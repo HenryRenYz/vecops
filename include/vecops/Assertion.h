@@ -7,7 +7,7 @@
 
 #include "vecops/CoreDefs.h"
 
-#define CT_INTERNAL_RUN_WHEN_FALSE(cond, ...)\
+#define VECOPS_INTERNAL_RUN_WHEN_FALSE(cond, ...)\
   do {                \
     if (!(cond)) {    \
        __VA_ARGS__;   \
@@ -16,28 +16,28 @@
 
 /**
  * Assertion, panic when cond is false, only check in debug mode.
- * usage: CT_ASSERT(cond, message[, arg0[, arg1[, ...]]])
+ * usage: VECOPS_ASSERT(cond, message[, arg0[, arg1[, ...]]])
  *      where message and args are a format same to printf
  */
-#ifdef CT_DEBUG
-  #define CT_ASSERT(cond, ...) CT_INTERNAL_RUN_WHEN_FALSE(cond, ::vecops::details::assertion_failed(__FILE__, __LINE__, CT_FUNC_NAME, __VA_ARGS__))
+#ifdef VECOPS_DEBUG
+  #define VECOPS_ASSERT(cond, ...) VECOPS_INTERNAL_RUN_WHEN_FALSE(cond, ::vecops::details::assertion_failed(__FILE__, __LINE__, VECOPS_FUNC_NAME, __VA_ARGS__))
 #else
-  #define CT_ASSERT(cond ...) ((void) 0)
+  #define VECOPS_ASSERT(cond ...) ((void) 0)
 #endif
 
 /**
  * Runtime checks, always exists, throw std::runtime_error when check failed.
- * usage: CT_CHECK(cond, message[, arg0[, arg1[, ...]]])
+ * usage: VECOPS_CHECK(cond, message[, arg0[, arg1[, ...]]])
  *      where message and args are a format same to printf
  */
-#define CT_CHECK(cond, ...) CT_INTERNAL_RUN_WHEN_FALSE(cond, ::vecops::details::check_failed(__FILE__, __LINE__, CT_FUNC_NAME, __VA_ARGS__))
+#define VECOPS_CHECK(cond, ...) VECOPS_INTERNAL_RUN_WHEN_FALSE(cond, ::vecops::details::check_failed(__FILE__, __LINE__, VECOPS_FUNC_NAME, __VA_ARGS__))
 
 namespace vecops::details {
 
-[[noreturn]] CT_NOINLINE
+[[noreturn]] VECOPS_NOINLINE
 void assertion_failed(const char* file, int line, const char* fn_name, const char* message, ...);
 
-[[noreturn]] CT_NOINLINE
+[[noreturn]] VECOPS_NOINLINE
 void check_failed(const char* file, int line, const char* fn_name, const char* message, ...);
 
 } // namespace vecops::details

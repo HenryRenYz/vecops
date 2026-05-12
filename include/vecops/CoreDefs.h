@@ -11,99 +11,97 @@
 #include "vecops/Features.h"
 
 /**
- * Debug & release flags, currently controlled by NDEBUG (TODO raw handling, nerf it)
+ * Debug & release flags
  */
-#if defined(NDEBUG)
-#define CT_RELEASE 1
-#else
-#define CT_DEBUG 1
+#if !defined(VECOPS_DEBUG)
+#define VECOPS_RELEASE 1
 #endif
 
 /**
- * Definition for CT_NOINLINE, CT_FORCEINLINE, and CT_ALWAYS_FORCEINLINE
+ * Definition for VECOPS_NOINLINE, VECOPS_INLINE, and VECOPS_ALWAYS_INLINE
  * Inline controller.
- * CT_NOINLINE: function never inline.
- * CT_FORCEINLINE: function always inline, except when compiling in debug mode (for easy debugging).
- * CT_ALWAYS_FORCEINLINE: function always inline, used for primitives.
+ * VECOPS_NOINLINE: function never inline.
+ * VECOPS_INLINE: function always inline, except when compiling in debug mode (for easy debugging).
+ * VECOPS_ALWAYS_INLINE: function always inline, used for primitives.
  */
 #if defined(COMPILER_GCC) || defined(COMPILER_CLANG)
-  #define CT_NOINLINE __attribute__((noinline))
-  #define CT_ALWAYS_FORCEINLINE __attribute__((always_inline)) inline
+  #define VECOPS_NOINLINE __attribute__((noinline))
+  #define VECOPS_ALWAYS_INLINE __attribute__((always_inline)) inline
 #elif defined(COMPILER_MSVC)
-  #define CT_NOINLINE __declspec(noinline)
-  #define CT_ALWAYS_FORCEINLINE __forceinline
+  #define VECOPS_NOINLINE __declspec(noinline)
+  #define VECOPS_ALWAYS_INLINE __forceinline
 #else
-  #define CT_NOINLINE
-  #define CT_ALWAYS_FORCEINLINE inline
+  #define VECOPS_NOINLINE
+  #define VECOPS_ALWAYS_INLINE inline
 #endif
-#if CT_RELEASE
-  #define CT_FORCEINLINE CT_ALWAYS_FORCEINLINE
+#if VECOPS_RELEASE
+  #define VECOPS_INLINE VECOPS_ALWAYS_INLINE
 #else
-  #define CT_FORCEINLINE inline
+  #define VECOPS_INLINE inline
 #endif
 
 /**
  * Pretty function name
  */
 #if defined(COMPILER_GCC) || defined(COMPILER_CLANG)
-  #define CT_FUNC_NAME __PRETTY_FUNCTION__
+  #define VECOPS_FUNC_NAME __PRETTY_FUNCTION__
 #elif defined(COMPILER_MSVC)
-  #define CT_FUNC_NAME __FUNCSIG__
+  #define VECOPS_FUNC_NAME __FUNCSIG__
 #else
-  #define CT_FUNC_NAME __func__
+  #define VECOPS_FUNC_NAME __func__
 #endif
 
 /**
  * Explicit breakpoint
  */
 #if defined(COMPILER_GCC)
-  #define CT_BREAKPOINT std::raise(SIGTRAP)
+  #define VECOPS_BREAKPOINT std::raise(SIGTRAP)
 #elif defined(COMPILER_CLANG)
-  #define CT_BREAKPOINT __builtin_debugtrap()
+  #define VECOPS_BREAKPOINT __builtin_debugtrap()
 #elif defined(COMPILER_MSVC)
-  #define CT_BREAKPOINT __debugbreak()
+  #define VECOPS_BREAKPOINT __debugbreak()
 #else
-  #define CT_BREAKPOINT std::raise(SIGTRAP)
+  #define VECOPS_BREAKPOINT std::raise(SIGTRAP)
 #endif
 
 /**
  * Pure marker
  */
 #if defined(COMPILER_GCC) || defined(COMPILER_CLANG)
-#define CT_PURE __attribute__((const))
+#define VECOPS_PURE __attribute__((const))
 #else
-#define CT_PURE
+#define VECOPS_PURE
 #endif
 
 /**
  * Unroll pragma for loop
  */
 #if defined(COMPILER_GCC) || defined(COMPILER_CLANG)
-#define CT_UNROLL _Pragma("GCC unroll 16")
+#define VECOPS_UNROLL _Pragma("GCC unroll 16")
 #elif defined(COMPILER_MSVC)
-#define CT_UNROLL __pragma(loop(unroll))
+#define VECOPS_UNROLL __pragma(loop(unroll))
 #endif
 
 /**
  * Unreachable hint
  */
 #if defined(__cplusplus) && __cplusplus >= 202302L
-  #define CT_UNREACHABLE() std::unreachable()
+  #define VECOPS_UNREACHABLE() std::unreachable()
 #elif defined(COMPILER_GCC) || defined(COMPILER_CLANG)
-  #define CT_UNREACHABLE() __builtin_unreachable()
+  #define VECOPS_UNREACHABLE() __builtin_unreachable()
 #elif defined(COMPILER_MSVC)
-  #define CT_UNREACHABLE() __assume(false)
+  #define VECOPS_UNREACHABLE() __assume(false)
 #else
-  #define CT_UNREACHABLE() ((void)0)
+  #define VECOPS_UNREACHABLE() ((void)0)
 #endif
 
 /**
- * Check for constant expression
+ * Check for constant result
  */
 #if defined(COMPILER_GCC) || defined(COMPILER_CLANG)
-  #define CT_IS_CONSTANT_EXPR(x) (__builtin_constant_p(x))
+  #define VECOPS_IS_CONST_RESULT(x) (__builtin_constant_p(x))
 #else
-  #define CT_IS_CONSTANT_EXPR(x) (0)
+  #define VECOPS_IS_CONST_RESULT(x) (0)
 #endif
 
 

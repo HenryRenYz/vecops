@@ -84,7 +84,7 @@ using namespace CPU_CAPABILITY;
  *   auto v = fill(t, 3.14f);  // v = [3.14, 3.14, 3.14, 3.14]
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> fill(T t, TypeOf<T> value) {
+VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value) {
   using namespace details;
   return vmap(
       t, [=](auto tt) { return word::fill(tt, value); }
@@ -99,7 +99,7 @@ TLV_INLINE Vec<T> fill(T t, TypeOf<T> value) {
  * @return Vector with first n elements from value, rest from default_v
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> fill(T t, TypeOf<T> value, nint_t n, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, nint_t n, Vec<T> default_v) {
   using namespace details;
   return vmap(
       t, n, [=](auto tt, auto&& dd) { return word::fill(tt, value); },
@@ -109,7 +109,7 @@ TLV_INLINE Vec<T> fill(T t, TypeOf<T> value, nint_t n, Vec<T> default_v) {
 }
 
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> fill(T t, TypeOf<T> value, nint_t n, TypeOf<T> default_v = T()) {
+VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, nint_t n, TypeOf<T> default_v = T()) {
   return vec::fill(t, value, n, vec::fill(t, default_v));
 }
 
@@ -122,7 +122,7 @@ TLV_INLINE Vec<T> fill(T t, TypeOf<T> value, nint_t n, TypeOf<T> default_v = T()
  * @return Vector with masked lanes from value, rest from default_v
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> fill(T t, TypeOf<T> value, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, Mask<T> m, Vec<T> default_v) {
   using namespace details;
   return vmap(
       t, [=](auto tt, auto&& mm, auto&& dd) { return word::fill(tt, value, mm, dd); },
@@ -131,7 +131,7 @@ TLV_INLINE Vec<T> fill(T t, TypeOf<T> value, Mask<T> m, Vec<T> default_v) {
 }
 
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> fill(T t, TypeOf<T> value, Mask<T> m, TypeOf<T> default_v = TypeOf<T>()) {
+VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, Mask<T> m, TypeOf<T> default_v = TypeOf<T>()) {
   return vec::fill(t, value, m, vec::fill(t, default_v));
 }
 
@@ -144,7 +144,7 @@ TLV_INLINE Vec<T> fill(T t, TypeOf<T> value, Mask<T> m, TypeOf<T> default_v = Ty
  * @return Vector with all elements zero-initialized
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> zeros(T t) {
+VECOPS_VFUNC Vec<T> zeros(T t) {
   using namespace details;
   return vmap(
       t, [=](auto tt) { return word::zeros(tt); }
@@ -161,7 +161,7 @@ TLV_INLINE Vec<T> zeros(T t) {
  *   auto m = mfill(t, true);  // All lanes active
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Mask<T> mfill(T t, bool value) {
+VECOPS_VFUNC Mask<T> mfill(T t, bool value) {
   using namespace details;
   return vmap(
       t, [=](auto tt) { return word::mfill(tt, value); }
@@ -174,7 +174,7 @@ TLV_INLINE Mask<T> mfill(T t, bool value) {
  * @return Mask with all elements true
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Mask<T> mtrue(T t) {
+VECOPS_VFUNC Mask<T> mtrue(T t) {
   return vec::mfill(t, true);
 }
 
@@ -184,7 +184,7 @@ TLV_INLINE Mask<T> mtrue(T t) {
  * @return Mask with all elements false
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Mask<T> mfalse(T t) {
+VECOPS_VFUNC Mask<T> mfalse(T t) {
   return vec::mfill(t, false);
 }
 
@@ -208,7 +208,7 @@ TLV_INLINE Mask<T> mfalse(T t) {
  *   auto m = mwhilelt(t, 0, n);  // Process n elements
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Mask<T> mwhilelt(T t, nint_t a, nint_t b) {
+VECOPS_VFUNC Mask<T> mwhilelt(T t, nint_t a, nint_t b) {
   using namespace details;
   nint_t ws = word_size(t);
   return vmap(
@@ -224,7 +224,7 @@ TLV_INLINE Mask<T> mwhilelt(T t, nint_t a, nint_t b) {
  * @return Mask where lanes [a, b] are true
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Mask<T> mwhilele(T t, nint_t a, nint_t b) {
+VECOPS_VFUNC Mask<T> mwhilele(T t, nint_t a, nint_t b) {
   return vec::mwhilelt(t, a, b + 1);
 }
 
@@ -237,7 +237,7 @@ TLV_INLINE Mask<T> mwhilele(T t, nint_t a, nint_t b) {
  * @return Mask where lanes >= b are true
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Mask<T> mwhilege(T t, nint_t a, nint_t b) {
+VECOPS_VFUNC Mask<T> mwhilege(T t, nint_t a, nint_t b) {
   using namespace details;
   nint_t ws = word_size(t);
   return vmap(
@@ -253,7 +253,7 @@ TLV_INLINE Mask<T> mwhilege(T t, nint_t a, nint_t b) {
  * @return Mask where lanes > b are true
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Mask<T> mwhilegt(T t, nint_t a, nint_t b) {
+VECOPS_VFUNC Mask<T> mwhilegt(T t, nint_t a, nint_t b) {
   return vec::mwhilege(t, a, b + 1);
 }
 
@@ -274,7 +274,7 @@ TLV_INLINE Mask<T> mwhilegt(T t, nint_t a, nint_t b) {
  *       (p, p + word_size, p + 2*word_size, etc.)
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> loadu(T t, const TypeOf<T>* p) {
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p) {
   using namespace details;
   return vmap(
       t, [=](auto tt, const TypeOf<T>* pp) { return word::loadu(tt, pp); },
@@ -294,8 +294,8 @@ TLV_INLINE Vec<T> loadu(T t, const TypeOf<T>* p) {
  *   auto v = loadu(t, {1.0f, 2.0f, 3.0f, 4.0f});
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> loadu(T t, std::initializer_list<TypeOf<T>> list) {
-  CT_ASSERT(list.size() >= size(t), "insufficient elements: %zd v.s. %zd", (nint_t) list.size(), size(t));
+VECOPS_VFUNC Vec<T> loadu(T t, std::initializer_list<TypeOf<T>> list) {
+  VECOPS_ASSERT(list.size() >= size(t), "insufficient elements: %zd v.s. %zd", (nint_t) list.size(), size(t));
   return vec::loadu(t, (const TypeOf<T>*) list.begin());
 }
 
@@ -310,7 +310,7 @@ TLV_INLINE Vec<T> loadu(T t, std::initializer_list<TypeOf<T>> list) {
  * @warning Passing an unaligned pointer may cause crashes or performance issues.
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> load(T t, const TypeOf<T>* p) {
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p) {
   using namespace details;
   return vmap(
       t, [=](auto tt, const TypeOf<T>* pp) { return word::load(tt, pp); },
@@ -324,7 +324,7 @@ TLV_INLINE Vec<T> load(T t, const TypeOf<T>* p) {
  * @return Loaded vector
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> load(T t, std::initializer_list<T> list) {
+VECOPS_VFUNC Vec<T> load(T t, std::initializer_list<T> list) {
   return vec::load(t, (const TypeOf<T>*) list.begin());
 }
 
@@ -343,7 +343,7 @@ TLV_INLINE Vec<T> load(T t, std::initializer_list<T> list) {
  *   auto v = loadu(t, data, 2, zeros(t));  // v = [1, 2, 0, 0]
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
   using namespace details;
   return vmap(
       t, n, [=](auto tt, const TypeOf<T>* p, auto v_d) { return word::loadu(tt, p); },
@@ -353,7 +353,7 @@ TLV_INLINE Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
 }
 
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, T default_v = T()) {
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, T default_v = T()) {
   return vec::loadu(t, p, n, vec::fill(t, default_v));
 }
 
@@ -363,7 +363,7 @@ TLV_INLINE Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, T default_v = T()) {
  * @return Vector with loaded elements
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> load(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
   using namespace details;
   return vmap(
       t, n, [=](auto tt, const TypeOf<T>* p, auto v_d) { return word::load(tt, p); },
@@ -373,7 +373,7 @@ TLV_INLINE Vec<T> load(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
 }
 
 template <TLV_DECL_TAG(T)>
-TLV_INLINE auto load(T t, const TypeOf<T>* p, nint_t n, T default_v = T()) {
+VECOPS_VFUNC auto load(T t, const TypeOf<T>* p, nint_t n, T default_v = T()) {
   return vec::load(t, p, n, vec::fill(t, default_v));
 }
 
@@ -389,7 +389,7 @@ TLV_INLINE auto load(T t, const TypeOf<T>* p, nint_t n, T default_v = T()) {
  *       those addresses are valid even if the values won't be used.
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
   using namespace details;
   return vmap(
       t, [=](auto tt, const TypeOf<T>* p, auto mm, auto v_d) { return word::loadu(tt, p, mm, v_d); },
@@ -398,7 +398,7 @@ TLV_INLINE Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
 }
 
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, T default_v = T()) {
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, T default_v = T()) {
   return vec::loadu(t, p, m, vec::fill(t, default_v));
 }
 
@@ -408,7 +408,7 @@ TLV_INLINE Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, T default_v = T()) {
  * @return Vector with masked-loaded elements
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
   using namespace details;
   return vmap(
       t, [=](auto tt, const TypeOf<T>* p, auto mm, auto v_d) { return word::load(tt, p, mm, v_d); },
@@ -417,7 +417,7 @@ TLV_INLINE Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
 }
 
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, T default_v = T()) {
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, T default_v = T()) {
   return vec::load(t, p, m, vec::fill(t, default_v));
 }
 
@@ -427,7 +427,7 @@ TLV_INLINE Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, T default_v = T()) {
  * Stores size(t) consecutive elements to memory starting at address p.
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE void storeu(T t, TypeOf<T>* p, Vec<T> v) {
+VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, Vec<T> v) {
   using namespace details;
   return vmap(
       t, [=](auto tt, TypeOf<T>* pp, auto&& vv) { word::storeu(tt, pp, vv); },
@@ -439,7 +439,7 @@ TLV_INLINE void storeu(T t, TypeOf<T>* p, Vec<T> v) {
  * @brief Store a vector to aligned memory.
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE void store(T t, TypeOf<T>* p, Vec<T> v) {
+VECOPS_VFUNC void store(T t, TypeOf<T>* p, Vec<T> v) {
   using namespace details;
   return vmap(
       t, [=](auto tt, TypeOf<T>* pp, auto&& vv) { word::store(tt, pp, vv); },
@@ -453,7 +453,7 @@ TLV_INLINE void store(T t, TypeOf<T>* p, Vec<T> v) {
  * Only the first n elements are written to memory.
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE void storeu(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
+VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
   using namespace details;
   return vmap(
       t, n, [=](auto tt, TypeOf<T>* pp, auto&& vv) { word::storeu(tt, pp, vv); },
@@ -466,7 +466,7 @@ TLV_INLINE void storeu(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
  * @brief Store first n elements of a vector to aligned memory.
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE void store(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
+VECOPS_VFUNC void store(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
   using namespace details;
   return vmap(
       t, n, [=](auto tt, TypeOf<T>* pp, auto&& vv) { word::store(tt, pp, vv); },
@@ -482,7 +482,7 @@ TLV_INLINE void store(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
  * Masked-out lanes are not written.
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE void storeu(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
+VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
   using namespace details;
   return vmap(
       t, [=](auto tt, TypeOf<T>* pp, auto&& mm, auto&& vv) { word::storeu(tt, pp, mm, vv); },
@@ -494,7 +494,7 @@ TLV_INLINE void storeu(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
  * @brief Masked store to aligned memory.
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE void store(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
+VECOPS_VFUNC void store(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
   using namespace details;
   return vmap(
       t, [=](auto tt, TypeOf<T>* pp, auto&& mm, auto&& vv) { word::store(tt, pp, mm, vv); },
@@ -527,7 +527,7 @@ TLV_INLINE void store(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
  *   auto v = gather(t, data, idx);  // v[i] = data[indices[i]]
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-TLV_INLINE Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
   using namespace details;
   constexpr Rebind<Index<TypeOf<T>>, T> it;
   return vmap(
@@ -542,7 +542,7 @@ TLV_INLINE Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T
  * @return Gathered vector
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-TLV_INLINE Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
   using namespace details;
   constexpr Rebind<Index<TypeOf<T>>, T> it;
   return vmap(
@@ -560,7 +560,7 @@ TLV_INLINE Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T
  * @return Gathered vector
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-TLV_INLINE Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, TypeOf<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, TypeOf<T> default_v) {
   return vec::gather(t, p, i, n, vec::fill(t, default_v));
 }
 
@@ -575,7 +575,7 @@ TLV_INLINE Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T
  * @note May access p[index[i]] for masked-out lanes; ensure indices are valid.
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-TLV_INLINE Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   using namespace details;
   constexpr Rebind<Index<TypeOf<T>>, T> it;
   return vmap(
@@ -590,7 +590,7 @@ TLV_INLINE Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T
  * @return Gathered vector
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-TLV_INLINE Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, TypeOf<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, TypeOf<T> default_v) {
   return vec::gather(t, p, i, m, vec::fill(t, default_v));
 }
 
@@ -607,7 +607,7 @@ TLV_INLINE Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T
  * @note Scatter operations can be significantly slower than consecutive stores.
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-TLV_INLINE void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
+VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
   using namespace details;
   constexpr Rebind<Index<TypeOf<T>>, T> it;
   return vmap(
@@ -629,7 +629,7 @@ TLV_INLINE void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>
  * @param n Number of elements to scatter (0 <= n <= size(t))
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-TLV_INLINE void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
+VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
   using namespace details;
   constexpr Rebind<Index<TypeOf<T>>, T> it;
   return vmap(
@@ -655,7 +655,7 @@ TLV_INLINE void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>
  * @param m Mask indicating which lanes to scatter
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-TLV_INLINE void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
   using namespace details;
   constexpr Rebind<Index<TypeOf<T>>, T> it;
   return vmap(
@@ -678,7 +678,7 @@ TLV_INLINE void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>
  * @return The element at the specified index
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE TypeOf<T> get(V v, nint_t index) {
+VECOPS_VFUNC TypeOf<T> get(V v, nint_t index) {
   constexpr T t;
   nint_t ws = word_size(t);
   nint_t ord = index / ws, off = index % ws;
@@ -687,8 +687,8 @@ TLV_INLINE TypeOf<T> get(V v, nint_t index) {
 }
 
 template <TLV_DECL_TAG(T)>
-TLV_INLINE TypeOf<T> get(T t, Vec<T> v, nint_t index) {
-  CT_ASSERT(0 <= index && index < size(t), "%zd !in 0:%zd", index, size(t));
+VECOPS_VFUNC TypeOf<T> get(T t, Vec<T> v, nint_t index) {
+  VECOPS_ASSERT(0 <= index && index < size(t), "%zd !in 0:%zd", index, size(t));
   return vec::get<Vec<T>, T>(v, index);
 }
 
@@ -700,8 +700,8 @@ TLV_INLINE TypeOf<T> get(T t, Vec<T> v, nint_t index) {
  * @return The boolean value at the specified index
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE bool get(T t, Mask<T> m, nint_t index) {
-  CT_ASSERT(0 <= index && index < size(t), "%zd !in 0:%zd", index, size(t));
+VECOPS_VFUNC bool get(T t, Mask<T> m, nint_t index) {
+  VECOPS_ASSERT(0 <= index && index < size(t), "%zd !in 0:%zd", index, size(t));
   nint_t ws = word_size(t);
   nint_t ord = index / ws, off = index % ws;
   auto word = get_word_mask(t, m, ord);
@@ -717,7 +717,7 @@ TLV_INLINE bool get(T t, Mask<T> m, nint_t index) {
  * @return Vector with the element at index set to x
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V set(V v, nint_t index, TypeOf<T> x) {
+VECOPS_VFUNC V set(V v, nint_t index, TypeOf<T> x) {
   constexpr T t;
   nint_t ws = word_size(t);
   nint_t ord = index / ws, off = index % ws;
@@ -725,8 +725,8 @@ TLV_INLINE V set(V v, nint_t index, TypeOf<T> x) {
   return set_word(t, v, ord, word::set(word, off, x));
 }
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> set(T t, Vec<T> v, nint_t index, TypeOf<T> x) {
-  CT_ASSERT(0 <= index && index < size(t), "%zd !in 0:%zd", index, size(t));
+VECOPS_VFUNC Vec<T> set(T t, Vec<T> v, nint_t index, TypeOf<T> x) {
+  VECOPS_ASSERT(0 <= index && index < size(t), "%zd !in 0:%zd", index, size(t));
   return vec::set<Vec<T>, T>(v, index, x);
 }
 
@@ -738,8 +738,8 @@ TLV_INLINE Vec<T> set(T t, Vec<T> v, nint_t index, TypeOf<T> x) {
  * @return Mask with the element at index set to x
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE auto set(T t, Mask<T> m, nint_t index, bool x) -> Mask<T> {
-  CT_ASSERT(0 <= index && index < size(t), "%zd !in 0:%zd", index, size(t));
+VECOPS_VFUNC auto set(T t, Mask<T> m, nint_t index, bool x) -> Mask<T> {
+  VECOPS_ASSERT(0 <= index && index < size(t), "%zd !in 0:%zd", index, size(t));
   nint_t ws = word_size(t);
   nint_t ord = index / ws, off = index % ws;
   auto word = get_word_mask(t, m, ord);
@@ -757,7 +757,7 @@ TLV_INLINE auto set(T t, Mask<T> m, nint_t index, bool x) -> Mask<T> {
  * @return Sum of the two vectors
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -774,7 +774,7 @@ TLV_INLINE V add(V a, V b) {
  * @return Sum of the two vectors for masked lanes
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -788,7 +788,7 @@ TLV_INLINE V add(V a, V b, Mask<T> m) {
  * @return Difference of the two vectors
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -801,7 +801,7 @@ TLV_INLINE V sub(V a, V b) {
  * @brief Masked element-wise subtraction: result[i] = a[i] - b[i] for masked lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -815,7 +815,7 @@ TLV_INLINE V sub(V a, V b, Mask<T> m) {
  * @return Product of the two vectors
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -828,7 +828,7 @@ TLV_INLINE V mul(V a, V b) {
  * @brief Masked element-wise multiplication: result[i] = a[i] * b[i] for masked lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -842,7 +842,7 @@ TLV_INLINE V mul(V a, V b, Mask<T> m) {
  * @return Quotient of the two vectors
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V div(V a, V b) {
+VECOPS_VFUNC V div(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -855,7 +855,7 @@ TLV_INLINE V div(V a, V b) {
  * @brief Masked element-wise division: result[i] = a[i] / b[i] for masked lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V div(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V div(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -869,7 +869,7 @@ TLV_INLINE V div(V a, V b, Mask<T> m) {
  * @return Vector with maximum elements
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -882,7 +882,7 @@ TLV_INLINE V max(V a, V b) {
  * @brief Masked element-wise maximum: result[i] = max(a[i], b[i]) for masked lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -896,7 +896,7 @@ TLV_INLINE V max(V a, V b, Mask<T> m) {
  * @return Vector with minimum elements
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -909,7 +909,7 @@ TLV_INLINE V min(V a, V b) {
  * @brief Masked element-wise minimum: result[i] = min(a[i], b[i]) for masked lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -923,7 +923,7 @@ TLV_INLINE V min(V a, V b, Mask<T> m) {
  * @return Bitwise AND of the two vectors
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_and(V a, V b) {
+VECOPS_VFUNC V bit_and(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -936,7 +936,7 @@ TLV_INLINE V bit_and(V a, V b) {
  * @brief Masked element-wise bitwise AND for masked lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_and(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V bit_and(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -950,7 +950,7 @@ TLV_INLINE V bit_and(V a, V b, Mask<T> m) {
  * @return Bitwise OR of the two vectors
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_or(V a, V b) {
+VECOPS_VFUNC V bit_or(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -963,7 +963,7 @@ TLV_INLINE V bit_or(V a, V b) {
  * @brief Masked element-wise bitwise OR for masked lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_or(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V bit_or(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -977,7 +977,7 @@ TLV_INLINE V bit_or(V a, V b, Mask<T> m) {
  * @return Bitwise XOR of the two vectors
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_xor(V a, V b) {
+VECOPS_VFUNC V bit_xor(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -990,7 +990,7 @@ TLV_INLINE V bit_xor(V a, V b) {
  * @brief Masked element-wise bitwise XOR for masked lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_xor(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V bit_xor(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1004,7 +1004,7 @@ TLV_INLINE V bit_xor(V a, V b, Mask<T> m) {
  * @return Bitwise AND-NOT of the two vectors
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_andnot(V a, V b) {
+VECOPS_VFUNC V bit_andnot(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1017,7 +1017,7 @@ TLV_INLINE V bit_andnot(V a, V b) {
  * @brief Masked element-wise bitwise AND-NOT for masked lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_andnot(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V bit_andnot(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1032,7 +1032,7 @@ TLV_INLINE V bit_andnot(V a, V b, Mask<T> m) {
  * @return Shifted vector
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_shl(V v, int count) {
+VECOPS_VFUNC V bit_shl(V v, int count) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1045,7 +1045,7 @@ TLV_INLINE V bit_shl(V v, int count) {
  * @brief Masked element-wise left shift for masked lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_shl(V v, int count, Mask<T> m) {
+VECOPS_VFUNC V bit_shl(V v, int count, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1060,7 +1060,7 @@ TLV_INLINE V bit_shl(V v, int count, Mask<T> m) {
  * @return Shifted vector
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_shr(V v, int count) {
+VECOPS_VFUNC V bit_shr(V v, int count) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1073,7 +1073,7 @@ TLV_INLINE V bit_shr(V v, int count) {
  * @brief Masked element-wise right shift for masked lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_shr(V v, int count, Mask<T> m) {
+VECOPS_VFUNC V bit_shr(V v, int count, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1088,7 +1088,7 @@ TLV_INLINE V bit_shr(V v, int count, Mask<T> m) {
  * @return Bitwise complement of the vector
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_not(V v) {
+VECOPS_VFUNC V bit_not(V v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1101,7 +1101,7 @@ TLV_INLINE V bit_not(V v) {
  * @brief Masked bitwise NOT: result[i] = ~v[i] for masked lanes, default_v[i] otherwise.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_not(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V bit_not(V v, Mask<T> m, V default_v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1114,7 +1114,7 @@ TLV_INLINE V bit_not(V v, Mask<T> m, V default_v) {
  * @brief Masked bitwise NOT with original value as default for masked-out lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V bit_not(V v, Mask<T> m) {
+VECOPS_VFUNC V bit_not(V v, Mask<T> m) {
   return vec::bit_not(v, m, v);
 }
 
@@ -1123,7 +1123,7 @@ TLV_INLINE V bit_not(V v, Mask<T> m) {
  * @return Negated vector
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V neg(V v) {
+VECOPS_VFUNC V neg(V v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1136,7 +1136,7 @@ TLV_INLINE V neg(V v) {
  * @brief Masked negation: result[i] = -v[i] for masked lanes, default_v[i] otherwise.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V neg(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V neg(V v, Mask<T> m, V default_v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1149,7 +1149,7 @@ TLV_INLINE V neg(V v, Mask<T> m, V default_v) {
  * @brief Masked negation with original value as default for masked-out lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V neg(V v, Mask<T> m) {
+VECOPS_VFUNC V neg(V v, Mask<T> m) {
   return vec::neg(v, m, v);
 }
 
@@ -1159,7 +1159,7 @@ TLV_INLINE V neg(V v, Mask<T> m) {
  * @return Absolute value of the vector
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1172,7 +1172,7 @@ TLV_INLINE V abs(V v) {
  * @brief Masked absolute value: result[i] = |v[i]| for masked lanes, default_v[i] otherwise.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1185,7 +1185,7 @@ TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
  * @brief Masked absolute value with original value as default for masked-out lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V abs(V v, Mask<T> m) {
+VECOPS_VFUNC V abs(V v, Mask<T> m) {
   return vec::abs(v, m, v);
 }
 
@@ -1195,7 +1195,7 @@ TLV_INLINE V abs(V v, Mask<T> m) {
  * @return Square root of the vector (floating-point only)
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V sqrt(V v) {
+VECOPS_VFUNC V sqrt(V v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1208,7 +1208,7 @@ TLV_INLINE V sqrt(V v) {
  * @brief Masked square root: result[i] = sqrt(v[i]) for masked lanes, default_v[i] otherwise.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V sqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V sqrt(V v, Mask<T> m, V default_v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1221,7 +1221,7 @@ TLV_INLINE V sqrt(V v, Mask<T> m, V default_v) {
  * @brief Masked square root with original value as default for masked-out lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V sqrt(V v, Mask<T> m) {
+VECOPS_VFUNC V sqrt(V v, Mask<T> m) {
   return vec::sqrt(v, m, v);
 }
 
@@ -1231,7 +1231,7 @@ TLV_INLINE V sqrt(V v, Mask<T> m) {
  * @return Reciprocal square root of the vector (floating-point only)
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V rsqrt(V v) {
+VECOPS_VFUNC V rsqrt(V v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1244,7 +1244,7 @@ TLV_INLINE V rsqrt(V v) {
  * @brief Masked reciprocal square root: result[i] = 1/sqrt(v[i]) for masked lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V rsqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rsqrt(V v, Mask<T> m, V default_v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1257,7 +1257,7 @@ TLV_INLINE V rsqrt(V v, Mask<T> m, V default_v) {
  * @brief Masked reciprocal square root with original value as default.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V rsqrt(V v, Mask<T> m) {
+VECOPS_VFUNC V rsqrt(V v, Mask<T> m) {
   return vec::rsqrt(v, m, v);
 }
 
@@ -1267,7 +1267,7 @@ TLV_INLINE V rsqrt(V v, Mask<T> m) {
  * @return Reciprocal of the vector (floating-point only)
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V rcp(V v) {
+VECOPS_VFUNC V rcp(V v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1280,7 +1280,7 @@ TLV_INLINE V rcp(V v) {
  * @brief Masked reciprocal: result[i] = 1/v[i] for masked lanes.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V rcp(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rcp(V v, Mask<T> m, V default_v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1293,7 +1293,7 @@ TLV_INLINE V rcp(V v, Mask<T> m, V default_v) {
  * @brief Masked reciprocal with original value as default.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V rcp(V v, Mask<T> m) {
+VECOPS_VFUNC V rcp(V v, Mask<T> m) {
   return vec::rcp(v, m, v);
 }
 
@@ -1303,7 +1303,7 @@ TLV_INLINE V rcp(V v, Mask<T> m) {
  * @return Mask where lanes are true if elements are equal
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1317,7 +1317,7 @@ TLV_INLINE Mask<T> cmpeq(V a, V b) {
  * @return Mask where lanes are true if elements are equal and mask is true
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1332,7 +1332,7 @@ TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
  * @return Mask where lanes are true if elements are not equal
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1345,7 +1345,7 @@ TLV_INLINE Mask<T> cmpne(V a, V b) {
  * @brief Masked inequality comparison: only compare lanes where mask is true.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1360,7 +1360,7 @@ TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
  * @return Mask where lanes are true if a[i] < b[i]
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1373,7 +1373,7 @@ TLV_INLINE Mask<T> cmplt(V a, V b) {
  * @brief Masked less-than comparison: only compare lanes where mask is true.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1388,7 +1388,7 @@ TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
  * @return Mask where lanes are true if a[i] > b[i]
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1401,7 +1401,7 @@ TLV_INLINE Mask<T> cmpgt(V a, V b) {
  * @brief Masked greater-than comparison: only compare lanes where mask is true.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1416,7 +1416,7 @@ TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
  * @return Mask where lanes are true if a[i] <= b[i]
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1429,7 +1429,7 @@ TLV_INLINE Mask<T> cmple(V a, V b) {
  * @brief Masked less-than-or-equal comparison: only compare lanes where mask is true.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1444,7 +1444,7 @@ TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
  * @return Mask where lanes are true if a[i] >= b[i]
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1457,7 +1457,7 @@ TLV_INLINE Mask<T> cmpge(V a, V b) {
  * @brief Masked greater-than-or-equal comparison: only compare lanes where mask is true.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1472,7 +1472,7 @@ TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
  * @return Mask where lanes are true if elements are NaN (floating-point only)
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> isnan(V v) {
+VECOPS_VFUNC Mask<T> isnan(V v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1485,7 +1485,7 @@ TLV_INLINE Mask<T> isnan(V v) {
  * @brief Masked NaN check: only check lanes where mask is true.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> isnan(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1500,7 +1500,7 @@ TLV_INLINE Mask<T> isnan(V v, Mask<T> m) {
  * @return Mask where lanes are true if elements are positive infinity
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> isposinf(V v) {
+VECOPS_VFUNC Mask<T> isposinf(V v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1513,7 +1513,7 @@ TLV_INLINE Mask<T> isposinf(V v) {
  * @brief Masked positive infinity check: only check lanes where mask is true.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> isposinf(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isposinf(V v, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1528,7 +1528,7 @@ TLV_INLINE Mask<T> isposinf(V v, Mask<T> m) {
  * @return Mask where lanes are true if elements are negative infinity
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> isneginf(V v) {
+VECOPS_VFUNC Mask<T> isneginf(V v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1541,7 +1541,7 @@ TLV_INLINE Mask<T> isneginf(V v) {
  * @brief Masked negative infinity check: only check lanes where mask is true.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> isneginf(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isneginf(V v, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1556,7 +1556,7 @@ TLV_INLINE Mask<T> isneginf(V v, Mask<T> m) {
  * @return Mask where lanes are true if elements are infinity
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> isinf(V v) {
+VECOPS_VFUNC Mask<T> isinf(V v) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1569,7 +1569,7 @@ TLV_INLINE Mask<T> isinf(V v) {
  * @brief Masked infinity check: only check lanes where mask is true.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> isinf(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isinf(V v, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -1599,7 +1599,7 @@ TLV_INLINE Mask<T> isinf(V v, Mask<T> m) {
  * @note Vectors smaller than word_size are treated as word_size vectors.
  */
 template <int... Is, TLV_DECL_VEC(V)>
-TLV_INLINE V local_shuf(V v) {
+VECOPS_VFUNC V local_shuf(V v) {
   using namespace details;
   constexpr Vec2Tag<V> t;
   return vmap(
@@ -1624,7 +1624,7 @@ TLV_INLINE V local_shuf(V v) {
  * @return Shuffled vector
  */
 template <TLV_DECL_VEC(V), TLV_DECL_VEC(Vi)>
-TLV_INLINE V local_shuf(V v, Vi i) {
+VECOPS_VFUNC V local_shuf(V v, Vi i) {
   using namespace details;
   constexpr Vec2Tag<V> t;
   constexpr Vec2Tag<Vi> ti;
@@ -1645,7 +1645,7 @@ TLV_INLINE V local_shuf(V v, Vi i) {
  * @return Shuffled vector
  */
 template <TLV_DECL_VEC(V), typename... Is, TL_IF(is_any<Is, int> && ...)>
-TLV_INLINE V local_shuf(V v, Is... is) {
+VECOPS_VFUNC V local_shuf(V v, Is... is) {
   using namespace details;
   constexpr Vec2Tag<V> t;
   return vmap(
@@ -1693,7 +1693,7 @@ TLV_INLINE V local_shuf(V v, Is... is) {
  *       For int8_t/uint8_t without AVX512_VBMI, this is slower than wider types.
  */
 template <TLV_DECL_VEC(V), TLV_DECL_VEC(Vi)>
-TLV_INLINE V shuf(V v, Vi i) {
+VECOPS_VFUNC V shuf(V v, Vi i) {
   using namespace details;
   constexpr Vec2Tag<V> t;
   constexpr Vec2Tag<Vi> ti;
@@ -1727,7 +1727,7 @@ TLV_INLINE V shuf(V v, Vi i) {
  *   auto u = upper(t, v);  // u = [4, 5, 6, 7]
  */
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
-TLV_INLINE V upper(T t, Vec<T> v) {
+VECOPS_VFUNC V upper(T t, Vec<T> v) {
   using namespace details;
   constexpr nint_t NWi = num_words(t);
   if constexpr (NWi > 1) {
@@ -1762,7 +1762,7 @@ TLV_INLINE V upper(T t, Vec<T> v) {
  *   auto u = lower(t, v);  // u = [0, 1, 2, 3]
  */
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
-TLV_INLINE V lower(T t, Vec<T> v) {
+VECOPS_VFUNC V lower(T t, Vec<T> v) {
   using namespace details;
   constexpr nint_t NWi = num_words(t);
   if constexpr (NWi > 1) {
@@ -1799,7 +1799,7 @@ TLV_INLINE V lower(T t, Vec<T> v) {
  *   auto u = even(t, v);  // u = [0, 2, 4, 6]
  */
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
-TLV_INLINE V even(T t, Vec<T> v) {
+VECOPS_VFUNC V even(T t, Vec<T> v) {
   using namespace details;
   static_assert(size(t) >= 2, "Insufficient elements");
   constexpr nint_t NWi = num_words(t);
@@ -1843,7 +1843,7 @@ TLV_INLINE V even(T t, Vec<T> v) {
  *   auto u = odd(t, v);  // u = [1, 3, 5, 7]
  */
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
-TLV_INLINE V odd(T t, Vec<T> v) {
+VECOPS_VFUNC V odd(T t, Vec<T> v) {
   using namespace details;
   static_assert(size(t) >= 2, "Insufficient elements");
   constexpr nint_t NWi = num_words(t);
@@ -1888,7 +1888,7 @@ TLV_INLINE V odd(T t, Vec<T> v) {
  *   auto v = concat(t, lo, hi);  // v = [0, 1, 2, 3, 4, 5, 6, 7]
  */
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
-TLV_INLINE Vec<T> concat(T t, V v_lo, V v_hi) {
+VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
   using namespace details;
   using Ti = Vec2Tag<V>;
   constexpr nint_t NWo = num_words(t);
@@ -1935,7 +1935,7 @@ TLV_INLINE Vec<T> concat(T t, V v_lo, V v_hi) {
  *   auto v = concat_even(t, lo, hi);  // v = [0, 2, 4, 6, 8, 10, 12, 14]
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> concat_even(T t, Vec<T> v_lo, Vec<T> v_hi) {
+VECOPS_VFUNC Vec<T> concat_even(T t, Vec<T> v_lo, Vec<T> v_hi) {
   using namespace details;
   constexpr nint_t NWo = num_words(t);
   if constexpr (NWo > 1) {
@@ -1983,7 +1983,7 @@ TLV_INLINE Vec<T> concat_even(T t, Vec<T> v_lo, Vec<T> v_hi) {
  *   auto v = concat_odd(t, lo, hi);  // v = [1, 3, 5, 7, 9, 11, 13, 15]
  */
 template <TLV_DECL_TAG(T)>
-TLV_INLINE Vec<T> concat_odd(T t, Vec<T> v_lo, Vec<T> v_hi) {
+VECOPS_VFUNC Vec<T> concat_odd(T t, Vec<T> v_lo, Vec<T> v_hi) {
   using namespace details;
   constexpr nint_t NWo = num_words(t);
   if constexpr (NWo > 1) {
@@ -2031,7 +2031,7 @@ TLV_INLINE Vec<T> concat_odd(T t, Vec<T> v_lo, Vec<T> v_hi) {
  * @see interleave for full-vector interleaving (may be slower due to cross-block movement)
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V local_interleave_lower(V a, V b) {
+VECOPS_VFUNC V local_interleave_lower(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -2068,7 +2068,7 @@ TLV_INLINE V local_interleave_lower(V a, V b) {
  * @see interleave for full-vector interleaving (may be slower due to cross-block movement)
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V local_interleave_upper(V a, V b) {
+VECOPS_VFUNC V local_interleave_upper(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -2110,7 +2110,7 @@ TLV_INLINE V local_interleave_upper(V a, V b) {
  *   auto v = interleave(t, lo, hi);  // v = [4, 0, 5, 1, 6, 2, 7, 3] (MSB to LSB)
  */
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
-TLV_INLINE Vec<T> interleave(T t, V v_lo, V v_hi) {
+VECOPS_VFUNC Vec<T> interleave(T t, V v_lo, V v_hi) {
   using namespace details;
   using Ti = Vec2Tag<V>;
   using TWo = WordOf<T>;
@@ -2161,7 +2161,7 @@ TLV_INLINE Vec<T> interleave(T t, V v_lo, V v_hi) {
  *   auto v = interleave_even(a, b);  // v = [8, 0, 10, 2, 12, 4, 14, 6]
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V interleave_even(V a, V b) {
+VECOPS_VFUNC V interleave_even(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -2197,7 +2197,7 @@ TLV_INLINE V interleave_even(V a, V b) {
  *   auto v = interleave_odd(a, b);  // v = [9, 1, 11, 3, 13, 5, 15, 7]
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V interleave_odd(V a, V b) {
+VECOPS_VFUNC V interleave_odd(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
@@ -2228,7 +2228,7 @@ TLV_INLINE V interleave_odd(V a, V b) {
  * @note Assumes byte size of a word in input and output vectors is consistent.
  */
 template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
-TLV_INLINE Vec<To> promote(To t, Vi v) {
+VECOPS_VFUNC Vec<To> promote(To t, Vi v) {
   using namespace details;
   using     Ti       = Vec2Tag<Vi>;
   constexpr Ti   t_i;                  constexpr To   t_o;
@@ -2288,7 +2288,7 @@ TLV_INLINE Vec<To> promote(To t, Vi v) {
  * @return Demoted vector
  */
 template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
-TLV_INLINE Vec<To> demote(To t, Vi v) {
+VECOPS_VFUNC Vec<To> demote(To t, Vi v) {
   using namespace details;
   using     Ti       = Vec2Tag<Vi>;
   constexpr Ti   t_i;                  constexpr To   t_o;
@@ -2343,7 +2343,7 @@ TLV_INLINE Vec<To> demote(To t, Vi v) {
  * @return Converted vector
  */
 template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
-TLV_INLINE Vec<To> convert(To t, Vi v) {
+VECOPS_VFUNC Vec<To> convert(To t, Vi v) {
   using namespace details;
   constexpr Vec2Tag<Vi> ti;
   return vmap(
@@ -2365,7 +2365,7 @@ TLV_INLINE Vec<To> convert(To t, Vi v) {
  * @return Reinterpreted vector
  */
 template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
-TLV_INLINE Vec<To> bitcast(To t, Vi v) {
+VECOPS_VFUNC Vec<To> bitcast(To t, Vi v) {
   using namespace details;
   using     Ti       = Vec2Tag<Vi>;
   constexpr Ti   t_i;                  constexpr To   t_o;

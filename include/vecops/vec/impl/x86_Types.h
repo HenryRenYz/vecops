@@ -29,16 +29,16 @@ struct RegType {
 template <typename T>
 struct WrapperType {
   T v;
-  TLV_INLINE constexpr WrapperType() = default;
-  TLV_INLINE constexpr WrapperType(const T& v) : v(v) {}
-  TLV_INLINE constexpr WrapperType(T&& v) : v(std::move(v)) {}
-  TLV_INLINE explicit constexpr operator T() { return this->v; }
+  VECOPS_VFUNC constexpr WrapperType() = default;
+  VECOPS_VFUNC constexpr WrapperType(const T& v) : v(v) {}
+  VECOPS_VFUNC constexpr WrapperType(T&& v) : v(std::move(v)) {}
+  VECOPS_VFUNC explicit constexpr operator T() { return this->v; }
 };
 
 #define TL_DEFINE_MMREG(name, N, raw_type) \
 template <> struct RegType<name##_t, N> : public WrapperType<raw_type> { \
   using WrapperType<raw_type>::WrapperType; \
-  TLV_INLINE constexpr name##_t operator[](nuint_t i) { return v[i]; } \
+  VECOPS_VFUNC constexpr name##_t operator[](nuint_t i) { return v[i]; } \
 }; \
 using v##name##x##N##_t = RegType<name##_t, N>
 

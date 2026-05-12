@@ -12,7 +12,7 @@
 
 #include "vecops/Assertion.h"
 
-namespace vecops { namespace array {
+namespace vecops::array {
 namespace details {
 // Markers for static dispatching
 struct ReserveAxis {};
@@ -64,7 +64,7 @@ static constexpr auto ellipse = details::Ellipse(); // TODO currently not suppor
  *       share the same underlying data (broadcasting semantics).
  */
 static constexpr auto new_axis(int64_t repeat = 1) {
-  CT_ASSERT(repeat >= 0, "Cannot repeat negative times");
+  VECOPS_ASSERT(repeat >= 0, "Cannot repeat negative times");
   return details::NewAxis{repeat};
 }
 
@@ -176,7 +176,7 @@ enum ArrayFlags : int {
  *
  * @section performance Performance
  *   - All operations are constexpr and can be evaluated at compile time
- *   - CT_ALWAYS_FORCEINLINE ensures aggressive inlining for zero overhead
+ *   - VECOPS_ALWAYS_INLINE ensures aggressive inlining for zero overhead
  *   - Contiguity flags enable compile-time optimizations
  *
  * @section example Basic Usage
@@ -232,15 +232,15 @@ public:
    *       const and non-const access patterns, but const-correctness is
    *       maintained through the API.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr Array(
       const T* data, // may be device ptr
       const int64_t* sizes,
       const int64_t* strides
   ) : _data((T*) data) {
-    CT_ASSERT(data != nullptr, "data ptr should not be null");
-    CT_ASSERT(sizes != nullptr, "sizes ptr should not be null");
-    CT_ASSERT(strides != nullptr, "strides ptr should not be null");
+    VECOPS_ASSERT(data != nullptr, "data ptr should not be null");
+    VECOPS_ASSERT(sizes != nullptr, "sizes ptr should not be null");
+    VECOPS_ASSERT(strides != nullptr, "strides ptr should not be null");
 
     for (int i = 0; i < N; ++i) {
       _sizes[i] = sizes[i];
@@ -270,13 +270,13 @@ public:
    * @note Consider using as_contiguous() after construction if the memory
    *       is known to be contiguous, to enable compile-time optimizations.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr Array(
       const T* data,
       const int64_t* sizes
   ) : _data((T*) data) {
-    CT_ASSERT(data != nullptr, "data ptr should not be null");
-    CT_ASSERT(sizes != nullptr, "sizes ptr should not be null");
+    VECOPS_ASSERT(data != nullptr, "data ptr should not be null");
+    VECOPS_ASSERT(sizes != nullptr, "sizes ptr should not be null");
 
     int64_t numel = 1;
     for (int64_t d = N - 1; d >= 0; --d) {
@@ -303,7 +303,7 @@ public:
    *   float data[24];
    *   Array<float, 2> arr(data, {4, 6}, {6, 1});
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr Array(
       const T* data,
       std::initializer_list<int64_t> sizes,
@@ -324,7 +324,7 @@ public:
    *   float data[24];
    *   Array<float, 2> arr(data, {4, 6});  // Creates 4x6 contiguous array
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr Array(
       const T* data,
       std::initializer_list<int64_t> sizes
@@ -339,7 +339,7 @@ public:
    * @param sizes std::array of N dimension sizes.
    * @param strides std::array of N dimension strides.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr Array(
       const T* data,
       std::array<int64_t, N> sizes,
@@ -354,7 +354,7 @@ public:
    * @param data Pointer to the underlying data.
    * @param sizes std::array of N dimension sizes.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr Array(
       const T* data,
       std::array<int64_t, N> sizes
@@ -372,7 +372,7 @@ public:
    * @pre sizes._size(0) == N (assertion failure otherwise)
    * @pre strides._size(0) == N (assertion failure otherwise)
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr Array(
       const T* data,
       IntsMetaRef sizes,
@@ -389,7 +389,7 @@ public:
    *
    * @pre sizes._size(0) == N (assertion failure otherwise)
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr Array(
       const T* data,
       IntsMetaRef sizes
@@ -405,7 +405,7 @@ public:
    *
    * @note This is a shallow copy - the data pointer is copied, not the data.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr Array(
       const Array& other
   ) : Array(other._data, other._sizes, other._strides) {}
@@ -420,9 +420,9 @@ public:
    *
    * @note This is a constexpr operation with zero runtime overhead.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   int64_t size(int64_t i) const {
-    CT_ASSERT(0 <= i && i < N, "n !in 0:N");
+    VECOPS_ASSERT(0 <= i && i < N, "n !in 0:N");
     return _sizes[i];
   }
 
@@ -439,9 +439,9 @@ public:
    *
    * @note A stride of 0 indicates a broadcasted dimension.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   int64_t stride(int64_t i) const {
-    CT_ASSERT(0 <= i && i < N, "n !in 0:N");
+    VECOPS_ASSERT(0 <= i && i < N, "n !in 0:N");
     return _strides[i];
   }
 
@@ -452,7 +452,7 @@ public:
    *
    * @note The returned view is guaranteed contiguous.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   const IntsMetaRef sizes() const {
     return {_sizes, {N}, {int64_t(1)}};
   }
@@ -464,7 +464,7 @@ public:
    *
    * @note The returned view is guaranteed contiguous.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   const IntsMetaRef strides() const {
     return {_strides, {N}, {int64_t(1)}};
   }
@@ -477,7 +477,7 @@ public:
    * @warning Modifying data through this pointer affects all Array views
    *          referencing the same memory.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   T* data() {
     return _data;
   }
@@ -487,7 +487,7 @@ public:
    *
    * @return Const pointer to the first element.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   const T* data() const {
     return _data;
   }
@@ -521,7 +521,7 @@ public:
    *
    * @note This is a constexpr function - the value is known at compile time.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr int64_t ndim() const {
     return N;
   }
@@ -536,7 +536,7 @@ public:
    * @note If FLAGS includes AF_LAST_CONTIGUOUS, this returns true at
    *       compile time without runtime computation.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr bool is_last_contiguous() const {
     if constexpr (N < 1) return false; // note: actually unreachable
     if constexpr ((FLAGS & AF_LAST_CONTIGUOUS) == AF_LAST_CONTIGUOUS) return true;
@@ -556,7 +556,7 @@ public:
    * @note If FLAGS includes AF_LAST2_CONTIGUOUS, this returns true at
    *       compile time without runtime computation.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr bool is_last2_contiguous() const {
     if constexpr (N < 2) return false;
     if constexpr ((FLAGS & AF_LAST2_CONTIGUOUS) == AF_LAST2_CONTIGUOUS) return true;
@@ -633,7 +633,7 @@ public:
    * @return Same as operator()(index).
    */
   template <typename TIndex>
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr decltype(auto) operator[](TIndex index) const {
     return this->operator()(index);
   }
@@ -651,7 +651,7 @@ public:
    *
    * @note The returned Array shares the same data pointer.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr Array::L1Contiguous as_last_contiguous() const {
     return {_data, _sizes, _strides}; // assertion inside constructor
   }
@@ -669,7 +669,7 @@ public:
    *
    * @note The returned Array shares the same data pointer.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr Array::L2Contiguous as_last2_contiguous() const {
     return {_data, _sizes, _strides}; // assertion inside constructor
   }
@@ -687,15 +687,15 @@ public:
    *
    * @note The returned Array shares the same data pointer.
    */
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   constexpr Array::Contiguous as_contiguous() const {
     return {_data, _sizes, _strides}; // assertion inside constructor
   }
 
 private:
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   void _check_stride_for_contiguity() const {
-    #ifdef CT_DEBUG
+    #ifdef VECOPS_DEBUG
     constexpr int contiguity_flag = FLAGS & _AF_ALL_CONTIGUITY_FLAGS;
     if constexpr (contiguity_flag != 0) {
       int64_t limit;
@@ -712,30 +712,30 @@ private:
       }
       int64_t numel = 1;
       for (int64_t d = N - 1; d >= limit; --d) {
-        CT_ASSERT(_strides[d] == numel, "dim %lld of array is not contiguous (expected %lld, got %lld)", d, numel, _strides[d]);
+        VECOPS_ASSERT(_strides[d] == numel, "dim %lld of array is not contiguous (expected %lld, got %lld)", d, numel, _strides[d]);
         numel *= _sizes[d];
       }
     }
     #endif
   }
 
-  CT_ALWAYS_FORCEINLINE
+  VECOPS_ALWAYS_INLINE
   void _check_meta_sanity() const {
-    #ifdef CT_DEBUG
+    #ifdef VECOPS_DEBUG
     for (int64_t i = 0; i < N; ++i) {
-      CT_ASSERT(_sizes[i] >= 0, "dim %lld of array have negative _size", i);
+      VECOPS_ASSERT(_sizes[i] >= 0, "dim %lld of array have negative _size", i);
     }
     _check_stride_for_contiguity();
     #endif
   }
 
   constexpr static const int64_t* _get_ints_meta_size_checked(std::initializer_list<int64_t> x, const char* name) {
-    CT_ASSERT(x.size() == N, "%s(%lld) != N(%lld)", name, x.size(), N);
+    VECOPS_ASSERT(x.size() == N, "%s(%lld) != N(%lld)", name, x.size(), N);
     return x.begin();
   }
 
   constexpr static const int64_t* _get_ints_meta_size_checked(const IntsMetaRef& x, const char* name) {
-    CT_ASSERT(x.size(0) == N, "%s(%lld) != N(%lld)", name, x.size(0), N);
+    VECOPS_ASSERT(x.size(0) == N, "%s(%lld) != N(%lld)", name, x.size(0), N);
     return x.data();
   }
 
@@ -766,7 +766,7 @@ struct SliceHelper<T, N, D, FLAGS> {
   static constexpr int64_t NewLength = N;
   static constexpr int64_t LastNContiguous = N - D;
 
-  CT_ALWAYS_FORCEINLINE int64_t apply(
+  VECOPS_ALWAYS_INLINE int64_t apply(
       const int64_t* old_sizes, const int64_t* old_strides,
       int64_t* new_sizes, int64_t* new_strides
   ) {
@@ -793,13 +793,13 @@ struct SliceHelper<T, N, D, FLAGS, std::enable_if_t<std::is_integral_v<std::deca
   static_assert(NewLength >= 0);
   static constexpr int64_t LastNContiguous = Next::LastNContiguous; // breaks contiguity
 
-  CT_ALWAYS_FORCEINLINE int64_t apply(
+  VECOPS_ALWAYS_INLINE int64_t apply(
       const int64_t* old_sizes, const int64_t* old_strides,
       int64_t* new_sizes, int64_t* new_strides,
       TIndex i0, TIndices... iargs
   ) {
     int64_t index = int64_t(i0);
-    CT_ASSERT(0 <= index && index < old_sizes[0], "%lld !in 0:%lld", index, old_sizes[0]);
+    VECOPS_ASSERT(0 <= index && index < old_sizes[0], "%lld !in 0:%lld", index, old_sizes[0]);
     int64_t offset;
     // last dimensional contiguity optimization: skip multiplication of 1
     if constexpr (D == N - 1 && (FLAGS & AF_LAST_CONTIGUOUS) != 0) {
@@ -828,7 +828,7 @@ struct SliceHelper<T, N, D, FLAGS, std::enable_if_t<std::is_same_v<std::decay_t<
   static_assert(NewLength >= 0);
   static constexpr int64_t LastNContiguous = Next::LastNContiguous == N - D - 1 ? Next::LastNContiguous + 1 : Next::LastNContiguous;
 
-  CT_ALWAYS_FORCEINLINE int64_t apply(
+  VECOPS_ALWAYS_INLINE int64_t apply(
       const int64_t* old_sizes, const int64_t* old_strides,
       int64_t* new_sizes, int64_t* new_strides,
       TIndex i0, TIndices... iargs
@@ -856,7 +856,7 @@ struct SliceHelper<T, N, D, FLAGS, std::enable_if_t<std::is_same_v<std::decay_t<
   static_assert(NewLength >= 0);
   static constexpr int64_t LastNContiguous = Next::LastNContiguous; // breaks contiguity
 
-  CT_ALWAYS_FORCEINLINE int64_t apply(
+  VECOPS_ALWAYS_INLINE int64_t apply(
       const int64_t* old_sizes, const int64_t* old_strides,
       int64_t* new_sizes, int64_t* new_strides,
       TIndex i0, TIndices... iargs
@@ -884,7 +884,7 @@ struct SliceHelper<T, N, D, FLAGS, std::enable_if_t<std::is_same_v<std::decay_t<
   static_assert(NewLength >= 0);
   static constexpr int64_t LastNContiguous = Next::LastNContiguous; // breaks contiguity
 
-  CT_ALWAYS_FORCEINLINE int64_t apply(
+  VECOPS_ALWAYS_INLINE int64_t apply(
       const int64_t* old_sizes, const int64_t* old_strides,
       int64_t* new_sizes, int64_t* new_strides,
       TIndex i0, TIndices... iargs
@@ -893,16 +893,16 @@ struct SliceHelper<T, N, D, FLAGS, std::enable_if_t<std::is_same_v<std::decay_t<
     int64_t to = i0.end;
     int64_t step = i0.step;
     int64_t size;
-    CT_ASSERT(0 <= from && from < old_sizes[0], "%lld !in 0:%lld", from, old_sizes[0]);
-    CT_ASSERT(0 <= to && to <= old_sizes[0], "%lld !in 0:%lld", to, old_sizes[0]);
+    VECOPS_ASSERT(0 <= from && from < old_sizes[0], "%lld !in 0:%lld", from, old_sizes[0]);
+    VECOPS_ASSERT(0 <= to && to <= old_sizes[0], "%lld !in 0:%lld", to, old_sizes[0]);
     if (step > 0) {
-      CT_ASSERT(from < to, "for positive step, from must be less than to");
+      VECOPS_ASSERT(from < to, "for positive step, from must be less than to");
       size = (to - from + step - 1) / step;
     } else if (step < 0) {
-      CT_ASSERT(from > to, "for negative step, from must be greater than to");
+      VECOPS_ASSERT(from > to, "for negative step, from must be greater than to");
       size = (from - to - step - 1) / (-step);
     } else {
-      CT_ASSERT(false, "step cannot be zero");
+      VECOPS_ASSERT(false, "step cannot be zero");
     }
     new_sizes[0] = size;
     new_strides[0] = old_strides[0] * step;
@@ -913,7 +913,7 @@ struct SliceHelper<T, N, D, FLAGS, std::enable_if_t<std::is_same_v<std::decay_t<
   }
 };
 
-CT_ALWAYS_FORCEINLINE constexpr int get_new_flags(int64_t last_n_contiguous, int64_t N, int flags) {
+VECOPS_ALWAYS_INLINE constexpr int get_new_flags(int64_t last_n_contiguous, int64_t N, int flags) {
   if (last_n_contiguous == N) {
     return flags; // keeps all contiguity flags
   } else if (last_n_contiguous >= 2 && N >= 2) {
@@ -928,7 +928,7 @@ CT_ALWAYS_FORCEINLINE constexpr int get_new_flags(int64_t last_n_contiguous, int
 
 template <typename T, int64_t N, int FLAGS>
 template <typename... TIndices>
-CT_ALWAYS_FORCEINLINE
+VECOPS_ALWAYS_INLINE
 constexpr decltype(auto) Array<T, N, FLAGS>::operator()(TIndices... indices) const {
   using Helper = typename details::SliceHelper<T, N, 0, FLAGS, void, TIndices...>;
   constexpr int64_t new_length = Helper::NewLength;
@@ -973,10 +973,10 @@ constexpr decltype(auto) Array<T, N, FLAGS>::operator()(TIndices... indices) con
  *   auto transposed = transpose(arr, 0, 2);  // shape [4, 3, 2]
  */
 template <typename T, int64_t N, int FLAGS>
-CT_ALWAYS_FORCEINLINE
+VECOPS_ALWAYS_INLINE
 constexpr Array<T, N, FLAGS> transpose(const Array<T, N, FLAGS>& x, int64_t i, int64_t j) {
-  CT_ASSERT(0 <= i && i < N, "%lld !in 0:%lld", i, N);
-  CT_ASSERT(0 <= j && j < N, "%lld !in 0:%lld", j, N);
+  VECOPS_ASSERT(0 <= i && i < N, "%lld !in 0:%lld", i, N);
+  VECOPS_ASSERT(0 <= j && j < N, "%lld !in 0:%lld", j, N);
   std::array<int64_t, N> new_sizes, new_strides;
   const int64_t* old_sizes = x.sizes().data();
   const int64_t* old_strides = x.strides().data();
@@ -1020,32 +1020,32 @@ constexpr Array<T, N, FLAGS> transpose(const Array<T, N, FLAGS>& x, int64_t i, i
  *   auto permuted2 = permute(arr, 0, 2, 3, 1); // shape [1, 3, 4, 2]
  */
 template <typename T, int64_t N, int FLAGS, typename... TIndices>
-CT_ALWAYS_FORCEINLINE
+VECOPS_ALWAYS_INLINE
 constexpr Array<T, N, FLAGS> permute(const Array<T, N, FLAGS>& x, TIndices... indices) {
   static_assert(sizeof...(TIndices) == N, "insufficient number of indices");
   std::array<int64_t, N> index_array = {static_cast<int64_t>(indices)...};
   std::array<int64_t, N> new_sizes, new_strides;
   const int64_t* old_sizes = x.sizes().data();
   const int64_t* old_strides = x.strides().data();
-  #ifdef CT_DEBUG
+  #ifdef VECOPS_DEBUG
   std::array<bool, N> is_visited;
   is_visited.fill(false);
   #endif
 
   for (int64_t i = 0; i < N; ++i) {
     int64_t j = index_array[i];
-    CT_ASSERT(0 <= j && j < N, "indices[%lld]: %lld !in 0:%lld", i, j, N);
-    CT_ASSERT(!is_visited[j], "indices[%lld]: index %lld is being used twice", i, j);
-    #ifdef CT_DEBUG
+    VECOPS_ASSERT(0 <= j && j < N, "indices[%lld]: %lld !in 0:%lld", i, j, N);
+    VECOPS_ASSERT(!is_visited[j], "indices[%lld]: index %lld is being used twice", i, j);
+    #ifdef VECOPS_DEBUG
     is_visited[j] = true;
     #endif
     new_sizes[i] = old_sizes[j];
     new_strides[i] = old_strides[j];
   }
 
-  #ifdef CT_DEBUG
+  #ifdef VECOPS_DEBUG
   for (int64_t i = 0; i < N; ++i) {
-    CT_ASSERT(is_visited[i], "index %lld is never used", i);
+    VECOPS_ASSERT(is_visited[i], "index %lld is never used", i);
   }
   #endif
 
@@ -1053,7 +1053,6 @@ constexpr Array<T, N, FLAGS> permute(const Array<T, N, FLAGS>& x, TIndices... in
   return Array<T, N, new_flags>(x.data(), new_sizes, new_strides);
 }
 
-} // namespace array
-} // namespace vecops
+} // namespace vecops::array
 
 #endif //VECOPS_ARRAY_H

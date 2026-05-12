@@ -25,7 +25,7 @@ struct ShardVec {
   static constexpr T tag{};
   Vec<T>& v;
 
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr ShardVec(T t, Vec<T>& v) : v(v) {}
 };
 
@@ -43,7 +43,7 @@ struct ShardMask {
   static constexpr T tag{};
   Mask<T>& m;
 
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr ShardMask(T t, Mask<T>& m) : m(m) {}
 };
 
@@ -60,11 +60,11 @@ struct StepPointer {
   E* p;
   nint_t step;
 
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr StepPointer(const E* p, nint_t step) : p(const_cast<E*>(p)), step(step) {}
 
   template <nint_t N, int P>
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr StepPointer(Tag<E, N, P> t, const E* p) : StepPointer(p, word_size(t)) {}
 };
 
@@ -84,14 +84,14 @@ struct ForEach {
   static_assert((Step > 0 && I < NLoop) || (Step < 0 && I > NLoop));
 
   template <typename F, typename... Args>
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr void operator()(F&& f, Args&& ... args) {
     f.template operator()<I>(std::forward<Args>(args)...);
     ForEach<NLoop, Step, I + Step>()(std::forward<F>(f), std::forward<Args>(args)...);
   }
 
   template <typename F, typename... Args>
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr void operator()(nint_t n, F&& f, Args&& ... args) {
     if (I >= n - (Step - 1)) return;
     f.template operator()<I>(std::forward<Args>(args)...);
@@ -102,11 +102,11 @@ struct ForEach {
 template <nint_t NLoop, nint_t Step, nint_t I>
 struct ForEach<NLoop, Step, I, std::enable_if_t<(I >= NLoop)>> {
   template <typename F, typename... Args>
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr void operator()(F&& f, Args&& ... args) {}
 
   template <typename F, typename... Args>
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr void operator()(nint_t n, F&& f, Args&& ... args) {}
 };
 
@@ -122,7 +122,7 @@ struct ForEach<NLoop, Step, I, std::enable_if_t<(I >= NLoop)>> {
  * @param args Additional arguments passed to f
  */
 template <nint_t NLoop, nint_t Step = 1, nint_t I = 0, typename F, typename... Args>
-TLV_INLINE constexpr void foreach(F&& f, Args&&... args) {
+VECOPS_VFUNC constexpr void foreach(F&& f, Args&&... args) {
   ForEach<NLoop, Step, I>()(std::forward<F>(f), std::forward<Args>(args)...);
 }
 
@@ -139,7 +139,7 @@ TLV_INLINE constexpr void foreach(F&& f, Args&&... args) {
  * @param args Additional arguments passed to f
  */
 template <nint_t NLoop, nint_t Step = 1, nint_t I = 0, typename F, typename... Args>
-TLV_INLINE constexpr void foreach(nint_t n, F&& f, Args&&... args) {
+VECOPS_VFUNC constexpr void foreach(nint_t n, F&& f, Args&&... args) {
   ForEach<NLoop, Step, I>()(n, std::forward<F>(f), std::forward<Args>(args)...);
 }
 
@@ -157,12 +157,12 @@ template <nint_t Index, nint_t Batch, typename T>
 struct ArgTransform {
   static_assert((Batch & (Batch - 1)) == 0, "Batch is not power of 2");
 
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr decltype(auto) operator()(T&& a) {
     return std::forward<T>(a);
   }
 
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr decltype(auto) operator()(T&& a, nint_t index) {
     return this->operator()(std::forward<T>(a));
   }
@@ -183,7 +183,7 @@ template <nint_t Index, nint_t Batch, TLV_DECL_TAG(T)>
 struct ArgTransform<Index, Batch, ShardVec<T>> {
   static_assert((Batch & (Batch - 1)) == 0, "Batch is not power of 2");
 
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr decltype(auto) operator()(ShardVec<T>&& a) {
     if constexpr (Batch == 1) {
       return get_word<Index>(T(), a.v);
@@ -200,7 +200,7 @@ struct ArgTransform<Index, Batch, ShardVec<T>> {
     }
   }
 
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr decltype(auto) operator()(ShardVec<T>&& a, nint_t index) {
     if constexpr (Batch == 1) {
       return get_word(T(), a.v, index);
@@ -232,7 +232,7 @@ template <nint_t Index, nint_t Batch, TLV_DECL_TAG(T)>
 struct ArgTransform<Index, Batch, ShardMask<T>> {
   static_assert((Batch & (Batch - 1)) == 0, "Batch is not power of 2");
 
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr decltype(auto) operator()(ShardMask<T>&& a) {
     if constexpr (Batch == 1) {
       return get_word_mask<Index>(T(), a.m);
@@ -249,7 +249,7 @@ struct ArgTransform<Index, Batch, ShardMask<T>> {
     }
   }
 
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr decltype(auto) operator()(ShardMask<T>&& a, nint_t index) {
     if constexpr (Batch == 1) {
       return get_word_mask(T(), a.m, index);
@@ -279,12 +279,12 @@ struct ArgTransform<Index, Batch, ShardMask<T>> {
  */
 template <nint_t Index, nint_t Batch, typename T>
 struct ArgTransform<Index, Batch, StepPointer<T>> {
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr decltype(auto) operator()(StepPointer<T>&& a) {
     return this->operator()(std::forward<StepPointer<T>>(a), Index);
   }
 
-  TLV_INLINE
+  VECOPS_VFUNC
   constexpr decltype(auto) operator()(StepPointer<T>&& a, nint_t index) {
     return a.p + index * Batch * a.step;
   }
@@ -302,7 +302,7 @@ struct ArgTransform<Index, Batch, StepPointer<T>> {
  * @return Transformed argument appropriate for word-level operation
  */
 template <nint_t Index, nint_t Batch = 1, typename T>
-TLV_INLINE constexpr decltype(auto) transform(T&& t) {
+VECOPS_VFUNC constexpr decltype(auto) transform(T&& t) {
   return ArgTransform<Index, Batch, T>()(std::forward<T>(t));
 }
 
@@ -317,7 +317,7 @@ TLV_INLINE constexpr decltype(auto) transform(T&& t) {
  * @return Transformed argument appropriate for word-level operation
  */
 template <nint_t Index = -1, nint_t Batch = 1, typename T>
-TLV_INLINE constexpr decltype(auto) transform(T&& t, nint_t index) {
+VECOPS_VFUNC constexpr decltype(auto) transform(T&& t, nint_t index) {
   return ArgTransform<Index, Batch, T>()(std::forward<T>(t), index);
 }
 
@@ -412,7 +412,7 @@ using TransformedReturn = decltype(std::declval<IndexedFn<0, F>>()(transform<0>(
  */
 template <TLV_DECL_TAG(T), typename Fn, typename... Args>
 requires (!is_tag<std::remove_cvref_t<Fn>>)
-TLV_INLINE auto vmap(T t, Fn&& f, Args&& ... args) -> std::enable_if_t<
+VECOPS_VFUNC auto vmap(T t, Fn&& f, Args&& ... args) -> std::enable_if_t<
   std::is_void_v<TransformedReturn<Fn, WordOf<T>, Args...>>,
   void>
 {
@@ -446,7 +446,7 @@ TLV_INLINE auto vmap(T t, Fn&& f, Args&& ... args) -> std::enable_if_t<
  * @return The result vector
  */
 template <TLV_DECL_TAG(T), typename FnC, typename FnT, typename... Args>
-TLV_INLINE auto vmap(T t, nint_t n, FnC&& f_complete, FnT&& f_tail, Args&& ... args) -> std::enable_if_t<
+VECOPS_VFUNC auto vmap(T t, nint_t n, FnC&& f_complete, FnT&& f_tail, Args&& ... args) -> std::enable_if_t<
     std::is_void_v<TransformedReturn<FnC, WordOf<T>, Args...>>,
     void>
 {
@@ -454,7 +454,7 @@ TLV_INLINE auto vmap(T t, nint_t n, FnC&& f_complete, FnT&& f_tail, Args&& ... a
   static_assert(std::is_same_v<TransformedReturn<FnT, WordOf<T>, nint_t, Args...>, void>);
   constexpr auto wt = word_tag(t);
   nint_t L = size(t);
-  CT_ASSERT(0 <= n && n <= L, "%zd !in 0..%zd", n, L);
+  VECOPS_ASSERT(0 <= n && n <= L, "%zd !in 0..%zd", n, L);
 
   if constexpr (is_word_vec(t)) {
     std::forward<FnT>(f_tail)(wt, n, transform<0>(std::forward<Args>(args))...);
@@ -494,7 +494,7 @@ TLV_INLINE auto vmap(T t, nint_t n, FnC&& f_complete, FnT&& f_tail, Args&& ... a
  */
 template <TLV_DECL_TAG(T), typename Fn, typename... Args>
 requires (!is_tag<std::remove_cvref_t<Fn>>)
-TLV_INLINE auto vmap(T t, Fn&& f, Args&& ... args) -> std::enable_if_t<
+VECOPS_VFUNC auto vmap(T t, Fn&& f, Args&& ... args) -> std::enable_if_t<
     vec::is_vec<TransformedReturn<Fn, WordOf<T>, Args...>>,
     Vec<T>>
 {
@@ -528,14 +528,14 @@ TLV_INLINE auto vmap(T t, Fn&& f, Args&& ... args) -> std::enable_if_t<
  * @param args Arguments to pass
  */
 template <TLV_DECL_TAG(T), typename FnC, typename FnT, typename... Args>
-TLV_INLINE auto vmap(T t, nint_t n, FnC&& f_complete, FnT&& f_tail, Args&& ... args) -> std::enable_if_t<
+VECOPS_VFUNC auto vmap(T t, nint_t n, FnC&& f_complete, FnT&& f_tail, Args&& ... args) -> std::enable_if_t<
     is_vec<TransformedReturn<FnC, WordOf<T>, Args...>>,
     Vec<T>>
 {
   static_assert(vec::is_vec<TransformedReturn<FnT, WordOf<T>, nint_t, Args...>>);
   constexpr auto wt = word_tag(t);
   nint_t L = size(t);
-  CT_ASSERT(0 <= n && n <= L, "%zd !in 0..%zd", n, L);
+  VECOPS_ASSERT(0 <= n && n <= L, "%zd !in 0..%zd", n, L);
 
   if constexpr (is_word_vec(t)) {
     return std::forward<FnT>(f_tail)(wt, n, transform<0>(std::forward<Args>(args))...);
@@ -576,7 +576,7 @@ TLV_INLINE auto vmap(T t, nint_t n, FnC&& f_complete, FnT&& f_tail, Args&& ... a
  */
 template <TLV_DECL_TAG(T), typename Fn, typename... Args>
 requires (!is_tag<std::remove_cvref_t<Fn>>)
-TLV_INLINE auto vmap(T t, Fn&& f, Args&& ... args) -> std::enable_if_t<
+VECOPS_VFUNC auto vmap(T t, Fn&& f, Args&& ... args) -> std::enable_if_t<
     vec::is_mask<TransformedReturn<Fn, WordOf<T>, Args...>>,
     Mask<T>>
 {

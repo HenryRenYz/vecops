@@ -699,7 +699,7 @@ TEST_F(VecScalarTest, POW2NegativeLoadStore) {
 // Copy Function Test (like the original VecTest)
 // ============================================================================
 
-CT_NOINLINE
+VECOPS_NOINLINE
 static void scalar_copy(const float* from, float* to, nint_t len) {
   FixedTag<float32_t, 16> t;
   nint_t i;

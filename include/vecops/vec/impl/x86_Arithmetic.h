@@ -19,162 +19,162 @@ namespace word {
 /* ************************************************************************** */
 // TODO arithmetics for float16_t and bfloat16_t
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm_add_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm_add_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm_add_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm_add_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm_add_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm_add_epi64(a.v, b.v);
 }
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm256_add_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm256_add_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm256_add_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm256_add_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm256_add_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm256_add_epi64(a.v, b.v);
 }
 #endif // VEC_WIDTH >= 256
 
 #if VEC_WIDTH >= 512
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm512_add_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm512_add_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm512_add_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm512_add_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm512_add_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V add(V a, V b) {
+VECOPS_VFUNC V add(V a, V b) {
   return _mm512_add_epi64(a.v, b.v);
 }
 #endif // VEC_WIDTH >= 512
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm_mask_add_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm_mask_add_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm_mask_add_epi8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm_mask_add_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm_mask_add_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm_mask_add_epi64(a.v, m.v, a.v, b.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm256_mask_add_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm256_mask_add_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm256_mask_add_epi8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm256_mask_add_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm256_mask_add_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm256_mask_add_epi64(a.v, m.v, a.v, b.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm512_mask_add_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm512_mask_add_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm512_mask_add_epi8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm512_mask_add_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm512_mask_add_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return _mm512_mask_add_epi64(a.v, m.v, a.v, b.v);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V add(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   return word::blend(a, m, word::add(a, b));
 }
 #endif // HAS_AVX512DQ
@@ -185,162 +185,162 @@ TLV_INLINE V add(V a, V b, Mask<T> m) {
 /* ************************************************************************** */
 // TODO arithmetics for float16_t and bfloat16_t
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm_sub_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm_sub_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm_sub_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm_sub_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm_sub_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm_sub_epi64(a.v, b.v);
 }
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm256_sub_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm256_sub_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm256_sub_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm256_sub_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm256_sub_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm256_sub_epi64(a.v, b.v);
 }
 #endif // VEC_WIDTH >= 256
 
 #if VEC_WIDTH >= 512
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm512_sub_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm512_sub_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm512_sub_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm512_sub_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm512_sub_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V sub(V a, V b) {
+VECOPS_VFUNC V sub(V a, V b) {
   return _mm512_sub_epi64(a.v, b.v);
 }
 #endif // VEC_WIDTH >= 512
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm_mask_sub_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm_mask_sub_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm_mask_sub_epi8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm_mask_sub_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm_mask_sub_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm_mask_sub_epi64(a.v, m.v, a.v, b.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm256_mask_sub_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm256_mask_sub_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm256_mask_sub_epi8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm256_mask_sub_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm256_mask_sub_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm256_mask_sub_epi64(a.v, m.v, a.v, b.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm512_mask_sub_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm512_mask_sub_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm512_mask_sub_epi8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm512_mask_sub_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm512_mask_sub_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return _mm512_mask_sub_epi64(a.v, m.v, a.v, b.v);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V sub(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   return word::blend(a, m, word::sub(a, b));
 }
 #endif // HAS_AVX512DQ
@@ -351,29 +351,29 @@ TLV_INLINE V sub(V a, V b, Mask<T> m) {
 /* ************************************************************************** */
 // TODO arithmetics for float16_t and bfloat16_t
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   return _mm_mul_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   return _mm_mul_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   auto even = _mm_mullo_epi16(a.v, b.v);
   auto odd = _mm_mullo_epi16(_mm_srli_epi16(a.v, 8), _mm_srli_epi16(b.v, 8));
   return _mm_or_si128(_mm_slli_epi16(odd, 8), _mm_and_si128(even, _mm_set1_epi16(0xFF)));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   return _mm_mullo_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   return _mm_mullo_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   #ifdef HAS_AVX512DQ
   return _mm_mullo_epi64(a.v, b.v);
   #else
@@ -391,29 +391,29 @@ TLV_INLINE V mul(V a, V b) {
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   return _mm256_mul_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   return _mm256_mul_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   auto even = _mm256_mullo_epi16(a.v, b.v);
   auto odd = _mm256_mullo_epi16(_mm256_srli_epi16(a.v, 8), _mm256_srli_epi16(b.v, 8));
   return _mm256_or_si256(_mm256_slli_epi16(odd, 8), _mm256_and_si256(even, _mm256_set1_epi16(0xFF)));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   return _mm256_mullo_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   return _mm256_mullo_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   #ifdef HAS_AVX512DQ
   return _mm256_mullo_epi64(a.v, b.v);
   #else
@@ -431,103 +431,103 @@ TLV_INLINE V mul(V a, V b) {
 
 #if VEC_WIDTH >= 512
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   return _mm512_mul_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   return _mm512_mul_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   auto even = _mm512_mullo_epi16(a.v, b.v);
   auto odd = _mm512_mullo_epi16(_mm512_srli_epi16(a.v, 8), _mm512_srli_epi16(b.v, 8));
   return _mm512_or_si128(_mm512_slli_epi16(odd, 8), _mm512_and_si512(even, _mm512_set1_epi16(0xFF)));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   return _mm512_mullo_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   return _mm512_mullo_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V mul(V a, V b) {
+VECOPS_VFUNC V mul(V a, V b) {
   return _mm512_mullo_epi64(a.v, b.v);
 }
 #endif // VEC_WIDTH >= 512
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm_mask_mul_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm_mask_mul_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return word::blend(a, m, word::mul(a, b));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm_mask_mullo_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm_mask_mullo_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm_mask_mullo_epi64(a.v, m.v, a.v, b.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm256_mask_mul_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm256_mask_mul_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm256_mask_mullo_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm256_mask_mullo_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm256_mask_mullo_epi64(a.v, m.v, a.v, b.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm512_mask_mul_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm512_mask_mul_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm512_mask_mullo_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm512_mask_mullo_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return _mm512_mask_mullo_epi64(a.v, m.v, a.v, b.v);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V mul(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return word::blend(a, m, word::mul(a, b));
 }
 #endif // HAS_AVX512DQ
@@ -538,66 +538,66 @@ TLV_INLINE V mul(V a, V b, Mask<T> m) {
 /* ************************************************************************** */
 // TODO arithmetics for float16_t and bfloat16_t
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V div(V a, V b) {
+VECOPS_VFUNC V div(V a, V b) {
   return _mm_div_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V div(V a, V b) {
+VECOPS_VFUNC V div(V a, V b) {
   return _mm_div_pd(a.v, b.v);
 }
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V div(V a, V b) {
+VECOPS_VFUNC V div(V a, V b) {
   return _mm256_div_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V div(V a, V b) {
+VECOPS_VFUNC V div(V a, V b) {
   return _mm256_div_pd(a.v, b.v);
 }
 #endif // VEC_WIDTH >= 256
 
 #if VEC_WIDTH >= 512
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V div(V a, V b) {
+VECOPS_VFUNC V div(V a, V b) {
   return _mm512_div_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V div(V a, V b) {
+VECOPS_VFUNC V div(V a, V b) {
   return _mm512_div_pd(a.v, b.v);
 }
 #endif // VEC_WIDTH >= 512
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V div(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V div(V a, V b, Mask<T> m) {
   return _mm_mask_div_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V div(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V div(V a, V b, Mask<T> m) {
   return _mm_mask_div_pd(a.v, m.v, a.v, b.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V div(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V div(V a, V b, Mask<T> m) {
   return _mm256_mask_div_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V div(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V div(V a, V b, Mask<T> m) {
   return _mm256_mask_div_pd(a.v, m.v, a.v, b.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V div(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V div(V a, V b, Mask<T> m) {
   return _mm512_mask_div_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V div(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V div(V a, V b, Mask<T> m) {
   return _mm512_mask_div_pd(a.v, m.v, a.v, b.v);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V div(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V div(V a, V b, Mask<T> m) {
   return word::blend(a, m, word::div(a, b));
 }
 #endif // HAS_AVX512DQ
@@ -608,39 +608,39 @@ TLV_INLINE V div(V a, V b, Mask<T> m) {
 /* ************************************************************************** */
 // TODO arithmetics for float16_t and bfloat16_t
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm_min_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm_min_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm_min_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm_min_epu8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm_min_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm_min_epu16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm_min_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm_min_epu32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   #ifdef HAS_AVX512F
   return _mm_min_epi64(a.v, b.v);
   #else
@@ -648,7 +648,7 @@ TLV_INLINE V min(V a, V b) {
   #endif
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   #ifdef HAS_AVX512F
   return _mm_min_epu64(a.v, b.v);
   #else
@@ -661,39 +661,39 @@ TLV_INLINE V min(V a, V b) {
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm256_min_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm256_min_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm256_min_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm256_min_epu8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm256_min_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm256_min_epu16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm256_min_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm256_min_epu32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   #ifdef HAS_AVX512F
   return _mm256_min_epi64(a.v, b.v);
   #else
@@ -701,7 +701,7 @@ TLV_INLINE V min(V a, V b) {
   #endif
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   #ifdef HAS_AVX512F
   return _mm256_min_epu64(a.v, b.v);
   #else
@@ -715,173 +715,173 @@ TLV_INLINE V min(V a, V b) {
 
 #if VEC_WIDTH >= 512
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm512_min_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm512_min_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm512_min_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm512_min_epu8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm512_min_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm512_min_epu16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm512_min_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm512_min_epu32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm512_min_epi64(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE V min(V a, V b) {
+VECOPS_VFUNC V min(V a, V b) {
   return _mm512_min_epu64(a.v, b.v);
 }
 #endif // VEC_WIDTH >= 512
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm_mask_min_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm_mask_min_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm_mask_min_epi8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm_mask_min_epu8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm_mask_min_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm_mask_min_epu16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm_mask_min_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm_mask_min_epu32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm_mask_min_epi64(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm_mask_min_epu64(a.v, m.v, a.v, b.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm256_mask_min_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm256_mask_min_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm256_mask_min_epi8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm256_mask_min_epu8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm256_mask_min_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm256_mask_min_epu16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm256_mask_min_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm256_mask_min_epu32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm256_mask_min_epi64(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm256_mask_min_epu64(a.v, m.v, a.v, b.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm512_mask_min_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm512_mask_min_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm512_mask_min_epi8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm512_mask_min_epu8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm512_mask_min_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm512_mask_min_epu16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm512_mask_min_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm512_mask_min_epu32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm512_mask_min_epi64(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return _mm512_mask_min_epu64(a.v, m.v, a.v, b.v);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V min(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return word::blend(a, m, word::min(a, b));
 }
 #endif // HAS_AVX512DQ
@@ -892,39 +892,39 @@ TLV_INLINE V min(V a, V b, Mask<T> m) {
 /* ************************************************************************** */
 // TODO arithmetics for float16_t and bfloat16_t
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm_max_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm_max_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm_max_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm_max_epu8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm_max_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm_max_epu16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm_max_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm_max_epu32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   #ifdef HAS_AVX512F
   return _mm_max_epi64(a.v, b.v);
   #else
@@ -932,7 +932,7 @@ TLV_INLINE V max(V a, V b) {
   #endif
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   #ifdef HAS_AVX512F
   return _mm_max_epu64(a.v, b.v);
   #else
@@ -945,39 +945,39 @@ TLV_INLINE V max(V a, V b) {
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm256_max_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm256_max_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm256_max_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm256_max_epu8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm256_max_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm256_max_epu16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm256_max_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm256_max_epu32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   #ifdef HAS_AVX512F
   return _mm256_max_epi64(a.v, b.v);
   #else
@@ -985,7 +985,7 @@ TLV_INLINE V max(V a, V b) {
   #endif
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   #ifdef HAS_AVX512F
   return _mm256_max_epu64(a.v, b.v);
   #else
@@ -999,173 +999,173 @@ TLV_INLINE V max(V a, V b) {
 
 #if VEC_WIDTH >= 512
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm512_max_ps(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm512_max_pd(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm512_max_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm512_max_epu8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm512_max_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm512_max_epu16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm512_max_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm512_max_epu32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm512_max_epi64(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE V max(V a, V b) {
+VECOPS_VFUNC V max(V a, V b) {
   return _mm512_max_epu64(a.v, b.v);
 }
 #endif // VEC_WIDTH >= 512
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm_mask_max_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm_mask_max_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm_mask_max_epi8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm_mask_max_epu8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm_mask_max_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm_mask_max_epu16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm_mask_max_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm_mask_max_epu32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm_mask_max_epi64(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm_mask_max_epu64(a.v, m.v, a.v, b.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm256_mask_max_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm256_mask_max_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm256_mask_max_epi8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm256_mask_max_epu8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm256_mask_max_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm256_mask_max_epu16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm256_mask_max_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm256_mask_max_epu32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm256_mask_max_epi64(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm256_mask_max_epu64(a.v, m.v, a.v, b.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm512_mask_max_ps(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm512_mask_max_pd(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm512_mask_max_epi8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm512_mask_max_epu8(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm512_mask_max_epi16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm512_mask_max_epu16(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm512_mask_max_epi32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm512_mask_max_epu32(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm512_mask_max_epi64(a.v, m.v, a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return _mm512_mask_max_epu64(a.v, m.v, a.v, b.v);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V max(V a, V b, Mask<T> m) {
+VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return word::blend(a, m, word::max(a, b));
 }
 #endif // HAS_AVX512DQ
@@ -1176,7 +1176,7 @@ TLV_INLINE V max(V a, V b, Mask<T> m) {
 // TODO arithmetics for float16_t and bfloat16_t
 // Note: AVX512 uses rcp14 which gives higher accuracy than rcp used not in AVX512
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V rcp(V v) {
+VECOPS_VFUNC V rcp(V v) {
   #ifdef HAS_AVX512F
   return _mm_rcp14_ps(v.v);
   #else
@@ -1184,7 +1184,7 @@ TLV_INLINE V rcp(V v) {
   #endif
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V rcp(V v) {
+VECOPS_VFUNC V rcp(V v) {
   #ifdef HAS_AVX512F
   return _mm_rcp14_pd(v.v);
   #else
@@ -1194,7 +1194,7 @@ TLV_INLINE V rcp(V v) {
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V rcp(V v) {
+VECOPS_VFUNC V rcp(V v) {
   #ifdef HAS_AVX512F
   return _mm256_rcp14_ps(v.v);
   #else
@@ -1202,7 +1202,7 @@ TLV_INLINE V rcp(V v) {
   #endif
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V rcp(V v) {
+VECOPS_VFUNC V rcp(V v) {
   #ifdef HAS_AVX512F
   return _mm256_rcp14_pd(v.v);
   #else
@@ -1213,45 +1213,45 @@ TLV_INLINE V rcp(V v) {
 
 #if VEC_WIDTH >= 512
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V rcp(V v) {
+VECOPS_VFUNC V rcp(V v) {
   return _mm512_rcp14_ps(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V rcp(V v) {
+VECOPS_VFUNC V rcp(V v) {
   return _mm512_rcp14_pd(v.v);
 }
 #endif // VEC_WIDTH >= 512
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V rcp(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rcp(V v, Mask<T> m, V default_v) {
   return _mm_mask_rcp14_ps(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V rcp(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rcp(V v, Mask<T> m, V default_v) {
   return _mm_mask_rcp14_pd(default_v.v, m.v, v.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V rcp(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rcp(V v, Mask<T> m, V default_v) {
   return _mm256_mask_rcp14_ps(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V rcp(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rcp(V v, Mask<T> m, V default_v) {
   return _mm256_mask_rcp14_pd(default_v.v, m.v, v.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V rcp(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rcp(V v, Mask<T> m, V default_v) {
   return _mm512_mask_rcp14_ps(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V rcp(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rcp(V v, Mask<T> m, V default_v) {
   return _mm512_mask_rcp14_pd(default_v.v, m.v, v.v);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V rcp(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rcp(V v, Mask<T> m, V default_v) {
   return word::blend(default_v, m, word::rcp(v));
 }
 #endif // HAS_AVX512DQ
@@ -1262,66 +1262,66 @@ TLV_INLINE V rcp(V v, Mask<T> m, V default_v) {
 /* ************************************************************************** */
 // TODO arithmetics for float16_t and bfloat16_t
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V sqrt(V v) {
+VECOPS_VFUNC V sqrt(V v) {
   return _mm_sqrt_ps(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V sqrt(V v) {
+VECOPS_VFUNC V sqrt(V v) {
   return _mm_sqrt_pd(v.v);
 }
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V sqrt(V v) {
+VECOPS_VFUNC V sqrt(V v) {
   return _mm256_sqrt_ps(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V sqrt(V v) {
+VECOPS_VFUNC V sqrt(V v) {
   return _mm256_sqrt_pd(v.v);
 }
 #endif // VEC_WIDTH >= 256
 
 #if VEC_WIDTH >= 512
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V sqrt(V v) {
+VECOPS_VFUNC V sqrt(V v) {
   return _mm512_sqrt_ps(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V sqrt(V v) {
+VECOPS_VFUNC V sqrt(V v) {
   return _mm512_sqrt_pd(v.v);
 }
 #endif // VEC_WIDTH >= 512
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V sqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V sqrt(V v, Mask<T> m, V default_v) {
   return _mm_mask_sqrt_ps(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V sqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V sqrt(V v, Mask<T> m, V default_v) {
   return _mm_mask_sqrt_pd(default_v.v, m.v, v.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V sqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V sqrt(V v, Mask<T> m, V default_v) {
   return _mm256_mask_sqrt_ps(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V sqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V sqrt(V v, Mask<T> m, V default_v) {
   return _mm256_mask_sqrt_pd(default_v.v, m.v, v.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V sqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V sqrt(V v, Mask<T> m, V default_v) {
   return _mm512_mask_sqrt_ps(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V sqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V sqrt(V v, Mask<T> m, V default_v) {
   return _mm512_mask_sqrt_pd(default_v.v, m.v, v.v);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V sqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V sqrt(V v, Mask<T> m, V default_v) {
   return word::blend(default_v, m, word::sqrt(v));
 }
 #endif // HAS_AVX512DQ
@@ -1333,7 +1333,7 @@ TLV_INLINE V sqrt(V v, Mask<T> m, V default_v) {
 // TODO arithmetics for float16_t and bfloat16_t
 // Note: AVX512 uses rsqrt14 which gives higher accuracy than rsqrt used not in AVX512
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V rsqrt(V v) {
+VECOPS_VFUNC V rsqrt(V v) {
   #ifdef HAS_AVX512F
   return _mm_rsqrt14_ps(v.v);
   #else
@@ -1341,7 +1341,7 @@ TLV_INLINE V rsqrt(V v) {
   #endif
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V rsqrt(V v) {
+VECOPS_VFUNC V rsqrt(V v) {
   #ifdef HAS_AVX512F
   return _mm_rsqrt14_pd(v.v);
   #else
@@ -1351,7 +1351,7 @@ TLV_INLINE V rsqrt(V v) {
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V rsqrt(V v) {
+VECOPS_VFUNC V rsqrt(V v) {
   #ifdef HAS_AVX512F
   return _mm256_rsqrt14_ps(v.v);
   #else
@@ -1359,7 +1359,7 @@ TLV_INLINE V rsqrt(V v) {
   #endif
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V rsqrt(V v) {
+VECOPS_VFUNC V rsqrt(V v) {
   #ifdef HAS_AVX512F
   return _mm256_rsqrt14_pd(v.v);
   #else
@@ -1370,45 +1370,45 @@ TLV_INLINE V rsqrt(V v) {
 
 #if VEC_WIDTH >= 512
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V rsqrt(V v) {
+VECOPS_VFUNC V rsqrt(V v) {
   return _mm512_rsqrt14_ps(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V rsqrt(V v) {
+VECOPS_VFUNC V rsqrt(V v) {
   return _mm512_rsqrt14_pd(v.v);
 }
 #endif // VEC_WIDTH >= 512
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V rsqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rsqrt(V v, Mask<T> m, V default_v) {
   return _mm_mask_rsqrt14_ps(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V rsqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rsqrt(V v, Mask<T> m, V default_v) {
   return _mm_mask_rsqrt14_pd(default_v.v, m.v, v.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V rsqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rsqrt(V v, Mask<T> m, V default_v) {
   return _mm256_mask_rsqrt14_ps(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V rsqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rsqrt(V v, Mask<T> m, V default_v) {
   return _mm256_mask_rsqrt14_pd(default_v.v, m.v, v.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V rsqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rsqrt(V v, Mask<T> m, V default_v) {
   return _mm512_mask_rsqrt14_ps(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V rsqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rsqrt(V v, Mask<T> m, V default_v) {
   return _mm512_mask_rsqrt14_pd(default_v.v, m.v, v.v);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V rsqrt(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V rsqrt(V v, Mask<T> m, V default_v) {
   return word::blend(default_v, m, word::rsqrt(v));
 }
 #endif // HAS_AVX512DQ
@@ -1419,11 +1419,11 @@ TLV_INLINE V rsqrt(V v, Mask<T> m, V default_v) {
 /* ************************************************************************** */
 // Also defined for unsigned ints
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V neg(V v) {
+VECOPS_VFUNC V neg(V v) {
   return word::sub(word::zeros(T()), v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V neg(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V neg(V v, Mask<T> m, V default_v) {
   return word::blend(default_v, m, word::sub(word::zeros(T()), v));
 }
 
@@ -1432,31 +1432,31 @@ TLV_INLINE V neg(V v, Mask<T> m, V default_v) {
 //                              Absolute Value                                //
 /* ************************************************************************** */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm_and_ps(_mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF)), v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm_and_pd(_mm_castsi128_pd(_mm_set1_epi64x(0x7FFFFFFFFFFFFFFFLL)), v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>> && std::is_unsigned_v<TypeOf<T>>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return v;
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm_abs_epi8(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm_abs_epi16(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm_abs_epi32(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   #ifdef HAS_AVX512DQ
   return _mm_abs_epi64(v.v);
   #else
@@ -1470,27 +1470,27 @@ TLV_INLINE V abs(V v) {
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm256_and_ps(_mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF)), v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm256_and_pd(_mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL)), v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm256_abs_epi8(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm256_abs_epi16(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm256_abs_epi32(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   #ifdef HAS_AVX512DQ
   return _mm256_abs_epi64(v.v);
   #else
@@ -1505,113 +1505,113 @@ TLV_INLINE V abs(V v) {
 
 #if VEC_WIDTH >= 512
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm512_and_ps(_mm512_castsi512_ps(_mm512_set1_epi32(0x7FFFFFFF)), v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm512_and_pd(_mm512_castsi512_pd(_mm512_set1_epi64(0x7FFFFFFFFFFFFFFFLL)), v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm512_abs_epi8(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm512_abs_epi16(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm512_abs_epi32(v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V abs(V v) {
+VECOPS_VFUNC V abs(V v) {
   return _mm512_abs_epi64(v.v);
 }
 #endif // VEC_WIDTH >= 512
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>> && std::is_unsigned_v<TypeOf<T>>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return word::blend(default_v, m, v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm_mask_and_ps(default_v.v, m.v, _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF)), v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm_mask_and_pd(default_v.v, m.v, _mm_castsi128_pd(_mm_set1_epi64x(0x7FFFFFFFFFFFFFFFLL)), v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm_mask_abs_epi8(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm_mask_abs_epi16(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm_mask_abs_epi32(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm_mask_abs_epi64(default_v.v, m.v, v.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm256_mask_and_ps(default_v.v, m.v, _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF)), v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm256_mask_and_pd(default_v.v, m.v, _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFFLL)), v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm256_mask_abs_epi8(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm256_mask_abs_epi16(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm256_mask_abs_epi32(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm256_mask_abs_epi64(default_v.v, m.v, v.v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm512_mask_and_ps(default_v.v, m.v, _mm512_castsi512_ps(_mm512_set1_epi32(0x7FFFFFFF)), v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm512_mask_and_pd(default_v.v, m.v, _mm512_castsi512_pd(_mm512_set1_epi64(0x7FFFFFFFFFFFFFFFLL)), v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm512_mask_abs_epi8(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm512_mask_abs_epi16(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm512_mask_abs_epi32(default_v.v, m.v, v.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return _mm512_mask_abs_epi64(default_v.v, m.v, v.v);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
+VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return word::blend(default_v, m, word::abs(v));
 }
 #endif // HAS_AVX512DQ
@@ -1622,176 +1622,176 @@ TLV_INLINE V abs(V v, Mask<T> m, V default_v) {
 /* ************************************************************************** */
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmp_ps_mask(a.v, b.v, _CMP_EQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmp_pd_mask(a.v, b.v, _CMP_EQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmp_ps_mask(a.v, b.v, _CMP_EQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmp_pd_mask(a.v, b.v, _CMP_EQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm512_cmp_ps_mask(a.v, b.v, _CMP_EQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm512_cmp_pd_mask(a.v, b.v, _CMP_EQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm512_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm512_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm512_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm512_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm512_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm512_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm512_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm512_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_EQ);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_castps_si128(_mm_cmpeq_ps(a.v, b.v));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_castpd_si128(_mm_cmpeq_pd(a.v, b.v));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmpeq_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmpeq_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmpeq_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm_cmpeq_epi64(a.v, b.v);
 }
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_castps_si256(_mm256_cmp_ps(a.v, b.v, _CMP_EQ_OQ));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_castpd_si256(_mm256_cmp_pd(a.v, b.v, _CMP_EQ_OQ));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmpeq_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmpeq_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmpeq_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   return _mm256_cmpeq_epi64(a.v, b.v);
 }
 #endif // VEC_WIDTH >= 256
@@ -1803,130 +1803,130 @@ TLV_INLINE Mask<T> cmpeq(V a, V b) {
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_EQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_EQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_EQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_EQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_EQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_EQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_EQ);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return word::bit_and(m, word::cmpeq(a, b));
 }
 #endif // HAS_AVX512DQ
@@ -1937,148 +1937,148 @@ TLV_INLINE Mask<T> cmpeq(V a, V b, Mask<T> m) {
 /* ************************************************************************** */
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm_cmp_ps_mask(a.v, b.v, _CMP_NEQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm_cmp_pd_mask(a.v, b.v, _CMP_NEQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm256_cmp_ps_mask(a.v, b.v, _CMP_NEQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm256_cmp_pd_mask(a.v, b.v, _CMP_NEQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm256_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm256_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm256_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm256_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm256_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm256_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm256_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm256_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm512_cmp_ps_mask(a.v, b.v, _CMP_NEQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm512_cmp_pd_mask(a.v, b.v, _CMP_NEQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm512_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm512_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm512_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm512_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm512_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm512_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm512_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm512_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_NE);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm_castps_si128(_mm_cmpneq_ps(a.v, b.v));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm_castpd_si128(_mm_cmpneq_pd(a.v, b.v));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 32), TL_IF(is_int<TypeOf<T>>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return word::bit_not(V{word::cmpeq(a, b).v}).v; // TODO dabian
 }
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm256_castps_si256(_mm256_cmp_ps(a.v, b.v, _CMP_NEQ_OQ));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
   return _mm256_castpd_si256(_mm256_cmp_pd(a.v, b.v, _CMP_NEQ_OQ));
 }
 #endif // VEC_WIDTH >= 256
@@ -2090,130 +2090,130 @@ TLV_INLINE Mask<T> cmpne(V a, V b) {
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_NEQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_NEQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_NEQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_NEQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_NEQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_NEQ_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_NE);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   using Vi = Vec<ViewAs<Index<TypeOf<T>>, T>>;
   return word::bit_and(Vi{m.v}, Vi{word::cmpne(a, b).v}).v;
 }
@@ -2225,154 +2225,154 @@ TLV_INLINE Mask<T> cmpne(V a, V b, Mask<T> m) {
 /* ************************************************************************** */
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmp_ps_mask(a.v, b.v, _CMP_LT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmp_pd_mask(a.v, b.v, _CMP_LT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmp_ps_mask(a.v, b.v, _CMP_LT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmp_pd_mask(a.v, b.v, _CMP_LT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm512_cmp_ps_mask(a.v, b.v, _CMP_LT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm512_cmp_pd_mask(a.v, b.v, _CMP_LT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm512_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm512_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm512_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm512_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm512_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm512_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm512_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm512_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_LT);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_castps_si128(_mm_cmplt_ps(a.v, b.v));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_castpd_si128(_mm_cmplt_pd(a.v, b.v));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmpgt_epi8(b.v, a.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmpgt_epi16(b.v, a.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmpgt_epi32(b.v, a.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm_cmpgt_epi64(b.v, a.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>> && std::is_unsigned_v<TypeOf<T>>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   using Es = std::make_signed_t<TypeOf<T>>;
   constexpr Es val = 1uLL << (sizeof(Es) * CHAR_BIT - 1);
   ViewAs<Es, T> ts;
@@ -2385,27 +2385,27 @@ TLV_INLINE Mask<T> cmplt(V a, V b) {
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_castps_si256(_mm256_cmp_ps(a.v, b.v, _CMP_LT_OQ));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_castpd_si256(_mm256_cmp_pd(a.v, b.v, _CMP_LT_OQ));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmpgt_epi8(b.v, a.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmpgt_epi16(b.v, a.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmpgt_epi32(b.v, a.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
   return _mm256_cmpgt_epi64(b.v, a.v);
 }
 #endif // VEC_WIDTH >= 256
@@ -2417,130 +2417,130 @@ TLV_INLINE Mask<T> cmplt(V a, V b) {
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_LT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_LT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_LT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_LT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_LT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_LT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_LT);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return word::bit_and(m, word::cmplt(a, b));
 }
 #endif // HAS_AVX512DQ
@@ -2551,154 +2551,154 @@ TLV_INLINE Mask<T> cmplt(V a, V b, Mask<T> m) {
 /* ************************************************************************** */
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmp_ps_mask(a.v, b.v, _CMP_GT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmp_pd_mask(a.v, b.v, _CMP_GT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmp_ps_mask(a.v, b.v, _CMP_GT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmp_pd_mask(a.v, b.v, _CMP_GT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm512_cmp_ps_mask(a.v, b.v, _CMP_GT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm512_cmp_pd_mask(a.v, b.v, _CMP_GT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm512_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm512_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm512_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm512_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm512_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm512_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm512_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm512_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_NLE);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_castps_si128(_mm_cmpgt_ps(a.v, b.v));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_castpd_si128(_mm_cmpgt_pd(a.v, b.v));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmpgt_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmpgt_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmpgt_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm_cmpgt_epi64(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>> && std::is_unsigned_v<TypeOf<T>>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   using Es = std::make_signed_t<TypeOf<T>>;
   constexpr Es val = 1uLL << (sizeof(Es) * CHAR_BIT - 1);
   ViewAs<Es, T> ts;
@@ -2711,27 +2711,27 @@ TLV_INLINE Mask<T> cmpgt(V a, V b) {
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_castps_si256(_mm256_cmp_ps(a.v, b.v, _CMP_GT_OQ));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_castpd_si256(_mm256_cmp_pd(a.v, b.v, _CMP_GT_OQ));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmpgt_epi8(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmpgt_epi16(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmpgt_epi32(a.v, b.v);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
   return _mm256_cmpgt_epi64(a.v, b.v);
 }
 #endif // VEC_WIDTH >= 256
@@ -2743,130 +2743,130 @@ TLV_INLINE Mask<T> cmpgt(V a, V b) {
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_GT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_GT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_GT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_GT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_GT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_GT_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_NLE);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return word::bit_and(m, word::cmpgt(a, b));
 }
 #endif // HAS_AVX512DQ
@@ -2877,148 +2877,148 @@ TLV_INLINE Mask<T> cmpgt(V a, V b, Mask<T> m) {
 /* ************************************************************************** */
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm_cmp_ps_mask(a.v, b.v, _CMP_LE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm_cmp_pd_mask(a.v, b.v, _CMP_LE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm256_cmp_ps_mask(a.v, b.v, _CMP_LE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm256_cmp_pd_mask(a.v, b.v, _CMP_LE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm256_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm256_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm256_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm256_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm256_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm256_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm256_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm256_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm512_cmp_ps_mask(a.v, b.v, _CMP_LE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm512_cmp_pd_mask(a.v, b.v, _CMP_LE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm512_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm512_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm512_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm512_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm512_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm512_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm512_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm512_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_LE);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm_castps_si128(_mm_cmple_ps(a.v, b.v));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm_castpd_si128(_mm_cmple_pd(a.v, b.v));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return word::bit_not(V{word::cmpgt(a, b).v}).v; // TODO dabian
 }
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm256_castps_si256(_mm256_cmp_ps(a.v, b.v, _CMP_LE_OQ));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b) {
   return _mm256_castpd_si256(_mm256_cmp_pd(a.v, b.v, _CMP_LE_OQ));
 }
 #endif // VEC_WIDTH >= 256
@@ -3030,130 +3030,130 @@ TLV_INLINE Mask<T> cmple(V a, V b) {
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_LE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_LE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_LE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_LE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_LE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_LE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_LE);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return word::bit_and(m, word::cmple(a, b));
 }
 #endif // HAS_AVX512DQ
@@ -3164,148 +3164,148 @@ TLV_INLINE Mask<T> cmple(V a, V b, Mask<T> m) {
 /* ************************************************************************** */
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm_cmp_ps_mask(a.v, b.v, _CMP_GE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm_cmp_pd_mask(a.v, b.v, _CMP_GE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm256_cmp_ps_mask(a.v, b.v, _CMP_GE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm256_cmp_pd_mask(a.v, b.v, _CMP_GE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm256_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm256_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm256_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm256_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm256_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm256_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm256_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm256_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm512_cmp_ps_mask(a.v, b.v, _CMP_GE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm512_cmp_pd_mask(a.v, b.v, _CMP_GE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm512_cmp_epi8_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm512_cmp_epu8_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm512_cmp_epi16_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm512_cmp_epu16_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm512_cmp_epi32_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm512_cmp_epu32_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm512_cmp_epi64_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm512_cmp_epu64_mask(a.v, b.v, _MM_CMPINT_NLT);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm_castps_si128(_mm_cmpge_ps(a.v, b.v));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm_castpd_si128(_mm_cmpge_pd(a.v, b.v));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return word::bit_not(V{word::cmplt(a, b).v}).v; // TODO dabian
 }
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm256_castps_si256(_mm256_cmp_ps(a.v, b.v, _CMP_GE_OQ));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
   return _mm256_castpd_si256(_mm256_cmp_pd(a.v, b.v, _CMP_GE_OQ));
 }
 #endif // VEC_WIDTH >= 256
@@ -3317,130 +3317,130 @@ TLV_INLINE Mask<T> cmpge(V a, V b) {
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_GE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_GE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_GE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_GE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm256_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_ps_mask(m.v, a.v, b.v, _CMP_GE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_pd_mask(m.v, a.v, b.v, _CMP_GE_OQ);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int8_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi8_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint8_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu8_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi16_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint16_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu16_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi32_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint32_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu32_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epi64_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, uint64_t>)>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_epu64_mask(m.v, a.v, b.v, _MM_CMPINT_NLT);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return word::bit_and(m, word::cmpge(a, b));
 }
 #endif // HAS_AVX512DQ
@@ -3451,48 +3451,48 @@ TLV_INLINE Mask<T> cmpge(V a, V b, Mask<T> m) {
 /* ************************************************************************** */
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> isnan(V v) {
+VECOPS_VFUNC Mask<T> isnan(V v) {
   return _mm_cmp_ps_mask(v.v, v.v, _CMP_UNORD_Q);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> isnan(V v) {
+VECOPS_VFUNC Mask<T> isnan(V v) {
   return _mm_cmp_pd_mask(v.v, v.v, _CMP_UNORD_Q);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> isnan(V v) {
+VECOPS_VFUNC Mask<T> isnan(V v) {
   return _mm256_cmp_ps_mask(v.v, v.v, _CMP_UNORD_Q);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> isnan(V v) {
+VECOPS_VFUNC Mask<T> isnan(V v) {
   return _mm256_cmp_pd_mask(v.v, v.v, _CMP_UNORD_Q);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> isnan(V v) {
+VECOPS_VFUNC Mask<T> isnan(V v) {
   return _mm512_cmp_ps_mask(v.v, v.v, _CMP_UNORD_Q);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> isnan(V v) {
+VECOPS_VFUNC Mask<T> isnan(V v) {
   return _mm512_cmp_pd_mask(v.v, v.v, _CMP_UNORD_Q);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> isnan(V v) {
+VECOPS_VFUNC Mask<T> isnan(V v) {
   return _mm_castps_si128(_mm_cmpunord_ps(v.v, v.v));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> isnan(V v) {
+VECOPS_VFUNC Mask<T> isnan(V v) {
   return _mm_castpd_si128(_mm_cmpunord_pd(v.v, v.v));
 }
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> isnan(V v) {
+VECOPS_VFUNC Mask<T> isnan(V v) {
   return _mm256_castps_si256(_mm256_cmp_ps(v.v, v.v, _CMP_UNORD_Q));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> isnan(V v) {
+VECOPS_VFUNC Mask<T> isnan(V v) {
   return _mm256_castpd_si256(_mm256_cmp_pd(v.v, v.v, _CMP_UNORD_Q));
 }
 #endif // VEC_WIDTH >= 256
@@ -3500,34 +3500,34 @@ TLV_INLINE Mask<T> isnan(V v) {
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> isnan(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
   return _mm_mask_cmp_ps_mask(m.v, v.v, v.v, _CMP_UNORD_Q);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> isnan(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
   return _mm_mask_cmp_pd_mask(m.v, v.v, v.v, _CMP_UNORD_Q);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> isnan(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
   return _mm256_mask_cmp_ps_mask(m.v, v.v, v.v, _CMP_UNORD_Q);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> isnan(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
   return _mm256_mask_cmp_pd_mask(m.v, v.v, v.v, _CMP_UNORD_Q);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-TLV_INLINE Mask<T> isnan(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
   return _mm512_mask_cmp_ps_mask(m.v, v.v, v.v, _CMP_UNORD_Q);
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-TLV_INLINE Mask<T> isnan(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
   return _mm512_mask_cmp_pd_mask(m.v, v.v, v.v, _CMP_UNORD_Q);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-TLV_INLINE Mask<T> isnan(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
   return word::bit_and(m, word::isnan(v));
 }
 #endif // HAS_AVX512DQ
@@ -3537,32 +3537,32 @@ TLV_INLINE Mask<T> isnan(V v, Mask<T> m) {
 //                                Is Infinity                                 //
 /* ************************************************************************** */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>> || is_small_float<TypeOf<T>>)>
-TLV_INLINE Mask<T> isposinf(V v) {
+VECOPS_VFUNC Mask<T> isposinf(V v) {
   return word::cmpeq(v, word::fill(T(), TypeOf<T>(INFINITY)));
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>> || is_small_float<TypeOf<T>>)>
-TLV_INLINE Mask<T> isposinf(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isposinf(V v, Mask<T> m) {
   return word::cmpeq(v, word::fill(T(), TypeOf<T>(INFINITY)), m);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>> || is_small_float<TypeOf<T>>)>
-TLV_INLINE Mask<T> isneginf(V v) {
+VECOPS_VFUNC Mask<T> isneginf(V v) {
   return word::cmpeq(v, word::fill(T(), TypeOf<T>(-INFINITY)));
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>> || is_small_float<TypeOf<T>>)>
-TLV_INLINE Mask<T> isneginf(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isneginf(V v, Mask<T> m) {
   return word::cmpeq(v, word::fill(T(), TypeOf<T>(-INFINITY)), m);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>> || is_small_float<TypeOf<T>>)>
-TLV_INLINE Mask<T> isinf(V v) {
+VECOPS_VFUNC Mask<T> isinf(V v) {
   return word::isposinf(word::abs(v));
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>> || is_small_float<TypeOf<T>>)>
-TLV_INLINE Mask<T> isinf(V v, Mask<T> m) {
+VECOPS_VFUNC Mask<T> isinf(V v, Mask<T> m) {
   return word::isposinf(word::abs(v), m);
 }
 

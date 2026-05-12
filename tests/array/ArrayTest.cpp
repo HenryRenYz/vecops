@@ -8,7 +8,7 @@
 #include <vector>
 #include <numeric>
 #include <memory>
-#include "vecops/Array.h"
+#include "vecops/array/Array.h"
 
 using namespace vecops;
 using namespace vecops::array;

@@ -35,7 +35,7 @@
   #define _VEC_SIZE(type) (VEC_WIDTH / 8 / sizeof(type))
 #endif
 
-#define TLV_INLINE CT_ALWAYS_FORCEINLINE
+#define VECOPS_VFUNC VECOPS_ALWAYS_INLINE
 
 namespace vecops::vec {
 namespace details {
@@ -423,54 +423,54 @@ public:
   static_assert(std::is_same_v<VecType, typename WordDefs::VecType>);
 
   template <nint_t Index>
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto get(auto v) {
     static_assert(Index == 0, "Static index out of range");
     return v;
   }
 
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto get(auto v, nint_t index) {
-    CT_ASSERT(index == 0, "%lld !in 0..1", index);
+    VECOPS_ASSERT(index == 0, "%lld !in 0..1", index);
     return v;
   };
 
   template <nint_t Index>
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto set(auto v, auto u) {
     static_assert(Index == 0, "Static index out of range");
     return u;
   }
 
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto set(auto v, nint_t index, auto u) {
-    CT_ASSERT(index == 0, "%lld !in 0..1", index);
+    VECOPS_ASSERT(index == 0, "%lld !in 0..1", index);
     return u;
   };
 
   template <nint_t Index>
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto get_mask(auto m) {
     static_assert(Index == 0, "Static index out of range");
     return m;
   }
 
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto get_mask(auto m, nint_t index) {
-    CT_ASSERT(index == 0, "%lld !in 0..1", index);
+    VECOPS_ASSERT(index == 0, "%lld !in 0..1", index);
     return m;
   };
 
   template <nint_t Index>
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto set_mask(auto m, auto u) {
     static_assert(Index == 0, "Static index out of range");
     return u;
   }
 
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto set_mask(auto m, nint_t index, auto u) {
-    CT_ASSERT(index == 0, "%lld !in 0..1", index);
+    VECOPS_ASSERT(index == 0, "%lld !in 0..1", index);
     return u;
   };
 }; // class ScalarVecDefs
@@ -497,20 +497,20 @@ struct ScalarVecDefs<T, N, POW2, std::enable_if_t<(POW2 > 0)>> : BaseVecDefs<T, 
   using MaskType = ScalarArray<typename WordDefs::MaskType, num_words>;
 
   template <nint_t Index>
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto get(auto v) {
     static_assert(0 <= Index && Index < num_words, "Static index out of range");
     return v[Index];
   }
 
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto get(auto v, nint_t index) {
-    CT_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
+    VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
     return v[index];
   };
 
   template <nint_t Index>
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto set(auto v, auto u) {
     static_assert(0 <= Index && Index < num_words, "Static index out of range");
     auto r = v;
@@ -518,29 +518,29 @@ struct ScalarVecDefs<T, N, POW2, std::enable_if_t<(POW2 > 0)>> : BaseVecDefs<T, 
     return r;
   };
 
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto set(auto v, nint_t index, auto u) {
-    CT_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
+    VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
     auto r = v;
     r[index] = u;
     return r;
   };
 
   template <nint_t Index>
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto get_mask(auto m) {
     static_assert(0 <= Index && Index < num_words, "Static index out of range");
     return m[Index];
   }
 
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto get_mask(auto m, nint_t index) {
-    CT_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
+    VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
     return m[index];
   };
 
   template <nint_t Index>
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto set_mask(auto m, auto u) {
     static_assert(0 <= Index && Index < num_words, "Static index out of range");
     auto r = m;
@@ -548,9 +548,9 @@ struct ScalarVecDefs<T, N, POW2, std::enable_if_t<(POW2 > 0)>> : BaseVecDefs<T, 
     return r;
   }
 
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto set_mask(auto m, nint_t index, auto u) {
-    CT_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
+    VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
     auto r = m;
     r[index] = u;
     return r;
@@ -586,54 +586,54 @@ struct ScalarVecDefs<T, N, POW2, std::enable_if_t<(POW2 < 0)>> : BaseVecDefs<T, 
   using MaskType = typename WordDefs::MaskType;
 
   template <nint_t Index>
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto get(auto v) {
     static_assert(Index == 0, "Static index out of range");
     return v;
   }
 
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto get(auto v, nint_t index) {
-    CT_ASSERT(index == 0, "%lld !in 0..1", index);
+    VECOPS_ASSERT(index == 0, "%lld !in 0..1", index);
     return v;
   };
 
   template <nint_t Index>
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto set(auto v, auto u) {
     static_assert(Index == 0, "Static index out of range");
     return u;
   }
 
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto set(auto v, nint_t index, auto u) {
-    CT_ASSERT(index == 0, "%lld !in 0..1", index);
+    VECOPS_ASSERT(index == 0, "%lld !in 0..1", index);
     return u;
   };
 
   template <nint_t Index>
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto get_mask(auto m) {
     static_assert(Index == 0, "Static index out of range");
     return m;
   }
 
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto get_mask(auto m, nint_t index) {
-    CT_ASSERT(index == 0, "%lld !in 0..1", index);
+    VECOPS_ASSERT(index == 0, "%lld !in 0..1", index);
     return m;
   };
 
   template <nint_t Index>
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto set_mask(auto m, auto u) {
     static_assert(Index == 0, "Static index out of range");
     return u;
   }
 
-  TLV_INLINE CT_PURE
+  VECOPS_VFUNC VECOPS_PURE
   static auto set_mask(auto m, nint_t index, auto u) {
-    CT_ASSERT(index == 0, "%lld !in 0..1", index);
+    VECOPS_ASSERT(index == 0, "%lld !in 0..1", index);
     return u;
   };
 }; // class VecDefs
@@ -648,7 +648,7 @@ struct ScalarVecDefs<T, N, POW2, std::enable_if_t<(POW2 < 0)>> : BaseVecDefs<T, 
  * @return Number of words
  */
 template <typename T, nint_t N, int POW2>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static constexpr nint_t num_words(Tag<T, N, POW2> t = {}) {
   return VecDefs<T, N, POW2>::num_words;
 }
@@ -665,7 +665,7 @@ static constexpr nint_t num_words(Tag<T, N, POW2> t = {}) {
  * @return Number of elements per word
  */
 template <typename T, nint_t N, int POW2>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static constexpr nint_t word_size(Tag<T, N, POW2> t = {}) {
   return VecDefs<T, N, POW2>::word_size();
 }
@@ -680,7 +680,7 @@ static constexpr nint_t word_size(Tag<T, N, POW2> t = {}) {
  * @return Maximum elements per word
  */
 template <typename T, nint_t N, int POW2>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static constexpr nint_t max_word_size(Tag<T, N, POW2> t = {}) {
   return VecDefs<T, N, POW2>::max_word_size;
 }
@@ -697,7 +697,7 @@ static constexpr nint_t max_word_size(Tag<T, N, POW2> t = {}) {
  * @return Total number of elements
  */
 template <typename T, nint_t N, int POW2>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static constexpr nint_t size(Tag<T, N, POW2> t = {}) {
   return VecDefs<T, N, POW2>::size();
 }
@@ -712,7 +712,7 @@ static constexpr nint_t size(Tag<T, N, POW2> t = {}) {
  * @return true if scalable, false if fixed-size
  */
 template <typename T, nint_t N, int POW2>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static constexpr bool is_scalable(Tag<T, N, POW2> t = {}) {
   return VecDefs<T, N, POW2>::is_scalable;
 }
@@ -727,7 +727,7 @@ static constexpr bool is_scalable(Tag<T, N, POW2> t = {}) {
  * @return true if using scalar implementation, false if using SIMD
  */
 template <typename T, nint_t N, int POW2>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static constexpr bool is_default_impl(Tag<T, N, POW2> t = {}) {
   return VecDefs<T, N, POW2>::is_default_impl;
 }
@@ -742,7 +742,7 @@ static constexpr bool is_default_impl(Tag<T, N, POW2> t = {}) {
  * @return true if single-word, false if multi-word
  */
 template <typename T, nint_t N, int POW2>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static constexpr bool is_word_vec(Tag<T, N, POW2> t = {}) {
   return VecDefs<T, N, POW2>::is_word_vec;
 }
@@ -954,7 +954,7 @@ using ViewAs = std::conditional_t<TTag::is_runtime_size,
  * @return The specified word
  */
 template <nint_t Index, typename T, nint_t N, int P>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static typename VecDefs<T, N, P>::WordDefs::VecType get_word(Tag<T, N, P> t, Vec<Tag<T, N, P>> v) {
   return VecDefs<T, N, P>::template get<Index>(v);
 }
@@ -971,7 +971,7 @@ static typename VecDefs<T, N, P>::WordDefs::VecType get_word(Tag<T, N, P> t, Vec
  * @return The specified word
  */
 template <typename T, nint_t N, int P>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static typename VecDefs<T, N, P>::WordDefs::VecType get_word(Tag<T, N, P> t, Vec<Tag<T, N, P>> v, nint_t index) {
   return VecDefs<T, N, P>::get(v, index);
 }
@@ -989,7 +989,7 @@ static typename VecDefs<T, N, P>::WordDefs::VecType get_word(Tag<T, N, P> t, Vec
  * @return Vector with the word updated
  */
 template <nint_t Index, typename T, nint_t N, int P>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static Vec<Tag<T, N, P>> set_word(Tag<T, N, P> t, Vec<Tag<T, N, P>> v, typename VecDefs<T, N, P>::WordDefs::VecType u) {
   return VecDefs<T, N, P>::template set<Index>(v, u);
 }
@@ -1007,7 +1007,7 @@ static Vec<Tag<T, N, P>> set_word(Tag<T, N, P> t, Vec<Tag<T, N, P>> v, typename 
  * @return Vector with the word updated
  */
 template <typename T, nint_t N, int P>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static Vec<Tag<T, N, P>> set_word(Tag<T, N, P> t, Vec<Tag<T, N, P>> v, nint_t index, typename VecDefs<T, N, P>::WordDefs::VecType u) {
   return VecDefs<T, N, P>::set(v, index, u);
 }
@@ -1024,7 +1024,7 @@ static Vec<Tag<T, N, P>> set_word(Tag<T, N, P> t, Vec<Tag<T, N, P>> v, nint_t in
  * @return The specified mask word
  */
 template <nint_t Index, typename T, nint_t N, int P>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static typename VecDefs<T, N, P>::WordDefs::MaskType get_word_mask(Tag<T, N, P> t, Mask<Tag<T, N, P>> v) {
   return VecDefs<T, N, P>::template get_mask<Index>(v);
 }
@@ -1041,7 +1041,7 @@ static typename VecDefs<T, N, P>::WordDefs::MaskType get_word_mask(Tag<T, N, P> 
  * @return The specified mask word
  */
 template <typename T, nint_t N, int P>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static typename VecDefs<T, N, P>::WordDefs::MaskType get_word_mask(Tag<T, N, P> t, Mask<Tag<T, N, P>> v, nint_t index) {
   return VecDefs<T, N, P>::get_mask(v, index);
 }
@@ -1059,7 +1059,7 @@ static typename VecDefs<T, N, P>::WordDefs::MaskType get_word_mask(Tag<T, N, P> 
  * @return Mask with the word updated
  */
 template <nint_t Index, typename T, nint_t N, int P>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static Mask<Tag<T, N, P>> set_word_mask(Tag<T, N, P> t, Mask<Tag<T, N, P>> v, typename VecDefs<T, N, P>::WordDefs::MaskType u) {
   return VecDefs<T, N, P>::template set_mask<Index>(v, u);
 }
@@ -1077,7 +1077,7 @@ static Mask<Tag<T, N, P>> set_word_mask(Tag<T, N, P> t, Mask<Tag<T, N, P>> v, ty
  * @return Mask with the word updated
  */
 template <typename T, nint_t N, int P>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static Mask<Tag<T, N, P>> set_word_mask(Tag<T, N, P> t, Mask<Tag<T, N, P>> v, nint_t index, typename VecDefs<T, N, P>::WordDefs::MaskType u) {
   return VecDefs<T, N, P>::set_mask(v, index, u);
 }
@@ -1092,7 +1092,7 @@ static Mask<Tag<T, N, P>> set_word_mask(Tag<T, N, P> t, Mask<Tag<T, N, P>> v, ni
  * @return Tag for a single hardware word
  */
 template <typename T, nint_t N, int P>
-TLV_INLINE CT_PURE
+VECOPS_VFUNC VECOPS_PURE
 static constexpr auto word_tag(Tag<T, N, P> t) {
   return typename VecDefs<T, N, P>::WordDefs::TagType();
 }

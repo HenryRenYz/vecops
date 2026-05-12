@@ -1819,7 +1819,7 @@ TYPED_TEST(VecLoadStoreTest, ScalableTagFill) {
 // ============================================================================
 
 template <typename T>
-CT_NOINLINE
+VECOPS_NOINLINE
 static void vectorized_copy(const T* from, T* to, nint_t len) {
   ScalableTag<T> t;
   nint_t vec_size = size(t);

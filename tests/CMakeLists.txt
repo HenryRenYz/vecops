@@ -53,39 +53,44 @@ endfunction()
 
 
 # vecops-ArrayTest
-add_executable(vecops-ArrayTest ${CMAKE_CURRENT_SOURCE_DIR}/ArrayTest.cpp)
+add_executable(vecops-ArrayTest ${CMAKE_CURRENT_SOURCE_DIR}/array/ArrayTest.cpp)
 target_link_libraries(vecops-ArrayTest PRIVATE vecops gtest gtest_main)
 gtest_discover_tests(vecops-ArrayTest)
 
+# vecops-GemmTest
+add_executable(vecops-GemmTest ${CMAKE_CURRENT_SOURCE_DIR}/array/GemmTest.cpp)
+target_link_libraries(vecops-GemmTest PRIVATE vecops gtest gtest_main)
+gtest_discover_tests(vecops-GemmTest)
+
 # vecops-VecBaseTest
 add_multiarch_executable(vecops-VecBaseTest
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/VecBaseTest.cpp
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BaseTest.cpp
         ARCH x86-64
 )
 
 # vecops-VecScalarTest
 add_multiarch_executable(vecops-VecScalarTest
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/VecScalarTest.cpp
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ScalarTest.cpp
         ARCH x86-64
 )
 
 # vecops-VecLoadStoreTest
 add_multiarch_executable(vecops-VecLoadStoreTest
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/VecLoadStoreTest.cpp
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/LoadStoreTest.cpp
         ARCH x86-64 corei7-avx core-avx2 native
 )
 # vecops-VecArithTest
 add_multiarch_executable(vecops-VecArithTest
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/VecArithTest.cpp
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ArithTest.cpp
         ARCH x86-64 corei7-avx core-avx2 native
 )
 # vecops-VecConversionTest
 add_multiarch_executable(vecops-VecConversionTest
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/VecConversionTest.cpp
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ConversionTest.cpp
         ARCH x86-64 corei7-avx core-avx2 native
 )
 # vecops-VecShuffleTest
 add_multiarch_executable(vecops-VecShuffleTest
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/VecShuffleTest.cpp
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ShuffleTest.cpp
         ARCH x86-64 corei7-avx core-avx2 native
 )

@@ -33,7 +33,7 @@ void assertion_failed(const char* file, int line, const char* fn_name, const cha
   throw std::runtime_error(full);
   #else
   std::fputs(full.c_str(), stderr);
-  CT_BREAKPOINT;
+  VECOPS_BREAKPOINT;
   std::abort();
   #endif
 }
