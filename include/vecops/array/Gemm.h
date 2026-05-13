@@ -876,44 +876,44 @@ void gemm(
 
   int Mt = tiles_shape.template get<0>();
   int Nt = tiles_shape.template get<1>();
-  constexpr bool is_kTiling = TilesShape::Ndim >= 3;
+  static constexpr bool is_kTiling = TilesShape::Ndim >= 3;
   int Kt = K;
   if constexpr (is_kTiling) {
     Kt = tiles_shape.template get<2>();
   }
 
-  constexpr int kMt = Kernel::Mtile;
-  constexpr int kNt = Kernel::Ntile;
+  static constexpr int kMt = Kernel::Mtile;
+  static constexpr int kNt = Kernel::Ntile;
 
   VECOPS_ASSERT(Mt % kMt == 0,
                 "TilesShape M-tile must be divisible by Kernel::Mtile");
   VECOPS_ASSERT(Nt % kNt == 0,
                 "TilesShape N-tile must be divisible by Kernel::Ntile");
 
-  constexpr bool is_Apacked = ALayout::Ndim > 2;
-  constexpr bool is_Bpacked = BLayout::Ndim > 2;
+  static constexpr bool is_Apacked = ALayout::Ndim > 2;
+  static constexpr bool is_Bpacked = BLayout::Ndim > 2;
 
-  constexpr int ul_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 0>::value;
-  constexpr int ul_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 1>::value;
-  constexpr int ur_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_right)>, 0>::value;
-  constexpr int ur_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_right)>, 1>::value;
-  constexpr int ll_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_left)>, 0>::value;
-  constexpr int ll_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_left)>, 1>::value;
-  constexpr int lr_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_right)>, 0>::value;
-  constexpr int lr_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_right)>, 1>::value;
+  static constexpr int ul_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 0>::value;
+  static constexpr int ul_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 1>::value;
+  static constexpr int ur_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_right)>, 0>::value;
+  static constexpr int ur_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_right)>, 1>::value;
+  static constexpr int ll_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_left)>, 0>::value;
+  static constexpr int ll_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_left)>, 1>::value;
+  static constexpr int lr_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_right)>, 0>::value;
+  static constexpr int lr_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_right)>, 1>::value;
   static_assert(ul_m % lr_m == 0 && ur_m % lr_m == 0 && ll_m % lr_m == 0, "lr_m is not the smallest tile");
   static_assert(ul_n % lr_n == 0 && ur_n % lr_n == 0 && ll_n % lr_n == 0, "lr_n is not the smallest tile");
 
-  constexpr int ul_M = ul_m * kMt;
-  constexpr int ul_N = ul_n * kNt;
-  constexpr int ur_M = ur_m * kMt;
-  constexpr int ur_N = ur_n * kNt;
-  constexpr int ll_M = ll_m * kMt;
-  constexpr int ll_N = ll_n * kNt;
-  constexpr int lr_M = lr_m * kMt;
-  constexpr int lr_N = lr_n * kNt;
+  static constexpr int ul_M = ul_m * kMt;
+  static constexpr int ul_N = ul_n * kNt;
+  static constexpr int ur_M = ur_m * kMt;
+  static constexpr int ur_N = ur_n * kNt;
+  static constexpr int ll_M = ll_m * kMt;
+  static constexpr int ll_N = ll_n * kNt;
+  static constexpr int lr_M = lr_m * kMt;
+  static constexpr int lr_N = lr_n * kNt;
 
-  constexpr int kKt = Kernel::Ktile;
+  static constexpr int kKt = Kernel::Ktile;
 
   using TAcc = typename Kernel::TAccumulator;
 
@@ -928,8 +928,8 @@ void gemm(
   nint_t sc_m = C_layout.stride().template get<0>();
   nint_t sc_n = C_layout.stride().template get<1>();
 
-  constexpr bool c_is_row_major = details::StrideDimConst1<CStride, 1>::value;
-  constexpr bool buffer_bypass =
+  static constexpr bool c_is_row_major = details::StrideDimConst1<CStride, 1>::value;
+  static constexpr bool buffer_bypass =
       std::is_same_v<TC, TAcc> && c_is_row_major;
 
   TAcc * acc_buf = nullptr;
@@ -971,7 +971,12 @@ void gemm(
     }
   }
 
-  auto run_scheduler = [&](
+  nint_t a_step_M = is_Apacked ? (Mt / kMt) * A_layout.stride().template get<0>() : Mt * sa_m;
+  nint_t a_step_K = is_Apacked ? (Kt / kKt) * A_layout.stride().template get<1>() : Kt * sa_k;
+  nint_t b_step_N = is_Bpacked ? (Nt / kNt) * B_layout.stride().template get<0>() : Nt * sb_n;
+  nint_t b_step_K = is_Bpacked ? (Kt / kKt) * B_layout.stride().template get<1>() : Kt * sb_k;
+
+  auto run_scheduler = [kernel, C, C_layout, fn](
       int curM, int curN, int curK,
       int offM, int offN, int offK,
       auto accumulate, TAcc * acc_buf, int acc_ld,
@@ -983,14 +988,16 @@ void gemm(
     int m2 = (curM / ur_M) * ur_M;
     int n2 = (curN / ll_N) * ll_N;
 
-    auto call_tile = [&]<typename MType, typename NType>(
-        int m_loc, int n_loc, int tile_m, int tile_n)
-    {
-      TAcc * tile_buf = acc_buf
-          ? acc_buf + m_loc * nuint_t(acc_ld) + n_loc
-          : nullptr;
+    nint_t a_tile_s0 = a_layout.stride().template get<0>();
+    if constexpr (!is_Apacked) a_tile_s0 *= kMt;
+    nint_t b_tile_s0 = b_layout.stride().template get<0>();
+    if constexpr (!is_Bpacked) b_tile_s0 *= kNt;
 
-      auto make_sub_a_layout = [&] {
+    auto call_tile = [acc_ld, curK, a_layout, b_layout, kernel, C, C_layout, &fn, accumulate]<typename MType, typename NType>(
+        int m_global, int n_global, int tile_m, int tile_n,
+        const TA* a_loc, const TB* b_loc, TAcc* tile_buf)
+    {
+      auto make_sub_a_layout = [curK, a_layout, tile_m] {
         if constexpr (is_Apacked) {
           auto sub_a_s = make_shape(Int<MType::value>{}, curK,
                                     Int<Kernel::A_block_dim2>{},
@@ -1003,7 +1010,7 @@ void gemm(
         }
       };
 
-      auto make_sub_b_layout = [&] {
+      auto make_sub_b_layout = [curK, b_layout, tile_n] {
         if constexpr (is_Bpacked) {
           auto sub_b_s = make_shape(Int<NType::value>{}, curK,
                                     Int<Kernel::B_block_dim2>{},
@@ -1019,20 +1026,11 @@ void gemm(
       auto sub_a_l = make_sub_a_layout();
       auto sub_b_l = make_sub_b_layout();
 
-      nint_t a_sm_val = a_layout.stride().template get<0>();
-      nint_t b_sn_val = b_layout.stride().template get<0>();
-
-      nint_t a_tile_s0 = is_Apacked ? a_sm_val : a_sm_val * kMt;
-      nint_t b_tile_s0 = is_Bpacked ? b_sn_val : b_sn_val * kNt;
-
-      auto a_loc_ptr = a_ptr + (m_loc / kMt) * a_tile_s0;
-      auto b_loc_ptr = b_ptr + (n_loc / kNt) * b_tile_s0;
-
       kernel.run(
-          a_loc_ptr, sub_a_l,
-          b_loc_ptr, sub_b_l,
+          a_loc, sub_a_l,
+          b_loc, sub_b_l,
           tile_buf, acc_ld,
-          C, C_layout, offM + m_loc, offN + n_loc, fn,
+          C, C_layout, m_global, n_global, fn,
           tile_m, tile_n,
           accumulate);
     };
@@ -1041,39 +1039,80 @@ void gemm(
 
       using UlM = details::InteriorType<ul_m, is_Apacked, kMt>;
       using UlN = details::InteriorType<ul_n, is_Bpacked, kNt>;
-      for (int m = 0; m < m1; m += ul_M)
-        for (int n = 0; n < n1; n += ul_N)
-          call_tile.template operator()<UlM, UlN>(m, n, ul_M, ul_N);
+      {
+        nint_t buf_step_m = acc_buf ? ul_M * acc_ld : 0;
+        nint_t buf_step_n = acc_buf ? ul_N : 0;
+        TAcc* buf_m = acc_buf ? acc_buf : nullptr;
+        const TA* a_m = a_ptr;
+        for (int m = 0; m < m1; m += ul_M, a_m += ul_m * a_tile_s0, buf_m += buf_step_m) {
+          TAcc* buf_n = buf_m;
+          const TB* b_n = b_ptr;
+          for (int n = 0; n < n1; n += ul_N, b_n += ul_n * b_tile_s0, buf_n += buf_step_n)
+            call_tile.template operator()<UlM, UlN>(offM + m, offN + n, ul_M, ul_N, a_m, b_n, buf_n);
+        }
+      }
 
       using UrM = details::InteriorType<ur_m, is_Apacked, kMt>;
       using UrN = details::BoundaryType<ur_n, is_Bpacked>;
-      for (int n = n1; n < curN; n += ur_N) {
-        int tile_n = is_Bpacked ? ur_N : std::min(ur_N, curN - n);
-        for (int m = 0; m < m2; m += ur_M)
-          call_tile.template operator()<UrM, UrN>(m, n, ur_M, tile_n);
+      {
+        nint_t buf_step_n = acc_buf ? ur_N : 0;
+        nint_t buf_step_m = acc_buf ? ur_M * acc_ld : 0;
+        TAcc* buf_n = acc_buf ? acc_buf + n1 : nullptr;
+        const TB* b_n = b_ptr + (n1 / kNt) * b_tile_s0;
+        for (int n = n1; n < curN; n += ur_N, b_n += ur_n * b_tile_s0, buf_n += buf_step_n) {
+          int tile_n = is_Bpacked ? ur_N : std::min(ur_N, curN - n);
+          TAcc* buf_m = buf_n;
+          const TA* a_m = a_ptr;
+          for (int m = 0; m < m2; m += ur_M, a_m += ur_m * a_tile_s0, buf_m += buf_step_m)
+            call_tile.template operator()<UrM, UrN>(offM + m, offN + n, ur_M, tile_n, a_m, b_n, buf_m);
+        }
       }
 
       using LrM = details::BoundaryType<lr_m, is_Apacked>;
       using LrN = details::BoundaryType<lr_n, is_Bpacked>;
-      for (int n = n1; n < curN; n += lr_N) {
-        int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
-        for (int m = m2; m < m1; m += lr_M)
-          call_tile.template operator()<LrM, LrN>(m, n, lr_M, tile_n);
+      {
+        nint_t buf_step_n = acc_buf ? lr_N : 0;
+        nint_t buf_step_m = acc_buf ? lr_M * acc_ld : 0;
+        TAcc* buf_n = acc_buf ? acc_buf + n1 : nullptr;
+        const TB* b_n = b_ptr + (n1 / kNt) * b_tile_s0;
+        for (int n = n1; n < curN; n += lr_N, b_n += lr_n * b_tile_s0, buf_n += buf_step_n) {
+          int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
+          TAcc* buf_m = acc_buf ? buf_n + m2 * acc_ld : nullptr;
+          const TA* a_m = a_ptr + (m2 / kMt) * a_tile_s0;
+          for (int m = m2; m < m1; m += lr_M, a_m += lr_m * a_tile_s0, buf_m += buf_step_m)
+            call_tile.template operator()<LrM, LrN>(offM + m, offN + n, lr_M, tile_n, a_m, b_n, buf_m);
+        }
       }
 
       using LlM = details::BoundaryType<ll_m, is_Apacked>;
       using LlN = details::InteriorType<ll_n, is_Bpacked, kNt>;
-      for (int m = m1; m < curM; m += ll_M) {
-        int tile_m = is_Apacked ? ll_M : std::min(ll_M, curM - m);
-        for (int n = 0; n < n2; n += ll_N)
-          call_tile.template operator()<LlM, LlN>(m, n, tile_m, ll_N);
+      {
+        nint_t buf_step_m = acc_buf ? ll_M * acc_ld : 0;
+        nint_t buf_step_n = acc_buf ? ll_N : 0;
+        TAcc* buf_m = acc_buf ? acc_buf + m1 * acc_ld : nullptr;
+        const TA* a_m = a_ptr + (m1 / kMt) * a_tile_s0;
+        for (int m = m1; m < curM; m += ll_M, a_m += ll_m * a_tile_s0, buf_m += buf_step_m) {
+          int tile_m = is_Apacked ? ll_M : std::min(ll_M, curM - m);
+          TAcc* buf_n = buf_m;
+          const TB* b_n = b_ptr;
+          for (int n = 0; n < n2; n += ll_N, b_n += ll_n * b_tile_s0, buf_n += buf_step_n)
+            call_tile.template operator()<LlM, LlN>(offM + m, offN + n, tile_m, ll_N, a_m, b_n, buf_n);
+        }
       }
 
-      for (int m = m1; m < curM; m += lr_M) {
-        int tile_m_el = is_Apacked ? lr_M : std::min(lr_M, curM - m);
-        for (int n = n2; n < curN; n += lr_N) {
-          int tile_n_el = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
-          call_tile.template operator()<LrM, LrN>(m, n, tile_m_el, tile_n_el);
+      {
+        nint_t buf_step_m = acc_buf ? lr_M * acc_ld : 0;
+        nint_t buf_step_n = acc_buf ? lr_N : 0;
+        TAcc* buf_m = acc_buf ? acc_buf + m1 * acc_ld : nullptr;
+        const TA* a_m = a_ptr + (m1 / kMt) * a_tile_s0;
+        for (int m = m1; m < curM; m += lr_M, a_m += lr_m * a_tile_s0, buf_m += buf_step_m) {
+          int tile_m_el = is_Apacked ? lr_M : std::min(lr_M, curM - m);
+          TAcc* buf_n = acc_buf ? buf_m + n2 : nullptr;
+          const TB* b_n = b_ptr + (n2 / kNt) * b_tile_s0;
+          for (int n = n2; n < curN; n += lr_N, b_n += lr_n * b_tile_s0, buf_n += buf_step_n) {
+            int tile_n_el = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
+            call_tile.template operator()<LrM, LrN>(offM + m, offN + n, tile_m_el, tile_n_el, a_m, b_n, buf_n);
+          }
         }
       }
     } else {
@@ -1081,33 +1120,60 @@ void gemm(
 
       using UlM = details::InteriorType<ul_m, is_Apacked, kMt>;
       using UlN = details::InteriorType<ul_n, is_Bpacked, kNt>;
-      for (int m = 0; m < m1; m += ul_M)
-        for (int n = 0; n < n1; n += ul_N)
-          call_tile.template operator()<UlM, UlN>(m, n, ul_M, ul_N);
+      {
+        nint_t buf_step_m = acc_buf ? ul_M * acc_ld : 0;
+        nint_t buf_step_n = acc_buf ? ul_N : 0;
+        TAcc* buf_m = acc_buf ? acc_buf : nullptr;
+        const TA* a_m = a_ptr;
+        for (int m = 0; m < m1; m += ul_M, a_m += ul_m * a_tile_s0, buf_m += buf_step_m) {
+          TAcc* buf_n = buf_m;
+          const TB* b_n = b_ptr;
+          for (int n = 0; n < n1; n += ul_N, b_n += ul_n * b_tile_s0, buf_n += buf_step_n)
+            call_tile.template operator()<UlM, UlN>(offM + m, offN + n, ul_M, ul_N, a_m, b_n, buf_n);
+        }
+      }
 
       using LrM = details::BoundaryType<lr_m, is_Apacked>;
       using LrN = details::BoundaryType<lr_n, is_Bpacked>;
 
-      for (int m = 0; m < m1; m += lr_M)
-        for (int n = n1; n < curN; n += lr_N) {
+      {
+        nint_t buf_step_n = acc_buf ? lr_N : 0;
+        nint_t buf_step_m = acc_buf ? lr_M * acc_ld : 0;
+        TAcc* buf_n = acc_buf ? acc_buf + n1 : nullptr;
+        const TB* b_n = b_ptr + (n1 / kNt) * b_tile_s0;
+        for (int n = n1; n < curN; n += lr_N, b_n += lr_n * b_tile_s0, buf_n += buf_step_n) {
           int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
-          call_tile.template operator()<LrM, LrN>(m, n, lr_M, tile_n);
+          TAcc* buf_m = buf_n;
+          const TA* a_m = a_ptr;
+          for (int m = 0; m < m1; m += lr_M, a_m += lr_m * a_tile_s0, buf_m += buf_step_m)
+            call_tile.template operator()<LrM, LrN>(offM + m, offN + n, lr_M, tile_n, a_m, b_n, buf_m);
         }
+      }
 
-      for (int m = m1; m < curM; m += lr_M) {
-        int tile_m = is_Apacked ? lr_M : std::min(lr_M, curM - m);
-        for (int n = 0; n < curN; n += lr_N) {
-          int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
-          call_tile.template operator()<LrM, LrN>(m, n, tile_m, tile_n);
+      {
+        nint_t buf_step_m = acc_buf ? lr_M * acc_ld : 0;
+        nint_t buf_step_n = acc_buf ? lr_N : 0;
+        TAcc* buf_m = acc_buf ? acc_buf + m1 * acc_ld : nullptr;
+        const TA* a_m = a_ptr + (m1 / kMt) * a_tile_s0;
+        for (int m = m1; m < curM; m += lr_M, a_m += lr_m * a_tile_s0, buf_m += buf_step_m) {
+          int tile_m = is_Apacked ? lr_M : std::min(lr_M, curM - m);
+          TAcc* buf_n = buf_m;
+          const TB* b_n = b_ptr;
+          for (int n = 0; n < curN; n += lr_N, b_n += lr_n * b_tile_s0, buf_n += buf_step_n) {
+            int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
+            call_tile.template operator()<LrM, LrN>(offM + m, offN + n, tile_m, tile_n, a_m, b_n, buf_n);
+          }
         }
       }
     }
   };
 
   // L2 tiling loop
-  for (int mi = 0; mi < M; mi += Mt) {
+  const TA* A_m = A;
+  for (int mi = 0; mi < M; mi += Mt, A_m += a_step_M) {
     int curM = std::min(Mt, M - mi);
-    for (int ni = 0; ni < N; ni += Nt) {
+    const TB* B_n = B;
+    for (int ni = 0; ni < N; ni += Nt, B_n += b_step_N) {
       int curN = std::min(Nt, N - ni);
 
       TAcc * tile_acc = buffer_bypass
@@ -1122,28 +1188,24 @@ void gemm(
           return std::bool_constant<false>{};
       };
 
-      for (int ki = 0; ki < K; ki += Kt) {
+      const TA* A_mk = A_m;
+      const TB* B_nk = B_n;
+      for (int ki = 0; ki < K; ki += Kt, A_mk += a_step_K, B_nk += b_step_K) {
         int curK = std::min(Kt, K - ki);
         auto accumulate = make_accumulate(ki);
 
-        const TA * a_run, * b_run;
-
+        const TA * a_run;
         if constexpr (is_Apacked) {
-          int a_im = mi / kMt, a_ik = ki / kKt;
-          nint_t sa_im = A_layout.stride().template get<0>(), sa_ik = A_layout.stride().template get<1>();
-          a_run = A + a_im * sa_im + a_ik * sa_ik;
+          a_run = A_mk;
         } else {
-          auto a_base = A + mi * sa_m + ki * sa_k;
-          a_run = InA::prepare(a_base, curM, curK, sa_m, sa_k, a_gather, A_layout);
+          a_run = InA::prepare(A_mk, curM, curK, sa_m, sa_k, a_gather, A_layout);
         }
 
+        const TB * b_run;
         if constexpr (is_Bpacked) {
-          int b_in = ni / kNt, b_ik = ki / kKt;
-          nint_t sb_in = B_layout.stride().template get<0>(), sb_ik = B_layout.stride().template get<1>();
-          b_run = B + b_in * sb_in + b_ik * sb_ik;
+          b_run = B_nk;
         } else {
-          auto b_base = B + ni * sb_n + ki * sb_k;
-          b_run = InB::prepare(b_base, curN, curK, sb_n, sb_k, b_gather, B_layout);
+          b_run = InB::prepare(B_nk, curN, curK, sb_n, sb_k, b_gather, B_layout);
         }
 
         run_scheduler(curM, curN, curK, mi, ni, ki,
