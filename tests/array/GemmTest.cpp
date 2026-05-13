@@ -62,7 +62,9 @@ struct ScalarAMXBf16Kernel {
       TC* C, CLayout C_layout,
       const EpilogFn& fn,
       bool accumulate = false,
-      TAccumulator* acc_buffer = nullptr)
+      TAccumulator* acc_buffer = nullptr,
+      int acc_buf_ld = 0,
+      bool output_to_c = true)
   {
     int tile_m = A_layout.shape().template get<0>();
     int K = A_layout.shape().template get<1>();
@@ -75,15 +77,23 @@ struct ScalarAMXBf16Kernel {
     int ldc = C_layout.stride().template get<0>();
     int ldc_n = C_layout.stride().template get<1>();
 
+    int buf_ld = acc_buf_ld > 0 ? acc_buf_ld : tile_n;
+    bool write_buf = acc_buffer && !output_to_c;
+
     for (int m = 0; m < tile_m; ++m) {
       for (int n = 0; n < tile_n; ++n) {
-        float acc = accumulate ? static_cast<float>(C[m * ldc + n * ldc_n]) : 0.0f;
+        float acc = (accumulate && acc_buffer) ? acc_buffer[m * buf_ld + n]
+                   : (accumulate && !acc_buffer) ? static_cast<float>(C[m * ldc + n * ldc_n])
+                   : 0.0f;
         for (int k = 0; k < K; ++k) {
           float av = static_cast<float>(A[m * lda + k * ldk_a]);
           float bv = static_cast<float>(B[n * ldb + k * ldk_b]);
           acc += av * bv;
         }
-        C[m * ldc + n * ldc_n] = static_cast<TC>(fn(m, n, acc));
+        if (write_buf)
+          acc_buffer[m * buf_ld + n] = static_cast<TAccumulator>(acc);
+        else
+          C[m * ldc + n * ldc_n] = static_cast<TC>(fn(m, n, acc));
       }
     }
   }
@@ -114,7 +124,9 @@ struct ScalarSMEFp32Kernel {
       TC* C, CLayout C_layout,
       const EpilogFn& fn,
       bool accumulate = false,
-      TAccumulator* acc_buffer = nullptr)
+      TAccumulator* acc_buffer = nullptr,
+      int acc_buf_ld = 0,
+      bool output_to_c = true)
   {
     int tile_m = A_layout.shape().template get<0>();
     int K = A_layout.shape().template get<1>();
@@ -127,14 +139,22 @@ struct ScalarSMEFp32Kernel {
     int ldc = C_layout.stride().template get<0>();
     int ldc_n = C_layout.stride().template get<1>();
 
+    int buf_ld = acc_buf_ld > 0 ? acc_buf_ld : tile_n;
+    bool write_buf = acc_buffer && !output_to_c;
+
     for (int m = 0; m < tile_m; ++m) {
       for (int n = 0; n < tile_n; ++n) {
-        float acc = accumulate ? static_cast<float>(C[m * ldc + n * ldc_n]) : 0.0f;
+        float acc = (accumulate && acc_buffer) ? acc_buffer[m * buf_ld + n]
+                   : (accumulate && !acc_buffer) ? static_cast<float>(C[m * ldc + n * ldc_n])
+                   : 0.0f;
         for (int k = 0; k < K; ++k) {
           acc += static_cast<float>(A[m * lda + k * ldk_a]) *
                  static_cast<float>(B[n * ldb + k * ldk_b]);
         }
-        C[m * ldc + n * ldc_n] = static_cast<TC>(fn(m, n, acc));
+        if (write_buf)
+          acc_buffer[m * buf_ld + n] = static_cast<TAccumulator>(acc);
+        else
+          C[m * ldc + n * ldc_n] = static_cast<TC>(fn(m, n, acc));
       }
     }
   }
@@ -172,7 +192,8 @@ protected:
                 const std::vector<TA>& A_data,
                 const std::vector<TB>& B_data,
                 std::vector<TC>& C_data,
-                const auto& epilog)
+                const auto& epilog,
+                int Mt = 0, int Nt = 0, int Kt = 0)
   {
     auto shape_mnk = make_shape(M, N, K);
     auto a_layout = make_layout(make_shape(M, K), make_stride(K, 1));
@@ -181,8 +202,19 @@ protected:
 
     Kernel kernel;
     Scheduler scheduler{};
-    gemm(shape_mnk, A_data.data(), a_layout, B_data.data(), b_layout,
-         C_data.data(), c_layout, kernel, scheduler, epilog);
+    if (Mt > 0 && Kt > 0) {
+      auto ts = make_shape(Mt, Nt, Kt);
+      gemm(shape_mnk, A_data.data(), a_layout, B_data.data(), b_layout,
+           C_data.data(), c_layout, ts, kernel, scheduler, epilog);
+    } else if (Mt > 0) {
+      auto ts = make_shape(Mt, Nt);
+      gemm(shape_mnk, A_data.data(), a_layout, B_data.data(), b_layout,
+           C_data.data(), c_layout, ts, kernel, scheduler, epilog);
+    } else {
+      auto ts = make_shape(M, N);
+      gemm(shape_mnk, A_data.data(), a_layout, B_data.data(), b_layout,
+           C_data.data(), c_layout, ts, kernel, scheduler, epilog);
+    }
   }
 };
 
@@ -401,6 +433,114 @@ TEST_F(GemmTest, SchedulerConsistency) {
 
   for (int i = 0; i < M * N; ++i)
     EXPECT_FLOAT_EQ(C_max[i], C_min[i]) << "Scheduler mismatch at index " << i;
+}
+
+// ============================================================================
+// TilesShape Tests — 2D L2 tiling (M, N only)
+// ============================================================================
+
+TEST_F(GemmTest, SMEFp32_Tiles2D) {
+  constexpr int M = 120, N = 100, K = 128;
+  constexpr int Mt = 64, Nt = 64;
+  std::vector<float> A_data(M * K), B_data(K * N);
+  std::vector<float> C_data(M * N, 0.0f), C_ref(M * N, 0.0f);
+  fill_random(A_data); fill_random(B_data);
+  ref_gemm(M, N, K, A_data.data(), K, 1, B_data.data(), 1, N, C_ref.data(), N, 1);
+  run_gemm<ScalarSMEFp32Kernel, SchedulerMaxCases>(M, N, K, A_data, B_data, C_data, identity_epilog, Mt, Nt);
+  for (int i = 0; i < M * N; ++i)
+    EXPECT_NEAR(C_data[i], C_ref[i], 1e-5f) << "Mismatch at index " << i;
+}
+
+TEST_F(GemmTest, SMEFp32_Max_Tiles2D) {
+  constexpr int M = 200, N = 180, K = 256;
+  constexpr int Mt = 128, Nt = 64;
+  std::vector<float> A_data(M * K), B_data(K * N);
+  std::vector<float> C_data(M * N, 0.0f), C_ref(M * N, 0.0f);
+  fill_random(A_data); fill_random(B_data);
+  ref_gemm(M, N, K, A_data.data(), K, 1, B_data.data(), 1, N, C_ref.data(), N, 1);
+  run_gemm<ScalarSMEFp32Kernel, SchedulerMaxCases>(M, N, K, A_data, B_data, C_data, identity_epilog, Mt, Nt);
+  for (int i = 0; i < M * N; ++i)
+    EXPECT_NEAR(C_data[i], C_ref[i], 1e-5f) << "Mismatch at index " << i;
+}
+
+// ============================================================================
+// TilesShape Tests — 3D L2 tiling (M, N, K)
+// ============================================================================
+
+TEST_F(GemmTest, SMEFp32_Tiles3D_NoBuffer) {
+  constexpr int M = 64, N = 64, K = 128;
+  constexpr int Mt = 32, Nt = 64, Kt = 64;
+  std::vector<float> A_data(M * K), B_data(K * N);
+  std::vector<float> C_data(M * N, 0.0f), C_ref(M * N, 0.0f);
+  fill_random(A_data); fill_random(B_data);
+  ref_gemm(M, N, K, A_data.data(), K, 1, B_data.data(), 1, N, C_ref.data(), N, 1);
+  run_gemm<ScalarSMEFp32Kernel, SchedulerMinCases>(M, N, K, A_data, B_data, C_data, identity_epilog, Mt, Nt, Kt);
+  for (int i = 0; i < M * N; ++i)
+    EXPECT_NEAR(C_data[i], C_ref[i], 1e-5f) << "Mismatch at index " << i;
+}
+
+TEST_F(GemmTest, SMEFp32_Max_Tiles3D) {
+  constexpr int M = 128, N = 128, K = 256;
+  constexpr int Mt = 128, Nt = 64, Kt = 128;
+  std::vector<float> A_data(M * K), B_data(K * N);
+  std::vector<float> C_data(M * N, 0.0f), C_ref(M * N, 0.0f);
+  fill_random(A_data); fill_random(B_data);
+  ref_gemm(M, N, K, A_data.data(), K, 1, B_data.data(), 1, N, C_ref.data(), N, 1);
+  run_gemm<ScalarSMEFp32Kernel, SchedulerMaxCases>(M, N, K, A_data, B_data, C_data, identity_epilog, Mt, Nt, Kt);
+  for (int i = 0; i < M * N; ++i)
+    EXPECT_NEAR(C_data[i], C_ref[i], 1e-5f) << "Mismatch at index " << i;
+}
+
+// ============================================================================
+// TilesShape Tests — 3D with non-contiguous C (buffer path)
+// ============================================================================
+
+TEST_F(GemmTest, SMEFp32_Tiles3D_NonContigC) {
+  constexpr int M = 64, N = 64, K = 128;
+  constexpr int Mt = 64, Nt = 32, Kt = 64;
+  std::vector<float> A_data(M * K), B_data(K * N);
+  std::vector<float> C_data(M * N, 0.0f), C_ref(M * N, 0.0f);
+  fill_random(A_data); fill_random(B_data);
+  ref_gemm(M, N, K, A_data.data(), K, 1, B_data.data(), 1, N, C_ref.data(), N, 1);
+
+  auto shape_mnk = make_shape(M, N, K);
+  auto a_layout = make_layout(make_shape(M, K), make_stride(K, 1));
+  auto b_layout = make_layout(make_shape(N, K), make_stride(1, N));
+  auto c_layout = make_layout(make_shape(M, N), make_stride(1, M));
+  auto ts = make_shape(Mt, Nt, Kt);
+  ScalarSMEFp32Kernel kernel;
+  SchedulerMinCases scheduler{};
+  gemm(shape_mnk, A_data.data(), a_layout, B_data.data(), b_layout,
+       C_data.data(), c_layout, ts, kernel, scheduler, identity_epilog);
+
+  for (int m = 0; m < M; ++m)
+    for (int n = 0; n < N; ++n)
+      EXPECT_NEAR(C_data[m + n * M], C_ref[m * N + n], 1e-5f)
+          << "Mismatch at (" << m << "," << n << ")";
+}
+
+TEST_F(GemmTest, SMEFp32_Tiles3D_NonContigC_MaxCases) {
+  constexpr int M = 80, N = 64, K = 128;
+  constexpr int Mt = 64, Nt = 64, Kt = 64;
+  std::vector<float> A_data(M * K), B_data(K * N);
+  std::vector<float> C_data(M * N, 0.0f), C_ref(M * N, 0.0f);
+  fill_random(A_data); fill_random(B_data);
+  ref_gemm(M, N, K, A_data.data(), K, 1, B_data.data(), 1, N, C_ref.data(), N, 1);
+
+  auto shape_mnk = make_shape(M, N, K);
+  auto a_layout = make_layout(make_shape(M, K), make_stride(K, 1));
+  auto b_layout = make_layout(make_shape(N, K), make_stride(1, N));
+  auto c_layout = make_layout(make_shape(M, N), make_stride(1, M));
+  auto ts = make_shape(Mt, Nt, Kt);
+  ScalarSMEFp32Kernel kernel;
+  SchedulerMaxCases scheduler{};
+  gemm(shape_mnk, A_data.data(), a_layout, B_data.data(), b_layout,
+       C_data.data(), c_layout, ts, kernel, scheduler, identity_epilog);
+
+  for (int m = 0; m < M; ++m)
+    for (int n = 0; n < N; ++n)
+      EXPECT_NEAR(C_data[m + n * M], C_ref[m * N + n], 1e-5f)
+          << "Mismatch at (" << m << "," << n << ")";
 }
 
 // ============================================================================
