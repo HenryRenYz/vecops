@@ -870,8 +870,9 @@ void gemm(
 
   int Mt = tiles_shape.template get<0>();
   int Nt = tiles_shape.template get<1>();
+  constexpr bool is_kTiling = TilesShape::Ndim >= 3;
   int Kt = K;
-  if constexpr (TilesShape::Ndim >= 3) {
+  if constexpr (is_kTiling) {
     Kt = tiles_shape.template get<2>();
   }
 
@@ -979,303 +980,133 @@ void gemm(
     nint_t a_sm = a_layout.stride().template get<0>();
     nint_t b_sn = b_layout.stride().template get<0>();
 
-    auto call_tile = [&]<typename MType, typename NType>(
+    auto call_tile = [&, a_sm, b_sn]<typename MType, typename NType>(
         int m_loc, int n_loc, int tile_m, int tile_n)
     {
       TAcc * tile_buf = acc_buf
-          ? acc_buf + static_cast<nuint_t>(m_loc) * static_cast<nuint_t>(acc_ld)
-                     + static_cast<nuint_t>(n_loc)
+          ? acc_buf + m_loc * nuint_t(acc_ld) + n_loc
           : nullptr;
 
-      if constexpr (is_Apacked && is_Bpacked) {
-        auto sub_a_s = make_shape(Int<MType::value>{}, curK,
-                                  Int<Kernel::A_block_dim2>{},
-                                  Int<Kernel::A_block_dim3>{});
-        auto sub_b_s = make_shape(Int<NType::value>{}, curK,
-                                  Int<Kernel::B_block_dim2>{},
-                                  Int<Kernel::B_block_dim3>{});
-        auto sub_a_l = make_layout(sub_a_s, a_layout.stride());
-        auto sub_b_l = make_layout(sub_b_s, b_layout.stride());
-        if (accumulate)
-          kernel.template run<true>(
-              a_ptr + (m_loc / kMt) * a_sm, sub_a_l,
-              b_ptr + (n_loc / kNt) * b_sn, sub_b_l,
-              tile_buf, acc_ld,
-              C, C_layout, offM + m_loc, offN + n_loc, fn,
-              tile_m, tile_n);
-        else
-          kernel.template run<false>(
-              a_ptr + (m_loc / kMt) * a_sm, sub_a_l,
-              b_ptr + (n_loc / kNt) * b_sn, sub_b_l,
-              tile_buf, acc_ld,
-              C, C_layout, offM + m_loc, offN + n_loc, fn,
-              tile_m, tile_n);
-      } else if constexpr (is_Apacked) {
-        using SubBS = details::SubShape2D<Shape<Any, Any>, NType, Any>;
-        auto sub_a_s = make_shape(Int<MType::value>{}, curK,
-                                  Int<Kernel::A_block_dim2>{},
-                                  Int<Kernel::A_block_dim3>{});
-        auto sub_b_s = SubBS::create(tile_n, curK);
-        auto sub_a_l = make_layout(sub_a_s, a_layout.stride());
-        auto sub_b_l = make_layout(sub_b_s, b_layout.stride());
-        if (accumulate)
-          kernel.template run<true>(
-              a_ptr + (m_loc / kMt) * a_sm, sub_a_l,
-              b_ptr + n_loc * b_sn, sub_b_l,
-              tile_buf, acc_ld,
-              C, C_layout, offM + m_loc, offN + n_loc, fn,
-              tile_m, tile_n);
-        else
-          kernel.template run<false>(
-              a_ptr + (m_loc / kMt) * a_sm, sub_a_l,
-              b_ptr + n_loc * b_sn, sub_b_l,
-              tile_buf, acc_ld,
-              C, C_layout, offM + m_loc, offN + n_loc, fn,
-              tile_m, tile_n);
-      } else if constexpr (is_Bpacked) {
-        using SubAS = details::SubShape2D<Shape<Any, Any>, MType, Any>;
-        auto sub_a_s = SubAS::create(tile_m, curK);
-        auto sub_b_s = make_shape(Int<NType::value>{}, curK,
-                                  Int<Kernel::B_block_dim2>{},
-                                  Int<Kernel::B_block_dim3>{});
-        auto sub_a_l = make_layout(sub_a_s, a_layout.stride());
-        auto sub_b_l = make_layout(sub_b_s, b_layout.stride());
-        if (accumulate)
-          kernel.template run<true>(
-              a_ptr + m_loc * a_sm, sub_a_l,
-              b_ptr + (n_loc / kNt) * b_sn, sub_b_l,
-              tile_buf, acc_ld,
-              C, C_layout, offM + m_loc, offN + n_loc, fn,
-              tile_m, tile_n);
-        else
-          kernel.template run<false>(
-              a_ptr + m_loc * a_sm, sub_a_l,
-              b_ptr + (n_loc / kNt) * b_sn, sub_b_l,
-              tile_buf, acc_ld,
-              C, C_layout, offM + m_loc, offN + n_loc, fn,
-              tile_m, tile_n);
-      } else {
-        using SubAS = details::SubShape2D<Shape<Any, Any>, MType, Any>;
-        using SubBS = details::SubShape2D<Shape<Any, Any>, NType, Any>;
-        auto sub_a_s = SubAS::create(tile_m, curK);
-        auto sub_b_s = SubBS::create(tile_n, curK);
-        auto sub_a_l = make_layout(sub_a_s, a_layout.stride());
-        auto sub_b_l = make_layout(sub_b_s, b_layout.stride());
-        if (accumulate)
-          kernel.template run<true>(
-              a_ptr + m_loc * a_sm, sub_a_l,
-              b_ptr + n_loc * b_sn, sub_b_l,
-              tile_buf, acc_ld,
-              C, C_layout, offM + m_loc, offN + n_loc, fn,
-              tile_m, tile_n);
-        else
-          kernel.template run<false>(
-              a_ptr + m_loc * a_sm, sub_a_l,
-              b_ptr + n_loc * b_sn, sub_b_l,
-              tile_buf, acc_ld,
-              C, C_layout, offM + m_loc, offN + n_loc, fn,
-              tile_m, tile_n);
-      }
+      auto make_sub_a_layout = [&] {
+        if constexpr (is_Apacked) {
+          auto sub_a_s = make_shape(Int<MType::value>{}, curK,
+                                    Int<Kernel::A_block_dim2>{},
+                                    Int<Kernel::A_block_dim3>{});
+          return make_layout(sub_a_s, a_layout.stride());
+        } else {
+          using SubAS = details::SubShape2D<Shape<Any, Any>, MType, Any>;
+          auto sub_a_s = SubAS::create(tile_m, curK);
+          return make_layout(sub_a_s, a_layout.stride());
+        }
+      };
+
+      auto make_sub_b_layout = [&] {
+        if constexpr (is_Bpacked) {
+          auto sub_b_s = make_shape(Int<NType::value>{}, curK,
+                                    Int<Kernel::B_block_dim2>{},
+                                    Int<Kernel::B_block_dim3>{});
+          return make_layout(sub_b_s, b_layout.stride());
+        } else {
+          using SubBS = details::SubShape2D<Shape<Any, Any>, NType, Any>;
+          auto sub_b_s = SubBS::create(tile_n, curK);
+          return make_layout(sub_b_s, b_layout.stride());
+        }
+      };
+
+      auto sub_a_l = make_sub_a_layout();
+      auto sub_b_l = make_sub_b_layout();
+
+      auto a_loc_ptr = is_Apacked
+          ? a_ptr + (m_loc / kMt) * a_sm
+          : a_ptr + m_loc * a_sm;
+      auto b_loc_ptr = is_Bpacked
+          ? b_ptr + (n_loc / kNt) * b_sn
+          : b_ptr + n_loc * b_sn;
+
+      if (accumulate)
+        kernel.template run<true>(
+            a_loc_ptr, sub_a_l,
+            b_loc_ptr, sub_b_l,
+            tile_buf, acc_ld,
+            C, C_layout, offM + m_loc, offN + n_loc, fn,
+            tile_m, tile_n);
+      else
+        kernel.template run<false>(
+            a_loc_ptr, sub_a_l,
+            b_loc_ptr, sub_b_l,
+            tile_buf, acc_ld,
+            C, C_layout, offM + m_loc, offN + n_loc, fn,
+            tile_m, tile_n);
     };
 
     if constexpr (std::is_same_v<Scheduler, SchedulerMaxCases>) {
       // ── M packing status determines MType (element count → tile count) ──
       // ── N packing status determines NType (element count → tile count) ──
 
-      if constexpr (is_Apacked && is_Bpacked) {
-        for (int m = 0; m < m1; m += ul_M)
-          for (int n = 0; n < n1; n += ul_N)
-            call_tile.template operator()<Int<ul_m>, Int<ul_n>>(m, n, ul_M, ul_N);
-        for (int n = n1; n < curN; n += ur_N) {
-          int tile_n_el = std::min(ur_N, curN - n);
-          for (int m = 0; m < m2; m += ur_M)
-            call_tile.template operator()<Int<ur_m>, Int<ur_n>>(m, n, ur_M, tile_n_el);
-        }
-        for (int n = n1; n < curN; n += lr_N) {
-          int tile_n_el = std::min(lr_N, curN - n);
-          for (int m = m2; m < m1; m += lr_M)
-            call_tile.template operator()<Int<lr_m>, Int<lr_n>>(m, n, lr_M, tile_n_el);
-        }
-        for (int m = m1; m < curM; m += ll_M) {
-          int tile_m_el = std::min(ll_M, curM - m);
-          for (int n = 0; n < n2; n += ll_N)
-            call_tile.template operator()<Int<ll_m>, Int<ll_n>>(m, n, tile_m_el, ll_N);
-        }
-        for (int m = m1; m < curM; m += lr_M) {
-          int tile_m_el = std::min(lr_M, curM - m);
-          for (int n = n2; n < curN; n += lr_N) {
-            int tile_n_el = std::min(lr_N, curN - n);
-            call_tile.template operator()<Int<lr_m>, Int<lr_n>>(m, n, tile_m_el, tile_n_el);
-          }
-        }
-      } else if constexpr (is_Apacked) {
-        for (int m = 0; m < m1; m += ul_M)
-          for (int n = 0; n < n1; n += ul_N)
-            call_tile.template operator()<Int<ul_m>, Int<ul_N>>(m, n, ul_M, ul_N);
-        for (int n = n1; n < curN; n += ur_N) {
-          int tile_n = std::min(ur_N, curN - n);
-          for (int m = 0; m < m2; m += ur_M)
-            call_tile.template operator()<Int<ur_m>, Any>(m, n, ur_M, tile_n);
-        }
-        for (int n = n1; n < curN; n += lr_N) {
-          int tile_n = std::min(lr_N, curN - n);
-          for (int m = m2; m < m1; m += lr_M)
-            call_tile.template operator()<Int<lr_m>, Any>(m, n, lr_M, tile_n);
-        }
-        for (int m = m1; m < curM; m += ll_M) {
-          int tile_m = std::min(ll_M, curM - m);
-          for (int n = 0; n < n2; n += ll_N)
-            call_tile.template operator()<Int<ll_m>, Int<ll_N>>(m, n, tile_m, ll_N);
-        }
-        for (int m = m1; m < curM; m += lr_M) {
-          int tile_m = std::min(lr_M, curM - m);
-          for (int n = n2; n < curN; n += lr_N) {
-            int tile_n = std::min(lr_N, curN - n);
-            call_tile.template operator()<Int<lr_m>, Any>(m, n, tile_m, tile_n);
-          }
-        }
-      } else if constexpr (is_Bpacked) {
-        for (int m = 0; m < m1; m += ul_M)
-          for (int n = 0; n < n1; n += ul_N)
-            call_tile.template operator()<Int<ul_M>, Int<ul_n>>(m, n, ul_M, ul_N);
-        for (int n = n1; n < curN; n += ur_N) {
-          int tile_n_el = std::min(ur_N, curN - n);
-          for (int m = 0; m < m2; m += ur_M)
-            call_tile.template operator()<Int<ur_M>, Int<ur_n>>(m, n, ur_M, tile_n_el);
-        }
-        for (int n = n1; n < curN; n += lr_N) {
-          int tile_n_el = std::min(lr_N, curN - n);
-          for (int m = m2; m < m1; m += lr_M)
-            call_tile.template operator()<Int<lr_M>, Int<lr_n>>(m, n, lr_M, tile_n_el);
-        }
-        for (int m = m1; m < curM; m += ll_M) {
-          int tile_m = std::min(ll_M, curM - m);
-          for (int n = 0; n < n2; n += ll_N)
-            call_tile.template operator()<Any, Int<ll_n>>(m, n, tile_m, ll_N);
-        }
-        for (int m = m1; m < curM; m += lr_M) {
-          int tile_m = std::min(lr_M, curM - m);
-          for (int n = n2; n < curN; n += lr_N) {
-            int tile_n_el = std::min(lr_N, curN - n);
-            call_tile.template operator()<Any, Int<lr_n>>(m, n, tile_m, tile_n_el);
-          }
-        }
-      } else {
-        for (int m = 0; m < m1; m += ul_M)
-          for (int n = 0; n < n1; n += ul_N)
-            call_tile.template operator()<Int<ul_M>, Int<ul_N>>(m, n, ul_M, ul_N);
-        for (int n = n1; n < curN; n += ur_N) {
-          int tile_n = std::min(ur_N, curN - n);
-          for (int m = 0; m < m2; m += ur_M)
-            call_tile.template operator()<Int<ur_M>, Any>(m, n, ur_M, tile_n);
-        }
-        for (int n = n1; n < curN; n += lr_N) {
-          int tile_n = std::min(lr_N, curN - n);
-          for (int m = m2; m < m1; m += lr_M)
-            call_tile.template operator()<Int<lr_M>, Any>(m, n, lr_M, tile_n);
-        }
-        for (int m = m1; m < curM; m += ll_M) {
-          int tile_m = std::min(ll_M, curM - m);
-          for (int n = 0; n < n2; n += ll_N)
-            call_tile.template operator()<Any, Int<ll_N>>(m, n, tile_m, ll_N);
-        }
-        for (int m = m1; m < curM; m += lr_M) {
-          int tile_m = std::min(lr_M, curM - m);
-          for (int n = n2; n < curN; n += lr_N) {
-            int tile_n = std::min(lr_N, curN - n);
-            call_tile.template operator()<Any, Any>(m, n, tile_m, tile_n);
-          }
+      using UlM = std::conditional_t<is_Apacked, Int<ul_m>, Int<ul_M>>;
+      using UlN = std::conditional_t<is_Bpacked, Int<ul_n>, Int<ul_N>>;
+      for (int m = 0; m < m1; m += ul_M)
+        for (int n = 0; n < n1; n += ul_N)
+          call_tile.template operator()<UlM, UlN>(m, n, ul_M, ul_N);
+
+      using UrM = std::conditional_t<is_Apacked, Int<ur_m>, Int<ur_M>>;
+      using UrN = std::conditional_t<is_Bpacked, Int<ur_n>, Any>;
+      for (int n = n1; n < curN; n += ur_N) {
+        int tile_n = is_Bpacked ? ur_N : std::min(ur_N, curN - n);
+        for (int m = 0; m < m2; m += ur_M)
+          call_tile.template operator()<UrM, UrN>(m, n, ur_M, tile_n);
+      }
+
+      using LrM = std::conditional_t<is_Apacked, Int<lr_m>, Any>;
+      using LrN = std::conditional_t<is_Bpacked, Int<lr_n>, Any>;
+      for (int n = n1; n < curN; n += lr_N) {
+        int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
+        for (int m = m2; m < m1; m += lr_M)
+          call_tile.template operator()<LrM, LrN>(m, n, lr_M, tile_n);
+      }
+
+      using LlM = std::conditional_t<is_Apacked, Int<ll_m>, Any>;
+      using LlN = std::conditional_t<is_Bpacked, Int<ll_n>, Int<ll_N>>;
+      for (int m = m1; m < curM; m += ll_M) {
+        int tile_m = is_Apacked ? ll_M : std::min(ll_M, curM - m);
+        for (int n = 0; n < n2; n += ll_N)
+          call_tile.template operator()<LlM, LlN>(m, n, tile_m, ll_N);
+      }
+
+      for (int m = m1; m < curM; m += lr_M) {
+        int tile_m_el = is_Apacked ? lr_M : std::min(lr_M, curM - m);
+        for (int n = n2; n < curN; n += lr_N) {
+          int tile_n_el = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
+          call_tile.template operator()<LrM, LrN>(m, n, tile_m_el, tile_n_el);
         }
       }
     } else {
       static_assert(std::is_same_v<Scheduler, SchedulerMinCases>);
 
-      if constexpr (is_Apacked) {
-        for (int m = 0; m < m1; m += ul_M)
-          for (int n = 0; n < n1; n += ul_N)
-            call_tile.template operator()<Int<ul_m>, Int<ul_N>>(m, n, ul_M, ul_N);
-      } else {
-        for (int m = 0; m < m1; m += ul_M)
-          for (int n = 0; n < n1; n += ul_N)
-            call_tile.template operator()<Int<ul_M>, Int<ul_N>>(m, n, ul_M, ul_N);
-      }
+      for (int m = 0; m < m1; m += ul_M)
+        for (int n = 0; n < n1; n += ul_N)
+          call_tile.template operator()<Int<ul_M>, Int<ul_N>>(m, n, ul_M, ul_N);
 
-      if constexpr (is_Apacked && is_Bpacked) {
-        for (int m = 0; m < m1; m += lr_M)
-          for (int n = n1; n < curN; n += lr_N) {
-            int tile_n = std::min(lr_N, curN - n);
-            call_tile.template operator()<Int<lr_m>, Int<lr_n>>(m, n, lr_M, tile_n);
-          }
-      } else if constexpr (is_Apacked) {
-        for (int m = 0; m < m1; m += lr_M)
-          for (int n = n1; n < curN; n += lr_N) {
-            int tile_n = std::min(lr_N, curN - n);
-            call_tile.template operator()<Int<lr_m>, Any>(m, n, lr_M, tile_n);
-          }
-      } else if constexpr (is_Bpacked) {
-        for (int m = 0; m < m1; m += lr_M)
-          for (int n = n1; n < curN; n += lr_N) {
-            int tile_n = std::min(lr_N, curN - n);
-            call_tile.template operator()<Any, Int<lr_n>>(m, n, lr_M, tile_n);
-          }
-      } else {
-        for (int m = 0; m < m1; m += lr_M)
-          for (int n = n1; n < curN; n += lr_N) {
-            int tile_n = std::min(lr_N, curN - n);
-            call_tile.template operator()<Any, Any>(m, n, lr_M, tile_n);
-          }
-      }
+      using LrM = std::conditional_t<is_Apacked, Int<lr_m>, Any>;
+      using LrN = std::conditional_t<is_Bpacked, Int<lr_n>, Any>;
 
-      if constexpr (is_Apacked && is_Bpacked) {
-        for (int m = m1; m < curM; m += lr_M) {
-          int tile_m = std::min(lr_M, curM - m);
-          for (int n = 0; n < curN; n += lr_N) {
-            int tile_n = std::min(lr_N, curN - n);
-            call_tile.template operator()<Int<lr_m>, Int<lr_n>>(m, n, tile_m, tile_n);
-          }
+      for (int m = 0; m < m1; m += lr_M)
+        for (int n = n1; n < curN; n += lr_N) {
+          int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
+          call_tile.template operator()<LrM, LrN>(m, n, lr_M, tile_n);
         }
-      } else if constexpr (is_Apacked) {
-        for (int m = m1; m < curM; m += lr_M) {
-          int tile_m = std::min(lr_M, curM - m);
-          for (int n = 0; n < curN; n += lr_N) {
-            int tile_n = std::min(lr_N, curN - n);
-            call_tile.template operator()<Int<lr_m>, Any>(m, n, tile_m, tile_n);
-          }
-        }
-      } else if constexpr (is_Bpacked) {
-        for (int m = m1; m < curM; m += lr_M) {
-          int tile_m = std::min(lr_M, curM - m);
-          for (int n = 0; n < curN; n += lr_N) {
-            int tile_n = std::min(lr_N, curN - n);
-            call_tile.template operator()<Any, Int<lr_n>>(m, n, tile_m, tile_n);
-          }
-        }
-      } else {
-        for (int m = m1; m < curM; m += lr_M) {
-          int tile_m = std::min(lr_M, curM - m);
-          for (int n = 0; n < curN; n += lr_N) {
-            int tile_n = std::min(lr_N, curN - n);
-            call_tile.template operator()<Any, Any>(m, n, tile_m, tile_n);
-          }
+
+      for (int m = m1; m < curM; m += lr_M) {
+        int tile_m = is_Apacked ? lr_M : std::min(lr_M, curM - m);
+        for (int n = 0; n < curN; n += lr_N) {
+          int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
+          call_tile.template operator()<LrM, LrN>(m, n, tile_m, tile_n);
         }
       }
     }
   };
 
-  auto prepare_packed_A = [&](int mi, int ki) -> const TA* {
-    int a_im = mi / kMt;
-    int a_ik = ki / kKt;
-    return A + a_im * A_layout.stride().template get<0>()
-             + a_ik * A_layout.stride().template get<1>();
-  };
-
-  auto prepare_packed_B = [&](int ni, int ki) -> const TB* {
-    int b_in = ni / kNt;
-    int b_ik = ki / kKt;
-    return B + b_in * B_layout.stride().template get<0>()
-             + b_ik * B_layout.stride().template get<1>();
-  };
-
+  // L2 tiling loop
   for (int mi = 0; mi < M; mi += Mt) {
     int curM = std::min(Mt, M - mi);
     for (int ni = 0; ni < N; ni += Nt) {
@@ -1290,51 +1121,32 @@ void gemm(
         int curK = std::min(Kt, K - ki);
         bool accumulate = (ki > 0);
 
-        const TA * a_base;
-        const TB * b_base;
-        const TA * a_run;
-        const TB * b_run;
+        const TA * a_run, * b_run;
 
-        if constexpr (is_Apacked && is_Bpacked) {
-          a_base = prepare_packed_A(mi, ki);
-          b_base = prepare_packed_B(ni, ki);
-          a_run = a_base;
-          b_run = b_base;
-          run_scheduler(curM, curN, curK, mi, ni, ki,
-                        accumulate, tile_acc, acc_ld,
-                        a_run, A_layout, b_run, B_layout);
-        } else if constexpr (is_Apacked) {
-          a_base = prepare_packed_A(mi, ki);
-          a_run = a_base;
-          b_base = B + ni * sb_n + ki * sb_k;
-          auto b_lay = B_layout;
-          b_run = InB::prepare(b_base, curN, curK, sb_n, sb_k, b_gather, b_lay);
-          run_scheduler(curM, curN, curK, mi, ni, ki,
-                        accumulate, tile_acc, acc_ld,
-                        a_run, A_layout, b_run, b_lay);
-        } else if constexpr (is_Bpacked) {
-          a_base = A + mi * sa_m + ki * sa_k;
-          b_base = prepare_packed_B(ni, ki);
-          auto a_lay = A_layout;
-          a_run = InA::prepare(a_base, curM, curK, sa_m, sa_k, a_gather, a_lay);
-          b_run = b_base;
-          run_scheduler(curM, curN, curK, mi, ni, ki,
-                        accumulate, tile_acc, acc_ld,
-                        a_run, a_lay, b_run, B_layout);
+        if constexpr (is_Apacked) {
+          int a_im = mi / kMt, a_ik = ki / kKt;
+          nint_t sa_im = A_layout.stride().template get<0>(), sa_ik = A_layout.stride().template get<1>();
+          a_run = A + a_im * sa_im + a_ik * sa_ik;
         } else {
-          a_base = A + mi * sa_m + ki * sa_k;
-          b_base = B + ni * sb_n + ki * sb_k;
-          auto a_lay = A_layout;
-          auto b_lay = B_layout;
-          a_run = InA::prepare(a_base, curM, curK, sa_m, sa_k, a_gather, a_lay);
-          b_run = InB::prepare(b_base, curN, curK, sb_n, sb_k, b_gather, b_lay);
-          run_scheduler(curM, curN, curK, mi, ni, ki,
-                        accumulate, tile_acc, acc_ld,
-                        a_run, a_lay, b_run, b_lay);
+          auto a_base = A + mi * sa_m + ki * sa_k;
+          a_run = InA::prepare(a_base, curM, curK, sa_m, sa_k, a_gather, A_layout);
         }
+
+        if constexpr (is_Bpacked) {
+          int b_in = ni / kNt, b_ik = ki / kKt;
+          nint_t sb_in = B_layout.stride().template get<0>(), sb_ik = B_layout.stride().template get<1>();
+          b_run = B + b_in * sb_in + b_ik * sb_ik;
+        } else {
+          auto b_base = B + ni * sb_n + ki * sb_k;
+          b_run = InB::prepare(b_base, curN, curK, sb_n, sb_k, b_gather, B_layout);
+        }
+
+        run_scheduler(curM, curN, curK, mi, ni, ki,
+                      accumulate, tile_acc, acc_ld,
+                      a_run, A_layout, b_run, B_layout);
       }
 
-      if (!buffer_bypass) {
+      if constexpr (!buffer_bypass) {
         Out::drain(tile_acc, acc_ld, curM, curN,
                    C, sc_m, sc_n, mi, ni, fn);
       }
