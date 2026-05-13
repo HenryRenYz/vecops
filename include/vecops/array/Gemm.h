@@ -276,6 +276,12 @@ nint_t numel_of(const Meta& m, std::index_sequence<Is...>) {
   return x;
 }
 
+template <int N, bool IsPacked, int TileSize>
+using InteriorType = std::conditional_t<IsPacked, Int<N>, Int<N * TileSize>>;
+
+template <int N, bool IsPacked>
+using BoundaryType = std::conditional_t<IsPacked, Int<N>, Any>;
+
 } // namespace details
 
 
@@ -939,9 +945,9 @@ void gemm(
   TB * b_gather = nullptr;
 
   if constexpr (is_Apacked || is_Bpacked) {
-    VECOPS_ASSERT(Mt == kMt, "When A or B is packed, tiles_shape Mt must equal Kernel Mtile");
-    VECOPS_ASSERT(Nt == kNt, "When A or B is packed, tiles_shape Nt must equal Kernel Ntile");
-    VECOPS_ASSERT(Kt % kKt == 0, "When A or B is packed, Kt must be multiple of Kernel Ktile");
+    VECOPS_ASSERT(Mt % kMt == 0, "Mt must be divisible by Kernel Mtile");
+    VECOPS_ASSERT(Nt % kNt == 0, "Nt must be divisible by Kernel Ntile");
+    VECOPS_ASSERT(Kt % kKt == 0, "Kt must be multiple of Kernel Ktile");
   }
 
   nint_t sa_m = 0, sa_k = 0, sb_n = 0, sb_k = 0;
@@ -977,10 +983,7 @@ void gemm(
     int m2 = (curM / ur_M) * ur_M;
     int n2 = (curN / ll_N) * ll_N;
 
-    nint_t a_sm = a_layout.stride().template get<0>();
-    nint_t b_sn = b_layout.stride().template get<0>();
-
-    auto call_tile = [&, a_sm, b_sn]<typename MType, typename NType>(
+    auto call_tile = [&]<typename MType, typename NType>(
         int m_loc, int n_loc, int tile_m, int tile_n)
     {
       TAcc * tile_buf = acc_buf
@@ -1016,12 +1019,14 @@ void gemm(
       auto sub_a_l = make_sub_a_layout();
       auto sub_b_l = make_sub_b_layout();
 
-      auto a_loc_ptr = is_Apacked // constexpr
-          ? a_ptr + (m_loc / kMt) * a_sm
-          : a_ptr + m_loc * a_sm;
-      auto b_loc_ptr = is_Bpacked // constexpr
-          ? b_ptr + (n_loc / kNt) * b_sn
-          : b_ptr + n_loc * b_sn;
+      nint_t a_sm_val = a_layout.stride().template get<0>();
+      nint_t b_sn_val = b_layout.stride().template get<0>();
+
+      nint_t a_tile_s0 = is_Apacked ? a_sm_val : a_sm_val * kMt;
+      nint_t b_tile_s0 = is_Bpacked ? b_sn_val : b_sn_val * kNt;
+
+      auto a_loc_ptr = a_ptr + (m_loc / kMt) * a_tile_s0;
+      auto b_loc_ptr = b_ptr + (n_loc / kNt) * b_tile_s0;
 
       kernel.run(
           a_loc_ptr, sub_a_l,
@@ -1033,33 +1038,31 @@ void gemm(
     };
 
     if constexpr (std::is_same_v<Scheduler, SchedulerMaxCases>) {
-      // ── M packing status determines MType (element count → tile count) ──
-      // ── N packing status determines NType (element count → tile count) ──
 
-      using UlM = std::conditional_t<is_Apacked, Int<ul_m>, Int<ul_M>>;
-      using UlN = std::conditional_t<is_Bpacked, Int<ul_n>, Int<ul_N>>;
+      using UlM = details::InteriorType<ul_m, is_Apacked, kMt>;
+      using UlN = details::InteriorType<ul_n, is_Bpacked, kNt>;
       for (int m = 0; m < m1; m += ul_M)
         for (int n = 0; n < n1; n += ul_N)
           call_tile.template operator()<UlM, UlN>(m, n, ul_M, ul_N);
 
-      using UrM = std::conditional_t<is_Apacked, Int<ur_m>, Int<ur_M>>;
-      using UrN = std::conditional_t<is_Bpacked, Int<ur_n>, Any>;
+      using UrM = details::InteriorType<ur_m, is_Apacked, kMt>;
+      using UrN = details::BoundaryType<ur_n, is_Bpacked>;
       for (int n = n1; n < curN; n += ur_N) {
         int tile_n = is_Bpacked ? ur_N : std::min(ur_N, curN - n);
         for (int m = 0; m < m2; m += ur_M)
           call_tile.template operator()<UrM, UrN>(m, n, ur_M, tile_n);
       }
 
-      using LrM = std::conditional_t<is_Apacked, Int<lr_m>, Any>;
-      using LrN = std::conditional_t<is_Bpacked, Int<lr_n>, Any>;
+      using LrM = details::BoundaryType<lr_m, is_Apacked>;
+      using LrN = details::BoundaryType<lr_n, is_Bpacked>;
       for (int n = n1; n < curN; n += lr_N) {
         int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
         for (int m = m2; m < m1; m += lr_M)
           call_tile.template operator()<LrM, LrN>(m, n, lr_M, tile_n);
       }
 
-      using LlM = std::conditional_t<is_Apacked, Int<ll_m>, Any>;
-      using LlN = std::conditional_t<is_Bpacked, Int<ll_n>, Int<ll_N>>;
+      using LlM = details::BoundaryType<ll_m, is_Apacked>;
+      using LlN = details::InteriorType<ll_n, is_Bpacked, kNt>;
       for (int m = m1; m < curM; m += ll_M) {
         int tile_m = is_Apacked ? ll_M : std::min(ll_M, curM - m);
         for (int n = 0; n < n2; n += ll_N)
@@ -1076,12 +1079,14 @@ void gemm(
     } else {
       static_assert(std::is_same_v<Scheduler, SchedulerMinCases>);
 
+      using UlM = details::InteriorType<ul_m, is_Apacked, kMt>;
+      using UlN = details::InteriorType<ul_n, is_Bpacked, kNt>;
       for (int m = 0; m < m1; m += ul_M)
         for (int n = 0; n < n1; n += ul_N)
-          call_tile.template operator()<Int<ul_M>, Int<ul_N>>(m, n, ul_M, ul_N);
+          call_tile.template operator()<UlM, UlN>(m, n, ul_M, ul_N);
 
-      using LrM = std::conditional_t<is_Apacked, Int<lr_m>, Any>;
-      using LrN = std::conditional_t<is_Bpacked, Int<lr_n>, Any>;
+      using LrM = details::BoundaryType<lr_m, is_Apacked>;
+      using LrN = details::BoundaryType<lr_n, is_Bpacked>;
 
       for (int m = 0; m < m1; m += lr_M)
         for (int n = n1; n < curN; n += lr_N) {

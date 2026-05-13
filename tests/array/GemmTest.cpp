@@ -702,6 +702,22 @@ TEST_F(GemmTest, SMEFp32_Tiling2D) {
   }
 }
 
+TEST_F(GemmTest, AMXBf16_Tiling2D) {
+  struct { int M,N,K, Mt,Nt; } t[] = {
+    {335, 34, 605, 320, 32}, {512, 512, 512, 256, 256},
+    {256, 32, 256, 128, 32}, {32, 32, 64, 32, 32},
+    {16, 16, 16, 16, 16},   {64, 16, 64, 64, 16},
+    {354, 445, 156, 336, 432}, {32, 29, 32, 32, 16},
+    {416, 128, 40, 256, 128},
+  };
+  for (auto [M,N,K, Mt,Nt] : t) {
+    run_gemm_test<ScalarAMXBf16Kernel, SchedulerMaxCases>(
+        M, N, K, K,1, 1,N, N,1,
+        lt::A_row(M,K), lt::B_col(N,K), lt::C_row(M,N),
+        TILE_2D(Mt,Nt), identity_epilog, 1e-2f);
+  }
+}
+
 // ============================================================================
 // Tiling — 3D outer tiles (M, N, K) with K accumulation
 // ============================================================================
@@ -721,6 +737,24 @@ TEST_F(GemmTest, SMEFp32_Tiling3D) {
         M, N, K, K,1, 1,N, N,1,
         lt::A_row(M,K), lt::B_col(N,K), lt::C_row(M,N),
         TILE_3D(Mt,Nt,Kt), identity_epilog, 1e-5f);
+  }
+}
+
+TEST_F(GemmTest, AMXBf16_Tiling3D) {
+  struct { int M,N,K, Mt,Nt,Kt; } t[] = {
+    {512, 512, 512, 256, 256, 128},
+    {256, 32, 256, 128, 32, 128},
+    {32, 32, 64, 32, 32, 32},
+    {64, 16, 64, 64, 16, 32},
+    {325, 173, 776, 320, 160, 256},
+    {416, 128, 40, 256, 128, 32},
+    {32, 29, 32, 32, 16, 16},
+  };
+  for (auto [M,N,K, Mt,Nt,Kt] : t) {
+    run_gemm_test<ScalarAMXBf16Kernel, SchedulerMaxCases>(
+        M, N, K, K,1, 1,N, N,1,
+        lt::A_row(M,K), lt::B_col(N,K), lt::C_row(M,N),
+        TILE_3D(Mt,Nt,Kt), identity_epilog, 1e-2f);
   }
 }
 
@@ -770,6 +804,15 @@ TEST_F(GemmTest, SMEFp32_BRowMajor) {
   }
 }
 
+TEST_F(GemmTest, AMXBf16_BRowMajor) {
+  for (auto [M,N,K] : g_small_sizes) {
+    run_gemm_test<ScalarAMXBf16Kernel, SchedulerMaxCases>(
+        M, N, K, K,1, K,1, N,1,
+        lt::A_row(M,K), lt::B_row(N,K), lt::C_row(M,N),
+        BASIC_TILE(M,N), identity_epilog, 1e-2f);
+  }
+}
+
 // ============================================================================
 // Layout variation — A column-major (runtime gather path)
 // ============================================================================
@@ -783,6 +826,15 @@ TEST_F(GemmTest, SMEFp32_AColMajor) {
   }
 }
 
+TEST_F(GemmTest, AMXBf16_AColMajor) {
+  for (auto [M,N,K] : g_small_sizes) {
+    run_gemm_test<ScalarAMXBf16Kernel, SchedulerMaxCases>(
+        M, N, K, 1,M, 1,N, N,1,
+        lt::A_col(M,K), lt::B_col(N,K), lt::C_row(M,N),
+        BASIC_TILE(M,N), identity_epilog, 1e-2f);
+  }
+}
+
 // ============================================================================
 // Layout variation — C column-major (non-contiguous output)
 // ============================================================================
@@ -793,6 +845,16 @@ TEST_F(GemmTest, SMEFp32_NonContigC) {
         M, N, K, K,1, 1,N, 1,M,
         lt::A_row(M,K), lt::B_col(N,K), lt::C_col(M,N),
         BASIC_TILE(M,N), identity_epilog, 1e-5f,
+        /*c_is_col_major=*/true);
+  }
+}
+
+TEST_F(GemmTest, AMXBf16_NonContigC) {
+  for (auto [M,N,K] : g_small_sizes) {
+    run_gemm_test<ScalarAMXBf16Kernel, SchedulerMaxCases>(
+        M, N, K, K,1, 1,N, 1,M,
+        lt::A_row(M,K), lt::B_col(N,K), lt::C_col(M,N),
+        BASIC_TILE(M,N), identity_epilog, 1e-2f,
         /*c_is_col_major=*/true);
   }
 }
@@ -814,6 +876,23 @@ TEST_F(GemmTest, SMEFp32_AllColMajor) {
         M, N, K, 1,M, K,1, 1,M,
         lt::A_col(M,K), lt::B_row(N,K), lt::C_col(M,N),
         TILE_3D(Mt,Nt,Kt), identity_epilog, 1e-5f,
+        /*c_is_col_major=*/true);
+  }
+}
+
+TEST_F(GemmTest, AMXBf16_AllColMajor) {
+  struct { int M,N,K, Mt,Nt,Kt; } t[] = {
+    {64, 16, 64, 64, 16, 32},
+    {32, 32, 64, 32, 32, 32},
+    {65, 32, 64, 64, 32, 32},
+    {256, 32, 256, 256, 32, 128},
+    {512, 512, 512, 256, 256, 128},
+  };
+  for (auto [M,N,K, Mt,Nt,Kt] : t) {
+    run_gemm_test<ScalarAMXBf16Kernel, SchedulerMaxCases>(
+        M, N, K, 1,M, K,1, 1,M,
+        lt::A_col(M,K), lt::B_row(N,K), lt::C_col(M,N),
+        TILE_3D(Mt,Nt,Kt), identity_epilog, 1e-2f,
         /*c_is_col_major=*/true);
   }
 }
@@ -864,6 +943,25 @@ TEST_F(GemmTest, SMEFp32_CT_ColMixed) {
   run.template operator()<14, 36, 16>();
 }
 
+TEST_F(GemmTest, AMXBf16_CT_ColMixed) {
+  auto run = [this]<int M, int N, int K>() {
+    constexpr int Mt = ((M + 15) / 16) * 16;
+    constexpr int Nt = ((N + 15) / 16) * 16;
+    run_gemm_test<ScalarAMXBf16Kernel, SchedulerMaxCases>(
+        M, N, K, 1,M, K,1, 1,M,
+        Layout(Shape<Int<M>,Int<K>>{}, Stride<Int<1>,Int<M>>{}),
+        Layout(Shape<Int<N>,Int<K>>{}, Stride<Int<K>,Int<1>>{}),
+        Layout(Shape<Int<M>,Int<N>>{}, Stride<Int<1>,Int<M>>{}),
+        Shape<Int<Mt>,Int<Nt>,Int<32>>{},
+        identity_epilog, 1e-2f,
+        /*c_is_col_major=*/true);
+  };
+  run.template operator()<16, 32, 16>();
+  run.template operator()<32, 32, 64>();
+  run.template operator()<64, 16, 64>();
+  run.template operator()<13, 127, 63>();
+}
+
 TEST_F(GemmTest, AMXBf16_CT) {
   auto run = [this]<int M, int N, int K>() {
     constexpr int Mt = ((M + 15) / 16) * 16;
@@ -878,8 +976,12 @@ TEST_F(GemmTest, AMXBf16_CT) {
   };
   run.template operator()<16, 32, 16>();
   run.template operator()<3, 5, 7>();
+  run.template operator()<32, 29, 32>();
   run.template operator()<32, 32, 64>();
   run.template operator()<64, 16, 64>();
+  run.template operator()<31, 62, 31>();
+  run.template operator()<13, 32, 16>();
+  run.template operator()<5, 45, 8>();
   run.template operator()<10, 27, 64>();
 }
 
