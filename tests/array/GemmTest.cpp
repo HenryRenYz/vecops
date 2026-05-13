@@ -16,6 +16,19 @@ using namespace vecops;
 using namespace vecops::array;
 
 // ============================================================================
+// Helper: initialize accumulator based on AccumulateT type
+//   bool → runtime ternary; bool_constant<false> → compile-time DCE
+// ============================================================================
+
+template <typename AccumulateT, typename TAcc>
+VECOPS_ALWAYS_INLINE float init_acc(const TAcc* acc, int idx, AccumulateT acc_flag) {
+    if constexpr (std::is_same_v<std::decay_t<AccumulateT>, std::bool_constant<false>>)
+        return 0.0f;
+    else
+        return acc_flag ? static_cast<float>(acc[idx]) : 0.0f;
+}
+
+// ============================================================================
 // Reference GEMM
 // ============================================================================
 
@@ -60,7 +73,7 @@ struct ScalarAMXBf16Kernel {
   static constexpr Shape<Int<1>, Int<4>> shape_lower_left {};
   static constexpr Shape<Int<1>, Int<1>> shape_lower_right {};
 
-  template <bool Accumulate,
+  template <typename AccumulateT,
             typename TA, typename ALayout,
             typename TB, typename BLayout,
             typename TC, typename CLayout,
@@ -72,7 +85,8 @@ struct ScalarAMXBf16Kernel {
       TC* C, CLayout C_layout,
       int offM, int offN,
       const EpilogFn& fn,
-      int validM, int validN)
+      int validM, int validN,
+      AccumulateT accumulate)
       const
   {
     constexpr bool A_packed = (ALayout::Ndim == 4);
@@ -120,7 +134,7 @@ struct ScalarAMXBf16Kernel {
 
     for (int m = 0; m < validM; ++m) {
       for (int n = 0; n < validN; ++n) {
-        float val = Accumulate ? static_cast<float>(acc[m * acc_ld + n]) : 0.0f;
+        float val = init_acc(acc, m * acc_ld + n, accumulate);
         for (int k = 0; k < curK; ++k) {
           float av = static_cast<float>(A[nint_t(m)*lda + nint_t(k)*ldk_a]);
           float bv;
@@ -229,7 +243,7 @@ struct ScalarAMXBf16Kernel {
 struct ScalarSMEFp32Kernel {
   static constexpr int Mtile = 16;
   static constexpr int Ntile = 16;
-  static constexpr int Ktile = 16;
+  static constexpr int Ktile = 1;
   using TAccumulator = float;
 
   static constexpr bool pack_A_M_on_dim2 = false;
@@ -244,7 +258,7 @@ struct ScalarSMEFp32Kernel {
   static constexpr Shape<Int<1>, Int<4>> shape_lower_left {};
   static constexpr Shape<Int<1>, Int<1>> shape_lower_right {};
 
-  template <bool Accumulate,
+  template <typename AccumulateT,
             typename TA, typename ALayout,
             typename TB, typename BLayout,
             typename TC, typename CLayout,
@@ -256,7 +270,8 @@ struct ScalarSMEFp32Kernel {
       TC* C, CLayout C_layout,
       int offM, int offN,
       const EpilogFn& fn,
-      int validM, int validN)
+      int validM, int validN,
+      AccumulateT accumulate)
       const
   {
     constexpr bool A_packed = (ALayout::Ndim == 4);
@@ -291,7 +306,7 @@ struct ScalarSMEFp32Kernel {
 
     for (int m = 0; m < validM; ++m) {
       for (int n = 0; n < validN; ++n) {
-        float val = Accumulate ? static_cast<float>(acc[m * acc_ld + n]) : 0.0f;
+        float val = init_acc(acc, m * acc_ld + n, accumulate);
         for (int k = 0; k < curK; ++k)
           val += static_cast<float>(A[nint_t(m)*lda + nint_t(k)*ldk_a]) *
                  static_cast<float>(B[nint_t(n)*ldb + nint_t(k)*ldk_b]);

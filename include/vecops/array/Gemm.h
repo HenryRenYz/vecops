@@ -968,7 +968,7 @@ void gemm(
   auto run_scheduler = [&](
       int curM, int curN, int curK,
       int offM, int offN, int offK,
-      bool accumulate, TAcc * acc_buf, int acc_ld,
+      auto accumulate, TAcc * acc_buf, int acc_ld,
       const TA * a_ptr, const auto& a_layout,
       const TB * b_ptr, const auto& b_layout)
   {
@@ -1016,27 +1016,20 @@ void gemm(
       auto sub_a_l = make_sub_a_layout();
       auto sub_b_l = make_sub_b_layout();
 
-      auto a_loc_ptr = is_Apacked
+      auto a_loc_ptr = is_Apacked // constexpr
           ? a_ptr + (m_loc / kMt) * a_sm
           : a_ptr + m_loc * a_sm;
-      auto b_loc_ptr = is_Bpacked
+      auto b_loc_ptr = is_Bpacked // constexpr
           ? b_ptr + (n_loc / kNt) * b_sn
           : b_ptr + n_loc * b_sn;
 
-      if (accumulate)
-        kernel.template run<true>(
-            a_loc_ptr, sub_a_l,
-            b_loc_ptr, sub_b_l,
-            tile_buf, acc_ld,
-            C, C_layout, offM + m_loc, offN + n_loc, fn,
-            tile_m, tile_n);
-      else
-        kernel.template run<false>(
-            a_loc_ptr, sub_a_l,
-            b_loc_ptr, sub_b_l,
-            tile_buf, acc_ld,
-            C, C_layout, offM + m_loc, offN + n_loc, fn,
-            tile_m, tile_n);
+      kernel.run(
+          a_loc_ptr, sub_a_l,
+          b_loc_ptr, sub_b_l,
+          tile_buf, acc_ld,
+          C, C_layout, offM + m_loc, offN + n_loc, fn,
+          tile_m, tile_n,
+          accumulate);
     };
 
     if constexpr (std::is_same_v<Scheduler, SchedulerMaxCases>) {
@@ -1117,9 +1110,16 @@ void gemm(
           : acc_buf;
       int acc_ld = buffer_bypass ? static_cast<int>(sc_m) : curN;
 
+      auto make_accumulate = [](int ki) {
+        if constexpr (is_kTiling)
+          return bool(ki > 0);
+        else
+          return std::bool_constant<false>{};
+      };
+
       for (int ki = 0; ki < K; ki += Kt) {
         int curK = std::min(Kt, K - ki);
-        bool accumulate = (ki > 0);
+        auto accumulate = make_accumulate(ki);
 
         const TA * a_run, * b_run;
 
