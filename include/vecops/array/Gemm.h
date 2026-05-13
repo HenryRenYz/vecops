@@ -87,6 +87,13 @@ struct IndexSetter<I, Is...> {
 template <int N, typename... Is>
 struct IndexGetter;
 
+template <int I, typename... Is>
+struct IndexGetter<0, Int<I>, Is...> {
+  constexpr int operator()(const int *) {
+    return I;
+  }
+};
+
 template <typename I, typename... Is>
 struct IndexGetter<0, I, Is...> {
   constexpr int operator()(const int * in) {
@@ -550,6 +557,11 @@ struct Kernel {
   static constexpr int Ktile = 0;
   using TAccumulator = float;
 
+  // Whether M (for pack_A) or N (for pack_B) is on the second-to-last
+  // dimension of the packed layout.  If false, M/N is on the last dim.
+  static constexpr bool pack_A_M_on_dim2 = false;
+  static constexpr bool pack_B_N_on_dim2 = false;
+
   // Tile-count shapes: Shape<(Mtiled, Ntiled)> where the actual kernel tile size
   // processed by one call is (Mtiled * Mtile, Ntiled * Ntile).
   //   shape_upper_left  — both M,N non-boundary (bulk, largest tile)
@@ -856,61 +868,82 @@ void gemm(
   constexpr bool is_Apacked = ALayout::Ndim > 2;
   constexpr bool is_Bpacked = BLayout::Ndim > 2;
 
+  constexpr int ul_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 0>::value;
+  constexpr int ul_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 1>::value;
+  constexpr int ur_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_right)>, 0>::value;
+  constexpr int ur_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_right)>, 1>::value;
+  constexpr int ll_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_left)>, 0>::value;
+  constexpr int ll_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_left)>, 1>::value;
+  constexpr int lr_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_right)>, 0>::value;
+  constexpr int lr_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_right)>, 1>::value;
+  static_assert(ul_m % lr_m == 0 && ur_m % lr_m == 0 && ll_m % lr_m == 0, "lr_m is not the smallest tile");
+  static_assert(ul_n % lr_n == 0 && ur_n % lr_n == 0 && ll_n % lr_n == 0, "lr_n is not the smallest tile");
+
+  constexpr int ul_M = ul_m * kMt;
+  constexpr int ul_N = ul_n * kNt;
+  constexpr int ur_M = ur_m * kMt;
+  constexpr int ur_N = ur_n * kNt;
+  constexpr int ll_M = ll_m * kMt;
+  constexpr int ll_N = ll_n * kNt;
+  constexpr int lr_M = lr_m * kMt;
+  constexpr int lr_N = lr_n * kNt;
+
+  constexpr int kKt = Kernel::Ktile;
+
+  using TAcc = typename Kernel::TAccumulator;
+
+  using AStride = typename ALayout::Stride;
+  using BStride = typename BLayout::Stride;
+  using CStride = typename CLayout::Stride;
+
+  using InA = InputAdapter<TA, AStride>;
+  using InB = InputAdapter<TB, BStride>;
+  using Out = OutputAdapter<TC, TAcc, CStride>;
+
+  using InAPacked = InputAdapter<TA, Stride<Any, Any>>;
+  using InBPacked = InputAdapter<TB, Stride<Any, Any>>;
+
+  nint_t sc_m = C_layout.stride().template get<0>();
+  nint_t sc_n = C_layout.stride().template get<1>();
+
+  constexpr bool c_is_row_major = details::StrideDimConst1<CStride, 1>::value;
+  constexpr bool buffer_bypass =
+      std::is_same_v<TC, TAcc> && c_is_row_major;
+
+  TAcc * acc_buf = nullptr;
+  if (!buffer_bypass) {
+    nuint_t buf_elems = nuint_t(Mt) * nuint_t(Nt);
+    constexpr nuint_t align = 64;
+    nuint_t alloc_size = ((buf_elems * sizeof(TAcc) + align - 1) / align) * align;
+    acc_buf = (TAcc *)std::aligned_alloc(align, alloc_size);
+    VECOPS_ASSERT(acc_buf, "aligned_alloc failed");
+  }
+
+  TA * a_gather = nullptr;
+  TB * b_gather = nullptr;
+
   if constexpr (is_Apacked || is_Bpacked) {
-    VECOPS_ASSERT(false, "Pre-packed A/B not yet implemented");
+    VECOPS_ASSERT(Mt == kMt, "When A or B is packed, tiles_shape Mt must equal Kernel Mtile");
+    VECOPS_ASSERT(Nt == kNt, "When A or B is packed, tiles_shape Nt must equal Kernel Ntile");
+    VECOPS_ASSERT(Kt % kKt == 0, "When A or B is packed, Kt must be multiple of Kernel Ktile");
+  }
+
+  if constexpr (is_Apacked || is_Bpacked) {
+    if constexpr (InAPacked::needs_buffer()) {
+      nuint_t sz = nuint_t(Mt) * nuint_t(Kt);
+      a_gather = (TA *)std::aligned_alloc(64, sz * sizeof(TA));
+      VECOPS_ASSERT(a_gather, "aligned_alloc A gather failed");
+    }
+    if constexpr (InBPacked::needs_buffer()) {
+      nuint_t sz = nuint_t(Nt) * nuint_t(Kt);
+      b_gather = (TB *)std::aligned_alloc(64, sz * sizeof(TB));
+      VECOPS_ASSERT(b_gather, "aligned_alloc B gather failed");
+    }
   } else {
     nint_t sa_m = A_layout.stride().template get<0>();
     nint_t sa_k = A_layout.stride().template get<1>();
     nint_t sb_n = B_layout.stride().template get<0>();
     nint_t sb_k = B_layout.stride().template get<1>();
-    nint_t sc_m = C_layout.stride().template get<0>();
-    nint_t sc_n = C_layout.stride().template get<1>();
-
-    constexpr int ul_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 0>::value;
-    constexpr int ul_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 1>::value;
-    constexpr int ur_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_right)>, 0>::value;
-    constexpr int ur_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_right)>, 1>::value;
-    constexpr int ll_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_left)>, 0>::value;
-    constexpr int ll_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_left)>, 1>::value;
-    constexpr int lr_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_right)>, 0>::value;
-    constexpr int lr_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_right)>, 1>::value;
-    static_assert(ul_m % lr_m == 0 && ur_m % lr_m == 0 && ll_m % lr_m == 0, "lr_m is not the smallest tile");
-    static_assert(ul_n % lr_n == 0 && ur_n % lr_n == 0 && ll_n % lr_n == 0, "lr_n is not the smallest tile");
-
-    constexpr int ul_M = ul_m * kMt;
-    constexpr int ul_N = ul_n * kNt;
-    constexpr int ur_M = ur_m * kMt;
-    constexpr int ur_N = ur_n * kNt;
-    constexpr int ll_M = ll_m * kMt;
-    constexpr int ll_N = ll_n * kNt;
-    constexpr int lr_M = lr_m * kMt;
-    constexpr int lr_N = lr_n * kNt;
-
-    using TAcc = typename Kernel::TAccumulator;
-
-    using AStride = typename ALayout::Stride;
-    using BStride = typename BLayout::Stride;
-    using CStride = typename CLayout::Stride;
-
-    using InA = InputAdapter<TA, AStride>;
-    using InB = InputAdapter<TB, BStride>;
-    using Out = OutputAdapter<TC, TAcc, CStride>;
-
-    constexpr bool c_is_row_major = details::StrideDimConst1<CStride, 1>::value;
-    constexpr bool buffer_bypass =
-        std::is_same_v<TC, TAcc> && c_is_row_major;
-
-    TAcc * acc_buf = nullptr;
-    if (!buffer_bypass) {
-      nuint_t buf_elems = nuint_t(Mt) * nuint_t(Nt);
-      constexpr nuint_t align = 64;
-      nuint_t alloc_size = ((buf_elems * sizeof(TAcc) + align - 1) / align) * align;
-      acc_buf = (TAcc *)std::aligned_alloc(align, alloc_size);
-      VECOPS_ASSERT(acc_buf, "aligned_alloc failed");
-    }
-
-    TA * a_gather = nullptr;
-    TB * b_gather = nullptr;
     if constexpr (InA::needs_buffer()) {
       nuint_t sz = nuint_t(Mt) * nuint_t(Kt);
       a_gather = (TA *)std::aligned_alloc(64, sz * sizeof(TA));
@@ -921,137 +954,206 @@ void gemm(
       b_gather = (TB *)std::aligned_alloc(64, sz * sizeof(TB));
       VECOPS_ASSERT(b_gather, "aligned_alloc B gather failed");
     }
+  }
 
-    auto run_scheduler = [&](
-        int curM, int curN, int curK,
-        int offM, int offN, int offK,
-        bool accumulate, TAcc * acc_buf, int acc_ld,
-        const TA * a_ptr, const auto& a_layout,
-        const TB * b_ptr, const auto& b_layout)
+  auto run_scheduler = [&](
+      int curM, int curN, int curK,
+      int offM, int offN, int offK,
+      bool accumulate, TAcc * acc_buf, int acc_ld,
+      const TA * a_ptr, const auto& a_layout,
+      const TB * b_ptr, const auto& b_layout)
+  {
+    int m1 = (curM / ul_M) * ul_M;
+    int n1 = (curN / ul_N) * ul_N;
+    int m2 = (curM / ur_M) * ur_M;
+    int n2 = (curN / ll_N) * ll_N;
+
+    nint_t a_sm = a_layout.stride().template get<0>();
+    nint_t b_sn = b_layout.stride().template get<0>();
+
+    auto call_tile = [&]<typename MType, typename NType>(
+        int m_loc, int n_loc, int tile_m, int tile_n)
     {
-      int m1 = (curM / ul_M) * ul_M;
-      int n1 = (curN / ul_N) * ul_N;
-      int m2 = (curM / ur_M) * ur_M;
-      int n2 = (curN / ll_N) * ll_N;
+      using SubAS = details::SubShape2D<Shape<Any, Any>, MType, Any>;
+      using SubBS = details::SubShape2D<Shape<Any, Any>, NType, Any>;
 
-      nint_t a_sm = a_layout.stride().template get<0>();
-      nint_t b_sn = b_layout.stride().template get<0>();
+      auto sub_a_shape = SubAS::create(tile_m, curK);
+      auto sub_b_shape = SubBS::create(tile_n, curK);
 
-      auto call_tile = [&]<typename MType, typename NType>(
-          int m_loc, int n_loc, int tile_m, int tile_n)
-      {
-        using SubAS = details::SubShape2D<Shape<Any, Any>, MType, Any>;
-        using SubBS = details::SubShape2D<Shape<Any, Any>, NType, Any>;
+      auto sub_a_layout = make_layout(sub_a_shape, a_layout.stride());
+      auto sub_b_layout = make_layout(sub_b_shape, b_layout.stride());
 
-        auto sub_a_shape = SubAS::create(tile_m, curK);
-        auto sub_b_shape = SubBS::create(tile_n, curK);
+      TAcc * tile_buf = acc_buf
+          ? acc_buf + static_cast<nuint_t>(m_loc) * static_cast<nuint_t>(acc_ld)
+                     + static_cast<nuint_t>(n_loc)
+          : nullptr;
 
-        auto sub_a_layout = make_layout(sub_a_shape, a_layout.stride());
-        auto sub_b_layout = make_layout(sub_b_shape, b_layout.stride());
-
-        TAcc * tile_buf = acc_buf
-            ? acc_buf + static_cast<nuint_t>(m_loc) * static_cast<nuint_t>(acc_ld)
-                       + static_cast<nuint_t>(n_loc)
-            : nullptr;
-
-        if (accumulate)
-          kernel.template run<true>(a_ptr + m_loc * a_sm, sub_a_layout,
-                                     b_ptr + n_loc * b_sn, sub_b_layout,
-                                     tile_buf, acc_ld);
-        else
-          kernel.template run<false>(a_ptr + m_loc * a_sm, sub_a_layout,
-                                      b_ptr + n_loc * b_sn, sub_b_layout,
-                                      tile_buf, acc_ld);
-      };
-
-      if constexpr (std::is_same_v<Scheduler, SchedulerMaxCases>) {
-        for (int m = 0; m < m1; m += ul_M)
-          for (int n = 0; n < n1; n += ul_N)
-            call_tile.template operator()<Int<ul_M>, Int<ul_N>>(m, n, ul_M, ul_N);
-
-        for (int n = n1; n < curN; n += ur_N) {
-          int tile_n = std::min(ur_N, curN - n);
-          for (int m = 0; m < m2; m += ur_M)
-            call_tile.template operator()<Int<ur_M>, Any>(m, n, ur_M, tile_n);
-        }
-
-        for (int n = n1; n < curN; n += lr_N) {
-          int tile_n = std::min(lr_N, curN - n);
-          for (int m = m2; m < m1; m += lr_M)
-            call_tile.template operator()<Int<lr_M>, Any>(m, n, lr_M, tile_n);
-        }
-
-        for (int m = m1; m < curM; m += ll_M) {
-          int tile_m = std::min(ll_M, curM - m);
-          for (int n = 0; n < n2; n += ll_N)
-            call_tile.template operator()<Any, Int<ll_N>>(m, n, tile_m, ll_N);
-        }
-
-        for (int m = m1; m < curM; m += lr_M) {
-          int tile_m = std::min(lr_M, curM - m);
-          for (int n = n2; n < curN; n += lr_N) {
-            int tile_n = std::min(lr_N, curN - n);
-            call_tile.template operator()<Any, Any>(m, n, tile_m, tile_n);
-          }
-        }
-      } else {
-        static_assert(std::is_same_v<Scheduler, SchedulerMinCases>);
-
-        for (int m = 0; m < m1; m += ul_M)
-          for (int n = 0; n < n1; n += ul_N)
-            call_tile.template operator()<Int<ul_M>, Int<ul_N>>(m, n, ul_M, ul_N);
-
-        for (int m = 0; m < m1; m += lr_M)
-          for (int n = n1; n < curN; n += lr_N) {
-            int tile_n = std::min(lr_N, curN - n);
-            call_tile.template operator()<Any, Any>(m, n, lr_M, tile_n);
-          }
-
-        for (int m = m1; m < curM; m += lr_M) {
-          int tile_m = std::min(lr_M, curM - m);
-          for (int n = 0; n < curN; n += lr_N) {
-            int tile_n = std::min(lr_N, curN - n);
-            call_tile.template operator()<Any, Any>(m, n, tile_m, tile_n);
-          }
-        }
-      }
+      if (accumulate)
+        kernel.template run<true>(a_ptr + m_loc * a_sm, sub_a_layout,
+                                   b_ptr + n_loc * b_sn, sub_b_layout,
+                                   tile_buf, acc_ld);
+      else
+        kernel.template run<false>(a_ptr + m_loc * a_sm, sub_a_layout,
+                                    b_ptr + n_loc * b_sn, sub_b_layout,
+                                    tile_buf, acc_ld);
     };
 
-    for (int mi = 0; mi < M; mi += Mt) {
-      int curM = std::min(Mt, M - mi);
-      for (int ni = 0; ni < N; ni += Nt) {
-        int curN = std::min(Nt, N - ni);
+    if constexpr (std::is_same_v<Scheduler, SchedulerMaxCases>) {
+      for (int m = 0; m < m1; m += ul_M)
+        for (int n = 0; n < n1; n += ul_N)
+          call_tile.template operator()<Int<ul_M>, Int<ul_N>>(m, n, ul_M, ul_N);
 
-        TAcc * tile_acc = buffer_bypass
-            ? reinterpret_cast<TAcc *>(C + mi * sc_m + ni * sc_n)
-            : acc_buf;
-        int acc_ld = buffer_bypass ? static_cast<int>(sc_m) : curN;
+      for (int n = n1; n < curN; n += ur_N) {
+        int tile_n = std::min(ur_N, curN - n);
+        for (int m = 0; m < m2; m += ur_M)
+          call_tile.template operator()<Int<ur_M>, Any>(m, n, ur_M, tile_n);
+      }
 
-        for (int ki = 0; ki < K; ki += Kt) {
-          int curK = std::min(Kt, K - ki);
-          bool accumulate = (ki > 0);
+      for (int n = n1; n < curN; n += lr_N) {
+        int tile_n = std::min(lr_N, curN - n);
+        for (int m = m2; m < m1; m += lr_M)
+          call_tile.template operator()<Int<lr_M>, Any>(m, n, lr_M, tile_n);
+      }
 
-          const TA * a_base = A + mi * sa_m + ki * sa_k;
-          const TB * b_base = B + ni * sb_n + ki * sb_k;
+      for (int m = m1; m < curM; m += ll_M) {
+        int tile_m = std::min(ll_M, curM - m);
+        for (int n = 0; n < n2; n += ll_N)
+          call_tile.template operator()<Any, Int<ll_N>>(m, n, tile_m, ll_N);
+      }
 
-          const TA * a_run;
-          const TB * b_run;
+      for (int m = m1; m < curM; m += lr_M) {
+        int tile_m = std::min(lr_M, curM - m);
+        for (int n = n2; n < curN; n += lr_N) {
+          int tile_n = std::min(lr_N, curN - n);
+          call_tile.template operator()<Any, Any>(m, n, tile_m, tile_n);
+        }
+      }
+    } else {
+      static_assert(std::is_same_v<Scheduler, SchedulerMinCases>);
+
+      for (int m = 0; m < m1; m += ul_M)
+        for (int n = 0; n < n1; n += ul_N)
+          call_tile.template operator()<Int<ul_M>, Int<ul_N>>(m, n, ul_M, ul_N);
+
+      for (int m = 0; m < m1; m += lr_M)
+        for (int n = n1; n < curN; n += lr_N) {
+          int tile_n = std::min(lr_N, curN - n);
+          call_tile.template operator()<Any, Any>(m, n, lr_M, tile_n);
+        }
+
+      for (int m = m1; m < curM; m += lr_M) {
+        int tile_m = std::min(lr_M, curM - m);
+        for (int n = 0; n < curN; n += lr_N) {
+          int tile_n = std::min(lr_N, curN - n);
+          call_tile.template operator()<Any, Any>(m, n, tile_m, tile_n);
+        }
+      }
+    }
+  };
+
+  nint_t sa_m, sa_k, sb_n, sb_k;
+  if constexpr (!is_Apacked) {
+    sa_m = A_layout.stride().template get<0>();
+    sa_k = A_layout.stride().template get<1>();
+  }
+  if constexpr (!is_Bpacked) {
+    sb_n = B_layout.stride().template get<0>();
+    sb_k = B_layout.stride().template get<1>();
+  }
+
+  auto prepare_packed_A = [&](int mi, int ki) -> const TA* {
+    int a_im = mi / kMt;
+    int a_ik = ki / kKt;
+    return A + a_im * A_layout.stride().template get<0>()
+             + a_ik * A_layout.stride().template get<1>();
+  };
+
+  auto prepare_packed_B = [&](int ni, int ki) -> const TB* {
+    int b_in = ni / kNt;
+    int b_ik = ki / kKt;
+    return B + b_in * B_layout.stride().template get<0>()
+             + b_ik * B_layout.stride().template get<1>();
+  };
+
+  for (int mi = 0; mi < M; mi += Mt) {
+    int curM = std::min(Mt, M - mi);
+    for (int ni = 0; ni < N; ni += Nt) {
+      int curN = std::min(Nt, N - ni);
+
+      TAcc * tile_acc = buffer_bypass
+          ? reinterpret_cast<TAcc *>(C + mi * sc_m + ni * sc_n)
+          : acc_buf;
+      int acc_ld = buffer_bypass ? static_cast<int>(sc_m) : curN;
+
+      for (int ki = 0; ki < K; ki += Kt) {
+        int curK = std::min(Kt, K - ki);
+        bool accumulate = (ki > 0);
+
+        const TA * a_base;
+        const TB * b_base;
+        const TA * a_run;
+        const TB * b_run;
+
+        if constexpr (is_Apacked && is_Bpacked) {
+          a_base = prepare_packed_A(mi, ki);
+          b_base = prepare_packed_B(ni, ki);
+          nint_t a_s, a_k, b_s, b_k;
+          if constexpr (Kernel::pack_A_M_on_dim2) { a_s = kKt; a_k = 1; } else { a_s = 1; a_k = kMt; }
+          if constexpr (Kernel::pack_B_N_on_dim2) { b_s = kKt; b_k = 1; } else { b_s = 1; b_k = kNt; }
+          auto a_l = make_layout(make_shape(curM, curK), make_stride(int(a_s), int(a_k)));
+          auto b_l = make_layout(make_shape(curN, curK), make_stride(int(b_s), int(b_k)));
+          a_run = InAPacked::prepare(a_base, curM, curK, a_s, a_k, a_gather, a_l);
+          b_run = InBPacked::prepare(b_base, curN, curK, b_s, b_k, b_gather, b_l);
+          run_scheduler(curM, curN, curK, mi, ni, ki,
+                        accumulate, tile_acc, acc_ld,
+                        a_run, a_l, b_run, b_l);
+        } else if constexpr (is_Apacked) {
+          a_base = prepare_packed_A(mi, ki);
+          b_base = B + ni * sb_n + ki * sb_k;
+          nint_t a_s, a_k;
+          if constexpr (Kernel::pack_A_M_on_dim2) { a_s = kKt; a_k = 1; } else { a_s = 1; a_k = kMt; }
+          auto a_l = make_layout(make_shape(curM, curK), make_stride(int(a_s), int(a_k)));
+          a_run = InAPacked::prepare(a_base, curM, curK, a_s, a_k, a_gather, a_l);
+          auto b_lay = B_layout;
+          b_run = InB::prepare(b_base, curN, curK, sb_n, sb_k, b_gather, b_lay);
+          run_scheduler(curM, curN, curK, mi, ni, ki,
+                        accumulate, tile_acc, acc_ld,
+                        a_run, a_l, b_run, b_lay);
+        } else if constexpr (is_Bpacked) {
+          a_base = A + mi * sa_m + ki * sa_k;
+          b_base = prepare_packed_B(ni, ki);
+          nint_t b_s, b_k;
+          if constexpr (Kernel::pack_B_N_on_dim2) { b_s = kKt; b_k = 1; } else { b_s = 1; b_k = kNt; }
+          auto b_l = make_layout(make_shape(curN, curK), make_stride(int(b_s), int(b_k)));
+          auto a_lay = A_layout;
+          a_run = InA::prepare(a_base, curM, curK, sa_m, sa_k, a_gather, a_lay);
+          b_run = InBPacked::prepare(b_base, curN, curK, b_s, b_k, b_gather, b_l);
+          run_scheduler(curM, curN, curK, mi, ni, ki,
+                        accumulate, tile_acc, acc_ld,
+                        a_run, a_lay, b_run, b_l);
+        } else {
+          a_base = A + mi * sa_m + ki * sa_k;
+          b_base = B + ni * sb_n + ki * sb_k;
           auto a_lay = A_layout;
           auto b_lay = B_layout;
           a_run = InA::prepare(a_base, curM, curK, sa_m, sa_k, a_gather, a_lay);
           b_run = InB::prepare(b_base, curN, curK, sb_n, sb_k, b_gather, b_lay);
-
           run_scheduler(curM, curN, curK, mi, ni, ki,
                         accumulate, tile_acc, acc_ld,
                         a_run, a_lay, b_run, b_lay);
         }
-
-        Out::drain(tile_acc, acc_ld, curM, curN,
-                   C, sc_m, sc_n, mi, ni, fn);
       }
-    }
 
-    if (acc_buf) std::free(acc_buf);
+      Out::drain(tile_acc, acc_ld, curM, curN,
+                 C, sc_m, sc_n, mi, ni, fn);
+    }
+  }
+
+  if (acc_buf) std::free(acc_buf);
+  if constexpr (is_Apacked || is_Bpacked) {
+    if constexpr (InAPacked::needs_buffer()) std::free(a_gather);
+    if constexpr (InBPacked::needs_buffer()) std::free(b_gather);
+  } else {
     if constexpr (InA::needs_buffer()) std::free(a_gather);
     if constexpr (InB::needs_buffer()) std::free(b_gather);
   }

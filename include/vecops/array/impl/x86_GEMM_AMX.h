@@ -168,13 +168,6 @@ void gemm_bf16_32x32(const bfloat16_t * A, const bfloat16_t * B, int K) {
   // store back tile 4, 5, 6, 7 and apply epilog
 }
 
-template <
-    
-    >
-class Gemm {
-
-};
-
 /**
  * Perform a matrix multiplication C = A @ B
  * @tparam TAInputFn
