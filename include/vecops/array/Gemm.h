@@ -510,6 +510,19 @@ template <typename... Is>
 struct StrideIsCompileTime<Stride<Is...>>
     : std::bool_constant<(is_int<Is> && ...)> {};
 
+template <typename ShapeT, int Dim>
+struct ShapeDim;
+
+template <typename D0, typename D1>
+struct ShapeDim<Shape<D0, D1>, 0> {
+  static constexpr int value = D0::value;
+};
+
+template <typename D0, typename D1>
+struct ShapeDim<Shape<D0, D1>, 1> {
+  static constexpr int value = D1::value;
+};
+
 } // namespace details
 
 template <typename... IsOrInts>
@@ -537,11 +550,18 @@ struct Kernel {
   static constexpr int Ktile = 0;
   using TAccumulator = float;
 
-  // 四种kernel大小，用于处理不同分段，Shape<Mtiled, Ntiled>代表M N轴方向一次计算的内核分块大小，即实际kernel大小为(Mtiled*Mtile, Ntiled*Ntile)
-  static constexpr Shape<Int<1>, Int<1>> shape_upper_left {}; // 左上角的块，最大的块，效率最高，M N轴均非边界情况
-  static constexpr Shape<Int<1>, Int<1>> shape_upper_right {}; // 右上角的块，M轴非边界，N轴可能是边界
-  static constexpr Shape<Int<1>, Int<1>> shape_lower_left {}; // 左下角的块，M轴可能是边界，N轴非边界
-  static constexpr Shape<Int<1>, Int<1>> shape_lower_right {}; // 右下角的块，最小的块，M N轴均可能是边界
+  // Tile-count shapes: Shape<(Mtiled, Ntiled)> where the actual kernel tile size
+  // processed by one call is (Mtiled * Mtile, Ntiled * Ntile).
+  //   shape_upper_left  — both M,N non-boundary (bulk, largest tile)
+  //   shape_upper_right — M non-boundary, N may be boundary
+  //   shape_lower_left  — M may be boundary, N non-boundary
+  //   shape_lower_right — both M,N may be boundary (smallest tile)
+  // All tile-count dimensions must satisfy: upper_left >= others; all divisible by
+  // lower_right (ul_m % lr_m == 0 etc.).
+  static constexpr Shape<Int<1>, Int<1>> shape_upper_left  {};
+  static constexpr Shape<Int<1>, Int<1>> shape_upper_right {};
+  static constexpr Shape<Int<1>, Int<1>> shape_lower_left  {};
+  static constexpr Shape<Int<1>, Int<1>> shape_lower_right {};
 
   /**
    * @tparam Accumulate  if true, read from acc and accumulate; if false, start fresh
@@ -751,6 +771,49 @@ struct OutputAdapter<TC, TAcc, Stride<S0, S1>, false> {
   }
 };
 
+// ============================================================================
+// gemm: the GEMM orchestrator
+// ============================================================================
+//
+// Decomposes C <- A * B into a hierarchy of tiles.
+//
+// Outer level (TilesShape): splits (M,N,K) into outer tiles of size (Mt,Nt,Kt).
+// If TilesShape is 2D (M,N only), Kt defaults to K (single K pass).
+//
+// Inner level (Scheduler + Kernel shapes): within one outer tile, the Scheduler
+// partitions the (curM,curN) plane using the Kernel's four shape constants.
+//
+// Accumulation (across K tiles): the kernel always writes to an accumulator
+// buffer.  For K-tiling the buffer is reused (Accumulate=false for first pass,
+// true thereafter).  After all K passes, the OutputAdapter drains the buffer
+// to C, applying the user-provided EpilogFn per element.
+//
+// Buffer-bypass: when C is row-major AND TC == TAcc, C itself serves as the
+// accumulator.  No separate buffer is allocated.  OutputAdapter applies
+// EpilogFn in-place.
+//
+// InputAdapter: if strides are fully compile-time known (all Int<N>), the
+// original layout goes directly to the kernel.  Otherwise a runtime check
+// decides: row-major -> pass through; else -> gather into contiguous buffer.
+// The kernel's default input format is row-major (stride[1]==1).
+//
+// OutputAdapter: selected at compile time from C's stride type.  Row-major,
+// col-major, and scattered each have a specialisation.  For runtime strides,
+// a runtime if/else selects the write path.
+//
+// Constraints:
+//   - Every input matrix must have at least one contiguous (stride==1) axis.
+//   - TilesShape (Mt,Nt) must be multiples of Kernel::Mtile / Ntile
+//     respectively, so outer→inner tile subdivision is well-defined.
+//   - Tile dimensions must divide the problem's bulk region evenly.
+//   - Pre-packed A/B (ALayout::Ndim > 2) is not yet implemented.
+//
+// Pitfalls:
+//   - acc_ld == curN in non-bypass mode; kernel tile N may differ when the
+//     scheduler splits N, so acc_ld must be passed to the kernel explicitly.
+//   - EpilogFn receives GLOBAL (m,n) coordinates, not tile-local.
+//   - Gather buffers are sized (Mt*Kt) / (Nt*Kt), reused across outer tiles.
+
 template <
     typename ProblemShape,
     typename TA, typename ALayout,
@@ -785,6 +848,11 @@ void gemm(
   constexpr int kMt = Kernel::Mtile;
   constexpr int kNt = Kernel::Ntile;
 
+  VECOPS_ASSERT(Mt % kMt == 0,
+                "TilesShape M-tile must be divisible by Kernel::Mtile");
+  VECOPS_ASSERT(Nt % kNt == 0,
+                "TilesShape N-tile must be divisible by Kernel::Ntile");
+
   constexpr bool is_Apacked = ALayout::Ndim > 2;
   constexpr bool is_Bpacked = BLayout::Ndim > 2;
 
@@ -798,14 +866,14 @@ void gemm(
     nint_t sc_m = C_layout.stride().template get<0>();
     nint_t sc_n = C_layout.stride().template get<1>();
 
-    constexpr int ul_m = decltype(Kernel::shape_upper_left){}.template get<0>();
-    constexpr int ul_n = decltype(Kernel::shape_upper_left){}.template get<1>();
-    constexpr int ur_m = decltype(Kernel::shape_upper_right){}.template get<0>();
-    constexpr int ur_n = decltype(Kernel::shape_upper_right){}.template get<1>();
-    constexpr int ll_m = decltype(Kernel::shape_lower_left){}.template get<0>();
-    constexpr int ll_n = decltype(Kernel::shape_lower_left){}.template get<1>();
-    constexpr int lr_m = decltype(Kernel::shape_lower_right){}.template get<0>();
-    constexpr int lr_n = decltype(Kernel::shape_lower_right){}.template get<1>();
+    constexpr int ul_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 0>::value;
+    constexpr int ul_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 1>::value;
+    constexpr int ur_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_right)>, 0>::value;
+    constexpr int ur_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_right)>, 1>::value;
+    constexpr int ll_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_left)>, 0>::value;
+    constexpr int ll_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_left)>, 1>::value;
+    constexpr int lr_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_right)>, 0>::value;
+    constexpr int lr_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_lower_right)>, 1>::value;
     static_assert(ul_m % lr_m == 0 && ur_m % lr_m == 0 && ll_m % lr_m == 0, "lr_m is not the smallest tile");
     static_assert(ul_n % lr_n == 0 && ur_n % lr_n == 0 && ll_n % lr_n == 0, "lr_n is not the smallest tile");
 
