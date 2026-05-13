@@ -50,6 +50,10 @@ struct ScalarAMXBf16Kernel {
 
   static constexpr bool pack_A_M_on_dim2 = true;
   static constexpr bool pack_B_N_on_dim2 = false;
+  static constexpr int A_block_dim2 = Mtile;
+  static constexpr int A_block_dim3 = Ktile;
+  static constexpr int B_block_dim2 = Ktile / Wd;
+  static constexpr int B_block_dim3 = Ntile * Wd;
 
   static constexpr Shape<Int<2>, Int<2>> shape_upper_left {};
   static constexpr Shape<Int<4>, Int<1>> shape_upper_right {};
@@ -58,32 +62,79 @@ struct ScalarAMXBf16Kernel {
 
   template <bool Accumulate,
             typename TA, typename ALayout,
-            typename TB, typename BLayout>
+            typename TB, typename BLayout,
+            typename TC, typename CLayout,
+            typename EpilogFn>
   VECOPS_ALWAYS_INLINE void run(
       const TA* A, ALayout A_layout,
       const TB* B, BLayout B_layout,
-      TAccumulator* acc, int acc_ld)
+      TAccumulator* acc, int acc_ld,
+      TC* C, CLayout C_layout,
+      int offM, int offN,
+      const EpilogFn& fn,
+      int validM, int validN)
       const
   {
-    int tile_m = A_layout.shape().template get<0>();
-    int K = A_layout.shape().template get<1>();
-    int tile_n = B_layout.shape().template get<0>();
+    constexpr bool A_packed = (ALayout::Ndim == 4);
+    constexpr bool B_packed = (BLayout::Ndim == 4);
+    constexpr int kMt = Mtile;
+    constexpr int kNt = Ntile;
+    constexpr int kKt = Ktile;
+    constexpr int kWd = Wd;
 
-    int lda = A_layout.stride().template get<0>();
-    int ldk_a = A_layout.stride().template get<1>();
-    int ldb = B_layout.stride().template get<0>();
-    int ldk_b = B_layout.stride().template get<1>();
+    int curK;
+    nint_t lda, ldk_a, ldb, ldk_b;
+    nint_t b_s0=0, b_s1=0, b_s2=0, b_s3=0;
+    if constexpr (A_packed) {
+      curK = A_layout.shape().template get<1>();
+      if constexpr (pack_A_M_on_dim2) { lda = kKt; ldk_a = 1; }
+      else                            { lda = 1;   ldk_a = kMt; }
+    } else {
+      validM = A_layout.shape().template get<0>();
+      curK   = A_layout.shape().template get<1>();
+      lda   = A_layout.stride().template get<0>();
+      ldk_a = A_layout.stride().template get<1>();
+    }
+    if constexpr (B_packed) {
+      b_s0 = B_layout.stride().template get<0>();
+      b_s1 = B_layout.stride().template get<1>();
+      b_s2 = B_layout.stride().template get<2>();
+      b_s3 = B_layout.stride().template get<3>();
+      ldb = 0; ldk_b = 0;  // unused when B_packed (VNNI used)
+    } else {
+      validN = B_layout.shape().template get<0>();
+      ldb   = B_layout.stride().template get<0>();
+      ldk_b = B_layout.stride().template get<1>();
+    }
 
-    for (int m = 0; m < tile_m; ++m) {
-      for (int n = 0; n < tile_n; ++n) {
-        float val = Accumulate ? static_cast<float>(acc[m * acc_ld + n])
-                               : 0.0f;
-        for (int k = 0; k < K; ++k) {
-          float av = static_cast<float>(A[m * lda + k * ldk_a]);
-          float bv = static_cast<float>(B[n * ldb + k * ldk_b]);
+    int ldc   = int(C_layout.stride().template get<0>());
+    int ldc_n = int(C_layout.stride().template get<1>());
+
+    auto b_val_vnni = [&](int n, int k) -> float {
+      int in = n / kNt, ln = n % kNt;
+      int ik = k / kKt, lk = k % kKt;
+      int kw = lk / kWd, ko = lk % kWd;
+      return static_cast<float>(
+          B[nint_t(in)*b_s0 + nint_t(ik)*b_s1 + nint_t(kw)*b_s2 + nint_t(ln*kWd+ko)*b_s3]);
+    };
+
+    for (int m = 0; m < validM; ++m) {
+      for (int n = 0; n < validN; ++n) {
+        float val = Accumulate ? static_cast<float>(acc[m * acc_ld + n]) : 0.0f;
+        for (int k = 0; k < curK; ++k) {
+          float av = static_cast<float>(A[nint_t(m)*lda + nint_t(k)*ldk_a]);
+          float bv;
+          if constexpr (B_packed)
+            bv = b_val_vnni(n, k);
+          else
+            bv = static_cast<float>(B[nint_t(n)*ldb + nint_t(k)*ldk_b]);
           val += av * bv;
         }
-        acc[m * acc_ld + n] = static_cast<TAccumulator>(val);
+        if (acc)
+          acc[m * acc_ld + n] = static_cast<TAccumulator>(val);
+        else
+          C[(offM + m) * ldc + (offN + n) * ldc_n] =
+              static_cast<TC>(fn(offM + m, offN + n, val));
       }
     }
   }
@@ -183,6 +234,10 @@ struct ScalarSMEFp32Kernel {
 
   static constexpr bool pack_A_M_on_dim2 = false;
   static constexpr bool pack_B_N_on_dim2 = false;
+  static constexpr int A_block_dim2 = Ktile;
+  static constexpr int A_block_dim3 = Mtile;
+  static constexpr int B_block_dim2 = Ktile;
+  static constexpr int B_block_dim3 = Ntile;
 
   static constexpr Shape<Int<2>, Int<2>> shape_upper_left {};
   static constexpr Shape<Int<4>, Int<1>> shape_upper_right {};
@@ -191,31 +246,60 @@ struct ScalarSMEFp32Kernel {
 
   template <bool Accumulate,
             typename TA, typename ALayout,
-            typename TB, typename BLayout>
+            typename TB, typename BLayout,
+            typename TC, typename CLayout,
+            typename EpilogFn>
   VECOPS_ALWAYS_INLINE void run(
       const TA* A, ALayout A_layout,
       const TB* B, BLayout B_layout,
-      TAccumulator* acc, int acc_ld)
+      TAccumulator* acc, int acc_ld,
+      TC* C, CLayout C_layout,
+      int offM, int offN,
+      const EpilogFn& fn,
+      int validM, int validN)
       const
   {
-    int tile_m = A_layout.shape().template get<0>();
-    int K = A_layout.shape().template get<1>();
-    int tile_n = B_layout.shape().template get<0>();
+    constexpr bool A_packed = (ALayout::Ndim == 4);
+    constexpr bool B_packed = (BLayout::Ndim == 4);
+    constexpr int kMt = Mtile;
+    constexpr int kNt = Ntile;
+    constexpr int kKt = Ktile;
 
-    int lda = A_layout.stride().template get<0>();
-    int ldk_a = A_layout.stride().template get<1>();
-    int ldb = B_layout.stride().template get<0>();
-    int ldk_b = B_layout.stride().template get<1>();
+    int curK;
+    nint_t lda, ldk_a, ldb, ldk_b;
+    if constexpr (A_packed) {
+      curK = A_layout.shape().template get<1>();
+      if constexpr (pack_A_M_on_dim2) { lda = kKt; ldk_a = 1; }
+      else                            { lda = 1;   ldk_a = kMt; }
+    } else {
+      validM = A_layout.shape().template get<0>();
+      curK   = A_layout.shape().template get<1>();
+      lda   = A_layout.stride().template get<0>();
+      ldk_a = A_layout.stride().template get<1>();
+    }
+    if constexpr (B_packed) {
+      if constexpr (pack_B_N_on_dim2) { ldb = kKt; ldk_b = 1; }
+      else                            { ldb = 1;   ldk_b = kNt; }
+    } else {
+      validN = B_layout.shape().template get<0>();
+      ldb   = B_layout.stride().template get<0>();
+      ldk_b = B_layout.stride().template get<1>();
+    }
 
-    for (int m = 0; m < tile_m; ++m) {
-      for (int n = 0; n < tile_n; ++n) {
-        float val = Accumulate ? static_cast<float>(acc[m * acc_ld + n])
-                               : 0.0f;
-        for (int k = 0; k < K; ++k) {
-          val += static_cast<float>(A[m * lda + k * ldk_a]) *
-                 static_cast<float>(B[n * ldb + k * ldk_b]);
-        }
-        acc[m * acc_ld + n] = static_cast<TAccumulator>(val);
+    int ldc   = int(C_layout.stride().template get<0>());
+    int ldc_n = int(C_layout.stride().template get<1>());
+
+    for (int m = 0; m < validM; ++m) {
+      for (int n = 0; n < validN; ++n) {
+        float val = Accumulate ? static_cast<float>(acc[m * acc_ld + n]) : 0.0f;
+        for (int k = 0; k < curK; ++k)
+          val += static_cast<float>(A[nint_t(m)*lda + nint_t(k)*ldk_a]) *
+                 static_cast<float>(B[nint_t(n)*ldb + nint_t(k)*ldk_b]);
+        if (acc)
+          acc[m * acc_ld + n] = static_cast<TAccumulator>(val);
+        else
+          C[(offM + m) * ldc + (offN + n) * ldc_n] =
+              static_cast<TC>(fn(offM + m, offN + n, val));
       }
     }
   }
@@ -473,13 +557,15 @@ protected:
     auto a_packed_shape = make_shape(Mtiled, Ktiled, Int<kKt>{}, Int<kMt>{});
     auto a_packed_stride = make_stride(Ktiled * kKt * kMt,
                                        kKt * kMt,
-                                       Int<kMt>{}, Int<1>{});
+                                       Int<Kernel::pack_A_M_on_dim2 ? kKt : kMt>{},
+                                       Int<1>{});
     auto a_packed_layout = make_layout(a_packed_shape, a_packed_stride);
 
     auto b_packed_shape = make_shape(Ntiled, Ktiled, Int<kKt>{}, Int<kNt>{});
+    constexpr int b_s2 = Kernel::pack_B_N_on_dim2 ? kKt : kNt;
     auto b_packed_stride = make_stride(Ktiled * kKt * kNt,
                                        kKt * kNt,
-                                       Int<kNt>{}, Int<1>{});
+                                       Int<b_s2>{}, Int<1>{});
     auto b_packed_layout = make_layout(b_packed_shape, b_packed_stride);
 
     size_t a_packed_elems = static_cast<size_t>(Mtiled) * Ktiled * kMt * kKt;
@@ -866,11 +952,13 @@ TEST_F(GemmTest, SMEFp32_PackGemm_ReLU) {
     ref_gemm(M,N,K, A_in.data(),K,1, B_in.data(),1,N, C_ref.data(),N,1);
     for (auto& x : C_ref) x = std::max(TC{0}, x);
 
+    constexpr int sme_a_s2 = ScalarSMEFp32Kernel::pack_A_M_on_dim2 ? kKt : kMt;
     auto a_ps = make_shape(Mtiled,Ktiled,Int<kKt>{},Int<kMt>{});
-    auto a_pstr = make_stride(Ktiled*kKt*kMt, kKt*kMt, Int<kMt>{},Int<1>{});
+    auto a_pstr = make_stride(Ktiled*kKt*kMt, kKt*kMt, Int<sme_a_s2>{},Int<1>{});
     auto a_pl = make_layout(a_ps, a_pstr);
     auto b_ps = make_shape(Ntiled,Ktiled,Int<kKt>{},Int<kNt>{});
-    auto b_pstr = make_stride(Ktiled*kKt*kNt, kKt*kNt, Int<kNt>{},Int<1>{});
+    constexpr int sme_b_s2 = ScalarSMEFp32Kernel::pack_B_N_on_dim2 ? kKt : kNt;
+    auto b_pstr = make_stride(Ktiled*kKt*kNt, kKt*kNt, Int<sme_b_s2>{},Int<1>{});
     auto b_pl = make_layout(b_ps, b_pstr);
 
     std::vector<TA> A_p(Mtiled*Ktiled*kMt*kKt);
@@ -906,7 +994,8 @@ TEST_F(GemmTest, AMXBf16_PackGemm_Row) {
     ref_gemm(M,N,K, A_in.data(),K,1, B_in.data(),1,N, C_ref.data(),N,1);
 
     auto a_ps = make_shape(Mtiled,Ktiled,Int<kKt>{},Int<kMt>{});
-    auto a_pstr = make_stride(Ktiled*kKt*kMt, kKt*kMt, Int<kMt>{},Int<1>{});
+    constexpr int amx_a_s2 = ScalarAMXBf16Kernel::pack_A_M_on_dim2 ? kKt : kMt;
+    auto a_pstr = make_stride(Ktiled*kKt*kMt, kKt*kMt, Int<amx_a_s2>{},Int<1>{});
     auto a_pl = make_layout(a_ps, a_pstr);
     std::vector<TA> A_p(Mtiled*Ktiled*kMt*kKt);
     ScalarAMXBf16Kernel kernel;
@@ -920,6 +1009,147 @@ TEST_F(GemmTest, AMXBf16_PackGemm_Row) {
     for (size_t i = 0; i < total; ++i)
       EXPECT_NEAR(float(C_out[i]), float(C_ref[i]), 1e-2f)
           << "AMX packA M=" << M << " N=" << N << " K=" << K;
+  }
+}
+
+// ============================================================================
+// Pack tests — single-dimension packing coverage for SME and AMX
+// ============================================================================
+
+TEST_F(GemmTest, SMEFp32_PackGemm_AOnly) {
+  for (auto [M,N,K] : g_all_sizes) {
+    using TA = float; using TB = float; using TC = float;
+    constexpr int kMt = ScalarSMEFp32Kernel::Mtile;
+    constexpr int kNt = ScalarSMEFp32Kernel::Ntile;
+    constexpr int kKt = ScalarSMEFp32Kernel::Ktile;
+    int M_pad = ((M+kMt-1)/kMt)*kMt, K_pad = ((K+kKt-1)/kKt)*kKt;
+    int Mtiled=M_pad/kMt, Ktiled=K_pad/kKt;
+
+    std::vector<TA> A_in(M*K); fill_random(A_in);
+    std::vector<TB> B_in(N*K); fill_random(B_in);
+    std::vector<TC> C_out(M*N, TC{0}), C_ref(M*N, TC{0});
+    ref_gemm(M,N,K, A_in.data(),K,1, B_in.data(),1,N, C_ref.data(),N,1);
+
+    constexpr int a_s2 = ScalarSMEFp32Kernel::pack_A_M_on_dim2 ? kKt : kMt;
+    auto a_ps = make_shape(Mtiled,Ktiled,Int<kKt>{},Int<kMt>{});
+    auto a_pstr = make_stride(Ktiled*kKt*kMt, kKt*kMt, Int<a_s2>{},Int<1>{});
+    auto a_pl = make_layout(a_ps, a_pstr);
+    std::vector<TA> A_p(Mtiled*Ktiled*kMt*kKt);
+    ScalarSMEFp32Kernel kernel;
+    kernel.pack_A(A_in.data(), lt::A_row(M,K), A_p.data(), a_pl);
+    gemm(make_shape(M,N,K), A_p.data(), a_pl,
+         B_in.data(), lt::B_col(N,K), C_out.data(), lt::C_row(M,N),
+         make_shape(kMt,kNt,kKt), kernel, SchedulerMaxCases{}, identity_epilog);
+    size_t total = size_t(M)*N;
+    for (size_t i = 0; i < total; ++i)
+      EXPECT_NEAR(float(C_out[i]), float(C_ref[i]), 1e-5f)
+          << "SME Aonly M=" << M << " N=" << N << " K=" << K;
+  }
+}
+
+TEST_F(GemmTest, SMEFp32_PackGemm_BOnly) {
+  for (auto [M,N,K] : g_small_sizes) {
+    using TA = float; using TB = float; using TC = float;
+    constexpr int kMt = ScalarSMEFp32Kernel::Mtile;
+    constexpr int kNt = ScalarSMEFp32Kernel::Ntile;
+    constexpr int kKt = ScalarSMEFp32Kernel::Ktile;
+    int N_pad = ((N+kNt-1)/kNt)*kNt, K_pad = ((K+kKt-1)/kKt)*kKt;
+    int Ntiled=N_pad/kNt, Ktiled=K_pad/kKt;
+
+    std::vector<TA> A_in(M*K); fill_random(A_in);
+    std::vector<TB> B_in(N*K); fill_random(B_in);
+    std::vector<TC> C_out(M*N, TC{0}), C_ref(M*N, TC{0});
+    ref_gemm(M,N,K, A_in.data(),K,1, B_in.data(),1,N, C_ref.data(),N,1);
+
+    constexpr int b_s2 = ScalarSMEFp32Kernel::pack_B_N_on_dim2 ? kKt : kNt;
+    auto b_ps = make_shape(Ntiled,Ktiled,Int<kKt>{},Int<kNt>{});
+    auto b_pstr = make_stride(Ktiled*kKt*kNt, kKt*kNt, Int<b_s2>{},Int<1>{});
+    auto b_pl = make_layout(b_ps, b_pstr);
+    std::vector<TB> B_p(Ntiled*Ktiled*kNt*kKt);
+    ScalarSMEFp32Kernel kernel;
+    kernel.pack_B(B_in.data(), lt::B_col(N,K), B_p.data(), b_pl);
+    gemm(make_shape(M,N,K), A_in.data(), lt::A_row(M,K),
+         B_p.data(), b_pl, C_out.data(), lt::C_row(M,N),
+         make_shape(kMt,kNt,kKt), kernel, SchedulerMaxCases{}, identity_epilog);
+    size_t total = size_t(M)*N;
+    for (size_t i = 0; i < total; ++i)
+      EXPECT_NEAR(float(C_out[i]), float(C_ref[i]), 1e-5f)
+          << "SME Bonly M=" << M << " N=" << N << " K=" << K;
+  }
+}
+
+TEST_F(GemmTest, AMXBf16_PackGemm_BOnly) {
+  for (auto [M,N,K] : g_small_sizes) {
+    using TA = bfloat16_t; using TB = bfloat16_t; using TC = float;
+    constexpr int kMt = ScalarAMXBf16Kernel::Mtile;
+    constexpr int kNt = ScalarAMXBf16Kernel::Ntile;
+    constexpr int kKt = ScalarAMXBf16Kernel::Ktile;
+    constexpr int kWd = ScalarAMXBf16Kernel::Wd;
+    int N_pad = ((N+kNt-1)/kNt)*kNt, K_pad = ((K+kKt-1)/kKt)*kKt;
+    int Ntiled=N_pad/kNt, Ktiled=K_pad/kKt;
+
+    std::vector<TA> A_in(M*K); fill_random_bf16(A_in);
+    std::vector<TB> B_in(N*K); fill_random_bf16(B_in);
+    std::vector<TC> C_out(M*N, TC{0}), C_ref(M*N, TC{0});
+    ref_gemm(M,N,K, A_in.data(),K,1, B_in.data(),1,N, C_ref.data(),N,1);
+
+    // AMX B VNNI: A_block_dim2=kKt/kWd, A_block_dim3=kNt*kWd
+    constexpr int b_d2 = kKt / kWd, b_d3 = kNt * kWd;
+    constexpr int b_s2 = b_d3;  // stride dim2 = Ntile*Wd
+    auto b_ps = make_shape(Ntiled,Ktiled,Int<b_d2>{},Int<b_d3>{});
+    auto b_pstr = make_stride(Ktiled * b_d2 * b_d3, b_d2 * b_d3, Int<b_s2>{},Int<1>{});
+    auto b_pl = make_layout(b_ps, b_pstr);
+    std::vector<TB> B_p(Ntiled*Ktiled*b_d2*b_d3);
+    ScalarAMXBf16Kernel kernel;
+    kernel.pack_B(B_in.data(), lt::B_col(N,K), B_p.data(), b_pl);
+    gemm(make_shape(M,N,K), A_in.data(), lt::A_row(M,K),
+         B_p.data(), b_pl, C_out.data(), lt::C_row(M,N),
+         make_shape(kMt,kNt,kKt), kernel, SchedulerMaxCases{}, identity_epilog);
+    size_t total = size_t(M)*N;
+    for (size_t i = 0; i < total; ++i)
+      EXPECT_NEAR(float(C_out[i]), float(C_ref[i]), 1e-2f)
+          << "AMX Bonly M=" << M << " N=" << N << " K=" << K;
+  }
+}
+
+TEST_F(GemmTest, AMXBf16_PackGemm_Both) {
+  for (auto [M,N,K] : g_small_sizes) {
+    using TA = bfloat16_t; using TB = bfloat16_t; using TC = float;
+    constexpr int kMt = ScalarAMXBf16Kernel::Mtile;
+    constexpr int kNt = ScalarAMXBf16Kernel::Ntile;
+    constexpr int kKt = ScalarAMXBf16Kernel::Ktile;
+    constexpr int kWd = ScalarAMXBf16Kernel::Wd;
+    int M_pad = ((M+kMt-1)/kMt)*kMt, N_pad = ((N+kNt-1)/kNt)*kNt, K_pad = ((K+kKt-1)/kKt)*kKt;
+    int Mtiled=M_pad/kMt, Ntiled=N_pad/kNt, Ktiled=K_pad/kKt;
+
+    std::vector<TA> A_in(M*K); fill_random_bf16(A_in);
+    std::vector<TB> B_in(N*K); fill_random_bf16(B_in);
+    std::vector<TC> C_out(M*N, TC{0}), C_ref(M*N, TC{0});
+    ref_gemm(M,N,K, A_in.data(),K,1, B_in.data(),1,N, C_ref.data(),N,1);
+
+    constexpr int a_s2 = ScalarAMXBf16Kernel::pack_A_M_on_dim2 ? kKt : kMt;
+    auto a_ps = make_shape(Mtiled,Ktiled,Int<kKt>{},Int<kMt>{});
+    auto a_pstr = make_stride(Ktiled*kKt*kMt, kKt*kMt, Int<a_s2>{},Int<1>{});
+    auto a_pl = make_layout(a_ps, a_pstr);
+
+    constexpr int b_d2 = kKt / kWd, b_d3 = kNt * kWd;
+    constexpr int b_s2 = b_d3;
+    auto b_ps = make_shape(Ntiled,Ktiled,Int<b_d2>{},Int<b_d3>{});
+    auto b_pstr = make_stride(Ktiled * b_d2 * b_d3, b_d2 * b_d3, Int<b_s2>{},Int<1>{});
+    auto b_pl = make_layout(b_ps, b_pstr);
+
+    std::vector<TA> A_p(Mtiled*Ktiled*kMt*kKt);
+    std::vector<TB> B_p(Ntiled*Ktiled*b_d2*b_d3);
+    ScalarAMXBf16Kernel kernel;
+    kernel.pack_A(A_in.data(), lt::A_row(M,K), A_p.data(), a_pl);
+    kernel.pack_B(B_in.data(), lt::B_col(N,K), B_p.data(), b_pl);
+    gemm(make_shape(M,N,K), A_p.data(), a_pl, B_p.data(), b_pl,
+         C_out.data(), lt::C_row(M,N),
+         make_shape(kMt,kNt,kKt), kernel, SchedulerMaxCases{}, identity_epilog);
+    size_t total = size_t(M)*N;
+    for (size_t i = 0; i < total; ++i)
+      EXPECT_NEAR(float(C_out[i]), float(C_ref[i]), 1e-2f)
+          << "AMX both M=" << M << " N=" << N << " K=" << K;
   }
 }
 
