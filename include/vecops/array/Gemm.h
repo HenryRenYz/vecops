@@ -544,36 +544,21 @@ struct Kernel {
   static constexpr Shape<Int<1>, Int<1>> shape_lower_right {}; // 右下角的块，最小的块，M N轴均可能是边界
 
   /**
-   * @param A array with layout ALayout
-   * @param A_layout (* <= M_tile, K), stride (*, *), or PackedALayout of that
-   * @param B array with layout BLayout
-   * @param B_layout (* <= N_tile, K), stride (*, *), or PackedBLayout of that
-   * @param C array with layout CLayout
-   * @param C_layout (* <= M_tile, * <= N_tile), stride (*, *)
-   * @param fn epilog fn, signature
-   *        vec::Vec<vec::ScalableTag>(int m, int n, vec::Vec<vec::ScalableTag>),
-   *            where m, n is the local offset in 0:M_tile, 0:N_tile
-   * @param accumulate if true, accumulate partial sum into C (used for K-tiling)
-   * @param accumulator_buffer optional buffer for partial accumulation across K tiles, stride = acc_buf_ld
-   * @param acc_buf_ld leading dimension of accumulator_buffer (row stride), 0 = not used
-   * @param output_to_c if true, write final result to C instead of accumulator_buffer;
-   *        accumulator_buffer is still used for reading when accumulate is true
+   * @tparam Accumulate  if true, read from acc and accumulate; if false, start fresh
+   * @param A array pointed to start of the tile
+   * @param A_layout  shape (* <= Mtile, K), stride (*, *)
+   * @param B array pointed to start of the tile
+   * @param B_layout  shape (* <= Ntile, K), stride (*, *)
+   * @param acc  accumulator buffer (row-major, stride = acc_ld), or C itself in bypass mode
+   * @param acc_ld  row stride of accumulator buffer in elements
    */
-  template <
-      typename TA, typename ALayout,
-      typename TB, typename BLayout,
-      typename TC, typename CLayout,
-      typename EpilogFn
-  >
+  template <bool Accumulate,
+            typename TA, typename ALayout,
+            typename TB, typename BLayout>
   void run(
       const TA * A, ALayout A_layout,
       const TB * B, BLayout B_layout,
-      TC * C, CLayout C_layout,
-      const EpilogFn& fn,
-      bool accumulate = false,
-      TAccumulator * accumulator_buffer = nullptr,
-      int acc_buf_ld = 0,
-      bool output_to_c = true
+      TAccumulator * acc, int acc_ld
   );
 
   /**
@@ -610,6 +595,161 @@ struct SchedulerMaxCases {};
  * Minimizes the number of kernel configurations invoked.
  */
 struct SchedulerMinCases {};
+
+// ============================================================================
+// InputAdapter: ensures A and B are in a layout the kernel can consume
+// ============================================================================
+//
+// When the input stride is fully compile-time known (all dims are Int<N>),
+// InputAdapter is a no-op — the original pointer and layout are passed to the
+// kernel, which handles online-transpose via its own stride-type dispatch.
+//
+// When the stride is not compile-time known (any dim is Any/Aligned), the
+// adapter performs a runtime check: if already row-major (stride[1]==1) it
+// passes through; otherwise it gathers into a row-major contiguous buffer.
+//
+// Post-condition: the layout returned by prepare() always has stride[1]==1
+// (inner dimension contiguous), which is the kernel's default input format.
+
+template <typename T, typename StrideT,
+          bool CompileTimeKnown = details::StrideIsCompileTime<StrideT>::value>
+struct InputAdapter {
+  static constexpr bool needs_buffer() { return false; }
+
+  static const T* prepare(const T* base, int /*rows*/, int /*cols*/,
+                          nint_t /*sr*/, nint_t /*sc*/,
+                          T* /*buf*/,
+                          auto& /*out_layout*/) {
+    return base;
+  }
+};
+
+template <typename T, typename S0, typename S1>
+struct InputAdapter<T, Stride<S0, S1>, false> {
+  static constexpr bool needs_buffer() { return true; }
+
+  static const T* prepare(const T* base, int rows, int cols,
+                          nint_t sr, nint_t sc,
+                          T* buf,
+                          auto& out_layout) {
+    if (sc == 1) {
+      out_layout = make_layout(make_shape(rows, cols),
+                               make_stride(int(sr), int(sc)));
+      return base;
+    }
+    for (int r = 0; r < rows; ++r)
+      for (int c = 0; c < cols; ++c)
+        buf[r * cols + c] = base[r * sr + c * sc];
+    out_layout = make_layout(make_shape(rows, cols),
+                             make_stride(cols, 1));
+    return buf;
+  }
+};
+
+// ============================================================================
+// OutputAdapter: drains the accumulator buffer into C, applying EpilogFn
+// ============================================================================
+//
+// Selected at compile time based on C's stride type. Three specializations:
+//  - Row-major (stride[1] == Int<1>): direct copy
+//  - Col-major (stride[0] == Int<1>): transpose copy
+//  - Scattered (neither dim == 1 at compile time, or runtime unknown): scatter
+//
+// For the runtime-unknown case, a runtime check on sc_n/sc_m selects the path.
+//
+// When the accumulator IS C (buffer bypass: no K-tiling, TC==TAcc, row-major),
+// this performs an in-place element-wise transform via EpilogFn, which the
+// compiler can eliminate if EpilogFn is identity and TC==TAcc.
+
+template <typename TC, typename TAcc, typename CStride,
+          bool CompileTimeKnown = details::StrideIsCompileTime<CStride>::value>
+struct OutputAdapter;
+
+template <typename TC, typename TAcc, typename S0>
+    requires (!details::IsConstOne<S0>::value)
+struct OutputAdapter<TC, TAcc, Stride<S0, Int<1>>, true> {
+  template <typename Fn>
+  static void drain(const TAcc* acc, int acc_ld, int curM, int curN,
+                    TC* C, nint_t sc_m, nint_t sc_n,
+                    int offM, int offN, const Fn& fn) {
+    for (int m = 0; m < curM; ++m)
+      for (int n = 0; n < curN; ++n)
+        C[(offM + m) * sc_m + (offN + n) * sc_n] =
+            static_cast<TC>(fn(offM + m, offN + n,
+                               acc[m * acc_ld + n]));
+  }
+};
+
+template <typename TC, typename TAcc, typename S1>
+    requires (!details::IsConstOne<S1>::value)
+struct OutputAdapter<TC, TAcc, Stride<Int<1>, S1>, true> {
+  template <typename Fn>
+  static void drain(const TAcc* acc, int acc_ld, int curM, int curN,
+                    TC* C, nint_t sc_m, nint_t sc_n,
+                    int offM, int offN, const Fn& fn) {
+    for (int m = 0; m < curM; ++m)
+      for (int n = 0; n < curN; ++n)
+        C[(offM + m) * sc_m + (offN + n) * sc_n] =
+            static_cast<TC>(fn(offM + m, offN + n,
+                               acc[m * acc_ld + n]));
+  }
+};
+
+template <typename TC, typename TAcc>
+struct OutputAdapter<TC, TAcc, Stride<Int<1>, Int<1>>, true> {
+  template <typename Fn>
+  static void drain(const TAcc* acc, int acc_ld, int curM, int curN,
+                    TC* C, nint_t sc_m, nint_t sc_n,
+                    int offM, int offN, const Fn& fn) {
+    for (int m = 0; m < curM; ++m)
+      for (int n = 0; n < curN; ++n)
+        C[(offM + m) * sc_m + (offN + n) * sc_n] =
+            static_cast<TC>(fn(offM + m, offN + n,
+                               acc[m * acc_ld + n]));
+  }
+};
+
+template <typename TC, typename TAcc, typename S0, typename S1>
+struct OutputAdapter<TC, TAcc, Stride<S0, S1>, true> {
+  template <typename Fn>
+  static void drain(const TAcc* acc, int acc_ld, int curM, int curN,
+                    TC* C, nint_t sc_m, nint_t sc_n,
+                    int offM, int offN, const Fn& fn) {
+    for (int m = 0; m < curM; ++m)
+      for (int n = 0; n < curN; ++n)
+        C[(offM + m) * sc_m + (offN + n) * sc_n] =
+            static_cast<TC>(fn(offM + m, offN + n,
+                               acc[m * acc_ld + n]));
+  }
+};
+
+template <typename TC, typename TAcc, typename S0, typename S1>
+struct OutputAdapter<TC, TAcc, Stride<S0, S1>, false> {
+  template <typename Fn>
+  static void drain(const TAcc* acc, int acc_ld, int curM, int curN,
+                    TC* C, nint_t sc_m, nint_t sc_n,
+                    int offM, int offN, const Fn& fn) {
+    if (sc_n == 1) {
+      for (int m = 0; m < curM; ++m)
+        for (int n = 0; n < curN; ++n)
+          C[(offM + m) * sc_m + (offN + n)] =
+              static_cast<TC>(fn(offM + m, offN + n,
+                                 acc[m * acc_ld + n]));
+    } else if (sc_m == 1) {
+      for (int m = 0; m < curM; ++m)
+        for (int n = 0; n < curN; ++n)
+          C[(offM + m) + (offN + n) * sc_n] =
+              static_cast<TC>(fn(offM + m, offN + n,
+                                 acc[m * acc_ld + n]));
+    } else {
+      for (int m = 0; m < curM; ++m)
+        for (int n = 0; n < curN; ++n)
+          C[(offM + m) * sc_m + (offN + n) * sc_n] =
+              static_cast<TC>(fn(offM + m, offN + n,
+                                 acc[m * acc_ld + n]));
+    }
+  }
+};
 
 template <
     typename ProblemShape,
@@ -658,14 +798,6 @@ void gemm(
     nint_t sc_m = C_layout.stride().template get<0>();
     nint_t sc_n = C_layout.stride().template get<1>();
 
-    using CShape = typename CLayout::Shape;
-
-    using AShape = typename ALayout::Shape;
-    using BShape = typename BLayout::Shape;
-    using CShape = typename CLayout::Shape;
-    using AKDim  = typename details::KDimType<AShape>::type;
-    using BKDim  = typename details::KDimType<BShape>::type;
-
     constexpr int ul_m = decltype(Kernel::shape_upper_left){}.template get<0>();
     constexpr int ul_n = decltype(Kernel::shape_upper_left){}.template get<1>();
     constexpr int ur_m = decltype(Kernel::shape_upper_right){}.template get<0>();
@@ -687,20 +819,21 @@ void gemm(
     constexpr int lr_N = lr_n * kNt;
 
     using TAcc = typename Kernel::TAccumulator;
-    const bool ktiling = (Kt < K);
 
     using AStride = typename ALayout::Stride;
     using BStride = typename BLayout::Stride;
     using CStride = typename CLayout::Stride;
 
-    constexpr bool c_row_major = details::StrideDimConst1<CStride, 1>::value;
-    constexpr bool c_col_major = details::StrideDimConst1<CStride, 0>::value;
+    using InA = InputAdapter<TA, AStride>;
+    using InB = InputAdapter<TB, BStride>;
+    using Out = OutputAdapter<TC, TAcc, CStride>;
 
-    constexpr bool need_buffer = !std::is_same_v<TC, TAcc> || !c_row_major;
-    const bool use_acc_buf = need_buffer && ktiling;
+    constexpr bool c_is_row_major = details::StrideDimConst1<CStride, 1>::value;
+    constexpr bool buffer_bypass =
+        std::is_same_v<TC, TAcc> && c_is_row_major;
 
     TAcc * acc_buf = nullptr;
-    if (use_acc_buf) {
+    if (!buffer_bypass) {
       nuint_t buf_elems = nuint_t(Mt) * nuint_t(Nt);
       constexpr nuint_t align = 64;
       nuint_t alloc_size = ((buf_elems * sizeof(TAcc) + align - 1) / align) * align;
@@ -708,48 +841,23 @@ void gemm(
       VECOPS_ASSERT(acc_buf, "aligned_alloc failed");
     }
 
-    constexpr bool a_needs_gather =
-        !details::StrideIsCompileTime<AStride>::value;
-    constexpr bool b_needs_gather =
-        !details::StrideIsCompileTime<BStride>::value;
-
     TA * a_gather = nullptr;
     TB * b_gather = nullptr;
-    if constexpr (a_needs_gather) {
+    if constexpr (InA::needs_buffer()) {
       nuint_t sz = nuint_t(Mt) * nuint_t(Kt);
       a_gather = (TA *)std::aligned_alloc(64, sz * sizeof(TA));
       VECOPS_ASSERT(a_gather, "aligned_alloc A gather failed");
     }
-    if constexpr (b_needs_gather) {
+    if constexpr (InB::needs_buffer()) {
       nuint_t sz = nuint_t(Nt) * nuint_t(Kt);
       b_gather = (TB *)std::aligned_alloc(64, sz * sizeof(TB));
       VECOPS_ASSERT(b_gather, "aligned_alloc B gather failed");
     }
 
-    auto transpose_writeback = [&](
-        const TAcc * buf, int curM, int curN,
-        int offM, int offN)
-    {
-      for (int m = 0; m < curM; ++m)
-        for (int n = 0; n < curN; ++n)
-          C[(offM + m) * sc_m + (offN + n) * sc_n] =
-              static_cast<TC>(buf[m * curN + n]);
-    };
-
-    auto scatter_writeback = [&](
-        const TAcc * buf, int curM, int curN,
-        int offM, int offN)
-    {
-      for (int m = 0; m < curM; ++m)
-        for (int n = 0; n < curN; ++n)
-          C[(offM + m) * sc_m + (offN + n) * sc_n] =
-              static_cast<TC>(buf[m * curN + n]);
-    };
-
     auto run_scheduler = [&](
         int curM, int curN, int curK,
         int offM, int offN, int offK,
-        bool accumulate, bool is_last_k, TAcc * acc_buf,
+        bool accumulate, TAcc * acc_buf, int acc_ld,
         const TA * a_ptr, const auto& a_layout,
         const TB * b_ptr, const auto& b_layout)
     {
@@ -757,8 +865,6 @@ void gemm(
       int n1 = (curN / ul_N) * ul_N;
       int m2 = (curM / ur_M) * ur_M;
       int n2 = (curN / ll_N) * ll_N;
-
-      bool write_to_c = is_last_k && c_row_major;
 
       nint_t a_sm = a_layout.stride().template get<0>();
       nint_t b_sn = b_layout.stride().template get<0>();
@@ -768,38 +874,26 @@ void gemm(
       {
         using SubAS = details::SubShape2D<Shape<Any, Any>, MType, Any>;
         using SubBS = details::SubShape2D<Shape<Any, Any>, NType, Any>;
-        using SubC  = details::SubShape2D<CShape, MType, NType>;
 
         auto sub_a_shape = SubAS::create(tile_m, curK);
         auto sub_b_shape = SubBS::create(tile_n, curK);
-        auto sub_c_shape = SubC::create(tile_m, tile_n);
 
         auto sub_a_layout = make_layout(sub_a_shape, a_layout.stride());
         auto sub_b_layout = make_layout(sub_b_shape, b_layout.stride());
-        auto sub_c_layout = make_layout(sub_c_shape, C_layout.stride());
-
-        int gM = offM + m_loc;
-        int gN = offN + n_loc;
-
-        auto epilog_global = [&](int m_local, int n_local, auto val) {
-          return fn(gM + m_local, gN + n_local, val);
-        };
 
         TAcc * tile_buf = acc_buf
-            ? acc_buf + static_cast<nuint_t>(m_loc) * static_cast<nuint_t>(curN)
+            ? acc_buf + static_cast<nuint_t>(m_loc) * static_cast<nuint_t>(acc_ld)
                        + static_cast<nuint_t>(n_loc)
             : nullptr;
 
-        kernel.run(a_ptr + m_loc * a_sm,
-                   sub_a_layout,
-                   b_ptr + n_loc * b_sn,
-                   sub_b_layout,
-                   C + gM * sc_m + gN * sc_n,
-                   sub_c_layout,
-                   epilog_global,
-                   accumulate, tile_buf,
-                   tile_buf ? curN : 0,
-                   write_to_c);
+        if (accumulate)
+          kernel.template run<true>(a_ptr + m_loc * a_sm, sub_a_layout,
+                                     b_ptr + n_loc * b_sn, sub_b_layout,
+                                     tile_buf, acc_ld);
+        else
+          kernel.template run<false>(a_ptr + m_loc * a_sm, sub_a_layout,
+                                      b_ptr + n_loc * b_sn, sub_b_layout,
+                                      tile_buf, acc_ld);
       };
 
       if constexpr (std::is_same_v<Scheduler, SchedulerMaxCases>) {
@@ -853,15 +947,6 @@ void gemm(
           }
         }
       }
-
-      if constexpr (!c_row_major) {
-        if (is_last_k && acc_buf) {
-          if constexpr (c_col_major)
-            transpose_writeback(acc_buf, curM, curN, offM, offN);
-          else
-            scatter_writeback(acc_buf, curM, curN, offM, offN);
-        }
-      }
     };
 
     for (int mi = 0; mi < M; mi += Mt) {
@@ -869,48 +954,38 @@ void gemm(
       for (int ni = 0; ni < N; ni += Nt) {
         int curN = std::min(Nt, N - ni);
 
-        TAcc * tile_acc_buf = use_acc_buf ? acc_buf : nullptr;
+        TAcc * tile_acc = buffer_bypass
+            ? reinterpret_cast<TAcc *>(C + mi * sc_m + ni * sc_n)
+            : acc_buf;
+        int acc_ld = buffer_bypass ? static_cast<int>(sc_m) : curN;
 
         for (int ki = 0; ki < K; ki += Kt) {
           int curK = std::min(Kt, K - ki);
-          bool acc = (ki > 0) && (tile_acc_buf != nullptr || !need_buffer);
-          bool is_last_k = (ki + Kt >= K);
+          bool accumulate = (ki > 0);
 
           const TA * a_base = A + mi * sa_m + ki * sa_k;
           const TB * b_base = B + ni * sb_n + ki * sb_k;
 
-          const TA * a_run = a_base;
-          const TB * b_run = b_base;
+          const TA * a_run;
+          const TB * b_run;
           auto a_lay = A_layout;
           auto b_lay = B_layout;
-
-          if constexpr (a_needs_gather) {
-            for (int m = 0; m < curM; ++m)
-              for (int k = 0; k < curK; ++k)
-                a_gather[m * curK + k] = a_base[m * sa_m + k * sa_k];
-            a_lay = make_layout(make_shape(curM, curK),
-                                make_stride(curK, 1));
-            a_run = a_gather;
-          }
-          if constexpr (b_needs_gather) {
-            for (int n = 0; n < curN; ++n)
-              for (int k = 0; k < curK; ++k)
-                b_gather[n * curK + k] = b_base[n * sb_n + k * sb_k];
-            b_lay = make_layout(make_shape(curN, curK),
-                                make_stride(curK, 1));
-            b_run = b_gather;
-          }
+          a_run = InA::prepare(a_base, curM, curK, sa_m, sa_k, a_gather, a_lay);
+          b_run = InB::prepare(b_base, curN, curK, sb_n, sb_k, b_gather, b_lay);
 
           run_scheduler(curM, curN, curK, mi, ni, ki,
-                        acc, is_last_k, tile_acc_buf,
+                        accumulate, tile_acc, acc_ld,
                         a_run, a_lay, b_run, b_lay);
         }
+
+        Out::drain(tile_acc, acc_ld, curM, curN,
+                   C, sc_m, sc_n, mi, ni, fn);
       }
     }
 
     if (acc_buf) std::free(acc_buf);
-    if constexpr (a_needs_gather) std::free(a_gather);
-    if constexpr (b_needs_gather) std::free(b_gather);
+    if constexpr (InA::needs_buffer()) std::free(a_gather);
+    if constexpr (InB::needs_buffer()) std::free(b_gather);
   }
 }
 

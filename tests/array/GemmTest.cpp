@@ -52,19 +52,13 @@ struct ScalarAMXBf16Kernel {
   static constexpr Shape<Int<1>, Int<4>> shape_lower_left {};
   static constexpr Shape<Int<1>, Int<1>> shape_lower_right {};
 
-  template <typename TA, typename ALayout,
-            typename TB, typename BLayout,
-            typename TC, typename CLayout,
-            typename EpilogFn>
+  template <bool Accumulate,
+            typename TA, typename ALayout,
+            typename TB, typename BLayout>
   VECOPS_ALWAYS_INLINE void run(
       const TA* A, ALayout A_layout,
       const TB* B, BLayout B_layout,
-      TC* C, CLayout C_layout,
-      const EpilogFn& fn,
-      bool accumulate = false,
-      TAccumulator* acc_buffer = nullptr,
-      int acc_buf_ld = 0,
-      bool output_to_c = true)
+      TAccumulator* acc, int acc_ld)
   {
     int tile_m = A_layout.shape().template get<0>();
     int K = A_layout.shape().template get<1>();
@@ -74,26 +68,17 @@ struct ScalarAMXBf16Kernel {
     int ldk_a = A_layout.stride().template get<1>();
     int ldb = B_layout.stride().template get<0>();
     int ldk_b = B_layout.stride().template get<1>();
-    int ldc = C_layout.stride().template get<0>();
-    int ldc_n = C_layout.stride().template get<1>();
-
-    int buf_ld = acc_buf_ld > 0 ? acc_buf_ld : tile_n;
-    bool write_buf = acc_buffer && !output_to_c;
 
     for (int m = 0; m < tile_m; ++m) {
       for (int n = 0; n < tile_n; ++n) {
-        float acc = (accumulate && acc_buffer) ? acc_buffer[m * buf_ld + n]
-                   : (accumulate && !acc_buffer) ? static_cast<float>(C[m * ldc + n * ldc_n])
-                   : 0.0f;
+        float val = Accumulate ? static_cast<float>(acc[m * acc_ld + n])
+                               : 0.0f;
         for (int k = 0; k < K; ++k) {
           float av = static_cast<float>(A[m * lda + k * ldk_a]);
           float bv = static_cast<float>(B[n * ldb + k * ldk_b]);
-          acc += av * bv;
+          val += av * bv;
         }
-        if (write_buf)
-          acc_buffer[m * buf_ld + n] = static_cast<TAccumulator>(acc);
-        else
-          C[m * ldc + n * ldc_n] = static_cast<TC>(fn(m, n, acc));
+        acc[m * acc_ld + n] = static_cast<TAccumulator>(val);
       }
     }
   }
@@ -114,19 +99,13 @@ struct ScalarSMEFp32Kernel {
   static constexpr Shape<Int<1>, Int<4>> shape_lower_left {};
   static constexpr Shape<Int<1>, Int<1>> shape_lower_right {};
 
-  template <typename TA, typename ALayout,
-            typename TB, typename BLayout,
-            typename TC, typename CLayout,
-            typename EpilogFn>
+  template <bool Accumulate,
+            typename TA, typename ALayout,
+            typename TB, typename BLayout>
   VECOPS_ALWAYS_INLINE void run(
       const TA* A, ALayout A_layout,
       const TB* B, BLayout B_layout,
-      TC* C, CLayout C_layout,
-      const EpilogFn& fn,
-      bool accumulate = false,
-      TAccumulator* acc_buffer = nullptr,
-      int acc_buf_ld = 0,
-      bool output_to_c = true)
+      TAccumulator* acc, int acc_ld)
   {
     int tile_m = A_layout.shape().template get<0>();
     int K = A_layout.shape().template get<1>();
@@ -136,25 +115,16 @@ struct ScalarSMEFp32Kernel {
     int ldk_a = A_layout.stride().template get<1>();
     int ldb = B_layout.stride().template get<0>();
     int ldk_b = B_layout.stride().template get<1>();
-    int ldc = C_layout.stride().template get<0>();
-    int ldc_n = C_layout.stride().template get<1>();
-
-    int buf_ld = acc_buf_ld > 0 ? acc_buf_ld : tile_n;
-    bool write_buf = acc_buffer && !output_to_c;
 
     for (int m = 0; m < tile_m; ++m) {
       for (int n = 0; n < tile_n; ++n) {
-        float acc = (accumulate && acc_buffer) ? acc_buffer[m * buf_ld + n]
-                   : (accumulate && !acc_buffer) ? static_cast<float>(C[m * ldc + n * ldc_n])
-                   : 0.0f;
+        float val = Accumulate ? static_cast<float>(acc[m * acc_ld + n])
+                               : 0.0f;
         for (int k = 0; k < K; ++k) {
-          acc += static_cast<float>(A[m * lda + k * ldk_a]) *
+          val += static_cast<float>(A[m * lda + k * ldk_a]) *
                  static_cast<float>(B[n * ldb + k * ldk_b]);
         }
-        if (write_buf)
-          acc_buffer[m * buf_ld + n] = static_cast<TAccumulator>(acc);
-        else
-          C[m * ldc + n * ldc_n] = static_cast<TC>(fn(m, n, acc));
+        acc[m * acc_ld + n] = static_cast<TAccumulator>(val);
       }
     }
   }
@@ -540,6 +510,142 @@ TEST_F(GemmTest, SMEFp32_Tiles3D_NonContigC_MaxCases) {
   for (int m = 0; m < M; ++m)
     for (int n = 0; n < N; ++n)
       EXPECT_NEAR(C_data[m + n * M], C_ref[m * N + n], 1e-5f)
+          << "Mismatch at (" << m << "," << n << ")";
+}
+
+// ============================================================================
+// InputAdapter coverage: B row-major (runtime pass-through path)
+// ============================================================================
+
+TEST_F(GemmTest, SMEFp32_BRowMajor) {
+  constexpr int M = 64, N = 64, K = 128;
+  constexpr int Mt = 32, Nt = 64, Kt = 64;
+  std::vector<float> A_data(M * K), B_data(N * K);
+  std::vector<float> C_data(M * N, 0.0f), C_ref(M * N, 0.0f);
+  fill_random(A_data); fill_random(B_data);
+  ref_gemm(M, N, K, A_data.data(), K, 1, B_data.data(), K, 1, C_ref.data(), N, 1);
+
+  auto shape_mnk = make_shape(M, N, K);
+  auto a_layout = make_layout(make_shape(M, K), make_stride(K, 1));
+  auto b_layout = make_layout(make_shape(N, K), make_stride(K, 1));
+  auto c_layout = make_layout(make_shape(M, N), make_stride(N, 1));
+  auto ts = make_shape(Mt, Nt, Kt);
+  ScalarSMEFp32Kernel kernel;
+  SchedulerMinCases scheduler{};
+  gemm(shape_mnk, A_data.data(), a_layout, B_data.data(), b_layout,
+       C_data.data(), c_layout, ts, kernel, scheduler, identity_epilog);
+
+  for (int i = 0; i < M * N; ++i)
+    EXPECT_NEAR(C_data[i], C_ref[i], 1e-5f) << "Mismatch at index " << i;
+}
+
+// ============================================================================
+// InputAdapter coverage: A column-major (runtime gather path)
+// ============================================================================
+
+TEST_F(GemmTest, SMEFp32_AColMajor) {
+  constexpr int M = 64, N = 64, K = 128;
+  constexpr int Mt = 64, Nt = 32, Kt = 64;
+  std::vector<float> A_data(M * K), B_data(K * N);
+  std::vector<float> C_data(M * N, 0.0f), C_ref(M * N, 0.0f);
+  fill_random(A_data); fill_random(B_data);
+  ref_gemm(M, N, K, A_data.data(), 1, M, B_data.data(), 1, N, C_ref.data(), N, 1);
+
+  auto shape_mnk = make_shape(M, N, K);
+  auto a_layout = make_layout(make_shape(M, K), make_stride(1, M));
+  auto b_layout = make_layout(make_shape(N, K), make_stride(1, N));
+  auto c_layout = make_layout(make_shape(M, N), make_stride(N, 1));
+  auto ts = make_shape(Mt, Nt, Kt);
+  ScalarSMEFp32Kernel kernel;
+  SchedulerMaxCases scheduler{};
+  gemm(shape_mnk, A_data.data(), a_layout, B_data.data(), b_layout,
+       C_data.data(), c_layout, ts, kernel, scheduler, identity_epilog);
+
+  for (int i = 0; i < M * N; ++i)
+    EXPECT_NEAR(C_data[i], C_ref[i], 1e-5f) << "Mismatch at index " << i;
+}
+
+// ============================================================================
+// OutputAdapter coverage: column-major C + MinScheduler + K-tiling
+// ============================================================================
+
+TEST_F(GemmTest, SMEFp32_Min_NonContigC) {
+  constexpr int M = 64, N = 64, K = 128;
+  constexpr int Mt = 64, Nt = 32, Kt = 64;
+  std::vector<float> A_data(M * K), B_data(K * N);
+  std::vector<float> C_data(M * N, 0.0f), C_ref(M * N, 0.0f);
+  fill_random(A_data); fill_random(B_data);
+  ref_gemm(M, N, K, A_data.data(), K, 1, B_data.data(), 1, N, C_ref.data(), N, 1);
+
+  auto shape_mnk = make_shape(M, N, K);
+  auto a_layout = make_layout(make_shape(M, K), make_stride(K, 1));
+  auto b_layout = make_layout(make_shape(N, K), make_stride(1, N));
+  auto c_layout = make_layout(make_shape(M, N), make_stride(1, M));
+  auto ts = make_shape(Mt, Nt, Kt);
+  ScalarSMEFp32Kernel kernel;
+  SchedulerMinCases scheduler{};
+  gemm(shape_mnk, A_data.data(), a_layout, B_data.data(), b_layout,
+       C_data.data(), c_layout, ts, kernel, scheduler, identity_epilog);
+
+  for (int m = 0; m < M; ++m)
+    for (int n = 0; n < N; ++n)
+      EXPECT_NEAR(C_data[m + n * M], C_ref[m * N + n], 1e-5f)
+          << "Mismatch at (" << m << "," << n << ")";
+}
+
+// ============================================================================
+// Stress test: A column-major, B column-major, C column-major, K-tiling
+// ============================================================================
+
+TEST_F(GemmTest, SMEFp32_AllColMajor) {
+  constexpr int M = 64, N = 64, K = 128;
+  constexpr int Mt = 64, Nt = 64, Kt = 64;
+  std::vector<float> A_data(M * K), B_data(N * K);
+  std::vector<float> C_data(M * N, 0.0f), C_ref(M * N, 0.0f);
+  fill_random(A_data); fill_random(B_data);
+  ref_gemm(M, N, K, A_data.data(), 1, M, B_data.data(), K, 1, C_ref.data(), 1, M);
+
+  auto shape_mnk = make_shape(M, N, K);
+  auto a_layout = make_layout(make_shape(M, K), make_stride(1, M));
+  auto b_layout = make_layout(make_shape(N, K), make_stride(K, 1));
+  auto c_layout = make_layout(make_shape(M, N), make_stride(1, M));
+  auto ts = make_shape(Mt, Nt, Kt);
+  ScalarSMEFp32Kernel kernel;
+  SchedulerMaxCases scheduler{};
+  gemm(shape_mnk, A_data.data(), a_layout, B_data.data(), b_layout,
+       C_data.data(), c_layout, ts, kernel, scheduler, identity_epilog);
+
+  for (int m = 0; m < M; ++m)
+    for (int n = 0; n < N; ++n)
+      EXPECT_NEAR(C_data[m + n * M], C_ref[m + n * M], 1e-5f)
+          << "Mismatch at (" << m << "," << n << ")";
+}
+
+// ============================================================================
+// Buffer non-bypass: TC != TAcc with K-tiling (AMX BF16 → float)
+// ============================================================================
+
+TEST_F(GemmTest, AMXBf16_NonContigC) {
+  constexpr int M = 64, N = 64, K = 128;
+  constexpr int Mt = 64, Nt = 32, Kt = 64;
+  std::vector<bfloat16_t> A_data(M * K), B_data(K * N);
+  std::vector<float> C_data(M * N, 0.0f), C_ref(M * N, 0.0f);
+  fill_random_bf16(A_data); fill_random_bf16(B_data);
+  ref_gemm(M, N, K, A_data.data(), K, 1, B_data.data(), 1, N, C_ref.data(), N, 1);
+
+  auto shape_mnk = make_shape(M, N, K);
+  auto a_layout = make_layout(make_shape(M, K), make_stride(K, 1));
+  auto b_layout = make_layout(make_shape(N, K), make_stride(1, N));
+  auto c_layout = make_layout(make_shape(M, N), make_stride(1, M));
+  auto ts = make_shape(Mt, Nt, Kt);
+  ScalarAMXBf16Kernel kernel;
+  SchedulerMaxCases scheduler{};
+  gemm(shape_mnk, A_data.data(), a_layout, B_data.data(), b_layout,
+       C_data.data(), c_layout, ts, kernel, scheduler, identity_epilog);
+
+  for (int m = 0; m < M; ++m)
+    for (int n = 0; n < N; ++n)
+      EXPECT_NEAR(C_data[m + n * M], C_ref[m * N + n], 1e-2f)
           << "Mismatch at (" << m << "," << n << ")";
 }
 
