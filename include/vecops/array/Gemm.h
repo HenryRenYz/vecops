@@ -807,48 +807,388 @@ struct OutputAdapter<TC, TAcc, Stride<S0, S1>, false> {
   }
 };
 
+template <typename, typename, typename, typename,
+          typename, typename, typename, typename,
+          typename, typename, typename>
+struct GemmOrchestrator;
+
+template <typename Kernel>
+struct SubLayoutBuilder {
+  template <bool IsPacked, typename TType, typename Layout>
+  VECOPS_ALWAYS_INLINE static auto a_sub(int curK, int tile, const Layout& layout) {
+    if constexpr (IsPacked) {
+      auto s = make_shape(Int<TType::value>{}, curK,
+                          Int<Kernel::A_block_dim2>{},
+                          Int<Kernel::A_block_dim3>{});
+      return make_layout(s, layout.stride());
+    } else {
+      using SubS = details::SubShape2D<Shape<Any, Any>, TType, Any>;
+      return make_layout(SubS::create(tile, curK), layout.stride());
+    }
+  }
+
+  template <bool IsPacked, typename TType, typename Layout>
+  VECOPS_ALWAYS_INLINE static auto b_sub(int curK, int tile, const Layout& layout) {
+    if constexpr (IsPacked) {
+      auto s = make_shape(Int<TType::value>{}, curK,
+                          Int<Kernel::B_block_dim2>{},
+                          Int<Kernel::B_block_dim3>{});
+      return make_layout(s, layout.stride());
+    } else {
+      using SubS = details::SubShape2D<Shape<Any, Any>, TType, Any>;
+      return make_layout(SubS::create(tile, curK), layout.stride());
+    }
+  }
+};
+
+struct TileInvoker {
+  template <typename MType, typename NType, typename SubLayout>
+  VECOPS_ALWAYS_INLINE static void invoke(
+      int m_global, int n_global, int tile_m, int tile_n, int curK,
+      const auto* a_loc, const auto& a_layout,
+      const auto* b_loc, const auto& b_layout,
+      auto* tile_buf, int acc_ld,
+      auto* C, const auto& C_layout,
+      const auto& fn, const auto& kernel, auto accumulate)
+  {
+    constexpr bool is_Apacked = (std::decay_t<decltype(a_layout)>::Ndim > 2);
+    constexpr bool is_Bpacked = (std::decay_t<decltype(b_layout)>::Ndim > 2);
+
+    auto sub_a_l = SubLayout::template a_sub<is_Apacked, MType>(curK, tile_m, a_layout);
+    auto sub_b_l = SubLayout::template b_sub<is_Bpacked, NType>(curK, tile_n, b_layout);
+
+    kernel.run(
+        a_loc, sub_a_l,
+        b_loc, sub_b_l,
+        tile_buf, acc_ld,
+        C, C_layout, m_global, n_global, fn,
+        tile_m, tile_n,
+        accumulate);
+  }
+};
+
+template <typename SchedTag, typename Orchestrator>
+struct TileScheduler;
+
+template <typename Orchestrator>
+struct TileScheduler<SchedulerMaxCases, Orchestrator> {
+  VECOPS_ALWAYS_INLINE static void run(
+      int curM, int curN, int curK,
+      int offM, int offN, int offK,
+      auto accumulate, auto* acc_buf, int acc_ld,
+      const auto* a_ptr, auto a_layout,
+      const auto* b_ptr, auto b_layout,
+      auto* C, auto C_layout,
+      const auto& kernel, const auto& fn)
+  {
+    using TAcc = typename Orchestrator::TAcc;
+    using SL = SubLayoutBuilder<typename Orchestrator::KernelT>;
+
+    constexpr int kMt = Orchestrator::kMt;
+    constexpr int kNt = Orchestrator::kNt;
+    constexpr bool is_Apacked = Orchestrator::is_Apacked;
+    constexpr bool is_Bpacked = Orchestrator::is_Bpacked;
+    constexpr int ul_M = Orchestrator::ul_M, ul_N = Orchestrator::ul_N;
+    constexpr int ur_M = Orchestrator::ur_M, ur_N = Orchestrator::ur_N;
+    constexpr int ll_M = Orchestrator::ll_M, ll_N = Orchestrator::ll_N;
+    constexpr int lr_M = Orchestrator::lr_M, lr_N = Orchestrator::lr_N;
+    constexpr int ul_m = Orchestrator::ul_m, ul_n = Orchestrator::ul_n;
+    constexpr int ur_m = Orchestrator::ur_m, ur_n = Orchestrator::ur_n;
+    constexpr int ll_m = Orchestrator::ll_m, ll_n = Orchestrator::ll_n;
+    constexpr int lr_m = Orchestrator::lr_m, lr_n = Orchestrator::lr_n;
+
+    int m1 = (curM / ul_M) * ul_M;
+    int n1 = (curN / ul_N) * ul_N;
+    int m2 = (curM / ur_M) * ur_M;
+    int n2 = (curN / ll_N) * ll_N;
+
+    nint_t a_tile_s0 = a_layout.stride().template get<0>();
+    if constexpr (!is_Apacked) a_tile_s0 *= kMt;
+    nint_t b_tile_s0 = b_layout.stride().template get<0>();
+    if constexpr (!is_Bpacked) b_tile_s0 *= kNt;
+
+    using UlM = details::InteriorType<ul_m, is_Apacked, kMt>;
+    using UlN = details::InteriorType<ul_n, is_Bpacked, kNt>;
+    {
+      nint_t buf_step_m = acc_buf ? ul_M * acc_ld : 0;
+      nint_t buf_step_n = acc_buf ? ul_N : 0;
+      auto* buf_m = acc_buf ? acc_buf : nullptr;
+      const auto* a_m = a_ptr;
+      for (int m = 0; m < m1; m += ul_M, a_m += ul_m * a_tile_s0, buf_m += buf_step_m) {
+        auto* buf_n = buf_m;
+        const auto* b_n = b_ptr;
+        for (int n = 0; n < n1; n += ul_N, b_n += ul_n * b_tile_s0, buf_n += buf_step_n)
+          TileInvoker::invoke<UlM, UlN, SL>(
+              offM + m, offN + n, ul_M, ul_N, curK,
+              a_m, a_layout, b_n, b_layout,
+              buf_n, acc_ld,
+              C, C_layout, fn, kernel, accumulate);
+      }
+    }
+
+    using UrM = details::InteriorType<ur_m, is_Apacked, kMt>;
+    using UrN = details::BoundaryType<ur_n, is_Bpacked>;
+    {
+      nint_t buf_step_n = acc_buf ? ur_N : 0;
+      nint_t buf_step_m = acc_buf ? ur_M * acc_ld : 0;
+      auto* buf_n = acc_buf ? acc_buf + n1 : nullptr;
+      const auto* b_n = b_ptr + (n1 / kNt) * b_tile_s0;
+      for (int n = n1; n < curN; n += ur_N, b_n += ur_n * b_tile_s0, buf_n += buf_step_n) {
+        int tile_n = is_Bpacked ? ur_N : std::min(ur_N, curN - n);
+        auto* buf_m = buf_n;
+        const auto* a_m = a_ptr;
+        for (int m = 0; m < m2; m += ur_M, a_m += ur_m * a_tile_s0, buf_m += buf_step_m)
+          TileInvoker::invoke<UrM, UrN, SL>(
+              offM + m, offN + n, ur_M, tile_n, curK,
+              a_m, a_layout, b_n, b_layout,
+              buf_m, acc_ld,
+              C, C_layout, fn, kernel, accumulate);
+      }
+    }
+
+    using LrM = details::BoundaryType<lr_m, is_Apacked>;
+    using LrN = details::BoundaryType<lr_n, is_Bpacked>;
+    {
+      nint_t buf_step_n = acc_buf ? lr_N : 0;
+      nint_t buf_step_m = acc_buf ? lr_M * acc_ld : 0;
+      auto* buf_n = acc_buf ? acc_buf + n1 : nullptr;
+      const auto* b_n = b_ptr + (n1 / kNt) * b_tile_s0;
+      for (int n = n1; n < curN; n += lr_N, b_n += lr_n * b_tile_s0, buf_n += buf_step_n) {
+        int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
+        auto* buf_m = acc_buf ? buf_n + m2 * acc_ld : nullptr;
+        const auto* a_m = a_ptr + (m2 / kMt) * a_tile_s0;
+        for (int m = m2; m < m1; m += lr_M, a_m += lr_m * a_tile_s0, buf_m += buf_step_m)
+          TileInvoker::invoke<LrM, LrN, SL>(
+              offM + m, offN + n, lr_M, tile_n, curK,
+              a_m, a_layout, b_n, b_layout,
+              buf_m, acc_ld,
+              C, C_layout, fn, kernel, accumulate);
+      }
+    }
+
+    using LlM = details::BoundaryType<ll_m, is_Apacked>;
+    using LlN = details::InteriorType<ll_n, is_Bpacked, kNt>;
+    {
+      nint_t buf_step_m = acc_buf ? ll_M * acc_ld : 0;
+      nint_t buf_step_n = acc_buf ? ll_N : 0;
+      auto* buf_m = acc_buf ? acc_buf + m1 * acc_ld : nullptr;
+      const auto* a_m = a_ptr + (m1 / kMt) * a_tile_s0;
+      for (int m = m1; m < curM; m += ll_M, a_m += ll_m * a_tile_s0, buf_m += buf_step_m) {
+        int tile_m = is_Apacked ? ll_M : std::min(ll_M, curM - m);
+        auto* buf_n = buf_m;
+        const auto* b_n = b_ptr;
+        for (int n = 0; n < n2; n += ll_N, b_n += ll_n * b_tile_s0, buf_n += buf_step_n)
+          TileInvoker::invoke<LlM, LlN, SL>(
+              offM + m, offN + n, tile_m, ll_N, curK,
+              a_m, a_layout, b_n, b_layout,
+              buf_n, acc_ld,
+              C, C_layout, fn, kernel, accumulate);
+      }
+    }
+
+    {
+      nint_t buf_step_m = acc_buf ? lr_M * acc_ld : 0;
+      nint_t buf_step_n = acc_buf ? lr_N : 0;
+      auto* buf_m = acc_buf ? acc_buf + m1 * acc_ld : nullptr;
+      const auto* a_m = a_ptr + (m1 / kMt) * a_tile_s0;
+      for (int m = m1; m < curM; m += lr_M, a_m += lr_m * a_tile_s0, buf_m += buf_step_m) {
+        int tile_m_el = is_Apacked ? lr_M : std::min(lr_M, curM - m);
+        auto* buf_n = acc_buf ? buf_m + n2 : nullptr;
+        const auto* b_n = b_ptr + (n2 / kNt) * b_tile_s0;
+        for (int n = n2; n < curN; n += lr_N, b_n += lr_n * b_tile_s0, buf_n += buf_step_n) {
+          int tile_n_el = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
+          TileInvoker::invoke<LrM, LrN, SL>(
+              offM + m, offN + n, tile_m_el, tile_n_el, curK,
+              a_m, a_layout, b_n, b_layout,
+              buf_n, acc_ld,
+              C, C_layout, fn, kernel, accumulate);
+        }
+      }
+    }
+  }
+};
+
+template <typename Orchestrator>
+struct TileScheduler<SchedulerMinCases, Orchestrator> {
+  VECOPS_ALWAYS_INLINE static void run(
+      int curM, int curN, int curK,
+      int offM, int offN, int offK,
+      auto accumulate, auto* acc_buf, int acc_ld,
+      const auto* a_ptr, auto a_layout,
+      const auto* b_ptr, auto b_layout,
+      auto* C, auto C_layout,
+      const auto& kernel, const auto& fn)
+  {
+    using TAcc = typename Orchestrator::TAcc;
+    using SL = SubLayoutBuilder<typename Orchestrator::KernelT>;
+
+    constexpr int kMt = Orchestrator::kMt;
+    constexpr int kNt = Orchestrator::kNt;
+    constexpr bool is_Apacked = Orchestrator::is_Apacked;
+    constexpr bool is_Bpacked = Orchestrator::is_Bpacked;
+    constexpr int ul_M = Orchestrator::ul_M, ul_N = Orchestrator::ul_N;
+    constexpr int lr_M = Orchestrator::lr_M, lr_N = Orchestrator::lr_N;
+    constexpr int ul_m = Orchestrator::ul_m, ul_n = Orchestrator::ul_n;
+    constexpr int lr_m = Orchestrator::lr_m, lr_n = Orchestrator::lr_n;
+
+    int m1 = (curM / ul_M) * ul_M;
+    int n1 = (curN / ul_N) * ul_N;
+
+    nint_t a_tile_s0 = a_layout.stride().template get<0>();
+    if constexpr (!is_Apacked) a_tile_s0 *= kMt;
+    nint_t b_tile_s0 = b_layout.stride().template get<0>();
+    if constexpr (!is_Bpacked) b_tile_s0 *= kNt;
+
+    using UlM = details::InteriorType<ul_m, is_Apacked, kMt>;
+    using UlN = details::InteriorType<ul_n, is_Bpacked, kNt>;
+    {
+      nint_t buf_step_m = acc_buf ? ul_M * acc_ld : 0;
+      nint_t buf_step_n = acc_buf ? ul_N : 0;
+      auto* buf_m = acc_buf ? acc_buf : nullptr;
+      const auto* a_m = a_ptr;
+      for (int m = 0; m < m1; m += ul_M, a_m += ul_m * a_tile_s0, buf_m += buf_step_m) {
+        auto* buf_n = buf_m;
+        const auto* b_n = b_ptr;
+        for (int n = 0; n < n1; n += ul_N, b_n += ul_n * b_tile_s0, buf_n += buf_step_n)
+          TileInvoker::invoke<UlM, UlN, SL>(
+              offM + m, offN + n, ul_M, ul_N, curK,
+              a_m, a_layout, b_n, b_layout,
+              buf_n, acc_ld,
+              C, C_layout, fn, kernel, accumulate);
+      }
+    }
+
+    using LrM = details::BoundaryType<lr_m, is_Apacked>;
+    using LrN = details::BoundaryType<lr_n, is_Bpacked>;
+
+    {
+      nint_t buf_step_n = acc_buf ? lr_N : 0;
+      nint_t buf_step_m = acc_buf ? lr_M * acc_ld : 0;
+      auto* buf_n = acc_buf ? acc_buf + n1 : nullptr;
+      const auto* b_n = b_ptr + (n1 / kNt) * b_tile_s0;
+      for (int n = n1; n < curN; n += lr_N, b_n += lr_n * b_tile_s0, buf_n += buf_step_n) {
+        int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
+        auto* buf_m = buf_n;
+        const auto* a_m = a_ptr;
+        for (int m = 0; m < m1; m += lr_M, a_m += lr_m * a_tile_s0, buf_m += buf_step_m)
+          TileInvoker::invoke<LrM, LrN, SL>(
+              offM + m, offN + n, lr_M, tile_n, curK,
+              a_m, a_layout, b_n, b_layout,
+              buf_m, acc_ld,
+              C, C_layout, fn, kernel, accumulate);
+      }
+    }
+
+    {
+      nint_t buf_step_m = acc_buf ? lr_M * acc_ld : 0;
+      nint_t buf_step_n = acc_buf ? lr_N : 0;
+      auto* buf_m = acc_buf ? acc_buf + m1 * acc_ld : nullptr;
+      const auto* a_m = a_ptr + (m1 / kMt) * a_tile_s0;
+      for (int m = m1; m < curM; m += lr_M, a_m += lr_m * a_tile_s0, buf_m += buf_step_m) {
+        int tile_m = is_Apacked ? lr_M : std::min(lr_M, curM - m);
+        auto* buf_n = buf_m;
+        const auto* b_n = b_ptr;
+        for (int n = 0; n < curN; n += lr_N, b_n += lr_n * b_tile_s0, buf_n += buf_step_n) {
+          int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
+          TileInvoker::invoke<LrM, LrN, SL>(
+              offM + m, offN + n, tile_m, tile_n, curK,
+              a_m, a_layout, b_n, b_layout,
+              buf_n, acc_ld,
+              C, C_layout, fn, kernel, accumulate);
+        }
+      }
+    }
+  }
+};
+
+template <typename Orchestrator>
+struct L2Tiler {
+  using TAcc = typename Orchestrator::TAcc;
+  using Out  = typename Orchestrator::Out;
+
+  VECOPS_ALWAYS_INLINE static void run(
+      int M, int N, int K,
+      int Mt, int Nt, int Kt,
+      const auto* A, auto A_layout,
+      nint_t sa_m, nint_t sa_k,
+      nint_t a_step_M, nint_t a_step_K,
+      auto* a_gather,
+      const auto* B, auto B_layout,
+      nint_t sb_n, nint_t sb_k,
+      nint_t b_step_N, nint_t b_step_K,
+      auto* b_gather,
+      auto* C, auto C_layout,
+      nint_t sc_m, nint_t sc_n,
+      TAcc* acc_buf,
+      const auto& kernel, const auto& fn)
+  {
+    constexpr bool is_Apacked = Orchestrator::is_Apacked;
+    constexpr bool is_Bpacked = Orchestrator::is_Bpacked;
+    constexpr bool buffer_bypass = Orchestrator::buffer_bypass;
+    constexpr bool is_kTiling = Orchestrator::is_kTiling;
+    constexpr int kMt = Orchestrator::kMt;
+    constexpr int kNt = Orchestrator::kNt;
+    constexpr int kKt = Orchestrator::kKt;
+    using InA = typename Orchestrator::InA;
+    using InB = typename Orchestrator::InB;
+
+    auto make_accumulate = [](int ki) {
+      if constexpr (is_kTiling)
+        return bool(ki > 0);
+      else
+        return std::bool_constant<false>{};
+    };
+
+    const auto* A_m = A;
+    for (int mi = 0; mi < M; mi += Mt, A_m += a_step_M) {
+      int curM = std::min(Mt, M - mi);
+      const auto* B_n = B;
+      for (int ni = 0; ni < N; ni += Nt, B_n += b_step_N) {
+        int curN = std::min(Nt, N - ni);
+
+        TAcc * tile_acc = buffer_bypass
+            ? reinterpret_cast<TAcc *>(C + mi * sc_m + ni * sc_n)
+            : acc_buf;
+        int acc_ld = buffer_bypass ? static_cast<int>(sc_m) : curN;
+
+        const auto* A_mk = A_m;
+        const auto* B_nk = B_n;
+        for (int ki = 0; ki < K; ki += Kt, A_mk += a_step_K, B_nk += b_step_K) {
+          int curK = std::min(Kt, K - ki);
+          auto accumulate = make_accumulate(ki);
+
+          decltype(A_mk) a_run = A_mk;
+          if constexpr (!is_Apacked) {
+            a_run = InA::prepare(A_mk, curM, curK, sa_m, sa_k, a_gather, A_layout);
+          }
+
+          decltype(B_nk) b_run = B_nk;
+          if constexpr (!is_Bpacked) {
+            b_run = InB::prepare(B_nk, curN, curK, sb_n, sb_k, b_gather, B_layout);
+          }
+
+          TileScheduler<typename Orchestrator::SchedTag, Orchestrator>::run(
+              curM, curN, curK, mi, ni, ki,
+              accumulate, tile_acc, acc_ld,
+              a_run, A_layout, b_run, B_layout,
+              C, C_layout, kernel, fn);
+        }
+
+        if constexpr (!buffer_bypass) {
+          Out::drain(tile_acc, acc_ld, curM, curN,
+                     C, sc_m, sc_n, mi, ni, fn);
+        }
+      }
+    }
+  }
+};
+
 // ============================================================================
-// gemm: the GEMM orchestrator
+// GemmOrchestrator
 // ============================================================================
 //
-// Decomposes C <- A * B into a hierarchy of tiles.
-//
-// Outer level (TilesShape): splits (M,N,K) into outer tiles of size (Mt,Nt,Kt).
-// If TilesShape is 2D (M,N only), Kt defaults to K (single K pass).
-//
-// Inner level (Scheduler + Kernel shapes): within one outer tile, the Scheduler
-// partitions the (curM,curN) plane using the Kernel's four shape constants.
-//
-// Accumulation (across K tiles): the kernel always writes to an accumulator
-// buffer.  For K-tiling the buffer is reused (Accumulate=false for first pass,
-// true thereafter).  After all K passes, the OutputAdapter drains the buffer
-// to C, applying the user-provided EpilogFn per element.
-//
-// Buffer-bypass: when C is row-major AND TC == TAcc, C itself serves as the
-// accumulator.  No separate buffer is allocated.  OutputAdapter applies
-// EpilogFn in-place.
-//
-// InputAdapter: if strides are fully compile-time known (all Int<N>), the
-// original layout goes directly to the kernel.  Otherwise a runtime check
-// decides: row-major -> pass through; else -> gather into contiguous buffer.
-// The kernel's default input format is row-major (stride[1]==1).
-//
-// OutputAdapter: selected at compile time from C's stride type.  Row-major,
-// col-major, and scattered each have a specialisation.  For runtime strides,
-// a runtime if/else selects the write path.
-//
-// Constraints:
-//   - Every input matrix must have at least one contiguous (stride==1) axis.
-//   - TilesShape (Mt,Nt) must be multiples of Kernel::Mtile / Ntile
-//     respectively, so outer→inner tile subdivision is well-defined.
-//   - Tile dimensions must divide the problem's bulk region evenly.
-//   - Pre-packed A/B (ALayout::Ndim > 2) is not yet implemented.
-//
-// Pitfalls:
-//   - acc_ld == curN in non-bypass mode; kernel tile N may differ when the
-//     scheduler splits N, so acc_ld must be passed to the kernel explicitly.
-//   - EpilogFn receives GLOBAL (m,n) coordinates, not tile-local.
-//   - Gather buffers are sized (Mt*Kt) / (Nt*Kt), reused across outer tiles.
+// Holds all compile-time constants, allocates buffers, pre-computes pointer
+// steps, and delegates to L2Tiler for the actual tile traversal.
 
 template <
     typename ProblemShape,
@@ -860,38 +1200,27 @@ template <
     typename Scheduler,
     typename EpilogFn
 >
-void gemm(
-    ProblemShape shape_MNK,
-    const TA * A, ALayout A_layout,
-    const TB * B, BLayout B_layout,
-    TC * C, CLayout C_layout,
-    TilesShape tiles_shape,
-    Kernel kernel,
-    [[maybe_unused]] Scheduler scheduler,
-    const EpilogFn& fn
-) {
-  int M = shape_MNK.template get<0>();
-  int N = shape_MNK.template get<1>();
-  int K = shape_MNK.template get<2>();
-
-  int Mt = tiles_shape.template get<0>();
-  int Nt = tiles_shape.template get<1>();
-  static constexpr bool is_kTiling = TilesShape::Ndim >= 3;
-  int Kt = K;
-  if constexpr (is_kTiling) {
-    Kt = tiles_shape.template get<2>();
-  }
+struct GemmOrchestrator {
+  using TAcc = typename Kernel::TAccumulator;
+  using AStride = typename ALayout::Stride;
+  using BStride = typename BLayout::Stride;
+  using CStride = typename CLayout::Stride;
+  using InA = InputAdapter<TA, AStride>;
+  using InB = InputAdapter<TB, BStride>;
+  using Out = OutputAdapter<TC, TAcc, CStride>;
+  using SchedTag = Scheduler;
+  using KernelT = Kernel;
+  using L2 = L2Tiler<GemmOrchestrator>;
 
   static constexpr int kMt = Kernel::Mtile;
   static constexpr int kNt = Kernel::Ntile;
-
-  VECOPS_ASSERT(Mt % kMt == 0,
-                "TilesShape M-tile must be divisible by Kernel::Mtile");
-  VECOPS_ASSERT(Nt % kNt == 0,
-                "TilesShape N-tile must be divisible by Kernel::Ntile");
-
+  static constexpr int kKt = Kernel::Ktile;
+  static constexpr bool is_kTiling = TilesShape::Ndim >= 3;
   static constexpr bool is_Apacked = ALayout::Ndim > 2;
   static constexpr bool is_Bpacked = BLayout::Ndim > 2;
+  static constexpr bool c_is_row_major = details::StrideDimConst1<CStride, 1>::value;
+  static constexpr bool buffer_bypass =
+      std::is_same_v<TC, TAcc> && c_is_row_major;
 
   static constexpr int ul_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 0>::value;
   static constexpr int ul_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 1>::value;
@@ -913,316 +1242,119 @@ void gemm(
   static constexpr int lr_M = lr_m * kMt;
   static constexpr int lr_N = lr_n * kNt;
 
-  static constexpr int kKt = Kernel::Ktile;
-
-  using TAcc = typename Kernel::TAccumulator;
-
-  using AStride = typename ALayout::Stride;
-  using BStride = typename BLayout::Stride;
-  using CStride = typename CLayout::Stride;
-
-  using InA = InputAdapter<TA, AStride>;
-  using InB = InputAdapter<TB, BStride>;
-  using Out = OutputAdapter<TC, TAcc, CStride>;
-
-  nint_t sc_m = C_layout.stride().template get<0>();
-  nint_t sc_n = C_layout.stride().template get<1>();
-
-  static constexpr bool c_is_row_major = details::StrideDimConst1<CStride, 1>::value;
-  static constexpr bool buffer_bypass =
-      std::is_same_v<TC, TAcc> && c_is_row_major;
-
-  TAcc * acc_buf = nullptr;
-  if (!buffer_bypass) {
-    nuint_t buf_elems = nuint_t(Mt) * nuint_t(Nt);
-    constexpr nuint_t align = 64;
-    nuint_t alloc_size = ((buf_elems * sizeof(TAcc) + align - 1) / align) * align;
-    acc_buf = (TAcc *)std::aligned_alloc(align, alloc_size);
-    VECOPS_ASSERT(acc_buf, "aligned_alloc failed");
-  }
-
-  TA * a_gather = nullptr;
-  TB * b_gather = nullptr;
-
-  if constexpr (is_Apacked || is_Bpacked) {
-    VECOPS_ASSERT(Mt % kMt == 0, "Mt must be divisible by Kernel Mtile");
-    VECOPS_ASSERT(Nt % kNt == 0, "Nt must be divisible by Kernel Ntile");
-    VECOPS_ASSERT(Kt % kKt == 0, "Kt must be multiple of Kernel Ktile");
-  }
-
-  nint_t sa_m = 0, sa_k = 0, sb_n = 0, sb_k = 0;
-
-  if constexpr (!is_Apacked) {
-    sa_m = A_layout.stride().template get<0>();
-    sa_k = A_layout.stride().template get<1>();
-    if constexpr (InA::needs_buffer()) {
-      nuint_t sz = nuint_t(Mt) * nuint_t(Kt);
-      a_gather = (TA *)std::aligned_alloc(64, sz * sizeof(TA));
-      VECOPS_ASSERT(a_gather, "aligned_alloc A gather failed");
-    }
-  }
-  if constexpr (!is_Bpacked) {
-    sb_n = B_layout.stride().template get<0>();
-    sb_k = B_layout.stride().template get<1>();
-    if constexpr (InB::needs_buffer()) {
-      nuint_t sz = nuint_t(Nt) * nuint_t(Kt);
-      b_gather = (TB *)std::aligned_alloc(64, sz * sizeof(TB));
-      VECOPS_ASSERT(b_gather, "aligned_alloc B gather failed");
-    }
-  }
-
-  nint_t a_step_M = is_Apacked ? (Mt / kMt) * A_layout.stride().template get<0>() : Mt * sa_m;
-  nint_t a_step_K = is_Apacked ? (Kt / kKt) * A_layout.stride().template get<1>() : Kt * sa_k;
-  nint_t b_step_N = is_Bpacked ? (Nt / kNt) * B_layout.stride().template get<0>() : Nt * sb_n;
-  nint_t b_step_K = is_Bpacked ? (Kt / kKt) * B_layout.stride().template get<1>() : Kt * sb_k;
-
-  auto run_scheduler = [kernel, C, C_layout, fn](
-      int curM, int curN, int curK,
-      int offM, int offN, int offK,
-      auto accumulate, TAcc * acc_buf, int acc_ld,
-      const TA * a_ptr, const auto& a_layout,
-      const TB * b_ptr, const auto& b_layout)
+  VECOPS_ALWAYS_INLINE static void run(
+      ProblemShape shape_MNK,
+      const TA* A, ALayout A_layout,
+      const TB* B, BLayout B_layout,
+      TC* C, CLayout C_layout,
+      TilesShape tiles_shape,
+      Kernel kernel,
+      [[maybe_unused]] Scheduler scheduler,
+      const EpilogFn& fn)
   {
-    int m1 = (curM / ul_M) * ul_M;
-    int n1 = (curN / ul_N) * ul_N;
-    int m2 = (curM / ur_M) * ur_M;
-    int n2 = (curN / ll_N) * ll_N;
+    int M = shape_MNK.template get<0>();
+    int N = shape_MNK.template get<1>();
+    int K = shape_MNK.template get<2>();
 
-    nint_t a_tile_s0 = a_layout.stride().template get<0>();
-    if constexpr (!is_Apacked) a_tile_s0 *= kMt;
-    nint_t b_tile_s0 = b_layout.stride().template get<0>();
-    if constexpr (!is_Bpacked) b_tile_s0 *= kNt;
+    int Mt = tiles_shape.template get<0>();
+    int Nt = tiles_shape.template get<1>();
+    int Kt = K;
+    if constexpr (is_kTiling) {
+      Kt = tiles_shape.template get<2>();
+    }
 
-    auto call_tile = [acc_ld, curK, a_layout, b_layout, kernel, C, C_layout, &fn, accumulate]<typename MType, typename NType>(
-        int m_global, int n_global, int tile_m, int tile_n,
-        const TA* a_loc, const TB* b_loc, TAcc* tile_buf)
-    {
-      auto make_sub_a_layout = [curK, a_layout, tile_m] {
-        if constexpr (is_Apacked) {
-          auto sub_a_s = make_shape(Int<MType::value>{}, curK,
-                                    Int<Kernel::A_block_dim2>{},
-                                    Int<Kernel::A_block_dim3>{});
-          return make_layout(sub_a_s, a_layout.stride());
-        } else {
-          using SubAS = details::SubShape2D<Shape<Any, Any>, MType, Any>;
-          auto sub_a_s = SubAS::create(tile_m, curK);
-          return make_layout(sub_a_s, a_layout.stride());
-        }
-      };
+    VECOPS_ASSERT(Mt % kMt == 0, "TilesShape M-tile must be divisible by Kernel::Mtile");
+    VECOPS_ASSERT(Nt % kNt == 0, "TilesShape N-tile must be divisible by Kernel::Ntile");
 
-      auto make_sub_b_layout = [curK, b_layout, tile_n] {
-        if constexpr (is_Bpacked) {
-          auto sub_b_s = make_shape(Int<NType::value>{}, curK,
-                                    Int<Kernel::B_block_dim2>{},
-                                    Int<Kernel::B_block_dim3>{});
-          return make_layout(sub_b_s, b_layout.stride());
-        } else {
-          using SubBS = details::SubShape2D<Shape<Any, Any>, NType, Any>;
-          auto sub_b_s = SubBS::create(tile_n, curK);
-          return make_layout(sub_b_s, b_layout.stride());
-        }
-      };
+    if constexpr (is_Apacked || is_Bpacked) {
+      VECOPS_ASSERT(Mt % kMt == 0, "Mt must be divisible by Kernel Mtile");
+      VECOPS_ASSERT(Nt % kNt == 0, "Nt must be divisible by Kernel Ntile");
+      VECOPS_ASSERT(Kt % kKt == 0, "Kt must be multiple of Kernel Ktile");
+    }
 
-      auto sub_a_l = make_sub_a_layout();
-      auto sub_b_l = make_sub_b_layout();
+    nint_t sc_m = C_layout.stride().template get<0>();
+    nint_t sc_n = C_layout.stride().template get<1>();
 
-      kernel.run(
-          a_loc, sub_a_l,
-          b_loc, sub_b_l,
-          tile_buf, acc_ld,
-          C, C_layout, m_global, n_global, fn,
-          tile_m, tile_n,
-          accumulate);
-    };
+    TAcc* acc_buf = nullptr;
+    if constexpr (!buffer_bypass) {
+      nuint_t buf_elems = nuint_t(Mt) * nuint_t(Nt);
+      constexpr nuint_t align = 64;
+      nuint_t alloc_size = ((buf_elems * sizeof(TAcc) + align - 1) / align) * align;
+      acc_buf = (TAcc*)std::aligned_alloc(align, alloc_size);
+      VECOPS_ASSERT(acc_buf, "aligned_alloc failed");
+    }
 
-    if constexpr (std::is_same_v<Scheduler, SchedulerMaxCases>) {
+    TA* a_gather = nullptr;
+    TB* b_gather = nullptr;
 
-      using UlM = details::InteriorType<ul_m, is_Apacked, kMt>;
-      using UlN = details::InteriorType<ul_n, is_Bpacked, kNt>;
-      {
-        nint_t buf_step_m = acc_buf ? ul_M * acc_ld : 0;
-        nint_t buf_step_n = acc_buf ? ul_N : 0;
-        TAcc* buf_m = acc_buf ? acc_buf : nullptr;
-        const TA* a_m = a_ptr;
-        for (int m = 0; m < m1; m += ul_M, a_m += ul_m * a_tile_s0, buf_m += buf_step_m) {
-          TAcc* buf_n = buf_m;
-          const TB* b_n = b_ptr;
-          for (int n = 0; n < n1; n += ul_N, b_n += ul_n * b_tile_s0, buf_n += buf_step_n)
-            call_tile.template operator()<UlM, UlN>(offM + m, offN + n, ul_M, ul_N, a_m, b_n, buf_n);
-        }
-      }
+    nint_t sa_m = 0, sa_k = 0, sb_n = 0, sb_k = 0;
 
-      using UrM = details::InteriorType<ur_m, is_Apacked, kMt>;
-      using UrN = details::BoundaryType<ur_n, is_Bpacked>;
-      {
-        nint_t buf_step_n = acc_buf ? ur_N : 0;
-        nint_t buf_step_m = acc_buf ? ur_M * acc_ld : 0;
-        TAcc* buf_n = acc_buf ? acc_buf + n1 : nullptr;
-        const TB* b_n = b_ptr + (n1 / kNt) * b_tile_s0;
-        for (int n = n1; n < curN; n += ur_N, b_n += ur_n * b_tile_s0, buf_n += buf_step_n) {
-          int tile_n = is_Bpacked ? ur_N : std::min(ur_N, curN - n);
-          TAcc* buf_m = buf_n;
-          const TA* a_m = a_ptr;
-          for (int m = 0; m < m2; m += ur_M, a_m += ur_m * a_tile_s0, buf_m += buf_step_m)
-            call_tile.template operator()<UrM, UrN>(offM + m, offN + n, ur_M, tile_n, a_m, b_n, buf_m);
-        }
-      }
-
-      using LrM = details::BoundaryType<lr_m, is_Apacked>;
-      using LrN = details::BoundaryType<lr_n, is_Bpacked>;
-      {
-        nint_t buf_step_n = acc_buf ? lr_N : 0;
-        nint_t buf_step_m = acc_buf ? lr_M * acc_ld : 0;
-        TAcc* buf_n = acc_buf ? acc_buf + n1 : nullptr;
-        const TB* b_n = b_ptr + (n1 / kNt) * b_tile_s0;
-        for (int n = n1; n < curN; n += lr_N, b_n += lr_n * b_tile_s0, buf_n += buf_step_n) {
-          int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
-          TAcc* buf_m = acc_buf ? buf_n + m2 * acc_ld : nullptr;
-          const TA* a_m = a_ptr + (m2 / kMt) * a_tile_s0;
-          for (int m = m2; m < m1; m += lr_M, a_m += lr_m * a_tile_s0, buf_m += buf_step_m)
-            call_tile.template operator()<LrM, LrN>(offM + m, offN + n, lr_M, tile_n, a_m, b_n, buf_m);
-        }
-      }
-
-      using LlM = details::BoundaryType<ll_m, is_Apacked>;
-      using LlN = details::InteriorType<ll_n, is_Bpacked, kNt>;
-      {
-        nint_t buf_step_m = acc_buf ? ll_M * acc_ld : 0;
-        nint_t buf_step_n = acc_buf ? ll_N : 0;
-        TAcc* buf_m = acc_buf ? acc_buf + m1 * acc_ld : nullptr;
-        const TA* a_m = a_ptr + (m1 / kMt) * a_tile_s0;
-        for (int m = m1; m < curM; m += ll_M, a_m += ll_m * a_tile_s0, buf_m += buf_step_m) {
-          int tile_m = is_Apacked ? ll_M : std::min(ll_M, curM - m);
-          TAcc* buf_n = buf_m;
-          const TB* b_n = b_ptr;
-          for (int n = 0; n < n2; n += ll_N, b_n += ll_n * b_tile_s0, buf_n += buf_step_n)
-            call_tile.template operator()<LlM, LlN>(offM + m, offN + n, tile_m, ll_N, a_m, b_n, buf_n);
-        }
-      }
-
-      {
-        nint_t buf_step_m = acc_buf ? lr_M * acc_ld : 0;
-        nint_t buf_step_n = acc_buf ? lr_N : 0;
-        TAcc* buf_m = acc_buf ? acc_buf + m1 * acc_ld : nullptr;
-        const TA* a_m = a_ptr + (m1 / kMt) * a_tile_s0;
-        for (int m = m1; m < curM; m += lr_M, a_m += lr_m * a_tile_s0, buf_m += buf_step_m) {
-          int tile_m_el = is_Apacked ? lr_M : std::min(lr_M, curM - m);
-          TAcc* buf_n = acc_buf ? buf_m + n2 : nullptr;
-          const TB* b_n = b_ptr + (n2 / kNt) * b_tile_s0;
-          for (int n = n2; n < curN; n += lr_N, b_n += lr_n * b_tile_s0, buf_n += buf_step_n) {
-            int tile_n_el = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
-            call_tile.template operator()<LrM, LrN>(offM + m, offN + n, tile_m_el, tile_n_el, a_m, b_n, buf_n);
-          }
-        }
-      }
-    } else {
-      static_assert(std::is_same_v<Scheduler, SchedulerMinCases>);
-
-      using UlM = details::InteriorType<ul_m, is_Apacked, kMt>;
-      using UlN = details::InteriorType<ul_n, is_Bpacked, kNt>;
-      {
-        nint_t buf_step_m = acc_buf ? ul_M * acc_ld : 0;
-        nint_t buf_step_n = acc_buf ? ul_N : 0;
-        TAcc* buf_m = acc_buf ? acc_buf : nullptr;
-        const TA* a_m = a_ptr;
-        for (int m = 0; m < m1; m += ul_M, a_m += ul_m * a_tile_s0, buf_m += buf_step_m) {
-          TAcc* buf_n = buf_m;
-          const TB* b_n = b_ptr;
-          for (int n = 0; n < n1; n += ul_N, b_n += ul_n * b_tile_s0, buf_n += buf_step_n)
-            call_tile.template operator()<UlM, UlN>(offM + m, offN + n, ul_M, ul_N, a_m, b_n, buf_n);
-        }
-      }
-
-      using LrM = details::BoundaryType<lr_m, is_Apacked>;
-      using LrN = details::BoundaryType<lr_n, is_Bpacked>;
-
-      {
-        nint_t buf_step_n = acc_buf ? lr_N : 0;
-        nint_t buf_step_m = acc_buf ? lr_M * acc_ld : 0;
-        TAcc* buf_n = acc_buf ? acc_buf + n1 : nullptr;
-        const TB* b_n = b_ptr + (n1 / kNt) * b_tile_s0;
-        for (int n = n1; n < curN; n += lr_N, b_n += lr_n * b_tile_s0, buf_n += buf_step_n) {
-          int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
-          TAcc* buf_m = buf_n;
-          const TA* a_m = a_ptr;
-          for (int m = 0; m < m1; m += lr_M, a_m += lr_m * a_tile_s0, buf_m += buf_step_m)
-            call_tile.template operator()<LrM, LrN>(offM + m, offN + n, lr_M, tile_n, a_m, b_n, buf_m);
-        }
-      }
-
-      {
-        nint_t buf_step_m = acc_buf ? lr_M * acc_ld : 0;
-        nint_t buf_step_n = acc_buf ? lr_N : 0;
-        TAcc* buf_m = acc_buf ? acc_buf + m1 * acc_ld : nullptr;
-        const TA* a_m = a_ptr + (m1 / kMt) * a_tile_s0;
-        for (int m = m1; m < curM; m += lr_M, a_m += lr_m * a_tile_s0, buf_m += buf_step_m) {
-          int tile_m = is_Apacked ? lr_M : std::min(lr_M, curM - m);
-          TAcc* buf_n = buf_m;
-          const TB* b_n = b_ptr;
-          for (int n = 0; n < curN; n += lr_N, b_n += lr_n * b_tile_s0, buf_n += buf_step_n) {
-            int tile_n = is_Bpacked ? lr_N : std::min(lr_N, curN - n);
-            call_tile.template operator()<LrM, LrN>(offM + m, offN + n, tile_m, tile_n, a_m, b_n, buf_n);
-          }
-        }
+    if constexpr (!is_Apacked) {
+      sa_m = A_layout.stride().template get<0>();
+      sa_k = A_layout.stride().template get<1>();
+      if constexpr (InA::needs_buffer()) {
+        nuint_t sz = nuint_t(Mt) * nuint_t(Kt);
+        a_gather = (TA*)std::aligned_alloc(64, sz * sizeof(TA));
+        VECOPS_ASSERT(a_gather, "aligned_alloc A gather failed");
       }
     }
-  };
-
-  // L2 tiling loop
-  const TA* A_m = A;
-  for (int mi = 0; mi < M; mi += Mt, A_m += a_step_M) {
-    int curM = std::min(Mt, M - mi);
-    const TB* B_n = B;
-    for (int ni = 0; ni < N; ni += Nt, B_n += b_step_N) {
-      int curN = std::min(Nt, N - ni);
-
-      TAcc * tile_acc = buffer_bypass
-          ? reinterpret_cast<TAcc *>(C + mi * sc_m + ni * sc_n)
-          : acc_buf;
-      int acc_ld = buffer_bypass ? static_cast<int>(sc_m) : curN;
-
-      auto make_accumulate = [](int ki) {
-        if constexpr (is_kTiling)
-          return bool(ki > 0);
-        else
-          return std::bool_constant<false>{};
-      };
-
-      const TA* A_mk = A_m;
-      const TB* B_nk = B_n;
-      for (int ki = 0; ki < K; ki += Kt, A_mk += a_step_K, B_nk += b_step_K) {
-        int curK = std::min(Kt, K - ki);
-        auto accumulate = make_accumulate(ki);
-
-        const TA * a_run;
-        if constexpr (is_Apacked) {
-          a_run = A_mk;
-        } else {
-          a_run = InA::prepare(A_mk, curM, curK, sa_m, sa_k, a_gather, A_layout);
-        }
-
-        const TB * b_run;
-        if constexpr (is_Bpacked) {
-          b_run = B_nk;
-        } else {
-          b_run = InB::prepare(B_nk, curN, curK, sb_n, sb_k, b_gather, B_layout);
-        }
-
-        run_scheduler(curM, curN, curK, mi, ni, ki,
-                      accumulate, tile_acc, acc_ld,
-                      a_run, A_layout, b_run, B_layout);
-      }
-
-      if constexpr (!buffer_bypass) {
-        Out::drain(tile_acc, acc_ld, curM, curN,
-                   C, sc_m, sc_n, mi, ni, fn);
+    if constexpr (!is_Bpacked) {
+      sb_n = B_layout.stride().template get<0>();
+      sb_k = B_layout.stride().template get<1>();
+      if constexpr (InB::needs_buffer()) {
+        nuint_t sz = nuint_t(Nt) * nuint_t(Kt);
+        b_gather = (TB*)std::aligned_alloc(64, sz * sizeof(TB));
+        VECOPS_ASSERT(b_gather, "aligned_alloc B gather failed");
       }
     }
+
+    nint_t a_step_M = is_Apacked ? (Mt / kMt) * A_layout.stride().template get<0>() : Mt * sa_m;
+    nint_t a_step_K = is_Apacked ? (Kt / kKt) * A_layout.stride().template get<1>() : Kt * sa_k;
+    nint_t b_step_N = is_Bpacked ? (Nt / kNt) * B_layout.stride().template get<0>() : Nt * sb_n;
+    nint_t b_step_K = is_Bpacked ? (Kt / kKt) * B_layout.stride().template get<1>() : Kt * sb_k;
+
+    L2::run(M, N, K, Mt, Nt, Kt,
+            A, A_layout, sa_m, sa_k,
+            a_step_M, a_step_K, a_gather,
+            B, B_layout, sb_n, sb_k,
+            b_step_N, b_step_K, b_gather,
+            C, C_layout, sc_m, sc_n,
+            acc_buf, kernel, fn);
+
+    if (acc_buf) std::free(acc_buf);
+    if (a_gather) std::free(a_gather);
+    if (b_gather) std::free(b_gather);
   }
+};
 
-  if (acc_buf) std::free(acc_buf);
-  if (a_gather) std::free(a_gather);
-  if (b_gather) std::free(b_gather);
+// ============================================================================
+// Gemm entry point
+// ============================================================================
+
+template <
+    typename ProblemShape,
+    typename TA, typename ALayout,
+    typename TB, typename BLayout,
+    typename TC, typename CLayout,
+    typename TilesShape,
+    typename Kernel,
+    typename Scheduler,
+    typename EpilogFn
+>
+void gemm(
+    ProblemShape shape_MNK,
+    const TA * A, ALayout A_layout,
+    const TB * B, BLayout B_layout,
+    TC * C, CLayout C_layout,
+    TilesShape tiles_shape,
+    Kernel kernel,
+    [[maybe_unused]] Scheduler scheduler,
+    const EpilogFn& fn
+) {
+  GemmOrchestrator<ProblemShape, TA, ALayout, TB, BLayout, TC, CLayout,
+                   TilesShape, Kernel, Scheduler, EpilogFn>
+      ::run(shape_MNK, A, A_layout, B, B_layout,
+            C, C_layout, tiles_shape, kernel, scheduler, fn);
 }
 
 }
