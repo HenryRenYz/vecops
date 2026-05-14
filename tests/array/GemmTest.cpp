@@ -89,68 +89,116 @@ struct ScalarAMXBf16Kernel {
       AccumulateT accumulate)
       const
   {
-    constexpr bool A_packed = (ALayout::Ndim == 4);
-    constexpr bool B_packed = (BLayout::Ndim == 4);
-    constexpr int kMt = Mtile;
-    constexpr int kNt = Ntile;
-    constexpr int kKt = Ktile;
-    constexpr int kWd = Wd;
+    constexpr bool a_packed = (ALayout::Ndim >= 4);
+    constexpr bool b_packed = (BLayout::Ndim >= 4);
+    constexpr int Mt = Mtile;
+    constexpr int Nt = Ntile;
+    constexpr int Kt = Ktile;
+    constexpr int Wd_ = Wd;
 
-    int curK;
-    nint_t lda, ldk_a, ldb, ldk_b;
-    nint_t b_s0=0, b_s1=0, b_s2=0, b_s3=0;
-    if constexpr (A_packed) {
-      curK = A_layout.shape().template get<1>();
-      if constexpr (pack_A_M_on_dim2) { lda = kKt; ldk_a = 1; }
-      else                            { lda = 1;   ldk_a = kMt; }
-    } else {
-      validM = A_layout.shape().template get<0>();
-      curK   = A_layout.shape().template get<1>();
-      lda   = A_layout.stride().template get<0>();
-      ldk_a = A_layout.stride().template get<1>();
-    }
-    if constexpr (B_packed) {
-      b_s0 = B_layout.stride().template get<0>();
-      b_s1 = B_layout.stride().template get<1>();
-      b_s2 = B_layout.stride().template get<2>();
-      b_s3 = B_layout.stride().template get<3>();
-      ldb = 0; ldk_b = 0;  // unused when B_packed (VNNI used)
-    } else {
-      validN = B_layout.shape().template get<0>();
-      ldb   = B_layout.stride().template get<0>();
-      ldk_b = B_layout.stride().template get<1>();
-    }
+    const int nM = A_layout.shape().template get<0>();
+    const int nN = B_layout.shape().template get<0>();
 
-    int ldc   = int(C_layout.stride().template get<0>());
-    int ldc_n = int(C_layout.stride().template get<1>());
+    int a_ts = A_layout.stride().template get<0>();
+    int b_ts = B_layout.stride().template get<0>();
+    int a_ks = a_packed ? A_layout.stride().template get<1>()
+                        : (Kt * A_layout.stride().template get<2>());
+    int b_ks = b_packed ? B_layout.stride().template get<1>()
+                        : (Kt * B_layout.stride().template get<2>());
+    int k_a = a_packed ? (A_layout.shape().template get<1>() * Kt)
+                       : A_layout.shape().template get<2>();
+    int k_b = b_packed ? (B_layout.shape().template get<1>() * Kt)
+                       : B_layout.shape().template get<2>();
 
-    auto b_val_vnni = [&](int n, int k) -> float {
-      int in = n / kNt, ln = n % kNt;
-      int ik = k / kKt, lk = k % kKt;
-      int kw = lk / kWd, ko = lk % kWd;
-      return static_cast<float>(
-          B[nint_t(in)*b_s0 + nint_t(ik)*b_s1 + nint_t(kw)*b_s2 + nint_t(ln*kWd+ko)*b_s3]);
+    int c_s = C_layout.stride().template get<0>();
+    int M = C_layout.shape().template get<0>();
+    int N = C_layout.shape().template get<1>();
+
+    auto load_a = [&](const TA* a, float* tile, int Mr, int Kr) {
+      if constexpr (a_packed) {
+        for (int m = 0; m < Mt; ++m)
+          for (int k = 0; k < Kt; ++k)
+            tile[m * Kt + k] = float(a[m * Kt + k]);
+      } else {
+        int a_ms = A_layout.stride().template get<1>();
+        int a_ks_r = A_layout.stride().template get<2>();
+        for (int m = 0; m < Mt; ++m)
+          for (int k = 0; k < Kt; ++k)
+            tile[m * Kt + k] = (m < Mr && k < Kr)
+                ? float(a[m * a_ms + k * a_ks_r]) : 0.0f;
+      }
+    };
+    auto load_b = [&](const TB* b, float* tile, int Nr, int Kr) {
+      if constexpr (b_packed) {
+        for (int n = 0; n < Nt; ++n)
+          for (int k = 0; k < Kt; ++k)
+            tile[n * Kt + k] = float(b[n * Kt + k]);
+      } else {
+        int b_ns = B_layout.stride().template get<1>();
+        int b_ks_r = B_layout.stride().template get<2>();
+        for (int n = 0; n < Nt; ++n)
+          for (int k = 0; k < Kt; ++k) {
+            int vnni_idx = (k / Wd_) * Kt + Wd_ * n + (k % Wd_);
+            tile[vnni_idx] = (n < Nr && k < Kr)
+                ? float(b[n * b_ns + k * b_ks_r]) : 0.0f;
+          }
+      }
     };
 
-    for (int m = 0; m < validM; ++m) {
-      for (int n = 0; n < validN; ++n) {
-        float val = init_acc(acc, m * acc_ld + n, accumulate);
-        for (int k = 0; k < curK; ++k) {
-          float av = static_cast<float>(A[nint_t(m)*lda + nint_t(k)*ldk_a]);
-          float bv;
-          if constexpr (B_packed)
-            bv = b_val_vnni(n, k);
-          else
-            bv = static_cast<float>(B[nint_t(n)*ldb + nint_t(k)*ldk_b]);
-          val += av * bv;
+    alignas(64) float a_tiles[4][16][32];
+    alignas(64) float b_tiles[4][16][32];
+    alignas(64) float accum_tiles[4][4][16][16];
+
+    auto tdpbf16ps = [&](float* dst, const float* a, const float* b) {
+      for (int m = 0; m < Mt; ++m)
+        for (int n = 0; n < Nt; ++n) {
+          float tmp = dst[m * Nt + n];
+          for (int k = 0; k < Kt / Wd_; ++k) {
+            tmp += a[m * Kt + (2 * k + 0)] * b[k * Kt + (2 * n + 0)];
+            tmp += a[m * Kt + (2 * k + 1)] * b[k * Kt + (2 * n + 1)];
+          }
+          dst[m * Nt + n] = tmp;
         }
-        if (acc)
-          acc[m * acc_ld + n] = static_cast<TAccumulator>(val);
-        else
-          C[(offM + m) * ldc + (offN + n) * ldc_n] =
-              static_cast<TC>(fn(offM + m, offN + n, val));
+    };
+
+    for (int nm = 0; nm < nM; ++nm)
+      for (int nn = 0; nn < nN; ++nn)
+        for (int mt = 0; mt < Mt; ++mt)
+          for (int nt = 0; nt < Nt; ++nt) {
+            int m_off = nm * Mt + mt, n_off = nn * Nt + nt;
+            accum_tiles[nm][nn][mt][nt] = (accumulate && m_off < M && n_off < N)
+                ? float(acc[m_off * acc_ld + n_off]) : 0.0f;
+          }
+
+    int K_lim = std::min(k_a, k_b);
+    for (int k = 0; k < K_lim; k += Kt) {
+      int kr = std::min(K_lim - k, Kt);
+      for (int nm = 0; nm < nM; ++nm) {
+        int mr = std::min(M - nm * Mt, Mt);
+        load_a(A + (k / Kt) * a_ks + nm * a_ts, &a_tiles[nm][0][0], mr, kr);
       }
+      for (int nn = 0; nn < nN; ++nn) {
+        int nr = std::min(N - nn * Nt, Nt);
+        load_b(B + (k / Kt) * b_ks + nn * b_ts, &b_tiles[nn][0][0], nr, kr);
+      }
+      for (int nm = 0; nm < nM; ++nm)
+        for (int nn = 0; nn < nN; ++nn)
+          tdpbf16ps(&accum_tiles[nm][nn][0][0], &a_tiles[nm][0][0], &b_tiles[nn][0][0]);
     }
+
+    for (int nm = 0; nm < nM; ++nm)
+      for (int nn = 0; nn < nN; ++nn)
+        for (int mt = 0; mt < Mt; ++mt)
+          for (int nt = 0; nt < Nt; ++nt) {
+            int m_off = nm * Mt + mt, n_off = nn * Nt + nt;
+            if (m_off >= M || n_off >= N) continue;
+            float v = fn(m_off + offM, n_off + offN,
+                         accum_tiles[nm][nn][mt][nt]);
+            if (acc)
+              acc[m_off * acc_ld + n_off] = static_cast<TAccumulator>(v);
+            else
+              C[m_off * c_s + n_off] = static_cast<TC>(v);
+          }
   }
 
   template <typename TL>
@@ -274,49 +322,94 @@ struct ScalarSMEFp32Kernel {
       AccumulateT accumulate)
       const
   {
-    constexpr bool A_packed = (ALayout::Ndim == 4);
-    constexpr bool B_packed = (BLayout::Ndim == 4);
-    constexpr int kMt = Mtile;
-    constexpr int kNt = Ntile;
-    constexpr int kKt = Ktile;
+    constexpr bool a_packed = (ALayout::Ndim >= 4);
+    constexpr bool b_packed = (BLayout::Ndim >= 4);
+    constexpr int Mt = Mtile;
+    constexpr int Nt = Ntile;
 
-    int curK;
-    nint_t lda, ldk_a, ldb, ldk_b;
-    if constexpr (A_packed) {
-      curK = A_layout.shape().template get<1>();
-      if constexpr (pack_A_M_on_dim2) { lda = kKt; ldk_a = 1; }
-      else                            { lda = 1;   ldk_a = kMt; }
-    } else {
-      validM = A_layout.shape().template get<0>();
-      curK   = A_layout.shape().template get<1>();
-      lda   = A_layout.stride().template get<0>();
-      ldk_a = A_layout.stride().template get<1>();
-    }
-    if constexpr (B_packed) {
-      if constexpr (pack_B_N_on_dim2) { ldb = kKt; ldk_b = 1; }
-      else                            { ldb = 1;   ldk_b = kNt; }
-    } else {
-      validN = B_layout.shape().template get<0>();
-      ldb   = B_layout.stride().template get<0>();
-      ldk_b = B_layout.stride().template get<1>();
-    }
+    const int nM = A_layout.shape().template get<0>();
+    const int nN = B_layout.shape().template get<0>();
 
-    int ldc   = int(C_layout.stride().template get<0>());
-    int ldc_n = int(C_layout.stride().template get<1>());
+    int a_ts = A_layout.stride().template get<0>();
+    int b_ts = B_layout.stride().template get<0>();
+    int a_ks = a_packed ? A_layout.stride().template get<1>()
+                        : A_layout.stride().template get<2>();
+    int b_ks = b_packed ? B_layout.stride().template get<1>()
+                        : B_layout.stride().template get<2>();
+    int K = a_packed ? A_layout.shape().template get<1>()
+                     : A_layout.shape().template get<2>();
 
-    for (int m = 0; m < validM; ++m) {
-      for (int n = 0; n < validN; ++n) {
-        float val = init_acc(acc, m * acc_ld + n, accumulate);
-        for (int k = 0; k < curK; ++k)
-          val += static_cast<float>(A[nint_t(m)*lda + nint_t(k)*ldk_a]) *
-                 static_cast<float>(B[nint_t(n)*ldb + nint_t(k)*ldk_b]);
-        if (acc)
-          acc[m * acc_ld + n] = static_cast<TAccumulator>(val);
-        else
-          C[(offM + m) * ldc + (offN + n) * ldc_n] =
-              static_cast<TC>(fn(offM + m, offN + n, val));
+    int c_s = C_layout.stride().template get<0>();
+    int M = C_layout.shape().template get<0>();
+    int N = C_layout.shape().template get<1>();
+
+    auto load_a = [&](const TA* a, float* vec, int Mr) {
+      if constexpr (a_packed) {
+        for (int m = 0; m < Mt; ++m) vec[m] = float(a[m]);
+      } else {
+        int a_ms = A_layout.stride().template get<1>();
+        for (int m = 0; m < Mt; ++m)
+          vec[m] = (m < Mr) ? float(a[m * a_ms]) : 0.0f;
       }
+    };
+    auto load_b = [&](const TB* b, float* vec, int Nr) {
+      if constexpr (b_packed) {
+        for (int n = 0; n < Nt; ++n) vec[n] = float(b[n]);
+      } else {
+        int b_ns = B_layout.stride().template get<1>();
+        for (int n = 0; n < Nt; ++n)
+          vec[n] = (n < Nr) ? float(b[n * b_ns]) : 0.0f;
+      }
+    };
+
+    alignas(64) float a_vecs[4][16];
+    alignas(64) float b_vecs[4][16];
+    alignas(64) float accum_tiles[4][4][16][16];
+
+    auto fmopa = [&](float* dst, const float* a, const float* b) {
+      for (int m = 0; m < Mt; ++m) {
+        float va = a[m];
+        for (int n = 0; n < Nt; ++n)
+          dst[m * Nt + n] += va * b[n];
+      }
+    };
+
+    for (int nm = 0; nm < nM; ++nm)
+      for (int nn = 0; nn < nN; ++nn)
+        for (int mt = 0; mt < Mt; ++mt)
+          for (int nt = 0; nt < Nt; ++nt) {
+            int m_off = nm * Mt + mt, n_off = nn * Nt + nt;
+            accum_tiles[nm][nn][mt][nt] = (accumulate && m_off < M && n_off < N)
+                ? float(acc[m_off * acc_ld + n_off]) : 0.0f;
+          }
+
+    for (int k = 0; k < K; ++k) {
+      for (int nm = 0; nm < nM; ++nm) {
+        int mr = std::min(M - nm * Mt, Mt);
+        load_a(A + k * a_ks + nm * a_ts, &a_vecs[nm][0], mr);
+      }
+      for (int nn = 0; nn < nN; ++nn) {
+        int nr = std::min(N - nn * Nt, Nt);
+        load_b(B + k * b_ks + nn * b_ts, &b_vecs[nn][0], nr);
+      }
+      for (int nm = 0; nm < nM; ++nm)
+        for (int nn = 0; nn < nN; ++nn)
+          fmopa(&accum_tiles[nm][nn][0][0], &a_vecs[nm][0], &b_vecs[nn][0]);
     }
+
+    for (int nm = 0; nm < nM; ++nm)
+      for (int nn = 0; nn < nN; ++nn)
+        for (int mt = 0; mt < Mt; ++mt)
+          for (int nt = 0; nt < Nt; ++nt) {
+            int m_off = nm * Mt + mt, n_off = nn * Nt + nt;
+            if (m_off >= M || n_off >= N) continue;
+            float v = fn(m_off + offM, n_off + offN,
+                         accum_tiles[nm][nn][mt][nt]);
+            if (acc)
+              acc[m_off * acc_ld + n_off] = static_cast<TAccumulator>(v);
+            else
+              C[m_off * c_s + n_off] = static_cast<TC>(v);
+          }
   }
 
   template <typename TL>
