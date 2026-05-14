@@ -183,7 +183,7 @@ struct ScalarAMXBf16Kernel {
       }
       for (int nm = 0; nm < nM; ++nm)
         for (int nn = 0; nn < nN; ++nn)
-          tdpbf16ps(&accum_tiles[nm][nn][0][0], &a_tiles[nm][0][0], &b_tiles[nn][0][0]);
+             tdpbf16ps(&accum_tiles[nm][nn][0][0], &a_tiles[nm][0][0], &b_tiles[nn][0][0]);
     }
 
     for (int nm = 0; nm < nM; ++nm)
@@ -192,12 +192,11 @@ struct ScalarAMXBf16Kernel {
           for (int nt = 0; nt < Nt; ++nt) {
             int m_off = nm * Mt + mt, n_off = nn * Nt + nt;
             if (m_off >= M || n_off >= N) continue;
-            float v = fn(m_off + offM, n_off + offN,
-                         accum_tiles[nm][nn][mt][nt]);
+            float raw = accum_tiles[nm][nn][mt][nt];
             if (acc)
-              acc[m_off * acc_ld + n_off] = static_cast<TAccumulator>(v);
+              acc[m_off * acc_ld + n_off] = static_cast<TAccumulator>(raw);
             else
-              C[m_off * c_s + n_off] = static_cast<TC>(v);
+              C[m_off * c_s + n_off] = static_cast<TC>(fn(m_off + offM, n_off + offN, raw));
           }
   }
 
@@ -403,12 +402,11 @@ struct ScalarSMEFp32Kernel {
           for (int nt = 0; nt < Nt; ++nt) {
             int m_off = nm * Mt + mt, n_off = nn * Nt + nt;
             if (m_off >= M || n_off >= N) continue;
-            float v = fn(m_off + offM, n_off + offN,
-                         accum_tiles[nm][nn][mt][nt]);
+            float raw = accum_tiles[nm][nn][mt][nt];
             if (acc)
-              acc[m_off * acc_ld + n_off] = static_cast<TAccumulator>(v);
+              acc[m_off * acc_ld + n_off] = static_cast<TAccumulator>(raw);
             else
-              C[m_off * c_s + n_off] = static_cast<TC>(v);
+              C[m_off * c_s + n_off] = static_cast<TC>(fn(m_off + offM, n_off + offN, raw));
           }
   }
 

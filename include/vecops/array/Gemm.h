@@ -817,7 +817,8 @@ struct SubLayoutBuilder {
   template <bool IsPacked, typename TType, typename Layout>
   VECOPS_ALWAYS_INLINE static auto a_sub(int curK, int /*tile*/, const Layout& layout) {
     if constexpr (IsPacked) {
-      auto s = make_shape(Int<TType::value>{}, curK,
+      int nK = (curK + Kernel::Ktile - 1) / Kernel::Ktile;
+      auto s = make_shape(Int<TType::value>{}, nK,
                           Int<Kernel::A_block_dim2>{},
                           Int<Kernel::A_block_dim3>{});
       return make_layout(s, layout.stride());
@@ -833,7 +834,8 @@ struct SubLayoutBuilder {
   template <bool IsPacked, typename TType, typename Layout>
   VECOPS_ALWAYS_INLINE static auto b_sub(int curK, int /*tile*/, const Layout& layout) {
     if constexpr (IsPacked) {
-      auto s = make_shape(Int<TType::value>{}, curK,
+      int nK = (curK + Kernel::Ktile - 1) / Kernel::Ktile;
+      auto s = make_shape(Int<TType::value>{}, nK,
                           Int<Kernel::B_block_dim2>{},
                           Int<Kernel::B_block_dim3>{});
       return make_layout(s, layout.stride());
@@ -1215,9 +1217,7 @@ struct L2Tiler {
       for (int ni = 0; ni < N; ni += Nt, B_n += b_step_N) {
         int curN = std::min(Nt, N - ni);
 
-        TAcc * tile_acc = buffer_bypass
-            ? reinterpret_cast<TAcc *>(C + mi * sc_m + ni * sc_n)
-            : acc_buf;
+        TAcc * tile_acc = buffer_bypass ? nullptr : acc_buf;
         int acc_ld = buffer_bypass ? static_cast<int>(sc_m) : curN;
 
         const auto* A_mk = A_m;
@@ -1329,7 +1329,7 @@ struct GemmOrchestrator {
       "B is already packed; pack-OTF for B makes no sense");
   static constexpr bool c_is_row_major = details::StrideDimConst1<CStride, 1>::value;
   static constexpr bool buffer_bypass =
-      std::is_same_v<TC, TAcc> && c_is_row_major;
+      std::is_same_v<TC, TAcc> && c_is_row_major && !is_kTiling;
 
   static constexpr int ul_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 0>::value;
   static constexpr int ul_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 1>::value;
