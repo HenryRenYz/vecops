@@ -1245,8 +1245,18 @@ struct L2Tiler {
       for (int ni = 0; ni < N; ni += Nt, B_n += b_step_N) {
         int curN = std::min(Nt, N - ni);
 
-        TAcc * tile_acc = buffer_bypass ? nullptr : acc_buf;
-        int acc_ld = buffer_bypass ? static_cast<int>(sc_m) : curN;
+        TAcc * tile_acc;
+        int acc_ld;
+        if constexpr (!buffer_bypass) {
+          tile_acc = acc_buf;
+          acc_ld = curN;
+        } else if constexpr (is_kTiling) {
+          tile_acc = reinterpret_cast<TAcc*>(C + mi * sc_m + ni * sc_n);
+          acc_ld = static_cast<int>(sc_m);
+        } else {
+          tile_acc = nullptr;
+          acc_ld = static_cast<int>(sc_m);
+        }
 
         const auto* A_mk = A_m;
         const auto* B_nk = B_n;
@@ -1351,7 +1361,7 @@ struct L2Tiler {
           }
         }
 
-        if constexpr (!buffer_bypass) {
+        if constexpr (!buffer_bypass || is_kTiling) {
           Out::drain(tile_acc, acc_ld, curM, curN,
                      C, sc_m, sc_n, mi, ni, fn);
         }
@@ -1402,8 +1412,7 @@ struct GemmOrchestrator {
   static_assert(!b_pack_otf || !is_Bpacked,
       "B is already packed; pack-OTF for B makes no sense");
   static constexpr bool c_is_row_major = details::StrideDimConst1<CStride, 1>::value;
-  static constexpr bool buffer_bypass =
-      std::is_same_v<TC, TAcc> && c_is_row_major && !is_kTiling;
+  static constexpr bool buffer_bypass = std::is_same_v<TC, TAcc> && c_is_row_major;
 
   static constexpr int ul_m = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 0>::value;
   static constexpr int ul_n = details::ShapeDim<std::remove_const_t<decltype(Kernel::shape_upper_left)>, 1>::value;
