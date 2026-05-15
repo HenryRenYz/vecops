@@ -1149,60 +1149,6 @@ struct L2Tiler {
     using InB = typename Orchestrator::InB;
     using KernelT = typename Orchestrator::KernelT;
 
-    auto pack_A_otf = [&](const auto* A_src, int curM, int curK,
-                          nint_t sa_m, nint_t sa_k, auto* buf) {
-      constexpr int Mt = KernelT::Mtile;
-      constexpr int Kt_k = KernelT::Ktile;
-      int nM = (curM + Mt - 1) / Mt;
-      int nK = (curK + Kt_k - 1) / Kt_k;
-      int a_inner = Kt_k;
-      for (int im = 0; im < nM; ++im)
-        for (int ik = 0; ik < nK; ++ik)
-          for (int m = 0; m < Mt; ++m)
-            for (int k = 0; k < Kt_k; ++k) {
-              int mg = im * Mt + m;
-              int kg = ik * Kt_k + k;
-              auto v = (mg < curM && kg < curK)
-                  ? A_src[mg * sa_m + kg * sa_k] : decltype(*A_src)(0);
-              buf[im * nK * Mt * a_inner + ik * Mt * a_inner + m * a_inner + k] = v;
-            }
-      return make_layout(
-          make_shape(nM, nK,
-                     Int<KernelT::A_block_dim2>{},
-                     Int<KernelT::A_block_dim3>{}),
-          make_stride(nK * Mt * a_inner, Mt * a_inner,
-                      Int<KernelT::Ktile>{}, Int<1>{}));
-    };
-
-    auto pack_B_otf = [&](const auto* B_src, int curN, int curK,
-                          nint_t sb_n, nint_t sb_k, auto* buf) {
-      constexpr int Nt = KernelT::Ntile;
-      constexpr int Kt_k = KernelT::Ktile;
-      constexpr int Wd = (KernelT::B_block_dim2 > 0)
-          ? (Kt_k / KernelT::B_block_dim2) : 2;
-      constexpr int kWt = Kt_k / Wd;
-      constexpr int kNw = Nt * Wd;
-      int nN = (curN + Nt - 1) / Nt;
-      int nK = (curK + Kt_k - 1) / Kt_k;
-      for (int in = 0; in < nN; ++in)
-        for (int ik = 0; ik < nK; ++ik)
-          for (int kw = 0; kw < kWt; ++kw)
-            for (int x = 0; x < kNw; ++x) {
-              int n = x / Wd, ko = x % Wd;
-              int ng = in * Nt + n;
-              int kg = ik * Kt_k + kw * Wd + ko;
-              auto v = (ng < curN && kg < curK)
-                  ? B_src[ng * sb_n + kg * sb_k] : decltype(*B_src)(0);
-              buf[in * nK * kWt * kNw + ik * kWt * kNw + kw * kNw + x] = v;
-            }
-      return make_layout(
-          make_shape(nN, nK,
-                     Int<KernelT::B_block_dim2>{},
-                     Int<KernelT::B_block_dim3>{}),
-          make_stride(nK * kWt * kNw, kWt * kNw,
-                      Int<KernelT::B_block_dim3>{}, Int<1>{}));
-    };
-
     auto make_accumulate = [](int ki) {
       if constexpr (is_kTiling)
         return bool(ki > 0);
@@ -1216,19 +1162,16 @@ struct L2Tiler {
     if constexpr (a_pack_otf || b_pack_otf) Kt_use = K;
     if constexpr (b_pack_otf) {
       constexpr int NtK = KernelT::Ntile;
-      constexpr int Wd_b = (KernelT::B_block_dim2 > 0)
-          ? (kKt / KernelT::B_block_dim2) : 2;
-      constexpr int kWt_b = kKt / Wd_b;
-      constexpr int kNw_b = NtK * Wd_b;
-      int nK_pack = (K + kKt - 1) / kKt;
+      int nK_pack = KernelT::otf_nK(K);
       int nN_per_tile = Nt / NtK;
       b_stride = (nuint_t)nN_per_tile * (nuint_t)nK_pack
-               * (nuint_t)kWt_b * (nuint_t)kNw_b;
+               * (nuint_t)NtK * (nuint_t)KernelT::Ktile;
       const auto* B_ni = B;
       for (int ni = 0; ni < N; ni += Nt, B_ni += b_step_N) {
         int curN_val = std::min(Nt, N - ni);
-        pack_B_otf(B_ni, curN_val, K, sb_n, sb_k,
-                   b_packed + (ni / Nt) * b_stride);
+        kernel.pack_B_otf(B_ni, curN_val, K,
+                          (int)sb_n, (int)sb_k,
+                          b_packed + (ni / Nt) * b_stride);
       }
     }
 
@@ -1238,7 +1181,7 @@ struct L2Tiler {
 
       // ═══ Pack A: current M-tile, full K ═══
       if constexpr (a_pack_otf) {
-        pack_A_otf(A_m, curM, K, sa_m, sa_k, a_packed);
+        kernel.pack_A_otf(A_m, curM, K, (int)sa_m, (int)sa_k, a_packed);
       }
 
       const auto* B_n = B;
@@ -1247,15 +1190,17 @@ struct L2Tiler {
 
         TAcc * tile_acc;
         int acc_ld;
-        if constexpr (!buffer_bypass) {
-          tile_acc = acc_buf;
-          acc_ld = curN;
-        } else if constexpr (is_kTiling) {
-          tile_acc = reinterpret_cast<TAcc*>(C + mi * sc_m + ni * sc_n);
-          acc_ld = static_cast<int>(sc_m);
-        } else {
-          tile_acc = nullptr;
-          acc_ld = static_cast<int>(sc_m);
+        {
+          if constexpr (!buffer_bypass) {
+            tile_acc = acc_buf;
+            acc_ld = curN;
+          } else if constexpr (is_kTiling) {
+            tile_acc = reinterpret_cast<TAcc*>(C + mi * sc_m + ni * sc_n);
+            acc_ld = static_cast<int>(sc_m);
+          } else {
+            tile_acc = nullptr;
+            acc_ld = static_cast<int>(sc_m);
+          }
         }
 
         const auto* A_mk = A_m;
@@ -1265,33 +1210,16 @@ struct L2Tiler {
           auto accumulate = make_accumulate(ki);
 
           if constexpr (a_pack_otf) {
-            constexpr int Am = KernelT::Mtile;
-            int nK = (K + kKt - 1) / kKt;
-            int nM = (curM + Am - 1) / Am;
-            auto a_lay = make_layout(
-                make_shape(nM, nK,
-                           Int<KernelT::A_block_dim2>{},
-                           Int<KernelT::A_block_dim3>{}),
-                make_stride(nK * Am * kKt, Am * kKt,
-                            Int<kKt>{}, Int<1>{}));
-            const auto* a_ptr = a_packed + (ki / kKt) * (nuint_t)Am * (nuint_t)kKt;
+            auto a_lay = KernelT::a_otf_layout(
+                KernelT::otf_nM(curM), KernelT::otf_nK(K));
+            const auto* a_ptr = a_packed
+                + (ki / kKt) * (nuint_t)KernelT::Mtile * (nuint_t)KernelT::Ktile;
 
             if constexpr (b_pack_otf) {
-              constexpr int NtKb = KernelT::Ntile;
-              constexpr int Wd_b = (KernelT::B_block_dim2 > 0)
-                  ? (kKt / KernelT::B_block_dim2) : 2;
-              constexpr int kWt_b = kKt / Wd_b;
-              constexpr int kNw_b = NtKb * Wd_b;
-              int nK_b = (K + kKt - 1) / kKt;
-              int nN_u = Nt / NtKb;
-              auto b_lay = make_layout(
-                  make_shape(nN_u, nK_b,
-                             Int<KernelT::B_block_dim2>{},
-                             Int<KernelT::B_block_dim3>{}),
-                  make_stride(nK_b * kWt_b * kNw_b, kWt_b * kNw_b,
-                              Int<KernelT::B_block_dim3>{}, Int<1>{}));
+              auto b_lay = KernelT::b_otf_layout(
+                  Nt / KernelT::Ntile, KernelT::otf_nK(K));
               const auto* b_ptr = b_packed + (ni / Nt) * b_stride
-                                + (ki / kKt) * (nuint_t)kWt_b * (nuint_t)kNw_b;
+                  + (ki / kKt) * (nuint_t)KernelT::Ntile * (nuint_t)KernelT::Ktile;
               TileScheduler<typename Orchestrator::SchedTag, Orchestrator>::run(
                   curM, curN, curK, mi, ni, ki,
                   accumulate, tile_acc, acc_ld,
@@ -1313,21 +1241,10 @@ struct L2Tiler {
                   C, C_layout, kernel, fn);
             }
           } else if constexpr (b_pack_otf) {
-            constexpr int NtKb = KernelT::Ntile;
-            constexpr int Wd_b = (KernelT::B_block_dim2 > 0)
-                ? (kKt / KernelT::B_block_dim2) : 2;
-            constexpr int kWt_b = kKt / Wd_b;
-            constexpr int kNw_b = NtKb * Wd_b;
-            int nK_b = (K + kKt - 1) / kKt;
-            int nN_u = Nt / NtKb;
-            auto b_lay = make_layout(
-                make_shape(nN_u, nK_b,
-                           Int<KernelT::B_block_dim2>{},
-                           Int<KernelT::B_block_dim3>{}),
-                make_stride(nK_b * kWt_b * kNw_b, kWt_b * kNw_b,
-                            Int<KernelT::B_block_dim3>{}, Int<1>{}));
+            auto b_lay = KernelT::b_otf_layout(
+                Nt / KernelT::Ntile, KernelT::otf_nK(K));
             const auto* b_ptr = b_packed + (ni / Nt) * b_stride
-                              + (ki / kKt) * (nuint_t)kWt_b * (nuint_t)kNw_b;
+                + (ki / kKt) * (nuint_t)KernelT::Ntile * (nuint_t)KernelT::Ktile;
 
             if constexpr (!is_Apacked) {
               decltype(A_mk) a_run = InA::prepare(A_mk, curM, curK,

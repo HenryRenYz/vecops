@@ -275,15 +275,99 @@ struct ScalarAMXBf16Kernel {
             T val = static_cast<T>(0);
             if (n_global < N && k_global < K)
               val = B[n_global * sb_n + k_global * sb_k];
-            size_t out_off = static_cast<size_t>(in) * size_t(Ktiled) * size_t(kWt) * size_t(kNw)
-                           + static_cast<size_t>(ik) * size_t(kWt) * size_t(kNw)
-                           + static_cast<size_t>(kw) * size_t(kNw)
-                           + static_cast<size_t>(x);
-            B_packed[out_off] = val;
+             size_t out_off = static_cast<size_t>(in) * size_t(Ktiled) * size_t(kWt) * size_t(kNw)
+                            + static_cast<size_t>(ik) * size_t(kWt) * size_t(kNw)
+                            + static_cast<size_t>(kw) * size_t(kNw)
+                            + static_cast<size_t>(x);
+             B_packed[out_off] = val;
           }
         }
       }
     }
+  }
+
+  /// ─── On-the-fly (OTF) packing: invoked by L2Tiler for layout conversion ───
+
+  static constexpr int otf_nK(int curK) { return (curK + Ktile - 1) / Ktile; }
+  static constexpr int otf_nM(int curM) { return (curM + Mtile - 1) / Mtile; }
+  static constexpr int otf_nN(int curN) { return (curN + Ntile - 1) / Ntile; }
+
+  /// pack_A_otf  — packs a sub-tile [curM][curK] of A into buf in 4D packed format.
+  ///   A    : pointer to start of the current M×K sub-tile in source A
+  ///   curM : valid M rows (may be less than outer tile size)
+  ///   curK : valid K columns
+  ///   sa_m : row stride of source A
+  ///   sa_k : column stride of source A
+  ///   buf  : pre-allocated buffer (size >= otf_nM(curM) * otf_nK(curK) * Mtile * Ktile)
+  template <typename TA>
+  void pack_A_otf(const TA* A, int curM, int curK,
+                  int sa_m, int sa_k, TA* buf) const {
+    constexpr int Mt = Mtile;
+    constexpr int Kt = Ktile;
+    int nM = otf_nM(curM);
+    int nK = otf_nK(curK);
+    for (int im = 0; im < nM; ++im)
+      for (int ik = 0; ik < nK; ++ik)
+        for (int m = 0; m < Mt; ++m)
+          for (int k = 0; k < Kt; ++k) {
+            int mg = im * Mt + m;
+            int kg = ik * Kt + k;
+            TA v = (mg < curM && kg < curK) ? A[mg * sa_m + kg * sa_k] : TA{0};
+            buf[im * nK * Mt * Kt + ik * Mt * Kt + m * Kt + k] = v;
+          }
+  }
+
+  /// pack_B_otf  — packs a sub-tile [curN][curK] of B into buf in VNNI 4D packed format.
+  ///   B    : pointer to start of the current N×K sub-tile in source B
+  ///   curN : valid N rows (may be less than outer tile size)
+  ///   curK : valid K columns
+  ///   sb_n : row stride of source B
+  ///   sb_k : column stride of source B
+  ///   buf  : pre-allocated buffer
+  template <typename TB>
+  void pack_B_otf(const TB* B, int curN, int curK,
+                  int sb_n, int sb_k, TB* buf) const {
+    constexpr int Nt = Ntile;
+    constexpr int Kt = Ktile;
+    constexpr int Wd_v = Wd;
+    constexpr int kWt = Kt / Wd_v;
+    constexpr int kNw = Nt * Wd_v;
+    int nN = otf_nN(curN);
+    int nK = otf_nK(curK);
+    for (int in = 0; in < nN; ++in)
+      for (int ik = 0; ik < nK; ++ik)
+        for (int kw = 0; kw < kWt; ++kw)
+          for (int x = 0; x < kNw; ++x) {
+            int n  = x / Wd_v;
+            int ko = x % Wd_v;
+            int ng = in * Nt + n;
+            int kg = ik * Kt + kw * Wd_v + ko;
+            TB v = (ng < curN && kg < curK) ? B[ng * sb_n + kg * sb_k] : TB{0};
+            buf[in * nK * kWt * kNw + ik * kWt * kNw + kw * kNw + x] = v;
+          }
+  }
+
+  /// a_otf_layout  — returns the 4D Layout object for OTF-packed A.
+  ///   Static helper — no kernel object needed at the call site.
+  static auto a_otf_layout(int nM, int nK) {
+    constexpr int Mt = Mtile;
+    constexpr int Kt = Ktile;
+    return make_layout(
+        make_shape(nM, nK, Int<A_block_dim2>{}, Int<A_block_dim3>{}),
+        make_stride(nK * Mt * Kt, Mt * Kt, Int<A_block_dim3>{}, Int<1>{}));
+  }
+
+  /// b_otf_layout  — returns the 4D Layout object for OTF-packed B (VNNI).
+  ///   Static helper — no kernel object needed at the call site.
+  static auto b_otf_layout(int nN, int nK) {
+    constexpr int Nt = Ntile;
+    constexpr int Kt = Ktile;
+    constexpr int Wd_v = Wd;
+    constexpr int kWt = Kt / Wd_v;
+    constexpr int kNw = Nt * Wd_v;
+    return make_layout(
+        make_shape(nN, nK, Int<B_block_dim2>{}, Int<B_block_dim3>{}),
+        make_stride(nK * kWt * kNw, kWt * kNw, Int<B_block_dim3>{}, Int<1>{}));
   }
 };
 
@@ -479,15 +563,92 @@ struct ScalarSMEFp32Kernel {
             T val = static_cast<T>(0);
             if (n_global < N && k_global < K)
               val = B[n_global * sb_n + k_global * sb_k];
-            size_t out_off = static_cast<size_t>(in) * size_t(Ktiled) * size_t(kKt) * size_t(kNt)
-                           + static_cast<size_t>(ik) * size_t(kKt) * size_t(kNt)
-                           + static_cast<size_t>(k) * size_t(kNt)
-                           + static_cast<size_t>(n);
-            B_packed[out_off] = val;
+             size_t out_off = static_cast<size_t>(in) * size_t(Ktiled) * size_t(kKt) * size_t(kNt)
+                            + static_cast<size_t>(ik) * size_t(kKt) * size_t(kNt)
+                            + static_cast<size_t>(k) * size_t(kNt)
+                            + static_cast<size_t>(n);
+             B_packed[out_off] = val;
           }
         }
       }
     }
+  }
+
+  /// ─── On-the-fly (OTF) packing: invoked by L2Tiler for layout conversion ───
+
+  static constexpr int otf_nK(int curK) { return (curK + Ktile - 1) / Ktile; }
+  static constexpr int otf_nM(int curM) { return (curM + Mtile - 1) / Mtile; }
+  static constexpr int otf_nN(int curN) { return (curN + Ntile - 1) / Ntile; }
+
+  /// pack_A_otf  — packs a sub-tile [curM][curK] of A into buf in 4D packed format.
+  ///   A    : pointer to start of the current M×K sub-tile in source A
+  ///   curM : valid M rows (may be less than outer tile size)
+  ///   curK : valid K columns
+  ///   sa_m : row stride of source A
+  ///   sa_k : column stride of source A
+  ///   buf  : pre-allocated buffer (size >= otf_nM(curM) * otf_nK(curK) * Mtile * Ktile)
+  template <typename TA>
+  void pack_A_otf(const TA* A, int curM, int curK,
+                  int sa_m, int sa_k, TA* buf) const {
+    constexpr int Mt = Mtile;
+    constexpr int Kt = Ktile;
+    int nM = otf_nM(curM);
+    int nK = otf_nK(curK);
+    for (int im = 0; im < nM; ++im)
+      for (int ik = 0; ik < nK; ++ik)
+        for (int m = 0; m < Mt; ++m)
+          for (int k = 0; k < Kt; ++k) {
+            int mg = im * Mt + m;
+            int kg = ik * Kt + k;
+            TA v = (mg < curM && kg < curK) ? A[mg * sa_m + kg * sa_k] : TA{0};
+            buf[im * nK * Mt * Kt + ik * Mt * Kt + m * Kt + k] = v;
+          }
+  }
+
+  /// pack_B_otf  — packs a sub-tile [curN][curK] of B into buf in 4D packed format.
+  ///   No VNNI interleave since Ktile = 1 for this kernel.
+  ///   B    : pointer to start of the current N×K sub-tile in source B
+  ///   curN : valid N rows (may be less than outer tile size)
+  ///   curK : valid K columns
+  ///   sb_n : row stride of source B
+  ///   sb_k : column stride of source B
+  ///   buf  : pre-allocated buffer
+  template <typename TB>
+  void pack_B_otf(const TB* B, int curN, int curK,
+                  int sb_n, int sb_k, TB* buf) const {
+    constexpr int Nt = Ntile;
+    constexpr int Kt = Ktile;
+    int nN = otf_nN(curN);
+    int nK = otf_nK(curK);
+    for (int in = 0; in < nN; ++in)
+      for (int ik = 0; ik < nK; ++ik)
+        for (int k = 0; k < Kt; ++k)
+          for (int n = 0; n < Nt; ++n) {
+            int ng = in * Nt + n;
+            int kg = ik * Kt + k;
+            TB v = (ng < curN && kg < curK) ? B[ng * sb_n + kg * sb_k] : TB{0};
+            buf[in * nK * Kt * Nt + ik * Kt * Nt + k * Nt + n] = v;
+          }
+  }
+
+  /// a_otf_layout  — returns the 4D Layout object for OTF-packed A.
+  ///   Static helper — no kernel object needed at the call site.
+  static auto a_otf_layout(int nM, int nK) {
+    constexpr int Mt = Mtile;
+    constexpr int Kt = Ktile;
+    return make_layout(
+        make_shape(nM, nK, Int<A_block_dim2>{}, Int<A_block_dim3>{}),
+        make_stride(nK * Mt * Kt, Mt * Kt, Int<A_block_dim3>{}, Int<1>{}));
+  }
+
+  /// b_otf_layout  — returns the 4D Layout object for OTF-packed B.
+  ///   Static helper — no kernel object needed at the call site.
+  static auto b_otf_layout(int nN, int nK) {
+    constexpr int Nt = Ntile;
+    constexpr int Kt = Ktile;
+    return make_layout(
+        make_shape(nN, nK, Int<B_block_dim2>{}, Int<B_block_dim3>{}),
+        make_stride(nK * Kt * Nt, Kt * Nt, Int<B_block_dim3>{}, Int<1>{}));
   }
 };
 
