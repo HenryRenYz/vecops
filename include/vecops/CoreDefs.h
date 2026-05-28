@@ -111,7 +111,11 @@ namespace vecops {
  * Float types
  */
 using bfloat16_t = __bf16;
+#if defined(__arm__) || defined(__aarch64__)
+using float16_t = __fp16;
+#else
 using float16_t = _Float16;
+#endif
 using float32_t = float;
 using float64_t = double;
 /**

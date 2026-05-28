@@ -19,7 +19,12 @@
 #endif
 #endif // ARCH_X86_FAMILY
 #if defined(ARCH_ARM_FAMILY)
-  #warning "TODO support ARM NEON & SVE"
+  #if defined(HAS_SVE)
+    #define HAS_CPU_CAPABILITY_SVE 1
+  #endif
+  #if defined(HAS_NEON)
+    #define HAS_CPU_CAPABILITY_NEON 1
+  #endif
 #endif // ARCH_ARM_FAMILY
 
 #if defined(CPU_CAPABILITY_AVX512) || (defined(HAS_CPU_CAPABILITY_AVX512) && !defined(CPU_CAPABILITY))
@@ -49,15 +54,6 @@
   #define VEC_WIDTH 128
 #endif // CPU_CAPABILITY_AVX
 
-#if defined(CPU_CAPABILITY_NEON) || (defined(HAS_CPU_CAPABILITY_NEON) && !defined(CPU_CAPABILITY))
-#if defined(CPU_CAPABILITY) || !defined(HAS_CPU_CAPABILITY_NEON)
-    #error "CPU capability redefined or does not supported by compiler option"
-  #endif
-  #define CPU_CAPABILITY NEON
-  #define CPU_CAPABILITY_NEON 1
-  #define VEC_WIDTH 128
-#endif // CPU_CAPABILITY_NEON
-
 #if defined(CPU_CAPABILITY_SVE) || (defined(HAS_CPU_CAPABILITY_SVE) && !defined(CPU_CAPABILITY))
 #if defined(CPU_CAPABILITY) || !defined(HAS_CPU_CAPABILITY_SVE)
     #error "CPU capability redefined or does not supported by compiler option"
@@ -66,6 +62,15 @@
   #define CPU_CAPABILITY_SVE 1
   #define VEC_WIDTH (-1) // scalable
 #endif // CPU_CAPABILITY_SVE
+
+#if defined(CPU_CAPABILITY_NEON) || (defined(HAS_CPU_CAPABILITY_NEON) && !defined(CPU_CAPABILITY))
+#if defined(CPU_CAPABILITY) || !defined(HAS_CPU_CAPABILITY_NEON)
+    #error "CPU capability redefined or does not supported by compiler option"
+  #endif
+  #define CPU_CAPABILITY NEON
+  #define CPU_CAPABILITY_NEON 1
+  #define VEC_WIDTH 128
+#endif // CPU_CAPABILITY_NEON
 
 #if !defined(CPU_CAPABILITY)
   #define CPU_CAPABILITY GENERIC

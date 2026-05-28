@@ -79,6 +79,7 @@ add_multiarch_executable(vecops-VecLoadStoreTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/LoadStoreTest.cpp
         ARCH x86-64 corei7-avx core-avx2 native
 )
+target_compile_definitions(vecops-VecLoadStoreTest-native PRIVATE GTEST_HAS_RTTI=0)
 # vecops-VecArithTest
 add_multiarch_executable(vecops-VecArithTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ArithTest.cpp
@@ -94,3 +95,16 @@ add_multiarch_executable(vecops-VecShuffleTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ShuffleTest.cpp
         ARCH x86-64 corei7-avx core-avx2 native
 )
+
+# vecops-VecSVETest (SVE type infrastructure test)
+add_multiarch_executable(vecops-VecSVETest
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/SVETest.cpp
+        ARCH native
+)
+
+# vecops-VecBasicTest (word-level basic operations: fill, get/set, blend, shuffle, interleave, etc.)
+add_multiarch_executable(vecops-VecBasicTest
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BasicTest.cpp
+        ARCH native+bf16
+)
+target_compile_definitions(vecops-VecBasicTest-native+bf16 PRIVATE GTEST_HAS_RTTI=0)

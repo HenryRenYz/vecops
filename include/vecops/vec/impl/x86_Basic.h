@@ -2999,40 +2999,40 @@ VECOPS_VFUNC V set(V v, nint_t i, TypeOf<T> x) {
 //                               Get Mask Bit                                 //
 /* ************************************************************************** */
 #ifdef HAS_AVX512DQ
-template <TLV_DECL_MASK(M), TL_IF(M::N <= 8)>
-VECOPS_VFUNC bool get(M m, nint_t i) {
+template <TLV_DECL_TAG(T), TLV_DECL_MASK(M), TL_IF(M::N <= 8)>
+VECOPS_VFUNC bool get(T, M m, nint_t i) {
   return (_cvtmask8_u32(m.v) >> i) & 1;
 }
-template <TLV_DECL_MASK(M), TL_IF(M::N == 16)>
-VECOPS_VFUNC bool get(M m, nint_t i) {
+template <TLV_DECL_TAG(T), TLV_DECL_MASK(M), TL_IF(M::N == 16)>
+VECOPS_VFUNC bool get(T, M m, nint_t i) {
   return (_cvtmask16_u32(m.v) >> i) & 1;
 }
-template <TLV_DECL_MASK(M), TL_IF(M::N == 32)>
-VECOPS_VFUNC bool get(M m, nint_t i) {
+template <TLV_DECL_TAG(T), TLV_DECL_MASK(M), TL_IF(M::N == 32)>
+VECOPS_VFUNC bool get(T, M m, nint_t i) {
   return (_cvtmask32_u32(m.v) >> i) & 1;
 }
-template <TLV_DECL_MASK(M), TL_IF(M::N == 64)>
-VECOPS_VFUNC bool get(M m, nint_t i) {
+template <TLV_DECL_TAG(T), TLV_DECL_MASK(M), TL_IF(M::N == 64)>
+VECOPS_VFUNC bool get(T, M m, nint_t i) {
   return (_cvtmask64_u64(m.v) >> i) & 1;
 }
 #else // HAS_AVX512DQ
-template <TLV_DECL_MASK(M), TL_IF(M::ElSize == 1)>
-VECOPS_VFUNC bool get(M m, nint_t i) {
+template <TLV_DECL_TAG(TTag), TLV_DECL_MASK(M), TL_IF(M::ElSize == 1)>
+VECOPS_VFUNC bool get(TTag, M m, nint_t i) {
   Tag<int8_t, M::N> t;
   return !!get(Vec<decltype(t)>{m.v}, i);
 }
-template <TLV_DECL_MASK(M), TL_IF(M::ElSize == 2)>
-VECOPS_VFUNC bool get(M m, nint_t i) {
+template <TLV_DECL_TAG(TTag), TLV_DECL_MASK(M), TL_IF(M::ElSize == 2)>
+VECOPS_VFUNC bool get(TTag, M m, nint_t i) {
   Tag<int16_t, M::N> t;
   return !!get(Vec<decltype(t)>{m.v}, i);
 }
-template <TLV_DECL_MASK(M), TL_IF(M::ElSize == 4)>
-VECOPS_VFUNC bool get(M m, nint_t i) {
+template <TLV_DECL_TAG(TTag), TLV_DECL_MASK(M), TL_IF(M::ElSize == 4)>
+VECOPS_VFUNC bool get(TTag, M m, nint_t i) {
   Tag<int32_t, M::N> t;
   return !!get(Vec<decltype(t)>{m.v}, i);
 }
-template <TLV_DECL_MASK(M), TL_IF(M::ElSize == 8)>
-VECOPS_VFUNC bool get(M m, nint_t i) {
+template <TLV_DECL_TAG(TTag), TLV_DECL_MASK(M), TL_IF(M::ElSize == 8)>
+VECOPS_VFUNC bool get(TTag, M m, nint_t i) {
   Tag<int64_t, M::N> t;
   return !!get(Vec<decltype(t)>{m.v}, i);
 }
@@ -3043,48 +3043,48 @@ VECOPS_VFUNC bool get(M m, nint_t i) {
 //                               Set Mask Bit                                 //
 /* ************************************************************************** */
 #ifdef HAS_AVX512DQ
-template <TLV_DECL_MASK(M), TL_IF(M::N <= 8)>
-VECOPS_VFUNC M set(M m, nint_t i, bool x) {
+template <TLV_DECL_TAG(T), TLV_DECL_MASK(M), TL_IF(M::N <= 8)>
+VECOPS_VFUNC M set(T, M m, nint_t i, bool x) {
   uint32_t bits = _cvtmask8_u32(m.v);
   bits = (bits & ~(1u << i)) | ((x ? 1u : 0u) << i);
   return _cvtu32_mask8(bits);
 }
-template <TLV_DECL_MASK(M), TL_IF(M::N == 16)>
-VECOPS_VFUNC M set(M m, nint_t i, bool x) {
+template <TLV_DECL_TAG(T), TLV_DECL_MASK(M), TL_IF(M::N == 16)>
+VECOPS_VFUNC M set(T, M m, nint_t i, bool x) {
   uint32_t bits = _cvtmask16_u32(m.v);
   bits = (bits & ~(1u << i)) | ((x ? 1u : 0u) << i);
   return _cvtu32_mask16(bits);
 }
-template <TLV_DECL_MASK(M), TL_IF(M::N == 32)>
-VECOPS_VFUNC M set(M m, nint_t i, bool x) {
+template <TLV_DECL_TAG(T), TLV_DECL_MASK(M), TL_IF(M::N == 32)>
+VECOPS_VFUNC M set(T, M m, nint_t i, bool x) {
   uint32_t bits = _cvtmask32_u32(m.v);
   bits = (bits & ~(1u << i)) | ((x ? 1u : 0u) << i);
   return _cvtu32_mask32(bits);
 }
-template <TLV_DECL_MASK(M), TL_IF(M::N == 64)>
-VECOPS_VFUNC M set(M m, nint_t i, bool x) {
+template <TLV_DECL_TAG(T), TLV_DECL_MASK(M), TL_IF(M::N == 64)>
+VECOPS_VFUNC M set(T, M m, nint_t i, bool x) {
   uint64_t bits = _cvtmask64_u64(m.v);
   bits = (bits & ~(1ull << i)) | ((x ? 1ull : 0ull) << i);
   return _cvtu64_mask64(bits);
 }
 #else // HAS_AVX512DQ
-template <TLV_DECL_MASK(M), TL_IF(M::ElSize == 1)>
-VECOPS_VFUNC M set(M m, nint_t i, bool x) {
+template <TLV_DECL_TAG(TTag), TLV_DECL_MASK(M), TL_IF(M::ElSize == 1)>
+VECOPS_VFUNC M set(TTag, M m, nint_t i, bool x) {
   Tag<int8_t, M::N> t;
   return set(Vec<decltype(t)>{m.v}, i, x ? int8_t(-1) : 0).v;
 }
-template <TLV_DECL_MASK(M), TL_IF(M::ElSize == 2)>
-VECOPS_VFUNC M set(M m, nint_t i, bool x) {
+template <TLV_DECL_TAG(TTag), TLV_DECL_MASK(M), TL_IF(M::ElSize == 2)>
+VECOPS_VFUNC M set(TTag, M m, nint_t i, bool x) {
   Tag<int16_t, M::N> t;
   return set(Vec<decltype(t)>{m.v}, i, x ? int16_t(-1) : 0).v;
 }
-template <TLV_DECL_MASK(M), TL_IF(M::ElSize == 4)>
-VECOPS_VFUNC M set(M m, nint_t i, bool x) {
+template <TLV_DECL_TAG(TTag), TLV_DECL_MASK(M), TL_IF(M::ElSize == 4)>
+VECOPS_VFUNC M set(TTag, M m, nint_t i, bool x) {
   Tag<int32_t, M::N> t;
   return set(Vec<decltype(t)>{m.v}, i, x ? int32_t(-1) : 0).v;
 }
-template <TLV_DECL_MASK(M), TL_IF(M::ElSize == 8)>
-VECOPS_VFUNC M set(M m, nint_t i, bool x) {
+template <TLV_DECL_TAG(TTag), TLV_DECL_MASK(M), TL_IF(M::ElSize == 8)>
+VECOPS_VFUNC M set(TTag, M m, nint_t i, bool x) {
   Tag<int64_t, M::N> t;
   return set(Vec<decltype(t)>{m.v}, i, x ? int64_t(-1) : 0).v;
 }

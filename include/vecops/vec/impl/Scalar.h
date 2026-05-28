@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <climits>
 
 #include "CoreDefs.h"
 #include "../VecBase.h"
@@ -37,7 +38,7 @@ namespace details {
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> vectorized_v(auto&& fn) {
   constexpr T t;
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   
   Vec<T> v;
@@ -50,7 +51,7 @@ VECOPS_VFUNC Vec<T> vectorized_v(auto&& fn) {
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Mask<T> vectorized_m(auto&& fn) {
   constexpr T t;
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
 
   Mask<T> v;
@@ -67,12 +68,18 @@ VECOPS_VFUNC Mask<T> vectorized_m(auto&& fn) {
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value) {
+#ifdef VECOPS_HAS_SVE
+  // SVE mode: use scalarArray loop (scalable vecs have operator[])
+  Vec<T> v;
+  for (nint_t i = 0; i < size(t); ++i) v[i] = value;
+  return v;
+#else
   return details::vectorized_v<T>([&](nint_t i){ return value; });
 }
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, nint_t n, Vec<T> default_v) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
   Vec<T> v;
@@ -171,7 +178,7 @@ VECOPS_VFUNC V local_shuf(V v, Vec<Rebind<Index<TypeOf<T>>, T>> vi) {
   constexpr T t;
   constexpr Rebind<TypeOf<T>, T> ti;
   constexpr nint_t group_el = 16 / sizeof(TypeOf<T>);
-  static_assert(is_default_impl(t) && is_default_impl(ti));
+  static_assert((is_default_impl(t) || is_scalable(t)) && (is_default_impl(ti) || is_scalable(ti)));
   static_assert(is_word_vec(t) && is_word_vec(ti));
   static_assert(size(t) >= group_el && size(t) % group_el == 0);
   V u;
@@ -187,7 +194,7 @@ VECOPS_VFUNC V local_shuf(V v, Vec<Rebind<Index<TypeOf<T>>, T>> vi) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, typename... Is>
 VECOPS_VFUNC V local_shuf(V v, Is... is) {
   constexpr T t;
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   using Ei = Index<TypeOf<T>>;
   using Ti = Rebind<Ei, T>;
@@ -214,7 +221,7 @@ template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V shuf(V v, Vec<Rebind<Index<TypeOf<T>>, T>> vi) {
   constexpr T t;
   constexpr Rebind<TypeOf<T>, T> ti;
-  static_assert(is_default_impl(t) && is_default_impl(ti));
+  static_assert((is_default_impl(t) || is_scalable(t)) && (is_default_impl(ti) || is_scalable(ti)));
   static_assert(is_word_vec(t) && is_word_vec(ti));
   V u;
   for (nint_t i = 0; i < size(t); ++i) {
@@ -266,7 +273,7 @@ VECOPS_VFUNC V lower(T t, Vec<T> v) {
  */
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
 VECOPS_VFUNC V even(T t, Vec<T> v) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   static_assert(size(t) >= 2, "Insufficient elements");
   constexpr Half<T> th;
@@ -284,7 +291,7 @@ VECOPS_VFUNC V even(T t, Vec<T> v) {
  */
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
 VECOPS_VFUNC V odd(T t, Vec<T> v) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   static_assert(size(t) >= 2, "Insufficient elements");
   constexpr Half<T> th;
@@ -302,7 +309,7 @@ VECOPS_VFUNC V odd(T t, Vec<T> v) {
  */
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
 VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   constexpr Half<T> th;
   Vec<T> u;
@@ -321,7 +328,7 @@ VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> concat_even(T t, Vec<T> v_lo, Vec<T> v_hi) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   constexpr Half<T> th;
   Vec<T> u;
@@ -340,7 +347,7 @@ VECOPS_VFUNC Vec<T> concat_even(T t, Vec<T> v_lo, Vec<T> v_hi) {
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> concat_odd(T t, Vec<T> v_lo, Vec<T> v_hi) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   constexpr Half<T> th;
   Vec<T> u;
@@ -361,7 +368,7 @@ VECOPS_VFUNC Vec<T> concat_odd(T t, Vec<T> v_lo, Vec<T> v_hi) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V local_interleave_lower(V a, V b) {
   constexpr T t;
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   constexpr nint_t group_el = 16 / sizeof(TypeOf<T>);
   constexpr nint_t half_el = group_el / 2;
@@ -386,7 +393,7 @@ VECOPS_VFUNC V local_interleave_lower(V a, V b) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V local_interleave_upper(V a, V b) {
   constexpr T t;
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   constexpr nint_t group_el = 16 / sizeof(TypeOf<T>);
   constexpr nint_t half_el = group_el / 2;
@@ -409,7 +416,7 @@ VECOPS_VFUNC V local_interleave_upper(V a, V b) {
  */
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
 VECOPS_VFUNC Vec<T> interleave(T t, V v_lo, V v_hi) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   constexpr Half<T> th;
   Vec<T> u;
@@ -429,7 +436,7 @@ VECOPS_VFUNC Vec<T> interleave(T t, V v_lo, V v_hi) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V interleave_even(V a, V b) {
   constexpr T t;
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   static_assert(size(t) >= 2, "Insufficient elements");
   constexpr nint_t half_el = size(t) / 2;
@@ -450,7 +457,7 @@ VECOPS_VFUNC V interleave_even(V a, V b) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V interleave_odd(V a, V b) {
   constexpr T t;
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   static_assert(size(t) >= 2, "Insufficient elements");
   constexpr nint_t half_el = size(t) / 2;
@@ -473,7 +480,7 @@ VECOPS_VFUNC V interleave_odd(V a, V b) {
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   Vec<T> v;
   for (nint_t i = 0; i < size(t); ++i) {
@@ -498,7 +505,7 @@ VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p) {
  */
 template <TLV_DECL_TAG(T)>
 auto loadu(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
   Vec<T> v;
@@ -531,7 +538,7 @@ VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
  */
 template <TLV_DECL_TAG(T)>
 auto loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   Vec<T> v;
   for (nint_t i = 0; i < size(t); ++i) {
@@ -554,7 +561,7 @@ auto load(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
  */
 template <TLV_DECL_TAG(T)>
 void storeu(T t, TypeOf<T>* p, Vec<T> v) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   for (nint_t i = 0; i < size(t); ++i) {
     p[i] = v[i];
@@ -575,7 +582,7 @@ void store(T t, TypeOf<T>* p, Vec<T> v) {
  */
 template <TLV_DECL_TAG(T)>
 void storeu(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
   for (nint_t i = 0; i < n; ++i) {
@@ -597,7 +604,7 @@ void store(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
  */
 template <TLV_DECL_TAG(T)>
 void storeu(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   for (nint_t i = 0; i < size(t); ++i) {
     if (m[i]) p[i] = v[i];
@@ -626,7 +633,7 @@ void store(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_default_impl(Rebind<Index<TypeOf<T>>, T>()));
   static_assert(is_word_vec(t));
   static_assert(is_word_vec(Rebind<Index<TypeOf<T>>, T>()));
@@ -644,7 +651,7 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>,
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_default_impl(Rebind<Index<TypeOf<T>>, T>()));
   static_assert(is_word_vec(t));
   static_assert(is_word_vec(Rebind<Index<TypeOf<T>>, T>()));
@@ -667,7 +674,7 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>,
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_default_impl(Rebind<Index<TypeOf<T>>, T>()));
   static_assert(is_word_vec(t));
   static_assert(is_word_vec(Rebind<Index<TypeOf<T>>, T>()));
@@ -685,7 +692,7 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>,
  */
 template <TLV_DECL_TAG(T)>
 void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_default_impl(Rebind<Index<TypeOf<T>>, T>()));
   static_assert(is_word_vec(t));
   static_assert(is_word_vec(Rebind<Index<TypeOf<T>>, T>()));
@@ -699,7 +706,7 @@ void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
  */
 template <TLV_DECL_TAG(T)>
 void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_default_impl(Rebind<Index<TypeOf<T>>, T>()));
   static_assert(is_word_vec(t));
   static_assert(is_word_vec(Rebind<Index<TypeOf<T>>, T>()));
@@ -714,7 +721,7 @@ void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Ve
  */
 template <TLV_DECL_TAG(T)>
 void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_default_impl(Rebind<Index<TypeOf<T>>, T>()));
   static_assert(is_word_vec(t));
   static_assert(is_word_vec(Rebind<Index<TypeOf<T>>, T>()));
@@ -733,7 +740,7 @@ void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, V
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 TypeOf<T> get(V v, nint_t index) {
   constexpr T t;
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   VECOPS_ASSERT(0 <= index && index < size(t), "%zd !in 0..%zd", index, size(t));
   return v[index];
@@ -742,8 +749,8 @@ TypeOf<T> get(V v, nint_t index) {
 /**
  * @brief Get a single element from a mask (scalar implementation).
  */
-template <TLV_DECL_MASK(M)>
-bool get(M v, nint_t index) {
+template <TLV_DECL_TAG(TTag), TLV_DECL_MASK(M)>
+bool get(TTag, M v, nint_t index) {
 //  static_assert(is_word_vec(t));
 //  VECOPS_ASSERT(0 <= index && index < size(t), "%zd !in 0..%zd", index, size(t));
   return v[index];
@@ -755,7 +762,7 @@ bool get(M v, nint_t index) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V set(V v, nint_t index, TypeOf<T> x) {
   constexpr T t;
-  static_assert(is_default_impl(t));
+  static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
   VECOPS_ASSERT(0 <= index && index < size(t), "%zd !in 0..%zd", index, size(t));
   Vec<T> u = v;
@@ -766,9 +773,9 @@ VECOPS_VFUNC V set(V v, nint_t index, TypeOf<T> x) {
 /**
  * @brief Set a single element in a mask (scalar implementation).
  */
-template <TLV_DECL_MASK(M)>
-VECOPS_VFUNC M set(M v, nint_t index, bool x) {
-//  static_assert(is_default_impl(t));
+template <TLV_DECL_TAG(TTag), TLV_DECL_MASK(M)>
+VECOPS_VFUNC M set(TTag, M v, nint_t index, bool x) {
+//  static_assert(is_default_impl(t) || is_scalable(t));
 //  static_assert(is_word_vec(t));
 //  VECOPS_ASSERT(0 <= index && index < size(t), "%zd !in 0..%zd", index, size(t));
   M u = v;
@@ -1092,21 +1099,21 @@ VECOPS_VFUNC Vec<T> convert_impl(T t, V v) {
 
 template <typename T, typename V, TL_IF(sizeof(TypeOf<T>) > sizeof(TypeOf<Vec2Tag<V>>))>
 VECOPS_VFUNC Vec<T> promote(T t, V v) {
-  static_assert(is_default_impl(T()) && is_default_impl(Vec2Tag<V>()));
+  static_assert(is_default_impl(T()) || is_scalable(T()) && is_default_impl(Vec2Tag<V>()));
   static_assert(is_word_vec(T()));
   return details::convert_impl(t, v);
 }
 
 template <typename T, typename V, TL_IF(sizeof(TypeOf<T>) < sizeof(TypeOf<Vec2Tag<V>>))>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  static_assert(is_default_impl(T()) && is_default_impl(Vec2Tag<V>()));
+  static_assert(is_default_impl(T()) || is_scalable(T()) && is_default_impl(Vec2Tag<V>()));
   static_assert(is_word_vec(T()));
   return details::convert_impl(t, v);
 }
 
 template <typename T, typename V, TL_IF(sizeof(TypeOf<T>) == sizeof(TypeOf<Vec2Tag<V>>))>
 VECOPS_VFUNC Vec<T> convert(T t, V v) {
-  static_assert(is_default_impl(T()) && is_default_impl(Vec2Tag<V>()));
+  static_assert(is_default_impl(T()) || is_scalable(T()) && is_default_impl(Vec2Tag<V>()));
   static_assert(is_word_vec(T()));
   return details::convert_impl(t, v);
 }

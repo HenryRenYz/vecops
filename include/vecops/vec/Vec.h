@@ -61,6 +61,13 @@
   #include "./impl/x86_LoadStore.h"
   #include "./impl/x86_Arithmetic.h"
 #elif defined(ARCH_ARM_FAMILY)
+  #if defined(HAS_SVE)
+    #include "./impl/SVE_Types.h"
+    #include "./impl/SVE_Basic.h"
+    #include "./impl/SVE_Bit.h"
+    #include "./impl/SVE_Arithmetic.h"
+    #include "./impl/SVE_LoadStore.h"
+  #endif
 #else
   #include "./impl/Scalar.h"
 #endif
@@ -705,7 +712,8 @@ VECOPS_VFUNC bool get(T t, Mask<T> m, nint_t index) {
   nint_t ws = word_size(t);
   nint_t ord = index / ws, off = index % ws;
   auto word = get_word_mask(t, m, ord);
-  return word::get(word, off);
+  constexpr auto wt = word_tag(t);
+  return word::get(wt, word, off);
 }
 
 /**
@@ -743,7 +751,8 @@ VECOPS_VFUNC auto set(T t, Mask<T> m, nint_t index, bool x) -> Mask<T> {
   nint_t ws = word_size(t);
   nint_t ord = index / ws, off = index % ws;
   auto word = get_word_mask(t, m, ord);
-  return set_word_mask(t, m, ord, word::set(word, off, x));
+  constexpr auto wt = word_tag(t);
+  return set_word_mask(t, m, ord, word::set(wt, word, off, x));
 }
 
 
