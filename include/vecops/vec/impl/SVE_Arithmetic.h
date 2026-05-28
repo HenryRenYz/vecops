@@ -192,13 +192,13 @@ VECOPS_VFUNC V neg(V v) {
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svneg_bf16_x(pg, v);
 #endif
   else if constexpr (std::is_same_v<E, int8_t>)    return svneg_s8_x(pg, v);
-  else if constexpr (std::is_same_v<E, uint8_t>)   return svneg_u8_x(pg, v);
+  else if constexpr (std::is_same_v<E, uint8_t>) { auto s = svreinterpret_s8_u8(v); return svreinterpret_u8_s8(svneg_s8_x(pg, s)); }
   else if constexpr (std::is_same_v<E, int16_t>)   return svneg_s16_x(pg, v);
-  else if constexpr (std::is_same_v<E, uint16_t>)  return svneg_u16_x(pg, v);
+  else if constexpr (std::is_same_v<E, uint16_t>) { auto s = svreinterpret_s16_u16(v); return svreinterpret_u16_s16(svneg_s16_x(pg, s)); }
   else if constexpr (std::is_same_v<E, int32_t>)   return svneg_s32_x(pg, v);
-  else if constexpr (std::is_same_v<E, uint32_t>)  return svneg_u32_x(pg, v);
+  else if constexpr (std::is_same_v<E, uint32_t>) { auto s = svreinterpret_s32_u32(v); return svreinterpret_u32_s32(svneg_s32_x(pg, s)); }
   else if constexpr (std::is_same_v<E, int64_t>)   return svneg_s64_x(pg, v);
-  else return svneg_u64_x(pg, v);
+  else { auto s = svreinterpret_s64_u64(v); return svreinterpret_u64_s64(svneg_s64_x(pg, s)); }
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
@@ -258,14 +258,13 @@ VECOPS_VFUNC V sqrt(V v, Mask<T> m, V default_v) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>> || is_small_float<TypeOf<T>>)>
 VECOPS_VFUNC V rsqrt(V v) {
   using E = TypeOf<T>;
-  auto pg = sve_detail::sve_ptrue<E>();
-  if constexpr (std::is_same_v<E, float32_t>)      return svrsqrte_f32_x(pg, v);
-  else if constexpr (std::is_same_v<E, float64_t>) return svrsqrte_f64_x(pg, v);
-  else if constexpr (std::is_same_v<E, float16_t>) return svrsqrte_f16_x(pg, v);
+  if constexpr (std::is_same_v<E, float32_t>)      return svrsqrte_f32(v);
+  else if constexpr (std::is_same_v<E, float64_t>) return svrsqrte_f64(v);
+  else if constexpr (std::is_same_v<E, float16_t>) return svrsqrte_f16(v);
 #if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svrsqrte_bf16_x(pg, v);
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svrsqrte_bf16(v);
 #endif
-  else return svrsqrte_f32_x(pg, v);
+  else return svrsqrte_f32(v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>> || is_small_float<TypeOf<T>>)>
@@ -279,14 +278,13 @@ VECOPS_VFUNC V rsqrt(V v, Mask<T> m, V default_v) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>> || is_small_float<TypeOf<T>>)>
 VECOPS_VFUNC V rcp(V v) {
   using E = TypeOf<T>;
-  auto pg = sve_detail::sve_ptrue<E>();
-  if constexpr (std::is_same_v<E, float32_t>)      return svrecpe_f32_x(pg, v);
-  else if constexpr (std::is_same_v<E, float64_t>) return svrecpe_f64_x(pg, v);
-  else if constexpr (std::is_same_v<E, float16_t>) return svrecpe_f16_x(pg, v);
+  if constexpr (std::is_same_v<E, float32_t>)      return svrecpe_f32(v);
+  else if constexpr (std::is_same_v<E, float64_t>) return svrecpe_f64(v);
+  else if constexpr (std::is_same_v<E, float16_t>) return svrecpe_f16(v);
 #if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svrecpe_bf16_x(pg, v);
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svrecpe_bf16(v);
 #endif
-  else return svrecpe_f32_x(pg, v);
+  else return svrecpe_f32(v);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>> || is_small_float<TypeOf<T>>)>

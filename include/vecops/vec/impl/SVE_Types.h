@@ -18,6 +18,15 @@
 
 #include <arm_sve.h>
 
+// Allow svget2/svget4/svset2/svset4 on predicate tuples without requiring
+// global -march=...+sve2p1. These intrinsics are pure unpack/repack of
+// multi-register tuples and generate no sve2p1 hardware instructions.
+#if !defined(__ARM_FEATURE_SVE2p1)
+#define VECOPS_SVE2P1_TARGET __attribute__((target("sve2p1"))) inline
+#else
+#define VECOPS_SVE2P1_TARGET VECOPS_VFUNC
+#endif
+
 namespace vecops::vec {
 namespace SVE {
 
@@ -230,25 +239,32 @@ struct VecDefs<T, -1, 1, void> : public BaseVecDefs<T, -1, 1> {
   }
 
   template <nint_t Index>
-  VECOPS_VFUNC VECOPS_PURE
+  VECOPS_SVE2P1_TARGET VECOPS_PURE
   static WordMask get_mask(MaskType m) {
     static_assert(0 <= Index && Index < num_words, "Static index out of range");
     return svget2(m, (uint64_t)Index);
   }
 
-  // Runtime get/set for mask not available without SVE2p1; use compile-time Index only
-  VECOPS_VFUNC VECOPS_PURE
-  static WordMask get_mask(MaskType m, nint_t index) = delete;
+  VECOPS_SVE2P1_TARGET VECOPS_PURE
+  static WordMask get_mask(MaskType m, nint_t index) {
+    VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
+    if (index == 0) return svget2(m, 0);
+    else            return svget2(m, 1);
+  }
 
   template <nint_t Index>
-  VECOPS_VFUNC VECOPS_PURE
+  VECOPS_SVE2P1_TARGET VECOPS_PURE
   static MaskType set_mask(MaskType m, WordMask u) {
     static_assert(0 <= Index && Index < num_words, "Static index out of range");
     return svset2(m, (uint64_t)Index, u);
   }
 
-  VECOPS_VFUNC VECOPS_PURE
-  static MaskType set_mask(MaskType m, nint_t index, WordMask u) = delete;
+  VECOPS_SVE2P1_TARGET VECOPS_PURE
+  static MaskType set_mask(MaskType m, nint_t index, WordMask u) {
+    VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
+    if (index == 0) return svset2(m, 0, u);
+    else            return svset2(m, 1, u);
+  }
 };
 
 // =========================================================================
@@ -309,24 +325,36 @@ struct VecDefs<T, -1, 2, void> : public BaseVecDefs<T, -1, 2> {
   }
 
   template <nint_t Index>
-  VECOPS_VFUNC VECOPS_PURE
+  VECOPS_SVE2P1_TARGET VECOPS_PURE
   static WordMask get_mask(MaskType m) {
     static_assert(0 <= Index && Index < num_words, "Static index out of range");
     return svget4(m, (uint64_t)Index);
   }
 
-  VECOPS_VFUNC VECOPS_PURE
-  static WordMask get_mask(MaskType m, nint_t index) = delete;
+  VECOPS_SVE2P1_TARGET VECOPS_PURE
+  static WordMask get_mask(MaskType m, nint_t index) {
+    VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
+    if (index == 0)      return svget4(m, 0);
+    else if (index == 1) return svget4(m, 1);
+    else if (index == 2) return svget4(m, 2);
+    else                 return svget4(m, 3);
+  }
 
   template <nint_t Index>
-  VECOPS_VFUNC VECOPS_PURE
+  VECOPS_SVE2P1_TARGET VECOPS_PURE
   static MaskType set_mask(MaskType m, WordMask u) {
     static_assert(0 <= Index && Index < num_words, "Static index out of range");
     return svset4(m, (uint64_t)Index, u);
   }
 
-  VECOPS_VFUNC VECOPS_PURE
-  static MaskType set_mask(MaskType m, nint_t index, WordMask u) = delete;
+  VECOPS_SVE2P1_TARGET VECOPS_PURE
+  static MaskType set_mask(MaskType m, nint_t index, WordMask u) {
+    VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
+    if (index == 0)      return svset4(m, 0, u);
+    else if (index == 1) return svset4(m, 1, u);
+    else if (index == 2) return svset4(m, 2, u);
+    else                 return svset4(m, 3, u);
+  }
 };
 
 // =========================================================================

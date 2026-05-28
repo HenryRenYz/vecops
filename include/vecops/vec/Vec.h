@@ -159,6 +159,34 @@ VECOPS_VFUNC Vec<T> zeros(T t) {
 }
 
 /**
+ * @brief Blend two vectors based on a mask: result[i] = m[i] ? v1[i] : v0[i].
+ *
+ * For each element, if the corresponding mask element is true, the element
+ * from v1 is selected; otherwise, the element from v0 is selected.
+ *
+ * For multi-word vectors, the operation is automatically unrolled across
+ * all constituent words.
+ *
+ * @return Blended vector
+ *
+ * @example
+ *   Tag<float32_t, 4> t;
+ *   auto v0 = fill(t, 0.0f);
+ *   auto v1 = fill(t, 1.0f);
+ *   auto m  = mwhilelt(t, 0, 2);  // m = [T, T, F, F]
+ *   auto r  = blend(v0, m, v1);   // r = [1, 1, 0, 0]
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V blend(V v0, Mask<T> m, V v1) {
+  using namespace details;
+  constexpr T t;
+  return vmap(
+      t, [=](auto tt, auto&& vv0, auto&& mm, auto&& vv1) { return word::blend(vv0, mm, vv1); },
+      ShardVec(t, v0), ShardMask(t, m), ShardVec(t, v1)
+  );
+}
+
+/**
  * @brief Create a mask filled with a single boolean value.
  *
  * @return Mask with all elements set to `value`

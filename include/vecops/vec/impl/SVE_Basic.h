@@ -74,6 +74,41 @@ template <typename E> VECOPS_VFUNC auto sve_from_u8(svuint8_t v) {
   else return svreinterpret_u64_u8(v);
 }
 
+// ---- u32 canonical type for bitcast (x86-style, prevents combinatorial explosion) ----
+template <typename E> VECOPS_VFUNC svuint32_t sve_to_u32(auto v) {
+  if constexpr (std::is_same_v<E, float32_t>) return svreinterpret_u32_f32(v);
+  else if constexpr (std::is_same_v<E, float64_t>) return svreinterpret_u32_f64(v);
+  else if constexpr (std::is_same_v<E, int8_t>)  return svreinterpret_u32_s8(v);
+  else if constexpr (std::is_same_v<E, uint8_t>) return svreinterpret_u32_u8(v);
+  else if constexpr (std::is_same_v<E, int16_t>)  return svreinterpret_u32_s16(v);
+  else if constexpr (std::is_same_v<E, uint16_t>) return svreinterpret_u32_u16(v);
+  else if constexpr (std::is_same_v<E, int32_t>)  return svreinterpret_u32_s32(v);
+  else if constexpr (std::is_same_v<E, uint32_t>) return v;
+  else if constexpr (std::is_same_v<E, int64_t>)  return svreinterpret_u32_s64(v);
+  else if constexpr (std::is_same_v<E, float16_t>) return svreinterpret_u32_f16(v);
+#if defined(__ARM_FEATURE_BF16)
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_u32_bf16(v);
+#endif
+  else return svreinterpret_u32_u64(v);
+}
+
+template <typename E> VECOPS_VFUNC auto sve_from_u32(svuint32_t v) {
+  if constexpr (std::is_same_v<E, float32_t>) return svreinterpret_f32_u32(v);
+  else if constexpr (std::is_same_v<E, float64_t>) return svreinterpret_f64_u32(v);
+  else if constexpr (std::is_same_v<E, int8_t>)  return svreinterpret_s8_u32(v);
+  else if constexpr (std::is_same_v<E, uint8_t>) return svreinterpret_u8_u32(v);
+  else if constexpr (std::is_same_v<E, int16_t>)  return svreinterpret_s16_u32(v);
+  else if constexpr (std::is_same_v<E, uint16_t>) return svreinterpret_u16_u32(v);
+  else if constexpr (std::is_same_v<E, int32_t>)  return svreinterpret_s32_u32(v);
+  else if constexpr (std::is_same_v<E, uint32_t>) return v;
+  else if constexpr (std::is_same_v<E, int64_t>)  return svreinterpret_s64_u32(v);
+  else if constexpr (std::is_same_v<E, float16_t>) return svreinterpret_f16_u32(v);
+#if defined(__ARM_FEATURE_BF16)
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u32(v);
+#endif
+  else return svreinterpret_u64_u32(v);
+}
+
 // ---- Typed intrinsic dispatchers ----
 template <typename E, typename V, typename I>
 VECOPS_VFUNC auto sve_tbl(V v, I idx) {
@@ -258,26 +293,43 @@ VECOPS_VFUNC auto sve_splice(svbool_t pg, V lo, V hi) {
 /* === mfill / mwhilelt / mwhilege (used before fill_with_n) === */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Mask<T> mfill(T, bool value) {
-  if (value) return sve_detail::sve_ptrue<TypeOf<T>>();
-  else       return svpfalse_b();
+  using E = TypeOf<T>;
+  if constexpr (sizeof(E) == 1)      return svdup_b8(value);
+  else if constexpr (sizeof(E) == 2) return svdup_b16(value);
+  else if constexpr (sizeof(E) == 4) return svdup_b32(value);
+  else return svdup_b64(value);
 }
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Mask<T> mwhilelt(T, nint_t a, nint_t b) {
   using E = TypeOf<T>;
-  if constexpr (sizeof(E) == 1)      return svwhilelt_b8_s32((int32_t)a, (int32_t)b);
-  else if constexpr (sizeof(E) == 2) return svwhilelt_b16_s32((int32_t)a, (int32_t)b);
-  else if constexpr (sizeof(E) == 4) return svwhilelt_b32_s32((int32_t)a, (int32_t)b);
-  else return svwhilelt_b64_s64((int64_t)a, (int64_t)b);
+  if constexpr (sizeof(nint_t) == 4) {
+    if constexpr (sizeof(E) == 1)      return svwhilelt_b8_s32((int32_t)a, (int32_t)b);
+    else if constexpr (sizeof(E) == 2) return svwhilelt_b16_s32((int32_t)a, (int32_t)b);
+    else if constexpr (sizeof(E) == 4) return svwhilelt_b32_s32((int32_t)a, (int32_t)b);
+    else return svwhilelt_b64_s32((int32_t)a, (int32_t)b);
+  } else {
+    if constexpr (sizeof(E) == 1)      return svwhilelt_b8_s64((int64_t)a, (int64_t)b);
+    else if constexpr (sizeof(E) == 2) return svwhilelt_b16_s64((int64_t)a, (int64_t)b);
+    else if constexpr (sizeof(E) == 4) return svwhilelt_b32_s64((int64_t)a, (int64_t)b);
+    else return svwhilelt_b64_s64((int64_t)a, (int64_t)b);
+  }
 }
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Mask<T> mwhilege(T, nint_t a, nint_t b) {
   using E = TypeOf<T>;
-  if constexpr (sizeof(E) == 1)      return svnot_b_z(svptrue_b8(),  svwhilelt_b8_s32((int32_t)a, (int32_t)b));
-  else if constexpr (sizeof(E) == 2) return svnot_b_z(svptrue_b16(), svwhilelt_b16_s32((int32_t)a, (int32_t)b));
-  else if constexpr (sizeof(E) == 4) return svnot_b_z(svptrue_b32(), svwhilelt_b32_s32((int32_t)a, (int32_t)b));
-  else return svnot_b_z(svptrue_b64(), svwhilelt_b64_s64((int64_t)a, (int64_t)b));
+  if constexpr (sizeof(nint_t) == 4) {
+    if constexpr (sizeof(E) == 1)      return svnot_b_z(svptrue_b8(),  svwhilelt_b8_s32((int32_t)a, (int32_t)b));
+    else if constexpr (sizeof(E) == 2) return svnot_b_z(svptrue_b16(), svwhilelt_b16_s32((int32_t)a, (int32_t)b));
+    else if constexpr (sizeof(E) == 4) return svnot_b_z(svptrue_b32(), svwhilelt_b32_s32((int32_t)a, (int32_t)b));
+    else return svnot_b_z(svptrue_b64(), svwhilelt_b64_s32((int32_t)a, (int32_t)b));
+  } else {
+    if constexpr (sizeof(E) == 1)      return svnot_b_z(svptrue_b8(),  svwhilelt_b8_s64((int64_t)a, (int64_t)b));
+    else if constexpr (sizeof(E) == 2) return svnot_b_z(svptrue_b16(), svwhilelt_b16_s64((int64_t)a, (int64_t)b));
+    else if constexpr (sizeof(E) == 4) return svnot_b_z(svptrue_b32(), svwhilelt_b32_s64((int64_t)a, (int64_t)b));
+    else return svnot_b_z(svptrue_b64(), svwhilelt_b64_s64((int64_t)a, (int64_t)b));
+  }
 }
 
 /* === fill / zeros === */
@@ -321,15 +373,28 @@ VECOPS_VFUNC V blend(V v0, Mask<T> m, V v1) {
 }
 
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, nint_t n, Vec<T> default_v) {
-  VECOPS_ASSERT(0 <= n && n <= word_size(t), "");
-  auto m = word::mwhilelt(t, 0, n);
-  return word::blend(default_v, m, word::fill(t, value));
+VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, Mask<T> m, Vec<T> default_v) {
+  using E = TypeOf<T>;
+  if constexpr (std::is_same_v<E, float32_t>)      return svdup_n_f32_m(default_v, m, value);
+  else if constexpr (std::is_same_v<E, float64_t>) return svdup_n_f64_m(default_v, m, value);
+  else if constexpr (std::is_same_v<E, int8_t>)    return svdup_n_s8_m(default_v, m, value);
+  else if constexpr (std::is_same_v<E, uint8_t>)   return svdup_n_u8_m(default_v, m, value);
+  else if constexpr (std::is_same_v<E, int16_t>)   return svdup_n_s16_m(default_v, m, value);
+  else if constexpr (std::is_same_v<E, uint16_t>)  return svdup_n_u16_m(default_v, m, value);
+  else if constexpr (std::is_same_v<E, int32_t>)   return svdup_n_s32_m(default_v, m, value);
+  else if constexpr (std::is_same_v<E, uint32_t>)  return svdup_n_u32_m(default_v, m, value);
+  else if constexpr (std::is_same_v<E, int64_t>)   return svdup_n_s64_m(default_v, m, value);
+  else if constexpr (std::is_same_v<E, float16_t>)  return svdup_n_f16_m(default_v, m, value);
+#if defined(__ARM_FEATURE_BF16)
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svdup_n_bf16_m(default_v, m, value);
+#endif
+  else return svdup_n_u64_m(default_v, m, value);
 }
 
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, Mask<T> m, Vec<T> default_v) {
-  return word::blend(default_v, m, word::fill(t, value));
+VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, nint_t n, Vec<T> default_v) {
+  VECOPS_ASSERT(0 <= n && n <= word_size(t), "");
+  return word::fill(t, value, word::mwhilelt(t, 0, n), default_v);
 }
 
 template <TLV_DECL_TAG(T)>
@@ -416,31 +481,7 @@ template <typename To, typename V, typename Ti = Vec2Tag<V>,
 VECOPS_VFUNC Vec<To> bitcast(To, V v) {
   using Eo = TypeOf<To>; using Ei = TypeOf<Ti>;
   if constexpr (std::is_same_v<Ti, To>) return v;
-  if constexpr (std::is_same_v<Eo, float32_t> && std::is_same_v<Ei, int32_t>)  return svreinterpret_f32_s32(v);
-  if constexpr (std::is_same_v<Eo, float32_t> && std::is_same_v<Ei, uint32_t>) return svreinterpret_f32_u32(v);
-  if constexpr (std::is_same_v<Eo, float64_t> && std::is_same_v<Ei, int64_t>)  return svreinterpret_f64_s64(v);
-  if constexpr (std::is_same_v<Eo, float64_t> && std::is_same_v<Ei, uint64_t>) return svreinterpret_f64_u64(v);
-  if constexpr (std::is_same_v<Eo, int32_t>  && std::is_same_v<Ei, float32_t>) return svreinterpret_s32_f32(v);
-  if constexpr (std::is_same_v<Eo, int32_t>  && std::is_same_v<Ei, uint32_t>)  return svreinterpret_s32_u32(v);
-  if constexpr (std::is_same_v<Eo, uint32_t> && std::is_same_v<Ei, float32_t>) return svreinterpret_u32_f32(v);
-  if constexpr (std::is_same_v<Eo, uint32_t> && std::is_same_v<Ei, int32_t>)   return svreinterpret_u32_s32(v);
-  if constexpr (std::is_same_v<Eo, int64_t>  && std::is_same_v<Ei, float64_t>) return svreinterpret_s64_f64(v);
-  if constexpr (std::is_same_v<Eo, int64_t>  && std::is_same_v<Ei, uint64_t>)  return svreinterpret_s64_u64(v);
-  if constexpr (std::is_same_v<Eo, uint64_t> && std::is_same_v<Ei, float64_t>) return svreinterpret_u64_f64(v);
-  if constexpr (std::is_same_v<Eo, uint64_t> && std::is_same_v<Ei, int64_t>)   return svreinterpret_u64_s64(v);
-  // 16-bit float <-> 16-bit int
-  if constexpr (std::is_same_v<Eo, float16_t>  && std::is_same_v<Ei, int16_t>)  return svreinterpret_f16_s16(v);
-  if constexpr (std::is_same_v<Eo, float16_t>  && std::is_same_v<Ei, uint16_t>) return svreinterpret_f16_u16(v);
-  if constexpr (std::is_same_v<Eo, int16_t>  && std::is_same_v<Ei, float16_t>)  return svreinterpret_s16_f16(v);
-  if constexpr (std::is_same_v<Eo, uint16_t> && std::is_same_v<Ei, float16_t>)  return svreinterpret_u16_f16(v);
-#if defined(__ARM_FEATURE_BF16)
-  if constexpr (std::is_same_v<Eo, bfloat16_t> && std::is_same_v<Ei, int16_t>)  return svreinterpret_bf16_s16(v);
-  if constexpr (std::is_same_v<Eo, bfloat16_t> && std::is_same_v<Ei, uint16_t>) return svreinterpret_bf16_u16(v);
-  if constexpr (std::is_same_v<Eo, int16_t>  && std::is_same_v<Ei, bfloat16_t>) return svreinterpret_s16_bf16(v);
-  if constexpr (std::is_same_v<Eo, uint16_t> && std::is_same_v<Ei, bfloat16_t>) return svreinterpret_u16_bf16(v);
-#endif
-  static_assert(sizeof(Eo) != sizeof(Eo), "Unsupported bitcast");
-  return {};
+  return sve_detail::sve_from_u32<Eo>(sve_detail::sve_to_u32<Ei>(v));
 }
 
 /* === shuf / local_shuf === */
