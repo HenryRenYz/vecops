@@ -75,9 +75,15 @@ static constexpr nint_t size(nint_t scalable_size = -1) {
 template <nint_t N, int POW2>
 static constexpr nint_t adjusted_size(nint_t scalable_size = -1) {
   if constexpr (N < 0) {
+    if (scalable_size > 0) {
+      if (POW2 >= 0)
+        return scalable_size << POW2;
+      else
+        return scalable_size >> (-POW2);
+    }
     return scalable_size;
   } else {
-    if (POW2 > 0)
+    if (POW2 >= 0)
       return N << POW2;
     else
       return N >> (-POW2);

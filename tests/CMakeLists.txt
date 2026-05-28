@@ -105,6 +105,5 @@ add_multiarch_executable(vecops-VecSVETest
 # vecops-VecBasicTest (word-level basic operations: fill, get/set, blend, shuffle, interleave, etc.)
 add_multiarch_executable(vecops-VecBasicTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BasicTest.cpp
-        ARCH native+bf16
+        ARCH native+bf16+sve+sve2
 )
-target_compile_definitions(vecops-VecBasicTest-native+bf16 PRIVATE GTEST_HAS_RTTI=0)
