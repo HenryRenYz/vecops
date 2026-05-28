@@ -550,7 +550,58 @@ VECOPS_VFUNC V local_shuf(V v, Vec<Rebind<Index<TypeOf<T>>, T>> vi) {
 }
 
 template <int... Is, TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-VECOPS_VFUNC V local_shuf(V v) { return word::local_shuf(v, Is...); }
+VECOPS_VFUNC V local_shuf(V v) {
+  using E = TypeOf<T>;
+  static_assert(sizeof...(Is) * sizeof(E) == 16,
+                "Number of compile-time indices must match elements per 16-byte lane");
+  constexpr std::array<int, sizeof...(Is)> arr = {Is...};
+  // arr[0] = I_{M-1}, arr[M-1] = I_0 -- reverse to ascending order for svdupq
+
+  if constexpr (sizeof...(Is) == 2) {
+    auto vi = svdupq_n_s64(arr[1], arr[0]);
+    return word::local_shuf(v, vi);
+  } else if constexpr (sizeof...(Is) == 4) {
+    auto vi = svdupq_n_s32(arr[3], arr[2], arr[1], arr[0]);
+    return word::local_shuf(v, vi);
+  } else if constexpr (sizeof...(Is) == 8) {
+    auto vi = svdupq_n_s16(arr[7], arr[6], arr[5], arr[4],
+                           arr[3], arr[2], arr[1], arr[0]);
+    return word::local_shuf(v, vi);
+  } else if constexpr (sizeof...(Is) == 16) {
+    auto vi = svdupq_n_s8(arr[15], arr[14], arr[13], arr[12],
+                          arr[11], arr[10], arr[9], arr[8],
+                          arr[7], arr[6], arr[5], arr[4],
+                          arr[3], arr[2], arr[1], arr[0]);
+    return word::local_shuf(v, vi);
+  }
+}
+
+// Runtime scalar-index overloads — dispatch to vector version via svdupq
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V local_shuf(V v, int i3, int i2, int i1, int i0) {
+  auto vi = svdupq_n_s32(i0, i1, i2, i3);
+  return word::local_shuf(v, vi);
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V local_shuf(V v, int i1, int i0) {
+  auto vi = svdupq_n_s64(i0, i1);
+  return word::local_shuf(v, vi);
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V local_shuf(V v, int i7, int i6, int i5, int i4, int i3, int i2, int i1, int i0) {
+  auto vi = svdupq_n_s16(i0, i1, i2, i3, i4, i5, i6, i7);
+  return word::local_shuf(v, vi);
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V local_shuf(V v, int i15, int i14, int i13, int i12, int i11, int i10, int i9, int i8,
+                                         int i7, int i6, int i5, int i4, int i3, int i2, int i1, int i0) {
+  auto vi = svdupq_n_s8(i0, i1, i2, i3, i4, i5, i6, i7,
+                        i8, i9, i10, i11, i12, i13, i14, i15);
+  return word::local_shuf(v, vi);
+}
 
 /* === upper / lower / even / odd === */
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
@@ -621,20 +672,20 @@ VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
   using E = TypeOf<T>; nint_t hn = word_size(t)/2;
   auto lo = word::mwhilelt(t, 0, hn);
   auto up = svnot_b_z(sve_detail::sve_ptrue<E>(), lo);
-  if constexpr (std::is_same_v<E, float32_t>)      return svsplice_f32(up, v_lo, v_hi);
-  else if constexpr (std::is_same_v<E, float64_t>) return svsplice_f64(up, v_lo, v_hi);
-  else if constexpr (std::is_same_v<E, int8_t>)     return svsplice_s8(up, v_lo, v_hi);
-  else if constexpr (std::is_same_v<E, uint8_t>)    return svsplice_u8(up, v_lo, v_hi);
-  else if constexpr (std::is_same_v<E, int16_t>)    return svsplice_s16(up, v_lo, v_hi);
-  else if constexpr (std::is_same_v<E, uint16_t>)   return svsplice_u16(up, v_lo, v_hi);
-  else if constexpr (std::is_same_v<E, int32_t>)    return svsplice_s32(up, v_lo, v_hi);
-  else if constexpr (std::is_same_v<E, uint32_t>)   return svsplice_u32(up, v_lo, v_hi);
-  else if constexpr (std::is_same_v<E, int64_t>)    return svsplice_s64(up, v_lo, v_hi);
-  else if constexpr (std::is_same_v<E, float16_t>)   return svsplice_f16(up, v_lo, v_hi);
+  if constexpr (std::is_same_v<E, float32_t>)      return svsplice_f32(lo, v_lo, v_hi);
+  else if constexpr (std::is_same_v<E, float64_t>) return svsplice_f64(lo, v_lo, v_hi);
+  else if constexpr (std::is_same_v<E, int8_t>)     return svsplice_s8(lo, v_lo, v_hi);
+  else if constexpr (std::is_same_v<E, uint8_t>)    return svsplice_u8(lo, v_lo, v_hi);
+  else if constexpr (std::is_same_v<E, int16_t>)    return svsplice_s16(lo, v_lo, v_hi);
+  else if constexpr (std::is_same_v<E, uint16_t>)   return svsplice_u16(lo, v_lo, v_hi);
+  else if constexpr (std::is_same_v<E, int32_t>)    return svsplice_s32(lo, v_lo, v_hi);
+  else if constexpr (std::is_same_v<E, uint32_t>)   return svsplice_u32(lo, v_lo, v_hi);
+  else if constexpr (std::is_same_v<E, int64_t>)    return svsplice_s64(lo, v_lo, v_hi);
+  else if constexpr (std::is_same_v<E, float16_t>)   return svsplice_f16(lo, v_lo, v_hi);
 #if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>)  return svsplice_bf16(up, v_lo, v_hi);
+  else if constexpr (std::is_same_v<E, bfloat16_t>)  return svsplice_bf16(lo, v_lo, v_hi);
 #endif
-  else return svsplice_u64(up, v_lo, v_hi);
+  else return svsplice_u64(lo, v_lo, v_hi);
 }
 
 template <TLV_DECL_TAG(T)>
@@ -780,12 +831,6 @@ VECOPS_VFUNC V local_interleave_upper(V a, V b) {
 #endif
   else return svzip1_u64(aw, bw);
 }
-
-/* === Conversion stubs (will be replaced by SVE_Conversions.h) === */
-template <typename T,typename V, TL_IF(sizeof(TypeOf<T>) > sizeof(TypeOf<Vec2Tag<V>>))> VECOPS_VFUNC Vec<T> promote(T,V v) { return v; }
-template <typename T,typename V, TL_IF(sizeof(TypeOf<T>) < sizeof(TypeOf<Vec2Tag<V>>))> VECOPS_VFUNC Vec<T> demote(T,V v) { return v; }
-template <typename T,typename V, TL_IF(sizeof(TypeOf<T>) == sizeof(TypeOf<Vec2Tag<V>>))> VECOPS_VFUNC Vec<T> convert(T,V v) { return v; }
-template <typename To,typename Vi, typename Ti=Vec2Tag<Vi>> VECOPS_VFUNC Vec<To> reshape(To,Vi v) { return v; }
 
 }  // namespace word
 }  // namespace vecops::vec::CPU_CAPABILITY

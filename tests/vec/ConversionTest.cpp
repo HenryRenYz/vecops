@@ -82,14 +82,15 @@ template <typename T>
 }
 
 template <typename T>
-constexpr nint_t full_vec_size() {
-  return VEC_WIDTH / 8 / sizeof(T);
-}
-
-template <typename T>
 T* alloc_aligned(size_t count) {
   void* ptr = std::aligned_alloc(DEFAULT_ALIGNMENT, count * sizeof(T));
   return static_cast<T*>(ptr);
+}
+
+template <typename T>
+nint_t full_vec_elements() {
+  ScalableTag<T> t;
+  return size(t);
 }
 
 } // namespace test_utils
@@ -104,16 +105,14 @@ struct Pair {
 // Promote Tests: smaller type -> larger type
 // ============================================================================
 
-// Test fixture for promote operations
 template <typename TPair>
 class VecPromoteTest : public ::testing::Test {
 protected:
   using TIn = typename TPair::T1;
   using TOut = typename TPair::T2;
-  using InType = TIn;
-  using OutType = TOut;
-  static constexpr nint_t IN_SIZE = test_utils::full_vec_size<TIn>();
-  static constexpr nint_t OUT_SIZE = test_utils::full_vec_size<TOut>();
+
+  nint_t in_elements()  { return test_utils::full_vec_elements<TIn>(); }
+  nint_t out_elements() { return test_utils::full_vec_elements<TOut>(); }
 
   void SetUp() override {
     in_data_ = test_utils::alloc_aligned<TIn>(256);
@@ -134,8 +133,8 @@ using PromoteTypes = ::testing::Types<
     // 8-bit -> 16-bit
     Pair<int8_t, int16_t>,
     Pair<uint8_t, uint16_t>,
-    Pair<int8_t, uint16_t>,   // signed -> unsigned (sign extension)
-    Pair<uint8_t, int16_t>,   // unsigned -> signed (zero extension)
+    Pair<int8_t, uint16_t>,
+    Pair<uint8_t, int16_t>,
     // 8-bit -> 32-bit
     Pair<int8_t, int32_t>,
     Pair<uint8_t, uint32_t>,
@@ -162,49 +161,53 @@ using PromoteTypes = ::testing::Types<
 TYPED_TEST_SUITE(VecPromoteTest, PromoteTypes);
 
 TYPED_TEST(VecPromoteTest, BasicPromote) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
-  constexpr nint_t N = std::min(TestFixture::IN_SIZE, TestFixture::OUT_SIZE);
+  using TIn = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
+  nint_t n_in  = this->in_elements();
+  nint_t n_out = this->out_elements();
+  nint_t N = n_in < n_out ? n_in : n_out;
 
-  FixedTag<TIn, N> t_in;
-  FixedTag<TOut, N> t_out;
+  ScalableTag<TIn>  t_in;
+  ScalableTag<TOut> t_out;
 
-  auto v_in = loadu(t_in, this->in_data_);
+  auto v_in  = loadu(t_in, this->in_data_);
   auto v_out = promote(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(this->in_data_[i]);
-    TOut actual = get(t_out, v_out, i);
+    TOut actual   = get(t_out, v_out, i);
     EXPECT_TRUE(test_utils::values_equal(expected, actual))
         << "i=" << i << " input=" << static_cast<long long>(this->in_data_[i]);
   }
 }
 
 TYPED_TEST(VecPromoteTest, PromoteWithZeroValues) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
-  constexpr nint_t N_OUT = TestFixture::OUT_SIZE;
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
+  nint_t N = this->out_elements();
 
-  FixedTag<TIn, N_OUT> t_in;
-  FixedTag<TOut, N_OUT> t_out;
+  ScalableTag<TIn>  t_in;
+  ScalableTag<TOut> t_out;
 
-  auto v_in = zeros(t_in);
+  auto v_in  = zeros(t_in);
   auto v_out = promote(t_out, v_in);
 
-  for (nint_t i = 0; i < N_OUT; ++i) {
+  for (nint_t i = 0; i < N; ++i) {
     EXPECT_EQ(TOut(0), get(t_out, v_out, i)) << "i=" << i;
   }
 }
 
 TYPED_TEST(VecPromoteTest, PromoteWithMaxMinValues) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
-  constexpr nint_t N = std::min(TestFixture::IN_SIZE, TestFixture::OUT_SIZE);
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
+  nint_t n_in  = this->in_elements();
+  nint_t n_out = this->out_elements();
+  nint_t N = n_in < n_out ? n_in : n_out;
 
-  FixedTag<TIn, N> t_in;
-  FixedTag<TOut, N> t_out;
+  ScalableTag<TIn>  t_in;
+  ScalableTag<TOut> t_out;
 
-  alignas(16) TIn data[N];
+  auto data = test_utils::alloc_aligned<TIn>(N);
   for (nint_t i = 0; i < N; ++i) {
     if (i % 4 == 0) data[i] = std::numeric_limits<TIn>::max();
     else if (i % 4 == 1) data[i] = std::numeric_limits<TIn>::min();
@@ -212,46 +215,46 @@ TYPED_TEST(VecPromoteTest, PromoteWithMaxMinValues) {
     else data[i] = TIn(-1);
   }
 
-  auto v_in = loadu(t_in, data);
+  auto v_in  = loadu(t_in, data);
   auto v_out = promote(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(data[i]);
-    TOut actual = get(t_out, v_out, i);
+    TOut actual   = get(t_out, v_out, i);
     EXPECT_TRUE(test_utils::values_equal(expected, actual))
         << "i=" << i << " input=" << static_cast<long long>(data[i]);
   }
+  std::free(data);
 }
 
 // Sign extension test for signed types
 TYPED_TEST(VecPromoteTest, SignExtensionTest) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
-  constexpr nint_t N = std::min(TestFixture::IN_SIZE, TestFixture::OUT_SIZE);
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
+  nint_t n_in  = this->in_elements();
+  nint_t n_out = this->out_elements();
+  nint_t N = n_in < n_out ? n_in : n_out;
 
   if constexpr (std::is_signed_v<TIn>) {
-    FixedTag<TIn, N> t_in;
-    FixedTag<TOut, N> t_out;
+    ScalableTag<TIn>  t_in;
+    ScalableTag<TOut> t_out;
 
-    alignas(16) TIn data[N];
-    // Create negative values
+    auto data = test_utils::alloc_aligned<TIn>(N);
     for (nint_t i = 0; i < N; ++i) {
       data[i] = static_cast<TIn>(-(i + 1));
     }
 
-    auto v_in = loadu(t_in, data);
+    auto v_in  = loadu(t_in, data);
     auto v_out = promote(t_out, v_in);
 
     for (nint_t i = 0; i < N; ++i) {
-      TOut actual = get(t_out, v_out, i);
-      // For signed-to-signed, should preserve sign
-      // For signed-to-unsigned, sign extension still applies then reinterpreted
-      TIn original = data[i];
-      // Verify that promotion preserves the value
+      TOut actual   = get(t_out, v_out, i);
+      TIn  original = data[i];
       EXPECT_TRUE(test_utils::values_equal(static_cast<TOut>(original), actual))
           << "i=" << i << " original=" << static_cast<long long>(original)
           << " actual=" << static_cast<long long>(actual);
     }
+    std::free(data);
   }
 }
 
@@ -264,14 +267,12 @@ class VecDemoteTest : public ::testing::Test {
 protected:
   using TIn = typename TPair::T1;
   using TOut = typename TPair::T2;
-  using InType = TIn;
-  using OutType = TOut;
-  static constexpr nint_t IN_SIZE = test_utils::full_vec_size<TIn>();
-  static constexpr nint_t OUT_SIZE = test_utils::full_vec_size<TOut>();
+
+  nint_t in_elements()  { return test_utils::full_vec_elements<TIn>(); }
+  nint_t out_elements() { return test_utils::full_vec_elements<TOut>(); }
 
   void SetUp() override {
     in_data_ = test_utils::alloc_aligned<TIn>(256);
-    // Use smaller values to avoid overflow issues in demote tests
     for (size_t i = 0; i < 256; ++i) {
       if constexpr (std::is_floating_point_v<TIn> ||
                     std::is_same_v<TIn, float16_t> ||
@@ -325,33 +326,37 @@ using DemoteTypes = ::testing::Types<
 TYPED_TEST_SUITE(VecDemoteTest, DemoteTypes);
 
 TYPED_TEST(VecDemoteTest, BasicDemote) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
-  constexpr nint_t N = std::min(TestFixture::IN_SIZE, TestFixture::OUT_SIZE);
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
+  nint_t n_in  = this->in_elements();
+  nint_t n_out = this->out_elements();
+  nint_t N = n_in < n_out ? n_in : n_out;
 
-  FixedTag<TIn, N> t_in;
-  FixedTag<TOut, N> t_out;
+  ScalableTag<TIn>  t_in;
+  ScalableTag<TOut> t_out;
 
-  auto v_in = loadu(t_in, this->in_data_);
+  auto v_in  = loadu(t_in, this->in_data_);
   auto v_out = demote(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(this->in_data_[i]);
-    TOut actual = get(t_out, v_out, i);
+    TOut actual   = get(t_out, v_out, i);
     EXPECT_TRUE(test_utils::values_equal(expected, actual))
               << "i=" << i << " input=" << static_cast<long long>(this->in_data_[i]);
   }
 }
 
 TYPED_TEST(VecDemoteTest, DemoteWithZeroValues) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
-  constexpr nint_t N = std::min(TestFixture::IN_SIZE, TestFixture::OUT_SIZE);
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
+  nint_t n_in  = this->in_elements();
+  nint_t n_out = this->out_elements();
+  nint_t N = n_in < n_out ? n_in : n_out;
 
-  FixedTag<TIn, N> t_in;
-  FixedTag<TOut, N> t_out;
+  ScalableTag<TIn>  t_in;
+  ScalableTag<TOut> t_out;
 
-  auto v_in = zeros(t_in);
+  auto v_in  = zeros(t_in);
   auto v_out = demote(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -361,37 +366,37 @@ TYPED_TEST(VecDemoteTest, DemoteWithZeroValues) {
 
 // Truncation behavior test for overflow cases
 TYPED_TEST(VecDemoteTest, TruncationBehavior) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
-  constexpr nint_t N = std::min(TestFixture::IN_SIZE, TestFixture::OUT_SIZE);
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
+  nint_t n_in  = this->in_elements();
+  nint_t n_out = this->out_elements();
+  nint_t N = n_in < n_out ? n_in : n_out;
 
-  // Only test if output type can represent values within its range
-  FixedTag<TIn, N> t_in;
-  FixedTag<TOut, N> t_out;
+  ScalableTag<TIn>  t_in;
+  ScalableTag<TOut> t_out;
 
-  // Create values that are within representable range of output type
-  alignas(16) TIn data[N];
+  auto data = test_utils::alloc_aligned<TIn>(N);
   TIn max_out = static_cast<TIn>(std::numeric_limits<TOut>::max());
   TIn min_out = std::is_signed_v<TOut>
                     ? static_cast<TIn>(std::numeric_limits<TOut>::min())
                     : TIn(0);
 
   for (nint_t i = 0; i < N; ++i) {
-    // Alternate between min, max, and middle values
     if (i % 3 == 0) data[i] = max_out;
     else if (i % 3 == 1 && std::is_signed_v<TOut>) data[i] = min_out;
     else data[i] = TIn(0);
   }
 
-  auto v_in = loadu(t_in, data);
+  auto v_in  = loadu(t_in, data);
   auto v_out = demote(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(data[i]);
-    TOut actual = get(t_out, v_out, i);
+    TOut actual   = get(t_out, v_out, i);
     EXPECT_TRUE(test_utils::values_equal(expected, actual))
         << "i=" << i << " input=" << static_cast<long long>(data[i]);
   }
+  std::free(data);
 }
 
 // ============================================================================
@@ -403,10 +408,9 @@ class VecConvertTest : public ::testing::Test {
 protected:
   using TIn = typename TPair::T1;
   using TOut = typename TPair::T2;
-  using InType = TIn;
-  using OutType = TOut;
   static_assert(sizeof(TIn) == sizeof(TOut), "Convert requires same-size types");
-  static constexpr nint_t SIZE = test_utils::full_vec_size<TIn>();
+
+  nint_t elements() { return test_utils::full_vec_elements<TIn>(); }
 
   void SetUp() override {
     in_data_ = test_utils::alloc_aligned<TIn>(256);
@@ -449,33 +453,33 @@ using ConvertTypes = ::testing::Types<
 TYPED_TEST_SUITE(VecConvertTest, ConvertTypes);
 
 TYPED_TEST(VecConvertTest, BasicConvert) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
-  constexpr nint_t N = TestFixture::SIZE;
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
+  nint_t N = this->elements();
 
-  FixedTag<TIn, N> t_in;
-  FixedTag<TOut, N> t_out;
+  ScalableTag<TIn>  t_in;
+  ScalableTag<TOut> t_out;
 
-  auto v_in = loadu(t_in, this->in_data_);
+  auto v_in  = loadu(t_in, this->in_data_);
   auto v_out = convert(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(this->in_data_[i]);
-    TOut actual = get(t_out, v_out, i);
+    TOut actual   = get(t_out, v_out, i);
     EXPECT_TRUE(test_utils::values_equal(expected, actual))
         << "i=" << i << " input=" << static_cast<long long>(this->in_data_[i]);
   }
 }
 
 TYPED_TEST(VecConvertTest, ConvertWithZeroValues) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
-  constexpr nint_t N = TestFixture::SIZE;
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
+  nint_t N = this->elements();
 
-  FixedTag<TIn, N> t_in;
-  FixedTag<TOut, N> t_out;
+  ScalableTag<TIn>  t_in;
+  ScalableTag<TOut> t_out;
 
-  auto v_in = zeros(t_in);
+  auto v_in  = zeros(t_in);
   auto v_out = convert(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -485,52 +489,50 @@ TYPED_TEST(VecConvertTest, ConvertWithZeroValues) {
 
 // Test signed/unsigned reinterpretation
 TYPED_TEST(VecConvertTest, SignedUnsignedConversion) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
-  constexpr nint_t N = TestFixture::SIZE;
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
+  nint_t N = this->elements();
 
   if constexpr (!std::is_floating_point_v<TIn>)
   if constexpr ((std::is_signed_v<TIn> && std::is_unsigned_v<TOut>) ||
                 (std::is_unsigned_v<TIn> && std::is_signed_v<TOut>)) {
-    FixedTag<TIn, N> t_in;
-    FixedTag<TOut, N> t_out;
+    ScalableTag<TIn>  t_in;
+    ScalableTag<TOut> t_out;
 
-    alignas(16) TIn data[N];
-    // Create values with high bit set (negative if signed)
+    auto data = test_utils::alloc_aligned<TIn>(N);
     for (nint_t i = 0; i < N; ++i) {
       data[i] = static_cast<TIn>(~TIn(0) - i);
     }
 
-    auto v_in = loadu(t_in, data);
+    auto v_in  = loadu(t_in, data);
     auto v_out = convert(t_out, v_in);
 
     for (nint_t i = 0; i < N; ++i) {
       TOut expected = vecops::convert<TOut>(data[i]);
-      TOut actual = get(t_out, v_out, i);
+      TOut actual   = get(t_out, v_out, i);
       EXPECT_TRUE(test_utils::values_equal(expected, actual))
           << "i=" << i << " input=" << static_cast<long long>(data[i])
           << " expected=" << static_cast<long long>(expected);
     }
+    std::free(data);
   }
 }
 
 // Float to int and int to float conversion test
 TYPED_TEST(VecConvertTest, FloatIntConversion) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
-  constexpr nint_t N = TestFixture::SIZE;
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
+  nint_t N = this->elements();
 
   if constexpr ((std::is_floating_point_v<TIn> && std::is_integral_v<TOut>) ||
                 (std::is_integral_v<TIn> && std::is_floating_point_v<TOut>)) {
-    FixedTag<TIn, N> t_in;
-    FixedTag<TOut, N> t_out;
+    ScalableTag<TIn>  t_in;
+    ScalableTag<TOut> t_out;
 
-    alignas(16) TIn data[N];
-    // Use values that can be exactly represented
+    auto data = test_utils::alloc_aligned<TIn>(N);
     for (nint_t i = 0; i < N; ++i) {
       if constexpr (std::is_floating_point_v<TIn>) {
         if constexpr (std::is_unsigned_v<TOut>) {
-          // note: conversion from negative float to unsigned int is undefined
           data[i] = static_cast<TIn>(i * 10 + 33);
         } else {
           data[i] = static_cast<TIn>(i * 10 - 50);
@@ -540,15 +542,16 @@ TYPED_TEST(VecConvertTest, FloatIntConversion) {
       }
     }
 
-    auto v_in = loadu(t_in, data);
+    auto v_in  = loadu(t_in, data);
     auto v_out = convert(t_out, v_in);
 
     for (nint_t i = 0; i < N; ++i) {
       TOut expected = vecops::convert<TOut>(data[i]);
-      TOut actual = get(t_out, v_out, i);
+      TOut actual   = get(t_out, v_out, i);
       EXPECT_TRUE(test_utils::values_equal(expected, actual))
           << "i=" << i << " input=" << static_cast<long long>(data[i]);
     }
+    std::free(data);
   }
 }
 
@@ -556,7 +559,6 @@ TYPED_TEST(VecConvertTest, FloatIntConversion) {
 // Corner Case Tests
 // ============================================================================
 
-// Test fixture for corner cases
 class VecConvertCornerCaseTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -573,237 +575,251 @@ protected:
 
 // Test: int8_t (-1) -> uint16_t (should be 65535 via sign extension)
 TEST_F(VecConvertCornerCaseTest, PromoteNegativeToUnsigned) {
-  FixedTag<int8_t, 16> t_in;
-  FixedTag<uint16_t, 16> t_out;
+  ScalableTag<int8_t>  t_in;
+  ScalableTag<uint16_t> t_out;
+  nint_t N = std::min(size(t_in), size(t_out));
 
-  alignas(16) int8_t data[16];
-  for (int i = 0; i < 16; ++i) {
+  auto data = test_utils::alloc_aligned<int8_t>(N);
+  for (nint_t i = 0; i < N; ++i) {
     data[i] = -1;
   }
 
-  auto v_in = loadu(t_in, data);
+  auto v_in  = loadu(t_in, data);
   auto v_out = promote(t_out, v_in);
 
-  for (nint_t i = 0; i < 16; ++i) {
+  for (nint_t i = 0; i < N; ++i) {
     uint16_t actual = get(t_out, v_out, i);
-    // -1 as int8_t promoted to uint16_t should be 0xFFFF (65535)
     EXPECT_EQ(uint16_t(65535), actual) << "i=" << i;
   }
+  std::free(data);
 }
 
 // Test: uint8_t (255) -> int16_t (should be 255, not -1)
 TEST_F(VecConvertCornerCaseTest, PromoteUnsignedToSigned) {
-  FixedTag<uint8_t, 16> t_in;
-  FixedTag<int16_t, 16> t_out;
+  ScalableTag<uint8_t> t_in;
+  ScalableTag<int16_t> t_out;
+  nint_t N = std::min(size(t_in), size(t_out));
 
-  alignas(16) uint8_t data[16];
-  for (int i = 0; i < 16; ++i) {
+  auto data = test_utils::alloc_aligned<uint8_t>(N);
+  for (nint_t i = 0; i < N; ++i) {
     data[i] = 255;
   }
 
-  auto v_in = loadu(t_in, data);
+  auto v_in  = loadu(t_in, data);
   auto v_out = promote(t_out, v_in);
 
-  for (nint_t i = 0; i < 16; ++i) {
+  for (nint_t i = 0; i < N; ++i) {
     int16_t actual = get(t_out, v_out, i);
-    // 255 as uint8_t promoted to int16_t should be 255
     EXPECT_EQ(int16_t(255), actual) << "i=" << i;
   }
+  std::free(data);
 }
 
 // Test: int16_t (-1) -> int8_t (truncation to -1)
 TEST_F(VecConvertCornerCaseTest, DemoteNegativeValue) {
-  FixedTag<int16_t, 8> t_in;
-  FixedTag<int8_t, 8> t_out;
+  ScalableTag<int16_t> t_in;
+  ScalableTag<int8_t>  t_out;
+  nint_t N = std::min(size(t_in), size(t_out));
 
-  alignas(16) int16_t data[8];
-  for (int i = 0; i < 8; ++i) {
+  auto data = test_utils::alloc_aligned<int16_t>(N);
+  for (nint_t i = 0; i < N; ++i) {
     data[i] = -1;
   }
 
-  auto v_in = loadu(t_in, data);
+  auto v_in  = loadu(t_in, data);
   auto v_out = demote(t_out, v_in);
 
-  for (nint_t i = 0; i < 8; ++i) {
+  for (nint_t i = 0; i < N; ++i) {
     int8_t actual = get(t_out, v_out, i);
-    // -1 truncated should still be -1 (0xFF)
     EXPECT_EQ(int8_t(-1), actual) << "i=" << i;
   }
+  std::free(data);
 }
 
 // Test: int32_t <-> float32_t for boundary values
 TEST_F(VecConvertCornerCaseTest, Int32Float32Boundary) {
-  FixedTag<int32_t, 4> t_int;
-  FixedTag<float32_t, 4> t_float;
-
-  alignas(16) int32_t int_data[4] = {
-    0,
-    1,
-    -1,
-    123456
-  };
+  ScalableTag<int32_t>   t_int;
+  ScalableTag<float32_t> t_float;
+  nint_t N = size(t_int);
 
   // int32 -> float32
-  auto v_int = loadu(t_int, int_data);
-  auto v_float = convert(t_float, v_int);
+  {
+    auto int_data = test_utils::alloc_aligned<int32_t>(N);
+    for (nint_t i = 0; i < N; ++i) {
+      nint_t vals[] = {0, 1, -1, 123456};
+      int_data[i] = vals[i % 4];
+    }
 
-  for (nint_t i = 0; i < 4; ++i) {
-    float32_t expected = static_cast<float32_t>(int_data[i]);
-    float32_t actual = get(t_float, v_float, i);
-    EXPECT_FLOAT_EQ(expected, actual) << "i=" << i;
+    auto v_int   = loadu(t_int, int_data);
+    auto v_float = convert(t_float, v_int);
+
+    for (nint_t i = 0; i < N; ++i) {
+      float32_t expected = static_cast<float32_t>(int_data[i]);
+      float32_t actual = get(t_float, v_float, i);
+      EXPECT_FLOAT_EQ(expected, actual) << "i=" << i;
+    }
+    std::free(int_data);
   }
 
   // float32 -> int32
-  alignas(16) float32_t float_data[4] = {
-    0.0f,
-    1.0f,
-    -1.0f,
-    123456.0f
-  };
+  {
+    auto float_data = test_utils::alloc_aligned<float32_t>(N);
+    float32_t fvals[] = {0.0f, 1.0f, -1.0f, 123456.0f};
+    for (nint_t i = 0; i < N; ++i) {
+      float_data[i] = fvals[i % 4];
+    }
 
-  auto v_f = loadu(t_float, float_data);
-  auto v_i = convert(t_int, v_f);
+    auto v_f = loadu(t_float, float_data);
+    auto v_i = convert(t_int, v_f);
 
-  for (nint_t i = 0; i < 4; ++i) {
-    int32_t expected = static_cast<int32_t>(float_data[i]);
-    int32_t actual = get(t_int, v_i, i);
-    EXPECT_EQ(expected, actual) << "i=" << i;
+    for (nint_t i = 0; i < N; ++i) {
+      int32_t expected = static_cast<int32_t>(float_data[i]);
+      int32_t actual = get(t_int, v_i, i);
+      EXPECT_EQ(expected, actual) << "i=" << i;
+    }
+    std::free(float_data);
   }
 }
 
 // Test: Large int32_t values to float32_t (precision loss expected)
 TEST_F(VecConvertCornerCaseTest, LargeInt32ToFloat32) {
-  FixedTag<int32_t, 4> t_int;
-  FixedTag<float32_t, 4> t_float;
+  ScalableTag<int32_t>   t_int;
+  ScalableTag<float32_t> t_float;
+  nint_t N = size(t_int);
 
-  alignas(16) int32_t int_data[4] = {
-    0x7FFFFFFF,  // max int32
-    (int)0x80000000,  // min int32 (as unsigned, will be -2147483648 as signed)
+  auto int_data = test_utils::alloc_aligned<int32_t>(N);
+  int32_t vals[] = {
+    0x7FFFFFFF,
+    (int32_t)0x80000000,
     1234567890,
     -1234567890
   };
+  for (nint_t i = 0; i < N; ++i) {
+    int_data[i] = vals[i % 4];
+  }
 
-  auto v_int = loadu(t_int, int_data);
+  auto v_int   = loadu(t_int, int_data);
   auto v_float = convert(t_float, v_int);
 
-  for (nint_t i = 0; i < 4; ++i) {
-    float32_t actual = get(t_float, v_float, i);
+  for (nint_t i = 0; i < N; ++i) {
+    float32_t actual   = get(t_float, v_float, i);
     float32_t expected = static_cast<float32_t>(int_data[i]);
-    // Allow some precision difference for large values
     EXPECT_NEAR(expected, actual, std::abs(expected) * 1e-6f)
         << "i=" << i << " input=" << int_data[i];
   }
+  std::free(int_data);
 }
 
-// Test: Multi-word vector conversions
-//TEST_F(VecConvertCornerCaseTest, MultiWordPromote) {
-//  // 2-word int8_t vector -> int16_t
-//  FixedTag<int8_t, 32> t_in;   // 2 words (256-bit total)
-//  FixedTag<int16_t, 16> t_out; // 1 word (256-bit total)
-//
-//  alignas(16) int8_t data[32];
-//  for (int i = 0; i < 32; ++i) {
-//    data[i] = static_cast<int8_t>(i - 16);
-//  }
-//
-//  auto v_in = loadu(t_in, data);
-//  auto v_out = promote(t_out, v_in);
-//
-//  for (nint_t i = 0; i < 16; ++i) {
-//    int16_t expected = static_cast<int16_t>(data[i]);
-//    int16_t actual = get(t_out, v_out, i);
-//    EXPECT_EQ(expected, actual) << "i=" << i;
-//  }
-//}
-
 TEST_F(VecConvertCornerCaseTest, MultiWordDemote) {
-  FixedTag<int16_t, 16> t_in;
-  FixedTag<int8_t, 16> t_out;
+  ScalableTag<int16_t> t_in;
+  ScalableTag<int8_t>  t_out;
+  nint_t N = std::min(size(t_in), size(t_out));
 
-  alignas(16) int16_t data[16];
-  for (int i = 0; i < 16; ++i) {
+  auto data = test_utils::alloc_aligned<int16_t>(N);
+  for (nint_t i = 0; i < N; ++i) {
     data[i] = static_cast<int16_t>((i - 8) * 10);
   }
 
-  auto v_in = loadu(t_in, data);
+  auto v_in  = loadu(t_in, data);
   auto v_out = demote(t_out, v_in);
 
-  for (nint_t i = 0; i < 16; ++i) {
+  for (nint_t i = 0; i < N; ++i) {
     int8_t expected = static_cast<int8_t>(data[i]);
-    int8_t actual = get(t_out, v_out, i);
+    int8_t actual   = get(t_out, v_out, i);
     EXPECT_EQ(expected, actual) << "i=" << i;
   }
+  std::free(data);
 }
 
 TEST_F(VecConvertCornerCaseTest, MultiWordConvert) {
-  FixedTag<int32_t, 8> t_in;
-  FixedTag<uint32_t, 8> t_out;
+  ScalableTag<int32_t>  t_in;
+  ScalableTag<uint32_t> t_out;
+  nint_t N = size(t_in);
 
-  alignas(16) int32_t data[8];
-  for (int i = 0; i < 8; ++i) {
+  auto data = test_utils::alloc_aligned<int32_t>(N);
+  for (nint_t i = 0; i < N; ++i) {
     data[i] = (i - 4) * 1000;
   }
 
-  auto v_in = loadu(t_in, data);
+  auto v_in  = loadu(t_in, data);
   auto v_out = convert(t_out, v_in);
 
-  for (nint_t i = 0; i < 8; ++i) {
+  for (nint_t i = 0; i < N; ++i) {
     uint32_t expected = static_cast<uint32_t>(data[i]);
-    uint32_t actual = get(t_out, v_out, i);
+    uint32_t actual   = get(t_out, v_out, i);
     EXPECT_EQ(expected, actual) << "i=" << i;
   }
+  std::free(data);
 }
 
 // Test: Float64 <-> Float32 conversion
 TEST_F(VecConvertCornerCaseTest, Float64Float32RoundTrip) {
-  FixedTag<float64_t, 2> t_f64;
-  FixedTag<float32_t, 2> t_f32;
+  ScalableTag<float64_t> t_f64;
+  ScalableTag<float32_t> t_f32;
+  nint_t N = std::min(size(t_f64), size(t_f32));
 
   // Float64 -> Float32 (demote)
-  alignas(16) float64_t f64_data[2] = {1.5, -2.5};
-  auto v_f64 = loadu(t_f64, f64_data);
-  auto v_f32 = demote(t_f32, v_f64);
+  {
+    auto f64_data = test_utils::alloc_aligned<float64_t>(N);
+    float64_t vals[] = {1.5, -2.5};
+    for (nint_t i = 0; i < N; ++i) {
+      f64_data[i] = vals[i % 2];
+    }
 
-  for (nint_t i = 0; i < 2; ++i) {
-    float32_t expected = static_cast<float32_t>(f64_data[i]);
-    float32_t actual = get(t_f32, v_f32, i);
-    EXPECT_FLOAT_EQ(expected, actual) << "i=" << i;
+    auto v_f64 = loadu(t_f64, f64_data);
+    auto v_f32 = demote(t_f32, v_f64);
+
+    for (nint_t i = 0; i < N; ++i) {
+      float32_t expected = static_cast<float32_t>(f64_data[i]);
+      float32_t actual = get(t_f32, v_f32, i);
+      EXPECT_FLOAT_EQ(expected, actual) << "i=" << i;
+    }
+    std::free(f64_data);
   }
 }
 
 TEST_F(VecConvertCornerCaseTest, Float32Float64RoundTrip) {
-  FixedTag<float32_t, 4> t_f32;
-  FixedTag<float64_t, 2> t_f64;
+  ScalableTag<float32_t> t_f32;
+  ScalableTag<float64_t> t_f64;
+  nint_t N = std::min(size(t_f32), size(t_f64));
 
   // Float32 -> Float64 (promote)
-  alignas(16) float32_t f32_data[4] = {1.5f, -2.5f, 0.0f, 100.5f};
-  auto v_f32 = loadu(t_f32, f32_data);
-  auto v_f64 = promote(t_f64, v_f32);
+  {
+    auto f32_data = test_utils::alloc_aligned<float32_t>(N);
+    float32_t vals[] = {1.5f, -2.5f, 0.0f, 100.5f};
+    for (nint_t i = 0; i < N; ++i) {
+      f32_data[i] = vals[i % 4];
+    }
 
-  for (nint_t i = 0; i < 2; ++i) {
-    float64_t expected = static_cast<float64_t>(f32_data[i]);
-    float64_t actual = get(t_f64, v_f64, i);
-    EXPECT_DOUBLE_EQ(expected, actual) << "i=" << i;
+    auto v_f32 = loadu(t_f32, f32_data);
+    auto v_f64 = promote(t_f64, v_f32);
+
+    for (nint_t i = 0; i < N; ++i) {
+      float64_t expected = static_cast<float64_t>(f32_data[i]);
+      float64_t actual = get(t_f64, v_f64, i);
+      EXPECT_DOUBLE_EQ(expected, actual) << "i=" << i;
+    }
+    std::free(f32_data);
   }
 }
 
 // Test: All bits set patterns
 TEST_F(VecConvertCornerCaseTest, AllBitsSetPattern) {
-  // int8_t all 0xFF -> uint16_t should be 0xFFFF
-  FixedTag<int8_t, 16> t_i8;
-  FixedTag<uint16_t, 8> t_u16;
+  ScalableTag<int8_t>   t_i8;
+  ScalableTag<uint16_t> t_u16;
+  nint_t N = std::min(size(t_i8), size(t_u16));
 
-  alignas(16) int8_t data[16];
-  memset(data, 0xFF, 16);
+  auto data = test_utils::alloc_aligned<int8_t>(N);
+  memset(data, 0xFF, N * sizeof(int8_t));
 
-  auto v_in = loadu(t_i8, data);
+  auto v_in  = loadu(t_i8, data);
   auto v_out = promote(t_u16, v_in);
 
-  for (nint_t i = 0; i < 8; ++i) {
+  for (nint_t i = 0; i < N; ++i) {
     uint16_t actual = get(t_u16, v_out, i);
-    // Each pair of 0xFF becomes 0xFFFF
     EXPECT_EQ(uint16_t(0xFFFF), actual) << "i=" << i;
   }
+  std::free(data);
 }
 
 // ============================================================================
@@ -827,8 +843,6 @@ class VecBitcastTest : public ::testing::Test {
 protected:
   using TIn = typename TPair::T1;
   using TOut = typename TPair::T2;
-  using InType = TIn;
-  using OutType = TOut;
   static_assert(sizeof(TIn) == sizeof(TOut), "Bitcast requires same-size types");
 
   void SetUp() override {
@@ -872,21 +886,19 @@ using BitcastTypes = ::testing::Types<
 TYPED_TEST_SUITE(VecBitcastTest, BitcastTypes);
 
 TYPED_TEST(VecBitcastTest, BasicBitcast) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
 
-  ScalableTag<TIn> t_in;
+  ScalableTag<TIn>  t_in;
   ScalableTag<TOut> t_out;
-  constexpr nint_t N = size(t_in);
+  nint_t N = size(t_in);
 
-  auto v_in = loadu(t_in, this->in_data_);
+  auto v_in  = loadu(t_in, this->in_data_);
   auto v_out = bitcast(t_out, v_in);
 
-  // Bitcast should preserve bit pattern exactly
   for (nint_t i = 0; i < N; ++i) {
     TIn original = this->in_data_[i];
     TOut actual = get(t_out, v_out, i);
-    // Reinterpret bits: use memcpy for type-punning
     TOut expected;
     std::memcpy(&expected, &original, sizeof(TOut));
     EXPECT_TRUE(bits_equal(expected, actual))
@@ -895,18 +907,17 @@ TYPED_TEST(VecBitcastTest, BasicBitcast) {
 }
 
 TYPED_TEST(VecBitcastTest, BitcastRoundTrip) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
 
-  ScalableTag<TIn> t_in;
+  ScalableTag<TIn>  t_in;
   ScalableTag<TOut> t_out;
-  constexpr nint_t N = size(t_in);
+  nint_t N = size(t_in);
 
-  auto v_in = loadu(t_in, this->in_data_);
+  auto v_in  = loadu(t_in, this->in_data_);
   auto v_mid = bitcast(t_out, v_in);
   auto v_out = bitcast(t_in, v_mid);
 
-  // Round-trip should preserve original values
   for (nint_t i = 0; i < N; ++i) {
     TIn expected = this->in_data_[i];
     TIn actual = get(t_in, v_out, i);
@@ -915,14 +926,14 @@ TYPED_TEST(VecBitcastTest, BitcastRoundTrip) {
 }
 
 TYPED_TEST(VecBitcastTest, BitcastWithZeroValues) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
 
-  ScalableTag<TIn> t_in;
+  ScalableTag<TIn>  t_in;
   ScalableTag<TOut> t_out;
-  constexpr nint_t N = size(t_in);
+  nint_t N = size(t_in);
 
-  auto v_in = zeros(t_in);
+  auto v_in  = zeros(t_in);
   auto v_out = bitcast(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -933,124 +944,122 @@ TYPED_TEST(VecBitcastTest, BitcastWithZeroValues) {
 
 // Test special bit patterns (all ones = NaN for floats)
 TYPED_TEST(VecBitcastTest, BitcastWithAllOnesPattern) {
-  using TIn = typename TestFixture::InType;
-  using TOut = typename TestFixture::OutType;
+  using TIn  = typename TestFixture::TIn;
+  using TOut = typename TestFixture::TOut;
 
-  ScalableTag<TIn> t_in;
+  ScalableTag<TIn>  t_in;
   ScalableTag<TOut> t_out;
-  constexpr nint_t N = size(t_in);
+  nint_t N = size(t_in);
 
-  // Use aligned buffer with sufficient size
   auto data = test_utils::alloc_aligned<TIn>(N);
-  // Fill with all 1s
   std::memset(data, 0xFF, N * sizeof(TIn));
 
-  auto v_in = loadu(t_in, data);
+  auto v_in  = loadu(t_in, data);
   auto v_out = bitcast(t_out, v_in);
 
-  // All bits should be 1 - compare as bits to handle NaN correctly
   for (nint_t i = 0; i < N; ++i) {
     TOut actual = get(t_out, v_out, i);
     TOut expected;
     std::memset(&expected, 0xFF, sizeof(TOut));
     EXPECT_TRUE(bits_equal(expected, actual)) << "i=" << i;
   }
-
   std::free(data);
 }
 
 // Corner case tests for bitcast using ScalableTag
 TEST_F(VecConvertCornerCaseTest, BitcastFloat32ToInt32) {
   ScalableTag<float32_t> t_f32;
-  ScalableTag<int32_t> t_i32;
-  constexpr nint_t N = size(t_f32);
+  ScalableTag<int32_t>   t_i32;
+  nint_t N = size(t_f32);
 
-  // Test specific float values with known bit representations
   auto f32_data = test_utils::alloc_aligned<float32_t>(N);
-  f32_data[0] = 0.0f;           // 0x00000000
-  f32_data[1] = -0.0f;          // 0x80000000
-  f32_data[2] = 1.0f;           // 0x3F800000
-  f32_data[3] = -1.0f;          // 0xBF800000
+  for (nint_t i = 0; i < N; ++i) f32_data[i] = 0.0f;
+  f32_data[0] = 0.0f;
+  f32_data[1] = -0.0f;
+  if (N > 2) f32_data[2] = 1.0f;
+  if (N > 3) f32_data[3] = -1.0f;
 
   auto v_f32 = loadu(t_f32, f32_data);
   auto v_i32 = bitcast(t_i32, v_f32);
 
-  EXPECT_EQ(0x00000000, uint32_t(get(t_i32, v_i32, 0)));
-  EXPECT_EQ(0x80000000, uint32_t(get(t_i32, v_i32, 1)));
-  EXPECT_EQ(0x3F800000, uint32_t(get(t_i32, v_i32, 2)));
-  EXPECT_EQ(0xBF800000, uint32_t(get(t_i32, v_i32, 3)));
+  EXPECT_EQ(uint32_t(0x00000000), uint32_t(get(t_i32, v_i32, 0)));
+  EXPECT_EQ(uint32_t(0x80000000), uint32_t(get(t_i32, v_i32, 1)));
+  if (N > 2) EXPECT_EQ(uint32_t(0x3F800000), uint32_t(get(t_i32, v_i32, 2)));
+  if (N > 3) EXPECT_EQ(uint32_t(0xBF800000), uint32_t(get(t_i32, v_i32, 3)));
 
   std::free(f32_data);
 }
 
 TEST_F(VecConvertCornerCaseTest, BitcastInt32ToFloat32) {
-  ScalableTag<int32_t> t_i32;
+  ScalableTag<int32_t>   t_i32;
   ScalableTag<float32_t> t_f32;
-  constexpr nint_t N = size(t_i32);
+  nint_t N = size(t_i32);
 
   auto i32_data = test_utils::alloc_aligned<int32_t>(N);
-  i32_data[0] = 0x00000000;        // 0.0f
-  i32_data[1] = (int)0x80000000;   // -0.0f
-  i32_data[2] = 0x3F800000;        // 1.0f
-  i32_data[3] = (int)0xBF800000;   // -1.0f
+  for (nint_t i = 0; i < N; ++i) i32_data[i] = 0;
+  i32_data[0] = 0x00000000;
+  i32_data[1] = (int32_t)0x80000000;
+  if (N > 2) i32_data[2] = 0x3F800000;
+  if (N > 3) i32_data[3] = (int32_t)0xBF800000;
 
   auto v_i32 = loadu(t_i32, i32_data);
   auto v_f32 = bitcast(t_f32, v_i32);
 
   EXPECT_FLOAT_EQ(0.0f, get(t_f32, v_f32, 0));
   EXPECT_FLOAT_EQ(-0.0f, get(t_f32, v_f32, 1));
-  EXPECT_FLOAT_EQ(1.0f, get(t_f32, v_f32, 2));
-  EXPECT_FLOAT_EQ(-1.0f, get(t_f32, v_f32, 3));
+  if (N > 2) EXPECT_FLOAT_EQ(1.0f, get(t_f32, v_f32, 2));
+  if (N > 3) EXPECT_FLOAT_EQ(-1.0f, get(t_f32, v_f32, 3));
 
   std::free(i32_data);
 }
 
 TEST_F(VecConvertCornerCaseTest, BitcastFloat64ToInt64) {
   ScalableTag<float64_t> t_f64;
-  ScalableTag<int64_t> t_i64;
-  constexpr nint_t N = size(t_f64);
+  ScalableTag<int64_t>   t_i64;
+  nint_t N = size(t_f64);
 
   auto f64_data = test_utils::alloc_aligned<float64_t>(N);
-  f64_data[0] = 0.0;   // 0x0000000000000000
-  f64_data[1] = 1.0;   // 0x3FF0000000000000
+  for (nint_t i = 0; i < N; ++i) f64_data[i] = 0.0;
+  f64_data[0] = 0.0;
+  if (N > 1) f64_data[1] = 1.0;
 
   auto v_f64 = loadu(t_f64, f64_data);
   auto v_i64 = bitcast(t_i64, v_f64);
 
   EXPECT_EQ(int64_t(0x0000000000000000LL), get(t_i64, v_i64, 0));
-  EXPECT_EQ(int64_t(0x3FF0000000000000LL), get(t_i64, v_i64, 1));
+  if (N > 1) EXPECT_EQ(int64_t(0x3FF0000000000000LL), get(t_i64, v_i64, 1));
 
   std::free(f64_data);
 }
 
 TEST_F(VecConvertCornerCaseTest, BitcastSignedUnsigned) {
-  ScalableTag<int32_t> t_i32;
-  ScalableTag<uint32_t> t_u32;
-  constexpr nint_t N = size(t_i32);
+  ScalableTag<int32_t>   t_i32;
+  ScalableTag<uint32_t>  t_u32;
+  nint_t N = size(t_i32);
 
   auto i32_data = test_utils::alloc_aligned<int32_t>(N);
-  i32_data[0] = -1;                // 0xFFFFFFFF
-  i32_data[1] = -2;                // 0xFFFFFFFE
-  i32_data[2] = 0x7FFFFFFF;        // max int32
-  i32_data[3] = (int)0x80000000;   // min int32
+  for (nint_t i = 0; i < N; ++i) i32_data[i] = 0;
+  i32_data[0] = -1;
+  i32_data[1] = -2;
+  if (N > 2) i32_data[2] = 0x7FFFFFFF;
+  if (N > 3) i32_data[3] = (int32_t)0x80000000;
 
   auto v_i32 = loadu(t_i32, i32_data);
   auto v_u32 = bitcast(t_u32, v_i32);
 
   EXPECT_EQ(uint32_t(0xFFFFFFFF), get(t_u32, v_u32, 0));
   EXPECT_EQ(uint32_t(0xFFFFFFFE), get(t_u32, v_u32, 1));
-  EXPECT_EQ(uint32_t(0x7FFFFFFF), get(t_u32, v_u32, 2));
-  EXPECT_EQ(uint32_t(0x80000000), get(t_u32, v_u32, 3));
+  if (N > 2) EXPECT_EQ(uint32_t(0x7FFFFFFF), get(t_u32, v_u32, 2));
+  if (N > 3) EXPECT_EQ(uint32_t(0x80000000), get(t_u32, v_u32, 3));
 
   std::free(i32_data);
 }
 
 // Test bitcast with multi-word vectors (same size)
 TEST_F(VecConvertCornerCaseTest, BitcastMultiWordSameSize) {
-  // ScalableTag<T, 1> = 2 words
-  ScalableTag<int32_t, 1> t_i32;
+  ScalableTag<int32_t, 1>  t_i32;
   ScalableTag<uint32_t, 1> t_u32;
-  constexpr nint_t N = size(t_i32);
+  nint_t N = size(t_i32);
 
   auto i32_data = test_utils::alloc_aligned<int32_t>(N);
   for (nint_t i = 0; i < N; ++i) {
@@ -1066,71 +1075,62 @@ TEST_F(VecConvertCornerCaseTest, BitcastMultiWordSameSize) {
     uint32_t actual = get(t_u32, v_u32, i);
     EXPECT_EQ(expected, actual) << "i=" << i;
   }
-
   std::free(i32_data);
 }
 
 // Test bitcast with larger input vector (input words > output words)
 TEST_F(VecConvertCornerCaseTest, BitcastInputLarger) {
-  // ScalableTag<T, 1> = 2 words, ScalableTag<T, 0> = 1 word
-  ScalableTag<int32_t, 1> t_i32_in;   // 2 words input
-  ScalableTag<uint32_t, 0> t_u32_out; // 1 word output
-  constexpr nint_t N_IN = size(t_i32_in);
-  constexpr nint_t N_OUT = size(t_u32_out);
+  ScalableTag<int32_t, 1>  t_i32_in;
+  ScalableTag<uint32_t, 0> t_u32_out;
+  nint_t N_IN  = size(t_i32_in);
+  nint_t N_OUT = size(t_u32_out);
 
   auto i32_data = test_utils::alloc_aligned<int32_t>(N_IN);
   for (nint_t i = 0; i < N_IN; ++i) {
     i32_data[i] = i * 12345;
   }
 
-  auto v_in = loadu(t_i32_in, i32_data);
+  auto v_in  = loadu(t_i32_in, i32_data);
   auto v_out = bitcast(t_u32_out, v_in);
 
-  // Only first N_OUT elements should be preserved
   for (nint_t i = 0; i < N_OUT; ++i) {
     uint32_t expected;
     std::memcpy(&expected, &i32_data[i], sizeof(uint32_t));
     uint32_t actual = get(t_u32_out, v_out, i);
     EXPECT_EQ(expected, actual) << "i=" << i;
   }
-
   std::free(i32_data);
 }
 
 // Test bitcast with larger output vector (input words < output words)
 TEST_F(VecConvertCornerCaseTest, BitcastOutputLarger) {
-  // ScalableTag<T, 0> = 1 word, ScalableTag<T, 1> = 2 words
-  ScalableTag<float32_t, 0> t_f32_in;   // 1 word input
-  ScalableTag<uint32_t, 1> t_u32_out;   // 2 words output
-  constexpr nint_t N_IN = size(t_f32_in);
-  constexpr nint_t N_OUT = size(t_u32_out);
+  ScalableTag<float32_t, 0> t_f32_in;
+  ScalableTag<uint32_t, 1>  t_u32_out;
+  nint_t N_IN  = size(t_f32_in);
+  nint_t N_OUT = size(t_u32_out);
 
   auto f32_data = test_utils::alloc_aligned<float32_t>(N_IN);
   for (nint_t i = 0; i < N_IN; ++i) {
     f32_data[i] = static_cast<float32_t>(i * 1.5f + 0.5f);
   }
 
-  auto v_in = loadu(t_f32_in, f32_data);
+  auto v_in  = loadu(t_f32_in, f32_data);
   auto v_out = bitcast(t_u32_out, v_in);
 
-  // First N_IN elements should be correct
   for (nint_t i = 0; i < N_IN; ++i) {
     uint32_t expected;
     std::memcpy(&expected, &f32_data[i], sizeof(uint32_t));
     uint32_t actual = get(t_u32_out, v_out, i);
     EXPECT_EQ(expected, actual) << "i=" << i;
   }
-  // Elements beyond N_IN are undefined, so we don't test them
-
   std::free(f32_data);
 }
 
 // Test bitcast with 4-word vectors
 TEST_F(VecConvertCornerCaseTest, BitcastFourWords) {
-  // ScalableTag<T, 2> = 4 words
   ScalableTag<float64_t, 2> t_f64;
-  ScalableTag<uint64_t, 2> t_u64;
-  constexpr nint_t N = size(t_f64);
+  ScalableTag<uint64_t, 2>  t_u64;
+  nint_t N = size(t_f64);
 
   auto f64_data = test_utils::alloc_aligned<float64_t>(N);
   for (nint_t i = 0; i < N; ++i) {
@@ -1146,33 +1146,8 @@ TEST_F(VecConvertCornerCaseTest, BitcastFourWords) {
     uint64_t actual = get(t_u64, v_u64, i);
     EXPECT_EQ(expected, actual) << "i=" << i;
   }
-
   std::free(f64_data);
 }
-
-//// Test: Alternating bit patterns
-//TEST_F(VecConvertCornerCaseTest, AlternatingBitPattern) {
-//  FixedTag<uint8_t, 16> t_u8;
-//  FixedTag<uint16_t, 8> t_u16;
-//
-//  alignas(16) uint8_t data[16];
-//  for (int i = 0; i < 16; ++i) {
-//    data[i] = (i % 2 == 0) ? 0xAA : 0x55;
-//  }
-//
-//  auto v_in = loadu(t_u8, data);
-//  auto v_out = promote(t_u16, v_in);
-//
-//  // Check that patterns are correctly combined
-//  for (nint_t i = 0; i < 8; ++i) {
-//    uint16_t actual = get(t_u16, v_out, i);
-//    uint16_t expected = (uint16_t(data[i * 2]) | (uint16_t(data[i * 2 + 1]) << 8));
-//    // Note: endianness may affect this test
-//    // Just verify it's consistent
-//    EXPECT_EQ(actual, vecops::convert<uint16_t>(data[i * 2]))
-//        << "i=" << i << " low byte should be " << (int)data[i * 2];
-//  }
-//}
 
 // ============================================================================
 // Main

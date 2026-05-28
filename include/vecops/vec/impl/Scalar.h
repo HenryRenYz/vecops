@@ -191,48 +191,21 @@ VECOPS_VFUNC V local_shuf(V v, Vec<Rebind<Index<TypeOf<T>>, T>> vi) {
   return u;
 }
 
-template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, typename... Is>
-VECOPS_VFUNC V local_shuf(V v, Is... is) {
-  constexpr T t;
-  static_assert(is_default_impl(t) || is_scalable(t));
-  static_assert(is_word_vec(t));
-  using Ei = Index<TypeOf<T>>;
-  using Ti = Rebind<Ei, T>;
-  constexpr nint_t group_el = 16 / sizeof(Ei);
-  std::array<Ei, group_el> gi = {Ei(is)...}; // accepting inverse order
-  for (nint_t j = 0; j < group_el  / 2; ++j)
-    std::swap(gi[j], gi[group_el - j - 1]);
-
-  Vec<Ti> i; // copy and propogate
-  for (nint_t j = 0; j < size(t); j += group_el) {
-    for (nint_t k = 0; k < group_el; ++k) {
-      i[j + k] = gi[k];
-    }
-  }
-  return word::local_shuf(v, i);
-}
-
-template <int... Is, TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-VECOPS_VFUNC V local_shuf(V v) {
-  return word::local_shuf(v, Is...);
-}
-
+/**
+ * @brief Blend two vectors based on a mask (scalar implementation).
+ *
+ * For each lane i where mask[i] is true, result[i] = v1[i];
+ * otherwise result[i] = v0[i].
+ */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
-VECOPS_VFUNC V shuf(V v, Vec<Rebind<Index<TypeOf<T>>, T>> vi) {
+VECOPS_VFUNC V blend(V v0, Mask<T> m, V v1) {
   constexpr T t;
-  constexpr Rebind<TypeOf<T>, T> ti;
-  static_assert((is_default_impl(t) || is_scalable(t)) && (is_default_impl(ti) || is_scalable(ti)));
-  static_assert(is_word_vec(t) && is_word_vec(ti));
-  V u;
+  V r = v0;
   for (nint_t i = 0; i < size(t); ++i) {
-    u[i] = v[nint_t(vi[i])];
+    if (get(t, m, i)) r[i] = v1[i];
   }
-  return u;
+  return r;
 }
-
-/* ************************************************************************** */
-//                    Half-vector operations (upper/lower/etc)                 */
-/* ************************************************************************** */
 
 /**
  * @brief Get the upper half of a vector (scalar implementation).

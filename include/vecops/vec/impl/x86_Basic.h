@@ -724,7 +724,7 @@ VECOPS_VFUNC Vec<Tag<int32_t, 8>> local_shuf(Vec<Tag<int32_t, 8>> v, int i3, int
 template <int I3, int I2, int I1, int I0>
 VECOPS_VFUNC Vec<Tag<int32_t, 16>> local_shuf(Vec<Tag<int32_t, 16>> v) {
   details::assert_index<I3, I2, I1, I0>();
-  return _mm512_shuffle_epi32(v.v, _MM_SHUFFLE(I3, I2, I1, I0));
+  return _mm512_shuffle_epi32(v.v, static_cast<_MM_PERM_ENUM>(_MM_SHUFFLE(I3, I2, I1, I0)));
 }
 
 VECOPS_VFUNC Vec<Tag<int32_t, 16>> local_shuf(Vec<Tag<int32_t, 16>> v, Vec<Tag<int32_t, 16>> i) {

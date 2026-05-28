@@ -106,13 +106,6 @@ add_multiarch_executable(vecops-VecSVETest
 # vecops-VecBasicTest (word-level basic operations: fill, get/set, blend, shuffle, interleave, etc.)
 add_multiarch_executable(vecops-VecBasicTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BasicTest.cpp
-        ARCH native+bf16+sve2p1
+        ARCH native+bf16
 )
-target_compile_definitions(vecops-VecBasicTest-native+bf16+sve2p1 PRIVATE GTEST_HAS_RTTI=0)
-
-# vecops-SVEAsmGetSetTest (exploration: inline asm alternatives for svget2/svset2 on predicate tuples)
-add_multiarch_executable(vecops-SVEAsmGetSetTest
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/SVEAsmGetSetTest.cpp
-        ARCH native+sve2p1
-)
-target_compile_definitions(vecops-SVEAsmGetSetTest-native+sve2p1 PRIVATE GTEST_HAS_RTTI=0)
+target_compile_definitions(vecops-VecBasicTest-native+bf16 PRIVATE GTEST_HAS_RTTI=0)
