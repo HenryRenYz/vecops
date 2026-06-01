@@ -861,7 +861,8 @@ template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF
 VECOPS_VFUNC V bit_shr(V v, int shift) {
   VECOPS_ASSERT(0 <= shift && shift <= sizeof(TypeOf<T>) * CHAR_BIT, "Shift out of range: %d", shift);
   auto mask = _mm512_set1_epi8(tailing_mask(int32_t(8 - shift)));
-  auto signmask = _mm512_cmpgt_epi8(_mm512_setzero_si512(), v.v);
+  auto sm = _mm512_cmpgt_epi8_mask(_mm512_setzero_si512(), v.v);
+  auto signmask = _mm512_movm_epi8(sm);
   auto u = _mm512_srl_epi16(v.v, _mm_cvtsi32_si128(shift));
   // (mask & u) | (~mask & signmask), bitwise MUX
   u = _mm512_ternarylogic_epi32(mask, u, signmask, (_MM_TERNLOG_A & _MM_TERNLOG_B) | (~_MM_TERNLOG_A & _MM_TERNLOG_C));

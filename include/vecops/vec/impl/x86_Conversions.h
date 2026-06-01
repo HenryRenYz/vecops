@@ -1337,7 +1337,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int32_t, T>> v) {
   Rebind<int32_t, T> t1;
   auto lo = word::lower(t1, v);
   auto hi = word::upper(t1, v);
-  auto u = _mm512_packs_epi32(lo.v, hi.v);
+  auto u = _mm512_packs_epi32(lo, hi);
   static const __m512i idx = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
   return _mm512_permutexvar_epi64(u, idx);
 }
@@ -1405,7 +1405,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint32_t, T>> v) {
   static constexpr uint32_t max_val = INT32_MAX;
   auto lo = _mm512_min_epu32(word::lower(t1, v).v, _mm512_set1_epi32(max_val));
   auto hi = _mm512_min_epu32(word::upper(t1, v).v, _mm512_set1_epi32(max_val));
-  auto u = _mm512_packs_epi32(lo.v, hi.v);
+  auto u = _mm512_packs_epi32(lo, hi);
   static const __m512i idx = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
   return _mm512_permutexvar_epi64(u, idx);
 }
@@ -1560,7 +1560,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint32_t, T>> v) {
   static constexpr uint32_t max_val = INT32_MAX;
   auto lo = _mm512_min_epu32(word::lower(t1, v).v, _mm512_set1_epi32(max_val));
   auto hi = _mm512_min_epu32(word::upper(t1, v).v, _mm512_set1_epi32(max_val));
-  auto u = _mm512_packus_epi32(lo.v, hi.v);
+  auto u = _mm512_packus_epi32(lo, hi);
   static const __m512i idx = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
   return _mm512_permutexvar_epi64(u, idx);
 }
@@ -1602,11 +1602,34 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int16_t, T>> v) {
 /* ************************************************************************** */
 //                           int16_t <=> int64_t                              //
 /* ************************************************************************** */
-template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int16_t>)>
+template <TLV_DECL_TAG(T), TL_IF(T::N <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
 VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int64_t, T>> v) {
   Rebind<int32_t, T> t1;
   return word::demote(t, word::demote(t1, v));
 }
+
+#if VEC_WIDTH >= 512
+template <TLV_DECL_TAG(T), TL_IF(T::N == 32), TL_IF(is_any<TypeOf<T>, int16_t>)>
+VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int64_t, T>> v) {
+  Rebind<int64_t, T> t64;
+  Tag<int32_t, 16> t32;
+  Tag<int16_t, 16> t16;
+  using T64Half = Tag<int64_t, 16>;
+  T64Half th;
+  auto w0 = get_word<0>(t64, v);
+  auto w1 = get_word<1>(t64, v);
+  auto w2 = get_word<2>(t64, v);
+  auto w3 = get_word<3>(t64, v);
+  VecOf(th) v_lo, v_hi;
+  v_lo = set_word<0>(th, v_lo, w0);
+  v_lo = set_word<1>(th, v_lo, w1);
+  v_hi = set_word<0>(th, v_hi, w2);
+  v_hi = set_word<1>(th, v_hi, w3);
+  auto lo = word::demote(t16, word::demote(t32, v_lo));
+  auto hi = word::demote(t16, word::demote(t32, v_hi));
+  return word::concat(t, lo, hi);
+}
+#endif
 
 template <TLV_DECL_TAG(T), TL_IF(T::N <= 2), TL_IF(is_any<TypeOf<T>, int64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int16_t, T>> v) {
@@ -1656,7 +1679,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int16_t, T>> v) {
 /* ************************************************************************** */
 //                           int16_t <=> uint64_t                             //
 /* ************************************************************************** */
-template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int16_t>)>
+template <TLV_DECL_TAG(T), TL_IF(T::N <= 16), TL_IF(is_any<TypeOf<T>, int16_t>)>
 VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint64_t, T>> v) {
   Rebind<int32_t, T> t1;
   return word::demote(t, word::demote(t1, v));
@@ -1688,11 +1711,34 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint16_t, T>> v) {
 /* ************************************************************************** */
 //                           uint16_t <=> int64_t                             //
 /* ************************************************************************** */
-template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, uint16_t>)>
+template <TLV_DECL_TAG(T), TL_IF(T::N <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
 VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int64_t, T>> v) {
   Rebind<int32_t, T> t1;
   return word::demote(t, word::demote(t1, v));
 }
+
+#if VEC_WIDTH >= 512
+template <TLV_DECL_TAG(T), TL_IF(T::N == 32), TL_IF(is_any<TypeOf<T>, uint16_t>)>
+VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int64_t, T>> v) {
+  Rebind<int64_t, T> t64;
+  Tag<uint32_t, 16> t32;
+  Tag<uint16_t, 16> t16;
+  using T64Half = Tag<int64_t, 16>;
+  T64Half th;
+  auto w0 = get_word<0>(t64, v);
+  auto w1 = get_word<1>(t64, v);
+  auto w2 = get_word<2>(t64, v);
+  auto w3 = get_word<3>(t64, v);
+  VecOf(th) v_lo, v_hi;
+  v_lo = set_word<0>(th, v_lo, w0);
+  v_lo = set_word<1>(th, v_lo, w1);
+  v_hi = set_word<0>(th, v_hi, w2);
+  v_hi = set_word<1>(th, v_hi, w3);
+  auto lo = word::demote(t16, word::demote(t32, v_lo));
+  auto hi = word::demote(t16, word::demote(t32, v_hi));
+  return word::concat(t, lo, hi);
+}
+#endif
 
 template <TLV_DECL_TAG(T), TL_IF(T::N <= 2), TL_IF(is_any<TypeOf<T>, int64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint16_t, T>> v) {
@@ -1742,7 +1788,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint16_t, T>> v) {
 /* ************************************************************************** */
 //                          uint16_t <=> uint64_t                             //
 /* ************************************************************************** */
-template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, uint16_t>)>
+template <TLV_DECL_TAG(T), TL_IF(T::N <= 16), TL_IF(is_any<TypeOf<T>, uint16_t>)>
 VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint64_t, T>> v) {
   Rebind<int32_t, T> t1;
   return word::demote(t, word::demote(t1, v));
@@ -1901,7 +1947,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint16_t, T>> v) {
   static constexpr uint16_t max_val = INT16_MAX;
   auto lo = _mm512_min_epu16(word::lower(t1, v).v, _mm512_set1_epi16(max_val));
   auto hi = _mm512_min_epu16(word::upper(t1, v).v, _mm512_set1_epi16(max_val));
-  auto u = _mm512_packs_epi16(lo.v, hi.v);
+  auto u = _mm512_packs_epi16(lo, hi);
   static const __m512i idx = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
   return _mm512_permutexvar_epi64(u, idx);
 }
@@ -2040,7 +2086,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint16_t, T>> v) {
   static constexpr uint16_t max_val = INT16_MAX;
   auto lo = _mm512_min_epu16(word::lower(t1, v).v, _mm512_set1_epi16(max_val));
   auto hi = _mm512_min_epu16(word::upper(t1, v).v, _mm512_set1_epi16(max_val));
-  auto u = _mm512_packus_epi16(lo.v, hi.v);
+  auto u = _mm512_packus_epi16(lo, hi);
   static const __m512i idx = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
   return _mm512_permutexvar_epi64(u, idx);
 }
@@ -2066,7 +2112,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int8_t, T>> v) {
 /* ************************************************************************** */
 //                            int8_t <=> int32_t                              //
 /* ************************************************************************** */
-template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int8_t>)>
+template <TLV_DECL_TAG(T), TL_IF(T::N <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
 VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int32_t, T>> v) {
   Rebind<int16_t, T> t1;
   return word::demote(t, word::demote(t1, v));
@@ -2120,7 +2166,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int8_t, T>> v) {
 /* ************************************************************************** */
 //                           int8_t <=> uint32_t                              //
 /* ************************************************************************** */
-template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int8_t>)>
+template <TLV_DECL_TAG(T), TL_IF(T::N <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
 VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint32_t, T>> v) {
   Rebind<int16_t, T> t1;
   return word::demote(t, word::demote(t1, v));
@@ -2152,7 +2198,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint8_t, T>> v) {
 /* ************************************************************************** */
 //                           uint8_t <=> int32_t                              //
 /* ************************************************************************** */
-template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, uint8_t>)>
+template <TLV_DECL_TAG(T), TL_IF(T::N <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
 VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int32_t, T>> v) {
   Rebind<int16_t, T> t1;
   return word::demote(t, word::demote(t1, v));
@@ -2206,7 +2252,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint8_t, T>> v) {
 /* ************************************************************************** */
 //                           uint8_t <=> uint32_t                             //
 /* ************************************************************************** */
-template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, uint8_t>)>
+template <TLV_DECL_TAG(T), TL_IF(T::N <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
 VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint32_t, T>> v) {
   Rebind<uint16_t, T> t1;
   return word::demote(t, word::demote(t1, v));
@@ -2238,7 +2284,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int8_t, T>> v) {
 /* ************************************************************************** */
 //                            int8_t <=> int64_t                              //
 /* ************************************************************************** */
-template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int8_t>)>
+template <TLV_DECL_TAG(T), TL_IF(T::N <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
 VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int64_t, T>> v) {
   Rebind<int32_t, T> t1;
   return word::demote(t, word::demote(t1, v));
@@ -2292,7 +2338,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int8_t, T>> v) {
 /* ************************************************************************** */
 //                           int8_t <=> uint64_t                              //
 /* ************************************************************************** */
-template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int8_t>)>
+template <TLV_DECL_TAG(T), TL_IF(T::N <= 16), TL_IF(is_any<TypeOf<T>, int8_t>)>
 VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint64_t, T>> v) {
   Rebind<int32_t, T> t1;
   return word::demote(t, word::demote(t1, v));
@@ -2324,7 +2370,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint8_t, T>> v) {
 /* ************************************************************************** */
 //                           uint8_t <=> int64_t                              //
 /* ************************************************************************** */
-template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, uint8_t>)>
+template <TLV_DECL_TAG(T), TL_IF(T::N <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
 VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int64_t, T>> v) {
   Rebind<int32_t, T> t1;
   return word::demote(t, word::demote(t1, v));
@@ -2378,7 +2424,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint8_t, T>> v) {
 /* ************************************************************************** */
 //                           uint8_t <=> uint64_t                             //
 /* ************************************************************************** */
-template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, uint8_t>)>
+template <TLV_DECL_TAG(T), TL_IF(T::N <= 16), TL_IF(is_any<TypeOf<T>, uint8_t>)>
 VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint64_t, T>> v) {
   Rebind<int32_t, T> t1;
   return word::demote(t, word::demote(t1, v));

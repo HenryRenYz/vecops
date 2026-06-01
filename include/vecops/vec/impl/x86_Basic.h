@@ -308,20 +308,20 @@ VECOPS_VFUNC M bit_andnot(M a, M b) {
 }
 
 template <TLV_DECL_MASK(M), TL_IF(M::N <= 8)>
-VECOPS_VFUNC M bit_not(M a, M b) {
-  return _knot_mask8(a.v, b.v);
+VECOPS_VFUNC M bit_not(M a) {
+  return _knot_mask8(a.v);
 }
 template <TLV_DECL_MASK(M), TL_IF(M::N == 16)>
-VECOPS_VFUNC M bit_not(M a, M b) {
-  return _knot_mask16(a.v, b.v);
+VECOPS_VFUNC M bit_not(M a) {
+  return _knot_mask16(a.v);
 }
 template <TLV_DECL_MASK(M), TL_IF(M::N == 32)>
-VECOPS_VFUNC M bit_not(M a, M b) {
-  return _knot_mask32(a.v, b.v);
+VECOPS_VFUNC M bit_not(M a) {
+  return _knot_mask32(a.v);
 }
 template <TLV_DECL_MASK(M), TL_IF(M::N == 64)>
-VECOPS_VFUNC M bit_not(M a, M b) {
-  return _knot_mask64(a.v, b.v);
+VECOPS_VFUNC M bit_not(M a) {
+  return _knot_mask64(a.v);
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_MASK(M), TL_IF(M::Bytes <= 16)>
@@ -344,6 +344,30 @@ template <TLV_DECL_MASK(M), TL_IF(M::Bytes <= 16)>
 VECOPS_VFUNC M bit_not(M m) {
   return _mm_xor_si128(m.v, _mm_set1_epi32(-1));
 }
+
+#if VEC_WIDTH >= 256
+template <TLV_DECL_MASK(M), TL_IF(M::Bytes == 32)>
+VECOPS_VFUNC M bit_and(M a, M b) {
+  return _mm256_and_si256(a.v, b.v);
+}
+template <TLV_DECL_MASK(M), TL_IF(M::Bytes == 32)>
+VECOPS_VFUNC M bit_or(M a, M b) {
+  return _mm256_or_si256(a.v, b.v);
+}
+template <TLV_DECL_MASK(M), TL_IF(M::Bytes == 32)>
+VECOPS_VFUNC M bit_xor(M a, M b) {
+  return _mm256_xor_si256(a.v, b.v);
+}
+template <TLV_DECL_MASK(M), TL_IF(M::Bytes == 32)>
+VECOPS_VFUNC M bit_andnot(M a, M b) {
+  return _mm256_andnot_si256(a.v, b.v);
+}
+template <TLV_DECL_MASK(M), TL_IF(M::Bytes == 32)>
+VECOPS_VFUNC M bit_not(M m) {
+  return _mm256_xor_si256(m.v, _mm256_set1_epi32(-1));
+}
+#endif
+
 #endif // HAS_AVX512DQ
 
 

@@ -77,7 +77,7 @@ add_multiarch_executable(vecops-VecScalarTest
 # vecops-VecBasicTest (word-level basic operations: fill, get/set, blend)
 add_multiarch_executable(vecops-VecBasicTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BasicTest.cpp
-        ARCH native
+        ARCH x86-64 corei7-avx core-avx2 native
 )
 # vecops-VecLoadStoreTest
 add_multiarch_executable(vecops-VecLoadStoreTest

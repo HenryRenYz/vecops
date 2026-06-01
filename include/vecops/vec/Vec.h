@@ -2301,7 +2301,8 @@ VECOPS_VFUNC Vec<To> promote(To t, Vi v) {
   } else {
     static_assert(nw_i_r == 1);
     auto v_i = get_word<0>(t_i, v);
-    auto v_bo = word::promote(TWo(), v_i);
+    auto v_trimmed = word::bitcast(Rebind<Ei, TWo>(), v_i);
+    auto v_bo = word::promote(TWo(), v_trimmed);
     v_o = set_word<0>(t_o, v_o, v_bo);
   }
   return v_o;
@@ -2341,7 +2342,7 @@ VECOPS_VFUNC Vec<To> demote(To t, Vi v) {
   constexpr nint_t nw_i_r = is_scalable(t_i)
       ? (NWo + factor - 1) / factor
       : (To::AdjustedN + TWi::N - 1) / TWi::N;
-  static_assert(nw_i_r <= NWi, "Insufficient elements");
+  static_assert(nw_i_r <= NWi || (NWo == 1 && nw_i_r <= factor), "Insufficient elements");
 
   Vec<To> v_o;
   if constexpr (NWo > 1) {
@@ -2357,13 +2358,21 @@ VECOPS_VFUNC Vec<To> demote(To t, Vi v) {
     });
   } else {
     static_assert(nw_i_r <= factor);
-    // minibatch input
-    using TBmi = Tag<Ei, TWi::N, log2_floor(nw_i_r)>;
-    auto v_bi = vmap(TBmi(), [&]<nuint_t J>(auto tt){
-      return get_word<J>(t_i, v);
-    });
-    auto v_bo = word::demote(TWo(), v_bi);
-    v_o = set_word<0>(t_o, v_o, v_bo);
+    if constexpr (nw_i_r > 1) {
+      // Multiple input words, use batch creation
+      using TBi = Tag<Ei, TWi::N, log2_floor(nw_i_r)>;
+      TBi tb;
+      auto v_bi = vmap(tb, [&]<nuint_t J>(auto tt){
+        constexpr nint_t src_idx = J < NWi ? J : 0;
+        return get_word<src_idx>(t_i, v);
+      });
+      auto v_bo = word::demote(TWo(), v_bi);
+      v_o = set_word<0>(t_o, v_o, v_bo);
+    } else {
+      auto v_i = get_word<0>(t_i, v);
+      auto v_bo = word::demote(TWo(), v_i);
+      v_o = set_word<0>(t_o, v_o, v_bo);
+    }
   }
   return v_o;
 }

@@ -223,9 +223,9 @@ template <> struct VecDefs<dtype, (N)> : public VecDefs<dtype, 2 * (N)> { \
   static constexpr nint_t max_word_size = (N); \
   static constexpr nint_t size() { return (N); }; \
   static constexpr nint_t max_size = (N); \
-  using VecType = x86::RegType<dtype, 16 / sizeof(dtype)>; \
-  /* compatible with Mask<Tag<dtype, 16 / sizeof(dtype)>> */ \
-  using MaskType = x86::MaskType<dtype, 16 / sizeof(dtype)>;  \
+  using VecType = typename VecDefs<dtype, 2 * (N)>::VecType; \
+  /* compatible with parent full-word MaskType */ \
+  using MaskType = typename VecDefs<dtype, 2 * (N)>::MaskType;  \
   using WordDefs = VecDefs; \
 } \
 

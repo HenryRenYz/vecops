@@ -28,6 +28,8 @@ template <> struct ShuffleIndex<uint32_t>      { using type = int32_t; };
 template <> struct ShuffleIndex<uint64_t>      { using type = int64_t; };
 template <> struct ShuffleIndex<uint8_t>       { using type = int8_t; };
 template <> struct ShuffleIndex<uint16_t>      { using type = int16_t; };
+template <> struct ShuffleIndex<vecops::float16_t>      { using type = int16_t; };
+template <> struct ShuffleIndex<vecops::bfloat16_t>      { using type = int16_t; };
 template <typename T> using shuffle_idx_t = typename ShuffleIndex<T>::type;
 
 template <typename T>
@@ -88,14 +90,24 @@ using ShufTypes = ::testing::Types<
     float32_t, int32_t, uint32_t,
     float64_t, int64_t, uint64_t,
     int8_t,   uint8_t,
-    int16_t,  uint16_t>;
+    int16_t,  uint16_t,
+    float16_t
+    #if defined(__ARM_FEATURE_BF16) || defined(ARCH_X86_FAMILY)
+    , bfloat16_t
+    #endif
+>;
 
 using AllTypes = ::testing::Types<
+    float16_t,
+    #if defined(__ARM_FEATURE_BF16) || defined(ARCH_X86_FAMILY)
+    bfloat16_t,
+    #endif
     float32_t, float64_t,
     int8_t, uint8_t,
     int16_t, uint16_t,
     int32_t, uint32_t,
-    int64_t, uint64_t>;
+    int64_t, uint64_t
+>;
 
 // ============================================================================
 // Main typed test fixture (for most tests)
@@ -738,7 +750,7 @@ TYPED_TEST(VecShuffleAllTest, Concat_SingleWord) {
   auto data_hi = std::make_unique<T[]>(N / 2);
   test_utils::fill_seq(data_lo.get(), N / 2);
   for (nint_t i = 0; i < N / 2; ++i)
-    data_hi[i] = static_cast<T>(data_lo[i] + N / 2);
+    data_hi[i] = static_cast<T>(data_lo[i]) + T(N / 2);
 
   auto v_lo = loadu(th, data_lo.get());
   auto v_hi = loadu(th, data_hi.get());
@@ -762,7 +774,7 @@ TYPED_TEST(VecShuffleAllTest, Concat_MultiWord) {
   auto data_hi = std::make_unique<T[]>(N / 2);
   test_utils::fill_seq(data_lo.get(), N / 2);
   for (nint_t i = 0; i < N / 2; ++i)
-    data_hi[i] = static_cast<T>(data_lo[i] + N / 2);
+    data_hi[i] = static_cast<T>(data_lo[i]) + T(N / 2);
 
   auto v_lo = loadu(th, data_lo.get());
   auto v_hi = loadu(th, data_hi.get());
@@ -808,7 +820,7 @@ TYPED_TEST(VecShuffleAllTest, ConcatEvenOdd_SingleWord) {
   auto data_b = std::make_unique<T[]>(N);
   test_utils::fill_seq(data_a.get(), N);
   for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i] + N);
+    data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
   auto a = loadu(t, data_a.get());
   auto b = loadu(t, data_b.get());
@@ -838,7 +850,7 @@ TYPED_TEST(VecShuffleAllTest, ConcatEvenOdd_MultiWord) {
   auto data_b = std::make_unique<T[]>(N);
   test_utils::fill_seq(data_a.get(), N);
   for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i] + N);
+    data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
   auto a = loadu(t, data_a.get());
   auto b = loadu(t, data_b.get());
@@ -872,7 +884,7 @@ TYPED_TEST(VecShuffleAllTest, LocalInterleave_SingleWord) {
   auto data_b = std::make_unique<T[]>(N);
   test_utils::fill_seq(data_a.get(), N);
   for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i] + N);
+    data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
   auto a = loadu(t, data_a.get());
   auto b = loadu(t, data_b.get());
@@ -911,7 +923,7 @@ TYPED_TEST(VecShuffleAllTest, LocalInterleave_MultiWord) {
   auto data_b = std::make_unique<T[]>(N);
   test_utils::fill_seq(data_a.get(), N);
   for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i] + N);
+    data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
   auto a = loadu(t, data_a.get());
   auto b = loadu(t, data_b.get());
@@ -954,7 +966,7 @@ TYPED_TEST(VecShuffleAllTest, Interleave_SingleWord) {
   auto data_b = std::make_unique<T[]>(N / 2);
   test_utils::fill_seq(data_a.get(), N / 2);
   for (nint_t i = 0; i < N / 2; ++i)
-    data_b[i] = static_cast<T>(data_a[i] + N / 2);
+    data_b[i] = static_cast<T>(data_a[i]) + T(N / 2);
 
   auto a = loadu(th, data_a.get());
   auto b = loadu(th, data_b.get());
@@ -978,7 +990,7 @@ TYPED_TEST(VecShuffleAllTest, Interleave_MultiWord) {
   auto data_b = std::make_unique<T[]>(N / 2);
   test_utils::fill_seq(data_a.get(), N / 2);
   for (nint_t i = 0; i < N / 2; ++i)
-    data_b[i] = static_cast<T>(data_a[i] + N / 2);
+    data_b[i] = static_cast<T>(data_a[i]) + T(N / 2);
 
   auto a = loadu(th, data_a.get());
   auto b = loadu(th, data_b.get());
@@ -1005,7 +1017,7 @@ TYPED_TEST(VecShuffleAllTest, InterleaveEvenOdd_SingleWord) {
   auto data_b = std::make_unique<T[]>(N);
   test_utils::fill_seq(data_a.get(), N);
   for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i] + N);
+    data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
   auto a = loadu(t, data_a.get());
   auto b = loadu(t, data_b.get());
@@ -1034,7 +1046,7 @@ TYPED_TEST(VecShuffleAllTest, InterleaveEvenOdd_MultiWord) {
   auto data_b = std::make_unique<T[]>(N);
   test_utils::fill_seq(data_a.get(), N);
   for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i] + N);
+    data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
   auto a = loadu(t, data_a.get());
   auto b = loadu(t, data_b.get());
@@ -1401,7 +1413,7 @@ TEST(LocalInterleaveRoundTrip, Float64) {
   auto data_b = std::make_unique<T[]>(N);
   test_utils::fill_seq(data_a.get(), N);
   for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i] + N);
+    data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
   auto a = loadu(t, data_a.get());
   auto b = loadu(t, data_b.get());

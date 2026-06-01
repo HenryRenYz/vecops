@@ -136,7 +136,7 @@ protected:
 using TestedTypes = ::testing::Types<
     float32_t, float64_t, int8_t, uint8_t, int16_t, uint16_t,
     int32_t, uint32_t, int64_t, uint64_t, vecops::float16_t
-#if defined(__ARM_FEATURE_BF16)
+#if defined(__ARM_FEATURE_BF16) || defined(ARCH_X86_FAMILY)
     , vecops::bfloat16_t
 #endif
 >;

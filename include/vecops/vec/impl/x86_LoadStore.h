@@ -88,6 +88,7 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T> * p) {
   return _mm_cvtsi32_si128(((const int32_t *) p)[0]);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 8), TL_IF(is_int<TypeOf<T>> || is_small_float<TypeOf<T>>)>
+__attribute__((optimize("O1"))) // Note: O2+ triggers compiler bug in GCC 13
 VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T> * p) {
   return _mm_cvtsi64_si128(((const int64_t *) p)[0]);
 }
