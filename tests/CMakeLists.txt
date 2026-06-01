@@ -74,18 +74,21 @@ add_multiarch_executable(vecops-VecScalarTest
         ARCH x86-64
 )
 
+# vecops-VecBasicTest (word-level basic operations: fill, get/set, blend)
+add_multiarch_executable(vecops-VecBasicTest
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BasicTest.cpp
+        ARCH native
+)
 # vecops-VecLoadStoreTest
 add_multiarch_executable(vecops-VecLoadStoreTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/LoadStoreTest.cpp
         ARCH x86-64 corei7-avx core-avx2 native
 )
-target_compile_definitions(vecops-VecLoadStoreTest-native PRIVATE GTEST_HAS_RTTI=0)
 # vecops-VecArithTest
 add_multiarch_executable(vecops-VecArithTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ArithTest.cpp
         ARCH x86-64 corei7-avx core-avx2 native
 )
-target_compile_definitions(vecops-VecArithTest-native PRIVATE GTEST_HAS_RTTI=0)
 # vecops-VecConversionTest
 add_multiarch_executable(vecops-VecConversionTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ConversionTest.cpp
@@ -102,10 +105,3 @@ add_multiarch_executable(vecops-VecSVETest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/SVETest.cpp
         ARCH native
 )
-
-# vecops-VecBasicTest (word-level basic operations: fill, get/set, blend, shuffle, interleave, etc.)
-add_multiarch_executable(vecops-VecBasicTest
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BasicTest.cpp
-        ARCH native+bf16
-)
-target_compile_definitions(vecops-VecBasicTest-native+bf16 PRIVATE GTEST_HAS_RTTI=0)

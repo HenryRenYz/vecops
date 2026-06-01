@@ -30,10 +30,10 @@ namespace test_utils {
 
 template <typename T>
 constexpr T get_test_value(int idx) {
-  if constexpr (std::is_same_v<T, bfloat16_t>) {
-    return static_cast<bfloat16_t>(static_cast<float>(idx * 1.5f + 0.5f));
-  } else if constexpr (std::is_same_v<T, float16_t>) {
-    return static_cast<float16_t>(static_cast<float>(idx * 1.5f + 0.5f));
+  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
+    return static_cast<vecops::bfloat16_t>(static_cast<float>(idx * 1.5f + 0.5f));
+  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
+    return static_cast<vecops::float16_t>(static_cast<float>(idx * 1.5f + 0.5f));
   } else if constexpr (std::is_same_v<T, float32_t>) {
     return static_cast<float32_t>(idx * 1.5f + 0.5f);
   } else if constexpr (std::is_same_v<T, float64_t>) {
@@ -64,12 +64,12 @@ constexpr T get_test_value_b(int idx) {
 
 template <typename T>
 ::testing::AssertionResult values_equal(T expected, T actual) {
-  if constexpr (std::is_same_v<T, bfloat16_t>) {
+  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
     float e = static_cast<float>(expected);
     float a = static_cast<float>(actual);
     if (std::abs(e - a) < 0.01f) return ::testing::AssertionSuccess();
     return ::testing::AssertionFailure() << "Expected " << e << ", got " << a;
-  } else if constexpr (std::is_same_v<T, float16_t>) {
+  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
     float e = static_cast<float>(expected);
     float a = static_cast<float>(actual);
     if (std::abs(e - a) < 0.01f) return ::testing::AssertionSuccess();
@@ -101,19 +101,19 @@ template <typename T> T scalar_mul(T a, T b) { return a * b; }
 
 template <typename T>
 T scalar_div(T a, T b) {
-  if constexpr (std::is_floating_point_v<T>) return a / b;
+  if constexpr (vecops::is_float<T>) return a / b;
   else return static_cast<T>(0);
 }
 
 template <typename T>
 T scalar_max(T a, T b) {
-  if constexpr (std::is_floating_point_v<T>) return std::fmax(a, b);
+  if constexpr (vecops::is_float<T>) return std::max(a, b);
   else return (a > b) ? a : b;
 }
 
 template <typename T>
 T scalar_min(T a, T b) {
-  if constexpr (std::is_floating_point_v<T>) return std::fmin(a, b);
+  if constexpr (vecops::is_float<T>) return std::min(a, b);
   else return (a < b) ? a : b;
 }
 
@@ -121,7 +121,7 @@ template <typename T> T scalar_neg(T a) { return -a; }
 
 template <typename T>
 T scalar_abs(T a) {
-  if constexpr (std::is_floating_point_v<T>) return std::fabs(a);
+  if constexpr (vecops::is_float<T>) return std::fabs(a);
   else return (a < T{}) ? -a : a;
 }
 
@@ -175,7 +175,7 @@ T scalar_bit_shr(T a, int count) {
 
 template <typename T>
 T scalar_sqrt(T a) {
-  if constexpr (std::is_floating_point_v<T>) return std::sqrt(a);
+  if constexpr (vecops::is_float<T>) return std::sqrt((float64_t)a);
   else return static_cast<T>(0);
 }
 
@@ -224,9 +224,9 @@ using AllTypes = ::testing::Types<
     float32_t, float64_t,
     int8_t, uint8_t, int16_t, uint16_t,
     int32_t, uint32_t, int64_t, uint64_t,
-    float16_t
+    vecops::float16_t
 #if defined(__ARM_FEATURE_BF16)
-    , bfloat16_t
+    , vecops::bfloat16_t
 #endif
 >;
 
@@ -368,7 +368,7 @@ TYPED_TEST(VecArithTest, MulWithMask) {
 
 TYPED_TEST(VecArithTest, DivBasic) {
   using T = typename TestFixture::Type;
-  if constexpr (std::is_floating_point_v<T>) {
+  if constexpr (vecops::is_float<T>) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
@@ -392,7 +392,7 @@ TYPED_TEST(VecArithTest, DivBasic) {
 
 TYPED_TEST(VecArithTest, DivWithMask) {
   using T = typename TestFixture::Type;
-  if constexpr (std::is_floating_point_v<T>) {
+  if constexpr (vecops::is_float<T>) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
@@ -424,7 +424,7 @@ TYPED_TEST(VecArithTest, DivWithMask) {
 
 TYPED_TEST(VecArithTest, RcpBasic) {
   using T = typename TestFixture::Type;
-  if constexpr (std::is_floating_point_v<T>) {
+  if constexpr (vecops::is_float<T>) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
@@ -437,9 +437,9 @@ TYPED_TEST(VecArithTest, RcpBasic) {
     auto vr = rcp(va);
 
     for (nint_t i = 0; i < N; ++i) {
-      T expected = T{1} / a[i];
-      T actual = get(t, vr, i);
-      EXPECT_LT(std::abs(expected - actual) / std::abs(expected), T(0.01))
+      float64_t expected = T{1} / a[i];
+      float64_t actual = get(t, vr, i);
+      EXPECT_LT(std::abs(expected - actual) / std::abs(expected), 0.01)
           << "i=" << i << " expected=" << expected << " got=" << actual;
     }
   }
@@ -447,7 +447,7 @@ TYPED_TEST(VecArithTest, RcpBasic) {
 
 TYPED_TEST(VecArithTest, RcpWithMask) {
   using T = typename TestFixture::Type;
-  if constexpr (std::is_floating_point_v<T>) {
+  if constexpr (vecops::is_float<T>) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
@@ -462,8 +462,8 @@ TYPED_TEST(VecArithTest, RcpWithMask) {
     auto vr = rcp(va, m, default_v);
 
     for (nint_t i = 0; i < N / 2; ++i) {
-      T expected = T{1} / a[i];
-      T actual = get(t, vr, i);
+      float64_t expected = T{1} / a[i];
+      float64_t actual = get(t, vr, i);
       EXPECT_LT(std::abs(expected - actual) / std::abs(expected), 0.01);
     }
     for (nint_t i = N / 2; i < N; ++i) {
@@ -620,7 +620,7 @@ TYPED_TEST(VecArithTest, AbsWithMask) {
 
 TYPED_TEST(VecArithTest, SqrtBasic) {
   using T = typename TestFixture::Type;
-  if constexpr (std::is_floating_point_v<T>) {
+  if constexpr (vecops::is_float<T>) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
@@ -641,7 +641,7 @@ TYPED_TEST(VecArithTest, SqrtBasic) {
 
 TYPED_TEST(VecArithTest, SqrtWithMask) {
   using T = typename TestFixture::Type;
-  if constexpr (std::is_floating_point_v<T>) {
+  if constexpr (vecops::is_float<T>) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
@@ -667,7 +667,7 @@ TYPED_TEST(VecArithTest, SqrtWithMask) {
 
 TYPED_TEST(VecArithTest, RsqrtBasic) {
   using T = typename TestFixture::Type;
-  if constexpr (std::is_floating_point_v<T>) {
+  if constexpr (vecops::is_float<T>) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
@@ -680,9 +680,9 @@ TYPED_TEST(VecArithTest, RsqrtBasic) {
     auto vr = rsqrt(va);
 
     for (nint_t i = 0; i < N; ++i) {
-      T expected = T{1} / std::sqrt(a[i]);
-      T actual = get(t, vr, i);
-      EXPECT_LT(std::abs(expected - actual) / std::abs(expected), T(0.01))
+      float64_t expected = 1.0 / std::sqrt((float64_t)a[i]);
+      float64_t actual = get(t, vr, i);
+      EXPECT_LT(std::abs(expected - actual) / std::abs(expected), 0.01)
           << "i=" << i;
     }
   }
@@ -690,7 +690,7 @@ TYPED_TEST(VecArithTest, RsqrtBasic) {
 
 TYPED_TEST(VecArithTest, RsqrtWithMask) {
   using T = typename TestFixture::Type;
-  if constexpr (std::is_floating_point_v<T>) {
+  if constexpr (vecops::is_float<T>) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
@@ -705,8 +705,8 @@ TYPED_TEST(VecArithTest, RsqrtWithMask) {
     auto vr = rsqrt(va, m, default_v);
 
     for (nint_t i = 0; i < N / 2; ++i) {
-      T expected = T{1} / std::sqrt(a[i]);
-      T actual = get(t, vr, i);
+      float64_t expected = 1.0 / std::sqrt((float64_t)a[i]);
+      float64_t actual = get(t, vr, i);
       EXPECT_LT(std::abs(expected - actual) / std::abs(expected), 0.01);
     }
     for (nint_t i = N / 2; i < N; ++i) {
@@ -1297,7 +1297,7 @@ TYPED_TEST(VecArithTest, MultiWordMul) {
 
 TYPED_TEST(VecArithTest, MultiWordDiv) {
   using T = typename TestFixture::Type;
-  if constexpr (std::is_floating_point_v<T>) {
+  if constexpr (vecops::is_float<T>) {
     auto& t2 = this->t2;
     nint_t M = this->multi2_size;
 

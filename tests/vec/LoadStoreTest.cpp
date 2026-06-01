@@ -18,10 +18,10 @@ namespace test_utils {
 
 template <typename T>
 constexpr T get_test_value(int idx) {
-  if constexpr (std::is_same_v<T, bfloat16_t>) {
-    return static_cast<bfloat16_t>(static_cast<float>(idx * 1.5f + 0.5f));
-  } else if constexpr (std::is_same_v<T, float16_t>) {
-    return static_cast<float16_t>(static_cast<float>(idx * 1.5f + 0.5f));
+  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
+    return static_cast<vecops::bfloat16_t>(static_cast<float>(idx * 1.5f + 0.5f));
+  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
+    return static_cast<vecops::float16_t>(static_cast<float>(idx * 1.5f + 0.5f));
   } else if constexpr (std::is_same_v<T, float32_t>) {
     return static_cast<float32_t>(idx * 1.5f + 0.5f);
   } else if constexpr (std::is_same_v<T, float64_t>) {
@@ -47,7 +47,7 @@ constexpr T get_test_value(int idx) {
 
 template <typename T>
 ::testing::AssertionResult values_equal(T expected, T actual) {
-  if constexpr (std::is_same_v<T, bfloat16_t>) {
+  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
     float e = static_cast<float>(expected);
     float a = static_cast<float>(actual);
     if (std::abs(e - a) < 0.01f) {
@@ -55,7 +55,7 @@ template <typename T>
     }
     return ::testing::AssertionFailure()
         << "Expected " << e << ", got " << a;
-  } else if constexpr (std::is_same_v<T, float16_t>) {
+  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
     float e = static_cast<float>(expected);
     float a = static_cast<float>(actual);
     if (std::abs(e - a) < 0.01f) {
@@ -135,9 +135,9 @@ protected:
 
 using TestedTypes = ::testing::Types<
     float32_t, float64_t, int8_t, uint8_t, int16_t, uint16_t,
-    int32_t, uint32_t, int64_t, uint64_t, float16_t
+    int32_t, uint32_t, int64_t, uint64_t, vecops::float16_t
 #if defined(__ARM_FEATURE_BF16)
-    , bfloat16_t
+    , vecops::bfloat16_t
 #endif
 >;
 

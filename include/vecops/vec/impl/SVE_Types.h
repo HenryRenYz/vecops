@@ -5,7 +5,7 @@
 #ifndef VECOPS_SVE_TYPES_H
 #define VECOPS_SVE_TYPES_H
 
-#include "vecops/CoreDefs.h"
+#include "vecops/CoreTypes.h"
 #include "../VecBase.h"
 
 #ifndef ARCH_ARM_FAMILY

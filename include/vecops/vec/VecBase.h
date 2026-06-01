@@ -9,7 +9,7 @@
 #include <bitset>
 
 #include "vecops/Assertion.h"
-#include "vecops/CoreDefs.h"
+#include "vecops/CoreTypes.h"
 #include "vecops/util/Math.h"
 #include "vecops/util/TypeTraits.h"
 #include "./Capabilities.h"

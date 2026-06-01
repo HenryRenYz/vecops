@@ -7,7 +7,7 @@
 
 #include <bit>
 
-#include "CoreDefs.h"
+#include "CoreTypes.h"
 #include "Features.h"
 
 #ifdef ARCH_X86_FAMILY

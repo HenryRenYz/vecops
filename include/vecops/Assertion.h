@@ -5,7 +5,7 @@
 #ifndef VECOPS_ASSERTION_H
 #define VECOPS_ASSERTION_H
 
-#include "vecops/CoreDefs.h"
+#include "vecops/CoreTypes.h"
 
 #define VECOPS_INTERNAL_RUN_WHEN_FALSE(cond, ...)\
   do {                \

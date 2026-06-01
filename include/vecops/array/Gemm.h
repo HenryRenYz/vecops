@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <cstdlib>
 
-#include "vecops/CoreDefs.h"
+#include "vecops/CoreTypes.h"
 
 namespace vecops::array {
 

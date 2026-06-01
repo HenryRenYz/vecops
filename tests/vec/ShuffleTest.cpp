@@ -51,11 +51,11 @@ void fill_shuf_identity(I* idx, nint_t n, nint_t word_size) {
 
 template <typename T>
 ::testing::AssertionResult values_equal(T expected, T actual) {
-  if constexpr (std::is_same_v<T, bfloat16_t>) {
+  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
     float e = static_cast<float>(expected), a = static_cast<float>(actual);
     if (std::abs(e - a) < 0.01f) return ::testing::AssertionSuccess();
     return ::testing::AssertionFailure() << "Expected " << e << ", got " << a;
-  } else if constexpr (std::is_same_v<T, float16_t>) {
+  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
     float e = static_cast<float>(expected), a = static_cast<float>(actual);
     if (std::abs(e - a) < 0.01f) return ::testing::AssertionSuccess();
     return ::testing::AssertionFailure() << "Expected " << e << ", got " << a;

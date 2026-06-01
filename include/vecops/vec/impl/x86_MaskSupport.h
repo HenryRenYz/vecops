@@ -5,7 +5,7 @@
 #ifndef VECOPS_X86_MASKSUPPORT_H
 #define VECOPS_X86_MASKSUPPORT_H
 
-#include "vecops/CoreDefs.h"
+#include "vecops/CoreTypes.h"
 #include "../VecBase.h"
 
 #ifndef ARCH_X86_FAMILY

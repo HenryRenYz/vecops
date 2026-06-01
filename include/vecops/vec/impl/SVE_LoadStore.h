@@ -8,7 +8,7 @@
 #include <arm_sve.h>
 #include <cstring>
 
-#include "CoreDefs.h"
+#include "CoreTypes.h"
 #include "../VecBase.h"
 #include "SVE_Basic.h"
 
@@ -25,9 +25,9 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p) {
   auto pg = word::make_mask(t);
   if constexpr (std::is_same_v<E, float32_t>)      return svld1_f32(pg, p);
   else if constexpr (std::is_same_v<E, float64_t>) return svld1_f64(pg, p);
-  else if constexpr (std::is_same_v<E, float16_t>) return svld1_f16(pg, p);
+  else if constexpr (std::is_same_v<E, float16_t>) return svld1_f16(pg, (const __fp16 *)p);
 #if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svld1_bf16(pg, p);
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svld1_bf16(pg, (const __bf16 *)p);
 #endif
   else if constexpr (std::is_same_v<E, uint8_t>)   return svld1_u8(pg, p);
   else if constexpr (std::is_same_v<E, int8_t>)    return svld1_s8(pg, p);
@@ -56,9 +56,9 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) 
   Vec<T> loaded;
   if constexpr (std::is_same_v<E, float32_t>)      loaded = svld1_f32(m, p);
   else if constexpr (std::is_same_v<E, float64_t>) loaded = svld1_f64(m, p);
-  else if constexpr (std::is_same_v<E, float16_t>) loaded = svld1_f16(m, p);
+  else if constexpr (std::is_same_v<E, float16_t>) loaded = svld1_f16(m, (const __fp16 *)p);
 #if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) loaded = svld1_bf16(m, p);
+  else if constexpr (std::is_same_v<E, bfloat16_t>) loaded = svld1_bf16(m, (const __bf16 *)p);
 #endif
   else if constexpr (std::is_same_v<E, uint8_t>)   loaded = svld1_u8(m, p);
   else if constexpr (std::is_same_v<E, int8_t>)    loaded = svld1_s8(m, p);
@@ -108,9 +108,9 @@ VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, Vec<T> v) {
   auto pg = word::make_mask(t);
   if constexpr (std::is_same_v<E, float32_t>)      svst1_f32(pg, p, v);
   else if constexpr (std::is_same_v<E, float64_t>) svst1_f64(pg, p, v);
-  else if constexpr (std::is_same_v<E, float16_t>) svst1_f16(pg, p, v);
+  else if constexpr (std::is_same_v<E, float16_t>) svst1_f16(pg, (__fp16 *)p, v);
 #if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) svst1_bf16(pg, p, v);
+  else if constexpr (std::is_same_v<E, bfloat16_t>) svst1_bf16(pg, (__bf16 *)p, v);
 #endif
   else if constexpr (std::is_same_v<E, uint8_t>)   svst1_u8(pg, p, v);
   else if constexpr (std::is_same_v<E, int8_t>)    svst1_s8(pg, p, v);
@@ -138,9 +138,9 @@ VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
   using E = TypeOf<T>;
   if constexpr (std::is_same_v<E, float32_t>)      svst1_f32(m, p, v);
   else if constexpr (std::is_same_v<E, float64_t>) svst1_f64(m, p, v);
-  else if constexpr (std::is_same_v<E, float16_t>) svst1_f16(m, p, v);
+  else if constexpr (std::is_same_v<E, float16_t>) svst1_f16(m, (__fp16 *)p, v);
 #if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) svst1_bf16(m, p, v);
+  else if constexpr (std::is_same_v<E, bfloat16_t>) svst1_bf16(m, (__bf16 *)p, v);
 #endif
   else if constexpr (std::is_same_v<E, uint8_t>)   svst1_u8(m, p, v);
   else if constexpr (std::is_same_v<E, int8_t>)    svst1_s8(m, p, v);

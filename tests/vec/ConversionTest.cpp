@@ -24,10 +24,10 @@ namespace test_utils {
 
 template <typename T>
 constexpr T get_test_value(int idx) {
-  if constexpr (std::is_same_v<T, bfloat16_t>) {
-    return static_cast<bfloat16_t>(static_cast<float>(idx * 1.5f + 0.5f));
-  } else if constexpr (std::is_same_v<T, float16_t>) {
-    return static_cast<float16_t>(static_cast<float>(idx * 1.5f + 0.5f));
+  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
+    return static_cast<vecops::bfloat16_t>(static_cast<float>(idx * 1.5f + 0.5f));
+  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
+    return static_cast<vecops::float16_t>(static_cast<float>(idx * 1.5f + 0.5f));
   } else if constexpr (std::is_same_v<T, float32_t>) {
     return static_cast<float32_t>(idx * 1.5f + 0.5f);
   } else if constexpr (std::is_same_v<T, float64_t>) {
@@ -53,13 +53,13 @@ constexpr T get_test_value(int idx) {
 
 template <typename T>
 ::testing::AssertionResult values_equal(T expected, T actual, double tolerance = 0.01) {
-  if constexpr (std::is_same_v<T, bfloat16_t>) {
+  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
     float e = static_cast<float>(expected);
     float a = static_cast<float>(actual);
     if (std::abs(e - a) <= std::max(std::abs(e), std::abs(a)) * tolerance)
       return ::testing::AssertionSuccess();
     return ::testing::AssertionFailure() << "Expected " << e << ", got " << a;
-  } else if constexpr (std::is_same_v<T, float16_t>) {
+  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
     float e = static_cast<float>(expected);
     float a = static_cast<float>(actual);
     if (std::abs(e - a) <= std::max(std::abs(e), std::abs(a)) * tolerance)
@@ -275,8 +275,8 @@ protected:
     in_data_ = test_utils::alloc_aligned<TIn>(256);
     for (size_t i = 0; i < 256; ++i) {
       if constexpr (std::is_floating_point_v<TIn> ||
-                    std::is_same_v<TIn, float16_t> ||
-                    std::is_same_v<TIn, bfloat16_t>) {
+                    std::is_same_v<TIn, vecops::float16_t> ||
+                    std::is_same_v<TIn, vecops::bfloat16_t>) {
         in_data_[i] = static_cast<TIn>((i % 20) - 10 + 0.5);
       } else if constexpr (std::is_signed_v<TIn>) {
         in_data_[i] = static_cast<TIn>((i % 100) - 50);
@@ -636,6 +636,135 @@ TEST_F(VecConvertCornerCaseTest, DemoteNegativeValue) {
   std::free(data);
 }
 
+// Test: Demotion with out-of-range unsigned source (unsigned -> smaller int)
+// Verifies ScalarConvert correctly clamps in unsigned domain without signed wraparound
+TEST_F(VecConvertCornerCaseTest, DemoteUnsignedSaturated) {
+  // uint32_t -> int16_t: overshoot values
+  {
+    ScalableTag<uint32_t> t_in;
+    ScalableTag<int16_t>  t_out;
+    nint_t N = std::min(size(t_in), size(t_out));
+
+    auto data = test_utils::alloc_aligned<uint32_t>(N);
+    for (nint_t i = 0; i < N; ++i) {
+      nint_t vals[] = {0, 100, 40000, 4294934528u};
+      data[i] = vals[i % 4];
+    }
+
+    auto v_in  = loadu(t_in, data);
+    auto v_out = demote(t_out, v_in);
+
+    for (nint_t i = 0; i < N; ++i) {
+      int16_t expected = vecops::convert<int16_t>(data[i]);
+      int16_t actual   = get(t_out, v_out, i);
+      EXPECT_EQ(expected, actual) << "i=" << i << " input=" << data[i];
+    }
+    std::free(data);
+  }
+
+  // uint64_t -> uint32_t: large values should clamp to UINT32_MAX
+  {
+    ScalableTag<uint64_t> t_in;
+    ScalableTag<uint32_t> t_out;
+    nint_t N = std::min(size(t_in), size(t_out));
+
+    auto data = test_utils::alloc_aligned<uint64_t>(N);
+    for (nint_t i = 0; i < N; ++i) {
+      uint64_t vals[] = {0, 100, 0x100000000ULL, 0xFFFFFFFF00000000ULL};
+      data[i] = vals[i % 4];
+    }
+
+    auto v_in  = loadu(t_in, data);
+    auto v_out = demote(t_out, v_in);
+
+    for (nint_t i = 0; i < N; ++i) {
+      uint32_t expected = vecops::convert<uint32_t>(data[i]);
+      uint32_t actual   = get(t_out, v_out, i);
+      EXPECT_EQ(expected, actual) << "i=" << i << " input=" << data[i];
+    }
+    std::free(data);
+  }
+
+  // uint64_t -> int32_t: large unsigned values clamped to INT32_MAX
+  {
+    ScalableTag<uint64_t> t_in;
+    ScalableTag<int32_t>  t_out;
+    nint_t N = std::min(size(t_in), size(t_out));
+
+    auto data = test_utils::alloc_aligned<uint64_t>(N);
+    for (nint_t i = 0; i < N; ++i) {
+      uint64_t vals[] = {0, 100, 0x100000000ULL, 0xFFFFFFFF00000000ULL};
+      data[i] = vals[i % 4];
+    }
+
+    auto v_in  = loadu(t_in, data);
+    auto v_out = demote(t_out, v_in);
+
+    for (nint_t i = 0; i < N; ++i) {
+      int32_t expected = vecops::convert<int32_t>(data[i]);
+      int32_t actual   = get(t_out, v_out, i);
+      EXPECT_EQ(expected, actual) << "i=" << i << " input=" << data[i];
+    }
+    std::free(data);
+  }
+}
+
+// Test: Demotion with out-of-range signed source (int64_t -> int32_t)
+// Verifies ScalarConvert uses a wide enough intermediate type to avoid truncation
+TEST_F(VecConvertCornerCaseTest, DemoteSignedSaturated) {
+  // int64_t -> int32_t: values outside int32_t range
+  {
+    ScalableTag<int64_t> t_in;
+    ScalableTag<int32_t> t_out;
+    nint_t N = std::min(size(t_in), size(t_out));
+
+    auto data = test_utils::alloc_aligned<int64_t>(N);
+    for (nint_t i = 0; i < N; ++i) {
+      int64_t vals[] = {
+        0,
+        INT64_MAX,
+        INT64_MIN,
+        (int64_t)0x800000000LL,  // > INT32_MAX
+        (int64_t)(-0x800000001LL) // < INT32_MIN
+      };
+      data[i] = vals[i % 5];
+    }
+
+    auto v_in  = loadu(t_in, data);
+    auto v_out = demote(t_out, v_in);
+
+    for (nint_t i = 0; i < N; ++i) {
+      int32_t expected = vecops::convert<int32_t>(data[i]);
+      int32_t actual   = get(t_out, v_out, i);
+      EXPECT_EQ(expected, actual) << "i=" << i << " input=" << data[i];
+    }
+    std::free(data);
+  }
+
+  // int64_t -> int16_t
+  {
+    ScalableTag<int64_t> t_in;
+    ScalableTag<int16_t> t_out;
+    nint_t N = std::min(size(t_in), size(t_out));
+
+    auto data = test_utils::alloc_aligned<int64_t>(N);
+    for (nint_t i = 0; i < N; ++i) {
+      int64_t vals[] = {0, INT64_MAX, INT64_MIN, (int64_t)0x800000000LL};
+      data[i] = vals[i % 4];
+    }
+
+    auto v_in  = loadu(t_in, data);
+    auto v_out = demote(t_out, v_in);
+
+    for (nint_t i = 0; i < N; ++i) {
+      int16_t expected = vecops::convert<int16_t>(data[i]);
+      int16_t actual   = get(t_out, v_out, i);
+      EXPECT_EQ(expected, actual) << "i=" << i << " input=" << data[i];
+    }
+    std::free(data);
+  }
+}
+
 // Test: int32_t <-> float32_t for boundary values
 TEST_F(VecConvertCornerCaseTest, Int32Float32Boundary) {
   ScalableTag<int32_t>   t_int;
@@ -724,7 +853,7 @@ TEST_F(VecConvertCornerCaseTest, MultiWordDemote) {
   auto v_out = demote(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
-    int8_t expected = static_cast<int8_t>(data[i]);
+    int8_t expected = vecops::convert<int8_t>(data[i]);
     int8_t actual   = get(t_out, v_out, i);
     EXPECT_EQ(expected, actual) << "i=" << i;
   }
@@ -745,7 +874,7 @@ TEST_F(VecConvertCornerCaseTest, MultiWordConvert) {
   auto v_out = convert(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
-    uint32_t expected = static_cast<uint32_t>(data[i]);
+    uint32_t expected = vecops::convert<uint32_t>(data[i]);
     uint32_t actual   = get(t_out, v_out, i);
     EXPECT_EQ(expected, actual) << "i=" << i;
   }
@@ -770,7 +899,7 @@ TEST_F(VecConvertCornerCaseTest, Float64Float32RoundTrip) {
     auto v_f32 = demote(t_f32, v_f64);
 
     for (nint_t i = 0; i < N; ++i) {
-      float32_t expected = static_cast<float32_t>(f64_data[i]);
+      float32_t expected = vecops::convert<float32_t>(f64_data[i]);
       float32_t actual = get(t_f32, v_f32, i);
       EXPECT_FLOAT_EQ(expected, actual) << "i=" << i;
     }
@@ -795,7 +924,7 @@ TEST_F(VecConvertCornerCaseTest, Float32Float64RoundTrip) {
     auto v_f64 = promote(t_f64, v_f32);
 
     for (nint_t i = 0; i < N; ++i) {
-      float64_t expected = static_cast<float64_t>(f32_data[i]);
+      float64_t expected = vecops::convert<float64_t>(f32_data[i]);
       float64_t actual = get(t_f64, v_f64, i);
       EXPECT_DOUBLE_EQ(expected, actual) << "i=" << i;
     }

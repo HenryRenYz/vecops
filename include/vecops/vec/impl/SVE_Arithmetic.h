@@ -8,7 +8,7 @@
 #include <arm_sve.h>
 #include <cmath>
 
-#include "CoreDefs.h"
+#include "CoreTypes.h"
 #include "../VecBase.h"
 #include "SVE_Basic.h"
 #include "SVE_Bit.h"

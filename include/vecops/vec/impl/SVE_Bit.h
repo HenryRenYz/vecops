@@ -7,7 +7,7 @@
 
 #include <arm_sve.h>
 
-#include "CoreDefs.h"
+#include "CoreTypes.h"
 #include "../VecBase.h"
 #include "SVE_Basic.h"
 

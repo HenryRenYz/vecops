@@ -9,7 +9,7 @@
 #include <cstring>
 #include <climits>
 
-#include "CoreDefs.h"
+#include "CoreTypes.h"
 #include "../VecBase.h"
 #include "vecops/util/ScalarConvert.h"
 

@@ -10,7 +10,7 @@
 
 #include "vecops/array/Array.h"
 #include "vecops/array/Gemm.h"
-#include "vecops/CoreDefs.h"
+#include "vecops/CoreTypes.h"
 
 using namespace vecops;
 using namespace vecops::array;

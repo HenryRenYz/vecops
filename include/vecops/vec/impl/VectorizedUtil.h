@@ -5,7 +5,7 @@
 #ifndef VECOPS_VECTORIZEDUTIL_H
 #define VECOPS_VECTORIZEDUTIL_H
 
-#include "vecops/CoreDefs.h"
+#include "vecops/CoreTypes.h"
 #include <type_traits>
 #include "../VecBase.h"
 

@@ -11,7 +11,7 @@
 #include <cstring>
 #include <cmath>
 
-#include "CoreDefs.h"
+#include "CoreTypes.h"
 #include "../VecBase.h"
 #include "SVE_Types.h"
 

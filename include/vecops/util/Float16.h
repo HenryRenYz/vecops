@@ -6,8 +6,9 @@
 #define VECOPS_FLOAT16_H
 
 #include <cmath>
-#include <iostream>
 #include <cstring>
+#include <cstdint>
+#include <iostream>
 
 #include "vecops/CoreDefs.h"
 
@@ -21,15 +22,18 @@ struct alignas(2) Float16 {
 
   VECOPS_INLINE constexpr Float16() = default;
 
-  constexpr Float16(float32_t x);
+  constexpr Float16(float x);
+
+  VECOPS_INLINE constexpr Float16(double x) : Float16(float(x)) { }
+
+  template <typename Int, std::enable_if_t<std::is_integral_v<Int>, bool> = false>
+  VECOPS_INLINE explicit constexpr Float16(Int x) : Float16(float(x)) { }
 
   #if defined(__arm__) || defined(__aarch64__)
-
   VECOPS_INLINE constexpr Float16(__fp16 x) {
     union { __fp16 f; uint16_t u; } u{.f = x};
     this->x = u.u;
   }
-
   #else
   VECOPS_INLINE constexpr Float16(_Float16 x) {
     union { _Float16 f; uint16_t u; } u{.f = x};
@@ -47,7 +51,7 @@ struct alignas(2) Float16 {
     return x;
   }
 
-  constexpr operator float32_t() const;
+  constexpr operator float() const;
 
   #if defined(__arm__) || defined(__aarch64__)
 
@@ -63,23 +67,28 @@ struct alignas(2) Float16 {
   }
   #endif
 
+  template <typename Int, std::enable_if_t<std::is_integral_v<Int>, bool> = false>
+  VECOPS_INLINE explicit constexpr operator Int() const {
+    return Int(float(*this));
+  }
+
 private:
   uint16_t x;
 };
 
 namespace details {
 
-VECOPS_INLINE constexpr float32_t fp32_from_bits(uint32_t x) {
-  union { float32_t f; uint32_t i; } u{.i = x};
+VECOPS_INLINE constexpr float fp32_from_bits(uint32_t x) {
+  union { float f; uint32_t i; } u{.i = x};
   return u.f;
 }
 
-VECOPS_INLINE constexpr uint32_t fp32_to_bits(float32_t x) {
-  union { float32_t f; uint32_t i; } u{.f = x};
+VECOPS_INLINE constexpr uint32_t fp32_to_bits(float x) {
+  union { float f; uint32_t i; } u{.f = x};
   return u.i;
 }
 
-inline float32_t fp16_to_fp32(uint16_t v) {
+inline float fp16_to_fp32(uint16_t v) {
   #ifdef HAS_F16C
   return _cvtsh_ss(v);
   #else // HAS_F16C
@@ -214,7 +223,7 @@ inline float32_t fp16_to_fp32(uint16_t v) {
   #endif // HAS_F16C
 }
 
-inline uint16_t fp16_from_fp32(float32_t v) {
+inline uint16_t fp16_from_fp32(float v) {
   #ifdef HAS_F16C
   return _cvtss_sh(v, _MM_FROUND_TO_NEAREST_INT);
   #else // HAS_F16C
@@ -257,37 +266,37 @@ inline uint16_t fp16_from_fp32(float32_t v) {
 
 } // namespace details
 
-VECOPS_INLINE constexpr Float16::Float16(float32_t x)
+VECOPS_INLINE constexpr Float16::Float16(float x)
   : x(details::fp16_from_fp32(x)) { }
 
-VECOPS_INLINE constexpr Float16::operator float32_t() const {
+VECOPS_INLINE constexpr Float16::operator float() const {
   return details::fp16_to_fp32(x);
 }
 
 VECOPS_INLINE std::ostream& operator<<(std::ostream& out, const Float16& v) {
-  out << float32_t(v);
+  out << float(v);
   return out;
 }
 
 
 VECOPS_INLINE Float16 operator+(const Float16& a, const Float16& b) {
-  return float32_t(a) + float32_t(b);
+  return float(a) + float(b);
 }
 
 VECOPS_INLINE Float16 operator-(const Float16& a, const Float16& b) {
-  return float32_t(a) - float32_t(b);
+  return float(a) - float(b);
 }
 
 VECOPS_INLINE Float16 operator*(const Float16& a, const Float16& b) {
-  return float32_t(a) * float32_t(b);
+  return float(a) * float(b);
 }
 
 VECOPS_INLINE Float16 operator/(const Float16& a, const Float16& b) {
-  return float32_t(a) / float32_t(b);
+  return float(a) / float(b);
 }
 
 VECOPS_INLINE Float16 operator-(const Float16& a) {
-  return -float32_t(a);
+  return -float(a);
 }
 
 VECOPS_INLINE Float16& operator+=(Float16& a, const Float16& b) {
@@ -310,9 +319,42 @@ VECOPS_INLINE Float16& operator/=(Float16& a, const Float16& b) {
   return a;
 }
 
+
+VECOPS_INLINE bool operator<(const Float16& a, const Float16& b) {
+  return float(a) < float(b);
+}
+
+VECOPS_INLINE bool operator>(const Float16& a, const Float16& b) {
+  return float(a) > float(b);
+}
+
+VECOPS_INLINE bool operator<=(const Float16& a, const Float16& b) {
+  return float(a) <= float(b);
+}
+
+VECOPS_INLINE bool operator>=(const Float16& a, const Float16& b) {
+  return float(a) >= float(b);
+}
+
+VECOPS_INLINE bool operator==(const Float16& a, const Float16& b) {
+  return float(a) == float(b);
+}
+
+VECOPS_INLINE bool operator!=(const Float16& a, const Float16& b) {
+  return float(a) != float(b);
+}
+
 } // namespace vecops
 
 namespace std {
+
+VECOPS_INLINE constexpr vecops::Float16 fabs(vecops::Float16 x) {
+  return vecops::Float16::from_bits(x.to_bits() & 0x7fff);
+}
+
+VECOPS_INLINE constexpr vecops::Float16 abs(vecops::Float16 x) {
+  return std::fabs(x);
+}
 
 template <>
 class numeric_limits<vecops::Float16> {

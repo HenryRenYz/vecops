@@ -6,7 +6,7 @@
 #define VECOPS_X86_GEMM_AMX_H
 
 #include "vecops/Features.h"
-#include "vecops/CoreDefs.h"
+#include "vecops/CoreTypes.h"
 #include "vecops/Assertion.h"
 #include "vecops/vec/Vec.h"
 

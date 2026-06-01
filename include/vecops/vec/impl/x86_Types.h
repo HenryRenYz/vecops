@@ -5,7 +5,7 @@
 #ifndef VECOPS_X86_TYPES_H
 #define VECOPS_X86_TYPES_H
 
-#include "vecops/CoreDefs.h"
+#include "vecops/CoreTypes.h"
 #include "../VecBase.h"
 
 #ifndef ARCH_X86_FAMILY
@@ -38,7 +38,6 @@ struct WrapperType {
 #define TL_DEFINE_MMREG(name, N, raw_type) \
 template <> struct RegType<name##_t, N> : public WrapperType<raw_type> { \
   using WrapperType<raw_type>::WrapperType; \
-  VECOPS_VFUNC constexpr name##_t operator[](nuint_t i) { return v[i]; } \
 }; \
 using v##name##x##N##_t = RegType<name##_t, N>
 
