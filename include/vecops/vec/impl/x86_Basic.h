@@ -592,6 +592,8 @@ VECOPS_VFUNC Vec<T> bitcast(T t, V v) {
       x86::RegType<uint8_t, 16>{_mm256_castsi256_si128(details::bitcast_to_int(v).v)});
 }
 #endif // VEC_WIDTH >= 256
+
+#if VEC_WIDTH >= 512
 template <TLV_DECL_TAG(T), TLV_DECL_VEC(V), TL_IF(sizeof(V) == 16 && sizeof(Vec<T>) == 64)>
 VECOPS_VFUNC Vec<T> bitcast(T t, V v) {
   return details::bitcast_from_int<TypeOf<T>>(
@@ -612,6 +614,7 @@ VECOPS_VFUNC Vec<T> bitcast(T t, V v) {
   return details::bitcast_from_int<TypeOf<T>>(
       x86::RegType<uint8_t, 32>{_mm512_castsi512_si256(details::bitcast_to_int(v).v)});
 }
+#endif // VEC_WIDTH >= 512
 
 
 /* ************************************************************************** */
@@ -1774,11 +1777,6 @@ VECOPS_VFUNC Vec<T> concat_odd(T t, Vec<T> a, Vec<T> b) {
   #endif
   return _mm256_permute4x64_epi64(u, _MM_SHUFFLE(3, 1, 2, 0));
 }
-#else
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32)>
-  VECOPS_VFUNC Vec<T> concat(T t, Vec<Half<T>> v1, Vec<Half<T>> v2) {
-  return Vec<T>{ v1, v2 };
-}
 #endif // VEC_WIDTH >= 256
 
 #if VEC_WIDTH >= 512
@@ -1789,10 +1787,6 @@ VECOPS_VFUNC Vec<T> concat(T t, Vec<Half<T>> v1, Vec<Half<T>> v2) {
   auto u1 = word::bitcast(t1, v1);
   auto u2 = word::bitcast(t2, v2);
   return word::bitcast(t, Vec<decltype(t1)>{_mm512_inserti64x4(u1.v, u2.v, 1)});
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 128)>
-VECOPS_VFUNC Vec<T> concat(T t, Vec<Half<T>> v1, Vec<Half<T>> v2) {
-  return Vec<T>{ v1, v2 };
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
@@ -1878,27 +1872,40 @@ VECOPS_VFUNC Vec<T> concat_odd(T t, Vec<T> a, Vec<T> b) {
   static const auto idx2 = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
   return _mm512_permutexvar_epi64(idx2, u);
 }
-#elif VEC_WIDTH >= 256
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64)>
+#endif // VEC_WIDTH >= 512
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 2)>
 VECOPS_VFUNC Vec<T> concat(T t, Vec<Half<T>> v1, Vec<Half<T>> v2) {
   return Vec<T>{ v1, v2 };
 }
-#else
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64)>
-  VECOPS_VFUNC Vec<T> concat(T t, Vec<Half<T>> v1, Vec<Half<T>> v2) {
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC Vec<T> concat(T t, Vec<Half<T>> v1, Vec<Half<T>> v2) {
   return Vec<T>{ v1[0], v1[1], v2[0], v2[1] };
 }
-#endif // VEC_WIDTH >= 512
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 8)>
+VECOPS_VFUNC Vec<T> concat(T t, Vec<Half<T>> v1, Vec<Half<T>> v2) {
+  return Vec<T>{ v1[0], v1[1], v1[2], v1[3], v2[0], v2[1], v2[2], v2[3] };
+}
 
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= VEC_WIDTH / 8)>
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1)>
 VECOPS_VFUNC Vec<Half<T>> lower(T t, Vec<T> v) {
   Half<T> t1;
   return word::bitcast(t1, v);
 }
 
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 2 * VEC_WIDTH / 8)>
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 2)>
 VECOPS_VFUNC Vec<Half<T>> lower(T t, Vec<T> v) {
-  return v[0];
+  return Vec<Half<T>>{v[0]};
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC Vec<Half<T>> lower(T t, Vec<T> v) {
+  return Vec<Half<T>>{v[0], v[1]};
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 8)>
+VECOPS_VFUNC Vec<Half<T>> lower(T t, Vec<T> v) {
+  return Vec<Half<T>>{v[0], v[1], v[2], v[3]};
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 2), TL_IF(sizeof(TypeOf<T>) == 1)>
@@ -2078,10 +2085,6 @@ VECOPS_VFUNC Vec<Half<T>> odd(T t, Vec<T> v) {
 }
 #else
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32)>
-VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
-  return v[1];
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32)>
 VECOPS_VFUNC Vec<Half<T>> even(T t, Vec<T> v) {
   Half<T> th;
   auto u_lo = word::even(th, v[0]);
@@ -2109,10 +2112,6 @@ VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_none<TypeOf<T>, float32_t, float64_t>)>
 VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
   return _mm512_extracti32x8_epi32(v.v, 1);
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 128)>
-VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
-  return v[1];
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t, int64_t, uint64_t>)>
@@ -2184,10 +2183,6 @@ VECOPS_VFUNC Vec<Half<T>> odd(T t, Vec<T> v) {
 }
 #elif VEC_WIDTH >= 256
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64)>
-VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
-  return v[1];
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64)>
 VECOPS_VFUNC Vec<Half<T>> even(T t, Vec<T> v) {
   Half<T> th;
   auto u_lo = word::even(th, v[0]);
@@ -2203,6 +2198,30 @@ VECOPS_VFUNC Vec<Half<T>> odd(T t, Vec<T> v) {
 }
 #endif // VEC_WIDTH >= 512
 
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 2)>
+VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
+  return Vec<Half<T>>{v[1]};
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
+  return Vec<Half<T>>{v[2], v[3]};
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 8)>
+VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
+  return Vec<Half<T>>{v[4], v[5], v[6], v[7]};
+}
+
+// Note: batched version of bitcast, internal API
+template <TLV_DECL_TAG(T), TLV_DECL_VEC(V), TL_IF(num_words(T{}) > 1), TL_IF(sizeof(Vec<T>) == sizeof(V))>
+VECOPS_VFUNC Vec<T> bitcast(T t, V v) {
+  Vec2Tag<V> t1;
+  Half<T> t2;
+  auto lo = word::bitcast(t2, word::lower(t1, v));
+  auto hi = word::bitcast(t2, word::upper(t1, v));
+  return word::concat(t, lo, hi);
+}
 
 /* ************************************************************************** */
 //                                Interleave                                  //
