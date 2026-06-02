@@ -782,7 +782,7 @@ template <TLV_DECL_TAG(T)>
 static VECOPS_VFUNC Vec<T> _mask_gather_scalar(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   alignas(T::Bytes) TypeOf<T> data[T::N];
   VECOPS_UNROLL for (int j = 0; j < T::N; ++j) {
-    data[j] = word::get(m, j) ? p[nint_t(word::get(i, j))] : word::get(default_v, j);
+    data[j] = word::get(t, m, j) ? p[nint_t(word::get(i, j))] : word::get(default_v, j);
   }
   return word::load(t, data);
 }
@@ -976,7 +976,7 @@ static VECOPS_VFUNC void _scatter_scalar(T t, TypeOf<T>* p, Vec<Rebind<Index<Typ
 template <TLV_DECL_TAG(T)>
 static VECOPS_VFUNC void _mask_scatter_scalar(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
   VECOPS_UNROLL for (int j = 0; j < T::N; ++j) {
-    if (word::get(m, j)) {
+    if (word::get(t, m, j)) {
       p[nint_t(word::get(i, j))] = word::get(v, j);
     }
   }

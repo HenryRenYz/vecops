@@ -110,9 +110,3 @@ add_multiarch_executable(vecops-VecSVETest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/SVETest.cpp
         ARCH native native+bf16
 )
-# TODO temp test, old version of ConversionTest, will be removed
-# vecops-VecConversionTestX86
-add_multiarch_executable(vecops-VecConversionTestX86
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ConversionTestX86.cpp
-        ARCH x86-64 corei7-avx core-avx2 native
-)

@@ -2230,18 +2230,18 @@ VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   __m256 a_lo, a_hi, b_lo, b_hi;
   half_cvt::cvt_fp16_to_two_fp32(a.v, a_lo, a_hi);
   half_cvt::cvt_fp16_to_two_fp32(b.v, b_lo, b_hi);
-  return _mm256_packs_epi32(
+  return _mm256_permute4x64_epi64(_mm256_packs_epi32(
       _mm256_castps_si256(_mm256_cmp_ps(a_lo, b_lo, _CMP_EQ_OQ)),
-      _mm256_castps_si256(_mm256_cmp_ps(a_hi, b_hi, _CMP_EQ_OQ)));
+      _mm256_castps_si256(_mm256_cmp_ps(a_hi, b_hi, _CMP_EQ_OQ))), _MM_SHUFFLE(3, 1, 2, 0));
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
 VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
   __m256 a_lo, a_hi, b_lo, b_hi;
   half_cvt::cvt_bf16_to_two_fp32(a.v, a_lo, a_hi);
   half_cvt::cvt_bf16_to_two_fp32(b.v, b_lo, b_hi);
-  return _mm256_packs_epi32(
+  return _mm256_permute4x64_epi64(_mm256_packs_epi32(
       _mm256_castps_si256(_mm256_cmp_ps(a_lo, b_lo, _CMP_EQ_OQ)),
-      _mm256_castps_si256(_mm256_cmp_ps(a_hi, b_hi, _CMP_EQ_OQ)));
+      _mm256_castps_si256(_mm256_cmp_ps(a_hi, b_hi, _CMP_EQ_OQ))), _MM_SHUFFLE(3, 1, 2, 0));
 }
 #endif
 #endif // HAS_AVX512DQ
@@ -5177,6 +5177,82 @@ template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF
 VECOPS_VFUNC Mask<T> isnan(V v) {
   return _mm512_cmp_pd_mask(v.v, v.v, _CMP_UNORD_Q);
 }
+#ifdef HAS_AVX512FP16
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v) {
+  return _mm_cmp_ph_mask(_mm_castsi128_ph(v.v), _mm_castsi128_ph(v.v), _CMP_UNORD_Q);
+}
+#if VEC_WIDTH >= 256
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v) {
+  return _mm256_cmp_ph_mask(_mm256_castsi256_ph(v.v), _mm256_castsi256_ph(v.v), _CMP_UNORD_Q);
+}
+#endif
+#if VEC_WIDTH >= 512
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v) {
+  return _mm512_cmp_ph_mask(_mm512_castsi512_ph(v.v), _mm512_castsi512_ph(v.v), _CMP_UNORD_Q);
+}
+#endif
+#endif // HAS_AVX512FP16
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v) {
+  __m128 a_lo, a_hi;
+  half_cvt::cvt_bf16_to_two_fp32(v.v, a_lo, a_hi);
+  auto lo = _mm_cmp_ps_mask(a_lo, a_lo, _CMP_UNORD_Q);
+  auto hi = _mm_cmp_ps_mask(a_hi, a_hi, _CMP_UNORD_Q);
+  return lo | (hi << 4);
+}
+#if VEC_WIDTH >= 256
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v) {
+  __m256 a_lo, a_hi;
+  half_cvt::cvt_bf16_to_two_fp32(v.v, a_lo, a_hi);
+  auto lo = _mm256_cmp_ps_mask(a_lo, a_lo, _CMP_UNORD_Q);
+  auto hi = _mm256_cmp_ps_mask(a_hi, a_hi, _CMP_UNORD_Q);
+  return lo | (uint16_t(hi) << 8);
+}
+#endif
+#if VEC_WIDTH >= 512
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v) {
+  __m512 a_lo, a_hi;
+  half_cvt::cvt_bf16_to_two_fp32(v.v, a_lo, a_hi);
+  auto lo = _mm512_cmp_ps_mask(a_lo, a_lo, _CMP_UNORD_Q);
+  auto hi = _mm512_cmp_ps_mask(a_hi, a_hi, _CMP_UNORD_Q);
+  return lo | (uint32_t(hi) << 16);
+}
+#endif
+#ifndef HAS_AVX512FP16
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v) {
+  __m128 a_lo, a_hi;
+  half_cvt::cvt_fp16_to_two_fp32(v.v, a_lo, a_hi);
+  auto lo = _mm_cmp_ps_mask(a_lo, a_lo, _CMP_UNORD_Q);
+  auto hi = _mm_cmp_ps_mask(a_hi, a_hi, _CMP_UNORD_Q);
+  return lo | (hi << 4);
+}
+#if VEC_WIDTH >= 256
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v) {
+  __m256 a_lo, a_hi;
+  half_cvt::cvt_fp16_to_two_fp32(v.v, a_lo, a_hi);
+  auto lo = _mm256_cmp_ps_mask(a_lo, a_lo, _CMP_UNORD_Q);
+  auto hi = _mm256_cmp_ps_mask(a_hi, a_hi, _CMP_UNORD_Q);
+  return lo | (uint16_t(hi) << 8);
+}
+#endif
+#if VEC_WIDTH >= 512
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v) {
+  __m512 a_lo, a_hi;
+  half_cvt::cvt_fp16_to_two_fp32(v.v, a_lo, a_hi);
+  auto lo = _mm512_cmp_ps_mask(a_lo, a_lo, _CMP_UNORD_Q);
+  auto hi = _mm512_cmp_ps_mask(a_hi, a_hi, _CMP_UNORD_Q);
+  return lo | (uint32_t(hi) << 16);
+}
+#endif
+#endif // !HAS_AVX512FP16
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
 VECOPS_VFUNC Mask<T> isnan(V v) {
@@ -5195,6 +5271,43 @@ VECOPS_VFUNC Mask<T> isnan(V v) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
 VECOPS_VFUNC Mask<T> isnan(V v) {
   return _mm256_castpd_si256(_mm256_cmp_pd(v.v, v.v, _CMP_UNORD_Q));
+}
+#endif // VEC_WIDTH >= 256
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v) {
+  __m128 a_lo, a_hi;
+  half_cvt::cvt_fp16_to_two_fp32(v.v, a_lo, a_hi);
+  return _mm_packs_epi32(
+      _mm_castps_si128(_mm_cmpunord_ps(a_lo, a_lo)),
+      _mm_castps_si128(_mm_cmpunord_ps(a_hi, a_hi)));
+}
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v) {
+  __m128 a_lo, a_hi;
+  half_cvt::cvt_bf16_to_two_fp32(v.v, a_lo, a_hi);
+  return _mm_packs_epi32(
+      _mm_castps_si128(_mm_cmpunord_ps(a_lo, a_lo)),
+      _mm_castps_si128(_mm_cmpunord_ps(a_hi, a_hi)));
+}
+#if VEC_WIDTH >= 256
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v) {
+  __m256 a_lo, a_hi;
+  half_cvt::cvt_fp16_to_two_fp32(v.v, a_lo, a_hi);
+  __m256i packed = _mm256_packs_epi32(
+      _mm256_castps_si256(_mm256_cmp_ps(a_lo, a_lo, _CMP_UNORD_Q)),
+      _mm256_castps_si256(_mm256_cmp_ps(a_hi, a_hi, _CMP_UNORD_Q)));
+  return _mm256_permute4x64_epi64(packed, _MM_SHUFFLE(3, 1, 2, 0));
+}
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v) {
+  __m256 a_lo, a_hi;
+  half_cvt::cvt_bf16_to_two_fp32(v.v, a_lo, a_hi);
+  __m256i packed = _mm256_packs_epi32(
+      _mm256_castps_si256(_mm256_cmp_ps(a_lo, a_lo, _CMP_UNORD_Q)),
+      _mm256_castps_si256(_mm256_cmp_ps(a_hi, a_hi, _CMP_UNORD_Q)));
+  return _mm256_permute4x64_epi64(packed, _MM_SHUFFLE(3, 1, 2, 0));
 }
 #endif // VEC_WIDTH >= 256
 #endif // HAS_AVX512DQ
@@ -5225,6 +5338,28 @@ VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
 VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
   return _mm512_mask_cmp_pd_mask(m.v, v.v, v.v, _CMP_UNORD_Q);
+}
+#ifdef HAS_AVX512FP16
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
+  return _mm_mask_cmp_ph_mask(m.v, _mm_castsi128_ph(v.v), _mm_castsi128_ph(v.v), _CMP_UNORD_Q);
+}
+#if VEC_WIDTH >= 256
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
+  return _mm256_mask_cmp_ph_mask(m.v, _mm256_castsi256_ph(v.v), _mm256_castsi256_ph(v.v), _CMP_UNORD_Q);
+}
+#endif
+#if VEC_WIDTH >= 512
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
+  return _mm512_mask_cmp_ph_mask(m.v, _mm512_castsi512_ph(v.v), _mm512_castsi512_ph(v.v), _CMP_UNORD_Q);
+}
+#endif
+#endif // HAS_AVX512FP16
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_any<TypeOf<T>, float16_t, bfloat16_t>)>
+VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
+  return word::bit_and(m, word::isnan(v));
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
