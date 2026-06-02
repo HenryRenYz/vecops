@@ -38,13 +38,23 @@ VECOPS_INLINE constexpr TOut convert(TIn v) {
   using TPromoteOut = details::DTypePromote<TOut>::Type;
   if constexpr (is_int<TOut> && sizeof(TOut) < sizeof(TIn)) {
     if constexpr (is_unsigned_int<TIn>) {
-      const auto u_max = TIn(std::numeric_limits<TOut>::max());
-      return TOut(std::min(u_max, v));
+      const auto HI = TIn(std::numeric_limits<TOut>::max());
+      return TOut(std::min(HI, v));
     } else {
       using Wide = std::conditional_t<(sizeof(TPromoteOut) < sizeof(TIn)), TIn, TPromoteOut>;
       const auto HI = Wide(std::numeric_limits<TOut>::max());
       const auto LO = Wide(std::numeric_limits<TOut>::min());
       return TOut(std::max(LO, std::min(HI, Wide(v))));
+    }
+  } else if constexpr (is_int<TOut> && is_int<TIn> && sizeof(TOut) == sizeof(TIn)) {
+    if constexpr (is_unsigned_int<TOut>) {
+      const auto LO = TIn(0);
+      return TOut(std::max(v, LO));
+    } else if constexpr (is_unsigned_int<TIn>) {
+      const auto HI = TIn(std::numeric_limits<TOut>::max());
+      return TOut(std::min(v, HI));
+    } else {
+      return TOut(v);
     }
   } else {
     return TOut(TPromoteOut(TPromoteIn(v)));

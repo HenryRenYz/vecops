@@ -2363,8 +2363,7 @@ VECOPS_VFUNC Vec<To> demote(To t, Vi v) {
       using TBi = Tag<Ei, TWi::N, log2_floor(nw_i_r)>;
       TBi tb;
       auto v_bi = vmap(tb, [&]<nuint_t J>(auto tt){
-        constexpr nint_t src_idx = J < NWi ? J : 0;
-        return get_word<src_idx>(t_i, v);
+        return get_word<J>(t_i, v);
       });
       auto v_bo = word::demote(TWo(), v_bi);
       v_o = set_word<0>(t_o, v_o, v_bo);

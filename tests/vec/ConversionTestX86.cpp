@@ -111,8 +111,11 @@ protected:
   using TIn = typename TPair::T1;
   using TOut = typename TPair::T2;
 
-  nint_t in_elements()  { return test_utils::full_vec_elements<TIn>(); }
-  nint_t out_elements() { return test_utils::full_vec_elements<TOut>(); }
+  using InTag  = ScalableTag<TIn>;
+  using OutTag = Rebind<TOut, InTag>;
+
+  nint_t in_elements()  { return InTag::AdjustedN; }
+  nint_t out_elements() { return OutTag::AdjustedN; }
 
   void SetUp() override {
     in_data_ = test_utils::alloc_aligned<TIn>(256);
@@ -184,8 +187,8 @@ TYPED_TEST(VecPromoteTest, BasicPromote) {
   nint_t n_out = this->out_elements();
   nint_t N = n_in < n_out ? n_in : n_out;
 
-  ScalableTag<TIn>  t_in;
-  ScalableTag<TOut> t_out;
+  typename TestFixture::InTag  t_in;
+  typename TestFixture::OutTag t_out;
 
   auto v_in  = loadu(t_in, this->in_data_);
   auto v_out = promote(t_out, v_in);
@@ -203,8 +206,8 @@ TYPED_TEST(VecPromoteTest, PromoteWithZeroValues) {
   using TOut = typename TestFixture::TOut;
   nint_t N = this->out_elements();
 
-  ScalableTag<TIn>  t_in;
-  ScalableTag<TOut> t_out;
+  typename TestFixture::InTag  t_in;
+  typename TestFixture::OutTag t_out;
 
   auto v_in  = zeros(t_in);
   auto v_out = promote(t_out, v_in);
@@ -221,8 +224,8 @@ TYPED_TEST(VecPromoteTest, PromoteWithMaxMinValues) {
   nint_t n_out = this->out_elements();
   nint_t N = n_in < n_out ? n_in : n_out;
 
-  ScalableTag<TIn>  t_in;
-  ScalableTag<TOut> t_out;
+  typename TestFixture::InTag  t_in;
+  typename TestFixture::OutTag t_out;
 
   auto data = test_utils::alloc_aligned<TIn>(N);
   for (nint_t i = 0; i < N; ++i) {
@@ -253,8 +256,8 @@ TYPED_TEST(VecPromoteTest, SignExtensionTest) {
   nint_t N = n_in < n_out ? n_in : n_out;
 
   if constexpr (std::is_signed_v<TIn>) {
-    ScalableTag<TIn>  t_in;
-    ScalableTag<TOut> t_out;
+    typename TestFixture::InTag  t_in;
+    typename TestFixture::OutTag t_out;
 
     auto data = test_utils::alloc_aligned<TIn>(N);
     for (nint_t i = 0; i < N; ++i) {
@@ -285,8 +288,11 @@ protected:
   using TIn = typename TPair::T1;
   using TOut = typename TPair::T2;
 
-  nint_t in_elements()  { return test_utils::full_vec_elements<TIn>(); }
-  nint_t out_elements() { return test_utils::full_vec_elements<TOut>(); }
+  using OutTag = ScalableTag<TOut>;
+  using InTag  = Rebind<TIn, OutTag>;
+
+  nint_t in_elements()  { return InTag::AdjustedN; }
+  nint_t out_elements() { return OutTag::AdjustedN; }
 
   void SetUp() override {
     in_data_ = test_utils::alloc_aligned<TIn>(256);
@@ -366,8 +372,8 @@ TYPED_TEST(VecDemoteTest, BasicDemote) {
   nint_t n_out = this->out_elements();
   nint_t N = n_in < n_out ? n_in : n_out;
 
-  ScalableTag<TIn>  t_in;
-  ScalableTag<TOut> t_out;
+  typename TestFixture::InTag  t_in;
+  typename TestFixture::OutTag t_out;
 
   auto v_in  = loadu(t_in, this->in_data_);
   auto v_out = demote(t_out, v_in);
@@ -387,8 +393,8 @@ TYPED_TEST(VecDemoteTest, DemoteWithZeroValues) {
   nint_t n_out = this->out_elements();
   nint_t N = n_in < n_out ? n_in : n_out;
 
-  ScalableTag<TIn>  t_in;
-  ScalableTag<TOut> t_out;
+  typename TestFixture::InTag  t_in;
+  typename TestFixture::OutTag t_out;
 
   auto v_in  = zeros(t_in);
   auto v_out = demote(t_out, v_in);
@@ -406,8 +412,8 @@ TYPED_TEST(VecDemoteTest, TruncationBehavior) {
   nint_t n_out = this->out_elements();
   nint_t N = n_in < n_out ? n_in : n_out;
 
-  ScalableTag<TIn>  t_in;
-  ScalableTag<TOut> t_out;
+  typename TestFixture::InTag  t_in;
+  typename TestFixture::OutTag t_out;
 
   auto data = test_utils::alloc_aligned<TIn>(N);
   TIn max_out = static_cast<TIn>(std::numeric_limits<TOut>::max());
@@ -609,8 +615,8 @@ protected:
 
 // Test: int8_t (-1) -> uint16_t (should be 65535 via sign extension)
 TEST_F(VecConvertCornerCaseTest, PromoteNegativeToUnsigned) {
-  ScalableTag<int8_t>  t_in;
-  ScalableTag<uint16_t> t_out;
+  ScalableTag<int8_t> t_in;
+  Rebind<uint16_t, decltype(t_in)> t_out;
   nint_t N = std::min(size(t_in), size(t_out));
 
   auto data = test_utils::alloc_aligned<int8_t>(N);
@@ -631,7 +637,7 @@ TEST_F(VecConvertCornerCaseTest, PromoteNegativeToUnsigned) {
 // Test: uint8_t (255) -> int16_t (should be 255, not -1)
 TEST_F(VecConvertCornerCaseTest, PromoteUnsignedToSigned) {
   ScalableTag<uint8_t> t_in;
-  ScalableTag<int16_t> t_out;
+  Rebind<int16_t, decltype(t_in)> t_out;
   nint_t N = std::min(size(t_in), size(t_out));
 
   auto data = test_utils::alloc_aligned<uint8_t>(N);
@@ -651,8 +657,8 @@ TEST_F(VecConvertCornerCaseTest, PromoteUnsignedToSigned) {
 
 // Test: int16_t (-1) -> int8_t (truncation to -1)
 TEST_F(VecConvertCornerCaseTest, DemoteNegativeValue) {
-  ScalableTag<int16_t> t_in;
   ScalableTag<int8_t>  t_out;
+  Rebind<int16_t, decltype(t_out)> t_in;
   nint_t N = std::min(size(t_in), size(t_out));
 
   auto data = test_utils::alloc_aligned<int16_t>(N);
@@ -675,8 +681,8 @@ TEST_F(VecConvertCornerCaseTest, DemoteNegativeValue) {
 TEST_F(VecConvertCornerCaseTest, DemoteUnsignedSaturated) {
   // uint32_t -> int16_t: overshoot values
   {
-    ScalableTag<uint32_t> t_in;
     ScalableTag<int16_t>  t_out;
+    Rebind<uint32_t, decltype(t_out)> t_in;
     nint_t N = std::min(size(t_in), size(t_out));
 
     auto data = test_utils::alloc_aligned<uint32_t>(N);
@@ -698,8 +704,8 @@ TEST_F(VecConvertCornerCaseTest, DemoteUnsignedSaturated) {
 
   // uint64_t -> uint32_t: large values should clamp to UINT32_MAX
   {
-    ScalableTag<uint64_t> t_in;
     ScalableTag<uint32_t> t_out;
+    Rebind<uint64_t, decltype(t_out)> t_in;
     nint_t N = std::min(size(t_in), size(t_out));
 
     auto data = test_utils::alloc_aligned<uint64_t>(N);
@@ -721,8 +727,8 @@ TEST_F(VecConvertCornerCaseTest, DemoteUnsignedSaturated) {
 
   // uint64_t -> int32_t: large unsigned values clamped to INT32_MAX
   {
-    ScalableTag<uint64_t> t_in;
     ScalableTag<int32_t>  t_out;
+    Rebind<uint64_t, decltype(t_out)> t_in;
     nint_t N = std::min(size(t_in), size(t_out));
 
     auto data = test_utils::alloc_aligned<uint64_t>(N);
@@ -748,8 +754,8 @@ TEST_F(VecConvertCornerCaseTest, DemoteUnsignedSaturated) {
 TEST_F(VecConvertCornerCaseTest, DemoteSignedSaturated) {
   // int64_t -> int32_t: values outside int32_t range
   {
-    ScalableTag<int64_t> t_in;
     ScalableTag<int32_t> t_out;
+    Rebind<int64_t, decltype(t_out)> t_in;
     nint_t N = std::min(size(t_in), size(t_out));
 
     auto data = test_utils::alloc_aligned<int64_t>(N);
@@ -777,8 +783,8 @@ TEST_F(VecConvertCornerCaseTest, DemoteSignedSaturated) {
 
   // int64_t -> int16_t
   {
-    ScalableTag<int64_t> t_in;
     ScalableTag<int16_t> t_out;
+    Rebind<int64_t, decltype(t_out)> t_in;
     nint_t N = std::min(size(t_in), size(t_out));
 
     auto data = test_utils::alloc_aligned<int64_t>(N);
@@ -874,8 +880,8 @@ TEST_F(VecConvertCornerCaseTest, LargeInt32ToFloat32) {
 }
 
 TEST_F(VecConvertCornerCaseTest, MultiWordDemote) {
-  ScalableTag<int16_t> t_in;
   ScalableTag<int8_t>  t_out;
+  Rebind<int16_t, decltype(t_out)> t_in;
   nint_t N = std::min(size(t_in), size(t_out));
 
   auto data = test_utils::alloc_aligned<int16_t>(N);
@@ -917,8 +923,8 @@ TEST_F(VecConvertCornerCaseTest, MultiWordConvert) {
 
 // Test: Float64 <-> Float32 conversion
 TEST_F(VecConvertCornerCaseTest, Float64Float32RoundTrip) {
-  ScalableTag<float64_t> t_f64;
   ScalableTag<float32_t> t_f32;
+  Rebind<float64_t, decltype(t_f32)> t_f64;
   nint_t N = std::min(size(t_f64), size(t_f32));
 
   // Float64 -> Float32 (demote)
@@ -943,7 +949,7 @@ TEST_F(VecConvertCornerCaseTest, Float64Float32RoundTrip) {
 
 TEST_F(VecConvertCornerCaseTest, Float32Float64RoundTrip) {
   ScalableTag<float32_t> t_f32;
-  ScalableTag<float64_t> t_f64;
+  Rebind<float64_t, decltype(t_f32)> t_f64;
   nint_t N = std::min(size(t_f32), size(t_f64));
 
   // Float32 -> Float64 (promote)

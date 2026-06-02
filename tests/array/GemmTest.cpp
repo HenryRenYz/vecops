@@ -12,6 +12,8 @@
 #include "vecops/array/Gemm.h"
 #include "vecops/CoreTypes.h"
 
+#include "vecops/gemm/Layout.h"
+
 using namespace vecops;
 using namespace vecops::array;
 
@@ -1520,6 +1522,13 @@ TEST_F(GemmTest, AMXBf16_PackGemm_Both) {
       EXPECT_NEAR(float(C_out[i]), float(C_ref[i]), 1e-2f)
           << "AMX both M=" << M << " N=" << N << " K=" << K;
   }
+}
+
+TEST_F(GemmTest, Playground) {
+  using namespace vecops::array2;
+  constexpr auto a = array2::details::make_storage_offset<Const<2>, Const<4>, Aligned<2>>();
+  constexpr int nel = a.second;
+  static_assert(nel == 3);
 }
 
 // ============================================================================

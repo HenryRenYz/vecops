@@ -574,11 +574,7 @@ VECOPS_VFUNC Vec<T> bitcast(T t, V v) {
   return details::bitcast_from_int<TypeOf<T>>(details::bitcast_to_int(v));
 }
 
-template <TLV_DECL_TAG(T), TLV_DECL_VEC(V), TL_IF(sizeof(V) == sizeof(Vec<T>)), TL_IF(sizeof(V) == 2 * VEC_WIDTH / 8)>
-VECOPS_VFUNC Vec<T> bitcast(T t, V v) {
-  Tag<TypeOf<T>, T::N / 2> t1;
-  return Vec<T>{ word::bitcast(t1, v[0]), word::bitcast(t1, v[1]) };
-}
+// Note: internal batched bitcast defined after upper/lower & concat
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_TAG(T), TLV_DECL_VEC(V), TL_IF(sizeof(V) == 16 && sizeof(Vec<T>) == 32)>

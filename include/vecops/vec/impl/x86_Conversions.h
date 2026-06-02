@@ -241,12 +241,14 @@ VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint64_t, T>> v) {
 /* ************************************************************************** */
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1), TL_IF(is_any<TypeOf<T>, int64_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint64_t, T>> v) {
-  return v.v;
+  static const auto MAX = word::fill(Rebind<uint64_t, T>{}, std::numeric_limits<int64_t>::max());
+  return word::min(v, MAX).v;
 }
 
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1), TL_IF(is_any<TypeOf<T>, uint64_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<int64_t, T>> v) {
-  return v.v;
+  static const auto MIN = word::fill(Rebind<int64_t, T>{}, 0);
+  return word::max(v, MIN).v;
 }
 
 
@@ -696,7 +698,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int64_t, T>> v) {
   for (int i = 0; i < 4; ++i) conv[i] = int32_t(std::clamp(data[i], min_val, max_val));
   return _mm_load_si128((const __m128i*)conv);
   #else
-  Tag<int32_t, 2> t1;
+  Half<T> t1;
   Rebind<int64_t, T> t2;
   auto lo = word::demote(t1, word::lower(t2, v));
   auto hi = word::demote(t1, word::upper(t2, v));
@@ -706,7 +708,15 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int64_t, T>> v) {
 
 template <TLV_DECL_TAG(T), TL_IF(T::N == 4), TL_IF(is_any<TypeOf<T>, int64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int32_t, T>> v) {
+  #if VEC_WIDTH >= 256
   return _mm256_cvtepi32_epi64(v.v);
+  #else
+  Half<T> t1;
+  Rebind<int32_t, T> t2;
+  auto lo = word::promote(t1, word::lower(t2, v));
+  auto hi = word::promote(t1, word::upper(t2, v));
+  return word::concat(t, lo, hi);
+  #endif
 }
 
 #if VEC_WIDTH >= 256
@@ -989,7 +999,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int64_t, T>> v) {
   for (int i = 0; i < 4; ++i) conv[i] = uint32_t(std::clamp(data[i], min_val, max_val));
   return _mm_load_si128((const __m128i*)conv);
   #else
-  Tag<uint32_t, 2> t1;
+  Half<T> t1;
   Rebind<int64_t, T> t2;
   auto lo = word::demote(t1, word::lower(t2, v));
   auto hi = word::demote(t1, word::upper(t2, v));
@@ -999,7 +1009,15 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int64_t, T>> v) {
 
 template <TLV_DECL_TAG(T), TL_IF(T::N == 4), TL_IF(is_any<TypeOf<T>, int64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint32_t, T>> v) {
+  #if VEC_WIDTH >= 256
   return _mm256_cvtepu32_epi64(v.v);
+  #else
+  Half<T> t1;
+  Rebind<uint32_t, T> t2;
+  auto lo = word::promote(t1, word::lower(t2, v));
+  auto hi = word::promote(t1, word::upper(t2, v));
+  return word::concat(t, lo, hi);
+  #endif
 }
 
 #if VEC_WIDTH >= 256
@@ -1090,7 +1108,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint64_t, T>> v) {
   for (int i = 0; i < 4; ++i) conv[i] = uint32_t(std::min(data[i], max_val));
   return _mm_load_si128((const __m128i*)conv);
   #else
-  Tag<uint32_t, 2> t1;
+  Half<T> t1;
   Rebind<uint64_t, T> t2;
   auto lo = word::demote(t1, word::lower(t2, v));
   auto hi = word::demote(t1, word::upper(t2, v));
@@ -1100,7 +1118,15 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint64_t, T>> v) {
 
 template <TLV_DECL_TAG(T), TL_IF(T::N == 4), TL_IF(is_any<TypeOf<T>, uint64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint32_t, T>> v) {
+  #if VEC_WIDTH >= 256
   return _mm256_cvtepu32_epi64(v.v);
+  #else
+  Half<T> t1;
+  Rebind<uint32_t, T> t2;
+  auto lo = word::promote(t1, word::lower(t2, v));
+  auto hi = word::promote(t1, word::upper(t2, v));
+  return word::concat(t, lo, hi);
+  #endif
 }
 
 #if VEC_WIDTH >= 256
@@ -1271,15 +1297,16 @@ VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<float32_t, T>> v) {
 /* ************************************************************************** */
 //                          int32_t <=> uint32_t                             //
 /* ************************************************************************** */
-
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1), TL_IF(is_any<TypeOf<T>, int32_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint32_t, T>> v) {
-  return v.v;
+  static const auto MAX = word::fill(Rebind<uint32_t, T>{}, std::numeric_limits<int32_t>::max());
+  return word::min(v, MAX).v;
 }
 
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1), TL_IF(is_any<TypeOf<T>, uint32_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<int32_t, T>> v) {
-  return v.v;
+  static const auto MIN = word::fill(Rebind<int32_t, T>{}, 0);
+  return word::max(v, MIN).v;
 }
 
 
@@ -1332,7 +1359,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int16_t, T>> v) {
   #if VEC_WIDTH >= 512
   return _mm512_cvtepi16_epi32(v.v);
   #else
-  Tag<int32_t, 4> t1;
+  Half<T> t1;
   Rebind<int16_t, T> t2;
   auto lo = word::promote(t1, word::lower(t2, v));
   auto hi = word::promote(t1, word::upper(t2, v));
@@ -1354,7 +1381,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int32_t, T>> v) {
 
 template <TLV_DECL_TAG(T), TL_IF(T::N == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int16_t, T>> v) {
-  Tag<int32_t, 8> t1;
+  Half<T> t1;
   Rebind<int16_t, T> t2;
   auto lo = word::promote(t1, word::lower(t2, v));
   auto hi = word::promote(t1, word::upper(t2, v));
@@ -1495,7 +1522,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint16_t, T>> v) {
   #if VEC_WIDTH >= 512
   return _mm512_cvtepu16_epi32(v.v);
   #else
-  Tag<int32_t, 4> t1;
+  Half<T> t1;
   Rebind<uint16_t, T> t2;
   auto lo = word::promote(t1, word::lower(t2, v));
   auto hi = word::promote(t1, word::upper(t2, v));
@@ -1517,7 +1544,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int32_t, T>> v) {
 
 template <TLV_DECL_TAG(T), TL_IF(T::N == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint16_t, T>> v) {
-  Tag<int32_t, 8> t1;
+  Half<T> t1;
   Rebind<uint16_t, T> t2;
   auto lo = word::promote(t1, word::lower(t2, v));
   auto hi = word::promote(t1, word::upper(t2, v));
@@ -1861,15 +1888,16 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int8_t, T>> v) {
 /* ************************************************************************** */
 //                          int16_t <=> uint16_t                             //
 /* ************************************************************************** */
-
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1), TL_IF(is_any<TypeOf<T>, int16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint16_t, T>> v) {
-  return v.v;
+  static const auto MAX = word::fill(Rebind<uint16_t, T>{}, std::numeric_limits<int16_t>::max());
+  return word::min(v, MAX).v;
 }
 
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1), TL_IF(is_any<TypeOf<T>, uint16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<int16_t, T>> v) {
-  return v.v;
+  static const auto MIN = word::fill(Rebind<int16_t, T>{}, 0);
+  return word::max(v, MIN).v;
 }
 
 /* ************************************************************************** */
@@ -2311,7 +2339,6 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int8_t, T>> v) {
   #endif
 }
 
-#if VEC_WIDTH >= 256
 template <TLV_DECL_TAG(T), TL_IF(T::N == 16 || T::N == 32 || T::N == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int8_t, T>> v) {
   Half<T> t1;
@@ -2320,7 +2347,6 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int8_t, T>> v) {
   auto hi = word::promote(t1, word::upper(t2, v));
   return word::concat(t, lo, hi);
 }
-#endif // VEC_WIDTH >= 256
 
 
 /* ************************************************************************** */
@@ -2395,8 +2421,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint8_t, T>> v) {
   #endif
 }
 
-#if VEC_WIDTH >= 256
-template <TLV_DECL_TAG(T), TL_IF(T::N == 16 || T::N == 32 || T::N == 32), TL_IF(is_any<TypeOf<T>, int64_t>)>
+template <TLV_DECL_TAG(T), TL_IF(T::N == 16 || T::N == 32 || T::N == 64), TL_IF(is_any<TypeOf<T>, int64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint8_t, T>> v) {
   Half<T> t1;
   Rebind<uint8_t, T> t2;
@@ -2404,7 +2429,6 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint8_t, T>> v) {
   auto hi = word::promote(t1, word::upper(t2, v));
   return word::concat(t, lo, hi);
 }
-#endif // VEC_WIDTH >= 256
 
 
 /* ************************************************************************** */
@@ -2429,13 +2453,17 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint8_t, T>> v) {
 
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1), TL_IF(is_any<TypeOf<T>, int8_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint8_t, T>> v) {
-  return v.v;
+  static const auto MAX = word::fill(Rebind<uint8_t, T>{}, std::numeric_limits<int8_t>::max());
+  return word::min(v, MAX).v;
 }
 
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1), TL_IF(is_any<TypeOf<T>, uint8_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<int8_t, T>> v) {
-  return v.v;
+  static const auto MIN = word::fill(Rebind<int8_t, T>{}, 0);
+  return word::max(v, MIN).v;
 }
+
+
 
 // TODO maybe move front?
 template <TLV_DECL_TAG(T), TLV_DECL_VEC(V), std::enable_if_t<(num_words(Vec2Tag<V>{}) > 1), bool>>
