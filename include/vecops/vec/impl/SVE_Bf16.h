@@ -52,6 +52,19 @@ VECOPS_VFUNC svbfloat16_t f32x2_to_bf16(svfloat32_t lo_f32, svfloat32_t hi_f32) 
 }
 
 /* ================================================================ */
+//                      two f32 vectors -> f16                     //
+/* ================================================================ */
+
+VECOPS_VFUNC svfloat16_t f32x2_to_f16(svfloat32_t lo_f32, svfloat32_t hi_f32) {
+  auto pg_f16 = sve_ptrue<float16_t>();
+  auto lo_f16 = svcvt_f16_f32_z(pg_f16, lo_f32);
+  auto hi_f16 = svcvt_f16_f32_z(pg_f16, hi_f32);
+  auto lo_u16 = svreinterpret_u16_f16(lo_f16);
+  auto hi_u16 = svreinterpret_u16_f16(hi_f16);
+  return svreinterpret_f16_u16(svuzp1_u16(lo_u16, hi_u16));
+}
+
+/* ================================================================ */
 //                      mask conversion helpers                     //
 //  bf16 mask (b16 granularity) <-> f32 mask (b32 granularity)      //
 /* ================================================================ */

@@ -527,6 +527,38 @@ _TV _D(uint16_t), _S(float16_t) _ED
 _FN(convert) { auto pg = sve_detail::sve_ptrue<float16_t>(); return svcvt_u16_f16_x(pg, v); }
 
 /* ================================================================ */
+/*           f16 -> int8/uint8  (demote, via int16/uint16)           */
+/* ================================================================ */
+_TV _D(int8_t), _S(float16_t) _ED
+_FN(demote) {
+  auto pg = sve_detail::sve_ptrue<float16_t>();
+  auto i16 = svcvt_s16_f16_x(pg, v);
+  return word::demote(t, i16);
+}
+_TV _D(uint8_t), _S(float16_t) _ED
+_FN(demote) {
+  auto pg = sve_detail::sve_ptrue<float16_t>();
+  auto u16 = svcvt_u16_f16_x(pg, v);
+  return word::demote(t, u16);
+}
+
+/* ================================================================ */
+/*           int8/uint8 -> float16_t  (promote, via int16/uint16)    */
+/* ================================================================ */
+_TV _D(float16_t), _S(int8_t) _ED
+_FN(promote) {
+  ScalableTag<int16_t> t_i16;
+  auto pg = sve_detail::sve_ptrue<int16_t>();
+  return svcvt_f16_s16_x(pg, word::promote(t_i16, v));
+}
+_TV _D(float16_t), _S(uint8_t) _ED
+_FN(promote) {
+  ScalableTag<uint16_t> t_u16;
+  auto pg = sve_detail::sve_ptrue<uint16_t>();
+  return svcvt_f16_u16_x(pg, word::promote(t_u16, v));
+}
+
+/* ================================================================ */
 /*          float16_t <=> larger types  (demote / promote)           */
 /*         float16_t from int32/uint32  (via f32)                   */
 /* ================================================================ */
@@ -546,33 +578,12 @@ _TV _D(float16_t), _S(float64_t) _ED
 _FN(demote) { ScalableTag<float32_t> t1; return word::demote(t, word::demote(t1, v)); }
 
 /* ================================================================ */
-/*           f16/bf16 -> int8/uint8  (demote, via f32)               */
-/* ================================================================ */
-_TV _D(int8_t), _S(float16_t) _ED
-_FN(demote) { ScalableTag<float32_t> t1; ScalableTag<int32_t> t2; return word::demote(t, word::convert(t2, word::promote(t1, v))); }
-_TV _D(uint8_t), _S(float16_t) _ED
-_FN(demote) { ScalableTag<float32_t> t1; ScalableTag<int32_t> t2; return word::demote(t, word::convert(t2, word::promote(t1, v))); }
-
-/* ================================================================ */
-/*           int8/uint8 -> float16_t  (promote, via f32)             */
-/* ================================================================ */
-_TV _D(float16_t), _S(int8_t) _ED
-_FN(promote) { ScalableTag<int32_t> t1; ScalableTag<float32_t> t2; return word::demote(t, word::convert(t2, word::promote(t1, v))); }
-_TV _D(float16_t), _S(uint8_t) _ED
-_FN(promote) { ScalableTag<int32_t> t1; ScalableTag<float32_t> t2; return word::demote(t, word::convert(t2, word::promote(t1, v))); }
-
-/* ================================================================ */
 /*          float16_t -> larger types  (promote, via f32)           */
-/*    float16 -> int32/uint32                                     */
 /* ================================================================ */
 _TV _D(int32_t), _S(float16_t) _ED
 _FN(promote) { ScalableTag<float32_t> t1; return word::convert(t, word::promote(t1, v)); }
 _TV _D(uint32_t), _S(float16_t) _ED
 _FN(promote) { ScalableTag<float32_t> t1; return word::convert(t, word::promote(t1, v)); }
-
-/* ================================================================ */
-/*  float16 -> int64 / uint64 / float64             */
-/* ================================================================ */
 _TV _D(int64_t), _S(float16_t) _ED
 _FN(promote) { ScalableTag<float32_t> t1; return word::promote(t, word::promote(t1, v)); }
 _TV _D(uint64_t), _S(float16_t) _ED
@@ -620,14 +631,6 @@ _TV _D(float64_t), _S(bfloat16_t) _ED
 _FN(promote) { ScalableTag<float32_t> t1; return word::promote(t, word::promote(t1, v)); }
 
 /* ================================================================ */
-/*          int8/uint8 -> bfloat16_t  (promote, via f32)              */
-/* ================================================================ */
-_TV _D(bfloat16_t), _S(int8_t) _ED
-_FN(promote) { ScalableTag<int32_t> t1; ScalableTag<float32_t> t2; return word::demote(t, word::convert(t2, word::promote(t1, v))); }
-_TV _D(bfloat16_t), _S(uint8_t) _ED
-_FN(promote) { ScalableTag<int32_t> t1; ScalableTag<float32_t> t2; return word::demote(t, word::convert(t2, word::promote(t1, v))); }
-
-/* ================================================================ */
 /*         larger types -> bfloat16_t  (demote, via f32)             */
 /*       int32 / uint32 / float32                                  */
 /* ================================================================ */
@@ -647,92 +650,33 @@ _TV _D(bfloat16_t), _S(float64_t) _ED
 _FN(demote) { ScalableTag<float32_t> t1; return word::demote(t, word::demote(t1, v)); }
 
 /* ================================================================ */
-/*     bfloat16_t -> int8/uint8  (demote, via f32)                   */
-/* ================================================================ */
-_TV _D(int8_t), _S(bfloat16_t) _ED
-_FN(demote) { ScalableTag<float32_t> t1; ScalableTag<int32_t> t2; return word::demote(t, word::convert(t2, word::promote(t1, v))); }
-_TV _D(uint8_t), _S(bfloat16_t) _ED
-_FN(demote) { ScalableTag<float32_t> t1; ScalableTag<int32_t> t2; return word::demote(t, word::convert(t2, word::promote(t1, v))); }
-
-/* ================================================================ */
-/*     bfloat16_t <=> int16_t  (convert, same-size, via f32)         */
+/*     bfloat16_t <=> int16_t / uint16_t (convert, same-size)        */
 /* ================================================================ */
 _TV _D(int16_t), _S(bfloat16_t) _ED
 _FN(convert) {
-  auto lo_f32 = sve_detail::bf16_to_f32_lo(v);
-  auto hi_f32 = sve_detail::bf16_to_f32_hi(v);
-  auto pg = sve_detail::sve_ptrue<float32_t>();
-  auto lo_i32 = svcvt_s32_f32_x(pg, lo_f32);
-  auto hi_i32 = svcvt_s32_f32_x(pg, hi_f32);
-  auto lo_clamped = svmax_s32_z(pg, svmin_s32_z(pg, lo_i32, svdup_s32(INT16_MAX)), svdup_s32(INT16_MIN));
-  auto hi_clamped = svmax_s32_z(pg, svmin_s32_z(pg, hi_i32, svdup_s32(INT16_MAX)), svdup_s32(INT16_MIN));
-  auto lo_u16 = svreinterpret_u16_s32(lo_clamped);
-  auto hi_u16 = svreinterpret_u16_s32(hi_clamped);
-  auto lo_s16 = svreinterpret_s16_u16(svuzp1_u16(lo_u16, lo_u16));
-  auto hi_s16 = svreinterpret_s16_u16(svuzp1_u16(hi_u16, hi_u16));
-  return svzip1_s16(lo_s16, hi_s16);
+  auto f16_vec = sve_detail::f32x2_to_f16(sve_detail::bf16_to_f32_lo(v), sve_detail::bf16_to_f32_hi(v));
+  auto pg = sve_detail::sve_ptrue<float16_t>();
+  return svcvt_s16_f16_x(pg, f16_vec);
 }
-
 _TV _D(bfloat16_t), _S(int16_t) _ED
 _FN(convert) {
-  auto pg_u16 = sve_detail::sve_ptrue<uint16_t>();
-  auto u16_v = svreinterpret_u16_s16(v);
-  auto n = static_cast<uint16_t>(sve_detail::sve_cnt<int16_t>());
-  auto q = static_cast<uint16_t>(n >> 2);
-  auto rot_idx = svadd_u16_x(pg_u16, svindex_u16(0, 1), svdup_u16(q));
-  auto v_rot_u16 = svtbl_u16(u16_v, rot_idx);
-  auto v_rot = svreinterpret_s16_u16(v_rot_u16);
   auto pg_i32 = sve_detail::sve_ptrue<int32_t>();
-  auto i32_0 = svunpklo_s32(v);
-  auto i32_1 = svunpklo_s32(v_rot);
-  auto i32_2 = svunpkhi_s32(v);
-  auto i32_3 = svunpkhi_s32(v_rot);
-  auto f32_0 = svcvt_f32_s32_x(pg_i32, i32_0);
-  auto f32_1 = svcvt_f32_s32_x(pg_i32, i32_1);
-  auto f32_2 = svcvt_f32_s32_x(pg_i32, i32_2);
-  auto f32_3 = svcvt_f32_s32_x(pg_i32, i32_3);
-  auto lo_f32 = svzip1_f32(f32_0, f32_1);
-  auto hi_f32 = svzip1_f32(f32_2, f32_3);
+  auto lo_f32 = svcvt_f32_s32_x(pg_i32, svunpklo_s32(v));
+  auto hi_f32 = svcvt_f32_s32_x(pg_i32, svunpkhi_s32(v));
   return sve_detail::f32x2_to_bf16(lo_f32, hi_f32);
 }
-
-/* ================================================================ */
-/*    bfloat16_t <=> uint16_t  (convert, same-size, via f32)         */
-/* ================================================================ */
 _TV _D(uint16_t), _S(bfloat16_t) _ED
 _FN(convert) {
-  auto lo_f32 = sve_detail::bf16_to_f32_lo(v);
-  auto hi_f32 = sve_detail::bf16_to_f32_hi(v);
-  auto pg = sve_detail::sve_ptrue<float32_t>();
-  auto lo_i32 = svcvt_s32_f32_x(pg, lo_f32);
-  auto hi_i32 = svcvt_s32_f32_x(pg, hi_f32);
-  auto lo_clamped = svmax_s32_z(pg, svmin_s32_z(pg, lo_i32, svdup_s32(UINT16_MAX)), svdup_s32(0));
-  auto hi_clamped = svmax_s32_z(pg, svmin_s32_z(pg, hi_i32, svdup_s32(UINT16_MAX)), svdup_s32(0));
-  auto lo_u16 = svreinterpret_u16_s32(lo_clamped);
-  auto hi_u16 = svreinterpret_u16_s32(hi_clamped);
-  return svzip1_u16(svuzp1_u16(lo_u16, lo_u16), svuzp1_u16(hi_u16, hi_u16));
+  auto f16_vec = sve_detail::f32x2_to_f16(sve_detail::bf16_to_f32_lo(v), sve_detail::bf16_to_f32_hi(v));
+  auto pg = sve_detail::sve_ptrue<float16_t>();
+  return svcvt_u16_f16_x(pg, f16_vec);
 }
-
 _TV _D(bfloat16_t), _S(uint16_t) _ED
 _FN(convert) {
-  auto pg_u16 = sve_detail::sve_ptrue<uint16_t>();
-  auto u16_v = v;
-  auto n = static_cast<uint16_t>(sve_detail::sve_cnt<int16_t>());
-  auto q = static_cast<uint16_t>(n >> 2);
-  auto rot_idx = svadd_u16_x(pg_u16, svindex_u16(0, 1), svdup_u16(q));
-  auto v_rot_u16 = svtbl_u16(u16_v, rot_idx);
   auto pg_u32 = sve_detail::sve_ptrue<uint32_t>();
-  auto u32_0 = svunpklo_u32(u16_v);
-  auto u32_1 = svunpklo_u32(v_rot_u16);
-  auto u32_2 = svunpkhi_u32(u16_v);
-  auto u32_3 = svunpkhi_u32(v_rot_u16);
   auto pg_f32 = sve_detail::sve_ptrue<float32_t>();
-  auto f32_0 = svcvt_f32_u32_x(pg_f32, u32_0);
-  auto f32_1 = svcvt_f32_u32_x(pg_f32, u32_1);
-  auto f32_2 = svcvt_f32_u32_x(pg_f32, u32_2);
-  auto f32_3 = svcvt_f32_u32_x(pg_f32, u32_3);
-  auto lo_f32 = svzip1_f32(f32_0, f32_1);
-  auto hi_f32 = svzip1_f32(f32_2, f32_3);
+  auto lo_f32 = svcvt_f32_u32_x(pg_f32, svunpklo_u32(v));
+  auto hi_f32 = svcvt_f32_u32_x(pg_f32, svunpkhi_u32(v));
   return sve_detail::f32x2_to_bf16(lo_f32, hi_f32);
 }
 
@@ -741,27 +685,48 @@ _FN(convert) {
 /* ================================================================ */
 _TV _D(float16_t), _S(bfloat16_t) _ED
 _FN(convert) {
-  auto lo_f32 = sve_detail::bf16_to_f32_lo(v);
-  auto hi_f32 = sve_detail::bf16_to_f32_hi(v);
-  auto pg = sve_detail::sve_ptrue<float32_t>();
-  auto lo_f16 = svcvt_f16_f32_x(pg, lo_f32);
-  auto hi_f16 = svcvt_f16_f32_x(pg, hi_f32);
-  return svreinterpret_f16_u16(svzip1_u16(svreinterpret_u16_f16(lo_f16), svreinterpret_u16_f16(hi_f16)));
+  return sve_detail::f32x2_to_f16(sve_detail::bf16_to_f32_lo(v), sve_detail::bf16_to_f32_hi(v));
 }
-
 _TV _D(bfloat16_t), _S(float16_t) _ED
 _FN(convert) {
-  auto pg = sve_detail::sve_ptrue<float16_t>();
+  auto pg = sve_detail::sve_ptrue<float32_t>();
   auto lo_f32 = svcvt_f32_f16_x(pg, v);
-  auto n = static_cast<uint16_t>(sve_detail::sve_cnt<float16_t>());
-  auto half = static_cast<uint16_t>(n >> 1);
-  auto pg_u16 = sve_detail::sve_ptrue<uint16_t>();
-  auto u16_v = svreinterpret_u16_f16(v);
-  auto hi_idx = svadd_u16_x(pg_u16, svindex_u16(0, 1), svdup_u16(half));
-  auto hi_u16 = svtbl_u16(u16_v, hi_idx);
-  auto hi_f16 = svreinterpret_f16_u16(hi_u16);
-  auto hi_f32 = svcvt_f32_f16_x(pg, hi_f16);
+  auto hi_f32 = svcvtlt_f32_f16_x(pg, v);
+#if defined(__ARM_FEATURE_SVE_BF16)
+  auto pg_bf16 = sve_detail::sve_ptrue<bfloat16_t>();
+  auto lo_bf16 = svcvt_bf16_f32_x(pg_bf16, lo_f32);
+  return svcvtnt_bf16_f32_x(lo_bf16, pg_bf16, hi_f32);
+#else
   return sve_detail::f32x2_to_bf16(lo_f32, hi_f32);
+#endif
+}
+
+/* ================================================================ */
+/*          int8/uint8 -> bfloat16_t  (promote, via f16)             */
+/* ================================================================ */
+_TV _D(bfloat16_t), _S(int8_t) _ED
+_FN(promote) {
+  ScalableTag<float16_t> t_f16;
+  return word::convert(t, word::promote(t_f16, v));
+}
+_TV _D(bfloat16_t), _S(uint8_t) _ED
+_FN(promote) {
+  ScalableTag<float16_t> t_f16;
+  return word::convert(t, word::promote(t_f16, v));
+}
+
+/* ================================================================ */
+/*           bf16 -> int8/uint8  (demote, via f16)                   */
+/* ================================================================ */
+_TV _D(int8_t), _S(bfloat16_t) _ED
+_FN(demote) {
+  ScalableTag<float16_t> t_f16;
+  return word::demote(t, word::convert(t_f16, v));
+}
+_TV _D(uint8_t), _S(bfloat16_t) _ED
+_FN(demote) {
+  ScalableTag<float16_t> t_f16;
+  return word::demote(t, word::convert(t_f16, v));
 }
 
 #undef _TV
