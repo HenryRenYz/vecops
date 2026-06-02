@@ -296,11 +296,15 @@ protected:
 
   void SetUp() override {
     in_data_ = test_utils::alloc_aligned<TIn>(256);
-    for (size_t i = 0; i < 256; ++i) {
+    for (int i = 0; i < 256; ++i) {
       if constexpr (std::is_floating_point_v<TIn> ||
                     std::is_same_v<TIn, vecops::float16_t> ||
                     std::is_same_v<TIn, vecops::bfloat16_t>) {
-        in_data_[i] = static_cast<TIn>((i % 20) - 10 + 0.5);
+        if constexpr (is_unsigned_int<TOut>) {
+          in_data_[i] = static_cast<TIn>((i % 20) + 10 + 0.5); // make sure no negative value input (UB)
+        } else {
+          in_data_[i] = static_cast<TIn>((i % 20) - 10 + 0.5); // leading negative
+        }
       } else if constexpr (std::is_signed_v<TIn>) {
         in_data_[i] = static_cast<TIn>((i % 100) - 50);
       } else {

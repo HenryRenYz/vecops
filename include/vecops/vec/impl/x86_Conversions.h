@@ -1376,7 +1376,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int32_t, T>> v) {
   auto hi = word::upper(t1, v);
   auto u = _mm512_packs_epi32(lo.v, hi.v);
   static const __m512i idx = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
-  return _mm512_permutexvar_epi64(u, idx);
+  return _mm512_permutexvar_epi64(idx, u);
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::N == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
@@ -1452,7 +1452,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint32_t, T>> v) {
   auto hi = _mm512_min_epu32(word::upper(t1, v).v, _mm512_set1_epi32(max_val));
   auto u = _mm512_packs_epi32(lo, hi);
   static const __m512i idx = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
-  return _mm512_permutexvar_epi64(u, idx);
+  return _mm512_permutexvar_epi64(idx, u);
 }
 #endif // VEC_WIDTH >= 512
 
@@ -1539,7 +1539,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int32_t, T>> v) {
   auto hi = word::upper(t1, v);
   auto u = _mm512_packus_epi32(lo.v, hi.v);
   static const __m512i idx = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
-  return _mm512_permutexvar_epi64(u, idx);
+  return _mm512_permutexvar_epi64(idx, u);
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::N == 32), TL_IF(is_any<TypeOf<T>, int32_t>)>
@@ -1615,7 +1615,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint32_t, T>> v) {
   auto hi = _mm512_min_epu32(word::upper(t1, v).v, _mm512_set1_epi32(max_val));
   auto u = _mm512_packus_epi32(lo, hi);
   static const __m512i idx = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
-  return _mm512_permutexvar_epi64(u, idx);
+  return _mm512_permutexvar_epi64(idx, u);
 }
 #endif // VEC_WIDTH >= 512
 
@@ -1871,7 +1871,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int16_t, T>> v) {
   auto hi = word::upper(t1, v);
   auto u = _mm512_packs_epi16(lo.v, hi.v);
   static const __m512i idx = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
-  return _mm512_permutexvar_epi64(u, idx);
+  return _mm512_permutexvar_epi64(idx, u);
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::N == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
@@ -1956,7 +1956,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint16_t, T>> v) {
   auto hi = _mm512_min_epu16(word::upper(t1, v).v, _mm512_set1_epi16(max_val));
   auto u = _mm512_packs_epi16(lo, hi);
   static const __m512i idx = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
-  return _mm512_permutexvar_epi64(u, idx);
+  return _mm512_permutexvar_epi64(idx, u);
 }
 #endif // VEC_WIDTH >= 512
 
@@ -2032,7 +2032,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<int16_t, T>> v) {
   auto hi = word::upper(t1, v);
   auto u = _mm512_packus_epi16(lo.v, hi.v);
   static const __m512i idx = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
-  return _mm512_permutexvar_epi64(u, idx);
+  return _mm512_permutexvar_epi64(idx, u);
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::N == 64), TL_IF(is_any<TypeOf<T>, int16_t>)>
@@ -2102,7 +2102,7 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<uint16_t, T>> v) {
   auto hi = _mm512_min_epu16(word::upper(t1, v).v, _mm512_set1_epi16(max_val));
   auto u = _mm512_packus_epi16(lo, hi);
   static const __m512i idx = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
-  return _mm512_permutexvar_epi64(u, idx);
+  return _mm512_permutexvar_epi64(idx, u);
 }
 #endif // VEC_WIDTH >= 512
 
