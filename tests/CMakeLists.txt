@@ -78,30 +78,35 @@ add_multiarch_executable(vecops-VecScalarTest
 add_multiarch_executable(vecops-VecBasicTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BasicTest.cpp
         ARCH x86-64 corei7-avx core-avx2 native
+             native+bf16
 )
 # vecops-VecLoadStoreTest
 add_multiarch_executable(vecops-VecLoadStoreTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/LoadStoreTest.cpp
         ARCH x86-64 corei7-avx core-avx2 native
+            native+bf16
 )
 # vecops-VecArithTest
 add_multiarch_executable(vecops-VecArithTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ArithTest.cpp
         ARCH x86-64 corei7-avx core-avx2 native
+            native+bf16
 )
 # vecops-VecConversionTest
 add_multiarch_executable(vecops-VecConversionTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ConversionTest.cpp
         ARCH x86-64 corei7-avx core-avx2 native
+            native+bf16
 )
 # vecops-VecShuffleTest
 add_multiarch_executable(vecops-VecShuffleTest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ShuffleTest.cpp
         ARCH x86-64 corei7-avx core-avx2 native
+            native+bf16
 )
 
 # vecops-VecSVETest (SVE type infrastructure test)
 add_multiarch_executable(vecops-VecSVETest
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/SVETest.cpp
-        ARCH native
+        ARCH native native+bf16
 )

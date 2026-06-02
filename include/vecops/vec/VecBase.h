@@ -1107,11 +1107,29 @@ static constexpr auto word_tag(Tag<T, N, P> t) {
 template <typename T>
 using WordOf = typename VecDefs<TypeOf<T>, T::N, T::POW2>::WordDefs::TagType;
 
+/**
+ * 注：使用这种复杂结构是因为部分实现，如x86下如果总是直接操作POW2会导致一些bug
+ * TODO 设计问题，最好修复。可能需要更加规范的向量编译期元数据和等价类架构设计。
+ */
 template <typename T>
-using Half = Tag<TypeOf<T>, T::N, T::POW2 - 1>;
+using Half = std::conditional_t<
+    T::is_runtime_size,
+    Tag<TypeOf<T>, T::N, T::POW2 - 1>,               // scalable: 保持原始行为
+    std::conditional_t<(T::POW2 > 0),
+      Tag<TypeOf<T>, T::N, T::POW2 - 1>,            // POW2 > 0: 递减 POW2
+      Tag<TypeOf<T>, ((T::N) >> 1), 0>                // POW2 <= 0: 对 N 减半
+    >
+>;
 
 template <typename T>
-using Twice = Tag<TypeOf<T>, T::N, T::POW2 + 1>;
+using Twice = std::conditional_t<
+    T::is_runtime_size,
+    Tag<TypeOf<T>, T::N, T::POW2 + 1>,
+    std::conditional_t<(T::POW2 > 0),
+      Tag<TypeOf<T>, T::N, T::POW2 + 1>,
+      Tag<TypeOf<T>, ((T::N) << 1), 0>
+    >
+>;
 
 } // namespace vecops::vec
 

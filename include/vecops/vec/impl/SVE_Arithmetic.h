@@ -12,6 +12,7 @@
 #include "../VecBase.h"
 #include "SVE_Basic.h"
 #include "SVE_Bit.h"
+#include "SVE_Bf16.h"
 
 //@formatter:off
 namespace vecops::vec::CPU_CAPABILITY {
@@ -26,9 +27,17 @@ VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   if constexpr (std::is_same_v<E, float32_t>)      return svadd_f32_m(m, a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svadd_f64_m(m, a, b);
   else if constexpr (std::is_same_v<E, float16_t>) return svadd_f16_m(m, a, b);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svadd_bf16_m(m, a, b);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto a_lo = sve_detail::bf16_to_f32_lo(a);
+    auto a_hi = sve_detail::bf16_to_f32_hi(a);
+    auto b_lo = sve_detail::bf16_to_f32_lo(b);
+    auto b_hi = sve_detail::bf16_to_f32_hi(b);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto r_lo = svadd_f32_m(m_lo, a_lo, b_lo);
+    auto r_hi = svadd_f32_m(m_hi, a_hi, b_hi);
+    return sve_detail::f32x2_to_bf16(r_lo, r_hi);
+  }
   else if constexpr (std::is_same_v<E, uint8_t>)   return svadd_u8_m(m, a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svadd_s8_m(m, a, b);
   else if constexpr (std::is_same_v<E, uint16_t>)  return svadd_u16_m(m, a, b);
@@ -54,9 +63,17 @@ VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   if constexpr (std::is_same_v<E, float32_t>)      return svsub_f32_m(m, a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svsub_f64_m(m, a, b);
   else if constexpr (std::is_same_v<E, float16_t>) return svsub_f16_m(m, a, b);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svsub_bf16_m(m, a, b);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto a_lo = sve_detail::bf16_to_f32_lo(a);
+    auto a_hi = sve_detail::bf16_to_f32_hi(a);
+    auto b_lo = sve_detail::bf16_to_f32_lo(b);
+    auto b_hi = sve_detail::bf16_to_f32_hi(b);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto r_lo = svsub_f32_m(m_lo, a_lo, b_lo);
+    auto r_hi = svsub_f32_m(m_hi, a_hi, b_hi);
+    return sve_detail::f32x2_to_bf16(r_lo, r_hi);
+  }
   else if constexpr (std::is_same_v<E, uint8_t>)   return svsub_u8_m(m, a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svsub_s8_m(m, a, b);
   else if constexpr (std::is_same_v<E, uint16_t>)  return svsub_u16_m(m, a, b);
@@ -82,9 +99,17 @@ VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   if constexpr (std::is_same_v<E, float32_t>)      return svmul_f32_m(m, a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svmul_f64_m(m, a, b);
   else if constexpr (std::is_same_v<E, float16_t>) return svmul_f16_m(m, a, b);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svmul_bf16_m(m, a, b);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto a_lo = sve_detail::bf16_to_f32_lo(a);
+    auto a_hi = sve_detail::bf16_to_f32_hi(a);
+    auto b_lo = sve_detail::bf16_to_f32_lo(b);
+    auto b_hi = sve_detail::bf16_to_f32_hi(b);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto r_lo = svmul_f32_m(m_lo, a_lo, b_lo);
+    auto r_hi = svmul_f32_m(m_hi, a_hi, b_hi);
+    return sve_detail::f32x2_to_bf16(r_lo, r_hi);
+  }
   else if constexpr (std::is_same_v<E, uint8_t>)   return svmul_u8_m(m, a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svmul_s8_m(m, a, b);
   else if constexpr (std::is_same_v<E, uint16_t>)  return svmul_u16_m(m, a, b);
@@ -110,9 +135,17 @@ VECOPS_VFUNC V div(V a, V b, Mask<T> m) {
   if constexpr (std::is_same_v<E, float32_t>)      return svdiv_f32_m(m, a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svdiv_f64_m(m, a, b);
   else if constexpr (std::is_same_v<E, float16_t>) return svdiv_f16_m(m, a, b);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svdiv_bf16_m(m, a, b);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto a_lo = sve_detail::bf16_to_f32_lo(a);
+    auto a_hi = sve_detail::bf16_to_f32_hi(a);
+    auto b_lo = sve_detail::bf16_to_f32_lo(b);
+    auto b_hi = sve_detail::bf16_to_f32_hi(b);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto r_lo = svdiv_f32_m(m_lo, a_lo, b_lo);
+    auto r_hi = svdiv_f32_m(m_hi, a_hi, b_hi);
+    return sve_detail::f32x2_to_bf16(r_lo, r_hi);
+  }
   else return svdiv_f32_m(m, a, b);
 }
 
@@ -131,9 +164,17 @@ VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   if constexpr (std::is_same_v<E, float32_t>)      return svmin_f32_m(m, a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svmin_f64_m(m, a, b);
   else if constexpr (std::is_same_v<E, float16_t>) return svmin_f16_m(m, a, b);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svmin_bf16_m(m, a, b);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto a_lo = sve_detail::bf16_to_f32_lo(a);
+    auto a_hi = sve_detail::bf16_to_f32_hi(a);
+    auto b_lo = sve_detail::bf16_to_f32_lo(b);
+    auto b_hi = sve_detail::bf16_to_f32_hi(b);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto r_lo = svmin_f32_m(m_lo, a_lo, b_lo);
+    auto r_hi = svmin_f32_m(m_hi, a_hi, b_hi);
+    return sve_detail::f32x2_to_bf16(r_lo, r_hi);
+  }
   else if constexpr (std::is_same_v<E, int8_t>)    return svmin_s8_m(m, a, b);
   else if constexpr (std::is_same_v<E, uint8_t>)   return svmin_u8_m(m, a, b);
   else if constexpr (std::is_same_v<E, int16_t>)   return svmin_s16_m(m, a, b);
@@ -159,9 +200,17 @@ VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   if constexpr (std::is_same_v<E, float32_t>)      return svmax_f32_m(m, a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svmax_f64_m(m, a, b);
   else if constexpr (std::is_same_v<E, float16_t>) return svmax_f16_m(m, a, b);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svmax_bf16_m(m, a, b);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto a_lo = sve_detail::bf16_to_f32_lo(a);
+    auto a_hi = sve_detail::bf16_to_f32_hi(a);
+    auto b_lo = sve_detail::bf16_to_f32_lo(b);
+    auto b_hi = sve_detail::bf16_to_f32_hi(b);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto r_lo = svmax_f32_m(m_lo, a_lo, b_lo);
+    auto r_hi = svmax_f32_m(m_hi, a_hi, b_hi);
+    return sve_detail::f32x2_to_bf16(r_lo, r_hi);
+  }
   else if constexpr (std::is_same_v<E, int8_t>)    return svmax_s8_m(m, a, b);
   else if constexpr (std::is_same_v<E, uint8_t>)   return svmax_u8_m(m, a, b);
   else if constexpr (std::is_same_v<E, int16_t>)   return svmax_s16_m(m, a, b);
@@ -187,9 +236,17 @@ VECOPS_VFUNC V neg(V v, Mask<T> m, V default_v) {
   if constexpr (std::is_same_v<E, float32_t>)      return svneg_f32_m(default_v, m, v);
   else if constexpr (std::is_same_v<E, float64_t>) return svneg_f64_m(default_v, m, v);
   else if constexpr (std::is_same_v<E, float16_t>) return svneg_f16_m(default_v, m, v);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svneg_bf16_m(default_v, m, v);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto v_lo = sve_detail::bf16_to_f32_lo(v);
+    auto v_hi = sve_detail::bf16_to_f32_hi(v);
+    auto default_lo = sve_detail::bf16_to_f32_lo(default_v);
+    auto default_hi = sve_detail::bf16_to_f32_hi(default_v);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto r_lo = svneg_f32_m(default_lo, m_lo, v_lo);
+    auto r_hi = svneg_f32_m(default_hi, m_hi, v_hi);
+    return sve_detail::f32x2_to_bf16(r_lo, r_hi);
+  }
   else if constexpr (std::is_same_v<E, int8_t>)    return svneg_s8_m(default_v, m, v);
   else if constexpr (std::is_same_v<E, uint8_t>) { auto s = svreinterpret_s8_u8(v); auto s_def = svreinterpret_s8_u8(default_v); return svreinterpret_u8_s8(svneg_s8_m(s_def, m, s)); }
   else if constexpr (std::is_same_v<E, int16_t>)   return svneg_s16_m(default_v, m, v);
@@ -215,9 +272,17 @@ VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   if constexpr (std::is_same_v<E, float32_t>)      return svabs_f32_m(default_v, m, v);
   else if constexpr (std::is_same_v<E, float64_t>) return svabs_f64_m(default_v, m, v);
   else if constexpr (std::is_same_v<E, float16_t>) return svabs_f16_m(default_v, m, v);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svabs_bf16_m(default_v, m, v);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto v_lo = sve_detail::bf16_to_f32_lo(v);
+    auto v_hi = sve_detail::bf16_to_f32_hi(v);
+    auto default_lo = sve_detail::bf16_to_f32_lo(default_v);
+    auto default_hi = sve_detail::bf16_to_f32_hi(default_v);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto r_lo = svabs_f32_m(default_lo, m_lo, v_lo);
+    auto r_hi = svabs_f32_m(default_hi, m_hi, v_hi);
+    return sve_detail::f32x2_to_bf16(r_lo, r_hi);
+  }
   else if constexpr (std::is_same_v<E, int8_t>)    return svabs_s8_m(default_v, m, v);
   else if constexpr (std::is_same_v<E, int16_t>)   return svabs_s16_m(default_v, m, v);
   else if constexpr (std::is_same_v<E, int32_t>)   return svabs_s32_m(default_v, m, v);
@@ -240,9 +305,17 @@ VECOPS_VFUNC V sqrt(V v, Mask<T> m, V default_v) {
   if constexpr (std::is_same_v<E, float32_t>)      return svsqrt_f32_m(default_v, m, v);
   else if constexpr (std::is_same_v<E, float64_t>) return svsqrt_f64_m(default_v, m, v);
   else if constexpr (std::is_same_v<E, float16_t>) return svsqrt_f16_m(default_v, m, v);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svsqrt_bf16_m(default_v, m, v);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto v_lo = sve_detail::bf16_to_f32_lo(v);
+    auto v_hi = sve_detail::bf16_to_f32_hi(v);
+    auto default_lo = sve_detail::bf16_to_f32_lo(default_v);
+    auto default_hi = sve_detail::bf16_to_f32_hi(default_v);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto r_lo = svsqrt_f32_m(default_lo, m_lo, v_lo);
+    auto r_hi = svsqrt_f32_m(default_hi, m_hi, v_hi);
+    return sve_detail::f32x2_to_bf16(r_lo, r_hi);
+  }
   else return svsqrt_f32_m(default_v, m, v);
 }
 
@@ -261,9 +334,14 @@ VECOPS_VFUNC V rsqrt(V v, Mask<T> m, V default_v) {
   if constexpr (std::is_same_v<E, float32_t>)      return word::blend(default_v, m, svrsqrte_f32(v));
   else if constexpr (std::is_same_v<E, float64_t>) return word::blend(default_v, m, svrsqrte_f64(v));
   else if constexpr (std::is_same_v<E, float16_t>) return word::blend(default_v, m, svrsqrte_f16(v));
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return word::blend(default_v, m, svrsqrte_bf16(v));
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto v_lo = sve_detail::bf16_to_f32_lo(v);
+    auto v_hi = sve_detail::bf16_to_f32_hi(v);
+    auto r_lo = svrsqrte_f32(v_lo);
+    auto r_hi = svrsqrte_f32(v_hi);
+    auto result = sve_detail::f32x2_to_bf16(r_lo, r_hi);
+    return word::blend(default_v, m, result);
+  }
   else return word::blend(default_v, m, svrsqrte_f32(v));
 }
 
@@ -282,9 +360,14 @@ VECOPS_VFUNC V rcp(V v, Mask<T> m, V default_v) {
   if constexpr (std::is_same_v<E, float32_t>)      return word::blend(default_v, m, svrecpe_f32(v));
   else if constexpr (std::is_same_v<E, float64_t>) return word::blend(default_v, m, svrecpe_f64(v));
   else if constexpr (std::is_same_v<E, float16_t>) return word::blend(default_v, m, svrecpe_f16(v));
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return word::blend(default_v, m, svrecpe_bf16(v));
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto v_lo = sve_detail::bf16_to_f32_lo(v);
+    auto v_hi = sve_detail::bf16_to_f32_hi(v);
+    auto r_lo = svrecpe_f32(v_lo);
+    auto r_hi = svrecpe_f32(v_hi);
+    auto result = sve_detail::f32x2_to_bf16(r_lo, r_hi);
+    return word::blend(default_v, m, result);
+  }
   else return word::blend(default_v, m, svrecpe_f32(v));
 }
 
@@ -304,9 +387,17 @@ VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   if constexpr (std::is_same_v<E, float32_t>)      return svcmpeq_f32(m, a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svcmpeq_f64(m, a, b);
   else if constexpr (std::is_same_v<E, float16_t>) return svcmpeq_f16(m, a, b);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svcmpeq_bf16(m, a, b);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto a_lo = sve_detail::bf16_to_f32_lo(a);
+    auto a_hi = sve_detail::bf16_to_f32_hi(a);
+    auto b_lo = sve_detail::bf16_to_f32_lo(b);
+    auto b_hi = sve_detail::bf16_to_f32_hi(b);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto cmp_lo = svcmpeq_f32(m_lo, a_lo, b_lo);
+    auto cmp_hi = svcmpeq_f32(m_hi, a_hi, b_hi);
+    return sve_detail::combine_f32_masks_to_bf16(cmp_lo, cmp_hi);
+  }
   else if constexpr (std::is_same_v<E, uint8_t>)   return svcmpeq_u8(m, a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svcmpeq_s8(m, a, b);
   else if constexpr (std::is_same_v<E, uint16_t>)  return svcmpeq_u16(m, a, b);
@@ -330,9 +421,17 @@ VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   if constexpr (std::is_same_v<E, float32_t>)      return svcmpne_f32(m, a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svcmpne_f64(m, a, b);
   else if constexpr (std::is_same_v<E, float16_t>) return svcmpne_f16(m, a, b);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svcmpne_bf16(m, a, b);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto a_lo = sve_detail::bf16_to_f32_lo(a);
+    auto a_hi = sve_detail::bf16_to_f32_hi(a);
+    auto b_lo = sve_detail::bf16_to_f32_lo(b);
+    auto b_hi = sve_detail::bf16_to_f32_hi(b);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto cmp_lo = svcmpne_f32(m_lo, a_lo, b_lo);
+    auto cmp_hi = svcmpne_f32(m_hi, a_hi, b_hi);
+    return sve_detail::combine_f32_masks_to_bf16(cmp_lo, cmp_hi);
+  }
   else if constexpr (std::is_same_v<E, uint8_t>)   return svcmpne_u8(m, a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svcmpne_s8(m, a, b);
   else if constexpr (std::is_same_v<E, uint16_t>)  return svcmpne_u16(m, a, b);
@@ -356,9 +455,17 @@ VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   if constexpr (std::is_same_v<E, float32_t>)      return svcmplt_f32(m, a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svcmplt_f64(m, a, b);
   else if constexpr (std::is_same_v<E, float16_t>) return svcmplt_f16(m, a, b);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svcmplt_bf16(m, a, b);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto a_lo = sve_detail::bf16_to_f32_lo(a);
+    auto a_hi = sve_detail::bf16_to_f32_hi(a);
+    auto b_lo = sve_detail::bf16_to_f32_lo(b);
+    auto b_hi = sve_detail::bf16_to_f32_hi(b);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto cmp_lo = svcmplt_f32(m_lo, a_lo, b_lo);
+    auto cmp_hi = svcmplt_f32(m_hi, a_hi, b_hi);
+    return sve_detail::combine_f32_masks_to_bf16(cmp_lo, cmp_hi);
+  }
   else if constexpr (std::is_same_v<E, uint8_t>)   return svcmplt_u8(m, a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svcmplt_s8(m, a, b);
   else if constexpr (std::is_same_v<E, uint16_t>)  return svcmplt_u16(m, a, b);
@@ -382,9 +489,17 @@ VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   if constexpr (std::is_same_v<E, float32_t>)      return svcmpgt_f32(m, a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svcmpgt_f64(m, a, b);
   else if constexpr (std::is_same_v<E, float16_t>) return svcmpgt_f16(m, a, b);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svcmpgt_bf16(m, a, b);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto a_lo = sve_detail::bf16_to_f32_lo(a);
+    auto a_hi = sve_detail::bf16_to_f32_hi(a);
+    auto b_lo = sve_detail::bf16_to_f32_lo(b);
+    auto b_hi = sve_detail::bf16_to_f32_hi(b);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto cmp_lo = svcmpgt_f32(m_lo, a_lo, b_lo);
+    auto cmp_hi = svcmpgt_f32(m_hi, a_hi, b_hi);
+    return sve_detail::combine_f32_masks_to_bf16(cmp_lo, cmp_hi);
+  }
   else if constexpr (std::is_same_v<E, uint8_t>)   return svcmpgt_u8(m, a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svcmpgt_s8(m, a, b);
   else if constexpr (std::is_same_v<E, uint16_t>)  return svcmpgt_u16(m, a, b);
@@ -408,9 +523,17 @@ VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   if constexpr (std::is_same_v<E, float32_t>)      return svcmple_f32(m, a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svcmple_f64(m, a, b);
   else if constexpr (std::is_same_v<E, float16_t>) return svcmple_f16(m, a, b);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svcmple_bf16(m, a, b);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto a_lo = sve_detail::bf16_to_f32_lo(a);
+    auto a_hi = sve_detail::bf16_to_f32_hi(a);
+    auto b_lo = sve_detail::bf16_to_f32_lo(b);
+    auto b_hi = sve_detail::bf16_to_f32_hi(b);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto cmp_lo = svcmple_f32(m_lo, a_lo, b_lo);
+    auto cmp_hi = svcmple_f32(m_hi, a_hi, b_hi);
+    return sve_detail::combine_f32_masks_to_bf16(cmp_lo, cmp_hi);
+  }
   else if constexpr (std::is_same_v<E, uint8_t>)   return svcmple_u8(m, a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svcmple_s8(m, a, b);
   else if constexpr (std::is_same_v<E, uint16_t>)  return svcmple_u16(m, a, b);
@@ -434,9 +557,17 @@ VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   if constexpr (std::is_same_v<E, float32_t>)      return svcmpge_f32(m, a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svcmpge_f64(m, a, b);
   else if constexpr (std::is_same_v<E, float16_t>) return svcmpge_f16(m, a, b);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svcmpge_bf16(m, a, b);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto a_lo = sve_detail::bf16_to_f32_lo(a);
+    auto a_hi = sve_detail::bf16_to_f32_hi(a);
+    auto b_lo = sve_detail::bf16_to_f32_lo(b);
+    auto b_hi = sve_detail::bf16_to_f32_hi(b);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto cmp_lo = svcmpge_f32(m_lo, a_lo, b_lo);
+    auto cmp_hi = svcmpge_f32(m_hi, a_hi, b_hi);
+    return sve_detail::combine_f32_masks_to_bf16(cmp_lo, cmp_hi);
+  }
   else if constexpr (std::is_same_v<E, uint8_t>)   return svcmpge_u8(m, a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svcmpge_s8(m, a, b);
   else if constexpr (std::is_same_v<E, uint16_t>)  return svcmpge_u16(m, a, b);
@@ -463,9 +594,15 @@ VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
   if constexpr (std::is_same_v<E, float32_t>)      return svcmpne_f32(m, v, v);
   else if constexpr (std::is_same_v<E, float64_t>) return svcmpne_f64(m, v, v);
   else if constexpr (std::is_same_v<E, float16_t>) return svcmpne_f16(m, v, v);
-#if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svcmpne_bf16(m, v, v);
-#endif
+  else if constexpr (std::is_same_v<E, bfloat16_t>) {
+    auto v_lo = sve_detail::bf16_to_f32_lo(v);
+    auto v_hi = sve_detail::bf16_to_f32_hi(v);
+    auto m_lo = sve_detail::promote_mask_bf16_to_f32_lo(m);
+    auto m_hi = sve_detail::promote_mask_bf16_to_f32_hi(m);
+    auto nan_lo = svcmpne_f32(m_lo, v_lo, v_lo);
+    auto nan_hi = svcmpne_f32(m_hi, v_hi, v_hi);
+    return sve_detail::combine_f32_masks_to_bf16(nan_lo, nan_hi);
+  }
   else return svcmpne_f32(m, v, v);
 }
 

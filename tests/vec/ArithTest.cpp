@@ -1876,7 +1876,7 @@ TYPED_TEST(VecArithTest, CmpgeWithMask) {
 // Float-specific classification: isnan, isposinf, isneginf, isinf
 // ============================================================================
 
-using FloatTypes = ::testing::Types<float32_t, float64_t>;
+using FloatTypes = ::testing::Types<float32_t, float64_t, vecops::float16_t, vecops::bfloat16_t>;
 
 template <typename T>
 class VecFloatClassifyTest : public ::testing::Test {
