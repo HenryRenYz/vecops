@@ -449,11 +449,30 @@ struct VecDefs<T, N, POW2, std::enable_if_t<(N > 0)>> {
 
 // =========================================================================
 // Reject POW2 > 2  (more than 4 SVE registers)
+// Note: POW2>2 may arise from Rebind for large factor conversions (e.g. int8→int64);
+// Rebind caps at POW2=2, but we still provide a fallback for safety.
 // =========================================================================
 template <typename T, int POW2>
-struct VecDefs<T, -1, POW2, std::enable_if_t<(POW2 > 2)>> {
-  static_assert(sizeof(T) == -1,
-      "SVE supports max POW2=2 (4 registers). Use POW2 in [0,2].");
+struct VecDefs<T, -1, POW2, std::enable_if_t<(POW2 > 2)>> : public BaseVecDefs<T, -1, POW2> {
+  using TagType  = Tag<T, -1, POW2>;
+  using WordDefs = VecDefs<T, -1, 0>;
+  using WordVec  = typename WordDefs::VecType;
+  using WordMask = typename WordDefs::MaskType;
+
+  static constexpr nint_t num_words = 1;
+
+  static nint_t word_size() { return WordDefs::word_size(); }
+  static constexpr nint_t max_word_size = WordDefs::max_word_size;
+
+  static nint_t size() { return WordDefs::word_size(); }
+  static constexpr nint_t max_size = WordDefs::max_word_size;
+
+  static constexpr bool is_scalable   = true;
+  static constexpr bool is_default_impl = false;
+  static constexpr bool is_word_vec   = true;
+
+  using VecType  = WordVec;
+  using MaskType = WordMask;
 };
 
 // =========================================================================

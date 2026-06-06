@@ -926,13 +926,18 @@ constexpr nint_t size_shift(nuint_t from_size, nuint_t to_size) {
 template <typename TFrom, typename TTo>
 static constexpr nint_t SizeShift = details::size_shift(sizeof(TFrom), sizeof(TTo));
 
+namespace details {
+constexpr nint_t clamped_pow2(nint_t raw) { return raw < 2 ? raw : 2; }
+}
+
 /**
  * Keep number of elements unchanged but with a new dtype.
  * The power factor might change in scalable vector.
+ * POW2 is capped at 2 for SVE (max 4 registers).
  */
 template <typename TNew, typename TTag>
 using Rebind = std::conditional_t<TTag::is_runtime_size,
-    Tag<TNew, TTag::N, TTag::POW2 + SizeShift<TypeOf<TTag>, TNew>>,
+    Tag<TNew, TTag::N, details::clamped_pow2(TTag::POW2 + SizeShift<TypeOf<TTag>, TNew>)>,
     Tag<TNew, TTag::N, TTag::POW2>
 >;
 

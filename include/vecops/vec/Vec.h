@@ -2289,13 +2289,16 @@ VECOPS_VFUNC Vec<To> promote(To t, Vi v) {
     foreach<nw_i_r>([&]<nint_t I>{
       auto v_i = get_word<I>(t_i, v);
       auto v_bo_raw = word::promote(Rebind<Eo, TWi>(), v_i);
-      // batch output
-      using TBo = Tag<Eo, TWo::N, log2_floor(factor)>;
-      static_assert(num_words(TBo()) == factor, "Output element count mismatch");
+      // batch output — cap POW2 at 2 for SVE (max 4 registers)
+      constexpr nint_t raw_pow2 = log2_floor(factor);
+      constexpr nint_t bat_pow2 = is_scalable(t_i) && (raw_pow2 > 2) ? 2 : raw_pow2;
+      constexpr nint_t bat_factor = 1 << bat_pow2;
+      using TBo = Tag<Eo, TWo::N, bat_pow2>;
+      static_assert(num_words(TBo()) == bat_factor, "Output element count mismatch");
       auto v_bo = word::reshape(TBo(), v_bo_raw);
 
-      foreach<factor>([&]<nint_t J>{
-        v_o = set_word<I * factor + J>(t_o, v_o, get_word<J>(TBo(), v_bo));
+      foreach<bat_factor>([&]<nint_t J>{
+        v_o = set_word<I * bat_factor + J>(t_o, v_o, get_word<J>(TBo(), v_bo));
       });
     });
   } else {
@@ -2340,9 +2343,9 @@ VECOPS_VFUNC Vec<To> demote(To t, Vi v) {
 
   constexpr nint_t factor = sizeof(Ei) / sizeof(Eo);
   constexpr nint_t nw_i_r = is_scalable(t_i)
-      ? (NWo + factor - 1) / factor
+      ? NWo * factor
       : (To::AdjustedN + TWi::N - 1) / TWi::N;
-  static_assert(nw_i_r <= NWi || (NWo == 1 && nw_i_r <= factor), "Insufficient elements");
+  static_assert(nw_i_r <= NWi, "Insufficient elements");
 
   Vec<To> v_o;
   if constexpr (NWo > 1) {

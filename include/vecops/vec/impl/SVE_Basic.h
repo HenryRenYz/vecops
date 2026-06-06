@@ -484,6 +484,23 @@ VECOPS_VFUNC Vec<To> bitcast(To, V v) {
   return sve_detail::sve_from_u32<Eo>(sve_detail::sve_to_u32<Ei>(v));
 }
 
+// used for internal API
+template <typename To, typename V, typename Ti = Vec2Tag<V>,
+    TL_IF(num_words(To{}) == 2), TL_IF(num_words(Ti{}) == 2)>
+VECOPS_VFUNC Vec<To> bitcast(To, V v) {
+  Half<To> t1;
+  return svcreate2(word::bitcast(t1, svget2(v, 0)), word::bitcast(t1, svget2(v, 1)));
+}
+
+// used for internal API
+template <typename To, typename V, typename Ti = Vec2Tag<V>,
+    TL_IF(num_words(To{}) == 4), TL_IF(num_words(Ti{}) == 4)>
+VECOPS_VFUNC Vec<To> bitcast(To, V v) {
+  Half<Half<To>> t1;
+  return svcreate4(word::bitcast(t1, svget4(v, 0)), word::bitcast(t1, svget4(v, 1)),
+                   word::bitcast(t1, svget4(v, 2)), word::bitcast(t1, svget4(v, 3)));
+}
+
 /* === shuf / local_shuf === */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V shuf(V v, Vec<Rebind<Index<TypeOf<T>>, T>> vi) {
@@ -604,7 +621,7 @@ VECOPS_VFUNC V local_shuf(V v, int i15, int i14, int i13, int i12, int i11, int 
 }
 
 /* === upper / lower / even / odd === */
-template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 1)>
 VECOPS_VFUNC V upper(T t, Vec<T> v) {
   using E = TypeOf<T>; nint_t hn = word_size(t)/2;
   auto lo = word::mwhilelt(t, 0, hn);
@@ -625,8 +642,20 @@ VECOPS_VFUNC V upper(T t, Vec<T> v) {
   else return svsplice_u64(up, v, v);
 }
 
-template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 2)>
+VECOPS_VFUNC V upper(T t, Vec<T> v) { return svget2(v, 1); }
+
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC V upper(T t, Vec<T> v) { return svcreate2(svget4(v, 2), svget4(v, 3)); }
+
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 1)>
 VECOPS_VFUNC V lower(T t, Vec<T> v) { return v; }
+
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 2)>
+VECOPS_VFUNC V lower(T t, Vec<T> v) { return svget2(v, 0); }
+
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC V lower(T t, Vec<T> v) { return svcreate2(svget4(v, 0), svget4(v, 1)); }
 
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
 VECOPS_VFUNC V even(T t, Vec<T> v) {
@@ -667,11 +696,10 @@ VECOPS_VFUNC V odd(T t, Vec<T> v) {
 }
 
 /* === concat === */
-template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 1)>
 VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
-  using E = TypeOf<T>; nint_t hn = word_size(t)/2;
+  using E = TypeOf<T>; nint_t hn = size(t)/2;
   auto lo = word::mwhilelt(t, 0, hn);
-  auto up = svnot_b_z(sve_detail::sve_ptrue<E>(), lo);
   if constexpr (std::is_same_v<E, float32_t>)      return svsplice_f32(lo, v_lo, v_hi);
   else if constexpr (std::is_same_v<E, float64_t>) return svsplice_f64(lo, v_lo, v_hi);
   else if constexpr (std::is_same_v<E, int8_t>)     return svsplice_s8(lo, v_lo, v_hi);
@@ -687,6 +715,17 @@ VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
 #endif
   else return svsplice_u64(lo, v_lo, v_hi);
 }
+
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 2)>
+VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
+  return svcreate2(v_lo, v_hi);
+}
+
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
+  return svcreate4(svget2(v_lo, 0), svget2(v_lo, 1), svget2(v_hi, 0), svget2(v_hi, 1));
+}
+
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> concat_even(T t, Vec<T> v_lo, Vec<T> v_hi) {
