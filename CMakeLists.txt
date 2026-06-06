@@ -12,17 +12,20 @@ set(VECOPS_GITHUB_ENDPOINT "https://github.com" CACHE STRING "Set endpoint addre
 
 # -------------------------------- Dependencies --------------------------------
 include(FetchContent)
-enable_testing()
-FetchContent_Declare(
-        googletest
-        GIT_REPOSITORY "${VECOPS_GITHUB_ENDPOINT}/google/googletest.git"
-        GIT_TAG        v1.17.0
-)
-FetchContent_MakeAvailable(googletest)
-include(GoogleTest)
 
 # ------------------------------- Source Config --------------------------------
 add_subdirectory(src)
 
 # -------------------------------- Test Config ---------------------------------
-add_subdirectory(tests)
+option(BUILD_TESTING "Build tests" ON)
+if(BUILD_TESTING)
+    enable_testing()
+    FetchContent_Declare(
+            googletest
+            GIT_REPOSITORY "${VECOPS_GITHUB_ENDPOINT}/google/googletest.git"
+            GIT_TAG        v1.17.0
+    )
+    FetchContent_MakeAvailable(googletest)
+    include(GoogleTest)
+    add_subdirectory(tests)
+endif()
