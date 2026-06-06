@@ -87,35 +87,86 @@ T* alloc_aligned(size_t count) {
   return static_cast<T*>(ptr);
 }
 
-template <typename T>
-nint_t full_vec_elements() {
-  ScalableTag<T> t;
-  return size(t);
-}
-
 } // namespace test_utils
 
-template <typename T1_, typename T2_>
-struct Pair {
-  using T1 = T1_;
-  using T2 = T2_;
+// ============================================================================
+// Case structs for parameterizing tests at specific POW2 vector-width levels
+// ============================================================================
+
+template <typename T1_, typename T2_, int POW2_In_>
+struct PromoteCase {
+  using TIn    = T1_;
+  using TOut   = T2_;
+  using InTag  = ScalableTag<TIn,  POW2_In_>;
+  using OutTag = Rebind<TOut, InTag>;
 };
+
+template <typename T1_, typename T2_, int POW2_Out_>
+struct DemoteCase {
+  using TIn    = T1_;
+  using TOut   = T2_;
+  using OutTag = ScalableTag<TOut, POW2_Out_>;
+  using InTag  = Rebind<TIn, OutTag>;
+};
+
+template <typename T1_, typename T2_, int POW2_>
+struct ConvertCase {
+  using TIn    = T1_;
+  using TOut   = T2_;
+  using InTag  = ScalableTag<TIn,  POW2_>;
+  using OutTag = ScalableTag<TOut, POW2_>;
+};
+
+template <typename T1_, typename T2_, int POW2_>
+struct BitcastCase {
+  using TIn    = T1_;
+  using TOut   = T2_;
+  using InTag  = ScalableTag<TIn,  POW2_>;
+  using OutTag = ScalableTag<TOut, POW2_>;
+};
+
+// ------------------------------------------------------------------
+// Macros: enumerate all valid POW2 levels per shift category
+//   shift = log2(sizeof(larger)/sizeof(smaller))
+//   1 (ratio 2:1)  -> POW2 = 0, -1
+//   2 (ratio 4:1)  -> POW2 = 0, -1, -2
+//   3 (ratio 8:1)  -> POW2 = -1, -2, -3  (0 excluded: requires 8-word vectors)
+// ------------------------------------------------------------------
+
+#define PROMOTE_SHIFT1(T1, T2)  PromoteCase<T1, T2, 0>, PromoteCase<T1, T2, -1>
+#define DEMOTE_SHIFT1(T1, T2)   DemoteCase<T1, T2, 0>, DemoteCase<T1, T2, -1>
+
+#define PROMOTE_SHIFT2(T1, T2)  PromoteCase<T1, T2, 0>, PromoteCase<T1, T2, -1>, PromoteCase<T1, T2, -2>
+#define DEMOTE_SHIFT2(T1, T2)   DemoteCase<T1, T2, 0>, DemoteCase<T1, T2, -1>, DemoteCase<T1, T2, -2>
+
+#if VEC_MAX_POW >= 3
+#define PROMOTE_SHIFT3(T1, T2)  PromoteCase<T1, T2, 0>, PromoteCase<T1, T2, -1>, PromoteCase<T1, T2, -2>, PromoteCase<T1, T2, -3>
+#define DEMOTE_SHIFT3(T1, T2)   PromoteCase<T1, T2, 0>, DemoteCase<T1, T2, -1>, DemoteCase<T1, T2, -2>, DemoteCase<T1, T2, -3>
+#else
+#define PROMOTE_SHIFT3(T1, T2)  PromoteCase<T1, T2, -1>, PromoteCase<T1, T2, -2>, PromoteCase<T1, T2, -3>
+#define DEMOTE_SHIFT3(T1, T2)   DemoteCase<T1, T2, -1>, DemoteCase<T1, T2, -2>, DemoteCase<T1, T2, -3>
+#endif
+
+#define CONVERT_POWS(T1, T2)    ConvertCase<T1, T2, 0>, ConvertCase<T1, T2, 1>, ConvertCase<T1, T2, 2>
+#define BITCAST_POWS(T1, T2)    BitcastCase<T1, T2, 0>, BitcastCase<T1, T2, 1>, BitcastCase<T1, T2, 2>
 
 // ============================================================================
 // Promote Tests: smaller type -> larger type
 // ============================================================================
 
-template <typename TPair>
+template <typename TCase>
 class VecPromoteTest : public ::testing::Test {
 protected:
-  using TIn = typename TPair::T1;
-  using TOut = typename TPair::T2;
+  using TIn    = typename TCase::TIn;
+  using TOut   = typename TCase::TOut;
+  using InTag  = typename TCase::InTag;
+  using OutTag = typename TCase::OutTag;
 
-  using InTag  = ScalableTag<TIn>;
-  using OutTag = Rebind<TOut, InTag>;
+  InTag  t_in_;
+  OutTag t_out_;
 
-  nint_t in_elements()  { return InTag::AdjustedN; }
-  nint_t out_elements() { return OutTag::AdjustedN; }
+  nint_t in_elements()  { return size(t_in_); }
+  nint_t out_elements() { return size(t_out_); }
 
   void SetUp() override {
     in_data_ = test_utils::alloc_aligned<TIn>(256);
@@ -132,66 +183,64 @@ protected:
 };
 
 using PromoteTypes = ::testing::Types<
-    // 8-bit -> 16-bit
-    Pair<int8_t, int16_t>,
-    Pair<int8_t, uint16_t>,
-    Pair<int8_t, vecops::float16_t>,
-    Pair<int8_t, vecops::bfloat16_t>,
-    Pair<uint8_t, uint16_t>,
-    Pair<uint8_t, int16_t>,
-    Pair<uint8_t, vecops::float16_t>,
-    Pair<uint8_t, vecops::bfloat16_t>,
-    // 8-bit -> 32-bit
-    Pair<int8_t, int32_t>,
-    Pair<int8_t, uint32_t>,
-    Pair<int8_t, float32_t>,
-    Pair<uint8_t, int32_t>,
-    Pair<uint8_t, uint32_t>,
-    Pair<uint8_t, float32_t>,
-    // 8-bit -> 64-bit
-// TODO temp
-//    Pair<int8_t, int64_t>,
-//    Pair<int8_t, uint64_t>,
-//    Pair<int8_t, float64_t>,
-//    Pair<uint8_t, int64_t>,
-//    Pair<uint8_t, uint64_t>,
-//    Pair<uint8_t, float64_t>,
-    // 16-bit -> 32-bit
-    Pair<int16_t, int32_t>,
-    Pair<int16_t, uint32_t>,
-    Pair<int16_t, float32_t>,
-    Pair<uint16_t, int32_t>,
-    Pair<uint16_t, uint32_t>,
-    Pair<uint16_t, float32_t>,
-    Pair<vecops::float16_t, int32_t>,
-    Pair<vecops::float16_t, uint32_t>,
-    Pair<vecops::float16_t, float32_t>,
-    Pair<vecops::bfloat16_t, int32_t>,
-    Pair<vecops::bfloat16_t, uint32_t>,
-    Pair<vecops::bfloat16_t, float32_t>,
-    // 16-bit -> 64-bit
-    Pair<int16_t, int64_t>,
-    Pair<int16_t, uint64_t>,
-    Pair<int16_t, float64_t>,
-    Pair<uint16_t, int64_t>,
-    Pair<uint16_t, uint64_t>,
-    Pair<uint16_t, float64_t>,
-    Pair<vecops::float16_t, int64_t>,
-    Pair<vecops::float16_t, uint64_t>,
-    Pair<vecops::float16_t, float64_t>,
-    Pair<vecops::bfloat16_t, int64_t>,
-    Pair<vecops::bfloat16_t, uint64_t>,
-    Pair<vecops::bfloat16_t, float64_t>,
-    // 32-bit -> 64-bit
-    Pair<int32_t, int64_t>,
-    Pair<int32_t, uint64_t>,
-    Pair<int32_t, float64_t>,
-    Pair<uint32_t, uint64_t>,
-    Pair<uint32_t, int64_t>,
-    Pair<uint32_t, float64_t>,
-    Pair<float32_t, uint64_t>,
-    Pair<float32_t, int64_t>,
-    Pair<float32_t, float64_t>
+    // 8-bit -> 16-bit (shift=1)
+    PROMOTE_SHIFT1(int8_t, int16_t),
+    PROMOTE_SHIFT1(int8_t, uint16_t),
+    PROMOTE_SHIFT1(int8_t, vecops::float16_t),
+    PROMOTE_SHIFT1(int8_t, vecops::bfloat16_t),
+    PROMOTE_SHIFT1(uint8_t, uint16_t),
+    PROMOTE_SHIFT1(uint8_t, int16_t),
+    PROMOTE_SHIFT1(uint8_t, vecops::float16_t),
+    PROMOTE_SHIFT1(uint8_t, vecops::bfloat16_t),
+    // 8-bit -> 32-bit (shift=2)
+    PROMOTE_SHIFT2(int8_t, int32_t),
+    PROMOTE_SHIFT2(int8_t, uint32_t),
+    PROMOTE_SHIFT2(int8_t, float32_t),
+    PROMOTE_SHIFT2(uint8_t, int32_t),
+    PROMOTE_SHIFT2(uint8_t, uint32_t),
+    PROMOTE_SHIFT2(uint8_t, float32_t),
+    // 8-bit -> 64-bit (shift=3)
+    PROMOTE_SHIFT3(int8_t, int64_t),
+    PROMOTE_SHIFT3(int8_t, float64_t),
+    PROMOTE_SHIFT3(uint8_t, int64_t),
+    PROMOTE_SHIFT3(uint8_t, uint64_t),
+    PROMOTE_SHIFT3(uint8_t, float64_t),
+    // 16-bit -> 32-bit (shift=1)
+    PROMOTE_SHIFT1(int16_t, int32_t),
+    PROMOTE_SHIFT1(int16_t, uint32_t),
+    PROMOTE_SHIFT1(int16_t, float32_t),
+    PROMOTE_SHIFT1(uint16_t, int32_t),
+    PROMOTE_SHIFT1(uint16_t, uint32_t),
+    PROMOTE_SHIFT1(uint16_t, float32_t),
+    PROMOTE_SHIFT1(vecops::float16_t, int32_t),
+    PROMOTE_SHIFT1(vecops::float16_t, uint32_t),
+    PROMOTE_SHIFT1(vecops::float16_t, float32_t),
+    PROMOTE_SHIFT1(vecops::bfloat16_t, int32_t),
+    PROMOTE_SHIFT1(vecops::bfloat16_t, uint32_t),
+    PROMOTE_SHIFT1(vecops::bfloat16_t, float32_t),
+    // 16-bit -> 64-bit (shift=2)
+    PROMOTE_SHIFT2(int16_t, int64_t),
+    PROMOTE_SHIFT2(int16_t, uint64_t),
+    PROMOTE_SHIFT2(int16_t, float64_t),
+    PROMOTE_SHIFT2(uint16_t, int64_t),
+    PROMOTE_SHIFT2(uint16_t, uint64_t),
+    PROMOTE_SHIFT2(uint16_t, float64_t),
+    PROMOTE_SHIFT2(vecops::float16_t, int64_t),
+    PROMOTE_SHIFT2(vecops::float16_t, uint64_t),
+    PROMOTE_SHIFT2(vecops::float16_t, float64_t),
+    PROMOTE_SHIFT2(vecops::bfloat16_t, int64_t),
+    PROMOTE_SHIFT2(vecops::bfloat16_t, uint64_t),
+    PROMOTE_SHIFT2(vecops::bfloat16_t, float64_t),
+    // 32-bit -> 64-bit (shift=1)
+    PROMOTE_SHIFT1(int32_t, int64_t),
+    PROMOTE_SHIFT1(int32_t, uint64_t),
+    PROMOTE_SHIFT1(int32_t, float64_t),
+    PROMOTE_SHIFT1(uint32_t, uint64_t),
+    PROMOTE_SHIFT1(uint32_t, int64_t),
+    PROMOTE_SHIFT1(uint32_t, float64_t),
+    PROMOTE_SHIFT1(float32_t, uint64_t),
+    PROMOTE_SHIFT1(float32_t, int64_t),
+    PROMOTE_SHIFT1(float32_t, float64_t)
 >;
 
 TYPED_TEST_SUITE(VecPromoteTest, PromoteTypes);
@@ -203,15 +252,12 @@ TYPED_TEST(VecPromoteTest, BasicPromote) {
   nint_t n_out = this->out_elements();
   nint_t N = n_in < n_out ? n_in : n_out;
 
-  typename TestFixture::InTag  t_in;
-  typename TestFixture::OutTag t_out;
-
-  auto v_in  = loadu(t_in, this->in_data_);
-  auto v_out = promote(t_out, v_in);
+  auto v_in  = loadu(this->t_in_, this->in_data_);
+  auto v_out = promote(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(this->in_data_[i]);
-    TOut actual   = get(t_out, v_out, i);
+    TOut actual   = get(this->t_out_, v_out, i);
     EXPECT_TRUE(test_utils::values_equal(expected, actual))
               << "i=" << i << " input=" << static_cast<long long>(this->in_data_[i]);
   }
@@ -222,14 +268,11 @@ TYPED_TEST(VecPromoteTest, PromoteWithZeroValues) {
   using TOut = typename TestFixture::TOut;
   nint_t N = this->out_elements();
 
-  typename TestFixture::InTag  t_in;
-  typename TestFixture::OutTag t_out;
-
-  auto v_in  = zeros(t_in);
-  auto v_out = promote(t_out, v_in);
+  auto v_in  = zeros(this->t_in_);
+  auto v_out = promote(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
-    EXPECT_EQ(TOut(0), get(t_out, v_out, i)) << "i=" << i;
+    EXPECT_EQ(TOut(0), get(this->t_out_, v_out, i)) << "i=" << i;
   }
 }
 
@@ -240,9 +283,6 @@ TYPED_TEST(VecPromoteTest, PromoteWithMaxMinValues) {
   nint_t n_out = this->out_elements();
   nint_t N = n_in < n_out ? n_in : n_out;
 
-  typename TestFixture::InTag  t_in;
-  typename TestFixture::OutTag t_out;
-
   auto data = test_utils::alloc_aligned<TIn>(N);
   for (nint_t i = 0; i < N; ++i) {
     if (i % 4 == 0) data[i] = std::numeric_limits<TIn>::max();
@@ -251,12 +291,12 @@ TYPED_TEST(VecPromoteTest, PromoteWithMaxMinValues) {
     else data[i] = TIn(-1);
   }
 
-  auto v_in  = loadu(t_in, data);
-  auto v_out = promote(t_out, v_in);
+  auto v_in  = loadu(this->t_in_, data);
+  auto v_out = promote(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(data[i]);
-    TOut actual   = get(t_out, v_out, i);
+    TOut actual   = get(this->t_out_, v_out, i);
     EXPECT_TRUE(test_utils::values_equal(expected, actual))
               << "i=" << i << " input=" << static_cast<long long>(data[i]);
   }
@@ -272,19 +312,16 @@ TYPED_TEST(VecPromoteTest, SignExtensionTest) {
   nint_t N = n_in < n_out ? n_in : n_out;
 
   if constexpr (std::is_signed_v<TIn>) {
-    typename TestFixture::InTag  t_in;
-    typename TestFixture::OutTag t_out;
-
     auto data = test_utils::alloc_aligned<TIn>(N);
     for (nint_t i = 0; i < N; ++i) {
       data[i] = static_cast<TIn>(-(i + 1));
     }
 
-    auto v_in  = loadu(t_in, data);
-    auto v_out = promote(t_out, v_in);
+    auto v_in  = loadu(this->t_in_, data);
+    auto v_out = promote(this->t_out_, v_in);
 
     for (nint_t i = 0; i < N; ++i) {
-      TOut actual   = get(t_out, v_out, i);
+      TOut actual   = get(this->t_out_, v_out, i);
       TIn  original = data[i];
       EXPECT_TRUE(test_utils::values_equal(static_cast<TOut>(original), actual))
                 << "i=" << i << " original=" << static_cast<long long>(original)
@@ -298,17 +335,19 @@ TYPED_TEST(VecPromoteTest, SignExtensionTest) {
 // Demote Tests: larger type -> smaller type
 // ============================================================================
 
-template <typename TPair>
+template <typename TCase>
 class VecDemoteTest : public ::testing::Test {
 protected:
-  using TIn = typename TPair::T1;
-  using TOut = typename TPair::T2;
+  using TIn    = typename TCase::TIn;
+  using TOut   = typename TCase::TOut;
+  using OutTag = typename TCase::OutTag;
+  using InTag  = typename TCase::InTag;
 
-  using OutTag = ScalableTag<TOut>;
-  using InTag  = Rebind<TIn, OutTag>;
+  InTag  t_in_;
+  OutTag t_out_;
 
-  nint_t in_elements()  { return InTag::AdjustedN; }
-  nint_t out_elements() { return OutTag::AdjustedN; }
+  nint_t in_elements()  { return size(t_in_); }
+  nint_t out_elements() { return size(t_out_); }
 
   void SetUp() override {
     in_data_ = test_utils::alloc_aligned<TIn>(256);
@@ -338,66 +377,65 @@ protected:
 
 // Define type pairs for demote tests
 using DemoteTypes = ::testing::Types<
-    // 16-bit -> 8-bit
-    Pair<int16_t, int8_t>,
-    Pair<int16_t, uint8_t>,
-    Pair<uint16_t, int8_t>,
-    Pair<uint16_t, uint8_t>,
-    Pair<vecops::float16_t, int8_t>,
-    Pair<vecops::float16_t, uint8_t>,
-    Pair<vecops::bfloat16_t, int8_t>,
-    Pair<vecops::bfloat16_t, uint8_t>,
-    // 32-bit -> 16-bit
-    Pair<int32_t, int16_t>,
-    Pair<int32_t, uint16_t>,
-    Pair<int32_t, vecops::float16_t>,
-    Pair<int32_t, vecops::bfloat16_t>,
-    Pair<uint32_t, int16_t>,
-    Pair<uint32_t, uint16_t>,
-    Pair<uint32_t, vecops::float16_t>,
-    Pair<uint32_t, vecops::bfloat16_t>,
-    Pair<float32_t, int16_t>,
-    Pair<float32_t, uint16_t>,
-    Pair<float32_t, vecops::float16_t>,
-    Pair<float32_t, vecops::bfloat16_t>,
-    // 32-bit -> 8-bit
-    Pair<int32_t, int8_t>,
-    Pair<int32_t, uint8_t>,
-    Pair<uint32_t, int8_t>,
-    Pair<uint32_t, uint8_t>,
-    Pair<float32_t, int8_t>,
-    Pair<float32_t, uint8_t>,
-    // 64-bit -> 32-bit
-    Pair<int64_t, int32_t>,
-    Pair<int64_t, uint32_t>,
-    Pair<int64_t, float32_t>,
-    Pair<uint64_t, int32_t>,
-    Pair<uint64_t, uint32_t>,
-    Pair<uint64_t, float32_t>,
-    Pair<float64_t, int32_t>,
-    Pair<float64_t, uint32_t>,
-    Pair<float64_t, float32_t>,
-    // 64-bit -> 16-bit
-    Pair<int64_t, int16_t>,
-    Pair<int64_t, uint16_t>,
-    Pair<int64_t, vecops::float16_t>,
-    Pair<int64_t, vecops::bfloat16_t>,
-    Pair<uint64_t, int16_t>,
-    Pair<uint64_t, uint16_t>,
-    Pair<uint64_t, vecops::float16_t>,
-    Pair<uint64_t, vecops::bfloat16_t>,
-    Pair<float64_t, int16_t>,
-    Pair<float64_t, uint16_t>,
-    Pair<float64_t, vecops::float16_t>,
-    Pair<float64_t, vecops::bfloat16_t>
-    // 64-bit -> 8-bit
-// TODO temp
-//    Pair<int64_t, int8_t>,
-//    Pair<int64_t, uint8_t>,
-//    Pair<uint64_t, int8_t>,
-//    Pair<uint64_t, uint8_t>,
-//    Pair<float64_t, int8_t>,
-//    Pair<float64_t, uint8_t>
+    // 16-bit -> 8-bit (shift=1)
+    DEMOTE_SHIFT1(int16_t, int8_t),
+    DEMOTE_SHIFT1(int16_t, uint8_t),
+    DEMOTE_SHIFT1(uint16_t, int8_t),
+    DEMOTE_SHIFT1(uint16_t, uint8_t),
+    DEMOTE_SHIFT1(vecops::float16_t, int8_t),
+    DEMOTE_SHIFT1(vecops::float16_t, uint8_t),
+    DEMOTE_SHIFT1(vecops::bfloat16_t, int8_t),
+    DEMOTE_SHIFT1(vecops::bfloat16_t, uint8_t),
+    // 32-bit -> 16-bit (shift=1)
+    DEMOTE_SHIFT1(int32_t, int16_t),
+    DEMOTE_SHIFT1(int32_t, uint16_t),
+    DEMOTE_SHIFT1(int32_t, vecops::float16_t),
+    DEMOTE_SHIFT1(int32_t, vecops::bfloat16_t),
+    DEMOTE_SHIFT1(uint32_t, int16_t),
+    DEMOTE_SHIFT1(uint32_t, uint16_t),
+    DEMOTE_SHIFT1(uint32_t, vecops::float16_t),
+    DEMOTE_SHIFT1(uint32_t, vecops::bfloat16_t),
+    DEMOTE_SHIFT1(float32_t, int16_t),
+    DEMOTE_SHIFT1(float32_t, uint16_t),
+    DEMOTE_SHIFT1(float32_t, vecops::float16_t),
+    DEMOTE_SHIFT1(float32_t, vecops::bfloat16_t),
+    // 32-bit -> 8-bit (shift=2)
+    DEMOTE_SHIFT2(int32_t, int8_t),
+    DEMOTE_SHIFT2(int32_t, uint8_t),
+    DEMOTE_SHIFT2(uint32_t, int8_t),
+    DEMOTE_SHIFT2(uint32_t, uint8_t),
+    DEMOTE_SHIFT2(float32_t, int8_t),
+    DEMOTE_SHIFT2(float32_t, uint8_t),
+    // 64-bit -> 32-bit (shift=1)
+    DEMOTE_SHIFT1(int64_t, int32_t),
+    DEMOTE_SHIFT1(int64_t, uint32_t),
+    DEMOTE_SHIFT1(int64_t, float32_t),
+    DEMOTE_SHIFT1(uint64_t, int32_t),
+    DEMOTE_SHIFT1(uint64_t, uint32_t),
+    DEMOTE_SHIFT1(uint64_t, float32_t),
+    DEMOTE_SHIFT1(float64_t, int32_t),
+    DEMOTE_SHIFT1(float64_t, uint32_t),
+    DEMOTE_SHIFT1(float64_t, float32_t),
+    // 64-bit -> 16-bit (shift=2)
+    DEMOTE_SHIFT2(int64_t, int16_t),
+    DEMOTE_SHIFT2(int64_t, uint16_t),
+    DEMOTE_SHIFT2(int64_t, vecops::float16_t),
+    DEMOTE_SHIFT2(int64_t, vecops::bfloat16_t),
+    DEMOTE_SHIFT2(uint64_t, int16_t),
+    DEMOTE_SHIFT2(uint64_t, uint16_t),
+    DEMOTE_SHIFT2(uint64_t, vecops::float16_t),
+    DEMOTE_SHIFT2(uint64_t, vecops::bfloat16_t),
+    DEMOTE_SHIFT2(float64_t, int16_t),
+    DEMOTE_SHIFT2(float64_t, uint16_t),
+    DEMOTE_SHIFT2(float64_t, vecops::float16_t),
+    DEMOTE_SHIFT2(float64_t, vecops::bfloat16_t),
+    // 64-bit -> 8-bit (shift=3)
+    DEMOTE_SHIFT3(int64_t, int8_t),
+    DEMOTE_SHIFT3(int64_t, uint8_t),
+    DEMOTE_SHIFT3(uint64_t, int8_t),
+    DEMOTE_SHIFT3(uint64_t, uint8_t),
+    DEMOTE_SHIFT3(float64_t, int8_t),
+    DEMOTE_SHIFT3(float64_t, uint8_t)
 >;
 
 TYPED_TEST_SUITE(VecDemoteTest, DemoteTypes);
@@ -409,15 +447,12 @@ TYPED_TEST(VecDemoteTest, BasicDemote) {
   nint_t n_out = this->out_elements();
   nint_t N = n_in < n_out ? n_in : n_out;
 
-  typename TestFixture::InTag  t_in;
-  typename TestFixture::OutTag t_out;
-
-  auto v_in  = loadu(t_in, this->in_data_);
-  auto v_out = demote(t_out, v_in);
+  auto v_in  = loadu(this->t_in_, this->in_data_);
+  auto v_out = demote(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(this->in_data_[i]);
-    TOut actual   = get(t_out, v_out, i);
+    TOut actual   = get(this->t_out_, v_out, i);
     EXPECT_TRUE(test_utils::values_equal(expected, actual))
               << "i=" << i << " input=" << static_cast<long long>(this->in_data_[i]);
   }
@@ -430,14 +465,11 @@ TYPED_TEST(VecDemoteTest, DemoteWithZeroValues) {
   nint_t n_out = this->out_elements();
   nint_t N = n_in < n_out ? n_in : n_out;
 
-  typename TestFixture::InTag  t_in;
-  typename TestFixture::OutTag t_out;
-
-  auto v_in  = zeros(t_in);
-  auto v_out = demote(t_out, v_in);
+  auto v_in  = zeros(this->t_in_);
+  auto v_out = demote(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
-    EXPECT_EQ(TOut(0), get(t_out, v_out, i)) << "i=" << i;
+    EXPECT_EQ(TOut(0), get(this->t_out_, v_out, i)) << "i=" << i;
   }
 }
 
@@ -448,9 +480,6 @@ TYPED_TEST(VecDemoteTest, TruncationBehavior) {
   nint_t n_in  = this->in_elements();
   nint_t n_out = this->out_elements();
   nint_t N = n_in < n_out ? n_in : n_out;
-
-  typename TestFixture::InTag  t_in;
-  typename TestFixture::OutTag t_out;
 
   auto data = test_utils::alloc_aligned<TIn>(N);
   TIn max_out = static_cast<TIn>(std::numeric_limits<TOut>::max());
@@ -464,12 +493,12 @@ TYPED_TEST(VecDemoteTest, TruncationBehavior) {
     else data[i] = TIn(0);
   }
 
-  auto v_in  = loadu(t_in, data);
-  auto v_out = demote(t_out, v_in);
+  auto v_in  = loadu(this->t_in_, data);
+  auto v_out = demote(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(data[i]);
-    TOut actual   = get(t_out, v_out, i);
+    TOut actual   = get(this->t_out_, v_out, i);
     EXPECT_TRUE(test_utils::values_equal(expected, actual))
               << "i=" << i << " input=" << static_cast<long long>(data[i]);
   }
@@ -480,14 +509,19 @@ TYPED_TEST(VecDemoteTest, TruncationBehavior) {
 // Convert Tests: same-size type conversions
 // ============================================================================
 
-template <typename TPair>
+template <typename TCase>
 class VecConvertTest : public ::testing::Test {
 protected:
-  using TIn = typename TPair::T1;
-  using TOut = typename TPair::T2;
+  using TIn   = typename TCase::TIn;
+  using TOut  = typename TCase::TOut;
+  using InTag  = typename TCase::InTag;
+  using OutTag = typename TCase::OutTag;
   static_assert(sizeof(TIn) == sizeof(TOut), "Convert requires same-size types");
 
-  nint_t elements() { return test_utils::full_vec_elements<TIn>(); }
+  InTag  t_in_;
+  OutTag t_out_;
+
+  nint_t elements() { return size(t_in_); }
 
   void SetUp() override {
     in_data_ = test_utils::alloc_aligned<TIn>(256);
@@ -506,35 +540,35 @@ protected:
 // Define type pairs for convert tests (same size)
 using ConvertTypes = ::testing::Types<
     // 8-bit conversions
-    Pair<int8_t, uint8_t>,
-    Pair<uint8_t, int8_t>,
+    CONVERT_POWS(int8_t, uint8_t),
+    CONVERT_POWS(uint8_t, int8_t),
     // 16-bit conversions
-    Pair<int16_t, uint16_t>,
-    Pair<int16_t, vecops::float16_t>,
-    Pair<int16_t, vecops::bfloat16_t>,
-    Pair<uint16_t, int16_t>,
-    Pair<uint16_t, vecops::float16_t>,
-    Pair<uint16_t, vecops::bfloat16_t>,
-    Pair<vecops::float16_t, int16_t>,
-    Pair<vecops::float16_t, uint16_t>,
-    Pair<vecops::float16_t, vecops::bfloat16_t>,
-    Pair<vecops::bfloat16_t, int16_t>,
-    Pair<vecops::bfloat16_t, uint16_t>,
-    Pair<vecops::bfloat16_t, vecops::float16_t>,
+    CONVERT_POWS(int16_t, uint16_t),
+    CONVERT_POWS(int16_t, vecops::float16_t),
+    CONVERT_POWS(int16_t, vecops::bfloat16_t),
+    CONVERT_POWS(uint16_t, int16_t),
+    CONVERT_POWS(uint16_t, vecops::float16_t),
+    CONVERT_POWS(uint16_t, vecops::bfloat16_t),
+    CONVERT_POWS(vecops::float16_t, int16_t),
+    CONVERT_POWS(vecops::float16_t, uint16_t),
+    CONVERT_POWS(vecops::float16_t, vecops::bfloat16_t),
+    CONVERT_POWS(vecops::bfloat16_t, int16_t),
+    CONVERT_POWS(vecops::bfloat16_t, uint16_t),
+    CONVERT_POWS(vecops::bfloat16_t, vecops::float16_t),
     // 32-bit conversions
-    Pair<int32_t, uint32_t>,
-    Pair<int32_t, float32_t>,
-    Pair<uint32_t, int32_t>,
-    Pair<uint32_t, float32_t>,
-    Pair<float32_t, int32_t>,
-    Pair<float32_t, uint32_t>,
+    CONVERT_POWS(int32_t, uint32_t),
+    CONVERT_POWS(int32_t, float32_t),
+    CONVERT_POWS(uint32_t, int32_t),
+    CONVERT_POWS(uint32_t, float32_t),
+    CONVERT_POWS(float32_t, int32_t),
+    CONVERT_POWS(float32_t, uint32_t),
     // 64-bit conversions
-    Pair<int64_t, uint64_t>,
-    Pair<int64_t, float64_t>,
-    Pair<uint64_t, int64_t>,
-    Pair<uint64_t, float64_t>,
-    Pair<float64_t, int64_t>,
-    Pair<float64_t, uint64_t>
+    CONVERT_POWS(int64_t, uint64_t),
+    CONVERT_POWS(int64_t, float64_t),
+    CONVERT_POWS(uint64_t, int64_t),
+    CONVERT_POWS(uint64_t, float64_t),
+    CONVERT_POWS(float64_t, int64_t),
+    CONVERT_POWS(float64_t, uint64_t)
 >;
 
 TYPED_TEST_SUITE(VecConvertTest, ConvertTypes);
@@ -544,15 +578,12 @@ TYPED_TEST(VecConvertTest, BasicConvert) {
   using TOut = typename TestFixture::TOut;
   nint_t N = this->elements();
 
-  ScalableTag<TIn>  t_in;
-  ScalableTag<TOut> t_out;
-
-  auto v_in  = loadu(t_in, this->in_data_);
-  auto v_out = convert(t_out, v_in);
+  auto v_in  = loadu(this->t_in_, this->in_data_);
+  auto v_out = convert(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(this->in_data_[i]);
-    TOut actual   = get(t_out, v_out, i);
+    TOut actual   = get(this->t_out_, v_out, i);
     EXPECT_TRUE(test_utils::values_equal(expected, actual))
               << "i=" << i << " input=" << static_cast<long long>(this->in_data_[i]);
   }
@@ -563,14 +594,11 @@ TYPED_TEST(VecConvertTest, ConvertWithZeroValues) {
   using TOut = typename TestFixture::TOut;
   nint_t N = this->elements();
 
-  ScalableTag<TIn>  t_in;
-  ScalableTag<TOut> t_out;
-
-  auto v_in  = zeros(t_in);
-  auto v_out = convert(t_out, v_in);
+  auto v_in  = zeros(this->t_in_);
+  auto v_out = convert(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
-    EXPECT_EQ(TOut(0), get(t_out, v_out, i)) << "i=" << i;
+    EXPECT_EQ(TOut(0), get(this->t_out_, v_out, i)) << "i=" << i;
   }
 }
 
@@ -583,20 +611,17 @@ TYPED_TEST(VecConvertTest, SignedUnsignedConversion) {
   if constexpr (!std::is_floating_point_v<TIn>)
     if constexpr ((std::is_signed_v<TIn> && std::is_unsigned_v<TOut>) ||
                   (std::is_unsigned_v<TIn> && std::is_signed_v<TOut>)) {
-      ScalableTag<TIn>  t_in;
-      ScalableTag<TOut> t_out;
-
       auto data = test_utils::alloc_aligned<TIn>(N);
       for (nint_t i = 0; i < N; ++i) {
         data[i] = static_cast<TIn>(~TIn(0) - i);
       }
 
-      auto v_in  = loadu(t_in, data);
-      auto v_out = convert(t_out, v_in);
+      auto v_in  = loadu(this->t_in_, data);
+      auto v_out = convert(this->t_out_, v_in);
 
       for (nint_t i = 0; i < N; ++i) {
         TOut expected = vecops::convert<TOut>(data[i]);
-        TOut actual   = get(t_out, v_out, i);
+        TOut actual   = get(this->t_out_, v_out, i);
         EXPECT_TRUE(test_utils::values_equal(expected, actual))
                   << "i=" << i << " input=" << static_cast<long long>(data[i])
                   << " expected=" << static_cast<long long>(expected);
@@ -613,9 +638,6 @@ TYPED_TEST(VecConvertTest, FloatIntConversion) {
 
   if constexpr ((std::is_floating_point_v<TIn> && std::is_integral_v<TOut>) ||
                 (std::is_integral_v<TIn> && std::is_floating_point_v<TOut>)) {
-    ScalableTag<TIn>  t_in;
-    ScalableTag<TOut> t_out;
-
     auto data = test_utils::alloc_aligned<TIn>(N);
     for (nint_t i = 0; i < N; ++i) {
       if constexpr (std::is_floating_point_v<TIn>) {
@@ -629,12 +651,12 @@ TYPED_TEST(VecConvertTest, FloatIntConversion) {
       }
     }
 
-    auto v_in  = loadu(t_in, data);
-    auto v_out = convert(t_out, v_in);
+    auto v_in  = loadu(this->t_in_, data);
+    auto v_out = convert(this->t_out_, v_in);
 
     for (nint_t i = 0; i < N; ++i) {
       TOut expected = vecops::convert<TOut>(data[i]);
-      TOut actual   = get(t_out, v_out, i);
+      TOut actual   = get(this->t_out_, v_out, i);
       EXPECT_TRUE(test_utils::values_equal(expected, actual))
                 << "i=" << i << " input=" << static_cast<long long>(data[i]);
     }
@@ -1022,7 +1044,7 @@ TEST_F(VecConvertCornerCaseTest, Float32Float64RoundTrip) {
 // Test: All bits set patterns
 TEST_F(VecConvertCornerCaseTest, AllBitsSetPattern) {
   ScalableTag<int8_t>   t_i8;
-  ScalableTag<uint16_t> t_u16;
+  Rebind<uint16_t, decltype(t_i8)> t_u16;
   nint_t N = std::min(size(t_i8), size(t_u16));
 
   auto data = test_utils::alloc_aligned<int8_t>(N);
@@ -1054,12 +1076,17 @@ template <typename T1, typename T2>
       << ", got " << static_cast<long long>(actual);
 }
 
-template <typename TPair>
+template <typename TCase>
 class VecBitcastTest : public ::testing::Test {
 protected:
-  using TIn = typename TPair::T1;
-  using TOut = typename TPair::T2;
+  using TIn   = typename TCase::TIn;
+  using TOut  = typename TCase::TOut;
+  using InTag  = typename TCase::InTag;
+  using OutTag = typename TCase::OutTag;
   static_assert(sizeof(TIn) == sizeof(TOut), "Bitcast requires same-size types");
+
+  InTag  t_in_;
+  OutTag t_out_;
 
   void SetUp() override {
     in_data_ = test_utils::alloc_aligned<TIn>(256);
@@ -1078,25 +1105,25 @@ protected:
 // Define type pairs for bitcast tests (same size)
 using BitcastTypes = ::testing::Types<
     // 8-bit bitcast
-    Pair<int8_t, uint8_t>,
-    Pair<uint8_t, int8_t>,
+    BITCAST_POWS(int8_t, uint8_t),
+    BITCAST_POWS(uint8_t, int8_t),
     // 16-bit bitcast
-    Pair<int16_t, uint16_t>,
-    Pair<uint16_t, int16_t>,
+    BITCAST_POWS(int16_t, uint16_t),
+    BITCAST_POWS(uint16_t, int16_t),
     // 32-bit bitcast
-    Pair<int32_t, uint32_t>,
-    Pair<int32_t, float32_t>,
-    Pair<uint32_t, int32_t>,
-    Pair<uint32_t, float32_t>,
-    Pair<float32_t, int32_t>,
-    Pair<float32_t, uint32_t>,
+    BITCAST_POWS(int32_t, uint32_t),
+    BITCAST_POWS(int32_t, float32_t),
+    BITCAST_POWS(uint32_t, int32_t),
+    BITCAST_POWS(uint32_t, float32_t),
+    BITCAST_POWS(float32_t, int32_t),
+    BITCAST_POWS(float32_t, uint32_t),
     // 64-bit bitcast
-    Pair<int64_t, uint64_t>,
-    Pair<int64_t, float64_t>,
-    Pair<uint64_t, int64_t>,
-    Pair<uint64_t, float64_t>,
-    Pair<float64_t, int64_t>,
-    Pair<float64_t, uint64_t>
+    BITCAST_POWS(int64_t, uint64_t),
+    BITCAST_POWS(int64_t, float64_t),
+    BITCAST_POWS(uint64_t, int64_t),
+    BITCAST_POWS(uint64_t, float64_t),
+    BITCAST_POWS(float64_t, int64_t),
+    BITCAST_POWS(float64_t, uint64_t)
 >;
 
 TYPED_TEST_SUITE(VecBitcastTest, BitcastTypes);
@@ -1105,16 +1132,14 @@ TYPED_TEST(VecBitcastTest, BasicBitcast) {
   using TIn  = typename TestFixture::TIn;
   using TOut = typename TestFixture::TOut;
 
-  ScalableTag<TIn>  t_in;
-  ScalableTag<TOut> t_out;
-  nint_t N = size(t_in);
+  nint_t N = size(this->t_in_);
 
-  auto v_in  = loadu(t_in, this->in_data_);
-  auto v_out = bitcast(t_out, v_in);
+  auto v_in  = loadu(this->t_in_, this->in_data_);
+  auto v_out = bitcast(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TIn original = this->in_data_[i];
-    TOut actual = get(t_out, v_out, i);
+    TOut actual = get(this->t_out_, v_out, i);
     TOut expected;
     std::memcpy(&expected, &original, sizeof(TOut));
     EXPECT_TRUE(bits_equal(expected, actual))
@@ -1126,17 +1151,15 @@ TYPED_TEST(VecBitcastTest, BitcastRoundTrip) {
   using TIn  = typename TestFixture::TIn;
   using TOut = typename TestFixture::TOut;
 
-  ScalableTag<TIn>  t_in;
-  ScalableTag<TOut> t_out;
-  nint_t N = size(t_in);
+  nint_t N = size(this->t_in_);
 
-  auto v_in  = loadu(t_in, this->in_data_);
-  auto v_mid = bitcast(t_out, v_in);
-  auto v_out = bitcast(t_in, v_mid);
+  auto v_in  = loadu(this->t_in_, this->in_data_);
+  auto v_mid = bitcast(this->t_out_, v_in);
+  auto v_out = bitcast(this->t_in_, v_mid);
 
   for (nint_t i = 0; i < N; ++i) {
     TIn expected = this->in_data_[i];
-    TIn actual = get(t_in, v_out, i);
+    TIn actual = get(this->t_in_, v_out, i);
     EXPECT_TRUE(bits_equal(expected, actual)) << "i=" << i;
   }
 }
@@ -1145,15 +1168,13 @@ TYPED_TEST(VecBitcastTest, BitcastWithZeroValues) {
   using TIn  = typename TestFixture::TIn;
   using TOut = typename TestFixture::TOut;
 
-  ScalableTag<TIn>  t_in;
-  ScalableTag<TOut> t_out;
-  nint_t N = size(t_in);
+  nint_t N = size(this->t_in_);
 
-  auto v_in  = zeros(t_in);
-  auto v_out = bitcast(t_out, v_in);
+  auto v_in  = zeros(this->t_in_);
+  auto v_out = bitcast(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
-    TOut actual = get(t_out, v_out, i);
+    TOut actual = get(this->t_out_, v_out, i);
     EXPECT_TRUE(bits_equal(TOut(0), actual)) << "i=" << i;
   }
 }
@@ -1163,18 +1184,16 @@ TYPED_TEST(VecBitcastTest, BitcastWithAllOnesPattern) {
   using TIn  = typename TestFixture::TIn;
   using TOut = typename TestFixture::TOut;
 
-  ScalableTag<TIn>  t_in;
-  ScalableTag<TOut> t_out;
-  nint_t N = size(t_in);
+  nint_t N = size(this->t_in_);
 
   auto data = test_utils::alloc_aligned<TIn>(N);
   std::memset(data, 0xFF, N * sizeof(TIn));
 
-  auto v_in  = loadu(t_in, data);
-  auto v_out = bitcast(t_out, v_in);
+  auto v_in  = loadu(this->t_in_, data);
+  auto v_out = bitcast(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
-    TOut actual = get(t_out, v_out, i);
+    TOut actual = get(this->t_out_, v_out, i);
     TOut expected;
     std::memset(&expected, 0xFF, sizeof(TOut));
     EXPECT_TRUE(bits_equal(expected, actual)) << "i=" << i;

@@ -8,22 +8,25 @@
 #include "vecops/Features.h"
 
 #if defined(ARCH_X86_FAMILY)
-#if defined(HAS_AVX512F) && defined(HAS_AVX512CD) && defined(HAS_AVX512BW) && defined(HAS_AVX512DQ)
-  #define HAS_CPU_CAPABILITY_AVX512 1
-#endif
-#if defined(HAS_AVX2)
-  #define HAS_CPU_CAPABILITY_AVX2 1
-#endif
-#if defined(HAS_AVX)
-  #define HAS_CPU_CAPABILITY_AVX 1
-#endif
+  #if defined(HAS_AVX512F) && defined(HAS_AVX512CD) && defined(HAS_AVX512BW) && defined(HAS_AVX512DQ)
+    #define HAS_CPU_CAPABILITY_AVX512 1
+  #endif
+  #if defined(HAS_AVX2)
+    #define HAS_CPU_CAPABILITY_AVX2 1
+  #endif
+  #if defined(HAS_AVX)
+    #define HAS_CPU_CAPABILITY_AVX 1
+  #endif
+  #define VEC_MAX_POW (5)
 #endif // ARCH_X86_FAMILY
 #if defined(ARCH_ARM_FAMILY)
   #if defined(HAS_SVE)
     #define HAS_CPU_CAPABILITY_SVE 1
+    #define VEC_MAX_POW (2) // only up to svdtypex4_t is supported till SVE2p1
   #endif
   #if defined(HAS_NEON)
     #define HAS_CPU_CAPABILITY_NEON 1
+    #define VEC_MAX_POW (2) // TODO temp
   #endif
 #endif // ARCH_ARM_FAMILY
 
@@ -76,6 +79,7 @@
   #define CPU_CAPABILITY GENERIC
   #define CPU_CAPABILITY_GENERIC 1
   #define VEC_WIDTH 128 // default width for scalar vector implementation
+  #define VEC_MAX_POW (5) // default max pow2 for scalar implementation
 #endif // CPU_CAPABILITY
 
 #endif //VECOPS_CAPABILITIES_H

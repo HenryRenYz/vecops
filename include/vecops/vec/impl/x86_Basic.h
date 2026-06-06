@@ -19,65 +19,65 @@ namespace word {
 //                             Mask constructors                              //
 /* ************************************************************************** */
 #ifdef HAS_AVX512DQ
-template <TLV_DECL_TAG(T), TL_IF(T::N <= 8)>
+template <TLV_DECL_TAG(T), TL_IF(size(T{}) <= 8)>
 VECOPS_VFUNC Mask<T> mfill(T t, bool value) {
   /* we do not guarantee that padded elements are zero */
   uint32_t x = value ? 0xffffffffu : 0x00;
   return _cvtu32_mask8(x);
 }
-template <TLV_DECL_TAG(T), TL_IF(T::N == 16)>
+template <TLV_DECL_TAG(T), TL_IF(size(T{}) == 16)>
 VECOPS_VFUNC Mask<T> mfill(T t, bool value) {
   uint32_t x = value ? 0xffffffffu : 0x00;
   return _cvtu32_mask16(x);
 }
-template <TLV_DECL_TAG(T), TL_IF(T::N == 32)>
+template <TLV_DECL_TAG(T), TL_IF(size(T{}) == 32)>
 VECOPS_VFUNC Mask<T> mfill(T t, bool value) {
   uint32_t x = value ? 0xffffffffu : 0x00;
   return _cvtu32_mask32(x);
 }
-template <TLV_DECL_TAG(T), TL_IF(T::N == 64)>
+template <TLV_DECL_TAG(T), TL_IF(size(T{}) == 64)>
 VECOPS_VFUNC Mask<T> mfill(T t, bool value) {
   uint64_t x = value ? 0xffffffffffffffffLLu : 0x00;
   return _cvtu64_mask64(x);
 }
 
-template <TLV_DECL_TAG(T), TL_IF(T::N <= 8)>
+template <TLV_DECL_TAG(T), TL_IF(size(T{}) <= 8)>
 VECOPS_VFUNC Mask<T> mwhilelt(T t, nint_t a, nint_t b) {
   nint_t end = std::clamp<nint_t>(b - a, 0, 8);
   return _cvtu32_mask8(tailing_mask(int32_t(end)));
 }
-template <TLV_DECL_TAG(T), TL_IF(T::N == 16)>
+template <TLV_DECL_TAG(T), TL_IF(size(T{}) == 16)>
 VECOPS_VFUNC Mask<T> mwhilelt(T t, nint_t a, nint_t b) {
   nint_t end = std::clamp<nint_t>(b - a, 0, 16);
   return _cvtu32_mask16(tailing_mask(int32_t(end)));
 }
-template <TLV_DECL_TAG(T), TL_IF(T::N == 32)>
+template <TLV_DECL_TAG(T), TL_IF(size(T{}) == 32)>
 VECOPS_VFUNC Mask<T> mwhilelt(T t, nint_t a, nint_t b) {
   nint_t end = std::clamp<nint_t>(b - a, 0, 32);
   return _cvtu32_mask32(tailing_mask(int32_t(end)));
 }
-template <TLV_DECL_TAG(T), TL_IF(T::N == 64)>
+template <TLV_DECL_TAG(T), TL_IF(size(T{}) == 64)>
 VECOPS_VFUNC Mask<T> mwhilelt(T t, nint_t a, nint_t b) {
   nint_t end = std::clamp<nint_t>(b - a, 0, 64);
   return _cvtu64_mask64(tailing_mask(int64_t(end)));
 }
 
-template <TLV_DECL_TAG(T), TL_IF(T::N <= 8)>
+template <TLV_DECL_TAG(T), TL_IF(size(T{}) <= 8)>
 VECOPS_VFUNC Mask<T> mwhilege(T t, nint_t a, nint_t b) {
   nint_t end = std::clamp<nint_t>(b - a, 0, 8);
   return _cvtu32_mask8(~tailing_mask(int32_t(end)));
 }
-template <TLV_DECL_TAG(T), TL_IF(T::N == 16)>
+template <TLV_DECL_TAG(T), TL_IF(size(T{}) == 16)>
 VECOPS_VFUNC Mask<T> mwhilege(T t, nint_t a, nint_t b) {
   nint_t end = std::clamp<nint_t>(b - a, 0, 16);
   return _cvtu32_mask16(~tailing_mask(int32_t(end)));
 }
-template <TLV_DECL_TAG(T), TL_IF(T::N == 32)>
+template <TLV_DECL_TAG(T), TL_IF(size(T{}) == 32)>
 VECOPS_VFUNC Mask<T> mwhilege(T t, nint_t a, nint_t b) {
   nint_t end = std::clamp<nint_t>(b - a, 0, 32);
   return _cvtu32_mask32(~tailing_mask(int32_t(end)));
 }
-template <TLV_DECL_TAG(T), TL_IF(T::N == 64)>
+template <TLV_DECL_TAG(T), TL_IF(size(T{}) == 64)>
 VECOPS_VFUNC Mask<T> mwhilege(T t, nint_t a, nint_t b) {
   nint_t end = std::clamp<nint_t>(b - a, 0, 64);
   return _cvtu64_mask64(~tailing_mask(int64_t(end)));
@@ -2646,9 +2646,9 @@ return _mm_set1_epi16(u.i);
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float16_t>)>
 VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> v) {
 #ifdef HAS_AVX512_FP16
-return _mm256_castph_si256(_mm256_set1_ph(v));
+  return _mm_castph_si128(_mm_set1_ph(v));
 #else
-union { float16_t b; int16_t i; } u { .b = v };
+  union { float16_t b; int16_t i; } u { .b = v };
   return _mm_set1_epi16(u.i);
 #endif
 }
@@ -2744,7 +2744,7 @@ return word::blend(default_v, m, word::fill(t, v));
 }
 template <typename T>
 VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> v, nint_t n, Vec<T> default_v) {
-VECOPS_ASSERT(0 <= n && n <= T::N, "%zd !in 0..%zd", n, T::N);
+VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
 auto m = word::mwhilelt(t, 0, n);
 return word::fill(t, v, m, default_v);
 }

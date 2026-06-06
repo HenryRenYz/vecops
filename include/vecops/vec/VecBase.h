@@ -148,18 +148,39 @@ struct Tag {
   static_assert(is_element_type<T>, "Unsupported element type");
 };
 
+namespace details {
+
+template <typename T, nint_t N, int P, typename = void/*SFINAE*/>
+struct TagMaker {};
+
+template <typename T, nint_t N, int P> // is runtime size
+struct TagMaker<T, N, P, std::enable_if_t<(N < 0)>> {
+  using Type = Tag<T, -1, P>;
+};
+
+template <typename T, nint_t N, int P> // is fixed size & single word
+struct TagMaker<T, N, P, std::enable_if_t<(N >= 0 && adjusted_size<N, P>() <= _VEC_SIZE(T))>> {
+  using Type = Tag<T, adjusted_size<N, P>(), 0>;
+};
+
+template <typename T, nint_t N, int P> // is fixed size & multiword
+struct TagMaker<T, N, P, std::enable_if_t<(N >= 0 && adjusted_size<N, P>() > _VEC_SIZE(T))>> {
+  using Type = Tag<T, _VEC_SIZE(T), log2_floor(adjusted_size<N, P>() / _VEC_SIZE(T))>;
+};
+} // namespace details
+
 /**
  * @brief Tag for a scalable vector with hardware-determined size.
- * 
+ *
  * The vector size is determined at runtime based on the target SIMD width
  * and element type. Useful for writing portable code that adapts to different
  * hardware capabilities.
- * 
+ *
  * @tparam T Element type
  * @tparam POW2 Optional size multiplier (default 0)
  */
 template <typename T, int POW2 = 0>
-using ScalableTag = Tag<T, _VEC_SIZE(T), POW2>;
+using ScalableTag = details::TagMaker<T, _VEC_SIZE(T), POW2>::Type;
 
 /**
  * @brief Tag for a fixed-size vector.
@@ -168,7 +189,7 @@ using ScalableTag = Tag<T, _VEC_SIZE(T), POW2>;
  * @tparam N Number of elements (must be power of 2)
  */
 template <typename T, nint_t N>
-using FixedTag = Tag<T, N, 0>;
+using FixedTag = details::TagMaker<T, N, 0>::Type;
 
 
 /**
@@ -926,30 +947,28 @@ constexpr nint_t size_shift(nuint_t from_size, nuint_t to_size) {
 template <typename TFrom, typename TTo>
 static constexpr nint_t SizeShift = details::size_shift(sizeof(TFrom), sizeof(TTo));
 
-namespace details {
-constexpr nint_t clamped_pow2(nint_t raw) { return raw < 2 ? raw : 2; }
-}
-
 /**
  * Keep number of elements unchanged but with a new dtype.
  * The power factor might change in scalable vector.
  * POW2 is capped at 2 for SVE (max 4 registers).
  */
 template <typename TNew, typename TTag>
-using Rebind = std::conditional_t<TTag::is_runtime_size,
-    Tag<TNew, TTag::N, details::clamped_pow2(TTag::POW2 + SizeShift<TypeOf<TTag>, TNew>)>,
-    Tag<TNew, TTag::N, TTag::POW2>
->;
+using Rebind = typename details::TagMaker<
+    TNew,
+    TTag::is_runtime_size ? TTag::N : TTag::AdjustedN,
+    TTag::is_runtime_size ? (TTag::POW2 + SizeShift<TypeOf<TTag>, TNew>) : 0
+>::Type;
 
 /**
  * Keep number of bytes (vector width) unchanged but with a new dtype.
  * The power factor might change in non-scalable vector.
  */
 template <typename TNew, typename TTag>
-using ViewAs = std::conditional_t<TTag::is_runtime_size,
-    Tag<TNew, TTag::N, TTag::POW2>,
-    Tag<TNew, TTag::N * sizeof(TypeOf<TTag>) / sizeof(TNew), TTag::POW2>
->;
+using ViewAs = typename details::TagMaker<
+    TNew,
+    TTag::is_runtime_size ? TTag::N : (TTag::N * sizeof(TypeOf<TTag>) / sizeof(TNew)),
+    TTag::POW2
+>::Type;
 
 
 
@@ -1112,29 +1131,19 @@ static constexpr auto word_tag(Tag<T, N, P> t) {
 template <typename T>
 using WordOf = typename VecDefs<TypeOf<T>, T::N, T::POW2>::WordDefs::TagType;
 
-/**
- * 注：使用这种复杂结构是因为部分实现，如x86下如果总是直接操作POW2会导致一些bug
- * TODO 设计问题，最好修复。可能需要更加规范的向量编译期元数据和等价类架构设计。
- */
 template <typename T>
-using Half = std::conditional_t<
-    T::is_runtime_size,
-    Tag<TypeOf<T>, T::N, T::POW2 - 1>,               // scalable: 保持原始行为
-    std::conditional_t<(T::POW2 > 0),
-      Tag<TypeOf<T>, T::N, T::POW2 - 1>,            // POW2 > 0: 递减 POW2
-      Tag<TypeOf<T>, ((T::N) >> 1), 0>                // POW2 <= 0: 对 N 减半
-    >
->;
+using Half = typename details::TagMaker<
+    TypeOf<T>,
+    T::is_runtime_size ? T::N : (T::AdjustedN / 2),
+    T::is_runtime_size ? (T::POW2 - 1) : 0
+>::Type;
 
 template <typename T>
-using Twice = std::conditional_t<
-    T::is_runtime_size,
-    Tag<TypeOf<T>, T::N, T::POW2 + 1>,
-    std::conditional_t<(T::POW2 > 0),
-      Tag<TypeOf<T>, T::N, T::POW2 + 1>,
-      Tag<TypeOf<T>, ((T::N) << 1), 0>
-    >
->;
+using Twice = typename details::TagMaker<
+    TypeOf<T>,
+    T::is_runtime_size ? T::N : (T::AdjustedN * 2),
+    T::is_runtime_size ? (T::POW2 + 1) : 0
+>::Type;
 
 } // namespace vecops::vec
 

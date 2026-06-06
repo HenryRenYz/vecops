@@ -84,9 +84,9 @@ using namespace CPU_CAPABILITY;
 
 /**
  * @brief Create a vector filled with a single value.
- * 
+ *
  * All elements of the result vector are set to `value`.
- * 
+ *
  * @example
  *   Tag<float32_t, 4> t;
  *   auto v = fill(t, 3.14f);  // v = [3.14, 3.14, 3.14, 3.14]
@@ -2267,48 +2267,15 @@ VECOPS_VFUNC V interleave_odd(V a, V b) {
  */
 template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
 VECOPS_VFUNC Vec<To> promote(To t, Vi v) {
-  using namespace details;
-  using     Ti       = Vec2Tag<Vi>;
-  constexpr Ti   t_i;                  constexpr To   t_o;
-  constexpr auto NWi = num_words(t_i); constexpr auto NWo = num_words(t_o);
-  using     TWi      = WordOf<Ti>;     using     TWo      = WordOf<To>;
-  using     Ei       = TypeOf<Ti>;     using     Eo       = TypeOf<To>;
-
-  static_assert(sizeof(Ei) < sizeof(Eo));
-  static_assert(!(is_scalable(t_i) ^ is_scalable(t_o)));
-
-  constexpr nint_t factor = sizeof(Eo) / sizeof(Ei);
-  // required number of words from input vector
-  constexpr nint_t nw_i_r = is_scalable(t_i)
-      ? (NWo + factor - 1) / factor
-      : (To::AdjustedN + TWi::N - 1) / TWi::N;
-  static_assert(nw_i_r <= NWi, "Insufficient elements");
-
-  Vec<To> v_o;
-  if constexpr (NWo > 1) {
-    foreach<nw_i_r>([&]<nint_t I>{
-      auto v_i = get_word<I>(t_i, v);
-      auto v_bo_raw = word::promote(Rebind<Eo, TWi>(), v_i);
-      // batch output — cap POW2 at 2 for SVE (max 4 registers)
-      constexpr nint_t raw_pow2 = log2_floor(factor);
-      constexpr nint_t bat_pow2 = is_scalable(t_i) && (raw_pow2 > 2) ? 2 : raw_pow2;
-      constexpr nint_t bat_factor = 1 << bat_pow2;
-      using TBo = Tag<Eo, TWo::N, bat_pow2>;
-      static_assert(num_words(TBo()) == bat_factor, "Output element count mismatch");
-      auto v_bo = word::reshape(TBo(), v_bo_raw);
-
-      foreach<bat_factor>([&]<nint_t J>{
-        v_o = set_word<I * bat_factor + J>(t_o, v_o, get_word<J>(TBo(), v_bo));
-      });
-    });
+  constexpr Vec2Tag<Vi> t_i;
+  if constexpr (num_words(t_i) > 1 && num_words(t) > 1) {
+    Half<To> t_h;
+    auto lo = vec::promote(t_h, vec::lower(t, v));
+    auto hi = vec::promote(t_h, vec::upper(t, v));
+    return vec::concat(t, lo, hi);
   } else {
-    static_assert(nw_i_r == 1);
-    auto v_i = get_word<0>(t_i, v);
-    auto v_trimmed = word::bitcast(Rebind<Ei, TWo>(), v_i);
-    auto v_bo = word::promote(TWo(), v_trimmed);
-    v_o = set_word<0>(t_o, v_o, v_bo);
+    return word::promote(t, v);
   }
-  return v_o;
 }
 
 /**
@@ -2331,52 +2298,15 @@ VECOPS_VFUNC Vec<To> promote(To t, Vi v) {
  */
 template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
 VECOPS_VFUNC Vec<To> demote(To t, Vi v) {
-  using namespace details;
-  using     Ti       = Vec2Tag<Vi>;
-  constexpr Ti   t_i;                  constexpr To   t_o;
-  constexpr auto NWi = num_words(t_i); constexpr auto NWo = num_words(t_o);
-  using     TWi      = WordOf<Ti>;     using     TWo      = WordOf<To>;
-  using     Ei       = TypeOf<Ti>;     using     Eo       = TypeOf<To>;
-
-  static_assert(sizeof(Ei) > sizeof(Eo));
-  static_assert(!(is_scalable(t_i) ^ is_scalable(t_o)));
-
-  constexpr nint_t factor = sizeof(Ei) / sizeof(Eo);
-  constexpr nint_t nw_i_r = is_scalable(t_i)
-      ? NWo * factor
-      : (To::AdjustedN + TWi::N - 1) / TWi::N;
-  static_assert(nw_i_r <= NWi, "Insufficient elements");
-
-  Vec<To> v_o;
-  if constexpr (NWo > 1) {
-    static_assert (nw_i_r == NWo * factor);
-    foreach<NWo>([&]<nint_t I>{
-      // batch input
-      using TBi = Tag<Ei, TWi::N, log2_floor(factor)>;
-      auto v_bi = vmap(TBi(), [&]<nuint_t J>(auto tt){
-        return get_word<I * factor + J>(t_i, v);
-      });
-      auto v_bo = word::demote(TWo(), v_bi);
-      v_o = set_word<I>(t_o, v_o, v_bo);
-    });
+  constexpr Vec2Tag<Vi> t_i;
+  if constexpr (num_words(t_i) > 1 && num_words(t) > 1) {
+    Half<To> t_h;
+    auto lo = vec::demote(t_h, vec::lower(t, v));
+    auto hi = vec::demote(t_h, vec::upper(t, v));
+    return vec::concat(t, lo, hi);
   } else {
-    static_assert(nw_i_r <= factor);
-    if constexpr (nw_i_r > 1) {
-      // Multiple input words, use batch creation
-      using TBi = Tag<Ei, TWi::N, log2_floor(nw_i_r)>;
-      TBi tb;
-      auto v_bi = vmap(tb, [&]<nuint_t J>(auto tt){
-        return get_word<J>(t_i, v);
-      });
-      auto v_bo = word::demote(TWo(), v_bi);
-      v_o = set_word<0>(t_o, v_o, v_bo);
-    } else {
-      auto v_i = get_word<0>(t_i, v);
-      auto v_bo = word::demote(TWo(), v_i);
-      v_o = set_word<0>(t_o, v_o, v_bo);
-    }
+    return word::demote(t, v);
   }
-  return v_o;
 }
 
 /**

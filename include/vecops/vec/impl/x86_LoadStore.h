@@ -22,7 +22,7 @@ VECOPS_VFUNC Mask<T> restrict_mask_range(T t, Mask<T> m) {
   if constexpr (T::Bytes == 16 || T::Bytes == 32 || T::Bytes == 64) {
     return m;
   }
-  constexpr nint_t N = T::N;
+  constexpr nint_t N = size(t);
   constexpr uint64_t M = N == 64 ? -1 : (uint64_t(1) << N) - 1;
   if constexpr (N > 32) {
     return m.v & M;
@@ -388,7 +388,7 @@ VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T> * p, Mask<T> m, Vec<T> default_v) 
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T> * p, nint_t n, Vec<T> default_v) {
-  VECOPS_ASSERT(0 <= n && n <= T::N, "%zd !in 0..%zd", n, T::N);
+  VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
   auto m = word::mwhilelt(t, 0, n);
   return word::loadu(t, p, m, default_v);
 }
@@ -753,14 +753,14 @@ VECOPS_VFUNC void store(T t, TypeOf<T> * p, Mask<T> m, Vec<T> v) {
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void storeu(T t, TypeOf<T> * p, nint_t n, Vec<T> v) {
-  VECOPS_ASSERT(0 <= n && n <= T::N, "%zd !in 0..%zd", n, T::N);
+  VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
   auto m = word::mwhilelt(t, 0, n);
   word::storeu(t, p, m, v);
 }
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void store(T t, TypeOf<T> * p, nint_t n, Vec<T> v) {
-  VECOPS_ASSERT(0 <= n && n <= T::N, "%zd !in 0..%zd", n, T::N);
+  VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
   auto m = word::mwhilelt(t, 0, n);
   word::store(t, p, m, v);
 }
@@ -771,8 +771,8 @@ VECOPS_VFUNC void store(T t, TypeOf<T> * p, nint_t n, Vec<T> v) {
 /* ************************************************************************** */
 template <TLV_DECL_TAG(T)>
 static VECOPS_VFUNC Vec<T> _gather_scalar(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
-  alignas(T::Bytes) TypeOf<T> data[T::N];
-  VECOPS_UNROLL for (int j = 0; j < T::N; ++j) {
+  alignas(T::Bytes) TypeOf<T> data[size(t)];
+  VECOPS_UNROLL for (int j = 0; j < size(t); ++j) {
     data[j] = p[nint_t(word::get(i, j))];
   }
   return word::load(t, data);
@@ -780,8 +780,8 @@ static VECOPS_VFUNC Vec<T> _gather_scalar(T t, const TypeOf<T>* p, Vec<Rebind<In
 
 template <TLV_DECL_TAG(T)>
 static VECOPS_VFUNC Vec<T> _mask_gather_scalar(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
-  alignas(T::Bytes) TypeOf<T> data[T::N];
-  VECOPS_UNROLL for (int j = 0; j < T::N; ++j) {
+  alignas(T::Bytes) TypeOf<T> data[size(t)];
+  VECOPS_UNROLL for (int j = 0; j < size(t); ++j) {
     data[j] = word::get(t, m, j) ? p[nint_t(word::get(i, j))] : word::get(default_v, j);
   }
   return word::load(t, data);
@@ -957,7 +957,7 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>,
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> gather(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
-  VECOPS_ASSERT(0 <= n && n <= T::N, "%zd !in 0..%zd", n, T::N);
+  VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
   auto m = word::mwhilelt(t, 0, n);
   return word::gather(t, p, i, m, default_v);
 }
@@ -968,14 +968,14 @@ VECOPS_VFUNC Vec<T> gather(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> 
 /* ************************************************************************** */
 template <TLV_DECL_TAG(T)>
 static VECOPS_VFUNC void _scatter_scalar(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  VECOPS_UNROLL for (int j = 0; j < T::N; ++j) {
+  VECOPS_UNROLL for (int j = 0; j < size(t); ++j) {
     p[nint_t(word::get(i, j))] = word::get(v, j);
   }
 }
 
 template <TLV_DECL_TAG(T)>
 static VECOPS_VFUNC void _mask_scatter_scalar(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  VECOPS_UNROLL for (int j = 0; j < T::N; ++j) {
+  VECOPS_UNROLL for (int j = 0; j < size(t); ++j) {
     if (word::get(t, m, j)) {
       p[nint_t(word::get(i, j))] = word::get(v, j);
     }
@@ -1101,7 +1101,7 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
-  VECOPS_ASSERT(0 <= n && n <= T::N, "%zd !in 0..%zd", n, T::N);
+  VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
   auto m = word::mwhilelt(t, 0, n);
   word::scatter(t, p, i, m, v);
 }
