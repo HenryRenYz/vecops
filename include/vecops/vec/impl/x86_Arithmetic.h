@@ -128,7 +128,7 @@ VECOPS_VFUNC __m512i cvt_two_fp32_to_bf16(__m512 a, __m512 b){
   #else
   __m256 a_lo = _mm512_castps512_ps256(a), a_hi = _mm512_extractf32x8_ps(a, 1);
   __m256 b_lo = _mm512_castps512_ps256(b), b_hi = _mm512_extractf32x8_ps(b, 1);
-  __m256i r_lo = cvt_two_fp32_to_bf16(a_lo, b_lo), r_hi = cvt_two_fp32_to_bf16(a_hi, b_hi);
+  __m256i r_lo = cvt_two_fp32_to_bf16(a_lo, a_hi), r_hi = cvt_two_fp32_to_bf16(b_lo, b_hi);
   return _mm512_inserti64x4(_mm512_castsi256_si512(r_lo), r_hi, 1);
   #endif
 }
@@ -2524,6 +2524,26 @@ template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF
 VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_ph_mask(m.v, _mm512_castsi512_ph(a.v), _mm512_castsi512_ph(b.v), _CMP_EQ_OQ);
 }
+#else
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
+  __m256i a_lo256 = _mm512_castsi512_si256(a.v);
+  __m256i a_hi256 = _mm512_extracti64x4_epi64(a.v, 1);
+  __m256i b_lo256 = _mm512_castsi512_si256(b.v);
+  __m256i b_hi256 = _mm512_extracti64x4_epi64(b.v, 1);
+  __mmask16 lo_m = __mmask16(m.v & 0xFFFF);
+  __mmask16 hi_m = __mmask16(m.v >> 16);
+  __m256 a_lo0, a_lo1, a_hi0, a_hi1, b_lo0, b_lo1, b_hi0, b_hi1;
+  half_cvt::cvt_fp16_to_two_fp32(a_lo256, a_lo0, a_lo1);
+  half_cvt::cvt_fp16_to_two_fp32(a_hi256, a_hi0, a_hi1);
+  half_cvt::cvt_fp16_to_two_fp32(b_lo256, b_lo0, b_lo1);
+  half_cvt::cvt_fp16_to_two_fp32(b_hi256, b_hi0, b_hi1);
+  __mmask16 m0 = _mm256_mask_cmp_ps_mask(lo_m, a_lo0, b_lo0, _CMP_EQ_OQ);
+  __mmask16 m1 = _mm256_mask_cmp_ps_mask(lo_m, a_lo1, b_lo1, _CMP_EQ_OQ);
+  __mmask16 m2 = _mm256_mask_cmp_ps_mask(hi_m, a_hi0, b_hi0, _CMP_EQ_OQ);
+  __mmask16 m3 = _mm256_mask_cmp_ps_mask(hi_m, a_hi1, b_hi1, _CMP_EQ_OQ);
+  return __mmask32(m0) | (__mmask32(m1) << 8) | (__mmask32(m2) << 16) | (__mmask32(m3) << 24);
+}
 #endif
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
 VECOPS_VFUNC Mask<T> cmpeq(V a, V b, Mask<T> m) {
@@ -3026,6 +3046,26 @@ VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float16_t>)>
 VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_ph_mask(m.v, _mm512_castsi512_ph(a.v), _mm512_castsi512_ph(b.v), _CMP_NEQ_OQ);
+}
+#else
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
+  __m256i a_lo256 = _mm512_castsi512_si256(a.v);
+  __m256i a_hi256 = _mm512_extracti64x4_epi64(a.v, 1);
+  __m256i b_lo256 = _mm512_castsi512_si256(b.v);
+  __m256i b_hi256 = _mm512_extracti64x4_epi64(b.v, 1);
+  __mmask16 lo_m = __mmask16(m.v & 0xFFFF);
+  __mmask16 hi_m = __mmask16(m.v >> 16);
+  __m256 a_lo0, a_lo1, a_hi0, a_hi1, b_lo0, b_lo1, b_hi0, b_hi1;
+  half_cvt::cvt_fp16_to_two_fp32(a_lo256, a_lo0, a_lo1);
+  half_cvt::cvt_fp16_to_two_fp32(a_hi256, a_hi0, a_hi1);
+  half_cvt::cvt_fp16_to_two_fp32(b_lo256, b_lo0, b_lo1);
+  half_cvt::cvt_fp16_to_two_fp32(b_hi256, b_hi0, b_hi1);
+  __mmask16 m0 = _mm256_mask_cmp_ps_mask(lo_m, a_lo0, b_lo0, _CMP_NEQ_OQ);
+  __mmask16 m1 = _mm256_mask_cmp_ps_mask(lo_m, a_lo1, b_lo1, _CMP_NEQ_OQ);
+  __mmask16 m2 = _mm256_mask_cmp_ps_mask(hi_m, a_hi0, b_hi0, _CMP_NEQ_OQ);
+  __mmask16 m3 = _mm256_mask_cmp_ps_mask(hi_m, a_hi1, b_hi1, _CMP_NEQ_OQ);
+  return __mmask32(m0) | (__mmask32(m1) << 8) | (__mmask32(m2) << 16) | (__mmask32(m3) << 24);
 }
 #endif
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
@@ -3569,6 +3609,26 @@ template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF
 VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_ph_mask(m.v, _mm512_castsi512_ph(a.v), _mm512_castsi512_ph(b.v), _CMP_LT_OQ);
 }
+#else
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
+  __m256i a_lo256 = _mm512_castsi512_si256(a.v);
+  __m256i a_hi256 = _mm512_extracti64x4_epi64(a.v, 1);
+  __m256i b_lo256 = _mm512_castsi512_si256(b.v);
+  __m256i b_hi256 = _mm512_extracti64x4_epi64(b.v, 1);
+  __mmask16 lo_m = __mmask16(m.v & 0xFFFF);
+  __mmask16 hi_m = __mmask16(m.v >> 16);
+  __m256 a_lo0, a_lo1, a_hi0, a_hi1, b_lo0, b_lo1, b_hi0, b_hi1;
+  half_cvt::cvt_fp16_to_two_fp32(a_lo256, a_lo0, a_lo1);
+  half_cvt::cvt_fp16_to_two_fp32(a_hi256, a_hi0, a_hi1);
+  half_cvt::cvt_fp16_to_two_fp32(b_lo256, b_lo0, b_lo1);
+  half_cvt::cvt_fp16_to_two_fp32(b_hi256, b_hi0, b_hi1);
+  __mmask16 m0 = _mm256_mask_cmp_ps_mask(lo_m, a_lo0, b_lo0, _CMP_LT_OQ);
+  __mmask16 m1 = _mm256_mask_cmp_ps_mask(lo_m, a_lo1, b_lo1, _CMP_LT_OQ);
+  __mmask16 m2 = _mm256_mask_cmp_ps_mask(hi_m, a_hi0, b_hi0, _CMP_LT_OQ);
+  __mmask16 m3 = _mm256_mask_cmp_ps_mask(hi_m, a_hi1, b_hi1, _CMP_LT_OQ);
+  return __mmask32(m0) | (__mmask32(m1) << 8) | (__mmask32(m2) << 16) | (__mmask32(m3) << 24);
+}
 #endif
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
 VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
@@ -4111,6 +4171,26 @@ template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF
 VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_ph_mask(m.v, _mm512_castsi512_ph(a.v), _mm512_castsi512_ph(b.v), _CMP_GT_OQ);
 }
+#else
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
+  __m256i a_lo256 = _mm512_castsi512_si256(a.v);
+  __m256i a_hi256 = _mm512_extracti64x4_epi64(a.v, 1);
+  __m256i b_lo256 = _mm512_castsi512_si256(b.v);
+  __m256i b_hi256 = _mm512_extracti64x4_epi64(b.v, 1);
+  __mmask16 lo_m = __mmask16(m.v & 0xFFFF);
+  __mmask16 hi_m = __mmask16(m.v >> 16);
+  __m256 a_lo0, a_lo1, a_hi0, a_hi1, b_lo0, b_lo1, b_hi0, b_hi1;
+  half_cvt::cvt_fp16_to_two_fp32(a_lo256, a_lo0, a_lo1);
+  half_cvt::cvt_fp16_to_two_fp32(a_hi256, a_hi0, a_hi1);
+  half_cvt::cvt_fp16_to_two_fp32(b_lo256, b_lo0, b_lo1);
+  half_cvt::cvt_fp16_to_two_fp32(b_hi256, b_hi0, b_hi1);
+  __mmask16 m0 = _mm256_mask_cmp_ps_mask(lo_m, a_lo0, b_lo0, _CMP_GT_OQ);
+  __mmask16 m1 = _mm256_mask_cmp_ps_mask(lo_m, a_lo1, b_lo1, _CMP_GT_OQ);
+  __mmask16 m2 = _mm256_mask_cmp_ps_mask(hi_m, a_hi0, b_hi0, _CMP_GT_OQ);
+  __mmask16 m3 = _mm256_mask_cmp_ps_mask(hi_m, a_hi1, b_hi1, _CMP_GT_OQ);
+  return __mmask32(m0) | (__mmask32(m1) << 8) | (__mmask32(m2) << 16) | (__mmask32(m3) << 24);
+}
 #endif
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
 VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
@@ -4614,6 +4694,26 @@ template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF
 VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_ph_mask(m.v, _mm512_castsi512_ph(a.v), _mm512_castsi512_ph(b.v), _CMP_LE_OQ);
 }
+#else
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
+  __m256i a_lo256 = _mm512_castsi512_si256(a.v);
+  __m256i a_hi256 = _mm512_extracti64x4_epi64(a.v, 1);
+  __m256i b_lo256 = _mm512_castsi512_si256(b.v);
+  __m256i b_hi256 = _mm512_extracti64x4_epi64(b.v, 1);
+  __mmask16 lo_m = __mmask16(m.v & 0xFFFF);
+  __mmask16 hi_m = __mmask16(m.v >> 16);
+  __m256 a_lo0, a_lo1, a_hi0, a_hi1, b_lo0, b_lo1, b_hi0, b_hi1;
+  half_cvt::cvt_fp16_to_two_fp32(a_lo256, a_lo0, a_lo1);
+  half_cvt::cvt_fp16_to_two_fp32(a_hi256, a_hi0, a_hi1);
+  half_cvt::cvt_fp16_to_two_fp32(b_lo256, b_lo0, b_lo1);
+  half_cvt::cvt_fp16_to_two_fp32(b_hi256, b_hi0, b_hi1);
+  __mmask16 m0 = _mm256_mask_cmp_ps_mask(lo_m, a_lo0, b_lo0, _CMP_LE_OQ);
+  __mmask16 m1 = _mm256_mask_cmp_ps_mask(lo_m, a_lo1, b_lo1, _CMP_LE_OQ);
+  __mmask16 m2 = _mm256_mask_cmp_ps_mask(hi_m, a_hi0, b_hi0, _CMP_LE_OQ);
+  __mmask16 m3 = _mm256_mask_cmp_ps_mask(hi_m, a_hi1, b_hi1, _CMP_LE_OQ);
+  return __mmask32(m0) | (__mmask32(m1) << 8) | (__mmask32(m2) << 16) | (__mmask32(m3) << 24);
+}
 #endif
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
 VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
@@ -5116,6 +5216,26 @@ VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float16_t>)>
 VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
   return _mm512_mask_cmp_ph_mask(m.v, _mm512_castsi512_ph(a.v), _mm512_castsi512_ph(b.v), _CMP_GE_OQ);
+}
+#else
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
+  __m256i a_lo256 = _mm512_castsi512_si256(a.v);
+  __m256i a_hi256 = _mm512_extracti64x4_epi64(a.v, 1);
+  __m256i b_lo256 = _mm512_castsi512_si256(b.v);
+  __m256i b_hi256 = _mm512_extracti64x4_epi64(b.v, 1);
+  __mmask16 lo_m = __mmask16(m.v & 0xFFFF);
+  __mmask16 hi_m = __mmask16(m.v >> 16);
+  __m256 a_lo0, a_lo1, a_hi0, a_hi1, b_lo0, b_lo1, b_hi0, b_hi1;
+  half_cvt::cvt_fp16_to_two_fp32(a_lo256, a_lo0, a_lo1);
+  half_cvt::cvt_fp16_to_two_fp32(a_hi256, a_hi0, a_hi1);
+  half_cvt::cvt_fp16_to_two_fp32(b_lo256, b_lo0, b_lo1);
+  half_cvt::cvt_fp16_to_two_fp32(b_hi256, b_hi0, b_hi1);
+  __mmask16 m0 = _mm256_mask_cmp_ps_mask(lo_m, a_lo0, b_lo0, _CMP_GE_OQ);
+  __mmask16 m1 = _mm256_mask_cmp_ps_mask(lo_m, a_lo1, b_lo1, _CMP_GE_OQ);
+  __mmask16 m2 = _mm256_mask_cmp_ps_mask(hi_m, a_hi0, b_hi0, _CMP_GE_OQ);
+  __mmask16 m3 = _mm256_mask_cmp_ps_mask(hi_m, a_hi1, b_hi1, _CMP_GE_OQ);
+  return __mmask32(m0) | (__mmask32(m1) << 8) | (__mmask32(m2) << 16) | (__mmask32(m3) << 24);
 }
 #endif
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>

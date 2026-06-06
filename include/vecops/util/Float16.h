@@ -22,12 +22,12 @@ struct alignas(2) Float16 {
 
   VECOPS_INLINE constexpr Float16() = default;
 
-  constexpr Float16(float x);
+  Float16(float x);
 
-  VECOPS_INLINE constexpr Float16(double x) : Float16(float(x)) { }
+  VECOPS_INLINE Float16(double x) : Float16(float(x)) { }
 
   template <typename Int, std::enable_if_t<std::is_integral_v<Int>, bool> = false>
-  VECOPS_INLINE explicit constexpr Float16(Int x) : Float16(float(x)) { }
+  VECOPS_INLINE explicit Float16(Int x) : Float16(float(x)) { }
 
   #if defined(__arm__) || defined(__aarch64__)
   VECOPS_INLINE constexpr Float16(__fp16 x) {
@@ -51,7 +51,7 @@ struct alignas(2) Float16 {
     return x;
   }
 
-  constexpr operator float() const;
+  operator float() const;
 
   #if defined(__arm__) || defined(__aarch64__)
 
@@ -266,10 +266,10 @@ inline uint16_t fp16_from_fp32(float v) {
 
 } // namespace details
 
-VECOPS_INLINE constexpr Float16::Float16(float x)
+VECOPS_INLINE Float16::Float16(float x)
   : x(details::fp16_from_fp32(x)) { }
 
-VECOPS_INLINE constexpr Float16::operator float() const {
+VECOPS_INLINE Float16::operator float() const {
   return details::fp16_to_fp32(x);
 }
 

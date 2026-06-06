@@ -186,23 +186,23 @@ VECOPS_VFUNC void store(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
 /* 32-bit elements: float32, int32, uint32 */
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, float32_t>)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
-  auto pg = sve_detail::sve_ptrue<float32_t>();
+  auto pg = details::ptrue<float32_t>();
   auto byte_offsets = svlsl_n_s32_x(pg, i, 2);
   return svld1_gather_s32offset_f32(pg, p, byte_offsets);
 }
 
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int32_t>)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
-  auto pg = sve_detail::sve_ptrue<int32_t>();
+  auto pg = details::ptrue<int32_t>();
   auto byte_offsets = svlsl_n_s32_x(pg, i, 2);
   return svld1_gather_s32offset_s32(pg, p, byte_offsets);
 }
 
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, uint32_t>)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
-  auto pg32 = sve_detail::sve_ptrue<int32_t>();
+  auto pg32 = details::ptrue<int32_t>();
   auto byte_offsets = svlsl_n_s32_x(pg32, i, 2);
-  auto pg = sve_detail::sve_ptrue<uint32_t>();
+  auto pg = details::ptrue<uint32_t>();
   auto ui = svreinterpret_u32_s32(byte_offsets);
   return svld1_gather_u32offset_u32(pg, p, ui);
 }
@@ -210,23 +210,23 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>,
 /* 64-bit elements: float64, int64, uint64 */
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, float64_t>)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
-  auto pg = sve_detail::sve_ptrue<float64_t>();
+  auto pg = details::ptrue<float64_t>();
   auto byte_offsets = svlsl_n_s64_x(pg, i, 3);
   return svld1_gather_s64offset_f64(pg, p, byte_offsets);
 }
 
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int64_t>)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
-  auto pg = sve_detail::sve_ptrue<int64_t>();
+  auto pg = details::ptrue<int64_t>();
   auto byte_offsets = svlsl_n_s64_x(pg, i, 3);
   return svld1_gather_s64offset_s64(pg, p, byte_offsets);
 }
 
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, uint64_t>)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
-  auto pg64 = sve_detail::sve_ptrue<int64_t>();
+  auto pg64 = details::ptrue<int64_t>();
   auto byte_offsets = svlsl_n_s64_x(pg64, i, 3);
-  auto pg = sve_detail::sve_ptrue<uint64_t>();
+  auto pg = details::ptrue<uint64_t>();
   auto ui = svreinterpret_u64_s64(byte_offsets);
   return svld1_gather_u64offset_u64(pg, p, ui);
 }
@@ -251,23 +251,23 @@ VECOPS_VFUNC Vec<T> gather(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i
 /* 32-bit elements: float32, int32, uint32 */
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, float32_t>)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  auto pg = sve_detail::sve_ptrue<float32_t>();
+  auto pg = details::ptrue<float32_t>();
   auto byte_offsets = svlsl_n_s32_x(pg, i, 2);
   svst1_scatter_s32offset_f32(pg, p, byte_offsets, v);
 }
 
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int32_t>)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  auto pg = sve_detail::sve_ptrue<int32_t>();
+  auto pg = details::ptrue<int32_t>();
   auto byte_offsets = svlsl_n_s32_x(pg, i, 2);
   svst1_scatter_s32offset_s32(pg, p, byte_offsets, v);
 }
 
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, uint32_t>)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  auto pg32 = sve_detail::sve_ptrue<int32_t>();
+  auto pg32 = details::ptrue<int32_t>();
   auto byte_offsets = svlsl_n_s32_x(pg32, i, 2);
-  auto pg = sve_detail::sve_ptrue<uint32_t>();
+  auto pg = details::ptrue<uint32_t>();
   auto ui = svreinterpret_u32_s32(byte_offsets);
   svst1_scatter_u32offset_u32(pg, p, ui, v);
 }
@@ -275,23 +275,23 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i,
 /* 64-bit elements: float64, int64, uint64 */
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, float64_t>)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  auto pg = sve_detail::sve_ptrue<float64_t>();
+  auto pg = details::ptrue<float64_t>();
   auto byte_offsets = svlsl_n_s64_x(pg, i, 3);
   svst1_scatter_s64offset_f64(pg, p, byte_offsets, v);
 }
 
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int64_t>)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  auto pg = sve_detail::sve_ptrue<int64_t>();
+  auto pg = details::ptrue<int64_t>();
   auto byte_offsets = svlsl_n_s64_x(pg, i, 3);
   svst1_scatter_s64offset_s64(pg, p, byte_offsets, v);
 }
 
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, uint64_t>)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  auto pg64 = sve_detail::sve_ptrue<int64_t>();
+  auto pg64 = details::ptrue<int64_t>();
   auto byte_offsets = svlsl_n_s64_x(pg64, i, 3);
-  auto pg = sve_detail::sve_ptrue<uint64_t>();
+  auto pg = details::ptrue<uint64_t>();
   auto ui = svreinterpret_u64_s64(byte_offsets);
   svst1_scatter_u64offset_u64(pg, p, ui, v);
 }
@@ -301,28 +301,28 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
   using E = TypeOf<T>;
   if constexpr (std::is_same_v<E, float32_t>) {
-    auto pg = sve_detail::sve_ptrue<float32_t>();
+    auto pg = details::ptrue<float32_t>();
     auto byte_offsets = svlsl_n_s32_x(pg, i, 2);
     svst1_scatter_s32offset_f32(m, p, byte_offsets, v);
   } else if constexpr (std::is_same_v<E, float64_t>) {
-    auto pg = sve_detail::sve_ptrue<float64_t>();
+    auto pg = details::ptrue<float64_t>();
     auto byte_offsets = svlsl_n_s64_x(pg, i, 3);
     svst1_scatter_s64offset_f64(m, p, byte_offsets, v);
   } else if constexpr (std::is_same_v<E, int32_t>) {
-    auto pg = sve_detail::sve_ptrue<int32_t>();
+    auto pg = details::ptrue<int32_t>();
     auto byte_offsets = svlsl_n_s32_x(pg, i, 2);
     svst1_scatter_s32offset_s32(m, p, byte_offsets, v);
   } else if constexpr (std::is_same_v<E, uint32_t>) {
-    auto pg32 = sve_detail::sve_ptrue<int32_t>();
+    auto pg32 = details::ptrue<int32_t>();
     auto byte_offsets = svlsl_n_s32_x(pg32, i, 2);
     auto ui = svreinterpret_u32_s32(byte_offsets);
     svst1_scatter_u32offset_u32(m, p, ui, v);
   } else if constexpr (std::is_same_v<E, int64_t>) {
-    auto pg = sve_detail::sve_ptrue<int64_t>();
+    auto pg = details::ptrue<int64_t>();
     auto byte_offsets = svlsl_n_s64_x(pg, i, 3);
     svst1_scatter_s64offset_s64(m, p, byte_offsets, v);
   } else if constexpr (std::is_same_v<E, uint64_t>) {
-    auto pg64 = sve_detail::sve_ptrue<int64_t>();
+    auto pg64 = details::ptrue<int64_t>();
     auto byte_offsets = svlsl_n_s64_x(pg64, i, 3);
     auto ui = svreinterpret_u64_s64(byte_offsets);
     svst1_scatter_u64offset_u64(m, p, ui, v);

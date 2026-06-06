@@ -32,7 +32,7 @@ VECOPS_VFUNC V bit_and(V a, V b, Mask<T> m) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>>)>
 VECOPS_VFUNC V bit_and(V a, V b) {
   using E = TypeOf<T>;
-  return word::bit_and(a, b, sve_detail::sve_ptrue<E>());
+  return word::bit_and(a, b, details::ptrue<E>());
 }
 
 /* === bit_or === */
@@ -52,7 +52,7 @@ VECOPS_VFUNC V bit_or(V a, V b, Mask<T> m) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>>)>
 VECOPS_VFUNC V bit_or(V a, V b) {
   using E = TypeOf<T>;
-  return word::bit_or(a, b, sve_detail::sve_ptrue<E>());
+  return word::bit_or(a, b, details::ptrue<E>());
 }
 
 /* === bit_xor === */
@@ -72,7 +72,7 @@ VECOPS_VFUNC V bit_xor(V a, V b, Mask<T> m) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>>)>
 VECOPS_VFUNC V bit_xor(V a, V b) {
   using E = TypeOf<T>;
-  return word::bit_xor(a, b, sve_detail::sve_ptrue<E>());
+  return word::bit_xor(a, b, details::ptrue<E>());
 }
 
 /* === bit_andnot === */
@@ -83,7 +83,7 @@ VECOPS_VFUNC V bit_xor(V a, V b) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>>)>
 VECOPS_VFUNC V bit_andnot(V a, V b, Mask<T> m) {
   using E = TypeOf<T>;
-  auto pg = sve_detail::sve_ptrue<E>();
+  auto pg = details::ptrue<E>();
   if constexpr (std::is_same_v<E, uint8_t>)       return word::blend(a, m, svbic_u8_x(pg, b, a));
   else if constexpr (std::is_same_v<E, int8_t>)   return word::blend(a, m, svbic_s8_x(pg, b, a));
   else if constexpr (std::is_same_v<E, uint16_t>) return word::blend(a, m, svbic_u16_x(pg, b, a));
@@ -97,7 +97,7 @@ VECOPS_VFUNC V bit_andnot(V a, V b, Mask<T> m) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>>)>
 VECOPS_VFUNC V bit_andnot(V a, V b) {
   using E = TypeOf<T>;
-  return word::bit_andnot(a, b, sve_detail::sve_ptrue<E>());
+  return word::bit_andnot(a, b, details::ptrue<E>());
 }
 
 /* === bit_not === */
@@ -117,7 +117,7 @@ VECOPS_VFUNC V bit_not(V v, Mask<T> m, V default_v) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>>)>
 VECOPS_VFUNC V bit_not(V v) {
   using E = TypeOf<T>;
-  return word::bit_not(v, sve_detail::sve_ptrue<E>(), v);
+  return word::bit_not(v, details::ptrue<E>(), v);
 }
 
 /* === bit_shl (runtime shift) === */
@@ -137,7 +137,7 @@ VECOPS_VFUNC V bit_shl(V v, int shift, Mask<T> m) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>>)>
 VECOPS_VFUNC V bit_shl(V v, int shift) {
   using E = TypeOf<T>;
-  return word::bit_shl(v, shift, sve_detail::sve_ptrue<E>());
+  return word::bit_shl(v, shift, details::ptrue<E>());
 }
 
 /* === bit_shr (runtime shift) === */
@@ -157,7 +157,7 @@ VECOPS_VFUNC V bit_shr(V v, int shift, Mask<T> m) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>>)>
 VECOPS_VFUNC V bit_shr(V v, int shift) {
   using E = TypeOf<T>;
-  return word::bit_shr(v, shift, sve_detail::sve_ptrue<E>());
+  return word::bit_shr(v, shift, details::ptrue<E>());
 }
 
 }  // namespace word

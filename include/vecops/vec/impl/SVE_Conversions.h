@@ -58,171 +58,171 @@ VECOPS_VFUNC Vec<To> reshape(To t_out, Vi v_in) {
 // int64_t <=> float64_t
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int64_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<float64_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<float64_t>();
+  auto pg = details::ptrue<float64_t>();
   return svcvt_s64_f64_x(pg, v);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float64_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<int64_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<int64_t>();
+  auto pg = details::ptrue<int64_t>();
   return svcvt_f64_s64_x(pg, v);
 }
 
 // uint64_t <=> float64_t
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint64_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<float64_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<float64_t>();
+  auto pg = details::ptrue<float64_t>();
   return svcvt_u64_f64_x(pg, v);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float64_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint64_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<uint64_t>();
+  auto pg = details::ptrue<uint64_t>();
   return svcvt_f64_u64_x(pg, v);
 }
 
 // int64_t <=> uint64_t
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int64_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint64_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<uint64_t>();
+  auto pg = details::ptrue<uint64_t>();
   return svreinterpret_s64_u64(svmin_u64_z(pg, v, svdup_u64(std::numeric_limits<int64_t>::max())));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint64_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<int64_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<int64_t>();
+  auto pg = details::ptrue<int64_t>();
   return svreinterpret_u64_s64(svmax_s64_z(pg, v, svdup_s64(0)));
 }
 
 // int32_t <=> float32_t
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int32_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<float32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<float32_t>();
+  auto pg = details::ptrue<float32_t>();
   return svcvt_s32_f32_x(pg, v);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float32_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<int32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<int32_t>();
+  auto pg = details::ptrue<int32_t>();
   return svcvt_f32_s32_x(pg, v);
 }
 
 // uint32_t <=> float32_t
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint32_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<float32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<float32_t>();
+  auto pg = details::ptrue<float32_t>();
   return svcvt_u32_f32_x(pg, v);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float32_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<uint32_t>();
+  auto pg = details::ptrue<uint32_t>();
   return svcvt_f32_u32_x(pg, v);
 }
 
 // int32_t <=> uint32_t
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int32_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<uint32_t>();
+  auto pg = details::ptrue<uint32_t>();
   return svreinterpret_s32_u32(svmin_u32_z(pg, v, svdup_u32(std::numeric_limits<int32_t>::max())));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint32_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<int32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<int32_t>();
+  auto pg = details::ptrue<int32_t>();
   return svreinterpret_u32_s32(svmax_s32_z(pg, v, svdup_s32(0)));
 }
 
 // int16_t <=> uint16_t
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint16_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<uint16_t>();
+  auto pg = details::ptrue<uint16_t>();
   return svreinterpret_s16_u16(svmin_u16_z(pg, v, svdup_u16(std::numeric_limits<int16_t>::max())));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<int16_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<int16_t>();
+  auto pg = details::ptrue<int16_t>();
   return svreinterpret_u16_s16(svmax_s16_z(pg, v, svdup_s16(0)));
 }
 
 // int8_t <=> uint8_t
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int8_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint8_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<uint8_t>();
+  auto pg = details::ptrue<uint8_t>();
   return svreinterpret_s8_u8(svmin_u8_z(pg, v, svdup_u8(std::numeric_limits<int8_t>::max())));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint8_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<int8_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<int8_t>();
+  auto pg = details::ptrue<int8_t>();
   return svreinterpret_u8_s8(svmax_s8_z(pg, v, svdup_s8(0)));
 }
 
 // float16_t <=> int16_t
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<int16_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<int16_t>();
+  auto pg = details::ptrue<int16_t>();
   return svcvt_f16_s16_x(pg, v);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<float16_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<float16_t>();
+  auto pg = details::ptrue<float16_t>();
   return svcvt_s16_f16_x(pg, v);
 }
 
 // float16_t <=> uint16_t
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint16_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<uint16_t>();
+  auto pg = details::ptrue<uint16_t>();
   return svcvt_f16_u16_x(pg, v);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<float16_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<float16_t>();
+  auto pg = details::ptrue<float16_t>();
   return svcvt_u16_f16_x(pg, v);
 }
 
 // float16_t <=> bfloat16_t
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<bfloat16_t, T>> v) {
-  return sve_detail::f32x2_to_f16(sve_detail::bf16_to_f32_lo(v), sve_detail::bf16_to_f32_hi(v));
+  return details::f32x2_to_f16(details::bf16_to_f32_lo(v), details::bf16_to_f32_hi(v));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<float16_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<float32_t>();
+  auto pg = details::ptrue<float32_t>();
   auto lo_f32 = svcvt_f32_f16_x(pg, v);
   auto hi_f32 = svcvtlt_f32_f16_x(pg, v);
 #if defined(__ARM_FEATURE_SVE_BF16)
-  auto pg_bf16 = sve_detail::sve_ptrue<bfloat16_t>();
+  auto pg_bf16 = details::ptrue<bfloat16_t>();
   auto lo_bf16 = svcvt_bf16_f32_x(pg_bf16, lo_f32);
   return svcvtnt_bf16_f32_x(lo_bf16, pg_bf16, hi_f32);
 #else
-  return sve_detail::f32x2_to_bf16(lo_f32, hi_f32);
+  return details::f32x2_to_bf16(lo_f32, hi_f32);
 #endif
 }
 
 // bfloat16_t <=> int16_t (via f16)
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<bfloat16_t, T>> v) {
-  auto f16_vec = sve_detail::f32x2_to_f16(sve_detail::bf16_to_f32_lo(v), sve_detail::bf16_to_f32_hi(v));
-  auto pg = sve_detail::sve_ptrue<float16_t>();
+  auto f16_vec = details::f32x2_to_f16(details::bf16_to_f32_lo(v), details::bf16_to_f32_hi(v));
+  auto pg = details::ptrue<float16_t>();
   return svcvt_s16_f16_x(pg, f16_vec);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<int16_t, T>> v) {
-  auto pg_i32 = sve_detail::sve_ptrue<int32_t>();
+  auto pg_i32 = details::ptrue<int32_t>();
   auto lo_f32 = svcvt_f32_s32_x(pg_i32, svunpklo_s32(v));
   auto hi_f32 = svcvt_f32_s32_x(pg_i32, svunpkhi_s32(v));
-  return sve_detail::f32x2_to_bf16(lo_f32, hi_f32);
+  return details::f32x2_to_bf16(lo_f32, hi_f32);
 }
 
 // bfloat16_t <=> uint16_t (via f16)
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<bfloat16_t, T>> v) {
-  auto f16_vec = sve_detail::f32x2_to_f16(sve_detail::bf16_to_f32_lo(v), sve_detail::bf16_to_f32_hi(v));
-  auto pg = sve_detail::sve_ptrue<float16_t>();
+  auto f16_vec = details::f32x2_to_f16(details::bf16_to_f32_lo(v), details::bf16_to_f32_hi(v));
+  auto pg = details::ptrue<float16_t>();
   return svcvt_u16_f16_x(pg, f16_vec);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint16_t, T>> v) {
-  auto pg_u32 = sve_detail::sve_ptrue<uint32_t>();
-  auto pg_f32 = sve_detail::sve_ptrue<float32_t>();
+  auto pg_u32 = details::ptrue<uint32_t>();
+  auto pg_f32 = details::ptrue<float32_t>();
   auto lo_f32 = svcvt_f32_u32_x(pg_f32, svunpklo_u32(v));
   auto hi_f32 = svcvt_f32_u32_x(pg_f32, svunpkhi_u32(v));
-  return sve_detail::f32x2_to_bf16(lo_f32, hi_f32);
+  return details::f32x2_to_bf16(lo_f32, hi_f32);
 }
 
 /* ======================================================================= */
@@ -233,12 +233,12 @@ VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<uint16_t, T>> v) {
 /* float32_t -> float64_t */
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<float32_t>();
+  auto pg = details::ptrue<float32_t>();
   return svcvt_f64_f32_x(pg, svzip1_f32(v, v));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 == 1), TL_IF(is_any<TypeOf<T>, float64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<float32_t>();
+  auto pg = details::ptrue<float32_t>();
   auto evens = svcvt_f64_f32_x(pg, v);
   auto odds  = svcvtlt_f64_f32_x(pg, v);
   return word::reshape(t, svcreate2_f64(
@@ -248,13 +248,13 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float32_t, T>> v) {
 /* int32_t -> float64_t */
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<int64_t>();
+  auto pg = details::ptrue<int64_t>();
   auto lo64 = svunpklo_s64(v);
   return svcvt_f64_s64_x(pg, lo64);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 == 1), TL_IF(is_any<TypeOf<T>, float64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<int64_t>();
+  auto pg = details::ptrue<int64_t>();
   auto lo64 = svunpklo_s64(v);
   auto hi64 = svunpkhi_s64(v);
   auto lo_f64 = svcvt_f64_s64_x(pg, lo64);
@@ -265,13 +265,13 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int32_t, T>> v) {
 /* uint32_t -> float64_t */
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<uint64_t>();
+  auto pg = details::ptrue<uint64_t>();
   auto lo64 = svunpklo_u64(v);
   return svcvt_f64_u64_x(pg, lo64);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 == 1), TL_IF(is_any<TypeOf<T>, float64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<uint64_t>();
+  auto pg = details::ptrue<uint64_t>();
   auto lo64 = svunpklo_u64(v);
   auto hi64 = svunpkhi_u64(v);
   auto lo_f64 = svcvt_f64_u64_x(pg, lo64);
@@ -328,13 +328,13 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint32_t, T>> v) {
 /* float32_t -> int64_t */
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<float32_t>();
+  auto pg = details::ptrue<float32_t>();
   return svcvt_s64_f32_x(pg, svzip1_f32(v, v));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 == 1), TL_IF(is_any<TypeOf<T>, int64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float32_t, T>> v) {
-  auto pg_f32 = sve_detail::sve_ptrue<float32_t>();
-  auto pg_f64 = sve_detail::sve_ptrue<float64_t>();
+  auto pg_f32 = details::ptrue<float32_t>();
+  auto pg_f64 = details::ptrue<float64_t>();
   auto evens = svcvt_f64_f32_x(pg_f32, v);
   auto odds  = svcvtlt_f64_f32_x(pg_f32, v);
   auto lo = svcvt_s64_f64_x(pg_f64, svzip1_f64(evens, odds));
@@ -345,13 +345,13 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float32_t, T>> v) {
 /* float32_t -> uint64_t */
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float32_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<float32_t>();
+  auto pg = details::ptrue<float32_t>();
   return svcvt_u64_f32_x(pg, svzip1_f32(v, v));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 == 1), TL_IF(is_any<TypeOf<T>, uint64_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float32_t, T>> v) {
-  auto pg_f32 = sve_detail::sve_ptrue<float32_t>();
-  auto pg_f64 = sve_detail::sve_ptrue<float64_t>();
+  auto pg_f32 = details::ptrue<float32_t>();
+  auto pg_f64 = details::ptrue<float64_t>();
   auto evens = svcvt_f64_f32_x(pg_f32, v);
   auto odds  = svcvtlt_f64_f32_x(pg_f32, v);
   auto lo = svcvt_u64_f64_x(pg_f64, svzip1_f64(evens, odds));
@@ -434,14 +434,14 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint16_t, T>> v) {
 /* float16_t -> float32_t */
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float32_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float16_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<float32_t>();
+  auto pg = details::ptrue<float32_t>();
   auto even_f32 = svcvt_f32_f16_x(pg, v);
   auto odd_f32  = svcvtlt_f32_f16_x(pg, v);
   return svzip1_f32(even_f32, odd_f32);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 == 1), TL_IF(is_any<TypeOf<T>, float32_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float16_t, T>> v) {
-  auto pg = sve_detail::sve_ptrue<float32_t>();
+  auto pg = details::ptrue<float32_t>();
   auto even_f32 = svcvt_f32_f16_x(pg, v);
   auto odd_f32  = svcvtlt_f32_f16_x(pg, v);
   return word::reshape(t, svcreate2_f32(
@@ -451,12 +451,12 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float16_t, T>> v) {
 /* bfloat16_t -> float32_t */
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float32_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<bfloat16_t, T>> v) {
-  return sve_detail::bf16_to_f32_lo(v);
+  return details::bf16_to_f32_lo(v);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 == 1), TL_IF(is_any<TypeOf<T>, float32_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<bfloat16_t, T>> v) {
   return word::reshape(t, svcreate2_f32(
-    sve_detail::bf16_to_f32_lo(v), sve_detail::bf16_to_f32_hi(v)));
+    details::bf16_to_f32_lo(v), details::bf16_to_f32_hi(v)));
 }
 
 /* int8_t -> int16_t */
@@ -821,7 +821,7 @@ template <TLV_DECL_TAG(T), TL_IF(T::POW2 == 2), TL_IF(is_any<TypeOf<T>, float32_
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<int8_t, T>> v) {
   auto lo16 = svunpklo_s16(v); auto hi16 = svunpkhi_s16(v);
   auto lo32 = svunpklo_s32(lo16); auto hi32 = svunpklo_s32(hi16);
-  auto pg = sve_detail::sve_ptrue<int32_t>();
+  auto pg = details::ptrue<int32_t>();
   return word::reshape(t, svcreate4_f32(
     svcvt_f32_s32_x(pg, lo32), svcvt_f32_s32_x(pg, svunpkhi_s32(lo16)),
     svcvt_f32_s32_x(pg, hi32),
@@ -843,7 +843,7 @@ template <TLV_DECL_TAG(T), TL_IF(T::POW2 == 2), TL_IF(is_any<TypeOf<T>, float32_
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint8_t, T>> v) {
   auto lo16 = svunpklo_u16(v); auto hi16 = svunpkhi_u16(v);
   auto lo32 = svunpklo_u32(lo16); auto hi32 = svunpklo_u32(hi16);
-  auto pg = sve_detail::sve_ptrue<uint32_t>();
+  auto pg = details::ptrue<uint32_t>();
   return word::reshape(t, svcreate4_f32(
     svcvt_f32_u32_x(pg, lo32), svcvt_f32_u32_x(pg, svunpkhi_u32(lo16)),
     svcvt_f32_u32_x(pg, hi32),
@@ -1054,28 +1054,28 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<uint8_t, T>> v) {
 /* float64_t -> float32_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float32_t>), TL_IF(is_any<TypeOf<Ti>, float64_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<float64_t>();
+  auto pg = details::ptrue<float64_t>();
   return svuzp1_f32(svcvt_f32_f64_x(pg, v), svcvt_f32_f64_x(pg, v));
 }
 
 /* float64_t -> int32_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int32_t>), TL_IF(is_any<TypeOf<Ti>, float64_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<float64_t>();
+  auto pg = details::ptrue<float64_t>();
   return svuzp1_s32(svcvt_s32_f64_x(pg, v), svcvt_s32_f64_x(pg, v));
 }
 
 /* float64_t -> uint32_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint32_t>), TL_IF(is_any<TypeOf<Ti>, float64_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<float64_t>();
+  auto pg = details::ptrue<float64_t>();
   return svuzp1_u32(svcvt_u32_f64_x(pg, v), svcvt_u32_f64_x(pg, v));
 }
 
 /* int64_t -> int32_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int32_t>), TL_IF(is_any<TypeOf<Ti>, int64_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<int64_t>();
+  auto pg = details::ptrue<int64_t>();
   auto clamped = svmax_s64_z(pg, svmin_s64_z(pg, v, svdup_s64(INT32_MAX)), svdup_s64(INT32_MIN));
 #if defined(__ARM_FEATURE_SVE2)
   return svuzp1_s32(svqxtnb_s64(clamped), svqxtnb_s64(clamped));
@@ -1088,7 +1088,7 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 /* uint64_t -> uint32_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint32_t>), TL_IF(is_any<TypeOf<Ti>, uint64_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<uint64_t>();
+  auto pg = details::ptrue<uint64_t>();
   auto clamped = svmin_u64_z(pg, v, svdup_u64(UINT32_MAX));
 #if defined(__ARM_FEATURE_SVE2)
   return svuzp1_u32(svqxtnb_u64(clamped), svqxtnb_u64(clamped));
@@ -1101,21 +1101,21 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 /* int64_t -> float32_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float32_t>), TL_IF(is_any<TypeOf<Ti>, int64_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<int64_t>();
+  auto pg = details::ptrue<int64_t>();
   return svuzp1_f32(svcvt_f32_s64_x(pg, v), svcvt_f32_s64_x(pg, v));
 }
 
 /* uint64_t -> float32_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float32_t>), TL_IF(is_any<TypeOf<Ti>, uint64_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<uint64_t>();
+  auto pg = details::ptrue<uint64_t>();
   return svuzp1_f32(svcvt_f32_u64_x(pg, v), svcvt_f32_u64_x(pg, v));
 }
 
 /* uint64_t -> int32_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int32_t>), TL_IF(is_any<TypeOf<Ti>, uint64_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<uint64_t>();
+  auto pg = details::ptrue<uint64_t>();
   auto clamped = svmin_u64_z(pg, v, svdup_u64(INT32_MAX));
   auto u32 = svreinterpret_u32_u64(clamped);
   return svreinterpret_s32_u32(svuzp1_u32(u32, u32));
@@ -1124,7 +1124,7 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 /* int64_t -> uint32_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint32_t>), TL_IF(is_any<TypeOf<Ti>, int64_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<int64_t>();
+  auto pg = details::ptrue<int64_t>();
   auto clamped = svmax_s64_z(pg, svmin_s64_z(pg, v, svdup_s64(UINT32_MAX)), svdup_s64(0));
   auto u32 = svreinterpret_u32_u64(svreinterpret_u64_s64(clamped));
   return svuzp1_u32(u32, u32);
@@ -1133,7 +1133,7 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 /* int32_t -> int16_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int16_t>), TL_IF(is_any<TypeOf<Ti>, int32_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<int32_t>();
+  auto pg = details::ptrue<int32_t>();
   auto clamped = svmax_s32_z(pg, svmin_s32_z(pg, v, svdup_s32(INT16_MAX)), svdup_s32(INT16_MIN));
 #if defined(__ARM_FEATURE_SVE2)
   return svuzp1_s16(svqxtnb_s32(clamped), svqxtnb_s32(clamped));
@@ -1146,7 +1146,7 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 /* uint32_t -> uint16_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint16_t>), TL_IF(is_any<TypeOf<Ti>, uint32_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<uint32_t>();
+  auto pg = details::ptrue<uint32_t>();
   auto clamped = svmin_u32_z(pg, v, svdup_u32(UINT16_MAX));
 #if defined(__ARM_FEATURE_SVE2)
   return svuzp1_u16(svqxtnb_u32(clamped), svqxtnb_u32(clamped));
@@ -1159,7 +1159,7 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 /* int32_t -> uint16_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint16_t>), TL_IF(is_any<TypeOf<Ti>, int32_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<int32_t>();
+  auto pg = details::ptrue<int32_t>();
   auto clamped = svmax_s32_z(pg, svmin_s32_z(pg, v, svdup_s32(UINT16_MAX)), svdup_s32(0));
 #if defined(__ARM_FEATURE_SVE2)
   return svuzp1_u16(svqxtunb_s32(clamped), svqxtunb_s32(clamped));
@@ -1172,7 +1172,7 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 /* uint32_t -> int16_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int16_t>), TL_IF(is_any<TypeOf<Ti>, uint32_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<uint32_t>();
+  auto pg = details::ptrue<uint32_t>();
   auto clamped = svmin_u32_z(pg, v, svdup_u32(INT16_MAX));
   auto u16 = svreinterpret_u16_u32(clamped);
   return svreinterpret_s16_u16(svuzp1_u16(u16, u16));
@@ -1181,7 +1181,7 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 /* float32_t -> float16_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float16_t>), TL_IF(is_any<TypeOf<Ti>, float32_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<float16_t>();
+  auto pg = details::ptrue<float16_t>();
   auto narrowed = svcvt_f16_f32_x(pg, v);
   return svreinterpret_f16_u16(svuzp1_u16(
     svreinterpret_u16_f16(narrowed), svreinterpret_u16_f16(narrowed)));
@@ -1191,12 +1191,12 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, bfloat16_t>), TL_IF(is_any<TypeOf<Ti>, float32_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
 #if defined(__ARM_FEATURE_SVE_BF16)
-  auto pg = sve_detail::sve_ptrue<bfloat16_t>();
+  auto pg = details::ptrue<bfloat16_t>();
   auto tmp = svcvt_bf16_f32_z(pg, v);
   return svreinterpret_bf16_u16(svuzp1_u16(
     svreinterpret_u16_bf16(tmp), svreinterpret_u16_bf16(tmp)));
 #else
-  auto pg = sve_detail::sve_ptrue<float32_t>();
+  auto pg = details::ptrue<float32_t>();
   auto u32 = svlsr_n_u32_x(pg, svreinterpret_u32_f32(v), 16);
   auto u16 = svreinterpret_u16_u32(u32);
   return svreinterpret_bf16_u16(svuzp1_u16(u16, u16));
@@ -1234,7 +1234,7 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 /* int16_t -> int8_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int8_t>), TL_IF(is_any<TypeOf<Ti>, int16_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<int16_t>();
+  auto pg = details::ptrue<int16_t>();
   auto clamped = svmax_s16_z(pg, svmin_s16_z(pg, v, svdup_s16(INT8_MAX)), svdup_s16(INT8_MIN));
 #if defined(__ARM_FEATURE_SVE2)
   return svuzp1_s8(svqxtnb_s16(clamped), svqxtnb_s16(clamped));
@@ -1247,7 +1247,7 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 /* uint16_t -> uint8_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint8_t>), TL_IF(is_any<TypeOf<Ti>, uint16_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<uint16_t>();
+  auto pg = details::ptrue<uint16_t>();
   auto clamped = svmin_u16_z(pg, v, svdup_u16(UINT8_MAX));
 #if defined(__ARM_FEATURE_SVE2)
   return svuzp1_u8(svqxtnb_u16(clamped), svqxtnb_u16(clamped));
@@ -1260,7 +1260,7 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 /* int16_t -> uint8_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, uint8_t>), TL_IF(is_any<TypeOf<Ti>, int16_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<int16_t>();
+  auto pg = details::ptrue<int16_t>();
   auto clamped = svmax_s16_z(pg, svmin_s16_z(pg, v, svdup_s16(UINT8_MAX)), svdup_s16(0));
 #if defined(__ARM_FEATURE_SVE2)
   return svuzp1_u8(svqxtunb_s16(clamped), svqxtunb_s16(clamped));
@@ -1273,7 +1273,7 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 /* uint16_t -> int8_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, int8_t>), TL_IF(is_any<TypeOf<Ti>, uint16_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-  auto pg = sve_detail::sve_ptrue<uint16_t>();
+  auto pg = details::ptrue<uint16_t>();
   auto clamped = svmin_u16_z(pg, v, svdup_u16(INT8_MAX));
   auto u8 = svreinterpret_u8_u16(clamped);
   return svreinterpret_s8_u8(svuzp1_u8(u8, u8));

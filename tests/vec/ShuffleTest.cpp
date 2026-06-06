@@ -83,7 +83,11 @@ template <typename T>
 
 using Types4  = ::testing::Types<float32_t, int32_t, uint32_t>;
 using Types2  = ::testing::Types<float64_t, int64_t, uint64_t>;
-using Types8  = ::testing::Types<int16_t, uint16_t>;
+using Types8  = ::testing::Types<int16_t, uint16_t, vecops::float16_t
+#if defined(__ARM_FEATURE_BF16) || defined(ARCH_X86_FAMILY)
+    , vecops::bfloat16_t
+#endif
+>;
 using Types16 = ::testing::Types<int8_t, uint8_t>;
 
 using ShufTypes = ::testing::Types<
@@ -1136,6 +1140,39 @@ TYPED_TEST(LocalShufCT2, MultiWord_Swap) {
 #endif
 }
 
+TYPED_TEST(LocalShufCT8, MultiWord_Identity) {
+#ifndef CPU_CAPABILITY_GENERIC
+  using T = TypeParam;
+  auto& t = this->t2;
+  nint_t N = this->N2;
+
+  auto data = std::make_unique<T[]>(N);
+  test_utils::fill_seq(data.get(), N);
+  auto v = loadu(t, data.get());
+  auto r = local_shuf<7, 6, 5, 4, 3, 2, 1, 0>(v);
+  for (nint_t i = 0; i < N; ++i)
+    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
+#endif
+}
+
+TYPED_TEST(LocalShufCT8, MultiWord_Reverse) {
+#ifndef CPU_CAPABILITY_GENERIC
+  using T = TypeParam;
+  constexpr auto M = 8;
+  auto& t = this->t2;
+  nint_t N = this->N2;
+
+  auto data = std::make_unique<T[]>(N);
+  test_utils::fill_seq(data.get(), N);
+  auto v = loadu(t, data.get());
+  auto r = local_shuf<0, 1, 2, 3, 4, 5, 6, 7>(v);
+  for (nint_t i = 0; i < N; ++i) {
+    auto lane = i / M, pos = i % M;
+    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
+  }
+#endif
+}
+
 // ============================================================================
 // Multi-word local_shuf with vector indices
 // ============================================================================
@@ -1306,6 +1343,146 @@ TYPED_TEST(LocalShufCT2, MultiWord_ScalarSwap) {
 }
 
 // ============================================================================
+// 4-Word Vector Tests (ScalableTag<T, 2>)
+// ============================================================================
+
+TYPED_TEST(VecShuffleAllTest, UpperLower_4Word) {
+#ifndef CPU_CAPABILITY_GENERIC
+  using T = typename TestFixture::Type;
+  ScalableTag<T, 2> t4;
+  nint_t N = size(t4);
+  if (N < 2) return;
+  Half<std::remove_reference_t<decltype(t4)>> th;
+
+  auto data = std::make_unique<T[]>(N);
+  test_utils::fill_seq(data.get(), N);
+  auto v = loadu(t4, data.get());
+
+  auto lo = lower(t4, v);
+  auto hi = upper(t4, v);
+
+  for (nint_t i = 0; i < N / 2; ++i)
+    EXPECT_EQ(get(th, lo, i), data[i]) << "lower i=" << i;
+  for (nint_t i = 0; i < N / 2; ++i)
+    EXPECT_EQ(get(th, hi, i), data[i + N / 2]) << "upper i=" << i;
+#endif
+}
+
+TYPED_TEST(VecShuffleAllTest, Concat_4Word) {
+#ifndef CPU_CAPABILITY_GENERIC
+  using T = typename TestFixture::Type;
+  ScalableTag<T, 2> t4;
+  nint_t N = size(t4);
+  if (N < 2) return;
+  Half<std::remove_reference_t<decltype(t4)>> th;
+
+  auto data_lo = std::make_unique<T[]>(N / 2);
+  auto data_hi = std::make_unique<T[]>(N / 2);
+  test_utils::fill_seq(data_lo.get(), N / 2);
+  for (nint_t i = 0; i < N / 2; ++i)
+    data_hi[i] = static_cast<T>(data_lo[i]) + T(N / 2);
+
+  auto v_lo = loadu(th, data_lo.get());
+  auto v_hi = loadu(th, data_hi.get());
+  auto v = concat(t4, v_lo, v_hi);
+
+  for (nint_t i = 0; i < N / 2; ++i)
+    EXPECT_EQ(get(t4, v, i), data_lo[i]) << "lower i=" << i;
+  for (nint_t i = 0; i < N / 2; ++i)
+    EXPECT_EQ(get(t4, v, i + N / 2), data_hi[i]) << "upper i=" << i;
+#endif
+}
+
+TYPED_TEST(VecShuffleAllTest, Interleave_4Word) {
+#ifndef CPU_CAPABILITY_GENERIC
+  using T = typename TestFixture::Type;
+  ScalableTag<T, 2> t4;
+  nint_t N = size(t4);
+  if (N < 2) return;
+  Half<std::remove_reference_t<decltype(t4)>> th;
+
+  auto data_a = std::make_unique<T[]>(N / 2);
+  auto data_b = std::make_unique<T[]>(N / 2);
+  test_utils::fill_seq(data_a.get(), N / 2);
+  for (nint_t i = 0; i < N / 2; ++i)
+    data_b[i] = static_cast<T>(data_a[i]) + T(N / 2);
+
+  auto a = loadu(th, data_a.get());
+  auto b = loadu(th, data_b.get());
+  auto v = interleave(t4, a, b);
+
+  for (nint_t i = 0; i < N / 2; ++i) {
+    EXPECT_EQ(get(t4, v, 2 * i), data_a[i]) << "a i=" << i;
+    EXPECT_EQ(get(t4, v, 2 * i + 1), data_b[i]) << "b i=" << i;
+  }
+#endif
+}
+
+TYPED_TEST(VecShuffleAllTest, LocalInterleave_4Word) {
+#ifndef CPU_CAPABILITY_GENERIC
+  using T = typename TestFixture::Type;
+  ScalableTag<T, 2> t4;
+  nint_t N = size(t4);
+  constexpr auto M = test_utils::lane_size<T>();
+  if (N < M) return;
+
+  auto data_a = std::make_unique<T[]>(N);
+  auto data_b = std::make_unique<T[]>(N);
+  test_utils::fill_seq(data_a.get(), N);
+  for (nint_t i = 0; i < N; ++i)
+    data_b[i] = static_cast<T>(data_a[i]) + T(N);
+
+  auto a = loadu(t4, data_a.get());
+  auto b = loadu(t4, data_b.get());
+
+  auto lo = local_interleave_lower(a, b);
+  auto hi = local_interleave_upper(a, b);
+
+  for (nint_t lane = 0; lane < N / M; ++lane) {
+    for (nint_t i = 0; i < M / 2; ++i) {
+      nint_t idx = lane * M + i;
+      nint_t out_idx = lane * M + 2 * i;
+      EXPECT_EQ(get(t4, lo, out_idx), data_a[idx])
+          << "lower a lane=" << lane << " i=" << i;
+      EXPECT_EQ(get(t4, lo, out_idx + 1), data_b[idx])
+          << "lower b lane=" << lane << " i=" << i;
+    }
+  }
+  for (nint_t lane = 0; lane < N / M; ++lane) {
+    for (nint_t i = 0; i < M / 2; ++i) {
+      nint_t idx = lane * M + M / 2 + i;
+      nint_t out_idx = lane * M + 2 * i;
+      EXPECT_EQ(get(t4, hi, out_idx), data_a[idx])
+          << "upper a lane=" << lane << " i=" << i;
+      EXPECT_EQ(get(t4, hi, out_idx + 1), data_b[idx])
+          << "upper b lane=" << lane << " i=" << i;
+    }
+  }
+#endif
+}
+
+TYPED_TEST(VecShuffleTest, Shuf_4Word_Identity) {
+#ifndef CPU_CAPABILITY_GENERIC
+  using T = typename TestFixture::Type;
+  using I = test_utils::shuffle_idx_t<T>;
+  ScalableTag<T, 2> t4;
+  nint_t N = size(t4);
+  nint_t ws = this->full_size;
+  ScalableTag<I, 2> ti;
+
+  auto data = std::make_unique<T[]>(N);
+  auto idx = std::make_unique<I[]>(N);
+  test_utils::fill_seq(data.get(), N);
+  test_utils::fill_shuf_identity(idx.get(), N, ws);
+  auto v = loadu(t4, data.get());
+  auto vi = loadu(ti, idx.get());
+  auto r = shuf(v, vi);
+  for (nint_t i = 0; i < N; ++i)
+    EXPECT_EQ(get(t4, r, i), data[i]) << "i=" << i;
+#endif
+}
+
+// ============================================================================
 // Corner cases
 // ============================================================================
 
@@ -1369,6 +1546,94 @@ TEST(ShufCornerCase, BroadcastFirst) {
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[0]) << "i=" << i;
 }
+
+TEST(ShufCornerCase, Float16_LocalShufVI_Identity) {
+  using T = vecops::float16_t;
+  using I = test_utils::shuffle_idx_t<T>;
+  constexpr auto M = test_utils::lane_size<T>();
+  ScalableTag<T, 0> t;
+  ScalableTag<I, 0> ti;
+  nint_t N = size(t);
+  if (N < M) return;
+
+  auto data = std::make_unique<T[]>(N);
+  auto idx = std::make_unique<I[]>(N);
+  test_utils::fill_seq(data.get(), N);
+  test_utils::fill_local_identity(idx.get(), N);
+  auto v = loadu(t, data.get());
+  auto vi = loadu(ti, idx.get());
+  auto r = local_shuf(v, vi);
+  for (nint_t i = 0; i < N; ++i)
+    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
+}
+
+TEST(ShufCornerCase, Float16_LocalShufVI_Reverse) {
+  using T = vecops::float16_t;
+  using I = test_utils::shuffle_idx_t<T>;
+  constexpr auto M = test_utils::lane_size<T>();
+  ScalableTag<T, 0> t;
+  ScalableTag<I, 0> ti;
+  nint_t N = size(t);
+  if (N < M) return;
+
+  auto data = std::make_unique<T[]>(N);
+  auto idx = std::make_unique<I[]>(N);
+  test_utils::fill_seq(data.get(), N);
+  for (nint_t i = 0; i < N; ++i)
+    idx[i] = static_cast<I>(M - 1 - (i % M));
+  auto v = loadu(t, data.get());
+  auto vi = loadu(ti, idx.get());
+  auto r = local_shuf(v, vi);
+  for (nint_t i = 0; i < N; ++i) {
+    auto lane = i / M, pos = i % M;
+    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
+  }
+}
+
+#if defined(__ARM_FEATURE_BF16) || defined(ARCH_X86_FAMILY)
+TEST(ShufCornerCase, BFloat16_LocalShufVI_Identity) {
+  using T = vecops::bfloat16_t;
+  using I = test_utils::shuffle_idx_t<T>;
+  constexpr auto M = test_utils::lane_size<T>();
+  ScalableTag<T, 0> t;
+  ScalableTag<I, 0> ti;
+  nint_t N = size(t);
+  if (N < M) return;
+
+  auto data = std::make_unique<T[]>(N);
+  auto idx = std::make_unique<I[]>(N);
+  test_utils::fill_seq(data.get(), N);
+  test_utils::fill_local_identity(idx.get(), N);
+  auto v = loadu(t, data.get());
+  auto vi = loadu(ti, idx.get());
+  auto r = local_shuf(v, vi);
+  for (nint_t i = 0; i < N; ++i)
+    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
+}
+
+TEST(ShufCornerCase, BFloat16_LocalShufVI_Reverse) {
+  using T = vecops::bfloat16_t;
+  using I = test_utils::shuffle_idx_t<T>;
+  constexpr auto M = test_utils::lane_size<T>();
+  ScalableTag<T, 0> t;
+  ScalableTag<I, 0> ti;
+  nint_t N = size(t);
+  if (N < M) return;
+
+  auto data = std::make_unique<T[]>(N);
+  auto idx = std::make_unique<I[]>(N);
+  test_utils::fill_seq(data.get(), N);
+  for (nint_t i = 0; i < N; ++i)
+    idx[i] = static_cast<I>(M - 1 - (i % M));
+  auto v = loadu(t, data.get());
+  auto vi = loadu(ti, idx.get());
+  auto r = local_shuf(v, vi);
+  for (nint_t i = 0; i < N; ++i) {
+    auto lane = i / M, pos = i % M;
+    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
+  }
+}
+#endif
 
 // ============================================================================
 // Combined roundtrip tests

@@ -18,29 +18,29 @@
 namespace vecops::vec::CPU_CAPABILITY {
 namespace word {
 
-namespace sve_detail {
+namespace details {
 
 template <typename T> VECOPS_VFUNC constexpr nint_t max_elms() { return SVE::max_word_count<T>; }
-template <typename T> VECOPS_VFUNC nint_t sve_cnt() {
+template <typename T> VECOPS_VFUNC nint_t lane_count() {
   if constexpr (sizeof(T) == 1) return svcntb();
   else if constexpr (sizeof(T) == 2) return svcnth();
   else if constexpr (sizeof(T) == 4) return svcntw();
   else return svcntd();
 }
-template <typename T> VECOPS_VFUNC svbool_t sve_ptrue() {
+template <typename T> VECOPS_VFUNC svbool_t ptrue() {
   if constexpr (sizeof(T) == 1) return svptrue_b8();
   else if constexpr (sizeof(T) == 2) return svptrue_b16();
   else if constexpr (sizeof(T) == 4) return svptrue_b32();
   else return svptrue_b64();
 }
-template <typename T> VECOPS_VFUNC svbool_t sve_single_mask(nint_t idx) {
+template <typename T> VECOPS_VFUNC svbool_t single_mask(nint_t idx) {
   if constexpr (sizeof(T) == 1)      return svcmpeq_n_s8(svptrue_b8(), svindex_s8(0, 1), (int8_t)idx);
   else if constexpr (sizeof(T) == 2) return svcmpeq_n_s16(svptrue_b16(), svindex_s16(0, 1), (int16_t)idx);
   else if constexpr (sizeof(T) == 4) return svcmpeq_n_s32(svptrue_b32(), svindex_s32(0, 1), (int32_t)idx);
   else return svcmpeq_n_s64(svptrue_b64(), svindex_s64(0, 1), (int64_t)idx);
 }
 
-template <typename E> VECOPS_VFUNC svuint8_t sve_to_u8(auto v) {
+template <typename E> VECOPS_VFUNC svuint8_t to_u8(auto v) {
   if constexpr (std::is_same_v<E, float32_t>) return svreinterpret_u8_f32(v);
   else if constexpr (std::is_same_v<E, float64_t>) return svreinterpret_u8_f64(v);
   else if constexpr (std::is_same_v<E, int8_t>)  return svreinterpret_u8_s8(v);
@@ -57,7 +57,7 @@ template <typename E> VECOPS_VFUNC svuint8_t sve_to_u8(auto v) {
   else return svreinterpret_u8_u64(v);
 }
 
-template <typename E> VECOPS_VFUNC auto sve_from_u8(svuint8_t v) {
+template <typename E> VECOPS_VFUNC auto from_u8(svuint8_t v) {
   if constexpr (std::is_same_v<E, float32_t>) return svreinterpret_f32_u8(v);
   else if constexpr (std::is_same_v<E, float64_t>) return svreinterpret_f64_u8(v);
   else if constexpr (std::is_same_v<E, int8_t>)  return svreinterpret_s8_u8(v);
@@ -75,7 +75,7 @@ template <typename E> VECOPS_VFUNC auto sve_from_u8(svuint8_t v) {
 }
 
 // ---- u32 canonical type for bitcast (x86-style, prevents combinatorial explosion) ----
-template <typename E> VECOPS_VFUNC svuint32_t sve_to_u32(auto v) {
+template <typename E> VECOPS_VFUNC svuint32_t to_u32(auto v) {
   if constexpr (std::is_same_v<E, float32_t>) return svreinterpret_u32_f32(v);
   else if constexpr (std::is_same_v<E, float64_t>) return svreinterpret_u32_f64(v);
   else if constexpr (std::is_same_v<E, int8_t>)  return svreinterpret_u32_s8(v);
@@ -92,7 +92,7 @@ template <typename E> VECOPS_VFUNC svuint32_t sve_to_u32(auto v) {
   else return svreinterpret_u32_u64(v);
 }
 
-template <typename E> VECOPS_VFUNC auto sve_from_u32(svuint32_t v) {
+template <typename E> VECOPS_VFUNC auto from_u32(svuint32_t v) {
   if constexpr (std::is_same_v<E, float32_t>) return svreinterpret_f32_u32(v);
   else if constexpr (std::is_same_v<E, float64_t>) return svreinterpret_f64_u32(v);
   else if constexpr (std::is_same_v<E, int8_t>)  return svreinterpret_s8_u32(v);
@@ -111,7 +111,7 @@ template <typename E> VECOPS_VFUNC auto sve_from_u32(svuint32_t v) {
 
 // ---- Typed intrinsic dispatchers ----
 template <typename E, typename V, typename I>
-VECOPS_VFUNC auto sve_tbl(V v, I idx) {
+VECOPS_VFUNC auto table_lookup(V v, I idx) {
   if constexpr (std::is_same_v<E, float32_t>) return svtbl_f32(v, idx);
   else if constexpr (std::is_same_v<E, float64_t>) return svtbl_f64(v, idx);
   else if constexpr (std::is_same_v<E, int8_t>)    return svtbl_s8(v, idx);
@@ -129,7 +129,7 @@ VECOPS_VFUNC auto sve_tbl(V v, I idx) {
 }
 
 template <typename E, typename V>
-VECOPS_VFUNC auto sve_sel(svbool_t m, V v1, V v0) {
+VECOPS_VFUNC auto select(svbool_t m, V v1, V v0) {
   if constexpr (std::is_same_v<E, float32_t>) return svsel_f32(m, v1, v0);
   else if constexpr (std::is_same_v<E, float64_t>) return svsel_f64(m, v1, v0);
   else if constexpr (std::is_same_v<E, int8_t>)    return svsel_s8(m, v1, v0);
@@ -147,7 +147,7 @@ VECOPS_VFUNC auto sve_sel(svbool_t m, V v1, V v0) {
 }
 
 template <typename E>
-VECOPS_VFUNC auto sve_dup_n(decltype(E()) value) {
+VECOPS_VFUNC auto dup_n(decltype(E()) value) {
   if constexpr (std::is_same_v<E, float32_t>) return svdup_n_f32(value);
   else if constexpr (std::is_same_v<E, float64_t>) return svdup_n_f64(value);
   else if constexpr (std::is_same_v<E, int8_t>)    return svdup_n_s8(value);
@@ -165,7 +165,7 @@ VECOPS_VFUNC auto sve_dup_n(decltype(E()) value) {
 }
 
 template <typename E, typename V>
-VECOPS_VFUNC auto sve_lastb(svbool_t pg, V v) {
+VECOPS_VFUNC auto lastb(svbool_t pg, V v) {
   if constexpr (std::is_same_v<E, float32_t>) return svlastb_f32(pg, v);
   else if constexpr (std::is_same_v<E, float64_t>) return svlastb_f64(pg, v);
   else if constexpr (std::is_same_v<E, int8_t>)    return svlastb_s8(pg, v);
@@ -183,7 +183,7 @@ VECOPS_VFUNC auto sve_lastb(svbool_t pg, V v) {
 }
 
 template <typename E, typename V>
-VECOPS_VFUNC auto sve_zip1(V a, V b) {
+VECOPS_VFUNC auto zip1(V a, V b) {
   if constexpr (std::is_same_v<E, float32_t>) return svzip1_f32(a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svzip1_f64(a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svzip1_s8(a, b);
@@ -201,7 +201,7 @@ VECOPS_VFUNC auto sve_zip1(V a, V b) {
 }
 
 template <typename E, typename V>
-VECOPS_VFUNC auto sve_uzp1(V a, V b) {
+VECOPS_VFUNC auto uzp1(V a, V b) {
   if constexpr (std::is_same_v<E, float32_t>) return svuzp1_f32(a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svuzp1_f64(a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svuzp1_s8(a, b);
@@ -218,7 +218,7 @@ VECOPS_VFUNC auto sve_uzp1(V a, V b) {
   else return svuzp1_u64(a, b);
 }
 template <typename E, typename V>
-VECOPS_VFUNC auto sve_uzp2(V a, V b) {
+VECOPS_VFUNC auto uzp2(V a, V b) {
   if constexpr (std::is_same_v<E, float32_t>) return svuzp2_f32(a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svuzp2_f64(a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svuzp2_s8(a, b);
@@ -236,7 +236,7 @@ VECOPS_VFUNC auto sve_uzp2(V a, V b) {
 }
 
 template <typename E, typename V>
-VECOPS_VFUNC auto sve_trn1(V a, V b) {
+VECOPS_VFUNC auto trn1(V a, V b) {
   if constexpr (std::is_same_v<E, float32_t>) return svtrn1_f32(a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svtrn1_f64(a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svtrn1_s8(a, b);
@@ -253,7 +253,7 @@ VECOPS_VFUNC auto sve_trn1(V a, V b) {
   else return svtrn1_u64(a, b);
 }
 template <typename E, typename V>
-VECOPS_VFUNC auto sve_trn2(V a, V b) {
+VECOPS_VFUNC auto trn2(V a, V b) {
   if constexpr (std::is_same_v<E, float32_t>) return svtrn2_f32(a, b);
   else if constexpr (std::is_same_v<E, float64_t>) return svtrn2_f64(a, b);
   else if constexpr (std::is_same_v<E, int8_t>)    return svtrn2_s8(a, b);
@@ -271,7 +271,7 @@ VECOPS_VFUNC auto sve_trn2(V a, V b) {
 }
 
 template <typename E, typename V>
-VECOPS_VFUNC auto sve_splice(svbool_t pg, V lo, V hi) {
+VECOPS_VFUNC auto splice(svbool_t pg, V lo, V hi) {
   if constexpr (std::is_same_v<E, float32_t>) return svsplice_f32(pg, lo, hi);
   else if constexpr (std::is_same_v<E, float64_t>) return svsplice_f64(pg, lo, hi);
   else if constexpr (std::is_same_v<E, int8_t>)    return svsplice_s8(pg, lo, hi);
@@ -288,7 +288,7 @@ VECOPS_VFUNC auto sve_splice(svbool_t pg, V lo, V hi) {
   else return svsplice_u64(pg, lo, hi);
 }
 
-}  // namespace sve_detail
+}  // namespace details
 
 /* === mfill / mwhilelt / mwhilege (used before fill_with_n) === */
 template <TLV_DECL_TAG(T)>
@@ -403,7 +403,7 @@ VECOPS_VFUNC Vec<T> zeros(T t) { return word::fill(t, TypeOf<T>()); }
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Mask<T> make_mask(T t) {
   if constexpr (T::POW2 == 0) {
-    return sve_detail::sve_ptrue<TypeOf<T>>();
+    return details::ptrue<TypeOf<T>>();
   } else {
     return word::mwhilelt(t, 0, size(t));
   }
@@ -421,7 +421,7 @@ template <TLV_DECL_MASK(M)> VECOPS_VFUNC M bit_not(M a) { return svnot_b_z(svptr
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC TypeOf<T> get(V v, nint_t idx) {
   using E = TypeOf<T>;
-  auto pg = sve_detail::sve_single_mask<E>(idx);
+  auto pg = details::single_mask<E>(idx);
   if constexpr (std::is_same_v<E, float32_t>)      return svlastb_f32(pg, v);
   else if constexpr (std::is_same_v<E, float64_t>) return svlastb_f64(pg, v);
   else if constexpr (std::is_same_v<E, int8_t>)    return svlastb_s8(pg, v);
@@ -441,7 +441,7 @@ VECOPS_VFUNC TypeOf<T> get(V v, nint_t idx) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V set(V v, nint_t idx, TypeOf<T> x) {
   using E = TypeOf<T>;
-  auto pg = sve_detail::sve_single_mask<E>(idx);
+  auto pg = details::single_mask<E>(idx);
   auto bc = word::fill(T(), x);
   if constexpr (std::is_same_v<E, float32_t>)      return svsel_f32(pg, bc, v);
   else if constexpr (std::is_same_v<E, float64_t>) return svsel_f64(pg, bc, v);
@@ -462,16 +462,16 @@ VECOPS_VFUNC V set(V v, nint_t idx, TypeOf<T> x) {
 template <TLV_DECL_TAG(TT), TLV_DECL_MASK(M)>
 VECOPS_VFUNC bool get(TT, M m, nint_t idx) {
   using E = TypeOf<TT>;
-  auto pg = sve_detail::sve_single_mask<E>(idx);
-  auto at = sve_detail::sve_ptrue<E>();
+  auto pg = details::single_mask<E>(idx);
+  auto at = details::ptrue<E>();
   return svptest_any(at, svand_b_z(at, m, pg));
 }
 
 template <TLV_DECL_TAG(TT), TLV_DECL_MASK(M)>
 VECOPS_VFUNC M set(TT, M m, nint_t idx, bool x) {
   using E = TypeOf<TT>;
-  auto pg = sve_detail::sve_single_mask<E>(idx);
-  auto at = sve_detail::sve_ptrue<E>();
+  auto pg = details::single_mask<E>(idx);
+  auto at = details::ptrue<E>();
   return x ? svorr_b_z(at, m, pg) : svbic_b_z(at, m, pg);
 }
 
@@ -481,7 +481,7 @@ template <typename To, typename V, typename Ti = Vec2Tag<V>,
 VECOPS_VFUNC Vec<To> bitcast(To, V v) {
   using Eo = TypeOf<To>; using Ei = TypeOf<Ti>;
   if constexpr (std::is_same_v<Ti, To>) return v;
-  return sve_detail::sve_from_u32<Eo>(sve_detail::sve_to_u32<Ei>(v));
+  return details::from_u32<Eo>(details::to_u32<Ei>(v));
 }
 
 // used for internal API
@@ -508,16 +508,16 @@ VECOPS_VFUNC V shuf(V v, Vec<Rebind<Index<TypeOf<T>>, T>> vi) {
   using IdxT = Index<E>;
   if constexpr (std::is_same_v<IdxT, int8_t>) {
     auto uvi = svreinterpret_u8_s8(vi);
-    return sve_detail::sve_tbl<E, V, decltype(uvi)>(v, uvi);
+    return details::table_lookup<E, V, decltype(uvi)>(v, uvi);
   } else if constexpr (std::is_same_v<IdxT, int16_t>) {
     auto uvi = svreinterpret_u16_s16(vi);
-    return sve_detail::sve_tbl<E, V, decltype(uvi)>(v, uvi);
+    return details::table_lookup<E, V, decltype(uvi)>(v, uvi);
   } else if constexpr (std::is_same_v<IdxT, int32_t>) {
     auto uvi = svreinterpret_u32_s32(vi);
-    return sve_detail::sve_tbl<E, V, decltype(uvi)>(v, uvi);
+    return details::table_lookup<E, V, decltype(uvi)>(v, uvi);
   } else {
     auto uvi = svreinterpret_u64_s64(vi);
-    return sve_detail::sve_tbl<E, V, decltype(uvi)>(v, uvi);
+    return details::table_lookup<E, V, decltype(uvi)>(v, uvi);
   }
 }
 
@@ -530,7 +530,7 @@ VECOPS_VFUNC V local_shuf(V v, Vec<Rebind<Index<TypeOf<T>>, T>> vi) {
 
   // Use unsigned for shifts (logical shift right)
   using UIdx = std::make_unsigned_t<IdxT>;
-  auto pg = sve_detail::sve_ptrue<IdxT>();
+  auto pg = details::ptrue<IdxT>();
 
   // Generate per-element group base: (index >> shift) << shift
   auto ibase = Vec<decltype(ti)>{};
@@ -625,7 +625,7 @@ template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 1)
 VECOPS_VFUNC V upper(T t, Vec<T> v) {
   using E = TypeOf<T>; nint_t hn = word_size(t)/2;
   auto lo = word::mwhilelt(t, 0, hn);
-  auto up = svnot_b_z(sve_detail::sve_ptrue<E>(), lo);
+  auto up = svnot_b_z(details::ptrue<E>(), lo);
   if constexpr (std::is_same_v<E, float32_t>)      return svsplice_f32(up, v, v);
   else if constexpr (std::is_same_v<E, float64_t>) return svsplice_f64(up, v, v);
   else if constexpr (std::is_same_v<E, int8_t>)     return svsplice_s8(up, v, v);
@@ -826,11 +826,11 @@ VECOPS_VFUNC V interleave_odd(V a, V b) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V local_interleave_lower(V a, V b) {
   using E = TypeOf<T>;
-  auto a8 = sve_detail::sve_to_u8<E>(a), b8 = sve_detail::sve_to_u8<E>(b);
+  auto a8 = details::to_u8<E>(a), b8 = details::to_u8<E>(b);
   auto a64 = svreinterpret_u64_u8(a8), b64 = svreinterpret_u64_u8(b8);
   auto alo = svuzp1_u64(a64, a64), blo = svuzp1_u64(b64, b64);
-  auto aw = sve_detail::sve_from_u8<E>(svreinterpret_u8_u64(alo));
-  auto bw = sve_detail::sve_from_u8<E>(svreinterpret_u8_u64(blo));
+  auto aw = details::from_u8<E>(svreinterpret_u8_u64(alo));
+  auto bw = details::from_u8<E>(svreinterpret_u8_u64(blo));
   if constexpr (std::is_same_v<E, float32_t>)      return svzip1_f32(aw, bw);
   else if constexpr (std::is_same_v<E, float64_t>) return svzip1_f64(aw, bw);
   else if constexpr (std::is_same_v<E, int8_t>)     return svzip1_s8(aw, bw);
@@ -850,11 +850,11 @@ VECOPS_VFUNC V local_interleave_lower(V a, V b) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V local_interleave_upper(V a, V b) {
   using E = TypeOf<T>;
-  auto a8 = sve_detail::sve_to_u8<E>(a), b8 = sve_detail::sve_to_u8<E>(b);
+  auto a8 = details::to_u8<E>(a), b8 = details::to_u8<E>(b);
   auto a64 = svreinterpret_u64_u8(a8), b64 = svreinterpret_u64_u8(b8);
   auto ahi = svuzp2_u64(a64, a64), bhi = svuzp2_u64(b64, b64);
-  auto aw = sve_detail::sve_from_u8<E>(svreinterpret_u8_u64(ahi));
-  auto bw = sve_detail::sve_from_u8<E>(svreinterpret_u8_u64(bhi));
+  auto aw = details::from_u8<E>(svreinterpret_u8_u64(ahi));
+  auto bw = details::from_u8<E>(svreinterpret_u8_u64(bhi));
   if constexpr (std::is_same_v<E, float32_t>)      return svzip1_f32(aw, bw);
   else if constexpr (std::is_same_v<E, float64_t>) return svzip1_f64(aw, bw);
   else if constexpr (std::is_same_v<E, int8_t>)     return svzip1_s8(aw, bw);

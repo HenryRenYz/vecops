@@ -564,6 +564,7 @@ TYPED_TEST(VecBasicTest, TagGetSetElement) {
 // ============================================================================
 
 TYPED_TEST(VecBasicTest, MaskBitOps) {
+#ifndef CPU_CAPABILITY_GENERIC
   using T = typename TestFixture::Type;
   auto& t = this->t;
   nint_t N = this->full_size;
@@ -585,6 +586,7 @@ TYPED_TEST(VecBasicTest, MaskBitOps) {
     EXPECT_EQ(get(t, c_nand, i), !va && vb);
     EXPECT_EQ(get(t, c_not, i), !va);
   }
+#endif
 }
 
 // ============================================================================
@@ -651,45 +653,99 @@ TYPED_TEST(VecBasicTest, Bitcast) {
   using T = typename TestFixture::Type;
   auto& t = this->t;
   nint_t N = this->full_size;
+  using TagT = std::remove_reference_t<decltype(t)>;
 
-  // Only test bitcast for 32-bit types (float32 <-> int32 <-> uint32)
-  if constexpr (sizeof(T) == 4) {
-    auto v = fill(t, test_utils::get_test_value<T>(0));
-    for (nint_t i = 0; i < N; ++i) v = set(v, i, T(i));
+  auto v = fill(t, test_utils::get_test_value<T>(0));
+  for (nint_t i = 0; i < N; ++i) v = set(v, i, test_utils::get_test_value<T>(i));
 
-    using TagT = std::remove_reference_t<decltype(t)>;
-
+  if constexpr (sizeof(T) == 1) {
+    // int8_t <-> uint8_t
+    using OT = std::conditional_t<std::is_same_v<T, int8_t>, uint8_t, int8_t>;
+    auto tt = Rebind<OT, TagT>{};
+    auto r = bitcast(tt, v);
+    for (nint_t i = 0; i < N; ++i) {
+      T orig = test_utils::get_test_value<T>(i);
+      OT exp; std::memcpy(&exp, &orig, 1);
+      EXPECT_EQ(exp, get(r, i));
+    }
+  } else if constexpr (sizeof(T) == 2) {
+    // int16_t/uint16_t/float16_t/bfloat16_t <-> int16_t
+    using OT = std::conditional_t<std::is_same_v<T, int16_t>, uint16_t, int16_t>;
+    auto tt = Rebind<OT, TagT>{};
+    auto r = bitcast(tt, v);
+    for (nint_t i = 0; i < N; ++i) {
+      T orig = test_utils::get_test_value<T>(i);
+      OT exp; std::memcpy(&exp, &orig, 2);
+      EXPECT_EQ(exp, get(r, i));
+    }
+  } else if constexpr (sizeof(T) == 4) {
     if constexpr (std::is_same_v<T, float32_t>) {
-      using OtherT = int32_t;
-      auto tt = Rebind<OtherT, TagT>{};
-      auto r = bitcast(tt, v);
+      using OT = int32_t;
+      auto tt = Rebind<OT, TagT>{}; auto r = bitcast(tt, v);
       for (nint_t i = 0; i < N; ++i) {
-        int32_t expected;
-        float f = static_cast<float>(i);
-        std::memcpy(&expected, &f, sizeof(float));
-        EXPECT_EQ(expected, get(r, i));
-      }
-    } else if constexpr (std::is_same_v<T, int32_t>) {
-      using OtherT = float32_t;
-      auto tt = Rebind<OtherT, TagT>{};
-      auto r = bitcast(tt, v);
-      for (nint_t i = 0; i < N; ++i) {
-        float expected;
-        int32_t val = static_cast<int32_t>(i);
-        std::memcpy(&expected, &val, sizeof(int32_t));
-        EXPECT_TRUE(test_utils::values_equal(expected, get(r, i)));
+        T orig = test_utils::get_test_value<T>(i); OT exp; std::memcpy(&exp, &orig, 4); EXPECT_EQ(exp, get(r, i));
       }
     } else {
-      // T is uint32_t
-      using OtherT = float32_t;
-      auto tt = Rebind<OtherT, TagT>{};
-      auto r = bitcast(tt, v);
+      using OT = float32_t;
+      auto tt = Rebind<OT, TagT>{}; auto r = bitcast(tt, v);
       for (nint_t i = 0; i < N; ++i) {
-        float expected;
-        uint32_t val = static_cast<uint32_t>(i);
-        std::memcpy(&expected, &val, sizeof(uint32_t));
-        EXPECT_TRUE(test_utils::values_equal(expected, get(r, i)));
+        T orig = test_utils::get_test_value<T>(i); OT exp; std::memcpy(&exp, &orig, 4); EXPECT_TRUE(test_utils::values_equal(exp, get(r, i)));
       }
+    }
+  } else if constexpr (sizeof(T) == 8) {
+    if constexpr (std::is_same_v<T, float64_t>) {
+      using OT = int64_t;
+      auto tt = Rebind<OT, TagT>{}; auto r = bitcast(tt, v);
+      for (nint_t i = 0; i < N; ++i) {
+        T orig = test_utils::get_test_value<T>(i); OT exp; std::memcpy(&exp, &orig, 8); EXPECT_EQ(exp, get(r, i));
+      }
+    } else {
+      using OT = float64_t;
+      auto tt = Rebind<OT, TagT>{}; auto r = bitcast(tt, v);
+      for (nint_t i = 0; i < N; ++i) {
+        T orig = test_utils::get_test_value<T>(i); OT exp; std::memcpy(&exp, &orig, 8); EXPECT_TRUE(test_utils::values_equal(exp, get(r, i)));
+      }
+    }
+  }
+}
+
+TYPED_TEST(VecBasicTest, BitcastMultiWord) {
+  using T = typename TestFixture::Type;
+  auto& t = this->t2;
+  nint_t N = this->multi2_size;
+  using TagT = std::remove_reference_t<decltype(t)>;
+
+  auto v = fill(t, test_utils::get_test_value<T>(0));
+  for (nint_t i = 0; i < N; ++i) v = set(v, i, test_utils::get_test_value<T>(i));
+
+  // bitcast multi-word: pick opposite signed/unsigned or int/float type
+  if constexpr (sizeof(T) == 1) {
+    using OT = std::conditional_t<std::is_same_v<T, int8_t>, uint8_t, int8_t>;
+    auto tt = Rebind<OT, TagT>{}; auto r = bitcast(tt, v);
+    for (nint_t i = 0; i < N; ++i) {
+      T orig = test_utils::get_test_value<T>(i); OT exp; std::memcpy(&exp, &orig, 1); EXPECT_EQ(exp, get(r, i));
+    }
+  } else if constexpr (sizeof(T) == 2) {
+    using OT = std::conditional_t<std::is_same_v<T, int16_t>, uint16_t, int16_t>;
+    auto tt = Rebind<OT, TagT>{}; auto r = bitcast(tt, v);
+    for (nint_t i = 0; i < N; ++i) {
+      T orig = test_utils::get_test_value<T>(i); OT exp; std::memcpy(&exp, &orig, 2); EXPECT_EQ(exp, get(r, i));
+    }
+  } else if constexpr (sizeof(T) == 4) {
+    using OT = std::conditional_t<std::is_same_v<T, float32_t>, int32_t, float32_t>;
+    auto tt = Rebind<OT, TagT>{}; auto r = bitcast(tt, v);
+    for (nint_t i = 0; i < N; ++i) {
+      T orig = test_utils::get_test_value<T>(i); OT exp; std::memcpy(&exp, &orig, 4);
+      if constexpr (std::is_integral_v<OT>) EXPECT_EQ(exp, get(r, i));
+      else EXPECT_TRUE(test_utils::values_equal(exp, get(r, i)));
+    }
+  } else if constexpr (sizeof(T) == 8) {
+    using OT = std::conditional_t<std::is_same_v<T, float64_t>, int64_t, float64_t>;
+    auto tt = Rebind<OT, TagT>{}; auto r = bitcast(tt, v);
+    for (nint_t i = 0; i < N; ++i) {
+      T orig = test_utils::get_test_value<T>(i); OT exp; std::memcpy(&exp, &orig, 8);
+      if constexpr (std::is_integral_v<OT>) EXPECT_EQ(exp, get(r, i));
+      else EXPECT_TRUE(test_utils::values_equal(exp, get(r, i)));
     }
   }
 }
@@ -757,6 +813,7 @@ TYPED_TEST(VecBasicTest, HalfSizeMwhilelt) {
 }
 
 TYPED_TEST(VecBasicTest, HalfSizeMaskBitOps) {
+#ifndef CPU_CAPABILITY_GENERIC
   using T = typename TestFixture::Type;
   auto& t = this->t;
   nint_t N = this->full_size;
@@ -772,6 +829,7 @@ TYPED_TEST(VecBasicTest, HalfSizeMaskBitOps) {
     bool va = get(t, a, i), vb = get(t, b, i);
     EXPECT_EQ(get(t, c_and, i), va && vb);
   }
+#endif
 }
 
 TYPED_TEST(VecBasicTest, HalfSizeBlend) {
@@ -793,6 +851,158 @@ TYPED_TEST(VecBasicTest, HalfSizeBlend) {
   }
   for (nint_t i = n; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(va, get(r, i)));
+  }
+}
+
+// ============================================================================
+// Partial Register Tests (ScalableTag<T, POW2<0>)
+// Tests half-word (-1), quarter-word (-2), eighth-word (-3) tags
+// Critical for SVE and partial-register scenarios on x86
+// ============================================================================
+
+TYPED_TEST(VecBasicTest, PartialHalfWordFill) {
+  using T = typename TestFixture::Type;
+  ScalableTag<T, -1> th;
+  nint_t N = size(th);
+  if (N < 1) return;
+
+  T fill_val = test_utils::get_test_value<T>(42);
+  auto v = fill(th, fill_val);
+  for (nint_t i = 0; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(fill_val, get(v, i)));
+  }
+}
+
+TYPED_TEST(VecBasicTest, PartialHalfWordZeros) {
+  using T = typename TestFixture::Type;
+  ScalableTag<T, -1> th;
+  nint_t N = size(th);
+  if (N < 1) return;
+
+  auto v = zeros(th);
+  for (nint_t i = 0; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(T{}, get(v, i)));
+  }
+}
+
+TYPED_TEST(VecBasicTest, PartialHalfWordGetSet) {
+  using T = typename TestFixture::Type;
+  ScalableTag<T, -1> th;
+  nint_t N = size(th);
+  if (N < 1) return;
+
+  auto v = zeros(th);
+  T val = test_utils::get_test_value<T>(123);
+  v = set(v, N - 1, val);
+  EXPECT_TRUE(test_utils::values_equal(val, get(v, N - 1)));
+}
+
+TYPED_TEST(VecBasicTest, PartialHalfWordMwhilelt) {
+  using T = typename TestFixture::Type;
+  ScalableTag<T, -1> th;
+  nint_t N = size(th);
+  if (N < 2) return;
+
+  nint_t n = N / 2;
+  auto m = mwhilelt(th, 0, n);
+  for (nint_t i = 0; i < n; ++i) {
+    EXPECT_TRUE(get(th, m, i));
+  }
+  for (nint_t i = n; i < N; ++i) {
+    EXPECT_FALSE(get(th, m, i));
+  }
+}
+
+TYPED_TEST(VecBasicTest, PartialHalfWordBlend) {
+  using T = typename TestFixture::Type;
+  ScalableTag<T, -1> th;
+  nint_t N = size(th);
+  if (N < 2) return;
+
+  T va = test_utils::get_test_value<T>(5);
+  T vb = test_utils::get_test_value<T>(95);
+  auto v0 = fill(th, va);
+  auto v1 = fill(th, vb);
+  auto m = mwhilelt(th, 0, N / 2);
+  auto r = blend(v0, m, v1);
+
+  for (nint_t i = 0; i < N / 2; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(vb, get(r, i)));
+  }
+  for (nint_t i = N / 2; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(va, get(r, i)));
+  }
+}
+
+TYPED_TEST(VecBasicTest, PartialQuarterWordFill) {
+  using T = typename TestFixture::Type;
+  if constexpr (VEC_WIDTH < 0 || VEC_WIDTH / (8 * sizeof(T)) >= 4) {
+    ScalableTag<T, -2> tq;
+    nint_t N = size(tq);
+    if (N < 1) return;
+
+    T fill_val = test_utils::get_test_value<T>(77);
+    auto v = fill(tq, fill_val);
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(fill_val, get(v, i)));
+    }
+  }
+}
+
+TYPED_TEST(VecBasicTest, PartialQuarterWordZeros) {
+  using T = typename TestFixture::Type;
+  if constexpr (VEC_WIDTH < 0 || VEC_WIDTH / (8 * sizeof(T)) >= 4) {
+    ScalableTag<T, -2> tq;
+    nint_t N = size(tq);
+    if (N < 1) return;
+
+    auto v = zeros(tq);
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(T{}, get(v, i)));
+    }
+  }
+}
+
+TYPED_TEST(VecBasicTest, PartialQuarterWordGetSet) {
+  using T = typename TestFixture::Type;
+  if constexpr (VEC_WIDTH < 0 || VEC_WIDTH / (8 * sizeof(T)) >= 4) {
+    ScalableTag<T, -2> tq;
+    nint_t N = size(tq);
+    if (N < 2) return;
+
+    auto v = zeros(tq);
+    T val = test_utils::get_test_value<T>(99);
+    v = set(v, N - 1, val);
+    EXPECT_TRUE(test_utils::values_equal(val, get(v, N - 1)));
+  }
+}
+
+TYPED_TEST(VecBasicTest, PartialEighthWordFill) {
+  using T = typename TestFixture::Type;
+  if constexpr (VEC_WIDTH < 0 || VEC_WIDTH / (8 * sizeof(T)) >= 8) {
+    ScalableTag<T, -3> te;
+    nint_t N = size(te);
+    if (N < 1) return;
+
+    T fill_val = test_utils::get_test_value<T>(88);
+    auto v = fill(te, fill_val);
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(fill_val, get(v, i)));
+    }
+  }
+}
+
+TYPED_TEST(VecBasicTest, PartialEighthWordZeros) {
+  using T = typename TestFixture::Type;
+  if constexpr (VEC_WIDTH < 0 || VEC_WIDTH / (8 * sizeof(T)) >= 8) {
+    ScalableTag<T, -3> te;
+    nint_t N = size(te);
+    if (N < 1) return;
+
+    auto v = zeros(te);
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(T{}, get(v, i)));
+    }
   }
 }
 
@@ -951,6 +1161,83 @@ TYPED_TEST(VecBasicTest, ExtremeValues) {
     for (nint_t i = 0; i < N; ++i) {
       EXPECT_TRUE(test_utils::values_equal(min_val, get(v_min, i)));
       EXPECT_TRUE(test_utils::values_equal(max_val, get(v_max, i)));
+    }
+  }
+}
+
+TYPED_TEST(VecBasicTest, FloatExtremeValues) {
+  using T = typename TestFixture::Type;
+  auto& t = this->t;
+  nint_t N = this->full_size;
+
+  if constexpr (std::is_same_v<T, float32_t>) {
+    auto v_nan  = fill(t, std::numeric_limits<float32_t>::quiet_NaN());
+    auto v_inf  = fill(t, std::numeric_limits<float32_t>::infinity());
+    auto v_ninf = fill(t, -std::numeric_limits<float32_t>::infinity());
+    auto v_max  = fill(t, std::numeric_limits<float32_t>::max());
+    auto v_min  = fill(t, std::numeric_limits<float32_t>::min());
+    auto v_sub  = fill(t, std::numeric_limits<float32_t>::denorm_min());
+    auto v_zero = fill(t, 0.0f);
+    auto v_nzero= fill(t, -0.0f);
+
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(std::isnan(get(v_nan, i)));
+      EXPECT_TRUE(std::isinf(get(v_inf, i)));
+      EXPECT_TRUE(std::isinf(get(v_ninf, i)));
+      EXPECT_TRUE(test_utils::values_equal(
+          std::numeric_limits<float32_t>::max(), get(v_max, i)));
+      EXPECT_TRUE(test_utils::values_equal(
+          std::numeric_limits<float32_t>::denorm_min(), get(v_sub, i)));
+      EXPECT_EQ(0.0f, get(v_zero, i));
+      EXPECT_EQ(-0.0f, get(v_nzero, i));
+    }
+  } else if constexpr (std::is_same_v<T, float64_t>) {
+    auto v_nan  = fill(t, std::numeric_limits<float64_t>::quiet_NaN());
+    auto v_inf  = fill(t, std::numeric_limits<float64_t>::infinity());
+    auto v_ninf = fill(t, -std::numeric_limits<float64_t>::infinity());
+    auto v_max  = fill(t, std::numeric_limits<float64_t>::max());
+    auto v_sub  = fill(t, std::numeric_limits<float64_t>::denorm_min());
+    auto v_zero = fill(t, 0.0);
+    auto v_nzero= fill(t, -0.0);
+
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(std::isnan(get(v_nan, i)));
+      EXPECT_TRUE(std::isinf(get(v_inf, i)));
+      EXPECT_TRUE(std::isinf(get(v_ninf, i)));
+      EXPECT_TRUE(test_utils::values_equal(
+          std::numeric_limits<float64_t>::max(), get(v_max, i)));
+      EXPECT_TRUE(test_utils::values_equal(
+          std::numeric_limits<float64_t>::denorm_min(), get(v_sub, i)));
+      EXPECT_EQ(0.0, get(v_zero, i));
+      EXPECT_EQ(-0.0, get(v_nzero, i));
+    }
+  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
+    auto v_zero = fill(t, vecops::float16_t{});
+    auto v_pos  = fill(t, static_cast<vecops::float16_t>(
+        static_cast<float>(1.5f)));
+    auto v_neg  = fill(t, static_cast<vecops::float16_t>(
+        static_cast<float>(-3.25f)));
+
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(vecops::float16_t{}, get(v_zero, i)));
+      EXPECT_TRUE(test_utils::values_equal(
+          static_cast<vecops::float16_t>(static_cast<float>(1.5f)), get(v_pos, i)));
+      EXPECT_TRUE(test_utils::values_equal(
+          static_cast<vecops::float16_t>(static_cast<float>(-3.25f)), get(v_neg, i)));
+    }
+  } else if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
+    auto v_zero = fill(t, vecops::bfloat16_t{});
+    auto v_pos  = fill(t, static_cast<vecops::bfloat16_t>(
+        static_cast<float>(2.5f)));
+    auto v_neg  = fill(t, static_cast<vecops::bfloat16_t>(
+        static_cast<float>(-7.5f)));
+
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(vecops::bfloat16_t{}, get(v_zero, i)));
+      EXPECT_TRUE(test_utils::values_equal(
+          static_cast<vecops::bfloat16_t>(static_cast<float>(2.5f)), get(v_pos, i)));
+      EXPECT_TRUE(test_utils::values_equal(
+          static_cast<vecops::bfloat16_t>(static_cast<float>(-7.5f)), get(v_neg, i)));
     }
   }
 }

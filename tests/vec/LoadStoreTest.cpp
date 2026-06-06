@@ -1022,6 +1022,116 @@ TYPED_TEST(VecLoadStoreTest, HalfSizeLoadWithN) {
 }
 
 // ============================================================================
+// Partial Register Tests (ScalableTag<T, POW2<0>)
+// Tests half-word (-1), quarter-word (-2), eighth-word (-3) tags
+// ============================================================================
+
+TYPED_TEST(VecLoadStoreTest, PartialHalfWordLoadStore) {
+  using T = typename TestFixture::Type;
+  ScalableTag<T, -1> th;
+  nint_t N = size(th);
+  if (N < 1) return;
+
+  auto v = loadu(th, this->aligned_data_);
+  for (nint_t i = 0; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], get(v, i)));
+  }
+
+  for (nint_t i = 0; i < N; ++i) {
+    this->aligned_out_[i] = T{};
+  }
+  storeu(th, this->aligned_out_, v);
+  for (nint_t i = 0; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], this->aligned_out_[i]));
+  }
+}
+
+TYPED_TEST(VecLoadStoreTest, PartialHalfWordLoadWithN) {
+  using T = typename TestFixture::Type;
+  ScalableTag<T, -1> th;
+  nint_t N = size(th);
+  if (N < 2) return;
+
+  T default_val = test_utils::get_test_value<T>(999);
+  auto default_v = fill(th, default_val);
+  nint_t n = N / 2;
+
+  auto v = loadu(th, this->aligned_data_, n, default_v);
+  for (nint_t i = 0; i < n; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], get(v, i)));
+  }
+  for (nint_t i = n; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(default_val, get(v, i)));
+  }
+}
+
+TYPED_TEST(VecLoadStoreTest, PartialHalfWordFill) {
+  using T = typename TestFixture::Type;
+  ScalableTag<T, -1> th;
+  nint_t N = size(th);
+  if (N < 1) return;
+
+  T fill_val = test_utils::get_test_value<T>(42);
+  auto v = fill(th, fill_val);
+  for (nint_t i = 0; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(fill_val, get(v, i)));
+  }
+}
+
+TYPED_TEST(VecLoadStoreTest, PartialQuarterWordLoadStore) {
+  using T = typename TestFixture::Type;
+  if constexpr (VEC_WIDTH < 0 || VEC_WIDTH / (8 * sizeof(T)) >= 4) {
+    ScalableTag<T, -2> tq;
+    nint_t N = size(tq);
+    if (N < 1) return;
+
+    auto v = loadu(tq, this->aligned_data_);
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], get(v, i)));
+    }
+
+    storeu(tq, this->aligned_out_, v);
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], this->aligned_out_[i]));
+    }
+  }
+}
+
+TYPED_TEST(VecLoadStoreTest, PartialQuarterWordFill) {
+  using T = typename TestFixture::Type;
+  if constexpr (VEC_WIDTH < 0 || VEC_WIDTH / (8 * sizeof(T)) >= 4) {
+    ScalableTag<T, -2> tq;
+    nint_t N = size(tq);
+    if (N < 1) return;
+
+    T fill_val = test_utils::get_test_value<T>(77);
+    auto v = fill(tq, fill_val);
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(fill_val, get(v, i)));
+    }
+  }
+}
+
+TYPED_TEST(VecLoadStoreTest, PartialEighthWordLoadStore) {
+  using T = typename TestFixture::Type;
+  if constexpr (VEC_WIDTH < 0 || VEC_WIDTH / (8 * sizeof(T)) >= 8) {
+    ScalableTag<T, -3> te;
+    nint_t N = size(te);
+    if (N < 1) return;
+
+    auto v = loadu(te, this->aligned_data_);
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], get(v, i)));
+    }
+
+    storeu(te, this->aligned_out_, v);
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], this->aligned_out_[i]));
+    }
+  }
+}
+
+// ============================================================================
 // Edge Cases
 // ============================================================================
 
@@ -1069,6 +1179,68 @@ TYPED_TEST(VecLoadStoreTest, ExtremeValues) {
       EXPECT_TRUE(test_utils::values_equal(min_val, get(v_min, i)));
       EXPECT_TRUE(test_utils::values_equal(max_val, get(v_max, i)));
     }
+  }
+}
+
+TYPED_TEST(VecLoadStoreTest, FloatExtremeValues) {
+  using T = typename TestFixture::Type;
+  auto& t = this->t;
+  nint_t N = this->full_size;
+
+  if constexpr (std::is_same_v<T, float32_t>) {
+    auto v_nan  = fill(t, std::numeric_limits<float32_t>::quiet_NaN());
+    auto v_inf  = fill(t, std::numeric_limits<float32_t>::infinity());
+    auto v_ninf = fill(t, -std::numeric_limits<float32_t>::infinity());
+    auto v_max  = fill(t, std::numeric_limits<float32_t>::max());
+    auto v_sub  = fill(t, std::numeric_limits<float32_t>::denorm_min());
+    auto v_zero = fill(t, 0.0f);
+    auto v_nzero= fill(t, -0.0f);
+
+    storeu(t, this->aligned_out_, v_nan);  EXPECT_TRUE(std::isnan(this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_inf);  EXPECT_TRUE(std::isinf(this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_ninf); EXPECT_TRUE(std::isinf(this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_max);  EXPECT_TRUE(test_utils::values_equal(std::numeric_limits<float32_t>::max(), this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_sub);  EXPECT_TRUE(test_utils::values_equal(std::numeric_limits<float32_t>::denorm_min(), this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_zero); EXPECT_EQ(0.0f, this->aligned_out_[0]);
+    storeu(t, this->aligned_out_, v_nzero);EXPECT_EQ(-0.0f, this->aligned_out_[0]);
+  } else if constexpr (std::is_same_v<T, float64_t>) {
+    auto v_nan  = fill(t, std::numeric_limits<float64_t>::quiet_NaN());
+    auto v_inf  = fill(t, std::numeric_limits<float64_t>::infinity());
+    auto v_ninf = fill(t, -std::numeric_limits<float64_t>::infinity());
+    auto v_max  = fill(t, std::numeric_limits<float64_t>::max());
+    auto v_sub  = fill(t, std::numeric_limits<float64_t>::denorm_min());
+    auto v_zero = fill(t, 0.0);
+    auto v_nzero= fill(t, -0.0);
+
+    storeu(t, this->aligned_out_, v_nan);  EXPECT_TRUE(std::isnan(this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_inf);  EXPECT_TRUE(std::isinf(this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_ninf); EXPECT_TRUE(std::isinf(this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_max);  EXPECT_TRUE(test_utils::values_equal(std::numeric_limits<float64_t>::max(), this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_sub);  EXPECT_TRUE(test_utils::values_equal(std::numeric_limits<float64_t>::denorm_min(), this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_zero); EXPECT_EQ(0.0, this->aligned_out_[0]);
+    storeu(t, this->aligned_out_, v_nzero);EXPECT_EQ(-0.0, this->aligned_out_[0]);
+  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
+    auto v_zero = fill(t, vecops::float16_t{});
+    auto v_pos  = fill(t, static_cast<vecops::float16_t>(static_cast<float>(1.5f)));
+    auto v_neg  = fill(t, static_cast<vecops::float16_t>(static_cast<float>(-3.25f)));
+
+    storeu(t, this->aligned_out_, v_zero);
+    EXPECT_TRUE(test_utils::values_equal(vecops::float16_t{}, this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_pos);
+    EXPECT_TRUE(test_utils::values_equal(static_cast<vecops::float16_t>(static_cast<float>(1.5f)), this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_neg);
+    EXPECT_TRUE(test_utils::values_equal(static_cast<vecops::float16_t>(static_cast<float>(-3.25f)), this->aligned_out_[0]));
+  } else if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
+    auto v_zero = fill(t, vecops::bfloat16_t{});
+    auto v_pos  = fill(t, static_cast<vecops::bfloat16_t>(static_cast<float>(2.5f)));
+    auto v_neg  = fill(t, static_cast<vecops::bfloat16_t>(static_cast<float>(-7.5f)));
+
+    storeu(t, this->aligned_out_, v_zero);
+    EXPECT_TRUE(test_utils::values_equal(vecops::bfloat16_t{}, this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_pos);
+    EXPECT_TRUE(test_utils::values_equal(static_cast<vecops::bfloat16_t>(static_cast<float>(2.5f)), this->aligned_out_[0]));
+    storeu(t, this->aligned_out_, v_neg);
+    EXPECT_TRUE(test_utils::values_equal(static_cast<vecops::bfloat16_t>(static_cast<float>(-7.5f)), this->aligned_out_[0]));
   }
 }
 
@@ -1653,6 +1825,127 @@ TYPED_TEST(VecGatherScatterTest, GatherScatterRoundTrip) {
   for (nint_t i = 0; i < N; ++i) {
     T expected = test_utils::get_test_value<T>(static_cast<int>(indices[i]));
     EXPECT_TRUE(test_utils::values_equal(expected, this->aligned_out_[i]));
+  }
+}
+
+// ============================================================================
+// Multi-word Gather / Scatter Tests
+// ============================================================================
+
+TYPED_TEST(VecGatherScatterTest, MultiWordGather) {
+  using T = typename TestFixture::Type;
+  ScalableTag<T, 1> t2;
+  nint_t N = size(t2);
+  nint_t ws = this->full_size;
+  using IndexT = Index<T>;
+  ScalableTag<IndexT, 1> it;
+
+  // Reverse within each word — tests that vmap offsets base per word
+  auto indices = std::make_unique<IndexT[]>(N);
+  for (nint_t i = 0; i < N; ++i) {
+    indices[i] = static_cast<IndexT>(ws - 1 - (i % ws));
+  }
+
+  auto idx = loadu(it, indices.get());
+  auto v = gather(t2, this->aligned_data_, idx);
+
+  for (nint_t i = 0; i < N; ++i) {
+    nint_t word = i / ws;
+    T expected = this->aligned_data_[word * ws + indices[i]];
+    EXPECT_TRUE(test_utils::values_equal(expected, get(v, i)));
+  }
+}
+
+TYPED_TEST(VecGatherScatterTest, MultiWordScatter) {
+  using T = typename TestFixture::Type;
+  ScalableTag<T, 1> t2;
+  nint_t N = size(t2);
+  nint_t ws = this->full_size;
+  using IndexT = Index<T>;
+  ScalableTag<IndexT, 1> it;
+
+  T sentinel = test_utils::get_test_value<T>(-1);
+  for (int i = 0; i < 256; ++i) {
+    this->aligned_out_[i] = sentinel;
+  }
+
+  // Reverse within each word — scatter input to reversed positions
+  auto indices = std::make_unique<IndexT[]>(N);
+  for (nint_t i = 0; i < N; ++i) {
+    indices[i] = static_cast<IndexT>(ws - 1 - (i % ws));
+  }
+
+  auto idx = loadu(it, indices.get());
+  auto v = loadu(t2, this->aligned_data_);
+
+  scatter(t2, this->aligned_out_, idx, v);
+
+  for (nint_t i = 0; i < N; ++i) {
+    nint_t word = i / ws;
+    nint_t pos = i % ws;
+    nint_t dst = static_cast<nint_t>(word * ws + indices[word * ws + pos]);
+    EXPECT_TRUE(test_utils::values_equal(
+        this->aligned_data_[i], this->aligned_out_[dst]));
+  }
+}
+
+TYPED_TEST(VecGatherScatterTest, MultiWordGatherWithN) {
+  using T = typename TestFixture::Type;
+  ScalableTag<T, 1> t2;
+  nint_t N = size(t2);
+  if (N < 2) return;
+  nint_t ws = this->full_size;
+  using IndexT = Index<T>;
+  ScalableTag<IndexT, 1> it;
+
+  auto indices = std::make_unique<IndexT[]>(N);
+  for (nint_t i = 0; i < N; ++i) {
+    indices[i] = static_cast<IndexT>(i % ws);
+  }
+
+  auto idx = loadu(it, indices.get());
+  auto m = mwhilelt(t2, 0, N / 2);
+  T default_val = test_utils::get_test_value<T>(999);
+
+  auto v = gather(t2, this->aligned_data_, idx, m, default_val);
+
+  for (nint_t i = 0; i < N / 2; ++i) {
+    nint_t word = i / ws;
+    T expected = this->aligned_data_[word * ws + indices[i]];
+    EXPECT_TRUE(test_utils::values_equal(expected, get(v, i)));
+  }
+  for (nint_t i = N / 2; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(default_val, get(v, i)));
+  }
+}
+
+TYPED_TEST(VecGatherScatterTest, MultiWordGatherWithMask) {
+  using T = typename TestFixture::Type;
+  ScalableTag<T, 1> t2;
+  nint_t N = size(t2);
+  if (N < 2) return;
+  nint_t ws = this->full_size;
+  using IndexT = Index<T>;
+  ScalableTag<IndexT, 1> it;
+
+  auto indices = std::make_unique<IndexT[]>(N);
+  for (nint_t i = 0; i < N; ++i) {
+    indices[i] = static_cast<IndexT>((i * 5 + 3) % ws);
+  }
+
+  auto idx = loadu(it, indices.get());
+  auto m = mwhilelt(t2, 0, N / 2);
+  T default_val = test_utils::get_test_value<T>(777);
+
+  auto v = gather(t2, this->aligned_data_, idx, m, default_val);
+
+  for (nint_t i = 0; i < N / 2; ++i) {
+    nint_t word = i / ws;
+    T expected = this->aligned_data_[word * ws + indices[i]];
+    EXPECT_TRUE(test_utils::values_equal(expected, get(v, i)));
+  }
+  for (nint_t i = N / 2; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(default_val, get(v, i)));
   }
 }
 
