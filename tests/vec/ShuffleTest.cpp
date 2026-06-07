@@ -84,7 +84,7 @@ template <typename T>
 using Types4  = ::testing::Types<float32_t, int32_t, uint32_t>;
 using Types2  = ::testing::Types<float64_t, int64_t, uint64_t>;
 using Types8  = ::testing::Types<int16_t, uint16_t, vecops::float16_t
-#if defined(__ARM_FEATURE_BF16) || defined(ARCH_X86_FAMILY)
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     , vecops::bfloat16_t
 #endif
 >;
@@ -96,14 +96,14 @@ using ShufTypes = ::testing::Types<
     int8_t,   uint8_t,
     int16_t,  uint16_t,
     vecops::float16_t
-    #if defined(__ARM_FEATURE_BF16) || defined(ARCH_X86_FAMILY)
+    #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     , vecops::bfloat16_t
     #endif
 >;
 
 using AllTypes = ::testing::Types<
     vecops::float16_t,
-    #if defined(__ARM_FEATURE_BF16) || defined(ARCH_X86_FAMILY)
+    #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     vecops::bfloat16_t,
     #endif
     float32_t, float64_t,
@@ -1590,7 +1590,7 @@ TEST(ShufCornerCase, Float16_LocalShufVI_Reverse) {
   }
 }
 
-#if defined(__ARM_FEATURE_BF16) || defined(ARCH_X86_FAMILY)
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
 TEST(ShufCornerCase, BFloat16_LocalShufVI_Identity) {
   using T = vecops::bfloat16_t;
   using I = test_utils::shuffle_idx_t<T>;

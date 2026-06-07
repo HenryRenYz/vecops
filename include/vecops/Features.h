@@ -784,7 +784,9 @@
 #endif
 
 // 检测是否支持 BF16
-#if defined(HAS_AVX512_BF16) || defined(HAS_BF16) || defined(HAS_SME_BI16I32)
+// On ARM with SVE, bf16 is available via software emulation (reinterpret + uint16 ops)
+// even when __ARM_FEATURE_BF16 is not defined by the compiler.
+#if defined(HAS_SVE) || defined(HAS_AVX512_BF16) || defined(HAS_BF16) || defined(HAS_SME_BI16I32)
   #define HAS_BFLOAT16 1
 #endif
 

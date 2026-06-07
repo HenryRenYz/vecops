@@ -214,12 +214,23 @@ struct VecDefs<T, -1, 1, void> : public BaseVecDefs<T, -1, 1> {
   VECOPS_VFUNC VECOPS_PURE
   static WordVec get(VecType v) {
     static_assert(0 <= Index && Index < num_words, "Static index out of range");
+#if !defined(__ARM_FEATURE_BF16)
+    if constexpr (std::is_same_v<T, bfloat16_t>)
+      return svreinterpret_bf16_u16(svget2(svreinterpret_u16_bf16_x2(v), (uint64_t)Index));
+    else
+#endif
     return svget2(v, (uint64_t)Index);
   }
 
   VECOPS_VFUNC VECOPS_PURE
   static WordVec get(VecType v, nint_t index) {
     VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
+#if !defined(__ARM_FEATURE_BF16)
+    if constexpr (std::is_same_v<T, bfloat16_t>) {
+      if (index == 0) return svreinterpret_bf16_u16(svget2(svreinterpret_u16_bf16_x2(v), 0));
+      else            return svreinterpret_bf16_u16(svget2(svreinterpret_u16_bf16_x2(v), 1));
+    } else
+#endif
     if (index == 0) return svget2(v, 0);
     else            return svget2(v, 1);
   }
@@ -228,12 +239,26 @@ struct VecDefs<T, -1, 1, void> : public BaseVecDefs<T, -1, 1> {
   VECOPS_VFUNC VECOPS_PURE
   static VecType set(VecType v, WordVec u) {
     static_assert(0 <= Index && Index < num_words, "Static index out of range");
+#if !defined(__ARM_FEATURE_BF16)
+    if constexpr (std::is_same_v<T, bfloat16_t>)
+      return svreinterpret_bf16_u16_x2(
+        svset2(svreinterpret_u16_bf16_x2(v), (uint64_t)Index, svreinterpret_u16_bf16(u)));
+    else
+#endif
     return svset2(v, (uint64_t)Index, u);
   }
 
   VECOPS_VFUNC VECOPS_PURE
   static VecType set(VecType v, nint_t index, WordVec u) {
     VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
+#if !defined(__ARM_FEATURE_BF16)
+    if constexpr (std::is_same_v<T, bfloat16_t>) {
+      if (index == 0) return svreinterpret_bf16_u16_x2(
+        svset2(svreinterpret_u16_bf16_x2(v), 0, svreinterpret_u16_bf16(u)));
+      else            return svreinterpret_bf16_u16_x2(
+        svset2(svreinterpret_u16_bf16_x2(v), 1, svreinterpret_u16_bf16(u)));
+    } else
+#endif
     if (index == 0) return svset2(v, 0, u);
     else            return svset2(v, 1, u);
   }
@@ -296,12 +321,25 @@ struct VecDefs<T, -1, 2, void> : public BaseVecDefs<T, -1, 2> {
   VECOPS_VFUNC VECOPS_PURE
   static WordVec get(VecType v) {
     static_assert(0 <= Index && Index < num_words, "Static index out of range");
+#if !defined(__ARM_FEATURE_BF16)
+    if constexpr (std::is_same_v<T, bfloat16_t>)
+      return svreinterpret_bf16_u16(svget4(svreinterpret_u16_bf16_x4(v), (uint64_t)Index));
+    else
+#endif
     return svget4(v, (uint64_t)Index);
   }
 
   VECOPS_VFUNC VECOPS_PURE
   static WordVec get(VecType v, nint_t index) {
     VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
+#if !defined(__ARM_FEATURE_BF16)
+    if constexpr (std::is_same_v<T, bfloat16_t>) {
+      if (index == 0)      return svreinterpret_bf16_u16(svget4(svreinterpret_u16_bf16_x4(v), 0));
+      else if (index == 1) return svreinterpret_bf16_u16(svget4(svreinterpret_u16_bf16_x4(v), 1));
+      else if (index == 2) return svreinterpret_bf16_u16(svget4(svreinterpret_u16_bf16_x4(v), 2));
+      else                 return svreinterpret_bf16_u16(svget4(svreinterpret_u16_bf16_x4(v), 3));
+    } else
+#endif
     if (index == 0)      return svget4(v, 0);
     else if (index == 1) return svget4(v, 1);
     else if (index == 2) return svget4(v, 2);
@@ -312,12 +350,30 @@ struct VecDefs<T, -1, 2, void> : public BaseVecDefs<T, -1, 2> {
   VECOPS_VFUNC VECOPS_PURE
   static VecType set(VecType v, WordVec u) {
     static_assert(0 <= Index && Index < num_words, "Static index out of range");
+#if !defined(__ARM_FEATURE_BF16)
+    if constexpr (std::is_same_v<T, bfloat16_t>)
+      return svreinterpret_bf16_u16_x4(
+        svset4(svreinterpret_u16_bf16_x4(v), (uint64_t)Index, svreinterpret_u16_bf16(u)));
+    else
+#endif
     return svset4(v, (uint64_t)Index, u);
   }
 
   VECOPS_VFUNC VECOPS_PURE
   static VecType set(VecType v, nint_t index, WordVec u) {
     VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
+#if !defined(__ARM_FEATURE_BF16)
+    if constexpr (std::is_same_v<T, bfloat16_t>) {
+      if (index == 0)      return svreinterpret_bf16_u16_x4(
+        svset4(svreinterpret_u16_bf16_x4(v), 0, svreinterpret_u16_bf16(u)));
+      else if (index == 1) return svreinterpret_bf16_u16_x4(
+        svset4(svreinterpret_u16_bf16_x4(v), 1, svreinterpret_u16_bf16(u)));
+      else if (index == 2) return svreinterpret_bf16_u16_x4(
+        svset4(svreinterpret_u16_bf16_x4(v), 2, svreinterpret_u16_bf16(u)));
+      else                 return svreinterpret_bf16_u16_x4(
+        svset4(svreinterpret_u16_bf16_x4(v), 3, svreinterpret_u16_bf16(u)));
+    } else
+#endif
     if (index == 0)      return svset4(v, 0, u);
     else if (index == 1) return svset4(v, 1, u);
     else if (index == 2) return svset4(v, 2, u);

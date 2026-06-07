@@ -187,11 +187,15 @@ using PromoteTypes = ::testing::Types<
     PROMOTE_SHIFT1(int8_t, int16_t),
     PROMOTE_SHIFT1(int8_t, uint16_t),
     PROMOTE_SHIFT1(int8_t, vecops::float16_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     PROMOTE_SHIFT1(int8_t, vecops::bfloat16_t),
+#endif
     PROMOTE_SHIFT1(uint8_t, uint16_t),
     PROMOTE_SHIFT1(uint8_t, int16_t),
     PROMOTE_SHIFT1(uint8_t, vecops::float16_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     PROMOTE_SHIFT1(uint8_t, vecops::bfloat16_t),
+#endif
     // 8-bit -> 32-bit (shift=2)
     PROMOTE_SHIFT2(int8_t, int32_t),
     PROMOTE_SHIFT2(int8_t, uint32_t),
@@ -215,9 +219,11 @@ using PromoteTypes = ::testing::Types<
     PROMOTE_SHIFT1(vecops::float16_t, int32_t),
     PROMOTE_SHIFT1(vecops::float16_t, uint32_t),
     PROMOTE_SHIFT1(vecops::float16_t, float32_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     PROMOTE_SHIFT1(vecops::bfloat16_t, int32_t),
     PROMOTE_SHIFT1(vecops::bfloat16_t, uint32_t),
     PROMOTE_SHIFT1(vecops::bfloat16_t, float32_t),
+#endif
     // 16-bit -> 64-bit (shift=2)
     PROMOTE_SHIFT2(int16_t, int64_t),
     PROMOTE_SHIFT2(int16_t, uint64_t),
@@ -228,9 +234,11 @@ using PromoteTypes = ::testing::Types<
     PROMOTE_SHIFT2(vecops::float16_t, int64_t),
     PROMOTE_SHIFT2(vecops::float16_t, uint64_t),
     PROMOTE_SHIFT2(vecops::float16_t, float64_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     PROMOTE_SHIFT2(vecops::bfloat16_t, int64_t),
     PROMOTE_SHIFT2(vecops::bfloat16_t, uint64_t),
     PROMOTE_SHIFT2(vecops::bfloat16_t, float64_t),
+#endif
     // 32-bit -> 64-bit (shift=1)
     PROMOTE_SHIFT1(int32_t, int64_t),
     PROMOTE_SHIFT1(int32_t, uint64_t),
@@ -384,21 +392,29 @@ using DemoteTypes = ::testing::Types<
     DEMOTE_SHIFT1(uint16_t, uint8_t),
     DEMOTE_SHIFT1(vecops::float16_t, int8_t),
     DEMOTE_SHIFT1(vecops::float16_t, uint8_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     DEMOTE_SHIFT1(vecops::bfloat16_t, int8_t),
     DEMOTE_SHIFT1(vecops::bfloat16_t, uint8_t),
+#endif
     // 32-bit -> 16-bit (shift=1)
     DEMOTE_SHIFT1(int32_t, int16_t),
     DEMOTE_SHIFT1(int32_t, uint16_t),
     DEMOTE_SHIFT1(int32_t, vecops::float16_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     DEMOTE_SHIFT1(int32_t, vecops::bfloat16_t),
+#endif
     DEMOTE_SHIFT1(uint32_t, int16_t),
     DEMOTE_SHIFT1(uint32_t, uint16_t),
     DEMOTE_SHIFT1(uint32_t, vecops::float16_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     DEMOTE_SHIFT1(uint32_t, vecops::bfloat16_t),
+#endif
     DEMOTE_SHIFT1(float32_t, int16_t),
     DEMOTE_SHIFT1(float32_t, uint16_t),
     DEMOTE_SHIFT1(float32_t, vecops::float16_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     DEMOTE_SHIFT1(float32_t, vecops::bfloat16_t),
+#endif
     // 32-bit -> 8-bit (shift=2)
     DEMOTE_SHIFT2(int32_t, int8_t),
     DEMOTE_SHIFT2(int32_t, uint8_t),
@@ -420,15 +436,21 @@ using DemoteTypes = ::testing::Types<
     DEMOTE_SHIFT2(int64_t, int16_t),
     DEMOTE_SHIFT2(int64_t, uint16_t),
     DEMOTE_SHIFT2(int64_t, vecops::float16_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     DEMOTE_SHIFT2(int64_t, vecops::bfloat16_t),
+#endif
     DEMOTE_SHIFT2(uint64_t, int16_t),
     DEMOTE_SHIFT2(uint64_t, uint16_t),
     DEMOTE_SHIFT2(uint64_t, vecops::float16_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     DEMOTE_SHIFT2(uint64_t, vecops::bfloat16_t),
+#endif
     DEMOTE_SHIFT2(float64_t, int16_t),
     DEMOTE_SHIFT2(float64_t, uint16_t),
     DEMOTE_SHIFT2(float64_t, vecops::float16_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     DEMOTE_SHIFT2(float64_t, vecops::bfloat16_t),
+#endif
     // 64-bit -> 8-bit (shift=3)
     DEMOTE_SHIFT3(int64_t, int8_t),
     DEMOTE_SHIFT3(int64_t, uint8_t),
@@ -545,16 +567,22 @@ using ConvertTypes = ::testing::Types<
     // 16-bit conversions
     CONVERT_POWS(int16_t, uint16_t),
     CONVERT_POWS(int16_t, vecops::float16_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     CONVERT_POWS(int16_t, vecops::bfloat16_t),
+#endif
     CONVERT_POWS(uint16_t, int16_t),
     CONVERT_POWS(uint16_t, vecops::float16_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     CONVERT_POWS(uint16_t, vecops::bfloat16_t),
+#endif
     CONVERT_POWS(vecops::float16_t, int16_t),
     CONVERT_POWS(vecops::float16_t, uint16_t),
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
     CONVERT_POWS(vecops::float16_t, vecops::bfloat16_t),
     CONVERT_POWS(vecops::bfloat16_t, int16_t),
     CONVERT_POWS(vecops::bfloat16_t, uint16_t),
     CONVERT_POWS(vecops::bfloat16_t, vecops::float16_t),
+#endif
     // 32-bit conversions
     CONVERT_POWS(int32_t, uint32_t),
     CONVERT_POWS(int32_t, float32_t),

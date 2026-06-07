@@ -71,7 +71,7 @@ TEST(SVETest, VecDefsSingleWordAllTypes) {
   EXPECT_TRUE((std::is_same_v<typename VecDefs<float64_t, -1, 0>::VecType, svfloat64_t>));
   EXPECT_TRUE((std::is_same_v<typename VecDefs<int32_t,  -1, 0>::VecType, svint32_t>));
   EXPECT_TRUE((std::is_same_v<typename VecDefs<uint8_t,  -1, 0>::VecType, svuint8_t>));
-  EXPECT_TRUE((std::is_same_v<typename VecDefs<bfloat16_t, -1, 0>::VecType, svbfloat16_t>));
+  EXPECT_TRUE((std::is_same_v<typename VecDefs<vecops::bfloat16_t, -1, 0>::VecType, svvecops::bfloat16_t>));
   EXPECT_TRUE((std::is_same_v<typename VecDefs<vecops::float16_t, -1, 0>::VecType, svfloat16_t>));
 }
 
@@ -103,7 +103,7 @@ TEST(SVETest, VecDefsTwoWordAllTypes) {
   EXPECT_TRUE((std::is_same_v<typename VecDefs<float64_t, -1, 1>::VecType, svfloat64x2_t>));
   EXPECT_TRUE((std::is_same_v<typename VecDefs<int32_t,  -1, 1>::VecType, svint32x2_t>));
   EXPECT_TRUE((std::is_same_v<typename VecDefs<uint8_t,  -1, 1>::VecType, svuint8x2_t>));
-  EXPECT_TRUE((std::is_same_v<typename VecDefs<bfloat16_t, -1, 1>::VecType, svbfloat16x2_t>));
+  EXPECT_TRUE((std::is_same_v<typename VecDefs<vecops::bfloat16_t, -1, 1>::VecType, svbfloat16x2_t>));
   EXPECT_TRUE((std::is_same_v<typename VecDefs<vecops::float16_t, -1, 1>::VecType, svfloat16x2_t>));
 }
 
@@ -132,7 +132,7 @@ TEST(SVETest, VecDefsFourWordAllTypes) {
   EXPECT_TRUE((std::is_same_v<typename VecDefs<float64_t, -1, 2>::VecType, svfloat64x4_t>));
   EXPECT_TRUE((std::is_same_v<typename VecDefs<int32_t,  -1, 2>::VecType, svint32x4_t>));
   EXPECT_TRUE((std::is_same_v<typename VecDefs<uint8_t,  -1, 2>::VecType, svuint8x4_t>));
-  EXPECT_TRUE((std::is_same_v<typename VecDefs<bfloat16_t, -1, 2>::VecType, svbfloat16x4_t>));
+  EXPECT_TRUE((std::is_same_v<typename VecDefs<vecops::bfloat16_t, -1, 2>::VecType, svbfloat16x4_t>));
   EXPECT_TRUE((std::is_same_v<typename VecDefs<vecops::float16_t, -1, 2>::VecType, svfloat16x4_t>));
 }
 
@@ -228,7 +228,7 @@ TEST(SVETest, Vec2TagAllTypes) {
   EXPECT_TRUE((std::is_same_v<Vec2Tag<svuint16_t>,     Tag<uint16_t, -1, 0>>));
   EXPECT_TRUE((std::is_same_v<Vec2Tag<svint8_t>,       Tag<int8_t,   -1, 0>>));
   EXPECT_TRUE((std::is_same_v<Vec2Tag<svuint8_t>,      Tag<uint8_t,  -1, 0>>));
-  EXPECT_TRUE((std::is_same_v<Vec2Tag<svbfloat16_t>,   Tag<bfloat16_t,-1, 0>>));
+  EXPECT_TRUE((std::is_same_v<Vec2Tag<svvecops::bfloat16_t>,   Tag<vecops::bfloat16_t,-1, 0>>));
   EXPECT_TRUE((std::is_same_v<Vec2Tag<svfloat16_t>,    Tag<vecops::float16_t,-1, 0>>));
   EXPECT_TRUE((std::is_same_v<Vec2Tag<svint64_t>,      Tag<int64_t,  -1, 0>>));
   EXPECT_TRUE((std::is_same_v<Vec2Tag<svuint64_t>,     Tag<uint64_t, -1, 0>>));
@@ -438,7 +438,7 @@ TEST(SVETest, MultiPredType) {
 // ============================================================================
 
 TEST(SVETest, RegTypeAll12Types) {
-  EXPECT_TRUE((std::is_same_v<typename SVE::RegType<bfloat16_t>::Type, svbfloat16_t>));
+  EXPECT_TRUE((std::is_same_v<typename SVE::RegType<vecops::bfloat16_t>::Type, svvecops::bfloat16_t>));
   EXPECT_TRUE((std::is_same_v<typename SVE::RegType<vecops::float16_t>::Type,   svfloat16_t>));
   EXPECT_TRUE((std::is_same_v<typename SVE::RegType<float32_t>::Type,   svfloat32_t>));
   EXPECT_TRUE((std::is_same_v<typename SVE::RegType<float64_t>::Type,   svfloat64_t>));

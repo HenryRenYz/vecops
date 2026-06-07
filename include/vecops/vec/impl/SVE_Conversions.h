@@ -18,6 +18,26 @@ namespace vecops::vec::CPU_CAPABILITY {
 namespace word {
 
 /* ======================================================================= */
+/*     svcvtlt_* fallback for SVE without SVE2                              */
+/*     svcvtlt converts the "long top" (odd elements).                      */
+/*     Without SVE2, extract odds via svuzp2, then use regular svcvt.       */
+/* ======================================================================= */
+#if !defined(__ARM_FEATURE_SVE2)
+VECOPS_VFUNC svfloat32_t sve_cvtlt_f32_f16(svbool_t pg, svfloat16_t v) {
+  auto u16 = svreinterpret_u16_f16(v);
+  auto odds_u16 = svuzp2_u16(u16, u16);
+  auto full_u16 = svzip1_u16(odds_u16, odds_u16);
+  return svcvt_f32_f16_x(pg, svreinterpret_f16_u16(full_u16));
+}
+VECOPS_VFUNC svfloat64_t sve_cvtlt_f64_f32(svbool_t pg, svfloat32_t v) {
+  auto u32 = svreinterpret_u32_f32(v);
+  auto odds_u32 = svuzp2_u32(u32, u32);
+  auto full_u32 = svzip1_u32(odds_u32, odds_u32);
+  return svcvt_f64_f32_x(pg, svreinterpret_f32_u32(full_u32));
+}
+#endif
+
+/* ======================================================================= */
 /*              Multi-word fallback forward declarations                    */
 /* ======================================================================= */
 
@@ -184,13 +204,23 @@ template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, bfloat16
 VECOPS_VFUNC Vec<T> convert(T t, Vec<Rebind<float16_t, T>> v) {
   auto pg = details::ptrue<float32_t>();
   auto lo_f32 = svcvt_f32_f16_x(pg, v);
+#if defined(__ARM_FEATURE_SVE2)
   auto hi_f32 = svcvtlt_f32_f16_x(pg, v);
+#else
+  auto hi_f32 = sve_cvtlt_f32_f16(pg, v);
+#endif
 #if defined(__ARM_FEATURE_SVE_BF16)
   auto pg_bf16 = details::ptrue<bfloat16_t>();
   auto lo_bf16 = svcvt_bf16_f32_x(pg_bf16, lo_f32);
   return svcvtnt_bf16_f32_x(lo_bf16, pg_bf16, hi_f32);
 #else
-  return details::f32x2_to_bf16(lo_f32, hi_f32);
+  auto u32_lo = svlsr_n_u32_x(pg, svreinterpret_u32_f32(lo_f32), 16);
+  auto u32_hi = svlsr_n_u32_x(pg, svreinterpret_u32_f32(hi_f32), 16);
+  auto u16_lo = svreinterpret_u16_u32(u32_lo);
+  auto u16_hi = svreinterpret_u16_u32(u32_hi);
+  auto lo_compact = svuzp1_u16(u16_lo, svdup_n_u16(0));
+  auto hi_compact = svuzp1_u16(u16_hi, svdup_n_u16(0));
+  return svreinterpret_bf16_u16(svzip1_u16(lo_compact, hi_compact));
 #endif
 }
 
@@ -240,7 +270,11 @@ template <TLV_DECL_TAG(T), TL_IF(T::POW2 == 1), TL_IF(is_any<TypeOf<T>, float64_
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float32_t, T>> v) {
   auto pg = details::ptrue<float32_t>();
   auto evens = svcvt_f64_f32_x(pg, v);
+#if defined(__ARM_FEATURE_SVE2)
   auto odds  = svcvtlt_f64_f32_x(pg, v);
+#else
+  auto odds  = sve_cvtlt_f64_f32(pg, v);
+#endif
   return word::reshape(t, svcreate2_f64(
     svzip1_f64(evens, odds), svzip2_f64(evens, odds)));
 }
@@ -336,7 +370,11 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float32_t, T>> v) {
   auto pg_f32 = details::ptrue<float32_t>();
   auto pg_f64 = details::ptrue<float64_t>();
   auto evens = svcvt_f64_f32_x(pg_f32, v);
+#if defined(__ARM_FEATURE_SVE2)
   auto odds  = svcvtlt_f64_f32_x(pg_f32, v);
+#else
+  auto odds  = sve_cvtlt_f64_f32(pg_f32, v);
+#endif
   auto lo = svcvt_s64_f64_x(pg_f64, svzip1_f64(evens, odds));
   auto hi = svcvt_s64_f64_x(pg_f64, svzip2_f64(evens, odds));
   return word::reshape(t, svcreate2_s64(lo, hi));
@@ -353,7 +391,11 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float32_t, T>> v) {
   auto pg_f32 = details::ptrue<float32_t>();
   auto pg_f64 = details::ptrue<float64_t>();
   auto evens = svcvt_f64_f32_x(pg_f32, v);
+#if defined(__ARM_FEATURE_SVE2)
   auto odds  = svcvtlt_f64_f32_x(pg_f32, v);
+#else
+  auto odds  = sve_cvtlt_f64_f32(pg_f32, v);
+#endif
   auto lo = svcvt_u64_f64_x(pg_f64, svzip1_f64(evens, odds));
   auto hi = svcvt_u64_f64_x(pg_f64, svzip2_f64(evens, odds));
   return word::reshape(t, svcreate2_u64(lo, hi));
@@ -436,14 +478,22 @@ template <TLV_DECL_TAG(T), TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, float32_
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float16_t, T>> v) {
   auto pg = details::ptrue<float32_t>();
   auto even_f32 = svcvt_f32_f16_x(pg, v);
+#if defined(__ARM_FEATURE_SVE2)
   auto odd_f32  = svcvtlt_f32_f16_x(pg, v);
+#else
+  auto odd_f32  = sve_cvtlt_f32_f16(pg, v);
+#endif
   return svzip1_f32(even_f32, odd_f32);
 }
 template <TLV_DECL_TAG(T), TL_IF(T::POW2 == 1), TL_IF(is_any<TypeOf<T>, float32_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float16_t, T>> v) {
   auto pg = details::ptrue<float32_t>();
   auto even_f32 = svcvt_f32_f16_x(pg, v);
+#if defined(__ARM_FEATURE_SVE2)
   auto odd_f32  = svcvtlt_f32_f16_x(pg, v);
+#else
+  auto odd_f32  = sve_cvtlt_f32_f16(pg, v);
+#endif
   return word::reshape(t, svcreate2_f32(
     svzip1_f32(even_f32, odd_f32), svzip2_f32(even_f32, odd_f32)));
 }

@@ -47,8 +47,24 @@ VECOPS_VFUNC svbfloat16_t f32x2_to_bf16(svfloat32_t lo_f32, svfloat32_t hi_f32) 
   auto hi_bf16 = svcvt_bf16_z(pg_bf16, hi_f32);
   return svuzp1(lo_bf16, hi_bf16);
   #else
-    #warning "Note: fallback not implemented — returning zero"
-    return svbfloat16_t{};
+    auto pg = svptrue_b32();
+    auto lo_u32 = svreinterpret_u32_f32(lo_f32);
+    auto hi_u32 = svreinterpret_u32_f32(hi_f32);
+
+    auto ones = svdup_n_u32(1);
+    auto bias_base = svdup_n_u32(0x7fff);
+
+    auto lo_round_bit = svand_u32_x(pg, svlsr_n_u32_x(pg, lo_u32, 16), ones);
+    auto lo_bias = svadd_u32_x(pg, lo_round_bit, bias_base);
+    auto u32_lo = svlsr_n_u32_x(pg, svadd_u32_x(pg, lo_u32, lo_bias), 16);
+
+    auto hi_round_bit = svand_u32_x(pg, svlsr_n_u32_x(pg, hi_u32, 16), ones);
+    auto hi_bias = svadd_u32_x(pg, hi_round_bit, bias_base);
+    auto u32_hi = svlsr_n_u32_x(pg, svadd_u32_x(pg, hi_u32, hi_bias), 16);
+
+    auto u16_lo = svreinterpret_u16_u32(u32_lo);
+    auto u16_hi = svreinterpret_u16_u32(u32_hi);
+    return svreinterpret_bf16_u16(svuzp1_u16(u16_lo, u16_hi));
   #endif
 }
 

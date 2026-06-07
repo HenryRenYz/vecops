@@ -53,6 +53,8 @@ template <typename E> VECOPS_VFUNC svuint8_t to_u8(auto v) {
   else if constexpr (std::is_same_v<E, float16_t>) return svreinterpret_u8_f16(v);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_u8_bf16(v);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_u8_u16(svreinterpret_u16_bf16(v));
 #endif
   else return svreinterpret_u8_u64(v);
 }
@@ -70,6 +72,8 @@ template <typename E> VECOPS_VFUNC auto from_u8(svuint8_t v) {
   else if constexpr (std::is_same_v<E, float16_t>) return svreinterpret_f16_u8(v);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u8(v);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(svreinterpret_u16_u8(v));
 #endif
   else return svreinterpret_u64_u8(v);
 }
@@ -88,6 +92,8 @@ template <typename E> VECOPS_VFUNC svuint32_t to_u32(auto v) {
   else if constexpr (std::is_same_v<E, float16_t>) return svreinterpret_u32_f16(v);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_u32_bf16(v);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_u32_u16(svreinterpret_u16_bf16(v));
 #endif
   else return svreinterpret_u32_u64(v);
 }
@@ -105,6 +111,8 @@ template <typename E> VECOPS_VFUNC auto from_u32(svuint32_t v) {
   else if constexpr (std::is_same_v<E, float16_t>) return svreinterpret_f16_u32(v);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u32(v);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(svreinterpret_u16_u32(v));
 #endif
   else return svreinterpret_u64_u32(v);
 }
@@ -124,6 +132,8 @@ VECOPS_VFUNC auto table_lookup(V v, I idx) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svtbl_f16(v, idx);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svtbl_bf16(v, idx);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(svtbl_u16(svreinterpret_u16_bf16(v), idx));
 #endif
   else return svtbl_u64(v, idx);
 }
@@ -142,6 +152,9 @@ VECOPS_VFUNC auto select(svbool_t m, V v1, V v0) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svsel_f16(m, v1, v0);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svsel_bf16(m, v1, v0);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
+    svsel_u16(m, svreinterpret_u16_bf16(v1), svreinterpret_u16_bf16(v0)));
 #endif
   else return svsel_u64(m, v1, v0);
 }
@@ -160,6 +173,8 @@ VECOPS_VFUNC auto dup_n(decltype(E()) value) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svdup_n_f16(value);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svdup_n_bf16(value);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(svdup_n_u16(value.to_bits()));
 #endif
   else return svdup_n_u64(value);
 }
@@ -178,6 +193,8 @@ VECOPS_VFUNC auto lastb(svbool_t pg, V v) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svlastb_f16(pg, v);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svlastb_bf16(pg, v);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return BFloat16::from_bits(svlastb_u16(pg, svreinterpret_u16_bf16(v)));
 #endif
   else return svlastb_u64(pg, v);
 }
@@ -196,6 +213,9 @@ VECOPS_VFUNC auto zip1(V a, V b) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svzip1_f16(a, b);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svzip1_bf16(a, b);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
+    svzip1_u16(svreinterpret_u16_bf16(a), svreinterpret_u16_bf16(b)));
 #endif
   else return svzip1_u64(a, b);
 }
@@ -214,6 +234,9 @@ VECOPS_VFUNC auto uzp1(V a, V b) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svuzp1_f16(a, b);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svuzp1_bf16(a, b);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
+    svuzp1_u16(svreinterpret_u16_bf16(a), svreinterpret_u16_bf16(b)));
 #endif
   else return svuzp1_u64(a, b);
 }
@@ -231,6 +254,9 @@ VECOPS_VFUNC auto uzp2(V a, V b) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svuzp2_f16(a, b);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svuzp2_bf16(a, b);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
+    svuzp2_u16(svreinterpret_u16_bf16(a), svreinterpret_u16_bf16(b)));
 #endif
   else return svuzp2_u64(a, b);
 }
@@ -249,6 +275,9 @@ VECOPS_VFUNC auto trn1(V a, V b) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svtrn1_f16(a, b);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svtrn1_bf16(a, b);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
+    svtrn1_u16(svreinterpret_u16_bf16(a), svreinterpret_u16_bf16(b)));
 #endif
   else return svtrn1_u64(a, b);
 }
@@ -266,6 +295,9 @@ VECOPS_VFUNC auto trn2(V a, V b) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svtrn2_f16(a, b);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svtrn2_bf16(a, b);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
+    svtrn2_u16(svreinterpret_u16_bf16(a), svreinterpret_u16_bf16(b)));
 #endif
   else return svtrn2_u64(a, b);
 }
@@ -284,10 +316,67 @@ VECOPS_VFUNC auto splice(svbool_t pg, V lo, V hi) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svsplice_f16(pg, lo, hi);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svsplice_bf16(pg, lo, hi);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
+    svsplice_u16(pg, svreinterpret_u16_bf16(lo), svreinterpret_u16_bf16(hi)));
 #endif
   else return svsplice_u64(pg, lo, hi);
 }
 
+}  // namespace details
+
+// === bf16-safe multi-register tuple access helpers ===
+// These abstract away the need for svget2/svcreate2/etc. on bf16 tuples,
+// which require +bf16 target feature when used natively.
+// Indices must be compile-time constants (template parameters).
+namespace details {
+template <typename T, uint64_t Index>
+VECOPS_VFUNC auto tuple_get2(auto v) {
+#if defined(__ARM_FEATURE_BF16)
+  return svget2(v, Index);
+#else
+  if constexpr (std::is_same_v<T, bfloat16_t>)
+    return svreinterpret_bf16_u16(svget2(svreinterpret_u16_bf16_x2(v), Index));
+  else
+    return svget2(v, Index);
+#endif
+}
+template <typename T, uint64_t Index>
+VECOPS_VFUNC auto tuple_get4(auto v) {
+#if defined(__ARM_FEATURE_BF16)
+  return svget4(v, Index);
+#else
+  if constexpr (std::is_same_v<T, bfloat16_t>)
+    return svreinterpret_bf16_u16(svget4(svreinterpret_u16_bf16_x4(v), Index));
+  else
+    return svget4(v, Index);
+#endif
+}
+template <typename T, typename WA, typename WB>
+VECOPS_VFUNC auto tuple_create2(WA wa, WB wb) {
+#if defined(__ARM_FEATURE_BF16)
+  return svcreate2(wa, wb);
+#else
+  if constexpr (std::is_same_v<T, bfloat16_t>)
+    return svreinterpret_bf16_u16_x2(
+      svcreate2(svreinterpret_u16_bf16(wa), svreinterpret_u16_bf16(wb)));
+  else
+    return svcreate2(wa, wb);
+#endif
+}
+template <typename T, typename WA, typename WB, typename WC, typename WD>
+VECOPS_VFUNC auto tuple_create4(WA wa, WB wb, WC wc, WD wd) {
+#if defined(__ARM_FEATURE_BF16)
+  return svcreate4(wa, wb, wc, wd);
+#else
+  if constexpr (std::is_same_v<T, bfloat16_t>)
+    return svreinterpret_bf16_u16_x4(
+      svcreate4(svreinterpret_u16_bf16(wa), svreinterpret_u16_bf16(wb),
+                svreinterpret_u16_bf16(wc), svreinterpret_u16_bf16(wd)));
+  else
+    return svcreate4(wa, wb, wc, wd);
+#endif
+}
 }  // namespace details
 
 /* === mfill / mwhilelt / mwhilege (used before fill_with_n) === */
@@ -348,6 +437,8 @@ VECOPS_VFUNC Vec<T> fill(T, TypeOf<T> value) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svdup_n_f16(value);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svdup_n_bf16(value);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(svdup_n_u16(value.to_bits()));
 #endif
   else return svdup_n_u64(value);
 }
@@ -368,6 +459,9 @@ VECOPS_VFUNC V blend(V v0, Mask<T> m, V v1) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svsel_f16(m, v1, v0);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svsel_bf16(m, v1, v0);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
+    svsel_u16(m, svreinterpret_u16_bf16(v1), svreinterpret_u16_bf16(v0)));
 #endif
   else return svsel_u64(m, v1, v0);
 }
@@ -387,6 +481,9 @@ VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, Mask<T> m, Vec<T> default_v) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svdup_n_f16_m(default_v, m, value);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svdup_n_bf16_m(default_v, m, value);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
+    svdup_n_u16_m(svreinterpret_u16_bf16(default_v), m, value.to_bits()));
 #endif
   else return svdup_n_u64_m(default_v, m, value);
 }
@@ -434,6 +531,8 @@ VECOPS_VFUNC TypeOf<T> get(V v, nint_t idx) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svlastb_f16(pg, v);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svlastb_bf16(pg, v);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return BFloat16::from_bits(svlastb_u16(pg, svreinterpret_u16_bf16(v)));
 #endif
   else return svlastb_u64(pg, v);
 }
@@ -455,6 +554,9 @@ VECOPS_VFUNC V set(V v, nint_t idx, TypeOf<T> x) {
   else if constexpr (std::is_same_v<E, float16_t>)  return svsel_f16(pg, bc, v);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>) return svsel_bf16(pg, bc, v);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
+    svsel_u16(pg, svreinterpret_u16_bf16(bc), svreinterpret_u16_bf16(v)));
 #endif
   else return svsel_u64(pg, bc, v);
 }
@@ -489,7 +591,9 @@ template <typename To, typename V, typename Ti = Vec2Tag<V>,
     TL_IF(num_words(To{}) == 2), TL_IF(num_words(Ti{}) == 2)>
 VECOPS_VFUNC Vec<To> bitcast(To, V v) {
   Half<To> t1;
-  return svcreate2(word::bitcast(t1, svget2(v, 0)), word::bitcast(t1, svget2(v, 1)));
+  return details::tuple_create2<TypeOf<To>>(
+    word::bitcast(t1, details::tuple_get2<TypeOf<Ti>, 0>(v)),
+    word::bitcast(t1, details::tuple_get2<TypeOf<Ti>, 1>(v)));
 }
 
 // used for internal API
@@ -497,8 +601,11 @@ template <typename To, typename V, typename Ti = Vec2Tag<V>,
     TL_IF(num_words(To{}) == 4), TL_IF(num_words(Ti{}) == 4)>
 VECOPS_VFUNC Vec<To> bitcast(To, V v) {
   Half<Half<To>> t1;
-  return svcreate4(word::bitcast(t1, svget4(v, 0)), word::bitcast(t1, svget4(v, 1)),
-                   word::bitcast(t1, svget4(v, 2)), word::bitcast(t1, svget4(v, 3)));
+  return details::tuple_create4<TypeOf<To>>(
+    word::bitcast(t1, details::tuple_get4<TypeOf<Ti>, 0>(v)),
+    word::bitcast(t1, details::tuple_get4<TypeOf<Ti>, 1>(v)),
+    word::bitcast(t1, details::tuple_get4<TypeOf<Ti>, 2>(v)),
+    word::bitcast(t1, details::tuple_get4<TypeOf<Ti>, 3>(v)));
 }
 
 /* === shuf / local_shuf === */
@@ -638,24 +745,33 @@ VECOPS_VFUNC V upper(T t, Vec<T> v) {
   else if constexpr (std::is_same_v<E, float16_t>)   return svsplice_f16(up, v, v);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>)  return svsplice_bf16(up, v, v);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>)  return svreinterpret_bf16_u16(
+    svsplice_u16(up, svreinterpret_u16_bf16(v), svreinterpret_u16_bf16(v)));
 #endif
   else return svsplice_u64(up, v, v);
 }
 
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 2)>
-VECOPS_VFUNC V upper(T t, Vec<T> v) { return svget2(v, 1); }
+VECOPS_VFUNC V upper(T t, Vec<T> v) { return details::tuple_get2<TypeOf<T>, 1>(v); }
 
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 4)>
-VECOPS_VFUNC V upper(T t, Vec<T> v) { return svcreate2(svget4(v, 2), svget4(v, 3)); }
+VECOPS_VFUNC V upper(T t, Vec<T> v) {
+  return details::tuple_create2<TypeOf<Half<T>>>(
+    details::tuple_get4<TypeOf<T>, 2>(v), details::tuple_get4<TypeOf<T>, 3>(v));
+}
 
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 1)>
 VECOPS_VFUNC V lower(T t, Vec<T> v) { return v; }
 
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 2)>
-VECOPS_VFUNC V lower(T t, Vec<T> v) { return svget2(v, 0); }
+VECOPS_VFUNC V lower(T t, Vec<T> v) { return details::tuple_get2<TypeOf<T>, 0>(v); }
 
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 4)>
-VECOPS_VFUNC V lower(T t, Vec<T> v) { return svcreate2(svget4(v, 0), svget4(v, 1)); }
+VECOPS_VFUNC V lower(T t, Vec<T> v) {
+  return details::tuple_create2<TypeOf<Half<T>>>(
+    details::tuple_get4<TypeOf<T>, 0>(v), details::tuple_get4<TypeOf<T>, 1>(v));
+}
 
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
 VECOPS_VFUNC V even(T t, Vec<T> v) {
@@ -672,6 +788,9 @@ VECOPS_VFUNC V even(T t, Vec<T> v) {
   else if constexpr (std::is_same_v<E, float16_t>)   return svuzp1_f16(v, v);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>)  return svuzp1_bf16(v, v);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>)  return svreinterpret_bf16_u16(
+    svuzp1_u16(svreinterpret_u16_bf16(v), svreinterpret_u16_bf16(v)));
 #endif
   else return svuzp1_u64(v, v);
 }
@@ -691,6 +810,9 @@ VECOPS_VFUNC V odd(T t, Vec<T> v) {
   else if constexpr (std::is_same_v<E, float16_t>)   return svuzp2_f16(v, v);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>)  return svuzp2_bf16(v, v);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>)  return svreinterpret_bf16_u16(
+    svuzp2_u16(svreinterpret_u16_bf16(v), svreinterpret_u16_bf16(v)));
 #endif
   else return svuzp2_u64(v, v);
 }
@@ -712,18 +834,24 @@ VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
   else if constexpr (std::is_same_v<E, float16_t>)   return svsplice_f16(lo, v_lo, v_hi);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>)  return svsplice_bf16(lo, v_lo, v_hi);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>)  return svreinterpret_bf16_u16(
+    svsplice_u16(lo, svreinterpret_u16_bf16(v_lo), svreinterpret_u16_bf16(v_hi)));
 #endif
   else return svsplice_u64(lo, v_lo, v_hi);
 }
 
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 2)>
 VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
-  return svcreate2(v_lo, v_hi);
+  return details::tuple_create2<TypeOf<T>>(v_lo, v_hi);
 }
 
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 4)>
 VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
-  return svcreate4(svget2(v_lo, 0), svget2(v_lo, 1), svget2(v_hi, 0), svget2(v_hi, 1));
+  using E2 = TypeOf<Half<T>>;
+  return details::tuple_create4<TypeOf<T>>(
+    details::tuple_get2<E2, 0>(v_lo), details::tuple_get2<E2, 1>(v_lo),
+    details::tuple_get2<E2, 0>(v_hi), details::tuple_get2<E2, 1>(v_hi));
 }
 
 
@@ -742,6 +870,9 @@ VECOPS_VFUNC Vec<T> concat_even(T t, Vec<T> v_lo, Vec<T> v_hi) {
   else if constexpr (std::is_same_v<E, float16_t>)   return svuzp1_f16(v_lo, v_hi);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>)  return svuzp1_bf16(v_lo, v_hi);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>)  return svreinterpret_bf16_u16(
+    svuzp1_u16(svreinterpret_u16_bf16(v_lo), svreinterpret_u16_bf16(v_hi)));
 #endif
   else return svuzp1_u64(v_lo, v_hi);
 }
@@ -761,6 +892,9 @@ VECOPS_VFUNC Vec<T> concat_odd(T t, Vec<T> v_lo, Vec<T> v_hi) {
   else if constexpr (std::is_same_v<E, float16_t>)   return svuzp2_f16(v_lo, v_hi);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>)  return svuzp2_bf16(v_lo, v_hi);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>)  return svreinterpret_bf16_u16(
+    svuzp2_u16(svreinterpret_u16_bf16(v_lo), svreinterpret_u16_bf16(v_hi)));
 #endif
   else return svuzp2_u64(v_lo, v_hi);
 }
@@ -781,6 +915,9 @@ VECOPS_VFUNC Vec<T> interleave(T t, V v_lo, V v_hi) {
   else if constexpr (std::is_same_v<E, float16_t>)   return svzip1_f16(v_lo, v_hi);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>)  return svzip1_bf16(v_lo, v_hi);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>)  return svreinterpret_bf16_u16(
+    svzip1_u16(svreinterpret_u16_bf16(v_lo), svreinterpret_u16_bf16(v_hi)));
 #endif
   else return svzip1_u64(v_lo, v_hi);
 }
@@ -800,6 +937,9 @@ VECOPS_VFUNC V interleave_even(V a, V b) {
   else if constexpr (std::is_same_v<E, float16_t>)   return svtrn1_f16(a, b);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>)  return svtrn1_bf16(a, b);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>)  return svreinterpret_bf16_u16(
+    svtrn1_u16(svreinterpret_u16_bf16(a), svreinterpret_u16_bf16(b)));
 #endif
   else return svtrn1_u64(a, b);
 }
@@ -819,6 +959,9 @@ VECOPS_VFUNC V interleave_odd(V a, V b) {
   else if constexpr (std::is_same_v<E, float16_t>)   return svtrn2_f16(a, b);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>)  return svtrn2_bf16(a, b);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>)  return svreinterpret_bf16_u16(
+    svtrn2_u16(svreinterpret_u16_bf16(a), svreinterpret_u16_bf16(b)));
 #endif
   else return svtrn2_u64(a, b);
 }
@@ -843,6 +986,9 @@ VECOPS_VFUNC V local_interleave_lower(V a, V b) {
   else if constexpr (std::is_same_v<E, float16_t>)   return svzip1_f16(aw, bw);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>)  return svzip1_bf16(aw, bw);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>)  return svreinterpret_bf16_u16(
+    svzip1_u16(svreinterpret_u16_bf16(aw), svreinterpret_u16_bf16(bw)));
 #endif
   else return svzip1_u64(aw, bw);
 }
@@ -867,6 +1013,9 @@ VECOPS_VFUNC V local_interleave_upper(V a, V b) {
   else if constexpr (std::is_same_v<E, float16_t>)   return svzip1_f16(aw, bw);
 #if defined(__ARM_FEATURE_BF16)
   else if constexpr (std::is_same_v<E, bfloat16_t>)  return svzip1_bf16(aw, bw);
+#else
+  else if constexpr (std::is_same_v<E, bfloat16_t>)  return svreinterpret_bf16_u16(
+    svzip1_u16(svreinterpret_u16_bf16(aw), svreinterpret_u16_bf16(bw)));
 #endif
   else return svzip1_u64(aw, bw);
 }
