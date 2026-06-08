@@ -11,9 +11,14 @@
 #include <iostream>
 
 #include "vecops/CoreDefs.h"
+#include "./Bitcast.h"
 
 #ifdef ARCH_X86_FAMILY
 #include <immintrin.h>
+#endif
+
+#if defined(ARCH_ARM64)
+#include <arm_neon.h>
 #endif
 
 namespace vecops {
@@ -29,15 +34,13 @@ struct alignas(2) Float16 {
   template <typename Int, std::enable_if_t<std::is_integral_v<Int>, bool> = false>
   VECOPS_INLINE explicit Float16(Int x) : Float16(float(x)) { }
 
-  #if defined(__arm__) || defined(__aarch64__)
+  #if defined(ARCH_ARM64)
   VECOPS_INLINE constexpr Float16(__fp16 x) {
-    union { __fp16 f; uint16_t u; } u{.f = x};
-    this->x = u.u;
+    this->x = bitcast<uint16_t>(x);
   }
   #else
   VECOPS_INLINE constexpr Float16(_Float16 x) {
-    union { _Float16 f; uint16_t u; } u{.f = x};
-    this->x = u.u;
+    this->x = bitcast<uint16_t>(x);
   }
   #endif
 
@@ -53,17 +56,15 @@ struct alignas(2) Float16 {
 
   operator float() const;
 
-  #if defined(__arm__) || defined(__aarch64__)
+  #if defined(ARCH_ARM64)
 
   VECOPS_INLINE constexpr operator __fp16() const {
-    union { __fp16 b; uint16_t u; } u{.u = this->x};
-    return u.b;
+    return bitcast<__fp16>(this->x);
   }
 
   #else
   VECOPS_INLINE constexpr operator _Float16() const {
-    union { _Float16 b; uint16_t u; } u{.u = this->x};
-    return u.b;
+    return bitcast<_Float16>(this->x);
   }
   #endif
 
@@ -77,20 +78,11 @@ private:
 };
 
 namespace details {
-
-VECOPS_INLINE constexpr float fp32_from_bits(uint32_t x) {
-  union { float f; uint32_t i; } u{.i = x};
-  return u.f;
-}
-
-VECOPS_INLINE constexpr uint32_t fp32_to_bits(float x) {
-  union { float f; uint32_t i; } u{.f = x};
-  return u.i;
-}
-
 inline float fp16_to_fp32(uint16_t v) {
-  #ifdef HAS_F16C
+  #if defined(ARCH_X86_64) && defined(HAS_F16C)
   return _cvtsh_ss(v);
+  #elif defined(ARCH_ARM64) && defined(HAS_NEON_FP16_ARITH)
+  return float(bitcast<__fp16>(v));
   #else // HAS_F16C
   // Copied from https://github.com/pytorch/pytorch/blob/torch/headeronly/util/Half.h
   /*
@@ -169,7 +161,7 @@ inline float fp16_to_fp32(uint16_t v) {
 
   const float exp_scale = exp_scale_val;
   const float normalized_value =
-      details::fp32_from_bits((two_w >> 4) + exp_offset) * exp_scale;
+      bitcast<float>((two_w >> 4) + exp_offset) * exp_scale;
 
   /*
    * Convert denormalized half-precision inputs into single-precision results
@@ -205,7 +197,7 @@ inline float fp16_to_fp32(uint16_t v) {
   constexpr uint32_t magic_mask = UINT32_C(126) << 23;
   constexpr float magic_bias = 0.5f;
   const float denormalized_value =
-      fp32_from_bits((two_w >> 17) | magic_mask) - magic_bias;
+      bitcast<float>((two_w >> 17) | magic_mask) - magic_bias;
 
   /*
    * - Choose either results of conversion of input as a normalized number, or
@@ -217,15 +209,17 @@ inline float fp16_to_fp32(uint16_t v) {
    */
   constexpr uint32_t denormalized_cutoff = UINT32_C(1) << 27;
   const uint32_t result = sign |
-                          (two_w < denormalized_cutoff ? fp32_to_bits(denormalized_value)
-                                                       : fp32_to_bits(normalized_value));
-  return fp32_from_bits(result);
+                          (two_w < denormalized_cutoff ? bitcast<uint32_t>(denormalized_value)
+                                                       : bitcast<uint32_t>(normalized_value));
+  return bitcast<float>(result);
   #endif // HAS_F16C
 }
 
 inline uint16_t fp16_from_fp32(float v) {
-  #ifdef HAS_F16C
+  #if defined(ARCH_X86_64) && defined(HAS_F16C)
   return _cvtss_sh(v, _MM_FROUND_TO_NEAREST_INT);
+  #elif defined(ARCH_ARM64) && defined(HAS_NEON_FP16_ARITH)
+  return bitcast<uint16_t>(__fp16(v));
   #else // HAS_F16C
   // Copied from https://github.com/pytorch/pytorch/blob/torch/headeronly/util/Half.h
   // const float scale_to_inf = 0x1.0p+112f;
@@ -242,10 +236,10 @@ inline uint16_t fp16_from_fp32(float v) {
   #if defined(_MSC_VER) && _MSC_VER == 1916
   float base = ((signbit(f) != 0 ? -f : f) * scale_to_inf) * scale_to_zero;
   #else
-  float base = (fabsf(v) * scale_to_inf) * scale_to_zero;
+  float base = (std::fabs(v) * scale_to_inf) * scale_to_zero;
   #endif
 
-  const uint32_t w = fp32_to_bits(v);
+  const uint32_t w = bitcast<uint32_t>(v);
   const uint32_t shl1_w = w + w;
   const uint32_t sign = w & UINT32_C(0x80000000);
   uint32_t bias = shl1_w & UINT32_C(0xFF000000);
@@ -253,8 +247,8 @@ inline uint16_t fp16_from_fp32(float v) {
     bias = UINT32_C(0x71000000);
   }
 
-  base = fp32_from_bits((bias >> 1) + UINT32_C(0x07800000)) + base;
-  const uint32_t bits = fp32_to_bits(base);
+  base = bitcast<float>((bias >> 1) + UINT32_C(0x07800000)) + base;
+  const uint32_t bits = bitcast<uint32_t>(base);
   const uint32_t exp_bits = (bits >> 13) & UINT32_C(0x00007C00);
   const uint32_t mantissa_bits = bits & UINT32_C(0x00000FFF);
   const uint32_t nonsign = exp_bits + mantissa_bits;

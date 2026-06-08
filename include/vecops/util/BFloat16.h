@@ -10,6 +10,11 @@
 #include <iostream>
 
 #include "vecops/CoreDefs.h"
+#include "./Bitcast.h"
+
+#if defined(ARCH_ARM64)
+#include <arm_neon.h>
+#endif
 
 namespace vecops {
 
@@ -18,13 +23,17 @@ struct alignas(2) BFloat16 {
   VECOPS_INLINE constexpr BFloat16() = default;
 
   VECOPS_INLINE constexpr BFloat16(float x) {
+    #if defined(ARCH_ARM64) && defined(HAS_BF16)
+    this->x = bitcast<uint16_t>(vcvth_bf16_f32(x));
+    #else
     if (std::isnan(x)) {
       this->x = uint16_t(0x7fc0);
     } else {
-      union { float f; uint32_t i; } u{.f = x};
-      auto bias = ((u.i >> 16) & 1) + uint32_t(0x7fff);
-      this->x = uint16_t((u.i + bias) >> 16);
+      uint32_t bits = bitcast<uint32_t>(x);
+      auto bias = ((bits >> 16) & 1) + uint32_t(0x7fff);
+      this->x = uint16_t((bits + bias) >> 16);
     }
+    #endif
   }
 
   VECOPS_INLINE constexpr BFloat16(double x) : BFloat16(float(x)) { }
@@ -33,8 +42,7 @@ struct alignas(2) BFloat16 {
   VECOPS_INLINE explicit constexpr BFloat16(Int x) : BFloat16(float(x)) { }
 
   VECOPS_INLINE constexpr BFloat16(__bf16 x) {
-    union { __bf16 b; uint16_t u; } u{.b = x};
-    this->x = u.u;
+    this->x = bitcast<uint16_t>(x);
   }
 
   VECOPS_INLINE static constexpr BFloat16 from_bits(uint16_t x) {
@@ -48,13 +56,15 @@ struct alignas(2) BFloat16 {
   }
 
   VECOPS_INLINE constexpr operator float() const {
-    union { float f; uint32_t i; } u{.i = uint32_t(this->x) << 16};
-    return u.f;
+    #if defined(ARCH_ARM64) && defined(HAS_BF16)
+    return vcvtah_f32_bf16(bitcast<__bf16>(this->x));
+    #else
+    return bitcast<float>(uint32_t(this->x) << 16);
+    #endif
   }
 
   VECOPS_INLINE constexpr operator __bf16() const {
-    union { __bf16 b; uint16_t u; } u{.u = this->x};
-    return u.b;
+    return bitcast<__bf16>(this->x);
   }
 
   template <typename Int, std::enable_if_t<std::is_integral_v<Int>, bool> = false>
