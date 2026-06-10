@@ -1458,3 +1458,301 @@ TEST_F(LayoutDeathTest, DynamicBoundsViolationUnaligned) {
 }
 
 #endif  // VECOPS_DEBUG
+
+// ======================================================================
+// Continuity Traits Suite
+// ======================================================================
+
+class ContiguityTest : public ::testing::Test {};
+
+TEST_F(ContiguityTest, CtLastContiguous_FullConst) {
+  auto layout = make_layout(make_shape(cint<4>, cint<6>),
+                            make_strides(cint<6>, cint<1>));
+  EXPECT_TRUE((is_ct_last_contiguous<decltype(layout), 2>::value));
+  EXPECT_TRUE((is_ct_last_contiguous<decltype(layout), 1>::value));
+  EXPECT_TRUE((is_ct_contiguous<decltype(layout)>::value));
+}
+
+TEST_F(ContiguityTest, CtLastContiguous_LastOneConst) {
+  auto layout = make_layout(make_shape(Any{4}, Any{6}),
+                            make_strides(Any{6}, cint<1>));
+  EXPECT_TRUE((is_ct_last_contiguous<decltype(layout), 1>::value));
+}
+
+TEST_F(ContiguityTest, CtLastContiguous_ShapeNotConst) {
+  // shape[1] must be non-const because the contiguity check at D=0
+  // uses Zd1=shape[1]; shape[0] is not checked in that position.
+  auto layout = make_layout(make_shape(cint<4>, Any{6}),
+                            make_strides(cint<6>, cint<1>));
+  EXPECT_FALSE((is_ct_last_contiguous<decltype(layout), 2>::value));
+}
+
+TEST_F(ContiguityTest, CtLastContiguous_StrideNotConst) {
+  auto layout = make_layout(make_shape(cint<4>, cint<6>),
+                            make_strides(Any{6}, cint<1>));
+  EXPECT_FALSE((is_ct_last_contiguous<decltype(layout), 2>::value));
+}
+
+TEST_F(ContiguityTest, CtLastContiguous_N_Exceeds_Ndim) {
+  auto layout = make_layout(make_shape(cint<4>, cint<6>),
+                            make_strides(cint<6>, cint<1>));
+  EXPECT_FALSE((is_ct_last_contiguous<decltype(layout), 3>::value));
+}
+
+TEST_F(ContiguityTest, CtLastContiguous_N_Zero) {
+  auto layout = make_layout(make_shape(cint<4>, cint<6>),
+                            make_strides(cint<6>, cint<1>));
+  EXPECT_TRUE((is_ct_last_contiguous<decltype(layout), 0>::value));
+}
+
+TEST_F(ContiguityTest, CtLastContiguous_NonUnitLastStride) {
+  auto layout = make_layout(make_shape(cint<4>, cint<6>),
+                            make_strides(cint<6>, cint<2>));
+  EXPECT_FALSE((is_ct_last_contiguous<decltype(layout), 1>::value));
+}
+
+TEST_F(ContiguityTest, CtLastContiguous_4D_FullConst) {
+  auto s = make_shape(cint<2>, cint<3>, cint<4>, cint<5>);
+  auto st = make_strides(cint<60>, cint<20>, cint<5>, cint<1>);
+  auto layout = make_layout(s, st);
+  EXPECT_TRUE((is_ct_last_contiguous<decltype(layout), 4>::value));
+  EXPECT_TRUE((is_ct_last_contiguous<decltype(layout), 2>::value));
+  EXPECT_TRUE((is_ct_contiguous<decltype(layout)>::value));
+}
+
+TEST_F(ContiguityTest, CtLastContiguous_4D_Last2) {
+  auto s = make_shape(cint<2>, cint<3>, cint<4>, cint<5>);
+  auto st = make_strides(cint<20>, cint<5>, cint<1>, Any{1});
+  auto layout = make_layout(s, st);
+  EXPECT_FALSE((is_ct_last_contiguous<decltype(layout), 4>::value));
+}
+
+TEST_F(ContiguityTest, CtIsContiguous_NotContiguous) {
+  auto layout = make_layout(make_shape(cint<4>, cint<6>),
+                            make_strides(cint<5>, cint<1>));
+  EXPECT_FALSE((is_ct_contiguous<decltype(layout)>::value));
+}
+
+TEST_F(ContiguityTest, CtContiguous_1D) {
+  auto layout = make_layout(make_shape(cint<10>), make_strides(cint<1>));
+  EXPECT_TRUE((is_ct_contiguous<decltype(layout)>::value));
+}
+
+TEST_F(ContiguityTest, CtContiguous_3D_FullConst) {
+  auto s = make_shape(cint<3>, cint<4>, cint<5>);
+  auto st = make_strides(cint<20>, cint<5>, cint<1>);
+  auto layout = make_layout(s, st);
+  EXPECT_TRUE((is_ct_contiguous<decltype(layout)>::value));
+}
+
+TEST_F(ContiguityTest, CtContiguous_3D_NotContiguous_Mismatch) {
+  auto s = make_shape(cint<3>, cint<4>, cint<5>);
+  auto st = make_strides(cint<30>, cint<5>, cint<1>);
+  auto layout = make_layout(s, st);
+  EXPECT_FALSE((is_ct_contiguous<decltype(layout)>::value));
+}
+
+// ======================================================================
+// Runtime Contiguity Suite
+// ======================================================================
+
+class RuntimeContiguityTest : public ::testing::Test {};
+
+TEST_F(RuntimeContiguityTest, IsLastContiguous_AllRuntimeRowMajor) {
+  auto layout = make_layout(make_shape(4, 6), make_strides(6, 1));
+  EXPECT_TRUE(is_last_contiguous<2>(layout));
+  EXPECT_TRUE(is_contiguous(layout));
+}
+
+TEST_F(RuntimeContiguityTest, IsLastContiguous_AllRuntimeNonContiguous) {
+  auto layout = make_layout(make_shape(4, 6), make_strides(10, 2));
+  EXPECT_FALSE(is_last_contiguous<2>(layout));
+  EXPECT_FALSE(is_last_contiguous<1>(layout));
+}
+
+TEST_F(RuntimeContiguityTest, IsLastContiguous_CompileTimeShortcut) {
+  auto layout = make_layout(make_shape(cint<4>, cint<6>),
+                            make_strides(cint<6>, cint<1>));
+  EXPECT_TRUE(is_last_contiguous<2>(layout));
+  EXPECT_TRUE(is_contiguous(layout));
+}
+
+TEST_F(RuntimeContiguityTest, IsLastContiguous_N_Greater_Than_Ndim) {
+  auto layout = make_layout(make_shape(4, 6), make_strides(6, 1));
+  EXPECT_FALSE(is_last_contiguous<3>(layout));
+}
+
+TEST_F(RuntimeContiguityTest, IsLastContiguous_3D_Last1) {
+  auto layout = make_layout(make_shape(3, 4, 5), make_strides(20, 5, 1));
+  EXPECT_TRUE(is_last_contiguous<1>(layout));
+}
+
+TEST_F(RuntimeContiguityTest, IsLastContiguous_3D_Last2) {
+  auto layout = make_layout(make_shape(3, 4, 5), make_strides(20, 5, 1));
+  EXPECT_TRUE(is_last_contiguous<2>(layout));
+}
+
+TEST_F(RuntimeContiguityTest, IsLastContiguous_3D_Full) {
+  auto layout = make_layout(make_shape(3, 4, 5), make_strides(20, 5, 1));
+  EXPECT_TRUE(is_last_contiguous<3>(layout));
+}
+
+TEST_F(RuntimeContiguityTest, IsContiguous_NonContiguous) {
+  auto layout = make_layout(make_shape(3, 4, 5), make_strides(30, 5, 1));
+  EXPECT_FALSE(is_contiguous(layout));
+  EXPECT_TRUE(is_last_contiguous<2>(layout));
+}
+
+TEST_F(RuntimeContiguityTest, IsContiguous_4D) {
+  auto layout = make_layout(make_shape(2, 3, 4, 5), make_strides(60, 20, 5, 1));
+  EXPECT_TRUE(is_contiguous(layout));
+}
+
+TEST_F(RuntimeContiguityTest, IsContiguous_1D) {
+  auto layout = make_layout(make_shape(10), make_strides(1));
+  EXPECT_TRUE(is_contiguous(layout));
+}
+
+// ======================================================================
+// Transpose / Swap Dim Trait Suite
+// ======================================================================
+
+class TransposeTraitTest : public ::testing::Test {};
+
+TEST_F(TransposeTraitTest, SwapDim_Basic) {
+  auto s = make_shape(cint<1>, cint<2>, cint<3>);
+  auto r = gemm::details::swap_dim<0, 2>(s);
+  EXPECT_EQ(r.ndim(), 3);
+  EXPECT_EQ(get<0>(r), 3);
+  EXPECT_EQ(get<1>(r), 2);
+  EXPECT_EQ(get<2>(r), 1);
+  EXPECT_TRUE(r.template is_const<0>());
+  EXPECT_TRUE(r.template is_const<2>());
+}
+
+TEST_F(TransposeTraitTest, SwapDim_PreserveConst) {
+  auto s = make_shape(cint<128>, Any{64}, cint<32>);
+  auto r = gemm::details::swap_dim<0, 1>(s);
+  // After swap: Shape<Any, Const<128>, Const<32>>
+  EXPECT_FALSE(r.template is_const<0>());  // Any moved to pos 0
+  EXPECT_TRUE(r.template is_const<1>());   // Const<128> moved to pos 1
+  EXPECT_TRUE(r.template is_const<2>());   // Const<32> unchanged
+  EXPECT_EQ(get<0>(r), 64);
+  EXPECT_EQ(get<1>(r), 128);
+  EXPECT_EQ(get<2>(r), 32);
+}
+
+TEST_F(TransposeTraitTest, SwapDim_RuntimeValues) {
+  auto s = make_shape(10, 20, 30);
+  auto r = gemm::details::swap_dim<0, 2>(s);
+  EXPECT_EQ(get<0>(r), 30);
+  EXPECT_EQ(get<1>(r), 20);
+  EXPECT_EQ(get<2>(r), 10);
+}
+
+TEST_F(TransposeTraitTest, SwapDim_AllConst) {
+  auto s = make_shape(cint<1>, cint<2>, cint<3>, cint<4>);
+  auto r = gemm::details::swap_dim<1, 2>(s);
+  EXPECT_EQ(get<0>(r), 1);
+  EXPECT_EQ(get<1>(r), 3);
+  EXPECT_EQ(get<2>(r), 2);
+  EXPECT_EQ(get<3>(r), 4);
+}
+
+TEST_F(TransposeTraitTest, SwapDim_Strides) {
+  auto st = make_strides(cint<60>, cint<20>, cint<5>, cint<1>);
+  auto r = gemm::details::swap_dim<0, 3>(st);
+  EXPECT_EQ(get<0>(r), 1);
+  EXPECT_EQ(get<1>(r), 20);
+  EXPECT_EQ(get<2>(r), 5);
+  EXPECT_EQ(get<3>(r), 60);
+}
+
+// ======================================================================
+// Layout Transpose Suite
+// ======================================================================
+
+class LayoutTransposeTest : public ::testing::Test {};
+
+TEST_F(LayoutTransposeTest, TransposeCT_Basic) {
+  auto layout = make_layout(make_shape(cint<4>, cint<6>),
+                            make_strides(cint<6>, cint<1>));
+  auto t = transpose<0, 1>(layout);
+  EXPECT_EQ(t.ndim(), 2);
+  EXPECT_EQ(size<0>(t), 6);
+  EXPECT_EQ(size<1>(t), 4);
+  EXPECT_EQ(stride<0>(t), 1);
+  EXPECT_EQ(stride<1>(t), 6);
+}
+
+TEST_F(LayoutTransposeTest, TransposeCT_3D) {
+  auto layout = make_layout(make_shape(cint<2>, cint<3>, cint<4>),
+                            make_strides(cint<12>, cint<4>, cint<1>));
+  auto t = transpose<0, 2>(layout);
+  EXPECT_EQ(t.ndim(), 3);
+  EXPECT_EQ(size<0>(t), 4);
+  EXPECT_EQ(size<1>(t), 3);
+  EXPECT_EQ(size<2>(t), 2);
+  EXPECT_EQ(stride<0>(t), 1);
+  EXPECT_EQ(stride<1>(t), 4);
+  EXPECT_EQ(stride<2>(t), 12);
+}
+
+TEST_F(LayoutTransposeTest, TransposeCT_ConstPreserved) {
+  auto layout = make_layout(make_shape(cint<128>, cint<64>, cint<32>),
+                            make_strides(cint<2048>, cint<32>, cint<1>));
+  auto t = transpose<0, 1>(layout);
+  EXPECT_TRUE(t.shape().template is_const<0>());
+  EXPECT_TRUE(t.shape().template is_const<1>());
+  EXPECT_TRUE(t.strides().template is_const<0>());
+}
+
+TEST_F(LayoutTransposeTest, TransposeCT_SameAxis) {
+  auto layout = make_layout(make_shape(4, 6), make_strides(6, 1));
+  auto t = transpose<1, 1>(layout);
+  EXPECT_EQ(size<0>(t), 4);
+  EXPECT_EQ(size<1>(t), 6);
+}
+
+TEST_F(LayoutTransposeTest, TransposeRT_Basic) {
+  auto layout = make_layout(make_shape(4, 6), make_strides(6, 1));
+  auto t = transpose(layout, 0, 1);
+  EXPECT_EQ(t.ndim(), 2);
+  EXPECT_EQ(size<0>(t), 6);
+  EXPECT_EQ(size<1>(t), 4);
+  EXPECT_EQ(stride<0>(t), 1);
+  EXPECT_EQ(stride<1>(t), 6);
+}
+
+TEST_F(LayoutTransposeTest, TransposeRT_DegradesToAny) {
+  auto layout = make_layout(make_shape(cint<4>, cint<6>),
+                            make_strides(cint<6>, cint<1>));
+  auto t = transpose(layout, 0, 1);
+  EXPECT_FALSE(t.shape().template is_const<0>());
+  EXPECT_FALSE(t.shape().template is_const<1>());
+  EXPECT_FALSE(t.strides().template is_const<0>());
+  EXPECT_FALSE(t.strides().template is_const<1>());
+}
+
+TEST_F(LayoutTransposeTest, TransposeRT_3D) {
+  auto layout = make_layout(make_shape(2, 3, 4), make_strides(12, 4, 1));
+  auto t = transpose(layout, 0, 2);
+  EXPECT_EQ(size<0>(t), 4);
+  EXPECT_EQ(size<1>(t), 3);
+  EXPECT_EQ(size<2>(t), 2);
+}
+
+TEST_F(LayoutTransposeTest, TransposeRT_SameAxis) {
+  auto layout = make_layout(make_shape(4, 6), make_strides(6, 1));
+  auto t = transpose(layout, 1, 1);
+  EXPECT_EQ(size<0>(t), 4);
+  EXPECT_EQ(size<1>(t), 6);
+}
+
+#ifdef VECOPS_DEBUG
+TEST_F(LayoutTransposeTest, TransposeRT_InvalidIndexDeath) {
+  auto layout = make_layout(make_shape(4, 6), make_strides(6, 1));
+  EXPECT_DEATH(transpose(layout, -1, 0), "out of range");
+  EXPECT_DEATH(transpose(layout, 0, 2), "out of range");
+}
+#endif

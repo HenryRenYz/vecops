@@ -34,13 +34,14 @@ struct Atom {
   using KernelKind = gemm::KernelKind;
   /**
    * 硬件累加器M N分块大小，可能是常量或者运行时量（如SME）
+   * 可能不是constexpr
    */
-  constexpr static auto M_R = cint<16>;
-  constexpr static auto N_R = cint<16>;
+  static constexpr auto M_R = cint<16>;
+  static constexpr auto N_R = cint<16>;
   /**
    * 单条指令 K 轴长度 (SME: 1, AMX BF16: 32, AMX INT8: 64)。
    */
-  constexpr static auto K_R = cint<16>;
+  static constexpr auto K_R = cint<16>;
 
   /**
    * 内核期望的A, B, C元素类型。如果内核传入的实际A, B, C类型和此保持一致则不需要类型转换。
@@ -71,10 +72,7 @@ struct Atom {
   static constexpr bool is_A_packed_layout = true;
 
   template <
-      typename TSrcA,
-      typename SrcALayout,
-      typename SrcAPackedLayout,
-      typename Prologue>
+      typename TSrcA, typename SrcALayout, typename SrcAPackedLayout, typename Prologue>
   void pack_A(const TSrcA *src, SrcALayout src_layout, TA *dst, SrcAPackedLayout dst_layout, const Prologue &prologue);
 
 
@@ -85,10 +83,7 @@ struct Atom {
   static constexpr bool is_B_packed_layout = true;
 
   template <
-      typename TSrcB,
-      typename SrcBLayout,
-      typename SrcBPackedLayout,
-      typename Prologue>
+      typename TSrcB, typename SrcBLayout, typename SrcBPackedLayout, typename Prologue>
   void pack_B(const TSrcB *src, SrcBLayout src_layout, TA *dst, SrcBPackedLayout dst_layout, const Prologue &prologue);
 
   /**
@@ -117,10 +112,77 @@ template <
     MaskMode M_mask_, MaskMode N_mask_>
 struct Kernel {
   using Atom = Atom_;
-  static constexpr int nM_R = nM_R_, nN_R = nN_R_;
-  static constexpr MaskMode M_mask = M_mask_, N_mask = N_mask_;
+  static constexpr auto nM_R = cint<nM_R_>;
+  static constexpr auto nN_R = cint<nN_R_>;
+  static constexpr MaskMode M_mask = M_mask_;
+  static constexpr MaskMode N_mask = N_mask_;
+  /**
+   * 一次内核调用处理的元素数。
+   */
+  static constexpr auto tile_M = nM_R * Atom::M_R;
+  static constexpr auto tile_N = nN_R * Atom::N_R;
+  /**
+   * 算力参考值，手动设定，用于组合搜索。
+   */
   static constexpr int compute_power = 0;
 
+  /**
+   * 执行K累加循环核心函数。
+   * @tparam TSrcA, TSrcB, TSrcDstC A B C类型。
+   * @tparam SrcALayout 输入A的布局，必须为非打包布局Shape<xM, xK>, Stride<*, *>或者打包布局，
+   *                    即满足Atom::is_A_packed_layout<SrcALayout>。其中xM, xN当前分块大小，
+   *                    不大于内核分块大小M_R, N_R，xK为K轴累加长度，任意，下同。
+   * @tparam APrologue 用于非打包A的前处理，A打包时必须为identity。一般使用identity。
+   * @tparam SrcBLayout 输入B的布局，必须为非打包布局Shape<xN, xK>, Stride<*, *>或者打包布局，
+   *                    即满足Atom::is_B_packed_layout<SrcBLayout>。
+   * @tparam BPrologue 用于非打包B的前处理，B打包时必须为identity。一般使用identity。
+   * @tparam SrcDstCLayout 输入C的布局，必须为非打包布局Shape<xM, xN>, Stride<*, *>。
+   * @tparam CPrologue 用于非ld_acc时的C的前处理，一般使用zeros（零初始化）。
+   * @tparam LdAccFlag bool或者std::bool_constant
+   * @tparam StAccFlag bool或者std::bool_constant
+   * @tparam reuse_buffer 是否重用C作为K分块缓冲区。如果开启，则必须满足：
+   *                      - sizeof(Atom::TAcc)<=sizeof(TC)，即硬件累加器精度不能高于C精度。
+   *                      - SrcDstCLayout.stride[1]==Int<1>，即缓冲区必须是行主序的，保证读写效率。
+   *                      - 注：由于reuse_buffer保证C必须是行主序的，且C元素不不比硬件累加器精度低，因此C作为分块缓冲区时我们会直接将加载/存储的C块的每一行看成Atom::TAcc类型，从而省掉作为缓冲区加载存储时的数据转换以及节省潜在带宽。
+   * @param acc K分块缓冲区，可空，但(ld_acc||st_acc) && !reuse_buffer为真是必须非空。
+   *            布局必须为Shape<nM_R, Atom::M_R, nN_R, Atom::N_R>, Stride<Int<Atom::M_R>, *, Int<Atom::N_R>, Int<1>>。
+   * @param ld_acc 真+reuse_buffer假：从缓冲区中unmasked加载数据到硬件累加器。
+   *               真+reuse_buffer真：从C中masked加载数据到硬件累加器
+   *               假+CPrologue==zeros：直接硬件0初始化硬件累加器。
+   *               假+CPrologue!=zeros：从C中masked加载数据，经过CPrologue变换后加载到硬件累加器。
+   * @param st_acc 真+reuse_buffer假：硬件累加器数据unmasked写入acc。
+   *               真+reuse_buffer真：硬件累加器数据masked写入C。
+   *               假：硬件累加器数据经Epilogue变换后masked写入C。
+   * @param epilogue
+   *
+   * @note 关于mask相关的约束和处理：
+   *       - 在A/B打包时，不管对应M/N如何设置，都直接按满数据（Atom::M_R/Atom::N_R）加载。
+   *       - 在A非打包时，形状参数为Shape<xM, xK>，则M_mask关闭时需满足xM==Atom::M_R（assert检查）。
+   *         M_mask开启时则加载A数据时按照xM元素数量应用mask，其余元素设为0。
+   *       - 在B非打包时，形状参数为Shape<xN, xK>，则N_mask关闭时需满足xN==Atom::N_R（assert检查）。
+   *         N_mask开启时则加载B数据时按照xN元素数量应用mask，其余元素设为0。
+   */
+  template <
+      typename TSrcA, typename SrcALayout, typename APrologue,
+      typename TSrcB, typename SrcBLayout, typename BPrologue,
+      typename TSrcDstC, typename SrcDstCLayout, typename CPrologue,
+      typename LdAccFlag, typename StAccFlag,
+      typename Epilogue, bool reuse_buffer>
+  void run(
+      const TSrcA *srcA, SrcALayout srcA_layout, const APrologue &srcA_prologue,
+      const TSrcB *srcB, SrcBLayout srcB_layout, const BPrologue &srcB_prologue,
+      const TSrcDstC *C, SrcDstCLayout C_layout, const CPrologue &C_prologue,
+      typename Atom::TAcc *acc, LdAccFlag ld_acc, StAccFlag st_acc, const Epilogue &epilogue) const;
+
+  /**
+   * 获取/释放运行此kernel所需的硬件资源，进入kernel前必须调用begin_kernel()，退出kernel后必须调用end_kernel()，
+   * 否则执行结果未定义。
+   *
+   * 多次调用同一种内核之间不需要调用end_kernel+begin_kernel。
+   *   - 比如AMX的LDTILECFG和设置tile形状。
+   */
+  void begin_kernel() const;
+  void end_kernel() const;
 };
 
 

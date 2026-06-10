@@ -15,38 +15,130 @@
 #include "vecops/Assertion.h"
 #include "vecops/util/TypeTraits.h"
 
+/**
+ * @file Layout.h
+ * @brief Compile-time tensor layout metadata and constraint system.
+ *
+ * This header defines the foundational types for describing multi-dimensional
+ * tensor shapes and strides with compile-time constraint propagation. The
+ * core concept is a Value hierarchy that separates compile-time constants
+ * from run-time values while preserving alignment and bound constraints
+ * through arithmetic operations.
+ *
+ * ## Key components
+ *
+ * | Component      | Purpose                                                   |
+ * |----------------|-----------------------------------------------------------|
+ * | Value hierarchy| Compile-time/run-time typed integers with constraints     |
+ * | PackedStorage  | Space-efficient storage eliding compile-time constants    |
+ * | ArrayMeta      | Multi-dimensional typed integer arrays (base for Shape/Strides) |
+ * | Shape          | Non-negative dimension sizes                              |
+ * | Strides        | Stride values (may be negative)                           |
+ * | Layout         | Pairs a Shape and Strides into a memory layout descriptor |
+ * | Continuity     | Compile-time and run-time row-major contiguity checks     |
+ *
+ * ## Usage overview
+ *
+ * @code
+ * #include "vecops/gemm/Layout.h"
+ * using namespace vecops::gemm;
+ *
+ * // Create compile-time shapes
+ * auto sh = make_shape(cint<2>, cint<3>);       // Shape<Const<2>, Const<3>>
+ * auto st = make_strides(cint<3>, cint<1>);     // Strides<Const<3>, Const<1>>
+ *
+ * // Create runtime shapes with alignment constraints
+ * auto sh2 = make_shape(cint<16>, dyn<4>(128)); // Shape<Const<16>, Dynamic<4>>
+ *
+ * // Build a layout
+ * auto layout = make_layout(sh, st);
+ *
+ * // Arithmetic propagates constraints at compile time
+ * auto stride2 = st.get<0>() * sh.get<1>();     // Const<6>
+ * @endcode
+ *
+ * ## Pitfalls
+ *
+ * - `Const` cannot be default-constructed: its constructor asserts the value equals N.
+ * - `Dynamic` construction asserts alignment/bounds constraints at runtime.
+ * - Arithmetic with raw `nint_t` promotes to `Any`, losing all constraint info.
+ * - `aligns(v)` is conservative: returning false means "not guaranteed", not "impossible".
+ * - `remove_dim`, `set_dim`, `insert_dim` are O(N) compile-time type transformations.
+ */
+
 namespace vecops::gemm {
 
 // ======================== Sentinel values for unbounded Dynamic ========================
 
+/**
+ * Sentinel for "no lower bound". Used as the default `Lo` parameter in
+ * `Dynamic<A,Lo,Hi>` to indicate the runtime value has no compile-time
+ * lower bound guarantee.
+ */
 constexpr nint_t kLoInf = std::numeric_limits<nint_t>::min();
+
+/**
+ * Sentinel for "no upper bound". Used as the default `Hi` parameter in
+ * `Dynamic<A,Lo,Hi>` to indicate the runtime value has no compile-time
+ * upper bound guarantee.
+ */
 constexpr nint_t kHiInf = std::numeric_limits<nint_t>::max();
 
 // ======================== constexpr helpers ========================
 
 namespace details {
 
+/**
+ * Extract the least significant set bit of `x`.
+ * Used internally for computing alignment constraints during
+ * arithmetic constraint propagation.
+ *
+ * @note Works correctly on two's-complement signed integers because
+ *       `x & -x` isolates the lowest 1 bit regardless of sign.
+ */
 constexpr nint_t lsb(nint_t x) {
   using U = std::make_unsigned_t<nint_t>;
   return static_cast<nint_t>(static_cast<U>(x) & -static_cast<U>(x));
 }
 
+/**
+ * Helper for addition/subtraction alignment constraint propagation.
+ * Computes the resulting alignment when adding/subtracting a value
+ * with alignment `A` and a Const value `N`.
+ *
+ * - A = 0 means the input is Const with alignment "infinity" (cannot be
+ *   undermined by another operand) → result alignment is N.
+ * - Otherwise the result alignment is min(A, lsb(N)).
+ */
 template <nint_t A, nint_t N>
 struct AlignAddSub {
   static constexpr nint_t value = (N == 0) ? A : ((A < lsb(N)) ? A : lsb(N));
 };
 
+/**
+ * Helper for Dynamic+Dynamic addition/subtraction alignment propagation.
+ * Computes the minimum of two alignments (the weaker alignment survives).
+ */
 template <nint_t A1, nint_t A2>
 struct AlignAddSubDyn {
   static constexpr nint_t value = (A1 < A2) ? A1 : A2;
 };
 
+/**
+ * Helper for multiplication alignment constraint propagation.
+ * - When `N == 0`, multiplication produces `Const<0>` (handled by the caller).
+ * - Otherwise result alignment = `A * lsb(N)`.
+ */
 template <nint_t A, nint_t N>
 struct AlignMul {
   static constexpr bool is_zero = (N == 0);
   static constexpr nint_t value = A * lsb(N);
 };
 
+/**
+ * Helper for Dynamic*Dynamic multiplication alignment propagation.
+ * Result alignment = `A1 * A2`.
+ */
 template <nint_t A1, nint_t A2>
 struct AlignMulDyn {
   static constexpr nint_t value = A1 * A2;
@@ -57,42 +149,95 @@ struct AlignMulDyn {
 // ======================== Value hierarchy ========================
 
 /**
- * 用于表示一个张量元数据中的值，比如Shape或者Stride中的一个值。
- * 使用类型而不是运行时nint_t是用于存储编译期常量、对齐信息和约束，用于编译期优化。
- * 对于张量元数据而言，所有数值均为常量，一旦张量初始化其元数据则不再变化。
+ * @brief Abstract base for tensor metadata values (shape entries, stride entries).
+ *
+ * The Value hierarchy represents integer metadata as **types** rather than
+ * bare `nint_t`, enabling compile-time storage of:
+ * - Whether the value is a compile-time constant or run-time variable
+ * - Alignment constraints (runtime value % A == 0)
+ * - Lower/upper bound guarantees
+ *
+ * These constraints propagate through arithmetic operations, allowing
+ * the compiler to optimize based on partial knowledge of runtime values.
+ *
+ * ## Subclass contract
+ *
+ * All subclasses must implement:
+ * - `is_const` / `is_runtime` – class-level predicates
+ * - `conforms(v)` – does compile-time value `v` satisfy this type's constraints?
+ * - `aligns(v)` – does **every** possible runtime value of this type align to `v`?
+ * - `is_aligned(v)` – does **this** specific runtime instance align to `v`?
+ * - `explicit operator nint_t()` – conversion to raw integer
+ *
+ * ## Pitfalls
+ *
+ * - `aligns(v)` is **conservative**: returning `false` does not mean the
+ *   runtime value definitely misaligns, it only means "cannot guarantee".
+ *   For example, `Any{4}.is_aligned(4)` is `true` even though `Any::aligns(4)`
+ *   is `false`.
+ * - `Value` provides default implementations (`is_const=false`, `is_runtime=false`,
+ *   `aligns`/`is_aligned`/`conforms` all return `false`, `operator nint_t` returns -100).
+ *   These exist to simplify the operator-overload SFINAE machinery; override
+ *   all of them in your subclass.
  */
 struct Value {
-  /**
-   * 表示此值是否为编译期常量。
-   */
+  /// Whether all instances of this type carry a compile-time known value.
   static constexpr bool is_const = false;
-  /**
-   * 表示此值是否为运行时常量。
-   */
+  /// Whether instances of this type carry a run-time value (stored per instance).
   static constexpr bool is_runtime = false;
 
   /**
-   * 对于传入值v，其是否符合当前Value定义的约束（比如是否对齐等等）
+   * Check whether a compile-time value `v` satisfies this type's constraints
+   * (e.g., alignment, bounds).
    */
   static constexpr bool conforms(nint_t v) { return false; }
 
   /**
-   * 检查此Value定义是否一定符合对齐到v的要求
-   * 此函数返回false不代表Value携带的值一定不符合对齐要求（比如实际的运行时量可能是对齐的）
+   * Check whether **every** possible runtime value of this type is guaranteed
+   * to be divisible by `v`. This is a conservative check: returning `true`
+   * means "always aligned"; returning `false` means "not proven".
+   *
+   * @note `false` does **not** mean a specific instance is misaligned
+   *       (use `is_aligned()` for that).
    */
   static constexpr bool aligns(nint_t v) { return false; }
 
   /**
-   * 检查此Value携带的值是否符合对齐到v的要求
-   * 可能会出现aligns(v) == false但this->is_aligned(v) == true的情况：Any{4}.is_aligned(4)
+   * Check whether **this specific instance's** runtime value is divisible by `v`.
+   *
+   * @note `aligns(v)` may return `false` while `is_aligned(v)` returns `true`
+   *       (e.g., `Any{4}.is_aligned(4) == true` whereas `Any::aligns(4) == false`).
    */
   bool is_aligned(nint_t v) { return false; }
 
+  /// Convert to raw `nint_t`. Default implementation returns an invalid sentinel.
   constexpr explicit operator nint_t() const { return -100; }
 }; // struct Value
 
 /**
- * 表示编译器常量值，其值必定为N
+ * @brief A compile-time constant integer with value N.
+ *
+ * `Const<N>` always carries the value `N` and nothing else. The constructor
+ * **asserts** that the provided runtime value equals `N` — so you cannot
+ * accidentally construct a `Const<N>` with a mismatched value.
+ *
+ * ## Usage
+ *
+ * @code
+ * Const<16> c;              // c == 16
+ * Const<16> c2(16);         // OK
+ * Const<16> c3(8);          // RUNTIME ASSERTION FAILURE — 8 != 16
+ *
+ * auto c = cint<16>;        // Convenience: same as Const<16>{}
+ * @endcode
+ *
+ * ## Arithmetic behavior
+ *
+ * Arithmetically, `Const<N>` acts as the integer `N`, but operations with
+ * `Dynamic` degrade the result to `Dynamic` (losing constness) because the
+ * result depends on a runtime value.
+ *
+ * @tparam N The compile-time integer value. Can be negative.
  */
 template <nint_t N>
 struct Const : public Value {
@@ -104,6 +249,12 @@ struct Const : public Value {
 
   static constexpr bool aligns(nint_t v) { return N % v == 0; }
 
+  /**
+   * Construct a `Const<N>`. The value `v` must equal `N`, otherwise a runtime
+   * assertion fires.
+   *
+   * @note The default parameter (`v = N`) allows default construction.
+   */
   constexpr explicit Const(nint_t v = N) {
     VECOPS_ASSERT(v == N, "%td != %td", v, N);
   }
@@ -114,16 +265,59 @@ struct Const : public Value {
 }; // struct Const
 
 /**
- * constexpr field template用于方便初始化
+ * @brief Convenience variable template for constructing `Const<N>`.
+ *
+ * @code
+ * auto c = cint<32>;   // Equivalent to Const<32>{}
+ * @endcode
  */
 template <nint_t N>
 inline constexpr Const<N> cint{N};
 
 /**
- * 携带对齐和上下界约束的运行时量.
- * @tparam Alignment 对齐量，必须是2的整数幂且不能是0，运行时值v满足 v % Alignment == 0
- * @tparam Lo 编译期保证的下界（包含），v >= Lo；kLoInf 表示无下界约束
- * @tparam Hi 编译期保证的上界（包含），v <= Hi；kHiInf 表示无上界约束
+ * @brief A run-time integer with compile-time alignment and bound constraints.
+ *
+ * `Dynamic<Alignment, Lo, Hi>` stores a run-time `nint_t` value while
+ * providing compile-time guarantees about its properties:
+ *
+ * - **Alignment**: The runtime value `v` satisfies `v % Alignment == 0`.
+ *   `Alignment` must be a positive power of 2.
+ * - **Lower bound**: `v >= Lo` (if `Lo != kLoInf`).
+ * - **Upper bound**: `v <= Hi` (if `Hi != kHiInf`).
+ *
+ * These constraints propagate through arithmetic operations (see the
+ * operator overloads below).
+ *
+ * ## Usage
+ *
+ * @code
+ * // Aligned to 16, range [0, 1024]
+ * Dynamic<16, 0, 1024> d(512);   // OK
+ *
+ * // Aligned to 4, no bounds
+ * Dynamic<4> d2(100);            // Equivalent to Dynamic<4, kLoInf, kHiInf>
+ *
+ * // Construction asserts:
+ * Dynamic<8, 0, 16> bad(10);     // RUNTIME ASSERTION — 10 % 8 != 0
+ * @endcode
+ *
+ * ## Convenience constructors
+ *
+ * Use the `dyn<A,L,H>(v)` or `dyn<A>(v)` factory functions for cleaner syntax:
+ * @code
+ * auto d = dyn<8>(64);           // Dynamic<8>{64}
+ * auto d2 = dyn<4,0,256>(128);   // Dynamic<4,0,256>{128}
+ * @endcode
+ *
+ * ## Any: The unconstrained runtime value
+ *
+ * `Any` is an alias for `Dynamic<1>` — alignment 1 (everything aligns to 1),
+ * no bounds. It is the default when a raw `nint_t` participates in Value
+ * arithmetic.
+ *
+ * @tparam Alignment  Positive power-of-2 alignment requirement. Default 1 (no constraint).
+ * @tparam Lo         Compile-time inclusive lower bound. `kLoInf` means no lower bound.
+ * @tparam Hi         Compile-time inclusive upper bound. `kHiInf` means no upper bound.
  */
 template <nint_t Alignment, nint_t Lo = kLoInf, nint_t Hi = kHiInf>
 struct Dynamic : public Value {
@@ -139,9 +333,8 @@ struct Dynamic : public Value {
   static constexpr bool has_upper = (Hi != kHiInf);
 
   /**
-   * 检查编译期值v是否满足此Dynamic定义的约束：
-   *   对齐约束：v & (Alignment-1) == 0
-   *   上下界约束（若生效）：Lo <= v <= Hi
+   * Check whether a compile-time value `v` satisfies all constraints of
+   * this Dynamic type: alignment, lower bound (if active), upper bound (if active).
    */
   static constexpr bool conforms(nint_t v) {
     return (v & (Alignment - 1)) == 0
@@ -150,14 +343,18 @@ struct Dynamic : public Value {
   }
 
   /**
-   * 检查任何可能的此Dynamic值是否一定对齐到v。
-   * 如果任何符合约束的运行时值都能被v整除则返回true。
-   * 保守返回false是安全的。
+   * Check whether **every** possible value of this Dynamic type is
+   * guaranteed to be divisible by `v`. Returns `true` when
+   * `Alignment % v == 0`.
+   *
+   * @note Conservative: returns `false` when uncertain, even if some
+   *       specific values may still align.
    */
   static constexpr bool aligns(nint_t v) { return Alignment % v == 0; }
 
   /**
-   * 构造Dynamic，运行时值v必须在编译期符合约束条件。
+   * Construct a `Dynamic` with the given runtime value.
+   * Asserts that `v` satisfies all compile-time constraints (alignment, bounds).
    */
   constexpr explicit Dynamic(nint_t v) : value(v) {
     VECOPS_ASSERT(conforms(v),
@@ -165,7 +362,7 @@ struct Dynamic : public Value {
   }
 
   /**
-   * 检查this的运行时值是否对齐到v。
+   * Check whether **this specific instance's** runtime value is divisible by `v`.
    */
   constexpr bool is_aligned(nint_t v) const { return value % v == 0; }
 
@@ -175,37 +372,72 @@ struct Dynamic : public Value {
 }; // struct Dynamic
 
 /**
- * 表示任意运行时量（无约束）。等价于 Dynamic<1>（对齐1，无上下界）
+ * @brief Alias for `Dynamic<1>` — a completely unconstrained runtime value.
+ *
+ * `Any` is the default Value type when a raw `nint_t` participates in
+ * Value arithmetic. It carries no alignment constraint (1 divides everything)
+ * and no bounds.
+ *
+ * @code
+ * Any a(42);        // Unconstrained runtime value
+ * auto b = 42 + cint<3>;  // operator+(nint_t, Const<3>) → wraps 42 in Any
+ * @endcode
  */
 using Any = Dynamic<1>;
 
-// ======================== dyn<> 辅助构造 ========================
+// ======================== dyn<> auxiliary constructors ========================
 
+/**
+ * @brief Create a `Dynamic<A, L, H>` with explicit alignment and bounds.
+ *
+ * @code
+ * auto d = dyn<8, 0, 1024>(512);   // Dynamic<8, 0, 1024>
+ * @endcode
+ *
+ * @tparam A  Alignment (positive power of 2).
+ * @tparam L  Lower bound.
+ * @tparam H  Upper bound.
+ * @param v  The runtime value.
+ * @return Dynamic<A, L, H>{v}
+ */
 template <nint_t A, nint_t L, nint_t H>
 constexpr Dynamic<A, L, H> dyn(nint_t v) { return Dynamic<A, L, H>{v}; }
 
+/**
+ * @brief Create a `Dynamic<A>` with alignment only (no bounds).
+ *
+ * @code
+ * auto d = dyn<4>(128);   // Dynamic<4>
+ * @endcode
+ *
+ * @tparam A  Alignment (positive power of 2).
+ * @param v   The runtime value.
+ * @return Dynamic<A>{v}
+ */
 template <nint_t A>
 constexpr Dynamic<A> dyn(nint_t v) { return Dynamic<A>{v}; }
 
-// ======================== 算术操作符 ========================
+// ======================== Arithmetic operators ========================
 //
-// 操作符语义：对Const与Dynamic做算术运算，在编译期传播约束信息（对齐量、上下界）。
-// int/nint_t 类型的操作数会被自动包装为 Any（即 Dynamic<1>），等价于无约束运行时量。
+// Operator semantics: Const and Dynamic arithmetic propagates constraint
+// information (alignment, bounds) at compile time. Raw nint_t operands
+// are automatically wrapped as Any (Dynamic<1>, unconstrained).
 //
-// 约束传播规则摘要：
-//   Const ± Const  → Const（值在编译期合并）
-//   Const ± Dyn    → Dyn<gcd(A,N), ...>（对齐退化为gcd，界平移）
-//   Dyn  ± Dyn     → Dyn<min(A1,A2), ...>（对齐取更弱，界线性合并）
+// Constraint propagation rules summary:
+//   Const ± Const  → Const   (value merged at compile time)
+//   Const ± Dyn    → Dyn<gcd(A,N), ...>  (alignment degrades, bounds shift)
+//   Dyn  ± Dyn     → Dyn<min(A1,A2), ...> (weaker alignment, bounds merged)
 //   Const × Const  → Const
-//   Const × Dyn    → 若N=0 → Const<0>；否则 Dyn<A·lsb(N), ...>
-//   Dyn  × Dyn     → Dyn<A1·A2, 四角积min/max>
-//   Dyn  / Const<N>: A%N=0 → Dyn<A/N,...>; 否则 Dyn<1,...>（对齐退化）
-//   Const / Dyn, Dyn / Dyn: 对齐退化到1
-//   Dyn  % Const<N>: A%N=0 → Const<0>; 否则 Dyn<1,...>
-//   Const % Dyn, Dyn % Dyn: 对齐退化到1
-// 除法和求余Bounds由端点分析法精确计算（利用截断除法的分段单调性）
+//   Const × Dyn    → if N=0: Const<0>; else Dyn<A·lsb(N), ...>
+//   Dyn  × Dyn     → Dyn<A1·A2, four-corner min/max bounds>
+//   Dyn  / Const<N>: if A%N=0: Dyn<A/N,...>; else Dyn<1,...> (alignment degrades)
+//   Const / Dyn, Dyn / Dyn: alignment degrades to 1
+//   Dyn  % Const<N>: if A%N=0: Const<0>; else Dyn<1,...>
+//   Const % Dyn, Dyn % Dyn: alignment degrades to 1
+// Division and remainder bounds use endpoint analysis (piecewise monotonicity
+// of truncating division).
 
-// ---- 加法 ----
+// ---- Addition ----
 
 template <nint_t N, nint_t M>
 constexpr Const<N + M> operator+(Const<N>, Const<M>) { return Const<N + M>(); }
@@ -234,18 +466,19 @@ constexpr auto operator+(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
   return Dynamic<g, rl, rh>{lhs.value + rhs.value};
 }
 
-// Value + nint_t  → Value + Any{nint_t}
+/// Value + nint_t → Value + Any{nint_t}
 template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
 constexpr auto operator+(T lhs, nint_t rhs) {
   return lhs + Any{rhs};
 }
 
+/// nint_t + Value → Any{nint_t} + Value
 template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
 constexpr auto operator+(nint_t lhs, T rhs) {
   return Any{lhs} + rhs;
 }
 
-// ---- 减法 ----
+// ---- Subtraction ----
 
 template <nint_t N, nint_t M>
 constexpr Const<N - M> operator-(Const<N>, Const<M>) { return Const<N - M>(); }
@@ -274,18 +507,19 @@ constexpr auto operator-(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
   return Dynamic<g, rl, rh>{lhs.value - rhs.value};
 }
 
-// Value - nint_t
+/// Value - nint_t → Value - Any{nint_t}
 template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
 constexpr auto operator-(T lhs, nint_t rhs) {
   return lhs - Any{rhs};
 }
 
+/// nint_t - Value → Any{nint_t} - Value
 template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
 constexpr auto operator-(nint_t lhs, T rhs) {
   return Any{lhs} - rhs;
 }
 
-// ---- 一元取负 ----
+// ---- Unary negation ----
 
 template <nint_t N>
 constexpr Const<-N> operator-(Const<N>) { return Const<-N>(); }
@@ -297,7 +531,7 @@ constexpr auto operator-(Dynamic<A, L, H> x) {
   return Dynamic<A, rl, rh>{-x.value};
 }
 
-// ---- 乘法 ----
+// ---- Multiplication ----
 
 template <nint_t N, nint_t M>
 constexpr Const<N * M> operator*(Const<N>, Const<M>) { return Const<N * M>(); }
@@ -335,25 +569,34 @@ constexpr auto operator*(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
   }
 }
 
-// Value * nint_t
+/// Value * nint_t → Value * Any{nint_t}
 template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
 constexpr auto operator*(T lhs, nint_t rhs) {
   return lhs * Any{rhs};
 }
 
+/// nint_t * Value → Any{nint_t} * Value
 template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
 constexpr auto operator*(nint_t lhs, T rhs) {
   return Any{lhs} * rhs;
 }
 
-// ---- 除法 ----
+// ---- Division ----
 
 namespace details {
 
+/**
+ * Ceiling division: `ceil(a / b)` for integer `a`, `b` (b != 0).
+ * Handles negative numerators correctly with truncating division.
+ */
 constexpr nint_t ceil_div(nint_t a, nint_t b) {
   return a >= 0 ? (a + b - 1) / b : a / b;
 }
 
+/**
+ * Floor division: `floor(a / b)` for integer `a`, `b` (b != 0).
+ * Handles negative numerators correctly with truncating division.
+ */
 constexpr nint_t floor_div(nint_t a, nint_t b) {
   return a >= 0 ? a / b : (a - b + 1) / b;
 }
@@ -363,9 +606,12 @@ constexpr nint_t floor_div(nint_t a, nint_t b) {
 template <nint_t N, nint_t M>
 constexpr Const<N / M> operator/(Const<N>, Const<M>) { return Const<N / M>(); }
 
-/// Dyn<A,L,H> / Const<N>:
-///   对齐量：如果 A%N==0，保留 A/N；否则退化到1（因为不能保证商的可整除性）
-///   Bounds：利用 f(k) = k*A/N 在k上单调，极值在k_min和k_max处
+/**
+ * Dynamic<A,L,H> / Const<N>:
+ *   Alignment: if A % N == 0, result alignment = A/N; otherwise degrades to 1
+ *     (quotient divisibility by N is not guaranteed).
+ *   Bounds: f(k) = k*A/N is monotonic in k, so extreme values are at k_min and k_max.
+ */
 template <nint_t A, nint_t L, nint_t H, nint_t N>
 constexpr auto operator/(Dynamic<A, L, H> lhs, Const<N>) {
   static_assert(N != 0, "division by zero");
@@ -388,9 +634,15 @@ constexpr auto operator/(Dynamic<A, L, H> lhs, Const<N>) {
   }
 }
 
-/// Const<N> / Dyn<A,L,H>:
-///   对齐量退化为1（除非所有可能结果相同 → Const）
-///   Bounds：利用 f(k)=N/(k*A) 在 k>0 和 k<0 上分别单调，极值在端点和±1处
+/**
+ * Const<N> / Dynamic<A,L,H>:
+ *   Alignment degrades to 1 (unless all possible results produce the same value → Const).
+ *   Bounds: f(k) = N/(k*A) is monotonic on k>0 and k<0 separately,
+ *   so extreme values are at endpoints and ±1.
+ *
+ *   @note When the Dynamic denominator range crosses zero, the quotient
+ *         is potentially unbounded (division by arbitrarily small values).
+ */
 template <nint_t N, nint_t A, nint_t L, nint_t H>
 constexpr auto operator/(Const<N>, Dynamic<A, L, H> rhs) {
   if constexpr (L == kLoInf || H == kHiInf) {
@@ -422,48 +674,56 @@ constexpr auto operator/(Const<N>, Dynamic<A, L, H> rhs) {
   }
 }
 
-/// Dyn / Dyn: 对齐退化为1
-///   Bounds：若v2区间不跨0，在固定符号上除法对v1单调增、对v2单调（视v1符号），
-///   极值在四角取得；若v2跨0，退回到无界（v2可能接近0导致商无界）
+/**
+ * Dynamic / Dynamic: alignment always degrades to 1.
+ *   Bounds: if the denominator range does not cross zero, division is
+ *   monotonic in both variables (with sign conventions); extreme values
+ *   are at the four corners. If denominator crosses zero, bounds become
+ *   unbounded (quotient can be arbitrarily large as denominator → 0).
+ */
 template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
 constexpr auto operator/(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
-    if constexpr (L1 == kLoInf || H1 == kHiInf || L2 == kLoInf || H2 == kHiInf) {
-        return Dynamic<1>{lhs.value / rhs.value};
-    } else if constexpr (L2 > 0) {
-        // v2 all positive: f(v1,v2) monotonic → four-corner is exact
-        constexpr nint_t rl = std::min({L1 / L2, L1 / H2, H1 / L2, H1 / H2});
-        constexpr nint_t rh = std::max({L1 / L2, L1 / H2, H1 / L2, H1 / H2});
-        return Dynamic<1, rl, rh>{lhs.value / rhs.value};
-    } else if constexpr (H2 < 0) {
-        // v2 all negative: similar, monotonic
-        constexpr nint_t rl = std::min({L1 / L2, L1 / H2, H1 / L2, H1 / H2});
-        constexpr nint_t rh = std::max({L1 / L2, L1 / H2, H1 / L2, H1 / H2});
-        return Dynamic<1, rl, rh>{lhs.value / rhs.value};
-    } else {
-        // v2 crosses 0: quotient potentially unbounded
-        return Dynamic<1>{lhs.value / rhs.value};
-    }
+  if constexpr (L1 == kLoInf || H1 == kHiInf || L2 == kLoInf || H2 == kHiInf) {
+    return Dynamic<1>{lhs.value / rhs.value};
+  } else if constexpr (L2 > 0) {
+    // Denominator all positive: monotonic → four-corner is exact
+    constexpr nint_t rl = std::min({L1 / L2, L1 / H2, H1 / L2, H1 / H2});
+    constexpr nint_t rh = std::max({L1 / L2, L1 / H2, H1 / L2, H1 / H2});
+    return Dynamic<1, rl, rh>{lhs.value / rhs.value};
+  } else if constexpr (H2 < 0) {
+    // Denominator all negative: similar, monotonic
+    constexpr nint_t rl = std::min({L1 / L2, L1 / H2, H1 / L2, H1 / H2});
+    constexpr nint_t rh = std::max({L1 / L2, L1 / H2, H1 / L2, H1 / H2});
+    return Dynamic<1, rl, rh>{lhs.value / rhs.value};
+  } else {
+    // Denominator crosses zero: quotient potentially unbounded
+    return Dynamic<1>{lhs.value / rhs.value};
+  }
 }
 
-// Value / nint_t
+/// Value / nint_t → Value / Any{nint_t}
 template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
 constexpr auto operator/(T lhs, nint_t rhs) {
   return lhs / Any{rhs};
 }
 
+/// nint_t / Value → Any{nint_t} / Value
 template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
 constexpr auto operator/(nint_t lhs, T rhs) {
   return Any{lhs} / rhs;
 }
 
-// ---- 求余 (remainder) ----
+// ---- Remainder ----
 
 template <nint_t N, nint_t M>
 constexpr Const<N % M> operator%(Const<N>, Const<M>) { return Const<N % M>(); }
 
-/// Dyn<A,L,H> % Const<N>:
-///   如果 A%N==0，每个v都是N的倍数，结果必为0 → Const<0>
-///   否则，对齐退化为1，余数范围取决于被除数符号
+/**
+ * Dynamic<A,L,H> % Const<N>:
+ *   If A % N == 0, every runtime value is a multiple of N, so the result
+ *   is always 0 → Const<0>. Otherwise alignment degrades to 1 and the
+ *   remainder range depends on the sign of the dividend.
+ */
 template <nint_t A, nint_t L, nint_t H, nint_t N_in>
 constexpr auto operator%(Dynamic<A, L, H> lhs, Const<N_in>) {
   static_assert(N_in != 0, "modulo by zero");
@@ -483,7 +743,10 @@ constexpr auto operator%(Dynamic<A, L, H> lhs, Const<N_in>) {
   }
 }
 
-/// Const<N> % Dyn<A,L,H>: 对齐退化为1
+/**
+ * Const<N> % Dynamic<A,L,H>: alignment degrades to 1.
+ * Bounds computed from endpoint analysis similar to division.
+ */
 template <nint_t N, nint_t A, nint_t L, nint_t H>
 constexpr auto operator%(Const<N>, Dynamic<A, L, H> rhs) {
   if constexpr (L == kLoInf || H == kHiInf) {
@@ -515,30 +778,32 @@ constexpr auto operator%(Const<N>, Dynamic<A, L, H> rhs) {
   }
 }
 
-/// Dyn % Dyn:
-///  对齐退化到1，Bounds利用C++余数性质保守估计：
-///  结果符号跟随被除数，|result| < |v2|。
-///  故 |result| <= max(|L2|,|H2|) - 1
+/**
+ * Dynamic % Dynamic: alignment degrades to 1.
+ * Uses C++ remainder semantics (sign follows dividend, |result| < |v2|).
+ * Conservative bounds: |result| <= max(|L2|, |H2|) - 1.
+ */
 template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
 constexpr auto operator%(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
-    if constexpr (L1 == kLoInf || H1 == kHiInf || L2 == kLoInf || H2 == kHiInf) {
-        return Dynamic<1>{lhs.value % rhs.value};
-    } else {
-        constexpr nint_t max_abs_v2 = std::max(L2 < 0 ? -L2 : L2, H2 < 0 ? -H2 : H2);
-        constexpr nint_t rl = (L1 < 0) ? -(max_abs_v2 - 1) : 0;
-        constexpr nint_t rh = (H1 >= 0) ? (max_abs_v2 - 1) : 0;
-        constexpr nint_t lo = std::min(rl, rh);
-        constexpr nint_t hi = std::max(rl, rh);
-        return Dynamic<1, lo, hi>{lhs.value % rhs.value};
-    }
+  if constexpr (L1 == kLoInf || H1 == kHiInf || L2 == kLoInf || H2 == kHiInf) {
+    return Dynamic<1>{lhs.value % rhs.value};
+  } else {
+    constexpr nint_t max_abs_v2 = std::max(L2 < 0 ? -L2 : L2, H2 < 0 ? -H2 : H2);
+    constexpr nint_t rl = (L1 < 0) ? -(max_abs_v2 - 1) : 0;
+    constexpr nint_t rh = (H1 >= 0) ? (max_abs_v2 - 1) : 0;
+    constexpr nint_t lo = std::min(rl, rh);
+    constexpr nint_t hi = std::max(rl, rh);
+    return Dynamic<1, lo, hi>{lhs.value % rhs.value};
+  }
 }
 
-// Value % nint_t
+/// Value % nint_t → Value % Any{nint_t}
 template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
 constexpr auto operator%(T lhs, nint_t rhs) {
   return lhs % Any{rhs};
 }
 
+/// nint_t % Value → Any{nint_t} % Value
 template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
 constexpr auto operator%(nint_t lhs, T rhs) {
   return Any{lhs} % rhs;
@@ -547,14 +812,23 @@ constexpr auto operator%(nint_t lhs, T rhs) {
 namespace details {
 
 /**
- * 将用户参数输入中的整数v转化为Any{v}
- * @tparam T
+ * @brief Converts integer types to their Value wrapper equivalent.
+ *
+ * Non-integer types (already Value subclasses) pass through unchanged.
+ * Integer types (int8_t, uint32_t, etc.) are promoted to `Any`.
+ *
+ * Used by `ToValue<T>` to normalize user-provided shape/stride parameters
+ * so that bare integers are automatically wrapped as `Any{v}`.
  */
 template <typename T, typename = void/*SFINAE*/>
 struct ValuePromote { using Type = T; };
 template <typename T>
 struct ValuePromote<T, std::enable_if_t<is_int<T>>> { using Type = Any; };
 
+/**
+ * Helper to extract the compile-time value from a Const type, or 0
+ * for non-Const types. Used by PackedStorage for the const_values array.
+ */
 template <typename T>
 struct PickConstValue { static constexpr nint_t value = 0; };
 
@@ -563,6 +837,13 @@ struct PickConstValue<Const < N>> {
 static constexpr nint_t value = N;
 };
 
+/**
+ * Pack runtime values from a parameter pack into a flat array,
+ * skipping Const entries (they are stored outside the packed array).
+ *
+ * @param v_out  Output array (must have enough space for runtime entries).
+ * @param v_in   Input values (mix of Const and Dynamic).
+ */
 template <typename... Is>
 VECOPS_INLINE constexpr void zip_packed_values(nint_t* v_out, const Is& ... v_in) {
   int idx = 0;
@@ -573,6 +854,11 @@ VECOPS_INLINE constexpr void zip_packed_values(nint_t* v_out, const Is& ... v_in
   }(), ...);
 }
 
+/**
+ * Copy a packed array into an output array, filling Const entries from
+ * compile-time type info and runtime entries from the packed array.
+ * Inverse of zip_packed_values.
+ */
 template <typename... Is>
 VECOPS_INLINE constexpr void zip_packed_values(nint_t* v_out, const nint_t* v_in) {
   int out_idx = 0;
@@ -586,6 +872,10 @@ VECOPS_INLINE constexpr void zip_packed_values(nint_t* v_out, const nint_t* v_in
   }(), ...);
 }
 
+/**
+ * Unpack compress storage into a full array, filling Const entries from
+ * compile-time type information.
+ */
 template <typename... Is>
 VECOPS_INLINE constexpr void unzip_packed_values(nint_t* v_out, const nint_t* v_in) {
   int out_idx = 0;
@@ -600,8 +890,33 @@ VECOPS_INLINE constexpr void unzip_packed_values(nint_t* v_out, const nint_t* v_
 }
 
 /**
- * 压缩存储，存储一系列整数值，不会实际存储其中的编译期常量，从而节省存储空间
- * @tparam Is
+ * @brief Compressed storage for a sequence of Values.
+ *
+ * `PackedStorage<Is...>` stores the run-time values of a parameter pack
+ * `Is...` while eliding compile-time constants from the actual storage.
+ * This saves memory for metadata types where many dimensions are
+ * compile-time `Const<N>`.
+ *
+ * ## Internal layout
+ *
+ * - `is_runtime[i]`: whether the i-th type is a Dynamic (run-time) type.
+ * - `offsets[i]`: maps logical index i to its position in the compressed
+ *   `values` array (skipping Const entries).
+ * - `const_values[i]`: the compile-time value for Const entries.
+ * - `num_stor`: number of actually stored runtime values.
+ *
+ * ## Usage
+ *
+ * @code
+ * // PackedStorage<Const<2>, Dynamic<4>, Const<3>>
+ * // stores only 1 runtime value (the Dynamic<4> entry)
+ * PackedStorage<Const<2>, Dynamic<4>, Const<3>> stor(2, 128, 3);
+ * auto v0 = stor.get<0>();   // 2 (constexpr)
+ * auto v1 = stor.get<1>();   // 128 (runtime read)
+ * auto arr = stor.to_array(); // {2, 128, 3}
+ * @endcode
+ *
+ * @tparam Is  Parameter pack of Value subclasses (Const<N> or Dynamic<A,L,H>).
  */
 template <typename... Is>
 struct PackedStorage {
@@ -609,33 +924,45 @@ struct PackedStorage {
   static constexpr int n_dim = sizeof...(Is);
 private:
   static constexpr nint_t const_values[] = {PickConstValue<Is>::value...};
-  /**
-  * 生成一个将Is下标映射到压缩数组下标的映射表
-  * @return (映射表数组, 压缩数组长度)
-  */
-  static constexpr auto stor_data = [] {
-    std::array<int, sizeof...(Is)> arr;
+
+  /// Fold over the type pack directly to compute offsets at compile time.
+  /// Uses Is::is_runtime (class-level static) rather than is_runtime[i]
+  /// which avoids clang's "array without known bound" constexpr limitation.
+  template <size_t... Js>
+  static constexpr auto _compute_offsets(std::index_sequence<Js...>) {
+    std::array<int, sizeof...(Is)> arr{};
     int off = 0;
-    for (int i = 0; i < sizeof...(Is); ++i) {
-      arr[i] = off;
-      off += int(is_runtime[i]);
-    }
+    ((arr[Js] = off, off += int(Is::is_runtime)), ...);
     return std::make_pair(arr, off);
-  }();
+  }
+  static constexpr auto stor_data = _compute_offsets(std::index_sequence_for<Is...>{});
 public:
+  /**
+   * Offset mapping: `offsets[i]` gives the position in the compressed
+   * `values` array for logical dimension i (meaningless for Const entries).
+   */
   static constexpr std::array<int, sizeof...(Is)> offsets = stor_data.first;
+  /// Number of actually stored runtime values.
   static constexpr int num_stor = stor_data.second;
 
   constexpr PackedStorage() = default;
 
   /**
-   * 构造压缩存储，输入非压缩原始数据，函数内部会进行压缩
+   * Construct from unpacked values. Internally compresses by storing
+   * only the runtime entries.
+   *
+   * @note Asserts that each value conforms to its type's constraints.
    */
   constexpr PackedStorage(Is... values) {
     VECOPS_ASSERT((Is::conforms(nint_t(values)) && ...), "values do not conform to type constraints");
     zip_packed_values<Is...>(this->values.data(), values...);
   }
 
+  /**
+   * Construct from a packed (already compressed) array.
+   *
+   * @note Asserts that each value conforms to its type's constraints.
+   */
   constexpr PackedStorage(const nint_t* values) {
     int idx = 0;
     VECOPS_ASSERT(((Is::conforms(values[idx++])) && ...), "values do not conform to type constraints");
@@ -643,19 +970,28 @@ public:
   }
 
   /**
-   * 拿到第I维的数据，如果是常量则函数返回constexpr，否则返回运行时值。
+   * Get the value for dimension I. Returns a `constexpr` value for
+   * Const entries, reads from the compressed array for Dynamic entries.
+   *
+   * @tparam I  Zero-based dimension index.
+   * @return The value (constexpr or runtime depending on type).
    */
   template <int I>
   [[nodiscard]] constexpr nint_t get() const {
-    if constexpr (is_runtime[I]) {
+    using DimType = std::tuple_element_t<I, std::tuple<Is...>>;
+    if constexpr (DimType::is_runtime) {
       return values[offsets[I]];
     } else {
-      return const_values[I];
+      return PickConstValue<DimType>::value;
     }
   }
 
   /**
-   * 拿到第I维的数据，总是返回运行时量。
+   * Get the value for dimension `i` at runtime. Always returns a
+   * runtime `nint_t` regardless of whether the type is Const or Dynamic.
+   *
+   * @param i  Zero-based dimension index (runtime value).
+   * @return The integer value.
    */
   [[nodiscard]] nint_t operator[](int i) const {
     VECOPS_ASSERT(0 <= i && i < n_dim, "%d !in 0..%d", i, n_dim);
@@ -667,7 +1003,7 @@ public:
   }
 
   /**
-   * 拿到此压缩存储对应的非压缩原始数据
+   * Expand to a full unpacked array (restoring Const entries).
    */
   [[nodiscard]] constexpr std::array<nint_t, n_dim> to_array() const {
     std::array<nint_t, n_dim> arr;
@@ -676,14 +1012,17 @@ public:
   }
 
   /**
-   * 拿到此压缩存储的压缩数据数组
+   * Get the internal compressed array (runtime values only, no Const entries).
    */
   [[nodiscard]] constexpr const std::array<nint_t, num_stor>& to_packed_array() const {
     return this->values;
   }
 
   /**
-   * 从压缩数组直接初始化一个压缩存储
+   * Construct from a pre-existing compressed array.
+   *
+   * @note The caller must ensure the array was produced by `zip_packed_values`
+   *       with the same type parameter pack. No validation is performed.
    */
   static constexpr PackedStorage from_packed_array(const nint_t* values) {
     PackedStorage self;
@@ -698,14 +1037,43 @@ private:
 } // namespace details
 
 /**
- * 将类型转换为Value包装，比如整数会被转为Any{v}
+ * @brief Convert a type to its Value wrapper.
+ *
+ * Integer types are promoted to `Any`; Value subclasses pass through unchanged.
+ * This is used to normalize user-provided parameters in `make_shape`,
+ * `make_strides`, etc.
+ *
+ * @code
+ * using T = ToValue<int32_t>;   // T = Any
+ * using U = ToValue<Const<4>>;  // U = Const<4>
+ * @endcode
  */
 template <typename T>
 using ToValue = details::ValuePromote<T>::Type;
 
 /**
- * 多维数组元数据基类，比如Shape或者Stride
- * @tparam Is
+ * @brief Base class for multi-dimensional typed integer arrays (Shape, Strides).
+ *
+ * `ArrayMeta<Is...>` is a fixed-rank container where each dimension's value
+ * is represented by a Value subclass type (`Const<N>` or `Dynamic<A,L,H>`).
+ * It uses `PackedStorage` internally to store only runtime values.
+ *
+ * ## Subclass usage
+ *
+ * Subclasses `Shape<Is...>` and `Strides<Is...>` enforce additional
+ * semantic constraints (e.g., Shape values must be non-negative).
+ *
+ * ## Construction
+ *
+ * @code
+ * // Explicit types
+ * ArrayMeta<Const<2>, Dynamic<4>> m(2, 128);
+ *
+ * // Via make_shape
+ * auto s = make_shape(cint<2>, 128);  // Shape<Const<2>, Any>
+ * @endcode
+ *
+ * @tparam Is  Value subclass types for each dimension.
  */
 template <typename... Is>
 struct ArrayMeta {
@@ -715,6 +1083,10 @@ struct ArrayMeta {
 
   constexpr ArrayMeta() = default;
 
+  /**
+   * Construct from per-dimension values. Types are deduced from the
+   * parameter types via ValuePromote.
+   */
   template <typename... Ints>
   constexpr explicit ArrayMeta(Ints... vs) {
     static_assert(sizeof...(Ints) == sizeof...(Is), "MatrixMeta: argument count mismatch");
@@ -722,6 +1094,10 @@ struct ArrayMeta {
     _stor = details::PackedStorage < Is...>{ Is{vs}... };
   }
 
+  /**
+   * Get the compile-time (if Const) or runtime value for dimension I.
+   * @tparam I  Zero-based dimension index.
+   */
   template <int I>
   constexpr nint_t get() const {
     return _stor.template get<I>();
@@ -731,11 +1107,17 @@ struct ArrayMeta {
     return _stor[i];
   }
 
+  /**
+   * Check whether dimension I is a compile-time constant.
+   */
   template <int I>
   constexpr bool is_const() const {
     return !this->template is_runtime<I>();
   }
 
+  /**
+   * Check whether dimension I holds a runtime value.
+   */
   template <int I>
   constexpr bool is_runtime() const {
     return decltype(_stor)::is_runtime[I];
@@ -749,7 +1131,21 @@ struct ArrayMeta {
 }; // struct ArrayMeta
 
 /**
- * 高维数组形状参数，每一维度参数必须非负
+ * @brief Multi-dimensional shape descriptor. All dimension values must be non-negative.
+ *
+ * `Shape<Is...>` inherits from `ArrayMeta<Is...>` and adds the constraint
+ * that every dimension size >= 0. Construction asserts this.
+ *
+ * ## Usage
+ *
+ * @code
+ * Shape<Const<2>, Const<3>> s(2, 3);          // OK
+ * Shape<Const<2>> bad(-1);                     // RUNTIME ASSERTION
+ *
+ * auto s2 = make_shape(cint<2>, dyn<4>(128));  // Convenience factory
+ * @endcode
+ *
+ * @tparam Is  Value types for each dimension.
  */
 template <typename... Is>
 struct Shape : public ArrayMeta<Is...> {
@@ -761,13 +1157,25 @@ struct Shape : public ArrayMeta<Is...> {
   constexpr Shape() = default;
 }; // struct Shape
 
+/**
+ * @brief Create a Shape, automatically wrapping bare integers as Any.
+ *
+ * @code
+ * auto s = make_shape(cint<3>, 128);  // Shape<Const<3>, Any>
+ * @endcode
+ */
 template <typename... Ints>
 constexpr auto make_shape(Ints&& ... is) -> Shape<ToValue<std::remove_cvref_t<Ints>>...> {
   return {std::forward<Ints>(is)...};
 }
 
 /**
- * 高维数组步长参数，每一维参数可为负数
+ * @brief Multi-dimensional stride descriptor. Stride values may be negative
+ *        (for reversed dimensions).
+ *
+ * Unlike `Shape`, `Strides` does **not** enforce a sign constraint.
+ *
+ * @tparam Is  Value types for each dimension.
  */
 template <typename... Is>
 struct Strides : public ArrayMeta<Is...> {
@@ -778,12 +1186,17 @@ struct Strides : public ArrayMeta<Is...> {
   constexpr Strides() = default;
 }; // class Strides
 
+/**
+ * @brief Create Strides, automatically wrapping bare integers as Any.
+ */
 template <typename... Ints>
 constexpr auto make_strides(Ints&& ... is) -> Strides<ToValue<std::remove_cvref_t<Ints>>...> {
   return {std::forward<Ints>(is)...};
 }
 
 namespace details {
+
+// --- Type trait helpers for ArrayMeta / Shape / Strides ---
 
 template <typename T>
 struct IsArrayMeta : std::false_type {};
@@ -805,13 +1218,29 @@ template <typename... Is>
 struct IsStrides<Strides<Is...>> : std::true_type {};
 
 
+/**
+ * @brief Compile-time dimension removal from an ArrayMeta type.
+ *
+ * Removes dimension `J` from the type `Meta<InIs...>`, producing
+ * `Meta<OutIs..., InIs_without_J...>`.
+ *
+ * This is a compile-time O(N) operation implemented via recursive
+ * template specialization with two nested Holder levels (two variadic
+ * packs require double nesting).
+ *
+ * @tparam Meta  The target container template (e.g., Shape, Strides, ArrayMeta).
+ * @tparam N     Original number of dimensions.
+ * @tparam I     Current input index (internal recursion counter).
+ * @tparam J     Target dimension to remove.
+ * @tparam InIs  Remaining input types.
+ */
 template <
-    template <typename... xIs> typename Meta, // 目标Meta类型，模板类型用于随后填入类型值
-    int N, // 原始Is长度
-    int I, // 当前下标
-    int J, // 目标下标
+    template <typename... xIs> typename Meta,
+    int N,
+    int I,
+    int J,
     typename = void, // SFINAE
-    typename... InIs // 剩余未处理的类型值
+    typename... InIs
 >
 struct ArrayMetaRemoveDim {
   static_assert(sizeof(N) == 0, "Unreachable");
@@ -828,10 +1257,8 @@ template <
 struct ArrayMetaRemoveDim<Meta, N, I, J, std::enable_if_t<(I < J)>, InI0, InIs...> {
   static_assert(0 <= I && I < N, "I out of range");
 
-  // 由于有两个variadic template args，所以需要套两层
-  template <typename... OutIs> // 已处理的类型值
+  template <typename... OutIs>
   struct Holder {
-    // 直接从高一级转发
     using Inner = typename ArrayMetaRemoveDim<Meta, N, I + 1, J, void, InIs...>
     ::template Holder<OutIs..., InI0>;
     using Type = Inner::Type;
@@ -852,10 +1279,9 @@ template <
 struct ArrayMetaRemoveDim<Meta, N, I, I, void, InI0, InIs...> {
   static_assert(0 <= I && I < N, "I out of range");
 
-  // 由于有两个variadic template args，所以需要套两层
-  template <typename... OutIs> // 已处理的类型值
+  template <typename... OutIs>
   struct Holder {
-    using Type = Meta<OutIs..., InIs...>; // 输入InI0被移除
+    using Type = Meta<OutIs..., InIs...>;  // InI0 removed
 
     constexpr Type transform(const Meta<OutIs..., InI0, InIs...>& m) {
       std::array<nint_t, N - 1> out;
@@ -875,14 +1301,25 @@ constexpr auto remove_dim(const TMeta<Is...>& m) {
 }
 
 
+/**
+ * @brief Compile-time dimension replacement in an ArrayMeta type.
+ *
+ * Replaces dimension `J` with a new Value type `InNew`.
+ *
+ * @tparam Meta  The target container template.
+ * @tparam N     Original number of dimensions.
+ * @tparam I     Current input index (recursion counter).
+ * @tparam J     Target dimension to replace.
+ * @tparam InNew The new Value type for dimension J.
+ */
 template <
-    template <typename... xIs> typename Meta, // 目标Meta类型，模板类型用于随后填入类型值
-    int N, // 原始Is长度
-    int I, // 当前下标
-    int J, // 目标下标
+    template <typename... xIs> typename Meta,
+    int N,
+    int I,
+    int J,
     typename InNew,
-    typename = void, // SFINAE
-    typename... InIs // 剩余未处理的类型值
+    typename = void,
+    typename... InIs
 >
 struct ArrayMetaSetDim {
   static_assert(sizeof(N) == 0, "Unreachable");
@@ -900,10 +1337,8 @@ template <
 struct ArrayMetaSetDim<Meta, N, I, J, InNew, std::enable_if_t<(I < J)>, InI0, InIs...> {
   static_assert(0 <= I && I < N, "I out of range");
 
-  // 由于有两个variadic template args，所以需要套两层
-  template <typename... OutIs> // 已处理的类型值
+  template <typename... OutIs>
   struct Holder {
-    // 直接从高一级转发
     using Inner = typename ArrayMetaSetDim<Meta, N, I + 1, J, InNew, void, InIs...>
     ::template Holder<OutIs..., InI0>;
     using Type = Inner::Type;
@@ -925,10 +1360,9 @@ template <
 struct ArrayMetaSetDim<Meta, N, I, I, InNew, void, InI0, InIs...> {
   static_assert(0 <= I && I < N, "I out of range");
 
-  // 由于有两个variadic template args，所以需要套两层
-  template <typename... OutIs> // 已处理的类型值
+  template <typename... OutIs>
   struct Holder {
-    using Type = Meta<OutIs..., InNew, InIs...>; // 输入InI0被替换为InNew
+    using Type = Meta<OutIs..., InNew, InIs...>;  // InI0 replaced by InNew
 
     constexpr Type transform(const Meta<OutIs..., InI0, InIs...>& m, InNew v) {
       std::array<nint_t, N> out;
@@ -949,14 +1383,26 @@ constexpr auto set_dim(const TMeta<Is...>& m, Inew v) {
 }
 
 
+/**
+ * @brief Compile-time dimension insertion into an ArrayMeta type.
+ *
+ * Inserts a new Value type `InNew` at position `J` (0 <= J <= N).
+ * When `J == N`, the dimension is appended at the end.
+ *
+ * @tparam Meta  The target container template.
+ * @tparam N     Original number of dimensions.
+ * @tparam I     Current input index (recursion counter).
+ * @tparam J     Target position for insertion.
+ * @tparam InNew The Value type to insert at position J.
+ */
 template <
-    template <typename... xIs> typename Meta, // 目标Meta类型，模板类型用于随后填入类型值
-    int N, // 原始Is长度
-    int I, // 当前下标
-    int J, // 目标下标
+    template <typename... xIs> typename Meta,
+    int N,
+    int I,
+    int J,
     typename InNew,
-    typename = void, // SFINAE
-    typename... InIs // 剩余未处理的类型值
+    typename = void,
+    typename... InIs
 >
 struct ArrayMetaInsertDim {
   static_assert(sizeof(N) == 0, "Unreachable");
@@ -974,10 +1420,8 @@ template <
 struct ArrayMetaInsertDim<Meta, N, I, J, InNew, std::enable_if_t<(I < J)>, InI0, InIs...> {
   static_assert(0 <= I && I <= N, "I out of range");
 
-  // 由于有两个variadic template args，所以需要套两层
-  template <typename... OutIs> // 已处理的类型值
+  template <typename... OutIs>
   struct Holder {
-    // 直接从高一级转发
     using Inner = typename ArrayMetaInsertDim<Meta, N, I + 1, J, InNew, void, InIs...>
     ::template Holder<OutIs..., InI0>;
     using Type = Inner::Type;
@@ -998,10 +1442,9 @@ template <
 struct ArrayMetaInsertDim<Meta, N, I, I, InNew, void, InIs...> {
   static_assert(0 <= I && I <= N, "I out of range");
 
-  // 由于有两个variadic template args，所以需要套两层
-  template <typename... OutIs> // 已处理的类型值
+  template <typename... OutIs>
   struct Holder {
-    using Type = Meta<OutIs..., InNew, InIs...>; // 输入InI0被替换为InNew
+    using Type = Meta<OutIs..., InNew, InIs...>;
 
     constexpr Type transform(const Meta<OutIs..., InIs...>& m, InNew v) {
       std::array<nint_t, N + 1> out;
@@ -1023,25 +1466,25 @@ constexpr auto insert_dim(const TMeta<Is...>& m, Inew v) {
 
 } // namespace details
 
-/**
- * 检查类型T是否是ArrayMeta
- */
+/// Type trait: `true` if T is an ArrayMeta, Shape, or Strides.
 template <typename T>
 static constexpr bool is_array_meta = details::IsArrayMeta<T>::value;
-/**
- * 检查类型T是否是Shape
- */
+/// Type trait: `true` if T is a Shape.
 template <typename T>
 static constexpr bool is_shape = details::IsShape<T>::value;
-/**
- * 检查类型T是否是Strides
- */
+/// Type trait: `true` if T is a Strides.
 template <typename T>
 static constexpr bool is_strides = details::IsStrides<T>::value;
 
 /**
- * 获取ArrayMeta (Shape, Stride)中第I维的数据
- * 如果第I维是Const，则函数返回constexpr，否则返回运行时量
+ * @brief Get the value of dimension I from an ArrayMeta.
+ *
+ * Returns `constexpr` if the dimension is a compile-time `Const<N>`.
+ *
+ * @tparam I     Dimension index.
+ * @tparam TMeta The ArrayMeta type (Shape, Strides, or ArrayMeta itself).
+ * @param  m     The metadata container.
+ * @return The integer value for dimension I.
  */
 template <int I, typename TMeta, std::enable_if_t<is_array_meta<TMeta>, bool> = true>
 constexpr nint_t get(const TMeta& m) {
@@ -1049,7 +1492,7 @@ constexpr nint_t get(const TMeta& m) {
 }
 
 /**
- * 获取ArrayMeta中第I维的数据是否为Const
+ * @brief Check whether dimension I of an ArrayMeta is a compile-time constant.
  */
 template <int I, typename TMeta, std::enable_if_t<is_array_meta<TMeta>, bool> = true>
 constexpr bool is_const(const TMeta& m) {
@@ -1057,7 +1500,7 @@ constexpr bool is_const(const TMeta& m) {
 }
 
 /**
- * 获取ArrayMeta中第I维的数据是否为运行时量
+ * @brief Check whether dimension I of an ArrayMeta is a runtime value.
  */
 template <int I, typename TMeta, std::enable_if_t<is_array_meta<TMeta>, bool> = true>
 constexpr bool is_runtime(const TMeta& m) {
@@ -1066,9 +1509,34 @@ constexpr bool is_runtime(const TMeta& m) {
 
 
 /**
- * 一个高维数组的内存布局，包含Shape和Stride。
- * @tparam TShape
- * @tparam TStrides
+ * @brief Memory layout descriptor pairing a Shape and Strides.
+ *
+ * `Layout<TShape, TStrides>` describes the memory layout for a
+ * multi-dimensional tensor: the shape specifies the size of each
+ * dimension, and the strides specify the spacing (in elements) between
+ * consecutive entries along each dimension. This follows row-major
+ * conventions but allows arbitrary striding.
+ *
+ * ## Template parameters
+ *
+ * - `TShape`: A `Shape<...>` type encoding per-dimension sizes.
+ * - `TStrides`: A `Strides<...>` type encoding per-dimension strides.
+ *
+ * Both must have the same rank (number of dimensions).
+ *
+ * ## Usage
+ *
+ * @code
+ * auto s = make_shape(cint<2>, cint<3>);
+ * auto st = make_strides(cint<3>, cint<1>);
+ * auto layout = make_layout(s, st);
+ *
+ * // or directly
+ * auto layout2 = make_layout(make_shape(2, 3), make_strides(3, 1));
+ * @endcode
+ *
+ * @tparam TShape   Shape type.
+ * @tparam TStrides Strides type.
  */
 template <typename TShape, typename TStrides>
 struct Layout {
@@ -1100,6 +1568,9 @@ private:
   TStrides _stride;
 }; // struct Layout
 
+/**
+ * @brief Create a Layout, forwarding the shape and strides arguments.
+ */
 template <typename TShape, typename TStrides>
 constexpr auto make_layout(TShape&& shape, TStrides&& stride) -> Layout<std::remove_cvref_t<TShape>, std::remove_cvref_t<TStrides>> {
   return {std::forward<TShape>(shape), std::forward<TStrides>(stride)};
@@ -1114,14 +1585,17 @@ struct IsLayout<Layout<TShape, TStrides>> : std::true_type {};
 
 } // namespace details
 
-/**
- * 检查类型T是否是Layout
- */
+/// Type trait: `true` if T is a Layout.
 template <typename T>
 static constexpr bool is_layout = details::IsLayout<T>::value;
 
 /**
- * 获取布局layout第I维的大小（Shape数值），此值应是非负的。
+ * @brief Get the size (shape value) of dimension I from a Layout.
+ *
+ * @tparam I       Dimension index.
+ * @tparam TLayout Layout type.
+ * @param  layout  The layout.
+ * @return The size of dimension I (always non-negative).
  */
 template <int I, typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
 constexpr nint_t size(const TLayout& layout) {
@@ -1129,7 +1603,7 @@ constexpr nint_t size(const TLayout& layout) {
 }
 
 /**
- * 获取布局layout第I维的步长（Stride数值）
+ * @brief Get the stride value of dimension I from a Layout.
  */
 template <int I, typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
 constexpr nint_t stride(const TLayout& layout) {
@@ -1137,49 +1611,333 @@ constexpr nint_t stride(const TLayout& layout) {
 }
 
 /**
- * 移除第I维
+ * @brief Remove dimension I from an ArrayMeta (Shape or Strides).
+ *
+ * Returns a new ArrayMeta of rank `Ndim-1`.
+ *
+ * @note This is a compile-time O(N) type transformation — the return
+ *       type carries the modified type parameter pack.
  */
 template <int I, typename TMeta, std::enable_if_t<is_array_meta<TMeta>, bool> = true>
 constexpr auto remove(const TMeta& m) { return details::remove_dim<I>(m); }
 
+/**
+ * @brief Remove dimension I from a Layout (both shape and strides).
+ */
 template <int I, typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
 constexpr auto remove(const TLayout& m) {
   return make_layout(remove<I>(m.shape()), remove<I>(m.strides()));
 }
 
 /**
- * 将第I维设置为指定的值
+ * @brief Set dimension I in an ArrayMeta to a new value.
+ *
+ * @tparam I     Dimension index.
+ * @tparam TMeta ArrayMeta type.
+ * @tparam Inew  New Value type for this dimension.
+ * @param  m     The metadata container.
+ * @param  v     The new value.
+ * @return A new ArrayMeta with dimension I replaced.
  */
 template <int I, typename TMeta, typename Inew, std::enable_if_t<is_array_meta<TMeta>, bool> = true>
 constexpr auto set(const TMeta& m, Inew v) { return details::set_dim<I>(m, v); }
 
+/**
+ * @brief Set dimension I in a Layout to new shape and stride values.
+ */
 template <int I, typename TLayout, typename IShapeNew, typename IStridesNew, std::enable_if_t<is_layout<TLayout>, bool> = true>
 constexpr auto set(const TLayout& m, IShapeNew v_size, IStridesNew v_stride) {
   return make_layout(set<I>(m.shape(), v_size), set<I>(m.strides(), v_stride));
 }
 
 /**
- * 在第I维之前插入指定的值，如果I==Ndim，则在最后一维后面插入此值
+ * @brief Insert a new dimension before position I in an ArrayMeta.
+ *
+ * If `I == Ndim`, the new dimension is appended after the last dimension.
+ *
+ * @tparam I     Insertion position (0 <= I <= Ndim).
+ * @tparam TMeta ArrayMeta type.
+ * @tparam Inew  Value type for the new dimension.
+ * @param  m     The metadata container.
+ * @param  v     The value for the new dimension.
+ * @return A new ArrayMeta of rank `Ndim+1`.
  */
 template <int I, typename TMeta, typename Inew, std::enable_if_t<is_array_meta<TMeta>, bool> = true>
 constexpr auto insert(const TMeta& m, Inew v) { return details::insert_dim<I>(m, v); }
 
+/**
+ * @brief Insert a new dimension before position I in a Layout
+ *        (both shape and strides).
+ */
 template <int I, typename TLayout, typename IShapeNew, typename IStridesNew, std::enable_if_t<is_layout<TLayout>, bool> = true>
 constexpr auto insert(const TLayout& m, IShapeNew v_size, IStridesNew v_stride) {
   return make_layout(insert<I>(m.shape(), v_size), insert<I>(m.strides(), v_stride));
+}
+
+// ======================== ArrayMeta Swap Dim ========================
+
+namespace details {
+
+/**
+ * @brief Compile-time dimension swapping for an ArrayMeta type.
+ *
+ * Swaps dimensions I and J in the type parameter pack, producing a new
+ * type with the dimensions exchanged at compile time.
+ *
+ * @tparam Meta  The target container template.
+ * @tparam I     First dimension index to swap.
+ * @tparam J     Second dimension index to swap.
+ * @tparam Is    Original type parameter pack.
+ */
+template <
+    template <typename... xIs> typename Meta,
+    int I,
+    int J,
+    typename... Is
+>
+struct ArrayMetaSwapDim {
+private:
+  static constexpr int N = sizeof...(Is);
+  static_assert(0 <= I && I < N, "I out of range");
+  static_assert(0 <= J && J < N, "J out of range");
+
+  template <int Idx>
+  struct select {
+    using type = std::conditional_t<
+        Idx == I,
+        std::tuple_element_t<J, std::tuple<Is...>>,
+        std::conditional_t<
+            Idx == J,
+            std::tuple_element_t<I, std::tuple<Is...>>,
+            std::tuple_element_t<Idx, std::tuple<Is...>>
+        >
+    >;
+  };
+
+  template <int... Idx>
+  static constexpr Meta<typename select<Idx>::type...> _make_type(std::integer_sequence<int, Idx...>);
+
+public:
+  using Type = decltype(_make_type(std::make_integer_sequence<int, N>{}));
+
+  static constexpr Type transform(const Meta<Is...>& m) {
+    std::array<nint_t, N> arr = m._stor.to_array();
+    std::swap(arr[I], arr[J]);
+    return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
+      return Type{arr[Idx]...};
+    }(std::make_index_sequence<N>{});
+  }
+};
+
+template <int I, int J, template <typename... xIs> typename TMeta, typename... Is>
+constexpr auto swap_dim(const TMeta<Is...>& m) {
+  return ArrayMetaSwapDim<TMeta, I, J, Is...>::transform(m);
+}
+
+} // namespace details
+
+/**
+ * @brief Compile-time transpose: swap dimensions I and J in a Layout, preserving
+ *        Const type information.
+ *
+ * Unlike the runtime `transpose(layout, i, j)`, this overload preserves the
+ * compile-time Const/Dynamic types for each dimension, producing the exact
+ * swapped type at compile time.
+ *
+ * @code
+ * auto s = make_shape(cint<2>, cint<3>, cint<4>);
+ * auto st = make_strides(cint<12>, cint<4>, cint<1>);
+ * auto L = make_layout(s, st);
+ * auto Lt = transpose<0, 1>(L);
+ * // Lt.shape() == Shape<Const<3>, Const<2>, Const<4>>
+ * @endcode
+ *
+ * @tparam I       First dimension index to swap.
+ * @tparam J       Second dimension index to swap.
+ * @tparam TLayout Layout type.
+ * @param  layout  The layout to transpose.
+ * @return A new Layout with dimensions I and J exchanged, preserving type info.
+ */
+template <int I, int J, typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+constexpr auto transpose(const TLayout& layout) {
+  static_assert(0 <= I && I < TLayout::Ndim, "I out of range");
+  static_assert(0 <= J && J < TLayout::Ndim, "J out of range");
+  return make_layout(
+      details::swap_dim<I, J>(layout.shape()),
+      details::swap_dim<I, J>(layout.strides())
+  );
+}
+
+/**
+ * @brief Runtime transpose: swap dimensions i and j in a Layout.
+ *
+ * The return type degrades to all-`Any` (all dimensions become `Any`)
+ * because the swap targets are runtime values.
+ *
+ * @note Prefer the compile-time overload `transpose<I, J>(layout)` when
+ *       the swap indices are known at compile time.
+ *
+ * @tparam TLayout Layout type.
+ * @param  layout  The layout to transpose.
+ * @param  i       First dimension index (runtime).
+ * @param  j       Second dimension index (runtime).
+ * @return A new Layout with all-Any Shape and Strides.
+ */
+template <typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+constexpr auto transpose(const TLayout& layout, int i, int j) {
+  constexpr int ndim = TLayout::Ndim;
+  VECOPS_ASSERT(0 <= i && i < ndim, "i(%d) out of range [0, %d)", i, ndim);
+  VECOPS_ASSERT(0 <= j && j < ndim, "j(%d) out of range [0, %d)", j, ndim);
+
+  auto shape_arr = layout.shape()._stor.to_array();
+  auto stride_arr = layout.strides()._stor.to_array();
+  std::swap(shape_arr[i], shape_arr[j]);
+  std::swap(stride_arr[i], stride_arr[j]);
+
+  return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
+    return make_layout(
+        make_shape(Any{shape_arr[Idx]}...),
+        make_strides(Any{stride_arr[Idx]}...)
+    );
+  }(std::make_index_sequence<ndim>{});
+}
+
+// ======================== Continuity Traits ========================
+
+namespace details {
+
+/**
+ * @brief Compile-time check: are the last N dimensions of TLayout contiguous?
+ *
+ * A layout is **row-major contiguous** when each stride equals the product
+ * of all subsequent dimensions' sizes:
+ *   stride[D] == shape[D+1] * stride[D+1]
+ * and the last stride == 1.
+ *
+ * This trait performs the check at compile time using only `Const` dimension
+ * information. If any involved dimension is non-Const, the check returns
+ * `false` (conservative).
+ *
+ * @tparam TLayout  The Layout type.
+ * @tparam N        How many trailing dimensions to check.
+ */
+template <typename TLayout, int N>
+struct is_ct_last_contiguous_impl;
+
+template <typename... Ss, typename... Ts, int N>
+struct is_ct_last_contiguous_impl<Layout<Shape<Ss...>, Strides<Ts...>>, N> {
+private:
+  static constexpr int ndim = sizeof...(Ss);
+
+  template <int D>
+  static constexpr bool _check_one() {
+    if constexpr (D < 0 || D > ndim) {
+      return false;
+    } else if constexpr (D >= ndim) {
+      return true;
+    } else if constexpr (D == ndim - 1) {
+      using St = std::tuple_element_t<D, std::tuple<Ts...>>;
+      if constexpr (!St::is_const) {
+        return false;
+      } else {
+        return St::value == 1;
+      }
+    } else {
+      using Sd = std::tuple_element_t<D, std::tuple<Ts...>>;
+      using Sd1 = std::tuple_element_t<D + 1, std::tuple<Ts...>>;
+      using Zd1 = std::tuple_element_t<D + 1, std::tuple<Ss...>>;
+      if constexpr (!Sd::is_const) {
+        return false;
+      } else if constexpr (!Sd1::is_const) {
+        return false;
+      } else if constexpr (!Zd1::is_const) {
+        return false;
+      } else {
+        return Sd::value == Zd1::value * Sd1::value && _check_one<D + 1>();
+      }
+    }
+  }
+
+public:
+  static constexpr bool value = (N >= 0) && (N <= ndim) && _check_one<ndim - N>();
+};
+
+} // namespace details
+
+/**
+ * @brief Compile-time check: are the last N dimensions of TLayout contiguous?
+ *
+ * Evaluates at compile time. When all involved dimensions are `Const`,
+ * can resolve to `true` without any runtime check.
+ *
+ * @tparam TLayout  Layout type.
+ * @tparam N        Number of trailing dimensions to check.
+ */
+template <typename TLayout, int N>
+struct is_ct_last_contiguous : details::is_ct_last_contiguous_impl<std::remove_cvref_t<TLayout>, N> {};
+
+/**
+ * @brief Compile-time check: are all dimensions of TLayout contiguous?
+ *
+ * Equivalent to `is_ct_last_contiguous<TLayout, TLayout::Ndim>`.
+ */
+template <typename TLayout>
+struct is_ct_contiguous : is_ct_last_contiguous<std::remove_cvref_t<TLayout>, std::remove_cvref_t<TLayout>::Ndim> {};
+
+/**
+ * @brief Runtime check: are the last N dimensions of `layout` contiguous?
+ *
+ * If the compile-time check (`is_ct_last_contiguous`) already returns `true`,
+ * this function returns `true` at compile time with no runtime cost.
+ *
+ * @tparam N       Number of trailing dimensions to check.
+ * @tparam TLayout Layout type.
+ * @param  layout  The layout.
+ * @return `true` if the last N dimensions are row-major contiguous.
+ */
+template <int N, typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+inline bool is_last_contiguous(const TLayout& layout) {
+  if constexpr (is_ct_last_contiguous<TLayout, N>::value) {
+    return true;
+  }
+  if constexpr (N <= 0) {
+    return true;
+  }
+  int ndim = layout.ndim();
+  if (N > ndim) return false;
+  nint_t expected = 1;
+  for (int d = ndim - 1; d >= ndim - N; --d) {
+    if (layout.strides()[d] != expected) return false;
+    expected *= layout.shape()[d];
+  }
+  return true;
+}
+
+/**
+ * @brief Runtime check: are all dimensions of `layout` contiguous?
+ *
+ * @tparam TLayout Layout type.
+ * @param  layout  The layout.
+ * @return `true` if the layout is fully row-major contiguous.
+ */
+template <typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+inline bool is_contiguous(const TLayout& layout) {
+  return is_last_contiguous<TLayout::Ndim>(layout);
 }
 
 
 // ============ I/O Support ============
 
 /**
- * 输出 ArrayMeta (Shape / Strides) 为紧凑元组形式 "(v0, v1, ...)"。
+ * @brief Stream output for ArrayMeta (Shape / Strides).
  *
- * 维度值输出规则：
- *   - Const<N>             → N!
- *   - Any{v} (=Dynamic<1>)  → v
- *   - Dynamic<A,_,_>{v}     → v@A   (当 A>1)
- *   - Dynamic<A,Lo,Hi>{v}   → v@A[Lo,Hi] (当有上下界时)
+ * Prints as compact tuple form `(v0, v1, ...)`.
+ *
+ * Value decoration rules:
+ *   - `Const<N>`             → `N!`
+ *   - `Any{v}` (=Dynamic<1>) → `v`
+ *   - `Dynamic<A,_,_>{v}`    → `v@A`  (when A > 1)
+ *   - `Dynamic<A,Lo,Hi>{v}`  → `v@A[Lo,Hi]` (when bounds are active)
  */
 template <typename... Is>
 std::ostream& operator<<(std::ostream& os, const ArrayMeta<Is...>& m) {
@@ -1212,7 +1970,9 @@ std::ostream& operator<<(std::ostream& os, const ArrayMeta<Is...>& m) {
 }
 
 /**
- * 输出 Layout<TShape, TStrides> 为 "Layout(s=(...), st=(...))" 形式。
+ * @brief Stream output for Layout.
+ *
+ * Prints as `Layout(s=(...), st=(...))`.
  */
 template <typename TShape, typename TStrides>
 std::ostream& operator<<(std::ostream& os, const Layout<TShape, TStrides>& l) {

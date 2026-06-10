@@ -114,6 +114,10 @@ add_executable(ArrayTest ${CMAKE_CURRENT_SOURCE_DIR}/array/ArrayTest.cpp)
 target_link_libraries(ArrayTest PRIVATE vecops gtest gtest_main)
 gtest_discover_tests(ArrayTest)
 
+add_executable(TensorTest ${CMAKE_CURRENT_SOURCE_DIR}/gemm/TensorTest.cpp)
+target_link_libraries(TensorTest PRIVATE vecops gtest gtest_main)
+gtest_discover_tests(TensorTest)
+
 add_executable(GemmTest ${CMAKE_CURRENT_SOURCE_DIR}/array/GemmTest.cpp)
 target_link_libraries(GemmTest PRIVATE vecops gtest gtest_main)
 gtest_discover_tests(GemmTest)
