@@ -137,18 +137,18 @@ struct ConversionVecAdapter : public PositionedVecFn<Eo, Ei> {
         auto inner_out = _fn.call(t_ox, inner_in, x, y);
         return vec::xconvert(t, vec::bitcast(t_io, inner_out));
       }
-    } else { // 否则需要劈成两半处理，且需要递归处理
-      vec::Half<Ti> t_h;
-      auto v_lo = this->call(t_h, vec::lower(t, v_in), x, y);
-      auto v_hi = this->call(t_h, vec::upper(t, v_lo), x, y);
+    } else {
+      vec::Half<To> t_h;
+      Ti ti;
+      auto v_lo = this->call(t_h, vec::lower(ti, v_in), x, y);
+      auto v_hi = this->call(t_h, vec::upper(ti, v_in), x, y);
       return vec::concat(t, v_lo, v_hi);
     }
   }
 
   template <TLV_DECL_TAG(To),
       TL_IF(is_any<vec::TypeOf<To>, Eo>),
-      TL_IF(is_elementwise),
-      TL_IF(ConversionVecAdapter::min_output_pow2 <= vec::scalable_pow2_of<To> && vec::scalable_pow2_of<To> <= ConversionVecAdapter::max_output_pow2)>
+      TL_IF((is_elementwise) && ConversionVecAdapter::min_output_pow2 <= vec::scalable_pow2_of<To> && vec::scalable_pow2_of<To> <= ConversionVecAdapter::max_output_pow2)>
   vec::Vec<To> call(To t, vec::Vec<vec::Rebind<Ei, To>> v_in) const {
     return this->call(t, v_in, 0, 0);
   }
