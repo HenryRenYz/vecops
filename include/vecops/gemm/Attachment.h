@@ -122,7 +122,7 @@ struct ConversionVecAdapter : public PositionedVecFn<Eo, Ei> {
 
     // 输入转换为VecFn输入后可以装下
     if constexpr (pow2_in <= VecFn::max_input_pow2) {
-      if (VecFn::min_input_pow2 <= pow2_in) {
+      if constexpr (VecFn::min_input_pow2 <= pow2_in) {
         vec::Rebind<InnerEi, Ti> t_ii;
         vec::Rebind<InnerEo, Ti> t_io;
         auto inner_in = vec::xconvert(t_ii, v_in);

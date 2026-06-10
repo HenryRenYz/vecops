@@ -5,6 +5,7 @@
 
 #include "vecops/gemm/Attachment.h"
 #include "vecops/util/Math.h"
+#include "vecops/util/ScalarConvert.h"
 
 using namespace vecops;
 using namespace vecops::gemm;
@@ -112,7 +113,7 @@ void runPositionalLambdaTest() {
   auto buf_ref = alloc_aligned<Eo>(N_out);
 
   for (nint_t i = 0; i < N_in; ++i) buf_in[i] = get_value<Ei>(i);
-  for (nint_t i = 0; i < N_out; ++i) buf_ref[i] = static_cast<Eo>(buf_in[i % N_in]);
+  for (nint_t i = 0; i < N_out; ++i) buf_ref[i] = convert<Eo, Ei>(buf_in[i % N_in]);
 
   auto v_in = loadu(t_i, buf_in);
   auto v_out = adapter.call(t_o, v_in, 0, 0);
@@ -151,7 +152,7 @@ void runElementwiseLambdaTest() {
   auto buf_ref = alloc_aligned<Eo>(N_out);
 
   for (nint_t i = 0; i < N_in; ++i) buf_in[i] = get_value<Ei>(i);
-  for (nint_t i = 0; i < N_out; ++i) buf_ref[i] = static_cast<Eo>(buf_in[i % N_in]);
+  for (nint_t i = 0; i < N_out; ++i) buf_ref[i] = convert<Eo, Ei>(buf_in[i % N_in]);
 
   auto v_in = loadu(t_i, buf_in);
   auto v_out = adapter.call(t_o, v_in);
@@ -196,7 +197,7 @@ void runConversionTest() {
   storeu(t_o, buf_out, v_out);
 
   for (nint_t i = 0; i < N_out; ++i) {
-    Eo expected = static_cast<Eo>(buf_in[i % N_in]);
+    Eo expected = convert<Eo, Ei>(buf_in[i % N_in]);
     EXPECT_TRUE(values_close(expected, buf_out[i]))
         << "ConvAdapter Eo=" << typeid(Eo).name() << " Ei=" << typeid(Ei).name()
         << " Pow2=" << CallPow2 << " i=" << i;
@@ -233,7 +234,7 @@ void runConversionBranchCTest() {
   storeu(t_o, buf_out, v_out);
 
   for (nint_t i = 0; i < N_out; ++i) {
-    Eo expected = static_cast<Eo>(buf_in[i % N_in]);
+    Eo expected = convert<Eo, Ei>(buf_in[i % N_in]);
     EXPECT_TRUE(values_close(expected, buf_out[i]))
         << "ConvBranchC Eo=" << typeid(Eo).name() << " Ei=" << typeid(Ei).name()
         << " Pow2=" << CallPow2 << " i=" << i;
@@ -357,9 +358,8 @@ CONV_POW0_TESTS(int32_t, int8_t)
 LAMBDA_POW2_TESTS(float16_t, float32_t)    // narrowing 2:1
 CONV_POW0_TESTS(float16_t, float32_t)
 
-// Narrowing 4:1 (int32->int8) excluded: Vec.h demote bug for 4:1 integer
-// narrowing. All tests fail at element-level comparison. Lambda and
-// ConversionVecAdapter dispatch correctness verified by other pairs.
+LAMBDA_POW2_TESTS(int8_t, int32_t)         // narrowing 4:1
+CONV_POW0_TESTS(int8_t, int32_t)
 
 
 // ============================================================================
