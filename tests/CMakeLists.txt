@@ -127,6 +127,11 @@ add_multiarch_executable(VecBaseTest
     ARCH Scalar
 )
 
+add_multiarch_executable(AttachmentTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/gemm/AttachmentTest.cpp
+    ARCH Native
+)
+
 set(VECOPS_VEC_TESTS BasicTest LoadStoreTest ArithTest ConversionTest ShuffleTest)
 foreach(TEST ${VECOPS_VEC_TESTS})
     add_multiarch_executable(Vec${TEST}
