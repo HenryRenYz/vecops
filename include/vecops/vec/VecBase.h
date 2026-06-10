@@ -1145,6 +1145,15 @@ using Twice = typename details::TagMaker<
     T::is_runtime_size ? (T::POW2 + 1) : 0
 >::Type;
 
+/**
+ * 获取等效pow2, 即使得 T == ScalableTag<TypeOf<T>, scalable_pow2_of<T>>
+ */
+template <typename T>
+static constexpr int scalable_pow2_of = T::is_runtime_size
+    ? T::POW2 : T::AdjustedN >= _VEC_SIZE(TypeOf<T>)
+    ? log2_floor(T::AdjustedN / _VEC_SIZE(TypeOf<T>))
+    : -log2_floor(_VEC_SIZE(TypeOf<T>) / T::AdjustedN);
+
 } // namespace vecops::vec
 
 #endif //VECOPS_VECBASE_H

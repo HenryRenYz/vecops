@@ -2332,6 +2332,22 @@ VECOPS_VFUNC Vec<To> convert(To t, Vi v) {
 }
 
 /**
+ * @brief Convert elements to designated type using promote/demote/convert adaptively
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+VECOPS_VFUNC Vec<To> xconvert(To t, Vi v) {
+  using Ei = TypeOf<Vi>;
+  using Eo = TypeOf<To>;
+  if constexpr (sizeof(Ei) < sizeof(Eo)) { // widening, promote
+    return vec::promote(t, v);
+  } else if constexpr(sizeof(Ei) > sizeof(Eo)) { // narrowing, demote
+    return vec::demote(t, v);
+  } else {
+    return vec::convert(t, v);
+  }
+}
+
+/**
  * @brief Reinterpret cast vector bits to a different type.
  *
  * Reinterprets the bit pattern of the input vector as a different type

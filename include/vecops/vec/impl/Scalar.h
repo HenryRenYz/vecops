@@ -75,6 +75,7 @@ VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value) {
   return v;
 #else
   return details::vectorized_v<T>([&](nint_t i){ return value; });
+#endif
 }
 
 template <TLV_DECL_TAG(T)>
@@ -187,6 +188,60 @@ VECOPS_VFUNC V local_shuf(V v, Vec<Rebind<Index<TypeOf<T>>, T>> vi) {
     for (nint_t j = 0; j < group_el; ++j) {
       u[i + j] = v[nint_t(vi[i + j]) + i];
     }
+  }
+  return u;
+}
+
+template <int... Is, TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V local_shuf(V v) {
+  constexpr T t;
+  static_assert(is_default_impl(t) || is_scalable(t));
+  static_assert(is_word_vec(t));
+  constexpr nint_t M = sizeof...(Is);
+  static_assert(16 / sizeof(TypeOf<T>) == M, "Indices count must match elements per 16-byte lane");
+  static_assert(size(t) >= M && size(t) % M == 0);
+  constexpr std::array<int, M> arr = {Is...};
+  V u;
+  for (nint_t i = 0; i < size(t); i += M) {
+    for (nint_t j = 0; j < M; ++j) {
+      u[i + j] = v[i + arr[M - 1 - j]];
+    }
+  }
+  return u;
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, typename... Is, TL_IF((is_any<Is, int> && ...))>
+VECOPS_VFUNC V local_shuf(V v, Is... is) {
+  constexpr T t;
+  static_assert(is_default_impl(t) || is_scalable(t));
+  static_assert(is_word_vec(t));
+  constexpr nint_t M = sizeof...(Is);
+  static_assert(16 / sizeof(TypeOf<T>) == M, "Indices count must match elements per 16-byte lane");
+  static_assert(size(t) >= M && size(t) % M == 0);
+  const std::array<int, M> arr = {is...};
+  V u;
+  for (nint_t i = 0; i < size(t); i += M) {
+    for (nint_t j = 0; j < M; ++j) {
+      u[i + j] = v[i + arr[M - 1 - j]];
+    }
+  }
+  return u;
+}
+
+/**
+ * @brief Shuffle elements across the entire vector using an index vector (scalar implementation).
+ *
+ * Permutes elements across the whole word. Each element can be selected from any position.
+ * Result: result[j] = v[vi[j]]
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V shuf(V v, Vec<Rebind<Index<TypeOf<T>>, T>> vi) {
+  constexpr T t;
+  static_assert(is_default_impl(t) || is_scalable(t));
+  static_assert(is_word_vec(t));
+  V u;
+  for (nint_t i = 0; i < size(t); ++i) {
+    u[i] = v[(nint_t)vi[i]];
   }
   return u;
 }
@@ -922,31 +977,40 @@ VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
   return details::vectorized_v<T>([&](nint_t i){ return m[i] ? _safe_abs<TypeOf<T>>(v[i]) : default_v[i]; });
 }
 
+template <typename T>
+static VECOPS_VFUNC T _safe_sqrt(T v) {
+  if constexpr (is_small_float<T>) {
+    return static_cast<T>(std::sqrt(static_cast<float>(v)));
+  } else {
+    return static_cast<T>(std::sqrt(v));
+  }
+}
+
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V sqrt(V v) {
-  return details::vectorized_v<T>([&](nint_t i){ return (TypeOf<T>)std::sqrt(v[i]); });
+  return details::vectorized_v<T>([&](nint_t i){ return _safe_sqrt<TypeOf<T>>(v[i]); });
   }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V sqrt(V v, Mask<T> m, V default_v) {
-  return details::vectorized_v<T>([&](nint_t i){ return m[i] ? (TypeOf<T>)std::sqrt(v[i]) : default_v[i]; });
+  return details::vectorized_v<T>([&](nint_t i){ return m[i] ? _safe_sqrt<TypeOf<T>>(v[i]) : default_v[i]; });
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V rsqrt(V v) {
-  return details::vectorized_v<T>([&](nint_t i){ return 1 / (TypeOf<T>)std::sqrt(v[i]); });
+  return details::vectorized_v<T>([&](nint_t i){ return TypeOf<T>(1) / _safe_sqrt<TypeOf<T>>(v[i]); });
   }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V rsqrt(V v, Mask<T> m, V default_v) {
-  return details::vectorized_v<T>([&](nint_t i){ return m[i] ? 1 / (TypeOf<T>)std::sqrt(v[i]) : default_v[i]; });
+  return details::vectorized_v<T>([&](nint_t i){ return m[i] ? TypeOf<T>(1) / _safe_sqrt<TypeOf<T>>(v[i]) : default_v[i]; });
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V rcp(V v) {
-  return details::vectorized_v<T>([&](nint_t i){ return 1 / v[i]; });
+  return details::vectorized_v<T>([&](nint_t i){ return TypeOf<T>(1) / v[i]; });
   }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V rcp(V v, Mask<T> m, V default_v) {
-  return details::vectorized_v<T>([&](nint_t i){ return m[i] ? 1 / v[i] : default_v[i]; });
+  return details::vectorized_v<T>([&](nint_t i){ return m[i] ? TypeOf<T>(1) / v[i] : default_v[i]; });
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
@@ -1005,38 +1069,38 @@ VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC Mask<T> isnan(V v) {
-  return details::vectorized_m<T>([&](nint_t i){ return std::isnan(v[i]); });
+  return details::vectorized_m<T>([&](nint_t i){ return std::isnan(static_cast<float>(v[i])); });
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
-  return details::vectorized_m<T>([&](nint_t i){ return m[i] && std::isnan(v[i]); });
+  return details::vectorized_m<T>([&](nint_t i){ return m[i] && std::isnan(static_cast<float>(v[i])); });
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC Mask<T> isposinf(V v) {
-  return details::vectorized_m<T>([&](nint_t i){ return v[i] > 0 && std::isinf(v[i]); });
+  return details::vectorized_m<T>([&](nint_t i){ return v[i] > TypeOf<T>() && std::isinf(static_cast<float>(v[i])); });
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC Mask<T> isposinf(V v, Mask<T> m) {
-  return details::vectorized_m<T>([&](nint_t i){ return m[i] && v[i] > 0 && std::isinf(v[i]); });
+  return details::vectorized_m<T>([&](nint_t i){ return m[i] && v[i] > TypeOf<T>() && std::isinf(static_cast<float>(v[i])); });
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC Mask<T> isneginf(V v) {
-  return details::vectorized_m<T>([&](nint_t i){ return v[i] < 0 && std::isinf(v[i]); });
+  return details::vectorized_m<T>([&](nint_t i){ return v[i] < TypeOf<T>() && std::isinf(static_cast<float>(v[i])); });
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC Mask<T> isneginf(V v, Mask<T> m) {
-  return details::vectorized_m<T>([&](nint_t i){ return m[i] && v[i] < 0 && std::isinf(v[i]); });
+  return details::vectorized_m<T>([&](nint_t i){ return m[i] && v[i] < TypeOf<T>() && std::isinf(static_cast<float>(v[i])); });
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC Mask<T> isinf(V v) {
-  return details::vectorized_m<T>([&](nint_t i){ return std::isinf(v[i]); });
+  return details::vectorized_m<T>([&](nint_t i){ return std::isinf(static_cast<float>(v[i])); });
 }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC Mask<T> isinf(V v, Mask<T> m) {
-  return details::vectorized_m<T>([&](nint_t i){ return m[i] && std::isinf(v[i]); });
+  return details::vectorized_m<T>([&](nint_t i){ return m[i] && std::isinf(static_cast<float>(v[i])); });
 }
 
 
@@ -1044,7 +1108,7 @@ VECOPS_VFUNC Mask<T> isinf(V v, Mask<T> m) {
 //                          Data type conversions                             //
 /* ************************************************************************** */
 namespace details {
-template <typename T, typename V, TL_IF(is_word_vec(T())), TL_IF(is_default_impl(T())), TL_IF(is_default_impl(Vec2Tag<V>()))>
+template <typename T, typename V, TL_IF(is_default_impl(T())), TL_IF(is_default_impl(Vec2Tag<V>()))>
 VECOPS_VFUNC Vec<T> convert_impl(T t, V v) {
   using TOut = TypeOf<T>;
   using TIn = TypeOf<Vec2Tag<V>>;
@@ -1055,8 +1119,17 @@ VECOPS_VFUNC Vec<T> convert_impl(T t, V v) {
   VECOPS_ASSERT(n_out <= n_in, "Insufficient element (expected %zd, got %zd)", n_out, n_in);
 
   if constexpr (is_word_vec(t_in)) {
-    for (nint_t i = 0; i < n_out; ++i) {
-      u[i] = vecops::convert<TOut, TIn>(v[i]);
+    if constexpr (is_word_vec(t)) {
+      for (nint_t i = 0; i < n_out; ++i) {
+        u[i] = vecops::convert<TOut, TIn>(v[i]);
+      }
+    } else {
+      nint_t k = 0;
+      for (nint_t i = 0; i < num_words(t); ++i) {
+        for (nint_t j = 0; j < word_size(t); ++j) {
+          u[i][j] = vecops::convert<TOut, TIn>(v[k++]);
+        }
+      }
     }
   } else {
     TOut* p = u.data();
@@ -1073,21 +1146,18 @@ VECOPS_VFUNC Vec<T> convert_impl(T t, V v) {
 template <typename T, typename V, TL_IF(sizeof(TypeOf<T>) > sizeof(TypeOf<Vec2Tag<V>>))>
 VECOPS_VFUNC Vec<T> promote(T t, V v) {
   static_assert(is_default_impl(T()) || is_scalable(T()) && is_default_impl(Vec2Tag<V>()));
-  static_assert(is_word_vec(T()));
   return details::convert_impl(t, v);
 }
 
 template <typename T, typename V, TL_IF(sizeof(TypeOf<T>) < sizeof(TypeOf<Vec2Tag<V>>))>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
   static_assert(is_default_impl(T()) || is_scalable(T()) && is_default_impl(Vec2Tag<V>()));
-  static_assert(is_word_vec(T()));
   return details::convert_impl(t, v);
 }
 
 template <typename T, typename V, TL_IF(sizeof(TypeOf<T>) == sizeof(TypeOf<Vec2Tag<V>>))>
 VECOPS_VFUNC Vec<T> convert(T t, V v) {
   static_assert(is_default_impl(T()) || is_scalable(T()) && is_default_impl(Vec2Tag<V>()));
-  static_assert(is_word_vec(T()));
   return details::convert_impl(t, v);
 }
 

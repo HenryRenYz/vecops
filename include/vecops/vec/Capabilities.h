@@ -18,15 +18,18 @@
     #define HAS_CPU_CAPABILITY_AVX 1
   #endif
   #define VEC_MAX_POW (5)
+  #define VEC_HW_MIN_POW (-2) // min POW2 in ScalableTag that Vec can be of a hardware vector rather than software emulated
 #endif // ARCH_X86_FAMILY
 #if defined(ARCH_ARM_FAMILY)
   #if defined(HAS_SVE)
     #define HAS_CPU_CAPABILITY_SVE 1
     #define VEC_MAX_POW (2) // only up to svdtypex4_t is supported till SVE2p1
+    #define VEC_HW_MIN_POW (0) // min POW2 in ScalableTag that Vec can be of a hardware vector rather than software emulated
   #endif
   #if defined(HAS_NEON)
     #define HAS_CPU_CAPABILITY_NEON 1
     #define VEC_MAX_POW (2) // TODO temp
+    #define VEC_HW_MIN_POW (0) // TODO temp
   #endif
 #endif // ARCH_ARM_FAMILY
 
@@ -80,6 +83,7 @@
   #define CPU_CAPABILITY_GENERIC 1
   #define VEC_WIDTH 128 // default width for scalar vector implementation
   #define VEC_MAX_POW (5) // default max pow2 for scalar implementation
+  #define VEC_HW_MIN_POW (0)
 #endif // CPU_CAPABILITY
 
 #endif //VECOPS_CAPABILITIES_H
