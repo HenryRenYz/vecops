@@ -2270,8 +2270,8 @@ VECOPS_VFUNC Vec<To> promote(To t, Vi v) {
   constexpr Vec2Tag<Vi> t_i;
   if constexpr (num_words(t_i) > 1 && num_words(t) > 1) {
     Half<To> t_h;
-    auto lo = vec::promote(t_h, vec::lower(t, v));
-    auto hi = vec::promote(t_h, vec::upper(t, v));
+    auto lo = vec::promote(t_h, vec::lower(t_i, v));
+    auto hi = vec::promote(t_h, vec::upper(t_i, v));
     return vec::concat(t, lo, hi);
   } else {
     return word::promote(t, v);
@@ -2301,8 +2301,8 @@ VECOPS_VFUNC Vec<To> demote(To t, Vi v) {
   constexpr Vec2Tag<Vi> t_i;
   if constexpr (num_words(t_i) > 1 && num_words(t) > 1) {
     Half<To> t_h;
-    auto lo = vec::demote(t_h, vec::lower(t, v));
-    auto hi = vec::demote(t_h, vec::upper(t, v));
+    auto lo = vec::demote(t_h, vec::lower(t_i, v));
+    auto hi = vec::demote(t_h, vec::upper(t_i, v));
     return vec::concat(t, lo, hi);
   } else {
     return word::demote(t, v);
