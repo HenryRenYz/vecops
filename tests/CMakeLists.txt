@@ -118,6 +118,10 @@ add_executable(GemmTest ${CMAKE_CURRENT_SOURCE_DIR}/array/GemmTest.cpp)
 target_link_libraries(GemmTest PRIVATE vecops gtest gtest_main)
 gtest_discover_tests(GemmTest)
 
+add_executable(LayoutTest ${CMAKE_CURRENT_SOURCE_DIR}/gemm/LayoutTest.cpp)
+target_link_libraries(LayoutTest PRIVATE vecops gtest gtest_main)
+gtest_discover_tests(LayoutTest)
+
 add_multiarch_executable(VecBaseTest
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BaseTest.cpp
     ARCH Scalar

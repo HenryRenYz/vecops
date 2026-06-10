@@ -1525,8 +1525,8 @@ TEST_F(GemmTest, AMXBf16_PackGemm_Both) {
 }
 
 TEST_F(GemmTest, Playground) {
-  using namespace vecops::array2;
-  constexpr auto a = array2::details::make_storage_offset<Const<2>, Const<4>, Aligned<2>>();
+  using namespace vecops::gemm;
+  constexpr auto a = details::make_storage_offset<Const<2>, Const<4>, Dynamic<2>>();
   constexpr int nel = a.second;
   static_assert(nel == 3);
 }
