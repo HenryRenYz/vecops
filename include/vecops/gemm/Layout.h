@@ -825,6 +825,57 @@ struct ValuePromote { using Type = T; };
 template <typename T>
 struct ValuePromote<T, std::enable_if_t<is_int<T>>> { using Type = Any; };
 
+// ======================== IsMoreLenientValue ========================
+
+/**
+ * @brief Check whether Value type `VSrc` can be implicitly converted to `VDst`.
+ *
+ * A Value type is "more lenient" (less strict) when it carries less
+ * compile-time information: `Const<N>` is strictest, `Dynamic<A,L,H>` is
+ * intermediate, and `Any` is the most lenient (no constraints at all).
+ *
+ * The implicit conversion is safe when:
+ * - Same type → always OK
+ * - `Const<N>` → `Dynamic<A,L,H>` if N satisfies A, L, H
+ * - `Const<N>` → `Any` (always OK)
+ * - `Dynamic<A1,L1,H1>` → `Dynamic<A2,L2,H2>` if constraints are relaxed
+ * - `Dynamic<A,L,H>` → `Any` (always OK)
+ *
+ * Any other direction (e.g., `Dynamic` → `Const`) requires explicit `as<>()`.
+ */
+template <typename VSrc, typename VDst>
+struct IsMoreLenientValue : std::false_type {};
+
+// Same type
+template <nint_t N>
+struct IsMoreLenientValue<Const<N>, Const<N>> : std::true_type {};
+template <nint_t A, nint_t L, nint_t H>
+struct IsMoreLenientValue<Dynamic<A, L, H>, Dynamic<A, L, H>> : std::true_type {};
+template <>
+struct IsMoreLenientValue<Any, Any> : std::true_type {};
+
+// Const<N> → Dynamic<A, L, H>: N must conform to alignment and bounds
+template <nint_t N, nint_t A, nint_t L, nint_t H>
+struct IsMoreLenientValue<Const<N>, Dynamic<A, L, H>>
+    : std::bool_constant<(N & (A - 1)) == 0
+                         && (L == kLoInf || N >= L)
+                         && (H == kHiInf || N <= H)> {};
+
+// Const<N> → Any
+template <nint_t N>
+struct IsMoreLenientValue<Const<N>, Any> : std::true_type {};
+
+// Dynamic<A1,L1,H1> → Dynamic<A2,L2,H2>: A1 % A2 == 0 and bounds are relaxed
+template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
+struct IsMoreLenientValue<Dynamic<A1, L1, H1>, Dynamic<A2, L2, H2>>
+    : std::bool_constant<(A1 % A2 == 0)
+                         && (L2 == kLoInf || (L1 != kLoInf && L1 >= L2))
+                         && (H2 == kHiInf || (H1 != kHiInf && H1 <= H2))> {};
+
+// Dynamic<A, L, H> → Any
+template <nint_t A, nint_t L, nint_t H>
+struct IsMoreLenientValue<Dynamic<A, L, H>, Any> : std::true_type {};
+
 /**
  * Helper to extract the compile-time value from a Const type, or 0
  * for non-Const types. Used by PackedStorage for the const_values array.

@@ -437,6 +437,20 @@ TEST_F(TensorIntIndexTest, Index_3D_Valid) {
                 EXPECT_EQ(arr(i, j, k), expected++);
 }
 
+TEST_F(TensorIntIndexTest, Index_3D_Modify) {
+    Array<int64_t, 3> arr(data_3d_.data(), {3, 4, 5});
+    arr(0, 0, 0) = 999;
+    arr(0, 1, 2) = 888;
+    arr(1, 2, 3) = 777;
+    arr(2, 3, 4) = 666;
+    EXPECT_EQ(arr(0, 0, 0), 999);
+    EXPECT_EQ(arr(0, 1, 2), 888);
+    EXPECT_EQ(arr(1, 2, 3), 777);
+    EXPECT_EQ(arr(2, 3, 4), 666);
+    EXPECT_EQ(arr(0, 0, 1), 1);
+    EXPECT_EQ(arr(2, 2, 2), 52);
+}
+
 TEST_F(TensorIntIndexTest, Index_4D_Valid) {
     Array<int64_t, 4> arr(data_4d_.data(), {2, 3, 4, 5});
     int64_t expected = 0;
@@ -919,6 +933,277 @@ TEST_F(TensorAsTest, As_ContiguityAfter) {
     EXPECT_TRUE((typed.ct_is_contiguous));
 }
 
+TEST_F(TensorAsTest, As_AnyToConst_Matching) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto typed = arr.as<Shape<Const<4>, Const<5>>, Strides<Const<5>, Const<1>>>();
+    EXPECT_EQ(typed.size<0>(), 4);
+    EXPECT_EQ(typed.size<1>(), 5);
+    EXPECT_EQ(typed.stride<0>(), 5);
+    EXPECT_EQ(typed.stride<1>(), 1);
+}
+
+TEST_F(TensorAsTest, As_AnyToDynamic) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    using S = Shape<Dynamic<4>, Dynamic<1>>;
+    using ST = Strides<Dynamic<1>, Dynamic<1>>;
+    auto typed = arr.as<S, ST>();
+    EXPECT_EQ(typed.ndim(), 2);
+    EXPECT_EQ(typed.size(0), 4);
+    EXPECT_EQ(typed.size(1), 5);
+}
+
+TEST_F(TensorAsTest, As_DynamicToAny) {
+    auto d = make_tensor(data_2d_.data(), make_shape(dyn<4>(4), dyn<1>(5)),
+                         make_strides(dyn<1>(5), dyn<1>(1)));
+    auto relaxed = d.as<Shape<Any, Any>, Strides<Any, Any>>();
+    EXPECT_EQ(relaxed.ndim(), 2);
+    EXPECT_EQ(relaxed.size(0), 4);
+    EXPECT_EQ(relaxed.size(1), 5);
+}
+
+TEST_F(TensorAsTest, As_ConstToDynamic_Conforming) {
+    auto strict = make_tensor(data_2d_.data(), make_shape(cint<4>, cint<5>),
+                              make_strides(cint<5>, cint<1>));
+    using S = Shape<Dynamic<4>, Dynamic<1>>;
+    using ST = Strides<Dynamic<1>, Dynamic<1>>;
+    auto typed = strict.as<S, ST>();
+    EXPECT_EQ(typed.ndim(), 2);
+    EXPECT_EQ(typed.size(0), 4);
+}
+
+TEST_F(TensorAsTest, As_DynamicToDynamic_Relaxed) {
+    auto d = make_tensor(data_2d_.data(), make_shape(dyn<8>(64), dyn<4>(128)),
+                         make_strides(dyn<2>(128), dyn<2>(2)));
+    using S = Shape<Dynamic<4>, Dynamic<2>>;
+    using ST = Strides<Dynamic<1>, Dynamic<1>>;
+    auto relaxed = d.as<S, ST>();
+    EXPECT_EQ(relaxed.ndim(), 2);
+    EXPECT_EQ(relaxed.size(0), 64);
+    EXPECT_EQ(relaxed.size(1), 128);
+}
+
+TEST_F(TensorAsTest, As_StridesOnly) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    using ST = Strides<Const<5>, Const<1>>;
+    auto typed = arr.as<Shape<Any, Any>, ST>();
+    EXPECT_EQ(typed.stride<0>(), 5);
+    EXPECT_EQ(typed.stride<1>(), 1);
+}
+
+TEST_F(TensorAsTest, As_ShapeOnly) {
+    auto t = make_tensor(data_2d_.data(), make_shape(Any{4}, Any{5}),
+                         make_strides(cint<5>, cint<1>));
+    using S = Shape<Const<4>, Const<5>>;
+    auto typed = t.as<S, Strides<Any, Any>>();
+    EXPECT_EQ(typed.size<0>(), 4);
+    EXPECT_EQ(typed.size<1>(), 5);
+}
+
+TEST_F(TensorAsTest, As_SameType_Identity) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto same = arr.as<Shape<Any, Any>, Strides<Any, Any>>();
+    EXPECT_EQ(same.size(0), 4);
+    EXPECT_EQ(same.size(1), 5);
+    EXPECT_EQ(same.stride(0), 5);
+    EXPECT_EQ(same.stride(1), 1);
+}
+
+TEST_F(TensorAsTest, As_1D) {
+    Array<int64_t, 1> arr(data_1d_.data(), {10});
+    auto typed = arr.as<Shape<Const<10>>, Strides<Const<1>>>();
+    EXPECT_EQ(typed.ndim(), 1);
+    EXPECT_EQ(typed.size<0>(), 10);
+    EXPECT_EQ(typed.stride<0>(), 1);
+}
+
+TEST_F(TensorAsTest, As_4D) {
+    Array<int64_t, 4> arr(data_4d_.data(), {2, 3, 4, 5});
+    using S = Shape<Const<2>, Const<3>, Const<4>, Const<5>>;
+    using ST = Strides<Const<60>, Const<20>, Const<5>, Const<1>>;
+    auto typed = arr.as<S, ST>();
+    EXPECT_EQ(typed.ndim(), 4);
+    EXPECT_TRUE((typed.ct_is_contiguous));
+}
+
+TEST_F(TensorAsTest, As_Chained) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto s1 = arr.as<Shape<Const<4>, Any>, Strides<Any, Const<1>>>();
+    auto s2 = s1.as<Shape<Const<4>, Const<5>>, Strides<Const<5>, Const<1>>>();
+    EXPECT_TRUE((s2.ct_is_contiguous));
+    EXPECT_EQ(s2(0, 0), 0);
+}
+
+TEST_F(TensorAsTest, As_VerifyDataPointer) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto typed = arr.as<Shape<Const<4>, Const<5>>, Strides<Const<5>, Const<1>>>();
+    EXPECT_EQ(typed.data(), data_2d_.data());
+}
+
+TEST_F(TensorAsTest, As_PartialConst_Mixed) {
+    auto t = make_tensor(data_2d_.data(), make_shape(cint<4>, Any{5}),
+                         make_strides(Any{5}, cint<1>));
+    auto typed = t.as<Shape<Const<4>, Any>, Strides<Any, Const<1>>>();
+    EXPECT_EQ(typed.size<0>(), 4);
+    EXPECT_EQ(typed.stride<1>(), 1);
+}
+
+TEST_F(TensorAsTest, As_3D_ToAllConst) {
+    Array<int64_t, 3> arr(data_3d_.data(), {3, 4, 5});
+    using S = Shape<Const<3>, Const<4>, Const<5>>;
+    using ST = Strides<Const<20>, Const<5>, Const<1>>;
+    auto typed = arr.as<S, ST>();
+    EXPECT_TRUE((typed.ct_is_contiguous));
+}
+
+TEST_F(TensorAsTest, As_ValuePreservation) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto typed = arr.as<Shape<Const<4>, Const<5>>, Strides<Const<5>, Const<1>>>();
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 5; ++j)
+            EXPECT_EQ(typed(i, j), arr(i, j));
+}
+
+#ifdef VECOPS_DEBUG
+TEST_F(TensorAsTest, As_ConstMismatchSize_Death) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    EXPECT_DEATH((arr.as<Shape<Const<4>, Const<9>>, Strides<Any, Any>>()), "!= 9");
+}
+
+TEST_F(TensorAsTest, As_ConstMismatchStride_Death) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    EXPECT_DEATH((arr.as<Shape<Any, Any>, Strides<Const<3>, Const<1>>>()), "!= 3");
+}
+#endif
+
+// ============================================================================
+// 13. cast() Free Function Tests
+// ============================================================================
+
+class TensorCastTest : public TensorTest {};
+
+TEST_F(TensorCastTest, Cast_ConstToAny_2D) {
+    auto strict = make_tensor(data_2d_.data(), make_shape(cint<4>, cint<5>),
+                              make_strides(cint<5>, cint<1>));
+    auto relaxed = cast<Shape<Any, Any>, Strides<Any, Any>>(strict);
+    EXPECT_EQ(relaxed.ndim(), 2);
+    EXPECT_EQ(relaxed.size(0), 4);
+    EXPECT_EQ(relaxed.size(1), 5);
+    EXPECT_EQ(relaxed(0, 0), 0);
+}
+
+TEST_F(TensorCastTest, Cast_AnyToConst_Matching) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto typed = cast<Shape<Const<4>, Const<5>>, Strides<Const<5>, Const<1>>>(arr);
+    EXPECT_EQ(typed.size<0>(), 4);
+    EXPECT_EQ(typed.size<1>(), 5);
+    EXPECT_TRUE((typed.ct_is_contiguous));
+}
+
+TEST_F(TensorCastTest, Cast_ConstToDynamic) {
+    auto strict = make_tensor(data_2d_.data(), make_shape(cint<4>, cint<5>),
+                              make_strides(cint<5>, cint<1>));
+    using S = Shape<Dynamic<4>, Dynamic<1>>;
+    using ST = Strides<Dynamic<1>, Dynamic<1>>;
+    auto typed = cast<S, ST>(strict);
+    EXPECT_EQ(typed.ndim(), 2);
+    EXPECT_EQ(typed.size(0), 4);
+}
+
+TEST_F(TensorCastTest, Cast_DynamicToAny) {
+    auto d = make_tensor(data_1d_.data(), make_shape(dyn<2>(10)),
+                         make_strides(cint<1>));
+    auto relaxed = cast<Shape<Any>, Strides<Any>>(d);
+    EXPECT_EQ(relaxed.ndim(), 1);
+    EXPECT_EQ(relaxed.size(0), 10);
+}
+
+TEST_F(TensorCastTest, Cast_1D) {
+    Array<int64_t, 1> arr(data_1d_.data(), {10});
+    auto typed = cast<Shape<Const<10>>, Strides<Const<1>>>(arr);
+    EXPECT_EQ(typed.ndim(), 1);
+    EXPECT_EQ(typed.size<0>(), 10);
+    EXPECT_EQ(typed(5), 5);
+}
+
+TEST_F(TensorCastTest, Cast_3D) {
+    Array<int64_t, 3> arr(data_3d_.data(), {3, 4, 5});
+    auto typed = cast<Shape<Const<3>, Const<4>, Const<5>>,
+                      Strides<Const<20>, Const<5>, Const<1>>>(arr);
+    EXPECT_EQ(typed.ndim(), 3);
+    EXPECT_TRUE((typed.ct_is_contiguous));
+}
+
+TEST_F(TensorCastTest, Cast_4D) {
+    Array<int64_t, 4> arr(data_4d_.data(), {2, 3, 4, 5});
+    using S = Shape<Const<2>, Const<3>, Const<4>, Const<5>>;
+    using ST = Strides<Const<60>, Const<20>, Const<5>, Const<1>>;
+    auto typed = cast<S, ST>(arr);
+    EXPECT_EQ(typed.ndim(), 4);
+    EXPECT_TRUE((typed.ct_is_contiguous));
+}
+
+TEST_F(TensorCastTest, Cast_StridesOnly) {
+    auto t = make_tensor(data_2d_.data(), make_shape(cint<4>, cint<5>),
+                         make_strides(Any{5}, Any{1}));
+    auto typed = cast<Shape<Const<4>, Const<5>>, Strides<Const<5>, Const<1>>>(t);
+    EXPECT_EQ(typed.stride<0>(), 5);
+    EXPECT_EQ(typed.stride<1>(), 1);
+    EXPECT_TRUE((typed.ct_is_contiguous));
+}
+
+TEST_F(TensorCastTest, Cast_EquivalenceWithAs) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    using S = Shape<Const<4>, Const<5>>;
+    using ST = Strides<Const<5>, Const<1>>;
+    auto r1 = cast<S, ST>(arr);
+    auto r2 = arr.as<S, ST>();
+    EXPECT_EQ(r1.size<0>(), r2.size<0>());
+    EXPECT_EQ(r1.size<1>(), r2.size<1>());
+    EXPECT_EQ(r1(0, 0), r2(0, 0));
+}
+
+TEST_F(TensorCastTest, Cast_Chained) {
+    auto strict = make_tensor(data_2d_.data(), make_shape(cint<4>, cint<5>),
+                              make_strides(cint<5>, cint<1>));
+    auto r1 = cast<Shape<Any, Any>, Strides<Any, Any>>(strict);
+    auto r2 = cast<Shape<Const<4>, Const<5>>, Strides<Const<5>, Const<1>>>(r1);
+    EXPECT_TRUE((r2.ct_is_contiguous));
+}
+
+TEST_F(TensorCastTest, Cast_VerifyData) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto typed = cast<Shape<Const<4>, Const<5>>, Strides<Const<5>, Const<1>>>(arr);
+    EXPECT_EQ(typed.data(), data_2d_.data());
+}
+
+TEST_F(TensorCastTest, Cast_PartialConst) {
+    auto t = make_tensor(data_2d_.data(), make_shape(cint<4>, Any{5}),
+                         make_strides(cint<5>, cint<1>));
+    auto typed = cast<Shape<Const<4>, Any>, Strides<Any, Const<1>>>(t);
+    EXPECT_EQ(typed.size<0>(), 4);
+    EXPECT_EQ(typed.stride<1>(), 1);
+}
+
+TEST_F(TensorCastTest, Cast_DynamicToDynamic_Relaxed) {
+    auto d = make_tensor(data_2d_.data(), make_shape(dyn<8>(64), dyn<4>(128)),
+                         make_strides(dyn<2>(128), cint<1>));
+    using S = Shape<Dynamic<4>, Dynamic<2>>;
+    using ST = Strides<Dynamic<1>, Dynamic<1>>;
+    auto relaxed = cast<S, ST>(d);
+    EXPECT_EQ(relaxed.ndim(), 2);
+    EXPECT_EQ(relaxed.size(0), 64);
+    EXPECT_EQ(relaxed.size(1), 128);
+}
+
+#ifdef VECOPS_DEBUG
+TEST_F(TensorCastTest, Cast_MismatchConst_Death) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    EXPECT_DEATH(
+        (cast<Shape<Const<8>, Any>, Strides<Any, Any>>(arr)),
+        "!= 8");
+}
+#endif
+
 // ============================================================================
 // 13. Data Type Tests
 // ============================================================================
@@ -1330,6 +1615,326 @@ TEST_F(TensorBoundaryTest, Edge_LargeDim_1D) {
     std::iota(data.begin(), data.end(), 0);
     Array<int64_t, 1> arr(data.data(), {1000000});
     EXPECT_EQ(arr(999999), 999999);
+}
+
+// ============================================================================
+// 18. Implicit Conversion Tests
+// ============================================================================
+
+class TensorImplicitConversionTest : public TensorTest {};
+
+TEST_F(TensorImplicitConversionTest, ConstToAny_AllDims) {
+    auto strict = make_tensor(data_2d_.data(), make_shape(cint<4>, cint<5>),
+                              make_strides(cint<5>, cint<1>));
+    Array<int64_t, 2> arr = strict;
+    EXPECT_EQ(arr.ndim(), 2);
+    EXPECT_EQ(arr.size(0), 4);
+    EXPECT_EQ(arr.size(1), 5);
+    EXPECT_EQ(arr.stride(0), 5);
+    EXPECT_EQ(arr.stride(1), 1);
+    EXPECT_EQ(arr(0, 0), 0);
+}
+
+TEST_F(TensorImplicitConversionTest, ConstToAny_Partial) {
+    auto mixed = make_tensor(data_2d_.data(), make_shape(cint<4>, Any{5}),
+                             make_strides(cint<5>, cint<1>));
+    Tensor<int64_t, Shape<Any, Any>, Strides<Any, Any>> arr = mixed;
+    EXPECT_EQ(arr.ndim(), 2);
+    EXPECT_EQ(arr.size(0), 4);
+    EXPECT_EQ(arr.size(1), 5);
+}
+
+TEST_F(TensorImplicitConversionTest, ConstToDynamic_Conforming) {
+    auto strict = make_tensor(data_2d_.data(), make_shape(cint<4>, cint<5>),
+                              make_strides(cint<5>, cint<1>));
+    Tensor<int64_t, Shape<Dynamic<4>, Dynamic<1>>,
+           Strides<Dynamic<1>, Dynamic<1>>> arr = strict;
+    EXPECT_EQ(arr.ndim(), 2);
+    EXPECT_EQ(arr.size(0), 4);
+}
+
+TEST_F(TensorImplicitConversionTest, ConstToConst_DirectAssignment) {
+    auto strict = make_tensor(data_2d_.data(), make_shape(cint<4>, cint<5>),
+                              make_strides(cint<5>, cint<1>));
+    auto same = strict;
+    EXPECT_EQ(same.size<0>(), 4);
+    EXPECT_TRUE((same.ct_is_contiguous));
+}
+
+TEST_F(TensorImplicitConversionTest, DynamicToAny) {
+    auto d = make_tensor(data_2d_.data(), make_shape(dyn<4>(4), dyn<1>(5)),
+                         make_strides(dyn<1>(5), dyn<1>(1)));
+    Array<int64_t, 2> arr = d;
+    EXPECT_EQ(arr.ndim(), 2);
+    EXPECT_EQ(arr.size(0), 4);
+}
+
+TEST_F(TensorImplicitConversionTest, FullyConstToArray_3D) {
+    auto strict = make_tensor(data_3d_.data(),
+                              make_shape(cint<3>, cint<4>, cint<5>),
+                              make_strides(cint<20>, cint<5>, cint<1>));
+    Array<int64_t, 3> arr = strict;
+    EXPECT_EQ(arr.ndim(), 3);
+    EXPECT_EQ(arr.numel(), 60);
+    EXPECT_EQ(arr(2, 3, 4), 2 * 20 + 3 * 5 + 4);
+}
+
+TEST_F(TensorImplicitConversionTest, ConstToDynamic_SameAlignment) {
+    auto strict = make_tensor(data_1d_.data(), make_shape(cint<10>),
+                              make_strides(cint<1>));
+    Tensor<int64_t, Shape<Dynamic<2>>, Strides<Dynamic<1>>> arr = strict;
+    EXPECT_EQ(arr.size(0), 10);
+}
+
+TEST_F(TensorImplicitConversionTest, DynamicToMoreLenientDynamic) {
+    auto d = make_tensor(data_2d_.data(), make_shape(dyn<8>(64), dyn<4>(128)),
+                         make_strides(dyn<2>(128), cint<1>));
+    Tensor<int64_t, Shape<Dynamic<4>, Dynamic<2>>,
+           Strides<Dynamic<1>, Dynamic<1>>> arr = d;
+    EXPECT_EQ(arr.ndim(), 2);
+    EXPECT_EQ(arr.size(0), 64);
+    EXPECT_EQ(arr.size(1), 128);
+}
+
+TEST_F(TensorImplicitConversionTest, FunctionParameter_Implicit) {
+    auto strict = make_tensor(data_2d_.data(), make_shape(cint<4>, cint<5>),
+                              make_strides(cint<5>, cint<1>));
+    auto fn = [](Array<int64_t, 2> arr) {
+        return arr.size(0);
+    };
+    EXPECT_EQ(fn(strict), 4);
+}
+
+TEST_F(TensorImplicitConversionTest, FullConstToDynamic_Bounded) {
+    auto strict = make_tensor(data_2d_.data(), make_shape(cint<4>, cint<5>),
+                              make_strides(cint<5>, cint<1>));
+    using S = Shape<Dynamic<2, 0, 16>, Dynamic<1, 0, 16>>;
+    using T = Strides<Dynamic<1, 0, 16>, Dynamic<1, 0, 16>>;
+    Tensor<int64_t, S, T> arr = strict;
+    EXPECT_EQ(arr.ndim(), 2);
+}
+
+TEST_F(TensorImplicitConversionTest, AnyToAny_DirectSameType) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    Array<int64_t, 2> arr2 = arr;
+    EXPECT_EQ(arr2.size(0), 4);
+}
+
+TEST_F(TensorImplicitConversionTest, ConstToAny_4D) {
+    auto strict = make_tensor(data_4d_.data(),
+                              make_shape(cint<2>, cint<3>, cint<4>, cint<5>),
+                              make_strides(cint<60>, cint<20>, cint<5>, cint<1>));
+    Array<int64_t, 4> arr = strict;
+    EXPECT_EQ(arr.ndim(), 4);
+    EXPECT_EQ(arr.numel(), 120);
+    EXPECT_EQ(arr(1, 2, 3, 4), 1 * 60 + 2 * 20 + 3 * 5 + 4);
+}
+
+#ifdef VECOPS_DEBUG
+TEST_F(TensorImplicitConversionTest, As_NonConforming_Death) {
+    auto strict = make_tensor(data_2d_.data(), make_shape(cint<4>, cint<5>),
+                              make_strides(cint<5>, cint<1>));
+    using BadShape = Shape<Dynamic<8>, Any>;
+    using BadStrides = Strides<Any, Any>;
+    EXPECT_DEATH((strict.template as<BadShape, BadStrides>()), "constraints");
+}
+#endif
+
+// ============================================================================
+// 19. Ellipsis Slicing Tests
+// ============================================================================
+
+class TensorEllipsisTest : public TensorTest {};
+
+TEST_F(TensorEllipsisTest, Marker_Exists) {
+    auto e = ellipsis;
+    (void)e;
+}
+
+TEST_F(TensorEllipsisTest, EllipsisOnly_2D) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto s = arr(ellipsis);
+    EXPECT_EQ(s.ndim(), 2);
+    EXPECT_EQ(s.size(0), 4);
+    EXPECT_EQ(s.size(1), 5);
+}
+
+TEST_F(TensorEllipsisTest, EllipsisOnly_3D) {
+    Array<int64_t, 3> arr(data_3d_.data(), {3, 4, 5});
+    auto s = arr(ellipsis);
+    EXPECT_EQ(s.ndim(), 3);
+    EXPECT_EQ(s.size(0), 3);
+    EXPECT_EQ(s.size(1), 4);
+    EXPECT_EQ(s.size(2), 5);
+}
+
+TEST_F(TensorEllipsisTest, EllipsisOnly_4D) {
+    Array<int64_t, 4> arr(data_4d_.data(), {2, 3, 4, 5});
+    auto s = arr(ellipsis);
+    EXPECT_EQ(s.ndim(), 4);
+    EXPECT_EQ(s.numel(), 120);
+}
+
+TEST_F(TensorEllipsisTest, EllipsisTail_2D) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto s = arr(ellipsis, 2);
+    EXPECT_EQ(s.ndim(), 1);
+    EXPECT_EQ(s.size(0), 4);
+    EXPECT_EQ(s(0), arr(0, 2));
+    EXPECT_EQ(s(3), arr(3, 2));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisHead_2D) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto s = arr(1, ellipsis);
+    EXPECT_EQ(s.ndim(), 1);
+    EXPECT_EQ(s.size(0), 5);
+    EXPECT_EQ(s(2), arr(1, 2));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisMiddle_3D) {
+    Array<int64_t, 3> arr(data_3d_.data(), {3, 4, 5});
+    auto s = arr(1, ellipsis, 3);
+    EXPECT_EQ(s.ndim(), 1);
+    EXPECT_EQ(s.size(0), 4);
+    EXPECT_EQ(s(2), arr(1, 2, 3));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisMiddle_4D) {
+    Array<int64_t, 4> arr(data_4d_.data(), {2, 3, 4, 5});
+    auto s = arr(0, ellipsis, 3);
+    EXPECT_EQ(s.ndim(), 2);
+    EXPECT_EQ(s.size(0), 3);
+    EXPECT_EQ(s.size(1), 4);
+    EXPECT_EQ(s(2, 1), arr(0, 2, 1, 3));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisWithRange) {
+    Array<int64_t, 3> arr(data_3d_.data(), {3, 4, 5});
+    auto s = arr(ellipsis, range(1, 4));
+    EXPECT_EQ(s.ndim(), 3);
+    EXPECT_EQ(s.size(0), 3);
+    EXPECT_EQ(s.size(1), 4);
+    EXPECT_EQ(s.size(2), 3);
+    EXPECT_EQ(s(0, 0, 0), arr(0, 0, 1));
+    EXPECT_EQ(s(0, 3, 2), arr(0, 3, 3));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisWithNewAxis) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto s = arr(new_axis(), ellipsis);
+    EXPECT_EQ(s.ndim(), 3);
+    EXPECT_EQ(s.size(0), 1);
+    EXPECT_EQ(s.size(1), 4);
+    EXPECT_EQ(s.size(2), 5);
+    EXPECT_EQ(s(0, 1, 2), arr(1, 2));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisTailWithNewAxis) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto s = arr(ellipsis, new_axis());
+    EXPECT_EQ(s.ndim(), 3);
+    EXPECT_EQ(s.size(0), 4);
+    EXPECT_EQ(s.size(1), 5);
+    EXPECT_EQ(s.size(2), 1);
+    EXPECT_EQ(s(1, 2, 0), arr(1, 2));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisAllIntegers_ResultScalar_3D) {
+    Array<int64_t, 3> arr(data_3d_.data(), {3, 4, 5});
+    const auto& val = arr(1, ellipsis, 2, 3);
+    EXPECT_EQ(val, arr(1, 2, 3));
+    EXPECT_TRUE((std::is_same_v<std::decay_t<decltype(val)>, int64_t>));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisAllIntegers_ResultScalar_2D) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    const auto& val = arr(1, ellipsis, 3);
+    EXPECT_EQ(val, arr(1, 3));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisWithSingleInteger_ReturnsTensor_3D) {
+    Array<int64_t, 3> arr(data_3d_.data(), {3, 4, 5});
+    auto s = arr(1, ellipsis, 2);
+    EXPECT_EQ(s.ndim(), 1);
+    EXPECT_EQ(s.size(0), 4);
+    EXPECT_EQ(s(0), arr(1, 0, 2));
+    EXPECT_EQ(s(3), arr(1, 3, 2));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisNoGap_2D) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto s = arr(ellipsis, reserve);
+    EXPECT_EQ(s.ndim(), 2);
+    EXPECT_EQ(s.size(0), 4);
+    EXPECT_EQ(s.size(1), 5);
+    EXPECT_EQ(s(2, 4), arr(2, 4));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisNoGapHead_2D) {
+    Array<int64_t, 2> arr(data_2d_.data(), {4, 5});
+    auto s = arr(reserve, ellipsis);
+    EXPECT_EQ(s.ndim(), 2);
+    EXPECT_EQ(s.size(0), 4);
+    EXPECT_EQ(s.size(1), 5);
+    EXPECT_EQ(s(0, 3), arr(0, 3));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisWithZeroFill_3D) {
+    Array<int64_t, 3> arr(data_3d_.data(), {3, 4, 5});
+    auto s = arr(2, 3, ellipsis);
+    EXPECT_EQ(s.ndim(), 1);
+    EXPECT_EQ(s.size(0), 5);
+    EXPECT_EQ(s(4), arr(2, 3, 4));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisHeadZeroFill_3D) {
+    Array<int64_t, 3> arr(data_3d_.data(), {3, 4, 5});
+    auto s = arr(ellipsis, 3, 4);
+    EXPECT_EQ(s.ndim(), 1);
+    EXPECT_EQ(s.size(0), 3);
+    EXPECT_EQ(s(2), arr(2, 3, 4));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisChainedSlice) {
+    Array<int64_t, 4> arr(data_4d_.data(), {2, 3, 4, 5});
+    auto s1 = arr(0, ellipsis);
+    EXPECT_EQ(s1.ndim(), 3);
+    auto s2 = s1(ellipsis, 2);
+    EXPECT_EQ(s2.ndim(), 2);
+    EXPECT_EQ(s2.size(0), 3);
+    EXPECT_EQ(s2.size(1), 4);
+    EXPECT_EQ(s2(1, 3), arr(0, 1, 3, 2));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisPreservesConst) {
+    auto strict = make_tensor(data_2d_.data(), make_shape(cint<4>, cint<5>),
+                              make_strides(cint<5>, cint<1>));
+    auto s = strict(ellipsis);
+    EXPECT_EQ(s.size<0>(), 4);
+    EXPECT_EQ(s.size<1>(), 5);
+    EXPECT_TRUE((s.ct_is_contiguous));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisPreservesContiguity) {
+    auto t = make_tensor(data_3d_.data(),
+                         make_shape(cint<3>, cint<4>, cint<5>),
+                         make_strides(cint<20>, cint<5>, cint<1>));
+    auto s = t(1, ellipsis);
+    EXPECT_TRUE((s.ct_is_contiguous));
+}
+
+TEST_F(TensorEllipsisTest, EllipsisWithConstShape_8D) {
+    std::vector<int64_t> data(720);
+    std::iota(data.begin(), data.end(), 0);
+    Array<int64_t, 8> arr(data.data(), {1, 1, 1, 2, 3, 4, 5, 6});
+    auto s = arr(0, 0, ellipsis, 5);
+    EXPECT_EQ(s.ndim(), 5);
+    EXPECT_EQ(s.size(0), 1);
+    EXPECT_EQ(s.size(1), 2);
+    EXPECT_EQ(s.size(2), 3);
+    EXPECT_EQ(s.size(3), 4);
+    EXPECT_EQ(s.size(4), 5);
 }
 
 // ============================================================================

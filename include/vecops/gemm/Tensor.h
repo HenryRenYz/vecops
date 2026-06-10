@@ -148,6 +148,24 @@ struct Range {
   nint_t start, end, step;
 };
 
+/**
+ * @brief Marker: ellipsis — fills remaining dimensions with `reserve`.
+ *
+ * When used in `operator()(...)`, the ellipsis expands to as many `reserve`
+ * markers as needed to fill all source dimensions not consumed by other
+ * explicit indices. At most one ellipsis is allowed per slicing expression.
+ *
+ * @code
+ * // For a 4D tensor t, these are equivalent:
+ * auto a = t(ellipsis, 3);      // = t(reserve, reserve, reserve, 3)
+ * auto b = t(0, ellipsis);      // = t(0, reserve, reserve, reserve)
+ * auto c = t(0, ellipsis, 3);   // = t(0, reserve, reserve, 3)
+ * @endcode
+ *
+ * @see ellipsis
+ */
+struct Ellipsis {};
+
 } // namespace details
 
 /**
@@ -243,6 +261,22 @@ static constexpr auto range(S start, E end, T step = T{1}) {
 static constexpr auto range(nint_t start, nint_t end, nint_t step = 1) {
   return details::Range<Any, Any, Any>{start, end, step};
 }
+
+/**
+ * @brief Slicing marker: ellipsis — fills all remaining source dimensions
+ *        with `reserve`.
+ *
+ * Expands to the right number of `reserve` markers to cover dimensions
+ * not explicitly indexed. At most one ellipsis is allowed per slicing call.
+ *
+ * @code
+ * auto t = make_tensor<4>(data, {2, 3, 4, 5});
+ * auto s1 = t(ellipsis, 3);     // shape (2, 3, 4)
+ * auto s2 = t(0, ellipsis);     // shape (3, 4, 5)
+ * auto s3 = t(0, ellipsis, 3);  // shape (3, 4)
+ * @endcode
+ */
+static constexpr auto ellipsis = details::Ellipsis{};
 
 // ======================== Repeat type helper ========================
 
@@ -372,6 +406,66 @@ struct SlicedTraitsImpl<Shape<S0, Ss...>, Strides<T0, Ts...>, void, Range<S, E, 
   using NewShape = typename PrependMeta<new_sz, typename Next::NewShape>::type;
   using NewStrides = typename PrependMeta<new_stride, typename Next::NewStrides>::type;
   static constexpr int Ndim = NewShape::Ndim;
+};
+
+// ======================== IsMoreLenientMeta ========================
+
+/**
+ * @brief Check whether a Shape or Strides type can be implicitly converted
+ *        to another Meta type, dimension by dimension.
+ *
+ * Returns true only if every corresponding pair of dimensions satisfies
+ * `IsMoreLenientValue`.
+ */
+template <typename MSrc, typename MDst>
+struct IsMoreLenientMeta : std::false_type {};
+
+template <typename... Ss, typename... Ds>
+struct IsMoreLenientMeta<Shape<Ss...>, Shape<Ds...>>
+    : std::bool_constant<(IsMoreLenientValue<Ss, Ds>::value && ...)> {};
+
+template <typename... Ss, typename... Ds>
+struct IsMoreLenientMeta<Strides<Ss...>, Strides<Ds...>>
+    : std::bool_constant<(IsMoreLenientValue<Ss, Ds>::value && ...)> {};
+
+// ======================== Ellipsis helpers ========================
+
+/// True if the pack contains an Ellipsis.
+template <typename... Ts>
+constexpr bool has_ellipsis_v = (std::is_same_v<std::decay_t<Ts>, Ellipsis> || ...);
+
+/// Count the number of Ellipsis markers in the pack.
+template <typename... Ts>
+constexpr int count_ellipsis_v = ((std::is_same_v<std::decay_t<Ts>, Ellipsis> ? 1 : 0) + ...);
+
+/// Trait to detect Range<S, E, T> types.
+template <typename T>
+struct is_range : std::false_type {};
+template <typename S, typename E, typename T>
+struct is_range<Range<S, E, T>> : std::true_type {};
+template <typename T>
+constexpr bool is_range_v = is_range<std::decay_t<T>>::value;
+
+/// True if the type consumes one source dimension (integer, ReserveAxis, or Range).
+template <typename T>
+constexpr bool is_dim_consuming_v =
+    std::is_integral_v<std::decay_t<T>> ||
+    std::is_same_v<std::decay_t<T>, ReserveAxis> ||
+    is_range_v<T>;
+
+/// Count the number of dimension-consuming types in the pack.
+template <typename... Ts>
+constexpr int count_dim_consuming_v = ((is_dim_consuming_v<Ts> ? 1 : 0) + ...);
+
+/// Find the (0-based) index of Target in the pack. Returns -1 if not found.
+template <int I, typename Target, typename... Ts>
+struct FindIndexInPack { static constexpr int value = -1; };
+
+template <int I, typename Target, typename T0, typename... Ts>
+struct FindIndexInPack<I, Target, T0, Ts...> {
+  static constexpr int value =
+      std::is_same_v<std::decay_t<T0>, Target> ? I
+      : FindIndexInPack<I + 1, Target, Ts...>::value;
 };
 
 } // namespace details
@@ -661,6 +755,10 @@ public:
    */
   template <typename TShape2, typename TStrides2>
   constexpr Tensor<T, TShape2, TStrides2> as() const {
+    static_assert(TShape2::Ndim == Shape::Ndim,
+                  "Target Shape rank must match source Tensor rank");
+    static_assert(TStrides2::Ndim == Stride::Ndim,
+                  "Target Strides rank must match source Tensor rank");
     constexpr int N = TShape2::Ndim;
     auto s_arr = _layout.shape()._stor.to_array();
     auto t_arr = _layout.strides()._stor.to_array();
@@ -671,6 +769,36 @@ public:
           TStrides2{t_arr[Idx]...}
       };
     }(std::make_index_sequence<N>{});
+  }
+
+  // -------- Implicit conversion --------
+
+  /**
+   * @brief Implicit conversion to a more lenient Tensor type.
+   *
+   * A Tensor can be implicitly converted to another Tensor with the same
+   * element type and rank, where every dimension's Shape and Strides Value
+   * type is "more lenient" (or equal). This means `Const<N>` can become
+   * `Dynamic<A,L,H>` (if constraints satisfied) or `Any`, and `Dynamic`
+   * can become `Any`, but not vice versa.
+   *
+   * @code
+   * auto strict = make_tensor(data, make_shape(cint<4>, cint<5>),
+   *                                  make_strides(cint<5>, cint<1>));
+   * Array<float, 2> arr = strict;  // Implicit: Const→Any per dim
+   * @endcode
+   *
+   * @tparam TShape2   Target Shape type (must be more-or-equal lenient).
+   * @tparam TStrides2 Target Strides type (must be more-or-equal lenient).
+   */
+  template <typename TShape2, typename TStrides2,
+      std::enable_if_t<
+          !(std::is_same_v<Shape, TShape2> && std::is_same_v<Stride, TStrides2>) &&
+          details::IsMoreLenientMeta<Shape, TShape2>::value &&
+          details::IsMoreLenientMeta<Stride, TStrides2>::value,
+      bool> = true>
+  constexpr operator Tensor<T, TShape2, TStrides2>() const {
+    return as<TShape2, TStrides2>();
   }
 
   // -------- operator() slicing --------
@@ -684,21 +812,33 @@ public:
    *   by reference (no Tensor).
    * - **Mixed (integers + markers)**: computes a new Layout and returns a
    *   new Tensor with offset data pointer.
+   * - **Ellipsis**: expands to the right number of `reserve` markers to fill
+   *   all source dimensions not explicitly indexed.
    *
    * @code
    * auto t = make_tensor<3>(data, {2, 3, 4});
    *
    * float val = t(0, 1, 2);                    // Element access
    * auto sub = t(0, reserve, range(1, 4));     // Tensor sub-view
+   * auto col = t(ellipsis, 2);                 // = t(reserve, reserve, 2)
    * @endcode
    *
-   * @tparam TIndices  Index types (int, ReserveAxis, NewAxis, Range).
+   * @tparam TIndices  Index types (int, ReserveAxis, NewAxis, Range, Ellipsis).
    * @param  indices   Per-dimension slicing indices.
    * @return Element reference (all-integer) or Tensor sub-view (mixed).
    */
   template <typename... TIndices>
   constexpr decltype(auto) operator()(TIndices... indices) const {
-    if constexpr ((std::is_integral_v<std::decay_t<TIndices>> && ...)) {
+    if constexpr (details::has_ellipsis_v<TIndices...>) {
+      static_assert(details::count_ellipsis_v<TIndices...> == 1,
+                    "At most one ellipsis is allowed");
+      constexpr int consumed = details::count_dim_consuming_v<TIndices...>;
+      static_assert(consumed <= Ndim,
+                    "Too many dimension-consuming indices for ellipsis");
+      if constexpr (consumed <= Ndim) {
+        return _slice_expand_ellipsis<Ndim - consumed>(indices...);
+      }
+    } else if constexpr ((std::is_integral_v<std::decay_t<TIndices>> && ...)) {
       nint_t offset = _slice_index<0>(indices...);
       return _data[offset];
     } else {
@@ -709,6 +849,20 @@ public:
 
       auto [ns, nt, offset] = _slice_make_meta<RetShape, RetStrides>(indices...);
       return Tensor<T, RetShape, RetStrides>(_data + offset, ns, nt);
+    }
+  }
+
+  /**
+   * @brief Non-const overload: for all-integer indices, returns a mutable
+   *        element reference; otherwise delegates to the const version.
+   */
+  template <typename... TIndices>
+  constexpr decltype(auto) operator()(TIndices... indices) {
+    if constexpr ((std::is_integral_v<std::decay_t<TIndices>> && ...)) {
+      nint_t offset = _slice_index<0>(indices...);
+      return data()[offset];
+    } else {
+      return static_cast<const Tensor*>(this)->operator()(indices...);
     }
   }
 
@@ -725,7 +879,47 @@ public:
     return this->operator()(index);
   }
 
+  template <typename TIndex>
+  constexpr decltype(auto) operator[](TIndex index) {
+    return this->operator()(index);
+  }
+
 private:
+  /**
+   * @brief Expand an ellipsis into the right number of `reserve` markers
+   *        and recursively call operator() with the expanded pack.
+   *
+   * Finds the position of the Ellipsis in the index pack, splits the pack
+   * into head and tail, and inserts `Nfill` reserve markers at the ellipsis
+   * position. Then re-invokes `operator()` with the expanded pack, which
+   * re-enters the else-if/integer-only branch correctly.
+   *
+   * @tparam Nfill   Number of reserve markers to insert (= Ndim - consumed).
+   * @tparam TIndices  Original index types (contains exactly one Ellipsis).
+   */
+  template <int Nfill, typename... TIndices,
+      std::enable_if_t<(Nfill >= 0), bool> = true>
+  constexpr decltype(auto) _slice_expand_ellipsis(TIndices... indices) const {
+    constexpr int Pos = details::FindIndexInPack<0, details::Ellipsis,
+                        std::decay_t<TIndices>...>::value;
+    auto tup = std::forward_as_tuple(indices...);
+    return [&] <size_t... Hi, size_t... Fi, size_t... Ti>(
+        std::index_sequence<Hi...>,
+        std::index_sequence<Fi...>,
+        std::index_sequence<Ti...>
+    ) {
+      return this->operator()(
+          std::get<Hi>(tup)...,
+          ((void)Fi, reserve)...,
+          std::get<Pos + 1 + Ti>(tup)...
+      );
+    }(
+        std::make_index_sequence<Pos>{},
+        std::make_index_sequence<Nfill>{},
+        std::make_index_sequence<sizeof...(TIndices) - Pos - 1>{}
+    );
+  }
+
   /**
    * Compute the linearized element offset given a pack of slicing indices.
    * This is the private implementation used during slicing.
@@ -1021,6 +1215,29 @@ constexpr auto transpose(const Tensor<T, TShape, TStrides>& t, int i, int j) {
   using NewShape = std::remove_cvref_t<decltype(new_layout.shape())>;
   using NewStrides = std::remove_cvref_t<decltype(new_layout.strides())>;
   return Tensor<T, NewShape, NewStrides>(t.data(), new_layout);
+}
+
+// ======================== cast ========================
+
+/**
+ * @brief Cast a Tensor to a different Shape/Strides type.
+ *
+ * Convenience free function that forwards to `Tensor::as()`.
+ * The target Shape and Strides must have the same rank as the source Tensor.
+ *
+ * @code
+ * Array<float, 2> arr(data, {4, 5});
+ * auto typed = cast<Shape<Const<4>, Const<5>>, Strides<Const<5>, Const<1>>>(arr);
+ * @endcode
+ *
+ * @tparam TShape2   Target Shape type.
+ * @tparam TStrides2 Target Strides type.
+ * @param t          Source Tensor.
+ * @return A new Tensor with the specified type parameters.
+ */
+template <typename TShape2, typename TStrides2, typename T, typename TShape, typename TStrides>
+constexpr auto cast(const Tensor<T, TShape, TStrides>& t) {
+  return t.template as<TShape2, TStrides2>();
 }
 
 // ======================== Continuity convenience functions ========================
