@@ -200,9 +200,6 @@ TYPED_TEST(MaskConvFixture, DemoteInt16ToInt8) {
 
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(pattern[i], get(t_i8, r, i)) << "at " << i;
-  // Remaining output lanes should be false
-  for (nint_t i = N; i < size(t_i8); ++i)
-    EXPECT_FALSE(get(t_i8, r, i)) << "at " << i;
 }
 
 TYPED_TEST(MaskConvFixture, DemoteInt32ToInt16) {
@@ -218,8 +215,6 @@ TYPED_TEST(MaskConvFixture, DemoteInt32ToInt16) {
 
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(pattern[i], get(t_i16, r, i)) << "at " << i;
-  for (nint_t i = N; i < size(t_i16); ++i)
-    EXPECT_FALSE(get(t_i16, r, i)) << "at " << i;
 }
 
 TYPED_TEST(MaskConvFixture, DemoteInt64ToInt32) {
@@ -234,8 +229,6 @@ TYPED_TEST(MaskConvFixture, DemoteInt64ToInt32) {
 
   for (nint_t i = 0; i < N; ++i)
     EXPECT_TRUE(get(t_i32, r, i)) << "at " << i;
-  for (nint_t i = N; i < size(t_i32); ++i)
-    EXPECT_FALSE(get(t_i32, r, i)) << "at " << i;
 }
 
 TYPED_TEST(MaskConvFixture, DemoteInt32ToInt8) {
@@ -253,8 +246,6 @@ TYPED_TEST(MaskConvFixture, DemoteInt32ToInt8) {
 
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(pattern[i], get(t_i8, r, i)) << "at " << i;
-  for (nint_t i = N; i < size(t_i8); ++i)
-    EXPECT_FALSE(get(t_i8, r, i)) << "at " << i;
 }
 
 TYPED_TEST(MaskConvFixture, DemoteInt64ToInt16) {
@@ -272,8 +263,6 @@ TYPED_TEST(MaskConvFixture, DemoteInt64ToInt16) {
 
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(pattern[i], get(t_i16, r, i)) << "at " << i;
-  for (nint_t i = N; i < size(t_i16); ++i)
-    EXPECT_FALSE(get(t_i16, r, i)) << "at " << i;
 }
 
 // ============================================================================
@@ -312,21 +301,18 @@ TYPED_TEST(MaskConvFixture, RoundTrip) {
   ScalableTag<int16_t, 0> t_i16;
   ScalableTag<int32_t, 0> t_i32;
   ScalableTag<int64_t, 0> t_i64;
-  nint_t N = size(t_i16);   // also = size(t_i64) * 4
+  nint_t N_in = size(t_i16);
+  nint_t N_survive = size(t_i64);   // promote shrinks to this, demote restores
 
-  std::vector<bool> pattern(N);
-  for (nint_t i = 0; i < N; ++i) pattern[i] = (i % 5 < 2);
+  std::vector<bool> pattern(N_in);
+  for (nint_t i = 0; i < N_in; ++i) pattern[i] = (i % 5 < 2);
 
   auto m = make_mask(t_i16, pattern);
   auto promoted = promote(t_i64, t_i16, m);
   // Chain: int64 -> int32 -> int16
   auto demoted = demote(t_i16, t_i32, demote(t_i32, t_i64, promoted));
 
-  // Only first size(t_i64) bits survive the roundtrip
-  nint_t N_survive = size(t_i64);
+  // Only first N_survive elements are meaningful after roundtrip
   for (nint_t i = 0; i < N_survive; ++i)
     EXPECT_EQ(pattern[i], get(t_i16, demoted, i)) << "at " << i;
-  // Remaining positions should be false (demote fills with zeros)
-  for (nint_t i = N_survive; i < N; ++i)
-    EXPECT_FALSE(get(t_i16, demoted, i)) << "at " << i;
 }

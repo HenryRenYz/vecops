@@ -67,8 +67,38 @@ VECOPS_PROMOTE_X86(int16_t, int8_t,  _mm_cvtepi8_epi16)
 VECOPS_PROMOTE_X86(int32_t, int8_t,  _mm_cvtepi8_epi32)
 VECOPS_PROMOTE_X86(int64_t, int8_t,  _mm_cvtepi8_epi64)
 VECOPS_PROMOTE_X86(int32_t, int16_t, _mm_cvtepi16_epi32)
-VECOPS_PROMOTE_X86(int64_t, int16_t, _mm_cvtepi16_epi64)
-VECOPS_PROMOTE_X86(int64_t, int32_t, _mm_cvtepi32_epi64)
+
+// Override 256-bit promote for int16->int64: need consecutive elements from lower half
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(sizeof(TypeOf<To>) == 8 && sizeof(TypeOf<Ti>) == 2)>
+VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
+  if constexpr (is_m256i_v<decltype(mi.v)>) {
+    auto lo128 = _mm256_castsi256_si128(mi.v);
+    auto lo = _mm_cvtepi16_epi64(lo128);
+    auto hi = _mm_cvtepi16_epi64(_mm_srli_si128(lo128, 4));
+    __m256i result = _mm256_castsi128_si256(lo);
+    result = _mm256_inserti128_si256(result, hi, 1);
+    return Mask<To>{result};
+  } else {
+    return Mask<To>{_mm_cvtepi16_epi64(mi.v)};
+  }
+}
+
+// Override 256-bit promote for int32->int64: need consecutive elements from lower half
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(sizeof(TypeOf<To>) == 8 && sizeof(TypeOf<Ti>) == 4)>
+VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
+  if constexpr (is_m256i_v<decltype(mi.v)>) {
+    auto lo128 = _mm256_castsi256_si128(mi.v);
+    auto lo = _mm_cvtepi32_epi64(lo128);
+    auto hi = _mm_cvtepi32_epi64(_mm_srli_si128(lo128, 8));
+    __m256i result = _mm256_castsi128_si256(lo);
+    result = _mm256_inserti128_si256(result, hi, 1);
+    return Mask<To>{result};
+  } else {
+    return Mask<To>{_mm_cvtepi32_epi64(mi.v)};
+  }
+}
 
 #undef VECOPS_PROMOTE_X86
 
@@ -76,21 +106,28 @@ VECOPS_PROMOTE_X86(int64_t, int32_t, _mm_cvtepi32_epi64)
 /*              demote: saturating pack lanes                            */
 /* =================================================================== */
 
-// Helper for demote with pack intrinsics (128-bit and 256-bit variants)
-#define VECOPS_DEMOTE_X86(ToElem, TiElem, PACK_128, PACK_256)                   \
+// Helper for demote: 256-bit splits into two 128-bit halves, packs each,
+// then squeezes the two half-results together (packs_epi* puts valid data
+// in the lower 64 bits of each half, followed by zeros from the zero register).
+#define VECOPS_DEMOTE_X86(ToElem, TiElem, PACK_128)                              \
   template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),                              \
             TL_IF(sizeof(TypeOf<To>) == sizeof(ToElem) &&                     \
                   sizeof(TypeOf<Ti>) == sizeof(TiElem))>                       \
   VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {                 \
     if constexpr (is_m256i_v<decltype(mi.v)>) {                              \
-      return Mask<To>{PACK_256(mi.v, _mm256_setzero_si256())};              \
-    } else {                                                                 \
-      return Mask<To>{PACK_128(mi.v, _mm_setzero_si128())};                  \
-    }                                                                        \
+      auto lo_in  = _mm256_castsi256_si128(mi.v);                            \
+      auto hi_in  = _mm256_extracti128_si256(mi.v, 1);                        \
+      auto lo_out = PACK_128(lo_in, _mm_setzero_si128());                    \
+      auto hi_out = PACK_128(hi_in, _mm_setzero_si128());                    \
+      auto packed = _mm_unpacklo_epi64(lo_out, hi_out);                      \
+      return Mask<To>{_mm256_castsi128_si256(packed)};                        \
+    } else {                                                                  \
+      return Mask<To>{PACK_128(mi.v, _mm_setzero_si128())};                   \
+    }                                                                         \
   }
 
-VECOPS_DEMOTE_X86(int8_t,  int16_t, _mm_packs_epi16,  _mm256_packs_epi16)
-VECOPS_DEMOTE_X86(int16_t, int32_t, _mm_packs_epi32,  _mm256_packs_epi32)
+VECOPS_DEMOTE_X86(int8_t,  int16_t, _mm_packs_epi16)
+VECOPS_DEMOTE_X86(int16_t, int32_t, _mm_packs_epi32)
 
 // int64 -> int32: mask narrowing (for mask values 0/-1, upper 32 bits carry info)
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
