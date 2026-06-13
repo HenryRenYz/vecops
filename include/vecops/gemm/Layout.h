@@ -1619,12 +1619,163 @@ private:
   TStrides _stride;
 }; // struct Layout
 
+namespace details {
+
+// ---- Repeat type helper ----
+
+template <int N, template <typename...> class Meta, typename V, typename... Acc>
+struct RepeatImpl {
+  using type = typename RepeatImpl<N - 1, Meta, V, V, Acc...>::type;
+};
+
+template <template <typename...> class Meta, typename V, typename... Acc>
+struct RepeatImpl<0, Meta, V, Acc...> {
+  using type = Meta<Acc...>;
+};
+
+template <int N, template <typename...> class Meta, typename V>
+using repeat_t = typename RepeatImpl<N, Meta, V>::type;
+
+// ---- Inferred contiguous Strides from Shape ----
+
+/// Compute the product type of a pack of Value types (right-to-left accumulation).
+template <typename... Ts> struct Product;
+template <> struct Product<> { using type = Const<1>; };
+template <typename T> struct Product<T> { using type = T; };
+template <typename T0, typename T1, typename... Ts>
+struct Product<T0, T1, Ts...> {
+  using type = decltype(std::declval<T0>() * std::declval<typename Product<T1, Ts...>::type()>());
+};
+
+/// Extract types from index I to end of pack.
+template <int I, typename... Ts> struct SuffixOf;
+template <int I, typename T0, typename... Ts>
+struct SuffixOf<I, T0, Ts...> {
+  using type = std::conditional_t<(I == 0), std::tuple<T0, Ts...>,
+      typename SuffixOf<I - 1, Ts...>::type>;
+};
+template <int I> struct SuffixOf<I> { using type = std::tuple<>; };
+
+/// Compute the product of types in a std::tuple.
+template <typename Tuple> struct TupleProduct;
+template <typename... Ts>
+struct TupleProduct<std::tuple<Ts...>> : Product<Ts...> {};
+
+/// Compute the stride type for dimension I: product of sizes[I+1..N-1].
+template <int I, typename TShape> struct StrideTypeForDim;
+template <int I, typename... Ss>
+struct StrideTypeForDim<I, Shape<Ss...>> {
+  using suffix = typename SuffixOf<I + 1, Ss...>::type;
+  using type = typename TupleProduct<suffix>::type;
+};
+
+/// Compute the full Strides<...> type from a Shape<...>.
+template <typename TShape> struct InferredStrides;
+template <typename... Ss>
+struct InferredStrides<Shape<Ss...>> {
+  template <size_t... Idx>
+  static auto deduce(std::index_sequence<Idx...>)
+      -> Strides<typename StrideTypeForDim<Idx, Shape<Ss...>>::type...>;
+  using type = decltype(deduce(std::make_index_sequence<sizeof...(Ss)>{}));
+};
+
+} // namespace details
+
+// ======================== make_layout ========================
+
 /**
  * @brief Create a Layout, forwarding the shape and strides arguments.
  */
 template <typename TShape, typename TStrides>
 constexpr auto make_layout(TShape&& shape, TStrides&& stride) -> Layout<std::remove_cvref_t<TShape>, std::remove_cvref_t<TStrides>> {
   return {std::forward<TShape>(shape), std::forward<TStrides>(stride)};
+}
+
+/**
+ * @brief Create a Layout from a typed Shape only; Strides are inferred as
+ *        row-major contiguous, preserving compile-time type constraints.
+ *
+ * @code
+ * auto s = make_shape(cint<2>, Any{5}, cint<4>, cint<3>);
+ * auto L = make_layout(s);
+ * // L.strides() has type Strides<Dynamic<4>, Const<12>, Const<3>, Const<1>>
+ * @endcode
+ */
+template <typename TShape>
+constexpr auto make_layout(TShape&& shape) -> Layout<
+    std::remove_cvref_t<TShape>,
+    typename details::InferredStrides<std::remove_cvref_t<TShape>>::type
+> {
+  using S = std::remove_cvref_t<TShape>;
+  static_assert(S::Ndim > 0, "Shape must have at least 1 dimension");
+  constexpr int N = S::Ndim;
+
+  std::array<nint_t, N> stride_vals{};
+  stride_vals[N - 1] = 1;
+  for (int i = N - 2; i >= 0; --i)
+    stride_vals[i] = stride_vals[i + 1] * nint_t(shape[i + 1]);
+
+  using St = typename details::InferredStrides<S>::type;
+  return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
+    return Layout<S, St>(
+        std::forward<TShape>(shape),
+        St{stride_vals[Idx]...}
+    );
+  }(std::make_index_sequence<N>{});
+}
+
+/**
+ * @brief Create a Layout of rank Ndim from initializer_lists for shape and
+ *        strides. All dimensions are treated as `Any`.
+ */
+template <int Ndim>
+constexpr auto make_layout(
+    std::initializer_list<nint_t> shape_vals,
+    std::initializer_list<nint_t> stride_vals
+) {
+  static_assert(Ndim > 0, "Ndim must be positive");
+  VECOPS_ASSERT(shape_vals.size() == Ndim, "shape_vals.size() != Ndim");
+  VECOPS_ASSERT(stride_vals.size() == Ndim, "stride_vals.size() != Ndim");
+
+  using S = details::repeat_t<Ndim, Shape, Any>;
+  using St = details::repeat_t<Ndim, Strides, Any>;
+
+  return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
+    return Layout<S, St>{
+        S{Any{*(shape_vals.begin() + (nint_t)Idx)}...},
+        St{Any{*(stride_vals.begin() + (nint_t)Idx)}...}
+    };
+  }(std::make_index_sequence<Ndim>{});
+}
+
+/**
+ * @brief Create a Layout of rank Ndim from a shape initializer_list only.
+ *        Strides are auto-computed as row-major contiguous, all Any.
+ */
+template <int Ndim>
+constexpr auto make_layout(
+    std::initializer_list<nint_t> shape_vals
+) {
+  static_assert(Ndim > 0, "Ndim must be positive");
+  VECOPS_ASSERT(shape_vals.size() == Ndim, "shape_vals.size() != Ndim");
+
+  using S = details::repeat_t<Ndim, Shape, Any>;
+  using St = details::repeat_t<Ndim, Strides, Any>;
+
+  std::array<nint_t, Ndim> shapes{};
+  std::copy(shape_vals.begin(), shape_vals.end(), shapes.begin());
+
+  std::array<nint_t, Ndim> stride_vals{};
+  stride_vals[Ndim - 1] = 1;
+  for (int i = Ndim - 2; i >= 0; --i)
+    stride_vals[i] = stride_vals[i + 1] * shapes[i + 1];
+
+  return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
+    return Layout<S, St>{
+        S{Any{shapes[Idx]}...},
+        St{Any{stride_vals[Idx]}...}
+    };
+  }(std::make_index_sequence<Ndim>{});
 }
 
 namespace details {

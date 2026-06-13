@@ -335,7 +335,7 @@ VECOPS_VFUNC V odd(T t, Vec<T> v) {
  *
  * Returns a vector of double the size with v_lo in lower half and v_hi in upper half.
  */
-template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(is_vec<V>)>
 VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
   static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
@@ -347,6 +347,52 @@ VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
   }
   return u;
 }
+
+/* === mask lower / upper / concat === */
+template <TLV_DECL_TAG(T), typename M = Mask<Half<T>>, TL_IF(num_words(T{}) <= 1)>
+VECOPS_VFUNC M lower(T t, Mask<T> m) {
+  constexpr Half<T> th;
+  M r;
+  for (nint_t i = 0; i < size(th); ++i) r[(size_t)i] = m[(size_t)i];
+  return r;
+}
+template <TLV_DECL_TAG(T), typename M = Mask<Half<T>>, TL_IF(num_words(T{}) <= 1)>
+VECOPS_VFUNC M upper(T t, Mask<T> m) {
+  constexpr Half<T> th;
+  M r;
+  for (nint_t i = 0; i < size(th); ++i) r[(size_t)i] = m[(size_t)(i + size(th))];
+  return r;
+}
+template <TLV_DECL_TAG(T), typename V = Mask<Half<T>>, TL_IF(num_words(T{}) <= 1 && is_mask<V>)>
+VECOPS_VFUNC Mask<T> concat(T t, V m_lo, V m_hi) {
+  constexpr Half<T> th;
+  Mask<T> r;
+  for (nint_t i = 0; i < size(th); ++i) {
+    r[(size_t)i] = m_lo[(size_t)i];
+    r[(size_t)(i + size(th))] = m_hi[(size_t)i];
+  }
+  return r;
+}
+
+/* multi-word scalar masks */
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 2)>
+VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> v) { return Mask<Half<T>>{v[0]}; }
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> v) { return Mask<Half<T>>{v[0], v[1]}; }
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 8)>
+VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> v) { return Mask<Half<T>>{v[0], v[1], v[2], v[3]}; }
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 2)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> v) { return Mask<Half<T>>{v[1]}; }
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> v) { return Mask<Half<T>>{v[2], v[3]}; }
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 8)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> v) { return Mask<Half<T>>{v[4], v[5], v[6], v[7]}; }
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 2)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) { return Mask<T>{m_lo, m_hi}; }
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) { return Mask<T>{m_lo[0], m_lo[1], m_hi[0], m_hi[1]}; }
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 8)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) { return Mask<T>{m_lo[0], m_lo[1], m_lo[2], m_lo[3], m_hi[0], m_hi[1], m_hi[2], m_hi[3]}; }
 
 /**
  * @brief Concatenate even-indexed elements from two vectors (scalar implementation).
@@ -867,6 +913,24 @@ template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   return details::vectorized_v<T>([&](nint_t i){ return m[i] ? (TypeOf<T>)std::min(a[i], b[i]) : a[i]; });
 }
+
+/* === mask bit ops === */
+template <TLV_DECL_MASK(M)> VECOPS_VFUNC M bit_and(M a, M b) { M r = a; r &= b; return r; }
+template <TLV_DECL_MASK(M)> VECOPS_VFUNC M bit_or(M a, M b)  { M r = a; r |= b; return r; }
+template <TLV_DECL_MASK(M)> VECOPS_VFUNC M bit_xor(M a, M b) { M r = a; r ^= b; return r; }
+template <TLV_DECL_MASK(M)> VECOPS_VFUNC M bit_andnot(M a, M b) { M r = a; r.flip(); r &= b; return r; }
+template <TLV_DECL_MASK(M)> VECOPS_VFUNC M bit_not(M a) { M r = a; r.flip(); return r; }
+
+template <TLV_DECL_TAG(T), typename M = Mask<T>, TL_IF(num_words(T{}) <= 1)>
+VECOPS_VFUNC M bit_and(T t, M a, M b) { M r = a; r &= b; return r; }
+template <TLV_DECL_TAG(T), typename M = Mask<T>, TL_IF(num_words(T{}) <= 1)>
+VECOPS_VFUNC M bit_or(T t, M a, M b)  { M r = a; r |= b; return r; }
+template <TLV_DECL_TAG(T), typename M = Mask<T>, TL_IF(num_words(T{}) <= 1)>
+VECOPS_VFUNC M bit_xor(T t, M a, M b) { M r = a; r ^= b; return r; }
+template <TLV_DECL_TAG(T), typename M = Mask<T>, TL_IF(num_words(T{}) <= 1)>
+VECOPS_VFUNC M bit_andnot(T t, M a, M b) { M r = a; r.flip(); r &= b; return r; }
+template <TLV_DECL_TAG(T), typename M = Mask<T>, TL_IF(num_words(T{}) <= 1)>
+VECOPS_VFUNC M bit_not(T t, M a) { M r = a; r.flip(); return r; }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_int<TypeOf<T>>)>
 VECOPS_VFUNC V bit_and(V a, V b) {

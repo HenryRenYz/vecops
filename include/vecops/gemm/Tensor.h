@@ -278,35 +278,6 @@ static constexpr auto range(nint_t start, nint_t end, nint_t step = 1) {
  */
 static constexpr auto ellipsis = details::Ellipsis{};
 
-// ======================== Repeat type helper ========================
-
-namespace details {
-
-/**
- * @brief Generate a `Meta<V, V, ..., V>` type with N repetitions of V.
- *
- * Used to define array aliases where all dimensions have the same
- * Value type (e.g., `Array<N, T>` uses `repeat_t<N, Shape, Any>`).
- *
- * @tparam N    Number of times to repeat V.
- * @tparam Meta Target container template (e.g., Shape, Strides).
- * @tparam V    Value type to repeat.
- */
-template <int N, template <typename...> class Meta, typename V, typename... Acc>
-struct RepeatImpl {
-  using type = typename RepeatImpl<N - 1, Meta, V, V, Acc...>::type;
-};
-
-template <template <typename...> class Meta, typename V, typename... Acc>
-struct RepeatImpl<0, Meta, V, Acc...> {
-  using type = Meta<Acc...>;
-};
-
-template <int N, template <typename...> class Meta, typename V>
-using repeat_t = typename RepeatImpl<N, Meta, V>::type;
-
-} // namespace details
-
 // ======================== SlicedTraits (compile-time type computation) ========================
 
 namespace details {
@@ -763,11 +734,10 @@ public:
     auto s_arr = _layout.shape()._stor.to_array();
     auto t_arr = _layout.strides()._stor.to_array();
     return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
-      return Tensor<T, TShape2, TStrides2>{
-          _data,
+      return make_tensor(_data, make_layout(
           TShape2{s_arr[Idx]...},
           TStrides2{t_arr[Idx]...}
-      };
+      ));
     }(std::make_index_sequence<N>{});
   }
 
@@ -848,7 +818,7 @@ public:
       constexpr int new_ndim = RetShape::Ndim;
 
       auto [ns, nt, offset] = _slice_make_meta<RetShape, RetStrides>(indices...);
-      return Tensor<T, RetShape, RetStrides>(_data + offset, ns, nt);
+      return make_tensor(_data + offset, ns, nt);
     }
   }
 
@@ -1085,6 +1055,19 @@ private:
   Layout _layout;
 };
 
+namespace details {
+
+template <typename T>
+struct IsTensor : std::false_type {};
+template <typename T, typename TShape, typename TStrides>
+struct IsTensor<Tensor<T, TShape, TStrides>> : std::true_type {};
+
+} // namespace details
+
+/// Type trait: `true` if T is a Tensor.
+template <typename T>
+static constexpr bool is_tensor = details::IsTensor<T>::value;
+
 // ======================== Array alias ========================
 
 /**
@@ -1108,6 +1091,24 @@ using Array = Tensor<T,
 // ======================== make_tensor ========================
 
 /**
+ * @brief Create a Tensor from a data pointer and a Layout.
+ *
+ * This is the core factory; all other make_tensor overloads delegate here.
+ *
+ * @tparam T       Element type.
+ * @tparam TLayout Layout type (Shape+Strides pair).
+ * @param data     Data pointer (non-owning).
+ * @param layout   Layout descriptor.
+ * @return A Tensor with the given layout.
+ */
+template <typename T, typename TLayout,
+    std::enable_if_t<is_layout<std::remove_cvref_t<TLayout>>, bool> = true>
+constexpr auto make_tensor(const T* data, TLayout&& layout) {
+  using L = std::remove_cvref_t<TLayout>;
+  return Tensor<T, typename L::Shape, typename L::Stride>(data, std::forward<TLayout>(layout));
+}
+
+/**
  * @brief Create a Tensor from typed Shape and Strides.
  *
  * @code
@@ -1125,9 +1126,32 @@ using Array = Tensor<T,
  * @return A Tensor with the given layout.
  */
 template <typename T, typename TShape, typename TStrides>
-constexpr Tensor<T, std::remove_cvref_t<TShape>, std::remove_cvref_t<TStrides>>
-make_tensor(const T* data, TShape&& shape, TStrides&& strides) {
-  return {data, std::forward<TShape>(shape), std::forward<TStrides>(strides)};
+constexpr auto make_tensor(const T* data, TShape&& shape, TStrides&& strides) {
+  return make_tensor(data, make_layout(std::forward<TShape>(shape), std::forward<TStrides>(strides)));
+}
+
+/**
+ * @brief Create a Tensor from a typed Shape only.
+ *
+ * Strides are inferred as row-major contiguous, preserving compile-time
+ * type constraints (Const remains Const, Dynamic preserves alignment, etc.).
+ *
+ * @code
+ * auto s = make_shape(cint<2>, Any{5}, cint<4>, cint<3>);
+ * auto t = make_tensor(data, s);
+ * // t has inferred Strides<Dynamic<4>, Const<12>, Const<3>, Const<1>>
+ * @endcode
+ *
+ * @tparam T      Element type.
+ * @tparam TShape Shape type (deduced from argument).
+ * @param data    Data pointer (non-owning).
+ * @param shape   Shape descriptor.
+ * @return A Tensor with inferred contiguous Strides.
+ */
+template <typename T, typename TShape,
+    std::enable_if_t<is_shape<std::remove_cvref_t<TShape>>, bool> = true>
+constexpr auto make_tensor(const T* data, TShape&& shape) {
+  return make_tensor(data, make_layout(std::forward<TShape>(shape)));
 }
 
 /**
@@ -1147,9 +1171,7 @@ constexpr auto make_tensor(
     std::initializer_list<nint_t> shape_vals,
     std::initializer_list<nint_t> stride_vals
 ) {
-  return Tensor<T,
-      details::repeat_t<Ndim, Shape, Any>,
-      details::repeat_t<Ndim, Strides, Any>>(data, shape_vals, stride_vals);
+  return make_tensor(data, make_layout<Ndim>(shape_vals, stride_vals));
 }
 
 /**
@@ -1168,9 +1190,7 @@ constexpr auto make_tensor(
     const T* data,
     std::initializer_list<nint_t> shape_vals
 ) {
-  return Tensor<T,
-      details::repeat_t<Ndim, Shape, Any>,
-      details::repeat_t<Ndim, Strides, Any>>(data, shape_vals);
+  return make_tensor(data, make_layout<Ndim>(shape_vals));
 }
 
 // ======================== Transpose ========================
@@ -1189,9 +1209,7 @@ constexpr auto make_tensor(
 template <int I, int J, typename T, typename TShape, typename TStrides>
 constexpr auto transpose(const Tensor<T, TShape, TStrides>& t) {
   auto new_layout = gemm::transpose<I, J>(t.layout());
-  using NewShape = std::remove_cvref_t<decltype(new_layout.shape())>;
-  using NewStrides = std::remove_cvref_t<decltype(new_layout.strides())>;
-  return Tensor<T, NewShape, NewStrides>(t.data(), new_layout);
+  return make_tensor(t.data(), new_layout);
 }
 
 /**
@@ -1212,9 +1230,7 @@ constexpr auto transpose(const Tensor<T, TShape, TStrides>& t) {
 template <typename T, typename TShape, typename TStrides>
 constexpr auto transpose(const Tensor<T, TShape, TStrides>& t, int i, int j) {
   auto new_layout = gemm::transpose(t.layout(), i, j);
-  using NewShape = std::remove_cvref_t<decltype(new_layout.shape())>;
-  using NewStrides = std::remove_cvref_t<decltype(new_layout.strides())>;
-  return Tensor<T, NewShape, NewStrides>(t.data(), new_layout);
+  return make_tensor(t.data(), new_layout);
 }
 
 // ======================== cast ========================

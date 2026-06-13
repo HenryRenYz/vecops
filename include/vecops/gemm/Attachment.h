@@ -300,6 +300,94 @@ private:
   }
 };
 
+/**
+ * 特殊固定函数：（点对点）常量0。受Kernel特殊优化：当C_prologue是ZerosVecFn时，**可能**直接硬件初始化为0。
+ * 注：此优化是否生效取决于使用的Atom和Kernel，但仅使用此函数时可能生效，使用其他函数时绝不会生效。
+ */
+template <typename Eo>
+struct ZerosVecFn : public PositionedVecFn<Eo, Eo> {
+  static constexpr bool is_elementwise = true;
+
+  /**
+   * 转换函数，包含从min_output_pow2到max_output_pow2的各种长度的重载
+   */
+  template <TLV_DECL_TAG(To),
+      TLV_DECL_VEC(Vi),
+      TL_IF(is_any<vec::TypeOf<To>, Eo>),
+      TL_IF(ZerosVecFn::min_output_pow2 <= vec::scalable_pow2_of<To> && vec::scalable_pow2_of<To> <= ZerosVecFn::max_output_pow2)>
+  vec::Vec<To> call(To t, Vi v_in) const {
+    return vec::zeros(t);
+  }
+
+  /**
+   * Adapter，elementwise操作等价于忽略座标的positioned操作
+   */
+  template <TLV_DECL_TAG(To),
+      TLV_DECL_VEC(Vi),
+      TL_IF(is_any<vec::TypeOf<To>, Eo>),
+      TL_IF(ZerosVecFn::min_output_pow2 <= vec::scalable_pow2_of<To> && vec::scalable_pow2_of<To> <= ZerosVecFn::max_output_pow2)>
+  vec::Vec<To> call(To t, Vi v_in, nint_t x, nint_t y) const {
+    ((void) x); // UNUSED
+    ((void) y); // UNUSED
+    return vec::zeros(t);
+  }
+};
+
+/**
+ * 特殊固定函数：（点对点）恒等变换。受Kernel特殊优化：对于A,B,C的prologue和C epilogue：如果是IdentityVecFn，则**可能**直接使用硬件读入，不会经过向量系统。
+ * 注：此优化是否生效取决于使用的Atom和Kernel，但仅使用此函数时可能生效，使用其他函数时绝不会生效。
+ */
+template <typename Eo>
+struct IdentityVecFn : public PositionedVecFn<Eo, Eo> {
+  static constexpr bool is_elementwise = true;
+
+  /**
+   * 转换函数，包含从min_output_pow2到max_output_pow2的各种长度的重载
+   */
+  template <TLV_DECL_TAG(To),
+      TL_IF(is_any<vec::TypeOf<To>, Eo>),
+      TL_IF(IdentityVecFn::min_output_pow2 <= vec::scalable_pow2_of<To> && vec::scalable_pow2_of<To> <= IdentityVecFn::max_output_pow2)>
+  vec::Vec<To> call(To t, vec::Vec<To> v_in) const {
+    return v_in;
+  }
+
+  /**
+   * Adapter，elementwise操作等价于忽略座标的positioned操作
+   */
+  template <TLV_DECL_TAG(To),
+      TL_IF(is_any<vec::TypeOf<To>, Eo>),
+      TL_IF(IdentityVecFn::min_output_pow2 <= vec::scalable_pow2_of<To> && vec::scalable_pow2_of<To> <= IdentityVecFn::max_output_pow2)>
+  vec::Vec<To> call(To t, vec::Vec<To> v_in, nint_t x, nint_t y) const {
+    ((void) x); // UNUSED
+    ((void) y); // UNUSED
+    return v_in;
+  }
+};
+
+template <typename Eo>
+inline constexpr ZerosVecFn<Eo> zeros {};
+
+template <typename Eo>
+inline constexpr IdentityVecFn<Eo> identity {};
+
+namespace details {
+template <typename T>
+struct IsZerosVecFn : public std::false_type {};
+template <typename Eo>
+struct IsZerosVecFn<ZerosVecFn<Eo>> : public std::true_type {};
+
+template <typename T>
+struct IsIdentityVecFn : public std::false_type {};
+template <typename Eo>
+struct IsIdentityVecFn<IdentityVecFn<Eo>> : public std::true_type {};
+} // namespace details
+
+template <typename T>
+static constexpr bool is_zeros_fn = details::IsZerosVecFn<T>::value;
+
+template <typename T>
+static constexpr bool is_identity_fn = details::IsIdentityVecFn<T>::value;
+
 } // namespace vecops::gemm
 
 #endif //VECOPS_ATTACHMENT_H

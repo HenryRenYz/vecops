@@ -9,7 +9,7 @@
 
 #define VECOPS_INTERNAL_RUN_WHEN_FALSE(cond, ...)\
   do {                \
-    if (!(cond)) {    \
+    if VECOPS_UNLIKELY(!(cond)) {    \
        __VA_ARGS__;   \
     }                 \
   } while (0)

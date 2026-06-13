@@ -7,6 +7,7 @@
 
 #include "./x86_Types.h"
 #include "./x86_Basic.h"
+#include "./x86_Arithmetic.h"
 
 //@formatter:off
 namespace vecops::vec::CPU_CAPABILITY {
@@ -769,173 +770,155 @@ VECOPS_VFUNC void store(T t, TypeOf<T> * p, nint_t n, Vec<T> v) {
 /* ************************************************************************** */
 //                                  Gather                                    //
 /* ************************************************************************** */
-template <TLV_DECL_TAG(T)>
-static VECOPS_VFUNC Vec<T> _gather_scalar(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
-  alignas(T::Bytes) TypeOf<T> data[size(t)];
-  VECOPS_UNROLL for (int j = 0; j < size(t); ++j) {
-    data[j] = p[nint_t(word::get(i, j))];
-  }
-  return word::load(t, data);
-}
-
-template <TLV_DECL_TAG(T)>
-static VECOPS_VFUNC Vec<T> _mask_gather_scalar(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
-  alignas(T::Bytes) TypeOf<T> data[size(t)];
-  VECOPS_UNROLL for (int j = 0; j < size(t); ++j) {
-    data[j] = word::get(t, m, j) ? p[nint_t(word::get(i, j))] : word::get(default_v, j);
-  }
-  return word::load(t, data);
-}
-
 #ifdef HAS_AVX2
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   return _mm_i32gather_ps(p, i.v, (int)sizeof(TypeOf<T>));
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   return _mm_i64gather_pd(p, i.v, (int)sizeof(TypeOf<T>));
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   return _mm_i32gather_epi32(p, i.v, (int)sizeof(TypeOf<T>));
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   return _mm_i64gather_epi64(p, i.v, (int)sizeof(TypeOf<T>));
 }
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   return _mm256_i32gather_ps(p, i.v, (int)sizeof(TypeOf<T>));
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   return _mm256_i64gather_pd(p, i.v, (int)sizeof(TypeOf<T>));
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   return _mm256_i32gather_epi32(p, i.v, (int)sizeof(TypeOf<T>));
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   return _mm256_i64gather_epi64(p, i.v, (int)sizeof(TypeOf<T>));
 }
 #endif // VEC_WIDTH >= 256
 
 #if VEC_WIDTH >= 512
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   return _mm512_i32gather_ps(i.v, p, (int)sizeof(TypeOf<T>));
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   return _mm512_i64gather_pd(i.v, p, (int)sizeof(TypeOf<T>));
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   return _mm512_i32gather_epi32(i.v, p, (int)sizeof(TypeOf<T>));
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   return _mm512_i64gather_epi64(i.v, p, (int)sizeof(TypeOf<T>));
 }
 #endif // VEC_WIDTH >= 512
 
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm_mmask_i32gather_ps(default_v.v, m.v, i.v, p, (int)sizeof(TypeOf<T>));
   }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm_mmask_i64gather_pd(default_v.v, m.v, i.v, p, (int)sizeof(TypeOf<T>));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm_mmask_i32gather_epi32(default_v.v, m.v, i.v, p, (int)sizeof(TypeOf<T>));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm_mmask_i64gather_epi64(default_v.v, m.v, i.v, p, (int)sizeof(TypeOf<T>));
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm256_mmask_i32gather_ps(default_v.v, m.v, i.v, p, (int)sizeof(TypeOf<T>));
   }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm256_mmask_i64gather_pd(default_v.v, m.v, i.v, p, (int)sizeof(TypeOf<T>));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm256_mmask_i32gather_epi32(default_v.v, m.v, i.v, p, (int)sizeof(TypeOf<T>));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm256_mmask_i64gather_epi64(default_v.v, m.v, i.v, p, (int)sizeof(TypeOf<T>));
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm512_mask_i32gather_ps(default_v.v, m.v, i.v, p, (int)sizeof(TypeOf<T>));
   }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm512_mask_i64gather_pd(default_v.v, m.v, i.v, p, (int)sizeof(TypeOf<T>));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm512_mask_i32gather_epi32(default_v.v, m.v, i.v, p, (int)sizeof(TypeOf<T>));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm512_mask_i64gather_epi64(default_v.v, m.v, i.v, p, (int)sizeof(TypeOf<T>));
 }
 #else // HAS_AVX512DQ
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm_mask_i32gather_ps(default_v.v, p, i.v, _mm_castsi128_ps(m.v), (int)sizeof(TypeOf<T>));
   }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm_mask_i64gather_pd(default_v.v, p, i.v, _mm_castsi128_pd(m.v), (int)sizeof(TypeOf<T>));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm_mask_i32gather_epi32(default_v.v, p, i.v, m.v, (int)sizeof(TypeOf<T>));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm_mask_i64gather_epi64(default_v.v, p, i.v, m.v, (int)sizeof(TypeOf<T>));
 }
 
 #if VEC_WIDTH >= 256
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm256_mask_i32gather_ps(default_v.v, p, i.v, _mm256_castsi256_ps(m.v), (int)sizeof(TypeOf<T>));
   }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm256_mask_i64gather_pd(default_v.v, p, i.v, _mm256_castsi256_pd(m.v), (int)sizeof(TypeOf<T>));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm256_mask_i32gather_epi32(default_v.v, p, i.v, m.v, (int)sizeof(TypeOf<T>));
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return _mm256_mask_i64gather_epi64(default_v.v, p, i.v, m.v, (int)sizeof(TypeOf<T>));
 }
 #endif // VEC_WIDTH >= 256
@@ -944,19 +927,127 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>,
   #error "Unreachable"
 #endif // VEC_WIDTH >= 512
 #endif // HAS_AVX512DQ
+
+// common fallback for type with 1B / 2B size
+
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t, float16_t, bfloat16_t>)>
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
+  Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
+  if constexpr (num_words(t_i) == 1) {
+    auto p_bits = int32_t(nint_t(p) & 0b1);
+    auto *p_adj = decltype(p)(nint_t(p) & ~nint_t(0b1));
+    auto i_adj = word::add(i, word::fill(t_i, p_bits));
+    auto i_i32 = word::bit_shr<1>(i_adj);
+    auto g_v = word::gather(t_i, (const int32_t *)p_adj, i_i32);
+    auto i_shr = word::bit_shr<27>(word::bit_shl<31>(i_adj)); // (LSb -> 0b{LSb}0000)
+    auto g_x = word::bit_shr(g_v, i_shr);
+    Twice<T> t_2;
+    return word::even(t_2, word::bitcast(t_2, g_x));
+  } else {
+    Half<T> t_h;
+    auto lo = word::gather(t_h, p, word::lower(t_i, i));
+    auto hi = word::gather(t_h, p, word::upper(t_i, i));
+    return word::concat(t, lo, hi);
+  }
+}
+
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
+  Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
+  if constexpr (num_words(t_i) == 1) {
+    Rebind<int16_t, decltype(t_i)> t_i16;
+    auto p_bits = int32_t(nint_t(p) & 0b11);
+    auto *p_adj = decltype(p)(nint_t(p) & ~nint_t(0b11));
+    auto i_adj = word::add(i, word::fill(t_i, p_bits));
+    auto i_i32 = word::bit_shr<2>(i_adj);
+    auto g_v = word::gather(t_i, (const int32_t *)p_adj, i_i32);
+    auto i_shr = word::bit_shr<27>(word::bit_shl<30>(i_adj)); // (LSb -> 0b{LSb}000)
+    auto g_x = word::bit_shr(g_v, i_shr);
+    Twice<T> t_2;
+    return word::even(t_2, word::bitcast(t_2, word::even(t_i16, word::bitcast(t_i16, g_x))));
+  } else {
+    Half<T> t_h;
+    auto lo = word::gather(t_h, p, word::lower(t_i, i));
+    auto hi = word::gather(t_h, p, word::upper(t_i, i));
+    return word::concat(t, lo, hi);
+  }
+}
+
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t, float16_t, bfloat16_t>)>
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+  Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
+  if constexpr (num_words(t_i) == 1) {
+    auto p_bits = int32_t(nint_t(p) & 0b1);
+    auto *p_adj = decltype(p)(nint_t(p) & ~nint_t(0b1));
+    auto i_adj = word::add(i, word::fill(t_i, p_bits));
+    auto i_i32 = word::bit_shr<1>(i_adj);
+    // TODO bad mask type conversion
+    auto g_v = word::gather(t_i, (const int32_t *)p_adj, i_i32, Mask<decltype(t_i)>{m.v}, word::zeros(t_i));
+    auto i_shr = word::bit_shr<27>(word::bit_shl<31>(i_adj)); // (LSb -> 0b{LSb}0000)
+    auto g_x = word::bit_shr(g_v, i_shr);
+    Twice<T> t_2;
+    return word::blend(default_v, m, word::even(t_2, word::bitcast(t_2, g_x)));
+  } else {
+    Half<T> t_h;
+    auto lo = word::gather(t_h, p, word::lower(t_i, i), word::lower(t, m), word::lower(t, default_v));
+    auto hi = word::gather(t_h, p, word::upper(t_i, i), word::upper(t, m), word::upper(t, default_v));
+    return word::concat(t, lo, hi);
+  }
+}
+
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+  Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
+  if constexpr (num_words(t_i) == 1) {
+    Rebind<int16_t, decltype(t_i)> t_i16;
+    auto p_bits = int32_t(nint_t(p) & 0b11);
+    auto *p_adj = decltype(p)(nint_t(p) & ~nint_t(0b11));
+    auto i_adj = word::add(i, word::fill(t_i, p_bits));
+    auto i_i32 = word::bit_shr<2>(i_adj);
+    // TODO bad mask type conversion
+    auto g_v = word::gather(t_i, (const int32_t *)p_adj, i_i32, Mask<decltype(t_i)>{m.v}, word::zeros(t_i));
+    auto i_shr = word::bit_shr<27>(word::bit_shl<30>(i_adj)); // (LSb -> 0b{LSb}000)
+    auto g_x = word::bit_shr(g_v, i_shr);
+    Twice<T> t_2;
+    return word::blend(default_v, m, word::even(t_2, word::bitcast(t_2, word::even(t_i16, word::bitcast(t_i16, g_x)))));
+  } else {
+    Half<T> t_h;
+    auto lo = word::gather(t_h, p, word::lower(t_i, i), word::lower(t, m), word::lower(t, default_v));
+    auto hi = word::gather(t_h, p, word::upper(t_i, i), word::upper(t, m), word::upper(t, default_v));
+    return word::concat(t, lo, hi);
+  }
+}
+
 #else
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+static VECOPS_VFUNC Vec<T> _gather_scalar(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
+  alignas(T::Bytes) TypeOf<T> data[size(t)];
+  VECOPS_UNROLL for (int j = 0; j < size(t); ++j) {
+    data[j] = p[nint_t(word::get(i, j))];
+  }
+  return word::load(t, data);
+}
+template <TLV_DECL_TAG(T)>
+static VECOPS_VFUNC Vec<T> _mask_gather_scalar(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+  alignas(T::Bytes) TypeOf<T> data[size(t)];
+  VECOPS_UNROLL for (int j = 0; j < size(t); ++j) {
+    data[j] = word::get(t, m, j) ? p[nint_t(word::get(i, j))] : word::get(default_v, j);
+  }
+  return word::load(t, data);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   return word::_gather_scalar(t, p, i);
 }
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   return word::_mask_gather_scalar(t, p, i, m, default_v);
 }
 #endif // HAS_AVX2
 
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> gather(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
   VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
   auto m = word::mwhilelt(t, 0, n);
   return word::gather(t, p, i, m, default_v);
@@ -966,15 +1057,122 @@ VECOPS_VFUNC Vec<T> gather(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> 
 /* ************************************************************************** */
 //                                  Scatter                                   //
 /* ************************************************************************** */
+#ifdef HAS_AVX512F
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  _mm_i32scatter_ps(p, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  _mm_i64scatter_pd(p, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  _mm_i32scatter_epi32(p, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  _mm_i64scatter_epi64(p, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+
+#if VEC_WIDTH >= 256
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  _mm256_i32scatter_ps(p, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  _mm256_i64scatter_pd(p, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  _mm256_i32scatter_epi32(p, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  _mm256_i64scatter_epi64(p, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+#endif
+
+#if VEC_WIDTH >= 512
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  _mm512_i32scatter_ps(p, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  _mm512_i64scatter_pd(p, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  _mm512_i32scatter_epi32(p, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  _mm512_i64scatter_epi64(p, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+#endif
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  _mm_mask_i32scatter_ps(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  _mm_mask_i64scatter_pd(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  _mm_mask_i32scatter_epi32(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  _mm_mask_i64scatter_epi64(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  _mm256_mask_i32scatter_ps(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  _mm256_mask_i64scatter_pd(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  _mm256_mask_i32scatter_epi32(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  _mm256_mask_i64scatter_epi64(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  _mm512_mask_i32scatter_ps(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  _mm512_mask_i64scatter_pd(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  _mm512_mask_i32scatter_epi32(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  _mm512_mask_i64scatter_epi64(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
+}
+#else // HAS_AVX512F
 template <TLV_DECL_TAG(T)>
-static VECOPS_VFUNC void _scatter_scalar(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
+static VECOPS_VFUNC void _scatter_scalar(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
   VECOPS_UNROLL for (int j = 0; j < size(t); ++j) {
     p[nint_t(word::get(i, j))] = word::get(v, j);
   }
 }
 
 template <TLV_DECL_TAG(T)>
-static VECOPS_VFUNC void _mask_scatter_scalar(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+static VECOPS_VFUNC void _mask_scatter_scalar(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
   VECOPS_UNROLL for (int j = 0; j < size(t); ++j) {
     if (word::get(t, m, j)) {
       p[nint_t(word::get(i, j))] = word::get(v, j);
@@ -982,125 +1180,18 @@ static VECOPS_VFUNC void _mask_scatter_scalar(T t, TypeOf<T>* p, Vec<Rebind<Inde
   }
 }
 
-#ifdef HAS_AVX512F
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  _mm_i32scatter_ps(p, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  _mm_i64scatter_pd(p, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  _mm_i32scatter_epi32(p, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  _mm_i64scatter_epi64(p, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-
-#if VEC_WIDTH >= 256
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  _mm256_i32scatter_ps(p, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  _mm256_i64scatter_pd(p, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  _mm256_i32scatter_epi32(p, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  _mm256_i64scatter_epi64(p, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-#endif
-
-#if VEC_WIDTH >= 512
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  _mm512_i32scatter_ps(p, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  _mm512_i64scatter_pd(p, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  _mm512_i32scatter_epi32(p, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  _mm512_i64scatter_epi64(p, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-#endif
-
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  _mm_mask_i32scatter_ps(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  _mm_mask_i64scatter_pd(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  _mm_mask_i32scatter_epi32(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  _mm_mask_i64scatter_epi64(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  _mm256_mask_i32scatter_ps(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  _mm256_mask_i64scatter_pd(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  _mm256_mask_i32scatter_epi32(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  _mm256_mask_i64scatter_epi64(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float32_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  _mm512_mask_i32scatter_ps(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, float64_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  _mm512_mask_i64scatter_pd(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int32_t, uint32_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  _mm512_mask_i32scatter_epi32(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  _mm512_mask_i64scatter_epi64(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
-}
-#else // HAS_AVX512F
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
   word::_scatter_scalar(t, p, i, v);
 }
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
   word::_mask_scatter_scalar(t, p, i, m, v);
 }
 #endif // HAS_AVX512F
 
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
+VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
   VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
   auto m = word::mwhilelt(t, 0, n);
   word::scatter(t, p, i, m, v);

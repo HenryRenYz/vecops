@@ -236,7 +236,7 @@ VECOPS_VFUNC Mask<T> mwhilege(T t, nint_t a, nint_t b) {
 
 
 /* ************************************************************************** */
-//                            Mask Bit Operation                              //
+//                             Mask Operations                                //
 /* ************************************************************************** */
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_MASK(M), TL_IF(M::N <= 8)>
@@ -2217,6 +2217,132 @@ VECOPS_VFUNC Vec<T> bitcast(T t, V v) {
   auto lo = word::bitcast(t2, word::lower(t1, v));
   auto hi = word::bitcast(t2, word::upper(t1, v));
   return word::concat(t, lo, hi);
+}
+
+#ifdef HAS_AVX512DQ
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> m) {
+  return Mask<Half<T>>{m.v};
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::N == 2 && num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> m) {
+  return _kshiftri_mask8(m.v, 1);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::N == 4 && num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> m) {
+  return _kshiftri_mask8(m.v, 2);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::N == 8 && num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> m) {
+  return _kshiftri_mask8(m.v, 4);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::N == 16 && num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> m) {
+  return _kshiftri_mask16(m.v, 8);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::N == 32 && num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> m) {
+  return _kshiftri_mask32(m.v, 16);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::N == 64 && num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> m) {
+  return _kshiftri_mask64(m.v, 32);
+}
+
+#else // HAS_AVX512DQ
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> v) {
+  return word::lower(t, Vec<T>{v.v}).v;
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> v) {
+  return word::upper(t, Vec<T>{v.v}).v;
+}
+#endif // HAS_AVX512DQ
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 2)>
+VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> v) {
+  return Mask<Half<T>>{v[0]};
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> v) {
+  return Mask<Half<T>>{v[0], v[1]};
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 8)>
+VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> v) {
+  return Mask<Half<T>>{v[0], v[1], v[2], v[3]};
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 2)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> v) {
+  return Mask<Half<T>>{v[1]};
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> v) {
+  return Mask<Half<T>>{v[2], v[3]};
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 8)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> v) {
+  return Mask<Half<T>>{v[4], v[5], v[6], v[7]};
+}
+
+/* === mask concat === */
+#ifdef HAS_AVX512DQ
+template <TLV_DECL_TAG(T), TL_IF(T::N == 2 && num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  return _kor_mask8(m_lo.v, _kshiftli_mask8(m_hi.v, 1));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::N == 4 && num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  return _kor_mask8(m_lo.v, _kshiftli_mask8(m_hi.v, 2));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::N == 8 && num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  return _kor_mask8(m_lo.v, _kshiftli_mask8(m_hi.v, 4));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::N == 16 && num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  return _kor_mask16(m_lo.v, _kshiftli_mask16(m_hi.v, 8));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::N == 32 && num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  return _kor_mask32(m_lo.v, _kshiftli_mask32(m_hi.v, 16));
+}
+template <TLV_DECL_TAG(T), TL_IF(T::N == 64 && num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  return _kor_mask64(m_lo.v, _kshiftli_mask64(m_hi.v, 32));
+}
+#else // HAS_AVX512DQ
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  auto v_lo = Vec<Half<T>>{m_lo.v};
+  auto v_hi = Vec<Half<T>>{m_hi.v};
+  return Mask<T>{word::concat(t, v_lo, v_hi).v};
+}
+#endif // HAS_AVX512DQ
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 2)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  return Mask<T>{m_lo, m_hi};
+}
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  return Mask<T>{m_lo[0], m_lo[1], m_hi[0], m_hi[1]};
+}
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 8)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  return Mask<T>{m_lo[0], m_lo[1], m_lo[2], m_lo[3], m_hi[0], m_hi[1], m_hi[2], m_hi[3]};
 }
 
 /* ************************************************************************** */

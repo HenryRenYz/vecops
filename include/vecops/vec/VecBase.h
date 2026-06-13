@@ -779,7 +779,7 @@ namespace details {
  * @brief Helper to determine the index type for a given element type.
  * 
  * The index type has the same size as the element type but is always signed.
- * Used for gather/scatter operations where indices must be signed integers.
+ * Used for shuffle-related operations
  */
 template <typename T, typename = void/*SFINAE*/>
 struct IndexType { static_assert(sizeof(T) == -1, "Unsupported type"); };
@@ -791,6 +791,17 @@ template <typename T>
 struct IndexType<T, std::enable_if_t<sizeof(T) == sizeof(int32_t)>> { using Type = int32_t; };
 template <typename T>
 struct IndexType<T, std::enable_if_t<sizeof(T) == sizeof(int64_t)>> { using Type = int64_t; };
+
+/**
+ * @brief Helper to determine the index type used for gather & scatter for a given element type.
+ */
+template <typename T, typename = void/*SFINAE*/>
+struct GatherScatterIndexType { static_assert(sizeof(T) == -1, "Unsupported type"); };
+template <typename T>
+struct GatherScatterIndexType<T, std::enable_if_t<(sizeof(T) >= sizeof(int32_t))>> { using Type = IndexType<T>::Type; };
+template <typename T>
+struct GatherScatterIndexType<T, std::enable_if_t<(sizeof(T) < sizeof(int32_t))>> { using Type = int32_t; };
+
 } // namespace details
 
 /**
@@ -830,13 +841,23 @@ using Mask = typename VecDefs<typename Tag::Type, Tag::N, Tag::POW2>::MaskType;
 /**
  * @brief Type alias for the signed index type corresponding to element type T.
  * 
- * The index type is used in gather/scatter operations.
+ * The index type is used in shuffle operations.
+ *
+ * This returns the signed integer type of same size with type T.
  * 
  * @warning This is a forwarded type and cannot be used for template argument
  *          deduction.
  */
 template <typename T>
 using Index = typename details::IndexType<T>::Type;
+
+/**
+ * @brief Type alias for signed index type used for gather/scatter corresponding to element type T.
+ *
+ * This is identical to Index<T> when sizeof(T) >= 4, otherwise this will always be int32_t
+ */
+template <typename T>
+using GatherScatterIndex = typename details::GatherScatterIndexType<T>::Type;
 
 
 namespace details {

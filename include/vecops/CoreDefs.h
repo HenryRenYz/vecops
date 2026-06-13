@@ -71,6 +71,19 @@
 #endif
 
 /**
+ * Branch prediction hints
+ * VECOPS_LIKELY:   condition is expected to be true.
+ * VECOPS_UNLIKELY: condition is expected to be false.
+ */
+#if defined(COMPILER_GCC) || defined(COMPILER_CLANG)
+#define VECOPS_LIKELY(x)   (__builtin_expect(!!(x), 1))
+#define VECOPS_UNLIKELY(x) (__builtin_expect(!!(x), 0))
+#else
+#define VECOPS_LIKELY(x)   (x)
+#define VECOPS_UNLIKELY(x) (x)
+#endif
+
+/**
  * Unroll pragma for loop
  */
 #if defined(COMPILER_GCC) || defined(COMPILER_CLANG)

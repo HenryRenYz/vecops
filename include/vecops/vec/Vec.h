@@ -563,7 +563,7 @@ VECOPS_VFUNC void store(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
  *   auto v = gather(t, data, idx);  // v[i] = data[indices[i]]
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   using namespace details;
   constexpr Rebind<Index<TypeOf<T>>, T> it;
   return vmap(
@@ -578,7 +578,7 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>,
  * @return Gathered vector
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
   using namespace details;
   constexpr Rebind<Index<TypeOf<T>>, T> it;
   return vmap(
@@ -596,7 +596,7 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>,
  * @return Gathered vector
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, TypeOf<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatterIndex<T>>, T>> i, nint_t n, TypeOf<T> default_v) {
   return vec::gather(t, p, i, n, vec::fill(t, default_v));
 }
 
@@ -611,7 +611,7 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>,
  * @note May access p[index[i]] for masked-out lanes; ensure indices are valid.
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatterIndex<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   using namespace details;
   constexpr Rebind<Index<TypeOf<T>>, T> it;
   return vmap(
@@ -626,7 +626,7 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>,
  * @return Gathered vector
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, TypeOf<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatterIndex<T>>, T>> i, Mask<T> m, TypeOf<T> default_v) {
   return vec::gather(t, p, i, m, vec::fill(t, default_v));
 }
 
@@ -643,7 +643,7 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>,
  * @note Scatter operations can be significantly slower than consecutive stores.
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
+VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatterIndex<T>>, T>> i, Vec<T> v) {
   using namespace details;
   constexpr Rebind<Index<TypeOf<T>>, T> it;
   return vmap(
@@ -665,7 +665,7 @@ VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, 
  * @param n Number of elements to scatter (0 <= n <= size(t))
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
+VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatterIndex<T>>, T>> i, nint_t n, Vec<T> v) {
   using namespace details;
   constexpr Rebind<Index<TypeOf<T>>, T> it;
   return vmap(
@@ -691,7 +691,7 @@ VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, 
  * @param m Mask indicating which lanes to scatter
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatterIndex<T>>, T>> i, Mask<T> m, Vec<T> v) {
   using namespace details;
   constexpr Rebind<Index<TypeOf<T>>, T> it;
   return vmap(
@@ -1154,6 +1154,86 @@ VECOPS_VFUNC V bit_not(V v, Mask<T> m, V default_v) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V bit_not(V v, Mask<T> m) {
   return vec::bit_not(v, m, v);
+}
+
+/* ********************************************************************** */
+//                     Mask Bitwise Operations                             //
+/* ********************************************************************** */
+
+namespace details {
+template <typename F, TLV_DECL_TAG(T)>
+VECOPS_VFUNC Mask<T> mask_bitwise_op(F&& f, T t, Mask<T> a, Mask<T> b) {
+  using namespace details;
+  constexpr nint_t NW = num_words(t);
+  if constexpr (NW <= 1) {
+    return f(a, b);
+  } else {
+    Mask<T> r;
+    foreach<NW>([&]<nint_t I>{
+      r = set_word_mask<I>(t, r, f(get_word_mask<I>(t, a), get_word_mask<I>(t, b)));
+    });
+    return r;
+  }
+}
+template <typename F, TLV_DECL_TAG(T)>
+VECOPS_VFUNC Mask<T> mask_unary_op(F&& f, T t, Mask<T> a) {
+  using namespace details;
+  constexpr nint_t NW = num_words(t);
+  if constexpr (NW <= 1) {
+    return f(a);
+  } else {
+    Mask<T> r;
+    foreach<NW>([&]<nint_t I>{
+      r = set_word_mask<I>(t, r, f(get_word_mask<I>(t, a)));
+    });
+    return r;
+  }
+}
+}  // namespace details
+
+/**
+ * @brief Bitwise AND of two masks: result[i] = a[i] & b[i].
+ */
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Mask<T> bit_and(T t, Mask<T> a, Mask<T> b) {
+  return details::mask_bitwise_op(
+    [](auto aa, auto bb) { return word::bit_and(aa, bb); }, t, a, b);
+}
+
+/**
+ * @brief Bitwise OR of two masks: result[i] = a[i] | b[i].
+ */
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Mask<T> bit_or(T t, Mask<T> a, Mask<T> b) {
+  return details::mask_bitwise_op(
+    [](auto aa, auto bb) { return word::bit_or(aa, bb); }, t, a, b);
+}
+
+/**
+ * @brief Bitwise XOR of two masks: result[i] = a[i] ^ b[i].
+ */
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Mask<T> bit_xor(T t, Mask<T> a, Mask<T> b) {
+  return details::mask_bitwise_op(
+    [](auto aa, auto bb) { return word::bit_xor(aa, bb); }, t, a, b);
+}
+
+/**
+ * @brief Bitwise AND-NOT of two masks: result[i] = ~a[i] & b[i].
+ */
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Mask<T> bit_andnot(T t, Mask<T> a, Mask<T> b) {
+  return details::mask_bitwise_op(
+    [](auto aa, auto bb) { return word::bit_andnot(aa, bb); }, t, a, b);
+}
+
+/**
+ * @brief Bitwise NOT of a mask: result[i] = ~a[i].
+ */
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Mask<T> bit_not(T t, Mask<T> a) {
+  return details::mask_unary_op(
+    [](auto aa) { return word::bit_not(aa); }, t, a);
 }
 
 /**
@@ -1925,7 +2005,7 @@ VECOPS_VFUNC V odd(T t, Vec<T> v) {
  *   auto hi = loadu(th, {4, 5, 6, 7});
  *   auto v = concat(t, lo, hi);  // v = [0, 1, 2, 3, 4, 5, 6, 7]
  */
-template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>>
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(is_vec<V>)>
 VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
   using namespace details;
   using Ti = Vec2Tag<V>;
@@ -1942,6 +2022,110 @@ VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
     return v_o;
   } else {
     return word::concat(t, v_lo, v_hi);
+  }
+}
+
+/* ********************************************************************** */
+//                     Mask Lower / Upper / Concat                          //
+/* ********************************************************************** */
+
+/**
+ * @brief Extract the lower half of a mask.
+ *
+ * Returns a mask of half the length containing the lower (low-indexed)
+ * predicate bits of the input mask.
+ *
+ * For a mask m of size N: result[i] = m[i]
+ *
+ * @tparam T Input tag type
+ * @param t Input tag
+ * @param m Input mask of size N
+ * @return Mask of size N/2 containing lower half bits
+ */
+template <TLV_DECL_TAG(T), typename M = Mask<Half<T>>>
+VECOPS_VFUNC M lower(T t, Mask<T> m) {
+  using namespace details;
+  constexpr nint_t NWi = num_words(t);
+  if constexpr (NWi > 1) {
+    static_assert(NWi == 2 * num_words(Half<T>{}));
+    M r;
+    constexpr nint_t NWh = NWi / 2;
+    foreach<NWh>([&]<nint_t I>{
+      r = set_word_mask<I>(Half<T>{}, r, get_word_mask<I>(t, m));
+    });
+    return r;
+  } else {
+    return word::lower(t, m);
+  }
+}
+
+/**
+ * @brief Extract the upper half of a mask.
+ *
+ * Returns a mask of half the length containing the upper (high-indexed)
+ * predicate bits of the input mask.
+ *
+ * For a mask m of size N: result[i] = m[i + N/2]
+ *
+ * @tparam T Input tag type
+ * @param t Input tag
+ * @param m Input mask of size N
+ * @return Mask of size N/2 containing upper half bits
+ */
+template <TLV_DECL_TAG(T), typename M = Mask<Half<T>>>
+VECOPS_VFUNC M upper(T t, Mask<T> m) {
+  using namespace details;
+  constexpr nint_t NWi = num_words(t);
+  if constexpr (NWi > 1) {
+    static_assert(NWi == 2 * num_words(Half<T>{}));
+    M r;
+    constexpr nint_t NWh = NWi / 2;
+    foreach<NWh>([&]<nint_t I>{
+      r = set_word_mask<I>(Half<T>{}, r, get_word_mask<I + NWh>(t, m));
+    });
+    return r;
+  } else {
+    return word::upper(t, m);
+  }
+}
+
+/**
+ * @brief Concatenate two half-length masks into a full-length mask.
+ *
+ * Combines two masks of half the target size into a single mask of
+ * the target size. The lower mask's bits occupy the lower indices,
+ * and the higher mask's bits occupy the upper indices.
+ *
+ * Result: result[i] = m_lo[i] for i < N/2, result[i] = m_hi[i - N/2] for i >= N/2
+ *
+ * @tparam T Output tag type
+ * @tparam V Input mask type (Mask<Half<T>>)
+ * @param t Output tag
+ * @param m_lo Lower half mask (placed at lower indices)
+ * @param m_hi Upper half mask (placed at upper indices)
+ * @return Concatenated mask of size N
+ *
+ * @note This is the inverse operation of upper() and lower() combined:
+ *       concat(t, lower(t, m), upper(t, m)) == m
+ */
+template <TLV_DECL_TAG(T), typename V = Mask<Half<T>>, TL_IF(is_mask<V>)>
+VECOPS_VFUNC Mask<T> concat(T t, V m_lo, V m_hi) {
+  using namespace details;
+  constexpr nint_t NWo = num_words(t);
+  if constexpr (NWo > 1) {
+    static_assert(NWo == 2 * num_words(Half<T>{}));
+    Mask<T> r;
+    constexpr nint_t NWh = NWo / 2;
+    Half<T> th;
+    foreach<NWh>([&]<nint_t I>{
+      r = set_word_mask<I>(t, r, get_word_mask<I>(th, m_lo));
+    });
+    foreach<NWh>([&]<nint_t I>{
+      r = set_word_mask<I + NWh>(t, r, get_word_mask<I>(th, m_hi));
+    });
+    return r;
+  } else {
+    return word::concat(t, m_lo, m_hi);
   }
 }
 

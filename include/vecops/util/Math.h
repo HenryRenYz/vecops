@@ -57,6 +57,11 @@ VECOPS_ALWAYS_INLINE constexpr uint64_t tailing_mask(int64_t n) {
   #endif
 }
 
+template <typename T, typename X, std::enable_if_t<std::is_integral_v<T> && std::is_convertible_v<X, T>, bool> = true>
+VECOPS_ALWAYS_INLINE constexpr auto cdiv(T v, X x) {
+  return (v + x - 1) / x;
+}
+
 } // vecops
 
 #endif //VECOPS_MATH_H

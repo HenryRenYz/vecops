@@ -514,6 +514,33 @@ template <TLV_DECL_MASK(M)> VECOPS_VFUNC M bit_xor(M a, M b) { return sveor_b_z(
 template <TLV_DECL_MASK(M)> VECOPS_VFUNC M bit_andnot(M a, M b) { return svbic_b_z(svptrue_b8(), b, a); }
 template <TLV_DECL_MASK(M)> VECOPS_VFUNC M bit_not(M a) { return svnot_b_z(svptrue_b8(), a); }
 
+/* === mask lower / upper / concat === */
+/* single-word: lower is identity (lower N/2 predicate bits at position 0) */
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1)>
+VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> m) {
+  return m;
+}
+
+/* single-word upper via conversion: svbool_t -> svuint8_t -> svsplice_u8 -> svbool_t */
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> m) {
+  nint_t hn_bytes = (nint_t)svcntb() / 2;
+  auto up_pg = svnot_b_z(svptrue_b8(), svwhilelt_b8_u64(0, (uint64_t)hn_bytes));
+  svuint8_t v = svdup_u8_z(m, 1);
+  svuint8_t v_hi = svsplice_u8(up_pg, v, v);
+  return svcmpne_n_u8(svptrue_b8(), v_hi, 0);
+}
+
+/* single-word concat via conversion */
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  nint_t hn_bytes = (nint_t)svcntb() / 2;
+  svuint8_t v_lo = svdup_u8_z(m_lo, 1);
+  svuint8_t v_hi = svdup_u8_z(m_hi, 1);
+  svuint8_t v_concat = svsplice_u8(svwhilelt_b8_u64(0, (uint64_t)hn_bytes), v_lo, v_hi);
+  return svcmpne_n_u8(svptrue_b8(), v_concat, 0);
+}
+
 /* === get / set === */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC TypeOf<T> get(V v, nint_t idx) {
@@ -818,7 +845,7 @@ VECOPS_VFUNC V odd(T t, Vec<T> v) {
 }
 
 /* === concat === */
-template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 1)>
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 1 && is_vec<V>)>
 VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
   using E = TypeOf<T>; nint_t hn = size(t)/2;
   auto lo = word::mwhilelt(t, 0, hn);
@@ -841,12 +868,12 @@ VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
   else return svsplice_u64(lo, v_lo, v_hi);
 }
 
-template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 2)>
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 2 && is_vec<V>)>
 VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
   return details::tuple_create2<TypeOf<T>>(v_lo, v_hi);
 }
 
-template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 4)>
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 4 && is_vec<V>)>
 VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
   using E2 = TypeOf<Half<T>>;
   return details::tuple_create4<TypeOf<T>>(

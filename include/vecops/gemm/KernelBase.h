@@ -84,7 +84,7 @@ struct Atom {
 
   template <
       typename TSrcB, typename SrcBLayout, typename SrcBPackedLayout, typename Prologue>
-  void pack_B(const TSrcB *src, SrcBLayout src_layout, TA *dst, SrcBPackedLayout dst_layout, const Prologue &prologue);
+  void pack_B(const TSrcB *src, SrcBLayout src_layout, TB *dst, SrcBPackedLayout dst_layout, const Prologue &prologue);
 
   /**
    * 用于不打包时 Kernel 内部的向量加载优化路径选择
