@@ -1225,23 +1225,23 @@ VECOPS_VFUNC Vec<T> convert(T t, V v) {
   return details::convert_impl(t, v);
 }
 
-// ---- Mask promotion / demotion / conversion (all identity in scalar) ----
-// Scalar masks store bits in std::bitset; same element count = same N,
-// so copy bits between the underlying bitsets which have identical size.
+// ---- Mask promotion / demotion / conversion ----
+// Scalar masks store bits in std::bitset<N> where N = element count.
+// Promote/demote change element width so bitset sizes differ; copy bit-by-bit.
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti), TL_IF(sizeof(TypeOf<To>) > sizeof(TypeOf<Ti>))>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
   Mask<To> r;
-  using Bits = std::bitset<(size_t)size(ti)>;
-  static_cast<Bits&>(r) = static_cast<const Bits&>(mi);
+  for (nint_t i = 0; i < size(to); ++i)
+    r.set((size_t)i, mi.test((size_t)i));
   return r;
 }
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti), TL_IF(sizeof(TypeOf<To>) < sizeof(TypeOf<Ti>))>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
   Mask<To> r;
-  using Bits = std::bitset<(size_t)size(ti)>;
-  static_cast<Bits&>(r) = static_cast<const Bits&>(mi);
+  for (nint_t i = 0; i < size(ti); ++i)
+    r.set((size_t)i, mi.test((size_t)i));
   return r;
 }
 
