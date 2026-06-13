@@ -43,7 +43,7 @@ VECOPS_VFUNC Mask<To> convert(To, Ti, Mask<Ti> mi) { return Mask<To>{mi.v}; }
 #else // !HAS_AVX512DQ — vector register masks
 
 template <typename Reg>
-static constexpr bool is_m256i_v = std::is_same_v<Reg, __m256i>;
+static constexpr bool is_m256i_v = (sizeof(Reg) == 32);
 
 /* =================================================================== */
 /*              promote: int8 -> int16 (full register)                   */

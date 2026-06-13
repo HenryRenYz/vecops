@@ -2585,7 +2585,7 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
     Half<Ti> t_hi;
     auto lo = vec::demote(t_ho, t_hi, vec::lower(ti, mi));
     auto hi = vec::demote(t_ho, t_hi, vec::upper(ti, mi));
-    return concat(to, lo, hi);
+    return vec::concat(to, lo, hi);
   } else {
     return word::demote(to, ti, mi);
   }
@@ -2610,7 +2610,7 @@ VECOPS_VFUNC Mask<To> convert(To to, Ti ti, Mask<Ti> mi) {
     Half<Ti> t_hi;
     auto lo = vec::convert(t_ho, t_hi, vec::lower(ti, mi));
     auto hi = vec::convert(t_ho, t_hi, vec::upper(ti, mi));
-    return concat(to, lo, hi);
+    return vec::concat(to, lo, hi);
   } else {
     return word::convert(to, ti, mi);
   }
