@@ -29,7 +29,8 @@ VECOPS_VFUNC Mask<T> convert(T to, T ti, Mask<T> mi) { return mi; }
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
-          TL_IF(sizeof(TypeOf<To>) == sizeof(TypeOf<Ti>))>
+          TL_IF(sizeof(TypeOf<To>) == sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
 VECOPS_VFUNC Mask<To> convert(To to, Ti ti, Mask<Ti> mi) {
   return Mask<To>{mi};
 }
@@ -39,11 +40,9 @@ VECOPS_VFUNC Mask<To> convert(To to, Ti ti, Mask<Ti> mi) {
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
-          TL_IF(sizeof(TypeOf<To>) == 2 * sizeof(TypeOf<Ti>))>
+          TL_IF(sizeof(TypeOf<To>) == 2 * sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
-  // svunpklo_b doubles granularity from Ti to intermediate To-size
-  // svunpkhi_b does the same for the upper half of Ti bits
-  // svzip1 interleaves lo and hi to regain full element count
   auto lo = svunpklo_b(mi);
   auto hi = svunpkhi_b(mi);
   if constexpr (sizeof(TypeOf<To>) == 2) {
@@ -62,7 +61,6 @@ VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 4 * sizeof(TypeOf<Ti>))>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
-  // Chain two 2x promotes: Ti -> intermediate (2x) -> To (2x)
   using TmElem = std::conditional_t<sizeof(TypeOf<Ti>) == 1, int16_t, int32_t>;
   Tag<TmElem, Ti::N, Ti::POW2> t_mid;
   auto m_mid = promote(t_mid, ti, mi);
@@ -87,9 +85,9 @@ VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
-          TL_IF(sizeof(TypeOf<To>) * 2 == sizeof(TypeOf<Ti>))>
+          TL_IF(sizeof(TypeOf<To>) * 2 == sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
-  // svuzp1 extracts every-other predicate bit, halving granularity
   if constexpr (sizeof(TypeOf<Ti>) == 2) {
     return svuzp1_b8(mi, mi);
   } else if constexpr (sizeof(TypeOf<Ti>) == 4) {
@@ -106,7 +104,6 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) * 4 == sizeof(TypeOf<Ti>))>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
-  // Chain two 2x demotes
   using TmElem = std::conditional_t<sizeof(TypeOf<To>) == 1, int16_t, int32_t>;
   Tag<TmElem, Ti::N, Ti::POW2> t_mid;
   auto m_mid = demote(t_mid, ti, mi);
@@ -124,22 +121,6 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
   auto m_mid = demote(t_mid, ti, mi);
   return demote(to, t_mid, m_mid);
 }
-
-/* =================================================================== */
-/*    Multi-word fallback forward declarations (exclude from word::)     */
-/* =================================================================== */
-
-template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
-          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1)>
-Mask<To> promote(To to, Ti ti, Mask<Ti> mi);
-
-template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
-          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1)>
-Mask<To> demote(To to, Ti ti, Mask<Ti> mi);
-
-template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
-          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1)>
-Mask<To> convert(To to, Ti ti, Mask<Ti> mi);
 
 } // namespace word
 } // namespace vecops::vec::CPU_CAPABILITY

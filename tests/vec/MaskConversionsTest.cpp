@@ -240,6 +240,7 @@ TYPED_TEST(MaskConvFixture, DemoteInt64ToInt32) {
 
 TYPED_TEST(MaskConvFixture, DemoteInt32ToInt8) {
   ScalableTag<int32_t, 0> t_i32;
+  ScalableTag<int16_t, 0> t_i16;
   ScalableTag<int8_t, 0> t_i8;
   nint_t N = size(t_i32);
 
@@ -247,7 +248,8 @@ TYPED_TEST(MaskConvFixture, DemoteInt32ToInt8) {
   for (nint_t i = 0; i < N; ++i) pattern[i] = (i & 1) == 0;
 
   auto m = make_mask(t_i32, pattern);
-  auto r = demote(t_i8, t_i32, m);
+  // Chain: int32 -> int16 -> int8
+  auto r = demote(t_i8, t_i16, demote(t_i16, t_i32, m));
 
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(pattern[i], get(t_i8, r, i)) << "at " << i;
@@ -257,6 +259,7 @@ TYPED_TEST(MaskConvFixture, DemoteInt32ToInt8) {
 
 TYPED_TEST(MaskConvFixture, DemoteInt64ToInt16) {
   ScalableTag<int64_t, 0> t_i64;
+  ScalableTag<int32_t, 0> t_i32;
   ScalableTag<int16_t, 0> t_i16;
   nint_t N = size(t_i64);
 
@@ -264,7 +267,8 @@ TYPED_TEST(MaskConvFixture, DemoteInt64ToInt16) {
   for (nint_t i = 0; i < N; ++i) pattern[i] = (i % 2 == 1);
 
   auto m = make_mask(t_i64, pattern);
-  auto r = demote(t_i16, t_i64, m);
+  // Chain: int64 -> int32 -> int16
+  auto r = demote(t_i16, t_i32, demote(t_i32, t_i64, m));
 
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(pattern[i], get(t_i16, r, i)) << "at " << i;
@@ -306,6 +310,7 @@ TYPED_TEST(MaskConvFixture, AllTrue) {
 
 TYPED_TEST(MaskConvFixture, RoundTrip) {
   ScalableTag<int16_t, 0> t_i16;
+  ScalableTag<int32_t, 0> t_i32;
   ScalableTag<int64_t, 0> t_i64;
   nint_t N = size(t_i16);   // also = size(t_i64) * 4
 
@@ -314,7 +319,8 @@ TYPED_TEST(MaskConvFixture, RoundTrip) {
 
   auto m = make_mask(t_i16, pattern);
   auto promoted = promote(t_i64, t_i16, m);
-  auto demoted = demote(t_i16, t_i64, promoted);
+  // Chain: int64 -> int32 -> int16
+  auto demoted = demote(t_i16, t_i32, demote(t_i32, t_i64, promoted));
 
   // Only first size(t_i64) bits survive the roundtrip
   nint_t N_survive = size(t_i64);
