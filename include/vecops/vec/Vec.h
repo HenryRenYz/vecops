@@ -70,6 +70,8 @@
     #include "./impl/SVE_Bit.h"
     #include "./impl/SVE_Arithmetic.h"
     #include "./impl/SVE_LoadStore.h"
+  #else
+    #include "./impl/Scalar.h"
   #endif
 #else
   #include "./impl/Scalar.h"
