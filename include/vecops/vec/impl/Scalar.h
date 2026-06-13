@@ -1259,6 +1259,27 @@ VECOPS_VFUNC Mask<To> convert(To to, Ti ti, Mask<Ti> mi) {
   return r;
 }
 
+// Multi-word fallback
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1),
+          TL_IF(sizeof(TypeOf<To>) > sizeof(TypeOf<Ti>))>
+VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
+  Half<To> t_h; Half<Ti> t_i_h;
+  auto lo = word::promote(t_h, t_i_h, word::lower(ti, mi));
+  auto hi = word::promote(t_h, t_i_h, word::upper(ti, mi));
+  return word::concat(to, lo, hi);
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1),
+          TL_IF(sizeof(TypeOf<To>) < sizeof(TypeOf<Ti>))>
+VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
+  Half<To> t_h; Half<Ti> t_i_h;
+  auto lo = word::demote(t_h, t_i_h, word::lower(ti, mi));
+  auto hi = word::demote(t_h, t_i_h, word::upper(ti, mi));
+  return word::concat(to, lo, hi);
+}
+
 template <typename To, typename Vi, typename Ti = Vec2Tag<Vi>>
 VECOPS_VFUNC Vec<To> reshape(To t_out, Vi v_in) {
   static_assert(is_default_impl(Ti()) && is_default_impl(t_out));

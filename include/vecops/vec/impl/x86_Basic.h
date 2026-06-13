@@ -2256,14 +2256,30 @@ VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> m) {
 }
 
 #else // HAS_AVX512DQ
-template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1)>
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1), TL_IF(T::Bytes >= 16)>
 VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> v) {
   return word::lower(t, Vec<T>{v.v}).v;
 }
 
-template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1)>
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1), TL_IF(T::Bytes >= 16)>
 VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> v) {
   return word::upper(t, Vec<T>{v.v}).v;
+}
+
+// Sub-word mask lower/upper (Bytes < 16): handle directly via register shift
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1), TL_IF(T::Bytes < 16)>
+VECOPS_VFUNC Mask<Half<T>> lower(T, Mask<T> v) {
+  return Mask<Half<T>>{v.v};
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1), TL_IF(T::Bytes < 16)>
+VECOPS_VFUNC Mask<Half<T>> upper(T, Mask<T> v) {
+  constexpr int shift_bytes = Half<T>::Bytes;
+  if constexpr (sizeof(v.v) == 32) {
+    return Mask<Half<T>>{_mm256_srli_si256(v.v, shift_bytes)};
+  } else {
+    return Mask<Half<T>>{_mm_srli_si128(v.v, shift_bytes)};
+  }
 }
 #endif // HAS_AVX512DQ
 
@@ -2324,11 +2340,26 @@ VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
   return _kor_mask64(m_lo.v, _kshiftli_mask64(m_hi.v, 32));
 }
 #else // HAS_AVX512DQ
-template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1)>
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1), TL_IF(T::Bytes >= 16)>
 VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
   auto v_lo = Vec<Half<T>>{m_lo.v};
   auto v_hi = Vec<Half<T>>{m_hi.v};
   return Mask<T>{word::concat(t, v_lo, v_hi).v};
+}
+
+// Sub-word mask concat: place hi's data at upper bytes via blend (not OR — lo's upper bytes may be undefined)
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1), TL_IF(T::Bytes < 16)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  constexpr int half_bytes = Half<T>::Bytes;
+  if constexpr (sizeof(m_lo.v) == 32) {
+    auto shifted = _mm256_slli_si256(m_hi.v, half_bytes);
+    auto mask = _mm256_slli_si256(_mm256_set1_epi8(char(0x80)), half_bytes);
+    return Mask<T>{_mm256_blendv_epi8(m_lo.v, shifted, mask)};
+  } else {
+    auto shifted = _mm_slli_si128(m_hi.v, half_bytes);
+    auto mask = _mm_slli_si128(_mm_set1_epi8(char(0x80)), half_bytes);
+    return Mask<T>{_mm_blendv_epi8(m_lo.v, shifted, mask)};
+  }
 }
 #endif // HAS_AVX512DQ
 

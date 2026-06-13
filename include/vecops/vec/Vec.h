@@ -2553,12 +2553,15 @@ VECOPS_VFUNC Vec<To> xconvert(To t, Vi v) {
  */
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
-  using namespace details;
-  constexpr auto wt_i = word_tag(ti);
-  return vmap(
-      to, [=](auto tt, auto&& mm) { return word::promote(tt, wt_i, mm); },
-      ShardMask(ti, mi)
-  );
+  if constexpr (num_words(ti) > 1 && num_words(to) > 1) {
+    Half<To> t_h;
+    Half<Ti> t_i_h;
+    auto lo = vec::promote(t_h, t_i_h, vec::lower(ti, mi));
+    auto hi = vec::promote(t_h, t_i_h, vec::upper(ti, mi));
+    return vec::concat(to, lo, hi);
+  } else {
+    return word::promote(to, ti, mi);
+  }
 }
 
 /**
@@ -2566,12 +2569,15 @@ VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
  */
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
-  using namespace details;
-  constexpr auto wt_i = word_tag(ti);
-  return vmap(
-      to, [=](auto tt, auto&& mm) { return word::demote(tt, wt_i, mm); },
-      ShardMask(ti, mi)
-  );
+  if constexpr (num_words(ti) > 1 && num_words(to) > 1) {
+    Half<To> t_h;
+    Half<Ti> t_i_h;
+    auto lo = vec::demote(t_h, t_i_h, vec::lower(ti, mi));
+    auto hi = vec::demote(t_h, t_i_h, vec::upper(ti, mi));
+    return vec::concat(to, lo, hi);
+  } else {
+    return word::demote(to, ti, mi);
+  }
 }
 
 /**
@@ -2580,8 +2586,9 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
 VECOPS_VFUNC Mask<To> convert(To to, Ti ti, Mask<Ti> mi) {
   using namespace details;
+  constexpr auto wt_i = word_tag(ti);
   return vmap(
-      to, [=](auto tt, auto&& mm) { return word::convert(tt, ti, mm); },
+      to, [=](auto tt, auto&& mm) { return word::convert(tt, wt_i, mm); },
       ShardMask(ti, mi)
   );
 }

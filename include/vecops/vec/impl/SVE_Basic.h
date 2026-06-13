@@ -521,13 +521,15 @@ VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> m) {
   return m;
 }
 
-/* single-word upper via conversion: svbool_t -> svuint8_t -> svsplice_u8 -> svbool_t */
+/* single-word upper via svtbl shift + svsel zero-fill */
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1)>
 VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> m) {
   nint_t hn_bytes = (nint_t)svcntb() / 2;
-  auto up_pg = svnot_b_z(svptrue_b8(), svwhilelt_b8_u64(0, (uint64_t)hn_bytes));
   svuint8_t v = svdup_u8_z(m, 1);
-  svuint8_t v_hi = svsplice_u8(up_pg, v, v);
+  auto lo_pg = svwhilelt_b8_u64(0, (uint64_t)hn_bytes);
+  auto idx = svindex_u8((uint64_t)hn_bytes, 1);
+  svuint8_t shifted = svtbl_u8(v, idx);
+  svuint8_t v_hi = svsel_u8(lo_pg, shifted, svdup_n_u8(0));
   return svcmpne_n_u8(svptrue_b8(), v_hi, 0);
 }
 
@@ -539,6 +541,47 @@ VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
   svuint8_t v_hi = svdup_u8_z(m_hi, 1);
   svuint8_t v_concat = svsplice_u8(svwhilelt_b8_u64(0, (uint64_t)hn_bytes), v_lo, v_hi);
   return svcmpne_n_u8(svptrue_b8(), v_concat, 0);
+}
+
+/* === multi-word mask lower / upper / concat === */
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 2)>
+VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> v) {
+  return get_word_mask<0>(t, v);
+}
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 2)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> v) {
+  return get_word_mask<1>(t, v);
+}
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 2)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  Mask<T> r;
+  r = set_word_mask<0>(t, r, m_lo);
+  r = set_word_mask<1>(t, r, m_hi);
+  return r;
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> v) {
+  Mask<Half<T>> r;
+  r = set_word_mask<0>(Half<T>{}, r, get_word_mask<0>(t, v));
+  r = set_word_mask<1>(Half<T>{}, r, get_word_mask<1>(t, v));
+  return r;
+}
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> v) {
+  Mask<Half<T>> r;
+  r = set_word_mask<0>(Half<T>{}, r, get_word_mask<2>(t, v));
+  r = set_word_mask<1>(Half<T>{}, r, get_word_mask<3>(t, v));
+  return r;
+}
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 4)>
+VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
+  Mask<T> r;
+  r = set_word_mask<0>(t, r, get_word_mask<0>(Half<T>{}, m_lo));
+  r = set_word_mask<1>(t, r, get_word_mask<1>(Half<T>{}, m_lo));
+  r = set_word_mask<2>(t, r, get_word_mask<0>(Half<T>{}, m_hi));
+  r = set_word_mask<3>(t, r, get_word_mask<1>(Half<T>{}, m_hi));
+  return r;
 }
 
 /* === get / set === */

@@ -54,7 +54,8 @@ VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
-          TL_IF(sizeof(TypeOf<To>) == 4 * sizeof(TypeOf<Ti>))>
+          TL_IF(sizeof(TypeOf<To>) == 4 * sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
   using TmElem = std::conditional_t<sizeof(TypeOf<Ti>) == 1, int16_t, int32_t>;
   Tag<TmElem, Ti::N, Ti::POW2> t_mid;
@@ -67,7 +68,8 @@ VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
-          TL_IF(sizeof(TypeOf<To>) == 8 * sizeof(TypeOf<Ti>))>
+          TL_IF(sizeof(TypeOf<To>) == 8 * sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
   using TmElem = std::conditional_t<sizeof(TypeOf<Ti>) == 1, int32_t, void>;
   Tag<TmElem, Ti::N, Ti::POW2> t_mid;
@@ -97,7 +99,8 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
-          TL_IF(sizeof(TypeOf<To>) * 4 == sizeof(TypeOf<Ti>))>
+          TL_IF(sizeof(TypeOf<To>) * 4 == sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
   using TmElem = std::conditional_t<sizeof(TypeOf<To>) == 1, int16_t, int32_t>;
   Tag<TmElem, Ti::N, Ti::POW2> t_mid;
@@ -110,11 +113,38 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
-          TL_IF(sizeof(TypeOf<To>) * 8 == sizeof(TypeOf<Ti>))>
+          TL_IF(sizeof(TypeOf<To>) * 8 == sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
   Tag<int32_t, Ti::N, Ti::POW2> t_mid;
   auto m_mid = word::demote(t_mid, ti, mi);
   return word::demote(to, t_mid, m_mid);
+}
+
+/* =================================================================== */
+/*              Multi-word promote/demote fallback                       */
+/* =================================================================== */
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(sizeof(TypeOf<To>) > sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1)>
+VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
+  Half<To> t_h; Half<Ti> t_i_h;
+  auto lo = word::promote(t_h, t_i_h, word::lower(ti, mi));
+  auto hi = word::promote(t_h, t_i_h, word::upper(ti, mi));
+  return word::concat(to, lo, hi);
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(sizeof(TypeOf<To>) < sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1)>
+VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
+  Half<To> t_h; Half<Ti> t_i_h;
+  auto lo = word::demote(t_h, t_i_h, word::lower(ti, mi));
+  auto hi = word::demote(t_h, t_i_h, word::upper(ti, mi));
+  return word::concat(to, lo, hi);
+}
+
 } // namespace word
 } // namespace vecops::vec::CPU_CAPABILITY
 
