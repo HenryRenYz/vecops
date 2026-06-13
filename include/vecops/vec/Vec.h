@@ -58,6 +58,7 @@
   #include "./impl/x86_Basic.h"
   #include "./impl/x86_Bit.h"
   #include "./impl/x86_Conversions.h"
+  #include "./impl/x86_MaskConversions.h"
   #include "./impl/x86_LoadStore.h"
   #include "./impl/x86_Arithmetic.h"
 #elif defined(ARCH_ARM_FAMILY)
