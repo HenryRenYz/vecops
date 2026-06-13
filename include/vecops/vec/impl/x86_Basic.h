@@ -1505,7 +1505,7 @@ VECOPS_VFUNC Vec<T> concat(T t, Vec<Half<T>> v1, Vec<Half<T>> v2) {
   return _mm_move_ss(hi.v, v2.v);
 }
 
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 8), TL_IF(is_none<TypeOf<T>, float32_t> && sizeof(TypeOf<T>) <= 4)>
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 8), TL_IF(is_none<TypeOf<T>, float32_t> && sizeof(TypeOf<T>) == 4)>
 VECOPS_VFUNC Vec<T> concat(T t, Vec<Half<T>> v1, Vec<Half<T>> v2) {
   Tag<uint8_t, 16> t1;
   Tag<float32_t, 4> t2;
@@ -1927,7 +1927,7 @@ VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
   return word::local_shuf<0, 0, 0, 1>(v);
 }
 
-template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 8), TL_IF(is_none<TypeOf<T>, float32_t> && sizeof(TypeOf<T>) <= 4)>
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 8), TL_IF(is_none<TypeOf<T>, float32_t> && sizeof(TypeOf<T>) == 4)>
 VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
   Tag<uint8_t, 16> t1;
   Half<T> tr;
