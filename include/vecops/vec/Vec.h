@@ -2533,6 +2533,85 @@ VECOPS_VFUNC Vec<To> xconvert(To t, Vi v) {
   }
 }
 
+/* ************************************************************************** */
+//                    Mask Promotion / Demotion / Conversion                   //
+/* ************************************************************************** */
+
+/**
+ * @brief Promote a mask to a wider element type.
+ *
+ * Each mask lane is widened to the target element width while preserving
+ * the predicate value: all-1s stays all-1s, all-0s stays all-0s.
+ * Same element count before and after.
+ *
+ * @tparam To Target element tag
+ * @tparam Ti Source element tag
+ * @param to Target tag
+ * @param ti Source tag
+ * @param mi Input mask
+ * @return Promoted mask with wider lanes
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
+VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
+  if constexpr (num_words(ti) > 1 && num_words(to) > 1) {
+    Half<To> t_ho;
+    Half<Ti> t_hi;
+    auto lo = promote(t_ho, t_hi, lower(ti, mi));
+    auto hi = promote(t_ho, t_hi, upper(ti, mi));
+    return concat(to, lo, hi);
+  } else {
+    return word::promote(to, ti, mi);
+  }
+}
+
+/**
+ * @brief Demote a mask to a narrower element type.
+ *
+ * Each mask lane is narrowed to the target element width while preserving
+ * the predicate value: all-1s stays all-1s, all-0s stays all-0s.
+ * Same element count before and after.
+ *
+ * @tparam To Target element tag
+ * @tparam Ti Source element tag
+ * @param to Target tag
+ * @param ti Source tag
+ * @param mi Input mask
+ * @return Demoted mask with narrower lanes
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
+VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
+  if constexpr (num_words(ti) > 1 && num_words(to) > 1) {
+    Half<To> t_ho;
+    Half<Ti> t_hi;
+    auto lo = demote(t_ho, t_hi, lower(ti, mi));
+    auto hi = demote(t_ho, t_hi, upper(ti, mi));
+    return concat(to, lo, hi);
+  } else {
+    return word::demote(to, ti, mi);
+  }
+}
+
+/**
+ * @brief Convert a mask between types of the same element size.
+ *
+ * Identity operation: same element count, same byte size per element.
+ *
+ * @tparam To Target element tag
+ * @tparam Ti Source element tag
+ * @param to Target tag
+ * @param ti Source tag
+ * @param mi Input mask
+ * @return Converted mask
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
+VECOPS_VFUNC Mask<To> convert(To to, Ti ti, Mask<Ti> mi) {
+  using namespace details;
+  return vmap(
+      to, [=](auto tt, auto&& mm) { return word::convert(tt, ti, mm); },
+      ShardMask(ti, mi)
+  );
+}
+
 /**
  * @brief Reinterpret cast vector bits to a different type.
  *

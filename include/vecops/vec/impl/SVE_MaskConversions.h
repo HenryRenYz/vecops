@@ -64,7 +64,7 @@ template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
   // Chain two 2x promotes: Ti -> intermediate (2x) -> To (2x)
   using TmElem = std::conditional_t<sizeof(TypeOf<Ti>) == 1, int16_t, int32_t>;
-  Tag<TmElem, Tag<Ti>::N, Tag<Ti>::POW2> t_mid;
+  Tag<TmElem, Ti::N, Ti::POW2> t_mid;
   auto m_mid = promote(t_mid, ti, mi);
   return promote(to, t_mid, m_mid);
 }
@@ -77,7 +77,7 @@ template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 8 * sizeof(TypeOf<Ti>))>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
   using TmElem = std::conditional_t<sizeof(TypeOf<Ti>) == 1, int32_t, void>;
-  Tag<TmElem, Tag<Ti>::N, Tag<Ti>::POW2> t_mid;
+  Tag<TmElem, Ti::N, Ti::POW2> t_mid;
   auto m_mid = promote(t_mid, ti, mi);
   return promote(to, t_mid, m_mid);
 }
@@ -108,7 +108,7 @@ template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
   // Chain two 2x demotes
   using TmElem = std::conditional_t<sizeof(TypeOf<To>) == 1, int16_t, int32_t>;
-  Tag<TmElem, Tag<Ti>::N, Tag<Ti>::POW2> t_mid;
+  Tag<TmElem, Ti::N, Ti::POW2> t_mid;
   auto m_mid = demote(t_mid, ti, mi);
   return demote(to, t_mid, m_mid);
 }
@@ -120,7 +120,7 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) * 8 == sizeof(TypeOf<Ti>))>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
-  Tag<int32_t, Tag<Ti>::N, Tag<Ti>::POW2> t_mid;
+  Tag<int32_t, Ti::N, Ti::POW2> t_mid;
   auto m_mid = demote(t_mid, ti, mi);
   return demote(to, t_mid, m_mid);
 }

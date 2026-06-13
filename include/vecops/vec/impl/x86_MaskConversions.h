@@ -111,7 +111,7 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 2 && sizeof(TypeOf<Ti>) == 8)>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
-  Tag<int32_t, Tag<To>::N, Tag<To>::POW2> t32;
+  Tag<int32_t, To::N, To::POW2> t32;
   auto m32 = demote(t32, ti, mi);
   return demote(to, t32, m32);
 }
@@ -120,7 +120,7 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 1 && sizeof(TypeOf<Ti>) == 8)>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
-  Tag<int32_t, Tag<To>::N, Tag<To>::POW2> t32;
+  Tag<int32_t, To::N, To::POW2> t32;
   auto m32 = demote(t32, ti, mi);
   return demote(to, t32, m32);
 }
@@ -129,7 +129,7 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 1 && sizeof(TypeOf<Ti>) == 4)>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
-  Tag<int16_t, Tag<To>::N, Tag<To>::POW2> t16;
+  Tag<int16_t, To::N, To::POW2> t16;
   auto m16 = demote(t16, ti, mi);
   return demote(to, t16, m16);
 }
