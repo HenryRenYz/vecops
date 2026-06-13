@@ -66,6 +66,7 @@
     #include "./impl/SVE_Types.h"
     #include "./impl/SVE_Basic.h"
     #include "./impl/SVE_Conversions.h"
+    #include "./impl/SVE_MaskConversions.h"
     #include "./impl/SVE_Bit.h"
     #include "./impl/SVE_Arithmetic.h"
     #include "./impl/SVE_LoadStore.h"
