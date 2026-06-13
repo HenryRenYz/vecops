@@ -43,31 +43,50 @@ VECOPS_VFUNC Mask<To> convert(To, Ti, Mask<Ti> mi) { return Mask<To>{mi.v}; }
 #else // !HAS_AVX512DQ — vector register masks
 
 template <typename Reg>
-static constexpr bool is_m256i_v = (sizeof(Reg) == 32);
+static constexpr bool is_256 = (sizeof(Reg) == 32);
+
+// Extract lower 128 bits regardless of 128/256-bit input
+template <typename Mi>
+VECOPS_VFUNC __m128i low128(Mi&& mi) {
+  if constexpr (is_256<decltype(mi.v)>) return _mm256_castsi256_si128(mi.v);
+  else return mi.v;
+}
+template <typename Mi>
+VECOPS_VFUNC __m128i high128(Mi&& mi) {
+  return _mm256_extracti128_si256(mi.v, 1);
+}
+
+// Output 256-bit from two 128-bit halves
+template <typename M>
+VECOPS_VFUNC M make_m256(__m128i lo, __m128i hi) {
+  __m256i r = _mm256_castsi128_si256(lo);
+  r = _mm256_inserti128_si256(r, hi, 1);
+  return M{r};
+}
 
 /* =================================================================== */
-/*              promote: int8 -> int16 (full register)                   */
+/*              promote: int8 -> int16                                  */
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 2 && sizeof(TypeOf<Ti>) == 1)>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
-  if constexpr (is_m256i_v<decltype(mi.v)>) {
-    return Mask<To>{_mm256_cvtepi8_epi16(_mm256_castsi256_si128(mi.v))};
+  if constexpr (To::Bytes >= 32) {
+    return Mask<To>{_mm256_cvtepi8_epi16(low128(mi))};
   } else {
     return Mask<To>{_mm_cvtepi8_epi16(mi.v)};
   }
 }
 
 /* =================================================================== */
-/*              promote: int8 -> int32 (half register → chain)           */
+/*              promote: int8 -> int32                                  */
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 4 && sizeof(TypeOf<Ti>) == 1)>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
-  if constexpr (is_m256i_v<decltype(mi.v)>) {
-    auto step1 = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(mi.v));
+  if constexpr (To::Bytes >= 32) {
+    auto step1 = _mm256_cvtepi8_epi16(low128(mi));
     return Mask<To>{_mm256_cvtepi16_epi32(_mm256_castsi256_si128(step1))};
   } else {
     auto step1 = _mm_cvtepi8_epi16(mi.v);
@@ -76,14 +95,14 @@ VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
 }
 
 /* =================================================================== */
-/*              promote: int8 -> int64 (chain int8→int16→int32→int64)    */
+/*              promote: int8 -> int64                                  */
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 8 && sizeof(TypeOf<Ti>) == 1)>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
-  if constexpr (is_m256i_v<decltype(mi.v)>) {
-    auto step1 = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(mi.v));
+  if constexpr (To::Bytes >= 32) {
+    auto step1 = _mm256_cvtepi8_epi16(low128(mi));
     auto step2 = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(step1));
     return Mask<To>{_mm256_cvtepi32_epi64(_mm256_castsi256_si128(step2))};
   } else {
@@ -94,28 +113,28 @@ VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
 }
 
 /* =================================================================== */
-/*              promote: int16 -> int32 (full register)                  */
+/*              promote: int16 -> int32                                 */
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 4 && sizeof(TypeOf<Ti>) == 2)>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
-  if constexpr (is_m256i_v<decltype(mi.v)>) {
-    return Mask<To>{_mm256_cvtepi16_epi32(_mm256_castsi256_si128(mi.v))};
+  if constexpr (To::Bytes >= 32) {
+    return Mask<To>{_mm256_cvtepi16_epi32(low128(mi))};
   } else {
     return Mask<To>{_mm_cvtepi16_epi32(mi.v)};
   }
 }
 
 /* =================================================================== */
-/*              promote: int16 -> int64 (chain int16→int32→int64)        */
+/*              promote: int16 -> int64                                 */
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 8 && sizeof(TypeOf<Ti>) == 2)>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
-  if constexpr (is_m256i_v<decltype(mi.v)>) {
-    auto step1 = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(mi.v));
+  if constexpr (To::Bytes >= 32) {
+    auto step1 = _mm256_cvtepi16_epi32(low128(mi));
     return Mask<To>{_mm256_cvtepi32_epi64(_mm256_castsi256_si128(step1))};
   } else {
     auto step1 = _mm_cvtepi16_epi32(mi.v);
@@ -124,14 +143,14 @@ VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
 }
 
 /* =================================================================== */
-/*              promote: int32 -> int64 (full register)                  */
+/*              promote: int32 -> int64                                 */
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 8 && sizeof(TypeOf<Ti>) == 4)>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
-  if constexpr (is_m256i_v<decltype(mi.v)>) {
-    return Mask<To>{_mm256_cvtepi32_epi64(_mm256_castsi256_si128(mi.v))};
+  if constexpr (To::Bytes >= 32) {
+    return Mask<To>{_mm256_cvtepi32_epi64(low128(mi))};
   } else {
     return Mask<To>{_mm_cvtepi32_epi64(mi.v)};
   }
@@ -144,13 +163,15 @@ VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 1 && sizeof(TypeOf<Ti>) == 2)>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
-  if constexpr (is_m256i_v<decltype(mi.v)>) {
-    auto lo_in  = _mm256_castsi256_si128(mi.v);
-    auto hi_in  = _mm256_extracti128_si256(mi.v, 1);
-    auto lo_out = _mm_packs_epi16(lo_in, _mm_setzero_si128());
-    auto hi_out = _mm_packs_epi16(hi_in, _mm_setzero_si128());
-    auto packed = _mm_unpacklo_epi64(lo_out, hi_out);
-    return Mask<To>{_mm256_castsi128_si256(packed)};
+  if constexpr (is_256<decltype(mi.v)>) {
+    if constexpr (To::Bytes >= 32) {
+      auto lo = _mm_packs_epi16(low128(mi), _mm_setzero_si128());
+      auto hi = _mm_packs_epi16(high128(mi), _mm_setzero_si128());
+      auto packed = _mm_unpacklo_epi64(lo, hi);
+      return Mask<To>{_mm256_castsi128_si256(packed)};
+    } else {
+      return Mask<To>{_mm_packs_epi16(low128(mi), _mm_setzero_si128())};
+    }
   } else {
     return Mask<To>{_mm_packs_epi16(mi.v, _mm_setzero_si128())};
   }
@@ -163,13 +184,15 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 2 && sizeof(TypeOf<Ti>) == 4)>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
-  if constexpr (is_m256i_v<decltype(mi.v)>) {
-    auto lo_in  = _mm256_castsi256_si128(mi.v);
-    auto hi_in  = _mm256_extracti128_si256(mi.v, 1);
-    auto lo_out = _mm_packs_epi32(lo_in, _mm_setzero_si128());
-    auto hi_out = _mm_packs_epi32(hi_in, _mm_setzero_si128());
-    auto packed = _mm_unpacklo_epi64(lo_out, hi_out);
-    return Mask<To>{_mm256_castsi128_si256(packed)};
+  if constexpr (is_256<decltype(mi.v)>) {
+    if constexpr (To::Bytes >= 32) {
+      auto lo = _mm_packs_epi32(low128(mi), _mm_setzero_si128());
+      auto hi = _mm_packs_epi32(high128(mi), _mm_setzero_si128());
+      auto packed = _mm_unpacklo_epi64(lo, hi);
+      return Mask<To>{_mm256_castsi128_si256(packed)};
+    } else {
+      return Mask<To>{_mm_packs_epi32(low128(mi), _mm_setzero_si128())};
+    }
   } else {
     return Mask<To>{_mm_packs_epi32(mi.v, _mm_setzero_si128())};
   }
@@ -182,10 +205,15 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == 4 && sizeof(TypeOf<Ti>) == 8)>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
-  if constexpr (is_m256i_v<decltype(mi.v)>) {
+  if constexpr (is_256<decltype(mi.v)>) {
     __m256i shifted = _mm256_srli_epi64(mi.v, 32);
-    return Mask<To>{_mm256_permutevar8x32_epi32(shifted,
-        _mm256_setr_epi32(0, 2, 4, 6, 0, 0, 0, 0))};
+    auto r256 = _mm256_permutevar8x32_epi32(shifted,
+        _mm256_setr_epi32(0, 2, 4, 6, 0, 0, 0, 0));
+    if constexpr (To::Bytes >= 32) {
+      return Mask<To>{r256};
+    } else {
+      return Mask<To>{_mm256_castsi256_si128(r256)};
+    }
   } else {
     __m128i shifted = _mm_srli_epi64(mi.v, 32);
     return Mask<To>{_mm_shuffle_epi32(shifted, _MM_SHUFFLE(0, 0, 2, 0))};
