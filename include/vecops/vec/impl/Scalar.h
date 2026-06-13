@@ -1225,6 +1225,34 @@ VECOPS_VFUNC Vec<T> convert(T t, V v) {
   return details::convert_impl(t, v);
 }
 
+// ---- Mask promotion / demotion / conversion (all identity in scalar) ----
+// Scalar masks store bits in std::bitset; same element count = same N,
+// so copy bits between the underlying bitsets which have identical size.
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti), TL_IF(sizeof(TypeOf<To>) > sizeof(TypeOf<Ti>))>
+VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
+  Mask<To> r;
+  using Bits = std::bitset<(size_t)size(ti)>;
+  static_cast<Bits&>(r) = static_cast<const Bits&>(mi);
+  return r;
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti), TL_IF(sizeof(TypeOf<To>) < sizeof(TypeOf<Ti>))>
+VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
+  Mask<To> r;
+  using Bits = std::bitset<(size_t)size(ti)>;
+  static_cast<Bits&>(r) = static_cast<const Bits&>(mi);
+  return r;
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti), TL_IF(sizeof(TypeOf<To>) == sizeof(TypeOf<Ti>))>
+VECOPS_VFUNC Mask<To> convert(To to, Ti ti, Mask<Ti> mi) {
+  Mask<To> r;
+  using Bits = std::bitset<(size_t)size(ti)>;
+  static_cast<Bits&>(r) = static_cast<const Bits&>(mi);
+  return r;
+}
+
 template <typename To, typename Vi, typename Ti = Vec2Tag<Vi>>
 VECOPS_VFUNC Vec<To> reshape(To t_out, Vi v_in) {
   static_assert(is_default_impl(Ti()) && is_default_impl(t_out));
