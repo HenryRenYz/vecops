@@ -61,18 +61,16 @@
   #include "./impl/x86_MaskConversions.h"
   #include "./impl/x86_LoadStore.h"
   #include "./impl/x86_Arithmetic.h"
-#elif defined(ARCH_ARM_FAMILY)
-  #if defined(HAS_SVE)
-    #include "./impl/SVE_Types.h"
-    #include "./impl/SVE_Basic.h"
-    #include "./impl/SVE_Conversions.h"
-    #include "./impl/SVE_MaskConversions.h"
-    #include "./impl/SVE_Bit.h"
-    #include "./impl/SVE_Arithmetic.h"
-    #include "./impl/SVE_LoadStore.h"
-  #else
-    #include "./impl/Scalar.h"
-  #endif
+#elif defined(ARCH_ARM_FAMILY) && defined(HAS_SVE)
+  #include "./impl/SVE_Basic.h"
+  #include "./impl/SVE_Bit.h"
+  #include "./impl/SVE_Conversions.h"
+  #include "./impl/SVE_MaskConversions.h"
+  #include "./impl/SVE_LoadStore.h"
+  #include "./impl/SVE_Arithmetic.h"
+#elif defined(ARCH_ARM_FAMILY) && defined(HAS_NEON)
+  #warning "NEON not implemented yet, falling back to Scalar implementation"
+  #include "./impl/Scalar.h"
 #else
   #include "./impl/Scalar.h"
 #endif
@@ -2555,11 +2553,15 @@ VECOPS_VFUNC Vec<To> xconvert(To t, Vi v) {
  */
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
-  using namespace details;
-  return vmap(
-      to, [=](auto tt, auto&& mm) { return word::promote(tt, ti, mm); },
-      ShardMask(ti, mi)
-  );
+  if constexpr (num_words(ti) > 1 || num_words(to) > 1) {
+    Half<To> t_ho;
+    Half<Ti> t_hi;
+    auto lo = vec::promote(t_ho, t_hi, vec::lower(ti, mi));
+    auto hi = vec::promote(t_ho, t_hi, vec::upper(ti, mi));
+    return vec::concat(to, lo, hi);
+  } else {
+    return word::promote(to, ti, mi);
+  }
 }
 
 /**
@@ -2578,11 +2580,15 @@ VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
  */
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
-  using namespace details;
-  return vmap(
-      to, [=](auto tt, auto&& mm) { return word::demote(tt, ti, mm); },
-      ShardMask(ti, mi)
-  );
+  if constexpr (num_words(ti) > 1 || num_words(to) > 1) {
+    Half<To> t_ho;
+    Half<Ti> t_hi;
+    auto lo = vec::demote(t_ho, t_hi, vec::lower(ti, mi));
+    auto hi = vec::demote(t_ho, t_hi, vec::upper(ti, mi));
+    return concat(to, lo, hi);
+  } else {
+    return word::demote(to, ti, mi);
+  }
 }
 
 /**
@@ -2599,11 +2605,15 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
  */
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
 VECOPS_VFUNC Mask<To> convert(To to, Ti ti, Mask<Ti> mi) {
-  using namespace details;
-  return vmap(
-      to, [=](auto tt, auto&& mm) { return word::convert(tt, ti, mm); },
-      ShardMask(ti, mi)
-  );
+  if constexpr (num_words(ti) > 1 || num_words(to) > 1) {
+    Half<To> t_ho;
+    Half<Ti> t_hi;
+    auto lo = vec::convert(t_ho, t_hi, vec::lower(ti, mi));
+    auto hi = vec::convert(t_ho, t_hi, vec::upper(ti, mi));
+    return concat(to, lo, hi);
+  } else {
+    return word::convert(to, ti, mi);
+  }
 }
 
 /**

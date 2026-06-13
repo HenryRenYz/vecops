@@ -270,6 +270,9 @@ TL_DEFINE_BATCH_VEC(uint64_t);
 template <nint_t ELSIZE, nint_t N, typename T>
 struct IsMask<x86::RegMask<ELSIZE, N, T>> : public std::true_type {};
 
+template <nint_t ELSIZE, nint_t N, typename T, nint_t M>
+struct IsMask<ScalarArray<x86::RegMask<ELSIZE, N, T>, M>> : public std::true_type {};
+
 }; // namespace vecops::vec
 
 #endif //VECOPS_X86_TYPES_H

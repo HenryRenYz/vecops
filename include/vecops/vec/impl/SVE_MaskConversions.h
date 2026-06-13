@@ -115,8 +115,6 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
   Tag<int32_t, Ti::N, Ti::POW2> t_mid;
   auto m_mid = word::demote(t_mid, ti, mi);
   return word::demote(to, t_mid, m_mid);
-}
-
 } // namespace word
 } // namespace vecops::vec::CPU_CAPABILITY
 

@@ -25,13 +25,19 @@ VECOPS_VFUNC Mask<T> convert(T to, T ti, Mask<T> mi) { return mi; }
 
 #ifdef HAS_AVX512DQ
 
-template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti), TL_IF(sizeof(TypeOf<To>) > sizeof(TypeOf<Ti>))>
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(sizeof(TypeOf<To>) > sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
 VECOPS_VFUNC Mask<To> promote(To, Ti, Mask<Ti> mi) { return Mask<To>{mi.v}; }
 
-template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti), TL_IF(sizeof(TypeOf<To>) < sizeof(TypeOf<Ti>))>
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(sizeof(TypeOf<To>) < sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
 VECOPS_VFUNC Mask<To> demote(To, Ti, Mask<Ti> mi) { return Mask<To>{mi.v}; }
 
-template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti), TL_IF(sizeof(TypeOf<To>) == sizeof(TypeOf<Ti>))>
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(sizeof(TypeOf<To>) == sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
 VECOPS_VFUNC Mask<To> convert(To, Ti, Mask<Ti> mi) { return Mask<To>{mi.v}; }
 
 #else // !HAS_AVX512DQ — vector register masks
@@ -184,6 +190,34 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
     __m128i shifted = _mm_srli_epi64(mi.v, 32);
     return Mask<To>{_mm_shuffle_epi32(shifted, _MM_SHUFFLE(0, 0, 2, 0))};
   }
+}
+
+/* =================================================================== */
+/*              demote chain: multi-step narrow (single-word leaf only)  */
+/* =================================================================== */
+
+// int64 -> int16: chain int64->int32 then int32->int16
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(sizeof(TypeOf<To>) == 2 && sizeof(TypeOf<Ti>) == 8)>
+VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
+  Tag<int32_t, To::N, To::POW2> t32;
+  return word::demote(to, t32, word::demote(t32, ti, mi));
+}
+
+// int64 -> int8: chain int64->int32 then int32->int8
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(sizeof(TypeOf<To>) == 1 && sizeof(TypeOf<Ti>) == 8)>
+VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
+  Tag<int32_t, To::N, To::POW2> t32;
+  return word::demote(to, t32, word::demote(t32, ti, mi));
+}
+
+// int32 -> int8: chain int32->int16 then int16->int8
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(sizeof(TypeOf<To>) == 1 && sizeof(TypeOf<Ti>) == 4)>
+VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
+  Tag<int16_t, To::N, To::POW2> t16;
+  return word::demote(to, t16, word::demote(t16, ti, mi));
 }
 
 /* =================================================================== */
