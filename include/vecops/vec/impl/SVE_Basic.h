@@ -524,7 +524,8 @@ VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> m) {
 /* single-word upper via svtbl shift + svsel zero-fill */
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1)>
 VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> m) {
-  nint_t hn_bytes = (nint_t)svcntb() / 2;
+  using E = TypeOf<T>;
+  nint_t hn_bytes = size(Half<T>{}) * (nint_t)sizeof(E);
   svuint8_t v = svdup_u8_z(m, 1);
   auto lo_pg = svwhilelt_b8_u64(0, (uint64_t)hn_bytes);
   auto idx = svindex_u8((uint64_t)hn_bytes, 1);
@@ -536,7 +537,8 @@ VECOPS_VFUNC Mask<Half<T>> upper(T t, Mask<T> m) {
 /* single-word concat via conversion */
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1)>
 VECOPS_VFUNC Mask<T> concat(T t, Mask<Half<T>> m_lo, Mask<Half<T>> m_hi) {
-  nint_t hn_bytes = (nint_t)svcntb() / 2;
+  using E = TypeOf<T>;
+  nint_t hn_bytes = size(Half<T>{}) * (nint_t)sizeof(E);
   svuint8_t v_lo = svdup_u8_z(m_lo, 1);
   svuint8_t v_hi = svdup_u8_z(m_hi, 1);
   svuint8_t v_concat = svsplice_u8(svwhilelt_b8_u64(0, (uint64_t)hn_bytes), v_lo, v_hi);
