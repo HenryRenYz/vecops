@@ -2222,7 +2222,8 @@ VECOPS_VFUNC Vec<T> bitcast(T t, V v) {
 #ifdef HAS_AVX512DQ
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) <= 1)>
 VECOPS_VFUNC Mask<Half<T>> lower(T t, Mask<T> m) {
-  return Mask<Half<T>>{m.v};
+  using RawMask = decltype(Mask<Half<T>>{}.v);
+  return Mask<Half<T>>{static_cast<RawMask>(m.v)};
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::N == 2 && num_words(T{}) <= 1)>

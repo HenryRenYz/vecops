@@ -29,20 +29,65 @@ VECOPS_VFUNC Mask<T> convert(T to, T ti, Mask<T> mi) { return mi; }
 
 #ifdef HAS_AVX512DQ
 
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
+VECOPS_VFUNC Mask<To> copy_mask_bits(To, Ti, Mask<Ti> mi) {
+  using RawMask = decltype(Mask<To>{}.v);
+  return Mask<To>{static_cast<RawMask>(mi.v)};
+}
+
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) > sizeof(TypeOf<Ti>)),
           TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
-VECOPS_VFUNC Mask<To> promote(To, Ti, Mask<Ti> mi) { return Mask<To>{mi.v}; }
+VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
+  return copy_mask_bits(to, ti, mi);
+}
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) < sizeof(TypeOf<Ti>)),
           TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
-VECOPS_VFUNC Mask<To> demote(To, Ti, Mask<Ti> mi) { return Mask<To>{mi.v}; }
+VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
+  return copy_mask_bits(to, ti, mi);
+}
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) == sizeof(TypeOf<Ti>)),
           TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
-VECOPS_VFUNC Mask<To> convert(To, Ti, Mask<Ti> mi) { return Mask<To>{mi.v}; }
+VECOPS_VFUNC Mask<To> convert(To to, Ti ti, Mask<Ti> mi) {
+  return copy_mask_bits(to, ti, mi);
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1),
+          TL_IF(sizeof(TypeOf<To>) > sizeof(TypeOf<Ti>))>
+VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
+  Half<To> t_h;
+  Half<Ti> t_i_h;
+  auto lo = word::promote(t_h, t_i_h, word::lower(ti, mi));
+  auto hi = word::promote(t_h, t_i_h, word::upper(ti, mi));
+  return word::concat(to, lo, hi);
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1),
+          TL_IF(sizeof(TypeOf<To>) < sizeof(TypeOf<Ti>))>
+VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
+  Half<To> t_h;
+  Half<Ti> t_i_h;
+  auto lo = word::demote(t_h, t_i_h, word::lower(ti, mi));
+  auto hi = word::demote(t_h, t_i_h, word::upper(ti, mi));
+  return word::concat(to, lo, hi);
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1),
+          TL_IF(sizeof(TypeOf<To>) == sizeof(TypeOf<Ti>))>
+VECOPS_VFUNC Mask<To> convert(To to, Ti ti, Mask<Ti> mi) {
+  Half<To> t_h;
+  Half<Ti> t_i_h;
+  auto lo = word::convert(t_h, t_i_h, word::lower(ti, mi));
+  auto hi = word::convert(t_h, t_i_h, word::upper(ti, mi));
+  return word::concat(to, lo, hi);
+}
 
 #else // !HAS_AVX512DQ — vector register masks
 
