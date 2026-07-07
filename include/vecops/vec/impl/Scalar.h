@@ -760,6 +760,9 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
   }
 }
 
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v);
+
 /**
  * @brief Gather first n elements (scalar implementation).
  *
@@ -786,8 +789,25 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
     }
     return v;
   } else {
-    auto g = word::gather(t, p, i);
-    return word::blend(default_v, m, g);
+    Half<T> t_h;
+    auto i_lo = word::lower(t_i, i);
+    auto i_hi = word::upper(t_i, i);
+    if constexpr (num_words(t) > 1) {
+      auto lo = word::gather(t_h, p, i_lo, word::lower(t, m), word::lower(t, default_v));
+      auto hi = word::gather(t_h, p, i_hi, word::upper(t, m), word::upper(t, default_v));
+      return word::concat(t, lo, hi);
+    } else {
+      alignas(16) TypeOf<T> def_arr[size(t)];
+      word::storeu(t, def_arr, default_v);
+      auto def_lo = word::loadu(t_h, def_arr);
+      auto def_hi = word::loadu(t_h, def_arr + size(t_h));
+      constexpr nint_t hs = size(t_h);
+      Mask<Half<T>> m_lo(static_cast<unsigned long long>(m.to_ullong() & ((1ULL << hs) - 1)));
+      Mask<Half<T>> m_hi(static_cast<unsigned long long>(m.to_ullong() >> hs));
+      auto lo = word::gather(t_h, p, i_lo, m_lo, def_lo);
+      auto hi = word::gather(t_h, p, i_hi, m_hi, def_hi);
+      return word::concat(t, lo, hi);
+    }
   }
 }
 
@@ -817,11 +837,14 @@ void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i,
     } else {
       alignas(16) TypeOf<T> v_arr[size(t)];
       word::storeu(t, v_arr, v);
-      word::scatter(t_h, p, i_lo, word::load(t_h, v_arr));
-      word::scatter(t_h, p, i_hi, word::load(t_h, v_arr + size(t_h)));
+      word::scatter(t_h, p, i_lo, word::loadu(t_h, v_arr));
+      word::scatter(t_h, p, i_hi, word::loadu(t_h, v_arr + size(t_h)));
     }
   }
 }
+
+template <TLV_DECL_TAG(T)>
+void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v);
 
 /**
  * @brief Scatter first n elements (scalar implementation).
@@ -858,8 +881,8 @@ void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i,
     } else {
       alignas(16) TypeOf<T> v_arr[size(t)];
       word::storeu(t, v_arr, v);
-      auto v_lo = word::load(t_h, v_arr);
-      auto v_hi = word::load(t_h, v_arr + size(t_h));
+      auto v_lo = word::loadu(t_h, v_arr);
+      auto v_hi = word::loadu(t_h, v_arr + size(t_h));
       constexpr nint_t hs = size(t_h);
       Mask<Half<T>> m_lo(static_cast<unsigned long long>(m.to_ullong() & ((1ULL << hs) - 1)));
       Mask<Half<T>> m_hi(static_cast<unsigned long long>(m.to_ullong() >> hs));

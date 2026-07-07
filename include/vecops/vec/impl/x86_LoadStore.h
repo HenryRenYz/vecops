@@ -13,6 +13,12 @@
 namespace vecops::vec::CPU_CAPABILITY {
 namespace word {
 
+#if defined(COMPILER_GCC) || defined(COMPILER_CLANG)
+#define VECOPS_X86_NO_ASAN __attribute__((no_sanitize_address))
+#else
+#define VECOPS_X86_NO_ASAN
+#endif
+
 /* ************************************************************************** */
 //                              Consecutive Load                              //
 /* ************************************************************************** */
@@ -53,6 +59,159 @@ VECOPS_VFUNC Mask<T> restrict_mask_range(T t, Mask<T> m) {
   return m;
 }
 #endif // HAS_AVX512DQ
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> i32_set1(T, int32_t x) {
+  Vec<T> r;
+  if constexpr (T::Bytes <= 16)
+    r.v = _mm_set1_epi32(x);
+  else if constexpr (T::Bytes == 32)
+    r.v = _mm256_set1_epi32(x);
+  else
+    r.v = _mm512_set1_epi32(x);
+  return r;
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> i32_add(Vec<T> a, Vec<T> b) {
+  if constexpr (T::Bytes <= 16)
+    return _mm_add_epi32(a.v, b.v);
+  else if constexpr (T::Bytes == 32)
+    return _mm256_add_epi32(a.v, b.v);
+  else
+    return _mm512_add_epi32(a.v, b.v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> i32_and(Vec<T> a, Vec<T> b) {
+  if constexpr (T::Bytes <= 16)
+    return _mm_and_si128(a.v, b.v);
+  else if constexpr (T::Bytes == 32)
+    return _mm256_and_si256(a.v, b.v);
+  else
+    return _mm512_and_si512(a.v, b.v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> i32_andnot(Vec<T> a, Vec<T> b) {
+  if constexpr (T::Bytes <= 16)
+    return _mm_andnot_si128(a.v, b.v);
+  else if constexpr (T::Bytes == 32)
+    return _mm256_andnot_si256(a.v, b.v);
+  else
+    return _mm512_andnot_si512(a.v, b.v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> i32_or(Vec<T> a, Vec<T> b) {
+  if constexpr (T::Bytes <= 16)
+    return _mm_or_si128(a.v, b.v);
+  else if constexpr (T::Bytes == 32)
+    return _mm256_or_si256(a.v, b.v);
+  else
+    return _mm512_or_si512(a.v, b.v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> i32_xor(Vec<T> a, Vec<T> b) {
+  if constexpr (T::Bytes <= 16)
+    return _mm_xor_si128(a.v, b.v);
+  else if constexpr (T::Bytes == 32)
+    return _mm256_xor_si256(a.v, b.v);
+  else
+    return _mm512_xor_si512(a.v, b.v);
+}
+
+template <int Shift, TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> i32_slli(Vec<T> a) {
+  if constexpr (T::Bytes <= 16)
+    return _mm_slli_epi32(a.v, Shift);
+  else if constexpr (T::Bytes == 32)
+    return _mm256_slli_epi32(a.v, Shift);
+  else
+    return _mm512_slli_epi32(a.v, Shift);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> i32_srlv(Vec<T> a, Vec<T> shift) {
+  if constexpr (T::Bytes <= 16)
+    return _mm_srlv_epi32(a.v, shift.v);
+  else if constexpr (T::Bytes == 32)
+    return _mm256_srlv_epi32(a.v, shift.v);
+  else
+    return _mm512_srlv_epi32(a.v, shift.v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> i32_sllv(Vec<T> a, Vec<T> shift) {
+  if constexpr (T::Bytes <= 16)
+    return _mm_sllv_epi32(a.v, shift.v);
+  else if constexpr (T::Bytes == 32)
+    return _mm256_sllv_epi32(a.v, shift.v);
+  else
+    return _mm512_sllv_epi32(a.v, shift.v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_X86_NO_ASAN VECOPS_VFUNC Vec<T> i32_gather_bytes(T t, const void* p, Vec<T> byte_offsets) {
+  Vec<T> r;
+  if constexpr (T::Bytes <= 16)
+    r.v = _mm_i32gather_epi32(reinterpret_cast<const int*>(p), byte_offsets.v, 1);
+  else if constexpr (T::Bytes == 32)
+    r.v = _mm256_i32gather_epi32(reinterpret_cast<const int*>(p), byte_offsets.v, 1);
+  else
+    r.v = _mm512_i32gather_epi32(byte_offsets.v, p, 1);
+  return r;
+}
+
+template <TLV_DECL_TAG(TI)>
+VECOPS_VFUNC void subint1_offsets(TI t_i, const void* p, Vec<TI> i,
+                                  Vec<TI>& i_base, Vec<TI>& i_sel) {
+  auto r_32 = details::i32_set1(t_i, int32_t(nuint_t(p) & 3));
+  auto i_b32 = details::i32_add<TI>(i, r_32);
+  i_base = details::i32_and<TI>(i_b32, details::i32_set1(t_i, ~int32_t(3)));
+  i_sel = details::i32_slli<3, TI>(details::i32_and<TI>(i_b32, details::i32_set1(t_i, 3)));
+}
+
+template <TLV_DECL_TAG(TI)>
+VECOPS_VFUNC void subint2_offsets(TI t_i, const void* p, Vec<TI> i,
+                                  Vec<TI>& i_base, Vec<TI>& i_sel) {
+  auto r_32 = details::i32_set1(t_i, int32_t(nuint_t(p) & 3));
+  auto i_b32 = details::i32_add<TI>(details::i32_slli<1, TI>(i), r_32);
+  auto is_3 = details::i32_and<TI>(
+      details::i32_and<TI>(i_b32, details::i32_slli<1, TI>(i_b32)),
+      details::i32_set1(t_i, 2));
+  auto m_tail = details::i32_xor<TI>(is_3, details::i32_set1(t_i, 3));
+  i_base = details::i32_andnot<TI>(m_tail, i_b32);
+  i_sel = details::i32_slli<3, TI>(details::i32_and<TI>(i_b32, m_tail));
+}
+
+template <TLV_DECL_TAG(TI)>
+VECOPS_X86_NO_ASAN VECOPS_VFUNC Vec<TI> subint1_gather_i32(TI t_i, const void* p, Vec<TI> i) {
+#ifdef VECOPS_X86_ENABLE_UNSAFE_GATHER
+  return details::i32_gather_bytes(t_i, p, i);
+#else
+  Vec<TI> i_base, i_sel;
+  details::subint1_offsets(t_i, p, i, i_base, i_sel);
+  auto g = details::i32_gather_bytes(t_i, reinterpret_cast<const void*>(nuint_t(p) & ~nuint_t(3)), i_base);
+  return details::i32_and<TI>(details::i32_srlv<TI>(g, i_sel), details::i32_set1(t_i, 0xff));
+#endif
+}
+
+template <TLV_DECL_TAG(TI)>
+VECOPS_X86_NO_ASAN VECOPS_VFUNC Vec<TI> subint2_gather_i32(TI t_i, const void* p, Vec<TI> i) {
+#ifdef VECOPS_X86_ENABLE_UNSAFE_GATHER
+  auto i_b = details::i32_slli<1, TI>(i);
+  return details::i32_gather_bytes(t_i, p, i_b);
+#else
+  Vec<TI> i_base, i_sel;
+  details::subint2_offsets(t_i, p, i, i_base, i_sel);
+  auto g = details::i32_gather_bytes(t_i, reinterpret_cast<const void*>(nuint_t(p) & ~nuint_t(3)), i_base);
+  return details::i32_and<TI>(details::i32_srlv<TI>(g, i_sel), details::i32_set1(t_i, 0xffff));
+#endif
+}
+
+#undef VECOPS_X86_NO_ASAN
 } // namespace details
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 8), TL_IF(is_any<TypeOf<T>, float64_t>)>
@@ -935,19 +1094,13 @@ template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t, float16_t,
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
   if constexpr (num_words(t_i) == 1) {
-    Vec<decltype(t_i)> g_v;
-    if constexpr (t_i.Bytes <= 16)
-      g_v.v = _mm_i32gather_epi32(reinterpret_cast<const int*>(p), i.v, 2);
-    else if constexpr (t_i.Bytes == 32)
-      g_v.v = _mm256_i32gather_epi32(reinterpret_cast<const int*>(p), i.v, 2);
-    else
-      g_v.v = _mm512_i32gather_epi32(i.v, p, 2);
+    auto g_v = details::subint2_gather_i32(t_i, p, i);
     Twice<T> t_2;
     return word::even(t_2, word::bitcast(t_2, g_v));
   } else {
     Half<T> t_h;
     auto lo = word::gather(t_h, p, word::lower(t_i, i));
-    auto hi = word::gather(t_h, p + size(t_h), word::upper(t_i, i));
+    auto hi = word::gather(t_h, p, word::upper(t_i, i));
     return word::concat(t, lo, hi);
   }
 }
@@ -961,7 +1114,7 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
   } else {
     Half<T> t_h;
     auto lo = word::gather(t_h, p, word::lower(t_i, i));
-    auto hi = word::gather(t_h, p + size(t_h), word::upper(t_i, i));
+    auto hi = word::gather(t_h, p, word::upper(t_i, i));
     auto def_lo = word::lower(t, default_v);
     auto def_hi = word::upper(t, default_v);
     auto m_lo = word::lower(t, m);
@@ -980,19 +1133,13 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
   Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
   if constexpr (num_words(t_i) == 1) {
     ViewAs<int16_t, decltype(t_i)> t_i16;
-    Vec<decltype(t_i)> g_v;
-    if constexpr (t_i.Bytes <= 16)
-      g_v.v = _mm_i32gather_epi32(reinterpret_cast<const int*>(p), i.v, 1);
-    else if constexpr (t_i.Bytes == 32)
-      g_v.v = _mm256_i32gather_epi32(reinterpret_cast<const int*>(p), i.v, 1);
-    else
-      g_v.v = _mm512_i32gather_epi32(i.v, p, 1);
+    auto g_v = details::subint1_gather_i32(t_i, p, i);
     Twice<T> t_2;
     return word::even(t_2, word::bitcast(t_2, word::even(t_i16, word::bitcast(t_i16, g_v))));
   } else {
     Half<T> t_h;
     auto lo = word::gather(t_h, p, word::lower(t_i, i));
-    auto hi = word::gather(t_h, p + size(t_h), word::upper(t_i, i));
+    auto hi = word::gather(t_h, p, word::upper(t_i, i));
     return word::concat(t, lo, hi);
   }
 }
@@ -1006,7 +1153,7 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
   } else {
     Half<T> t_h;
     auto lo = word::gather(t_h, p, word::lower(t_i, i));
-    auto hi = word::gather(t_h, p + size(t_h), word::upper(t_i, i));
+    auto hi = word::gather(t_h, p, word::upper(t_i, i));
     auto def_lo = word::lower(t, default_v);
     auto def_hi = word::upper(t, default_v);
     auto m_lo = word::lower(t, m);
@@ -1043,7 +1190,7 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
   } else {
     Half<T> t_h;
     auto lo = word::gather(t_h, p, word::lower(t_i, i));
-    auto hi = word::gather(t_h, p + size(t_h), word::upper(t_i, i));
+    auto hi = word::gather(t_h, p, word::upper(t_i, i));
     return word::concat(t, lo, hi);
   }
 }
@@ -1058,7 +1205,7 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
     auto i_hi = word::upper(t_i, i);
     if constexpr (num_words(t) > 1) {
       auto lo = word::gather(t_h, p, i_lo, word::lower(t, m), word::lower(t, default_v));
-      auto hi = word::gather(t_h, p + size(t_h), i_hi, word::upper(t, m), word::upper(t, default_v));
+      auto hi = word::gather(t_h, p, i_hi, word::upper(t, m), word::upper(t, default_v));
       return word::concat(t, lo, hi);
     } else {
       auto g = word::gather(t, p, i);
@@ -1183,6 +1330,7 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<Type
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64), TL_IF(is_any<TypeOf<T>, int64_t, uint64_t>)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  _mm512_mask_i64scatter_epi64(p, m.v, i.v, v.v, (int)sizeof(TypeOf<T>));
 }
 
 // ── Sub-word scatter: 2B ────────────────────────────────────────────────
@@ -1192,17 +1340,36 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeO
   Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
   if constexpr (num_words(t_i) == 1) {
     if constexpr (t_i.Bytes == 64) {
-      __mmask16 odd = _mm512_test_epi32_mask(i.v, _mm512_set1_epi32(1));
+#ifdef HAS_AVX512CD
+      Vec<decltype(t_i)> i_base, i_sel;
+      details::subint2_offsets(t_i, p, i, i_base, i_sel);
       auto vals_32 = _mm512_cvtepu16_epi32(v.v);
-      __m512i l0 = _mm512_set1_epi32(0x0000FFFF);
-      auto do_pass = [&](__mmask16 mask) {
-        if (!mask) return;
-        auto g = _mm512_i32gather_epi32(i.v, p, 2);
-        auto d = _mm512_or_si512(_mm512_andnot_si512(l0, g), _mm512_and_si512(vals_32, l0));
-        _mm512_mask_i32scatter_epi32(p, mask, i.v, d, 2);
+      const void* p32_const = reinterpret_cast<const void*>(nuint_t(p) & ~nuint_t(3));
+      void* p32 = reinterpret_cast<void*>(nuint_t(p) & ~nuint_t(3));
+      auto vals = details::i32_and<decltype(t_i)>(Vec<decltype(t_i)>{vals_32}, details::i32_set1(t_i, 0xffff));
+      auto conflict = _mm512_conflict_epi32(i_base.v);
+      auto do_pass = [&](__mmask16 mask) -> bool {
+        if (!mask) return false;
+        if ((_mm512_test_epi32_mask(conflict, conflict) & mask) != 0) return true;
+        auto field_mask = details::i32_sllv<decltype(t_i)>(details::i32_set1(t_i, 0xffff), i_sel);
+        auto payload = details::i32_sllv<decltype(t_i)>(vals, i_sel);
+        auto g = details::i32_gather_bytes(t_i, p32_const, i_base);
+        auto d = details::i32_or<decltype(t_i)>(details::i32_andnot<decltype(t_i)>(field_mask, g), payload);
+        _mm512_mask_i32scatter_epi32(p32, mask, i_base.v, d.v, 1);
+        return false;
       };
-      do_pass((__mmask16)(~odd));
-      do_pass(odd);
+      bool fallback = false;
+      fallback |= do_pass(_mm512_cmpeq_epi32_mask(i_sel.v, _mm512_set1_epi32(0)));
+      fallback |= do_pass(_mm512_cmpeq_epi32_mask(i_sel.v, _mm512_set1_epi32(8)));
+      fallback |= do_pass(_mm512_cmpeq_epi32_mask(i_sel.v, _mm512_set1_epi32(16)));
+      if (fallback) {
+        VECOPS_UNROLL for (int j = 0; j < size(t); ++j)
+          p[nint_t(word::get(i, j))] = word::get(v, j);
+      }
+#else
+      VECOPS_UNROLL for (int j = 0; j < size(t); ++j)
+        p[nint_t(word::get(i, j))] = word::get(v, j);
+#endif
     } else {
       VECOPS_UNROLL for (int j = 0; j < size(t); ++j)
         p[nint_t(word::get(i, j))] = word::get(v, j);
@@ -1262,20 +1429,37 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeO
   Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
   if constexpr (num_words(t_i) == 1) {
     if constexpr (t_i.Bytes == 64) {
+#ifdef HAS_AVX512CD
+      Vec<decltype(t_i)> i_base, i_sel;
+      details::subint1_offsets(t_i, p, i, i_base, i_sel);
       auto vals_32 = _mm512_cvtepu8_epi32(v.v);
-      __m512i b0 = _mm512_set1_epi32(0x000000FF);
-      __mmask16 q0 = _mm512_test_epi32_mask(i.v, _mm512_set1_epi32(1));
-      __mmask16 q1 = _mm512_test_epi32_mask(i.v, _mm512_set1_epi32(2));
-      auto do_pass = [&](__mmask16 mask) {
-        if (!mask) return;
-        auto g = _mm512_i32gather_epi32(i.v, p, 1);
-        auto d = _mm512_or_si512(_mm512_andnot_si512(b0, g), _mm512_and_si512(vals_32, b0));
-        _mm512_mask_i32scatter_epi32(p, mask, i.v, d, 1);
+      const void* p32_const = reinterpret_cast<const void*>(nuint_t(p) & ~nuint_t(3));
+      void* p32 = reinterpret_cast<void*>(nuint_t(p) & ~nuint_t(3));
+      auto vals = details::i32_and<decltype(t_i)>(Vec<decltype(t_i)>{vals_32}, details::i32_set1(t_i, 0xff));
+      auto conflict = _mm512_conflict_epi32(i_base.v);
+      auto do_pass = [&](__mmask16 mask) -> bool {
+        if (!mask) return false;
+        if ((_mm512_test_epi32_mask(conflict, conflict) & mask) != 0) return true;
+        auto field_mask = details::i32_sllv<decltype(t_i)>(details::i32_set1(t_i, 0xff), i_sel);
+        auto payload = details::i32_sllv<decltype(t_i)>(vals, i_sel);
+        auto g = details::i32_gather_bytes(t_i, p32_const, i_base);
+        auto d = details::i32_or<decltype(t_i)>(details::i32_andnot<decltype(t_i)>(field_mask, g), payload);
+        _mm512_mask_i32scatter_epi32(p32, mask, i_base.v, d.v, 1);
+        return false;
       };
-      do_pass((__mmask16)(~q0 & ~q1));
-      do_pass((__mmask16)(q0 & ~q1));
-      do_pass((__mmask16)(~q0 & q1));
-      do_pass((__mmask16)(q0 & q1));
+      bool fallback = false;
+      fallback |= do_pass(_mm512_cmpeq_epi32_mask(i_sel.v, _mm512_set1_epi32(0)));
+      fallback |= do_pass(_mm512_cmpeq_epi32_mask(i_sel.v, _mm512_set1_epi32(8)));
+      fallback |= do_pass(_mm512_cmpeq_epi32_mask(i_sel.v, _mm512_set1_epi32(16)));
+      fallback |= do_pass(_mm512_cmpeq_epi32_mask(i_sel.v, _mm512_set1_epi32(24)));
+      if (fallback) {
+        VECOPS_UNROLL for (int j = 0; j < size(t); ++j)
+          p[nint_t(word::get(i, j))] = word::get(v, j);
+      }
+#else
+      VECOPS_UNROLL for (int j = 0; j < size(t); ++j)
+        p[nint_t(word::get(i, j))] = word::get(v, j);
+#endif
     } else {
       VECOPS_UNROLL for (int j = 0; j < size(t); ++j)
         p[nint_t(word::get(i, j))] = word::get(v, j);

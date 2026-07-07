@@ -573,8 +573,8 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
   using namespace details;
   constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
   return vmap(
-      t, [=](auto tt, TypeOf<T>* pp, auto&& ii) { return word::gather(tt, pp, ii); },
-      StepPointer(t, p), ShardVec(it, i)
+      t, [=](auto tt, const TypeOf<T>* pp, auto&& ii) { return word::gather(tt, pp, ii); },
+      p, ShardVec(it, i)
   );
 }
 
@@ -592,9 +592,9 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
   using namespace details;
   constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
   return vmap(
-      t, n, [=](auto tt, TypeOf<T>* pp, auto&& ii, auto&& vv) { return word::gather(tt, pp, ii); },
-      [=](auto tt, nint_t rem, TypeOf<T>* pp, auto&& ii, auto&& vv) { return word::gather(tt, pp, ii, rem, vv); },
-      StepPointer(t, p), ShardVec(it, i), ShardVec(t, default_v)
+      t, n, [=](auto tt, const TypeOf<T>* pp, auto&& ii, auto&& vv) { return word::gather(tt, pp, ii); },
+      [=](auto tt, nint_t rem, const TypeOf<T>* pp, auto&& ii, auto&& vv) { return word::gather(tt, pp, ii, rem, vv); },
+      p, ShardVec(it, i), ShardVec(t, default_v)
   );
 }
 
@@ -629,8 +629,8 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
   using namespace details;
   constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
   return vmap(
-      t, [=](auto tt, TypeOf<T>* pp, auto&& ii, auto&& mm, auto&& vv) { return word::gather(tt, pp, ii, mm, vv); },
-      StepPointer(t, p), ShardVec(it, i), ShardMask(t, m), ShardVec(t, default_v)
+      t, [=](auto tt, const TypeOf<T>* pp, auto&& ii, auto&& mm, auto&& vv) { return word::gather(tt, pp, ii, mm, vv); },
+      p, ShardVec(it, i), ShardMask(t, m), ShardVec(t, default_v)
   );
 }
 
@@ -666,7 +666,7 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeO
   constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
   vmap(
       t, [=](auto tt, TypeOf<T>* pp, auto&& ii, auto&& vv) { word::scatter(tt, pp, ii, vv); },
-      StepPointer(t, p), ShardVec(it, i), ShardVec(t, v)
+      p, ShardVec(it, i), ShardVec(t, v)
   );
 }
 
@@ -684,7 +684,7 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeO
   vmap(
       t, n, [=](auto tt, TypeOf<T>* pp, auto&& ii, auto&& vv) { word::scatter(tt, pp, ii, vv); },
       [=](auto tt, nint_t rem, TypeOf<T>* pp, auto&& ii, auto&& vv) { word::scatter(tt, pp, ii, rem, vv); },
-      StepPointer(t, p), ShardVec(it, i), ShardVec(t, v)
+      p, ShardVec(it, i), ShardVec(t, v)
   );
 }
 
@@ -704,7 +704,7 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeO
   constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
   vmap(
       t, [=](auto tt, TypeOf<T>* pp, auto&& ii, auto&& mm, auto&& vv) { word::scatter(tt, pp, ii, mm, vv); },
-      StepPointer(t, p), ShardVec(it, i), ShardMask(t, m), ShardVec(t, v)
+      p, ShardVec(it, i), ShardMask(t, m), ShardVec(t, v)
   );
 }
 

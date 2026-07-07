@@ -1842,7 +1842,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGather) {
   using IndexT = GatherScatterIndex<T>;
   Rebind<IndexT, decltype(t2)> it;
 
-  // Reverse within each word — tests that vmap offsets base per word
+  // Reverse within each logical word; indices still use the single base pointer.
   auto indices = std::make_unique<IndexT[]>(N);
   for (nint_t i = 0; i < N; ++i) {
     indices[i] = static_cast<IndexT>(ws - 1 - (i % ws));
@@ -1852,8 +1852,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGather) {
   auto v = gather(t2, this->aligned_data_, idx);
 
   for (nint_t i = 0; i < N; ++i) {
-    nint_t word = i / ws;
-    T expected = this->aligned_data_[word * ws + indices[i]];
+    T expected = this->aligned_data_[indices[i]];
     EXPECT_TRUE(test_utils::values_equal(expected, get(v, i)));
   }
 }
@@ -1871,7 +1870,12 @@ TYPED_TEST(VecGatherScatterTest, MultiWordScatter) {
     this->aligned_out_[i] = sentinel;
   }
 
-  // Reverse within each word — scatter input to reversed positions
+  std::unique_ptr<T[]> expected(new T[256]);
+  for (int i = 0; i < 256; ++i) {
+    expected[i] = sentinel;
+  }
+
+  // Reverse within each logical word; duplicate indices use last-write-wins.
   auto indices = std::make_unique<IndexT[]>(N);
   for (nint_t i = 0; i < N; ++i) {
     indices[i] = static_cast<IndexT>(ws - 1 - (i % ws));
@@ -1881,13 +1885,12 @@ TYPED_TEST(VecGatherScatterTest, MultiWordScatter) {
   auto v = loadu(t2, this->aligned_data_);
 
   scatter(t2, this->aligned_out_, idx, v);
-
   for (nint_t i = 0; i < N; ++i) {
-    nint_t word = i / ws;
-    nint_t pos = i % ws;
-    nint_t dst = static_cast<nint_t>(word * ws + indices[word * ws + pos]);
-    EXPECT_TRUE(test_utils::values_equal(
-        this->aligned_data_[i], this->aligned_out_[dst]));
+    expected[indices[i]] = this->aligned_data_[i];
+  }
+
+  for (int i = 0; i < 256; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(expected[i], this->aligned_out_[i]));
   }
 }
 
@@ -1912,8 +1915,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherWithN) {
   auto v = gather(t2, this->aligned_data_, idx, m, default_val);
 
   for (nint_t i = 0; i < N / 2; ++i) {
-    nint_t word = i / ws;
-    T expected = this->aligned_data_[word * ws + indices[i]];
+    T expected = this->aligned_data_[indices[i]];
     EXPECT_TRUE(test_utils::values_equal(expected, get(v, i)));
   }
   for (nint_t i = N / 2; i < N; ++i) {
@@ -1942,8 +1944,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherWithMask) {
   auto v = gather(t2, this->aligned_data_, idx, m, default_val);
 
   for (nint_t i = 0; i < N / 2; ++i) {
-    nint_t word = i / ws;
-    T expected = this->aligned_data_[word * ws + indices[i]];
+    T expected = this->aligned_data_[indices[i]];
     EXPECT_TRUE(test_utils::values_equal(expected, get(v, i)));
   }
   for (nint_t i = N / 2; i < N; ++i) {
@@ -2509,19 +2510,15 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
     }
   }
 
-  // ── Step 3b: Compare full gather vs original test validation ─────
-  // The original MultiWordGather test uses:
-  //   expected = aligned_data_[word * ws + indices[i]]
+  // ── Step 3b: Compare full gather against single-base reference ───
   for (nint_t i = 0; i < N; ++i) {
-    nint_t word = i / ws;
-    T orig_exp = this->aligned_data_[word * ws + indices[i]];
+    T ref_val = ref[i];
     T full_val = get(v_full, i);
-    if (!test_utils::values_equal(orig_exp, full_val)) {
-      ADD_FAILURE() << "Original-validation mismatch at i=" << i
-                    << " word=" << word << " orig_exp=" << +orig_exp
-                    << "(from idx " << (word * ws + indices[i])
-                    << ") full=" << +full_val
-                    << " N=" << N << " ws=" << ws;
+    if (!test_utils::values_equal(ref_val, full_val)) {
+      ADD_FAILURE() << "Full-reference mismatch at i=" << i
+                    << " ref=" << +ref_val
+                    << "(from idx " << indices[i]
+                    << ") full=" << +full_val;
       break;
     }
   }
