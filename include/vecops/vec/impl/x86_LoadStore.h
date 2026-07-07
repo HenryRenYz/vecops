@@ -374,10 +374,9 @@ VECOPS_X86_NO_ASAN VECOPS_VFUNC bool subint_scatter_i32_composite(
 #endif
 
 template <int SubBytes, TLV_DECL_TAG(TI), TLV_DECL_TAG(T)>
-VECOPS_X86_NO_ASAN VECOPS_VFUNC bool subint_scatter_i32(
+VECOPS_X86_NO_ASAN VECOPS_VFUNC void subint_scatter_i32(
     TI t_i, T t, TypeOf<T>* p, Vec<TI> i, Mask<TI> active, Vec<T> v) {
   active = details::restrict_mask_range(t_i, active);
-  if (!details::mask_any(t_i, active)) return true;
 
   Vec<TI> i_base, i_sel;
 #if defined(VECOPS_X86_ENABLE_UNSAFE_SCATTER) && defined(VECOPS_X86_NONOVERLAP_SCATTER)
@@ -404,6 +403,7 @@ VECOPS_X86_NO_ASAN VECOPS_VFUNC bool subint_scatter_i32(
   auto field_bits = word::fill(t_i, SubBytes == 1 ? 0xff : 0xffff);
   auto field_mask = details::i32_sllv<TI>(field_bits, i_sel);
   auto payload = details::i32_sllv<TI>(vals, i_sel);
+  auto scalar_active = word::demote(t, t_i, active);
 
   const void* p32_const;
   void* p32;
@@ -425,16 +425,18 @@ VECOPS_X86_NO_ASAN VECOPS_VFUNC bool subint_scatter_i32(
       else
         return word::add(word::bit_shl<1>(i), p_mod);
     }();
-    return details::subint_scatter_i32_composite<SubBytes>(
-        t_i, p32_const, p32, elem_byte_offsets, i_base, i_sel, active, field_mask, payload);
+    if (!details::subint_scatter_i32_composite<SubBytes>(
+            t_i, p32_const, p32, elem_byte_offsets, i_base, i_sel, active, field_mask, payload)) {
+      details::subint_scatter_scalar(t, p, i, scalar_active, v);
+    }
 #else
-    return false;
+    details::subint_scatter_scalar(t, p, i, scalar_active, v);
 #endif
+    return;
   }
 #endif
 
   details::subint_scatter_i32_once(t_i, p32_const, p32, i_base, active, field_mask, payload);
-  return true;
 }
 #endif // HAS_AVX512F
 
@@ -1425,14 +1427,9 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
     Half<T> t_h;
     auto i_lo = word::lower(t_i, i);
     auto i_hi = word::upper(t_i, i);
-    if constexpr (num_words(t) > 1) {
-      auto lo = word::gather(t_h, p, i_lo, word::lower(t, m), word::lower(t, default_v));
-      auto hi = word::gather(t_h, p, i_hi, word::upper(t, m), word::upper(t, default_v));
-      return word::concat(t, lo, hi);
-    } else {
-      auto g = word::gather(t, p, i);
-      return word::blend(default_v, m, g);
-    }
+    auto lo = word::gather(t_h, p, i_lo, word::lower(t, m), word::lower(t, default_v));
+    auto hi = word::gather(t_h, p, i_hi, word::upper(t, m), word::upper(t, default_v));
+    return word::concat(t, lo, hi);
   }
 }
 #endif // HAS_AVX2
@@ -1562,9 +1559,7 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeO
   Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
   if constexpr (num_words(t_i) == 1) {
     auto active = details::restrict_mask_range(t_i, word::mfill(t_i, true));
-    if (!details::subint_scatter_i32<2>(t_i, t, p, i, active, v)) {
-      details::subint_scatter_scalar(t, p, i, v);
-    }
+    details::subint_scatter_i32<2>(t_i, t, p, i, active, v);
   } else {
     Half<T> t_h;
     auto i_lo = word::lower(t_i, i);
@@ -1577,15 +1572,9 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeO
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int16_t, uint16_t, float16_t, bfloat16_t>)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
   Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
-  if (details::mask_all(t, m)) {
-    word::scatter(t, p, i, v);
-    return;
-  }
   if constexpr (num_words(t_i) == 1) {
     auto active = word::promote(t_i, t, m);
-    if (!details::subint_scatter_i32<2>(t_i, t, p, i, active, v)) {
-      details::subint_scatter_scalar(t, p, i, m, v);
-    }
+    details::subint_scatter_i32<2>(t_i, t, p, i, active, v);
   } else {
     Half<T> t_h;
     auto i_lo = word::lower(t_i, i);
@@ -1602,9 +1591,7 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeO
   Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
   if constexpr (num_words(t_i) == 1) {
     auto active = details::restrict_mask_range(t_i, word::mfill(t_i, true));
-    if (!details::subint_scatter_i32<1>(t_i, t, p, i, active, v)) {
-      details::subint_scatter_scalar(t, p, i, v);
-    }
+    details::subint_scatter_i32<1>(t_i, t, p, i, active, v);
   } else {
     Half<T> t_h;
     auto i_lo = word::lower(t_i, i);
@@ -1617,15 +1604,9 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeO
 template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, int8_t, uint8_t>)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
   Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
-  if (details::mask_all(t, m)) {
-    word::scatter(t, p, i, v);
-    return;
-  }
   if constexpr (num_words(t_i) == 1) {
     auto active = word::promote(t_i, t, m);
-    if (!details::subint_scatter_i32<1>(t_i, t, p, i, active, v)) {
-      details::subint_scatter_scalar(t, p, i, m, v);
-    }
+    details::subint_scatter_i32<1>(t_i, t, p, i, active, v);
   } else {
     Half<T> t_h;
     auto i_lo = word::lower(t_i, i);
