@@ -11,107 +11,11 @@
 #include <memory>
 #include <type_traits>
 
+#include "TestUtils.h"
 #include "vecops/vec/Vec.h"
 
 using namespace vecops;
 using namespace vecops::vec;
-
-namespace test_utils {
-
-template <typename T>
-constexpr nint_t lane_size() { return 16 / static_cast<nint_t>(sizeof(T)); }
-
-template <typename T> struct ShuffleIndex     { using type = T; };
-template <> struct ShuffleIndex<float32_t>     { using type = int32_t; };
-template <> struct ShuffleIndex<float64_t>     { using type = int64_t; };
-template <> struct ShuffleIndex<uint32_t>      { using type = int32_t; };
-template <> struct ShuffleIndex<uint64_t>      { using type = int64_t; };
-template <> struct ShuffleIndex<uint8_t>       { using type = int8_t; };
-template <> struct ShuffleIndex<uint16_t>      { using type = int16_t; };
-template <> struct ShuffleIndex<vecops::float16_t>      { using type = int16_t; };
-template <> struct ShuffleIndex<vecops::bfloat16_t>      { using type = int16_t; };
-template <typename T> using shuffle_idx_t = typename ShuffleIndex<T>::type;
-
-template <typename T>
-void fill_seq(T* data, nint_t n) {
-  for (nint_t i = 0; i < n; ++i)
-    data[i] = static_cast<T>(i + 1);
-}
-
-template <typename I>
-void fill_local_identity(I* idx, nint_t n) {
-  constexpr nint_t M = 16 / sizeof(I);
-  for (nint_t i = 0; i < n; ++i)
-    idx[i] = static_cast<I>(i % M);
-}
-
-template <typename I>
-void fill_shuf_identity(I* idx, nint_t n, nint_t word_size) {
-  for (nint_t i = 0; i < n; ++i)
-    idx[i] = static_cast<I>(i % word_size);
-}
-
-template <typename T>
-::testing::AssertionResult values_equal(T expected, T actual) {
-  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
-    float e = static_cast<float>(expected), a = static_cast<float>(actual);
-    if (std::abs(e - a) < 0.01f) return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure() << "Expected " << e << ", got " << a;
-  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
-    float e = static_cast<float>(expected), a = static_cast<float>(actual);
-    if (std::abs(e - a) < 0.01f) return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure() << "Expected " << e << ", got " << a;
-  } else if constexpr (std::is_same_v<T, float32_t>) {
-    if (std::abs(expected - actual) < 1e-5f) return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure() << "Expected " << expected << ", got " << actual;
-  } else if constexpr (std::is_same_v<T, float64_t>) {
-    if (std::abs(expected - actual) < 1e-10) return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure() << "Expected " << expected << ", got " << actual;
-  } else {
-    if (expected == actual) return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure()
-        << "Expected " << static_cast<long long>(expected)
-        << ", got " << static_cast<long long>(actual);
-  }
-}
-
-} // namespace test_utils
-
-// ============================================================================
-// Type groups
-// ============================================================================
-
-using Types4  = ::testing::Types<float32_t, int32_t, uint32_t>;
-using Types2  = ::testing::Types<float64_t, int64_t, uint64_t>;
-using Types8  = ::testing::Types<int16_t, uint16_t, vecops::float16_t
-#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    , vecops::bfloat16_t
-#endif
->;
-using Types16 = ::testing::Types<int8_t, uint8_t>;
-
-using ShufTypes = ::testing::Types<
-    float32_t, int32_t, uint32_t,
-    float64_t, int64_t, uint64_t,
-    int8_t,   uint8_t,
-    int16_t,  uint16_t,
-    vecops::float16_t
-    #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    , vecops::bfloat16_t
-    #endif
->;
-
-using AllTypes = ::testing::Types<
-    vecops::float16_t,
-    #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    vecops::bfloat16_t,
-    #endif
-    float32_t, float64_t,
-    int8_t, uint8_t,
-    int16_t, uint16_t,
-    int32_t, uint32_t,
-    int64_t, uint64_t
->;
 
 // ============================================================================
 // Main typed test fixture (for most tests)
@@ -149,7 +53,7 @@ protected:
   nint_t N2;
   void SetUp() override { N = size(t); N2 = size(t2); }
 };
-TYPED_TEST_SUITE(LocalShufCT4, Types4);
+TYPED_TEST_SUITE(LocalShufCT4, test_utils::Types4);
 
 TYPED_TEST(LocalShufCT4, Identity) {
   using T = TypeParam;
@@ -224,7 +128,7 @@ protected:
   nint_t N2;
   void SetUp() override { N = size(t); N2 = size(t2); }
 };
-TYPED_TEST_SUITE(LocalShufCT2, Types2);
+TYPED_TEST_SUITE(LocalShufCT2, test_utils::Types2);
 
 TYPED_TEST(LocalShufCT2, Identity) {
   using T = TypeParam;
@@ -267,7 +171,7 @@ protected:
   nint_t N2;
   void SetUp() override { N = size(t); N2 = size(t2); }
 };
-TYPED_TEST_SUITE(LocalShufCT8, Types8);
+TYPED_TEST_SUITE(LocalShufCT8, test_utils::Types8);
 
 TYPED_TEST(LocalShufCT8, Identity) {
   using T = TypeParam;
@@ -310,7 +214,7 @@ protected:
   nint_t N2;
   void SetUp() override { N = size(t); N2 = size(t2); }
 };
-TYPED_TEST_SUITE(LocalShufCT16, Types16);
+TYPED_TEST_SUITE(LocalShufCT16, test_utils::Types16);
 
 TYPED_TEST(LocalShufCT16, Identity) {
   using T = TypeParam;
@@ -362,7 +266,7 @@ TYPED_TEST(LocalShufCT16, BroadcastMiddle) {
 // local_shuf with vector indices
 // ============================================================================
 
-TYPED_TEST_SUITE(VecShuffleTest, ShufTypes);
+TYPED_TEST_SUITE(VecShuffleTest, test_utils::ShufTypes);
 
 TYPED_TEST(VecShuffleTest, LocalShufVI_Identity) {
   using T = typename TestFixture::Type;
@@ -647,7 +551,7 @@ TEST(Shuf, Float64_CrossLaneSwap) {
 // upper / lower tests
 // ============================================================================
 
-TYPED_TEST_SUITE(VecShuffleAllTest, AllTypes);
+TYPED_TEST_SUITE(VecShuffleAllTest, test_utils::ShuffleAllTypes);
 
 TYPED_TEST(VecShuffleAllTest, UpperLower_SingleWord) {
   using T = typename TestFixture::Type;

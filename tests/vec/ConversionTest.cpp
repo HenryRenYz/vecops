@@ -10,84 +10,12 @@
 #include <limits>
 #include <type_traits>
 
+#include "TestUtils.h"
 #include "vecops/vec/Vec.h"
 #include "vecops/util/ScalarConvert.h"
 
 using namespace vecops;
 using namespace vecops::vec;
-
-// ============================================================================
-// Helper utilities
-// ============================================================================
-
-namespace test_utils {
-
-template <typename T>
-constexpr T get_test_value(int idx) {
-  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
-    return static_cast<vecops::bfloat16_t>(static_cast<float>(idx * 1.5f + 0.5f));
-  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
-    return static_cast<vecops::float16_t>(static_cast<float>(idx * 1.5f + 0.5f));
-  } else if constexpr (std::is_same_v<T, float32_t>) {
-    return static_cast<float32_t>(idx * 1.5f + 0.5f);
-  } else if constexpr (std::is_same_v<T, float64_t>) {
-    return static_cast<float64_t>(idx * 1.5 + 0.5);
-  } else if constexpr (std::is_same_v<T, int8_t>) {
-    return static_cast<int8_t>((idx * 7 + 3) % 127 - 64);
-  } else if constexpr (std::is_same_v<T, uint8_t>) {
-    return static_cast<uint8_t>((idx * 7 + 3) % 256);
-  } else if constexpr (std::is_same_v<T, int16_t>) {
-    return static_cast<int16_t>((idx * 100 + 50) % 32767 - 16384);
-  } else if constexpr (std::is_same_v<T, uint16_t>) {
-    return static_cast<uint16_t>((idx * 100 + 50) % 65536);
-  } else if constexpr (std::is_same_v<T, int32_t>) {
-    return static_cast<int32_t>(idx * 1000 + 500);
-  } else if constexpr (std::is_same_v<T, uint32_t>) {
-    return static_cast<uint32_t>(idx * 1000 + 500);
-  } else if constexpr (std::is_same_v<T, int64_t>) {
-    return static_cast<int64_t>(idx * 100000LL + 50000LL);
-  } else if constexpr (std::is_same_v<T, uint64_t>) {
-    return static_cast<uint64_t>(idx * 100000ULL + 50000ULL);
-  }
-}
-
-template <typename T>
-::testing::AssertionResult values_equal(T expected, T actual, double tolerance = 0.01) {
-  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
-    float e = static_cast<float>(expected);
-    float a = static_cast<float>(actual);
-    if (std::abs(e - a) <= std::max(std::abs(e), std::abs(a)) * tolerance)
-      return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure() << "Expected " << e << ", got " << a;
-  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
-    float e = static_cast<float>(expected);
-    float a = static_cast<float>(actual);
-    if (std::abs(e - a) <= std::max(std::abs(e), std::abs(a)) * tolerance)
-      return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure() << "Expected " << e << ", got " << a;
-  } else if constexpr (std::is_same_v<T, float32_t>) {
-    if (std::abs(expected - actual) <= std::max(std::abs(expected), std::abs(actual)) * tolerance)
-      return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure() << "Expected " << expected << ", got " << actual;
-  } else if constexpr (std::is_same_v<T, float64_t>) {
-    if (std::abs(expected - actual) <= std::max(std::abs(expected), std::abs(actual)) * tolerance)
-      return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure() << "Expected " << expected << ", got " << actual;
-  } else {
-    if (expected == actual) return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure()
-        << "Expected " << static_cast<long long>(expected)
-        << ", got " << static_cast<long long>(actual);
-  }
-}
-
-template <typename T>
-T* alloc_aligned(size_t count) {
-  void* ptr = std::aligned_alloc(DEFAULT_ALIGNMENT, count * sizeof(T));
-  return static_cast<T*>(ptr);
-}
-
-} // namespace test_utils
 
 // ============================================================================
 // Case structs for parameterizing tests at specific POW2 vector-width levels
@@ -266,7 +194,7 @@ TYPED_TEST(VecPromoteTest, BasicPromote) {
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(this->in_data_[i]);
     TOut actual   = get(this->t_out_, v_out, i);
-    EXPECT_TRUE(test_utils::values_equal(expected, actual))
+    EXPECT_TRUE(test_utils::values_near(expected, actual))
               << "i=" << i << " input=" << static_cast<long long>(this->in_data_[i]);
   }
 }
@@ -305,7 +233,7 @@ TYPED_TEST(VecPromoteTest, PromoteWithMaxMinValues) {
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(data[i]);
     TOut actual   = get(this->t_out_, v_out, i);
-    EXPECT_TRUE(test_utils::values_equal(expected, actual))
+    EXPECT_TRUE(test_utils::values_near(expected, actual))
               << "i=" << i << " input=" << static_cast<long long>(data[i]);
   }
   std::free(data);
@@ -331,7 +259,7 @@ TYPED_TEST(VecPromoteTest, SignExtensionTest) {
     for (nint_t i = 0; i < N; ++i) {
       TOut actual   = get(this->t_out_, v_out, i);
       TIn  original = data[i];
-      EXPECT_TRUE(test_utils::values_equal(static_cast<TOut>(original), actual))
+      EXPECT_TRUE(test_utils::values_near(static_cast<TOut>(original), actual))
                 << "i=" << i << " original=" << static_cast<long long>(original)
                 << " actual=" << static_cast<long long>(actual);
     }
@@ -475,7 +403,7 @@ TYPED_TEST(VecDemoteTest, BasicDemote) {
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(this->in_data_[i]);
     TOut actual   = get(this->t_out_, v_out, i);
-    EXPECT_TRUE(test_utils::values_equal(expected, actual))
+    EXPECT_TRUE(test_utils::values_near(expected, actual))
               << "i=" << i << " input=" << static_cast<long long>(this->in_data_[i]);
   }
 }
@@ -521,7 +449,7 @@ TYPED_TEST(VecDemoteTest, TruncationBehavior) {
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(data[i]);
     TOut actual   = get(this->t_out_, v_out, i);
-    EXPECT_TRUE(test_utils::values_equal(expected, actual))
+    EXPECT_TRUE(test_utils::values_near(expected, actual))
               << "i=" << i << " input=" << static_cast<long long>(data[i]);
   }
   std::free(data);
@@ -612,7 +540,7 @@ TYPED_TEST(VecConvertTest, BasicConvert) {
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(this->in_data_[i]);
     TOut actual   = get(this->t_out_, v_out, i);
-    EXPECT_TRUE(test_utils::values_equal(expected, actual))
+    EXPECT_TRUE(test_utils::values_near(expected, actual))
               << "i=" << i << " input=" << static_cast<long long>(this->in_data_[i]);
   }
 }
@@ -650,7 +578,7 @@ TYPED_TEST(VecConvertTest, SignedUnsignedConversion) {
       for (nint_t i = 0; i < N; ++i) {
         TOut expected = vecops::convert<TOut>(data[i]);
         TOut actual   = get(this->t_out_, v_out, i);
-        EXPECT_TRUE(test_utils::values_equal(expected, actual))
+        EXPECT_TRUE(test_utils::values_near(expected, actual))
                   << "i=" << i << " input=" << static_cast<long long>(data[i])
                   << " expected=" << static_cast<long long>(expected);
       }
@@ -685,7 +613,7 @@ TYPED_TEST(VecConvertTest, FloatIntConversion) {
     for (nint_t i = 0; i < N; ++i) {
       TOut expected = vecops::convert<TOut>(data[i]);
       TOut actual   = get(this->t_out_, v_out, i);
-      EXPECT_TRUE(test_utils::values_equal(expected, actual))
+      EXPECT_TRUE(test_utils::values_near(expected, actual))
                 << "i=" << i << " input=" << static_cast<long long>(data[i]);
     }
     std::free(data);

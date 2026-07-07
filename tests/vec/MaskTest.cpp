@@ -11,118 +11,11 @@
 #include <cstring>
 #include <limits>
 
+#include "TestUtils.h"
 #include "vecops/vec/Vec.h"
 
 using namespace vecops;
 using namespace vecops::vec;
-
-// ============================================================================
-// Helper utilities
-// ============================================================================
-
-namespace test_utils {
-
-template <typename T>
-constexpr T get_test_value(int idx) {
-  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
-    return static_cast<vecops::bfloat16_t>(static_cast<float>(idx * 1.5f + 0.5f));
-  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
-    return static_cast<vecops::float16_t>(static_cast<float>(idx * 1.5f + 0.5f));
-  } else if constexpr (std::is_same_v<T, float32_t>) {
-    return static_cast<float32_t>(idx * 1.5f + 0.5f);
-  } else if constexpr (std::is_same_v<T, float64_t>) {
-    return static_cast<float64_t>(idx * 1.5 + 0.5);
-  } else if constexpr (std::is_same_v<T, int8_t>) {
-    return static_cast<int8_t>((idx * 7 + 3) % 127 - 64);
-  } else if constexpr (std::is_same_v<T, uint8_t>) {
-    return static_cast<uint8_t>((idx * 7 + 3) % 256);
-  } else if constexpr (std::is_same_v<T, int16_t>) {
-    return static_cast<int16_t>((idx * 100 + 50) % 32767 - 16384);
-  } else if constexpr (std::is_same_v<T, uint16_t>) {
-    return static_cast<uint16_t>((idx * 100 + 50) % 65536);
-  } else if constexpr (std::is_same_v<T, int32_t>) {
-    return static_cast<int32_t>(idx * 1000 + 500);
-  } else if constexpr (std::is_same_v<T, uint32_t>) {
-    return static_cast<uint32_t>(idx * 1000 + 500);
-  } else if constexpr (std::is_same_v<T, int64_t>) {
-    return static_cast<int64_t>(idx * 100000LL + 50000LL);
-  } else if constexpr (std::is_same_v<T, uint64_t>) {
-    return static_cast<uint64_t>(idx * 100000ULL + 50000ULL);
-  }
-}
-
-template <typename T>
-T* alloc_aligned(size_t count) {
-  void* ptr = std::aligned_alloc(DEFAULT_ALIGNMENT, count * sizeof(T));
-  return static_cast<T*>(ptr);
-}
-
-// Create a mask pattern where bit i is set if (i & mask_bits) == match_val
-std::vector<bool> make_pattern(int n, int mask_bits, int match_val) {
-  std::vector<bool> pattern;
-  pattern.reserve(n);
-  for (int i = 0; i < n; ++i) {
-    pattern.push_back((i & mask_bits) == match_val);
-  }
-  return pattern;
-}
-
-// Apply mask bit op to scalar bools and return expected
-std::vector<bool> scalar_mask_and(const std::vector<bool>& a, const std::vector<bool>& b) {
-  std::vector<bool> r(a.size());
-  for (size_t i = 0; i < a.size(); ++i) r[i] = a[i] && b[i];
-  return r;
-}
-std::vector<bool> scalar_mask_or(const std::vector<bool>& a, const std::vector<bool>& b) {
-  std::vector<bool> r(a.size());
-  for (size_t i = 0; i < a.size(); ++i) r[i] = a[i] || b[i];
-  return r;
-}
-std::vector<bool> scalar_mask_xor(const std::vector<bool>& a, const std::vector<bool>& b) {
-  std::vector<bool> r(a.size());
-  for (size_t i = 0; i < a.size(); ++i) r[i] = a[i] != b[i];
-  return r;
-}
-std::vector<bool> scalar_mask_andnot(const std::vector<bool>& a, const std::vector<bool>& b) {
-  std::vector<bool> r(a.size());
-  for (size_t i = 0; i < a.size(); ++i) r[i] = !a[i] && b[i];
-  return r;
-}
-std::vector<bool> scalar_mask_not(const std::vector<bool>& a) {
-  std::vector<bool> r(a.size());
-  for (size_t i = 0; i < a.size(); ++i) r[i] = !a[i];
-  return r;
-}
-
-// scalar lower: first N/2 bits
-std::vector<bool> scalar_mask_lower(const std::vector<bool>& a) {
-  size_t n = a.size() / 2;
-  std::vector<bool> r(n);
-  for (size_t i = 0; i < n; ++i) r[i] = a[i];
-  return r;
-}
-
-// scalar upper: last N/2 bits
-std::vector<bool> scalar_mask_upper(const std::vector<bool>& a) {
-  size_t n = a.size() / 2;
-  std::vector<bool> r(n);
-  for (size_t i = 0; i < n; ++i) r[i] = a[i + n];
-  return r;
-}
-
-// scalar concat: combine two halves
-std::vector<bool> scalar_mask_concat(const std::vector<bool>& lo, const std::vector<bool>& hi) {
-  size_t n = lo.size();
-  std::vector<bool> r(n * 2);
-  for (size_t i = 0; i < n; ++i) {
-    r[i] = lo[i];
-    r[i + n] = hi[i];
-  }
-  return r;
-}
-
-} // namespace test_utils
-
 
 // ============================================================================
 // Test Fixture
@@ -158,32 +51,17 @@ protected:
   // Helper: create a mask from a bool pattern using comparisons
   template <typename Tag>
   Mask<Tag> make_mask_from_pattern(Tag tt, const std::vector<bool>& pattern) {
-    T* buf = test_utils::alloc_aligned<T>((size_t)size(tt) + 10);
-    for (nint_t i = 0; i < size(tt); ++i) {
-      buf[i] = pattern[(size_t)i] ? static_cast<T>(1) : static_cast<T>(0);
-    }
-    auto v = loadu(tt, buf);
-    auto m = cmpeq(v, fill(tt, static_cast<T>(1)));
-    std::free(buf);
-    return m;
+    return test_utils::make_mask(tt, pattern);
   }
 
   // Helper: verify mask matches expected pattern
   template <typename Tag>
   void verify_mask(Tag tt, Mask<Tag> m, const std::vector<bool>& expected, int line) {
-    for (nint_t i = 0; i < size(tt); ++i) {
-      bool actual = get(tt, m, i);
-      EXPECT_EQ(expected[(size_t)i], actual)
-          << "Mismatch at i=" << i << " line=" << line;
-    }
+    test_utils::verify_mask_pattern(tt, m, expected, line);
   }
 };
 
-using AllIntTypes = ::testing::Types<
-    uint8_t, uint16_t, uint32_t, uint64_t
->;
-
-TYPED_TEST_SUITE(VecMaskTest, AllIntTypes);
+TYPED_TEST_SUITE(VecMaskTest, test_utils::UnsignedIntTypes);
 
 
 // ============================================================================

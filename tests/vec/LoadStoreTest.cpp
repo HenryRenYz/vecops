@@ -10,89 +10,11 @@
 #include <type_traits>
 #include <random>
 
+#include "TestUtils.h"
 #include "vecops/vec/Vec.h"
 
 using namespace vecops;
 using namespace vecops::vec;
-
-namespace test_utils {
-
-template <typename T>
-constexpr T get_test_value(int idx) {
-  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
-    return static_cast<vecops::bfloat16_t>(static_cast<float>(idx * 1.5f + 0.5f));
-  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
-    return static_cast<vecops::float16_t>(static_cast<float>(idx * 1.5f + 0.5f));
-  } else if constexpr (std::is_same_v<T, float32_t>) {
-    return static_cast<float32_t>(idx * 1.5f + 0.5f);
-  } else if constexpr (std::is_same_v<T, float64_t>) {
-    return static_cast<float64_t>(idx * 1.5 + 0.5);
-  } else if constexpr (std::is_same_v<T, int8_t>) {
-    return static_cast<int8_t>((idx * 7 + 3) % 127 - 64);
-  } else if constexpr (std::is_same_v<T, uint8_t>) {
-    return static_cast<uint8_t>((idx * 7 + 3) % 256);
-  } else if constexpr (std::is_same_v<T, int16_t>) {
-    return static_cast<int16_t>((idx * 100 + 50) % 32767 - 16384);
-  } else if constexpr (std::is_same_v<T, uint16_t>) {
-    return static_cast<uint16_t>((idx * 100 + 50) % 65536);
-  } else if constexpr (std::is_same_v<T, int32_t>) {
-    return static_cast<int32_t>(idx * 1000 + 500);
-  } else if constexpr (std::is_same_v<T, uint32_t>) {
-    return static_cast<uint32_t>(idx * 1000 + 500);
-  } else if constexpr (std::is_same_v<T, int64_t>) {
-    return static_cast<int64_t>(idx * 100000LL + 50000LL);
-  } else {
-    return static_cast<uint64_t>(idx * 100000ULL + 50000ULL);
-  }
-}
-
-template <typename T>
-::testing::AssertionResult values_equal(T expected, T actual) {
-  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
-    float e = static_cast<float>(expected);
-    float a = static_cast<float>(actual);
-    if (std::abs(e - a) < 0.01f) {
-      return ::testing::AssertionSuccess();
-    }
-    return ::testing::AssertionFailure()
-        << "Expected " << e << ", got " << a;
-  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
-    float e = static_cast<float>(expected);
-    float a = static_cast<float>(actual);
-    if (std::abs(e - a) < 0.01f) {
-      return ::testing::AssertionSuccess();
-    }
-    return ::testing::AssertionFailure()
-        << "Expected " << e << ", got " << a;
-  } else if constexpr (std::is_same_v<T, float32_t>) {
-    if (std::abs(expected - actual) < 1e-5f) {
-      return ::testing::AssertionSuccess();
-    }
-    return ::testing::AssertionFailure()
-        << "Expected " << expected << ", got " << actual;
-  } else if constexpr (std::is_same_v<T, float64_t>) {
-    if (std::abs(expected - actual) < 1e-10) {
-      return ::testing::AssertionSuccess();
-    }
-    return ::testing::AssertionFailure()
-        << "Expected " << expected << ", got " << actual;
-  } else {
-    if (expected == actual) {
-      return ::testing::AssertionSuccess();
-    }
-    return ::testing::AssertionFailure()
-        << "Expected " << static_cast<long long>(expected)
-        << ", got " << static_cast<long long>(actual);
-  }
-}
-
-template <typename T>
-T* alloc_aligned(size_t count) {
-  void* ptr = std::aligned_alloc(DEFAULT_ALIGNMENT, count * sizeof(T));
-  return static_cast<T*>(ptr);
-}
-
-} // namespace test_utils
 
 // ============================================================================
 // Test Fixture
@@ -134,15 +56,7 @@ protected:
   T* aligned_out_{};
 };
 
-using TestedTypes = ::testing::Types<
-    float32_t, float64_t, int8_t, uint8_t, int16_t, uint16_t,
-    int32_t, uint32_t, int64_t, uint64_t, vecops::float16_t
-#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    , vecops::bfloat16_t
-#endif
->;
-
-TYPED_TEST_SUITE(VecLoadStoreTest, TestedTypes);
+TYPED_TEST_SUITE(VecLoadStoreTest, test_utils::AllVecDataTypes);
 
 // ============================================================================
 // Size Verification Tests

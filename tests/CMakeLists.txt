@@ -139,7 +139,9 @@ add_multiarch_executable(AttachmentTest
 set(VECOPS_VEC_TESTS BasicTest LoadStoreTest ArithTest ConversionTest ShuffleTest MaskTest MaskConversionsTest)
 foreach(TEST ${VECOPS_VEC_TESTS})
     add_multiarch_executable(Vec${TEST}
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/${TEST}.cpp
+        FILES
+            ${CMAKE_CURRENT_SOURCE_DIR}/vec/${TEST}.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/vec/TestUtils.cpp
         ARCH ${VECOPS_ARCH_LIST}
     )
 endforeach()

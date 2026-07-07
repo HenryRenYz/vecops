@@ -17,169 +17,11 @@
 #include <limits>
 #include <type_traits>
 
+#include "TestUtils.h"
 #include "vecops/vec/Vec.h"
 
 using namespace vecops;
 using namespace vecops::vec;
-
-// ============================================================================
-// Helper utilities
-// ============================================================================
-
-namespace test_utils {
-
-template <typename T>
-constexpr T get_test_value(int idx) {
-  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
-    return static_cast<vecops::bfloat16_t>(static_cast<float>(idx * 1.5f + 0.5f));
-  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
-    return static_cast<vecops::float16_t>(static_cast<float>(idx * 1.5f + 0.5f));
-  } else if constexpr (std::is_same_v<T, float32_t>) {
-    return static_cast<float32_t>(idx * 1.5f + 0.5f);
-  } else if constexpr (std::is_same_v<T, float64_t>) {
-    return static_cast<float64_t>(idx * 1.5 + 0.5);
-  } else if constexpr (std::is_same_v<T, int8_t>) {
-    return static_cast<int8_t>((idx * 7 + 3) % 127 - 64);
-  } else if constexpr (std::is_same_v<T, uint8_t>) {
-    return static_cast<uint8_t>((idx * 7 + 3) % 256);
-  } else if constexpr (std::is_same_v<T, int16_t>) {
-    return static_cast<int16_t>((idx * 100 + 50) % 32767 - 16384);
-  } else if constexpr (std::is_same_v<T, uint16_t>) {
-    return static_cast<uint16_t>((idx * 100 + 50) % 65536);
-  } else if constexpr (std::is_same_v<T, int32_t>) {
-    return static_cast<int32_t>(idx * 1000 + 500);
-  } else if constexpr (std::is_same_v<T, uint32_t>) {
-    return static_cast<uint32_t>(idx * 1000 + 500);
-  } else if constexpr (std::is_same_v<T, int64_t>) {
-    return static_cast<int64_t>(idx * 100000LL + 50000LL);
-  } else if constexpr (std::is_same_v<T, uint64_t>) {
-    return static_cast<uint64_t>(idx * 100000ULL + 50000ULL);
-  }
-}
-
-template <typename T>
-constexpr T get_test_value_b(int idx) {
-  return get_test_value<T>(idx + 50);
-}
-
-template <typename T>
-::testing::AssertionResult values_equal(T expected, T actual) {
-  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
-    float e = static_cast<float>(expected);
-    float a = static_cast<float>(actual);
-    if (std::abs(e - a) < 0.01f) return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure() << "Expected " << e << ", got " << a;
-  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
-    float e = static_cast<float>(expected);
-    float a = static_cast<float>(actual);
-    if (std::abs(e - a) < 0.01f) return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure() << "Expected " << e << ", got " << a;
-  } else if constexpr (std::is_same_v<T, float32_t>) {
-    if (std::abs(expected - actual) < 1e-5f) return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure() << "Expected " << expected << ", got " << actual;
-  } else if constexpr (std::is_same_v<T, float64_t>) {
-    if (std::abs(expected - actual) < 1e-10) return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure() << "Expected " << expected << ", got " << actual;
-  } else {
-    if (expected == actual) return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure()
-        << "Expected " << static_cast<long long>(expected)
-        << ", got " << static_cast<long long>(actual);
-  }
-}
-
-template <typename T>
-T* alloc_aligned(size_t count) {
-  void* ptr = std::aligned_alloc(DEFAULT_ALIGNMENT, count * sizeof(T));
-  return static_cast<T*>(ptr);
-}
-
-// Arithmetic helpers: compute expected result element-wise
-template <typename T> T scalar_add(T a, T b) { return a + b; }
-template <typename T> T scalar_sub(T a, T b) { return a - b; }
-template <typename T> T scalar_mul(T a, T b) { return a * b; }
-
-template <typename T>
-T scalar_div(T a, T b) {
-  if constexpr (vecops::is_float<T>) return a / b;
-  else return static_cast<T>(0);
-}
-
-template <typename T>
-T scalar_max(T a, T b) {
-  if constexpr (vecops::is_float<T>) return std::max(a, b);
-  else return (a > b) ? a : b;
-}
-
-template <typename T>
-T scalar_min(T a, T b) {
-  if constexpr (vecops::is_float<T>) return std::min(a, b);
-  else return (a < b) ? a : b;
-}
-
-template <typename T> T scalar_neg(T a) { return -a; }
-
-template <typename T>
-T scalar_abs(T a) {
-  if constexpr (vecops::is_float<T>) return std::fabs(a);
-  else return (a < T{}) ? -a : a;
-}
-
-template <typename T>
-T scalar_bit_and(T a, T b) {
-  using U = std::make_unsigned_t<T>;
-  return static_cast<T>(static_cast<U>(a) & static_cast<U>(b));
-}
-
-template <typename T>
-T scalar_bit_or(T a, T b) {
-  using U = std::make_unsigned_t<T>;
-  return static_cast<T>(static_cast<U>(a) | static_cast<U>(b));
-}
-
-template <typename T>
-T scalar_bit_xor(T a, T b) {
-  using U = std::make_unsigned_t<T>;
-  return static_cast<T>(static_cast<U>(a) ^ static_cast<U>(b));
-}
-
-template <typename T>
-T scalar_bit_andnot(T a, T b) {
-  using U = std::make_unsigned_t<T>;
-  return static_cast<T>((~static_cast<U>(a)) & static_cast<U>(b));
-}
-
-template <typename T>
-T scalar_bit_not(T a) {
-  using U = std::make_unsigned_t<T>;
-  return static_cast<T>(~static_cast<U>(a));
-}
-
-template <typename T>
-T scalar_bit_shl(T a, int count) {
-  using U = std::make_unsigned_t<T>;
-  if (count >= static_cast<int>(sizeof(T) * 8)) return T{0};
-  if (count < 0) return a;
-  return static_cast<T>(static_cast<U>(a) << count);
-}
-
-template <typename T>
-T scalar_bit_shr(T a, int count) {
-  if (count >= static_cast<int>(sizeof(T) * 8)) {
-    if constexpr (std::is_signed_v<T>) return (a < 0) ? static_cast<T>(-1) : T{0};
-    else return T{0};
-  }
-  if (count < 0) return a;
-  return a >> count;
-}
-
-template <typename T>
-T scalar_sqrt(T a) {
-  if constexpr (vecops::is_float<T>) return std::sqrt((float64_t)a);
-  else return static_cast<T>(0);
-}
-
-} // namespace test_utils
 
 // ============================================================================
 // Test Fixture
@@ -220,17 +62,7 @@ protected:
   T* b_data_{};
 };
 
-using AllTypes = ::testing::Types<
-    float32_t, float64_t,
-    int8_t, uint8_t, int16_t, uint16_t,
-    int32_t, uint32_t, int64_t, uint64_t,
-    vecops::float16_t
-#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    , vecops::bfloat16_t
-#endif
->;
-
-TYPED_TEST_SUITE(VecArithTest, AllTypes);
+TYPED_TEST_SUITE(VecArithTest, test_utils::AllVecDataTypes);
 
 // ============================================================================
 // add

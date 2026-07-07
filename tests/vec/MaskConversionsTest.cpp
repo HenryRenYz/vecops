@@ -11,46 +11,11 @@
 #include <cstring>
 #include <vector>
 
+#include "TestUtils.h"
 #include "vecops/vec/Vec.h"
 
 using namespace vecops;
 using namespace vecops::vec;
-
-// ============================================================================
-// Helper utilities
-// ============================================================================
-
-namespace test_utils {
-
-template <typename T>
-T* alloc_aligned(size_t count) {
-  void* ptr = std::aligned_alloc(DEFAULT_ALIGNMENT, count * sizeof(T));
-  return static_cast<T*>(ptr);
-}
-
-// Create a bool pattern of `size` elements, where bit i is set
-// if (i & mask_bits) == match_val.
-std::vector<bool> make_pattern(nint_t size, int mask_bits, int match_val) {
-  std::vector<bool> pattern((size_t)size);
-  for (nint_t i = 0; i < size; ++i)
-    pattern[(size_t)i] = ((int)i & mask_bits) == match_val;
-  return pattern;
-}
-
-// Create a Mask<Tag> from a std::vector<bool> pattern.
-// Uses the tag's element type to create data: 1 for true, 0 for false.
-template <typename Tag>
-Mask<Tag> make_mask(Tag tt, const std::vector<bool>& pattern) {
-  using T = TypeOf<Tag>;
-  auto* buf = alloc_aligned<T>((size_t)size(tt));
-  for (nint_t i = 0; i < size(tt); ++i)
-    buf[i] = pattern[(size_t)i] ? static_cast<T>(1) : static_cast<T>(0);
-  auto v = loadu(tt, buf);
-  std::free(buf);
-  return cmpeq(v, fill(tt, static_cast<T>(1)));
-}
-
-} // namespace test_utils
 
 // ============================================================================
 // Case structs for parameterizing tests at specific POW2 vector-width levels
