@@ -1922,6 +1922,15 @@ VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
   return word::bitcast(tr, Vec<decltype(t1)>{r});
 }
 
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 8), TL_IF(sizeof(TypeOf<T>) <= 2)>
+VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
+  Tag<uint8_t, 16> t1;
+  Half<T> tr;
+  auto u = word::bitcast(t1, v);
+  auto r = _mm_srli_epi64(u.v, 32);
+  return word::bitcast(tr, Vec<decltype(t1)>{r});
+}
+
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 8), TL_IF(is_any<TypeOf<T>, float32_t>)>
 VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
   return word::local_shuf<0, 0, 0, 1>(v);

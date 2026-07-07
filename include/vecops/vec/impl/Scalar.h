@@ -1260,7 +1260,7 @@ VECOPS_VFUNC Mask<T> isinf(V v, Mask<T> m) {
 //                          Data type conversions                             //
 /* ************************************************************************** */
 namespace details {
-template <typename T, typename V, TL_IF(num_words(T{}) <= 1), TL_IF(is_default_impl(Vec2Tag<V>()))>
+template <typename T, typename V, TL_IF(is_default_impl(Vec2Tag<V>()))>
 VECOPS_VFUNC Vec<T> convert_impl(T t, V v) {
   using TOut = TypeOf<T>;
   using TIn = TypeOf<Vec2Tag<V>>;
