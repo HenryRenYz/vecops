@@ -816,18 +816,6 @@ template <typename Tag>
 using Vec = typename VecDefs<typename Tag::Type, Tag::N, Tag::POW2>::VecType;
 
 /**
- * @brief Macro to extract the vector type from a tag expression.
- * 
- * Useful when the tag is a complex expression, e.g., VecOf(t) where t is a Tag.
- */
-#define VecOf(x) Vec<decltype(x)>
-
-/**
- * @brief Macro to extract the mask type from a tag expression.
- */
-#define MaskOf(x) Mask<decltype(x)>
-
-/**
  * @brief Type alias for the mask storage type.
  * 
  * @warning This is a forwarded type and cannot be used for template argument

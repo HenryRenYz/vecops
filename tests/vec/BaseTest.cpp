@@ -298,16 +298,16 @@ TEST(VecBaseTest, MaskTypeAlias) {
   EXPECT_TRUE((std::is_same_v<MaskT, ScalarBitSet<4, 16>>));
 }
 
-TEST(VecBaseTest, VecOfMacro) {
+TEST(VecBaseTest, VecAliasFromTagExpression) {
   Tag<float32_t, 16> t;
   
-  EXPECT_TRUE((std::is_same_v<VecOf(t), ScalarArray<float32_t, 16>>));
+  EXPECT_TRUE((std::is_same_v<Vec<decltype(t)>, ScalarArray<float32_t, 16>>));
 }
 
-TEST(VecBaseTest, MaskOfMacro) {
+TEST(VecBaseTest, MaskAliasFromTagExpression) {
   Tag<float32_t, 16> t;
   
-  EXPECT_TRUE((std::is_same_v<MaskOf(t), ScalarBitSet<4, 16>>));
+  EXPECT_TRUE((std::is_same_v<Mask<decltype(t)>, ScalarBitSet<4, 16>>));
 }
 
 // ============================================================================
@@ -316,7 +316,7 @@ TEST(VecBaseTest, MaskOfMacro) {
 
 TEST(VecBaseTest, GetWordStatic) {
   Tag<float32_t, 16> t;
-  VecOf(t) v{};
+  Vec<decltype(t)> v{};
   
   v[0] = 1.0f;
   v[1] = 2.0f;
@@ -329,8 +329,8 @@ TEST(VecBaseTest, GetWordStatic) {
 
 TEST(VecBaseTest, SetWordStatic) {
   Tag<float32_t, 16> t;
-  VecOf(t) v{};
-  VecOf(t) new_word{};
+  Vec<decltype(t)> v{};
+  Vec<decltype(t)> new_word{};
   
   new_word[0] = 10.0f;
   new_word[1] = 20.0f;
@@ -343,7 +343,7 @@ TEST(VecBaseTest, SetWordStatic) {
 
 TEST(VecBaseTest, GetWordRuntime) {
   Tag<float32_t, 16> t;
-  VecOf(t) v{};
+  Vec<decltype(t)> v{};
   
   v[0] = 1.0f;
   v[1] = 2.0f;
@@ -356,8 +356,8 @@ TEST(VecBaseTest, GetWordRuntime) {
 
 TEST(VecBaseTest, SetWordRuntime) {
   Tag<float32_t, 16> t;
-  VecOf(t) v{};
-  VecOf(t) new_word{};
+  Vec<decltype(t)> v{};
+  Vec<decltype(t)> new_word{};
   
   new_word[0] = 10.0f;
   new_word[1] = 20.0f;
@@ -374,7 +374,7 @@ TEST(VecBaseTest, SetWordRuntime) {
 
 TEST(VecBaseTest, GetWordMaskStatic) {
   Tag<float32_t, 16> t;
-  MaskOf(t) m{};
+  Mask<decltype(t)> m{};
   
   m.set(0);
   m.set(2);
@@ -388,8 +388,8 @@ TEST(VecBaseTest, GetWordMaskStatic) {
 
 TEST(VecBaseTest, SetWordMaskStatic) {
   Tag<float32_t, 16> t;
-  MaskOf(t) m{};
-  MaskOf(t) new_mask{};
+  Mask<decltype(t)> m{};
+  Mask<decltype(t)> new_mask{};
   
   new_mask.set(0);
   new_mask.set(3);

@@ -182,14 +182,14 @@ TEST(SVETest, MaskTypeAliasFourWord) {
   EXPECT_TRUE((std::is_same_v<M, svboolx4_t>));
 }
 
-TEST(SVETest, VecOfMacro) {
+TEST(SVETest, VecAliasFromTagExpression) {
   ScalableTag<float32_t> t;
-  EXPECT_TRUE((std::is_same_v<VecOf(t), svfloat32_t>));
+  EXPECT_TRUE((std::is_same_v<Vec<decltype(t)>, svfloat32_t>));
 }
 
-TEST(SVETest, MaskOfMacro) {
+TEST(SVETest, MaskAliasFromTagExpression) {
   ScalableTag<float32_t> t;
-  EXPECT_TRUE((std::is_same_v<MaskOf(t), svbool_t>));
+  EXPECT_TRUE((std::is_same_v<Mask<decltype(t)>, svbool_t>));
 }
 
 // ============================================================================
@@ -580,14 +580,14 @@ TEST(SVETest, MaskTypeAliasFractional) {
   EXPECT_TRUE((std::is_same_v<M, svbool_t>));
 }
 
-TEST(SVETest, VecOfMacroFractional) {
+TEST(SVETest, VecAliasFromFractionalTagExpression) {
   ScalableTag<float32_t, -1> t;
-  EXPECT_TRUE((std::is_same_v<VecOf(t), svfloat32_t>));
+  EXPECT_TRUE((std::is_same_v<Vec<decltype(t)>, svfloat32_t>));
 }
 
-TEST(SVETest, MaskOfMacroFractional) {
+TEST(SVETest, MaskAliasFromFractionalTagExpression) {
   ScalableTag<float32_t, -1> t;
-  EXPECT_TRUE((std::is_same_v<MaskOf(t), svbool_t>));
+  EXPECT_TRUE((std::is_same_v<Mask<decltype(t)>, svbool_t>));
 }
 
 TEST(SVETest, HalfFromPOW2_0) {
