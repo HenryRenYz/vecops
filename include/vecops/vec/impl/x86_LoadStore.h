@@ -8,6 +8,7 @@
 #include "./x86_Types.h"
 #include "./x86_Basic.h"
 #include "./x86_Arithmetic.h"
+#include "./x86_Conversions.h"
 
 //@formatter:off
 namespace vecops::vec::CPU_CAPABILITY {
@@ -63,78 +64,6 @@ VECOPS_VFUNC Mask<T> restrict_mask_range(T t, Mask<T> m) {
   return m;
 }
 #endif // HAS_AVX512DQ
-
-template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> i32_set1(T, int32_t x) {
-  Vec<T> r;
-  if constexpr (T::Bytes <= 16)
-    r.v = _mm_set1_epi32(x);
-  else if constexpr (T::Bytes == 32)
-    r.v = _mm256_set1_epi32(x);
-  else
-    r.v = _mm512_set1_epi32(x);
-  return r;
-}
-
-template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> i32_add(Vec<T> a, Vec<T> b) {
-  if constexpr (T::Bytes <= 16)
-    return _mm_add_epi32(a.v, b.v);
-  else if constexpr (T::Bytes == 32)
-    return _mm256_add_epi32(a.v, b.v);
-  else
-    return _mm512_add_epi32(a.v, b.v);
-}
-
-template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> i32_and(Vec<T> a, Vec<T> b) {
-  if constexpr (T::Bytes <= 16)
-    return _mm_and_si128(a.v, b.v);
-  else if constexpr (T::Bytes == 32)
-    return _mm256_and_si256(a.v, b.v);
-  else
-    return _mm512_and_si512(a.v, b.v);
-}
-
-template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> i32_andnot(Vec<T> a, Vec<T> b) {
-  if constexpr (T::Bytes <= 16)
-    return _mm_andnot_si128(a.v, b.v);
-  else if constexpr (T::Bytes == 32)
-    return _mm256_andnot_si256(a.v, b.v);
-  else
-    return _mm512_andnot_si512(a.v, b.v);
-}
-
-template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> i32_or(Vec<T> a, Vec<T> b) {
-  if constexpr (T::Bytes <= 16)
-    return _mm_or_si128(a.v, b.v);
-  else if constexpr (T::Bytes == 32)
-    return _mm256_or_si256(a.v, b.v);
-  else
-    return _mm512_or_si512(a.v, b.v);
-}
-
-template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> i32_xor(Vec<T> a, Vec<T> b) {
-  if constexpr (T::Bytes <= 16)
-    return _mm_xor_si128(a.v, b.v);
-  else if constexpr (T::Bytes == 32)
-    return _mm256_xor_si256(a.v, b.v);
-  else
-    return _mm512_xor_si512(a.v, b.v);
-}
-
-template <int Shift, TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> i32_slli(Vec<T> a) {
-  if constexpr (T::Bytes <= 16)
-    return _mm_slli_epi32(a.v, Shift);
-  else if constexpr (T::Bytes == 32)
-    return _mm256_slli_epi32(a.v, Shift);
-  else
-    return _mm512_slli_epi32(a.v, Shift);
-}
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> i32_srlv(Vec<T> a, Vec<T> shift) {
@@ -266,23 +195,21 @@ VECOPS_VFUNC bool mask_all(T t, Mask<T> m) {
 template <TLV_DECL_TAG(TI)>
 VECOPS_VFUNC void subint1_offsets(TI t_i, const void* p, Vec<TI> i,
                                   Vec<TI>& i_base, Vec<TI>& i_sel) {
-  auto r_32 = details::i32_set1(t_i, int32_t(nuint_t(p) & 3));
-  auto i_b32 = details::i32_add<TI>(i, r_32);
-  i_base = details::i32_and<TI>(i_b32, details::i32_set1(t_i, ~int32_t(3)));
-  i_sel = details::i32_slli<3, TI>(details::i32_and<TI>(i_b32, details::i32_set1(t_i, 3)));
+  auto r_32 = word::fill(t_i, int32_t(nuint_t(p) & 3));
+  auto i_b32 = word::add(i, r_32);
+  i_base = word::bit_and(i_b32, word::fill(t_i, ~int32_t(3)));
+  i_sel = word::bit_shl<3>(word::bit_and(i_b32, word::fill(t_i, 3)));
 }
 
 template <TLV_DECL_TAG(TI)>
 VECOPS_VFUNC void subint2_offsets(TI t_i, const void* p, Vec<TI> i,
                                   Vec<TI>& i_base, Vec<TI>& i_sel) {
-  auto r_32 = details::i32_set1(t_i, int32_t(nuint_t(p) & 3));
-  auto i_b32 = details::i32_add<TI>(details::i32_slli<1, TI>(i), r_32);
-  auto is_3 = details::i32_and<TI>(
-      details::i32_and<TI>(i_b32, details::i32_slli<1, TI>(i_b32)),
-      details::i32_set1(t_i, 2));
-  auto m_tail = details::i32_xor<TI>(is_3, details::i32_set1(t_i, 3));
-  i_base = details::i32_andnot<TI>(m_tail, i_b32);
-  i_sel = details::i32_slli<3, TI>(details::i32_and<TI>(i_b32, m_tail));
+  auto r_32 = word::fill(t_i, int32_t(nuint_t(p) & 3));
+  auto i_b32 = word::add(word::bit_shl<1>(i), r_32);
+  auto is_3 = word::bit_and(word::bit_and(i_b32, word::bit_shl<1>(i_b32)), word::fill(t_i, 2));
+  auto m_tail = word::bit_xor(is_3, word::fill(t_i, 3));
+  i_base = word::bit_andnot(m_tail, i_b32);
+  i_sel = word::bit_shl<3>(word::bit_and(i_b32, m_tail));
 }
 
 template <TLV_DECL_TAG(TI)>
@@ -293,7 +220,7 @@ VECOPS_X86_NO_ASAN VECOPS_VFUNC Vec<TI> subint1_gather_i32(TI t_i, const void* p
   Vec<TI> i_base, i_sel;
   details::subint1_offsets(t_i, p, i, i_base, i_sel);
   auto g = details::i32_gather_bytes(t_i, reinterpret_cast<const void*>(nuint_t(p) & ~nuint_t(3)), i_base);
-  return details::i32_and<TI>(details::i32_srlv<TI>(g, i_sel), details::i32_set1(t_i, 0xff));
+  return word::bit_and(details::i32_srlv<TI>(g, i_sel), word::fill(t_i, 0xff));
 #endif
 }
 
@@ -301,16 +228,16 @@ template <TLV_DECL_TAG(TI)>
 VECOPS_X86_NO_ASAN VECOPS_VFUNC Vec<TI> subint1_gather_i32(
     TI t_i, const void* p, Vec<TI> i, Mask<TI> m, Vec<TI> default_v) {
   m = details::restrict_mask_range(t_i, m);
-  auto zero = details::i32_set1(t_i, 0);
+  auto zero = word::fill(t_i, 0);
 #ifdef VECOPS_X86_ENABLE_UNSAFE_GATHER
   auto g = details::i32_gather_bytes(t_i, p, i, m, zero);
-  g = details::i32_and<TI>(g, details::i32_set1(t_i, 0xff));
+  g = word::bit_and(g, word::fill(t_i, 0xff));
 #else
   Vec<TI> i_base, i_sel;
   details::subint1_offsets(t_i, p, i, i_base, i_sel);
   auto g = details::i32_gather_bytes(
       t_i, reinterpret_cast<const void*>(nuint_t(p) & ~nuint_t(3)), i_base, m, zero);
-  g = details::i32_and<TI>(details::i32_srlv<TI>(g, i_sel), details::i32_set1(t_i, 0xff));
+  g = word::bit_and(details::i32_srlv<TI>(g, i_sel), word::fill(t_i, 0xff));
 #endif
   return word::blend(default_v, m, g);
 }
@@ -318,13 +245,13 @@ VECOPS_X86_NO_ASAN VECOPS_VFUNC Vec<TI> subint1_gather_i32(
 template <TLV_DECL_TAG(TI)>
 VECOPS_X86_NO_ASAN VECOPS_VFUNC Vec<TI> subint2_gather_i32(TI t_i, const void* p, Vec<TI> i) {
 #ifdef VECOPS_X86_ENABLE_UNSAFE_GATHER
-  auto i_b = details::i32_slli<1, TI>(i);
+  auto i_b = word::bit_shl<1>(i);
   return details::i32_gather_bytes(t_i, p, i_b);
 #else
   Vec<TI> i_base, i_sel;
   details::subint2_offsets(t_i, p, i, i_base, i_sel);
   auto g = details::i32_gather_bytes(t_i, reinterpret_cast<const void*>(nuint_t(p) & ~nuint_t(3)), i_base);
-  return details::i32_and<TI>(details::i32_srlv<TI>(g, i_sel), details::i32_set1(t_i, 0xffff));
+  return word::bit_and(details::i32_srlv<TI>(g, i_sel), word::fill(t_i, 0xffff));
 #endif
 }
 
@@ -332,43 +259,29 @@ template <TLV_DECL_TAG(TI)>
 VECOPS_X86_NO_ASAN VECOPS_VFUNC Vec<TI> subint2_gather_i32(
     TI t_i, const void* p, Vec<TI> i, Mask<TI> m, Vec<TI> default_v) {
   m = details::restrict_mask_range(t_i, m);
-  auto zero = details::i32_set1(t_i, 0);
+  auto zero = word::fill(t_i, 0);
 #ifdef VECOPS_X86_ENABLE_UNSAFE_GATHER
-  auto i_b = details::i32_slli<1, TI>(i);
+  auto i_b = word::bit_shl<1>(i);
   auto g = details::i32_gather_bytes(t_i, p, i_b, m, zero);
-  g = details::i32_and<TI>(g, details::i32_set1(t_i, 0xffff));
+  g = word::bit_and(g, word::fill(t_i, 0xffff));
 #else
   Vec<TI> i_base, i_sel;
   details::subint2_offsets(t_i, p, i, i_base, i_sel);
   auto g = details::i32_gather_bytes(
       t_i, reinterpret_cast<const void*>(nuint_t(p) & ~nuint_t(3)), i_base, m, zero);
-  g = details::i32_and<TI>(details::i32_srlv<TI>(g, i_sel), details::i32_set1(t_i, 0xffff));
+  g = word::bit_and(details::i32_srlv<TI>(g, i_sel), word::fill(t_i, 0xffff));
 #endif
   return word::blend(default_v, m, g);
 }
 
 template <TLV_DECL_TAG(TI), TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<TI> subint1_as_i32(TI, T, Vec<T> v) {
-  Vec<TI> r;
-  if constexpr (TI::Bytes <= 16)
-    r.v = _mm_cvtepu8_epi32(v.v);
-  else if constexpr (TI::Bytes == 32)
-    r.v = _mm256_cvtepu8_epi32(v.v);
-  else
-    r.v = _mm512_cvtepu8_epi32(v.v);
-  return r;
+VECOPS_VFUNC Vec<TI> subint1_as_i32(TI t_i, T, Vec<T> v) {
+  return word::promote(t_i, word::bitcast(Rebind<uint8_t, TI>{}, v));
 }
 
 template <TLV_DECL_TAG(TI), TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<TI> subint2_as_i32(TI, T, Vec<T> v) {
-  Vec<TI> r;
-  if constexpr (TI::Bytes <= 16)
-    r.v = _mm_cvtepu16_epi32(v.v);
-  else if constexpr (TI::Bytes == 32)
-    r.v = _mm256_cvtepu16_epi32(v.v);
-  else
-    r.v = _mm512_cvtepu16_epi32(v.v);
-  return r;
+VECOPS_VFUNC Vec<TI> subint2_as_i32(TI t_i, T, Vec<T> v) {
+  return word::promote(t_i, word::bitcast(Rebind<uint16_t, TI>{}, v));
 }
 
 #ifdef HAS_AVX512F
@@ -388,18 +301,18 @@ VECOPS_X86_NO_ASAN VECOPS_VFUNC bool subint_scatter_i32(
 
   auto vals = [&] {
     if constexpr (SubBytes == 1)
-      return details::i32_and<TI>(details::subint1_as_i32(t_i, t, v), details::i32_set1(t_i, 0xff));
+      return word::bit_and(subint1_as_i32(t_i, t, v), word::fill(t_i, 0xff));
     else
-      return details::i32_and<TI>(details::subint2_as_i32(t_i, t, v), details::i32_set1(t_i, 0xffff));
+      return word::bit_and(subint2_as_i32(t_i, t, v), word::fill(t_i, 0xffff));
   }();
-  auto field_bits = details::i32_set1(t_i, SubBytes == 1 ? 0xff : 0xffff);
+  auto field_bits = word::fill(t_i, SubBytes == 1 ? 0xff : 0xffff);
   auto field_mask = details::i32_sllv<TI>(field_bits, i_sel);
   auto payload = details::i32_sllv<TI>(vals, i_sel);
-  auto conflict_key = details::i32_or<TI>(i_base, i_sel);
+  auto conflict_key = word::bit_or(i_base, i_sel);
   auto conflict = details::i32_test_nonzero_mask(t_i, details::i32_conflict(t_i, conflict_key));
   const void* p32_const = reinterpret_cast<const void*>(nuint_t(p) & ~nuint_t(3));
   void* p32 = reinterpret_cast<void*>(nuint_t(p) & ~nuint_t(3));
-  auto zero = details::i32_set1(t_i, 0);
+  auto zero = word::fill(t_i, 0);
 
   auto do_pass = [&](int32_t shift) -> bool {
     auto group = details::i32_cmpeq_mask(t_i, i_sel, shift);
@@ -407,7 +320,7 @@ VECOPS_X86_NO_ASAN VECOPS_VFUNC bool subint_scatter_i32(
     if (!details::mask_any(t_i, pass)) return true;
     if (details::mask_any(t_i, details::mask_and(t_i, conflict, pass))) return false;
     auto g = details::i32_gather_bytes(t_i, p32_const, i_base, pass, zero);
-    auto d = details::i32_or<TI>(details::i32_andnot<TI>(field_mask, g), payload);
+    auto d = word::bit_or(word::bit_andnot(field_mask, g), payload);
     if (details::mask_all(t_i, pass))
       details::i32_scatter_bytes(t_i, p32, i_base, d);
     else
