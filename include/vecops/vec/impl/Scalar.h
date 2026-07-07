@@ -267,7 +267,7 @@ VECOPS_VFUNC V blend(V v0, Mask<T> m, V v1) {
  *
  * Returns a vector of half the size containing the upper half of elements.
  */
-template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(is_default_impl(T()))>
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) <= 1)>
 VECOPS_VFUNC V upper(T t, Vec<T> v) {
   static_assert(is_word_vec(t));
   constexpr Half<T> th;
@@ -283,7 +283,7 @@ VECOPS_VFUNC V upper(T t, Vec<T> v) {
  *
  * Returns a vector of half the size containing the lower half of elements.
  */
-template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(is_default_impl(T()))>
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) <= 1)>
 VECOPS_VFUNC V lower(T t, Vec<T> v) {
   static_assert(is_word_vec(t));
   constexpr Half<T> th;
@@ -335,7 +335,7 @@ VECOPS_VFUNC V odd(T t, Vec<T> v) {
  *
  * Returns a vector of double the size with v_lo in lower half and v_hi in upper half.
  */
-template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(is_vec<V>)>
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) <= 1 && is_vec<V>)>
 VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
   static_assert(is_default_impl(t) || is_scalable(t));
   static_assert(is_word_vec(t));
@@ -344,6 +344,42 @@ VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
   for (nint_t i = 0; i < size(th); ++i) {
     u[i] = v_lo[i];
     u[i + size(th)] = v_hi[i];
+  }
+  return u;
+}
+
+// multi-word vector lower/upper/concat
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) > 1)>
+VECOPS_VFUNC V lower(T t, Vec<T> v) {
+  constexpr Half<T> th;
+  if constexpr (num_words(th) == 1) {
+    return v[0];
+  } else {
+    V u;
+    for (nint_t i = 0; i < num_words(th); ++i) u[i] = v[i];
+    return u;
+  }
+}
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) > 1)>
+VECOPS_VFUNC V upper(T t, Vec<T> v) {
+  constexpr Half<T> th;
+  if constexpr (num_words(th) == 1) {
+    return v[num_words(T{}) - 1];
+  } else {
+    V u;
+    for (nint_t i = 0; i < num_words(th); ++i) u[i] = v[i + num_words(th)];
+    return u;
+  }
+}
+template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) > 1)>
+VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
+  constexpr Half<T> th;
+  Vec<T> u;
+  if constexpr (num_words(th) == 1) {
+    u[0] = v_lo; u[1] = v_hi;
+  } else {
+    for (nint_t i = 0; i < num_words(th); ++i) u[i] = v_lo[i];
+    for (nint_t i = 0; i < num_words(th); ++i) u[i + num_words(th)] = v_hi[i];
   }
   return u;
 }
@@ -706,16 +742,22 @@ void store(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
  * @return Gathered vector
  */
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i) {
-  static_assert(is_default_impl(t) || is_scalable(t));
-  static_assert(is_default_impl(Rebind<Index<TypeOf<T>>, T>()));
-  static_assert(is_word_vec(t));
-  static_assert(is_word_vec(Rebind<Index<TypeOf<T>>, T>()));
-  Vec<T> v;
-  for (nint_t j = 0; j < size(t); ++j) {
-    v[j] = p[(nint_t) i[j]];
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
+  Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
+  if constexpr (num_words(t_i) == 1) {
+    static_assert(is_default_impl(t) || is_scalable(t));
+    static_assert(is_word_vec(t));
+    Vec<T> v;
+    for (nint_t j = 0; j < size(t); ++j) {
+      v[j] = p[(nint_t) i[j]];
+    }
+    return v;
+  } else {
+    Half<T> t_h;
+    auto lo = word::gather(t_h, p, word::lower(t_i, i));
+    auto hi = word::gather(t_h, p, word::upper(t_i, i));
+    return word::concat(t, lo, hi);
   }
-  return v;
 }
 
 /**
@@ -724,39 +766,29 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>,
  * @return Gathered vector
  */
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
-  static_assert(is_default_impl(t) || is_scalable(t));
-  static_assert(is_default_impl(Rebind<Index<TypeOf<T>>, T>()));
-  static_assert(is_word_vec(t));
-  static_assert(is_word_vec(Rebind<Index<TypeOf<T>>, T>()));
-  VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
-  Vec<T> v;
-  nint_t j;
-  // Gather n elements
-  for (j = 0; j < n; ++j) {
-    v[j] = p[(nint_t) i[j]];
-  }
-  // Fill remaining from default
-  for(; j < size(t); ++j) {
-    v[j] = default_v[j];
-  }
-  return v;
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
+  auto m = word::mwhilelt(t, 0, n);
+  return word::gather(t, p, i, m, default_v);
 }
 
 /**
  * @brief Masked gather (scalar implementation).
  */
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
-  static_assert(is_default_impl(t) || is_scalable(t));
-  static_assert(is_default_impl(Rebind<Index<TypeOf<T>>, T>()));
-  static_assert(is_word_vec(t));
-  static_assert(is_word_vec(Rebind<Index<TypeOf<T>>, T>()));
-  Vec<T> v;
-  for (nint_t j = 0; j < size(t); ++j) {
-    v[j] = m[j] ? p[(nint_t) i[j]] : default_v[j];
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+  Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
+  if constexpr (num_words(t_i) == 1) {
+    static_assert(is_default_impl(t) || is_scalable(t));
+    static_assert(is_word_vec(t));
+    Vec<T> v;
+    for (nint_t j = 0; j < size(t); ++j) {
+      v[j] = m[j] ? p[(nint_t) i[j]] : default_v[j];
+    }
+    return v;
+  } else {
+    auto g = word::gather(t, p, i);
+    return word::blend(default_v, m, g);
   }
-  return v;
 }
 
 /**
@@ -765,13 +797,29 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>,
  * For each lane j, stores v[j] to p[i[j]].
  */
 template <TLV_DECL_TAG(T)>
-void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
-  static_assert(is_default_impl(t) || is_scalable(t));
-  static_assert(is_default_impl(Rebind<Index<TypeOf<T>>, T>()));
-  static_assert(is_word_vec(t));
-  static_assert(is_word_vec(Rebind<Index<TypeOf<T>>, T>()));
-  for (nint_t j = 0; j < size(t); ++j) {
-    p[i[j]] = v[j];
+void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
+  if constexpr (num_words(t_i) == 1) {
+    static_assert(is_default_impl(t) || is_scalable(t));
+    static_assert(is_word_vec(t));
+    for (nint_t j = 0; j < size(t); ++j) {
+      p[(nint_t) i[j]] = v[j];
+    }
+  } else {
+    Half<T> t_h;
+    auto i_lo = word::lower(t_i, i);
+    auto i_hi = word::upper(t_i, i);
+    if constexpr (num_words(t) > 1) {
+      auto v_lo = word::lower(t, v);
+      auto v_hi = word::upper(t, v);
+      word::scatter(t_h, p, i_lo, v_lo);
+      word::scatter(t_h, p, i_hi, v_hi);
+    } else {
+      alignas(16) TypeOf<T> v_arr[size(t)];
+      word::storeu(t, v_arr, v);
+      word::scatter(t_h, p, i_lo, word::load(t_h, v_arr));
+      word::scatter(t_h, p, i_hi, word::load(t_h, v_arr + size(t_h)));
+    }
   }
 }
 
@@ -779,28 +827,45 @@ void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Vec<T> v) {
  * @brief Scatter first n elements (scalar implementation).
  */
 template <TLV_DECL_TAG(T)>
-void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
-  static_assert(is_default_impl(t) || is_scalable(t));
-  static_assert(is_default_impl(Rebind<Index<TypeOf<T>>, T>()));
-  static_assert(is_word_vec(t));
-  static_assert(is_word_vec(Rebind<Index<TypeOf<T>>, T>()));
-  VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
-  for (nint_t j = 0; j < n; ++j) {
-    p[i[j]] = v[j];
-  }
+void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
+  auto m = word::mwhilelt(t, 0, n);
+  word::scatter(t, p, i, m, v);
 }
 
 /**
  * @brief Masked scatter (scalar implementation).
  */
 template <TLV_DECL_TAG(T)>
-void scatter(T t, TypeOf<T>* p, Vec<Rebind<Index<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  static_assert(is_default_impl(t) || is_scalable(t));
-  static_assert(is_default_impl(Rebind<Index<TypeOf<T>>, T>()));
-  static_assert(is_word_vec(t));
-  static_assert(is_word_vec(Rebind<Index<TypeOf<T>>, T>()));
-  for (nint_t j = 0; j < size(t); ++j) {
-    if (m[j]) p[i[j]] = v[j];
+void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  Rebind<GatherScatterIndex<TypeOf<T>>, T> t_i;
+  if constexpr (num_words(t_i) == 1) {
+    static_assert(is_default_impl(t) || is_scalable(t));
+    static_assert(is_word_vec(t));
+    for (nint_t j = 0; j < size(t); ++j) {
+      if (m[j]) p[(nint_t) i[j]] = v[j];
+    }
+  } else {
+    Half<T> t_h;
+    auto i_lo = word::lower(t_i, i);
+    auto i_hi = word::upper(t_i, i);
+    if constexpr (num_words(t) > 1) {
+      auto v_lo = word::lower(t, v);
+      auto v_hi = word::upper(t, v);
+      auto m_lo = word::lower(t, m);
+      auto m_hi = word::upper(t, m);
+      word::scatter(t_h, p, i_lo, m_lo, v_lo);
+      word::scatter(t_h, p, i_hi, m_hi, v_hi);
+    } else {
+      alignas(16) TypeOf<T> v_arr[size(t)];
+      word::storeu(t, v_arr, v);
+      auto v_lo = word::load(t_h, v_arr);
+      auto v_hi = word::load(t_h, v_arr + size(t_h));
+      constexpr nint_t hs = size(t_h);
+      Mask<Half<T>> m_lo(static_cast<unsigned long long>(m.to_ullong() & ((1ULL << hs) - 1)));
+      Mask<Half<T>> m_hi(static_cast<unsigned long long>(m.to_ullong() >> hs));
+      word::scatter(t_h, p, i_lo, m_lo, v_lo);
+      word::scatter(t_h, p, i_hi, m_hi, v_hi);
+    }
   }
 }
 
@@ -1172,7 +1237,7 @@ VECOPS_VFUNC Mask<T> isinf(V v, Mask<T> m) {
 //                          Data type conversions                             //
 /* ************************************************************************** */
 namespace details {
-template <typename T, typename V, TL_IF(is_default_impl(T())), TL_IF(is_default_impl(Vec2Tag<V>()))>
+template <typename T, typename V, TL_IF(num_words(T{}) <= 1), TL_IF(is_default_impl(Vec2Tag<V>()))>
 VECOPS_VFUNC Vec<T> convert_impl(T t, V v) {
   using TOut = TypeOf<T>;
   using TIn = TypeOf<Vec2Tag<V>>;

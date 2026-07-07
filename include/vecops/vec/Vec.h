@@ -564,10 +564,14 @@ VECOPS_VFUNC void store(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
  *   auto idx = loadu(Tag<int32_t, 4>(), indices);
  *   auto v = gather(t, data, idx);  // v[i] = data[indices[i]]
  */
+template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) < 4)>
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
+  return word::gather(t, p, i);
+}
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
   using namespace details;
-  constexpr Rebind<Index<TypeOf<T>>, T> it;
+  constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
   return vmap(
       t, [=](auto tt, TypeOf<T>* pp, auto&& ii) { return word::gather(tt, pp, ii); },
       StepPointer(t, p), ShardVec(it, i)
@@ -579,10 +583,14 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
  *
  * @return Gathered vector
  */
+template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) < 4)>
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
+  return word::gather(t, p, i, n, default_v);
+}
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
   using namespace details;
-  constexpr Rebind<Index<TypeOf<T>>, T> it;
+  constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
   return vmap(
       t, n, [=](auto tt, TypeOf<T>* pp, auto&& ii, auto&& vv) { return word::gather(tt, pp, ii); },
       [=](auto tt, nint_t rem, TypeOf<T>* pp, auto&& ii, auto&& vv) { return word::gather(tt, pp, ii, rem, vv); },
@@ -597,8 +605,8 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
  *
  * @return Gathered vector
  */
-template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatterIndex<T>>, T>> i, nint_t n, TypeOf<T> default_v) {
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, TypeOf<T> default_v) {
   return vec::gather(t, p, i, n, vec::fill(t, default_v));
 }
 
@@ -612,10 +620,14 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatt
  *
  * @note May access p[index[i]] for masked-out lanes; ensure indices are valid.
  */
+template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) < 4)>
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+  return word::gather(t, p, i, m, default_v);
+}
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatterIndex<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
   using namespace details;
-  constexpr Rebind<Index<TypeOf<T>>, T> it;
+  constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
   return vmap(
       t, [=](auto tt, TypeOf<T>* pp, auto&& ii, auto&& mm, auto&& vv) { return word::gather(tt, pp, ii, mm, vv); },
       StepPointer(t, p), ShardVec(it, i), ShardMask(t, m), ShardVec(t, default_v)
@@ -627,8 +639,8 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatt
  *
  * @return Gathered vector
  */
-template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatterIndex<T>>, T>> i, Mask<T> m, TypeOf<T> default_v) {
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, TypeOf<T> default_v) {
   return vec::gather(t, p, i, m, vec::fill(t, default_v));
 }
 
@@ -644,11 +656,15 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatt
  *
  * @note Scatter operations can be significantly slower than consecutive stores.
  */
+template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) < 4)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
+  word::scatter(t, p, i, v);
+}
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatterIndex<T>>, T>> i, Vec<T> v) {
+VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
   using namespace details;
-  constexpr Rebind<Index<TypeOf<T>>, T> it;
-  return vmap(
+  constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
+  vmap(
       t, [=](auto tt, TypeOf<T>* pp, auto&& ii, auto&& vv) { word::scatter(tt, pp, ii, vv); },
       StepPointer(t, p), ShardVec(it, i), ShardVec(t, v)
   );
@@ -656,21 +672,16 @@ VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatte
 
 /**
  * @brief Scatter first n elements to memory using an index vector.
- *
- * @tparam T Element type
- * @tparam N Nominal size
- * @tparam P Size multiplier
- * @param t The vector tag
- * @param p Base pointer for scatter
- * @param i Index vector
- * @param v The vector to scatter
- * @param n Number of elements to scatter (0 <= n <= size(t))
  */
+template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) < 4)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
+  word::scatter(t, p, i, n, v);
+}
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatterIndex<T>>, T>> i, nint_t n, Vec<T> v) {
+VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
   using namespace details;
-  constexpr Rebind<Index<TypeOf<T>>, T> it;
-  return vmap(
+  constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
+  vmap(
       t, n, [=](auto tt, TypeOf<T>* pp, auto&& ii, auto&& vv) { word::scatter(tt, pp, ii, vv); },
       [=](auto tt, nint_t rem, TypeOf<T>* pp, auto&& ii, auto&& vv) { word::scatter(tt, pp, ii, rem, vv); },
       StepPointer(t, p), ShardVec(it, i), ShardVec(t, v)
@@ -682,21 +693,16 @@ VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatte
  *
  * For each lane i where mask[i] is true, stores v[i] to p[index[i]].
  * Masked-out lanes are not written.
- *
- * @tparam T Element type
- * @tparam N Nominal size
- * @tparam P Size multiplier
- * @param t The vector tag
- * @param p Base pointer for scatter
- * @param i Index vector
- * @param v The vector to scatter
- * @param m Mask indicating which lanes to scatter
  */
+template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) < 4)>
+VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
+  word::scatter(t, p, i, m, v);
+}
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
-VECOPS_VFUNC void scatter(T t, const TypeOf<T>* p, Vec<Rebind<Index<GatherScatterIndex<T>>, T>> i, Mask<T> m, Vec<T> v) {
+VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
   using namespace details;
-  constexpr Rebind<Index<TypeOf<T>>, T> it;
-  return vmap(
+  constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
+  vmap(
       t, [=](auto tt, TypeOf<T>* pp, auto&& ii, auto&& mm, auto&& vv) { word::scatter(tt, pp, ii, mm, vv); },
       StepPointer(t, p), ShardVec(it, i), ShardMask(t, m), ShardVec(t, v)
   );

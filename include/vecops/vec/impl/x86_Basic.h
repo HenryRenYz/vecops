@@ -1518,7 +1518,7 @@ VECOPS_VFUNC Vec<T> concat(T t, Vec<Half<T>> v1, Vec<Half<T>> v2) {
   Tag<float32_t, 4> t1;
   auto u1 = word::bitcast(t1, v1);
   auto u2 = word::bitcast(t1, v2);
-  return word::bitcast(t, Vec<decltype(t1)>{_mm_movelh_ps(u1.v, u2.v)});
+  return word::bitcast(t, Vec<decltype(t1)>{_mm_unpacklo_ps(u1.v, u2.v)});
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 16)>
