@@ -1409,8 +1409,11 @@ protected:
 };
 
 using GatherScatterTypes = ::testing::Types<
-    int8_t, uint8_t, int16_t, uint16_t,
-    int32_t, uint32_t, float32_t, int64_t, uint64_t, float64_t
+    float32_t, float64_t, int8_t, uint8_t, int16_t, uint16_t,
+    int32_t, uint32_t, int64_t, uint64_t, vecops::float16_t
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
+    , vecops::bfloat16_t
+#endif
 >;
 
 TYPED_TEST_SUITE(VecGatherScatterTest, GatherScatterTypes);
@@ -1585,6 +1588,33 @@ TYPED_TEST(VecGatherScatterTest, GatherWithMaskNone) {
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(default_val, get(v, i)));
+  }
+}
+
+TYPED_TEST(VecGatherScatterTest, GatherMaskedOffInvalidIndex) {
+  using T = typename TestFixture::Type;
+  auto& t = this->t;
+  nint_t N = this->full_size;
+  if (N < 2) return;
+  using IndexT = GatherScatterIndex<T>;
+  Rebind<IndexT, decltype(this->t)> it;
+
+  auto indices = std::make_unique<IndexT[]>(N);
+  auto m = mfalse(t);
+  constexpr IndexT bad_index = static_cast<IndexT>(1 << 28);
+  for (nint_t i = 0; i < N; ++i) {
+    bool active = (i % 2) == 0;
+    indices[i] = active ? static_cast<IndexT>(i) : bad_index;
+    m = set(t, m, i, active);
+  }
+
+  auto idx = loadu(it, indices.get());
+  T default_val = test_utils::get_test_value<T>(777);
+  auto v = gather(t, this->aligned_data_, idx, m, default_val);
+
+  for (nint_t i = 0; i < N; ++i) {
+    T expected = (i % 2) == 0 ? this->aligned_data_[i] : default_val;
+    EXPECT_TRUE(test_utils::values_equal(expected, get(v, i)));
   }
 }
 
@@ -1789,6 +1819,44 @@ TYPED_TEST(VecGatherScatterTest, ScatterWithMaskNone) {
 
   for (int i = 0; i < 256; ++i) {
     EXPECT_TRUE(test_utils::values_equal(sentinel, this->aligned_out_[i]));
+  }
+}
+
+TYPED_TEST(VecGatherScatterTest, ScatterMaskedOffInvalidIndex) {
+  using T = typename TestFixture::Type;
+  auto& t = this->t;
+  nint_t N = this->full_size;
+  if (N < 2) return;
+  using IndexT = GatherScatterIndex<T>;
+  Rebind<IndexT, decltype(this->t)> it;
+
+  T sentinel = test_utils::get_test_value<T>(-1);
+  for (int i = 0; i < 256; ++i) {
+    this->aligned_out_[i] = sentinel;
+  }
+
+  auto indices = std::make_unique<IndexT[]>(N);
+  auto m = mfalse(t);
+  constexpr IndexT bad_index = static_cast<IndexT>(1 << 28);
+  for (nint_t i = 0; i < N; ++i) {
+    bool active = (i % 2) == 0;
+    indices[i] = active ? static_cast<IndexT>(i) : bad_index;
+    m = set(t, m, i, active);
+  }
+
+  auto idx = loadu(it, indices.get());
+  auto v = loadu(t, this->aligned_data_);
+  scatter(t, this->aligned_out_, idx, m, v);
+
+  for (nint_t i = 0; i < N; ++i) {
+    if ((i % 2) == 0) {
+      EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], this->aligned_out_[i]));
+    }
+  }
+  for (int i = 0; i < 256; ++i) {
+    if (i >= N || (i % 2) != 0) {
+      EXPECT_TRUE(test_utils::values_equal(sentinel, this->aligned_out_[i]));
+    }
   }
 }
 
@@ -2462,7 +2530,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
       // If this hits, concat in the full gather is wrong OR
       // word::lower produced different indices than the recursion uses.
       ADD_FAILURE() << "Half-split mismatch at i=" << i
-                    << " full=" << +full_val << " lo=" << +lo_val;
+                    << " full=" << full_val << " lo=" << lo_val;
       break;
     }
   }
@@ -2471,7 +2539,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
     T hi_val = get(v_hi, i);
     if (!test_utils::values_equal(full_val, hi_val)) {
       ADD_FAILURE() << "Half-split mismatch at i=" << (i + N / 2)
-                    << " full=" << +full_val << " hi=" << +hi_val;
+                    << " full=" << full_val << " hi=" << hi_val;
       break;
     }
   }
@@ -2484,7 +2552,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
     T lo_val = get(v_lo, i);
     if (!test_utils::values_equal(ref_val, lo_val)) {
       ADD_FAILURE() << "Lo half ref mismatch at i=" << i
-                    << " ref=" << +ref_val << " lo=" << +lo_val;
+                    << " ref=" << ref_val << " lo=" << lo_val;
       break;
     }
   }
@@ -2493,7 +2561,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
     T hi_val = get(v_hi, i);
     if (!test_utils::values_equal(ref_val, hi_val)) {
       ADD_FAILURE() << "Hi half ref mismatch at i=" << i
-                    << " ref=" << +ref_val << " hi=" << +hi_val;
+                    << " ref=" << ref_val << " hi=" << hi_val;
       break;
     }
   }
@@ -2505,7 +2573,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
     T ref_val = ref[i];
     if (!test_utils::values_equal(ref_val, cat_val)) {
       ADD_FAILURE() << "Concat mismatch at i=" << i
-                    << " ref=" << +ref_val << " cat=" << +cat_val;
+                    << " ref=" << ref_val << " cat=" << cat_val;
       break;
     }
   }
@@ -2516,9 +2584,9 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
     T full_val = get(v_full, i);
     if (!test_utils::values_equal(ref_val, full_val)) {
       ADD_FAILURE() << "Full-reference mismatch at i=" << i
-                    << " ref=" << +ref_val
+                    << " ref=" << ref_val
                     << "(from idx " << indices[i]
-                    << ") full=" << +full_val;
+                    << ") full=" << full_val;
       break;
     }
   }
@@ -2541,8 +2609,8 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
         T actual_val = get(vq, i);
         if (!test_utils::values_equal(expected_val, actual_val)) {
           ADD_FAILURE() << "Leaf fwd gather wrong at lane " << i
-                        << " expected=" << +expected_val
-                        << " actual=" << +actual_val;
+                        << " expected=" << expected_val
+                        << " actual=" << actual_val;
           break;
         }
       }
@@ -2556,8 +2624,8 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
         T actual_val = get(vq_r, i);
         if (!test_utils::values_equal(expected_val, actual_val)) {
           ADD_FAILURE() << "Leaf rev gather wrong at lane " << i
-                        << " expected=" << +expected_val
-                        << " actual=" << +actual_val;
+                        << " expected=" << expected_val
+                        << " actual=" << actual_val;
           break;
         }
       }
@@ -2578,8 +2646,8 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
         T actual_val = get(vh, i);
         if (!test_utils::values_equal(expected_val, actual_val)) {
           ADD_FAILURE() << "Half-word rev gather wrong at lane " << i
-                        << " expected=" << +expected_val
-                        << " actual=" << +actual_val;
+                        << " expected=" << expected_val
+                        << " actual=" << actual_val;
           break;
         }
       }
@@ -2609,7 +2677,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
   for (int i = 0; i < 256; ++i) {
     if (!test_utils::values_equal(ref_out[i], this->aligned_out_[i])) {
       ADD_FAILURE() << "Scatter mismatch at dst=" << i
-                    << " ref=" << +ref_out[i] << " out=" << +this->aligned_out_[i];
+                    << " ref=" << ref_out[i] << " out=" << this->aligned_out_[i];
       break;
     }
   }
