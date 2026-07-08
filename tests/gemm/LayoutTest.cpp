@@ -1041,6 +1041,28 @@ TEST_F(FreeFunctionTest, FreeStride) {
   EXPECT_EQ(stride<1>(layout), 1);
 }
 
+TEST_F(FreeFunctionTest, OffsetAtFromIntegralPack) {
+  auto layout = make_layout(make_shape(3, 4, 5), make_strides(20, 5, 1));
+  EXPECT_EQ(offset_at(layout, 2, 3, 4), 59);
+}
+
+TEST_F(FreeFunctionTest, OffsetAtFromArray) {
+  auto layout = make_layout(make_shape(3, 4), make_strides(10, 2));
+  std::array<nint_t, 2> coords{2, 3};
+  EXPECT_EQ(offset_at(layout, coords), 26);
+}
+
+TEST_F(FreeFunctionTest, OffsetAtSupportsCompileTimeLayout) {
+  auto layout = make_layout(make_shape(cint<3>, cint<4>),
+                            make_strides(cint<7>, cint<1>));
+  EXPECT_EQ(offset_at(layout, 2, 3), 17);
+}
+
+TEST_F(FreeFunctionTest, OffsetAtSupportsNegativeStrides) {
+  auto layout = make_layout(make_shape(3, 4), make_strides(-4, 1));
+  EXPECT_EQ(offset_at(layout, 2, 3), -5);
+}
+
 // ======================================================================
 // MetaOps Suite — remove / set / insert on ArrayMeta, Shape, Strides, Layout
 // ======================================================================
@@ -1440,6 +1462,12 @@ TEST_F(LayoutDeathTest, PackedStorageOutOfBounds) {
   vecops::gemm::details::PackedStorage<Any, Any> ps(Any{1}, Any{2});
   EXPECT_DEATH((void)ps[-1], "!in 0..");
   EXPECT_DEATH((void)ps[99], "!in 0..");
+}
+
+TEST_F(LayoutDeathTest, OffsetAtOutOfBounds) {
+  auto layout = make_layout(make_shape(3, 4), make_strides(4, 1));
+  EXPECT_DEATH((void)offset_at(layout, 2, 4), "index out of range");
+  EXPECT_DEATH((void)offset_at(layout, -1, 0), "index out of range");
 }
 
 TEST_F(LayoutDeathTest, DynamicBoundsViolationLower) {

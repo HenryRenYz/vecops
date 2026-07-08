@@ -1978,6 +1978,41 @@ constexpr nint_t stride(const TLayout& layout) {
 }
 
 /**
+ * @brief Compute the linear storage offset for a full coordinate tuple.
+ *
+ * Bounds are checked with VECOPS_ASSERT, so release builds do not pay for the
+ * validation when assertions are disabled.
+ */
+template <typename TLayout, std::enable_if_t<is_layout<std::remove_cvref_t<TLayout>>, bool> = true>
+constexpr nint_t offset_at(
+    const TLayout& layout,
+    const std::array<nint_t, std::remove_cvref_t<TLayout>::Ndim>& coords) {
+  using LayoutT = std::remove_cvref_t<TLayout>;
+  nint_t offset = 0;
+  VECOPS_UNROLL
+  for (int d = 0; d < LayoutT::Ndim; ++d) {
+    VECOPS_ASSERT(0 <= coords[d] && coords[d] < layout.shape()[d], "index out of range");
+    offset += coords[d] * layout.strides()[d];
+  }
+  return offset;
+}
+
+/**
+ * @brief Compute the linear storage offset from one integer coordinate per
+ *        layout dimension.
+ */
+template <
+    typename TLayout,
+    typename... Is,
+    std::enable_if_t<is_layout<std::remove_cvref_t<TLayout>>, bool> = true>
+constexpr nint_t offset_at(const TLayout& layout, Is... is) {
+  using LayoutT = std::remove_cvref_t<TLayout>;
+  static_assert(sizeof...(Is) == LayoutT::Ndim, "coordinate count must match layout rank");
+  static_assert((std::is_integral_v<std::decay_t<Is>> && ...), "coordinates must be integers");
+  return offset_at(layout, std::array<nint_t, LayoutT::Ndim>{static_cast<nint_t>(is)...});
+}
+
+/**
  * @brief Remove dimension I from an ArrayMeta (Shape or Strides).
  *
  * Returns a new ArrayMeta of rank `Ndim-1`.

@@ -1,0 +1,397 @@
+//
+// Created by renyz on 2026/7/8.
+//
+
+#ifndef VECOPS_HOP_H
+#define VECOPS_HOP_H
+
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+#include "vecops/CoreDefs.h"
+#include "vecops/Assertion.h"
+#include "vecops/gemm/Tensor.h"
+
+/**
+ * @file HOP.h
+ * @brief Higher-order traversal helpers for Tensor-like nested iteration.
+ *
+ * This header defines small higher-order traversal primitives for applying a
+ * callable to slices of one or more `Tensor` objects. The traversal dimensions
+ * are selected at compile time, while runtime sizes are read from the input
+ * Tensor layouts.
+ *
+ * ## Key components
+ *
+ * | Component              | Purpose                                         |
+ * |------------------------|-------------------------------------------------|
+ * | `hop::for_each<Is...>` | Traverse the listed logical dimensions          |
+ * | `hop::for_each_dims<N>`| Traverse logical dimensions `0, 1, ..., N - 1`  |
+ *
+ * ## Logical dimensions and alignment
+ *
+ * Inputs are interpreted under trailing-dimension alignment, matching the
+ * usual NumPy/PyTorch broadcasting convention. If the traversal logical rank is
+ * `R` and a Tensor has rank `T`, the Tensor dimension corresponding to logical
+ * dimension `I` is:
+ *
+ * @code
+ * actual_dim = I - (R - T)
+ * @endcode
+ *
+ * If `actual_dim` is outside `[0, T)`, that Tensor has no dimension at the
+ * current logical axis and is forwarded unchanged into the recursive traversal.
+ *
+ * For `for_each<Is...>`, the logical rank is:
+ *
+ * @code
+ * max(max(Is...) + 1, max_rank(inputs...))
+ * @endcode
+ *
+ * For `for_each_dims<N>`, the logical rank is exactly `N`.
+ *
+ * ## Broadcasting
+ *
+ * Only dimensions whose compile-time shape type is exactly `Const<1>` use
+ * broadcast semantics. Those dimensions are always sliced at index 0 and do
+ * not contribute to the loop extent. Runtime size-one dimensions such as
+ * `Any{1}` are **not** treated as broadcast dimensions.
+ *
+ * Non-broadcast Tensor dimensions at the same logical axis must have the same
+ * runtime extent. The check uses `VECOPS_ASSERT`, so it is intended to have no
+ * release-build cost when assertions are disabled.
+ *
+ * Non-Tensor inputs have rank 0. They never affect extents and are forwarded
+ * unchanged to every invocation of the user callable.
+ *
+ * ## Slicing behavior
+ *
+ * At each traversed axis, a Tensor is sliced with an integer index on the
+ * selected dimension and `reserve` on all other dimensions. Therefore:
+ *
+ * - Traversing every dimension of a Tensor eventually passes element
+ *   references to the callable.
+ * - Traversing only some dimensions passes sub-Tensor views for the remaining
+ *   dimensions.
+ * - The sub-Tensor shapes passed for different inputs do not need to match.
+ * - Writable Tensor inputs may be updated through the scalar references or
+ *   sub-Tensor views passed to the callable.
+ *
+ * ## Usage overview
+ *
+ * @code
+ * #include "vecops/gemm/HOP.h"
+ * using namespace vecops::gemm;
+ *
+ * std::vector<float> a(2 * 3);
+ * std::vector<float> b(3);
+ * std::vector<float> out(2 * 3);
+ *
+ * auto ta = make_tensor(a.data(), make_shape(cint<2>, cint<3>),
+ *                       make_strides(cint<3>, cint<1>));
+ * auto tb = make_tensor(b.data(), make_shape(cint<3>), make_strides(cint<1>));
+ * auto to = make_tensor(out.data(), make_shape(cint<2>, cint<3>),
+ *                       make_strides(cint<3>, cint<1>));
+ *
+ * // Traverses logical dimensions 0 and 1. `tb` is trailing-aligned with the
+ * // last dimension and is reused for both rows.
+ * hop::for_each_dims<2>([](auto&& dst, auto&& x, auto&& y) {
+ *   dst = x + y;
+ * }, to, ta, tb);
+ *
+ * // Traverse rows only. The callable receives rank-1 row views.
+ * hop::for_each<0>([](auto&& row) {
+ *   row(0) = 0;
+ * }, to);
+ * @endcode
+ *
+ * ## Pitfalls and limitations
+ *
+ * - Traversal dimensions must be non-negative and unique; violations are
+ *   compile-time errors.
+ * - `for_each_dims<N>` requires every Tensor input rank to be `<= N`.
+ * - Broadcast is type-based (`Const<1>`), not value-based (`Any{1}`).
+ * - The callable does not receive coordinate indices. If coordinates are
+ *   needed, capture and maintain them explicitly or add a dedicated traversal
+ *   helper.
+ * - The helpers preserve `Tensor`'s non-owning view semantics. The underlying
+ *   storage must outlive the traversal and must be mutable if the callable
+ *   writes through the passed objects.
+ */
+
+namespace vecops::gemm::hop {
+namespace details {
+
+// ======================== Type Traits ========================
+
+template <typename T>
+struct TensorRank : std::integral_constant<int, 0> {};
+
+template <typename T, typename TShape, typename TStrides>
+struct TensorRank<Tensor<T, TShape, TStrides>>
+    : std::integral_constant<int, Tensor<T, TShape, TStrides>::Ndim> {};
+
+template <typename T>
+static constexpr int tensor_rank_v = TensorRank<std::remove_cvref_t<T>>::value;
+
+template <typename T>
+static constexpr bool is_tensor_v = is_tensor<std::remove_cvref_t<T>>;
+
+template <int I, typename T>
+struct TensorShapeDim;
+
+template <int I, typename T, typename... Ss, typename... Ts>
+struct TensorShapeDim<I, Tensor<T, Shape<Ss...>, Strides<Ts...>>> {
+  using type = std::tuple_element_t<I, std::tuple<Ss...>>;
+};
+
+template <typename T>
+struct IsConstOne : std::false_type {};
+
+template <>
+struct IsConstOne<Const<1>> : std::true_type {};
+
+template <int I, typename T>
+static constexpr bool is_const_one_dim_v =
+    IsConstOne<typename TensorShapeDim<I, std::remove_cvref_t<T>>::type>::value;
+
+constexpr int max2(int a, int b) {
+  return a > b ? a : b;
+}
+
+template <int... Ns>
+struct MaxInt;
+
+template <>
+struct MaxInt<> : std::integral_constant<int, 0> {};
+
+template <int N, int... Ns>
+struct MaxInt<N, Ns...> : std::integral_constant<int, max2(N, MaxInt<Ns...>::value)> {};
+
+template <int... Is>
+static constexpr int max_index_plus_one_v = MaxInt<(Is + 1)...>::value;
+
+template <typename... Ts>
+static constexpr int max_tensor_rank_v = MaxInt<tensor_rank_v<Ts>...>::value;
+
+// ======================== Dimension Validation ========================
+
+template <int I, int... Is>
+struct ContainsDim : std::bool_constant<((I == Is) || ...)> {};
+
+template <int... Is>
+struct UniqueDims : std::true_type {};
+
+template <int I, int... Is>
+struct UniqueDims<I, Is...>
+    : std::bool_constant<!ContainsDim<I, Is...>::value && UniqueDims<Is...>::value> {};
+
+template <int I>
+constexpr int adjust_dim_after_slice() {
+  static_assert(I != 0, "duplicate traversal dimension");
+  if constexpr (I < 0) {
+    return I;
+  } else {
+    return I - 1;
+  }
+}
+
+template <int SlicedDim, int I>
+constexpr int adjust_dim_after_slice() {
+  static_assert(I != SlicedDim, "duplicate traversal dimension");
+  if constexpr (I < SlicedDim) {
+    return I;
+  } else {
+    return I - 1;
+  }
+}
+
+// ======================== Logical-to-Actual Dimension Mapping ========================
+
+template <int LogicalRank, int LogicalDim, typename T>
+static constexpr int actual_dim_v =
+    LogicalDim - (LogicalRank - tensor_rank_v<T>);
+
+template <int LogicalRank, int LogicalDim, typename T>
+static constexpr bool has_actual_dim_v =
+    is_tensor_v<T> && (0 <= actual_dim_v<LogicalRank, LogicalDim, T>) &&
+    (actual_dim_v<LogicalRank, LogicalDim, T> < tensor_rank_v<T>);
+
+template <bool HasActualDim, int ActualDim, typename T>
+struct IsBroadcastDim : std::true_type {};
+
+template <int ActualDim, typename T>
+struct IsBroadcastDim<true, ActualDim, T>
+    : std::bool_constant<is_const_one_dim_v<ActualDim, T>> {};
+
+template <int LogicalRank, int LogicalDim, typename T>
+static constexpr bool is_broadcast_dim_v =
+    IsBroadcastDim<
+        has_actual_dim_v<LogicalRank, LogicalDim, T>,
+        actual_dim_v<LogicalRank, LogicalDim, T>,
+        T>::value;
+
+// ======================== Extent Resolution and Slicing ========================
+
+template <int LogicalRank, int LogicalDim, typename T>
+VECOPS_ALWAYS_INLINE void update_extent(nint_t& extent, bool& has_extent, const T& input) {
+  if constexpr (has_actual_dim_v<LogicalRank, LogicalDim, T> &&
+                !is_broadcast_dim_v<LogicalRank, LogicalDim, T>) {
+    constexpr int actual_dim = actual_dim_v<LogicalRank, LogicalDim, T>;
+    const nint_t current = input.size(actual_dim);
+    if (has_extent) {
+      VECOPS_ASSERT(extent == current, "broadcast extent mismatch");
+    } else {
+      extent = current;
+      has_extent = true;
+    }
+  }
+}
+
+template <int ActualDim, int D>
+VECOPS_ALWAYS_INLINE constexpr decltype(auto) slice_arg(nint_t index) {
+  if constexpr (D == ActualDim) {
+    return index;
+  } else {
+    return reserve;
+  }
+}
+
+template <int ActualDim, typename T, size_t... Ds>
+VECOPS_ALWAYS_INLINE constexpr decltype(auto) slice_at_actual_dim_impl(
+    T&& input,
+    nint_t index,
+    std::index_sequence<Ds...>) {
+  return std::forward<T>(input)(slice_arg<ActualDim, static_cast<int>(Ds)>(index)...);
+}
+
+template <int ActualDim, typename T>
+VECOPS_ALWAYS_INLINE constexpr decltype(auto) slice_at_actual_dim(T&& input, nint_t index) {
+  using TensorT = std::remove_cvref_t<T>;
+  return slice_at_actual_dim_impl<ActualDim>(
+      std::forward<T>(input),
+      index,
+      std::make_index_sequence<TensorT::Ndim>{});
+}
+
+template <int LogicalRank, int LogicalDim, typename T>
+VECOPS_ALWAYS_INLINE constexpr decltype(auto) slice_one(T&& input, nint_t index) {
+  if constexpr (!has_actual_dim_v<LogicalRank, LogicalDim, T>) {
+    return std::forward<T>(input);
+  } else {
+    constexpr int actual_dim = actual_dim_v<LogicalRank, LogicalDim, T>;
+    if constexpr (is_broadcast_dim_v<LogicalRank, LogicalDim, T>) {
+      return slice_at_actual_dim<actual_dim>(std::forward<T>(input), 0);
+    } else {
+      return slice_at_actual_dim<actual_dim>(std::forward<T>(input), index);
+    }
+  }
+}
+
+// ======================== Recursive Traversal ========================
+
+template <int LogicalRank, typename Fn, typename... Inputs>
+VECOPS_ALWAYS_INLINE void for_each_impl(Fn& fn, Inputs&&... inputs) {
+  fn(inputs...);
+}
+
+template <int LogicalRank, int I0, int... Is, typename Fn, typename... Inputs>
+VECOPS_ALWAYS_INLINE void for_each_impl(Fn& fn, Inputs&&... inputs) {
+  static_assert(LogicalRank > 0, "logical rank exhausted");
+  nint_t extent = 1;
+  bool has_extent = false;
+  (update_extent<LogicalRank, I0>(extent, has_extent, inputs), ...);
+
+  for (nint_t i = 0; i < extent; ++i) {
+    for_each_impl<LogicalRank - 1, adjust_dim_after_slice<I0, Is>()...>(
+        fn,
+        slice_one<LogicalRank, I0>(inputs, i)...);
+  }
+}
+
+template <int N, typename Seq = std::make_integer_sequence<int, N>>
+struct LeadingDims;
+
+template <int N, int... Is>
+struct LeadingDims<N, std::integer_sequence<int, Is...>> {
+  template <typename Fn, typename... Inputs>
+  VECOPS_ALWAYS_INLINE static void run(Fn& fn, Inputs&&... inputs) {
+    for_each_impl<N, Is...>(fn, std::forward<Inputs>(inputs)...);
+  }
+};
+
+} // namespace details
+
+/**
+ * @brief Traverse selected logical dimensions and invoke `fn` on the resulting
+ *        slices.
+ *
+ * The dimensions in `Is...` are interpreted in logical trailing-aligned space.
+ * Each listed dimension is removed before descending to the next recursion
+ * level, so later dimensions are adjusted to match the rank of the sliced
+ * inputs.
+ *
+ * When all selected dimensions have been traversed, `fn` is invoked with one
+ * argument per input. Each argument is either:
+ *
+ * - an element reference, if all dimensions of that Tensor were sliced;
+ * - a sub-Tensor view, if some Tensor dimensions remain;
+ * - the original non-Tensor input, for scalar or other non-Tensor arguments.
+ *
+ * @tparam Is      Logical dimensions to traverse. They must be non-negative
+ *                 and unique.
+ * @tparam Fn      Callable type. It must be invocable as `fn(auto&&...)`.
+ * @tparam Inputs  Tensor and non-Tensor input types.
+ *
+ * @param fn      Callable invoked at the traversal leaves.
+ * @param inputs  Inputs traversed together.
+ *
+ * @note Only `Const<1>` Tensor dimensions broadcast. Non-broadcast extents at
+ *       the same logical dimension are checked with `VECOPS_ASSERT`.
+ *
+ * @see for_each_dims
+ */
+template <int... Is, typename Fn, typename... Inputs>
+VECOPS_ALWAYS_INLINE void for_each(Fn&& fn, Inputs&&... inputs) {
+  static_assert(((Is >= 0) && ...), "traversal dimensions must be non-negative");
+  static_assert(details::UniqueDims<Is...>::value, "duplicate traversal dimension");
+  constexpr int logical_rank = details::max2(
+      details::max_index_plus_one_v<Is...>,
+      details::max_tensor_rank_v<Inputs...>);
+  details::for_each_impl<logical_rank, Is...>(fn, std::forward<Inputs>(inputs)...);
+}
+
+/**
+ * @brief Traverse logical dimensions `0, 1, ..., Ndim - 1`.
+ *
+ * This is the common full-prefix wrapper around `for_each`. The logical rank is
+ * fixed to `Ndim`, so every Tensor input rank must be at most `Ndim`. Inputs
+ * with smaller rank are trailing-aligned against the `Ndim` logical axes.
+ *
+ * @tparam Ndim    Number of logical dimensions to traverse.
+ * @tparam Fn      Callable type. It must be invocable as `fn(auto&&...)`.
+ * @tparam Inputs  Tensor and non-Tensor input types.
+ *
+ * @param fn      Callable invoked at the traversal leaves.
+ * @param inputs  Inputs traversed together.
+ *
+ * @code
+ * hop::for_each_dims<2>([](auto&& dst, auto&& lhs, auto&& rhs) {
+ *   dst = lhs + rhs;
+ * }, out, a, b);
+ * @endcode
+ *
+ * @see for_each
+ */
+template <int Ndim, typename Fn, typename... Inputs>
+VECOPS_ALWAYS_INLINE void for_each_dims(Fn&& fn, Inputs&&... inputs) {
+  static_assert(Ndim >= 0, "Ndim must be non-negative");
+  static_assert(((details::tensor_rank_v<Inputs> <= Ndim) && ...),
+                "input tensor rank must not exceed Ndim");
+  details::LeadingDims<Ndim>::run(fn, std::forward<Inputs>(inputs)...);
+}
+
+} // namespace vecops::gemm::hop
+
+#endif // VECOPS_HOP_H

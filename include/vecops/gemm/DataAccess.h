@@ -9,11 +9,13 @@
 #include "vecops/vec/Vec.h"
 #include "./Attachment.h"
 #include "./Tensor.h"
+#include "./HOP.h"
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <type_traits>
+#include <utility>
 
 namespace vecops::gemm {
 namespace details {
@@ -83,58 +85,11 @@ nint_t aux_required_bytes(const TLayout& layout) {
                   vec::DEFAULT_ALIGNMENT);
 }
 
-template <typename TLayout>
-nint_t offset_from_coords(const TLayout& layout, const std::array<nint_t, TLayout::Ndim>& coords) {
-  nint_t offset = 0;
-  VECOPS_UNROLL for (int d = 0; d < TLayout::Ndim; ++d)
-    offset += coords[d] * layout.strides()[d];
-  return offset;
-}
-
-template <typename TLayout>
-nint_t offset_from_coords_and_last(
-    const TLayout& layout,
-    const std::array<nint_t, TLayout::Ndim>& coords,
-    nint_t last) {
-  nint_t offset = 0;
-  VECOPS_UNROLL for (int d = 0; d < TLayout::Ndim - 1; ++d)
-    offset += coords[d] * layout.strides()[d];
-  offset += last * layout.strides()[TLayout::Ndim - 1];
-  return offset;
-}
-
 template <typename TLayout, typename TAux>
-nint_t aux_offset_from_coords(
-    const TLayout& layout,
-    const std::array<nint_t, TLayout::Ndim>& coords) {
-  nint_t offset = 0;
-  nint_t stride = 1;
-  const nint_t padded_last = padded_last_size<TLayout, TAux>(layout);
-  VECOPS_UNROLL for (int d = TLayout::Ndim - 1; d >= 0; --d) {
-    offset += coords[d] * stride;
-    stride *= (d == TLayout::Ndim - 1) ? padded_last : layout.shape()[d];
-  }
-  return offset;
-}
-
-template <typename TLayout, typename F>
-void for_each_prefix_row(const TLayout& layout, F&& f) {
-  constexpr int ndim = TLayout::Ndim;
-  nint_t rows = 1;
-  VECOPS_UNROLL for (int d = 0; d < ndim - 1; ++d)
-    rows *= layout.shape()[d];
-
-  for (nint_t linear = 0; linear < rows; ++linear) {
-    std::array<nint_t, ndim> coords{};
-    nint_t rem = linear;
-    VECOPS_UNROLL
-    for (int d = ndim - 2; d >= 0; --d) {
-      const nint_t extent = layout.shape()[d];
-      coords[d] = rem % extent;
-      rem /= extent;
-    }
-    f(coords);
-  }
+auto make_aux_layout(const TLayout& layout) {
+  constexpr int last_dim = TLayout::Ndim - 1;
+  auto aux_shape = set<last_dim>(layout.shape(), Any{padded_last_size<TLayout, TAux>(layout)});
+  return make_layout(aux_shape);
 }
 
 template <typename TLayout>
@@ -144,6 +99,38 @@ nint_t transform_x(const std::array<nint_t, TLayout::Ndim>& coords) {
   } else {
     return 0;
   }
+}
+
+template <typename TLayout>
+nint_t transform_x_from_prefix_row(const TLayout& layout, nint_t row) {
+  if constexpr (TLayout::Ndim >= 2) {
+    return row % layout.shape()[TLayout::Ndim - 2];
+  } else {
+    ((void) layout);
+    ((void) row);
+    return 0;
+  }
+}
+
+template <int N, typename Seq = std::make_integer_sequence<int, N>>
+struct PrefixRowTraversal;
+
+template <int N, int... Is>
+struct PrefixRowTraversal<N, std::integer_sequence<int, Is...>> {
+  template <typename F, typename... Tensors>
+  VECOPS_ALWAYS_INLINE static void run(F&& f, Tensors&&... tensors) {
+    nint_t row = 0;
+    hop::for_each<Is...>([&](auto&&... rows) {
+      f(row++, std::forward<decltype(rows)>(rows)...);
+    }, std::forward<Tensors>(tensors)...);
+  }
+};
+
+template <typename TLayout, typename F, typename... Tensors>
+VECOPS_ALWAYS_INLINE void for_each_prefix_row(F&& f, Tensors&&... tensors) {
+  PrefixRowTraversal<TLayout::Ndim - 1>::run(
+      std::forward<F>(f),
+      std::forward<Tensors>(tensors)...);
 }
 
 template <typename N>
@@ -241,10 +228,11 @@ void scatter_dispatch(
   }
 }
 
-template <typename TOut, typename TIn, typename InLayout, typename TransformFn>
+template <typename TOut, typename TIn, typename InLayout, typename AuxLayout, typename TransformFn>
 void precompute_input_aux(
     const TIn* p,
     const InLayout& layout,
+    const AuxLayout& aux_layout,
     const TransformFn& fn,
   TOut* aux) {
   std::fill(aux, aux + aux_numel<InLayout, TOut>(layout), TOut{});
@@ -253,17 +241,19 @@ void precompute_input_aux(
   To to;
   Ti ti;
   const nint_t last = layout.shape()[InLayout::Ndim - 1];
+  auto src_tensor = make_tensor(p, layout);
+  auto aux_tensor = make_tensor(aux, aux_layout);
 
-  for_each_prefix_row(layout, [&](auto coords) {
+  for_each_prefix_row<InLayout>([&](nint_t row, auto&& src_row, auto&& aux_row) {
+    const nint_t x = transform_x_from_prefix_row(layout, row);
     for (nint_t y = 0; y < last; y += vec::size(to)) {
       const nint_t n = std::min(vec::size(to), last - y);
-      coords[InLayout::Ndim - 1] = y;
-      const nint_t src_offset = offset_from_coords_and_last(layout, coords, y);
-      auto v_in = gather_dispatch(ti, p, src_offset, layout.strides()[InLayout::Ndim - 1], Any{n});
-      auto v_out = fn.call(to, v_in, transform_x<InLayout>(coords), y);
-      storeu_dispatch(to, aux + aux_offset_from_coords<InLayout, TOut>(layout, coords), Any{n}, v_out);
+      const nint_t stride = src_row.stride(0);
+      auto v_in = gather_dispatch(ti, src_row.data(), y * stride, stride, Any{n});
+      auto v_out = fn.call(to, v_in, x, y);
+      storeu_dispatch(to, aux_row.data() + y, Any{n}, v_out);
     }
-  });
+  }, src_tensor, aux_tensor);
 }
 
 template <typename Kind, typename TOut, typename InTensor, typename TransformFn>
@@ -284,7 +274,7 @@ struct DataInputImpl<AccessKindLastContiguous, TOut, InTensor, TransformFn> {
     static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
     using Ti = vec::Rebind<TIn, To>;
     std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
-    const nint_t offset = offset_from_coords(_layout, coords);
+    const nint_t offset = offset_at(_layout, coords);
     auto v_in = loadu_dispatch(Ti{}, _p + offset, n);
     auto v_out = _fn.call(t, v_in, transform_x<InLayout>(coords), coords[InLayout::Ndim - 1]);
     return v_out;
@@ -299,27 +289,31 @@ template <typename Kind, typename TOut, typename InTensor, typename TransformFn>
 struct DataInputAuxImpl {
   using TIn = typename InTensor::ElementType;
   using InLayout = typename InTensor::Layout;
+  using AuxLayout = decltype(make_aux_layout<InLayout, TOut>(std::declval<const InLayout&>()));
 
   static nint_t required_aux_size(const InLayout& layout) {
     return aux_required_bytes<InLayout, TOut>(layout);
   }
 
   DataInputAuxImpl(const TIn* p, const InLayout& layout, const TransformFn& fn, void* aux)
-      : _layout(layout), _aux(static_cast<TOut*>(aux)) {
+      : _layout(layout),
+        _aux_layout(make_aux_layout<InLayout, TOut>(layout)),
+        _aux(static_cast<TOut*>(aux)) {
     VECOPS_ASSERT(aux != nullptr, "DataInput aux buffer is required for non-last-contiguous layouts");
-    precompute_input_aux<TOut>(p, _layout, fn, _aux);
+    precompute_input_aux<TOut>(p, _layout, _aux_layout, fn, _aux);
   }
 
   template <TLV_DECL_TAG(To), typename N, typename... Is>
   vec::Vec<To> operator()(To t, N n, Is... is) const {
     static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
     std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
-    const nint_t offset = aux_offset_from_coords<InLayout, TOut>(_layout, coords);
+    const nint_t offset = offset_at(_aux_layout, coords);
     auto v = loadu_dispatch(t, _aux + offset, n);
     return v;
   }
 
   InLayout _layout;
+  AuxLayout _aux_layout;
   TOut* _aux;
 };
 
@@ -353,7 +347,7 @@ struct DataOutputImpl<AccessKindLastContiguous, TIn, OutTensor, TransformFn> {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
-    const nint_t offset = offset_from_coords(_layout, coords);
+    const nint_t offset = offset_at(_layout, coords);
     auto v_out = _fn.call(To{}, v, transform_x<OutLayout>(coords), coords[OutLayout::Ndim - 1]);
     storeu_dispatch(To{}, _p + offset, n, v_out);
   }
@@ -367,26 +361,31 @@ template <typename TIn, typename OutTensor, typename TransformFn>
 struct DataOutputImpl<AccessKindSecondLastContiguous, TIn, OutTensor, TransformFn> {
   using TOut = typename OutTensor::ElementType;
   using OutLayout = typename OutTensor::Layout;
+  using AuxLayout = decltype(make_aux_layout<OutLayout, TOut>(std::declval<const OutLayout&>()));
 
   static nint_t required_aux_size(const OutLayout& layout) {
     return aux_required_bytes<OutLayout, TOut>(layout);
   }
 
   DataOutputImpl(TOut* p, const OutLayout& layout, const TransformFn& fn, void* aux)
-      : _p(p), _layout(layout), _fn(fn), _aux(static_cast<TOut*>(aux)) {
+      : _p(p),
+        _layout(layout),
+        _aux_layout(make_aux_layout<OutLayout, TOut>(layout)),
+        _fn(fn),
+        _aux(static_cast<TOut*>(aux)) {
     VECOPS_ASSERT(aux != nullptr, "DataOutput aux buffer is required for second-last-contiguous layouts");
     std::fill(_aux, _aux + aux_numel<OutLayout, TOut>(_layout), TOut{});
   }
 
   ~DataOutputImpl() {
-    for_each_prefix_row(_layout, [&](auto coords) {
-      const nint_t last = _layout.shape()[OutLayout::Ndim - 1];
+    auto out_tensor = make_tensor(_p, _layout);
+    auto aux_tensor = make_tensor(_aux, _aux_layout);
+    for_each_prefix_row<OutLayout>([&](nint_t, auto&& out_row, auto&& aux_row) {
+      const nint_t last = out_row.size(0);
       for (nint_t y = 0; y < last; ++y) {
-        coords[OutLayout::Ndim - 1] = y;
-        _p[offset_from_coords(_layout, coords)] =
-            _aux[aux_offset_from_coords<OutLayout, TOut>(_layout, coords)];
+        out_row(y) = aux_row(y);
       }
-    });
+    }, out_tensor, aux_tensor);
   }
 
   template <TLV_DECL_TAG(Ti), typename N, typename... Is>
@@ -395,12 +394,13 @@ struct DataOutputImpl<AccessKindSecondLastContiguous, TIn, OutTensor, TransformF
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
     auto v_out = _fn.call(To{}, v, transform_x<OutLayout>(coords), coords[OutLayout::Ndim - 1]);
-    const nint_t offset = aux_offset_from_coords<OutLayout, TOut>(_layout, coords);
+    const nint_t offset = offset_at(_aux_layout, coords);
     storeu_dispatch(To{}, _aux + offset, n, v_out);
   }
 
   TOut* _p;
   OutLayout _layout;
+  AuxLayout _aux_layout;
   TransformFn _fn;
   TOut* _aux;
 };
@@ -420,7 +420,7 @@ struct DataOutputImpl<AccessKindStrided, TIn, OutTensor, TransformFn> {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
-    const nint_t base = offset_from_coords(_layout, coords);
+    const nint_t base = offset_at(_layout, coords);
     auto v_out = _fn.call(To{}, v, transform_x<OutLayout>(coords), coords[OutLayout::Ndim - 1]);
     scatter_dispatch(To{}, _p, base, _layout.strides()[OutLayout::Ndim - 1], n, v_out);
   }

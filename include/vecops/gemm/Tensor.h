@@ -777,7 +777,7 @@ public:
         return _slice_expand_ellipsis<Ndim - consumed>(indices...);
       }
     } else if constexpr ((std::is_integral_v<std::decay_t<TIndices>> && ...)) {
-      nint_t offset = _slice_index<0>(indices...);
+      nint_t offset = offset_at(_layout, indices...);
       return _data[offset];
     } else {
       using Traits = details::SlicedTraitsImpl<Shape, Stride, void, std::decay_t<TIndices>...>;
@@ -797,7 +797,7 @@ public:
   template <typename... TIndices>
   constexpr decltype(auto) operator()(TIndices... indices) {
     if constexpr ((std::is_integral_v<std::decay_t<TIndices>> && ...)) {
-      nint_t offset = _slice_index<0>(indices...);
+      nint_t offset = offset_at(_layout, indices...);
       return data()[offset];
     } else {
       return static_cast<const Tensor*>(this)->operator()(indices...);

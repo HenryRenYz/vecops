@@ -128,6 +128,10 @@ add_executable(LayoutTest ${CMAKE_CURRENT_SOURCE_DIR}/gemm/LayoutTest.cpp)
 target_link_libraries(LayoutTest PRIVATE vecops gtest gtest_main)
 gtest_discover_tests(LayoutTest)
 
+add_executable(HOPTest ${CMAKE_CURRENT_SOURCE_DIR}/gemm/HOPTest.cpp)
+target_link_libraries(HOPTest PRIVATE vecops gtest gtest_main)
+gtest_discover_tests(HOPTest)
+
 add_multiarch_executable(DataAccessTest
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/gemm/DataAccessTest.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp

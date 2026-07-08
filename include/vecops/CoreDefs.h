@@ -7,6 +7,8 @@
 
 #include <csignal>
 
+#include "vecops/Features.h"
+
 /**
  * Debug & release flags
  */
