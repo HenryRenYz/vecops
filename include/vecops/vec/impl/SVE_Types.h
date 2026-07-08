@@ -62,7 +62,7 @@ static constexpr nint_t max_word_count = []{
 #if SVE_VECTOR_BITS >= 128
   return SVE_VECTOR_BITS / 8 / sizeof(T);
 #else
-  return 2048 / 8 / sizeof(T);
+  return MAX_VEC_WIDTH / 8 / sizeof(T);
 #endif
 }();
 

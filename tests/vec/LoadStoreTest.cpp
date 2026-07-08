@@ -1934,6 +1934,55 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherWithMask) {
   }
 }
 
+TYPED_TEST(VecGatherScatterTest, PositivePow2SubwordGatherScatter) {
+  using T = typename TestFixture::Type;
+  if constexpr (sizeof(T) < 4) {
+    ScalableTag<T, 2> t4;
+    const nint_t N = size(t4);
+    if (N < 2) return;
+    using IndexT = GatherScatterIndex<T>;
+    Rebind<IndexT, decltype(t4)> it;
+
+    auto indices = std::make_unique<IndexT[]>(N);
+    for (nint_t i = 0; i < N; ++i) {
+      indices[i] = static_cast<IndexT>(i);
+    }
+
+    auto idx = loadu(it, indices.get());
+    auto gathered = gather(t4, this->aligned_data_, idx);
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[indices[i]], get(gathered, i)))
+          << "gather lane=" << i;
+    }
+
+    auto mask = mwhilelt(t4, 0, N / 2);
+    T default_val = test_utils::get_test_value<T>(77);
+    auto masked_gathered = gather(t4, this->aligned_data_, idx, mask, fill(t4, default_val));
+    for (nint_t i = 0; i < N; ++i) {
+      T expected = i < N / 2 ? this->aligned_data_[indices[i]] : default_val;
+      EXPECT_TRUE(test_utils::values_equal(expected, get(masked_gathered, i)))
+          << "masked gather lane=" << i;
+    }
+
+    T sentinel = test_utils::get_test_value<T>(-1);
+    for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
+    auto values = loadu(t4, this->aligned_data_);
+    scatter(t4, this->aligned_out_, idx, values);
+    for (nint_t i = 0; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], this->aligned_out_[indices[i]]))
+          << "scatter lane=" << i;
+    }
+
+    for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
+    scatter(t4, this->aligned_out_, idx, mask, values);
+    for (nint_t i = 0; i < N; ++i) {
+      T expected = i < N / 2 ? this->aligned_data_[i] : sentinel;
+      EXPECT_TRUE(test_utils::values_equal(expected, this->aligned_out_[indices[i]]))
+          << "masked scatter lane=" << i;
+    }
+  }
+}
+
 // ============================================================================
 // Gather/Scatter Edge Case Tests
 // ============================================================================

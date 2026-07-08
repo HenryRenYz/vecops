@@ -1882,6 +1882,12 @@ template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 8)>
 VECOPS_VFUNC Vec<T> concat(T t, Vec<Half<T>> v1, Vec<Half<T>> v2) {
   return Vec<T>{ v1[0], v1[1], v1[2], v1[3], v2[0], v2[1], v2[2], v2[3] };
 }
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 16)>
+VECOPS_VFUNC Vec<T> concat(T t, Vec<Half<T>> v1, Vec<Half<T>> v2) {
+  return Vec<T>{
+      v1[0], v1[1], v1[2], v1[3], v1[4], v1[5], v1[6], v1[7],
+      v2[0], v2[1], v2[2], v2[3], v2[4], v2[5], v2[6], v2[7]};
+}
 
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 1)>
 VECOPS_VFUNC Vec<Half<T>> lower(T t, Vec<T> v) {
@@ -1902,6 +1908,11 @@ VECOPS_VFUNC Vec<Half<T>> lower(T t, Vec<T> v) {
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 8)>
 VECOPS_VFUNC Vec<Half<T>> lower(T t, Vec<T> v) {
   return Vec<Half<T>>{v[0], v[1], v[2], v[3]};
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 16)>
+VECOPS_VFUNC Vec<Half<T>> lower(T t, Vec<T> v) {
+  return Vec<Half<T>>{v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]};
 }
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 2), TL_IF(sizeof(TypeOf<T>) == 1)>
@@ -2216,6 +2227,11 @@ VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
 template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 8)>
 VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
   return Vec<Half<T>>{v[4], v[5], v[6], v[7]};
+}
+
+template <TLV_DECL_TAG(T), TL_IF(num_words(T{}) == 16)>
+VECOPS_VFUNC Vec<Half<T>> upper(T t, Vec<T> v) {
+  return Vec<Half<T>>{v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15]};
 }
 
 // Note: batched version of bitcast, internal API

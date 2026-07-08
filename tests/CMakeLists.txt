@@ -110,6 +110,8 @@ endfunction()
 # Tests
 # ======================================================================
 
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+
 add_executable(ArrayTest ${CMAKE_CURRENT_SOURCE_DIR}/array/ArrayTest.cpp)
 target_link_libraries(ArrayTest PRIVATE vecops gtest gtest_main)
 gtest_discover_tests(ArrayTest)
@@ -126,8 +128,14 @@ add_executable(LayoutTest ${CMAKE_CURRENT_SOURCE_DIR}/gemm/LayoutTest.cpp)
 target_link_libraries(LayoutTest PRIVATE vecops gtest gtest_main)
 gtest_discover_tests(LayoutTest)
 
+add_multiarch_executable(DataAccessTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/gemm/DataAccessTest.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
+    ARCH Scalar Native
+)
+
 add_multiarch_executable(VecBaseTest
-    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BaseTest.cpp
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BaseTest.cpp 
     ARCH Scalar
 )
 
@@ -141,7 +149,7 @@ foreach(TEST ${VECOPS_VEC_TESTS})
     add_multiarch_executable(Vec${TEST}
         FILES
             ${CMAKE_CURRENT_SOURCE_DIR}/vec/${TEST}.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/vec/TestUtils.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
         ARCH ${VECOPS_ARCH_LIST}
     )
 endforeach()

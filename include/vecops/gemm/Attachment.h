@@ -9,6 +9,7 @@
 #include "vecops/vec/Vec.h"
 
 #include <type_traits>
+#include <utility>
 
 namespace vecops::gemm {
 namespace details {
@@ -108,8 +109,8 @@ template <typename Eo, typename Ei, typename VecFn>
 struct ConversionVecAdapter : public PositionedVecFn<Eo, Ei> {
   static constexpr bool is_elementwise = VecFn::is_elementwise;
 
-  ConversionVecAdapter(VecFn&& fn) : _fn(std::move(fn)) { }
-  ConversionVecAdapter(const VecFn& fn) : _fn(fn) { }
+  constexpr ConversionVecAdapter(VecFn&& fn) : _fn(std::move(fn)) { }
+  constexpr ConversionVecAdapter(const VecFn& fn) : _fn(fn) { }
 
   template <TLV_DECL_TAG(To),
       TL_IF(is_any<vec::TypeOf<To>, Eo>),
@@ -364,11 +365,18 @@ struct IdentityVecFn : public PositionedVecFn<Eo, Eo> {
   }
 };
 
+template <typename Eo, typename Ei = Eo>
+struct IdentityConversionVecFn : public ConversionVecAdapter<Eo, Ei, IdentityVecFn<Ei>> {
+  using Base = ConversionVecAdapter<Eo, Ei, IdentityVecFn<Ei>>;
+
+  constexpr IdentityConversionVecFn() : Base(IdentityVecFn<Ei>{}) {}
+};
+
 template <typename Eo>
 inline constexpr ZerosVecFn<Eo> zeros {};
 
-template <typename Eo>
-inline constexpr IdentityVecFn<Eo> identity {};
+template <typename Eo, typename Ei = Eo>
+inline constexpr IdentityConversionVecFn<Eo, Ei> identity {};
 
 namespace details {
 template <typename T>
@@ -380,13 +388,17 @@ template <typename T>
 struct IsIdentityVecFn : public std::false_type {};
 template <typename Eo>
 struct IsIdentityVecFn<IdentityVecFn<Eo>> : public std::true_type {};
+template <typename Eo, typename Ei>
+struct IsIdentityVecFn<IdentityConversionVecFn<Eo, Ei>> : public std::true_type {};
+template <typename Eo, typename Ei>
+struct IsIdentityVecFn<ConversionVecAdapter<Eo, Ei, IdentityVecFn<Ei>>> : public std::true_type {};
 } // namespace details
 
 template <typename T>
-static constexpr bool is_zeros_fn = details::IsZerosVecFn<T>::value;
+static constexpr bool is_zeros_fn = details::IsZerosVecFn<std::remove_cvref_t<T>>::value;
 
 template <typename T>
-static constexpr bool is_identity_fn = details::IsIdentityVecFn<T>::value;
+static constexpr bool is_identity_fn = details::IsIdentityVecFn<std::remove_cvref_t<T>>::value;
 
 } // namespace vecops::gemm
 
