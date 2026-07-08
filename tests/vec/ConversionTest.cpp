@@ -17,6 +17,28 @@
 using namespace vecops;
 using namespace vecops::vec;
 
+namespace {
+
+template <typename TIn, typename TOut>
+TIn get_promote_extreme_test_value(nint_t i) {
+  if constexpr (vecops::is_float<TIn> && vecops::is_int<TOut>) {
+    if constexpr (vecops::is_unsigned_int<TOut>) {
+      const int values[] = {123, 1, 0, 7};
+      return TIn(values[i % 4]);
+    } else {
+      const int values[] = {123, -123, 0, -1};
+      return TIn(values[i % 4]);
+    }
+  } else {
+    if (i % 4 == 0) return std::numeric_limits<TIn>::max();
+    if (i % 4 == 1) return std::numeric_limits<TIn>::min();
+    if (i % 4 == 2) return TIn(0);
+    return TIn(-1);
+  }
+}
+
+} // namespace
+
 // ============================================================================
 // Case structs for parameterizing tests at specific POW2 vector-width levels
 // ============================================================================
@@ -221,10 +243,7 @@ TYPED_TEST(VecPromoteTest, PromoteWithMaxMinValues) {
 
   auto data = test_utils::alloc_aligned<TIn>(N);
   for (nint_t i = 0; i < N; ++i) {
-    if (i % 4 == 0) data[i] = std::numeric_limits<TIn>::max();
-    else if (i % 4 == 1) data[i] = std::numeric_limits<TIn>::min();
-    else if (i % 4 == 2) data[i] = TIn(0);
-    else data[i] = TIn(-1);
+    data[i] = get_promote_extreme_test_value<TIn, TOut>(i);
   }
 
   auto v_in  = loadu(this->t_in_, data);
@@ -247,7 +266,7 @@ TYPED_TEST(VecPromoteTest, SignExtensionTest) {
   nint_t n_out = this->out_elements();
   nint_t N = n_in < n_out ? n_in : n_out;
 
-  if constexpr (std::is_signed_v<TIn>) {
+  if constexpr (vecops::is_signed_int<TIn>) {
     auto data = test_utils::alloc_aligned<TIn>(N);
     for (nint_t i = 0; i < N; ++i) {
       data[i] = static_cast<TIn>(-(i + 1));
@@ -259,7 +278,7 @@ TYPED_TEST(VecPromoteTest, SignExtensionTest) {
     for (nint_t i = 0; i < N; ++i) {
       TOut actual   = get(this->t_out_, v_out, i);
       TIn  original = data[i];
-      EXPECT_TRUE(test_utils::values_near(static_cast<TOut>(original), actual))
+      EXPECT_TRUE(test_utils::values_near(vecops::convert<TOut>(original), actual))
                 << "i=" << i << " original=" << static_cast<long long>(original)
                 << " actual=" << static_cast<long long>(actual);
     }
