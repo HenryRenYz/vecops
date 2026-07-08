@@ -1465,6 +1465,123 @@ TEST_F(LayoutDeathTest, DynamicBoundsViolationUnaligned) {
 
 class ContiguityTest : public ::testing::Test {};
 
+// ======================================================================
+// Type Trait Selection Suite
+// ======================================================================
+
+class TypeTraitSelectionTest : public ::testing::Test {};
+
+template <typename T, typename = void>
+struct HasTypeMember : std::false_type {};
+
+template <typename T>
+struct HasTypeMember<T, std::void_t<typename T::type>> : std::true_type {};
+
+TEST_F(TypeTraitSelectionTest, ChainIfSelectsFirstTrueOption) {
+  using T = chain_if_t<
+      chain_opt<false, int>,
+      chain_opt<true, float>,
+      chain_opt<true, double>>;
+  EXPECT_TRUE((std::is_same_v<T, float>));
+}
+
+TEST_F(TypeTraitSelectionTest, ChainIfHasNoTypeWhenNoOptionMatches) {
+  using T = chain_if<
+      chain_opt<false, int>,
+      chain_opt<false, float>>;
+  EXPECT_FALSE((HasTypeMember<T>::value));
+}
+
+TEST_F(TypeTraitSelectionTest, ChainIfDuplicateTrueOptionsUseFirst) {
+  using T = chain_if_t<
+      chain_opt<true, int>,
+      chain_opt<true, float>>;
+  EXPECT_TRUE((std::is_same_v<T, int>));
+}
+
+// ======================================================================
+// Lenient Meta Matching Suite
+// ======================================================================
+
+class LenientMetaTest : public ::testing::Test {};
+
+TEST_F(LenientMetaTest, MoreLenientMetaMovedToLayout) {
+  using SrcShape = Shape<Const<4>, Const<8>>;
+  using DstShape = Shape<Dynamic<4>, Any>;
+  using SrcStrides = Strides<Const<8>, Const<1>>;
+  using DstStrides = Strides<Any, Any>;
+
+  EXPECT_TRUE((vecops::gemm::details::IsMoreLenientMeta<SrcShape, DstShape>::value));
+  EXPECT_TRUE((vecops::gemm::details::IsMoreLenientMeta<SrcStrides, DstStrides>::value));
+  EXPECT_FALSE((vecops::gemm::details::IsMoreLenientMeta<DstShape, SrcShape>::value));
+}
+
+TEST_F(LenientMetaTest, IsLenientMatchesWildcardAndValueConstraints) {
+  using St = Strides<Const<64>, Const<8>, Const<2>, Const<2>>;
+
+  EXPECT_TRUE((is_lenient_v<St, any, any, Dynamic<1, -1, 3>, Const<2>>));
+  EXPECT_FALSE((is_lenient_v<St, any, any, Dynamic<4, -1, 3>, Const<2>>));
+}
+
+TEST_F(LenientMetaTest, IsLenientWildcardIsDistinctFromAnyValue) {
+  EXPECT_FALSE((std::is_same_v<any, Any>));
+
+  using St = Strides<Const<7>>;
+  EXPECT_TRUE((is_lenient_v<St, any>));
+  EXPECT_TRUE((is_lenient_v<St, Any>));
+
+  using DynamicSt = Strides<Dynamic<2>>;
+  EXPECT_TRUE((is_lenient_v<DynamicSt, any>));
+  EXPECT_TRUE((is_lenient_v<DynamicSt, Any>));
+  EXPECT_FALSE((is_lenient_v<Any, any>));
+}
+
+TEST_F(LenientMetaTest, IsLenientRequiresMatchingRank) {
+  using St = Strides<Const<8>, Const<1>>;
+  EXPECT_FALSE((is_lenient_v<St, any>));
+  EXPECT_FALSE((is_lenient_v<St, any, any, any>));
+}
+
+// ======================================================================
+// Layout Conversion Suite
+// ======================================================================
+
+class LayoutConversionTest : public ::testing::Test {};
+
+TEST_F(LayoutConversionTest, AsCastsToTargetMetaTypes) {
+  auto layout = make_layout(make_shape(Any{4}, Any{5}),
+                            make_strides(Any{5}, Any{1}));
+
+  auto typed = layout.as<Shape<Const<4>, Const<5>>, Strides<Const<5>, Const<1>>>();
+
+  EXPECT_TRUE((std::is_same_v<decltype(typed)::Shape, Shape<Const<4>, Const<5>>>));
+  EXPECT_TRUE((std::is_same_v<decltype(typed)::Strides, Strides<Const<5>, Const<1>>>));
+  EXPECT_EQ(typed.shape()[0], 4);
+  EXPECT_EQ(typed.shape()[1], 5);
+  EXPECT_EQ(typed.strides()[0], 5);
+  EXPECT_EQ(typed.strides()[1], 1);
+}
+
+TEST_F(LayoutConversionTest, ImplicitConversionToMoreLenientLayout) {
+  auto strict = make_layout(make_shape(cint<4>, cint<5>),
+                            make_strides(cint<5>, cint<1>));
+
+  Layout<Shape<Dynamic<4>, Any>, Strides<Any, Any>> lenient = strict;
+
+  EXPECT_EQ(lenient.shape()[0], 4);
+  EXPECT_EQ(lenient.shape()[1], 5);
+  EXPECT_EQ(lenient.strides()[0], 5);
+  EXPECT_EQ(lenient.strides()[1], 1);
+}
+
+TEST_F(LayoutConversionTest, ImplicitConversionRejectsMoreStrictLayout) {
+  using Strict = Layout<Shape<Const<4>, Const<5>>, Strides<Const<5>, Const<1>>>;
+  using Lenient = Layout<Shape<Any, Any>, Strides<Any, Any>>;
+
+  EXPECT_FALSE((std::is_convertible_v<Lenient, Strict>));
+  EXPECT_TRUE((std::is_convertible_v<Strict, Lenient>));
+}
+
 TEST_F(ContiguityTest, CtLastContiguous_FullConst) {
   auto layout = make_layout(make_shape(cint<4>, cint<6>),
                             make_strides(cint<6>, cint<1>));

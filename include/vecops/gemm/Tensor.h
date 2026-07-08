@@ -379,26 +379,6 @@ struct SlicedTraitsImpl<Shape<S0, Ss...>, Strides<T0, Ts...>, void, Range<S, E, 
   static constexpr int Ndim = NewShape::Ndim;
 };
 
-// ======================== IsMoreLenientMeta ========================
-
-/**
- * @brief Check whether a Shape or Strides type can be implicitly converted
- *        to another Meta type, dimension by dimension.
- *
- * Returns true only if every corresponding pair of dimensions satisfies
- * `IsMoreLenientValue`.
- */
-template <typename MSrc, typename MDst>
-struct IsMoreLenientMeta : std::false_type {};
-
-template <typename... Ss, typename... Ds>
-struct IsMoreLenientMeta<Shape<Ss...>, Shape<Ds...>>
-    : std::bool_constant<(IsMoreLenientValue<Ss, Ds>::value && ...)> {};
-
-template <typename... Ss, typename... Ds>
-struct IsMoreLenientMeta<Strides<Ss...>, Strides<Ds...>>
-    : std::bool_constant<(IsMoreLenientValue<Ss, Ds>::value && ...)> {};
-
 // ======================== Ellipsis helpers ========================
 
 /// True if the pack contains an Ellipsis.
@@ -470,7 +450,7 @@ struct FindIndexInPack<I, Target, T0, Ts...> {
  *
  * // From raw data + Layout
  * auto L = make_layout(make_shape(2,3,4), make_strides(12,4,1));
- * auto t2 = Tensor<float, decltype(L)::Shape, decltype(L)::Stride>(data, L);
+ * auto t2 = Tensor<float, decltype(L)::Shape, decltype(L)::Strides>(data, L);
  *
  * // Using make_tensor with initializer_list (auto-computes row-major strides)
  * auto t3 = make_tensor<3>(data, {2, 3, 4});
@@ -726,19 +706,7 @@ public:
    */
   template <typename TShape2, typename TStrides2>
   constexpr Tensor<T, TShape2, TStrides2> as() const {
-    static_assert(TShape2::Ndim == Shape::Ndim,
-                  "Target Shape rank must match source Tensor rank");
-    static_assert(TStrides2::Ndim == Stride::Ndim,
-                  "Target Strides rank must match source Tensor rank");
-    constexpr int N = TShape2::Ndim;
-    auto s_arr = _layout.shape()._stor.to_array();
-    auto t_arr = _layout.strides()._stor.to_array();
-    return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
-      return make_tensor(_data, make_layout(
-          TShape2{s_arr[Idx]...},
-          TStrides2{t_arr[Idx]...}
-      ));
-    }(std::make_index_sequence<N>{});
+    return make_tensor(_data, _layout.template as<TShape2, TStrides2>());
   }
 
   // -------- Implicit conversion --------
@@ -1105,7 +1073,7 @@ template <typename T, typename TLayout,
     std::enable_if_t<is_layout<std::remove_cvref_t<TLayout>>, bool> = true>
 constexpr auto make_tensor(const T* data, TLayout&& layout) {
   using L = std::remove_cvref_t<TLayout>;
-  return Tensor<T, typename L::Shape, typename L::Stride>(data, std::forward<TLayout>(layout));
+  return Tensor<T, typename L::Shape, typename L::Strides>(data, std::forward<TLayout>(layout));
 }
 
 /**

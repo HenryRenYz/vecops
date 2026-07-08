@@ -40,6 +40,7 @@
   #define CPU_CAPABILITY AVX512
   #define CPU_CAPABILITY_AVX512 1
   #define VEC_WIDTH 512
+  #define MAX_VEC_WIDTH VEC_WIDTH
 #endif // CPU_CAPABILITY_AVX512
 
 #if defined(CPU_CAPABILITY_AVX2) || (defined(HAS_CPU_CAPABILITY_AVX2) && !defined(CPU_CAPABILITY))
@@ -49,6 +50,7 @@
   #define CPU_CAPABILITY AVX2
   #define CPU_CAPABILITY_AVX2 1
   #define VEC_WIDTH 256
+  #define MAX_VEC_WIDTH VEC_WIDTH
 #endif // CPU_CAPABILITY_AVX2
 
 #if defined(CPU_CAPABILITY_AVX) || (defined(HAS_CPU_CAPABILITY_AVX) && !defined(CPU_CAPABILITY))
@@ -58,6 +60,7 @@
   #define CPU_CAPABILITY AVX
   #define CPU_CAPABILITY_AVX
   #define VEC_WIDTH 128
+  #define MAX_VEC_WIDTH VEC_WIDTH
 #endif // CPU_CAPABILITY_AVX
 
 #if defined(CPU_CAPABILITY_SVE) || (defined(HAS_CPU_CAPABILITY_SVE) && !defined(CPU_CAPABILITY))
@@ -67,6 +70,7 @@
   #define CPU_CAPABILITY SVE
   #define CPU_CAPABILITY_SVE 1
   #define VEC_WIDTH (-1) // scalable
+  #define MAX_VEC_WIDTH 2048 // as defined by SVE spec
 #endif // CPU_CAPABILITY_SVE
 
 #if defined(CPU_CAPABILITY_NEON) || (defined(HAS_CPU_CAPABILITY_NEON) && !defined(CPU_CAPABILITY))
@@ -76,12 +80,14 @@
   #define CPU_CAPABILITY NEON
   #define CPU_CAPABILITY_NEON 1
   #define VEC_WIDTH 128
+  #define MAX_VEC_WIDTH VEC_WIDTH
 #endif // CPU_CAPABILITY_NEON
 
 #if !defined(CPU_CAPABILITY)
   #define CPU_CAPABILITY GENERIC
   #define CPU_CAPABILITY_GENERIC 1
   #define VEC_WIDTH 128 // default width for scalar vector implementation
+  #define MAX_VEC_WIDTH VEC_WIDTH
   #define VEC_MAX_POW (5) // default max pow2 for scalar implementation
   #define VEC_HW_MIN_POW (0)
 #endif // CPU_CAPABILITY

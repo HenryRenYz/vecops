@@ -385,6 +385,21 @@ struct Dynamic : public Value {
  */
 using Any = Dynamic<1>;
 
+/**
+ * @brief Wildcard type for compile-time metadata pattern matching.
+ *
+ * `any` is not a runtime metadata value. It is a type-level pattern used by
+ * traits such as `is_lenient_v<Meta, Patterns...>` to mean "accept any Value
+ * type in this position". Use `Any` when you need an unconstrained runtime
+ * `Value`; use `any` only as a template matching wildcard.
+ *
+ * @code
+ * using St = Strides<Const<8>, Const<2>>;
+ * static_assert(is_lenient_v<St, any, Const<2>>);
+ * @endcode
+ */
+struct any {};
+
 // ======================== dyn<> auxiliary constructors ========================
 
 /**
@@ -1558,6 +1573,100 @@ constexpr bool is_runtime(const TMeta& m) {
   return m.template is_runtime<I>();
 }
 
+namespace details {
+
+// ======================== Lenient metadata matching ========================
+
+/**
+ * @brief Check whether a Shape or Strides type can be converted to another
+ *        metadata type dimension by dimension.
+ *
+ * Returns true only when the source and destination are both `Shape<...>` or
+ * both `Strides<...>`, have the same rank, and each source dimension can be
+ * converted to the corresponding destination dimension according to
+ * `IsMoreLenientValue`.
+ */
+template <typename MSrc, typename MDst>
+struct IsMoreLenientMeta : std::false_type {};
+
+template <bool SameRank, typename MSrc, typename MDst>
+struct IsMoreLenientMetaImpl : std::false_type {};
+
+template <typename... Ss, typename... Ds>
+struct IsMoreLenientMetaImpl<true, Shape<Ss...>, Shape<Ds...>>
+    : std::bool_constant<(IsMoreLenientValue<Ss, Ds>::value && ...)> {};
+
+template <typename... Ss, typename... Ds>
+struct IsMoreLenientMetaImpl<true, Strides<Ss...>, Strides<Ds...>>
+    : std::bool_constant<(IsMoreLenientValue<Ss, Ds>::value && ...)> {};
+
+template <typename... Ss, typename... Ds>
+struct IsMoreLenientMeta<Shape<Ss...>, Shape<Ds...>>
+    : IsMoreLenientMetaImpl<sizeof...(Ss) == sizeof...(Ds), Shape<Ss...>, Shape<Ds...>> {};
+
+template <typename... Ss, typename... Ds>
+struct IsMoreLenientMeta<Strides<Ss...>, Strides<Ds...>>
+    : IsMoreLenientMetaImpl<sizeof...(Ss) == sizeof...(Ds), Strides<Ss...>, Strides<Ds...>> {};
+
+/**
+ * @brief Match one metadata Value against a lenient pattern.
+ *
+ * The `any` wildcard accepts every Value type. Non-wildcard patterns reuse
+ * `IsMoreLenientValue`, so `Const<N>` can match compatible `Dynamic<A,L,H>`
+ * patterns, `Dynamic` can match less constrained `Dynamic` patterns, and so on.
+ */
+template <typename Actual, typename Pattern>
+struct IsLenientPatternValue : IsMoreLenientValue<Actual, Pattern> {};
+
+template <typename Actual>
+struct IsLenientPatternValue<Actual, any> : std::true_type {};
+
+template <bool SameRank, typename Meta, typename... Patterns>
+struct IsLenientPatternMetaImpl : std::false_type {};
+
+template <typename... Ss, typename... Patterns>
+struct IsLenientPatternMetaImpl<true, Shape<Ss...>, Patterns...>
+    : std::bool_constant<(IsLenientPatternValue<Ss, Patterns>::value && ...)> {};
+
+template <typename... Ss, typename... Patterns>
+struct IsLenientPatternMetaImpl<true, Strides<Ss...>, Patterns...>
+    : std::bool_constant<(IsLenientPatternValue<Ss, Patterns>::value && ...)> {};
+
+/**
+ * @brief Check whether a Shape or Strides type matches a lenient pattern list.
+ *
+ * Rank must match exactly. Each pattern is either the `any` wildcard or a
+ * Value type accepted by `IsMoreLenientValue`.
+ */
+template <typename Meta, typename... Patterns>
+struct IsLenientPatternMeta : std::false_type {};
+
+template <typename... Ss, typename... Patterns>
+struct IsLenientPatternMeta<Shape<Ss...>, Patterns...>
+    : IsLenientPatternMetaImpl<sizeof...(Ss) == sizeof...(Patterns), Shape<Ss...>, Patterns...> {};
+
+template <typename... Ss, typename... Patterns>
+struct IsLenientPatternMeta<Strides<Ss...>, Patterns...>
+    : IsLenientPatternMetaImpl<sizeof...(Ss) == sizeof...(Patterns), Strides<Ss...>, Patterns...> {};
+
+} // namespace details
+
+/**
+ * @brief Check whether a Shape or Strides type matches a lenient pattern list.
+ *
+ * This is a static type predicate. It does not inspect runtime shape or stride
+ * values. Use `any` as a per-dimension wildcard, and use Value types such as
+ * `Const<N>`, `Dynamic<A,L,H>`, or `Any` for constrained dimensions.
+ *
+ * @code
+ * using St = Strides<Const<64>, Const<8>, Const<2>, Const<2>>;
+ * static_assert(is_lenient_v<St, any, any, Dynamic<1, -1, 3>, Const<2>>);
+ * @endcode
+ */
+template <typename Meta, typename... Patterns>
+static constexpr bool is_lenient_v =
+    details::IsLenientPatternMeta<std::remove_cvref_t<Meta>, Patterns...>::value;
+
 
 /**
  * @brief Memory layout descriptor pairing a Shape and Strides.
@@ -1598,6 +1707,7 @@ struct Layout {
 
   using Shape = TShape;
   using Stride = TStrides;
+  using Strides = TStrides;
 
   constexpr Layout(TShape shape, TStrides stride) : _shape(shape), _stride(stride) {
   }
@@ -1612,6 +1722,61 @@ struct Layout {
 
   constexpr int ndim() const {
     return Ndim;
+  }
+
+  /**
+   * @brief Reinterpret this Layout with different Shape and Strides metadata.
+   *
+   * Runtime shape and stride values are copied from the current layout into
+   * the target metadata types. Target constructors enforce their own
+   * constraints, so converting to incompatible `Const<N>` or
+   * `Dynamic<A,L,H>` types triggers the same assertions as direct
+   * construction.
+   *
+   * @code
+   * auto layout = make_layout(make_shape(Any{4}, Any{5}),
+   *                           make_strides(Any{5}, Any{1}));
+   * auto typed = layout.as<Shape<Const<4>, Const<5>>,
+   *                        Strides<Const<5>, Const<1>>>();
+   * @endcode
+   *
+   * @tparam TShape2   Target Shape type with the same rank.
+   * @tparam TStrides2 Target Strides type with the same rank.
+   */
+  template <typename TShape2, typename TStrides2>
+  constexpr Layout<TShape2, TStrides2> as() const {
+    static_assert(is_shape<TShape2>, "TShape2 must be Shape<...>");
+    static_assert(is_strides<TStrides2>, "TStrides2 must be Strides<...>");
+    static_assert(TShape2::Ndim == Ndim, "Target Shape rank must match Layout rank");
+    static_assert(TStrides2::Ndim == Ndim, "Target Strides rank must match Layout rank");
+
+    auto s_arr = _shape._stor.to_array();
+    auto t_arr = _stride._stor.to_array();
+    return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
+      return Layout<TShape2, TStrides2>{
+          TShape2{s_arr[Idx]...},
+          TStrides2{t_arr[Idx]...}
+      };
+    }(std::make_index_sequence<Ndim>{});
+  }
+
+  /**
+   * @brief Implicit conversion to a more lenient Layout type.
+   *
+   * A Layout can convert implicitly only when both Shape and Strides metadata
+   * move toward equal-or-more-lenient Value types. Examples include
+   * `Const<N>` to compatible `Dynamic<A,L,H>`, `Const<N>` to `Any`, and
+   * constrained `Dynamic` to less constrained `Dynamic`. More strict
+   * conversions remain explicit through `as()`.
+   */
+  template <typename TShape2, typename TStrides2,
+      std::enable_if_t<
+          !(std::is_same_v<TShape, TShape2> && std::is_same_v<TStrides, TStrides2>) &&
+          details::IsMoreLenientMeta<TShape, TShape2>::value &&
+          details::IsMoreLenientMeta<TStrides, TStrides2>::value,
+      bool> = true>
+  constexpr operator Layout<TShape2, TStrides2>() const {
+    return as<TShape2, TStrides2>();
   }
 
 private:
