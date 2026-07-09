@@ -208,7 +208,7 @@ TYPED_TEST(DataAccessTypedTest, StridedInputUsesAuxAndPadding) {
 
   auto src = make_source<T>(800);
   L layout{Shape<Const<3>, Const<63>>{}, Strides<Const<257>, Const<3>>{}};
-  auto aux = make_aux<T>(Spec::required_aux_size(layout));
+  auto aux = make_aux<T>(Spec::required_workspace(layout));
   Spec spec(layout);
   auto input = spec.make_input(src.data(), aux.data());
 
@@ -219,7 +219,7 @@ TYPED_TEST(DataAccessTypedTest, StridedInputUsesAuxAndPadding) {
   for (nint_t i = 0; i < count; ++i) {
     EXPECT_TRUE(test_utils::values_equal(src[517 + i * 3], read_vec_lane<T>(v, i)));
   }
-  EXPECT_GT(Spec::required_aux_size(layout), 3 * 63 * static_cast<nint_t>(sizeof(T)));
+  EXPECT_GT(Spec::required_workspace(layout), 3 * 63 * static_cast<nint_t>(sizeof(T)));
 }
 
 TYPED_TEST(DataAccessTypedTest, StridedOutputScattersTailOnly) {
@@ -277,7 +277,7 @@ TEST(DataAccessTransformTest, SecondLastContiguousOutputFlushesInDestructor) {
 
   std::vector<T> dst(32, -9);
   L layout{Shape<Const<3>, Const<5>>{}, Strides<Const<1>, Const<3>>{}};
-  auto aux = make_aux<T>(Spec::required_aux_size(layout));
+  auto aux = make_aux<T>(Spec::required_workspace(layout));
   int calls = 0;
   std::vector<nint_t> coords;
   CoordShiftFn<T> fn(&calls, &coords);
@@ -312,7 +312,7 @@ TEST(DataAccessSpecWrapperTest, InputHelperBindsTensorWithWorkspace) {
   auto tensor = make_tensor(src.data(), layout);
   auto spec = input<T>(tensor);
 
-  EXPECT_EQ(spec.required_workspace(), (InputSpec<T, T, L>::required_aux_size(layout)));
+  EXPECT_EQ(spec.required_workspace(), (InputSpec<T, T, L>::required_workspace(layout)));
 
   Workspace workspace(spec.required_workspace());
   auto view = workspace.view();
@@ -650,7 +650,7 @@ TYPED_TEST(DataAccessConversionTest, InputSpecCoversTypeAndVectorLengthCombinati
 
   auto src = make_source<TIn>(600);
   L layout{Shape<Const<2>, Const<128>>{}, Strides<Const<257>, Const<3>>{}};
-  auto aux = make_aux<TOut>(Spec::required_aux_size(layout));
+  auto aux = make_aux<TOut>(Spec::required_workspace(layout));
   Spec spec(layout);
   auto input = spec.make_input(src.data(), aux.data());
 

@@ -301,7 +301,7 @@ struct DataInputImpl<AccessKindLastContiguous, TOut, InTensor, TransformFn> {
   using TIn = typename InTensor::ElementType;
   using InLayout = typename InTensor::Layout;
 
-  static constexpr nint_t required_aux_size(const InLayout&) { return 0; }
+  static constexpr nint_t required_workspace(const InLayout&) { return 0; }
 
   DataInputImpl(const TIn* p, const InLayout& layout, const TransformFn& fn, void*)
       : _p(p), _layout(layout), _fn(fn) {}
@@ -328,7 +328,7 @@ struct DataInputAuxImpl {
   using InLayout = typename InTensor::Layout;
   using AuxLayout = decltype(make_aux_layout<InLayout, TOut>(std::declval<const InLayout&>()));
 
-  static nint_t required_aux_size(const InLayout& layout) {
+  static nint_t required_workspace(const InLayout& layout) {
     return aux_required_bytes<InLayout, TOut>(layout);
   }
 
@@ -374,7 +374,7 @@ struct DataOutputImpl<AccessKindLastContiguous, TIn, OutTensor, TransformFn> {
   using TOut = typename OutTensor::ElementType;
   using OutLayout = typename OutTensor::Layout;
 
-  static constexpr nint_t required_aux_size(const OutLayout&) { return 0; }
+  static constexpr nint_t required_workspace(const OutLayout&) { return 0; }
 
   DataOutputImpl(TOut* p, const OutLayout& layout, const TransformFn& fn, void*)
       : _p(p), _layout(layout), _fn(fn) {}
@@ -400,7 +400,7 @@ struct DataOutputImpl<AccessKindSecondLastContiguous, TIn, OutTensor, TransformF
   using OutLayout = typename OutTensor::Layout;
   using AuxLayout = decltype(make_aux_layout<OutLayout, TOut>(std::declval<const OutLayout&>()));
 
-  static nint_t required_aux_size(const OutLayout& layout) {
+  static nint_t required_workspace(const OutLayout& layout) {
     return aux_required_bytes<OutLayout, TOut>(layout);
   }
 
@@ -450,7 +450,7 @@ struct DataOutputImpl<AccessKindStrided, TIn, OutTensor, TransformFn> {
   using TOut = typename OutTensor::ElementType;
   using OutLayout = typename OutTensor::Layout;
 
-  static constexpr nint_t required_aux_size(const OutLayout&) { return 0; }
+  static constexpr nint_t required_workspace(const OutLayout&) { return 0; }
 
   DataOutputImpl(TOut* p, const OutLayout& layout, const TransformFn& fn, void*)
       : _p(p), _layout(layout), _fn(fn) {}
@@ -506,8 +506,8 @@ struct DataInput {
   using Kind = details::SelectAccessKind<InLayout>;
   using Impl = details::DataInputImpl<Kind, TOut, InTensor, Transform>;
 
-  static nint_t required_aux_size(const InLayout& layout) {
-    return Impl::required_aux_size(layout);
+  static nint_t required_workspace(const InLayout& layout) {
+    return Impl::required_workspace(layout);
   }
 
   DataInput(const TIn* p, const InLayout& layout, const Transform& fn, void* aux)
@@ -548,8 +548,8 @@ struct InputSpec<
   static_assert(is_any<typename Transform::TIn, TIn>, "Input type of transform fn mismatch");
   static_assert(is_any<typename Transform::TOut, TOut>, "Output type of transform fn mismatch");
 
-  static nint_t required_aux_size(const InputLayout& layout) {
-    return InputAccessor::required_aux_size(layout);
+  static nint_t required_workspace(const InputLayout& layout) {
+    return InputAccessor::required_workspace(layout);
   }
 
   InputSpec(const InputTensor& tensor, const Transform& fn)
@@ -563,7 +563,7 @@ struct InputSpec<
   const InputLayout& input_layout() const { return _tensor.layout(); }
 
   nint_t required_workspace() const {
-    return InputAccessor::required_aux_size(_tensor.layout());
+    return InputAccessor::required_workspace(_tensor.layout());
   }
 
   InputAccessor bind(void* aux) const {
@@ -625,8 +625,8 @@ struct InputSpec<
   static_assert(is_any<typename Transform::TIn, TIn>, "Input type of transform fn mismatch");
   static_assert(is_any<typename Transform::TOut, TOut>, "Output type of transform fn mismatch");
 
-  static nint_t required_aux_size(const InputLayout& layout) {
-    return InputAccessor::required_aux_size(layout);
+  static nint_t required_workspace(const InputLayout& layout) {
+    return InputAccessor::required_workspace(layout);
   }
 
   InputSpec(const InputLayout& layout, const Transform& fn)
@@ -639,7 +639,7 @@ struct InputSpec<
   const InputLayout& input_layout() const { return _in_layout; }
 
   nint_t required_workspace() const {
-    return InputAccessor::required_aux_size(_in_layout);
+    return InputAccessor::required_workspace(_in_layout);
   }
 
   InputAccessor make_input(const TIn* p, void* aux) const {
@@ -685,8 +685,8 @@ struct DataOutput {
   using Kind = details::SelectAccessKind<OutLayout>;
   using Impl = details::DataOutputImpl<Kind, TIn, OutTensor, Transform>;
 
-  static nint_t required_aux_size(const OutLayout& layout) {
-    return Impl::required_aux_size(layout);
+  static nint_t required_workspace(const OutLayout& layout) {
+    return Impl::required_workspace(layout);
   }
 
   DataOutput(TOut* p, const OutLayout& layout, const Transform& fn, void* aux)
@@ -727,8 +727,8 @@ struct OutputSpec<
   static_assert(is_any<typename Transform::TIn, TIn>, "Input type of transform fn mismatch");
   static_assert(is_any<typename Transform::TOut, TOut>, "Output type of transform fn mismatch");
 
-  static nint_t required_aux_size(const OutputLayout& layout) {
-    return OutputAccessor::required_aux_size(layout);
+  static nint_t required_workspace(const OutputLayout& layout) {
+    return OutputAccessor::required_workspace(layout);
   }
 
   OutputSpec(const OutputTensor& tensor, const Transform& fn)
@@ -742,7 +742,7 @@ struct OutputSpec<
   const OutputLayout& output_layout() const { return _tensor.layout(); }
 
   nint_t required_workspace() const {
-    return OutputAccessor::required_aux_size(_tensor.layout());
+    return OutputAccessor::required_workspace(_tensor.layout());
   }
 
   OutputAccessor bind(void* aux) const {
@@ -800,8 +800,8 @@ struct OutputSpec<
   static_assert(is_any<typename Transform::TIn, TIn>, "Input type of transform fn mismatch");
   static_assert(is_any<typename Transform::TOut, TOut>, "Output type of transform fn mismatch");
 
-  static nint_t required_aux_size(const OutputLayout& layout) {
-    return OutputAccessor::required_aux_size(layout);
+  static nint_t required_workspace(const OutputLayout& layout) {
+    return OutputAccessor::required_workspace(layout);
   }
 
   OutputSpec(const OutputLayout& layout, const Transform& fn)
@@ -814,7 +814,7 @@ struct OutputSpec<
   const OutputLayout& output_layout() const { return _out_layout; }
 
   nint_t required_workspace() const {
-    return OutputAccessor::required_aux_size(_out_layout);
+    return OutputAccessor::required_workspace(_out_layout);
   }
 
   OutputAccessor make_output(TOut* p, void* aux) const {
