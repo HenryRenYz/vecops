@@ -51,17 +51,21 @@ template <typename T>
   if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
     float e = static_cast<float>(expected);
     float a = static_cast<float>(actual);
+    if (e == a) return ::testing::AssertionSuccess();
     if (std::abs(e - a) < 0.01f) return ::testing::AssertionSuccess();
     return ::testing::AssertionFailure() << "Expected " << e << ", got " << a;
   } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
     float e = static_cast<float>(expected);
     float a = static_cast<float>(actual);
+    if (e == a) return ::testing::AssertionSuccess();
     if (std::abs(e - a) < 0.01f) return ::testing::AssertionSuccess();
     return ::testing::AssertionFailure() << "Expected " << e << ", got " << a;
   } else if constexpr (std::is_same_v<T, vecops::float32_t>) {
+    if (expected == actual) return ::testing::AssertionSuccess();
     if (std::abs(expected - actual) < 1e-5f) return ::testing::AssertionSuccess();
     return ::testing::AssertionFailure() << "Expected " << expected << ", got " << actual;
   } else if constexpr (std::is_same_v<T, vecops::float64_t>) {
+    if (expected == actual) return ::testing::AssertionSuccess();
     if (std::abs(expected - actual) < 1e-10) return ::testing::AssertionSuccess();
     return ::testing::AssertionFailure() << "Expected " << expected << ", got " << actual;
   } else {

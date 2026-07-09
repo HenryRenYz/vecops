@@ -6,6 +6,7 @@
 #define VECOPS_X86_ARITHMETIC_H
 
 #include <cmath>
+#include <limits>
 
 #include "./x86_Basic.h"
 #include "./x86_Bit.h"
@@ -1670,6 +1671,326 @@ VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
   return word::blend(a, m, word::max(a, b));
 }
 #endif // HAS_AVX512DQ
+
+/* ************************************************************************** */
+//                              Reductions                                    //
+/* ************************************************************************** */
+namespace details {
+template <typename E>
+VECOPS_VFUNC E reduce_max_identity() {
+  if constexpr (is_float<E>) return static_cast<E>(-std::numeric_limits<double>::infinity());
+  else return std::numeric_limits<E>::lowest();
+}
+
+template <typename E>
+VECOPS_VFUNC E reduce_min_identity() {
+  if constexpr (is_float<E>) return static_cast<E>(std::numeric_limits<double>::infinity());
+  else return std::numeric_limits<E>::max();
+}
+
+template <TLV_DECL_TAG(T), TLV_DECL_VEC(V)>
+VECOPS_VFUNC TypeOf<T> scalar_reduce_add(T t, V v) {
+  TypeOf<T> acc{};
+  for (nint_t i = 0; i < size(t); ++i) {
+    acc = static_cast<TypeOf<T>>(acc + word::get(v, i));
+  }
+  return acc;
+}
+
+template <TLV_DECL_TAG(T), TLV_DECL_VEC(V)>
+VECOPS_VFUNC TypeOf<T> scalar_reduce_add(T t, V v, Mask<T> m) {
+  TypeOf<T> acc{};
+  for (nint_t i = 0; i < size(t); ++i) {
+    if (word::get(t, m, i)) acc = static_cast<TypeOf<T>>(acc + word::get(v, i));
+  }
+  return acc;
+}
+
+template <TLV_DECL_TAG(T), TLV_DECL_VEC(V)>
+VECOPS_VFUNC TypeOf<T> scalar_reduce_max(T t, V v) {
+  TypeOf<T> acc = reduce_max_identity<TypeOf<T>>();
+  for (nint_t i = 0; i < size(t); ++i) {
+    auto x = word::get(v, i);
+    if (x > acc) acc = x;
+  }
+  return acc;
+}
+
+template <TLV_DECL_TAG(T), TLV_DECL_VEC(V)>
+VECOPS_VFUNC TypeOf<T> scalar_reduce_max(T t, V v, Mask<T> m) {
+  TypeOf<T> acc = reduce_max_identity<TypeOf<T>>();
+  for (nint_t i = 0; i < size(t); ++i) {
+    auto x = word::get(v, i);
+    if (word::get(t, m, i) && x > acc) acc = x;
+  }
+  return acc;
+}
+
+template <TLV_DECL_TAG(T), TLV_DECL_VEC(V)>
+VECOPS_VFUNC TypeOf<T> scalar_reduce_min(T t, V v) {
+  TypeOf<T> acc = reduce_min_identity<TypeOf<T>>();
+  for (nint_t i = 0; i < size(t); ++i) {
+    auto x = word::get(v, i);
+    if (x < acc) acc = x;
+  }
+  return acc;
+}
+
+template <TLV_DECL_TAG(T), TLV_DECL_VEC(V)>
+VECOPS_VFUNC TypeOf<T> scalar_reduce_min(T t, V v, Mask<T> m) {
+  TypeOf<T> acc = reduce_min_identity<TypeOf<T>>();
+  for (nint_t i = 0; i < size(t); ++i) {
+    auto x = word::get(v, i);
+    if (word::get(t, m, i) && x < acc) acc = x;
+  }
+  return acc;
+}
+} // namespace details
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v) {
+  using E = TypeOf<T>;
+#if defined(HAS_AVX512BW) && defined(HAS_AVX512VL) && (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER))
+  if constexpr (T::Bytes == 16 && is_any<E, int8_t, uint8_t>) return static_cast<E>(_mm_reduce_add_epi8(v.v));
+  else if constexpr (T::Bytes == 16 && is_any<E, int16_t, uint16_t>) return static_cast<E>(_mm_reduce_add_epi16(v.v));
+#endif
+#ifdef HAS_AVX512_FP16
+  if constexpr (T::Bytes == 16 && std::is_same_v<E, float16_t>) return static_cast<E>(_mm_reduce_add_ph(_mm_castsi128_ph(v.v)));
+#endif
+  return details::scalar_reduce_add(t, v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v, Mask<T> m) {
+  using E = TypeOf<T>;
+#if defined(HAS_AVX512BW) && defined(HAS_AVX512VL) && (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER))
+  if constexpr (T::Bytes == 16 && is_any<E, int8_t, uint8_t>) return static_cast<E>(_mm_mask_reduce_add_epi8(m.v, v.v));
+  else if constexpr (T::Bytes == 16 && is_any<E, int16_t, uint16_t>) return static_cast<E>(_mm_mask_reduce_add_epi16(m.v, v.v));
+#endif
+  return details::scalar_reduce_add(t, v, m);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v) {
+  using E = TypeOf<T>;
+#if defined(HAS_AVX512BW) && defined(HAS_AVX512VL) && (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER))
+  if constexpr (T::Bytes == 16 && std::is_same_v<E, int8_t>) return static_cast<E>(_mm_reduce_max_epi8(v.v));
+  else if constexpr (T::Bytes == 16 && std::is_same_v<E, uint8_t>) return static_cast<E>(_mm_reduce_max_epu8(v.v));
+  else if constexpr (T::Bytes == 16 && std::is_same_v<E, int16_t>) return static_cast<E>(_mm_reduce_max_epi16(v.v));
+  else if constexpr (T::Bytes == 16 && std::is_same_v<E, uint16_t>) return static_cast<E>(_mm_reduce_max_epu16(v.v));
+#endif
+#ifdef HAS_AVX512_FP16
+  if constexpr (T::Bytes == 16 && std::is_same_v<E, float16_t>) return static_cast<E>(_mm_reduce_max_ph(_mm_castsi128_ph(v.v)));
+#endif
+  return details::scalar_reduce_max(t, v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v, Mask<T> m) {
+  using E = TypeOf<T>;
+#if defined(HAS_AVX512BW) && defined(HAS_AVX512VL) && (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER))
+  if constexpr (T::Bytes == 16 && std::is_same_v<E, int8_t>) return static_cast<E>(_mm_mask_reduce_max_epi8(m.v, v.v));
+  else if constexpr (T::Bytes == 16 && std::is_same_v<E, uint8_t>) return static_cast<E>(_mm_mask_reduce_max_epu8(m.v, v.v));
+  else if constexpr (T::Bytes == 16 && std::is_same_v<E, int16_t>) return static_cast<E>(_mm_mask_reduce_max_epi16(m.v, v.v));
+  else if constexpr (T::Bytes == 16 && std::is_same_v<E, uint16_t>) return static_cast<E>(_mm_mask_reduce_max_epu16(m.v, v.v));
+#endif
+  return details::scalar_reduce_max(t, v, m);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v) {
+  using E = TypeOf<T>;
+#if defined(HAS_AVX512BW) && defined(HAS_AVX512VL) && (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER))
+  if constexpr (T::Bytes == 16 && std::is_same_v<E, int8_t>) return static_cast<E>(_mm_reduce_min_epi8(v.v));
+  else if constexpr (T::Bytes == 16 && std::is_same_v<E, uint8_t>) return static_cast<E>(_mm_reduce_min_epu8(v.v));
+  else if constexpr (T::Bytes == 16 && std::is_same_v<E, int16_t>) return static_cast<E>(_mm_reduce_min_epi16(v.v));
+  else if constexpr (T::Bytes == 16 && std::is_same_v<E, uint16_t>) return static_cast<E>(_mm_reduce_min_epu16(v.v));
+#endif
+#ifdef HAS_AVX512_FP16
+  if constexpr (T::Bytes == 16 && std::is_same_v<E, float16_t>) return static_cast<E>(_mm_reduce_min_ph(_mm_castsi128_ph(v.v)));
+#endif
+  return details::scalar_reduce_min(t, v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v, Mask<T> m) {
+  using E = TypeOf<T>;
+#if defined(HAS_AVX512BW) && defined(HAS_AVX512VL) && (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER))
+  if constexpr (T::Bytes == 16 && std::is_same_v<E, int8_t>) return static_cast<E>(_mm_mask_reduce_min_epi8(m.v, v.v));
+  else if constexpr (T::Bytes == 16 && std::is_same_v<E, uint8_t>) return static_cast<E>(_mm_mask_reduce_min_epu8(m.v, v.v));
+  else if constexpr (T::Bytes == 16 && std::is_same_v<E, int16_t>) return static_cast<E>(_mm_mask_reduce_min_epi16(m.v, v.v));
+  else if constexpr (T::Bytes == 16 && std::is_same_v<E, uint16_t>) return static_cast<E>(_mm_mask_reduce_min_epu16(m.v, v.v));
+#endif
+  return details::scalar_reduce_min(t, v, m);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v) {
+  using E = TypeOf<T>;
+#if defined(HAS_AVX512BW) && defined(HAS_AVX512VL) && (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER))
+  if constexpr (is_any<E, int8_t, uint8_t>) return static_cast<E>(_mm256_reduce_add_epi8(v.v));
+  else if constexpr (is_any<E, int16_t, uint16_t>) return static_cast<E>(_mm256_reduce_add_epi16(v.v));
+#endif
+#ifdef HAS_AVX512_FP16
+  if constexpr (std::is_same_v<E, float16_t>) return static_cast<E>(_mm256_reduce_add_ph(_mm256_castsi256_ph(v.v)));
+#endif
+  return details::scalar_reduce_add(t, v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v, Mask<T> m) {
+  using E = TypeOf<T>;
+#if defined(HAS_AVX512BW) && defined(HAS_AVX512VL) && (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER))
+  if constexpr (is_any<E, int8_t, uint8_t>) return static_cast<E>(_mm256_mask_reduce_add_epi8(m.v, v.v));
+  else if constexpr (is_any<E, int16_t, uint16_t>) return static_cast<E>(_mm256_mask_reduce_add_epi16(m.v, v.v));
+#endif
+  return details::scalar_reduce_add(t, v, m);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v) {
+  using E = TypeOf<T>;
+#if defined(HAS_AVX512BW) && defined(HAS_AVX512VL) && (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER))
+  if constexpr (std::is_same_v<E, int8_t>) return static_cast<E>(_mm256_reduce_max_epi8(v.v));
+  else if constexpr (std::is_same_v<E, uint8_t>) return static_cast<E>(_mm256_reduce_max_epu8(v.v));
+  else if constexpr (std::is_same_v<E, int16_t>) return static_cast<E>(_mm256_reduce_max_epi16(v.v));
+  else if constexpr (std::is_same_v<E, uint16_t>) return static_cast<E>(_mm256_reduce_max_epu16(v.v));
+#endif
+#ifdef HAS_AVX512_FP16
+  if constexpr (std::is_same_v<E, float16_t>) return static_cast<E>(_mm256_reduce_max_ph(_mm256_castsi256_ph(v.v)));
+#endif
+  return details::scalar_reduce_max(t, v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v, Mask<T> m) {
+  using E = TypeOf<T>;
+#if defined(HAS_AVX512BW) && defined(HAS_AVX512VL) && (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER))
+  if constexpr (std::is_same_v<E, int8_t>) return static_cast<E>(_mm256_mask_reduce_max_epi8(m.v, v.v));
+  else if constexpr (std::is_same_v<E, uint8_t>) return static_cast<E>(_mm256_mask_reduce_max_epu8(m.v, v.v));
+  else if constexpr (std::is_same_v<E, int16_t>) return static_cast<E>(_mm256_mask_reduce_max_epi16(m.v, v.v));
+  else if constexpr (std::is_same_v<E, uint16_t>) return static_cast<E>(_mm256_mask_reduce_max_epu16(m.v, v.v));
+#endif
+  return details::scalar_reduce_max(t, v, m);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v) {
+  using E = TypeOf<T>;
+#if defined(HAS_AVX512BW) && defined(HAS_AVX512VL) && (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER))
+  if constexpr (std::is_same_v<E, int8_t>) return static_cast<E>(_mm256_reduce_min_epi8(v.v));
+  else if constexpr (std::is_same_v<E, uint8_t>) return static_cast<E>(_mm256_reduce_min_epu8(v.v));
+  else if constexpr (std::is_same_v<E, int16_t>) return static_cast<E>(_mm256_reduce_min_epi16(v.v));
+  else if constexpr (std::is_same_v<E, uint16_t>) return static_cast<E>(_mm256_reduce_min_epu16(v.v));
+#endif
+#ifdef HAS_AVX512_FP16
+  if constexpr (std::is_same_v<E, float16_t>) return static_cast<E>(_mm256_reduce_min_ph(_mm256_castsi256_ph(v.v)));
+#endif
+  return details::scalar_reduce_min(t, v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 32)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v, Mask<T> m) {
+  using E = TypeOf<T>;
+#if defined(HAS_AVX512BW) && defined(HAS_AVX512VL) && (defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER))
+  if constexpr (std::is_same_v<E, int8_t>) return static_cast<E>(_mm256_mask_reduce_min_epi8(m.v, v.v));
+  else if constexpr (std::is_same_v<E, uint8_t>) return static_cast<E>(_mm256_mask_reduce_min_epu8(m.v, v.v));
+  else if constexpr (std::is_same_v<E, int16_t>) return static_cast<E>(_mm256_mask_reduce_min_epi16(m.v, v.v));
+  else if constexpr (std::is_same_v<E, uint16_t>) return static_cast<E>(_mm256_mask_reduce_min_epu16(m.v, v.v));
+#endif
+  return details::scalar_reduce_min(t, v, m);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v) {
+  using E = TypeOf<T>;
+#ifdef HAS_AVX512F
+  if constexpr (std::is_same_v<E, float32_t>) return _mm512_reduce_add_ps(v.v);
+  else if constexpr (std::is_same_v<E, float64_t>) return _mm512_reduce_add_pd(v.v);
+  else if constexpr (std::is_same_v<E, int64_t>) return static_cast<E>(_mm512_reduce_add_epi64(v.v));
+  else if constexpr (std::is_same_v<E, uint64_t>) return static_cast<E>(_mm512_reduce_add_epi64(v.v));
+  else if constexpr (is_any<E, int32_t, uint32_t>) return static_cast<E>(_mm512_reduce_add_epi32(v.v));
+#endif
+#ifdef HAS_AVX512_FP16
+  if constexpr (std::is_same_v<E, float16_t>) return static_cast<E>(_mm512_reduce_add_ph(_mm512_castsi512_ph(v.v)));
+#endif
+  return details::scalar_reduce_add(t, v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v, Mask<T> m) {
+  using E = TypeOf<T>;
+#ifdef HAS_AVX512F
+  if constexpr (std::is_same_v<E, float32_t>) return _mm512_mask_reduce_add_ps(m.v, v.v);
+  else if constexpr (std::is_same_v<E, float64_t>) return _mm512_mask_reduce_add_pd(m.v, v.v);
+  else if constexpr (std::is_same_v<E, int64_t>) return static_cast<E>(_mm512_mask_reduce_add_epi64(m.v, v.v));
+  else if constexpr (std::is_same_v<E, uint64_t>) return static_cast<E>(_mm512_mask_reduce_add_epi64(m.v, v.v));
+  else if constexpr (is_any<E, int32_t, uint32_t>) return static_cast<E>(_mm512_mask_reduce_add_epi32(m.v, v.v));
+#endif
+  return details::scalar_reduce_add(t, v, m);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v) {
+  using E = TypeOf<T>;
+#ifdef HAS_AVX512F
+  if constexpr (std::is_same_v<E, float32_t>) return _mm512_reduce_max_ps(v.v);
+  else if constexpr (std::is_same_v<E, float64_t>) return _mm512_reduce_max_pd(v.v);
+  else if constexpr (std::is_same_v<E, int32_t>) return static_cast<E>(_mm512_reduce_max_epi32(v.v));
+  else if constexpr (std::is_same_v<E, uint32_t>) return static_cast<E>(_mm512_reduce_max_epu32(v.v));
+  else if constexpr (std::is_same_v<E, int64_t>) return static_cast<E>(_mm512_reduce_max_epi64(v.v));
+  else if constexpr (std::is_same_v<E, uint64_t>) return static_cast<E>(_mm512_reduce_max_epu64(v.v));
+#endif
+#ifdef HAS_AVX512_FP16
+  if constexpr (std::is_same_v<E, float16_t>) return static_cast<E>(_mm512_reduce_max_ph(_mm512_castsi512_ph(v.v)));
+#endif
+  return details::scalar_reduce_max(t, v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v, Mask<T> m) {
+  using E = TypeOf<T>;
+#ifdef HAS_AVX512F
+  if constexpr (std::is_same_v<E, float32_t>) return _mm512_mask_reduce_max_ps(m.v, v.v);
+  else if constexpr (std::is_same_v<E, float64_t>) return _mm512_mask_reduce_max_pd(m.v, v.v);
+  else if constexpr (std::is_same_v<E, int32_t>) return static_cast<E>(_mm512_mask_reduce_max_epi32(m.v, v.v));
+  else if constexpr (std::is_same_v<E, uint32_t>) return static_cast<E>(_mm512_mask_reduce_max_epu32(m.v, v.v));
+  else if constexpr (std::is_same_v<E, int64_t>) return static_cast<E>(_mm512_mask_reduce_max_epi64(m.v, v.v));
+  else if constexpr (std::is_same_v<E, uint64_t>) return static_cast<E>(_mm512_mask_reduce_max_epu64(m.v, v.v));
+#endif
+  return details::scalar_reduce_max(t, v, m);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v) {
+  using E = TypeOf<T>;
+#ifdef HAS_AVX512F
+  if constexpr (std::is_same_v<E, float32_t>) return _mm512_reduce_min_ps(v.v);
+  else if constexpr (std::is_same_v<E, float64_t>) return _mm512_reduce_min_pd(v.v);
+  else if constexpr (std::is_same_v<E, int32_t>) return static_cast<E>(_mm512_reduce_min_epi32(v.v));
+  else if constexpr (std::is_same_v<E, uint32_t>) return static_cast<E>(_mm512_reduce_min_epu32(v.v));
+  else if constexpr (std::is_same_v<E, int64_t>) return static_cast<E>(_mm512_reduce_min_epi64(v.v));
+  else if constexpr (std::is_same_v<E, uint64_t>) return static_cast<E>(_mm512_reduce_min_epu64(v.v));
+#endif
+#ifdef HAS_AVX512_FP16
+  if constexpr (std::is_same_v<E, float16_t>) return static_cast<E>(_mm512_reduce_min_ph(_mm512_castsi512_ph(v.v)));
+#endif
+  return details::scalar_reduce_min(t, v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(T::Bytes == 64)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v, Mask<T> m) {
+  using E = TypeOf<T>;
+#ifdef HAS_AVX512F
+  if constexpr (std::is_same_v<E, float32_t>) return _mm512_mask_reduce_min_ps(m.v, v.v);
+  else if constexpr (std::is_same_v<E, float64_t>) return _mm512_mask_reduce_min_pd(m.v, v.v);
+  else if constexpr (std::is_same_v<E, int32_t>) return static_cast<E>(_mm512_mask_reduce_min_epi32(m.v, v.v));
+  else if constexpr (std::is_same_v<E, uint32_t>) return static_cast<E>(_mm512_mask_reduce_min_epu32(m.v, v.v));
+  else if constexpr (std::is_same_v<E, int64_t>) return static_cast<E>(_mm512_mask_reduce_min_epi64(m.v, v.v));
+  else if constexpr (std::is_same_v<E, uint64_t>) return static_cast<E>(_mm512_mask_reduce_min_epu64(m.v, v.v));
+#endif
+  return details::scalar_reduce_min(t, v, m);
+}
 
 /* ************************************************************************** */
 //                             Rcp / Reciprocal                               //

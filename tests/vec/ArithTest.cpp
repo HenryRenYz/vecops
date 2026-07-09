@@ -23,6 +23,84 @@
 using namespace vecops;
 using namespace vecops::vec;
 
+namespace {
+template <typename T>
+T reduce_test_value(nint_t i) {
+  if constexpr (is_signed_int<T> || is_float<T>) {
+    return static_cast<T>(static_cast<float>((i % 11) - 5));
+  } else {
+    return static_cast<T>((i % 13) + 1);
+  }
+}
+
+template <typename T>
+T expected_reduce_add(const std::vector<T>& data, const std::vector<bool>* mask = nullptr) {
+  T acc{};
+  for (size_t i = 0; i < data.size(); ++i) {
+    if (mask == nullptr || (*mask)[i]) acc = static_cast<T>(acc + data[i]);
+  }
+  return acc;
+}
+
+template <typename T>
+T expected_reduce_max(const std::vector<T>& data, const std::vector<bool>* mask = nullptr) {
+  T acc;
+  if constexpr (is_float<T>) acc = static_cast<T>(-std::numeric_limits<double>::infinity());
+  else acc = std::numeric_limits<T>::lowest();
+  for (size_t i = 0; i < data.size(); ++i) {
+    if ((mask == nullptr || (*mask)[i]) && data[i] > acc) acc = data[i];
+  }
+  return acc;
+}
+
+template <typename T>
+T expected_reduce_min(const std::vector<T>& data, const std::vector<bool>* mask = nullptr) {
+  T acc;
+  if constexpr (is_float<T>) acc = static_cast<T>(std::numeric_limits<double>::infinity());
+  else acc = std::numeric_limits<T>::max();
+  for (size_t i = 0; i < data.size(); ++i) {
+    if ((mask == nullptr || (*mask)[i]) && data[i] < acc) acc = data[i];
+  }
+  return acc;
+}
+
+template <typename Tag>
+void run_reduce_checks(Tag t) {
+  using T = TypeOf<Tag>;
+  const nint_t N = size(t);
+  std::vector<T> data((size_t)N);
+  for (nint_t i = 0; i < N; ++i) data[(size_t)i] = reduce_test_value<T>(i);
+
+  auto v = loadu(t, data.data());
+  EXPECT_TRUE(test_utils::values_equal(expected_reduce_add(data), reduce_add(t, v)))
+      << "reduce_add N=" << N;
+  EXPECT_TRUE(test_utils::values_equal(expected_reduce_max(data), reduce_max(t, v)))
+      << "reduce_max N=" << N;
+  EXPECT_TRUE(test_utils::values_equal(expected_reduce_min(data), reduce_min(t, v)))
+      << "reduce_min N=" << N;
+
+  std::vector<std::vector<bool>> masks;
+  masks.emplace_back((size_t)N, true);
+  masks.emplace_back((size_t)N, false);
+  masks.emplace_back((size_t)N, false);
+  masks.emplace_back((size_t)N, false);
+  for (nint_t i = 0; i < N; ++i) {
+    masks[2][(size_t)i] = (i % 2) == 0;
+    masks[3][(size_t)i] = (i % 5) == 1 || (i % 5) == 3;
+  }
+
+  for (size_t mi = 0; mi < masks.size(); ++mi) {
+    auto m = test_utils::make_mask(t, masks[mi]);
+    EXPECT_TRUE(test_utils::values_equal(expected_reduce_add(data, &masks[mi]), reduce_add(t, v, m)))
+        << "masked reduce_add N=" << N << " mask=" << mi;
+    EXPECT_TRUE(test_utils::values_equal(expected_reduce_max(data, &masks[mi]), reduce_max(t, v, m)))
+        << "masked reduce_max N=" << N << " mask=" << mi;
+    EXPECT_TRUE(test_utils::values_equal(expected_reduce_min(data, &masks[mi]), reduce_min(t, v, m)))
+        << "masked reduce_min N=" << N << " mask=" << mi;
+  }
+}
+} // namespace
+
 // ============================================================================
 // Test Fixture
 // ============================================================================
@@ -102,6 +180,12 @@ TYPED_TEST(VecArithTest, AddWithMask) {
     EXPECT_TRUE(test_utils::values_equal(this->a_data_[i], get(t, vr, i)))
         << "i=" << i << " (masked out, should be a)";
   }
+}
+
+TYPED_TEST(VecArithTest, Reductions) {
+  run_reduce_checks(this->t);
+  run_reduce_checks(this->t2);
+  run_reduce_checks(this->t4);
 }
 
 // ============================================================================

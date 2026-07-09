@@ -1115,7 +1115,7 @@ private:
  * @endcode
  */
 template <typename T>
-using ToValue = details::ValuePromote<T>::Type;
+using ToValue = details::ValuePromote<std::remove_cvref_t<T>>::Type;
 
 /**
  * @brief Base class for multi-dimensional typed integer arrays (Shape, Strides).

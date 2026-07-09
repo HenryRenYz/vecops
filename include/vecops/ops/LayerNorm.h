@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -39,31 +40,15 @@ using layernorm_compute_t = typename std::remove_cvref_t<Config>::ComputeType;
 template <typename Config>
 using layernorm_tag_t = typename std::remove_cvref_t<Config>::Tag;
 
-template <typename T>
-struct IsInputSpec : std::false_type {};
-
-template <typename... Args>
-struct IsInputSpec<gemm::InputSpec<Args...>> : std::true_type {};
-
-template <typename T>
-static constexpr bool is_input_spec_v = IsInputSpec<std::remove_cvref_t<T>>::value;
-
-template <typename T>
-struct IsOutputSpec : std::false_type {};
-
-template <typename... Args>
-struct IsOutputSpec<gemm::OutputSpec<Args...>> : std::true_type {};
-
-template <typename T>
-static constexpr bool is_output_spec_v = IsOutputSpec<std::remove_cvref_t<T>>::value;
-
+// TODO sooner or later I will take this down
 template <typename Tag>
-VECOPS_ALWAYS_INLINE vec::TypeOf<Tag> horizontal_sum(Tag tag, vec::Vec<Tag> v) {
-  vec::TypeOf<Tag> acc{};
-  for (nint_t i = 0; i < vec::size(tag); ++i) {
-    acc += vec::get(tag, v, i);
+auto vector_step_value(Tag tag) {
+  using TagT = std::remove_cvref_t<Tag>;
+  if constexpr (TagT::is_runtime_size) {
+    return gemm::Any{vec::size(tag)};
+  } else {
+    return gemm::Const<vec::size(TagT{})>{};
   }
-  return acc;
 }
 
 template <typename InLayout, typename ScaleLayout, typename BiasLayout, typename OutLayout>
@@ -108,16 +93,22 @@ struct LayerNorm {
       typename InSpec,
       typename ScaleSpec,
       typename BiasSpec,
-      typename OutSpec>
+      typename OutSpec,
+      std::enable_if_t<
+          gemm::is_input_spec_v<InSpec> &&
+          gemm::is_input_spec_v<ScaleSpec> &&
+          gemm::is_input_spec_v<BiasSpec> &&
+          gemm::is_output_spec_v<OutSpec>,
+          bool> = true>
   nint_t required_workspace(
       const InSpec& in,
       const ScaleSpec& scale,
       const BiasSpec& bias,
       const OutSpec& out) const {
-    static_assert(details::is_input_spec_v<InSpec>, "LayerNorm input must be an InputSpec");
-    static_assert(details::is_input_spec_v<ScaleSpec>, "LayerNorm scale must be an InputSpec");
-    static_assert(details::is_input_spec_v<BiasSpec>, "LayerNorm bias must be an InputSpec");
-    static_assert(details::is_output_spec_v<OutSpec>, "LayerNorm output must be an OutputSpec");
+    static_assert(gemm::is_input_spec_v<InSpec>, "LayerNorm input must be an InputSpec");
+    static_assert(gemm::is_input_spec_v<ScaleSpec>, "LayerNorm scale must be an InputSpec");
+    static_assert(gemm::is_input_spec_v<BiasSpec>, "LayerNorm bias must be an InputSpec");
+    static_assert(gemm::is_output_spec_v<OutSpec>, "LayerNorm output must be an OutputSpec");
     details::validate_layernorm_layouts(
         in.input_layout(),
         scale.input_layout(),
@@ -142,8 +133,7 @@ struct LayerNorm {
       const ScaleLayout& scale,
       const BiasLayout& bias,
       const OutLayout& out) const {
-    details::validate_layernorm_layouts(in, scale, bias, out);
-    return gemm::required_workspace(
+    return required_workspace(
         gemm::InputSpec<ComputeType, ComputeType, std::remove_cvref_t<InLayout>>(in),
         gemm::InputSpec<ComputeType, ComputeType, std::remove_cvref_t<ScaleLayout>>(scale),
         gemm::InputSpec<ComputeType, ComputeType, std::remove_cvref_t<BiasLayout>>(bias),
@@ -161,10 +151,10 @@ struct LayerNorm {
       const ScaleSpec& scale,
       const BiasSpec& bias,
       const OutSpec& out) const {
-    static_assert(details::is_input_spec_v<InSpec>, "LayerNorm input must be an InputSpec");
-    static_assert(details::is_input_spec_v<ScaleSpec>, "LayerNorm scale must be an InputSpec");
-    static_assert(details::is_input_spec_v<BiasSpec>, "LayerNorm bias must be an InputSpec");
-    static_assert(details::is_output_spec_v<OutSpec>, "LayerNorm output must be an OutputSpec");
+    static_assert(gemm::is_input_spec_v<InSpec>, "LayerNorm input must be an InputSpec");
+    static_assert(gemm::is_input_spec_v<ScaleSpec>, "LayerNorm scale must be an InputSpec");
+    static_assert(gemm::is_input_spec_v<BiasSpec>, "LayerNorm bias must be an InputSpec");
+    static_assert(gemm::is_output_spec_v<OutSpec>, "LayerNorm output must be an OutputSpec");
 
     const auto& in_layout = in.input_layout();
     const auto& scale_layout = scale.input_layout();
@@ -176,7 +166,12 @@ struct LayerNorm {
     {
       auto gamma = scale.bind(workspace);
       auto beta = bias.bind(workspace);
-      run_bound(workspace, in, out, gamma, beta);
+
+      gemm::hop::for_each_dims<in_layout.Ndim - 1>(
+          [&](const auto& in_row, const auto& out_row) {
+            run_row(workspace, in_row, gamma, beta, out_row);
+          }, in, out
+      );
     }
     workspace.rewind(mark);
   }
@@ -199,29 +194,6 @@ struct LayerNorm {
 private:
   template <
       typename InSpec,
-      typename OutSpec,
-      typename ScaleAccessor,
-      typename BiasAccessor>
-  void run_bound(
-      gemm::WorkspaceView& workspace,
-      const InSpec& in,
-      const OutSpec& out,
-      const ScaleAccessor& gamma,
-      const BiasAccessor& beta) const {
-    using InLayout = typename std::remove_cvref_t<InSpec>::InputLayout;
-    constexpr int rank = InLayout::Ndim;
-    constexpr int prefix_rank = rank - 1;
-
-    gemm::hop::for_each_dims<prefix_rank>(
-        [&](const auto& in_row, const auto& out_row) {
-          run_row(workspace, in_row, gamma, beta, out_row);
-        },
-        in,
-        out);
-  }
-
-  template <
-      typename InSpec,
       typename ScaleAccessor,
       typename BiasAccessor,
       typename OutSpec>
@@ -231,60 +203,49 @@ private:
       const ScaleAccessor& gamma,
       const BiasAccessor& beta,
       const OutSpec& out) const {
+    const auto & in_layout = in.input_layout();
+    using InLayout = std::remove_cvref_t<decltype(in_layout)>;
+    static_assert(InLayout::Ndim == 1, "LayerNorm row spec must be rank 1");
+
+    Tag t;
+    using VecT = vec::Vec<Tag>;
     auto mark = workspace.mark();
     {
       auto x = in.bind(workspace);
       auto y = out.bind(workspace);
-      run_row_bound(in.input_layout(), x, gamma, beta, y);
+
+      const auto normalized_count = gemm::size<0>(in_layout);
+      const auto step = details::vector_step_value(t);
+
+      const auto [v_mean, v_var] = gemm::hop::scan(
+          std::make_pair(vec::zeros(t), vec::zeros(t)), normalized_count, step,
+          [&](std::pair<VecT, VecT> acc, nint_t col, auto&& count) {
+            auto xv = x(t, count, col);
+            return std::make_pair(vec::add(acc.first, xv), vec::fmadd(xv, xv, acc.second));
+          }
+      );
+
+      const auto inv_n = ComputeType(1) / static_cast<ComputeType>(normalized_count);
+      const auto sum = vec::reduce_add(t, v_mean);
+      const auto sum_sq = vec::reduce_add(t, v_var);
+      const auto mean = sum * inv_n;
+      const auto variance = std::max(sum_sq * inv_n - mean * mean, ComputeType(0));
+      const auto rstd = ComputeType(1) / std::sqrt(variance + config.eps);
+
+      const auto mean_v = vec::fill(t, mean);
+      const auto rstd_v = vec::fill(t, rstd);
+
+      gemm::hop::map(normalized_count, step, [&](nint_t col, auto&& count) {
+        auto xv = x(t, count, col);
+        auto gamma_v = gamma(t, count, col);
+        auto beta_v = beta(t, count, col);
+        auto centered = vec::sub(xv, mean_v);
+        auto normalized = vec::mul(centered, rstd_v);
+        auto affine = vec::fmadd(normalized, gamma_v, beta_v);
+        y(t, affine, count, col);
+      });
     }
     workspace.rewind(mark);
-  }
-
-  template <
-      typename InLayout,
-      typename InAccessor,
-      typename ScaleAccessor,
-      typename BiasAccessor,
-      typename OutAccessor>
-  void run_row_bound(
-      const InLayout& in_layout,
-      const InAccessor& x,
-      const ScaleAccessor& gamma,
-      const BiasAccessor& beta,
-      const OutAccessor& y) const {
-    static_assert(InLayout::Ndim == 1, "LayerNorm row spec must be rank 1");
-    Tag tag;
-    const nint_t normalized_size = in_layout.shape()[0];
-    auto sum_v = vec::zeros(tag);
-    auto sum_sq_v = vec::zeros(tag);
-
-    for (nint_t col = 0; col < normalized_size; col += vec::size(tag)) {
-      const nint_t count = std::min(vec::size(tag), normalized_size - col);
-      auto xv = x(tag, gemm::Any{count}, col);
-      sum_v = vec::add(sum_v, xv);
-      sum_sq_v = vec::fmadd(xv, xv, sum_sq_v);
-    }
-
-    const ComputeType inv_n = ComputeType(1) / static_cast<ComputeType>(normalized_size);
-    const ComputeType sum = details::horizontal_sum(tag, sum_v);
-    const ComputeType sum_sq = details::horizontal_sum(tag, sum_sq_v);
-    const ComputeType mean = sum * inv_n;
-    const ComputeType variance =
-        std::max(sum_sq * inv_n - mean * mean, ComputeType(0));
-    const ComputeType rstd = ComputeType(1) / std::sqrt(variance + config.eps);
-
-    const auto mean_v = vec::fill(tag, mean);
-    const auto rstd_v = vec::fill(tag, rstd);
-    for (nint_t col = 0; col < normalized_size; col += vec::size(tag)) {
-      const nint_t count = std::min(vec::size(tag), normalized_size - col);
-      auto xv = x(tag, gemm::Any{count}, col);
-      auto gamma_v = gamma(tag, gemm::Any{count}, col);
-      auto beta_v = beta(tag, gemm::Any{count}, col);
-      auto centered = vec::sub(xv, mean_v);
-      auto normalized = vec::mul(centered, rstd_v);
-      auto affine = vec::fmadd(normalized, gamma_v, beta_v);
-      y(tag, affine, gemm::Any{count}, col);
-    }
   }
 
   template <
@@ -299,22 +260,46 @@ private:
       const OutSpec& out) const {
     using InLayout = typename std::remove_cvref_t<InSpec>::InputLayout;
     constexpr int prefix_rank = InLayout::Ndim - 1;
-    const auto in_row = first_row_spec<prefix_rank>(in);
-    const auto out_row = first_row_spec<prefix_rank>(out);
+    const auto in_row = row_input_spec<prefix_rank>(in);
+    const auto out_row = row_output_spec<prefix_rank>(out);
     const nint_t row_workspace = gemm::required_workspace(in_row, out_row);
     return gemm::details::workspace_round_up(
         gemm::required_workspace(scale, bias) + row_workspace,
         vec::DEFAULT_ALIGNMENT);
   }
 
-  template <int PrefixRank, typename Spec>
-  static auto first_row_spec(const Spec& spec) {
+  template <int PrefixRank, typename Layout>
+  static auto row_layout(const Layout& layout) {
     if constexpr (PrefixRank == 0) {
-      return spec;
+      return layout;
     } else {
-      return first_row_spec<PrefixRank - 1>(
-          gemm::hop::details::slice_at_actual_dim<0>(spec, 0));
+      return row_layout<PrefixRank - 1>(gemm::remove<0>(layout));
     }
+  }
+
+  template <int PrefixRank, typename Spec>
+  static auto row_input_spec(const Spec& spec) {
+    using SpecT = std::remove_cvref_t<Spec>;
+    auto layout = row_layout<PrefixRank>(spec.input_layout());
+    using RowLayout = std::remove_cvref_t<decltype(layout)>;
+    return gemm::InputSpec<
+        typename SpecT::OutputElement,
+        typename SpecT::InputTensor::ElementType,
+        RowLayout,
+        typename SpecT::Transform>(layout, spec.transform());
+  }
+
+  template <int PrefixRank, typename Spec>
+  static auto row_output_spec(const Spec& spec) {
+    using SpecT = std::remove_cvref_t<Spec>;
+    auto layout = row_layout<PrefixRank>(spec.output_layout());
+    using RowLayout = std::remove_cvref_t<decltype(layout)>;
+    using TOut = typename SpecT::OutputTensor::ElementType;
+    return gemm::OutputSpec<
+        typename SpecT::InputElement,
+        TOut,
+        RowLayout,
+        typename SpecT::Transform>(layout, spec.transform());
   }
 };
 

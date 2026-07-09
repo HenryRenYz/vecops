@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <tuple>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "vecops/gemm/HOP.h"
@@ -527,6 +529,146 @@ TEST(HOPForEachTest, ForEachDimsWithIndexPreservesBroadcastAndForwarding) {
   EXPECT_EQ(seen, (std::vector<int64_t>{20, 52, 84, 126, 158, 190}));
 }
 
+TEST(HOPScanTest, ConstInputsEmitFullChunksAndTail) {
+  std::vector<std::pair<nint_t, nint_t>> chunks;
+
+  const int result = hop::scan(0, cint<10>, cint<4>,
+      [&](int acc, nint_t i, auto&& chunk_n) {
+        using Chunk = std::remove_cvref_t<decltype(chunk_n)>;
+        if (i < 8) {
+          EXPECT_TRUE((std::is_same_v<Chunk, Const<4>>));
+        } else {
+          EXPECT_TRUE((std::is_same_v<Chunk, Const<2>>));
+        }
+        const nint_t len = static_cast<nint_t>(chunk_n);
+        chunks.emplace_back(i, len);
+        return acc + static_cast<int>(len);
+      });
+
+  EXPECT_EQ(result, 10);
+  EXPECT_EQ(chunks, (std::vector<std::pair<nint_t, nint_t>>{{0, 4}, {4, 4}, {8, 2}}));
+}
+
+TEST(HOPScanTest, ConstInputsSkipTailWhenExactlyDivisible) {
+  std::vector<std::pair<nint_t, nint_t>> chunks;
+
+  const int result = hop::scan(1, cint<12>, cint<4>,
+      [&](int acc, nint_t i, auto&& chunk_n) {
+        using Chunk = std::remove_cvref_t<decltype(chunk_n)>;
+        EXPECT_TRUE((std::is_same_v<Chunk, Const<4>>));
+        chunks.emplace_back(i, static_cast<nint_t>(chunk_n));
+        return acc + 1;
+      });
+
+  EXPECT_EQ(result, 4);
+  EXPECT_EQ(chunks, (std::vector<std::pair<nint_t, nint_t>>{{0, 4}, {4, 4}, {8, 4}}));
+}
+
+TEST(HOPScanTest, ConstStepGreaterThanNEmitsSingleTailChunk) {
+  std::vector<std::pair<nint_t, nint_t>> chunks;
+
+  const int result = hop::scan(0, cint<3>, cint<4>,
+      [&](int acc, nint_t i, auto&& chunk_n) {
+        using Chunk = std::remove_cvref_t<decltype(chunk_n)>;
+        EXPECT_TRUE((std::is_same_v<Chunk, Const<3>>));
+        chunks.emplace_back(i, static_cast<nint_t>(chunk_n));
+        return acc + static_cast<int>(static_cast<nint_t>(chunk_n));
+      });
+
+  EXPECT_EQ(result, 3);
+  EXPECT_EQ(chunks, (std::vector<std::pair<nint_t, nint_t>>{{0, 3}}));
+}
+
+TEST(HOPScanTest, ZeroLengthConstInputDoesNotCallFn) {
+  int calls = 0;
+
+  const int result = hop::scan(17, cint<0>, cint<4>,
+      [&](int acc, nint_t, auto&&) {
+        ++calls;
+        return acc + 1;
+      });
+
+  EXPECT_EQ(result, 17);
+  EXPECT_EQ(calls, 0);
+}
+
+TEST(HOPScanTest, RawIntegerInputsPromoteToAnyAndEmitRuntimeTail) {
+  std::vector<std::pair<nint_t, nint_t>> chunks;
+
+  const int result = hop::scan(0, nint_t{10}, nint_t{4},
+      [&](int acc, nint_t i, auto&& chunk_n) {
+        using Chunk = std::remove_cvref_t<decltype(chunk_n)>;
+        EXPECT_TRUE((std::is_same_v<Chunk, Any>));
+        chunks.emplace_back(i, static_cast<nint_t>(chunk_n));
+        return acc + static_cast<int>(static_cast<nint_t>(chunk_n));
+      });
+
+  EXPECT_EQ(result, 10);
+  EXPECT_EQ(chunks, (std::vector<std::pair<nint_t, nint_t>>{{0, 4}, {4, 4}, {8, 2}}));
+}
+
+TEST(HOPScanTest, DynamicInputsPreserveStepValueType) {
+  int calls = 0;
+
+  const int result = hop::scan(0, dyn<2, 0, 20>(8), dyn<2, 2, 8>(4),
+      [&](int acc, nint_t i, auto&& chunk_n) {
+        using Chunk = std::remove_cvref_t<decltype(chunk_n)>;
+        EXPECT_TRUE((std::is_same_v<Chunk, Dynamic<2, 2, 8>>));
+        EXPECT_EQ(i, calls * 4);
+        EXPECT_EQ(static_cast<nint_t>(chunk_n), 4);
+        ++calls;
+        return acc + 10;
+      });
+
+  EXPECT_EQ(result, 20);
+  EXPECT_EQ(calls, 2);
+}
+
+TEST(HOPScanTest, DynamicInputWithConstStepEmitsAnyRuntimeTail) {
+  std::vector<std::pair<nint_t, nint_t>> chunks;
+
+  const int result = hop::scan(0, dyn<2, 0, 20>(10), cint<4>,
+      [&](int acc, nint_t i, auto&& chunk_n) {
+        using Chunk = std::remove_cvref_t<decltype(chunk_n)>;
+        if (i < 8) {
+          EXPECT_TRUE((std::is_same_v<Chunk, Const<4>>));
+        } else {
+          EXPECT_TRUE((std::is_same_v<Chunk, Any>));
+        }
+        const nint_t len = static_cast<nint_t>(chunk_n);
+        chunks.emplace_back(i, len);
+        return acc + static_cast<int>(len);
+      });
+
+  EXPECT_EQ(result, 10);
+  EXPECT_EQ(chunks, (std::vector<std::pair<nint_t, nint_t>>{{0, 4}, {4, 4}, {8, 2}}));
+}
+
+TEST(HOPMapTest, ReusesScanChunkEmission) {
+  std::vector<std::pair<nint_t, nint_t>> chunks;
+
+  hop::map(cint<10>, cint<4>, [&](nint_t i, auto&& chunk_n) {
+    chunks.emplace_back(i, static_cast<nint_t>(chunk_n));
+  });
+
+  EXPECT_EQ(chunks, (std::vector<std::pair<nint_t, nint_t>>{{0, 4}, {4, 4}, {8, 2}}));
+}
+
+TEST(HOPMapTest, RawIntegerInputsPromoteToAny) {
+  int calls = 0;
+  std::vector<std::pair<nint_t, nint_t>> chunks;
+
+  hop::map(nint_t{10}, nint_t{4}, [&](nint_t i, auto&& chunk_n) {
+    using Chunk = std::remove_cvref_t<decltype(chunk_n)>;
+    EXPECT_TRUE((std::is_same_v<Chunk, Any>));
+    chunks.emplace_back(i, static_cast<nint_t>(chunk_n));
+    ++calls;
+  });
+
+  EXPECT_EQ(calls, 3);
+  EXPECT_EQ(chunks, (std::vector<std::pair<nint_t, nint_t>>{{0, 4}, {4, 4}, {8, 2}}));
+}
+
 #ifdef VECOPS_DEBUG
 TEST(HOPForEachDeathTest, NonBroadcastExtentMismatch) {
   std::vector<int64_t> a(2 * 3);
@@ -550,5 +692,19 @@ TEST(HOPForEachDeathTest, DynamicSizeOneDoesNotBroadcast) {
 
   EXPECT_DEATH((hop::for_each_dims<2>([](auto&&, auto&&) {}, ta, tb)),
                "broadcast extent mismatch");
+}
+
+TEST(HOPScanDeathTest, NegativeRuntimeNAsserts) {
+  EXPECT_DEATH(
+      (void)hop::scan(0, nint_t{-1}, nint_t{1},
+                      [](int acc, nint_t, auto&&) { return acc; }),
+      "scan n must be non-negative");
+}
+
+TEST(HOPScanDeathTest, NonPositiveRuntimeStepAsserts) {
+  EXPECT_DEATH(
+      (void)hop::scan(0, nint_t{4}, nint_t{0},
+                      [](int acc, nint_t, auto&&) { return acc; }),
+      "scan step must be positive");
 }
 #endif

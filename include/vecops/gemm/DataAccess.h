@@ -1486,6 +1486,30 @@ struct IsOutputSpec<OutputSpec<Args...>> : std::true_type {};
 } // namespace details
 
 /**
+ * @brief True when `Spec` is a `gemm::InputSpec` instantiation.
+ *
+ * This trait ignores cv/ref qualifiers, so `InputSpec<...>`,
+ * `const InputSpec<...>&`, and `InputSpec<...>&&` are all recognized.
+ * It is intended for operator front-ends that accept the user-facing
+ * DataAccess spec API and want a clear compile-time contract.
+ */
+template <typename Spec>
+static constexpr bool is_input_spec_v =
+    details::IsInputSpec<std::remove_cvref_t<Spec>>::value;
+
+/**
+ * @brief True when `Spec` is a `gemm::OutputSpec` instantiation.
+ *
+ * This trait ignores cv/ref qualifiers, so `OutputSpec<...>`,
+ * `const OutputSpec<...>&`, and `OutputSpec<...>&&` are all recognized.
+ * It is intended for operator front-ends that accept the user-facing
+ * DataAccess spec API and want a clear compile-time contract.
+ */
+template <typename Spec>
+static constexpr bool is_output_spec_v =
+    details::IsOutputSpec<std::remove_cvref_t<Spec>>::value;
+
+/**
  * @brief True when an InputSpec transform is the zero-vector function.
  */
 template <typename Spec>

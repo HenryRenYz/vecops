@@ -291,6 +291,57 @@ TEST(LayerNormRankTest, HandlesRuntimeRankFourTensorLayout) {
   }
 }
 
+TEST(LayerNormWorkspaceTest, LayoutAndSpecWorkspaceMatchContiguous) {
+  using InLayout = Layout<Shape<Const<3>, Const<7>>, Strides<Const<7>, Const<1>>>;
+  using VecLayout = Layout<Shape<Const<7>>, Strides<Const<1>>>;
+  using OutLayout = Layout<Shape<Const<3>, Const<7>>, Strides<Const<7>, Const<1>>>;
+
+  std::vector<float> x(21);
+  std::vector<float> scale(7);
+  std::vector<float> bias(7);
+  std::vector<float> out(21);
+
+  InLayout in_layout{Shape<Const<3>, Const<7>>{}, Strides<Const<7>, Const<1>>{}};
+  VecLayout vec_layout{Shape<Const<7>>{}, Strides<Const<1>>{}};
+  OutLayout out_layout{Shape<Const<3>, Const<7>>{}, Strides<Const<7>, Const<1>>{}};
+  auto x_t = make_tensor(x.data(), in_layout);
+  auto s_t = make_tensor(scale.data(), vec_layout);
+  auto b_t = make_tensor(bias.data(), vec_layout);
+  auto y_t = make_tensor(out.data(), out_layout);
+
+  auto op = layer_norm(LayerNormConfig<float32_t>{.eps = 1e-5f});
+  const nint_t spec_bytes = op.required_workspace(
+      input<float32_t>(x_t),
+      input<float32_t>(s_t),
+      input<float32_t>(b_t),
+      output<float32_t>(y_t));
+  const nint_t layout_bytes = op.required_workspace(in_layout, vec_layout, vec_layout, out_layout);
+
+  EXPECT_EQ(spec_bytes, layout_bytes);
+}
+
+TEST(LayerNormWorkspaceTest, LegacyLayoutSpecsUseRowWorkspace) {
+  using InLayout = Layout<Shape<Const<2>, Const<7>>, Strides<Const<17>, Const<2>>>;
+  using VecLayout = Layout<Shape<Const<7>>, Strides<Const<1>>>;
+  using OutLayout = Layout<Shape<Const<2>, Const<7>>, Strides<Const<1>, Const<2>>>;
+
+  InLayout in_layout{Shape<Const<2>, Const<7>>{}, Strides<Const<17>, Const<2>>{}};
+  VecLayout vec_layout{Shape<Const<7>>{}, Strides<Const<1>>{}};
+  OutLayout out_layout{Shape<Const<2>, Const<7>>{}, Strides<Const<1>, Const<2>>{}};
+  auto op = layer_norm(LayerNormConfig<float32_t>{.eps = 1e-5f});
+
+  auto x_spec = InputSpec<float32_t, float32_t, InLayout>(in_layout);
+  auto s_spec = InputSpec<float32_t, float32_t, VecLayout>(vec_layout);
+  auto b_spec = InputSpec<float32_t, float32_t, VecLayout>(vec_layout);
+  auto y_spec = OutputSpec<float32_t, float32_t, OutLayout>(out_layout);
+
+  const nint_t spec_bytes = op.required_workspace(x_spec, s_spec, b_spec, y_spec);
+  const nint_t layout_bytes = op.required_workspace(in_layout, vec_layout, vec_layout, out_layout);
+
+  EXPECT_EQ(spec_bytes, layout_bytes);
+  EXPECT_GT(spec_bytes, 0);
+}
+
 TEST(LayerNormWorkspaceTest, HandlesStridedInputAndSecondLastContiguousOutput) {
   using InLayout = Layout<Shape<Const<2>, Const<7>>, Strides<Const<17>, Const<2>>>;
   using OutLayout = Layout<Shape<Const<2>, Const<7>>, Strides<Const<1>, Const<2>>>;
@@ -328,9 +379,15 @@ TEST(LayerNormWorkspaceTest, HandlesStridedInputAndSecondLastContiguousOutput) {
   auto b_spec = input<float32_t>(b_t);
   auto y_spec = output<float32_t>(y_t);
   const nint_t bytes = op.required_workspace(x_spec, s_spec, b_spec, y_spec);
+  const nint_t layout_bytes = op.required_workspace(
+      in_layout,
+      s_t.layout(),
+      b_t.layout(),
+      out_layout);
+  EXPECT_EQ(bytes, layout_bytes);
   EXPECT_GT(bytes, 0);
 
-  Workspace workspace(bytes);
+  Workspace workspace(layout_bytes);
   auto view = workspace.view();
   op(view, x_spec, s_spec, b_spec, y_spec);
 

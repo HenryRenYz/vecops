@@ -1230,6 +1230,119 @@ VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   );
 }
 
+namespace details {
+template <typename E>
+VECOPS_VFUNC E reduce_scalar_add(E a, E b) {
+  return static_cast<E>(a + b);
+}
+
+template <typename E>
+VECOPS_VFUNC E reduce_scalar_max(E a, E b) {
+  return a > b ? a : b;
+}
+
+template <typename E>
+VECOPS_VFUNC E reduce_scalar_min(E a, E b) {
+  return a < b ? a : b;
+}
+
+template <nint_t Begin, nint_t Count, TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_add_words(T t, Vec<T> v) {
+  if constexpr (Count == 1) {
+    return word::reduce_add(word_tag(t), get_word<Begin>(t, v));
+  } else {
+    return reduce_scalar_add(
+        reduce_add_words<Begin, Count / 2>(t, v),
+        reduce_add_words<Begin + Count / 2, Count - Count / 2>(t, v));
+  }
+}
+
+template <nint_t Begin, nint_t Count, TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_add_words(T t, Vec<T> v, Mask<T> m) {
+  if constexpr (Count == 1) {
+    return word::reduce_add(word_tag(t), get_word<Begin>(t, v), get_word_mask<Begin>(t, m));
+  } else {
+    return reduce_scalar_add(
+        reduce_add_words<Begin, Count / 2>(t, v, m),
+        reduce_add_words<Begin + Count / 2, Count - Count / 2>(t, v, m));
+  }
+}
+
+template <nint_t Begin, nint_t Count, TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_max_words(T t, Vec<T> v) {
+  if constexpr (Count == 1) {
+    return word::reduce_max(word_tag(t), get_word<Begin>(t, v));
+  } else {
+    return reduce_scalar_max(
+        reduce_max_words<Begin, Count / 2>(t, v),
+        reduce_max_words<Begin + Count / 2, Count - Count / 2>(t, v));
+  }
+}
+
+template <nint_t Begin, nint_t Count, TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_max_words(T t, Vec<T> v, Mask<T> m) {
+  if constexpr (Count == 1) {
+    return word::reduce_max(word_tag(t), get_word<Begin>(t, v), get_word_mask<Begin>(t, m));
+  } else {
+    return reduce_scalar_max(
+        reduce_max_words<Begin, Count / 2>(t, v, m),
+        reduce_max_words<Begin + Count / 2, Count - Count / 2>(t, v, m));
+  }
+}
+
+template <nint_t Begin, nint_t Count, TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_min_words(T t, Vec<T> v) {
+  if constexpr (Count == 1) {
+    return word::reduce_min(word_tag(t), get_word<Begin>(t, v));
+  } else {
+    return reduce_scalar_min(
+        reduce_min_words<Begin, Count / 2>(t, v),
+        reduce_min_words<Begin + Count / 2, Count - Count / 2>(t, v));
+  }
+}
+
+template <nint_t Begin, nint_t Count, TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_min_words(T t, Vec<T> v, Mask<T> m) {
+  if constexpr (Count == 1) {
+    return word::reduce_min(word_tag(t), get_word<Begin>(t, v), get_word_mask<Begin>(t, m));
+  } else {
+    return reduce_scalar_min(
+        reduce_min_words<Begin, Count / 2>(t, v, m),
+        reduce_min_words<Begin + Count / 2, Count - Count / 2>(t, v, m));
+  }
+}
+} // namespace details
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v) {
+  return details::reduce_add_words<0, num_words(T{})>(t, v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v, Mask<T> m) {
+  return details::reduce_add_words<0, num_words(T{})>(t, v, m);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v) {
+  return details::reduce_max_words<0, num_words(T{})>(t, v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v, Mask<T> m) {
+  return details::reduce_max_words<0, num_words(T{})>(t, v, m);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v) {
+  return details::reduce_min_words<0, num_words(T{})>(t, v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v, Mask<T> m) {
+  return details::reduce_min_words<0, num_words(T{})>(t, v, m);
+}
+
 /**
  * @brief Element-wise bitwise AND: result[i] = a[i] & b[i].
  * @return Bitwise AND of the two vectors

@@ -5,6 +5,7 @@
 #ifndef VECOPS_HOP_H
 #define VECOPS_HOP_H
 
+#include <cstddef>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -31,6 +32,8 @@
  * | `hop::for_each_with_index<Is...>` | Traverse and pass current indices to `fn` |
  * | `hop::for_each_dims_with_index<N>`| Traverse `0..N - 1` and pass indices      |
  * | `hop::*_with_index_tuple`         | Pass indices as one tuple before slices   |
+ * | `hop::scan`                       | Chunked 1D scan with carry                |
+ * | `hop::map`                        | Chunked 1D map without carry              |
  *
  * ## Logical dimensions and alignment
  *
@@ -121,6 +124,9 @@
  * - Broadcast is type-based (`Const<1>`), not value-based (`Any{1}`).
  * - Use the `_with_index` variants when the callable needs current traversal
  *   indices. The indices are passed before the sliced inputs.
+ * - `scan` and `map` are one-dimensional chunk helpers. They accept
+ *   `Const`/`Dynamic` Value objects for `n` and `step`; raw integers are
+ *   promoted to `Any`.
  * - The helpers preserve `Tensor`'s non-owning view semantics. The underlying
  *   storage must outlive the traversal and must be mutable if the callable
  *   writes through the passed objects.
@@ -128,6 +134,78 @@
 
 namespace vecops::gemm::hop {
 namespace details {
+
+// ======================== Value Normalization ========================
+
+template <typename T>
+using HopValue = ::vecops::gemm::ToValue<std::remove_cvref_t<T>>;
+
+template <typename T>
+VECOPS_ALWAYS_INLINE constexpr HopValue<T> to_hop_value(T&& value) {
+  return HopValue<T>{static_cast<nint_t>(value)};
+}
+
+template <typename T>
+struct ConstValue : std::false_type {
+  static constexpr nint_t value = 0;
+};
+
+template <nint_t N>
+struct ConstValue<Const<N>> : std::true_type {
+  static constexpr nint_t value = N;
+};
+
+template <typename T>
+static constexpr bool is_const_value_v = ConstValue<std::remove_cvref_t<T>>::value;
+
+template <typename N, typename Step>
+struct HasNoTail : std::false_type {};
+
+template <nint_t N, nint_t Step>
+struct HasNoTail<Const<N>, Const<Step>>
+    : std::bool_constant<(Step > 0) && (N % Step) == 0> {};
+
+template <nint_t A, nint_t Lo, nint_t Hi, nint_t Step>
+struct HasNoTail<Dynamic<A, Lo, Hi>, Const<Step>>
+    : std::bool_constant<(Step > 0) && Dynamic<A, Lo, Hi>::aligns(Step)> {};
+
+template <>
+struct HasNoTail<Const<0>, Any> : std::true_type {};
+
+template <nint_t A, nint_t Lo, nint_t Hi>
+struct HasNoTail<Const<0>, Dynamic<A, Lo, Hi>> : std::true_type {};
+
+template <typename N, typename Step>
+static constexpr bool has_no_tail_v =
+    HasNoTail<std::remove_cvref_t<N>, std::remove_cvref_t<Step>>::value;
+
+template <typename N, typename Step>
+struct HasConstTail : std::false_type {};
+
+template <nint_t N, nint_t Step>
+struct HasConstTail<Const<N>, Const<Step>>
+    : std::bool_constant<(Step > 0) && (N % Step) != 0> {};
+
+template <nint_t N>
+struct HasConstTail<Const<N>, Const<0>> : std::false_type {};
+
+template <typename N, typename Step>
+static constexpr bool has_const_tail_v =
+    HasConstTail<std::remove_cvref_t<N>, std::remove_cvref_t<Step>>::value;
+
+template <typename N, typename Step>
+VECOPS_ALWAYS_INLINE constexpr void validate_scan_args(const N& n, const Step& step) {
+  if constexpr (is_const_value_v<N>) {
+    static_assert(ConstValue<std::remove_cvref_t<N>>::value >= 0,
+                  "scan n must be non-negative");
+  }
+  if constexpr (is_const_value_v<Step>) {
+    static_assert(ConstValue<std::remove_cvref_t<Step>>::value > 0,
+                  "scan step must be positive");
+  }
+  VECOPS_ASSERT(static_cast<nint_t>(n) >= 0, "scan n must be non-negative");
+  VECOPS_ASSERT(static_cast<nint_t>(step) > 0, "scan step must be positive");
+}
 
 // ======================== Slice Traits ========================
 
@@ -478,6 +556,108 @@ struct LeadingDimsWithIndexTuple<N, std::integer_sequence<int, Is...>> {
 };
 
 } // namespace details
+
+/**
+ * @brief Run a chunked one-dimensional scan and return the final carry.
+ *
+ * `scan` walks the half-open range `[0, n)` in chunks of `step`. For each full
+ * chunk it invokes:
+ *
+ * @code
+ * carry = fn(carry, i, step);
+ * @endcode
+ *
+ * where `i` is the chunk start. If the compiler cannot prove that the range
+ * length is always divisible by `step`, `scan` emits one runtime tail branch:
+ *
+ * @code
+ * if (i < n) carry = fn(carry, i, tail_n);
+ * @endcode
+ *
+ * For a compile-time `Const` tail, `tail_n` preserves its `Const` type.
+ * Otherwise `tail_n` is an `Any` value. The tail branch is removed only when
+ * the type-level metadata proves that no non-empty tail can exist, for example
+ * `Const<16>` with `Const<4>` or `Dynamic<4>` with `Const<4>`.
+ *
+ * `n` and `step` may be `Const`, `Dynamic`, or raw integer values. Raw integers
+ * are promoted to `Any`, so their exact values are available at runtime and
+ * their tail length is passed as `Any` when needed.
+ *
+ * @tparam Fn     Callable type. It must be invocable as
+ *                `fn(Carry, nint_t, auto&&)` and return the next carry.
+ * @tparam N      Range length type (`Const`, `Dynamic`, or integer).
+ * @tparam Step   Chunk step type (`Const`, `Dynamic`, or integer).
+ * @tparam Carry  Carry type.
+ *
+ * @param init  Initial carry value.
+ * @param n     Number of elements in the logical range. Must be non-negative.
+ * @param step  Full chunk length. Must be positive.
+ * @param fn    Iteration function.
+ *
+ * @return The final carry value after all emitted chunks.
+ *
+ * @note Runtime validity checks use `VECOPS_ASSERT`. Compile-time `Const`
+ *       invalid arguments are rejected with `static_assert`.
+ */
+template <typename Fn, typename N, typename Step, typename Carry>
+VECOPS_ALWAYS_INLINE auto scan(Carry&& init, N n, Step step, Fn&& fn)
+    -> std::remove_cvref_t<Carry> {
+  auto n_value = details::to_hop_value(n);
+  auto step_value = details::to_hop_value(step);
+  details::validate_scan_args(n_value, step_value);
+
+  using NValue = std::remove_cvref_t<decltype(n_value)>;
+  using StepValue = std::remove_cvref_t<decltype(step_value)>;
+  using CarryT = std::remove_cvref_t<Carry>;
+
+  CarryT carry = std::forward<Carry>(init);
+  nint_t i = 0;
+  const nint_t full_end = static_cast<nint_t>(n_value - step_value + cint<1>);
+  const nint_t step_int = static_cast<nint_t>(step_value);
+  for (; i < full_end; i += step_int) {
+    carry = fn(carry, i, step_value);
+  }
+
+  if constexpr (!details::has_no_tail_v<NValue, StepValue>) {
+    if (i < static_cast<nint_t>(n_value)) {
+      if constexpr (details::has_const_tail_v<NValue, StepValue>) {
+        carry = fn(carry, i, n_value % step_value);
+      } else {
+        carry = fn(carry, i, Any{static_cast<nint_t>(n_value) - i});
+      }
+    }
+  }
+
+  return carry;
+}
+
+/**
+ * @brief Run a chunked one-dimensional map with no carry.
+ *
+ * This is the non-iterative form of `scan`. It uses the same chunk emission
+ * rules, but invokes the user callable as:
+ *
+ * @code
+ * fn(i, chunk_n);
+ * @endcode
+ *
+ * @tparam Fn    Callable type. It must be invocable as `fn(nint_t, auto&&)`.
+ * @tparam N     Range length type (`Const`, `Dynamic`, or integer).
+ * @tparam Step  Chunk step type (`Const`, `Dynamic`, or integer).
+ *
+ * @param n     Number of elements in the logical range. Must be non-negative.
+ * @param step  Full chunk length. Must be positive.
+ * @param fn    Mapping function.
+ *
+ * @see scan
+ */
+template <typename Fn, typename N, typename Step>
+VECOPS_ALWAYS_INLINE void map(N n, Step step, Fn&& fn) {
+  scan(std::nullptr_t{}, n, step, [&](std::nullptr_t, nint_t i, auto&& chunk_n) -> std::nullptr_t {
+    fn(i, std::forward<decltype(chunk_n)>(chunk_n));
+    return nullptr;
+  });
+}
 
 /**
  * @brief Traverse selected logical dimensions and invoke `fn` on the resulting

@@ -794,7 +794,14 @@ TEST(DataAccessTraitTest, SpecHelpersClassifyTransformsAndContinuity) {
   using SecondIn = InputSpec<int32_t, int32_t, Second>;
   using StridedIn = InputSpec<int32_t, int32_t, Strided>;
   using ZeroIn = InputSpec<int32_t, int32_t, Last, ZeroVecTransform<int32_t>>;
+  using LastOut = OutputSpec<int32_t, int32_t, Last>;
 
+  EXPECT_TRUE(is_input_spec_v<LastIn>);
+  EXPECT_TRUE(is_input_spec_v<const LastIn&>);
+  EXPECT_FALSE(is_input_spec_v<LastOut>);
+  EXPECT_TRUE(is_output_spec_v<LastOut>);
+  EXPECT_TRUE(is_output_spec_v<const LastOut&>);
+  EXPECT_FALSE(is_output_spec_v<LastIn>);
   EXPECT_TRUE(is_identity_last_contiguous_input_spec_v<LastIn>);
   EXPECT_FALSE(is_identity_last_contiguous_input_spec_v<SecondIn>);
   EXPECT_TRUE(is_identity_second_last_contiguous_input_spec_v<SecondIn>);

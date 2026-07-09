@@ -441,6 +441,111 @@ VECOPS_VFUNC V rcp(V v) {
 }
 
 /* ================================================================ */
+//                              Reductions                          //
+/* ================================================================ */
+namespace details {
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_add_bf16(T t, Vec<T> v, Mask<T> m) {
+  auto v_lo = bf16_to_f32_lo(v);
+  auto v_hi = bf16_to_f32_hi(v);
+  auto m_lo = promote_mask_bf16_to_f32_lo(m);
+  auto m_hi = promote_mask_bf16_to_f32_hi(m);
+  return static_cast<TypeOf<T>>(svaddv_f32(m_lo, v_lo) + svaddv_f32(m_hi, v_hi));
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_max_bf16(T t, Vec<T> v, Mask<T> m) {
+  auto v_lo = bf16_to_f32_lo(v);
+  auto v_hi = bf16_to_f32_hi(v);
+  auto m_lo = promote_mask_bf16_to_f32_lo(m);
+  auto m_hi = promote_mask_bf16_to_f32_hi(m);
+  auto r_lo = svmaxv_f32(m_lo, v_lo);
+  auto r_hi = svmaxv_f32(m_hi, v_hi);
+  return static_cast<TypeOf<T>>(r_lo > r_hi ? r_lo : r_hi);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_min_bf16(T t, Vec<T> v, Mask<T> m) {
+  auto v_lo = bf16_to_f32_lo(v);
+  auto v_hi = bf16_to_f32_hi(v);
+  auto m_lo = promote_mask_bf16_to_f32_lo(m);
+  auto m_hi = promote_mask_bf16_to_f32_hi(m);
+  auto r_lo = svminv_f32(m_lo, v_lo);
+  auto r_hi = svminv_f32(m_hi, v_hi);
+  return static_cast<TypeOf<T>>(r_lo < r_hi ? r_lo : r_hi);
+}
+} // namespace details
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v, Mask<T> m) {
+  using E = TypeOf<T>;
+  if constexpr (std::is_same_v<E, bfloat16_t>)      return details::reduce_add_bf16(t, v, m);
+  else if constexpr (std::is_same_v<E, float16_t>)  return E(svaddv_f16(m, v));
+  else if constexpr (std::is_same_v<E, float32_t>)  return svaddv_f32(m, v);
+  else if constexpr (std::is_same_v<E, float64_t>)  return svaddv_f64(m, v);
+  else if constexpr (std::is_same_v<E, int8_t>)     return static_cast<E>(svaddv_s8(m, v));
+  else if constexpr (std::is_same_v<E, uint8_t>)    return static_cast<E>(svaddv_u8(m, v));
+  else if constexpr (std::is_same_v<E, int16_t>)    return static_cast<E>(svaddv_s16(m, v));
+  else if constexpr (std::is_same_v<E, uint16_t>)   return static_cast<E>(svaddv_u16(m, v));
+  else if constexpr (std::is_same_v<E, int32_t>)    return static_cast<E>(svaddv_s32(m, v));
+  else if constexpr (std::is_same_v<E, uint32_t>)   return static_cast<E>(svaddv_u32(m, v));
+  else if constexpr (std::is_same_v<E, int64_t>)    return static_cast<E>(svaddv_s64(m, v));
+  else return static_cast<E>(svaddv_u64(m, v));
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v) {
+  using E = TypeOf<T>;
+  return word::reduce_add(t, v, details::ptrue<E>());
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v, Mask<T> m) {
+  using E = TypeOf<T>;
+  if constexpr (std::is_same_v<E, bfloat16_t>)      return details::reduce_max_bf16(t, v, m);
+  else if constexpr (std::is_same_v<E, float16_t>)  return E(svmaxv_f16(m, v));
+  else if constexpr (std::is_same_v<E, float32_t>)  return svmaxv_f32(m, v);
+  else if constexpr (std::is_same_v<E, float64_t>)  return svmaxv_f64(m, v);
+  else if constexpr (std::is_same_v<E, int8_t>)     return svmaxv_s8(m, v);
+  else if constexpr (std::is_same_v<E, uint8_t>)    return svmaxv_u8(m, v);
+  else if constexpr (std::is_same_v<E, int16_t>)    return svmaxv_s16(m, v);
+  else if constexpr (std::is_same_v<E, uint16_t>)   return svmaxv_u16(m, v);
+  else if constexpr (std::is_same_v<E, int32_t>)    return svmaxv_s32(m, v);
+  else if constexpr (std::is_same_v<E, uint32_t>)   return svmaxv_u32(m, v);
+  else if constexpr (std::is_same_v<E, int64_t>)    return svmaxv_s64(m, v);
+  else return svmaxv_u64(m, v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v) {
+  using E = TypeOf<T>;
+  return word::reduce_max(t, v, details::ptrue<E>());
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v, Mask<T> m) {
+  using E = TypeOf<T>;
+  if constexpr (std::is_same_v<E, bfloat16_t>)      return details::reduce_min_bf16(t, v, m);
+  else if constexpr (std::is_same_v<E, float16_t>)  return E(svminv_f16(m, v));
+  else if constexpr (std::is_same_v<E, float32_t>)  return svminv_f32(m, v);
+  else if constexpr (std::is_same_v<E, float64_t>)  return svminv_f64(m, v);
+  else if constexpr (std::is_same_v<E, int8_t>)     return svminv_s8(m, v);
+  else if constexpr (std::is_same_v<E, uint8_t>)    return svminv_u8(m, v);
+  else if constexpr (std::is_same_v<E, int16_t>)    return svminv_s16(m, v);
+  else if constexpr (std::is_same_v<E, uint16_t>)   return svminv_u16(m, v);
+  else if constexpr (std::is_same_v<E, int32_t>)    return svminv_s32(m, v);
+  else if constexpr (std::is_same_v<E, uint32_t>)   return svminv_u32(m, v);
+  else if constexpr (std::is_same_v<E, int64_t>)    return svminv_s64(m, v);
+  else return svminv_u64(m, v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v) {
+  using E = TypeOf<T>;
+  return word::reduce_min(t, v, details::ptrue<E>());
+}
+
+/* ================================================================ */
 //                             Comparisons                          //
 /* ================================================================ */
 /* cmpeq */

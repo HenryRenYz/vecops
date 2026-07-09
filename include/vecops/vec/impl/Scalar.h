@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <climits>
+#include <limits>
 
 #include "CoreTypes.h"
 #include "../VecBase.h"
@@ -35,6 +36,18 @@
 namespace vecops::vec::CPU_CAPABILITY {
 namespace word {
 namespace details {
+template <typename E>
+VECOPS_VFUNC E reduce_max_identity() {
+  if constexpr (is_float<E>) return static_cast<E>(-std::numeric_limits<double>::infinity());
+  else return std::numeric_limits<E>::lowest();
+}
+
+template <typename E>
+VECOPS_VFUNC E reduce_min_identity() {
+  if constexpr (is_float<E>) return static_cast<E>(std::numeric_limits<double>::infinity());
+  else return std::numeric_limits<E>::max();
+}
+
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> vectorized_v(auto&& fn) {
   constexpr T t;
@@ -1291,6 +1304,62 @@ VECOPS_VFUNC Mask<T> isinf(V v, Mask<T> m) {
   return details::vectorized_m<T>([&](nint_t i){ return m[i] && std::isinf(static_cast<float>(v[i])); });
 }
 
+/* ************************************************************************** */
+//                              Reductions                                    //
+/* ************************************************************************** */
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v) {
+  TypeOf<T> acc{};
+  for (nint_t i = 0; i < size(t); ++i) {
+    acc = static_cast<TypeOf<T>>(acc + v[i]);
+  }
+  return acc;
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v, Mask<T> m) {
+  TypeOf<T> acc{};
+  for (nint_t i = 0; i < size(t); ++i) {
+    if (m[i]) acc = static_cast<TypeOf<T>>(acc + v[i]);
+  }
+  return acc;
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v) {
+  TypeOf<T> acc = details::reduce_max_identity<TypeOf<T>>();
+  for (nint_t i = 0; i < size(t); ++i) {
+    if (v[i] > acc) acc = v[i];
+  }
+  return acc;
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v, Mask<T> m) {
+  TypeOf<T> acc = details::reduce_max_identity<TypeOf<T>>();
+  for (nint_t i = 0; i < size(t); ++i) {
+    if (m[i] && v[i] > acc) acc = v[i];
+  }
+  return acc;
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v) {
+  TypeOf<T> acc = details::reduce_min_identity<TypeOf<T>>();
+  for (nint_t i = 0; i < size(t); ++i) {
+    if (v[i] < acc) acc = v[i];
+  }
+  return acc;
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v, Mask<T> m) {
+  TypeOf<T> acc = details::reduce_min_identity<TypeOf<T>>();
+  for (nint_t i = 0; i < size(t); ++i) {
+    if (m[i] && v[i] < acc) acc = v[i];
+  }
+  return acc;
+}
 
 /* ************************************************************************** */
 //                          Data type conversions                             //
