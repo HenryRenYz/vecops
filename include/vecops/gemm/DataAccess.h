@@ -8,6 +8,7 @@
 #include "vecops/VecTransform.h"
 #include "vecops/util/TypeTraits.h"
 #include "vecops/vec/Vec.h"
+#include "./Workspace.h"
 #include "./Tensor.h"
 #include "./HOP.h"
 
@@ -520,43 +521,138 @@ struct DataInput {
   Impl _impl;
 };
 
-/**
- * @brief Compile-time description of an input stream.
- *
- * `InputSpec` bundles the source element type, output element type, input
- * layout and transform function. Kernels can inspect the type to specialize
- * fast paths, and can call `make_input()` to bind a concrete pointer and aux
- * buffer for execution.
- */
 template <
     typename TOut,
-    typename TIn,
-    typename InLayout,
-    typename TransformFn = IdentityVecTransform<TOut, TIn>
-> struct InputSpec {
-  using InputLayout = InLayout;
+    typename Arg1,
+    typename Arg2 = void,
+    typename Arg3 = void,
+    typename Enable = void>
+struct InputSpec;
+
+/**
+ * @brief Full input operand description: tensor view + transform.
+ */
+template <typename TOut, typename InTensor, typename TransformFn>
+struct InputSpec<
+    TOut,
+    InTensor,
+    TransformFn,
+    void,
+    std::enable_if_t<is_tensor<std::remove_cvref_t<InTensor>>>> {
+  using InputTensor = std::remove_cvref_t<InTensor>;
+  using TIn = typename InputTensor::ElementType;
+  using InputLayout = typename InputTensor::Layout;
   using Transform = std::remove_cvref_t<TransformFn>;
-  using InputTensor = Tensor<TIn, typename InLayout::Shape, typename InLayout::Strides>;
   using InputAccessor = DataInput<TOut, InputTensor, Transform>;
 
   static_assert(is_any<typename Transform::TIn, TIn>, "Input type of transform fn mismatch");
   static_assert(is_any<typename Transform::TOut, TOut>, "Output type of transform fn mismatch");
 
-  static nint_t required_aux_size(const InLayout& layout) {
+  static nint_t required_aux_size(const InputLayout& layout) {
     return InputAccessor::required_aux_size(layout);
   }
 
-  InputSpec(const InLayout& layout, const Transform& fn = identity_transform<TOut, TIn>)
+  InputSpec(const InputTensor& tensor, const Transform& fn)
+      : _tensor(tensor), _fn(fn) {}
+
+  template <typename T = Transform, std::enable_if_t<std::is_default_constructible_v<T>, bool> = true>
+  explicit InputSpec(const InputTensor& tensor)
+      : _tensor(tensor), _fn{} {}
+
+  const InputTensor& tensor() const { return _tensor; }
+  const InputLayout& input_layout() const { return _tensor.layout(); }
+
+  nint_t required_workspace() const {
+    return InputAccessor::required_aux_size(_tensor.layout());
+  }
+
+  InputAccessor bind(void* aux) const {
+    return InputAccessor(_tensor.data(), _tensor.layout(), _fn, aux);
+  }
+
+  InputAccessor bind(WorkspaceView& ws) const {
+    const nint_t bytes = required_workspace();
+    return bind(bytes == 0 ? nullptr : ws.allocate(bytes));
+  }
+
+  InputAccessor make_input(void* aux) const { return bind(aux); }
+
+private:
+  InputTensor _tensor;
+  Transform _fn;
+};
+
+template <typename TOut, typename InTensor>
+struct InputSpec<
+    TOut,
+    InTensor,
+    void,
+    void,
+    std::enable_if_t<is_tensor<std::remove_cvref_t<InTensor>>>>
+    : InputSpec<
+          TOut,
+          std::remove_cvref_t<InTensor>,
+          IdentityVecTransform<TOut, typename std::remove_cvref_t<InTensor>::ElementType>> {
+  using InputTensor = std::remove_cvref_t<InTensor>;
+  using TIn = typename InputTensor::ElementType;
+  using Base = InputSpec<TOut, InputTensor, IdentityVecTransform<TOut, TIn>>;
+  using Base::Base;
+};
+
+/**
+ * @brief Legacy input layout description.
+ *
+ * This form keeps the original `InputSpec<TOut, TIn, Layout, Transform>` API:
+ * it stores only layout + transform and binds the data pointer later with
+ * `make_input()`. New user-facing code should prefer `input<TOut>(tensor)`.
+ */
+template <typename TOut, typename TIn, typename InLayout, typename TransformFn>
+struct InputSpec<
+    TOut,
+    TIn,
+    InLayout,
+    TransformFn,
+    std::enable_if_t<!is_tensor<std::remove_cvref_t<TIn>> &&
+                     is_layout<std::remove_cvref_t<InLayout>>>> {
+  using InputLayout = std::remove_cvref_t<InLayout>;
+  using Transform = std::conditional_t<
+      std::is_void_v<TransformFn>,
+      IdentityVecTransform<TOut, TIn>,
+      std::remove_cvref_t<TransformFn>>;
+  using InputTensor = Tensor<TIn, typename InputLayout::Shape, typename InputLayout::Strides>;
+  using InputAccessor = DataInput<TOut, InputTensor, Transform>;
+
+  static_assert(is_any<typename Transform::TIn, TIn>, "Input type of transform fn mismatch");
+  static_assert(is_any<typename Transform::TOut, TOut>, "Output type of transform fn mismatch");
+
+  static nint_t required_aux_size(const InputLayout& layout) {
+    return InputAccessor::required_aux_size(layout);
+  }
+
+  InputSpec(const InputLayout& layout, const Transform& fn)
       : _in_layout(layout), _fn(fn) {}
 
-  const InLayout& input_layout() const { return _in_layout; }
+  template <typename T = Transform, std::enable_if_t<std::is_default_constructible_v<T>, bool> = true>
+  explicit InputSpec(const InputLayout& layout)
+      : _in_layout(layout), _fn{} {}
+
+  const InputLayout& input_layout() const { return _in_layout; }
+
+  nint_t required_workspace() const {
+    return InputAccessor::required_aux_size(_in_layout);
+  }
 
   InputAccessor make_input(const TIn* p, void* aux) const {
     return InputAccessor(p, _in_layout, _fn, aux);
   }
 
+  InputAccessor make_input(const TIn* p, WorkspaceView& ws) const {
+    const nint_t bytes = required_workspace();
+    return make_input(p, bytes == 0 ? nullptr : ws.allocate(bytes));
+  }
+
 private:
-  InLayout _in_layout;
+  InputLayout _in_layout;
   Transform _fn;
 };
 
@@ -604,56 +700,206 @@ struct DataOutput {
   Impl _impl;
 };
 
-/**
- * @brief Compile-time description of an output stream.
- *
- * `OutputSpec` bundles the accumulator/input element type, stored output
- * element type, output layout and transform function. `make_output()` binds a
- * destination pointer and optional aux buffer to produce a `DataOutput`.
- */
 template <
     typename TIn,
-    typename TOut,
-    typename OutLayout,
-    typename TransformFn = IdentityVecTransform<TOut, TIn>
-> struct OutputSpec {
-  using OutputLayout = OutLayout;
+    typename Arg1,
+    typename Arg2 = void,
+    typename Arg3 = void,
+    typename Enable = void>
+struct OutputSpec;
+
+/**
+ * @brief Full output operand description: tensor view + transform.
+ */
+template <typename TIn, typename OutTensor, typename TransformFn>
+struct OutputSpec<
+    TIn,
+    OutTensor,
+    TransformFn,
+    void,
+    std::enable_if_t<is_tensor<std::remove_cvref_t<OutTensor>>>> {
+  using OutputTensor = std::remove_cvref_t<OutTensor>;
+  using TOut = typename OutputTensor::ElementType;
+  using OutputLayout = typename OutputTensor::Layout;
   using Transform = std::remove_cvref_t<TransformFn>;
-  using OutputTensor = Tensor<TOut, typename OutLayout::Shape, typename OutLayout::Strides>;
   using OutputAccessor = DataOutput<TIn, OutputTensor, Transform>;
 
   static_assert(is_any<typename Transform::TIn, TIn>, "Input type of transform fn mismatch");
   static_assert(is_any<typename Transform::TOut, TOut>, "Output type of transform fn mismatch");
 
-  static nint_t required_aux_size(const OutLayout& layout) {
+  static nint_t required_aux_size(const OutputLayout& layout) {
     return OutputAccessor::required_aux_size(layout);
   }
 
-  OutputSpec(const OutLayout& layout, const Transform& fn = identity_transform<TOut, TIn>)
+  OutputSpec(const OutputTensor& tensor, const Transform& fn)
+      : _tensor(tensor), _fn(fn) {}
+
+  template <typename T = Transform, std::enable_if_t<std::is_default_constructible_v<T>, bool> = true>
+  explicit OutputSpec(const OutputTensor& tensor)
+      : _tensor(tensor), _fn{} {}
+
+  const OutputTensor& tensor() const { return _tensor; }
+  const OutputLayout& output_layout() const { return _tensor.layout(); }
+
+  nint_t required_workspace() const {
+    return OutputAccessor::required_aux_size(_tensor.layout());
+  }
+
+  OutputAccessor bind(void* aux) const {
+    return OutputAccessor(const_cast<TOut*>(_tensor.data()), _tensor.layout(), _fn, aux);
+  }
+
+  OutputAccessor bind(WorkspaceView& ws) const {
+    const nint_t bytes = required_workspace();
+    return bind(bytes == 0 ? nullptr : ws.allocate(bytes));
+  }
+
+  OutputAccessor make_output(void* aux) const { return bind(aux); }
+
+private:
+  OutputTensor _tensor;
+  Transform _fn;
+};
+
+template <typename TIn, typename OutTensor>
+struct OutputSpec<
+    TIn,
+    OutTensor,
+    void,
+    void,
+    std::enable_if_t<is_tensor<std::remove_cvref_t<OutTensor>>>>
+    : OutputSpec<
+          TIn,
+          std::remove_cvref_t<OutTensor>,
+          IdentityVecTransform<typename std::remove_cvref_t<OutTensor>::ElementType, TIn>> {
+  using OutputTensor = std::remove_cvref_t<OutTensor>;
+  using TOut = typename OutputTensor::ElementType;
+  using Base = OutputSpec<TIn, OutputTensor, IdentityVecTransform<TOut, TIn>>;
+  using Base::Base;
+};
+
+/**
+ * @brief Legacy output layout description.
+ */
+template <typename TIn, typename TOut, typename OutLayout, typename TransformFn>
+struct OutputSpec<
+    TIn,
+    TOut,
+    OutLayout,
+    TransformFn,
+    std::enable_if_t<!is_tensor<std::remove_cvref_t<TOut>> &&
+                     is_layout<std::remove_cvref_t<OutLayout>>>> {
+  using OutputLayout = std::remove_cvref_t<OutLayout>;
+  using Transform = std::conditional_t<
+      std::is_void_v<TransformFn>,
+      IdentityVecTransform<TOut, TIn>,
+      std::remove_cvref_t<TransformFn>>;
+  using OutputTensor = Tensor<TOut, typename OutputLayout::Shape, typename OutputLayout::Strides>;
+  using OutputAccessor = DataOutput<TIn, OutputTensor, Transform>;
+
+  static_assert(is_any<typename Transform::TIn, TIn>, "Input type of transform fn mismatch");
+  static_assert(is_any<typename Transform::TOut, TOut>, "Output type of transform fn mismatch");
+
+  static nint_t required_aux_size(const OutputLayout& layout) {
+    return OutputAccessor::required_aux_size(layout);
+  }
+
+  OutputSpec(const OutputLayout& layout, const Transform& fn)
       : _out_layout(layout), _fn(fn) {}
 
-  const OutLayout& output_layout() const { return _out_layout; }
+  template <typename T = Transform, std::enable_if_t<std::is_default_constructible_v<T>, bool> = true>
+  explicit OutputSpec(const OutputLayout& layout)
+      : _out_layout(layout), _fn{} {}
+
+  const OutputLayout& output_layout() const { return _out_layout; }
+
+  nint_t required_workspace() const {
+    return OutputAccessor::required_aux_size(_out_layout);
+  }
 
   OutputAccessor make_output(TOut* p, void* aux) const {
     return OutputAccessor(p, _out_layout, _fn, aux);
   }
 
+  OutputAccessor make_output(TOut* p, WorkspaceView& ws) const {
+    const nint_t bytes = required_workspace();
+    return make_output(p, bytes == 0 ? nullptr : ws.allocate(bytes));
+  }
+
 private:
-  OutLayout _out_layout;
+  OutputLayout _out_layout;
   Transform _fn;
 };
+
+template <typename TOut, typename Tensor>
+auto input(Tensor&& tensor) {
+  using TensorT = std::remove_cvref_t<Tensor>;
+  return InputSpec<TOut, TensorT>(std::forward<Tensor>(tensor));
+}
+
+template <typename TOut, typename Tensor, typename TransformFn>
+auto input(Tensor&& tensor, TransformFn&& fn) {
+  using TensorT = std::remove_cvref_t<Tensor>;
+  using TIn = typename TensorT::ElementType;
+  auto adapted = adapt_vec_transform<TOut, TIn>(std::forward<TransformFn>(fn));
+  using Transform = decltype(adapted);
+  return InputSpec<TOut, TensorT, Transform>(std::forward<Tensor>(tensor), adapted);
+}
+
+template <typename TOut, typename Tensor>
+auto in(Tensor&& tensor) {
+  return input<TOut>(std::forward<Tensor>(tensor));
+}
+
+template <typename TOut, typename Tensor, typename TransformFn>
+auto in(Tensor&& tensor, TransformFn&& fn) {
+  return input<TOut>(std::forward<Tensor>(tensor), std::forward<TransformFn>(fn));
+}
+
+template <typename TIn, typename Tensor>
+auto output(Tensor&& tensor) {
+  using TensorT = std::remove_cvref_t<Tensor>;
+  return OutputSpec<TIn, TensorT>(std::forward<Tensor>(tensor));
+}
+
+template <typename TIn, typename Tensor, typename TransformFn>
+auto output(Tensor&& tensor, TransformFn&& fn) {
+  using TensorT = std::remove_cvref_t<Tensor>;
+  using TOut = typename TensorT::ElementType;
+  auto adapted = adapt_vec_transform<TOut, TIn>(std::forward<TransformFn>(fn));
+  using Transform = decltype(adapted);
+  return OutputSpec<TIn, TensorT, Transform>(std::forward<Tensor>(tensor), adapted);
+}
+
+template <typename TIn, typename Tensor>
+auto out(Tensor&& tensor) {
+  return output<TIn>(std::forward<Tensor>(tensor));
+}
+
+template <typename TIn, typename Tensor, typename TransformFn>
+auto out(Tensor&& tensor, TransformFn&& fn) {
+  return output<TIn>(std::forward<Tensor>(tensor), std::forward<TransformFn>(fn));
+}
+
+template <typename... Specs>
+nint_t required_workspace(const Specs&... specs) {
+  nint_t total = 0;
+  ((total = details::workspace_round_up(total, vec::DEFAULT_ALIGNMENT) +
+            specs.required_workspace()), ...);
+  return details::workspace_round_up(total, vec::DEFAULT_ALIGNMENT);
+}
 
 namespace details {
 
 template <typename T>
 struct IsInputSpec : std::false_type {};
-template <typename TOut, typename TIn, typename L, typename Fn>
-struct IsInputSpec<InputSpec<TOut, TIn, L, Fn>> : std::true_type {};
+template <typename... Args>
+struct IsInputSpec<InputSpec<Args...>> : std::true_type {};
 
 template <typename T>
 struct IsOutputSpec : std::false_type {};
-template <typename TIn, typename TOut, typename L, typename Fn>
-struct IsOutputSpec<OutputSpec<TIn, TOut, L, Fn>> : std::true_type {};
+template <typename... Args>
+struct IsOutputSpec<OutputSpec<Args...>> : std::true_type {};
 
 } // namespace details
 

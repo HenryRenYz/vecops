@@ -303,6 +303,72 @@ TEST(DataAccessTransformTest, SecondLastContiguousOutputFlushesInDestructor) {
   EXPECT_EQ(dst[13], coord_shift_expected(4, 1, 1));
 }
 
+TEST(DataAccessSpecWrapperTest, InputHelperBindsTensorWithWorkspace) {
+  using T = int32_t;
+  using L = Layout<Shape<Const<3>, Const<5>>, Strides<Const<17>, Const<3>>>;
+
+  auto src = make_source<T>(80);
+  L layout{Shape<Const<3>, Const<5>>{}, Strides<Const<17>, Const<3>>{}};
+  auto tensor = make_tensor(src.data(), layout);
+  auto spec = input<T>(tensor);
+
+  EXPECT_EQ(spec.required_workspace(), (InputSpec<T, T, L>::required_aux_size(layout)));
+
+  Workspace workspace(spec.required_workspace());
+  auto view = workspace.view();
+  auto accessor = spec.bind(view);
+
+  ScalableTag<T, 0> t;
+  auto v = accessor(t, nint_t{3}, nint_t{2}, nint_t{1});
+  EXPECT_EQ(read_vec_lane<T>(v, 0), src[37]);
+  EXPECT_EQ(read_vec_lane<T>(v, 1), src[40]);
+  EXPECT_EQ(read_vec_lane<T>(v, 2), src[43]);
+}
+
+TEST(DataAccessSpecWrapperTest, OutputHelperBindsTensorWithWorkspace) {
+  using T = int32_t;
+  using L = Layout<Shape<Const<3>, Const<5>>, Strides<Const<5>, Const<1>>>;
+
+  std::vector<T> dst(32, -1);
+  L layout{Shape<Const<3>, Const<5>>{}, Strides<Const<5>, Const<1>>{}};
+  auto tensor = make_tensor(dst.data(), layout);
+  auto spec = output<T>(tensor);
+
+  EXPECT_EQ(spec.required_workspace(), 0);
+  EXPECT_EQ(required_workspace(spec), 0);
+
+  Workspace workspace(required_workspace(spec));
+  auto view = workspace.view();
+  auto accessor = spec.bind(view);
+
+  ScalableTag<T, 0> t;
+  std::array<T, 64> values{};
+  for (nint_t i = 0; i < size(t); ++i) {
+    values[static_cast<size_t>(i)] = static_cast<T>(100 + i);
+  }
+  auto v = loadu(t, values.data());
+  accessor(t, v, nint_t{3}, nint_t{1}, nint_t{2});
+
+  EXPECT_EQ(dst[7], 100);
+  EXPECT_EQ(dst[8], 101);
+  EXPECT_EQ(dst[9], 102);
+}
+
+TEST(WorkspaceTest, ParallelWorkspaceProvidesIndependentThreadViews) {
+  ParallelWorkspace workspace(2, 64);
+  auto left = workspace.thread_view(0);
+  auto right = workspace.thread_view(1);
+
+  auto* a = left.allocate<int32_t>(4);
+  auto* b = right.allocate<int32_t>(4);
+  a[0] = 11;
+  b[0] = 22;
+
+  EXPECT_EQ(a[0], 11);
+  EXPECT_EQ(b[0], 22);
+  EXPECT_NE(a, b);
+}
+
 TEST(DataAccessTransformTest, FullCoordinatesAreForwardedForInputRanksOneThroughFour) {
   using T = int32_t;
 
