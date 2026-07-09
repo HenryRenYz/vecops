@@ -108,6 +108,29 @@ VECOPS_ALWAYS_INLINE auto call_transform_with_last_coord(
       prefix);
 }
 
+template <typename TransformFn, typename PrefixTuple>
+struct PrefixVecTransform {
+  using TIn = typename TransformFn::TIn;
+  using TOut = typename TransformFn::TOut;
+
+  TransformFn fn;
+  PrefixTuple prefix;
+
+  template <typename To, typename VIn, typename... Is>
+  VECOPS_ALWAYS_INLINE auto operator()(To to, VIn v_in, Is... is) const {
+    return std::apply(
+        [&](auto... prefix_coords) {
+          return fn(to, v_in, prefix_coords..., static_cast<nint_t>(is)...);
+        },
+        prefix);
+  }
+};
+
+template <typename TransformFn, typename PrefixTuple>
+auto prepend_transform_prefix(const TransformFn& fn, const PrefixTuple& prefix) {
+  return PrefixVecTransform<TransformFn, PrefixTuple>{fn, prefix};
+}
+
 template <typename N>
 struct StaticCount : std::false_type {};
 
@@ -333,7 +356,8 @@ struct DataInputAuxImpl {
   }
 
   DataInputAuxImpl(const TIn* p, const InLayout& layout, const TransformFn& fn, void* aux)
-      : _layout(layout),
+      : _p(p),
+        _layout(layout),
         _aux_layout(make_aux_layout<InLayout, TOut>(layout)),
         _aux(static_cast<TOut*>(aux)) {
     VECOPS_ASSERT(aux != nullptr, "DataInput aux buffer is required for non-last-contiguous layouts");
@@ -349,6 +373,7 @@ struct DataInputAuxImpl {
     return v;
   }
 
+  const TIn* _p;
   InLayout _layout;
   AuxLayout _aux_layout;
   TOut* _aux;
@@ -470,6 +495,165 @@ struct DataOutputImpl<AccessKindStrided, TIn, OutTensor, TransformFn> {
   TransformFn _fn;
 };
 
+template <
+    typename Kind,
+    typename TOut,
+    typename InTensor,
+    typename TransformFn,
+    typename AuxLayout = void>
+struct DataInputViewImpl;
+
+template <typename TOut, typename InTensor, typename TransformFn>
+struct DataInputViewImpl<AccessKindLastContiguous, TOut, InTensor, TransformFn, void> {
+  using TIn = typename InTensor::ElementType;
+  using InLayout = typename InTensor::Layout;
+
+  DataInputViewImpl(const TIn* p, const InLayout& layout, const TransformFn& fn)
+      : _p(p), _layout(layout), _fn(fn) {}
+
+  template <TLV_DECL_TAG(To), typename N, typename... Is>
+  vec::Vec<To> operator()(To t, N n, Is... is) const {
+    static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
+    using Ti = vec::Rebind<TIn, To>;
+    std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
+    const nint_t offset = offset_at(_layout, coords);
+    auto v_in = loadu_dispatch(Ti{}, _p + offset, n);
+    return _fn(t, v_in, static_cast<nint_t>(is)...);
+  }
+
+  const TIn* _p;
+  InLayout _layout;
+  TransformFn _fn;
+};
+
+template <typename Kind, typename TOut, typename InTensor, typename TransformFn, typename AuxLayout>
+struct DataInputAuxViewImpl {
+  using TIn = typename InTensor::ElementType;
+  using InLayout = typename InTensor::Layout;
+
+  DataInputAuxViewImpl(const TIn* p, const InLayout& layout, const AuxLayout& aux_layout, TOut* aux)
+      : _p(p), _layout(layout), _aux_layout(aux_layout), _aux(aux) {}
+
+  template <TLV_DECL_TAG(To), typename N, typename... Is>
+  vec::Vec<To> operator()(To t, N n, Is... is) const {
+    static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
+    std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
+    const nint_t offset = offset_at(_aux_layout, coords);
+    return loadu_dispatch(t, _aux + offset, n);
+  }
+
+  const TIn* _p;
+  InLayout _layout;
+  AuxLayout _aux_layout;
+  TOut* _aux;
+};
+
+template <typename TOut, typename InTensor, typename TransformFn, typename AuxLayout>
+struct DataInputViewImpl<AccessKindSecondLastContiguous, TOut, InTensor, TransformFn, AuxLayout>
+    : DataInputAuxViewImpl<AccessKindSecondLastContiguous, TOut, InTensor, TransformFn, AuxLayout> {
+  using DataInputAuxViewImpl<
+      AccessKindSecondLastContiguous,
+      TOut,
+      InTensor,
+      TransformFn,
+      AuxLayout>::DataInputAuxViewImpl;
+};
+
+template <typename TOut, typename InTensor, typename TransformFn, typename AuxLayout>
+struct DataInputViewImpl<AccessKindStrided, TOut, InTensor, TransformFn, AuxLayout>
+    : DataInputAuxViewImpl<AccessKindStrided, TOut, InTensor, TransformFn, AuxLayout> {
+  using DataInputAuxViewImpl<
+      AccessKindStrided,
+      TOut,
+      InTensor,
+      TransformFn,
+      AuxLayout>::DataInputAuxViewImpl;
+};
+
+template <
+    typename Kind,
+    typename TIn,
+    typename OutTensor,
+    typename TransformFn,
+    typename AuxLayout = void>
+struct DataOutputViewImpl;
+
+template <typename TIn, typename OutTensor, typename TransformFn>
+struct DataOutputViewImpl<AccessKindLastContiguous, TIn, OutTensor, TransformFn, void> {
+  using TOut = typename OutTensor::ElementType;
+  using OutLayout = typename OutTensor::Layout;
+
+  DataOutputViewImpl(TOut* p, const OutLayout& layout, const TransformFn& fn)
+      : _p(p), _layout(layout), _fn(fn) {}
+
+  template <TLV_DECL_TAG(Ti), typename N, typename... Is>
+  void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
+    static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
+    using To = vec::Rebind<TOut, Ti>;
+    std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
+    const nint_t offset = offset_at(_layout, coords);
+    auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
+    storeu_dispatch(To{}, _p + offset, n, v_out);
+  }
+
+  TOut* _p;
+  OutLayout _layout;
+  TransformFn _fn;
+};
+
+template <typename TIn, typename OutTensor, typename TransformFn, typename AuxLayout>
+struct DataOutputViewImpl<
+    AccessKindSecondLastContiguous,
+    TIn,
+    OutTensor,
+    TransformFn,
+    AuxLayout> {
+  using TOut = typename OutTensor::ElementType;
+  using OutLayout = typename OutTensor::Layout;
+
+  DataOutputViewImpl(TOut* p, const OutLayout& layout, const AuxLayout& aux_layout, const TransformFn& fn, TOut* aux)
+      : _p(p), _layout(layout), _aux_layout(aux_layout), _fn(fn), _aux(aux) {}
+
+  template <TLV_DECL_TAG(Ti), typename N, typename... Is>
+  void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
+    static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
+    using To = vec::Rebind<TOut, Ti>;
+    std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
+    auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
+    const nint_t offset = offset_at(_aux_layout, coords);
+    storeu_dispatch(To{}, _aux + offset, n, v_out);
+  }
+
+  TOut* _p;
+  OutLayout _layout;
+  AuxLayout _aux_layout;
+  TransformFn _fn;
+  TOut* _aux;
+};
+
+template <typename TIn, typename OutTensor, typename TransformFn>
+struct DataOutputViewImpl<AccessKindStrided, TIn, OutTensor, TransformFn, void> {
+  using TOut = typename OutTensor::ElementType;
+  using OutLayout = typename OutTensor::Layout;
+
+  DataOutputViewImpl(TOut* p, const OutLayout& layout, const TransformFn& fn)
+      : _p(p), _layout(layout), _fn(fn) {}
+
+  template <TLV_DECL_TAG(Ti), typename N, typename... Is>
+  void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
+    static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
+    using To = vec::Rebind<TOut, Ti>;
+    std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
+    const nint_t base = offset_at(_layout, coords);
+    auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
+    scatter_dispatch(To{}, _p, base, _layout.strides()[OutLayout::Ndim - 1], n, v_out);
+  }
+
+  TOut* _p;
+  OutLayout _layout;
+  TransformFn _fn;
+};
+
 } // namespace details
 
 /**
@@ -502,8 +686,11 @@ template <typename TOut, typename InTensor, typename TransformFn>
 struct DataInput {
   using TIn = typename InTensor::ElementType;
   using InLayout = typename InTensor::Layout;
+  using InputTensor = InTensor;
+  using OutputElement = TOut;
   using Transform = std::remove_cvref_t<TransformFn>;
   using Kind = details::SelectAccessKind<InLayout>;
+  using AccessKind = Kind;
   using Impl = details::DataInputImpl<Kind, TOut, InTensor, Transform>;
 
   static nint_t required_workspace(const InLayout& layout) {
@@ -512,6 +699,34 @@ struct DataInput {
 
   DataInput(const TIn* p, const InLayout& layout, const Transform& fn, void* aux)
       : _impl(p, layout, fn, aux) {}
+
+  template <TLV_DECL_TAG(To), TL_IF(is_any<vec::TypeOf<To>, TOut>), typename N, typename... Is>
+  vec::Vec<To> operator()(To t, N n, Is... is) const {
+    return _impl(t, n, is...);
+  }
+
+  Impl _impl;
+};
+
+template <
+    typename TOut,
+    typename InTensor,
+    typename TransformFn,
+    typename Kind,
+    typename AuxLayout = void>
+struct DataInputView {
+  using TIn = typename InTensor::ElementType;
+  using InLayout = typename InTensor::Layout;
+  using InputTensor = InTensor;
+  using OutputElement = TOut;
+  using Transform = std::remove_cvref_t<TransformFn>;
+  using AccessKind = Kind;
+  using KindType = Kind;
+  using Impl = details::DataInputViewImpl<Kind, TOut, InTensor, Transform, AuxLayout>;
+
+  template <typename... Args>
+  explicit DataInputView(Args&&... args)
+      : _impl(std::forward<Args>(args)...) {}
 
   template <TLV_DECL_TAG(To), TL_IF(is_any<vec::TypeOf<To>, TOut>), typename N, typename... Is>
   vec::Vec<To> operator()(To t, N n, Is... is) const {
@@ -542,6 +757,7 @@ struct InputSpec<
   using InputTensor = std::remove_cvref_t<InTensor>;
   using TIn = typename InputTensor::ElementType;
   using InputLayout = typename InputTensor::Layout;
+  using OutputElement = TOut;
   using Transform = std::remove_cvref_t<TransformFn>;
   using InputAccessor = DataInput<TOut, InputTensor, Transform>;
 
@@ -560,6 +776,7 @@ struct InputSpec<
       : _tensor(tensor), _fn{} {}
 
   const InputTensor& tensor() const { return _tensor; }
+  const Transform& transform() const { return _fn; }
   const InputLayout& input_layout() const { return _tensor.layout(); }
 
   nint_t required_workspace() const {
@@ -596,6 +813,8 @@ struct InputSpec<
   using InputTensor = std::remove_cvref_t<InTensor>;
   using TIn = typename InputTensor::ElementType;
   using Base = InputSpec<TOut, InputTensor, IdentityVecTransform<TOut, TIn>>;
+  using OutputElement = TOut;
+  using Transform = typename Base::Transform;
   using Base::Base;
 };
 
@@ -615,6 +834,7 @@ struct InputSpec<
     std::enable_if_t<!is_tensor<std::remove_cvref_t<TIn>> &&
                      is_layout<std::remove_cvref_t<InLayout>>>> {
   using InputLayout = std::remove_cvref_t<InLayout>;
+  using OutputElement = TOut;
   using Transform = std::conditional_t<
       std::is_void_v<TransformFn>,
       IdentityVecTransform<TOut, TIn>,
@@ -637,6 +857,7 @@ struct InputSpec<
       : _in_layout(layout), _fn{} {}
 
   const InputLayout& input_layout() const { return _in_layout; }
+  const Transform& transform() const { return _fn; }
 
   nint_t required_workspace() const {
     return InputAccessor::required_workspace(_in_layout);
@@ -681,8 +902,11 @@ template <typename TIn, typename OutTensor, typename TransformFn>
 struct DataOutput {
   using TOut = typename OutTensor::ElementType;
   using OutLayout = typename OutTensor::Layout;
+  using OutputTensor = OutTensor;
+  using InputElement = TIn;
   using Transform = std::remove_cvref_t<TransformFn>;
   using Kind = details::SelectAccessKind<OutLayout>;
+  using AccessKind = Kind;
   using Impl = details::DataOutputImpl<Kind, TIn, OutTensor, Transform>;
 
   static nint_t required_workspace(const OutLayout& layout) {
@@ -691,6 +915,34 @@ struct DataOutput {
 
   DataOutput(TOut* p, const OutLayout& layout, const Transform& fn, void* aux)
       : _impl(p, layout, fn, aux) {}
+
+  template <TLV_DECL_TAG(Ti), TL_IF(is_any<vec::TypeOf<Ti>, TIn>), typename N, typename... Is>
+  void operator()(Ti t, vec::Vec<Ti> v, N n, Is... is) const {
+    _impl(t, v, n, is...);
+  }
+
+  Impl _impl;
+};
+
+template <
+    typename TIn,
+    typename OutTensor,
+    typename TransformFn,
+    typename Kind,
+    typename AuxLayout = void>
+struct DataOutputView {
+  using TOut = typename OutTensor::ElementType;
+  using OutLayout = typename OutTensor::Layout;
+  using OutputTensor = OutTensor;
+  using InputElement = TIn;
+  using Transform = std::remove_cvref_t<TransformFn>;
+  using AccessKind = Kind;
+  using KindType = Kind;
+  using Impl = details::DataOutputViewImpl<Kind, TIn, OutTensor, Transform, AuxLayout>;
+
+  template <typename... Args>
+  explicit DataOutputView(Args&&... args)
+      : _impl(std::forward<Args>(args)...) {}
 
   template <TLV_DECL_TAG(Ti), TL_IF(is_any<vec::TypeOf<Ti>, TIn>), typename N, typename... Is>
   void operator()(Ti t, vec::Vec<Ti> v, N n, Is... is) const {
@@ -721,6 +973,7 @@ struct OutputSpec<
   using OutputTensor = std::remove_cvref_t<OutTensor>;
   using TOut = typename OutputTensor::ElementType;
   using OutputLayout = typename OutputTensor::Layout;
+  using InputElement = TIn;
   using Transform = std::remove_cvref_t<TransformFn>;
   using OutputAccessor = DataOutput<TIn, OutputTensor, Transform>;
 
@@ -739,6 +992,7 @@ struct OutputSpec<
       : _tensor(tensor), _fn{} {}
 
   const OutputTensor& tensor() const { return _tensor; }
+  const Transform& transform() const { return _fn; }
   const OutputLayout& output_layout() const { return _tensor.layout(); }
 
   nint_t required_workspace() const {
@@ -775,6 +1029,8 @@ struct OutputSpec<
   using OutputTensor = std::remove_cvref_t<OutTensor>;
   using TOut = typename OutputTensor::ElementType;
   using Base = OutputSpec<TIn, OutputTensor, IdentityVecTransform<TOut, TIn>>;
+  using InputElement = TIn;
+  using Transform = typename Base::Transform;
   using Base::Base;
 };
 
@@ -790,6 +1046,7 @@ struct OutputSpec<
     std::enable_if_t<!is_tensor<std::remove_cvref_t<TOut>> &&
                      is_layout<std::remove_cvref_t<OutLayout>>>> {
   using OutputLayout = std::remove_cvref_t<OutLayout>;
+  using InputElement = TIn;
   using Transform = std::conditional_t<
       std::is_void_v<TransformFn>,
       IdentityVecTransform<TOut, TIn>,
@@ -812,6 +1069,7 @@ struct OutputSpec<
       : _out_layout(layout), _fn{} {}
 
   const OutputLayout& output_layout() const { return _out_layout; }
+  const Transform& transform() const { return _fn; }
 
   nint_t required_workspace() const {
     return OutputAccessor::required_workspace(_out_layout);
@@ -888,6 +1146,330 @@ nint_t required_workspace(const Specs&... specs) {
             specs.required_workspace()), ...);
   return details::workspace_round_up(total, vec::DEFAULT_ALIGNMENT);
 }
+
+namespace details {
+
+template <int ActualDim, typename Transform>
+auto prefixed_transform(const Transform& fn, nint_t index) {
+  return prepend_transform_prefix(fn, std::tuple<nint_t>{index});
+}
+
+template <int ActualDim, typename TOut, typename InTensor, typename Transform>
+auto slice_data_input_last(
+    const DataInput<TOut, InTensor, Transform>& input,
+    nint_t index) {
+  const auto& impl = input._impl;
+  auto tensor = make_tensor(impl._p, impl._layout);
+  auto sliced = hop::details::slice_at_actual_dim<ActualDim>(tensor, index);
+  auto fn = prefixed_transform<ActualDim>(impl._fn, index);
+  using SlicedTensor = std::remove_cvref_t<decltype(sliced)>;
+  using PrefixedTransform = decltype(fn);
+  return DataInputView<TOut, SlicedTensor, PrefixedTransform, AccessKindLastContiguous>(
+      sliced.data(),
+      sliced.layout(),
+      fn);
+}
+
+template <int ActualDim, typename Accessor>
+auto slice_data_input_view_last(const Accessor& input, nint_t index) {
+  const auto& impl = input._impl;
+  auto tensor = make_tensor(impl._p, impl._layout);
+  auto sliced = hop::details::slice_at_actual_dim<ActualDim>(tensor, index);
+  auto fn = prefixed_transform<ActualDim>(impl._fn, index);
+  using SlicedTensor = std::remove_cvref_t<decltype(sliced)>;
+  using PrefixedTransform = decltype(fn);
+  return DataInputView<
+      typename Accessor::OutputElement,
+      SlicedTensor,
+      PrefixedTransform,
+      AccessKindLastContiguous>(
+      sliced.data(),
+      sliced.layout(),
+      fn);
+}
+
+template <int ActualDim, typename Accessor>
+auto slice_data_input_aux(const Accessor& input, nint_t index) {
+  const auto& impl = input._impl;
+  auto src_tensor = make_tensor(impl._p, impl._layout);
+  auto aux_tensor = make_tensor(impl._aux, impl._aux_layout);
+  auto sliced_src = hop::details::slice_at_actual_dim<ActualDim>(src_tensor, index);
+  auto sliced_aux = hop::details::slice_at_actual_dim<ActualDim>(aux_tensor, index);
+  using SlicedTensor = std::remove_cvref_t<decltype(sliced_src)>;
+  using SlicedAuxLayout = std::remove_cvref_t<decltype(sliced_aux.layout())>;
+  return DataInputView<
+      typename Accessor::OutputElement,
+      SlicedTensor,
+      typename Accessor::Transform,
+      typename Accessor::AccessKind,
+      SlicedAuxLayout>(
+      sliced_src.data(),
+      sliced_src.layout(),
+      sliced_aux.layout(),
+      const_cast<typename Accessor::OutputElement*>(sliced_aux.data()));
+}
+
+template <int ActualDim, typename TIn, typename OutTensor, typename Transform>
+auto slice_data_output_last(
+    const DataOutput<TIn, OutTensor, Transform>& output,
+    nint_t index) {
+  const auto& impl = output._impl;
+  auto tensor = make_tensor(impl._p, impl._layout);
+  auto sliced = hop::details::slice_at_actual_dim<ActualDim>(tensor, index);
+  auto fn = prefixed_transform<ActualDim>(impl._fn, index);
+  using SlicedTensor = std::remove_cvref_t<decltype(sliced)>;
+  using PrefixedTransform = decltype(fn);
+  return DataOutputView<TIn, SlicedTensor, PrefixedTransform, AccessKindLastContiguous>(
+      const_cast<typename SlicedTensor::ElementType*>(sliced.data()),
+      sliced.layout(),
+      fn);
+}
+
+template <int ActualDim, typename Accessor>
+auto slice_data_output_view_last(const Accessor& output, nint_t index) {
+  const auto& impl = output._impl;
+  auto tensor = make_tensor(impl._p, impl._layout);
+  auto sliced = hop::details::slice_at_actual_dim<ActualDim>(tensor, index);
+  auto fn = prefixed_transform<ActualDim>(impl._fn, index);
+  using SlicedTensor = std::remove_cvref_t<decltype(sliced)>;
+  using PrefixedTransform = decltype(fn);
+  return DataOutputView<
+      typename Accessor::InputElement,
+      SlicedTensor,
+      PrefixedTransform,
+      AccessKindLastContiguous>(
+      const_cast<typename SlicedTensor::ElementType*>(sliced.data()),
+      sliced.layout(),
+      fn);
+}
+
+template <int ActualDim, typename Accessor>
+auto slice_data_output_strided(const Accessor& output, nint_t index) {
+  const auto& impl = output._impl;
+  auto tensor = make_tensor(impl._p, impl._layout);
+  auto sliced = hop::details::slice_at_actual_dim<ActualDim>(tensor, index);
+  auto fn = prefixed_transform<ActualDim>(impl._fn, index);
+  using SlicedTensor = std::remove_cvref_t<decltype(sliced)>;
+  using PrefixedTransform = decltype(fn);
+  return DataOutputView<
+      typename Accessor::InputElement,
+      SlicedTensor,
+      PrefixedTransform,
+      AccessKindStrided>(
+      const_cast<typename SlicedTensor::ElementType*>(sliced.data()),
+      sliced.layout(),
+      fn);
+}
+
+template <int ActualDim, typename Accessor>
+auto slice_data_output_second_last(const Accessor& output, nint_t index) {
+  const auto& impl = output._impl;
+  auto out_tensor = make_tensor(impl._p, impl._layout);
+  auto aux_tensor = make_tensor(impl._aux, impl._aux_layout);
+  auto sliced_out = hop::details::slice_at_actual_dim<ActualDim>(out_tensor, index);
+  auto sliced_aux = hop::details::slice_at_actual_dim<ActualDim>(aux_tensor, index);
+  auto fn = prefixed_transform<ActualDim>(impl._fn, index);
+  using SlicedTensor = std::remove_cvref_t<decltype(sliced_out)>;
+  using SlicedAuxLayout = std::remove_cvref_t<decltype(sliced_aux.layout())>;
+  using PrefixedTransform = decltype(fn);
+  return DataOutputView<
+      typename Accessor::InputElement,
+      SlicedTensor,
+      PrefixedTransform,
+      AccessKindSecondLastContiguous,
+      SlicedAuxLayout>(
+      const_cast<typename SlicedTensor::ElementType*>(sliced_out.data()),
+      sliced_out.layout(),
+      sliced_aux.layout(),
+      fn,
+      const_cast<typename SlicedTensor::ElementType*>(sliced_aux.data()));
+}
+
+template <int ActualDim, typename Spec>
+auto slice_input_spec(const Spec& spec, nint_t index) {
+  auto sliced = hop::details::slice_at_actual_dim<ActualDim>(spec.tensor(), index);
+  auto fn = prefixed_transform<ActualDim>(spec.transform(), index);
+  using SlicedTensor = std::remove_cvref_t<decltype(sliced)>;
+  using PrefixedTransform = decltype(fn);
+  return InputSpec<typename Spec::OutputElement, SlicedTensor, PrefixedTransform>(
+      sliced,
+      fn);
+}
+
+template <int ActualDim, typename Spec>
+auto slice_output_spec(const Spec& spec, nint_t index) {
+  auto sliced = hop::details::slice_at_actual_dim<ActualDim>(spec.tensor(), index);
+  auto fn = prefixed_transform<ActualDim>(spec.transform(), index);
+  using SlicedTensor = std::remove_cvref_t<decltype(sliced)>;
+  using PrefixedTransform = decltype(fn);
+  return OutputSpec<typename Spec::InputElement, SlicedTensor, PrefixedTransform>(
+      sliced,
+      fn);
+}
+
+} // namespace details
+
+namespace hop::details {
+
+template <typename TOut, typename InTensor, typename Transform>
+struct SliceTraits<DataInput<TOut, InTensor, Transform>> {
+  using Accessor = DataInput<TOut, InTensor, Transform>;
+  static constexpr int rank = InTensor::Ndim;
+  static constexpr bool is_sliceable = true;
+
+  template <int I>
+  using shape_dim = typename TensorShapeDim<I, InTensor>::type;
+
+  static nint_t size(const Accessor& input, int dim) {
+    return input._impl._layout.shape()[dim];
+  }
+
+  template <int ActualDim, typename U>
+  static auto slice(U&& input, nint_t index) {
+    using Kind = typename Accessor::AccessKind;
+    if constexpr (std::is_same_v<Kind, vecops::gemm::details::AccessKindLastContiguous>) {
+      return vecops::gemm::details::slice_data_input_last<ActualDim>(input, index);
+    } else {
+      return vecops::gemm::details::slice_data_input_aux<ActualDim>(input, index);
+    }
+  }
+};
+
+template <typename TOut, typename InTensor, typename Transform, typename Kind, typename AuxLayout>
+struct SliceTraits<DataInputView<TOut, InTensor, Transform, Kind, AuxLayout>> {
+  using Accessor = DataInputView<TOut, InTensor, Transform, Kind, AuxLayout>;
+  static constexpr int rank = InTensor::Ndim;
+  static constexpr bool is_sliceable = true;
+
+  template <int I>
+  using shape_dim = typename TensorShapeDim<I, InTensor>::type;
+
+  static nint_t size(const Accessor& input, int dim) {
+    return input._impl._layout.shape()[dim];
+  }
+
+  template <int ActualDim, typename U>
+  static auto slice(U&& input, nint_t index) {
+    if constexpr (std::is_same_v<Kind, vecops::gemm::details::AccessKindLastContiguous>) {
+      return vecops::gemm::details::slice_data_input_view_last<ActualDim>(input, index);
+    } else {
+      return vecops::gemm::details::slice_data_input_aux<ActualDim>(input, index);
+    }
+  }
+};
+
+template <typename TIn, typename OutTensor, typename Transform>
+struct SliceTraits<DataOutput<TIn, OutTensor, Transform>> {
+  using Accessor = DataOutput<TIn, OutTensor, Transform>;
+  static constexpr int rank = OutTensor::Ndim;
+  static constexpr bool is_sliceable = true;
+
+  template <int I>
+  using shape_dim = typename TensorShapeDim<I, OutTensor>::type;
+
+  static nint_t size(const Accessor& output, int dim) {
+    return output._impl._layout.shape()[dim];
+  }
+
+  template <int ActualDim, typename U>
+  static auto slice(U&& output, nint_t index) {
+    using Kind = typename Accessor::AccessKind;
+    if constexpr (std::is_same_v<Kind, vecops::gemm::details::AccessKindLastContiguous>) {
+      return vecops::gemm::details::slice_data_output_last<ActualDim>(output, index);
+    } else if constexpr (std::is_same_v<Kind, vecops::gemm::details::AccessKindSecondLastContiguous>) {
+      return vecops::gemm::details::slice_data_output_second_last<ActualDim>(output, index);
+    } else {
+      return vecops::gemm::details::slice_data_output_strided<ActualDim>(output, index);
+    }
+  }
+};
+
+template <typename TIn, typename OutTensor, typename Transform, typename Kind, typename AuxLayout>
+struct SliceTraits<DataOutputView<TIn, OutTensor, Transform, Kind, AuxLayout>> {
+  using Accessor = DataOutputView<TIn, OutTensor, Transform, Kind, AuxLayout>;
+  static constexpr int rank = OutTensor::Ndim;
+  static constexpr bool is_sliceable = true;
+
+  template <int I>
+  using shape_dim = typename TensorShapeDim<I, OutTensor>::type;
+
+  static nint_t size(const Accessor& output, int dim) {
+    return output._impl._layout.shape()[dim];
+  }
+
+  template <int ActualDim, typename U>
+  static auto slice(U&& output, nint_t index) {
+    if constexpr (std::is_same_v<Kind, vecops::gemm::details::AccessKindLastContiguous>) {
+      return vecops::gemm::details::slice_data_output_view_last<ActualDim>(output, index);
+    } else if constexpr (std::is_same_v<Kind, vecops::gemm::details::AccessKindSecondLastContiguous>) {
+      return vecops::gemm::details::slice_data_output_second_last<ActualDim>(output, index);
+    } else {
+      return vecops::gemm::details::slice_data_output_strided<ActualDim>(output, index);
+    }
+  }
+};
+
+template <typename TOut, typename InTensor, typename Transform>
+struct SliceTraits<
+    InputSpec<
+        TOut,
+        InTensor,
+        Transform,
+        void,
+        std::enable_if_t<is_tensor<std::remove_cvref_t<InTensor>>>>> {
+  using Spec = InputSpec<
+      TOut,
+      InTensor,
+      Transform,
+      void,
+      std::enable_if_t<is_tensor<std::remove_cvref_t<InTensor>>>>;
+  static constexpr int rank = Spec::InputTensor::Ndim;
+  static constexpr bool is_sliceable = true;
+
+  template <int I>
+  using shape_dim = typename TensorShapeDim<I, typename Spec::InputTensor>::type;
+
+  static nint_t size(const Spec& spec, int dim) {
+    return spec.tensor().size(dim);
+  }
+
+  template <int ActualDim, typename U>
+  static auto slice(U&& spec, nint_t index) {
+    return vecops::gemm::details::slice_input_spec<ActualDim>(spec, index);
+  }
+};
+
+template <typename TIn, typename OutTensor, typename Transform>
+struct SliceTraits<
+    OutputSpec<
+        TIn,
+        OutTensor,
+        Transform,
+        void,
+        std::enable_if_t<is_tensor<std::remove_cvref_t<OutTensor>>>>> {
+  using Spec = OutputSpec<
+      TIn,
+      OutTensor,
+      Transform,
+      void,
+      std::enable_if_t<is_tensor<std::remove_cvref_t<OutTensor>>>>;
+  static constexpr int rank = Spec::OutputTensor::Ndim;
+  static constexpr bool is_sliceable = true;
+
+  template <int I>
+  using shape_dim = typename TensorShapeDim<I, typename Spec::OutputTensor>::type;
+
+  static nint_t size(const Spec& spec, int dim) {
+    return spec.tensor().size(dim);
+  }
+
+  template <int ActualDim, typename U>
+  static auto slice(U&& spec, nint_t index) {
+    return vecops::gemm::details::slice_output_spec<ActualDim>(spec, index);
+  }
+};
+
+} // namespace hop::details
 
 namespace details {
 

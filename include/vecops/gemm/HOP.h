@@ -129,20 +129,13 @@
 namespace vecops::gemm::hop {
 namespace details {
 
-// ======================== Type Traits ========================
+// ======================== Slice Traits ========================
 
 template <typename T>
-struct TensorRank : std::integral_constant<int, 0> {};
-
-template <typename T, typename TShape, typename TStrides>
-struct TensorRank<Tensor<T, TShape, TStrides>>
-    : std::integral_constant<int, Tensor<T, TShape, TStrides>::Ndim> {};
-
-template <typename T>
-static constexpr int tensor_rank_v = TensorRank<std::remove_cvref_t<T>>::value;
-
-template <typename T>
-static constexpr bool is_tensor_v = is_tensor<std::remove_cvref_t<T>>;
+struct SliceTraits {
+  static constexpr int rank = 0;
+  static constexpr bool is_sliceable = false;
+};
 
 template <int I, typename T>
 struct TensorShapeDim;
@@ -152,6 +145,32 @@ struct TensorShapeDim<I, Tensor<T, Shape<Ss...>, Strides<Ts...>>> {
   using type = std::tuple_element_t<I, std::tuple<Ss...>>;
 };
 
+template <typename T, typename TShape, typename TStrides>
+struct SliceTraits<Tensor<T, TShape, TStrides>> {
+  using TensorT = Tensor<T, TShape, TStrides>;
+  static constexpr int rank = TensorT::Ndim;
+  static constexpr bool is_sliceable = true;
+
+  template <int I>
+  using shape_dim = typename TensorShapeDim<I, TensorT>::type;
+
+  static nint_t size(const TensorT& input, int dim) {
+    return input.size(dim);
+  }
+
+  template <int ActualDim, typename U>
+  VECOPS_ALWAYS_INLINE static constexpr decltype(auto) slice(U&& input, nint_t index);
+};
+
+template <typename T>
+static constexpr int slice_rank_v = SliceTraits<std::remove_cvref_t<T>>::rank;
+
+template <typename T>
+static constexpr bool is_sliceable_v = SliceTraits<std::remove_cvref_t<T>>::is_sliceable;
+
+template <int I, typename T>
+using slice_shape_dim_t = typename SliceTraits<std::remove_cvref_t<T>>::template shape_dim<I>;
+
 template <typename T>
 struct IsConstOne : std::false_type {};
 
@@ -160,7 +179,7 @@ struct IsConstOne<Const<1>> : std::true_type {};
 
 template <int I, typename T>
 static constexpr bool is_const_one_dim_v =
-    IsConstOne<typename TensorShapeDim<I, std::remove_cvref_t<T>>::type>::value;
+    IsConstOne<slice_shape_dim_t<I, T>>::value;
 
 constexpr int max2(int a, int b) {
   return a > b ? a : b;
@@ -179,7 +198,7 @@ template <int... Is>
 static constexpr int max_index_plus_one_v = MaxInt<(Is + 1)...>::value;
 
 template <typename... Ts>
-static constexpr int max_tensor_rank_v = MaxInt<tensor_rank_v<Ts>...>::value;
+static constexpr int max_slice_rank_v = MaxInt<slice_rank_v<Ts>...>::value;
 
 // ======================== Dimension Validation ========================
 
@@ -217,12 +236,12 @@ constexpr int adjust_dim_after_slice() {
 
 template <int LogicalRank, int LogicalDim, typename T>
 static constexpr int actual_dim_v =
-    LogicalDim - (LogicalRank - tensor_rank_v<T>);
+    LogicalDim - (LogicalRank - slice_rank_v<T>);
 
 template <int LogicalRank, int LogicalDim, typename T>
 static constexpr bool has_actual_dim_v =
-    is_tensor_v<T> && (0 <= actual_dim_v<LogicalRank, LogicalDim, T>) &&
-    (actual_dim_v<LogicalRank, LogicalDim, T> < tensor_rank_v<T>);
+    is_sliceable_v<T> && (0 <= actual_dim_v<LogicalRank, LogicalDim, T>) &&
+    (actual_dim_v<LogicalRank, LogicalDim, T> < slice_rank_v<T>);
 
 template <bool HasActualDim, int ActualDim, typename T>
 struct IsBroadcastDim : std::true_type {};
@@ -245,7 +264,7 @@ VECOPS_ALWAYS_INLINE void update_extent(nint_t& extent, bool& has_extent, const 
   if constexpr (has_actual_dim_v<LogicalRank, LogicalDim, T> &&
                 !is_broadcast_dim_v<LogicalRank, LogicalDim, T>) {
     constexpr int actual_dim = actual_dim_v<LogicalRank, LogicalDim, T>;
-    const nint_t current = input.size(actual_dim);
+    const nint_t current = SliceTraits<std::remove_cvref_t<T>>::size(input, actual_dim);
     if (has_extent) {
       VECOPS_ASSERT(extent == current, "broadcast extent mismatch");
     } else {
@@ -272,13 +291,21 @@ VECOPS_ALWAYS_INLINE constexpr decltype(auto) slice_at_actual_dim_impl(
   return std::forward<T>(input)(slice_arg<ActualDim, static_cast<int>(Ds)>(index)...);
 }
 
-template <int ActualDim, typename T>
-VECOPS_ALWAYS_INLINE constexpr decltype(auto) slice_at_actual_dim(T&& input, nint_t index) {
-  using TensorT = std::remove_cvref_t<T>;
+template <typename T, typename TShape, typename TStrides>
+template <int ActualDim, typename U>
+VECOPS_ALWAYS_INLINE constexpr decltype(auto)
+SliceTraits<Tensor<T, TShape, TStrides>>::slice(U&& input, nint_t index) {
   return slice_at_actual_dim_impl<ActualDim>(
-      std::forward<T>(input),
+      std::forward<U>(input),
       index,
       std::make_index_sequence<TensorT::Ndim>{});
+}
+
+template <int ActualDim, typename T>
+VECOPS_ALWAYS_INLINE constexpr decltype(auto) slice_at_actual_dim(T&& input, nint_t index) {
+  return SliceTraits<std::remove_cvref_t<T>>::template slice<ActualDim>(
+      std::forward<T>(input),
+      index);
 }
 
 template <int LogicalRank, int LogicalDim, typename T>
@@ -415,7 +442,7 @@ template <int N, int... Is>
 struct LeadingDims<N, std::integer_sequence<int, Is...>> {
   template <typename Fn, typename... Inputs>
   VECOPS_ALWAYS_INLINE static void run(Fn& fn, Inputs&&... inputs) {
-    constexpr int logical_rank = max2(N, max_tensor_rank_v<Inputs...>);
+    constexpr int logical_rank = max2(N, max_slice_rank_v<Inputs...>);
     for_each_impl<logical_rank, Is...>(fn, std::forward<Inputs>(inputs)...);
   }
 };
@@ -427,7 +454,7 @@ template <int N, int... Is>
 struct LeadingDimsWithIndex<N, std::integer_sequence<int, Is...>> {
   template <typename Fn, typename... Inputs>
   VECOPS_ALWAYS_INLINE static void run(Fn& fn, Inputs&&... inputs) {
-    constexpr int logical_rank = max2(N, max_tensor_rank_v<Inputs...>);
+    constexpr int logical_rank = max2(N, max_slice_rank_v<Inputs...>);
     for_each_with_index_impl<logical_rank, Is...>(
         fn,
         std::tuple<>{},
@@ -442,7 +469,7 @@ template <int N, int... Is>
 struct LeadingDimsWithIndexTuple<N, std::integer_sequence<int, Is...>> {
   template <typename Fn, typename... Inputs>
   VECOPS_ALWAYS_INLINE static void run(Fn& fn, Inputs&&... inputs) {
-    constexpr int logical_rank = max2(N, max_tensor_rank_v<Inputs...>);
+    constexpr int logical_rank = max2(N, max_slice_rank_v<Inputs...>);
     for_each_with_index_tuple_impl<logical_rank, Is...>(
         fn,
         std::tuple<>{},
@@ -487,7 +514,7 @@ VECOPS_ALWAYS_INLINE void for_each(Fn&& fn, Inputs&&... inputs) {
   static_assert(details::UniqueDims<Is...>::value, "duplicate traversal dimension");
   constexpr int logical_rank = details::max2(
       details::max_index_plus_one_v<Is...>,
-      details::max_tensor_rank_v<Inputs...>);
+      details::max_slice_rank_v<Inputs...>);
   details::for_each_impl<logical_rank, Is...>(fn, std::forward<Inputs>(inputs)...);
 }
 
@@ -525,7 +552,7 @@ VECOPS_ALWAYS_INLINE void for_each_with_index(Fn&& fn, Inputs&&... inputs) {
   static_assert(details::UniqueDims<Is...>::value, "duplicate traversal dimension");
   constexpr int logical_rank = details::max2(
       details::max_index_plus_one_v<Is...>,
-      details::max_tensor_rank_v<Inputs...>);
+      details::max_slice_rank_v<Inputs...>);
   details::for_each_with_index_impl<logical_rank, Is...>(
       fn,
       std::tuple<>{},
@@ -554,7 +581,7 @@ VECOPS_ALWAYS_INLINE void for_each_with_index_tuple(Fn&& fn, Inputs&&... inputs)
   static_assert(details::UniqueDims<Is...>::value, "duplicate traversal dimension");
   constexpr int logical_rank = details::max2(
       details::max_index_plus_one_v<Is...>,
-      details::max_tensor_rank_v<Inputs...>);
+      details::max_slice_rank_v<Inputs...>);
   details::for_each_with_index_tuple_impl<logical_rank, Is...>(
       fn,
       std::tuple<>{},

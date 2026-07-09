@@ -118,7 +118,12 @@ struct LayerNorm {
     static_assert(details::is_input_spec_v<ScaleSpec>, "LayerNorm scale must be an InputSpec");
     static_assert(details::is_input_spec_v<BiasSpec>, "LayerNorm bias must be an InputSpec");
     static_assert(details::is_output_spec_v<OutSpec>, "LayerNorm output must be an OutputSpec");
-    return gemm::required_workspace(in, scale, bias, out);
+    details::validate_layernorm_layouts(
+        in.input_layout(),
+        scale.input_layout(),
+        bias.input_layout(),
+        out.output_layout());
+    return required_workspace_impl(in, scale, bias, out);
   }
 
   template <
@@ -169,11 +174,9 @@ struct LayerNorm {
 
     auto mark = workspace.mark();
     {
-      auto x = in.bind(workspace);
       auto gamma = scale.bind(workspace);
       auto beta = bias.bind(workspace);
-      auto y = out.bind(workspace);
-      run_bound(in.tensor(), in_layout, x, gamma, beta, y);
+      run_bound(workspace, in, out, gamma, beta);
     }
     workspace.rewind(mark);
   }
@@ -195,31 +198,46 @@ struct LayerNorm {
 
 private:
   template <
-      typename InTensor,
-      typename InLayout,
-      typename InAccessor,
+      typename InSpec,
+      typename OutSpec,
       typename ScaleAccessor,
-      typename BiasAccessor,
-      typename OutAccessor>
+      typename BiasAccessor>
   void run_bound(
-      const InTensor& in_tensor,
-      const InLayout& in_layout,
-      const InAccessor& x,
+      gemm::WorkspaceView& workspace,
+      const InSpec& in,
+      const OutSpec& out,
       const ScaleAccessor& gamma,
-      const BiasAccessor& beta,
-      const OutAccessor& y) const {
+      const BiasAccessor& beta) const {
+    using InLayout = typename std::remove_cvref_t<InSpec>::InputLayout;
     constexpr int rank = InLayout::Ndim;
     constexpr int prefix_rank = rank - 1;
 
-    gemm::hop::for_each_dims_with_index_tuple<prefix_rank>(
-        [&](const auto& prefix, auto&&) {
-          std::apply(
-              [&](auto... prefix_coords) {
-                run_row(in_layout, x, gamma, beta, y, prefix_coords...);
-              },
-              prefix);
+    gemm::hop::for_each_dims<prefix_rank>(
+        [&](const auto& in_row, const auto& out_row) {
+          run_row(workspace, in_row, gamma, beta, out_row);
         },
-        in_tensor);
+        in,
+        out);
+  }
+
+  template <
+      typename InSpec,
+      typename ScaleAccessor,
+      typename BiasAccessor,
+      typename OutSpec>
+  void run_row(
+      gemm::WorkspaceView& workspace,
+      const InSpec& in,
+      const ScaleAccessor& gamma,
+      const BiasAccessor& beta,
+      const OutSpec& out) const {
+    auto mark = workspace.mark();
+    {
+      auto x = in.bind(workspace);
+      auto y = out.bind(workspace);
+      run_row_bound(in.input_layout(), x, gamma, beta, y);
+    }
+    workspace.rewind(mark);
   }
 
   template <
@@ -227,23 +245,22 @@ private:
       typename InAccessor,
       typename ScaleAccessor,
       typename BiasAccessor,
-      typename OutAccessor,
-      typename... PrefixCoords>
-  void run_row(
+      typename OutAccessor>
+  void run_row_bound(
       const InLayout& in_layout,
       const InAccessor& x,
       const ScaleAccessor& gamma,
       const BiasAccessor& beta,
-      const OutAccessor& y,
-      PrefixCoords... prefix_coords) const {
+      const OutAccessor& y) const {
+    static_assert(InLayout::Ndim == 1, "LayerNorm row spec must be rank 1");
     Tag tag;
-    const nint_t normalized_size = in_layout.shape()[InLayout::Ndim - 1];
+    const nint_t normalized_size = in_layout.shape()[0];
     auto sum_v = vec::zeros(tag);
     auto sum_sq_v = vec::zeros(tag);
 
     for (nint_t col = 0; col < normalized_size; col += vec::size(tag)) {
       const nint_t count = std::min(vec::size(tag), normalized_size - col);
-      auto xv = x(tag, gemm::Any{count}, prefix_coords..., col);
+      auto xv = x(tag, gemm::Any{count}, col);
       sum_v = vec::add(sum_v, xv);
       sum_sq_v = vec::fmadd(xv, xv, sum_sq_v);
     }
@@ -260,13 +277,43 @@ private:
     const auto rstd_v = vec::fill(tag, rstd);
     for (nint_t col = 0; col < normalized_size; col += vec::size(tag)) {
       const nint_t count = std::min(vec::size(tag), normalized_size - col);
-      auto xv = x(tag, gemm::Any{count}, prefix_coords..., col);
+      auto xv = x(tag, gemm::Any{count}, col);
       auto gamma_v = gamma(tag, gemm::Any{count}, col);
       auto beta_v = beta(tag, gemm::Any{count}, col);
       auto centered = vec::sub(xv, mean_v);
       auto normalized = vec::mul(centered, rstd_v);
       auto affine = vec::fmadd(normalized, gamma_v, beta_v);
-      y(tag, affine, gemm::Any{count}, prefix_coords..., col);
+      y(tag, affine, gemm::Any{count}, col);
+    }
+  }
+
+  template <
+      typename InSpec,
+      typename ScaleSpec,
+      typename BiasSpec,
+      typename OutSpec>
+  nint_t required_workspace_impl(
+      const InSpec& in,
+      const ScaleSpec& scale,
+      const BiasSpec& bias,
+      const OutSpec& out) const {
+    using InLayout = typename std::remove_cvref_t<InSpec>::InputLayout;
+    constexpr int prefix_rank = InLayout::Ndim - 1;
+    const auto in_row = first_row_spec<prefix_rank>(in);
+    const auto out_row = first_row_spec<prefix_rank>(out);
+    const nint_t row_workspace = gemm::required_workspace(in_row, out_row);
+    return gemm::details::workspace_round_up(
+        gemm::required_workspace(scale, bias) + row_workspace,
+        vec::DEFAULT_ALIGNMENT);
+  }
+
+  template <int PrefixRank, typename Spec>
+  static auto first_row_spec(const Spec& spec) {
+    if constexpr (PrefixRank == 0) {
+      return spec;
+    } else {
+      return first_row_spec<PrefixRank - 1>(
+          gemm::hop::details::slice_at_actual_dim<0>(spec, 0));
     }
   }
 };

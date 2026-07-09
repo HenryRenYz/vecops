@@ -354,6 +354,104 @@ TEST(DataAccessSpecWrapperTest, OutputHelperBindsTensorWithWorkspace) {
   EXPECT_EQ(dst[9], 102);
 }
 
+TEST(DataAccessHOPSliceTest, SlicedInputAccessorUsesRowLayoutAndFullTransformCoords) {
+  using T = int32_t;
+  using L = Layout<Shape<Const<3>, Const<5>>, Strides<Const<5>, Const<1>>>;
+
+  auto src = make_source<T>(32);
+  L layout{Shape<Const<3>, Const<5>>{}, Strides<Const<5>, Const<1>>{}};
+  int calls = 0;
+  std::vector<nint_t> coords;
+  CoordShiftFn<T> fn(&calls, &coords);
+  DataInput<T, Tensor<T, typename L::Shape, typename L::Strides>, CoordShiftFn<T>> accessor(
+      src.data(), layout, fn, nullptr);
+
+  ScalableTag<T, 0> tag;
+  std::vector<T> seen;
+  hop::for_each<0>(
+      [&](const auto& row) {
+        auto v = row(tag, nint_t{2}, nint_t{1});
+        seen.push_back(read_vec_lane<T>(v, 0));
+        seen.push_back(read_vec_lane<T>(v, 1));
+      },
+      accessor);
+
+  EXPECT_GE(calls, 3);
+  EXPECT_EQ(coords, (std::vector<nint_t>{2, 1}));
+  EXPECT_EQ(seen[0], coord_shift_expected(src[1], 0, 1));
+  EXPECT_EQ(seen[1], coord_shift_expected(src[2], 0, 1));
+  EXPECT_EQ(seen[4], coord_shift_expected(src[11], 2, 1));
+  EXPECT_EQ(seen[5], coord_shift_expected(src[12], 2, 1));
+}
+
+TEST(DataAccessHOPSliceTest, SlicedInputSpecBindsWithFullTransformCoords) {
+  using T = int32_t;
+  using L = Layout<Shape<Const<3>, Const<5>>, Strides<Const<5>, Const<1>>>;
+
+  auto src = make_source<T>(32);
+  L layout{Shape<Const<3>, Const<5>>{}, Strides<Const<5>, Const<1>>{}};
+  auto tensor = make_tensor(src.data(), layout);
+  int calls = 0;
+  std::vector<nint_t> coords;
+  auto spec = input<T>(tensor, CoordShiftFn<T>(&calls, &coords));
+
+  Workspace workspace(0);
+  auto view = workspace.view();
+  ScalableTag<T, 0> tag;
+  std::vector<T> seen;
+  hop::for_each<0>(
+      [&](const auto& row_spec) {
+        auto row = row_spec.bind(view);
+        auto v = row(tag, nint_t{2}, nint_t{2});
+        seen.push_back(read_vec_lane<T>(v, 0));
+      },
+      spec);
+
+  EXPECT_GE(calls, 3);
+  EXPECT_EQ(coords, (std::vector<nint_t>{2, 2}));
+  EXPECT_EQ(seen[0], coord_shift_expected(src[2], 0, 2));
+  EXPECT_EQ(seen[1], coord_shift_expected(src[7], 1, 2));
+  EXPECT_EQ(seen[2], coord_shift_expected(src[12], 2, 2));
+}
+
+TEST(DataAccessHOPSliceTest, SlicedSecondLastOutputAccessorFlushesOnlyFromParent) {
+  using T = int32_t;
+  using L = Layout<Shape<Const<2>, Const<5>>, Strides<Const<1>, Const<2>>>;
+  using Spec = OutputSpec<T, T, L, CoordShiftFn<T>>;
+
+  std::vector<T> dst(16, -9);
+  L layout{Shape<Const<2>, Const<5>>{}, Strides<Const<1>, Const<2>>{}};
+  auto aux = make_aux<T>(Spec::required_workspace(layout));
+  int calls = 0;
+  std::vector<nint_t> coords;
+
+  {
+    Spec spec(layout, CoordShiftFn<T>(&calls, &coords));
+    auto output = spec.make_output(dst.data(), aux.data());
+    ScalableTag<T, 0> tag;
+    std::array<T, 64> values{};
+    for (nint_t i = 0; i < size(tag); ++i) {
+      values[static_cast<size_t>(i)] = static_cast<T>(10 + i);
+    }
+    auto v = loadu(tag, values.data());
+
+    hop::for_each<0>(
+        [&](const auto& row) {
+          row(tag, v, nint_t{2}, nint_t{1});
+          EXPECT_EQ(dst[2], -9);
+          EXPECT_EQ(dst[3], -9);
+        },
+        output);
+  }
+
+  EXPECT_GE(calls, 2);
+  EXPECT_EQ(coords, (std::vector<nint_t>{1, 1}));
+  EXPECT_EQ(dst[2], coord_shift_expected(static_cast<T>(10), 0, 1));
+  EXPECT_EQ(dst[4], coord_shift_expected(static_cast<T>(11), 0, 1));
+  EXPECT_EQ(dst[3], coord_shift_expected(static_cast<T>(10), 1, 1));
+  EXPECT_EQ(dst[5], coord_shift_expected(static_cast<T>(11), 1, 1));
+}
+
 TEST(WorkspaceTest, ParallelWorkspaceProvidesIndependentThreadViews) {
   ParallelWorkspace workspace(2, 64);
   auto left = workspace.thread_view(0);
