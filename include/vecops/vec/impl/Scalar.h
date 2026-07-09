@@ -975,6 +975,42 @@ VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return details::vectorized_v<T>([&](nint_t i){ return m[i] ? a[i] * b[i] : a[i]; });
 }
 
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmadd(V a, V b, V c) {
+  return details::vectorized_v<T>([&](nint_t i){ return TypeOf<T>(a[i] * b[i] + c[i]); });
+}
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmadd(V a, V b, V c, Mask<T> m) {
+  return details::vectorized_v<T>([&](nint_t i){ return m[i] ? TypeOf<T>(a[i] * b[i] + c[i]) : a[i]; });
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmsub(V a, V b, V c) {
+  return details::vectorized_v<T>([&](nint_t i){ return TypeOf<T>(a[i] * b[i] - c[i]); });
+}
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmsub(V a, V b, V c, Mask<T> m) {
+  return details::vectorized_v<T>([&](nint_t i){ return m[i] ? TypeOf<T>(a[i] * b[i] - c[i]) : a[i]; });
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmadd(V a, V b, V c) {
+  return details::vectorized_v<T>([&](nint_t i){ return TypeOf<T>(-(a[i] * b[i]) + c[i]); });
+}
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmadd(V a, V b, V c, Mask<T> m) {
+  return details::vectorized_v<T>([&](nint_t i){ return m[i] ? TypeOf<T>(-(a[i] * b[i]) + c[i]) : a[i]; });
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmsub(V a, V b, V c) {
+  return details::vectorized_v<T>([&](nint_t i){ return TypeOf<T>(-(a[i] * b[i]) - c[i]); });
+}
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmsub(V a, V b, V c, Mask<T> m) {
+  return details::vectorized_v<T>([&](nint_t i){ return m[i] ? TypeOf<T>(-(a[i] * b[i]) - c[i]) : a[i]; });
+}
+
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V div(V a, V b) {
   return details::vectorized_v<T>([&](nint_t i){ return a[i] / b[i]; });

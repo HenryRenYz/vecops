@@ -1809,7 +1809,7 @@ template <> struct Product<> { using type = Const<1>; };
 template <typename T> struct Product<T> { using type = T; };
 template <typename T0, typename T1, typename... Ts>
 struct Product<T0, T1, Ts...> {
-  using type = decltype(std::declval<T0>() * std::declval<typename Product<T1, Ts...>::type()>());
+  using type = decltype(std::declval<T0>() * std::declval<typename Product<T1, Ts...>::type>());
 };
 
 /// Extract types from index I to end of pack.

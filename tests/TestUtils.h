@@ -225,6 +225,11 @@ void verify_mask_pattern(Tag tt, vecops::vec::Mask<Tag> m, const std::vector<boo
 template <typename T> T scalar_add(T a, T b) { return a + b; }
 template <typename T> T scalar_sub(T a, T b) { return a - b; }
 template <typename T> T scalar_mul(T a, T b) { return a * b; }
+template <typename T> T scalar_neg(T a) { return -a; }
+template <typename T> T scalar_fmadd(T a, T b, T c) { return scalar_add(scalar_mul(a, b), c); }
+template <typename T> T scalar_fmsub(T a, T b, T c) { return scalar_sub(scalar_mul(a, b), c); }
+template <typename T> T scalar_fnmadd(T a, T b, T c) { return scalar_add(scalar_neg(scalar_mul(a, b)), c); }
+template <typename T> T scalar_fnmsub(T a, T b, T c) { return scalar_sub(scalar_neg(scalar_mul(a, b)), c); }
 
 template <typename T>
 T scalar_div(T a, T b) {
@@ -243,8 +248,6 @@ T scalar_min(T a, T b) {
   if constexpr (vecops::is_float<T>) return std::min(a, b);
   else return (a < b) ? a : b;
 }
-
-template <typename T> T scalar_neg(T a) { return -a; }
 
 template <typename T>
 T scalar_abs(T a) {

@@ -443,6 +443,9 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, T default_v = T())
 /**
  * @brief Masked load from aligned memory.
  *
+ * For each lane i where mask[i] is true, loads from p[i]. For lanes
+ * where mask is false, takes the value from default_v[i].
+ *
  * @return Vector with masked-loaded elements
  */
 template <TLV_DECL_TAG(T)>
@@ -530,6 +533,9 @@ VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
 
 /**
  * @brief Masked store to aligned memory.
+ *
+ * For each lane i where mask[i] is true, stores v[i] to p[i].
+ * Masked-out lanes are not written.
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void store(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
@@ -593,6 +599,9 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
 
 /**
  * @brief Gather first n elements using an index vector, with default for rest.
+ *
+ * For lanes [0, n), loads from p[index[i]]. Lanes [n, size(t)) take
+ * values from default_v.
  *
  * @return Gathered vector
  */
@@ -691,6 +700,9 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
 /**
  * @brief Masked gather with scalar default.
  *
+ * For each lane i where mask[i] is true, loads from p[index[i]].
+ * Masked-out lanes take the scalar default_v.
+ *
  * @return Gathered vector
  */
 template <TLV_DECL_TAG(T)>
@@ -737,6 +749,8 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeO
 
 /**
  * @brief Scatter first n elements to memory using an index vector.
+ *
+ * Only lanes [0, n) are written to p[index[i]].
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) < 4)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
@@ -913,7 +927,7 @@ VECOPS_VFUNC V add(V a, V b) {
 /**
  * @brief Masked element-wise addition: result[i] = a[i] + b[i] for masked lanes.
  *
- * For masked-out lanes, the value is undefined (typically a[i]).
+ * For masked-out lanes, result[i] = a[i].
  *
  * @return Sum of the two vectors for masked lanes
  */
@@ -943,6 +957,8 @@ VECOPS_VFUNC V sub(V a, V b) {
 
 /**
  * @brief Masked element-wise subtraction: result[i] = a[i] - b[i] for masked lanes.
+ *
+ * For masked-out lanes, result[i] = a[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
@@ -970,6 +986,8 @@ VECOPS_VFUNC V mul(V a, V b) {
 
 /**
  * @brief Masked element-wise multiplication: result[i] = a[i] * b[i] for masked lanes.
+ *
+ * For masked-out lanes, result[i] = a[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
@@ -978,6 +996,150 @@ VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   return vmap(
       t, [=](auto tt, auto&& aa, auto&& bb, auto&& mm) { return word::mul(aa, bb, mm); },
       ShardVec(t, a), ShardVec(t, b), ShardMask(t, m)
+  );
+}
+
+/**
+ * @brief Element-wise fused multiply-add: result[i] = a[i] * b[i] + c[i].
+ *
+ * Uses a native FMA instruction when available for the element type and
+ * target backend; otherwise falls back to multiply plus add.
+ *
+ * @return Fused multiply-add result
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmadd(V a, V b, V c) {
+  using namespace details;
+  constexpr T t;
+  return vmap(
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc) { return word::fmadd(aa, bb, cc); },
+      ShardVec(t, a), ShardVec(t, b), ShardVec(t, c)
+  );
+}
+
+/**
+ * @brief Masked fused multiply-add for masked lanes.
+ *
+ * For masked lanes, result[i] = a[i] * b[i] + c[i].
+ * For masked-out lanes, result[i] = a[i].
+ *
+ * @return Fused multiply-add result for masked lanes
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmadd(V a, V b, V c, Mask<T> m) {
+  using namespace details;
+  constexpr T t;
+  return vmap(
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc, auto&& mm) { return word::fmadd(aa, bb, cc, mm); },
+      ShardVec(t, a), ShardVec(t, b), ShardVec(t, c), ShardMask(t, m)
+  );
+}
+
+/**
+ * @brief Element-wise fused multiply-subtract: result[i] = a[i] * b[i] - c[i].
+ *
+ * Uses a native FMA instruction when available for the element type and
+ * target backend; otherwise falls back to multiply plus subtract.
+ *
+ * @return Fused multiply-subtract result
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmsub(V a, V b, V c) {
+  using namespace details;
+  constexpr T t;
+  return vmap(
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc) { return word::fmsub(aa, bb, cc); },
+      ShardVec(t, a), ShardVec(t, b), ShardVec(t, c)
+  );
+}
+
+/**
+ * @brief Masked fused multiply-subtract for masked lanes.
+ *
+ * For masked lanes, result[i] = a[i] * b[i] - c[i].
+ * For masked-out lanes, result[i] = a[i].
+ *
+ * @return Fused multiply-subtract result for masked lanes
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmsub(V a, V b, V c, Mask<T> m) {
+  using namespace details;
+  constexpr T t;
+  return vmap(
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc, auto&& mm) { return word::fmsub(aa, bb, cc, mm); },
+      ShardVec(t, a), ShardVec(t, b), ShardVec(t, c), ShardMask(t, m)
+  );
+}
+
+/**
+ * @brief Element-wise negative fused multiply-add: result[i] = -(a[i] * b[i]) + c[i].
+ *
+ * Uses a native FMA instruction when available for the element type and
+ * target backend; otherwise falls back to multiply plus add/subtract.
+ *
+ * @return Negative fused multiply-add result
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmadd(V a, V b, V c) {
+  using namespace details;
+  constexpr T t;
+  return vmap(
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc) { return word::fnmadd(aa, bb, cc); },
+      ShardVec(t, a), ShardVec(t, b), ShardVec(t, c)
+  );
+}
+
+/**
+ * @brief Masked negative fused multiply-add for masked lanes.
+ *
+ * For masked lanes, result[i] = -(a[i] * b[i]) + c[i].
+ * For masked-out lanes, result[i] = a[i].
+ *
+ * @return Negative fused multiply-add result for masked lanes
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmadd(V a, V b, V c, Mask<T> m) {
+  using namespace details;
+  constexpr T t;
+  return vmap(
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc, auto&& mm) { return word::fnmadd(aa, bb, cc, mm); },
+      ShardVec(t, a), ShardVec(t, b), ShardVec(t, c), ShardMask(t, m)
+  );
+}
+
+/**
+ * @brief Element-wise negative fused multiply-subtract: result[i] = -(a[i] * b[i]) - c[i].
+ *
+ * Uses a native FMA instruction when available for the element type and
+ * target backend; otherwise falls back to multiply plus add/subtract.
+ *
+ * @return Negative fused multiply-subtract result
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmsub(V a, V b, V c) {
+  using namespace details;
+  constexpr T t;
+  return vmap(
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc) { return word::fnmsub(aa, bb, cc); },
+      ShardVec(t, a), ShardVec(t, b), ShardVec(t, c)
+  );
+}
+
+/**
+ * @brief Masked negative fused multiply-subtract for masked lanes.
+ *
+ * For masked lanes, result[i] = -(a[i] * b[i]) - c[i].
+ * For masked-out lanes, result[i] = a[i].
+ *
+ * @return Negative fused multiply-subtract result for masked lanes
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmsub(V a, V b, V c, Mask<T> m) {
+  using namespace details;
+  constexpr T t;
+  return vmap(
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc, auto&& mm) { return word::fnmsub(aa, bb, cc, mm); },
+      ShardVec(t, a), ShardVec(t, b), ShardVec(t, c), ShardMask(t, m)
   );
 }
 
@@ -997,6 +1159,8 @@ VECOPS_VFUNC V div(V a, V b) {
 
 /**
  * @brief Masked element-wise division: result[i] = a[i] / b[i] for masked lanes.
+ *
+ * For masked-out lanes, result[i] = a[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V div(V a, V b, Mask<T> m) {
@@ -1024,6 +1188,8 @@ VECOPS_VFUNC V max(V a, V b) {
 
 /**
  * @brief Masked element-wise maximum: result[i] = max(a[i], b[i]) for masked lanes.
+ *
+ * For masked-out lanes, result[i] = a[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V max(V a, V b, Mask<T> m) {
@@ -1051,6 +1217,8 @@ VECOPS_VFUNC V min(V a, V b) {
 
 /**
  * @brief Masked element-wise minimum: result[i] = min(a[i], b[i]) for masked lanes.
+ *
+ * For masked-out lanes, result[i] = a[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
@@ -1078,6 +1246,9 @@ VECOPS_VFUNC V bit_and(V a, V b) {
 
 /**
  * @brief Masked element-wise bitwise AND for masked lanes.
+ *
+ * For masked lanes, result[i] = a[i] & b[i].
+ * For masked-out lanes, result[i] = a[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V bit_and(V a, V b, Mask<T> m) {
@@ -1105,6 +1276,9 @@ VECOPS_VFUNC V bit_or(V a, V b) {
 
 /**
  * @brief Masked element-wise bitwise OR for masked lanes.
+ *
+ * For masked lanes, result[i] = a[i] | b[i].
+ * For masked-out lanes, result[i] = a[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V bit_or(V a, V b, Mask<T> m) {
@@ -1132,6 +1306,9 @@ VECOPS_VFUNC V bit_xor(V a, V b) {
 
 /**
  * @brief Masked element-wise bitwise XOR for masked lanes.
+ *
+ * For masked lanes, result[i] = a[i] ^ b[i].
+ * For masked-out lanes, result[i] = a[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V bit_xor(V a, V b, Mask<T> m) {
@@ -1159,6 +1336,9 @@ VECOPS_VFUNC V bit_andnot(V a, V b) {
 
 /**
  * @brief Masked element-wise bitwise AND-NOT for masked lanes.
+ *
+ * For masked lanes, result[i] = (~a[i]) & b[i].
+ * For masked-out lanes, result[i] = a[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V bit_andnot(V a, V b, Mask<T> m) {
@@ -1187,6 +1367,9 @@ VECOPS_VFUNC V bit_shl(V v, int count) {
 
 /**
  * @brief Masked element-wise left shift for masked lanes.
+ *
+ * For masked lanes, result[i] = v[i] << count.
+ * For masked-out lanes, result[i] = v[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V bit_shl(V v, int count, Mask<T> m) {
@@ -1215,6 +1398,9 @@ VECOPS_VFUNC V bit_shr(V v, int count) {
 
 /**
  * @brief Masked element-wise right shift for masked lanes.
+ *
+ * For masked lanes, result[i] = v[i] >> count.
+ * For masked-out lanes, result[i] = v[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V bit_shr(V v, int count, Mask<T> m) {
@@ -1256,6 +1442,9 @@ VECOPS_VFUNC V bit_not(V v, Mask<T> m, V default_v) {
 
 /**
  * @brief Masked bitwise NOT with original value as default for masked-out lanes.
+ *
+ * For masked lanes, result[i] = ~v[i].
+ * For masked-out lanes, result[i] = v[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V bit_not(V v, Mask<T> m) {
@@ -1371,6 +1560,9 @@ VECOPS_VFUNC V neg(V v, Mask<T> m, V default_v) {
 
 /**
  * @brief Masked negation with original value as default for masked-out lanes.
+ *
+ * For masked lanes, result[i] = -v[i].
+ * For masked-out lanes, result[i] = v[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V neg(V v, Mask<T> m) {
@@ -1407,6 +1599,9 @@ VECOPS_VFUNC V abs(V v, Mask<T> m, V default_v) {
 
 /**
  * @brief Masked absolute value with original value as default for masked-out lanes.
+ *
+ * For masked lanes, result[i] = |v[i]|.
+ * For masked-out lanes, result[i] = v[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V abs(V v, Mask<T> m) {
@@ -1443,6 +1638,9 @@ VECOPS_VFUNC V sqrt(V v, Mask<T> m, V default_v) {
 
 /**
  * @brief Masked square root with original value as default for masked-out lanes.
+ *
+ * For masked lanes, result[i] = sqrt(v[i]).
+ * For masked-out lanes, result[i] = v[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V sqrt(V v, Mask<T> m) {
@@ -1466,6 +1664,8 @@ VECOPS_VFUNC V rsqrt(V v) {
 
 /**
  * @brief Masked reciprocal square root: result[i] = 1/sqrt(v[i]) for masked lanes.
+ *
+ * For masked-out lanes, result[i] = default_v[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V rsqrt(V v, Mask<T> m, V default_v) {
@@ -1479,6 +1679,9 @@ VECOPS_VFUNC V rsqrt(V v, Mask<T> m, V default_v) {
 
 /**
  * @brief Masked reciprocal square root with original value as default.
+ *
+ * For masked lanes, result[i] = 1/sqrt(v[i]).
+ * For masked-out lanes, result[i] = v[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V rsqrt(V v, Mask<T> m) {
@@ -1502,6 +1705,8 @@ VECOPS_VFUNC V rcp(V v) {
 
 /**
  * @brief Masked reciprocal: result[i] = 1/v[i] for masked lanes.
+ *
+ * For masked-out lanes, result[i] = default_v[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V rcp(V v, Mask<T> m, V default_v) {
@@ -1515,6 +1720,9 @@ VECOPS_VFUNC V rcp(V v, Mask<T> m, V default_v) {
 
 /**
  * @brief Masked reciprocal with original value as default.
+ *
+ * For masked lanes, result[i] = 1/v[i].
+ * For masked-out lanes, result[i] = v[i].
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V rcp(V v, Mask<T> m) {
@@ -1538,6 +1746,9 @@ VECOPS_VFUNC Mask<T> cmpeq(V a, V b) {
 
 /**
  * @brief Masked equality comparison: only compare lanes where mask is true.
+ *
+ * For masked-out lanes, result[i] = false.
+ *
  * @return Mask where lanes are true if elements are equal and mask is true
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
@@ -1567,6 +1778,8 @@ VECOPS_VFUNC Mask<T> cmpne(V a, V b) {
 
 /**
  * @brief Masked inequality comparison: only compare lanes where mask is true.
+ *
+ * For masked-out lanes, result[i] = false.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC Mask<T> cmpne(V a, V b, Mask<T> m) {
@@ -1595,6 +1808,8 @@ VECOPS_VFUNC Mask<T> cmplt(V a, V b) {
 
 /**
  * @brief Masked less-than comparison: only compare lanes where mask is true.
+ *
+ * For masked-out lanes, result[i] = false.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC Mask<T> cmplt(V a, V b, Mask<T> m) {
@@ -1623,6 +1838,8 @@ VECOPS_VFUNC Mask<T> cmpgt(V a, V b) {
 
 /**
  * @brief Masked greater-than comparison: only compare lanes where mask is true.
+ *
+ * For masked-out lanes, result[i] = false.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC Mask<T> cmpgt(V a, V b, Mask<T> m) {
@@ -1651,6 +1868,8 @@ VECOPS_VFUNC Mask<T> cmple(V a, V b) {
 
 /**
  * @brief Masked less-than-or-equal comparison: only compare lanes where mask is true.
+ *
+ * For masked-out lanes, result[i] = false.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC Mask<T> cmple(V a, V b, Mask<T> m) {
@@ -1679,6 +1898,8 @@ VECOPS_VFUNC Mask<T> cmpge(V a, V b) {
 
 /**
  * @brief Masked greater-than-or-equal comparison: only compare lanes where mask is true.
+ *
+ * For masked-out lanes, result[i] = false.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC Mask<T> cmpge(V a, V b, Mask<T> m) {
@@ -1707,6 +1928,8 @@ VECOPS_VFUNC Mask<T> isnan(V v) {
 
 /**
  * @brief Masked NaN check: only check lanes where mask is true.
+ *
+ * For masked-out lanes, result[i] = false.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC Mask<T> isnan(V v, Mask<T> m) {
@@ -1735,6 +1958,8 @@ VECOPS_VFUNC Mask<T> isposinf(V v) {
 
 /**
  * @brief Masked positive infinity check: only check lanes where mask is true.
+ *
+ * For masked-out lanes, result[i] = false.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC Mask<T> isposinf(V v, Mask<T> m) {
@@ -1763,6 +1988,8 @@ VECOPS_VFUNC Mask<T> isneginf(V v) {
 
 /**
  * @brief Masked negative infinity check: only check lanes where mask is true.
+ *
+ * For masked-out lanes, result[i] = false.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC Mask<T> isneginf(V v, Mask<T> m) {
@@ -1791,6 +2018,8 @@ VECOPS_VFUNC Mask<T> isinf(V v) {
 
 /**
  * @brief Masked infinity check: only check lanes where mask is true.
+ *
+ * For masked-out lanes, result[i] = false.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC Mask<T> isinf(V v, Mask<T> m) {

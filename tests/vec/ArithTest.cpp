@@ -195,6 +195,79 @@ TYPED_TEST(VecArithTest, MulWithMask) {
 }
 
 // ============================================================================
+// fused multiply-add/subtract
+// ============================================================================
+
+TYPED_TEST(VecArithTest, FmaBasic) {
+  using T = typename TestFixture::Type;
+  auto& t = this->t;
+  nint_t N = this->full_size;
+
+  auto a = std::make_unique<T[]>(N);
+  auto b = std::make_unique<T[]>(N);
+  auto c = std::make_unique<T[]>(N);
+  for (nint_t i = 0; i < N; ++i) {
+    a[i] = static_cast<T>((i % 5) + 1);
+    b[i] = static_cast<T>((i % 3) + 2);
+    c[i] = static_cast<T>((i % 7) + 3);
+  }
+
+  auto va = loadu(t, a.get());
+  auto vb = loadu(t, b.get());
+  auto vc = loadu(t, c.get());
+
+  auto v_fmadd = fmadd(va, vb, vc);
+  auto v_fmsub = fmsub(va, vb, vc);
+  auto v_fnmadd = fnmadd(va, vb, vc);
+  auto v_fnmsub = fnmsub(va, vb, vc);
+
+  for (nint_t i = 0; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(test_utils::scalar_fmadd(a[i], b[i], c[i]), get(t, v_fmadd, i))) << "fmadd i=" << i;
+    EXPECT_TRUE(test_utils::values_equal(test_utils::scalar_fmsub(a[i], b[i], c[i]), get(t, v_fmsub, i))) << "fmsub i=" << i;
+    EXPECT_TRUE(test_utils::values_equal(test_utils::scalar_fnmadd(a[i], b[i], c[i]), get(t, v_fnmadd, i))) << "fnmadd i=" << i;
+    EXPECT_TRUE(test_utils::values_equal(test_utils::scalar_fnmsub(a[i], b[i], c[i]), get(t, v_fnmsub, i))) << "fnmsub i=" << i;
+  }
+}
+
+TYPED_TEST(VecArithTest, FmaWithMask) {
+  using T = typename TestFixture::Type;
+  auto& t = this->t;
+  nint_t N = this->full_size;
+
+  auto a = std::make_unique<T[]>(N);
+  auto b = std::make_unique<T[]>(N);
+  auto c = std::make_unique<T[]>(N);
+  for (nint_t i = 0; i < N; ++i) {
+    a[i] = static_cast<T>((i % 5) + 1);
+    b[i] = static_cast<T>((i % 3) + 2);
+    c[i] = static_cast<T>((i % 7) + 3);
+  }
+
+  auto va = loadu(t, a.get());
+  auto vb = loadu(t, b.get());
+  auto vc = loadu(t, c.get());
+  auto m = mwhilelt(t, 0, N / 2);
+
+  auto v_fmadd = fmadd(va, vb, vc, m);
+  auto v_fmsub = fmsub(va, vb, vc, m);
+  auto v_fnmadd = fnmadd(va, vb, vc, m);
+  auto v_fnmsub = fnmsub(va, vb, vc, m);
+
+  for (nint_t i = 0; i < N / 2; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(test_utils::scalar_fmadd(a[i], b[i], c[i]), get(t, v_fmadd, i))) << "fmadd i=" << i;
+    EXPECT_TRUE(test_utils::values_equal(test_utils::scalar_fmsub(a[i], b[i], c[i]), get(t, v_fmsub, i))) << "fmsub i=" << i;
+    EXPECT_TRUE(test_utils::values_equal(test_utils::scalar_fnmadd(a[i], b[i], c[i]), get(t, v_fnmadd, i))) << "fnmadd i=" << i;
+    EXPECT_TRUE(test_utils::values_equal(test_utils::scalar_fnmsub(a[i], b[i], c[i]), get(t, v_fnmsub, i))) << "fnmsub i=" << i;
+  }
+  for (nint_t i = N / 2; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_equal(a[i], get(t, v_fmadd, i))) << "fmadd inactive i=" << i;
+    EXPECT_TRUE(test_utils::values_equal(a[i], get(t, v_fmsub, i))) << "fmsub inactive i=" << i;
+    EXPECT_TRUE(test_utils::values_equal(a[i], get(t, v_fnmadd, i))) << "fnmadd inactive i=" << i;
+    EXPECT_TRUE(test_utils::values_equal(a[i], get(t, v_fnmsub, i))) << "fnmsub inactive i=" << i;
+  }
+}
+
+// ============================================================================
 // div (float only)
 // ============================================================================
 

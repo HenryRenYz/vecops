@@ -154,6 +154,12 @@ add_multiarch_executable(VecTransformTest
     ARCH Native Scalar
 )
 
+add_multiarch_executable(LayerNormTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/LayerNormTest.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
+    ARCH Native Scalar
+)
+
 set(VECOPS_VEC_TESTS BasicTest LoadStoreTest ArithTest ConversionTest ShuffleTest MaskTest MaskConversionsTest)
 foreach(TEST ${VECOPS_VEC_TESTS})
     add_multiarch_executable(Vec${TEST}

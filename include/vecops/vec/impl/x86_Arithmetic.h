@@ -801,6 +801,174 @@ VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
 
 
 /* ************************************************************************** */
+//                                   FMA                                      //
+/* ************************************************************************** */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmadd(V a, V b, V c) {
+  using E = TypeOf<T>;
+  #ifdef HAS_FMA
+  if constexpr (std::is_same_v<E, float32_t>) {
+    if constexpr (T::Bytes <= 16) return _mm_fmadd_ps(a.v, b.v, c.v);
+    #if VEC_WIDTH >= 256
+    else if constexpr (T::Bytes == 32) return _mm256_fmadd_ps(a.v, b.v, c.v);
+    #endif
+    #if VEC_WIDTH >= 512
+    else if constexpr (T::Bytes == 64) return _mm512_fmadd_ps(a.v, b.v, c.v);
+    #endif
+  } else if constexpr (std::is_same_v<E, float64_t>) {
+    if constexpr (T::Bytes <= 16) return _mm_fmadd_pd(a.v, b.v, c.v);
+    #if VEC_WIDTH >= 256
+    else if constexpr (T::Bytes == 32) return _mm256_fmadd_pd(a.v, b.v, c.v);
+    #endif
+    #if VEC_WIDTH >= 512
+    else if constexpr (T::Bytes == 64) return _mm512_fmadd_pd(a.v, b.v, c.v);
+    #endif
+  }
+  #endif
+  #ifdef HAS_AVX512_FP16
+  if constexpr (std::is_same_v<E, float16_t>) {
+    if constexpr (T::Bytes <= 16) return _mm_castph_si128(_mm_fmadd_ph(_mm_castsi128_ph(a.v), _mm_castsi128_ph(b.v), _mm_castsi128_ph(c.v)));
+    #if VEC_WIDTH >= 256
+    else if constexpr (T::Bytes == 32) return _mm256_castph_si256(_mm256_fmadd_ph(_mm256_castsi256_ph(a.v), _mm256_castsi256_ph(b.v), _mm256_castsi256_ph(c.v)));
+    #endif
+    #if VEC_WIDTH >= 512
+    else if constexpr (T::Bytes == 64) return _mm512_castph_si512(_mm512_fmadd_ph(_mm512_castsi512_ph(a.v), _mm512_castsi512_ph(b.v), _mm512_castsi512_ph(c.v)));
+    #endif
+  }
+  #endif
+  return word::add(word::mul(a, b), c);
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmadd(V a, V b, V c, Mask<T> m) {
+  return word::blend(a, m, word::fmadd(a, b, c));
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmsub(V a, V b, V c) {
+  using E = TypeOf<T>;
+  #ifdef HAS_FMA
+  if constexpr (std::is_same_v<E, float32_t>) {
+    if constexpr (T::Bytes <= 16) return _mm_fmsub_ps(a.v, b.v, c.v);
+    #if VEC_WIDTH >= 256
+    else if constexpr (T::Bytes == 32) return _mm256_fmsub_ps(a.v, b.v, c.v);
+    #endif
+    #if VEC_WIDTH >= 512
+    else if constexpr (T::Bytes == 64) return _mm512_fmsub_ps(a.v, b.v, c.v);
+    #endif
+  } else if constexpr (std::is_same_v<E, float64_t>) {
+    if constexpr (T::Bytes <= 16) return _mm_fmsub_pd(a.v, b.v, c.v);
+    #if VEC_WIDTH >= 256
+    else if constexpr (T::Bytes == 32) return _mm256_fmsub_pd(a.v, b.v, c.v);
+    #endif
+    #if VEC_WIDTH >= 512
+    else if constexpr (T::Bytes == 64) return _mm512_fmsub_pd(a.v, b.v, c.v);
+    #endif
+  }
+  #endif
+  #ifdef HAS_AVX512_FP16
+  if constexpr (std::is_same_v<E, float16_t>) {
+    if constexpr (T::Bytes <= 16) return _mm_castph_si128(_mm_fmsub_ph(_mm_castsi128_ph(a.v), _mm_castsi128_ph(b.v), _mm_castsi128_ph(c.v)));
+    #if VEC_WIDTH >= 256
+    else if constexpr (T::Bytes == 32) return _mm256_castph_si256(_mm256_fmsub_ph(_mm256_castsi256_ph(a.v), _mm256_castsi256_ph(b.v), _mm256_castsi256_ph(c.v)));
+    #endif
+    #if VEC_WIDTH >= 512
+    else if constexpr (T::Bytes == 64) return _mm512_castph_si512(_mm512_fmsub_ph(_mm512_castsi512_ph(a.v), _mm512_castsi512_ph(b.v), _mm512_castsi512_ph(c.v)));
+    #endif
+  }
+  #endif
+  return word::sub(word::mul(a, b), c);
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmsub(V a, V b, V c, Mask<T> m) {
+  return word::blend(a, m, word::fmsub(a, b, c));
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmadd(V a, V b, V c) {
+  using E = TypeOf<T>;
+  #ifdef HAS_FMA
+  if constexpr (std::is_same_v<E, float32_t>) {
+    if constexpr (T::Bytes <= 16) return _mm_fnmadd_ps(a.v, b.v, c.v);
+    #if VEC_WIDTH >= 256
+    else if constexpr (T::Bytes == 32) return _mm256_fnmadd_ps(a.v, b.v, c.v);
+    #endif
+    #if VEC_WIDTH >= 512
+    else if constexpr (T::Bytes == 64) return _mm512_fnmadd_ps(a.v, b.v, c.v);
+    #endif
+  } else if constexpr (std::is_same_v<E, float64_t>) {
+    if constexpr (T::Bytes <= 16) return _mm_fnmadd_pd(a.v, b.v, c.v);
+    #if VEC_WIDTH >= 256
+    else if constexpr (T::Bytes == 32) return _mm256_fnmadd_pd(a.v, b.v, c.v);
+    #endif
+    #if VEC_WIDTH >= 512
+    else if constexpr (T::Bytes == 64) return _mm512_fnmadd_pd(a.v, b.v, c.v);
+    #endif
+  }
+  #endif
+  #ifdef HAS_AVX512_FP16
+  if constexpr (std::is_same_v<E, float16_t>) {
+    if constexpr (T::Bytes <= 16) return _mm_castph_si128(_mm_fnmadd_ph(_mm_castsi128_ph(a.v), _mm_castsi128_ph(b.v), _mm_castsi128_ph(c.v)));
+    #if VEC_WIDTH >= 256
+    else if constexpr (T::Bytes == 32) return _mm256_castph_si256(_mm256_fnmadd_ph(_mm256_castsi256_ph(a.v), _mm256_castsi256_ph(b.v), _mm256_castsi256_ph(c.v)));
+    #endif
+    #if VEC_WIDTH >= 512
+    else if constexpr (T::Bytes == 64) return _mm512_castph_si512(_mm512_fnmadd_ph(_mm512_castsi512_ph(a.v), _mm512_castsi512_ph(b.v), _mm512_castsi512_ph(c.v)));
+    #endif
+  }
+  #endif
+  return word::sub(c, word::mul(a, b));
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmadd(V a, V b, V c, Mask<T> m) {
+  return word::blend(a, m, word::fnmadd(a, b, c));
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmsub(V a, V b, V c) {
+  using E = TypeOf<T>;
+  #ifdef HAS_FMA
+  if constexpr (std::is_same_v<E, float32_t>) {
+    if constexpr (T::Bytes <= 16) return _mm_fnmsub_ps(a.v, b.v, c.v);
+    #if VEC_WIDTH >= 256
+    else if constexpr (T::Bytes == 32) return _mm256_fnmsub_ps(a.v, b.v, c.v);
+    #endif
+    #if VEC_WIDTH >= 512
+    else if constexpr (T::Bytes == 64) return _mm512_fnmsub_ps(a.v, b.v, c.v);
+    #endif
+  } else if constexpr (std::is_same_v<E, float64_t>) {
+    if constexpr (T::Bytes <= 16) return _mm_fnmsub_pd(a.v, b.v, c.v);
+    #if VEC_WIDTH >= 256
+    else if constexpr (T::Bytes == 32) return _mm256_fnmsub_pd(a.v, b.v, c.v);
+    #endif
+    #if VEC_WIDTH >= 512
+    else if constexpr (T::Bytes == 64) return _mm512_fnmsub_pd(a.v, b.v, c.v);
+    #endif
+  }
+  #endif
+  #ifdef HAS_AVX512_FP16
+  if constexpr (std::is_same_v<E, float16_t>) {
+    if constexpr (T::Bytes <= 16) return _mm_castph_si128(_mm_fnmsub_ph(_mm_castsi128_ph(a.v), _mm_castsi128_ph(b.v), _mm_castsi128_ph(c.v)));
+    #if VEC_WIDTH >= 256
+    else if constexpr (T::Bytes == 32) return _mm256_castph_si256(_mm256_fnmsub_ph(_mm256_castsi256_ph(a.v), _mm256_castsi256_ph(b.v), _mm256_castsi256_ph(c.v)));
+    #endif
+    #if VEC_WIDTH >= 512
+    else if constexpr (T::Bytes == 64) return _mm512_castph_si512(_mm512_fnmsub_ph(_mm512_castsi512_ph(a.v), _mm512_castsi512_ph(b.v), _mm512_castsi512_ph(c.v)));
+    #endif
+  }
+  #endif
+  return word::sub(word::sub(a, a), word::add(word::mul(a, b), c));
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmsub(V a, V b, V c, Mask<T> m) {
+  return word::blend(a, m, word::fnmsub(a, b, c));
+}
+
+
+/* ************************************************************************** */
 //                                   Div                                      //
 /* ************************************************************************** */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>

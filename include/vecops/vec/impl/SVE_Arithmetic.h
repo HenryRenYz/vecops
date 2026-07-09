@@ -127,6 +127,69 @@ VECOPS_VFUNC V mul(V a, V b) {
 }
 
 /* ================================================================ */
+//                                  FMA                             //
+/* ================================================================ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmadd(V a, V b, V c, Mask<T> m) {
+  using E = TypeOf<T>;
+  if constexpr (std::is_same_v<E, float32_t>)      return svmad_f32_m(m, a, b, c);
+  else if constexpr (std::is_same_v<E, float64_t>) return svmad_f64_m(m, a, b, c);
+  else if constexpr (std::is_same_v<E, float16_t>) return svmad_f16_m(m, a, b, c);
+  else return word::blend(a, m, word::add(word::mul(a, b), c));
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmadd(V a, V b, V c) {
+  using E = TypeOf<T>;
+  return word::fmadd(a, b, c, details::ptrue<E>());
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmsub(V a, V b, V c, Mask<T> m) {
+  using E = TypeOf<T>;
+  if constexpr (std::is_same_v<E, float32_t>)      return svnmsb_f32_m(m, a, b, c);
+  else if constexpr (std::is_same_v<E, float64_t>) return svnmsb_f64_m(m, a, b, c);
+  else if constexpr (std::is_same_v<E, float16_t>) return svnmsb_f16_m(m, a, b, c);
+  else return word::blend(a, m, word::sub(word::mul(a, b), c));
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fmsub(V a, V b, V c) {
+  using E = TypeOf<T>;
+  return word::fmsub(a, b, c, details::ptrue<E>());
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmadd(V a, V b, V c, Mask<T> m) {
+  using E = TypeOf<T>;
+  if constexpr (std::is_same_v<E, float32_t>)      return svmsb_f32_m(m, a, b, c);
+  else if constexpr (std::is_same_v<E, float64_t>) return svmsb_f64_m(m, a, b, c);
+  else if constexpr (std::is_same_v<E, float16_t>) return svmsb_f16_m(m, a, b, c);
+  else return word::blend(a, m, word::sub(c, word::mul(a, b)));
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmadd(V a, V b, V c) {
+  using E = TypeOf<T>;
+  return word::fnmadd(a, b, c, details::ptrue<E>());
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmsub(V a, V b, V c, Mask<T> m) {
+  using E = TypeOf<T>;
+  if constexpr (std::is_same_v<E, float32_t>)      return svnmad_f32_m(m, a, b, c);
+  else if constexpr (std::is_same_v<E, float64_t>) return svnmad_f64_m(m, a, b, c);
+  else if constexpr (std::is_same_v<E, float16_t>) return svnmad_f16_m(m, a, b, c);
+  else return word::blend(a, m, word::sub(word::sub(a, a), word::add(word::mul(a, b), c)));
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+VECOPS_VFUNC V fnmsub(V a, V b, V c) {
+  using E = TypeOf<T>;
+  return word::fnmsub(a, b, c, details::ptrue<E>());
+}
+
+/* ================================================================ */
 //                                  Div (float only)                //
 /* ================================================================ */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>> || is_small_float<TypeOf<T>>)>
