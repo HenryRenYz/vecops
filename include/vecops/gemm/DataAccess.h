@@ -198,12 +198,43 @@ make_index_vector(
 }
 
 template <typename T, TLV_DECL_TAG(Ti)>
-static constexpr bool gather_scatter_index_supported_v =
+static constexpr bool can_materialize_gather_scatter_index_v =
 #if defined(CPU_CAPABILITY_SVE)
     (vec::Rebind<vec::GatherScatterIndex<T>, Ti>::POW2 <= VEC_MAX_POW);
 #else
     true;
 #endif
+
+template <typename N, typename T, TLV_DECL_TAG(Ti)>
+vec::Vec<Ti> gather_leaf(
+    Ti ti,
+    const T* p,
+    nint_t base_offset,
+    nint_t stride,
+    N n) {
+  auto idx = make_index_vector<T>(ti, base_offset, stride);
+  if constexpr (use_unmasked_path_v<N, Ti>) {
+    return vec::gather(ti, p, idx);
+  } else {
+    return vec::gather(ti, p, idx, vec::mwhilelt(ti, 0, count_value(n)), vec::zeros(ti));
+  }
+}
+
+template <typename N, typename T, TLV_DECL_TAG(Ti)>
+void scatter_leaf(
+    Ti ti,
+    T* p,
+    nint_t base_offset,
+    nint_t stride,
+    N n,
+    vec::Vec<Ti> v) {
+  auto idx = make_index_vector<T>(ti, base_offset, stride);
+  if constexpr (use_unmasked_path_v<N, Ti>) {
+    vec::scatter(ti, p, idx, v);
+  } else {
+    vec::scatter(ti, p, idx, vec::mwhilelt(ti, 0, count_value(n)), v);
+  }
+}
 
 template <typename N, typename T, TLV_DECL_TAG(Ti)>
 vec::Vec<Ti> gather_dispatch(
@@ -212,23 +243,20 @@ vec::Vec<Ti> gather_dispatch(
     nint_t base_offset,
     nint_t stride,
     N n) {
-  if constexpr (!gather_scatter_index_supported_v<T, Ti>) {
+  if constexpr (!can_materialize_gather_scatter_index_v<T, Ti>) {
+    // SVE supports up to x4 tuples. A narrow data vector may need a wider
+    // i32/i64 index tuple, so split before instantiating the index tag.
     using Th = vec::Half<Ti>;
     Th th;
     const nint_t half_size = vec::size(th);
     const nint_t count = count_value(n);
-    auto lo = gather_dispatch(th, p, base_offset, stride, std::min(count, half_size));
+    auto lo = gather_dispatch(th, p, base_offset, stride, count);
     auto hi = gather_dispatch(
         th, p, base_offset + half_size * stride, stride,
-        std::max<nint_t>(0, count - half_size));
+        count - half_size);
     return vec::concat(ti, lo, hi);
   } else {
-    auto idx = make_index_vector<T>(ti, base_offset, stride);
-    if constexpr (use_unmasked_path_v<N, Ti>) {
-      return vec::gather(ti, p, idx);
-    } else {
-      return vec::gather(ti, p, idx, vec::mwhilelt(ti, 0, count_value(n)), vec::zeros(ti));
-    }
+    return gather_leaf(ti, p, base_offset, stride, n);
   }
 }
 
@@ -240,23 +268,19 @@ void scatter_dispatch(
     nint_t stride,
     N n,
     vec::Vec<Ti> v) {
-  if constexpr (!gather_scatter_index_supported_v<T, Ti>) {
+  if constexpr (!can_materialize_gather_scatter_index_v<T, Ti>) {
+    // Keep the leaf path from forming an unsupported SVE index tuple.
     using Th = vec::Half<Ti>;
     Th th;
     const nint_t half_size = vec::size(th);
     const nint_t count = count_value(n);
-    scatter_dispatch(th, p, base_offset, stride, std::min(count, half_size), vec::lower(ti, v));
+    scatter_dispatch(th, p, base_offset, stride, count, vec::lower(ti, v));
     scatter_dispatch(
         th, p, base_offset + half_size * stride, stride,
-        std::max<nint_t>(0, count - half_size), vec::upper(ti, v));
+        count - half_size, vec::upper(ti, v));
     return;
   } else {
-    auto idx = make_index_vector<T>(ti, base_offset, stride);
-    if constexpr (use_unmasked_path_v<N, Ti>) {
-      vec::scatter(ti, p, idx, v);
-    } else {
-      vec::scatter(ti, p, idx, vec::mwhilelt(ti, 0, count_value(n)), v);
-    }
+    scatter_leaf(ti, p, base_offset, stride, n, v);
   }
 }
 

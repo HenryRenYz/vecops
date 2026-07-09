@@ -212,6 +212,199 @@ TEST(HOPForEachTest, ForEachWithoutDimsCallsOnceWithOriginalInputs) {
   EXPECT_EQ(calls, 1);
 }
 
+TEST(HOPForEachTest, ForEachDimsCoversRanksOneThroughFour) {
+  {
+    std::vector<int64_t> data{0, 1, 2};
+    auto t = make_tensor(data.data(), make_shape(cint<3>), make_strides(cint<1>));
+
+    std::vector<int64_t> seen;
+    hop::for_each_dims<1>([&](auto&& x) {
+      seen.push_back(static_cast<int64_t>(x));
+    }, t);
+
+    EXPECT_EQ(seen, data);
+  }
+
+  {
+    std::vector<int64_t> data{0, 1, 2, 3, 4, 5};
+    auto t = make_tensor(data.data(), make_shape(cint<2>, cint<3>),
+                         make_strides(cint<3>, cint<1>));
+
+    std::vector<int64_t> seen;
+    hop::for_each_dims<2>([&](auto&& x) {
+      seen.push_back(static_cast<int64_t>(x));
+    }, t);
+
+    EXPECT_EQ(seen, data);
+  }
+
+  {
+    std::vector<int64_t> data(2 * 3 * 4);
+    for (nint_t i = 0; i < static_cast<nint_t>(data.size()); ++i) {
+      data[static_cast<size_t>(i)] = i;
+    }
+    auto t = make_tensor(data.data(), make_shape(cint<2>, cint<3>, cint<4>),
+                         make_strides(cint<12>, cint<4>, cint<1>));
+
+    std::vector<int64_t> seen;
+    hop::for_each_dims<3>([&](auto&& x) {
+      seen.push_back(static_cast<int64_t>(x));
+    }, t);
+
+    EXPECT_EQ(seen, data);
+  }
+
+  {
+    std::vector<int64_t> data(2 * 3 * 2 * 4);
+    for (nint_t i = 0; i < static_cast<nint_t>(data.size()); ++i) {
+      data[static_cast<size_t>(i)] = i;
+    }
+    auto t = make_tensor(data.data(), make_shape(cint<2>, cint<3>, cint<2>, cint<4>),
+                         make_strides(cint<24>, cint<8>, cint<4>, cint<1>));
+
+    std::vector<int64_t> seen;
+    hop::for_each_dims<4>([&](auto&& x) {
+      seen.push_back(static_cast<int64_t>(x));
+    }, t);
+
+    EXPECT_EQ(seen, data);
+  }
+}
+
+TEST(HOPForEachTest, ForEachDimsWithIndexCoversRanksOneThroughFour) {
+  {
+    std::vector<int64_t> data{0, 1, 2};
+    auto t = make_tensor(data.data(), make_shape(cint<3>), make_strides(cint<1>));
+
+    int calls = 0;
+    hop::for_each_dims_with_index<1>([&](nint_t i0, auto&& x) {
+      ++calls;
+      EXPECT_EQ(static_cast<int64_t>(x), i0);
+    }, t);
+
+    EXPECT_EQ(calls, 3);
+  }
+
+  {
+    std::vector<int64_t> data{0, 1, 2, 3, 4, 5};
+    auto t = make_tensor(data.data(), make_shape(cint<2>, cint<3>),
+                         make_strides(cint<3>, cint<1>));
+
+    int calls = 0;
+    hop::for_each_dims_with_index<2>([&](nint_t i0, nint_t i1, auto&& x) {
+      ++calls;
+      EXPECT_EQ(static_cast<int64_t>(x), i0 * 3 + i1);
+    }, t);
+
+    EXPECT_EQ(calls, 6);
+  }
+
+  {
+    std::vector<int64_t> data(2 * 3 * 4);
+    for (nint_t i = 0; i < static_cast<nint_t>(data.size()); ++i) {
+      data[static_cast<size_t>(i)] = i;
+    }
+    auto t = make_tensor(data.data(), make_shape(cint<2>, cint<3>, cint<4>),
+                         make_strides(cint<12>, cint<4>, cint<1>));
+
+    int calls = 0;
+    hop::for_each_dims_with_index<3>(
+        [&](nint_t i0, nint_t i1, nint_t i2, auto&& x) {
+          ++calls;
+          EXPECT_EQ(static_cast<int64_t>(x), i0 * 12 + i1 * 4 + i2);
+        },
+        t);
+
+    EXPECT_EQ(calls, 24);
+  }
+
+  {
+    std::vector<int64_t> data(2 * 3 * 2 * 4);
+    for (nint_t i = 0; i < static_cast<nint_t>(data.size()); ++i) {
+      data[static_cast<size_t>(i)] = i;
+    }
+    auto t = make_tensor(data.data(), make_shape(cint<2>, cint<3>, cint<2>, cint<4>),
+                         make_strides(cint<24>, cint<8>, cint<4>, cint<1>));
+
+    int calls = 0;
+    hop::for_each_dims_with_index<4>(
+        [&](nint_t i0, nint_t i1, nint_t i2, nint_t i3, auto&& x) {
+          ++calls;
+          EXPECT_EQ(static_cast<int64_t>(x), i0 * 24 + i1 * 8 + i2 * 4 + i3);
+        },
+        t);
+
+    EXPECT_EQ(calls, 48);
+  }
+}
+
+TEST(HOPForEachTest, ForEachWithIndexHonorsRequestedIndexOrder) {
+  std::vector<int64_t> data(2 * 3 * 4);
+  for (nint_t i = 0; i < static_cast<nint_t>(data.size()); ++i) {
+    data[static_cast<size_t>(i)] = i;
+  }
+  auto t = make_tensor(data.data(), make_shape(cint<2>, cint<3>, cint<4>),
+                       make_strides(cint<12>, cint<4>, cint<1>));
+
+  std::vector<int64_t> seen;
+  std::vector<int64_t> expected;
+  for (nint_t i1 = 0; i1 < 3; ++i1) {
+    for (nint_t i2 = 0; i2 < 4; ++i2) {
+      for (nint_t i0 = 0; i0 < 2; ++i0) {
+        expected.push_back(i1 * 100 + i2 * 10 + i0);
+      }
+    }
+  }
+
+  hop::for_each_with_index<1, 2, 0>(
+      [&](nint_t i1, nint_t i2, nint_t i0, auto&& x) {
+        EXPECT_EQ(static_cast<int64_t>(x), i0 * 12 + i1 * 4 + i2);
+        seen.push_back(i1 * 100 + i2 * 10 + i0);
+      },
+      t);
+
+  EXPECT_EQ(seen, expected);
+}
+
+TEST(HOPForEachTest, ForEachWithIndexWithoutDimsCallsOnceWithOriginalInputs) {
+  std::vector<int64_t> data{0, 1, 2, 3, 4, 5};
+  auto t = make_tensor(data.data(), make_shape(cint<2>, cint<3>),
+                       make_strides(cint<3>, cint<1>));
+  int value = 13;
+
+  int calls = 0;
+  hop::for_each_with_index<>([&](auto&& whole, auto&& x) {
+    ++calls;
+    EXPECT_EQ(whole.ndim(), 2);
+    EXPECT_EQ(whole(1, 2), 5);
+    EXPECT_EQ(x, value);
+  }, t, value);
+
+  EXPECT_EQ(calls, 1);
+}
+
+TEST(HOPForEachTest, ForEachDimsWithIndexPreservesBroadcastAndForwarding) {
+  std::vector<int64_t> row{10, 20, 30};
+  std::vector<int64_t> matrix{0, 1, 2, 3, 4, 5};
+  auto tr = make_tensor(row.data(), make_shape(cint<1>, cint<3>),
+                        make_strides(cint<3>, cint<1>));
+  auto tm = make_tensor(matrix.data(), make_shape(cint<2>, cint<3>),
+                        make_strides(cint<3>, cint<1>));
+  int scale = 2;
+
+  std::vector<int64_t> seen;
+  hop::for_each_dims_with_index<2>(
+      [&](nint_t i0, nint_t i1, auto&& x, auto&& y, auto&& s) {
+        EXPECT_EQ(s, scale);
+        seen.push_back(i0 * 100 + i1 * 10 + static_cast<int64_t>(x + y) * s);
+      },
+      tr,
+      tm,
+      scale);
+
+  EXPECT_EQ(seen, (std::vector<int64_t>{20, 52, 84, 126, 158, 190}));
+}
+
 #ifdef VECOPS_DEBUG
 TEST(HOPForEachDeathTest, NonBroadcastExtentMismatch) {
   std::vector<int64_t> a(2 * 3);
