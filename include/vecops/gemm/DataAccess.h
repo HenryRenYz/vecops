@@ -5,15 +5,16 @@
 #ifndef VECOPS_DATAACCESS_H
 #define VECOPS_DATAACCESS_H
 
+#include "vecops/VecTransform.h"
 #include "vecops/util/TypeTraits.h"
 #include "vecops/vec/Vec.h"
-#include "./Attachment.h"
 #include "./Tensor.h"
 #include "./HOP.h"
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -92,45 +93,18 @@ auto make_aux_layout(const TLayout& layout) {
   return make_layout(aux_shape);
 }
 
-template <typename TLayout>
-nint_t transform_x(const std::array<nint_t, TLayout::Ndim>& coords) {
-  if constexpr (TLayout::Ndim >= 2) {
-    return coords[TLayout::Ndim - 2];
-  } else {
-    return 0;
-  }
-}
-
-template <typename TLayout>
-nint_t transform_x_from_prefix_row(const TLayout& layout, nint_t row) {
-  if constexpr (TLayout::Ndim >= 2) {
-    return row % layout.shape()[TLayout::Ndim - 2];
-  } else {
-    ((void) layout);
-    ((void) row);
-    return 0;
-  }
-}
-
-template <int N, typename Seq = std::make_integer_sequence<int, N>>
-struct PrefixRowTraversal;
-
-template <int N, int... Is>
-struct PrefixRowTraversal<N, std::integer_sequence<int, Is...>> {
-  template <typename F, typename... Tensors>
-  VECOPS_ALWAYS_INLINE static void run(F&& f, Tensors&&... tensors) {
-    nint_t row = 0;
-    hop::for_each<Is...>([&](auto&&... rows) {
-      f(row++, std::forward<decltype(rows)>(rows)...);
-    }, std::forward<Tensors>(tensors)...);
-  }
-};
-
-template <typename TLayout, typename F, typename... Tensors>
-VECOPS_ALWAYS_INLINE void for_each_prefix_row(F&& f, Tensors&&... tensors) {
-  PrefixRowTraversal<TLayout::Ndim - 1>::run(
-      std::forward<F>(f),
-      std::forward<Tensors>(tensors)...);
+template <typename TransformFn, typename To, typename VIn, typename PrefixTuple>
+VECOPS_ALWAYS_INLINE auto call_transform_with_last_coord(
+    const TransformFn& fn,
+    To to,
+    VIn v_in,
+    const PrefixTuple& prefix,
+    nint_t last) {
+  return std::apply(
+      [&](auto... prefix_coords) {
+        return fn(to, v_in, prefix_coords..., last);
+      },
+      prefix);
 }
 
 template <typename N>
@@ -304,16 +278,18 @@ void precompute_input_aux(
   auto src_tensor = make_tensor(p, layout);
   auto aux_tensor = make_tensor(aux, aux_layout);
 
-  for_each_prefix_row<InLayout>([&](nint_t row, auto&& src_row, auto&& aux_row) {
-    const nint_t x = transform_x_from_prefix_row(layout, row);
-    for (nint_t y = 0; y < last; y += vec::size(to)) {
-      const nint_t n = std::min(vec::size(to), last - y);
-      const nint_t stride = src_row.stride(0);
-      auto v_in = gather_dispatch(ti, src_row.data(), y * stride, stride, Any{n});
-      auto v_out = fn.call(to, v_in, x, y);
-      storeu_dispatch(to, aux_row.data() + y, Any{n}, v_out);
-    }
-  }, src_tensor, aux_tensor);
+  hop::for_each_dims_with_index_tuple<InLayout::Ndim - 1>(
+      [&](const auto& prefix, auto&& src_row, auto&& aux_row) {
+        for (nint_t y = 0; y < last; y += vec::size(to)) {
+          const nint_t n = std::min(vec::size(to), last - y);
+          const nint_t stride = src_row.stride(0);
+          auto v_in = gather_dispatch(ti, src_row.data(), y * stride, stride, Any{n});
+          auto v_out = call_transform_with_last_coord(fn, to, v_in, prefix, y);
+          storeu_dispatch(to, aux_row.data() + y, Any{n}, v_out);
+        }
+      },
+      src_tensor,
+      aux_tensor);
 }
 
 template <typename Kind, typename TOut, typename InTensor, typename TransformFn>
@@ -336,7 +312,7 @@ struct DataInputImpl<AccessKindLastContiguous, TOut, InTensor, TransformFn> {
     std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t offset = offset_at(_layout, coords);
     auto v_in = loadu_dispatch(Ti{}, _p + offset, n);
-    auto v_out = _fn.call(t, v_in, transform_x<InLayout>(coords), coords[InLayout::Ndim - 1]);
+    auto v_out = _fn(t, v_in, static_cast<nint_t>(is)...);
     return v_out;
   }
 
@@ -408,7 +384,7 @@ struct DataOutputImpl<AccessKindLastContiguous, TIn, OutTensor, TransformFn> {
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t offset = offset_at(_layout, coords);
-    auto v_out = _fn.call(To{}, v, transform_x<OutLayout>(coords), coords[OutLayout::Ndim - 1]);
+    auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
     storeu_dispatch(To{}, _p + offset, n, v_out);
   }
 
@@ -440,12 +416,15 @@ struct DataOutputImpl<AccessKindSecondLastContiguous, TIn, OutTensor, TransformF
   ~DataOutputImpl() {
     auto out_tensor = make_tensor(_p, _layout);
     auto aux_tensor = make_tensor(_aux, _aux_layout);
-    for_each_prefix_row<OutLayout>([&](nint_t, auto&& out_row, auto&& aux_row) {
-      const nint_t last = out_row.size(0);
-      for (nint_t y = 0; y < last; ++y) {
-        out_row(y) = aux_row(y);
-      }
-    }, out_tensor, aux_tensor);
+    hop::for_each_dims_with_index_tuple<OutLayout::Ndim - 1>(
+        [](const auto&, auto&& out_row, auto&& aux_row) {
+          const nint_t last = out_row.size(0);
+          for (nint_t y = 0; y < last; ++y) {
+            out_row(y) = aux_row(y);
+          }
+        },
+        out_tensor,
+        aux_tensor);
   }
 
   template <TLV_DECL_TAG(Ti), typename N, typename... Is>
@@ -453,7 +432,7 @@ struct DataOutputImpl<AccessKindSecondLastContiguous, TIn, OutTensor, TransformF
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
-    auto v_out = _fn.call(To{}, v, transform_x<OutLayout>(coords), coords[OutLayout::Ndim - 1]);
+    auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
     const nint_t offset = offset_at(_aux_layout, coords);
     storeu_dispatch(To{}, _aux + offset, n, v_out);
   }
@@ -481,7 +460,7 @@ struct DataOutputImpl<AccessKindStrided, TIn, OutTensor, TransformFn> {
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t base = offset_at(_layout, coords);
-    auto v_out = _fn.call(To{}, v, transform_x<OutLayout>(coords), coords[OutLayout::Ndim - 1]);
+    auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
     scatter_dispatch(To{}, _p, base, _layout.strides()[OutLayout::Ndim - 1], n, v_out);
   }
 
@@ -510,6 +489,9 @@ struct DataOutputImpl<AccessKindStrided, TIn, OutTensor, TransformFn> {
  * dimension is padded to a vector lane count so callers can issue vector
  * loads without crossing into the next logical row. Inactive tail lanes are
  * returned as zero after the transform.
+ *
+ * Transforms are invoked as `fn(out_tag, in_vec, coords...)`, where
+ * `coords...` is the full logical coordinate pack supplied by the caller.
  *
  * @warning The current transpose materialization uses a simple element loop
  * for correctness. It is the replaceable hook for future low-level block
@@ -550,7 +532,7 @@ template <
     typename TOut,
     typename TIn,
     typename InLayout,
-    typename TransformFn = IdentityConversionVecFn<TOut, TIn>
+    typename TransformFn = IdentityVecTransform<TOut, TIn>
 > struct InputSpec {
   using InputLayout = InLayout;
   using Transform = std::remove_cvref_t<TransformFn>;
@@ -564,7 +546,7 @@ template <
     return InputAccessor::required_aux_size(layout);
   }
 
-  InputSpec(const InLayout& layout, const Transform& fn = identity<TOut, TIn>)
+  InputSpec(const InLayout& layout, const Transform& fn = identity_transform<TOut, TIn>)
       : _in_layout(layout), _fn(fn) {}
 
   const InLayout& input_layout() const { return _in_layout; }
@@ -592,6 +574,9 @@ private:
  * The second-last-contiguous path uses the same padded aux layout as
  * `DataInput`. Only logical elements are flushed; padded tail cells remain
  * internal scratch space.
+ *
+ * Transforms are invoked as `fn(out_tag, in_vec, coords...)`, where
+ * `coords...` is the full logical coordinate pack supplied by the caller.
  *
  * @warning Scatter with duplicate logical addresses has the same ordering
  * caveat as the underlying vector scatter primitive.
@@ -630,7 +615,7 @@ template <
     typename TIn,
     typename TOut,
     typename OutLayout,
-    typename TransformFn = IdentityConversionVecFn<TOut, TIn>
+    typename TransformFn = IdentityVecTransform<TOut, TIn>
 > struct OutputSpec {
   using OutputLayout = OutLayout;
   using Transform = std::remove_cvref_t<TransformFn>;
@@ -644,7 +629,7 @@ template <
     return OutputAccessor::required_aux_size(layout);
   }
 
-  OutputSpec(const OutLayout& layout, const Transform& fn = identity<TOut, TIn>)
+  OutputSpec(const OutLayout& layout, const Transform& fn = identity_transform<TOut, TIn>)
       : _out_layout(layout), _fn(fn) {}
 
   const OutLayout& output_layout() const { return _out_layout; }
@@ -677,21 +662,21 @@ struct IsOutputSpec<OutputSpec<TIn, TOut, L, Fn>> : std::true_type {};
  */
 template <typename Spec>
 static constexpr bool is_zero_input_spec_v =
-    is_zeros_fn<typename std::remove_cvref_t<Spec>::Transform>;
+    is_zero_vec_transform_v<typename std::remove_cvref_t<Spec>::Transform>;
 
 /**
  * @brief True when an OutputSpec transform is the zero-vector function.
  */
 template <typename Spec>
 static constexpr bool is_zero_output_spec_v =
-    is_zeros_fn<typename std::remove_cvref_t<Spec>::Transform>;
+    is_zero_vec_transform_v<typename std::remove_cvref_t<Spec>::Transform>;
 
 /**
  * @brief True when an InputSpec is identity and can read last-dim contiguous memory.
  */
 template <typename Spec>
 static constexpr bool is_identity_last_contiguous_input_spec_v =
-    is_identity_fn<typename std::remove_cvref_t<Spec>::Transform> &&
+    is_identity_vec_transform_v<typename std::remove_cvref_t<Spec>::Transform> &&
     details::IsLastDimContiguous<typename std::remove_cvref_t<Spec>::InputLayout>::value;
 
 /**
@@ -699,7 +684,7 @@ static constexpr bool is_identity_last_contiguous_input_spec_v =
  */
 template <typename Spec>
 static constexpr bool is_identity_last_contiguous_output_spec_v =
-    is_identity_fn<typename std::remove_cvref_t<Spec>::Transform> &&
+    is_identity_vec_transform_v<typename std::remove_cvref_t<Spec>::Transform> &&
     details::IsLastDimContiguous<typename std::remove_cvref_t<Spec>::OutputLayout>::value;
 
 /**
@@ -707,7 +692,7 @@ static constexpr bool is_identity_last_contiguous_output_spec_v =
  */
 template <typename Spec>
 static constexpr bool is_identity_second_last_contiguous_input_spec_v =
-    is_identity_fn<typename std::remove_cvref_t<Spec>::Transform> &&
+    is_identity_vec_transform_v<typename std::remove_cvref_t<Spec>::Transform> &&
     !details::IsLastDimContiguous<typename std::remove_cvref_t<Spec>::InputLayout>::value &&
     details::IsSecondLastDimContiguous<typename std::remove_cvref_t<Spec>::InputLayout>::value;
 
@@ -716,7 +701,7 @@ static constexpr bool is_identity_second_last_contiguous_input_spec_v =
  */
 template <typename Spec>
 static constexpr bool is_identity_second_last_contiguous_output_spec_v =
-    is_identity_fn<typename std::remove_cvref_t<Spec>::Transform> &&
+    is_identity_vec_transform_v<typename std::remove_cvref_t<Spec>::Transform> &&
     !details::IsLastDimContiguous<typename std::remove_cvref_t<Spec>::OutputLayout>::value &&
     details::IsSecondLastDimContiguous<typename std::remove_cvref_t<Spec>::OutputLayout>::value;
 

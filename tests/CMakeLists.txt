@@ -149,8 +149,8 @@ add_multiarch_executable(VecBaseTest
     ARCH Scalar
 )
 
-add_multiarch_executable(AttachmentTest
-    FILES ${CMAKE_CURRENT_SOURCE_DIR}/gemm/AttachmentTest.cpp
+add_multiarch_executable(VecTransformTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/gemm/VecTransformTest.cpp
     ARCH Native Scalar
 )
 

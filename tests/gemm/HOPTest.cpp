@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <tuple>
 #include <vector>
 
 #include "vecops/gemm/HOP.h"
@@ -271,6 +272,21 @@ TEST(HOPForEachTest, ForEachDimsCoversRanksOneThroughFour) {
   }
 }
 
+TEST(HOPForEachTest, ForEachDimsCanTraversePrefixOfHigherRankTensor) {
+  std::vector<int64_t> data{0, 1, 2, 3, 4, 5};
+  auto t = make_tensor(data.data(), make_shape(cint<2>, cint<3>),
+                       make_strides(cint<3>, cint<1>));
+
+  std::vector<int64_t> row_first_values;
+  hop::for_each_dims<1>([&](auto&& row) {
+    EXPECT_EQ(row.ndim(), 1);
+    EXPECT_EQ(row.size(0), 3);
+    row_first_values.push_back(row(0));
+  }, t);
+
+  EXPECT_EQ(row_first_values, (std::vector<int64_t>{0, 3}));
+}
+
 TEST(HOPForEachTest, ForEachDimsWithIndexCoversRanksOneThroughFour) {
   {
     std::vector<int64_t> data{0, 1, 2};
@@ -336,6 +352,112 @@ TEST(HOPForEachTest, ForEachDimsWithIndexCoversRanksOneThroughFour) {
 
     EXPECT_EQ(calls, 48);
   }
+}
+
+TEST(HOPForEachTest, ForEachDimsWithIndexCanTraversePrefixOfHigherRankTensor) {
+  std::vector<int64_t> data{0, 1, 2, 3, 4, 5};
+  auto t = make_tensor(data.data(), make_shape(cint<2>, cint<3>),
+                       make_strides(cint<3>, cint<1>));
+
+  std::vector<int64_t> seen;
+  hop::for_each_dims_with_index<1>([&](nint_t i0, auto&& row) {
+    EXPECT_EQ(row.ndim(), 1);
+    EXPECT_EQ(row.size(0), 3);
+    seen.push_back(i0 * 10 + row(0));
+  }, t);
+
+  EXPECT_EQ(seen, (std::vector<int64_t>{0, 13}));
+}
+
+TEST(HOPForEachTest, ForEachDimsWithIndexTupleWithoutDimsCallsOnce) {
+  std::vector<int64_t> data{0, 1, 2, 3, 4, 5};
+  auto t = make_tensor(data.data(), make_shape(cint<2>, cint<3>),
+                       make_strides(cint<3>, cint<1>));
+
+  int calls = 0;
+  hop::for_each_dims_with_index_tuple<0>(
+      [&](const auto& indices, auto&& whole) {
+        ++calls;
+        EXPECT_EQ(std::tuple_size_v<std::remove_cvref_t<decltype(indices)>>, 0);
+        EXPECT_EQ(whole.ndim(), 2);
+        EXPECT_EQ(whole(1, 2), 5);
+      },
+      t);
+
+  EXPECT_EQ(calls, 1);
+}
+
+TEST(HOPForEachTest, ForEachDimsWithIndexTupleCanTraversePrefixOfHigherRankTensor) {
+  std::vector<int64_t> data{0, 1, 2, 3, 4, 5};
+  auto t = make_tensor(data.data(), make_shape(cint<2>, cint<3>),
+                       make_strides(cint<3>, cint<1>));
+
+  std::vector<int64_t> seen;
+  hop::for_each_dims_with_index_tuple<1>(
+      [&](const auto& indices, auto&& row) {
+        EXPECT_EQ(row.ndim(), 1);
+        EXPECT_EQ(row.size(0), 3);
+        seen.push_back(std::get<0>(indices) * 10 + row(0));
+      },
+      t);
+
+  EXPECT_EQ(seen, (std::vector<int64_t>{0, 13}));
+}
+
+TEST(HOPForEachTest, ForEachWithIndexTupleHonorsRequestedIndexOrder) {
+  std::vector<int64_t> data(2 * 3 * 4);
+  for (nint_t i = 0; i < static_cast<nint_t>(data.size()); ++i) {
+    data[static_cast<size_t>(i)] = i;
+  }
+  auto t = make_tensor(data.data(), make_shape(cint<2>, cint<3>, cint<4>),
+                       make_strides(cint<12>, cint<4>, cint<1>));
+
+  std::vector<int64_t> seen;
+  std::vector<int64_t> expected;
+  for (nint_t i1 = 0; i1 < 3; ++i1) {
+    for (nint_t i2 = 0; i2 < 4; ++i2) {
+      for (nint_t i0 = 0; i0 < 2; ++i0) {
+        expected.push_back(i1 * 100 + i2 * 10 + i0);
+      }
+    }
+  }
+
+  hop::for_each_with_index_tuple<1, 2, 0>(
+      [&](const auto& indices, auto&& x) {
+        const nint_t i1 = std::get<0>(indices);
+        const nint_t i2 = std::get<1>(indices);
+        const nint_t i0 = std::get<2>(indices);
+        EXPECT_EQ(static_cast<int64_t>(x), i0 * 12 + i1 * 4 + i2);
+        seen.push_back(i1 * 100 + i2 * 10 + i0);
+      },
+      t);
+
+  EXPECT_EQ(seen, expected);
+}
+
+TEST(HOPForEachTest, ForEachDimsWithIndexTuplePreservesBroadcastAndForwarding) {
+  std::vector<int64_t> row{10, 20, 30};
+  std::vector<int64_t> matrix{0, 1, 2, 3, 4, 5};
+  auto tr = make_tensor(row.data(), make_shape(cint<1>, cint<3>),
+                        make_strides(cint<3>, cint<1>));
+  auto tm = make_tensor(matrix.data(), make_shape(cint<2>, cint<3>),
+                        make_strides(cint<3>, cint<1>));
+  int scale = 2;
+
+  std::vector<int64_t> seen;
+  hop::for_each_dims_with_index_tuple<2>(
+      [&](const auto& indices, auto&& x, auto&& y, auto&& s) {
+        EXPECT_EQ(s, scale);
+        seen.push_back(
+            std::get<0>(indices) * 100 +
+            std::get<1>(indices) * 10 +
+            static_cast<int64_t>(x + y) * s);
+      },
+      tr,
+      tm,
+      scale);
+
+  EXPECT_EQ(seen, (std::vector<int64_t>{20, 52, 84, 126, 158, 190}));
 }
 
 TEST(HOPForEachTest, ForEachWithIndexHonorsRequestedIndexOrder) {

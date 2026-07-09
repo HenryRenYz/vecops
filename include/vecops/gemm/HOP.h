@@ -30,6 +30,7 @@
  * | `hop::for_each_dims<N>`           | Traverse logical dimensions `0..N - 1`    |
  * | `hop::for_each_with_index<Is...>` | Traverse and pass current indices to `fn` |
  * | `hop::for_each_dims_with_index<N>`| Traverse `0..N - 1` and pass indices      |
+ * | `hop::*_with_index_tuple`         | Pass indices as one tuple before slices   |
  *
  * ## Logical dimensions and alignment
  *
@@ -51,7 +52,9 @@
  * max(max(Is...) + 1, max_rank(inputs...))
  * @endcode
  *
- * For `for_each_dims<N>`, the logical rank is exactly `N`.
+ * For `for_each_dims<N>`, the selected dimensions are `0..N - 1`; the
+ * logical rank is chosen the same way as `for_each<0, ..., N - 1>`, namely
+ * large enough to include both the selected dimensions and all Tensor inputs.
  *
  * ## Broadcasting
  *
@@ -112,7 +115,9 @@
  *
  * - Traversal dimensions must be non-negative and unique; violations are
  *   compile-time errors.
- * - `for_each_dims<N>` requires every Tensor input rank to be `<= N`.
+ * - `for_each_dims<N>` is shorthand for traversing dimensions `0..N - 1`;
+ *   Tensor inputs may have higher rank, in which case the untraversed trailing
+ *   dimensions are forwarded as sub-Tensor views.
  * - Broadcast is type-based (`Const<1>`), not value-based (`Any{1}`).
  * - Use the `_with_index` variants when the callable needs current traversal
  *   indices. The indices are passed before the sliced inputs.
@@ -341,6 +346,14 @@ VECOPS_ALWAYS_INLINE void for_each_with_index_impl(
   invoke_with_index(fn, indices, std::forward<Inputs>(inputs)...);
 }
 
+template <int LogicalRank, typename IndexTuple, typename Fn, typename... Inputs>
+VECOPS_ALWAYS_INLINE void for_each_with_index_tuple_impl(
+    Fn& fn,
+    const IndexTuple& indices,
+    Inputs&&... inputs) {
+  fn(indices, std::forward<Inputs>(inputs)...);
+}
+
 template <
     int LogicalRank,
     int I0,
@@ -368,6 +381,33 @@ VECOPS_ALWAYS_INLINE void for_each_with_index_impl(
   }
 }
 
+template <
+    int LogicalRank,
+    int I0,
+    int... Is,
+    typename IndexTuple,
+    typename Fn,
+    typename... Inputs>
+VECOPS_ALWAYS_INLINE void for_each_with_index_tuple_impl(
+    Fn& fn,
+    const IndexTuple& indices,
+    Inputs&&... inputs) {
+  static_assert(LogicalRank > 0, "logical rank exhausted");
+  nint_t extent = 1;
+  bool has_extent = false;
+  (update_extent<LogicalRank, I0>(extent, has_extent, inputs), ...);
+
+  for (nint_t i = 0; i < extent; ++i) {
+    const auto next_indices = std::tuple_cat(indices, std::tuple<nint_t>{i});
+    for_each_with_index_tuple_impl<
+        LogicalRank - 1,
+        adjust_dim_after_slice<I0, Is>()...>(
+        fn,
+        next_indices,
+        slice_one<LogicalRank, I0>(inputs, i)...);
+  }
+}
+
 template <int N, typename Seq = std::make_integer_sequence<int, N>>
 struct LeadingDims;
 
@@ -375,7 +415,8 @@ template <int N, int... Is>
 struct LeadingDims<N, std::integer_sequence<int, Is...>> {
   template <typename Fn, typename... Inputs>
   VECOPS_ALWAYS_INLINE static void run(Fn& fn, Inputs&&... inputs) {
-    for_each_impl<N, Is...>(fn, std::forward<Inputs>(inputs)...);
+    constexpr int logical_rank = max2(N, max_tensor_rank_v<Inputs...>);
+    for_each_impl<logical_rank, Is...>(fn, std::forward<Inputs>(inputs)...);
   }
 };
 
@@ -386,7 +427,23 @@ template <int N, int... Is>
 struct LeadingDimsWithIndex<N, std::integer_sequence<int, Is...>> {
   template <typename Fn, typename... Inputs>
   VECOPS_ALWAYS_INLINE static void run(Fn& fn, Inputs&&... inputs) {
-    for_each_with_index_impl<N, Is...>(
+    constexpr int logical_rank = max2(N, max_tensor_rank_v<Inputs...>);
+    for_each_with_index_impl<logical_rank, Is...>(
+        fn,
+        std::tuple<>{},
+        std::forward<Inputs>(inputs)...);
+  }
+};
+
+template <int N, typename Seq = std::make_integer_sequence<int, N>>
+struct LeadingDimsWithIndexTuple;
+
+template <int N, int... Is>
+struct LeadingDimsWithIndexTuple<N, std::integer_sequence<int, Is...>> {
+  template <typename Fn, typename... Inputs>
+  VECOPS_ALWAYS_INLINE static void run(Fn& fn, Inputs&&... inputs) {
+    constexpr int logical_rank = max2(N, max_tensor_rank_v<Inputs...>);
+    for_each_with_index_tuple_impl<logical_rank, Is...>(
         fn,
         std::tuple<>{},
         std::forward<Inputs>(inputs)...);
@@ -476,11 +533,41 @@ VECOPS_ALWAYS_INLINE void for_each_with_index(Fn&& fn, Inputs&&... inputs) {
 }
 
 /**
+ * @brief Traverse selected logical dimensions, passing current indices as one
+ *        tuple before the resulting slices.
+ *
+ * This is equivalent to `for_each_with_index<Is...>` except that the indices
+ * are grouped as `std::tuple<nint_t, ...>`:
+ *
+ * @code
+ * fn(const auto& indices, auto&& sub_inputs...)
+ * @endcode
+ *
+ * The tuple order is exactly the order of `Is...`.
+ *
+ * @see for_each_with_index
+ * @see for_each_dims_with_index_tuple
+ */
+template <int... Is, typename Fn, typename... Inputs>
+VECOPS_ALWAYS_INLINE void for_each_with_index_tuple(Fn&& fn, Inputs&&... inputs) {
+  static_assert(((Is >= 0) && ...), "traversal dimensions must be non-negative");
+  static_assert(details::UniqueDims<Is...>::value, "duplicate traversal dimension");
+  constexpr int logical_rank = details::max2(
+      details::max_index_plus_one_v<Is...>,
+      details::max_tensor_rank_v<Inputs...>);
+  details::for_each_with_index_tuple_impl<logical_rank, Is...>(
+      fn,
+      std::tuple<>{},
+      std::forward<Inputs>(inputs)...);
+}
+
+/**
  * @brief Traverse logical dimensions `0, 1, ..., Ndim - 1`.
  *
- * This is the common full-prefix wrapper around `for_each`. The logical rank is
- * fixed to `Ndim`, so every Tensor input rank must be at most `Ndim`. Inputs
- * with smaller rank are trailing-aligned against the `Ndim` logical axes.
+ * This is the common prefix wrapper around `for_each<0, ..., Ndim - 1>`.
+ * The logical rank is large enough to include both the selected dimensions and
+ * all Tensor inputs. Inputs with smaller rank are trailing-aligned against that
+ * logical rank.
  *
  * @tparam Ndim    Number of logical dimensions to traverse.
  * @tparam Fn      Callable type. It must be invocable as `fn(auto&&...)`.
@@ -500,8 +587,6 @@ VECOPS_ALWAYS_INLINE void for_each_with_index(Fn&& fn, Inputs&&... inputs) {
 template <int Ndim, typename Fn, typename... Inputs>
 VECOPS_ALWAYS_INLINE void for_each_dims(Fn&& fn, Inputs&&... inputs) {
   static_assert(Ndim >= 0, "Ndim must be non-negative");
-  static_assert(((details::tensor_rank_v<Inputs> <= Ndim) && ...),
-                "input tensor rank must not exceed Ndim");
   details::LeadingDims<Ndim>::run(fn, std::forward<Inputs>(inputs)...);
 }
 
@@ -509,10 +594,10 @@ VECOPS_ALWAYS_INLINE void for_each_dims(Fn&& fn, Inputs&&... inputs) {
  * @brief Traverse logical dimensions `0, 1, ..., Ndim - 1`, passing current
  *        indices to `fn` before the resulting slices.
  *
- * This is the indexed full-prefix wrapper around `for_each_with_index`. The
- * logical rank is fixed to `Ndim`, so every Tensor input rank must be at most
- * `Ndim`. Inputs with smaller rank are trailing-aligned against the `Ndim`
- * logical axes.
+ * This is the indexed prefix wrapper around
+ * `for_each_with_index<0, ..., Ndim - 1>`. The logical rank is large enough to
+ * include both the selected dimensions and all Tensor inputs. Inputs with
+ * smaller rank are trailing-aligned against that logical rank.
  *
  * At each leaf, `fn` is invoked as:
  *
@@ -534,9 +619,29 @@ VECOPS_ALWAYS_INLINE void for_each_dims(Fn&& fn, Inputs&&... inputs) {
 template <int Ndim, typename Fn, typename... Inputs>
 VECOPS_ALWAYS_INLINE void for_each_dims_with_index(Fn&& fn, Inputs&&... inputs) {
   static_assert(Ndim >= 0, "Ndim must be non-negative");
-  static_assert(((details::tensor_rank_v<Inputs> <= Ndim) && ...),
-                "input tensor rank must not exceed Ndim");
   details::LeadingDimsWithIndex<Ndim>::run(fn, std::forward<Inputs>(inputs)...);
+}
+
+/**
+ * @brief Traverse logical dimensions `0, 1, ..., Ndim - 1`, passing current
+ *        indices as one tuple before the resulting slices.
+ *
+ * This is the tuple-index wrapper around
+ * `for_each_with_index_tuple<0, ..., Ndim - 1>`.
+ *
+ * At each leaf, `fn` is invoked as:
+ *
+ * @code
+ * fn(const auto& indices, auto&& sub_inputs...)
+ * @endcode
+ *
+ * @see for_each_with_index_tuple
+ * @see for_each_dims_with_index
+ */
+template <int Ndim, typename Fn, typename... Inputs>
+VECOPS_ALWAYS_INLINE void for_each_dims_with_index_tuple(Fn&& fn, Inputs&&... inputs) {
+  static_assert(Ndim >= 0, "Ndim must be non-negative");
+  details::LeadingDimsWithIndexTuple<Ndim>::run(fn, std::forward<Inputs>(inputs)...);
 }
 
 } // namespace vecops::gemm::hop

@@ -19,29 +19,34 @@ using namespace vecops::vec;
 namespace {
 
 template <typename T>
-struct CoordShiftFn : PositionedVecFn<T, T> {
+struct CoordShiftFn : VecTransform<T, T> {
   int* calls{};
-  nint_t* last_x{};
-  nint_t* last_y{};
+  std::vector<nint_t>* last_coords{};
 
-  CoordShiftFn(int* calls_, nint_t* last_x_, nint_t* last_y_)
-      : calls(calls_), last_x(last_x_), last_y(last_y_) {}
+  CoordShiftFn(int* calls_, std::vector<nint_t>* last_coords_)
+      : calls(calls_), last_coords(last_coords_) {}
 
   template <TLV_DECL_TAG(To),
       TL_IF(is_any<TypeOf<To>, T>),
       TL_IF(CoordShiftFn::min_output_pow2 <= scalable_pow2_of<To> &&
-            scalable_pow2_of<To> <= CoordShiftFn::max_output_pow2)>
-  Vec<To> call(To t, Vec<To> v, nint_t x, nint_t y) const {
+            scalable_pow2_of<To> <= CoordShiftFn::max_output_pow2),
+      typename... Coords>
+  Vec<To> operator()(To t, Vec<To> v, Coords... coords) const {
     if (calls != nullptr) ++*calls;
-    if (last_x != nullptr) *last_x = x;
-    if (last_y != nullptr) *last_y = y;
-    return add(v, fill(t, static_cast<T>(x * 100 + y)));
+    nint_t encoded = 0;
+    ((encoded = encoded * 100 + static_cast<nint_t>(coords)), ...);
+    if (last_coords != nullptr) {
+      *last_coords = {static_cast<nint_t>(coords)...};
+    }
+    return add(v, fill(t, static_cast<T>(encoded)));
   }
 };
 
-template <typename T>
-T coord_shift_expected(T value, nint_t x, nint_t y) {
-  return static_cast<T>(value + static_cast<T>(x * 100 + y));
+template <typename T, typename... Coords>
+T coord_shift_expected(T value, Coords... coords) {
+  nint_t encoded = 0;
+  ((encoded = encoded * 100 + static_cast<nint_t>(coords)), ...);
+  return static_cast<T>(value + static_cast<T>(encoded));
 }
 
 template <typename T>
@@ -249,9 +254,8 @@ TEST(DataAccessTransformTest, CoordinatesAreForwardedForLastContiguousInput) {
   auto src = make_source<T>(32);
   L layout{Shape<Const<3>, Const<5>>{}, Strides<Const<5>, Const<1>>{}};
   int calls = 0;
-  nint_t x = -1;
-  nint_t y = -1;
-  CoordShiftFn<T> fn(&calls, &x, &y);
+  std::vector<nint_t> coords;
+  CoordShiftFn<T> fn(&calls, &coords);
   DataInput<T, Tensor<T, typename L::Shape, typename L::Strides>, CoordShiftFn<T>> input(
       src.data(), layout, fn, nullptr);
 
@@ -259,8 +263,7 @@ TEST(DataAccessTransformTest, CoordinatesAreForwardedForLastContiguousInput) {
   auto v = input(t, nint_t{3}, nint_t{1}, nint_t{2});
 
   EXPECT_GE(calls, 1);
-  EXPECT_EQ(x, 1);
-  EXPECT_EQ(y, 2);
+  EXPECT_EQ(coords, (std::vector<nint_t>{1, 2}));
   EXPECT_EQ(read_vec_lane<T>(v, 0), coord_shift_expected(src[7], 1, 2));
   EXPECT_EQ(read_vec_lane<T>(v, 1), coord_shift_expected(src[8], 1, 2));
   // undefined value
@@ -276,9 +279,8 @@ TEST(DataAccessTransformTest, SecondLastContiguousOutputFlushesInDestructor) {
   L layout{Shape<Const<3>, Const<5>>{}, Strides<Const<1>, Const<3>>{}};
   auto aux = make_aux<T>(Spec::required_aux_size(layout));
   int calls = 0;
-  nint_t x = -1;
-  nint_t y = -1;
-  CoordShiftFn<T> fn(&calls, &x, &y);
+  std::vector<nint_t> coords;
+  CoordShiftFn<T> fn(&calls, &coords);
 
   {
     Spec spec(layout, fn);
@@ -294,12 +296,87 @@ TEST(DataAccessTransformTest, SecondLastContiguousOutputFlushesInDestructor) {
   }
 
   EXPECT_GE(calls, 1);
-  EXPECT_EQ(x, 1);
-  EXPECT_EQ(y, 1);
+  EXPECT_EQ(coords, (std::vector<nint_t>{1, 1}));
   EXPECT_EQ(dst[4], coord_shift_expected(1, 1, 1));
   EXPECT_EQ(dst[7], coord_shift_expected(2, 1, 1));
   EXPECT_EQ(dst[10], coord_shift_expected(3, 1, 1));
   EXPECT_EQ(dst[13], coord_shift_expected(4, 1, 1));
+}
+
+TEST(DataAccessTransformTest, FullCoordinatesAreForwardedForInputRanksOneThroughFour) {
+  using T = int32_t;
+
+  {
+    using L = Layout<Shape<Const<7>>, Strides<Const<1>>>;
+    auto src = make_source<T>(16);
+    L layout{Shape<Const<7>>{}, Strides<Const<1>>{}};
+    int calls = 0;
+    std::vector<nint_t> coords;
+    CoordShiftFn<T> fn(&calls, &coords);
+    DataInput<T, Tensor<T, typename L::Shape, typename L::Strides>, CoordShiftFn<T>> input(
+        src.data(), layout, fn, nullptr);
+
+    ScalableTag<T, 0> t;
+    auto v = input(t, nint_t{1}, nint_t{4});
+    EXPECT_GE(calls, 1);
+    EXPECT_EQ(coords, (std::vector<nint_t>{4}));
+    EXPECT_EQ(read_vec_lane<T>(v, 0), coord_shift_expected(src[4], 4));
+  }
+
+  {
+    using L = Layout<Shape<Const<3>, Const<5>>, Strides<Const<5>, Const<1>>>;
+    auto src = make_source<T>(32);
+    L layout{Shape<Const<3>, Const<5>>{}, Strides<Const<5>, Const<1>>{}};
+    int calls = 0;
+    std::vector<nint_t> coords;
+    CoordShiftFn<T> fn(&calls, &coords);
+    DataInput<T, Tensor<T, typename L::Shape, typename L::Strides>, CoordShiftFn<T>> input(
+        src.data(), layout, fn, nullptr);
+
+    ScalableTag<T, 0> t;
+    auto v = input(t, nint_t{1}, nint_t{2}, nint_t{3});
+    EXPECT_GE(calls, 1);
+    EXPECT_EQ(coords, (std::vector<nint_t>{2, 3}));
+    EXPECT_EQ(read_vec_lane<T>(v, 0), coord_shift_expected(src[13], 2, 3));
+  }
+
+  {
+    using L = Layout<Shape<Const<2>, Const<3>, Const<5>>, Strides<Const<15>, Const<5>, Const<1>>>;
+    auto src = make_source<T>(64);
+    L layout{Shape<Const<2>, Const<3>, Const<5>>{}, Strides<Const<15>, Const<5>, Const<1>>{}};
+    int calls = 0;
+    std::vector<nint_t> coords;
+    CoordShiftFn<T> fn(&calls, &coords);
+    DataInput<T, Tensor<T, typename L::Shape, typename L::Strides>, CoordShiftFn<T>> input(
+        src.data(), layout, fn, nullptr);
+
+    ScalableTag<T, 0> t;
+    auto v = input(t, nint_t{1}, nint_t{1}, nint_t{2}, nint_t{4});
+    EXPECT_GE(calls, 1);
+    EXPECT_EQ(coords, (std::vector<nint_t>{1, 2, 4}));
+    EXPECT_EQ(read_vec_lane<T>(v, 0), coord_shift_expected(src[29], 1, 2, 4));
+  }
+
+  {
+    using L = Layout<
+        Shape<Const<2>, Const<3>, Const<4>, Const<5>>,
+        Strides<Const<60>, Const<20>, Const<5>, Const<1>>>;
+    auto src = make_source<T>(128);
+    L layout{
+        Shape<Const<2>, Const<3>, Const<4>, Const<5>>{},
+        Strides<Const<60>, Const<20>, Const<5>, Const<1>>{}};
+    int calls = 0;
+    std::vector<nint_t> coords;
+    CoordShiftFn<T> fn(&calls, &coords);
+    DataInput<T, Tensor<T, typename L::Shape, typename L::Strides>, CoordShiftFn<T>> input(
+        src.data(), layout, fn, nullptr);
+
+    ScalableTag<T, 0> t;
+    auto v = input(t, nint_t{1}, nint_t{1}, nint_t{2}, nint_t{3}, nint_t{4});
+    EXPECT_GE(calls, 1);
+    EXPECT_EQ(coords, (std::vector<nint_t>{1, 2, 3, 4}));
+    EXPECT_EQ(read_vec_lane<T>(v, 0), coord_shift_expected(src[119], 1, 2, 3, 4));
+  }
 }
 
 template <typename Tag>
@@ -552,7 +629,7 @@ TEST(DataAccessTraitTest, SpecHelpersClassifyTransformsAndContinuity) {
   using LastIn = InputSpec<int32_t, int32_t, Last>;
   using SecondIn = InputSpec<int32_t, int32_t, Second>;
   using StridedIn = InputSpec<int32_t, int32_t, Strided>;
-  using ZeroIn = InputSpec<int32_t, int32_t, Last, ZerosVecFn<int32_t>>;
+  using ZeroIn = InputSpec<int32_t, int32_t, Last, ZeroVecTransform<int32_t>>;
 
   EXPECT_TRUE(is_identity_last_contiguous_input_spec_v<LastIn>);
   EXPECT_FALSE(is_identity_last_contiguous_input_spec_v<SecondIn>);
