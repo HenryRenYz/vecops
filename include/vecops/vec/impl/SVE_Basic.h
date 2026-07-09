@@ -379,113 +379,145 @@ VECOPS_VFUNC auto tuple_create4(WA wa, WB wb, WC wc, WD wd) {
 }
 }  // namespace details
 
-/* === mfill / mwhilelt / mwhilege (used before fill_with_n) === */
-template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Mask<T> mfill(T, bool value) {
-  using E = TypeOf<T>;
-  if constexpr (sizeof(E) == 1)      return svdup_b8(value);
-  else if constexpr (sizeof(E) == 2) return svdup_b16(value);
-  else if constexpr (sizeof(E) == 4) return svdup_b32(value);
-  else return svdup_b64(value);
+namespace details {
+template <typename T> VECOPS_VFUNC Mask<T> multi_mfill(T t, bool value);
+template <typename T> VECOPS_VFUNC Mask<T> multi_mwhilelt(T t, nint_t a, nint_t b);
+template <typename T> VECOPS_VFUNC Mask<T> multi_mwhilege(T t, nint_t a, nint_t b);
+template <typename T> VECOPS_VFUNC Vec<T> multi_fill(T t, TypeOf<T> value);
+template <typename T, typename V> VECOPS_VFUNC V multi_blend(V v0, Mask<T> m, V v1);
 }
 
+/* === mfill / mwhilelt / mwhilege (used before fill_with_n) === */
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Mask<T> mwhilelt(T, nint_t a, nint_t b) {
-  using E = TypeOf<T>;
-  if constexpr (sizeof(nint_t) == 4) {
-    if constexpr (sizeof(E) == 1)      return svwhilelt_b8_s32((int32_t)a, (int32_t)b);
-    else if constexpr (sizeof(E) == 2) return svwhilelt_b16_s32((int32_t)a, (int32_t)b);
-    else if constexpr (sizeof(E) == 4) return svwhilelt_b32_s32((int32_t)a, (int32_t)b);
-    else return svwhilelt_b64_s32((int32_t)a, (int32_t)b);
+VECOPS_VFUNC Mask<T> mfill(T t, bool value) {
+  if constexpr (num_words(T{}) > 1) {
+    return details::multi_mfill(t, value);
   } else {
-    if constexpr (sizeof(E) == 1)      return svwhilelt_b8_s64((int64_t)a, (int64_t)b);
-    else if constexpr (sizeof(E) == 2) return svwhilelt_b16_s64((int64_t)a, (int64_t)b);
-    else if constexpr (sizeof(E) == 4) return svwhilelt_b32_s64((int64_t)a, (int64_t)b);
-    else return svwhilelt_b64_s64((int64_t)a, (int64_t)b);
+    using E = TypeOf<T>;
+    if constexpr (sizeof(E) == 1)      return svdup_b8(value);
+    else if constexpr (sizeof(E) == 2) return svdup_b16(value);
+    else if constexpr (sizeof(E) == 4) return svdup_b32(value);
+    else return svdup_b64(value);
   }
 }
 
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Mask<T> mwhilege(T, nint_t a, nint_t b) {
-  using E = TypeOf<T>;
-  if constexpr (sizeof(nint_t) == 4) {
-    if constexpr (sizeof(E) == 1)      return svnot_b_z(svptrue_b8(),  svwhilelt_b8_s32((int32_t)a, (int32_t)b));
-    else if constexpr (sizeof(E) == 2) return svnot_b_z(svptrue_b16(), svwhilelt_b16_s32((int32_t)a, (int32_t)b));
-    else if constexpr (sizeof(E) == 4) return svnot_b_z(svptrue_b32(), svwhilelt_b32_s32((int32_t)a, (int32_t)b));
-    else return svnot_b_z(svptrue_b64(), svwhilelt_b64_s32((int32_t)a, (int32_t)b));
+VECOPS_VFUNC Mask<T> mwhilelt(T t, nint_t a, nint_t b) {
+  if constexpr (num_words(T{}) > 1) {
+    return details::multi_mwhilelt(t, a, b);
   } else {
-    if constexpr (sizeof(E) == 1)      return svnot_b_z(svptrue_b8(),  svwhilelt_b8_s64((int64_t)a, (int64_t)b));
-    else if constexpr (sizeof(E) == 2) return svnot_b_z(svptrue_b16(), svwhilelt_b16_s64((int64_t)a, (int64_t)b));
-    else if constexpr (sizeof(E) == 4) return svnot_b_z(svptrue_b32(), svwhilelt_b32_s64((int64_t)a, (int64_t)b));
-    else return svnot_b_z(svptrue_b64(), svwhilelt_b64_s64((int64_t)a, (int64_t)b));
+    using E = TypeOf<T>;
+    if constexpr (sizeof(nint_t) == 4) {
+      if constexpr (sizeof(E) == 1)      return svwhilelt_b8_s32((int32_t)a, (int32_t)b);
+      else if constexpr (sizeof(E) == 2) return svwhilelt_b16_s32((int32_t)a, (int32_t)b);
+      else if constexpr (sizeof(E) == 4) return svwhilelt_b32_s32((int32_t)a, (int32_t)b);
+      else return svwhilelt_b64_s32((int32_t)a, (int32_t)b);
+    } else {
+      if constexpr (sizeof(E) == 1)      return svwhilelt_b8_s64((int64_t)a, (int64_t)b);
+      else if constexpr (sizeof(E) == 2) return svwhilelt_b16_s64((int64_t)a, (int64_t)b);
+      else if constexpr (sizeof(E) == 4) return svwhilelt_b32_s64((int64_t)a, (int64_t)b);
+      else return svwhilelt_b64_s64((int64_t)a, (int64_t)b);
+    }
+  }
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Mask<T> mwhilege(T t, nint_t a, nint_t b) {
+  if constexpr (num_words(T{}) > 1) {
+    return details::multi_mwhilege(t, a, b);
+  } else {
+    using E = TypeOf<T>;
+    if constexpr (sizeof(nint_t) == 4) {
+      if constexpr (sizeof(E) == 1)      return svnot_b_z(svptrue_b8(),  svwhilelt_b8_s32((int32_t)a, (int32_t)b));
+      else if constexpr (sizeof(E) == 2) return svnot_b_z(svptrue_b16(), svwhilelt_b16_s32((int32_t)a, (int32_t)b));
+      else if constexpr (sizeof(E) == 4) return svnot_b_z(svptrue_b32(), svwhilelt_b32_s32((int32_t)a, (int32_t)b));
+      else return svnot_b_z(svptrue_b64(), svwhilelt_b64_s32((int32_t)a, (int32_t)b));
+    } else {
+      if constexpr (sizeof(E) == 1)      return svnot_b_z(svptrue_b8(),  svwhilelt_b8_s64((int64_t)a, (int64_t)b));
+      else if constexpr (sizeof(E) == 2) return svnot_b_z(svptrue_b16(), svwhilelt_b16_s64((int64_t)a, (int64_t)b));
+      else if constexpr (sizeof(E) == 4) return svnot_b_z(svptrue_b32(), svwhilelt_b32_s64((int64_t)a, (int64_t)b));
+      else return svnot_b_z(svptrue_b64(), svwhilelt_b64_s64((int64_t)a, (int64_t)b));
+    }
   }
 }
 
 /* === fill / zeros === */
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> fill(T, TypeOf<T> value) {
-  using E = TypeOf<T>;
-  if constexpr (std::is_same_v<E, float32_t>)      return svdup_n_f32(value);
-  else if constexpr (std::is_same_v<E, float64_t>) return svdup_n_f64(value);
-  else if constexpr (std::is_same_v<E, int8_t>)    return svdup_n_s8(value);
-  else if constexpr (std::is_same_v<E, uint8_t>)   return svdup_n_u8(value);
-  else if constexpr (std::is_same_v<E, int16_t>)   return svdup_n_s16(value);
-  else if constexpr (std::is_same_v<E, uint16_t>)  return svdup_n_u16(value);
-  else if constexpr (std::is_same_v<E, int32_t>)   return svdup_n_s32(value);
-  else if constexpr (std::is_same_v<E, uint32_t>)  return svdup_n_u32(value);
-  else if constexpr (std::is_same_v<E, int64_t>)   return svdup_n_s64(value);
-  else if constexpr (std::is_same_v<E, float16_t>)  return svdup_n_f16(value);
+VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value) {
+  if constexpr (num_words(T{}) > 1) {
+    return details::multi_fill(t, value);
+  } else {
+    using E = TypeOf<T>;
+    if constexpr (std::is_same_v<E, float32_t>)      return svdup_n_f32(value);
+    else if constexpr (std::is_same_v<E, float64_t>) return svdup_n_f64(value);
+    else if constexpr (std::is_same_v<E, int8_t>)    return svdup_n_s8(value);
+    else if constexpr (std::is_same_v<E, uint8_t>)   return svdup_n_u8(value);
+    else if constexpr (std::is_same_v<E, int16_t>)   return svdup_n_s16(value);
+    else if constexpr (std::is_same_v<E, uint16_t>)  return svdup_n_u16(value);
+    else if constexpr (std::is_same_v<E, int32_t>)   return svdup_n_s32(value);
+    else if constexpr (std::is_same_v<E, uint32_t>)  return svdup_n_u32(value);
+    else if constexpr (std::is_same_v<E, int64_t>)   return svdup_n_s64(value);
+    else if constexpr (std::is_same_v<E, float16_t>)  return svdup_n_f16(value);
 #if defined(HAS_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svdup_n_bf16(value);
+    else if constexpr (std::is_same_v<E, bfloat16_t>) return svdup_n_bf16(value);
 #else
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(svdup_n_u16(value.to_bits()));
+    else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(svdup_n_u16(value.to_bits()));
 #endif
-  else return svdup_n_u64(value);
+    else return svdup_n_u64(value);
+  }
 }
 
 /* === blend === */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V blend(V v0, Mask<T> m, V v1) {
-  using E = TypeOf<T>;
-  if constexpr (std::is_same_v<E, float32_t>)      return svsel_f32(m, v1, v0);
-  else if constexpr (std::is_same_v<E, float64_t>) return svsel_f64(m, v1, v0);
-  else if constexpr (std::is_same_v<E, int8_t>)    return svsel_s8(m, v1, v0);
-  else if constexpr (std::is_same_v<E, uint8_t>)   return svsel_u8(m, v1, v0);
-  else if constexpr (std::is_same_v<E, int16_t>)   return svsel_s16(m, v1, v0);
-  else if constexpr (std::is_same_v<E, uint16_t>)  return svsel_u16(m, v1, v0);
-  else if constexpr (std::is_same_v<E, int32_t>)   return svsel_s32(m, v1, v0);
-  else if constexpr (std::is_same_v<E, uint32_t>)  return svsel_u32(m, v1, v0);
-  else if constexpr (std::is_same_v<E, int64_t>)   return svsel_s64(m, v1, v0);
-  else if constexpr (std::is_same_v<E, float16_t>)  return svsel_f16(m, v1, v0);
+  if constexpr (num_words(T{}) > 1) {
+    return details::multi_blend<T>(v0, m, v1);
+  } else {
+    using E = TypeOf<T>;
+    if constexpr (std::is_same_v<E, float32_t>)      return svsel_f32(m, v1, v0);
+    else if constexpr (std::is_same_v<E, float64_t>) return svsel_f64(m, v1, v0);
+    else if constexpr (std::is_same_v<E, int8_t>)    return svsel_s8(m, v1, v0);
+    else if constexpr (std::is_same_v<E, uint8_t>)   return svsel_u8(m, v1, v0);
+    else if constexpr (std::is_same_v<E, int16_t>)   return svsel_s16(m, v1, v0);
+    else if constexpr (std::is_same_v<E, uint16_t>)  return svsel_u16(m, v1, v0);
+    else if constexpr (std::is_same_v<E, int32_t>)   return svsel_s32(m, v1, v0);
+    else if constexpr (std::is_same_v<E, uint32_t>)  return svsel_u32(m, v1, v0);
+    else if constexpr (std::is_same_v<E, int64_t>)   return svsel_s64(m, v1, v0);
+    else if constexpr (std::is_same_v<E, float16_t>)  return svsel_f16(m, v1, v0);
 #if defined(HAS_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svsel_bf16(m, v1, v0);
+    else if constexpr (std::is_same_v<E, bfloat16_t>) return svsel_bf16(m, v1, v0);
 #else
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
-    svsel_u16(m, svreinterpret_u16_bf16(v1), svreinterpret_u16_bf16(v0)));
+    else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
+      svsel_u16(m, svreinterpret_u16_bf16(v1), svreinterpret_u16_bf16(v0)));
 #endif
-  else return svsel_u64(m, v1, v0);
+    else return svsel_u64(m, v1, v0);
+  }
 }
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, Mask<T> m, Vec<T> default_v) {
-  using E = TypeOf<T>;
-  if constexpr (std::is_same_v<E, float32_t>)      return svdup_n_f32_m(default_v, m, value);
-  else if constexpr (std::is_same_v<E, float64_t>) return svdup_n_f64_m(default_v, m, value);
-  else if constexpr (std::is_same_v<E, int8_t>)    return svdup_n_s8_m(default_v, m, value);
-  else if constexpr (std::is_same_v<E, uint8_t>)   return svdup_n_u8_m(default_v, m, value);
-  else if constexpr (std::is_same_v<E, int16_t>)   return svdup_n_s16_m(default_v, m, value);
-  else if constexpr (std::is_same_v<E, uint16_t>)  return svdup_n_u16_m(default_v, m, value);
-  else if constexpr (std::is_same_v<E, int32_t>)   return svdup_n_s32_m(default_v, m, value);
-  else if constexpr (std::is_same_v<E, uint32_t>)  return svdup_n_u32_m(default_v, m, value);
-  else if constexpr (std::is_same_v<E, int64_t>)   return svdup_n_s64_m(default_v, m, value);
-  else if constexpr (std::is_same_v<E, float16_t>)  return svdup_n_f16_m(default_v, m, value);
+  if constexpr (num_words(T{}) > 1) {
+    return word::blend(default_v, m, word::fill(t, value));
+  } else {
+    using E = TypeOf<T>;
+    if constexpr (std::is_same_v<E, float32_t>)      return svdup_n_f32_m(default_v, m, value);
+    else if constexpr (std::is_same_v<E, float64_t>) return svdup_n_f64_m(default_v, m, value);
+    else if constexpr (std::is_same_v<E, int8_t>)    return svdup_n_s8_m(default_v, m, value);
+    else if constexpr (std::is_same_v<E, uint8_t>)   return svdup_n_u8_m(default_v, m, value);
+    else if constexpr (std::is_same_v<E, int16_t>)   return svdup_n_s16_m(default_v, m, value);
+    else if constexpr (std::is_same_v<E, uint16_t>)  return svdup_n_u16_m(default_v, m, value);
+    else if constexpr (std::is_same_v<E, int32_t>)   return svdup_n_s32_m(default_v, m, value);
+    else if constexpr (std::is_same_v<E, uint32_t>)  return svdup_n_u32_m(default_v, m, value);
+    else if constexpr (std::is_same_v<E, int64_t>)   return svdup_n_s64_m(default_v, m, value);
+    else if constexpr (std::is_same_v<E, float16_t>)  return svdup_n_f16_m(default_v, m, value);
 #if defined(HAS_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svdup_n_bf16_m(default_v, m, value);
+    else if constexpr (std::is_same_v<E, bfloat16_t>) return svdup_n_bf16_m(default_v, m, value);
 #else
-  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
-    svdup_n_u16_m(svreinterpret_u16_bf16(default_v), m, value.to_bits()));
+    else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(
+      svdup_n_u16_m(svreinterpret_u16_bf16(default_v), m, value.to_bits()));
 #endif
-  else return svdup_n_u64_m(default_v, m, value);
+    else return svdup_n_u64_m(default_v, m, value);
+  }
 }
 
 template <TLV_DECL_TAG(T)>
@@ -499,10 +531,14 @@ VECOPS_VFUNC Vec<T> zeros(T t) { return word::fill(t, TypeOf<T>()); }
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Mask<T> make_mask(T t) {
-  if constexpr (T::POW2 == 0) {
-    return details::ptrue<TypeOf<T>>();
+  if constexpr (num_words(T{}) > 1) {
+    return word::mfill(t, true);
   } else {
-    return word::mwhilelt(t, 0, size(t));
+    if constexpr (T::POW2 == 0) {
+      return details::ptrue<TypeOf<T>>();
+    } else {
+      return word::mwhilelt(t, 0, size(t));
+    }
   }
 }
 
@@ -802,7 +838,7 @@ VECOPS_VFUNC V local_shuf(V v, int i15, int i14, int i13, int i12, int i11, int 
 /* === upper / lower / even / odd === */
 template <TLV_DECL_TAG(T), typename V = Vec<Half<T>>, TL_IF(num_words(T{}) == 1)>
 VECOPS_VFUNC V upper(T t, Vec<T> v) {
-  using E = TypeOf<T>; nint_t hn = word_size(t)/2;
+  using E = TypeOf<T>; nint_t hn = size(t)/2;
   auto lo = word::mwhilelt(t, 0, hn);
   auto up = svnot_b_z(details::ptrue<E>(), lo);
   if constexpr (std::is_same_v<E, float32_t>)      return svsplice_f32(up, v, v);
@@ -925,6 +961,42 @@ VECOPS_VFUNC Vec<T> concat(T t, V v_lo, V v_hi) {
     details::tuple_get2<E2, 0>(v_lo), details::tuple_get2<E2, 1>(v_lo),
     details::tuple_get2<E2, 0>(v_hi), details::tuple_get2<E2, 1>(v_hi));
 }
+
+namespace details {
+template <typename T>
+VECOPS_VFUNC Mask<T> multi_mfill(T t, bool value) {
+  Half<T> th;
+  return word::concat(t, word::mfill(th, value), word::mfill(th, value));
+}
+
+template <typename T>
+VECOPS_VFUNC Mask<T> multi_mwhilelt(T t, nint_t a, nint_t b) {
+  Half<T> th;
+  auto half_size = size(th);
+  return word::concat(t, word::mwhilelt(th, a, b), word::mwhilelt(th, a + half_size, b));
+}
+
+template <typename T>
+VECOPS_VFUNC Mask<T> multi_mwhilege(T t, nint_t a, nint_t b) {
+  Half<T> th;
+  auto half_size = size(th);
+  return word::concat(t, word::mwhilege(th, a, b), word::mwhilege(th, a + half_size, b));
+}
+
+template <typename T>
+VECOPS_VFUNC Vec<T> multi_fill(T t, TypeOf<T> value) {
+  Half<T> th;
+  return word::concat(t, word::fill(th, value), word::fill(th, value));
+}
+
+template <typename T, typename V>
+VECOPS_VFUNC V multi_blend(V v0, Mask<T> m, V v1) {
+  constexpr T t;
+  auto lo = word::blend(word::lower(t, v0), word::lower(t, m), word::lower(t, v1));
+  auto hi = word::blend(word::upper(t, v0), word::upper(t, m), word::upper(t, v1));
+  return word::concat(t, lo, hi);
+}
+}  // namespace details
 
 
 template <TLV_DECL_TAG(T)>

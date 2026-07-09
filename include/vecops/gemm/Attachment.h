@@ -14,11 +14,19 @@
 namespace vecops::gemm {
 namespace details {
 
+template <typename To, typename Ei>
+static constexpr bool rebind_vec_supported_v =
+#if defined(CPU_CAPABILITY_SVE)
+    (vec::Rebind<Ei, To>::POW2 <= VEC_MAX_POW);
+#else
+    true;
+#endif
+
 template <typename To, typename Fn, typename Ei, typename = void>
-struct can_call_positional : std::false_type {};
+struct can_call_positional_impl : std::false_type {};
 
 template <typename To, typename Fn, typename Ei>
-struct can_call_positional<To, Fn, Ei, std::void_t<decltype(
+struct can_call_positional_impl<To, Fn, Ei, std::void_t<decltype(
     std::declval<Fn>()(std::declval<To>(),
                        std::declval<vec::Vec<vec::Rebind<Ei, To>>>(),
                        std::declval<nint_t>(),
@@ -26,13 +34,25 @@ struct can_call_positional<To, Fn, Ei, std::void_t<decltype(
 )>> : std::true_type {};
 
 template <typename To, typename Fn, typename Ei, typename = void>
-struct can_call_elementwise : std::false_type {};
+struct can_call_elementwise_impl : std::false_type {};
 
 template <typename To, typename Fn, typename Ei>
-struct can_call_elementwise<To, Fn, Ei, std::void_t<decltype(
+struct can_call_elementwise_impl<To, Fn, Ei, std::void_t<decltype(
     std::declval<Fn>()(std::declval<To>(),
                        std::declval<vec::Vec<vec::Rebind<Ei, To>>>())
 )>> : std::true_type {};
+
+template <typename To, typename Fn, typename Ei>
+struct can_call_positional : std::conditional_t<
+    rebind_vec_supported_v<To, Ei>,
+    can_call_positional_impl<To, Fn, Ei>,
+    std::false_type> {};
+
+template <typename To, typename Fn, typename Ei>
+struct can_call_elementwise : std::conditional_t<
+    rebind_vec_supported_v<To, Ei>,
+    can_call_elementwise_impl<To, Fn, Ei>,
+    std::false_type> {};
 
 } // namespace details
 

@@ -197,6 +197,14 @@ make_index_vector(
   return idx;
 }
 
+template <typename T, TLV_DECL_TAG(Ti)>
+static constexpr bool gather_scatter_index_supported_v =
+#if defined(CPU_CAPABILITY_SVE)
+    (vec::Rebind<vec::GatherScatterIndex<T>, Ti>::POW2 <= VEC_MAX_POW);
+#else
+    true;
+#endif
+
 template <typename N, typename T, TLV_DECL_TAG(Ti)>
 vec::Vec<Ti> gather_dispatch(
     Ti ti,
@@ -204,11 +212,23 @@ vec::Vec<Ti> gather_dispatch(
     nint_t base_offset,
     nint_t stride,
     N n) {
-  auto idx = make_index_vector<T>(ti, base_offset, stride);
-  if constexpr (use_unmasked_path_v<N, Ti>) {
-    return vec::gather(ti, p, idx);
+  if constexpr (!gather_scatter_index_supported_v<T, Ti>) {
+    using Th = vec::Half<Ti>;
+    Th th;
+    const nint_t half_size = vec::size(th);
+    const nint_t count = count_value(n);
+    auto lo = gather_dispatch(th, p, base_offset, stride, std::min(count, half_size));
+    auto hi = gather_dispatch(
+        th, p, base_offset + half_size * stride, stride,
+        std::max<nint_t>(0, count - half_size));
+    return vec::concat(ti, lo, hi);
   } else {
-    return vec::gather(ti, p, idx, vec::mwhilelt(ti, 0, count_value(n)), vec::zeros(ti));
+    auto idx = make_index_vector<T>(ti, base_offset, stride);
+    if constexpr (use_unmasked_path_v<N, Ti>) {
+      return vec::gather(ti, p, idx);
+    } else {
+      return vec::gather(ti, p, idx, vec::mwhilelt(ti, 0, count_value(n)), vec::zeros(ti));
+    }
   }
 }
 
@@ -220,11 +240,23 @@ void scatter_dispatch(
     nint_t stride,
     N n,
     vec::Vec<Ti> v) {
-  auto idx = make_index_vector<T>(ti, base_offset, stride);
-  if constexpr (use_unmasked_path_v<N, Ti>) {
-    vec::scatter(ti, p, idx, v);
+  if constexpr (!gather_scatter_index_supported_v<T, Ti>) {
+    using Th = vec::Half<Ti>;
+    Th th;
+    const nint_t half_size = vec::size(th);
+    const nint_t count = count_value(n);
+    scatter_dispatch(th, p, base_offset, stride, std::min(count, half_size), vec::lower(ti, v));
+    scatter_dispatch(
+        th, p, base_offset + half_size * stride, stride,
+        std::max<nint_t>(0, count - half_size), vec::upper(ti, v));
+    return;
   } else {
-    vec::scatter(ti, p, idx, vec::mwhilelt(ti, 0, count_value(n)), v);
+    auto idx = make_index_vector<T>(ti, base_offset, stride);
+    if constexpr (use_unmasked_path_v<N, Ti>) {
+      vec::scatter(ti, p, idx, v);
+    } else {
+      vec::scatter(ti, p, idx, vec::mwhilelt(ti, 0, count_value(n)), v);
+    }
   }
 }
 
@@ -236,7 +268,11 @@ void precompute_input_aux(
     const TransformFn& fn,
   TOut* aux) {
   std::fill(aux, aux + aux_numel<InLayout, TOut>(layout), TOut{});
-  using To = vec::ScalableTag<TOut, 0>;
+  constexpr int input_pow_shift = vec::SizeShift<TOut, TIn>;
+  constexpr int output_pow = input_pow_shift > VEC_MAX_POW
+      ? VEC_MAX_POW - input_pow_shift
+      : 0;
+  using To = vec::ScalableTag<TOut, output_pow>;
   using Ti = vec::Rebind<TIn, To>;
   To to;
   Ti ti;

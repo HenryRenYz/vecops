@@ -1330,6 +1330,14 @@ using GatherScatterTypes = ::testing::Types<
 #endif
 >;
 
+template <typename TagT>
+static constexpr bool gather_scatter_index_supported_v =
+#if defined(CPU_CAPABILITY_SVE)
+    (Rebind<GatherScatterIndex<TypeOf<TagT>>, TagT>::POW2 <= VEC_MAX_POW);
+#else
+    true;
+#endif
+
 TYPED_TEST_SUITE(VecGatherScatterTest, GatherScatterTypes);
 
 // ============================================================================
@@ -1819,118 +1827,126 @@ TYPED_TEST(VecGatherScatterTest, GatherScatterRoundTrip) {
 TYPED_TEST(VecGatherScatterTest, MultiWordGather) {
   using T = typename TestFixture::Type;
   ScalableTag<T, 1> t2;
-  nint_t N = size(t2);
-  nint_t ws = this->full_size;
-  using IndexT = GatherScatterIndex<T>;
-  Rebind<IndexT, decltype(t2)> it;
+  if constexpr (gather_scatter_index_supported_v<decltype(t2)>) {
+    nint_t N = size(t2);
+    nint_t ws = this->full_size;
+    using IndexT = GatherScatterIndex<T>;
+    Rebind<IndexT, decltype(t2)> it;
 
-  // Reverse within each logical word; indices still use the single base pointer.
-  auto indices = std::make_unique<IndexT[]>(N);
-  for (nint_t i = 0; i < N; ++i) {
-    indices[i] = static_cast<IndexT>(ws - 1 - (i % ws));
-  }
+    // Reverse within each logical word; indices still use the single base pointer.
+    auto indices = std::make_unique<IndexT[]>(N);
+    for (nint_t i = 0; i < N; ++i) {
+      indices[i] = static_cast<IndexT>(ws - 1 - (i % ws));
+    }
 
-  auto idx = loadu(it, indices.get());
-  auto v = gather(t2, this->aligned_data_, idx);
+    auto idx = loadu(it, indices.get());
+    auto v = gather(t2, this->aligned_data_, idx);
 
-  for (nint_t i = 0; i < N; ++i) {
-    T expected = this->aligned_data_[indices[i]];
-    EXPECT_TRUE(test_utils::values_equal(expected, get(v, i)));
+    for (nint_t i = 0; i < N; ++i) {
+      T expected = this->aligned_data_[indices[i]];
+      EXPECT_TRUE(test_utils::values_equal(expected, get(v, i)));
+    }
   }
 }
 
 TYPED_TEST(VecGatherScatterTest, MultiWordScatter) {
   using T = typename TestFixture::Type;
   ScalableTag<T, 1> t2;
-  nint_t N = size(t2);
-  nint_t ws = this->full_size;
-  using IndexT = GatherScatterIndex<T>;
-  Rebind<IndexT, decltype(t2)> it;
+  if constexpr (gather_scatter_index_supported_v<decltype(t2)>) {
+    nint_t N = size(t2);
+    nint_t ws = this->full_size;
+    using IndexT = GatherScatterIndex<T>;
+    Rebind<IndexT, decltype(t2)> it;
 
-  T sentinel = test_utils::get_test_value<T>(-1);
-  for (int i = 0; i < 256; ++i) {
-    this->aligned_out_[i] = sentinel;
-  }
+    T sentinel = test_utils::get_test_value<T>(-1);
+    for (int i = 0; i < 256; ++i) {
+      this->aligned_out_[i] = sentinel;
+    }
 
-  std::unique_ptr<T[]> expected(new T[256]);
-  for (int i = 0; i < 256; ++i) {
-    expected[i] = sentinel;
-  }
+    std::unique_ptr<T[]> expected(new T[256]);
+    for (int i = 0; i < 256; ++i) {
+      expected[i] = sentinel;
+    }
 
-  // Reverse within each logical word; duplicate indices use last-write-wins.
-  auto indices = std::make_unique<IndexT[]>(N);
-  for (nint_t i = 0; i < N; ++i) {
-    indices[i] = static_cast<IndexT>(ws - 1 - (i % ws));
-  }
+    // Reverse within each logical word; duplicate indices use last-write-wins.
+    auto indices = std::make_unique<IndexT[]>(N);
+    for (nint_t i = 0; i < N; ++i) {
+      indices[i] = static_cast<IndexT>(ws - 1 - (i % ws));
+    }
 
-  auto idx = loadu(it, indices.get());
-  auto v = loadu(t2, this->aligned_data_);
+    auto idx = loadu(it, indices.get());
+    auto v = loadu(t2, this->aligned_data_);
 
-  scatter(t2, this->aligned_out_, idx, v);
-  for (nint_t i = 0; i < N; ++i) {
-    expected[indices[i]] = this->aligned_data_[i];
-  }
+    scatter(t2, this->aligned_out_, idx, v);
+    for (nint_t i = 0; i < N; ++i) {
+      expected[indices[i]] = this->aligned_data_[i];
+    }
 
-  for (int i = 0; i < 256; ++i) {
-    EXPECT_TRUE(test_utils::values_equal(expected[i], this->aligned_out_[i]));
+    for (int i = 0; i < 256; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(expected[i], this->aligned_out_[i]));
+    }
   }
 }
 
 TYPED_TEST(VecGatherScatterTest, MultiWordGatherWithN) {
   using T = typename TestFixture::Type;
   ScalableTag<T, 1> t2;
-  nint_t N = size(t2);
-  if (N < 2) return;
-  nint_t ws = this->full_size;
-  using IndexT = GatherScatterIndex<T>;
-  Rebind<IndexT, decltype(t2)> it;
+  if constexpr (gather_scatter_index_supported_v<decltype(t2)>) {
+    nint_t N = size(t2);
+    if (N < 2) return;
+    nint_t ws = this->full_size;
+    using IndexT = GatherScatterIndex<T>;
+    Rebind<IndexT, decltype(t2)> it;
 
-  auto indices = std::make_unique<IndexT[]>(N);
-  for (nint_t i = 0; i < N; ++i) {
-    indices[i] = static_cast<IndexT>(i % ws);
-  }
+    auto indices = std::make_unique<IndexT[]>(N);
+    for (nint_t i = 0; i < N; ++i) {
+      indices[i] = static_cast<IndexT>(i % ws);
+    }
 
-  auto idx = loadu(it, indices.get());
-  auto m = mwhilelt(t2, 0, N / 2);
-  T default_val = test_utils::get_test_value<T>(999);
+    auto idx = loadu(it, indices.get());
+    auto m = mwhilelt(t2, 0, N / 2);
+    T default_val = test_utils::get_test_value<T>(999);
 
-  auto v = gather(t2, this->aligned_data_, idx, m, default_val);
+    auto v = gather(t2, this->aligned_data_, idx, m, default_val);
 
-  for (nint_t i = 0; i < N / 2; ++i) {
-    T expected = this->aligned_data_[indices[i]];
-    EXPECT_TRUE(test_utils::values_equal(expected, get(v, i)));
-  }
-  for (nint_t i = N / 2; i < N; ++i) {
-    EXPECT_TRUE(test_utils::values_equal(default_val, get(v, i)));
+    for (nint_t i = 0; i < N / 2; ++i) {
+      T expected = this->aligned_data_[indices[i]];
+      EXPECT_TRUE(test_utils::values_equal(expected, get(v, i)));
+    }
+    for (nint_t i = N / 2; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(default_val, get(v, i)));
+    }
   }
 }
 
 TYPED_TEST(VecGatherScatterTest, MultiWordGatherWithMask) {
   using T = typename TestFixture::Type;
   ScalableTag<T, 1> t2;
-  nint_t N = size(t2);
-  if (N < 2) return;
-  nint_t ws = this->full_size;
-  using IndexT = GatherScatterIndex<T>;
-  Rebind<IndexT, decltype(t2)> it;
+  if constexpr (gather_scatter_index_supported_v<decltype(t2)>) {
+    nint_t N = size(t2);
+    if (N < 2) return;
+    nint_t ws = this->full_size;
+    using IndexT = GatherScatterIndex<T>;
+    Rebind<IndexT, decltype(t2)> it;
 
-  auto indices = std::make_unique<IndexT[]>(N);
-  for (nint_t i = 0; i < N; ++i) {
-    indices[i] = static_cast<IndexT>((i * 5 + 3) % ws);
-  }
+    auto indices = std::make_unique<IndexT[]>(N);
+    for (nint_t i = 0; i < N; ++i) {
+      indices[i] = static_cast<IndexT>((i * 5 + 3) % ws);
+    }
 
-  auto idx = loadu(it, indices.get());
-  auto m = mwhilelt(t2, 0, N / 2);
-  T default_val = test_utils::get_test_value<T>(777);
+    auto idx = loadu(it, indices.get());
+    auto m = mwhilelt(t2, 0, N / 2);
+    T default_val = test_utils::get_test_value<T>(777);
 
-  auto v = gather(t2, this->aligned_data_, idx, m, default_val);
+    auto v = gather(t2, this->aligned_data_, idx, m, default_val);
 
-  for (nint_t i = 0; i < N / 2; ++i) {
-    T expected = this->aligned_data_[indices[i]];
-    EXPECT_TRUE(test_utils::values_equal(expected, get(v, i)));
-  }
-  for (nint_t i = N / 2; i < N; ++i) {
-    EXPECT_TRUE(test_utils::values_equal(default_val, get(v, i)));
+    for (nint_t i = 0; i < N / 2; ++i) {
+      T expected = this->aligned_data_[indices[i]];
+      EXPECT_TRUE(test_utils::values_equal(expected, get(v, i)));
+    }
+    for (nint_t i = N / 2; i < N; ++i) {
+      EXPECT_TRUE(test_utils::values_equal(default_val, get(v, i)));
+    }
   }
 }
 
@@ -1938,47 +1954,49 @@ TYPED_TEST(VecGatherScatterTest, PositivePow2SubwordGatherScatter) {
   using T = typename TestFixture::Type;
   if constexpr (sizeof(T) < 4) {
     ScalableTag<T, 2> t4;
-    const nint_t N = size(t4);
-    if (N < 2) return;
-    using IndexT = GatherScatterIndex<T>;
-    Rebind<IndexT, decltype(t4)> it;
+    if constexpr (gather_scatter_index_supported_v<decltype(t4)>) {
+      const nint_t N = size(t4);
+      if (N < 2) return;
+      using IndexT = GatherScatterIndex<T>;
+      Rebind<IndexT, decltype(t4)> it;
 
-    auto indices = std::make_unique<IndexT[]>(N);
-    for (nint_t i = 0; i < N; ++i) {
-      indices[i] = static_cast<IndexT>(i);
-    }
+      auto indices = std::make_unique<IndexT[]>(N);
+      for (nint_t i = 0; i < N; ++i) {
+        indices[i] = static_cast<IndexT>(i);
+      }
 
-    auto idx = loadu(it, indices.get());
-    auto gathered = gather(t4, this->aligned_data_, idx);
-    for (nint_t i = 0; i < N; ++i) {
-      EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[indices[i]], get(gathered, i)))
-          << "gather lane=" << i;
-    }
+      auto idx = loadu(it, indices.get());
+      auto gathered = gather(t4, this->aligned_data_, idx);
+      for (nint_t i = 0; i < N; ++i) {
+        EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[indices[i]], get(gathered, i)))
+            << "gather lane=" << i;
+      }
 
-    auto mask = mwhilelt(t4, 0, N / 2);
-    T default_val = test_utils::get_test_value<T>(77);
-    auto masked_gathered = gather(t4, this->aligned_data_, idx, mask, fill(t4, default_val));
-    for (nint_t i = 0; i < N; ++i) {
-      T expected = i < N / 2 ? this->aligned_data_[indices[i]] : default_val;
-      EXPECT_TRUE(test_utils::values_equal(expected, get(masked_gathered, i)))
-          << "masked gather lane=" << i;
-    }
+      auto mask = mwhilelt(t4, 0, N / 2);
+      T default_val = test_utils::get_test_value<T>(77);
+      auto masked_gathered = gather(t4, this->aligned_data_, idx, mask, fill(t4, default_val));
+      for (nint_t i = 0; i < N; ++i) {
+        T expected = i < N / 2 ? this->aligned_data_[indices[i]] : default_val;
+        EXPECT_TRUE(test_utils::values_equal(expected, get(masked_gathered, i)))
+            << "masked gather lane=" << i;
+      }
 
-    T sentinel = test_utils::get_test_value<T>(-1);
-    for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
-    auto values = loadu(t4, this->aligned_data_);
-    scatter(t4, this->aligned_out_, idx, values);
-    for (nint_t i = 0; i < N; ++i) {
-      EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], this->aligned_out_[indices[i]]))
-          << "scatter lane=" << i;
-    }
+      T sentinel = test_utils::get_test_value<T>(-1);
+      for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
+      auto values = loadu(t4, this->aligned_data_);
+      scatter(t4, this->aligned_out_, idx, values);
+      for (nint_t i = 0; i < N; ++i) {
+        EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], this->aligned_out_[indices[i]]))
+            << "scatter lane=" << i;
+      }
 
-    for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
-    scatter(t4, this->aligned_out_, idx, mask, values);
-    for (nint_t i = 0; i < N; ++i) {
-      T expected = i < N / 2 ? this->aligned_data_[i] : sentinel;
-      EXPECT_TRUE(test_utils::values_equal(expected, this->aligned_out_[indices[i]]))
-          << "masked scatter lane=" << i;
+      for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
+      scatter(t4, this->aligned_out_, idx, mask, values);
+      for (nint_t i = 0; i < N; ++i) {
+        T expected = i < N / 2 ? this->aligned_data_[i] : sentinel;
+        EXPECT_TRUE(test_utils::values_equal(expected, this->aligned_out_[indices[i]]))
+            << "masked scatter lane=" << i;
+      }
     }
   }
 }
@@ -2451,6 +2469,7 @@ TYPED_TEST(VecGatherScatterTest, PartialHalfWordRoundTrip) {
 // to isolate which concat or recursion step introduces errors.
 // ============================================================================
 
+#ifndef CPU_CAPABILITY_SVE
 TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
   using T = typename TestFixture::Type;
   using IndexT = GatherScatterIndex<T>;
@@ -2645,6 +2664,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
     }
   }
 }
+#endif
 
 // ============================================================================
 // ScalableTag Tests

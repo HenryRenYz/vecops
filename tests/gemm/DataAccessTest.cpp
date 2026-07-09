@@ -104,9 +104,9 @@ template <> struct TypeLabel<int8_t> { static constexpr const char* value = "i8"
 template <> struct TypeLabel<uint8_t> { static constexpr const char* value = "u8"; };
 template <> struct TypeLabel<int16_t> { static constexpr const char* value = "i16"; };
 template <> struct TypeLabel<uint16_t> { static constexpr const char* value = "u16"; };
-template <> struct TypeLabel<float16_t> { static constexpr const char* value = "f16"; };
+template <> struct TypeLabel<vecops::float16_t> { static constexpr const char* value = "f16"; };
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-template <> struct TypeLabel<bfloat16_t> { static constexpr const char* value = "bf16"; };
+template <> struct TypeLabel<vecops::bfloat16_t> { static constexpr const char* value = "bf16"; };
 #endif
 template <> struct TypeLabel<int32_t> { static constexpr const char* value = "i32"; };
 template <> struct TypeLabel<uint32_t> { static constexpr const char* value = "u32"; };
@@ -337,15 +337,15 @@ class DataAccessConversionTest : public ::testing::Test {};
 using DataAccessConversionCases = ::testing::Types<
     DATA_ACCESS_PROMOTE_SHIFT1(int8_t, int16_t),
     DATA_ACCESS_PROMOTE_SHIFT1(int8_t, uint16_t),
-    DATA_ACCESS_PROMOTE_SHIFT1(int8_t, float16_t),
+    DATA_ACCESS_PROMOTE_SHIFT1(int8_t, vecops::float16_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_PROMOTE_SHIFT1(int8_t, bfloat16_t),
+    DATA_ACCESS_PROMOTE_SHIFT1(int8_t, vecops::bfloat16_t),
 #endif
     DATA_ACCESS_PROMOTE_SHIFT1(uint8_t, uint16_t),
     DATA_ACCESS_PROMOTE_SHIFT1(uint8_t, int16_t),
-    DATA_ACCESS_PROMOTE_SHIFT1(uint8_t, float16_t),
+    DATA_ACCESS_PROMOTE_SHIFT1(uint8_t, vecops::float16_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_PROMOTE_SHIFT1(uint8_t, bfloat16_t),
+    DATA_ACCESS_PROMOTE_SHIFT1(uint8_t, vecops::bfloat16_t),
 #endif
     DATA_ACCESS_PROMOTE_SHIFT2(int8_t, int32_t),
     DATA_ACCESS_PROMOTE_SHIFT2(int8_t, uint32_t),
@@ -364,13 +364,13 @@ using DataAccessConversionCases = ::testing::Types<
     DATA_ACCESS_PROMOTE_SHIFT1(uint16_t, int32_t),
     DATA_ACCESS_PROMOTE_SHIFT1(uint16_t, uint32_t),
     DATA_ACCESS_PROMOTE_SHIFT1(uint16_t, float32_t),
-    DATA_ACCESS_PROMOTE_SHIFT1(float16_t, int32_t),
-    DATA_ACCESS_PROMOTE_SHIFT1(float16_t, uint32_t),
-    DATA_ACCESS_PROMOTE_SHIFT1(float16_t, float32_t),
+    DATA_ACCESS_PROMOTE_SHIFT1(vecops::float16_t, int32_t),
+    DATA_ACCESS_PROMOTE_SHIFT1(vecops::float16_t, uint32_t),
+    DATA_ACCESS_PROMOTE_SHIFT1(vecops::float16_t, float32_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_PROMOTE_SHIFT1(bfloat16_t, int32_t),
-    DATA_ACCESS_PROMOTE_SHIFT1(bfloat16_t, uint32_t),
-    DATA_ACCESS_PROMOTE_SHIFT1(bfloat16_t, float32_t),
+    DATA_ACCESS_PROMOTE_SHIFT1(vecops::bfloat16_t, int32_t),
+    DATA_ACCESS_PROMOTE_SHIFT1(vecops::bfloat16_t, uint32_t),
+    DATA_ACCESS_PROMOTE_SHIFT1(vecops::bfloat16_t, float32_t),
 #endif
     DATA_ACCESS_PROMOTE_SHIFT2(int16_t, int64_t),
     DATA_ACCESS_PROMOTE_SHIFT2(int16_t, uint64_t),
@@ -378,13 +378,13 @@ using DataAccessConversionCases = ::testing::Types<
     DATA_ACCESS_PROMOTE_SHIFT2(uint16_t, int64_t),
     DATA_ACCESS_PROMOTE_SHIFT2(uint16_t, uint64_t),
     DATA_ACCESS_PROMOTE_SHIFT2(uint16_t, float64_t),
-    DATA_ACCESS_PROMOTE_SHIFT2(float16_t, int64_t),
-    DATA_ACCESS_PROMOTE_SHIFT2(float16_t, uint64_t),
-    DATA_ACCESS_PROMOTE_SHIFT2(float16_t, float64_t),
+    DATA_ACCESS_PROMOTE_SHIFT2(vecops::float16_t, int64_t),
+    DATA_ACCESS_PROMOTE_SHIFT2(vecops::float16_t, uint64_t),
+    DATA_ACCESS_PROMOTE_SHIFT2(vecops::float16_t, float64_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_PROMOTE_SHIFT2(bfloat16_t, int64_t),
-    DATA_ACCESS_PROMOTE_SHIFT2(bfloat16_t, uint64_t),
-    DATA_ACCESS_PROMOTE_SHIFT2(bfloat16_t, float64_t),
+    DATA_ACCESS_PROMOTE_SHIFT2(vecops::bfloat16_t, int64_t),
+    DATA_ACCESS_PROMOTE_SHIFT2(vecops::bfloat16_t, uint64_t),
+    DATA_ACCESS_PROMOTE_SHIFT2(vecops::bfloat16_t, float64_t),
 #endif
     DATA_ACCESS_PROMOTE_SHIFT1(int32_t, int64_t),
     DATA_ACCESS_PROMOTE_SHIFT1(int32_t, uint64_t),
@@ -399,29 +399,29 @@ using DataAccessConversionCases = ::testing::Types<
     DATA_ACCESS_DEMOTE_SHIFT1(int16_t, uint8_t),
     DATA_ACCESS_DEMOTE_SHIFT1(uint16_t, int8_t),
     DATA_ACCESS_DEMOTE_SHIFT1(uint16_t, uint8_t),
-    DATA_ACCESS_DEMOTE_SHIFT1(float16_t, int8_t),
-    DATA_ACCESS_DEMOTE_SHIFT1(float16_t, uint8_t),
+    DATA_ACCESS_DEMOTE_SHIFT1(vecops::float16_t, int8_t),
+    DATA_ACCESS_DEMOTE_SHIFT1(vecops::float16_t, uint8_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_DEMOTE_SHIFT1(bfloat16_t, int8_t),
-    DATA_ACCESS_DEMOTE_SHIFT1(bfloat16_t, uint8_t),
+    DATA_ACCESS_DEMOTE_SHIFT1(vecops::bfloat16_t, int8_t),
+    DATA_ACCESS_DEMOTE_SHIFT1(vecops::bfloat16_t, uint8_t),
 #endif
     DATA_ACCESS_DEMOTE_SHIFT1(int32_t, int16_t),
     DATA_ACCESS_DEMOTE_SHIFT1(int32_t, uint16_t),
-    DATA_ACCESS_DEMOTE_SHIFT1(int32_t, float16_t),
+    DATA_ACCESS_DEMOTE_SHIFT1(int32_t, vecops::float16_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_DEMOTE_SHIFT1(int32_t, bfloat16_t),
+    DATA_ACCESS_DEMOTE_SHIFT1(int32_t, vecops::bfloat16_t),
 #endif
     DATA_ACCESS_DEMOTE_SHIFT1(uint32_t, int16_t),
     DATA_ACCESS_DEMOTE_SHIFT1(uint32_t, uint16_t),
-    DATA_ACCESS_DEMOTE_SHIFT1(uint32_t, float16_t),
+    DATA_ACCESS_DEMOTE_SHIFT1(uint32_t, vecops::float16_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_DEMOTE_SHIFT1(uint32_t, bfloat16_t),
+    DATA_ACCESS_DEMOTE_SHIFT1(uint32_t, vecops::bfloat16_t),
 #endif
     DATA_ACCESS_DEMOTE_SHIFT1(float32_t, int16_t),
     DATA_ACCESS_DEMOTE_SHIFT1(float32_t, uint16_t),
-    DATA_ACCESS_DEMOTE_SHIFT1(float32_t, float16_t),
+    DATA_ACCESS_DEMOTE_SHIFT1(float32_t, vecops::float16_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_DEMOTE_SHIFT1(float32_t, bfloat16_t),
+    DATA_ACCESS_DEMOTE_SHIFT1(float32_t, vecops::bfloat16_t),
 #endif
     DATA_ACCESS_DEMOTE_SHIFT2(int32_t, int8_t),
     DATA_ACCESS_DEMOTE_SHIFT2(int32_t, uint8_t),
@@ -440,21 +440,21 @@ using DataAccessConversionCases = ::testing::Types<
     DATA_ACCESS_DEMOTE_SHIFT1(float64_t, float32_t),
     DATA_ACCESS_DEMOTE_SHIFT2(int64_t, int16_t),
     DATA_ACCESS_DEMOTE_SHIFT2(int64_t, uint16_t),
-    DATA_ACCESS_DEMOTE_SHIFT2(int64_t, float16_t),
+    DATA_ACCESS_DEMOTE_SHIFT2(int64_t, vecops::float16_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_DEMOTE_SHIFT2(int64_t, bfloat16_t),
+    DATA_ACCESS_DEMOTE_SHIFT2(int64_t, vecops::bfloat16_t),
 #endif
     DATA_ACCESS_DEMOTE_SHIFT2(uint64_t, int16_t),
     DATA_ACCESS_DEMOTE_SHIFT2(uint64_t, uint16_t),
-    DATA_ACCESS_DEMOTE_SHIFT2(uint64_t, float16_t),
+    DATA_ACCESS_DEMOTE_SHIFT2(uint64_t, vecops::float16_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_DEMOTE_SHIFT2(uint64_t, bfloat16_t),
+    DATA_ACCESS_DEMOTE_SHIFT2(uint64_t, vecops::bfloat16_t),
 #endif
     DATA_ACCESS_DEMOTE_SHIFT2(float64_t, int16_t),
     DATA_ACCESS_DEMOTE_SHIFT2(float64_t, uint16_t),
-    DATA_ACCESS_DEMOTE_SHIFT2(float64_t, float16_t),
+    DATA_ACCESS_DEMOTE_SHIFT2(float64_t, vecops::float16_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_DEMOTE_SHIFT2(float64_t, bfloat16_t),
+    DATA_ACCESS_DEMOTE_SHIFT2(float64_t, vecops::bfloat16_t),
 #endif
     DATA_ACCESS_DEMOTE_SHIFT3(int64_t, int8_t),
     DATA_ACCESS_DEMOTE_SHIFT3(int64_t, uint8_t),
@@ -465,22 +465,22 @@ using DataAccessConversionCases = ::testing::Types<
     DATA_ACCESS_CONVERT_POWS(int8_t, uint8_t),
     DATA_ACCESS_CONVERT_POWS(uint8_t, int8_t),
     DATA_ACCESS_CONVERT_POWS(int16_t, uint16_t),
-    DATA_ACCESS_CONVERT_POWS(int16_t, float16_t),
+    DATA_ACCESS_CONVERT_POWS(int16_t, vecops::float16_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_CONVERT_POWS(int16_t, bfloat16_t),
+    DATA_ACCESS_CONVERT_POWS(int16_t, vecops::bfloat16_t),
 #endif
     DATA_ACCESS_CONVERT_POWS(uint16_t, int16_t),
-    DATA_ACCESS_CONVERT_POWS(uint16_t, float16_t),
+    DATA_ACCESS_CONVERT_POWS(uint16_t, vecops::float16_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_CONVERT_POWS(uint16_t, bfloat16_t),
+    DATA_ACCESS_CONVERT_POWS(uint16_t, vecops::bfloat16_t),
 #endif
-    DATA_ACCESS_CONVERT_POWS(float16_t, int16_t),
-    DATA_ACCESS_CONVERT_POWS(float16_t, uint16_t),
+    DATA_ACCESS_CONVERT_POWS(vecops::float16_t, int16_t),
+    DATA_ACCESS_CONVERT_POWS(vecops::float16_t, uint16_t),
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    DATA_ACCESS_CONVERT_POWS(float16_t, bfloat16_t),
-    DATA_ACCESS_CONVERT_POWS(bfloat16_t, int16_t),
-    DATA_ACCESS_CONVERT_POWS(bfloat16_t, uint16_t),
-    DATA_ACCESS_CONVERT_POWS(bfloat16_t, float16_t),
+    DATA_ACCESS_CONVERT_POWS(vecops::float16_t, vecops::bfloat16_t),
+    DATA_ACCESS_CONVERT_POWS(vecops::bfloat16_t, int16_t),
+    DATA_ACCESS_CONVERT_POWS(vecops::bfloat16_t, uint16_t),
+    DATA_ACCESS_CONVERT_POWS(vecops::bfloat16_t, vecops::float16_t),
 #endif
     DATA_ACCESS_CONVERT_POWS(int32_t, uint32_t),
     DATA_ACCESS_CONVERT_POWS(int32_t, float32_t),

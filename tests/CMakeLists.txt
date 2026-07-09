@@ -42,7 +42,7 @@ endif()
 
 # ── Default Arch Code Lists (full sequence per family) ──────
 set(VECOPS_ARCH_LIST_x86 Scalar AVX AVX2 AVX512 Native)
-set(VECOPS_ARCH_LIST_ARM Scalar NEON SVE SVE2 Native)
+set(VECOPS_ARCH_LIST_ARM Scalar SVE SVE2 Native)
 set(VECOPS_ARCH_LIST ${VECOPS_ARCH_LIST_${VECOPS_ARCH_FAMILY}})
 
 # ======================================================================
@@ -75,6 +75,12 @@ function(add_multiarch_executable NAME)
         set(TARGET_NAME "${NAME}-${CODE}")
         add_executable(${TARGET_NAME} ${ARG_FILES})
         target_compile_options(${TARGET_NAME} PRIVATE -march=${MARCH})
+        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND CODE STREQUAL "Scalar")
+            target_compile_definitions(${TARGET_NAME} PRIVATE
+                CPU_CAPABILITY=GENERIC
+                CPU_CAPABILITY_GENERIC=1
+            )
+        endif()
         target_link_libraries(${TARGET_NAME} PRIVATE vecops gtest gtest_main)
         gtest_discover_tests(${TARGET_NAME})
 

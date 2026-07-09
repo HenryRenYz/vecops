@@ -7,7 +7,11 @@
 
 #include "vecops/Features.h"
 
-#if defined(ARCH_X86_FAMILY)
+#if defined(CPU_CAPABILITY_GENERIC) && !defined(CPU_CAPABILITY)
+  #define CPU_CAPABILITY GENERIC
+#endif
+
+#if defined(ARCH_X86_FAMILY) && !defined(CPU_CAPABILITY_GENERIC)
   #if defined(HAS_AVX512F) && defined(HAS_AVX512CD) && defined(HAS_AVX512BW) && defined(HAS_AVX512DQ)
     #define HAS_CPU_CAPABILITY_AVX512 1
   #endif
@@ -20,7 +24,7 @@
   #define VEC_MAX_POW (5)
   #define VEC_HW_MIN_POW (-2) // min POW2 in ScalableTag that Vec can be of a hardware vector rather than software emulated
 #endif // ARCH_X86_FAMILY
-#if defined(ARCH_ARM_FAMILY)
+#if defined(ARCH_ARM_FAMILY) && !defined(CPU_CAPABILITY_GENERIC)
   #if defined(HAS_SVE)
     #define HAS_CPU_CAPABILITY_SVE 1
     #define VEC_MAX_POW (2) // only up to svdtypex4_t is supported till SVE2p1
@@ -32,6 +36,13 @@
     #define VEC_HW_MIN_POW (0) // TODO temp
   #endif
 #endif // ARCH_ARM_FAMILY
+
+#if defined(CPU_CAPABILITY_GENERIC)
+  #define VEC_WIDTH 128 // default width for scalar vector implementation
+  #define MAX_VEC_WIDTH VEC_WIDTH
+  #define VEC_MAX_POW (5) // default max pow2 for scalar implementation
+  #define VEC_HW_MIN_POW (0)
+#endif // CPU_CAPABILITY_GENERIC
 
 #if defined(CPU_CAPABILITY_AVX512) || (defined(HAS_CPU_CAPABILITY_AVX512) && !defined(CPU_CAPABILITY))
   #if defined(CPU_CAPABILITY) || !defined(HAS_CPU_CAPABILITY_AVX512)

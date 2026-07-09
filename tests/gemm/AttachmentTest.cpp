@@ -11,6 +11,8 @@ using namespace vecops;
 using namespace vecops::gemm;
 using namespace vecops::vec;
 
+using test_float16_t = vecops::float16_t;
+
 // ============================================================================
 // Helpers: POW2-gated functors
 // ============================================================================
@@ -105,8 +107,8 @@ void runPositionalLambdaTest() {
   OutTag t_o;
   InTag t_i;
 
-  constexpr nint_t N_out = size(t_o);
-  constexpr nint_t N_in  = size(t_i);
+  nint_t N_out = size(t_o);
+  nint_t N_in  = size(t_i);
 
   auto buf_in  = alloc_aligned<Ei>(N_in);
   auto buf_out = alloc_aligned<Eo>(N_out);
@@ -144,8 +146,8 @@ void runElementwiseLambdaTest() {
   OutTag t_o;
   InTag t_i;
 
-  constexpr nint_t N_out = size(t_o);
-  constexpr nint_t N_in  = size(t_i);
+  nint_t N_out = size(t_o);
+  nint_t N_in  = size(t_i);
 
   auto buf_in  = alloc_aligned<Ei>(N_in);
   auto buf_out = alloc_aligned<Eo>(N_out);
@@ -184,8 +186,8 @@ void runConversionTest() {
   OutTag t_o;
   InTag t_i;
 
-  constexpr nint_t N_out = size(t_o);
-  constexpr nint_t N_in  = size(t_i);
+  nint_t N_out = size(t_o);
+  nint_t N_in  = size(t_i);
 
   auto buf_in  = alloc_aligned<Ei>(N_in);
   auto buf_out = alloc_aligned<Eo>(N_out);
@@ -221,8 +223,8 @@ void runConversionBranchCTest() {
   OutTag t_o;
   InTag t_i;
 
-  constexpr nint_t N_out = size(t_o);
-  constexpr nint_t N_in  = size(t_i);
+  nint_t N_out = size(t_o);
+  nint_t N_in  = size(t_i);
 
   auto buf_in  = alloc_aligned<Ei>(N_in);
   auto buf_out = alloc_aligned<Eo>(N_out);
@@ -260,7 +262,7 @@ void runConversionElementwiseTest() {
   OutTag t_o;
   InTag t_i;
 
-  constexpr nint_t N = size(t_o);
+  nint_t N = size(t_o);
   auto buf_in  = alloc_aligned<Ei>(N);
   auto buf_out_coord = alloc_aligned<Eo>(N);
   auto buf_out_nocoord = alloc_aligned<Eo>(N);
@@ -288,15 +290,34 @@ void runConversionElementwiseTest() {
 // Each pair gets 3 POW2 tests per adapter class
 // ============================================================================
 
+template <typename Eo, typename Ei, int Pow2>
+static constexpr bool lambda_pow2_test_supported_v =
+#if defined(CPU_CAPABILITY_SVE)
+    !((sizeof(Eo) > sizeof(Ei) && Pow2 == PositionedVecFn<Eo, Ei>::max_output_pow2) ||
+      (sizeof(Eo) < sizeof(Ei) && Pow2 == PositionedVecFn<Eo, Ei>::min_output_pow2));
+#else
+    true;
+#endif
+
 #define MAKE_POW2_TESTS(ADAPTER_CLASS, TEST_GROUP, Eo, Ei, runner_func)   \
   TEST(TEST_GROUP, Ei##_to_##Eo##_min) {                                   \
-    runner_func<Eo, Ei, PositionedVecFn<Eo, Ei>::min_output_pow2>();       \
+    constexpr int Pow2 = PositionedVecFn<Eo, Ei>::min_output_pow2;         \
+    if constexpr (lambda_pow2_test_supported_v<Eo, Ei, Pow2>) {            \
+      runner_func<Eo, Ei, Pow2>();                                         \
+    } else {                                                               \
+      GTEST_SKIP() << "SVE backend cannot represent this boundary tag";    \
+    }                                                                      \
   }                                                                        \
   TEST(TEST_GROUP, Ei##_to_##Eo##_pow0) {                                  \
     runner_func<Eo, Ei, 0>();                                              \
   }                                                                        \
   TEST(TEST_GROUP, Ei##_to_##Eo##_max) {                                   \
-    runner_func<Eo, Ei, PositionedVecFn<Eo, Ei>::max_output_pow2>();       \
+    constexpr int Pow2 = PositionedVecFn<Eo, Ei>::max_output_pow2;         \
+    if constexpr (lambda_pow2_test_supported_v<Eo, Ei, Pow2>) {            \
+      runner_func<Eo, Ei, Pow2>();                                         \
+    } else {                                                               \
+      GTEST_SKIP() << "SVE backend cannot represent this boundary tag";    \
+    }                                                                      \
   }
 
 #define ALL_TESTS(Eo, Ei)                                                  \
@@ -340,8 +361,8 @@ CONV_POW0_TESTS(int32_t, int32_t)
 LAMBDA_POW2_TESTS(float64_t, float64_t)    // equal, 8-byte
 CONV_POW0_TESTS(float64_t, float64_t)
 
-LAMBDA_POW2_TESTS(float16_t, float16_t)    // equal, 2-byte
-CONV_POW0_TESTS(float16_t, float16_t)
+LAMBDA_POW2_TESTS(test_float16_t, test_float16_t)    // equal, 2-byte
+CONV_POW0_TESTS(test_float16_t, test_float16_t)
 
 LAMBDA_POW2_TESTS(int8_t, int8_t)          // equal, 1-byte
 CONV_POW0_TESTS(int8_t, int8_t)
@@ -349,14 +370,14 @@ CONV_POW0_TESTS(int8_t, int8_t)
 LAMBDA_POW2_TESTS(float32_t, int32_t)      // equal cross-domain
 CONV_POW0_TESTS(float32_t, int32_t)
 
-LAMBDA_POW2_TESTS(float32_t, float16_t)    // widening 2:1
-CONV_POW0_TESTS(float32_t, float16_t)
+LAMBDA_POW2_TESTS(float32_t, test_float16_t)    // widening 2:1
+CONV_POW0_TESTS(float32_t, test_float16_t)
 
 LAMBDA_POW2_TESTS(int32_t, int8_t)         // widening 4:1
 CONV_POW0_TESTS(int32_t, int8_t)
 
-LAMBDA_POW2_TESTS(float16_t, float32_t)    // narrowing 2:1
-CONV_POW0_TESTS(float16_t, float32_t)
+LAMBDA_POW2_TESTS(test_float16_t, float32_t)    // narrowing 2:1
+CONV_POW0_TESTS(test_float16_t, float32_t)
 
 LAMBDA_POW2_TESTS(int8_t, int32_t)         // narrowing 4:1
 CONV_POW0_TESTS(int8_t, int32_t)
@@ -398,7 +419,7 @@ TEST(ConversionVecAdapterElementwise, f64_coord_discard) {
 }
 
 TEST(ConversionVecAdapterElementwise, f16_coord_discard) {
-  runConversionElementwiseTest<float16_t, float16_t>();
+  runConversionElementwiseTest<test_float16_t, test_float16_t>();
 }
 
 TEST(ConversionVecAdapterElementwise, i8_coord_discard) {
@@ -410,10 +431,16 @@ TEST(ConversionVecAdapterElementwise, i8_coord_discard) {
 // ============================================================================
 
 TEST(PositionalLambdaAdapter, upward_skip_multiple) {
-  using FnType = PartialPositionedFn<float32_t, float32_t, 3>;
+  constexpr int supported_pow2 =
+#if defined(CPU_CAPABILITY_SVE)
+      2;
+#else
+      3;
+#endif
+  using FnType = PartialPositionedFn<float32_t, float32_t, supported_pow2>;
   PositionalLambdaVecAdapter<float32_t, float32_t, FnType> adapter{FnType{}};
   ScalableTag<float32_t, 0> t;
-  constexpr nint_t N = size(t);
+  nint_t N = size(t);
   auto b_in = alloc_aligned<float32_t>(N);
   auto b_out = alloc_aligned<float32_t>(N);
   for (nint_t i = 0; i < N; ++i) b_in[i] = get_value<float32_t>(i);
@@ -426,10 +453,16 @@ TEST(PositionalLambdaAdapter, upward_skip_multiple) {
 }
 
 TEST(ElementwiseLambdaAdapter, upward_skip_multiple) {
-  using FnType = PartialElementwiseFn<float32_t, float32_t, 3>;
+  constexpr int supported_pow2 =
+#if defined(CPU_CAPABILITY_SVE)
+      2;
+#else
+      3;
+#endif
+  using FnType = PartialElementwiseFn<float32_t, float32_t, supported_pow2>;
   ElementwiseLambdaVecAdapter<float32_t, float32_t, FnType> adapter{FnType{}};
   ScalableTag<float32_t, 0> t;
-  constexpr nint_t N = size(t);
+  nint_t N = size(t);
   auto b_in = alloc_aligned<float32_t>(N);
   auto b_out = alloc_aligned<float32_t>(N);
   for (nint_t i = 0; i < N; ++i) b_in[i] = get_value<float32_t>(i);
@@ -448,8 +481,12 @@ TEST(ElementwiseLambdaAdapter, upward_skip_multiple) {
 TEST(PositionalLambdaAdapter, downward_deep) {
   using FnType = PartialPositionedFn<float32_t, float32_t, 0>;
   PositionalLambdaVecAdapter<float32_t, float32_t, FnType> adapter{FnType{}};
+#if defined(CPU_CAPABILITY_SVE)
+  ScalableTag<float32_t, 2> t;
+#else
   ScalableTag<float32_t, 4> t;
-  constexpr nint_t N = size(t);
+#endif
+  nint_t N = size(t);
   auto b_in = alloc_aligned<float32_t>(N);
   auto b_out = alloc_aligned<float32_t>(N);
   for (nint_t i = 0; i < N; ++i) b_in[i] = get_value<float32_t>(i);
@@ -476,11 +513,11 @@ TEST(Traits, ElementwiseLambda_is_elementwise) {
 }
 
 TEST(Traits, is_widening_f16_to_f32) {
-  EXPECT_TRUE((ElementwiseLambdaVecAdapter<float32_t, float16_t,
-      PartialElementwiseFn<float32_t, float16_t, 0>>::is_widening));
+  EXPECT_TRUE((ElementwiseLambdaVecAdapter<float32_t, test_float16_t,
+      PartialElementwiseFn<float32_t, test_float16_t, 0>>::is_widening));
 }
 
 TEST(Traits, is_narrowing_f32_to_f16) {
-  EXPECT_TRUE((ElementwiseLambdaVecAdapter<float16_t, float32_t,
-      PartialElementwiseFn<float16_t, float32_t, 0>>::is_narrowing));
+  EXPECT_TRUE((ElementwiseLambdaVecAdapter<test_float16_t, float32_t,
+      PartialElementwiseFn<test_float16_t, float32_t, 0>>::is_narrowing));
 }

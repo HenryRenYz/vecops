@@ -566,16 +566,29 @@ VECOPS_VFUNC void store(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) < 4)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
-  return word::gather(t, p, i);
+  if constexpr (num_words(t) > 1) {
+    Half<T> th;
+    using Ti = Rebind<GatherScatterIndex<TypeOf<T>>, T>;
+    constexpr Ti ti;
+    auto lo = vec::gather(th, p, word::lower(ti, i));
+    auto hi = vec::gather(th, p, word::upper(ti, i));
+    return word::concat(t, lo, hi);
+  } else {
+    return word::gather(t, p, i);
+  }
 }
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i) {
-  using namespace details;
-  constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
-  return vmap(
-      t, [=](auto tt, const TypeOf<T>* pp, auto&& ii) { return word::gather(tt, pp, ii); },
-      p, ShardVec(it, i)
-  );
+  if constexpr (num_words(t) > 1) {
+    Half<T> th;
+    using Ti = Rebind<GatherScatterIndex<TypeOf<T>>, T>;
+    constexpr Ti ti;
+    auto lo = vec::gather(th, p, word::lower(ti, i));
+    auto hi = vec::gather(th, p, word::upper(ti, i));
+    return word::concat(t, lo, hi);
+  } else {
+    return word::gather(t, p, i);
+  }
 }
 
 /**
@@ -585,17 +598,45 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) < 4)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
-  return word::gather(t, p, i, n, default_v);
+  VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
+  if constexpr (num_words(t) > 1) {
+    Half<T> th;
+    using Ti = Rebind<GatherScatterIndex<TypeOf<T>>, T>;
+    constexpr Ti ti;
+    auto half_size = size(th);
+    auto default_lo = word::lower(t, default_v);
+    auto default_hi = word::upper(t, default_v);
+    if (n <= half_size) {
+      auto lo = vec::gather(th, p, word::lower(ti, i), n, default_lo);
+      return word::concat(t, lo, default_hi);
+    }
+    auto lo = vec::gather(th, p, word::lower(ti, i));
+    auto hi = vec::gather(th, p, word::upper(ti, i), n - half_size, default_hi);
+    return word::concat(t, lo, hi);
+  } else {
+    return word::gather(t, p, i, n, default_v);
+  }
 }
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> default_v) {
-  using namespace details;
-  constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
-  return vmap(
-      t, n, [=](auto tt, const TypeOf<T>* pp, auto&& ii, auto&& vv) { return word::gather(tt, pp, ii); },
-      [=](auto tt, nint_t rem, const TypeOf<T>* pp, auto&& ii, auto&& vv) { return word::gather(tt, pp, ii, rem, vv); },
-      p, ShardVec(it, i), ShardVec(t, default_v)
-  );
+  VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
+  if constexpr (num_words(t) > 1) {
+    Half<T> th;
+    using Ti = Rebind<GatherScatterIndex<TypeOf<T>>, T>;
+    constexpr Ti ti;
+    auto half_size = size(th);
+    auto default_lo = word::lower(t, default_v);
+    auto default_hi = word::upper(t, default_v);
+    if (n <= half_size) {
+      auto lo = vec::gather(th, p, word::lower(ti, i), n, default_lo);
+      return word::concat(t, lo, default_hi);
+    }
+    auto lo = vec::gather(th, p, word::lower(ti, i));
+    auto hi = vec::gather(th, p, word::upper(ti, i), n - half_size, default_hi);
+    return word::concat(t, lo, hi);
+  } else {
+    return word::gather(t, p, i, n, default_v);
+  }
 }
 
 /**
@@ -622,16 +663,29 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) < 4)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
-  return word::gather(t, p, i, m, default_v);
+  if constexpr (num_words(t) > 1) {
+    Half<T> th;
+    using Ti = Rebind<GatherScatterIndex<TypeOf<T>>, T>;
+    constexpr Ti ti;
+    auto lo = vec::gather(th, p, word::lower(ti, i), word::lower(t, m), word::lower(t, default_v));
+    auto hi = vec::gather(th, p, word::upper(ti, i), word::upper(t, m), word::upper(t, default_v));
+    return word::concat(t, lo, hi);
+  } else {
+    return word::gather(t, p, i, m, default_v);
+  }
 }
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
 VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> default_v) {
-  using namespace details;
-  constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
-  return vmap(
-      t, [=](auto tt, const TypeOf<T>* pp, auto&& ii, auto&& mm, auto&& vv) { return word::gather(tt, pp, ii, mm, vv); },
-      p, ShardVec(it, i), ShardMask(t, m), ShardVec(t, default_v)
-  );
+  if constexpr (num_words(t) > 1) {
+    Half<T> th;
+    using Ti = Rebind<GatherScatterIndex<TypeOf<T>>, T>;
+    constexpr Ti ti;
+    auto lo = vec::gather(th, p, word::lower(ti, i), word::lower(t, m), word::lower(t, default_v));
+    auto hi = vec::gather(th, p, word::upper(ti, i), word::upper(t, m), word::upper(t, default_v));
+    return word::concat(t, lo, hi);
+  } else {
+    return word::gather(t, p, i, m, default_v);
+  }
 }
 
 /**
@@ -658,16 +712,27 @@ VECOPS_VFUNC Vec<T> gather(T t, const TypeOf<T>* p, Vec<Rebind<GatherScatterInde
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) < 4)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
-  word::scatter(t, p, i, v);
+  if constexpr (num_words(t) > 1) {
+    Half<T> th;
+    using Ti = Rebind<GatherScatterIndex<TypeOf<T>>, T>;
+    constexpr Ti ti;
+    vec::scatter(th, p, word::lower(ti, i), word::lower(t, v));
+    vec::scatter(th, p, word::upper(ti, i), word::upper(t, v));
+  } else {
+    word::scatter(t, p, i, v);
+  }
 }
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Vec<T> v) {
-  using namespace details;
-  constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
-  vmap(
-      t, [=](auto tt, TypeOf<T>* pp, auto&& ii, auto&& vv) { word::scatter(tt, pp, ii, vv); },
-      p, ShardVec(it, i), ShardVec(t, v)
-  );
+  if constexpr (num_words(t) > 1) {
+    Half<T> th;
+    using Ti = Rebind<GatherScatterIndex<TypeOf<T>>, T>;
+    constexpr Ti ti;
+    vec::scatter(th, p, word::lower(ti, i), word::lower(t, v));
+    vec::scatter(th, p, word::upper(ti, i), word::upper(t, v));
+  } else {
+    word::scatter(t, p, i, v);
+  }
 }
 
 /**
@@ -675,17 +740,39 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeO
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) < 4)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
-  word::scatter(t, p, i, n, v);
+  VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
+  if constexpr (num_words(t) > 1) {
+    Half<T> th;
+    using Ti = Rebind<GatherScatterIndex<TypeOf<T>>, T>;
+    constexpr Ti ti;
+    auto half_size = size(th);
+    if (n <= half_size) {
+      vec::scatter(th, p, word::lower(ti, i), n, word::lower(t, v));
+    } else {
+      vec::scatter(th, p, word::lower(ti, i), word::lower(t, v));
+      vec::scatter(th, p, word::upper(ti, i), n - half_size, word::upper(t, v));
+    }
+  } else {
+    word::scatter(t, p, i, n, v);
+  }
 }
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, nint_t n, Vec<T> v) {
-  using namespace details;
-  constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
-  vmap(
-      t, n, [=](auto tt, TypeOf<T>* pp, auto&& ii, auto&& vv) { word::scatter(tt, pp, ii, vv); },
-      [=](auto tt, nint_t rem, TypeOf<T>* pp, auto&& ii, auto&& vv) { word::scatter(tt, pp, ii, rem, vv); },
-      p, ShardVec(it, i), ShardVec(t, v)
-  );
+  VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
+  if constexpr (num_words(t) > 1) {
+    Half<T> th;
+    using Ti = Rebind<GatherScatterIndex<TypeOf<T>>, T>;
+    constexpr Ti ti;
+    auto half_size = size(th);
+    if (n <= half_size) {
+      vec::scatter(th, p, word::lower(ti, i), n, word::lower(t, v));
+    } else {
+      vec::scatter(th, p, word::lower(ti, i), word::lower(t, v));
+      vec::scatter(th, p, word::upper(ti, i), n - half_size, word::upper(t, v));
+    }
+  } else {
+    word::scatter(t, p, i, n, v);
+  }
 }
 
 /**
@@ -696,16 +783,27 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeO
  */
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) < 4)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  word::scatter(t, p, i, m, v);
+  if constexpr (num_words(t) > 1) {
+    Half<T> th;
+    using Ti = Rebind<GatherScatterIndex<TypeOf<T>>, T>;
+    constexpr Ti ti;
+    vec::scatter(th, p, word::lower(ti, i), word::lower(t, m), word::lower(t, v));
+    vec::scatter(th, p, word::upper(ti, i), word::upper(t, m), word::upper(t, v));
+  } else {
+    word::scatter(t, p, i, m, v);
+  }
 }
 template <TLV_DECL_TAG(T), TL_IF(sizeof(TypeOf<T>) >= 4)>
 VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeOf<T>>, T>> i, Mask<T> m, Vec<T> v) {
-  using namespace details;
-  constexpr Rebind<GatherScatterIndex<TypeOf<T>>, T> it;
-  vmap(
-      t, [=](auto tt, TypeOf<T>* pp, auto&& ii, auto&& mm, auto&& vv) { word::scatter(tt, pp, ii, mm, vv); },
-      p, ShardVec(it, i), ShardMask(t, m), ShardVec(t, v)
-  );
+  if constexpr (num_words(t) > 1) {
+    Half<T> th;
+    using Ti = Rebind<GatherScatterIndex<TypeOf<T>>, T>;
+    constexpr Ti ti;
+    vec::scatter(th, p, word::lower(ti, i), word::lower(t, m), word::lower(t, v));
+    vec::scatter(th, p, word::upper(ti, i), word::upper(t, m), word::upper(t, v));
+  } else {
+    word::scatter(t, p, i, m, v);
+  }
 }
 
 
