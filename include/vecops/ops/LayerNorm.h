@@ -42,7 +42,7 @@ using layernorm_tag_t = typename std::remove_cvref_t<Config>::Tag;
 
 // TODO sooner or later I will take this down
 template <typename Tag>
-auto vector_step_value(Tag tag) {
+VECOPS_INLINE auto vector_step_value(Tag tag) {
   using TagT = std::remove_cvref_t<Tag>;
   if constexpr (TagT::is_runtime_size) {
     return gemm::Any{vec::size(tag)};
@@ -52,7 +52,7 @@ auto vector_step_value(Tag tag) {
 }
 
 template <typename InLayout, typename ScaleLayout, typename BiasLayout, typename OutLayout>
-void validate_layernorm_layouts(
+VECOPS_INLINE void validate_layernorm_layouts(
     const InLayout& in,
     const ScaleLayout& scale,
     const BiasLayout& bias,
@@ -85,9 +85,10 @@ struct LayerNorm {
   using ComputeType = details::layernorm_compute_t<Config>;
   using Tag = details::layernorm_tag_t<Config>;
 
+public:
   const Config config;
 
-  constexpr explicit LayerNorm(Config cfg = {}) : config(cfg) {}
+  VECOPS_INLINE constexpr explicit LayerNorm(Config cfg = {}) : config(cfg) {}
 
   template <
       typename InSpec,
@@ -100,7 +101,7 @@ struct LayerNorm {
           gemm::is_input_spec_v<BiasSpec> &&
           gemm::is_output_spec_v<OutSpec>,
           bool> = true>
-  nint_t required_workspace(
+  VECOPS_INLINE nint_t required_workspace(
       const InSpec& in,
       const ScaleSpec& scale,
       const BiasSpec& bias,
@@ -128,7 +129,7 @@ struct LayerNorm {
           gemm::is_layout<std::remove_cvref_t<BiasLayout>> &&
           gemm::is_layout<std::remove_cvref_t<OutLayout>>,
           bool> = true>
-  nint_t required_workspace(
+  VECOPS_INLINE nint_t required_workspace(
       const InLayout& in,
       const ScaleLayout& scale,
       const BiasLayout& bias,
@@ -145,7 +146,7 @@ struct LayerNorm {
       typename ScaleSpec,
       typename BiasSpec,
       typename OutSpec>
-  void operator()(
+  VECOPS_INLINE void operator()(
       gemm::WorkspaceView& workspace,
       const InSpec& in,
       const ScaleSpec& scale,
@@ -167,9 +168,10 @@ struct LayerNorm {
       auto gamma = scale.bind(workspace);
       auto beta = bias.bind(workspace);
 
-      gemm::hop::for_each_dims<in_layout.Ndim - 1>(
-          [&](const auto& in_row, const auto& out_row) {
-            run_row(workspace, in_row, gamma, beta, out_row);
+      constexpr int prefix_rank = std::remove_cvref_t<decltype(in_layout)>::Ndim - 1;
+      gemm::hop::for_each_dims<prefix_rank>(
+          [this, &workspace, &gamma, &beta](const auto& in_row, const auto& out_row) VECOPS_ALWAYS_INLINE_LAMBDA {
+            this->run_row(workspace, in_row, gamma, beta, out_row);
           }, in, out
       );
     }
@@ -181,7 +183,7 @@ struct LayerNorm {
       typename ScaleSpec,
       typename BiasSpec,
       typename OutSpec>
-  void operator()(
+  VECOPS_INLINE void operator()(
       const InSpec& in,
       const ScaleSpec& scale,
       const BiasSpec& bias,
@@ -197,7 +199,7 @@ private:
       typename ScaleAccessor,
       typename BiasAccessor,
       typename OutSpec>
-  void run_row(
+  VECOPS_INLINE void run_row(
       gemm::WorkspaceView& workspace,
       const InSpec& in,
       const ScaleAccessor& gamma,
@@ -219,7 +221,7 @@ private:
 
       const auto [v_mean, v_var] = gemm::hop::scan(
           std::make_pair(vec::zeros(t), vec::zeros(t)), normalized_count, step,
-          [&](std::pair<VecT, VecT> acc, nint_t col, auto&& count) {
+          [&](std::pair<VecT, VecT> acc, nint_t col, auto&& count) VECOPS_ALWAYS_INLINE_LAMBDA {
             auto xv = x(t, count, col);
             return std::make_pair(vec::add(acc.first, xv), vec::fmadd(xv, xv, acc.second));
           }
@@ -235,7 +237,7 @@ private:
       const auto mean_v = vec::fill(t, mean);
       const auto rstd_v = vec::fill(t, rstd);
 
-      gemm::hop::map(normalized_count, step, [&](nint_t col, auto&& count) {
+      gemm::hop::map(normalized_count, step, [&](nint_t col, auto&& count) VECOPS_ALWAYS_INLINE_LAMBDA {
         auto xv = x(t, count, col);
         auto gamma_v = gamma(t, count, col);
         auto beta_v = beta(t, count, col);
@@ -253,7 +255,7 @@ private:
       typename ScaleSpec,
       typename BiasSpec,
       typename OutSpec>
-  nint_t required_workspace_impl(
+  VECOPS_INLINE nint_t required_workspace_impl(
       const InSpec& in,
       const ScaleSpec& scale,
       const BiasSpec& bias,
@@ -269,7 +271,7 @@ private:
   }
 
   template <int PrefixRank, typename Layout>
-  static auto row_layout(const Layout& layout) {
+  VECOPS_INLINE static auto row_layout(const Layout& layout) {
     if constexpr (PrefixRank == 0) {
       return layout;
     } else {
@@ -278,7 +280,7 @@ private:
   }
 
   template <int PrefixRank, typename Spec>
-  static auto row_input_spec(const Spec& spec) {
+  VECOPS_INLINE static auto row_input_spec(const Spec& spec) {
     using SpecT = std::remove_cvref_t<Spec>;
     auto layout = row_layout<PrefixRank>(spec.input_layout());
     using RowLayout = std::remove_cvref_t<decltype(layout)>;
@@ -290,7 +292,7 @@ private:
   }
 
   template <int PrefixRank, typename Spec>
-  static auto row_output_spec(const Spec& spec) {
+  VECOPS_INLINE static auto row_output_spec(const Spec& spec) {
     using SpecT = std::remove_cvref_t<Spec>;
     auto layout = row_layout<PrefixRank>(spec.output_layout());
     using RowLayout = std::remove_cvref_t<decltype(layout)>;
@@ -304,7 +306,7 @@ private:
 };
 
 template <typename Config = LayerNormConfig<>>
-constexpr auto layer_norm(Config config = {}) {
+VECOPS_INLINE constexpr auto layer_norm(Config config = {}) {
   return LayerNorm<Config>{config};
 }
 

@@ -97,7 +97,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value) {
   using namespace details;
   return vmap(
-      t, [=](auto tt) { return word::fill(tt, value); }
+      t, [=](auto tt) VECOPS_ALWAYS_INLINE_LAMBDA { return word::fill(tt, value); }
   );
 }
 
@@ -112,8 +112,9 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, nint_t n, Vec<T> default_v) {
   using namespace details;
   return vmap(
-      t, n, [=](auto tt, auto&& dd) { return word::fill(tt, value); },
-      [=](auto tt, nint_t rem, auto&& dd) { return word::fill(tt, value, rem, dd); },
+      t, n,
+      [=](auto tt, auto&& dd) VECOPS_ALWAYS_INLINE_LAMBDA { return word::fill(tt, value); },
+      [=](auto tt, nint_t rem, auto&& dd) VECOPS_ALWAYS_INLINE_LAMBDA { return word::fill(tt, value, rem, dd); },
       ShardVec(t, default_v)
   );
 }
@@ -135,7 +136,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, Mask<T> m, Vec<T> default_v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, auto&& mm, auto&& dd) { return word::fill(tt, value, mm, dd); },
+      t, [=](auto tt, auto&& mm, auto&& dd) VECOPS_ALWAYS_INLINE_LAMBDA { return word::fill(tt, value, mm, dd); },
       ShardMask(t, m), ShardVec(t, default_v)
   );
 }
@@ -157,7 +158,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> zeros(T t) {
   using namespace details;
   return vmap(
-      t, [=](auto tt) { return word::zeros(tt); }
+      t, [=](auto tt) VECOPS_ALWAYS_INLINE_LAMBDA { return word::zeros(tt); }
   );
 }
 
@@ -184,7 +185,7 @@ VECOPS_VFUNC V blend(V v0, Mask<T> m, V v1) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& vv0, auto&& mm, auto&& vv1) { return word::blend(vv0, mm, vv1); },
+      t, [=](auto tt, auto&& vv0, auto&& mm, auto&& vv1) VECOPS_ALWAYS_INLINE_LAMBDA { return word::blend(vv0, mm, vv1); },
       ShardVec(t, v0), ShardMask(t, m), ShardVec(t, v1)
   );
 }
@@ -226,6 +227,24 @@ VECOPS_VFUNC Mask<T> mfalse(T t) {
   return vec::mfill(t, false);
 }
 
+namespace details {
+
+template <TLV_DECL_TAG(T)>
+struct MWhileLtWords {
+  Mask<T>& r;
+  nint_t a;
+  nint_t b;
+  nint_t ws;
+
+  template <nint_t I>
+  VECOPS_VFUNC void operator()() const {
+    constexpr auto wt = word_tag(T{});
+    r = set_word_mask<I>(T{}, r, word::mwhilelt(wt, a + I * ws, b));
+  }
+};
+
+} // namespace details
+
 /**
  * @brief Create a mask where lanes i are true if (a + i) < b.
  *
@@ -248,10 +267,16 @@ VECOPS_VFUNC Mask<T> mfalse(T t) {
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Mask<T> mwhilelt(T t, nint_t a, nint_t b) {
   using namespace details;
-  nint_t ws = word_size(t);
-  return vmap(
-      t, [=] <nint_t I>(auto tt) { return word::mwhilelt(tt, a + I * ws, b); }
-  );
+  constexpr auto wt = word_tag(T{});
+  if constexpr (is_word_vec(T{})) {
+    return word::mwhilelt(wt, a, b);
+  } else {
+    constexpr nint_t nloop = num_words(T{});
+    const nint_t ws = word_size(T{});
+    Mask<T> r;
+    foreach<nloop>(details::MWhileLtWords<T>{r, a, b, ws});
+    return r;
+  }
 }
 
 /**
@@ -315,7 +340,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, const TypeOf<T>* pp) { return word::loadu(tt, pp); },
+      t, [=](auto tt, const TypeOf<T>* pp) VECOPS_ALWAYS_INLINE_LAMBDA { return word::loadu(tt, pp); },
       StepPointer(t, p)
   );
 }
@@ -351,7 +376,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, const TypeOf<T>* pp) { return word::load(tt, pp); },
+      t, [=](auto tt, const TypeOf<T>* pp) VECOPS_ALWAYS_INLINE_LAMBDA { return word::load(tt, pp); },
       StepPointer(t, p)
   );
 }
@@ -384,8 +409,9 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
   using namespace details;
   return vmap(
-      t, n, [=](auto tt, const TypeOf<T>* p, auto v_d) { return word::loadu(tt, p); },
-      [=](auto tt, nint_t rem, const TypeOf<T>* p, auto v_d) { return word::loadu(tt, p, rem, v_d); },
+      t, n,
+      [=](auto tt, const TypeOf<T>* p, auto v_d) VECOPS_ALWAYS_INLINE_LAMBDA { return word::loadu(tt, p); },
+      [=](auto tt, nint_t rem, const TypeOf<T>* p, auto v_d) VECOPS_ALWAYS_INLINE_LAMBDA { return word::loadu(tt, p, rem, v_d); },
       StepPointer(t, p), ShardVec(t, default_v)
   );
 }
@@ -404,8 +430,9 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
   using namespace details;
   return vmap(
-      t, n, [=](auto tt, const TypeOf<T>* p, auto v_d) { return word::load(tt, p); },
-      [=](auto tt, nint_t rem, const TypeOf<T>* p, auto v_d) { return word::load(tt, p, rem, v_d); },
+      t, n,
+      [=](auto tt, const TypeOf<T>* p, auto v_d) VECOPS_ALWAYS_INLINE_LAMBDA { return word::load(tt, p); },
+      [=](auto tt, nint_t rem, const TypeOf<T>* p, auto v_d) VECOPS_ALWAYS_INLINE_LAMBDA { return word::load(tt, p, rem, v_d); },
       StepPointer(t, p), ShardVec(t, default_v)
   );
 }
@@ -430,7 +457,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, const TypeOf<T>* p, auto mm, auto v_d) { return word::loadu(tt, p, mm, v_d); },
+      t, [=](auto tt, const TypeOf<T>* p, auto mm, auto v_d) VECOPS_ALWAYS_INLINE_LAMBDA { return word::loadu(tt, p, mm, v_d); },
       StepPointer(t, p), ShardMask(t, m), ShardVec(t, default_v)
   );
 }
@@ -452,7 +479,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, const TypeOf<T>* p, auto mm, auto v_d) { return word::load(tt, p, mm, v_d); },
+      t, [=](auto tt, const TypeOf<T>* p, auto mm, auto v_d) VECOPS_ALWAYS_INLINE_LAMBDA { return word::load(tt, p, mm, v_d); },
       StepPointer(t, p), ShardMask(t, m), ShardVec(t, default_v)
   );
 }
@@ -471,7 +498,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, Vec<T> v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, TypeOf<T>* pp, auto&& vv) { word::storeu(tt, pp, vv); },
+      t, [=](auto tt, TypeOf<T>* pp, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::storeu(tt, pp, vv); },
       StepPointer(t, p), ShardVec(t, v)
   );
 }
@@ -483,7 +510,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void store(T t, TypeOf<T>* p, Vec<T> v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, TypeOf<T>* pp, auto&& vv) { word::store(tt, pp, vv); },
+      t, [=](auto tt, TypeOf<T>* pp, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::store(tt, pp, vv); },
       StepPointer(t, p), ShardVec(t, v)
   );
 }
@@ -497,8 +524,9 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
   using namespace details;
   return vmap(
-      t, n, [=](auto tt, TypeOf<T>* pp, auto&& vv) { word::storeu(tt, pp, vv); },
-      [=](auto tt, nint_t rem, TypeOf<T>* pp, auto&& vv) { word::storeu(tt, pp, rem, vv); },
+      t, n,
+      [=](auto tt, TypeOf<T>* pp, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::storeu(tt, pp, vv); },
+      [=](auto tt, nint_t rem, TypeOf<T>* pp, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::storeu(tt, pp, rem, vv); },
       StepPointer(t, p), ShardVec(t, v)
   );
 }
@@ -510,8 +538,9 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void store(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
   using namespace details;
   return vmap(
-      t, n, [=](auto tt, TypeOf<T>* pp, auto&& vv) { word::store(tt, pp, vv); },
-      [=](auto tt, nint_t rem, TypeOf<T>* pp, auto&& vv) { word::store(tt, pp, rem, vv); },
+      t, n,
+      [=](auto tt, TypeOf<T>* pp, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::store(tt, pp, vv); },
+      [=](auto tt, nint_t rem, TypeOf<T>* pp, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::store(tt, pp, rem, vv); },
       StepPointer(t, p), ShardVec(t, v)
   );
 }
@@ -526,7 +555,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, TypeOf<T>* pp, auto&& mm, auto&& vv) { word::storeu(tt, pp, mm, vv); },
+      t, [=](auto tt, TypeOf<T>* pp, auto&& mm, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::storeu(tt, pp, mm, vv); },
       StepPointer(t, p), ShardMask(t, m), ShardVec(t, v)
   );
 }
@@ -541,7 +570,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void store(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, TypeOf<T>* pp, auto&& mm, auto&& vv) { word::store(tt, pp, mm, vv); },
+      t, [=](auto tt, TypeOf<T>* pp, auto&& mm, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::store(tt, pp, mm, vv); },
       StepPointer(t, p), ShardMask(t, m), ShardVec(t, v)
   );
 }
@@ -919,7 +948,7 @@ VECOPS_VFUNC V add(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb) { return word::add(aa, bb); },
+      t, [=](auto tt, auto&& aa, auto&& bb) VECOPS_ALWAYS_INLINE_LAMBDA { return word::add(aa, bb); },
       ShardVec(t, a), ShardVec(t, b)
   );
 }
@@ -936,7 +965,7 @@ VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb, auto&& mm) { return word::add(aa, bb, mm); },
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& mm) VECOPS_ALWAYS_INLINE_LAMBDA { return word::add(aa, bb, mm); },
       ShardVec(t, a), ShardVec(t, b), ShardMask(t, m)
   );
 }
@@ -950,7 +979,7 @@ VECOPS_VFUNC V sub(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb) { return word::sub(aa, bb); },
+      t, [=](auto tt, auto&& aa, auto&& bb) VECOPS_ALWAYS_INLINE_LAMBDA { return word::sub(aa, bb); },
       ShardVec(t, a), ShardVec(t, b)
   );
 }
@@ -965,7 +994,7 @@ VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb, auto&& mm) { return word::sub(aa, bb, mm); },
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& mm) VECOPS_ALWAYS_INLINE_LAMBDA { return word::sub(aa, bb, mm); },
       ShardVec(t, a), ShardVec(t, b), ShardMask(t, m)
   );
 }
@@ -979,7 +1008,7 @@ VECOPS_VFUNC V mul(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb) { return word::mul(aa, bb); },
+      t, [=](auto tt, auto&& aa, auto&& bb) VECOPS_ALWAYS_INLINE_LAMBDA { return word::mul(aa, bb); },
       ShardVec(t, a), ShardVec(t, b)
   );
 }
@@ -994,7 +1023,7 @@ VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb, auto&& mm) { return word::mul(aa, bb, mm); },
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& mm) VECOPS_ALWAYS_INLINE_LAMBDA { return word::mul(aa, bb, mm); },
       ShardVec(t, a), ShardVec(t, b), ShardMask(t, m)
   );
 }
@@ -1012,7 +1041,7 @@ VECOPS_VFUNC V fmadd(V a, V b, V c) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc) { return word::fmadd(aa, bb, cc); },
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc) VECOPS_ALWAYS_INLINE_LAMBDA { return word::fmadd(aa, bb, cc); },
       ShardVec(t, a), ShardVec(t, b), ShardVec(t, c)
   );
 }
@@ -1030,7 +1059,7 @@ VECOPS_VFUNC V fmadd(V a, V b, V c, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc, auto&& mm) { return word::fmadd(aa, bb, cc, mm); },
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc, auto&& mm) VECOPS_ALWAYS_INLINE_LAMBDA { return word::fmadd(aa, bb, cc, mm); },
       ShardVec(t, a), ShardVec(t, b), ShardVec(t, c), ShardMask(t, m)
   );
 }

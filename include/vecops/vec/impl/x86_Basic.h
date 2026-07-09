@@ -2923,27 +2923,27 @@ VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> v) {
  */
 template <typename T>
 VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> v, Mask<T> m, Vec<T> default_v) {
-return word::blend(default_v, m, word::fill(t, v));
+  return word::blend(default_v, m, word::fill(t, v));
 }
 template <typename T>
 VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> v, nint_t n, Vec<T> default_v) {
-VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
-auto m = word::mwhilelt(t, 0, n);
-return word::fill(t, v, m, default_v);
+  VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
+  auto m = word::mwhilelt(t, 0, n);
+  return word::fill(t, v, m, default_v);
 }
 
 
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float32_t>)>
 VECOPS_VFUNC Vec<T> zeros(T t) {
-return _mm_setzero_ps();
+  return _mm_setzero_ps();
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_any<TypeOf<T>, float64_t>)>
 VECOPS_VFUNC Vec<T> zeros(T t) {
-return _mm_setzero_pd();
+  return _mm_setzero_pd();
 }
 template <TLV_DECL_TAG(T), TL_IF(T::Bytes <= 16), TL_IF(is_none<TypeOf<T>, float32_t, float64_t>)>
 VECOPS_VFUNC Vec<T> zeros(T t) {
-return _mm_setzero_si128();
+  return _mm_setzero_si128();
 }
 
 #if VEC_WIDTH >= 256

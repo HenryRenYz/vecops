@@ -241,6 +241,7 @@ TEST_F(MakeTensorTest, MakeTensorInitListSizesOnly) {
     auto t = make_tensor<2>(data_2d_.data(), {4, 5});
     EXPECT_EQ(t.size(0), 4);
     EXPECT_EQ(t.stride(0), 5);
+    EXPECT_TRUE((std::is_same_v<typename decltype(t)::Stride, Strides<Any, Const<1>>>));
     EXPECT_TRUE(t.is_contiguous());
 }
 
@@ -248,12 +249,14 @@ TEST_F(MakeTensorTest, MakeTensorInitList_1D) {
     auto t = make_tensor<1>(data_1d_.data(), {10});
     EXPECT_EQ(t.ndim(), 1);
     EXPECT_EQ(t.stride(0), 1);
+    EXPECT_TRUE((std::is_same_v<typename decltype(t)::Stride, Strides<Const<1>>>));
 }
 
 TEST_F(MakeTensorTest, MakeTensorInitList_3D) {
     auto t = make_tensor<3>(data_3d_.data(), {3, 4, 5});
     EXPECT_EQ(t.ndim(), 3);
     EXPECT_EQ(t.numel(), 60);
+    EXPECT_TRUE((std::is_same_v<typename decltype(t)::Stride, Strides<Any, Any, Const<1>>>));
 }
 
 TEST_F(MakeTensorTest, MakeTensorInitList_4D) {

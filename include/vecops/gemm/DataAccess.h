@@ -59,22 +59,22 @@ using SelectAccessKind = chain_if_t<
     chain_opt<IsSecondLastDimContiguous<TLayout>::value, AccessKindSecondLastContiguous>,
     chain_opt<true, AccessKindStrided>>;
 
-constexpr nint_t round_up(nint_t value, nint_t alignment) {
+VECOPS_INLINE constexpr nint_t round_up(nint_t value, nint_t alignment) {
   return (value + alignment - 1) & ~(alignment - 1);
 }
 
 template <typename T>
-constexpr nint_t aux_vector_lanes() {
+VECOPS_INLINE constexpr nint_t aux_vector_lanes() {
   return vec::size(vec::ScalableTag<T, VEC_MAX_POW>{});
 }
 
 template <typename TLayout, typename TAux>
-nint_t padded_last_size(const TLayout& layout) {
+VECOPS_INLINE nint_t padded_last_size(const TLayout& layout) {
   return round_up(layout.shape()[TLayout::Ndim - 1], aux_vector_lanes<TAux>());
 }
 
 template <typename TLayout, typename TAux>
-nint_t aux_numel(const TLayout& layout) {
+VECOPS_INLINE nint_t aux_numel(const TLayout& layout) {
   nint_t n = padded_last_size<TLayout, TAux>(layout);
   VECOPS_UNROLL
   for (int d = 0; d < TLayout::Ndim - 1; ++d) n *= layout.shape()[d];
@@ -82,13 +82,13 @@ nint_t aux_numel(const TLayout& layout) {
 }
 
 template <typename TLayout, typename TAux>
-nint_t aux_required_bytes(const TLayout& layout) {
+VECOPS_INLINE nint_t aux_required_bytes(const TLayout& layout) {
   return round_up(aux_numel<TLayout, TAux>(layout) * static_cast<nint_t>(sizeof(TAux)),
                   vec::DEFAULT_ALIGNMENT);
 }
 
 template <typename TLayout, typename TAux>
-auto make_aux_layout(const TLayout& layout) {
+VECOPS_INLINE auto make_aux_layout(const TLayout& layout) {
   constexpr int last_dim = TLayout::Ndim - 1;
   auto aux_shape = set<last_dim>(layout.shape(), Any{padded_last_size<TLayout, TAux>(layout)});
   return make_layout(aux_shape);
@@ -127,7 +127,7 @@ struct PrefixVecTransform {
 };
 
 template <typename TransformFn, typename PrefixTuple>
-auto prepend_transform_prefix(const TransformFn& fn, const PrefixTuple& prefix) {
+VECOPS_INLINE auto prepend_transform_prefix(const TransformFn& fn, const PrefixTuple& prefix) {
   return PrefixVecTransform<TransformFn, PrefixTuple>{fn, prefix};
 }
 
@@ -147,10 +147,10 @@ struct UseUnmaskedPath : std::false_type {};
 
 template <nint_t N, TLV_DECL_TAG(T)>
 struct UseUnmaskedPath<Const<N>, T>
-    : std::bool_constant<(N > vec::max_word_size(T{}) * vec::num_words(T{}))> {};
+    : std::bool_constant<(N >= vec::max_word_size(T{}) * vec::num_words(T{}))> {};
 
 template <typename N>
-constexpr nint_t count_value(N n) {
+VECOPS_INLINE constexpr nint_t count_value(N n) {
   if constexpr (is_static_count_v<N>) {
     return StaticCount<std::remove_cvref_t<N>>::value;
   } else {
@@ -162,7 +162,7 @@ template <typename N, TLV_DECL_TAG(T)>
 static constexpr bool use_unmasked_path_v = UseUnmaskedPath<std::remove_cvref_t<N>, T>::value;
 
 template <typename N, TLV_DECL_TAG(T)>
-vec::Vec<T> loadu_dispatch(T t, const vec::TypeOf<T>* p, N n) {
+VECOPS_INLINE vec::Vec<T> loadu_dispatch(T t, const vec::TypeOf<T>* p, N n) {
   if constexpr (use_unmasked_path_v<N, T>) {
     return vec::loadu(t, p);
   } else {
@@ -171,7 +171,16 @@ vec::Vec<T> loadu_dispatch(T t, const vec::TypeOf<T>* p, N n) {
 }
 
 template <typename N, TLV_DECL_TAG(T)>
-void storeu_dispatch(T t, vec::TypeOf<T>* p, N n, vec::Vec<T> v) {
+VECOPS_ALWAYS_INLINE vec::Vec<T> zero_inactive_lanes(T t, vec::Vec<T> v, N n) {
+  if constexpr (use_unmasked_path_v<N, T>) {
+    return v;
+  } else {
+    return vec::blend(vec::zeros(t), vec::mwhilelt(t, 0, count_value(n)), v);
+  }
+}
+
+template <typename N, TLV_DECL_TAG(T)>
+VECOPS_INLINE void storeu_dispatch(T t, vec::TypeOf<T>* p, N n, vec::Vec<T> v) {
   if constexpr (use_unmasked_path_v<N, T>) {
     vec::storeu(t, p, v);
   } else {
@@ -180,7 +189,7 @@ void storeu_dispatch(T t, vec::TypeOf<T>* p, N n, vec::Vec<T> v) {
 }
 
 template <typename T, TLV_DECL_TAG(Ti)>
-vec::Vec<vec::Rebind<vec::GatherScatterIndex<T>, Ti>>
+VECOPS_INLINE vec::Vec<vec::Rebind<vec::GatherScatterIndex<T>, Ti>>
 make_index_vector(
     Ti ti,
     nint_t base_offset,
@@ -204,7 +213,7 @@ static constexpr bool can_materialize_gather_scatter_index_v =
 #endif
 
 template <typename N, typename T, TLV_DECL_TAG(Ti)>
-vec::Vec<Ti> gather_leaf(
+VECOPS_INLINE vec::Vec<Ti> gather_leaf(
     Ti ti,
     const T* p,
     nint_t base_offset,
@@ -219,7 +228,7 @@ vec::Vec<Ti> gather_leaf(
 }
 
 template <typename N, typename T, TLV_DECL_TAG(Ti)>
-void scatter_leaf(
+VECOPS_INLINE void scatter_leaf(
     Ti ti,
     T* p,
     nint_t base_offset,
@@ -235,7 +244,7 @@ void scatter_leaf(
 }
 
 template <typename N, typename T, TLV_DECL_TAG(Ti)>
-vec::Vec<Ti> gather_dispatch(
+VECOPS_INLINE vec::Vec<Ti> gather_dispatch(
     Ti ti,
     const T* p,
     nint_t base_offset,
@@ -259,7 +268,7 @@ vec::Vec<Ti> gather_dispatch(
 }
 
 template <typename N, typename T, TLV_DECL_TAG(Ti)>
-void scatter_dispatch(
+VECOPS_INLINE void scatter_dispatch(
     Ti ti,
     T* p,
     nint_t base_offset,
@@ -283,7 +292,7 @@ void scatter_dispatch(
 }
 
 template <typename TOut, typename TIn, typename InLayout, typename AuxLayout, typename TransformFn>
-void precompute_input_aux(
+VECOPS_INLINE void precompute_input_aux(
     const TIn* p,
     const InLayout& layout,
     const AuxLayout& aux_layout,
@@ -324,20 +333,20 @@ struct DataInputImpl<AccessKindLastContiguous, TOut, InTensor, TransformFn> {
   using TIn = typename InTensor::ElementType;
   using InLayout = typename InTensor::Layout;
 
-  static constexpr nint_t required_workspace(const InLayout&) { return 0; }
+  VECOPS_INLINE static constexpr nint_t required_workspace(const InLayout&) { return 0; }
 
-  DataInputImpl(const TIn* p, const InLayout& layout, const TransformFn& fn, void*)
+  VECOPS_INLINE DataInputImpl(const TIn* p, const InLayout& layout, const TransformFn& fn, void*)
       : _p(p), _layout(layout), _fn(fn) {}
 
   template <TLV_DECL_TAG(To), typename N, typename... Is>
-  vec::Vec<To> operator()(To t, N n, Is... is) const {
+  VECOPS_INLINE vec::Vec<To> operator()(To t, N n, Is... is) const {
     static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
     using Ti = vec::Rebind<TIn, To>;
     std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t offset = offset_at(_layout, coords);
     auto v_in = loadu_dispatch(Ti{}, _p + offset, n);
     auto v_out = _fn(t, v_in, static_cast<nint_t>(is)...);
-    return v_out;
+    return zero_inactive_lanes(t, v_out, n);
   }
 
   const TIn* _p;
@@ -351,11 +360,11 @@ struct DataInputAuxImpl {
   using InLayout = typename InTensor::Layout;
   using AuxLayout = decltype(make_aux_layout<InLayout, TOut>(std::declval<const InLayout&>()));
 
-  static nint_t required_workspace(const InLayout& layout) {
+  VECOPS_INLINE static nint_t required_workspace(const InLayout& layout) {
     return aux_required_bytes<InLayout, TOut>(layout);
   }
 
-  DataInputAuxImpl(const TIn* p, const InLayout& layout, const TransformFn& fn, void* aux)
+  VECOPS_INLINE DataInputAuxImpl(const TIn* p, const InLayout& layout, const TransformFn& fn, void* aux)
       : _p(p),
         _layout(layout),
         _aux_layout(make_aux_layout<InLayout, TOut>(layout)),
@@ -365,7 +374,7 @@ struct DataInputAuxImpl {
   }
 
   template <TLV_DECL_TAG(To), typename N, typename... Is>
-  vec::Vec<To> operator()(To t, N n, Is... is) const {
+  VECOPS_INLINE vec::Vec<To> operator()(To t, N n, Is... is) const {
     static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
     std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t offset = offset_at(_aux_layout, coords);
@@ -399,13 +408,13 @@ struct DataOutputImpl<AccessKindLastContiguous, TIn, OutTensor, TransformFn> {
   using TOut = typename OutTensor::ElementType;
   using OutLayout = typename OutTensor::Layout;
 
-  static constexpr nint_t required_workspace(const OutLayout&) { return 0; }
+  VECOPS_INLINE static constexpr nint_t required_workspace(const OutLayout&) { return 0; }
 
-  DataOutputImpl(TOut* p, const OutLayout& layout, const TransformFn& fn, void*)
+  VECOPS_INLINE DataOutputImpl(TOut* p, const OutLayout& layout, const TransformFn& fn, void*)
       : _p(p), _layout(layout), _fn(fn) {}
 
   template <TLV_DECL_TAG(Ti), typename N, typename... Is>
-  void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
+  VECOPS_INLINE void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
@@ -425,11 +434,11 @@ struct DataOutputImpl<AccessKindSecondLastContiguous, TIn, OutTensor, TransformF
   using OutLayout = typename OutTensor::Layout;
   using AuxLayout = decltype(make_aux_layout<OutLayout, TOut>(std::declval<const OutLayout&>()));
 
-  static nint_t required_workspace(const OutLayout& layout) {
+  VECOPS_INLINE static nint_t required_workspace(const OutLayout& layout) {
     return aux_required_bytes<OutLayout, TOut>(layout);
   }
 
-  DataOutputImpl(TOut* p, const OutLayout& layout, const TransformFn& fn, void* aux)
+  VECOPS_INLINE DataOutputImpl(TOut* p, const OutLayout& layout, const TransformFn& fn, void* aux)
       : _p(p),
         _layout(layout),
         _aux_layout(make_aux_layout<OutLayout, TOut>(layout)),
@@ -439,7 +448,7 @@ struct DataOutputImpl<AccessKindSecondLastContiguous, TIn, OutTensor, TransformF
     std::fill(_aux, _aux + aux_numel<OutLayout, TOut>(_layout), TOut{});
   }
 
-  ~DataOutputImpl() {
+  VECOPS_INLINE ~DataOutputImpl() {
     auto out_tensor = make_tensor(_p, _layout);
     auto aux_tensor = make_tensor(_aux, _aux_layout);
     hop::for_each_dims_with_index_tuple<OutLayout::Ndim - 1>(
@@ -454,7 +463,7 @@ struct DataOutputImpl<AccessKindSecondLastContiguous, TIn, OutTensor, TransformF
   }
 
   template <TLV_DECL_TAG(Ti), typename N, typename... Is>
-  void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
+  VECOPS_INLINE void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
@@ -475,13 +484,13 @@ struct DataOutputImpl<AccessKindStrided, TIn, OutTensor, TransformFn> {
   using TOut = typename OutTensor::ElementType;
   using OutLayout = typename OutTensor::Layout;
 
-  static constexpr nint_t required_workspace(const OutLayout&) { return 0; }
+  VECOPS_INLINE static constexpr nint_t required_workspace(const OutLayout&) { return 0; }
 
-  DataOutputImpl(TOut* p, const OutLayout& layout, const TransformFn& fn, void*)
+  VECOPS_INLINE DataOutputImpl(TOut* p, const OutLayout& layout, const TransformFn& fn, void*)
       : _p(p), _layout(layout), _fn(fn) {}
 
   template <TLV_DECL_TAG(Ti), typename N, typename... Is>
-  void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
+  VECOPS_INLINE void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
@@ -508,17 +517,18 @@ struct DataInputViewImpl<AccessKindLastContiguous, TOut, InTensor, TransformFn, 
   using TIn = typename InTensor::ElementType;
   using InLayout = typename InTensor::Layout;
 
-  DataInputViewImpl(const TIn* p, const InLayout& layout, const TransformFn& fn)
+  VECOPS_INLINE DataInputViewImpl(const TIn* p, const InLayout& layout, const TransformFn& fn)
       : _p(p), _layout(layout), _fn(fn) {}
 
   template <TLV_DECL_TAG(To), typename N, typename... Is>
-  vec::Vec<To> operator()(To t, N n, Is... is) const {
+  VECOPS_INLINE vec::Vec<To> operator()(To t, N n, Is... is) const {
     static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
     using Ti = vec::Rebind<TIn, To>;
     std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t offset = offset_at(_layout, coords);
     auto v_in = loadu_dispatch(Ti{}, _p + offset, n);
-    return _fn(t, v_in, static_cast<nint_t>(is)...);
+    auto v_out = _fn(t, v_in, static_cast<nint_t>(is)...);
+    return zero_inactive_lanes(t, v_out, n);
   }
 
   const TIn* _p;
@@ -531,11 +541,11 @@ struct DataInputAuxViewImpl {
   using TIn = typename InTensor::ElementType;
   using InLayout = typename InTensor::Layout;
 
-  DataInputAuxViewImpl(const TIn* p, const InLayout& layout, const AuxLayout& aux_layout, TOut* aux)
+  VECOPS_INLINE DataInputAuxViewImpl(const TIn* p, const InLayout& layout, const AuxLayout& aux_layout, TOut* aux)
       : _p(p), _layout(layout), _aux_layout(aux_layout), _aux(aux) {}
 
   template <TLV_DECL_TAG(To), typename N, typename... Is>
-  vec::Vec<To> operator()(To t, N n, Is... is) const {
+  VECOPS_INLINE vec::Vec<To> operator()(To t, N n, Is... is) const {
     static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
     std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t offset = offset_at(_aux_layout, coords);
@@ -583,11 +593,11 @@ struct DataOutputViewImpl<AccessKindLastContiguous, TIn, OutTensor, TransformFn,
   using TOut = typename OutTensor::ElementType;
   using OutLayout = typename OutTensor::Layout;
 
-  DataOutputViewImpl(TOut* p, const OutLayout& layout, const TransformFn& fn)
+  VECOPS_INLINE DataOutputViewImpl(TOut* p, const OutLayout& layout, const TransformFn& fn)
       : _p(p), _layout(layout), _fn(fn) {}
 
   template <TLV_DECL_TAG(Ti), typename N, typename... Is>
-  void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
+  VECOPS_INLINE void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
@@ -611,11 +621,11 @@ struct DataOutputViewImpl<
   using TOut = typename OutTensor::ElementType;
   using OutLayout = typename OutTensor::Layout;
 
-  DataOutputViewImpl(TOut* p, const OutLayout& layout, const AuxLayout& aux_layout, const TransformFn& fn, TOut* aux)
+  VECOPS_INLINE DataOutputViewImpl(TOut* p, const OutLayout& layout, const AuxLayout& aux_layout, const TransformFn& fn, TOut* aux)
       : _p(p), _layout(layout), _aux_layout(aux_layout), _fn(fn), _aux(aux) {}
 
   template <TLV_DECL_TAG(Ti), typename N, typename... Is>
-  void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
+  VECOPS_INLINE void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
@@ -636,11 +646,11 @@ struct DataOutputViewImpl<AccessKindStrided, TIn, OutTensor, TransformFn, void> 
   using TOut = typename OutTensor::ElementType;
   using OutLayout = typename OutTensor::Layout;
 
-  DataOutputViewImpl(TOut* p, const OutLayout& layout, const TransformFn& fn)
+  VECOPS_INLINE DataOutputViewImpl(TOut* p, const OutLayout& layout, const TransformFn& fn)
       : _p(p), _layout(layout), _fn(fn) {}
 
   template <TLV_DECL_TAG(Ti), typename N, typename... Is>
-  void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
+  VECOPS_INLINE void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
@@ -693,15 +703,15 @@ struct DataInput {
   using AccessKind = Kind;
   using Impl = details::DataInputImpl<Kind, TOut, InTensor, Transform>;
 
-  static nint_t required_workspace(const InLayout& layout) {
+  VECOPS_INLINE static nint_t required_workspace(const InLayout& layout) {
     return Impl::required_workspace(layout);
   }
 
-  DataInput(const TIn* p, const InLayout& layout, const Transform& fn, void* aux)
+  VECOPS_INLINE DataInput(const TIn* p, const InLayout& layout, const Transform& fn, void* aux)
       : _impl(p, layout, fn, aux) {}
 
   template <TLV_DECL_TAG(To), TL_IF(is_any<vec::TypeOf<To>, TOut>), typename N, typename... Is>
-  vec::Vec<To> operator()(To t, N n, Is... is) const {
+  VECOPS_INLINE vec::Vec<To> operator()(To t, N n, Is... is) const {
     return _impl(t, n, is...);
   }
 
@@ -725,11 +735,11 @@ struct DataInputView {
   using Impl = details::DataInputViewImpl<Kind, TOut, InTensor, Transform, AuxLayout>;
 
   template <typename... Args>
-  explicit DataInputView(Args&&... args)
+  VECOPS_INLINE explicit DataInputView(Args&&... args)
       : _impl(std::forward<Args>(args)...) {}
 
   template <TLV_DECL_TAG(To), TL_IF(is_any<vec::TypeOf<To>, TOut>), typename N, typename... Is>
-  vec::Vec<To> operator()(To t, N n, Is... is) const {
+  VECOPS_INLINE vec::Vec<To> operator()(To t, N n, Is... is) const {
     return _impl(t, n, is...);
   }
 
@@ -764,35 +774,35 @@ struct InputSpec<
   static_assert(is_any<typename Transform::TIn, TIn>, "Input type of transform fn mismatch");
   static_assert(is_any<typename Transform::TOut, TOut>, "Output type of transform fn mismatch");
 
-  static nint_t required_workspace(const InputLayout& layout) {
+  VECOPS_INLINE static nint_t required_workspace(const InputLayout& layout) {
     return InputAccessor::required_workspace(layout);
   }
 
-  InputSpec(const InputTensor& tensor, const Transform& fn)
+  VECOPS_INLINE InputSpec(const InputTensor& tensor, const Transform& fn)
       : _tensor(tensor), _fn(fn) {}
 
   template <typename T = Transform, std::enable_if_t<std::is_default_constructible_v<T>, bool> = true>
-  explicit InputSpec(const InputTensor& tensor)
+  VECOPS_INLINE explicit InputSpec(const InputTensor& tensor)
       : _tensor(tensor), _fn{} {}
 
-  const InputTensor& tensor() const { return _tensor; }
-  const Transform& transform() const { return _fn; }
-  const InputLayout& input_layout() const { return _tensor.layout(); }
+  VECOPS_INLINE const InputTensor& tensor() const { return _tensor; }
+  VECOPS_INLINE const Transform& transform() const { return _fn; }
+  VECOPS_INLINE const InputLayout& input_layout() const { return _tensor.layout(); }
 
-  nint_t required_workspace() const {
+  VECOPS_INLINE nint_t required_workspace() const {
     return InputAccessor::required_workspace(_tensor.layout());
   }
 
-  InputAccessor bind(void* aux) const {
+  VECOPS_INLINE InputAccessor bind(void* aux) const {
     return InputAccessor(_tensor.data(), _tensor.layout(), _fn, aux);
   }
 
-  InputAccessor bind(WorkspaceView& ws) const {
+  VECOPS_INLINE InputAccessor bind(WorkspaceView& ws) const {
     const nint_t bytes = required_workspace();
     return bind(bytes == 0 ? nullptr : ws.allocate(bytes));
   }
 
-  InputAccessor make_input(void* aux) const { return bind(aux); }
+  VECOPS_INLINE InputAccessor make_input(void* aux) const { return bind(aux); }
 
 private:
   InputTensor _tensor;
@@ -845,29 +855,29 @@ struct InputSpec<
   static_assert(is_any<typename Transform::TIn, TIn>, "Input type of transform fn mismatch");
   static_assert(is_any<typename Transform::TOut, TOut>, "Output type of transform fn mismatch");
 
-  static nint_t required_workspace(const InputLayout& layout) {
+  VECOPS_INLINE static nint_t required_workspace(const InputLayout& layout) {
     return InputAccessor::required_workspace(layout);
   }
 
-  InputSpec(const InputLayout& layout, const Transform& fn)
+  VECOPS_INLINE InputSpec(const InputLayout& layout, const Transform& fn)
       : _in_layout(layout), _fn(fn) {}
 
   template <typename T = Transform, std::enable_if_t<std::is_default_constructible_v<T>, bool> = true>
-  explicit InputSpec(const InputLayout& layout)
+  VECOPS_INLINE explicit InputSpec(const InputLayout& layout)
       : _in_layout(layout), _fn{} {}
 
-  const InputLayout& input_layout() const { return _in_layout; }
-  const Transform& transform() const { return _fn; }
+  VECOPS_INLINE const InputLayout& input_layout() const { return _in_layout; }
+  VECOPS_INLINE const Transform& transform() const { return _fn; }
 
-  nint_t required_workspace() const {
+  VECOPS_INLINE nint_t required_workspace() const {
     return InputAccessor::required_workspace(_in_layout);
   }
 
-  InputAccessor make_input(const TIn* p, void* aux) const {
+  VECOPS_INLINE InputAccessor make_input(const TIn* p, void* aux) const {
     return InputAccessor(p, _in_layout, _fn, aux);
   }
 
-  InputAccessor make_input(const TIn* p, WorkspaceView& ws) const {
+  VECOPS_INLINE InputAccessor make_input(const TIn* p, WorkspaceView& ws) const {
     const nint_t bytes = required_workspace();
     return make_input(p, bytes == 0 ? nullptr : ws.allocate(bytes));
   }
@@ -909,15 +919,15 @@ struct DataOutput {
   using AccessKind = Kind;
   using Impl = details::DataOutputImpl<Kind, TIn, OutTensor, Transform>;
 
-  static nint_t required_workspace(const OutLayout& layout) {
+  VECOPS_INLINE static nint_t required_workspace(const OutLayout& layout) {
     return Impl::required_workspace(layout);
   }
 
-  DataOutput(TOut* p, const OutLayout& layout, const Transform& fn, void* aux)
+  VECOPS_INLINE DataOutput(TOut* p, const OutLayout& layout, const Transform& fn, void* aux)
       : _impl(p, layout, fn, aux) {}
 
   template <TLV_DECL_TAG(Ti), TL_IF(is_any<vec::TypeOf<Ti>, TIn>), typename N, typename... Is>
-  void operator()(Ti t, vec::Vec<Ti> v, N n, Is... is) const {
+  VECOPS_INLINE void operator()(Ti t, vec::Vec<Ti> v, N n, Is... is) const {
     _impl(t, v, n, is...);
   }
 
@@ -941,11 +951,11 @@ struct DataOutputView {
   using Impl = details::DataOutputViewImpl<Kind, TIn, OutTensor, Transform, AuxLayout>;
 
   template <typename... Args>
-  explicit DataOutputView(Args&&... args)
+  VECOPS_INLINE explicit DataOutputView(Args&&... args)
       : _impl(std::forward<Args>(args)...) {}
 
   template <TLV_DECL_TAG(Ti), TL_IF(is_any<vec::TypeOf<Ti>, TIn>), typename N, typename... Is>
-  void operator()(Ti t, vec::Vec<Ti> v, N n, Is... is) const {
+  VECOPS_INLINE void operator()(Ti t, vec::Vec<Ti> v, N n, Is... is) const {
     _impl(t, v, n, is...);
   }
 
@@ -980,35 +990,35 @@ struct OutputSpec<
   static_assert(is_any<typename Transform::TIn, TIn>, "Input type of transform fn mismatch");
   static_assert(is_any<typename Transform::TOut, TOut>, "Output type of transform fn mismatch");
 
-  static nint_t required_workspace(const OutputLayout& layout) {
+  VECOPS_INLINE static nint_t required_workspace(const OutputLayout& layout) {
     return OutputAccessor::required_workspace(layout);
   }
 
-  OutputSpec(const OutputTensor& tensor, const Transform& fn)
+  VECOPS_INLINE OutputSpec(const OutputTensor& tensor, const Transform& fn)
       : _tensor(tensor), _fn(fn) {}
 
   template <typename T = Transform, std::enable_if_t<std::is_default_constructible_v<T>, bool> = true>
-  explicit OutputSpec(const OutputTensor& tensor)
+  VECOPS_INLINE explicit OutputSpec(const OutputTensor& tensor)
       : _tensor(tensor), _fn{} {}
 
-  const OutputTensor& tensor() const { return _tensor; }
-  const Transform& transform() const { return _fn; }
-  const OutputLayout& output_layout() const { return _tensor.layout(); }
+  VECOPS_INLINE const OutputTensor& tensor() const { return _tensor; }
+  VECOPS_INLINE const Transform& transform() const { return _fn; }
+  VECOPS_INLINE const OutputLayout& output_layout() const { return _tensor.layout(); }
 
-  nint_t required_workspace() const {
+  VECOPS_INLINE nint_t required_workspace() const {
     return OutputAccessor::required_workspace(_tensor.layout());
   }
 
-  OutputAccessor bind(void* aux) const {
+  VECOPS_INLINE OutputAccessor bind(void* aux) const {
     return OutputAccessor(const_cast<TOut*>(_tensor.data()), _tensor.layout(), _fn, aux);
   }
 
-  OutputAccessor bind(WorkspaceView& ws) const {
+  VECOPS_INLINE OutputAccessor bind(WorkspaceView& ws) const {
     const nint_t bytes = required_workspace();
     return bind(bytes == 0 ? nullptr : ws.allocate(bytes));
   }
 
-  OutputAccessor make_output(void* aux) const { return bind(aux); }
+  VECOPS_INLINE OutputAccessor make_output(void* aux) const { return bind(aux); }
 
 private:
   OutputTensor _tensor;
@@ -1057,29 +1067,29 @@ struct OutputSpec<
   static_assert(is_any<typename Transform::TIn, TIn>, "Input type of transform fn mismatch");
   static_assert(is_any<typename Transform::TOut, TOut>, "Output type of transform fn mismatch");
 
-  static nint_t required_workspace(const OutputLayout& layout) {
+  VECOPS_INLINE static nint_t required_workspace(const OutputLayout& layout) {
     return OutputAccessor::required_workspace(layout);
   }
 
-  OutputSpec(const OutputLayout& layout, const Transform& fn)
+  VECOPS_INLINE OutputSpec(const OutputLayout& layout, const Transform& fn)
       : _out_layout(layout), _fn(fn) {}
 
   template <typename T = Transform, std::enable_if_t<std::is_default_constructible_v<T>, bool> = true>
-  explicit OutputSpec(const OutputLayout& layout)
+  VECOPS_INLINE explicit OutputSpec(const OutputLayout& layout)
       : _out_layout(layout), _fn{} {}
 
-  const OutputLayout& output_layout() const { return _out_layout; }
-  const Transform& transform() const { return _fn; }
+  VECOPS_INLINE const OutputLayout& output_layout() const { return _out_layout; }
+  VECOPS_INLINE const Transform& transform() const { return _fn; }
 
-  nint_t required_workspace() const {
+  VECOPS_INLINE nint_t required_workspace() const {
     return OutputAccessor::required_workspace(_out_layout);
   }
 
-  OutputAccessor make_output(TOut* p, void* aux) const {
+  VECOPS_INLINE OutputAccessor make_output(TOut* p, void* aux) const {
     return OutputAccessor(p, _out_layout, _fn, aux);
   }
 
-  OutputAccessor make_output(TOut* p, WorkspaceView& ws) const {
+  VECOPS_INLINE OutputAccessor make_output(TOut* p, WorkspaceView& ws) const {
     const nint_t bytes = required_workspace();
     return make_output(p, bytes == 0 ? nullptr : ws.allocate(bytes));
   }
@@ -1090,13 +1100,13 @@ private:
 };
 
 template <typename TOut, typename Tensor>
-auto input(Tensor&& tensor) {
+VECOPS_INLINE auto input(Tensor&& tensor) {
   using TensorT = std::remove_cvref_t<Tensor>;
   return InputSpec<TOut, TensorT>(std::forward<Tensor>(tensor));
 }
 
 template <typename TOut, typename Tensor, typename TransformFn>
-auto input(Tensor&& tensor, TransformFn&& fn) {
+VECOPS_INLINE auto input(Tensor&& tensor, TransformFn&& fn) {
   using TensorT = std::remove_cvref_t<Tensor>;
   using TIn = typename TensorT::ElementType;
   auto adapted = adapt_vec_transform<TOut, TIn>(std::forward<TransformFn>(fn));
@@ -1105,23 +1115,23 @@ auto input(Tensor&& tensor, TransformFn&& fn) {
 }
 
 template <typename TOut, typename Tensor>
-auto in(Tensor&& tensor) {
+VECOPS_INLINE auto in(Tensor&& tensor) {
   return input<TOut>(std::forward<Tensor>(tensor));
 }
 
 template <typename TOut, typename Tensor, typename TransformFn>
-auto in(Tensor&& tensor, TransformFn&& fn) {
+VECOPS_INLINE auto in(Tensor&& tensor, TransformFn&& fn) {
   return input<TOut>(std::forward<Tensor>(tensor), std::forward<TransformFn>(fn));
 }
 
 template <typename TIn, typename Tensor>
-auto output(Tensor&& tensor) {
+VECOPS_INLINE auto output(Tensor&& tensor) {
   using TensorT = std::remove_cvref_t<Tensor>;
   return OutputSpec<TIn, TensorT>(std::forward<Tensor>(tensor));
 }
 
 template <typename TIn, typename Tensor, typename TransformFn>
-auto output(Tensor&& tensor, TransformFn&& fn) {
+VECOPS_INLINE auto output(Tensor&& tensor, TransformFn&& fn) {
   using TensorT = std::remove_cvref_t<Tensor>;
   using TOut = typename TensorT::ElementType;
   auto adapted = adapt_vec_transform<TOut, TIn>(std::forward<TransformFn>(fn));
@@ -1130,17 +1140,17 @@ auto output(Tensor&& tensor, TransformFn&& fn) {
 }
 
 template <typename TIn, typename Tensor>
-auto out(Tensor&& tensor) {
+VECOPS_INLINE auto out(Tensor&& tensor) {
   return output<TIn>(std::forward<Tensor>(tensor));
 }
 
 template <typename TIn, typename Tensor, typename TransformFn>
-auto out(Tensor&& tensor, TransformFn&& fn) {
+VECOPS_INLINE auto out(Tensor&& tensor, TransformFn&& fn) {
   return output<TIn>(std::forward<Tensor>(tensor), std::forward<TransformFn>(fn));
 }
 
 template <typename... Specs>
-nint_t required_workspace(const Specs&... specs) {
+VECOPS_INLINE nint_t required_workspace(const Specs&... specs) {
   nint_t total = 0;
   ((total = details::workspace_round_up(total, vec::DEFAULT_ALIGNMENT) +
             specs.required_workspace()), ...);
@@ -1150,12 +1160,12 @@ nint_t required_workspace(const Specs&... specs) {
 namespace details {
 
 template <int ActualDim, typename Transform>
-auto prefixed_transform(const Transform& fn, nint_t index) {
+VECOPS_INLINE auto prefixed_transform(const Transform& fn, nint_t index) {
   return prepend_transform_prefix(fn, std::tuple<nint_t>{index});
 }
 
 template <int ActualDim, typename TOut, typename InTensor, typename Transform>
-auto slice_data_input_last(
+VECOPS_INLINE auto slice_data_input_last(
     const DataInput<TOut, InTensor, Transform>& input,
     nint_t index) {
   const auto& impl = input._impl;
@@ -1171,7 +1181,7 @@ auto slice_data_input_last(
 }
 
 template <int ActualDim, typename Accessor>
-auto slice_data_input_view_last(const Accessor& input, nint_t index) {
+VECOPS_INLINE auto slice_data_input_view_last(const Accessor& input, nint_t index) {
   const auto& impl = input._impl;
   auto tensor = make_tensor(impl._p, impl._layout);
   auto sliced = hop::details::slice_at_actual_dim<ActualDim>(tensor, index);
@@ -1189,7 +1199,7 @@ auto slice_data_input_view_last(const Accessor& input, nint_t index) {
 }
 
 template <int ActualDim, typename Accessor>
-auto slice_data_input_aux(const Accessor& input, nint_t index) {
+VECOPS_INLINE auto slice_data_input_aux(const Accessor& input, nint_t index) {
   const auto& impl = input._impl;
   auto src_tensor = make_tensor(impl._p, impl._layout);
   auto aux_tensor = make_tensor(impl._aux, impl._aux_layout);
@@ -1210,7 +1220,7 @@ auto slice_data_input_aux(const Accessor& input, nint_t index) {
 }
 
 template <int ActualDim, typename TIn, typename OutTensor, typename Transform>
-auto slice_data_output_last(
+VECOPS_INLINE auto slice_data_output_last(
     const DataOutput<TIn, OutTensor, Transform>& output,
     nint_t index) {
   const auto& impl = output._impl;
@@ -1226,7 +1236,7 @@ auto slice_data_output_last(
 }
 
 template <int ActualDim, typename Accessor>
-auto slice_data_output_view_last(const Accessor& output, nint_t index) {
+VECOPS_INLINE auto slice_data_output_view_last(const Accessor& output, nint_t index) {
   const auto& impl = output._impl;
   auto tensor = make_tensor(impl._p, impl._layout);
   auto sliced = hop::details::slice_at_actual_dim<ActualDim>(tensor, index);
@@ -1244,7 +1254,7 @@ auto slice_data_output_view_last(const Accessor& output, nint_t index) {
 }
 
 template <int ActualDim, typename Accessor>
-auto slice_data_output_strided(const Accessor& output, nint_t index) {
+VECOPS_INLINE auto slice_data_output_strided(const Accessor& output, nint_t index) {
   const auto& impl = output._impl;
   auto tensor = make_tensor(impl._p, impl._layout);
   auto sliced = hop::details::slice_at_actual_dim<ActualDim>(tensor, index);
@@ -1262,7 +1272,7 @@ auto slice_data_output_strided(const Accessor& output, nint_t index) {
 }
 
 template <int ActualDim, typename Accessor>
-auto slice_data_output_second_last(const Accessor& output, nint_t index) {
+VECOPS_INLINE auto slice_data_output_second_last(const Accessor& output, nint_t index) {
   const auto& impl = output._impl;
   auto out_tensor = make_tensor(impl._p, impl._layout);
   auto aux_tensor = make_tensor(impl._aux, impl._aux_layout);
@@ -1286,7 +1296,7 @@ auto slice_data_output_second_last(const Accessor& output, nint_t index) {
 }
 
 template <int ActualDim, typename Spec>
-auto slice_input_spec(const Spec& spec, nint_t index) {
+VECOPS_INLINE auto slice_input_spec(const Spec& spec, nint_t index) {
   auto sliced = hop::details::slice_at_actual_dim<ActualDim>(spec.tensor(), index);
   auto fn = prefixed_transform<ActualDim>(spec.transform(), index);
   using SlicedTensor = std::remove_cvref_t<decltype(sliced)>;
@@ -1297,7 +1307,7 @@ auto slice_input_spec(const Spec& spec, nint_t index) {
 }
 
 template <int ActualDim, typename Spec>
-auto slice_output_spec(const Spec& spec, nint_t index) {
+VECOPS_INLINE auto slice_output_spec(const Spec& spec, nint_t index) {
   auto sliced = hop::details::slice_at_actual_dim<ActualDim>(spec.tensor(), index);
   auto fn = prefixed_transform<ActualDim>(spec.transform(), index);
   using SlicedTensor = std::remove_cvref_t<decltype(sliced)>;
@@ -1320,12 +1330,12 @@ struct SliceTraits<DataInput<TOut, InTensor, Transform>> {
   template <int I>
   using shape_dim = typename TensorShapeDim<I, InTensor>::type;
 
-  static nint_t size(const Accessor& input, int dim) {
+  VECOPS_INLINE static nint_t size(const Accessor& input, int dim) {
     return input._impl._layout.shape()[dim];
   }
 
   template <int ActualDim, typename U>
-  static auto slice(U&& input, nint_t index) {
+  VECOPS_INLINE static auto slice(U&& input, nint_t index) {
     using Kind = typename Accessor::AccessKind;
     if constexpr (std::is_same_v<Kind, vecops::gemm::details::AccessKindLastContiguous>) {
       return vecops::gemm::details::slice_data_input_last<ActualDim>(input, index);
@@ -1344,12 +1354,12 @@ struct SliceTraits<DataInputView<TOut, InTensor, Transform, Kind, AuxLayout>> {
   template <int I>
   using shape_dim = typename TensorShapeDim<I, InTensor>::type;
 
-  static nint_t size(const Accessor& input, int dim) {
+  VECOPS_INLINE static nint_t size(const Accessor& input, int dim) {
     return input._impl._layout.shape()[dim];
   }
 
   template <int ActualDim, typename U>
-  static auto slice(U&& input, nint_t index) {
+  VECOPS_INLINE static auto slice(U&& input, nint_t index) {
     if constexpr (std::is_same_v<Kind, vecops::gemm::details::AccessKindLastContiguous>) {
       return vecops::gemm::details::slice_data_input_view_last<ActualDim>(input, index);
     } else {
@@ -1367,12 +1377,12 @@ struct SliceTraits<DataOutput<TIn, OutTensor, Transform>> {
   template <int I>
   using shape_dim = typename TensorShapeDim<I, OutTensor>::type;
 
-  static nint_t size(const Accessor& output, int dim) {
+  VECOPS_INLINE static nint_t size(const Accessor& output, int dim) {
     return output._impl._layout.shape()[dim];
   }
 
   template <int ActualDim, typename U>
-  static auto slice(U&& output, nint_t index) {
+  VECOPS_INLINE static auto slice(U&& output, nint_t index) {
     using Kind = typename Accessor::AccessKind;
     if constexpr (std::is_same_v<Kind, vecops::gemm::details::AccessKindLastContiguous>) {
       return vecops::gemm::details::slice_data_output_last<ActualDim>(output, index);
@@ -1393,12 +1403,12 @@ struct SliceTraits<DataOutputView<TIn, OutTensor, Transform, Kind, AuxLayout>> {
   template <int I>
   using shape_dim = typename TensorShapeDim<I, OutTensor>::type;
 
-  static nint_t size(const Accessor& output, int dim) {
+  VECOPS_INLINE static nint_t size(const Accessor& output, int dim) {
     return output._impl._layout.shape()[dim];
   }
 
   template <int ActualDim, typename U>
-  static auto slice(U&& output, nint_t index) {
+  VECOPS_INLINE static auto slice(U&& output, nint_t index) {
     if constexpr (std::is_same_v<Kind, vecops::gemm::details::AccessKindLastContiguous>) {
       return vecops::gemm::details::slice_data_output_view_last<ActualDim>(output, index);
     } else if constexpr (std::is_same_v<Kind, vecops::gemm::details::AccessKindSecondLastContiguous>) {
@@ -1429,12 +1439,12 @@ struct SliceTraits<
   template <int I>
   using shape_dim = typename TensorShapeDim<I, typename Spec::InputTensor>::type;
 
-  static nint_t size(const Spec& spec, int dim) {
+  VECOPS_INLINE static nint_t size(const Spec& spec, int dim) {
     return spec.tensor().size(dim);
   }
 
   template <int ActualDim, typename U>
-  static auto slice(U&& spec, nint_t index) {
+  VECOPS_INLINE static auto slice(U&& spec, nint_t index) {
     return vecops::gemm::details::slice_input_spec<ActualDim>(spec, index);
   }
 };
@@ -1459,12 +1469,12 @@ struct SliceTraits<
   template <int I>
   using shape_dim = typename TensorShapeDim<I, typename Spec::OutputTensor>::type;
 
-  static nint_t size(const Spec& spec, int dim) {
+  VECOPS_INLINE static nint_t size(const Spec& spec, int dim) {
     return spec.tensor().size(dim);
   }
 
   template <int ActualDim, typename U>
-  static auto slice(U&& spec, nint_t index) {
+  VECOPS_INLINE static auto slice(U&& spec, nint_t index) {
     return vecops::gemm::details::slice_output_spec<ActualDim>(spec, index);
   }
 };

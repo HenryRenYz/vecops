@@ -653,10 +653,29 @@ VECOPS_ALWAYS_INLINE auto scan(Carry&& init, N n, Step step, Fn&& fn)
  */
 template <typename Fn, typename N, typename Step>
 VECOPS_ALWAYS_INLINE void map(N n, Step step, Fn&& fn) {
-  scan(std::nullptr_t{}, n, step, [&](std::nullptr_t, nint_t i, auto&& chunk_n) -> std::nullptr_t {
-    fn(i, std::forward<decltype(chunk_n)>(chunk_n));
-    return nullptr;
-  });
+  auto n_value = details::to_hop_value(n);
+  auto step_value = details::to_hop_value(step);
+  details::validate_scan_args(n_value, step_value);
+
+  using NValue = std::remove_cvref_t<decltype(n_value)>;
+  using StepValue = std::remove_cvref_t<decltype(step_value)>;
+
+  nint_t i = 0;
+  const nint_t full_end = static_cast<nint_t>(n_value - step_value + cint<1>);
+  const nint_t step_int = static_cast<nint_t>(step_value);
+  for (; i < full_end; i += step_int) {
+    fn(i, step_value);
+  }
+
+  if constexpr (!details::has_no_tail_v<NValue, StepValue>) {
+    if (i < static_cast<nint_t>(n_value)) {
+      if constexpr (details::has_const_tail_v<NValue, StepValue>) {
+        fn(i, n_value % step_value);
+      } else {
+        fn(i, Any{static_cast<nint_t>(n_value) - i});
+      }
+    }
+  }
 }
 
 /**

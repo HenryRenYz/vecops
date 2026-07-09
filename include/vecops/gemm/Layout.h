@@ -1915,7 +1915,8 @@ constexpr auto make_layout(
 
 /**
  * @brief Create a Layout of rank Ndim from a shape initializer_list only.
- *        Strides are auto-computed as row-major contiguous, all Any.
+ *        Strides are auto-computed as row-major contiguous, preserving the
+ *        trailing `Const<1>` stride even though shape values are dynamic.
  */
 template <int Ndim>
 constexpr auto make_layout(
@@ -1925,7 +1926,7 @@ constexpr auto make_layout(
   VECOPS_ASSERT(shape_vals.size() == Ndim, "shape_vals.size() != Ndim");
 
   using S = details::repeat_t<Ndim, Shape, Any>;
-  using St = details::repeat_t<Ndim, Strides, Any>;
+  using St = typename details::InferredStrides<S>::type;
 
   std::array<nint_t, Ndim> shapes{};
   std::copy(shape_vals.begin(), shape_vals.end(), shapes.begin());
@@ -1938,7 +1939,7 @@ constexpr auto make_layout(
   return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
     return Layout<S, St>{
         S{Any{shapes[Idx]}...},
-        St{Any{stride_vals[Idx]}...}
+        St{stride_vals[Idx]...}
     };
   }(std::make_index_sequence<Ndim>{});
 }

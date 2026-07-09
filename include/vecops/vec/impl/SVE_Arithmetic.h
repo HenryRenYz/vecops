@@ -141,7 +141,10 @@ VECOPS_VFUNC V fmadd(V a, V b, V c, Mask<T> m) {
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 VECOPS_VFUNC V fmadd(V a, V b, V c) {
   using E = TypeOf<T>;
-  return word::fmadd(a, b, c, details::ptrue<E>());
+  if constexpr (std::is_same_v<E, float32_t>)      return svmla_f32_m(details::ptrue<E>(), c, a, b);
+  else if constexpr (std::is_same_v<E, float64_t>) return svmla_f64_m(details::ptrue<E>(), c, a, b);
+  else if constexpr (std::is_same_v<E, float16_t>) return svmla_f16_m(details::ptrue<E>(), c, a, b);
+  else return word::add(word::mul(a, b), c);
 }
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>>

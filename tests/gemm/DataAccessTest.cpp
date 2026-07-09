@@ -266,8 +266,9 @@ TEST(DataAccessTransformTest, CoordinatesAreForwardedForLastContiguousInput) {
   EXPECT_EQ(coords, (std::vector<nint_t>{1, 2}));
   EXPECT_EQ(read_vec_lane<T>(v, 0), coord_shift_expected(src[7], 1, 2));
   EXPECT_EQ(read_vec_lane<T>(v, 1), coord_shift_expected(src[8], 1, 2));
-  // undefined value
-  //EXPECT_EQ(read_vec_lane<T>(v, 3), 0);
+  if (3 < size(t)) {
+    EXPECT_EQ(read_vec_lane<T>(v, 3), 0);
+  }
 }
 
 TEST(DataAccessTransformTest, SecondLastContiguousOutputFlushesInDestructor) {
@@ -325,6 +326,20 @@ TEST(DataAccessSpecWrapperTest, InputHelperBindsTensorWithWorkspace) {
   EXPECT_EQ(read_vec_lane<T>(v, 2), src[43]);
 }
 
+TEST(DataAccessSpecWrapperTest, ShapeOnlyInitializerTensorUsesLastContiguousInputPath) {
+  using T = int32_t;
+
+  auto src = make_source<T>(32);
+  auto tensor = make_tensor<2>(src.data(), {3, 5});
+  auto spec = input<T>(tensor);
+
+  using Accessor = typename decltype(spec)::InputAccessor;
+  EXPECT_TRUE((std::is_same_v<
+      typename Accessor::AccessKind,
+      vecops::gemm::details::AccessKindLastContiguous>));
+  EXPECT_EQ(spec.required_workspace(), 0);
+}
+
 TEST(DataAccessSpecWrapperTest, OutputHelperBindsTensorWithWorkspace) {
   using T = int32_t;
   using L = Layout<Shape<Const<3>, Const<5>>, Strides<Const<5>, Const<1>>>;
@@ -352,6 +367,20 @@ TEST(DataAccessSpecWrapperTest, OutputHelperBindsTensorWithWorkspace) {
   EXPECT_EQ(dst[7], 100);
   EXPECT_EQ(dst[8], 101);
   EXPECT_EQ(dst[9], 102);
+}
+
+TEST(DataAccessSpecWrapperTest, ShapeOnlyInitializerTensorUsesLastContiguousOutputPath) {
+  using T = int32_t;
+
+  std::vector<T> dst(32, -1);
+  auto tensor = make_tensor<2>(dst.data(), {3, 5});
+  auto spec = output<T>(tensor);
+
+  using Accessor = typename decltype(spec)::OutputAccessor;
+  EXPECT_TRUE((std::is_same_v<
+      typename Accessor::AccessKind,
+      vecops::gemm::details::AccessKindLastContiguous>));
+  EXPECT_EQ(spec.required_workspace(), 0);
 }
 
 TEST(DataAccessHOPSliceTest, SlicedInputAccessorUsesRowLayoutAndFullTransformCoords) {

@@ -76,7 +76,9 @@ void run_dtype_combo() {
   auto s_spec = input<float32_t>(s_t);
   auto b_spec = input<float32_t>(b_t);
   auto y_spec = output<float32_t>(y_t);
-  Workspace workspace(op.required_workspace(x_spec, s_spec, b_spec, y_spec));
+  const nint_t workspace_bytes = op.required_workspace(x_spec, s_spec, b_spec, y_spec);
+  EXPECT_EQ(workspace_bytes, 0);
+  Workspace workspace(workspace_bytes);
   auto view = workspace.view();
   op(view, x_spec, s_spec, b_spec, y_spec);
 
@@ -281,7 +283,9 @@ TEST(LayerNormRankTest, HandlesRuntimeRankFourTensorLayout) {
   auto s_spec = input<float32_t>(s_t);
   auto b_spec = input<float32_t>(b_t);
   auto y_spec = output<float32_t>(y_t);
-  Workspace workspace(op.required_workspace(x_spec, s_spec, b_spec, y_spec));
+  const nint_t workspace_bytes = op.required_workspace(x_spec, s_spec, b_spec, y_spec);
+  EXPECT_EQ(workspace_bytes, 0);
+  Workspace workspace(workspace_bytes);
   auto view = workspace.view();
   op(view, x_spec, s_spec, b_spec, y_spec);
 

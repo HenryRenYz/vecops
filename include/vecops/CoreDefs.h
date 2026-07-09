@@ -26,12 +26,15 @@
 #if defined(COMPILER_GCC) || defined(COMPILER_CLANG)
 #define VECOPS_NOINLINE __attribute__((noinline))
   #define VECOPS_ALWAYS_INLINE __attribute__((always_inline)) inline
+  #define VECOPS_ALWAYS_INLINE_LAMBDA __attribute__((always_inline))
 #elif defined(COMPILER_MSVC)
 #define VECOPS_NOINLINE __declspec(noinline)
   #define VECOPS_ALWAYS_INLINE __forceinline
+  #define VECOPS_ALWAYS_INLINE_LAMBDA
 #else
 #define VECOPS_NOINLINE
 #define VECOPS_ALWAYS_INLINE inline
+#define VECOPS_ALWAYS_INLINE_LAMBDA
 #endif
 #if VECOPS_RELEASE
 #define VECOPS_INLINE VECOPS_ALWAYS_INLINE

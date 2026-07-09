@@ -29,3 +29,17 @@ if(BUILD_TESTING)
     include(GoogleTest)
     add_subdirectory(tests)
 endif()
+
+option(BUILD_BENCHMARKS "Build benchmarks" ON)
+if(BUILD_BENCHMARKS)
+    set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+            googlebenchmark
+            GIT_REPOSITORY "${VECOPS_GITHUB_ENDPOINT}/google/benchmark.git"
+            GIT_TAG        v1.8.3
+    )
+    FetchContent_MakeAvailable(googlebenchmark)
+    add_subdirectory(benchmarks)
+endif()
