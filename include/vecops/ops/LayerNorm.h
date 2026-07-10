@@ -210,7 +210,6 @@ private:
     static_assert(InLayout::Ndim == 1, "LayerNorm row spec must be rank 1");
 
     Tag t;
-    using VecT = vec::Vec<Tag>;
     auto mark = workspace.mark();
     {
       auto x = in.bind(workspace);
@@ -219,17 +218,32 @@ private:
       const auto normalized_count = gemm::size<0>(in_layout);
       const auto step = details::vector_step_value(t);
 
-      const auto [v_mean, v_var] = gemm::hop::scan(
-          std::make_pair(vec::zeros(t), vec::zeros(t)), normalized_count, step,
-          [&](std::pair<VecT, VecT> acc, nint_t col, auto&& count) {
+      const auto [sum, sum_sq] = gemm::hop::scan<4>(
+          normalized_count,
+          step,
+          [&](auto&& use) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+            auto v_sum = vec::zeros(t);
+            auto v_sum_sq = vec::zeros(t);
+            return use(v_sum, v_sum_sq);
+          },
+          [&](nint_t col, auto&& count, auto& v_sum, auto& v_sum_sq)
+              VECOPS_INLINE_LAMBDA {
             auto xv = x(t, count, col);
-            return std::make_pair(vec::add(acc.first, xv), vec::fmadd(xv, xv, acc.second));
-          }
-      );
+            v_sum = vec::add(v_sum, xv);
+            v_sum_sq = vec::fmadd(xv, xv, v_sum_sq);
+          },
+          [&](auto& dst_sum, auto& dst_sum_sq, auto& src_sum, auto& src_sum_sq)
+              VECOPS_INLINE_LAMBDA {
+            dst_sum = vec::add(dst_sum, src_sum);
+            dst_sum_sq = vec::add(dst_sum_sq, src_sum_sq);
+          },
+          [&](auto& v_sum, auto& v_sum_sq) {
+            return std::make_pair(
+                vec::reduce_add(t, v_sum),
+                vec::reduce_add(t, v_sum_sq));
+          });
 
       const auto inv_n = ComputeType(1) / static_cast<ComputeType>(normalized_count);
-      const auto sum = vec::reduce_add(t, v_mean);
-      const auto sum_sq = vec::reduce_add(t, v_var);
       const auto mean = sum * inv_n;
       const auto variance = std::max(sum_sq * inv_n - mean * mean, ComputeType(0));
       const auto rstd = ComputeType(1) / std::sqrt(variance + config.eps);
@@ -237,7 +251,7 @@ private:
       const auto mean_v = vec::fill(t, mean);
       const auto rstd_v = vec::fill(t, rstd);
 
-      gemm::hop::map(normalized_count, step, [&](nint_t col, auto&& count) {
+      gemm::hop::map<4>(normalized_count, step, [&](nint_t col, auto&& count) {
         auto xv = x(t, count, col);
         auto gamma_v = gamma(t, count, col);
         auto beta_v = beta(t, count, col);

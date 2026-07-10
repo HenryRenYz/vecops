@@ -185,7 +185,7 @@ private:
       const auto negative_infinity =
           static_cast<ComputeType>(-std::numeric_limits<double>::infinity());
 
-      const auto v_max = gemm::hop::scan(
+      const auto v_max = gemm::hop::scan<1>(
           vec::fill(t, negative_infinity),
           normalized_count,
           step,
@@ -197,7 +197,7 @@ private:
       const auto max_value = vec::reduce_max(t, v_max);
       const auto max_v = vec::fill(t, max_value);
 
-      const auto v_sum = gemm::hop::scan(
+      const auto v_sum = gemm::hop::scan<1>(
           vec::zeros(t),
           normalized_count,
           step,
@@ -211,7 +211,7 @@ private:
       const auto inv_sum = ComputeType(1) / vec::reduce_add(t, v_sum);
       const auto inv_sum_v = vec::fill(t, inv_sum);
 
-      gemm::hop::map(
+      gemm::hop::map<2>(
           normalized_count,
           step,
           [&](nint_t col, auto&& count) VECOPS_INLINE_LAMBDA {

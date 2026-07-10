@@ -669,6 +669,90 @@ TEST(HOPMapTest, RawIntegerInputsPromoteToAny) {
   EXPECT_EQ(chunks, (std::vector<std::pair<nint_t, nint_t>>{{0, 4}, {4, 4}, {8, 2}}));
 }
 
+template <int Unroll>
+void expect_unrolled_scan() {
+  int carry_sets = 0;
+  int combines = 0;
+  std::vector<std::pair<nint_t, nint_t>> chunks;
+
+  const auto result = hop::scan<Unroll>(
+      cint<11>,
+      cint<2>,
+      [&](auto&& use) -> decltype(auto) {
+        ++carry_sets;
+        int count_sum = 0;
+        int position_sum = 0;
+        return use(count_sum, position_sum);
+      },
+      [&](nint_t i, auto&& chunk_n, int& count_sum, int& position_sum) {
+        const auto count = static_cast<nint_t>(chunk_n);
+        chunks.emplace_back(i, count);
+        count_sum += static_cast<int>(count);
+        position_sum += static_cast<int>(i + count);
+      },
+      [&](int& dst_count, int& dst_position, int& src_count, int& src_position) {
+        ++combines;
+        dst_count += src_count;
+        dst_position += src_position;
+      },
+      [](int& count_sum, int& position_sum) {
+        return std::pair{count_sum, position_sum};
+      });
+
+  EXPECT_EQ(carry_sets, Unroll);
+  EXPECT_EQ(combines, Unroll - 1);
+  EXPECT_EQ(result, (std::pair{11, 41}));
+  EXPECT_EQ(chunks, (std::vector<std::pair<nint_t, nint_t>>{
+                        {0, 2}, {2, 2}, {4, 2}, {6, 2}, {8, 2}, {10, 1}}));
+}
+
+TEST(HOPScanTest, UnrolledVariadicCarriesCoverOneThroughFour) {
+  expect_unrolled_scan<1>();
+  expect_unrolled_scan<2>();
+  expect_unrolled_scan<3>();
+  expect_unrolled_scan<4>();
+}
+
+template <int Unroll>
+void expect_unrolled_single_carry() {
+  const int result = hop::scan<Unroll>(
+      0,
+      cint<11>,
+      cint<2>,
+      [](int acc, nint_t, auto&& chunk_n) {
+        return acc + static_cast<int>(static_cast<nint_t>(chunk_n));
+      },
+      [](int lhs, int rhs) {
+        return lhs + rhs;
+      });
+  EXPECT_EQ(result, 11);
+}
+
+TEST(HOPScanTest, SingleCarryConvenienceOverloadCoversOneThroughFour) {
+  expect_unrolled_single_carry<1>();
+  expect_unrolled_single_carry<2>();
+  expect_unrolled_single_carry<3>();
+  expect_unrolled_single_carry<4>();
+}
+
+template <int Unroll>
+void expect_unrolled_map() {
+  std::vector<std::pair<nint_t, nint_t>> chunks;
+  hop::map<Unroll>(cint<11>, cint<2>, [&](nint_t i, auto&& chunk_n) {
+    chunks.emplace_back(i, static_cast<nint_t>(chunk_n));
+  });
+
+  EXPECT_EQ(chunks, (std::vector<std::pair<nint_t, nint_t>>{
+                        {0, 2}, {2, 2}, {4, 2}, {6, 2}, {8, 2}, {10, 1}}));
+}
+
+TEST(HOPMapTest, UnrollFactorsOneThroughFourPreserveChunkOrder) {
+  expect_unrolled_map<1>();
+  expect_unrolled_map<2>();
+  expect_unrolled_map<3>();
+  expect_unrolled_map<4>();
+}
+
 #ifdef VECOPS_DEBUG
 TEST(HOPForEachDeathTest, NonBroadcastExtentMismatch) {
   std::vector<int64_t> a(2 * 3);
