@@ -39,31 +39,27 @@ VECOPS_VFUNC svfloat32_t bf16_to_f32_hi(svbfloat16_t v) {
 //  hi_f32 = upper  half computation results (contiguous)           //
 /* ================================================================ */
 
+VECOPS_VFUNC svuint32_t f32_to_bf16_rne_bits(svfloat32_t v) {
+  const auto pg = ptrue<float32_t>();
+  const auto bits = svreinterpret_u32_f32(v);
+  const auto lsb = svand_n_u32_x(pg, svlsr_n_u32_x(pg, bits, 16), 1);
+  const auto rounded = svlsr_n_u32_x(
+      pg, svadd_u32_x(pg, bits, svadd_n_u32_x(pg, lsb, 0x7fffu)), 16);
+  const auto abs_bits = svand_n_u32_x(pg, bits, 0x7fffffffu);
+  const auto nan = svcmpgt_n_u32(pg, abs_bits, 0x7f800000u);
+  return svsel_u32(nan, svdup_n_u32(0x7fc0u), rounded);
+}
+
 VECOPS_VFUNC svbfloat16_t f32x2_to_bf16(svfloat32_t lo_f32, svfloat32_t hi_f32) {
-  #if defined(__ARM_FEATURE_SVE_BF16)
+  #if defined(__ARM_FEATURE_SVE_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
   auto pg_bf16 = ptrue<bfloat16_t>();
 
   auto lo_bf16 = svcvt_bf16_z(pg_bf16, lo_f32);
   auto hi_bf16 = svcvt_bf16_z(pg_bf16, hi_f32);
   return svuzp1(lo_bf16, hi_bf16);
   #else
-    auto pg = svptrue_b32();
-    auto lo_u32 = svreinterpret_u32_f32(lo_f32);
-    auto hi_u32 = svreinterpret_u32_f32(hi_f32);
-
-    auto ones = svdup_n_u32(1);
-    auto bias_base = svdup_n_u32(0x7fff);
-
-    auto lo_round_bit = svand_u32_x(pg, svlsr_n_u32_x(pg, lo_u32, 16), ones);
-    auto lo_bias = svadd_u32_x(pg, lo_round_bit, bias_base);
-    auto u32_lo = svlsr_n_u32_x(pg, svadd_u32_x(pg, lo_u32, lo_bias), 16);
-
-    auto hi_round_bit = svand_u32_x(pg, svlsr_n_u32_x(pg, hi_u32, 16), ones);
-    auto hi_bias = svadd_u32_x(pg, hi_round_bit, bias_base);
-    auto u32_hi = svlsr_n_u32_x(pg, svadd_u32_x(pg, hi_u32, hi_bias), 16);
-
-    auto u16_lo = svreinterpret_u16_u32(u32_lo);
-    auto u16_hi = svreinterpret_u16_u32(u32_hi);
+    auto u16_lo = svreinterpret_u16_u32(f32_to_bf16_rne_bits(lo_f32));
+    auto u16_hi = svreinterpret_u16_u32(f32_to_bf16_rne_bits(hi_f32));
     return svreinterpret_bf16_u16(svuzp1_u16(u16_lo, u16_hi));
   #endif
 }

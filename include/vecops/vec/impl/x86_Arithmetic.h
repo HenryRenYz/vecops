@@ -51,20 +51,19 @@ VECOPS_VFUNC __m512i cast_bh_to_si512(__m512bh v) {
 #endif
 
 VECOPS_VFUNC void cvt_bf16_to_two_fp32(__m128i a, __m128& lo, __m128& hi){
-  #if defined(HAS_AVX512_BF16)
+  #if defined(HAS_AVX512_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
   auto x256 = _mm256_cvtpbh_ps(cast_si128_to_bh(a));
   lo = _mm256_castps256_ps128(x256);
   hi = _mm256_extractf128_ps(x256, 1);
-  lo = _mm_cvtpbh_ps(cast_si128_to_bh(a));
   #else
   lo = _mm_castsi128_ps(_mm_slli_epi32(_mm_cvtepu16_epi32(a), 16));
   hi = _mm_castsi128_ps(_mm_slli_epi32(_mm_cvtepu16_epi32(_mm_srli_si128(a, 8)), 16));
   #endif
 }
 VECOPS_VFUNC __m128i cvt_two_fp32_to_bf16(__m128 lo, __m128 hi) {
-  #if defined(HAS_AVX512_BF16)
+  #if defined(HAS_AVX512_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
   return cast_bh_to_si128(_mm_cvtne2ps_pbh(hi, lo));
-  #elif defined(HAS_AVX_NE_CONVERT)
+  #elif defined(HAS_AVX_NE_CONVERT) && !defined(VECOPS_PRESERVE_SUBNORMALS)
   auto t_256 = _mm256_insertf128_ps(_mm256_castps128_ps256(lo), hi, 1);
   return cast_bh_to_si128(_mm256_cvtneps_pbh(t_256));
   #else
@@ -82,7 +81,7 @@ VECOPS_VFUNC __m128i cvt_two_fp32_to_bf16(__m128 lo, __m128 hi) {
 
 #if VEC_WIDTH >= 256
 VECOPS_VFUNC void cvt_bf16_to_two_fp32(__m256i a, __m256& o1, __m256& o2) {
-  #if defined(HAS_AVX512_BF16)
+  #if defined(HAS_AVX512_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
   auto x512 = _mm512_cvtpbh_ps(cast_si256_to_bh(a));
   o1 = _mm512_castps512_ps256(x512);
   o2 = _mm512_extractf32x8_ps(x512, 1);
@@ -93,9 +92,9 @@ VECOPS_VFUNC void cvt_bf16_to_two_fp32(__m256i a, __m256& o1, __m256& o2) {
   #endif
 }
 VECOPS_VFUNC __m256i cvt_two_fp32_to_bf16(__m256 a, __m256 b){
-  #if defined(HAS_AVX512_BF16)
+  #if defined(HAS_AVX512_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
   return cast_bh_to_si256(_mm256_cvtne2ps_pbh(b, a));
-  #elif defined(HAS_AVX_NE_CONVERT)
+  #elif defined(HAS_AVX_NE_CONVERT) && !defined(VECOPS_PRESERVE_SUBNORMALS)
   __m128bh lo_bh=_mm256_cvtneps_pbh(a),hi_bh=_mm256_cvtneps_pbh(b);
   return _mm256_insertf128_si256(_mm256_castsi128_si256(cast_bh_to_si128(lo_bh)),cast_bh_to_si128(hi_bh),1);
   #else
@@ -115,7 +114,7 @@ VECOPS_VFUNC __m256i cvt_two_fp32_to_bf16(__m256 a, __m256 b){
 #if VEC_WIDTH >= 512
 VECOPS_VFUNC void cvt_bf16_to_two_fp32(__m512i a, __m512& o1, __m512& o2) {
   __m256i lo256 = _mm512_castsi512_si256(a), hi256 = _mm512_extracti64x4_epi64(a, 1);
-  #if defined(HAS_AVX512_BF16)
+  #if defined(HAS_AVX512_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
   o1 = _mm512_cvtpbh_ps(cast_si256_to_bh(lo256));
   o2 = _mm512_cvtpbh_ps(cast_si256_to_bh(hi256));
   #else
@@ -124,7 +123,7 @@ VECOPS_VFUNC void cvt_bf16_to_two_fp32(__m512i a, __m512& o1, __m512& o2) {
   #endif
 }
 VECOPS_VFUNC __m512i cvt_two_fp32_to_bf16(__m512 a, __m512 b){
-  #if defined(HAS_AVX512_BF16)
+  #if defined(HAS_AVX512_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
   return cast_bh_to_si512(_mm512_cvtne2ps_pbh(b, a));
   #else
   __m256 a_lo = _mm512_castps512_ps256(a), a_hi = _mm512_extractf32x8_ps(a, 1);

@@ -2563,10 +2563,7 @@ VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<float16_t, T>> v) {
 /* ************************************************************************** */
 template <TLV_DECL_TAG(T), TL_IF(size(T{}) <= 4), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
 VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<float32_t, T>> v) {
-  alignas(16) float val[4]; alignas(16) bfloat16_t conv[8];
-  _mm_store_ps(val, v.v);
-  for (int i = 0; i < 4; ++i) conv[i] = bfloat16_t(val[i]);
-  return _mm_load_si128((const __m128i*)conv);
+  return half_cvt::cvt_two_fp32_to_bf16(v.v, v.v);
 }
 
 template <TLV_DECL_TAG(T), TL_IF(size(T{}) == 8), TL_IF(is_any<TypeOf<T>, bfloat16_t>)>
@@ -2585,10 +2582,9 @@ VECOPS_VFUNC Vec<T> demote(T t, Vec<Rebind<float32_t, T>> v) {
 
 template <TLV_DECL_TAG(T), TL_IF(size(T{}) <= 4), TL_IF(is_any<TypeOf<T>, float32_t>)>
 VECOPS_VFUNC Vec<T> promote(T t, Vec<Rebind<bfloat16_t, T>> v) {
-  alignas(16) bfloat16_t val[8]; alignas(16) float conv[4];
-  _mm_store_si128((__m128i*)val, v.v);
-  for (int i = 0; i < 4; ++i) conv[i] = float(val[i]);
-  return _mm_load_ps(conv);
+  __m128 lo, hi;
+  half_cvt::cvt_bf16_to_two_fp32(v.v, lo, hi);
+  return lo;
 }
 
 template <TLV_DECL_TAG(T), TL_IF(size(T{}) == 8), TL_IF(is_any<TypeOf<T>, float32_t>)>

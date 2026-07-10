@@ -61,6 +61,7 @@
   #include "./impl/x86_MaskConversions.h"
   #include "./impl/x86_LoadStore.h"
   #include "./impl/x86_Arithmetic.h"
+  #include "./impl/x86_Math.h"
 #elif defined(ARCH_ARM_FAMILY) && defined(HAS_SVE)
   #include "./impl/SVE_Basic.h"
   #include "./impl/SVE_Bit.h"
@@ -68,6 +69,7 @@
   #include "./impl/SVE_MaskConversions.h"
   #include "./impl/SVE_LoadStore.h"
   #include "./impl/SVE_Arithmetic.h"
+  #include "./impl/SVE_Math.h"
 #elif defined(ARCH_ARM_FAMILY) && defined(HAS_NEON)
   #warning "NEON not implemented yet, falling back to Scalar implementation"
   #include "./impl/Scalar.h"
@@ -1259,6 +1261,7 @@ VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   );
 }
 
+// TODO wtf
 namespace details {
 template <typename E>
 VECOPS_VFUNC E reduce_scalar_add(E a, E b) {
@@ -1871,6 +1874,137 @@ VECOPS_VFUNC V rcp(V v, Mask<T> m) {
   return vec::rcp(v, m, v);
 }
 
+/* ************************************************************************** */
+//                           Transcendental math                              //
+/* ************************************************************************** */
+
+/**
+ * @brief Computes the element-wise natural exponential with strict accuracy.
+ *
+ * Normal results are within one ULP of the destination type. The default build
+ * may flush subnormal results to zero; defining `VECOPS_PRESERVE_SUBNORMALS`
+ * enables gradual underflow with the same one-ULP bound. This is the default
+ * choice for numerically sensitive workloads.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp(V v) {
+  using namespace details;
+  constexpr T t;
+  return vmap(t, [=](auto, auto&& vv) { return word::exp(vv); }, ShardVec(t, v));
+}
+
+/**
+ * @brief Computes strict element-wise exp on active lanes.
+ *
+ * Inactive lanes are copied from default_v without modification.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp(V v, Mask<T> m, V default_v) {
+  using namespace details;
+  constexpr T t;
+  return vmap(t, [=](auto, auto&& vv, auto&& mm, auto&& dd) {
+    return word::exp(vv, mm, dd);
+  }, ShardVec(t, v), ShardMask(t, m), ShardVec(t, default_v));
+}
+
+/**
+ * @brief Computes strict element-wise exp on active lanes.
+ *
+ * Inactive lanes retain their original input values.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp(V v, Mask<T> m) {
+  return vec::exp(v, m, v);
+}
+
+/**
+ * @brief Computes a fast element-wise natural exponential.
+ *
+ * Normal results are within four ULP. Subnormal mathematical results may be
+ * flushed to positive zero. If `VECOPS_MATH_ASSUME_VALID_INPUTS` is defined,
+ * the input must be finite and its mathematical result must be normal.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_fast(V v) {
+  using namespace details;
+  constexpr T t;
+  return vmap(t, [=](auto, auto&& vv) { return word::exp_fast(vv); }, ShardVec(t, v));
+}
+
+/**
+ * @brief Computes fast element-wise exp on active lanes.
+ *
+ * Inactive lanes are copied from default_v without modification.
+ * With `VECOPS_MATH_ASSUME_VALID_INPUTS`, active inputs must be finite and
+ * produce normal mathematical results.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_fast(V v, Mask<T> m, V default_v) {
+  using namespace details;
+  constexpr T t;
+  return vmap(t, [=](auto, auto&& vv, auto&& mm, auto&& dd) {
+    return word::exp_fast(vv, mm, dd);
+  }, ShardVec(t, v), ShardMask(t, m), ShardVec(t, default_v));
+}
+
+/**
+ * @brief Computes fast element-wise exp on active lanes.
+ *
+ * Inactive lanes retain their original input values.
+ * With `VECOPS_MATH_ASSUME_VALID_INPUTS`, active inputs must be finite and
+ * produce normal mathematical results.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_fast(V v, Mask<T> m) {
+  return vec::exp_fast(v, m, v);
+}
+
+/**
+ * @brief Computes a maximum-throughput estimate of element-wise exp.
+ *
+ * Normal results have at most 0.6 percent relative error. Subnormal
+ * mathematical results may be flushed to positive zero. If
+ * `VECOPS_MATH_ASSUME_VALID_INPUTS` is defined, the input must be finite and
+ * its mathematical result must be normal.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_est(V v) {
+  using namespace details;
+  constexpr T t;
+  return vmap(t, [=](auto, auto&& vv) { return word::exp_est(vv); }, ShardVec(t, v));
+}
+
+/**
+ * @brief Computes estimated element-wise exp on active lanes.
+ *
+ * Inactive lanes are copied from default_v without modification.
+ * With `VECOPS_MATH_ASSUME_VALID_INPUTS`, active inputs must be finite and
+ * produce normal mathematical results.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_est(V v, Mask<T> m, V default_v) {
+  using namespace details;
+  constexpr T t;
+  return vmap(t, [=](auto, auto&& vv, auto&& mm, auto&& dd) {
+    return word::exp_est(vv, mm, dd);
+  }, ShardVec(t, v), ShardMask(t, m), ShardVec(t, default_v));
+}
+
+/**
+ * @brief Computes estimated element-wise exp on active lanes.
+ *
+ * Inactive lanes retain their original input values.
+ * With `VECOPS_MATH_ASSUME_VALID_INPUTS`, active inputs must be finite and
+ * produce normal mathematical results.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_est(V v, Mask<T> m) {
+  return vec::exp_est(v, m, v);
+}
+
+/* ************************************************************************** */
+//                                Comparison                                  //
+/* ************************************************************************** */
 
 /**
  * @brief Element-wise equality comparison: result[i] = (a[i] == b[i]).
@@ -2951,6 +3085,9 @@ VECOPS_VFUNC Vec<To> promote(To t, Vi v) {
  * - int -> float: standard conversion
  * - float -> signed int: standard conversion
  * - float -> unsigned int: standard conversion (negative input undefined)
+ * - float32 -> bfloat16: round-to-nearest-even for normal inputs; the default
+ *   build may flush subnormal inputs, while `VECOPS_PRESERVE_SUBNORMALS`
+ *   guarantees representable bfloat16 subnormal results
  *
  * @tparam To Target type tag
  * @param t Target vector tag

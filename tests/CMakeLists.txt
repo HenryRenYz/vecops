@@ -58,7 +58,7 @@ file(GLOB _GDB_SCRIPTS "${CMAKE_SOURCE_DIR}/scripts/*.py")
 function(add_multiarch_executable NAME)
     set(options "")
     set(oneValueArgs "")
-    set(multiValueArgs FILES ARCH)
+    set(multiValueArgs FILES ARCH DEFINITIONS)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     if(NOT ARG_ARCH)
@@ -75,6 +75,9 @@ function(add_multiarch_executable NAME)
         set(TARGET_NAME "${NAME}-${CODE}")
         add_executable(${TARGET_NAME} ${ARG_FILES})
         target_compile_options(${TARGET_NAME} PRIVATE -march=${MARCH})
+        if(ARG_DEFINITIONS)
+            target_compile_definitions(${TARGET_NAME} PRIVATE ${ARG_DEFINITIONS})
+        endif()
         if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND CODE STREQUAL "Scalar")
             target_compile_definitions(${TARGET_NAME} PRIVATE
                 CPU_CAPABILITY=GENERIC
@@ -160,7 +163,13 @@ add_multiarch_executable(LayerNormTest
     ARCH Native Scalar
 )
 
-set(VECOPS_VEC_TESTS BasicTest LoadStoreTest ArithTest ConversionTest ShuffleTest MaskTest MaskConversionsTest)
+add_multiarch_executable(SoftmaxTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/SoftmaxTest.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
+    ARCH Native Scalar
+)
+
+set(VECOPS_VEC_TESTS BasicTest LoadStoreTest ArithTest ConversionTest ShuffleTest MaskTest MaskConversionsTest MathTest SubnormalConversionTest)
 foreach(TEST ${VECOPS_VEC_TESTS})
     add_multiarch_executable(Vec${TEST}
         FILES
@@ -169,3 +178,27 @@ foreach(TEST ${VECOPS_VEC_TESTS})
         ARCH ${VECOPS_ARCH_LIST}
     )
 endforeach()
+
+add_multiarch_executable(VecMathAssumeValidTest
+    FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/vec/MathTest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
+    ARCH ${VECOPS_ARCH_LIST}
+    DEFINITIONS VECOPS_MATH_ASSUME_VALID_INPUTS=1
+)
+
+add_multiarch_executable(VecMathPreserveSubnormalTest
+    FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/vec/MathTest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
+    ARCH ${VECOPS_ARCH_LIST}
+    DEFINITIONS VECOPS_PRESERVE_SUBNORMALS=1
+)
+
+add_multiarch_executable(VecSubnormalConversionPreserveTest
+    FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/vec/SubnormalConversionTest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
+    ARCH ${VECOPS_ARCH_LIST}
+    DEFINITIONS VECOPS_PRESERVE_SUBNORMALS=1
+)

@@ -11,4 +11,7 @@ target_include_directories(vecops
 )
 
 target_compile_definitions(vecops PUBLIC "$<$<CONFIG:Debug>:VECOPS_DEBUG>")
+if(VECOPS_PRESERVE_SUBNORMALS)
+    target_compile_definitions(vecops PUBLIC VECOPS_PRESERVE_SUBNORMALS=1)
+endif()
 target_compile_options(vecops PUBLIC "-Wno-ignored-attributes")

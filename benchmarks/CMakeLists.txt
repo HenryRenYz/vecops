@@ -84,3 +84,8 @@ add_multiarch_benchmark(LayerNormBench
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/LayerNormBench.cpp
     ARCH Native Scalar
 )
+
+add_multiarch_benchmark(SoftmaxBench
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/SoftmaxBench.cpp
+    ARCH Native Scalar
+)

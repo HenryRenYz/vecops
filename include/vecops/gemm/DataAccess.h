@@ -318,7 +318,7 @@ VECOPS_INLINE void precompute_input_aux(
           const nint_t stride = src_row.stride(0);
           auto v_in = gather_dispatch(ti, src_row.data(), y * stride, stride, Any{n});
           auto v_out = call_transform_with_last_coord(fn, to, v_in, prefix, y);
-          storeu_dispatch(to, aux_row.data() + y, Any{n}, v_out);
+          storeu_dispatch(to, aux_row.data() + y, Any{n}, v_out); // TODO laji: Any N
         }
       },
       src_tensor,
@@ -451,7 +451,7 @@ struct DataOutputImpl<AccessKindSecondLastContiguous, TIn, OutTensor, TransformF
   VECOPS_INLINE ~DataOutputImpl() {
     auto out_tensor = make_tensor(_p, _layout);
     auto aux_tensor = make_tensor(_aux, _aux_layout);
-    hop::for_each_dims_with_index_tuple<OutLayout::Ndim - 1>(
+    hop::for_each_dims_with_index_tuple<OutLayout::Ndim - 1>( // TODO laji: scalar fallback
         [](const auto&, auto&& out_row, auto&& aux_row) {
           const nint_t last = out_row.size(0);
           for (nint_t y = 0; y < last; ++y) {
@@ -656,7 +656,7 @@ struct DataOutputViewImpl<AccessKindStrided, TIn, OutTensor, TransformFn, void> 
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t base = offset_at(_layout, coords);
     auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
-    scatter_dispatch(To{}, _p, base, _layout.strides()[OutLayout::Ndim - 1], n, v_out);
+    scatter_dispatch(To{}, _p, base, _layout.strides()[OutLayout::Ndim - 1], n, v_out); // TODO laji: bad strides usage
   }
 
   TOut* _p;
@@ -1320,7 +1320,7 @@ VECOPS_INLINE auto slice_output_spec(const Spec& spec, nint_t index) {
 } // namespace details
 
 namespace hop::details {
-
+// TODO laji: why is this trait here?
 template <typename TOut, typename InTensor, typename Transform>
 struct SliceTraits<DataInput<TOut, InTensor, Transform>> {
   using Accessor = DataInput<TOut, InTensor, Transform>;

@@ -48,6 +48,34 @@ VECOPS_VFUNC E reduce_min_identity() {
   else return std::numeric_limits<E>::max();
 }
 
+template <typename E>
+VECOPS_VFUNC E scalar_exp(E x) {
+  if constexpr (std::is_same_v<E, float64_t>) {
+    return std::exp(x);
+  } else {
+    return static_cast<E>(std::exp(static_cast<float>(x)));
+  }
+}
+
+template <typename E>
+VECOPS_VFUNC E scalar_exp_ftz(E x) {
+  E y = scalar_exp(x);
+  const double yd = static_cast<double>(y);
+  if (yd > 0.0 && yd < static_cast<double>(std::numeric_limits<E>::min())) {
+    return E(0.0f);
+  }
+  return y;
+}
+
+template <typename E>
+VECOPS_VFUNC E scalar_exp_strict(E x) {
+#ifdef VECOPS_PRESERVE_SUBNORMALS
+  return scalar_exp(x);
+#else
+  return scalar_exp_ftz(x);
+#endif
+}
+
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> vectorized_v(auto&& fn) {
   constexpr T t;
@@ -74,6 +102,52 @@ VECOPS_VFUNC Mask<T> vectorized_m(auto&& fn) {
   return v;
 }
 } // namespace details
+
+/* ************************************************************************** */
+//                         Transcendental math                              //
+/* ************************************************************************** */
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp(V v) {
+  return details::vectorized_v<T>([&](nint_t i) {
+    return details::scalar_exp_strict(v[i]);
+  });
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp(V v, Mask<T> m, V default_v) {
+  return details::vectorized_v<T>([&](nint_t i) {
+    return m[i] ? details::scalar_exp_strict(v[i]) : default_v[i];
+  });
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_fast(V v) {
+  return details::vectorized_v<T>([&](nint_t i) {
+    return details::scalar_exp_ftz(v[i]);
+  });
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_fast(V v, Mask<T> m, V default_v) {
+  return details::vectorized_v<T>([&](nint_t i) {
+    return m[i] ? details::scalar_exp_ftz(v[i]) : default_v[i];
+  });
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_est(V v) {
+  return details::vectorized_v<T>([&](nint_t i) {
+    return details::scalar_exp_ftz(v[i]);
+  });
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_est(V v, Mask<T> m, V default_v) {
+  return details::vectorized_v<T>([&](nint_t i) {
+    return m[i] ? details::scalar_exp_ftz(v[i]) : default_v[i];
+  });
+}
 
 /* ************************************************************************** */
 //                               Constructors                                 //

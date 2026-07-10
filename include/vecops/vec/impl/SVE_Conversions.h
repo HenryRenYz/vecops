@@ -1240,17 +1240,7 @@ VECOPS_VFUNC Vec<T> demote(T t, V v) {
 /* float32_t -> bfloat16_t */
 template <TLV_DECL_TAG(T), typename V, typename Ti = Vec2Tag<std::remove_cvref_t<V>>, TL_IF(T::POW2 <= 0), TL_IF(is_any<TypeOf<T>, bfloat16_t>), TL_IF(is_any<TypeOf<Ti>, float32_t>), TL_IF(num_words(Ti{}) == 1)>
 VECOPS_VFUNC Vec<T> demote(T t, V v) {
-#if defined(__ARM_FEATURE_SVE_BF16)
-  auto pg = details::ptrue<bfloat16_t>();
-  auto tmp = svcvt_bf16_f32_z(pg, v);
-  return svreinterpret_bf16_u16(svuzp1_u16(
-    svreinterpret_u16_bf16(tmp), svreinterpret_u16_bf16(tmp)));
-#else
-  auto pg = details::ptrue<float32_t>();
-  auto u32 = svlsr_n_u32_x(pg, svreinterpret_u32_f32(v), 16);
-  auto u16 = svreinterpret_u16_u32(u32);
-  return svreinterpret_bf16_u16(svuzp1_u16(u16, u16));
-#endif
+  return details::f32x2_to_bf16(v, v);
 }
 
 /* int32_t -> bfloat16_t (via float32_t) */

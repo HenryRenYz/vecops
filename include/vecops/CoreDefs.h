@@ -5,6 +5,12 @@
 #ifndef VECOPS_COREDEFS_H
 #define VECOPS_COREDEFS_H
 
+/**
+ * Define VECOPS_PRESERVE_SUBNORMALS consistently for every translation unit
+ * to make strict vector operations preserve representable subnormal results.
+ * The default build permits hardware FTZ/DAZ behavior for maximum throughput.
+ */
+
 #include <csignal>
 
 #include "vecops/Features.h"

@@ -9,6 +9,8 @@ set(CMAKE_VERBOSE_MAKEFILE ON)
 
 # ---------------------------------- Options -----------------------------------
 set(VECOPS_GITHUB_ENDPOINT "https://github.com" CACHE STRING "Set endpoint address for GitHub repositories")
+option(VECOPS_PRESERVE_SUBNORMALS
+       "Preserve representable subnormal results in strict vector operations" OFF)
 
 # -------------------------------- Dependencies --------------------------------
 include(FetchContent)
