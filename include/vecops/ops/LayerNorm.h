@@ -170,7 +170,7 @@ public:
 
       constexpr int prefix_rank = std::remove_cvref_t<decltype(in_layout)>::Ndim - 1;
       gemm::hop::for_each_dims<prefix_rank>(
-          [this, &workspace, &gamma, &beta](const auto& in_row, const auto& out_row) VECOPS_ALWAYS_INLINE_LAMBDA {
+          [this, &workspace, &gamma, &beta](const auto& in_row, const auto& out_row) {
             this->run_row(workspace, in_row, gamma, beta, out_row);
           }, in, out
       );
@@ -221,7 +221,7 @@ private:
 
       const auto [v_mean, v_var] = gemm::hop::scan(
           std::make_pair(vec::zeros(t), vec::zeros(t)), normalized_count, step,
-          [&](std::pair<VecT, VecT> acc, nint_t col, auto&& count) VECOPS_ALWAYS_INLINE_LAMBDA {
+          [&](std::pair<VecT, VecT> acc, nint_t col, auto&& count) {
             auto xv = x(t, count, col);
             return std::make_pair(vec::add(acc.first, xv), vec::fmadd(xv, xv, acc.second));
           }
@@ -237,7 +237,7 @@ private:
       const auto mean_v = vec::fill(t, mean);
       const auto rstd_v = vec::fill(t, rstd);
 
-      gemm::hop::map(normalized_count, step, [&](nint_t col, auto&& count) VECOPS_ALWAYS_INLINE_LAMBDA {
+      gemm::hop::map(normalized_count, step, [&](nint_t col, auto&& count) {
         auto xv = x(t, count, col);
         auto gamma_v = gamma(t, count, col);
         auto beta_v = beta(t, count, col);

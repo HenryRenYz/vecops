@@ -41,6 +41,8 @@ set(VECOPS_ARCH_LIST_x86 Scalar AVX AVX2 AVX512 Native)
 set(VECOPS_ARCH_LIST_ARM Scalar SVE SVE2 Native)
 set(VECOPS_ARCH_LIST ${VECOPS_ARCH_LIST_${VECOPS_ARCH_FAMILY}})
 
+add_compile_definitions(VECOPS_MATH_ASSUME_VALID_INPUTS)
+
 # ======================================================================
 # add_multiarch_benchmark
 # ======================================================================

@@ -169,20 +169,12 @@ VECOPS_VFUNC Vec<T> exp_sve(Vec<T> x) {
                     word::fill(T{}, std::numeric_limits<E>::max()));
   }
 
-#ifndef VECOPS_MATH_ASSUME_VALID_INPUTS
   y = word::blend(y, word::cmpgt(x, word::fill(T{}, overflow)),
                   word::fill(T{}, std::numeric_limits<E>::infinity()));
   y = word::blend(y, word::cmplt(x, word::fill(T{}, gradual ? zero_limit : normal_limit)),
                   word::fill(T{}, E(0)));
+#ifndef VECOPS_MATH_ASSUME_VALID_INPUTS
   y = word::blend(y, word::cmpne(x, x), word::add(x, x));
-#else
-  if constexpr (strict) {
-    y = word::blend(y, word::cmpgt(x, word::fill(T{}, overflow)),
-                    word::fill(T{}, std::numeric_limits<E>::infinity()));
-    y = word::blend(y, word::cmplt(x, word::fill(T{}, gradual ? zero_limit : normal_limit)),
-                    word::fill(T{}, E(0)));
-    y = word::blend(y, word::cmpne(x, x), word::add(x, x));
-  }
 #endif
   if constexpr (std::is_same_v<E, float32_t> || std::is_same_v<E, float64_t>) {
     const E repair_upper = std::is_same_v<E, float32_t> ? E(88.0) : E(709.0);
@@ -242,6 +234,16 @@ VECOPS_VFUNC V exp_fast(V v) { return math_details::dispatch<math_details::ExpTi
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V exp_est(V v) { return math_details::dispatch<math_details::ExpTier::Estimate, T>(v); }
 
+// TODO: implement the x <= 0 specialization. It can omit the upper clamp,
+// overflow repair, NaN handling, and the dynamic sign-dependent rounding used
+// by a general exponential. The forwarding stubs keep the public API correct.
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg(V v) { return word::exp(v); }
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg_fast(V v) { return word::exp_fast(v); }
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg_est(V v) { return word::exp_est(v); }
+
 #define VECOPS_SVE_MASKED_EXP(NAME) \
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)> \
 VECOPS_VFUNC V NAME(V v, Mask<T> m, V default_v) { \
@@ -251,6 +253,9 @@ VECOPS_VFUNC V NAME(V v, Mask<T> m, V default_v) { \
 VECOPS_SVE_MASKED_EXP(exp)
 VECOPS_SVE_MASKED_EXP(exp_fast)
 VECOPS_SVE_MASKED_EXP(exp_est)
+VECOPS_SVE_MASKED_EXP(exp_neg)
+VECOPS_SVE_MASKED_EXP(exp_neg_fast)
+VECOPS_SVE_MASKED_EXP(exp_neg_est)
 #undef VECOPS_SVE_MASKED_EXP
 
 }  // namespace word

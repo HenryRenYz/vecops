@@ -120,7 +120,7 @@ public:
   }
 
   template <typename InSpec, typename OutSpec>
-  VECOPS_INLINE void operator()(
+  void operator()(
       gemm::WorkspaceView& workspace,
       const InSpec& in,
       const OutSpec& out) const {
@@ -135,7 +135,7 @@ public:
     {
       constexpr int prefix_rank = std::remove_cvref_t<decltype(in_layout)>::Ndim - 1;
       gemm::hop::for_each_dims<prefix_rank>(
-          [this, &workspace](const auto& in_row, const auto& out_row) VECOPS_ALWAYS_INLINE_LAMBDA {
+          [this, &workspace](const auto& in_row, const auto& out_row) VECOPS_INLINE_LAMBDA {
             this->run_row(workspace, in_row, out_row);
           },
           in,
@@ -155,12 +155,12 @@ private:
   template <typename V, typename M>
   VECOPS_INLINE static V apply_exp(V v, M mask, V default_v) {
     if constexpr (ExpMode == SoftmaxExpMode::Strict) {
-      return vec::exp(v, mask, default_v);
+      return vec::exp_neg(v, mask, default_v);
     } else if constexpr (ExpMode == SoftmaxExpMode::Fast) {
-      return vec::exp_fast(v, mask, default_v);
+      return vec::exp_neg_fast(v, mask, default_v);
     } else {
       static_assert(ExpMode == SoftmaxExpMode::Estimate, "Unsupported Softmax exp mode");
-      return vec::exp_est(v, mask, default_v);
+      return vec::exp_neg_est(v, mask, default_v);
     }
   }
 
@@ -189,7 +189,7 @@ private:
           vec::fill(t, negative_infinity),
           normalized_count,
           step,
-          [&](VecT acc, nint_t col, auto&& count) VECOPS_ALWAYS_INLINE_LAMBDA {
+          [&](VecT acc, nint_t col, auto&& count) VECOPS_INLINE_LAMBDA {
             auto xv = x(t, count, col);
             auto mask = vec::mwhilelt(t, 0, static_cast<nint_t>(count));
             return vec::max(acc, xv, mask);
@@ -201,7 +201,7 @@ private:
           vec::zeros(t),
           normalized_count,
           step,
-          [&](VecT acc, nint_t col, auto&& count) VECOPS_ALWAYS_INLINE_LAMBDA {
+          [&](VecT acc, nint_t col, auto&& count) VECOPS_INLINE_LAMBDA {
             auto xv = x(t, count, col);
             auto mask = vec::mwhilelt(t, 0, static_cast<nint_t>(count));
             auto shifted = vec::sub(xv, max_v);
@@ -214,7 +214,7 @@ private:
       gemm::hop::map(
           normalized_count,
           step,
-          [&](nint_t col, auto&& count) VECOPS_ALWAYS_INLINE_LAMBDA {
+          [&](nint_t col, auto&& count) VECOPS_INLINE_LAMBDA {
             auto xv = x(t, count, col);
             auto mask = vec::mwhilelt(t, 0, static_cast<nint_t>(count));
             auto shifted = vec::sub(xv, max_v);

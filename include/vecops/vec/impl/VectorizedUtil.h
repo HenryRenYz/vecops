@@ -193,7 +193,7 @@ struct ArgTransform<Index, Batch, ShardVec<T>> {
       using Tb = Tag<TypeOf<Tw>, Tw::N, log2_floor(Batch)>;
 
       Vec<Tb> v_batch;
-      foreach<Batch, 1>([&]<nint_t I>() VECOPS_ALWAYS_INLINE_LAMBDA {
+      foreach<Batch, 1>([&]<nint_t I>() VECOPS_INLINE_LAMBDA {
         v_batch = set_word<I>(Tb(), v_batch, get_word<Index * Batch + I>(T(), a.v));
       });
       return v_batch;
@@ -242,7 +242,7 @@ struct ArgTransform<Index, Batch, ShardMask<T>> {
       using Tb = Tag<TypeOf<Tw>, Tw::N, log2_floor(Batch)>;
 
       Mask<Tb> m_batch;
-      foreach<Batch, 1>([&]<nint_t I>() VECOPS_ALWAYS_INLINE_LAMBDA {
+      foreach<Batch, 1>([&]<nint_t I>() VECOPS_INLINE_LAMBDA {
         m_batch = set_word_mask<I>(Tb(), m_batch, get_word_mask<Index * Batch + I>(T(), a.m));
       });
       return m_batch;
@@ -421,7 +421,7 @@ VECOPS_VFUNC auto vmap(T t, Fn&& f, Args&& ... args) -> std::enable_if_t<
     IndexedFn<0, Fn>{f}(wt, transform<0>(std::forward<Args>(args))...);
   } else {
     constexpr nint_t nloop = num_words(t);
-    foreach<nloop>([&]<nint_t I>() VECOPS_ALWAYS_INLINE_LAMBDA {
+    foreach<nloop>([&]<nint_t I>() {
       IndexedFn<I, Fn>{f}(wt, transform<I>(std::forward<Args>(args))...);
     });
   }
@@ -464,7 +464,7 @@ VECOPS_VFUNC auto vmap(T t, nint_t n, FnC&& f_complete, FnT&& f_tail, Args&& ...
     nint_t full_nloop = n / ws;
     nint_t rem = n % ws;
 
-    foreach<nloop>(full_nloop, [&]<nint_t I>() VECOPS_ALWAYS_INLINE_LAMBDA {
+    foreach<nloop>(full_nloop, [&]<nint_t I>() VECOPS_INLINE_LAMBDA {
       f_complete(wt, transform<I>(std::forward<Args>(args))...);
     });
     if (rem > 0) {
@@ -504,7 +504,7 @@ VECOPS_VFUNC auto vmap(T t, Fn&& f, Args&& ... args) -> std::enable_if_t<
   } else {
     constexpr nint_t nloop = num_words(t);
     Vec<T> r;
-    foreach<nloop>([&]<nint_t I>() VECOPS_ALWAYS_INLINE_LAMBDA {
+    foreach<nloop>([&]<nint_t I>() VECOPS_INLINE_LAMBDA {
       auto out = IndexedFn<I, Fn>{f}(wt, transform<I>(std::forward<Args>(args))...);
       r = set_word<I>(t, r, std::move(out));
     });
@@ -546,7 +546,7 @@ VECOPS_VFUNC auto vmap(T t, nint_t n, FnC&& f_complete, FnT&& f_tail, Args&& ...
     nint_t rem = n % ws;
 
     Vec<T> r;
-    foreach<nloop>(full_nloop, [&]<nint_t I>() VECOPS_ALWAYS_INLINE_LAMBDA {
+    foreach<nloop>(full_nloop, [&]<nint_t I>() VECOPS_INLINE_LAMBDA {
       r = set_word<I>(t, r, f_complete(wt, transform<I>(std::forward<Args>(args))...));
     });
     if (rem > 0) {
@@ -586,7 +586,7 @@ VECOPS_VFUNC auto vmap(T t, Fn&& f, Args&& ... args) -> std::enable_if_t<
   } else {
     constexpr nint_t nloop = num_words(t);
     Mask<T> r;
-    foreach<nloop>([&]<nint_t I>() VECOPS_ALWAYS_INLINE_LAMBDA {
+    foreach<nloop>([&]<nint_t I>() VECOPS_INLINE_LAMBDA {
       auto out = IndexedFn<I, Fn>{f}(wt, transform<I>(std::forward<Args>(args))...);
       r = set_word_mask<I>(t, r, std::move(out));
     });

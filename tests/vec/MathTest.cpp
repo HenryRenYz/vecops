@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <bit>
 #include <cfenv>
 #include <cmath>
@@ -70,11 +71,25 @@ V call_exp(V v) {
   else return exp_est(v);
 }
 
+template <Tier tier, TLV_DECL_VEC(V)>
+V call_exp_neg(V v) {
+  if constexpr (tier == Tier::Strict) return vecops::vec::exp_neg(v);
+  else if constexpr (tier == Tier::Fast) return exp_neg_fast(v);
+  else return exp_neg_est(v);
+}
+
 template <Tier tier, TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
 V call_exp(V v, Mask<T> m, V d) {
   if constexpr (tier == Tier::Strict) return vecops::vec::exp(v, m, d);
   else if constexpr (tier == Tier::Fast) return exp_fast(v, m, d);
   else return exp_est(v, m, d);
+}
+
+template <Tier tier, TLV_DECL_VEC(V), typename T = Vec2Tag<V>>
+V call_exp_neg(V v, Mask<T> m, V d) {
+  if constexpr (tier == Tier::Strict) return vecops::vec::exp_neg(v, m, d);
+  else if constexpr (tier == Tier::Fast) return exp_neg_fast(v, m, d);
+  else return exp_neg_est(v, m, d);
 }
 
 template <typename E>
@@ -129,6 +144,27 @@ void run_values(Tag t, const std::vector<TypeOf<Tag>>& values) {
   }
 }
 
+template <Tier tier, typename Tag>
+void run_neg_values(Tag t, const std::vector<TypeOf<Tag>>& values) {
+  ScopedNearestRounding rounding;
+  using E = TypeOf<Tag>;
+  const nint_t n = size(t);
+  std::vector<E> in(static_cast<size_t>(n));
+  std::vector<E> out(static_cast<size_t>(n));
+  for (size_t pos = 0; pos < values.size(); pos += static_cast<size_t>(n)) {
+    for (nint_t i = 0; i < n; ++i) in[static_cast<size_t>(i)] = values[(pos + i) % values.size()];
+    storeu(t, out.data(), call_exp_neg<tier>(loadu(t, in.data())));
+    const size_t count = std::min(static_cast<size_t>(n), values.size() - pos);
+    for (size_t i = 0; i < count; ++i) {
+      ASSERT_FALSE(std::isnan(as_double(in[i])));
+      ASSERT_LE(as_double(in[i]), 0.0);
+      check_accuracy<tier>(in[i], out[i]);
+      EXPECT_GE(as_double(out[i]), 0.0);
+      EXPECT_LE(as_double(out[i]), 1.0);
+    }
+  }
+}
+
 template <typename E>
 void check_subnormal_and_thresholds() {
   ScalableTag<E, 0> t;
@@ -152,10 +188,18 @@ void check_subnormal_and_thresholds() {
   std::vector<E> in(static_cast<size_t>(n), E(as_double(normal_log) - 0.25));
   std::vector<E> out(static_cast<size_t>(n));
   auto v = loadu(t, in.data());
+  // Fast tiers may either retain a subnormal when FTZ is disabled by the test
+  // process or flush it to zero in the library's default execution mode.
   storeu(t, out.data(), exp_fast(v));
-  for (E y : out) EXPECT_EQ(as_double(y), 0.0);
+  for (E y : out) {
+    EXPECT_GE(as_double(y), 0.0);
+    EXPECT_LT(as_double(y), as_double(std::numeric_limits<E>::min()));
+  }
   storeu(t, out.data(), exp_est(v));
-  for (E y : out) EXPECT_EQ(as_double(y), 0.0);
+  for (E y : out) {
+    EXPECT_GE(as_double(y), 0.0);
+    EXPECT_LT(as_double(y), as_double(std::numeric_limits<E>::min()));
+  }
 }
 
 template <Tier tier, typename E>
@@ -211,8 +255,7 @@ std::vector<E> all_low_precision_values() {
   for (uint32_t i = 0; i <= 0xffffu; ++i) {
     E x = E::from_bits(static_cast<uint16_t>(i));
 #ifdef VECOPS_MATH_ASSUME_VALID_INPUTS
-    E y = reference_exp(x);
-    if (!std::isfinite(as_double(x)) || !is_normal_result(y)) continue;
+    if (!std::isfinite(as_double(x))) continue;
 #endif
     v.push_back(x);
   }
@@ -235,6 +278,41 @@ void run_low_precision_tiers() {
   run_values<Tier::Strict>(t, samples);
   run_values<Tier::Fast>(t, samples);
   run_values<Tier::Estimate>(t, samples);
+}
+
+template <typename E, int POW2>
+void run_negative_tiers() {
+  ScalableTag<E, POW2> t;
+  auto samples = regular_samples<E>();
+  samples.erase(std::remove_if(samples.begin(), samples.end(), [](E x) {
+    return std::isnan(as_double(x)) || as_double(x) > 0.0;
+  }), samples.end());
+  samples.push_back(E(0.0));
+  samples.push_back(E(-0.0));
+  samples.push_back(-std::numeric_limits<E>::min());
+  if constexpr (std::is_same_v<E, float32_t>) {
+    samples.insert(samples.end(), {E(-87.5), E(-100.0), E(-104.0), E(-120.0)});
+  } else if constexpr (std::is_same_v<E, float64_t>) {
+    samples.insert(samples.end(), {E(-709.0), E(-740.0), E(-746.0), E(-800.0)});
+  }
+#ifndef VECOPS_MATH_ASSUME_VALID_INPUTS
+  samples.push_back(-std::numeric_limits<E>::infinity());
+#endif
+  run_neg_values<Tier::Strict>(t, samples);
+  run_neg_values<Tier::Fast>(t, samples);
+  run_neg_values<Tier::Estimate>(t, samples);
+}
+
+template <typename E>
+void run_negative_low_precision_tiers() {
+  ScalableTag<E, 0> t;
+  auto samples = all_low_precision_values<E>();
+  samples.erase(std::remove_if(samples.begin(), samples.end(), [](E x) {
+    return std::isnan(as_double(x)) || as_double(x) > 0.0;
+  }), samples.end());
+  run_neg_values<Tier::Strict>(t, samples);
+  run_neg_values<Tier::Fast>(t, samples);
+  run_neg_values<Tier::Estimate>(t, samples);
 }
 
 template <Tier tier, typename E>
@@ -264,6 +342,28 @@ void check_masked() {
   for (nint_t i = 0; i < n; ++i) if (!pattern[i]) EXPECT_EQ(bits(in[i]), bits(out[i]));
 }
 
+template <Tier tier, typename E>
+void check_neg_masked() {
+  ScalableTag<E, 1> t;
+  const nint_t n = size(t);
+  std::vector<E> in(static_cast<size_t>(n)), defaults(static_cast<size_t>(n)), out(static_cast<size_t>(n));
+  std::vector<bool> pattern(static_cast<size_t>(n));
+  for (nint_t i = 0; i < n; ++i) {
+    pattern[static_cast<size_t>(i)] = i % 2 == 0;
+    in[static_cast<size_t>(i)] = pattern[static_cast<size_t>(i)]
+        ? E(-0.125 * (i + 1))
+        : (i % 4 == 1 ? std::numeric_limits<E>::quiet_NaN() : E(4.0));
+    defaults[static_cast<size_t>(i)] = E(-7.0 - i);
+  }
+  auto m = test_utils::make_mask(t, pattern);
+  auto vi = loadu(t, in.data());
+  storeu(t, out.data(), call_exp_neg<tier>(vi, m, loadu(t, defaults.data())));
+  for (nint_t i = 0; i < n; ++i) {
+    if (pattern[static_cast<size_t>(i)]) check_accuracy<tier>(in[i], out[i]);
+    else EXPECT_EQ(bits(defaults[i]), bits(out[i])) << "inactive lane " << i;
+  }
+}
+
 }  // namespace
 
 TEST(VecMathTest, Float32AccuracyAllVectorShapes) {
@@ -284,6 +384,28 @@ TEST(VecMathTest, Float16Exhaustive) { run_low_precision_tiers<vecops::float16_t
 TEST(VecMathTest, BFloat16Exhaustive) { run_low_precision_tiers<vecops::bfloat16_t>(); }
 #endif
 
+TEST(VecMathTest, NegativeDomainFloat32AllVectorShapes) {
+  run_negative_tiers<float32_t, 0>();
+  run_negative_tiers<float32_t, 1>();
+  run_negative_tiers<float32_t, 2>();
+}
+
+TEST(VecMathTest, NegativeDomainFloat64AllVectorShapes) {
+  run_negative_tiers<float64_t, 0>();
+  run_negative_tiers<float64_t, 1>();
+  run_negative_tiers<float64_t, 2>();
+}
+
+TEST(VecMathTest, NegativeDomainFloat16Exhaustive) {
+  run_negative_low_precision_tiers<vecops::float16_t>();
+}
+
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
+TEST(VecMathTest, NegativeDomainBFloat16Exhaustive) {
+  run_negative_low_precision_tiers<vecops::bfloat16_t>();
+}
+#endif
+
 TEST(VecMathTest, MaskedOverloadsPreserveInactiveLanes) {
   check_masked<Tier::Strict, float32_t>();
   check_masked<Tier::Fast, float32_t>();
@@ -301,12 +423,27 @@ TEST(VecMathTest, MaskedOverloadsPreserveInactiveLanes) {
 #endif
 }
 
-#ifndef VECOPS_MATH_ASSUME_VALID_INPUTS
+TEST(VecMathTest, NegativeDomainMaskedOverloadsIgnoreInvalidInactiveLanes) {
+  check_neg_masked<Tier::Strict, float32_t>();
+  check_neg_masked<Tier::Fast, float32_t>();
+  check_neg_masked<Tier::Estimate, float32_t>();
+  check_neg_masked<Tier::Strict, float64_t>();
+  check_neg_masked<Tier::Fast, float64_t>();
+  check_neg_masked<Tier::Estimate, float64_t>();
+  check_neg_masked<Tier::Strict, vecops::float16_t>();
+  check_neg_masked<Tier::Fast, vecops::float16_t>();
+  check_neg_masked<Tier::Estimate, vecops::float16_t>();
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
+  check_neg_masked<Tier::Strict, vecops::bfloat16_t>();
+  check_neg_masked<Tier::Fast, vecops::bfloat16_t>();
+  check_neg_masked<Tier::Estimate, vecops::bfloat16_t>();
+#endif
+}
+
 TEST(VecMathTest, SubnormalAndThresholdBoundaries) {
   check_subnormal_and_thresholds<float32_t>();
   check_subnormal_and_thresholds<float64_t>();
 }
-#endif
 
 TEST(VecMathTest, MonotonicAcrossRangeReductionBoundaries) {
   check_monotonic<Tier::Strict, float32_t>();

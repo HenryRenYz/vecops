@@ -149,6 +149,48 @@ VECOPS_VFUNC V exp_est(V v, Mask<T> m, V default_v) {
   });
 }
 
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg(V v) {
+  return details::vectorized_v<T>([&](nint_t i) {
+    return details::scalar_exp_strict(v[i]);
+  });
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg(V v, Mask<T> m, V default_v) {
+  return details::vectorized_v<T>([&](nint_t i) {
+    return m[i] ? details::scalar_exp_strict(v[i]) : default_v[i];
+  });
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg_fast(V v) {
+  return details::vectorized_v<T>([&](nint_t i) {
+    return details::scalar_exp_ftz(v[i]);
+  });
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg_fast(V v, Mask<T> m, V default_v) {
+  return details::vectorized_v<T>([&](nint_t i) {
+    return m[i] ? details::scalar_exp_ftz(v[i]) : default_v[i];
+  });
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg_est(V v) {
+  return details::vectorized_v<T>([&](nint_t i) {
+    return details::scalar_exp_ftz(v[i]);
+  });
+}
+
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg_est(V v, Mask<T> m, V default_v) {
+  return details::vectorized_v<T>([&](nint_t i) {
+    return m[i] ? details::scalar_exp_ftz(v[i]) : default_v[i];
+  });
+}
+
 /* ************************************************************************** */
 //                               Constructors                                 //
 /* ************************************************************************** */

@@ -94,6 +94,21 @@ VECOPS_INLINE auto make_aux_layout(const TLayout& layout) {
   return make_layout(aux_shape);
 }
 
+template <typename F, typename Tuple, std::size_t... I>
+VECOPS_ALWAYS_INLINE constexpr decltype(auto) apply_impl(F&& f, Tuple&& t, std::index_sequence<I...>) {
+  return std::forward<F>(f)(std::get<I>(std::forward<Tuple>(t))...);
+}
+
+// Note: std::apply may fail to inline at some point
+template <typename F, typename Tuple>
+VECOPS_ALWAYS_INLINE constexpr decltype(auto) apply_inline(F&& f, Tuple&& t) {
+  return apply_impl(
+      std::forward<F>(f), std::forward<Tuple>(t),
+      std::make_index_sequence<
+          std::tuple_size_v<std::decay_t<Tuple>>>{}
+  );
+}
+
 template <typename TransformFn, typename To, typename VIn, typename PrefixTuple>
 VECOPS_ALWAYS_INLINE auto call_transform_with_last_coord(
     const TransformFn& fn,
@@ -101,8 +116,8 @@ VECOPS_ALWAYS_INLINE auto call_transform_with_last_coord(
     VIn v_in,
     const PrefixTuple& prefix,
     nint_t last) {
-  return std::apply(
-      [&](auto... prefix_coords) {
+  return apply_inline(
+      [&](auto... prefix_coords) VECOPS_INLINE_LAMBDA {
         return fn(to, v_in, prefix_coords..., last);
       },
       prefix);
@@ -118,8 +133,8 @@ struct PrefixVecTransform {
 
   template <typename To, typename VIn, typename... Is>
   VECOPS_ALWAYS_INLINE auto operator()(To to, VIn v_in, Is... is) const {
-    return std::apply(
-        [&](auto... prefix_coords) {
+    return apply_inline(
+        [&](auto... prefix_coords) VECOPS_INLINE_LAMBDA {
           return fn(to, v_in, prefix_coords..., static_cast<nint_t>(is)...);
         },
         prefix);
@@ -150,7 +165,7 @@ struct UseUnmaskedPath<Const<N>, T>
     : std::bool_constant<(N >= vec::max_word_size(T{}) * vec::num_words(T{}))> {};
 
 template <typename N>
-VECOPS_INLINE constexpr nint_t count_value(N n) {
+VECOPS_ALWAYS_INLINE constexpr nint_t count_value(N n) {
   if constexpr (is_static_count_v<N>) {
     return StaticCount<std::remove_cvref_t<N>>::value;
   } else {
@@ -162,7 +177,7 @@ template <typename N, TLV_DECL_TAG(T)>
 static constexpr bool use_unmasked_path_v = UseUnmaskedPath<std::remove_cvref_t<N>, T>::value;
 
 template <typename N, TLV_DECL_TAG(T)>
-VECOPS_INLINE vec::Vec<T> loadu_dispatch(T t, const vec::TypeOf<T>* p, N n) {
+VECOPS_ALWAYS_INLINE vec::Vec<T> loadu_dispatch(T t, const vec::TypeOf<T>* p, N n) {
   if constexpr (use_unmasked_path_v<N, T>) {
     return vec::loadu(t, p);
   } else {
@@ -213,7 +228,7 @@ static constexpr bool can_materialize_gather_scatter_index_v =
 #endif
 
 template <typename N, typename T, TLV_DECL_TAG(Ti)>
-VECOPS_INLINE vec::Vec<Ti> gather_leaf(
+VECOPS_ALWAYS_INLINE vec::Vec<Ti> gather_leaf(
     Ti ti,
     const T* p,
     nint_t base_offset,
@@ -228,7 +243,7 @@ VECOPS_INLINE vec::Vec<Ti> gather_leaf(
 }
 
 template <typename N, typename T, TLV_DECL_TAG(Ti)>
-VECOPS_INLINE void scatter_leaf(
+VECOPS_ALWAYS_INLINE void scatter_leaf(
     Ti ti,
     T* p,
     nint_t base_offset,
@@ -307,19 +322,18 @@ VECOPS_INLINE void precompute_input_aux(
   using Ti = vec::Rebind<TIn, To>;
   To to;
   Ti ti;
-  const nint_t last = layout.shape()[InLayout::Ndim - 1];
+  const auto last = size<InLayout::Ndim - 1>(layout);
   auto src_tensor = make_tensor(p, layout);
   auto aux_tensor = make_tensor(aux, aux_layout);
 
   hop::for_each_dims_with_index_tuple<InLayout::Ndim - 1>(
-      [&](const auto& prefix, auto&& src_row, auto&& aux_row) {
-        for (nint_t y = 0; y < last; y += vec::size(to)) {
-          const nint_t n = std::min(vec::size(to), last - y);
-          const nint_t stride = src_row.stride(0);
-          auto v_in = gather_dispatch(ti, src_row.data(), y * stride, stride, Any{n});
-          auto v_out = call_transform_with_last_coord(fn, to, v_in, prefix, y);
-          storeu_dispatch(to, aux_row.data() + y, Any{n}, v_out); // TODO laji: Any N
-        }
+      [&](const auto& prefix, auto&& src_row, auto&& aux_row) VECOPS_INLINE_LAMBDA {
+        const nint_t stride = src_row.stride(0);
+        hop::map(last, vec::size(to), [&](nint_t i, auto n) {
+          auto v_in = gather_dispatch(ti, src_row.data(), i * stride, stride, Any{n});
+          auto v_out = call_transform_with_last_coord(fn, to, v_in, prefix, i);
+          storeu_dispatch(to, aux_row.data() + i, n, v_out);
+        });
       },
       src_tensor,
       aux_tensor);
@@ -451,8 +465,8 @@ struct DataOutputImpl<AccessKindSecondLastContiguous, TIn, OutTensor, TransformF
   VECOPS_INLINE ~DataOutputImpl() {
     auto out_tensor = make_tensor(_p, _layout);
     auto aux_tensor = make_tensor(_aux, _aux_layout);
-    hop::for_each_dims_with_index_tuple<OutLayout::Ndim - 1>( // TODO laji: scalar fallback
-        [](const auto&, auto&& out_row, auto&& aux_row) {
+    hop::for_each_dims_with_index_tuple<OutLayout::Ndim - 1>(
+        [](const auto&, auto&& out_row, auto&& aux_row) VECOPS_INLINE_LAMBDA {
           const nint_t last = out_row.size(0);
           for (nint_t y = 0; y < last; ++y) {
             out_row(y) = aux_row(y);
@@ -656,7 +670,7 @@ struct DataOutputViewImpl<AccessKindStrided, TIn, OutTensor, TransformFn, void> 
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t base = offset_at(_layout, coords);
     auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
-    scatter_dispatch(To{}, _p, base, _layout.strides()[OutLayout::Ndim - 1], n, v_out); // TODO laji: bad strides usage
+    scatter_dispatch(To{}, _p, base, _layout.strides()[OutLayout::Ndim - 1], n, v_out);
   }
 
   TOut* _p;
@@ -1320,7 +1334,7 @@ VECOPS_INLINE auto slice_output_spec(const Spec& spec, nint_t index) {
 } // namespace details
 
 namespace hop::details {
-// TODO laji: why is this trait here?
+
 template <typename TOut, typename InTensor, typename Transform>
 struct SliceTraits<DataInput<TOut, InTensor, Transform>> {
   using Accessor = DataInput<TOut, InTensor, Transform>;

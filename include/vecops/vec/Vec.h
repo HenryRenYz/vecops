@@ -99,7 +99,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value) {
   using namespace details;
   return vmap(
-      t, [=](auto tt) VECOPS_ALWAYS_INLINE_LAMBDA { return word::fill(tt, value); }
+      t, [=](auto tt) VECOPS_INLINE_LAMBDA { return word::fill(tt, value); }
   );
 }
 
@@ -115,8 +115,8 @@ VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, nint_t n, Vec<T> default_v) {
   using namespace details;
   return vmap(
       t, n,
-      [=](auto tt, auto&& dd) VECOPS_ALWAYS_INLINE_LAMBDA { return word::fill(tt, value); },
-      [=](auto tt, nint_t rem, auto&& dd) VECOPS_ALWAYS_INLINE_LAMBDA { return word::fill(tt, value, rem, dd); },
+      [=](auto tt, auto&& dd) VECOPS_INLINE_LAMBDA { return word::fill(tt, value); },
+      [=](auto tt, nint_t rem, auto&& dd) VECOPS_INLINE_LAMBDA { return word::fill(tt, value, rem, dd); },
       ShardVec(t, default_v)
   );
 }
@@ -138,7 +138,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> fill(T t, TypeOf<T> value, Mask<T> m, Vec<T> default_v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, auto&& mm, auto&& dd) VECOPS_ALWAYS_INLINE_LAMBDA { return word::fill(tt, value, mm, dd); },
+      t, [=](auto tt, auto&& mm, auto&& dd) VECOPS_INLINE_LAMBDA { return word::fill(tt, value, mm, dd); },
       ShardMask(t, m), ShardVec(t, default_v)
   );
 }
@@ -160,7 +160,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> zeros(T t) {
   using namespace details;
   return vmap(
-      t, [=](auto tt) VECOPS_ALWAYS_INLINE_LAMBDA { return word::zeros(tt); }
+      t, [=](auto tt) VECOPS_INLINE_LAMBDA { return word::zeros(tt); }
   );
 }
 
@@ -187,7 +187,7 @@ VECOPS_VFUNC V blend(V v0, Mask<T> m, V v1) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& vv0, auto&& mm, auto&& vv1) VECOPS_ALWAYS_INLINE_LAMBDA { return word::blend(vv0, mm, vv1); },
+      t, [=](auto tt, auto&& vv0, auto&& mm, auto&& vv1) VECOPS_INLINE_LAMBDA { return word::blend(vv0, mm, vv1); },
       ShardVec(t, v0), ShardMask(t, m), ShardVec(t, v1)
   );
 }
@@ -342,7 +342,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, const TypeOf<T>* pp) VECOPS_ALWAYS_INLINE_LAMBDA { return word::loadu(tt, pp); },
+      t, [=](auto tt, const TypeOf<T>* pp) VECOPS_INLINE_LAMBDA { return word::loadu(tt, pp); },
       StepPointer(t, p)
   );
 }
@@ -378,7 +378,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, const TypeOf<T>* pp) VECOPS_ALWAYS_INLINE_LAMBDA { return word::load(tt, pp); },
+      t, [=](auto tt, const TypeOf<T>* pp) VECOPS_INLINE_LAMBDA { return word::load(tt, pp); },
       StepPointer(t, p)
   );
 }
@@ -412,8 +412,8 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
   using namespace details;
   return vmap(
       t, n,
-      [=](auto tt, const TypeOf<T>* p, auto v_d) VECOPS_ALWAYS_INLINE_LAMBDA { return word::loadu(tt, p); },
-      [=](auto tt, nint_t rem, const TypeOf<T>* p, auto v_d) VECOPS_ALWAYS_INLINE_LAMBDA { return word::loadu(tt, p, rem, v_d); },
+      [=](auto tt, const TypeOf<T>* p, auto v_d) VECOPS_INLINE_LAMBDA { return word::loadu(tt, p); },
+      [=](auto tt, nint_t rem, const TypeOf<T>* p, auto v_d) VECOPS_INLINE_LAMBDA { return word::loadu(tt, p, rem, v_d); },
       StepPointer(t, p), ShardVec(t, default_v)
   );
 }
@@ -433,8 +433,8 @@ VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
   using namespace details;
   return vmap(
       t, n,
-      [=](auto tt, const TypeOf<T>* p, auto v_d) VECOPS_ALWAYS_INLINE_LAMBDA { return word::load(tt, p); },
-      [=](auto tt, nint_t rem, const TypeOf<T>* p, auto v_d) VECOPS_ALWAYS_INLINE_LAMBDA { return word::load(tt, p, rem, v_d); },
+      [=](auto tt, const TypeOf<T>* p, auto v_d) VECOPS_INLINE_LAMBDA { return word::load(tt, p); },
+      [=](auto tt, nint_t rem, const TypeOf<T>* p, auto v_d) VECOPS_INLINE_LAMBDA { return word::load(tt, p, rem, v_d); },
       StepPointer(t, p), ShardVec(t, default_v)
   );
 }
@@ -459,7 +459,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, const TypeOf<T>* p, auto mm, auto v_d) VECOPS_ALWAYS_INLINE_LAMBDA { return word::loadu(tt, p, mm, v_d); },
+      t, [=](auto tt, const TypeOf<T>* p, auto mm, auto v_d) VECOPS_INLINE_LAMBDA { return word::loadu(tt, p, mm, v_d); },
       StepPointer(t, p), ShardMask(t, m), ShardVec(t, default_v)
   );
 }
@@ -481,7 +481,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, const TypeOf<T>* p, auto mm, auto v_d) VECOPS_ALWAYS_INLINE_LAMBDA { return word::load(tt, p, mm, v_d); },
+      t, [=](auto tt, const TypeOf<T>* p, auto mm, auto v_d) VECOPS_INLINE_LAMBDA { return word::load(tt, p, mm, v_d); },
       StepPointer(t, p), ShardMask(t, m), ShardVec(t, default_v)
   );
 }
@@ -500,7 +500,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, Vec<T> v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, TypeOf<T>* pp, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::storeu(tt, pp, vv); },
+      t, [=](auto tt, TypeOf<T>* pp, auto&& vv) VECOPS_INLINE_LAMBDA { word::storeu(tt, pp, vv); },
       StepPointer(t, p), ShardVec(t, v)
   );
 }
@@ -512,7 +512,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void store(T t, TypeOf<T>* p, Vec<T> v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, TypeOf<T>* pp, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::store(tt, pp, vv); },
+      t, [=](auto tt, TypeOf<T>* pp, auto&& vv) VECOPS_INLINE_LAMBDA { word::store(tt, pp, vv); },
       StepPointer(t, p), ShardVec(t, v)
   );
 }
@@ -527,8 +527,8 @@ VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
   using namespace details;
   return vmap(
       t, n,
-      [=](auto tt, TypeOf<T>* pp, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::storeu(tt, pp, vv); },
-      [=](auto tt, nint_t rem, TypeOf<T>* pp, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::storeu(tt, pp, rem, vv); },
+      [=](auto tt, TypeOf<T>* pp, auto&& vv) VECOPS_INLINE_LAMBDA { word::storeu(tt, pp, vv); },
+      [=](auto tt, nint_t rem, TypeOf<T>* pp, auto&& vv) VECOPS_INLINE_LAMBDA { word::storeu(tt, pp, rem, vv); },
       StepPointer(t, p), ShardVec(t, v)
   );
 }
@@ -541,8 +541,8 @@ VECOPS_VFUNC void store(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
   using namespace details;
   return vmap(
       t, n,
-      [=](auto tt, TypeOf<T>* pp, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::store(tt, pp, vv); },
-      [=](auto tt, nint_t rem, TypeOf<T>* pp, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::store(tt, pp, rem, vv); },
+      [=](auto tt, TypeOf<T>* pp, auto&& vv) VECOPS_INLINE_LAMBDA { word::store(tt, pp, vv); },
+      [=](auto tt, nint_t rem, TypeOf<T>* pp, auto&& vv) VECOPS_INLINE_LAMBDA { word::store(tt, pp, rem, vv); },
       StepPointer(t, p), ShardVec(t, v)
   );
 }
@@ -557,7 +557,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, TypeOf<T>* pp, auto&& mm, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::storeu(tt, pp, mm, vv); },
+      t, [=](auto tt, TypeOf<T>* pp, auto&& mm, auto&& vv) VECOPS_INLINE_LAMBDA { word::storeu(tt, pp, mm, vv); },
       StepPointer(t, p), ShardMask(t, m), ShardVec(t, v)
   );
 }
@@ -572,7 +572,7 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC void store(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
   using namespace details;
   return vmap(
-      t, [=](auto tt, TypeOf<T>* pp, auto&& mm, auto&& vv) VECOPS_ALWAYS_INLINE_LAMBDA { word::store(tt, pp, mm, vv); },
+      t, [=](auto tt, TypeOf<T>* pp, auto&& mm, auto&& vv) VECOPS_INLINE_LAMBDA { word::store(tt, pp, mm, vv); },
       StepPointer(t, p), ShardMask(t, m), ShardVec(t, v)
   );
 }
@@ -950,7 +950,7 @@ VECOPS_VFUNC V add(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb) VECOPS_ALWAYS_INLINE_LAMBDA { return word::add(aa, bb); },
+      t, [=](auto tt, auto&& aa, auto&& bb) VECOPS_INLINE_LAMBDA { return word::add(aa, bb); },
       ShardVec(t, a), ShardVec(t, b)
   );
 }
@@ -967,7 +967,7 @@ VECOPS_VFUNC V add(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb, auto&& mm) VECOPS_ALWAYS_INLINE_LAMBDA { return word::add(aa, bb, mm); },
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& mm) VECOPS_INLINE_LAMBDA { return word::add(aa, bb, mm); },
       ShardVec(t, a), ShardVec(t, b), ShardMask(t, m)
   );
 }
@@ -981,7 +981,7 @@ VECOPS_VFUNC V sub(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb) VECOPS_ALWAYS_INLINE_LAMBDA { return word::sub(aa, bb); },
+      t, [=](auto tt, auto&& aa, auto&& bb) VECOPS_INLINE_LAMBDA { return word::sub(aa, bb); },
       ShardVec(t, a), ShardVec(t, b)
   );
 }
@@ -996,7 +996,7 @@ VECOPS_VFUNC V sub(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb, auto&& mm) VECOPS_ALWAYS_INLINE_LAMBDA { return word::sub(aa, bb, mm); },
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& mm) VECOPS_INLINE_LAMBDA { return word::sub(aa, bb, mm); },
       ShardVec(t, a), ShardVec(t, b), ShardMask(t, m)
   );
 }
@@ -1010,7 +1010,7 @@ VECOPS_VFUNC V mul(V a, V b) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb) VECOPS_ALWAYS_INLINE_LAMBDA { return word::mul(aa, bb); },
+      t, [=](auto tt, auto&& aa, auto&& bb) VECOPS_INLINE_LAMBDA { return word::mul(aa, bb); },
       ShardVec(t, a), ShardVec(t, b)
   );
 }
@@ -1025,7 +1025,7 @@ VECOPS_VFUNC V mul(V a, V b, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb, auto&& mm) VECOPS_ALWAYS_INLINE_LAMBDA { return word::mul(aa, bb, mm); },
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& mm) VECOPS_INLINE_LAMBDA { return word::mul(aa, bb, mm); },
       ShardVec(t, a), ShardVec(t, b), ShardMask(t, m)
   );
 }
@@ -1043,7 +1043,7 @@ VECOPS_VFUNC V fmadd(V a, V b, V c) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc) VECOPS_ALWAYS_INLINE_LAMBDA { return word::fmadd(aa, bb, cc); },
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc) VECOPS_INLINE_LAMBDA { return word::fmadd(aa, bb, cc); },
       ShardVec(t, a), ShardVec(t, b), ShardVec(t, c)
   );
 }
@@ -1061,7 +1061,7 @@ VECOPS_VFUNC V fmadd(V a, V b, V c, Mask<T> m) {
   using namespace details;
   constexpr T t;
   return vmap(
-      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc, auto&& mm) VECOPS_ALWAYS_INLINE_LAMBDA { return word::fmadd(aa, bb, cc, mm); },
+      t, [=](auto tt, auto&& aa, auto&& bb, auto&& cc, auto&& mm) VECOPS_INLINE_LAMBDA { return word::fmadd(aa, bb, cc, mm); },
       ShardVec(t, a), ShardVec(t, b), ShardVec(t, c), ShardMask(t, m)
   );
 }
@@ -1890,7 +1890,7 @@ template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V exp(V v) {
   using namespace details;
   constexpr T t;
-  return vmap(t, [=](auto, auto&& vv) { return word::exp(vv); }, ShardVec(t, v));
+  return vmap(t, [=](auto, auto&& vv) VECOPS_INLINE_LAMBDA { return word::exp(vv); }, ShardVec(t, v));
 }
 
 /**
@@ -1902,7 +1902,7 @@ template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V exp(V v, Mask<T> m, V default_v) {
   using namespace details;
   constexpr T t;
-  return vmap(t, [=](auto, auto&& vv, auto&& mm, auto&& dd) {
+  return vmap(t, [=](auto, auto&& vv, auto&& mm, auto&& dd) VECOPS_INLINE_LAMBDA {
     return word::exp(vv, mm, dd);
   }, ShardVec(t, v), ShardMask(t, m), ShardVec(t, default_v));
 }
@@ -1922,27 +1922,27 @@ VECOPS_VFUNC V exp(V v, Mask<T> m) {
  *
  * Normal results are within four ULP. Subnormal mathematical results may be
  * flushed to positive zero. If `VECOPS_MATH_ASSUME_VALID_INPUTS` is defined,
- * the input must be finite and its mathematical result must be normal.
+ * the input must not be NaN or infinity. Finite subnormal inputs are allowed.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V exp_fast(V v) {
   using namespace details;
   constexpr T t;
-  return vmap(t, [=](auto, auto&& vv) { return word::exp_fast(vv); }, ShardVec(t, v));
+  return vmap(t, [=](auto, auto&& vv) VECOPS_INLINE_LAMBDA { return word::exp_fast(vv); }, ShardVec(t, v));
 }
 
 /**
  * @brief Computes fast element-wise exp on active lanes.
  *
  * Inactive lanes are copied from default_v without modification.
- * With `VECOPS_MATH_ASSUME_VALID_INPUTS`, active inputs must be finite and
- * produce normal mathematical results.
+ * With `VECOPS_MATH_ASSUME_VALID_INPUTS`, active inputs must not be NaN or
+ * infinity. Finite subnormal inputs are allowed.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V exp_fast(V v, Mask<T> m, V default_v) {
   using namespace details;
   constexpr T t;
-  return vmap(t, [=](auto, auto&& vv, auto&& mm, auto&& dd) {
+  return vmap(t, [=](auto, auto&& vv, auto&& mm, auto&& dd) VECOPS_INLINE_LAMBDA {
     return word::exp_fast(vv, mm, dd);
   }, ShardVec(t, v), ShardMask(t, m), ShardVec(t, default_v));
 }
@@ -1951,8 +1951,8 @@ VECOPS_VFUNC V exp_fast(V v, Mask<T> m, V default_v) {
  * @brief Computes fast element-wise exp on active lanes.
  *
  * Inactive lanes retain their original input values.
- * With `VECOPS_MATH_ASSUME_VALID_INPUTS`, active inputs must be finite and
- * produce normal mathematical results.
+ * With `VECOPS_MATH_ASSUME_VALID_INPUTS`, active inputs must not be NaN or
+ * infinity. Finite subnormal inputs are allowed.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V exp_fast(V v, Mask<T> m) {
@@ -1964,28 +1964,28 @@ VECOPS_VFUNC V exp_fast(V v, Mask<T> m) {
  *
  * Normal results have at most 0.6 percent relative error. Subnormal
  * mathematical results may be flushed to positive zero. If
- * `VECOPS_MATH_ASSUME_VALID_INPUTS` is defined, the input must be finite and
- * its mathematical result must be normal.
+ * `VECOPS_MATH_ASSUME_VALID_INPUTS` is defined, the input must not be NaN or
+ * infinity. Finite subnormal inputs are allowed.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V exp_est(V v) {
   using namespace details;
   constexpr T t;
-  return vmap(t, [=](auto, auto&& vv) { return word::exp_est(vv); }, ShardVec(t, v));
+  return vmap(t, [=](auto, auto&& vv) VECOPS_INLINE_LAMBDA { return word::exp_est(vv); }, ShardVec(t, v));
 }
 
 /**
  * @brief Computes estimated element-wise exp on active lanes.
  *
  * Inactive lanes are copied from default_v without modification.
- * With `VECOPS_MATH_ASSUME_VALID_INPUTS`, active inputs must be finite and
- * produce normal mathematical results.
+ * With `VECOPS_MATH_ASSUME_VALID_INPUTS`, active inputs must not be NaN or
+ * infinity. Finite subnormal inputs are allowed.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V exp_est(V v, Mask<T> m, V default_v) {
   using namespace details;
   constexpr T t;
-  return vmap(t, [=](auto, auto&& vv, auto&& mm, auto&& dd) {
+  return vmap(t, [=](auto, auto&& vv, auto&& mm, auto&& dd) VECOPS_INLINE_LAMBDA {
     return word::exp_est(vv, mm, dd);
   }, ShardVec(t, v), ShardMask(t, m), ShardVec(t, default_v));
 }
@@ -1994,12 +1994,134 @@ VECOPS_VFUNC V exp_est(V v, Mask<T> m, V default_v) {
  * @brief Computes estimated element-wise exp on active lanes.
  *
  * Inactive lanes retain their original input values.
- * With `VECOPS_MATH_ASSUME_VALID_INPUTS`, active inputs must be finite and
- * produce normal mathematical results.
+ * With `VECOPS_MATH_ASSUME_VALID_INPUTS`, active inputs must not be NaN or
+ * infinity. Finite subnormal inputs are allowed.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V exp_est(V v, Mask<T> m) {
   return vec::exp_est(v, m, v);
+}
+
+/**
+ * @brief Computes strict element-wise exp for inputs known to be non-positive.
+ *
+ * Every lane must satisfy `v[i] <= 0`; results for positive values and NaNs are
+ * undefined. Negative infinity is supported unless
+ * `VECOPS_MATH_ASSUME_VALID_INPUTS` is defined. Normal results are within one
+ * ULP, and `VECOPS_PRESERVE_SUBNORMALS` enables the strict gradual-underflow
+ * guarantee.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg(V v) {
+  using namespace details;
+  constexpr T t;
+  return vmap(t, [=](auto, auto&& vv) VECOPS_INLINE_LAMBDA { return word::exp_neg(vv); }, ShardVec(t, v));
+}
+
+/**
+ * @brief Computes strict non-positive-domain exp on active lanes.
+ *
+ * Active lanes must be non-positive and not NaN. Inactive lanes are copied
+ * from `default_v` without modification.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg(V v, Mask<T> m, V default_v) {
+  using namespace details;
+  constexpr T t;
+  return vmap(t, [=](auto, auto&& vv, auto&& mm, auto&& dd) VECOPS_INLINE_LAMBDA {
+    return word::exp_neg(vv, mm, dd);
+  }, ShardVec(t, v), ShardMask(t, m), ShardVec(t, default_v));
+}
+
+/**
+ * @brief Computes strict non-positive-domain exp on active lanes.
+ *
+ * Active lanes must be non-positive and not NaN. Inactive lanes retain their
+ * original input values.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg(V v, Mask<T> m) {
+  return vec::exp_neg(v, m, v);
+}
+
+/**
+ * @brief Computes fast element-wise exp for inputs known to be non-positive.
+ *
+ * Every lane must satisfy `v[i] <= 0`; positive values and NaNs have undefined
+ * results. Normal results are within four ULP. Subnormal mathematical results
+ * may be flushed to positive zero.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg_fast(V v) {
+  using namespace details;
+  constexpr T t;
+  return vmap(t, [=](auto, auto&& vv) VECOPS_INLINE_LAMBDA { return word::exp_neg_fast(vv); }, ShardVec(t, v));
+}
+
+/**
+ * @brief Computes fast non-positive-domain exp on active lanes.
+ *
+ * Active lanes must be non-positive and not NaN. Inactive lanes are copied
+ * from `default_v` without modification.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg_fast(V v, Mask<T> m, V default_v) {
+  using namespace details;
+  constexpr T t;
+  return vmap(t, [=](auto, auto&& vv, auto&& mm, auto&& dd) VECOPS_INLINE_LAMBDA {
+    return word::exp_neg_fast(vv, mm, dd);
+  }, ShardVec(t, v), ShardMask(t, m), ShardVec(t, default_v));
+}
+
+/**
+ * @brief Computes fast non-positive-domain exp on active lanes.
+ *
+ * Active lanes must be non-positive and not NaN. Inactive lanes retain their
+ * original input values.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg_fast(V v, Mask<T> m) {
+  return vec::exp_neg_fast(v, m, v);
+}
+
+/**
+ * @brief Estimates element-wise exp for inputs known to be non-positive.
+ *
+ * Every lane must satisfy `v[i] <= 0`; positive values and NaNs have undefined
+ * results. Normal results have at most 0.6 percent relative error, and
+ * subnormal mathematical results may be flushed to positive zero.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg_est(V v) {
+  using namespace details;
+  constexpr T t;
+  return vmap(t, [=](auto, auto&& vv) VECOPS_INLINE_LAMBDA { return word::exp_neg_est(vv); }, ShardVec(t, v));
+}
+
+/**
+ * @brief Estimates non-positive-domain exp on active lanes.
+ *
+ * Active lanes must be non-positive and not NaN. Inactive lanes are copied
+ * from `default_v` without modification.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg_est(V v, Mask<T> m, V default_v) {
+  using namespace details;
+  constexpr T t;
+  return vmap(t, [=](auto, auto&& vv, auto&& mm, auto&& dd) VECOPS_INLINE_LAMBDA {
+    return word::exp_neg_est(vv, mm, dd);
+  }, ShardVec(t, v), ShardMask(t, m), ShardVec(t, default_v));
+}
+
+/**
+ * @brief Estimates non-positive-domain exp on active lanes.
+ *
+ * Active lanes must be non-positive and not NaN. Inactive lanes retain their
+ * original input values.
+ */
+template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
+VECOPS_VFUNC V exp_neg_est(V v, Mask<T> m) {
+  return vec::exp_neg_est(v, m, v);
 }
 
 /* ************************************************************************** */

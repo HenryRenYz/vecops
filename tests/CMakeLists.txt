@@ -195,6 +195,14 @@ add_multiarch_executable(VecMathPreserveSubnormalTest
     DEFINITIONS VECOPS_PRESERVE_SUBNORMALS=1
 )
 
+add_multiarch_executable(VecMathAssumeValidPreserveSubnormalTest
+    FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/vec/MathTest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
+    ARCH ${VECOPS_ARCH_LIST}
+    DEFINITIONS VECOPS_MATH_ASSUME_VALID_INPUTS=1 VECOPS_PRESERVE_SUBNORMALS=1
+)
+
 add_multiarch_executable(VecSubnormalConversionPreserveTest
     FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/vec/SubnormalConversionTest.cpp
