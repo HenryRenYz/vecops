@@ -21,20 +21,20 @@ template <typename... Ts>
 struct TypeList {};
 
 using LayerNormFloatTypes = TypeList<
-    float16_t,
+    vecops::float16_t,
     float32_t,
     float64_t
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-    , bfloat16_t
+    , vecops::bfloat16_t
 #endif
 >;
 
 template <typename T>
 const char* dtype_name() {
-  if constexpr (std::is_same_v<T, float16_t>) return "fp16";
+  if constexpr (std::is_same_v<T, vecops::float16_t>) return "fp16";
   if constexpr (std::is_same_v<T, float32_t>) return "fp32";
   if constexpr (std::is_same_v<T, float64_t>) return "fp64";
-  if constexpr (std::is_same_v<T, bfloat16_t>) return "bf16";
+  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) return "bf16";
   return typeid(T).name();
 }
 
@@ -47,8 +47,8 @@ template <typename T>
 double tolerance() {
   if constexpr (std::is_same_v<T, float64_t>) return 2e-5;
   if constexpr (std::is_same_v<T, float32_t>) return 2e-5;
-  if constexpr (std::is_same_v<T, float16_t>) return 2e-2;
-  if constexpr (std::is_same_v<T, bfloat16_t>) return 4e-2;
+  if constexpr (std::is_same_v<T, vecops::float16_t>) return 2e-2;
+  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) return 4e-2;
   return 1e-5;
 }
 

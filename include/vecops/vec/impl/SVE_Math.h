@@ -15,6 +15,15 @@ namespace math_details {
 
 enum class ExpTier { Strict, Fast, Estimate };
 
+struct alignas(16) ExpF32Constants {
+  float lanes[8];
+};
+
+inline constexpr ExpF32Constants kExpF32Constants{{
+    -87.3365447505531f, 88.72283905206835f, 196735.0f,
+    1.4426950408889634074f,
+    -0.693145751953125f, -1.428606765330187045e-6f, 88.0f, 0.5f}};
+
 template <typename T>
 VECOPS_VFUNC Vec<T> exp_f32_accurate(Vec<T> x) {
   const auto pg = details::ptrue<float32_t>();
@@ -49,7 +58,7 @@ VECOPS_VFUNC Vec<T> exp_f32_accurate(Vec<T> x) {
   return y;
 }
 
-template <ExpTier tier, typename T>
+template <ExpTier tier, bool negative_only, typename T>
 VECOPS_VFUNC Vec<T> exp_sve(Vec<T> x) {
   using E = TypeOf<T>;
   constexpr bool strict = tier == ExpTier::Strict;
@@ -61,6 +70,10 @@ VECOPS_VFUNC Vec<T> exp_sve(Vec<T> x) {
 #endif
   const auto pg = details::ptrue<E>();
 
+  const auto f32_pg = details::ptrue<float32_t>();
+  const auto f32_c0 = svld1rq_f32(f32_pg, kExpF32Constants.lanes);
+  const auto f32_c1 = svld1rq_f32(f32_pg, kExpF32Constants.lanes + 4);
+
   E overflow, zero_limit, normal_limit, sub_shift, sub_scale;
   if constexpr (std::is_same_v<E, float16_t>) {
     // Largest binary16 input whose exponential is still finite.
@@ -70,34 +83,53 @@ VECOPS_VFUNC Vec<T> exp_sve(Vec<T> x) {
   } else if constexpr (std::is_same_v<E, float32_t>) {
     overflow = E(88.72283905206835); zero_limit = E(-103.972084045410);
     normal_limit = E(-87.3365447505531); sub_shift = E(44.3614195558365);
-    sub_scale = E(0x1p-64f);
+    // Compensate for sub_shift being rounded to f32 rather than exactly 64*ln(2).
+    sub_scale = E(0x1.fffffcp-65f);
   } else {
     overflow = E(709.782712893384); zero_limit = E(-745.1332191019411);
     normal_limit = E(-708.3964185322641); sub_shift = E(354.891356446692);
-    sub_scale = E(0x1p-512);
+    // Compensate for sub_shift being rounded to f64 rather than exactly 512*ln(2).
+    sub_scale = E(0x1.0000000000035p-512);
   }
 
-  const auto subnormal = word::cmplt(x, word::fill(T{}, normal_limit));
+  const auto subnormal = [&]() VECOPS_INLINE_LAMBDA {
+    if constexpr (std::is_same_v<E, float32_t>)
+      return svcmplt_f32(pg, x, svdup_lane_f32(f32_c0, 0));
+    else
+      return word::cmplt(x, word::fill(T{}, normal_limit));
+  }();
   auto xc = x;
   if constexpr (gradual) {
     xc = word::blend(xc, subnormal, word::add(xc, word::fill(T{}, sub_shift)));
   }
   const E lower = normal_limit;
-  xc = word::blend(xc, word::cmplt(xc, word::fill(T{}, lower)), word::fill(T{}, lower)); // TODO use clamp
-  xc = word::blend(xc, word::cmpgt(xc, word::fill(T{}, overflow)), word::fill(T{}, overflow));
+  if constexpr (std::is_same_v<E, float32_t>) {
+    xc = svmaxnm_f32_x(pg, xc, svdup_lane_f32(f32_c0, 0));
+    if constexpr (!negative_only)
+      xc = svminnm_f32_x(pg, xc, svdup_lane_f32(f32_c0, 1));
+  } else {
+    xc = word::blend(xc, word::cmplt(xc, word::fill(T{}, lower)),
+                     word::fill(T{}, lower));
+    if constexpr (!negative_only) {
+      xc = word::blend(xc, word::cmpgt(xc, word::fill(T{}, overflow)),
+                       word::fill(T{}, overflow));
+    }
+  }
 
   Vec<T> y;
   if constexpr (std::is_same_v<E, float32_t>) {
-    constexpr float inv_step = 92.33248261689366f;  // 64 / ln(2)
-    const auto nf = svrinta_f32_x(pg, svmul_n_f32_x(pg, xc, inv_step));
-    const auto code = svcvt_u32_f32_x(pg, svadd_n_f32_x(pg, nf, 8128.0f));
-    const auto scale = svexpa_f32(code);
-    auto r = svmla_n_f32_x(pg, xc, nf, -0.010830402374267578125f);
-    r = svmla_n_f32_x(pg, r, nf, -2.232198101786e-8f);
+    // The low six mantissa bits of z encode FEXPA's 64-entry table index.
+    // This magic-bias form folds rounding and code generation into one FMA.
+    const auto shift = svdup_lane_f32(f32_c0, 2);
+    const auto z = svmla_lane_f32(shift, xc, f32_c0, 3);
+    const auto n = svsub_f32_x(pg, z, shift);
+    const auto scale = svexpa_f32(svreinterpret_u32_f32(z));
+    auto r = svmla_lane_f32(xc, n, f32_c1, 0);
+    r = svmla_lane_f32(r, n, f32_c1, 1);
     if constexpr (estimate) {
       y = svmla_f32_x(pg, scale, scale, r);
     } else {
-      const auto p = svmla_n_f32_x(pg, r, svmul_f32_x(pg, r, r), 0.5f);
+      const auto p = svmla_lane_f32(r, svmul_f32_x(pg, r, r), f32_c1, 3);
       y = svmla_f32_x(pg, scale, scale, p);
     }
   } else if constexpr (std::is_same_v<E, float64_t>) {
@@ -169,37 +201,34 @@ VECOPS_VFUNC Vec<T> exp_sve(Vec<T> x) {
                     word::fill(T{}, std::numeric_limits<E>::max()));
   }
 
-  y = word::blend(y, word::cmpgt(x, word::fill(T{}, overflow)),
-                  word::fill(T{}, std::numeric_limits<E>::infinity()));
-  y = word::blend(y, word::cmplt(x, word::fill(T{}, gradual ? zero_limit : normal_limit)),
-                  word::fill(T{}, E(0)));
-#ifndef VECOPS_MATH_ASSUME_VALID_INPUTS
-  y = word::blend(y, word::cmpne(x, x), word::add(x, x));
-#endif
-  if constexpr (std::is_same_v<E, float32_t> || std::is_same_v<E, float64_t>) {
-    const E repair_upper = std::is_same_v<E, float32_t> ? E(88.0) : E(709.0);
-    const auto upper_tail = word::cmpgt(x, word::fill(T{}, repair_upper));
-    const bool repair_subnormal = gradual && svptest_any(pg, subnormal);
-    const bool repair_top = svptest_any(pg, upper_tail);
-    if (repair_subnormal || repair_top) {
-      for (nint_t i = 0; i < size(T{}); ++i) {
-        const E xi = word::get(x, i);
-        if (std::isfinite(xi) &&
-            ((gradual && xi < normal_limit) || xi > repair_upper)) {
-          E yi = std::exp(xi);
-          if constexpr (!strict) {
-            if (yi < std::numeric_limits<E>::min()) yi = E(0);
-          }
-          y = word::set(y, i, yi);
-        }
+  if constexpr (!negative_only) {
+    if constexpr (std::is_same_v<E, float32_t>) {
+      // FEXPA's top finite code aliases a NaN encoding. Keep the common path
+      // compact and use the accurate vector polynomial only for affected lanes.
+      const auto upper_tail = svcmpgt_f32(pg, x, svdup_lane_f32(f32_c1, 2));
+      if (svptest_any(pg, upper_tail)) {
+        y = word::blend(y, upper_tail, exp_f32_accurate<T>(x));
       }
     }
+    y = word::blend(y, word::cmpgt(x, word::fill(T{}, overflow)),
+                    word::fill(T{}, std::numeric_limits<E>::infinity()));
   }
+  if constexpr (gradual) {
+    y = word::blend(y, word::cmplt(x, word::fill(T{}, zero_limit)),
+                    word::fill(T{}, E(0)));
+  } else {
+    y = word::blend(y, subnormal, word::fill(T{}, E(0)));
+  }
+#ifndef VECOPS_MATH_ASSUME_VALID_INPUTS
+  if constexpr (!negative_only) {
+    y = word::blend(y, word::cmpne(x, x), word::add(x, x));
+  }
+#endif
   return y;
 }
 
-template <ExpTier tier, typename T>
-VECOPS_VFUNC Vec<T> dispatch(Vec<T> x) {
+template <ExpTier tier, bool negative_only = false, typename T>
+VECOPS_INLINE Vec<T> dispatch(Vec<T> x) {
   using E = TypeOf<T>;
   if constexpr (std::is_same_v<E, bfloat16_t> ||
                 (std::is_same_v<E, float16_t> && tier != ExpTier::Estimate)) {
@@ -208,41 +237,52 @@ VECOPS_VFUNC Vec<T> dispatch(Vec<T> x) {
     const auto lo = word::promote(tf, word::lower(T{}, x));
     const auto hi = word::promote(tf, word::upper(T{}, x));
     const auto ylo = [&] {
-      if constexpr (std::is_same_v<E, bfloat16_t> && tier == ExpTier::Estimate)
-        return exp_f32_accurate<Rebind<float32_t, Half<T>>>(lo);
-      else
-        return exp_sve<tier, Rebind<float32_t, Half<T>>>(lo);
+      if constexpr (std::is_same_v<E, bfloat16_t> && tier == ExpTier::Estimate) {
+        if constexpr (negative_only)
+          return exp_sve<ExpTier::Fast, true, Rebind<float32_t, Half<T>>>(lo);
+        else
+          return exp_f32_accurate<Rebind<float32_t, Half<T>>>(lo);
+      } else {
+        return exp_sve<tier, negative_only, Rebind<float32_t, Half<T>>>(lo);
+      }
     }();
     const auto yhi = [&] {
-      if constexpr (std::is_same_v<E, bfloat16_t> && tier == ExpTier::Estimate)
-        return exp_f32_accurate<Rebind<float32_t, Half<T>>>(hi);
-      else
-        return exp_sve<tier, Rebind<float32_t, Half<T>>>(hi);
+      if constexpr (std::is_same_v<E, bfloat16_t> && tier == ExpTier::Estimate) {
+        if constexpr (negative_only)
+          return exp_sve<ExpTier::Fast, true, Rebind<float32_t, Half<T>>>(hi);
+        else
+          return exp_f32_accurate<Rebind<float32_t, Half<T>>>(hi);
+      } else {
+        return exp_sve<tier, negative_only, Rebind<float32_t, Half<T>>>(hi);
+      }
     }();
     return word::concat(T{}, word::demote(th, ylo), word::demote(th, yhi));
   } else {
-    return exp_sve<tier, T>(x);
+    return exp_sve<tier, negative_only, T>(x);
   }
 }
 
 }  // namespace math_details
 
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
-VECOPS_VFUNC V exp(V v) { return math_details::dispatch<math_details::ExpTier::Strict, T>(v); }
+VECOPS_VFUNC V exp(V v) { return math_details::dispatch<math_details::ExpTier::Strict, false, T>(v); }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
-VECOPS_VFUNC V exp_fast(V v) { return math_details::dispatch<math_details::ExpTier::Fast, T>(v); }
+VECOPS_VFUNC V exp_fast(V v) { return math_details::dispatch<math_details::ExpTier::Fast, false, T>(v); }
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
-VECOPS_VFUNC V exp_est(V v) { return math_details::dispatch<math_details::ExpTier::Estimate, T>(v); }
+VECOPS_VFUNC V exp_est(V v) { return math_details::dispatch<math_details::ExpTier::Estimate, false, T>(v); }
 
-// TODO: implement the x <= 0 specialization. It can omit the upper clamp,
-// overflow repair, NaN handling, and the dynamic sign-dependent rounding used
-// by a general exponential. The forwarding stubs keep the public API correct.
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
-VECOPS_VFUNC V exp_neg(V v) { return word::exp(v); }
+VECOPS_VFUNC V exp_neg(V v) {
+  return math_details::dispatch<math_details::ExpTier::Strict, true, T>(v);
+}
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
-VECOPS_VFUNC V exp_neg_fast(V v) { return word::exp_fast(v); }
+VECOPS_VFUNC V exp_neg_fast(V v) {
+  return math_details::dispatch<math_details::ExpTier::Fast, true, T>(v);
+}
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
-VECOPS_VFUNC V exp_neg_est(V v) { return word::exp_est(v); }
+VECOPS_VFUNC V exp_neg_est(V v) {
+  return math_details::dispatch<math_details::ExpTier::Estimate, true, T>(v);
+}
 
 #define VECOPS_SVE_MASKED_EXP(NAME) \
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)> \

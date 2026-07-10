@@ -141,6 +141,13 @@ add_executable(HOPTest ${CMAKE_CURRENT_SOURCE_DIR}/gemm/HOPTest.cpp)
 target_link_libraries(HOPTest PRIVATE vecops gtest gtest_main)
 gtest_discover_tests(HOPTest)
 
+if(VECOPS_ARCH_FAMILY STREQUAL "ARM")
+    add_multiarch_executable(HOPSizelessTest
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/gemm/HOPSizelessTest.cpp
+        ARCH SVE
+    )
+endif()
+
 add_multiarch_executable(DataAccessTest
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/gemm/DataAccessTest.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp

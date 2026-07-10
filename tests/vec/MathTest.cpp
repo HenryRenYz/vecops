@@ -445,6 +445,23 @@ TEST(VecMathTest, SubnormalAndThresholdBoundaries) {
   check_subnormal_and_thresholds<float64_t>();
 }
 
+TEST(VecMathTest, Float32UpperTailDense) {
+  ScalableTag<float32_t, 0> t;
+  constexpr float lo = 88.0f;
+  constexpr float overflow = 88.72283905206835f;
+  const float finite_hi = std::nextafter(overflow, -std::numeric_limits<float>::infinity());
+  std::vector<float> values;
+  values.reserve(8195);
+  for (int i = 0; i <= 8192; ++i) {
+    values.push_back(lo + (finite_hi - lo) * static_cast<float>(i) / 8192.0f);
+  }
+  values.push_back(overflow);
+  values.push_back(std::nextafter(overflow, std::numeric_limits<float>::infinity()));
+  run_values<Tier::Strict>(t, values);
+  run_values<Tier::Fast>(t, values);
+  run_values<Tier::Estimate>(t, values);
+}
+
 TEST(VecMathTest, MonotonicAcrossRangeReductionBoundaries) {
   check_monotonic<Tier::Strict, float32_t>();
   check_monotonic<Tier::Fast, float32_t>();
