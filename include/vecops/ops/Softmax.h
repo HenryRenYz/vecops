@@ -181,6 +181,8 @@ private:
       auto y = out.bind(workspace);
 
       const auto normalized_count = gemm::size<0>(in_layout);
+      const nint_t normalized_n = normalized_count;
+      ComputeType* exp_cache = workspace.allocate<ComputeType>(normalized_n);
       const auto step = details::softmax_vector_step_value(t);
       const auto negative_infinity =
           static_cast<ComputeType>(-std::numeric_limits<double>::infinity());
@@ -206,19 +208,19 @@ private:
             auto mask = vec::mwhilelt(t, 0, static_cast<nint_t>(count));
             auto shifted = vec::sub(xv, max_v);
             auto exp_v = apply_exp(shifted, mask, vec::zeros(t));
+            vec::storeu(t, exp_cache + col, mask, exp_v);
             return vec::add(acc, exp_v);
           });
       const auto inv_sum = ComputeType(1) / vec::reduce_add(t, v_sum);
       const auto inv_sum_v = vec::fill(t, inv_sum);
 
+      // Loop unrolling 2
       gemm::hop::map<2>(
           normalized_count,
           step,
           [&](nint_t col, auto&& count) VECOPS_INLINE_LAMBDA {
-            auto xv = x(t, count, col);
             auto mask = vec::mwhilelt(t, 0, static_cast<nint_t>(count));
-            auto shifted = vec::sub(xv, max_v);
-            auto exp_v = apply_exp(shifted, mask, vec::zeros(t));
+            auto exp_v = vec::loadu(t, exp_cache + col, mask, vec::zeros(t));
             y(t, vec::mul(exp_v, inv_sum_v), count, col);
           });
     }
@@ -233,7 +235,13 @@ private:
     constexpr int prefix_rank = InLayout::Ndim - 1;
     const auto in_row = row_input_spec<prefix_rank>(in);
     const auto out_row = row_output_spec<prefix_rank>(out);
-    return gemm::required_workspace(in_row, out_row);
+    const nint_t row_workspace = gemm::required_workspace(in_row, out_row);
+    const nint_t normalized_count = gemm::size<0>(in_row.input_layout());
+    const nint_t exp_cache_bytes =
+        normalized_count * static_cast<nint_t>(sizeof(ComputeType));
+    return gemm::details::workspace_round_up(
+        row_workspace + exp_cache_bytes,
+        vec::DEFAULT_ALIGNMENT);
   }
 
   template <int PrefixRank, typename Layout>

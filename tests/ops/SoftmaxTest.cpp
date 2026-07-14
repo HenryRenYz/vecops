@@ -100,7 +100,11 @@ void run_dtype_combo() {
   auto x_spec = input<ComputeT>(x_t);
   auto y_spec = output<ComputeT>(y_t);
   const nint_t workspace_bytes = op.required_workspace(x_spec, y_spec);
-  EXPECT_EQ(workspace_bytes, 0);
+  EXPECT_EQ(
+      workspace_bytes,
+      gemm::details::workspace_round_up(
+          n * static_cast<nint_t>(sizeof(ComputeT)),
+          vec::DEFAULT_ALIGNMENT));
   Workspace workspace(workspace_bytes);
   auto view = workspace.view();
   op(view, x_spec, y_spec);
