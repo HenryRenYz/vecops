@@ -2,3 +2,4 @@
 # ============ CMake ============
 /cmake-build*/
 /build*/
+/benchmarks/results/inst/

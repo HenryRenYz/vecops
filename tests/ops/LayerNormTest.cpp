@@ -255,6 +255,131 @@ TEST(LayerNormRankTest, CoversRanksOneThroughFour) {
   run_contiguous_rank_case<4>();
 }
 
+TEST(LayerNormVectorBoundaryTest, CoversGroupedLoopAndTailBoundaries) {
+  using Tag = LayerNormConfig<float32_t>::Tag;
+  const nint_t lanes = vec::size(Tag{});
+  ASSERT_GT(lanes, 0);
+
+  const std::array<nint_t, 8> sizes = {
+      1,
+      std::max<nint_t>(1, lanes - 1),
+      lanes,
+      lanes + 1,
+      4 * lanes - 1,
+      4 * lanes,
+      4 * lanes + 1,
+      5 * lanes + 3};
+
+  for (const nint_t n : sizes) {
+    SCOPED_TRACE("normalized_size=" + std::to_string(n));
+    constexpr nint_t rows = 3;
+    std::vector<float> x(static_cast<size_t>(rows * n));
+    std::vector<float> scale(static_cast<size_t>(n));
+    std::vector<float> bias(static_cast<size_t>(n));
+    std::vector<float> out(static_cast<size_t>(rows * n), -99.0f);
+    std::vector<float> ref(static_cast<size_t>(rows * n));
+
+    for (nint_t i = 0; i < rows * n; ++i) {
+      x[static_cast<size_t>(i)] = float((i * 7) % 29 - 14) * 0.11f;
+    }
+    for (nint_t i = 0; i < n; ++i) {
+      scale[static_cast<size_t>(i)] = 0.65f + float(i % 17) * 0.013f;
+      bias[static_cast<size_t>(i)] = -0.18f + float(i % 13) * 0.009f;
+    }
+    reference_layernorm_rows(x, scale, bias, rows, n, ref, 1e-5f);
+
+    auto x_t = make_tensor<2>(x.data(), {rows, n});
+    auto s_t = make_tensor<1>(scale.data(), {n});
+    auto b_t = make_tensor<1>(bias.data(), {n});
+    auto y_t = make_tensor<2>(out.data(), {rows, n});
+    auto op = layer_norm(LayerNormConfig<float32_t>{.eps = 1e-5f});
+    op(
+        input<float32_t>(x_t),
+        input<float32_t>(s_t),
+        input<float32_t>(b_t),
+        output<float32_t>(y_t));
+
+    for (nint_t i = 0; i < rows * n; ++i) {
+      EXPECT_NEAR(ref[static_cast<size_t>(i)], out[static_cast<size_t>(i)], 3e-5f)
+          << "i=" << i;
+    }
+  }
+}
+
+template <typename T>
+void run_sve_16bit_boundary_cases() {
+  using Tag = LayerNormConfig<float32_t>::Tag;
+  const nint_t half_lanes = 2 * vec::size(Tag{});
+  const std::array<nint_t, 8> sizes = {
+      1,
+      std::max<nint_t>(1, half_lanes - 1),
+      half_lanes,
+      half_lanes + 1,
+      2 * half_lanes - 1,
+      2 * half_lanes,
+      2 * half_lanes + 1,
+      3 * half_lanes + 5};
+
+  for (const nint_t n : sizes) {
+    SCOPED_TRACE(std::string(dtype_name<T>()) + " normalized_size=" +
+                 std::to_string(n));
+    constexpr nint_t rows = 3;
+    std::vector<T> x(static_cast<size_t>(rows * n));
+    std::vector<T> scale(static_cast<size_t>(n));
+    std::vector<T> bias(static_cast<size_t>(n));
+    std::vector<T> out(static_cast<size_t>(rows * n), T{});
+
+    for (nint_t i = 0; i < rows * n; ++i)
+      x[static_cast<size_t>(i)] =
+          static_cast<T>(float((i * 7) % 29 - 14) * 0.11f);
+    for (nint_t i = 0; i < n; ++i) {
+      scale[static_cast<size_t>(i)] =
+          static_cast<T>(0.65f + float(i % 17) * 0.013f);
+      bias[static_cast<size_t>(i)] =
+          static_cast<T>(-0.18f + float(i % 13) * 0.009f);
+    }
+
+    auto x_t = make_tensor<2>(x.data(), {rows, n});
+    auto s_t = make_tensor<1>(scale.data(), {n});
+    auto b_t = make_tensor<1>(bias.data(), {n});
+    auto y_t = make_tensor<2>(out.data(), {rows, n});
+    auto op = layer_norm(LayerNormConfig<float32_t>{.eps = 1e-5f});
+    op(input<float32_t>(x_t), input<float32_t>(s_t),
+       input<float32_t>(b_t), output<float32_t>(y_t));
+
+    for (nint_t row = 0; row < rows; ++row) {
+      float sum = 0.0f;
+      float sum_sq = 0.0f;
+      for (nint_t col = 0; col < n; ++col) {
+        const float v = static_cast<float>(
+            x[static_cast<size_t>(row * n + col)]);
+        sum += v;
+        sum_sq += v * v;
+      }
+      const float mean = sum / float(n);
+      const float variance =
+          std::max(sum_sq / float(n) - mean * mean, 0.0f);
+      const float rstd = 1.0f / std::sqrt(variance + 1e-5f);
+      for (nint_t col = 0; col < n; ++col) {
+        const size_t index = static_cast<size_t>(row * n + col);
+        const T expected = static_cast<T>(
+            (static_cast<float>(x[index]) - mean) * rstd *
+                static_cast<float>(scale[static_cast<size_t>(col)]) +
+            static_cast<float>(bias[static_cast<size_t>(col)]));
+        EXPECT_NEAR(as_double(expected), as_double(out[index]), tolerance<T>())
+            << "row=" << row << " col=" << col;
+      }
+    }
+  }
+}
+
+TEST(LayerNormVectorBoundaryTest, CoversSVE16BitFullLoadsAndTails) {
+  run_sve_16bit_boundary_cases<vecops::float16_t>();
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
+  run_sve_16bit_boundary_cases<vecops::bfloat16_t>();
+#endif
+}
+
 TEST(LayerNormRankTest, HandlesRuntimeRankFourTensorLayout) {
   constexpr nint_t d0 = 2;
   constexpr nint_t d1 = 2;

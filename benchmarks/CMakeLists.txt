@@ -91,3 +91,24 @@ add_multiarch_benchmark(SoftmaxBench
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/SoftmaxBench.cpp
     ARCH Native Scalar
 )
+
+set(INSTRUCTION_BENCH_FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/inst/InstructionBench.cpp
+)
+if(VECOPS_ARCH_FAMILY STREQUAL "x86")
+    list(APPEND INSTRUCTION_BENCH_FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/inst/InstructionBenchX86.cpp)
+elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
+    list(APPEND INSTRUCTION_BENCH_FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/inst/InstructionBenchSVE.cpp)
+endif()
+
+add_multiarch_benchmark(InstructionBench
+    FILES ${INSTRUCTION_BENCH_FILES}
+    ARCH Native
+)
+
+# Keep the instruction kernels easy to audit and prevent project-wide release
+# or LTO settings from changing their intended O2 code shape.
+target_compile_options(InstructionBench-Native PRIVATE -O2 -fno-lto)
+set_property(TARGET InstructionBench-Native PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
