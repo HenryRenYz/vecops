@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <cstring>
 #include <numeric>
 #include <random>
 #include <sched.h>
@@ -31,6 +32,7 @@ namespace {
 #endif
 
 using vecops::bench::inst::InstructionCase;
+using vecops::bench::inst::MemoryConversionKind;
 using vecops::bench::inst::MemoryPattern;
 using vecops::bench::inst::WorkingSetLevel;
 
@@ -116,6 +118,14 @@ uint64_t working_set_bytes(WorkingSetLevel level) {
   return std::bit_ceil(target);
 }
 
+uint64_t working_set_bytes(const InstructionCase& c) {
+  uint64_t bytes = working_set_bytes(c.working_set);
+  if (c.working_set_bytes_cap != 0) {
+    bytes = std::min(bytes, c.working_set_bytes_cap);
+  }
+  return bytes;
+}
+
 bool level_available(WorkingSetLevel level) {
   if (level == WorkingSetLevel::None || level == WorkingSetLevel::BeyondLastCache) {
     return true;
@@ -148,7 +158,43 @@ MemoryBuffer prepare_memory(const InstructionCase& c, uint64_t bytes) {
     data[offset] = std::byte{static_cast<unsigned char>(offset / 4096)};
   }
 
-  if (c.memory_pattern == MemoryPattern::PointerChase) {
+  if (c.memory_pattern == MemoryPattern::PointerChase &&
+      c.conversion_kind != MemoryConversionKind::None) {
+    const size_t lines = static_cast<size_t>(bytes / 64);
+    std::vector<size_t> order(lines);
+    std::iota(order.begin(), order.end(), size_t{0});
+    std::mt19937_64 random(0x636f6e76657274ULL);
+    std::shuffle(order.begin() + 1, order.end(), random);
+    const bool signed_index =
+        c.conversion_kind == MemoryConversionKind::SignExtendLoad;
+    const int64_t anchor = signed_index ? static_cast<int64_t>(lines / 2) : 0;
+    const size_t element_bytes = c.source_element_bits / 8;
+    for (size_t i = 0; i < lines; ++i) {
+      const int64_t next_index =
+          static_cast<int64_t>(order[(i + 1) % lines]) - anchor;
+      auto* line = data + order[i] * 64;
+      for (size_t offset = 0; offset < 64; offset += element_bytes) {
+        switch (c.source_element_bits) {
+          case 8: {
+            const auto value = static_cast<uint8_t>(next_index);
+            std::memcpy(line + offset, &value, sizeof(value));
+            break;
+          }
+          case 16: {
+            const auto value = static_cast<uint16_t>(next_index);
+            std::memcpy(line + offset, &value, sizeof(value));
+            break;
+          }
+          case 32: {
+            const auto value = static_cast<uint32_t>(next_index);
+            std::memcpy(line + offset, &value, sizeof(value));
+            break;
+          }
+          default: std::abort();
+        }
+      }
+    }
+  } else if (c.memory_pattern == MemoryPattern::PointerChase) {
     const size_t lines = static_cast<size_t>(bytes / 64);
     std::vector<size_t> order(lines);
     std::iota(order.begin(), order.end(), size_t{0});
@@ -223,7 +269,7 @@ void print_case_list_json() {
             << "\",\n  \"cases\": [\n";
   for (size_t i = 0; i < cases.size(); ++i) {
     const auto& c = *cases[i];
-    const uint64_t memory_bytes = working_set_bytes(c.working_set);
+    const uint64_t memory_bytes = working_set_bytes(c);
     std::cout << "    {\"benchmark_name\": \"" << json_escape(benchmark_name(c))
               << "\", \"name\": \"" << json_escape(c.name)
               << "\", \"isa\": \"" << json_escape(c.isa)
@@ -240,7 +286,13 @@ void print_case_list_json() {
               << vecops::bench::inst::working_set_level_name(c.working_set)
               << "\", \"working_set_bytes\": " << memory_bytes
               << ", \"bytes_per_sequence\": " << c.bytes_per_sequence
-              << ", \"baseline_name\": \"" << json_escape(c.baseline_name) << "\"}";
+              << ", \"baseline_name\": \"" << json_escape(c.baseline_name)
+              << "\", \"conversion_kind\": \""
+              << vecops::bench::inst::memory_conversion_kind_name(c.conversion_kind)
+              << "\", \"source_element_bits\": " << c.source_element_bits
+              << ", \"destination_element_bits\": " << c.destination_element_bits
+              << ", \"elements_per_sequence\": " << c.elements_per_sequence
+              << ", \"working_set_bytes_cap\": " << c.working_set_bytes_cap << "}";
     if (i + 1 != cases.size()) std::cout << ',';
     std::cout << '\n';
   }
@@ -253,7 +305,7 @@ void register_instruction_benchmarks() {
     const std::string name = benchmark_name(c);
     benchmark::RegisterBenchmark(name.c_str(), [case_ptr](benchmark::State& state) {
       const auto& c = *case_ptr;
-      const uint64_t memory_bytes = working_set_bytes(c.working_set);
+      const uint64_t memory_bytes = working_set_bytes(c);
       auto memory = c.memory_kernel ? prepare_memory(c, memory_bytes) : MemoryBuffer{};
       if (c.memory_kernel) {
         c.memory_kernel(std::min<uint64_t>(g_inner_loops, 1024), memory.aligned, memory.bytes);
@@ -279,6 +331,8 @@ void register_instruction_benchmarks() {
       state.counters["uut_instructions"] = static_cast<double>(instructions);
       state.counters["vector_bits"] = static_cast<double>(c.vector_bits);
       state.counters["bytes_per_sequence"] = static_cast<double>(c.bytes_per_sequence);
+      state.counters["elements_per_sequence"] =
+          static_cast<double>(c.elements_per_sequence);
       state.counters["working_set_bytes"] = static_cast<double>(memory_bytes);
     })->Unit(benchmark::kNanosecond);
   }

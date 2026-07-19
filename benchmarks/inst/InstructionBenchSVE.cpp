@@ -475,6 +475,165 @@ SVE_DEFINE_MEMORY_KERNEL(
     "st1w {z16.s}, p1, [%[ptr], #7, mul vl]\n\t",
     "x9", "p1", "z16")
 
+#define SVE_CONV_OFFSET_SETUP(index_shift, advance_shift)                   \
+  "cntb x9\n\t"                                                            \
+  "lsr x9, x9, #" #index_shift "\n\t"                                     \
+  "add x10, x9, x9\n\t"                                                    \
+  "add x11, x10, x9\n\t"                                                   \
+  "add x12, x11, x9\n\t"                                                   \
+  "add x13, x12, x9\n\t"                                                   \
+  "add x14, x13, x9\n\t"                                                   \
+  "add x15, x14, x9\n\t"                                                   \
+  "lsl x16, x9, #" #advance_shift "\n\t"
+#define SVE_CONV_ADVANCE                                                    \
+  "add %[ptr], %[ptr], x16\n\t"                                            \
+  "cmp %[ptr], %[end]\n\t"                                                 \
+  "csel %[ptr], %[base], %[ptr], hs\n\t"
+#define SVE_DEFINE_CONV_CONTROL(name, shift)                                \
+  SVE_DEFINE_MEMORY_KERNEL(                                                  \
+      name, SVE_CONV_OFFSET_SETUP(shift, 3), SVE_CONV_ADVANCE, "x9", "x10",\
+      "x11", "x12", "x13", "x14", "x15", "x16")
+#define SVE_DEFINE_CONV_LOAD(name, op, type, index_shift, advance_shift, address_suffix) \
+  SVE_DEFINE_MEMORY_KERNEL(                                                  \
+      name,                                                                 \
+      "ptrue p0." type "\n\t"                                              \
+      SVE_CONV_OFFSET_SETUP(index_shift, advance_shift),                     \
+      op " z0." type ", p0/z, [%[ptr]]\n\t"                               \
+      op " z1." type ", p0/z, [%[ptr], x9" address_suffix "]\n\t"         \
+      op " z2." type ", p0/z, [%[ptr], x10" address_suffix "]\n\t"        \
+      op " z3." type ", p0/z, [%[ptr], x11" address_suffix "]\n\t"        \
+      op " z4." type ", p0/z, [%[ptr], x12" address_suffix "]\n\t"        \
+      op " z5." type ", p0/z, [%[ptr], x13" address_suffix "]\n\t"        \
+      op " z6." type ", p0/z, [%[ptr], x14" address_suffix "]\n\t"        \
+      op " z7." type ", p0/z, [%[ptr], x15" address_suffix "]\n\t"        \
+      SVE_CONV_ADVANCE,                                                      \
+      "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "p0",\
+      "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7")
+#define SVE_DEFINE_CONV_STORE(name, op, type, index_shift, advance_shift, address_suffix) \
+  SVE_DEFINE_MEMORY_KERNEL(                                                  \
+      name,                                                                 \
+      "ptrue p0." type "\n\t"                                              \
+      "dup z16.d, #127\n\t"                                                \
+      SVE_CONV_OFFSET_SETUP(index_shift, advance_shift),                     \
+      op " z16." type ", p0, [%[ptr]]\n\t"                                \
+      op " z16." type ", p0, [%[ptr], x9" address_suffix "]\n\t"          \
+      op " z16." type ", p0, [%[ptr], x10" address_suffix "]\n\t"         \
+      op " z16." type ", p0, [%[ptr], x11" address_suffix "]\n\t"         \
+      op " z16." type ", p0, [%[ptr], x12" address_suffix "]\n\t"         \
+      op " z16." type ", p0, [%[ptr], x13" address_suffix "]\n\t"         \
+      op " z16." type ", p0, [%[ptr], x14" address_suffix "]\n\t"         \
+      op " z16." type ", p0, [%[ptr], x15" address_suffix "]\n\t"         \
+      SVE_CONV_ADVANCE,                                                      \
+      "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "p0",\
+      "z16")
+
+SVE_DEFINE_CONV_CONTROL(sve_conv_control_vl_div_8, 3)
+SVE_DEFINE_CONV_CONTROL(sve_conv_control_vl_div_4, 2)
+SVE_DEFINE_CONV_CONTROL(sve_conv_control_vl_div_2, 1)
+SVE_DEFINE_CONV_LOAD(sve_ld1sb_h_stream, "ld1sb", "h", 1, 3, "")
+SVE_DEFINE_CONV_LOAD(sve_ld1b_h_stream, "ld1b", "h", 1, 3, "")
+SVE_DEFINE_CONV_LOAD(sve_ld1sb_s_stream, "ld1sb", "s", 2, 3, "")
+SVE_DEFINE_CONV_LOAD(sve_ld1b_s_stream, "ld1b", "s", 2, 3, "")
+SVE_DEFINE_CONV_LOAD(sve_ld1sb_d_stream, "ld1sb", "d", 3, 3, "")
+SVE_DEFINE_CONV_LOAD(sve_ld1b_d_stream, "ld1b", "d", 3, 3, "")
+SVE_DEFINE_CONV_LOAD(sve_ld1sh_s_stream, "ld1sh", "s", 2, 4, ", lsl #1")
+SVE_DEFINE_CONV_LOAD(sve_ld1h_s_stream, "ld1h", "s", 2, 4, ", lsl #1")
+SVE_DEFINE_CONV_LOAD(sve_ld1sh_d_stream, "ld1sh", "d", 3, 4, ", lsl #1")
+SVE_DEFINE_CONV_LOAD(sve_ld1h_d_stream, "ld1h", "d", 3, 4, ", lsl #1")
+SVE_DEFINE_CONV_LOAD(sve_ld1sw_d_stream, "ld1sw", "d", 3, 5, ", lsl #2")
+SVE_DEFINE_CONV_LOAD(sve_ld1w_d_stream, "ld1w", "d", 3, 5, ", lsl #2")
+SVE_DEFINE_CONV_STORE(sve_st1b_h_stream, "st1b", "h", 1, 3, "")
+SVE_DEFINE_CONV_STORE(sve_st1b_s_stream, "st1b", "s", 2, 3, "")
+SVE_DEFINE_CONV_STORE(sve_st1h_s_stream, "st1h", "s", 2, 4, ", lsl #1")
+SVE_DEFINE_CONV_STORE(sve_st1b_d_stream, "st1b", "d", 3, 3, "")
+SVE_DEFINE_CONV_STORE(sve_st1h_d_stream, "st1h", "d", 3, 4, ", lsl #1")
+SVE_DEFINE_CONV_STORE(sve_st1w_d_stream, "st1w", "d", 3, 5, ", lsl #2")
+
+#define SVE_DEFINE_INDEX_CHASE(name, op, type, last_reg, normalize, signed_anchor) \
+  extern "C" VECOPS_INST_NOINLINE_USED void name(                           \
+      uint64_t loops, void* memory, uint64_t memory_bytes) {                 \
+    if (loops == 0 || memory_bytes == 0) return;                             \
+    auto* base = static_cast<uint8_t*>(memory);                              \
+    auto* ptr = base;                                                        \
+    auto* anchor = base + (signed_anchor);                                   \
+    __asm__ volatile(                                                        \
+        "ptrue p0." type "\n\t"                                             \
+        ".p2align 6\n\t"                                                    \
+        "1:\n\t"                                                            \
+        op " z0." type ", p0/z, [%[ptr]]\n\t"                              \
+        "lastb " last_reg ", p0, z0." type "\n\t"                          \
+        normalize                                                           \
+        "lsl x9, x9, #6\n\t"                                                \
+        "add %[ptr], %[anchor], x9\n\t"                                     \
+        "subs %[loops], %[loops], #1\n\t"                                   \
+        "b.ne 1b\n\t"                                                       \
+        : [loops] "+r"(loops), [ptr] "+&r"(ptr)                             \
+        : [anchor] "r"(anchor)                                              \
+        : "cc", "memory", "x9", "p0", "z0");                              \
+  }
+#define SVE_INDEX_PAIR(symbol_s, op_s, symbol_u, op_u, type, last_reg, normalize_s) \
+  SVE_DEFINE_INDEX_CHASE(symbol_s, op_s, type, last_reg, normalize_s, 4096)  \
+  SVE_DEFINE_INDEX_CHASE(symbol_u, op_u, type, last_reg, "", 0)
+SVE_INDEX_PAIR(
+    sve_ld1sb_h_index, "ld1sb", sve_ld1b_h_index, "ld1b", "h", "w9",
+    "sxth x9, w9\n\t")
+SVE_INDEX_PAIR(
+    sve_ld1sb_s_index, "ld1sb", sve_ld1b_s_index, "ld1b", "s", "w9",
+    "sxtw x9, w9\n\t")
+SVE_INDEX_PAIR(
+    sve_ld1sb_d_index, "ld1sb", sve_ld1b_d_index, "ld1b", "d", "x9", "")
+SVE_INDEX_PAIR(
+    sve_ld1sh_s_index, "ld1sh", sve_ld1h_s_index, "ld1h", "s", "w9",
+    "sxtw x9, w9\n\t")
+SVE_INDEX_PAIR(
+    sve_ld1sh_d_index, "ld1sh", sve_ld1h_d_index, "ld1h", "d", "x9", "")
+SVE_INDEX_PAIR(
+    sve_ld1sw_d_index, "ld1sw", sve_ld1w_d_index, "ld1w", "d", "x9", "")
+
+#define SVE_DEFINE_SCALAR_INDEX_CONTROL(name, load_op, signed_anchor)        \
+  extern "C" VECOPS_INST_NOINLINE_USED void name(                           \
+      uint64_t loops, void* memory, uint64_t memory_bytes) {                 \
+    if (loops == 0 || memory_bytes == 0) return;                             \
+    auto* base = static_cast<uint8_t*>(memory);                              \
+    auto* ptr = base;                                                        \
+    auto* anchor = base + (signed_anchor);                                   \
+    __asm__ volatile(                                                        \
+        ".p2align 6\n\t"                                                    \
+        "1:\n\t"                                                            \
+        load_op                                                             \
+        "lsl x9, x9, #6\n\t"                                                \
+        "add %[ptr], %[anchor], x9\n\t"                                     \
+        "subs %[loops], %[loops], #1\n\t"                                   \
+        "b.ne 1b\n\t"                                                       \
+        : [loops] "+r"(loops), [ptr] "+&r"(ptr)                             \
+        : [anchor] "r"(anchor)                                              \
+        : "cc", "memory", "x9");                                           \
+  }
+SVE_DEFINE_SCALAR_INDEX_CONTROL(
+    sve_index_control_s8, "ldrsb x9, [%[ptr]]\n\t", 4096)
+SVE_DEFINE_SCALAR_INDEX_CONTROL(
+    sve_index_control_u8, "ldrb w9, [%[ptr]]\n\t", 0)
+SVE_DEFINE_SCALAR_INDEX_CONTROL(
+    sve_index_control_s16, "ldrsh x9, [%[ptr]]\n\t", 4096)
+SVE_DEFINE_SCALAR_INDEX_CONTROL(
+    sve_index_control_u16, "ldrh w9, [%[ptr]]\n\t", 0)
+SVE_DEFINE_SCALAR_INDEX_CONTROL(
+    sve_index_control_s32, "ldrsw x9, [%[ptr]]\n\t", 4096)
+SVE_DEFINE_SCALAR_INDEX_CONTROL(
+    sve_index_control_u32, "ldr w9, [%[ptr]]\n\t", 0)
+
+#define SVE_DEFINE_STORE_FORWARD(name, store_op, load_op, type)              \
+  SVE_DEFINE_MEMORY_KERNEL(                                                  \
+      name, "ptrue p0." type "\n\tdup z0.d, #127\n\t",                    \
+      store_op " z0." type ", p0, [%[ptr]]\n\t"                            \
+      load_op " z0." type ", p0/z, [%[ptr]]\n\t", "p0", "z0")
+SVE_DEFINE_STORE_FORWARD(sve_st1b_h_forward, "st1b", "ld1b", "h")
+SVE_DEFINE_STORE_FORWARD(sve_st1b_s_forward, "st1b", "ld1b", "s")
+SVE_DEFINE_STORE_FORWARD(sve_st1h_s_forward, "st1h", "ld1h", "s")
+SVE_DEFINE_STORE_FORWARD(sve_st1b_d_forward, "st1b", "ld1b", "d")
+SVE_DEFINE_STORE_FORWARD(sve_st1h_d_forward, "st1h", "ld1h", "d")
+SVE_DEFINE_STORE_FORWARD(sve_st1w_d_forward, "st1w", "ld1w", "d")
+
 } // namespace
 
 std::span<const InstructionCase> arch_instruction_cases() {
@@ -621,6 +780,179 @@ std::span<const InstructionCase> arch_instruction_cases() {
                       MeasureMode::Throughput, sve_mask_store, 8, 1, 8,
                       MemoryPattern::Hot, WorkingSetLevel::L1, vector_bits / 16,
                       "empty_loop"),
+#define SVE_CONV_CASE(label, description, mode_value, symbol, seq, inst, chains, pattern, \
+                      level, bytes, baseline, kind, src, dst, elems, cap)                  \
+      {label, "SVE", description, mode_value, nullptr, seq, inst, chains, vector_bits,    \
+       InstructionCategory::Memory, symbol, pattern, level, bytes, baseline, kind, src,    \
+       dst, elems, cap}
+#define SVE_CONV_CONTROLS(level_label, level_value)                           \
+      SVE_CONV_CASE("conv_stream_control_vl_div_8_" level_label,             \
+                    "VL/8 conversion-stream address baseline", MeasureMode::Control,\
+                    sve_conv_control_vl_div_8, 8, 0, 0, MemoryPattern::Stream, level_value,\
+                    0, "empty_loop", MemoryConversionKind::None, 0, 0, 0, 0),             \
+      SVE_CONV_CASE("conv_stream_control_vl_div_4_" level_label,             \
+                    "VL/4 conversion-stream address baseline", MeasureMode::Control,\
+                    sve_conv_control_vl_div_4, 8, 0, 0, MemoryPattern::Stream, level_value,\
+                    0, "empty_loop", MemoryConversionKind::None, 0, 0, 0, 0),             \
+      SVE_CONV_CASE("conv_stream_control_vl_div_2_" level_label,             \
+                    "VL/2 conversion-stream address baseline", MeasureMode::Control,\
+                    sve_conv_control_vl_div_2, 8, 0, 0, MemoryPattern::Stream, level_value,\
+                    0, "empty_loop", MemoryConversionKind::None, 0, 0, 0, 0)
+      SVE_CONV_CONTROLS("l1", WorkingSetLevel::L1),
+      SVE_CONV_CONTROLS("l2", WorkingSetLevel::L2),
+      SVE_CONV_CONTROLS("l3", WorkingSetLevel::L3),
+      SVE_CONV_CONTROLS(
+          "beyond_last_reported_cache", WorkingSetLevel::BeyondLastCache),
+#define SVE_CONV_STREAM_LEVEL(label, description, symbol, kind, src, dst, bytes, elems, \
+                              ratio_tag, level_label, level_value)                       \
+      SVE_CONV_CASE(label "_stream_" level_label, description, MeasureMode::Throughput, \
+                    symbol, 8, 1, 8, MemoryPattern::Stream, level_value, bytes,           \
+                    "conv_stream_control_" ratio_tag "_" level_label, kind, src, dst,    \
+                    elems, 0)
+#define SVE_CONV_STREAM_LEVELS(label, description, symbol, kind, src, dst, bytes, elems, ratio_tag) \
+      SVE_CONV_STREAM_LEVEL(label, description, symbol, kind, src, dst, bytes, elems, ratio_tag,\
+                            "l1", WorkingSetLevel::L1),                                  \
+      SVE_CONV_STREAM_LEVEL(label, description, symbol, kind, src, dst, bytes, elems, ratio_tag,\
+                            "l2", WorkingSetLevel::L2),                                  \
+      SVE_CONV_STREAM_LEVEL(label, description, symbol, kind, src, dst, bytes, elems, ratio_tag,\
+                            "l3", WorkingSetLevel::L3),                                  \
+      SVE_CONV_STREAM_LEVEL(label, description, symbol, kind, src, dst, bytes, elems, ratio_tag,\
+                            "beyond_last_reported_cache",                               \
+                            WorkingSetLevel::BeyondLastCache)
+#define SVE_EXTEND_LEVELS(label_s, label_u, symbol_s, symbol_u, src, dst, bytes, elems, ratio_tag) \
+      SVE_CONV_STREAM_LEVELS(label_s, "Sequential SVE sign-extending load", symbol_s,     \
+                             MemoryConversionKind::SignExtendLoad, src, dst, bytes, elems,\
+                             ratio_tag),                                                  \
+      SVE_CONV_STREAM_LEVELS(label_u, "Sequential SVE zero-extending load (ACLE svld1u*)",\
+                             symbol_u, MemoryConversionKind::ZeroExtendLoad, src, dst,    \
+                             bytes, elems, ratio_tag)
+      SVE_EXTEND_LEVELS(
+          "ld1sb_z_h", "ld1b_z_h", sve_ld1sb_h_stream, sve_ld1b_h_stream,
+          8, 16, vector_bits / 16, vector_bits / 16, "vl_div_2"),
+      SVE_EXTEND_LEVELS(
+          "ld1sb_z_s", "ld1b_z_s", sve_ld1sb_s_stream, sve_ld1b_s_stream,
+          8, 32, vector_bits / 32, vector_bits / 32, "vl_div_4"),
+      SVE_EXTEND_LEVELS(
+          "ld1sb_z_d", "ld1b_z_d", sve_ld1sb_d_stream, sve_ld1b_d_stream,
+          8, 64, vector_bits / 64, vector_bits / 64, "vl_div_8"),
+      SVE_EXTEND_LEVELS(
+          "ld1sh_z_s", "ld1h_z_s", sve_ld1sh_s_stream, sve_ld1h_s_stream,
+          16, 32, vector_bits / 16, vector_bits / 32, "vl_div_2"),
+      SVE_EXTEND_LEVELS(
+          "ld1sh_z_d", "ld1h_z_d", sve_ld1sh_d_stream, sve_ld1h_d_stream,
+          16, 64, vector_bits / 32, vector_bits / 64, "vl_div_4"),
+      SVE_EXTEND_LEVELS(
+          "ld1sw_z_d", "ld1w_z_d", sve_ld1sw_d_stream, sve_ld1w_d_stream,
+          32, 64, vector_bits / 16, vector_bits / 64, "vl_div_2"),
+#define SVE_STORE_LEVELS(label, symbol, src, dst, bytes, elems, ratio_tag)    \
+      SVE_CONV_STREAM_LEVELS(label, "Sequential SVE truncating narrow store", symbol,    \
+                             MemoryConversionKind::TruncateStore, src, dst, bytes, elems,\
+                             ratio_tag)
+      SVE_STORE_LEVELS(
+          "st1b_z_h", sve_st1b_h_stream, 16, 8, vector_bits / 16,
+          vector_bits / 16, "vl_div_2"),
+      SVE_STORE_LEVELS(
+          "st1b_z_s", sve_st1b_s_stream, 32, 8, vector_bits / 32,
+          vector_bits / 32, "vl_div_4"),
+      SVE_STORE_LEVELS(
+          "st1h_z_s", sve_st1h_s_stream, 32, 16, vector_bits / 16,
+          vector_bits / 32, "vl_div_2"),
+      SVE_STORE_LEVELS(
+          "st1b_z_d", sve_st1b_d_stream, 64, 8, vector_bits / 64,
+          vector_bits / 64, "vl_div_8"),
+      SVE_STORE_LEVELS(
+          "st1h_z_d", sve_st1h_d_stream, 64, 16, vector_bits / 32,
+          vector_bits / 64, "vl_div_4"),
+      SVE_STORE_LEVELS(
+          "st1w_z_d", sve_st1w_d_stream, 64, 32, vector_bits / 16,
+          vector_bits / 64, "vl_div_2"),
+#define SVE_INDEX_CONTROL(label, symbol, kind, src)                           \
+      SVE_CONV_CASE(label, "Matched scalar extending-load index-chase control",\
+                    MeasureMode::Control, symbol, 1, 0, 1,                   \
+                    MemoryPattern::PointerChase, WorkingSetLevel::L1, 0,     \
+                    "empty_loop", kind, src, src, 0, 8192)
+      SVE_INDEX_CONTROL(
+          "conv_index_control_s8", sve_index_control_s8,
+          MemoryConversionKind::SignExtendLoad, 8),
+      SVE_INDEX_CONTROL(
+          "conv_index_control_u8", sve_index_control_u8,
+          MemoryConversionKind::ZeroExtendLoad, 8),
+      SVE_INDEX_CONTROL(
+          "conv_index_control_s16", sve_index_control_s16,
+          MemoryConversionKind::SignExtendLoad, 16),
+      SVE_INDEX_CONTROL(
+          "conv_index_control_u16", sve_index_control_u16,
+          MemoryConversionKind::ZeroExtendLoad, 16),
+      SVE_INDEX_CONTROL(
+          "conv_index_control_s32", sve_index_control_s32,
+          MemoryConversionKind::SignExtendLoad, 32),
+      SVE_INDEX_CONTROL(
+          "conv_index_control_u32", sve_index_control_u32,
+          MemoryConversionKind::ZeroExtendLoad, 32),
+#define SVE_EXTEND_LAT(label, symbol, kind, src, dst, bytes, elems, baseline) \
+      SVE_CONV_CASE(label "_index_chase_l1", "L1 dependent extending-load index chase",\
+                    MeasureMode::Latency, symbol, 1, 5, 1, MemoryPattern::PointerChase,   \
+                    WorkingSetLevel::L1, bytes, baseline, kind, src, dst, elems, 8192)
+      SVE_EXTEND_LAT(
+          "ld1sb_z_h", sve_ld1sb_h_index, MemoryConversionKind::SignExtendLoad,
+          8, 16, vector_bits / 16, vector_bits / 16, "conv_index_control_s8"),
+      SVE_EXTEND_LAT(
+          "ld1b_z_h", sve_ld1b_h_index, MemoryConversionKind::ZeroExtendLoad,
+          8, 16, vector_bits / 16, vector_bits / 16, "conv_index_control_u8"),
+      SVE_EXTEND_LAT(
+          "ld1sb_z_s", sve_ld1sb_s_index, MemoryConversionKind::SignExtendLoad,
+          8, 32, vector_bits / 32, vector_bits / 32, "conv_index_control_s8"),
+      SVE_EXTEND_LAT(
+          "ld1b_z_s", sve_ld1b_s_index, MemoryConversionKind::ZeroExtendLoad,
+          8, 32, vector_bits / 32, vector_bits / 32, "conv_index_control_u8"),
+      SVE_EXTEND_LAT(
+          "ld1sb_z_d", sve_ld1sb_d_index, MemoryConversionKind::SignExtendLoad,
+          8, 64, vector_bits / 64, vector_bits / 64, "conv_index_control_s8"),
+      SVE_EXTEND_LAT(
+          "ld1b_z_d", sve_ld1b_d_index, MemoryConversionKind::ZeroExtendLoad,
+          8, 64, vector_bits / 64, vector_bits / 64, "conv_index_control_u8"),
+      SVE_EXTEND_LAT(
+          "ld1sh_z_s", sve_ld1sh_s_index, MemoryConversionKind::SignExtendLoad,
+          16, 32, vector_bits / 16, vector_bits / 32, "conv_index_control_s16"),
+      SVE_EXTEND_LAT(
+          "ld1h_z_s", sve_ld1h_s_index, MemoryConversionKind::ZeroExtendLoad,
+          16, 32, vector_bits / 16, vector_bits / 32, "conv_index_control_u16"),
+      SVE_EXTEND_LAT(
+          "ld1sh_z_d", sve_ld1sh_d_index, MemoryConversionKind::SignExtendLoad,
+          16, 64, vector_bits / 32, vector_bits / 64, "conv_index_control_s16"),
+      SVE_EXTEND_LAT(
+          "ld1h_z_d", sve_ld1h_d_index, MemoryConversionKind::ZeroExtendLoad,
+          16, 64, vector_bits / 32, vector_bits / 64, "conv_index_control_u16"),
+      SVE_EXTEND_LAT(
+          "ld1sw_z_d", sve_ld1sw_d_index, MemoryConversionKind::SignExtendLoad,
+          32, 64, vector_bits / 16, vector_bits / 64, "conv_index_control_s32"),
+      SVE_EXTEND_LAT(
+          "ld1w_z_d", sve_ld1w_d_index, MemoryConversionKind::ZeroExtendLoad,
+          32, 64, vector_bits / 16, vector_bits / 64, "conv_index_control_u32"),
+#define SVE_STORE_LAT(label, symbol, src, dst, bytes, elems)                  \
+      SVE_CONV_CASE(label "_store_forward_l1",                              \
+                    "L1 dependent truncating-store plus extending-load forwarding round trip",\
+                    MeasureMode::Latency, symbol, 1, 2, 1, MemoryPattern::StoreForward,   \
+                    WorkingSetLevel::L1, bytes, "empty_loop",                       \
+                    MemoryConversionKind::TruncateStore, src, dst, elems, 0)
+      SVE_STORE_LAT(
+          "st1b_z_h", sve_st1b_h_forward, 16, 8, vector_bits / 16,
+          vector_bits / 16),
+      SVE_STORE_LAT(
+          "st1b_z_s", sve_st1b_s_forward, 32, 8, vector_bits / 32,
+          vector_bits / 32),
+      SVE_STORE_LAT(
+          "st1h_z_s", sve_st1h_s_forward, 32, 16, vector_bits / 16,
+          vector_bits / 32),
+      SVE_STORE_LAT(
+          "st1b_z_d", sve_st1b_d_forward, 64, 8, vector_bits / 64,
+          vector_bits / 64),
+      SVE_STORE_LAT(
+          "st1h_z_d", sve_st1h_d_forward, 64, 16, vector_bits / 32,
+          vector_bits / 64),
+      SVE_STORE_LAT(
+          "st1w_z_d", sve_st1w_d_forward, 64, 32, vector_bits / 16,
+          vector_bits / 64),
   };
   return cases;
 }

@@ -36,6 +36,15 @@ enum class WorkingSetLevel {
   BeyondLastCache,
 };
 
+enum class MemoryConversionKind {
+  None,
+  SignExtendLoad,
+  ZeroExtendLoad,
+  TruncateStore,
+  SignedSaturatingStore,
+  UnsignedSaturatingStore,
+};
+
 using Kernel = void (*)(uint64_t loops);
 using MemoryKernel = void (*)(uint64_t loops, void* memory, uint64_t memory_bytes);
 
@@ -55,6 +64,11 @@ struct InstructionCase {
   WorkingSetLevel working_set = WorkingSetLevel::None;
   uint32_t bytes_per_sequence = 0;
   const char* baseline_name = "empty_loop";
+  MemoryConversionKind conversion_kind = MemoryConversionKind::None;
+  uint32_t source_element_bits = 0;
+  uint32_t destination_element_bits = 0;
+  uint32_t elements_per_sequence = 0;
+  uint64_t working_set_bytes_cap = 0;
 };
 
 std::span<const InstructionCase> arch_instruction_cases();
@@ -98,6 +112,20 @@ constexpr const char* working_set_level_name(WorkingSetLevel level) {
     case WorkingSetLevel::L2: return "l2";
     case WorkingSetLevel::L3: return "l3";
     case WorkingSetLevel::BeyondLastCache: return "beyond_last_reported_cache";
+  }
+  return "unknown";
+}
+
+constexpr const char* memory_conversion_kind_name(MemoryConversionKind kind) {
+  switch (kind) {
+    case MemoryConversionKind::None: return "none";
+    case MemoryConversionKind::SignExtendLoad: return "sign_extend_load";
+    case MemoryConversionKind::ZeroExtendLoad: return "zero_extend_load";
+    case MemoryConversionKind::TruncateStore: return "truncate_store";
+    case MemoryConversionKind::SignedSaturatingStore:
+      return "signed_saturating_store";
+    case MemoryConversionKind::UnsignedSaturatingStore:
+      return "unsigned_saturating_store";
   }
   return "unknown";
 }

@@ -425,6 +425,194 @@ X86_DEFINE_MEMORY_KERNEL(
     "vmovdqu32 %%zmm16, 448(%[ptr])%{%%k1%}\n\t",
     "rax", "k1", "zmm16")
 
+#define X86_CONV_ADVANCE(bytes)                                              \
+  "add $" #bytes ", %[ptr]\n\t"                                             \
+  "cmp %[end], %[ptr]\n\t"                                                  \
+  "cmovae %[base], %[ptr]\n\t"
+#define X86_DEFINE_ZMM_CONV_STREAM_CONTROL(name, stride)                     \
+  X86_DEFINE_MEMORY_KERNEL(name, "", X86_CONV_ADVANCE(stride))
+#define X86_DEFINE_ZMM_CONV_LOAD(name, op, o1, o2, o3, o4, o5, o6, o7, stride) \
+  X86_DEFINE_MEMORY_KERNEL(                                                  \
+      name, "",                                                             \
+      op " 0(%[ptr]), %%zmm0\n\t"                                          \
+      op " " #o1 "(%[ptr]), %%zmm1\n\t"                                    \
+      op " " #o2 "(%[ptr]), %%zmm2\n\t"                                    \
+      op " " #o3 "(%[ptr]), %%zmm3\n\t"                                    \
+      op " " #o4 "(%[ptr]), %%zmm4\n\t"                                    \
+      op " " #o5 "(%[ptr]), %%zmm5\n\t"                                    \
+      op " " #o6 "(%[ptr]), %%zmm6\n\t"                                    \
+      op " " #o7 "(%[ptr]), %%zmm7\n\t"                                    \
+      X86_CONV_ADVANCE(stride),                                              \
+      "zmm0", "zmm1", "zmm2", "zmm3", "zmm4", "zmm5", "zmm6", "zmm7")
+#define X86_DEFINE_ZMM_CONV_STORE(name, op, o1, o2, o3, o4, o5, o6, o7, stride) \
+  X86_DEFINE_MEMORY_KERNEL(                                                  \
+      name,                                                                 \
+      "movabs $0x80000100ffff007f, %%rax\n\t"                               \
+      "vpbroadcastq %%rax, %%zmm16\n\t",                                    \
+      op " %%zmm16, 0(%[ptr])\n\t"                                         \
+      op " %%zmm16, " #o1 "(%[ptr])\n\t"                                   \
+      op " %%zmm16, " #o2 "(%[ptr])\n\t"                                   \
+      op " %%zmm16, " #o3 "(%[ptr])\n\t"                                   \
+      op " %%zmm16, " #o4 "(%[ptr])\n\t"                                   \
+      op " %%zmm16, " #o5 "(%[ptr])\n\t"                                   \
+      op " %%zmm16, " #o6 "(%[ptr])\n\t"                                   \
+      op " %%zmm16, " #o7 "(%[ptr])\n\t"                                   \
+      X86_CONV_ADVANCE(stride), "rax", "zmm16")
+
+X86_DEFINE_ZMM_CONV_STREAM_CONTROL(x86_zmm_conv_control_8b, 64)
+X86_DEFINE_ZMM_CONV_STREAM_CONTROL(x86_zmm_conv_control_16b, 128)
+X86_DEFINE_ZMM_CONV_STREAM_CONTROL(x86_zmm_conv_control_32b, 256)
+
+#define X86_ZMM_CONV_LOAD_8(name, op)                                       \
+  X86_DEFINE_ZMM_CONV_LOAD(name, op, 8, 16, 24, 32, 40, 48, 56, 64)
+#define X86_ZMM_CONV_LOAD_16(name, op)                                      \
+  X86_DEFINE_ZMM_CONV_LOAD(name, op, 16, 32, 48, 64, 80, 96, 112, 128)
+#define X86_ZMM_CONV_LOAD_32(name, op)                                      \
+  X86_DEFINE_ZMM_CONV_LOAD(name, op, 32, 64, 96, 128, 160, 192, 224, 256)
+#define X86_ZMM_CONV_STORE_8(name, op)                                      \
+  X86_DEFINE_ZMM_CONV_STORE(name, op, 8, 16, 24, 32, 40, 48, 56, 64)
+#define X86_ZMM_CONV_STORE_16(name, op)                                     \
+  X86_DEFINE_ZMM_CONV_STORE(name, op, 16, 32, 48, 64, 80, 96, 112, 128)
+#define X86_ZMM_CONV_STORE_32(name, op)                                     \
+  X86_DEFINE_ZMM_CONV_STORE(name, op, 32, 64, 96, 128, 160, 192, 224, 256)
+
+X86_ZMM_CONV_LOAD_32(x86_zmm_vpmovsxbw_stream, "vpmovsxbw")
+X86_ZMM_CONV_LOAD_32(x86_zmm_vpmovzxbw_stream, "vpmovzxbw")
+X86_ZMM_CONV_LOAD_16(x86_zmm_vpmovsxbd_stream, "vpmovsxbd")
+X86_ZMM_CONV_LOAD_16(x86_zmm_vpmovzxbd_stream, "vpmovzxbd")
+X86_ZMM_CONV_LOAD_8(x86_zmm_vpmovsxbq_stream, "vpmovsxbq")
+X86_ZMM_CONV_LOAD_8(x86_zmm_vpmovzxbq_stream, "vpmovzxbq")
+X86_ZMM_CONV_LOAD_32(x86_zmm_vpmovsxwd_stream, "vpmovsxwd")
+X86_ZMM_CONV_LOAD_32(x86_zmm_vpmovzxwd_stream, "vpmovzxwd")
+X86_ZMM_CONV_LOAD_16(x86_zmm_vpmovsxwq_stream, "vpmovsxwq")
+X86_ZMM_CONV_LOAD_16(x86_zmm_vpmovzxwq_stream, "vpmovzxwq")
+X86_ZMM_CONV_LOAD_32(x86_zmm_vpmovsxdq_stream, "vpmovsxdq")
+X86_ZMM_CONV_LOAD_32(x86_zmm_vpmovzxdq_stream, "vpmovzxdq")
+
+#define X86_ZMM_DEFINE_STORE_FAMILY(prefix, wb, db, dw, qb, qw, qd)          \
+  X86_ZMM_CONV_STORE_32(prefix##_wb_stream, wb)                              \
+  X86_ZMM_CONV_STORE_16(prefix##_db_stream, db)                              \
+  X86_ZMM_CONV_STORE_32(prefix##_dw_stream, dw)                              \
+  X86_ZMM_CONV_STORE_8(prefix##_qb_stream, qb)                               \
+  X86_ZMM_CONV_STORE_16(prefix##_qw_stream, qw)                              \
+  X86_ZMM_CONV_STORE_32(prefix##_qd_stream, qd)
+X86_ZMM_DEFINE_STORE_FAMILY(
+    x86_zmm_vpmov, "vpmovwb", "vpmovdb", "vpmovdw",
+    "vpmovqb", "vpmovqw", "vpmovqd")
+X86_ZMM_DEFINE_STORE_FAMILY(
+    x86_zmm_vpmovs, "vpmovswb", "vpmovsdb", "vpmovsdw",
+    "vpmovsqb", "vpmovsqw", "vpmovsqd")
+X86_ZMM_DEFINE_STORE_FAMILY(
+    x86_zmm_vpmovus, "vpmovuswb", "vpmovusdb", "vpmovusdw",
+    "vpmovusqb", "vpmovusqw", "vpmovusqd")
+
+#define X86_DEFINE_ZMM_INDEX_CHASE(name, op, normalize, signed_anchor)       \
+  extern "C" VECOPS_INST_NOINLINE_USED void name(                           \
+      uint64_t loops, void* memory, uint64_t memory_bytes) {                 \
+    if (loops == 0 || memory_bytes == 0) return;                             \
+    auto* base = static_cast<uint8_t*>(memory);                              \
+    auto* ptr = base;                                                        \
+    auto* anchor = base + (signed_anchor);                                   \
+    __asm__ volatile(                                                        \
+        ".p2align 6\n\t"                                                    \
+        "1:\n\t"                                                            \
+        op " (%[ptr]), %%zmm0\n\t"                                         \
+        normalize                                                           \
+        "shl $6, %%rax\n\t"                                                 \
+        "lea (%[anchor], %%rax), %[ptr]\n\t"                                \
+        "dec %[loops]\n\t"                                                  \
+        "jnz 1b\n\t"                                                        \
+        : [loops] "+r"(loops), [ptr] "+&r"(ptr)                             \
+        : [anchor] "r"(anchor)                                              \
+        : "cc", "memory", "rax", "zmm0");                                  \
+  }
+#define X86_EXTRACT_S16 "vmovd %%xmm0, %%eax\n\tmovswq %%ax, %%rax\n\t"
+#define X86_EXTRACT_U16 "vmovd %%xmm0, %%eax\n\tmovzwl %%ax, %%eax\n\t"
+#define X86_EXTRACT_S32 "vmovd %%xmm0, %%eax\n\tmovslq %%eax, %%rax\n\t"
+#define X86_EXTRACT_U32 "vmovd %%xmm0, %%eax\n\t"
+#define X86_EXTRACT_64 "vmovq %%xmm0, %%rax\n\t"
+#define X86_ZMM_INDEX_PAIR(symbol_s, op_s, symbol_u, op_u, extract_s, extract_u) \
+  X86_DEFINE_ZMM_INDEX_CHASE(symbol_s, op_s, extract_s, 4096)                \
+  X86_DEFINE_ZMM_INDEX_CHASE(symbol_u, op_u, extract_u, 0)
+X86_ZMM_INDEX_PAIR(
+    x86_zmm_vpmovsxbw_index, "vpmovsxbw", x86_zmm_vpmovzxbw_index,
+    "vpmovzxbw", X86_EXTRACT_S16, X86_EXTRACT_U16)
+X86_ZMM_INDEX_PAIR(
+    x86_zmm_vpmovsxbd_index, "vpmovsxbd", x86_zmm_vpmovzxbd_index,
+    "vpmovzxbd", X86_EXTRACT_S32, X86_EXTRACT_U32)
+X86_ZMM_INDEX_PAIR(
+    x86_zmm_vpmovsxbq_index, "vpmovsxbq", x86_zmm_vpmovzxbq_index,
+    "vpmovzxbq", X86_EXTRACT_64, X86_EXTRACT_64)
+X86_ZMM_INDEX_PAIR(
+    x86_zmm_vpmovsxwd_index, "vpmovsxwd", x86_zmm_vpmovzxwd_index,
+    "vpmovzxwd", X86_EXTRACT_S32, X86_EXTRACT_U32)
+X86_ZMM_INDEX_PAIR(
+    x86_zmm_vpmovsxwq_index, "vpmovsxwq", x86_zmm_vpmovzxwq_index,
+    "vpmovzxwq", X86_EXTRACT_64, X86_EXTRACT_64)
+X86_ZMM_INDEX_PAIR(
+    x86_zmm_vpmovsxdq_index, "vpmovsxdq", x86_zmm_vpmovzxdq_index,
+    "vpmovzxdq", X86_EXTRACT_64, X86_EXTRACT_64)
+
+#define X86_DEFINE_SCALAR_INDEX_CONTROL(name, load_op, signed_anchor)        \
+  extern "C" VECOPS_INST_NOINLINE_USED void name(                           \
+      uint64_t loops, void* memory, uint64_t memory_bytes) {                 \
+    if (loops == 0 || memory_bytes == 0) return;                             \
+    auto* base = static_cast<uint8_t*>(memory);                              \
+    auto* ptr = base;                                                        \
+    auto* anchor = base + (signed_anchor);                                   \
+    __asm__ volatile(                                                        \
+        ".p2align 6\n\t"                                                    \
+        "1:\n\t"                                                            \
+        load_op                                                             \
+        "shl $6, %%rax\n\t"                                                 \
+        "lea (%[anchor], %%rax), %[ptr]\n\t"                                \
+        "dec %[loops]\n\t"                                                  \
+        "jnz 1b\n\t"                                                        \
+        : [loops] "+r"(loops), [ptr] "+&r"(ptr)                             \
+        : [anchor] "r"(anchor)                                              \
+        : "cc", "memory", "rax");                                          \
+  }
+X86_DEFINE_SCALAR_INDEX_CONTROL(
+    x86_zmm_index_control_s8, "movsbq (%[ptr]), %%rax\n\t", 4096)
+X86_DEFINE_SCALAR_INDEX_CONTROL(
+    x86_zmm_index_control_u8, "movzbl (%[ptr]), %%eax\n\t", 0)
+X86_DEFINE_SCALAR_INDEX_CONTROL(
+    x86_zmm_index_control_s16, "movswq (%[ptr]), %%rax\n\t", 4096)
+X86_DEFINE_SCALAR_INDEX_CONTROL(
+    x86_zmm_index_control_u16, "movzwl (%[ptr]), %%eax\n\t", 0)
+X86_DEFINE_SCALAR_INDEX_CONTROL(
+    x86_zmm_index_control_s32, "movslq (%[ptr]), %%rax\n\t", 4096)
+X86_DEFINE_SCALAR_INDEX_CONTROL(
+    x86_zmm_index_control_u32, "movl (%[ptr]), %%eax\n\t", 0)
+
+#define X86_DEFINE_ZMM_FORWARD(name, store_op, load_op)                      \
+  X86_DEFINE_MEMORY_KERNEL(                                                  \
+      name,                                                                 \
+      "movabs $0x80000100ffff007f, %%rax\n\t"                               \
+      "vpbroadcastq %%rax, %%zmm0\n\t",                                    \
+      store_op " %%zmm0, (%[ptr])\n\t"                                     \
+      load_op " (%[ptr]), %%zmm0\n\t", "rax", "zmm0")
+#define X86_ZMM_FORWARD_FAMILY(prefix, wb, db, dw, qb, qw, qd,               \
+                               l8w, l8d, l16d, l8q, l16q, l32q)              \
+  X86_DEFINE_ZMM_FORWARD(prefix##_wb_forward, wb, l8w)                       \
+  X86_DEFINE_ZMM_FORWARD(prefix##_db_forward, db, l8d)                       \
+  X86_DEFINE_ZMM_FORWARD(prefix##_dw_forward, dw, l16d)                      \
+  X86_DEFINE_ZMM_FORWARD(prefix##_qb_forward, qb, l8q)                       \
+  X86_DEFINE_ZMM_FORWARD(prefix##_qw_forward, qw, l16q)                      \
+  X86_DEFINE_ZMM_FORWARD(prefix##_qd_forward, qd, l32q)
+X86_ZMM_FORWARD_FAMILY(
+    x86_zmm_vpmov, "vpmovwb", "vpmovdb", "vpmovdw", "vpmovqb", "vpmovqw",
+    "vpmovqd", "vpmovzxbw", "vpmovzxbd", "vpmovzxwd", "vpmovzxbq",
+    "vpmovzxwq", "vpmovzxdq")
+X86_ZMM_FORWARD_FAMILY(
+    x86_zmm_vpmovs, "vpmovswb", "vpmovsdb", "vpmovsdw", "vpmovsqb",
+    "vpmovsqw", "vpmovsqd", "vpmovsxbw", "vpmovsxbd", "vpmovsxwd",
+    "vpmovsxbq", "vpmovsxwq", "vpmovsxdq")
+X86_ZMM_FORWARD_FAMILY(
+    x86_zmm_vpmovus, "vpmovuswb", "vpmovusdb", "vpmovusdw", "vpmovusqb",
+    "vpmovusqw", "vpmovusqd", "vpmovzxbw", "vpmovzxbd", "vpmovzxwd",
+    "vpmovzxbq", "vpmovzxwq", "vpmovzxdq")
+
 const InstructionCase kCases[] = {
     {"empty_loop", "x86", "Loop-control baseline", MeasureMode::Control,
      x86_control_empty_loop, 32, 0, 0, 512},
@@ -553,6 +741,171 @@ const InstructionCase kCases[] = {
     X86_MEMORY_CASE("vmovdqu32_mask50_store", "Half-mask contiguous store",
                     MeasureMode::Throughput, x86_zmm_mask_store, 8, 1, 8,
                     MemoryPattern::Hot, WorkingSetLevel::L1, 32, "empty_loop"),
+#define X86_ZMM_CONV_CASE(label, isa_value, description, mode_value, symbol, seq, inst, \
+                          chains, pattern, level, bytes, baseline, kind, src, dst, elems, cap) \
+    {label, isa_value, description, mode_value, nullptr, seq, inst, chains, 512,         \
+     InstructionCategory::Memory, symbol, pattern, level, bytes, baseline, kind, src,    \
+     dst, elems, cap}
+#define X86_ZMM_CONV_CONTROLS(level_label, level_value)                       \
+    X86_ZMM_CONV_CASE("conv_stream_control_8b_" level_label, "AVX512F",       \
+                      "8-byte conversion-stream address baseline", MeasureMode::Control,\
+                      x86_zmm_conv_control_8b, 8, 0, 0, MemoryPattern::Stream, level_value,\
+                      0, "empty_loop", MemoryConversionKind::None, 0, 0, 0, 0),           \
+    X86_ZMM_CONV_CASE("conv_stream_control_16b_" level_label, "AVX512F",      \
+                      "16-byte conversion-stream address baseline", MeasureMode::Control,\
+                      x86_zmm_conv_control_16b, 8, 0, 0, MemoryPattern::Stream, level_value,\
+                      0, "empty_loop", MemoryConversionKind::None, 0, 0, 0, 0),           \
+    X86_ZMM_CONV_CASE("conv_stream_control_32b_" level_label, "AVX512F",      \
+                      "32-byte conversion-stream address baseline", MeasureMode::Control,\
+                      x86_zmm_conv_control_32b, 8, 0, 0, MemoryPattern::Stream, level_value,\
+                      0, "empty_loop", MemoryConversionKind::None, 0, 0, 0, 0)
+    X86_ZMM_CONV_CONTROLS("l1", WorkingSetLevel::L1),
+    X86_ZMM_CONV_CONTROLS("l2", WorkingSetLevel::L2),
+    X86_ZMM_CONV_CONTROLS("l3", WorkingSetLevel::L3),
+    X86_ZMM_CONV_CONTROLS(
+        "beyond_last_reported_cache", WorkingSetLevel::BeyondLastCache),
+#define X86_ZMM_CONV_STREAM_LEVEL(label, symbol, kind, src, dst, bytes, elems, bytes_tag, \
+                                  level_label, level_value)                              \
+    X86_ZMM_CONV_CASE(label "_stream_" level_label, "AVX512F",                         \
+                      "Sequential integer converting memory instruction",              \
+                      MeasureMode::Throughput, symbol, 8, 1, 8, MemoryPattern::Stream,   \
+                      level_value, bytes, "conv_stream_control_" bytes_tag "_" level_label,\
+                      kind, src, dst, elems, 0)
+#define X86_ZMM_CONV_STREAM_LEVELS(label, symbol, kind, src, dst, bytes, elems, bytes_tag) \
+    X86_ZMM_CONV_STREAM_LEVEL(label, symbol, kind, src, dst, bytes, elems, bytes_tag,     \
+                              "l1", WorkingSetLevel::L1),                                 \
+    X86_ZMM_CONV_STREAM_LEVEL(label, symbol, kind, src, dst, bytes, elems, bytes_tag,     \
+                              "l2", WorkingSetLevel::L2),                                 \
+    X86_ZMM_CONV_STREAM_LEVEL(label, symbol, kind, src, dst, bytes, elems, bytes_tag,     \
+                              "l3", WorkingSetLevel::L3),                                 \
+    X86_ZMM_CONV_STREAM_LEVEL(label, symbol, kind, src, dst, bytes, elems, bytes_tag,     \
+                              "beyond_last_reported_cache",                              \
+                              WorkingSetLevel::BeyondLastCache)
+#define X86_ZMM_EXTEND_LEVELS(label_s, label_u, symbol_s, symbol_u, src, dst, bytes, elems, bytes_tag) \
+    X86_ZMM_CONV_STREAM_LEVELS(label_s, symbol_s, MemoryConversionKind::SignExtendLoad,    \
+                               src, dst, bytes, elems, bytes_tag),                          \
+    X86_ZMM_CONV_STREAM_LEVELS(label_u, symbol_u, MemoryConversionKind::ZeroExtendLoad,    \
+                               src, dst, bytes, elems, bytes_tag)
+    X86_ZMM_EXTEND_LEVELS(
+        "vpmovsxbw", "vpmovzxbw", x86_zmm_vpmovsxbw_stream,
+        x86_zmm_vpmovzxbw_stream,
+        8, 16, 32, 32, "32b"),
+    X86_ZMM_EXTEND_LEVELS(
+        "vpmovsxbd", "vpmovzxbd", x86_zmm_vpmovsxbd_stream,
+        x86_zmm_vpmovzxbd_stream,
+        8, 32, 16, 16, "16b"),
+    X86_ZMM_EXTEND_LEVELS(
+        "vpmovsxbq", "vpmovzxbq", x86_zmm_vpmovsxbq_stream,
+        x86_zmm_vpmovzxbq_stream,
+        8, 64, 8, 8, "8b"),
+    X86_ZMM_EXTEND_LEVELS(
+        "vpmovsxwd", "vpmovzxwd", x86_zmm_vpmovsxwd_stream,
+        x86_zmm_vpmovzxwd_stream,
+        16, 32, 32, 16, "32b"),
+    X86_ZMM_EXTEND_LEVELS(
+        "vpmovsxwq", "vpmovzxwq", x86_zmm_vpmovsxwq_stream,
+        x86_zmm_vpmovzxwq_stream,
+        16, 64, 16, 8, "16b"),
+    X86_ZMM_EXTEND_LEVELS(
+        "vpmovsxdq", "vpmovzxdq", x86_zmm_vpmovsxdq_stream,
+        x86_zmm_vpmovzxdq_stream,
+        32, 64, 32, 8, "32b"),
+#define X86_ZMM_STORE_LEVELS(label, symbol, kind, src, dst, bytes, elems, bytes_tag) \
+    X86_ZMM_CONV_STREAM_LEVELS(label, symbol, kind, src, dst, bytes, elems, bytes_tag)
+#define X86_ZMM_STORE_FAMILY_LEVELS(prefix, kind)                             \
+    X86_ZMM_STORE_LEVELS(#prefix "wb", x86_zmm_##prefix##_wb_stream, kind, 16, 8, 32, 32, "32b"),\
+    X86_ZMM_STORE_LEVELS(#prefix "db", x86_zmm_##prefix##_db_stream, kind, 32, 8, 16, 16, "16b"),\
+    X86_ZMM_STORE_LEVELS(#prefix "dw", x86_zmm_##prefix##_dw_stream, kind, 32, 16, 32, 16, "32b"),\
+    X86_ZMM_STORE_LEVELS(#prefix "qb", x86_zmm_##prefix##_qb_stream, kind, 64, 8, 8, 8, "8b"),\
+    X86_ZMM_STORE_LEVELS(#prefix "qw", x86_zmm_##prefix##_qw_stream, kind, 64, 16, 16, 8, "16b"),\
+    X86_ZMM_STORE_LEVELS(#prefix "qd", x86_zmm_##prefix##_qd_stream, kind, 64, 32, 32, 8, "32b")
+    X86_ZMM_STORE_FAMILY_LEVELS(vpmov, MemoryConversionKind::TruncateStore),
+    X86_ZMM_STORE_FAMILY_LEVELS(
+        vpmovs, MemoryConversionKind::SignedSaturatingStore),
+    X86_ZMM_STORE_FAMILY_LEVELS(
+        vpmovus, MemoryConversionKind::UnsignedSaturatingStore),
+#define X86_ZMM_INDEX_CONTROL(label, symbol, kind, src)                       \
+    X86_ZMM_CONV_CASE(label, "AVX512F", "Matched scalar extending-load index-chase control",\
+                      MeasureMode::Control, symbol, 1, 0, 1,                  \
+                      MemoryPattern::PointerChase, WorkingSetLevel::L1, 0,    \
+                      "empty_loop", kind, src, src, 0, 8192)
+    X86_ZMM_INDEX_CONTROL(
+        "conv_index_control_s8", x86_zmm_index_control_s8,
+        MemoryConversionKind::SignExtendLoad, 8),
+    X86_ZMM_INDEX_CONTROL(
+        "conv_index_control_u8", x86_zmm_index_control_u8,
+        MemoryConversionKind::ZeroExtendLoad, 8),
+    X86_ZMM_INDEX_CONTROL(
+        "conv_index_control_s16", x86_zmm_index_control_s16,
+        MemoryConversionKind::SignExtendLoad, 16),
+    X86_ZMM_INDEX_CONTROL(
+        "conv_index_control_u16", x86_zmm_index_control_u16,
+        MemoryConversionKind::ZeroExtendLoad, 16),
+    X86_ZMM_INDEX_CONTROL(
+        "conv_index_control_s32", x86_zmm_index_control_s32,
+        MemoryConversionKind::SignExtendLoad, 32),
+    X86_ZMM_INDEX_CONTROL(
+        "conv_index_control_u32", x86_zmm_index_control_u32,
+        MemoryConversionKind::ZeroExtendLoad, 32),
+#define X86_ZMM_EXTEND_LAT(label, symbol, kind, src, dst, elems, baseline)    \
+    X86_ZMM_CONV_CASE(label "_index_chase_l1", "AVX512F",                   \
+                      "L1 dependent extending-load index chase", MeasureMode::Latency,\
+                      symbol, 1, 4, 1, MemoryPattern::PointerChase,           \
+                      WorkingSetLevel::L1, src / 8 * elems, baseline, kind,   \
+                      src, dst, elems, 8192)
+    X86_ZMM_EXTEND_LAT(
+        "vpmovsxbw", x86_zmm_vpmovsxbw_index, MemoryConversionKind::SignExtendLoad,
+        8, 16, 32, "conv_index_control_s8"),
+    X86_ZMM_EXTEND_LAT(
+        "vpmovzxbw", x86_zmm_vpmovzxbw_index, MemoryConversionKind::ZeroExtendLoad,
+        8, 16, 32, "conv_index_control_u8"),
+    X86_ZMM_EXTEND_LAT(
+        "vpmovsxbd", x86_zmm_vpmovsxbd_index, MemoryConversionKind::SignExtendLoad,
+        8, 32, 16, "conv_index_control_s8"),
+    X86_ZMM_EXTEND_LAT(
+        "vpmovzxbd", x86_zmm_vpmovzxbd_index, MemoryConversionKind::ZeroExtendLoad,
+        8, 32, 16, "conv_index_control_u8"),
+    X86_ZMM_EXTEND_LAT(
+        "vpmovsxbq", x86_zmm_vpmovsxbq_index, MemoryConversionKind::SignExtendLoad,
+        8, 64, 8, "conv_index_control_s8"),
+    X86_ZMM_EXTEND_LAT(
+        "vpmovzxbq", x86_zmm_vpmovzxbq_index, MemoryConversionKind::ZeroExtendLoad,
+        8, 64, 8, "conv_index_control_u8"),
+    X86_ZMM_EXTEND_LAT(
+        "vpmovsxwd", x86_zmm_vpmovsxwd_index, MemoryConversionKind::SignExtendLoad,
+        16, 32, 16, "conv_index_control_s16"),
+    X86_ZMM_EXTEND_LAT(
+        "vpmovzxwd", x86_zmm_vpmovzxwd_index, MemoryConversionKind::ZeroExtendLoad,
+        16, 32, 16, "conv_index_control_u16"),
+    X86_ZMM_EXTEND_LAT(
+        "vpmovsxwq", x86_zmm_vpmovsxwq_index, MemoryConversionKind::SignExtendLoad,
+        16, 64, 8, "conv_index_control_s16"),
+    X86_ZMM_EXTEND_LAT(
+        "vpmovzxwq", x86_zmm_vpmovzxwq_index, MemoryConversionKind::ZeroExtendLoad,
+        16, 64, 8, "conv_index_control_u16"),
+    X86_ZMM_EXTEND_LAT(
+        "vpmovsxdq", x86_zmm_vpmovsxdq_index, MemoryConversionKind::SignExtendLoad,
+        32, 64, 8, "conv_index_control_s32"),
+    X86_ZMM_EXTEND_LAT(
+        "vpmovzxdq", x86_zmm_vpmovzxdq_index, MemoryConversionKind::ZeroExtendLoad,
+        32, 64, 8, "conv_index_control_u32"),
+#define X86_ZMM_STORE_LAT(label, symbol, kind, src, dst, bytes, elems)        \
+    X86_ZMM_CONV_CASE(label "_store_forward_l1", "AVX512F",                 \
+                      "L1 dependent narrow-store plus extending-load forwarding round trip",\
+                      MeasureMode::Latency, symbol, 1, 2, 1,                  \
+                      MemoryPattern::StoreForward, WorkingSetLevel::L1, bytes,\
+                      "empty_loop", kind, src, dst, elems, 0)
+#define X86_ZMM_STORE_FAMILY_LAT(prefix, kind)                               \
+    X86_ZMM_STORE_LAT(#prefix "wb", x86_zmm_##prefix##_wb_forward, kind, 16, 8, 32, 32),\
+    X86_ZMM_STORE_LAT(#prefix "db", x86_zmm_##prefix##_db_forward, kind, 32, 8, 16, 16),\
+    X86_ZMM_STORE_LAT(#prefix "dw", x86_zmm_##prefix##_dw_forward, kind, 32, 16, 32, 16),\
+    X86_ZMM_STORE_LAT(#prefix "qb", x86_zmm_##prefix##_qb_forward, kind, 64, 8, 8, 8),\
+    X86_ZMM_STORE_LAT(#prefix "qw", x86_zmm_##prefix##_qw_forward, kind, 64, 16, 16, 8),\
+    X86_ZMM_STORE_LAT(#prefix "qd", x86_zmm_##prefix##_qd_forward, kind, 64, 32, 32, 8)
+    X86_ZMM_STORE_FAMILY_LAT(vpmov, MemoryConversionKind::TruncateStore),
+    X86_ZMM_STORE_FAMILY_LAT(vpmovs, MemoryConversionKind::SignedSaturatingStore),
+    X86_ZMM_STORE_FAMILY_LAT(
+        vpmovus, MemoryConversionKind::UnsignedSaturatingStore),
 };
 
 #elif defined(__AVX2__)
@@ -812,6 +1165,126 @@ X86_DEFINE_MEMORY_KERNEL(
     "vmaskmovps %%ymm14, %%ymm13, 224(%[ptr])\n\t",
     "ymm13", "ymm14")
 
+#define X86_YMM_CONV_ADVANCE(bytes)                                         \
+  "add $" #bytes ", %[ptr]\n\t"                                             \
+  "cmp %[end], %[ptr]\n\t"                                                  \
+  "cmovae %[base], %[ptr]\n\t"
+#define X86_DEFINE_YMM_CONV_STREAM_CONTROL(name, stride)                    \
+  X86_DEFINE_MEMORY_KERNEL(name, "", X86_YMM_CONV_ADVANCE(stride))
+#define X86_DEFINE_YMM_CONV_LOAD(name, op, o1, o2, o3, o4, o5, o6, o7, stride) \
+  X86_DEFINE_MEMORY_KERNEL(                                                  \
+      name, "",                                                             \
+      op " 0(%[ptr]), %%ymm0\n\t"                                          \
+      op " " #o1 "(%[ptr]), %%ymm1\n\t"                                    \
+      op " " #o2 "(%[ptr]), %%ymm2\n\t"                                    \
+      op " " #o3 "(%[ptr]), %%ymm3\n\t"                                    \
+      op " " #o4 "(%[ptr]), %%ymm4\n\t"                                    \
+      op " " #o5 "(%[ptr]), %%ymm5\n\t"                                    \
+      op " " #o6 "(%[ptr]), %%ymm6\n\t"                                    \
+      op " " #o7 "(%[ptr]), %%ymm7\n\t"                                    \
+      X86_YMM_CONV_ADVANCE(stride),                                         \
+      "ymm0", "ymm1", "ymm2", "ymm3", "ymm4", "ymm5", "ymm6", "ymm7")
+X86_DEFINE_YMM_CONV_STREAM_CONTROL(x86_ymm_conv_control_4b, 32)
+X86_DEFINE_YMM_CONV_STREAM_CONTROL(x86_ymm_conv_control_8b, 64)
+X86_DEFINE_YMM_CONV_STREAM_CONTROL(x86_ymm_conv_control_16b, 128)
+#define X86_YMM_CONV_LOAD_4(name, op)                                       \
+  X86_DEFINE_YMM_CONV_LOAD(name, op, 4, 8, 12, 16, 20, 24, 28, 32)
+#define X86_YMM_CONV_LOAD_8(name, op)                                       \
+  X86_DEFINE_YMM_CONV_LOAD(name, op, 8, 16, 24, 32, 40, 48, 56, 64)
+#define X86_YMM_CONV_LOAD_16(name, op)                                      \
+  X86_DEFINE_YMM_CONV_LOAD(name, op, 16, 32, 48, 64, 80, 96, 112, 128)
+X86_YMM_CONV_LOAD_16(x86_ymm_vpmovsxbw_stream, "vpmovsxbw")
+X86_YMM_CONV_LOAD_16(x86_ymm_vpmovzxbw_stream, "vpmovzxbw")
+X86_YMM_CONV_LOAD_8(x86_ymm_vpmovsxbd_stream, "vpmovsxbd")
+X86_YMM_CONV_LOAD_8(x86_ymm_vpmovzxbd_stream, "vpmovzxbd")
+X86_YMM_CONV_LOAD_4(x86_ymm_vpmovsxbq_stream, "vpmovsxbq")
+X86_YMM_CONV_LOAD_4(x86_ymm_vpmovzxbq_stream, "vpmovzxbq")
+X86_YMM_CONV_LOAD_16(x86_ymm_vpmovsxwd_stream, "vpmovsxwd")
+X86_YMM_CONV_LOAD_16(x86_ymm_vpmovzxwd_stream, "vpmovzxwd")
+X86_YMM_CONV_LOAD_8(x86_ymm_vpmovsxwq_stream, "vpmovsxwq")
+X86_YMM_CONV_LOAD_8(x86_ymm_vpmovzxwq_stream, "vpmovzxwq")
+X86_YMM_CONV_LOAD_16(x86_ymm_vpmovsxdq_stream, "vpmovsxdq")
+X86_YMM_CONV_LOAD_16(x86_ymm_vpmovzxdq_stream, "vpmovzxdq")
+
+#define X86_DEFINE_YMM_INDEX_CHASE(name, op, normalize, signed_anchor)       \
+  extern "C" VECOPS_INST_NOINLINE_USED void name(                           \
+      uint64_t loops, void* memory, uint64_t memory_bytes) {                 \
+    if (loops == 0 || memory_bytes == 0) return;                             \
+    auto* base = static_cast<uint8_t*>(memory);                              \
+    auto* ptr = base;                                                        \
+    auto* anchor = base + (signed_anchor);                                   \
+    __asm__ volatile(                                                        \
+        ".p2align 6\n\t"                                                    \
+        "1:\n\t"                                                            \
+        op " (%[ptr]), %%ymm0\n\t"                                         \
+        normalize                                                           \
+        "shl $6, %%rax\n\t"                                                 \
+        "lea (%[anchor], %%rax), %[ptr]\n\t"                                \
+        "dec %[loops]\n\t"                                                  \
+        "jnz 1b\n\t"                                                        \
+        : [loops] "+r"(loops), [ptr] "+&r"(ptr)                             \
+        : [anchor] "r"(anchor)                                              \
+        : "cc", "memory", "rax", "ymm0");                                  \
+  }
+#define X86_YMM_EXTRACT_S16 "vmovd %%xmm0, %%eax\n\tmovswq %%ax, %%rax\n\t"
+#define X86_YMM_EXTRACT_U16 "vmovd %%xmm0, %%eax\n\tmovzwl %%ax, %%eax\n\t"
+#define X86_YMM_EXTRACT_S32 "vmovd %%xmm0, %%eax\n\tmovslq %%eax, %%rax\n\t"
+#define X86_YMM_EXTRACT_U32 "vmovd %%xmm0, %%eax\n\t"
+#define X86_YMM_EXTRACT_64 "vmovq %%xmm0, %%rax\n\t"
+#define X86_YMM_INDEX_PAIR(symbol_s, op_s, symbol_u, op_u, extract_s, extract_u) \
+  X86_DEFINE_YMM_INDEX_CHASE(symbol_s, op_s, extract_s, 4096)                \
+  X86_DEFINE_YMM_INDEX_CHASE(symbol_u, op_u, extract_u, 0)
+X86_YMM_INDEX_PAIR(
+    x86_ymm_vpmovsxbw_index, "vpmovsxbw", x86_ymm_vpmovzxbw_index,
+    "vpmovzxbw", X86_YMM_EXTRACT_S16, X86_YMM_EXTRACT_U16)
+X86_YMM_INDEX_PAIR(
+    x86_ymm_vpmovsxbd_index, "vpmovsxbd", x86_ymm_vpmovzxbd_index,
+    "vpmovzxbd", X86_YMM_EXTRACT_S32, X86_YMM_EXTRACT_U32)
+X86_YMM_INDEX_PAIR(
+    x86_ymm_vpmovsxbq_index, "vpmovsxbq", x86_ymm_vpmovzxbq_index,
+    "vpmovzxbq", X86_YMM_EXTRACT_64, X86_YMM_EXTRACT_64)
+X86_YMM_INDEX_PAIR(
+    x86_ymm_vpmovsxwd_index, "vpmovsxwd", x86_ymm_vpmovzxwd_index,
+    "vpmovzxwd", X86_YMM_EXTRACT_S32, X86_YMM_EXTRACT_U32)
+X86_YMM_INDEX_PAIR(
+    x86_ymm_vpmovsxwq_index, "vpmovsxwq", x86_ymm_vpmovzxwq_index,
+    "vpmovzxwq", X86_YMM_EXTRACT_64, X86_YMM_EXTRACT_64)
+X86_YMM_INDEX_PAIR(
+    x86_ymm_vpmovsxdq_index, "vpmovsxdq", x86_ymm_vpmovzxdq_index,
+    "vpmovzxdq", X86_YMM_EXTRACT_64, X86_YMM_EXTRACT_64)
+
+#define X86_DEFINE_YMM_SCALAR_INDEX_CONTROL(name, load_op, signed_anchor)    \
+  extern "C" VECOPS_INST_NOINLINE_USED void name(                           \
+      uint64_t loops, void* memory, uint64_t memory_bytes) {                 \
+    if (loops == 0 || memory_bytes == 0) return;                             \
+    auto* base = static_cast<uint8_t*>(memory);                              \
+    auto* ptr = base;                                                        \
+    auto* anchor = base + (signed_anchor);                                   \
+    __asm__ volatile(                                                        \
+        ".p2align 6\n\t"                                                    \
+        "1:\n\t"                                                            \
+        load_op                                                             \
+        "shl $6, %%rax\n\t"                                                 \
+        "lea (%[anchor], %%rax), %[ptr]\n\t"                                \
+        "dec %[loops]\n\t"                                                  \
+        "jnz 1b\n\t"                                                        \
+        : [loops] "+r"(loops), [ptr] "+&r"(ptr)                             \
+        : [anchor] "r"(anchor)                                              \
+        : "cc", "memory", "rax");                                          \
+  }
+X86_DEFINE_YMM_SCALAR_INDEX_CONTROL(
+    x86_ymm_index_control_s8, "movsbq (%[ptr]), %%rax\n\t", 4096)
+X86_DEFINE_YMM_SCALAR_INDEX_CONTROL(
+    x86_ymm_index_control_u8, "movzbl (%[ptr]), %%eax\n\t", 0)
+X86_DEFINE_YMM_SCALAR_INDEX_CONTROL(
+    x86_ymm_index_control_s16, "movswq (%[ptr]), %%rax\n\t", 4096)
+X86_DEFINE_YMM_SCALAR_INDEX_CONTROL(
+    x86_ymm_index_control_u16, "movzwl (%[ptr]), %%eax\n\t", 0)
+X86_DEFINE_YMM_SCALAR_INDEX_CONTROL(
+    x86_ymm_index_control_s32, "movslq (%[ptr]), %%rax\n\t", 4096)
+X86_DEFINE_YMM_SCALAR_INDEX_CONTROL(
+    x86_ymm_index_control_u32, "movl (%[ptr]), %%eax\n\t", 0)
+
 const InstructionCase kCases[] = {
     {"empty_loop", "x86", "Loop-control baseline", MeasureMode::Control,
      x86_control_empty_loop, 32, 0, 0, 256},
@@ -912,6 +1385,134 @@ const InstructionCase kCases[] = {
     X86_YMM_MEMORY_CASE("vmaskmovps_mask50_store", "Half-mask contiguous store",
                         MeasureMode::Throughput, x86_ymm_mask_store, 8, 1, 8,
                         MemoryPattern::Hot, WorkingSetLevel::L1, 16, "empty_loop"),
+#define X86_YMM_CONV_CASE(label, description, mode_value, symbol, seq, inst, chains, \
+                          pattern, level, bytes, baseline, kind, src, dst, elems, cap) \
+    {label, "AVX2", description, mode_value, nullptr, seq, inst, chains, 256,          \
+     InstructionCategory::Memory, symbol, pattern, level, bytes, baseline, kind, src,  \
+     dst, elems, cap}
+#define X86_YMM_CONV_CONTROLS(level_label, level_value)                       \
+    X86_YMM_CONV_CASE("conv_stream_control_4b_" level_label,                  \
+                      "4-byte conversion-stream address baseline", MeasureMode::Control,\
+                      x86_ymm_conv_control_4b, 8, 0, 0, MemoryPattern::Stream, level_value,\
+                      0, "empty_loop", MemoryConversionKind::None, 0, 0, 0, 0),           \
+    X86_YMM_CONV_CASE("conv_stream_control_8b_" level_label,                  \
+                      "8-byte conversion-stream address baseline", MeasureMode::Control,\
+                      x86_ymm_conv_control_8b, 8, 0, 0, MemoryPattern::Stream, level_value,\
+                      0, "empty_loop", MemoryConversionKind::None, 0, 0, 0, 0),           \
+    X86_YMM_CONV_CASE("conv_stream_control_16b_" level_label,                 \
+                      "16-byte conversion-stream address baseline", MeasureMode::Control,\
+                      x86_ymm_conv_control_16b, 8, 0, 0, MemoryPattern::Stream, level_value,\
+                      0, "empty_loop", MemoryConversionKind::None, 0, 0, 0, 0)
+    X86_YMM_CONV_CONTROLS("l1", WorkingSetLevel::L1),
+    X86_YMM_CONV_CONTROLS("l2", WorkingSetLevel::L2),
+    X86_YMM_CONV_CONTROLS("l3", WorkingSetLevel::L3),
+    X86_YMM_CONV_CONTROLS(
+        "beyond_last_reported_cache", WorkingSetLevel::BeyondLastCache),
+#define X86_YMM_CONV_STREAM_LEVEL(label, symbol, kind, src, dst, bytes, elems, bytes_tag, \
+                                  level_label, level_value)                              \
+    X86_YMM_CONV_CASE(label "_stream_" level_label,                                 \
+                      "Sequential integer extending memory load", MeasureMode::Throughput,\
+                      symbol, 8, 1, 8, MemoryPattern::Stream, level_value, bytes,          \
+                      "conv_stream_control_" bytes_tag "_" level_label, kind, src, dst,  \
+                      elems, 0)
+#define X86_YMM_CONV_STREAM_LEVELS(label, symbol, kind, src, dst, bytes, elems, bytes_tag) \
+    X86_YMM_CONV_STREAM_LEVEL(label, symbol, kind, src, dst, bytes, elems, bytes_tag,     \
+                              "l1", WorkingSetLevel::L1),                                 \
+    X86_YMM_CONV_STREAM_LEVEL(label, symbol, kind, src, dst, bytes, elems, bytes_tag,     \
+                              "l2", WorkingSetLevel::L2),                                 \
+    X86_YMM_CONV_STREAM_LEVEL(label, symbol, kind, src, dst, bytes, elems, bytes_tag,     \
+                              "l3", WorkingSetLevel::L3),                                 \
+    X86_YMM_CONV_STREAM_LEVEL(label, symbol, kind, src, dst, bytes, elems, bytes_tag,     \
+                              "beyond_last_reported_cache",                              \
+                              WorkingSetLevel::BeyondLastCache)
+#define X86_YMM_EXTEND_LEVELS(label_s, label_u, symbol_s, symbol_u, src, dst, bytes, elems, bytes_tag) \
+    X86_YMM_CONV_STREAM_LEVELS(label_s, symbol_s, MemoryConversionKind::SignExtendLoad,    \
+                               src, dst, bytes, elems, bytes_tag),                          \
+    X86_YMM_CONV_STREAM_LEVELS(label_u, symbol_u, MemoryConversionKind::ZeroExtendLoad,    \
+                               src, dst, bytes, elems, bytes_tag)
+    X86_YMM_EXTEND_LEVELS(
+        "vpmovsxbw", "vpmovzxbw", x86_ymm_vpmovsxbw_stream,
+        x86_ymm_vpmovzxbw_stream, 8, 16, 16, 16, "16b"),
+    X86_YMM_EXTEND_LEVELS(
+        "vpmovsxbd", "vpmovzxbd", x86_ymm_vpmovsxbd_stream,
+        x86_ymm_vpmovzxbd_stream, 8, 32, 8, 8, "8b"),
+    X86_YMM_EXTEND_LEVELS(
+        "vpmovsxbq", "vpmovzxbq", x86_ymm_vpmovsxbq_stream,
+        x86_ymm_vpmovzxbq_stream, 8, 64, 4, 4, "4b"),
+    X86_YMM_EXTEND_LEVELS(
+        "vpmovsxwd", "vpmovzxwd", x86_ymm_vpmovsxwd_stream,
+        x86_ymm_vpmovzxwd_stream, 16, 32, 16, 8, "16b"),
+    X86_YMM_EXTEND_LEVELS(
+        "vpmovsxwq", "vpmovzxwq", x86_ymm_vpmovsxwq_stream,
+        x86_ymm_vpmovzxwq_stream, 16, 64, 8, 4, "8b"),
+    X86_YMM_EXTEND_LEVELS(
+        "vpmovsxdq", "vpmovzxdq", x86_ymm_vpmovsxdq_stream,
+        x86_ymm_vpmovzxdq_stream, 32, 64, 16, 4, "16b"),
+#define X86_YMM_INDEX_CONTROL(label, symbol, kind, src)                       \
+    X86_YMM_CONV_CASE(label, "Matched scalar extending-load index-chase control",\
+                      MeasureMode::Control, symbol, 1, 0, 1,                  \
+                      MemoryPattern::PointerChase, WorkingSetLevel::L1, 0,    \
+                      "empty_loop", kind, src, src, 0, 8192)
+    X86_YMM_INDEX_CONTROL(
+        "conv_index_control_s8", x86_ymm_index_control_s8,
+        MemoryConversionKind::SignExtendLoad, 8),
+    X86_YMM_INDEX_CONTROL(
+        "conv_index_control_u8", x86_ymm_index_control_u8,
+        MemoryConversionKind::ZeroExtendLoad, 8),
+    X86_YMM_INDEX_CONTROL(
+        "conv_index_control_s16", x86_ymm_index_control_s16,
+        MemoryConversionKind::SignExtendLoad, 16),
+    X86_YMM_INDEX_CONTROL(
+        "conv_index_control_u16", x86_ymm_index_control_u16,
+        MemoryConversionKind::ZeroExtendLoad, 16),
+    X86_YMM_INDEX_CONTROL(
+        "conv_index_control_s32", x86_ymm_index_control_s32,
+        MemoryConversionKind::SignExtendLoad, 32),
+    X86_YMM_INDEX_CONTROL(
+        "conv_index_control_u32", x86_ymm_index_control_u32,
+        MemoryConversionKind::ZeroExtendLoad, 32),
+#define X86_YMM_EXTEND_LAT(label, symbol, kind, src, dst, elems, baseline)    \
+    X86_YMM_CONV_CASE(label "_index_chase_l1",                              \
+                      "L1 dependent extending-load index chase", MeasureMode::Latency,\
+                      symbol, 1, 4, 1, MemoryPattern::PointerChase,           \
+                      WorkingSetLevel::L1, src / 8 * elems, baseline, kind,   \
+                      src, dst, elems, 8192)
+    X86_YMM_EXTEND_LAT(
+        "vpmovsxbw", x86_ymm_vpmovsxbw_index, MemoryConversionKind::SignExtendLoad,
+        8, 16, 16, "conv_index_control_s8"),
+    X86_YMM_EXTEND_LAT(
+        "vpmovzxbw", x86_ymm_vpmovzxbw_index, MemoryConversionKind::ZeroExtendLoad,
+        8, 16, 16, "conv_index_control_u8"),
+    X86_YMM_EXTEND_LAT(
+        "vpmovsxbd", x86_ymm_vpmovsxbd_index, MemoryConversionKind::SignExtendLoad,
+        8, 32, 8, "conv_index_control_s8"),
+    X86_YMM_EXTEND_LAT(
+        "vpmovzxbd", x86_ymm_vpmovzxbd_index, MemoryConversionKind::ZeroExtendLoad,
+        8, 32, 8, "conv_index_control_u8"),
+    X86_YMM_EXTEND_LAT(
+        "vpmovsxbq", x86_ymm_vpmovsxbq_index, MemoryConversionKind::SignExtendLoad,
+        8, 64, 4, "conv_index_control_s8"),
+    X86_YMM_EXTEND_LAT(
+        "vpmovzxbq", x86_ymm_vpmovzxbq_index, MemoryConversionKind::ZeroExtendLoad,
+        8, 64, 4, "conv_index_control_u8"),
+    X86_YMM_EXTEND_LAT(
+        "vpmovsxwd", x86_ymm_vpmovsxwd_index, MemoryConversionKind::SignExtendLoad,
+        16, 32, 8, "conv_index_control_s16"),
+    X86_YMM_EXTEND_LAT(
+        "vpmovzxwd", x86_ymm_vpmovzxwd_index, MemoryConversionKind::ZeroExtendLoad,
+        16, 32, 8, "conv_index_control_u16"),
+    X86_YMM_EXTEND_LAT(
+        "vpmovsxwq", x86_ymm_vpmovsxwq_index, MemoryConversionKind::SignExtendLoad,
+        16, 64, 4, "conv_index_control_s16"),
+    X86_YMM_EXTEND_LAT(
+        "vpmovzxwq", x86_ymm_vpmovzxwq_index, MemoryConversionKind::ZeroExtendLoad,
+        16, 64, 4, "conv_index_control_u16"),
+    X86_YMM_EXTEND_LAT(
+        "vpmovsxdq", x86_ymm_vpmovsxdq_index, MemoryConversionKind::SignExtendLoad,
+        32, 64, 4, "conv_index_control_s32"),
+    X86_YMM_EXTEND_LAT(
+        "vpmovzxdq", x86_ymm_vpmovzxdq_index, MemoryConversionKind::ZeroExtendLoad,
+        32, 64, 4, "conv_index_control_u32"),
 };
 
 #else
