@@ -3166,6 +3166,137 @@ VECOPS_VFUNC V interleave_odd(V a, V b) {
 //                       Data type & size conversions                         //
 /* ************************************************************************** */
 
+namespace details {
+
+template <typename To, typename Ti>
+inline constexpr bool same_vector_bytes =
+    To::is_runtime_size == Ti::is_runtime_size &&
+    (To::is_runtime_size ? To::POW2 == Ti::POW2 : To::Bytes == Ti::Bytes);
+
+template <typename To, typename Ti>
+inline constexpr bool promote_even_compatible =
+    same_vector_bytes<To, Ti> &&
+    (sizeof(TypeOf<To>) == 2 * sizeof(TypeOf<Ti>) ||
+     sizeof(TypeOf<To>) == 4 * sizeof(TypeOf<Ti>) ||
+     sizeof(TypeOf<To>) == 8 * sizeof(TypeOf<Ti>));
+
+template <typename To, typename Ti>
+inline constexpr bool promote_odd_compatible =
+    same_vector_bytes<To, Ti> &&
+    sizeof(TypeOf<To>) == 2 * sizeof(TypeOf<Ti>);
+
+template <typename To, typename Ti>
+inline constexpr bool demote_even_compatible =
+    same_vector_bytes<To, Ti> &&
+    (sizeof(TypeOf<Ti>) == 2 * sizeof(TypeOf<To>) ||
+     sizeof(TypeOf<Ti>) == 4 * sizeof(TypeOf<To>) ||
+     sizeof(TypeOf<Ti>) == 8 * sizeof(TypeOf<To>));
+
+template <typename To, typename Ti>
+inline constexpr bool demote_odd_compatible =
+    same_vector_bytes<To, Ti> &&
+    sizeof(TypeOf<Ti>) == 2 * sizeof(TypeOf<To>);
+
+} // namespace details
+
+/**
+ * @brief Promote every 2nd, 4th, or 8th input element.
+ *
+ * Input and output vectors have the same byte size. For widening ratio R,
+ * result[i] = convert<To>(input[R * i]).
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+  requires details::promote_even_compatible<To, Vec2Tag<Vi>>
+VECOPS_VFUNC Vec<To> promote_even(To to, Vi vi) {
+  using namespace details;
+  constexpr Vec2Tag<Vi> ti;
+  return vmap(
+      to, [](auto tt, auto&& vv) { return word::promote_even(tt, vv); },
+      ShardVec(ti, vi)
+  );
+}
+
+/**
+ * @brief Promote odd-indexed input elements.
+ *
+ * Input and output vectors have the same byte size and the output element is
+ * twice as wide: result[i] = convert<To>(input[2 * i + 1]).
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+  requires details::promote_odd_compatible<To, Vec2Tag<Vi>>
+VECOPS_VFUNC Vec<To> promote_odd(To to, Vi vi) {
+  using namespace details;
+  constexpr Vec2Tag<Vi> ti;
+  return vmap(
+      to, [](auto tt, auto&& vv) { return word::promote_odd(tt, vv); },
+      ShardVec(ti, vi)
+  );
+}
+
+/**
+ * @brief Demote input elements into every 2nd, 4th, or 8th output lane.
+ *
+ * Lanes not populated by the conversion are copied from fallback.
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+  requires details::demote_even_compatible<To, Vec2Tag<Vi>>
+VECOPS_VFUNC Vec<To> demote_even(To to, Vi vi, Vec<To> fallback) {
+  using namespace details;
+  constexpr Vec2Tag<Vi> ti;
+  return vmap(
+      to, [](auto tt, auto&& vv, auto&& ff) { return word::demote_even(tt, vv, ff); },
+      ShardVec(ti, vi), ShardVec(to, fallback)
+  );
+}
+
+/**
+ * @brief Demote input elements into every 2nd, 4th, or 8th output lane.
+ *
+ * Lanes not populated by the conversion are zero.
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+  requires details::demote_even_compatible<To, Vec2Tag<Vi>>
+VECOPS_VFUNC Vec<To> demote_even(To to, Vi vi) {
+  using namespace details;
+  constexpr Vec2Tag<Vi> ti;
+  return vmap(
+      to, [](auto tt, auto&& vv) { return word::demote_even(tt, vv); },
+      ShardVec(ti, vi)
+  );
+}
+
+/**
+ * @brief Demote input elements into odd output lanes.
+ *
+ * Even lanes are copied from fallback.
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+  requires details::demote_odd_compatible<To, Vec2Tag<Vi>>
+VECOPS_VFUNC Vec<To> demote_odd(To to, Vi vi, Vec<To> fallback) {
+  using namespace details;
+  constexpr Vec2Tag<Vi> ti;
+  return vmap(
+      to, [](auto tt, auto&& vv, auto&& ff) { return word::demote_odd(tt, vv, ff); },
+      ShardVec(ti, vi), ShardVec(to, fallback)
+  );
+}
+
+/**
+ * @brief Demote input elements into odd output lanes.
+ *
+ * Even lanes are zero.
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+  requires details::demote_odd_compatible<To, Vec2Tag<Vi>>
+VECOPS_VFUNC Vec<To> demote_odd(To to, Vi vi) {
+  using namespace details;
+  constexpr Vec2Tag<Vi> ti;
+  return vmap(
+      to, [](auto tt, auto&& vv) { return word::demote_odd(tt, vv); },
+      ShardVec(ti, vi)
+  );
+}
+
 /**
  * @brief Promote elements to a larger type.
  *
@@ -3264,6 +3395,182 @@ VECOPS_VFUNC Vec<To> xconvert(To t, Vi v) {
     return vec::demote(t, v);
   } else {
     return vec::convert(t, v);
+  }
+}
+
+namespace details {
+
+#if defined(CPU_CAPABILITY_SVE)
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
+VECOPS_VFUNC Vec<To> promote_even_tagged(To to, Ti ti, Vec<Ti> vi) {
+  return vmap(
+      to, [](auto tt, auto&& vv) { return word::promote_even(tt, vv); },
+      ShardVec(ti, vi)
+  );
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
+VECOPS_VFUNC Vec<To> promote_odd_tagged(To to, Ti ti, Vec<Ti> vi) {
+  return vmap(
+      to, [](auto tt, auto&& vv) { return word::promote_odd(tt, vv); },
+      ShardVec(ti, vi)
+  );
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
+VECOPS_VFUNC Vec<To> demote_even_tagged(To to, Ti ti, Vec<Ti> vi) {
+  return vmap(
+      to, [](auto tt, auto&& vv) { return word::demote_even(tt, vv); },
+      ShardVec(ti, vi)
+  );
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
+VECOPS_VFUNC Vec<To> demote_odd_tagged(
+    To to, Ti ti, Vec<Ti> vi, Vec<To> fallback
+) {
+  return vmap(
+      to, [](auto tt, auto&& vv, auto&& ff) {
+        return word::demote_odd(tt, vv, ff);
+      },
+      ShardVec(ti, vi), ShardVec(to, fallback)
+  );
+}
+
+template <int Levels, TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
+VECOPS_VFUNC Vec<To> promote_unord_sve(To to, Ti ti, Vec<Ti> vi) {
+  if constexpr (Levels == 0) {
+    return vec::promote(to, vi);
+  } else {
+    constexpr Half<To> to_half;
+    constexpr Half<Ti> ti_half;
+    auto lo = promote_unord_sve<Levels - 1>(
+        to_half, ti_half, word::even(ti, vi)
+    );
+    auto hi = promote_unord_sve<Levels - 1>(
+        to_half, ti_half, word::odd(ti, vi)
+    );
+    return vec::concat(to, lo, hi);
+  }
+}
+
+template <int Levels, TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
+VECOPS_VFUNC Vec<To> demote_unord_sve(To to, Ti ti, Vec<Ti> vi) {
+  if constexpr (Levels == 0) {
+    return vec::demote(to, vi);
+  } else {
+    constexpr Half<To> to_half;
+    constexpr Half<Ti> ti_half;
+    auto lo = demote_unord_sve<Levels - 1>(
+        to_half, ti_half, vec::lower(ti, vi)
+    );
+    auto hi = demote_unord_sve<Levels - 1>(
+        to_half, ti_half, vec::upper(ti, vi)
+    );
+    return vec::interleave(to, lo, hi);
+  }
+}
+#endif
+
+} // namespace details
+
+/**
+ * @brief Promote elements using the platform's most efficient lane order.
+ *
+ * The element count is unchanged, but the result lane order is unspecified.
+ * A matching demote_unord back to the original element type restores the
+ * original lane order.
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+VECOPS_VFUNC Vec<To> promote_unord(To to, Vi vi) {
+  using Ei = TypeOf<Vi>;
+  using Eo = TypeOf<To>;
+  using Ti = Rebind<Ei, To>;
+  static_assert(
+      sizeof(Eo) == 2 * sizeof(Ei) ||
+      sizeof(Eo) == 4 * sizeof(Ei) ||
+      sizeof(Eo) == 8 * sizeof(Ei),
+      "promote_unord requires a 2x, 4x, or 8x wider output element"
+  );
+#if defined(CPU_CAPABILITY_SVE)
+  constexpr Ti ti;
+  constexpr int levels = log2_floor(sizeof(Eo) / sizeof(Ei));
+  if constexpr (levels == 1) {
+    constexpr Half<To> to_half;
+    return vec::concat(
+        to,
+        details::promote_even_tagged(to_half, ti, vi),
+        details::promote_odd_tagged(to_half, ti, vi)
+    );
+  } else {
+    return details::promote_unord_sve<levels>(to, ti, vi);
+  }
+#else
+  return vec::promote(to, vi);
+#endif
+}
+
+/**
+ * @brief Demote elements using the lane order paired with promote_unord.
+ *
+ * The element count is unchanged. Input lane order is interpreted according
+ * to the platform's unordered promotion layout.
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+VECOPS_VFUNC Vec<To> demote_unord(To to, Vi vi) {
+  using Ei = TypeOf<Vi>;
+  using Eo = TypeOf<To>;
+  using Ti = Rebind<Ei, To>;
+  static_assert(
+      sizeof(Ei) == 2 * sizeof(Eo) ||
+      sizeof(Ei) == 4 * sizeof(Eo) ||
+      sizeof(Ei) == 8 * sizeof(Eo),
+      "demote_unord requires a 2x, 4x, or 8x narrower output element"
+  );
+#if defined(CPU_CAPABILITY_SVE)
+  constexpr Ti ti;
+  constexpr int levels = log2_floor(sizeof(Ei) / sizeof(Eo));
+  if constexpr (levels == 1) {
+    constexpr Half<Ti> ti_half;
+    auto lo = details::demote_even_tagged(
+        to, ti_half, vec::lower(ti, vi)
+    );
+    return details::demote_odd_tagged(
+        to, ti_half, vec::upper(ti, vi), lo
+    );
+  } else {
+    return details::demote_unord_sve<levels>(to, ti, vi);
+  }
+#else
+  return vec::demote(to, vi);
+#endif
+}
+
+/**
+ * @brief Convert equal-width elements without imposing an additional order.
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+VECOPS_VFUNC Vec<To> convert_unord(To to, Vi vi) {
+  static_assert(
+      sizeof(TypeOf<To>) == sizeof(TypeOf<Vec2Tag<Vi>>),
+      "convert_unord requires equal-size input and output elements"
+  );
+  return vec::convert(to, vi);
+}
+
+/**
+ * @brief Adaptively promote, demote, or convert using unordered conversions.
+ */
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+VECOPS_VFUNC Vec<To> xconvert_unord(To to, Vi vi) {
+  using Ei = TypeOf<Vec2Tag<Vi>>;
+  using Eo = TypeOf<To>;
+  if constexpr (sizeof(Ei) < sizeof(Eo)) {
+    return vec::promote_unord(to, vi);
+  } else if constexpr (sizeof(Ei) > sizeof(Eo)) {
+    return vec::demote_unord(to, vi);
+  } else {
+    return vec::convert_unord(to, vi);
   }
 }
 

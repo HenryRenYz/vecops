@@ -221,6 +221,47 @@ TYPED_TEST(VecPromoteTest, BasicPromote) {
   }
 }
 
+TYPED_TEST(VecPromoteTest, UnorderedRoundTripPreservesLaneOrder) {
+  using TIn = typename TestFixture::TIn;
+  nint_t N = this->in_elements();
+
+  for (nint_t i = 0; i < N; ++i) {
+    this->in_data_[i] = static_cast<TIn>(i + 1);
+  }
+
+  auto v_in = loadu(this->t_in_, this->in_data_);
+  auto promoted = promote_unord(this->t_out_, v_in);
+  auto promoted_x = xconvert_unord(this->t_out_, v_in);
+
+  for (nint_t i = 0; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_near(
+        get(this->t_out_, promoted, i),
+        get(this->t_out_, promoted_x, i)
+    )) << "promoted i=" << i;
+  }
+
+#if !defined(CPU_CAPABILITY_SVE)
+  auto promoted_ordered = promote(this->t_out_, v_in);
+  for (nint_t i = 0; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_near(
+        get(this->t_out_, promoted_ordered, i),
+        get(this->t_out_, promoted, i)
+    )) << "ordered i=" << i;
+  }
+#endif
+
+  auto restored = demote_unord(this->t_in_, promoted);
+  auto restored_x = xconvert_unord(this->t_in_, promoted_x);
+  for (nint_t i = 0; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_near(
+        this->in_data_[i], get(this->t_in_, restored, i)
+    )) << "restored i=" << i;
+    EXPECT_TRUE(test_utils::values_near(
+        this->in_data_[i], get(this->t_in_, restored_x, i)
+    )) << "restored_x i=" << i;
+  }
+}
+
 TYPED_TEST(VecPromoteTest, PromoteWithZeroValues) {
   using TIn  = typename TestFixture::TIn;
   using TOut = typename TestFixture::TOut;
@@ -561,6 +602,26 @@ TYPED_TEST(VecConvertTest, BasicConvert) {
     TOut actual   = get(this->t_out_, v_out, i);
     EXPECT_TRUE(test_utils::values_near(expected, actual))
               << "i=" << i << " input=" << static_cast<long long>(this->in_data_[i]);
+  }
+}
+
+TYPED_TEST(VecConvertTest, UnorderedConversionForwardsToConvert) {
+  nint_t N = this->elements();
+
+  auto v_in = loadu(this->t_in_, this->in_data_);
+  auto expected = convert(this->t_out_, v_in);
+  auto converted = convert_unord(this->t_out_, v_in);
+  auto converted_x = xconvert_unord(this->t_out_, v_in);
+
+  for (nint_t i = 0; i < N; ++i) {
+    EXPECT_TRUE(test_utils::values_near(
+        get(this->t_out_, expected, i),
+        get(this->t_out_, converted, i)
+    )) << "converted i=" << i;
+    EXPECT_TRUE(test_utils::values_near(
+        get(this->t_out_, expected, i),
+        get(this->t_out_, converted_x, i)
+    )) << "converted_x i=" << i;
   }
 }
 

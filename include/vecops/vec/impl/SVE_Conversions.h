@@ -1688,6 +1688,226 @@ VECOPS_VFUNC Vec<T> convert(T t, V v) {
   return word::concat(t, lo, hi);
 }
 
+/* ======================================================================= */
+/*                   Interleaved native conversions                         */
+/* ======================================================================= */
+
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, float32_t>)>
+VECOPS_VFUNC Vec<T> promote_even(T, Vec<ViewAs<float16_t, T>> v) {
+  return svcvt_f32_f16_x(details::ptrue<float32_t>(), v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, float64_t>)>
+VECOPS_VFUNC Vec<T> promote_even(T, Vec<ViewAs<float32_t, T>> v) {
+  return svcvt_f64_f32_x(details::ptrue<float64_t>(), v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Vec<T> demote_even(T, Vec<ViewAs<float32_t, T>> v) {
+  return svcvt_f16_f32_z(details::ptrue<float32_t>(), v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, float32_t>)>
+VECOPS_VFUNC Vec<T> demote_even(T, Vec<ViewAs<float64_t, T>> v) {
+  return svcvt_f32_f64_z(details::ptrue<float64_t>(), v);
+}
+
+#if defined(__ARM_FEATURE_SVE2)
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, float32_t>)>
+VECOPS_VFUNC Vec<T> promote_odd(T, Vec<ViewAs<float16_t, T>> v) {
+  return svcvtlt_f32_f16_x(details::ptrue<float32_t>(), v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, float64_t>)>
+VECOPS_VFUNC Vec<T> promote_odd(T, Vec<ViewAs<float32_t, T>> v) {
+  return svcvtlt_f64_f32_x(details::ptrue<float64_t>(), v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, float16_t>)>
+VECOPS_VFUNC Vec<T> demote_odd(
+    T, Vec<ViewAs<float32_t, T>> v, Vec<T> fallback
+) {
+  return svcvtnt_f16_f32_m(fallback, details::ptrue<float32_t>(), v);
+}
+
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, float32_t>)>
+VECOPS_VFUNC Vec<T> demote_odd(
+    T, Vec<ViewAs<float64_t, T>> v, Vec<T> fallback
+) {
+  return svcvtnt_f32_f64_m(fallback, details::ptrue<float64_t>(), v);
+}
+
+#define VECOPS_SVE_INTERLEAVED_INT(TO, TI, SHLLB, SHLLT, QXTNB, QXTNT)      \
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, TO>)>                    \
+VECOPS_VFUNC Vec<T> promote_even(T, Vec<ViewAs<TI, T>> v) {                \
+  return SHLLB(v, 0);                                                        \
+}                                                                           \
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, TO>)>                    \
+VECOPS_VFUNC Vec<T> promote_odd(T, Vec<ViewAs<TI, T>> v) {                 \
+  return SHLLT(v, 0);                                                        \
+}                                                                           \
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, TI>)>                    \
+VECOPS_VFUNC Vec<T> demote_even(T, Vec<ViewAs<TO, T>> v) {                 \
+  return QXTNB(v);                                                           \
+}                                                                           \
+template <TLV_DECL_TAG(T), TL_IF(is_any<TypeOf<T>, TI>)>                    \
+VECOPS_VFUNC Vec<T> demote_odd(                                             \
+    T, Vec<ViewAs<TO, T>> v, Vec<T> fallback                               \
+) {                                                                         \
+  return QXTNT(fallback, v);                                                 \
+}
+
+VECOPS_SVE_INTERLEAVED_INT(
+    int16_t, int8_t, svshllb_n_s16, svshllt_n_s16, svqxtnb_s16, svqxtnt_s16
+)
+VECOPS_SVE_INTERLEAVED_INT(
+    int32_t, int16_t, svshllb_n_s32, svshllt_n_s32, svqxtnb_s32, svqxtnt_s32
+)
+VECOPS_SVE_INTERLEAVED_INT(
+    int64_t, int32_t, svshllb_n_s64, svshllt_n_s64, svqxtnb_s64, svqxtnt_s64
+)
+VECOPS_SVE_INTERLEAVED_INT(
+    uint16_t, uint8_t, svshllb_n_u16, svshllt_n_u16, svqxtnb_u16, svqxtnt_u16
+)
+VECOPS_SVE_INTERLEAVED_INT(
+    uint32_t, uint16_t, svshllb_n_u32, svshllt_n_u32, svqxtnb_u32, svqxtnt_u32
+)
+VECOPS_SVE_INTERLEAVED_INT(
+    uint64_t, uint32_t, svshllb_n_u64, svshllt_n_u64, svqxtnb_u64, svqxtnt_u64
+)
+
+#undef VECOPS_SVE_INTERLEAVED_INT
+#endif
+
+namespace interleaved_conversion_details {
+
+template <typename To, typename Ti>
+inline constexpr bool native_widen_float =
+    (is_any<TypeOf<To>, float32_t> && is_any<TypeOf<Ti>, float16_t>) ||
+    (is_any<TypeOf<To>, float64_t> && is_any<TypeOf<Ti>, float32_t>);
+
+template <typename To, typename Ti>
+inline constexpr bool native_narrow_float =
+    native_widen_float<Ti, To>;
+
+#if defined(__ARM_FEATURE_SVE2)
+template <typename To, typename Ti>
+inline constexpr bool native_widen_integer =
+    std::is_integral_v<TypeOf<To>> &&
+    std::is_integral_v<TypeOf<Ti>> &&
+    std::is_signed_v<TypeOf<To>> == std::is_signed_v<TypeOf<Ti>> &&
+    sizeof(TypeOf<To>) == 2 * sizeof(TypeOf<Ti>);
+
+template <typename To, typename Ti>
+inline constexpr bool native_narrow_integer =
+    native_widen_integer<Ti, To>;
+#else
+template <typename To, typename Ti>
+inline constexpr bool native_widen_integer = false;
+
+template <typename To, typename Ti>
+inline constexpr bool native_narrow_integer = false;
+#endif
+
+template <typename To, typename Ti>
+inline constexpr bool native_promote_even =
+    native_widen_float<To, Ti> || native_widen_integer<To, Ti>;
+
+template <typename To, typename Ti>
+inline constexpr bool native_promote_odd =
+#if defined(__ARM_FEATURE_SVE2)
+    native_widen_float<To, Ti> || native_widen_integer<To, Ti>;
+#else
+    false;
+#endif
+
+template <typename To, typename Ti>
+inline constexpr bool native_demote_even =
+    native_narrow_float<To, Ti> || native_narrow_integer<To, Ti>;
+
+template <typename To, typename Ti>
+inline constexpr bool native_demote_odd_fallback =
+#if defined(__ARM_FEATURE_SVE2)
+    native_narrow_float<To, Ti> || native_narrow_integer<To, Ti>;
+#else
+    false;
+#endif
+
+template <int Levels, TLV_DECL_TAG(T), TLV_DECL_VEC(V)>
+VECOPS_VFUNC auto select_even(T t, V v) {
+  if constexpr (Levels == 0) {
+    return v;
+  } else {
+    return select_even<Levels - 1>(Half<T>{}, word::even(t, v));
+  }
+}
+
+template <int Levels, TLV_DECL_TAG(T), TLV_DECL_VEC(V)>
+VECOPS_VFUNC Vec<T> insert_even(T t, V values, Vec<T> fallback) {
+  if constexpr (Levels == 0) {
+    return values;
+  } else {
+    auto fallback_even = word::even(t, fallback);
+    auto fallback_odd = word::odd(t, fallback);
+    auto result_even = insert_even<Levels - 1>(Half<T>{}, values, fallback_even);
+    return word::interleave(t, result_even, fallback_odd);
+  }
+}
+
+} // namespace interleaved_conversion_details
+
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+  requires (!interleaved_conversion_details::native_promote_even<
+            To, Vec2Tag<Vi>>)
+VECOPS_VFUNC Vec<To> promote_even(To to, Vi vi) {
+  using Ti = Vec2Tag<Vi>;
+  constexpr Ti ti;
+  constexpr int levels = log2_floor(sizeof(TypeOf<To>) / sizeof(TypeOf<Ti>));
+  auto selected = interleaved_conversion_details::select_even<levels>(ti, vi);
+  return word::promote(to, selected);
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+  requires (!interleaved_conversion_details::native_promote_odd<
+            To, Vec2Tag<Vi>>)
+VECOPS_VFUNC Vec<To> promote_odd(To to, Vi vi) {
+  constexpr Vec2Tag<Vi> ti;
+  return word::promote(to, word::odd(ti, vi));
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+VECOPS_VFUNC Vec<To> demote_even(To to, Vi vi, Vec<To> fallback) {
+  using Ti = Vec2Tag<Vi>;
+  constexpr Ti ti;
+  constexpr int levels = log2_floor(sizeof(TypeOf<Ti>) / sizeof(TypeOf<To>));
+  using TCompact = Rebind<TypeOf<To>, Ti>;
+  auto compact = word::demote(TCompact{}, vi);
+  return interleaved_conversion_details::insert_even<levels>(to, compact, fallback);
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+  requires (!interleaved_conversion_details::native_demote_even<
+            To, Vec2Tag<Vi>>)
+VECOPS_VFUNC Vec<To> demote_even(To to, Vi vi) {
+  return word::demote_even(to, vi, word::zeros(to));
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+  requires (!interleaved_conversion_details::native_demote_odd_fallback<
+            To, Vec2Tag<Vi>>)
+VECOPS_VFUNC Vec<To> demote_odd(To to, Vi vi, Vec<To> fallback) {
+  using Ti = Vec2Tag<Vi>;
+  constexpr Ti ti;
+  using TCompact = Rebind<TypeOf<To>, Ti>;
+  auto compact = word::demote(TCompact{}, vi);
+  return word::interleave(to, word::even(to, fallback), compact);
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+VECOPS_VFUNC Vec<To> demote_odd(To to, Vi vi) {
+  return word::demote_odd(to, vi, word::zeros(to));
+}
+
 }  // namespace word
 }  // namespace vecops::vec::CPU_CAPABILITY
 

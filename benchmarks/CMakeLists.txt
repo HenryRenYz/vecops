@@ -103,12 +103,21 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
         ${CMAKE_CURRENT_SOURCE_DIR}/inst/InstructionBenchSVE.cpp)
 endif()
 
+if(VECOPS_ARCH_FAMILY STREQUAL "x86")
+    set(INSTRUCTION_BENCH_ARCH AVX2 AVX512 Native)
+else()
+    set(INSTRUCTION_BENCH_ARCH SVE SVE2 Native)
+endif()
+
 add_multiarch_benchmark(InstructionBench
     FILES ${INSTRUCTION_BENCH_FILES}
-    ARCH Native
+    ARCH ${INSTRUCTION_BENCH_ARCH}
 )
 
 # Keep the instruction kernels easy to audit and prevent project-wide release
 # or LTO settings from changing their intended O2 code shape.
-target_compile_options(InstructionBench-Native PRIVATE -O2 -fno-lto)
-set_property(TARGET InstructionBench-Native PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+foreach(CODE ${INSTRUCTION_BENCH_ARCH})
+    target_compile_options(InstructionBench-${CODE} PRIVATE -O2 -fno-lto)
+    set_property(TARGET InstructionBench-${CODE}
+        PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+endforeach()

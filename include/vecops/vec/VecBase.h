@@ -975,7 +975,10 @@ using Rebind = typename details::TagMaker<
 template <typename TNew, typename TTag>
 using ViewAs = typename details::TagMaker<
     TNew,
-    TTag::is_runtime_size ? TTag::N : (TTag::N * sizeof(TypeOf<TTag>) / sizeof(TNew)),
+    TTag::is_runtime_size
+        ? TTag::N
+        : (TTag::N * static_cast<nint_t>(sizeof(TypeOf<TTag>)) /
+           static_cast<nint_t>(sizeof(TNew))),
     TTag::POW2
 >::Type;
 

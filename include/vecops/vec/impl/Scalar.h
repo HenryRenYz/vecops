@@ -1534,6 +1534,75 @@ VECOPS_VFUNC Vec<T> convert(T t, V v) {
   return details::convert_impl(t, v);
 }
 
+namespace interleaved_conversion_details {
+
+template <int Levels, TLV_DECL_TAG(T), TLV_DECL_VEC(V)>
+VECOPS_VFUNC auto select_even(T t, V v) {
+  if constexpr (Levels == 0) {
+    return v;
+  } else {
+    return select_even<Levels - 1>(Half<T>{}, word::even(t, v));
+  }
+}
+
+template <int Levels, TLV_DECL_TAG(T), TLV_DECL_VEC(V)>
+VECOPS_VFUNC Vec<T> insert_even(T t, V values, Vec<T> fallback) {
+  if constexpr (Levels == 0) {
+    return values;
+  } else {
+    auto fallback_even = word::even(t, fallback);
+    auto fallback_odd = word::odd(t, fallback);
+    auto result_even = insert_even<Levels - 1>(Half<T>{}, values, fallback_even);
+    return word::interleave(t, result_even, fallback_odd);
+  }
+}
+
+} // namespace interleaved_conversion_details
+
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+VECOPS_VFUNC Vec<To> promote_even(To to, Vi vi) {
+  using Ti = Vec2Tag<Vi>;
+  constexpr Ti ti;
+  constexpr int levels = log2_floor(sizeof(TypeOf<To>) / sizeof(TypeOf<Ti>));
+  auto selected = interleaved_conversion_details::select_even<levels>(ti, vi);
+  return word::promote(to, selected);
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+VECOPS_VFUNC Vec<To> promote_odd(To to, Vi vi) {
+  constexpr Vec2Tag<Vi> ti;
+  return word::promote(to, word::odd(ti, vi));
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+VECOPS_VFUNC Vec<To> demote_even(To to, Vi vi, Vec<To> fallback) {
+  using Ti = Vec2Tag<Vi>;
+  constexpr Ti ti;
+  constexpr int levels = log2_floor(sizeof(TypeOf<Ti>) / sizeof(TypeOf<To>));
+  using TCompact = Rebind<TypeOf<To>, Ti>;
+  auto compact = word::demote(TCompact{}, vi);
+  return interleaved_conversion_details::insert_even<levels>(to, compact, fallback);
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+VECOPS_VFUNC Vec<To> demote_even(To to, Vi vi) {
+  return word::demote_even(to, vi, word::zeros(to));
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+VECOPS_VFUNC Vec<To> demote_odd(To to, Vi vi, Vec<To> fallback) {
+  using Ti = Vec2Tag<Vi>;
+  constexpr Ti ti;
+  using TCompact = Rebind<TypeOf<To>, Ti>;
+  auto compact = word::demote(TCompact{}, vi);
+  return word::interleave(to, word::even(to, fallback), compact);
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_VEC(Vi)>
+VECOPS_VFUNC Vec<To> demote_odd(To to, Vi vi) {
+  return word::demote_odd(to, vi, word::zeros(to));
+}
+
 // ---- Mask promotion / demotion / conversion ----
 // Scalar masks store bits in std::bitset<N> where N = element count.
 // Promote/demote change element width so bitset sizes differ; copy bit-by-bit.
