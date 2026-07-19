@@ -419,7 +419,7 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
 }
 
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, T default_v = T()) {
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, TypeOf<T> default_v = TypeOf<T>()) {
   return vec::loadu(t, p, n, vec::fill(t, default_v));
 }
 
@@ -440,7 +440,7 @@ VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
 }
 
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC auto load(T t, const TypeOf<T>* p, nint_t n, T default_v = T()) {
+VECOPS_VFUNC auto load(T t, const TypeOf<T>* p, nint_t n, TypeOf<T> default_v = TypeOf<T>()) {
   return vec::load(t, p, n, vec::fill(t, default_v));
 }
 
@@ -465,7 +465,7 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) 
 }
 
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, T default_v = T()) {
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, TypeOf<T> default_v = TypeOf<T>()) {
   return vec::loadu(t, p, m, vec::fill(t, default_v));
 }
 
@@ -487,7 +487,7 @@ VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
 }
 
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, T default_v = T()) {
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, TypeOf<T> default_v = TypeOf<T>()) {
   return vec::load(t, p, m, vec::fill(t, default_v));
 }
 
