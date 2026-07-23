@@ -237,7 +237,7 @@ TYPED_TEST(DataAccessTypedTest, StridedOutputScattersTailOnly) {
   for (nint_t i = 0; i < size(t); ++i) {
     values[static_cast<size_t>(i)] = static_cast<T>(i + 11);
   }
-  auto v = loadu(t, values.data());
+  auto v = load(t, values.data());
   const nint_t count = std::min<nint_t>(std::max<nint_t>(1, size(t) - 1), 62);
   output(t, v, count, nint_t{1}, nint_t{1});
 
@@ -291,7 +291,7 @@ TEST(DataAccessTransformTest, SecondLastContiguousOutputFlushesInDestructor) {
     for (nint_t i = 0; i < size(t); ++i) {
       values[static_cast<size_t>(i)] = static_cast<T>(i + 1);
     }
-    auto v = loadu(t, values.data());
+    auto v = load(t, values.data());
     output(t, v, nint_t{4}, nint_t{1}, nint_t{1});
     EXPECT_EQ(dst[4], -9);
   }
@@ -361,7 +361,7 @@ TEST(DataAccessSpecWrapperTest, OutputHelperBindsTensorWithWorkspace) {
   for (nint_t i = 0; i < size(t); ++i) {
     values[static_cast<size_t>(i)] = static_cast<T>(100 + i);
   }
-  auto v = loadu(t, values.data());
+  auto v = load(t, values.data());
   accessor(t, v, nint_t{3}, nint_t{1}, nint_t{2});
 
   EXPECT_EQ(dst[7], 100);
@@ -462,7 +462,7 @@ TEST(DataAccessHOPSliceTest, SlicedSecondLastOutputAccessorFlushesOnlyFromParent
     for (nint_t i = 0; i < size(tag); ++i) {
       values[static_cast<size_t>(i)] = static_cast<T>(10 + i);
     }
-    auto v = loadu(tag, values.data());
+    auto v = load(tag, values.data());
 
     hop::for_each<0>(
         [&](const auto& row) {

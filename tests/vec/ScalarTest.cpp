@@ -238,13 +238,13 @@ TEST_F(VecScalarTest, Mwhilegt) {
 }
 
 // ============================================================================
-// loadu/storeu Tests
+// load/store Tests
 // ============================================================================
 
 TEST_F(VecScalarTest, LoaduBasic) {
   FixedTag<float32_t, 16> t;
 
-  auto v = loadu(t, aligned_data_);
+  auto v = load(t, aligned_data_);
 
   for (int i = 0; i < 16; ++i) {
     EXPECT_FLOAT_EQ(v[i], static_cast<float>(i));
@@ -254,8 +254,8 @@ TEST_F(VecScalarTest, LoaduBasic) {
 TEST_F(VecScalarTest, StoreuBasic) {
   FixedTag<float32_t, 16> t;
 
-  auto v = loadu(t, aligned_data_);
-  storeu(t, aligned_out_, v);
+  auto v = load(t, aligned_data_);
+  store(t, aligned_out_, v);
 
   for (int i = 0; i < 16; ++i) {
     EXPECT_FLOAT_EQ(aligned_out_[i], static_cast<float>(i));
@@ -265,7 +265,7 @@ TEST_F(VecScalarTest, StoreuBasic) {
 TEST_F(VecScalarTest, LoaduInitializerList) {
   FixedTag<float32_t, 4> t;
 
-  auto v = loadu(t, {1.0f, 2.0f, 3.0f, 4.0f});
+  auto v = load(t, {1.0f, 2.0f, 3.0f, 4.0f});
 
   EXPECT_FLOAT_EQ(v[0], 1.0f);
   EXPECT_FLOAT_EQ(v[1], 2.0f);
@@ -318,7 +318,8 @@ TEST_F(VecScalarTest, LoaduWithN) {
   FixedTag<float32_t, 16> t;
 
   auto default_v = fill(t, -99.0f);
-  auto v = loadu(t, aligned_data_, 5, default_v);
+  auto v = load(
+      t, aligned_data_, opt::first(5), opt::merge(default_v));
 
   // First 5 elements from memory
   for (int i = 0; i < 5; ++i) {
@@ -334,7 +335,8 @@ TEST_F(VecScalarTest, LoaduWithNZero) {
   FixedTag<float32_t, 16> t;
 
   auto default_v = fill(t, -99.0f);
-  auto v = loadu(t, aligned_data_, 0, default_v);
+  auto v = load(
+      t, aligned_data_, opt::first(0), opt::merge(default_v));
 
   for (int i = 0; i < 16; ++i) {
     EXPECT_FLOAT_EQ(v[i], -99.0f);
@@ -345,7 +347,8 @@ TEST_F(VecScalarTest, LoaduWithNFull) {
   FixedTag<float32_t, 16> t;
 
   auto default_v = fill(t, -99.0f);
-  auto v = loadu(t, aligned_data_, 16, default_v);
+  auto v = load(
+      t, aligned_data_, opt::first(16), opt::merge(default_v));
 
   for (int i = 0; i < 16; ++i) {
     EXPECT_FLOAT_EQ(v[i], static_cast<float>(i));
@@ -356,7 +359,7 @@ TEST_F(VecScalarTest, StoreuWithN) {
   FixedTag<float32_t, 16> t;
 
   auto v = fill(t, 42.0f);
-  storeu(t, aligned_out_, 5, v);
+  store(t, aligned_out_, v, opt::first(5));
 
   // First 5 elements stored
   for (int i = 0; i < 5; ++i) {
@@ -375,7 +378,7 @@ TEST_F(VecScalarTest, StoreuWithNZero) {
   for (int i = 0; i < 16; ++i) aligned_out_[i] = -1.0f;
 
   auto v = fill(t, 42.0f);
-  storeu(t, aligned_out_, 0, v);
+  store(t, aligned_out_, v, opt::first(0));
 
   // Nothing should be stored
   for (int i = 0; i < 16; ++i) {
@@ -393,7 +396,8 @@ TEST_F(VecScalarTest, LoaduWithMask) {
   auto m = mwhilelt(t, 0, 5); // First 5 bits true
   auto default_v = fill(t, -99.0f);
 
-  auto v = loadu(t, aligned_data_, m, default_v);
+  auto v = load(
+      t, aligned_data_, opt::masked(m), opt::merge(default_v));
 
   // First 5 from memory
   for (int i = 0; i < 5; ++i) {
@@ -411,7 +415,7 @@ TEST_F(VecScalarTest, StoreuWithMask) {
   auto m = mwhilelt(t, 0, 5);
   auto v = fill(t, 42.0f);
 
-  storeu(t, aligned_out_, m, v);
+  store(t, aligned_out_, v, opt::masked(m));
 
   // First 5 stored
   for (int i = 0; i < 5; ++i) {
@@ -429,7 +433,7 @@ TEST_F(VecScalarTest, StoreuWithMaskAll) {
   auto m = mtrue(t);
   auto v = fill(t, 42.0f);
 
-  storeu(t, aligned_out_, m, v);
+  store(t, aligned_out_, v, opt::masked(m));
 
   for (int i = 0; i < 16; ++i) {
     EXPECT_FLOAT_EQ(aligned_out_[i], 42.0f);
@@ -445,7 +449,7 @@ TEST_F(VecScalarTest, StoreuWithMaskNone) {
   auto m = mfalse(t);
   auto v = fill(t, 42.0f);
 
-  storeu(t, aligned_out_, m, v);
+  store(t, aligned_out_, v, opt::masked(m));
 
   // Nothing should be stored
   for (int i = 0; i < 16; ++i) {
@@ -670,7 +674,7 @@ TEST_F(VecScalarTest, Int32Operations) {
 TEST_F(VecScalarTest, POW2PositiveLoadStore) {
   Tag<float32_t, 4, 1> t; // size = 8
 
-  auto v = loadu(t, aligned_data_);
+  auto v = load(t, aligned_data_);
 
   for (int j = 0; j < 2; ++j) {
     for (int i = 0; i < 4; ++i) {
@@ -678,7 +682,7 @@ TEST_F(VecScalarTest, POW2PositiveLoadStore) {
     }
   }
 
-  storeu(t, aligned_out_, v);
+  store(t, aligned_out_, v);
 
   for (int i = 0; i < 8; ++i) {
     EXPECT_FLOAT_EQ(aligned_out_[i], static_cast<float>(i));
@@ -688,7 +692,7 @@ TEST_F(VecScalarTest, POW2PositiveLoadStore) {
 TEST_F(VecScalarTest, POW2NegativeLoadStore) {
   Tag<float32_t, 8, -1> t; // size = 4
 
-  auto v = loadu(t, aligned_data_);
+  auto v = load(t, aligned_data_);
 
   for (int i = 0; i < 4; ++i) {
     EXPECT_FLOAT_EQ(v[i], static_cast<float>(i));
@@ -704,8 +708,8 @@ static void scalar_copy(const float* from, float* to, nint_t len) {
   FixedTag<float32_t, 16> t;
   nint_t i;
   for (i = 0; i <= len - size(t); i += size(t)) {
-    auto v = loadu(t, from + i);
-    storeu(t, to + i, v);
+    auto v = load(t, from + i);
+    store(t, to + i, v);
   }
   for (; i < len; ++i) {
     to[i] = from[i];
@@ -749,7 +753,7 @@ TEST_F(VecScalarTest, UnalignedPointer) {
 
   FixedTag<float32_t, 4> t;
 
-  auto v = loadu(t, unaligned);
+  auto v = load(t, unaligned);
 
   for (int i = 0; i < 4; ++i) {
     EXPECT_FLOAT_EQ(v[i], static_cast<float>(i + 1));
@@ -761,8 +765,8 @@ TEST_F(VecScalarTest, UnalignedPointer) {
 // ============================================================================
 TEST_F(VecScalarTest, Add) {
   FixedTag<float32_t, 16> t;
-  auto a = loadu(t, aligned_data_);
-  auto b = loadu(t, aligned_data_ + 1);
+  auto a = load(t, aligned_data_);
+  auto b = load(t, aligned_data_ + 1);
   auto m = mwhilelt(t, 0, 8);
   static_assert(std::is_same_v<decltype(a), ScalarArray<float, 16>>);
   static_assert(is_element_type<float>);

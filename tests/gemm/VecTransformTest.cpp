@@ -23,7 +23,7 @@ struct PartialCoordinateFn {
     if constexpr (std::is_same_v<Eo_, Ei_>) {
       return bitcast(t, v_in);
     } else {
-      return bitcast(t, xconvert(t, v_in));
+      return bitcast(t, convert(t, v_in));
     }
   }
 };
@@ -35,7 +35,7 @@ struct PartialElementwiseFn {
     if constexpr (std::is_same_v<Eo_, Ei_>) {
       return bitcast(t, v_in);
     } else {
-      return bitcast(t, xconvert(t, v_in));
+      return bitcast(t, convert(t, v_in));
     }
   }
 };
@@ -53,7 +53,7 @@ struct LimitedMaxInputVecFn : public VecTransform<Eo_, Ei_> {
       TL_IF(LimitedMaxInputVecFn::min_output_pow2 <= vec::scalable_pow2_of<To>
          && vec::scalable_pow2_of<To> <= LimitedMaxInputVecFn::max_output_pow2)>
   Vec<To> operator()(To, Vec<Rebind<Ei_, To>> v_in, nint_t, nint_t) const {
-    return bitcast(To{}, xconvert(To{}, v_in));
+    return bitcast(To{}, convert(To{}, v_in));
   }
 };
 
@@ -165,9 +165,9 @@ void runPositionalLambdaTest() {
   for (nint_t i = 0; i < N_in; ++i) buf_in[i] = get_value<Ei>(i);
   for (nint_t i = 0; i < N_out; ++i) buf_ref[i] = convert<Eo, Ei>(buf_in[i % N_in]);
 
-  auto v_in = loadu(t_i, buf_in);
+  auto v_in = load(t_i, buf_in);
   auto v_out = adapter(t_o, v_in, 0, 0);
-  storeu(t_o, buf_out, v_out);
+  store(t_o, buf_out, v_out);
 
   for (nint_t i = 0; i < N_out; ++i) {
     EXPECT_TRUE(values_close(buf_ref[i], buf_out[i]))
@@ -204,9 +204,9 @@ void runElementwiseLambdaTest() {
   for (nint_t i = 0; i < N_in; ++i) buf_in[i] = get_value<Ei>(i);
   for (nint_t i = 0; i < N_out; ++i) buf_ref[i] = convert<Eo, Ei>(buf_in[i % N_in]);
 
-  auto v_in = loadu(t_i, buf_in);
+  auto v_in = load(t_i, buf_in);
   auto v_out = adapter(t_o, v_in);
-  storeu(t_o, buf_out, v_out);
+  store(t_o, buf_out, v_out);
 
   for (nint_t i = 0; i < N_out; ++i) {
     EXPECT_TRUE(values_close(buf_ref[i], buf_out[i]))
@@ -242,9 +242,9 @@ void runConversionTest() {
 
   for (nint_t i = 0; i < N_in; ++i) buf_in[i] = get_value<Ei>(i);
 
-  auto v_in = loadu(t_i, buf_in);
+  auto v_in = load(t_i, buf_in);
   auto v_out = outer(t_o, v_in, 0, 0);
-  storeu(t_o, buf_out, v_out);
+  store(t_o, buf_out, v_out);
 
   for (nint_t i = 0; i < N_out; ++i) {
     Eo expected = convert<Eo, Ei>(buf_in[i % N_in]);
@@ -279,9 +279,9 @@ void runConversionBranchCTest() {
 
   for (nint_t i = 0; i < N_in; ++i) buf_in[i] = get_value<Ei>(i);
 
-  auto v_in = loadu(t_i, buf_in);
+  auto v_in = load(t_i, buf_in);
   auto v_out = outer(t_o, v_in, 0, 0);
-  storeu(t_o, buf_out, v_out);
+  store(t_o, buf_out, v_out);
 
   for (nint_t i = 0; i < N_out; ++i) {
     Eo expected = convert<Eo, Ei>(buf_in[i % N_in]);
@@ -317,11 +317,11 @@ void runConversionElementwiseTest() {
 
   for (nint_t i = 0; i < N; ++i) buf_in[i] = get_value<Ei>(i);
 
-  auto v_in = loadu(t_i, buf_in);
+  auto v_in = load(t_i, buf_in);
   auto v_with = outer(t_o, v_in, 42, 99);
   auto v_without = outer(t_o, v_in);
-  storeu(t_o, buf_out_coord, v_with);
-  storeu(t_o, buf_out_nocoord, v_without);
+  store(t_o, buf_out_coord, v_with);
+  store(t_o, buf_out_nocoord, v_without);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(values_close(buf_out_coord[i], buf_out_nocoord[i]))
@@ -492,9 +492,9 @@ TEST(LambdaVecTransform, upward_skip_multiple) {
   auto b_in = alloc_aligned<float32_t>(N);
   auto b_out = alloc_aligned<float32_t>(N);
   for (nint_t i = 0; i < N; ++i) b_in[i] = get_value<float32_t>(i);
-  auto v_in = loadu(t, b_in);
+  auto v_in = load(t, b_in);
   auto v_out = adapter(t, v_in, 0, 0);
-  storeu(t, b_out, v_out);
+  store(t, b_out, v_out);
   for (nint_t i = 0; i < N; ++i) EXPECT_TRUE(values_close(b_in[i], b_out[i]));
   std::free(b_in);
   std::free(b_out);
@@ -514,9 +514,9 @@ TEST(ElementwiseVecTransform, upward_skip_multiple) {
   auto b_in = alloc_aligned<float32_t>(N);
   auto b_out = alloc_aligned<float32_t>(N);
   for (nint_t i = 0; i < N; ++i) b_in[i] = get_value<float32_t>(i);
-  auto v_in = loadu(t, b_in);
+  auto v_in = load(t, b_in);
   auto v_out = adapter(t, v_in);
-  storeu(t, b_out, v_out);
+  store(t, b_out, v_out);
   for (nint_t i = 0; i < N; ++i) EXPECT_TRUE(values_close(b_in[i], b_out[i]));
   std::free(b_in);
   std::free(b_out);
@@ -538,9 +538,9 @@ TEST(LambdaVecTransform, downward_deep) {
   auto b_in = alloc_aligned<float32_t>(N);
   auto b_out = alloc_aligned<float32_t>(N);
   for (nint_t i = 0; i < N; ++i) b_in[i] = get_value<float32_t>(i);
-  auto v_in = loadu(t, b_in);
+  auto v_in = load(t, b_in);
   auto v_out = adapter(t, v_in, 0, 0);
-  storeu(t, b_out, v_out);
+  store(t, b_out, v_out);
   for (nint_t i = 0; i < N; ++i) EXPECT_TRUE(values_close(b_in[i], b_out[i]));
   std::free(b_in);
   std::free(b_out);

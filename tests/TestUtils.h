@@ -107,12 +107,12 @@ template <typename T>
 }
 
 template <typename T>
-T* alloc_aligned(size_t count) {
+T* alloc_aligned(
+    size_t count, size_t alignment = vecops::vec::DEFAULT_ALIGNMENT) {
   size_t bytes = count * sizeof(T);
   size_t aligned_bytes =
-      ((bytes + vecops::vec::DEFAULT_ALIGNMENT - 1) / vecops::vec::DEFAULT_ALIGNMENT) *
-      vecops::vec::DEFAULT_ALIGNMENT;
-  void* ptr = std::aligned_alloc(vecops::vec::DEFAULT_ALIGNMENT, aligned_bytes);
+      ((bytes + alignment - 1) / alignment) * alignment;
+  void* ptr = std::aligned_alloc(alignment, aligned_bytes);
   if (ptr == nullptr) throw std::bad_alloc();
   return static_cast<T*>(ptr);
 }

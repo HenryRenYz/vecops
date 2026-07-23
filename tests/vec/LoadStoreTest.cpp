@@ -38,8 +38,9 @@ protected:
     multi2_size = size(t2);
     multi4_size = size(t4);
 
-    aligned_data_ = test_utils::alloc_aligned<T>(256);
-    aligned_out_ = test_utils::alloc_aligned<T>(256);
+    const auto alignment = static_cast<size_t>(memory_alignment(t));
+    aligned_data_ = test_utils::alloc_aligned<T>(256, alignment);
+    aligned_out_ = test_utils::alloc_aligned<T>(256, alignment);
 
     for (size_t i = 0; i < 256; ++i) {
       aligned_data_[i] = test_utils::get_test_value<T>(i);
@@ -417,14 +418,14 @@ TYPED_TEST(VecLoadStoreTest, MwhileleMwhilegt) {
 }
 
 // ============================================================================
-// loadu / storeu Tests
+// load / store Tests
 // ============================================================================
 
 TYPED_TEST(VecLoadStoreTest, LoaduBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto v = loadu(t, this->aligned_data_);
+  auto v = load(t, this->aligned_data_);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -436,8 +437,8 @@ TYPED_TEST(VecLoadStoreTest, StoreuBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto v = loadu(t, this->aligned_data_);
-  storeu(t, this->aligned_out_, v);
+  auto v = load(t, this->aligned_data_);
+  store(t, this->aligned_out_, v);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -452,9 +453,9 @@ TYPED_TEST(VecLoadStoreTest, LoaduStoreuRoundTrip) {
 
   T fill_val = test_utils::get_test_value<T>(123);
   auto v = fill(t, fill_val);
-  storeu(t, this->aligned_out_, v);
+  store(t, this->aligned_out_, v);
 
-  auto v2 = loadu(t, this->aligned_out_);
+  auto v2 = load(t, this->aligned_out_);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(fill_val, get(v2, i)));
@@ -471,7 +472,8 @@ TYPED_TEST(VecLoadStoreTest, LoaduWithN) {
   auto default_v = fill(t, default_val);
   nint_t n = N / 2;
 
-  auto v = loadu(t, this->aligned_data_, n, default_v);
+  auto v = load(
+      t, this->aligned_data_, opt::first(n), opt::merge(default_v));
 
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -490,7 +492,8 @@ TYPED_TEST(VecLoadStoreTest, LoaduWithNZero) {
   T default_val = test_utils::get_test_value<T>(999);
   auto default_v = fill(t, default_val);
 
-  auto v = loadu(t, this->aligned_data_, 0, default_v);
+  auto v = load(
+      t, this->aligned_data_, opt::first(0), opt::merge(default_v));
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(default_val, get(v, i)));
@@ -505,7 +508,8 @@ TYPED_TEST(VecLoadStoreTest, LoaduWithNFull) {
   T default_val = test_utils::get_test_value<T>(999);
   auto default_v = fill(t, default_val);
 
-  auto v = loadu(t, this->aligned_data_, N, default_v);
+  auto v = load(
+      t, this->aligned_data_, opt::first(N), opt::merge(default_v));
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -527,7 +531,7 @@ TYPED_TEST(VecLoadStoreTest, StoreuWithN) {
   auto v = fill(t, fill_val);
   nint_t n = N / 2;
 
-  storeu(t, this->aligned_out_, n, v);
+  store(t, this->aligned_out_, v, opt::first(n));
 
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(fill_val, this->aligned_out_[i]));
@@ -547,7 +551,7 @@ TYPED_TEST(VecLoadStoreTest, StoreuWithNZero) {
   T fill_val = test_utils::get_test_value<T>(42);
   auto v = fill(t, fill_val);
 
-  storeu(t, this->aligned_out_, 0, v);
+  store(t, this->aligned_out_, v, opt::first(0));
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(sentinel, this->aligned_out_[i]));
@@ -562,7 +566,7 @@ TYPED_TEST(VecLoadStoreTest, LoadAligned) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto v = load(t, this->aligned_data_);
+  auto v = load(t, this->aligned_data_, mem::aligned);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -574,8 +578,8 @@ TYPED_TEST(VecLoadStoreTest, StoreAligned) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto v = load(t, this->aligned_data_);
-  store(t, this->aligned_out_, v);
+  auto v = load(t, this->aligned_data_, mem::aligned);
+  store(t, this->aligned_out_, v, mem::aligned);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -593,7 +597,9 @@ TYPED_TEST(VecLoadStoreTest, LoadWithN) {
   auto default_v = fill(t, default_val);
   nint_t n = N / 2;
 
-  auto v = load(t, this->aligned_data_, n, default_v);
+  auto v = load(
+      t, this->aligned_data_, mem::aligned, opt::first(n),
+      opt::merge(default_v));
 
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -618,7 +624,7 @@ TYPED_TEST(VecLoadStoreTest, StoreWithN) {
   auto v = fill(t, fill_val);
   nint_t n = N / 2;
 
-  store(t, this->aligned_out_, n, v);
+  store(t, this->aligned_out_, v, mem::aligned, opt::first(n));
 
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(fill_val, this->aligned_out_[i]));
@@ -640,7 +646,8 @@ TYPED_TEST(VecLoadStoreTest, LoaduWithMask) {
   T default_val = test_utils::get_test_value<T>(999);
   auto default_v = fill(t, default_val);
 
-  auto v = loadu(t, this->aligned_data_, m, default_v);
+  auto v = load(
+      t, this->aligned_data_, opt::masked(m), opt::merge(default_v));
 
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -662,7 +669,9 @@ TYPED_TEST(VecLoadStoreTest, LoadWithMask) {
   T default_val = test_utils::get_test_value<T>(999);
   auto default_v = fill(t, default_val);
 
-  auto v = load(t, this->aligned_data_, m, default_v);
+  auto v = load(
+      t, this->aligned_data_, mem::aligned, opt::masked(m),
+      opt::merge(default_v));
 
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -689,7 +698,7 @@ TYPED_TEST(VecLoadStoreTest, StoreuWithMask) {
   T fill_val = test_utils::get_test_value<T>(42);
   auto v = fill(t, fill_val);
 
-  storeu(t, this->aligned_out_, m, v);
+  store(t, this->aligned_out_, v, opt::masked(m));
 
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(fill_val, this->aligned_out_[i]));
@@ -715,7 +724,7 @@ TYPED_TEST(VecLoadStoreTest, StoreWithMask) {
   T fill_val = test_utils::get_test_value<T>(42);
   auto v = fill(t, fill_val);
 
-  store(t, this->aligned_out_, m, v);
+  store(t, this->aligned_out_, v, mem::aligned, opt::masked(m));
 
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(fill_val, this->aligned_out_[i]));
@@ -734,7 +743,7 @@ TYPED_TEST(VecLoadStoreTest, StoreuWithMaskAll) {
   T fill_val = test_utils::get_test_value<T>(42);
   auto v = fill(t, fill_val);
 
-  storeu(t, this->aligned_out_, m, v);
+  store(t, this->aligned_out_, v, opt::masked(m));
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(fill_val, this->aligned_out_[i]));
@@ -755,7 +764,7 @@ TYPED_TEST(VecLoadStoreTest, StoreuWithMaskNone) {
   T fill_val = test_utils::get_test_value<T>(42);
   auto v = fill(t, fill_val);
 
-  storeu(t, this->aligned_out_, m, v);
+  store(t, this->aligned_out_, v, opt::masked(m));
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(sentinel, this->aligned_out_[i]));
@@ -770,7 +779,7 @@ TYPED_TEST(VecLoadStoreTest, GetElement) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto v = loadu(t, this->aligned_data_);
+  auto v = load(t, this->aligned_data_);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -884,14 +893,14 @@ TYPED_TEST(VecLoadStoreTest, HalfSizeLoadStore) {
   if (N < 2) return;
   nint_t n = N / 2;
 
-  auto v = loadu(t, this->aligned_data_);
+  auto v = load(t, this->aligned_data_);
 
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
         this->aligned_data_[i], get(v, i)));
   }
 
-  storeu(t, this->aligned_out_, v);
+  store(t, this->aligned_out_, v);
 
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -925,7 +934,8 @@ TYPED_TEST(VecLoadStoreTest, HalfSizeLoadWithN) {
   auto default_v = fill(t, default_val);
   nint_t n = N / 4;
 
-  auto v = loadu(t, this->aligned_data_, n, default_v);
+  auto v = load(
+      t, this->aligned_data_, opt::first(n), opt::merge(default_v));
 
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -947,7 +957,7 @@ TYPED_TEST(VecLoadStoreTest, PartialHalfWordLoadStore) {
   nint_t N = size(th);
   if (N < 1) return;
 
-  auto v = loadu(th, this->aligned_data_);
+  auto v = load(th, this->aligned_data_);
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], get(v, i)));
   }
@@ -955,7 +965,7 @@ TYPED_TEST(VecLoadStoreTest, PartialHalfWordLoadStore) {
   for (nint_t i = 0; i < N; ++i) {
     this->aligned_out_[i] = T{};
   }
-  storeu(th, this->aligned_out_, v);
+  store(th, this->aligned_out_, v);
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], this->aligned_out_[i]));
   }
@@ -971,7 +981,8 @@ TYPED_TEST(VecLoadStoreTest, PartialHalfWordLoadWithN) {
   auto default_v = fill(th, default_val);
   nint_t n = N / 2;
 
-  auto v = loadu(th, this->aligned_data_, n, default_v);
+  auto v = load(
+      th, this->aligned_data_, opt::first(n), opt::merge(default_v));
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], get(v, i)));
   }
@@ -1000,12 +1011,12 @@ TYPED_TEST(VecLoadStoreTest, PartialQuarterWordLoadStore) {
     nint_t N = size(tq);
     if (N < 1) return;
 
-    auto v = loadu(tq, this->aligned_data_);
+    auto v = load(tq, this->aligned_data_);
     for (nint_t i = 0; i < N; ++i) {
       EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], get(v, i)));
     }
 
-    storeu(tq, this->aligned_out_, v);
+    store(tq, this->aligned_out_, v);
     for (nint_t i = 0; i < N; ++i) {
       EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], this->aligned_out_[i]));
     }
@@ -1034,12 +1045,12 @@ TYPED_TEST(VecLoadStoreTest, PartialEighthWordLoadStore) {
     nint_t N = size(te);
     if (N < 1) return;
 
-    auto v = loadu(te, this->aligned_data_);
+    auto v = load(te, this->aligned_data_);
     for (nint_t i = 0; i < N; ++i) {
       EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], get(v, i)));
     }
 
-    storeu(te, this->aligned_out_, v);
+    store(te, this->aligned_out_, v);
     for (nint_t i = 0; i < N; ++i) {
       EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], this->aligned_out_[i]));
     }
@@ -1068,8 +1079,8 @@ TYPED_TEST(VecLoadStoreTest, LoadStoreSequential) {
   nint_t N = this->full_size;
 
   for (int offset = 0; offset < 64; offset += N) {
-    auto v = loadu(t, this->aligned_data_ + offset);
-    storeu(t, this->aligned_out_ + offset, v);
+    auto v = load(t, this->aligned_data_ + offset);
+    store(t, this->aligned_out_ + offset, v);
   }
 
   for (int i = 0; i < 64; ++i) {
@@ -1111,13 +1122,13 @@ TYPED_TEST(VecLoadStoreTest, FloatExtremeValues) {
     auto v_zero = fill(t, 0.0f);
     auto v_nzero= fill(t, -0.0f);
 
-    storeu(t, this->aligned_out_, v_nan);  EXPECT_TRUE(std::isnan(this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_inf);  EXPECT_TRUE(std::isinf(this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_ninf); EXPECT_TRUE(std::isinf(this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_max);  EXPECT_TRUE(test_utils::values_equal(std::numeric_limits<float32_t>::max(), this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_sub);  EXPECT_TRUE(test_utils::values_equal(std::numeric_limits<float32_t>::denorm_min(), this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_zero); EXPECT_EQ(0.0f, this->aligned_out_[0]);
-    storeu(t, this->aligned_out_, v_nzero);EXPECT_EQ(-0.0f, this->aligned_out_[0]);
+    store(t, this->aligned_out_, v_nan);  EXPECT_TRUE(std::isnan(this->aligned_out_[0]));
+    store(t, this->aligned_out_, v_inf);  EXPECT_TRUE(std::isinf(this->aligned_out_[0]));
+    store(t, this->aligned_out_, v_ninf); EXPECT_TRUE(std::isinf(this->aligned_out_[0]));
+    store(t, this->aligned_out_, v_max);  EXPECT_TRUE(test_utils::values_equal(std::numeric_limits<float32_t>::max(), this->aligned_out_[0]));
+    store(t, this->aligned_out_, v_sub);  EXPECT_TRUE(test_utils::values_equal(std::numeric_limits<float32_t>::denorm_min(), this->aligned_out_[0]));
+    store(t, this->aligned_out_, v_zero); EXPECT_EQ(0.0f, this->aligned_out_[0]);
+    store(t, this->aligned_out_, v_nzero);EXPECT_EQ(-0.0f, this->aligned_out_[0]);
   } else if constexpr (std::is_same_v<T, float64_t>) {
     auto v_nan  = fill(t, std::numeric_limits<float64_t>::quiet_NaN());
     auto v_inf  = fill(t, std::numeric_limits<float64_t>::infinity());
@@ -1127,34 +1138,34 @@ TYPED_TEST(VecLoadStoreTest, FloatExtremeValues) {
     auto v_zero = fill(t, 0.0);
     auto v_nzero= fill(t, -0.0);
 
-    storeu(t, this->aligned_out_, v_nan);  EXPECT_TRUE(std::isnan(this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_inf);  EXPECT_TRUE(std::isinf(this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_ninf); EXPECT_TRUE(std::isinf(this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_max);  EXPECT_TRUE(test_utils::values_equal(std::numeric_limits<float64_t>::max(), this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_sub);  EXPECT_TRUE(test_utils::values_equal(std::numeric_limits<float64_t>::denorm_min(), this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_zero); EXPECT_EQ(0.0, this->aligned_out_[0]);
-    storeu(t, this->aligned_out_, v_nzero);EXPECT_EQ(-0.0, this->aligned_out_[0]);
+    store(t, this->aligned_out_, v_nan);  EXPECT_TRUE(std::isnan(this->aligned_out_[0]));
+    store(t, this->aligned_out_, v_inf);  EXPECT_TRUE(std::isinf(this->aligned_out_[0]));
+    store(t, this->aligned_out_, v_ninf); EXPECT_TRUE(std::isinf(this->aligned_out_[0]));
+    store(t, this->aligned_out_, v_max);  EXPECT_TRUE(test_utils::values_equal(std::numeric_limits<float64_t>::max(), this->aligned_out_[0]));
+    store(t, this->aligned_out_, v_sub);  EXPECT_TRUE(test_utils::values_equal(std::numeric_limits<float64_t>::denorm_min(), this->aligned_out_[0]));
+    store(t, this->aligned_out_, v_zero); EXPECT_EQ(0.0, this->aligned_out_[0]);
+    store(t, this->aligned_out_, v_nzero);EXPECT_EQ(-0.0, this->aligned_out_[0]);
   } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
     auto v_zero = fill(t, vecops::float16_t{});
     auto v_pos  = fill(t, static_cast<vecops::float16_t>(static_cast<float>(1.5f)));
     auto v_neg  = fill(t, static_cast<vecops::float16_t>(static_cast<float>(-3.25f)));
 
-    storeu(t, this->aligned_out_, v_zero);
+    store(t, this->aligned_out_, v_zero);
     EXPECT_TRUE(test_utils::values_equal(vecops::float16_t{}, this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_pos);
+    store(t, this->aligned_out_, v_pos);
     EXPECT_TRUE(test_utils::values_equal(static_cast<vecops::float16_t>(static_cast<float>(1.5f)), this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_neg);
+    store(t, this->aligned_out_, v_neg);
     EXPECT_TRUE(test_utils::values_equal(static_cast<vecops::float16_t>(static_cast<float>(-3.25f)), this->aligned_out_[0]));
   } else if constexpr (std::is_same_v<T, vecops::bfloat16_t>) {
     auto v_zero = fill(t, vecops::bfloat16_t{});
     auto v_pos  = fill(t, static_cast<vecops::bfloat16_t>(static_cast<float>(2.5f)));
     auto v_neg  = fill(t, static_cast<vecops::bfloat16_t>(static_cast<float>(-7.5f)));
 
-    storeu(t, this->aligned_out_, v_zero);
+    store(t, this->aligned_out_, v_zero);
     EXPECT_TRUE(test_utils::values_equal(vecops::bfloat16_t{}, this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_pos);
+    store(t, this->aligned_out_, v_pos);
     EXPECT_TRUE(test_utils::values_equal(static_cast<vecops::bfloat16_t>(static_cast<float>(2.5f)), this->aligned_out_[0]));
-    storeu(t, this->aligned_out_, v_neg);
+    store(t, this->aligned_out_, v_neg);
     EXPECT_TRUE(test_utils::values_equal(static_cast<vecops::bfloat16_t>(static_cast<float>(-7.5f)), this->aligned_out_[0]));
   }
 }
@@ -1169,7 +1180,7 @@ TYPED_TEST(VecLoadStoreTest, InitializerListLoad) {
     data[i] = test_utils::get_test_value<T>(i + 100);
   }
 
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(data[i], get(v, i)));
@@ -1197,8 +1208,8 @@ TYPED_TEST(VecLoadStoreTest, MultiWordLoadStore2) {
   auto& t = this->t2;
   nint_t N = this->multi2_size;
 
-  auto v = loadu(t, this->aligned_data_);
-  storeu(t, this->aligned_out_, v);
+  auto v = load(t, this->aligned_data_);
+  store(t, this->aligned_out_, v);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -1234,7 +1245,8 @@ TYPED_TEST(VecLoadStoreTest, MultiWordLoadWithN2) {
   auto default_v = fill(t, default_val);
   nint_t n = N - N / 4;
 
-  auto v = loadu(t, this->aligned_data_, n, default_v);
+  auto v = load(
+      t, this->aligned_data_, opt::first(n), opt::merge(default_v));
 
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(
@@ -1260,7 +1272,7 @@ TYPED_TEST(VecLoadStoreTest, MultiWordStoreWithN2) {
   auto v = fill(t, fill_val);
   nint_t n = N - N / 4;
 
-  storeu(t, this->aligned_out_, n, v);
+  store(t, this->aligned_out_, v, opt::first(n));
 
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_TRUE(test_utils::values_equal(fill_val, this->aligned_out_[i]));
@@ -1356,7 +1368,7 @@ TYPED_TEST(VecGatherScatterTest, GatherBasic) {
     indices[i] = static_cast<IndexT>(i * 2);
   }
 
-  auto idx = loadu(it, indices.get());
+  auto idx = load(it, indices.get());
   auto v = gather(t, this->aligned_data_, idx);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -1378,7 +1390,7 @@ TYPED_TEST(VecGatherScatterTest, GatherWithN) {
     indices[i] = static_cast<IndexT>((i * 3) % 128);
   }
 
-  auto idx = loadu(it, indices.get());
+  auto idx = load(it, indices.get());
   T default_val = test_utils::get_test_value<T>(999);
   nint_t n = N / 2;
 
@@ -1405,7 +1417,7 @@ TYPED_TEST(VecGatherScatterTest, GatherWithNZero) {
     indices[i] = static_cast<IndexT>(i);
   }
 
-  auto idx = loadu(it, indices.get());
+  auto idx = load(it, indices.get());
   T default_val = test_utils::get_test_value<T>(999);
 
   auto v = gather(t, this->aligned_data_, idx, 0, default_val);
@@ -1427,7 +1439,7 @@ TYPED_TEST(VecGatherScatterTest, GatherWithNFull) {
     indices[i] = static_cast<IndexT>(i);
   }
 
-  auto idx = loadu(it, indices.get());
+  auto idx = load(it, indices.get());
   T default_val = test_utils::get_test_value<T>(999);
 
   auto v = gather(t, this->aligned_data_, idx, N, default_val);
@@ -1451,7 +1463,7 @@ TYPED_TEST(VecGatherScatterTest, GatherWithMask) {
     indices[i] = static_cast<IndexT>((i * 5 + 10) % 128);
   }
 
-  auto idx = loadu(it, indices.get());
+  auto idx = load(it, indices.get());
   auto m = mwhilelt(t, 0, N / 2);
   T default_val = test_utils::get_test_value<T>(777);
 
@@ -1478,7 +1490,7 @@ TYPED_TEST(VecGatherScatterTest, GatherWithMaskAll) {
     indices[i] = static_cast<IndexT>(i);
   }
 
-  auto idx = loadu(it, indices.get());
+  auto idx = load(it, indices.get());
   auto m = mtrue(t);
   T default_val = test_utils::get_test_value<T>(777);
 
@@ -1502,7 +1514,7 @@ TYPED_TEST(VecGatherScatterTest, GatherWithMaskNone) {
     indices[i] = static_cast<IndexT>(i);
   }
 
-  auto idx = loadu(it, indices.get());
+  auto idx = load(it, indices.get());
   auto m = mfalse(t);
   T default_val = test_utils::get_test_value<T>(777);
 
@@ -1530,7 +1542,7 @@ TYPED_TEST(VecGatherScatterTest, GatherMaskedOffInvalidIndex) {
     m = set(t, m, i, active);
   }
 
-  auto idx = loadu(it, indices.get());
+  auto idx = load(it, indices.get());
   T default_val = test_utils::get_test_value<T>(777);
   auto v = gather(t, this->aligned_data_, idx, m, default_val);
 
@@ -1561,8 +1573,8 @@ TYPED_TEST(VecGatherScatterTest, ScatterBasic) {
     indices[i] = static_cast<IndexT>(i * 2);
   }
 
-  auto idx = loadu(it, indices.get());
-  auto v = loadu(t, this->aligned_data_);
+  auto idx = load(it, indices.get());
+  auto v = load(t, this->aligned_data_);
 
   scatter(t, this->aligned_out_, idx, v);
 
@@ -1590,8 +1602,8 @@ TYPED_TEST(VecGatherScatterTest, ScatterWithN) {
     indices[i] = static_cast<IndexT>((i * 3) % 128);
   }
 
-  auto idx = loadu(it, indices.get());
-  auto v = loadu(t, this->aligned_data_);
+  auto idx = load(it, indices.get());
+  auto v = load(t, this->aligned_data_);
   nint_t n = N / 2;
 
   scatter(t, this->aligned_out_, idx, n, v);
@@ -1619,8 +1631,8 @@ TYPED_TEST(VecGatherScatterTest, ScatterWithNZero) {
     indices[i] = static_cast<IndexT>(i);
   }
 
-  auto idx = loadu(it, indices.get());
-  auto v = loadu(t, this->aligned_data_);
+  auto idx = load(it, indices.get());
+  auto v = load(t, this->aligned_data_);
 
   scatter(t, this->aligned_out_, idx, 0, v);
 
@@ -1646,8 +1658,8 @@ TYPED_TEST(VecGatherScatterTest, ScatterWithNFull) {
     indices[i] = static_cast<IndexT>(i + 50);
   }
 
-  auto idx = loadu(it, indices.get());
-  auto v = loadu(t, this->aligned_data_);
+  auto idx = load(it, indices.get());
+  auto v = load(t, this->aligned_data_);
 
   scatter(t, this->aligned_out_, idx, N, v);
 
@@ -1675,8 +1687,8 @@ TYPED_TEST(VecGatherScatterTest, ScatterWithMask) {
     indices[i] = static_cast<IndexT>((i * 5 + 10) % 128);
   }
 
-  auto idx = loadu(it, indices.get());
-  auto v = loadu(t, this->aligned_data_);
+  auto idx = load(it, indices.get());
+  auto v = load(t, this->aligned_data_);
   auto m = mwhilelt(t, 0, N / 2);
 
   scatter(t, this->aligned_out_, idx, m, v);
@@ -1704,8 +1716,8 @@ TYPED_TEST(VecGatherScatterTest, ScatterWithMaskAll) {
     indices[i] = static_cast<IndexT>(i + 100);
   }
 
-  auto idx = loadu(it, indices.get());
-  auto v = loadu(t, this->aligned_data_);
+  auto idx = load(it, indices.get());
+  auto v = load(t, this->aligned_data_);
   auto m = mtrue(t);
 
   scatter(t, this->aligned_out_, idx, m, v);
@@ -1733,8 +1745,8 @@ TYPED_TEST(VecGatherScatterTest, ScatterWithMaskNone) {
     indices[i] = static_cast<IndexT>(i);
   }
 
-  auto idx = loadu(it, indices.get());
-  auto v = loadu(t, this->aligned_data_);
+  auto idx = load(it, indices.get());
+  auto v = load(t, this->aligned_data_);
   auto m = mfalse(t);
 
   scatter(t, this->aligned_out_, idx, m, v);
@@ -1766,8 +1778,8 @@ TYPED_TEST(VecGatherScatterTest, ScatterMaskedOffInvalidIndex) {
     m = set(t, m, i, active);
   }
 
-  auto idx = loadu(it, indices.get());
-  auto v = loadu(t, this->aligned_data_);
+  auto idx = load(it, indices.get());
+  auto v = load(t, this->aligned_data_);
   scatter(t, this->aligned_out_, idx, m, v);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -1794,7 +1806,7 @@ TYPED_TEST(VecGatherScatterTest, GatherScatterRoundTrip) {
     indices[i] = static_cast<IndexT>(i + 128);
   }
 
-  auto idx = loadu(it, indices.get());
+  auto idx = load(it, indices.get());
 
   for (int i = 128; i < 128 + N; ++i) {
     this->aligned_data_[i] = test_utils::get_test_value<T>(i);
@@ -1810,7 +1822,7 @@ TYPED_TEST(VecGatherScatterTest, GatherScatterRoundTrip) {
   for (nint_t i = 0; i < N; ++i) {
     scatter_indices[i] = static_cast<IndexT>(i);
   }
-  auto scatter_idx = loadu(it, scatter_indices.get());
+  auto scatter_idx = load(it, scatter_indices.get());
 
   scatter(t, this->aligned_out_, scatter_idx, v);
 
@@ -1839,7 +1851,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGather) {
       indices[i] = static_cast<IndexT>(ws - 1 - (i % ws));
     }
 
-    auto idx = loadu(it, indices.get());
+    auto idx = load(it, indices.get());
     auto v = gather(t2, this->aligned_data_, idx);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -1874,8 +1886,8 @@ TYPED_TEST(VecGatherScatterTest, MultiWordScatter) {
       indices[i] = static_cast<IndexT>(ws - 1 - (i % ws));
     }
 
-    auto idx = loadu(it, indices.get());
-    auto v = loadu(t2, this->aligned_data_);
+    auto idx = load(it, indices.get());
+    auto v = load(t2, this->aligned_data_);
 
     scatter(t2, this->aligned_out_, idx, v);
     for (nint_t i = 0; i < N; ++i) {
@@ -1903,7 +1915,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherWithN) {
       indices[i] = static_cast<IndexT>(i % ws);
     }
 
-    auto idx = loadu(it, indices.get());
+    auto idx = load(it, indices.get());
     auto m = mwhilelt(t2, 0, N / 2);
     T default_val = test_utils::get_test_value<T>(999);
 
@@ -1934,7 +1946,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherWithMask) {
       indices[i] = static_cast<IndexT>((i * 5 + 3) % ws);
     }
 
-    auto idx = loadu(it, indices.get());
+    auto idx = load(it, indices.get());
     auto m = mwhilelt(t2, 0, N / 2);
     T default_val = test_utils::get_test_value<T>(777);
 
@@ -1965,7 +1977,7 @@ TYPED_TEST(VecGatherScatterTest, PositivePow2SubwordGatherScatter) {
         indices[i] = static_cast<IndexT>(i);
       }
 
-      auto idx = loadu(it, indices.get());
+      auto idx = load(it, indices.get());
       auto gathered = gather(t4, this->aligned_data_, idx);
       for (nint_t i = 0; i < N; ++i) {
         EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[indices[i]], get(gathered, i)))
@@ -1983,7 +1995,7 @@ TYPED_TEST(VecGatherScatterTest, PositivePow2SubwordGatherScatter) {
 
       T sentinel = test_utils::get_test_value<T>(-1);
       for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
-      auto values = loadu(t4, this->aligned_data_);
+      auto values = load(t4, this->aligned_data_);
       scatter(t4, this->aligned_out_, idx, values);
       for (nint_t i = 0; i < N; ++i) {
         EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[i], this->aligned_out_[indices[i]]))
@@ -2055,7 +2067,7 @@ TYPED_TEST(VecGatherScatterTest, GatherAllAlignments) {
   for (int off = 0; off < 4; ++off) {
     auto* misaligned = reinterpret_cast<const T*>(
         reinterpret_cast<const char*>(this->aligned_data_) + off);
-    auto idx = loadu(it, indices.get());
+    auto idx = load(it, indices.get());
     auto v = gather(t, misaligned, idx);
     std::unique_ptr<T[]> ref(new T[N]);
     ref_gather(ref.get(), misaligned, indices.get(), N);
@@ -2075,7 +2087,7 @@ TYPED_TEST(VecGatherScatterTest, GatherEdges) {
 
   for (nint_t i = 0; i < N; ++i) indices[i] = 0;
   {
-    auto idx = loadu(it, indices.get());
+    auto idx = load(it, indices.get());
     auto v = gather(t, this->aligned_data_, idx);
     T expected = this->aligned_data_[0];
     for (nint_t i = 0; i < N; ++i)
@@ -2085,7 +2097,7 @@ TYPED_TEST(VecGatherScatterTest, GatherEdges) {
   IndexT max_idx = static_cast<IndexT>(255);
   for (nint_t i = 0; i < N; ++i) indices[i] = max_idx;
   {
-    auto idx = loadu(it, indices.get());
+    auto idx = load(it, indices.get());
     auto v = gather(t, this->aligned_data_, idx);
     T expected = this->aligned_data_[max_idx];
     for (nint_t i = 0; i < N; ++i)
@@ -2095,7 +2107,7 @@ TYPED_TEST(VecGatherScatterTest, GatherEdges) {
   for (nint_t i = 0; i < N; ++i)
     indices[i] = (i & 1) ? 0 : max_idx;
   {
-    auto idx = loadu(it, indices.get());
+    auto idx = load(it, indices.get());
     auto v = gather(t, this->aligned_data_, idx);
     for (nint_t i = 0; i < N; ++i) {
       T expected = this->aligned_data_[indices[i]];
@@ -2118,7 +2130,7 @@ TYPED_TEST(VecGatherScatterTest, GatherRandom) {
   std::unique_ptr<IndexT[]> indices(new IndexT[N]);
   for (nint_t i = 0; i < N; ++i) indices[i] = dist(rng);
 
-  auto idx = loadu(it, indices.get());
+  auto idx = load(it, indices.get());
   auto v = gather(t, this->aligned_data_, idx);
 
   std::unique_ptr<T[]> ref_out(new T[N]);
@@ -2145,7 +2157,7 @@ TYPED_TEST(VecGatherScatterTest, GatherMaskedRandom) {
     mask[i] = (i % 2 == 0);
   }
 
-  auto idx = loadu(it, indices.get());
+  auto idx = load(it, indices.get());
   Mask<decltype(this->t)> m;
   for (nint_t k = 0; k < N; ++k) m = set(t, m, k, mask[k]);
   T defv = test_utils::get_test_value<T>(777);
@@ -2173,8 +2185,8 @@ TYPED_TEST(VecGatherScatterTest, ScatterAllAlignments) {
 
   T sentinel = test_utils::get_test_value<T>(-1);
   std::unique_ptr<T[]> buf(new T[300]);
-  auto idx = loadu(it, indices.get());
-  auto v = loadu(t, this->aligned_data_);
+  auto idx = load(it, indices.get());
+  auto v = load(t, this->aligned_data_);
 
   for (int off = 0; off < 4; ++off) {
     for (int k = 0; k < 300; ++k) buf[k] = sentinel;
@@ -2206,8 +2218,8 @@ TYPED_TEST(VecGatherScatterTest, ScatterConflictRMW) {
   T sentinel = test_utils::get_test_value<T>(-1);
   for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
 
-  auto idx = loadu(it, indices.get());
-  auto v = loadu(t, this->aligned_data_);
+  auto idx = load(it, indices.get());
+  auto v = load(t, this->aligned_data_);
   scatter(t, this->aligned_out_, idx, v);
 
   T expected[64];
@@ -2238,8 +2250,8 @@ TYPED_TEST(VecGatherScatterTest, ScatterConflictMasked) {
   T sentinel = test_utils::get_test_value<T>(-1);
   for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
 
-  auto idx = loadu(it, indices.get());
-  auto v = loadu(t, this->aligned_data_);
+  auto idx = load(it, indices.get());
+  auto v = load(t, this->aligned_data_);
   Mask<decltype(this->t)> m;
   for (nint_t k = 0; k < N; ++k) m = set(t, m, k, mask[k]);
   scatter(t, this->aligned_out_, idx, m, v);
@@ -2267,8 +2279,8 @@ TYPED_TEST(VecGatherScatterTest, ScatterSamePosition) {
   T sentinel = test_utils::get_test_value<T>(-1);
   for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
 
-  auto idx = loadu(it, indices.get());
-  auto v = loadu(t, this->aligned_data_);
+  auto idx = load(it, indices.get());
+  auto v = load(t, this->aligned_data_);
   scatter(t, this->aligned_out_, idx, v);
 
   EXPECT_TRUE(test_utils::values_equal(this->aligned_data_[N - 1], this->aligned_out_[target]));
@@ -2294,7 +2306,7 @@ TYPED_TEST(VecGatherScatterTest, GatherScatterRoundTripRandom) {
   std::unique_ptr<IndexT[]> indices(new IndexT[N]);
   for (nint_t i = 0; i < N; ++i) indices[i] = dist(rng);
 
-  auto idx = loadu(it, indices.get());
+  auto idx = load(it, indices.get());
   T sentinel = test_utils::get_test_value<T>(-1);
   for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
 
@@ -2319,7 +2331,7 @@ TYPED_TEST(VecGatherScatterTest, GatherScatterRoundTripMasked) {
   for (nint_t i = 0; i < N; ++i)
     indices[i] = static_cast<IndexT>(i * 3);
 
-  auto idx = loadu(it, indices.get());
+  auto idx = load(it, indices.get());
   auto m = mwhilelt(t, 0, N / 2);
   T defv = test_utils::get_test_value<T>(777);
 
@@ -2356,7 +2368,7 @@ TYPED_TEST(VecGatherScatterTest, PartialHalfWordGather) {
   for (nint_t i = 0; i < N; ++i)
     indices[i] = static_cast<IndexT>(i);
 
-  auto idx = loadu(ith, indices.get());
+  auto idx = load(ith, indices.get());
   auto v = gather(th, this->aligned_data_, idx);
 
   std::unique_ptr<T[]> ref(new T[N]);
@@ -2380,8 +2392,8 @@ TYPED_TEST(VecGatherScatterTest, PartialHalfWordScatter) {
   T sentinel = test_utils::get_test_value<T>(-1);
   for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
 
-  auto idx = loadu(ith, indices.get());
-  auto v = loadu(th, this->aligned_data_);
+  auto idx = load(ith, indices.get());
+  auto v = load(th, this->aligned_data_);
   scatter(th, this->aligned_out_, idx, v);
 
   for (nint_t i = 0; i < N; ++i)
@@ -2402,7 +2414,7 @@ TYPED_TEST(VecGatherScatterTest, PartialQuarterWordGather) {
     for (nint_t i = 0; i < N; ++i)
       indices[i] = static_cast<IndexT>(i);
 
-    auto idx = loadu(itq, indices.get());
+    auto idx = load(itq, indices.get());
     auto v = gather(tq, this->aligned_data_, idx);
 
     std::unique_ptr<T[]> ref(new T[N]);
@@ -2428,8 +2440,8 @@ TYPED_TEST(VecGatherScatterTest, PartialQuarterWordScatter) {
     T sentinel = test_utils::get_test_value<T>(-1);
     for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
 
-    auto idx = loadu(itq, indices.get());
-    auto v = loadu(tq, this->aligned_data_);
+    auto idx = load(itq, indices.get());
+    auto v = load(tq, this->aligned_data_);
     scatter(tq, this->aligned_out_, idx, v);
 
     for (nint_t i = 0; i < N; ++i)
@@ -2450,7 +2462,7 @@ TYPED_TEST(VecGatherScatterTest, PartialHalfWordRoundTrip) {
   for (nint_t i = 0; i < N; ++i)
     indices[i] = static_cast<IndexT>(i + 50);
 
-  auto idx = loadu(ith, indices.get());
+  auto idx = load(ith, indices.get());
   T sentinel = test_utils::get_test_value<T>(-1);
   for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
 
@@ -2489,7 +2501,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
   std::unique_ptr<IndexT[]> indices(new IndexT[N]);
   for (nint_t i = 0; i < N; ++i)
     indices[i] = static_cast<IndexT>(ws - 1 - (i % ws));
-  auto idx = loadu(itag, indices.get());
+  auto idx = load(itag, indices.get());
 
   // ── Full multi-word gather ─────────────────────────────────────────
   auto v_full = gather(t2, this->aligned_data_, idx);
@@ -2584,7 +2596,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
       // Test with identity indices
       std::unique_ptr<IndexT[]> iq(new IndexT[Nq]);
       for (nint_t i = 0; i < Nq; ++i) iq[i] = static_cast<IndexT>(i);
-      auto iq_vec = loadu(itq, iq.get());
+      auto iq_vec = load(itq, iq.get());
       auto vq = gather(tq, this->aligned_data_, iq_vec);
       for (nint_t i = 0; i < Nq; ++i) {
         T expected_val = this->aligned_data_[i];
@@ -2599,7 +2611,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
 
       // Test with reversed indices
       for (nint_t i = 0; i < Nq; ++i) iq[i] = static_cast<IndexT>(Nq - 1 - i);
-      auto iq_vec_r = loadu(itq, iq.get());
+      auto iq_vec_r = load(itq, iq.get());
       auto vq_r = gather(tq, this->aligned_data_, iq_vec_r);
       for (nint_t i = 0; i < Nq; ++i) {
         T expected_val = this->aligned_data_[Nq - 1 - i];
@@ -2621,7 +2633,7 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
       HIQTag hitq;
       auto* hiq = new IndexT[Nh];
       for (nint_t i = 0; i < Nh; ++i) hiq[i] = static_cast<IndexT>(Nh - 1 - i);
-      auto hiq_vec = loadu(hitq, hiq);
+      auto hiq_vec = load(hitq, hiq);
       auto vh = gather(thq, this->aligned_data_, hiq_vec);
       for (nint_t i = 0; i < Nh; ++i) {
         T expected_val = this->aligned_data_[Nh - 1 - i];
@@ -2645,8 +2657,8 @@ TYPED_TEST(VecGatherScatterTest, MultiWordGatherDiagnostic) {
   std::unique_ptr<IndexT[]> s_indices(new IndexT[N]);
   for (nint_t i = 0; i < N; ++i)
     s_indices[i] = static_cast<IndexT>(i * 2 % 200);
-  auto sidx = loadu(itag_s, s_indices.get());
-  auto sv = loadu(t2_s, this->aligned_data_);
+  auto sidx = load(itag_s, s_indices.get());
+  auto sv = load(t2_s, this->aligned_data_);
 
   T sentinel = test_utils::get_test_value<T>(-1);
   for (int i = 0; i < 256; ++i) this->aligned_out_[i] = sentinel;
@@ -2705,14 +2717,14 @@ static void vectorized_copy(const T* from, T* to, nint_t len) {
   nint_t i;
 
   for (i = 0; i <= len - vec_size; i += vec_size) {
-    auto v = loadu(t, from + i);
-    storeu(t, to + i, v);
+    auto v = load(t, from + i);
+    store(t, to + i, v);
   }
 
   if (i < len) {
     auto m = mwhilelt(t, i, len);
-    auto v = loadu(t, from + i, m, zeros(t));
-    storeu(t, to + i, m, v);
+    auto v = load(t, from + i, opt::masked(m));
+    store(t, to + i, v, opt::masked(m));
   }
 }
 

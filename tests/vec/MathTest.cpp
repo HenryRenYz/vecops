@@ -138,7 +138,7 @@ void run_values(Tag t, const std::vector<TypeOf<Tag>>& values) {
   std::vector<E> out(static_cast<size_t>(n));
   for (size_t pos = 0; pos < values.size(); pos += static_cast<size_t>(n)) {
     for (nint_t i = 0; i < n; ++i) in[static_cast<size_t>(i)] = values[(pos + i) % values.size()];
-    storeu(t, out.data(), call_exp<tier>(loadu(t, in.data())));
+    store(t, out.data(), call_exp<tier>(load(t, in.data())));
     const size_t count = std::min(static_cast<size_t>(n), values.size() - pos);
     for (size_t i = 0; i < count; ++i) check_accuracy<tier>(in[i], out[i]);
   }
@@ -153,7 +153,7 @@ void run_neg_values(Tag t, const std::vector<TypeOf<Tag>>& values) {
   std::vector<E> out(static_cast<size_t>(n));
   for (size_t pos = 0; pos < values.size(); pos += static_cast<size_t>(n)) {
     for (nint_t i = 0; i < n; ++i) in[static_cast<size_t>(i)] = values[(pos + i) % values.size()];
-    storeu(t, out.data(), call_exp_neg<tier>(loadu(t, in.data())));
+    store(t, out.data(), call_exp_neg<tier>(load(t, in.data())));
     const size_t count = std::min(static_cast<size_t>(n), values.size() - pos);
     for (size_t i = 0; i < count; ++i) {
       ASSERT_FALSE(std::isnan(as_double(in[i])));
@@ -187,15 +187,15 @@ void check_subnormal_and_thresholds() {
   const nint_t n = size(t);
   std::vector<E> in(static_cast<size_t>(n), E(as_double(normal_log) - 0.25));
   std::vector<E> out(static_cast<size_t>(n));
-  auto v = loadu(t, in.data());
+  auto v = load(t, in.data());
   // Fast tiers may either retain a subnormal when FTZ is disabled by the test
   // process or flush it to zero in the library's default execution mode.
-  storeu(t, out.data(), exp_fast(v));
+  store(t, out.data(), exp_fast(v));
   for (E y : out) {
     EXPECT_GE(as_double(y), 0.0);
     EXPECT_LT(as_double(y), as_double(std::numeric_limits<E>::min()));
   }
-  storeu(t, out.data(), exp_est(v));
+  store(t, out.data(), exp_est(v));
   for (E y : out) {
     EXPECT_GE(as_double(y), 0.0);
     EXPECT_LT(as_double(y), as_double(std::numeric_limits<E>::min()));
@@ -215,7 +215,7 @@ void check_monotonic() {
       const int index = std::min(base + static_cast<int>(i), count - 1);
       in[static_cast<size_t>(i)] = E(-80.0 + 160.0 * index / (count - 1));
     }
-    storeu(t, out.data(), call_exp<tier>(loadu(t, in.data())));
+    store(t, out.data(), call_exp<tier>(load(t, in.data())));
     for (nint_t i = 0; i < n && base + i < count; ++i) {
       const double current = as_double(out[static_cast<size_t>(i)]);
       if (!first) EXPECT_GE(current, previous) << "index=" << base + i;
@@ -328,8 +328,8 @@ void check_masked() {
     defaults[static_cast<size_t>(i)] = E(-3.0 - i);
   }
   auto m = test_utils::make_mask(t, pattern);
-  auto vi = loadu(t, in.data());
-  storeu(t, out.data(), call_exp<tier>(vi, m, loadu(t, defaults.data())));
+  auto vi = load(t, in.data());
+  store(t, out.data(), call_exp<tier>(vi, m, load(t, defaults.data())));
   for (nint_t i = 0; i < n; ++i) {
     if (pattern[static_cast<size_t>(i)]) check_accuracy<tier>(in[i], out[i]);
     else EXPECT_EQ(bits(defaults[i]), bits(out[i])) << "inactive lane " << i;
@@ -338,7 +338,7 @@ void check_masked() {
   if constexpr (tier == Tier::Strict) preserved = vecops::vec::exp(vi, m);
   else if constexpr (tier == Tier::Fast) preserved = exp_fast(vi, m);
   else preserved = exp_est(vi, m);
-  storeu(t, out.data(), preserved);
+  store(t, out.data(), preserved);
   for (nint_t i = 0; i < n; ++i) if (!pattern[i]) EXPECT_EQ(bits(in[i]), bits(out[i]));
 }
 
@@ -356,8 +356,8 @@ void check_neg_masked() {
     defaults[static_cast<size_t>(i)] = E(-7.0 - i);
   }
   auto m = test_utils::make_mask(t, pattern);
-  auto vi = loadu(t, in.data());
-  storeu(t, out.data(), call_exp_neg<tier>(vi, m, loadu(t, defaults.data())));
+  auto vi = load(t, in.data());
+  store(t, out.data(), call_exp_neg<tier>(vi, m, load(t, defaults.data())));
   for (nint_t i = 0; i < n; ++i) {
     if (pattern[static_cast<size_t>(i)]) check_accuracy<tier>(in[i], out[i]);
     else EXPECT_EQ(bits(defaults[i]), bits(out[i])) << "inactive lane " << i;
@@ -482,7 +482,7 @@ void check_edges() {
   if (in.size() > 3) in[3] = -std::numeric_limits<E>::infinity();
   if (in.size() > 4) in[4] = std::numeric_limits<E>::quiet_NaN();
   std::vector<E> out(in.size());
-  storeu(t, out.data(), call_exp<tier>(loadu(t, in.data())));
+  store(t, out.data(), call_exp<tier>(load(t, in.data())));
   EXPECT_EQ(as_double(out[0]), 1.0);
   if (in.size() > 1) EXPECT_EQ(as_double(out[1]), 1.0);
   if (in.size() > 2) EXPECT_TRUE(std::isinf(as_double(out[2]))) << as_double(out[2]);

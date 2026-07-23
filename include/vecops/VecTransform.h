@@ -65,7 +65,7 @@
  * A wrapped callable may implement only a subset of vector POW2 tags. The
  * lambda adapter first tries the requested tag, then tries larger tags via
  * `vec::bitcast`, then recursively splits into half vectors. `ConvertedVecTransform`
- * additionally converts input and output element types through `vec::xconvert`.
+ * additionally converts input and output element types through `vec::convert`.
  *
  * ## Pitfalls
  *
@@ -328,17 +328,17 @@ struct ConvertedVecTransform : public VecTransform<EOut, EIn, InnerTransform::is
       if constexpr (InnerTransform::min_input_pow2 <= pow2_in) {
         vec::Rebind<InnerIn, Ti> t_ii;
         vec::Rebind<InnerOut, Ti> t_io;
-        auto inner_in = vec::xconvert(t_ii, v_in);
+        auto inner_in = vec::convert(t_ii, v_in);
         auto inner_out = _fn(t_io, inner_in, static_cast<nint_t>(coords)...);
-        return vec::xconvert(t, inner_out);
+        return vec::convert(t, inner_out);
       } else {
         vec::Rebind<InnerIn, Ti> t_ii;
         vec::ScalableTag<InnerIn, InnerTransform::min_input_pow2> t_ix;
         vec::Rebind<InnerOut, decltype(t_ix)> t_ox;
         vec::Rebind<InnerOut, Ti> t_io;
-        auto inner_in = vec::bitcast(t_ix, vec::xconvert(t_ii, v_in));
+        auto inner_in = vec::bitcast(t_ix, vec::convert(t_ii, v_in));
         auto inner_out = _fn(t_ox, inner_in, static_cast<nint_t>(coords)...);
-        return vec::xconvert(t, vec::bitcast(t_io, inner_out));
+        return vec::convert(t, vec::bitcast(t_io, inner_out));
       }
     } else {
       using Th = vec::Half<To>;
@@ -382,7 +382,7 @@ struct IdentityVecTransform : public VecTransform<EOut, EIn, true> {
             vec::scalable_pow2_of<To> <= Base::max_output_pow2)>
   vec::Vec<To> operator()(To t, vec::Vec<vec::Rebind<EIn, To>> v_in, Coords... coords) const {
     ((void) coords, ...);
-    return vec::xconvert(t, v_in);
+    return vec::convert(t, v_in);
   }
 };
 

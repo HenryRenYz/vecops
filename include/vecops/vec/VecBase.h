@@ -698,6 +698,18 @@ static constexpr nint_t word_size(Tag<T, N, POW2> t = {}) {
 }
 
 /**
+ * @brief Required byte alignment for an aligned memory access.
+ *
+ * Alignment follows one hardware word of the memory-side tag, rather than the
+ * total byte size of a possibly multi-word vector.
+ */
+template <typename T, nint_t N, int POW2>
+VECOPS_VFUNC VECOPS_PURE
+static constexpr nint_t memory_alignment(Tag<T, N, POW2> t = {}) {
+  return word_size(t) * static_cast<nint_t>(sizeof(T));
+}
+
+/**
  * @brief Returns the maximum number of elements per word.
  * 
  * @tparam T Element type

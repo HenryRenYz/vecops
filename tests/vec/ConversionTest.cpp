@@ -210,8 +210,8 @@ TYPED_TEST(VecPromoteTest, BasicPromote) {
   nint_t n_out = this->out_elements();
   nint_t N = n_in < n_out ? n_in : n_out;
 
-  auto v_in  = loadu(this->t_in_, this->in_data_);
-  auto v_out = promote(this->t_out_, v_in);
+  auto v_in  = load(this->t_in_, this->in_data_);
+  auto v_out = convert(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(this->in_data_[i]);
@@ -229,9 +229,9 @@ TYPED_TEST(VecPromoteTest, UnorderedRoundTripPreservesLaneOrder) {
     this->in_data_[i] = static_cast<TIn>(i + 1);
   }
 
-  auto v_in = loadu(this->t_in_, this->in_data_);
-  auto promoted = promote_unord(this->t_out_, v_in);
-  auto promoted_x = xconvert_unord(this->t_out_, v_in);
+  auto v_in = load(this->t_in_, this->in_data_);
+  auto promoted = convert(this->t_out_, v_in, cvt::unordered);
+  auto promoted_x = convert(this->t_out_, v_in, cvt::unordered);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_near(
@@ -241,7 +241,7 @@ TYPED_TEST(VecPromoteTest, UnorderedRoundTripPreservesLaneOrder) {
   }
 
 #if !defined(CPU_CAPABILITY_SVE)
-  auto promoted_ordered = promote(this->t_out_, v_in);
+  auto promoted_ordered = convert(this->t_out_, v_in);
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_near(
         get(this->t_out_, promoted_ordered, i),
@@ -250,8 +250,8 @@ TYPED_TEST(VecPromoteTest, UnorderedRoundTripPreservesLaneOrder) {
   }
 #endif
 
-  auto restored = demote_unord(this->t_in_, promoted);
-  auto restored_x = xconvert_unord(this->t_in_, promoted_x);
+  auto restored = convert(this->t_in_, promoted, cvt::unordered);
+  auto restored_x = convert(this->t_in_, promoted_x, cvt::unordered);
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_near(
         this->in_data_[i], get(this->t_in_, restored, i)
@@ -268,7 +268,7 @@ TYPED_TEST(VecPromoteTest, PromoteWithZeroValues) {
   nint_t N = this->out_elements();
 
   auto v_in  = zeros(this->t_in_);
-  auto v_out = promote(this->t_out_, v_in);
+  auto v_out = convert(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_EQ(TOut(0), get(this->t_out_, v_out, i)) << "i=" << i;
@@ -287,8 +287,8 @@ TYPED_TEST(VecPromoteTest, PromoteWithMaxMinValues) {
     data[i] = get_promote_extreme_test_value<TIn, TOut>(i);
   }
 
-  auto v_in  = loadu(this->t_in_, data);
-  auto v_out = promote(this->t_out_, v_in);
+  auto v_in  = load(this->t_in_, data);
+  auto v_out = convert(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(data[i]);
@@ -313,8 +313,8 @@ TYPED_TEST(VecPromoteTest, SignExtensionTest) {
       data[i] = static_cast<TIn>(-(i + 1));
     }
 
-    auto v_in  = loadu(this->t_in_, data);
-    auto v_out = promote(this->t_out_, v_in);
+    auto v_in  = load(this->t_in_, data);
+    auto v_out = convert(this->t_out_, v_in);
 
     for (nint_t i = 0; i < N; ++i) {
       TOut actual   = get(this->t_out_, v_out, i);
@@ -457,8 +457,8 @@ TYPED_TEST(VecDemoteTest, BasicDemote) {
   nint_t n_out = this->out_elements();
   nint_t N = n_in < n_out ? n_in : n_out;
 
-  auto v_in  = loadu(this->t_in_, this->in_data_);
-  auto v_out = demote(this->t_out_, v_in);
+  auto v_in  = load(this->t_in_, this->in_data_);
+  auto v_out = convert(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(this->in_data_[i]);
@@ -476,7 +476,7 @@ TYPED_TEST(VecDemoteTest, DemoteWithZeroValues) {
   nint_t N = n_in < n_out ? n_in : n_out;
 
   auto v_in  = zeros(this->t_in_);
-  auto v_out = demote(this->t_out_, v_in);
+  auto v_out = convert(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_EQ(TOut(0), get(this->t_out_, v_out, i)) << "i=" << i;
@@ -503,8 +503,8 @@ TYPED_TEST(VecDemoteTest, TruncationBehavior) {
     else data[i] = TIn(0);
   }
 
-  auto v_in  = loadu(this->t_in_, data);
-  auto v_out = demote(this->t_out_, v_in);
+  auto v_in  = load(this->t_in_, data);
+  auto v_out = convert(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     TOut expected = vecops::convert<TOut>(data[i]);
@@ -594,7 +594,7 @@ TYPED_TEST(VecConvertTest, BasicConvert) {
   using TOut = typename TestFixture::TOut;
   nint_t N = this->elements();
 
-  auto v_in  = loadu(this->t_in_, this->in_data_);
+  auto v_in  = load(this->t_in_, this->in_data_);
   auto v_out = convert(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -608,10 +608,10 @@ TYPED_TEST(VecConvertTest, BasicConvert) {
 TYPED_TEST(VecConvertTest, UnorderedConversionForwardsToConvert) {
   nint_t N = this->elements();
 
-  auto v_in = loadu(this->t_in_, this->in_data_);
+  auto v_in = load(this->t_in_, this->in_data_);
   auto expected = convert(this->t_out_, v_in);
-  auto converted = convert_unord(this->t_out_, v_in);
-  auto converted_x = xconvert_unord(this->t_out_, v_in);
+  auto converted = convert(this->t_out_, v_in, cvt::unordered);
+  auto converted_x = convert(this->t_out_, v_in, cvt::unordered);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(test_utils::values_near(
@@ -652,7 +652,7 @@ TYPED_TEST(VecConvertTest, SignedUnsignedConversion) {
         data[i] = static_cast<TIn>(~TIn(0) - i);
       }
 
-      auto v_in  = loadu(this->t_in_, data);
+      auto v_in  = load(this->t_in_, data);
       auto v_out = convert(this->t_out_, v_in);
 
       for (nint_t i = 0; i < N; ++i) {
@@ -687,7 +687,7 @@ TYPED_TEST(VecConvertTest, FloatIntConversion) {
       }
     }
 
-    auto v_in  = loadu(this->t_in_, data);
+    auto v_in  = load(this->t_in_, data);
     auto v_out = convert(this->t_out_, v_in);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -729,8 +729,8 @@ TEST_F(VecConvertCornerCaseTest, PromoteNegativeToUnsigned) {
     data[i] = -1;
   }
 
-  auto v_in  = loadu(t_in, data);
-  auto v_out = promote(t_out, v_in);
+  auto v_in  = load(t_in, data);
+  auto v_out = convert(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     uint16_t actual = get(t_out, v_out, i);
@@ -750,8 +750,8 @@ TEST_F(VecConvertCornerCaseTest, PromoteUnsignedToSigned) {
     data[i] = 255;
   }
 
-  auto v_in  = loadu(t_in, data);
-  auto v_out = promote(t_out, v_in);
+  auto v_in  = load(t_in, data);
+  auto v_out = convert(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     int16_t actual = get(t_out, v_out, i);
@@ -771,8 +771,8 @@ TEST_F(VecConvertCornerCaseTest, DemoteNegativeValue) {
     data[i] = -1;
   }
 
-  auto v_in  = loadu(t_in, data);
-  auto v_out = demote(t_out, v_in);
+  auto v_in  = load(t_in, data);
+  auto v_out = convert(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     int8_t actual = get(t_out, v_out, i);
@@ -796,8 +796,8 @@ TEST_F(VecConvertCornerCaseTest, DemoteUnsignedSaturated) {
       data[i] = vals[i % 4];
     }
 
-    auto v_in  = loadu(t_in, data);
-    auto v_out = demote(t_out, v_in);
+    auto v_in  = load(t_in, data);
+    auto v_out = convert(t_out, v_in);
 
     for (nint_t i = 0; i < N; ++i) {
       int16_t expected = vecops::convert<int16_t>(data[i]);
@@ -819,8 +819,8 @@ TEST_F(VecConvertCornerCaseTest, DemoteUnsignedSaturated) {
       data[i] = vals[i % 4];
     }
 
-    auto v_in  = loadu(t_in, data);
-    auto v_out = demote(t_out, v_in);
+    auto v_in  = load(t_in, data);
+    auto v_out = convert(t_out, v_in);
 
     for (nint_t i = 0; i < N; ++i) {
       uint32_t expected = vecops::convert<uint32_t>(data[i]);
@@ -842,8 +842,8 @@ TEST_F(VecConvertCornerCaseTest, DemoteUnsignedSaturated) {
       data[i] = vals[i % 4];
     }
 
-    auto v_in  = loadu(t_in, data);
-    auto v_out = demote(t_out, v_in);
+    auto v_in  = load(t_in, data);
+    auto v_out = convert(t_out, v_in);
 
     for (nint_t i = 0; i < N; ++i) {
       int32_t expected = vecops::convert<int32_t>(data[i]);
@@ -875,8 +875,8 @@ TEST_F(VecConvertCornerCaseTest, DemoteSignedSaturated) {
       data[i] = vals[i % 5];
     }
 
-    auto v_in  = loadu(t_in, data);
-    auto v_out = demote(t_out, v_in);
+    auto v_in  = load(t_in, data);
+    auto v_out = convert(t_out, v_in);
 
     for (nint_t i = 0; i < N; ++i) {
       int32_t expected = vecops::convert<int32_t>(data[i]);
@@ -898,8 +898,8 @@ TEST_F(VecConvertCornerCaseTest, DemoteSignedSaturated) {
       data[i] = vals[i % 4];
     }
 
-    auto v_in  = loadu(t_in, data);
-    auto v_out = demote(t_out, v_in);
+    auto v_in  = load(t_in, data);
+    auto v_out = convert(t_out, v_in);
 
     for (nint_t i = 0; i < N; ++i) {
       int16_t expected = vecops::convert<int16_t>(data[i]);
@@ -924,7 +924,7 @@ TEST_F(VecConvertCornerCaseTest, Int32Float32Boundary) {
       int_data[i] = vals[i % 4];
     }
 
-    auto v_int   = loadu(t_int, int_data);
+    auto v_int   = load(t_int, int_data);
     auto v_float = convert(t_float, v_int);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -943,7 +943,7 @@ TEST_F(VecConvertCornerCaseTest, Int32Float32Boundary) {
       float_data[i] = fvals[i % 4];
     }
 
-    auto v_f = loadu(t_float, float_data);
+    auto v_f = load(t_float, float_data);
     auto v_i = convert(t_int, v_f);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -972,7 +972,7 @@ TEST_F(VecConvertCornerCaseTest, LargeInt32ToFloat32) {
     int_data[i] = vals[i % 4];
   }
 
-  auto v_int   = loadu(t_int, int_data);
+  auto v_int   = load(t_int, int_data);
   auto v_float = convert(t_float, v_int);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -994,8 +994,8 @@ TEST_F(VecConvertCornerCaseTest, MultiWordDemote) {
     data[i] = static_cast<int16_t>((i - 8) * 10);
   }
 
-  auto v_in  = loadu(t_in, data);
-  auto v_out = demote(t_out, v_in);
+  auto v_in  = load(t_in, data);
+  auto v_out = convert(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     int8_t expected = vecops::convert<int8_t>(data[i]);
@@ -1015,7 +1015,7 @@ TEST_F(VecConvertCornerCaseTest, MultiWordConvert) {
     data[i] = (i - 4) * 1000;
   }
 
-  auto v_in  = loadu(t_in, data);
+  auto v_in  = load(t_in, data);
   auto v_out = convert(t_out, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -1040,8 +1040,8 @@ TEST_F(VecConvertCornerCaseTest, Float64Float32RoundTrip) {
       f64_data[i] = vals[i % 2];
     }
 
-    auto v_f64 = loadu(t_f64, f64_data);
-    auto v_f32 = demote(t_f32, v_f64);
+    auto v_f64 = load(t_f64, f64_data);
+    auto v_f32 = convert(t_f32, v_f64);
 
     for (nint_t i = 0; i < N; ++i) {
       float32_t expected = vecops::convert<float32_t>(f64_data[i]);
@@ -1065,8 +1065,8 @@ TEST_F(VecConvertCornerCaseTest, Float32Float64RoundTrip) {
       f32_data[i] = vals[i % 4];
     }
 
-    auto v_f32 = loadu(t_f32, f32_data);
-    auto v_f64 = promote(t_f64, v_f32);
+    auto v_f32 = load(t_f32, f32_data);
+    auto v_f64 = convert(t_f64, v_f32);
 
     for (nint_t i = 0; i < N; ++i) {
       float64_t expected = vecops::convert<float64_t>(f32_data[i]);
@@ -1086,8 +1086,8 @@ TEST_F(VecConvertCornerCaseTest, AllBitsSetPattern) {
   auto data = test_utils::alloc_aligned<int8_t>(N);
   memset(data, 0xFF, N * sizeof(int8_t));
 
-  auto v_in  = loadu(t_i8, data);
-  auto v_out = promote(t_u16, v_in);
+  auto v_in  = load(t_i8, data);
+  auto v_out = convert(t_u16, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
     uint16_t actual = get(t_u16, v_out, i);
@@ -1170,7 +1170,7 @@ TYPED_TEST(VecBitcastTest, BasicBitcast) {
 
   nint_t N = size(this->t_in_);
 
-  auto v_in  = loadu(this->t_in_, this->in_data_);
+  auto v_in  = load(this->t_in_, this->in_data_);
   auto v_out = bitcast(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -1189,7 +1189,7 @@ TYPED_TEST(VecBitcastTest, BitcastRoundTrip) {
 
   nint_t N = size(this->t_in_);
 
-  auto v_in  = loadu(this->t_in_, this->in_data_);
+  auto v_in  = load(this->t_in_, this->in_data_);
   auto v_mid = bitcast(this->t_out_, v_in);
   auto v_out = bitcast(this->t_in_, v_mid);
 
@@ -1225,7 +1225,7 @@ TYPED_TEST(VecBitcastTest, BitcastWithAllOnesPattern) {
   auto data = test_utils::alloc_aligned<TIn>(N);
   std::memset(data, 0xFF, N * sizeof(TIn));
 
-  auto v_in  = loadu(this->t_in_, data);
+  auto v_in  = load(this->t_in_, data);
   auto v_out = bitcast(this->t_out_, v_in);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -1250,7 +1250,7 @@ TEST_F(VecConvertCornerCaseTest, BitcastFloat32ToInt32) {
   if (N > 2) f32_data[2] = 1.0f;
   if (N > 3) f32_data[3] = -1.0f;
 
-  auto v_f32 = loadu(t_f32, f32_data);
+  auto v_f32 = load(t_f32, f32_data);
   auto v_i32 = bitcast(t_i32, v_f32);
 
   EXPECT_EQ(uint32_t(0x00000000), uint32_t(get(t_i32, v_i32, 0)));
@@ -1273,7 +1273,7 @@ TEST_F(VecConvertCornerCaseTest, BitcastInt32ToFloat32) {
   if (N > 2) i32_data[2] = 0x3F800000;
   if (N > 3) i32_data[3] = (int32_t)0xBF800000;
 
-  auto v_i32 = loadu(t_i32, i32_data);
+  auto v_i32 = load(t_i32, i32_data);
   auto v_f32 = bitcast(t_f32, v_i32);
 
   EXPECT_FLOAT_EQ(0.0f, get(t_f32, v_f32, 0));
@@ -1294,7 +1294,7 @@ TEST_F(VecConvertCornerCaseTest, BitcastFloat64ToInt64) {
   f64_data[0] = 0.0;
   if (N > 1) f64_data[1] = 1.0;
 
-  auto v_f64 = loadu(t_f64, f64_data);
+  auto v_f64 = load(t_f64, f64_data);
   auto v_i64 = bitcast(t_i64, v_f64);
 
   EXPECT_EQ(int64_t(0x0000000000000000LL), get(t_i64, v_i64, 0));
@@ -1315,7 +1315,7 @@ TEST_F(VecConvertCornerCaseTest, BitcastSignedUnsigned) {
   if (N > 2) i32_data[2] = 0x7FFFFFFF;
   if (N > 3) i32_data[3] = (int32_t)0x80000000;
 
-  auto v_i32 = loadu(t_i32, i32_data);
+  auto v_i32 = load(t_i32, i32_data);
   auto v_u32 = bitcast(t_u32, v_i32);
 
   EXPECT_EQ(uint32_t(0xFFFFFFFF), get(t_u32, v_u32, 0));
@@ -1337,7 +1337,7 @@ TEST_F(VecConvertCornerCaseTest, BitcastMultiWordSameSize) {
     i32_data[i] = (i - N/2) * 0x11111111;
   }
 
-  auto v_i32 = loadu(t_i32, i32_data);
+  auto v_i32 = load(t_i32, i32_data);
   auto v_u32 = bitcast(t_u32, v_i32);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -1361,7 +1361,7 @@ TEST_F(VecConvertCornerCaseTest, BitcastInputLarger) {
     i32_data[i] = i * 12345;
   }
 
-  auto v_in  = loadu(t_i32_in, i32_data);
+  auto v_in  = load(t_i32_in, i32_data);
   auto v_out = bitcast(t_u32_out, v_in);
 
   for (nint_t i = 0; i < N_OUT; ++i) {
@@ -1385,7 +1385,7 @@ TEST_F(VecConvertCornerCaseTest, BitcastOutputLarger) {
     f32_data[i] = static_cast<float32_t>(i * 1.5f + 0.5f);
   }
 
-  auto v_in  = loadu(t_f32_in, f32_data);
+  auto v_in  = load(t_f32_in, f32_data);
   auto v_out = bitcast(t_u32_out, v_in);
 
   for (nint_t i = 0; i < N_IN; ++i) {
@@ -1408,7 +1408,7 @@ TEST_F(VecConvertCornerCaseTest, BitcastFourWords) {
     f64_data[i] = static_cast<float64_t>(i * 2.5 + 1.0);
   }
 
-  auto v_f64 = loadu(t_f64, f64_data);
+  auto v_f64 = load(t_f64, f64_data);
   auto v_u64 = bitcast(t_u64, v_f64);
 
   for (nint_t i = 0; i < N; ++i) {
