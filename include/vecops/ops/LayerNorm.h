@@ -394,17 +394,17 @@ private:
       vec::Vec<F32Tag> x1_lo;
       vec::Vec<F32Tag> x1_hi;
       if constexpr (IsFloat16V<Element>) {
-        const auto h0 = vec::loadu(f16_tag, x + col);
-        const auto h1 = vec::loadu(f16_tag, x + col + half_lanes);
-        x0_lo = vec::promote_even(f32_tag, h0);
-        x0_hi = vec::promote_odd(f32_tag, h0);
-        x1_lo = vec::promote_even(f32_tag, h1);
-        x1_hi = vec::promote_odd(f32_tag, h1);
+        const auto h0 = vec::load(f16_tag, x + col);
+        const auto h1 = vec::load(f16_tag, x + col + half_lanes);
+        x0_lo = vec::convert(f32_tag, h0, vec::cvt::lane<0>);
+        x0_hi = vec::convert(f32_tag, h0, vec::cvt::lane<1>);
+        x1_lo = vec::convert(f32_tag, h1, vec::cvt::lane<0>);
+        x1_hi = vec::convert(f32_tag, h1, vec::cvt::lane<1>);
       } else {
-        x0_lo = vec::xconvert_loadu(f32_tag, x + col);
-        x0_hi = vec::xconvert_loadu(f32_tag, x + col + word_lanes);
-        x1_lo = vec::xconvert_loadu(f32_tag, x + col + half_lanes);
-        x1_hi = vec::xconvert_loadu(
+        x0_lo = vec::load_convert(f32_tag, x + col);
+        x0_hi = vec::load_convert(f32_tag, x + col + word_lanes);
+        x1_lo = vec::load_convert(f32_tag, x + col + half_lanes);
+        x1_hi = vec::load_convert(
             f32_tag, x + col + half_lanes + word_lanes);
       }
 
@@ -423,15 +423,17 @@ private:
       vec::Vec<F32Tag> x_lo;
       vec::Vec<F32Tag> x_hi;
       if constexpr (IsFloat16V<Element>) {
-        const auto h = vec::loadu(f16_tag, x + col, tail);
-        x_lo = vec::promote_even(f32_tag, h);
-        x_hi = vec::promote_odd(f32_tag, h);
+        const auto h = vec::load(
+            f16_tag, x + col, vec::opt::masked(tail));
+        x_lo = vec::convert(f32_tag, h, vec::cvt::lane<0>);
+        x_hi = vec::convert(f32_tag, h, vec::cvt::lane<1>);
       } else {
         const auto tail_lo = vec::mwhilelt(f32_tag, col, n);
         const auto tail_hi = vec::mwhilelt(f32_tag, col + word_lanes, n);
-        x_lo = vec::xconvert_loadu(f32_tag, x + col, tail_lo);
-        x_hi = vec::xconvert_loadu(
-            f32_tag, x + col + word_lanes, tail_hi);
+        x_lo = vec::load_convert(
+            f32_tag, x + col, vec::opt::masked(tail_lo));
+        x_hi = vec::load_convert(
+            f32_tag, x + col + word_lanes, vec::opt::masked(tail_hi));
       }
       sum0 = vec::add(sum0, x_lo);
       sum1 = vec::add(sum1, x_hi);
@@ -485,28 +487,34 @@ private:
       vec::Vec<F32Tag> beta_hi;
 
       if constexpr (IsFloat16V<Element>) {
-        const auto xh = vec::loadu(f16_tag, x + col, tail);
-        const auto gh = vec::loadu(f16_tag, gamma + col, tail);
-        const auto bh = vec::loadu(f16_tag, beta + col, tail);
-        x_lo = vec::promote_even(f32_tag, xh);
-        x_hi = vec::promote_odd(f32_tag, xh);
-        gamma_lo = vec::promote_even(f32_tag, gh);
-        gamma_hi = vec::promote_odd(f32_tag, gh);
-        beta_lo = vec::promote_even(f32_tag, bh);
-        beta_hi = vec::promote_odd(f32_tag, bh);
+        const auto xh = vec::load(
+            f16_tag, x + col, vec::opt::masked(tail));
+        const auto gh = vec::load(
+            f16_tag, gamma + col, vec::opt::masked(tail));
+        const auto bh = vec::load(
+            f16_tag, beta + col, vec::opt::masked(tail));
+        x_lo = vec::convert(f32_tag, xh, vec::cvt::lane<0>);
+        x_hi = vec::convert(f32_tag, xh, vec::cvt::lane<1>);
+        gamma_lo = vec::convert(f32_tag, gh, vec::cvt::lane<0>);
+        gamma_hi = vec::convert(f32_tag, gh, vec::cvt::lane<1>);
+        beta_lo = vec::convert(f32_tag, bh, vec::cvt::lane<0>);
+        beta_hi = vec::convert(f32_tag, bh, vec::cvt::lane<1>);
       } else {
         const auto tail_lo = vec::mwhilelt(f32_tag, col, n);
         const auto tail_hi = vec::mwhilelt(f32_tag, col + word_lanes, n);
-        x_lo = vec::xconvert_loadu(f32_tag, x + col, tail_lo);
-        x_hi = vec::xconvert_loadu(
-            f32_tag, x + col + word_lanes, tail_hi);
-        gamma_lo = vec::xconvert_loadu(
-            f32_tag, gamma + col, tail_lo);
-        gamma_hi = vec::xconvert_loadu(
-            f32_tag, gamma + col + word_lanes, tail_hi);
-        beta_lo = vec::xconvert_loadu(f32_tag, beta + col, tail_lo);
-        beta_hi = vec::xconvert_loadu(
-            f32_tag, beta + col + word_lanes, tail_hi);
+        x_lo = vec::load_convert(
+            f32_tag, x + col, vec::opt::masked(tail_lo));
+        x_hi = vec::load_convert(
+            f32_tag, x + col + word_lanes, vec::opt::masked(tail_hi));
+        gamma_lo = vec::load_convert(
+            f32_tag, gamma + col, vec::opt::masked(tail_lo));
+        gamma_hi = vec::load_convert(
+            f32_tag, gamma + col + word_lanes,
+            vec::opt::masked(tail_hi));
+        beta_lo = vec::load_convert(
+            f32_tag, beta + col, vec::opt::masked(tail_lo));
+        beta_hi = vec::load_convert(
+            f32_tag, beta + col + word_lanes, vec::opt::masked(tail_hi));
       }
 
       if constexpr (IsFloat16V<Element>) {
@@ -520,27 +528,32 @@ private:
       const auto out_hi = vec::fmadd(x_hi, gamma_hi, beta_hi);
 
       if constexpr (IsFloat16V<Element>) {
-        auto packed = vec::demote_even(f16_tag, out_lo);
-        packed = vec::demote_odd(f16_tag, out_hi, packed);
-        vec::storeu(f16_tag, y + col, tail, packed);
+        auto packed = vec::convert(
+            f16_tag, out_lo, vec::cvt::lane<0>);
+        packed = vec::convert(
+            f16_tag, out_hi, vec::cvt::lane<1>, vec::opt::merge(packed));
+        vec::store(
+            f16_tag, y + col, packed, vec::opt::masked(tail));
       } else {
         if constexpr (SplitBf16Store) {
           const auto store_tail_lo = vec::mwhilelt(f32_tag, col, n);
           const auto store_tail_hi =
               vec::mwhilelt(f32_tag, col + word_lanes, n);
-          vec::xconvert_storeu(
-              f32_tag, y + col, store_tail_lo, out_lo);
-          vec::xconvert_storeu(
-              f32_tag, y + col + word_lanes, store_tail_hi, out_hi);
+          vec::store_convert(
+              f32_tag, y + col, out_lo, vec::opt::masked(store_tail_lo));
+          vec::store_convert(
+              f32_tag, y + col + word_lanes, out_hi,
+              vec::opt::masked(store_tail_hi));
         } else {
           const auto out_pair =
               vec::concat(f32_pair_tag, out_lo, out_hi);
           if (col + half_lanes <= n) {
-            vec::xconvert_storeu(f32_pair_tag, y + col, out_pair);
+            vec::store_convert(f32_pair_tag, y + col, out_pair);
           } else {
             const auto store_tail = vec::mwhilelt(f32_pair_tag, col, n);
-            vec::xconvert_storeu(
-                f32_pair_tag, y + col, store_tail, out_pair);
+            vec::store_convert(
+                f32_pair_tag, y + col, out_pair,
+                vec::opt::masked(store_tail));
           }
         }
       }

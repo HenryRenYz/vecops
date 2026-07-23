@@ -71,7 +71,7 @@ void run_reduce_checks(Tag t) {
   std::vector<T> data((size_t)N);
   for (nint_t i = 0; i < N; ++i) data[(size_t)i] = reduce_test_value<T>(i);
 
-  auto v = loadu(t, data.data());
+  auto v = load(t, data.data());
   EXPECT_TRUE(test_utils::values_equal(expected_reduce_add(data), reduce_add(t, v)))
       << "reduce_add N=" << N;
   EXPECT_TRUE(test_utils::values_equal(expected_reduce_max(data), reduce_max(t, v)))
@@ -151,8 +151,8 @@ TYPED_TEST(VecArithTest, AddBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto vr = add(va, vb);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -167,8 +167,8 @@ TYPED_TEST(VecArithTest, AddWithMask) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m = mwhilelt(t, 0, N / 2);
   auto vr = add(va, vb, m);
 
@@ -197,8 +197,8 @@ TYPED_TEST(VecArithTest, SubBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto vr = sub(va, vb);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -212,8 +212,8 @@ TYPED_TEST(VecArithTest, SubWithMask) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m = mwhilelt(t, 0, N / 2);
   auto vr = sub(va, vb, m);
 
@@ -242,8 +242,8 @@ TYPED_TEST(VecArithTest, MulBasic) {
     small_b[i] = test_utils::get_test_value<T>((i + 2) % 5);
   }
 
-  auto va = loadu(t, small_a.get());
-  auto vb = loadu(t, small_b.get());
+  auto va = load(t, small_a.get());
+  auto vb = load(t, small_b.get());
   auto vr = mul(va, vb);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -264,8 +264,8 @@ TYPED_TEST(VecArithTest, MulWithMask) {
     small_b[i] = test_utils::get_test_value<T>((i + 2) % 5);
   }
 
-  auto va = loadu(t, small_a.get());
-  auto vb = loadu(t, small_b.get());
+  auto va = load(t, small_a.get());
+  auto vb = load(t, small_b.get());
   auto m = mwhilelt(t, 0, N / 2);
   auto vr = mul(va, vb, m);
 
@@ -296,9 +296,9 @@ TYPED_TEST(VecArithTest, FmaBasic) {
     c[i] = static_cast<T>((i % 7) + 3);
   }
 
-  auto va = loadu(t, a.get());
-  auto vb = loadu(t, b.get());
-  auto vc = loadu(t, c.get());
+  auto va = load(t, a.get());
+  auto vb = load(t, b.get());
+  auto vc = load(t, c.get());
 
   auto v_fmadd = fmadd(va, vb, vc);
   auto v_fmsub = fmsub(va, vb, vc);
@@ -327,9 +327,9 @@ TYPED_TEST(VecArithTest, FmaWithMask) {
     c[i] = static_cast<T>((i % 7) + 3);
   }
 
-  auto va = loadu(t, a.get());
-  auto vb = loadu(t, b.get());
-  auto vc = loadu(t, c.get());
+  auto va = load(t, a.get());
+  auto vb = load(t, b.get());
+  auto vc = load(t, c.get());
   auto m = mwhilelt(t, 0, N / 2);
 
   auto v_fmadd = fmadd(va, vb, vc, m);
@@ -368,8 +368,8 @@ TYPED_TEST(VecArithTest, DivBasic) {
       b[i] = static_cast<T>((i + 1) * 3.0 + 1.0);
     }
 
-    auto va = loadu(t, a.get());
-    auto vb = loadu(t, b.get());
+    auto va = load(t, a.get());
+    auto vb = load(t, b.get());
     auto vr = div(va, vb);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -392,8 +392,8 @@ TYPED_TEST(VecArithTest, DivWithMask) {
       b[i] = static_cast<T>((i + 1) * 3.0 + 1.0);
     }
 
-    auto va = loadu(t, a.get());
-    auto vb = loadu(t, b.get());
+    auto va = load(t, a.get());
+    auto vb = load(t, b.get());
     auto m = mwhilelt(t, 0, N / 2);
     auto vr = div(va, vb, m);
 
@@ -422,7 +422,7 @@ TYPED_TEST(VecArithTest, RcpBasic) {
       a[i] = static_cast<T>((i + 1) * 2.0 + 1.0);
     }
 
-    auto va = loadu(t, a.get());
+    auto va = load(t, a.get());
     auto vr = rcp(va);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -445,7 +445,7 @@ TYPED_TEST(VecArithTest, RcpWithMask) {
       a[i] = static_cast<T>((i + 1) * 2.0 + 1.0);
     }
 
-    auto va = loadu(t, a.get());
+    auto va = load(t, a.get());
     auto m = mwhilelt(t, 0, N / 2);
     auto default_v = fill(t, T(999));
     auto vr = rcp(va, m, default_v);
@@ -470,8 +470,8 @@ TYPED_TEST(VecArithTest, MaxBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto vr = vec::max(va, vb);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -485,8 +485,8 @@ TYPED_TEST(VecArithTest, MaxWithMask) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m = mwhilelt(t, 0, N / 2);
   auto vr = vec::max(va, vb, m);
 
@@ -504,8 +504,8 @@ TYPED_TEST(VecArithTest, MinBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto vr = vec::min(va, vb);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -519,8 +519,8 @@ TYPED_TEST(VecArithTest, MinWithMask) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m = mwhilelt(t, 0, N / 2);
   auto vr = vec::min(va, vb, m);
 
@@ -542,7 +542,7 @@ TYPED_TEST(VecArithTest, NegBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
+  auto va = load(t, this->a_data_);
   auto vr = neg(va);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -556,7 +556,7 @@ TYPED_TEST(VecArithTest, NegWithMask) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
+  auto va = load(t, this->a_data_);
   auto m = mwhilelt(t, 0, N / 2);
   auto default_v = fill(t, T(999));
   auto vr = neg(va, m, default_v);
@@ -575,7 +575,7 @@ TYPED_TEST(VecArithTest, AbsBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
+  auto va = load(t, this->a_data_);
   auto vr = abs(va);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -589,7 +589,7 @@ TYPED_TEST(VecArithTest, AbsWithMask) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
+  auto va = load(t, this->a_data_);
   auto m = mwhilelt(t, 0, N / 2);
   auto default_v = fill(t, T(999));
   auto vr = abs(va, m, default_v);
@@ -618,7 +618,7 @@ TYPED_TEST(VecArithTest, SqrtBasic) {
       a[i] = static_cast<T>((i + 1) * 4.0 + 1.0);
     }
 
-    auto va = loadu(t, a.get());
+    auto va = load(t, a.get());
     auto vr = sqrt(va);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -639,7 +639,7 @@ TYPED_TEST(VecArithTest, SqrtWithMask) {
       a[i] = static_cast<T>((i + 1) * 4.0 + 1.0);
     }
 
-    auto va = loadu(t, a.get());
+    auto va = load(t, a.get());
     auto m = mwhilelt(t, 0, N / 2);
     auto default_v = fill(t, T(999));
     auto vr = sqrt(va, m, default_v);
@@ -665,7 +665,7 @@ TYPED_TEST(VecArithTest, RsqrtBasic) {
       a[i] = static_cast<T>((i + 1) * 4.0 + 1.0);
     }
 
-    auto va = loadu(t, a.get());
+    auto va = load(t, a.get());
     auto vr = rsqrt(va);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -688,7 +688,7 @@ TYPED_TEST(VecArithTest, RsqrtWithMask) {
       a[i] = static_cast<T>((i + 1) * 4.0 + 1.0);
     }
 
-    auto va = loadu(t, a.get());
+    auto va = load(t, a.get());
     auto m = mwhilelt(t, 0, N / 2);
     auto default_v = fill(t, T(999));
     auto vr = rsqrt(va, m, default_v);
@@ -714,8 +714,8 @@ TYPED_TEST(VecArithTest, BitAndBasic) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
-    auto va = loadu(t, this->a_data_);
-    auto vb = loadu(t, this->b_data_);
+    auto va = load(t, this->a_data_);
+    auto vb = load(t, this->b_data_);
     auto vr = bit_and(va, vb);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -731,8 +731,8 @@ TYPED_TEST(VecArithTest, BitAndWithMask) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
-    auto va = loadu(t, this->a_data_);
-    auto vb = loadu(t, this->b_data_);
+    auto va = load(t, this->a_data_);
+    auto vb = load(t, this->b_data_);
     auto m = mwhilelt(t, 0, N / 2);
     auto vr = bit_and(va, vb, m);
 
@@ -752,8 +752,8 @@ TYPED_TEST(VecArithTest, BitOrBasic) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
-    auto va = loadu(t, this->a_data_);
-    auto vb = loadu(t, this->b_data_);
+    auto va = load(t, this->a_data_);
+    auto vb = load(t, this->b_data_);
     auto vr = bit_or(va, vb);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -769,8 +769,8 @@ TYPED_TEST(VecArithTest, BitOrWithMask) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
-    auto va = loadu(t, this->a_data_);
-    auto vb = loadu(t, this->b_data_);
+    auto va = load(t, this->a_data_);
+    auto vb = load(t, this->b_data_);
     auto m = mwhilelt(t, 0, N / 2);
     auto vr = bit_or(va, vb, m);
 
@@ -790,8 +790,8 @@ TYPED_TEST(VecArithTest, BitXorBasic) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
-    auto va = loadu(t, this->a_data_);
-    auto vb = loadu(t, this->b_data_);
+    auto va = load(t, this->a_data_);
+    auto vb = load(t, this->b_data_);
     auto vr = bit_xor(va, vb);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -807,8 +807,8 @@ TYPED_TEST(VecArithTest, BitXorWithMask) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
-    auto va = loadu(t, this->a_data_);
-    auto vb = loadu(t, this->b_data_);
+    auto va = load(t, this->a_data_);
+    auto vb = load(t, this->b_data_);
     auto m = mwhilelt(t, 0, N / 2);
     auto vr = bit_xor(va, vb, m);
 
@@ -828,8 +828,8 @@ TYPED_TEST(VecArithTest, BitAndnotBasic) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
-    auto va = loadu(t, this->a_data_);
-    auto vb = loadu(t, this->b_data_);
+    auto va = load(t, this->a_data_);
+    auto vb = load(t, this->b_data_);
     auto vr = bit_andnot(va, vb);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -845,8 +845,8 @@ TYPED_TEST(VecArithTest, BitAndnotWithMask) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
-    auto va = loadu(t, this->a_data_);
-    auto vb = loadu(t, this->b_data_);
+    auto va = load(t, this->a_data_);
+    auto vb = load(t, this->b_data_);
     auto m = mwhilelt(t, 0, N / 2);
     auto vr = bit_andnot(va, vb, m);
 
@@ -866,7 +866,7 @@ TYPED_TEST(VecArithTest, BitNotBasic) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
-    auto va = loadu(t, this->a_data_);
+    auto va = load(t, this->a_data_);
     auto vr = bit_not(va);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -882,7 +882,7 @@ TYPED_TEST(VecArithTest, BitNotWithMask) {
     auto& t = this->t;
     nint_t N = this->full_size;
 
-    auto va = loadu(t, this->a_data_);
+    auto va = load(t, this->a_data_);
     auto m = mwhilelt(t, 0, N / 2);
     auto default_v = fill(t, T{0x42});
     auto vr = bit_not(va, m, default_v);
@@ -909,7 +909,7 @@ TYPED_TEST(VecArithTest, BitShlBasic) {
 
     int shift_counts[] = {0, 1, 2, 3, 4, 7, 8};
     for (int shift : shift_counts) {
-      auto va = loadu(t, this->a_data_);
+      auto va = load(t, this->a_data_);
       auto vr = bit_shl(va, shift);
 
       for (nint_t i = 0; i < N; ++i) {
@@ -931,7 +931,7 @@ TYPED_TEST(VecArithTest, BitShlWithMask) {
     nint_t N = this->full_size;
 
     int shift = 2;
-    auto va = loadu(t, this->a_data_);
+    auto va = load(t, this->a_data_);
     auto m = mwhilelt(t, 0, N / 2);
     auto vr = bit_shl(va, shift, m);
 
@@ -952,7 +952,7 @@ TYPED_TEST(VecArithTest, BitShlLargeShift) {
     nint_t N = this->full_size;
 
     int large_shift = sizeof(T) * 8;
-    auto va = loadu(t, this->a_data_);
+    auto va = load(t, this->a_data_);
     auto vr = bit_shl(va, large_shift);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -971,7 +971,7 @@ TYPED_TEST(VecArithTest, BitShrBasic) {
 
     int shift_counts[] = {0, 1, 2, 3, 4, 7, 8};
     for (int shift : shift_counts) {
-      auto va = loadu(t, this->a_data_);
+      auto va = load(t, this->a_data_);
       auto vr = bit_shr(va, shift);
 
       for (nint_t i = 0; i < N; ++i) {
@@ -993,7 +993,7 @@ TYPED_TEST(VecArithTest, BitShrWithMask) {
     nint_t N = this->full_size;
 
     int shift = 2;
-    auto va = loadu(t, this->a_data_);
+    auto va = load(t, this->a_data_);
     auto m = mwhilelt(t, 0, N / 2);
     auto vr = bit_shr(va, shift, m);
 
@@ -1020,7 +1020,7 @@ TYPED_TEST(VecArithTest, BitShrArithmeticSignExtension) {
     }
 
     int shift = 1;
-    auto va = loadu(t, test_data.get());
+    auto va = load(t, test_data.get());
     auto vr = bit_shr(va, shift);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -1049,7 +1049,7 @@ TYPED_TEST(VecArithTest, BitShrLogicalZeroFill) {
     }
 
     int shift = 1;
-    auto va = loadu(t, test_data.get());
+    auto va = load(t, test_data.get());
     auto vr = bit_shr(va, shift);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -1077,7 +1077,7 @@ TYPED_TEST(VecArithTest, BitShrLargeShift) {
         test_data[i] = static_cast<T>(i + 1);
     }
 
-    auto va = loadu(t, test_data.get());
+    auto va = load(t, test_data.get());
     auto vr = bit_shr(va, large_shift);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -1098,7 +1098,7 @@ TYPED_TEST(VecArithTest, BitShlPattern) {
     for (nint_t i = 0; i < N; ++i) test_data[i] = static_cast<T>(1);
 
     for (int shift = 0; shift < static_cast<int>(sizeof(T) * 8); ++shift) {
-      auto va = loadu(t, test_data.get());
+      auto va = load(t, test_data.get());
       auto vr = bit_shl(va, shift);
 
       for (nint_t i = 0; i < N; ++i) {
@@ -1123,7 +1123,7 @@ TYPED_TEST(VecArithTest, BitShrPattern) {
       test_data[i] = static_cast<T>(T{1} << (sizeof(T) * 8 - 1));
 
     for (int shift = 0; shift < static_cast<int>(sizeof(T) * 8); ++shift) {
-      auto va = loadu(t, test_data.get());
+      auto va = load(t, test_data.get());
       auto vr = bit_shr(va, shift);
 
       for (nint_t i = 0; i < N; ++i) {
@@ -1147,8 +1147,8 @@ TYPED_TEST(VecArithTest, HalfSizeAdd) {
   auto half_t = Half<decltype(this->t)>{};
   nint_t half_n = size(half_t);
 
-  auto va = loadu(half_t, this->a_data_);
-  auto vb = loadu(half_t, this->b_data_);
+  auto va = load(half_t, this->a_data_);
+  auto vb = load(half_t, this->b_data_);
   auto vr = add(va, vb);
 
   for (nint_t i = 0; i < half_n; ++i) {
@@ -1162,8 +1162,8 @@ TYPED_TEST(VecArithTest, HalfSizeSub) {
   auto half_t = Half<decltype(this->t)>{};
   nint_t half_n = size(half_t);
 
-  auto va = loadu(half_t, this->a_data_);
-  auto vb = loadu(half_t, this->b_data_);
+  auto va = load(half_t, this->a_data_);
+  auto vb = load(half_t, this->b_data_);
   auto vr = sub(va, vb);
 
   for (nint_t i = 0; i < half_n; ++i) {
@@ -1184,8 +1184,8 @@ TYPED_TEST(VecArithTest, HalfSizeMul) {
     sb[i] = test_utils::get_test_value<T>((i + 2) % 5);
   }
 
-  auto va = loadu(half_t, sa.get());
-  auto vb = loadu(half_t, sb.get());
+  auto va = load(half_t, sa.get());
+  auto vb = load(half_t, sb.get());
   auto vr = mul(va, vb);
 
   for (nint_t i = 0; i < half_n; ++i) {
@@ -1201,7 +1201,7 @@ TYPED_TEST(VecArithTest, HalfSizeBitShl) {
     nint_t half_n = size(half_t);
 
     int shift = 3;
-    auto va = loadu(half_t, this->a_data_);
+    auto va = load(half_t, this->a_data_);
     auto vr = bit_shl(va, shift);
 
     for (nint_t i = 0; i < half_n; ++i) {
@@ -1218,7 +1218,7 @@ TYPED_TEST(VecArithTest, HalfSizeBitShr) {
     nint_t half_n = size(half_t);
 
     int shift = 3;
-    auto va = loadu(half_t, this->a_data_);
+    auto va = load(half_t, this->a_data_);
     auto vr = bit_shr(va, shift);
 
     for (nint_t i = 0; i < half_n; ++i) {
@@ -1233,8 +1233,8 @@ TYPED_TEST(VecArithTest, HalfSizeMax) {
   auto half_t = Half<decltype(this->t)>{};
   nint_t half_n = size(half_t);
 
-  auto va = loadu(half_t, this->a_data_);
-  auto vb = loadu(half_t, this->b_data_);
+  auto va = load(half_t, this->a_data_);
+  auto vb = load(half_t, this->b_data_);
   auto vr = vec::max(va, vb);
 
   for (nint_t i = 0; i < half_n; ++i) {
@@ -1248,8 +1248,8 @@ TYPED_TEST(VecArithTest, HalfSizeMin) {
   auto half_t = Half<decltype(this->t)>{};
   nint_t half_n = size(half_t);
 
-  auto va = loadu(half_t, this->a_data_);
-  auto vb = loadu(half_t, this->b_data_);
+  auto va = load(half_t, this->a_data_);
+  auto vb = load(half_t, this->b_data_);
   auto vr = vec::min(va, vb);
 
   for (nint_t i = 0; i < half_n; ++i) {
@@ -1263,7 +1263,7 @@ TYPED_TEST(VecArithTest, HalfSizeNeg) {
   auto half_t = Half<decltype(this->t)>{};
   nint_t half_n = size(half_t);
 
-  auto va = loadu(half_t, this->a_data_);
+  auto va = load(half_t, this->a_data_);
   auto vr = neg(va);
 
   for (nint_t i = 0; i < half_n; ++i) {
@@ -1277,7 +1277,7 @@ TYPED_TEST(VecArithTest, HalfSizeAbs) {
   auto half_t = Half<decltype(this->t)>{};
   nint_t half_n = size(half_t);
 
-  auto va = loadu(half_t, this->a_data_);
+  auto va = load(half_t, this->a_data_);
   auto vr = abs(va);
 
   for (nint_t i = 0; i < half_n; ++i) {
@@ -1292,8 +1292,8 @@ TYPED_TEST(VecArithTest, HalfSizeBitAnd) {
     auto half_t = Half<decltype(this->t)>{};
     nint_t half_n = size(half_t);
 
-    auto va = loadu(half_t, this->a_data_);
-    auto vb = loadu(half_t, this->b_data_);
+    auto va = load(half_t, this->a_data_);
+    auto vb = load(half_t, this->b_data_);
     auto vr = bit_and(va, vb);
 
     for (nint_t i = 0; i < half_n; ++i) {
@@ -1309,8 +1309,8 @@ TYPED_TEST(VecArithTest, HalfSizeBitOr) {
     auto half_t = Half<decltype(this->t)>{};
     nint_t half_n = size(half_t);
 
-    auto va = loadu(half_t, this->a_data_);
-    auto vb = loadu(half_t, this->b_data_);
+    auto va = load(half_t, this->a_data_);
+    auto vb = load(half_t, this->b_data_);
     auto vr = bit_or(va, vb);
 
     for (nint_t i = 0; i < half_n; ++i) {
@@ -1325,12 +1325,12 @@ TYPED_TEST(VecArithTest, HalfSizeCmpeq) {
   auto half_t = Half<decltype(this->t)>{};
   nint_t half_n = size(half_t);
 
-  auto va = loadu(half_t, this->a_data_);
-  auto vb = loadu(half_t, this->a_data_);
+  auto va = load(half_t, this->a_data_);
+  auto vb = load(half_t, this->a_data_);
   auto m = cmpeq(va, vb);
   for (nint_t i = 0; i < half_n; ++i) EXPECT_TRUE(get(half_t, m, i));
 
-  auto vb2 = loadu(half_t, this->b_data_);
+  auto vb2 = load(half_t, this->b_data_);
   auto m2 = cmpeq(va, vb2);
   for (nint_t i = 0; i < half_n; ++i) EXPECT_FALSE(get(half_t, m2, i));
 }
@@ -1346,8 +1346,8 @@ TYPED_TEST(VecArithTest, PartialHalfWordAdd) {
   nint_t N = size(th);
   if (N < 1) return;
 
-  auto va = loadu(th, this->a_data_);
-  auto vb = loadu(th, this->b_data_);
+  auto va = load(th, this->a_data_);
+  auto vb = load(th, this->b_data_);
   auto vr = add(va, vb);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -1362,8 +1362,8 @@ TYPED_TEST(VecArithTest, PartialHalfWordSub) {
   nint_t N = size(th);
   if (N < 1) return;
 
-  auto va = loadu(th, this->a_data_);
-  auto vb = loadu(th, this->b_data_);
+  auto va = load(th, this->a_data_);
+  auto vb = load(th, this->b_data_);
   auto vr = sub(va, vb);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -1384,8 +1384,8 @@ TYPED_TEST(VecArithTest, PartialHalfWordMul) {
     sa[i] = test_utils::get_test_value<T>(i % 5);
     sb[i] = test_utils::get_test_value<T>((i + 2) % 5);
   }
-  auto va = loadu(th, sa.get());
-  auto vb = loadu(th, sb.get());
+  auto va = load(th, sa.get());
+  auto vb = load(th, sb.get());
   auto vr = mul(va, vb);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -1401,8 +1401,8 @@ TYPED_TEST(VecArithTest, PartialHalfWordBitAnd) {
     nint_t N = size(th);
     if (N < 1) return;
 
-    auto va = loadu(th, this->a_data_);
-    auto vb = loadu(th, this->b_data_);
+    auto va = load(th, this->a_data_);
+    auto vb = load(th, this->b_data_);
     auto vr = bit_and(va, vb);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -1418,12 +1418,12 @@ TYPED_TEST(VecArithTest, PartialHalfWordCmpeq) {
   nint_t N = size(th);
   if (N < 1) return;
 
-  auto va = loadu(th, this->a_data_);
-  auto vb = loadu(th, this->a_data_);
+  auto va = load(th, this->a_data_);
+  auto vb = load(th, this->a_data_);
   auto m = cmpeq(va, vb);
   for (nint_t i = 0; i < N; ++i) EXPECT_TRUE(get(th, m, i));
 
-  auto vb2 = loadu(th, this->b_data_);
+  auto vb2 = load(th, this->b_data_);
   auto m2 = cmpeq(va, vb2);
   for (nint_t i = 0; i < N; ++i) EXPECT_FALSE(get(th, m2, i));
 }
@@ -1435,8 +1435,8 @@ TYPED_TEST(VecArithTest, PartialQuarterWordAdd) {
     nint_t N = size(tq);
     if (N < 1) return;
 
-    auto va = loadu(tq, this->a_data_);
-    auto vb = loadu(tq, this->b_data_);
+    auto va = load(tq, this->a_data_);
+    auto vb = load(tq, this->b_data_);
     auto vr = add(va, vb);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -1453,8 +1453,8 @@ TYPED_TEST(VecArithTest, PartialQuarterWordSub) {
     nint_t N = size(tq);
     if (N < 1) return;
 
-    auto va = loadu(tq, this->a_data_);
-    auto vb = loadu(tq, this->b_data_);
+    auto va = load(tq, this->a_data_);
+    auto vb = load(tq, this->b_data_);
     auto vr = sub(va, vb);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -1471,8 +1471,8 @@ TYPED_TEST(VecArithTest, PartialEighthWordAdd) {
     nint_t N = size(te);
     if (N < 1) return;
 
-    auto va = loadu(te, this->a_data_);
-    auto vb = loadu(te, this->b_data_);
+    auto va = load(te, this->a_data_);
+    auto vb = load(te, this->b_data_);
     auto vr = add(va, vb);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -1491,8 +1491,8 @@ TYPED_TEST(VecArithTest, MultiWordAdd) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->b_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->b_data_);
   auto vr = add(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -1506,8 +1506,8 @@ TYPED_TEST(VecArithTest, MultiWordSub) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->b_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->b_data_);
   auto vr = sub(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -1528,8 +1528,8 @@ TYPED_TEST(VecArithTest, MultiWordMul) {
     sb[i] = test_utils::get_test_value<T>((i + 2) % 5);
   }
 
-  auto va = loadu(t2, sa.get());
-  auto vb = loadu(t2, sb.get());
+  auto va = load(t2, sa.get());
+  auto vb = load(t2, sb.get());
   auto vr = mul(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -1551,8 +1551,8 @@ TYPED_TEST(VecArithTest, MultiWordDiv) {
       b[i] = static_cast<T>((i + 1) * 3.0 + 1.0);
     }
 
-    auto va = loadu(t2, a.get());
-    auto vb = loadu(t2, b.get());
+    auto va = load(t2, a.get());
+    auto vb = load(t2, b.get());
     auto vr = div(va, vb);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -1567,8 +1567,8 @@ TYPED_TEST(VecArithTest, MultiWordMax) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->b_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->b_data_);
   auto vr = vec::max(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -1582,8 +1582,8 @@ TYPED_TEST(VecArithTest, MultiWordMin) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->b_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->b_data_);
   auto vr = vec::min(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -1597,7 +1597,7 @@ TYPED_TEST(VecArithTest, MultiWordNeg) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
+  auto va = load(t2, this->a_data_);
   auto vr = neg(va);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -1611,7 +1611,7 @@ TYPED_TEST(VecArithTest, MultiWordAbs) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
+  auto va = load(t2, this->a_data_);
   auto vr = abs(va);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -1627,7 +1627,7 @@ TYPED_TEST(VecArithTest, MultiWordBitShl) {
     nint_t M = this->multi2_size;
 
     int shift = 3;
-    auto va = loadu(t2, this->a_data_);
+    auto va = load(t2, this->a_data_);
     auto vr = bit_shl(va, shift);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -1644,7 +1644,7 @@ TYPED_TEST(VecArithTest, MultiWordBitShr) {
     nint_t M = this->multi2_size;
 
     int shift = 3;
-    auto va = loadu(t2, this->a_data_);
+    auto va = load(t2, this->a_data_);
     auto vr = bit_shr(va, shift);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -1660,8 +1660,8 @@ TYPED_TEST(VecArithTest, MultiWordBitAnd) {
     auto& t2 = this->t2;
     nint_t M = this->multi2_size;
 
-    auto va = loadu(t2, this->a_data_);
-    auto vb = loadu(t2, this->b_data_);
+    auto va = load(t2, this->a_data_);
+    auto vb = load(t2, this->b_data_);
     auto vr = bit_and(va, vb);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -1677,8 +1677,8 @@ TYPED_TEST(VecArithTest, MultiWordBitOr) {
     auto& t2 = this->t2;
     nint_t M = this->multi2_size;
 
-    auto va = loadu(t2, this->a_data_);
-    auto vb = loadu(t2, this->b_data_);
+    auto va = load(t2, this->a_data_);
+    auto vb = load(t2, this->b_data_);
     auto vr = bit_or(va, vb);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -1695,8 +1695,8 @@ TYPED_TEST(VecArithTest, MultiWordAddWithMask) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->b_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->b_data_);
   auto m = mwhilelt(t2, 0, M / 2);
   auto vr = add(va, vb, m);
 
@@ -1722,8 +1722,8 @@ TYPED_TEST(VecArithTest, MultiWordMulWithMask) {
     sb[i] = test_utils::get_test_value<T>((i + 2) % 5);
   }
 
-  auto va = loadu(t2, sa.get());
-  auto vb = loadu(t2, sb.get());
+  auto va = load(t2, sa.get());
+  auto vb = load(t2, sb.get());
   auto m = mwhilelt(t2, 0, M / 2);
   auto vr = mul(va, vb, m);
 
@@ -1741,8 +1741,8 @@ TYPED_TEST(VecArithTest, MultiWordMaxWithMask) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->b_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->b_data_);
   auto m = mwhilelt(t2, 0, M / 2);
   auto vr = vec::max(va, vb, m);
 
@@ -1762,7 +1762,7 @@ TYPED_TEST(VecArithTest, MultiWordBitShlWithMask) {
     nint_t M = this->multi2_size;
 
     int shift = 3;
-    auto va = loadu(t2, this->a_data_);
+    auto va = load(t2, this->a_data_);
     auto m = mwhilelt(t2, 0, M / 2);
     auto vr = bit_shl(va, shift, m);
 
@@ -1781,15 +1781,15 @@ TYPED_TEST(VecArithTest, MultiWordCmpeq) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->a_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->a_data_);
   auto m = cmpeq(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
     EXPECT_TRUE(get(t2, m, i)) << "i=" << i;
   }
 
-  auto vb2 = loadu(t2, this->b_data_);
+  auto vb2 = load(t2, this->b_data_);
   auto m2 = cmpeq(va, vb2);
   for (nint_t i = 0; i < M; ++i) {
     EXPECT_FALSE(get(t2, m2, i)) << "i=" << i;
@@ -1801,8 +1801,8 @@ TYPED_TEST(VecArithTest, MultiWordCmpeqWithMask) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->a_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->a_data_);
   auto m_pred = mwhilelt(t2, 0, M / 2);
   auto m_result = cmpeq(va, vb, m_pred);
 
@@ -1815,8 +1815,8 @@ TYPED_TEST(VecArithTest, MultiWordCmpneWithMask) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->b_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->b_data_);
   auto m_pred = mwhilelt(t2, 0, M / 2);
   auto m_result = cmpne(va, vb, m_pred);
 
@@ -1829,8 +1829,8 @@ TYPED_TEST(VecArithTest, MultiWordSubWithMask) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->b_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->b_data_);
   auto m = mwhilelt(t2, 0, M / 2);
   auto vr = sub(va, vb, m);
 
@@ -1849,8 +1849,8 @@ TYPED_TEST(VecArithTest, MultiWordBitXor) {
     auto& t2 = this->t2;
     nint_t M = this->multi2_size;
 
-    auto va = loadu(t2, this->a_data_);
-    auto vb = loadu(t2, this->b_data_);
+    auto va = load(t2, this->a_data_);
+    auto vb = load(t2, this->b_data_);
     auto vr = bit_xor(va, vb);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -1866,8 +1866,8 @@ TYPED_TEST(VecArithTest, MultiWordBitAndnot) {
     auto& t2 = this->t2;
     nint_t M = this->multi2_size;
 
-    auto va = loadu(t2, this->a_data_);
-    auto vb = loadu(t2, this->b_data_);
+    auto va = load(t2, this->a_data_);
+    auto vb = load(t2, this->b_data_);
     auto vr = bit_andnot(va, vb);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -1883,7 +1883,7 @@ TYPED_TEST(VecArithTest, MultiWordBitNot) {
     auto& t2 = this->t2;
     nint_t M = this->multi2_size;
 
-    auto va = loadu(t2, this->a_data_);
+    auto va = load(t2, this->a_data_);
     auto vr = bit_not(va);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -1898,8 +1898,8 @@ TYPED_TEST(VecArithTest, MultiWordCmplt) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->b_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->b_data_);
   auto m = cmplt(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -1913,8 +1913,8 @@ TYPED_TEST(VecArithTest, MultiWordCmpgt) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->b_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->b_data_);
   auto m = cmpgt(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -1928,8 +1928,8 @@ TYPED_TEST(VecArithTest, MultiWordCmple) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->b_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->b_data_);
   auto m = cmple(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -1943,8 +1943,8 @@ TYPED_TEST(VecArithTest, MultiWordCmpge) {
   auto& t2 = this->t2;
   nint_t M = this->multi2_size;
 
-  auto va = loadu(t2, this->a_data_);
-  auto vb = loadu(t2, this->b_data_);
+  auto va = load(t2, this->a_data_);
+  auto vb = load(t2, this->b_data_);
   auto m = cmpge(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -1964,7 +1964,7 @@ TYPED_TEST(VecArithTest, MultiWordSqrt) {
       a[i] = static_cast<T>((i + 1) * 4.0 + 1.0);
     }
 
-    auto va = loadu(t2, a.get());
+    auto va = load(t2, a.get());
     auto vr = sqrt(va);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -1985,7 +1985,7 @@ TYPED_TEST(VecArithTest, MultiWordRsqrt) {
       a[i] = static_cast<T>((i + 1) * 4.0 + 1.0);
     }
 
-    auto va = loadu(t2, a.get());
+    auto va = load(t2, a.get());
     auto vr = rsqrt(va);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -2005,8 +2005,8 @@ TYPED_TEST(VecArithTest, MultiWordAdd4) {
   auto& t4 = this->t4;
   nint_t M = this->multi4_size;
 
-  auto va = loadu(t4, this->a_data_);
-  auto vb = loadu(t4, this->b_data_);
+  auto va = load(t4, this->a_data_);
+  auto vb = load(t4, this->b_data_);
   auto vr = add(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -2027,8 +2027,8 @@ TYPED_TEST(VecArithTest, MultiWordMul4) {
     sb[i] = test_utils::get_test_value<T>((i + 2) % 5);
   }
 
-  auto va = loadu(t4, sa.get());
-  auto vb = loadu(t4, sb.get());
+  auto va = load(t4, sa.get());
+  auto vb = load(t4, sb.get());
   auto vr = mul(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -2044,7 +2044,7 @@ TYPED_TEST(VecArithTest, MultiWordBitShl4) {
     nint_t M = this->multi4_size;
 
     int shift = 2;
-    auto va = loadu(t4, this->a_data_);
+    auto va = load(t4, this->a_data_);
     auto vr = bit_shl(va, shift);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -2072,8 +2072,8 @@ TYPED_TEST(VecArithTest, MultiWordAddWithMask4) {
   auto& t4 = this->t4;
   nint_t M = this->multi4_size;
 
-  auto va = loadu(t4, this->a_data_);
-  auto vb = loadu(t4, this->b_data_);
+  auto va = load(t4, this->a_data_);
+  auto vb = load(t4, this->b_data_);
   auto m = mwhilelt(t4, 0, M / 2);
   auto vr = add(va, vb, m);
 
@@ -2092,8 +2092,8 @@ TYPED_TEST(VecArithTest, MultiWordSub4) {
   auto& t4 = this->t4;
   nint_t M = this->multi4_size;
 
-  auto va = loadu(t4, this->a_data_);
-  auto vb = loadu(t4, this->b_data_);
+  auto va = load(t4, this->a_data_);
+  auto vb = load(t4, this->b_data_);
   auto vr = sub(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -2107,8 +2107,8 @@ TYPED_TEST(VecArithTest, MultiWordMax4) {
   auto& t4 = this->t4;
   nint_t M = this->multi4_size;
 
-  auto va = loadu(t4, this->a_data_);
-  auto vb = loadu(t4, this->b_data_);
+  auto va = load(t4, this->a_data_);
+  auto vb = load(t4, this->b_data_);
   auto vr = vec::max(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -2122,8 +2122,8 @@ TYPED_TEST(VecArithTest, MultiWordMin4) {
   auto& t4 = this->t4;
   nint_t M = this->multi4_size;
 
-  auto va = loadu(t4, this->a_data_);
-  auto vb = loadu(t4, this->b_data_);
+  auto va = load(t4, this->a_data_);
+  auto vb = load(t4, this->b_data_);
   auto vr = vec::min(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -2137,7 +2137,7 @@ TYPED_TEST(VecArithTest, MultiWordNeg4) {
   auto& t4 = this->t4;
   nint_t M = this->multi4_size;
 
-  auto va = loadu(t4, this->a_data_);
+  auto va = load(t4, this->a_data_);
   auto vr = neg(va);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -2151,7 +2151,7 @@ TYPED_TEST(VecArithTest, MultiWordAbs4) {
   auto& t4 = this->t4;
   nint_t M = this->multi4_size;
 
-  auto va = loadu(t4, this->a_data_);
+  auto va = load(t4, this->a_data_);
   auto vr = abs(va);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -2166,8 +2166,8 @@ TYPED_TEST(VecArithTest, MultiWordBitAnd4) {
     auto& t4 = this->t4;
     nint_t M = this->multi4_size;
 
-    auto va = loadu(t4, this->a_data_);
-    auto vb = loadu(t4, this->b_data_);
+    auto va = load(t4, this->a_data_);
+    auto vb = load(t4, this->b_data_);
     auto vr = bit_and(va, vb);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -2183,8 +2183,8 @@ TYPED_TEST(VecArithTest, MultiWordBitOr4) {
     auto& t4 = this->t4;
     nint_t M = this->multi4_size;
 
-    auto va = loadu(t4, this->a_data_);
-    auto vb = loadu(t4, this->b_data_);
+    auto va = load(t4, this->a_data_);
+    auto vb = load(t4, this->b_data_);
     auto vr = bit_or(va, vb);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -2201,7 +2201,7 @@ TYPED_TEST(VecArithTest, MultiWordBitShr4) {
     nint_t M = this->multi4_size;
 
     int shift = 2;
-    auto va = loadu(t4, this->a_data_);
+    auto va = load(t4, this->a_data_);
     auto vr = bit_shr(va, shift);
 
     for (nint_t i = 0; i < M; ++i) {
@@ -2216,12 +2216,12 @@ TYPED_TEST(VecArithTest, MultiWordCmpeq4) {
   auto& t4 = this->t4;
   nint_t M = this->multi4_size;
 
-  auto va = loadu(t4, this->a_data_);
-  auto vb = loadu(t4, this->a_data_);
+  auto va = load(t4, this->a_data_);
+  auto vb = load(t4, this->a_data_);
   auto m = cmpeq(va, vb);
   for (nint_t i = 0; i < M; ++i) EXPECT_TRUE(get(t4, m, i));
 
-  auto vb2 = loadu(t4, this->b_data_);
+  auto vb2 = load(t4, this->b_data_);
   auto m2 = cmpeq(va, vb2);
   for (nint_t i = 0; i < M; ++i) EXPECT_FALSE(get(t4, m2, i));
 }
@@ -2231,8 +2231,8 @@ TYPED_TEST(VecArithTest, MultiWordCmplt4) {
   auto& t4 = this->t4;
   nint_t M = this->multi4_size;
 
-  auto va = loadu(t4, this->a_data_);
-  auto vb = loadu(t4, this->b_data_);
+  auto va = load(t4, this->a_data_);
+  auto vb = load(t4, this->b_data_);
   auto m = cmplt(va, vb);
 
   for (nint_t i = 0; i < M; ++i) {
@@ -2250,15 +2250,15 @@ TYPED_TEST(VecArithTest, CmpeqBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->a_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->a_data_);
   auto m = cmpeq(va, vb);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_TRUE(get(t, m, i)) << "i=" << i;
   }
 
-  auto vb2 = loadu(t, this->b_data_);
+  auto vb2 = load(t, this->b_data_);
   auto m2 = cmpeq(va, vb2);
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_FALSE(get(t, m2, i)) << "i=" << i;
@@ -2270,8 +2270,8 @@ TYPED_TEST(VecArithTest, CmpeqWithMask) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->a_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->a_data_);
   auto m_pred = mwhilelt(t, 0, N / 2);
   auto m_result = cmpeq(va, vb, m_pred);
 
@@ -2284,13 +2284,13 @@ TYPED_TEST(VecArithTest, CmpneBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m = cmpne(va, vb);
 
   for (nint_t i = 0; i < N; ++i) EXPECT_TRUE(get(t, m, i)) << "i=" << i;
 
-  auto vsame = loadu(t, this->a_data_);
+  auto vsame = load(t, this->a_data_);
   auto m2 = cmpne(va, vsame);
   for (nint_t i = 0; i < N; ++i) EXPECT_FALSE(get(t, m2, i)) << "i=" << i;
 }
@@ -2300,8 +2300,8 @@ TYPED_TEST(VecArithTest, CmpneWithMask) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m_pred = mwhilelt(t, 0, N / 2);
   auto m_result = cmpne(va, vb, m_pred);
 
@@ -2314,8 +2314,8 @@ TYPED_TEST(VecArithTest, CmpltBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m = cmplt(va, vb);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -2331,8 +2331,8 @@ TYPED_TEST(VecArithTest, CmpltWithMask) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m_pred = mwhilelt(t, 0, N / 2);
   auto m_result = cmplt(va, vb, m_pred);
 
@@ -2348,8 +2348,8 @@ TYPED_TEST(VecArithTest, CmpgtBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m = cmpgt(va, vb);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -2365,8 +2365,8 @@ TYPED_TEST(VecArithTest, CmpgtWithMask) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m_pred = mwhilelt(t, 0, N / 2);
   auto m_result = cmpgt(va, vb, m_pred);
 
@@ -2382,8 +2382,8 @@ TYPED_TEST(VecArithTest, CmpleBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m = cmple(va, vb);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -2397,8 +2397,8 @@ TYPED_TEST(VecArithTest, CmpleWithMask) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m_pred = mwhilelt(t, 0, N / 2);
   auto m_result = cmple(va, vb, m_pred);
 
@@ -2414,8 +2414,8 @@ TYPED_TEST(VecArithTest, CmpgeBasic) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m = cmpge(va, vb);
 
   for (nint_t i = 0; i < N; ++i) {
@@ -2429,8 +2429,8 @@ TYPED_TEST(VecArithTest, CmpgeWithMask) {
   auto& t = this->t;
   nint_t N = this->full_size;
 
-  auto va = loadu(t, this->a_data_);
-  auto vb = loadu(t, this->b_data_);
+  auto va = load(t, this->a_data_);
+  auto vb = load(t, this->b_data_);
   auto m_pred = mwhilelt(t, 0, N / 2);
   auto m_result = cmpge(va, vb, m_pred);
 
@@ -2478,7 +2478,7 @@ TYPED_TEST(VecFloatClassifyTest, IsNanBasic) {
     a[N - 1] = std::numeric_limits<double>::quiet_NaN();
   }
 
-  auto va = loadu(t, a.get());
+  auto va = load(t, a.get());
   auto m = isnan(va);
 
   EXPECT_TRUE(get(t, m, 0));
@@ -2496,7 +2496,7 @@ TYPED_TEST(VecFloatClassifyTest, IsNanWithMask) {
   a[0] = static_cast<T>(std::numeric_limits<double>::quiet_NaN());
   a[N / 2] = static_cast<T>(std::numeric_limits<double>::quiet_NaN());
 
-  auto va = loadu(t, a.get());
+  auto va = load(t, a.get());
   auto m_pred = mwhilelt(t, 0, N / 2);
   auto m_result = isnan(va, m_pred);
 
@@ -2515,7 +2515,7 @@ TYPED_TEST(VecFloatClassifyTest, IsPosInfBasic) {
   a[0] = static_cast<T>(INFINITY);
   a[N - 1] = static_cast<T>(-INFINITY);
 
-  auto va = loadu(t, a.get());
+  auto va = load(t, a.get());
   auto m = isposinf(va);
 
   EXPECT_TRUE(get(t, m, 0));
@@ -2533,7 +2533,7 @@ TYPED_TEST(VecFloatClassifyTest, IsPosInfWithMask) {
   a[0] = static_cast<T>(INFINITY);
   a[N - 1] = static_cast<T>(INFINITY);
 
-  auto va = loadu(t, a.get());
+  auto va = load(t, a.get());
   auto m_pred = mwhilelt(t, 0, N / 2);
   auto m_result = isposinf(va, m_pred);
 
@@ -2551,7 +2551,7 @@ TYPED_TEST(VecFloatClassifyTest, IsNegInfBasic) {
   a[0] = static_cast<T>(-INFINITY);
   a[N - 1] = static_cast<T>(INFINITY);
 
-  auto va = loadu(t, a.get());
+  auto va = load(t, a.get());
   auto m = isneginf(va);
 
   EXPECT_TRUE(get(t, m, 0));
@@ -2569,7 +2569,7 @@ TYPED_TEST(VecFloatClassifyTest, IsNegInfWithMask) {
   a[0] = static_cast<T>(-INFINITY);
   a[N - 1] = static_cast<T>(-INFINITY);
 
-  auto va = loadu(t, a.get());
+  auto va = load(t, a.get());
   auto m_pred = mwhilelt(t, 0, N / 2);
   auto m_result = isneginf(va, m_pred);
 
@@ -2588,7 +2588,7 @@ TYPED_TEST(VecFloatClassifyTest, IsInfBasic) {
   a[1] = static_cast<T>(-INFINITY);
   if (N > 2) a[2] = static_cast<T>(std::numeric_limits<double>::quiet_NaN());
 
-  auto va = loadu(t, a.get());
+  auto va = load(t, a.get());
   auto m = isinf(va);
 
   EXPECT_TRUE(get(t, m, 0));
@@ -2607,7 +2607,7 @@ TYPED_TEST(VecFloatClassifyTest, IsInfWithMask) {
   a[0] = static_cast<T>(INFINITY);
   a[N - 1] = static_cast<T>(-INFINITY);
 
-  auto va = loadu(t, a.get());
+  auto va = load(t, a.get());
   auto m_pred = mwhilelt(t, 0, N / 2);
   auto m_result = isinf(va, m_pred);
 
@@ -2629,7 +2629,7 @@ TYPED_TEST(VecFloatClassifyTest, MultiWordIsNan) {
   a[0] = static_cast<T>(std::numeric_limits<double>::quiet_NaN());
   a[N - 1] = static_cast<T>(std::numeric_limits<double>::quiet_NaN());
 
-  auto va = loadu(t2, a.get());
+  auto va = load(t2, a.get());
   auto m = isnan(va);
 
   EXPECT_TRUE(get(t2, m, 0));
@@ -2647,7 +2647,7 @@ TYPED_TEST(VecFloatClassifyTest, MultiWordIsInf) {
   a[0] = static_cast<T>(INFINITY);
   a[1] = static_cast<T>(-INFINITY);
 
-  auto va = loadu(t2, a.get());
+  auto va = load(t2, a.get());
   auto m = isinf(va);
 
   EXPECT_TRUE(get(t2, m, 0));
@@ -2672,8 +2672,8 @@ TYPED_TEST(VecArithTest, DivByZero) {
       b[i] = static_cast<T>(0.0);
     }
 
-    auto va = loadu(t, a.get());
-    auto vb = loadu(t, b.get());
+    auto va = load(t, a.get());
+    auto vb = load(t, b.get());
     auto vr = div(va, vb);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -2693,7 +2693,7 @@ TYPED_TEST(VecArithTest, SqrtNegative) {
     auto a = std::make_unique<T[]>(N);
     for (nint_t i = 0; i < N; ++i) a[i] = static_cast<T>(-1.0);
 
-    auto va = loadu(t, a.get());
+    auto va = load(t, a.get());
     auto vr = sqrt(va);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -2712,7 +2712,7 @@ TYPED_TEST(VecArithTest, RcpZero) {
     auto a = std::make_unique<T[]>(N);
     for (nint_t i = 0; i < N; ++i) a[i] = static_cast<T>(0.0);
 
-    auto va = loadu(t, a.get());
+    auto va = load(t, a.get());
     auto vr = rcp(va);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -2734,8 +2734,8 @@ TYPED_TEST(VecArithTest, AddWithNaN) {
                       : static_cast<T>(i + 1.0);
     }
 
-    auto va = loadu(t, a.get());
-    auto vb = loadu(t, this->b_data_);
+    auto va = load(t, a.get());
+    auto vb = load(t, this->b_data_);
     auto vr = add(va, vb);
 
     float64_t actual0 = get(t, vr, 0);
@@ -2757,7 +2757,7 @@ TYPED_TEST(VecArithTest, BitShlOverflow) {
     for (nint_t i = 0; i < N; ++i) test_data[i] = static_cast<T>(~T{0});
 
     int shift = sizeof(T) * 8; // shift by full bit width
-    auto va = loadu(t, test_data.get());
+    auto va = load(t, test_data.get());
     auto vr = bit_shl(va, shift);
 
     for (nint_t i = 0; i < N; ++i) {
@@ -2780,7 +2780,7 @@ TYPED_TEST(VecArithTest, BitShrFullWidthSignExt) {
     }
 
     int shift = sizeof(T) * 8 - 1;
-    auto va = loadu(t, test_data.get());
+    auto va = load(t, test_data.get());
     auto vr = bit_shr(va, shift);
 
     for (nint_t i = 0; i < N; ++i) {

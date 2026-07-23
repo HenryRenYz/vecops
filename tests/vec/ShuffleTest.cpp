@@ -63,7 +63,7 @@ TYPED_TEST(LocalShufCT4, Identity) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<3, 2, 1, 0>(v);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
@@ -77,7 +77,7 @@ TYPED_TEST(LocalShufCT4, ReverseWithinLane) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<0, 1, 2, 3>(v);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -93,7 +93,7 @@ TYPED_TEST(LocalShufCT4, BroadcastFirst) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<0, 0, 0, 0>(v);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[(i / M) * M]) << "i=" << i;
@@ -107,7 +107,7 @@ TYPED_TEST(LocalShufCT4, MixedPermutation) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<1, 3, 0, 2>(v);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -137,7 +137,7 @@ TYPED_TEST(LocalShufCT2, Identity) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<1, 0>(v);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
@@ -151,7 +151,7 @@ TYPED_TEST(LocalShufCT2, Swap) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<0, 1>(v);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -180,7 +180,7 @@ TYPED_TEST(LocalShufCT8, Identity) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<7, 6, 5, 4, 3, 2, 1, 0>(v);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
@@ -194,7 +194,7 @@ TYPED_TEST(LocalShufCT8, ReverseWithinLane) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<0, 1, 2, 3, 4, 5, 6, 7>(v);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -223,7 +223,7 @@ TYPED_TEST(LocalShufCT16, Identity) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<15, 14, 13, 12, 11, 10, 9, 8,
                      7,  6,  5,  4,  3,  2,  1,  0>(v);
   for (nint_t i = 0; i < N; ++i)
@@ -238,7 +238,7 @@ TYPED_TEST(LocalShufCT16, ReverseWithinLane) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<0, 1, 2, 3, 4, 5, 6, 7,
                      8, 9, 10, 11, 12, 13, 14, 15>(v);
   for (nint_t i = 0; i < N; ++i) {
@@ -255,7 +255,7 @@ TYPED_TEST(LocalShufCT16, BroadcastMiddle) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<7, 7, 7, 7, 7, 7, 7, 7,
                      7, 7, 7, 7, 7, 7, 7, 7>(v);
   for (nint_t i = 0; i < N; ++i)
@@ -279,8 +279,8 @@ TYPED_TEST(VecShuffleTest, LocalShufVI_Identity) {
   auto idx = std::make_unique<I[]>(N);
   test_utils::fill_seq(data.get(), N);
   test_utils::fill_local_identity(idx.get(), N);
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = local_shuf(v, vi);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
@@ -299,8 +299,8 @@ TYPED_TEST(VecShuffleTest, LocalShufVI_ReverseWithinLane) {
   test_utils::fill_seq(data.get(), N);
   for (nint_t i = 0; i < N; ++i)
     idx[i] = static_cast<I>(M - 1 - (i % M));
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = local_shuf(v, vi);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -325,8 +325,8 @@ TYPED_TEST(VecShuffleTest, LocalShufVI_DifferentPerLane) {
         ? static_cast<I>(pos)
         : static_cast<I>(M - 1 - pos);
   }
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = local_shuf(v, vi);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -349,7 +349,7 @@ TEST(LocalShufScalar, Float32_Identity) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf(v, 3, 2, 1, 0);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
@@ -363,7 +363,7 @@ TEST(LocalShufScalar, Float32_Reverse) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf(v, 0, 1, 2, 3);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -380,7 +380,7 @@ TEST(LocalShufScalar, Float64_Swap) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf(v, 0, 1);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -396,7 +396,7 @@ TEST(LocalShufScalar, Int8_Identity) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf(v, 15, 14, 13, 12, 11, 10, 9, 8,
                          7,  6,  5,  4,  3,  2,  1,  0);
   for (nint_t i = 0; i < N; ++i)
@@ -411,7 +411,7 @@ TEST(LocalShufScalar, Int16_Reverse) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf(v, 0, 1, 2, 3, 4, 5, 6, 7);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -434,8 +434,8 @@ TYPED_TEST(VecShuffleTest, ShufIdentity) {
   auto idx = std::make_unique<I[]>(N);
   test_utils::fill_seq(data.get(), N);
   test_utils::fill_shuf_identity(idx.get(), N, N);
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = shuf(v, vi);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
@@ -463,9 +463,9 @@ TEST(ShufVsLocalShuf, Float32_FullWordReverse) {
   for (nint_t i = 0; i < N; ++i)
     idx_shuf[i] = static_cast<I>(N - 1 - i);
 
-  auto v = loadu(t, data.get());
-  auto r_local = local_shuf(v, loadu(ti, idx_local.get()));
-  auto r_shuf  = shuf(v, loadu(ti, idx_shuf.get()));
+  auto v = load(t, data.get());
+  auto r_local = local_shuf(v, load(ti, idx_local.get()));
+  auto r_shuf  = shuf(v, load(ti, idx_shuf.get()));
 
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -508,9 +508,9 @@ TEST(ShufVsLocalShuf, Int8_FullWordReverse) {
   for (nint_t i = 0; i < N; ++i)
     idx_shuf[i] = static_cast<I>(N - 1 - i);
 
-  auto v = loadu(t, data.get());
-  auto r_local = local_shuf(v, loadu(ti, idx_local.get()));
-  auto r_shuf  = shuf(v, loadu(ti, idx_shuf.get()));
+  auto v = load(t, data.get());
+  auto r_local = local_shuf(v, load(ti, idx_local.get()));
+  auto r_shuf  = shuf(v, load(ti, idx_shuf.get()));
 
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -538,8 +538,8 @@ TEST(Shuf, Float64_CrossLaneSwap) {
   test_utils::fill_seq(data.get(), N);
   for (nint_t i = 0; i < N; ++i)
     idx[i] = static_cast<I>((i % M == 0) ? i + 1 : i - 1);
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = shuf(v, vi);
   for (nint_t i = 0; i < N; ++i) {
     I expected_idx = static_cast<I>((i % M == 0) ? i + 1 : i - 1);
@@ -562,7 +562,7 @@ TYPED_TEST(VecShuffleAllTest, UpperLower_SingleWord) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
 
   auto lo = lower(t, v);
   auto hi = upper(t, v);
@@ -583,7 +583,7 @@ TYPED_TEST(VecShuffleAllTest, UpperLower_MultiWord) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
 
   auto lo = lower(t, v);
   auto hi = upper(t, v);
@@ -609,7 +609,7 @@ TYPED_TEST(VecShuffleAllTest, EvenOdd_SingleWord) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
 
   auto ev = even(t, v);
   auto od = odd(t, v);
@@ -631,7 +631,7 @@ TYPED_TEST(VecShuffleAllTest, EvenOdd_MultiWord) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
 
   auto ev = even(t, v);
   auto od = odd(t, v);
@@ -660,8 +660,8 @@ TYPED_TEST(VecShuffleAllTest, Concat_SingleWord) {
   for (nint_t i = 0; i < N / 2; ++i)
     data_hi[i] = static_cast<T>(data_lo[i]) + T(N / 2);
 
-  auto v_lo = loadu(th, data_lo.get());
-  auto v_hi = loadu(th, data_hi.get());
+  auto v_lo = load(th, data_lo.get());
+  auto v_hi = load(th, data_hi.get());
   auto v = concat(t, v_lo, v_hi);
 
   for (nint_t i = 0; i < N / 2; ++i)
@@ -684,8 +684,8 @@ TYPED_TEST(VecShuffleAllTest, Concat_MultiWord) {
   for (nint_t i = 0; i < N / 2; ++i)
     data_hi[i] = static_cast<T>(data_lo[i]) + T(N / 2);
 
-  auto v_lo = loadu(th, data_lo.get());
-  auto v_hi = loadu(th, data_hi.get());
+  auto v_lo = load(th, data_lo.get());
+  auto v_hi = load(th, data_hi.get());
   auto v = concat(t, v_lo, v_hi);
 
   for (nint_t i = 0; i < N / 2; ++i)
@@ -703,7 +703,7 @@ TYPED_TEST(VecShuffleAllTest, Concat_RoundTrip) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
 
   auto lo = lower(t, v);
   auto hi = upper(t, v);
@@ -730,8 +730,8 @@ TYPED_TEST(VecShuffleAllTest, ConcatEvenOdd_SingleWord) {
   for (nint_t i = 0; i < N; ++i)
     data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
-  auto a = loadu(t, data_a.get());
-  auto b = loadu(t, data_b.get());
+  auto a = load(t, data_a.get());
+  auto b = load(t, data_b.get());
 
   auto ce = concat_even(t, a, b);
   auto co = concat_odd(t, a, b);
@@ -760,8 +760,8 @@ TYPED_TEST(VecShuffleAllTest, ConcatEvenOdd_MultiWord) {
   for (nint_t i = 0; i < N; ++i)
     data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
-  auto a = loadu(t, data_a.get());
-  auto b = loadu(t, data_b.get());
+  auto a = load(t, data_a.get());
+  auto b = load(t, data_b.get());
 
   auto ce = concat_even(t, a, b);
   auto co = concat_odd(t, a, b);
@@ -794,8 +794,8 @@ TYPED_TEST(VecShuffleAllTest, LocalInterleave_SingleWord) {
   for (nint_t i = 0; i < N; ++i)
     data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
-  auto a = loadu(t, data_a.get());
-  auto b = loadu(t, data_b.get());
+  auto a = load(t, data_a.get());
+  auto b = load(t, data_b.get());
 
   auto lo = local_interleave_lower(a, b);
   auto hi = local_interleave_upper(a, b);
@@ -833,8 +833,8 @@ TYPED_TEST(VecShuffleAllTest, LocalInterleave_MultiWord) {
   for (nint_t i = 0; i < N; ++i)
     data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
-  auto a = loadu(t, data_a.get());
-  auto b = loadu(t, data_b.get());
+  auto a = load(t, data_a.get());
+  auto b = load(t, data_b.get());
 
   auto lo = local_interleave_lower(a, b);
   auto hi = local_interleave_upper(a, b);
@@ -876,8 +876,8 @@ TYPED_TEST(VecShuffleAllTest, Interleave_SingleWord) {
   for (nint_t i = 0; i < N / 2; ++i)
     data_b[i] = static_cast<T>(data_a[i]) + T(N / 2);
 
-  auto a = loadu(th, data_a.get());
-  auto b = loadu(th, data_b.get());
+  auto a = load(th, data_a.get());
+  auto b = load(th, data_b.get());
   auto v = interleave(t, a, b);
 
   for (nint_t i = 0; i < N / 2; ++i) {
@@ -900,8 +900,8 @@ TYPED_TEST(VecShuffleAllTest, Interleave_MultiWord) {
   for (nint_t i = 0; i < N / 2; ++i)
     data_b[i] = static_cast<T>(data_a[i]) + T(N / 2);
 
-  auto a = loadu(th, data_a.get());
-  auto b = loadu(th, data_b.get());
+  auto a = load(th, data_a.get());
+  auto b = load(th, data_b.get());
   auto v = interleave(t, a, b);
 
   for (nint_t i = 0; i < N / 2; ++i) {
@@ -927,8 +927,8 @@ TYPED_TEST(VecShuffleAllTest, InterleaveEvenOdd_SingleWord) {
   for (nint_t i = 0; i < N; ++i)
     data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
-  auto a = loadu(t, data_a.get());
-  auto b = loadu(t, data_b.get());
+  auto a = load(t, data_a.get());
+  auto b = load(t, data_b.get());
 
   auto ie = interleave_even(a, b);
   auto io = interleave_odd(a, b);
@@ -956,8 +956,8 @@ TYPED_TEST(VecShuffleAllTest, InterleaveEvenOdd_MultiWord) {
   for (nint_t i = 0; i < N; ++i)
     data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
-  auto a = loadu(t, data_a.get());
-  auto b = loadu(t, data_b.get());
+  auto a = load(t, data_a.get());
+  auto b = load(t, data_b.get());
 
   auto ie = interleave_even(a, b);
   auto io = interleave_odd(a, b);
@@ -985,7 +985,7 @@ TYPED_TEST(LocalShufCT4, MultiWord_Identity) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<3, 2, 1, 0>(v);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
@@ -1001,7 +1001,7 @@ TYPED_TEST(LocalShufCT4, MultiWord_Reverse) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<0, 1, 2, 3>(v);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -1018,7 +1018,7 @@ TYPED_TEST(LocalShufCT16, MultiWord_Identity) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<15, 14, 13, 12, 11, 10, 9, 8,
                      7,  6,  5,  4,  3,  2,  1,  0>(v);
   for (nint_t i = 0; i < N; ++i)
@@ -1035,7 +1035,7 @@ TYPED_TEST(LocalShufCT2, MultiWord_Swap) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<0, 1>(v);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -1052,7 +1052,7 @@ TYPED_TEST(LocalShufCT8, MultiWord_Identity) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<7, 6, 5, 4, 3, 2, 1, 0>(v);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
@@ -1068,7 +1068,7 @@ TYPED_TEST(LocalShufCT8, MultiWord_Reverse) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf<0, 1, 2, 3, 4, 5, 6, 7>(v);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -1093,8 +1093,8 @@ TYPED_TEST(VecShuffleTest, LocalShufVI_MultiWord_Identity) {
   auto idx = std::make_unique<I[]>(N);
   test_utils::fill_seq(data.get(), N);
   test_utils::fill_local_identity(idx.get(), N);
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = local_shuf(v, vi);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
@@ -1115,8 +1115,8 @@ TYPED_TEST(VecShuffleTest, LocalShufVI_MultiWord_Reverse) {
   test_utils::fill_seq(data.get(), N);
   for (nint_t i = 0; i < N; ++i)
     idx[i] = static_cast<I>(M - 1 - (i % M));
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = local_shuf(v, vi);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -1146,8 +1146,8 @@ TYPED_TEST(VecShuffleTest, Shuf_MultiWord_ReverseWithinWord) {
     nint_t pos  = i % ws;
     idx[i] = static_cast<I>(ws - 1 - pos);
   }
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = shuf(v, vi);
   for (nint_t i = 0; i < N; ++i) {
     nint_t word = i / ws;
@@ -1170,8 +1170,8 @@ TYPED_TEST(VecShuffleTest, Shuf_MultiWord_Identity) {
   auto idx = std::make_unique<I[]>(N);
   test_utils::fill_seq(data.get(), N);
   test_utils::fill_shuf_identity(idx.get(), N, ws);
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = shuf(v, vi);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
@@ -1195,8 +1195,8 @@ TYPED_TEST(VecShuffleTest, Shuf_MultiWord_Swap) {
     nint_t pos = i % ws;
     idx[i] = static_cast<I>((pos % M == 0) ? pos + 1 : pos - 1);
   }
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = shuf(v, vi);
   for (nint_t i = 0; i < N; ++i) {
     nint_t pos = i % ws;
@@ -1219,7 +1219,7 @@ TYPED_TEST(LocalShufCT4, MultiWord_ScalarReverse) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf(v, 0, 1, 2, 3);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -1237,7 +1237,7 @@ TYPED_TEST(LocalShufCT2, MultiWord_ScalarSwap) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t, data.get());
+  auto v = load(t, data.get());
   auto r = local_shuf(v, 0, 1);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -1260,7 +1260,7 @@ TYPED_TEST(VecShuffleAllTest, UpperLower_4Word) {
 
   auto data = std::make_unique<T[]>(N);
   test_utils::fill_seq(data.get(), N);
-  auto v = loadu(t4, data.get());
+  auto v = load(t4, data.get());
 
   auto lo = lower(t4, v);
   auto hi = upper(t4, v);
@@ -1286,8 +1286,8 @@ TYPED_TEST(VecShuffleAllTest, Concat_4Word) {
   for (nint_t i = 0; i < N / 2; ++i)
     data_hi[i] = static_cast<T>(data_lo[i]) + T(N / 2);
 
-  auto v_lo = loadu(th, data_lo.get());
-  auto v_hi = loadu(th, data_hi.get());
+  auto v_lo = load(th, data_lo.get());
+  auto v_hi = load(th, data_hi.get());
   auto v = concat(t4, v_lo, v_hi);
 
   for (nint_t i = 0; i < N / 2; ++i)
@@ -1311,8 +1311,8 @@ TYPED_TEST(VecShuffleAllTest, Interleave_4Word) {
   for (nint_t i = 0; i < N / 2; ++i)
     data_b[i] = static_cast<T>(data_a[i]) + T(N / 2);
 
-  auto a = loadu(th, data_a.get());
-  auto b = loadu(th, data_b.get());
+  auto a = load(th, data_a.get());
+  auto b = load(th, data_b.get());
   auto v = interleave(t4, a, b);
 
   for (nint_t i = 0; i < N / 2; ++i) {
@@ -1336,8 +1336,8 @@ TYPED_TEST(VecShuffleAllTest, LocalInterleave_4Word) {
   for (nint_t i = 0; i < N; ++i)
     data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
-  auto a = loadu(t4, data_a.get());
-  auto b = loadu(t4, data_b.get());
+  auto a = load(t4, data_a.get());
+  auto b = load(t4, data_b.get());
 
   auto lo = local_interleave_lower(a, b);
   auto hi = local_interleave_upper(a, b);
@@ -1378,8 +1378,8 @@ TYPED_TEST(VecShuffleTest, Shuf_4Word_Identity) {
   auto idx = std::make_unique<I[]>(N);
   test_utils::fill_seq(data.get(), N);
   test_utils::fill_shuf_identity(idx.get(), N, ws);
-  auto v = loadu(t4, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t4, data.get());
+  auto vi = load(ti, idx.get());
   auto r = shuf(v, vi);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t4, r, i), data[i]) << "i=" << i;
@@ -1405,8 +1405,8 @@ TEST(ShufCornerCase, SingleLaneEqualsLocalShuf) {
   for (nint_t i = 0; i < N; ++i)
     idx[i] = static_cast<I>((i % M == 0) ? i + 2 : i - 1);
 
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r_local = local_shuf(v, vi);
   auto r_shuf  = shuf(v, vi);
 
@@ -1427,7 +1427,7 @@ TEST(ShufCornerCase, ZeroVector) {
   auto v = zeros(t);
   auto idx = std::make_unique<I[]>(N);
   for (nint_t i = 0; i < N; ++i) idx[i] = static_cast<I>((N - 1 - i) % N);
-  auto vi = loadu(ti, idx.get());
+  auto vi = load(ti, idx.get());
   auto r = shuf(v, vi);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), T(0)) << "i=" << i;
@@ -1444,8 +1444,8 @@ TEST(ShufCornerCase, BroadcastFirst) {
   auto idx = std::make_unique<I[]>(N);
   test_utils::fill_seq(data.get(), N);
   for (nint_t i = 0; i < N; ++i) idx[i] = 0;
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = shuf(v, vi);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[0]) << "i=" << i;
@@ -1464,8 +1464,8 @@ TEST(ShufCornerCase, Float16_LocalShufVI_Identity) {
   auto idx = std::make_unique<I[]>(N);
   test_utils::fill_seq(data.get(), N);
   test_utils::fill_local_identity(idx.get(), N);
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = local_shuf(v, vi);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
@@ -1485,8 +1485,8 @@ TEST(ShufCornerCase, Float16_LocalShufVI_Reverse) {
   test_utils::fill_seq(data.get(), N);
   for (nint_t i = 0; i < N; ++i)
     idx[i] = static_cast<I>(M - 1 - (i % M));
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = local_shuf(v, vi);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -1508,8 +1508,8 @@ TEST(ShufCornerCase, BFloat16_LocalShufVI_Identity) {
   auto idx = std::make_unique<I[]>(N);
   test_utils::fill_seq(data.get(), N);
   test_utils::fill_local_identity(idx.get(), N);
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = local_shuf(v, vi);
   for (nint_t i = 0; i < N; ++i)
     EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
@@ -1529,8 +1529,8 @@ TEST(ShufCornerCase, BFloat16_LocalShufVI_Reverse) {
   test_utils::fill_seq(data.get(), N);
   for (nint_t i = 0; i < N; ++i)
     idx[i] = static_cast<I>(M - 1 - (i % M));
-  auto v = loadu(t, data.get());
-  auto vi = loadu(ti, idx.get());
+  auto v = load(t, data.get());
+  auto vi = load(ti, idx.get());
   auto r = local_shuf(v, vi);
   for (nint_t i = 0; i < N; ++i) {
     auto lane = i / M, pos = i % M;
@@ -1557,8 +1557,8 @@ TEST(InterleaveRoundTrip, Float32) {
   for (nint_t i = 0; i < N / 2; ++i)
     data_b[i] = static_cast<T>(data_a[i] + N / 2);
 
-  auto a = loadu(th, data_a.get());
-  auto b = loadu(th, data_b.get());
+  auto a = load(th, data_a.get());
+  auto b = load(th, data_b.get());
 
   auto v = interleave(t, a, b);
   auto ev = even(t, v);
@@ -1584,8 +1584,8 @@ TEST(LocalInterleaveRoundTrip, Float64) {
   for (nint_t i = 0; i < N; ++i)
     data_b[i] = static_cast<T>(data_a[i]) + T(N);
 
-  auto a = loadu(t, data_a.get());
-  auto b = loadu(t, data_b.get());
+  auto a = load(t, data_a.get());
+  auto b = load(t, data_b.get());
 
   auto lo = local_interleave_lower(a, b);
   auto hi = local_interleave_upper(a, b);

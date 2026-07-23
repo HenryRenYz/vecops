@@ -78,9 +78,9 @@ void check_f32_to_bf16() {
       input[static_cast<size_t>(i)] =
           f32_from_bits(values[(pos + static_cast<size_t>(i)) % values.size()]);
     }
-    const auto input_v = loadu(from, input.data());
-    const auto output = demote(to, input_v);
-    demote_storeu(from, fused_output.data() + 1, input_v);
+    const auto input_v = load(from, input.data());
+    const auto output = convert(to, input_v);
+    store_convert(from, fused_output.data() + 1, input_v);
     const size_t count = std::min(static_cast<size_t>(input_lanes), values.size() - pos);
     for (size_t i = 0; i < count; ++i) {
       const uint32_t input_bits = f32_bits(input[i]);
@@ -129,8 +129,8 @@ void check_bf16_to_f32() {
       input[static_cast<size_t>(i)] =
           vecops::bfloat16_t::from_bits(static_cast<uint16_t>(code));
     }
-    const auto output = promote(to, loadu(from, input.data()));
-    const auto fused_output = promote_loadu(to, input.data());
+    const auto output = convert(to, load(from, input.data()));
+    const auto fused_output = load_convert(to, input.data());
     const uint32_t count = std::min(
         static_cast<uint32_t>(output_lanes), 0x10000u - base);
     for (uint32_t i = 0; i < count; ++i) {

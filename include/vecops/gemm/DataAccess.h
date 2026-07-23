@@ -177,11 +177,11 @@ template <typename N, TLV_DECL_TAG(T)>
 static constexpr bool use_unmasked_path_v = UseUnmaskedPath<std::remove_cvref_t<N>, T>::value;
 
 template <typename N, TLV_DECL_TAG(T)>
-VECOPS_ALWAYS_INLINE vec::Vec<T> loadu_dispatch(T t, const vec::TypeOf<T>* p, N n) {
+VECOPS_ALWAYS_INLINE vec::Vec<T> load_dispatch(T t, const vec::TypeOf<T>* p, N n) {
   if constexpr (use_unmasked_path_v<N, T>) {
-    return vec::loadu(t, p);
+    return vec::load(t, p);
   } else {
-    return vec::loadu(t, p, vec::mwhilelt(t, 0, count_value(n)), vec::zeros(t));
+    return vec::load(t, p, vec::opt::first(count_value(n)));
   }
 }
 
@@ -195,11 +195,11 @@ VECOPS_ALWAYS_INLINE vec::Vec<T> zero_inactive_lanes(T t, vec::Vec<T> v, N n) {
 }
 
 template <typename N, TLV_DECL_TAG(T)>
-VECOPS_INLINE void storeu_dispatch(T t, vec::TypeOf<T>* p, N n, vec::Vec<T> v) {
+VECOPS_INLINE void store_dispatch(T t, vec::TypeOf<T>* p, N n, vec::Vec<T> v) {
   if constexpr (use_unmasked_path_v<N, T>) {
-    vec::storeu(t, p, v);
+    vec::store(t, p, v);
   } else {
-    vec::storeu(t, p, vec::mwhilelt(t, 0, count_value(n)), v);
+    vec::store(t, p, v, vec::opt::first(count_value(n)));
   }
 }
 
@@ -332,7 +332,7 @@ VECOPS_INLINE void precompute_input_aux(
         hop::map(last, vec::size(to), [&](nint_t i, auto n) {
           auto v_in = gather_dispatch(ti, src_row.data(), i * stride, stride, Any{n});
           auto v_out = call_transform_with_last_coord(fn, to, v_in, prefix, i);
-          storeu_dispatch(to, aux_row.data() + i, n, v_out);
+          store_dispatch(to, aux_row.data() + i, n, v_out);
         });
       },
       src_tensor,
@@ -358,7 +358,7 @@ struct DataInputImpl<AccessKindLastContiguous, TOut, InTensor, TransformFn> {
     using Ti = vec::Rebind<TIn, To>;
     std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t offset = offset_at(_layout, coords);
-    auto v_in = loadu_dispatch(Ti{}, _p + offset, n);
+    auto v_in = load_dispatch(Ti{}, _p + offset, n);
     auto v_out = _fn(t, v_in, static_cast<nint_t>(is)...);
     return zero_inactive_lanes(t, v_out, n);
   }
@@ -392,7 +392,7 @@ struct DataInputAuxImpl {
     static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
     std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t offset = offset_at(_aux_layout, coords);
-    auto v = loadu_dispatch(t, _aux + offset, n);
+    auto v = load_dispatch(t, _aux + offset, n);
     return v;
   }
 
@@ -434,7 +434,7 @@ struct DataOutputImpl<AccessKindLastContiguous, TIn, OutTensor, TransformFn> {
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t offset = offset_at(_layout, coords);
     auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
-    storeu_dispatch(To{}, _p + offset, n, v_out);
+    store_dispatch(To{}, _p + offset, n, v_out);
   }
 
   TOut* _p;
@@ -483,7 +483,7 @@ struct DataOutputImpl<AccessKindSecondLastContiguous, TIn, OutTensor, TransformF
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
     auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
     const nint_t offset = offset_at(_aux_layout, coords);
-    storeu_dispatch(To{}, _aux + offset, n, v_out);
+    store_dispatch(To{}, _aux + offset, n, v_out);
   }
 
   TOut* _p;
@@ -540,7 +540,7 @@ struct DataInputViewImpl<AccessKindLastContiguous, TOut, InTensor, TransformFn, 
     using Ti = vec::Rebind<TIn, To>;
     std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t offset = offset_at(_layout, coords);
-    auto v_in = loadu_dispatch(Ti{}, _p + offset, n);
+    auto v_in = load_dispatch(Ti{}, _p + offset, n);
     auto v_out = _fn(t, v_in, static_cast<nint_t>(is)...);
     return zero_inactive_lanes(t, v_out, n);
   }
@@ -563,7 +563,7 @@ struct DataInputAuxViewImpl {
     static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
     std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t offset = offset_at(_aux_layout, coords);
-    return loadu_dispatch(t, _aux + offset, n);
+    return load_dispatch(t, _aux + offset, n);
   }
 
   const TIn* _p;
@@ -617,7 +617,7 @@ struct DataOutputViewImpl<AccessKindLastContiguous, TIn, OutTensor, TransformFn,
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t offset = offset_at(_layout, coords);
     auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
-    storeu_dispatch(To{}, _p + offset, n, v_out);
+    store_dispatch(To{}, _p + offset, n, v_out);
   }
 
   TOut* _p;
@@ -645,7 +645,7 @@ struct DataOutputViewImpl<
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
     auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
     const nint_t offset = offset_at(_aux_layout, coords);
-    storeu_dispatch(To{}, _aux + offset, n, v_out);
+    store_dispatch(To{}, _aux + offset, n, v_out);
   }
 
   TOut* _p;

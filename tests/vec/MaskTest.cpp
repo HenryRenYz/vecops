@@ -90,7 +90,7 @@ TYPED_TEST(VecMaskTest, MaskBitAnd) {
   }
 
   // Also test all-true and all-false
-  auto v_all = loadu(t, this->data_);
+  auto v_all = load(t, this->data_);
   auto m_true = cmpeq(v_all, v_all);
   auto m_false = cmpne(v_all, v_all);
 
@@ -120,7 +120,7 @@ TYPED_TEST(VecMaskTest, MaskBitOr) {
   }
 
   // all-true OR anything = all-true
-  auto v = loadu(t, this->data_);
+  auto v = load(t, this->data_);
   auto m_true = cmpeq(v, v);
   auto mr2 = bit_or(t, m_true, ma);
   for (nint_t i = 0; i < N; ++i) EXPECT_TRUE(get(t, mr2, i));
@@ -188,7 +188,7 @@ TYPED_TEST(VecMaskTest, MaskBitNot) {
   }
 
   // NOT(all-false) = all-true
-  auto v = loadu(t, this->data_);
+  auto v = load(t, this->data_);
   auto m_false = cmpne(v, v);
   auto mr2 = bit_not(t, m_false);
   for (nint_t i = 0; i < N; ++i) EXPECT_TRUE(get(t, mr2, i));
@@ -220,7 +220,7 @@ TYPED_TEST(VecMaskTest, MaskLower) {
   EXPECT_EQ((size_t)(N / 2), (size_t)size(Half<ScalableTag<T, 0>>{}));
 
   // Also test with all-false and all-true
-  auto v = loadu(t, this->data_);
+  auto v = load(t, this->data_);
   auto m_false = cmpne(v, v);
   auto m_true = cmpeq(v, v);
 
@@ -247,7 +247,7 @@ TYPED_TEST(VecMaskTest, MaskUpper) {
   }
 
   // Test with all-true: upper of all-true = all-true
-  auto v = loadu(t, this->data_);
+  auto v = load(t, this->data_);
   auto m_true = cmpeq(v, v);
   auto mt_hi = upper(t, m_true);
   for (nint_t i = 0; i < N / 2; ++i) EXPECT_TRUE(get(Half<ScalableTag<T, 0>>{}, mt_hi, i));
@@ -292,7 +292,7 @@ TYPED_TEST(VecMaskTest, MaskConcatAllFalse) {
   nint_t N = this->full_size;
 
   Half<ScalableTag<T, 0>> th;
-  auto v_half = loadu(th, this->data_);
+  auto v_half = load(th, this->data_);
   auto m_false = cmpne(v_half, v_half);
 
   auto m = concat(t, m_false, m_false);
@@ -305,7 +305,7 @@ TYPED_TEST(VecMaskTest, MaskConcatAllTrue) {
   nint_t N = this->full_size;
 
   Half<ScalableTag<T, 0>> th;
-  auto v_half = loadu(th, this->data_);
+  auto v_half = load(th, this->data_);
   auto m_true = cmpeq(v_half, v_half);
 
   auto m = concat(t, m_true, m_true);
@@ -342,7 +342,7 @@ TYPED_TEST(VecMaskTest, MaskRoundtrip) {
   }
 
   // Also test all-true and all-false roundtrip
-  auto v = loadu(t, this->data_);
+  auto v = load(t, this->data_);
   auto m_true = cmpeq(v, v);
   auto m_false = cmpne(v, v);
 

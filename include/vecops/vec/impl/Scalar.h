@@ -735,7 +735,7 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p) {
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p) {
-  VECOPS_ASSERT(((nuint_t)(p) & (DEFAULT_ALIGNMENT - 1)) == 0, "Not aligned");
+  VECOPS_ASSERT(is_aligned(memory_alignment(t), p), "Not aligned");
   return word::loadu(t, p);
 }
 
@@ -770,14 +770,14 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n) {
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
-  VECOPS_ASSERT(((nuint_t)(p) & (DEFAULT_ALIGNMENT - 1)) == 0, "Not aligned");
+  VECOPS_ASSERT(is_aligned(memory_alignment(t), p), "Not aligned");
   return word::loadu(t, p, n, default_v);
 }
 
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n) {
-  VECOPS_ASSERT(((nuint_t)(p) & (DEFAULT_ALIGNMENT - 1)) == 0, "Not aligned");
+  VECOPS_ASSERT(is_aligned(memory_alignment(t), p), "Not aligned");
   return word::loadu(t, p, n);
 }
 
@@ -808,14 +808,14 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m) {
  */
 template <TLV_DECL_TAG(T)>
 auto load(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
-  VECOPS_ASSERT(((nuint_t)(p) & (DEFAULT_ALIGNMENT - 1)) == 0, "Not aligned");
+  VECOPS_ASSERT(is_aligned(memory_alignment(t), p), "Not aligned");
   return word::loadu(t, p, m, default_v);
 }
 
 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m) {
-  VECOPS_ASSERT(((nuint_t)(p) & (DEFAULT_ALIGNMENT - 1)) == 0, "Not aligned");
+  VECOPS_ASSERT(is_aligned(memory_alignment(t), p), "Not aligned");
   return word::loadu(t, p, m);
 }
 
@@ -836,7 +836,7 @@ void storeu(T t, TypeOf<T>* p, Vec<T> v) {
  */
 template <TLV_DECL_TAG(T)>
 void store(T t, TypeOf<T>* p, Vec<T> v) {
-  VECOPS_ASSERT(((nuint_t)(p) & (DEFAULT_ALIGNMENT - 1)) == 0, "Not aligned");
+  VECOPS_ASSERT(is_aligned(memory_alignment(t), p), "Not aligned");
   return word::storeu(t, p, v);
 }
 
@@ -858,7 +858,7 @@ void storeu(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
  */
 template <TLV_DECL_TAG(T)>
 void store(T t, TypeOf<T>* p, nint_t n, Vec<T> v) {
-  VECOPS_ASSERT(((nuint_t)(p) & (DEFAULT_ALIGNMENT - 1)) == 0, "Not aligned");
+  VECOPS_ASSERT(is_aligned(memory_alignment(t), p), "Not aligned");
   return word::storeu(t, p, n, v);
 }
 
@@ -879,7 +879,7 @@ void storeu(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
  */
 template <TLV_DECL_TAG(T)>
 void store(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
-  VECOPS_ASSERT(((nuint_t)(p) & (DEFAULT_ALIGNMENT - 1)) == 0, "Not aligned");
+  VECOPS_ASSERT(is_aligned(memory_alignment(t), p), "Not aligned");
   return word::storeu(t, p, m, v);
 }
 

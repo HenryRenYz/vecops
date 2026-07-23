@@ -281,7 +281,8 @@ TYPED_TEST_SUITE(PromoteEvenTest, WidenCases);
 TYPED_TEST(PromoteEvenTest, SelectsStridedLanes) {
   using TOut = typename TestFixture::TOut;
   constexpr nint_t ratio = sizeof(TOut) / sizeof(typename TestFixture::TIn);
-  auto result = promote_even(this->out_tag, loadu(this->in_tag, this->input));
+  auto result = convert(
+      this->out_tag, load(this->in_tag, this->input), cvt::lane<0>);
 
   for (nint_t i = 0; i < size(this->out_tag); ++i) {
     auto expected = vecops::convert<TOut>(this->input[ratio * i]);
@@ -295,7 +296,8 @@ TYPED_TEST_SUITE(PromoteOddTest, WidenBy2Cases);
 
 TYPED_TEST(PromoteOddTest, SelectsOddLanes) {
   using TOut = typename TestFixture::TOut;
-  auto result = promote_odd(this->out_tag, loadu(this->in_tag, this->input));
+  auto result = convert(
+      this->out_tag, load(this->in_tag, this->input), cvt::lane<1>);
 
   for (nint_t i = 0; i < size(this->out_tag); ++i) {
     auto expected = vecops::convert<TOut>(this->input[2 * i + 1]);
@@ -310,10 +312,12 @@ TYPED_TEST_SUITE(DemoteEvenTest, NarrowCases);
 TYPED_TEST(DemoteEvenTest, InsertsValuesAndPreservesFallback) {
   using TOut = typename TestFixture::TOut;
   constexpr nint_t ratio = sizeof(typename TestFixture::TIn) / sizeof(TOut);
-  auto input = loadu(this->in_tag, this->input);
-  auto fallback = loadu(this->out_tag, this->fallback);
-  auto zero_result = demote_even(this->out_tag, input);
-  auto fallback_result = demote_even(this->out_tag, input, fallback);
+  auto input = load(this->in_tag, this->input);
+  auto fallback = load(this->out_tag, this->fallback);
+  auto zero_result = convert(
+      this->out_tag, input, cvt::lane<0>);
+  auto fallback_result = convert(
+      this->out_tag, input, cvt::lane<0>, opt::merge(fallback));
 
   for (nint_t i = 0; i < size(this->out_tag); ++i) {
     const bool converted = i % ratio == 0;
@@ -334,10 +338,12 @@ TYPED_TEST_SUITE(DemoteOddTest, NarrowBy2Cases);
 
 TYPED_TEST(DemoteOddTest, InsertsValuesAndPreservesFallback) {
   using TOut = typename TestFixture::TOut;
-  auto input = loadu(this->in_tag, this->input);
-  auto fallback = loadu(this->out_tag, this->fallback);
-  auto zero_result = demote_odd(this->out_tag, input);
-  auto fallback_result = demote_odd(this->out_tag, input, fallback);
+  auto input = load(this->in_tag, this->input);
+  auto fallback = load(this->out_tag, this->fallback);
+  auto zero_result = convert(
+      this->out_tag, input, cvt::lane<1>);
+  auto fallback_result = convert(
+      this->out_tag, input, cvt::lane<1>, opt::merge(fallback));
 
   for (nint_t i = 0; i < size(this->out_tag); ++i) {
     const bool converted = i % 2 == 1;
@@ -353,16 +359,20 @@ TYPED_TEST(DemoteOddTest, InsertsValuesAndPreservesFallback) {
 }
 
 template <typename To, typename Vi>
-concept CanPromoteEven = requires(To to, Vi vi) { promote_even(to, vi); };
+concept CanPromoteEven =
+    requires(To to, Vi vi) { convert(to, vi, cvt::lane<0>); };
 
 template <typename To, typename Vi>
-concept CanPromoteOdd = requires(To to, Vi vi) { promote_odd(to, vi); };
+concept CanPromoteOdd =
+    requires(To to, Vi vi) { convert(to, vi, cvt::lane<1>); };
 
 template <typename To, typename Vi>
-concept CanDemoteEven = requires(To to, Vi vi) { demote_even(to, vi); };
+concept CanDemoteEven =
+    requires(To to, Vi vi) { convert(to, vi, cvt::lane<0>); };
 
 template <typename To, typename Vi>
-concept CanDemoteOdd = requires(To to, Vi vi) { demote_odd(to, vi); };
+concept CanDemoteOdd =
+    requires(To to, Vi vi) { convert(to, vi, cvt::lane<1>); };
 
 using I16 = ScalableTag<int16_t>;
 using I16Vec = Vec<I16>;

@@ -61,6 +61,20 @@ VECOPS_INLINE constexpr TOut convert(TIn v) {
   }
 }
 
+/**
+ * Integer narrowing with deterministic low-bit/modulo semantics.
+ */
+template <typename TOut, typename TIn>
+  requires (
+      std::is_integral_v<TOut> && std::is_integral_v<TIn> &&
+      sizeof(TOut) < sizeof(TIn))
+VECOPS_INLINE constexpr TOut wrap_convert(TIn v) {
+  using UIn = std::make_unsigned_t<TIn>;
+  using UOut = std::make_unsigned_t<TOut>;
+  const UOut low = static_cast<UOut>(static_cast<UIn>(v));
+  return static_cast<TOut>(low);
+}
+
 } // namespace vecops
 
 #endif //VECOPS_SCALARCONVERT_H

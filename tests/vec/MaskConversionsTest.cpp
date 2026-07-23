@@ -122,7 +122,7 @@ TYPED_TEST(VecMaskPromoteTest, BasicPromote) {
   // Pattern: every other element true (i & 1) == 0
   auto pattern = test_utils::make_pattern(n_in, 1, 0);
   auto m_in    = test_utils::make_mask(this->t_in_, pattern);
-  auto m_out   = promote(this->t_out_, this->t_in_, m_in);
+  auto m_out   = convert(this->t_out_, this->t_in_, m_in);
 
   for (nint_t i = 0; i < N; ++i) {
     bool expected = pattern[(size_t)i];
@@ -138,7 +138,7 @@ TYPED_TEST(VecMaskPromoteTest, AllTrue) {
 
   std::vector<bool> pattern((size_t)n_in, true);
   auto m_in  = test_utils::make_mask(this->t_in_, pattern);
-  auto m_out = promote(this->t_out_, this->t_in_, m_in);
+  auto m_out = convert(this->t_out_, this->t_in_, m_in);
 
   for (nint_t i = 0; i < N; ++i)
     EXPECT_TRUE(get(this->t_out_, m_out, i)) << "i=" << i;
@@ -151,7 +151,7 @@ TYPED_TEST(VecMaskPromoteTest, AllFalse) {
 
   std::vector<bool> pattern((size_t)n_in, false);
   auto m_in  = test_utils::make_mask(this->t_in_, pattern);
-  auto m_out = promote(this->t_out_, this->t_in_, m_in);
+  auto m_out = convert(this->t_out_, this->t_in_, m_in);
 
   for (nint_t i = 0; i < N; ++i)
     EXPECT_FALSE(get(this->t_out_, m_out, i)) << "i=" << i;
@@ -167,7 +167,7 @@ TYPED_TEST(VecMaskPromoteTest, AlternatingPattern) {
   for (nint_t i = 0; i < n_in; ++i) pattern[(size_t)i] = (i % 2 == 0);
 
   auto m_in  = test_utils::make_mask(this->t_in_, pattern);
-  auto m_out = promote(this->t_out_, this->t_in_, m_in);
+  auto m_out = convert(this->t_out_, this->t_in_, m_in);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_EQ(pattern[(size_t)i], get(this->t_out_, m_out, i)) << "i=" << i;
@@ -224,7 +224,7 @@ TYPED_TEST(VecMaskDemoteTest, BasicDemote) {
   // Pattern: (i & 3) == 0
   auto pattern = test_utils::make_pattern(n_in, 3, 0);
   auto m_in    = test_utils::make_mask(this->t_in_, pattern);
-  auto m_out   = demote(this->t_out_, this->t_in_, m_in);
+  auto m_out   = convert(this->t_out_, this->t_in_, m_in);
 
   for (nint_t i = 0; i < N; ++i) {
     bool expected = pattern[(size_t)i];
@@ -240,7 +240,7 @@ TYPED_TEST(VecMaskDemoteTest, AllTrue) {
 
   std::vector<bool> pattern((size_t)n_in, true);
   auto m_in  = test_utils::make_mask(this->t_in_, pattern);
-  auto m_out = demote(this->t_out_, this->t_in_, m_in);
+  auto m_out = convert(this->t_out_, this->t_in_, m_in);
 
   for (nint_t i = 0; i < N; ++i)
     EXPECT_TRUE(get(this->t_out_, m_out, i)) << "i=" << i;
@@ -253,7 +253,7 @@ TYPED_TEST(VecMaskDemoteTest, AllFalse) {
 
   std::vector<bool> pattern((size_t)n_in, false);
   auto m_in  = test_utils::make_mask(this->t_in_, pattern);
-  auto m_out = demote(this->t_out_, this->t_in_, m_in);
+  auto m_out = convert(this->t_out_, this->t_in_, m_in);
 
   for (nint_t i = 0; i < N; ++i)
     EXPECT_FALSE(get(this->t_out_, m_out, i)) << "i=" << i;
@@ -268,7 +268,7 @@ TYPED_TEST(VecMaskDemoteTest, AlternatingPattern) {
   for (nint_t i = 0; i < n_in; ++i) pattern[(size_t)i] = (i & 1) != 0;
 
   auto m_in  = test_utils::make_mask(this->t_in_, pattern);
-  auto m_out = demote(this->t_out_, this->t_in_, m_in);
+  auto m_out = convert(this->t_out_, this->t_in_, m_in);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_EQ(pattern[(size_t)i], get(this->t_out_, m_out, i)) << "i=" << i;
@@ -285,8 +285,8 @@ TYPED_TEST(VecMaskDemoteTest, RoundTrip) {
   for (nint_t i = 0; i < n_out; ++i) pattern[(size_t)i] = (i % 5 < 2);
 
   auto m_small  = test_utils::make_mask(this->t_out_, pattern);
-  auto promoted  = promote(this->t_in_, this->t_out_, m_small);
-  auto demoted   = demote(this->t_out_, this->t_in_, promoted);
+  auto promoted  = convert(this->t_in_, this->t_out_, m_small);
+  auto demoted   = convert(this->t_out_, this->t_in_, promoted);
 
   for (nint_t i = 0; i < N; ++i) {
     EXPECT_EQ(pattern[(size_t)i], get(this->t_out_, demoted, i)) << "i=" << i;

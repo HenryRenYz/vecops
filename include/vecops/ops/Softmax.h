@@ -208,7 +208,7 @@ private:
             auto mask = vec::mwhilelt(t, 0, static_cast<nint_t>(count));
             auto shifted = vec::sub(xv, max_v);
             auto exp_v = apply_exp(shifted, mask, vec::zeros(t));
-            vec::storeu(t, exp_cache + col, mask, exp_v);
+            vec::store(t, exp_cache + col, exp_v, vec::opt::masked(mask));
             return vec::add(acc, exp_v);
           });
       const auto inv_sum = ComputeType(1) / vec::reduce_add(t, v_sum);
@@ -220,7 +220,8 @@ private:
           step,
           [&](nint_t col, auto&& count) VECOPS_INLINE_LAMBDA {
             auto mask = vec::mwhilelt(t, 0, static_cast<nint_t>(count));
-            auto exp_v = vec::loadu(t, exp_cache + col, mask, vec::zeros(t));
+            auto exp_v = vec::load(
+                t, exp_cache + col, vec::opt::masked(mask));
             y(t, vec::mul(exp_v, inv_sum_v), count, col);
           });
     }
