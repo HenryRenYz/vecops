@@ -340,6 +340,9 @@ VECOPS_VFUNC Mask<T> mwhilegt(T t, nint_t a, nint_t b) {
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p) {
+  if constexpr (is_word_vec(t)) {
+    return word::loadu(t, p);
+  }
   using namespace details;
   return vmap(
       t, [=](auto tt, const TypeOf<T>* pp) VECOPS_INLINE_LAMBDA { return word::loadu(tt, pp); },
@@ -376,6 +379,9 @@ VECOPS_VFUNC Vec<T> loadu(T t, std::initializer_list<TypeOf<T>> list) {
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p) {
+  if constexpr (is_word_vec(t)) {
+    return word::load(t, p);
+  }
   using namespace details;
   return vmap(
       t, [=](auto tt, const TypeOf<T>* pp) VECOPS_INLINE_LAMBDA { return word::load(tt, pp); },
@@ -409,6 +415,9 @@ VECOPS_VFUNC Vec<T> load(T t, std::initializer_list<T> list) {
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
+  if constexpr (is_word_vec(t)) {
+    return word::loadu(t, p, n, default_v);
+  }
   using namespace details;
   return vmap(
       t, n,
@@ -418,8 +427,27 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
   );
 }
 
+/**
+ * @brief Load the first n elements from unaligned memory and zero the rest.
+ *
+ * Memory at and beyond `p + n` is not accessed.
+ */
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, TypeOf<T> default_v = TypeOf<T>()) {
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n) {
+  if constexpr (is_word_vec(t)) {
+    return word::loadu(t, p, n);
+  }
+  using namespace details;
+  return vmap(
+      t, n,
+      [=](auto tt, const TypeOf<T>* pp) VECOPS_INLINE_LAMBDA { return word::loadu(tt, pp); },
+      [=](auto tt, nint_t rem, const TypeOf<T>* pp) VECOPS_INLINE_LAMBDA { return word::loadu(tt, pp, rem); },
+      StepPointer(t, p)
+  );
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, TypeOf<T> default_v) {
   return vec::loadu(t, p, n, vec::fill(t, default_v));
 }
 
@@ -430,6 +458,9 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, TypeOf<T> default_v
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
+  if constexpr (is_word_vec(t)) {
+    return word::load(t, p, n, default_v);
+  }
   using namespace details;
   return vmap(
       t, n,
@@ -439,8 +470,27 @@ VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
   );
 }
 
+/**
+ * @brief Load the first n elements from aligned memory and zero the rest.
+ *
+ * Memory at and beyond `p + n` is not accessed.
+ */
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC auto load(T t, const TypeOf<T>* p, nint_t n, TypeOf<T> default_v = TypeOf<T>()) {
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n) {
+  if constexpr (is_word_vec(t)) {
+    return word::load(t, p, n);
+  }
+  using namespace details;
+  return vmap(
+      t, n,
+      [=](auto tt, const TypeOf<T>* pp) VECOPS_INLINE_LAMBDA { return word::load(tt, pp); },
+      [=](auto tt, nint_t rem, const TypeOf<T>* pp) VECOPS_INLINE_LAMBDA { return word::load(tt, pp, rem); },
+      StepPointer(t, p)
+  );
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC auto load(T t, const TypeOf<T>* p, nint_t n, TypeOf<T> default_v) {
   return vec::load(t, p, n, vec::fill(t, default_v));
 }
 
@@ -452,11 +502,13 @@ VECOPS_VFUNC auto load(T t, const TypeOf<T>* p, nint_t n, TypeOf<T> default_v = 
  *
  * @return Vector with masked-loaded elements
  *
- * @note This operation may load from masked-out addresses; ensure
- *       those addresses are valid even if the values won't be used.
+ * @note Masked-out addresses are not accessed.
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
+  if constexpr (is_word_vec(t)) {
+    return word::loadu(t, p, m, default_v);
+  }
   using namespace details;
   return vmap(
       t, [=](auto tt, const TypeOf<T>* p, auto mm, auto v_d) VECOPS_INLINE_LAMBDA { return word::loadu(tt, p, mm, v_d); },
@@ -464,8 +516,25 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) 
   );
 }
 
+/**
+ * @brief Masked unaligned load with zero-filled inactive lanes.
+ *
+ * Masked-out addresses are not accessed.
+ */
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, TypeOf<T> default_v = TypeOf<T>()) {
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m) {
+  if constexpr (is_word_vec(t)) {
+    return word::loadu(t, p, m);
+  }
+  using namespace details;
+  return vmap(
+      t, [=](auto tt, const TypeOf<T>* pp, auto mm) VECOPS_INLINE_LAMBDA { return word::loadu(tt, pp, mm); },
+      StepPointer(t, p), ShardMask(t, m)
+  );
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, TypeOf<T> default_v) {
   return vec::loadu(t, p, m, vec::fill(t, default_v));
 }
 
@@ -479,6 +548,9 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, TypeOf<T> default_
  */
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
+  if constexpr (is_word_vec(t)) {
+    return word::load(t, p, m, default_v);
+  }
   using namespace details;
   return vmap(
       t, [=](auto tt, const TypeOf<T>* p, auto mm, auto v_d) VECOPS_INLINE_LAMBDA { return word::load(tt, p, mm, v_d); },
@@ -486,8 +558,25 @@ VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
   );
 }
 
+/**
+ * @brief Masked aligned load with zero-filled inactive lanes.
+ *
+ * Masked-out addresses are not accessed.
+ */
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, TypeOf<T> default_v = TypeOf<T>()) {
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m) {
+  if constexpr (is_word_vec(t)) {
+    return word::load(t, p, m);
+  }
+  using namespace details;
+  return vmap(
+      t, [=](auto tt, const TypeOf<T>* pp, auto mm) VECOPS_INLINE_LAMBDA { return word::load(tt, pp, mm); },
+      StepPointer(t, p), ShardMask(t, m)
+  );
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, TypeOf<T> default_v) {
   return vec::load(t, p, m, vec::fill(t, default_v));
 }
 
@@ -3632,6 +3721,412 @@ VECOPS_VFUNC Mask<To> convert(To to, Ti ti, Mask<Ti> mi) {
       to, [=](auto tt, auto&& mm) { return word::convert(tt, wt_i, mm); },
       ShardMask(ti, mi)
   );
+}
+
+/* ************************************************************************** */
+//                    Fused conversion load & store                          //
+/* ************************************************************************** */
+
+/**
+ * @brief Load unaligned elements and promote them to a wider vector type.
+ *
+ * The input element type is inferred from `p`. Exactly `size(t)` consecutive
+ * input elements are converted, preserving lane order. The pointer need not be
+ * aligned. Integer and floating-point behavior is identical to `promote`.
+ *
+ * @return Promoted vector
+ */
+template <TLV_DECL_TAG(To), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) < sizeof(TypeOf<To>))
+VECOPS_VFUNC Vec<To> promote_loadu(To t, const Ei* p) {
+  constexpr Rebind<Ei, To> ti{};
+  if constexpr (is_word_vec(t) || is_word_vec(ti)) {
+    return word::promote_loadu(t, p);
+  } else {
+    using namespace details;
+    return vmap(
+        t,
+        [=](auto tt, const Ei* pp) VECOPS_INLINE_LAMBDA {
+          return word::promote_loadu(tt, pp);
+        },
+        StepPointer(p, word_size(t))
+    );
+  }
+}
+
+/**
+ * @brief Masked unaligned promoting load with zero-filled inactive lanes.
+ *
+ * Active lanes are loaded and promoted; inactive lanes are zero. Masked-out
+ * addresses are not accessed.
+ */
+template <TLV_DECL_TAG(To), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) < sizeof(TypeOf<To>))
+VECOPS_VFUNC Vec<To> promote_loadu(To t, const Ei* p, Mask<To> m) {
+  constexpr Rebind<Ei, To> ti{};
+  if constexpr (is_word_vec(t) || is_word_vec(ti)) {
+    return word::promote_loadu(t, p, m);
+  } else {
+    using namespace details;
+    return vmap(
+        t,
+        [=](auto tt, const Ei* pp, auto mm) VECOPS_INLINE_LAMBDA {
+          return word::promote_loadu(tt, pp, mm);
+        },
+        StepPointer(p, word_size(t)), ShardMask(t, m)
+    );
+  }
+}
+
+/**
+ * @brief Masked unaligned promoting load.
+ *
+ * Active lanes are loaded and promoted; inactive lanes come from `default_v`.
+ * Masked-out addresses are not accessed.
+ */
+template <TLV_DECL_TAG(To), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) < sizeof(TypeOf<To>))
+VECOPS_VFUNC Vec<To> promote_loadu(
+    To t, const Ei* p, Mask<To> m, Vec<To> default_v) {
+  constexpr Rebind<Ei, To> ti{};
+  if constexpr (is_word_vec(t) || is_word_vec(ti)) {
+    return word::promote_loadu(t, p, m, default_v);
+  } else {
+    using namespace details;
+    return vmap(
+        t,
+        [=](auto tt, const Ei* pp, auto mm, auto dd) VECOPS_INLINE_LAMBDA {
+          return word::promote_loadu(tt, pp, mm, dd);
+        },
+        StepPointer(p, word_size(t)), ShardMask(t, m), ShardVec(t, default_v)
+    );
+  }
+}
+
+/**
+ * @brief Load unaligned elements and demote them to a narrower vector type.
+ *
+ * The input element type is inferred from `p`; conversion follows `demote`,
+ * including saturation for narrowing integer conversions.
+ */
+template <TLV_DECL_TAG(To), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) > sizeof(TypeOf<To>))
+VECOPS_VFUNC Vec<To> demote_loadu(To t, const Ei* p) {
+  constexpr Rebind<Ei, To> ti{};
+  if constexpr (is_word_vec(t) || is_word_vec(ti)) {
+    return word::demote_loadu(t, p);
+  } else {
+    using namespace details;
+    return vmap(
+        t,
+        [=](auto tt, const Ei* pp) VECOPS_INLINE_LAMBDA {
+          return word::demote_loadu(tt, pp);
+        },
+        StepPointer(p, word_size(t))
+    );
+  }
+}
+
+/**
+ * @brief Masked unaligned demoting load with zero-filled inactive lanes.
+ * Masked-out addresses are not accessed.
+ */
+template <TLV_DECL_TAG(To), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) > sizeof(TypeOf<To>))
+VECOPS_VFUNC Vec<To> demote_loadu(To t, const Ei* p, Mask<To> m) {
+  constexpr Rebind<Ei, To> ti{};
+  if constexpr (is_word_vec(t) || is_word_vec(ti)) {
+    return word::demote_loadu(t, p, m);
+  } else {
+    using namespace details;
+    return vmap(
+        t,
+        [=](auto tt, const Ei* pp, auto mm) VECOPS_INLINE_LAMBDA {
+          return word::demote_loadu(tt, pp, mm);
+        },
+        StepPointer(p, word_size(t)), ShardMask(t, m)
+    );
+  }
+}
+
+/**
+ * @brief Masked unaligned demoting load with per-lane defaults.
+ * Masked-out addresses are not accessed.
+ */
+template <TLV_DECL_TAG(To), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) > sizeof(TypeOf<To>))
+VECOPS_VFUNC Vec<To> demote_loadu(
+    To t, const Ei* p, Mask<To> m, Vec<To> default_v) {
+  constexpr Rebind<Ei, To> ti{};
+  if constexpr (is_word_vec(t) || is_word_vec(ti)) {
+    return word::demote_loadu(t, p, m, default_v);
+  } else {
+    using namespace details;
+    return vmap(
+        t,
+        [=](auto tt, const Ei* pp, auto mm,
+            auto dd) VECOPS_INLINE_LAMBDA {
+          return word::demote_loadu(tt, pp, mm, dd);
+        },
+        StepPointer(p, word_size(t)), ShardMask(t, m), ShardVec(t, default_v)
+    );
+  }
+}
+
+/**
+ * @brief Load unaligned elements and convert them to an equal-width type.
+ *
+ * The input element type is inferred from `p`; conversion follows `convert`.
+ */
+template <TLV_DECL_TAG(To), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) == sizeof(TypeOf<To>))
+VECOPS_VFUNC Vec<To> convert_loadu(To t, const Ei* p) {
+  if constexpr (is_word_vec(t)) return word::convert_loadu(t, p);
+  using namespace details;
+  return vmap(
+      t,
+      [=](auto tt, const Ei* pp) VECOPS_INLINE_LAMBDA {
+        return word::convert_loadu(tt, pp);
+      },
+      StepPointer(p, word_size(t))
+  );
+}
+
+/**
+ * @brief Masked unaligned equal-width load with zero-filled inactive lanes.
+ * Masked-out addresses are not accessed.
+ */
+template <TLV_DECL_TAG(To), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) == sizeof(TypeOf<To>))
+VECOPS_VFUNC Vec<To> convert_loadu(To t, const Ei* p, Mask<To> m) {
+  if constexpr (is_word_vec(t)) return word::convert_loadu(t, p, m);
+  using namespace details;
+  return vmap(
+      t,
+      [=](auto tt, const Ei* pp, auto mm) VECOPS_INLINE_LAMBDA {
+        return word::convert_loadu(tt, pp, mm);
+      },
+      StepPointer(p, word_size(t)), ShardMask(t, m)
+  );
+}
+
+/**
+ * @brief Masked unaligned equal-width converting load.
+ * Masked-out addresses are not accessed.
+ */
+template <TLV_DECL_TAG(To), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) == sizeof(TypeOf<To>))
+VECOPS_VFUNC Vec<To> convert_loadu(
+    To t, const Ei* p, Mask<To> m, Vec<To> default_v) {
+  if constexpr (is_word_vec(t)) {
+    return word::convert_loadu(t, p, m, default_v);
+  }
+  using namespace details;
+  return vmap(
+      t,
+      [=](auto tt, const Ei* pp, auto mm,
+          auto dd) VECOPS_INLINE_LAMBDA {
+        return word::convert_loadu(tt, pp, mm, dd);
+      },
+      StepPointer(p, word_size(t)), ShardMask(t, m), ShardVec(t, default_v)
+  );
+}
+
+/**
+ * @brief Store a vector to unaligned memory while promoting its elements.
+ *
+ * The output element type is inferred from `p`. Exactly `size(t)` elements
+ * are converted and stored; the pointer need not be aligned.
+ */
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) < sizeof(Eo))
+VECOPS_VFUNC void promote_storeu(Ti t, Eo* p, Vec<Ti> v) {
+  constexpr Rebind<Eo, Ti> to{};
+  if constexpr (is_word_vec(t) || is_word_vec(to)) {
+    word::promote_storeu(t, p, v);
+  } else {
+    using namespace details;
+    vmap(
+        t,
+        [=](auto tt, Eo* pp, auto vv) VECOPS_INLINE_LAMBDA {
+          word::promote_storeu(tt, pp, vv);
+        },
+        StepPointer(p, word_size(t)), ShardVec(t, v)
+    );
+  }
+}
+
+/** @brief Masked unaligned promoting store; inactive elements are untouched. */
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) < sizeof(Eo))
+VECOPS_VFUNC void promote_storeu(
+    Ti t, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  constexpr Rebind<Eo, Ti> to{};
+  if constexpr (is_word_vec(t) || is_word_vec(to)) {
+    word::promote_storeu(t, p, m, v);
+  } else {
+    using namespace details;
+    vmap(
+        t,
+        [=](auto tt, Eo* pp, auto mm, auto vv) VECOPS_INLINE_LAMBDA {
+          word::promote_storeu(tt, pp, mm, vv);
+        },
+        StepPointer(p, word_size(t)), ShardMask(t, m), ShardVec(t, v)
+    );
+  }
+}
+
+/**
+ * @brief Store a vector to unaligned memory while demoting its elements.
+ *
+ * Narrowing integer conversions saturate exactly as `demote`; FP32 to BF16
+ * uses the same round-to-nearest-even and subnormal policy as `demote`.
+ */
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) > sizeof(Eo))
+VECOPS_VFUNC void demote_storeu(Ti t, Eo* p, Vec<Ti> v) {
+  constexpr Rebind<Eo, Ti> to{};
+  if constexpr (is_word_vec(t) || is_word_vec(to)) {
+    word::demote_storeu(t, p, v);
+  } else {
+    using namespace details;
+    vmap(
+        t,
+        [=](auto tt, Eo* pp, auto vv) VECOPS_INLINE_LAMBDA {
+          word::demote_storeu(tt, pp, vv);
+        },
+        StepPointer(p, word_size(t)), ShardVec(t, v)
+    );
+  }
+}
+
+/** @brief Masked unaligned demoting store; inactive elements are untouched. */
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) > sizeof(Eo))
+VECOPS_VFUNC void demote_storeu(
+    Ti t, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  constexpr Rebind<Eo, Ti> to{};
+  if constexpr (is_word_vec(t) || is_word_vec(to)) {
+    word::demote_storeu(t, p, m, v);
+  } else {
+    using namespace details;
+    vmap(
+        t,
+        [=](auto tt, Eo* pp, auto mm, auto vv) VECOPS_INLINE_LAMBDA {
+          word::demote_storeu(tt, pp, mm, vv);
+        },
+        StepPointer(p, word_size(t)), ShardMask(t, m), ShardVec(t, v)
+    );
+  }
+}
+
+/** @brief Store a vector to unaligned memory with equal-width conversion. */
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) == sizeof(Eo))
+VECOPS_VFUNC void convert_storeu(Ti t, Eo* p, Vec<Ti> v) {
+  if constexpr (is_word_vec(t)) {
+    word::convert_storeu(t, p, v);
+    return;
+  }
+  using namespace details;
+  vmap(
+      t,
+      [=](auto tt, Eo* pp, auto vv) VECOPS_INLINE_LAMBDA {
+        word::convert_storeu(tt, pp, vv);
+      },
+      StepPointer(p, word_size(t)), ShardVec(t, v)
+  );
+}
+
+/** @brief Masked equal-width converting store; inactive elements are untouched. */
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) == sizeof(Eo))
+VECOPS_VFUNC void convert_storeu(
+    Ti t, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  if constexpr (is_word_vec(t)) {
+    word::convert_storeu(t, p, m, v);
+    return;
+  }
+  using namespace details;
+  vmap(
+      t,
+      [=](auto tt, Eo* pp, auto mm, auto vv) VECOPS_INLINE_LAMBDA {
+        word::convert_storeu(tt, pp, mm, vv);
+      },
+      StepPointer(p, word_size(t)), ShardMask(t, m), ShardVec(t, v)
+  );
+}
+
+/** @brief Unaligned converting load that dispatches by element width. */
+template <TLV_DECL_TAG(To), typename Ei>
+  requires is_element_type<Ei>
+VECOPS_VFUNC Vec<To> xconvert_loadu(To t, const Ei* p) {
+  if constexpr (sizeof(Ei) < sizeof(TypeOf<To>)) {
+    return vec::promote_loadu(t, p);
+  } else if constexpr (sizeof(Ei) > sizeof(TypeOf<To>)) {
+    return vec::demote_loadu(t, p);
+  } else {
+    return vec::convert_loadu(t, p);
+  }
+}
+
+/**
+ * @brief Masked converting load with zero-filled inactive lanes.
+ *
+ * Dispatches to promote, demote, or equal-width conversion according to the
+ * input and output element widths. Masked-out addresses are not accessed.
+ */
+template <TLV_DECL_TAG(To), typename Ei>
+  requires is_element_type<Ei>
+VECOPS_VFUNC Vec<To> xconvert_loadu(To t, const Ei* p, Mask<To> m) {
+  if constexpr (sizeof(Ei) < sizeof(TypeOf<To>)) {
+    return vec::promote_loadu(t, p, m);
+  } else if constexpr (sizeof(Ei) > sizeof(TypeOf<To>)) {
+    return vec::demote_loadu(t, p, m);
+  } else {
+    return vec::convert_loadu(t, p, m);
+  }
+}
+
+/** @brief Masked unaligned converting load that dispatches by element width. */
+template <TLV_DECL_TAG(To), typename Ei>
+  requires is_element_type<Ei>
+VECOPS_VFUNC Vec<To> xconvert_loadu(
+    To t, const Ei* p, Mask<To> m, Vec<To> default_v) {
+  if constexpr (sizeof(Ei) < sizeof(TypeOf<To>)) {
+    return vec::promote_loadu(t, p, m, default_v);
+  } else if constexpr (sizeof(Ei) > sizeof(TypeOf<To>)) {
+    return vec::demote_loadu(t, p, m, default_v);
+  } else {
+    return vec::convert_loadu(t, p, m, default_v);
+  }
+}
+
+/** @brief Unaligned converting store that dispatches by element width. */
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires is_element_type<Eo>
+VECOPS_VFUNC void xconvert_storeu(Ti t, Eo* p, Vec<Ti> v) {
+  if constexpr (sizeof(TypeOf<Ti>) < sizeof(Eo)) {
+    vec::promote_storeu(t, p, v);
+  } else if constexpr (sizeof(TypeOf<Ti>) > sizeof(Eo)) {
+    vec::demote_storeu(t, p, v);
+  } else {
+    vec::convert_storeu(t, p, v);
+  }
+}
+
+/** @brief Masked unaligned converting store that dispatches by element width. */
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires is_element_type<Eo>
+VECOPS_VFUNC void xconvert_storeu(
+    Ti t, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  if constexpr (sizeof(TypeOf<Ti>) < sizeof(Eo)) {
+    vec::promote_storeu(t, p, m, v);
+  } else if constexpr (sizeof(TypeOf<Ti>) > sizeof(Eo)) {
+    vec::demote_storeu(t, p, m, v);
+  } else {
+    vec::convert_storeu(t, p, m, v);
+  }
 }
 
 /**

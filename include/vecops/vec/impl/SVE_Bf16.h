@@ -54,8 +54,8 @@ VECOPS_VFUNC svbfloat16_t f32x2_to_bf16(svfloat32_t lo_f32, svfloat32_t hi_f32) 
   #if defined(__ARM_FEATURE_SVE_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
   auto pg_bf16 = ptrue<bfloat16_t>();
 
-  auto lo_bf16 = svcvt_bf16_z(pg_bf16, lo_f32);
-  auto hi_bf16 = svcvt_bf16_z(pg_bf16, hi_f32);
+  auto lo_bf16 = svcvt_bf16_x(pg_bf16, lo_f32);
+  auto hi_bf16 = svcvt_bf16_x(pg_bf16, hi_f32);
   return svuzp1(lo_bf16, hi_bf16);
   #else
     auto u16_lo = svreinterpret_u16_u32(f32_to_bf16_rne_bits(lo_f32));

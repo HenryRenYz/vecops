@@ -943,6 +943,12 @@ struct TypeOfHelper<V, std::enable_if_t<is_vec<V>>> {
 template <typename TorV>
 using TypeOf = typename details::TypeOfHelper<TorV>::Type;
 
+template <size_t Bytes>
+using SignedIntegerOfSize = std::conditional_t<
+    Bytes == 1, int8_t,
+    std::conditional_t<Bytes == 2, int16_t,
+    std::conditional_t<Bytes == 4, int32_t, int64_t>>>;
+
 namespace details {
 constexpr nint_t size_shift(nuint_t from_size, nuint_t to_size) {
   if (from_size > to_size) {

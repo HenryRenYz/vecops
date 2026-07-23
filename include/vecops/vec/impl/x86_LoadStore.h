@@ -30,6 +30,8 @@
 #ifndef VECOPS_X86_LOADSTORE_H
 #define VECOPS_X86_LOADSTORE_H
 
+#include <limits>
+
 #include "./x86_Types.h"
 #include "./x86_Basic.h"
 #include "./x86_Arithmetic.h"
@@ -741,7 +743,7 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T> * p, Mask<T> m, Vec<T> default_v)
   } else {
     // Fallback to scalar implementation, TODO slow
     union { int16_t i[16]; __m256i m; } V{.m = default_v.v}, M{.m = m.v};
-    alignas(16) int16_t S[16];
+    alignas(32) int16_t S[16];
     auto P = (const int16_t*) p;
     for (int i = 0; i < 16; ++i) S[i] = M.i[i] ? P[i] : V.i[i];
     return _mm256_load_si256((const __m256i *)S);
@@ -770,9 +772,20 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T> * p, Mask<T> m, Vec<T> default_v)
 #endif // HAS_AVX512DQ
 
 template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T> * p, Mask<T> m) {
+  return word::loadu(t, p, m, word::zeros(t));
+}
+
+template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T> * p, Mask<T> m, Vec<T> default_v) {
   VECOPS_ASSERT(is_aligned(T::Bytes, p), "Not aligned");
   return word::loadu(t, p, m, default_v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T> * p, Mask<T> m) {
+  VECOPS_ASSERT(is_aligned(T::Bytes, p), "Not aligned");
+  return word::loadu(t, p, m);
 }
 
 template <TLV_DECL_TAG(T)>
@@ -783,9 +796,21 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T> * p, nint_t n, Vec<T> default_v) 
 }
 
 template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T> * p, nint_t n) {
+  VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
+  return word::loadu(t, p, word::mwhilelt(t, 0, n));
+}
+
+template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T> * p, nint_t n, Vec<T> default_v) {
   VECOPS_ASSERT(is_aligned(T::Bytes, p), "Not aligned");
   return word::loadu(t, p, n, default_v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T> * p, nint_t n) {
+  VECOPS_ASSERT(is_aligned(T::Bytes, p), "Not aligned");
+  return word::loadu(t, p, n);
 }
 
 
@@ -1665,6 +1690,385 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T> * p, Vec<Rebind<GatherScatterIndex<Type
   VECOPS_ASSERT(0 <= n && n <= size(t), "%zd !in 0..%zd", n, size(t));
   auto m = word::mwhilelt(t, 0, n);
   word::scatter(t, p, i, m, v);
+}
+
+/* ************************************************************************** */
+//                    Fused conversion load & store                          //
+/* ************************************************************************** */
+
+namespace conversion_load_store_detail {
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
+VECOPS_VFUNC Mask<To> xconvert_mask(To to, Ti ti, Mask<Ti> m) {
+  using ToMask = Rebind<SignedIntegerOfSize<sizeof(TypeOf<To>)>, To>;
+  using TiMask = Rebind<SignedIntegerOfSize<sizeof(TypeOf<Ti>)>, Ti>;
+  constexpr ToMask to_mask{};
+  constexpr TiMask ti_mask{};
+  if constexpr (sizeof(TypeOf<Ti>) < sizeof(TypeOf<To>)) {
+    return word::promote(to_mask, ti_mask, m);
+  } else if constexpr (sizeof(TypeOf<Ti>) > sizeof(TypeOf<To>)) {
+    return word::demote(to_mask, ti_mask, m);
+  } else {
+    return word::convert(to_mask, ti_mask, m);
+  }
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> zeros(T t) {
+  if constexpr (is_word_vec(t)) return word::zeros(t);
+  return vecops::vec::details::vmap(
+      t, [](auto tt) VECOPS_INLINE_LAMBDA { return word::zeros(tt); });
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p) {
+  if constexpr (is_word_vec(t)) return word::loadu(t, p);
+  return vecops::vec::details::vmap(
+      t,
+      [](auto tt, const TypeOf<T>* pp) VECOPS_INLINE_LAMBDA {
+        return word::loadu(tt, pp);
+      },
+      vecops::vec::details::StepPointer(t, p));
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> loadu(
+    T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
+  if constexpr (is_word_vec(t)) return word::loadu(t, p, m, default_v);
+  return vecops::vec::details::vmap(
+      t,
+      [](auto tt, const TypeOf<T>* pp, auto mm,
+         auto dd) VECOPS_INLINE_LAMBDA {
+        return word::loadu(tt, pp, mm, dd);
+      },
+      vecops::vec::details::StepPointer(t, p),
+      vecops::vec::details::ShardMask(t, m),
+      vecops::vec::details::ShardVec(t, default_v));
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, Vec<T> v) {
+  if constexpr (is_word_vec(t)) {
+    word::storeu(t, p, v);
+    return;
+  }
+  vecops::vec::details::vmap(
+      t,
+      [](auto tt, TypeOf<T>* pp, auto vv) VECOPS_INLINE_LAMBDA {
+        word::storeu(tt, pp, vv);
+      },
+      vecops::vec::details::StepPointer(t, p),
+      vecops::vec::details::ShardVec(t, v));
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC void masked_storeu_word(
+    T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
+#if !defined(HAS_AVX512DQ)
+  if constexpr (sizeof(TypeOf<T>) < 4) {
+    using E = TypeOf<T>;
+    using M = Index<E>;
+    ViewAs<M, T> tm;
+    alignas(64) E values[size(t)];
+    alignas(64) M masks[size(t)];
+    word::storeu(t, values, v);
+    word::storeu(tm, masks, Vec<decltype(tm)>{m.v});
+    for (nint_t i = 0; i < size(t); ++i) {
+      if (masks[i] < 0) p[i] = values[i];
+    }
+    return;
+  }
+#endif
+  word::storeu(t, p, m, v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
+  if constexpr (is_word_vec(t)) {
+    masked_storeu_word(t, p, m, v);
+    return;
+  }
+  vecops::vec::details::vmap(
+      t,
+      [](auto tt, TypeOf<T>* pp, auto mm,
+         auto vv) VECOPS_INLINE_LAMBDA {
+        masked_storeu_word(tt, pp, mm, vv);
+      },
+      vecops::vec::details::StepPointer(t, p),
+      vecops::vec::details::ShardMask(t, m),
+      vecops::vec::details::ShardVec(t, v));
+}
+
+} // namespace conversion_load_store_detail
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) < sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> promote_loadu(T t, const Ei* p) {
+  if constexpr (!is_word_vec(t)) {
+    constexpr Half<T> th{};
+    return word::concat(
+        t, word::promote_loadu(th, p),
+        word::promote_loadu(th, p + size(th)));
+  } else {
+  using Eo = TypeOf<T>;
+  if constexpr (std::is_same_v<Ei, bfloat16_t> && std::is_same_v<Eo, float32_t>) {
+    __m128i narrow128;
+    if constexpr (T::Bytes == 4) {
+      uint16_t bits;
+      __builtin_memcpy(&bits, p, sizeof(bits));
+      narrow128 = _mm_cvtsi32_si128(bits);
+    } else if constexpr (T::Bytes == 8) {
+      uint32_t bits;
+      __builtin_memcpy(&bits, p, sizeof(bits));
+      narrow128 = _mm_cvtsi32_si128(static_cast<int32_t>(bits));
+    } else if constexpr (T::Bytes == 16) {
+      narrow128 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(p));
+    } else if constexpr (T::Bytes == 32) {
+      narrow128 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+    }
+
+    if constexpr (T::Bytes <= 16) {
+      return _mm_castsi128_ps(_mm_slli_epi32(_mm_cvtepu16_epi32(narrow128), 16));
+    } else if constexpr (T::Bytes == 32) {
+      return _mm256_castsi256_ps(
+          _mm256_slli_epi32(_mm256_cvtepu16_epi32(narrow128), 16));
+    } else {
+      const auto narrow256 =
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
+      return _mm512_castsi512_ps(
+          _mm512_slli_epi32(_mm512_cvtepu16_epi32(narrow256), 16));
+    }
+  } else {
+    Rebind<Ei, T> ti;
+    return word::promote(
+        t, conversion_load_store_detail::loadu(ti, p));
+  }
+  }
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) < sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> promote_loadu(
+    T t, const Ei* p, Mask<T> m, Vec<T> default_v) {
+  if constexpr (!is_word_vec(t)) {
+    constexpr Half<T> th{};
+    return word::concat(
+        t,
+        word::promote_loadu(
+            th, p, word::lower(t, m), word::lower(t, default_v)),
+        word::promote_loadu(
+            th, p + size(th), word::upper(t, m),
+            word::upper(t, default_v)));
+  } else {
+  Rebind<Ei, T> ti;
+  auto mi = conversion_load_store_detail::xconvert_mask(ti, t, m);
+  auto loaded = conversion_load_store_detail::loadu(
+      ti, p, mi, conversion_load_store_detail::zeros(ti));
+  return word::blend(default_v, m, word::promote(t, loaded));
+  }
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) < sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> promote_loadu(T t, const Ei* p, Mask<T> m) {
+  if constexpr (!is_word_vec(t)) {
+    constexpr Half<T> th{};
+    return word::concat(
+        t, word::promote_loadu(th, p, word::lower(t, m)),
+        word::promote_loadu(
+            th, p + size(th), word::upper(t, m)));
+  } else {
+    return word::promote_loadu(t, p, m, word::zeros(t));
+  }
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) > sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> demote_loadu(T t, const Ei* p) {
+  Rebind<Ei, T> ti;
+  return word::demote(
+      t, conversion_load_store_detail::loadu(ti, p));
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) > sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> demote_loadu(
+    T t, const Ei* p, Mask<T> m, Vec<T> default_v) {
+  Rebind<Ei, T> ti;
+  auto mi = conversion_load_store_detail::xconvert_mask(ti, t, m);
+  auto loaded = conversion_load_store_detail::loadu(
+      ti, p, mi, conversion_load_store_detail::zeros(ti));
+  return word::blend(default_v, m, word::demote(t, loaded));
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) > sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> demote_loadu(T t, const Ei* p, Mask<T> m) {
+  return word::demote_loadu(t, p, m, word::zeros(t));
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) == sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> convert_loadu(T t, const Ei* p) {
+  Rebind<Ei, T> ti;
+  return word::convert(
+      t, conversion_load_store_detail::loadu(ti, p));
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) == sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> convert_loadu(
+    T t, const Ei* p, Mask<T> m, Vec<T> default_v) {
+  Rebind<Ei, T> ti;
+  auto mi = conversion_load_store_detail::xconvert_mask(ti, t, m);
+  auto loaded = conversion_load_store_detail::loadu(
+      ti, p, mi, conversion_load_store_detail::zeros(ti));
+  return word::blend(default_v, m, word::convert(t, loaded));
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) == sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> convert_loadu(T t, const Ei* p, Mask<T> m) {
+  return word::convert_loadu(t, p, m, word::zeros(t));
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) < sizeof(Eo))
+VECOPS_VFUNC void promote_storeu(Ti ti, Eo* p, Vec<Ti> v) {
+  Rebind<Eo, Ti> to;
+  conversion_load_store_detail::storeu(to, p, word::promote(to, v));
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) < sizeof(Eo))
+VECOPS_VFUNC void promote_storeu(
+    Ti ti, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  Rebind<Eo, Ti> to;
+  auto mo = conversion_load_store_detail::xconvert_mask(to, ti, m);
+  conversion_load_store_detail::storeu(
+      to, p, mo, word::promote(to, v));
+}
+
+#if defined(CPU_CAPABILITY_AVX512)
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (IsIntV<TypeOf<Ti>> && IsIntV<Eo> && Ti::Bytes == 64 &&
+            sizeof(TypeOf<Ti>) > sizeof(Eo))
+VECOPS_VFUNC void demote_integer_storeu_avx512(
+    Ti ti, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  using Ei = TypeOf<Ti>;
+  auto bits = v.v;
+
+  if constexpr (std::is_unsigned_v<Ei>) {
+    constexpr Ei hi = static_cast<Ei>(std::numeric_limits<Eo>::max());
+    if constexpr (sizeof(Ei) == 2) {
+      bits = _mm512_min_epu16(bits, _mm512_set1_epi16(static_cast<int16_t>(hi)));
+    } else if constexpr (sizeof(Ei) == 4) {
+      bits = _mm512_min_epu32(bits, _mm512_set1_epi32(static_cast<int32_t>(hi)));
+    } else {
+      bits = _mm512_min_epu64(bits, _mm512_set1_epi64(static_cast<int64_t>(hi)));
+    }
+  } else if constexpr (std::is_unsigned_v<Eo>) {
+    constexpr Ei hi = static_cast<Ei>(std::numeric_limits<Eo>::max());
+    if constexpr (sizeof(Ei) == 2) {
+      bits = _mm512_max_epi16(bits, _mm512_setzero_si512());
+      bits = _mm512_min_epi16(bits, _mm512_set1_epi16(static_cast<int16_t>(hi)));
+    } else if constexpr (sizeof(Ei) == 4) {
+      bits = _mm512_max_epi32(bits, _mm512_setzero_si512());
+      bits = _mm512_min_epi32(bits, _mm512_set1_epi32(static_cast<int32_t>(hi)));
+    } else {
+      bits = _mm512_max_epi64(bits, _mm512_setzero_si512());
+      bits = _mm512_min_epi64(bits, _mm512_set1_epi64(static_cast<int64_t>(hi)));
+    }
+  }
+
+  if constexpr (sizeof(Ei) == 2) {
+    if constexpr (std::is_signed_v<Ei> && std::is_signed_v<Eo>) {
+      _mm512_mask_cvtsepi16_storeu_epi8(p, m.v, bits);
+    } else {
+      _mm512_mask_cvtepi16_storeu_epi8(p, m.v, bits);
+    }
+  } else if constexpr (sizeof(Ei) == 4 && sizeof(Eo) == 1) {
+    if constexpr (std::is_signed_v<Ei> && std::is_signed_v<Eo>) {
+      _mm512_mask_cvtsepi32_storeu_epi8(p, m.v, bits);
+    } else {
+      _mm512_mask_cvtepi32_storeu_epi8(p, m.v, bits);
+    }
+  } else if constexpr (sizeof(Ei) == 4) {
+    if constexpr (std::is_signed_v<Ei> && std::is_signed_v<Eo>) {
+      _mm512_mask_cvtsepi32_storeu_epi16(p, m.v, bits);
+    } else {
+      _mm512_mask_cvtepi32_storeu_epi16(p, m.v, bits);
+    }
+  } else if constexpr (sizeof(Eo) == 1) {
+    if constexpr (std::is_signed_v<Ei> && std::is_signed_v<Eo>) {
+      _mm512_mask_cvtsepi64_storeu_epi8(p, m.v, bits);
+    } else {
+      _mm512_mask_cvtepi64_storeu_epi8(p, m.v, bits);
+    }
+  } else if constexpr (sizeof(Eo) == 2) {
+    if constexpr (std::is_signed_v<Ei> && std::is_signed_v<Eo>) {
+      _mm512_mask_cvtsepi64_storeu_epi16(p, m.v, bits);
+    } else {
+      _mm512_mask_cvtepi64_storeu_epi16(p, m.v, bits);
+    }
+  } else {
+    if constexpr (std::is_signed_v<Ei> && std::is_signed_v<Eo>) {
+      _mm512_mask_cvtsepi64_storeu_epi32(p, m.v, bits);
+    } else {
+      _mm512_mask_cvtepi64_storeu_epi32(p, m.v, bits);
+    }
+  }
+}
+#endif
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) > sizeof(Eo))
+VECOPS_VFUNC void demote_storeu(Ti ti, Eo* p, Vec<Ti> v) {
+#if defined(CPU_CAPABILITY_AVX512)
+  if constexpr (IsIntV<TypeOf<Ti>> && IsIntV<Eo> &&
+                is_word_vec(ti) && Ti::Bytes == 64) {
+    demote_integer_storeu_avx512(ti, p, word::mfill(ti, true), v);
+  } else
+#endif
+  {
+    Rebind<Eo, Ti> to;
+    conversion_load_store_detail::storeu(to, p, word::demote(to, v));
+  }
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) > sizeof(Eo))
+VECOPS_VFUNC void demote_storeu(
+    Ti ti, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+#if defined(CPU_CAPABILITY_AVX512)
+  if constexpr (IsIntV<TypeOf<Ti>> && IsIntV<Eo> &&
+                is_word_vec(ti) && Ti::Bytes == 64) {
+    demote_integer_storeu_avx512(ti, p, m, v);
+  } else
+#endif
+  {
+    Rebind<Eo, Ti> to;
+    auto mo = conversion_load_store_detail::xconvert_mask(to, ti, m);
+    conversion_load_store_detail::storeu(
+        to, p, mo, word::demote(to, v));
+  }
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) == sizeof(Eo))
+VECOPS_VFUNC void convert_storeu(Ti ti, Eo* p, Vec<Ti> v) {
+  Rebind<Eo, Ti> to;
+  conversion_load_store_detail::storeu(to, p, word::convert(to, v));
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) == sizeof(Eo))
+VECOPS_VFUNC void convert_storeu(
+    Ti ti, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  Rebind<Eo, Ti> to;
+  auto mo = conversion_load_store_detail::xconvert_mask(to, ti, m);
+  conversion_load_store_detail::storeu(
+      to, p, mo, word::convert(to, v));
 }
 
 } // namespace word

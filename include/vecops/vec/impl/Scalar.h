@@ -760,6 +760,11 @@ auto loadu(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
   return v;
 }
 
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n) {
+  return word::loadu(t, p, n, word::zeros(t));
+}
+
 /**
  * @brief Aligned load of first n elements (scalar implementation).
  */
@@ -767,6 +772,13 @@ template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
   VECOPS_ASSERT(((nuint_t)(p) & (DEFAULT_ALIGNMENT - 1)) == 0, "Not aligned");
   return word::loadu(t, p, n, default_v);
+}
+
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n) {
+  VECOPS_ASSERT(((nuint_t)(p) & (DEFAULT_ALIGNMENT - 1)) == 0, "Not aligned");
+  return word::loadu(t, p, n);
 }
 
 /**
@@ -786,6 +798,11 @@ auto loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
   return v;
 }
 
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m) {
+  return word::loadu(t, p, m, word::zeros(t));
+}
+
 /**
  * @brief Aligned masked load (scalar implementation).
  */
@@ -793,6 +810,13 @@ template <TLV_DECL_TAG(T)>
 auto load(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
   VECOPS_ASSERT(((nuint_t)(p) & (DEFAULT_ALIGNMENT - 1)) == 0, "Not aligned");
   return word::loadu(t, p, m, default_v);
+}
+
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m) {
+  VECOPS_ASSERT(((nuint_t)(p) & (DEFAULT_ALIGNMENT - 1)) == 0, "Not aligned");
+  return word::loadu(t, p, m);
 }
 
 /**
@@ -1707,6 +1731,192 @@ VECOPS_VFUNC Vec<To> bitcast(To t, V v) {
   Vec<To> u;
   std::memcpy(u.data(), v.data(), std::min(n_out, n_in));
   return u;
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) < sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> promote_loadu(T t, const Ei* p) {
+  if constexpr (!is_word_vec(t)) {
+    constexpr Half<T> th{};
+    return word::concat(
+        t, word::promote_loadu(th, p),
+        word::promote_loadu(th, p + size(th)));
+  } else {
+  Vec<T> v;
+  for (nint_t i = 0; i < size(t); ++i) {
+    v[i] = vecops::convert<TypeOf<T>>(p[i]);
+  }
+  return v;
+  }
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) < sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> promote_loadu(
+    T t, const Ei* p, Mask<T> m, Vec<T> default_v) {
+  if constexpr (!is_word_vec(t)) {
+    constexpr Half<T> th{};
+    return word::concat(
+        t,
+        word::promote_loadu(
+            th, p, word::lower(t, m), word::lower(t, default_v)),
+        word::promote_loadu(
+            th, p + size(th), word::upper(t, m),
+            word::upper(t, default_v)));
+  } else {
+  Vec<T> v;
+  for (nint_t i = 0; i < size(t); ++i) {
+    v[i] = m[i] ? vecops::convert<TypeOf<T>>(p[i]) : default_v[i];
+  }
+  return v;
+  }
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) < sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> promote_loadu(T t, const Ei* p, Mask<T> m) {
+  if constexpr (!is_word_vec(t)) {
+    constexpr Half<T> th{};
+    return word::concat(
+        t, word::promote_loadu(th, p, word::lower(t, m)),
+        word::promote_loadu(
+            th, p + size(th), word::upper(t, m)));
+  } else {
+  Vec<T> v;
+  for (nint_t i = 0; i < size(t); ++i) {
+    v[i] = m[i] ? vecops::convert<TypeOf<T>>(p[i]) : TypeOf<T>{};
+  }
+  return v;
+  }
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) > sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> demote_loadu(T t, const Ei* p) {
+  Vec<T> v;
+  for (nint_t i = 0; i < size(t); ++i) {
+    v[i] = vecops::convert<TypeOf<T>>(p[i]);
+  }
+  return v;
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) > sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> demote_loadu(
+    T t, const Ei* p, Mask<T> m, Vec<T> default_v) {
+  Vec<T> v;
+  for (nint_t i = 0; i < size(t); ++i) {
+    v[i] = m[i] ? vecops::convert<TypeOf<T>>(p[i]) : default_v[i];
+  }
+  return v;
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) > sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> demote_loadu(T t, const Ei* p, Mask<T> m) {
+  Vec<T> v;
+  for (nint_t i = 0; i < size(t); ++i) {
+    v[i] = m[i] ? vecops::convert<TypeOf<T>>(p[i]) : TypeOf<T>{};
+  }
+  return v;
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) == sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> convert_loadu(T t, const Ei* p) {
+  Vec<T> v;
+  for (nint_t i = 0; i < size(t); ++i) {
+    v[i] = vecops::convert<TypeOf<T>>(p[i]);
+  }
+  return v;
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) == sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> convert_loadu(
+    T t, const Ei* p, Mask<T> m, Vec<T> default_v) {
+  Vec<T> v;
+  for (nint_t i = 0; i < size(t); ++i) {
+    v[i] = m[i] ? vecops::convert<TypeOf<T>>(p[i]) : default_v[i];
+  }
+  return v;
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) == sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> convert_loadu(T t, const Ei* p, Mask<T> m) {
+  Vec<T> v;
+  for (nint_t i = 0; i < size(t); ++i) {
+    v[i] = m[i] ? vecops::convert<TypeOf<T>>(p[i]) : TypeOf<T>{};
+  }
+  return v;
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) < sizeof(Eo))
+VECOPS_VFUNC void promote_storeu(Ti ti, Eo* p, Vec<Ti> v) {
+  for (nint_t i = 0; i < size(ti); ++i) {
+    p[i] = vecops::convert<Eo>(v[i]);
+  }
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) < sizeof(Eo))
+VECOPS_VFUNC void promote_storeu(
+    Ti ti, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  for (nint_t i = 0; i < size(ti); ++i) {
+    if (m[i]) p[i] = vecops::convert<Eo>(v[i]);
+  }
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) > sizeof(Eo))
+VECOPS_VFUNC void demote_storeu(Ti ti, Eo* p, Vec<Ti> v) {
+  if constexpr (!is_word_vec(ti)) {
+    constexpr Half<Ti> th{};
+    word::demote_storeu(th, p, word::lower(ti, v));
+    word::demote_storeu(th, p + size(th), word::upper(ti, v));
+    return;
+  } else {
+  for (nint_t i = 0; i < size(ti); ++i) {
+    p[i] = vecops::convert<Eo>(v[i]);
+  }
+  }
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) > sizeof(Eo))
+VECOPS_VFUNC void demote_storeu(
+    Ti ti, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  if constexpr (!is_word_vec(ti)) {
+    constexpr Half<Ti> th{};
+    word::demote_storeu(
+        th, p, word::lower(ti, m), word::lower(ti, v));
+    word::demote_storeu(
+        th, p + size(th), word::upper(ti, m), word::upper(ti, v));
+    return;
+  } else {
+  for (nint_t i = 0; i < size(ti); ++i) {
+    if (m[i]) p[i] = vecops::convert<Eo>(v[i]);
+  }
+  }
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) == sizeof(Eo))
+VECOPS_VFUNC void convert_storeu(Ti ti, Eo* p, Vec<Ti> v) {
+  for (nint_t i = 0; i < size(ti); ++i) {
+    p[i] = vecops::convert<Eo>(v[i]);
+  }
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) == sizeof(Eo))
+VECOPS_VFUNC void convert_storeu(
+    Ti ti, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  for (nint_t i = 0; i < size(ti); ++i) {
+    if (m[i]) p[i] = vecops::convert<Eo>(v[i]);
+  }
 }
 
 } // namespace word

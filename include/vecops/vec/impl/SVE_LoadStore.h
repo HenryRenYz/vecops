@@ -7,6 +7,7 @@
 
 #include <arm_sve.h>
 #include <cstring>
+#include <limits>
 
 #include "CoreTypes.h"
 #include "../VecBase.h"
@@ -52,29 +53,32 @@ VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p) {
 }
 
 /* ================================================================ */
-//                  masked loadu  (mask + default)                   //
+//                  masked loadu  (zeroing mask)                     //
 /* ================================================================ */
 template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m) {
   using E = TypeOf<T>;
-  Vec<T> loaded;
-  if constexpr (std::is_same_v<E, float32_t>)      loaded = svld1_f32(m, p);
-  else if constexpr (std::is_same_v<E, float64_t>) loaded = svld1_f64(m, p);
-  else if constexpr (std::is_same_v<E, float16_t>) loaded = svld1_f16(m, (const __fp16 *)p);
+  if constexpr (std::is_same_v<E, float32_t>)      return svld1_f32(m, p);
+  else if constexpr (std::is_same_v<E, float64_t>) return svld1_f64(m, p);
+  else if constexpr (std::is_same_v<E, float16_t>) return svld1_f16(m, (const __fp16 *)p);
 #if defined(__ARM_FEATURE_BF16)
-  else if constexpr (std::is_same_v<E, bfloat16_t>) loaded = svld1_bf16(m, (const __bf16 *)p);
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svld1_bf16(m, (const __bf16 *)p);
 #else
-  else if constexpr (std::is_same_v<E, bfloat16_t>) loaded = svreinterpret_bf16_u16(svld1_u16(m, (const uint16_t *)p));
+  else if constexpr (std::is_same_v<E, bfloat16_t>) return svreinterpret_bf16_u16(svld1_u16(m, (const uint16_t *)p));
 #endif
-  else if constexpr (std::is_same_v<E, uint8_t>)   loaded = svld1_u8(m, p);
-  else if constexpr (std::is_same_v<E, int8_t>)    loaded = svld1_s8(m, p);
-  else if constexpr (std::is_same_v<E, uint16_t>)  loaded = svld1_u16(m, p);
-  else if constexpr (std::is_same_v<E, int16_t>)   loaded = svld1_s16(m, p);
-  else if constexpr (std::is_same_v<E, uint32_t>)  loaded = svld1_u32(m, p);
-  else if constexpr (std::is_same_v<E, int32_t>)   loaded = svld1_s32(m, p);
-  else if constexpr (std::is_same_v<E, uint64_t>)  loaded = svld1_u64(m, p);
-  else loaded = svld1_s64(m, p);
-  return word::blend(default_v, m, loaded);
+  else if constexpr (std::is_same_v<E, uint8_t>)   return svld1_u8(m, p);
+  else if constexpr (std::is_same_v<E, int8_t>)    return svld1_s8(m, p);
+  else if constexpr (std::is_same_v<E, uint16_t>)  return svld1_u16(m, p);
+  else if constexpr (std::is_same_v<E, int16_t>)   return svld1_s16(m, p);
+  else if constexpr (std::is_same_v<E, uint32_t>)  return svld1_u32(m, p);
+  else if constexpr (std::is_same_v<E, int32_t>)   return svld1_s32(m, p);
+  else if constexpr (std::is_same_v<E, uint64_t>)  return svld1_u64(m, p);
+  else return svld1_s64(m, p);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
+  return word::blend(default_v, m, word::loadu(t, p, m));
 }
 
 /* ================================================================ */
@@ -83,6 +87,11 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) 
 template <TLV_DECL_TAG(T)>
 VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
   return word::loadu(t, p, m, default_v);
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, Mask<T> m) {
+  return word::loadu(t, p, m);
 }
 
 /* ================================================================ */
@@ -95,6 +104,12 @@ VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
   return word::loadu(t, p, m, default_v);
 }
 
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, nint_t n) {
+  VECOPS_ASSERT(0 <= n && n <= word_size(t), "");
+  return word::loadu(t, p, word::mwhilelt(t, 0, n));
+}
+
 /* ================================================================ */
 //              partial count load  (n elements)                     //
 /* ================================================================ */
@@ -103,6 +118,13 @@ VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n, Vec<T> default_v) {
   VECOPS_ASSERT(0 <= n && n <= word_size(t), "");
   auto m = word::mwhilelt(t, 0, n);
   return word::load(t, p, m, default_v);
+}
+
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> load(T t, const TypeOf<T>* p, nint_t n) {
+  VECOPS_ASSERT(0 <= n && n <= word_size(t), "");
+  return word::load(t, p, word::mwhilelt(t, 0, n));
 }
 
 /* ================================================================ */
@@ -411,6 +433,495 @@ VECOPS_VFUNC void scatter(T t, TypeOf<T>* p, Vec<Rebind<GatherScatterIndex<TypeO
   VECOPS_ASSERT(0 <= n && n <= size(t), "");
   auto m = word::mwhilelt(t, 0, n);
   word::scatter(t, p, i, m, v);
+}
+
+/* ================================================================ */
+//                 Fused conversion load & store                    //
+/* ================================================================ */
+
+namespace conversion_load_store_detail {
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti)>
+VECOPS_VFUNC Mask<To> xconvert_mask(To to, Ti ti, Mask<Ti> m) {
+  using ToMask = Rebind<SignedIntegerOfSize<sizeof(TypeOf<To>)>, To>;
+  using TiMask = Rebind<SignedIntegerOfSize<sizeof(TypeOf<Ti>)>, Ti>;
+  constexpr ToMask to_mask{};
+  constexpr TiMask ti_mask{};
+  if constexpr (sizeof(TypeOf<Ti>) < sizeof(TypeOf<To>)) {
+    return word::promote(to_mask, ti_mask, m);
+  } else if constexpr (sizeof(TypeOf<Ti>) > sizeof(TypeOf<To>)) {
+    return word::demote(to_mask, ti_mask, m);
+  } else {
+    return word::convert(to_mask, ti_mask, m);
+  }
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> zeros(T t) {
+  if constexpr (is_word_vec(t)) return word::zeros(t);
+  return vecops::vec::details::vmap(
+      t, [](auto tt) VECOPS_INLINE_LAMBDA { return word::zeros(tt); });
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p) {
+  if constexpr (is_word_vec(t)) return word::loadu(t, p);
+  return vecops::vec::details::vmap(
+      t,
+      [](auto tt, const TypeOf<T>* pp) VECOPS_INLINE_LAMBDA {
+        return word::loadu(tt, pp);
+      },
+      vecops::vec::details::StepPointer(t, p));
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> loadu(
+    T t, const TypeOf<T>* p, Mask<T> m, Vec<T> default_v) {
+  if constexpr (is_word_vec(t)) return word::loadu(t, p, m, default_v);
+  return vecops::vec::details::vmap(
+      t,
+      [](auto tt, const TypeOf<T>* pp, auto mm,
+         auto dd) VECOPS_INLINE_LAMBDA {
+        return word::loadu(tt, pp, mm, dd);
+      },
+      vecops::vec::details::StepPointer(t, p),
+      vecops::vec::details::ShardMask(t, m),
+      vecops::vec::details::ShardVec(t, default_v));
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC Vec<T> loadu(T t, const TypeOf<T>* p, Mask<T> m) {
+  if constexpr (is_word_vec(t)) return word::loadu(t, p, m);
+  return vecops::vec::details::vmap(
+      t,
+      [](auto tt, const TypeOf<T>* pp, auto mm) VECOPS_INLINE_LAMBDA {
+        return word::loadu(tt, pp, mm);
+      },
+      vecops::vec::details::StepPointer(t, p),
+      vecops::vec::details::ShardMask(t, m));
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, Vec<T> v) {
+  if constexpr (is_word_vec(t)) {
+    word::storeu(t, p, v);
+    return;
+  }
+  vecops::vec::details::vmap(
+      t,
+      [](auto tt, TypeOf<T>* pp, auto vv) VECOPS_INLINE_LAMBDA {
+        word::storeu(tt, pp, vv);
+      },
+      vecops::vec::details::StepPointer(t, p),
+      vecops::vec::details::ShardVec(t, v));
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC void storeu(T t, TypeOf<T>* p, Mask<T> m, Vec<T> v) {
+  if constexpr (is_word_vec(t)) {
+    word::storeu(t, p, m, v);
+    return;
+  }
+  vecops::vec::details::vmap(
+      t,
+      [](auto tt, TypeOf<T>* pp, auto mm,
+         auto vv) VECOPS_INLINE_LAMBDA {
+        word::storeu(tt, pp, mm, vv);
+      },
+      vecops::vec::details::StepPointer(t, p),
+      vecops::vec::details::ShardMask(t, m),
+      vecops::vec::details::ShardVec(t, v));
+}
+
+} // namespace conversion_load_store_detail
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) < sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> promote_loadu(T t, const Ei* p) {
+  if constexpr (!is_word_vec(t)) {
+    constexpr Half<T> th{};
+    return word::concat(
+        t, word::promote_loadu(th, p),
+        word::promote_loadu(th, p + size(th)));
+  } else {
+
+  using Eo = TypeOf<T>;
+  auto pg = word::make_mask(t);
+
+  if constexpr (std::is_same_v<Ei, bfloat16_t> && std::is_same_v<Eo, float32_t>) {
+    auto bits = svld1uh_u32(pg, reinterpret_cast<const uint16_t*>(p));
+    return svreinterpret_f32_u32(svlsl_n_u32_x(pg, bits, 16));
+  } else if constexpr (IsIntV<Ei> && IsIntV<Eo>) {
+    if constexpr (std::is_signed_v<Ei>) {
+      if constexpr (sizeof(Ei) == 1 && sizeof(Eo) == 2) {
+        auto v = svld1sb_s16(pg, reinterpret_cast<const int8_t*>(p));
+        if constexpr (std::is_signed_v<Eo>) return v;
+        else return svreinterpret_u16_s16(v);
+      } else if constexpr (sizeof(Ei) == 1 && sizeof(Eo) == 4) {
+        auto v = svld1sb_s32(pg, reinterpret_cast<const int8_t*>(p));
+        if constexpr (std::is_signed_v<Eo>) return v;
+        else return svreinterpret_u32_s32(v);
+      } else if constexpr (sizeof(Ei) == 1 && sizeof(Eo) == 8) {
+        auto v = svld1sb_s64(pg, reinterpret_cast<const int8_t*>(p));
+        if constexpr (std::is_signed_v<Eo>) return v;
+        else return svreinterpret_u64_s64(v);
+      } else if constexpr (sizeof(Ei) == 2 && sizeof(Eo) == 4) {
+        auto v = svld1sh_s32(pg, reinterpret_cast<const int16_t*>(p));
+        if constexpr (std::is_signed_v<Eo>) return v;
+        else return svreinterpret_u32_s32(v);
+      } else if constexpr (sizeof(Ei) == 2 && sizeof(Eo) == 8) {
+        auto v = svld1sh_s64(pg, reinterpret_cast<const int16_t*>(p));
+        if constexpr (std::is_signed_v<Eo>) return v;
+        else return svreinterpret_u64_s64(v);
+      } else {
+        auto v = svld1sw_s64(pg, reinterpret_cast<const int32_t*>(p));
+        if constexpr (std::is_signed_v<Eo>) return v;
+        else return svreinterpret_u64_s64(v);
+      }
+    } else {
+      if constexpr (sizeof(Ei) == 1 && sizeof(Eo) == 2) {
+        auto v = svld1ub_u16(pg, reinterpret_cast<const uint8_t*>(p));
+        if constexpr (std::is_unsigned_v<Eo>) return v;
+        else return svreinterpret_s16_u16(v);
+      } else if constexpr (sizeof(Ei) == 1 && sizeof(Eo) == 4) {
+        auto v = svld1ub_u32(pg, reinterpret_cast<const uint8_t*>(p));
+        if constexpr (std::is_unsigned_v<Eo>) return v;
+        else return svreinterpret_s32_u32(v);
+      } else if constexpr (sizeof(Ei) == 1 && sizeof(Eo) == 8) {
+        auto v = svld1ub_u64(pg, reinterpret_cast<const uint8_t*>(p));
+        if constexpr (std::is_unsigned_v<Eo>) return v;
+        else return svreinterpret_s64_u64(v);
+      } else if constexpr (sizeof(Ei) == 2 && sizeof(Eo) == 4) {
+        auto v = svld1uh_u32(pg, reinterpret_cast<const uint16_t*>(p));
+        if constexpr (std::is_unsigned_v<Eo>) return v;
+        else return svreinterpret_s32_u32(v);
+      } else if constexpr (sizeof(Ei) == 2 && sizeof(Eo) == 8) {
+        auto v = svld1uh_u64(pg, reinterpret_cast<const uint16_t*>(p));
+        if constexpr (std::is_unsigned_v<Eo>) return v;
+        else return svreinterpret_s64_u64(v);
+      } else {
+        auto v = svld1uw_u64(pg, reinterpret_cast<const uint32_t*>(p));
+        if constexpr (std::is_unsigned_v<Eo>) return v;
+        else return svreinterpret_s64_u64(v);
+      }
+    }
+  } else {
+    Rebind<Ei, T> ti;
+    return word::promote(t, word::loadu(ti, p));
+  }
+  }
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) < sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> promote_loadu(
+    T t, const Ei* p, Mask<T> m) {
+  if constexpr (!is_word_vec(t)) {
+    constexpr Half<T> th{};
+    return word::concat(
+        t, word::promote_loadu(th, p, word::lower(t, m)),
+        word::promote_loadu(
+            th, p + size(th), word::upper(t, m)));
+  } else {
+
+  using Eo = TypeOf<T>;
+  if constexpr (std::is_same_v<Ei, bfloat16_t> && std::is_same_v<Eo, float32_t>) {
+    auto bits = svld1uh_u32(m, reinterpret_cast<const uint16_t*>(p));
+    // svld1uh zeroes every inactive lane. Shift under ptrue so those zeroes
+    // stay defined without requiring an additional predicated merge.
+    return svreinterpret_f32_u32(
+        svlsl_n_u32_x(svptrue_b32(), bits, 16));
+  } else if constexpr (IsIntV<Ei> && IsIntV<Eo>) {
+    Vec<T> loaded;
+    if constexpr (std::is_signed_v<Ei>) {
+      if constexpr (sizeof(Ei) == 1 && sizeof(Eo) == 2) {
+        auto v = svld1sb_s16(m, reinterpret_cast<const int8_t*>(p));
+        if constexpr (std::is_signed_v<Eo>) loaded = v;
+        else loaded = svreinterpret_u16_s16(v);
+      } else if constexpr (sizeof(Ei) == 1 && sizeof(Eo) == 4) {
+        auto v = svld1sb_s32(m, reinterpret_cast<const int8_t*>(p));
+        if constexpr (std::is_signed_v<Eo>) loaded = v;
+        else loaded = svreinterpret_u32_s32(v);
+      } else if constexpr (sizeof(Ei) == 1 && sizeof(Eo) == 8) {
+        auto v = svld1sb_s64(m, reinterpret_cast<const int8_t*>(p));
+        if constexpr (std::is_signed_v<Eo>) loaded = v;
+        else loaded = svreinterpret_u64_s64(v);
+      } else if constexpr (sizeof(Ei) == 2 && sizeof(Eo) == 4) {
+        auto v = svld1sh_s32(m, reinterpret_cast<const int16_t*>(p));
+        if constexpr (std::is_signed_v<Eo>) loaded = v;
+        else loaded = svreinterpret_u32_s32(v);
+      } else if constexpr (sizeof(Ei) == 2 && sizeof(Eo) == 8) {
+        auto v = svld1sh_s64(m, reinterpret_cast<const int16_t*>(p));
+        if constexpr (std::is_signed_v<Eo>) loaded = v;
+        else loaded = svreinterpret_u64_s64(v);
+      } else {
+        auto v = svld1sw_s64(m, reinterpret_cast<const int32_t*>(p));
+        if constexpr (std::is_signed_v<Eo>) loaded = v;
+        else loaded = svreinterpret_u64_s64(v);
+      }
+    } else {
+      if constexpr (sizeof(Ei) == 1 && sizeof(Eo) == 2) {
+        auto v = svld1ub_u16(m, reinterpret_cast<const uint8_t*>(p));
+        if constexpr (std::is_unsigned_v<Eo>) loaded = v;
+        else loaded = svreinterpret_s16_u16(v);
+      } else if constexpr (sizeof(Ei) == 1 && sizeof(Eo) == 4) {
+        auto v = svld1ub_u32(m, reinterpret_cast<const uint8_t*>(p));
+        if constexpr (std::is_unsigned_v<Eo>) loaded = v;
+        else loaded = svreinterpret_s32_u32(v);
+      } else if constexpr (sizeof(Ei) == 1 && sizeof(Eo) == 8) {
+        auto v = svld1ub_u64(m, reinterpret_cast<const uint8_t*>(p));
+        if constexpr (std::is_unsigned_v<Eo>) loaded = v;
+        else loaded = svreinterpret_s64_u64(v);
+      } else if constexpr (sizeof(Ei) == 2 && sizeof(Eo) == 4) {
+        auto v = svld1uh_u32(m, reinterpret_cast<const uint16_t*>(p));
+        if constexpr (std::is_unsigned_v<Eo>) loaded = v;
+        else loaded = svreinterpret_s32_u32(v);
+      } else if constexpr (sizeof(Ei) == 2 && sizeof(Eo) == 8) {
+        auto v = svld1uh_u64(m, reinterpret_cast<const uint16_t*>(p));
+        if constexpr (std::is_unsigned_v<Eo>) loaded = v;
+        else loaded = svreinterpret_s64_u64(v);
+      } else {
+        auto v = svld1uw_u64(m, reinterpret_cast<const uint32_t*>(p));
+        if constexpr (std::is_unsigned_v<Eo>) loaded = v;
+        else loaded = svreinterpret_s64_u64(v);
+      }
+    }
+    return loaded;
+  } else {
+    Rebind<Ei, T> ti;
+    auto mi = conversion_load_store_detail::xconvert_mask(ti, t, m);
+    auto loaded = conversion_load_store_detail::loadu(ti, p, mi);
+    return word::promote(t, loaded);
+  }
+  }
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) < sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> promote_loadu(
+    T t, const Ei* p, Mask<T> m, Vec<T> default_v) {
+  if constexpr (!is_word_vec(t)) {
+    constexpr Half<T> th{};
+    return word::concat(
+        t,
+        word::promote_loadu(
+            th, p, word::lower(t, m), word::lower(t, default_v)),
+        word::promote_loadu(
+            th, p + size(th), word::upper(t, m),
+            word::upper(t, default_v)));
+  } else {
+    return word::blend(default_v, m, word::promote_loadu(t, p, m));
+  }
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) > sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> demote_loadu(T t, const Ei* p) {
+  Rebind<Ei, T> ti;
+  return word::demote(
+      t, conversion_load_store_detail::loadu(ti, p));
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) > sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> demote_loadu(
+    T t, const Ei* p, Mask<T> m, Vec<T> default_v) {
+  Rebind<Ei, T> ti;
+  auto mi = conversion_load_store_detail::xconvert_mask(ti, t, m);
+  auto loaded = conversion_load_store_detail::loadu(
+      ti, p, mi, conversion_load_store_detail::zeros(ti));
+  return word::blend(default_v, m, word::demote(t, loaded));
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) > sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> demote_loadu(T t, const Ei* p, Mask<T> m) {
+  Rebind<Ei, T> ti;
+  auto mi = conversion_load_store_detail::xconvert_mask(ti, t, m);
+  return word::demote(
+      t, conversion_load_store_detail::loadu(ti, p, mi));
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) == sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> convert_loadu(T t, const Ei* p) {
+  Rebind<Ei, T> ti;
+  return word::convert(
+      t, conversion_load_store_detail::loadu(ti, p));
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) == sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> convert_loadu(
+    T t, const Ei* p, Mask<T> m, Vec<T> default_v) {
+  Rebind<Ei, T> ti;
+  auto mi = conversion_load_store_detail::xconvert_mask(ti, t, m);
+  auto loaded = conversion_load_store_detail::loadu(
+      ti, p, mi, conversion_load_store_detail::zeros(ti));
+  return word::blend(default_v, m, word::convert(t, loaded));
+}
+
+template <TLV_DECL_TAG(T), typename Ei>
+  requires (is_element_type<Ei> && sizeof(Ei) == sizeof(TypeOf<T>))
+VECOPS_VFUNC Vec<T> convert_loadu(T t, const Ei* p, Mask<T> m) {
+  Rebind<Ei, T> ti;
+  auto mi = conversion_load_store_detail::xconvert_mask(ti, t, m);
+  return word::convert(
+      t, conversion_load_store_detail::loadu(ti, p, mi));
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) < sizeof(Eo))
+VECOPS_VFUNC void promote_storeu(Ti ti, Eo* p, Vec<Ti> v) {
+  Rebind<Eo, Ti> to;
+  conversion_load_store_detail::storeu(to, p, word::promote(to, v));
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) < sizeof(Eo))
+VECOPS_VFUNC void promote_storeu(
+    Ti ti, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  Rebind<Eo, Ti> to;
+  auto mo = conversion_load_store_detail::xconvert_mask(to, ti, m);
+  conversion_load_store_detail::storeu(
+      to, p, mo, word::promote(to, v));
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (IsIntV<TypeOf<Ti>> && IsIntV<Eo> &&
+            sizeof(TypeOf<Ti>) > sizeof(Eo))
+VECOPS_VFUNC void demote_integer_storeu_sve(
+    Ti ti, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  using Ei = TypeOf<Ti>;
+
+  if constexpr (std::is_signed_v<Ei>) {
+    constexpr Ei lo = std::is_signed_v<Eo>
+        ? static_cast<Ei>(std::numeric_limits<Eo>::lowest()) : Ei{0};
+    constexpr Ei hi = static_cast<Ei>(std::numeric_limits<Eo>::max());
+    if constexpr (sizeof(Ei) == 2) {
+      auto clamped = svmin_n_s16_x(m, svmax_n_s16_x(m, v, lo), hi);
+      svst1b_s16(m, reinterpret_cast<int8_t*>(p), clamped);
+    } else if constexpr (sizeof(Ei) == 4) {
+      auto clamped = svmin_n_s32_x(m, svmax_n_s32_x(m, v, lo), hi);
+      if constexpr (sizeof(Eo) == 1) {
+        svst1b_s32(m, reinterpret_cast<int8_t*>(p), clamped);
+      } else {
+        svst1h_s32(m, reinterpret_cast<int16_t*>(p), clamped);
+      }
+    } else {
+      auto clamped = svmin_n_s64_x(m, svmax_n_s64_x(m, v, lo), hi);
+      if constexpr (sizeof(Eo) == 1) {
+        svst1b_s64(m, reinterpret_cast<int8_t*>(p), clamped);
+      } else if constexpr (sizeof(Eo) == 2) {
+        svst1h_s64(m, reinterpret_cast<int16_t*>(p), clamped);
+      } else {
+        svst1w_s64(m, reinterpret_cast<int32_t*>(p), clamped);
+      }
+    }
+  } else {
+    constexpr Ei hi = static_cast<Ei>(std::numeric_limits<Eo>::max());
+    if constexpr (sizeof(Ei) == 2) {
+      auto clamped = svmin_n_u16_x(m, v, hi);
+      svst1b_u16(m, reinterpret_cast<uint8_t*>(p), clamped);
+    } else if constexpr (sizeof(Ei) == 4) {
+      auto clamped = svmin_n_u32_x(m, v, hi);
+      if constexpr (sizeof(Eo) == 1) {
+        svst1b_u32(m, reinterpret_cast<uint8_t*>(p), clamped);
+      } else {
+        svst1h_u32(m, reinterpret_cast<uint16_t*>(p), clamped);
+      }
+    } else {
+      auto clamped = svmin_n_u64_x(m, v, hi);
+      if constexpr (sizeof(Eo) == 1) {
+        svst1b_u64(m, reinterpret_cast<uint8_t*>(p), clamped);
+      } else if constexpr (sizeof(Eo) == 2) {
+        svst1h_u64(m, reinterpret_cast<uint16_t*>(p), clamped);
+      } else {
+        svst1w_u64(m, reinterpret_cast<uint32_t*>(p), clamped);
+      }
+    }
+  }
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) > sizeof(Eo))
+VECOPS_VFUNC void demote_storeu(Ti ti, Eo* p, Vec<Ti> v) {
+  using Ei = TypeOf<Ti>;
+#if defined(__ARM_FEATURE_SVE_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
+  if constexpr (std::is_same_v<Ei, float32_t> && std::is_same_v<Eo, bfloat16_t>) {
+    if constexpr (is_word_vec(ti)) {
+      auto pg = word::make_mask(ti);
+      auto bf16 = svcvt_bf16_f32_x(pg, v);
+      svst1h_u32(
+          pg, reinterpret_cast<uint16_t*>(p),
+          svreinterpret_u32_bf16(bf16));
+    } else {
+      constexpr Rebind<Eo, Ti> to{};
+      static_assert(num_words(ti) == 2 && is_word_vec(to));
+      auto packed = details::f32x2_to_bf16(
+          word::lower(ti, v), word::upper(ti, v));
+      svst1_bf16(
+          word::make_mask(to), reinterpret_cast<__bf16*>(p), packed);
+    }
+  } else
+#endif
+  if constexpr (IsIntV<Ei> && IsIntV<Eo> && is_word_vec(ti)) {
+    demote_integer_storeu_sve(ti, p, word::make_mask(ti), v);
+  } else
+  {
+    Rebind<Eo, Ti> to;
+    conversion_load_store_detail::storeu(to, p, word::demote(to, v));
+  }
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) > sizeof(Eo))
+VECOPS_VFUNC void demote_storeu(
+    Ti ti, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  using Ei = TypeOf<Ti>;
+#if defined(__ARM_FEATURE_SVE_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
+  if constexpr (std::is_same_v<Ei, float32_t> && std::is_same_v<Eo, bfloat16_t>) {
+    if constexpr (is_word_vec(ti)) {
+      auto bf16 = svcvt_bf16_f32_x(m, v);
+      svst1h_u32(
+          m, reinterpret_cast<uint16_t*>(p),
+          svreinterpret_u32_bf16(bf16));
+    } else {
+      constexpr Rebind<Eo, Ti> to{};
+      static_assert(num_words(ti) == 2 && is_word_vec(to));
+      auto packed = details::f32x2_to_bf16(
+          word::lower(ti, v), word::upper(ti, v));
+      auto mo = conversion_load_store_detail::xconvert_mask(to, ti, m);
+      svst1_bf16(mo, reinterpret_cast<__bf16*>(p), packed);
+    }
+  } else
+#endif
+  if constexpr (IsIntV<Ei> && IsIntV<Eo> && is_word_vec(ti)) {
+    demote_integer_storeu_sve(ti, p, m, v);
+  } else
+  {
+    Rebind<Eo, Ti> to;
+    auto mo = conversion_load_store_detail::xconvert_mask(to, ti, m);
+    conversion_load_store_detail::storeu(
+        to, p, mo, word::demote(to, v));
+  }
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) == sizeof(Eo))
+VECOPS_VFUNC void convert_storeu(Ti ti, Eo* p, Vec<Ti> v) {
+  Rebind<Eo, Ti> to;
+  conversion_load_store_detail::storeu(to, p, word::convert(to, v));
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+  requires (is_element_type<Eo> && sizeof(TypeOf<Ti>) == sizeof(Eo))
+VECOPS_VFUNC void convert_storeu(
+    Ti ti, Eo* p, Mask<Ti> m, Vec<Ti> v) {
+  Rebind<Eo, Ti> to;
+  auto mo = conversion_load_store_detail::xconvert_mask(to, ti, m);
+  conversion_load_store_detail::storeu(
+      to, p, mo, word::convert(to, v));
 }
 
 }  // namespace word

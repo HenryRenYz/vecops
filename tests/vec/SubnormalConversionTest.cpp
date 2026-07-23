@@ -68,6 +68,9 @@ void check_f32_to_bf16() {
   Rebind<float32_t, To> from;
   const nint_t input_lanes = size(from);
   std::vector<float32_t> input(static_cast<size_t>(input_lanes));
+  std::vector<vecops::bfloat16_t> fused_output(
+      static_cast<size_t>(input_lanes + 2),
+      vecops::bfloat16_t::from_bits(0x3f80u));
   const auto values = demote_inputs();
 
   for (size_t pos = 0; pos < values.size(); pos += static_cast<size_t>(input_lanes)) {
@@ -75,26 +78,37 @@ void check_f32_to_bf16() {
       input[static_cast<size_t>(i)] =
           f32_from_bits(values[(pos + static_cast<size_t>(i)) % values.size()]);
     }
-    const auto output = demote(to, loadu(from, input.data()));
+    const auto input_v = loadu(from, input.data());
+    const auto output = demote(to, input_v);
+    demote_storeu(from, fused_output.data() + 1, input_v);
     const size_t count = std::min(static_cast<size_t>(input_lanes), values.size() - pos);
     for (size_t i = 0; i < count; ++i) {
       const uint32_t input_bits = f32_bits(input[i]);
       const auto output_lane = get(to, output, static_cast<nint_t>(i));
       const uint16_t actual = output_lane.to_bits();
+      const uint16_t fused_actual = fused_output[i + 1].to_bits();
       if ((input_bits & 0x7fffffffu) > 0x7f800000u) {
         EXPECT_TRUE(std::isnan(static_cast<float>(output_lane)));
+        EXPECT_TRUE(std::isnan(static_cast<float>(fused_output[i + 1])));
         continue;
       }
       const uint16_t expected = bf16_rne_bits(input_bits);
 #ifdef VECOPS_PRESERVE_SUBNORMALS
       EXPECT_EQ(actual, expected) << "input_bits=0x" << std::hex << input_bits;
+      EXPECT_EQ(fused_actual, expected)
+          << "fused input_bits=0x" << std::hex << input_bits;
 #else
       if (is_f32_subnormal(input_bits)) {
         EXPECT_TRUE(actual == expected || (actual & 0x7fffu) == 0)
             << "input_bits=0x" << std::hex << input_bits
             << " expected=0x" << expected << " actual=0x" << actual;
+        EXPECT_TRUE(fused_actual == expected || (fused_actual & 0x7fffu) == 0)
+            << "fused input_bits=0x" << std::hex << input_bits
+            << " expected=0x" << expected << " actual=0x" << fused_actual;
       } else {
         EXPECT_EQ(actual, expected) << "input_bits=0x" << std::hex << input_bits;
+        EXPECT_EQ(fused_actual, expected)
+            << "fused input_bits=0x" << std::hex << input_bits;
       }
 #endif
     }
@@ -116,13 +130,18 @@ void check_bf16_to_f32() {
           vecops::bfloat16_t::from_bits(static_cast<uint16_t>(code));
     }
     const auto output = promote(to, loadu(from, input.data()));
+    const auto fused_output = promote_loadu(to, input.data());
     const uint32_t count = std::min(
         static_cast<uint32_t>(output_lanes), 0x10000u - base);
     for (uint32_t i = 0; i < count; ++i) {
       const uint32_t expected = (base + i) << 16;
       const uint32_t actual =
           f32_bits(get(to, output, static_cast<nint_t>(i)));
+      const uint32_t fused_actual =
+          f32_bits(get(to, fused_output, static_cast<nint_t>(i)));
       EXPECT_EQ(actual, expected) << "bf16_bits=0x" << std::hex << base + i;
+      EXPECT_EQ(fused_actual, expected)
+          << "fused bf16_bits=0x" << std::hex << base + i;
     }
     if (base + static_cast<uint32_t>(output_lanes) >= 0x10000u) break;
   }

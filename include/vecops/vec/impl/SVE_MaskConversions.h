@@ -85,13 +85,19 @@ template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) * 2 == sizeof(TypeOf<Ti>)),
           TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 1)>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
+  svbool_t packed;
   if constexpr (sizeof(TypeOf<Ti>) == 2) {
-    return svuzp1_b8(mi, mi);
+    packed = svuzp1_b8(mi, mi);
   } else if constexpr (sizeof(TypeOf<Ti>) == 4) {
-    return svuzp1_b16(mi, mi);
+    packed = svuzp1_b16(mi, mi);
   } else { // sizeof == 8
-    return svuzp1_b32(mi, mi);
+    packed = svuzp1_b32(mi, mi);
   }
+  // svuzp1 duplicates the packed predicate into the otherwise-unused upper
+  // half. Clear it so a following narrower store cannot touch lanes beyond
+  // the logical vector extent.
+  auto valid = word::make_mask(to);
+  return svand_b_z(svptrue_b8(), packed, valid);
 }
 
 /* =================================================================== */
@@ -126,8 +132,34 @@ VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
 /* =================================================================== */
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(sizeof(TypeOf<To>) == 2 * sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) == 2 && num_words(Ti{}) == 1)>
+VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
+  auto lo = svunpklo_b(mi);
+  auto hi = svunpkhi_b(mi);
+  return word::concat(to, lo, hi);
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
+          TL_IF(sizeof(TypeOf<To>) * 2 == sizeof(TypeOf<Ti>)),
+          TL_IF(num_words(To{}) == 1 && num_words(Ti{}) == 2)>
+VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
+  auto lo = word::lower(ti, mi);
+  auto hi = word::upper(ti, mi);
+  if constexpr (sizeof(TypeOf<Ti>) == 2) {
+    return svuzp1_b8(lo, hi);
+  } else if constexpr (sizeof(TypeOf<Ti>) == 4) {
+    return svuzp1_b16(lo, hi);
+  } else {
+    return svuzp1_b32(lo, hi);
+  }
+}
+
+template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) > sizeof(TypeOf<Ti>)),
-          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1)>
+          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1),
+          TL_IF(!(sizeof(TypeOf<To>) == 2 * sizeof(TypeOf<Ti>) &&
+                  num_words(To{}) == 2 && num_words(Ti{}) == 1))>
 VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
   Half<To> t_h; Half<Ti> t_i_h;
   auto lo = word::promote(t_h, t_i_h, word::lower(ti, mi));
@@ -137,7 +169,9 @@ VECOPS_VFUNC Mask<To> promote(To to, Ti ti, Mask<Ti> mi) {
 
 template <TLV_DECL_TAG(To), TLV_DECL_TAG(Ti),
           TL_IF(sizeof(TypeOf<To>) < sizeof(TypeOf<Ti>)),
-          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1)>
+          TL_IF(num_words(To{}) > 1 || num_words(Ti{}) > 1),
+          TL_IF(!(sizeof(TypeOf<To>) * 2 == sizeof(TypeOf<Ti>) &&
+                  num_words(To{}) == 1 && num_words(Ti{}) == 2))>
 VECOPS_VFUNC Mask<To> demote(To to, Ti ti, Mask<Ti> mi) {
   Half<To> t_h; Half<Ti> t_i_h;
   auto lo = word::demote(t_h, t_i_h, word::lower(ti, mi));

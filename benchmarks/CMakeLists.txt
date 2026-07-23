@@ -92,6 +92,11 @@ add_multiarch_benchmark(SoftmaxBench
     ARCH Native Scalar
 )
 
+add_multiarch_benchmark(ConversionLoadStoreBench
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ConversionLoadStoreBench.cpp
+    ARCH Native
+)
+
 set(INSTRUCTION_BENCH_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/inst/InstructionBench.cpp
 )

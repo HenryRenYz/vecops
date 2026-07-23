@@ -176,7 +176,7 @@ add_multiarch_executable(SoftmaxTest
     ARCH Native Scalar
 )
 
-set(VECOPS_VEC_TESTS BasicTest LoadStoreTest ArithTest ConversionTest InterleavedConversionTest ShuffleTest MaskTest MaskConversionsTest MathTest SubnormalConversionTest)
+set(VECOPS_VEC_TESTS BasicTest LoadStoreTest ArithTest ConversionTest ConversionLoadStoreTest InterleavedConversionTest ShuffleTest MaskTest MaskConversionsTest MathTest SubnormalConversionTest)
 foreach(TEST ${VECOPS_VEC_TESTS})
     add_multiarch_executable(Vec${TEST}
         FILES
