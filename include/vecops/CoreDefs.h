@@ -5,6 +5,10 @@
 #ifndef VECOPS_COREDEFS_H
 #define VECOPS_COREDEFS_H
 
+#if !defined(__cplusplus) || __cplusplus < 202002L
+#error "VecOps requires C++20 or newer"
+#endif
+
 /**
  * Define VECOPS_PRESERVE_SUBNORMALS consistently for every translation unit
  * to make strict vector operations preserve representable subnormal results.

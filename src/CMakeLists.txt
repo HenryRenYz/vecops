@@ -4,6 +4,7 @@ file(GLOB_RECURSE _VECOPS_SRCS
 )
 
 add_library(vecops ${_VECOPS_SRCS})
+target_compile_features(vecops PUBLIC cxx_std_20)
 target_include_directories(vecops
     PUBLIC "${CMAKE_SOURCE_DIR}/include"
     PUBLIC "${CMAKE_SOURCE_DIR}/include/vecops"

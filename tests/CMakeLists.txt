@@ -40,6 +40,65 @@ if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND EXISTS "/proc/cpuinfo")
     unset(_FEAT_LINE)
 endif()
 
+# NativeFixedSVE uses the native ISA feature set while making SVE types sized.
+# An explicit cache value is useful for testing a smaller supported VL. When it
+# is omitted, ask Linux for the largest VL supported by the current machine;
+# the probe runs in a child process and does not change the configure process.
+if(VECOPS_ARCH_FAMILY STREQUAL "ARM")
+    set(VECOPS_NATIVE_FIXED_SVE_BITS "${VECOPS_FIXED_SVE_BITS}")
+    if(NOT VECOPS_NATIVE_FIXED_SVE_BITS AND NOT CMAKE_CROSSCOMPILING)
+        set(_SVE_VL_PROBE "${CMAKE_BINARY_DIR}/CMakeFiles/vecops_sve_vl_probe.c")
+        file(WRITE "${_SVE_VL_PROBE}" [=[
+#include <stdio.h>
+#include <sys/prctl.h>
+
+#ifndef PR_SVE_SET_VL
+#define PR_SVE_SET_VL 50
+#endif
+#ifndef PR_SVE_VL_LEN_MASK
+#define PR_SVE_VL_LEN_MASK 0xffff
+#endif
+
+int main(void) {
+  const int result = prctl(PR_SVE_SET_VL, 256UL, 0UL, 0UL, 0UL);
+  if (result < 0) return 1;
+  printf("%d", (result & PR_SVE_VL_LEN_MASK) * 8);
+  return 0;
+}
+]=])
+        try_run(
+            _SVE_VL_RUN_RESULT
+            _SVE_VL_COMPILE_RESULT
+            "${CMAKE_BINARY_DIR}/CMakeFiles/vecops_sve_vl_probe"
+            "${_SVE_VL_PROBE}"
+            RUN_OUTPUT_VARIABLE _SVE_VL_OUTPUT
+        )
+        if(_SVE_VL_COMPILE_RESULT AND _SVE_VL_RUN_RESULT EQUAL 0)
+            string(STRIP "${_SVE_VL_OUTPUT}" VECOPS_NATIVE_FIXED_SVE_BITS)
+            message(STATUS
+                "Detected maximum native SVE width: ${VECOPS_NATIVE_FIXED_SVE_BITS} bits")
+        else()
+            message(WARNING
+                "Could not detect the maximum native SVE width; "
+                "NativeFixedSVE tests will be skipped. Set VECOPS_FIXED_SVE_BITS explicitly to enable them.")
+        endif()
+    endif()
+
+    if(VECOPS_NATIVE_FIXED_SVE_BITS)
+        if(NOT VECOPS_NATIVE_FIXED_SVE_BITS MATCHES "^[0-9]+$")
+            message(FATAL_ERROR "VECOPS_FIXED_SVE_BITS must be an integer number of bits")
+        endif()
+        math(EXPR _SVE_VL_REMAINDER "${VECOPS_NATIVE_FIXED_SVE_BITS} % 128")
+        if(VECOPS_NATIVE_FIXED_SVE_BITS LESS 128 OR
+           VECOPS_NATIVE_FIXED_SVE_BITS GREATER 2048 OR
+           NOT _SVE_VL_REMAINDER EQUAL 0)
+            message(FATAL_ERROR
+                "VECOPS_FIXED_SVE_BITS must be a multiple of 128 in [128, 2048]")
+        endif()
+        set(VECOPS_MAP_ARM_NativeFixedSVE "${VECOPS_MAP_ARM_Native}")
+    endif()
+endif()
+
 # ── Default Arch Code Lists (full sequence per family) ──────
 set(VECOPS_ARCH_LIST_x86 Scalar AVX AVX2 AVX512 Native)
 set(VECOPS_ARCH_LIST_ARM Scalar SVE SVE2 Native)
@@ -75,10 +134,14 @@ function(add_multiarch_executable NAME)
         set(TARGET_NAME "${NAME}-${CODE}")
         add_executable(${TARGET_NAME} ${ARG_FILES})
         target_compile_options(${TARGET_NAME} PRIVATE -march=${MARCH})
+        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND CODE STREQUAL "NativeFixedSVE")
+            target_compile_options(${TARGET_NAME} PRIVATE
+                -msve-vector-bits=${VECOPS_NATIVE_FIXED_SVE_BITS})
+        endif()
         if(ARG_DEFINITIONS)
             target_compile_definitions(${TARGET_NAME} PRIVATE ${ARG_DEFINITIONS})
         endif()
-        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND CODE STREQUAL "Scalar")
+        if(CODE STREQUAL "Scalar")
             target_compile_definitions(${TARGET_NAME} PRIVATE
                 CPU_CAPABILITY=GENERIC
                 CPU_CAPABILITY_GENERIC=1
@@ -157,6 +220,29 @@ add_multiarch_executable(DataAccessTest
 add_multiarch_executable(VecBaseTest
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BaseTest.cpp 
     ARCH Scalar
+)
+
+set(NVEC_BASE_ARCH ${VECOPS_ARCH_LIST})
+if(VECOPS_ARCH_FAMILY STREQUAL "ARM")
+    if(VECOPS_NATIVE_FIXED_SVE_BITS)
+        list(APPEND NVEC_BASE_ARCH NativeFixedSVE)
+    endif()
+endif()
+add_multiarch_executable(NVecBaseTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/nvec/BaseTest.cpp
+    ARCH ${NVEC_BASE_ARCH}
+)
+add_multiarch_executable(NVecArithmeticTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/nvec/ArithmeticTest.cpp
+    ARCH ${NVEC_BASE_ARCH}
+)
+add_multiarch_executable(NVecBasicTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/nvec/BasicTest.cpp
+    ARCH ${NVEC_BASE_ARCH}
+)
+add_multiarch_executable(NVecShuffleTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/nvec/ShuffleTest.cpp
+    ARCH ${NVEC_BASE_ARCH}
 )
 
 add_multiarch_executable(VecTransformTest

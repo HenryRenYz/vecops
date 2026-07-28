@@ -3,6 +3,7 @@ project(vecops)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
 # Address sanitizer
@@ -11,6 +12,8 @@ set(CMAKE_VERBOSE_MAKEFILE ON)
 set(VECOPS_GITHUB_ENDPOINT "https://github.com" CACHE STRING "Set endpoint address for GitHub repositories")
 option(VECOPS_PRESERVE_SUBNORMALS
        "Preserve representable subnormal results in strict vector operations" OFF)
+set(VECOPS_FIXED_SVE_BITS "" CACHE STRING
+    "SVE vector width in bits for NativeFixedSVE tests; empty detects the host maximum")
 
 # -------------------------------- Dependencies --------------------------------
 include(FetchContent)
