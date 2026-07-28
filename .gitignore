@@ -1,5 +1,15 @@
 
-# ============ CMake ============
+# ======== Agents & IDE =========
+/.idea/
+/.opencode/
+/.claude/
+/.codex/
+
+# ============ Build ============
 /cmake-build*/
 /build*/
-/benchmarks/results/inst/
+/benchmarks/results/
+__pycache__/
+
+# ============= WIP =============
+/docs/

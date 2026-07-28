@@ -225,12 +225,13 @@ struct VecDefs<T, -1, 1, void> : public BaseVecDefs<T, -1, 1> {
   VECOPS_VFUNC VECOPS_PURE
   static WordVec get(VecType v, nint_t index) {
     VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
-#if !defined(__ARM_FEATURE_BF16)
     if constexpr (std::is_same_v<T, bfloat16_t>) {
-      if (index == 0) return svreinterpret_bf16_u16(svget2(svreinterpret_u16_bf16_x2(v), 0));
-      else            return svreinterpret_bf16_u16(svget2(svreinterpret_u16_bf16_x2(v), 1));
+      const auto bits = svreinterpret_u16_bf16_x2(v);
+      svuint16_t selected;
+      if (index == 0) selected = svget2(bits, 0);
+      else            selected = svget2(bits, 1);
+      return svreinterpret_bf16_u16(selected);
     } else
-#endif
     if (index == 0) return svget2(v, 0);
     else            return svget2(v, 1);
   }
@@ -251,14 +252,13 @@ struct VecDefs<T, -1, 1, void> : public BaseVecDefs<T, -1, 1> {
   VECOPS_VFUNC VECOPS_PURE
   static VecType set(VecType v, nint_t index, WordVec u) {
     VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
-#if !defined(__ARM_FEATURE_BF16)
     if constexpr (std::is_same_v<T, bfloat16_t>) {
-      if (index == 0) return svreinterpret_bf16_u16_x2(
-        svset2(svreinterpret_u16_bf16_x2(v), 0, svreinterpret_u16_bf16(u)));
-      else            return svreinterpret_bf16_u16_x2(
-        svset2(svreinterpret_u16_bf16_x2(v), 1, svreinterpret_u16_bf16(u)));
+      auto bits = svreinterpret_u16_bf16_x2(v);
+      const auto word = svreinterpret_u16_bf16(u);
+      if (index == 0) bits = svset2(bits, 0, word);
+      else            bits = svset2(bits, 1, word);
+      return svreinterpret_bf16_u16_x2(bits);
     } else
-#endif
     if (index == 0) return svset2(v, 0, u);
     else            return svset2(v, 1, u);
   }
@@ -332,14 +332,15 @@ struct VecDefs<T, -1, 2, void> : public BaseVecDefs<T, -1, 2> {
   VECOPS_VFUNC VECOPS_PURE
   static WordVec get(VecType v, nint_t index) {
     VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
-#if !defined(__ARM_FEATURE_BF16)
     if constexpr (std::is_same_v<T, bfloat16_t>) {
-      if (index == 0)      return svreinterpret_bf16_u16(svget4(svreinterpret_u16_bf16_x4(v), 0));
-      else if (index == 1) return svreinterpret_bf16_u16(svget4(svreinterpret_u16_bf16_x4(v), 1));
-      else if (index == 2) return svreinterpret_bf16_u16(svget4(svreinterpret_u16_bf16_x4(v), 2));
-      else                 return svreinterpret_bf16_u16(svget4(svreinterpret_u16_bf16_x4(v), 3));
+      const auto bits = svreinterpret_u16_bf16_x4(v);
+      svuint16_t selected;
+      if (index == 0)      selected = svget4(bits, 0);
+      else if (index == 1) selected = svget4(bits, 1);
+      else if (index == 2) selected = svget4(bits, 2);
+      else                 selected = svget4(bits, 3);
+      return svreinterpret_bf16_u16(selected);
     } else
-#endif
     if (index == 0)      return svget4(v, 0);
     else if (index == 1) return svget4(v, 1);
     else if (index == 2) return svget4(v, 2);
@@ -362,18 +363,15 @@ struct VecDefs<T, -1, 2, void> : public BaseVecDefs<T, -1, 2> {
   VECOPS_VFUNC VECOPS_PURE
   static VecType set(VecType v, nint_t index, WordVec u) {
     VECOPS_ASSERT(0 <= index && index < num_words, "%lld !in 0..%lld", index, num_words);
-#if !defined(__ARM_FEATURE_BF16)
     if constexpr (std::is_same_v<T, bfloat16_t>) {
-      if (index == 0)      return svreinterpret_bf16_u16_x4(
-        svset4(svreinterpret_u16_bf16_x4(v), 0, svreinterpret_u16_bf16(u)));
-      else if (index == 1) return svreinterpret_bf16_u16_x4(
-        svset4(svreinterpret_u16_bf16_x4(v), 1, svreinterpret_u16_bf16(u)));
-      else if (index == 2) return svreinterpret_bf16_u16_x4(
-        svset4(svreinterpret_u16_bf16_x4(v), 2, svreinterpret_u16_bf16(u)));
-      else                 return svreinterpret_bf16_u16_x4(
-        svset4(svreinterpret_u16_bf16_x4(v), 3, svreinterpret_u16_bf16(u)));
+      auto bits = svreinterpret_u16_bf16_x4(v);
+      const auto word = svreinterpret_u16_bf16(u);
+      if (index == 0)      bits = svset4(bits, 0, word);
+      else if (index == 1) bits = svset4(bits, 1, word);
+      else if (index == 2) bits = svset4(bits, 2, word);
+      else                 bits = svset4(bits, 3, word);
+      return svreinterpret_bf16_u16_x4(bits);
     } else
-#endif
     if (index == 0)      return svset4(v, 0, u);
     else if (index == 1) return svset4(v, 1, u);
     else if (index == 2) return svset4(v, 2, u);

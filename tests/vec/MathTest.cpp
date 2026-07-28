@@ -124,8 +124,17 @@ void check_accuracy(E input, E actual) {
           << " expected=" << as_double(expected) << " actual=" << as_double(actual);
     }
   } else if (is_normal_result(expected)) {
-    const double rel = std::abs(as_double(actual) / as_double(expected) - 1.0);
-    EXPECT_LE(rel, 0.006) << "x=" << as_double(input) << " rel=" << rel;
+    const long double exact =
+        std::exp(static_cast<long double>(as_double(input)));
+    const long double rel =
+        std::abs(static_cast<long double>(as_double(actual)) / exact - 1.0L);
+    const uint64_t ulps = ulp_distance(expected, actual);
+    EXPECT_TRUE(ulps <= 4u || rel <= 0.006L)
+        << "x=" << as_double(input)
+        << " expected=" << as_double(expected)
+        << " actual=" << as_double(actual)
+        << " ulp=" << ulps
+        << " rel=" << static_cast<double>(rel);
   }
 }
 

@@ -22,15 +22,15 @@ set(VECOPS_MAP_x86_Native    "native")
 set(VECOPS_MAP_ARM_Scalar    "armv8-a")
 set(VECOPS_MAP_ARM_NEON      "armv8-a+simd")
 set(VECOPS_MAP_ARM_SVE       "armv8-a+sve")
-set(VECOPS_MAP_ARM_SVE2      "armv8-a+sve2+sve2p1")
+set(VECOPS_MAP_ARM_SVE2      "armv8-a+sve2")
 
-# ARM Native: starts from native, conditionally appends +bf16 / +sme
+# ARM Native: starts from native, conditionally appends advertised extensions.
 # because some compilers (e.g. BiSheng) do not auto-enable them with -march=native
-set(VECOPS_MAP_ARM_Native "native+sve2p1")
+set(VECOPS_MAP_ARM_Native "native")
 if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND EXISTS "/proc/cpuinfo")
     file(READ "/proc/cpuinfo" _CPUINFO)
     string(REGEX MATCH "Features[ \t]*:.*" _FEAT_LINE "${_CPUINFO}")
-    foreach(_FEAT IN ITEMS bf16 sme)
+    foreach(_FEAT IN ITEMS sve2p1 bf16 sme)
         string(FIND "${_FEAT_LINE}" " ${_FEAT} " _POS)
         if(NOT _POS EQUAL -1)
             string(APPEND VECOPS_MAP_ARM_Native "+${_FEAT}")

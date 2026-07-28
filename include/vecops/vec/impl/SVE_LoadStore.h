@@ -855,13 +855,27 @@ VECOPS_VFUNC void demote_storeu(Ti ti, Eo* p, Vec<Ti> v) {
       svst1h_u32(
           pg, reinterpret_cast<uint16_t*>(p),
           svreinterpret_u32_bf16(bf16));
-    } else {
+    } else if constexpr (num_words(ti) == 2) {
       constexpr Rebind<Eo, Ti> to{};
-      static_assert(num_words(ti) == 2 && is_word_vec(to));
+      static_assert(is_word_vec(to));
       auto packed = details::f32x2_to_bf16(
           word::lower(ti, v), word::upper(ti, v));
       svst1_bf16(
           word::make_mask(to), reinterpret_cast<__bf16*>(p), packed);
+    } else {
+      constexpr Rebind<Eo, Ti> to{};
+      constexpr auto to_word = word_tag(to);
+      static_assert(num_words(ti) == 4 && num_words(to) == 2);
+      auto packed_lo = details::f32x2_to_bf16(
+          get_word<0>(ti, v), get_word<1>(ti, v));
+      auto packed_hi = details::f32x2_to_bf16(
+          get_word<2>(ti, v), get_word<3>(ti, v));
+      const auto pg = word::make_mask(to_word);
+      svst1_bf16(
+          pg, reinterpret_cast<__bf16*>(p), packed_lo);
+      svst1_bf16(
+          pg, reinterpret_cast<__bf16*>(p + word_size(to_word)),
+          packed_hi);
     }
   } else
 #endif
@@ -886,13 +900,31 @@ VECOPS_VFUNC void demote_storeu(
       svst1h_u32(
           m, reinterpret_cast<uint16_t*>(p),
           svreinterpret_u32_bf16(bf16));
-    } else {
+    } else if constexpr (num_words(ti) == 2) {
       constexpr Rebind<Eo, Ti> to{};
-      static_assert(num_words(ti) == 2 && is_word_vec(to));
+      static_assert(is_word_vec(to));
       auto packed = details::f32x2_to_bf16(
           word::lower(ti, v), word::upper(ti, v));
       auto mo = conversion_load_store_detail::xconvert_mask(to, ti, m);
       svst1_bf16(mo, reinterpret_cast<__bf16*>(p), packed);
+    } else {
+      constexpr Half<Ti> th{};
+      constexpr Rebind<Eo, Half<Ti>> to_half{};
+      static_assert(num_words(ti) == 4 && is_word_vec(to_half));
+      auto packed_lo = details::f32x2_to_bf16(
+          get_word<0>(ti, v), get_word<1>(ti, v));
+      auto packed_hi = details::f32x2_to_bf16(
+          get_word<2>(ti, v), get_word<3>(ti, v));
+      const auto mo_lo = conversion_load_store_detail::xconvert_mask(
+          to_half, th, word::lower(ti, m));
+      const auto mo_hi = conversion_load_store_detail::xconvert_mask(
+          to_half, th, word::upper(ti, m));
+      svst1_bf16(
+          mo_lo, reinterpret_cast<__bf16*>(p), packed_lo);
+      svst1_bf16(
+          mo_hi,
+          reinterpret_cast<__bf16*>(p + word_size(to_half)),
+          packed_hi);
     }
   } else
 #endif

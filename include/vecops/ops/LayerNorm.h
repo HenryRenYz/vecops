@@ -214,15 +214,14 @@ public:
         nint_t element_count = 1;
         for (int d = 0; d <= prefix_rank; ++d)
           element_count *= in_layout.shape()[d];
-        // Keep both input and output within a conservative fraction of L2.
-        // The split store avoids uzp1 but doubles the number of store
-        // instructions, which is only profitable for cache-resident tensors.
-        const bool use_split_store = element_count <= 64 * 1024;
-        if (use_split_store) {
+        // Prefetch only when input and output no longer fit within a
+        // conservative fraction of L2.
+        const bool use_prefetch = element_count > 64 * 1024;
+        if (use_prefetch) {
           gemm::hop::for_each_dims<prefix_rank>(
               [this, &scale, &bias](const auto &in_row,
                                     const auto &out_row) {
-                this->template run_row_sve_16bit<true, false>(
+                this->template run_row_sve_16bit<true>(
                     in_row, scale, bias, out_row);
               },
               in, out);
@@ -230,7 +229,7 @@ public:
           gemm::hop::for_each_dims<prefix_rank>(
               [this, &scale, &bias](const auto &in_row,
                                     const auto &out_row) {
-                this->template run_row_sve_16bit<false, true>(
+                this->template run_row_sve_16bit<false>(
                     in_row, scale, bias, out_row);
               },
               in, out);
@@ -239,7 +238,7 @@ public:
       }
       gemm::hop::for_each_dims<prefix_rank>(
           [this, &scale, &bias](const auto &in_row, const auto &out_row) {
-            this->template run_row_sve_16bit<false, false>(
+            this->template run_row_sve_16bit<false>(
                 in_row, scale, bias, out_row);
           },
           in, out);
@@ -344,9 +343,8 @@ public:
 private:
 #if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE2) && \
     !defined(VECOPS_DISABLE_SVE_16BIT_LAYERNORM_FAST_PATH)
-  template <bool SplitBf16Store, bool PrefetchBf16,
-            typename InSpec, typename ScaleSpec, typename BiasSpec,
-            typename OutSpec>
+  template <bool PrefetchBf16, typename InSpec, typename ScaleSpec,
+            typename BiasSpec, typename OutSpec>
   VECOPS_INLINE void run_row_sve_16bit(const InSpec &in,
                                        const ScaleSpec &scale,
                                        const BiasSpec &bias,
@@ -361,27 +359,31 @@ private:
     Element *y = const_cast<Element *>(out.tensor().data());
     const nint_t n = in.input_layout().shape()[0];
     using F16Tag = vec::ScalableTag<float16_t, 0>;
-    using F32Tag = vec::ScalableTag<float32_t, 0>;
     using F32PairTag = vec::ScalableTag<float32_t, 1>;
+    using F32QuadTag = vec::ScalableTag<float32_t, 2>;
+    using InputPairTag = vec::Rebind<Element, F32PairTag>;
+    using Layout = std::conditional_t<
+        IsFloat16V<Element>, vec::cvt::unordered_t, vec::cvt::ordered_t>;
+    using NormalizeTag = F32QuadTag;
     constexpr F16Tag f16_tag{};
-    constexpr F32Tag f32_tag{};
     constexpr F32PairTag f32_pair_tag{};
+    constexpr F32QuadTag f32_quad_tag{};
+    constexpr InputPairTag input_pair_tag{};
+    constexpr Layout layout{};
+    constexpr NormalizeTag normalize_tag{};
     const nint_t half_lanes = vec::size(f16_tag);
-    const nint_t word_lanes = vec::size(f32_tag);
+    const nint_t pair_lanes = vec::size(f32_pair_tag);
+    const nint_t quad_lanes = vec::size(f32_quad_tag);
+    const nint_t normalize_lanes = vec::size(normalize_tag);
     const auto pg16 = vec::mtrue(f16_tag);
 
-    vec::Vec<F32Tag> sum0 = vec::zeros(f32_tag);
-    vec::Vec<F32Tag> sum1 = vec::zeros(f32_tag);
-    vec::Vec<F32Tag> sum2 = vec::zeros(f32_tag);
-    vec::Vec<F32Tag> sum3 = vec::zeros(f32_tag);
-    vec::Vec<F32Tag> sum_sq0 = vec::zeros(f32_tag);
-    vec::Vec<F32Tag> sum_sq1 = vec::zeros(f32_tag);
-    vec::Vec<F32Tag> sum_sq2 = vec::zeros(f32_tag);
-    vec::Vec<F32Tag> sum_sq3 = vec::zeros(f32_tag);
+    vec::Vec<F32QuadTag> sum = vec::zeros(f32_quad_tag);
+    vec::Vec<F32QuadTag> sum_sq = vec::zeros(f32_quad_tag);
+    float tail_sum = 0.0f;
+    float tail_sum_sq = 0.0f;
 
     nint_t col = 0;
-    const nint_t reduction_step = 2 * half_lanes;
-    for (; col + reduction_step <= n; col += reduction_step) {
+    for (; col + quad_lanes <= n; col += quad_lanes) {
       if constexpr (IsBfloat16V<Element> && PrefetchBf16) {
         constexpr nint_t prefetch_vectors = 8;
         svprfh(
@@ -389,174 +391,137 @@ private:
             x + col + prefetch_vectors * half_lanes,
             SV_PLDL1KEEP);
       }
-      vec::Vec<F32Tag> x0_lo;
-      vec::Vec<F32Tag> x0_hi;
-      vec::Vec<F32Tag> x1_lo;
-      vec::Vec<F32Tag> x1_hi;
-      if constexpr (IsFloat16V<Element>) {
-        const auto h0 = vec::load(f16_tag, x + col);
-        const auto h1 = vec::load(f16_tag, x + col + half_lanes);
-        x0_lo = vec::convert(f32_tag, h0, vec::cvt::lane<0>);
-        x0_hi = vec::convert(f32_tag, h0, vec::cvt::lane<1>);
-        x1_lo = vec::convert(f32_tag, h1, vec::cvt::lane<0>);
-        x1_hi = vec::convert(f32_tag, h1, vec::cvt::lane<1>);
-      } else {
-        x0_lo = vec::load_convert(f32_tag, x + col);
-        x0_hi = vec::load_convert(f32_tag, x + col + word_lanes);
-        x1_lo = vec::load_convert(f32_tag, x + col + half_lanes);
-        x1_hi = vec::load_convert(
-            f32_tag, x + col + half_lanes + word_lanes);
-      }
-
-      sum0 = vec::add(sum0, x0_lo);
-      sum1 = vec::add(sum1, x0_hi);
-      sum2 = vec::add(sum2, x1_lo);
-      sum3 = vec::add(sum3, x1_hi);
-      sum_sq0 = vec::fmadd(x0_lo, x0_lo, sum_sq0);
-      sum_sq1 = vec::fmadd(x0_hi, x0_hi, sum_sq1);
-      sum_sq2 = vec::fmadd(x1_lo, x1_lo, sum_sq2);
-      sum_sq3 = vec::fmadd(x1_hi, x1_hi, sum_sq3);
+      const auto xv =
+          vec::load_convert(f32_quad_tag, x + col, layout);
+      sum = vec::add(sum, xv);
+      sum_sq = vec::fmadd(xv, xv, sum_sq);
     }
 
-    for (; col < n; col += half_lanes) {
-      const auto tail = vec::mwhilelt(f16_tag, col, n);
-      vec::Vec<F32Tag> x_lo;
-      vec::Vec<F32Tag> x_hi;
-      if constexpr (IsFloat16V<Element>) {
-        const auto h = vec::load(
-            f16_tag, x + col, vec::opt::masked(tail));
-        x_lo = vec::convert(f32_tag, h, vec::cvt::lane<0>);
-        x_hi = vec::convert(f32_tag, h, vec::cvt::lane<1>);
-      } else {
-        const auto tail_lo = vec::mwhilelt(f32_tag, col, n);
-        const auto tail_hi = vec::mwhilelt(f32_tag, col + word_lanes, n);
-        x_lo = vec::load_convert(
-            f32_tag, x + col, vec::opt::masked(tail_lo));
-        x_hi = vec::load_convert(
-            f32_tag, x + col + word_lanes, vec::opt::masked(tail_hi));
-      }
-      sum0 = vec::add(sum0, x_lo);
-      sum1 = vec::add(sum1, x_hi);
-      sum_sq0 = vec::fmadd(x_lo, x_lo, sum_sq0);
-      sum_sq1 = vec::fmadd(x_hi, x_hi, sum_sq1);
+    for (; col < n; col += pair_lanes) {
+      const auto tail = [&] {
+        if constexpr (IsFloat16V<Element>)
+          return vec::mwhilelt(input_pair_tag, col, n);
+        else
+          return vec::mwhilelt(f32_pair_tag, col, n);
+      }();
+      const auto xv = vec::load_convert(
+          f32_pair_tag, x + col, layout,
+          vec::opt::masked(tail));
+      tail_sum += vec::reduce_add(f32_pair_tag, xv);
+      tail_sum_sq +=
+          vec::reduce_add(f32_pair_tag, vec::mul(xv, xv));
     }
 
-    sum0 = vec::add(sum0, sum1);
-    sum2 = vec::add(sum2, sum3);
-    sum_sq0 = vec::add(sum_sq0, sum_sq1);
-    sum_sq2 = vec::add(sum_sq2, sum_sq3);
-    sum0 = vec::add(sum0, sum2);
-    sum_sq0 = vec::add(sum_sq0, sum_sq2);
-
-    const float sum = vec::reduce_add(f32_tag, sum0);
-    const float sum_sq = vec::reduce_add(f32_tag, sum_sq0);
+    const float sum_value =
+        vec::reduce_add(f32_quad_tag, sum) + tail_sum;
+    const float sum_sq_value =
+        vec::reduce_add(f32_quad_tag, sum_sq) + tail_sum_sq;
     const float inv_n = 1.0f / static_cast<float>(n);
-    const float mean = sum * inv_n;
+    const float mean = sum_value * inv_n;
     const float variance =
-        std::max(sum_sq * inv_n - mean * mean, 0.0f);
+        std::max(sum_sq_value * inv_n - mean * mean, 0.0f);
     const float rstd = 1.0f / std::sqrt(variance + config.eps);
-    const auto mean_v = vec::fill(f32_tag, mean);
-    const auto rstd_v = vec::fill(f32_tag, rstd);
-    vec::Vec<F32Tag> shift_v;
+    const auto mean_v = vec::fill(normalize_tag, mean);
+    const auto rstd_v = vec::fill(normalize_tag, rstd);
+    vec::Vec<NormalizeTag> shift_v;
     if constexpr (IsFloat16V<Element>)
-      shift_v = vec::fill(f32_tag, -mean * rstd);
+      shift_v = vec::fill(normalize_tag, -mean * rstd);
 
-#pragma clang loop unroll_count(2)
-    for (col = 0; col < n; col += half_lanes) {
+    const auto normalize_block = [&](nint_t offset) VECOPS_INLINE_LAMBDA {
       if constexpr (IsBfloat16V<Element> && PrefetchBf16) {
         constexpr nint_t prefetch_vectors = 8;
         svprfh(
             pg16,
-            x + col + prefetch_vectors * half_lanes,
+            x + offset + prefetch_vectors * half_lanes,
             SV_PLDL1KEEP);
         svprfh(
             pg16,
-            gamma + col + prefetch_vectors * half_lanes,
+            x + offset + (prefetch_vectors + 1) * half_lanes,
             SV_PLDL1KEEP);
         svprfh(
             pg16,
-            beta + col + prefetch_vectors * half_lanes,
+            gamma + offset + prefetch_vectors * half_lanes,
+            SV_PLDL1KEEP);
+        svprfh(
+            pg16,
+            gamma + offset + (prefetch_vectors + 1) * half_lanes,
+            SV_PLDL1KEEP);
+        svprfh(
+            pg16,
+            beta + offset + prefetch_vectors * half_lanes,
+            SV_PLDL1KEEP);
+        svprfh(
+            pg16,
+            beta + offset + (prefetch_vectors + 1) * half_lanes,
             SV_PLDL1KEEP);
       }
-      const auto tail = vec::mwhilelt(f16_tag, col, n);
-      vec::Vec<F32Tag> x_lo;
-      vec::Vec<F32Tag> x_hi;
-      vec::Vec<F32Tag> gamma_lo;
-      vec::Vec<F32Tag> gamma_hi;
-      vec::Vec<F32Tag> beta_lo;
-      vec::Vec<F32Tag> beta_hi;
+      auto xv = vec::load_convert(
+          normalize_tag, x + offset, layout);
+      const auto gamma_v = vec::load_convert(
+          normalize_tag, gamma + offset, layout);
+      const auto beta_v = vec::load_convert(
+          normalize_tag, beta + offset, layout);
+      if constexpr (IsFloat16V<Element>)
+        xv = vec::fmadd(xv, rstd_v, shift_v);
+      else
+        xv = vec::mul(vec::sub(xv, mean_v), rstd_v);
+      const auto out_v = vec::fmadd(xv, gamma_v, beta_v);
+      vec::store_convert(normalize_tag, y + offset, out_v, layout);
+    };
 
-      if constexpr (IsFloat16V<Element>) {
-        const auto xh = vec::load(
-            f16_tag, x + col, vec::opt::masked(tail));
-        const auto gh = vec::load(
-            f16_tag, gamma + col, vec::opt::masked(tail));
-        const auto bh = vec::load(
-            f16_tag, beta + col, vec::opt::masked(tail));
-        x_lo = vec::convert(f32_tag, xh, vec::cvt::lane<0>);
-        x_hi = vec::convert(f32_tag, xh, vec::cvt::lane<1>);
-        gamma_lo = vec::convert(f32_tag, gh, vec::cvt::lane<0>);
-        gamma_hi = vec::convert(f32_tag, gh, vec::cvt::lane<1>);
-        beta_lo = vec::convert(f32_tag, bh, vec::cvt::lane<0>);
-        beta_hi = vec::convert(f32_tag, bh, vec::cvt::lane<1>);
-      } else {
-        const auto tail_lo = vec::mwhilelt(f32_tag, col, n);
-        const auto tail_hi = vec::mwhilelt(f32_tag, col + word_lanes, n);
-        x_lo = vec::load_convert(
-            f32_tag, x + col, vec::opt::masked(tail_lo));
-        x_hi = vec::load_convert(
-            f32_tag, x + col + word_lanes, vec::opt::masked(tail_hi));
-        gamma_lo = vec::load_convert(
-            f32_tag, gamma + col, vec::opt::masked(tail_lo));
-        gamma_hi = vec::load_convert(
-            f32_tag, gamma + col + word_lanes,
-            vec::opt::masked(tail_hi));
-        beta_lo = vec::load_convert(
-            f32_tag, beta + col, vec::opt::masked(tail_lo));
-        beta_hi = vec::load_convert(
-            f32_tag, beta + col + word_lanes, vec::opt::masked(tail_hi));
-      }
+    // TODO(920f-3): A cache-resident BF16 fast path using two 32-byte
+    // narrowing stores per F32Pair avoided the packed store's uzp1 and was
+    // faster for small tensors. We currently accept that regression to keep
+    // one quad/multiword normalize path and to guarantee full-width stores
+    // once a conversion produces at least one complete output vector.
+    //
+    // Previous 32-byte-store fast path, retained as implementation guidance:
+    //
+    // using NormalizeTag = F32PairTag;
+    // const auto out_v = ...;  // Vec<F32PairTag>
+    // constexpr auto f32_word_tag = vec::Half<F32PairTag>{};
+    // vec::store_convert(
+    //     f32_word_tag, y + offset,
+    //     vec::lower(f32_pair_tag, out_v));
+    // vec::store_convert(
+    //     f32_word_tag, y + offset + vec::size(f32_word_tag),
+    //     vec::upper(f32_pair_tag, out_v));
+    //
+    // Re-evaluate a dedicated small-tensor policy if the lost performance
+    // becomes more important than keeping this path uniform.
+    col = 0;
+    for (; col + normalize_lanes <= n; col += normalize_lanes)
+      normalize_block(col);
 
+    for (; col < n; col += pair_lanes) {
+      const auto tail = [&] {
+        if constexpr (IsFloat16V<Element>)
+          return vec::mwhilelt(input_pair_tag, col, n);
+        else
+          return vec::mwhilelt(f32_pair_tag, col, n);
+      }();
+      auto xv = vec::load_convert(
+          f32_pair_tag, x + col, layout,
+          vec::opt::masked(tail));
+      const auto gamma_v = vec::load_convert(
+          f32_pair_tag, gamma + col, layout,
+          vec::opt::masked(tail));
+      const auto beta_v = vec::load_convert(
+          f32_pair_tag, beta + col, layout,
+          vec::opt::masked(tail));
+      const auto mean_pair = vec::fill(f32_pair_tag, mean);
+      const auto rstd_pair = vec::fill(f32_pair_tag, rstd);
       if constexpr (IsFloat16V<Element>) {
-        x_lo = vec::fmadd(x_lo, rstd_v, shift_v);
-        x_hi = vec::fmadd(x_hi, rstd_v, shift_v);
+        const auto shift_pair =
+            vec::fill(f32_pair_tag, -mean * rstd);
+        xv = vec::fmadd(xv, rstd_pair, shift_pair);
       } else {
-        x_lo = vec::mul(vec::sub(x_lo, mean_v), rstd_v);
-        x_hi = vec::mul(vec::sub(x_hi, mean_v), rstd_v);
+        xv = vec::mul(vec::sub(xv, mean_pair), rstd_pair);
       }
-      const auto out_lo = vec::fmadd(x_lo, gamma_lo, beta_lo);
-      const auto out_hi = vec::fmadd(x_hi, gamma_hi, beta_hi);
-
-      if constexpr (IsFloat16V<Element>) {
-        auto packed = vec::convert(
-            f16_tag, out_lo, vec::cvt::lane<0>);
-        packed = vec::convert(
-            f16_tag, out_hi, vec::cvt::lane<1>, vec::opt::merge(packed));
-        vec::store(
-            f16_tag, y + col, packed, vec::opt::masked(tail));
-      } else {
-        if constexpr (SplitBf16Store) {
-          const auto store_tail_lo = vec::mwhilelt(f32_tag, col, n);
-          const auto store_tail_hi =
-              vec::mwhilelt(f32_tag, col + word_lanes, n);
-          vec::store_convert(
-              f32_tag, y + col, out_lo, vec::opt::masked(store_tail_lo));
-          vec::store_convert(
-              f32_tag, y + col + word_lanes, out_hi,
-              vec::opt::masked(store_tail_hi));
-        } else {
-          const auto out_pair =
-              vec::concat(f32_pair_tag, out_lo, out_hi);
-          if (col + half_lanes <= n) {
-            vec::store_convert(f32_pair_tag, y + col, out_pair);
-          } else {
-            const auto store_tail = vec::mwhilelt(f32_pair_tag, col, n);
-            vec::store_convert(
-                f32_pair_tag, y + col, out_pair,
-                vec::opt::masked(store_tail));
-          }
-        }
-      }
+      const auto out_v = vec::fmadd(xv, gamma_v, beta_v);
+      vec::store_convert(
+          f32_pair_tag, y + col, out_v, layout,
+          vec::opt::masked(tail));
     }
   }
 #endif

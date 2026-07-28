@@ -38,11 +38,15 @@ struct unaligned_t {};
 struct aligned_t {};
 struct temporal_t {};
 struct non_temporal_t {};
+struct packed_t {};
+struct split_t {};
 
 inline constexpr unaligned_t unaligned{};
 inline constexpr aligned_t aligned{};
 inline constexpr temporal_t temporal{};
 inline constexpr non_temporal_t non_temporal{};
+inline constexpr packed_t packed{};
+inline constexpr split_t split{};
 
 } // namespace mem
 
@@ -169,6 +173,17 @@ template <typename T>
 inline constexpr bool is_temporality = is_temporal<T> || is_non_temporal<T>;
 
 template <typename T>
+inline constexpr bool is_packed =
+    std::is_same_v<remove_cvref_t<T>, mem::packed_t>;
+
+template <typename T>
+inline constexpr bool is_split =
+    std::is_same_v<remove_cvref_t<T>, mem::split_t>;
+
+template <typename T>
+inline constexpr bool is_packing = is_packed<T> || is_split<T>;
+
+template <typename T>
 struct is_masked_impl : std::false_type {};
 
 template <typename M, bool IsSized>
@@ -205,6 +220,10 @@ inline constexpr bool is_memory_option =
     is_alignment<T> || is_temporality<T> || is_active<T> || is_population<T>;
 
 template <typename T>
+inline constexpr bool is_memory_conversion_option =
+    is_memory_option<T> || is_packing<T>;
+
+template <typename T>
 inline constexpr bool is_conversion_option =
     is_layout<T> || is_value_policy<T> || is_population<T>;
 
@@ -219,6 +238,8 @@ template <typename T>
 struct IsAlignment : std::bool_constant<is_alignment<T>> {};
 template <typename T>
 struct IsTemporality : std::bool_constant<is_temporality<T>> {};
+template <typename T>
+struct IsPacking : std::bool_constant<is_packing<T>> {};
 template <typename T>
 struct IsActive : std::bool_constant<is_active<T>> {};
 template <typename T>

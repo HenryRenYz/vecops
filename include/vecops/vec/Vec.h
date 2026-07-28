@@ -1336,120 +1336,6 @@ VECOPS_VFUNC V min(V a, V b, Mask<T> m) {
   );
 }
 
-// TODO wtf
-namespace details {
-template <typename E>
-VECOPS_VFUNC E reduce_scalar_add(E a, E b) {
-  return static_cast<E>(a + b);
-}
-
-template <typename E>
-VECOPS_VFUNC E reduce_scalar_max(E a, E b) {
-  return a > b ? a : b;
-}
-
-template <typename E>
-VECOPS_VFUNC E reduce_scalar_min(E a, E b) {
-  return a < b ? a : b;
-}
-
-template <nint_t Begin, nint_t Count, TLV_DECL_TAG(T)>
-VECOPS_VFUNC TypeOf<T> reduce_add_words(T t, Vec<T> v) {
-  if constexpr (Count == 1) {
-    return word::reduce_add(word_tag(t), get_word<Begin>(t, v));
-  } else {
-    return reduce_scalar_add(
-        reduce_add_words<Begin, Count / 2>(t, v),
-        reduce_add_words<Begin + Count / 2, Count - Count / 2>(t, v));
-  }
-}
-
-template <nint_t Begin, nint_t Count, TLV_DECL_TAG(T)>
-VECOPS_VFUNC TypeOf<T> reduce_add_words(T t, Vec<T> v, Mask<T> m) {
-  if constexpr (Count == 1) {
-    return word::reduce_add(word_tag(t), get_word<Begin>(t, v), get_word_mask<Begin>(t, m));
-  } else {
-    return reduce_scalar_add(
-        reduce_add_words<Begin, Count / 2>(t, v, m),
-        reduce_add_words<Begin + Count / 2, Count - Count / 2>(t, v, m));
-  }
-}
-
-template <nint_t Begin, nint_t Count, TLV_DECL_TAG(T)>
-VECOPS_VFUNC TypeOf<T> reduce_max_words(T t, Vec<T> v) {
-  if constexpr (Count == 1) {
-    return word::reduce_max(word_tag(t), get_word<Begin>(t, v));
-  } else {
-    return reduce_scalar_max(
-        reduce_max_words<Begin, Count / 2>(t, v),
-        reduce_max_words<Begin + Count / 2, Count - Count / 2>(t, v));
-  }
-}
-
-template <nint_t Begin, nint_t Count, TLV_DECL_TAG(T)>
-VECOPS_VFUNC TypeOf<T> reduce_max_words(T t, Vec<T> v, Mask<T> m) {
-  if constexpr (Count == 1) {
-    return word::reduce_max(word_tag(t), get_word<Begin>(t, v), get_word_mask<Begin>(t, m));
-  } else {
-    return reduce_scalar_max(
-        reduce_max_words<Begin, Count / 2>(t, v, m),
-        reduce_max_words<Begin + Count / 2, Count - Count / 2>(t, v, m));
-  }
-}
-
-template <nint_t Begin, nint_t Count, TLV_DECL_TAG(T)>
-VECOPS_VFUNC TypeOf<T> reduce_min_words(T t, Vec<T> v) {
-  if constexpr (Count == 1) {
-    return word::reduce_min(word_tag(t), get_word<Begin>(t, v));
-  } else {
-    return reduce_scalar_min(
-        reduce_min_words<Begin, Count / 2>(t, v),
-        reduce_min_words<Begin + Count / 2, Count - Count / 2>(t, v));
-  }
-}
-
-template <nint_t Begin, nint_t Count, TLV_DECL_TAG(T)>
-VECOPS_VFUNC TypeOf<T> reduce_min_words(T t, Vec<T> v, Mask<T> m) {
-  if constexpr (Count == 1) {
-    return word::reduce_min(word_tag(t), get_word<Begin>(t, v), get_word_mask<Begin>(t, m));
-  } else {
-    return reduce_scalar_min(
-        reduce_min_words<Begin, Count / 2>(t, v, m),
-        reduce_min_words<Begin + Count / 2, Count - Count / 2>(t, v, m));
-  }
-}
-} // namespace details
-
-template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v) {
-  return details::reduce_add_words<0, num_words(T{})>(t, v);
-}
-
-template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v, Mask<T> m) {
-  return details::reduce_add_words<0, num_words(T{})>(t, v, m);
-}
-
-template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v) {
-  return details::reduce_max_words<0, num_words(T{})>(t, v);
-}
-
-template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v, Mask<T> m) {
-  return details::reduce_max_words<0, num_words(T{})>(t, v, m);
-}
-
-template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v) {
-  return details::reduce_min_words<0, num_words(T{})>(t, v);
-}
-
-template <TLV_DECL_TAG(T)>
-VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v, Mask<T> m) {
-  return details::reduce_min_words<0, num_words(T{})>(t, v, m);
-}
-
 /**
  * @brief Element-wise bitwise AND: result[i] = a[i] & b[i].
  * @return Bitwise AND of the two vectors
@@ -2037,7 +1923,9 @@ VECOPS_VFUNC V exp_fast(V v, Mask<T> m) {
 /**
  * @brief Computes a maximum-throughput estimate of element-wise exp.
  *
- * Normal results have at most 0.6 percent relative error. Subnormal
+ * Normal results are within four ULP of the correctly rounded destination
+ * result or have at most 0.6 percent relative error. This quantization-aware
+ * bound applies uniformly to every floating-point type. Subnormal
  * mathematical results may be flushed to positive zero. If
  * `VECOPS_MATH_ASSUME_VALID_INPUTS` is defined, the input must not be NaN or
  * infinity. Finite subnormal inputs are allowed.
@@ -2163,8 +2051,10 @@ VECOPS_VFUNC V exp_neg_fast(V v, Mask<T> m) {
  * @brief Estimates element-wise exp for inputs known to be non-positive.
  *
  * Every lane must satisfy `v[i] <= 0`; positive values and NaNs have undefined
- * results. Normal results have at most 0.6 percent relative error, and
- * subnormal mathematical results may be flushed to positive zero.
+ * results. Normal results are within four ULP of the correctly rounded
+ * destination result or have at most 0.6 percent relative error. This
+ * quantization-aware bound applies uniformly to every floating-point type,
+ * and subnormal mathematical results may be flushed to positive zero.
  */
 template <TLV_DECL_VEC(V), typename T = Vec2Tag<V>, TL_IF(is_float<TypeOf<T>>)>
 VECOPS_VFUNC V exp_neg_est(V v) {
@@ -2937,6 +2827,100 @@ VECOPS_VFUNC Mask<T> concat(T t, V m_lo, V m_hi) {
   }
 }
 
+/* ********************************************************************** */
+//                             Reductions
+/* ********************************************************************** */
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v) {
+  if constexpr (is_word_vec(t)) {
+    return word::reduce_add(t, v);
+  } else {
+    constexpr Half<T> th;
+    return vec::reduce_add(
+        th, vec::add(vec::lower(t, v), vec::upper(t, v)));
+  }
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_add(T t, Vec<T> v, Mask<T> m) {
+  if constexpr (is_word_vec(t)) {
+    return word::reduce_add(t, v, m);
+  } else {
+    constexpr Half<T> th;
+    const auto m_lo = vec::lower(t, m);
+    const auto m_hi = vec::upper(t, m);
+    const auto both = vec::bit_and(th, m_lo, m_hi);
+    const auto either = vec::bit_or(th, m_lo, m_hi);
+    const auto v_lo = vec::lower(t, v);
+    const auto v_hi = vec::upper(t, v);
+    auto folded = vec::blend(v_hi, m_lo, v_lo);
+    folded = vec::blend(
+        folded, both, vec::add(v_lo, v_hi));
+    return vec::reduce_add(th, folded, either);
+  }
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v) {
+  if constexpr (is_word_vec(t)) {
+    return word::reduce_max(t, v);
+  } else {
+    constexpr Half<T> th;
+    return vec::reduce_max(
+        th, vec::max(vec::lower(t, v), vec::upper(t, v)));
+  }
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_max(T t, Vec<T> v, Mask<T> m) {
+  if constexpr (is_word_vec(t)) {
+    return word::reduce_max(t, v, m);
+  } else {
+    constexpr Half<T> th;
+    const auto m_lo = vec::lower(t, m);
+    const auto m_hi = vec::upper(t, m);
+    const auto both = vec::bit_and(th, m_lo, m_hi);
+    const auto either = vec::bit_or(th, m_lo, m_hi);
+    const auto v_lo = vec::lower(t, v);
+    const auto v_hi = vec::upper(t, v);
+    auto folded = vec::blend(v_hi, m_lo, v_lo);
+    folded = vec::blend(
+        folded, both, vec::max(v_lo, v_hi));
+    return vec::reduce_max(th, folded, either);
+  }
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v) {
+  if constexpr (is_word_vec(t)) {
+    return word::reduce_min(t, v);
+  } else {
+    constexpr Half<T> th;
+    return vec::reduce_min(
+        th, vec::min(vec::lower(t, v), vec::upper(t, v)));
+  }
+}
+
+template <TLV_DECL_TAG(T)>
+VECOPS_VFUNC TypeOf<T> reduce_min(T t, Vec<T> v, Mask<T> m) {
+  if constexpr (is_word_vec(t)) {
+    return word::reduce_min(t, v, m);
+  } else {
+    constexpr Half<T> th;
+    const auto m_lo = vec::lower(t, m);
+    const auto m_hi = vec::upper(t, m);
+    const auto both = vec::bit_and(th, m_lo, m_hi);
+    const auto either = vec::bit_or(th, m_lo, m_hi);
+    const auto v_lo = vec::lower(t, v);
+    const auto v_hi = vec::upper(t, v);
+    auto folded = vec::blend(v_hi, m_lo, v_lo);
+    folded = vec::blend(
+        folded, both, vec::min(v_lo, v_hi));
+    return vec::reduce_min(th, folded, either);
+  }
+}
+
 /**
  * @brief Extract even-indexed elements from two vectors and concatenate.
  *
@@ -3455,11 +3439,18 @@ VECOPS_VFUNC Vec<To> convert_unordered_widen(
 #if defined(CPU_CAPABILITY_SVE)
   if constexpr (Levels > 0) {
     constexpr Half<To> to_half;
-    constexpr Half<Ti> ti_half;
-    auto lo = convert_unordered_widen<Levels - 1>(
-        to_half, ti_half, word::even(ti, vi), policy);
-    auto hi = convert_unordered_widen<Levels - 1>(
-        to_half, ti_half, word::odd(ti, vi), policy);
+    Vec<Half<To>> lo;
+    Vec<Half<To>> hi;
+    if constexpr (Levels == 1) {
+      lo = convert_lane_saturate<0>(to_half, vi, opt::zero);
+      hi = convert_lane_saturate<1>(to_half, vi, opt::zero);
+    } else {
+      constexpr Half<Ti> ti_half;
+      lo = convert_unordered_widen<Levels - 1>(
+          to_half, ti_half, word::even(ti, vi), policy);
+      hi = convert_unordered_widen<Levels - 1>(
+          to_half, ti_half, word::odd(ti, vi), policy);
+    }
     return vec::concat(to, lo, hi);
   }
 #endif
@@ -3475,13 +3466,22 @@ VECOPS_VFUNC Vec<To> convert_unordered_narrow(
     To to, Ti ti, Vec<Ti> vi, ValuePolicy policy) {
 #if defined(CPU_CAPABILITY_SVE)
   if constexpr (Levels > 0) {
-    constexpr Half<To> to_half;
-    constexpr Half<Ti> ti_half;
-    auto lo = convert_unordered_narrow<Levels - 1>(
-        to_half, ti_half, vec::lower(ti, vi), policy);
-    auto hi = convert_unordered_narrow<Levels - 1>(
-        to_half, ti_half, vec::upper(ti, vi), policy);
-    return vec::interleave(to, lo, hi);
+    if constexpr (
+        Levels == 1 &&
+        !std::is_same_v<TypeOf<To>, bfloat16_t>) {
+      auto packed = convert_lane_saturate<0>(
+          to, vec::lower(ti, vi), opt::zero);
+      return convert_lane_saturate<1>(
+          to, vec::upper(ti, vi), opt::merge(packed));
+    } else {
+      constexpr Half<To> to_half;
+      constexpr Half<Ti> ti_half;
+      auto lo = convert_unordered_narrow<Levels - 1>(
+          to_half, ti_half, vec::lower(ti, vi), policy);
+      auto hi = convert_unordered_narrow<Levels - 1>(
+          to_half, ti_half, vec::upper(ti, vi), policy);
+      return vec::interleave(to, lo, hi);
+    }
   }
 #endif
   if constexpr (policy_details::is_wrap<ValuePolicy>) {
@@ -3606,7 +3606,7 @@ namespace details {
 template <typename... Options>
 consteval void validate_memory_conversion_options() {
   static_assert(
-      ((policy_details::is_memory_option<Options> ||
+      ((policy_details::is_memory_conversion_option<Options> ||
         policy_details::is_layout<Options> ||
         policy_details::is_value_policy<Options>) && ...),
       "unsupported load_convert/store_convert option");
@@ -3625,6 +3625,10 @@ consteval void validate_memory_conversion_options() {
           policy_details::IsTemporality, Options...> <= 1,
       "memory conversion accepts at most one temporal option");
   static_assert(
+      policy_details::count_options<
+          policy_details::IsPacking, Options...> <= 1,
+      "memory conversion accepts at most one packing option");
+  static_assert(
       policy_details::count_options<policy_details::IsActive, Options...> <= 1,
       "opt::masked and opt::first are mutually exclusive");
   static_assert(
@@ -3636,7 +3640,7 @@ consteval void validate_memory_conversion_options() {
 template <bool IsStore, typename Ei, typename Eo, typename... Options>
 consteval bool valid_memory_conversion() {
   if constexpr (!(
-      (policy_details::is_memory_option<Options> ||
+      (policy_details::is_memory_conversion_option<Options> ||
        policy_details::is_layout<Options> ||
        policy_details::is_value_policy<Options>) && ...)) {
     return false;
@@ -3650,6 +3654,8 @@ consteval bool valid_memory_conversion() {
       policy_details::count_options<
           policy_details::IsTemporality, Options...> > 1 ||
       policy_details::count_options<
+          policy_details::IsPacking, Options...> > 1 ||
+      policy_details::count_options<
           policy_details::IsActive, Options...> > 1 ||
       policy_details::count_options<
           policy_details::IsPopulation, Options...> > 1) {
@@ -3659,21 +3665,37 @@ consteval bool valid_memory_conversion() {
         policy_details::IsLayout, cvt::ordered_t, Options...>;
     using ValuePolicy = policy_details::selected_option_t<
         policy_details::IsValuePolicy, cvt::saturate_t, Options...>;
+    using Packing = policy_details::selected_option_t<
+        policy_details::IsPacking, mem::packed_t, Options...>;
+    using Alignment = policy_details::selected_option_t<
+        policy_details::IsAlignment, mem::unaligned_t, Options...>;
+    using Temporality = policy_details::selected_option_t<
+        policy_details::IsTemporality, mem::temporal_t, Options...>;
     constexpr int active_count =
         policy_details::count_options<
             policy_details::IsActive, Options...>;
     constexpr int population_count =
         policy_details::count_options<
             policy_details::IsPopulation, Options...>;
+    constexpr bool ordered_layout =
+        policy_details::is_ordered<Layout>;
+    constexpr bool unordered_layout =
+        policy_details::is_unordered<Layout>;
     constexpr bool valid_population =
-        IsStore ? population_count == 0
-                : (population_count == 0 || active_count == 1);
+        population_count == 0 ||
+        (!IsStore && ordered_layout && active_count == 1);
     constexpr bool valid_wrap =
         !policy_details::is_wrap<ValuePolicy> ||
         (std::is_integral_v<Ei> && std::is_integral_v<Eo> &&
          sizeof(Eo) < sizeof(Ei));
-    return policy_details::is_ordered<Layout> &&
-           valid_population && valid_wrap;
+    constexpr bool valid_packing =
+        policy_details::is_packed<Packing> ||
+        (IsStore && ordered_layout &&
+         policy_details::is_saturate<ValuePolicy> &&
+         policy_details::is_unaligned<Alignment> &&
+         policy_details::is_temporal<Temporality>);
+    return (ordered_layout || unordered_layout) &&
+           valid_population && valid_wrap && valid_packing;
   }
 }
 
@@ -3688,6 +3710,12 @@ VECOPS_VFUNC Vec<To> fused_load_saturate(To to, const Ei* p) {
     } else {
       return word::convert_loadu(to, p);
     }
+  } else if constexpr (sizeof(Ei) != sizeof(TypeOf<To>)) {
+    constexpr Half<To> th;
+    const auto lo = fused_load_saturate(th, p);
+    const auto hi =
+        fused_load_saturate(th, p + size(th));
+    return vec::concat(to, lo, hi);
   } else {
     return vmap(
         to,
@@ -3717,6 +3745,14 @@ VECOPS_VFUNC Vec<To> fused_load_saturate(
     } else {
       return word::convert_loadu(to, p, m);
     }
+  } else if constexpr (sizeof(Ei) != sizeof(TypeOf<To>)) {
+    constexpr Half<To> th;
+    const auto m_lo = vec::lower(to, m);
+    const auto m_hi = vec::upper(to, m);
+    const auto lo = fused_load_saturate(th, p, m_lo);
+    const auto hi =
+        fused_load_saturate(th, p + size(th), m_hi);
+    return vec::concat(to, lo, hi);
   } else {
     return vmap(
         to,
@@ -3747,6 +3783,17 @@ VECOPS_VFUNC Vec<To> fused_load_saturate(
     } else {
       return word::convert_loadu(to, p, m, default_v);
     }
+  } else if constexpr (sizeof(Ei) != sizeof(TypeOf<To>)) {
+    constexpr Half<To> th;
+    const auto m_lo = vec::lower(to, m);
+    const auto m_hi = vec::upper(to, m);
+    const auto v_lo = vec::lower(to, default_v);
+    const auto v_hi = vec::upper(to, default_v);
+    const auto lo =
+        fused_load_saturate(th, p, m_lo, v_lo);
+    const auto hi = fused_load_saturate(
+        th, p + size(th), m_hi, v_hi);
+    return vec::concat(to, lo, hi);
   } else {
     return vmap(
         to,
@@ -3770,7 +3817,17 @@ template <TLV_DECL_TAG(Ti), typename Eo>
 VECOPS_VFUNC void fused_store_saturate(
     Ti ti, Eo* p, Vec<Ti> vi) {
   constexpr Rebind<Eo, Ti> to;
-  if constexpr (is_word_vec(ti) || is_word_vec(to)) {
+  constexpr bool sve_bf16_path =
+#if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE_BF16) && \
+    !defined(VECOPS_PRESERVE_SUBNORMALS)
+      std::is_same_v<TypeOf<Ti>, float32_t> &&
+      std::is_same_v<Eo, bfloat16_t>;
+#else
+      false;
+#endif
+  if constexpr (sve_bf16_path) {
+    word::demote_storeu(ti, p, vi);
+  } else if constexpr (is_word_vec(ti) || is_word_vec(to)) {
     if constexpr (sizeof(TypeOf<Ti>) < sizeof(Eo)) {
       word::promote_storeu(ti, p, vi);
     } else if constexpr (sizeof(TypeOf<Ti>) > sizeof(Eo)) {
@@ -3778,6 +3835,12 @@ VECOPS_VFUNC void fused_store_saturate(
     } else {
       word::convert_storeu(ti, p, vi);
     }
+  } else if constexpr (sizeof(TypeOf<Ti>) != sizeof(Eo)) {
+    constexpr Half<Ti> th;
+    const Vec<Half<Ti>> v_lo = vec::lower(ti, vi);
+    const Vec<Half<Ti>> v_hi = vec::upper(ti, vi);
+    fused_store_saturate(th, p, v_lo);
+    fused_store_saturate(th, p + size(th), v_hi);
   } else {
     vmap(
         ti,
@@ -3798,7 +3861,17 @@ template <TLV_DECL_TAG(Ti), typename Eo>
 VECOPS_VFUNC void fused_store_saturate(
     Ti ti, Eo* p, Mask<Ti> m, Vec<Ti> vi) {
   constexpr Rebind<Eo, Ti> to;
-  if constexpr (is_word_vec(ti) || is_word_vec(to)) {
+  constexpr bool sve_bf16_path =
+#if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE_BF16) && \
+    !defined(VECOPS_PRESERVE_SUBNORMALS)
+      std::is_same_v<TypeOf<Ti>, float32_t> &&
+      std::is_same_v<Eo, bfloat16_t>;
+#else
+      false;
+#endif
+  if constexpr (sve_bf16_path) {
+    word::demote_storeu(ti, p, m, vi);
+  } else if constexpr (is_word_vec(ti) || is_word_vec(to)) {
     if constexpr (sizeof(TypeOf<Ti>) < sizeof(Eo)) {
       word::promote_storeu(ti, p, m, vi);
     } else if constexpr (sizeof(TypeOf<Ti>) > sizeof(Eo)) {
@@ -3806,6 +3879,15 @@ VECOPS_VFUNC void fused_store_saturate(
     } else {
       word::convert_storeu(ti, p, m, vi);
     }
+  } else if constexpr (sizeof(TypeOf<Ti>) != sizeof(Eo)) {
+    constexpr Half<Ti> th;
+    const Mask<Half<Ti>> m_lo = vec::lower(ti, m);
+    const Mask<Half<Ti>> m_hi = vec::upper(ti, m);
+    const Vec<Half<Ti>> v_lo = vec::lower(ti, vi);
+    const Vec<Half<Ti>> v_hi = vec::upper(ti, vi);
+    fused_store_saturate(th, p, m_lo, v_lo);
+    fused_store_saturate(
+        th, p + size(th), m_hi, v_hi);
   } else {
     vmap(
         ti,
@@ -3823,10 +3905,71 @@ VECOPS_VFUNC void fused_store_saturate(
   }
 }
 
+template <TLV_DECL_TAG(Ti), typename Eo>
+inline constexpr bool prefer_native_full_width_split_store =
+#if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE_BF16) && \
+    !defined(VECOPS_PRESERVE_SUBNORMALS)
+    std::is_same_v<TypeOf<Ti>, float32_t> &&
+    std::is_same_v<Eo, bfloat16_t> && num_words(Ti{}) > 1;
+#else
+    false;
+#endif
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+VECOPS_VFUNC void fused_store_saturate_split(
+    Ti ti, Eo* p, Vec<Ti> vi) {
+  if constexpr (prefer_native_full_width_split_store<Ti, Eo>) {
+    // A multiword F32 -> BF16 conversion contains at least one complete
+    // native output vector. On the 512-bit SVE target this is a 64-byte
+    // store. Never split it into multiple 32-byte narrowing stores: those
+    // are substantially slower for streaming LayerNorm workloads.
+    fused_store_saturate(ti, p, vi);
+  } else if constexpr (is_word_vec(ti)) {
+    if constexpr (sizeof(TypeOf<Ti>) < sizeof(Eo)) {
+      word::promote_storeu(ti, p, vi);
+    } else if constexpr (sizeof(TypeOf<Ti>) > sizeof(Eo)) {
+      word::demote_storeu(ti, p, vi);
+    } else {
+      word::convert_storeu(ti, p, vi);
+    }
+  } else {
+    constexpr Half<Ti> th;
+    fused_store_saturate_split(th, p, vec::lower(ti, vi));
+    fused_store_saturate_split(
+        th, p + size(th), vec::upper(ti, vi));
+  }
+}
+
+template <TLV_DECL_TAG(Ti), typename Eo>
+VECOPS_VFUNC void fused_store_saturate_split(
+    Ti ti, Eo* p, Mask<Ti> m, Vec<Ti> vi) {
+  if constexpr (prefer_native_full_width_split_store<Ti, Eo>) {
+    // Keep masked multiword stores on the same full-width backend as the
+    // unmasked route; the backend derives the output-side predicates.
+    fused_store_saturate(ti, p, m, vi);
+  } else if constexpr (is_word_vec(ti)) {
+    if constexpr (sizeof(TypeOf<Ti>) < sizeof(Eo)) {
+      word::promote_storeu(ti, p, m, vi);
+    } else if constexpr (sizeof(TypeOf<Ti>) > sizeof(Eo)) {
+      word::demote_storeu(ti, p, m, vi);
+    } else {
+      word::convert_storeu(ti, p, m, vi);
+    }
+  } else {
+    constexpr Half<Ti> th;
+    fused_store_saturate_split(
+        th, p, vec::lower(ti, m), vec::lower(ti, vi));
+    fused_store_saturate_split(
+        th, p + size(th), vec::upper(ti, m), vec::upper(ti, vi));
+  }
+}
+
 } // namespace details
 
 /**
- * @brief Ordered conversion fused with a consecutive load.
+ * @brief Conversion fused with a consecutive load.
+ *
+ * For an unordered conversion, opt::masked uses the memory-side mask.
  */
 template <TLV_DECL_TAG(To), typename Ei, typename... Options>
   requires (
@@ -3839,8 +3982,9 @@ VECOPS_VFUNC Vec<To> load_convert(
   auto&& layout = policy_details::select_option<
       policy_details::IsLayout>(
       cvt::ordered, std::forward<Options>(options)...);
-  static_assert(policy_details::is_ordered<decltype(layout)>,
-                "load_convert supports ordered layout only");
+  static_assert(policy_details::is_ordered<decltype(layout)> ||
+                policy_details::is_unordered<decltype(layout)>,
+                "load_convert supports ordered/unordered layouts only");
 
   constexpr int active_count =
       policy_details::count_options<policy_details::IsActive, Options...>;
@@ -3865,7 +4009,9 @@ VECOPS_VFUNC Vec<To> load_convert(
 
   constexpr Rebind<Ei, To> ti;
   Mask<To> output_mask;
-  if constexpr (active_count != 0) {
+  if constexpr (
+      active_count != 0 &&
+      policy_details::is_ordered<decltype(layout)>) {
     auto&& active = policy_details::select_option<
         policy_details::IsActive>(
         opt::first(size(to)), std::forward<Options>(options)...);
@@ -3884,6 +4030,7 @@ VECOPS_VFUNC Vec<To> load_convert(
   }
 
   constexpr bool native_path =
+      policy_details::is_ordered<decltype(layout)> &&
       policy_details::is_unaligned<decltype(alignment)> &&
       policy_details::is_temporal<decltype(temporality)> &&
       policy_details::is_saturate<decltype(value_policy)>;
@@ -3907,17 +4054,40 @@ VECOPS_VFUNC Vec<To> load_convert(
       } else {
         loaded = vec::load(ti, p);
       }
-      return vec::convert(to, loaded, value_policy);
+      return vec::convert(to, loaded, layout, value_policy);
     } else {
-      auto input_mask = vec::convert(ti, to, output_mask);
+      Mask<Rebind<Ei, To>> input_mask;
+      if constexpr (policy_details::is_unordered<decltype(layout)>) {
+        auto&& active = policy_details::select_option<
+            policy_details::IsActive>(
+            opt::first(size(to)), std::forward<Options>(options)...);
+        if constexpr (policy_details::is_masked<decltype(active)>) {
+          static_assert(std::is_same_v<
+                            policy_details::remove_cvref_t<
+                                decltype(active.value)>,
+                            Mask<Rebind<Ei, To>>>,
+                        "unordered load_convert mask must match the "
+                        "memory-side tag");
+          input_mask = active.value;
+        } else {
+          VECOPS_ASSERT(
+              0 <= active.value && active.value <= size(ti),
+              "load_convert count %zd !in 0..%zd",
+              active.value, size(ti));
+          input_mask = vec::mwhilelt(ti, 0, active.value);
+        }
+      } else {
+        input_mask = vec::convert(ti, to, output_mask);
+      }
       if constexpr (policy_details::is_aligned<decltype(alignment)>) {
         loaded = vec::load(
             ti, p, mem::aligned, opt::masked(input_mask));
       } else {
         loaded = vec::load(ti, p, opt::masked(input_mask));
       }
-      auto converted = vec::convert(to, loaded, value_policy);
-      if constexpr (policy_details::is_zero<decltype(population)>) {
+      auto converted = vec::convert(to, loaded, layout, value_policy);
+      if constexpr (policy_details::is_unordered<decltype(layout)> ||
+                    policy_details::is_zero<decltype(population)>) {
         return converted;
       } else {
         return vec::blend(
@@ -3929,7 +4099,9 @@ VECOPS_VFUNC Vec<To> load_convert(
 }
 
 /**
- * @brief Ordered conversion fused with a consecutive store.
+ * @brief Conversion fused with a consecutive store.
+ *
+ * For an unordered conversion, opt::masked uses the memory-side mask.
  */
 template <TLV_DECL_TAG(Ti), typename Eo, typename... Options>
   requires (
@@ -3946,8 +4118,9 @@ VECOPS_VFUNC void store_convert(
   auto&& layout = policy_details::select_option<
       policy_details::IsLayout>(
       cvt::ordered, std::forward<Options>(options)...);
-  static_assert(policy_details::is_ordered<decltype(layout)>,
-                "store_convert supports ordered layout only");
+  static_assert(policy_details::is_ordered<decltype(layout)> ||
+                policy_details::is_unordered<decltype(layout)>,
+                "store_convert supports ordered/unordered layouts only");
 
   auto&& alignment = policy_details::select_option<
       policy_details::IsAlignment>(
@@ -3955,14 +4128,20 @@ VECOPS_VFUNC void store_convert(
   auto&& temporality = policy_details::select_option<
       policy_details::IsTemporality>(
       mem::temporal, std::forward<Options>(options)...);
+  auto&& packing = policy_details::select_option<
+      policy_details::IsPacking>(
+      mem::packed, std::forward<Options>(options)...);
   auto&& value_policy = policy_details::select_option<
       policy_details::IsValuePolicy>(
       cvt::saturate, std::forward<Options>(options)...);
   constexpr int active_count =
       policy_details::count_options<policy_details::IsActive, Options...>;
+  constexpr Rebind<Eo, Ti> to;
 
   Mask<Ti> input_mask;
-  if constexpr (active_count != 0) {
+  if constexpr (
+      active_count != 0 &&
+      policy_details::is_ordered<decltype(layout)>) {
     auto&& active = policy_details::select_option<
         policy_details::IsActive>(
         opt::first(size(ti)), std::forward<Options>(options)...);
@@ -3981,18 +4160,24 @@ VECOPS_VFUNC void store_convert(
   }
 
   constexpr bool native_path =
+      policy_details::is_ordered<decltype(layout)> &&
       policy_details::is_unaligned<decltype(alignment)> &&
       policy_details::is_temporal<decltype(temporality)> &&
       policy_details::is_saturate<decltype(value_policy)>;
   if constexpr (native_path) {
     if constexpr (active_count == 0) {
-      details::fused_store_saturate(ti, p, vi);
+      if constexpr (policy_details::is_split<decltype(packing)>)
+        details::fused_store_saturate_split(ti, p, vi);
+      else
+        details::fused_store_saturate(ti, p, vi);
     } else {
-      details::fused_store_saturate(ti, p, input_mask, vi);
+      if constexpr (policy_details::is_split<decltype(packing)>)
+        details::fused_store_saturate_split(ti, p, input_mask, vi);
+      else
+        details::fused_store_saturate(ti, p, input_mask, vi);
     }
   } else {
-    constexpr Rebind<Eo, Ti> to;
-    auto converted = vec::convert(to, vi, value_policy);
+    auto converted = vec::convert(to, vi, layout, value_policy);
     if constexpr (active_count == 0) {
       if constexpr (policy_details::is_aligned<decltype(alignment)>) {
         vec::store(to, p, converted, mem::aligned);
@@ -4000,7 +4185,29 @@ VECOPS_VFUNC void store_convert(
         vec::store(to, p, converted);
       }
     } else {
-      auto output_mask = vec::convert(to, ti, input_mask);
+      Mask<Rebind<Eo, Ti>> output_mask;
+      if constexpr (policy_details::is_unordered<decltype(layout)>) {
+        auto&& active = policy_details::select_option<
+            policy_details::IsActive>(
+            opt::first(size(ti)), std::forward<Options>(options)...);
+        if constexpr (policy_details::is_masked<decltype(active)>) {
+          static_assert(std::is_same_v<
+                            policy_details::remove_cvref_t<
+                                decltype(active.value)>,
+                            Mask<Rebind<Eo, Ti>>>,
+                        "unordered store_convert mask must match the "
+                        "memory-side tag");
+          output_mask = active.value;
+        } else {
+          VECOPS_ASSERT(
+              0 <= active.value && active.value <= size(to),
+              "store_convert count %zd !in 0..%zd",
+              active.value, size(to));
+          output_mask = vec::mwhilelt(to, 0, active.value);
+        }
+      } else {
+        output_mask = vec::convert(to, ti, input_mask);
+      }
       if constexpr (policy_details::is_aligned<decltype(alignment)>) {
         vec::store(
             to, p, converted, mem::aligned, opt::masked(output_mask));

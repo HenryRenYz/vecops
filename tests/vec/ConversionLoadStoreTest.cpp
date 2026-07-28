@@ -163,6 +163,40 @@ void check_demote_load_store() {
   check_conversion_load_store<InTag, OutTag>();
 }
 
+template <typename Ti, typename To, int POW2_Out>
+void check_split_demote_store() {
+  using OutTag = ScalableTag<To, POW2_Out>;
+  using InTag = Rebind<Ti, OutTag>;
+  constexpr InTag ti{};
+  const nint_t n = size(ti);
+  const nint_t active = n - 3;
+  const To sentinel = test_value<To>(31);
+  std::vector<Ti> input(static_cast<size_t>(n));
+  std::vector<To> output(static_cast<size_t>(n), sentinel);
+  for (nint_t i = 0; i < n; ++i)
+    input[static_cast<size_t>(i)] = test_value<Ti>(i);
+  const auto vi = load(ti, input.data());
+
+  store_convert(ti, output.data(), vi, mem::split);
+  for (nint_t i = 0; i < n; ++i) {
+    EXPECT_TRUE(test_utils::values_near(
+        vecops::convert<To>(input[static_cast<size_t>(i)]),
+        output[static_cast<size_t>(i)]));
+  }
+
+  std::fill(output.begin(), output.end(), sentinel);
+  const auto mask = mwhilelt(ti, 0, active);
+  store_convert(
+      ti, output.data(), vi, mem::split, opt::masked(mask));
+  for (nint_t i = 0; i < n; ++i) {
+    const To expected = i < active
+        ? vecops::convert<To>(input[static_cast<size_t>(i)])
+        : sentinel;
+    EXPECT_TRUE(test_utils::values_near(
+        expected, output[static_cast<size_t>(i)]));
+  }
+}
+
 template <typename Ti, typename To, int POW2>
 void check_convert_load_store() {
   using InTag = ScalableTag<Ti, POW2>;
@@ -505,8 +539,10 @@ concept CanLoadConvertWith =
     requires(To to, const Ei* p, Options... options) {
       load_convert(to, p, options...);
     };
-static_assert(!CanLoadConvertWith<
+static_assert(CanLoadConvertWith<
               ConstraintI16Tag, int32_t, cvt::unordered_t>);
+static_assert(!CanLoadConvertWith<
+              ConstraintI16Tag, int32_t, mem::split_t>);
 
 template <typename Ti, typename Eo, typename V, typename... Options>
 concept CanStoreConvertWith =
@@ -516,6 +552,9 @@ concept CanStoreConvertWith =
 static_assert(!CanStoreConvertWith<
               ConstraintI32Tag, int16_t, ConstraintI32Vec,
               opt::merge_t<ConstraintI32Vec>>);
+static_assert(CanStoreConvertWith<
+              ConstraintI32Tag, int16_t, ConstraintI32Vec,
+              mem::split_t>);
 
 } // namespace
 
@@ -638,6 +677,59 @@ TEST(VecConversionLoadStoreTest, FloatingPointWidths) {
   CHECK_DEMOTE_SHIFT1(float64_t, float32_t);
 }
 
+template <typename Narrow>
+void check_unordered_memory_conversion_round_trip() {
+  using NarrowTag = ScalableTag<Narrow>;
+  using WideTag = Rebind<float32_t, NarrowTag>;
+  constexpr NarrowTag narrow_tag{};
+  constexpr WideTag wide_tag{};
+  const nint_t n = size(wide_tag);
+  const nint_t active = n - 3;
+  const Narrow sentinel = static_cast<Narrow>(-91.0f);
+
+  std::vector<Narrow> input(static_cast<size_t>(n));
+  std::vector<Narrow> output(static_cast<size_t>(n), sentinel);
+  for (nint_t i = 0; i < n; ++i)
+    input[static_cast<size_t>(i)] =
+        static_cast<Narrow>(float(i) - 17.0f);
+
+  const auto full =
+      load_convert(wide_tag, input.data(), cvt::unordered);
+  store_convert(
+      wide_tag, output.data(), full, cvt::unordered);
+  EXPECT_EQ(input, output);
+
+  std::fill(output.begin(), output.end(), sentinel);
+  const auto tail = load_convert(
+      wide_tag, input.data(), cvt::unordered, opt::first(active));
+  store_convert(
+      wide_tag, output.data(), tail, cvt::unordered, opt::first(active));
+  for (nint_t i = 0; i < n; ++i) {
+    EXPECT_EQ(
+        i < active ? input[static_cast<size_t>(i)] : sentinel,
+        output[static_cast<size_t>(i)]);
+  }
+
+  std::fill(output.begin(), output.end(), sentinel);
+  const auto memory_mask = mwhilelt(narrow_tag, 0, active);
+  const auto masked_tail = load_convert(
+      wide_tag, input.data(), cvt::unordered,
+      opt::masked(memory_mask));
+  store_convert(
+      wide_tag, output.data(), masked_tail, cvt::unordered,
+      opt::masked(memory_mask));
+  for (nint_t i = 0; i < n; ++i) {
+    EXPECT_EQ(
+        i < active ? input[static_cast<size_t>(i)] : sentinel,
+        output[static_cast<size_t>(i)]);
+  }
+}
+
+TEST(VecConversionLoadStoreTest, UnorderedMemoryConversionRoundTrips) {
+  check_unordered_memory_conversion_round_trip<vecops::float16_t>();
+  check_unordered_memory_conversion_round_trip<vecops::bfloat16_t>();
+}
+
 TEST(VecConversionLoadStoreTest, OrdinaryInt16MaskedLoadsZeroInactiveLanes) {
   check_ordinary_zero_loads<int16_t>();
 }
@@ -668,6 +760,10 @@ TEST(VecConversionLoadStoreTest, MaskedConvertDoesNotCrossGuardPage) {
 TEST(VecConversionLoadStoreTest, Bfloat16Routes) {
   CHECK_PROMOTE_SHIFT1(vecops::bfloat16_t, float32_t);
   CHECK_DEMOTE_SHIFT1(float32_t, vecops::bfloat16_t);
+  check_promote_load_store<vecops::bfloat16_t, float32_t, 1>();
+  check_demote_load_store<float32_t, vecops::bfloat16_t, 1>();
+  check_split_demote_store<float32_t, vecops::bfloat16_t, 0>();
+  check_split_demote_store<float32_t, vecops::bfloat16_t, 1>();
   CHECK_CONVERT_POWS(vecops::bfloat16_t, int16_t);
   CHECK_CONVERT_POWS(int16_t, vecops::bfloat16_t);
   CHECK_PROMOTE_SHIFT2(vecops::bfloat16_t, float64_t);

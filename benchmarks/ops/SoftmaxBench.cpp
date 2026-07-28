@@ -16,6 +16,11 @@
 #include "vecops/gemm/Workspace.h"
 #include "vecops/ops/Softmax.h"
 
+#ifdef VECOPS_BENCH_USE_ONEDNN
+#include <oneapi/dnnl/dnnl.h>
+#include <oneapi/dnnl/dnnl.hpp>
+#endif
+
 using namespace vecops;
 using namespace vecops::gemm;
 using namespace vecops::ops;
@@ -49,6 +54,16 @@ constexpr SoftmaxCase kCases[] = {
     {"tail", {7, 1, 1, 1}, 1},
     {"tail", {64, 513, 1, 1}, 2},
     {"tail", {16, 32, 1000, 1}, 3},
+    // Decode shapes are [batch, heads, keys].  The prefill shape is
+    // [batch, heads, queries, keys].  Softmax is over the final dimension.
+    {"llm_decode", {1, 64, 128, 1}, 3},
+    {"llm_decode", {1, 64, 640, 1}, 3},
+    {"llm_decode", {1, 128, 1152, 1}, 3},
+    {"llm_decode", {1, 64, 2048, 1}, 3},
+    {"llm_decode", {1, 128, 8320, 1}, 3},
+    {"llm_prefill", {1, 64, 128, 2048}, 4},
+    {"llm_vocab", {1, 154880, 1, 1}, 2},
+    {"llm_stress", {1, 64, 262144, 1}, 3},
 };
 
 template <typename T>
@@ -62,13 +77,22 @@ const char* dtype_name() {
 
 template <SoftmaxExpMode Mode>
 const char* mode_name() {
+#ifdef VECOPS_BENCH_USE_ONEDNN
+  return "oneDNN-accurate";
+#else
   if constexpr (Mode == SoftmaxExpMode::Strict) return "strict";
   if constexpr (Mode == SoftmaxExpMode::Fast) return "fast";
   return "estimate";
+#endif
 }
 
 template <SoftmaxExpMode Mode, typename T>
 double tolerance() {
+#ifdef VECOPS_BENCH_USE_ONEDNN
+  if constexpr (std::is_same_v<T, vecops::bfloat16_t>) return 8e-3;
+  if constexpr (std::is_same_v<T, vecops::float16_t>) return 2e-3;
+  return 3e-5;
+#else
   if constexpr (Mode == SoftmaxExpMode::Estimate) {
     if constexpr (std::is_same_v<T, vecops::bfloat16_t>) return 2e-2;
     if constexpr (std::is_same_v<T, vecops::float16_t>) return 1e-2;
@@ -78,6 +102,7 @@ double tolerance() {
   if constexpr (std::is_same_v<T, vecops::float16_t>) return 2e-3;
   if constexpr (std::is_same_v<T, vecops::float64_t>) return 2e-12;
   return 3e-5;
+#endif
 }
 
 template <typename T>
@@ -109,6 +134,41 @@ nint_t normalized_size(const SoftmaxCase& c) {
 nint_t row_count(const SoftmaxCase& c) {
   return total_elements(c) / normalized_size(c);
 }
+
+#ifdef VECOPS_BENCH_USE_ONEDNN
+dnnl::memory::dims onednn_dims(const SoftmaxCase& c) {
+  dnnl::memory::dims dims;
+  dims.reserve(static_cast<size_t>(c.rank));
+  for (int i = 0; i < c.rank; ++i) {
+    dims.push_back(c.shape[static_cast<size_t>(i)]);
+  }
+  return dims;
+}
+
+dnnl::memory::desc onednn_plain_desc(
+    const dnnl::memory::dims& dims,
+    dnnl::memory::data_type dtype) {
+  dnnl::memory::dims strides(dims.size());
+  dnnl::memory::dim stride = 1;
+  for (size_t i = dims.size(); i-- > 0;) {
+    strides[i] = stride;
+    stride *= dims[i];
+  }
+  return dnnl::memory::desc(dims, dtype, strides);
+}
+
+template <typename T>
+constexpr dnnl::memory::data_type onednn_dtype() {
+  if constexpr (std::is_same_v<T, vecops::float32_t>) {
+    return dnnl::memory::data_type::f32;
+  } else if constexpr (std::is_same_v<T, vecops::float16_t>) {
+    return dnnl::memory::data_type::f16;
+  } else {
+    static_assert(std::is_same_v<T, vecops::bfloat16_t>);
+    return dnnl::memory::data_type::bf16;
+  }
+}
+#endif
 
 template <typename T>
 void fill_input(std::vector<T>& x) {
@@ -160,6 +220,73 @@ void run_case(benchmark::State& state, const SoftmaxCase& c) {
   std::vector<T> out(static_cast<size_t>(total), T{});
   fill_input(x);
 
+#ifdef VECOPS_BENCH_USE_ONEDNN
+  static_assert(
+      std::is_same_v<T, vecops::float32_t> ||
+      std::is_same_v<T, vecops::float16_t> ||
+      std::is_same_v<T, vecops::bfloat16_t>);
+  const dnnl::engine engine(dnnl::engine::kind::cpu, 0);
+  const dnnl::stream stream(engine);
+  const auto data_md = onednn_plain_desc(onednn_dims(c), onednn_dtype<T>());
+  dnnl::primitive_attr attr;
+  attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
+  const dnnl::softmax_forward::primitive_desc pd(
+      engine,
+      dnnl::prop_kind::forward_inference,
+      dnnl::algorithm::softmax_accurate,
+      data_md,
+      data_md,
+      c.rank - 1,
+      attr);
+  const std::string impl = pd.impl_info_str();
+  const std::string required_impl = VECOPS_BENCH_ONEDNN_IMPL_TOKEN;
+  if (!required_impl.empty() &&
+      impl.find(required_impl) == std::string::npos) {
+    const std::string error =
+        "oneDNN Softmax implementation '" + impl +
+        "' does not contain required token '" + required_impl + "'";
+    state.SkipWithError(error.c_str());
+    return;
+  }
+
+  const dnnl::softmax_forward primitive(pd);
+  const dnnl::memory src_mem(data_md, engine, x.data());
+  const dnnl::memory dst_mem(data_md, engine, out.data());
+  std::vector<dnnl_exec_arg_t> exec_args = {
+      {DNNL_ARG_SRC, src_mem.get()},
+      {DNNL_ARG_DST, dst_mem.get()},
+  };
+  const size_t scratchpad_bytes = pd.scratchpad_desc().get_size();
+  dnnl::memory scratchpad_mem;
+  if (scratchpad_bytes != 0) {
+    scratchpad_mem = dnnl::memory(pd.scratchpad_desc(), engine);
+    exec_args.push_back({DNNL_ARG_SCRATCHPAD, scratchpad_mem.get()});
+  }
+  const auto invoke = [&] {
+    return dnnl_primitive_execute(
+        primitive.get(),
+        stream.get(),
+        static_cast<int>(exec_args.size()),
+        exec_args.data());
+  };
+
+  if (invoke() != dnnl_success) {
+    state.SkipWithError("oneDNN Softmax execution failed");
+    return;
+  }
+  if (!verify_output<Mode>(x, out, rows, n)) {
+    state.SkipWithError("oneDNN Softmax output verification failed");
+    return;
+  }
+  for (auto _ : state) {
+    benchmark::DoNotOptimize(x.data());
+    benchmark::DoNotOptimize(invoke());
+    benchmark::ClobberMemory();
+  }
+  state.SetLabel(impl);
+  state.counters["workspace_bytes"] =
+      benchmark::Counter(double(scratchpad_bytes));
+#else
   using ComputeT = softmax_compute_type_t<T>;
   using Config = SoftmaxConfig<ComputeT, vec::ScalableTag<ComputeT, 0>, Mode>;
   auto op = softmax(Config{});
@@ -237,6 +364,7 @@ void run_case(benchmark::State& state, const SoftmaxCase& c) {
     }
     state.counters["workspace_bytes"] = benchmark::Counter(double(workspace.requested_capacity()));
   }
+#endif
 
   const double bytes_per_iter = double(total * sizeof(T) * 2);
   state.SetItemsProcessed(state.iterations() * total);
@@ -275,17 +403,27 @@ void register_mode_dtype() {
 
 template <typename T>
 void register_dtype() {
+#ifdef VECOPS_BENCH_USE_ONEDNN
+  register_mode_dtype<SoftmaxExpMode::Estimate, T>();
+#else
   register_mode_dtype<SoftmaxExpMode::Strict, T>();
   register_mode_dtype<SoftmaxExpMode::Fast, T>();
   register_mode_dtype<SoftmaxExpMode::Estimate, T>();
+#endif
 }
 
 void register_softmax_benchmarks() {
+#ifdef VECOPS_BENCH_USE_ONEDNN
+  register_dtype<vecops::float32_t>();
+  register_dtype<vecops::float16_t>();
+  register_dtype<vecops::bfloat16_t>();
+#else
   register_dtype<vecops::float32_t>();
   register_dtype<vecops::float64_t>();
   register_dtype<vecops::float16_t>();
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
   register_dtype<vecops::bfloat16_t>();
+#endif
 #endif
 }
 

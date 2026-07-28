@@ -15,6 +15,11 @@
 #include "vecops/gemm/Workspace.h"
 #include "vecops/ops/LayerNorm.h"
 
+#ifdef VECOPS_BENCH_USE_ONEDNN
+#include <oneapi/dnnl/dnnl.h>
+#include <oneapi/dnnl/dnnl.hpp>
+#endif
+
 using namespace vecops;
 using namespace vecops::gemm;
 using namespace vecops::ops;
@@ -51,6 +56,18 @@ constexpr LayerNormCase kCases[] = {
     {"tail", {7, 1, 1, 1}, 1},
     {"tail", {64, 513, 1, 1}, 2},
     {"tail", {16, 32, 1000, 1}, 3},
+    // Representative RMSNorm/LayerNorm dimensions from current open LLMs.
+    // The first dimension is the number of tokens (or flattened batch x
+    // sequence rows); normalization is over the final hidden dimension.
+    {"llm_decode", {1, 4096, 1, 1}, 2},
+    {"llm_decode", {1, 6144, 1, 1}, 2},
+    {"llm_decode", {1, 7168, 1, 1}, 2},
+    {"llm_batch", {128, 4096, 1, 1}, 2},
+    {"llm_batch", {128, 6144, 1, 1}, 2},
+    {"llm_batch", {128, 7168, 1, 1}, 2},
+    {"llm_prefill", {4096, 4096, 1, 1}, 2},
+    {"llm_prefill", {4096, 6144, 1, 1}, 2},
+    {"llm_prefill", {4096, 7168, 1, 1}, 2},
 };
 
 template <typename T>
@@ -97,6 +114,35 @@ nint_t row_count(const LayerNormCase& c) {
   return total_elements(c) / normalized_size(c);
 }
 
+#ifdef VECOPS_BENCH_USE_ONEDNN
+dnnl::memory::dims onednn_dims(const LayerNormCase& c) {
+  // oneDNN's AArch64 JIT LayerNorm requires at least two dimensions.
+  // A rank-one normalized vector is equivalently one row of length N; this
+  // descriptor reshape is zero-copy and happens outside the timed region.
+  if (c.rank == 1) {
+    return {1, c.shape[0]};
+  }
+  dnnl::memory::dims dims;
+  dims.reserve(static_cast<size_t>(c.rank));
+  for (int i = 0; i < c.rank; ++i) {
+    dims.push_back(c.shape[static_cast<size_t>(i)]);
+  }
+  return dims;
+}
+
+dnnl::memory::desc onednn_plain_desc(
+    const dnnl::memory::dims& dims,
+    dnnl::memory::data_type dtype) {
+  dnnl::memory::dims strides(dims.size());
+  dnnl::memory::dim stride = 1;
+  for (size_t i = dims.size(); i-- > 0;) {
+    strides[i] = stride;
+    stride *= dims[i];
+  }
+  return dnnl::memory::desc(dims, dtype, strides);
+}
+#endif
+
 template <typename T>
 void fill_inputs(std::vector<T>& x, std::vector<T>& scale, std::vector<T>& bias) {
   for (size_t i = 0; i < x.size(); ++i) {
@@ -109,11 +155,11 @@ void fill_inputs(std::vector<T>& x, std::vector<T>& scale, std::vector<T>& bias)
   }
 }
 
-template <typename T>
+template <typename T, typename ScaleT, typename BiasT>
 bool verify_output(
     const std::vector<T>& x,
-    const std::vector<T>& scale,
-    const std::vector<T>& bias,
+    const std::vector<ScaleT>& scale,
+    const std::vector<BiasT>& bias,
     const std::vector<T>& out,
     nint_t rows,
     nint_t n) {
@@ -157,6 +203,82 @@ void run_case(benchmark::State& state, const LayerNormCase& c) {
   std::vector<T> out(static_cast<size_t>(total), T{});
   fill_inputs(x, scale, bias);
 
+#ifdef VECOPS_BENCH_USE_ONEDNN
+  static_assert(std::is_same_v<T, vecops::float32_t>);
+  const dnnl::engine engine(dnnl::engine::kind::cpu, 0);
+  const dnnl::stream stream(engine);
+  const auto data_md =
+      onednn_plain_desc(onednn_dims(c), dnnl::memory::data_type::f32);
+  const auto parameter_md = onednn_plain_desc(
+      dnnl::memory::dims{n}, dnnl::memory::data_type::f32);
+  dnnl::primitive_attr attr;
+  attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
+  constexpr float eps = 1e-5f;
+  const auto flags =
+      dnnl::normalization_flags::use_scale |
+      dnnl::normalization_flags::use_shift;
+  const dnnl::layer_normalization_forward::primitive_desc pd(
+      engine,
+      dnnl::prop_kind::forward_inference,
+      data_md,
+      data_md,
+      dnnl::memory::data_type::f32,
+      eps,
+      flags,
+      attr);
+  const std::string impl = pd.impl_info_str();
+  const std::string required_impl = VECOPS_BENCH_ONEDNN_IMPL_TOKEN;
+  if (!required_impl.empty() &&
+      impl.find(required_impl) == std::string::npos) {
+    const std::string error =
+        "oneDNN LayerNorm implementation '" + impl +
+        "' does not contain required token '" + required_impl + "'";
+    state.SkipWithError(error.c_str());
+    return;
+  }
+
+  const dnnl::layer_normalization_forward primitive(pd);
+  const dnnl::memory src_mem(data_md, engine, x.data());
+  const dnnl::memory dst_mem(data_md, engine, out.data());
+  const dnnl::memory scale_mem(parameter_md, engine, scale.data());
+  const dnnl::memory shift_mem(parameter_md, engine, bias.data());
+  std::vector<dnnl_exec_arg_t> exec_args = {
+      {DNNL_ARG_SRC, src_mem.get()},
+      {DNNL_ARG_SCALE, scale_mem.get()},
+      {DNNL_ARG_SHIFT, shift_mem.get()},
+      {DNNL_ARG_DST, dst_mem.get()},
+  };
+  const size_t scratchpad_bytes = pd.scratchpad_desc().get_size();
+  dnnl::memory scratchpad_mem;
+  if (scratchpad_bytes != 0) {
+    scratchpad_mem = dnnl::memory(pd.scratchpad_desc(), engine);
+    exec_args.push_back({DNNL_ARG_SCRATCHPAD, scratchpad_mem.get()});
+  }
+  const auto invoke = [&] {
+    return dnnl_primitive_execute(
+        primitive.get(),
+        stream.get(),
+        static_cast<int>(exec_args.size()),
+        exec_args.data());
+  };
+
+  if (invoke() != dnnl_success) {
+    state.SkipWithError("oneDNN LayerNorm execution failed");
+    return;
+  }
+  if (!verify_output(x, scale, bias, out, rows, n)) {
+    state.SkipWithError("oneDNN LayerNorm output verification failed");
+    return;
+  }
+  for (auto _ : state) {
+    benchmark::DoNotOptimize(x.data());
+    benchmark::DoNotOptimize(invoke());
+    benchmark::ClobberMemory();
+  }
+  state.SetLabel(impl);
+  state.counters["workspace_bytes"] =
+      benchmark::Counter(double(scratchpad_bytes));
+#else
   using ComputeT = layernorm_compute_type_t<T>;
   constexpr ComputeT eps = ComputeT(1e-5);
   auto s_t = make_tensor<1>(scale.data(), {n});
@@ -238,8 +360,16 @@ void run_case(benchmark::State& state, const LayerNormCase& c) {
     }
     state.counters["workspace_bytes"] = benchmark::Counter(double(workspace.requested_capacity()));
   }
+#endif
 
-  const double bytes_per_iter = double(total * sizeof(T) * 2 + n * sizeof(T) * 2);
+  const double parameter_bytes =
+#ifdef VECOPS_BENCH_USE_ONEDNN
+      double(n * sizeof(float) * 2);
+#else
+      double(n * sizeof(T) * 2);
+#endif
+  const double bytes_per_iter =
+      double(total * sizeof(T) * 2) + parameter_bytes;
   state.SetItemsProcessed(state.iterations() * total);
   state.SetBytesProcessed(state.iterations() * static_cast<int64_t>(bytes_per_iter));
   state.counters["rank"] = benchmark::Counter(double(c.rank));
@@ -274,11 +404,15 @@ void register_dtype() {
 }
 
 void register_layernorm_benchmarks() {
+#ifdef VECOPS_BENCH_USE_ONEDNN
+  register_dtype<float32_t>();
+#else
   register_dtype<float32_t>();
   register_dtype<float64_t>();
   register_dtype<vecops::float16_t>();
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
   register_dtype<vecops::bfloat16_t>();
+#endif
 #endif
 }
 
