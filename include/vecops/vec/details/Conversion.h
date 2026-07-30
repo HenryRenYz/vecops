@@ -1,0 +1,261 @@
+#ifndef VECOPS_VEC_DETAILS_CONVERSION_H
+#define VECOPS_VEC_DETAILS_CONVERSION_H
+
+/**
+ * @file Conversion.h
+ * @brief Conversion infrastructure: compile-time options validation
+ * (valid_conversion_options), mask conversion validation, and the
+ * GenericImpl fallback (ConvertOp::call) that performs lane-by-lane
+ * element conversion using the scalar convert/ wrap_convert utilities.
+ */
+
+#include "vecops/vec/details/Basic.h"
+#include "vecops/vec/details/Options.h"
+#include "vecops/util/ScalarConvert.h"
+
+namespace vecops::vec::details {
+
+/* **************************************************************************** */
+//    Compile-time validation for conversion options and mask conversion        //
+/* **************************************************************************** */
+
+template <VectorTag ToTag, VectorTag FromTag>
+consteval bool valid_mask_conversion() {
+  if constexpr (is_fixed_tag<ToTag> && is_fixed_tag<FromTag>) {
+    return fixed_lanes<ToTag> == fixed_lanes<FromTag>;
+  } else if constexpr (is_scalable_tag<ToTag> && is_scalable_tag<FromTag>) {
+    return scale_power<ToTag> ==
+        scale_power<FromTag> + element_size_shift(
+            sizeof(ElementOf<FromTag>), sizeof(ElementOf<ToTag>));
+  } else {
+    return false;
+  }
+}
+
+template <VectorTag ToTag, VectorTag FromTag, typename... Options>
+consteval bool valid_conversion_options() {
+  using From = ElementOf<FromTag>;
+  using To = ElementOf<ToTag>;
+  constexpr std::size_t layout_count =
+      option_count<IsOrderedOption, Options...> +
+      option_count<IsUnorderedOption, Options...> +
+      option_count<IsLaneOption, Options...>;
+  constexpr std::size_t value_count =
+      option_count<IsSaturateOption, Options...> +
+      option_count<IsWrapOption, Options...>;
+  constexpr std::size_t population_count =
+      option_count<IsZeroOption, Options...> +
+      option_count<IsVectorMergeOption, Options...> +
+      option_count<IsScalarMergeOption, Options...>;
+  constexpr std::size_t masked_count =
+      option_count<IsMaskedOption, Options...>;
+  constexpr std::size_t unmasked_count =
+      option_count<IsUnmaskedOption, Options...>;
+  constexpr std::size_t active_count = masked_count + unmasked_count;
+  constexpr bool supported_options =
+      ((IsOrderedOption<std::remove_cvref_t<Options>>::value ||
+        IsUnorderedOption<std::remove_cvref_t<Options>>::value ||
+        IsLaneOption<std::remove_cvref_t<Options>>::value ||
+        IsSaturateOption<std::remove_cvref_t<Options>>::value ||
+        IsWrapOption<std::remove_cvref_t<Options>>::value ||
+        IsUnmaskedOption<std::remove_cvref_t<Options>>::value ||
+        is_masked_option_for<ToTag, Options> ||
+        is_vector_population_option_for<ToTag, Options>) && ...);
+  constexpr bool wraps = option_count<IsWrapOption, Options...> == 1;
+  constexpr bool lane_layout = option_count<IsLaneOption, Options...> == 1;
+  constexpr bool ordinary_layout = !lane_layout;
+  if constexpr (!supported_options || layout_count > 1 || value_count > 1 ||
+                population_count > 1 || active_count > 1) {
+    return false;
+  } else if constexpr (
+      wraps && !(std::integral<From> && std::integral<To> &&
+                 sizeof(To) < sizeof(From))) {
+    return false;
+  } else if constexpr (ordinary_layout) {
+    return valid_mask_conversion<ToTag, FromTag>() &&
+        (population_count == 0 || masked_count == 1);
+  } else {
+    constexpr int ratio = sizeof(From) < sizeof(To)
+        ? static_cast<int>(sizeof(To) / sizeof(From))
+        : static_cast<int>(sizeof(From) / sizeof(To));
+    constexpr int phase = [] {
+      int found = -1;
+      ([]<typename Option>(int& value) {
+        if constexpr (IsLaneOption<Option>::value)
+          value = IsLaneOption<Option>::phase;
+      }.template operator()<std::remove_cvref_t<Options>>(found), ...);
+      return found;
+    }();
+    return active_count == 0 && same_logical_bytes<ToTag, FromTag> &&
+        (ratio == 2 || ratio == 4 || ratio == 8) &&
+        (phase == 0 || (phase == 1 && ratio == 2)) &&
+        (sizeof(From) > sizeof(To) || population_count == 0);
+  }
+}
+
+template <typename... Options>
+inline constexpr bool conversion_uses_wrap =
+    option_count<IsWrapOption, Options...> == 1;
+
+template <typename... Options>
+inline constexpr bool conversion_uses_lane =
+    option_count<IsLaneOption, Options...> == 1;
+
+template <typename... Options>
+inline constexpr bool conversion_is_masked =
+    option_count<IsMaskedOption, Options...> == 1;
+
+template <typename... Options>
+consteval int conversion_lane_phase() {
+  int found = -1;
+  ([]<typename Option>(int& value) {
+    if constexpr (IsLaneOption<Option>::value)
+      value = IsLaneOption<Option>::phase;
+  }.template operator()<std::remove_cvref_t<Options>>(found), ...);
+  return found;
+}
+
+template <typename Backend, VectorTag Tag, typename... Options>
+VECOPS_ALWAYS_INLINE Vec<Tag> conversion_population(
+    Tag tag, Options&&... options) {
+  if constexpr (option_count<IsVectorMergeOption, Options...> == 1) {
+    return find_option<IsVectorMergeOption>(
+        std::forward<Options>(options)...).value;
+  } else if constexpr (option_count<IsScalarMergeOption, Options...> == 1) {
+    return execute(
+        FillOp{}, tag,
+        find_option<IsScalarMergeOption>(
+            std::forward<Options>(options)...).value);
+  } else {
+    return execute(FillOp{}, tag, ElementOf<Tag>{});
+  }
+}
+
+template <typename Backend, VectorTag Tag>
+VECOPS_ALWAYS_INLINE ElementOf<Tag> conversion_get_vec_lane(
+    Tag tag, Vec<Tag> value, nint_t lane) {
+  const nint_t word_lanes = native_word_size(tag);
+  return visit_runtime_word<Backend>(
+      tag, lane / word_lanes, [&]<nint_t Index>() {
+        return execute_word<Index, Backend>(
+            GetVecLaneOp{}, tag,
+            ::vecops::vec::get_word<Index>(tag, value),
+            lane % word_lanes);
+      });
+}
+
+template <typename Backend, VectorTag Tag>
+VECOPS_ALWAYS_INLINE Vec<Tag> conversion_set_vec_lane(
+    Tag tag, Vec<Tag> value, nint_t lane, ElementOf<Tag> replacement) {
+  const nint_t word_lanes = native_word_size(tag);
+  return visit_runtime_word<Backend>(
+      tag, lane / word_lanes, [&]<nint_t Index>() -> Vec<Tag> {
+        return ::vecops::vec::set_word<Index>(
+            tag, value,
+            execute_word<Index, Backend>(
+                SetVecLaneOp{}, tag,
+                ::vecops::vec::get_word<Index>(tag, value),
+                lane % word_lanes, replacement));
+      });
+}
+
+template <typename Backend, VectorTag Tag>
+VECOPS_ALWAYS_INLINE bool conversion_get_mask_lane(
+    Tag tag, Mask<Tag> value, nint_t lane) {
+  const nint_t word_lanes = native_word_size(tag);
+  return visit_runtime_word<Backend>(
+      tag, lane / word_lanes, [&]<nint_t Index>() {
+        return execute_word<Index, Backend>(
+            GetMaskLaneOp{}, tag,
+            ::vecops::vec::get_word<Index>(tag, value),
+            lane % word_lanes);
+      });
+}
+
+template <typename Backend, VectorTag Tag>
+VECOPS_ALWAYS_INLINE Mask<Tag> conversion_set_mask_lane(
+    Tag tag, Mask<Tag> value, nint_t lane, bool replacement) {
+  const nint_t word_lanes = native_word_size(tag);
+  return visit_runtime_word<Backend>(
+      tag, lane / word_lanes, [&]<nint_t Index>() -> Mask<Tag> {
+        return ::vecops::vec::set_word<Index>(
+            tag, value,
+            execute_word<Index, Backend>(
+                SetMaskLaneOp{}, tag,
+                ::vecops::vec::get_word<Index>(tag, value),
+                lane % word_lanes, replacement));
+      });
+}
+
+/* **************************************************************************** */
+//    GenericImpl for ConvertOp: lane-by-lane element conversion                //
+/* **************************************************************************** */
+
+template <typename Backend, VectorTag ToTag>
+struct GenericImpl<Backend, ConvertOp, ToTag> {
+  template <VectorTag FromTag, typename... Options>
+    requires (valid_conversion_options<ToTag, FromTag, Options...>())
+  static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
+      ConvertOp, ToTag to, FromTag from, Vec<FromTag> value,
+      Options&&... options) {
+    constexpr bool lane_layout = conversion_uses_lane<Options...>;
+    constexpr bool masked = conversion_is_masked<Options...>;
+    constexpr bool wraps = conversion_uses_wrap<Options...>;
+    constexpr bool narrows =
+        sizeof(ElementOf<FromTag>) > sizeof(ElementOf<ToTag>);
+    constexpr int ratio = sizeof(ElementOf<FromTag>) < sizeof(ElementOf<ToTag>)
+        ? static_cast<int>(sizeof(ElementOf<ToTag>) / sizeof(ElementOf<FromTag>))
+        : static_cast<int>(sizeof(ElementOf<FromTag>) / sizeof(ElementOf<ToTag>));
+    constexpr int phase = lane_layout
+        ? conversion_lane_phase<Options...>() : 0;
+    auto result = [&] {
+      if constexpr ((lane_layout && narrows) || masked)
+        return conversion_population<Backend>(
+            to, std::forward<Options>(options)...);
+      else
+        return execute(FillOp{}, to, ElementOf<ToTag>{});
+    }();
+    const nint_t converted_lanes = lane_layout && narrows
+        ? size(from) : size(to);
+    for (nint_t lane = 0; lane < converted_lanes; ++lane) {
+      const nint_t input_lane = lane_layout && !narrows
+          ? ratio * lane + phase : lane;
+      const nint_t output_lane = lane_layout && narrows
+          ? ratio * lane + phase : lane;
+      if constexpr (masked) {
+        const auto& output_mask = find_option<IsMaskedOption>(
+            std::forward<Options>(options)...).value;
+        if (!conversion_get_mask_lane<Backend>(to, output_mask, output_lane))
+          continue;
+      }
+      const auto input = conversion_get_vec_lane<Backend>(
+          from, value, input_lane);
+      const auto converted = [&] {
+        if constexpr (wraps) {
+          return ::vecops::wrap_convert<ElementOf<ToTag>>(input);
+        } else {
+          return ::vecops::convert<ElementOf<ToTag>, ElementOf<FromTag>>(input);
+        }
+      }();
+      result = conversion_set_vec_lane<Backend>(
+          to, result, output_lane, converted);
+    }
+    return result;
+  }
+
+  template <VectorTag FromTag>
+    requires (valid_mask_conversion<ToTag, FromTag>())
+  static VECOPS_ALWAYS_INLINE Mask<ToTag> call(
+      ConvertOp, ToTag to, FromTag from, Mask<FromTag> value) {
+    auto result = execute(MaskFillOp{}, to, false);
+    for (nint_t lane = 0; lane < size(to); ++lane) {
+      const bool bit = conversion_get_mask_lane<Backend>(from, value, lane);
+      result = conversion_set_mask_lane<Backend>(to, result, lane, bit);
+    }
+    return result;
+  }
+};
+
+} // namespace vecops::vec::details
+
+#endif // VECOPS_VEC_DETAILS_CONVERSION_H

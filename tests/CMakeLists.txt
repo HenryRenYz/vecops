@@ -117,7 +117,7 @@ file(GLOB _GDB_SCRIPTS "${CMAKE_SOURCE_DIR}/scripts/*.py")
 function(add_multiarch_executable NAME)
     set(options "")
     set(oneValueArgs "")
-    set(multiValueArgs FILES ARCH DEFINITIONS)
+    set(multiValueArgs FILES ARCH DEFINITIONS LABELS)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     if(NOT ARG_ARCH)
@@ -148,7 +148,9 @@ function(add_multiarch_executable NAME)
             )
         endif()
         target_link_libraries(${TARGET_NAME} PRIVATE vecops gtest gtest_main)
-        gtest_discover_tests(${TARGET_NAME})
+        string(JOIN "+" _GTEST_LABELS ${ARG_LABELS})
+        gtest_discover_tests(${TARGET_NAME}
+            PROPERTIES LABELS "${_GTEST_LABELS}")
 
         # ── GDB pretty-printer auto-load ───────────────────
         list(LENGTH _GDB_SCRIPTS _NUM_GDB_SCRIPTS)
@@ -217,33 +219,118 @@ add_multiarch_executable(DataAccessTest
     ARCH Scalar Native
 )
 
-add_multiarch_executable(VecBaseTest
-    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BaseTest.cpp 
-    ARCH Scalar
-)
-
-set(NVEC_BASE_ARCH ${VECOPS_ARCH_LIST})
+set(VEC_BASE_ARCH ${VECOPS_ARCH_LIST})
 if(VECOPS_ARCH_FAMILY STREQUAL "ARM")
     if(VECOPS_NATIVE_FIXED_SVE_BITS)
-        list(APPEND NVEC_BASE_ARCH NativeFixedSVE)
+        list(APPEND VEC_BASE_ARCH NativeFixedSVE)
     endif()
 endif()
-add_multiarch_executable(NVecBaseTest
-    FILES ${CMAKE_CURRENT_SOURCE_DIR}/nvec/BaseTest.cpp
-    ARCH ${NVEC_BASE_ARCH}
+add_multiarch_executable(VecBaseTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BaseTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
 )
-add_multiarch_executable(NVecArithmeticTest
-    FILES ${CMAKE_CURRENT_SOURCE_DIR}/nvec/ArithmeticTest.cpp
-    ARCH ${NVEC_BASE_ARCH}
+add_multiarch_executable(VecOptionsTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/OptionsTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
 )
-add_multiarch_executable(NVecBasicTest
-    FILES ${CMAKE_CURRENT_SOURCE_DIR}/nvec/BasicTest.cpp
-    ARCH ${NVEC_BASE_ARCH}
+add_multiarch_executable(VecArithmeticTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ArithmeticTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
 )
-add_multiarch_executable(NVecShuffleTest
-    FILES ${CMAKE_CURRENT_SOURCE_DIR}/nvec/ShuffleTest.cpp
-    ARCH ${NVEC_BASE_ARCH}
+add_multiarch_executable(VecUnaryArithmeticTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/UnaryArithmeticTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
 )
+add_multiarch_executable(VecFloatingUnaryTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/FloatingUnaryTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
+)
+add_multiarch_executable(VecMathTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/MathTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
+)
+add_multiarch_executable(VecMemoryTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/MemoryTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
+)
+add_multiarch_executable(VecPrefetchTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/PrefetchTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
+)
+add_multiarch_executable(VecMaskConversionTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/MaskConversionTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec vec_conversion
+)
+add_multiarch_executable(VecConversionTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ConversionTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec vec_conversion
+)
+add_multiarch_executable(VecConversionMemoryTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ConversionMemoryTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec vec_conversion
+)
+add_multiarch_executable(VecReductionTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ReductionTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
+)
+add_multiarch_executable(VecBitTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BitTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
+)
+add_multiarch_executable(VecComparisonTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ComparisonTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
+)
+add_multiarch_executable(VecBasicTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/BasicTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
+)
+add_multiarch_executable(VecShuffleTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ShuffleTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
+)
+add_multiarch_executable(VecTaglessTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/TaglessTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
+)
+
+add_multiarch_executable(VecOverloadContractTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/OverloadContractTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
+)
+
+foreach(_SOURCE_BYTES IN ITEMS 1 2 4 8)
+    add_multiarch_executable(VecConversionMatrix${_SOURCE_BYTES}Test
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ConversionMatrixTest.cpp
+        ARCH ${VEC_BASE_ARCH}
+        DEFINITIONS VECOPS_TEST_SOURCE_BYTES=${_SOURCE_BYTES}
+        LABELS vec vec_conversion vec_exhaustive
+    )
+    add_multiarch_executable(VecConversionMemoryMatrix${_SOURCE_BYTES}Test
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ConversionMemoryMatrixTest.cpp
+        ARCH ${VEC_BASE_ARCH}
+        DEFINITIONS VECOPS_TEST_SOURCE_BYTES=${_SOURCE_BYTES}
+        LABELS vec vec_conversion vec_exhaustive
+    )
+endforeach()
 
 add_multiarch_executable(VecTransformTest
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/gemm/VecTransformTest.cpp
@@ -260,46 +347,4 @@ add_multiarch_executable(SoftmaxTest
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/SoftmaxTest.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
     ARCH Native Scalar
-)
-
-set(VECOPS_VEC_TESTS BasicTest LoadStoreTest ArithTest ConversionTest ConversionLoadStoreTest InterleavedConversionTest ShuffleTest MaskTest MaskConversionsTest MathTest SubnormalConversionTest)
-foreach(TEST ${VECOPS_VEC_TESTS})
-    add_multiarch_executable(Vec${TEST}
-        FILES
-            ${CMAKE_CURRENT_SOURCE_DIR}/vec/${TEST}.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
-        ARCH ${VECOPS_ARCH_LIST}
-    )
-endforeach()
-
-add_multiarch_executable(VecMathAssumeValidTest
-    FILES
-        ${CMAKE_CURRENT_SOURCE_DIR}/vec/MathTest.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
-    ARCH ${VECOPS_ARCH_LIST}
-    DEFINITIONS VECOPS_MATH_ASSUME_VALID_INPUTS=1
-)
-
-add_multiarch_executable(VecMathPreserveSubnormalTest
-    FILES
-        ${CMAKE_CURRENT_SOURCE_DIR}/vec/MathTest.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
-    ARCH ${VECOPS_ARCH_LIST}
-    DEFINITIONS VECOPS_PRESERVE_SUBNORMALS=1
-)
-
-add_multiarch_executable(VecMathAssumeValidPreserveSubnormalTest
-    FILES
-        ${CMAKE_CURRENT_SOURCE_DIR}/vec/MathTest.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
-    ARCH ${VECOPS_ARCH_LIST}
-    DEFINITIONS VECOPS_MATH_ASSUME_VALID_INPUTS=1 VECOPS_PRESERVE_SUBNORMALS=1
-)
-
-add_multiarch_executable(VecSubnormalConversionPreserveTest
-    FILES
-        ${CMAKE_CURRENT_SOURCE_DIR}/vec/SubnormalConversionTest.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
-    ARCH ${VECOPS_ARCH_LIST}
-    DEFINITIONS VECOPS_PRESERVE_SUBNORMALS=1
 )

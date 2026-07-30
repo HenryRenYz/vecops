@@ -661,7 +661,7 @@ struct ScalarSMEFp32Kernel {
 template <typename Kernel> struct KernelTraits;
 
 template <> struct KernelTraits<ScalarAMXBf16Kernel> {
-  using TA = bfloat16_t; using TB = bfloat16_t; using TC = float;
+  using TA = vecops::bfloat16_t; using TB = vecops::bfloat16_t; using TC = float;
 };
 template <> struct KernelTraits<ScalarSMEFp32Kernel> {
   using TA = float; using TB = float; using TC = float;
@@ -746,7 +746,7 @@ protected:
     auto shape_mnk = make_shape(M, N, K);
     Kernel kernel;
     Scheduler scheduler{};
-    gemm(shape_mnk,
+    vecops::array::gemm(shape_mnk,
          A_data.data(), a_layout,
          B_data.data(), b_layout,
          C_data.data(), c_layout,
@@ -849,7 +849,7 @@ protected:
     auto shape_mnk = make_shape(M, N, K);
     auto tiles = make_shape(kMt, kNt, kKt);
     Scheduler scheduler{};
-    gemm(shape_mnk,
+    vecops::array::gemm(shape_mnk,
          A_packed.data(), a_packed_layout,
          B_packed.data(), b_packed_layout,
          C_out.data(), c_layout,
@@ -1034,9 +1034,9 @@ TEST_F(GemmTest, SchedulerConsistency) {
 
     SchedulerMaxCases maxS;
     SchedulerMinCases minS;
-    gemm(shape_mnk, A_data.data(), a_l, B_data.data(), b_l, C_max.data(), c_l,
+    vecops::array::gemm(shape_mnk, A_data.data(), a_l, B_data.data(), b_l, C_max.data(), c_l,
          ts, kernel, maxS, identity_epilog);
-    gemm(shape_mnk, A_data.data(), a_l, B_data.data(), b_l, C_min.data(), c_l,
+    vecops::array::gemm(shape_mnk, A_data.data(), a_l, B_data.data(), b_l, C_min.data(), c_l,
          ts, kernel, minS, identity_epilog);
 
     for (int i = 0; i < M * N; ++i)
@@ -1337,7 +1337,7 @@ TEST_F(GemmTest, SMEFp32_PackGemm_ReLU) {
     ScalarSMEFp32Kernel kernel;
     kernel.pack_A(A_in.data(), lt::A_row(M,K), A_p.data(), a_pl);
     kernel.pack_B(B_in.data(), lt::B_col(N,K), B_p.data(), b_pl);
-    gemm(make_shape(M,N,K), A_p.data(), a_pl, B_p.data(), b_pl, C_out.data(), lt::C_row(M,N),
+    vecops::array::gemm(make_shape(M,N,K), A_p.data(), a_pl, B_p.data(), b_pl, C_out.data(), lt::C_row(M,N),
          make_shape(kMt,kNt,kKt), kernel, SchedulerMaxCases{}, relu);
     size_t total = size_t(M)*N;
     for (size_t i = 0; i < total; ++i)
@@ -1350,7 +1350,7 @@ TEST_F(GemmTest, AMXBf16_PackGemm_Row) {
   // AMX B packed layout uses Wd interleaving incompatible with simple 2D
   // kernel stride — only pack A here, keep B in runtime layout
   for (auto [M,N,K] : g_small_sizes) {
-    using TA = bfloat16_t; using TB = bfloat16_t; using TC = float;
+    using TA = vecops::bfloat16_t; using TB = vecops::bfloat16_t; using TC = float;
     constexpr int kMt = ScalarAMXBf16Kernel::Mtile;
     constexpr int kNt = ScalarAMXBf16Kernel::Ntile;
     constexpr int kKt = ScalarAMXBf16Kernel::Ktile;
@@ -1372,7 +1372,7 @@ TEST_F(GemmTest, AMXBf16_PackGemm_Row) {
     ScalarAMXBf16Kernel kernel;
     kernel.pack_A(A_in.data(), lt::A_row(M,K), A_p.data(), a_pl);
 
-    gemm(make_shape(M,N,K), A_p.data(), a_pl,
+    vecops::array::gemm(make_shape(M,N,K), A_p.data(), a_pl,
          B_in.data(), lt::B_col(N,K),
          C_out.data(), lt::C_row(M,N),
          make_shape(kMt,kNt,kKt), kernel, SchedulerMaxCases{}, identity_epilog);
@@ -1408,7 +1408,7 @@ TEST_F(GemmTest, SMEFp32_PackGemm_AOnly) {
     std::vector<TA> A_p(Mtiled*Ktiled*kMt*kKt);
     ScalarSMEFp32Kernel kernel;
     kernel.pack_A(A_in.data(), lt::A_row(M,K), A_p.data(), a_pl);
-    gemm(make_shape(M,N,K), A_p.data(), a_pl,
+    vecops::array::gemm(make_shape(M,N,K), A_p.data(), a_pl,
          B_in.data(), lt::B_col(N,K), C_out.data(), lt::C_row(M,N),
          make_shape(kMt,kNt,kKt), kernel, SchedulerMaxCases{}, identity_epilog);
     size_t total = size_t(M)*N;
@@ -1439,7 +1439,7 @@ TEST_F(GemmTest, SMEFp32_PackGemm_BOnly) {
     std::vector<TB> B_p(Ntiled*Ktiled*kNt*kKt);
     ScalarSMEFp32Kernel kernel;
     kernel.pack_B(B_in.data(), lt::B_col(N,K), B_p.data(), b_pl);
-    gemm(make_shape(M,N,K), A_in.data(), lt::A_row(M,K),
+    vecops::array::gemm(make_shape(M,N,K), A_in.data(), lt::A_row(M,K),
          B_p.data(), b_pl, C_out.data(), lt::C_row(M,N),
          make_shape(kMt,kNt,kKt), kernel, SchedulerMaxCases{}, identity_epilog);
     size_t total = size_t(M)*N;
@@ -1451,7 +1451,7 @@ TEST_F(GemmTest, SMEFp32_PackGemm_BOnly) {
 
 TEST_F(GemmTest, AMXBf16_PackGemm_BOnly) {
   for (auto [M,N,K] : g_small_sizes) {
-    using TA = bfloat16_t; using TB = bfloat16_t; using TC = float;
+    using TA = vecops::bfloat16_t; using TB = vecops::bfloat16_t; using TC = float;
     constexpr int kMt = ScalarAMXBf16Kernel::Mtile;
     constexpr int kNt = ScalarAMXBf16Kernel::Ntile;
     constexpr int kKt = ScalarAMXBf16Kernel::Ktile;
@@ -1473,7 +1473,7 @@ TEST_F(GemmTest, AMXBf16_PackGemm_BOnly) {
     std::vector<TB> B_p(Ntiled*Ktiled*b_d2*b_d3);
     ScalarAMXBf16Kernel kernel;
     kernel.pack_B(B_in.data(), lt::B_col(N,K), B_p.data(), b_pl);
-    gemm(make_shape(M,N,K), A_in.data(), lt::A_row(M,K),
+    vecops::array::gemm(make_shape(M,N,K), A_in.data(), lt::A_row(M,K),
          B_p.data(), b_pl, C_out.data(), lt::C_row(M,N),
          make_shape(kMt,kNt,kKt), kernel, SchedulerMaxCases{}, identity_epilog);
     size_t total = size_t(M)*N;
@@ -1485,7 +1485,7 @@ TEST_F(GemmTest, AMXBf16_PackGemm_BOnly) {
 
 TEST_F(GemmTest, AMXBf16_PackGemm_Both) {
   for (auto [M,N,K] : g_small_sizes) {
-    using TA = bfloat16_t; using TB = bfloat16_t; using TC = float;
+    using TA = vecops::bfloat16_t; using TB = vecops::bfloat16_t; using TC = float;
     constexpr int kMt = ScalarAMXBf16Kernel::Mtile;
     constexpr int kNt = ScalarAMXBf16Kernel::Ntile;
     constexpr int kKt = ScalarAMXBf16Kernel::Ktile;
@@ -1514,7 +1514,7 @@ TEST_F(GemmTest, AMXBf16_PackGemm_Both) {
     ScalarAMXBf16Kernel kernel;
     kernel.pack_A(A_in.data(), lt::A_row(M,K), A_p.data(), a_pl);
     kernel.pack_B(B_in.data(), lt::B_col(N,K), B_p.data(), b_pl);
-    gemm(make_shape(M,N,K), A_p.data(), a_pl, B_p.data(), b_pl,
+    vecops::array::gemm(make_shape(M,N,K), A_p.data(), a_pl, B_p.data(), b_pl,
          C_out.data(), lt::C_row(M,N),
          make_shape(kMt,kNt,kKt), kernel, SchedulerMaxCases{}, identity_epilog);
     size_t total = size_t(M)*N;
@@ -1522,13 +1522,6 @@ TEST_F(GemmTest, AMXBf16_PackGemm_Both) {
       EXPECT_NEAR(float(C_out[i]), float(C_ref[i]), 1e-2f)
           << "AMX both M=" << M << " N=" << N << " K=" << K;
   }
-}
-
-TEST_F(GemmTest, Playground) {
-  using namespace vecops::gemm;
-  constexpr auto a = details::make_storage_offset<Const<2>, Const<4>, Dynamic<2>>();
-  constexpr int nel = a.second;
-  static_assert(nel == 3);
 }
 
 // ============================================================================

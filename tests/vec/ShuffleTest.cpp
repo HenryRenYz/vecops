@@ -1,1614 +1,395 @@
-//
-// ShuffleTest.cpp — Comprehensive shuffle operation tests
-// Covers: shuf, local_shuf (CT indices, vector indices, scalar indices),
-//         upper/lower, even/odd, concat, concat_even/odd,
-//         interleave, interleave_even/odd, local_interleave_lower/upper
-// Supports both x86 (FixedTag legacy) and ARM SVE (ScalableTag)
-//
-
 #include <gtest/gtest.h>
-#include <cmath>
-#include <memory>
+
+#include <bit>
+#include <cstdint>
 #include <type_traits>
+#include <utility>
 
-#include "TestUtils.h"
-#include "vecops/vec/Vec.h"
+#include "vecops/vec/Basic.h"
+#include "TestHelpers.h"
 
-using namespace vecops;
-using namespace vecops::vec;
-
-// ============================================================================
-// Main typed test fixture (for most tests)
-// ============================================================================
+namespace vec = vecops::vec;
 
 template <typename T>
-class VecShuffleTest : public ::testing::Test {
-protected:
-  using Type = T;
+class VecShuffleElementTest : public ::testing::Test {};
 
-  ScalableTag<T, 0> t;
-  ScalableTag<T, 1> t2;
-
-  nint_t full_size;
-  nint_t multi2_size;
-
-  void SetUp() override {
-    full_size = size(t);
-    multi2_size = size(t2);
-  }
-};
+TYPED_TEST_SUITE(VecShuffleElementTest, vec_test::AllElementTypes);
 
 template <typename T>
-class VecShuffleAllTest : public VecShuffleTest<T> {};
-
-// ============================================================================
-// Compile-time local_shuf — 4 elements per lane (float32_t, int32_t, uint32_t)
-// ============================================================================
-
-template <typename T> class LocalShufCT4 : public ::testing::Test {
-protected:
-  ScalableTag<T, 0> t;
-  ScalableTag<T, 1> t2;
-  nint_t N;
-  nint_t N2;
-  void SetUp() override { N = size(t); N2 = size(t2); }
-};
-TYPED_TEST_SUITE(LocalShufCT4, test_utils::Types4);
-
-TYPED_TEST(LocalShufCT4, Identity) {
-  using T = TypeParam;
-  constexpr auto M = 4;
-  auto& t = this->t;
-  nint_t N = this->N;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<3, 2, 1, 0>(v);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-}
-
-TYPED_TEST(LocalShufCT4, ReverseWithinLane) {
-  using T = TypeParam;
-  constexpr auto M = 4;
-  auto& t = this->t;
-  nint_t N = this->N;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<0, 1, 2, 3>(v);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-}
-
-TYPED_TEST(LocalShufCT4, BroadcastFirst) {
-  using T = TypeParam;
-  constexpr auto M = 4;
-  auto& t = this->t;
-  nint_t N = this->N;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<0, 0, 0, 0>(v);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[(i / M) * M]) << "i=" << i;
-}
-
-TYPED_TEST(LocalShufCT4, MixedPermutation) {
-  using T = TypeParam;
-  constexpr auto M = 4;
-  auto& t = this->t;
-  nint_t N = this->N;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<1, 3, 0, 2>(v);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    static constexpr int perm[] = {2, 0, 3, 1};
-    EXPECT_EQ(get(t, r, i), data[lane * M + perm[pos]]) << "i=" << i;
-  }
-}
-
-// ============================================================================
-// Compile-time local_shuf — 2 elements per lane (float64_t, int64_t, uint64_t)
-// ============================================================================
-
-template <typename T> class LocalShufCT2 : public ::testing::Test {
-protected:
-  ScalableTag<T, 0> t;
-  ScalableTag<T, 1> t2;
-  nint_t N;
-  nint_t N2;
-  void SetUp() override { N = size(t); N2 = size(t2); }
-};
-TYPED_TEST_SUITE(LocalShufCT2, test_utils::Types2);
-
-TYPED_TEST(LocalShufCT2, Identity) {
-  using T = TypeParam;
-  auto& t = this->t;
-  nint_t N = this->N;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<1, 0>(v);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-}
-
-TYPED_TEST(LocalShufCT2, Swap) {
-  using T = TypeParam;
-  constexpr auto M = 2;
-  auto& t = this->t;
-  nint_t N = this->N;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<0, 1>(v);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-}
-
-// ============================================================================
-// Compile-time local_shuf — 8 elements per lane (int16_t, uint16_t)
-// ============================================================================
-
-template <typename T> class LocalShufCT8 : public ::testing::Test {
-protected:
-  ScalableTag<T, 0> t;
-  ScalableTag<T, 1> t2;
-  nint_t N;
-  nint_t N2;
-  void SetUp() override { N = size(t); N2 = size(t2); }
-};
-TYPED_TEST_SUITE(LocalShufCT8, test_utils::Types8);
-
-TYPED_TEST(LocalShufCT8, Identity) {
-  using T = TypeParam;
-  auto& t = this->t;
-  nint_t N = this->N;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<7, 6, 5, 4, 3, 2, 1, 0>(v);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-}
-
-TYPED_TEST(LocalShufCT8, ReverseWithinLane) {
-  using T = TypeParam;
-  constexpr auto M = 8;
-  auto& t = this->t;
-  nint_t N = this->N;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<0, 1, 2, 3, 4, 5, 6, 7>(v);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-}
-
-// ============================================================================
-// Compile-time local_shuf — 16 elements per lane (int8_t, uint8_t)
-// ============================================================================
-
-template <typename T> class LocalShufCT16 : public ::testing::Test {
-protected:
-  ScalableTag<T, 0> t;
-  ScalableTag<T, 1> t2;
-  nint_t N;
-  nint_t N2;
-  void SetUp() override { N = size(t); N2 = size(t2); }
-};
-TYPED_TEST_SUITE(LocalShufCT16, test_utils::Types16);
-
-TYPED_TEST(LocalShufCT16, Identity) {
-  using T = TypeParam;
-  auto& t = this->t;
-  nint_t N = this->N;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<15, 14, 13, 12, 11, 10, 9, 8,
-                     7,  6,  5,  4,  3,  2,  1,  0>(v);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-}
-
-TYPED_TEST(LocalShufCT16, ReverseWithinLane) {
-  using T = TypeParam;
-  constexpr auto M = 16;
-  auto& t = this->t;
-  nint_t N = this->N;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<0, 1, 2, 3, 4, 5, 6, 7,
-                     8, 9, 10, 11, 12, 13, 14, 15>(v);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-}
-
-TYPED_TEST(LocalShufCT16, BroadcastMiddle) {
-  using T = TypeParam;
-  constexpr auto M = 16;
-  auto& t = this->t;
-  nint_t N = this->N;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<7, 7, 7, 7, 7, 7, 7, 7,
-                     7, 7, 7, 7, 7, 7, 7, 7>(v);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[(i / M) * M + 7]) << "i=" << i;
-}
-
-// ============================================================================
-// local_shuf with vector indices
-// ============================================================================
-
-TYPED_TEST_SUITE(VecShuffleTest, test_utils::ShufTypes);
-
-TYPED_TEST(VecShuffleTest, LocalShufVI_Identity) {
-  using T = typename TestFixture::Type;
-  using I = test_utils::shuffle_idx_t<T>;
-  auto& t = this->t;
-  nint_t N = this->full_size;
-  ScalableTag<I, 0> ti;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  test_utils::fill_local_identity(idx.get(), N);
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = local_shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-}
-
-TYPED_TEST(VecShuffleTest, LocalShufVI_ReverseWithinLane) {
-  using T = typename TestFixture::Type;
-  using I = test_utils::shuffle_idx_t<T>;
-  auto& t = this->t;
-  nint_t N = this->full_size;
-  constexpr auto M = test_utils::lane_size<T>();
-  ScalableTag<I, 0> ti;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  for (nint_t i = 0; i < N; ++i)
-    idx[i] = static_cast<I>(M - 1 - (i % M));
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = local_shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-}
-
-TYPED_TEST(VecShuffleTest, LocalShufVI_DifferentPerLane) {
-  using T = typename TestFixture::Type;
-  using I = test_utils::shuffle_idx_t<T>;
-  auto& t = this->t;
-  nint_t N = this->full_size;
-  constexpr auto M = test_utils::lane_size<T>();
-  ScalableTag<I, 0> ti;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    idx[i] = (lane % 2 == 0)
-        ? static_cast<I>(pos)
-        : static_cast<I>(M - 1 - pos);
-  }
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = local_shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    T expected = (lane % 2 == 0)
-        ? data[lane * M + pos]
-        : data[lane * M + (M - 1 - pos)];
-    EXPECT_EQ(get(t, r, i), expected) << "i=" << i;
-  }
-}
-
-// ============================================================================
-// local_shuf with scalar indices (runtime int... parameters)
-// ============================================================================
-
-TEST(LocalShufScalar, Float32_Identity) {
-  using T = float32_t;
-  constexpr auto M = 4;
-  ScalableTag<T, 0> t;
-  nint_t N = size(t);
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf(v, 3, 2, 1, 0);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-}
-
-TEST(LocalShufScalar, Float32_Reverse) {
-  using T = float32_t;
-  constexpr auto M = 4;
-  ScalableTag<T, 0> t;
-  nint_t N = size(t);
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf(v, 0, 1, 2, 3);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-}
-
-TEST(LocalShufScalar, Float64_Swap) {
-  using T = float64_t;
-  constexpr auto M = 2;
-  ScalableTag<T, 0> t;
-  nint_t N = size(t);
-  if (N < 2) return;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf(v, 0, 1);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-}
-
-TEST(LocalShufScalar, Int8_Identity) {
-  using T = int8_t;
-  constexpr auto M = 16;
-  ScalableTag<T, 0> t;
-  nint_t N = size(t);
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf(v, 15, 14, 13, 12, 11, 10, 9, 8,
-                         7,  6,  5,  4,  3,  2,  1,  0);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-}
-
-TEST(LocalShufScalar, Int16_Reverse) {
-  using T = int16_t;
-  constexpr auto M = 8;
-  ScalableTag<T, 0> t;
-  nint_t N = size(t);
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf(v, 0, 1, 2, 3, 4, 5, 6, 7);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-}
-
-// ============================================================================
-// shuf — identity for all type categories
-// ============================================================================
-
-TYPED_TEST(VecShuffleTest, ShufIdentity) {
-  using T = typename TestFixture::Type;
-  using I = test_utils::shuffle_idx_t<T>;
-  auto& t = this->t;
-  nint_t N = this->full_size;
-  ScalableTag<I, 0> ti;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  test_utils::fill_shuf_identity(idx.get(), N, N);
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-}
-
-// ============================================================================
-// shuf vs local_shuf — demonstrate cross-lane capability
-// ============================================================================
-
-TEST(ShufVsLocalShuf, Float32_FullWordReverse) {
-  using T = float32_t;
-  using I = int32_t;
-  constexpr auto M = 4;
-  ScalableTag<T, 0> t;
-  ScalableTag<I, 0> ti;
-  nint_t N = size(t);
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx_local = std::make_unique<I[]>(N);
-  auto idx_shuf = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-
-  for (nint_t i = 0; i < N; ++i)
-    idx_local[i] = static_cast<I>(M - 1 - (i % M));
-  for (nint_t i = 0; i < N; ++i)
-    idx_shuf[i] = static_cast<I>(N - 1 - i);
-
-  auto v = load(t, data.get());
-  auto r_local = local_shuf(v, load(ti, idx_local.get()));
-  auto r_shuf  = shuf(v, load(ti, idx_shuf.get()));
-
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r_local, i), data[lane * M + (M - 1 - pos)])
-        << "local_shuf i=" << i;
-    EXPECT_EQ(get(t, r_shuf, i), data[N - 1 - i])
-        << "shuf i=" << i;
-  }
-
-  if (N == M) {
-    for (nint_t i = 0; i < N; ++i)
-      EXPECT_EQ(get(t, r_local, i), get(t, r_shuf, i));
+T lane_value(vecops::nint_t lane) {
+  if constexpr (std::same_as<T, vecops::bfloat16_t>) {
+    return vecops::bfloat16_t(static_cast<float>(lane + 1));
+  } else if constexpr (std::same_as<T, vecops::float16_t>) {
+    return vecops::float16_t(static_cast<float>(lane + 1));
   } else {
-    bool differs = false;
-    for (nint_t i = 0; i < N; ++i) {
-      if (get(t, r_local, i) != get(t, r_shuf, i)) {
-        differs = true;
-        break;
-      }
-    }
-    EXPECT_TRUE(differs) << "local_shuf and shuf should differ on multi-lane words";
+    return static_cast<T>(lane + 1);
   }
 }
 
-TEST(ShufVsLocalShuf, Int8_FullWordReverse) {
-  using T = int8_t;
-  using I = int8_t;
-  constexpr auto M = 16;
-  ScalableTag<T, 0> t;
-  ScalableTag<I, 0> ti;
-  nint_t N = size(t);
+using vec_test::values_identical;
 
-  auto data = std::make_unique<T[]>(N);
-  auto idx_local = std::make_unique<I[]>(N);
-  auto idx_shuf = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
+template <typename T, typename Visitor>
+void for_each_halvable_rearrange_shape(Visitor&& visitor) {
+  // The minimum native word is 16 bytes (including the AVX target, whose
+  // public word width intentionally remains 128 bits). A 64-bit P=-1 tag has
+  // one lane there and therefore cannot be halved again.
+  if constexpr (sizeof(T) <= 4) {
+    visitor.template operator()<vec::ScalableTag<T, -1>>();
+  }
+  visitor.template operator()<vec::ScalableTag<T, 0>>();
+  visitor.template operator()<vec::ScalableTag<T, 1>>();
+  visitor.template operator()<vec::ScalableTag<T, 2>>();
+}
 
-  for (nint_t i = 0; i < N; ++i)
-    idx_local[i] = static_cast<I>(M - 1 - (i % M));
-  for (nint_t i = 0; i < N; ++i)
-    idx_shuf[i] = static_cast<I>(N - 1 - i);
+template <typename T, typename Visitor>
+void for_each_same_width_rearrange_shape(Visitor&& visitor) {
+  visitor.template operator()<vec::ScalableTag<T, -1>>();
+  visitor.template operator()<vec::ScalableTag<T, 0>>();
+  visitor.template operator()<vec::ScalableTag<T, 1>>();
+  visitor.template operator()<vec::ScalableTag<T, 2>>();
+}
 
-  auto v = load(t, data.get());
-  auto r_local = local_shuf(v, load(ti, idx_local.get()));
-  auto r_shuf  = shuf(v, load(ti, idx_shuf.get()));
+template <vec::VectorTag Tag>
+vec::Vec<Tag> make_lane_sequence(Tag tag) {
+  using T = vec::ElementOf<Tag>;
+  auto value = vec::zeros(tag);
+  for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
+    value = vec::set(tag, value, lane, lane_value<T>(lane));
+  }
+  return value;
+}
 
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r_local, i), data[lane * M + (M - 1 - pos)])
-        << "local_shuf i=" << i;
-    EXPECT_EQ(get(t, r_shuf, i), data[N - 1 - i])
-        << "shuf i=" << i;
+template <vec::VectorTag Tag>
+vec::Vec<Tag> make_lane_sequence(Tag tag, vecops::nint_t offset) {
+  using T = vec::ElementOf<Tag>;
+  auto value = vec::zeros(tag);
+  for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
+    value = vec::set(tag, value, lane, lane_value<T>(lane + offset));
+  }
+  return value;
+}
+
+constexpr bool mask_lane(vecops::nint_t lane, vecops::nint_t seed = 0) {
+  return ((lane * 5 + seed) % 7) < 3;
+}
+
+template <vec::VectorTag Tag>
+vec::Mask<Tag> make_mask_pattern(Tag tag, vecops::nint_t seed = 0) {
+  auto mask = vec::mfalse(tag);
+  for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
+    mask = vec::set(tag, mask, lane, mask_lane(lane, seed));
+  }
+  return mask;
+}
+
+template <vec::VectorTag Tag>
+void expect_lane(
+    Tag tag, vec::Vec<Tag> value, vecops::nint_t lane,
+    vec::ElementOf<Tag> expected, const char* operation) {
+  EXPECT_TRUE(values_identical(expected, vec::get(tag, value, lane)))
+      << operation << " lane=" << lane;
+}
+
+template <vec::VectorTag Tag>
+void expect_mask_lane(
+    Tag tag, vec::Mask<Tag> value, vecops::nint_t lane,
+    bool expected, const char* operation) {
+  EXPECT_EQ(vec::get(tag, value, lane), expected)
+      << operation << " lane=" << lane;
+}
+
+template <vec::VectorTag Tag>
+void verify_halves_concat_and_selection(Tag tag) {
+  using T = vec::ElementOf<Tag>;
+  using HalfTag = vec::Half<Tag>;
+  const vecops::nint_t lanes = vec::size(tag);
+  const vecops::nint_t half = lanes / 2;
+
+  // This can occur only for a minimum-VL SVE subword. The corresponding
+  // half descriptor has no runtime lanes, so none of these APIs is defined.
+  if (lanes < 2) return;
+
+  const auto a = make_lane_sequence(tag, 0);
+  const auto b = make_lane_sequence(tag, lanes + 19);
+  const auto mask = make_mask_pattern(tag, 2);
+  const auto lower_a = vec::lower(tag, a);
+  const auto upper_a = vec::upper(tag, a);
+  const auto lower_mask = vec::lower(tag, mask);
+  const auto upper_mask = vec::upper(tag, mask);
+  const auto rebuilt_a = vec::concat(tag, lower_a, upper_a);
+  const auto rebuilt_mask = vec::concat(tag, lower_mask, upper_mask);
+  const auto evens = vec::even(tag, a);
+  const auto odds = vec::odd(tag, a);
+  const auto interleaved = vec::interleave(
+      tag, lower_a, vec::lower(tag, b));
+
+  EXPECT_EQ(vec::size(HalfTag{}), half);
+  for (vecops::nint_t lane = 0; lane < half; ++lane) {
+    expect_lane(
+        HalfTag{}, lower_a, lane, lane_value<T>(lane), "lower");
+    expect_lane(
+        HalfTag{}, upper_a, lane, lane_value<T>(lane + half), "upper");
+    expect_mask_lane(
+        HalfTag{}, lower_mask, lane, mask_lane(lane, 2), "mask lower");
+    expect_mask_lane(
+        HalfTag{}, upper_mask, lane,
+        mask_lane(lane + half, 2), "mask upper");
+    expect_lane(
+        HalfTag{}, evens, lane, lane_value<T>(2 * lane), "even");
+    expect_lane(
+        HalfTag{}, odds, lane, lane_value<T>(2 * lane + 1), "odd");
+    expect_lane(
+        tag, interleaved, 2 * lane,
+        lane_value<T>(lane), "interleave a");
+    expect_lane(
+        tag, interleaved, 2 * lane + 1,
+        lane_value<T>(lane + lanes + 19), "interleave b");
+  }
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    expect_lane(tag, rebuilt_a, lane, lane_value<T>(lane), "concat roundtrip");
+    expect_mask_lane(
+        tag, rebuilt_mask, lane, mask_lane(lane, 2),
+        "mask concat roundtrip");
   }
 }
 
-// ============================================================================
-// shuf — cross-lane swap for float64
-// ============================================================================
+template <vec::VectorTag Tag>
+void verify_same_width_rearrangements(Tag tag) {
+  using T = vec::ElementOf<Tag>;
+  constexpr vecops::nint_t block_lanes =
+      16 / static_cast<vecops::nint_t>(sizeof(T));
+  const vecops::nint_t lanes = vec::size(tag);
+  if (lanes < 2) return;
 
-TEST(Shuf, Float64_CrossLaneSwap) {
-  using T = float64_t;
-  using I = int64_t;
-  constexpr auto M = 2;
-  ScalableTag<T, 0> t;
-  ScalableTag<I, 0> ti;
-  nint_t N = size(t);
+  const vecops::nint_t b_offset = lanes + 37;
+  const auto a = make_lane_sequence(tag, 0);
+  const auto b = make_lane_sequence(tag, b_offset);
+  const auto concat_evens = vec::concat_even(tag, a, b);
+  const auto concat_odds = vec::concat_odd(tag, a, b);
+  const auto interleaved_evens = vec::interleave_even(a, b);
+  const auto interleaved_odds = vec::interleave_odd(a, b);
 
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  for (nint_t i = 0; i < N; ++i)
-    idx[i] = static_cast<I>((i % M == 0) ? i + 1 : i - 1);
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i) {
-    I expected_idx = static_cast<I>((i % M == 0) ? i + 1 : i - 1);
-    EXPECT_EQ(get(t, r, i), data[expected_idx]) << "i=" << i;
+  for (vecops::nint_t lane = 0; lane < lanes / 2; ++lane) {
+    expect_lane(
+        tag, concat_evens, lane,
+        lane_value<T>(2 * lane), "concat_even lower");
+    expect_lane(
+        tag, concat_evens, lane + lanes / 2,
+        lane_value<T>(b_offset + 2 * lane), "concat_even upper");
+    expect_lane(
+        tag, concat_odds, lane,
+        lane_value<T>(2 * lane + 1), "concat_odd lower");
+    expect_lane(
+        tag, concat_odds, lane + lanes / 2,
+        lane_value<T>(b_offset + 2 * lane + 1), "concat_odd upper");
+    expect_lane(
+        tag, interleaved_evens, 2 * lane,
+        lane_value<T>(2 * lane), "interleave_even a");
+    expect_lane(
+        tag, interleaved_evens, 2 * lane + 1,
+        lane_value<T>(b_offset + 2 * lane), "interleave_even b");
+    expect_lane(
+        tag, interleaved_odds, 2 * lane,
+        lane_value<T>(2 * lane + 1), "interleave_odd a");
+    expect_lane(
+        tag, interleaved_odds, 2 * lane + 1,
+        lane_value<T>(b_offset + 2 * lane + 1), "interleave_odd b");
+  }
+
+  // Local interleave is defined on complete 16-byte blocks. Shorter logical
+  // subwords have no complete block and therefore intentionally stop above.
+  if (lanes < block_lanes || lanes % block_lanes != 0) return;
+  const auto local_lower = vec::local_interleave_lower(a, b);
+  const auto local_upper = vec::local_interleave_upper(a, b);
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const vecops::nint_t block = (lane / block_lanes) * block_lanes;
+    const vecops::nint_t within = lane % block_lanes;
+    const vecops::nint_t selected = block + within / 2;
+    const vecops::nint_t upper_selected = selected + block_lanes / 2;
+    const vecops::nint_t stream_offset = (within & 1) ? b_offset : 0;
+    expect_lane(
+        tag, local_lower, lane,
+        lane_value<T>(selected + stream_offset), "local_interleave_lower");
+    expect_lane(
+        tag, local_upper, lane,
+        lane_value<T>(upper_selected + stream_offset),
+        "local_interleave_upper");
   }
 }
 
-// ============================================================================
-// upper / lower tests
-// ============================================================================
+template <vec::VectorTag Tag>
+void verify_word_local_vector_shuffle(Tag tag) {
+  using T = vec::ElementOf<Tag>;
+  using Index = vec::IndexElement<T>;
+  using IndexTag = vec::IndexTag<Tag>;
+  const vecops::nint_t lanes = vec::size(tag);
+  const vecops::nint_t word_lanes = vec::native_word_size(tag);
+  const auto source = make_lane_sequence(tag);
+  auto indices = vec::zeros(IndexTag{});
 
-TYPED_TEST_SUITE(VecShuffleAllTest, test_utils::ShuffleAllTypes);
-
-TYPED_TEST(VecShuffleAllTest, UpperLower_SingleWord) {
-  using T = typename TestFixture::Type;
-  auto& t = this->t;
-  nint_t N = this->full_size;
-  if (N < 2) return;
-  Half<std::remove_reference_t<decltype(t)>> th;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-
-  auto lo = lower(t, v);
-  auto hi = upper(t, v);
-
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(th, lo, i), data[i]) << "lower i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(th, hi, i), data[i + N / 2]) << "upper i=" << i;
-}
-
-TYPED_TEST(VecShuffleAllTest, UpperLower_MultiWord) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  auto& t = this->t2;
-  nint_t N = this->multi2_size;
-  if (N < 2) return;
-  Half<std::remove_reference_t<decltype(t)>> th;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-
-  auto lo = lower(t, v);
-  auto hi = upper(t, v);
-
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(th, lo, i), data[i]) << "lower i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(th, hi, i), data[i + N / 2]) << "upper i=" << i;
-#endif
-}
-
-// ============================================================================
-// even / odd tests
-// ============================================================================
-
-TYPED_TEST(VecShuffleAllTest, EvenOdd_SingleWord) {
-#ifndef CPU_CAPABILITY_SVE
-  using T = typename TestFixture::Type;
-  auto& t = this->t;
-  nint_t N = this->full_size;
-  if (N < 2) return;
-  Half<std::remove_reference_t<decltype(t)>> th;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-
-  auto ev = even(t, v);
-  auto od = odd(t, v);
-
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(th, ev, i), data[2 * i]) << "even i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(th, od, i), data[2 * i + 1]) << "odd i=" << i;
-#endif
-}
-
-TYPED_TEST(VecShuffleAllTest, EvenOdd_MultiWord) {
-#if !defined(CPU_CAPABILITY_SVE) && !defined(CPU_CAPABILITY_GENERIC)
-  using T = typename TestFixture::Type;
-  auto& t = this->t2;
-  nint_t N = this->multi2_size;
-  if (N < 2) return;
-  Half<std::remove_reference_t<decltype(t)>> th;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-
-  auto ev = even(t, v);
-  auto od = odd(t, v);
-
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(th, ev, i), data[2 * i]) << "even i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(th, od, i), data[2 * i + 1]) << "odd i=" << i;
-#endif
-}
-
-// ============================================================================
-// concat tests
-// ============================================================================
-
-TYPED_TEST(VecShuffleAllTest, Concat_SingleWord) {
-  using T = typename TestFixture::Type;
-  auto& t = this->t;
-  nint_t N = this->full_size;
-  if (N < 2) return;
-  Half<std::remove_reference_t<decltype(t)>> th;
-
-  auto data_lo = std::make_unique<T[]>(N / 2);
-  auto data_hi = std::make_unique<T[]>(N / 2);
-  test_utils::fill_seq(data_lo.get(), N / 2);
-  for (nint_t i = 0; i < N / 2; ++i)
-    data_hi[i] = static_cast<T>(data_lo[i]) + T(N / 2);
-
-  auto v_lo = load(th, data_lo.get());
-  auto v_hi = load(th, data_hi.get());
-  auto v = concat(t, v_lo, v_hi);
-
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t, v, i), data_lo[i]) << "lower i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t, v, i + N / 2), data_hi[i]) << "upper i=" << i;
-}
-
-TYPED_TEST(VecShuffleAllTest, Concat_MultiWord) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  auto& t = this->t2;
-  nint_t N = this->multi2_size;
-  if (N < 2) return;
-  Half<std::remove_reference_t<decltype(t)>> th;
-
-  auto data_lo = std::make_unique<T[]>(N / 2);
-  auto data_hi = std::make_unique<T[]>(N / 2);
-  test_utils::fill_seq(data_lo.get(), N / 2);
-  for (nint_t i = 0; i < N / 2; ++i)
-    data_hi[i] = static_cast<T>(data_lo[i]) + T(N / 2);
-
-  auto v_lo = load(th, data_lo.get());
-  auto v_hi = load(th, data_hi.get());
-  auto v = concat(t, v_lo, v_hi);
-
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t, v, i), data_lo[i]) << "lower i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t, v, i + N / 2), data_hi[i]) << "upper i=" << i;
-#endif
-}
-
-TYPED_TEST(VecShuffleAllTest, Concat_RoundTrip) {
-  using T = typename TestFixture::Type;
-  auto& t = this->t;
-  nint_t N = this->full_size;
-  if (N < 2) return;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-
-  auto lo = lower(t, v);
-  auto hi = upper(t, v);
-  auto v2 = concat(t, lo, hi);
-
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, v2, i), data[i]) << "i=" << i;
-}
-
-// ============================================================================
-// concat_even / concat_odd tests
-// ============================================================================
-
-TYPED_TEST(VecShuffleAllTest, ConcatEvenOdd_SingleWord) {
-#ifndef CPU_CAPABILITY_SVE
-  using T = typename TestFixture::Type;
-  auto& t = this->t;
-  nint_t N = this->full_size;
-  if (N < 2) return;
-
-  auto data_a = std::make_unique<T[]>(N);
-  auto data_b = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data_a.get(), N);
-  for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i]) + T(N);
-
-  auto a = load(t, data_a.get());
-  auto b = load(t, data_b.get());
-
-  auto ce = concat_even(t, a, b);
-  auto co = concat_odd(t, a, b);
-
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t, ce, i), data_a[2 * i]) << "concat_even lower i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t, ce, i + N / 2), data_b[2 * i]) << "concat_even upper i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t, co, i), data_a[2 * i + 1]) << "concat_odd lower i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t, co, i + N / 2), data_b[2 * i + 1]) << "concat_odd upper i=" << i;
-#endif
-}
-
-TYPED_TEST(VecShuffleAllTest, ConcatEvenOdd_MultiWord) {
-#if !defined(CPU_CAPABILITY_SVE) && !defined(CPU_CAPABILITY_GENERIC)
-  using T = typename TestFixture::Type;
-  auto& t = this->t2;
-  nint_t N = this->multi2_size;
-  if (N < 2) return;
-
-  auto data_a = std::make_unique<T[]>(N);
-  auto data_b = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data_a.get(), N);
-  for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i]) + T(N);
-
-  auto a = load(t, data_a.get());
-  auto b = load(t, data_b.get());
-
-  auto ce = concat_even(t, a, b);
-  auto co = concat_odd(t, a, b);
-
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t, ce, i), data_a[2 * i]) << "concat_even lower i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t, ce, i + N / 2), data_b[2 * i]) << "concat_even upper i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t, co, i), data_a[2 * i + 1]) << "concat_odd lower i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t, co, i + N / 2), data_b[2 * i + 1]) << "concat_odd upper i=" << i;
-#endif
-}
-
-// ============================================================================
-// local_interleave_lower / local_interleave_upper tests
-// ============================================================================
-
-TYPED_TEST(VecShuffleAllTest, LocalInterleave_SingleWord) {
-  using T = typename TestFixture::Type;
-  auto& t = this->t;
-  nint_t N = this->full_size;
-  constexpr auto M = test_utils::lane_size<T>();
-  if (N < M) return;
-
-  auto data_a = std::make_unique<T[]>(N);
-  auto data_b = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data_a.get(), N);
-  for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i]) + T(N);
-
-  auto a = load(t, data_a.get());
-  auto b = load(t, data_b.get());
-
-  auto lo = local_interleave_lower(a, b);
-  auto hi = local_interleave_upper(a, b);
-
-  for (nint_t lane = 0; lane < N / M; ++lane) {
-    for (nint_t i = 0; i < M / 2; ++i) {
-      nint_t idx = lane * M + i;
-      nint_t out_idx = lane * M + 2 * i;
-      EXPECT_EQ(get(t, lo, out_idx), data_a[idx]) << "lower a lane=" << lane << " i=" << i;
-      EXPECT_EQ(get(t, lo, out_idx + 1), data_b[idx]) << "lower b lane=" << lane << " i=" << i;
-    }
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const vecops::nint_t word_start = (lane / word_lanes) * word_lanes;
+    const vecops::nint_t remaining = lanes - word_start;
+    const vecops::nint_t valid =
+        remaining < word_lanes ? remaining : word_lanes;
+    const vecops::nint_t within = lane - word_start;
+    indices = vec::set(
+        IndexTag{}, indices, lane,
+        static_cast<Index>(valid - 1 - within));
   }
 
-  for (nint_t lane = 0; lane < N / M; ++lane) {
-    for (nint_t i = 0; i < M / 2; ++i) {
-      nint_t idx = lane * M + M / 2 + i;
-      nint_t out_idx = lane * M + 2 * i;
-      EXPECT_EQ(get(t, hi, out_idx), data_a[idx]) << "upper a lane=" << lane << " i=" << i;
-      EXPECT_EQ(get(t, hi, out_idx + 1), data_b[idx]) << "upper b lane=" << lane << " i=" << i;
-    }
+  const auto result = vec::shuf(source, indices);
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const vecops::nint_t word_start = (lane / word_lanes) * word_lanes;
+    const vecops::nint_t remaining = lanes - word_start;
+    const vecops::nint_t valid =
+        remaining < word_lanes ? remaining : word_lanes;
+    const vecops::nint_t within = lane - word_start;
+    const vecops::nint_t source_lane = word_start + valid - 1 - within;
+    EXPECT_TRUE(values_identical(
+        lane_value<T>(source_lane), vec::get(tag, result, lane)))
+        << "lane=" << lane << ", word_start=" << word_start;
   }
 }
 
-TYPED_TEST(VecShuffleAllTest, LocalInterleave_MultiWord) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  auto& t = this->t2;
-  nint_t N = this->multi2_size;
-  constexpr auto M = test_utils::lane_size<T>();
-  if (N < M) return;
+template <vec::VectorTag Tag>
+void verify_block_local_vector_shuffle(Tag tag) {
+  using T = vec::ElementOf<Tag>;
+  using Index = vec::IndexElement<T>;
+  using IndexTag = vec::IndexTag<Tag>;
+  constexpr vecops::nint_t block_lanes =
+      16 / static_cast<vecops::nint_t>(sizeof(T));
+  const vecops::nint_t lanes = vec::size(tag);
+  const auto source = make_lane_sequence(tag);
+  auto indices = vec::zeros(IndexTag{});
 
-  auto data_a = std::make_unique<T[]>(N);
-  auto data_b = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data_a.get(), N);
-  for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i]) + T(N);
-
-  auto a = load(t, data_a.get());
-  auto b = load(t, data_b.get());
-
-  auto lo = local_interleave_lower(a, b);
-  auto hi = local_interleave_upper(a, b);
-
-  for (nint_t lane = 0; lane < N / M; ++lane) {
-    for (nint_t i = 0; i < M / 2; ++i) {
-      nint_t idx = lane * M + i;
-      nint_t out_idx = lane * M + 2 * i;
-      EXPECT_EQ(get(t, lo, out_idx), data_a[idx]) << "lower a lane=" << lane << " i=" << i;
-      EXPECT_EQ(get(t, lo, out_idx + 1), data_b[idx]) << "lower b lane=" << lane << " i=" << i;
-    }
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const vecops::nint_t block_start = (lane / block_lanes) * block_lanes;
+    const vecops::nint_t remaining = lanes - block_start;
+    const vecops::nint_t valid =
+        remaining < block_lanes ? remaining : block_lanes;
+    const vecops::nint_t within = lane - block_start;
+    indices = vec::set(
+        IndexTag{}, indices, lane,
+        static_cast<Index>(valid - 1 - within));
   }
 
-  for (nint_t lane = 0; lane < N / M; ++lane) {
-    for (nint_t i = 0; i < M / 2; ++i) {
-      nint_t idx = lane * M + M / 2 + i;
-      nint_t out_idx = lane * M + 2 * i;
-      EXPECT_EQ(get(t, hi, out_idx), data_a[idx]) << "upper a lane=" << lane << " i=" << i;
-      EXPECT_EQ(get(t, hi, out_idx + 1), data_b[idx]) << "upper b lane=" << lane << " i=" << i;
-    }
-  }
-#endif
-}
-
-// ============================================================================
-// interleave tests
-// ============================================================================
-
-TYPED_TEST(VecShuffleAllTest, Interleave_SingleWord) {
-  using T = typename TestFixture::Type;
-  auto& t = this->t;
-  nint_t N = this->full_size;
-  if (N < 2) return;
-  Half<std::remove_reference_t<decltype(t)>> th;
-
-  auto data_a = std::make_unique<T[]>(N / 2);
-  auto data_b = std::make_unique<T[]>(N / 2);
-  test_utils::fill_seq(data_a.get(), N / 2);
-  for (nint_t i = 0; i < N / 2; ++i)
-    data_b[i] = static_cast<T>(data_a[i]) + T(N / 2);
-
-  auto a = load(th, data_a.get());
-  auto b = load(th, data_b.get());
-  auto v = interleave(t, a, b);
-
-  for (nint_t i = 0; i < N / 2; ++i) {
-    EXPECT_EQ(get(t, v, 2 * i), data_a[i]) << "a i=" << i;
-    EXPECT_EQ(get(t, v, 2 * i + 1), data_b[i]) << "b i=" << i;
+  const auto result = vec::local_shuf(source, indices);
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const vecops::nint_t block_start = (lane / block_lanes) * block_lanes;
+    const vecops::nint_t remaining = lanes - block_start;
+    const vecops::nint_t valid =
+        remaining < block_lanes ? remaining : block_lanes;
+    const vecops::nint_t within = lane - block_start;
+    const vecops::nint_t source_lane = block_start + valid - 1 - within;
+    EXPECT_TRUE(values_identical(
+        lane_value<T>(source_lane), vec::get(tag, result, lane)))
+        << "lane=" << lane << ", block_start=" << block_start;
   }
 }
 
-TYPED_TEST(VecShuffleAllTest, Interleave_MultiWord) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  auto& t = this->t2;
-  nint_t N = this->multi2_size;
-  if (N < 2) return;
-  Half<std::remove_reference_t<decltype(t)>> th;
-
-  auto data_a = std::make_unique<T[]>(N / 2);
-  auto data_b = std::make_unique<T[]>(N / 2);
-  test_utils::fill_seq(data_a.get(), N / 2);
-  for (nint_t i = 0; i < N / 2; ++i)
-    data_b[i] = static_cast<T>(data_a[i]) + T(N / 2);
-
-  auto a = load(th, data_a.get());
-  auto b = load(th, data_b.get());
-  auto v = interleave(t, a, b);
-
-  for (nint_t i = 0; i < N / 2; ++i) {
-    EXPECT_EQ(get(t, v, 2 * i), data_a[i]) << "a i=" << i;
-    EXPECT_EQ(get(t, v, 2 * i + 1), data_b[i]) << "b i=" << i;
-  }
-#endif
+template <vec::VectorTag Tag, std::size_t... Index>
+vec::Vec<Tag> runtime_reversing_pattern_local_shuffle(
+    Tag tag, vec::Vec<Tag> source, std::index_sequence<Index...>) {
+  constexpr vecops::nint_t block_lanes =
+      16 / static_cast<vecops::nint_t>(sizeof(vec::ElementOf<Tag>));
+  const vecops::nint_t pattern_lanes =
+      vec::size(tag) < block_lanes ? vec::size(tag) : block_lanes;
+  return vec::local_shuf(
+      source,
+      static_cast<int>(pattern_lanes - 1 -
+                       static_cast<vecops::nint_t>(Index) % pattern_lanes)...);
 }
 
-// ============================================================================
-// interleave_even / interleave_odd tests
-// ============================================================================
+template <vec::VectorTag Tag, std::size_t... Index>
+vec::Vec<Tag> compile_time_zero_pattern_local_shuffle(
+    Tag tag, vec::Vec<Tag> source, std::index_sequence<Index...>) {
+  return vec::local_shuf(
+      source, vec::opt::lanes<(static_cast<int>(Index) * 0)...>);
+}
 
-TYPED_TEST(VecShuffleAllTest, InterleaveEvenOdd_SingleWord) {
-  using T = typename TestFixture::Type;
-  auto& t = this->t;
-  nint_t N = this->full_size;
-  if (N < 4) return;
+template <vec::VectorTag Tag>
+void verify_repeating_local_shuffle_patterns(Tag tag) {
+  using T = vec::ElementOf<Tag>;
+  constexpr vecops::nint_t block_lanes =
+      16 / static_cast<vecops::nint_t>(sizeof(T));
+  const auto source = make_lane_sequence(tag);
+  const auto sequence = std::make_index_sequence<
+      static_cast<std::size_t>(block_lanes)>{};
+  const auto runtime_result =
+      runtime_reversing_pattern_local_shuffle(tag, source, sequence);
+  const auto compile_time_result =
+      compile_time_zero_pattern_local_shuffle(tag, source, sequence);
 
-  auto data_a = std::make_unique<T[]>(N);
-  auto data_b = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data_a.get(), N);
-  for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i]) + T(N);
-
-  auto a = load(t, data_a.get());
-  auto b = load(t, data_b.get());
-
-  auto ie = interleave_even(a, b);
-  auto io = interleave_odd(a, b);
-
-  for (nint_t i = 0; i < N / 2; ++i) {
-    EXPECT_EQ(get(t, ie, 2 * i), data_a[2 * i]) << "ie a i=" << i;
-    EXPECT_EQ(get(t, ie, 2 * i + 1), data_b[2 * i]) << "ie b i=" << i;
-  }
-  for (nint_t i = 0; i < N / 2; ++i) {
-    EXPECT_EQ(get(t, io, 2 * i), data_a[2 * i + 1]) << "io a i=" << i;
-    EXPECT_EQ(get(t, io, 2 * i + 1), data_b[2 * i + 1]) << "io b i=" << i;
+  // The runtime pattern reverses every block. For a subword shorter than one
+  // block it reverses only the logical lanes, so it never reads padding.
+  // The compile-time all-zero pattern is universally valid and broadcasts
+  // the first lane of each independently shuffled block.
+  for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
+    const vecops::nint_t block_start = (lane / block_lanes) * block_lanes;
+    const vecops::nint_t remaining = vec::size(tag) - block_start;
+    const vecops::nint_t valid =
+        remaining < block_lanes ? remaining : block_lanes;
+    const vecops::nint_t within = lane - block_start;
+    const T runtime_expected =
+        lane_value<T>(block_start + valid - 1 - within);
+    const T compile_time_expected = lane_value<T>(block_start);
+    EXPECT_TRUE(values_identical(
+        runtime_expected, vec::get(tag, runtime_result, lane)))
+        << "runtime lane=" << lane;
+    EXPECT_TRUE(values_identical(
+        compile_time_expected, vec::get(tag, compile_time_result, lane)))
+        << "compile-time lane=" << lane;
   }
 }
 
-TYPED_TEST(VecShuffleAllTest, InterleaveEvenOdd_MultiWord) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  auto& t = this->t2;
-  nint_t N = this->multi2_size;
-  if (N < 4) return;
-
-  auto data_a = std::make_unique<T[]>(N);
-  auto data_b = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data_a.get(), N);
-  for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i]) + T(N);
-
-  auto a = load(t, data_a.get());
-  auto b = load(t, data_b.get());
-
-  auto ie = interleave_even(a, b);
-  auto io = interleave_odd(a, b);
-
-  for (nint_t i = 0; i < N / 2; ++i) {
-    EXPECT_EQ(get(t, ie, 2 * i), data_a[2 * i]) << "ie a i=" << i;
-    EXPECT_EQ(get(t, ie, 2 * i + 1), data_b[2 * i]) << "ie b i=" << i;
-  }
-  for (nint_t i = 0; i < N / 2; ++i) {
-    EXPECT_EQ(get(t, io, 2 * i), data_a[2 * i + 1]) << "io a i=" << i;
-    EXPECT_EQ(get(t, io, 2 * i + 1), data_b[2 * i + 1]) << "io b i=" << i;
-  }
-#endif
-}
-
-// ============================================================================
-// Multi-word local_shuf with compile-time indices
-// ============================================================================
-
-TYPED_TEST(LocalShufCT4, MultiWord_Identity) {
-#ifndef CPU_CAPABILITY_GENERIC
+TYPED_TEST(VecShuffleElementTest, VectorIndicesUseTheirDocumentedDomains) {
   using T = TypeParam;
-  auto& t = this->t2;
-  nint_t N = this->N2;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<3, 2, 1, 0>(v);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-#endif
+  vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
+    verify_word_local_vector_shuffle(Tag{});
+    verify_block_local_vector_shuffle(Tag{});
+  });
 }
 
-TYPED_TEST(LocalShufCT4, MultiWord_Reverse) {
-#ifndef CPU_CAPABILITY_GENERIC
+TYPED_TEST(VecShuffleElementTest, ScalarAndCompileTimePatternsRepeatPerBlock) {
   using T = TypeParam;
-  constexpr auto M = 4;
-  auto& t = this->t2;
-  nint_t N = this->N2;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<0, 1, 2, 3>(v);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-#endif
+  vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
+    verify_repeating_local_shuffle_patterns(Tag{});
+  });
 }
 
-TYPED_TEST(LocalShufCT16, MultiWord_Identity) {
-#ifndef CPU_CAPABILITY_GENERIC
+TYPED_TEST(VecShuffleElementTest, HalvesConcatSelectionAndInterleaveKeepGlobalOrder) {
   using T = TypeParam;
-  auto& t = this->t2;
-  nint_t N = this->N2;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<15, 14, 13, 12, 11, 10, 9, 8,
-                     7,  6,  5,  4,  3,  2,  1,  0>(v);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-#endif
+  for_each_halvable_rearrange_shape<T>([]<vec::VectorTag Tag>() {
+    verify_halves_concat_and_selection(Tag{});
+  });
 }
 
-TYPED_TEST(LocalShufCT2, MultiWord_Swap) {
-#ifndef CPU_CAPABILITY_GENERIC
+TYPED_TEST(VecShuffleElementTest, SameWidthRearrangementsKeepDocumentedOrder) {
   using T = TypeParam;
-  constexpr auto M = 2;
-  auto& t = this->t2;
-  nint_t N = this->N2;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<0, 1>(v);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-#endif
+  for_each_same_width_rearrange_shape<T>([]<vec::VectorTag Tag>() {
+    verify_same_width_rearrangements(Tag{});
+  });
 }
 
-TYPED_TEST(LocalShufCT8, MultiWord_Identity) {
-#ifndef CPU_CAPABILITY_GENERIC
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+
+TYPED_TEST(VecShuffleElementTest, FixedSVEArrayPathKeepsShuffleLocality) {
   using T = TypeParam;
-  auto& t = this->t2;
-  nint_t N = this->N2;
+  constexpr vecops::nint_t word_lanes =
+      FIXED_SVE_BITS / 8 / static_cast<vecops::nint_t>(sizeof(T));
+  // SVE VL is a 128-bit multiple, not necessarily a power of two. Select the
+  // first power-of-two extent beyond four words so FixedTag remains valid
+  // even when CMake requests (for example) a 384-bit fixed SVE vector.
+  constexpr vecops::nint_t array_lanes = static_cast<vecops::nint_t>(
+      std::bit_ceil(static_cast<std::uint64_t>(word_lanes * 4 + 1)));
+  using Tag = vec::FixedTag<T, array_lanes>;
 
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<7, 6, 5, 4, 3, 2, 1, 0>(v);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
+  verify_word_local_vector_shuffle(Tag{});
+  verify_block_local_vector_shuffle(Tag{});
+  verify_repeating_local_shuffle_patterns(Tag{});
+  verify_halves_concat_and_selection(Tag{});
+  verify_same_width_rearrangements(Tag{});
+}
+
 #endif
-}
-
-TYPED_TEST(LocalShufCT8, MultiWord_Reverse) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = TypeParam;
-  constexpr auto M = 8;
-  auto& t = this->t2;
-  nint_t N = this->N2;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf<0, 1, 2, 3, 4, 5, 6, 7>(v);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-#endif
-}
-
-// ============================================================================
-// Multi-word local_shuf with vector indices
-// ============================================================================
-
-TYPED_TEST(VecShuffleTest, LocalShufVI_MultiWord_Identity) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  using I = test_utils::shuffle_idx_t<T>;
-  auto& t = this->t2;
-  nint_t N = this->multi2_size;
-  ScalableTag<I, 1> ti;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  test_utils::fill_local_identity(idx.get(), N);
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = local_shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-#endif
-}
-
-TYPED_TEST(VecShuffleTest, LocalShufVI_MultiWord_Reverse) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  using I = test_utils::shuffle_idx_t<T>;
-  auto& t = this->t2;
-  nint_t N = this->multi2_size;
-  constexpr auto M = test_utils::lane_size<T>();
-  ScalableTag<I, 1> ti;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  for (nint_t i = 0; i < N; ++i)
-    idx[i] = static_cast<I>(M - 1 - (i % M));
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = local_shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-#endif
-}
-
-// ============================================================================
-// Multi-word shuf
-// ============================================================================
-
-TYPED_TEST(VecShuffleTest, Shuf_MultiWord_ReverseWithinWord) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  using I = test_utils::shuffle_idx_t<T>;
-  auto& t = this->t2;
-  nint_t N = this->multi2_size;
-  nint_t ws = this->full_size;
-  ScalableTag<I, 1> ti;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  for (nint_t i = 0; i < N; ++i) {
-    nint_t word = i / ws;
-    nint_t pos  = i % ws;
-    idx[i] = static_cast<I>(ws - 1 - pos);
-  }
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i) {
-    nint_t word = i / ws;
-    nint_t pos  = i % ws;
-    EXPECT_EQ(get(t, r, i), data[word * ws + (ws - 1 - pos)]) << "i=" << i;
-  }
-#endif
-}
-
-TYPED_TEST(VecShuffleTest, Shuf_MultiWord_Identity) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  using I = test_utils::shuffle_idx_t<T>;
-  auto& t = this->t2;
-  nint_t N = this->multi2_size;
-  nint_t ws = this->full_size;
-  ScalableTag<I, 1> ti;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  test_utils::fill_shuf_identity(idx.get(), N, ws);
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-#endif
-}
-
-TYPED_TEST(VecShuffleTest, Shuf_MultiWord_Swap) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  using I = test_utils::shuffle_idx_t<T>;
-  auto& t = this->t2;
-  nint_t N = this->multi2_size;
-  nint_t ws = this->full_size;
-  constexpr auto M = 2;
-  ScalableTag<I, 1> ti;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  for (nint_t i = 0; i < N; ++i) {
-    nint_t pos = i % ws;
-    idx[i] = static_cast<I>((pos % M == 0) ? pos + 1 : pos - 1);
-  }
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i) {
-    nint_t pos = i % ws;
-    I expected_idx = static_cast<I>((pos % M == 0) ? pos + 1 : pos - 1);
-    EXPECT_EQ(get(t, r, i), data[i / ws * ws + expected_idx]) << "i=" << i;
-  }
-#endif
-}
-
-// ============================================================================
-// Multi-word local_shuf with scalar indices
-// ============================================================================
-
-TYPED_TEST(LocalShufCT4, MultiWord_ScalarReverse) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = TypeParam;
-  constexpr auto M = 4;
-  auto& t = this->t2;
-  nint_t N = this->N2;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf(v, 0, 1, 2, 3);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-#endif
-}
-
-TYPED_TEST(LocalShufCT2, MultiWord_ScalarSwap) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = TypeParam;
-  constexpr auto M = 2;
-  auto& t = this->t2;
-  nint_t N = this->N2;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t, data.get());
-  auto r = local_shuf(v, 0, 1);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-#endif
-}
-
-// ============================================================================
-// 4-Word Vector Tests (ScalableTag<T, 2>)
-// ============================================================================
-
-TYPED_TEST(VecShuffleAllTest, UpperLower_4Word) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  ScalableTag<T, 2> t4;
-  nint_t N = size(t4);
-  if (N < 2) return;
-  Half<std::remove_reference_t<decltype(t4)>> th;
-
-  auto data = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  auto v = load(t4, data.get());
-
-  auto lo = lower(t4, v);
-  auto hi = upper(t4, v);
-
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(th, lo, i), data[i]) << "lower i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(th, hi, i), data[i + N / 2]) << "upper i=" << i;
-#endif
-}
-
-TYPED_TEST(VecShuffleAllTest, Concat_4Word) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  ScalableTag<T, 2> t4;
-  nint_t N = size(t4);
-  if (N < 2) return;
-  Half<std::remove_reference_t<decltype(t4)>> th;
-
-  auto data_lo = std::make_unique<T[]>(N / 2);
-  auto data_hi = std::make_unique<T[]>(N / 2);
-  test_utils::fill_seq(data_lo.get(), N / 2);
-  for (nint_t i = 0; i < N / 2; ++i)
-    data_hi[i] = static_cast<T>(data_lo[i]) + T(N / 2);
-
-  auto v_lo = load(th, data_lo.get());
-  auto v_hi = load(th, data_hi.get());
-  auto v = concat(t4, v_lo, v_hi);
-
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t4, v, i), data_lo[i]) << "lower i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(t4, v, i + N / 2), data_hi[i]) << "upper i=" << i;
-#endif
-}
-
-TYPED_TEST(VecShuffleAllTest, Interleave_4Word) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  ScalableTag<T, 2> t4;
-  nint_t N = size(t4);
-  if (N < 2) return;
-  Half<std::remove_reference_t<decltype(t4)>> th;
-
-  auto data_a = std::make_unique<T[]>(N / 2);
-  auto data_b = std::make_unique<T[]>(N / 2);
-  test_utils::fill_seq(data_a.get(), N / 2);
-  for (nint_t i = 0; i < N / 2; ++i)
-    data_b[i] = static_cast<T>(data_a[i]) + T(N / 2);
-
-  auto a = load(th, data_a.get());
-  auto b = load(th, data_b.get());
-  auto v = interleave(t4, a, b);
-
-  for (nint_t i = 0; i < N / 2; ++i) {
-    EXPECT_EQ(get(t4, v, 2 * i), data_a[i]) << "a i=" << i;
-    EXPECT_EQ(get(t4, v, 2 * i + 1), data_b[i]) << "b i=" << i;
-  }
-#endif
-}
-
-TYPED_TEST(VecShuffleAllTest, LocalInterleave_4Word) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  ScalableTag<T, 2> t4;
-  nint_t N = size(t4);
-  constexpr auto M = test_utils::lane_size<T>();
-  if (N < M) return;
-
-  auto data_a = std::make_unique<T[]>(N);
-  auto data_b = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data_a.get(), N);
-  for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i]) + T(N);
-
-  auto a = load(t4, data_a.get());
-  auto b = load(t4, data_b.get());
-
-  auto lo = local_interleave_lower(a, b);
-  auto hi = local_interleave_upper(a, b);
-
-  for (nint_t lane = 0; lane < N / M; ++lane) {
-    for (nint_t i = 0; i < M / 2; ++i) {
-      nint_t idx = lane * M + i;
-      nint_t out_idx = lane * M + 2 * i;
-      EXPECT_EQ(get(t4, lo, out_idx), data_a[idx])
-          << "lower a lane=" << lane << " i=" << i;
-      EXPECT_EQ(get(t4, lo, out_idx + 1), data_b[idx])
-          << "lower b lane=" << lane << " i=" << i;
-    }
-  }
-  for (nint_t lane = 0; lane < N / M; ++lane) {
-    for (nint_t i = 0; i < M / 2; ++i) {
-      nint_t idx = lane * M + M / 2 + i;
-      nint_t out_idx = lane * M + 2 * i;
-      EXPECT_EQ(get(t4, hi, out_idx), data_a[idx])
-          << "upper a lane=" << lane << " i=" << i;
-      EXPECT_EQ(get(t4, hi, out_idx + 1), data_b[idx])
-          << "upper b lane=" << lane << " i=" << i;
-    }
-  }
-#endif
-}
-
-TYPED_TEST(VecShuffleTest, Shuf_4Word_Identity) {
-#ifndef CPU_CAPABILITY_GENERIC
-  using T = typename TestFixture::Type;
-  using I = test_utils::shuffle_idx_t<T>;
-  ScalableTag<T, 2> t4;
-  nint_t N = size(t4);
-  nint_t ws = this->full_size;
-  ScalableTag<I, 2> ti;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  test_utils::fill_shuf_identity(idx.get(), N, ws);
-  auto v = load(t4, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t4, r, i), data[i]) << "i=" << i;
-#endif
-}
-
-// ============================================================================
-// Corner cases
-// ============================================================================
-
-TEST(ShufCornerCase, SingleLaneEqualsLocalShuf) {
-  using T = float32_t;
-  using I = int32_t;
-  constexpr auto M = 4;
-  ScalableTag<T, 0> t;
-  ScalableTag<I, 0> ti;
-  nint_t N = size(t);
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  // Arbitrary permutation
-  for (nint_t i = 0; i < N; ++i)
-    idx[i] = static_cast<I>((i % M == 0) ? i + 2 : i - 1);
-
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r_local = local_shuf(v, vi);
-  auto r_shuf  = shuf(v, vi);
-
-  // On single-lane words, shuf == local_shuf
-  if (N == M) {
-    for (nint_t i = 0; i < N; ++i)
-      EXPECT_EQ(get(t, r_local, i), get(t, r_shuf, i)) << "i=" << i;
-  }
-}
-
-TEST(ShufCornerCase, ZeroVector) {
-  using T = int32_t;
-  using I = int32_t;
-  ScalableTag<T, 0> t;
-  ScalableTag<I, 0> ti;
-  nint_t N = size(t);
-
-  auto v = zeros(t);
-  auto idx = std::make_unique<I[]>(N);
-  for (nint_t i = 0; i < N; ++i) idx[i] = static_cast<I>((N - 1 - i) % N);
-  auto vi = load(ti, idx.get());
-  auto r = shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), T(0)) << "i=" << i;
-}
-
-TEST(ShufCornerCase, BroadcastFirst) {
-  using T = float32_t;
-  using I = int32_t;
-  ScalableTag<T, 0> t;
-  ScalableTag<I, 0> ti;
-  nint_t N = size(t);
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  for (nint_t i = 0; i < N; ++i) idx[i] = 0;
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[0]) << "i=" << i;
-}
-
-TEST(ShufCornerCase, Float16_LocalShufVI_Identity) {
-  using T = vecops::float16_t;
-  using I = test_utils::shuffle_idx_t<T>;
-  constexpr auto M = test_utils::lane_size<T>();
-  ScalableTag<T, 0> t;
-  ScalableTag<I, 0> ti;
-  nint_t N = size(t);
-  if (N < M) return;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  test_utils::fill_local_identity(idx.get(), N);
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = local_shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-}
-
-TEST(ShufCornerCase, Float16_LocalShufVI_Reverse) {
-  using T = vecops::float16_t;
-  using I = test_utils::shuffle_idx_t<T>;
-  constexpr auto M = test_utils::lane_size<T>();
-  ScalableTag<T, 0> t;
-  ScalableTag<I, 0> ti;
-  nint_t N = size(t);
-  if (N < M) return;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  for (nint_t i = 0; i < N; ++i)
-    idx[i] = static_cast<I>(M - 1 - (i % M));
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = local_shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-}
-
-#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-TEST(ShufCornerCase, BFloat16_LocalShufVI_Identity) {
-  using T = vecops::bfloat16_t;
-  using I = test_utils::shuffle_idx_t<T>;
-  constexpr auto M = test_utils::lane_size<T>();
-  ScalableTag<T, 0> t;
-  ScalableTag<I, 0> ti;
-  nint_t N = size(t);
-  if (N < M) return;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  test_utils::fill_local_identity(idx.get(), N);
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = local_shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i)
-    EXPECT_EQ(get(t, r, i), data[i]) << "i=" << i;
-}
-
-TEST(ShufCornerCase, BFloat16_LocalShufVI_Reverse) {
-  using T = vecops::bfloat16_t;
-  using I = test_utils::shuffle_idx_t<T>;
-  constexpr auto M = test_utils::lane_size<T>();
-  ScalableTag<T, 0> t;
-  ScalableTag<I, 0> ti;
-  nint_t N = size(t);
-  if (N < M) return;
-
-  auto data = std::make_unique<T[]>(N);
-  auto idx = std::make_unique<I[]>(N);
-  test_utils::fill_seq(data.get(), N);
-  for (nint_t i = 0; i < N; ++i)
-    idx[i] = static_cast<I>(M - 1 - (i % M));
-  auto v = load(t, data.get());
-  auto vi = load(ti, idx.get());
-  auto r = local_shuf(v, vi);
-  for (nint_t i = 0; i < N; ++i) {
-    auto lane = i / M, pos = i % M;
-    EXPECT_EQ(get(t, r, i), data[lane * M + (M - 1 - pos)]) << "i=" << i;
-  }
-}
-#endif
-
-// ============================================================================
-// Combined roundtrip tests
-// ============================================================================
-
-TEST(InterleaveRoundTrip, Float32) {
-#ifndef CPU_CAPABILITY_SVE
-  using T = float32_t;
-  ScalableTag<T, 0> t;
-  nint_t N = size(t);
-  if (N < 2) return;
-  Half<std::remove_reference_t<decltype(t)>> th;
-
-  auto data_a = std::make_unique<T[]>(N / 2);
-  auto data_b = std::make_unique<T[]>(N / 2);
-  test_utils::fill_seq(data_a.get(), N / 2);
-  for (nint_t i = 0; i < N / 2; ++i)
-    data_b[i] = static_cast<T>(data_a[i] + N / 2);
-
-  auto a = load(th, data_a.get());
-  auto b = load(th, data_b.get());
-
-  auto v = interleave(t, a, b);
-  auto ev = even(t, v);
-  auto od = odd(t, v);
-
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(th, ev, i), data_a[i]) << "even i=" << i;
-  for (nint_t i = 0; i < N / 2; ++i)
-    EXPECT_EQ(get(th, od, i), data_b[i]) << "odd i=" << i;
-#endif
-}
-
-TEST(LocalInterleaveRoundTrip, Float64) {
-  using T = float64_t;
-  ScalableTag<T, 0> t;
-  nint_t N = size(t);
-  constexpr auto M = test_utils::lane_size<T>();
-  if (N < M) return;
-
-  auto data_a = std::make_unique<T[]>(N);
-  auto data_b = std::make_unique<T[]>(N);
-  test_utils::fill_seq(data_a.get(), N);
-  for (nint_t i = 0; i < N; ++i)
-    data_b[i] = static_cast<T>(data_a[i]) + T(N);
-
-  auto a = load(t, data_a.get());
-  auto b = load(t, data_b.get());
-
-  auto lo = local_interleave_lower(a, b);
-  auto hi = local_interleave_upper(a, b);
-
-  for (nint_t lane = 0; lane < N / M; ++lane) {
-    for (nint_t i = 0; i < M / 2; ++i) {
-      nint_t idx = lane * M + i;
-      EXPECT_EQ(get(t, lo, lane * M + 2 * i), data_a[idx]);
-      EXPECT_EQ(get(t, lo, lane * M + 2 * i + 1), data_b[idx]);
-    }
-    for (nint_t i = 0; i < M / 2; ++i) {
-      nint_t idx = lane * M + M / 2 + i;
-      EXPECT_EQ(get(t, hi, lane * M + 2 * i), data_a[idx]);
-      EXPECT_EQ(get(t, hi, lane * M + 2 * i + 1), data_b[idx]);
-    }
-  }
-}
-
-// ============================================================================
-// Main
-// ============================================================================
-
-int main(int argc, char** argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

@@ -40,16 +40,16 @@ const char* mode_name() {
   return "estimate";
 }
 
-template <Tier tier, bool negative_only, typename V>
-V apply_exp(V x) {
+template <Tier tier, bool negative_only, VectorTag Tag>
+Vec<Tag> apply_exp(Tag tag, Vec<Tag> x) {
   if constexpr (negative_only) {
-    if constexpr (tier == Tier::Strict) return exp_neg(x);
-    if constexpr (tier == Tier::Fast) return exp_neg_fast(x);
-    return exp_neg_est(x);
+    if constexpr (tier == Tier::Strict) return exp_neg(tag, x);
+    if constexpr (tier == Tier::Fast) return exp_neg_fast(tag, x);
+    return exp_neg_est(tag, x);
   } else {
-    if constexpr (tier == Tier::Strict) return vecops::vec::exp(x);
-    if constexpr (tier == Tier::Fast) return exp_fast(x);
-    return exp_est(x);
+    if constexpr (tier == Tier::Strict) return vecops::vec::exp(tag, x);
+    if constexpr (tier == Tier::Fast) return exp_fast(tag, x);
+    return exp_est(tag, x);
   }
 }
 
@@ -69,7 +69,7 @@ void bench_exp(benchmark::State& state) {
   for (auto _ : state) {
     for (nint_t i = 0; i < count; i += lanes) {
       const auto x = load(t, input.data() + i);
-      store(t, output.data() + i, apply_exp<tier, negative_only>(x));
+      store(t, output.data() + i, apply_exp<tier, negative_only>(t, x));
     }
     benchmark::ClobberMemory();
   }

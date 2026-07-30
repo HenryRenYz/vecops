@@ -82,10 +82,20 @@
 namespace vecops {
 namespace details {
 
+consteval int vec_transform_log2(int value) {
+  int result = 0;
+  while (value > 1) {
+    value >>= 1;
+    ++result;
+  }
+  return result;
+}
+
 template <typename To, typename Ei>
 static constexpr bool rebind_vec_supported_v =
 #if defined(CPU_CAPABILITY_SVE)
-    (vec::Rebind<Ei, To>::POW2 <= VEC_MAX_POW);
+    vec::is_scalable_tag<To> &&
+    (vec::scale_power<vec::Rebind<Ei, To>> <= VEC_MAX_POW);
 #else
     true;
 #endif
@@ -148,7 +158,7 @@ static constexpr bool is_vec_transform_like_v =
  */
 template <typename EOut, typename EIn, bool Elementwise = false>
 struct VecTransform {
-  static_assert(vec::is_element_type<EIn> && vec::is_element_type<EOut>,
+  static_assert(vec::Element<EIn> && vec::Element<EOut>,
                 "EIn or EOut is not a supported vector element type");
 
   using TIn = EIn;
@@ -160,7 +170,7 @@ struct VecTransform {
   static constexpr bool is_narrowing = sizeof(EOut) < sizeof(EIn);
   static constexpr int size_ratio =
       is_widening ? sizeof(EOut) / sizeof(EIn) : sizeof(EIn) / sizeof(EOut);
-  static constexpr int pow2_shift = log2_floor(size_ratio);
+  static constexpr int pow2_shift = details::vec_transform_log2(size_ratio);
 
   static constexpr int max_input_pow2 = is_widening ? VEC_MAX_POW - pow2_shift : VEC_MAX_POW;
   static constexpr int min_input_pow2 = is_widening ? VEC_HW_MIN_POW - pow2_shift : VEC_HW_MIN_POW;
@@ -182,14 +192,13 @@ struct LambdaVecTransform : public VecTransform<EOut, EIn, Elementwise> {
   constexpr explicit LambdaVecTransform(Fn&& fn) : _fn(std::move(fn)) {}
   constexpr explicit LambdaVecTransform(const Fn& fn) : _fn(fn) {}
 
-  template <
-      TLV_DECL_TAG(To),
-      typename... Coords,
-      TL_IF(is_any<vec::TypeOf<To>, EOut>),
-      TL_IF(Base::min_output_pow2 <= vec::scalable_pow2_of<To> &&
-            vec::scalable_pow2_of<To> <= Base::max_output_pow2)>
+  template <vec::VectorTag To, typename... Coords>
+    requires vec::is_scalable_tag<To> &&
+             std::same_as<vec::ElementOf<To>, EOut> &&
+             (Base::min_output_pow2 <= vec::scale_power<To>) &&
+             (vec::scale_power<To> <= Base::max_output_pow2)
   vec::Vec<To> operator()(To t, vec::Vec<vec::Rebind<EIn, To>> v_in, Coords... coords) const {
-    constexpr int pow2 = vec::scalable_pow2_of<To>;
+    constexpr int pow2 = vec::scale_power<To>;
     if constexpr (Elementwise) {
       ((void) coords, ...);
       return call_elementwise<To, pow2>(t, v_in);
@@ -228,9 +237,9 @@ private:
       using TryIn = vec::Rebind<EIn, TryOut>;
 
       if constexpr (details::CanCallElementwise<TryOut, Fn, EIn>::value) {
-        auto cast_in = vec::bitcast(TryIn{}, v_in);
+        auto cast_in = vec::bitcast(TryIn{}, vec::Rebind<EIn, To>{}, v_in);
         auto cast_out = _fn(TryOut{}, cast_in);
-        return vec::bitcast(To{}, cast_out);
+        return vec::bitcast(To{}, TryOut{}, cast_out);
       } else {
         return try_upward_elementwise<To, TryPow2 + 1>(t, v_in);
       }
@@ -249,9 +258,9 @@ private:
       using TryIn = vec::Rebind<EIn, TryOut>;
 
       if constexpr (details::CanCallCoordinate<TryOut, Fn, EIn, Coords...>::value) {
-        auto cast_in = vec::bitcast(TryIn{}, v_in);
+        auto cast_in = vec::bitcast(TryIn{}, vec::Rebind<EIn, To>{}, v_in);
         auto cast_out = _fn(TryOut{}, cast_in, coords...);
-        return vec::bitcast(To{}, cast_out);
+        return vec::bitcast(To{}, TryOut{}, cast_out);
       } else {
         return try_upward_coordinate<To, TryPow2 + 1>(t, v_in, coords...);
       }
@@ -260,7 +269,7 @@ private:
 
   template <typename To>
   vec::Vec<To> try_downward_elementwise(To t, vec::Vec<vec::Rebind<EIn, To>> v_in) const {
-    constexpr int pow2 = vec::scalable_pow2_of<To>;
+    constexpr int pow2 = vec::scale_power<To>;
 
     if constexpr (details::CanCallElementwise<To, Fn, EIn>::value) {
       return _fn(t, v_in);
@@ -282,7 +291,7 @@ private:
       To t,
       vec::Vec<vec::Rebind<EIn, To>> v_in,
       Coords... coords) const {
-    constexpr int pow2 = vec::scalable_pow2_of<To>;
+    constexpr int pow2 = vec::scale_power<To>;
 
     if constexpr (details::CanCallCoordinate<To, Fn, EIn, Coords...>::value) {
       return _fn(t, v_in, coords...);
@@ -312,33 +321,34 @@ struct ConvertedVecTransform : public VecTransform<EOut, EIn, InnerTransform::is
   constexpr explicit ConvertedVecTransform(InnerTransform&& fn) : _fn(std::move(fn)) {}
   constexpr explicit ConvertedVecTransform(const InnerTransform& fn) : _fn(fn) {}
 
-  template <
-      TLV_DECL_TAG(To),
-      typename... Coords,
-      TL_IF(is_any<vec::TypeOf<To>, EOut>),
-      TL_IF(Base::min_output_pow2 <= vec::scalable_pow2_of<To> &&
-            vec::scalable_pow2_of<To> <= Base::max_output_pow2)>
+  template <vec::VectorTag To, typename... Coords>
+    requires vec::is_scalable_tag<To> &&
+             std::same_as<vec::ElementOf<To>, EOut> &&
+             (Base::min_output_pow2 <= vec::scale_power<To>) &&
+             (vec::scale_power<To> <= Base::max_output_pow2)
   vec::Vec<To> operator()(To t, vec::Vec<vec::Rebind<EIn, To>> v_in, Coords... coords) const {
     using Ti = vec::Rebind<EIn, To>;
     using InnerIn = typename InnerTransform::TIn;
     using InnerOut = typename InnerTransform::TOut;
-    constexpr int pow2_in = vec::scalable_pow2_of<Ti>;
+    constexpr int pow2_in = vec::scale_power<Ti>;
 
     if constexpr (pow2_in <= InnerTransform::max_input_pow2) {
       if constexpr (InnerTransform::min_input_pow2 <= pow2_in) {
         vec::Rebind<InnerIn, Ti> t_ii;
         vec::Rebind<InnerOut, Ti> t_io;
-        auto inner_in = vec::convert(t_ii, v_in);
+        auto inner_in = vec::convert(t_ii, Ti{}, v_in);
         auto inner_out = _fn(t_io, inner_in, static_cast<nint_t>(coords)...);
-        return vec::convert(t, inner_out);
+        return vec::convert(t, t_io, inner_out);
       } else {
         vec::Rebind<InnerIn, Ti> t_ii;
         vec::ScalableTag<InnerIn, InnerTransform::min_input_pow2> t_ix;
         vec::Rebind<InnerOut, decltype(t_ix)> t_ox;
         vec::Rebind<InnerOut, Ti> t_io;
-        auto inner_in = vec::bitcast(t_ix, vec::convert(t_ii, v_in));
+        auto converted_in = vec::convert(t_ii, Ti{}, v_in);
+        auto inner_in = vec::bitcast(t_ix, t_ii, converted_in);
         auto inner_out = _fn(t_ox, inner_in, static_cast<nint_t>(coords)...);
-        return vec::convert(t, vec::bitcast(t_io, inner_out));
+        auto resized_out = vec::bitcast(t_io, t_ox, inner_out);
+        return vec::convert(t, t_io, resized_out);
       }
     } else {
       using Th = vec::Half<To>;
@@ -357,13 +367,11 @@ template <typename EOut, typename EIn = EOut>
 struct ZeroVecTransform : public VecTransform<EOut, EIn, true> {
   using Base = VecTransform<EOut, EIn, true>;
 
-  template <
-      TLV_DECL_TAG(To),
-      TLV_DECL_VEC(Vi),
-      typename... Coords,
-      TL_IF(is_any<vec::TypeOf<To>, EOut>),
-      TL_IF(Base::min_output_pow2 <= vec::scalable_pow2_of<To> &&
-            vec::scalable_pow2_of<To> <= Base::max_output_pow2)>
+  template <vec::VectorTag To, vec::VectorValue Vi, typename... Coords>
+    requires vec::is_scalable_tag<To> &&
+             std::same_as<vec::ElementOf<To>, EOut> &&
+             (Base::min_output_pow2 <= vec::scale_power<To>) &&
+             (vec::scale_power<To> <= Base::max_output_pow2)
   vec::Vec<To> operator()(To t, Vi, Coords... coords) const {
     ((void) coords, ...);
     return vec::zeros(t);
@@ -374,15 +382,14 @@ template <typename EOut, typename EIn = EOut>
 struct IdentityVecTransform : public VecTransform<EOut, EIn, true> {
   using Base = VecTransform<EOut, EIn, true>;
 
-  template <
-      TLV_DECL_TAG(To),
-      typename... Coords,
-      TL_IF(is_any<vec::TypeOf<To>, EOut>),
-      TL_IF(Base::min_output_pow2 <= vec::scalable_pow2_of<To> &&
-            vec::scalable_pow2_of<To> <= Base::max_output_pow2)>
+  template <vec::VectorTag To, typename... Coords>
+    requires vec::is_scalable_tag<To> &&
+             std::same_as<vec::ElementOf<To>, EOut> &&
+             (Base::min_output_pow2 <= vec::scale_power<To>) &&
+             (vec::scale_power<To> <= Base::max_output_pow2)
   vec::Vec<To> operator()(To t, vec::Vec<vec::Rebind<EIn, To>> v_in, Coords... coords) const {
     ((void) coords, ...);
-    return vec::convert(t, v_in);
+    return vec::convert(t, vec::Rebind<EIn, To>{}, v_in);
   }
 };
 

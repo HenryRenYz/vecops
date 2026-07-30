@@ -26,11 +26,11 @@ struct CoordShiftFn : VecTransform<T, T> {
   CoordShiftFn(int* calls_, std::vector<nint_t>* last_coords_)
       : calls(calls_), last_coords(last_coords_) {}
 
-  template <TLV_DECL_TAG(To),
-      TL_IF(is_any<TypeOf<To>, T>),
-      TL_IF(CoordShiftFn::min_output_pow2 <= scalable_pow2_of<To> &&
-            scalable_pow2_of<To> <= CoordShiftFn::max_output_pow2),
-      typename... Coords>
+  template <VectorTag To, typename... Coords>
+    requires is_scalable_tag<To> &&
+             std::same_as<ElementOf<To>, T> &&
+             (CoordShiftFn::min_output_pow2 <= scale_power<To>) &&
+             (scale_power<To> <= CoordShiftFn::max_output_pow2)
   Vec<To> operator()(To t, Vec<To> v, Coords... coords) const {
     if (calls != nullptr) ++*calls;
     nint_t encoded = 0;
@@ -38,7 +38,7 @@ struct CoordShiftFn : VecTransform<T, T> {
     if (last_coords != nullptr) {
       *last_coords = {static_cast<nint_t>(coords)...};
     }
-    return add(v, fill(t, static_cast<T>(encoded)));
+    return add(t, v, fill(t, static_cast<T>(encoded)));
   }
 };
 
@@ -67,7 +67,7 @@ std::vector<std::byte> make_aux(nint_t bytes) {
 
 template <typename T>
 T read_vec_lane(Vec<ScalableTag<T, 0>> v, nint_t lane) {
-  return get(ScalableTag<T, 0>{}, v, lane);
+  return vec::get(ScalableTag<T, 0>{}, v, lane);
 }
 
 template <typename TIn_, typename TOut_, int PowIn_, int PowOut_>
@@ -89,7 +89,7 @@ struct DataAccessPromoteCase {
   using OutTag = Rebind<TOut, InTag>;
   static constexpr const char* Kind = "P";
   static constexpr int InPow = PowIn_;
-  static constexpr int OutPow = scalable_pow2_of<OutTag>;
+  static constexpr int OutPow = scale_power<OutTag>;
 };
 
 template <typename T1_, typename T2_, int PowOut_>
@@ -99,7 +99,7 @@ struct DataAccessDemoteCase {
   using OutTag = ScalableTag<TOut, PowOut_>;
   using InTag = Rebind<TIn, OutTag>;
   static constexpr const char* Kind = "D";
-  static constexpr int InPow = scalable_pow2_of<InTag>;
+  static constexpr int InPow = scale_power<InTag>;
   static constexpr int OutPow = PowOut_;
 };
 
@@ -574,7 +574,7 @@ TEST(DataAccessTransformTest, FullCoordinatesAreForwardedForInputRanksOneThrough
 
 template <typename Tag>
 void run_last_contiguous_input_for_tag() {
-  using T = TypeOf<Tag>;
+  using T = ElementOf<Tag>;
   using L = Layout<Shape<Const<2>, Const<128>>, Strides<Const<128>, Const<1>>>;
   using Spec = InputSpec<T, T, L>;
 
@@ -587,10 +587,10 @@ void run_last_contiguous_input_for_tag() {
   const nint_t count = std::min<nint_t>(std::max<nint_t>(1, size(t) - 1), 125);
   auto v = input(t, count, nint_t{1}, nint_t{3});
   for (nint_t i = 0; i < count; ++i) {
-    EXPECT_TRUE(test_utils::values_equal(src[131 + i], get(t, v, i)));
+    EXPECT_TRUE(test_utils::values_equal(src[131 + i], vec::get(t, v, i)));
   }
   if (count < size(t)) {
-    EXPECT_TRUE(test_utils::values_equal(T{}, get(t, v, count)));
+    EXPECT_TRUE(test_utils::values_equal(T{}, vec::get(t, v, count)));
   }
 }
 
@@ -782,12 +782,14 @@ TYPED_TEST(DataAccessConversionTest, InputSpecCoversTypeAndVectorLengthCombinati
   auto input = spec.make_input(src.data(), aux.data());
 
   OutTag t;
-  constexpr nint_t StaticN = std::min<nint_t>(max_word_size(t) * num_words(t), 64);
+  // A scalable Tag has no architecture-independent compile-time lane count.
+  // One lane keeps this a genuinely static-count API test on every VL.
+  constexpr nint_t StaticN = 1;
   auto v = input(t, Const<StaticN>{}, nint_t{1}, nint_t{2});
   const nint_t lanes = std::min<nint_t>(size(t), StaticN);
   for (nint_t i = 0; i < lanes; ++i) {
-    TOut expected = convert<TOut>(src[263 + i * 3]);
-    EXPECT_TRUE(test_utils::values_near(expected, get(t, v, i))) << "i=" << i;
+    TOut expected = vecops::convert<TOut>(src[263 + i * 3]);
+    EXPECT_TRUE(test_utils::values_near(expected, vec::get(t, v, i))) << "i=" << i;
   }
 }
 
@@ -805,11 +807,11 @@ TYPED_TEST(DataAccessConversionTest, OutputSpecCoversTypeAndVectorLengthCombinat
 
   InTag t;
   auto v = fill(t, static_cast<TIn>(7));
-  constexpr nint_t StaticN = std::min<nint_t>(max_word_size(t) * num_words(t), 64);
+  constexpr nint_t StaticN = 1;
   output(t, v, Const<StaticN>{}, nint_t{1}, nint_t{2});
   const nint_t lanes = std::min<nint_t>(size(t), StaticN);
   for (nint_t i = 0; i < lanes; ++i) {
-    TOut expected = convert<TOut>(static_cast<TIn>(7));
+    TOut expected = vecops::convert<TOut>(static_cast<TIn>(7));
     EXPECT_TRUE(test_utils::values_near(expected, dst[263 + i * 3])) << "i=" << i;
   }
 }

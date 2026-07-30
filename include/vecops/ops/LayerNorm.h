@@ -5,6 +5,13 @@
 #ifndef VECOPS_OPS_LAYERNORM_H
 #define VECOPS_OPS_LAYERNORM_H
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
 #include "vecops/Assertion.h"
 #include "vecops/CoreTypes.h"
 #include "vecops/gemm/DataAccess.h"
@@ -12,13 +19,6 @@
 #include "vecops/gemm/Tensor.h"
 #include "vecops/gemm/Workspace.h"
 #include "vecops/vec/Vec.h"
-
-#include <algorithm>
-#include <array>
-#include <cmath>
-#include <tuple>
-#include <type_traits>
-#include <utility>
 
 #if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE2) && \
     !defined(VECOPS_DISABLE_SVE_16BIT_LAYERNORM_FAST_PATH)
@@ -49,7 +49,7 @@ using layernorm_tag_t = typename std::remove_cvref_t<Config>::Tag;
 template <typename Tag>
 VECOPS_INLINE auto vector_step_value(Tag tag) {
   using TagT = std::remove_cvref_t<Tag>;
-  if constexpr (TagT::is_runtime_size) {
+  if constexpr (vec::is_runtime_size<TagT>) {
     return gemm::Any{vec::size(tag)};
   } else {
     return gemm::Const<vec::size(TagT{})>{};
@@ -363,7 +363,7 @@ private:
     using F32QuadTag = vec::ScalableTag<float32_t, 2>;
     using InputPairTag = vec::Rebind<Element, F32PairTag>;
     using Layout = std::conditional_t<
-        IsFloat16V<Element>, vec::cvt::unordered_t, vec::cvt::ordered_t>;
+        IsFloat16V<Element>, vec::cvt::Unordered, vec::cvt::Ordered>;
     using NormalizeTag = F32QuadTag;
     constexpr F16Tag f16_tag{};
     constexpr F32PairTag f32_pair_tag{};
@@ -464,8 +464,11 @@ private:
       if constexpr (IsFloat16V<Element>)
         xv = vec::fmadd(xv, rstd_v, shift_v);
       else
-        xv = vec::mul(vec::sub(xv, mean_v), rstd_v);
-      const auto out_v = vec::fmadd(xv, gamma_v, beta_v);
+        xv = vec::mul(
+            vec::sub(xv, mean_v),
+            rstd_v);
+      const auto out_v =
+          vec::fmadd(xv, gamma_v, beta_v);
       vec::store_convert(normalize_tag, y + offset, out_v, layout);
     };
 
@@ -516,9 +519,12 @@ private:
             vec::fill(f32_pair_tag, -mean * rstd);
         xv = vec::fmadd(xv, rstd_pair, shift_pair);
       } else {
-        xv = vec::mul(vec::sub(xv, mean_pair), rstd_pair);
+        xv = vec::mul(
+            vec::sub(xv, mean_pair),
+            rstd_pair);
       }
-      const auto out_v = vec::fmadd(xv, gamma_v, beta_v);
+      const auto out_v =
+          vec::fmadd(xv, gamma_v, beta_v);
       vec::store_convert(
           f32_pair_tag, y + col, out_v, layout,
           vec::opt::masked(tail));
@@ -554,20 +560,20 @@ private:
             auto v_sum_sq = vec::zeros(t);
             return use(v_sum, v_sum_sq);
           },
-          [&](nint_t col, auto &&count, auto &v_sum, auto &v_sum_sq)
-              VECOPS_INLINE_LAMBDA {
-                auto xv = x(t, count, col);
-                v_sum = vec::add(v_sum, xv);
-                v_sum_sq = vec::fmadd(xv, xv, v_sum_sq);
-              },
-          [&](auto &dst_sum, auto &dst_sum_sq, auto &src_sum, auto &src_sum_sq)
-              VECOPS_INLINE_LAMBDA {
-                dst_sum = vec::add(dst_sum, src_sum);
-                dst_sum_sq = vec::add(dst_sum_sq, src_sum_sq);
-              },
-          [&](auto &v_sum, auto &v_sum_sq) {
-            return std::make_pair(vec::reduce_add(t, v_sum),
-                                  vec::reduce_add(t, v_sum_sq));
+            [&](nint_t col, auto &&count, auto &v_sum, auto &v_sum_sq)
+                VECOPS_INLINE_LAMBDA {
+                  auto xv = x(t, count, col);
+                  v_sum = vec::add(v_sum, xv);
+                  v_sum_sq = vec::fmadd(xv, xv, v_sum_sq);
+                },
+            [&](auto &dst_sum, auto &dst_sum_sq, auto &src_sum,
+                auto &src_sum_sq) VECOPS_INLINE_LAMBDA {
+              dst_sum = vec::add(dst_sum, src_sum);
+              dst_sum_sq = vec::add(dst_sum_sq, src_sum_sq);
+            },
+            [&](auto &v_sum, auto &v_sum_sq) {
+              return std::make_pair(vec::reduce_add(t, v_sum),
+                                    vec::reduce_add(t, v_sum_sq));
           });
 
       const auto inv_n =
@@ -712,13 +718,13 @@ private:
             [&](nint_t col, auto &&count, auto &v_sum, auto &v_sum_sq)
                 VECOPS_INLINE_LAMBDA {
                   auto xv = x(t, count, col);
-                  v_sum = vec::add(v_sum, xv);
-                  v_sum_sq = vec::fmadd(xv, xv, v_sum_sq);
+                  v_sum = vec::add(t, v_sum, xv);
+                  v_sum_sq = vec::fmadd(t, xv, xv, v_sum_sq);
                 },
             [&](auto &dst_sum, auto &dst_sum_sq, auto &src_sum,
                 auto &src_sum_sq) VECOPS_INLINE_LAMBDA {
-              dst_sum = vec::add(dst_sum, src_sum);
-              dst_sum_sq = vec::add(dst_sum_sq, src_sum_sq);
+              dst_sum = vec::add(t, dst_sum, src_sum);
+              dst_sum_sq = vec::add(t, dst_sum_sq, src_sum_sq);
             },
             [&](auto &v_sum, auto &v_sum_sq) {
               return std::make_pair(vec::reduce_add(t, v_sum),

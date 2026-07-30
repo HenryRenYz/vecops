@@ -47,7 +47,7 @@ using softmax_tag_t = typename std::remove_cvref_t<Config>::Tag;
 template <typename Tag>
 VECOPS_INLINE auto softmax_vector_step_value(Tag tag) {
   using TagT = std::remove_cvref_t<Tag>;
-  if constexpr (TagT::is_runtime_size) {
+  if constexpr (vec::is_runtime_size<TagT>) {
     return gemm::Any{vec::size(tag)};
   } else {
     return gemm::Const<vec::size(TagT{})>{};
@@ -152,15 +152,18 @@ public:
   }
 
 private:
-  template <typename V, typename M>
-  VECOPS_INLINE static V apply_exp(V v, M mask, V default_v) {
+  template <typename TagT, typename V, typename M>
+  VECOPS_INLINE static V apply_exp(TagT tag, V v, M mask, V default_v) {
     if constexpr (ExpMode == SoftmaxExpMode::Strict) {
-      return vec::exp_neg(v, mask, default_v);
+      return vec::exp_neg(
+          v, vec::opt::masked(mask), vec::opt::merge(default_v));
     } else if constexpr (ExpMode == SoftmaxExpMode::Fast) {
-      return vec::exp_neg_fast(v, mask, default_v);
+      return vec::exp_neg_fast(
+          v, vec::opt::masked(mask), vec::opt::merge(default_v));
     } else {
       static_assert(ExpMode == SoftmaxExpMode::Estimate, "Unsupported Softmax exp mode");
-      return vec::exp_neg_est(v, mask, default_v);
+      return vec::exp_neg_est(
+          v, vec::opt::masked(mask), vec::opt::merge(default_v));
     }
   }
 
@@ -194,7 +197,7 @@ private:
           [&](VecT acc, nint_t col, auto&& count) VECOPS_INLINE_LAMBDA {
             auto xv = x(t, count, col);
             auto mask = vec::mwhilelt(t, 0, static_cast<nint_t>(count));
-            return vec::max(acc, xv, mask);
+            return vec::max(acc, xv, vec::opt::masked(mask));
           });
       const auto max_value = vec::reduce_max(t, v_max);
       const auto max_v = vec::fill(t, max_value);
@@ -207,7 +210,8 @@ private:
             auto xv = x(t, count, col);
             auto mask = vec::mwhilelt(t, 0, static_cast<nint_t>(count));
             auto shifted = vec::sub(xv, max_v);
-            auto exp_v = apply_exp(shifted, mask, vec::zeros(t));
+            auto zero_v = vec::zeros(t);
+            auto exp_v = apply_exp(t, shifted, mask, zero_v);
             vec::store(t, exp_cache + col, exp_v, vec::opt::masked(mask));
             return vec::add(acc, exp_v);
           });

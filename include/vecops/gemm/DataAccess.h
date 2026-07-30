@@ -63,6 +63,20 @@ VECOPS_INLINE constexpr nint_t round_up(nint_t value, nint_t alignment) {
   return (value + alignment - 1) & ~(alignment - 1);
 }
 
+VECOPS_INLINE consteval int element_size_shift(
+    std::size_t from, std::size_t to) {
+  int shift = 0;
+  while (from < to) {
+    from *= 2;
+    ++shift;
+  }
+  while (from > to) {
+    to *= 2;
+    --shift;
+  }
+  return shift;
+}
+
 template <typename T>
 VECOPS_INLINE constexpr nint_t aux_vector_lanes() {
   return vec::size(vec::ScalableTag<T, VEC_MAX_POW>{});
@@ -160,9 +174,14 @@ static constexpr bool is_static_count_v = StaticCount<std::remove_cvref_t<N>>::v
 template <typename N, typename T>
 struct UseUnmaskedPath : std::false_type {};
 
-template <nint_t N, TLV_DECL_TAG(T)>
-struct UseUnmaskedPath<Const<N>, T>
-    : std::bool_constant<(N >= vec::max_word_size(T{}) * vec::num_words(T{}))> {};
+template <nint_t N, vec::VectorTag T>
+struct UseUnmaskedPath<Const<N>, T> : std::bool_constant<[] {
+  if constexpr (vec::is_runtime_size<T>) {
+    return false;
+  } else {
+    return N >= vec::native_word_size(T{}) * vec::num_words(T{});
+  }
+}()> {};
 
 template <typename N>
 VECOPS_ALWAYS_INLINE constexpr nint_t count_value(N n) {
@@ -173,11 +192,12 @@ VECOPS_ALWAYS_INLINE constexpr nint_t count_value(N n) {
   }
 }
 
-template <typename N, TLV_DECL_TAG(T)>
+template <typename N, vec::VectorTag T>
 static constexpr bool use_unmasked_path_v = UseUnmaskedPath<std::remove_cvref_t<N>, T>::value;
 
-template <typename N, TLV_DECL_TAG(T)>
-VECOPS_ALWAYS_INLINE vec::Vec<T> load_dispatch(T t, const vec::TypeOf<T>* p, N n) {
+template <typename N, vec::VectorTag T>
+VECOPS_ALWAYS_INLINE vec::Vec<T> load_dispatch(
+    T t, const vec::ElementOf<T>* p, N n) {
   if constexpr (use_unmasked_path_v<N, T>) {
     return vec::load(t, p);
   } else {
@@ -185,17 +205,20 @@ VECOPS_ALWAYS_INLINE vec::Vec<T> load_dispatch(T t, const vec::TypeOf<T>* p, N n
   }
 }
 
-template <typename N, TLV_DECL_TAG(T)>
-VECOPS_ALWAYS_INLINE vec::Vec<T> zero_inactive_lanes(T t, vec::Vec<T> v, N n) {
+template <typename N, vec::VectorTag T>
+VECOPS_ALWAYS_INLINE vec::Vec<T> zero_inactive_lanes(
+    T t, vec::Vec<T> v, N n) {
   if constexpr (use_unmasked_path_v<N, T>) {
     return v;
   } else {
-    return vec::blend(vec::zeros(t), vec::mwhilelt(t, 0, count_value(n)), v);
+    return vec::blend(
+        t, vec::zeros(t), vec::mwhilelt(t, 0, count_value(n)), v);
   }
 }
 
-template <typename N, TLV_DECL_TAG(T)>
-VECOPS_INLINE void store_dispatch(T t, vec::TypeOf<T>* p, N n, vec::Vec<T> v) {
+template <typename N, vec::VectorTag T>
+VECOPS_INLINE void store_dispatch(
+    T t, vec::ElementOf<T>* p, N n, vec::Vec<T> v) {
   if constexpr (use_unmasked_path_v<N, T>) {
     vec::store(t, p, v);
   } else {
@@ -203,32 +226,43 @@ VECOPS_INLINE void store_dispatch(T t, vec::TypeOf<T>* p, N n, vec::Vec<T> v) {
   }
 }
 
-template <typename T, TLV_DECL_TAG(Ti)>
-VECOPS_INLINE vec::Vec<vec::Rebind<vec::GatherScatterIndex<T>, Ti>>
+template <typename T>
+using MemoryIndex = std::conditional_t<
+    (sizeof(T) < sizeof(int64_t)), int32_t, int64_t>;
+
+template <typename T, vec::VectorTag Ti>
+VECOPS_INLINE vec::Vec<vec::Rebind<MemoryIndex<T>, Ti>>
 make_index_vector(
     Ti ti,
     nint_t base_offset,
     nint_t stride) {
-  using IndexTag = vec::Rebind<vec::GatherScatterIndex<T>, Ti>;
-  using Index = vec::TypeOf<IndexTag>;
+  using IndexTag = vec::Rebind<MemoryIndex<T>, Ti>;
+  using Index = vec::ElementOf<IndexTag>;
   IndexTag it;
   auto idx = vec::fill(it, static_cast<Index>(base_offset));
   for (nint_t lane = 0; lane < vec::size(it); ++lane) {
-    idx = vec::set(it, idx, lane, static_cast<Index>(base_offset + lane * stride));
+    idx = vec::set(
+        it, idx, lane, static_cast<Index>(base_offset + lane * stride));
   }
   return idx;
 }
 
-template <typename T, TLV_DECL_TAG(Ti)>
-static constexpr bool can_materialize_gather_scatter_index_v =
+template <typename T, vec::VectorTag Ti>
+static constexpr bool can_materialize_memory_index_v = [] {
 #if defined(CPU_CAPABILITY_SVE)
-    (vec::Rebind<vec::GatherScatterIndex<T>, Ti>::POW2 <= VEC_MAX_POW);
+  using IndexTag = vec::Rebind<MemoryIndex<T>, Ti>;
+  if constexpr (vec::is_scalable_tag<IndexTag>) {
+    return vec::scale_power<IndexTag> <= VEC_MAX_POW;
+  } else {
+    return true;
+  }
 #else
-    true;
+  return true;
 #endif
+}();
 
-template <typename N, typename T, TLV_DECL_TAG(Ti)>
-VECOPS_ALWAYS_INLINE vec::Vec<Ti> gather_leaf(
+template <typename N, typename T, vec::VectorTag Ti>
+VECOPS_ALWAYS_INLINE vec::Vec<Ti> indexed_load_leaf(
     Ti ti,
     const T* p,
     nint_t base_offset,
@@ -236,14 +270,17 @@ VECOPS_ALWAYS_INLINE vec::Vec<Ti> gather_leaf(
     N n) {
   auto idx = make_index_vector<T>(ti, base_offset, stride);
   if constexpr (use_unmasked_path_v<N, Ti>) {
-    return vec::gather(ti, p, idx);
+    return vec::load(ti, p, vec::indexed(idx));
   } else {
-    return vec::gather(ti, p, idx, vec::mwhilelt(ti, 0, count_value(n)), vec::zeros(ti));
+    const auto mask = vec::mwhilelt(ti, 0, count_value(n));
+    return vec::load(
+        ti, p, vec::indexed(idx), vec::opt::masked(mask),
+        vec::opt::zero);
   }
 }
 
-template <typename N, typename T, TLV_DECL_TAG(Ti)>
-VECOPS_ALWAYS_INLINE void scatter_leaf(
+template <typename N, typename T, vec::VectorTag Ti>
+VECOPS_ALWAYS_INLINE void indexed_store_leaf(
     Ti ti,
     T* p,
     nint_t base_offset,
@@ -252,57 +289,59 @@ VECOPS_ALWAYS_INLINE void scatter_leaf(
     vec::Vec<Ti> v) {
   auto idx = make_index_vector<T>(ti, base_offset, stride);
   if constexpr (use_unmasked_path_v<N, Ti>) {
-    vec::scatter(ti, p, idx, v);
+    vec::store(ti, p, v, vec::indexed(idx));
   } else {
-    vec::scatter(ti, p, idx, vec::mwhilelt(ti, 0, count_value(n)), v);
+    const auto mask = vec::mwhilelt(ti, 0, count_value(n));
+    vec::store(ti, p, v, vec::indexed(idx), vec::opt::masked(mask));
   }
 }
 
-template <typename N, typename T, TLV_DECL_TAG(Ti)>
-VECOPS_INLINE vec::Vec<Ti> gather_dispatch(
+template <typename N, typename T, vec::VectorTag Ti>
+VECOPS_INLINE vec::Vec<Ti> indexed_load_dispatch(
     Ti ti,
     const T* p,
     nint_t base_offset,
     nint_t stride,
     N n) {
-  if constexpr (!can_materialize_gather_scatter_index_v<T, Ti>) {
+  if constexpr (!can_materialize_memory_index_v<T, Ti>) {
     // SVE supports up to x4 tuples. A narrow data vector may need a wider
     // i32/i64 index tuple, so split before instantiating the index tag.
     using Th = vec::Half<Ti>;
     Th th;
     const nint_t half_size = vec::size(th);
     const nint_t count = count_value(n);
-    auto lo = gather_dispatch(th, p, base_offset, stride, count);
-    auto hi = gather_dispatch(
+    auto lo = indexed_load_dispatch(th, p, base_offset, stride, count);
+    auto hi = indexed_load_dispatch(
         th, p, base_offset + half_size * stride, stride,
         count - half_size);
     return vec::concat(ti, lo, hi);
   } else {
-    return gather_leaf(ti, p, base_offset, stride, n);
+    return indexed_load_leaf(ti, p, base_offset, stride, n);
   }
 }
 
-template <typename N, typename T, TLV_DECL_TAG(Ti)>
-VECOPS_INLINE void scatter_dispatch(
+template <typename N, typename T, vec::VectorTag Ti>
+VECOPS_INLINE void indexed_store_dispatch(
     Ti ti,
     T* p,
     nint_t base_offset,
     nint_t stride,
     N n,
     vec::Vec<Ti> v) {
-  if constexpr (!can_materialize_gather_scatter_index_v<T, Ti>) {
+  if constexpr (!can_materialize_memory_index_v<T, Ti>) {
     // Keep the leaf path from forming an unsupported SVE index tuple.
     using Th = vec::Half<Ti>;
     Th th;
     const nint_t half_size = vec::size(th);
     const nint_t count = count_value(n);
-    scatter_dispatch(th, p, base_offset, stride, count, vec::lower(ti, v));
-    scatter_dispatch(
+    indexed_store_dispatch(
+        th, p, base_offset, stride, count, vec::lower(ti, v));
+    indexed_store_dispatch(
         th, p, base_offset + half_size * stride, stride,
         count - half_size, vec::upper(ti, v));
     return;
   } else {
-    scatter_leaf(ti, p, base_offset, stride, n, v);
+    indexed_store_leaf(ti, p, base_offset, stride, n, v);
   }
 }
 
@@ -314,7 +353,8 @@ VECOPS_INLINE void precompute_input_aux(
     const TransformFn& fn,
   TOut* aux) {
   std::fill(aux, aux + aux_numel<InLayout, TOut>(layout), TOut{});
-  constexpr int input_pow_shift = vec::SizeShift<TOut, TIn>;
+  constexpr int input_pow_shift =
+      element_size_shift(sizeof(TOut), sizeof(TIn));
   constexpr int output_pow = input_pow_shift > VEC_MAX_POW
       ? VEC_MAX_POW - input_pow_shift
       : 0;
@@ -330,7 +370,8 @@ VECOPS_INLINE void precompute_input_aux(
       [&](const auto& prefix, auto&& src_row, auto&& aux_row) VECOPS_INLINE_LAMBDA {
         const nint_t stride = src_row.stride(0);
         hop::map(last, vec::size(to), [&](nint_t i, auto n) {
-          auto v_in = gather_dispatch(ti, src_row.data(), i * stride, stride, Any{n});
+          auto v_in = indexed_load_dispatch(
+              ti, src_row.data(), i * stride, stride, Any{n});
           auto v_out = call_transform_with_last_coord(fn, to, v_in, prefix, i);
           store_dispatch(to, aux_row.data() + i, n, v_out);
         });
@@ -352,7 +393,7 @@ struct DataInputImpl<AccessKindLastContiguous, TOut, InTensor, TransformFn> {
   VECOPS_INLINE DataInputImpl(const TIn* p, const InLayout& layout, const TransformFn& fn, void*)
       : _p(p), _layout(layout), _fn(fn) {}
 
-  template <TLV_DECL_TAG(To), typename N, typename... Is>
+  template <vec::VectorTag To, typename N, typename... Is>
   VECOPS_INLINE vec::Vec<To> operator()(To t, N n, Is... is) const {
     static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
     using Ti = vec::Rebind<TIn, To>;
@@ -387,7 +428,7 @@ struct DataInputAuxImpl {
     precompute_input_aux<TOut>(p, _layout, _aux_layout, fn, _aux);
   }
 
-  template <TLV_DECL_TAG(To), typename N, typename... Is>
+  template <vec::VectorTag To, typename N, typename... Is>
   VECOPS_INLINE vec::Vec<To> operator()(To t, N n, Is... is) const {
     static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
     std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
@@ -427,7 +468,7 @@ struct DataOutputImpl<AccessKindLastContiguous, TIn, OutTensor, TransformFn> {
   VECOPS_INLINE DataOutputImpl(TOut* p, const OutLayout& layout, const TransformFn& fn, void*)
       : _p(p), _layout(layout), _fn(fn) {}
 
-  template <TLV_DECL_TAG(Ti), typename N, typename... Is>
+  template <vec::VectorTag Ti, typename N, typename... Is>
   VECOPS_INLINE void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
@@ -476,7 +517,7 @@ struct DataOutputImpl<AccessKindSecondLastContiguous, TIn, OutTensor, TransformF
         aux_tensor);
   }
 
-  template <TLV_DECL_TAG(Ti), typename N, typename... Is>
+  template <vec::VectorTag Ti, typename N, typename... Is>
   VECOPS_INLINE void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
@@ -503,14 +544,15 @@ struct DataOutputImpl<AccessKindStrided, TIn, OutTensor, TransformFn> {
   VECOPS_INLINE DataOutputImpl(TOut* p, const OutLayout& layout, const TransformFn& fn, void*)
       : _p(p), _layout(layout), _fn(fn) {}
 
-  template <TLV_DECL_TAG(Ti), typename N, typename... Is>
+  template <vec::VectorTag Ti, typename N, typename... Is>
   VECOPS_INLINE void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t base = offset_at(_layout, coords);
     auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
-    scatter_dispatch(To{}, _p, base, _layout.strides()[OutLayout::Ndim - 1], n, v_out);
+    indexed_store_dispatch(
+        To{}, _p, base, _layout.strides()[OutLayout::Ndim - 1], n, v_out);
   }
 
   TOut* _p;
@@ -534,7 +576,7 @@ struct DataInputViewImpl<AccessKindLastContiguous, TOut, InTensor, TransformFn, 
   VECOPS_INLINE DataInputViewImpl(const TIn* p, const InLayout& layout, const TransformFn& fn)
       : _p(p), _layout(layout), _fn(fn) {}
 
-  template <TLV_DECL_TAG(To), typename N, typename... Is>
+  template <vec::VectorTag To, typename N, typename... Is>
   VECOPS_INLINE vec::Vec<To> operator()(To t, N n, Is... is) const {
     static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
     using Ti = vec::Rebind<TIn, To>;
@@ -558,7 +600,7 @@ struct DataInputAuxViewImpl {
   VECOPS_INLINE DataInputAuxViewImpl(const TIn* p, const InLayout& layout, const AuxLayout& aux_layout, TOut* aux)
       : _p(p), _layout(layout), _aux_layout(aux_layout), _aux(aux) {}
 
-  template <TLV_DECL_TAG(To), typename N, typename... Is>
+  template <vec::VectorTag To, typename N, typename... Is>
   VECOPS_INLINE vec::Vec<To> operator()(To t, N n, Is... is) const {
     static_assert(sizeof...(Is) == InLayout::Ndim, "coordinate count must match input rank");
     std::array<nint_t, InLayout::Ndim> coords{static_cast<nint_t>(is)...};
@@ -610,7 +652,7 @@ struct DataOutputViewImpl<AccessKindLastContiguous, TIn, OutTensor, TransformFn,
   VECOPS_INLINE DataOutputViewImpl(TOut* p, const OutLayout& layout, const TransformFn& fn)
       : _p(p), _layout(layout), _fn(fn) {}
 
-  template <TLV_DECL_TAG(Ti), typename N, typename... Is>
+  template <vec::VectorTag Ti, typename N, typename... Is>
   VECOPS_INLINE void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
@@ -638,7 +680,7 @@ struct DataOutputViewImpl<
   VECOPS_INLINE DataOutputViewImpl(TOut* p, const OutLayout& layout, const AuxLayout& aux_layout, const TransformFn& fn, TOut* aux)
       : _p(p), _layout(layout), _aux_layout(aux_layout), _fn(fn), _aux(aux) {}
 
-  template <TLV_DECL_TAG(Ti), typename N, typename... Is>
+  template <vec::VectorTag Ti, typename N, typename... Is>
   VECOPS_INLINE void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
@@ -663,14 +705,15 @@ struct DataOutputViewImpl<AccessKindStrided, TIn, OutTensor, TransformFn, void> 
   VECOPS_INLINE DataOutputViewImpl(TOut* p, const OutLayout& layout, const TransformFn& fn)
       : _p(p), _layout(layout), _fn(fn) {}
 
-  template <TLV_DECL_TAG(Ti), typename N, typename... Is>
+  template <vec::VectorTag Ti, typename N, typename... Is>
   VECOPS_INLINE void operator()(Ti ti, vec::Vec<Ti> v, N n, Is... is) const {
     static_assert(sizeof...(Is) == OutLayout::Ndim, "coordinate count must match output rank");
     using To = vec::Rebind<TOut, Ti>;
     std::array<nint_t, OutLayout::Ndim> coords{static_cast<nint_t>(is)...};
     const nint_t base = offset_at(_layout, coords);
     auto v_out = _fn(To{}, v, static_cast<nint_t>(is)...);
-    scatter_dispatch(To{}, _p, base, _layout.strides()[OutLayout::Ndim - 1], n, v_out);
+    indexed_store_dispatch(
+        To{}, _p, base, _layout.strides()[OutLayout::Ndim - 1], n, v_out);
   }
 
   TOut* _p;
@@ -691,8 +734,8 @@ struct DataOutputViewImpl<AccessKindStrided, TIn, OutTensor, TransformFn, void> 
  *   transform in `operator()`;
  * - second-last dimension contiguous: materialize a padded, last-contiguous
  *   aux buffer in the constructor, then serve `operator()` from aux;
- * - neither trailing dimension contiguous: gather each logical row into aux in
- *   the constructor, then serve `operator()` from aux.
+ * - neither trailing dimension contiguous: indexed-load each logical row into
+ *   aux in the constructor, then serve `operator()` from aux.
  *
  * The aux buffer, when required, covers the whole logical layout. Its last
  * dimension is padded to a vector lane count so callers can issue vector
@@ -704,7 +747,7 @@ struct DataOutputViewImpl<AccessKindStrided, TIn, OutTensor, TransformFn, void> 
  *
  * @warning The current transpose materialization uses a simple element loop
  * for correctness. It is the replaceable hook for future low-level block
- * transpose kernels; strided rows already use the vector gather path.
+ * transpose kernels; strided rows already use the vector indexed-load path.
  */
 template <typename TOut, typename InTensor, typename TransformFn>
 struct DataInput {
@@ -724,7 +767,8 @@ struct DataInput {
   VECOPS_INLINE DataInput(const TIn* p, const InLayout& layout, const Transform& fn, void* aux)
       : _impl(p, layout, fn, aux) {}
 
-  template <TLV_DECL_TAG(To), TL_IF(is_any<vec::TypeOf<To>, TOut>), typename N, typename... Is>
+  template <vec::VectorTag To, typename N, typename... Is>
+    requires is_any<vec::ElementOf<To>, TOut>
   VECOPS_INLINE vec::Vec<To> operator()(To t, N n, Is... is) const {
     return _impl(t, n, is...);
   }
@@ -752,7 +796,8 @@ struct DataInputView {
   VECOPS_INLINE explicit DataInputView(Args&&... args)
       : _impl(std::forward<Args>(args)...) {}
 
-  template <TLV_DECL_TAG(To), TL_IF(is_any<vec::TypeOf<To>, TOut>), typename N, typename... Is>
+  template <vec::VectorTag To, typename N, typename... Is>
+    requires is_any<vec::ElementOf<To>, TOut>
   VECOPS_INLINE vec::Vec<To> operator()(To t, N n, Is... is) const {
     return _impl(t, n, is...);
   }
@@ -909,8 +954,8 @@ private:
  * - last dimension contiguous: transform and store directly in `operator()`;
  * - second-last dimension contiguous: transform into aux in `operator()`, then
  *   flush aux back to the destination layout in the destructor;
- * - neither trailing dimension contiguous: transform and scatter directly in
- *   `operator()`.
+ * - neither trailing dimension contiguous: transform and indexed-store
+ *   directly in `operator()`.
  *
  * The second-last-contiguous path uses the same padded aux layout as
  * `DataInput`. Only logical elements are flushed; padded tail cells remain
@@ -920,7 +965,7 @@ private:
  * `coords...` is the full logical coordinate pack supplied by the caller.
  *
  * @warning Scatter with duplicate logical addresses has the same ordering
- * caveat as the underlying vector scatter primitive.
+ * caveat as the underlying vector indexed-store primitive.
  */
 template <typename TIn, typename OutTensor, typename TransformFn>
 struct DataOutput {
@@ -940,7 +985,8 @@ struct DataOutput {
   VECOPS_INLINE DataOutput(TOut* p, const OutLayout& layout, const Transform& fn, void* aux)
       : _impl(p, layout, fn, aux) {}
 
-  template <TLV_DECL_TAG(Ti), TL_IF(is_any<vec::TypeOf<Ti>, TIn>), typename N, typename... Is>
+  template <vec::VectorTag Ti, typename N, typename... Is>
+    requires is_any<vec::ElementOf<Ti>, TIn>
   VECOPS_INLINE void operator()(Ti t, vec::Vec<Ti> v, N n, Is... is) const {
     _impl(t, v, n, is...);
   }
@@ -968,7 +1014,8 @@ struct DataOutputView {
   VECOPS_INLINE explicit DataOutputView(Args&&... args)
       : _impl(std::forward<Args>(args)...) {}
 
-  template <TLV_DECL_TAG(Ti), TL_IF(is_any<vec::TypeOf<Ti>, TIn>), typename N, typename... Is>
+  template <vec::VectorTag Ti, typename N, typename... Is>
+    requires is_any<vec::ElementOf<Ti>, TIn>
   VECOPS_INLINE void operator()(Ti t, vec::Vec<Ti> v, N n, Is... is) const {
     _impl(t, v, n, is...);
   }

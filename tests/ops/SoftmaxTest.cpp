@@ -180,16 +180,16 @@ void run_contiguous_rank_case() {
 }
 
 struct DoubleTransform : VecTransform<vecops::float32_t, vecops::float32_t> {
-  template <TLV_DECL_TAG(To), typename... Coords>
+  template <vec::VectorTag To, typename... Coords>
   vec::Vec<To> operator()(To tag, vec::Vec<To> v, Coords...) const {
-    return vec::mul(v, vec::fill(tag, 2.0f));
+    return vec::mul(tag, v, vec::fill(tag, 2.0f));
   }
 };
 
 struct HalfTransform : VecTransform<vecops::float32_t, vecops::float32_t> {
-  template <TLV_DECL_TAG(To), typename... Coords>
+  template <vec::VectorTag To, typename... Coords>
   vec::Vec<To> operator()(To tag, vec::Vec<To> v, Coords...) const {
-    return vec::mul(v, vec::fill(tag, 0.5f));
+    return vec::mul(tag, v, vec::fill(tag, 0.5f));
   }
 };
 

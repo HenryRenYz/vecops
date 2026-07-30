@@ -18,24 +18,28 @@ using test_float16_t = vecops::float16_t;
 
 template <typename Eo_, typename Ei_, int SupportedPow2>
 struct PartialCoordinateFn {
-  template <typename To, TL_IF(vec::scalable_pow2_of<To> == SupportedPow2)>
+  template <vec::VectorTag To>
+    requires (vec::scale_power<To> == SupportedPow2)
   Vec<To> operator()(To t, Vec<Rebind<Ei_, To>> v_in, nint_t, nint_t) const {
+    using From = Rebind<Ei_, To>;
     if constexpr (std::is_same_v<Eo_, Ei_>) {
-      return bitcast(t, v_in);
+      return v_in;
     } else {
-      return bitcast(t, convert(t, v_in));
+      return vec::convert(t, From{}, v_in);
     }
   }
 };
 
 template <typename Eo_, typename Ei_, int SupportedPow2>
 struct PartialElementwiseFn {
-  template <typename To, TL_IF(vec::scalable_pow2_of<To> == SupportedPow2)>
+  template <vec::VectorTag To>
+    requires (vec::scale_power<To> == SupportedPow2)
   Vec<To> operator()(To t, Vec<Rebind<Ei_, To>> v_in) const {
+    using From = Rebind<Ei_, To>;
     if constexpr (std::is_same_v<Eo_, Ei_>) {
-      return bitcast(t, v_in);
+      return v_in;
     } else {
-      return bitcast(t, convert(t, v_in));
+      return vec::convert(t, From{}, v_in);
     }
   }
 };
@@ -48,12 +52,13 @@ template <typename Eo_, typename Ei_, int LimitedMaxInputPow2>
 struct LimitedMaxInputVecFn : public VecTransform<Eo_, Ei_> {
   static constexpr int max_input_pow2 = LimitedMaxInputPow2;
 
-  template <TLV_DECL_TAG(To),
-      TL_IF(is_any<vec::TypeOf<To>, Eo_>),
-      TL_IF(LimitedMaxInputVecFn::min_output_pow2 <= vec::scalable_pow2_of<To>
-         && vec::scalable_pow2_of<To> <= LimitedMaxInputVecFn::max_output_pow2)>
+  template <vec::VectorTag To>
+    requires std::same_as<vec::ElementOf<To>, Eo_> &&
+             (LimitedMaxInputVecFn::min_output_pow2 <= vec::scale_power<To>) &&
+             (vec::scale_power<To> <= LimitedMaxInputVecFn::max_output_pow2)
   Vec<To> operator()(To, Vec<Rebind<Ei_, To>> v_in, nint_t, nint_t) const {
-    return bitcast(To{}, convert(To{}, v_in));
+    using From = Rebind<Ei_, To>;
+    return vec::convert(To{}, From{}, v_in);
   }
 };
 
@@ -93,18 +98,18 @@ bool values_close(T expected, T actual, double tol = 0.01) {
 }
 
 struct CoordinateEncodingFn {
-  template <TLV_DECL_TAG(To), typename... Coords>
+  template <vec::VectorTag To, typename... Coords>
   Vec<To> operator()(To t, Vec<To> v_in, Coords... coords) const {
     nint_t encoded = 0;
     ((encoded = encoded * 100 + static_cast<nint_t>(coords)), ...);
-    return add(v_in, fill(t, static_cast<TypeOf<To>>(encoded)));
+    return add(t, v_in, fill(t, static_cast<ElementOf<To>>(encoded)));
   }
 };
 
 struct PlusOneElementwiseFn {
-  template <TLV_DECL_TAG(To)>
+  template <vec::VectorTag To>
   Vec<To> operator()(To t, Vec<To> v_in) const {
-    return add(v_in, fill(t, static_cast<TypeOf<To>>(1)));
+    return add(t, v_in, fill(t, static_cast<ElementOf<To>>(1)));
   }
 };
 
@@ -163,7 +168,7 @@ void runPositionalLambdaTest() {
   auto buf_ref = alloc_aligned<Eo>(N_out);
 
   for (nint_t i = 0; i < N_in; ++i) buf_in[i] = get_value<Ei>(i);
-  for (nint_t i = 0; i < N_out; ++i) buf_ref[i] = convert<Eo, Ei>(buf_in[i % N_in]);
+  for (nint_t i = 0; i < N_out; ++i) buf_ref[i] = ::vecops::convert<Eo, Ei>(buf_in[i % N_in]);
 
   auto v_in = load(t_i, buf_in);
   auto v_out = adapter(t_o, v_in, 0, 0);
@@ -202,7 +207,7 @@ void runElementwiseLambdaTest() {
   auto buf_ref = alloc_aligned<Eo>(N_out);
 
   for (nint_t i = 0; i < N_in; ++i) buf_in[i] = get_value<Ei>(i);
-  for (nint_t i = 0; i < N_out; ++i) buf_ref[i] = convert<Eo, Ei>(buf_in[i % N_in]);
+  for (nint_t i = 0; i < N_out; ++i) buf_ref[i] = ::vecops::convert<Eo, Ei>(buf_in[i % N_in]);
 
   auto v_in = load(t_i, buf_in);
   auto v_out = adapter(t_o, v_in);
@@ -247,7 +252,7 @@ void runConversionTest() {
   store(t_o, buf_out, v_out);
 
   for (nint_t i = 0; i < N_out; ++i) {
-    Eo expected = convert<Eo, Ei>(buf_in[i % N_in]);
+    Eo expected = ::vecops::convert<Eo, Ei>(buf_in[i % N_in]);
     EXPECT_TRUE(values_close(expected, buf_out[i]))
         << "ConvertedAdapter Eo=" << typeid(Eo).name() << " Ei=" << typeid(Ei).name()
         << " Pow2=" << CallPow2 << " i=" << i;
@@ -284,7 +289,7 @@ void runConversionBranchCTest() {
   store(t_o, buf_out, v_out);
 
   for (nint_t i = 0; i < N_out; ++i) {
-    Eo expected = convert<Eo, Ei>(buf_in[i % N_in]);
+    Eo expected = ::vecops::convert<Eo, Ei>(buf_in[i % N_in]);
     EXPECT_TRUE(values_close(expected, buf_out[i]))
         << "ConvertedBranchC Eo=" << typeid(Eo).name() << " Ei=" << typeid(Ei).name()
         << " Pow2=" << CallPow2 << " i=" << i;

@@ -54,10 +54,11 @@ void bench_load(benchmark::State& state) {
   for (auto _ : state) {
     for (nint_t i = 0; i < count; i += lanes) {
       auto v = [&] {
-        if constexpr (Fused) return xconvert_loadu(to, input.data() + i + 1);
-        else return xconvert(to, loadu(ti, input.data() + i + 1));
+        if constexpr (Fused) return load_convert(to, input.data() + i + 1);
+        else return vecops::vec::convert(
+            to, ti, load(ti, input.data() + i + 1));
       }();
-      storeu(to, output.data() + i + 1, v);
+      store(to, output.data() + i + 1, v);
     }
     benchmark::ClobberMemory();
   }
@@ -82,11 +83,11 @@ void bench_store(benchmark::State& state) {
 
   for (auto _ : state) {
     for (nint_t i = 0; i < count; i += lanes) {
-      auto v = loadu(ti, input.data() + i + 1);
+      auto v = load(ti, input.data() + i + 1);
       if constexpr (Fused) {
-        xconvert_storeu(ti, output.data() + i + 1, v);
+        store_convert(ti, output.data() + i + 1, v);
       } else {
-        storeu(to, output.data() + i + 1, xconvert(to, v));
+        store(to, output.data() + i + 1, vecops::vec::convert(to, ti, v));
       }
     }
     benchmark::ClobberMemory();
