@@ -404,9 +404,18 @@
 #endif
 
 // SVE 向量长度 (如果编译时指定)
-#if defined(__ARM_FEATURE_SVE_BITS)
+#if defined(__ARM_FEATURE_SVE_BITS) && __ARM_FEATURE_SVE_BITS > 0
   #define HAS_FIXED_SVE_BITS 1
   #define FIXED_SVE_BITS __ARM_FEATURE_SVE_BITS
+#endif
+
+// Predicate tuples (svboolx2_t/svboolx4_t and svcreate/get/set) are exposed
+// by Clang and by GCC 13 or newer.  Older GCC can still use SVE in VLS mode,
+// where masks are represented as ordinary arrays and do not need these types.
+#if defined(HAS_SVE) && \
+    (defined(COMPILER_CLANG) || \
+     (defined(COMPILER_GCC) && __GNUC__ >= 13))
+  #define HAS_SVE_PREDICATE_TUPLES 1
 #endif
 
 // SVE 向量运算符
@@ -443,7 +452,7 @@
 
 // SVE2.1
 #if defined(__ARM_FEATURE_SVE2p1)
-  #define HAS_SVE2p1 1
+  #define HAS_SVE2P1 1
 #endif
 
 // ==================== SME (Scalable Matrix Extension) ====================

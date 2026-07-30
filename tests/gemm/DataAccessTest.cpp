@@ -601,6 +601,97 @@ TEST(DataAccessVectorLengthTest, LastContiguousInputSupportsSmallAndLargeTags) {
   run_last_contiguous_input_for_tag<ScalableTag<int8_t, 1>>();
 }
 
+TEST(DataAccessFullVectorCountTest, SelectsUnmaskedContiguousDispatch) {
+  using Tag = ScalableTag<int32_t>;
+  static_assert(
+      vecops::gemm::details::use_unmasked_path_v<FullVectorCount, Tag>);
+  static_assert(!std::is_convertible_v<FullVectorCount, nint_t>);
+
+  Tag t;
+  const nint_t lanes = size(t);
+  std::vector<int32_t> src(static_cast<size_t>(lanes));
+  std::vector<int32_t> dst(static_cast<size_t>(lanes), -1);
+  for (nint_t lane = 0; lane < lanes; ++lane)
+    src[static_cast<size_t>(lane)] = static_cast<int32_t>(lane * 7 + 3);
+
+  const auto value = vecops::gemm::details::load_dispatch(
+      t, src.data(), FullVectorCount{});
+  vecops::gemm::details::store_dispatch(
+      t, dst.data(), FullVectorCount{}, value);
+  EXPECT_EQ(dst, src);
+}
+
+TEST(DataAccessFullVectorCountTest, PropagatesThroughAuxAccessors) {
+  using T = int32_t;
+  using InLayout =
+      Layout<Shape<Const<2>, Const<256>>, Strides<Const<1024>, Const<3>>>;
+  using OutLayout =
+      Layout<Shape<Const<2>, Const<256>>, Strides<Const<1>, Const<2>>>;
+  using InSpec = InputSpec<T, T, InLayout>;
+  using OutSpec = OutputSpec<T, T, OutLayout>;
+
+  std::vector<T> src(2048);
+  std::vector<T> dst(512, T{-1});
+  for (nint_t lane = 0; lane < 256; ++lane)
+    src[static_cast<size_t>(lane * 3)] = static_cast<T>(lane * 5 + 9);
+
+  InLayout in_layout{
+      Shape<Const<2>, Const<256>>{},
+      Strides<Const<1024>, Const<3>>{}};
+  OutLayout out_layout{
+      Shape<Const<2>, Const<256>>{},
+      Strides<Const<1>, Const<2>>{}};
+  auto in_aux = make_aux<T>(InSpec::required_workspace(in_layout));
+  auto out_aux = make_aux<T>(OutSpec::required_workspace(out_layout));
+
+  InSpec in_spec(in_layout);
+  auto input = in_spec.make_input(src.data(), in_aux.data());
+  ScalableTag<T> t;
+  const auto value = input(t, FullVectorCount{}, nint_t{0}, nint_t{0});
+  {
+    OutSpec out_spec(out_layout);
+    auto output = out_spec.make_output(dst.data(), out_aux.data());
+    output(t, value, FullVectorCount{}, nint_t{0}, nint_t{0});
+  }
+
+  for (nint_t lane = 0; lane < size(t); ++lane) {
+    EXPECT_EQ(
+        src[static_cast<size_t>(lane * 3)],
+        dst[static_cast<size_t>(lane * 2)])
+        << "lane=" << lane;
+  }
+}
+
+TEST(DataAccessFullVectorCountTest, IndexedSplitKeepsFullHalves) {
+  // On SVE, rebinding this x4 byte vector to its i32 memory index would need
+  // an unsupported x16 tuple. This exercises recursive indexed splitting and
+  // proves that FullVectorCount is propagated structurally, without trying to
+  // turn the marker into a numeric count.
+  using Tag = ScalableTag<int8_t, 2>;
+  Tag t;
+  const nint_t lanes = size(t);
+  const nint_t stride = 2;
+  const nint_t base = 1;
+  std::vector<int8_t> src(
+      static_cast<size_t>(base + lanes * stride + 1));
+  std::vector<int8_t> dst(src.size(), int8_t{-1});
+  for (nint_t lane = 0; lane < lanes; ++lane)
+    src[static_cast<size_t>(base + lane * stride)] =
+        static_cast<int8_t>((lane % 101) - 50);
+
+  const auto value = vecops::gemm::details::indexed_load_dispatch(
+      t, src.data(), base, stride, FullVectorCount{});
+  vecops::gemm::details::indexed_store_dispatch(
+      t, dst.data(), base, stride, FullVectorCount{}, value);
+
+  for (nint_t lane = 0; lane < lanes; ++lane) {
+    EXPECT_EQ(
+        src[static_cast<size_t>(base + lane * stride)],
+        dst[static_cast<size_t>(base + lane * stride)])
+        << "lane=" << lane;
+  }
+}
+
 template <typename TCase>
 class DataAccessConversionTest : public ::testing::Test {};
 

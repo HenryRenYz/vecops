@@ -349,8 +349,18 @@ void verify_lane_narrowing() {
     const bool active = lane % ratio == 0;
     const auto converted = ::vecops::convert<Narrow>(
         vec::get(FromTag{}, source, lane / ratio));
-    EXPECT_TRUE(vec_test::values_identical(
-        active ? converted : Narrow{}, vec::get(ToTag{}, zero, lane)));
+    if constexpr (std::is_arithmetic_v<Narrow>) {
+      EXPECT_TRUE(vec_test::values_identical(
+          active ? converted : Narrow{}, vec::get(ToTag{}, zero, lane)))
+          << "lane=" << lane
+          << ", expected=" << static_cast<long double>(
+                 active ? converted : Narrow{})
+          << ", actual=" << static_cast<long double>(
+                 vec::get(ToTag{}, zero, lane));
+    } else {
+      EXPECT_TRUE(vec_test::values_identical(
+          active ? converted : Narrow{}, vec::get(ToTag{}, zero, lane)));
+    }
     EXPECT_TRUE(vec_test::values_identical(
         active ? converted : scalar_fallback,
         vec::get(ToTag{}, scalar, lane)));
@@ -385,6 +395,91 @@ TEST(VecConversionPolicyTest, LaneCoversEveryWidthRatioAndFloatingTypes) {
   verify_lane_narrowing<double, vecops::float16_t>();
   verify_lane_narrowing<int64_t, int8_t>();
 }
+
+TEST(VecConversionPolicyTest, LaneCoversEveryAdjacentTypePair) {
+  vec_test::for_each_element_type([]<typename From>() {
+    vec_test::for_each_element_type([]<typename To>() {
+      SCOPED_TRACE(::testing::Message()
+                   << "From=" << typeid(From).name()
+                   << ", To=" << typeid(To).name());
+      if constexpr (sizeof(To) == sizeof(From) * 2)
+        verify_lane_widening<From, To>();
+      else if constexpr (sizeof(From) == sizeof(To) * 2)
+        verify_lane_narrowing<From, To>();
+    });
+  });
+}
+
+#if defined(CPU_CAPABILITY_SVE)
+template <typename Narrow, typename Wide>
+void verify_unordered_matches_adjacent_lanes() {
+  static_assert(sizeof(Wide) == sizeof(Narrow) * 2);
+  using NarrowTag = vec::ScalableTag<Narrow>;
+  using WideTag = vec::Rebind<Wide, NarrowTag>;
+  using LaneWideTag = vec::ViewAs<Wide, NarrowTag>;
+  using HalfWideTag = vec::Half<WideTag>;
+  static_assert(std::same_as<LaneWideTag, HalfWideTag>);
+
+  auto source = vec::zeros(NarrowTag{});
+  for (vecops::nint_t lane = 0; lane < vec::size(NarrowTag{}); ++lane)
+    source = vec::set(
+        NarrowTag{}, source, lane, static_cast<Narrow>((lane % 17) - 8));
+
+  const auto unordered_wide = vec::convert(
+      WideTag{}, NarrowTag{}, source, vec::cvt::unordered);
+  const auto phase0 = vec::convert(
+      LaneWideTag{}, NarrowTag{}, source, vec::cvt::lane<0>);
+  const auto phase1 = vec::convert(
+      LaneWideTag{}, NarrowTag{}, source, vec::cvt::lane<1>);
+  const auto lane_wide = vec::concat(WideTag{}, phase0, phase1);
+  for (vecops::nint_t lane = 0; lane < vec::size(WideTag{}); ++lane)
+    EXPECT_TRUE(vec_test::values_identical(
+        vec::get(WideTag{}, lane_wide, lane),
+        vec::get(WideTag{}, unordered_wide, lane)))
+        << "widen lane=" << lane;
+
+  const auto lower = vec::lower(WideTag{}, unordered_wide);
+  const auto upper = vec::upper(WideTag{}, unordered_wide);
+  const auto bottom = vec::convert(
+      NarrowTag{}, HalfWideTag{}, lower, vec::cvt::lane<0>, vec::opt::zero);
+  const auto lane_narrow = vec::convert(
+      NarrowTag{}, HalfWideTag{}, upper, vec::cvt::lane<1>,
+      vec::opt::merge(bottom));
+  const auto unordered_narrow = vec::convert(
+      NarrowTag{}, WideTag{}, unordered_wide, vec::cvt::unordered);
+  for (vecops::nint_t lane = 0; lane < vec::size(NarrowTag{}); ++lane)
+    EXPECT_TRUE(vec_test::values_identical(
+        vec::get(NarrowTag{}, lane_narrow, lane),
+        vec::get(NarrowTag{}, unordered_narrow, lane)))
+        << "narrow lane=" << lane;
+
+  if constexpr (std::integral<Narrow> && std::integral<Wide>) {
+    const auto wrap_bottom = vec::convert(
+        NarrowTag{}, HalfWideTag{}, lower, vec::cvt::lane<0>,
+        vec::cvt::wrap, vec::opt::zero);
+    const auto wrap_lane_narrow = vec::convert(
+        NarrowTag{}, HalfWideTag{}, upper, vec::cvt::lane<1>,
+        vec::cvt::wrap, vec::opt::merge(wrap_bottom));
+    const auto wrap_unordered_narrow = vec::convert(
+        NarrowTag{}, WideTag{}, unordered_wide,
+        vec::cvt::unordered, vec::cvt::wrap);
+    for (vecops::nint_t lane = 0; lane < vec::size(NarrowTag{}); ++lane)
+      EXPECT_EQ(
+          vec::get(NarrowTag{}, wrap_lane_narrow, lane),
+          vec::get(NarrowTag{}, wrap_unordered_narrow, lane))
+          << "wrap narrow lane=" << lane;
+  }
+}
+
+TEST(VecConversionPolicyTest, UnorderedMatchesPublicLanesForAdjacentPairs) {
+  vec_test::for_each_element_type([]<typename Narrow>() {
+    vec_test::for_each_element_type([]<typename Wide>() {
+      if constexpr (sizeof(Wide) == sizeof(Narrow) * 2)
+        verify_unordered_matches_adjacent_lanes<Narrow, Wide>();
+    });
+  });
+}
+#endif
 
 template <typename From, typename To>
 void verify_ordered_wrap_pair() {

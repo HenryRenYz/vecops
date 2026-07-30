@@ -630,6 +630,7 @@ private:
       static_assert(output_unroll >= 2 && output_unroll <= 4);
       const nint_t reduction_group_step = 4 * step_int;
       const nint_t output_group_step = output_unroll * step_int;
+      constexpr gemm::FullVectorCount full_vector_count{};
 #if defined(__aarch64__)
       // fp16 uses the HOP reduction but a manually scheduled output pass;
       // wider types use manual scheduling for both passes.
@@ -657,10 +658,10 @@ private:
 
         for (; scan_col + reduction_group_step <= normalized_count_int;
              scan_col += reduction_group_step) {
-          auto x0 = x(t, step, scan_col);
-          auto x1 = x(t, step, scan_col + step_int);
-          auto x2 = x(t, step, scan_col + 2 * step_int);
-          auto x3 = x(t, step, scan_col + 3 * step_int);
+          auto x0 = x(t, full_vector_count, scan_col);
+          auto x1 = x(t, full_vector_count, scan_col + step_int);
+          auto x2 = x(t, full_vector_count, scan_col + 2 * step_int);
+          auto x3 = x(t, full_vector_count, scan_col + 3 * step_int);
 
           v_sum0 = vec::add(v_sum0, x0);
           v_sum1 = vec::add(v_sum1, x1);
@@ -674,19 +675,19 @@ private:
         }
 
         if (scan_col + step_int <= normalized_count_int) {
-          auto xv = x(t, step, scan_col);
+          auto xv = x(t, full_vector_count, scan_col);
           v_sum0 = vec::add(v_sum0, xv);
           v_sum_sq0 = vec::fmadd(xv, xv, v_sum_sq0);
           scan_col += step_int;
         }
         if (scan_col + step_int <= normalized_count_int) {
-          auto xv = x(t, step, scan_col);
+          auto xv = x(t, full_vector_count, scan_col);
           v_sum1 = vec::add(v_sum1, xv);
           v_sum_sq1 = vec::fmadd(xv, xv, v_sum_sq1);
           scan_col += step_int;
         }
         if (scan_col + step_int <= normalized_count_int) {
-          auto xv = x(t, step, scan_col);
+          auto xv = x(t, full_vector_count, scan_col);
           v_sum2 = vec::add(v_sum2, xv);
           v_sum_sq2 = vec::fmadd(xv, xv, v_sum_sq2);
           scan_col += step_int;
@@ -748,20 +749,20 @@ private:
         if constexpr (output_unroll == 4) {
           for (; col + output_group_step <= normalized_count_int;
                col += output_group_step) {
-            auto x0 = x(t, step, col);
-            auto x1 = x(t, step, col + step_int);
-            auto x2 = x(t, step, col + 2 * step_int);
-            auto x3 = x(t, step, col + 3 * step_int);
+            auto x0 = x(t, full_vector_count, col);
+            auto x1 = x(t, full_vector_count, col + step_int);
+            auto x2 = x(t, full_vector_count, col + 2 * step_int);
+            auto x3 = x(t, full_vector_count, col + 3 * step_int);
 
-            auto gamma0 = gamma(t, step, col);
-            auto gamma1 = gamma(t, step, col + step_int);
-            auto gamma2 = gamma(t, step, col + 2 * step_int);
-            auto gamma3 = gamma(t, step, col + 3 * step_int);
+            auto gamma0 = gamma(t, full_vector_count, col);
+            auto gamma1 = gamma(t, full_vector_count, col + step_int);
+            auto gamma2 = gamma(t, full_vector_count, col + 2 * step_int);
+            auto gamma3 = gamma(t, full_vector_count, col + 3 * step_int);
 
-            auto beta0 = beta(t, step, col);
-            auto beta1 = beta(t, step, col + step_int);
-            auto beta2 = beta(t, step, col + 2 * step_int);
-            auto beta3 = beta(t, step, col + 3 * step_int);
+            auto beta0 = beta(t, full_vector_count, col);
+            auto beta1 = beta(t, full_vector_count, col + step_int);
+            auto beta2 = beta(t, full_vector_count, col + 2 * step_int);
+            auto beta3 = beta(t, full_vector_count, col + 3 * step_int);
 
             auto centered0 = vec::sub(x0, mean_v);
             auto centered1 = vec::sub(x1, mean_v);
@@ -778,23 +779,23 @@ private:
             auto affine2 = vec::fmadd(normalized2, gamma2, beta2);
             auto affine3 = vec::fmadd(normalized3, gamma3, beta3);
 
-            y(t, affine0, step, col);
-            y(t, affine1, step, col + step_int);
-            y(t, affine2, step, col + 2 * step_int);
-            y(t, affine3, step, col + 3 * step_int);
+            y(t, affine0, full_vector_count, col);
+            y(t, affine1, full_vector_count, col + step_int);
+            y(t, affine2, full_vector_count, col + 2 * step_int);
+            y(t, affine3, full_vector_count, col + 3 * step_int);
           }
         } else if constexpr (output_unroll == 3) {
           for (; col + output_group_step <= normalized_count_int;
                col += output_group_step) {
-            auto x0 = x(t, step, col);
-            auto x1 = x(t, step, col + step_int);
-            auto x2 = x(t, step, col + 2 * step_int);
-            auto gamma0 = gamma(t, step, col);
-            auto gamma1 = gamma(t, step, col + step_int);
-            auto gamma2 = gamma(t, step, col + 2 * step_int);
-            auto beta0 = beta(t, step, col);
-            auto beta1 = beta(t, step, col + step_int);
-            auto beta2 = beta(t, step, col + 2 * step_int);
+            auto x0 = x(t, full_vector_count, col);
+            auto x1 = x(t, full_vector_count, col + step_int);
+            auto x2 = x(t, full_vector_count, col + 2 * step_int);
+            auto gamma0 = gamma(t, full_vector_count, col);
+            auto gamma1 = gamma(t, full_vector_count, col + step_int);
+            auto gamma2 = gamma(t, full_vector_count, col + 2 * step_int);
+            auto beta0 = beta(t, full_vector_count, col);
+            auto beta1 = beta(t, full_vector_count, col + step_int);
+            auto beta2 = beta(t, full_vector_count, col + 2 * step_int);
             auto centered0 = vec::sub(x0, mean_v);
             auto centered1 = vec::sub(x1, mean_v);
             auto centered2 = vec::sub(x2, mean_v);
@@ -804,39 +805,39 @@ private:
             auto affine0 = vec::fmadd(normalized0, gamma0, beta0);
             auto affine1 = vec::fmadd(normalized1, gamma1, beta1);
             auto affine2 = vec::fmadd(normalized2, gamma2, beta2);
-            y(t, affine0, step, col);
-            y(t, affine1, step, col + step_int);
-            y(t, affine2, step, col + 2 * step_int);
+            y(t, affine0, full_vector_count, col);
+            y(t, affine1, full_vector_count, col + step_int);
+            y(t, affine2, full_vector_count, col + 2 * step_int);
           }
         } else {
           static_assert(output_unroll == 2);
           for (; col + output_group_step <= normalized_count_int;
                col += output_group_step) {
-            auto x0 = x(t, step, col);
-            auto x1 = x(t, step, col + step_int);
-            auto gamma0 = gamma(t, step, col);
-            auto gamma1 = gamma(t, step, col + step_int);
-            auto beta0 = beta(t, step, col);
-            auto beta1 = beta(t, step, col + step_int);
+            auto x0 = x(t, full_vector_count, col);
+            auto x1 = x(t, full_vector_count, col + step_int);
+            auto gamma0 = gamma(t, full_vector_count, col);
+            auto gamma1 = gamma(t, full_vector_count, col + step_int);
+            auto beta0 = beta(t, full_vector_count, col);
+            auto beta1 = beta(t, full_vector_count, col + step_int);
             auto centered0 = vec::sub(x0, mean_v);
             auto centered1 = vec::sub(x1, mean_v);
             auto normalized0 = vec::mul(centered0, rstd_v);
             auto normalized1 = vec::mul(centered1, rstd_v);
             auto affine0 = vec::fmadd(normalized0, gamma0, beta0);
             auto affine1 = vec::fmadd(normalized1, gamma1, beta1);
-            y(t, affine0, step, col);
-            y(t, affine1, step, col + step_int);
+            y(t, affine0, full_vector_count, col);
+            y(t, affine1, full_vector_count, col + step_int);
           }
         }
 
         for (; col + step_int <= normalized_count_int; col += step_int) {
-          auto xv = x(t, step, col);
-          auto gamma_v = gamma(t, step, col);
-          auto beta_v = beta(t, step, col);
+          auto xv = x(t, full_vector_count, col);
+          auto gamma_v = gamma(t, full_vector_count, col);
+          auto beta_v = beta(t, full_vector_count, col);
           auto centered = vec::sub(xv, mean_v);
           auto normalized = vec::mul(centered, rstd_v);
           auto affine = vec::fmadd(normalized, gamma_v, beta_v);
-          y(t, affine, step, col);
+          y(t, affine, full_vector_count, col);
         }
 
         if (col < normalized_count_int) {

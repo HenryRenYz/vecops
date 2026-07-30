@@ -630,6 +630,238 @@ VECOPS_ALWAYS_INLINE Vec<Tag> sve_conversion_insert_even(
   }
 }
 
+#if defined(HAS_SVE2)
+template <int Phase, Element To, Element From, typename Raw>
+VECOPS_ALWAYS_INLINE auto sve_convert_lane_ratio2_widen_raw(Raw value) {
+  static_assert(Phase == 0 || Phase == 1);
+  static_assert(sizeof(To) == sizeof(From) * 2);
+  using Widened = SVEWidenedElement<From>;
+
+  // The widening FP-to-integer FCVT forms have the same bottom/even lane
+  // mapping as FP-to-FP FCVT, so phase 0 needs no intermediate FP vector.
+  if constexpr (Phase == 0 && std::same_as<From, float16_t> &&
+                std::same_as<To, int32_t>)
+    return svcvt_s32_f16_x(svptrue_b32(), value);
+  else if constexpr (Phase == 0 && std::same_as<From, float16_t> &&
+                     std::same_as<To, uint32_t>)
+    return svcvt_u32_f16_x(svptrue_b32(), value);
+  else if constexpr (Phase == 0 && std::same_as<From, float32_t> &&
+                     std::same_as<To, int64_t>)
+    return svcvt_s64_f32_x(svptrue_b64(), value);
+  else if constexpr (Phase == 0 && std::same_as<From, float32_t> &&
+                     std::same_as<To, uint64_t>)
+    return svcvt_u64_f32_x(svptrue_b64(), value);
+
+  // FCVT/FCVTLT and SHLLB/SHLLT already implement the public lane layout:
+  // phase 0 consumes source lanes 2*i and phase 1 consumes 2*i+1.
+  const auto widened = [&] {
+    if constexpr (std::same_as<From, bfloat16_t>) {
+      const auto bits = svreinterpret_u16_bf16(value);
+      const auto widened_bits = [&] {
+        if constexpr (Phase == 0) return svshllb_n_u32(bits, 0);
+        else return svshllt_n_u32(bits, 0);
+      }();
+      const auto shifted =
+          svlsl_n_u32_x(svptrue_b32(), widened_bits, 16);
+      return svreinterpret_f32_u32(shifted);
+    } else if constexpr (std::same_as<From, float16_t>) {
+      if constexpr (Phase == 0)
+        return svcvt_f32_f16_x(svptrue_b32(), value);
+      else
+        return svcvtlt_f32_f16_x(svptrue_b32(), value);
+    } else if constexpr (std::same_as<From, float32_t>) {
+      if constexpr (Phase == 0)
+        return svcvt_f64_f32_x(svptrue_b64(), value);
+      else
+        return svcvtlt_f64_f32_x(svptrue_b64(), value);
+    } else if constexpr (sve_is_signed_integer_element<From>) {
+      if constexpr (sizeof(From) == 1) {
+        if constexpr (Phase == 0) return svshllb_n_s16(value, 0);
+        else return svshllt_n_s16(value, 0);
+      } else if constexpr (sizeof(From) == 2) {
+        if constexpr (Phase == 0) return svshllb_n_s32(value, 0);
+        else return svshllt_n_s32(value, 0);
+      } else {
+        if constexpr (Phase == 0) return svshllb_n_s64(value, 0);
+        else return svshllt_n_s64(value, 0);
+      }
+    } else {
+      static_assert(sve_is_unsigned_integer_element<From>);
+      if constexpr (sizeof(From) == 1) {
+        if constexpr (Phase == 0) return svshllb_n_u16(value, 0);
+        else return svshllt_n_u16(value, 0);
+      } else if constexpr (sizeof(From) == 2) {
+        if constexpr (Phase == 0) return svshllb_n_u32(value, 0);
+        else return svshllt_n_u32(value, 0);
+      } else {
+        if constexpr (Phase == 0) return svshllb_n_u64(value, 0);
+        else return svshllt_n_u64(value, 0);
+      }
+    }
+  }();
+
+  if constexpr (sve_is_integer_element<To> &&
+                sve_is_integer_element<Widened>)
+    return sve_reinterpret_integer<To, Widened>(widened);
+  else
+    return sve_convert_same_size<To, Widened>(widened);
+}
+
+template <Element To, Element From, typename Raw>
+VECOPS_ALWAYS_INLINE auto sve_lane_qxt_bottom(Raw value) {
+  static_assert(sve_is_integer_element<To> &&
+                sve_is_integer_element<From>);
+  static_assert(sizeof(To) * 2 == sizeof(From));
+  if constexpr (std::is_signed_v<From> && std::is_signed_v<To>) {
+    if constexpr (sizeof(From) == 2) return svqxtnb_s16(value);
+    else if constexpr (sizeof(From) == 4) return svqxtnb_s32(value);
+    else return svqxtnb_s64(value);
+  } else if constexpr (std::is_unsigned_v<From> &&
+                       std::is_unsigned_v<To>) {
+    if constexpr (sizeof(From) == 2) return svqxtnb_u16(value);
+    else if constexpr (sizeof(From) == 4) return svqxtnb_u32(value);
+    else return svqxtnb_u64(value);
+  } else if constexpr (std::is_signed_v<From>) {
+    if constexpr (sizeof(From) == 2) return svqxtunb_s16(value);
+    else if constexpr (sizeof(From) == 4) return svqxtunb_s32(value);
+    else return svqxtunb_s64(value);
+  } else {
+    constexpr From high = static_cast<From>(std::numeric_limits<To>::max());
+    const auto clamped = [&] {
+      if constexpr (sizeof(From) == 2)
+        return svmin_n_u16_x(svptrue_b16(), value, high);
+      else if constexpr (sizeof(From) == 4)
+        return svmin_n_u32_x(svptrue_b32(), value, high);
+      else
+        return svmin_n_u64_x(svptrue_b64(), value, high);
+    }();
+    if constexpr (sizeof(From) == 2)
+      return svreinterpret_s8_u8(svqxtnb_u16(clamped));
+    else if constexpr (sizeof(From) == 4)
+      return svreinterpret_s16_u16(svqxtnb_u32(clamped));
+    else
+      return svreinterpret_s32_u32(svqxtnb_u64(clamped));
+  }
+}
+
+template <Element To, Element From, typename NarrowRaw, typename Raw>
+VECOPS_ALWAYS_INLINE auto sve_lane_qxt_top(NarrowRaw fallback, Raw value) {
+  static_assert(sve_is_integer_element<To> &&
+                sve_is_integer_element<From>);
+  static_assert(sizeof(To) * 2 == sizeof(From));
+  if constexpr (std::is_signed_v<From> && std::is_signed_v<To>) {
+    if constexpr (sizeof(From) == 2) return svqxtnt_s16(fallback, value);
+    else if constexpr (sizeof(From) == 4) return svqxtnt_s32(fallback, value);
+    else return svqxtnt_s64(fallback, value);
+  } else if constexpr (std::is_unsigned_v<From> &&
+                       std::is_unsigned_v<To>) {
+    if constexpr (sizeof(From) == 2) return svqxtnt_u16(fallback, value);
+    else if constexpr (sizeof(From) == 4) return svqxtnt_u32(fallback, value);
+    else return svqxtnt_u64(fallback, value);
+  } else if constexpr (std::is_signed_v<From>) {
+    if constexpr (sizeof(From) == 2) return svqxtunt_s16(fallback, value);
+    else if constexpr (sizeof(From) == 4) return svqxtunt_s32(fallback, value);
+    else return svqxtunt_s64(fallback, value);
+  } else {
+    constexpr From high = static_cast<From>(std::numeric_limits<To>::max());
+    const auto clamped = [&] {
+      if constexpr (sizeof(From) == 2)
+        return svmin_n_u16_x(svptrue_b16(), value, high);
+      else if constexpr (sizeof(From) == 4)
+        return svmin_n_u32_x(svptrue_b32(), value, high);
+      else
+        return svmin_n_u64_x(svptrue_b64(), value, high);
+    }();
+    if constexpr (sizeof(From) == 2)
+      return svreinterpret_s8_u8(svqxtnt_u16(
+          svreinterpret_u8_s8(fallback), clamped));
+    else if constexpr (sizeof(From) == 4)
+      return svreinterpret_s16_u16(svqxtnt_u32(
+          svreinterpret_u16_s16(fallback), clamped));
+    else
+      return svreinterpret_s32_u32(svqxtnt_u64(
+          svreinterpret_u32_s32(fallback), clamped));
+  }
+}
+
+template <int Phase, Element To, Element From, typename Raw,
+          typename FallbackRaw>
+VECOPS_ALWAYS_INLINE auto sve_convert_lane_ratio2_narrow_raw(
+    Raw value, FallbackRaw fallback) {
+  static_assert(Phase == 0 || Phase == 1);
+  static_assert(sizeof(To) * 2 == sizeof(From));
+
+  if constexpr (std::same_as<To, float32_t>) {
+    const auto wide = sve_convert_same_size<float64_t, From>(value);
+    if constexpr (Phase == 0)
+      return svcvt_f32_f64_m(fallback, svptrue_b64(), wide);
+    else
+      return svcvtnt_f32_f64_m(fallback, svptrue_b64(), wide);
+  } else if constexpr (std::same_as<To, float16_t>) {
+    const auto wide = sve_convert_same_size<float32_t, From>(value);
+    if constexpr (Phase == 0)
+      return svcvt_f16_f32_m(fallback, svptrue_b32(), wide);
+    else
+      return svcvtnt_f16_f32_m(fallback, svptrue_b32(), wide);
+  } else if constexpr (std::same_as<To, bfloat16_t>) {
+    const auto wide = sve_convert_same_size<float32_t, From>(value);
+#if defined(__ARM_FEATURE_SVE_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
+    if constexpr (Phase == 0)
+      return svcvt_bf16_f32_m(fallback, svptrue_b32(), wide);
+    else
+      return svcvtnt_bf16_f32_m(fallback, svptrue_b32(), wide);
+#else
+    const auto compact = sve_f32_to_bf16_lo(wide);
+    const auto compact_bits = svreinterpret_u16_bf16(compact);
+    const auto fallback_bits = svreinterpret_u16_bf16(fallback);
+    if constexpr (Phase == 0)
+      return svreinterpret_bf16_u16(svzip1_u16(
+          compact_bits, svuzp2_u16(fallback_bits, fallback_bits)));
+    else
+      return svreinterpret_bf16_u16(svzip1_u16(
+          svuzp1_u16(fallback_bits, fallback_bits), compact_bits));
+#endif
+  } else {
+    static_assert(sve_is_integer_element<To>);
+    if constexpr (sve_is_integer_element<From>) {
+      if constexpr (Phase == 0)
+        return sve_lane_qxt_bottom<To, From>(value);
+      else
+        return sve_lane_qxt_top<To, From>(fallback, value);
+    } else {
+      using Converted = SVEInteger<sizeof(From), std::is_signed_v<To>>;
+      const auto converted = sve_convert_same_size<Converted, From>(value);
+      if constexpr (Phase == 0) {
+        const auto bottom = sve_lane_qxt_bottom<To, Converted>(converted);
+        // Clang can fold FP-to-integer plus QXTNB into a narrowing FCVT whose
+        // inactive top half is a sign/zero extension, not the public lane
+        // population. Select at the source granularity to retain only the
+        // bottom destination lane and restore the requested fallback above it.
+        const auto bottom_lanes = [] {
+          if constexpr (sizeof(From) == 2) return svptrue_b16();
+          else if constexpr (sizeof(From) == 4) return svptrue_b32();
+          else return svptrue_b64();
+        }();
+        if constexpr (std::same_as<To, int8_t>)
+          return svsel_s8(bottom_lanes, bottom, fallback);
+        else if constexpr (std::same_as<To, uint8_t>)
+          return svsel_u8(bottom_lanes, bottom, fallback);
+        else if constexpr (std::same_as<To, int16_t>)
+          return svsel_s16(bottom_lanes, bottom, fallback);
+        else if constexpr (std::same_as<To, uint16_t>)
+          return svsel_u16(bottom_lanes, bottom, fallback);
+        else if constexpr (std::same_as<To, int32_t>)
+          return svsel_s32(bottom_lanes, bottom, fallback);
+        else
+          return svsel_u32(bottom_lanes, bottom, fallback);
+      } else {
+        return sve_lane_qxt_top<To, Converted>(fallback, converted);
+      }
+    }
+  }
+}
+#endif
+
 template <VectorTag ToTag, VectorTag FromTag, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
     ToTag to, FromTag from, Vec<FromTag> value, Options&&... options) {
@@ -640,6 +872,42 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
       : static_cast<int>(sizeof(ElementOf<ToTag>) / sizeof(ElementOf<FromTag>));
   constexpr int levels = ratio == 2 ? 1 : ratio == 4 ? 2 : 3;
   constexpr int phase = sve_conversion_lane_phase<Options...>();
+
+#if defined(HAS_SVE2)
+  constexpr bool wraps = option_count<IsWrapOption, Options...> == 1;
+  constexpr bool nonzero_population =
+      option_count<IsVectorMergeOption, Options...> == 1 ||
+      option_count<IsScalarMergeOption, Options...> == 1;
+  if constexpr (
+      ratio == 2 && !wraps &&
+      (!narrows || phase == 1 || !nonzero_population)) {
+    auto fallback = [&] {
+      if constexpr (narrows)
+        return sve_conversion_population(
+            to, std::forward<Options>(options)...);
+      else
+        return value;
+    }();
+    return construct_words<SVEBackend>(
+        to, [&]<nint_t Index>(auto) {
+          const auto source_word = ::vecops::vec::get_word<Index>(from, value);
+          if constexpr (!narrows) {
+            return sve_basic_wrap_word<ToTag>(
+                sve_convert_lane_ratio2_widen_raw<
+                    phase, ElementOf<ToTag>, ElementOf<FromTag>>(
+                    sve_basic_raw_word(source_word)));
+          } else {
+            const auto fallback_word =
+                ::vecops::vec::get_word<Index>(to, fallback);
+            return sve_basic_wrap_word<ToTag>(
+                sve_convert_lane_ratio2_narrow_raw<
+                    phase, ElementOf<ToTag>, ElementOf<FromTag>>(
+                    sve_basic_raw_word(source_word),
+                    sve_basic_raw_word(fallback_word)));
+          }
+        });
+  }
+#endif
 
   if constexpr (!narrows) {
     if constexpr (phase == 0) {
@@ -657,9 +925,10 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
           to, SelectedTag{}, execute(OddOp{}, from, value));
     }
   } else {
-    constexpr bool wraps = option_count<IsWrapOption, Options...> == 1;
+    constexpr bool wraps_fallback =
+        option_count<IsWrapOption, Options...> == 1;
     using CompactTag = Rebind<ElementOf<ToTag>, FromTag>;
-    const auto compact = sve_convert_vector<wraps>(
+    const auto compact = sve_convert_vector<wraps_fallback>(
         CompactTag{}, from, value);
     auto fallback = sve_conversion_population(
         to, std::forward<Options>(options)...);
@@ -674,6 +943,64 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
   }
 }
 
+template <bool Wrap = false, VectorTag ToTag, VectorTag FromTag>
+VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_unordered_ratio2(
+    ToTag to, FromTag from, Vec<FromTag> value) {
+  constexpr bool widens =
+      sizeof(ElementOf<ToTag>) == sizeof(ElementOf<FromTag>) * 2;
+  static_assert(
+      widens ||
+      sizeof(ElementOf<FromTag>) == sizeof(ElementOf<ToTag>) * 2);
+
+  if constexpr (widens) {
+    static_assert(!Wrap);
+    if constexpr (num_words(from) == 1) {
+      static_assert(num_words(to) == 2);
+      using ToHalf = Half<ToTag>;
+      const auto bottom = sve_convert_lane_native(
+          ToHalf{}, from, value, cvt::lane<0>);
+      const auto top = sve_convert_lane_native(
+          ToHalf{}, from, value, cvt::lane<1>);
+      return execute(ConcatOp{}, to, bottom, top);
+    } else {
+      using ToHalf = Half<ToTag>;
+      using FromHalf = Half<FromTag>;
+      const auto lower = sve_convert_unordered_ratio2(
+          ToHalf{}, FromHalf{}, execute(LowerOp{}, from, value));
+      const auto upper = sve_convert_unordered_ratio2(
+          ToHalf{}, FromHalf{}, execute(UpperOp{}, from, value));
+      return execute(ConcatOp{}, to, lower, upper);
+    }
+  } else {
+    if constexpr (num_words(to) == 1) {
+      static_assert(num_words(from) == 2);
+      using FromHalf = Half<FromTag>;
+      const auto lower = execute(LowerOp{}, from, value);
+      const auto upper = execute(UpperOp{}, from, value);
+      if constexpr (Wrap) {
+        const auto bottom = sve_convert_lane_native(
+            to, FromHalf{}, lower, cvt::lane<0>, cvt::wrap, opt::zero);
+        return sve_convert_lane_native(
+            to, FromHalf{}, upper, cvt::lane<1>, cvt::wrap,
+            opt::merge(bottom));
+      } else {
+        const auto bottom = sve_convert_lane_native(
+            to, FromHalf{}, lower, cvt::lane<0>, opt::zero);
+        return sve_convert_lane_native(
+            to, FromHalf{}, upper, cvt::lane<1>, opt::merge(bottom));
+      }
+    } else {
+      using ToHalf = Half<ToTag>;
+      using FromHalf = Half<FromTag>;
+      const auto lower = sve_convert_unordered_ratio2<Wrap>(
+          ToHalf{}, FromHalf{}, execute(LowerOp{}, from, value));
+      const auto upper = sve_convert_unordered_ratio2<Wrap>(
+          ToHalf{}, FromHalf{}, execute(UpperOp{}, from, value));
+      return execute(ConcatOp{}, to, lower, upper);
+    }
+  }
+}
+
 template <VectorTag ToTag>
 struct NativeImpl<SVEBackend, ConvertOp, ToTag> {
   template <VectorTag FromTag, typename... Options>
@@ -682,13 +1009,28 @@ struct NativeImpl<SVEBackend, ConvertOp, ToTag> {
       ConvertOp, ToTag to, FromTag from, Vec<FromTag> value,
       Options&&... options) {
     constexpr bool lane_layout = option_count<IsLaneOption, Options...> == 1;
+    constexpr bool unordered_layout =
+        option_count<IsUnorderedOption, Options...> == 1;
     constexpr bool wraps = option_count<IsWrapOption, Options...> == 1;
     constexpr bool masked = option_count<IsMaskedOption, Options...> == 1;
+    constexpr std::size_t to_bytes = sizeof(ElementOf<ToTag>);
+    constexpr std::size_t from_bytes = sizeof(ElementOf<FromTag>);
+    constexpr bool ratio2 =
+        to_bytes == from_bytes * 2 || from_bytes == to_bytes * 2;
+    constexpr bool ratio2_word_shape = to_bytes > from_bytes
+        ? num_words(to) == num_words(from) * 2
+        : num_words(from) == num_words(to) * 2;
     auto converted = [&] {
       if constexpr (lane_layout) {
         return sve_convert_lane_native(
             to, from, value, std::forward<Options>(options)...);
+      } else if constexpr (
+          unordered_layout && ratio2 && ratio2_word_shape) {
+        return sve_convert_unordered_ratio2<wraps>(to, from, value);
       } else {
+        // Equal-width and ratio-4/8 unordered conversions intentionally use
+        // the ordered implementation until a separately benchmarked phase
+        // tree is justified.
         return sve_convert_vector<wraps>(to, from, value);
       }
     }();

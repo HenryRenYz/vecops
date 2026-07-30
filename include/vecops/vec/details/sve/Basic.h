@@ -728,6 +728,9 @@ template <VectorTag Tag>
 struct NativeImpl<SVEBackend, UpperOp, Tag> {
   static VECOPS_ALWAYS_INLINE Vec<Half<Tag>> call(
       UpperOp, Tag tag, Vec<Tag> value) {
+    if constexpr (num_words(Tag{}) > 1 && !is_subword<Half<Tag>>) {
+      return ::vecops::vec::get_word<1>(tag, value);
+    }
     using T = ElementOf<Tag>;
     const auto word0 = sve_basic_raw_word(
         ::vecops::vec::get_word<0>(tag, value));
@@ -777,7 +780,19 @@ struct NativeImpl<SVEBackend, ConcatOp, Tag> {
       Vec<Half<Tag>> lower_value,
       Vec<Half<Tag>> upper_value) {
     using T = ElementOf<Tag>;
-    if constexpr (num_words(Tag{}) > 1) {
+    if constexpr (num_words(Tag{}) > 1 && !is_subword<Half<Tag>>) {
+      const auto lower_raw = sve_basic_raw_word(lower_value);
+      const auto upper_raw = sve_basic_raw_word(upper_value);
+      return construct_words<SVEBackend>(
+          tag,
+          [&]<nint_t Index>(Tag) -> NativeWordVec<Tag> {
+            static_assert(Index == 0 || Index == 1);
+            if constexpr (Index == 0)
+              return sve_basic_wrap_word<Tag>(lower_raw);
+            else
+              return sve_basic_wrap_word<Tag>(upper_raw);
+          });
+    } else if constexpr (num_words(Tag{}) > 1) {
       const auto lower_raw = sve_basic_raw_word(lower_value);
       const auto upper_raw = sve_basic_raw_word(upper_value);
       const nint_t half_lanes = size(Half<Tag>{});

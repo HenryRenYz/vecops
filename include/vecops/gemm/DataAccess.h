@@ -20,6 +20,17 @@
 #include <utility>
 
 namespace vecops::gemm {
+
+/**
+ * Marks a data-access request whose vector is known to be completely active.
+ *
+ * Unlike a runtime count, this marker deliberately has no numeric conversion:
+ * callers must establish the full-vector precondition structurally (normally
+ * with a loop bound), and dispatch can then omit predicate construction even
+ * for runtime-sized scalable vectors.
+ */
+struct FullVectorCount {};
+
 namespace details {
 
 struct AccessKindLastContiguous {};
@@ -183,6 +194,9 @@ struct UseUnmaskedPath<Const<N>, T> : std::bool_constant<[] {
   }
 }()> {};
 
+template <vec::VectorTag T>
+struct UseUnmaskedPath<FullVectorCount, T> : std::true_type {};
+
 template <typename N>
 VECOPS_ALWAYS_INLINE constexpr nint_t count_value(N n) {
   if constexpr (is_static_count_v<N>) {
@@ -309,12 +323,19 @@ VECOPS_INLINE vec::Vec<Ti> indexed_load_dispatch(
     using Th = vec::Half<Ti>;
     Th th;
     const nint_t half_size = vec::size(th);
-    const nint_t count = count_value(n);
-    auto lo = indexed_load_dispatch(th, p, base_offset, stride, count);
-    auto hi = indexed_load_dispatch(
-        th, p, base_offset + half_size * stride, stride,
-        count - half_size);
-    return vec::concat(ti, lo, hi);
+    if constexpr (use_unmasked_path_v<N, Ti>) {
+      auto lo = indexed_load_dispatch(th, p, base_offset, stride, n);
+      auto hi = indexed_load_dispatch(
+          th, p, base_offset + half_size * stride, stride, n);
+      return vec::concat(ti, lo, hi);
+    } else {
+      const nint_t count = count_value(n);
+      auto lo = indexed_load_dispatch(th, p, base_offset, stride, count);
+      auto hi = indexed_load_dispatch(
+          th, p, base_offset + half_size * stride, stride,
+          count - half_size);
+      return vec::concat(ti, lo, hi);
+    }
   } else {
     return indexed_load_leaf(ti, p, base_offset, stride, n);
   }
@@ -333,12 +354,20 @@ VECOPS_INLINE void indexed_store_dispatch(
     using Th = vec::Half<Ti>;
     Th th;
     const nint_t half_size = vec::size(th);
-    const nint_t count = count_value(n);
-    indexed_store_dispatch(
-        th, p, base_offset, stride, count, vec::lower(ti, v));
-    indexed_store_dispatch(
-        th, p, base_offset + half_size * stride, stride,
-        count - half_size, vec::upper(ti, v));
+    if constexpr (use_unmasked_path_v<N, Ti>) {
+      indexed_store_dispatch(
+          th, p, base_offset, stride, n, vec::lower(ti, v));
+      indexed_store_dispatch(
+          th, p, base_offset + half_size * stride, stride, n,
+          vec::upper(ti, v));
+    } else {
+      const nint_t count = count_value(n);
+      indexed_store_dispatch(
+          th, p, base_offset, stride, count, vec::lower(ti, v));
+      indexed_store_dispatch(
+          th, p, base_offset + half_size * stride, stride,
+          count - half_size, vec::upper(ti, v));
+    }
     return;
   } else {
     indexed_store_leaf(ti, p, base_offset, stride, n, v);

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <type_traits>
+#include <typeinfo>
 #include <vector>
 
 #include <sys/mman.h>
@@ -266,6 +267,9 @@ void verify_indexed_load_convert_pair() {
 
 template <vec::Element From, vec::Element To>
 void verify_indexed_store_convert_pair() {
+  SCOPED_TRACE(::testing::Message()
+               << "From=" << typeid(From).name()
+               << ", To=" << typeid(To).name());
   using Tag = vec::ScalableTag<From>;
   using I32Tag = vec::Rebind<int32_t, Tag>;
   using I64Tag = vec::Rebind<int64_t, Tag>;
@@ -293,7 +297,8 @@ void verify_indexed_store_convert_pair() {
     EXPECT_TRUE(vec_test::values_identical(
         expected, output32[static_cast<std::size_t>(i32_values[lane])]));
     EXPECT_TRUE(vec_test::values_identical(
-        expected, output64[static_cast<std::size_t>(i64_values[lane])]));
+        expected, output64[static_cast<std::size_t>(i64_values[lane])]))
+        << "lane=" << lane;
   }
 }
 

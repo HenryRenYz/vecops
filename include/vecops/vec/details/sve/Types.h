@@ -81,19 +81,26 @@ VECOPS_VEC_DEFINE_SVE_TUPLES(uint64_t, uint64);
 template <int ScalePower>
 struct SVEScalableMask;
 
+#if !defined(HAS_FIXED_SVE_BITS)
+
+#if !defined(HAS_SVE_PREDICATE_TUPLES)
+#error "VLA multiword SVE masks require predicate-tuple support; use GCC 13 or newer, Clang, or compile with -msve-vector-bits=<bits> to select the fixed-SVE array representation"
+#endif
+
 template <> struct SVEScalableMask<0> { using Type = svbool_t; };
 template <> struct SVEScalableMask<1> { using Type = svboolx2_t; };
 template <> struct SVEScalableMask<2> { using Type = svboolx4_t; };
 
-// Predicate-tuple access is an SVE2.1 ACLE operation even though the tuple is
-// also used in an SVE-only build. The target boundary is therefore confined
-// to these VLA accessors. VLS masks use sized WordArray storage below and do
-// not need this attribute or its resulting out-of-line call.
-#if defined(HAS_SVE2P1)
-#define VECOPS_VEC_SVE_PREDICATE_ACCESS VECOPS_ALWAYS_INLINE
-#else
+// Clang 19 gates predicate-tuple access behind SVE2.1 even though these
+// create/get/set operations only describe predicate-register grouping. Keep
+// that target boundary confined to the affected Clang VLA accessors. GCC with
+// tuple support accepts the operations directly under base SVE. VLS masks use
+// sized WordArray storage below and never parse this block.
+#if defined(COMPILER_CLANG) && !defined(HAS_SVE2P1)
 #define VECOPS_VEC_SVE_PREDICATE_ACCESS \
     __attribute__((target("sve2p1"))) inline
+#else
+#define VECOPS_VEC_SVE_PREDICATE_ACCESS VECOPS_ALWAYS_INLINE
 #endif
 
 template <nint_t Index>
@@ -133,6 +140,8 @@ VECOPS_VEC_SVE_PREDICATE_ACCESS svboolx4_t create_mask_tuple(
 }
 
 #undef VECOPS_VEC_SVE_PREDICATE_ACCESS
+
+#endif // !defined(HAS_FIXED_SVE_BITS)
 
 #define VECOPS_VEC_DEFINE_SVE_TUPLE_ACCESS(Name)                         \
   template <nint_t Index>                                                \
@@ -405,8 +414,11 @@ VECOPS_VEC_REGISTER_SVE_VECTOR(uint64_t, uint64);
 #undef VECOPS_VEC_REGISTER_SVE_VECTOR
 
 template <> struct IsMaskRepresentation<svbool_t> : std::true_type {};
+
+#if !defined(HAS_FIXED_SVE_BITS)
 template <> struct IsMaskRepresentation<svboolx2_t> : std::true_type {};
 template <> struct IsMaskRepresentation<svboolx4_t> : std::true_type {};
+#endif
 
 #if defined(HAS_FIXED_SVE_BITS)
 
