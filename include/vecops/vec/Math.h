@@ -3,75 +3,36 @@
 
 /**
  * @file Math.h
- * @brief Exponential operations with multiple precision tiers.
+ * @brief Exponential operations with compile-time accuracy options.
  *
- * Six callable CPOs implement `exp` across three precision tiers and two
- * input-domain variants:
+ * `exp` and `exp_neg` are the canonical entry points.  With no math option
+ * they use `Accuracy::Strict`; callers can select another implementation with
+ * `opt::math::strict`, `opt::math::fast`, `opt::math::estimate`, or the generic
+ * `opt::math::accuracy<A>` option.
  *
- * | CPO         | Tier     | Input domain |
- * |-------------|----------|-------------|
- * | exp         | Strict   | full range   |
- * | exp_fast    | Fast     | full range   |
- * | exp_est     | Estimate | full range   |
- * | exp_neg     | Strict   | `x <= 0`     |
- * | exp_neg_fast| Fast     | `x <= 0`     |
- * | exp_neg_est | Estimate | `x <= 0`     |
+ * | Accuracy | Normal-input error contract |
+ * |----------|-----------------------------|
+ * | Strict   | ULP error <= 1              |
+ * | Fast     | ULP error <= 4              |
+ * | Estimate | ULP error <= 4 or relative error <= 0.006 |
  *
- * @section precision Precision contracts
+ * `exp_strict`, `exp_fast`, and `exp_est` are convenience forwarding CPOs.
+ * Their `exp_neg_*` counterparts select the same accuracy while assuming every
+ * active input lane is `x <= 0`.  Accuracy options are deliberately rejected by
+ * these fixed-accuracy CPOs; use `exp` or `exp_neg` when forwarding an accuracy
+ * selected by a template parameter.
  *
- * The three tiers define the maximum allowed error for normal (non-overflow,
- * non-subnormal) inputs.  All contracts are verified against a high-precision
- * reference (std::exp in double precision) during testing:
+ * The negative-only family skips the overflow-test path. Active positive lanes
+ * therefore have unspecified results. `VECOPS_MATH_ASSUME_VALID_INPUTS` also
+ * skips NaN propagation checks on this path.
  *
- * - **Strict** (exp, exp_neg): ULP error ≤ 1.
- *   On SVE the scalar-style approximation (FEXPA with polynomial residual)
- *   achieves ~1 ULP for f32/f64/f16/bf16.
+ * When `VECOPS_PRESERVE_SUBNORMALS` is defined, Strict preserves representable
+ * subnormal results. Fast and Estimate always flush subnormal outputs to zero.
  *
- * - **Fast** (exp_fast, exp_neg_fast): ULP error ≤ 4.
- *   On SVE f16 this uses native fp16 FEXPA with a split-constant range
- *   reduction; other types use the same polynomial path as Strict with a
- *   reduced-quality residual or the same path where Strict already meets
- *   the Fast contract.
- *
- * - **Estimate** (exp_est, exp_neg_est): ULP error ≤ 4 **or** relative
- *   error ≤ 0.006 (whichever is looser).
- *   This is the fastest tier.  On x86 and SVE it uses the ISA-native
- *   estimate instruction (e.g. SVE FEXPA) with a minimal linear correction.
- *   The mixed ULP/relative criterion keeps the error bound meaningful
- *   across all element types: 0.6% relative error is the target for
- *   neural-network exponent usage, while 4 ULP serves as the output
- *   quantisation floor.
- *
- * @section neg Variants (exp_neg*)
- *
- * The `_neg` family assumes every active input lane satisfies `x <= 0`.
- * This is the typical softmax/layer-norm pattern where the input has
- * already been shifted by `x - row_max`.  These variants skip the
- * overflow-test branch and are measurably faster than the general entry
- * points on the same tier.
- *
- * Active lanes with `x > 0` produce **unspecified** results — the
- * behaviour is backend-dependent and may return infinity, NaN, or an
- * arbitrary finite value.  The `VECOPS_MATH_ASSUME_VALID_INPUTS` macro
- * additionally skips NaN propagation checks for the negative-only path.
- *
- * @section subnormals Subnormal handling
- *
- * When `VECOPS_PRESERVE_SUBNORMALS` is defined, the Strict tier preserves
- * subnormal (gradual underflow) results.  Without it (the default), and
- * on all Fast/Estimate tiers, subnormal outputs are flushed to zero.
- * On SVE bf16 the Strict tier additionally falls back to a higher-precision
- * path under this macro to avoid double-rounding artifacts.
- *
- * @section options Filtered calls
- *
- * Filtered calls accept exactly one `opt::masked(mask)` option, plus the
- * standard inactive-lane population policy (`opt::zero`, `opt::merge`).
- * The masking and population behaviour follows the same pattern as the
- * unary arithmetic operations (see Arithmetic.h).
- *
- * @see rcp, rsqrt for reciprocal and reciprocal-square-root estimate operations.
- * @see Arithmetic.h for the common masked-option pattern used by exp.
+ * Accuracy is orthogonal to the unary masking options. Calls may combine one
+ * accuracy option with exactly one `opt::masked(mask)` or `opt::unmasked` and
+ * the usual `opt::zero`/`opt::merge` inactive-lane policy, in any order. A call
+ * containing only an accuracy option is an ordinary unmasked call.
  */
 
 #include "vecops/vec/Arithmetic.h"
@@ -81,38 +42,112 @@
 namespace vecops::vec {
 
 namespace details {
-/**
- * Precision tier selector used internally to forward the tier from
- * operation type (e.g. ExpFastOp → Fast) to the backend implementation.
- */
-enum class ExpTier { Strict, Fast, Estimate };
+
+/** One related implementation token for every accuracy/domain combination. */
+template <Accuracy A, bool NegativeOnly>
+struct ExpOp {};
+
+template <FloatingTag Tag, typename... Options>
+consteval bool valid_exp_options_for() {
+  constexpr std::size_t accuracy_count =
+      option_count<IsMathAccuracyOption, Options...>;
+  if constexpr (accuracy_count > 1) return false;
+  if constexpr (!((is_math_accuracy_option<Options> ||
+                    is_arithmetic_option_for<Tag, Options>) && ...))
+    return false;
+
+  constexpr std::size_t arithmetic_count =
+      sizeof...(Options) - accuracy_count;
+  if constexpr (arithmetic_count == 0) return true;
+
+  constexpr std::size_t masked_count =
+      option_count<IsMaskedOption, Options...>;
+  constexpr std::size_t unmasked_count =
+      option_count<IsUnmaskedOption, Options...>;
+  constexpr std::size_t zero_count = option_count<IsZeroOption, Options...>;
+  constexpr std::size_t vector_merge_count =
+      option_count<IsVectorMergeOption, Options...>;
+  constexpr std::size_t scalar_merge_count =
+      option_count<IsScalarMergeOption, Options...>;
+  return masked_count + unmasked_count == 1 &&
+      masked_count * unmasked_count == 0 && zero_count <= 1 &&
+      vector_merge_count + scalar_merge_count <= 1 &&
+      zero_count + vector_merge_count + scalar_merge_count <= 1;
 }
 
-#define VECOPS_VEC_DECLARE_EXP_OP(OpType)                              \
-  struct OpType {                                                       \
-    template <FloatingTag Tag>                                         \
-    VECOPS_ALWAYS_INLINE Vec<Tag> operator()(                           \
-        Tag tag, Vec<Tag> value) const;                                 \
-    template <FloatingTag Tag, typename... Options>                     \
-      requires (sizeof...(Options) > 0)                                \
-    VECOPS_ALWAYS_INLINE Vec<Tag> operator()(                           \
-        Tag tag, Vec<Tag> value, Options&&... options) const;           \
-    template <FloatingVectorValue V, typename... Options>               \
-    VECOPS_ALWAYS_INLINE V operator()(                                  \
-        V value, Options&&... options) const {                          \
-      return (*this)(                                                   \
-          VecToTagT<V>{}, value, std::forward<Options>(options)...);    \
-    }                                                                   \
+template <typename... Options>
+consteval Accuracy selected_math_accuracy() {
+  Accuracy result = Accuracy::Strict;
+  ([&] {
+    using Option = std::remove_cvref_t<Options>;
+    if constexpr (IsMathAccuracyOption<Option>::value)
+      result = IsMathAccuracyOption<Option>::accuracy;
+  }(), ...);
+  return result;
+}
+
+template <typename... Options>
+inline constexpr bool has_math_accuracy_option =
+    option_count<IsMathAccuracyOption, Options...> != 0;
+
+} // namespace details
+
+/** Canonical exponential CPO, parameterized only by its valid input domain. */
+template <bool NegativeOnly>
+struct ExpCpo {
+  template <FloatingTag Tag>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(Tag tag, Vec<Tag> value) const;
+
+  template <Accuracy A, FloatingTag Tag, typename... ArithmeticOptions>
+    requires ((!details::is_math_accuracy_option<ArithmeticOptions>) && ... &&
+              details::valid_exp_options_for<
+                  Tag,
+                  opt::math::AccuracyOption<A>,
+                  ArithmeticOptions...>())
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag,
+      Vec<Tag> value,
+      opt::math::AccuracyOption<A>,
+      ArithmeticOptions&&... arithmetic_options) const;
+
+  template <FloatingTag Tag, typename... Options>
+    requires (sizeof...(Options) > 0 &&
+              details::valid_exp_options_for<Tag, Options...>())
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Options&&... options) const;
+
+  template <FloatingVectorValue V, typename... Options>
+    requires (details::valid_exp_options_for<VecToTagT<V>, Options...>())
+  VECOPS_ALWAYS_INLINE V operator()(V value, Options&&... options) const {
+    return (*this)(
+        VecToTagT<V>{}, value, std::forward<Options>(options)...);
+  }
+};
+
+/** Fixed-accuracy forwarding CPO used by exp_fast/exp_est/etc. */
+template <Accuracy A, bool NegativeOnly>
+struct FixedAccuracyExpCpo {
+  template <FloatingTag Tag, typename... Options>
+    requires (!details::has_math_accuracy_option<Options...> &&
+              details::valid_exp_options_for<
+                  Tag, Options..., decltype(opt::math::accuracy<A>)>())
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Options&&... options) const {
+    return ExpCpo<NegativeOnly>{}(
+        tag, value, opt::math::accuracy<A>,
+        std::forward<Options>(options)...);
   }
 
-VECOPS_VEC_DECLARE_EXP_OP(ExpOp);
-VECOPS_VEC_DECLARE_EXP_OP(ExpFastOp);
-VECOPS_VEC_DECLARE_EXP_OP(ExpEstOp);
-VECOPS_VEC_DECLARE_EXP_OP(ExpNegOp);
-VECOPS_VEC_DECLARE_EXP_OP(ExpNegFastOp);
-VECOPS_VEC_DECLARE_EXP_OP(ExpNegEstOp);
-
-#undef VECOPS_VEC_DECLARE_EXP_OP
+  template <FloatingVectorValue V, typename... Options>
+    requires (!details::has_math_accuracy_option<Options...> &&
+              details::valid_exp_options_for<
+                  VecToTagT<V>, Options...,
+                  decltype(opt::math::accuracy<A>)>())
+  VECOPS_ALWAYS_INLINE V operator()(V value, Options&&... options) const {
+    return (*this)(
+        VecToTagT<V>{}, value, std::forward<Options>(options)...);
+  }
+};
 
 } // namespace vecops::vec
 
@@ -129,88 +164,70 @@ VECOPS_VEC_DECLARE_EXP_OP(ExpNegEstOp);
 
 namespace vecops::vec {
 
-/* **************************************************************************** */
-//    Exponential: exp, exp_fast, exp_est and negative-only variants     //
-/* **************************************************************************** */
+template <bool NegativeOnly>
+template <FloatingTag Tag>
+VECOPS_ALWAYS_INLINE Vec<Tag> ExpCpo<NegativeOnly>::operator()(
+    Tag tag, Vec<Tag> value) const {
+  return details::execute(
+      details::ExpOp<Accuracy::Strict, NegativeOnly>{}, tag, value);
+}
 
-#define VECOPS_VEC_DEFINE_EXP_OP(OpType, Name)                         \
-  template <FloatingTag Tag>                                          \
-  VECOPS_ALWAYS_INLINE Vec<Tag> OpType::operator()(                    \
-      Tag tag, Vec<Tag> value) const {                                 \
-    return details::execute(*this, tag, value);                        \
-  }                                                                    \
-  template <FloatingTag Tag, typename... Options>                      \
-    requires (sizeof...(Options) > 0)                                 \
-  VECOPS_ALWAYS_INLINE Vec<Tag> OpType::operator()(                    \
-      Tag tag, Vec<Tag> value, Options&&... options) const {           \
-    return details::execute_unary_arithmetic_options(                  \
-        *this, tag, value, std::forward<Options>(options)...);         \
-  }                                                                    \
-  inline constexpr OpType Name{}
+template <bool NegativeOnly>
+template <Accuracy A, FloatingTag Tag, typename... ArithmeticOptions>
+  requires ((!details::is_math_accuracy_option<ArithmeticOptions>) && ... &&
+            details::valid_exp_options_for<
+                Tag,
+                opt::math::AccuracyOption<A>,
+                ArithmeticOptions...>())
+VECOPS_ALWAYS_INLINE Vec<Tag> ExpCpo<NegativeOnly>::operator()(
+    Tag tag,
+    Vec<Tag> value,
+    opt::math::AccuracyOption<A>,
+    ArithmeticOptions&&... arithmetic_options) const {
+  if constexpr (sizeof...(ArithmeticOptions) == 0) {
+    return details::execute(details::ExpOp<A, NegativeOnly>{}, tag, value);
+  } else {
+    return details::execute_unary_arithmetic_options(
+        details::ExpOp<A, NegativeOnly>{},
+        tag,
+        value,
+        std::forward<ArithmeticOptions>(arithmetic_options)...);
+  }
+}
 
-/**
- * Strict exponential.  ULP error ≤ 1 for all normal inputs.
- * Filtered calls require exactly one opt::masked, plus the usual
- * inactive-lane population options.
- *
- * @see exp_fast, exp_est for the faster-but-less-accurate tiers.
- * @see exp_neg for the negative-only Strict variant.
- */
-VECOPS_VEC_DEFINE_EXP_OP(ExpOp, exp);
+template <bool NegativeOnly>
+template <FloatingTag Tag, typename... Options>
+  requires (sizeof...(Options) > 0 &&
+            details::valid_exp_options_for<Tag, Options...>())
+VECOPS_ALWAYS_INLINE Vec<Tag> ExpCpo<NegativeOnly>::operator()(
+    Tag tag, Vec<Tag> value, Options&&... options) const {
+  return details::execute_exp_options<NegativeOnly>(
+      tag, value, std::forward<Options>(options)...);
+}
 
-/**
- * Fast exponential.  ULP error ≤ 4 for all normal inputs.
- * On SVE this uses the same polynomial path as Strict where it already
- * meets the Fast contract; on f16 it uses native fp16 FEXPA with a
- * split-constant range reduction.
- *
- * @see exp, exp_est for the other precision tiers.
- * @see exp_neg_fast for the negative-only Fast variant.
- */
-VECOPS_VEC_DEFINE_EXP_OP(ExpFastOp, exp_fast);
+/** Full-domain exponential; defaults to opt::math::strict. */
+inline constexpr ExpCpo<false> exp{};
 
-/**
- * Estimate exponential.  ULP error ≤ 4 OR relative error ≤ 0.006
- * (whichever is looser).  Uses ISA-native estimate instructions (FEXPA
- * on SVE, approximate RCP-based path on x86) with a minimal correction.
- *
- * @see exp, exp_fast for the higher-quality tiers.
- * @see exp_neg_est for the negative-only Estimate variant.
- */
-VECOPS_VEC_DEFINE_EXP_OP(ExpEstOp, exp_est);
+/** Negative-only exponential; defaults to opt::math::strict. */
+inline constexpr ExpCpo<true> exp_neg{};
 
-/**
- * Strict exponential for inputs known to be `x <= 0`.
- * Same ULP ≤ 1 precision as exp but skips the overflow check path.
- * Active lanes with `x > 0` produce unspecified results.
- *
- * @see exp for the general Strict variant.
- * @see exp_neg_fast, exp_neg_est for the negative-only Fast/Estimate tiers.
- */
-VECOPS_VEC_DEFINE_EXP_OP(ExpNegOp, exp_neg);
+/** Fixed Strict forwarding entry point for exp. */
+inline constexpr FixedAccuracyExpCpo<Accuracy::Strict, false> exp_strict{};
 
-/**
- * Fast exponential for inputs known to be `x <= 0`.
- * Same ULP ≤ 4 precision as exp_fast but skips the overflow check path.
- * Active lanes with `x > 0` produce unspecified results.
- *
- * @see exp_neg for the negative-only Strict variant.
- * @see exp_neg_est for the negative-only Estimate variant.
- */
-VECOPS_VEC_DEFINE_EXP_OP(ExpNegFastOp, exp_neg_fast);
+/** Fixed Fast forwarding entry point for exp. */
+inline constexpr FixedAccuracyExpCpo<Accuracy::Fast, false> exp_fast{};
 
-/**
- * Estimate exponential for inputs known to be `x <= 0`.
- * Same ULP ≤ 4 / relative ≤ 0.006 precision as exp_est but skips the
- * overflow check path.  Active lanes with `x > 0` produce unspecified
- * results.
- *
- * @see exp_neg_fast for the negative-only Fast variant.
- * @see exp_neg for the negative-only Strict variant.
- */
-VECOPS_VEC_DEFINE_EXP_OP(ExpNegEstOp, exp_neg_est);
+/** Fixed Estimate forwarding entry point for exp. */
+inline constexpr FixedAccuracyExpCpo<Accuracy::Estimate, false> exp_est{};
 
-#undef VECOPS_VEC_DEFINE_EXP_OP
+/** Fixed Strict forwarding entry point for exp_neg. */
+inline constexpr FixedAccuracyExpCpo<Accuracy::Strict, true> exp_neg_strict{};
+
+/** Fixed Fast forwarding entry point for exp_neg. */
+inline constexpr FixedAccuracyExpCpo<Accuracy::Fast, true> exp_neg_fast{};
+
+/** Fixed Estimate forwarding entry point for exp_neg. */
+inline constexpr FixedAccuracyExpCpo<Accuracy::Estimate, true> exp_neg_est{};
 
 } // namespace vecops::vec
 

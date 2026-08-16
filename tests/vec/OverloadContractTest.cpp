@@ -25,6 +25,9 @@ using IM = vec::Mask<ITag>;
 using Indexed = decltype(vec::indexed(std::declval<IV&>()));
 using MaskedF = vec::opt::Masked<FM>;
 using MaskedI = vec::opt::Masked<IM>;
+using MathStrict = decltype(vec::opt::math::strict);
+using MathFast = decltype(vec::opt::math::fast);
+using MathEstimate = decltype(vec::opt::math::estimate);
 
 #define CHECK_BINARY_CPO(Name, Tag, Value, Masked)                    \
   static_assert(accepts<decltype(vec::Name), Tag, Value, Value>);     \
@@ -58,11 +61,26 @@ CHECK_UNARY_CPO(sqrt, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(rcp, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(rsqrt, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(exp, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(exp_strict, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(exp_fast, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(exp_est, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(exp_neg, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(exp_neg_strict, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(exp_neg_fast, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(exp_neg_est, FTag, FV, MaskedF);
+
+static_assert(accepts<decltype(vec::exp), FTag, FV, MathStrict>);
+static_assert(accepts<decltype(vec::exp), FV, MathFast>);
+static_assert(accepts<
+              decltype(vec::exp_neg), FTag, FV,
+              MaskedF, MathEstimate, vec::opt::Zero>);
+static_assert(!accepts<
+              decltype(vec::exp), FTag, FV, MathStrict, MathFast>);
+static_assert(!accepts<decltype(vec::exp_fast), FTag, FV, MathFast>);
+static_assert(!accepts<decltype(vec::exp_est), FV, MathStrict>);
+static_assert(!accepts<
+              decltype(vec::exp_neg_strict), FTag, FV, MathEstimate>);
+static_assert(!accepts<decltype(vec::exp_neg_fast), FV, MathFast>);
 CHECK_BINARY_CPO(bit_and, ITag, IV, MaskedI);
 CHECK_BINARY_CPO(bit_or, ITag, IV, MaskedI);
 CHECK_BINARY_CPO(bit_xor, ITag, IV, MaskedI);

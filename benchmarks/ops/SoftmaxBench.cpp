@@ -2,7 +2,9 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <limits>
+#include <new>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -26,6 +28,45 @@ using namespace vecops::gemm;
 using namespace vecops::ops;
 
 namespace {
+
+template <typename T, std::size_t Alignment = 64>
+struct AlignedAllocator {
+  using value_type = T;
+
+  constexpr AlignedAllocator() noexcept = default;
+
+  template <typename U>
+  constexpr AlignedAllocator(
+      const AlignedAllocator<U, Alignment>&) noexcept {}
+
+  [[nodiscard]] T* allocate(std::size_t count) {
+    const std::size_t bytes = count * sizeof(T);
+    const std::size_t aligned_bytes =
+        (bytes + Alignment - 1) / Alignment * Alignment;
+    void* pointer = std::aligned_alloc(Alignment, aligned_bytes);
+    if (pointer == nullptr) throw std::bad_alloc{};
+    return static_cast<T*>(pointer);
+  }
+
+  void deallocate(T* pointer, std::size_t) noexcept {
+    std::free(pointer);
+  }
+
+  template <typename U>
+  struct rebind {
+    using other = AlignedAllocator<U, Alignment>;
+  };
+};
+
+template <typename T, typename U, std::size_t Alignment>
+constexpr bool operator==(
+    const AlignedAllocator<T, Alignment>&,
+    const AlignedAllocator<U, Alignment>&) noexcept {
+  return true;
+}
+
+template <typename T>
+using AlignedVector = std::vector<T, AlignedAllocator<T>>;
 
 #ifndef VECOPS_BENCH_ARCH_CODE
 #define VECOPS_BENCH_ARCH_CODE "unknown"
@@ -75,25 +116,25 @@ const char* dtype_name() {
   return "unknown";
 }
 
-template <SoftmaxExpMode Mode>
+template <vec::Accuracy Mode>
 const char* mode_name() {
 #ifdef VECOPS_BENCH_USE_ONEDNN
   return "oneDNN-accurate";
 #else
-  if constexpr (Mode == SoftmaxExpMode::Strict) return "strict";
-  if constexpr (Mode == SoftmaxExpMode::Fast) return "fast";
+  if constexpr (Mode == vec::Accuracy::Strict) return "strict";
+  if constexpr (Mode == vec::Accuracy::Fast) return "fast";
   return "estimate";
 #endif
 }
 
-template <SoftmaxExpMode Mode, typename T>
+template <vec::Accuracy Mode, typename T>
 double tolerance() {
 #ifdef VECOPS_BENCH_USE_ONEDNN
   if constexpr (std::is_same_v<T, vecops::bfloat16_t>) return 8e-3;
   if constexpr (std::is_same_v<T, vecops::float16_t>) return 2e-3;
   return 3e-5;
 #else
-  if constexpr (Mode == SoftmaxExpMode::Estimate) {
+  if constexpr (Mode == vec::Accuracy::Estimate) {
     if constexpr (std::is_same_v<T, vecops::bfloat16_t>) return 2e-2;
     if constexpr (std::is_same_v<T, vecops::float16_t>) return 1e-2;
     return 8e-3;
@@ -171,17 +212,17 @@ constexpr dnnl::memory::data_type onednn_dtype() {
 #endif
 
 template <typename T>
-void fill_input(std::vector<T>& x) {
+void fill_input(AlignedVector<T>& x) {
   for (size_t i = 0; i < x.size(); ++i) {
     const float value = float(int(i % 37) - 18) * 0.17f + float(i % 11) * 0.013f;
     x[i] = static_cast<T>(value);
   }
 }
 
-template <SoftmaxExpMode Mode, typename T>
+template <vec::Accuracy Mode, typename T>
 bool verify_output(
-    const std::vector<T>& x,
-    const std::vector<T>& out,
+    const AlignedVector<T>& x,
+    const AlignedVector<T>& out,
     nint_t rows,
     nint_t n) {
   const double tol = tolerance<Mode, T>();
@@ -211,13 +252,13 @@ bool verify_output(
   return true;
 }
 
-template <int Rank, SoftmaxExpMode Mode, typename T>
+template <int Rank, vec::Accuracy Mode, typename T>
 void run_case(benchmark::State& state, const SoftmaxCase& c) {
   const nint_t total = total_elements(c);
   const nint_t n = normalized_size(c);
   const nint_t rows = row_count(c);
-  std::vector<T> x(static_cast<size_t>(total));
-  std::vector<T> out(static_cast<size_t>(total), T{});
+  AlignedVector<T> x(static_cast<size_t>(total));
+  AlignedVector<T> out(static_cast<size_t>(total), T{});
   fill_input(x);
 
 #ifdef VECOPS_BENCH_USE_ONEDNN
@@ -289,7 +330,14 @@ void run_case(benchmark::State& state, const SoftmaxCase& c) {
 #else
   using ComputeT = softmax_compute_type_t<T>;
   using Config = SoftmaxConfig<ComputeT, vec::ScalableTag<ComputeT, 0>, Mode>;
-  auto op = softmax(Config{});
+  Config config{};
+#ifdef VECOPS_BENCH_DISABLE_ONLINE
+  config.allow_online = false;
+#endif
+  if (std::getenv("VECOPS_BENCH_DISABLE_ONLINE") != nullptr) {
+    config.allow_online = false;
+  }
+  auto op = softmax(config);
 
   if constexpr (Rank == 1) {
     auto x_t = make_tensor<1>(x.data(), {c.shape[0]});
@@ -375,7 +423,7 @@ void run_case(benchmark::State& state, const SoftmaxCase& c) {
   state.counters["elements"] = benchmark::Counter(double(total));
 }
 
-template <SoftmaxExpMode Mode, typename T>
+template <vec::Accuracy Mode, typename T>
 void bench_softmax(benchmark::State& state, SoftmaxCase c) {
   if (c.rank == 1) return run_case<1, Mode, T>(state, c);
   if (c.rank == 2) return run_case<2, Mode, T>(state, c);
@@ -383,7 +431,7 @@ void bench_softmax(benchmark::State& state, SoftmaxCase c) {
   return run_case<4, Mode, T>(state, c);
 }
 
-template <SoftmaxExpMode Mode, typename T>
+template <vec::Accuracy Mode, typename T>
 void register_mode_dtype() {
   for (const auto& c : kCases) {
     const std::string name =
@@ -404,11 +452,11 @@ void register_mode_dtype() {
 template <typename T>
 void register_dtype() {
 #ifdef VECOPS_BENCH_USE_ONEDNN
-  register_mode_dtype<SoftmaxExpMode::Estimate, T>();
+  register_mode_dtype<vec::Accuracy::Estimate, T>();
 #else
-  register_mode_dtype<SoftmaxExpMode::Strict, T>();
-  register_mode_dtype<SoftmaxExpMode::Fast, T>();
-  register_mode_dtype<SoftmaxExpMode::Estimate, T>();
+  register_mode_dtype<vec::Accuracy::Strict, T>();
+  register_mode_dtype<vec::Accuracy::Fast, T>();
+  register_mode_dtype<vec::Accuracy::Estimate, T>();
 #endif
 }
 

@@ -169,13 +169,13 @@ VECOPS_ALWAYS_INLINE NativeWordVec<IndexTag<Tag>> x86_exp_to_index(
   }
 }
 
-template <ExpTier Tier, nint_t Index, FloatingTag Tag>
+template <Accuracy Tier, nint_t Index, FloatingTag Tag>
 VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_poly(
     Tag tag, NativeWordVec<Tag> r) {
   using T = ElementOf<Tag>;
   using C = X86ExpContext<Index, Tag>;
   const auto r2 = C::mul(tag, r, r);
-  if constexpr (Tier == ExpTier::Estimate) {
+  if constexpr (Tier == Accuracy::Estimate) {
     if constexpr (std::same_as<T, float16_t>) {
       auto p = C::fill(tag, T(0.1666259765625));
       p = C::fmadd(tag, p, r, C::fill(tag, T(0.5)));
@@ -193,7 +193,7 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_poly(
     p = C::fmadd(tag, p, r, C::fill(tag, T(0.5)));
     p = C::fmadd(tag, p, r, C::fill(tag, T(1)));
     return C::fmadd(tag, p, r, C::fill(tag, T(1)));
-  } else if constexpr (Tier == ExpTier::Fast && std::same_as<T, float32_t>) {
+  } else if constexpr (Tier == Accuracy::Fast && std::same_as<T, float32_t>) {
     auto p = C::fill(tag, T(0.0083691484928131103515625));
     p = C::fmadd(tag, p, r, C::fill(tag, T(0.0419175066053867340087891)));
     p = C::fmadd(tag, p, r, C::fill(tag, T(0.166665047407150268554688)));
@@ -245,14 +245,14 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_poly(
   }
 }
 
-template <ExpTier Tier, bool NegativeOnly, nint_t Index, FloatingTag Tag>
+template <Accuracy Tier, bool NegativeOnly, nint_t Index, FloatingTag Tag>
 VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_standard(
     Tag tag, NativeWordVec<Tag> x) {
   using T = ElementOf<Tag>;
   using Raw = decltype(x.value);
   using C = X86ExpContext<Index, Tag>;
-  constexpr bool strict = Tier == ExpTier::Strict;
-  constexpr bool estimate = Tier == ExpTier::Estimate;
+  constexpr bool strict = Tier == Accuracy::Strict;
+  constexpr bool estimate = Tier == Accuracy::Estimate;
 #ifdef VECOPS_PRESERVE_SUBNORMALS
   constexpr bool gradual = strict;
 #else
@@ -366,7 +366,7 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_standard(
   return y;
 }
 
-template <ExpTier Tier, bool NegativeOnly, nint_t Index, FloatingTag Tag>
+template <Accuracy Tier, bool NegativeOnly, nint_t Index, FloatingTag Tag>
 VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_low_precision(
     Tag tag, NativeWordVec<Tag> x) {
   using T = ElementOf<Tag>;
@@ -375,9 +375,9 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_low_precision(
       float32_t,
       static_cast<nint_t>(sizeof(Raw) / sizeof(float32_t))>;
   constexpr FloatTag float_tag{};
-  constexpr ExpTier compute_tier =
-      std::same_as<T, bfloat16_t> && Tier == ExpTier::Estimate
-          ? ExpTier::Fast : Tier;
+  constexpr Accuracy compute_tier =
+      std::same_as<T, bfloat16_t> && Tier == Accuracy::Estimate
+          ? Accuracy::Fast : Tier;
   if constexpr (sizeof(Raw) == 16) {
     __m128 low;
     __m128 high;
@@ -448,20 +448,11 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_low_precision(
 //                    Exponential word implementation                        //
 /* **************************************************************************** */
 
-template <typename Op>
+template <Accuracy A, bool NegativeOnly>
 struct X86ExpWordImpl {
   template <nint_t Index, FloatingTag Tag>
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
-      Op, Tag tag, NativeWordVec<Tag> value) {
-    constexpr ExpTier tier = std::same_as<Op, ExpOp> ||
-            std::same_as<Op, ExpNegOp>
-        ? ExpTier::Strict
-        : (std::same_as<Op, ExpFastOp> || std::same_as<Op, ExpNegFastOp>
-            ? ExpTier::Fast : ExpTier::Estimate);
-    constexpr bool negative_only =
-        std::same_as<Op, ExpNegOp> ||
-        std::same_as<Op, ExpNegFastOp> ||
-        std::same_as<Op, ExpNegEstOp>;
+      ExpOp<A, NegativeOnly>, Tag tag, NativeWordVec<Tag> value) {
     if constexpr (
         std::same_as<ElementOf<Tag>, float32_t> ||
         std::same_as<ElementOf<Tag>, float64_t>
@@ -469,14 +460,14 @@ struct X86ExpWordImpl {
         || std::same_as<ElementOf<Tag>, float16_t>
 #endif
         )
-      return x86_exp_standard<tier, negative_only, Index>(tag, value);
+      return x86_exp_standard<A, NegativeOnly, Index>(tag, value);
     else
-      return x86_exp_low_precision<tier, negative_only, Index>(tag, value);
+      return x86_exp_low_precision<A, NegativeOnly, Index>(tag, value);
   }
 
   template <nint_t Index, FloatingTag Tag, typename Policy>
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
-      Op op, Tag tag, NativeWordVec<Tag> value,
+      ExpOp<A, NegativeOnly> op, Tag tag, NativeWordVec<Tag> value,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
     const auto zero = X86ExpContext<Index, Tag>::fill(tag, ElementOf<Tag>{});
     const auto safe = X86ExpContext<Index, Tag>::select(
@@ -486,19 +477,9 @@ struct X86ExpWordImpl {
   }
 };
 
-#define VECOPS_VEC_DEFINE_X86_EXP(OpType)                              \
-  template <>                                                          \
-  struct NativeWordImpl<X86Backend, OpType>                            \
-      : X86ExpWordImpl<OpType> {}
-
-VECOPS_VEC_DEFINE_X86_EXP(ExpOp);
-VECOPS_VEC_DEFINE_X86_EXP(ExpFastOp);
-VECOPS_VEC_DEFINE_X86_EXP(ExpEstOp);
-VECOPS_VEC_DEFINE_X86_EXP(ExpNegOp);
-VECOPS_VEC_DEFINE_X86_EXP(ExpNegFastOp);
-VECOPS_VEC_DEFINE_X86_EXP(ExpNegEstOp);
-
-#undef VECOPS_VEC_DEFINE_X86_EXP
+template <Accuracy A, bool NegativeOnly>
+struct NativeWordImpl<X86Backend, ExpOp<A, NegativeOnly>>
+    : X86ExpWordImpl<A, NegativeOnly> {};
 
 } // namespace vecops::vec::details
 

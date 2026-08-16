@@ -39,9 +39,9 @@ const char* dtype_name() {
   return typeid(T).name();
 }
 
-template <SoftmaxExpMode Mode, typename T>
+template <vec::Accuracy Mode, typename T>
 double tolerance() {
-  if constexpr (Mode == SoftmaxExpMode::Estimate) {
+  if constexpr (Mode == vec::Accuracy::Estimate) {
     if constexpr (std::is_same_v<T, vecops::bfloat16_t>) return 2e-2;
     if constexpr (std::is_same_v<T, vecops::float16_t>) return 1e-2;
     return 8e-3;
@@ -75,7 +75,7 @@ void reference_softmax_rows(
   }
 }
 
-template <SoftmaxExpMode Mode, typename TX, typename TY>
+template <vec::Accuracy Mode, typename TX, typename TY>
 void run_dtype_combo() {
   constexpr nint_t n = 9;
   using ComputeT = std::conditional_t<
@@ -122,15 +122,274 @@ void run_dtype_combo() {
   }
 }
 
-template <SoftmaxExpMode Mode, typename TX, typename... TYs>
+template <vec::Accuracy Mode, typename TX, typename... TYs>
 void run_out_combos(TypeList<TYs...>) {
   (run_dtype_combo<Mode, TX, TYs>(), ...);
 }
 
-template <SoftmaxExpMode Mode, typename... TXs>
+template <vec::Accuracy Mode, typename... TXs>
 void run_all_dtype_combos(TypeList<TXs...>) {
   (run_out_combos<Mode, TXs>(SoftmaxFloatTypes{}), ...);
 }
+
+template <vec::Accuracy Mode, typename T>
+void run_vector_boundary_cases() {
+  using ComputeT = std::conditional_t<
+      std::is_same_v<T, vecops::float64_t>,
+      vecops::float64_t,
+      vecops::float32_t>;
+  using Tag = vec::ScalableTag<ComputeT, 0>;
+  using Config = SoftmaxConfig<ComputeT, Tag, Mode>;
+  const nint_t vl = vec::size(Tag{});
+  const std::array<nint_t, 15> counts{
+      1, vl - 1, vl, vl + 1, 2 * vl - 1,
+      2 * vl, 2 * vl + 1, 4 * vl, 4 * vl + 1,
+      16 * vl - 1, 16 * vl, 16 * vl + 1,
+      1023, 1024, 1025};
+
+  for (const nint_t n : counts) {
+    if (n <= 0) continue;
+    std::vector<T> x(static_cast<size_t>(n));
+    std::vector<T> out(static_cast<size_t>(n + 2), static_cast<T>(-17.0));
+    std::vector<double> x_ref(static_cast<size_t>(n));
+    std::vector<double> ref(static_cast<size_t>(n));
+    for (nint_t i = 0; i < n; ++i) {
+      x[static_cast<size_t>(i)] = static_cast<T>(
+          -8.0 - 0.125 * double((i * 7) % 19));
+    }
+    x.back() = static_cast<T>(-0.25);
+    if (n > 2) x[1] = static_cast<T>(-std::numeric_limits<double>::infinity());
+    for (nint_t i = 0; i < n; ++i) {
+      x_ref[static_cast<size_t>(i)] = static_cast<double>(x[static_cast<size_t>(i)]);
+    }
+    reference_softmax_rows(x_ref, 1, n, ref);
+
+    auto x_t = make_tensor<1>(x.data(), {n});
+    auto y_t = make_tensor<1>(out.data() + 1, {n});
+    softmax(Config{})(input<ComputeT>(x_t), output<ComputeT>(y_t));
+
+    EXPECT_EQ(static_cast<double>(out.front()), -17.0) << "n=" << n;
+    EXPECT_EQ(static_cast<double>(out.back()), -17.0) << "n=" << n;
+    const double tol = tolerance<Mode, T>();
+    for (nint_t i = 0; i < n; ++i) {
+      EXPECT_NEAR(
+          ref[static_cast<size_t>(i)],
+          static_cast<double>(out[static_cast<size_t>(i + 1)]),
+          tol)
+          << "mode=" << static_cast<int>(Mode)
+          << " dtype=" << dtype_name<T>()
+          << " n=" << n << " i=" << i;
+    }
+  }
+}
+
+template <vec::Accuracy Mode, typename... Ts>
+void run_all_vector_boundary_cases(TypeList<Ts...>) {
+  (run_vector_boundary_cases<Mode, Ts>(), ...);
+}
+
+enum class LargeRowPattern {
+  Increasing,
+  Decreasing,
+  Alternating,
+  MixedNegativeInfinity,
+  FullTileNegativeInfinity,
+};
+
+const char* large_row_pattern_name(LargeRowPattern pattern) {
+  switch (pattern) {
+    case LargeRowPattern::Increasing: return "increasing";
+    case LargeRowPattern::Decreasing: return "decreasing";
+    case LargeRowPattern::Alternating: return "alternating";
+    case LargeRowPattern::MixedNegativeInfinity: return "mixed-negative-infinity";
+    case LargeRowPattern::FullTileNegativeInfinity: return "full-tile-negative-infinity";
+  }
+  return "unknown";
+}
+
+template <typename Config>
+void run_large_row_reference_case(
+    Config config,
+    bool in_place,
+    const char* config_name) {
+  using ComputeT = typename Config::ComputeType;
+  using Tag = typename Config::Tag;
+  static_assert(std::is_same_v<ComputeT, vecops::float32_t>);
+
+  constexpr std::array patterns{
+      LargeRowPattern::Increasing,
+      LargeRowPattern::Decreasing,
+      LargeRowPattern::Alternating,
+      LargeRowPattern::MixedNegativeInfinity,
+      LargeRowPattern::FullTileNegativeInfinity};
+  const nint_t vl = vec::size(Tag{});
+#if defined(CPU_CAPABILITY_SVE)
+  const nint_t n = 512 * vl + 3;
+#else
+  const nint_t n = 256 * vl - 1;
+#endif
+  const nint_t rows =
+      (1024 * 1024 + n - 1) / n;
+  const nint_t total = rows * n;
+  const float negative_infinity = -std::numeric_limits<float>::infinity();
+
+  std::vector<float> input_values(static_cast<size_t>(total));
+  std::vector<double> input_reference(static_cast<size_t>(total));
+  std::vector<double> reference(static_cast<size_t>(total));
+  for (nint_t row = 0; row < rows; ++row) {
+    const LargeRowPattern pattern =
+        patterns[static_cast<size_t>(row) % patterns.size()];
+    for (nint_t col = 0; col < n; ++col) {
+      float value = 0.0f;
+      switch (pattern) {
+        case LargeRowPattern::Increasing:
+          value = -8.0f + 16.0f * static_cast<float>(col) /
+              static_cast<float>(n - 1);
+          break;
+        case LargeRowPattern::Decreasing:
+          value = 8.0f - 16.0f * static_cast<float>(col) /
+              static_cast<float>(n - 1);
+          break;
+        case LargeRowPattern::Alternating: {
+          const float magnitude = 0.125f * static_cast<float>((col * 13) % 61);
+          value = col % 2 == 0 ? magnitude : -magnitude;
+          break;
+        }
+        case LargeRowPattern::MixedNegativeInfinity:
+          value = col % 11 == 0
+              ? negative_infinity
+              : -6.0f + 0.25f * static_cast<float>((col * 17 + 5) % 47);
+          break;
+        case LargeRowPattern::FullTileNegativeInfinity:
+          value = col >= 4 * vl && col < 8 * vl
+              ? negative_infinity
+              : -5.0f + 0.2f * static_cast<float>((col * 7 + 3) % 43);
+          break;
+      }
+      const nint_t index = row * n + col;
+      input_values[static_cast<size_t>(index)] = value;
+      input_reference[static_cast<size_t>(index)] = value;
+    }
+  }
+  reference_softmax_rows(input_reference, rows, n, reference);
+
+  std::vector<float> output_values(
+      static_cast<size_t>(total + 2),
+      -17.0f);
+  auto x_t = make_tensor<2>(input_values.data(), {rows, n});
+  if (in_place) {
+    softmax(config)(input<ComputeT>(x_t), output<ComputeT>(x_t));
+  } else {
+    auto y_t = make_tensor<2>(output_values.data() + 1, {rows, n});
+    softmax(config)(input<ComputeT>(x_t), output<ComputeT>(y_t));
+    EXPECT_FLOAT_EQ(output_values.front(), -17.0f);
+    EXPECT_FLOAT_EQ(output_values.back(), -17.0f);
+  }
+
+  const auto& actual_values = in_place ? input_values : output_values;
+  const size_t actual_offset = in_place ? 0 : 1;
+  for (nint_t row = 0; row < rows; ++row) {
+    double sum = 0.0;
+    for (nint_t col = 0; col < n; ++col) {
+      const nint_t index = row * n + col;
+      const double actual = static_cast<double>(
+          actual_values[actual_offset + static_cast<size_t>(index)]);
+      EXPECT_NEAR(reference[static_cast<size_t>(index)], actual, 5e-5)
+          << "config=" << config_name
+          << " in_place=" << in_place
+          << " pattern="
+          << large_row_pattern_name(
+                 patterns[static_cast<size_t>(row) % patterns.size()])
+          << " n=" << n << " col=" << col;
+      sum += actual;
+    }
+    EXPECT_NEAR(sum, 1.0, 5e-5)
+        << "config=" << config_name
+        << " in_place=" << in_place
+        << " pattern="
+        << large_row_pattern_name(
+               patterns[static_cast<size_t>(row) % patterns.size()])
+        << " n=" << n;
+  }
+}
+
+void run_online_nonfinite_equivalence_case(bool in_place) {
+  using Config = SoftmaxConfig<>;
+  using Tag = typename Config::Tag;
+  const nint_t vl = vec::size(Tag{});
+#if defined(CPU_CAPABILITY_SVE)
+  const nint_t n = 512 * vl + 3;
+#else
+  const nint_t n = 256 * vl - 1;
+#endif
+  const nint_t rows = (1024 * 1024 + n - 1) / n;
+  const nint_t total = rows * n;
+  const float inf = std::numeric_limits<float>::infinity();
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+
+  std::vector<float> input_values(static_cast<size_t>(total));
+  for (nint_t row = 0; row < rows; ++row) {
+    for (nint_t col = 0; col < n; ++col) {
+      input_values[static_cast<size_t>(row * n + col)] =
+          -5.0f + 0.125f * static_cast<float>((col * 17 + row * 3) % 73);
+    }
+    if (row % 4 == 0) {
+      input_values[static_cast<size_t>(row * n + row % n)] = nan;
+    } else if (row % 4 == 1) {
+      input_values[static_cast<size_t>(row * n + (3 * row) % n)] = inf;
+    } else if (row % 4 == 2) {
+      std::fill_n(
+          input_values.begin() + static_cast<size_t>(row * n),
+          static_cast<size_t>(n),
+          -inf);
+    } else {
+      const nint_t tile_begin = 4 * vl;
+      std::fill_n(
+          input_values.begin() + static_cast<size_t>(row * n + tile_begin),
+          static_cast<size_t>(4 * vl),
+          -inf);
+    }
+  }
+
+  const auto execute = [&](Config config) {
+    std::vector<float> input_buffer = input_values;
+    std::vector<float> output_buffer(static_cast<size_t>(total));
+    auto x_t = make_tensor<2>(input_buffer.data(), {rows, n});
+    if (in_place) {
+      softmax(config)(input<float>(x_t), output<float>(x_t));
+      return input_buffer;
+    }
+    auto y_t = make_tensor<2>(output_buffer.data(), {rows, n});
+    softmax(config)(input<float>(x_t), output<float>(y_t));
+    return output_buffer;
+  };
+
+  Config disabled{};
+  disabled.allow_online = false;
+  const auto regular = execute(disabled);
+  const auto automatic = execute(Config{});
+  for (nint_t i = 0; i < total; ++i) {
+    const float expected = regular[static_cast<size_t>(i)];
+    const float actual = automatic[static_cast<size_t>(i)];
+    if (std::isnan(expected)) {
+      EXPECT_TRUE(std::isnan(actual))
+          << "in_place=" << in_place << " i=" << i;
+    } else if (std::isinf(expected)) {
+      EXPECT_EQ(expected, actual)
+          << "in_place=" << in_place << " i=" << i;
+    } else {
+      EXPECT_NEAR(expected, actual, 5e-5f)
+          << "in_place=" << in_place << " i=" << i;
+    }
+  }
+}
+
+struct LegacySoftmaxConfig {
+  using ComputeType = vecops::float32_t;
+  using Tag = vec::ScalableTag<ComputeType, 0>;
+
+  static constexpr vec::Accuracy exp_accuracy = vec::Accuracy::Strict;
+};
 
 template <int Rank>
 void run_contiguous_rank_case() {
@@ -193,7 +452,7 @@ struct HalfTransform : VecTransform<vecops::float32_t, vecops::float32_t> {
   }
 };
 
-template <SoftmaxExpMode Mode>
+template <vec::Accuracy Mode>
 void run_shift_stability_case() {
   using Config = SoftmaxConfig<
       vecops::float32_t,
@@ -227,10 +486,101 @@ void run_shift_stability_case() {
 } // namespace
 
 TEST(SoftmaxDTypeTest, CoversAllFloatInputOutputCombinationsAndModes) {
-  run_all_dtype_combos<SoftmaxExpMode::Strict>(SoftmaxFloatTypes{});
-  run_all_dtype_combos<SoftmaxExpMode::Fast>(SoftmaxFloatTypes{});
-  run_all_dtype_combos<SoftmaxExpMode::Estimate>(SoftmaxFloatTypes{});
+  run_all_dtype_combos<vec::Accuracy::Strict>(SoftmaxFloatTypes{});
+  run_all_dtype_combos<vec::Accuracy::Fast>(SoftmaxFloatTypes{});
+  run_all_dtype_combos<vec::Accuracy::Estimate>(SoftmaxFloatTypes{});
 }
+
+TEST(SoftmaxVectorBoundaryTest, CoversFullVectorsAndTailsForEveryModeAndType) {
+  run_all_vector_boundary_cases<vec::Accuracy::Strict>(SoftmaxFloatTypes{});
+  run_all_vector_boundary_cases<vec::Accuracy::Fast>(SoftmaxFloatTypes{});
+  run_all_vector_boundary_cases<vec::Accuracy::Estimate>(SoftmaxFloatTypes{});
+}
+
+TEST(SoftmaxOnlineOptionTest, DefaultsToAllowedAndCanBeDisabled) {
+  using Config = SoftmaxConfig<>;
+  constexpr Config default_config{};
+  static_assert(default_config.allow_online);
+  EXPECT_TRUE(default_config.allow_online);
+
+  Config disabled_config{};
+  disabled_config.allow_online = false;
+  EXPECT_FALSE(disabled_config.allow_online);
+
+  run_large_row_reference_case(default_config, false, "default-allowed");
+  run_large_row_reference_case(default_config, true, "default-allowed");
+  run_large_row_reference_case(disabled_config, false, "explicit-disabled");
+  run_large_row_reference_case(disabled_config, true, "explicit-disabled");
+}
+
+TEST(SoftmaxOnlineOptionTest, LegacyConfigWithoutOptionRemainsCompatible) {
+  constexpr LegacySoftmaxConfig config{};
+  static_assert(vecops::ops::details::softmax_online_allowed(config));
+  run_large_row_reference_case(config, false, "legacy-default-allowed");
+}
+
+TEST(SoftmaxOnlineOptionTest, PreservesRegularNonFiniteSemantics) {
+  run_online_nonfinite_equivalence_case(false);
+  run_online_nonfinite_equivalence_case(true);
+}
+
+#if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE_BF16) && \
+    !defined(VECOPS_PRESERVE_SUBNORMALS)
+TEST(SoftmaxSveBf16PackedOutputTest, CoversLargeMultiRowTensorWithTailAndGuards) {
+  using ComputeT = vecops::float32_t;
+  using Tag = vec::ScalableTag<ComputeT, 0>;
+  using Config = SoftmaxConfig<ComputeT, Tag, vec::Accuracy::Strict>;
+
+  const nint_t vl = vec::size(Tag{});
+  const nint_t n = 512 * vl + 3;
+  const nint_t rows = (512 * 1024 + n - 1) / n;
+  const nint_t total = rows * n;
+  ASSERT_GE(total, 512 * 1024);
+  ASSERT_LE(total, 8 * 1024 * 1024);
+  ASSERT_GE(n, 8192);
+  ASSERT_LE(n, 16384);
+  ASSERT_NE(n % vl, 0);
+
+  std::vector<float> x(static_cast<size_t>(total));
+  std::vector<vecops::bfloat16_t> out(
+      static_cast<size_t>(total + 2),
+      static_cast<vecops::bfloat16_t>(-17.0f));
+  std::vector<double> x_ref(static_cast<size_t>(total));
+  std::vector<double> ref(static_cast<size_t>(total));
+  for (nint_t row = 0; row < rows; ++row) {
+    const nint_t multiplier = row % 13 + 1;
+    for (nint_t col = 0; col < n; ++col) {
+      const nint_t index = row * n + col;
+      const float value =
+          -7.0f + 0.25f * float((col * multiplier + 3 * row) % 29);
+      x[static_cast<size_t>(index)] = value;
+      x_ref[static_cast<size_t>(index)] = value;
+    }
+  }
+  reference_softmax_rows(x_ref, rows, n, ref);
+
+  auto x_t = make_tensor<2>(x.data(), {rows, n});
+  auto y_t = make_tensor<2>(out.data() + 1, {rows, n});
+  softmax(Config{})(input<ComputeT>(x_t), output<ComputeT>(y_t));
+
+  EXPECT_EQ(static_cast<float>(out.front()), -17.0f);
+  EXPECT_EQ(static_cast<float>(out.back()), -17.0f);
+  const double tol =
+      tolerance<vec::Accuracy::Strict, vecops::bfloat16_t>();
+  for (nint_t row = 0; row < rows; ++row) {
+    double sum = 0.0;
+    for (nint_t col = 0; col < n; ++col) {
+      const nint_t index = row * n + col;
+      const double actual =
+          static_cast<double>(out[static_cast<size_t>(index + 1)]);
+      EXPECT_NEAR(ref[static_cast<size_t>(index)], actual, tol)
+          << "row=" << row << " col=" << col << " n=" << n;
+      sum += actual;
+    }
+    EXPECT_NEAR(sum, 1.0, 1e-2) << "row=" << row << " n=" << n;
+  }
+}
+#endif
 
 TEST(SoftmaxRankTest, CoversRanksOneThroughFour) {
   run_contiguous_rank_case<1>();
@@ -255,9 +605,9 @@ TEST(SoftmaxNumericsTest, HandlesAllNegativeTailWithoutInactiveLaneContamination
 }
 
 TEST(SoftmaxNumericsTest, IsStableUnderLargeConstantShiftForEveryMode) {
-  run_shift_stability_case<SoftmaxExpMode::Strict>();
-  run_shift_stability_case<SoftmaxExpMode::Fast>();
-  run_shift_stability_case<SoftmaxExpMode::Estimate>();
+  run_shift_stability_case<vec::Accuracy::Strict>();
+  run_shift_stability_case<vec::Accuracy::Fast>();
+  run_shift_stability_case<vec::Accuracy::Estimate>();
 }
 
 TEST(SoftmaxNumericsTest, HandlesNegativeInfinity) {
@@ -309,6 +659,27 @@ TEST(SoftmaxWorkspaceTest, LayoutAndSpecWorkspaceMatchForStridedRows) {
           3e-5);
     }
   }
+}
+
+TEST(SoftmaxWorkspaceTest, MixedStorageComputeDoesNotUnderestimateLayoutQuery) {
+  using ComputeT = vecops::float64_t;
+  using Config = SoftmaxConfig<
+      ComputeT,
+      vec::ScalableTag<ComputeT, 0>,
+      vec::Accuracy::Strict>;
+  const nint_t vl = vec::size(vec::ScalableTag<ComputeT, 0>{});
+  const nint_t n = 1024 * vl + 3;
+  const nint_t rows = (1024 * 1024 + n - 1) / n;
+  std::vector<float> x(static_cast<size_t>(rows * n));
+  std::vector<float> out(static_cast<size_t>(rows * n));
+  auto x_t = make_tensor<2>(x.data(), {rows, n});
+  auto y_t = make_tensor<2>(out.data(), {rows, n});
+  auto x_spec = input<ComputeT>(x_t);
+  auto y_spec = output<ComputeT>(y_t);
+  auto op = softmax(Config{});
+  EXPECT_EQ(
+      op.required_workspace(x_spec, y_spec),
+      op.required_workspace(x_t.layout(), y_t.layout()));
 }
 
 TEST(SoftmaxFusionTest, AppliesInputPrologueAndOutputEpilogue) {

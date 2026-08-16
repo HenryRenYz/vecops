@@ -3,45 +3,72 @@
 
 /**
  * @file Math.h
- * @brief Backend-independent math infrastructure: EnableElementwiseWordBatching
- * opt-ins (all six exp operations support word batching) and GenericImpl
- * (multi-word fallback reusing UnaryArithmeticGenericImpl).
- *
- * The actual precision-tier logic lives in each backend's NativeWordImpl
- * specialization.  This file just registers the exp operations as eligible
- * for automatic word batching and provides the multi-word GenericImpl.
+ * @brief Backend-independent exponential batching and option dispatch.
  */
 
 #include "vecops/vec/details/Arithmetic.h"
 
 namespace vecops::vec::details {
 
-#define VECOPS_VEC_ENABLE_EXP_BATCHING(OpType)                         \
-  template <>                                                          \
-  struct EnableElementwiseWordBatching<OpType> : std::true_type {}
+template <Accuracy A, bool NegativeOnly>
+struct EnableElementwiseWordBatching<ExpOp<A, NegativeOnly>>
+    : std::true_type {};
 
-VECOPS_VEC_ENABLE_EXP_BATCHING(ExpOp);
-VECOPS_VEC_ENABLE_EXP_BATCHING(ExpFastOp);
-VECOPS_VEC_ENABLE_EXP_BATCHING(ExpEstOp);
-VECOPS_VEC_ENABLE_EXP_BATCHING(ExpNegOp);
-VECOPS_VEC_ENABLE_EXP_BATCHING(ExpNegFastOp);
-VECOPS_VEC_ENABLE_EXP_BATCHING(ExpNegEstOp);
+template <
+    typename Backend,
+    Accuracy A,
+    bool NegativeOnly,
+    VectorTag Tag>
+struct GenericImpl<Backend, ExpOp<A, NegativeOnly>, Tag>
+    : UnaryArithmeticGenericImpl<
+          Backend, ExpOp<A, NegativeOnly>, Tag> {};
 
-#undef VECOPS_VEC_ENABLE_EXP_BATCHING
+/** Invokes f with every option except the compile-time math-accuracy option. */
+template <typename F>
+VECOPS_ALWAYS_INLINE decltype(auto) invoke_without_math_accuracy(F&& f) {
+  return std::forward<F>(f)();
+}
 
-#define VECOPS_VEC_DEFINE_EXP_GENERIC(OpType)                          \
-  template <typename Backend, VectorTag Tag>                           \
-  struct GenericImpl<Backend, OpType, Tag>                             \
-      : UnaryArithmeticGenericImpl<Backend, OpType, Tag> {}
+template <typename F, typename First, typename... Rest>
+VECOPS_ALWAYS_INLINE decltype(auto) invoke_without_math_accuracy(
+    F&& f, First&& first, Rest&&... rest) {
+  if constexpr (is_math_accuracy_option<First>) {
+    return invoke_without_math_accuracy(
+        std::forward<F>(f), std::forward<Rest>(rest)...);
+  } else {
+    return invoke_without_math_accuracy(
+        [&f, &first]<typename... Tail>(Tail&&... tail) -> decltype(auto) {
+          return std::forward<F>(f)(
+              std::forward<First>(first),
+              std::forward<Tail>(tail)...);
+        },
+        std::forward<Rest>(rest)...);
+  }
+}
 
-VECOPS_VEC_DEFINE_EXP_GENERIC(ExpOp);
-VECOPS_VEC_DEFINE_EXP_GENERIC(ExpFastOp);
-VECOPS_VEC_DEFINE_EXP_GENERIC(ExpEstOp);
-VECOPS_VEC_DEFINE_EXP_GENERIC(ExpNegOp);
-VECOPS_VEC_DEFINE_EXP_GENERIC(ExpNegFastOp);
-VECOPS_VEC_DEFINE_EXP_GENERIC(ExpNegEstOp);
-
-#undef VECOPS_VEC_DEFINE_EXP_GENERIC
+/**
+ * Selects one ExpOp specialization, removes the accuracy option, and reuses
+ * the standard unary mask/population dispatcher for the remaining options.
+ */
+template <bool NegativeOnly, FloatingTag Tag, typename... Options>
+VECOPS_ALWAYS_INLINE Vec<Tag> execute_exp_options(
+    Tag tag, Vec<Tag> value, Options&&... options) {
+  static_assert(valid_exp_options_for<Tag, Options...>());
+  constexpr Accuracy accuracy = selected_math_accuracy<Options...>();
+  const auto dispatch = [&]<typename... ArithmeticOptions>(
+                            ArithmeticOptions&&... arithmetic_options)
+      -> Vec<Tag> {
+    if constexpr (sizeof...(ArithmeticOptions) == 0) {
+      return execute(ExpOp<accuracy, NegativeOnly>{}, tag, value);
+    } else {
+      return execute_unary_arithmetic_options(
+          ExpOp<accuracy, NegativeOnly>{}, tag, value,
+          std::forward<ArithmeticOptions>(arithmetic_options)...);
+    }
+  };
+  return invoke_without_math_accuracy(
+      dispatch, std::forward<Options>(options)...);
+}
 
 } // namespace vecops::vec::details
 

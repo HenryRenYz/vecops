@@ -20,11 +20,6 @@
 #include "vecops/gemm/Workspace.h"
 #include "vecops/vec/Vec.h"
 
-#if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE2) && \
-    !defined(VECOPS_DISABLE_SVE_16BIT_LAYERNORM_FAST_PATH)
-#include <arm_sve.h>
-#endif
-
 namespace vecops::ops {
 
 template <
@@ -358,58 +353,66 @@ private:
     const Element *beta = bias.tensor().data();
     Element *y = const_cast<Element *>(out.tensor().data());
     const nint_t n = in.input_layout().shape()[0];
-    using F16Tag = vec::ScalableTag<float16_t, 0>;
+    using InputTag = vec::ScalableTag<Element, 0>;
     using F32PairTag = vec::ScalableTag<float32_t, 1>;
     using F32QuadTag = vec::ScalableTag<float32_t, 2>;
     using InputPairTag = vec::Rebind<Element, F32PairTag>;
     using Layout = std::conditional_t<
         IsFloat16V<Element>, vec::cvt::Unordered, vec::cvt::Ordered>;
+    // Unordered fp16 conversion masks source-memory lanes; ordered bf16
+    // widening masks fp32 output lanes. Keep the call site uniform while the
+    // type system preserves the two distinct mask contracts.
+    using TailTag = std::conditional_t<
+        IsFloat16V<Element>, InputPairTag, F32PairTag>;
     using NormalizeTag = F32QuadTag;
-    constexpr F16Tag f16_tag{};
+    constexpr InputTag input_tag{};
     constexpr F32PairTag f32_pair_tag{};
     constexpr F32QuadTag f32_quad_tag{};
-    constexpr InputPairTag input_pair_tag{};
+    constexpr TailTag tail_tag{};
     constexpr Layout layout{};
     constexpr NormalizeTag normalize_tag{};
-    const nint_t half_lanes = vec::size(f16_tag);
+    constexpr bool do_prefetch =
+        IsBfloat16V<Element> && PrefetchBf16;
+    constexpr nint_t prefetch_vectors = 8;
+    const nint_t input_lanes = vec::size(input_tag);
+    const nint_t prefetch_lanes = prefetch_vectors * input_lanes;
     const nint_t pair_lanes = vec::size(f32_pair_tag);
     const nint_t quad_lanes = vec::size(f32_quad_tag);
     const nint_t normalize_lanes = vec::size(normalize_tag);
-    const auto pg16 = vec::mtrue(f16_tag);
 
     vec::Vec<F32QuadTag> sum = vec::zeros(f32_quad_tag);
     vec::Vec<F32QuadTag> sum_sq = vec::zeros(f32_quad_tag);
     float tail_sum = 0.0f;
     float tail_sum_sq = 0.0f;
 
-    nint_t col = 0;
-    for (; col + quad_lanes <= n; col += quad_lanes) {
-      if constexpr (IsBfloat16V<Element> && PrefetchBf16) {
-        constexpr nint_t prefetch_vectors = 8;
-        svprfh(
-            pg16,
-            x + col + prefetch_vectors * half_lanes,
-            SV_PLDL1KEEP);
+    const auto reduce_block = [&](auto block_tag, nint_t offset,
+                                  auto... options) VECOPS_INLINE_LAMBDA {
+      using BlockTag = std::remove_cvref_t<decltype(block_tag)>;
+      constexpr bool is_full_block =
+          std::is_same_v<BlockTag, F32QuadTag>;
+      if constexpr (is_full_block && do_prefetch)
+        vec::prefetch(input_tag, x + offset + prefetch_lanes);
+
+      const auto xv = vec::load_convert(
+          block_tag, x + offset, layout, options...);
+      if constexpr (is_full_block) {
+        sum = vec::add(sum, xv);
+        sum_sq = vec::fmadd(xv, xv, sum_sq);
+      } else {
+        tail_sum += vec::reduce_add(block_tag, xv);
+        tail_sum_sq +=
+            vec::reduce_add(block_tag, vec::mul(xv, xv));
       }
-      const auto xv =
-          vec::load_convert(f32_quad_tag, x + col, layout);
-      sum = vec::add(sum, xv);
-      sum_sq = vec::fmadd(xv, xv, sum_sq);
-    }
+    };
+
+    nint_t col = 0;
+    for (; col + quad_lanes <= n; col += quad_lanes)
+      reduce_block(f32_quad_tag, col);
 
     for (; col < n; col += pair_lanes) {
-      const auto tail = [&] {
-        if constexpr (IsFloat16V<Element>)
-          return vec::mwhilelt(input_pair_tag, col, n);
-        else
-          return vec::mwhilelt(f32_pair_tag, col, n);
-      }();
-      const auto xv = vec::load_convert(
-          f32_pair_tag, x + col, layout,
-          vec::opt::masked(tail));
-      tail_sum += vec::reduce_add(f32_pair_tag, xv);
-      tail_sum_sq +=
-          vec::reduce_add(f32_pair_tag, vec::mul(xv, xv));
+      const auto tail = vec::mwhilelt(tail_tag, col, n);
+      reduce_block(
+          f32_pair_tag, col, vec::opt::masked(tail));
     }
 
     const float sum_value =
@@ -421,55 +424,45 @@ private:
     const float variance =
         std::max(sum_sq_value * inv_n - mean * mean, 0.0f);
     const float rstd = 1.0f / std::sqrt(variance + config.eps);
-    const auto mean_v = vec::fill(normalize_tag, mean);
+    const float shift = -mean * rstd;
     const auto rstd_v = vec::fill(normalize_tag, rstd);
-    vec::Vec<NormalizeTag> shift_v;
-    if constexpr (IsFloat16V<Element>)
-      shift_v = vec::fill(normalize_tag, -mean * rstd);
+    const auto shift_v = vec::fill(normalize_tag, shift);
 
-    const auto normalize_block = [&](nint_t offset) VECOPS_INLINE_LAMBDA {
-      if constexpr (IsBfloat16V<Element> && PrefetchBf16) {
-        constexpr nint_t prefetch_vectors = 8;
-        svprfh(
-            pg16,
-            x + offset + prefetch_vectors * half_lanes,
-            SV_PLDL1KEEP);
-        svprfh(
-            pg16,
-            x + offset + (prefetch_vectors + 1) * half_lanes,
-            SV_PLDL1KEEP);
-        svprfh(
-            pg16,
-            gamma + offset + prefetch_vectors * half_lanes,
-            SV_PLDL1KEEP);
-        svprfh(
-            pg16,
-            gamma + offset + (prefetch_vectors + 1) * half_lanes,
-            SV_PLDL1KEEP);
-        svprfh(
-            pg16,
-            beta + offset + prefetch_vectors * half_lanes,
-            SV_PLDL1KEEP);
-        svprfh(
-            pg16,
-            beta + offset + (prefetch_vectors + 1) * half_lanes,
-            SV_PLDL1KEEP);
+    const auto normalize_block = [&](auto block_tag, nint_t offset,
+                                     const auto &block_rstd,
+                                     const auto &block_shift,
+                                     auto... options) VECOPS_INLINE_LAMBDA {
+      using BlockTag = std::remove_cvref_t<decltype(block_tag)>;
+      constexpr bool is_full_block =
+          std::is_same_v<BlockTag, NormalizeTag>;
+      if constexpr (is_full_block && do_prefetch) {
+        vec::prefetch(
+            input_tag, x + offset + prefetch_lanes);
+        vec::prefetch(
+            input_tag,
+            x + offset + prefetch_lanes + input_lanes);
+        vec::prefetch(
+            input_tag, gamma + offset + prefetch_lanes);
+        vec::prefetch(
+            input_tag,
+            gamma + offset + prefetch_lanes + input_lanes);
+        vec::prefetch(
+            input_tag, beta + offset + prefetch_lanes);
+        vec::prefetch(
+            input_tag,
+            beta + offset + prefetch_lanes + input_lanes);
       }
       auto xv = vec::load_convert(
-          normalize_tag, x + offset, layout);
+          block_tag, x + offset, layout, options...);
       const auto gamma_v = vec::load_convert(
-          normalize_tag, gamma + offset, layout);
+          block_tag, gamma + offset, layout, options...);
       const auto beta_v = vec::load_convert(
-          normalize_tag, beta + offset, layout);
-      if constexpr (IsFloat16V<Element>)
-        xv = vec::fmadd(xv, rstd_v, shift_v);
-      else
-        xv = vec::mul(
-            vec::sub(xv, mean_v),
-            rstd_v);
+          block_tag, beta + offset, layout, options...);
+      xv = vec::fmadd(xv, block_rstd, block_shift);
       const auto out_v =
           vec::fmadd(xv, gamma_v, beta_v);
-      vec::store_convert(normalize_tag, y + offset, out_v, layout);
+      vec::store_convert(
+          block_tag, y + offset, out_v, layout, options...);
     };
 
     // TODO(920f-3): A cache-resident BF16 fast path using two 32-byte
@@ -494,39 +487,14 @@ private:
     // becomes more important than keeping this path uniform.
     col = 0;
     for (; col + normalize_lanes <= n; col += normalize_lanes)
-      normalize_block(col);
+      normalize_block(normalize_tag, col, rstd_v, shift_v);
 
+    const auto rstd_pair = vec::fill(f32_pair_tag, rstd);
+    const auto shift_pair = vec::fill(f32_pair_tag, shift);
     for (; col < n; col += pair_lanes) {
-      const auto tail = [&] {
-        if constexpr (IsFloat16V<Element>)
-          return vec::mwhilelt(input_pair_tag, col, n);
-        else
-          return vec::mwhilelt(f32_pair_tag, col, n);
-      }();
-      auto xv = vec::load_convert(
-          f32_pair_tag, x + col, layout,
-          vec::opt::masked(tail));
-      const auto gamma_v = vec::load_convert(
-          f32_pair_tag, gamma + col, layout,
-          vec::opt::masked(tail));
-      const auto beta_v = vec::load_convert(
-          f32_pair_tag, beta + col, layout,
-          vec::opt::masked(tail));
-      const auto mean_pair = vec::fill(f32_pair_tag, mean);
-      const auto rstd_pair = vec::fill(f32_pair_tag, rstd);
-      if constexpr (IsFloat16V<Element>) {
-        const auto shift_pair =
-            vec::fill(f32_pair_tag, -mean * rstd);
-        xv = vec::fmadd(xv, rstd_pair, shift_pair);
-      } else {
-        xv = vec::mul(
-            vec::sub(xv, mean_pair),
-            rstd_pair);
-      }
-      const auto out_v =
-          vec::fmadd(xv, gamma_v, beta_v);
-      vec::store_convert(
-          f32_pair_tag, y + col, out_v, layout,
+      const auto tail = vec::mwhilelt(tail_tag, col, n);
+      normalize_block(
+          f32_pair_tag, col, rstd_pair, shift_pair,
           vec::opt::masked(tail));
     }
   }

@@ -35,6 +35,20 @@ namespace vecops::vec::details {
 //    Detection traits for operation-level options: masking, population         //
 /* **************************************************************************** */
 
+/** Detects opt::math::AccuracyOption<A> and exposes A as accuracy. */
+template <typename>
+struct IsMathAccuracyOption : std::false_type {};
+
+template <Accuracy A>
+struct IsMathAccuracyOption<opt::math::AccuracyOption<A>>
+    : std::true_type {
+  static constexpr Accuracy accuracy = A;
+};
+
+template <typename T>
+inline constexpr bool is_math_accuracy_option =
+    IsMathAccuracyOption<std::remove_cvref_t<T>>::value;
+
 /** Detects opt::Masked<M> wrappers; the Value alias extracts the mask type. */
 template <typename>
 struct IsMaskedOption : std::false_type {};

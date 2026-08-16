@@ -80,9 +80,22 @@ void verify_float_tagless() {
 
   const auto negative = vec::fill(tag, -0.5F);
   expect_same(tag, vec::exp(tag, a), vec::exp(a));
+  expect_same(
+      tag,
+      vec::exp(tag, a, vec::opt::math::fast),
+      vec::exp(a, vec::opt::math::fast));
+  expect_same(tag, vec::exp_strict(tag, a), vec::exp_strict(a));
   expect_same(tag, vec::exp_fast(tag, a), vec::exp_fast(a));
   expect_same(tag, vec::exp_est(tag, a), vec::exp_est(a));
   expect_same(tag, vec::exp_neg(tag, negative), vec::exp_neg(negative));
+  expect_same(
+      tag,
+      vec::exp_neg(tag, negative, vec::opt::math::estimate),
+      vec::exp_neg(negative, vec::opt::math::estimate));
+  expect_same(
+      tag,
+      vec::exp_neg_strict(tag, negative),
+      vec::exp_neg_strict(negative));
   expect_same(
       tag, vec::exp_neg_fast(tag, negative), vec::exp_neg_fast(negative));
   expect_same(

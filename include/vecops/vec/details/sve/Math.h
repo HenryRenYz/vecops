@@ -115,10 +115,10 @@ VECOPS_NOINLINE inline svfloat64_t sve_exp_f64_upper_tail(svfloat64_t x) {
   return svmul_f64_x(pg, svmul_f64_x(pg, poly, sh), sr);
 }
 
-template <ExpTier Tier, bool NegativeOnly>
+template <Accuracy Tier, bool NegativeOnly>
 VECOPS_ALWAYS_INLINE svfloat32_t sve_exp_f32(svfloat32_t x) {
-  constexpr bool strict = Tier == ExpTier::Strict;
-  constexpr bool estimate = Tier == ExpTier::Estimate;
+  constexpr bool strict = Tier == Accuracy::Strict;
+  constexpr bool estimate = Tier == Accuracy::Estimate;
 #ifdef VECOPS_PRESERVE_SUBNORMALS
   constexpr bool gradual = strict;
 #else
@@ -173,10 +173,10 @@ VECOPS_ALWAYS_INLINE svfloat32_t sve_exp_f32(svfloat32_t x) {
   return y;
 }
 
-template <ExpTier Tier, bool NegativeOnly>
+template <Accuracy Tier, bool NegativeOnly>
 VECOPS_ALWAYS_INLINE svfloat64_t sve_exp_f64(svfloat64_t x) {
-  constexpr bool strict = Tier == ExpTier::Strict;
-  constexpr bool estimate = Tier == ExpTier::Estimate;
+  constexpr bool strict = Tier == Accuracy::Strict;
+  constexpr bool estimate = Tier == Accuracy::Estimate;
 #ifdef VECOPS_PRESERVE_SUBNORMALS
   constexpr bool gradual = strict;
 #else
@@ -243,10 +243,10 @@ VECOPS_ALWAYS_INLINE svfloat64_t sve_exp_f64(svfloat64_t x) {
   return y;
 }
 
-template <ExpTier Tier, bool NegativeOnly>
+template <Accuracy Tier, bool NegativeOnly>
 VECOPS_ALWAYS_INLINE svfloat16_t sve_exp_f16(svfloat16_t x) {
-  constexpr bool strict = Tier == ExpTier::Strict;
-  constexpr bool estimate = Tier == ExpTier::Estimate;
+  constexpr bool strict = Tier == Accuracy::Strict;
+  constexpr bool estimate = Tier == Accuracy::Estimate;
 #ifdef VECOPS_PRESERVE_SUBNORMALS
   constexpr bool gradual = strict;
 #else
@@ -306,7 +306,7 @@ VECOPS_ALWAYS_INLINE svfloat16_t sve_exp_f16(svfloat16_t x) {
 //    Exp dispatch and SVEExpWordImpl                                         //
 /* **************************************************************************** */
 
-template <ExpTier Tier, bool NegativeOnly, FloatingTag Tag>
+template <Accuracy Tier, bool NegativeOnly, FloatingTag Tag>
 VECOPS_ALWAYS_INLINE NativeWordVec<Tag> sve_exp_dispatch(
     Tag, NativeWordVec<Tag> value) {
   using T = ElementOf<Tag>;
@@ -317,7 +317,7 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> sve_exp_dispatch(
     return sve_basic_wrap_word<Tag>(sve_exp_f64<Tier, NegativeOnly>(raw));
   } else if constexpr (std::same_as<T, float16_t>) {
 #ifdef VECOPS_PRESERVE_SUBNORMALS
-    if constexpr (Tier == ExpTier::Strict) {
+    if constexpr (Tier == Accuracy::Strict) {
       const auto low = svcvt_f32_f16_x(svptrue_b32(), raw);
 #if defined(__ARM_FEATURE_SVE2)
       const auto high = svcvtlt_f32_f16_x(svptrue_b32(), raw);
@@ -344,11 +344,11 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> sve_exp_dispatch(
 #endif
     return sve_basic_wrap_word<Tag>(sve_exp_f16<Tier, NegativeOnly>(raw));
   } else {
-    constexpr ExpTier compute_tier =
+    constexpr Accuracy compute_tier =
 #ifdef VECOPS_PRESERVE_SUBNORMALS
-        Tier == ExpTier::Strict ? ExpTier::Strict : ExpTier::Estimate;
+        Tier == Accuracy::Strict ? Accuracy::Strict : Accuracy::Estimate;
 #else
-        ExpTier::Estimate;
+        Accuracy::Estimate;
 #endif
     const auto low = sve_bfloat16_to_float32_low(raw);
     const auto high = sve_bfloat16_to_float32_high(raw);
@@ -358,26 +358,17 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> sve_exp_dispatch(
   }
 }
 
-template <typename Op>
+template <Accuracy A, bool NegativeOnly>
 struct SVEExpWordImpl {
   template <nint_t Index, FloatingTag Tag>
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
-      Op, Tag tag, NativeWordVec<Tag> value) {
-    constexpr ExpTier tier = std::same_as<Op, ExpOp> ||
-            std::same_as<Op, ExpNegOp>
-        ? ExpTier::Strict
-        : (std::same_as<Op, ExpFastOp> || std::same_as<Op, ExpNegFastOp>
-            ? ExpTier::Fast : ExpTier::Estimate);
-    constexpr bool negative_only =
-        std::same_as<Op, ExpNegOp> ||
-        std::same_as<Op, ExpNegFastOp> ||
-        std::same_as<Op, ExpNegEstOp>;
-    return sve_exp_dispatch<tier, negative_only>(tag, value);
+      ExpOp<A, NegativeOnly>, Tag tag, NativeWordVec<Tag> value) {
+    return sve_exp_dispatch<A, NegativeOnly>(tag, value);
   }
 
   template <nint_t Index, FloatingTag Tag, typename Policy>
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
-      Op op, Tag tag, NativeWordVec<Tag> value,
+      ExpOp<A, NegativeOnly> op, Tag tag, NativeWordVec<Tag> value,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
     const auto zero = NativeWordImpl<SVEBackend, FillOp>::template call<Index>(
         FillOp{}, tag, ElementOf<Tag>{});
@@ -389,19 +380,9 @@ struct SVEExpWordImpl {
   }
 };
 
-#define VECOPS_VEC_DEFINE_SVE_EXP(OpType)                              \
-  template <>                                                          \
-  struct NativeWordImpl<SVEBackend, OpType>                            \
-      : SVEExpWordImpl<OpType> {}
-
-VECOPS_VEC_DEFINE_SVE_EXP(ExpOp);
-VECOPS_VEC_DEFINE_SVE_EXP(ExpFastOp);
-VECOPS_VEC_DEFINE_SVE_EXP(ExpEstOp);
-VECOPS_VEC_DEFINE_SVE_EXP(ExpNegOp);
-VECOPS_VEC_DEFINE_SVE_EXP(ExpNegFastOp);
-VECOPS_VEC_DEFINE_SVE_EXP(ExpNegEstOp);
-
-#undef VECOPS_VEC_DEFINE_SVE_EXP
+template <Accuracy A, bool NegativeOnly>
+struct NativeWordImpl<SVEBackend, ExpOp<A, NegativeOnly>>
+    : SVEExpWordImpl<A, NegativeOnly> {};
 
 } // namespace vecops::vec::details
 

@@ -15,8 +15,6 @@ namespace vec = vecops::vec;
 
 namespace {
 
-enum class ExpTestTier { Strict, Fast, Estimate };
-
 using FloatingTypes = ::testing::Types<
     vecops::bfloat16_t,
     vecops::float16_t,
@@ -55,28 +53,45 @@ T reference_exp(T value) {
   }
 }
 
-template <ExpTestTier Tier, bool NegativeOnly, vec::FloatingTag Tag,
+template <vec::Accuracy Tier, bool NegativeOnly, vec::FloatingTag Tag,
           typename... Options>
 vec::Vec<Tag> invoke_exp(
     Tag tag, vec::Vec<Tag> value, Options&&... options) {
   if constexpr (NegativeOnly) {
-    if constexpr (Tier == ExpTestTier::Strict)
-      return vec::exp_neg(value, std::forward<Options>(options)...);
-    else if constexpr (Tier == ExpTestTier::Fast)
-      return vec::exp_neg_fast(value, std::forward<Options>(options)...);
-    else
-      return vec::exp_neg_est(value, std::forward<Options>(options)...);
+    return vec::exp_neg(
+        tag,
+        value,
+        std::forward<Options>(options)...,
+        vec::opt::math::accuracy<Tier>);
   } else {
-    if constexpr (Tier == ExpTestTier::Strict)
-      return vec::exp(value, std::forward<Options>(options)...);
-    else if constexpr (Tier == ExpTestTier::Fast)
-      return vec::exp_fast(value, std::forward<Options>(options)...);
-    else
-      return vec::exp_est(value, std::forward<Options>(options)...);
+    return vec::exp(
+        tag,
+        value,
+        std::forward<Options>(options)...,
+        vec::opt::math::accuracy<Tier>);
   }
 }
 
-template <ExpTestTier Tier, typename T>
+template <vec::Accuracy Tier, bool NegativeOnly, vec::FloatingTag Tag>
+vec::Vec<Tag> invoke_fixed_exp(Tag tag, vec::Vec<Tag> value) {
+  if constexpr (NegativeOnly) {
+    if constexpr (Tier == vec::Accuracy::Strict)
+      return vec::exp_neg_strict(tag, value);
+    else if constexpr (Tier == vec::Accuracy::Fast)
+      return vec::exp_neg_fast(tag, value);
+    else
+      return vec::exp_neg_est(tag, value);
+  } else {
+    if constexpr (Tier == vec::Accuracy::Strict)
+      return vec::exp_strict(tag, value);
+    else if constexpr (Tier == vec::Accuracy::Fast)
+      return vec::exp_fast(tag, value);
+    else
+      return vec::exp_est(tag, value);
+  }
+}
+
+template <vec::Accuracy Tier, typename T>
 void expect_accurate(T input, T actual) {
   const T expected = reference_exp(input);
   ASSERT_EQ(std::isnan(as_double(expected)), std::isnan(as_double(actual)))
@@ -93,11 +108,11 @@ void expect_accurate(T input, T actual) {
   const auto actual_bits = bits(actual);
   const auto ulps = expected_bits > actual_bits
       ? expected_bits - actual_bits : actual_bits - expected_bits;
-  if constexpr (Tier == ExpTestTier::Strict) {
+  if constexpr (Tier == vec::Accuracy::Strict) {
     EXPECT_LE(ulps, 1u)
         << "x=" << as_double(input) << " expected=" << as_double(expected)
         << " actual=" << as_double(actual);
-  } else if constexpr (Tier == ExpTestTier::Fast) {
+  } else if constexpr (Tier == vec::Accuracy::Fast) {
     if (std::isfinite(as_double(expected)) &&
         as_double(expected) >= as_double(std::numeric_limits<T>::min()))
       EXPECT_LE(ulps, 4u) << "x=" << as_double(input);
@@ -127,7 +142,7 @@ constexpr double upper_bound() {
   else return 9.0;
 }
 
-template <ExpTestTier Tier, bool NegativeOnly, bool FullOptions = true,
+template <vec::Accuracy Tier, bool NegativeOnly, bool FullOptions = true,
           vec::FloatingTag Tag>
 void verify_lane_shape(Tag tag) {
   using T = vec::ElementOf<Tag>;
@@ -155,8 +170,19 @@ void verify_lane_shape(Tag tag) {
     valid_input = vec::set(tag, valid_input, lane, T(value));
   }
   const auto result = invoke_exp<Tier, NegativeOnly>(tag, valid_input);
+  const auto fixed_result = invoke_fixed_exp<Tier, NegativeOnly>(
+      tag, valid_input);
   const auto unmasked_result = invoke_exp<Tier, NegativeOnly>(
       tag, valid_input, vec::opt::unmasked);
+  const auto default_result = [&] {
+    if constexpr (Tier != vec::Accuracy::Strict) {
+      return result;
+    } else if constexpr (NegativeOnly) {
+      return vec::exp_neg(tag, valid_input);
+    } else {
+      return vec::exp(tag, valid_input);
+    }
+  }();
   for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
     expect_accurate<Tier>(
         vec::get(tag, valid_input, lane), vec::get(tag, result, lane));
@@ -164,6 +190,16 @@ void verify_lane_shape(Tag tag) {
         bits(vec::get(tag, result, lane)),
         bits(vec::get(tag, unmasked_result, lane)))
         << "explicit unmasked lane=" << lane;
+    EXPECT_EQ(
+        bits(vec::get(tag, result, lane)),
+        bits(vec::get(tag, fixed_result, lane)))
+        << "fixed-accuracy forwarding lane=" << lane;
+    if constexpr (Tier == vec::Accuracy::Strict) {
+      EXPECT_EQ(
+          bits(vec::get(tag, result, lane)),
+          bits(vec::get(tag, default_result, lane)))
+          << "default strict lane=" << lane;
+    }
   }
 
   if constexpr (!FullOptions) return;
@@ -195,15 +231,15 @@ void verify_lane_shape(Tag tag) {
 
 template <typename T, bool FullOptions = true, vec::FloatingTag Tag>
 void verify_every_operation(Tag tag) {
-  verify_lane_shape<ExpTestTier::Strict, false, FullOptions>(tag);
-  verify_lane_shape<ExpTestTier::Fast, false, FullOptions>(tag);
-  verify_lane_shape<ExpTestTier::Estimate, false, FullOptions>(tag);
-  verify_lane_shape<ExpTestTier::Strict, true, FullOptions>(tag);
-  verify_lane_shape<ExpTestTier::Fast, true, FullOptions>(tag);
-  verify_lane_shape<ExpTestTier::Estimate, true, FullOptions>(tag);
+  verify_lane_shape<vec::Accuracy::Strict, false, FullOptions>(tag);
+  verify_lane_shape<vec::Accuracy::Fast, false, FullOptions>(tag);
+  verify_lane_shape<vec::Accuracy::Estimate, false, FullOptions>(tag);
+  verify_lane_shape<vec::Accuracy::Strict, true, FullOptions>(tag);
+  verify_lane_shape<vec::Accuracy::Fast, true, FullOptions>(tag);
+  verify_lane_shape<vec::Accuracy::Estimate, true, FullOptions>(tag);
 }
 
-template <ExpTestTier Tier, bool NegativeOnly, typename T>
+template <vec::Accuracy Tier, bool NegativeOnly, typename T>
 void verify_dense_samples() {
   vec::ScalableTag<T, 0> tag;
   constexpr int sample_count = 4096;
@@ -240,12 +276,12 @@ TYPED_TEST(VecMathTest, EveryOperationShapeAndOptions) {
 
 TYPED_TEST(VecMathTest, DenseAccuracyAndNegativeDomain) {
   using T = TypeParam;
-  verify_dense_samples<ExpTestTier::Strict, false, T>();
-  verify_dense_samples<ExpTestTier::Fast, false, T>();
-  verify_dense_samples<ExpTestTier::Estimate, false, T>();
-  verify_dense_samples<ExpTestTier::Strict, true, T>();
-  verify_dense_samples<ExpTestTier::Fast, true, T>();
-  verify_dense_samples<ExpTestTier::Estimate, true, T>();
+  verify_dense_samples<vec::Accuracy::Strict, false, T>();
+  verify_dense_samples<vec::Accuracy::Fast, false, T>();
+  verify_dense_samples<vec::Accuracy::Estimate, false, T>();
+  verify_dense_samples<vec::Accuracy::Strict, true, T>();
+  verify_dense_samples<vec::Accuracy::Fast, true, T>();
+  verify_dense_samples<vec::Accuracy::Estimate, true, T>();
 }
 
 #ifndef VECOPS_MATH_ASSUME_VALID_INPUTS
@@ -268,7 +304,7 @@ TYPED_TEST(VecMathTest, IeeeEdges) {
     if (std::isnan(in)) EXPECT_TRUE(std::isnan(out));
     else if (in == std::numeric_limits<double>::infinity()) EXPECT_TRUE(std::isinf(out));
     else if (in == -std::numeric_limits<double>::infinity()) EXPECT_EQ(out, 0.0);
-    else expect_accurate<ExpTestTier::Strict>(
+    else expect_accurate<vec::Accuracy::Strict>(
         vec::get(tag, input, lane), vec::get(tag, result, lane));
   }
 }
@@ -286,7 +322,7 @@ TYPED_TEST(VecMathTest, FixedSVEBatchesBeyondTupleLimit) {
         std::bit_ceil(static_cast<std::uint64_t>(word_lanes * 4 + 1)));
     using Tag = vec::FixedTag<T, lanes>;
     EXPECT_GT(vec::num_words(Tag{}), 4);
-    verify_every_operation<T>(Tag{}, false);
+    verify_every_operation<T, false>(Tag{});
   }
 }
 #endif

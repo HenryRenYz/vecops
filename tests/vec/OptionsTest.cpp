@@ -20,6 +20,23 @@ namespace vec = vecops::vec;
 TEST(VecOptionsTest, ClassifiesEveryPublicOptionFamily) {
   using namespace vecops::vec::details;
 
+  using StrictAccuracy =
+      std::remove_cvref_t<decltype(vec::opt::math::strict)>;
+  using FastAccuracy =
+      std::remove_cvref_t<decltype(vec::opt::math::fast)>;
+  using EstimateAccuracy =
+      std::remove_cvref_t<decltype(vec::opt::math::estimate)>;
+  static_assert(IsMathAccuracyOption<StrictAccuracy>::value);
+  static_assert(IsMathAccuracyOption<StrictAccuracy>::accuracy ==
+                vec::Accuracy::Strict);
+  static_assert(IsMathAccuracyOption<FastAccuracy>::accuracy ==
+                vec::Accuracy::Fast);
+  static_assert(IsMathAccuracyOption<EstimateAccuracy>::accuracy ==
+                vec::Accuracy::Estimate);
+  static_assert(std::same_as<
+      std::remove_cvref_t<decltype(vec::opt::math::fast)>,
+      std::remove_cvref_t<decltype(
+          vec::opt::math::accuracy<vec::Accuracy::Fast>)>>);
   static_assert(IsUnmaskedOption<decltype(vec::opt::unmasked)>::value);
   static_assert(IsFirstOption<decltype(vec::opt::first(1))>::value);
   static_assert(IsZeroOption<decltype(vec::opt::zero)>::value);

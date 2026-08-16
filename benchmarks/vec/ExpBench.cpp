@@ -21,8 +21,6 @@ namespace {
 #define VECOPS_SOURCE_DIR "."
 #endif
 
-enum class Tier { Strict, Fast, Estimate };
-
 constexpr nint_t kBlocks = 256;
 
 template <typename E>
@@ -33,27 +31,23 @@ const char* dtype_name() {
   return "bf16";
 }
 
-template <Tier tier>
+template <Accuracy tier>
 const char* mode_name() {
-  if constexpr (tier == Tier::Strict) return "strict";
-  if constexpr (tier == Tier::Fast) return "fast";
+  if constexpr (tier == Accuracy::Strict) return "strict";
+  if constexpr (tier == Accuracy::Fast) return "fast";
   return "estimate";
 }
 
-template <Tier tier, bool negative_only, VectorTag Tag>
+template <Accuracy tier, bool negative_only, VectorTag Tag>
 Vec<Tag> apply_exp(Tag tag, Vec<Tag> x) {
   if constexpr (negative_only) {
-    if constexpr (tier == Tier::Strict) return exp_neg(tag, x);
-    if constexpr (tier == Tier::Fast) return exp_neg_fast(tag, x);
-    return exp_neg_est(tag, x);
+    return exp_neg(tag, x, opt::math::accuracy<tier>);
   } else {
-    if constexpr (tier == Tier::Strict) return vecops::vec::exp(tag, x);
-    if constexpr (tier == Tier::Fast) return exp_fast(tag, x);
-    return exp_est(tag, x);
+    return vecops::vec::exp(tag, x, opt::math::accuracy<tier>);
   }
 }
 
-template <Tier tier, bool negative_only, typename E>
+template <Accuracy tier, bool negative_only, typename E>
 void bench_exp(benchmark::State& state) {
   const ScalableTag<E> t;
   const nint_t lanes = size(t);
@@ -81,7 +75,7 @@ void bench_exp(benchmark::State& state) {
   state.counters["lanes"] = benchmark::Counter(double(lanes));
 }
 
-template <Tier tier, bool negative_only, typename E>
+template <Accuracy tier, bool negative_only, typename E>
 void register_one() {
   const ScalableTag<E> t;
   const std::string name =
@@ -99,12 +93,12 @@ void register_one() {
 
 template <typename E>
 void register_dtype() {
-  register_one<Tier::Strict, false, E>();
-  register_one<Tier::Fast, false, E>();
-  register_one<Tier::Estimate, false, E>();
-  register_one<Tier::Strict, true, E>();
-  register_one<Tier::Fast, true, E>();
-  register_one<Tier::Estimate, true, E>();
+  register_one<Accuracy::Strict, false, E>();
+  register_one<Accuracy::Fast, false, E>();
+  register_one<Accuracy::Estimate, false, E>();
+  register_one<Accuracy::Strict, true, E>();
+  register_one<Accuracy::Fast, true, E>();
+  register_one<Accuracy::Estimate, true, E>();
 }
 
 void register_benchmarks() {

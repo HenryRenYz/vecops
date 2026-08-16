@@ -14,9 +14,9 @@
  * Options are organized in three namespaces:
  *
  * - **opt**: computation-level options for masking (masked/unmasked),
- *   inactive-lane population (zero/merge), lane selection (first), lane
- *   ordering (LaneOrder), scale (Scale), and memory addressing (indexed,
- *   strided).
+ *   inactive-lane population (zero/merge), math accuracy (opt::math), lane
+ *   selection (first), lane ordering (LaneOrder), scale (Scale), and memory
+ *   addressing (indexed, strided).
  *
  * - **cvt**: conversion-policy options controlling lane order
  *   (ordered/unordered/lane), value behavior (saturate/wrap), and narrowing
@@ -31,7 +31,48 @@
  * etc.) declares its own valid-option set via constexpr predicates.
  */
 
+namespace vecops::vec {
+
+/**
+ * Compile-time accuracy policy shared by vector math operations and operators
+ * which expose their math-accuracy choice.
+ *
+ * The meaning of each level, including its error metric and accuracy bound, is
+ * defined by the operation that accepts the policy.  The levels select an
+ * implementation contract; they do not impose a cross-operation or
+ * cross-target ordering on measured accuracy or performance.  In particular,
+ * a more relaxed implementation may be as accurate as a stricter one and is
+ * not guaranteed to be faster on every target or input.
+ */
+enum class Accuracy { Strict, Fast, Estimate };
+
+} // namespace vecops::vec
+
 namespace vecops::vec::opt {
+
+/** Compile-time options which select an operation-defined math accuracy. */
+namespace math {
+
+/** Associates a math option with one value of vec::Accuracy. */
+template <Accuracy A>
+struct AccuracyOption {
+  static constexpr Accuracy value = A;
+};
+
+/** Generic accuracy option for forwarding a compile-time Accuracy value. */
+template <Accuracy A>
+inline constexpr AccuracyOption<A> accuracy{};
+
+/** Requests the operation's strict accuracy contract. */
+inline constexpr auto strict = accuracy<Accuracy::Strict>;
+
+/** Requests the operation's fast accuracy contract, when distinguished. */
+inline constexpr auto fast = accuracy<Accuracy::Fast>;
+
+/** Requests the operation's estimate accuracy contract, when distinguished. */
+inline constexpr auto estimate = accuracy<Accuracy::Estimate>;
+
+} // namespace math
 
 /**
  * Selects zero for every inactive output lane of a masked vector operation.
