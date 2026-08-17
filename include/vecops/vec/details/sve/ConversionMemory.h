@@ -18,6 +18,34 @@
 
 namespace vecops::vec::details {
 
+template <typename... Options>
+inline constexpr bool sve_has_oversized_contiguous_conversion_lowering =
+    option_count<IsMemoryAddressingOption, Options...> == 0 &&
+    option_count<IsUnorderedOption, Options...> == 0 &&
+    option_count<IsWrapOption, Options...> == 0;
+
+template <VectorTag Tag>
+inline constexpr bool sve_conversion_tag_representable =
+    is_fixed_tag<Tag> || scale_power<Tag> <= VEC_MAX_POW;
+
+/**
+ * Ordered saturating SVE conversion recursively lowers the logical Tag until
+ * both sides fit one physical word. It therefore does not materialize the
+ * possibly oversized memory-side Rebind and must run before generic boundary
+ * splitting.
+ */
+template <VectorTag ToTag, Element From, typename... Options>
+struct HasOversizedMemoryConversionLowering<
+    SVEBackend, LoadConvertOp, ToTag, From, Options...>
+    : std::bool_constant<
+          sve_has_oversized_contiguous_conversion_lowering<Options...>> {};
+
+template <VectorTag FromTag, Element To, typename... Options>
+struct HasOversizedMemoryConversionLowering<
+    SVEBackend, StoreConvertOp, FromTag, To, Options...>
+    : std::bool_constant<
+          sve_has_oversized_contiguous_conversion_lowering<Options...>> {};
+
 
 /* **************************************************************************** */
 //                       Load and store with conversion                       //
@@ -310,7 +338,11 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_ordered_saturating(
   using FromTag = Rebind<From, ToTag>;
   static_assert(sve_is_conversion_element<ElementOf<ToTag>>);
   static_assert(sve_is_conversion_element<From>);
-  if constexpr (num_words(to) == 1 && num_words(FromTag{}) == 1) {
+  constexpr bool OneWordPair = [] {
+    if constexpr (!sve_conversion_tag_representable<FromTag>) return false;
+    else return num_words(ToTag{}) == 1 && num_words(FromTag{}) == 1;
+  }();
+  if constexpr (OneWordPair) {
     return sve_load_convert_word(to, pointer, mask, inactive);
   } else {
     // Shape-changing conversion cannot use independent word batching: split
@@ -332,7 +364,11 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_ordered_saturating(
   using FromTag = Rebind<From, ToTag>;
   static_assert(sve_is_conversion_element<ElementOf<ToTag>>);
   static_assert(sve_is_conversion_element<From>);
-  if constexpr (num_words(to) == 1 && num_words(FromTag{}) == 1) {
+  constexpr bool OneWordPair = [] {
+    if constexpr (!sve_conversion_tag_representable<FromTag>) return false;
+    else return num_words(ToTag{}) == 1 && num_words(FromTag{}) == 1;
+  }();
+  if constexpr (OneWordPair) {
     return sve_load_convert_word_unmasked(to, pointer);
   } else {
     using ToHalf = Half<ToTag>;
@@ -650,6 +686,15 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
   static_assert(sve_is_conversion_element<From>);
   static_assert(sve_is_conversion_element<To>);
 
+  if constexpr (!sve_conversion_tag_representable<ToTag>) {
+    using FromHalf = Half<FromTag>;
+    sve_store_convert_ordered_saturating(
+        FromHalf{}, pointer, execute(LowerOp{}, from, value),
+        execute(LowerOp{}, from, mask));
+    sve_store_convert_ordered_saturating(
+        FromHalf{}, pointer + size(FromHalf{}),
+        execute(UpperOp{}, from, value), execute(UpperOp{}, from, mask));
+  } else {
 #if defined(HAS_SVE2)
   if constexpr (
       sve_is_integer_element<From> && sve_is_integer_element<To> &&
@@ -695,6 +740,7 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
         FromHalf{}, pointer + size(FromHalf{}),
         execute(UpperOp{}, from, value), execute(UpperOp{}, from, mask));
   }
+  }
 }
 
 template <Element To, VectorTag FromTag>
@@ -705,6 +751,14 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
   static_assert(sve_is_conversion_element<From>);
   static_assert(sve_is_conversion_element<To>);
 
+  if constexpr (!sve_conversion_tag_representable<ToTag>) {
+    using FromHalf = Half<FromTag>;
+    sve_store_convert_ordered_saturating(
+        FromHalf{}, pointer, execute(LowerOp{}, from, value));
+    sve_store_convert_ordered_saturating(
+        FromHalf{}, pointer + size(FromHalf{}),
+        execute(UpperOp{}, from, value));
+  } else {
 #if defined(HAS_SVE2)
   if constexpr (
       sve_is_integer_element<From> && sve_is_integer_element<To> &&
@@ -744,6 +798,7 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
     sve_store_convert_ordered_saturating(
         FromHalf{}, pointer + size(FromHalf{}),
         execute(UpperOp{}, from, value));
+  }
   }
 }
 

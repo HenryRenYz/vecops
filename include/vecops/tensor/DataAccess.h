@@ -718,6 +718,9 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
   using Value = typename Policy::ConversionValueOption;
   using Temporal = typename Policy::MemoryOptions::TemporalityOption;
   using Alignment = typename Policy::MemoryOptions::AlignmentOption;
+  using Memory = std::remove_cv_t<
+      std::remove_pointer_t<std::remove_reference_t<Pointer>>>;
+  constexpr bool SameType = std::same_as<Memory, vec::ElementOf<Tag>>;
 
   auto invoke = [&](auto&&... retained_options) VECOPS_INLINE_LAMBDA {
     if constexpr (indexed_count == 1) {
@@ -732,10 +735,17 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
       const auto scale = vec::fill(
           IndexTag{}, static_cast<Index>(tensor_axis_stride));
       const auto physical = vec::mul(indexed.indices, scale);
-      return vec::load_convert(
-          tag, pointer, Order{}, Value{}, Temporal{},
-          std::forward<decltype(retained_options)>(retained_options)...,
-          vec::indexed(physical));
+      if constexpr (SameType) {
+        return vec::load(
+            tag, pointer, Temporal{},
+            std::forward<decltype(retained_options)>(retained_options)...,
+            vec::indexed(physical));
+      } else {
+        return vec::load_convert(
+            tag, pointer, Order{}, Value{}, Temporal{},
+            std::forward<decltype(retained_options)>(retained_options)...,
+            vec::indexed(physical));
+      }
     } else {
       nint_t physical_stride = tensor_axis_stride;
       if constexpr (strided_count == 1) {
@@ -745,15 +755,27 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
         physical_stride *= static_cast<nint_t>(strided.stride);
       }
       if (physical_stride == 1) {
+        if constexpr (SameType) {
+          return vec::load(
+              tag, pointer, Temporal{}, Alignment{},
+              std::forward<decltype(retained_options)>(retained_options)...);
+        } else {
+          return vec::load_convert(
+              tag, pointer, Order{}, Value{}, Temporal{}, Alignment{},
+              std::forward<decltype(retained_options)>(retained_options)...);
+        }
+      }
+      if constexpr (SameType) {
+        return vec::load(
+            tag, pointer, Temporal{},
+            std::forward<decltype(retained_options)>(retained_options)...,
+            vec::strided(physical_stride));
+      } else {
         return vec::load_convert(
             tag, pointer, Order{}, Value{}, Temporal{},
-            Alignment{},
-            std::forward<decltype(retained_options)>(retained_options)...);
+            std::forward<decltype(retained_options)>(retained_options)...,
+            vec::strided(physical_stride));
       }
-      return vec::load_convert(
-          tag, pointer, Order{}, Value{}, Temporal{},
-          std::forward<decltype(retained_options)>(retained_options)...,
-          vec::strided(physical_stride));
     }
   };
   return apply_inline(invoke, retained);
@@ -779,6 +801,10 @@ VECOPS_ALWAYS_INLINE void store_memory(
   using Temporal = typename Policy::MemoryOptions::TemporalityOption;
   using Packing = typename Policy::MemoryOptions::PackingOption;
   using Alignment = typename Policy::MemoryOptions::AlignmentOption;
+  using Memory = std::remove_cv_t<
+      std::remove_pointer_t<std::remove_reference_t<Pointer>>>;
+  constexpr bool SameType = std::same_as<Memory, vec::ElementOf<Tag>> &&
+      std::same_as<Packing, vec::mem::Packed>;
 
   auto invoke = [&](auto&&... retained_options) VECOPS_INLINE_LAMBDA {
     if constexpr (indexed_count == 1) {
@@ -793,10 +819,17 @@ VECOPS_ALWAYS_INLINE void store_memory(
       const auto scale = vec::fill(
           IndexTag{}, static_cast<Index>(tensor_axis_stride));
       const auto physical = vec::mul(indexed.indices, scale);
-      vec::store_convert(
-          tag, pointer, value, Order{}, Value{}, Temporal{}, Packing{},
-          std::forward<decltype(retained_options)>(retained_options)...,
-          vec::indexed(physical));
+      if constexpr (SameType) {
+        vec::store(
+            tag, pointer, value, Temporal{},
+            std::forward<decltype(retained_options)>(retained_options)...,
+            vec::indexed(physical));
+      } else {
+        vec::store_convert(
+            tag, pointer, value, Order{}, Value{}, Temporal{}, Packing{},
+            std::forward<decltype(retained_options)>(retained_options)...,
+            vec::indexed(physical));
+      }
     } else {
       nint_t physical_stride = tensor_axis_stride;
       if constexpr (strided_count == 1) {
@@ -806,15 +839,28 @@ VECOPS_ALWAYS_INLINE void store_memory(
         physical_stride *= static_cast<nint_t>(strided.stride);
       }
       if (physical_stride == 1) {
-        vec::store_convert(
-            tag, pointer, value, Order{}, Value{}, Temporal{}, Packing{},
-            Alignment{},
-            std::forward<decltype(retained_options)>(retained_options)...);
+        if constexpr (SameType) {
+          vec::store(
+              tag, pointer, value, Temporal{}, Alignment{},
+              std::forward<decltype(retained_options)>(retained_options)...);
+        } else {
+          vec::store_convert(
+              tag, pointer, value, Order{}, Value{}, Temporal{}, Packing{},
+              Alignment{},
+              std::forward<decltype(retained_options)>(retained_options)...);
+        }
       } else {
-        vec::store_convert(
-            tag, pointer, value, Order{}, Value{}, Temporal{}, Packing{},
-            std::forward<decltype(retained_options)>(retained_options)...,
-            vec::strided(physical_stride));
+        if constexpr (SameType) {
+          vec::store(
+              tag, pointer, value, Temporal{},
+              std::forward<decltype(retained_options)>(retained_options)...,
+              vec::strided(physical_stride));
+        } else {
+          vec::store_convert(
+              tag, pointer, value, Order{}, Value{}, Temporal{}, Packing{},
+              std::forward<decltype(retained_options)>(retained_options)...,
+              vec::strided(physical_stride));
+        }
       }
     }
   };
@@ -847,6 +893,13 @@ VECOPS_ALWAYS_INLINE void prefetch_tensor(
     auto issue = [&](nint_t logical_offset) VECOPS_INLINE_LAMBDA {
       vec::prefetch(
           MemoryTag{}, tensor.data() + base + logical_offset * axis_stride,
+          typename Prefetch::LocalityOption{},
+          typename Prefetch::TemporalityOption{},
+          typename Prefetch::IntentOption{});
+    };
+    auto issue_address = [&](std::uintptr_t address) VECOPS_INLINE_LAMBDA {
+      vec::prefetch(
+          MemoryTag{}, reinterpret_cast<const Memory*>(address),
           typename Prefetch::LocalityOption{},
           typename Prefetch::TemporalityOption{},
           typename Prefetch::IntentOption{});
@@ -903,6 +956,51 @@ VECOPS_ALWAYS_INLINE void prefetch_tensor(
       }
     } else {
       constexpr nint_t cache_line = 64;
+      constexpr bool has_arbitrary_mask =
+          vec::details::option_count<
+              vec::details::IsMaskedOption, Options...> == 1;
+      if constexpr (!has_arbitrary_mask) {
+        const nint_t active_lanes = [&] {
+          if constexpr (vec::details::option_count<
+                            vec::details::IsFirstOption,
+                            Options...> == 1) {
+            return static_cast<nint_t>(vec::details::find_option<
+                vec::details::IsFirstOption>(options...).count);
+          } else {
+            return vec::size(tag);
+          }
+        }();
+        nint_t logical_step = 1;
+        if constexpr (vec::details::option_count<
+                          vec::details::IsStridedOption,
+                          Options...> == 1) {
+          logical_step = static_cast<nint_t>(vec::details::find_option<
+              vec::details::IsStridedOption>(options...).stride);
+        }
+        const nint_t physical_step = logical_step * axis_stride;
+        const std::intptr_t byte_step =
+            static_cast<std::intptr_t>(physical_step) * sizeof(Memory);
+        if (active_lanes > 0 &&
+            byte_step >= -static_cast<std::intptr_t>(cache_line) &&
+            byte_step <= static_cast<std::intptr_t>(cache_line)) {
+          const auto first_address = reinterpret_cast<std::uintptr_t>(
+              tensor.data() + base);
+          const auto last_address = static_cast<std::uintptr_t>(
+              static_cast<std::intptr_t>(first_address) +
+              static_cast<std::intptr_t>(active_lanes - 1) * byte_step);
+          const auto low = std::min(first_address, last_address);
+          const auto high = std::max(first_address, last_address);
+          auto line = low - low % cache_line;
+          const auto first_line = line;
+          const auto last_line = high - high % cache_line;
+          for (;; line += cache_line) {
+            issue_address(line == first_line ? low : line);
+            if (line == last_line) break;
+          }
+          return;
+        }
+      }
+
       std::intptr_t previous_line = -1;
       for (nint_t lane = 0; lane < vec::size(tag); ++lane) {
         if (!active(lane)) continue;
@@ -1338,11 +1436,22 @@ public:
     const auto& tensor = spec_->tensor();
     details::assert_access_in_bounds(
         tag, tensor, position, Axis<Dim>{}, options...);
-    const nint_t base = offset_at(tensor.layout(), position);
+    using StrideMeta = typename details::MetaElement<
+        Dim, typename Spec::InputLayout::Strides>::type;
+    constexpr bool UnitRankOne =
+        Rank == 1 && details::is_const_one_meta_v<StrideMeta>;
+    const nint_t base = [&] {
+      if constexpr (UnitRankOne) return position[0];
+      else return offset_at(tensor.layout(), position);
+    }();
+    const nint_t axis_stride = [&] {
+      if constexpr (UnitRankOne) return nint_t{1};
+      else return stride<Dim>(tensor.layout());
+    }();
 
     if constexpr (details::is_no_transform<Transform>) {
       return details::load_memory<Tag, const MemoryElement*, Policy>(
-          tag, data_ + base, stride<Dim>(tensor.layout()),
+          tag, data_ + base, axis_stride,
           std::forward<Options>(options)...);
     } else {
       return details::with_transform_context(
@@ -1362,7 +1471,7 @@ public:
               result = vec::zeros(tag);
               details::load_transform_chunks<Policy>(
                   tag, tag, result, data_ + base,
-                  stride<Dim>(tensor.layout()), spec_->transform(), context, 0,
+                  axis_stride, spec_->transform(), context, 0,
                   options...);
             } else if constexpr (
                 details::can_transform_chunk<
@@ -1380,8 +1489,7 @@ public:
                 if constexpr (details::transform_reads_input<Transform>) {
                   return details::load_memory<
                       TransformInTag, const MemoryElement*, Policy>(
-                          TransformInTag{}, data_ + base,
-                          stride<Dim>(tensor.layout()),
+                          TransformInTag{}, data_ + base, axis_stride,
                           std::forward<Options>(options)...);
                 } else {
                   return vec::zeros(TransformInTag{});
@@ -1397,7 +1505,7 @@ public:
               result = vec::zeros(tag);
               details::load_transform_chunks<Policy>(
                   tag, tag, result, data_ + base,
-                  stride<Dim>(tensor.layout()), spec_->transform(), context, 0,
+                  axis_stride, spec_->transform(), context, 0,
                   options...);
             }
             return details::populate_inactive(
@@ -1589,10 +1697,21 @@ public:
     const auto& tensor = spec_->tensor();
     details::assert_access_in_bounds(
         tag, tensor, position, Axis<Dim>{}, options...);
-    const nint_t base = offset_at(tensor.layout(), position);
+    using StrideMeta = typename details::MetaElement<
+        Dim, typename Spec::OutputLayout::Strides>::type;
+    constexpr bool UnitRankOne =
+        Rank == 1 && details::is_const_one_meta_v<StrideMeta>;
+    const nint_t base = [&] {
+      if constexpr (UnitRankOne) return position[0];
+      else return offset_at(tensor.layout(), position);
+    }();
+    const nint_t axis_stride = [&] {
+      if constexpr (UnitRankOne) return nint_t{1};
+      else return stride<Dim>(tensor.layout());
+    }();
     if constexpr (details::is_no_transform<Transform>) {
       details::store_memory<Tag, MemoryElement*, Policy>(
-          tag, data_ + base, value, stride<Dim>(tensor.layout()),
+          tag, data_ + base, value, axis_stride,
           std::forward<Options>(options)...);
     } else {
       details::with_transform_context(
@@ -1606,7 +1725,7 @@ public:
                               Transform, Tag>()) {
               details::store_transform_chunks<Policy>(
                   tag, tag, value, data_ + base,
-                  stride<Dim>(tensor.layout()), spec_->transform(), context, 0,
+                  axis_stride, spec_->transform(), context, 0,
                   options...);
             } else if constexpr (
                 details::can_transform_chunk<
@@ -1625,12 +1744,12 @@ public:
               details::store_memory<
                   TransformOutTag, MemoryElement*, Policy>(
                       TransformOutTag{}, data_ + base, transformed,
-                      stride<Dim>(tensor.layout()),
+                      axis_stride,
                       std::forward<Options>(options)...);
             } else {
               details::store_transform_chunks<Policy>(
                   tag, tag, value, data_ + base,
-                  stride<Dim>(tensor.layout()), spec_->transform(), context, 0,
+                  axis_stride, spec_->transform(), context, 0,
                   options...);
             }
           },

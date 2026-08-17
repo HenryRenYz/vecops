@@ -320,61 +320,38 @@ VECOPS_ALWAYS_INLINE Memory* boundary_memory_address(
       tag, static_cast<const Memory*>(pointer), lane, options...));
 }
 
-template <VectorTag RootTag, VectorTag ChunkTag, Element From,
-          typename... Options>
-VECOPS_ALWAYS_INLINE void execute_large_load_convert_contiguous(
-    RootTag root,
-    ChunkTag,
-    Vec<RootTag>& result,
-    const From* pointer,
-    nint_t lane_begin,
-    Options&&... options) {
-  if constexpr (memory_rebind_supported<ChunkTag, From>()) {
-    auto chunk = execute_load_convert_options(
-        LoadConvertOp{}, ChunkTag{}, pointer + lane_begin, options...);
-    for (nint_t lane = 0; lane < size(ChunkTag{}); ++lane) {
-      result = set(
-          root, result, lane_begin + lane,
-          get(ChunkTag{}, chunk, lane));
-    }
+template <VectorTag ToTag, Element From, typename... Options>
+VECOPS_ALWAYS_INLINE Vec<ToTag> execute_large_load_convert_contiguous(
+    ToTag to, const From* pointer, Options&&... options) {
+  if constexpr (memory_rebind_supported<ToTag, From>()) {
+    return execute_load_convert_options(
+        LoadConvertOp{}, to, pointer, std::forward<Options>(options)...);
   } else {
-    using HalfTag = Half<ChunkTag>;
-    execute_large_load_convert_contiguous(
-        root, HalfTag{}, result, pointer, lane_begin, options...);
+    using HalfTag = Half<ToTag>;
+    auto lower = execute_large_load_convert_contiguous(
+        HalfTag{}, pointer, options...);
     const nint_t half_lanes = size(HalfTag{});
-    execute_large_load_convert_contiguous(
-        root, HalfTag{}, result, pointer, lane_begin + half_lanes,
-        options...);
+    auto upper = execute_large_load_convert_contiguous(
+        HalfTag{}, pointer + half_lanes, options...);
+    return execute(ConcatOp{}, to, lower, upper);
   }
 }
 
-template <VectorTag RootTag, VectorTag ChunkTag, Element To,
-          typename... Options>
+template <VectorTag FromTag, Element To, typename... Options>
 VECOPS_ALWAYS_INLINE void execute_large_store_convert_contiguous(
-    RootTag root,
-    ChunkTag,
-    To* pointer,
-    const Vec<RootTag>& value,
-    nint_t lane_begin,
-    Options&&... options) {
-  if constexpr (memory_rebind_supported<ChunkTag, To>()) {
-    auto chunk = zeros(ChunkTag{});
-    for (nint_t lane = 0; lane < size(ChunkTag{}); ++lane) {
-      chunk = set(
-          ChunkTag{}, chunk, lane,
-          get(root, value, lane_begin + lane));
-    }
+    FromTag from, To* pointer, Vec<FromTag> value, Options&&... options) {
+  if constexpr (memory_rebind_supported<FromTag, To>()) {
     execute_store_convert_options(
-        StoreConvertOp{}, ChunkTag{}, pointer + lane_begin, chunk,
-        options...);
+        StoreConvertOp{}, from, pointer, value,
+        std::forward<Options>(options)...);
   } else {
-    using HalfTag = Half<ChunkTag>;
+    using HalfTag = Half<FromTag>;
     execute_large_store_convert_contiguous(
-        root, HalfTag{}, pointer, value, lane_begin, options...);
+        HalfTag{}, pointer, execute(LowerOp{}, from, value), options...);
     const nint_t half_lanes = size(HalfTag{});
     execute_large_store_convert_contiguous(
-        root, HalfTag{}, pointer, value, lane_begin + half_lanes,
-        options...);
+        HalfTag{}, pointer + half_lanes,
+        execute(UpperOp{}, from, value), options...);
   }
 }
 
@@ -386,10 +363,8 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> execute_large_load_convert(
       option_count<IsMaskedOption, Options...> == 0 &&
       option_count<IsFirstOption, Options...> == 0;
   if constexpr (full_contiguous) {
-    auto result = zeros(to);
-    execute_large_load_convert_contiguous(
-        to, to, result, pointer, 0, options...);
-    return result;
+    return execute_large_load_convert_contiguous(
+        to, pointer, std::forward<Options>(options)...);
   }
 
   Vec<ToTag> result;
@@ -426,7 +401,7 @@ VECOPS_ALWAYS_INLINE void execute_large_store_convert(
       option_count<IsFirstOption, Options...> == 0;
   if constexpr (full_contiguous) {
     execute_large_store_convert_contiguous(
-        from, from, pointer, value, 0, options...);
+        from, pointer, value, std::forward<Options>(options)...);
     return;
   }
 

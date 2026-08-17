@@ -1,6 +1,7 @@
 #ifndef VECOPS_VEC_CONVERSION_MEMORY_H
 #define VECOPS_VEC_CONVERSION_MEMORY_H
 
+#include <type_traits>
 #include <utility>
 
 #include "vecops/vec/Conversion.h"
@@ -17,19 +18,22 @@
  * the API promises semantics, not one opcode.
  *
  * Any otherwise legal caller Tag is accepted even when rebinding that Tag to
- * the memory dtype would exceed the backend's representable POW2 range. Such a
- * request is recursively partitioned into legal logical chunks and reassembled
- * (load) or emitted (store). For active non-contiguous boundary cases, the
- * generic fallback may operate lane-by-lane to preserve exact mask/address
- * semantics.
+ * the memory dtype would exceed the backend's representable POW2 range. A
+ * backend whole-operation lowering is preferred whenever it can process the
+ * request without materializing that oversized memory-side representation.
+ * Only otherwise is the request recursively partitioned into legal logical
+ * chunks and reassembled (load) or emitted (store). For active non-contiguous
+ * boundary cases, the generic fallback may operate lane-by-lane to preserve
+ * exact mask/address semantics.
  *
  * ## Important mask domains
  *
  * Ordered conversion uses a caller-logical mask. Unordered conversion normally
  * uses the memory-side rebound Tag's mask because the backend may permute lanes.
- * When that rebound Tag is not representable and recursive partitioning is
- * required, only the caller-logical mask type is valid. `first(n)` avoids this
- * distinction and is generally the simplest tail interface.
+ * When that rebound Tag is not representable, only the caller-logical mask
+ * type is valid, whether a backend handles the whole request directly or the
+ * generic boundary partitions it. `first(n)` avoids this distinction and is
+ * generally the simplest tail interface.
  *
  * ## Pitfalls
  *
@@ -47,6 +51,27 @@ namespace vecops::vec {
 namespace details {
 template <VectorTag ToTag, Element From, bool IsStore, typename... Options>
 consteval bool valid_memory_conversion_options();
+
+/**
+ * Backend capability for a conversion whose memory-side Rebind exceeds the
+ * public scalable-Tag representation limit.
+ *
+ * A specialization promises that the backend's whole-operation lowering can
+ * consume the original public Tag without materializing the oversized
+ * memory-side Vec/Mask. The capability is option-sensitive because contiguous
+ * ordered conversion may be supported when indexed or unordered conversion is
+ * not.
+ */
+template <typename Backend, typename Op, VectorTag LogicalTag, Element Other,
+          typename... Options>
+struct HasOversizedMemoryConversionLowering : std::false_type {};
+
+template <typename Backend, typename Op, VectorTag LogicalTag, Element Other,
+          typename... Options>
+inline constexpr bool has_oversized_memory_conversion_lowering_v =
+    HasOversizedMemoryConversionLowering<
+        Backend, Op, LogicalTag, Other,
+        std::remove_cvref_t<Options>...>::value;
 }
 
 /* **************************************************************************** */
@@ -93,8 +118,8 @@ namespace vecops::vec {
  * inactive output lane is zero unless `opt::merge(scalar/vector)` is supplied.
  * For unordered conversion the mask normally has the memory-side source Tag
  * and no population option is accepted. If that rebound Tag would exceed the
- * backend maximum POW, the public logical-Tag mask is used while the operation
- * is recursively partitioned into representable memory-side chunks.
+ * backend maximum POW, the public logical-Tag mask is used while either a
+ * backend whole-request lowering or the generic partitioner handles it.
  * `mem::aligned` promises source-Tag memory
  * alignment. Alignment and temporality are hints and may be ignored while the
  * backend retains its fused conversion-load path. `mem::split` is not a valid
@@ -111,7 +136,10 @@ template <VectorTag ToTag, Element From, typename... Options>
             ToTag, From, false, Options...>())
 VECOPS_ALWAYS_INLINE Vec<ToTag> LoadConvertOp::operator()(
     ToTag to, const From* pointer, Options&&... options) const {
-  if constexpr (details::memory_rebind_supported<ToTag, From>()) {
+  if constexpr (
+      details::memory_rebind_supported<ToTag, From>() ||
+      details::has_oversized_memory_conversion_lowering_v<
+          details::CurrentBackend, LoadConvertOp, ToTag, From, Options...>) {
     return details::execute_load_convert_options(
         *this, to, pointer, std::forward<Options>(options)...);
   } else {
@@ -128,7 +156,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> LoadConvertOp::operator()(
  * `opt::masked` and `opt::first` filter writes, so inactive addresses remain
  * untouched. Ordered masks have type `Mask<FromTag>`; unordered masks normally
  * have the memory-side Tag. For a rebound Tag beyond the backend maximum POW,
- * unordered recursively partitions using a logical `Mask<FromTag>` instead.
+ * unordered fallback uses a logical `Mask<FromTag>` instead.
  * Population options are invalid. `mem::split` is accepted
  * only for ordered, saturating stores and has the same contiguous logical
  * result as `mem::packed`; it permits a backend-native wordwise implementation.
@@ -147,7 +175,10 @@ template <VectorTag FromTag, Element To, typename... Options>
 VECOPS_ALWAYS_INLINE void StoreConvertOp::operator()(
     FromTag from, To* pointer, Vec<FromTag> value,
     Options&&... options) const {
-  if constexpr (details::memory_rebind_supported<FromTag, To>()) {
+  if constexpr (
+      details::memory_rebind_supported<FromTag, To>() ||
+      details::has_oversized_memory_conversion_lowering_v<
+          details::CurrentBackend, StoreConvertOp, FromTag, To, Options...>) {
     details::execute_store_convert_options(
         *this, from, pointer, value,
         std::forward<Options>(options)...);

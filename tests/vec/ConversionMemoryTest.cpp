@@ -20,6 +20,31 @@ namespace vec = vecops::vec;
 
 namespace {
 
+#if defined(CPU_CAPABILITY_SVE) && !defined(HAS_FIXED_SVE_BITS)
+TEST(VecConversionMemoryTest, OversizedRebindPrefersSVEOrderedLowering) {
+  using Tag = vec::ScalableTag<int8_t, VEC_MAX_POW>;
+  static_assert(
+      !vec::details::memory_rebind_supported<Tag, double>());
+  static_assert(
+      vec::details::has_oversized_memory_conversion_lowering_v<
+          vec::details::SVEBackend, vec::LoadConvertOp, Tag, double>);
+  static_assert(
+      vec::details::has_oversized_memory_conversion_lowering_v<
+          vec::details::SVEBackend, vec::StoreConvertOp, Tag, double,
+          vec::cvt::Ordered, vec::cvt::Saturate,
+          vec::opt::Unmasked>);
+  static_assert(
+      !vec::details::has_oversized_memory_conversion_lowering_v<
+          vec::details::SVEBackend, vec::LoadConvertOp, Tag, double,
+          vec::cvt::Unordered>);
+  static_assert(
+      !vec::details::has_oversized_memory_conversion_lowering_v<
+          vec::details::SVEBackend, vec::StoreConvertOp, Tag, double,
+          decltype(vec::strided(2))>);
+  SUCCEED();
+}
+#endif
+
 TEST(VecConversionMemoryTest, RebindBeyondBackendMaximumRecursivelySplits) {
   using Tag = vec::ScalableTag<int8_t, VEC_MAX_POW>;
   Tag tag{};

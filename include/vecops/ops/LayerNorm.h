@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <type_traits>
+#include <utility>
 
 #include "vecops/Assertion.h"
 #include "vecops/CoreTypes.h"
@@ -74,6 +75,44 @@ VECOPS_INLINE auto row_spec(const Spec& spec) {
   if constexpr (Count == 0) return spec;
   else return row_spec<Count - 1>(remove_first_dimension(spec));
 }
+
+template <typename Memory>
+class ContiguousLayerNormInput {
+public:
+  explicit ContiguousLayerNormInput(const Memory* data) : data_(data) {}
+
+  template <vec::VectorTag Tag, typename... Options>
+  VECOPS_ALWAYS_INLINE auto load(
+      Tag tag, const tensor::Coord<1>& position,
+      Options&&... options) const {
+    return vec::load_convert(
+        tag, data_ + position[0],
+        std::forward<Options>(options)...);
+  }
+
+private:
+  const Memory* data_;
+};
+
+template <typename Memory>
+class ContiguousLayerNormOutput {
+public:
+  explicit ContiguousLayerNormOutput(Memory* data) : data_(data) {}
+
+  template <vec::VectorTag Tag, typename... Options>
+  VECOPS_ALWAYS_INLINE void store(
+      Tag tag, const tensor::Coord<1>& position, vec::Vec<Tag> value,
+      Options&&... options) const {
+    vec::store_convert(
+        tag, data_ + position[0], value,
+        std::forward<Options>(options)...);
+  }
+
+  VECOPS_ALWAYS_INLINE void commit() const {}
+
+private:
+  Memory* data_;
+};
 
 } // namespace details
 
@@ -250,9 +289,12 @@ private:
     using Element = std::remove_const_t<typename InSpec::MemoryElement>;
     using ConversionOrder = std::conditional_t<
         IsFloat16V<Element>, vec::cvt::Unordered, vec::cvt::Ordered>;
+    // The generic whole-block expansion is still slower than the original
+    // fixed SVE hint schedule for this x/gamma/beta stream. Keep automatic
+    // prefetch disabled until the Tensor prefetch backend can emit that
+    // schedule without a runtime cache-line loop.
     using Prefetch = tensor::PrefetchPolicy<
-        IsBfloat16V<Element> && PrefetchBf16, 4,
-        tensor::PrefetchFootprint::whole_block>;
+        false, 4, tensor::PrefetchFootprint::whole_block>;
     using XPolicy = tensor::InputAccessPolicy<
         0, 2, tensor::AccessPlan::direct, ConversionOrder,
         vec::cvt::Saturate, tensor::DefaultMemoryPolicy, true, Prefetch>;
@@ -274,24 +316,36 @@ private:
         [this, n](auto& x, auto& gamma, auto& beta, auto& y) {
           F32QuadTag full_tag{};
           F32PairTag tail_tag{};
-          auto x_scan = x.scan(
-              full_tag, tensor::coord(0), tensor::axis<0>, n);
+          const nint_t full_lanes = vec::size(full_tag);
+          const nint_t tail_lanes = vec::size(tail_tag);
           auto sum = vec::zeros(full_tag);
           auto sum_sq = vec::zeros(full_tag);
           float32_t tail_sum = 0.0f;
           float32_t tail_sum_sq = 0.0f;
-          while (x_scan.has_full()) {
-            auto value = x_scan.load_full();
+          nint_t col = 0;
+          for (; col + full_lanes <= n; col += full_lanes) {
+            if constexpr (Prefetch::enabled) {
+              if (col + (Prefetch::ahead_blocks + 1) * full_lanes <= n) {
+                x.prefetch(
+                    full_tag,
+                    tensor::coord(
+                        col + Prefetch::ahead_blocks * full_lanes),
+                    vec::opt::unmasked);
+              }
+            }
+            auto value = x.load(
+                full_tag, tensor::coord(col), vec::opt::unmasked);
             sum = vec::add(sum, value);
             sum_sq = vec::fmadd(value, value, sum_sq);
-            x_scan.advance_full();
           }
-          while (!x_scan.empty()) {
-            auto value = x_scan.load_tail(tail_tag);
+          while (col < n) {
+            const nint_t active = std::min(n - col, tail_lanes);
+            auto value = x.load(
+                tail_tag, tensor::coord(col), vec::opt::first(active));
             tail_sum += vec::reduce_add(tail_tag, value);
             tail_sum_sq +=
                 vec::reduce_add(tail_tag, vec::mul(value, value));
-            x_scan.advance_tail(tail_tag);
+            col += active;
           }
 
           const float32_t sum_value =
@@ -310,34 +364,45 @@ private:
           const auto tail_rstd = vec::fill(tail_tag, rstd);
           const auto tail_shift = vec::fill(tail_tag, shift);
 
-          auto xv = x.scan(full_tag, tensor::coord(0), tensor::axis<0>, n);
-          auto gv = gamma.scan(
-              full_tag, tensor::coord(0), tensor::axis<0>, n);
-          auto bv = beta.scan(
-              full_tag, tensor::coord(0), tensor::axis<0>, n);
-          auto yv = y.scan(full_tag, tensor::coord(0), tensor::axis<0>, n);
-          while (xv.has_full()) {
-            auto value = xv.load_full();
-            auto scale_value = gv.load_full();
-            auto bias_value = bv.load_full();
+          col = 0;
+          for (; col + full_lanes <= n; col += full_lanes) {
+            if constexpr (Prefetch::enabled) {
+              if (col + (Prefetch::ahead_blocks + 1) * full_lanes <= n) {
+                const auto future = tensor::coord(
+                    col + Prefetch::ahead_blocks * full_lanes);
+                x.prefetch(full_tag, future, vec::opt::unmasked);
+                gamma.prefetch(full_tag, future, vec::opt::unmasked);
+                beta.prefetch(full_tag, future, vec::opt::unmasked);
+              }
+            }
+            const auto position = tensor::coord(col);
+            auto value = x.load(
+                full_tag, position, vec::opt::unmasked);
+            auto scale_value = gamma.load(
+                full_tag, position, vec::opt::unmasked);
+            auto bias_value = beta.load(
+                full_tag, position, vec::opt::unmasked);
             value = vec::fmadd(value, full_rstd, full_shift);
-            yv.store_full(vec::fmadd(value, scale_value, bias_value));
-            xv.advance_full();
-            gv.advance_full();
-            bv.advance_full();
-            yv.advance_full();
+            y.store(
+                full_tag, position,
+                vec::fmadd(value, scale_value, bias_value),
+                vec::opt::unmasked);
           }
-          while (!xv.empty()) {
-            auto value = xv.load_tail(tail_tag);
-            auto scale_value = gv.load_tail(tail_tag);
-            auto bias_value = bv.load_tail(tail_tag);
+          while (col < n) {
+            const nint_t active = std::min(n - col, tail_lanes);
+            const auto position = tensor::coord(col);
+            auto value = x.load(
+                tail_tag, position, vec::opt::first(active));
+            auto scale_value = gamma.load(
+                tail_tag, position, vec::opt::first(active));
+            auto bias_value = beta.load(
+                tail_tag, position, vec::opt::first(active));
             value = vec::fmadd(value, tail_rstd, tail_shift);
-            yv.store_tail(
-                tail_tag, vec::fmadd(value, scale_value, bias_value));
-            xv.advance_tail(tail_tag);
-            gv.advance_tail(tail_tag);
-            bv.advance_tail(tail_tag);
-            yv.advance_tail(tail_tag);
+            y.store(
+                tail_tag, position,
+                vec::fmadd(value, scale_value, bias_value),
+                vec::opt::first(active));
+            col += active;
           }
           y.commit();
         });
@@ -353,11 +418,7 @@ private:
     using InPolicy = tensor::InputAccessPolicy<0, 2, InPlan>;
     using OutPolicy = tensor::OutputAccessPolicy<
         0, tensor::AccessPlan::direct>;
-    kernel::with_operands(
-        workspace,
-        tensor::operand(in, InPolicy{}),
-        tensor::operand(out, OutPolicy{}),
-        [this, &in, &gamma, &beta](auto& x, auto& y) {
+    auto compute = [this, &in](auto& x, auto& gamma, auto& beta, auto& y) {
           Tag tag{};
           const nint_t n = in.input_layout().shape()[0];
           const nint_t lanes = vec::size(tag);
@@ -474,8 +535,55 @@ private:
             write_block(x, gamma, beta, y, tag, col, mean_v, rstd_v,
                         vec::opt::first(n - col));
           }
-          y.commit();
-        });
+      y.commit();
+    };
+    if constexpr (InPlan == tensor::AccessPlan::direct) {
+      using ScaleSpec = std::remove_cvref_t<decltype(gamma.spec())>;
+      using BiasSpec = std::remove_cvref_t<decltype(beta.spec())>;
+#if defined(ARCH_X86_FAMILY)
+      constexpr bool RawContiguous =
+          std::same_as<typename InSpec::TransformType, tensor::NoTransform> &&
+          std::same_as<typename OutSpec::TransformType, tensor::NoTransform> &&
+          std::same_as<typename ScaleAccess::Transform, tensor::NoTransform> &&
+          std::same_as<typename BiasAccess::Transform, tensor::NoTransform> &&
+          tensor::is_ct_last_contiguous<
+              typename InSpec::InputLayout, 1>::value &&
+          tensor::is_ct_last_contiguous<
+              typename OutSpec::OutputLayout, 1>::value &&
+          tensor::is_ct_last_contiguous<
+              typename ScaleSpec::InputLayout, 1>::value &&
+          tensor::is_ct_last_contiguous<
+              typename BiasSpec::InputLayout, 1>::value;
+#else
+      constexpr bool RawContiguous = false;
+#endif
+      if constexpr (RawContiguous) {
+        using InputMemory =
+            std::remove_const_t<typename InSpec::MemoryElement>;
+        using ScaleMemory =
+            std::remove_const_t<typename ScaleSpec::MemoryElement>;
+        using BiasMemory =
+            std::remove_const_t<typename BiasSpec::MemoryElement>;
+        using OutputMemory = typename OutSpec::MemoryElement;
+        details::ContiguousLayerNormInput<InputMemory> x{in.tensor().data()};
+        details::ContiguousLayerNormInput<ScaleMemory> g{
+            gamma.spec().tensor().data()};
+        details::ContiguousLayerNormInput<BiasMemory> b{
+            beta.spec().tensor().data()};
+        details::ContiguousLayerNormOutput<OutputMemory> y{
+            out.tensor().data()};
+        compute(x, g, b, y);
+      } else {
+        auto x = tensor::bind(in, InPolicy{}, workspace);
+        auto y = tensor::bind(out, OutPolicy{}, workspace);
+        compute(x, gamma, beta, y);
+      }
+    } else {
+      kernel::with_operands(
+          workspace, tensor::operand(in, InPolicy{}),
+          tensor::operand(out, OutPolicy{}),
+          [&](auto& x, auto& y) { compute(x, gamma, beta, y); });
+    }
   }
 
   template <typename X, typename Gamma, typename Beta, typename Y,
