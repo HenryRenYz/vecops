@@ -160,11 +160,11 @@ void verify_integer_tagless() {
   expect_same(tag, vec::bit_shl(tag, a, 3), vec::bit_shl(a, 3));
   expect_same(tag, vec::bit_shr(tag, a, 3), vec::bit_shr(a, 3));
   expect_same(
-      tag, vec::bit_shl(tag, a, vecops::gemm::cint<3>),
-      vec::bit_shl(a, vecops::gemm::cint<3>));
+      tag, vec::bit_shl(tag, a, vecops::meta::cint<3>),
+      vec::bit_shl(a, vecops::meta::cint<3>));
   expect_same(
-      tag, vec::bit_shr(tag, a, vecops::gemm::dyn<1>(3)),
-      vec::bit_shr(a, vecops::gemm::dyn<1>(3)));
+      tag, vec::bit_shr(tag, a, vecops::meta::dyn<1>(3)),
+      vec::bit_shr(a, vecops::meta::dyn<1>(3)));
   expect_same(tag, vec::bit_shl(tag, a, counts), vec::bit_shl(a, counts));
   expect_same(tag, vec::bit_shr(tag, a, counts), vec::bit_shr(a, counts));
   expect_same(

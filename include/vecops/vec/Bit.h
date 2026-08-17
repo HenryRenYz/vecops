@@ -4,7 +4,7 @@
 #include <concepts>
 #include <utility>
 
-#include "vecops/gemm/Layout.h"
+#include "vecops/Meta.h"
 #include "vecops/vec/Basic.h"
 
 namespace vecops::vec {
@@ -78,12 +78,12 @@ struct BitShiftLeftOp {
 
   template <nint_t Count, IntegerTag Tag>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> value, gemm::Const<Count> count) const;
+      Tag tag, Vec<Tag> value, meta::Const<Count> count) const;
 
   template <IntegerTag Tag, nint_t Alignment, nint_t Lo, nint_t Hi>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
       Tag tag, Vec<Tag> value,
-      gemm::Dynamic<Alignment, Lo, Hi> count) const;
+      meta::Dynamic<Alignment, Lo, Hi> count) const;
 
   template <IntegerTag Tag>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
@@ -97,14 +97,14 @@ struct BitShiftLeftOp {
   template <nint_t Count, IntegerTag Tag, typename... Options>
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> value, gemm::Const<Count> count,
+      Tag tag, Vec<Tag> value, meta::Const<Count> count,
       Options&&... options) const;
 
   template <IntegerTag Tag, nint_t Alignment, nint_t Lo, nint_t Hi,
             typename... Options>
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> value, gemm::Dynamic<Alignment, Lo, Hi> count,
+      Tag tag, Vec<Tag> value, meta::Dynamic<Alignment, Lo, Hi> count,
       Options&&... options) const;
 
   template <IntegerTag Tag, typename... Options>
@@ -135,12 +135,12 @@ struct BitShiftRightOp {
 
   template <nint_t Count, IntegerTag Tag>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> value, gemm::Const<Count> count) const;
+      Tag tag, Vec<Tag> value, meta::Const<Count> count) const;
 
   template <IntegerTag Tag, nint_t Alignment, nint_t Lo, nint_t Hi>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
       Tag tag, Vec<Tag> value,
-      gemm::Dynamic<Alignment, Lo, Hi> count) const;
+      meta::Dynamic<Alignment, Lo, Hi> count) const;
 
   template <IntegerTag Tag>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
@@ -154,14 +154,14 @@ struct BitShiftRightOp {
   template <nint_t Count, IntegerTag Tag, typename... Options>
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> value, gemm::Const<Count> count,
+      Tag tag, Vec<Tag> value, meta::Const<Count> count,
       Options&&... options) const;
 
   template <IntegerTag Tag, nint_t Alignment, nint_t Lo, nint_t Hi,
             typename... Options>
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> value, gemm::Dynamic<Alignment, Lo, Hi> count,
+      Tag tag, Vec<Tag> value, meta::Dynamic<Alignment, Lo, Hi> count,
       Options&&... options) const;
 
   template <IntegerTag Tag, typename... Options>
@@ -364,8 +364,8 @@ VECOPS_ALWAYS_INLINE Vec<Tag> BitNotOp::operator()(
  * unsigned bit pattern of each lane, including for signed element types.
  * Negative counts preserve the input (no-op). Scalar counts at least the
  * element width produce zero in every lane; per-lane Vec counts produce
- * zero lane-by-lane. A gemm::Const supplies a compile-time count,
- * gemm::Dynamic supplies a checked runtime count, and a Vec count applies
+ * zero lane-by-lane. A meta::Const supplies a compile-time count,
+ * meta::Dynamic supplies a checked runtime count, and a Vec count applies
  * independently per lane. @see bit_shr for right shift.
  */
 template <IntegerTag Tag>
@@ -377,14 +377,14 @@ VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftLeftOp::operator()(
 
 template <nint_t Count, IntegerTag Tag>
 VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftLeftOp::operator()(
-    Tag tag, Vec<Tag> value, gemm::Const<Count>) const {
+    Tag tag, Vec<Tag> value, meta::Const<Count>) const {
   return (*this)(tag, value, static_cast<int>(Count));
 }
 
 template <IntegerTag Tag, nint_t Alignment, nint_t Lo, nint_t Hi>
 VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftLeftOp::operator()(
     Tag tag, Vec<Tag> value,
-    gemm::Dynamic<Alignment, Lo, Hi> count) const {
+    meta::Dynamic<Alignment, Lo, Hi> count) const {
   return (*this)(tag, value, static_cast<int>(
       static_cast<nint_t>(count)));
 }
@@ -413,7 +413,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftLeftOp::operator()(
 template <nint_t Count, IntegerTag Tag, typename... Options>
   requires (sizeof...(Options) > 0)
 VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftLeftOp::operator()(
-    Tag tag, Vec<Tag> value, gemm::Const<Count>, Options&&... options) const {
+    Tag tag, Vec<Tag> value, meta::Const<Count>, Options&&... options) const {
   return (*this)(
       tag, value, static_cast<int>(Count),
       std::forward<Options>(options)...);
@@ -423,7 +423,7 @@ template <IntegerTag Tag, nint_t Alignment, nint_t Lo, nint_t Hi,
           typename... Options>
   requires (sizeof...(Options) > 0)
 VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftLeftOp::operator()(
-    Tag tag, Vec<Tag> value, gemm::Dynamic<Alignment, Lo, Hi> count,
+    Tag tag, Vec<Tag> value, meta::Dynamic<Alignment, Lo, Hi> count,
     Options&&... options) const {
   return (*this)(
       tag, value, static_cast<int>(static_cast<nint_t>(count)),
@@ -443,7 +443,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftLeftOp::operator()(
  * (no-op). Unsigned lanes shift logically to zero for counts at least the
  * element width. Signed lanes shift arithmetically and become their sign
  * fill (all-ones for negative, all-zeros for non-negative) for large counts.
- * Counts may be scalar, gemm::Const, gemm::Dynamic, or a same-Tag Vec.
+ * Counts may be scalar, meta::Const, meta::Dynamic, or a same-Tag Vec.
  * @see bit_shl for left shift.
  */
 template <IntegerTag Tag>
@@ -455,14 +455,14 @@ VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftRightOp::operator()(
 
 template <nint_t Count, IntegerTag Tag>
 VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftRightOp::operator()(
-    Tag tag, Vec<Tag> value, gemm::Const<Count>) const {
+    Tag tag, Vec<Tag> value, meta::Const<Count>) const {
   return (*this)(tag, value, static_cast<int>(Count));
 }
 
 template <IntegerTag Tag, nint_t Alignment, nint_t Lo, nint_t Hi>
 VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftRightOp::operator()(
     Tag tag, Vec<Tag> value,
-    gemm::Dynamic<Alignment, Lo, Hi> count) const {
+    meta::Dynamic<Alignment, Lo, Hi> count) const {
   return (*this)(tag, value, static_cast<int>(
       static_cast<nint_t>(count)));
 }
@@ -491,7 +491,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftRightOp::operator()(
 template <nint_t Count, IntegerTag Tag, typename... Options>
   requires (sizeof...(Options) > 0)
 VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftRightOp::operator()(
-    Tag tag, Vec<Tag> value, gemm::Const<Count>, Options&&... options) const {
+    Tag tag, Vec<Tag> value, meta::Const<Count>, Options&&... options) const {
   return (*this)(
       tag, value, static_cast<int>(Count),
       std::forward<Options>(options)...);
@@ -501,7 +501,7 @@ template <IntegerTag Tag, nint_t Alignment, nint_t Lo, nint_t Hi,
           typename... Options>
   requires (sizeof...(Options) > 0)
 VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftRightOp::operator()(
-    Tag tag, Vec<Tag> value, gemm::Dynamic<Alignment, Lo, Hi> count,
+    Tag tag, Vec<Tag> value, meta::Dynamic<Alignment, Lo, Hi> count,
     Options&&... options) const {
   return (*this)(
       tag, value, static_cast<int>(static_cast<nint_t>(count)),

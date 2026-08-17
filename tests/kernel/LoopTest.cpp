@@ -6,10 +6,12 @@
 #include <utility>
 #include <vector>
 
-#include "vecops/gemm/HOP.h"
+#include "vecops/kernel/Loop.h"
 
 using namespace vecops;
-using namespace vecops::gemm;
+using namespace vecops::meta;
+using namespace vecops::tensor;
+namespace hop = vecops::kernel::loop;
 
 TEST(HOPForEachTest, OneDimTensorYieldsScalars) {
   std::vector<int64_t> data{1, 2, 3, 4};

@@ -9,11 +9,13 @@
 
 #include <gtest/gtest.h>
 
-#include "vecops/gemm/DataAccess.h"
+#include "vecops/tensor/DataAccess.h"
 #include "vecops/ops/Softmax.h"
 
 using namespace vecops;
-using namespace vecops::gemm;
+using namespace vecops::meta;
+using namespace vecops::tensor;
+using namespace vecops::kernel;
 using namespace vecops::ops;
 
 namespace {
@@ -102,7 +104,7 @@ void run_dtype_combo() {
   const nint_t workspace_bytes = op.required_workspace(x_spec, y_spec);
   EXPECT_EQ(
       workspace_bytes,
-      gemm::details::workspace_round_up(
+      kernel::details::workspace_round_up(
           n * static_cast<nint_t>(sizeof(ComputeT)),
           vec::DEFAULT_ALIGNMENT));
   Workspace workspace(workspace_bytes);
@@ -620,7 +622,7 @@ TEST(SoftmaxNumericsTest, HandlesNegativeInfinity) {
   EXPECT_NEAR(out[0] + out[2], 1.0f, 3e-5f);
 }
 
-TEST(SoftmaxWorkspaceTest, LayoutAndSpecWorkspaceMatchForStridedRows) {
+TEST(SoftmaxWorkspaceTest, SpecWorkspaceHandlesStridedRows) {
   using InLayout = Layout<Shape<Const<2>, Const<7>>, Strides<Const<17>, Const<2>>>;
   using OutLayout = Layout<Shape<Const<2>, Const<7>>, Strides<Const<1>, Const<2>>>;
   InLayout in_layout{Shape<Const<2>, Const<7>>{}, Strides<Const<17>, Const<2>>{}};
@@ -644,8 +646,6 @@ TEST(SoftmaxWorkspaceTest, LayoutAndSpecWorkspaceMatchForStridedRows) {
   auto y_spec = output<vecops::float32_t>(y_t);
   auto op = softmax();
   const nint_t spec_bytes = op.required_workspace(x_spec, y_spec);
-  const nint_t layout_bytes = op.required_workspace(in_layout, out_layout);
-  EXPECT_EQ(spec_bytes, layout_bytes);
   EXPECT_GT(spec_bytes, 0);
   Workspace workspace(spec_bytes);
   auto view = workspace.view();
@@ -661,7 +661,7 @@ TEST(SoftmaxWorkspaceTest, LayoutAndSpecWorkspaceMatchForStridedRows) {
   }
 }
 
-TEST(SoftmaxWorkspaceTest, MixedStorageComputeDoesNotUnderestimateLayoutQuery) {
+TEST(SoftmaxWorkspaceTest, MixedStorageUsesComputeCacheSize) {
   using ComputeT = vecops::float64_t;
   using Config = SoftmaxConfig<
       ComputeT,
@@ -677,9 +677,8 @@ TEST(SoftmaxWorkspaceTest, MixedStorageComputeDoesNotUnderestimateLayoutQuery) {
   auto x_spec = input<ComputeT>(x_t);
   auto y_spec = output<ComputeT>(y_t);
   auto op = softmax(Config{});
-  EXPECT_EQ(
-      op.required_workspace(x_spec, y_spec),
-      op.required_workspace(x_t.layout(), y_t.layout()));
+  EXPECT_GE(op.required_workspace(x_spec, y_spec),
+            n * static_cast<nint_t>(sizeof(ComputeT)));
 }
 
 TEST(SoftmaxFusionTest, AppliesInputPrologueAndOutputEpilogue) {

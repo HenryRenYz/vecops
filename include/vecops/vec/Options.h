@@ -3,7 +3,7 @@
 
 #include <type_traits>
 
-#include "vecops/gemm/Layout.h"
+#include "vecops/Meta.h"
 #include "vecops/vec/VecBase.h"
 
 /**
@@ -91,7 +91,11 @@ struct Unmasked {};
 
 inline constexpr Unmasked unmasked{};
 
-/** Selects lanes for a policy-bearing vector operation. */
+/**
+ * Selects lanes in the logical element space of the receiving abstraction.
+ * A higher-level accessor may translate the predicate before issuing the
+ * eventual physical memory instruction.
+ */
 template <MaskValue M>
 struct Masked {
   const M& value;
@@ -113,7 +117,7 @@ template <typename M>
 Masked<std::remove_cvref_t<M>> masked(M&&) = delete;
 
 /**
- * Selects the first count logical lanes. count is clamped to [0, size(tag)]
+ * Selects the first count logical elements. count is clamped to [0, size(tag)]
  * at the call site: negative values act as 0, excess as size(tag).
  * @see mwhilelt
  */
@@ -199,11 +203,13 @@ template <int S>
 inline constexpr Scale<S> scale{};
 
 /**
- * Selects indexed memory addressing with one signed i32/i64 index per lane.
+ * Selects indexed element addressing with one signed i32/i64 index per lane.
  *
- * A scale of zero means `sizeof(memory element)`; explicit scales are byte
- * multipliers. The named index vector is retained by reference so this option
- * also works with sizeless SVE vector types.
+ * At the raw vec layer a scale of zero means `sizeof(memory element)` and an
+ * explicit scale is a byte multiplier. A tensor accessor may instead lower
+ * scale-zero logical offsets through its layout, so this option alone does
+ * not guarantee a physical gather/scatter instruction. The named index vector
+ * is retained by reference so this also works with sizeless SVE types.
  */
 template <VectorValue V, int S = 0>
 struct Indexed {
@@ -242,17 +248,20 @@ template <typename>
 struct IsStrideMetadata : std::false_type {};
 
 template <nint_t N>
-struct IsStrideMetadata<gemm::Const<N>> : std::true_type {};
+struct IsStrideMetadata<meta::Const<N>> : std::true_type {};
 
 template <nint_t Alignment, nint_t Lo, nint_t Hi>
-struct IsStrideMetadata<gemm::Dynamic<Alignment, Lo, Hi>> : std::true_type {};
+struct IsStrideMetadata<meta::Dynamic<Alignment, Lo, Hi>> : std::true_type {};
 
 } // namespace details
 
 /**
- * Selects a constant or runtime element stride for memory addressing.
- * Accepts gemm::Const<N> for compile-time strides, gemm::Dynamic for
- * bounded runtime strides, or a plain nint_t (via gemm::Any). Strided and
+ * Selects a constant or runtime stride in the logical element space of the
+ * receiving abstraction. Raw vec memory operations apply it to pointer
+ * elements; a tensor accessor composes it with the selected tensor-axis
+ * stride. The option alone does not determine load versus gather lowering.
+ * Accepts meta::Const<N> for compile-time strides, meta::Dynamic for
+ * bounded runtime strides, or a plain nint_t (via meta::Any). Strided and
  * indexed addressing are mutually exclusive and cannot be combined with
  * alignment options.
  */
@@ -264,19 +273,19 @@ struct Strided {
 };
 
 template <nint_t N>
-VECOPS_ALWAYS_INLINE constexpr Strided<gemm::Const<N>> strided(
-    gemm::Const<N> stride) {
+VECOPS_ALWAYS_INLINE constexpr Strided<meta::Const<N>> strided(
+    meta::Const<N> stride) {
   return {stride};
 }
 
 template <nint_t Alignment, nint_t Lo, nint_t Hi>
-VECOPS_ALWAYS_INLINE constexpr Strided<gemm::Dynamic<Alignment, Lo, Hi>>
-strided(gemm::Dynamic<Alignment, Lo, Hi> stride) {
+VECOPS_ALWAYS_INLINE constexpr Strided<meta::Dynamic<Alignment, Lo, Hi>>
+strided(meta::Dynamic<Alignment, Lo, Hi> stride) {
   return {stride};
 }
 
-VECOPS_ALWAYS_INLINE constexpr Strided<gemm::Any> strided(nint_t stride) {
-  return {gemm::Any{stride}};
+VECOPS_ALWAYS_INLINE constexpr Strided<meta::Any> strided(nint_t stride) {
+  return {meta::Any{stride}};
 }
 
 } // namespace vecops::vec::opt

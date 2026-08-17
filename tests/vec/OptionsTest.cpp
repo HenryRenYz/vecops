@@ -55,7 +55,7 @@ TEST(VecOptionsTest, ClassifiesEveryPublicOptionFamily) {
 #endif
   using IndexVec = vec::Vec<vec::Rebind<int32_t, AddressTag>>;
   using Indexed = vec::opt::Indexed<IndexVec, 4>;
-  using Strided = vec::opt::Strided<vecops::gemm::Const<3>>;
+  using Strided = vec::opt::Strided<vecops::meta::Const<3>>;
   static_assert(IsIndexedOption<Indexed>::value);
   static_assert(IsIndexedOption<Indexed>::scale == 4);
   static_assert(IsStridedOption<Strided>::value);
@@ -111,8 +111,8 @@ TEST(VecOptionsTest, ValidatesIndexedAndStridedMemoryOptions) {
   using Indexed32 = vec::opt::Indexed<I32, 0>;
   using Indexed64 = vec::opt::Indexed<I64, 1>;
   using UnsignedIndexed = vec::opt::Indexed<U32, 1>;
-  using ConstantStride = vec::opt::Strided<vecops::gemm::Const<4>>;
-  using DynamicStride = vec::opt::Strided<vecops::gemm::Dynamic<1>>;
+  using ConstantStride = vec::opt::Strided<vecops::meta::Const<4>>;
+  using DynamicStride = vec::opt::Strided<vecops::meta::Dynamic<1>>;
 
   using namespace vecops::vec::details;
   static_assert(valid_memory_options<Tag, false, Indexed32>());

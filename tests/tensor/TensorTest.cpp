@@ -8,10 +8,11 @@
 #include <numeric>
 #include <memory>
 
-#include "vecops/gemm/Tensor.h"
+#include "vecops/tensor/Tensor.h"
 
 using namespace vecops;
-using namespace vecops::gemm;
+using namespace vecops::meta;
+using namespace vecops::tensor;
 
 // ============================================================================
 // Test Fixtures
@@ -58,7 +59,7 @@ TEST_F(TensorMarkerTest, NewAxisIntRepeat) {
 TEST_F(TensorMarkerTest, NewAxisConstRepeat) {
     auto na = new_axis(cint<3>);
     EXPECT_EQ(na.repeat, 3);
-    using ExpectedType = gemm::details::NewAxis<Const<3>>;
+    using ExpectedType = tensor::details::NewAxis<Const<3>>;
     EXPECT_TRUE((std::is_same_v<decltype(na), ExpectedType>));
 }
 

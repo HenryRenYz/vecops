@@ -149,9 +149,20 @@ VECOPS_ALWAYS_INLINE void x86_store_convert_ordered_saturating_packed(
 template <Element To, VectorTag FromTag>
 VECOPS_ALWAYS_INLINE void x86_store_convert_ordered_saturating_packed(
     FromTag from, To* pointer, Vec<FromTag> value) {
-  const auto mask = execute(MaskFillOp{}, from, true);
-  x86_store_convert_ordered_saturating_packed(
-      from, pointer, value, mask);
+  if constexpr (std::same_as<To, ElementOf<FromTag>>) {
+    // A same-type store is not a conversion.  Keep the unmasked operation
+    // unmasked instead of materializing an all-true predicate and routing it
+    // through the filtered-store overload.  Besides matching store_convert's
+    // documented degeneration to store, this avoids needless predicate state
+    // in otherwise mask-free hot loops.
+    execute(
+        StoreOp{}, from, pointer, value,
+        mem::unaligned, mem::temporal);
+  } else {
+    const auto mask = execute(MaskFillOp{}, from, true);
+    x86_store_convert_ordered_saturating_packed(
+        from, pointer, value, mask);
+  }
 }
 
 template <Element To, VectorTag FromTag>

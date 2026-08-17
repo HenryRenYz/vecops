@@ -37,7 +37,9 @@ struct NativeImpl<X86Backend, PrefetchOp, Tag> {
                       mem::PrefetchWrite> || ...);
     constexpr int hint = write || (!l2 && stream)
         ? _MM_HINT_NTA : l2 ? _MM_HINT_T1 : _MM_HINT_T0;
-    _mm_prefetch(reinterpret_cast<const char*>(pointer), hint);
+    _mm_prefetch(
+        reinterpret_cast<const char*>(pointer),
+        static_cast<_mm_hint>(hint));
   }
 };
 

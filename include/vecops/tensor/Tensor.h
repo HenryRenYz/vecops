@@ -13,7 +13,7 @@
 
 #include "vecops/CoreTypes.h"
 #include "vecops/Assertion.h"
-#include "vecops/gemm/Layout.h"
+#include "vecops/tensor/Layout.h"
 
 /**
  * @file Tensor.h
@@ -28,7 +28,7 @@
  *
  * | Component      | Purpose                                              |
  * |----------------|------------------------------------------------------|
- * | Tensor<T,S,St> | Multi-dimensional view over `const T*` data          |
+ * | Tensor<T,S,St> | Multi-dimensional view preserving pointer mutability |
  * | Array<N,T>     | Alias for fully-dynamic Tensor of rank N             |
  * | make_tensor()  | Factory functions for creating Tensors               |
  * | Slicing markers| `reserve`, `new_axis(n)`, `range(s,e,step)`          |
@@ -38,8 +38,8 @@
  * ## Usage overview
  *
  * @code
- * #include "vecops/gemm/Tensor.h"
- * using namespace vecops::gemm;
+ * #include "vecops/tensor/Tensor.h"
+ * using namespace vecops::tensor;
  *
  * float data[24];
  *
@@ -62,8 +62,8 @@
  * ## Pitfalls
  *
  * - Tensor is **non-owning**: the data pointer must outlive the Tensor view.
- * - `data()` returns `const T*`; the non-const overload uses `const_cast`.
- *   Modifying data through a Tensor is allowed but requires care.
+ * - Pointer cv-qualification is preserved: a Tensor created from `const T*`
+ *   stays read-only, while one created from `T*` remains writable.
  * - Slicing with **only** integer indices returns an **element reference**,
  *   not a Tensor. Mixed slicing (integers + markers) returns a Tensor.
  * - `new_axis()` does NOT consume an existing dimension; `reserve` and `range` do.
@@ -75,7 +75,7 @@
  * - `Array<N,T>` always uses `Any` for all dimensions (fully dynamic, no Const info).
  */
 
-namespace vecops::gemm {
+namespace vecops::tensor {
 
 // ======================== Slicing Markers ========================
 
@@ -427,7 +427,8 @@ struct FindIndexInPack<I, Target, T0, Ts...> {
  * @brief Non-owning multi-dimensional tensor view with compile-time layout.
  *
  * `Tensor<T, TShape, TStrides>` is a lightweight view that pairs a data
- * pointer (`const T*`) with a `Layout<TShape, TStrides>`. It does **not**
+ * pointer (`T*`, where T may itself be const) with a
+ * `Layout<TShape, TStrides>`. It does **not**
  * own the underlying data — the caller must ensure the data outlives the
  * Tensor view.
  *
@@ -483,8 +484,8 @@ struct FindIndexInPack<I, Target, T0, Ts...> {
  * ## Pitfalls
  *
  * - **Non-owning**: `_data` must outlive the Tensor.
- * - **Mutable data()**: uses `const_cast<T*>` — modifying is allowed but
- *   requires discipline.
+ * - **Pointer mutability**: no const-cast is used; mutability is part of the
+ *   Tensor element type and is checked by output specs.
  * - **All-integer slice** returns an **element**, not a Tensor.
  * - **Mixed slice** (integer + markers) returns a new Tensor with a
  *   different Shape/Strides type.
@@ -505,7 +506,7 @@ public:
   static constexpr int Ndim = TShape::Ndim;
   using Shape = TShape;
   using Stride = TStrides;
-  using Layout = gemm::Layout<TShape, TStrides>;
+  using Layout = tensor::Layout<TShape, TStrides>;
   using ElementType = T;
 
   // -------- Construction --------
@@ -517,7 +518,7 @@ public:
    * @param shape   Shape descriptor.
    * @param strides Strides descriptor.
    */
-  constexpr Tensor(const T* data, TShape shape, TStrides strides)
+  constexpr Tensor(T* data, TShape shape, TStrides strides)
       : _data(data), _layout(Layout{shape, strides}) {}
 
   /**
@@ -526,7 +527,7 @@ public:
    * @param data   Pointer to the start of the data (non-owning).
    * @param layout Layout descriptor.
    */
-  constexpr Tensor(const T* data, Layout layout)
+  constexpr Tensor(T* data, Layout layout)
       : _data(data), _layout(layout) {}
 
   /**
@@ -537,7 +538,7 @@ public:
    * @note Asserts that both lists have `Ndim` elements.
    */
   constexpr Tensor(
-      const T* data,
+      T* data,
       std::initializer_list<nint_t> shape_vals,
       std::initializer_list<nint_t> stride_vals
   )
@@ -564,7 +565,7 @@ public:
    * @note Asserts that the list has `Ndim` elements.
    */
   constexpr Tensor(
-      const T* data,
+      T* data,
       std::initializer_list<nint_t> shape_vals
   )
       : _data(data),
@@ -588,16 +589,8 @@ public:
 
   // -------- Data access --------
 
-  /// Get the raw data pointer (const).
-  constexpr const T* data() const { return _data; }
-
-  /**
-   * Get a mutable data pointer.
-   *
-   * @warning Uses `const_cast`. Modifying data through a Tensor is
-   *          allowed but bypasses const-correctness — use with care.
-   */
-  T* data() { return const_cast<T*>(_data); }
+  /// Get the raw pointer while preserving the Tensor element cv-qualification.
+  constexpr T* data() const { return _data; }
 
   // -------- Dimension access --------
 
@@ -609,7 +602,7 @@ public:
    */
   template <int I>
   constexpr nint_t size() const {
-    return gemm::size<I>(_layout);
+    return tensor::size<I>(_layout);
   }
 
   /**
@@ -620,7 +613,7 @@ public:
    */
   template <int I>
   constexpr nint_t stride() const {
-    return gemm::stride<I>(_layout);
+    return tensor::stride<I>(_layout);
   }
 
   /// Get the size of dimension `i` (runtime index).
@@ -668,7 +661,7 @@ public:
    */
   template <int N = 1>
   bool is_last_contiguous() const {
-    return gemm::is_last_contiguous<N>(_layout);
+    return tensor::is_last_contiguous<N>(_layout);
   }
 
   /**
@@ -677,7 +670,7 @@ public:
    * If `ct_is_contiguous` is true, returns `true` at compile time.
    */
   bool is_contiguous() const {
-    return gemm::is_contiguous(_layout);
+    return tensor::is_contiguous(_layout);
   }
 
   // -------- Cross-type conversion --------
@@ -1019,7 +1012,7 @@ private:
     };
   }
 
-  const T* _data;
+  T* _data;
   Layout _layout;
 };
 
@@ -1071,7 +1064,7 @@ using Array = Tensor<T,
  */
 template <typename T, typename TLayout,
     std::enable_if_t<is_layout<std::remove_cvref_t<TLayout>>, bool> = true>
-constexpr auto make_tensor(const T* data, TLayout&& layout) {
+constexpr auto make_tensor(T* data, TLayout&& layout) {
   using L = std::remove_cvref_t<TLayout>;
   return Tensor<T, typename L::Shape, typename L::Strides>(data, std::forward<TLayout>(layout));
 }
@@ -1094,7 +1087,7 @@ constexpr auto make_tensor(const T* data, TLayout&& layout) {
  * @return A Tensor with the given layout.
  */
 template <typename T, typename TShape, typename TStrides>
-constexpr auto make_tensor(const T* data, TShape&& shape, TStrides&& strides) {
+constexpr auto make_tensor(T* data, TShape&& shape, TStrides&& strides) {
   return make_tensor(data, make_layout(std::forward<TShape>(shape), std::forward<TStrides>(strides)));
 }
 
@@ -1118,7 +1111,7 @@ constexpr auto make_tensor(const T* data, TShape&& shape, TStrides&& strides) {
  */
 template <typename T, typename TShape,
     std::enable_if_t<is_shape<std::remove_cvref_t<TShape>>, bool> = true>
-constexpr auto make_tensor(const T* data, TShape&& shape) {
+constexpr auto make_tensor(T* data, TShape&& shape) {
   return make_tensor(data, make_layout(std::forward<TShape>(shape)));
 }
 
@@ -1135,7 +1128,7 @@ constexpr auto make_tensor(const T* data, TShape&& shape) {
  */
 template <int Ndim, typename T>
 constexpr auto make_tensor(
-    const T* data,
+    T* data,
     std::initializer_list<nint_t> shape_vals,
     std::initializer_list<nint_t> stride_vals
 ) {
@@ -1155,7 +1148,7 @@ constexpr auto make_tensor(
  */
 template <int Ndim, typename T>
 constexpr auto make_tensor(
-    const T* data,
+    T* data,
     std::initializer_list<nint_t> shape_vals
 ) {
   return make_tensor(data, make_layout<Ndim>(shape_vals));
@@ -1176,7 +1169,7 @@ constexpr auto make_tensor(
  */
 template <int I, int J, typename T, typename TShape, typename TStrides>
 constexpr auto transpose(const Tensor<T, TShape, TStrides>& t) {
-  auto new_layout = gemm::transpose<I, J>(t.layout());
+  auto new_layout = tensor::transpose<I, J>(t.layout());
   return make_tensor(t.data(), new_layout);
 }
 
@@ -1197,7 +1190,7 @@ constexpr auto transpose(const Tensor<T, TShape, TStrides>& t) {
  */
 template <typename T, typename TShape, typename TStrides>
 constexpr auto transpose(const Tensor<T, TShape, TStrides>& t, int i, int j) {
-  auto new_layout = gemm::transpose(t.layout(), i, j);
+  auto new_layout = tensor::transpose(t.layout(), i, j);
   return make_tensor(t.data(), new_layout);
 }
 
@@ -1258,6 +1251,6 @@ bool is_contiguous(const Tensor<T, TShape, TStrides>& t) {
   return t.is_contiguous();
 }
 
-} // namespace vecops::gemm
+} // namespace vecops::tensor
 
 #endif // VECOPS_TENSOR_H

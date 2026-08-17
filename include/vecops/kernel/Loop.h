@@ -2,8 +2,8 @@
 // Created by renyz on 2026/7/8.
 //
 
-#ifndef VECOPS_HOP_H
-#define VECOPS_HOP_H
+#ifndef VECOPS_KERNEL_LOOP_H
+#define VECOPS_KERNEL_LOOP_H
 
 #include <cstddef>
 #include <tuple>
@@ -12,10 +12,10 @@
 
 #include "vecops/CoreDefs.h"
 #include "vecops/Assertion.h"
-#include "vecops/gemm/Tensor.h"
+#include "vecops/tensor/DataAccess.h"
 
 /**
- * @file HOP.h
+ * @file Loop.h
  * @brief Higher-order traversal helpers for Tensor-like nested iteration.
  *
  * This header defines small higher-order traversal primitives for applying a
@@ -27,13 +27,13 @@
  *
  * | Component                         | Purpose                                   |
  * |-----------------------------------|-------------------------------------------|
- * | `hop::for_each<Is...>`            | Traverse the listed logical dimensions    |
- * | `hop::for_each_dims<N>`           | Traverse logical dimensions `0..N - 1`    |
- * | `hop::for_each_with_index<Is...>` | Traverse and pass current indices to `fn` |
- * | `hop::for_each_dims_with_index<N>`| Traverse `0..N - 1` and pass indices      |
- * | `hop::*_with_index_tuple`         | Pass indices as one tuple before slices   |
- * | `hop::scan`                       | Chunked 1D scan with carry                |
- * | `hop::map`                        | Chunked 1D map without carry              |
+ * | `loop::for_each<Is...>`            | Traverse the listed logical dimensions    |
+ * | `loop::for_each_dims<N>`           | Traverse logical dimensions `0..N - 1`    |
+ * | `loop::for_each_with_index<Is...>` | Traverse and pass current indices to `fn` |
+ * | `loop::for_each_dims_with_index<N>`| Traverse `0..N - 1` and pass indices      |
+ * | `loop::*_with_index_tuple`         | Pass indices as one tuple before slices   |
+ * | `loop::scan`                       | Chunked 1D scan with carry                |
+ * | `loop::map`                        | Chunked 1D map without carry              |
  *
  * ## Logical dimensions and alignment
  *
@@ -86,11 +86,31 @@
  * - Writable Tensor inputs may be updated through the scalar references or
  *   sub-Tensor views passed to the callable.
  *
+ * Tensor Specs and DataAccess sessions participate through the same logical
+ * slicing operation. Slicing a Spec composes its CoordinateProjection so a
+ * coordinate-aware transform still sees the original rank. Slicing DataAccess
+ * returns a borrowed view: it can load/store, but it cannot commit a
+ * materialized output. The parent session retains commit responsibility and
+ * must outlive the traversal.
+ *
+ * ## Chunked scan and map
+ *
+ * `scan` and `map` partition `[0, n)` into full chunks of `step` plus at most
+ * one tail. The type of `n` and `step` matters: `Const` or aligned `Dynamic`
+ * metadata can prove that no tail exists and remove its branch, while raw
+ * integers are promoted to `Any`.
+ *
+ * The callback receives the chunk start as `nint_t` and the chunk length as a
+ * typed metadata value. The generalized scan overload constructs each
+ * unrolled carry as a separate automatic variable rather than placing carries
+ * in an array/tuple; this permits SVE sizeless vector carries. Its combine
+ * function must describe an associative reduction with the supplied identity.
+ *
  * ## Usage overview
  *
  * @code
- * #include "vecops/gemm/HOP.h"
- * using namespace vecops::gemm;
+ * #include "vecops/kernel/Loop.h"
+ * using namespace vecops::kernel;
  *
  * std::vector<float> a(2 * 3);
  * std::vector<float> b(3);
@@ -104,12 +124,12 @@
  *
  * // Traverses logical dimensions 0 and 1. `tb` is trailing-aligned with the
  * // last dimension and is reused for both rows.
- * hop::for_each_dims<2>([](auto&& dst, auto&& x, auto&& y) {
+ * loop::for_each_dims<2>([](auto&& dst, auto&& x, auto&& y) {
  *   dst = x + y;
  * }, to, ta, tb);
  *
  * // Traverse rows only. The callable receives rank-1 row views.
- * hop::for_each<0>([](auto&& row) {
+ * loop::for_each<0>([](auto&& row) {
  *   row(0) = 0;
  * }, to);
  * @endcode
@@ -130,15 +150,26 @@
  * - The helpers preserve `Tensor`'s non-owning view semantics. The underlying
  *   storage must outlive the traversal and must be mutable if the callable
  *   writes through the passed objects.
+ * - A borrowed DataAccess view must not escape the parent operand session.
+ *   Commit the owning output, not an individual loop slice.
+ * - Traversal order follows `Is...`, and each selected dimension is removed
+ *   before the next one is interpreted. Use the documented logical trailing
+ *   alignment rather than assuming indices refer to the original local rank.
+ * - For unrolled `scan`, update/combine must not depend on a particular merge
+ *   order beyond their associative reduction contract.
  */
 
-namespace vecops::gemm::hop {
+namespace vecops::kernel::loop {
+
+using namespace ::vecops::meta;
+using namespace ::vecops::tensor;
+
 namespace details {
 
 // ======================== Value Normalization ========================
 
 template <typename T>
-using HopValue = ::vecops::gemm::ToValue<std::remove_cvref_t<T>>;
+using HopValue = ::vecops::meta::ToValue<std::remove_cvref_t<T>>;
 
 template <typename T>
 VECOPS_ALWAYS_INLINE constexpr HopValue<T> to_hop_value(T&& value) {
@@ -343,6 +374,87 @@ struct SliceTraits<Tensor<T, TShape, TStrides>> {
 
   template <int ActualDim, typename U>
   VECOPS_ALWAYS_INLINE static constexpr decltype(auto) slice(U&& input, nint_t index);
+};
+
+template <typename Compute, typename TensorT, typename Transform,
+          typename Projection, typename... Facts>
+struct SliceTraits<
+    InputSpec<Compute, TensorT, Transform, Projection, Facts...>> {
+  using Spec = InputSpec<
+      Compute, TensorT, Transform, Projection, Facts...>;
+  static constexpr int rank = TensorT::Ndim;
+  static constexpr bool is_sliceable = true;
+
+  template <int I>
+  using shape_dim = typename TensorShapeDim<I, TensorT>::type;
+
+  static nint_t size(const Spec& spec, int dim) {
+    return spec.input_layout().shape()[dim];
+  }
+
+  template <int ActualDim, typename U>
+  VECOPS_ALWAYS_INLINE static constexpr auto slice(U&& spec, nint_t index) {
+    return tensor::slice_view<ActualDim>(spec, index);
+  }
+};
+
+template <typename Compute, typename TensorT, typename Transform,
+          typename Projection, typename... Facts>
+struct SliceTraits<
+    OutputSpec<Compute, TensorT, Transform, Projection, Facts...>> {
+  using Spec = OutputSpec<
+      Compute, TensorT, Transform, Projection, Facts...>;
+  static constexpr int rank = TensorT::Ndim;
+  static constexpr bool is_sliceable = true;
+
+  template <int I>
+  using shape_dim = typename TensorShapeDim<I, TensorT>::type;
+
+  static nint_t size(const Spec& spec, int dim) {
+    return spec.output_layout().shape()[dim];
+  }
+
+  template <int ActualDim, typename U>
+  VECOPS_ALWAYS_INLINE static constexpr auto slice(U&& spec, nint_t index) {
+    return tensor::slice_view<ActualDim>(spec, index);
+  }
+};
+
+template <typename Spec, bool IsInput = Spec::is_input>
+struct SpecTensorType {
+  using type = typename Spec::OutputTensor;
+};
+
+template <typename Spec>
+struct SpecTensorType<Spec, true> {
+  using type = typename Spec::InputTensor;
+};
+
+template <typename Access>
+  requires requires(const Access& access, nint_t index) {
+    Access::Rank;
+    access.spec();
+    tensor::slice_view<0>(access, index);
+  }
+struct SliceTraits<Access> {
+  using Spec = std::remove_cvref_t<
+      decltype(std::declval<const Access&>().spec())>;
+  using TensorT = typename SpecTensorType<Spec>::type;
+  static constexpr int rank = Access::Rank;
+  static constexpr bool is_sliceable = true;
+
+  template <int I>
+  using shape_dim = typename TensorShapeDim<I, TensorT>::type;
+
+  static nint_t size(const Access& access, int dim) {
+    return access.spec().tensor().size(dim);
+  }
+
+  template <int ActualDim, typename U>
+  VECOPS_ALWAYS_INLINE static constexpr auto slice(
+      U&& access, nint_t index) {
+    return tensor::slice_view<ActualDim>(access, index);
+  }
 };
 
 template <typename T>
@@ -1045,7 +1157,7 @@ VECOPS_ALWAYS_INLINE void for_each_with_index_tuple(Fn&& fn, Inputs&&... inputs)
  * @param inputs  Inputs traversed together.
  *
  * @code
- * hop::for_each_dims<2>([](auto&& dst, auto&& lhs, auto&& rhs) {
+ * loop::for_each_dims<2>([](auto&& dst, auto&& lhs, auto&& rhs) {
  *   dst = lhs + rhs;
  * }, out, a, b);
  * @endcode
@@ -1112,6 +1224,6 @@ VECOPS_ALWAYS_INLINE void for_each_dims_with_index_tuple(Fn&& fn, Inputs&&... in
   details::LeadingDimsWithIndexTuple<Ndim>::run(fn, std::forward<Inputs>(inputs)...);
 }
 
-} // namespace vecops::gemm::hop
+} // namespace vecops::kernel::loop
 
-#endif // VECOPS_HOP_H
+#endif // VECOPS_KERNEL_LOOP_H

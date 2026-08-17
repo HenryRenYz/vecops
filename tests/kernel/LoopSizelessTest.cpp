@@ -4,10 +4,12 @@
 
 #include <utility>
 
-#include "vecops/gemm/HOP.h"
+#include "vecops/kernel/Loop.h"
 
 using namespace vecops;
-using namespace vecops::gemm;
+using namespace vecops::meta;
+using namespace vecops::tensor;
+namespace hop = vecops::kernel::loop;
 
 template <int Unroll>
 void expect_sizeless_carries() {

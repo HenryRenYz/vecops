@@ -209,14 +209,14 @@ void verify_bit_operations(Tag tag) {
   for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane)
     counts = vec::set(
         tag, counts, lane, static_cast<T>(lane % (width + 2)));
-  const auto const_left = vec::bit_shl(a, vecops::gemm::cint<3>);
+  const auto const_left = vec::bit_shl(a, vecops::meta::cint<3>);
   const auto const_right = vec::bit_shr(
-      a, vecops::gemm::cint<3>,
+      a, vecops::meta::cint<3>,
       vec::opt::masked(mask), vec::opt::zero);
   const auto dynamic_left = vec::bit_shl(
-      a, vecops::gemm::dyn<1>(2));
+      a, vecops::meta::dyn<1>(2));
   const auto dynamic_right = vec::bit_shr(
-      a, vecops::gemm::dyn<1>(2), vec::opt::unmasked);
+      a, vecops::meta::dyn<1>(2), vec::opt::unmasked);
   const auto lane_left = vec::bit_shl(a, counts);
   const auto lane_right = vec::bit_shr(a, counts);
   const auto masked_lane_left = vec::bit_shl(

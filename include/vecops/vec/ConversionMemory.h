@@ -6,6 +6,42 @@
 #include "vecops/vec/Conversion.h"
 #include "vecops/vec/Memory.h"
 
+/**
+ * @file ConversionMemory.h
+ * @brief Load/store operations fused with element conversion.
+ *
+ * `load_convert(to_tag, pointer, options...)` and
+ * `store_convert(from_tag, pointer, value, options...)` preserve the logical
+ * lane count of the caller's Tag while the memory element type may differ.
+ * Backends may use a fused instruction or an equivalent load/convert sequence;
+ * the API promises semantics, not one opcode.
+ *
+ * Any otherwise legal caller Tag is accepted even when rebinding that Tag to
+ * the memory dtype would exceed the backend's representable POW2 range. Such a
+ * request is recursively partitioned into legal logical chunks and reassembled
+ * (load) or emitted (store). For active non-contiguous boundary cases, the
+ * generic fallback may operate lane-by-lane to preserve exact mask/address
+ * semantics.
+ *
+ * ## Important mask domains
+ *
+ * Ordered conversion uses a caller-logical mask. Unordered conversion normally
+ * uses the memory-side rebound Tag's mask because the backend may permute lanes.
+ * When that rebound Tag is not representable and recursive partitioning is
+ * required, only the caller-logical mask type is valid. `first(n)` avoids this
+ * distinction and is generally the simplest tail interface.
+ *
+ * ## Pitfalls
+ *
+ * - Ordered/unordered and saturate/wrap are semantic choices, not mere hints.
+ * - Explicit indexed scale is in bytes at this raw pointer layer; scale zero
+ *   means one memory element. Tensor DataAccess assigns different higher-level
+ *   logical semantics before lowering to this API.
+ * - Masked-off addresses are not accessed. Inactive load lanes are zero unless
+ *   a merge population is provided; inactive stores leave memory unchanged.
+ * - Alignment and temporality are hints and may be ignored by a backend while
+ *   preserving the conversion and memory semantics.
+ */
 namespace vecops::vec {
 
 namespace details {
@@ -55,8 +91,11 @@ namespace vecops::vec {
  * `opt::masked` and `opt::first` filter memory accesses; inactive addresses
  * are never read. For ordered conversion a mask has type `Mask<ToTag>` and an
  * inactive output lane is zero unless `opt::merge(scalar/vector)` is supplied.
- * For unordered conversion the mask has the memory-side source Tag and no
- * population option is accepted. `mem::aligned` promises source-Tag memory
+ * For unordered conversion the mask normally has the memory-side source Tag
+ * and no population option is accepted. If that rebound Tag would exceed the
+ * backend maximum POW, the public logical-Tag mask is used while the operation
+ * is recursively partitioned into representable memory-side chunks.
+ * `mem::aligned` promises source-Tag memory
  * alignment. Alignment and temporality are hints and may be ignored while the
  * backend retains its fused conversion-load path. `mem::split` is not a valid
  * load option. `opt::indexed(indices)` and `opt::strided(stride)` select
@@ -72,8 +111,13 @@ template <VectorTag ToTag, Element From, typename... Options>
             ToTag, From, false, Options...>())
 VECOPS_ALWAYS_INLINE Vec<ToTag> LoadConvertOp::operator()(
     ToTag to, const From* pointer, Options&&... options) const {
-  return details::execute_load_convert_options(
-      *this, to, pointer, std::forward<Options>(options)...);
+  if constexpr (details::memory_rebind_supported<ToTag, From>()) {
+    return details::execute_load_convert_options(
+        *this, to, pointer, std::forward<Options>(options)...);
+  } else {
+    return details::execute_large_load_convert(
+        to, pointer, std::forward<Options>(options)...);
+  }
 }
 
 /**
@@ -82,8 +126,10 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> LoadConvertOp::operator()(
  * Defaults are ordered, saturating, unaligned, temporal, and packed.
  *
  * `opt::masked` and `opt::first` filter writes, so inactive addresses remain
- * untouched. Ordered masks have type `Mask<FromTag>`; unordered masks have the
- * memory-side Tag. Population options are invalid. `mem::split` is accepted
+ * untouched. Ordered masks have type `Mask<FromTag>`; unordered masks normally
+ * have the memory-side Tag. For a rebound Tag beyond the backend maximum POW,
+ * unordered recursively partitions using a logical `Mask<FromTag>` instead.
+ * Population options are invalid. `mem::split` is accepted
  * only for ordered, saturating stores and has the same contiguous logical
  * result as `mem::packed`; it permits a backend-native wordwise implementation.
  * `mem::aligned` promises memory-side Tag alignment. Alignment and temporality
@@ -101,8 +147,14 @@ template <VectorTag FromTag, Element To, typename... Options>
 VECOPS_ALWAYS_INLINE void StoreConvertOp::operator()(
     FromTag from, To* pointer, Vec<FromTag> value,
     Options&&... options) const {
-  details::execute_store_convert_options(
-      *this, from, pointer, value, std::forward<Options>(options)...);
+  if constexpr (details::memory_rebind_supported<FromTag, To>()) {
+    details::execute_store_convert_options(
+        *this, from, pointer, value,
+        std::forward<Options>(options)...);
+  } else {
+    details::execute_large_store_convert(
+        from, pointer, value, std::forward<Options>(options)...);
+  }
 }
 
 inline constexpr LoadConvertOp load_convert{};

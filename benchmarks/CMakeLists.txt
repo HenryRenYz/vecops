@@ -172,6 +172,11 @@ add_multiarch_benchmark(ConversionLoadStoreBench
     ARCH Native
 )
 
+add_multiarch_benchmark(DataAccessBench
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/tensor/DataAccessBench.cpp
+    ARCH Native
+)
+
 add_multiarch_benchmark(ExpBench
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ExpBench.cpp
     ARCH Native

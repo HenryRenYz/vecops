@@ -6,10 +6,11 @@
 #include <sstream>
 #include <string>
 
-#include "vecops/gemm/Layout.h"
+#include "vecops/tensor/Layout.h"
 
 using namespace vecops;
-using namespace vecops::gemm;
+using namespace vecops::meta;
+using namespace vecops::tensor;
 
 // ======================================================================
 // Helper: capture operator<< output to std::string
@@ -640,7 +641,7 @@ TEST_F(ValueTest, TypeVerificationAdd) {
 }
 
 TEST_F(ValueTest, OperatorOnPackedValue) {
-  vecops::gemm::details::PackedStorage<Dynamic<8, 0, 64>> ps(Dynamic<8, 0, 64>{32});
+  vecops::meta::details::PackedStorage<Dynamic<8, 0, 64>> ps(Dynamic<8, 0, 64>{32});
   auto v = ps.template get<0>();
   auto d = Dynamic<16, 0, 128>{64};
   auto r = d + v;
@@ -667,7 +668,7 @@ TEST_F(ValueTest, ToValuePreservesValueType) {
 class PackedStorageTest : public ::testing::Test {};
 
 TEST_F(PackedStorageTest, ConstructAllRuntime) {
-  vecops::gemm::details::PackedStorage<Any, Any> ps(Any{3}, Any{4});
+  vecops::meta::details::PackedStorage<Any, Any> ps(Any{3}, Any{4});
   EXPECT_EQ(ps.template get<0>(), 3);
   EXPECT_EQ(ps.template get<1>(), 4);
   EXPECT_EQ(ps[0], 3);
@@ -675,7 +676,7 @@ TEST_F(PackedStorageTest, ConstructAllRuntime) {
 }
 
 TEST_F(PackedStorageTest, ConstructAllConst) {
-  vecops::gemm::details::PackedStorage<Const<3>, Const<4>> ps(Const<3>{}, Const<4>{});
+  vecops::meta::details::PackedStorage<Const<3>, Const<4>> ps(Const<3>{}, Const<4>{});
   EXPECT_EQ(ps.template get<0>(), 3);
   EXPECT_EQ(ps.template get<1>(), 4);
   EXPECT_EQ(ps[0], 3);
@@ -683,21 +684,21 @@ TEST_F(PackedStorageTest, ConstructAllConst) {
 }
 
 TEST_F(PackedStorageTest, ConstructMixed) {
-  vecops::gemm::details::PackedStorage<Const<128>, Any> ps(Const<128>{}, Any{100});
+  vecops::meta::details::PackedStorage<Const<128>, Any> ps(Const<128>{}, Any{100});
   EXPECT_EQ(ps.template get<0>(), 128);
   EXPECT_EQ(ps.template get<1>(), 100);
 }
 
 TEST_F(PackedStorageTest, ConstructFromPtrAllRuntime) {
   nint_t data[] = {7, 8};
-  vecops::gemm::details::PackedStorage<Any, Any> ps(data);
+  vecops::meta::details::PackedStorage<Any, Any> ps(data);
   EXPECT_EQ(ps[0], 7);
   EXPECT_EQ(ps[1], 8);
 }
 
 TEST_F(PackedStorageTest, ConstructFromPtrMixed) {
   nint_t data[] = {128, 100};
-  vecops::gemm::details::PackedStorage<Const<128>, Any> ps(data);
+  vecops::meta::details::PackedStorage<Const<128>, Any> ps(data);
   EXPECT_EQ(ps.template get<0>(), 128);
   EXPECT_EQ(ps.template get<1>(), 100);
   EXPECT_EQ(ps[0], 128);  // const
@@ -705,7 +706,7 @@ TEST_F(PackedStorageTest, ConstructFromPtrMixed) {
 }
 
 TEST_F(PackedStorageTest, OperatorBracketConstDim) {
-  vecops::gemm::details::PackedStorage<Const<5>, Any, Const<10>> ps(Const<5>{}, Any{7}, Const<10>{});
+  vecops::meta::details::PackedStorage<Const<5>, Any, Const<10>> ps(Const<5>{}, Any{7}, Const<10>{});
   // operator[] 对 const 维度必须返回正确的 const_values（回归 bug #2）
   EXPECT_EQ(ps[0], 5);
   EXPECT_EQ(ps[1], 7);
@@ -713,7 +714,7 @@ TEST_F(PackedStorageTest, OperatorBracketConstDim) {
 }
 
 TEST_F(PackedStorageTest, ToArrayRoundtrip) {
-  vecops::gemm::details::PackedStorage<Const<3>, Any, Const<5>> ps(Const<3>{}, Any{7}, Const<5>{});
+  vecops::meta::details::PackedStorage<Const<3>, Any, Const<5>> ps(Const<3>{}, Any{7}, Const<5>{});
   auto arr = ps.to_array();
   EXPECT_EQ(arr[0], 3);
   EXPECT_EQ(arr[1], 7);
@@ -722,7 +723,7 @@ TEST_F(PackedStorageTest, ToArrayRoundtrip) {
 }
 
 TEST_F(PackedStorageTest, ToPackedArray) {
-  vecops::gemm::details::PackedStorage<Const<3>, Any, Const<5>> ps(Const<3>{}, Any{7}, Const<5>{});
+  vecops::meta::details::PackedStorage<Const<3>, Any, Const<5>> ps(Const<3>{}, Any{7}, Const<5>{});
   auto& packed = ps.to_packed_array();
   EXPECT_EQ(packed.size(), 1u);  // only Any dimension
   EXPECT_EQ(packed[0], 7);
@@ -730,19 +731,19 @@ TEST_F(PackedStorageTest, ToPackedArray) {
 
 TEST_F(PackedStorageTest, FromPackedArrayRoundtrip) {
   nint_t packed_data[] = {42};
-  auto ps = vecops::gemm::details::PackedStorage<Const<3>, Any, Const<5>>::from_packed_array(packed_data);
+  auto ps = vecops::meta::details::PackedStorage<Const<3>, Any, Const<5>>::from_packed_array(packed_data);
   EXPECT_EQ(ps.template get<1>(), 42);
 }
 
 TEST_F(PackedStorageTest, OffsetsAllRuntime) {
-  auto& offsets = vecops::gemm::details::PackedStorage<Any, Any, Any>::offsets;
+  auto& offsets = vecops::meta::details::PackedStorage<Any, Any, Any>::offsets;
   EXPECT_EQ(offsets[0], 0);
   EXPECT_EQ(offsets[1], 1);
   EXPECT_EQ(offsets[2], 2);
 }
 
 TEST_F(PackedStorageTest, OffsetsMixed) {
-  auto& offsets = vecops::gemm::details::PackedStorage<Const<1>, Any, Const<2>, Any>::offsets;
+  auto& offsets = vecops::meta::details::PackedStorage<Const<1>, Any, Const<2>, Any>::offsets;
   EXPECT_EQ(offsets[0], 0);
   EXPECT_EQ(offsets[1], 0);
   EXPECT_EQ(offsets[2], 1);
@@ -750,19 +751,19 @@ TEST_F(PackedStorageTest, OffsetsMixed) {
 }
 
 TEST_F(PackedStorageTest, NumStorAllConst) {
-  EXPECT_EQ((vecops::gemm::details::PackedStorage<Const<1>, Const<2>, Const<3>>::num_stor), 0);
+  EXPECT_EQ((vecops::meta::details::PackedStorage<Const<1>, Const<2>, Const<3>>::num_stor), 0);
 }
 
 TEST_F(PackedStorageTest, NumStorAllRuntime) {
-  EXPECT_EQ((vecops::gemm::details::PackedStorage<Any, Any, Any>::num_stor), 3);
+  EXPECT_EQ((vecops::meta::details::PackedStorage<Any, Any, Any>::num_stor), 3);
 }
 
 TEST_F(PackedStorageTest, NumStorMixed) {
-  EXPECT_EQ((vecops::gemm::details::PackedStorage<Const<1>, Any, Const<2>>::num_stor), 1);
+  EXPECT_EQ((vecops::meta::details::PackedStorage<Const<1>, Any, Const<2>>::num_stor), 1);
 }
 
 TEST_F(PackedStorageTest, SingleDimRuntime) {
-  vecops::gemm::details::PackedStorage<Any> ps(Any{42});
+  vecops::meta::details::PackedStorage<Any> ps(Any{42});
   EXPECT_EQ(ps.template get<0>(), 42);
   EXPECT_EQ(ps[0], 42);
   auto arr = ps.to_array();
@@ -770,13 +771,13 @@ TEST_F(PackedStorageTest, SingleDimRuntime) {
 }
 
 TEST_F(PackedStorageTest, SingleDimConst) {
-  vecops::gemm::details::PackedStorage<Const<99>> ps(Const<99>{});
+  vecops::meta::details::PackedStorage<Const<99>> ps(Const<99>{});
   EXPECT_EQ(ps.template get<0>(), 99);
   EXPECT_EQ(ps[0], 99);
 }
 
 TEST_F(PackedStorageTest, WithBoundedDynamic) {
-  vecops::gemm::details::PackedStorage<Dynamic<8, 0, 128>> ps(Dynamic<8, 0, 128>{64});
+  vecops::meta::details::PackedStorage<Dynamic<8, 0, 128>> ps(Dynamic<8, 0, 128>{64});
   EXPECT_EQ(ps.template get<0>(), 64);
   EXPECT_EQ(ps[0], 64);
   EXPECT_EQ(ps.to_array()[0], 64);
@@ -1401,39 +1402,45 @@ TEST_F(CompileTimeTest, ConstexprLayout) {
 class MetaDetailsTest : public ::testing::Test {};
 
 TEST_F(MetaDetailsTest, PickConstValue) {
-  using namespace vecops::gemm::details;
+  using namespace vecops::meta::details;
+  using namespace vecops::tensor::details;
   EXPECT_EQ((PickConstValue<Const<42>>::value), 42);
   EXPECT_EQ((PickConstValue<Any>::value), 0);
   EXPECT_EQ((PickConstValue<Dynamic<16>>::value), 0);
 }
 
 TEST_F(MetaDetailsTest, ValuePromote) {
-  using namespace vecops::gemm::details;
+  using namespace vecops::meta::details;
+  using namespace vecops::tensor::details;
   EXPECT_TRUE((std::is_same_v<ValuePromote<int>::Type, Any>));
   EXPECT_TRUE((std::is_same_v<ValuePromote<Const<5>>::Type, Const<5>>));
   EXPECT_TRUE((std::is_same_v<ValuePromote<Dynamic<16>>::Type, Dynamic<16>>));
 }
 
 TEST_F(MetaDetailsTest, IsArrayMetaDetails) {
-  using namespace vecops::gemm::details;
+  using namespace vecops::meta::details;
+  using namespace vecops::tensor::details;
   EXPECT_TRUE((IsArrayMeta<ArrayMeta<Any, Any>>::value));
   EXPECT_FALSE((IsArrayMeta<int>::value));
 }
 
 TEST_F(MetaDetailsTest, IsShapeDetails) {
-  using namespace vecops::gemm::details;
+  using namespace vecops::meta::details;
+  using namespace vecops::tensor::details;
   EXPECT_TRUE((IsShape<Shape<Any, Any>>::value));
   EXPECT_FALSE((IsShape<ArrayMeta<Any, Any>>::value));
 }
 
 TEST_F(MetaDetailsTest, IsStridesDetails) {
-  using namespace vecops::gemm::details;
+  using namespace vecops::meta::details;
+  using namespace vecops::tensor::details;
   EXPECT_TRUE((IsStrides<Strides<Any, Any>>::value));
   EXPECT_FALSE((IsStrides<ArrayMeta<Any, Any>>::value));
 }
 
 TEST_F(MetaDetailsTest, IsLayoutDetails) {
-  using namespace vecops::gemm::details;
+  using namespace vecops::meta::details;
+  using namespace vecops::tensor::details;
   EXPECT_TRUE((IsLayout<Layout<Shape<Any>, Strides<Any>>>::value));
   EXPECT_FALSE((IsLayout<ArrayMeta<Any>>::value));
 }
@@ -1459,7 +1466,7 @@ TEST_F(LayoutDeathTest, ShapeNegativeValue) {
 }
 
 TEST_F(LayoutDeathTest, PackedStorageOutOfBounds) {
-  vecops::gemm::details::PackedStorage<Any, Any> ps(Any{1}, Any{2});
+  vecops::meta::details::PackedStorage<Any, Any> ps(Any{1}, Any{2});
   EXPECT_DEATH((void)ps[-1], "!in 0..");
   EXPECT_DEATH((void)ps[99], "!in 0..");
 }
@@ -1539,9 +1546,9 @@ TEST_F(LenientMetaTest, MoreLenientMetaMovedToLayout) {
   using SrcStrides = Strides<Const<8>, Const<1>>;
   using DstStrides = Strides<Any, Any>;
 
-  EXPECT_TRUE((vecops::gemm::details::IsMoreLenientMeta<SrcShape, DstShape>::value));
-  EXPECT_TRUE((vecops::gemm::details::IsMoreLenientMeta<SrcStrides, DstStrides>::value));
-  EXPECT_FALSE((vecops::gemm::details::IsMoreLenientMeta<DstShape, SrcShape>::value));
+  EXPECT_TRUE((vecops::tensor::details::IsMoreLenientMeta<SrcShape, DstShape>::value));
+  EXPECT_TRUE((vecops::tensor::details::IsMoreLenientMeta<SrcStrides, DstStrides>::value));
+  EXPECT_FALSE((vecops::tensor::details::IsMoreLenientMeta<DstShape, SrcShape>::value));
 }
 
 TEST_F(LenientMetaTest, IsLenientMatchesWildcardAndValueConstraints) {
@@ -1766,7 +1773,7 @@ class TransposeTraitTest : public ::testing::Test {};
 
 TEST_F(TransposeTraitTest, SwapDim_Basic) {
   auto s = make_shape(cint<1>, cint<2>, cint<3>);
-  auto r = gemm::details::swap_dim<0, 2>(s);
+  auto r = tensor::details::swap_dim<0, 2>(s);
   EXPECT_EQ(r.ndim(), 3);
   EXPECT_EQ(get<0>(r), 3);
   EXPECT_EQ(get<1>(r), 2);
@@ -1777,7 +1784,7 @@ TEST_F(TransposeTraitTest, SwapDim_Basic) {
 
 TEST_F(TransposeTraitTest, SwapDim_PreserveConst) {
   auto s = make_shape(cint<128>, Any{64}, cint<32>);
-  auto r = gemm::details::swap_dim<0, 1>(s);
+  auto r = tensor::details::swap_dim<0, 1>(s);
   // After swap: Shape<Any, Const<128>, Const<32>>
   EXPECT_FALSE(r.template is_const<0>());  // Any moved to pos 0
   EXPECT_TRUE(r.template is_const<1>());   // Const<128> moved to pos 1
@@ -1789,7 +1796,7 @@ TEST_F(TransposeTraitTest, SwapDim_PreserveConst) {
 
 TEST_F(TransposeTraitTest, SwapDim_RuntimeValues) {
   auto s = make_shape(10, 20, 30);
-  auto r = gemm::details::swap_dim<0, 2>(s);
+  auto r = tensor::details::swap_dim<0, 2>(s);
   EXPECT_EQ(get<0>(r), 30);
   EXPECT_EQ(get<1>(r), 20);
   EXPECT_EQ(get<2>(r), 10);
@@ -1797,7 +1804,7 @@ TEST_F(TransposeTraitTest, SwapDim_RuntimeValues) {
 
 TEST_F(TransposeTraitTest, SwapDim_AllConst) {
   auto s = make_shape(cint<1>, cint<2>, cint<3>, cint<4>);
-  auto r = gemm::details::swap_dim<1, 2>(s);
+  auto r = tensor::details::swap_dim<1, 2>(s);
   EXPECT_EQ(get<0>(r), 1);
   EXPECT_EQ(get<1>(r), 3);
   EXPECT_EQ(get<2>(r), 2);
@@ -1806,7 +1813,7 @@ TEST_F(TransposeTraitTest, SwapDim_AllConst) {
 
 TEST_F(TransposeTraitTest, SwapDim_Strides) {
   auto st = make_strides(cint<60>, cint<20>, cint<5>, cint<1>);
-  auto r = gemm::details::swap_dim<0, 3>(st);
+  auto r = tensor::details::swap_dim<0, 3>(st);
   EXPECT_EQ(get<0>(r), 1);
   EXPECT_EQ(get<1>(r), 20);
   EXPECT_EQ(get<2>(r), 5);

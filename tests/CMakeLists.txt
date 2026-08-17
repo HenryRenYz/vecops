@@ -190,7 +190,7 @@ add_executable(ArrayTest ${CMAKE_CURRENT_SOURCE_DIR}/array/ArrayTest.cpp)
 target_link_libraries(ArrayTest PRIVATE vecops gtest gtest_main)
 gtest_discover_tests(ArrayTest)
 
-add_executable(TensorTest ${CMAKE_CURRENT_SOURCE_DIR}/gemm/TensorTest.cpp)
+add_executable(TensorTest ${CMAKE_CURRENT_SOURCE_DIR}/tensor/TensorTest.cpp)
 target_link_libraries(TensorTest PRIVATE vecops gtest gtest_main)
 gtest_discover_tests(TensorTest)
 
@@ -198,25 +198,31 @@ add_executable(GemmTest ${CMAKE_CURRENT_SOURCE_DIR}/array/GemmTest.cpp)
 target_link_libraries(GemmTest PRIVATE vecops gtest gtest_main)
 gtest_discover_tests(GemmTest)
 
-add_executable(LayoutTest ${CMAKE_CURRENT_SOURCE_DIR}/gemm/LayoutTest.cpp)
+add_executable(LayoutTest ${CMAKE_CURRENT_SOURCE_DIR}/tensor/LayoutTest.cpp)
 target_link_libraries(LayoutTest PRIVATE vecops gtest gtest_main)
 gtest_discover_tests(LayoutTest)
 
-add_executable(HOPTest ${CMAKE_CURRENT_SOURCE_DIR}/gemm/HOPTest.cpp)
-target_link_libraries(HOPTest PRIVATE vecops gtest gtest_main)
-gtest_discover_tests(HOPTest)
+add_executable(KernelLoopTest ${CMAKE_CURRENT_SOURCE_DIR}/kernel/LoopTest.cpp)
+target_link_libraries(KernelLoopTest PRIVATE vecops gtest gtest_main)
+gtest_discover_tests(KernelLoopTest)
 
 if(VECOPS_ARCH_FAMILY STREQUAL "ARM")
-    add_multiarch_executable(HOPSizelessTest
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/gemm/HOPSizelessTest.cpp
+    add_multiarch_executable(KernelLoopSizelessTest
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/kernel/LoopSizelessTest.cpp
         ARCH SVE
     )
 endif()
 
-add_multiarch_executable(DataAccessTest
-    FILES ${CMAKE_CURRENT_SOURCE_DIR}/gemm/DataAccessTest.cpp
+if(VECOPS_ARCH_FAMILY STREQUAL "x86")
+    set(VECOPS_TENSOR_KERNEL_ARCH Scalar AVX512 Native)
+else()
+    set(VECOPS_TENSOR_KERNEL_ARCH Scalar SVE SVE2 Native)
+endif()
+
+add_multiarch_executable(TensorDataAccessTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/tensor/DataAccessTest.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
-    ARCH Scalar Native
+    ARCH ${VECOPS_TENSOR_KERNEL_ARCH}
 )
 
 set(VEC_BASE_ARCH ${VECOPS_ARCH_LIST})
@@ -332,19 +338,19 @@ foreach(_SOURCE_BYTES IN ITEMS 1 2 4 8)
     )
 endforeach()
 
-add_multiarch_executable(VecTransformTest
-    FILES ${CMAKE_CURRENT_SOURCE_DIR}/gemm/VecTransformTest.cpp
-    ARCH Native Scalar
+add_multiarch_executable(TensorTransformTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/tensor/TransformTest.cpp
+    ARCH ${VECOPS_TENSOR_KERNEL_ARCH}
 )
 
 add_multiarch_executable(LayerNormTest
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/LayerNormTest.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
-    ARCH Native Scalar
+    ARCH ${VECOPS_TENSOR_KERNEL_ARCH}
 )
 
 add_multiarch_executable(SoftmaxTest
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/SoftmaxTest.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
-    ARCH Native Scalar
+    ARCH ${VECOPS_TENSOR_KERNEL_ARCH}
 )

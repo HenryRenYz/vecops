@@ -10,10 +10,36 @@
 
 #include <type_traits>
 #include <utility>
+#include <cstring>
 
+#include "vecops/util/ScalarConvert.h"
 #include "vecops/vec/details/Options.h"
 
 namespace vecops::vec::details {
+
+template <VectorTag LogicalTag, Element Other>
+consteval bool memory_rebind_supported() {
+  using MemoryTag = Rebind<Other, LogicalTag>;
+  if constexpr (is_fixed_tag<LogicalTag>) {
+    return true;
+  } else {
+    // A below-word memory-side Tag is already handled by the existing
+    // predicate/subword lowering.  Recursive partitioning is needed only
+    // when rebinding would require more backend words than can be represented
+    // (for example int8/P2 requested from double/P5 memory on SVE).
+    return scale_power<MemoryTag> <= VEC_MAX_POW;
+  }
+}
+
+template <VectorTag LogicalTag, Element Other, bool MemorySide>
+struct MemoryConversionMask {
+  using Type = Mask<LogicalTag>;
+};
+
+template <VectorTag LogicalTag, Element Other>
+struct MemoryConversionMask<LogicalTag, Other, true> {
+  using Type = Mask<Rebind<Other, LogicalTag>>;
+};
 
 
 /* **************************************************************************** */
@@ -49,8 +75,15 @@ inline constexpr bool is_memory_conversion_option_for = [] {
     return is_memory_addressing_option_for<LogicalTag, Clean>;
   } else if constexpr (IsMaskedOption<Clean>::value) {
     using MaskType = typename IsMaskedOption<Clean>::Value;
-    return std::same_as<MaskType, Mask<LogicalTag>> ||
-        std::same_as<MaskType, Mask<MemoryTag>>;
+    if constexpr (memory_rebind_supported<LogicalTag, Other>()) {
+      return std::same_as<MaskType, Mask<LogicalTag>> ||
+          std::same_as<MaskType, Mask<MemoryTag>>;
+    } else {
+      // The recursively lowered boundary has no representable memory-side
+      // vector/mask.  Its public active predicate therefore remains in the
+      // caller's logical Tag domain, including for unordered conversion.
+      return std::same_as<MaskType, Mask<LogicalTag>>;
+    }
   } else if constexpr (!IsStore && IsVectorMergeOption<Clean>::value) {
     return std::same_as<
         typename IsVectorMergeOption<Clean>::Value, Vec<LogicalTag>>;
@@ -94,8 +127,9 @@ consteval bool valid_memory_conversion_options() {
       using Clean = std::remove_cvref_t<Option>;
       if constexpr (IsMaskedOption<Clean>::value) {
         using Actual = typename IsMaskedOption<Clean>::Value;
-        using Expected = std::conditional_t<
-            unordered, Mask<MemoryTag>, Mask<LogicalTag>>;
+        using Expected = typename MemoryConversionMask<
+            LogicalTag, Other,
+            unordered && memory_rebind_supported<LogicalTag, Other>()>::Type;
         valid = std::same_as<Actual, Expected>;
       }
     }.template operator()<Options>(), ...);
@@ -132,6 +166,15 @@ VECOPS_ALWAYS_INLINE constexpr decltype(auto) memory_conversion_option_or(
   else
     return find_option<Predicate>(std::forward<Options>(options)...);
 }
+
+template <VectorTag ToTag, Element From, typename... Options>
+VECOPS_ALWAYS_INLINE Vec<ToTag> execute_load_convert_options(
+    LoadConvertOp op, ToTag to, const From* pointer, Options&&... options);
+
+template <VectorTag FromTag, Element To, typename... Options>
+VECOPS_ALWAYS_INLINE void execute_store_convert_options(
+    StoreConvertOp op, FromTag from, To* pointer, Vec<FromTag> value,
+    Options&&... options);
 
 template <typename Backend, VectorTag ToTag>
 struct GenericImpl<Backend, LoadConvertOp, ToTag> {
@@ -218,6 +261,184 @@ struct GenericImpl<Backend, StoreConvertOp, FromTag> {
     (void)packing;
   }
 };
+
+template <Element To, typename From, typename... Options>
+VECOPS_ALWAYS_INLINE To boundary_scalar_convert(
+    From value, Options&&...) {
+  if constexpr (option_count<IsWrapOption, Options...> == 1) {
+    return ::vecops::wrap_convert<To>(value);
+  } else {
+    return ::vecops::convert<To>(value);
+  }
+}
+
+template <VectorTag Tag, typename... Options>
+VECOPS_ALWAYS_INLINE bool boundary_lane_active(
+    Tag tag, nint_t lane, Options&&... options) {
+  if constexpr (option_count<IsMaskedOption, Options...> == 1) {
+    const auto& masked = find_option<IsMaskedOption>(options...);
+    return get(tag, masked.value, lane);
+  } else if constexpr (option_count<IsFirstOption, Options...> == 1) {
+    const nint_t count = find_option<IsFirstOption>(options...).count;
+    VECOPS_ASSERT(
+        0 <= count && count <= size(tag),
+        "memory conversion count %zd !in 0..%zd", count, size(tag));
+    return lane < count;
+  } else {
+    return true;
+  }
+}
+
+template <Element Memory, VectorTag Tag, typename... Options>
+VECOPS_ALWAYS_INLINE const Memory* boundary_memory_address(
+    Tag, const Memory* pointer, nint_t lane, Options&&... options) {
+  if constexpr (option_count<IsIndexedOption, Options...> == 1) {
+    const auto& indexed = find_option<IsIndexedOption>(options...);
+    using Indexed = std::remove_cvref_t<decltype(indexed)>;
+    using IndexTag = VecToTagT<typename IsIndexedOption<Indexed>::Value>;
+    const nint_t index = static_cast<nint_t>(
+        get(IndexTag{}, indexed.indices, lane));
+    if constexpr (IsIndexedOption<Indexed>::scale == 0) {
+      return pointer + index;
+    } else {
+      const auto* bytes = reinterpret_cast<const unsigned char*>(pointer);
+      return reinterpret_cast<const Memory*>(
+          bytes + index * IsIndexedOption<Indexed>::scale);
+    }
+  } else if constexpr (option_count<IsStridedOption, Options...> == 1) {
+    const auto& strided = find_option<IsStridedOption>(options...);
+    return pointer + lane * static_cast<nint_t>(strided.stride);
+  } else {
+    return pointer + lane;
+  }
+}
+
+template <Element Memory, VectorTag Tag, typename... Options>
+VECOPS_ALWAYS_INLINE Memory* boundary_memory_address(
+    Tag tag, Memory* pointer, nint_t lane, Options&&... options) {
+  return const_cast<Memory*>(boundary_memory_address(
+      tag, static_cast<const Memory*>(pointer), lane, options...));
+}
+
+template <VectorTag RootTag, VectorTag ChunkTag, Element From,
+          typename... Options>
+VECOPS_ALWAYS_INLINE void execute_large_load_convert_contiguous(
+    RootTag root,
+    ChunkTag,
+    Vec<RootTag>& result,
+    const From* pointer,
+    nint_t lane_begin,
+    Options&&... options) {
+  if constexpr (memory_rebind_supported<ChunkTag, From>()) {
+    auto chunk = execute_load_convert_options(
+        LoadConvertOp{}, ChunkTag{}, pointer + lane_begin, options...);
+    for (nint_t lane = 0; lane < size(ChunkTag{}); ++lane) {
+      result = set(
+          root, result, lane_begin + lane,
+          get(ChunkTag{}, chunk, lane));
+    }
+  } else {
+    using HalfTag = Half<ChunkTag>;
+    execute_large_load_convert_contiguous(
+        root, HalfTag{}, result, pointer, lane_begin, options...);
+    const nint_t half_lanes = size(HalfTag{});
+    execute_large_load_convert_contiguous(
+        root, HalfTag{}, result, pointer, lane_begin + half_lanes,
+        options...);
+  }
+}
+
+template <VectorTag RootTag, VectorTag ChunkTag, Element To,
+          typename... Options>
+VECOPS_ALWAYS_INLINE void execute_large_store_convert_contiguous(
+    RootTag root,
+    ChunkTag,
+    To* pointer,
+    const Vec<RootTag>& value,
+    nint_t lane_begin,
+    Options&&... options) {
+  if constexpr (memory_rebind_supported<ChunkTag, To>()) {
+    auto chunk = zeros(ChunkTag{});
+    for (nint_t lane = 0; lane < size(ChunkTag{}); ++lane) {
+      chunk = set(
+          ChunkTag{}, chunk, lane,
+          get(root, value, lane_begin + lane));
+    }
+    execute_store_convert_options(
+        StoreConvertOp{}, ChunkTag{}, pointer + lane_begin, chunk,
+        options...);
+  } else {
+    using HalfTag = Half<ChunkTag>;
+    execute_large_store_convert_contiguous(
+        root, HalfTag{}, pointer, value, lane_begin, options...);
+    const nint_t half_lanes = size(HalfTag{});
+    execute_large_store_convert_contiguous(
+        root, HalfTag{}, pointer, value, lane_begin + half_lanes,
+        options...);
+  }
+}
+
+template <VectorTag ToTag, Element From, typename... Options>
+VECOPS_ALWAYS_INLINE Vec<ToTag> execute_large_load_convert(
+    ToTag to, const From* pointer, Options&&... options) {
+  constexpr bool full_contiguous =
+      option_count<IsMemoryAddressingOption, Options...> == 0 &&
+      option_count<IsMaskedOption, Options...> == 0 &&
+      option_count<IsFirstOption, Options...> == 0;
+  if constexpr (full_contiguous) {
+    auto result = zeros(to);
+    execute_large_load_convert_contiguous(
+        to, to, result, pointer, 0, options...);
+    return result;
+  }
+
+  Vec<ToTag> result;
+  if constexpr (option_count<IsVectorMergeOption, Options...> == 1) {
+    result = find_option<IsVectorMergeOption>(options...).value;
+  } else if constexpr (option_count<IsScalarMergeOption, Options...> == 1) {
+    result = fill(to, find_option<IsScalarMergeOption>(options...).value);
+  } else {
+    result = zeros(to);
+  }
+
+  for (nint_t lane = 0; lane < size(to); ++lane) {
+    if (!boundary_lane_active(to, lane, options...)) continue;
+    From scalar;
+    const From* address = boundary_memory_address(
+        to, pointer, lane, options...);
+    std::memcpy(&scalar, address, sizeof(From));
+    result = set(
+        to, result, lane,
+        boundary_scalar_convert<ElementOf<ToTag>>(scalar, options...));
+  }
+  return result;
+}
+
+template <VectorTag FromTag, Element To, typename... Options>
+VECOPS_ALWAYS_INLINE void execute_large_store_convert(
+    FromTag from,
+    To* pointer,
+    Vec<FromTag> value,
+    Options&&... options) {
+  constexpr bool full_contiguous =
+      option_count<IsMemoryAddressingOption, Options...> == 0 &&
+      option_count<IsMaskedOption, Options...> == 0 &&
+      option_count<IsFirstOption, Options...> == 0;
+  if constexpr (full_contiguous) {
+    execute_large_store_convert_contiguous(
+        from, from, pointer, value, 0, options...);
+    return;
+  }
+
+  for (nint_t lane = 0; lane < size(from); ++lane) {
+    if (!boundary_lane_active(from, lane, options...)) continue;
+    const To scalar = boundary_scalar_convert<To>(
+        get(from, value, lane), options...);
+    To* address = boundary_memory_address(
+        from, pointer, lane, options...);
+    std::memcpy(address, &scalar, sizeof(To));
+  }
+}
 
 template <VectorTag ToTag, Element From, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<ToTag> execute_load_convert_options(

@@ -6,7 +6,8 @@
 #define VECOPS_KERNELBASE_H
 
 #include "vecops/CoreTypes.h"
-#include "./Layout.h"
+#include "vecops/Meta.h"
+#include "vecops/tensor/Layout.h"
 
 namespace vecops::gemm {
 
@@ -36,12 +37,12 @@ struct Atom {
    * 硬件累加器M N分块大小，可能是常量或者运行时量（如SME）
    * 可能不是constexpr
    */
-  static constexpr auto M_R = cint<16>;
-  static constexpr auto N_R = cint<16>;
+  static constexpr auto M_R = meta::cint<16>;
+  static constexpr auto N_R = meta::cint<16>;
   /**
    * 单条指令 K 轴长度 (SME: 1, AMX BF16: 32, AMX INT8: 64)。
    */
-  static constexpr auto K_R = cint<16>;
+  static constexpr auto K_R = meta::cint<16>;
 
   /**
    * 内核期望的A, B, C元素类型。如果内核传入的实际A, B, C类型和此保持一致则不需要类型转换。
@@ -61,14 +62,14 @@ struct Atom {
    * 返回布局为Shape<ceil(xM/M_R), ceil(xK/K_R), ...>, Stride<Dynamic<64> | Int<*>, Dynamic<64> | Int<*>>的特化。
    * 注：可能并不总是连续的，在一些输入下为了防止cache thrashing可能会特意留意些空隙。
    */
-  template <typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+  template <typename TLayout, std::enable_if_t<tensor::is_layout<TLayout>, bool> = true>
   using APackedLayout = TLayout;
 
   /**
    * ALayout是否为打包布局，即判断其是否为APackedLayout<ALayout>的宽松类型：
    * Shape<*, *, ...>, Stride<Dynamic<64> | Int<*>, Dynamic<64> | Int<*>>。
    */
-  template <typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+  template <typename TLayout, std::enable_if_t<tensor::is_layout<TLayout>, bool> = true>
   static constexpr bool is_A_packed_layout = true;
 
   template <
@@ -76,10 +77,10 @@ struct Atom {
   void pack_A(const TSrcA *src, SrcALayout src_layout, TA *dst, SrcAPackedLayout dst_layout, const Prologue &prologue);
 
 
-  template <typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+  template <typename TLayout, std::enable_if_t<tensor::is_layout<TLayout>, bool> = true>
   using BPackedLayout = TLayout;
 
-  template <typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+  template <typename TLayout, std::enable_if_t<tensor::is_layout<TLayout>, bool> = true>
   static constexpr bool is_B_packed_layout = true;
 
   template <
@@ -112,8 +113,8 @@ template <
     MaskMode M_mask_, MaskMode N_mask_>
 struct Kernel {
   using Atom = Atom_;
-  static constexpr auto nM_R = cint<nM_R_>;
-  static constexpr auto nN_R = cint<nN_R_>;
+  static constexpr auto nM_R = meta::cint<nM_R_>;
+  static constexpr auto nN_R = meta::cint<nN_R_>;
   static constexpr MaskMode M_mask = M_mask_;
   static constexpr MaskMode N_mask = N_mask_;
   /**

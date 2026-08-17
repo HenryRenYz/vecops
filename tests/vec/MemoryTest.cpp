@@ -234,9 +234,9 @@ void verify_indexed_loads(Tag tag) {
   const auto by_i32_non_temporal = vec::load(
       tag, input.data(), vec::indexed(indices32), vec::mem::non_temporal);
   const auto by_constant_stride =
-      vec::load(tag, input.data(), vec::strided(vecops::gemm::cint<7>));
+      vec::load(tag, input.data(), vec::strided(vecops::meta::cint<7>));
   const auto by_dynamic_stride =
-      vec::load(tag, input.data(), vec::strided(vecops::gemm::dyn<1>(7)));
+      vec::load(tag, input.data(), vec::strided(vecops::meta::dyn<1>(7)));
 
   auto mask = vec::mfalse(tag);
   for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane)
@@ -369,7 +369,7 @@ void verify_indexed_stores(Tag tag) {
         output[static_cast<std::size_t>(indices32_values[lane])]));
 
   std::fill(output.begin(), output.end(), untouched);
-  vec::store(tag, output.data(), value, vec::strided(vecops::gemm::cint<7>));
+  vec::store(tag, output.data(), value, vec::strided(vecops::meta::cint<7>));
   for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane)
     EXPECT_TRUE(vec_test::values_identical(
         values[static_cast<std::size_t>(lane)],
@@ -378,7 +378,7 @@ void verify_indexed_stores(Tag tag) {
   std::fill(output.begin(), output.end(), untouched);
   vec::store(
       tag, output.data(), value,
-      vec::strided(vecops::gemm::dyn<1>(7)));
+      vec::strided(vecops::meta::dyn<1>(7)));
   for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane)
     EXPECT_TRUE(vec_test::values_identical(
         values[static_cast<std::size_t>(lane)],

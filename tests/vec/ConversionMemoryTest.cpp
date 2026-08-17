@@ -20,6 +20,58 @@ namespace vec = vecops::vec;
 
 namespace {
 
+TEST(VecConversionMemoryTest, RebindBeyondBackendMaximumRecursivelySplits) {
+  using Tag = vec::ScalableTag<int8_t, VEC_MAX_POW>;
+  Tag tag{};
+  const vecops::nint_t lanes = vec::size(tag);
+  std::vector<double> input(static_cast<std::size_t>(lanes));
+  std::vector<double> output(static_cast<std::size_t>(lanes), -1.0);
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    input[static_cast<std::size_t>(lane)] =
+        static_cast<double>((lane % 101) - 50);
+  }
+
+  const auto loaded = vec::load_convert(tag, input.data());
+  vec::store_convert(tag, output.data(), loaded);
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const auto expected = static_cast<int8_t>((lane % 101) - 50);
+    EXPECT_EQ(vec::get(tag, loaded, lane), expected);
+    EXPECT_DOUBLE_EQ(
+        output[static_cast<std::size_t>(lane)],
+        static_cast<double>(expected));
+  }
+
+  const vecops::nint_t active = lanes - 3;
+  const auto tail = vec::load_convert(
+      tag, input.data(), vec::opt::first(active),
+      vec::opt::merge(int8_t{77}));
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    EXPECT_EQ(
+        vec::get(tag, tail, lane),
+        lane < active ? static_cast<int8_t>((lane % 101) - 50)
+                      : int8_t{77});
+  }
+
+  auto mask = vec::mfalse(tag);
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    mask = vec::set(tag, mask, lane, lane % 3 == 0);
+  }
+  const auto unordered = vec::load_convert(
+      tag, input.data(), vec::cvt::unordered, vec::opt::masked(mask));
+  output.assign(static_cast<std::size_t>(lanes), -1.0);
+  vec::store_convert(
+      tag, output.data(), unordered, vec::cvt::unordered,
+      vec::opt::masked(mask));
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const auto expected = static_cast<int8_t>((lane % 101) - 50);
+    EXPECT_EQ(
+        vec::get(tag, unordered, lane), lane % 3 == 0 ? expected : int8_t{});
+    EXPECT_DOUBLE_EQ(
+        output[static_cast<std::size_t>(lane)],
+        lane % 3 == 0 ? static_cast<double>(expected) : -1.0);
+  }
+}
+
 template <typename From, typename To>
 From memory_conversion_input(vecops::nint_t lane) {
   if constexpr (std::same_as<From, vecops::bfloat16_t> ||

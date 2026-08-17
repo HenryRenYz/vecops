@@ -189,16 +189,16 @@ static_assert(accepts<decltype(vec::local_shuf), FV, IV>);
 
 static_assert(accepts<decltype(vec::bit_shl), ITag, IV, int>);
 static_assert(accepts<decltype(vec::bit_shl), ITag, IV,
-                      vecops::gemm::Const<3>>);
+                      vecops::meta::Const<3>>);
 static_assert(accepts<decltype(vec::bit_shl), ITag, IV,
-                      vecops::gemm::Dynamic<1>>);
+                      vecops::meta::Dynamic<1>>);
 static_assert(accepts<decltype(vec::bit_shl), ITag, IV, IV>);
 static_assert(accepts<decltype(vec::bit_shl), IV, int>);
 static_assert(accepts<decltype(vec::bit_shr), ITag, IV, int>);
 static_assert(accepts<decltype(vec::bit_shr), ITag, IV,
-                      vecops::gemm::Const<3>>);
+                      vecops::meta::Const<3>>);
 static_assert(accepts<decltype(vec::bit_shr), ITag, IV,
-                      vecops::gemm::Dynamic<1>>);
+                      vecops::meta::Dynamic<1>>);
 static_assert(accepts<decltype(vec::bit_shr), ITag, IV, IV>);
 static_assert(accepts<decltype(vec::bit_shr), IV, int>);
 

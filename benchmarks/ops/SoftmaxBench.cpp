@@ -13,9 +13,9 @@
 #include <benchmark/benchmark.h>
 
 #include "BenchmarkUtils.h"
-#include "vecops/gemm/DataAccess.h"
-#include "vecops/gemm/Tensor.h"
-#include "vecops/gemm/Workspace.h"
+#include "vecops/tensor/DataAccess.h"
+#include "vecops/tensor/Tensor.h"
+#include "vecops/kernel/Workspace.h"
 #include "vecops/ops/Softmax.h"
 
 #ifdef VECOPS_BENCH_USE_ONEDNN
@@ -24,8 +24,10 @@
 #endif
 
 using namespace vecops;
-using namespace vecops::gemm;
+using namespace vecops::meta;
+using namespace vecops::tensor;
 using namespace vecops::ops;
+using vecops::kernel::Workspace;
 
 namespace {
 

@@ -2,8 +2,8 @@
 // Created by renyz on 2026/7/9.
 //
 
-#ifndef VECOPS_GEMM_WORKSPACE_H
-#define VECOPS_GEMM_WORKSPACE_H
+#ifndef VECOPS_KERNEL_WORKSPACE_H
+#define VECOPS_KERNEL_WORKSPACE_H
 
 #include "vecops/Assertion.h"
 #include "vecops/CoreTypes.h"
@@ -13,7 +13,42 @@
 #include <cstdint>
 #include <vector>
 
-namespace vecops::gemm {
+/**
+ * @file Workspace.h
+ * @brief Aligned bump-allocation storage for temporary kernel sessions.
+ *
+ * `WorkspaceView` is the non-owning primitive used by Tensor DataAccess
+ * materialization. `Workspace` and `ParallelWorkspace` are convenience owners
+ * for one or several independent views. Allocations are monotonic until
+ * `rewind()` or `reset()` and never run constructors or destructors.
+ *
+ * @code
+ * kernel::Workspace storage(required_bytes);
+ * auto ws = storage.view();
+ * auto mark = ws.mark();
+ * float* tmp = ws.allocate<float>(count);
+ * // use tmp; destroy objects that refer to it
+ * ws.rewind(mark);
+ * @endcode
+ *
+ * ## DataAccess lifetime
+ *
+ * `kernel::with_operands` creates a mark, allocates all materialized operand
+ * buffers, destroys the scoped sessions after the callback, then rewinds the
+ * mark. Materialized outputs must be committed while their buffer is alive.
+ * A borrowed DataAccess slice must not escape that callback.
+ *
+ * ## Pitfalls
+ *
+ * - Workspace memory is raw storage. Placement-created non-trivial objects
+ *   must be explicitly destroyed before rewind/reset.
+ * - A view does not own its buffer and is not thread-safe.
+ * - `high_watermark()` is historical and is not reduced by rewind/reset.
+ * - `Workspace::view()` exposes the padded storage size, while
+ *   `requested_capacity()` reports the caller's requested payload.
+ * - Per-thread views are independent only when each thread uses its own tid.
+ */
+namespace vecops::kernel {
 
 namespace details {
 
@@ -26,13 +61,14 @@ constexpr nint_t workspace_round_up(nint_t value, nint_t alignment) {
 /**
  * @brief Non-owning single-thread workspace view.
  *
- * `WorkspaceView` is a small bump allocator for temporary kernel buffers.
- * It does not own memory and is intentionally not synchronized; callers should
- * give each thread its own view and call `reset()` between independent kernel
- * invocations.
+ * `WorkspaceView` is a small aligned bump allocator for temporary kernel
+ * buffers. It does not own memory and is intentionally not synchronized.
+ * Allocation failure is reported through `VECOPS_ASSERT`; no heap fallback is
+ * attempted.
  */
 class WorkspaceView {
 public:
+  /** @brief Opaque rewind point within this view's current allocation stack. */
   struct Mark {
     nint_t offset;
   };
@@ -44,16 +80,28 @@ public:
     VECOPS_ASSERT(capacity >= 0, "workspace capacity must be non-negative");
   }
 
+  /** @brief Release all bump allocations without changing high watermark. */
   void reset() { _offset = 0; }
 
+  /** @brief Capture the current bump offset for later LIFO-style rewind. */
   Mark mark() const { return Mark{_offset}; }
 
+  /**
+   * @brief Release allocations made after `mark`.
+   * @note The mark belongs to the same view and must not be ahead of `used()`.
+   */
   void rewind(Mark mark) {
     VECOPS_ASSERT(0 <= mark.offset && mark.offset <= _offset,
                   "workspace mark is outside the active allocation range");
     _offset = mark.offset;
   }
 
+  /**
+   * @brief Allocate uninitialized aligned bytes from the view.
+   * @param bytes Payload size; zero returns nullptr without advancing.
+   * @param alignment Positive power-of-two byte alignment.
+   * @return Pointer valid until a covering rewind/reset or owner destruction.
+   */
   void* allocate(nint_t bytes, nint_t alignment = vec::DEFAULT_ALIGNMENT) {
     if (bytes == 0) return nullptr;
     VECOPS_ASSERT(_base != nullptr, "workspace buffer is null");
@@ -75,6 +123,11 @@ public:
     return reinterpret_cast<void*>(aligned);
   }
 
+  /**
+   * @brief Allocate raw storage for `count` T objects.
+   * @note This does not initialize T and is primarily intended for trivial
+   * Tensor element buffers.
+   */
   template <typename T>
   T* allocate(nint_t count) {
     return static_cast<T*>(allocate(count * static_cast<nint_t>(sizeof(T)), alignof(T)));
@@ -92,7 +145,11 @@ private:
 };
 
 /**
- * @brief Owning single-thread workspace.
+ * @brief Owning single-thread workspace with alignment padding.
+ *
+ * Resizing through `reserve()` invalidates every previously returned view and
+ * pointer. Despite its name, `reserve()` sets the requested size exactly and
+ * may shrink the vector.
  */
 class Workspace {
 public:
@@ -118,7 +175,11 @@ private:
 };
 
 /**
- * @brief Owning workspace that provides one independent view per thread.
+ * @brief Owning workspace that provides one padded independent view per thread.
+ *
+ * The stride prevents adjacent thread regions from sharing the requested
+ * payload. This class allocates storage only; it performs no thread scheduling
+ * and does not guard duplicate tid use.
  */
 class ParallelWorkspace {
 public:
@@ -156,6 +217,6 @@ private:
   std::vector<std::byte> _storage;
 };
 
-} // namespace vecops::gemm
+} // namespace vecops::kernel
 
-#endif // VECOPS_GEMM_WORKSPACE_H
+#endif // VECOPS_KERNEL_WORKSPACE_H

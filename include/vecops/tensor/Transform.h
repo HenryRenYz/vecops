@@ -2,10 +2,11 @@
 // Created by renyz on 2026/7/9.
 //
 
-#ifndef VECOPS_VECTRANSFORM_H
-#define VECOPS_VECTRANSFORM_H
+#ifndef VECOPS_TENSOR_TRANSFORM_H
+#define VECOPS_TENSOR_TRANSFORM_H
 
 #include "vecops/CoreTypes.h"
+#include "vecops/tensor/AccessOptions.h"
 #include "vecops/vec/Vec.h"
 
 #include <tuple>
@@ -13,21 +14,20 @@
 #include <utility>
 
 /**
- * @file VecTransform.h
- * @brief Vector-level transforms with optional logical coordinates.
+ * @file Transform.h
+ * @brief Pure vector transforms with an optional TransformContext.
  *
  * This header defines small adapter types for fused vector transforms. A
  * transform receives an output vector tag, an input vector, and zero or more
- * logical coordinates:
+ * logical tensor context:
  *
  * @code
- * auto out = transform(out_tag, in_vec, coords...);
+ * auto out = transform(out_tag, in_vec, context);
  * @endcode
  *
- * The coordinate pack is deliberately opaque to this layer. Its length and
- * meaning are a contract between the caller and the transform implementation.
- * For example, a tensor accessor may pass all logical coordinates while a GEMM
- * kernel may pass only tile-local row and column coordinates.
+ * TransformContext retains the original full-rank coordinate, vector axis,
+ * logical lane mapping and active lanes. lane_coord(i) returns the original
+ * tensor coordinate of lane i, including through sliced specs.
  *
  * ## Key components
  *
@@ -35,7 +35,6 @@
  * |------------------------------|----------------------------------------------|
  * | `VecTransform`               | Base traits and vector-size limits           |
  * | `LambdaVecTransform`         | Wrap a user callable as a transform          |
- * | `ConvertedVecTransform`      | Adapt an existing transform to new dtypes    |
  * | `ZeroVecTransform`           | Built-in transform that returns zeros        |
  * | `IdentityVecTransform`       | Built-in conversion/identity transform       |
  * | `make_vec_transform()`       | Factory for coordinate-aware callables       |
@@ -47,7 +46,7 @@
  * Coordinate-aware callables are invoked as:
  *
  * @code
- * fn(out_tag, in_vec, nint_t coords...)
+ * fn(out_tag, in_vec, context)
  * @endcode
  *
  * Elementwise callables are invoked as:
@@ -62,25 +61,166 @@
  *
  * ## Vector-size adaptation
  *
- * A wrapped callable may implement only a subset of vector POW2 tags. The
- * lambda adapter first tries the requested tag, then tries larger tags via
- * `vec::bitcast`, then recursively splits into half vectors. `ConvertedVecTransform`
- * additionally converts input and output element types through `vec::convert`.
+ * A wrapped callable may implement only a subset of scalable POW2 tags. The
+ * lambda adapter first tries the requested output tag, then legal larger tags
+ * via `vec::bitcast`, then recursively splits into half vectors. DataAccess
+ * adds an outer partitioning layer: if rebinding the caller's requested Tag to
+ * `TIn` or `TOut` exceeds backend limits, it recursively partitions the logical
+ * lanes and invokes the transform as many times as necessary. Thus a transform
+ * is not required to accept every Tag that a kernel may request.
+ *
+ * For example, an SVE `int8/P2` DataAccess result passing through a
+ * `double -> double` transform may require eight transform invocations even
+ * though it is one logical load. Each invocation receives a corresponding
+ * `context.subspan()`, so `lane_coord(0)` still refers to the right original
+ * lane.
  *
  * ## Pitfalls
  *
- * - Coordinates are vector-base coordinates, not per-lane indices.
- * - Tail masking is handled by the caller. A transform receives a full vector
- *   and should not assume that every lane is logically active.
+ * - Coordinate-aware transforms use context.lane_coord(i); a split high
+ *   chunk receives context.subspan() with the correct lane base.
+ * - Tail masking is handled by DataAccess. A transform receives a full vector;
+ *   use `context.is_active(i)` if inactive lanes affect the formula.
  * - `is_elementwise` is a promise made by the transform type or factory; this
  *   layer cannot prove that a callable is truly coordinate-independent.
- * - Transform objects are called through `const operator()`. They may hold
- *   state and may read external state; any side effects, synchronization, or
- *   repeated-call semantics are the caller's responsibility.
+ * - Transforms are deterministic, side-effect-free functions. DataAccess may
+ *   call them during materialization or split one logical request into
+ *   multiple legal internal vector calls.
  */
 
-namespace vecops {
+namespace vecops::tensor {
+
+/** @brief Active-lane descriptor in which every logical lane is active. */
+struct AllActiveLanes {
+  VECOPS_ALWAYS_INLINE constexpr bool is_active(nint_t) const { return true; }
+};
+
+/** @brief Active-lane descriptor for the half-open range `[0, count)`. */
+struct FirstActiveLanes {
+  nint_t count;
+  VECOPS_ALWAYS_INLINE constexpr bool is_active(nint_t lane) const {
+    return 0 <= lane && lane < count;
+  }
+};
+
+/**
+ * @brief Active-lane descriptor backed by a mask of the caller's Tag.
+ * @note The referenced mask must outlive the TransformContext invocation.
+ */
+template <vec::VectorTag Tag>
+struct MaskedActiveLanes {
+  Tag tag;
+  const vec::Mask<Tag>& mask;
+
+  VECOPS_ALWAYS_INLINE bool is_active(nint_t lane) const {
+    return vec::get(tag, mask, lane);
+  }
+};
+
+/**
+ * @brief Arbitrary logical lane offsets backed by an index vector.
+ * @note Indices are offsets along the vector axis in Tensor elements, not
+ * bytes or already-scaled physical addresses.
+ */
+template <vec::VectorTag IndexTag>
+struct IndexedLaneMapping {
+  IndexTag tag;
+  const vec::Vec<IndexTag>& indices;
+
+  VECOPS_ALWAYS_INLINE nint_t offset(nint_t lane) const {
+    return static_cast<nint_t>(vec::get(tag, indices, lane));
+  }
+};
+
+/**
+ * @brief Logical context supplied to a coordinate-aware vector transform.
+ *
+ * `origin` is expressed in the original unsliced Tensor coordinates.
+ * `vector_axis` identifies the original axis varied by vector lanes.
+ * `lane_mapping` converts a lane number into an element offset on that axis,
+ * while `active` describes which caller-visible lanes are valid.
+ *
+ * `lane_base` is maintained internally when one DataAccess request is split
+ * into several transform calls. Transform code should normally call
+ * `lane_coord(i)` and `is_active(i)` rather than inspect `lane_base` directly.
+ *
+ * @code
+ * auto bias = tensor::make_vec_transform<float, float>(
+ *     [](auto tag, auto x, const auto& ctx) {
+ *       auto y = x;
+ *       for (nint_t i = 0; i < vec::size(tag); ++i) {
+ *         if (ctx.is_active(i)) {
+ *           y = vec::set(tag, y, i,
+ *                        vec::get(tag, x, i) + ctx.lane_coord(i)[0]);
+ *         }
+ *       }
+ *       return y;
+ *     });
+ * @endcode
+ */
+template <
+    std::size_t Rank,
+    typename LaneMapping = ContiguousLaneMapping,
+    typename Active = AllActiveLanes>
+struct TransformContext {
+  Coord<Rank> origin{};
+  int vector_axis = static_cast<int>(Rank) - 1;
+  LaneMapping lane_mapping{};
+  Active active{};
+  nint_t lane_base = 0;
+
+  VECOPS_ALWAYS_INLINE Coord<Rank> lane_coord(nint_t lane) const {
+    auto result = origin;
+    result[static_cast<std::size_t>(vector_axis)] +=
+        lane_mapping.offset(lane_base + lane);
+    return result;
+  }
+
+  VECOPS_ALWAYS_INLINE bool is_active(nint_t lane) const {
+    return active.is_active(lane_base + lane);
+  }
+
+  VECOPS_ALWAYS_INLINE TransformContext subspan(
+      nint_t begin, nint_t) const {
+    auto result = *this;
+    result.lane_base += begin;
+    return result;
+  }
+};
+
+/** @brief Structural concept implemented by transform coordinate contexts. */
+template <typename T>
+concept TransformContextLike = requires(
+    const T& context, nint_t lane, nint_t count) {
+  context.lane_coord(lane);
+  context.is_active(lane);
+  context.subspan(lane, count);
+};
+
+/**
+ * @brief Sentinel meaning that no prologue/epilogue transform exists.
+ *
+ * This is intentionally distinct from `IdentityVecTransform`. DataAccess uses
+ * it to fuse `MemoryType <-> ComputeType` directly into
+ * `vec::load_convert/store_convert`, avoiding an artificial transform stage.
+ */
+struct NoTransform {
+  static constexpr bool is_elementwise = true;
+  static constexpr bool permutation_equivariant = true;
+  static constexpr bool reads_input = true;
+};
+
 namespace details {
+
+template <typename T>
+VECOPS_ALWAYS_INLINE decltype(auto) subspan_transform_argument(
+    T&& value, nint_t begin, nint_t count) {
+  if constexpr (TransformContextLike<std::remove_cvref_t<T>>) {
+    return value.subspan(begin, count);
+  } else {
+    return std::forward<T>(value);
+  }
+}
 
 consteval int vec_transform_log2(int value) {
   int result = 0;
@@ -152,9 +292,19 @@ static constexpr bool is_vec_transform_like_v =
  * @brief Base traits for vector transforms.
  *
  * `VecTransform` is an interface-by-convention base. Derived classes provide
- * `operator()(out_tag, in_vec, coords...)`; the base only defines the element
+ * `operator()(out_tag, in_vec, context)`; the base only defines the element
  * types, the elementwise marker, and the valid vector POW2 ranges implied by
  * the input/output element sizes.
+ *
+ * `TIn` and `TOut` are transform-boundary types, not Tensor memory and kernel
+ * compute types. DataAccess performs conversions on both sides. The traits are
+ * semantic promises used for planning:
+ *
+ * - `is_elementwise`: output lane i depends only on input lane i;
+ * - `permutation_equivariant`: permuting input lanes equivalently permutes
+ *   output lanes, which is required for unordered conversion;
+ * - `reads_input`: false allows input materialization and source reads to be
+ *   eliminated.
  */
 template <typename EOut, typename EIn, bool Elementwise = false>
 struct VecTransform {
@@ -165,6 +315,8 @@ struct VecTransform {
   using TOut = EOut;
 
   static constexpr bool is_elementwise = Elementwise;
+  static constexpr bool permutation_equivariant = Elementwise;
+  static constexpr bool reads_input = true;
 
   static constexpr bool is_widening = sizeof(EOut) > sizeof(EIn);
   static constexpr bool is_narrowing = sizeof(EOut) < sizeof(EIn);
@@ -181,9 +333,10 @@ struct VecTransform {
 /**
  * @brief Wrap a callable as a vector transform.
  *
- * When `Elementwise` is true, `Fn` is called without coordinates and the
- * wrapper accepts any coordinate pack. Otherwise `Fn` is called with the
- * coordinate pack forwarded after conversion to `nint_t`.
+ * When `Elementwise` is true, `Fn` is called without context and the wrapper
+ * accepts and ignores it. Otherwise the context is forwarded to `Fn`.
+ * Unsupported legal vector widths are adapted as described in the file-level
+ * documentation.
  */
 template <typename EOut, typename EIn, typename Fn, bool Elementwise = false>
 struct LambdaVecTransform : public VecTransform<EOut, EIn, Elementwise> {
@@ -203,7 +356,7 @@ struct LambdaVecTransform : public VecTransform<EOut, EIn, Elementwise> {
       ((void) coords, ...);
       return call_elementwise<To, pow2>(t, v_in);
     } else {
-      return call_coordinate<To, pow2>(t, v_in, static_cast<nint_t>(coords)...);
+      return call_coordinate<To, pow2>(t, v_in, coords...);
     }
   }
 
@@ -298,10 +451,14 @@ private:
     } else if constexpr (pow2 > Base::min_input_pow2) {
       using HalfTo = vec::Half<To>;
       using Ti = vec::Rebind<EIn, To>;
+      const nint_t half_lanes = vec::size(HalfTo{});
       auto v_lo = try_downward_coordinate<HalfTo>(
-          HalfTo{}, vec::lower(Ti{}, v_in), coords...);
+          HalfTo{}, vec::lower(Ti{}, v_in),
+          details::subspan_transform_argument(coords, 0, half_lanes)...);
       auto v_hi = try_downward_coordinate<HalfTo>(
-          HalfTo{}, vec::upper(Ti{}, v_in), coords...);
+          HalfTo{}, vec::upper(Ti{}, v_in),
+          details::subspan_transform_argument(
+              coords, half_lanes, half_lanes)...);
       return vec::concat(To{}, v_lo, v_hi);
     } else {
       static_assert(pow2 > Base::min_input_pow2,
@@ -312,60 +469,16 @@ private:
 };
 
 /**
- * @brief Adapt an existing transform to a new input/output element type.
+ * @brief Pure transform that synthesizes zero without reading Tensor memory.
+ *
+ * `reads_input=false` lets the planner eliminate source reads and input
+ * workspace. `EIn` remains part of the typed transform interface but its
+ * vector value is ignored.
  */
-template <typename EOut, typename EIn, typename InnerTransform>
-struct ConvertedVecTransform : public VecTransform<EOut, EIn, InnerTransform::is_elementwise> {
-  using Base = VecTransform<EOut, EIn, InnerTransform::is_elementwise>;
-
-  constexpr explicit ConvertedVecTransform(InnerTransform&& fn) : _fn(std::move(fn)) {}
-  constexpr explicit ConvertedVecTransform(const InnerTransform& fn) : _fn(fn) {}
-
-  template <vec::VectorTag To, typename... Coords>
-    requires vec::is_scalable_tag<To> &&
-             std::same_as<vec::ElementOf<To>, EOut> &&
-             (Base::min_output_pow2 <= vec::scale_power<To>) &&
-             (vec::scale_power<To> <= Base::max_output_pow2)
-  vec::Vec<To> operator()(To t, vec::Vec<vec::Rebind<EIn, To>> v_in, Coords... coords) const {
-    using Ti = vec::Rebind<EIn, To>;
-    using InnerIn = typename InnerTransform::TIn;
-    using InnerOut = typename InnerTransform::TOut;
-    constexpr int pow2_in = vec::scale_power<Ti>;
-
-    if constexpr (pow2_in <= InnerTransform::max_input_pow2) {
-      if constexpr (InnerTransform::min_input_pow2 <= pow2_in) {
-        vec::Rebind<InnerIn, Ti> t_ii;
-        vec::Rebind<InnerOut, Ti> t_io;
-        auto inner_in = vec::convert(t_ii, Ti{}, v_in);
-        auto inner_out = _fn(t_io, inner_in, static_cast<nint_t>(coords)...);
-        return vec::convert(t, t_io, inner_out);
-      } else {
-        vec::Rebind<InnerIn, Ti> t_ii;
-        vec::ScalableTag<InnerIn, InnerTransform::min_input_pow2> t_ix;
-        vec::Rebind<InnerOut, decltype(t_ix)> t_ox;
-        vec::Rebind<InnerOut, Ti> t_io;
-        auto converted_in = vec::convert(t_ii, Ti{}, v_in);
-        auto inner_in = vec::bitcast(t_ix, t_ii, converted_in);
-        auto inner_out = _fn(t_ox, inner_in, static_cast<nint_t>(coords)...);
-        auto resized_out = vec::bitcast(t_io, t_ox, inner_out);
-        return vec::convert(t, t_io, resized_out);
-      }
-    } else {
-      using Th = vec::Half<To>;
-      Ti ti;
-      auto v_lo = (*this)(Th{}, vec::lower(ti, v_in), static_cast<nint_t>(coords)...);
-      auto v_hi = (*this)(Th{}, vec::upper(ti, v_in), static_cast<nint_t>(coords)...);
-      return vec::concat(t, v_lo, v_hi);
-    }
-  }
-
-private:
-  InnerTransform _fn;
-};
-
 template <typename EOut, typename EIn = EOut>
 struct ZeroVecTransform : public VecTransform<EOut, EIn, true> {
   using Base = VecTransform<EOut, EIn, true>;
+  static constexpr bool reads_input = false;
 
   template <vec::VectorTag To, vec::VectorValue Vi, typename... Coords>
     requires vec::is_scalable_tag<To> &&
@@ -378,8 +491,17 @@ struct ZeroVecTransform : public VecTransform<EOut, EIn, true> {
   }
 };
 
+/**
+ * @brief Explicit same-dtype identity transform.
+ *
+ * Use this only when an actual transform object is needed. Prefer
+ * `NoTransform` for a normal Tensor operand, because it exposes fused memory
+ * conversion opportunities and avoids a transform call.
+ */
 template <typename EOut, typename EIn = EOut>
 struct IdentityVecTransform : public VecTransform<EOut, EIn, true> {
+  static_assert(std::same_as<EOut, EIn>,
+                "dtype conversion belongs to tensor::DataAccess; use NoTransform");
   using Base = VecTransform<EOut, EIn, true>;
 
   template <vec::VectorTag To, typename... Coords>
@@ -389,39 +511,61 @@ struct IdentityVecTransform : public VecTransform<EOut, EIn, true> {
              (vec::scale_power<To> <= Base::max_output_pow2)
   vec::Vec<To> operator()(To t, vec::Vec<vec::Rebind<EIn, To>> v_in, Coords... coords) const {
     ((void) coords, ...);
-    return vec::convert(t, vec::Rebind<EIn, To>{}, v_in);
+    return v_in;
   }
 };
 
+/**
+ * @brief Wrap a coordinate-aware callable as a typed vector transform.
+ * @tparam EOut Transform output element type.
+ * @tparam EIn Transform input element type.
+ * @param fn Callable with signature `fn(out_tag, input_vec, context)`.
+ */
 template <typename EOut, typename EIn, typename Fn>
 constexpr auto make_vec_transform(Fn&& fn) {
   using Transform = LambdaVecTransform<EOut, EIn, std::remove_cvref_t<Fn>, false>;
   return Transform(std::forward<Fn>(fn));
 }
 
+/**
+ * @brief Wrap a coordinate-independent callable as an elementwise transform.
+ *
+ * The callable signature is `fn(out_tag, input_vec)`. Marking a transform
+ * elementwise also promises permutation equivariance; do not use this factory
+ * for lane-position-dependent behavior even if the callable takes no context.
+ */
 template <typename EOut, typename EIn, typename Fn>
 constexpr auto make_elementwise_vec_transform(Fn&& fn) {
   using Transform = LambdaVecTransform<EOut, EIn, std::remove_cvref_t<Fn>, true>;
   return Transform(std::forward<Fn>(fn));
 }
 
+/**
+ * @brief Preserve an existing transform or wrap a raw callable.
+ *
+ * Existing transforms must already expose exactly compatible `TIn/TOut`.
+ * This function never inserts dtype-conversion wrappers; conversions belong to
+ * DataAccess so they can be fused with memory operations.
+ */
 template <typename EOut, typename EIn, typename Fn>
 constexpr auto adapt_vec_transform(Fn&& fn) {
   using FnT = std::remove_cvref_t<Fn>;
   if constexpr (is_vec_transform_like_v<FnT>) {
-    if constexpr (is_any<typename FnT::TIn, EIn> && is_any<typename FnT::TOut, EOut>) {
-      return FnT(std::forward<Fn>(fn));
-    } else {
-      return ConvertedVecTransform<EOut, EIn, FnT>(std::forward<Fn>(fn));
-    }
+    static_assert(
+        is_any<typename FnT::TIn, EIn> &&
+            is_any<typename FnT::TOut, EOut>,
+        "transform dtype adaptation belongs to tensor::DataAccess");
+    return FnT(std::forward<Fn>(fn));
   } else {
     return make_vec_transform<EOut, EIn>(std::forward<Fn>(fn));
   }
 }
 
+/** @brief Stateless zero-producing transform value. */
 template <typename EOut, typename EIn = EOut>
 inline constexpr ZeroVecTransform<EOut, EIn> zeros_transform {};
 
+/** @brief Stateless same-dtype identity transform value. */
 template <typename EOut, typename EIn = EOut>
 inline constexpr IdentityVecTransform<EOut, EIn> identity_transform {};
 
@@ -431,17 +575,11 @@ template <typename T>
 struct IsZeroVecTransform : std::false_type {};
 template <typename EOut, typename EIn>
 struct IsZeroVecTransform<ZeroVecTransform<EOut, EIn>> : std::true_type {};
-template <typename EOut, typename EIn, typename InnerOut, typename InnerIn>
-struct IsZeroVecTransform<ConvertedVecTransform<EOut, EIn, ZeroVecTransform<InnerOut, InnerIn>>>
-    : std::true_type {};
 
 template <typename T>
 struct IsIdentityVecTransform : std::false_type {};
 template <typename EOut, typename EIn>
 struct IsIdentityVecTransform<IdentityVecTransform<EOut, EIn>> : std::true_type {};
-template <typename EOut, typename EIn, typename InnerOut, typename InnerIn>
-struct IsIdentityVecTransform<ConvertedVecTransform<EOut, EIn, IdentityVecTransform<InnerOut, InnerIn>>>
-    : std::true_type {};
 
 } // namespace details
 
@@ -453,6 +591,6 @@ template <typename T>
 static constexpr bool is_identity_vec_transform_v =
     details::IsIdentityVecTransform<std::remove_cvref_t<T>>::value;
 
-} // namespace vecops
+} // namespace vecops::tensor
 
-#endif // VECOPS_VECTRANSFORM_H
+#endif // VECOPS_TENSOR_TRANSFORM_H

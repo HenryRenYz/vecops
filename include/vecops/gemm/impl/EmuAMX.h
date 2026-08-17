@@ -8,7 +8,7 @@
 #include "vecops/CoreTypes.h"
 #include "vecops/vec/Vec.h"
 #include "vecops/util/Math.h"
-#include "../Tensor.h"
+#include "vecops/Meta.h"
 
 namespace vecops::gemm::EmuAMX {
 
@@ -24,8 +24,8 @@ namespace details {
  */
 template <typename TLayout, int dtype_size>
 consteval auto infer_A_packed_layout() {
-  constexpr auto M_R = cint<16>;
-  constexpr auto K_R = cint<64 / dtype_size>;
+  constexpr auto M_R = meta::cint<16>;
+  constexpr auto K_R = meta::cint<64 / dtype_size>;
 
   auto layout = std::declval<TLayout>();
   static_assert(layout.ndim() == 2, "Ndim mismatch");
@@ -38,8 +38,8 @@ consteval auto infer_A_packed_layout() {
 
 template <typename TLayout, int dtype_size>
 consteval bool is_A_packed_layout() {
-  constexpr auto M_R = cint<16>;
-  constexpr auto K_R = cint<64 / dtype_size>;
+  constexpr auto M_R = meta::cint<16>;
+  constexpr auto K_R = meta::cint<64 / dtype_size>;
 
   auto layout = std::declval<TLayout>();
   // TLayout == shape (*, *, cint<M_R>, cint<K_R>), stride (*, *, cint<K_R>, cint<1>)
@@ -56,8 +56,8 @@ VECOPS_INLINE void pack_A(const TInArray &src, TOutArray &dst, const Prologue &p
   static_assert(is_tensor<TInArray> && is_tensor<TOutArray>);
   using EIn = TInArray::ElementType;
   using EOut = TOutArray::ElementType;
-  constexpr auto M_R = cint<16>;
-  constexpr auto K_R = cint<64 / sizeof(EOut)>;
+  constexpr auto M_R = meta::cint<16>;
+  constexpr auto K_R = meta::cint<64 / sizeof(EOut)>;
 
   auto in_p = src.data();
   auto out_p = dst.data();
@@ -89,9 +89,9 @@ VECOPS_INLINE void pack_A(const TInArray &src, TOutArray &dst, const Prologue &p
  */
 template <typename TLayout, int dtype_size>
 consteval auto infer_B_packed_layout() {
-  constexpr auto N_R = cint<16>;
-  constexpr auto K_R = cint<64 / dtype_size>;
-  constexpr auto K_P = cint<4 / dtype_size>;
+  constexpr auto N_R = meta::cint<16>;
+  constexpr auto K_R = meta::cint<64 / dtype_size>;
+  constexpr auto K_P = meta::cint<4 / dtype_size>;
   static_assert(K_R % K_P == 0);
 
   auto layout = std::declval<TLayout>();
@@ -105,9 +105,9 @@ consteval auto infer_B_packed_layout() {
 
 template <typename TLayout, int dtype_size>
 consteval bool is_B_packed_layout() {
-  constexpr auto N_R = cint<16>;
-  constexpr auto K_R = cint<64 / dtype_size>;
-  constexpr auto K_P = cint<4 / dtype_size>;
+  constexpr auto N_R = meta::cint<16>;
+  constexpr auto K_R = meta::cint<64 / dtype_size>;
+  constexpr auto K_P = meta::cint<4 / dtype_size>;
   static_assert(K_R % K_P == 0);
 
   auto layout = std::declval<TLayout>();
@@ -126,9 +126,9 @@ consteval bool is_B_packed_layout() {
 
 struct AtomBF16BF16F32 {
   using KernelKind = KernelKind;
-  static constexpr auto M_R = cint<16>;
-  static constexpr auto N_R = cint<16>;
-  static constexpr auto K_R = cint<32>;
+  static constexpr auto M_R = meta::cint<16>;
+  static constexpr auto N_R = meta::cint<16>;
+  static constexpr auto K_R = meta::cint<32>;
   using TA = bfloat16_t;
   using TB = bfloat16_t;
   using TC = float32_t;

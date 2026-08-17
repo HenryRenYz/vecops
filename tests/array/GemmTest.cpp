@@ -12,7 +12,7 @@
 #include "vecops/array/Gemm.h"
 #include "vecops/CoreTypes.h"
 
-#include "vecops/gemm/Layout.h"
+#include "vecops/tensor/Layout.h"
 
 using namespace vecops;
 using namespace vecops::array;
