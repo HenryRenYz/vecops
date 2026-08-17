@@ -11,6 +11,7 @@
 #include <type_traits>
 #include <utility>
 #include <cstring>
+#include <tuple>
 
 #include "vecops/util/ScalarConvert.h"
 #include "vecops/vec/details/Options.h"
@@ -165,6 +166,40 @@ VECOPS_ALWAYS_INLINE constexpr decltype(auto) memory_conversion_option_or(
     return std::forward<Default>(default_value);
   else
     return find_option<Predicate>(std::forward<Options>(options)...);
+}
+
+template <bool IsStore, VectorTag Tag, typename Option>
+VECOPS_ALWAYS_INLINE auto retain_identity_memory_option(Option&& option) {
+  using Clean = std::remove_cvref_t<Option>;
+  if constexpr (is_memory_option_for<Tag, IsStore, Clean>) {
+    return std::forward_as_tuple(std::forward<Option>(option));
+  } else {
+    return std::tuple<>{};
+  }
+}
+
+template <typename F, typename Tuple, std::size_t... I>
+VECOPS_ALWAYS_INLINE decltype(auto) apply_identity_memory_options_impl(
+    F&& fn, Tuple&& options, std::index_sequence<I...>) {
+  return std::forward<F>(fn)(
+      std::get<I>(std::forward<Tuple>(options))...);
+}
+
+/**
+ * Drops conversion-only policy dimensions before an identity conversion is
+ * forwarded to LoadOp or StoreOp. Active, population, addressing, alignment,
+ * and temporality options retain their value category and original order.
+ */
+template <bool IsStore, VectorTag Tag, typename F, typename... Options>
+VECOPS_ALWAYS_INLINE decltype(auto) apply_identity_memory_options(
+    F&& fn, Options&&... options) {
+  auto retained = std::tuple_cat(
+      retain_identity_memory_option<IsStore, Tag>(
+          std::forward<Options>(options))...);
+  return apply_identity_memory_options_impl(
+      std::forward<F>(fn), std::move(retained),
+      std::make_index_sequence<
+          std::tuple_size_v<decltype(retained)>>{});
 }
 
 template <VectorTag ToTag, Element From, typename... Options>
@@ -428,7 +463,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> execute_load_convert_options(
   using FromTag = Rebind<From, ToTag>;
 
   auto invoke = [&](auto layout, auto value_policy, auto alignment,
-                    auto temporality) -> Vec<ToTag> {
+                    auto temporality) VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
     if constexpr (
         active_count == 0 ||
         option_count<IsUnmaskedOption, Options...> == 1) {
@@ -482,7 +517,8 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> execute_load_convert_options(
     }
   };
 
-  auto invoke_with_access = [&](auto access) -> Vec<ToTag> {
+  auto invoke_with_access = [&](auto access) VECOPS_INLINE_LAMBDA
+      -> Vec<ToTag> {
     return invoke(
         memory_conversion_option_or<IsConversionMemoryLayoutOption>(
             cvt::ordered, std::forward<Options>(options)...),
@@ -522,7 +558,7 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_options(
   using ToTag = Rebind<To, FromTag>;
 
   auto invoke = [&](auto layout, auto value_policy, auto alignment,
-                    auto temporality, auto packing) {
+                    auto temporality, auto packing) VECOPS_INLINE_LAMBDA {
     if constexpr (
         active_count == 0 ||
         option_count<IsUnmaskedOption, Options...> == 1) {
@@ -564,7 +600,7 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_options(
     }
   };
 
-  auto invoke_with_access = [&](auto access) {
+  auto invoke_with_access = [&](auto access) VECOPS_INLINE_LAMBDA {
     invoke(
         memory_conversion_option_or<IsConversionMemoryLayoutOption>(
             cvt::ordered, std::forward<Options>(options)...),

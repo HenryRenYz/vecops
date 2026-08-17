@@ -718,9 +718,6 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
   using Value = typename Policy::ConversionValueOption;
   using Temporal = typename Policy::MemoryOptions::TemporalityOption;
   using Alignment = typename Policy::MemoryOptions::AlignmentOption;
-  using Memory = std::remove_cv_t<
-      std::remove_pointer_t<std::remove_reference_t<Pointer>>>;
-  constexpr bool SameType = std::same_as<Memory, vec::ElementOf<Tag>>;
 
   auto invoke = [&](auto&&... retained_options) VECOPS_INLINE_LAMBDA {
     if constexpr (indexed_count == 1) {
@@ -735,17 +732,10 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
       const auto scale = vec::fill(
           IndexTag{}, static_cast<Index>(tensor_axis_stride));
       const auto physical = vec::mul(indexed.indices, scale);
-      if constexpr (SameType) {
-        return vec::load(
-            tag, pointer, Temporal{},
-            std::forward<decltype(retained_options)>(retained_options)...,
-            vec::indexed(physical));
-      } else {
-        return vec::load_convert(
-            tag, pointer, Order{}, Value{}, Temporal{},
-            std::forward<decltype(retained_options)>(retained_options)...,
-            vec::indexed(physical));
-      }
+      return vec::load_convert(
+          tag, pointer, Order{}, Value{}, Temporal{},
+          std::forward<decltype(retained_options)>(retained_options)...,
+          vec::indexed(physical));
     } else {
       nint_t physical_stride = tensor_axis_stride;
       if constexpr (strided_count == 1) {
@@ -755,27 +745,14 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
         physical_stride *= static_cast<nint_t>(strided.stride);
       }
       if (physical_stride == 1) {
-        if constexpr (SameType) {
-          return vec::load(
-              tag, pointer, Temporal{}, Alignment{},
-              std::forward<decltype(retained_options)>(retained_options)...);
-        } else {
-          return vec::load_convert(
-              tag, pointer, Order{}, Value{}, Temporal{}, Alignment{},
-              std::forward<decltype(retained_options)>(retained_options)...);
-        }
-      }
-      if constexpr (SameType) {
-        return vec::load(
-            tag, pointer, Temporal{},
-            std::forward<decltype(retained_options)>(retained_options)...,
-            vec::strided(physical_stride));
-      } else {
         return vec::load_convert(
-            tag, pointer, Order{}, Value{}, Temporal{},
-            std::forward<decltype(retained_options)>(retained_options)...,
-            vec::strided(physical_stride));
+            tag, pointer, Order{}, Value{}, Temporal{}, Alignment{},
+            std::forward<decltype(retained_options)>(retained_options)...);
       }
+      return vec::load_convert(
+          tag, pointer, Order{}, Value{}, Temporal{},
+          std::forward<decltype(retained_options)>(retained_options)...,
+          vec::strided(physical_stride));
     }
   };
   return apply_inline(invoke, retained);
@@ -801,10 +778,6 @@ VECOPS_ALWAYS_INLINE void store_memory(
   using Temporal = typename Policy::MemoryOptions::TemporalityOption;
   using Packing = typename Policy::MemoryOptions::PackingOption;
   using Alignment = typename Policy::MemoryOptions::AlignmentOption;
-  using Memory = std::remove_cv_t<
-      std::remove_pointer_t<std::remove_reference_t<Pointer>>>;
-  constexpr bool SameType = std::same_as<Memory, vec::ElementOf<Tag>> &&
-      std::same_as<Packing, vec::mem::Packed>;
 
   auto invoke = [&](auto&&... retained_options) VECOPS_INLINE_LAMBDA {
     if constexpr (indexed_count == 1) {
@@ -819,17 +792,10 @@ VECOPS_ALWAYS_INLINE void store_memory(
       const auto scale = vec::fill(
           IndexTag{}, static_cast<Index>(tensor_axis_stride));
       const auto physical = vec::mul(indexed.indices, scale);
-      if constexpr (SameType) {
-        vec::store(
-            tag, pointer, value, Temporal{},
-            std::forward<decltype(retained_options)>(retained_options)...,
-            vec::indexed(physical));
-      } else {
-        vec::store_convert(
-            tag, pointer, value, Order{}, Value{}, Temporal{}, Packing{},
-            std::forward<decltype(retained_options)>(retained_options)...,
-            vec::indexed(physical));
-      }
+      vec::store_convert(
+          tag, pointer, value, Order{}, Value{}, Temporal{}, Packing{},
+          std::forward<decltype(retained_options)>(retained_options)...,
+          vec::indexed(physical));
     } else {
       nint_t physical_stride = tensor_axis_stride;
       if constexpr (strided_count == 1) {
@@ -839,28 +805,15 @@ VECOPS_ALWAYS_INLINE void store_memory(
         physical_stride *= static_cast<nint_t>(strided.stride);
       }
       if (physical_stride == 1) {
-        if constexpr (SameType) {
-          vec::store(
-              tag, pointer, value, Temporal{}, Alignment{},
-              std::forward<decltype(retained_options)>(retained_options)...);
-        } else {
-          vec::store_convert(
-              tag, pointer, value, Order{}, Value{}, Temporal{}, Packing{},
-              Alignment{},
-              std::forward<decltype(retained_options)>(retained_options)...);
-        }
+        vec::store_convert(
+            tag, pointer, value, Order{}, Value{}, Temporal{}, Packing{},
+            Alignment{},
+            std::forward<decltype(retained_options)>(retained_options)...);
       } else {
-        if constexpr (SameType) {
-          vec::store(
-              tag, pointer, value, Temporal{},
-              std::forward<decltype(retained_options)>(retained_options)...,
-              vec::strided(physical_stride));
-        } else {
-          vec::store_convert(
-              tag, pointer, value, Order{}, Value{}, Temporal{}, Packing{},
-              std::forward<decltype(retained_options)>(retained_options)...,
-              vec::strided(physical_stride));
-        }
+        vec::store_convert(
+            tag, pointer, value, Order{}, Value{}, Temporal{}, Packing{},
+            std::forward<decltype(retained_options)>(retained_options)...,
+            vec::strided(physical_stride));
       }
     }
   };
@@ -884,6 +837,8 @@ VECOPS_ALWAYS_INLINE void prefetch_tensor(
   } else {
     constexpr std::size_t indexed_count =
         vec::details::option_count<vec::details::IsIndexedOption, Options...>;
+    constexpr std::size_t strided_count =
+        vec::details::option_count<vec::details::IsStridedOption, Options...>;
     static_assert(
         Prefetch::footprint != PrefetchFootprint::whole_block ||
             indexed_count == 0,
@@ -955,6 +910,23 @@ VECOPS_ALWAYS_INLINE void prefetch_tensor(
         issue(lane_offset(point));
       }
     } else {
+      constexpr bool full_active =
+          vec::details::option_count<
+              vec::details::IsFirstOption, Options...> == 0 &&
+          vec::details::option_count<
+              vec::details::IsMaskedOption, Options...> == 0;
+      if constexpr (full_active && indexed_count == 0 && strided_count == 0) {
+        if (axis_stride == 1) {
+          constexpr std::size_t word_count =
+              static_cast<std::size_t>(vec::num_words(MemoryTag{}));
+          const nint_t word_lanes = vec::native_word_size(MemoryTag{});
+          [&]<std::size_t... I>(std::index_sequence<I...>)
+              VECOPS_INLINE_LAMBDA {
+            (issue(static_cast<nint_t>(I) * word_lanes), ...);
+          }(std::make_index_sequence<word_count>{});
+          return;
+        }
+      }
       constexpr nint_t cache_line = 64;
       constexpr bool has_arbitrary_mask =
           vec::details::option_count<

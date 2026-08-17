@@ -16,6 +16,11 @@
  * lane count of the caller's Tag while the memory element type may differ.
  * Backends may use a fused instruction or an equivalent load/convert sequence;
  * the API promises semantics, not one opcode.
+ * When the memory and logical element types are identical, the public boundary
+ * directly forwards to `load` or `store`. Conversion-only options are consumed
+ * there, while all ordinary memory options are preserved. Identity conversion
+ * therefore has exactly the same lowering as the corresponding memory API and
+ * never enters backend conversion machinery.
  *
  * Any otherwise legal caller Tag is accepted even when rebinding that Tag to
  * the memory dtype would exceed the backend's representable POW2 range. A
@@ -136,7 +141,15 @@ template <VectorTag ToTag, Element From, typename... Options>
             ToTag, From, false, Options...>())
 VECOPS_ALWAYS_INLINE Vec<ToTag> LoadConvertOp::operator()(
     ToTag to, const From* pointer, Options&&... options) const {
-  if constexpr (
+  if constexpr (std::same_as<From, ElementOf<ToTag>>) {
+    auto invoke = [&](auto&&... memory_options) VECOPS_INLINE_LAMBDA {
+      return LoadOp{}(
+          to, pointer,
+          std::forward<decltype(memory_options)>(memory_options)...);
+    };
+    return details::apply_identity_memory_options<false, ToTag>(
+        invoke, std::forward<Options>(options)...);
+  } else if constexpr (
       details::memory_rebind_supported<ToTag, From>() ||
       details::has_oversized_memory_conversion_lowering_v<
           details::CurrentBackend, LoadConvertOp, ToTag, From, Options...>) {
@@ -175,7 +188,15 @@ template <VectorTag FromTag, Element To, typename... Options>
 VECOPS_ALWAYS_INLINE void StoreConvertOp::operator()(
     FromTag from, To* pointer, Vec<FromTag> value,
     Options&&... options) const {
-  if constexpr (
+  if constexpr (std::same_as<To, ElementOf<FromTag>>) {
+    auto invoke = [&](auto&&... memory_options) VECOPS_INLINE_LAMBDA {
+      StoreOp{}(
+          from, pointer, value,
+          std::forward<decltype(memory_options)>(memory_options)...);
+    };
+    details::apply_identity_memory_options<true, FromTag>(
+        invoke, std::forward<Options>(options)...);
+  } else if constexpr (
       details::memory_rebind_supported<FromTag, To>() ||
       details::has_oversized_memory_conversion_lowering_v<
           details::CurrentBackend, StoreConvertOp, FromTag, To, Options...>) {

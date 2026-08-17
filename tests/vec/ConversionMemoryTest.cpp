@@ -228,6 +228,67 @@ TEST(VecConversionMemoryTest, AlignmentAndTemporalityAreSoftHints) {
   }
 }
 
+TEST(VecConversionMemoryTest, IdentityForwardsOrdinaryMemoryOptions) {
+  using Tag = vec::ScalableTag<int32_t>;
+  using IndexTag = vec::Rebind<int32_t, Tag>;
+  constexpr std::size_t capacity = 4096;
+  alignas(64) std::array<int32_t, capacity> input{};
+  alignas(64) std::array<int32_t, capacity> output{};
+  alignas(64) std::array<int32_t, capacity> index_values{};
+  ASSERT_LE(static_cast<std::size_t>(vec::size(Tag{}) * 3), capacity);
+  for (std::size_t i = 0; i < capacity; ++i)
+    input[i] = static_cast<int32_t>(i * 7 + 3);
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane)
+    index_values[static_cast<std::size_t>(lane)] =
+        static_cast<int32_t>(lane * 2 + 1);
+
+  const auto active = std::max<vecops::nint_t>(0, vec::size(Tag{}) - 2);
+  const auto tail = vec::load_convert(
+      Tag{}, input.data(), vec::cvt::ordered, vec::cvt::saturate,
+      vec::mem::aligned, vec::mem::non_temporal,
+      vec::opt::first(active), vec::opt::merge(int32_t{-17}));
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane) {
+    EXPECT_EQ(
+        lane < active ? input[static_cast<std::size_t>(lane)] : -17,
+        vec::get(Tag{}, tail, lane));
+  }
+
+  output.fill(-1);
+  vec::store_convert(
+      Tag{}, output.data(), tail, vec::cvt::ordered, vec::cvt::saturate,
+      vec::mem::split, vec::mem::aligned, vec::mem::non_temporal,
+      vec::opt::first(active));
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane) {
+    EXPECT_EQ(
+        lane < active ? input[static_cast<std::size_t>(lane)] : -1,
+        output[static_cast<std::size_t>(lane)]);
+  }
+
+  const auto indices = vec::load(IndexTag{}, index_values.data());
+  auto mask = vec::mfalse(Tag{});
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane)
+    mask = vec::set(Tag{}, mask, lane, lane % 2 == 0);
+  const auto gathered = vec::load_convert(
+      Tag{}, input.data(), vec::cvt::unordered, vec::cvt::saturate,
+      vec::mem::non_temporal, vec::opt::masked(mask),
+      vec::indexed(indices));
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane) {
+    const auto expected = lane % 2 == 0
+        ? input[static_cast<std::size_t>(lane * 2 + 1)] : int32_t{};
+    EXPECT_EQ(expected, vec::get(Tag{}, gathered, lane));
+  }
+
+  output.fill(-1);
+  vec::store_convert(
+      Tag{}, output.data(), gathered, vec::cvt::unordered,
+      vec::cvt::saturate, vec::mem::packed, vec::mem::non_temporal,
+      vec::opt::masked(mask), vec::indexed(indices));
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane) {
+    const auto index = static_cast<std::size_t>(lane * 2 + 1);
+    EXPECT_EQ(lane % 2 == 0 ? input[index] : -1, output[index]);
+  }
+}
+
 TEST(VecConversionMemoryTest, IndexedAndStridedAddressingConvertsAndFilters) {
   using Tag = vec::ScalableTag<int32_t, -1>;
   using I32Tag = vec::Rebind<int32_t, Tag>;

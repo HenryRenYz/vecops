@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <cmath>
 #include <type_traits>
-#include <utility>
 
 #include "vecops/Assertion.h"
 #include "vecops/CoreTypes.h"
@@ -75,44 +74,6 @@ VECOPS_INLINE auto row_spec(const Spec& spec) {
   if constexpr (Count == 0) return spec;
   else return row_spec<Count - 1>(remove_first_dimension(spec));
 }
-
-template <typename Memory>
-class ContiguousLayerNormInput {
-public:
-  explicit ContiguousLayerNormInput(const Memory* data) : data_(data) {}
-
-  template <vec::VectorTag Tag, typename... Options>
-  VECOPS_ALWAYS_INLINE auto load(
-      Tag tag, const tensor::Coord<1>& position,
-      Options&&... options) const {
-    return vec::load_convert(
-        tag, data_ + position[0],
-        std::forward<Options>(options)...);
-  }
-
-private:
-  const Memory* data_;
-};
-
-template <typename Memory>
-class ContiguousLayerNormOutput {
-public:
-  explicit ContiguousLayerNormOutput(Memory* data) : data_(data) {}
-
-  template <vec::VectorTag Tag, typename... Options>
-  VECOPS_ALWAYS_INLINE void store(
-      Tag tag, const tensor::Coord<1>& position, vec::Vec<Tag> value,
-      Options&&... options) const {
-    vec::store_convert(
-        tag, data_ + position[0], value,
-        std::forward<Options>(options)...);
-  }
-
-  VECOPS_ALWAYS_INLINE void commit() const {}
-
-private:
-  Memory* data_;
-};
 
 } // namespace details
 
@@ -199,37 +160,13 @@ public:
         tensor::is_ct_last_contiguous<
             typename OutSpec::OutputLayout, 1>::value;
     if constexpr (UseSVE16) {
-      if constexpr (IsBfloat16V<InElement>) {
-        nint_t element_count = 1;
-        for (int d = 0; d <= PrefixRank; ++d) {
-          element_count *= in.input_layout().shape()[d];
-        }
-        if (element_count > 64 * 1024) {
-          kernel::loop::for_each_dims<PrefixRank>(
-              [this, &workspace, &scale, &bias](
-                  const auto& in_row, const auto& out_row) {
-                run_row_sve_16bit<true>(
-                    workspace, in_row, scale, bias, out_row);
-              },
-              in, out);
-        } else {
-          kernel::loop::for_each_dims<PrefixRank>(
-              [this, &workspace, &scale, &bias](
-                  const auto& in_row, const auto& out_row) {
-                run_row_sve_16bit<false>(
-                    workspace, in_row, scale, bias, out_row);
-              },
-              in, out);
-        }
-      } else {
-        kernel::loop::for_each_dims<PrefixRank>(
-            [this, &workspace, &scale, &bias](
-                const auto& in_row, const auto& out_row) {
-              run_row_sve_16bit<false>(
-                  workspace, in_row, scale, bias, out_row);
-            },
-            in, out);
-      }
+      kernel::loop::for_each_dims<PrefixRank>(
+          [this, &workspace, &scale, &bias](
+              const auto& in_row, const auto& out_row) {
+            run_row_sve_16bit(
+                workspace, in_row, scale, bias, out_row);
+          },
+          in, out);
       return;
     }
 #endif
@@ -280,8 +217,8 @@ public:
 private:
 #if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE2) && \
     !defined(VECOPS_DISABLE_SVE_16BIT_LAYERNORM_FAST_PATH)
-  template <bool PrefetchBf16, typename InSpec, typename ScaleSpec,
-            typename BiasSpec, typename OutSpec>
+  template <typename InSpec, typename ScaleSpec, typename BiasSpec,
+            typename OutSpec>
   VECOPS_INLINE void run_row_sve_16bit(
       kernel::WorkspaceView& workspace, const InSpec& in,
       const ScaleSpec& scale, const BiasSpec& bias,
@@ -289,10 +226,9 @@ private:
     using Element = std::remove_const_t<typename InSpec::MemoryElement>;
     using ConversionOrder = std::conditional_t<
         IsFloat16V<Element>, vec::cvt::Unordered, vec::cvt::Ordered>;
-    // The generic whole-block expansion is still slower than the original
-    // fixed SVE hint schedule for this x/gamma/beta stream. Keep automatic
-    // prefetch disabled until the Tensor prefetch backend can emit that
-    // schedule without a runtime cache-line loop.
+    // Contiguous whole-block prefetch now lowers without a runtime cache-line
+    // loop, but it is still slower for this stream on current SVE targets.
+    // Keep it disabled until a row-working-set policy shows a measured win.
     using Prefetch = tensor::PrefetchPolicy<
         false, 4, tensor::PrefetchFootprint::whole_block>;
     using XPolicy = tensor::InputAccessPolicy<
@@ -339,13 +275,14 @@ private:
             sum_sq = vec::fmadd(value, value, sum_sq);
           }
           while (col < n) {
-            const nint_t active = std::min(n - col, tail_lanes);
+            const nint_t active = n - col;
+//            const nint_t active = std::min(n - col, tail_lanes);
             auto value = x.load(
                 tail_tag, tensor::coord(col), vec::opt::first(active));
             tail_sum += vec::reduce_add(tail_tag, value);
             tail_sum_sq +=
                 vec::reduce_add(tail_tag, vec::mul(value, value));
-            col += active;
+            col += tail_lanes;
           }
 
           const float32_t sum_value =
@@ -389,7 +326,8 @@ private:
                 vec::opt::unmasked);
           }
           while (col < n) {
-            const nint_t active = std::min(n - col, tail_lanes);
+            const nint_t active = n - col;
+//            const nint_t active = std::min(n - col, tail_lanes);
             const auto position = tensor::coord(col);
             auto value = x.load(
                 tail_tag, position, vec::opt::first(active));
@@ -402,7 +340,7 @@ private:
                 tail_tag, position,
                 vec::fmadd(value, scale_value, bias_value),
                 vec::opt::first(active));
-            col += active;
+            col += tail_lanes;
           }
           y.commit();
         });
@@ -538,46 +476,9 @@ private:
       y.commit();
     };
     if constexpr (InPlan == tensor::AccessPlan::direct) {
-      using ScaleSpec = std::remove_cvref_t<decltype(gamma.spec())>;
-      using BiasSpec = std::remove_cvref_t<decltype(beta.spec())>;
-#if defined(ARCH_X86_FAMILY)
-      constexpr bool RawContiguous =
-          std::same_as<typename InSpec::TransformType, tensor::NoTransform> &&
-          std::same_as<typename OutSpec::TransformType, tensor::NoTransform> &&
-          std::same_as<typename ScaleAccess::Transform, tensor::NoTransform> &&
-          std::same_as<typename BiasAccess::Transform, tensor::NoTransform> &&
-          tensor::is_ct_last_contiguous<
-              typename InSpec::InputLayout, 1>::value &&
-          tensor::is_ct_last_contiguous<
-              typename OutSpec::OutputLayout, 1>::value &&
-          tensor::is_ct_last_contiguous<
-              typename ScaleSpec::InputLayout, 1>::value &&
-          tensor::is_ct_last_contiguous<
-              typename BiasSpec::InputLayout, 1>::value;
-#else
-      constexpr bool RawContiguous = false;
-#endif
-      if constexpr (RawContiguous) {
-        using InputMemory =
-            std::remove_const_t<typename InSpec::MemoryElement>;
-        using ScaleMemory =
-            std::remove_const_t<typename ScaleSpec::MemoryElement>;
-        using BiasMemory =
-            std::remove_const_t<typename BiasSpec::MemoryElement>;
-        using OutputMemory = typename OutSpec::MemoryElement;
-        details::ContiguousLayerNormInput<InputMemory> x{in.tensor().data()};
-        details::ContiguousLayerNormInput<ScaleMemory> g{
-            gamma.spec().tensor().data()};
-        details::ContiguousLayerNormInput<BiasMemory> b{
-            beta.spec().tensor().data()};
-        details::ContiguousLayerNormOutput<OutputMemory> y{
-            out.tensor().data()};
-        compute(x, g, b, y);
-      } else {
-        auto x = tensor::bind(in, InPolicy{}, workspace);
-        auto y = tensor::bind(out, OutPolicy{}, workspace);
-        compute(x, gamma, beta, y);
-      }
+      auto x = tensor::bind(in, InPolicy{}, workspace);
+      auto y = tensor::bind(out, OutPolicy{}, workspace);
+      compute(x, gamma, beta, y);
     } else {
       kernel::with_operands(
           workspace, tensor::operand(in, InPolicy{}),
