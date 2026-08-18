@@ -386,7 +386,11 @@ TEST(TensorDataAccessTest, ReadlessTransformNeedsNoSourceOrWorkspace) {
 
 TEST(TensorDataAccessTest, MaterializedOutputRequiresExplicitCommitAndWritesLayout) {
   std::array<float, 3 * 16> values{};
-  auto tensor = make_tensor<2>(values.data(), {3, 16}, {1, 3});
+  // The commit axis must promise unit stride at compile time: plans are
+  // resolved from meta stride types, and a runtime-only unit axis is treated
+  // as non-unit (direct scatter).
+  auto tensor = make_tensor(
+      values.data(), make_shape(3, 16), make_strides(cint<1>, cint<3>));
   auto spec = output<float32_t>(tensor);
   using Policy = OutputAccessPolicy<1>;
   const nint_t bytes = required_workspace(spec, Policy{});

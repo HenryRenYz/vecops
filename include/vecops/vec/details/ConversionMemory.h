@@ -683,46 +683,6 @@ execute_load_convert_request(
           addressing, Temporality{});
     }
   } else if constexpr (Addr == Addressing::Strided) {
-    // Dynamic strides may still be one at runtime; lower that case to the
-    // contiguous form here so callers never branch on the value.
-    if (request.stride == 1) {
-      if constexpr (A == Active::Unmasked) {
-        return execute(
-            op, to, pointer, Layout{}, ValuePolicy{}, Alignment{},
-            Temporality{});
-      } else if constexpr (Unordered) {
-        const auto mask = [&]() VECOPS_INLINE_LAMBDA {
-          if constexpr (A == Active::First) {
-            return mwhilelt(FromTag{}, 0, request.first_count);
-          } else {
-            return request.mask;
-          }
-        }();
-        return execute(
-            op, to, pointer, mask, Layout{}, ValuePolicy{}, Alignment{},
-            Temporality{});
-      } else {
-        const Mask<ToTag> mask = [&]() VECOPS_INLINE_LAMBDA {
-          if constexpr (A == Active::First) {
-            return mwhilelt(to, 0, request.first_count);
-          } else {
-            return request.mask;
-          }
-        }();
-        const Vec<ToTag> inactive = [&]() VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
-          if constexpr (P == Populate::MergeVector) {
-            return request.merge_vector;
-          } else if constexpr (P == Populate::MergeScalar) {
-            return fill(to, request.merge_scalar);
-          } else {
-            return zeros(to);
-          }
-        }();
-        return execute(
-            op, to, pointer, mask, inactive, Layout{}, ValuePolicy{},
-            Alignment{}, Temporality{});
-      }
-    }
     const auto indices =
         make_strided_indices<CurrentBackend>(to, request.stride);
     opt::Indexed<Vec<Rebind<int32_t, ToTag>>, 0> addressing{indices};
@@ -846,29 +806,6 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_request(
           addressing, Temporality{}, Packing{});
     }
   } else if constexpr (Addr == Addressing::Strided) {
-    if (request.stride == 1) {
-      if constexpr (A == Active::Unmasked) {
-        execute(
-            op, from, pointer, value, Layout{}, ValuePolicy{}, Alignment{},
-            Temporality{}, Packing{});
-      } else {
-        const auto mask = [&]() VECOPS_INLINE_LAMBDA {
-          if constexpr (A == Active::First) {
-            if constexpr (Unordered) {
-              return mwhilelt(ToTag{}, 0, request.first_count);
-            } else {
-              return mwhilelt(from, 0, request.first_count);
-            }
-          } else {
-            return request.mask;
-          }
-        }();
-        execute(
-            op, from, pointer, value, mask, Layout{}, ValuePolicy{},
-            Alignment{}, Temporality{}, Packing{});
-      }
-      return;
-    }
     const auto indices =
         make_strided_indices<CurrentBackend>(from, request.stride);
     opt::Indexed<Vec<Rebind<int32_t, FromTag>>, 0> addressing{indices};

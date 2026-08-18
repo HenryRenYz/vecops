@@ -427,64 +427,6 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> populate_inactive(
   }
 }
 
-template <vec::VectorTag Tag, typename Tensor, int Dim, typename... Options>
-VECOPS_ALWAYS_INLINE void assert_access_in_bounds(
-    Tag tag,
-    const Tensor& tensor,
-    const Coord<Tensor::Ndim>& position,
-    Axis<Dim>,
-    Options&&... options) {
-#ifdef VECOPS_DEBUG
-  for (int d = 0; d < Tensor::Ndim; ++d) {
-    VECOPS_ASSERT(
-        0 <= position[static_cast<std::size_t>(d)] &&
-            position[static_cast<std::size_t>(d)] < tensor.size(d),
-        "tensor access origin is out of bounds");
-  }
-  constexpr bool IsStore = !std::is_const_v<Tensor>;
-  const auto request = [&]() {
-    if constexpr (IsStore) {
-      return vec::details::resolve_store_request<Tag>(
-          std::forward<Options>(options)...);
-    } else {
-      return vec::details::resolve_load_request<Tag>(
-          std::forward<Options>(options)...);
-    }
-  }();
-  using Request = decltype(request);
-  const vec::Mask<Tag> active = [&]() VECOPS_INLINE_LAMBDA {
-    if constexpr (Request::active_kind == vec::Active::First) {
-      return vec::mwhilelt(tag, 0, request.first_count);
-    } else if constexpr (Request::active_kind == vec::Active::Masked) {
-      return request.mask;
-    } else {
-      return vec::mfill(tag, true);
-    }
-  }();
-  for (nint_t lane = 0; lane < vec::size(tag); ++lane) {
-    if (!vec::get(tag, active, lane)) continue;
-    nint_t logical = lane;
-    if constexpr (Request::addressing_kind == vec::Addressing::Indexed) {
-      logical = static_cast<nint_t>(vec::get(
-          vec::VecToTagT<decltype(request.indices)>{},
-          request.indices, lane));
-    } else if constexpr (
-        Request::addressing_kind == vec::Addressing::Strided) {
-      logical = lane * request.stride;
-    }
-    const nint_t coordinate = position[Dim] + logical;
-    VECOPS_ASSERT(
-        0 <= coordinate && coordinate < tensor.size(Dim),
-        "active tensor vector lane is out of bounds");
-  }
-#else
-  (void) tag;
-  (void) tensor;
-  (void) position;
-  ((void) options, ...);
-#endif
-}
-
 template <typename Policy, typename To, typename From>
 VECOPS_ALWAYS_INLINE To scalar_policy_convert(From value) {
   if constexpr (std::same_as<typename Policy::ConversionValueOption,
@@ -1009,11 +951,12 @@ VECOPS_ALWAYS_INLINE void copy_memory_request_fields(
 template <vec::VectorTag Tag,
           typename Pointer,
           typename Policy,
+          typename StrideMeta,
           typename... Options>
 VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory_options(
     Tag tag,
     Pointer pointer,
-    nint_t tensor_axis_stride,
+    StrideMeta tensor_axis_stride,
     Options&&... options) {
   constexpr std::size_t indexed_count =
       vec::details::option_count<vec::details::IsIndexedOption, Options...>;
@@ -1043,22 +986,25 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory_options(
           std::forward<decltype(retained_options)>(retained_options)...,
           vec::indexed(physical));
     } else {
-      nint_t physical_stride = tensor_axis_stride;
+      nint_t physical_stride = static_cast<nint_t>(tensor_axis_stride);
       if constexpr (strided_count == 1) {
         auto&& strided = vec::details::find_option<
             vec::details::IsStridedOption>(
                 std::forward<Options>(options)...);
         physical_stride *= static_cast<nint_t>(strided.stride);
       }
-      if (physical_stride == 1) {
+      constexpr bool KernelUnit =
+          strided_count == 0 && is_definitely_one_meta_v<StrideMeta>;
+      if constexpr (KernelUnit) {
         return vec::load_convert(
             tag, pointer, Order{}, Value{}, Temporal{}, Alignment{},
             std::forward<decltype(retained_options)>(retained_options)...);
+      } else {
+        return vec::load_convert(
+            tag, pointer, Order{}, Value{}, Temporal{},
+            std::forward<decltype(retained_options)>(retained_options)...,
+            vec::strided(physical_stride));
       }
-      return vec::load_convert(
-          tag, pointer, Order{}, Value{}, Temporal{},
-          std::forward<decltype(retained_options)>(retained_options)...,
-          vec::strided(physical_stride));
     }
   };
   return apply_inline(invoke, retained);
@@ -1067,12 +1013,13 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory_options(
 template <vec::VectorTag Tag,
           typename Pointer,
           typename Policy,
+          typename StrideMeta,
           typename... Options>
 VECOPS_ALWAYS_INLINE void store_memory_options(
     Tag tag,
     Pointer pointer,
     vec::Vec<Tag> value,
-    nint_t tensor_axis_stride,
+    StrideMeta tensor_axis_stride,
     Options&&... options) {
   constexpr std::size_t indexed_count =
       vec::details::option_count<vec::details::IsIndexedOption, Options...>;
@@ -1103,14 +1050,16 @@ VECOPS_ALWAYS_INLINE void store_memory_options(
           std::forward<decltype(retained_options)>(retained_options)...,
           vec::indexed(physical));
     } else {
-      nint_t physical_stride = tensor_axis_stride;
+      nint_t physical_stride = static_cast<nint_t>(tensor_axis_stride);
       if constexpr (strided_count == 1) {
         auto&& strided = vec::details::find_option<
             vec::details::IsStridedOption>(
                 std::forward<Options>(options)...);
         physical_stride *= static_cast<nint_t>(strided.stride);
       }
-      if (physical_stride == 1) {
+      constexpr bool KernelUnit =
+          strided_count == 0 && is_definitely_one_meta_v<StrideMeta>;
+      if constexpr (KernelUnit) {
         vec::store_convert(
             tag, pointer, value, Order{}, Value{}, Temporal{}, Packing{},
             Alignment{},
@@ -1207,7 +1156,7 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
     }
   } else {
     return load_memory_options<Tag, Pointer, Policy>(
-        tag, pointer, static_cast<nint_t>(tensor_axis_stride),
+        tag, pointer, tensor_axis_stride,
         std::forward<Options>(options)...);
   }
 }
@@ -1301,7 +1250,7 @@ VECOPS_ALWAYS_INLINE void store_memory(
     }
   } else {
     store_memory_options<Tag, Pointer, Policy>(
-        tag, pointer, value, static_cast<nint_t>(tensor_axis_stride),
+        tag, pointer, value, tensor_axis_stride,
         std::forward<Options>(options)...);
   }
 }
@@ -1365,29 +1314,90 @@ VECOPS_INLINE void for_each_coordinate(
   }
 }
 
+/** True when the meta stride type can never hold the value 1. */
+template <typename T>
+struct MetaCannotBeOne {
+  static constexpr bool value = [] {
+    if constexpr (T::is_const) {
+      return T::value != 1;
+    } else {
+      return T::has_lower && T::lo >= 2;
+    }
+  }();
+};
+
+template <typename T>
+inline constexpr bool meta_cannot_be_one_v =
+    MetaCannotBeOne<std::remove_cvref_t<T>>::value;
+
+template <typename StridesPack, int SkipDim>
+struct OtherAxisStrideScan;
+
+template <typename... Ts, int SkipDim>
+struct OtherAxisStrideScan<Strides<Ts...>, SkipDim> {
+  static constexpr std::size_t kCount = sizeof...(Ts);
+  static_assert(
+      static_cast<std::size_t>(SkipDim) < kCount, "skip dim out of range");
+
+  template <std::size_t... Is>
+  static consteval bool any_definitely_one(std::index_sequence<Is...>) {
+    return ((Is != static_cast<std::size_t>(SkipDim) &&
+             is_definitely_one_meta_v<
+                 typename MetaElement<Is, Strides<Ts...>>::type>) ||
+            ...);
+  }
+
+  template <std::size_t... Is>
+  static consteval bool all_cannot_be_one(std::index_sequence<Is...>) {
+    return ((Is == static_cast<std::size_t>(SkipDim) ||
+             meta_cannot_be_one_v<
+                 typename MetaElement<Is, Strides<Ts...>>::type>) &&
+            ...);
+  }
+
+  static constexpr bool any_unit_other =
+      any_definitely_one(std::make_index_sequence<kCount>{});
+  static constexpr bool no_unit_other =
+      all_cannot_be_one(std::make_index_sequence<kCount>{});
+};
+
+/**
+ * Resolves the automatic storage plan entirely at compile time from the
+ * layout's meta stride types. A stride that cannot be proven equal to one
+ * (Const<N != 1>, or a Dynamic whose bounds do not pin it to 1) is treated
+ * as non-unit: dynamic layouts that happen to be contiguous at runtime use
+ * the gather/scatter path, never a runtime branch here.
+ */
 template <typename Spec, typename Policy>
-VECOPS_INLINE AccessPlan resolve_plan(const Spec& spec, Policy) {
+consteval AccessPlan resolve_plan() {
   if constexpr (Policy::requested_plan != AccessPlan::automatic) {
     return Policy::requested_plan;
   } else if constexpr (Spec::is_input) {
     if constexpr (!transform_reads_input<typename Spec::TransformType>) {
       return AccessPlan::direct;
     }
-    if (spec.tensor().stride(Policy::vector_axis) == 1 ||
-        Policy::read_passes == 1) {
+    using AxisStride = typename MetaElement<
+        Policy::vector_axis,
+        typename Spec::InputLayout::Strides>::type;
+    if constexpr (Policy::read_passes == 1 ||
+                  is_definitely_one_meta_v<AxisStride>) {
       return AccessPlan::direct;
+    } else {
+      return AccessPlan::materialize_after_transform;
     }
-    return AccessPlan::materialize_after_transform;
   } else {
-    if (spec.tensor().stride(Policy::vector_axis) == 1) {
+    using AxisStride = typename MetaElement<
+        Policy::vector_axis,
+        typename Spec::OutputLayout::Strides>::type;
+    using Scan = OtherAxisStrideScan<
+        typename Spec::OutputLayout::Strides, Policy::vector_axis>;
+    if constexpr (is_definitely_one_meta_v<AxisStride>) {
+      return AccessPlan::direct;
+    } else if constexpr (Scan::any_unit_other) {
+      return AccessPlan::materialize_after_transform;
+    } else {
       return AccessPlan::direct;
     }
-    for (int d = 0; d < Spec::OutputTensor::Ndim; ++d) {
-      if (d != Policy::vector_axis && spec.tensor().stride(d) == 1) {
-        return AccessPlan::materialize_after_transform;
-      }
-    }
-    return AccessPlan::direct;
   }
 }
 
@@ -1729,8 +1739,6 @@ public:
     static_assert(0 <= Dim && Dim < Rank);
     details::validate_access_options<true, Options...>();
     const auto& tensor = spec_->tensor();
-    details::assert_access_in_bounds(
-        tag, tensor, position, Axis<Dim>{}, options...);
     using StrideMeta = typename details::MetaElement<
         Dim, typename Spec::InputLayout::Strides>::type;
     constexpr bool UnitRankOne =
@@ -1935,8 +1943,6 @@ public:
     static_assert(0 <= Dim && Dim < Rank);
     details::validate_access_options<false, Options...>();
     const auto& tensor = spec_->tensor();
-    details::assert_access_in_bounds(
-        tag, tensor, position, Axis<Dim>{}, options...);
     using StrideMeta = typename details::MetaElement<
         Dim, typename Spec::OutputLayout::Strides>::type;
     constexpr bool UnitRankOne =
@@ -2601,15 +2607,16 @@ VECOPS_INLINE auto slice_view(
  */
 template <typename Spec, typename Policy>
 VECOPS_INLINE nint_t required_workspace(const Spec& spec, Policy policy) {
-  const AccessPlan plan = details::resolve_plan(spec, policy);
-  if (plan == AccessPlan::direct) return 0;
+  constexpr AccessPlan plan =
+      details::resolve_plan<Spec, Policy>();
+  if constexpr (plan == AccessPlan::direct) return 0;
   if constexpr (is_input_spec_v<Spec>) {
     if constexpr (!details::transform_reads_input<typename Spec::TransformType>) {
       return 0;
     }
   }
   const nint_t element_bytes = [&] {
-    if (plan == AccessPlan::materialize_before_transform) {
+    if constexpr (plan == AccessPlan::materialize_before_transform) {
       if constexpr (is_input_spec_v<Spec>) {
         return static_cast<nint_t>(sizeof(typename Spec::MemoryElement));
       } else {
@@ -2644,7 +2651,8 @@ VECOPS_INLINE nint_t required_workspace(const Spec& spec, Policy policy) {
  */
 template <typename Spec, typename Policy>
 VECOPS_INLINE auto bind(const Spec& spec, Policy policy, kernel::WorkspaceView&) {
-  VECOPS_ASSERT(details::resolve_plan(spec, policy) == AccessPlan::direct,
+  VECOPS_ASSERT(
+      (details::resolve_plan<Spec, Policy>() == AccessPlan::direct),
                 "tensor::bind only binds direct plans; use kernel::with_operands");
   if constexpr (is_input_spec_v<Spec>) {
     return InputDataAccess<Spec, Policy>{spec, policy};
@@ -2690,27 +2698,15 @@ VECOPS_INLINE decltype(auto) with_bound_input(
     const Spec& spec, Policy policy, kernel::WorkspaceView& workspace,
     Fn&& fn) {
   constexpr int AxisValue = Policy::vector_axis;
-  using StrideMeta = typename MetaElement<
-      AxisValue, typename Spec::InputLayout::Strides>::type;
-  constexpr bool StaticDirect =
-      Policy::requested_plan == AccessPlan::direct ||
-      (Policy::requested_plan == AccessPlan::automatic &&
-       (!transform_reads_input<typename Spec::TransformType> ||
-        Policy::read_passes == 1 ||
-        is_const_one_meta_v<StrideMeta>));
-  if constexpr (StaticDirect) {
+  constexpr AccessPlan plan = resolve_plan<Spec, Policy>();
+  if constexpr (plan == AccessPlan::direct) {
     InputDataAccess<Spec, Policy> access{spec, policy};
     return std::forward<Fn>(fn)(access);
   } else {
-  const AccessPlan plan = resolve_plan(spec, policy);
-  if (plan == AccessPlan::direct) {
-    InputDataAccess<Spec, Policy> access{spec, policy};
-    return std::forward<Fn>(fn)(access);
-  }
 
   const nint_t count = tensor_numel(spec.input_layout());
   auto aux_layout = auxiliary_layout<AxisValue>(spec.input_layout());
-  if (plan == AccessPlan::materialize_before_transform) {
+  if constexpr (plan == AccessPlan::materialize_before_transform) {
     using Memory = typename Spec::MemoryElement;
     Memory* buffer = workspace.allocate<Memory>(count);
     auto auxiliary_tensor = make_tensor(buffer, aux_layout);
@@ -2767,25 +2763,15 @@ VECOPS_INLINE decltype(auto) with_bound_output(
     const Spec& spec, Policy policy, kernel::WorkspaceView& workspace,
     Fn&& fn) {
   constexpr int AxisValue = Policy::vector_axis;
-  using StrideMeta = typename MetaElement<
-      AxisValue, typename Spec::OutputLayout::Strides>::type;
-  constexpr bool StaticDirect =
-      Policy::requested_plan == AccessPlan::direct ||
-      (Policy::requested_plan == AccessPlan::automatic &&
-       is_const_one_meta_v<StrideMeta>);
-  if constexpr (StaticDirect) {
+  constexpr AccessPlan plan = resolve_plan<Spec, Policy>();
+  if constexpr (plan == AccessPlan::direct) {
     OutputDataAccess<Spec, Policy> access{spec, policy};
     return std::forward<Fn>(fn)(access);
   } else {
-  const AccessPlan plan = resolve_plan(spec, policy);
-  if (plan == AccessPlan::direct) {
-    OutputDataAccess<Spec, Policy> access{spec, policy};
-    return std::forward<Fn>(fn)(access);
-  }
 
   const nint_t count = tensor_numel(spec.output_layout());
   auto aux_layout = auxiliary_layout<AxisValue>(spec.output_layout());
-  if (plan == AccessPlan::materialize_before_transform) {
+  if constexpr (plan == AccessPlan::materialize_before_transform) {
     using Compute = typename Spec::ComputeType;
     Compute* buffer = workspace.allocate<Compute>(count);
     auto auxiliary_tensor = make_tensor(buffer, aux_layout);

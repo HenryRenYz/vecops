@@ -184,8 +184,15 @@ public:
         [this, &workspace, &in, &out](auto& gamma, auto& beta) {
           // Resolve the only plan that can differ for a row before entering
           // the row loop. A rank-1 output has no alternate unit-stride commit
-          // axis, so its automatic plan is always direct.
-          if (in.input_layout().strides()[PrefixRank] == 1) {
+          // axis, so its automatic plan is always direct. The row stride is
+          // decided from the layout's meta type: anything not provably unit
+          // is treated as strided.
+          using RowStrideMeta = typename tensor::details::MetaElement<
+              PrefixRank,
+              typename InSpec::InputLayout::Strides>::type;
+          constexpr bool RowUnitStride =
+              tensor::details::is_definitely_one_meta_v<RowStrideMeta>;
+          if constexpr (RowUnitStride) {
             kernel::loop::for_each_dims<PrefixRank>(
                 [this, &workspace, &gamma, &beta](const auto& in_row,
                                                   const auto& out_row)
