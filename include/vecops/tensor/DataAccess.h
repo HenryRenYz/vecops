@@ -427,67 +427,6 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> populate_inactive(
   }
 }
 
-template <vec::VectorTag Tag, typename... Options>
-VECOPS_ALWAYS_INLINE bool lane_is_active(
-    Tag tag, nint_t lane, Options&&... options) {
-  if constexpr (vec::details::option_count<
-                    vec::details::IsFirstOption, Options...> == 1) {
-    auto&& first = vec::details::find_option<
-        vec::details::IsFirstOption>(options...);
-    return 0 <= lane && lane < first.count;
-  } else if constexpr (vec::details::option_count<
-                           vec::details::IsMaskedOption, Options...> == 1) {
-    auto&& masked = vec::details::find_option<
-        vec::details::IsMaskedOption>(options...);
-    return vec::get(tag, masked.value, lane);
-  } else {
-    return true;
-  }
-}
-
-template <vec::VectorTag Tag, typename... Options>
-VECOPS_ALWAYS_INLINE nint_t logical_lane_offset(
-    Tag, nint_t lane, Options&&... options) {
-  if constexpr (vec::details::option_count<
-                    vec::details::IsIndexedOption, Options...> == 1) {
-    auto&& indexed = vec::details::find_option<
-        vec::details::IsIndexedOption>(options...);
-    using Indexed = std::remove_cvref_t<decltype(indexed)>;
-    static_assert(vec::details::IsIndexedOption<Indexed>::scale == 0,
-                  "tensor indexed addressing rejects byte scales");
-    using IndexTag = vec::VecToTagT<
-        typename vec::details::IsIndexedOption<Indexed>::Value>;
-    return static_cast<nint_t>(
-        vec::get(IndexTag{}, indexed.indices, lane));
-  } else if constexpr (vec::details::option_count<
-                           vec::details::IsStridedOption, Options...> == 1) {
-    auto&& strided = vec::details::find_option<
-        vec::details::IsStridedOption>(options...);
-    return lane * static_cast<nint_t>(strided.stride);
-  } else {
-    return lane;
-  }
-}
-
-template <vec::VectorTag Tag, typename... Options>
-VECOPS_ALWAYS_INLINE vec::ElementOf<Tag> inactive_scalar(
-    Tag tag, nint_t lane, Options&&... options) {
-  if constexpr (vec::details::option_count<
-                    vec::details::IsVectorMergeOption, Options...> == 1) {
-    auto&& merge = vec::details::find_option<
-        vec::details::IsVectorMergeOption>(options...);
-    return vec::get(tag, merge.value, lane);
-  } else if constexpr (vec::details::option_count<
-                           vec::details::IsScalarMergeOption,
-                           Options...> == 1) {
-    auto&& merge = vec::details::find_option<
-        vec::details::IsScalarMergeOption>(options...);
-    return vecops::convert<vec::ElementOf<Tag>>(merge.value);
-  } else {
-    return vec::ElementOf<Tag>{};
-  }
-}
-
 template <vec::VectorTag Tag, typename Tensor, int Dim, typename... Options>
 VECOPS_ALWAYS_INLINE void assert_access_in_bounds(
     Tag tag,
@@ -502,10 +441,38 @@ VECOPS_ALWAYS_INLINE void assert_access_in_bounds(
             position[static_cast<std::size_t>(d)] < tensor.size(d),
         "tensor access origin is out of bounds");
   }
+  constexpr bool IsStore = !std::is_const_v<Tensor>;
+  const auto request = [&]() {
+    if constexpr (IsStore) {
+      return vec::details::resolve_store_request<Tag>(
+          std::forward<Options>(options)...);
+    } else {
+      return vec::details::resolve_load_request<Tag>(
+          std::forward<Options>(options)...);
+    }
+  }();
+  using Request = decltype(request);
+  const vec::Mask<Tag> active = [&]() VECOPS_INLINE_LAMBDA {
+    if constexpr (Request::active_kind == vec::Active::First) {
+      return vec::mwhilelt(tag, 0, request.first_count);
+    } else if constexpr (Request::active_kind == vec::Active::Masked) {
+      return request.mask;
+    } else {
+      return vec::mfill(tag, true);
+    }
+  }();
   for (nint_t lane = 0; lane < vec::size(tag); ++lane) {
-    if (!lane_is_active(tag, lane, options...)) continue;
-    const nint_t coordinate = position[Dim] +
-        logical_lane_offset(tag, lane, options...);
+    if (!vec::get(tag, active, lane)) continue;
+    nint_t logical = lane;
+    if constexpr (Request::addressing_kind == vec::Addressing::Indexed) {
+      logical = static_cast<nint_t>(vec::get(
+          vec::VecToTagT<decltype(request.indices)>{},
+          request.indices, lane));
+    } else if constexpr (
+        Request::addressing_kind == vec::Addressing::Strided) {
+      logical = lane * request.stride;
+    }
+    const nint_t coordinate = position[Dim] + logical;
     VECOPS_ASSERT(
         0 <= coordinate && coordinate < tensor.size(Dim),
         "active tensor vector lane is out of bounds");
@@ -563,6 +530,30 @@ consteval bool can_transform_chunk() {
   }
 }
 
+/**
+ * A chunk is usable only when the converting memory access at its width is
+ * representable as well: the memory-side rebind of the chunk must stay within
+ * backend tag limits, otherwise the chunk keeps splitting.
+ */
+template <
+    typename Transform, vec::VectorTag RequestedTag, typename Context,
+    typename Memory>
+consteval bool can_transform_chunk_with_memory() {
+  if constexpr (!can_transform_chunk<Transform, RequestedTag, Context>()) {
+    return false;
+  } else {
+    using MemoryTag = vec::Rebind<Memory, RequestedTag>;
+    if constexpr (
+        vec::is_scalable_tag<RequestedTag> &&
+        (vec::scale_power<MemoryTag> < VEC_HW_MIN_POW ||
+         vec::scale_power<MemoryTag> > VEC_MAX_POW)) {
+      return false;
+    } else {
+      return true;
+    }
+  }
+}
+
 template <typename Tag>
 consteval bool can_split_tag() {
   if constexpr (vec::is_fixed_tag<Tag>) {
@@ -595,125 +586,397 @@ consteval bool can_split_tag() {
  *
  * Prefer the `input<Compute>()` factory instead of naming this type directly.
  */
+/**
+ * Executes the transform over RootTag lanes, using whole-vector converting
+ * loads at every chunk. Active lanes ride as a chunk-domain mask, addressing
+ * is one of three compile-time forms, and halves recombine with vec::concat,
+ * so no per-lane scalar access appears anywhere on this path.
+ *
+ * AddrKind: 0 = contiguous physical (unit stride), 1 = strided with
+ * `physical_stride` elements between lanes, 2 = indexed by the chunk-domain
+ * logical index vector scaled by `physical_stride`.
+ */
 template <
-    typename Policy,
-    typename Transform,
-    vec::VectorTag RootTag,
-    vec::VectorTag ChunkTag,
-    typename Memory,
-    typename Context,
-    typename... Options>
-VECOPS_ALWAYS_INLINE void load_transform_chunks(
-    RootTag root_tag,
-    ChunkTag,
-    vec::Vec<RootTag>& result,
-    const Memory* pointer,
-    nint_t tensor_axis_stride,
-    const Transform& transform,
-    const Context& context,
+    typename Policy, typename Transform,
+    vec::VectorTag ChunkTag, typename Memory, typename Context,
+    bool HasActive, int AddrKind, typename IndexVec, typename MaskVec>
+VECOPS_ALWAYS_INLINE vec::Vec<vec::Rebind<typename Transform::TOut, ChunkTag>>
+load_transform_vector(
+    ChunkTag chunk_tag,
+    const Memory* base_pointer,
     nint_t lane_begin,
-    Options&&... options) {
-  if constexpr (can_transform_chunk<Transform, ChunkTag, Context>()) {
-    using TransformInTag = vec::Rebind<typename Transform::TIn, ChunkTag>;
-    using TransformOutTag = vec::Rebind<typename Transform::TOut, ChunkTag>;
-    auto transform_input = vec::zeros(TransformInTag{});
+    nint_t physical_stride,
+    IndexVec logical_indices,
+    MaskVec active_mask,
+    const Transform& transform,
+    const Context& context) {
+  using TIn = typename Transform::TIn;
+  using TOut = typename Transform::TOut;
+  if constexpr (can_transform_chunk_with_memory<
+                    Transform, ChunkTag, Context, Memory>()) {
+    using TransformInTag = vec::Rebind<TIn, ChunkTag>;
+    using TransformOutTag = vec::Rebind<TOut, ChunkTag>;
+    using Order = typename Policy::ConversionOrderOption;
+    using Value = typename Policy::ConversionValueOption;
+    using Temporal = typename Policy::MemoryOptions::TemporalityOption;
     const nint_t chunk_lanes = vec::size(TransformInTag{});
 
+    vec::Vec<TransformInTag> transform_input;
     if constexpr (transform_reads_input<Transform>) {
-      for (nint_t lane = 0; lane < chunk_lanes; ++lane) {
-        const nint_t root_lane = lane_begin + lane;
-        if (!lane_is_active(root_tag, root_lane, options...)) continue;
-        const nint_t logical = logical_lane_offset(
-            root_tag, root_lane, options...);
-        transform_input = vec::set(
-            TransformInTag{}, transform_input, lane,
-            scalar_policy_convert<Policy, typename Transform::TIn>(
-                pointer[logical * tensor_axis_stride]));
+      constexpr vec::Active ActiveKind =
+          HasActive ? vec::Active::Masked : vec::Active::Unmasked;
+      constexpr vec::Addressing AddressingKind =
+          AddrKind == 0   ? vec::Addressing::Contiguous
+          : AddrKind == 1 ? vec::Addressing::Strided
+                          : vec::Addressing::Indexed;
+      vec::LoadConvertRequest<
+          TransformInTag, Memory, ActiveKind, AddressingKind,
+          vec::Populate::Zero, vec::mem::Unaligned, Temporal,
+          0, std::remove_cvref_t<IndexVec>, Order, Value>
+          request;
+      if constexpr (HasActive) {
+        request.mask = [&]() VECOPS_INLINE_LAMBDA {
+          if constexpr (std::same_as<ChunkTag, TransformInTag>) {
+            return active_mask;
+          } else {
+            return vec::convert(TransformInTag{}, ChunkTag{}, active_mask);
+          }
+        }();
       }
+      const Memory* chunk_base = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (AddrKind == 0) {
+          return base_pointer + lane_begin;
+        } else if constexpr (AddrKind == 1) {
+          return base_pointer + lane_begin * physical_stride;
+        } else {
+          return base_pointer;
+        }
+      }();
+      if constexpr (AddrKind == 1) {
+        request.stride = physical_stride;
+      }
+      if constexpr (AddrKind == 2) {
+        const auto scale = vec::fill(
+            ChunkTag{}, vec::ElementOf<ChunkTag>{});
+        request.indices = logical_indices;  // scaled below
+        using IndexElement = vec::ElementOf<IndexVec>;
+        const auto stride_scale = vec::fill(
+            vec::VecToTagT<IndexVec>{},
+            static_cast<IndexElement>(physical_stride));
+        request.indices = vec::mul(logical_indices, stride_scale);
+        (void)scale;
+      }
+      transform_input =
+          vec::load_convert(TransformInTag{}, chunk_base, request);
+    } else {
+      transform_input = vec::zeros(TransformInTag{});
     }
 
     const auto chunk_context = context.subspan(lane_begin, chunk_lanes);
-    const auto transformed = transform(
-        TransformOutTag{}, transform_input, chunk_context);
-    for (nint_t lane = 0; lane < chunk_lanes; ++lane) {
-      const nint_t root_lane = lane_begin + lane;
-      if (!lane_is_active(root_tag, root_lane, options...)) continue;
-      result = vec::set(
-          root_tag, result, root_lane,
-          scalar_policy_convert<Policy, vec::ElementOf<RootTag>>(
-              vec::get(TransformOutTag{}, transformed, lane)));
-    }
+    return transform(TransformOutTag{}, transform_input, chunk_context);
   } else {
     static_assert(
         can_split_tag<ChunkTag>(),
         "DataAccess cannot find a legal vector size for this transform");
     using HalfTag = vec::Half<ChunkTag>;
-    load_transform_chunks<Policy>(
-        root_tag, HalfTag{}, result, pointer, tensor_axis_stride,
-        transform, context, lane_begin, options...);
+    using HalfIndexVec = std::conditional_t<
+        AddrKind == 2, vec::Vec<vec::Half<vec::VecToTagT<IndexVec>>>,
+        IndexVec>;
+    using HalfMaskVec = std::conditional_t<
+        HasActive, vec::Mask<HalfTag>, MaskVec>;
     const nint_t half_lanes = vec::size(HalfTag{});
-    load_transform_chunks<Policy>(
-        root_tag, HalfTag{}, result, pointer, tensor_axis_stride,
-        transform, context, lane_begin + half_lanes, options...);
+    const auto lower_mask = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (HasActive) return vec::lower(chunk_tag, active_mask);
+      else return MaskVec{};
+    }();
+    const auto upper_mask = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (HasActive) return vec::upper(chunk_tag, active_mask);
+      else return MaskVec{};
+    }();
+    const auto lower_indices = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (AddrKind == 2) return vec::lower(chunk_tag, logical_indices);
+      else return IndexVec{};
+    }();
+    const auto upper_indices = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (AddrKind == 2) return vec::upper(chunk_tag, logical_indices);
+      else return IndexVec{};
+    }();
+    const auto lower_part = load_transform_vector<
+        Policy, Transform, HalfTag, Memory, Context, HasActive, AddrKind>(
+        HalfTag{}, base_pointer, lane_begin, physical_stride, lower_indices,
+        lower_mask, transform, context);
+    const auto upper_part = load_transform_vector<
+        Policy, Transform, HalfTag, Memory, Context, HasActive, AddrKind>(
+        HalfTag{}, base_pointer, lane_begin + half_lanes, physical_stride,
+        upper_indices, upper_mask, transform, context);
+    using TransformOutTag = vec::Rebind<typename Transform::TOut, ChunkTag>;
+    return vec::concat(
+        TransformOutTag{}, lower_part, upper_part);
   }
 }
 
+/**
+ * Entry of the vectorized transform load: materializes the kernel's active
+ * predicate into a root-domain mask and lowers its addressing to one of the
+ * three compile-time physical forms before recursion. Returns the converted
+ * result in the root domain.
+ */
 template <
-    typename Policy,
-    typename Transform,
-    vec::VectorTag RootTag,
-    vec::VectorTag ChunkTag,
-    typename Memory,
-    typename Context,
+    typename Policy, typename Transform, vec::VectorTag RootTag,
+    typename Memory, typename Context, typename StrideMeta,
     typename... Options>
-VECOPS_ALWAYS_INLINE void store_transform_chunks(
+VECOPS_ALWAYS_INLINE vec::Vec<RootTag> load_transform_chunks(
     RootTag root_tag,
-    ChunkTag,
-    const vec::Vec<RootTag>& value,
-    Memory* pointer,
-    nint_t tensor_axis_stride,
+    const Memory* pointer,
+    StrideMeta tensor_axis_stride,
     const Transform& transform,
     const Context& context,
-    nint_t lane_begin,
     Options&&... options) {
-  if constexpr (can_transform_chunk<Transform, ChunkTag, Context>()) {
-    using TransformInTag = vec::Rebind<typename Transform::TIn, ChunkTag>;
-    using TransformOutTag = vec::Rebind<typename Transform::TOut, ChunkTag>;
-    auto transform_input = vec::zeros(TransformInTag{});
-    const nint_t chunk_lanes = vec::size(TransformInTag{});
-    for (nint_t lane = 0; lane < chunk_lanes; ++lane) {
-      const nint_t root_lane = lane_begin + lane;
-      if (!lane_is_active(root_tag, root_lane, options...)) continue;
-      transform_input = vec::set(
-          TransformInTag{}, transform_input, lane,
-          scalar_policy_convert<Policy, typename Transform::TIn>(
-              vec::get(root_tag, value, root_lane)));
+  const auto request = vec::details::resolve_load_request<RootTag>(
+      std::forward<Options>(options)...);
+  using KernelRequest = decltype(request);
+  constexpr bool HasActive =
+      KernelRequest::active_kind != vec::Active::Unmasked;
+  const vec::Mask<RootTag> active_mask = [&]() VECOPS_INLINE_LAMBDA {
+    if constexpr (KernelRequest::active_kind == vec::Active::First) {
+      return vec::mwhilelt(root_tag, 0, request.first_count);
+    } else if constexpr (HasActive) {
+      return request.mask;
+    } else {
+      return vec::Mask<RootTag>{};
     }
+  }();
+  constexpr bool TensorUnitStride = is_definitely_one_meta_v<StrideMeta>;
 
+  if constexpr (
+      KernelRequest::addressing_kind == vec::Addressing::Indexed) {
+    static_assert(
+        KernelRequest::index_scale == 0,
+        "tensor indexed addressing rejects byte scales");
+    const auto out = load_transform_vector<
+        Policy, Transform, RootTag, Memory, Context, HasActive, 2>(
+        root_tag, pointer, 0, static_cast<nint_t>(tensor_axis_stride),
+        request.indices, active_mask, transform, context);
+    using TransformOutTag =
+        vec::Rebind<typename Transform::TOut, RootTag>;
+    return vec::convert(
+        root_tag, TransformOutTag{}, out,
+        typename Policy::ConversionOrderOption{},
+        typename Policy::ConversionValueOption{});
+  } else if constexpr (
+      KernelRequest::addressing_kind == vec::Addressing::Contiguous &&
+      TensorUnitStride) {
+    const auto out = load_transform_vector<
+        Policy, Transform, RootTag, Memory, Context, HasActive, 0>(
+        root_tag, pointer, 0, 1, request.indices, active_mask, transform,
+        context);
+    using TransformOutTag =
+        vec::Rebind<typename Transform::TOut, RootTag>;
+    return vec::convert(
+        root_tag, TransformOutTag{}, out,
+        typename Policy::ConversionOrderOption{},
+        typename Policy::ConversionValueOption{});
+  } else {
+    nint_t physical_stride = static_cast<nint_t>(tensor_axis_stride);
+    if constexpr (
+        KernelRequest::addressing_kind == vec::Addressing::Strided) {
+      physical_stride *= request.stride;
+    }
+    const auto out = load_transform_vector<
+        Policy, Transform, RootTag, Memory, Context, HasActive, 1>(
+        root_tag, pointer, 0, physical_stride, request.indices, active_mask,
+        transform, context);
+    using TransformOutTag =
+        vec::Rebind<typename Transform::TOut, RootTag>;
+    return vec::convert(
+        root_tag, TransformOutTag{}, out,
+        typename Policy::ConversionOrderOption{},
+        typename Policy::ConversionValueOption{});
+  }
+}
+
+/**
+ * Stores through the transform with whole-vector converting stores. The
+ * root-domain value is split alongside the chunk tag; each leaf converts its
+ * half into the transform input domain, runs the transform, and issues one
+ * masked converting store.
+ */
+template <
+    typename Policy, typename Transform,
+    vec::VectorTag ChunkTag, typename Memory, typename Context,
+    bool HasActive, int AddrKind, typename IndexVec, typename MaskVec,
+    typename ChunkValueVec>
+VECOPS_ALWAYS_INLINE void store_transform_vector(
+    ChunkTag chunk_tag,
+    Memory* base_pointer,
+    nint_t lane_begin,
+    nint_t physical_stride,
+    IndexVec logical_indices,
+    MaskVec active_mask,
+    ChunkValueVec chunk_value,
+    const Transform& transform,
+    const Context& context) {
+  using TIn = typename Transform::TIn;
+  using TOut = typename Transform::TOut;
+  if constexpr (can_transform_chunk_with_memory<
+                    Transform, ChunkTag, Context, Memory>()) {
+    using TransformInTag = vec::Rebind<TIn, ChunkTag>;
+    using TransformOutTag = vec::Rebind<TOut, ChunkTag>;
+    using Order = typename Policy::ConversionOrderOption;
+    using Value = typename Policy::ConversionValueOption;
+    using Temporal = typename Policy::MemoryOptions::TemporalityOption;
+    using Packing = typename Policy::MemoryOptions::PackingOption;
+    const nint_t chunk_lanes = vec::size(TransformInTag{});
+
+    const auto transform_input = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (std::same_as<ChunkTag, TransformInTag>) {
+        return chunk_value;
+      } else {
+        return vec::convert(
+            TransformInTag{}, ChunkTag{}, chunk_value, Order{}, Value{});
+      }
+    }();
     const auto chunk_context = context.subspan(lane_begin, chunk_lanes);
     const auto transformed = transform(
         TransformOutTag{}, transform_input, chunk_context);
-    for (nint_t lane = 0; lane < chunk_lanes; ++lane) {
-      const nint_t root_lane = lane_begin + lane;
-      if (!lane_is_active(root_tag, root_lane, options...)) continue;
-      const nint_t logical = logical_lane_offset(
-          root_tag, root_lane, options...);
-      pointer[logical * tensor_axis_stride] =
-          scalar_policy_convert<Policy, Memory>(
-              vec::get(TransformOutTag{}, transformed, lane));
+
+    constexpr vec::Active ActiveKind =
+        HasActive ? vec::Active::Masked : vec::Active::Unmasked;
+    constexpr vec::Addressing AddressingKind =
+        AddrKind == 0   ? vec::Addressing::Contiguous
+        : AddrKind == 1 ? vec::Addressing::Strided
+                        : vec::Addressing::Indexed;
+    vec::StoreConvertRequest<
+        TransformOutTag, Memory, ActiveKind, AddressingKind,
+        vec::mem::Unaligned, Temporal, 0,
+        std::remove_cvref_t<IndexVec>, Order, Value, Packing>
+        request;
+    if constexpr (HasActive) {
+      request.mask = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (std::same_as<ChunkTag, TransformOutTag>) {
+          return active_mask;
+        } else {
+          return vec::convert(TransformOutTag{}, ChunkTag{}, active_mask);
+        }
+      }();
     }
+    Memory* chunk_base = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (AddrKind == 0) {
+        return base_pointer + lane_begin;
+      } else if constexpr (AddrKind == 1) {
+        return base_pointer + lane_begin * physical_stride;
+      } else {
+        return base_pointer;
+      }
+    }();
+    if constexpr (AddrKind == 1) {
+      request.stride = physical_stride;
+    }
+    if constexpr (AddrKind == 2) {
+      using IndexElement = vec::ElementOf<IndexVec>;
+      const auto stride_scale = vec::fill(
+          vec::VecToTagT<IndexVec>{},
+          static_cast<IndexElement>(physical_stride));
+      request.indices = vec::mul(logical_indices, stride_scale);
+    }
+    vec::store_convert(TransformOutTag{}, chunk_base, transformed, request);
   } else {
     static_assert(
         can_split_tag<ChunkTag>(),
         "DataAccess cannot find a legal vector size for this transform");
     using HalfTag = vec::Half<ChunkTag>;
-    store_transform_chunks<Policy>(
-        root_tag, HalfTag{}, value, pointer, tensor_axis_stride,
-        transform, context, lane_begin, options...);
+    using HalfIndexVec = std::conditional_t<
+        AddrKind == 2, vec::Vec<vec::Half<vec::VecToTagT<IndexVec>>>,
+        IndexVec>;
+    using HalfMaskVec = std::conditional_t<
+        HasActive, vec::Mask<HalfTag>, MaskVec>;
+    using HalfValueVec = vec::Vec<HalfTag>;
     const nint_t half_lanes = vec::size(HalfTag{});
-    store_transform_chunks<Policy>(
-        root_tag, HalfTag{}, value, pointer, tensor_axis_stride,
-        transform, context, lane_begin + half_lanes, options...);
+    const auto lower_mask = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (HasActive) return vec::lower(chunk_tag, active_mask);
+      else return MaskVec{};
+    }();
+    const auto upper_mask = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (HasActive) return vec::upper(chunk_tag, active_mask);
+      else return MaskVec{};
+    }();
+    const auto lower_indices = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (AddrKind == 2) return vec::lower(chunk_tag, logical_indices);
+      else return IndexVec{};
+    }();
+    const auto upper_indices = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (AddrKind == 2) return vec::upper(chunk_tag, logical_indices);
+      else return IndexVec{};
+    }();
+    store_transform_vector<
+        Policy, Transform, HalfTag, Memory, Context, HasActive, AddrKind>(
+        HalfTag{}, base_pointer, lane_begin, physical_stride, lower_indices,
+        lower_mask, vec::lower(chunk_tag, chunk_value), transform, context);
+    store_transform_vector<
+        Policy, Transform, HalfTag, Memory, Context, HasActive, AddrKind>(
+        HalfTag{}, base_pointer, lane_begin + half_lanes, physical_stride,
+        upper_indices, upper_mask, vec::upper(chunk_tag, chunk_value),
+        transform, context);
+  }
+}
+
+/**
+ * Entry of the vectorized transform store; mirrors `load_transform_chunks`.
+ */
+template <
+    typename Policy, typename Transform, vec::VectorTag RootTag,
+    typename Memory, typename Context, typename StrideMeta,
+    typename... Options>
+VECOPS_ALWAYS_INLINE void store_transform_chunks(
+    RootTag root_tag,
+    Memory* pointer,
+    StrideMeta tensor_axis_stride,
+    vec::Vec<RootTag> value,
+    const Transform& transform,
+    const Context& context,
+    Options&&... options) {
+  const auto request = vec::details::resolve_store_request<RootTag>(
+      std::forward<Options>(options)...);
+  using KernelRequest = decltype(request);
+  constexpr bool HasActive =
+      KernelRequest::active_kind != vec::Active::Unmasked;
+  const vec::Mask<RootTag> active_mask = [&]() VECOPS_INLINE_LAMBDA {
+    if constexpr (KernelRequest::active_kind == vec::Active::First) {
+      return vec::mwhilelt(root_tag, 0, request.first_count);
+    } else if constexpr (HasActive) {
+      return request.mask;
+    } else {
+      return vec::Mask<RootTag>{};
+    }
+  }();
+  constexpr bool TensorUnitStride = is_definitely_one_meta_v<StrideMeta>;
+
+  if constexpr (
+      KernelRequest::addressing_kind == vec::Addressing::Indexed) {
+    static_assert(
+        KernelRequest::index_scale == 0,
+        "tensor indexed addressing rejects byte scales");
+    store_transform_vector<
+        Policy, Transform, RootTag, Memory, Context, HasActive, 2>(
+        root_tag, pointer, 0, static_cast<nint_t>(tensor_axis_stride),
+        request.indices, active_mask, value, transform, context);
+  } else if constexpr (
+      KernelRequest::addressing_kind == vec::Addressing::Contiguous &&
+      TensorUnitStride) {
+    store_transform_vector<
+        Policy, Transform, RootTag, Memory, Context, HasActive, 0>(
+        root_tag, pointer, 0, 1, request.indices, active_mask, value,
+        transform, context);
+  } else {
+    nint_t physical_stride = static_cast<nint_t>(tensor_axis_stride);
+    if constexpr (
+        KernelRequest::addressing_kind == vec::Addressing::Strided) {
+      physical_stride *= request.stride;
+    }
+    store_transform_vector<
+        Policy, Transform, RootTag, Memory, Context, HasActive, 1>(
+        root_tag, pointer, 0, physical_stride, request.indices, active_mask,
+        value, transform, context);
   }
 }
 
@@ -1503,11 +1766,9 @@ public:
                 !std::same_as<typename Transform::TIn, ComputeType>;
             if constexpr (!details::transform_tags_representable<
                               Transform, Tag>()) {
-              result = vec::zeros(tag);
-              details::load_transform_chunks<Policy>(
-                  tag, tag, result, data_ + base,
-                  static_cast<nint_t>(axis_stride), spec_->transform(),
-                  context, 0, options...);
+              result = details::load_transform_chunks<Policy>(
+                  tag, data_ + base, axis_stride, spec_->transform(),
+                  context, std::forward<Options>(options)...);
             } else if constexpr (
                 details::can_transform_chunk<
                     Transform, Tag, decltype(context)>() &&
@@ -1537,11 +1798,9 @@ public:
                   typename Policy::ConversionOrderOption{},
                   typename Policy::ConversionValueOption{});
             } else {
-              result = vec::zeros(tag);
-              details::load_transform_chunks<Policy>(
-                  tag, tag, result, data_ + base,
-                  static_cast<nint_t>(axis_stride), spec_->transform(),
-                  context, 0, options...);
+              result = details::load_transform_chunks<Policy>(
+                  tag, data_ + base, axis_stride, spec_->transform(),
+                  context, std::forward<Options>(options)...);
             }
             return details::populate_inactive(
                 tag, result, std::forward<Options>(options)...);
@@ -1701,6 +1960,7 @@ public:
       details::with_transform_context(
           tag, position, Dim, spec_->projection(),
           [&](const auto& context) VECOPS_INLINE_LAMBDA {
+            vec::Vec<Tag> result;
             constexpr bool NeedsLogicalMaskLowering =
                 vec::details::option_count<
                     vec::details::IsMaskedOption, Options...> != 0 &&
@@ -1708,9 +1968,9 @@ public:
             if constexpr (!details::transform_tags_representable<
                               Transform, Tag>()) {
               details::store_transform_chunks<Policy>(
-                  tag, tag, value, data_ + base,
-                  static_cast<nint_t>(axis_stride), spec_->transform(),
-                  context, 0, options...);
+                  tag, data_ + base, axis_stride, value,
+                  spec_->transform(), context,
+                  std::forward<Options>(options)...);
             } else if constexpr (
                 details::can_transform_chunk<
                     Transform, Tag, decltype(context)>() &&
@@ -1732,9 +1992,9 @@ public:
                       std::forward<Options>(options)...);
             } else {
               details::store_transform_chunks<Policy>(
-                  tag, tag, value, data_ + base,
-                  static_cast<nint_t>(axis_stride), spec_->transform(),
-                  context, 0, options...);
+                  tag, data_ + base, axis_stride, value,
+                  spec_->transform(), context,
+                  std::forward<Options>(options)...);
             }
           },
           options...);
