@@ -24,6 +24,34 @@ namespace vecops::vec::details {
 //    Fill and MaskFill                                                       //
 /* **************************************************************************** */
 
+/// Word-level fill: the generic multi-word machinery (for example the
+/// strided-index generator) drives FillOp per word, which the whole-tag
+/// NativeImpl above cannot serve.
+template <>
+struct NativeWordImpl<ScalarBackend, FillOp> {
+  template <nint_t Index, VectorTag Tag>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      FillOp, Tag, ElementOf<Tag> value) {
+    NativeWordVec<Tag> result{};
+    for (std::size_t lane = 0;
+         lane < result.lanes.size(); ++lane) {
+      result.lanes[lane] = value;
+    }
+    return result;
+  }
+};
+
+template <>
+struct NativeWordImpl<ScalarBackend, MaskFillOp> {
+  template <nint_t Index, VectorTag Tag>
+  static VECOPS_ALWAYS_INLINE NativeWordMask<Tag> call(
+      MaskFillOp, Tag, bool value) {
+    NativeWordMask<Tag> result{};
+    value ? result.bits.set() : result.bits.reset();
+    return result;
+  }
+};
+
 template <VectorTag Tag>
 struct NativeImpl<ScalarBackend, FillOp, Tag> {
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(

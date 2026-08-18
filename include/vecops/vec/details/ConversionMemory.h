@@ -755,9 +755,19 @@ execute_load_convert_request(
           return zeros(to);
         }
       }();
-      return execute(
+      const auto loaded = execute(
           op, to, pointer, mask, inactive, Layout{}, ValuePolicy{},
           Alignment{}, Temporality{});
+#ifdef VECOPS_DEBUG_TF
+      fprintf(stderr, "[exec] lanes=%zd mask:", (long)vec::size(to));
+      for (nint_t i = 0; i < vec::size(to); ++i)
+        fprintf(stderr, "%d", (int)vec::get(to, mask, i));
+      fprintf(stderr, " loaded:");
+      for (nint_t i = 0; i < vec::size(to); ++i)
+        fprintf(stderr, " %.1f", (double)vec::get(to, loaded, i));
+      fprintf(stderr, "\n");
+#endif
+      return loaded;
     }
   }
 }

@@ -630,8 +630,18 @@ VECOPS_ALWAYS_INLINE Vec<typename Request::TagType> execute_load_request(
       }
     }();
     if constexpr (Addr == Addressing::Contiguous) {
-      return execute(
+      const auto loaded = execute(
           op, tag, pointer, mask, inactive, Alignment{}, Temporality{});
+#ifdef VECOPS_DEBUG_TF
+      fprintf(stderr, "[lexec] lanes=%zd mask:", (long)vec::size(tag));
+      for (nint_t i = 0; i < vec::size(tag); ++i)
+        fprintf(stderr, "%d", (int)vec::get(tag, mask, i));
+      fprintf(stderr, " loaded:");
+      for (nint_t i = 0; i < vec::size(tag); ++i)
+        fprintf(stderr, " %.1f", (double)vec::get(tag, loaded, i));
+      fprintf(stderr, "\n");
+#endif
+      return loaded;
     } else if constexpr (Addr == Addressing::Strided) {
       const auto indices =
           make_strided_indices<CurrentBackend>(tag, request.stride);

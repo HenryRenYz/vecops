@@ -766,6 +766,20 @@ load_transform_vector(
     using Temporal = typename Policy::MemoryOptions::TemporalityOption;
     const nint_t chunk_lanes = vec::size(TransformInTag{});
 
+    // Indexed addressing multiplies the chunk's logical indices by the
+    // element stride; the product must outlive `request` (referenced, not
+    // stored), so it is computed at function scope.
+    const IndexVec physical = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (AddrKind == 2) {
+        using IndexElement = vec::ElementOf<IndexVec>;
+        const auto stride_scale = vec::fill(
+            vec::VecToTagT<IndexVec>{},
+            static_cast<IndexElement>(physical_stride));
+        return vec::mul(logical_indices, stride_scale);
+      } else {
+        return IndexVec{};
+      }
+    }();
     vec::Vec<TransformInTag> transform_input;
     if constexpr (transform_reads_input<Transform>) {
       constexpr vec::Active ActiveKind =
@@ -779,14 +793,24 @@ load_transform_vector(
           vec::Populate::Zero, vec::mem::Unaligned, Temporal,
           0, std::remove_cvref_t<IndexVec>, Order, Value>
           request;
-      if constexpr (HasActive) {
-        const auto leaf_mask = [&]() VECOPS_INLINE_LAMBDA {
+      // The mask must outlive `request`: requests reference, never store,
+      // vector values, so the leaf mask lives at function scope in the
+      // transform-input mask domain.
+      using LeafMask = std::conditional_t<
+          HasActive && !std::same_as<ChunkTag, TransformInTag>,
+          vec::Mask<TransformInTag>, MaskVec>;
+      const LeafMask leaf_mask = [&]() VECOPS_INLINE_LAMBDA -> LeafMask {
+        if constexpr (HasActive) {
           if constexpr (std::same_as<ChunkTag, TransformInTag>) {
             return active_mask;
           } else {
             return vec::convert(TransformInTag{}, ChunkTag{}, active_mask);
           }
-        }();
+        } else {
+          return LeafMask{};
+        }
+      }();
+      if constexpr (HasActive) {
         request.mask = &leaf_mask;
       }
       const Memory* chunk_base = [&]() VECOPS_INLINE_LAMBDA {
@@ -802,11 +826,6 @@ load_transform_vector(
         request.stride = physical_stride;
       }
       if constexpr (AddrKind == 2) {
-        using IndexElement = vec::ElementOf<IndexVec>;
-        const auto stride_scale = vec::fill(
-            vec::VecToTagT<IndexVec>{},
-            static_cast<IndexElement>(physical_stride));
-        const auto physical = vec::mul(logical_indices, stride_scale);
         request.indices = &physical;
       }
       transform_input =
@@ -816,7 +835,9 @@ load_transform_vector(
     }
 
     const auto chunk_context = context.subspan(lane_begin, chunk_lanes);
-    return transform(TransformOutTag{}, transform_input, chunk_context);
+    const auto transformed =
+        transform(TransformOutTag{}, transform_input, chunk_context);
+    return transformed;
   } else {
     static_assert(
         can_split_tag<ChunkTag>(),
@@ -982,6 +1003,17 @@ VECOPS_ALWAYS_INLINE void store_transform_vector(
     using Packing = typename Policy::MemoryOptions::PackingOption;
     const nint_t chunk_lanes = vec::size(TransformInTag{});
 
+    const IndexVec physical = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (AddrKind == 2) {
+        using IndexElement = vec::ElementOf<IndexVec>;
+        const auto stride_scale = vec::fill(
+            vec::VecToTagT<IndexVec>{},
+            static_cast<IndexElement>(physical_stride));
+        return vec::mul(logical_indices, stride_scale);
+      } else {
+        return IndexVec{};
+      }
+    }();
     const auto transform_input = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (std::same_as<ChunkTag, TransformInTag>) {
         return chunk_value;
@@ -1005,14 +1037,21 @@ VECOPS_ALWAYS_INLINE void store_transform_vector(
         vec::mem::Unaligned, Temporal, 0,
         std::remove_cvref_t<IndexVec>, Order, Value, Packing>
         request;
-    if constexpr (HasActive) {
-      const auto leaf_mask = [&]() VECOPS_INLINE_LAMBDA {
+    using LeafMask = std::conditional_t<
+        HasActive && !std::same_as<ChunkTag, TransformOutTag>,
+        vec::Mask<TransformOutTag>, MaskVec>;
+    const LeafMask leaf_mask = [&]() VECOPS_INLINE_LAMBDA -> LeafMask {
+      if constexpr (HasActive) {
         if constexpr (std::same_as<ChunkTag, TransformOutTag>) {
           return active_mask;
         } else {
           return vec::convert(TransformOutTag{}, ChunkTag{}, active_mask);
         }
-      }();
+      } else {
+        return LeafMask{};
+      }
+    }();
+    if constexpr (HasActive) {
       request.mask = &leaf_mask;
     }
     Memory* chunk_base = [&]() VECOPS_INLINE_LAMBDA {
@@ -1028,11 +1067,6 @@ VECOPS_ALWAYS_INLINE void store_transform_vector(
       request.stride = physical_stride;
     }
     if constexpr (AddrKind == 2) {
-      using IndexElement = vec::ElementOf<IndexVec>;
-      const auto stride_scale = vec::fill(
-          vec::VecToTagT<IndexVec>{},
-          static_cast<IndexElement>(physical_stride));
-      const auto physical = vec::mul(logical_indices, stride_scale);
       request.indices = &physical;
     }
     vec::store_convert(TransformOutTag{}, chunk_base, transformed, request);

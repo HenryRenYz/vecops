@@ -172,6 +172,62 @@ struct ConvertMaskVectorOf<ToTag, opt::Masked<M>> {
 
 } // namespace request_resolve
 
+namespace request_resolve {
+
+template <typename... Options>
+inline constexpr bool is_mask_merge_option_pack =
+    ((IsMaskMergeOption<std::remove_cvref_t<Options>>::value) || ...);
+
+template <typename... Options>
+inline constexpr Active op_active_kind_of =
+    option_count<IsMaskedOption, Options...> == 1
+        ? Active::Masked
+        : Active::Unmasked;
+
+template <typename... Options>
+inline constexpr Inactive op_inactive_kind_of =
+    option_count<IsZeroOption, Options...> == 1
+        ? Inactive::Zero
+        : (option_count<IsVectorMergeOption, Options...> == 1
+               ? Inactive::MergeVector
+               : (option_count<IsScalarMergeOption, Options...> == 1
+                      ? Inactive::MergeScalar
+                      : (is_mask_merge_option_pack<Options...>
+                             ? Inactive::MergeMask
+                             : Inactive::PreserveInput)));
+
+} // namespace request_resolve
+
+/**
+ * Folds an elementwise option pack into an OpRequest. The pack must already
+ * satisfy the operation family's validation (exactly one active option, at
+ * most one population option).
+ */
+template <VectorTag Tag, typename... Options>
+VECOPS_ALWAYS_INLINE auto resolve_op_request(Options&&... options) {
+  using Request = OpRequest<
+      Tag,
+      request_resolve::op_active_kind_of<Options...>,
+      request_resolve::op_inactive_kind_of<Options...>>;
+  Request request;
+  if constexpr (Request::active_kind == Active::Masked) {
+    request.mask = &find_option<IsMaskedOption>(options...).value;
+  }
+  if constexpr (Request::inactive_kind == Inactive::MergeVector) {
+    request.merge_vector =
+        &find_option<IsVectorMergeOption>(options...).value;
+  }
+  if constexpr (Request::inactive_kind == Inactive::MergeScalar) {
+    request.merge_scalar =
+        find_option<IsScalarMergeOption>(options...).value;
+  }
+  if constexpr (Request::inactive_kind == Inactive::MergeMask) {
+    request.mask_merge =
+        &find_option<IsMaskMergeOption>(options...).value;
+  }
+  return request;
+}
+
 /**
  * Folds a validated `load_convert` option pack into a LoadConvertRequest.
  * The pack must already satisfy

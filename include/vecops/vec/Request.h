@@ -110,6 +110,38 @@ struct StoreRequest {
   const IndexVector* indices = nullptr;     ///< Addr == Indexed.
 };
 
+/** Inactive-lane population policy for elementwise operations. */
+enum class Inactive {
+  PreserveInput,  ///< Inactive lanes keep the first operand's value.
+  Zero,           ///< Inactive lanes read as zero.
+  MergeVector,    ///< Inactive lanes read the merge vector.
+  MergeScalar,    ///< Inactive lanes read the merge scalar.
+  MergeMask,      ///< Mask-result operations merge the inactive mask bits.
+};
+
+/**
+ * @brief Resolved descriptor for elementwise operations.
+ *
+ * Covers arithmetic, bit, and comparison option surfaces: an active kind
+ * (masked/unmasked — elementwise calls have no first-count form) and an
+ * inactive-lane policy. Vector values are referenced, never stored, exactly
+ * like the memory requests.
+ */
+template <
+    VectorTag Tag,
+    Active A = Active::Unmasked,
+    Inactive I = Inactive::PreserveInput>
+struct OpRequest {
+  using TagType = Tag;
+  static constexpr Active active_kind = A;
+  static constexpr Inactive inactive_kind = I;
+
+  const Mask<Tag>* mask = nullptr;          ///< A == Masked.
+  const Vec<Tag>* merge_vector = nullptr;   ///< I == MergeVector.
+  ElementOf<Tag> merge_scalar = ElementOf<Tag>{};  ///< I == MergeScalar.
+  const Mask<Tag>* mask_merge = nullptr;    ///< I == MergeMask.
+};
+
 /**
  * @brief Resolved descriptor for `load_convert`.
  *
