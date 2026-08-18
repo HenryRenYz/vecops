@@ -99,12 +99,17 @@
 #endif
 
 /**
- * Unroll pragma for loop
+ * Loop unroll controls.
  */
 #if defined(COMPILER_GCC) || defined(COMPILER_CLANG)
 #define VECOPS_UNROLL _Pragma("GCC unroll 16")
+#define VECOPS_NOUNROLL _Pragma("GCC unroll 1")
 #elif defined(COMPILER_MSVC)
 #define VECOPS_UNROLL __pragma(loop(unroll))
+#define VECOPS_NOUNROLL
+#else
+#define VECOPS_UNROLL
+#define VECOPS_NOUNROLL
 #endif
 
 /**
