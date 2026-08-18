@@ -330,12 +330,25 @@ foreach(_SOURCE_BYTES IN ITEMS 1 2 4 8)
         DEFINITIONS VECOPS_TEST_SOURCE_BYTES=${_SOURCE_BYTES}
         LABELS vec vec_conversion vec_exhaustive
     )
-    add_multiarch_executable(VecConversionMemoryMatrix${_SOURCE_BYTES}Test
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ConversionMemoryMatrixTest.cpp
-        ARCH ${VEC_BASE_ARCH}
-        DEFINITIONS VECOPS_TEST_SOURCE_BYTES=${_SOURCE_BYTES}
-        LABELS vec vec_conversion vec_exhaustive
-    )
+endforeach()
+
+# ConversionMemoryMatrix is split per source element type: one heavy TU per
+# type keeps parallel build wall time low while preserving full coverage.
+set(_CONV_MEM_TYPES_1 vecops::int8_t vecops::uint8_t)
+set(_CONV_MEM_TYPES_2 vecops::bfloat16_t vecops::float16_t vecops::int16_t vecops::uint16_t)
+set(_CONV_MEM_TYPES_4 vecops::float32_t vecops::int32_t vecops::uint32_t)
+set(_CONV_MEM_TYPES_8 vecops::float64_t vecops::int64_t vecops::uint64_t)
+foreach(_SOURCE_BYTES IN ITEMS 1 2 4 8)
+    foreach(_SOURCE_ELEM IN ITEMS ${_CONV_MEM_TYPES_${_SOURCE_BYTES}})
+        string(REPLACE "vecops::" "" _ELEM_CLEAN "${_SOURCE_ELEM}")
+        add_multiarch_executable(VecConversionMemory${_SOURCE_BYTES}${_ELEM_CLEAN}Test
+            FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/ConversionMemoryMatrixTest.cpp
+            ARCH ${VEC_BASE_ARCH}
+            DEFINITIONS VECOPS_TEST_SOURCE_BYTES=${_SOURCE_BYTES}
+                       VECOPS_TEST_SOURCE_ELEM=${_SOURCE_ELEM}
+            LABELS vec vec_conversion vec_exhaustive
+        )
+    endforeach()
 endforeach()
 
 add_multiarch_executable(TensorTransformTest
@@ -345,6 +358,10 @@ add_multiarch_executable(TensorTransformTest
 
 add_multiarch_executable(LayerNormTest
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/LayerNormTest.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/ops/LayerNormDTypeFp16Test.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/ops/LayerNormDTypeFp32Test.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/ops/LayerNormDTypeFp64Test.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/ops/LayerNormDTypeBf16Test.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
     ARCH ${VECOPS_TENSOR_KERNEL_ARCH}
 )

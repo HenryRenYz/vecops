@@ -18,7 +18,9 @@ namespace vec = vecops::vec;
 
 namespace {
 
-#if VECOPS_TEST_SOURCE_BYTES == 1
+#if defined(VECOPS_TEST_SOURCE_ELEM)
+using SourceTypes = ::testing::Types<VECOPS_TEST_SOURCE_ELEM>;
+#elif VECOPS_TEST_SOURCE_BYTES == 1
 using SourceTypes = ::testing::Types<vecops::int8_t, vecops::uint8_t>;
 #elif VECOPS_TEST_SOURCE_BYTES == 2
 using SourceTypes = ::testing::Types<
