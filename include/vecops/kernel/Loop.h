@@ -13,6 +13,7 @@
 #include "vecops/CoreDefs.h"
 #include "vecops/Assertion.h"
 #include "vecops/tensor/DataAccess.h"
+#include "vecops/vec/Vec.h"
 
 /**
  * @file Loop.h
@@ -32,8 +33,9 @@
  * | `loop::for_each_with_index<Is...>` | Traverse and pass current indices to `fn` |
  * | `loop::for_each_dims_with_index<N>`| Traverse `0..N - 1` and pass indices      |
  * | `loop::*_with_index_tuple`         | Pass indices as one tuple before slices   |
- * | `loop::scan`                       | Chunked 1D scan with carry                |
- * | `loop::map`                        | Chunked 1D map without carry              |
+ * | `loop::scan`                       | Chunked 1D scan with scalar-sized chunks  |
+ * | `loop::map`                        | Chunked or vector-block map               |
+ * | `loop::fold`                       | Vector-block fold with typed carries      |
  *
  * ## Logical dimensions and alignment
  *
@@ -106,6 +108,12 @@
  * in an array/tuple; this permits SVE sizeless vector carries. Its combine
  * function must describe an associative reduction with the supplied identity.
  *
+ * The vector-Tag overloads of `map` and `fold` instead grow one base Tag into
+ * full and tail multi-word Tags. A callback therefore sees one wide block,
+ * rather than repeated calls produced by a source-level unroll. `fold` creates
+ * reduction and invariant carries as independent automatic variables so it
+ * also supports sizeless SVE vectors.
+ *
  * ## Usage overview
  *
  * @code
@@ -163,6 +171,11 @@ namespace vecops::kernel::loop {
 
 using namespace ::vecops::meta;
 using namespace ::vecops::tensor;
+
+enum class TailCarryPolicy {
+  independent,
+  reuse_prefix,
+};
 
 namespace details {
 
@@ -340,6 +353,313 @@ VECOPS_ALWAYS_INLINE void invoke_remaining_map_chunks(
   if constexpr (Lane + 1 < Unroll) {
     invoke_remaining_map_chunks<Lane + 1, Unroll>(
         base, remaining, step, fn);
+  }
+}
+
+// ======================== Vector Block Traversal ========================
+
+consteval int floor_log2_positive(int value) {
+  int power = 0;
+  while (value > 1) {
+    value >>= 1;
+    ++power;
+  }
+  return power;
+}
+
+template <::vecops::vec::VectorTag Tag, int Power>
+struct GrowVectorTag {
+  using Type = typename GrowVectorTag<
+      ::vecops::vec::Twice<Tag>, Power - 1>::Type;
+};
+
+template <::vecops::vec::VectorTag Tag>
+struct GrowVectorTag<Tag, 0> {
+  using Type = Tag;
+};
+
+template <::vecops::vec::VectorTag Tag, int Factor,
+          bool Scalable = ::vecops::vec::is_scalable_tag<Tag>>
+struct SuggestedFactorTag;
+
+template <::vecops::vec::VectorTag Tag, int Factor>
+struct SuggestedFactorTag<Tag, Factor, true> {
+  static_assert(Factor > 0, "vector loop factor must be positive");
+  static_assert(
+      ::vecops::vec::scale_power<Tag> <= VEC_MAX_POW,
+      "base vector tag exceeds the backend multi-word limit");
+  static constexpr int requested_power = floor_log2_positive(Factor);
+  static constexpr int available_power =
+      VEC_MAX_POW - ::vecops::vec::scale_power<Tag>;
+  static constexpr int actual_power =
+      requested_power < available_power ? requested_power : available_power;
+  using Type = typename GrowVectorTag<Tag, actual_power>::Type;
+};
+
+template <::vecops::vec::VectorTag Tag, int Factor>
+struct SuggestedFactorTag<Tag, Factor, false> {
+  static_assert(Factor > 0, "vector loop factor must be positive");
+  static constexpr int requested_power = floor_log2_positive(Factor);
+  static constexpr int actual_power = []() consteval {
+    constexpr nint_t max_word_lanes =
+        static_cast<nint_t>(MAX_VEC_WIDTH / 8) /
+        static_cast<nint_t>(sizeof(::vecops::vec::ElementOf<Tag>));
+    constexpr nint_t max_lanes = max_word_lanes << VEC_MAX_POW;
+    nint_t lanes = ::vecops::vec::fixed_lanes<Tag>;
+    int power = 0;
+    while (power < requested_power && lanes <= max_lanes / 2) {
+      lanes *= 2;
+      ++power;
+    }
+    return power;
+  }();
+  using Type = typename GrowVectorTag<Tag, actual_power>::Type;
+};
+
+template <::vecops::vec::VectorTag Tag, int Factor>
+using SuggestedFactorTagT = typename SuggestedFactorTag<Tag, Factor>::Type;
+
+template <::vecops::vec::VectorTag ParentTag,
+          ::vecops::vec::VectorTag ChildTag>
+VECOPS_ALWAYS_INLINE auto vector_prefix(
+    ParentTag parent_tag, ChildTag child_tag,
+    ::vecops::vec::Vec<ParentTag> value) {
+  if constexpr (std::same_as<ParentTag, ChildTag>) {
+    return value;
+  } else {
+    using HalfTag = ::vecops::vec::Half<ParentTag>;
+    return vector_prefix(
+        HalfTag{}, child_tag,
+        ::vecops::vec::lower(parent_tag, value));
+  }
+}
+
+template <::vecops::vec::VectorTag ParentTag,
+          ::vecops::vec::VectorTag ChildTag>
+VECOPS_ALWAYS_INLINE ::vecops::vec::Vec<ParentTag> replace_vector_prefix(
+    ParentTag parent_tag, ChildTag child_tag,
+    ::vecops::vec::Vec<ParentTag> value,
+    ::vecops::vec::Vec<ChildTag> prefix) {
+  if constexpr (std::same_as<ParentTag, ChildTag>) {
+    return prefix;
+  } else {
+    using HalfTag = ::vecops::vec::Half<ParentTag>;
+    auto lower = ::vecops::vec::lower(parent_tag, value);
+    lower = replace_vector_prefix(HalfTag{}, child_tag, lower, prefix);
+    return ::vecops::vec::concat(
+        parent_tag, lower, ::vecops::vec::upper(parent_tag, value));
+  }
+}
+
+template <typename T, typename Reduction>
+struct VectorReductionDefinition {
+  T& result;
+  using ReductionType = Reduction;
+};
+
+template <typename T>
+struct VectorInvariantDefinition {
+  const T& value;
+};
+
+template <typename T>
+struct IsVectorReductionDefinition : std::false_type {};
+
+template <typename T, typename Reduction>
+struct IsVectorReductionDefinition<VectorReductionDefinition<T, Reduction>>
+    : std::true_type {};
+
+template <typename T>
+inline constexpr bool is_vector_reduction_definition_v =
+    IsVectorReductionDefinition<std::remove_cvref_t<T>>::value;
+
+template <typename T>
+struct IsVectorInvariantDefinition : std::false_type {};
+
+template <typename T>
+struct IsVectorInvariantDefinition<VectorInvariantDefinition<T>>
+    : std::true_type {};
+
+template <typename T>
+inline constexpr bool is_vector_invariant_definition_v =
+    IsVectorInvariantDefinition<std::remove_cvref_t<T>>::value;
+
+template <typename T>
+inline constexpr bool is_vector_carry_definition_v =
+    is_vector_reduction_definition_v<T> ||
+    is_vector_invariant_definition_v<T>;
+
+template <typename... Definitions>
+struct AreTwoVectorReductions : std::false_type {};
+
+template <typename A, typename B>
+struct AreTwoVectorReductions<A, B> : std::bool_constant<
+    is_vector_reduction_definition_v<A> &&
+    is_vector_reduction_definition_v<B>> {};
+
+template <typename... Definitions>
+inline constexpr bool are_two_vector_reductions_v =
+    AreTwoVectorReductions<Definitions...>::value;
+
+template <typename... Definitions>
+struct AreTwoVectorInvariants : std::false_type {};
+
+template <typename A, typename B>
+struct AreTwoVectorInvariants<A, B> : std::bool_constant<
+    is_vector_invariant_definition_v<A> &&
+    is_vector_invariant_definition_v<B>> {};
+
+template <typename... Definitions>
+inline constexpr bool are_two_vector_invariants_v =
+    AreTwoVectorInvariants<Definitions...>::value;
+
+template <typename Reduction, ::vecops::vec::VectorTag Tag>
+VECOPS_ALWAYS_INLINE ::vecops::vec::Vec<Tag> combine_reduction_carries(
+    Tag, ::vecops::vec::Vec<Tag> lhs,
+    ::vecops::vec::Vec<Tag> rhs) {
+  if constexpr (std::same_as<Reduction, ::vecops::vec::ReduceAddOp>) {
+    return ::vecops::vec::add(lhs, rhs);
+  } else if constexpr (
+      std::same_as<Reduction, ::vecops::vec::ReduceMaxOp>) {
+    return ::vecops::vec::max(lhs, rhs);
+  } else {
+    static_assert(
+        std::same_as<Reduction, ::vecops::vec::ReduceMinOp>,
+        "unsupported vector loop reduction");
+    return ::vecops::vec::min(lhs, rhs);
+  }
+}
+
+template <::vecops::vec::VectorTag ToTag,
+          ::vecops::vec::VectorTag FromTag>
+VECOPS_ALWAYS_INLINE ::vecops::vec::Vec<ToTag> repeat_invariant_vector(
+    ToTag to, FromTag from, ::vecops::vec::Vec<FromTag> value) {
+  if constexpr (std::same_as<ToTag, FromTag>) {
+    return value;
+  } else {
+    using HalfTag = ::vecops::vec::Half<ToTag>;
+    auto half = repeat_invariant_vector(HalfTag{}, from, value);
+    return ::vecops::vec::concat(to, half, half);
+  }
+}
+
+template <::vecops::vec::VectorTag FullTag,
+          ::vecops::vec::VectorTag BaseTag, typename Definition>
+VECOPS_ALWAYS_INLINE auto make_full_invariant(
+    FullTag full_tag, BaseTag base_tag, const Definition& definition) {
+  using Value = std::remove_cvref_t<decltype(definition.value)>;
+  if constexpr (std::same_as<Value, ::vecops::vec::ElementOf<BaseTag>>) {
+    return ::vecops::vec::fill(full_tag, definition.value);
+  } else {
+    static_assert(
+        std::same_as<Value, ::vecops::vec::Vec<BaseTag>>,
+        "loop::invariant requires ElementOf<Tag> or Vec<Tag>");
+    return repeat_invariant_vector(
+        full_tag, base_tag, definition.value);
+  }
+}
+
+template <std::size_t Wanted, std::size_t Current = 0,
+          typename Fn, typename First, typename... Rest>
+VECOPS_ALWAYS_INLINE decltype(auto) invoke_vector_carry(
+    Fn&& fn, First& first, Rest&... rest) {
+  if constexpr (Wanted == Current) {
+    return std::forward<Fn>(fn)(first);
+  } else {
+    static_assert(sizeof...(Rest) > 0, "vector carry index out of range");
+    return invoke_vector_carry<Wanted, Current + 1>(
+        std::forward<Fn>(fn), rest...);
+  }
+}
+
+template <std::size_t I, typename DefinitionTuple,
+          ::vecops::vec::VectorTag BaseTag,
+          ::vecops::vec::VectorTag FullTag,
+          typename Use, typename... FullCarries>
+VECOPS_ALWAYS_INLINE void with_vector_full_carries(
+    DefinitionTuple& definitions, BaseTag base_tag, FullTag full_tag,
+    Use& use, FullCarries&... full_carries) {
+  if constexpr (I == std::tuple_size_v<std::remove_reference_t<DefinitionTuple>>) {
+    use(full_carries...);
+  } else {
+    auto&& definition = std::get<I>(definitions);
+    using Definition = std::remove_cvref_t<decltype(definition)>;
+    if constexpr (is_vector_reduction_definition_v<Definition>) {
+      using Reduction = typename Definition::ReductionType;
+      using Result = std::remove_cvref_t<decltype(definition.result)>;
+      static_assert(
+          std::same_as<Result, ::vecops::vec::ElementOf<BaseTag>>,
+          "vector reduction result must be ElementOf<Tag>");
+      auto carry = ::vecops::vec::fill(
+          full_tag,
+          ::vecops::vec::details::reduction_identity<
+              Reduction, ::vecops::vec::ElementOf<BaseTag>>());
+      with_vector_full_carries<I + 1>(
+          definitions, base_tag, full_tag, use,
+          full_carries..., carry);
+      definition.result = Reduction{}(full_tag, carry);
+    } else {
+      static_assert(is_vector_invariant_definition_v<Definition>);
+      auto carry = make_full_invariant(full_tag, base_tag, definition);
+      const auto& const_carry = carry;
+      with_vector_full_carries<I + 1>(
+          definitions, base_tag, full_tag, use,
+          full_carries..., const_carry);
+    }
+  }
+}
+
+template <std::size_t I, TailCarryPolicy Policy,
+          typename DefinitionTuple,
+          ::vecops::vec::VectorTag FullTag,
+          ::vecops::vec::VectorTag TailTag,
+          typename FullDispatch, typename Use,
+          typename... TailCarries>
+VECOPS_ALWAYS_INLINE void with_vector_tail_carries(
+    DefinitionTuple& definitions, FullTag full_tag, TailTag tail_tag,
+    FullDispatch& full_dispatch, Use& use,
+    TailCarries&... tail_carries) {
+  if constexpr (I == std::tuple_size_v<std::remove_reference_t<DefinitionTuple>>) {
+    use(tail_carries...);
+  } else {
+    auto&& definition = std::get<I>(definitions);
+    using Definition = std::remove_cvref_t<decltype(definition)>;
+    full_dispatch.template operator()<I>(
+        [&](auto& full_carry) VECOPS_INLINE_LAMBDA {
+          if constexpr (is_vector_reduction_definition_v<Definition>) {
+            using Reduction = typename Definition::ReductionType;
+            auto tail_carry = [&]() VECOPS_INLINE_LAMBDA {
+              if constexpr (Policy == TailCarryPolicy::reuse_prefix) {
+                return vector_prefix(full_tag, tail_tag, full_carry);
+              } else {
+                return ::vecops::vec::fill(
+                    tail_tag,
+                    ::vecops::vec::details::reduction_identity<
+                        Reduction, ::vecops::vec::ElementOf<TailTag>>());
+              }
+            }();
+            with_vector_tail_carries<I + 1, Policy>(
+                definitions, full_tag, tail_tag,
+                full_dispatch, use, tail_carries..., tail_carry);
+            if constexpr (Policy == TailCarryPolicy::independent) {
+              tail_carry = combine_reduction_carries<Reduction>(
+                  tail_tag,
+                  vector_prefix(full_tag, tail_tag, full_carry),
+                  tail_carry);
+            }
+            full_carry = replace_vector_prefix(
+                full_tag, tail_tag, full_carry, tail_carry);
+          } else {
+            static_assert(is_vector_invariant_definition_v<Definition>);
+            auto tail_carry = vector_prefix(
+                full_tag, tail_tag, full_carry);
+            const auto& const_tail_carry = tail_carry;
+            with_vector_tail_carries<I + 1, Policy>(
+                definitions, full_tag, tail_tag,
+                full_dispatch, use,
+                tail_carries..., const_tail_carry);
+          }
+        });
   }
 }
 
@@ -995,6 +1315,7 @@ VECOPS_ALWAYS_INLINE auto scan(
  * @see scan
  */
 template <int Unroll = 1, typename Fn, typename N, typename Step>
+  requires (!::vecops::vec::VectorTag<std::remove_cvref_t<N>>)
 VECOPS_ALWAYS_INLINE void map(N n, Step step, Fn&& fn) {
   static_assert(Unroll > 0, "map unroll must be positive");
   auto n_value = details::to_hop_value(n);
@@ -1029,6 +1350,269 @@ VECOPS_ALWAYS_INLINE void map(N n, Step step, Fn&& fn) {
         fn_ref(i, Any{n_int - i});
       }
     }
+  }
+}
+
+/** Defines an additive vector carry and overwrites `result` on completion. */
+template <typename T>
+VECOPS_ALWAYS_INLINE auto reduce_add(T& result) {
+  return details::VectorReductionDefinition<
+      T, ::vecops::vec::ReduceAddOp>{result};
+}
+
+/** Defines a maximum vector carry and overwrites `result` on completion. */
+template <typename T>
+VECOPS_ALWAYS_INLINE auto reduce_max(T& result) {
+  return details::VectorReductionDefinition<
+      T, ::vecops::vec::ReduceMaxOp>{result};
+}
+
+/** Defines a minimum vector carry and overwrites `result` on completion. */
+template <typename T>
+VECOPS_ALWAYS_INLINE auto reduce_min(T& result) {
+  return details::VectorReductionDefinition<
+      T, ::vecops::vec::ReduceMinOp>{result};
+}
+
+/**
+ * Defines a read-only loop invariant. Scalars are filled into each block Tag;
+ * a Vec<BaseTag> is repeated word-wise to cover the actual block Tag.
+ */
+template <typename T>
+VECOPS_ALWAYS_INLINE auto invariant(const T& value) {
+  return details::VectorInvariantDefinition<T>{value};
+}
+
+/**
+ * @brief Traverse `[0, n)` with full and tail multi-word vector Tags.
+ *
+ * The factors are compile-time suggestions relative to `base_tag`. They are
+ * rounded down to powers of two and capped before an unsupported backend Tag
+ * is instantiated. The callback receives `(tag, i, active)` where `active` is
+ * `vec::opt::unmasked` for full blocks and `vec::opt::first(n - i)` for tail
+ * blocks.
+ */
+template <int FullFactor = 1, int TailFactor = 1,
+          ::vecops::vec::VectorTag Tag, typename N, typename Fn>
+VECOPS_ALWAYS_INLINE void map(Tag base_tag, N n, Fn&& block) {
+  static_assert(FullFactor > 0, "map full factor must be positive");
+  static_assert(TailFactor > 0, "map tail factor must be positive");
+  static_assert(
+      TailFactor <= FullFactor,
+      "map tail factor cannot exceed full factor");
+
+  using FullTag = details::SuggestedFactorTagT<Tag, FullFactor>;
+  using TailTag = details::SuggestedFactorTagT<Tag, TailFactor>;
+  auto n_value = details::to_hop_value(n);
+  if constexpr (details::is_const_value_v<decltype(n_value)>) {
+    static_assert(
+        details::ConstValue<std::remove_cvref_t<decltype(n_value)>>::value >= 0,
+        "map n must be non-negative");
+  }
+  const nint_t n_int = static_cast<nint_t>(n_value);
+  VECOPS_ASSERT(n_int >= 0, "map n must be non-negative");
+
+  FullTag full_tag{};
+  TailTag tail_tag{};
+  const nint_t full_lanes = ::vecops::vec::size(full_tag);
+  const nint_t tail_lanes = ::vecops::vec::size(tail_tag);
+  auto&& block_ref = block;
+  nint_t i = 0;
+  for (; i + full_lanes <= n_int; i += full_lanes) {
+    block_ref(full_tag, i, ::vecops::vec::opt::unmasked);
+  }
+  VECOPS_NOUNROLL
+  while (i < n_int) {
+    block_ref(tail_tag, i, ::vecops::vec::opt::first(n_int - i));
+    i += tail_lanes;
+  }
+  (void)base_tag;
+}
+
+/**
+ * @brief Vector block traversal with mutable reductions and read-only
+ *        invariants.
+ *
+ * Reduction carries are independent automatic variables and are never stored
+ * in an aggregate, so this overload supports sizeless SVE vectors. Definitions
+ * are passed to the callback in declaration order after `(tag, i, active)`.
+ */
+template <
+    int FullFactor = 1, int TailFactor = 1,
+    TailCarryPolicy Policy = TailCarryPolicy::independent,
+    ::vecops::vec::VectorTag Tag, typename N, typename Fn,
+    typename... Definitions>
+VECOPS_ALWAYS_INLINE void fold(
+    Tag base_tag, N n, Fn&& block, Definitions&&... definitions) {
+  static_assert(FullFactor > 0, "fold full factor must be positive");
+  static_assert(TailFactor > 0, "fold tail factor must be positive");
+  static_assert(
+      TailFactor <= FullFactor,
+      "fold tail factor cannot exceed full factor");
+  static_assert(
+      sizeof...(Definitions) > 0,
+      "fold requires at least one carry definition");
+  static_assert(
+      (details::is_vector_carry_definition_v<Definitions> && ...),
+      "fold accepts only reduce_add/max/min or invariant definitions");
+
+  using FullTag = details::SuggestedFactorTagT<Tag, FullFactor>;
+  using TailTag = details::SuggestedFactorTagT<Tag, TailFactor>;
+  auto n_value = details::to_hop_value(n);
+  if constexpr (details::is_const_value_v<decltype(n_value)>) {
+    static_assert(
+        details::ConstValue<std::remove_cvref_t<decltype(n_value)>>::value >= 0,
+        "fold n must be non-negative");
+  }
+  const nint_t n_int = static_cast<nint_t>(n_value);
+  VECOPS_ASSERT(n_int >= 0, "fold n must be non-negative");
+
+  FullTag full_tag{};
+  TailTag tail_tag{};
+  const nint_t full_lanes = ::vecops::vec::size(full_tag);
+  const nint_t tail_lanes = ::vecops::vec::size(tail_tag);
+  auto definition_tuple = std::forward_as_tuple(definitions...);
+  auto&& block_ref = block;
+
+  if constexpr (details::are_two_vector_reductions_v<Definitions...>) {
+    auto&& definition0 = std::get<0>(definition_tuple);
+    auto&& definition1 = std::get<1>(definition_tuple);
+    using Definition0 = std::remove_cvref_t<decltype(definition0)>;
+    using Definition1 = std::remove_cvref_t<decltype(definition1)>;
+    using Reduction0 = typename Definition0::ReductionType;
+    using Reduction1 = typename Definition1::ReductionType;
+    static_assert(std::same_as<
+        std::remove_cvref_t<decltype(definition0.result)>,
+        ::vecops::vec::ElementOf<Tag>>);
+    static_assert(std::same_as<
+        std::remove_cvref_t<decltype(definition1.result)>,
+        ::vecops::vec::ElementOf<Tag>>);
+
+    auto full_carry0 = ::vecops::vec::fill(
+        full_tag,
+        ::vecops::vec::details::reduction_identity<
+            Reduction0, ::vecops::vec::ElementOf<Tag>>());
+    auto full_carry1 = ::vecops::vec::fill(
+        full_tag,
+        ::vecops::vec::details::reduction_identity<
+            Reduction1, ::vecops::vec::ElementOf<Tag>>());
+    nint_t i = 0;
+    for (; i + full_lanes <= n_int; i += full_lanes) {
+      block_ref(
+          full_tag, i, ::vecops::vec::opt::unmasked,
+          full_carry0, full_carry1);
+    }
+    if (i < n_int) {
+      auto tail_carry0 = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (Policy == TailCarryPolicy::reuse_prefix) {
+          return details::vector_prefix(
+              full_tag, tail_tag, full_carry0);
+        } else {
+          return ::vecops::vec::fill(
+              tail_tag,
+              ::vecops::vec::details::reduction_identity<
+                  Reduction0, ::vecops::vec::ElementOf<Tag>>());
+        }
+      }();
+      auto tail_carry1 = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (Policy == TailCarryPolicy::reuse_prefix) {
+          return details::vector_prefix(
+              full_tag, tail_tag, full_carry1);
+        } else {
+          return ::vecops::vec::fill(
+              tail_tag,
+              ::vecops::vec::details::reduction_identity<
+                  Reduction1, ::vecops::vec::ElementOf<Tag>>());
+        }
+      }();
+      VECOPS_NOUNROLL
+      while (i < n_int) {
+        block_ref(
+            tail_tag, i, ::vecops::vec::opt::first(n_int - i),
+            tail_carry0, tail_carry1);
+        i += tail_lanes;
+      }
+      if constexpr (Policy == TailCarryPolicy::independent) {
+        tail_carry0 = details::combine_reduction_carries<Reduction0>(
+            tail_tag,
+            details::vector_prefix(full_tag, tail_tag, full_carry0),
+            tail_carry0);
+        tail_carry1 = details::combine_reduction_carries<Reduction1>(
+            tail_tag,
+            details::vector_prefix(full_tag, tail_tag, full_carry1),
+            tail_carry1);
+      }
+      full_carry0 = details::replace_vector_prefix(
+          full_tag, tail_tag, full_carry0, tail_carry0);
+      full_carry1 = details::replace_vector_prefix(
+          full_tag, tail_tag, full_carry1, tail_carry1);
+    }
+    definition0.result = Reduction0{}(full_tag, full_carry0);
+    definition1.result = Reduction1{}(full_tag, full_carry1);
+  } else if constexpr (
+      details::are_two_vector_invariants_v<Definitions...>) {
+    auto&& definition0 = std::get<0>(definition_tuple);
+    auto&& definition1 = std::get<1>(definition_tuple);
+    auto full_carry0 = details::make_full_invariant(
+        full_tag, base_tag, definition0);
+    auto full_carry1 = details::make_full_invariant(
+        full_tag, base_tag, definition1);
+    const auto& const_full_carry0 = full_carry0;
+    const auto& const_full_carry1 = full_carry1;
+    nint_t i = 0;
+    for (; i + full_lanes <= n_int; i += full_lanes) {
+      block_ref(
+          full_tag, i, ::vecops::vec::opt::unmasked,
+          const_full_carry0, const_full_carry1);
+    }
+    if (i < n_int) {
+      auto tail_carry0 = details::vector_prefix(
+          full_tag, tail_tag, full_carry0);
+      auto tail_carry1 = details::vector_prefix(
+          full_tag, tail_tag, full_carry1);
+      const auto& const_tail_carry0 = tail_carry0;
+      const auto& const_tail_carry1 = tail_carry1;
+      VECOPS_NOUNROLL
+      while (i < n_int) {
+        block_ref(
+            tail_tag, i, ::vecops::vec::opt::first(n_int - i),
+            const_tail_carry0, const_tail_carry1);
+        i += tail_lanes;
+      }
+    }
+  } else {
+    auto use_full_carries = [&](auto&... full_carries)
+        VECOPS_INLINE_LAMBDA {
+      nint_t i = 0;
+      for (; i + full_lanes <= n_int; i += full_lanes) {
+        block_ref(
+            full_tag, i, ::vecops::vec::opt::unmasked,
+            full_carries...);
+      }
+      if (i < n_int) {
+        auto full_dispatch = [&]<std::size_t Wanted>(auto&& fn)
+            VECOPS_INLINE_LAMBDA -> decltype(auto) {
+          return details::invoke_vector_carry<Wanted>(
+              std::forward<decltype(fn)>(fn), full_carries...);
+        };
+        auto use_tail_carries = [&](auto&... tail_carries)
+            VECOPS_INLINE_LAMBDA {
+          VECOPS_NOUNROLL
+          while (i < n_int) {
+            block_ref(
+                tail_tag, i,
+                ::vecops::vec::opt::first(n_int - i),
+                tail_carries...);
+            i += tail_lanes;
+          }
+        };
+        details::with_vector_tail_carries<0, Policy>(
+            definition_tuple, full_tag, tail_tag,
+            full_dispatch, use_tail_carries);
+      }
+    };
+    details::with_vector_full_carries<0>(
+        definition_tuple, base_tag, full_tag, use_full_carries);
   }
 }
 

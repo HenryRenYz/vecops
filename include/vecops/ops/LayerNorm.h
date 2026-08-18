@@ -2,7 +2,6 @@
 #define VECOPS_OPS_LAYERNORM_H
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <type_traits>
 
@@ -163,8 +162,9 @@ public:
     if constexpr (UseSVE16) {
       kernel::loop::for_each_dims<PrefixRank>(
           [this, &workspace, &scale, &bias](
-              const auto& in_row, const auto& out_row) {
-            run_row_sve_16bit(
+              const auto& in_row, const auto& out_row)
+              VECOPS_INLINE_LAMBDA {
+            bind_sve_16bit_row(
                 workspace, in_row, scale, bias, out_row);
           },
           in, out);
@@ -188,16 +188,18 @@ public:
           if (in.input_layout().strides()[PrefixRank] == 1) {
             kernel::loop::for_each_dims<PrefixRank>(
                 [this, &workspace, &gamma, &beta](const auto& in_row,
-                                                  const auto& out_row) {
-                  run_row<tensor::AccessPlan::direct>(
+                                                  const auto& out_row)
+                    VECOPS_INLINE_LAMBDA {
+                  bind_row<tensor::AccessPlan::direct>(
                       workspace, in_row, gamma, beta, out_row);
                 },
                 in, out);
           } else {
             kernel::loop::for_each_dims<PrefixRank>(
                 [this, &workspace, &gamma, &beta](const auto& in_row,
-                                                  const auto& out_row) {
-                  run_row<tensor::AccessPlan::automatic>(
+                                                  const auto& out_row)
+                    VECOPS_INLINE_LAMBDA {
+                  bind_row<tensor::AccessPlan::automatic>(
                       workspace, in_row, gamma, beta, out_row);
                 },
                 in, out);
@@ -220,7 +222,7 @@ private:
     !defined(VECOPS_DISABLE_SVE_16BIT_LAYERNORM_FAST_PATH)
   template <typename InSpec, typename ScaleSpec, typename BiasSpec,
             typename OutSpec>
-  VECOPS_INLINE void run_row_sve_16bit(
+  VECOPS_ALWAYS_INLINE void bind_sve_16bit_row(
       kernel::WorkspaceView& workspace, const InSpec& in,
       const ScaleSpec& scale, const BiasSpec& bias,
       const OutSpec& out) const {
@@ -241,225 +243,133 @@ private:
     using YPolicy = tensor::OutputAccessPolicy<
         0, tensor::AccessPlan::direct, ConversionOrder,
         vec::cvt::Saturate, tensor::DefaultMemoryPolicy, true>;
-    using F32PairTag = vec::ScalableTag<float32_t, 1>;
-    using F32QuadTag = vec::ScalableTag<float32_t, 2>;
+    using F32Tag = vec::ScalableTag<float32_t, 0>;
 
-    const nint_t n = in.input_layout().shape()[0];
-    kernel::with_operands(
-        workspace, tensor::operand(in, XPolicy{}),
-        tensor::operand(scale, ParamPolicy{}),
-        tensor::operand(bias, ParamPolicy{}),
-        tensor::operand(out, YPolicy{}),
-        [this, n](auto& x, auto& gamma, auto& beta, auto& y) {
-          F32QuadTag full_tag{};
-          F32PairTag tail_tag{};
-          const nint_t full_lanes = vec::size(full_tag);
-          const nint_t tail_lanes = vec::size(tail_tag);
-          auto sum = vec::zeros(full_tag);
-          auto sum_sq = vec::zeros(full_tag);
-          float32_t tail_sum = 0.0f;
-          float32_t tail_sum_sq = 0.0f;
-          nint_t col = 0;
-          for (; col + full_lanes <= n; col += full_lanes) {
-            if constexpr (Prefetch::enabled) {
-              if (col + (Prefetch::ahead_blocks + 1) * full_lanes <= n) {
-                x.prefetch(
-                    full_tag,
-                    tensor::coord(
-                        col + Prefetch::ahead_blocks * full_lanes),
-                    vec::opt::unmasked);
-              }
-            }
-            auto value = x.load(
-                full_tag, tensor::coord(col), vec::opt::unmasked);
-            sum = vec::add(sum, value);
-            sum_sq = vec::fmadd(value, value, sum_sq);
-          }
-          while (col < n) {
-            const nint_t active = n - col;
-//            const nint_t active = std::min(n - col, tail_lanes);
-            auto value = x.load(
-                tail_tag, tensor::coord(col), vec::opt::first(active));
-            tail_sum += vec::reduce_add(tail_tag, value);
-            tail_sum_sq +=
-                vec::reduce_add(tail_tag, vec::mul(value, value));
-            col += tail_lanes;
-          }
-
-          const float32_t sum_value =
-              vec::reduce_add(full_tag, sum) + tail_sum;
-          const float32_t sum_sq_value =
-              vec::reduce_add(full_tag, sum_sq) + tail_sum_sq;
-          const float32_t inv_n = 1.0f / static_cast<float32_t>(n);
-          const float32_t mean = sum_value * inv_n;
-          const float32_t variance =
-              std::max(sum_sq_value * inv_n - mean * mean, 0.0f);
-          const float32_t rstd =
-              1.0f / std::sqrt(variance + config.eps);
-          const float32_t shift = -mean * rstd;
-          const auto full_rstd = vec::fill(full_tag, rstd);
-          const auto full_shift = vec::fill(full_tag, shift);
-          const auto tail_rstd = vec::fill(tail_tag, rstd);
-          const auto tail_shift = vec::fill(tail_tag, shift);
-
-          col = 0;
-          for (; col + full_lanes <= n; col += full_lanes) {
-            if constexpr (Prefetch::enabled) {
-              if (col + (Prefetch::ahead_blocks + 1) * full_lanes <= n) {
-                const auto future = tensor::coord(
-                    col + Prefetch::ahead_blocks * full_lanes);
-                x.prefetch(full_tag, future, vec::opt::unmasked);
-                gamma.prefetch(full_tag, future, vec::opt::unmasked);
-                beta.prefetch(full_tag, future, vec::opt::unmasked);
-              }
-            }
-            const auto position = tensor::coord(col);
-            auto value = x.load(
-                full_tag, position, vec::opt::unmasked);
-            auto scale_value = gamma.load(
-                full_tag, position, vec::opt::unmasked);
-            auto bias_value = beta.load(
-                full_tag, position, vec::opt::unmasked);
-            value = vec::fmadd(value, full_rstd, full_shift);
-            y.store(
-                full_tag, position,
-                vec::fmadd(value, scale_value, bias_value),
-                vec::opt::unmasked);
-          }
-          while (col < n) {
-            const nint_t active = n - col;
-//            const nint_t active = std::min(n - col, tail_lanes);
-            const auto position = tensor::coord(col);
-            auto value = x.load(
-                tail_tag, position, vec::opt::first(active));
-            auto scale_value = gamma.load(
-                tail_tag, position, vec::opt::first(active));
-            auto bias_value = beta.load(
-                tail_tag, position, vec::opt::first(active));
-            value = vec::fmadd(value, tail_rstd, tail_shift);
-            y.store(
-                tail_tag, position,
-                vec::fmadd(value, scale_value, bias_value),
-                vec::opt::first(active));
-            col += tail_lanes;
-          }
-          y.commit();
-        });
+    // Every fast-path operand is compile-time direct. Binding each one here
+    // avoids routing the row kernel through std::invoke; BiSheng otherwise
+    // outlines that wrapper despite the callback's always_inline attribute.
+    auto x = tensor::bind(in, XPolicy{}, workspace);
+    auto gamma = tensor::bind(scale, ParamPolicy{}, workspace);
+    auto beta = tensor::bind(bias, ParamPolicy{}, workspace);
+    auto y = tensor::bind(out, YPolicy{}, workspace);
+    run_row<
+        F32Tag, 4, 2, true,
+        kernel::loop::TailCarryPolicy::reuse_prefix, Prefetch>(
+        in, x, gamma, beta, y);
   }
 #endif
 
   template <tensor::AccessPlan InPlan, typename InSpec, typename ScaleAccess,
             typename BiasAccess, typename OutSpec>
-  VECOPS_INLINE void run_row(
+  VECOPS_ALWAYS_INLINE void bind_row(
       kernel::WorkspaceView& workspace, const InSpec& in,
       ScaleAccess& gamma, BiasAccess& beta, const OutSpec& out) const {
     static_assert(InSpec::InputTensor::Ndim == 1);
     using InPolicy = tensor::InputAccessPolicy<0, 2, InPlan>;
     using OutPolicy = tensor::OutputAccessPolicy<
         0, tensor::AccessPlan::direct>;
-    auto compute = [this, &in](
-        auto& x, auto& gamma, auto& beta, auto& y) VECOPS_INLINE_LAMBDA {
-          using FullTag = vec::Twice<vec::Twice<Tag>>;
-          FullTag full_tag{};
-          Tag tag{};
-          const nint_t n = in.input_layout().shape()[0];
-          const nint_t full_lanes = vec::size(full_tag);
-          const nint_t lanes = vec::size(tag);
-
-          nint_t col = 0;
-          auto sum = vec::zeros(full_tag);
-          auto sum_sq = vec::zeros(full_tag);
-          auto tail_sum = vec::zeros(tag);
-          auto tail_sum_sq = vec::zeros(tag);
-          for (; col + full_lanes <= n; col += full_lanes) {
-            auto value = x.load(
-                full_tag, tensor::coord(col), vec::opt::unmasked);
-            sum = vec::add(sum, value);
-            sum_sq = vec::fmadd(value, value, sum_sq);
-          }
-          while (col < n) {
-            const nint_t active = n - col;
-            auto value = x.load(
-                tag, tensor::coord(col), vec::opt::first(active));
-            tail_sum = vec::add(tail_sum, value);
-            tail_sum_sq = vec::fmadd(value, value, tail_sum_sq);
-            col += lanes;
-          }
-          using HalfTag = vec::Twice<Tag>;
-          HalfTag half_tag{};
-          const auto tail_half = vec::concat(
-              half_tag, tail_sum, vec::zeros(tag));
-          const auto tail_sq_half = vec::concat(
-              half_tag, tail_sum_sq, vec::zeros(tag));
-          sum = vec::add(
-              sum,
-              vec::concat(full_tag, tail_half, vec::zeros(half_tag)));
-          sum_sq = vec::add(
-              sum_sq,
-              vec::concat(
-                  full_tag, tail_sq_half, vec::zeros(half_tag)));
-          const ComputeType sum_value = vec::reduce_add(full_tag, sum);
-          const ComputeType sum_sq_value =
-              vec::reduce_add(full_tag, sum_sq);
-          const ComputeType inv_n =
-              ComputeType(1) / static_cast<ComputeType>(n);
-          const ComputeType mean = sum_value * inv_n;
-          const ComputeType variance =
-              std::max(sum_sq_value * inv_n - mean * mean, ComputeType(0));
-          const ComputeType rstd =
-              ComputeType(1) / std::sqrt(variance + config.eps);
-
-          const auto tail_mean = vec::fill(tag, mean);
-          const auto tail_rstd = vec::fill(tag, rstd);
-          col = 0;
-          // Keep sized multi-word aggregates non-const: GCC's SRA pass
-          // disqualifies read-only aggregate declarations after init.
-          auto full_mean = vec::fill(full_tag, mean);
-          auto full_rstd = vec::fill(full_tag, rstd);
-          for (; col + full_lanes <= n; col += full_lanes) {
-            write_block(
-                x, gamma, beta, y, full_tag, col,
-                full_mean, full_rstd, vec::opt::unmasked);
-          }
-          while (col < n) {
-            const nint_t active = n - col;
-            write_block(
-                x, gamma, beta, y, tag, col,
-                tail_mean, tail_rstd, vec::opt::first(active));
-            col += lanes;
-          }
-          y.commit();
-        };
     if constexpr (InPlan == tensor::AccessPlan::direct) {
       auto x = tensor::bind(in, InPolicy{}, workspace);
       auto y = tensor::bind(out, OutPolicy{}, workspace);
-      compute(x, gamma, beta, y);
+      run_row<
+          Tag, 4, 1, false,
+          kernel::loop::TailCarryPolicy::independent, tensor::NoPrefetch>(
+          in, x, gamma, beta, y);
     } else {
       kernel::with_operands(
           workspace, tensor::operand(in, InPolicy{}),
           tensor::operand(out, OutPolicy{}),
-          [&](auto& x, auto& y) { compute(x, gamma, beta, y); });
+          [this, &in, &gamma, &beta](auto& x, auto& y)
+              VECOPS_INLINE_LAMBDA {
+            run_row<
+                Tag, 4, 1, false,
+                kernel::loop::TailCarryPolicy::independent,
+                tensor::NoPrefetch>(in, x, gamma, beta, y);
+          });
     }
   }
 
-  template <typename X, typename Gamma, typename Beta, typename Y,
-            vec::VectorTag VTag, typename Active>
-  VECOPS_ALWAYS_INLINE static void write_block(
-      X& x, Gamma& gamma, Beta& beta, Y& y, VTag tag, nint_t col,
-      vec::Vec<VTag> mean, vec::Vec<VTag> rstd, Active active) {
-    auto xv = x.load(tag, tensor::coord(col), active);
-    auto gamma_v = gamma.load(tag, tensor::coord(col), active);
-    auto beta_v = beta.load(tag, tensor::coord(col), active);
-    if constexpr (
-        vec::num_words(VTag{}) > 1 && requires { sizeof(vec::Vec<VTag>); }) {
-      // Preserve the three independent load streams before starting their
-      // arithmetic. GCC otherwise shortens aggregate lifetimes word by word,
-      // reducing memory-level parallelism in the four-word loop.
-      std::atomic_signal_fence(std::memory_order_acquire);
-    }
-    auto normalized = vec::mul(vec::sub(xv, mean), rstd);
-    y.store(tag, tensor::coord(col),
-            vec::fmadd(normalized, gamma_v, beta_v), active);
+  template <vec::VectorTag BaseTag, int FullFactor, int TailFactor,
+            bool FusedShift, kernel::loop::TailCarryPolicy TailPolicy,
+            typename Prefetch,
+            typename InSpec,
+            typename X, typename Gamma, typename Beta, typename Y>
+  VECOPS_ALWAYS_INLINE void run_row(
+      const InSpec& in, X& x, Gamma& gamma, Beta& beta, Y& y) const {
+    static_assert(InSpec::InputTensor::Ndim == 1);
+
+    BaseTag base_tag{};
+    const nint_t n = in.input_layout().shape()[0];
+
+    ComputeType sum_value{};
+    ComputeType sum_sq_value{};
+    auto accumulate_block = [&, n](
+                                auto block_tag, nint_t col, auto active,
+                                auto& sum, auto& sum_sq)
+        VECOPS_INLINE_LAMBDA {
+      using Active = std::remove_cvref_t<decltype(active)>;
+      if constexpr (
+          Prefetch::enabled && std::same_as<Active, vec::opt::Unmasked>) {
+        const nint_t full_lanes = vec::size(block_tag);
+        if (col + (Prefetch::ahead_blocks + 1) * full_lanes <= n) {
+          x.prefetch(
+              block_tag,
+              tensor::coord(col + Prefetch::ahead_blocks * full_lanes),
+              vec::opt::unmasked);
+        }
+      }
+      auto value = x.load(block_tag, tensor::coord(col), active);
+      sum = vec::add(sum, value);
+      sum_sq = vec::fmadd(value, value, sum_sq);
+    };
+    kernel::loop::fold<FullFactor, TailFactor, TailPolicy>(
+        base_tag, n, accumulate_block,
+        kernel::loop::reduce_add(sum_value),
+        kernel::loop::reduce_add(sum_sq_value));
+
+    const ComputeType inv_n =
+        ComputeType(1) / static_cast<ComputeType>(n);
+    const ComputeType mean = sum_value * inv_n;
+    const ComputeType variance =
+        std::max(sum_sq_value * inv_n - mean * mean, ComputeType(0));
+    const ComputeType rstd =
+        ComputeType(1) / std::sqrt(variance + config.eps);
+    const ComputeType center = FusedShift ? -mean * rstd : mean;
+
+    auto write_block = [&, n](
+                           auto block_tag, nint_t col, auto active,
+                           const auto& center_v, const auto& rstd_v)
+        VECOPS_INLINE_LAMBDA {
+      using Active = std::remove_cvref_t<decltype(active)>;
+      if constexpr (
+          Prefetch::enabled && std::same_as<Active, vec::opt::Unmasked>) {
+        const nint_t full_lanes = vec::size(block_tag);
+        if (col + (Prefetch::ahead_blocks + 1) * full_lanes <= n) {
+          const auto future = tensor::coord(
+              col + Prefetch::ahead_blocks * full_lanes);
+          x.prefetch(block_tag, future, vec::opt::unmasked);
+          gamma.prefetch(block_tag, future, vec::opt::unmasked);
+          beta.prefetch(block_tag, future, vec::opt::unmasked);
+        }
+      }
+      const auto position = tensor::coord(col);
+      auto value = x.load(block_tag, position, active);
+      auto scale_value = gamma.load(block_tag, position, active);
+      auto bias_value = beta.load(block_tag, position, active);
+      if constexpr (FusedShift) {
+        value = vec::fmadd(value, rstd_v, center_v);
+      } else {
+        value = vec::mul(vec::sub(value, center_v), rstd_v);
+      }
+      y.store(
+          block_tag, position,
+          vec::fmadd(value, scale_value, bias_value), active);
+    };
+    kernel::loop::fold<FullFactor, TailFactor>(
+        base_tag, n, write_block,
+        kernel::loop::invariant(center),
+        kernel::loop::invariant(rstd));
+    y.commit();
   }
 };
 

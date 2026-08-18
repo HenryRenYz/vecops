@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -669,6 +671,135 @@ TEST(HOPMapTest, RawIntegerInputsPromoteToAny) {
 
   EXPECT_EQ(calls, 3);
   EXPECT_EQ(chunks, (std::vector<std::pair<nint_t, nint_t>>{{0, 4}, {4, 4}, {8, 2}}));
+}
+
+TEST(HOPVectorMapTest, UsesRoundedMultiwordFullTagAndRepeatedTailTag) {
+  using Tag = vec::ScalableTag<int32_t>;
+  Tag tag{};
+  const nint_t lanes = vec::size(tag);
+  std::vector<nint_t> indices;
+  std::vector<nint_t> words;
+  std::vector<bool> full;
+
+  hop::map<3, 1>(tag, 3 * lanes + 1,
+      [&](auto block_tag, nint_t i, auto active) VECOPS_INLINE_LAMBDA {
+        indices.push_back(i);
+        words.push_back(vec::num_words(block_tag));
+        full.push_back(std::same_as<
+            std::remove_cvref_t<decltype(active)>, vec::opt::Unmasked>);
+      });
+
+  EXPECT_EQ(indices, (std::vector<nint_t>{0, 2 * lanes, 3 * lanes}));
+  EXPECT_EQ(words, (std::vector<nint_t>{2, 1, 1}));
+  EXPECT_EQ(full, (std::vector<bool>{true, false, false}));
+}
+
+TEST(HOPVectorMapTest, CapsSuggestedFactorAtBackendLimit) {
+  using Tag = vec::ScalableTag<int32_t>;
+  Tag tag{};
+  const nint_t lanes = vec::size(tag);
+  nint_t maximum_words = 0;
+
+  hop::map<8>(tag, 8 * lanes,
+      [&](auto block_tag, nint_t, auto) VECOPS_INLINE_LAMBDA {
+        maximum_words = std::max(
+            maximum_words, vec::num_words(block_tag));
+      });
+
+  constexpr nint_t expected_words =
+      nint_t{1} << (VEC_MAX_POW < 3 ? VEC_MAX_POW : 3);
+  EXPECT_EQ(maximum_words, expected_words);
+}
+
+template <hop::TailCarryPolicy Policy>
+void expect_vector_fold_reductions_and_invariants() {
+  using Tag = vec::ScalableTag<int32_t>;
+  Tag tag{};
+  const nint_t lanes = vec::size(tag);
+  const nint_t n = 6 * lanes + 1;
+  std::vector<int32_t> values(static_cast<std::size_t>(n));
+  for (nint_t i = 0; i < n; ++i) {
+    values[static_cast<std::size_t>(i)] = static_cast<int32_t>(i + 1);
+  }
+
+  int32_t sum = -1;
+  int32_t maximum = -1;
+  int32_t minimum = -1;
+  const int32_t scalar_invariant = 2;
+  auto base_vector = vec::fill(tag, int32_t{7});
+  int calls = 0;
+  hop::fold<4, 1, Policy>(
+      tag, n,
+      [&](auto block_tag, nint_t i, auto active,
+          auto& sum_carry, auto& max_carry, auto& min_carry,
+          auto& scalar_value, auto& vector_value)
+          VECOPS_INLINE_LAMBDA {
+        static_assert(!std::is_const_v<
+            std::remove_reference_t<decltype(sum_carry)>>);
+        static_assert(std::is_const_v<
+            std::remove_reference_t<decltype(scalar_value)>>);
+        static_assert(std::is_const_v<
+            std::remove_reference_t<decltype(vector_value)>>);
+        EXPECT_EQ(vec::reduce_min(block_tag, scalar_value), 2);
+        EXPECT_EQ(vec::reduce_min(block_tag, vector_value), 7);
+
+        if constexpr (std::same_as<
+                          std::remove_cvref_t<decltype(active)>,
+                          vec::opt::Unmasked>) {
+          auto value = vec::load(block_tag, values.data() + i);
+          sum_carry = vec::add(sum_carry, value);
+          max_carry = vec::max(max_carry, value);
+          min_carry = vec::min(min_carry, value);
+        } else {
+          auto sum_value = vec::load(
+              block_tag, values.data() + i, active,
+              vec::opt::merge(int32_t{0}));
+          auto max_value = vec::load(
+              block_tag, values.data() + i, active,
+              vec::opt::merge(std::numeric_limits<int32_t>::lowest()));
+          auto min_value = vec::load(
+              block_tag, values.data() + i, active,
+              vec::opt::merge(std::numeric_limits<int32_t>::max()));
+          sum_carry = vec::add(sum_carry, sum_value);
+          max_carry = vec::max(max_carry, max_value);
+          min_carry = vec::min(min_carry, min_value);
+        }
+        ++calls;
+      },
+      hop::reduce_add(sum),
+      hop::reduce_max(maximum),
+      hop::reduce_min(minimum),
+      hop::invariant(scalar_invariant),
+      hop::invariant(base_vector));
+
+  EXPECT_EQ(calls, 4);
+  EXPECT_EQ(sum, static_cast<int32_t>(n * (n + 1) / 2));
+  EXPECT_EQ(maximum, static_cast<int32_t>(n));
+  EXPECT_EQ(minimum, 1);
+}
+
+TEST(HOPVectorFoldTest, IndependentTailSupportsVariadicCarries) {
+  expect_vector_fold_reductions_and_invariants<
+      hop::TailCarryPolicy::independent>();
+}
+
+TEST(HOPVectorFoldTest, ReusedPrefixSupportsVariadicCarries) {
+  expect_vector_fold_reductions_and_invariants<
+      hop::TailCarryPolicy::reuse_prefix>();
+}
+
+TEST(HOPVectorFoldTest, ZeroLengthReturnsReductionIdentity) {
+  using Tag = vec::ScalableTag<int32_t>;
+  int32_t sum = 123;
+  int calls = 0;
+  hop::fold(
+      Tag{}, nint_t{0},
+      [&](auto, nint_t, auto, auto&) VECOPS_INLINE_LAMBDA {
+        ++calls;
+      },
+      hop::reduce_add(sum));
+  EXPECT_EQ(calls, 0);
+  EXPECT_EQ(sum, 0);
 }
 
 template <int Unroll>
