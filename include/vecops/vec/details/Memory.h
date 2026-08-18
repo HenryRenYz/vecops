@@ -17,7 +17,9 @@
 #include <utility>
 
 #include "vecops/Assertion.h"
+#include "vecops/vec/Request.h"
 #include "vecops/vec/details/Options.h"
+#include "vecops/vec/details/Request.h"
 #include "vecops/vec/details/Wordwise.h"
 
 namespace vecops::vec::details {
@@ -25,28 +27,7 @@ namespace vecops::vec::details {
 /* **************************************************************************** */
 //    Option validation for memory operations                                   //
 /* **************************************************************************** */
-
-template <typename T>
-struct IsMemoryAlignmentOption : std::bool_constant<
-    IsUnalignedOption<T>::value || IsAlignedOption<T>::value> {};
-
-template <typename T>
-struct IsMemoryTemporalityOption : std::bool_constant<
-    IsTemporalOption<T>::value || IsNonTemporalOption<T>::value> {};
-
-template <typename T>
-struct IsMemoryActiveOption : std::bool_constant<
-    IsMaskedOption<T>::value || IsUnmaskedOption<T>::value ||
-    IsFirstOption<T>::value> {};
-
-template <typename T>
-struct IsMemoryPopulationOption : std::bool_constant<
-    IsZeroOption<T>::value || IsVectorMergeOption<T>::value ||
-    IsScalarMergeOption<T>::value> {};
-
-template <typename T>
-struct IsMemoryAddressingOption : std::bool_constant<
-    IsIndexedOption<T>::value || IsStridedOption<T>::value> {};
+// The IsMemory*Option group predicates live in details/Options.h.
 
 template <VectorTag Tag, typename Option>
 inline constexpr bool is_memory_addressing_option_for = [] {
@@ -586,6 +567,139 @@ VECOPS_ALWAYS_INLINE void execute_store_options(
                             std::forward<Options>(options)...));
   } else {
     invoke(mem::unaligned, mem::temporal);
+  }
+}
+
+/* **************************************************************************** */
+//    Request-driven execution                                                  //
+/* **************************************************************************** */
+
+/**
+ * Executes a load from a resolved LoadRequest. Branching happens on the
+ * request's kind template parameters; runtime values (stride, first-count,
+ * mask, inactive population, indices) are read from the struct fields. The
+ * emitted operations match the equivalent option-pack call exactly.
+ */
+template <typename Request>
+VECOPS_ALWAYS_INLINE Vec<typename Request::TagType> execute_load_request(
+    LoadOp op, typename Request::TagType tag,
+    const ElementOf<typename Request::TagType>* pointer,
+    const Request& request) {
+  using Tag = typename Request::TagType;
+  using Alignment = typename Request::AlignmentOption;
+  using Temporality = typename Request::TemporalityOption;
+  constexpr Active A = Request::active_kind;
+  constexpr Addressing Addr = Request::addressing_kind;
+  constexpr Populate P = Request::populate_kind;
+
+  if constexpr (std::same_as<Alignment, mem::Aligned>) {
+    VECOPS_ASSERT(
+        reinterpret_cast<std::uintptr_t>(pointer) %
+                static_cast<std::uintptr_t>(memory_alignment(tag)) ==
+            0,
+        "load pointer is not aligned to %zd bytes", memory_alignment(tag));
+  }
+  if constexpr (A == Active::Unmasked) {
+    if constexpr (Addr == Addressing::Contiguous) {
+      return execute(op, tag, pointer, Alignment{}, Temporality{});
+    } else if constexpr (Addr == Addressing::Strided) {
+      const auto indices =
+          make_strided_indices<CurrentBackend>(tag, request.stride);
+      return execute(
+          op, tag, pointer, opt::indexed(indices), Temporality{});
+    } else {
+      opt::Indexed<typename Request::IndexVectorType, Request::index_scale> addressing{
+          request.indices};
+      return execute(op, tag, pointer, addressing, Temporality{});
+    }
+  } else {
+    const Mask<Tag> mask = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (A == Active::First) {
+        return mwhilelt(tag, 0, request.first_count);
+      } else {
+        return request.mask;
+      }
+    }();
+    const Vec<Tag> inactive = [&]() VECOPS_INLINE_LAMBDA -> Vec<Tag> {
+      if constexpr (P == Populate::MergeVector) {
+        return request.merge_vector;
+      } else if constexpr (P == Populate::MergeScalar) {
+        return fill(tag, request.merge_scalar);
+      } else {
+        return zeros(tag);
+      }
+    }();
+    if constexpr (Addr == Addressing::Contiguous) {
+      return execute(
+          op, tag, pointer, mask, inactive, Alignment{}, Temporality{});
+    } else if constexpr (Addr == Addressing::Strided) {
+      const auto indices =
+          make_strided_indices<CurrentBackend>(tag, request.stride);
+      return execute(
+          op, tag, pointer, opt::indexed(indices), mask, inactive,
+          Temporality{});
+    } else {
+      opt::Indexed<typename Request::IndexVectorType, Request::index_scale> addressing{
+          request.indices};
+      return execute(
+          op, tag, pointer, addressing, mask, inactive, Temporality{});
+    }
+  }
+}
+
+/** Executes a store from a resolved StoreRequest. */
+template <typename Request>
+VECOPS_ALWAYS_INLINE void execute_store_request(
+    StoreOp op, typename Request::TagType tag,
+    ElementOf<typename Request::TagType>* pointer,
+    Vec<typename Request::TagType> value, const Request& request) {
+  using Tag = typename Request::TagType;
+  using Alignment = typename Request::AlignmentOption;
+  using Temporality = typename Request::TemporalityOption;
+  constexpr Active A = Request::active_kind;
+  constexpr Addressing Addr = Request::addressing_kind;
+
+  if constexpr (std::same_as<Alignment, mem::Aligned>) {
+    VECOPS_ASSERT(
+        reinterpret_cast<std::uintptr_t>(pointer) %
+                static_cast<std::uintptr_t>(memory_alignment(tag)) ==
+            0,
+        "store pointer is not aligned to %zd bytes", memory_alignment(tag));
+  }
+  if constexpr (A == Active::Unmasked) {
+    if constexpr (Addr == Addressing::Contiguous) {
+      execute(op, tag, pointer, value, Alignment{}, Temporality{});
+    } else if constexpr (Addr == Addressing::Strided) {
+      const auto indices =
+          make_strided_indices<CurrentBackend>(tag, request.stride);
+      execute(op, tag, pointer, value, opt::indexed(indices), Temporality{});
+    } else {
+      opt::Indexed<typename Request::IndexVectorType, Request::index_scale> addressing{
+          request.indices};
+      execute(op, tag, pointer, value, addressing, Temporality{});
+    }
+  } else {
+    const Mask<Tag> mask = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (A == Active::First) {
+        return mwhilelt(tag, 0, request.first_count);
+      } else {
+        return request.mask;
+      }
+    }();
+    if constexpr (Addr == Addressing::Contiguous) {
+      execute(op, tag, pointer, value, mask, Alignment{}, Temporality{});
+    } else if constexpr (Addr == Addressing::Strided) {
+      const auto indices =
+          make_strided_indices<CurrentBackend>(tag, request.stride);
+      execute(
+          op, tag, pointer, value, opt::indexed(indices), mask,
+          Temporality{});
+    } else {
+      opt::Indexed<typename Request::IndexVectorType, Request::index_scale> addressing{
+          request.indices};
+      execute(
+          op, tag, pointer, value, addressing, mask, Temporality{});
+    }
   }
 }
 

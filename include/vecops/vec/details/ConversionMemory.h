@@ -614,6 +614,245 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_options(
   }
 }
 
+/* **************************************************************************** */
+//    Request-driven conversion-memory execution                                //
+/* **************************************************************************** */
+
+/**
+ * Executes a converting load from a resolved LoadConvertRequest. The emitted
+ * operations match the equivalent option-pack call exactly: addressing rides
+ * in the alignment slot, ordered masks live in the output domain, unordered
+ * masks in the memory-side domain.
+ */
+template <typename Request>
+VECOPS_ALWAYS_INLINE Vec<typename Request::TagType>
+execute_load_convert_request(
+    LoadConvertOp op, typename Request::TagType to,
+    const typename Request::FromElement* pointer, const Request& request) {
+  using ToTag = typename Request::TagType;
+  using From = typename Request::FromElement;
+  using FromTag = Rebind<From, ToTag>;
+  using Layout = typename Request::LayoutOption;
+  using ValuePolicy = typename Request::ValuePolicyOption;
+  using Alignment = typename Request::AlignmentOption;
+  using Temporality = typename Request::TemporalityOption;
+  constexpr Active A = Request::active_kind;
+  constexpr Addressing Addr = Request::addressing_kind;
+  constexpr Populate P = Request::populate_kind;
+  constexpr bool Unordered =
+      std::same_as<Layout, cvt::Unordered>;
+
+  if constexpr (Addr == Addressing::Indexed) {
+    opt::Indexed<
+        typename Request::IndexVectorType, Request::index_scale>
+        addressing{request.indices};
+    if constexpr (A == Active::Unmasked) {
+      return execute(
+          op, to, pointer, Layout{}, ValuePolicy{}, addressing,
+          Temporality{});
+    } else if constexpr (Unordered) {
+      const auto mask = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (A == Active::First) {
+          return mwhilelt(FromTag{}, 0, request.first_count);
+        } else {
+          return request.mask;
+        }
+      }();
+      return execute(
+          op, to, pointer, mask, Layout{}, ValuePolicy{}, addressing,
+          Temporality{});
+    } else {
+      const Mask<ToTag> mask = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (A == Active::First) {
+          return mwhilelt(to, 0, request.first_count);
+        } else {
+          return request.mask;
+        }
+      }();
+      const Vec<ToTag> inactive = [&]() VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
+        if constexpr (P == Populate::MergeVector) {
+          return request.merge_vector;
+        } else if constexpr (P == Populate::MergeScalar) {
+          return fill(to, request.merge_scalar);
+        } else {
+          return zeros(to);
+        }
+      }();
+      return execute(
+          op, to, pointer, mask, inactive, Layout{}, ValuePolicy{},
+          addressing, Temporality{});
+    }
+  } else if constexpr (Addr == Addressing::Strided) {
+    const auto indices =
+        make_strided_indices<CurrentBackend>(to, request.stride);
+    opt::Indexed<Vec<Rebind<int32_t, ToTag>>, 0> addressing{indices};
+    if constexpr (A == Active::Unmasked) {
+      return execute(
+          op, to, pointer, Layout{}, ValuePolicy{}, addressing,
+          Temporality{});
+    } else if constexpr (Unordered) {
+      const auto mask = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (A == Active::First) {
+          return mwhilelt(FromTag{}, 0, request.first_count);
+        } else {
+          return request.mask;
+        }
+      }();
+      return execute(
+          op, to, pointer, mask, Layout{}, ValuePolicy{}, addressing,
+          Temporality{});
+    } else {
+      const Mask<ToTag> mask = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (A == Active::First) {
+          return mwhilelt(to, 0, request.first_count);
+        } else {
+          return request.mask;
+        }
+      }();
+      const Vec<ToTag> inactive = [&]() VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
+        if constexpr (P == Populate::MergeVector) {
+          return request.merge_vector;
+        } else if constexpr (P == Populate::MergeScalar) {
+          return fill(to, request.merge_scalar);
+        } else {
+          return zeros(to);
+        }
+      }();
+      return execute(
+          op, to, pointer, mask, inactive, Layout{}, ValuePolicy{},
+          addressing, Temporality{});
+    }
+  } else {
+    if constexpr (A == Active::Unmasked) {
+      return execute(
+          op, to, pointer, Layout{}, ValuePolicy{}, Alignment{},
+          Temporality{});
+    } else if constexpr (Unordered) {
+      const auto mask = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (A == Active::First) {
+          return mwhilelt(FromTag{}, 0, request.first_count);
+        } else {
+          return request.mask;
+        }
+      }();
+      return execute(
+          op, to, pointer, mask, Layout{}, ValuePolicy{}, Alignment{},
+          Temporality{});
+    } else {
+      const Mask<ToTag> mask = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (A == Active::First) {
+          return mwhilelt(to, 0, request.first_count);
+        } else {
+          return request.mask;
+        }
+      }();
+      const Vec<ToTag> inactive = [&]() VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
+        if constexpr (P == Populate::MergeVector) {
+          return request.merge_vector;
+        } else if constexpr (P == Populate::MergeScalar) {
+          return fill(to, request.merge_scalar);
+        } else {
+          return zeros(to);
+        }
+      }();
+      return execute(
+          op, to, pointer, mask, inactive, Layout{}, ValuePolicy{},
+          Alignment{}, Temporality{});
+    }
+  }
+}
+
+/** Executes a converting store from a resolved StoreConvertRequest. */
+template <typename Request>
+VECOPS_ALWAYS_INLINE void execute_store_convert_request(
+    StoreConvertOp op, typename Request::TagType from,
+    typename Request::ToElement* pointer,
+    Vec<typename Request::TagType> value, const Request& request) {
+  using FromTag = typename Request::TagType;
+  using To = typename Request::ToElement;
+  using ToTag = Rebind<To, FromTag>;
+  using Layout = typename Request::LayoutOption;
+  using ValuePolicy = typename Request::ValuePolicyOption;
+  using Alignment = typename Request::AlignmentOption;
+  using Temporality = typename Request::TemporalityOption;
+  using Packing = typename Request::PackingOption;
+  constexpr Active A = Request::active_kind;
+  constexpr Addressing Addr = Request::addressing_kind;
+  constexpr bool Unordered =
+      std::same_as<Layout, cvt::Unordered>;
+
+  if constexpr (Addr == Addressing::Indexed) {
+    opt::Indexed<
+        typename Request::IndexVectorType, Request::index_scale>
+        addressing{request.indices};
+    if constexpr (A == Active::Unmasked) {
+      execute(
+          op, from, pointer, value, Layout{}, ValuePolicy{}, addressing,
+          Temporality{}, Packing{});
+    } else {
+      const auto mask = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (A == Active::First) {
+          if constexpr (Unordered) {
+            return mwhilelt(ToTag{}, 0, request.first_count);
+          } else {
+            return mwhilelt(from, 0, request.first_count);
+          }
+        } else {
+          return request.mask;
+        }
+      }();
+      execute(
+          op, from, pointer, value, mask, Layout{}, ValuePolicy{},
+          addressing, Temporality{}, Packing{});
+    }
+  } else if constexpr (Addr == Addressing::Strided) {
+    const auto indices =
+        make_strided_indices<CurrentBackend>(from, request.stride);
+    opt::Indexed<Vec<Rebind<int32_t, FromTag>>, 0> addressing{indices};
+    if constexpr (A == Active::Unmasked) {
+      execute(
+          op, from, pointer, value, Layout{}, ValuePolicy{}, addressing,
+          Temporality{}, Packing{});
+    } else {
+      const auto mask = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (A == Active::First) {
+          if constexpr (Unordered) {
+            return mwhilelt(ToTag{}, 0, request.first_count);
+          } else {
+            return mwhilelt(from, 0, request.first_count);
+          }
+        } else {
+          return request.mask;
+        }
+      }();
+      execute(
+          op, from, pointer, value, mask, Layout{}, ValuePolicy{},
+          addressing, Temporality{}, Packing{});
+    }
+  } else {
+    if constexpr (A == Active::Unmasked) {
+      execute(
+          op, from, pointer, value, Layout{}, ValuePolicy{}, Alignment{},
+          Temporality{}, Packing{});
+    } else {
+      const auto mask = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (A == Active::First) {
+          if constexpr (Unordered) {
+            return mwhilelt(ToTag{}, 0, request.first_count);
+          } else {
+            return mwhilelt(from, 0, request.first_count);
+          }
+        } else {
+          return request.mask;
+        }
+      }();
+      execute(
+          op, from, pointer, value, mask, Layout{}, ValuePolicy{},
+          Alignment{}, Temporality{}, Packing{});
+    }
+  }
+}
+
 } // namespace vecops::vec::details
 
 #endif // VECOPS_VEC_DETAILS_CONVERSION_MEMORY_H

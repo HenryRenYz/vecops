@@ -371,3 +371,10 @@ add_multiarch_executable(SoftmaxTest
           ${CMAKE_CURRENT_SOURCE_DIR}/TestUtils.cpp
     ARCH ${VECOPS_TENSOR_KERNEL_ARCH}
 )
+
+
+add_multiarch_executable(VecRequestTest
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/RequestTest.cpp
+    ARCH ${VEC_BASE_ARCH}
+    LABELS vec
+)

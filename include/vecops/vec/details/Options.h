@@ -263,6 +263,32 @@ struct IsPrefetchOption : std::bool_constant<
     IsPrefetchIntentOption<T>::value> {};
 
 /* **************************************************************************** */
+//    Memory option group predicates                                           //
+/* **************************************************************************** */
+
+template <typename T>
+struct IsMemoryAlignmentOption : std::bool_constant<
+    IsUnalignedOption<T>::value || IsAlignedOption<T>::value> {};
+
+template <typename T>
+struct IsMemoryTemporalityOption : std::bool_constant<
+    IsTemporalOption<T>::value || IsNonTemporalOption<T>::value> {};
+
+template <typename T>
+struct IsMemoryActiveOption : std::bool_constant<
+    IsMaskedOption<T>::value || IsUnmaskedOption<T>::value ||
+    IsFirstOption<T>::value> {};
+
+template <typename T>
+struct IsMemoryPopulationOption : std::bool_constant<
+    IsZeroOption<T>::value || IsVectorMergeOption<T>::value ||
+    IsScalarMergeOption<T>::value> {};
+
+template <typename T>
+struct IsMemoryAddressingOption : std::bool_constant<
+    IsIndexedOption<T>::value || IsStridedOption<T>::value> {};
+
+/* **************************************************************************** */
 //    Option count and search utilities                                         //
 /* **************************************************************************** */
 
@@ -304,6 +330,28 @@ VECOPS_ALWAYS_INLINE constexpr decltype(auto) find_option(
     return find_option<Predicate>(std::forward<Rest>(rest)...);
   }
 }
+
+/**
+ * Type-level counterpart of `find_option`: names the cleaned type of the
+ * first option satisfying Predicate, or `void` when absent. Used by the
+ * Request resolver to fold an option pack once into resolved kind types.
+ */
+template <template <typename> typename Predicate, typename... Options>
+struct FindOptionType {
+  using type = void;
+};
+
+template <template <typename> typename Predicate,
+          typename First, typename... Rest>
+struct FindOptionType<Predicate, First, Rest...> {
+  using type = std::conditional_t<
+      Predicate<std::remove_cvref_t<First>>::value,
+      std::remove_cvref_t<First>,
+      typename FindOptionType<Predicate, Rest...>::type>;
+};
+
+template <template <typename> typename Predicate, typename... Options>
+using find_option_type_t = typename FindOptionType<Predicate, Options...>::type;
 
 } // namespace vecops::vec::details
 

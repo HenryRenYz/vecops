@@ -9,6 +9,7 @@
 #include "vecops/Assertion.h"
 #include "vecops/vec/Basic.h"
 #include "vecops/vec/Options.h"
+#include "vecops/vec/Request.h"
 
 namespace vecops::vec {
 
@@ -31,6 +32,15 @@ struct LoadOp {
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
       Tag tag, const ElementOf<Tag>* pointer, Options&&... options) const;
 
+  /// Direct entry with an already-resolved request; skips option parsing.
+  template <VectorTag Tag, Active A, Addressing Addr, Populate P,
+            typename Alignment, typename Temporality, int IndexScale,
+            VectorValue IndexVector>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, const ElementOf<Tag>* pointer,
+      LoadRequest<Tag, A, Addr, P, Alignment, Temporality, IndexScale,
+                  IndexVector> request) const;
+
   template <VectorTag Tag>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
       Tag tag, std::initializer_list<ElementOf<Tag>> values) const;
@@ -42,6 +52,15 @@ struct StoreOp {
   VECOPS_ALWAYS_INLINE void operator()(
       Tag tag, ElementOf<Tag>* pointer, Vec<Tag> value,
       Options&&... options) const;
+
+  /// Direct entry with an already-resolved request; skips option parsing.
+  template <VectorTag Tag, Active A, Addressing Addr,
+            typename Alignment, typename Temporality, int IndexScale,
+            VectorValue IndexVector>
+  VECOPS_ALWAYS_INLINE void operator()(
+      Tag tag, ElementOf<Tag>* pointer, Vec<Tag> value,
+      StoreRequest<Tag, A, Addr, Alignment, Temporality, IndexScale,
+                   IndexVector> request) const;
 };
 
 } // namespace vecops::vec
@@ -82,8 +101,20 @@ template <VectorTag Tag, typename... Options>
   requires (details::valid_memory_options<Tag, false, Options...>())
 VECOPS_ALWAYS_INLINE Vec<Tag> LoadOp::operator()(
     Tag tag, const ElementOf<Tag>* pointer, Options&&... options) const {
-  return details::execute_load_options(
-      *this, tag, pointer, std::forward<Options>(options)...);
+  return details::execute_load_request(
+      *this, tag, pointer,
+      details::resolve_load_request<Tag>(
+          std::forward<Options>(options)...));
+}
+
+template <VectorTag Tag, Active A, Addressing Addr, Populate P,
+          typename Alignment, typename Temporality, int IndexScale,
+          VectorValue IndexVector>
+VECOPS_ALWAYS_INLINE Vec<Tag> LoadOp::operator()(
+    Tag tag, const ElementOf<Tag>* pointer,
+    LoadRequest<Tag, A, Addr, P, Alignment, Temporality, IndexScale,
+                IndexVector> request) const {
+  return details::execute_load_request(*this, tag, pointer, request);
 }
 
 /** Loads exactly size(tag) values from an initializer list. */
@@ -116,8 +147,20 @@ template <VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE void StoreOp::operator()(
     Tag tag, ElementOf<Tag>* pointer, Vec<Tag> value,
     Options&&... options) const {
-  details::execute_store_options(
-      *this, tag, pointer, value, std::forward<Options>(options)...);
+  details::execute_store_request(
+      *this, tag, pointer, value,
+      details::resolve_store_request<Tag>(
+          std::forward<Options>(options)...));
+}
+
+template <VectorTag Tag, Active A, Addressing Addr,
+          typename Alignment, typename Temporality, int IndexScale,
+          VectorValue IndexVector>
+VECOPS_ALWAYS_INLINE void StoreOp::operator()(
+    Tag tag, ElementOf<Tag>* pointer, Vec<Tag> value,
+    StoreRequest<Tag, A, Addr, Alignment, Temporality, IndexScale,
+                 IndexVector> request) const {
+  details::execute_store_request(*this, tag, pointer, value, request);
 }
 
 inline constexpr LoadOp load{};

@@ -6,6 +6,8 @@
 
 #include "vecops/vec/Conversion.h"
 #include "vecops/vec/Memory.h"
+#include "vecops/vec/Request.h"
+#include "vecops/vec/details/Request.h"
 
 /**
  * @file ConversionMemory.h
@@ -57,6 +59,9 @@ namespace details {
 template <VectorTag ToTag, Element From, bool IsStore, typename... Options>
 consteval bool valid_memory_conversion_options();
 
+template <VectorTag LogicalTag, Element Other>
+consteval bool memory_rebind_supported();
+
 /**
  * Backend capability for a conversion whose memory-side Rebind exceeds the
  * public scalable-Tag representation limit.
@@ -89,6 +94,21 @@ struct LoadConvertOp {
               ToTag, From, false, Options...>())
   VECOPS_ALWAYS_INLINE Vec<ToTag> operator()(
       ToTag to, const From* pointer, Options&&... options) const;
+
+  /// Direct entry with an already-resolved request; skips option parsing.
+  /// Requires an identity pair or a representable memory-side rebind; the
+  /// oversized partitioner remains reachable through the option-pack entry.
+  template <VectorTag ToTag, Element From, Active A, Addressing Addr,
+            Populate P, typename Alignment, typename Temporality,
+            int IndexScale, VectorValue IndexVector, typename Layout,
+            typename ValuePolicy, MaskValue MaskVector>
+    requires (std::same_as<From, ElementOf<ToTag>> ||
+              details::memory_rebind_supported<ToTag, From>())
+  VECOPS_ALWAYS_INLINE Vec<ToTag> operator()(
+      ToTag to, const From* pointer,
+      LoadConvertRequest<
+          ToTag, From, A, Addr, P, Alignment, Temporality, IndexScale,
+          IndexVector, Layout, ValuePolicy, MaskVector> request) const;
 };
 
 struct StoreConvertOp {
@@ -98,6 +118,21 @@ struct StoreConvertOp {
   VECOPS_ALWAYS_INLINE void operator()(
       FromTag from, To* pointer, Vec<FromTag> value,
       Options&&... options) const;
+
+  /// Direct entry with an already-resolved request; skips option parsing.
+  /// Requires an identity pair or a representable memory-side rebind.
+  template <VectorTag FromTag, Element To, Active A, Addressing Addr,
+            typename Alignment, typename Temporality, int IndexScale,
+            VectorValue IndexVector, typename Layout, typename ValuePolicy,
+            typename Packing, MaskValue MaskVector>
+    requires (std::same_as<To, ElementOf<FromTag>> ||
+              details::memory_rebind_supported<FromTag, To>())
+  VECOPS_ALWAYS_INLINE void operator()(
+      FromTag from, To* pointer, Vec<FromTag> value,
+      StoreConvertRequest<
+          FromTag, To, A, Addr, Alignment, Temporality, IndexScale,
+          IndexVector, Layout, ValuePolicy, Packing, MaskVector>
+          request) const;
 };
 
 } // namespace vecops::vec
@@ -153,11 +188,46 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> LoadConvertOp::operator()(
       details::memory_rebind_supported<ToTag, From>() ||
       details::has_oversized_memory_conversion_lowering_v<
           details::CurrentBackend, LoadConvertOp, ToTag, From, Options...>) {
-    return details::execute_load_convert_options(
-        *this, to, pointer, std::forward<Options>(options)...);
+    if constexpr (details::memory_rebind_supported<ToTag, From>()) {
+      return details::execute_load_convert_request(
+          *this, to, pointer,
+          details::resolve_load_convert_request<ToTag, From>(
+              std::forward<Options>(options)...));
+    } else {
+      return details::execute_load_convert_options(
+          *this, to, pointer, std::forward<Options>(options)...);
+    }
   } else {
     return details::execute_large_load_convert(
         to, pointer, std::forward<Options>(options)...);
+  }
+}
+
+template <VectorTag ToTag, Element From, Active A, Addressing Addr,
+          Populate P, typename Alignment, typename Temporality,
+          int IndexScale, VectorValue IndexVector, typename Layout,
+          typename ValuePolicy, MaskValue MaskVector>
+  requires (std::same_as<From, ElementOf<ToTag>> ||
+            details::memory_rebind_supported<ToTag, From>())
+VECOPS_ALWAYS_INLINE Vec<ToTag> LoadConvertOp::operator()(
+    ToTag to, const From* pointer,
+    LoadConvertRequest<
+        ToTag, From, A, Addr, P, Alignment, Temporality, IndexScale,
+        IndexVector, Layout, ValuePolicy, MaskVector> request) const {
+  if constexpr (std::same_as<From, ElementOf<ToTag>>) {
+    LoadRequest<ToTag, A, Addr, P, Alignment, Temporality, IndexScale,
+                IndexVector>
+        memory_request;
+    memory_request.first_count = request.first_count;
+    memory_request.mask = request.mask;
+    memory_request.merge_vector = request.merge_vector;
+    memory_request.merge_scalar = request.merge_scalar;
+    memory_request.stride = request.stride;
+    memory_request.indices = request.indices;
+    return LoadOp{}(to, pointer, memory_request);
+  } else {
+    return details::execute_load_convert_request(
+        *this, to, pointer, request);
   }
 }
 
@@ -200,12 +270,46 @@ VECOPS_ALWAYS_INLINE void StoreConvertOp::operator()(
       details::memory_rebind_supported<FromTag, To>() ||
       details::has_oversized_memory_conversion_lowering_v<
           details::CurrentBackend, StoreConvertOp, FromTag, To, Options...>) {
-    details::execute_store_convert_options(
-        *this, from, pointer, value,
-        std::forward<Options>(options)...);
+    if constexpr (details::memory_rebind_supported<FromTag, To>()) {
+      details::execute_store_convert_request(
+          *this, from, pointer, value,
+          details::resolve_store_convert_request<FromTag, To>(
+              std::forward<Options>(options)...));
+    } else {
+      details::execute_store_convert_options(
+          *this, from, pointer, value,
+          std::forward<Options>(options)...);
+    }
   } else {
     details::execute_large_store_convert(
         from, pointer, value, std::forward<Options>(options)...);
+  }
+}
+
+template <VectorTag FromTag, Element To, Active A, Addressing Addr,
+          typename Alignment, typename Temporality, int IndexScale,
+          VectorValue IndexVector, typename Layout, typename ValuePolicy,
+          typename Packing, MaskValue MaskVector>
+  requires (std::same_as<To, ElementOf<FromTag>> ||
+            details::memory_rebind_supported<FromTag, To>())
+VECOPS_ALWAYS_INLINE void StoreConvertOp::operator()(
+    FromTag from, To* pointer, Vec<FromTag> value,
+    StoreConvertRequest<
+        FromTag, To, A, Addr, Alignment, Temporality, IndexScale,
+        IndexVector, Layout, ValuePolicy, Packing, MaskVector>
+        request) const {
+  if constexpr (std::same_as<To, ElementOf<FromTag>>) {
+    StoreRequest<FromTag, A, Addr, Alignment, Temporality, IndexScale,
+                 IndexVector>
+        memory_request;
+    memory_request.first_count = request.first_count;
+    memory_request.mask = request.mask;
+    memory_request.stride = request.stride;
+    memory_request.indices = request.indices;
+    StoreOp{}(from, pointer, value, memory_request);
+  } else {
+    details::execute_store_convert_request(
+        *this, from, pointer, value, request);
   }
 }
 

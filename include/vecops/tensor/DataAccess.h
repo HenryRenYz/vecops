@@ -700,11 +700,37 @@ VECOPS_ALWAYS_INLINE void store_transform_chunks(
   }
 }
 
+/**
+ * Copies the active/populate fields between requests that share the same
+ * resolved kinds, used when DataAccess rewrites only the addressing axis.
+ */
+template <typename OutRequest, typename InRequest>
+VECOPS_ALWAYS_INLINE void copy_memory_request_fields(
+    OutRequest& out, const InRequest& in) {
+  if constexpr (OutRequest::active_kind == vec::Active::First) {
+    out.first_count = in.first_count;
+  }
+  if constexpr (OutRequest::active_kind == vec::Active::Masked) {
+    out.mask = in.mask;
+  }
+  if constexpr (OutRequest::populate_kind == vec::Populate::MergeVector) {
+    out.merge_vector = in.merge_vector;
+  }
+  if constexpr (OutRequest::populate_kind == vec::Populate::MergeScalar) {
+    out.merge_scalar = in.merge_scalar;
+  }
+}
+
+/**
+ * Lowering for memory element pairs whose memory-side rebind exceeds the
+ * representation limit: composes addressing at this layer and defers to the
+ * option-pack oversized partitioner.
+ */
 template <vec::VectorTag Tag,
           typename Pointer,
           typename Policy,
           typename... Options>
-VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
+VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory_options(
     Tag tag,
     Pointer pointer,
     nint_t tensor_axis_stride,
@@ -762,7 +788,7 @@ template <vec::VectorTag Tag,
           typename Pointer,
           typename Policy,
           typename... Options>
-VECOPS_ALWAYS_INLINE void store_memory(
+VECOPS_ALWAYS_INLINE void store_memory_options(
     Tag tag,
     Pointer pointer,
     vec::Vec<Tag> value,
@@ -818,6 +844,174 @@ VECOPS_ALWAYS_INLINE void store_memory(
     }
   };
   apply_inline(invoke, retained);
+}
+
+/**
+ * Request-driven memory lowering: folds the kernel options once and hands the
+ * composed addressing straight to the parse-free converting-load entry.
+ */
+template <vec::VectorTag Tag,
+          typename Pointer,
+          typename Policy,
+          typename... Options>
+VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
+    Tag tag,
+    Pointer pointer,
+    nint_t tensor_axis_stride,
+    Options&&... options) {
+  using MemoryElement =
+      std::remove_cvref_t<std::remove_pointer_t<Pointer>>;
+  using Order = typename Policy::ConversionOrderOption;
+  using Value = typename Policy::ConversionValueOption;
+  using Temporal = typename Policy::MemoryOptions::TemporalityOption;
+  using Alignment = typename Policy::MemoryOptions::AlignmentOption;
+
+  if constexpr (
+      std::same_as<MemoryElement, vec::ElementOf<Tag>> ||
+      vec::details::memory_rebind_supported<Tag, MemoryElement>()) {
+    const auto request = vec::details::resolve_load_request<Tag>(
+        std::forward<Options>(options)...);
+    using KernelRequest = decltype(request);
+
+    if constexpr (
+        KernelRequest::addressing_kind == vec::Addressing::Indexed) {
+      static_assert(
+          KernelRequest::index_scale == 0,
+          "tensor indexed addressing rejects byte scales");
+      using IndexTag =
+          vec::VecToTagT<typename KernelRequest::IndexVectorType>;
+      using Index = vec::ElementOf<IndexTag>;
+      const auto scale = vec::fill(
+          IndexTag{}, static_cast<Index>(tensor_axis_stride));
+      const auto physical = vec::mul(request.indices, scale);
+      vec::LoadConvertRequest<
+          Tag, MemoryElement, KernelRequest::active_kind,
+          vec::Addressing::Indexed, KernelRequest::populate_kind,
+          vec::mem::Unaligned, Temporal, 0,
+          std::remove_cvref_t<decltype(physical)>, Order, Value>
+          out{};
+      copy_memory_request_fields(out, request);
+      out.indices = physical;
+      return vec::load_convert(tag, pointer, out);
+    } else {
+      nint_t physical_stride = tensor_axis_stride;
+      if constexpr (
+          KernelRequest::addressing_kind == vec::Addressing::Strided) {
+        physical_stride *= request.stride;
+      }
+      if (physical_stride == 1) {
+        vec::LoadConvertRequest<
+            Tag, MemoryElement, KernelRequest::active_kind,
+            vec::Addressing::Contiguous, KernelRequest::populate_kind,
+            Alignment, Temporal, 0>
+            out{};
+        copy_memory_request_fields(out, request);
+        return vec::load_convert(tag, pointer, out);
+      }
+      vec::LoadConvertRequest<
+          Tag, MemoryElement, KernelRequest::active_kind,
+          vec::Addressing::Strided, KernelRequest::populate_kind,
+          vec::mem::Unaligned, Temporal, 0>
+          out{};
+      copy_memory_request_fields(out, request);
+      out.stride = physical_stride;
+      return vec::load_convert(tag, pointer, out);
+    }
+  } else {
+    return load_memory_options<Tag, Pointer, Policy>(
+        tag, pointer, tensor_axis_stride,
+        std::forward<Options>(options)...);
+  }
+}
+
+/** Request-driven converting-store lowering, mirroring `load_memory`. */
+template <vec::VectorTag Tag,
+          typename Pointer,
+          typename Policy,
+          typename... Options>
+VECOPS_ALWAYS_INLINE void store_memory(
+    Tag tag,
+    Pointer pointer,
+    vec::Vec<Tag> value,
+    nint_t tensor_axis_stride,
+    Options&&... options) {
+  using MemoryElement =
+      std::remove_cvref_t<std::remove_pointer_t<Pointer>>;
+  using Order = typename Policy::ConversionOrderOption;
+  using Value = typename Policy::ConversionValueOption;
+  using Temporal = typename Policy::MemoryOptions::TemporalityOption;
+  using Packing = typename Policy::MemoryOptions::PackingOption;
+  using Alignment = typename Policy::MemoryOptions::AlignmentOption;
+
+  if constexpr (
+      std::same_as<MemoryElement, vec::ElementOf<Tag>> ||
+      vec::details::memory_rebind_supported<Tag, MemoryElement>()) {
+    const auto request = vec::details::resolve_store_request<Tag>(
+        std::forward<Options>(options)...);
+    using KernelRequest = decltype(request);
+
+    if constexpr (
+        KernelRequest::addressing_kind == vec::Addressing::Indexed) {
+      static_assert(
+          KernelRequest::index_scale == 0,
+          "tensor indexed addressing rejects byte scales");
+      using IndexTag =
+          vec::VecToTagT<typename KernelRequest::IndexVectorType>;
+      using Index = vec::ElementOf<IndexTag>;
+      const auto scale = vec::fill(
+          IndexTag{}, static_cast<Index>(tensor_axis_stride));
+      const auto physical = vec::mul(request.indices, scale);
+      vec::StoreConvertRequest<
+          Tag, MemoryElement, KernelRequest::active_kind,
+          vec::Addressing::Indexed, vec::mem::Unaligned, Temporal, 0,
+          std::remove_cvref_t<decltype(physical)>, Order, Value, Packing>
+          out{};
+      if constexpr (out.active_kind == vec::Active::First) {
+        out.first_count = request.first_count;
+      }
+      if constexpr (out.active_kind == vec::Active::Masked) {
+        out.mask = request.mask;
+      }
+      out.indices = physical;
+      vec::store_convert(tag, pointer, value, out);
+    } else {
+      nint_t physical_stride = tensor_axis_stride;
+      if constexpr (
+          KernelRequest::addressing_kind == vec::Addressing::Strided) {
+        physical_stride *= request.stride;
+      }
+      if (physical_stride == 1) {
+        vec::StoreConvertRequest<
+            Tag, MemoryElement, KernelRequest::active_kind,
+            vec::Addressing::Contiguous, Alignment, Temporal, 0>
+            out{};
+        if constexpr (out.active_kind == vec::Active::First) {
+          out.first_count = request.first_count;
+        }
+        if constexpr (out.active_kind == vec::Active::Masked) {
+          out.mask = request.mask;
+        }
+        vec::store_convert(tag, pointer, value, out);
+      } else {
+        vec::StoreConvertRequest<
+            Tag, MemoryElement, KernelRequest::active_kind,
+            vec::Addressing::Strided, vec::mem::Unaligned, Temporal, 0>
+            out{};
+        if constexpr (out.active_kind == vec::Active::First) {
+          out.first_count = request.first_count;
+        }
+        if constexpr (out.active_kind == vec::Active::Masked) {
+          out.mask = request.mask;
+        }
+        out.stride = physical_stride;
+        vec::store_convert(tag, pointer, value, out);
+      }
+    }
+  } else {
+    store_memory_options<Tag, Pointer, Policy>(
+        tag, pointer, value, tensor_axis_stride,
+        std::forward<Options>(options)...);
+  }
 }
 
 template <typename Layout>
