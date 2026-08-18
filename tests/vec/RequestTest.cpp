@@ -60,7 +60,7 @@ TEST(VecRequestTest, ResolvedLoadMatchesOptionPackLoad) {
         Tag, vec::Active::Masked, vec::Addressing::Contiguous,
         vec::Populate::MergeScalar>
         request{};
-    request.mask = mask;
+    request.mask = &mask;
     request.merge_scalar = 7.0f;
     const auto resolved = vec::load(tag, buffer.data(), request);
     expect_same_lanes(tag, packed, resolved);

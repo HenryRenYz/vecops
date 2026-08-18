@@ -19,10 +19,11 @@
  * mask and index vectors, merge values) are fields, so numeric combinations
  * no longer multiply template instantiations.
  *
- * Value fields are meaningful only for the matching kind; unused fields are
- * left uninitialized and disappear after inlining. Vector fields are plain
- * named members: on scalable SVE they are sizeless, which is legal for named
- * members but forbids aggregates requiring layout such as std::tuple.
+ * Scalar value fields are meaningful only for the matching kind. Vector
+ * values (mask, merge vector, indices) are referenced, never stored:
+ * scalable-SVE vectors are sizeless and cannot be data members, so requests
+ * borrow caller-owned storage exactly like opt::masked does. Null vector
+ * pointers simply mean the matching kind is not selected.
  */
 
 namespace vecops::vec {
@@ -74,11 +75,11 @@ struct LoadRequest {
   using IndexVectorType = IndexVector;
 
   nint_t first_count = 0;          ///< Meaningful when A == First.
-  Mask<Tag> mask;                  ///< Meaningful when A == Masked.
-  Vec<Tag> merge_vector;           ///< Meaningful when P == MergeVector.
+  const Mask<Tag>* mask = nullptr;          ///< A == Masked.
+  const Vec<Tag>* merge_vector = nullptr;   ///< P == MergeVector.
   ElementOf<Tag> merge_scalar = ElementOf<Tag>{};  ///< P == MergeScalar.
   nint_t stride = 1;               ///< Meaningful when Addr == Strided.
-  IndexVector indices;             ///< Meaningful when Addr == Indexed.
+  const IndexVector* indices = nullptr;     ///< Addr == Indexed.
 };
 
 /**
@@ -104,9 +105,9 @@ struct StoreRequest {
   using IndexVectorType = IndexVector;
 
   nint_t first_count = 0;      ///< Meaningful when A == First.
-  Mask<Tag> mask;              ///< Meaningful when A == Masked.
+  const Mask<Tag>* mask = nullptr;          ///< A == Masked.
   nint_t stride = 1;           ///< Meaningful when Addr == Strided.
-  IndexVector indices;         ///< Meaningful when Addr == Indexed.
+  const IndexVector* indices = nullptr;     ///< Addr == Indexed.
 };
 
 /**
@@ -150,11 +151,11 @@ struct LoadConvertRequest {
       ToTag>;
 
   nint_t first_count = 0;      ///< Meaningful when A == First.
-  MaskVector mask;             ///< Meaningful when A == Masked.
-  Vec<ToTag> merge_vector;     ///< Meaningful when P == MergeVector.
+  const MaskVector* mask = nullptr;         ///< A == Masked.
+  const Vec<ToTag>* merge_vector = nullptr;  ///< P == MergeVector.
   ElementOf<ToTag> merge_scalar = ElementOf<ToTag>{};  ///< P == MergeScalar.
   nint_t stride = 1;           ///< Meaningful when Addr == Strided.
-  IndexVector indices;         ///< Meaningful when Addr == Indexed.
+  const IndexVector* indices = nullptr;     ///< Addr == Indexed.
 };
 
 /**
@@ -192,9 +193,9 @@ struct StoreConvertRequest {
   using MaskVectorType = MaskVector;
 
   nint_t first_count = 0;      ///< Meaningful when A == First.
-  MaskVector mask;             ///< Meaningful when A == Masked.
+  const MaskVector* mask = nullptr;         ///< A == Masked.
   nint_t stride = 1;           ///< Meaningful when Addr == Strided.
-  IndexVector indices;         ///< Meaningful when Addr == Indexed.
+  const IndexVector* indices = nullptr;     ///< Addr == Indexed.
 };
 
 } // namespace vecops::vec

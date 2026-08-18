@@ -609,7 +609,7 @@ VECOPS_ALWAYS_INLINE Vec<typename Request::TagType> execute_load_request(
           op, tag, pointer, opt::indexed(indices), Temporality{});
     } else {
       opt::Indexed<typename Request::IndexVectorType, Request::index_scale> addressing{
-          request.indices};
+          *request.indices};
       return execute(op, tag, pointer, addressing, Temporality{});
     }
   } else {
@@ -617,12 +617,12 @@ VECOPS_ALWAYS_INLINE Vec<typename Request::TagType> execute_load_request(
       if constexpr (A == Active::First) {
         return mwhilelt(tag, 0, request.first_count);
       } else {
-        return request.mask;
+        return *request.mask;
       }
     }();
     const Vec<Tag> inactive = [&]() VECOPS_INLINE_LAMBDA -> Vec<Tag> {
       if constexpr (P == Populate::MergeVector) {
-        return request.merge_vector;
+        return *request.merge_vector;
       } else if constexpr (P == Populate::MergeScalar) {
         return fill(tag, request.merge_scalar);
       } else {
@@ -640,7 +640,7 @@ VECOPS_ALWAYS_INLINE Vec<typename Request::TagType> execute_load_request(
           Temporality{});
     } else {
       opt::Indexed<typename Request::IndexVectorType, Request::index_scale> addressing{
-          request.indices};
+          *request.indices};
       return execute(
           op, tag, pointer, addressing, mask, inactive, Temporality{});
     }
@@ -675,7 +675,7 @@ VECOPS_ALWAYS_INLINE void execute_store_request(
       execute(op, tag, pointer, value, opt::indexed(indices), Temporality{});
     } else {
       opt::Indexed<typename Request::IndexVectorType, Request::index_scale> addressing{
-          request.indices};
+          *request.indices};
       execute(op, tag, pointer, value, addressing, Temporality{});
     }
   } else {
@@ -683,7 +683,7 @@ VECOPS_ALWAYS_INLINE void execute_store_request(
       if constexpr (A == Active::First) {
         return mwhilelt(tag, 0, request.first_count);
       } else {
-        return request.mask;
+        return *request.mask;
       }
     }();
     if constexpr (Addr == Addressing::Contiguous) {
@@ -696,7 +696,7 @@ VECOPS_ALWAYS_INLINE void execute_store_request(
           Temporality{});
     } else {
       opt::Indexed<typename Request::IndexVectorType, Request::index_scale> addressing{
-          request.indices};
+          *request.indices};
       execute(
           op, tag, pointer, value, addressing, mask, Temporality{});
     }

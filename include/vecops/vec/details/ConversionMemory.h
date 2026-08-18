@@ -645,7 +645,7 @@ execute_load_convert_request(
   if constexpr (Addr == Addressing::Indexed) {
     opt::Indexed<
         typename Request::IndexVectorType, Request::index_scale>
-        addressing{request.indices};
+        addressing{*request.indices};
     if constexpr (A == Active::Unmasked) {
       return execute(
           op, to, pointer, Layout{}, ValuePolicy{}, addressing,
@@ -655,7 +655,7 @@ execute_load_convert_request(
         if constexpr (A == Active::First) {
           return mwhilelt(FromTag{}, 0, request.first_count);
         } else {
-          return request.mask;
+          return *request.mask;
         }
       }();
       return execute(
@@ -666,12 +666,12 @@ execute_load_convert_request(
         if constexpr (A == Active::First) {
           return mwhilelt(to, 0, request.first_count);
         } else {
-          return request.mask;
+          return *request.mask;
         }
       }();
       const Vec<ToTag> inactive = [&]() VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
         if constexpr (P == Populate::MergeVector) {
-          return request.merge_vector;
+          return *request.merge_vector;
         } else if constexpr (P == Populate::MergeScalar) {
           return fill(to, request.merge_scalar);
         } else {
@@ -695,7 +695,7 @@ execute_load_convert_request(
         if constexpr (A == Active::First) {
           return mwhilelt(FromTag{}, 0, request.first_count);
         } else {
-          return request.mask;
+          return *request.mask;
         }
       }();
       return execute(
@@ -706,12 +706,12 @@ execute_load_convert_request(
         if constexpr (A == Active::First) {
           return mwhilelt(to, 0, request.first_count);
         } else {
-          return request.mask;
+          return *request.mask;
         }
       }();
       const Vec<ToTag> inactive = [&]() VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
         if constexpr (P == Populate::MergeVector) {
-          return request.merge_vector;
+          return *request.merge_vector;
         } else if constexpr (P == Populate::MergeScalar) {
           return fill(to, request.merge_scalar);
         } else {
@@ -732,7 +732,7 @@ execute_load_convert_request(
         if constexpr (A == Active::First) {
           return mwhilelt(FromTag{}, 0, request.first_count);
         } else {
-          return request.mask;
+          return *request.mask;
         }
       }();
       return execute(
@@ -743,12 +743,12 @@ execute_load_convert_request(
         if constexpr (A == Active::First) {
           return mwhilelt(to, 0, request.first_count);
         } else {
-          return request.mask;
+          return *request.mask;
         }
       }();
       const Vec<ToTag> inactive = [&]() VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
         if constexpr (P == Populate::MergeVector) {
-          return request.merge_vector;
+          return *request.merge_vector;
         } else if constexpr (P == Populate::MergeScalar) {
           return fill(to, request.merge_scalar);
         } else {
@@ -784,7 +784,7 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_request(
   if constexpr (Addr == Addressing::Indexed) {
     opt::Indexed<
         typename Request::IndexVectorType, Request::index_scale>
-        addressing{request.indices};
+        addressing{*request.indices};
     if constexpr (A == Active::Unmasked) {
       execute(
           op, from, pointer, value, Layout{}, ValuePolicy{}, addressing,
@@ -798,7 +798,7 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_request(
             return mwhilelt(from, 0, request.first_count);
           }
         } else {
-          return request.mask;
+          return *request.mask;
         }
       }();
       execute(
@@ -822,7 +822,7 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_request(
             return mwhilelt(from, 0, request.first_count);
           }
         } else {
-          return request.mask;
+          return *request.mask;
         }
       }();
       execute(
@@ -843,7 +843,7 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_request(
             return mwhilelt(from, 0, request.first_count);
           }
         } else {
-          return request.mask;
+          return *request.mask;
         }
       }();
       execute(

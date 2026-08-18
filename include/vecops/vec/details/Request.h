@@ -97,10 +97,10 @@ VECOPS_ALWAYS_INLINE auto resolve_load_request(Options&&... options) {
     request.first_count = find_option<IsFirstOption>(options...).count;
   }
   if constexpr (Request::active_kind == Active::Masked) {
-    request.mask = find_option<IsMaskedOption>(options...).value;
+    request.mask = &find_option<IsMaskedOption>(options...).value;
   }
   if constexpr (Request::populate_kind == Populate::MergeVector) {
-    request.merge_vector = find_option<IsVectorMergeOption>(options...).value;
+    request.merge_vector = &find_option<IsVectorMergeOption>(options...).value;
   }
   if constexpr (Request::populate_kind == Populate::MergeScalar) {
     request.merge_scalar = find_option<IsScalarMergeOption>(options...).value;
@@ -110,7 +110,7 @@ VECOPS_ALWAYS_INLINE auto resolve_load_request(Options&&... options) {
         find_option<IsStridedOption>(options...).stride);
   }
   if constexpr (Request::addressing_kind == Addressing::Indexed) {
-    request.indices = find_option<IsIndexedOption>(options...).indices;
+    request.indices = &find_option<IsIndexedOption>(options...).indices;
   }
   return request;
 }
@@ -134,14 +134,14 @@ VECOPS_ALWAYS_INLINE auto resolve_store_request(Options&&... options) {
     request.first_count = find_option<IsFirstOption>(options...).count;
   }
   if constexpr (Request::active_kind == Active::Masked) {
-    request.mask = find_option<IsMaskedOption>(options...).value;
+    request.mask = &find_option<IsMaskedOption>(options...).value;
   }
   if constexpr (Request::addressing_kind == Addressing::Strided) {
     request.stride = static_cast<nint_t>(
         find_option<IsStridedOption>(options...).stride);
   }
   if constexpr (Request::addressing_kind == Addressing::Indexed) {
-    request.indices = find_option<IsIndexedOption>(options...).indices;
+    request.indices = &find_option<IsIndexedOption>(options...).indices;
   }
   return request;
 }
@@ -203,10 +203,10 @@ VECOPS_ALWAYS_INLINE auto resolve_load_convert_request(Options&&... options) {
     request.first_count = find_option<IsFirstOption>(options...).count;
   }
   if constexpr (Request::active_kind == Active::Masked) {
-    request.mask = find_option<IsMaskedOption>(options...).value;
+    request.mask = &find_option<IsMaskedOption>(options...).value;
   }
   if constexpr (Request::populate_kind == Populate::MergeVector) {
-    request.merge_vector = find_option<IsVectorMergeOption>(options...).value;
+    request.merge_vector = &find_option<IsVectorMergeOption>(options...).value;
   }
   if constexpr (Request::populate_kind == Populate::MergeScalar) {
     request.merge_scalar = find_option<IsScalarMergeOption>(options...).value;
@@ -216,7 +216,7 @@ VECOPS_ALWAYS_INLINE auto resolve_load_convert_request(Options&&... options) {
         find_option<IsStridedOption>(options...).stride);
   }
   if constexpr (Request::addressing_kind == Addressing::Indexed) {
-    request.indices = find_option<IsIndexedOption>(options...).indices;
+    request.indices = &find_option<IsIndexedOption>(options...).indices;
   }
   return request;
 }
@@ -255,14 +255,14 @@ VECOPS_ALWAYS_INLINE auto resolve_store_convert_request(
     request.first_count = find_option<IsFirstOption>(options...).count;
   }
   if constexpr (Request::active_kind == Active::Masked) {
-    request.mask = find_option<IsMaskedOption>(options...).value;
+    request.mask = &find_option<IsMaskedOption>(options...).value;
   }
   if constexpr (Request::addressing_kind == Addressing::Strided) {
     request.stride = static_cast<nint_t>(
         find_option<IsStridedOption>(options...).stride);
   }
   if constexpr (Request::addressing_kind == Addressing::Indexed) {
-    request.indices = find_option<IsIndexedOption>(options...).indices;
+    request.indices = &find_option<IsIndexedOption>(options...).indices;
   }
   return request;
 }
