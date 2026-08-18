@@ -12,7 +12,7 @@
  * Operand Specs describe data supplied by a caller: Tensor, compute boundary
  * type, optional transform, and verifiable facts. Access policies instead
  * describe how one kernel uses that operand. Keeping the two separate prevents
- * callers from selecting unsafe lane reordering, materialization, or prefetch
+ * callers from selecting unsafe lane reordering or materialization
  * strategies that only the kernel can validate.
  *
  * @code
@@ -103,7 +103,6 @@ using DefaultMemoryPolicy = MemoryPolicy<>;
  * @tparam ConversionValue Saturating/wrapping conversion behavior.
  * @tparam Memory Final memory-operation hints.
  * @tparam PermutationSafe Whether the kernel tolerates this lane permutation.
- * @tparam Prefetch Cursor prefetch policy.
  */
 template <
     int VectorAxis,
@@ -112,8 +111,7 @@ template <
     typename ConversionOrder = vec::cvt::Ordered,
     typename ConversionValue = vec::cvt::Saturate,
     typename Memory = DefaultMemoryPolicy,
-    bool PermutationSafe = false,
-    typename Prefetch = NoPrefetch>
+    bool PermutationSafe = false>
 struct InputAccessPolicy {
   static_assert(VectorAxis >= 0, "vector axis must be non-negative");
   static_assert(ReadPasses > 0, "input read pass count must be positive");
@@ -124,15 +122,14 @@ struct InputAccessPolicy {
   using ConversionOrderOption = ConversionOrder;
   using ConversionValueOption = ConversionValue;
   using MemoryOptions = Memory;
-  using PrefetchOptions = Prefetch;
 };
 
 /**
  * @brief Compile-time output access policy selected by a kernel.
  *
- * Output policies mirror input conversion, memory, permutation, and prefetch
- * controls but omit ReadPasses because output planning is governed by commit
- * layout rather than repeated reads.
+ * Output policies mirror input conversion, memory, and permutation controls
+ * but omit ReadPasses because output planning is governed by commit layout
+ * rather than repeated reads.
  */
 template <
     int VectorAxis,
@@ -140,8 +137,7 @@ template <
     typename ConversionOrder = vec::cvt::Ordered,
     typename ConversionValue = vec::cvt::Saturate,
     typename Memory = DefaultMemoryPolicy,
-    bool PermutationSafe = false,
-    typename Prefetch = NoPrefetch>
+    bool PermutationSafe = false>
 struct OutputAccessPolicy {
   static_assert(VectorAxis >= 0, "vector axis must be non-negative");
   static constexpr int vector_axis = VectorAxis;
@@ -150,7 +146,6 @@ struct OutputAccessPolicy {
   using ConversionOrderOption = ConversionOrder;
   using ConversionValueOption = ConversionValue;
   using MemoryOptions = Memory;
-  using PrefetchOptions = Prefetch;
 };
 
 /**
@@ -166,35 +161,35 @@ struct SliceAccessPolicy;
 template <
     int VectorAxis, int ReadPasses, AccessPlan Plan,
     typename ConversionOrder, typename ConversionValue, typename Memory,
-    bool PermutationSafe, typename Prefetch, int SlicedDim>
+    bool PermutationSafe, int SlicedDim>
 struct SliceAccessPolicy<
     InputAccessPolicy<
         VectorAxis, ReadPasses, Plan, ConversionOrder, ConversionValue,
-        Memory, PermutationSafe, Prefetch>,
+        Memory, PermutationSafe>,
     SlicedDim> {
   static_assert(
       SlicedDim != VectorAxis,
       "slicing away a DataAccess vector axis has no vector-view semantics");
   using type = InputAccessPolicy<
       VectorAxis - (SlicedDim < VectorAxis ? 1 : 0), ReadPasses, Plan,
-      ConversionOrder, ConversionValue, Memory, PermutationSafe, Prefetch>;
+      ConversionOrder, ConversionValue, Memory, PermutationSafe>;
 };
 
 template <
     int VectorAxis, AccessPlan Plan, typename ConversionOrder,
     typename ConversionValue, typename Memory, bool PermutationSafe,
-    typename Prefetch, int SlicedDim>
+    int SlicedDim>
 struct SliceAccessPolicy<
     OutputAccessPolicy<
         VectorAxis, Plan, ConversionOrder, ConversionValue, Memory,
-        PermutationSafe, Prefetch>,
+        PermutationSafe>,
     SlicedDim> {
   static_assert(
       SlicedDim != VectorAxis,
       "slicing away a DataAccess vector axis has no vector-view semantics");
   using type = OutputAccessPolicy<
       VectorAxis - (SlicedDim < VectorAxis ? 1 : 0), Plan,
-      ConversionOrder, ConversionValue, Memory, PermutationSafe, Prefetch>;
+      ConversionOrder, ConversionValue, Memory, PermutationSafe>;
 };
 
 /** @brief Result type of `SliceAccessPolicy`. */

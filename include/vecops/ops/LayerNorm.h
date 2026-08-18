@@ -229,17 +229,12 @@ private:
     using Element = std::remove_const_t<typename InSpec::MemoryElement>;
     using ConversionOrder = std::conditional_t<
         IsFloat16V<Element>, vec::cvt::Unordered, vec::cvt::Ordered>;
-    // Contiguous whole-block prefetch now lowers without a runtime cache-line
-    // loop, but it is still slower for this stream on current SVE targets.
-    // Keep it disabled until a row-working-set policy shows a measured win.
-    using Prefetch = tensor::PrefetchPolicy<
-        false, 4, tensor::PrefetchFootprint::whole_block>;
     using XPolicy = tensor::InputAccessPolicy<
         0, 2, tensor::AccessPlan::direct, ConversionOrder,
-        vec::cvt::Saturate, tensor::DefaultMemoryPolicy, true, Prefetch>;
+        vec::cvt::Saturate, tensor::DefaultMemoryPolicy, true>;
     using ParamPolicy = tensor::InputAccessPolicy<
         0, 1, tensor::AccessPlan::direct, ConversionOrder,
-        vec::cvt::Saturate, tensor::DefaultMemoryPolicy, true, Prefetch>;
+        vec::cvt::Saturate, tensor::DefaultMemoryPolicy, true>;
     using YPolicy = tensor::OutputAccessPolicy<
         0, tensor::AccessPlan::direct, ConversionOrder,
         vec::cvt::Saturate, tensor::DefaultMemoryPolicy, true>;
@@ -254,7 +249,7 @@ private:
     auto y = tensor::bind(out, YPolicy{}, workspace);
     run_row<
         F32Tag, 4, 2, true,
-        kernel::loop::TailCarryPolicy::reuse_prefix, Prefetch>(
+        kernel::loop::TailCarryPolicy::reuse_prefix>(
         in, x, gamma, beta, y);
   }
 #endif
@@ -273,7 +268,7 @@ private:
       auto y = tensor::bind(out, OutPolicy{}, workspace);
       run_row<
           Tag, 4, 1, false,
-          kernel::loop::TailCarryPolicy::independent, tensor::NoPrefetch>(
+          kernel::loop::TailCarryPolicy::independent>(
           in, x, gamma, beta, y);
     } else {
       kernel::with_operands(
@@ -283,15 +278,14 @@ private:
               VECOPS_INLINE_LAMBDA {
             run_row<
                 Tag, 4, 1, false,
-                kernel::loop::TailCarryPolicy::independent,
-                tensor::NoPrefetch>(in, x, gamma, beta, y);
+                kernel::loop::TailCarryPolicy::independent>(
+                in, x, gamma, beta, y);
           });
     }
   }
 
   template <vec::VectorTag BaseTag, int FullFactor, int TailFactor,
             bool FusedShift, kernel::loop::TailCarryPolicy TailPolicy,
-            typename Prefetch,
             typename InSpec,
             typename X, typename Gamma, typename Beta, typename Y>
   VECOPS_ALWAYS_INLINE void run_row(
@@ -307,17 +301,6 @@ private:
                                 auto block_tag, nint_t col, auto active,
                                 auto& sum, auto& sum_sq)
         VECOPS_INLINE_LAMBDA {
-      using Active = std::remove_cvref_t<decltype(active)>;
-      if constexpr (
-          Prefetch::enabled && std::same_as<Active, vec::opt::Unmasked>) {
-        const nint_t full_lanes = vec::size(block_tag);
-        if (col + (Prefetch::ahead_blocks + 1) * full_lanes <= n) {
-          x.prefetch(
-              block_tag,
-              tensor::coord(col + Prefetch::ahead_blocks * full_lanes),
-              vec::opt::unmasked);
-        }
-      }
       auto value = x.load(block_tag, tensor::coord(col), active);
       sum = vec::add(sum, value);
       sum_sq = vec::fmadd(value, value, sum_sq);
@@ -340,18 +323,6 @@ private:
                            auto block_tag, nint_t col, auto active,
                            const auto& center_v, const auto& rstd_v)
         VECOPS_INLINE_LAMBDA {
-      using Active = std::remove_cvref_t<decltype(active)>;
-      if constexpr (
-          Prefetch::enabled && std::same_as<Active, vec::opt::Unmasked>) {
-        const nint_t full_lanes = vec::size(block_tag);
-        if (col + (Prefetch::ahead_blocks + 1) * full_lanes <= n) {
-          const auto future = tensor::coord(
-              col + Prefetch::ahead_blocks * full_lanes);
-          x.prefetch(block_tag, future, vec::opt::unmasked);
-          gamma.prefetch(block_tag, future, vec::opt::unmasked);
-          beta.prefetch(block_tag, future, vec::opt::unmasked);
-        }
-      }
       const auto position = tensor::coord(col);
       auto value = x.load(block_tag, position, active);
       auto scale_value = gamma.load(block_tag, position, active);

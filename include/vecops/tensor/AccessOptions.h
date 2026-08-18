@@ -10,7 +10,7 @@
 
 /**
  * @file AccessOptions.h
- * @brief Coordinates, axes, lane mappings, prefetch policies, and operand facts.
+ * @brief Coordinates, axes, lane mappings, and operand facts.
  *
  * These types form the vocabulary shared by coordinate DataAccess and its
  * cursors. They describe logical tensor operations; they do not prescribe a
@@ -31,18 +31,10 @@
  * two are semantic aliases used by `ProjectCursor` to make it difficult to
  * accidentally swap the axis being advanced with the axis being loaded.
  *
- * ## Prefetch policy
- *
- * `PrefetchPolicy<false>` eliminates prefetch code with `if constexpr`.
- * Enabled policies specify a cursor-relative lookahead plus a logical
- * footprint. Tensor DataAccess expands that footprint into one or more raw
- * cache-line hints after applying Layout strides and lane addressing.
- *
  * ## Pitfalls
  *
  * - Coordinates are signed `nint_t` values and are not bounds-checked by the
  *   type. DataAccess performs debug assertions for active lanes.
- * - `explicit_points` offsets are logical lane offsets, not bytes.
  * - `whole_block` requires an affine footprint; indexed accesses must use
  *   `first_line` or explicit points.
  * - `BaseAlignment<N>` is an externally asserted fact about the Tensor's base
@@ -151,86 +143,6 @@ struct AffineLaneMapping {
   }
 };
 
-/**
- * @brief Logical memory footprint expanded by Tensor-level prefetch.
- *
- * `first_line` hints only the first active logical element. `whole_block`
- * covers cache lines touched by an affine block. `explicit_points` uses an
- * `ExplicitPrefetchPoints` list and is suitable for gathers or manual tuning.
- */
-enum class PrefetchFootprint {
-  first_line,
-  whole_block,
-  explicit_points,
-};
-
-/** @brief Compile-time list of logical lane offsets to prefetch. */
-template <nint_t... Offsets>
-struct ExplicitPrefetchPoints {
-  inline static constexpr std::array<nint_t, sizeof...(Offsets)> values{
-      Offsets...};
-};
-
-using NoPrefetchPoints = ExplicitPrefetchPoints<>;
-
-/**
- * @brief Compile-time cursor prefetch configuration.
- *
- * @tparam Enabled `false` removes future-coordinate calculation and hints.
- * @tparam AheadBlocks Number of full scan blocks/project iterations ahead.
- * @tparam Footprint Logical points or block coverage to hint.
- * @tparam Locality Backend cache-level option passed to `vec::prefetch`.
- * @tparam Temporality Backend keep/streaming option.
- * @tparam Intent Backend read/write intent.
- * @tparam Points Logical offsets used only with `explicit_points`.
- *
- * @note A ScanCursor interprets one block as one full vector advance. A
- * ProjectCursor interprets one block as one traversal step.
- */
-template <
-    bool Enabled,
-    int AheadBlocks = 1,
-    PrefetchFootprint Footprint = PrefetchFootprint::first_line,
-    typename Locality = vec::mem::PrefetchL1,
-    typename Temporality = vec::mem::PrefetchKeep,
-    typename Intent = vec::mem::PrefetchRead,
-    typename Points = NoPrefetchPoints>
-struct PrefetchPolicy {
-  static_assert(!Enabled || AheadBlocks > 0,
-                "enabled prefetch requires a positive lookahead");
-  static_assert(
-      Footprint == PrefetchFootprint::explicit_points ||
-          std::same_as<Points, NoPrefetchPoints>,
-      "explicit prefetch points require the explicit_points footprint");
-
-  static constexpr bool enabled = Enabled;
-  static constexpr int ahead_blocks = AheadBlocks;
-  static constexpr PrefetchFootprint footprint = Footprint;
-  using LocalityOption = Locality;
-  using TemporalityOption = Temporality;
-  using IntentOption = Intent;
-  using PointSet = Points;
-};
-
-/** @brief Disabled prefetch policy; intended as the default. */
-using NoPrefetch = PrefetchPolicy<false>;
-
-/**
- * @brief Convenience read/L1/keep policy with explicit logical points.
- * @tparam AheadBlocks Cursor lookahead.
- * @tparam Offsets Logical offsets along the vector axis.
- */
-template <
-    int AheadBlocks,
-    nint_t... Offsets>
-using ExplicitPrefetchPolicy = PrefetchPolicy<
-    true,
-    AheadBlocks,
-    PrefetchFootprint::explicit_points,
-    vec::mem::PrefetchL1,
-    vec::mem::PrefetchKeep,
-    vec::mem::PrefetchRead,
-    ExplicitPrefetchPoints<Offsets...>>;
 
 /**
  * @brief User-asserted alignment of an operand's base pointer in bytes.

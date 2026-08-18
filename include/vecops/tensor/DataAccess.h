@@ -26,7 +26,7 @@
  * caller's Tensor representation. A kernel requests a vector of ComputeType at
  * a logical coordinate and axis; DataAccess applies Layout addressing, active
  * lanes, dtype conversion, an optional pure transform, materialization, and
- * prefetch without exposing those details to the hot-loop algorithm.
+ * hot-loop algorithm boundaries.
  *
  * ## Construction model: Spec + Policy + Session
  *
@@ -116,7 +116,6 @@
  *   TailTag.
  * - `project()` advances one axis while each operation vectors along a
  *   different axis. Each load/store supplies its own active/address options.
- *   This models row-to-row accesses and their future prefetch coordinates.
  *
  * Both cursors store logical coordinates, not independently incremented raw
  * pointers. Arbitrary indexed mappings are intentionally excluded from scan.
@@ -573,7 +572,7 @@ consteval bool can_split_tag() {
  *
  * The Spec stores a Tensor view, compute-boundary type, optional transform,
  * coordinate projection, and externally verifiable facts. It deliberately
- * stores no execution plan, conversion order, memory temporality, or prefetch
+ * stores no execution plan, conversion order, or memory temporality
  * choice; those belong to `InputAccessPolicy`.
  *
  * Prefer the `input<Compute>()` factory instead of naming this type directly.
@@ -1021,167 +1020,6 @@ VECOPS_ALWAYS_INLINE nint_t tensor_numel(const Layout& layout) {
   return result;
 }
 
-template <typename Prefetch, vec::VectorTag Tag, typename Tensor,
-          typename... Options>
-VECOPS_ALWAYS_INLINE void prefetch_tensor(
-    Tag tag, const Tensor& tensor, nint_t base, nint_t axis_stride,
-    Options&&... options) {
-  if constexpr (!Prefetch::enabled) {
-    return;
-  } else {
-    constexpr std::size_t indexed_count =
-        vec::details::option_count<vec::details::IsIndexedOption, Options...>;
-    constexpr std::size_t strided_count =
-        vec::details::option_count<vec::details::IsStridedOption, Options...>;
-    static_assert(
-        Prefetch::footprint != PrefetchFootprint::whole_block ||
-            indexed_count == 0,
-        "whole_block prefetch requires an affine lane mapping");
-    using Memory = std::remove_const_t<typename Tensor::ElementType>;
-    using MemoryTag = vec::Rebind<Memory, Tag>;
-    auto issue = [&](nint_t logical_offset) VECOPS_INLINE_LAMBDA {
-      vec::prefetch(
-          MemoryTag{}, tensor.data() + base + logical_offset * axis_stride,
-          typename Prefetch::LocalityOption{},
-          typename Prefetch::TemporalityOption{},
-          typename Prefetch::IntentOption{});
-    };
-    auto issue_address = [&](std::uintptr_t address) VECOPS_INLINE_LAMBDA {
-      vec::prefetch(
-          MemoryTag{}, reinterpret_cast<const Memory*>(address),
-          typename Prefetch::LocalityOption{},
-          typename Prefetch::TemporalityOption{},
-          typename Prefetch::IntentOption{});
-    };
-    auto lane_offset = [&](nint_t lane) VECOPS_INLINE_LAMBDA {
-      if constexpr (indexed_count == 1) {
-        auto&& indexed = vec::details::find_option<
-            vec::details::IsIndexedOption>(options...);
-        using Indexed = std::remove_cvref_t<decltype(indexed)>;
-        static_assert(vec::details::IsIndexedOption<Indexed>::scale == 0,
-                      "tensor indexed addressing rejects byte scales");
-        using IndexTag = vec::VecToTagT<
-            typename vec::details::IsIndexedOption<Indexed>::Value>;
-        return static_cast<nint_t>(
-            vec::get(IndexTag{}, indexed.indices, lane));
-      } else if constexpr (
-          vec::details::option_count<vec::details::IsStridedOption,
-                                     Options...> == 1) {
-        auto&& strided = vec::details::find_option<
-            vec::details::IsStridedOption>(options...);
-        return lane * static_cast<nint_t>(strided.stride);
-      } else {
-        return lane;
-      }
-    };
-    auto active = [&](nint_t lane) VECOPS_INLINE_LAMBDA {
-      if constexpr (vec::details::option_count<
-                        vec::details::IsFirstOption, Options...> == 1) {
-        auto&& first = vec::details::find_option<
-            vec::details::IsFirstOption>(options...);
-        return lane < first.count;
-      } else if constexpr (vec::details::option_count<
-                               vec::details::IsMaskedOption,
-                               Options...> == 1) {
-        auto&& masked = vec::details::find_option<
-            vec::details::IsMaskedOption>(options...);
-        return vec::get(tag, masked.value, lane);
-      } else {
-        return true;
-      }
-    };
-
-    if constexpr (Prefetch::footprint == PrefetchFootprint::first_line) {
-      for (nint_t lane = 0; lane < vec::size(tag); ++lane) {
-        if (active(lane)) {
-          issue(lane_offset(lane));
-          break;
-        }
-      }
-    } else if constexpr (
-        Prefetch::footprint == PrefetchFootprint::explicit_points) {
-      for (nint_t point : Prefetch::PointSet::values) {
-        issue(lane_offset(point));
-      }
-    } else {
-      constexpr bool full_active =
-          vec::details::option_count<
-              vec::details::IsFirstOption, Options...> == 0 &&
-          vec::details::option_count<
-              vec::details::IsMaskedOption, Options...> == 0;
-      if constexpr (full_active && indexed_count == 0 && strided_count == 0) {
-        if (axis_stride == 1) {
-          constexpr std::size_t word_count =
-              static_cast<std::size_t>(vec::num_words(MemoryTag{}));
-          const nint_t word_lanes = vec::native_word_size(MemoryTag{});
-          [&]<std::size_t... I>(std::index_sequence<I...>)
-              VECOPS_INLINE_LAMBDA {
-            (issue(static_cast<nint_t>(I) * word_lanes), ...);
-          }(std::make_index_sequence<word_count>{});
-          return;
-        }
-      }
-      constexpr nint_t cache_line = 64;
-      constexpr bool has_arbitrary_mask =
-          vec::details::option_count<
-              vec::details::IsMaskedOption, Options...> == 1;
-      if constexpr (!has_arbitrary_mask) {
-        const nint_t active_lanes = [&] {
-          if constexpr (vec::details::option_count<
-                            vec::details::IsFirstOption,
-                            Options...> == 1) {
-            return static_cast<nint_t>(vec::details::find_option<
-                vec::details::IsFirstOption>(options...).count);
-          } else {
-            return vec::size(tag);
-          }
-        }();
-        nint_t logical_step = 1;
-        if constexpr (vec::details::option_count<
-                          vec::details::IsStridedOption,
-                          Options...> == 1) {
-          logical_step = static_cast<nint_t>(vec::details::find_option<
-              vec::details::IsStridedOption>(options...).stride);
-        }
-        const nint_t physical_step = logical_step * axis_stride;
-        const std::intptr_t byte_step =
-            static_cast<std::intptr_t>(physical_step) * sizeof(Memory);
-        if (active_lanes > 0 &&
-            byte_step >= -static_cast<std::intptr_t>(cache_line) &&
-            byte_step <= static_cast<std::intptr_t>(cache_line)) {
-          const auto first_address = reinterpret_cast<std::uintptr_t>(
-              tensor.data() + base);
-          const auto last_address = static_cast<std::uintptr_t>(
-              static_cast<std::intptr_t>(first_address) +
-              static_cast<std::intptr_t>(active_lanes - 1) * byte_step);
-          const auto low = std::min(first_address, last_address);
-          const auto high = std::max(first_address, last_address);
-          auto line = low - low % cache_line;
-          const auto first_line = line;
-          const auto last_line = high - high % cache_line;
-          for (;; line += cache_line) {
-            issue_address(line == first_line ? low : line);
-            if (line == last_line) break;
-          }
-          return;
-        }
-      }
-
-      std::intptr_t previous_line = -1;
-      for (nint_t lane = 0; lane < vec::size(tag); ++lane) {
-        if (!active(lane)) continue;
-        auto* pointer = tensor.data() + base + lane_offset(lane) * axis_stride;
-        const auto address = reinterpret_cast<std::uintptr_t>(pointer);
-        const auto line = static_cast<std::intptr_t>(address / cache_line);
-        if (line != previous_line) {
-          issue(lane_offset(lane));
-          previous_line = line;
-        }
-      }
-    }
-  }
-}
-
 template <int Axis, typename Layout>
 VECOPS_INLINE auto auxiliary_layout(const Layout& layout) {
   constexpr int Rank = Layout::Ndim;
@@ -1531,12 +1369,10 @@ VECOPS_INLINE auto slice_view(
       sliced_tensor, spec.transform(), projection};
 }
 
-template <typename Access, typename Tag, int Dim, typename Mapping,
-          typename Prefetch>
+template <typename Access, typename Tag, int Dim, typename Mapping>
 class ScanCursor;
 
-template <typename Access, typename Tag, int TraverseDim, int VectorDim,
-          typename Prefetch>
+template <typename Access, typename Tag, int TraverseDim, int VectorDim>
 class ProjectCursor;
 
 /**
@@ -1544,7 +1380,7 @@ class ProjectCursor;
  *
  * `load()` returns exactly the caller's Compute Tag regardless of Tensor memory
  * dtype or transform dtype/width. Axis defaults to `Rank - 1`. The session also
- * creates ScanCursor/ProjectCursor objects and explicit prefetches.
+ * creates ScanCursor/ProjectCursor objects.
  *
  * Instances borrow their Spec and Tensor storage and must not outlive them.
  * Kernels should normally receive this type through `kernel::with_operands` so
@@ -1681,53 +1517,6 @@ public:
     }
   }
 
-  /** @brief Prefetch using the policy footprint along the final Tensor axis. */
-  template <vec::VectorTag Tag, typename... Options>
-  VECOPS_ALWAYS_INLINE void prefetch(
-      Tag tag, const Coord<Rank>& position, Options&&... options) const {
-    prefetch(
-        tag, position, axis<Rank - 1>,
-        std::forward<Options>(options)...);
-  }
-
-  /**
-   * @brief Prefetch a logical vector footprint along axis `Dim`.
-   * @note If the policy is disabled this compiles to no operation, including no
-   * future-coordinate or footprint computation.
-   */
-  template <vec::VectorTag Tag, int Dim, typename... Options>
-  VECOPS_ALWAYS_INLINE void prefetch(
-      Tag tag,
-      const Coord<Rank>& position,
-      Axis<Dim>,
-      Options&&... options) const {
-    using Prefetch = typename Policy::PrefetchOptions;
-    prefetch_with<Prefetch>(
-        tag, position, Axis<Dim>{}, std::forward<Options>(options)...);
-  }
-
-  /**
-   * @brief Prefetch with an explicitly selected compile-time policy.
-   *
-   * This is primarily used by cursors and kernels with a local scheduling
-   * decision. It still applies Tensor Layout and logical access options.
-   */
-  template <typename Prefetch, vec::VectorTag Tag, int Dim,
-            typename... Options>
-  VECOPS_ALWAYS_INLINE void prefetch_with(
-      Tag tag, const Coord<Rank>& position, Axis<Dim>,
-      Options&&... options) const {
-    if constexpr (Prefetch::enabled) {
-      const auto& tensor = spec_->tensor();
-      details::assert_access_in_bounds(
-          tag, tensor, position, Axis<Dim>{}, options...);
-      const nint_t base = offset_at(tensor.layout(), position);
-      details::prefetch_tensor<Prefetch>(
-          tag, tensor, base, stride<Dim>(tensor.layout()),
-          std::forward<Options>(options)...);
-    }
-  }
-
   /**
    * @brief Create a same-axis ScanCursor.
    * @param count Number of logical sequence elements remaining, not bytes and
@@ -1738,8 +1527,7 @@ public:
    * `vec::size(tag) * mapping.stride`. Indexed mappings are not accepted.
    */
   template <vec::VectorTag Tag, int Dim,
-            typename Mapping = ContiguousLaneMapping,
-            typename Prefetch = typename Policy::PrefetchOptions>
+            typename Mapping = ContiguousLaneMapping>
     requires (std::same_as<Mapping, ContiguousLaneMapping> ||
               std::same_as<Mapping, AffineLaneMapping>)
   VECOPS_INLINE auto scan(
@@ -1747,21 +1535,19 @@ public:
       Coord<Rank> origin,
       Axis<Dim>,
       nint_t count,
-      Mapping mapping = {},
-      Prefetch prefetch = {}) {
-    return ScanCursor<InputDataAccess, Tag, Dim, Mapping, Prefetch>{
-        *this, tag, origin, count, mapping, prefetch};
+      Mapping mapping = {}) {
+    return ScanCursor<InputDataAccess, Tag, Dim, Mapping>{
+        *this, tag, origin, count, mapping};
   }
 
   /** @brief Convenience ScanCursor overload accepting `vec::strided(s)`. */
-  template <vec::VectorTag Tag, int Dim, typename Stride,
-            typename Prefetch = typename Policy::PrefetchOptions>
+  template <vec::VectorTag Tag, int Dim, typename Stride>
   VECOPS_INLINE auto scan(
       Tag tag, Coord<Rank> origin, Axis<Dim> dim, nint_t count,
-      vec::opt::Strided<Stride> mapping, Prefetch prefetch = {}) {
+      vec::opt::Strided<Stride> mapping) {
     return scan(
         tag, origin, dim, count,
-        AffineLaneMapping{static_cast<nint_t>(mapping.stride)}, prefetch);
+        AffineLaneMapping{static_cast<nint_t>(mapping.stride)});
   }
 
   /**
@@ -1769,24 +1555,20 @@ public:
    * @param iterations Number of cursor positions.
    * @param traversal_step Logical elements added on each `advance()`.
    *
-   * Every operation may use a different Tag and access options. Prefetch looks
-   * ahead in traversal iterations, then applies the operation's vector-axis
-   * footprint at that future origin.
+   * Every operation may use a different Tag and access options.
    */
-  template <vec::VectorTag Tag, int TraverseDim, int VectorDim,
-            typename Prefetch = typename Policy::PrefetchOptions>
+  template <vec::VectorTag Tag, int TraverseDim, int VectorDim>
   VECOPS_INLINE auto project(
       Tag tag,
       Coord<Rank> origin,
       TraversalAxis<TraverseDim>,
       VectorAxis<VectorDim>,
       nint_t iterations,
-      nint_t traversal_step = 1,
-      Prefetch prefetch = {}) {
+      nint_t traversal_step = 1) {
     static_assert(TraverseDim != VectorDim);
     return ProjectCursor<
-        InputDataAccess, Tag, TraverseDim, VectorDim, Prefetch>{
-            *this, tag, origin, iterations, traversal_step, prefetch};
+        InputDataAccess, Tag, TraverseDim, VectorDim>{
+            *this, tag, origin, iterations, traversal_step};
   }
 
   const Spec& spec() const { return *spec_; }
@@ -1923,44 +1705,8 @@ public:
     }
   }
 
-  template <vec::VectorTag Tag, typename... Options>
-  VECOPS_ALWAYS_INLINE void prefetch(
-      Tag tag, const Coord<Rank>& position, Options&&... options) const {
-    prefetch(
-        tag, position, axis<Rank - 1>,
-        std::forward<Options>(options)...);
-  }
-
-  template <vec::VectorTag Tag, int Dim, typename... Options>
-  VECOPS_ALWAYS_INLINE void prefetch(
-      Tag tag,
-      const Coord<Rank>& position,
-      Axis<Dim>,
-      Options&&... options) const {
-    using Prefetch = typename Policy::PrefetchOptions;
-    prefetch_with<Prefetch>(
-        tag, position, Axis<Dim>{}, std::forward<Options>(options)...);
-  }
-
-  template <typename Prefetch, vec::VectorTag Tag, int Dim,
-            typename... Options>
-  VECOPS_ALWAYS_INLINE void prefetch_with(
-      Tag tag, const Coord<Rank>& position, Axis<Dim>,
-      Options&&... options) const {
-    if constexpr (Prefetch::enabled) {
-      const auto& tensor = spec_->tensor();
-      details::assert_access_in_bounds(
-          tag, tensor, position, Axis<Dim>{}, options...);
-      const nint_t base = offset_at(tensor.layout(), position);
-      details::prefetch_tensor<Prefetch>(
-          tag, tensor, base, stride<Dim>(tensor.layout()),
-          std::forward<Options>(options)...);
-    }
-  }
-
   template <vec::VectorTag Tag, int Dim,
-            typename Mapping = ContiguousLaneMapping,
-            typename Prefetch = typename Policy::PrefetchOptions>
+            typename Mapping = ContiguousLaneMapping>
     requires (std::same_as<Mapping, ContiguousLaneMapping> ||
               std::same_as<Mapping, AffineLaneMapping>)
   VECOPS_INLINE auto scan(
@@ -1968,36 +1714,32 @@ public:
       Coord<Rank> origin,
       Axis<Dim>,
       nint_t count,
-      Mapping mapping = {},
-      Prefetch prefetch = {}) {
-    return ScanCursor<OutputDataAccess, Tag, Dim, Mapping, Prefetch>{
-        *this, tag, origin, count, mapping, prefetch};
+      Mapping mapping = {}) {
+    return ScanCursor<OutputDataAccess, Tag, Dim, Mapping>{
+        *this, tag, origin, count, mapping};
   }
 
-  template <vec::VectorTag Tag, int Dim, typename Stride,
-            typename Prefetch = typename Policy::PrefetchOptions>
+  template <vec::VectorTag Tag, int Dim, typename Stride>
   VECOPS_INLINE auto scan(
       Tag tag, Coord<Rank> origin, Axis<Dim> dim, nint_t count,
-      vec::opt::Strided<Stride> mapping, Prefetch prefetch = {}) {
+      vec::opt::Strided<Stride> mapping) {
     return scan(
         tag, origin, dim, count,
-        AffineLaneMapping{static_cast<nint_t>(mapping.stride)}, prefetch);
+        AffineLaneMapping{static_cast<nint_t>(mapping.stride)});
   }
 
-  template <vec::VectorTag Tag, int TraverseDim, int VectorDim,
-            typename Prefetch = typename Policy::PrefetchOptions>
+  template <vec::VectorTag Tag, int TraverseDim, int VectorDim>
   VECOPS_INLINE auto project(
       Tag tag,
       Coord<Rank> origin,
       TraversalAxis<TraverseDim>,
       VectorAxis<VectorDim>,
       nint_t iterations,
-      nint_t traversal_step = 1,
-      Prefetch prefetch = {}) {
+      nint_t traversal_step = 1) {
     static_assert(TraverseDim != VectorDim);
     return ProjectCursor<
-        OutputDataAccess, Tag, TraverseDim, VectorDim, Prefetch>{
-            *this, tag, origin, iterations, traversal_step, prefetch};
+        OutputDataAccess, Tag, TraverseDim, VectorDim>{
+            *this, tag, origin, iterations, traversal_step};
   }
 
   /**
@@ -2042,15 +1784,12 @@ private:
  *
  * The default TailTag is the full Tag with `first(active)`. A manually smaller
  * TailTag consumes `min(remaining, size(tail_tag))`, enabling SVE paths whose
- * fast full and tail representations differ. Automatic prefetch occurs only
- * for full operations and only when the complete future block exists.
  *
  * @note A `load_tail()` and its `advance_tail()` must use the same TailTag.
  * @note Calling `load_full()` without `has_full()` or tail operations on an
  * empty cursor violates the cursor protocol.
  */
-template <typename Access, typename Tag, int Dim, typename Mapping,
-          typename Prefetch>
+template <typename Access, typename Tag, int Dim, typename Mapping>
 class ScanCursor {
 public:
   static constexpr int Rank = Access::Rank;
@@ -2060,10 +1799,9 @@ public:
       Tag tag,
       Coord<Rank> origin,
       nint_t count,
-      Mapping mapping,
-      Prefetch prefetch)
+      Mapping mapping)
       : access_(&access), tag_(tag), origin_(origin), remaining_(count),
-        mapping_(mapping), prefetch_(prefetch) {}
+        mapping_(mapping) {}
 
   bool has_full() const { return remaining_ >= vec::size(tag_); }
   bool empty() const { return remaining_ <= 0; }
@@ -2074,7 +1812,6 @@ public:
       access.load(tag, origin, axis<Dim>, vec::opt::unmasked);
     }
   {
-    maybe_prefetch();
     if constexpr (std::same_as<Mapping, ContiguousLaneMapping>) {
       return access_->load(tag_, origin_, axis<Dim>, vec::opt::unmasked);
     } else {
@@ -2108,7 +1845,6 @@ public:
       access.store(tag, origin, axis<Dim>, value, vec::opt::unmasked);
     }
   {
-    maybe_prefetch();
     if constexpr (std::same_as<Mapping, ContiguousLaneMapping>) {
       access_->store(
           tag_, origin_, axis<Dim>, value, vec::opt::unmasked);
@@ -2155,32 +1891,11 @@ private:
     remaining_ -= lanes;
   }
 
-  VECOPS_ALWAYS_INLINE void maybe_prefetch() const {
-    if constexpr (Prefetch::enabled) {
-      const nint_t lanes = vec::size(tag_);
-      // Scan prefetches only complete future blocks.  A future tail may have
-      // fewer active lanes than the full-load options carried by this cursor.
-      if (remaining_ >= (Prefetch::ahead_blocks + 1) * lanes) {
-        auto future = origin_;
-        future[Dim] += mapping_.offset(
-            Prefetch::ahead_blocks * lanes);
-        if constexpr (std::same_as<Mapping, ContiguousLaneMapping>) {
-          access_->template prefetch_with<Prefetch>(
-              tag_, future, axis<Dim>);
-        } else {
-          access_->template prefetch_with<Prefetch>(
-              tag_, future, axis<Dim>, vec::strided(mapping_.stride));
-        }
-      }
-    }
-  }
-
   Access* access_;
   Tag tag_;
   Coord<Rank> origin_;
   nint_t remaining_;
   [[no_unique_address]] Mapping mapping_;
-  [[no_unique_address]] Prefetch prefetch_;
 };
 
 /**
@@ -2200,11 +1915,9 @@ private:
  * }
  * @endcode
  *
- * With prefetch lookahead `D`, that example hints the footprint rooted at
  * `(i + D, 0)`, not `(i, D * vector_width)`.
  */
-template <typename Access, typename Tag, int TraverseDim, int VectorDim,
-          typename Prefetch>
+template <typename Access, typename Tag, int TraverseDim, int VectorDim>
 class ProjectCursor {
 public:
   static constexpr int Rank = Access::Rank;
@@ -2214,17 +1927,14 @@ public:
       Tag tag,
       Coord<Rank> origin,
       nint_t iterations,
-      nint_t traversal_step,
-      Prefetch prefetch)
+      nint_t traversal_step)
       : access_(&access), tag_(tag), origin_(origin),
-        remaining_iterations_(iterations), traversal_step_(traversal_step),
-        prefetch_(prefetch) {}
+        remaining_iterations_(iterations), traversal_step_(traversal_step) {}
 
   bool valid() const { return remaining_iterations_ > 0; }
 
   template <typename... Options>
   VECOPS_ALWAYS_INLINE auto load(Options&&... options) const {
-    maybe_prefetch(tag_, std::forward<Options>(options)...);
     return access_->load(
         tag_, origin_, axis<VectorDim>,
         std::forward<Options>(options)...);
@@ -2233,7 +1943,6 @@ public:
   template <vec::VectorTag OtherTag, typename... Options>
   VECOPS_ALWAYS_INLINE auto load(
       OtherTag tag, Options&&... options) const {
-    maybe_prefetch(tag, std::forward<Options>(options)...);
     return access_->load(
         tag, origin_, axis<VectorDim>,
         std::forward<Options>(options)...);
@@ -2248,7 +1957,6 @@ public:
           std::forward<Options>(options)...);
     }
   {
-    maybe_prefetch(tag_, std::forward<Options>(options)...);
     access_->store(
         tag_, origin_, axis<VectorDim>, value,
         std::forward<Options>(options)...);
@@ -2263,7 +1971,6 @@ public:
           std::forward<Options>(options)...);
     }
   {
-    maybe_prefetch(tag, std::forward<Options>(options)...);
     access_->store(
         tag, origin_, axis<VectorDim>, value,
         std::forward<Options>(options)...);
@@ -2275,27 +1982,11 @@ public:
   }
 
 private:
-  template <vec::VectorTag LoadTag, typename... Options>
-  VECOPS_ALWAYS_INLINE void maybe_prefetch(
-      LoadTag load_tag, Options&&... options) const {
-    if constexpr (Prefetch::enabled) {
-      if (remaining_iterations_ > Prefetch::ahead_blocks) {
-        auto future = origin_;
-        future[TraverseDim] +=
-            Prefetch::ahead_blocks * traversal_step_;
-        access_->template prefetch_with<Prefetch>(
-            load_tag, future, axis<VectorDim>,
-            std::forward<Options>(options)...);
-      }
-    }
-  }
-
   Access* access_;
   Tag tag_;
   Coord<Rank> origin_;
   nint_t remaining_iterations_;
   nint_t traversal_step_;
-  [[no_unique_address]] Prefetch prefetch_;
 };
 
 /**
@@ -2364,68 +2055,35 @@ public:
         std::forward<Options>(options)...);
   }
 
-  template <vec::VectorTag Tag, typename... Options>
-  VECOPS_ALWAYS_INLINE void prefetch(
-      Tag tag, const Coord<Rank>& position, Options&&... options) const {
-    if constexpr (IsInput) {
-      InputDataAccess<Spec, Policy> access{spec_, policy_};
-      access.prefetch(
-          tag, position, std::forward<Options>(options)...);
-    } else {
-      OutputDataAccess<Spec, Policy> access{spec_, policy_};
-      access.prefetch(
-          tag, position, std::forward<Options>(options)...);
-    }
-  }
-
-  template <typename Prefetch, vec::VectorTag Tag, int Dim,
-            typename... Options>
-  VECOPS_ALWAYS_INLINE void prefetch_with(
-      Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
-      Options&&... options) const {
-    if constexpr (IsInput) {
-      InputDataAccess<Spec, Policy> access{spec_, policy_};
-      access.template prefetch_with<Prefetch>(
-          tag, position, dim, std::forward<Options>(options)...);
-    } else {
-      OutputDataAccess<Spec, Policy> access{spec_, policy_};
-      access.template prefetch_with<Prefetch>(
-          tag, position, dim, std::forward<Options>(options)...);
-    }
-  }
-
   template <vec::VectorTag Tag, int Dim,
-            typename Mapping = ContiguousLaneMapping,
-            typename Prefetch = typename Policy::PrefetchOptions>
+            typename Mapping = ContiguousLaneMapping>
     requires (std::same_as<Mapping, ContiguousLaneMapping> ||
               std::same_as<Mapping, AffineLaneMapping>)
   VECOPS_INLINE auto scan(
       Tag tag, Coord<Rank> origin, Axis<Dim>, nint_t count,
-      Mapping mapping = {}, Prefetch prefetch = {}) {
-    return ScanCursor<BorrowedDataAccess, Tag, Dim, Mapping, Prefetch>{
-        *this, tag, origin, count, mapping, prefetch};
+      Mapping mapping = {}) {
+    return ScanCursor<BorrowedDataAccess, Tag, Dim, Mapping>{
+        *this, tag, origin, count, mapping};
   }
 
-  template <vec::VectorTag Tag, int Dim, typename Stride,
-            typename Prefetch = typename Policy::PrefetchOptions>
+  template <vec::VectorTag Tag, int Dim, typename Stride>
   VECOPS_INLINE auto scan(
       Tag tag, Coord<Rank> origin, Axis<Dim> dim, nint_t count,
-      vec::opt::Strided<Stride> mapping, Prefetch prefetch = {}) {
+      vec::opt::Strided<Stride> mapping) {
     return scan(
         tag, origin, dim, count,
-        AffineLaneMapping{static_cast<nint_t>(mapping.stride)}, prefetch);
+        AffineLaneMapping{static_cast<nint_t>(mapping.stride)});
   }
 
-  template <vec::VectorTag Tag, int TraverseDim, int VectorDim,
-            typename Prefetch = typename Policy::PrefetchOptions>
+  template <vec::VectorTag Tag, int TraverseDim, int VectorDim>
   VECOPS_INLINE auto project(
       Tag tag, Coord<Rank> origin, TraversalAxis<TraverseDim>,
       VectorAxis<VectorDim>, nint_t iterations,
-      nint_t traversal_step = 1, Prefetch prefetch = {}) {
+      nint_t traversal_step = 1) {
     static_assert(TraverseDim != VectorDim);
     return ProjectCursor<
-        BorrowedDataAccess, Tag, TraverseDim, VectorDim, Prefetch>{
-            *this, tag, origin, iterations, traversal_step, prefetch};
+        BorrowedDataAccess, Tag, TraverseDim, VectorDim>{
+            *this, tag, origin, iterations, traversal_step};
   }
 
   const Spec& spec() const { return spec_; }
@@ -2525,64 +2183,35 @@ public:
         tag, position, dim, value, std::forward<Options>(options)...);
   }
 
-  template <vec::VectorTag Tag, typename... Options>
-  VECOPS_ALWAYS_INLINE void prefetch(
-      Tag tag, const Coord<Rank>& position, Options&&... options) const {
-    OutputDataAccess<AuxSpec, Policy> hot{auxiliary_, policy_};
-    hot.prefetch(tag, position, std::forward<Options>(options)...);
-  }
-
-  template <vec::VectorTag Tag, int Dim, typename... Options>
-  VECOPS_ALWAYS_INLINE void prefetch(
-      Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
-      Options&&... options) const {
-    OutputDataAccess<AuxSpec, Policy> hot{auxiliary_, policy_};
-    hot.prefetch(
-        tag, position, dim, std::forward<Options>(options)...);
-  }
-
-  template <typename Prefetch, vec::VectorTag Tag, int Dim,
-            typename... Options>
-  VECOPS_ALWAYS_INLINE void prefetch_with(
-      Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
-      Options&&... options) const {
-    OutputDataAccess<AuxSpec, Policy> hot{auxiliary_, policy_};
-    hot.template prefetch_with<Prefetch>(
-        tag, position, dim, std::forward<Options>(options)...);
-  }
-
   template <vec::VectorTag Tag, int Dim,
-            typename Mapping = ContiguousLaneMapping,
-            typename Prefetch = typename Policy::PrefetchOptions>
+            typename Mapping = ContiguousLaneMapping>
     requires (std::same_as<Mapping, ContiguousLaneMapping> ||
               std::same_as<Mapping, AffineLaneMapping>)
   VECOPS_INLINE auto scan(
       Tag tag, Coord<Rank> origin, Axis<Dim>, nint_t count,
-      Mapping mapping = {}, Prefetch prefetch = {}) {
-    return ScanCursor<MaterializedOutputDataAccess, Tag, Dim, Mapping, Prefetch>{
-        *this, tag, origin, count, mapping, prefetch};
+      Mapping mapping = {}) {
+    return ScanCursor<MaterializedOutputDataAccess, Tag, Dim, Mapping>{
+        *this, tag, origin, count, mapping};
   }
 
-  template <vec::VectorTag Tag, int Dim, typename Stride,
-            typename Prefetch = typename Policy::PrefetchOptions>
+  template <vec::VectorTag Tag, int Dim, typename Stride>
   VECOPS_INLINE auto scan(
       Tag tag, Coord<Rank> origin, Axis<Dim> dim, nint_t count,
-      vec::opt::Strided<Stride> mapping, Prefetch prefetch = {}) {
+      vec::opt::Strided<Stride> mapping) {
     return scan(
         tag, origin, dim, count,
-        AffineLaneMapping{static_cast<nint_t>(mapping.stride)}, prefetch);
+        AffineLaneMapping{static_cast<nint_t>(mapping.stride)});
   }
 
-  template <vec::VectorTag Tag, int TraverseDim, int VectorDim,
-            typename Prefetch = typename Policy::PrefetchOptions>
+  template <vec::VectorTag Tag, int TraverseDim, int VectorDim>
   VECOPS_INLINE auto project(
       Tag tag, Coord<Rank> origin, TraversalAxis<TraverseDim>,
       VectorAxis<VectorDim>, nint_t iterations,
-      nint_t traversal_step = 1, Prefetch prefetch = {}) {
+      nint_t traversal_step = 1) {
     static_assert(TraverseDim != VectorDim);
     return ProjectCursor<MaterializedOutputDataAccess, Tag, TraverseDim,
-                         VectorDim, Prefetch>{
-        *this, tag, origin, iterations, traversal_step, prefetch};
+                         VectorDim>{
+        *this, tag, origin, iterations, traversal_step};
   }
 
   /**

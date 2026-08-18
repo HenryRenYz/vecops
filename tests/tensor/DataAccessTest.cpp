@@ -48,30 +48,6 @@ static_assert(!tensor::details::can_transform_chunk<
               vec::ScalableTag<int8_t, 2>, TransformContext<1>>());
 #endif
 
-struct CursorPrefetchProbe {
-  static constexpr int Rank = 2;
-  inline static int calls = 0;
-  inline static Coord<2> last{};
-  inline static int last_axis = -1;
-  inline static nint_t last_lanes = 0;
-
-  template <vec::VectorTag ProbeTag, int Dim, typename... Options>
-  auto load(
-      ProbeTag tag, const Coord<2>&, Axis<Dim>, Options&&...) const {
-    return vec::zeros(tag);
-  }
-
-  template <typename Prefetch, vec::VectorTag ProbeTag, int Dim,
-            typename... Options>
-  void prefetch_with(
-      ProbeTag tag, const Coord<2>& position, Axis<Dim>, Options&&...) const {
-    ++calls;
-    last = position;
-    last_axis = Dim;
-    last_lanes = vec::size(tag);
-  }
-};
-
 template <typename Tensor>
 concept CanMakeOutputSpec = requires(Tensor tensor) {
   output<float32_t>(tensor);
@@ -283,48 +259,6 @@ TEST(TensorDataAccessTest, ProjectCursorAdvancesTraversalAxis) {
     cursor.advance();
   }
   EXPECT_FALSE(cursor.valid());
-}
-
-TEST(TensorDataAccessTest, CursorPrefetchUsesProjectedFutureCoordinates) {
-  using Enabled = PrefetchPolicy<true, 2>;
-  using Disabled = PrefetchPolicy<false, 2>;
-  CursorPrefetchProbe probe;
-  Tag tag{};
-  CursorPrefetchProbe::calls = 0;
-  ScanCursor<CursorPrefetchProbe, Tag, 1, ContiguousLaneMapping, Disabled>
-      disabled{probe, tag, coord(3, 5), 4 * vec::size(tag), {}, {}};
-  (void)disabled.load_full();
-  EXPECT_EQ(CursorPrefetchProbe::calls, 0);
-
-  ScanCursor<CursorPrefetchProbe, Tag, 1, ContiguousLaneMapping, Enabled>
-      scan{probe, tag, coord(3, 5), 4 * vec::size(tag), {}, {}};
-  (void)scan.load_full();
-  EXPECT_EQ(CursorPrefetchProbe::calls, 1);
-  EXPECT_EQ(CursorPrefetchProbe::last, coord(3, 5 + 2 * vec::size(tag)));
-  EXPECT_EQ(CursorPrefetchProbe::last_axis, 1);
-
-  CursorPrefetchProbe::calls = 0;
-  ScanCursor<CursorPrefetchProbe, Tag, 1, ContiguousLaneMapping, Enabled>
-      future_is_tail{
-          probe, tag, coord(3, 5), 2 * vec::size(tag) + 1, {}, {}};
-  (void)future_is_tail.load_full();
-  EXPECT_EQ(CursorPrefetchProbe::calls, 0);
-
-  CursorPrefetchProbe::calls = 0;
-  ProjectCursor<CursorPrefetchProbe, Tag, 0, 1, Enabled> project{
-      probe, tag, coord(1, 7), 4, 3, {}};
-  using OtherTag = vec::Half<Tag>;
-  (void)project.load(OtherTag{}, vec::opt::first(1));
-  EXPECT_EQ(CursorPrefetchProbe::calls, 1);
-  EXPECT_EQ(CursorPrefetchProbe::last, coord(7, 7));
-  EXPECT_EQ(CursorPrefetchProbe::last_axis, 1);
-  EXPECT_EQ(CursorPrefetchProbe::last_lanes, vec::size(OtherTag{}));
-
-  CursorPrefetchProbe::calls = 0;
-  ScanCursor<CursorPrefetchProbe, Tag, 1, ContiguousLaneMapping, Enabled>
-      tail{probe, tag, coord(0, 0), vec::size(tag) - 1, {}, {}};
-  (void)tail.load_tail();
-  EXPECT_EQ(CursorPrefetchProbe::calls, 0);
 }
 
 TEST(TensorDataAccessTest, SlicedDataAccessIsBorrowedAndKeepsCoordinates) {
