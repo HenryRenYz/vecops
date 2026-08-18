@@ -73,12 +73,18 @@ template <typename Value, VectorTag Tag, typename Builder,
           std::size_t... Index>
 VECOPS_ALWAYS_INLINE constexpr Value construct_sized_value(
     Tag tag, Builder& builder, std::index_sequence<Index...>) {
-  Value result{};
-  ((result = set_word<static_cast<nint_t>(Index)>(
-        result,
-        builder.template operator()<static_cast<nint_t>(Index)>(tag))),
-   ...);
-  return result;
+  if constexpr (is_word_array<Value>) {
+    // Keep this as one aggregate initialization. Repeated
+    // `result = set_word(result, word)` creates partially-covered whole-value
+    // copies; GCC 13 then fails SRA for four 64-byte words and spills them.
+    // `--param=sra-max-scalarization-size-Ospeed=256` masks that failure, but
+    // the construction itself must not depend on a compiler threshold.
+    return Value{{
+        builder.template operator()<static_cast<nint_t>(Index)>(tag)...}};
+  } else {
+    static_assert(sizeof...(Index) == 1);
+    return (builder.template operator()<static_cast<nint_t>(Index)>(tag), ...);
+  }
 }
 
 /**

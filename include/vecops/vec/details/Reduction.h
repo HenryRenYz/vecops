@@ -85,15 +85,78 @@ VECOPS_ALWAYS_INLINE decltype(auto) fold_reduction_words(
     constexpr nint_t right_count = Count - left_count;
     return fold_reduction_words<
         Backend, ReduceOp, Begin, left_count>(
-        ReduceOp{}, tag, value, [&](auto left) -> decltype(auto) {
+        ReduceOp{}, tag, value,
+        [&](auto left) VECOPS_INLINE_LAMBDA -> decltype(auto) {
           return fold_reduction_words<
               Backend, ReduceOp, Begin + left_count, right_count>(
-              ReduceOp{}, tag, value, [&](auto right) -> decltype(auto) {
+              ReduceOp{}, tag, value,
+              [&](auto right) VECOPS_INLINE_LAMBDA -> decltype(auto) {
                 auto folded = execute_word<Begin, Backend>(
                     ReductionCombineOpOf<ReduceOp>{}, tag, left, right);
                 return std::forward<Callback>(callback)(folded);
               });
         });
+  }
+}
+
+/** Sized backends can return one folded word directly without a lambda tree. */
+template <typename Backend, typename ReduceOp,
+          nint_t Begin, nint_t Count, VectorTag Tag>
+VECOPS_ALWAYS_INLINE NativeWordVec<Tag> fold_sized_reduction_words(
+    ReduceOp, Tag tag, const Vec<Tag>& value) {
+  static_assert(Count > 0);
+  if constexpr (Count == 1) {
+    return ::vecops::vec::get_word<Begin>(tag, value);
+  } else {
+    constexpr nint_t left_count = Count / 2;
+    constexpr nint_t right_count = Count - left_count;
+    const auto left = fold_sized_reduction_words<
+        Backend, ReduceOp, Begin, left_count>(ReduceOp{}, tag, value);
+    const auto right = fold_sized_reduction_words<
+        Backend, ReduceOp, Begin + left_count, right_count>(
+        ReduceOp{}, tag, value);
+    return execute_word<Begin, Backend>(
+        ReductionCombineOpOf<ReduceOp>{}, tag, left, right);
+  }
+}
+
+template <VectorTag Tag>
+struct SizedMaskedReductionWord {
+  NativeWordVec<Tag> value;
+  NativeWordMask<Tag> mask;
+};
+
+template <typename Backend, typename ReduceOp,
+          nint_t Begin, nint_t Count, VectorTag Tag>
+VECOPS_ALWAYS_INLINE SizedMaskedReductionWord<Tag>
+fold_sized_masked_reduction_words(
+    ReduceOp, Tag tag, const Vec<Tag>& value, const Mask<Tag>& mask) {
+  static_assert(Count > 0);
+  if constexpr (Count == 1) {
+    return {
+        ::vecops::vec::get_word<Begin>(tag, value),
+        ::vecops::vec::get_word<Begin>(tag, mask)};
+  } else {
+    constexpr nint_t left_count = Count / 2;
+    constexpr nint_t right_count = Count - left_count;
+    const auto left = fold_sized_masked_reduction_words<
+        Backend, ReduceOp, Begin, left_count>(
+        ReduceOp{}, tag, value, mask);
+    const auto right = fold_sized_masked_reduction_words<
+        Backend, ReduceOp, Begin + left_count, right_count>(
+        ReduceOp{}, tag, value, mask);
+    const auto both = execute_word<Begin, Backend>(
+        MaskAndOp{}, tag, left.mask, right.mask);
+    const auto either = execute_word<Begin, Backend>(
+        MaskOrOp{}, tag, left.mask, right.mask);
+    const auto combined = execute_word<Begin, Backend>(
+        ReductionCombineOpOf<ReduceOp>{}, tag, left.value, right.value);
+    const auto unique = execute_word<Begin, Backend>(
+        BlendOp{}, tag, right.value, left.mask, left.value);
+    return {
+        execute_word<Begin, Backend>(
+            BlendOp{}, tag, unique, both, combined),
+        either};
   }
 }
 
@@ -117,11 +180,13 @@ VECOPS_ALWAYS_INLINE decltype(auto) fold_masked_reduction_words(
     return fold_masked_reduction_words<
         Backend, ReduceOp, Begin, left_count>(
         ReduceOp{}, tag, value, mask,
-        [&](auto left, auto left_mask) -> decltype(auto) {
+        [&](auto left, auto left_mask)
+            VECOPS_INLINE_LAMBDA -> decltype(auto) {
           return fold_masked_reduction_words<
               Backend, ReduceOp, Begin + left_count, right_count>(
               ReduceOp{}, tag, value, mask,
-              [&](auto right, auto right_mask) -> decltype(auto) {
+              [&](auto right, auto right_mask)
+                  VECOPS_INLINE_LAMBDA -> decltype(auto) {
                 const auto both = execute_word<Begin, Backend>(
                     MaskAndOp{}, tag, left_mask, right_mask);
                 const auto either = execute_word<Begin, Backend>(
@@ -144,19 +209,33 @@ struct ReductionGenericImpl {
   static VECOPS_ALWAYS_INLINE ElementOf<Tag> call(
       ReduceOp op, Tag tag, Vec<Tag> value) {
     constexpr nint_t count = RepresentationTraits<Backend, Tag>::word_count;
-    return fold_reduction_words<Backend, ReduceOp, 0, count>(
-        op, tag, value, [&](auto folded) {
-          return execute_word<0, Backend>(op, tag, folded);
-        });
+    if constexpr (requires { sizeof(Vec<Tag>); }) {
+      const auto folded = fold_sized_reduction_words<
+          Backend, ReduceOp, 0, count>(op, tag, value);
+      return execute_word<0, Backend>(op, tag, folded);
+    } else {
+      return fold_reduction_words<Backend, ReduceOp, 0, count>(
+          op, tag, value, [&](auto folded) VECOPS_INLINE_LAMBDA {
+            return execute_word<0, Backend>(op, tag, folded);
+          });
+    }
   }
 
   static VECOPS_ALWAYS_INLINE ElementOf<Tag> call(
       ReduceOp op, Tag tag, Vec<Tag> value, Mask<Tag> mask) {
     constexpr nint_t count = RepresentationTraits<Backend, Tag>::word_count;
-    return fold_masked_reduction_words<Backend, ReduceOp, 0, count>(
-        op, tag, value, mask, [&](auto folded, auto active) {
-          return execute_word<0, Backend>(op, tag, folded, active);
-        });
+    if constexpr (requires { sizeof(Vec<Tag>); sizeof(Mask<Tag>); }) {
+      const auto folded = fold_sized_masked_reduction_words<
+          Backend, ReduceOp, 0, count>(op, tag, value, mask);
+      return execute_word<0, Backend>(
+          op, tag, folded.value, folded.mask);
+    } else {
+      return fold_masked_reduction_words<Backend, ReduceOp, 0, count>(
+          op, tag, value, mask,
+          [&](auto folded, auto active) VECOPS_INLINE_LAMBDA {
+            return execute_word<0, Backend>(op, tag, folded, active);
+          });
+    }
   }
 };
 

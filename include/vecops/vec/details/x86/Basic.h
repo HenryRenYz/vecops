@@ -932,17 +932,15 @@ template <VectorTag Tag>
       RepresentationTraits<X86Backend, Half<Tag>>::word_count == 1)
 struct NativeImpl<X86Backend, ConcatOp, Tag> {
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(
-      ConcatOp, Tag, Vec<Half<Tag>> lower, Vec<Half<Tag>> upper) {
+      ConcatOp, Tag tag, Vec<Half<Tag>> lower, Vec<Half<Tag>> upper) {
     using T = ElementOf<Tag>;
     using OutTraits = RepresentationTraits<X86Backend, Tag>;
     using OutRaw = typename OutTraits::RawVec;
     using InRaw = typename RepresentationTraits<X86Backend, Half<Tag>>::RawVec;
     if constexpr (RepresentationTraits<X86Backend, Tag>::word_count == 2) {
-      Vec<Tag> result{};
-      result.words[0] = lower;
-      result.words[1] = upper;
       VECOPS_VEC_X86_EXACT_REARRANGE_DISPATCH(
-          result, "unsupported x86 concat element type");
+          ::vecops::vec::from_words(tag, lower, upper),
+          "unsupported x86 concat element type");
     } else if constexpr (sizeof(OutRaw) == sizeof(InRaw)) {
       constexpr int logical_bytes = static_cast<int>(
           OutTraits::logical_lanes * static_cast<nint_t>(sizeof(T)));
@@ -1041,10 +1039,7 @@ struct NativeImpl<X86Backend, ConcatOp, Tag> {
   static VECOPS_ALWAYS_INLINE Mask<Tag> call(
       ConcatOp, Tag tag, Mask<Half<Tag>> lower, Mask<Half<Tag>> upper) {
     if constexpr (RepresentationTraits<X86Backend, Tag>::word_count == 2) {
-      Mask<Tag> result{};
-      result.words[0] = lower;
-      result.words[1] = upper;
-      return result;
+      return ::vecops::vec::mask_from_words(tag, lower, upper);
     } else {
       return x86_concat_mask_halves(tag, lower, upper);
     }

@@ -344,6 +344,15 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_ordered_saturating(
   }();
   if constexpr (OneWordPair) {
     return sve_load_convert_word(to, pointer, mask, inactive);
+  } else if constexpr (is_scalable_tag<ToTag> && num_words(to) > 1) {
+    using WordTag = ScalableTag<ElementOf<ToTag>, 0>;
+    return construct_words<SVEBackend>(
+        to, [&]<nint_t Index>(ToTag) VECOPS_INLINE_LAMBDA {
+          return sve_load_convert_ordered_saturating(
+              WordTag{}, pointer + Index * size(WordTag{}),
+              ::vecops::vec::get_word<Index>(to, mask),
+              ::vecops::vec::get_word<Index>(to, inactive));
+        });
   } else {
     // Shape-changing conversion cannot use independent word batching: split
     // both complete Tags so the pointer offset remains a logical lane count.
@@ -370,6 +379,13 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_ordered_saturating(
   }();
   if constexpr (OneWordPair) {
     return sve_load_convert_word_unmasked(to, pointer);
+  } else if constexpr (is_scalable_tag<ToTag> && num_words(to) > 1) {
+    using WordTag = ScalableTag<ElementOf<ToTag>, 0>;
+    return construct_words<SVEBackend>(
+        to, [&]<nint_t Index>(ToTag) VECOPS_INLINE_LAMBDA {
+          return sve_load_convert_ordered_saturating(
+              WordTag{}, pointer + Index * size(WordTag{}));
+        });
   } else {
     using ToHalf = Half<ToTag>;
     const auto lower = sve_load_convert_ordered_saturating(

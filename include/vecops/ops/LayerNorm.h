@@ -2,6 +2,7 @@
 #define VECOPS_OPS_LAYERNORM_H
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <type_traits>
 
@@ -356,122 +357,193 @@ private:
     using InPolicy = tensor::InputAccessPolicy<0, 2, InPlan>;
     using OutPolicy = tensor::OutputAccessPolicy<
         0, tensor::AccessPlan::direct>;
-    auto compute = [this, &in](auto& x, auto& gamma, auto& beta, auto& y) {
+    auto compute = [this, &in](
+        auto& x, auto& gamma, auto& beta, auto& y) VECOPS_INLINE_LAMBDA {
+          using FullTag = vec::Twice<vec::Twice<Tag>>;
+          FullTag full_tag{};
           Tag tag{};
           const nint_t n = in.input_layout().shape()[0];
+          const nint_t full_lanes = vec::size(full_tag);
           const nint_t lanes = vec::size(tag);
-          auto sum0 = vec::zeros(tag);
-          auto sum1 = vec::zeros(tag);
-          auto sum2 = vec::zeros(tag);
-          auto sum3 = vec::zeros(tag);
-          auto sum_sq0 = vec::zeros(tag);
-          auto sum_sq1 = vec::zeros(tag);
-          auto sum_sq2 = vec::zeros(tag);
-          auto sum_sq3 = vec::zeros(tag);
+
+          ComputeType sum_value;
+          ComputeType sum_sq_value;
           nint_t col = 0;
-          for (; col + 4 * lanes <= n; col += 4 * lanes) {
-            auto x0 = x.load(tag, tensor::coord(col), vec::opt::unmasked);
-            auto x1 = x.load(
-                tag, tensor::coord(col + lanes), vec::opt::unmasked);
-            auto x2 = x.load(
-                tag, tensor::coord(col + 2 * lanes), vec::opt::unmasked);
-            auto x3 = x.load(
-                tag, tensor::coord(col + 3 * lanes), vec::opt::unmasked);
-            sum0 = vec::add(sum0, x0);
-            sum1 = vec::add(sum1, x1);
-            sum2 = vec::add(sum2, x2);
-            sum3 = vec::add(sum3, x3);
-            sum_sq0 = vec::fmadd(x0, x0, sum_sq0);
-            sum_sq1 = vec::fmadd(x1, x1, sum_sq1);
-            sum_sq2 = vec::fmadd(x2, x2, sum_sq2);
-            sum_sq3 = vec::fmadd(x3, x3, sum_sq3);
+          if constexpr (requires { sizeof(vec::Vec<FullTag>); }) {
+            auto sum = vec::zeros(full_tag);
+            auto sum_sq = vec::zeros(full_tag);
+            ComputeType tail_sum = ComputeType(0);
+            ComputeType tail_sum_sq = ComputeType(0);
+            for (; col + full_lanes <= n; col += full_lanes) {
+              auto value = x.load(
+                  full_tag, tensor::coord(col), vec::opt::unmasked);
+              sum = vec::add(sum, value);
+              sum_sq = vec::fmadd(value, value, sum_sq);
+            }
+            while (col < n) {
+              const nint_t active = n - col;
+              auto value = x.load(
+                  tag, tensor::coord(col), vec::opt::first(active));
+              tail_sum += vec::reduce_add(tag, value);
+              tail_sum_sq +=
+                  vec::reduce_add(tag, vec::mul(value, value));
+              col += lanes;
+            }
+            sum_value = vec::reduce_add(full_tag, sum) + tail_sum;
+            sum_sq_value =
+                vec::reduce_add(full_tag, sum_sq) + tail_sum_sq;
+          } else {
+            auto sum0 = vec::zeros(tag);
+            auto sum1 = vec::zeros(tag);
+            auto sum2 = vec::zeros(tag);
+            auto sum3 = vec::zeros(tag);
+            auto sum_sq0 = vec::zeros(tag);
+            auto sum_sq1 = vec::zeros(tag);
+            auto sum_sq2 = vec::zeros(tag);
+            auto sum_sq3 = vec::zeros(tag);
+            for (; col + full_lanes <= n; col += full_lanes) {
+              auto x0 = x.load(
+                  tag, tensor::coord(col), vec::opt::unmasked);
+              auto x1 = x.load(
+                  tag, tensor::coord(col + lanes), vec::opt::unmasked);
+              auto x2 = x.load(
+                  tag, tensor::coord(col + 2 * lanes),
+                  vec::opt::unmasked);
+              auto x3 = x.load(
+                  tag, tensor::coord(col + 3 * lanes),
+                  vec::opt::unmasked);
+              sum0 = vec::add(sum0, x0);
+              sum1 = vec::add(sum1, x1);
+              sum2 = vec::add(sum2, x2);
+              sum3 = vec::add(sum3, x3);
+              sum_sq0 = vec::fmadd(x0, x0, sum_sq0);
+              sum_sq1 = vec::fmadd(x1, x1, sum_sq1);
+              sum_sq2 = vec::fmadd(x2, x2, sum_sq2);
+              sum_sq3 = vec::fmadd(x3, x3, sum_sq3);
+            }
+            if (col + lanes <= n) {
+              auto value = x.load(
+                  tag, tensor::coord(col), vec::opt::unmasked);
+              sum0 = vec::add(sum0, value);
+              sum_sq0 = vec::fmadd(value, value, sum_sq0);
+              col += lanes;
+            }
+            if (col + lanes <= n) {
+              auto value = x.load(
+                  tag, tensor::coord(col), vec::opt::unmasked);
+              sum1 = vec::add(sum1, value);
+              sum_sq1 = vec::fmadd(value, value, sum_sq1);
+              col += lanes;
+            }
+            if (col + lanes <= n) {
+              auto value = x.load(
+                  tag, tensor::coord(col), vec::opt::unmasked);
+              sum2 = vec::add(sum2, value);
+              sum_sq2 = vec::fmadd(value, value, sum_sq2);
+              col += lanes;
+            }
+            if (col < n) {
+              auto value = x.load(
+                  tag, tensor::coord(col), vec::opt::first(n - col));
+              sum3 = vec::add(sum3, value);
+              sum_sq3 = vec::fmadd(value, value, sum_sq3);
+            }
+            sum0 = vec::add(sum0, sum1);
+            sum0 = vec::add(sum0, sum2);
+            sum0 = vec::add(sum0, sum3);
+            sum_sq0 = vec::add(sum_sq0, sum_sq1);
+            sum_sq0 = vec::add(sum_sq0, sum_sq2);
+            sum_sq0 = vec::add(sum_sq0, sum_sq3);
+            sum_value = vec::reduce_add(tag, sum0);
+            sum_sq_value = vec::reduce_add(tag, sum_sq0);
           }
-          if (col + lanes <= n) {
-            auto value = x.load(tag, tensor::coord(col), vec::opt::unmasked);
-            sum0 = vec::add(sum0, value);
-            sum_sq0 = vec::fmadd(value, value, sum_sq0);
-            col += lanes;
-          }
-          if (col + lanes <= n) {
-            auto value = x.load(tag, tensor::coord(col), vec::opt::unmasked);
-            sum1 = vec::add(sum1, value);
-            sum_sq1 = vec::fmadd(value, value, sum_sq1);
-            col += lanes;
-          }
-          if (col + lanes <= n) {
-            auto value = x.load(tag, tensor::coord(col), vec::opt::unmasked);
-            sum2 = vec::add(sum2, value);
-            sum_sq2 = vec::fmadd(value, value, sum_sq2);
-            col += lanes;
-          }
-          if (col < n) {
-            auto value = x.load(
-                tag, tensor::coord(col), vec::opt::first(n - col));
-            sum0 = vec::add(sum0, value);
-            sum_sq0 = vec::fmadd(value, value, sum_sq0);
-          }
-          sum0 = vec::add(sum0, sum1);
-          sum0 = vec::add(sum0, sum2);
-          sum0 = vec::add(sum0, sum3);
-          sum_sq0 = vec::add(sum_sq0, sum_sq1);
-          sum_sq0 = vec::add(sum_sq0, sum_sq2);
-          sum_sq0 = vec::add(sum_sq0, sum_sq3);
-          const ComputeType sum = vec::reduce_add(tag, sum0);
-          const ComputeType sum_sq = vec::reduce_add(tag, sum_sq0);
           const ComputeType inv_n =
               ComputeType(1) / static_cast<ComputeType>(n);
-          const ComputeType mean = sum * inv_n;
+          const ComputeType mean = sum_value * inv_n;
           const ComputeType variance =
-              std::max(sum_sq * inv_n - mean * mean, ComputeType(0));
+              std::max(sum_sq_value * inv_n - mean * mean, ComputeType(0));
           const ComputeType rstd =
               ComputeType(1) / std::sqrt(variance + config.eps);
-          const auto mean_v = vec::fill(tag, mean);
-          const auto rstd_v = vec::fill(tag, rstd);
 
+          const auto tail_mean = vec::fill(tag, mean);
+          const auto tail_rstd = vec::fill(tag, rstd);
           col = 0;
-          for (; col + 4 * lanes <= n; col += 4 * lanes) {
-            auto x0 = x.load(tag, tensor::coord(col), vec::opt::unmasked);
-            auto x1 = x.load(
-                tag, tensor::coord(col + lanes), vec::opt::unmasked);
-            auto x2 = x.load(
-                tag, tensor::coord(col + 2 * lanes), vec::opt::unmasked);
-            auto x3 = x.load(
-                tag, tensor::coord(col + 3 * lanes), vec::opt::unmasked);
-            auto g0 = gamma.load(
-                tag, tensor::coord(col), vec::opt::unmasked);
-            auto g1 = gamma.load(
-                tag, tensor::coord(col + lanes), vec::opt::unmasked);
-            auto g2 = gamma.load(
-                tag, tensor::coord(col + 2 * lanes), vec::opt::unmasked);
-            auto g3 = gamma.load(
-                tag, tensor::coord(col + 3 * lanes), vec::opt::unmasked);
-            auto b0 = beta.load(tag, tensor::coord(col), vec::opt::unmasked);
-            auto b1 = beta.load(
-                tag, tensor::coord(col + lanes), vec::opt::unmasked);
-            auto b2 = beta.load(
-                tag, tensor::coord(col + 2 * lanes), vec::opt::unmasked);
-            auto b3 = beta.load(
-                tag, tensor::coord(col + 3 * lanes), vec::opt::unmasked);
-            auto n0 = vec::mul(vec::sub(x0, mean_v), rstd_v);
-            auto n1 = vec::mul(vec::sub(x1, mean_v), rstd_v);
-            auto n2 = vec::mul(vec::sub(x2, mean_v), rstd_v);
-            auto n3 = vec::mul(vec::sub(x3, mean_v), rstd_v);
-            y.store(tag, tensor::coord(col), vec::fmadd(n0, g0, b0),
-                    vec::opt::unmasked);
-            y.store(tag, tensor::coord(col + lanes), vec::fmadd(n1, g1, b1),
-                    vec::opt::unmasked);
-            y.store(tag, tensor::coord(col + 2 * lanes),
-                    vec::fmadd(n2, g2, b2), vec::opt::unmasked);
-            y.store(tag, tensor::coord(col + 3 * lanes),
-                    vec::fmadd(n3, g3, b3), vec::opt::unmasked);
-          }
-          for (; col + lanes <= n; col += lanes) {
-            write_block(x, gamma, beta, y, tag, col, mean_v, rstd_v,
-                        vec::opt::unmasked);
-          }
-          if (col < n) {
-            write_block(x, gamma, beta, y, tag, col, mean_v, rstd_v,
-                        vec::opt::first(n - col));
+          if constexpr (requires { sizeof(vec::Vec<FullTag>); }) {
+            // Keep sized multi-word aggregates non-const: GCC's SRA pass
+            // disqualifies read-only aggregate declarations after init.
+            auto full_mean = vec::fill(full_tag, mean);
+            auto full_rstd = vec::fill(full_tag, rstd);
+            for (; col + full_lanes <= n; col += full_lanes) {
+              write_block(
+                  x, gamma, beta, y, full_tag, col,
+                  full_mean, full_rstd, vec::opt::unmasked);
+            }
+            while (col < n) {
+              const nint_t active = n - col;
+              write_block(
+                  x, gamma, beta, y, tag, col,
+                  tail_mean, tail_rstd, vec::opt::first(active));
+              col += lanes;
+            }
+          } else {
+            for (; col + full_lanes <= n; col += full_lanes) {
+              auto x0 = x.load(
+                  tag, tensor::coord(col), vec::opt::unmasked);
+              auto x1 = x.load(
+                  tag, tensor::coord(col + lanes), vec::opt::unmasked);
+              auto x2 = x.load(
+                  tag, tensor::coord(col + 2 * lanes),
+                  vec::opt::unmasked);
+              auto x3 = x.load(
+                  tag, tensor::coord(col + 3 * lanes),
+                  vec::opt::unmasked);
+              auto g0 = gamma.load(
+                  tag, tensor::coord(col), vec::opt::unmasked);
+              auto g1 = gamma.load(
+                  tag, tensor::coord(col + lanes), vec::opt::unmasked);
+              auto g2 = gamma.load(
+                  tag, tensor::coord(col + 2 * lanes),
+                  vec::opt::unmasked);
+              auto g3 = gamma.load(
+                  tag, tensor::coord(col + 3 * lanes),
+                  vec::opt::unmasked);
+              auto b0 = beta.load(
+                  tag, tensor::coord(col), vec::opt::unmasked);
+              auto b1 = beta.load(
+                  tag, tensor::coord(col + lanes), vec::opt::unmasked);
+              auto b2 = beta.load(
+                  tag, tensor::coord(col + 2 * lanes),
+                  vec::opt::unmasked);
+              auto b3 = beta.load(
+                  tag, tensor::coord(col + 3 * lanes),
+                  vec::opt::unmasked);
+              auto n0 = vec::mul(vec::sub(x0, tail_mean), tail_rstd);
+              auto n1 = vec::mul(vec::sub(x1, tail_mean), tail_rstd);
+              auto n2 = vec::mul(vec::sub(x2, tail_mean), tail_rstd);
+              auto n3 = vec::mul(vec::sub(x3, tail_mean), tail_rstd);
+              y.store(
+                  tag, tensor::coord(col), vec::fmadd(n0, g0, b0),
+                  vec::opt::unmasked);
+              y.store(
+                  tag, tensor::coord(col + lanes),
+                  vec::fmadd(n1, g1, b1), vec::opt::unmasked);
+              y.store(
+                  tag, tensor::coord(col + 2 * lanes),
+                  vec::fmadd(n2, g2, b2), vec::opt::unmasked);
+              y.store(
+                  tag, tensor::coord(col + 3 * lanes),
+                  vec::fmadd(n3, g3, b3), vec::opt::unmasked);
+            }
+            for (; col + lanes <= n; col += lanes) {
+              write_block(
+                  x, gamma, beta, y, tag, col,
+                  tail_mean, tail_rstd, vec::opt::unmasked);
+            }
+            if (col < n) {
+              write_block(
+                  x, gamma, beta, y, tag, col,
+                  tail_mean, tail_rstd, vec::opt::first(n - col));
+            }
           }
       y.commit();
     };
@@ -495,6 +567,13 @@ private:
     auto xv = x.load(tag, tensor::coord(col), active);
     auto gamma_v = gamma.load(tag, tensor::coord(col), active);
     auto beta_v = beta.load(tag, tensor::coord(col), active);
+    if constexpr (
+        vec::num_words(VTag{}) > 1 && requires { sizeof(vec::Vec<VTag>); }) {
+      // Preserve the three independent load streams before starting their
+      // arithmetic. GCC otherwise shortens aggregate lifetimes word by word,
+      // reducing memory-level parallelism in the four-word loop.
+      std::atomic_signal_fence(std::memory_order_acquire);
+    }
     auto normalized = vec::mul(vec::sub(xv, mean), rstd);
     y.store(tag, tensor::coord(col),
             vec::fmadd(normalized, gamma_v, beta_v), active);

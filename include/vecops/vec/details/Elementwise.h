@@ -52,13 +52,16 @@ struct ElementwiseWordBatch {
       Value first,
       std::index_sequence<Index...>,
       Rest... rest) {
-    Value result = first;
-    ((result = ::vecops::vec::set_word<static_cast<nint_t>(Index)>(
-          tag,
-          result,
-          call_word<Index>(op, tag, first, rest...))),
-     ...);
-    return result;
+    if constexpr (requires { sizeof(Value); }) {
+      return Value{{call_word<Index>(op, tag, first, rest...)...}};
+    } else if constexpr (std::same_as<Value, Vec<Tag>>) {
+      return ::vecops::vec::from_words(
+          tag, call_word<Index>(op, tag, first, rest...)...);
+    } else {
+      static_assert(std::same_as<Value, Mask<Tag>>);
+      return ::vecops::vec::mask_from_words(
+          tag, call_word<Index>(op, tag, first, rest...)...);
+    }
   }
 
  public:

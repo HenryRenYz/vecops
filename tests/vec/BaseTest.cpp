@@ -73,6 +73,7 @@ concept HasSingleWordVectorAccess = requires(
   { vec::get_word<0>(Tag{}, value) } ->
       std::same_as<vec::NativeWordVec<Tag>>;
   { vec::set_word<0>(Tag{}, value, word) } -> std::same_as<vec::Vec<Tag>>;
+  { vec::from_words(Tag{}, word) } -> std::same_as<vec::Vec<Tag>>;
 };
 
 template <typename Tag>
@@ -81,6 +82,7 @@ concept HasSingleWordMaskAccess = requires(
   { vec::get_word<0>(Tag{}, value) } ->
       std::same_as<vec::NativeWordMask<Tag>>;
   { vec::set_word<0>(Tag{}, value, word) } -> std::same_as<vec::Mask<Tag>>;
+  { vec::mask_from_words(Tag{}, word) } -> std::same_as<vec::Mask<Tag>>;
 };
 
 template <typename Tag>
@@ -92,6 +94,7 @@ concept HasTwoWordVectorAccess = requires(
       std::same_as<vec::NativeWordVec<Tag>>;
   { vec::set_word<0>(Tag{}, value, word) } -> std::same_as<vec::Vec<Tag>>;
   { vec::set_word<1>(Tag{}, value, word) } -> std::same_as<vec::Vec<Tag>>;
+  { vec::from_words(Tag{}, word, word) } -> std::same_as<vec::Vec<Tag>>;
 };
 
 template <typename Tag>
@@ -103,6 +106,7 @@ concept HasTwoWordMaskAccess = requires(
       std::same_as<vec::NativeWordMask<Tag>>;
   { vec::set_word<0>(Tag{}, value, word) } -> std::same_as<vec::Mask<Tag>>;
   { vec::set_word<1>(Tag{}, value, word) } -> std::same_as<vec::Mask<Tag>>;
+  { vec::mask_from_words(Tag{}, word, word) } -> std::same_as<vec::Mask<Tag>>;
 };
 
 template <typename Tag>
@@ -111,6 +115,8 @@ concept HasFourWordVectorAccess = requires(
   { vec::get_word<3>(Tag{}, value) } ->
       std::same_as<vec::NativeWordVec<Tag>>;
   { vec::set_word<3>(Tag{}, value, word) } -> std::same_as<vec::Vec<Tag>>;
+  { vec::from_words(Tag{}, word, word, word, word) } ->
+      std::same_as<vec::Vec<Tag>>;
 };
 
 template <typename Tag>
@@ -119,6 +125,22 @@ concept HasFourWordMaskAccess = requires(
   { vec::get_word<3>(Tag{}, value) } ->
       std::same_as<vec::NativeWordMask<Tag>>;
   { vec::set_word<3>(Tag{}, value, word) } -> std::same_as<vec::Mask<Tag>>;
+  { vec::mask_from_words(Tag{}, word, word, word, word) } ->
+      std::same_as<vec::Mask<Tag>>;
+};
+
+template <typename Tag>
+concept HasEightWordConstruction = requires(
+    vec::NativeWordVec<Tag> vector_word,
+    vec::NativeWordMask<Tag> mask_word) {
+  { vec::from_words(
+        Tag{}, vector_word, vector_word, vector_word, vector_word,
+        vector_word, vector_word, vector_word, vector_word) } ->
+      std::same_as<vec::Vec<Tag>>;
+  { vec::mask_from_words(
+        Tag{}, mask_word, mask_word, mask_word, mask_word,
+        mask_word, mask_word, mask_word, mask_word) } ->
+      std::same_as<vec::Mask<Tag>>;
 };
 
 TYPED_TEST(VecBaseElementTest, RecognizesEveryBuiltInElementType) {
@@ -305,20 +327,24 @@ TYPED_TEST(VecBaseElementTest, ScalableVectorAndMaskHaveCompileTimeWordAccess) {
   vec::Vec<TwoWords> vectors{};
   vec::NativeWordVec<TwoWords> vector_word{};
   vector_word.lanes[0] = static_cast<T>(3.0f);
-  vectors = vec::set_word<1>(TwoWords{}, vectors, vector_word);
+  auto vector_word0 = vec::NativeWordVec<TwoWords>{};
+  vector_word0.lanes[0] = static_cast<T>(2.0f);
+  vectors = vec::from_words(TwoWords{}, vector_word0, vector_word);
   EXPECT_EQ(
       static_cast<float>(vec::get_word<1>(TwoWords{}, vectors).lanes[0]),
       static_cast<float>(static_cast<T>(3.0f)));
   EXPECT_EQ(
       static_cast<float>(vec::get_word<0>(TwoWords{}, vectors).lanes[0]),
-      0.0f);
+      static_cast<float>(static_cast<T>(2.0f)));
 
   vec::Mask<TwoWords> masks{};
   vec::NativeWordMask<TwoWords> mask_word{};
   mask_word.bits.set(0);
-  masks = vec::set_word<1>(TwoWords{}, masks, mask_word);
+  auto mask_word0 = vec::NativeWordMask<TwoWords>{};
+  mask_word0.bits.set(1);
+  masks = vec::mask_from_words(TwoWords{}, mask_word0, mask_word);
   EXPECT_TRUE(vec::get_word<1>(TwoWords{}, masks).bits.test(0));
-  EXPECT_FALSE(vec::get_word<0>(TwoWords{}, masks).bits.test(0));
+  EXPECT_TRUE(vec::get_word<0>(TwoWords{}, masks).bits.test(1));
 
   vec::Vec<SingleWord> single_vector{};
   vec::NativeWordVec<SingleWord> single_vector_word{};
@@ -356,6 +382,7 @@ TYPED_TEST(VecBaseElementTest, FixedRepresentationCoversSubwordAndMultiword) {
       vec::native_word_size(Subword{});
   using CompleteWord = vec::FixedTag<T, subword_physical_lanes>;
   using TwoWords = vec::FixedTag<T, native_lanes * 2>;
+  using EightWords = vec::FixedTag<T, native_lanes * 8>;
 
   EXPECT_EQ(vec::size(Subword{}), 1);
   EXPECT_EQ(vec::num_words(Subword{}), 1);
@@ -373,6 +400,7 @@ TYPED_TEST(VecBaseElementTest, FixedRepresentationCoversSubwordAndMultiword) {
   EXPECT_TRUE(vec::MaskValue<vec::Mask<TwoWords>>);
   EXPECT_TRUE(HasTwoWordVectorAccess<TwoWords>);
   EXPECT_TRUE(HasTwoWordMaskAccess<TwoWords>);
+  EXPECT_TRUE(HasEightWordConstruction<EightWords>);
 
   using InferredSubword = vec::InferredTagOf<vec::Vec<Subword>>;
   EXPECT_TRUE((std::same_as<

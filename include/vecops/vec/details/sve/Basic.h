@@ -145,8 +145,15 @@ VECOPS_ALWAYS_INLINE svbool_t sve_single_lane_predicate(nint_t lane) {
 template <nint_t Index, VectorTag Tag>
 VECOPS_ALWAYS_INLINE nint_t sve_valid_word_lanes(Tag tag) {
   const nint_t word_lanes = native_word_size(tag);
-  return std::clamp<nint_t>(
-      size(tag) - Index * word_lanes, 0, word_lanes);
+  if constexpr (is_scalable_tag<Tag> && scale_power<Tag> >= 0) {
+    // Every physical word of a non-subword scalable tuple is complete. Keep
+    // this explicit so Clang does not retain per-word whilelo predicates for
+    // a multi-word Tag whose runtime size is expressed through svcnt*().
+    return word_lanes;
+  } else {
+    return std::clamp<nint_t>(
+        size(tag) - Index * word_lanes, 0, word_lanes);
+  }
 }
 
 /* **************************************************************************** */
@@ -158,7 +165,6 @@ struct ConstructWordsHook<SVEBackend> {
   template <VectorTag Tag, typename Builder>
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(Tag tag, Builder& builder) {
     using Traits = RepresentationTraits<SVEBackend, Tag>;
-    using T = ElementOf<Tag>;
     if constexpr (requires { sizeof(Vec<Tag>); }) {
       return construct_sized_value<Vec<Tag>>(
           tag,
@@ -168,35 +174,15 @@ struct ConstructWordsHook<SVEBackend> {
     } else if constexpr (Traits::word_count == 1) {
       return builder.template operator()<0>(tag);
     } else if constexpr (Traits::word_count == 2) {
-      const auto word0 = builder.template operator()<0>(tag);
-      const auto word1 = builder.template operator()<1>(tag);
-#if !defined(HAS_BF16)
-      if constexpr (std::same_as<T, bfloat16_t>) {
-        return svreinterpret_bf16_u16_x2(svcreate2(
-            svreinterpret_u16_bf16(word0),
-            svreinterpret_u16_bf16(word1)));
-      } else
-#endif
-      {
-        return svcreate2(word0, word1);
-      }
+      return ::vecops::vec::from_words(
+          tag, builder.template operator()<0>(tag),
+          builder.template operator()<1>(tag));
     } else if constexpr (Traits::word_count == 4) {
-      const auto word0 = builder.template operator()<0>(tag);
-      const auto word1 = builder.template operator()<1>(tag);
-      const auto word2 = builder.template operator()<2>(tag);
-      const auto word3 = builder.template operator()<3>(tag);
-#if !defined(HAS_BF16)
-      if constexpr (std::same_as<T, bfloat16_t>) {
-        return svreinterpret_bf16_u16_x4(svcreate4(
-            svreinterpret_u16_bf16(word0),
-            svreinterpret_u16_bf16(word1),
-            svreinterpret_u16_bf16(word2),
-            svreinterpret_u16_bf16(word3)));
-      } else
-#endif
-      {
-        return svcreate4(word0, word1, word2, word3);
-      }
+      return ::vecops::vec::from_words(
+          tag, builder.template operator()<0>(tag),
+          builder.template operator()<1>(tag),
+          builder.template operator()<2>(tag),
+          builder.template operator()<3>(tag));
     } else {
       static_assert(
           dispatch_dependent_false<Tag>,
@@ -223,11 +209,13 @@ struct ConstructMaskWordsHook<SVEBackend> {
     } else if constexpr (Traits::word_count == 2) {
       // A sizeless predicate tuple has no initial value for set_word. Tuple
       // creation is isolated in Types.h because it is an SVE2.1 ACLE operation.
-      return create_mask_tuple(
+      return ::vecops::vec::mask_from_words(
+          tag,
           builder.template operator()<0>(tag),
           builder.template operator()<1>(tag));
     } else if constexpr (Traits::word_count == 4) {
-      return create_mask_tuple(
+      return ::vecops::vec::mask_from_words(
+          tag,
           builder.template operator()<0>(tag),
           builder.template operator()<1>(tag),
           builder.template operator()<2>(tag),

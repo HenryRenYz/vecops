@@ -27,30 +27,54 @@ template <VectorTag ToTag, Element From>
 VECOPS_ALWAYS_INLINE Vec<ToTag> x86_load_convert_ordered_saturating(
     ToTag to, const From* pointer) {
   using FromTag = Rebind<From, ToTag>;
+  using ToTraits = RepresentationTraits<X86Backend, ToTag>;
   static_assert(is_x86_conversion_element<ElementOf<ToTag>>);
   static_assert(is_x86_conversion_element<From>);
-  const auto loaded = execute(
-      LoadOp{}, FromTag{}, pointer, mem::unaligned, mem::temporal);
-  return x86_convert_vec_native(to, FromTag{}, loaded);
+  if constexpr (ToTraits::word_count > 1) {
+    using WordTag = FixedTag<ElementOf<ToTag>, ToTraits::word_lanes>;
+    return construct_words<X86Backend>(
+        to, [&]<nint_t Index>(ToTag) VECOPS_INLINE_LAMBDA {
+      const auto converted = x86_load_convert_ordered_saturating(
+          WordTag{}, pointer + Index * ToTraits::word_lanes);
+      return ::vecops::vec::get_word<0>(WordTag{}, converted);
+    });
+  } else {
+    const auto loaded = execute(
+        LoadOp{}, FromTag{}, pointer, mem::unaligned, mem::temporal);
+    return x86_convert_vec_native(to, FromTag{}, loaded);
+  }
 }
 
 template <VectorTag ToTag, Element From>
 VECOPS_ALWAYS_INLINE Vec<ToTag> x86_load_convert_ordered_saturating(
     ToTag to, const From* pointer, Mask<ToTag> mask, Vec<ToTag> inactive) {
   using FromTag = Rebind<From, ToTag>;
+  using ToTraits = RepresentationTraits<X86Backend, ToTag>;
   static_assert(is_x86_conversion_element<ElementOf<ToTag>>);
   static_assert(is_x86_conversion_element<From>);
 
-  // The mask must be converted before the load. Loading a full source vector
-  // and blending after conversion would fault on inactive addresses at a page
-  // boundary and would violate the filtered-memory contract.
-  const auto memory_mask = x86_convert_mask_native(FromTag{}, to, mask);
-  const auto zero = execute(FillOp{}, FromTag{}, From{});
-  const auto loaded = execute(
-      LoadOp{}, FromTag{}, pointer, memory_mask, zero,
-      mem::unaligned, mem::temporal);
-  const auto converted = x86_convert_vec_native(to, FromTag{}, loaded);
-  return execute(BlendOp{}, to, inactive, mask, converted);
+  if constexpr (ToTraits::word_count > 1) {
+    using WordTag = FixedTag<ElementOf<ToTag>, ToTraits::word_lanes>;
+    return construct_words<X86Backend>(
+        to, [&]<nint_t Index>(ToTag) VECOPS_INLINE_LAMBDA {
+      const auto converted = x86_load_convert_ordered_saturating(
+          WordTag{}, pointer + Index * ToTraits::word_lanes,
+          ::vecops::vec::get_word<Index>(to, mask),
+          ::vecops::vec::get_word<Index>(to, inactive));
+      return ::vecops::vec::get_word<0>(WordTag{}, converted);
+    });
+  } else {
+    // The mask must be converted before the load. Loading a full source vector
+    // and blending after conversion would fault on inactive addresses at a
+    // page boundary and would violate the filtered-memory contract.
+    const auto memory_mask = x86_convert_mask_native(FromTag{}, to, mask);
+    const auto zero = execute(FillOp{}, FromTag{}, From{});
+    const auto loaded = execute(
+        LoadOp{}, FromTag{}, pointer, memory_mask, zero,
+        mem::unaligned, mem::temporal);
+    const auto converted = x86_convert_vec_native(to, FromTag{}, loaded);
+    return execute(BlendOp{}, to, inactive, mask, converted);
+  }
 }
 
 #if defined(CPU_CAPABILITY_AVX512)

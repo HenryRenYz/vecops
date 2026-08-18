@@ -315,9 +315,6 @@ VECOPS_ALWAYS_INLINE bool boundary_lane_active(
     return get(tag, masked.value, lane);
   } else if constexpr (option_count<IsFirstOption, Options...> == 1) {
     const nint_t count = find_option<IsFirstOption>(options...).count;
-    VECOPS_ASSERT(
-        0 <= count && count <= size(tag),
-        "memory conversion count %zd !in 0..%zd", count, size(tag));
     return lane < count;
   } else {
     return true;
@@ -477,9 +474,6 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> execute_load_convert_options(
       } else {
         const nint_t count = find_option<IsFirstOption>(
             std::forward<Options>(options)...).count;
-        VECOPS_ASSERT(
-            0 <= count && count <= size(FromTag{}),
-            "load_convert count %zd !in 0..%zd", count, size(FromTag{}));
         mask = mwhilelt(FromTag{}, 0, count);
       }
       return execute(
@@ -493,9 +487,6 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> execute_load_convert_options(
       } else {
         const nint_t count = find_option<IsFirstOption>(
             std::forward<Options>(options)...).count;
-        VECOPS_ASSERT(
-            0 <= count && count <= size(to),
-            "load_convert count %zd !in 0..%zd", count, size(to));
         mask = mwhilelt(to, 0, count);
       }
       Vec<ToTag> inactive;
@@ -573,9 +564,6 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_options(
       } else {
         const nint_t count = find_option<IsFirstOption>(
             std::forward<Options>(options)...).count;
-        VECOPS_ASSERT(
-            0 <= count && count <= size(ToTag{}),
-            "store_convert count %zd !in 0..%zd", count, size(ToTag{}));
         mask = mwhilelt(ToTag{}, 0, count);
       }
       execute(
@@ -589,9 +577,6 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_options(
       } else {
         const nint_t count = find_option<IsFirstOption>(
             std::forward<Options>(options)...).count;
-        VECOPS_ASSERT(
-            0 <= count && count <= size(from),
-            "store_convert count %zd !in 0..%zd", count, size(from));
         mask = mwhilelt(from, 0, count);
       }
       execute(

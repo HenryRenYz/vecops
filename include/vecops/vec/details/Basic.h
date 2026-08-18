@@ -19,7 +19,8 @@ struct GenericImpl<Backend, ResizeBitCastOp, ToTag> {
     using ToTraits = RepresentationTraits<Backend, ToTag>;
     using FromTraits = RepresentationTraits<Backend, FromTag>;
     if constexpr (std::same_as<Backend, SVEBackend>) {
-      return construct_words<Backend>(to, [&]<nint_t Index>(ToTag parent) {
+      return construct_words<Backend>(
+          to, [&]<nint_t Index>(ToTag parent) VECOPS_INLINE_LAMBDA {
         if constexpr (Index < FromTraits::word_count) {
           return execute_word<Index, Backend>(
               BitCastOp{}, parent, from,
@@ -71,7 +72,7 @@ struct GenericImpl<Backend, FillOp, Tag> {
       FillOp op, Tag tag, ElementOf<Tag> value) {
     return construct_words<Backend>(
         tag,
-        [&]<nint_t Index>(Tag parent) {
+        [&]<nint_t Index>(Tag parent) VECOPS_INLINE_LAMBDA {
           return execute_word<Index, Backend>(op, parent, value);
         });
   }
@@ -84,7 +85,7 @@ struct GenericImpl<Backend, MaskFillOp, Tag> {
       MaskFillOp op, Tag tag, bool value) {
     return construct_mask_words<Backend>(
         tag,
-        [&]<nint_t Index>(Tag parent) {
+        [&]<nint_t Index>(Tag parent) VECOPS_INLINE_LAMBDA {
           return execute_word<Index, Backend>(op, parent, value);
         });
   }
@@ -98,7 +99,7 @@ struct GenericImpl<Backend, MaskFillOp, Tag> {
         OpType op, Tag tag, nint_t a, nint_t b) {                         \
       return construct_mask_words<Backend>(                              \
           tag,                                                           \
-          [&]<nint_t Index>(Tag parent) {                                \
+          [&]<nint_t Index>(Tag parent) VECOPS_INLINE_LAMBDA {           \
             return execute_word<Index, Backend>(op, parent, a, b);       \
           });                                                            \
     }                                                                    \
@@ -120,7 +121,7 @@ struct GenericImpl<Backend, BitCastOp, ToTag> {
       BitCastOp op, ToTag to, FromTag from, Vec<FromTag> value) {
     return construct_words<Backend>(
         to,
-        [&]<nint_t Index>(ToTag parent) {
+        [&]<nint_t Index>(ToTag parent) VECOPS_INLINE_LAMBDA {
           return execute_word<Index, Backend>(
               op, parent, from,
               ::vecops::vec::get_word<Index>(from, value));
@@ -138,7 +139,7 @@ struct GenericImpl<Backend, LowerOp, Tag> {
     using OutTag = Half<Tag>;
     return construct_words<Backend>(
         OutTag{},
-        [&]<nint_t Index>(OutTag) {
+        [&]<nint_t Index>(OutTag) VECOPS_INLINE_LAMBDA {
           return ::vecops::vec::get_word<Index>(tag, value);
         });
   }
@@ -148,7 +149,7 @@ struct GenericImpl<Backend, LowerOp, Tag> {
     using OutTag = Half<Tag>;
     return construct_mask_words<Backend>(
         OutTag{},
-        [&]<nint_t Index>(OutTag) {
+        [&]<nint_t Index>(OutTag) VECOPS_INLINE_LAMBDA {
           return ::vecops::vec::get_word<Index>(tag, value);
         });
   }
@@ -166,7 +167,7 @@ struct GenericImpl<Backend, UpperOp, Tag> {
         RepresentationTraits<Backend, OutTag>::word_count;
     return construct_words<Backend>(
         OutTag{},
-        [&]<nint_t Index>(OutTag) {
+        [&]<nint_t Index>(OutTag) VECOPS_INLINE_LAMBDA {
           return ::vecops::vec::get_word<Index + offset>(tag, value);
         });
   }
@@ -178,7 +179,7 @@ struct GenericImpl<Backend, UpperOp, Tag> {
         RepresentationTraits<Backend, OutTag>::word_count;
     return construct_mask_words<Backend>(
         OutTag{},
-        [&]<nint_t Index>(OutTag) {
+        [&]<nint_t Index>(OutTag) VECOPS_INLINE_LAMBDA {
           return ::vecops::vec::get_word<Index + offset>(tag, value);
         });
   }
@@ -197,7 +198,7 @@ struct GenericImpl<Backend, ConcatOp, Tag> {
         RepresentationTraits<Backend, InTag>::word_count;
     return construct_words<Backend>(
         tag,
-        [&]<nint_t Index>(Tag) {
+        [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA {
           if constexpr (Index < split) {
             return ::vecops::vec::get_word<Index>(InTag{}, lower_value);
           } else {
@@ -215,7 +216,7 @@ struct GenericImpl<Backend, ConcatOp, Tag> {
         RepresentationTraits<Backend, InTag>::word_count;
     return construct_mask_words<Backend>(
         tag,
-        [&]<nint_t Index>(Tag) {
+        [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA {
           if constexpr (Index < split) {
             return ::vecops::vec::get_word<Index>(InTag{}, lower_value);
           } else {
@@ -294,7 +295,7 @@ struct GenericImpl<Backend, InterleaveOp, Tag> {
         Vec<IndexTag<Tag>> indices) {                                    \
       return construct_words<Backend>(                                  \
           tag,                                                          \
-          [&]<nint_t Index>(Tag parent) {                               \
+          [&]<nint_t Index>(Tag parent) VECOPS_INLINE_LAMBDA {          \
             return execute_word<Index, Backend>(                        \
                 op, parent, ::vecops::vec::get_word<Index>(tag, value), \
                 ::vecops::vec::get_word<Index>(                        \

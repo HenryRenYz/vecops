@@ -9,6 +9,7 @@
  * StridedIndicesOp for building linear index sequences.
  */
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -143,32 +144,6 @@ struct GenericImpl<Backend, LoadOp, Tag> {
         });
   }
 
-  static VECOPS_ALWAYS_INLINE bool mask_lane(
-      Tag tag, Mask<Tag> mask, nint_t lane) {
-    const nint_t word_lanes = native_word_size(tag);
-    return visit_runtime_word<Backend>(
-        tag, lane / word_lanes, [&]<nint_t Index>() {
-          return execute_word<Index, Backend>(
-              GetMaskLaneOp{}, tag,
-              ::vecops::vec::get_word<Index>(tag, mask),
-              lane % word_lanes);
-        });
-  }
-
-  static VECOPS_ALWAYS_INLINE Vec<Tag> replace_lane(
-      Tag tag, Vec<Tag> value, nint_t lane, ElementOf<Tag> replacement) {
-    const nint_t word_lanes = native_word_size(tag);
-    return visit_runtime_word<Backend>(
-        tag, lane / word_lanes, [&]<nint_t Index>() -> Vec<Tag> {
-          return ::vecops::vec::set_word<Index>(
-              tag, value,
-              execute_word<Index, Backend>(
-                  SetVecLaneOp{}, tag,
-                  ::vecops::vec::get_word<Index>(tag, value),
-                  lane % word_lanes, replacement));
-        });
-  }
-
   template <VectorValue Indices, int Scale>
   static VECOPS_ALWAYS_INLINE Vec<Tag> load_indexed(
       Tag tag, const ElementOf<Tag>* pointer,
@@ -177,18 +152,28 @@ struct GenericImpl<Backend, LoadOp, Tag> {
     using IndexTag = Rebind<ElementOf<VecToTagT<Indices>>, Tag>;
     constexpr nint_t byte_scale =
         Scale == 0 ? static_cast<nint_t>(sizeof(ElementOf<Tag>)) : Scale;
-    auto result = inactive;
     const auto* base = reinterpret_cast<const std::byte*>(pointer);
-    for (nint_t lane = 0; lane < size(tag); ++lane) {
-      if (!mask_lane(tag, mask, lane)) continue;
-      const auto index = index_lane(IndexTag{}, addressing.indices, lane);
-      ElementOf<Tag> loaded;
-      std::memcpy(
-          &loaded, base + static_cast<nint_t>(index) * byte_scale,
-          sizeof(loaded));
-      result = replace_lane(tag, result, lane, loaded);
-    }
-    return result;
+    return construct_words<Backend>(
+        tag, [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA {
+      auto word = ::vecops::vec::get_word<Index>(tag, inactive);
+      constexpr nint_t word_lanes =
+          RepresentationTraits<Backend, Tag>::word_lanes;
+      const nint_t begin = Index * word_lanes;
+      const nint_t end = std::min(begin + word_lanes, size(tag));
+      const auto mask_word = ::vecops::vec::get_word<Index>(tag, mask);
+      for (nint_t lane = begin; lane < end; ++lane) {
+        if (!execute_word<Index, Backend>(
+                GetMaskLaneOp{}, tag, mask_word, lane - begin)) continue;
+        const auto index = index_lane(IndexTag{}, addressing.indices, lane);
+        ElementOf<Tag> loaded;
+        std::memcpy(
+            &loaded, base + static_cast<nint_t>(index) * byte_scale,
+            sizeof(loaded));
+        word = execute_word<Index, Backend>(
+            SetVecLaneOp{}, tag, word, lane - begin, loaded);
+      }
+      return word;
+    });
   }
 
  public:
@@ -196,7 +181,8 @@ struct GenericImpl<Backend, LoadOp, Tag> {
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(
       LoadOp op, Tag tag, const ElementOf<Tag>* pointer,
       Alignment alignment, Temporality temporality) {
-    return construct_words<Backend>(tag, [&]<nint_t Index>(Tag) {
+    return construct_words<Backend>(
+        tag, [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA {
       return execute_word<Index, Backend>(
           op, tag, pointer + Index * native_word_size(tag),
           alignment, temporality);
@@ -208,7 +194,8 @@ struct GenericImpl<Backend, LoadOp, Tag> {
       LoadOp op, Tag tag, const ElementOf<Tag>* pointer,
       Mask<Tag> mask, Vec<Tag> inactive,
       Alignment alignment, Temporality temporality) {
-    return construct_words<Backend>(tag, [&]<nint_t Index>(Tag) {
+    return construct_words<Backend>(
+        tag, [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA {
       return execute_word<Index, Backend>(
           op, tag, pointer + Index * native_word_size(tag),
           ::vecops::vec::get_word<Index>(tag, mask),
@@ -252,21 +239,21 @@ struct GenericImpl<Backend, StridedIndicesOp, IndexTag> {
              stride <= std::numeric_limits<int32_t>::max() /
                            (size(tag) - 1)),
         "strided index sequence overflows i32");
-    auto result = execute(FillOp{}, IndexTag{}, int32_t{});
-    for (nint_t lane = 0; lane < size(tag); ++lane) {
-      const nint_t word_lanes = native_word_size(IndexTag{});
-      result = visit_runtime_word<Backend>(
-          IndexTag{}, lane / word_lanes, [&]<nint_t Index>() -> Vec<IndexTag> {
-            return ::vecops::vec::set_word<Index>(
-                IndexTag{}, result,
-                execute_word<Index, Backend>(
-                    SetVecLaneOp{}, IndexTag{},
-                    ::vecops::vec::get_word<Index>(IndexTag{}, result),
-                    lane % word_lanes,
-                    static_cast<int32_t>(lane * stride)));
-          });
-    }
-    return result;
+    return construct_words<Backend>(
+        IndexTag{}, [&]<nint_t Index>(IndexTag) VECOPS_INLINE_LAMBDA {
+      auto word = execute_word<Index, Backend>(
+          FillOp{}, IndexTag{}, int32_t{});
+      constexpr nint_t word_lanes =
+          RepresentationTraits<Backend, IndexTag>::word_lanes;
+      const nint_t begin = Index * word_lanes;
+      const nint_t end = std::min(begin + word_lanes, size(IndexTag{}));
+      for (nint_t lane = begin; lane < end; ++lane) {
+        word = execute_word<Index, Backend>(
+            SetVecLaneOp{}, IndexTag{}, word, lane - begin,
+            static_cast<int32_t>(lane * stride));
+      }
+      return word;
+    });
   }
 };
 
@@ -455,9 +442,6 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_load_options(
       } else {
         const nint_t count = find_option<IsFirstOption>(
             std::forward<Options>(options)...).count;
-        VECOPS_ASSERT(
-            count >= 0 && count <= size(tag),
-            "load count %zd !in 0..%zd", count, size(tag));
         mask = mwhilelt(tag, 0, count);
       }
 
@@ -564,9 +548,6 @@ VECOPS_ALWAYS_INLINE void execute_store_options(
       } else {
         const nint_t count = find_option<IsFirstOption>(
             std::forward<Options>(options)...).count;
-        VECOPS_ASSERT(
-            count >= 0 && count <= size(tag),
-            "store count %zd !in 0..%zd", count, size(tag));
         mask = mwhilelt(tag, 0, count);
       }
       if constexpr (addressing_count == 0) {

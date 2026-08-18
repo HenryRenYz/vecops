@@ -96,6 +96,10 @@ constexpr WordArray<Word, Count> set_word(
   return value;
 }
 
+/** Customization point for sizeless backend word-group construction. */
+template <typename... Words>
+void make_word_group(Words...) = delete;
+
 } // namespace vecops::vec::details
 
 #endif // VECOPS_VEC_DETAILS_STORAGE_H

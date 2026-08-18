@@ -86,7 +86,7 @@ struct ArithmeticGenericImpl {
       Op op, Tag tag, Vec<Tag> a, Vec<Tag> b) {
     return construct_words<Backend>(
         tag,
-        [&]<nint_t Index>(Tag) {
+        [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA {
           return execute_word<Index, Backend>(
               op,
               tag,
@@ -101,7 +101,7 @@ struct ArithmeticGenericImpl {
       Vec<Tag> inactive, Policy policy) {
     return construct_words<Backend>(
         tag,
-        [&]<nint_t Index>(Tag) {
+        [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA {
           return execute_word<Index, Backend>(
               op,
               tag,
@@ -132,7 +132,8 @@ template <typename Backend, typename Op, VectorTag Tag>
 struct UnaryArithmeticGenericImpl {
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(
       Op op, Tag tag, Vec<Tag> value) {
-    return construct_words<Backend>(tag, [&]<nint_t Index>(Tag) {
+    return construct_words<Backend>(
+        tag, [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA {
       return execute_word<Index, Backend>(
           op, tag, ::vecops::vec::get_word<Index>(tag, value));
     });
@@ -142,7 +143,8 @@ struct UnaryArithmeticGenericImpl {
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(
       Op op, Tag tag, Vec<Tag> value, Mask<Tag> mask,
       Vec<Tag> inactive, Policy policy) {
-    return construct_words<Backend>(tag, [&]<nint_t Index>(Tag) {
+    return construct_words<Backend>(
+        tag, [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA {
       return execute_word<Index, Backend>(
           op, tag, ::vecops::vec::get_word<Index>(tag, value),
           ::vecops::vec::get_word<Index>(tag, mask),
@@ -175,7 +177,8 @@ template <typename Backend, typename Op, VectorTag Tag>
 struct TernaryArithmeticGenericImpl {
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(
       Op op, Tag tag, Vec<Tag> a, Vec<Tag> b, Vec<Tag> c) {
-    return construct_words<Backend>(tag, [&]<nint_t Index>(Tag) {
+    return construct_words<Backend>(
+        tag, [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA {
       return execute_word<Index, Backend>(
           op, tag,
           ::vecops::vec::get_word<Index>(tag, a),
@@ -188,7 +191,8 @@ struct TernaryArithmeticGenericImpl {
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(
       Op op, Tag tag, Vec<Tag> a, Vec<Tag> b, Vec<Tag> c,
       Mask<Tag> mask, Vec<Tag> inactive, Policy policy) {
-    return construct_words<Backend>(tag, [&]<nint_t Index>(Tag) {
+    return construct_words<Backend>(
+        tag, [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA {
       return execute_word<Index, Backend>(
           op, tag,
           ::vecops::vec::get_word<Index>(tag, a),

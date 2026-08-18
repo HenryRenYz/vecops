@@ -9,6 +9,8 @@
  * element conversion using the scalar convert/ wrap_convert utilities.
  */
 
+#include <algorithm>
+
 #include "vecops/vec/details/Basic.h"
 #include "vecops/vec/details/Options.h"
 #include "vecops/util/ScalarConvert.h"
@@ -145,21 +147,6 @@ VECOPS_ALWAYS_INLINE ElementOf<Tag> conversion_get_vec_lane(
 }
 
 template <typename Backend, VectorTag Tag>
-VECOPS_ALWAYS_INLINE Vec<Tag> conversion_set_vec_lane(
-    Tag tag, Vec<Tag> value, nint_t lane, ElementOf<Tag> replacement) {
-  const nint_t word_lanes = native_word_size(tag);
-  return visit_runtime_word<Backend>(
-      tag, lane / word_lanes, [&]<nint_t Index>() -> Vec<Tag> {
-        return ::vecops::vec::set_word<Index>(
-            tag, value,
-            execute_word<Index, Backend>(
-                SetVecLaneOp{}, tag,
-                ::vecops::vec::get_word<Index>(tag, value),
-                lane % word_lanes, replacement));
-      });
-}
-
-template <typename Backend, VectorTag Tag>
 VECOPS_ALWAYS_INLINE bool conversion_get_mask_lane(
     Tag tag, Mask<Tag> value, nint_t lane) {
   const nint_t word_lanes = native_word_size(tag);
@@ -169,21 +156,6 @@ VECOPS_ALWAYS_INLINE bool conversion_get_mask_lane(
             GetMaskLaneOp{}, tag,
             ::vecops::vec::get_word<Index>(tag, value),
             lane % word_lanes);
-      });
-}
-
-template <typename Backend, VectorTag Tag>
-VECOPS_ALWAYS_INLINE Mask<Tag> conversion_set_mask_lane(
-    Tag tag, Mask<Tag> value, nint_t lane, bool replacement) {
-  const nint_t word_lanes = native_word_size(tag);
-  return visit_runtime_word<Backend>(
-      tag, lane / word_lanes, [&]<nint_t Index>() -> Mask<Tag> {
-        return ::vecops::vec::set_word<Index>(
-            tag, value,
-            execute_word<Index, Backend>(
-                SetMaskLaneOp{}, tag,
-                ::vecops::vec::get_word<Index>(tag, value),
-                lane % word_lanes, replacement));
       });
 }
 
@@ -208,51 +180,70 @@ struct GenericImpl<Backend, ConvertOp, ToTag> {
         : static_cast<int>(sizeof(ElementOf<FromTag>) / sizeof(ElementOf<ToTag>));
     constexpr int phase = lane_layout
         ? conversion_lane_phase<Options...>() : 0;
-    auto result = [&] {
+    const auto initial = [&] {
       if constexpr ((lane_layout && narrows) || masked)
         return conversion_population<Backend>(
             to, std::forward<Options>(options)...);
       else
         return execute(FillOp{}, to, ElementOf<ToTag>{});
     }();
-    const nint_t converted_lanes = lane_layout && narrows
-        ? size(from) : size(to);
-    for (nint_t lane = 0; lane < converted_lanes; ++lane) {
-      const nint_t input_lane = lane_layout && !narrows
-          ? ratio * lane + phase : lane;
-      const nint_t output_lane = lane_layout && narrows
-          ? ratio * lane + phase : lane;
-      if constexpr (masked) {
-        const auto& output_mask = find_option<IsMaskedOption>(
-            std::forward<Options>(options)...).value;
-        if (!conversion_get_mask_lane<Backend>(to, output_mask, output_lane))
-          continue;
-      }
-      const auto input = conversion_get_vec_lane<Backend>(
-          from, value, input_lane);
-      const auto converted = [&] {
-        if constexpr (wraps) {
-          return ::vecops::wrap_convert<ElementOf<ToTag>>(input);
-        } else {
-          return ::vecops::convert<ElementOf<ToTag>, ElementOf<FromTag>>(input);
+    return construct_words<Backend>(
+        to, [&]<nint_t Index>(ToTag) VECOPS_INLINE_LAMBDA {
+      auto word = ::vecops::vec::get_word<Index>(to, initial);
+      constexpr nint_t word_lanes =
+          RepresentationTraits<Backend, ToTag>::word_lanes;
+      const nint_t begin = Index * word_lanes;
+      const nint_t end = std::min(begin + word_lanes, size(to));
+      for (nint_t output_lane = begin; output_lane < end; ++output_lane) {
+        if constexpr (lane_layout && narrows) {
+          if ((output_lane - phase) % ratio != 0) continue;
         }
-      }();
-      result = conversion_set_vec_lane<Backend>(
-          to, result, output_lane, converted);
-    }
-    return result;
+        const nint_t input_lane = lane_layout && !narrows
+            ? ratio * output_lane + phase
+            : lane_layout ? (output_lane - phase) / ratio : output_lane;
+        if constexpr (lane_layout && narrows) {
+          if (input_lane < 0 || input_lane >= size(from)) continue;
+        }
+        if constexpr (masked) {
+          const auto& output_mask = find_option<IsMaskedOption>(
+              std::forward<Options>(options)...).value;
+          if (!conversion_get_mask_lane<Backend>(
+                  to, output_mask, output_lane)) continue;
+        }
+        const auto input = conversion_get_vec_lane<Backend>(
+            from, value, input_lane);
+        const auto converted = [&] {
+          if constexpr (wraps)
+            return ::vecops::wrap_convert<ElementOf<ToTag>>(input);
+          else
+            return ::vecops::convert<
+                ElementOf<ToTag>, ElementOf<FromTag>>(input);
+        }();
+        word = execute_word<Index, Backend>(
+            SetVecLaneOp{}, to, word, output_lane - begin, converted);
+      }
+      return word;
+    });
   }
 
   template <VectorTag FromTag>
     requires (valid_mask_conversion<ToTag, FromTag>())
   static VECOPS_ALWAYS_INLINE Mask<ToTag> call(
       ConvertOp, ToTag to, FromTag from, Mask<FromTag> value) {
-    auto result = execute(MaskFillOp{}, to, false);
-    for (nint_t lane = 0; lane < size(to); ++lane) {
-      const bool bit = conversion_get_mask_lane<Backend>(from, value, lane);
-      result = conversion_set_mask_lane<Backend>(to, result, lane, bit);
-    }
-    return result;
+    return construct_mask_words<Backend>(
+        to, [&]<nint_t Index>(ToTag) VECOPS_INLINE_LAMBDA {
+      auto word = execute_word<Index, Backend>(MaskFillOp{}, to, false);
+      constexpr nint_t word_lanes =
+          RepresentationTraits<Backend, ToTag>::word_lanes;
+      const nint_t begin = Index * word_lanes;
+      const nint_t end = std::min(begin + word_lanes, size(to));
+      for (nint_t lane = begin; lane < end; ++lane) {
+        word = execute_word<Index, Backend>(
+            SetMaskLaneOp{}, to, word, lane - begin,
+            conversion_get_mask_lane<Backend>(from, value, lane));
+      }
+      return word;
+    });
   }
 };
 

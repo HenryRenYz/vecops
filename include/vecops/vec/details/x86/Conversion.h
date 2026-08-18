@@ -930,6 +930,8 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_native(
     ToTag to, FromTag from, Vec<FromTag> value) {
   using ToTraits = RepresentationTraits<X86Backend, ToTag>;
   using FromTraits = RepresentationTraits<X86Backend, FromTag>;
+  using To = ElementOf<ToTag>;
+  using From = ElementOf<FromTag>;
   static_assert(is_x86_conversion_element<ElementOf<ToTag>>);
   static_assert(is_x86_conversion_element<ElementOf<FromTag>>);
 
@@ -937,6 +939,29 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_native(
       std::same_as<ElementOf<ToTag>, bfloat16_t> &&
       std::same_as<ElementOf<FromTag>, float32_t> &&
       ToTraits::logical_lanes > 4;
+  using ToWordTag = FixedTag<To, ToTraits::word_lanes>;
+  using FromChunkTag = Rebind<From, ToWordTag>;
+  using FromChunkTraits = RepresentationTraits<X86Backend, FromChunkTag>;
+  constexpr bool directly_partitioned_output =
+      ToTraits::word_count > 1 &&
+      FromTraits::word_count ==
+          ToTraits::word_count * FromChunkTraits::word_count;
+
+  if constexpr (directly_partitioned_output) {
+    return construct_words<X86Backend>(
+        to, [&]<nint_t OutputIndex>(ToTag) VECOPS_INLINE_LAMBDA {
+      const auto input = construct_words<X86Backend>(
+          FromChunkTag{},
+          [&]<nint_t InputIndex>(FromChunkTag) VECOPS_INLINE_LAMBDA {
+            constexpr nint_t source_index =
+                OutputIndex * FromChunkTraits::word_count + InputIndex;
+            return ::vecops::vec::get_word<source_index>(from, value);
+          });
+      const auto converted = x86_convert_vec_native(
+          ToWordTag{}, FromChunkTag{}, input);
+      return ::vecops::vec::get_word<0>(ToWordTag{}, converted);
+    });
+  } else
 #if defined(HAS_AVX512_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
   if constexpr (
       split_bfloat32_narrowing && ToTraits::logical_lanes <= 32) {

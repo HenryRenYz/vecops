@@ -213,6 +213,25 @@ VECOPS_ALWAYS_INLINE constexpr Vec<Tag> set_word(
   return details::set_word<Index>(value, word);
 }
 
+/** Constructs a complete Vec directly from all of its physical words. */
+template <VectorTag Tag, typename First, typename... Rest>
+  requires std::same_as<std::remove_cvref_t<First>, NativeWordVec<Tag>> &&
+           (std::same_as<std::remove_cvref_t<Rest>, NativeWordVec<Tag>> && ...)
+VECOPS_ALWAYS_INLINE constexpr Vec<Tag> from_words(
+    Tag, First first, Rest... rest) {
+  constexpr nint_t count = details::CurrentRepresentation<Tag>::word_count;
+  static_assert(1 + sizeof...(Rest) == static_cast<std::size_t>(count));
+  if constexpr (count == 1) {
+    return first;
+  } else if constexpr (requires { sizeof(Vec<Tag>); }) {
+    return Vec<Tag>{{first, rest...}};
+  } else {
+    using Result = decltype(details::make_word_group(first, rest...));
+    static_assert(std::same_as<Result, Vec<Tag>>);
+    return details::make_word_group(first, rest...);
+  }
+}
+
 /** Returns a physical predicate word from a Mask selected by tag. */
 template <nint_t Index, VectorTag Tag>
   requires requires(Mask<Tag> value) {
@@ -231,6 +250,25 @@ template <nint_t Index, VectorTag Tag>
 VECOPS_ALWAYS_INLINE constexpr Mask<Tag> set_word(
     Tag, Mask<Tag> value, NativeWordMask<Tag> word) {
   return details::set_word<Index>(value, word);
+}
+
+/** Constructs a complete Mask directly from all of its physical words. */
+template <VectorTag Tag, typename First, typename... Rest>
+  requires std::same_as<std::remove_cvref_t<First>, NativeWordMask<Tag>> &&
+           (std::same_as<std::remove_cvref_t<Rest>, NativeWordMask<Tag>> && ...)
+VECOPS_ALWAYS_INLINE constexpr Mask<Tag> mask_from_words(
+    Tag, First first, Rest... rest) {
+  constexpr nint_t count = details::CurrentRepresentation<Tag>::word_count;
+  static_assert(1 + sizeof...(Rest) == static_cast<std::size_t>(count));
+  if constexpr (count == 1) {
+    return first;
+  } else if constexpr (requires { sizeof(Mask<Tag>); }) {
+    return Mask<Tag>{{first, rest...}};
+  } else {
+    using Result = decltype(details::make_word_group(first, rest...));
+    static_assert(std::same_as<Result, Mask<Tag>>);
+    return details::make_word_group(first, rest...);
+  }
 }
 
 } // namespace vecops::vec

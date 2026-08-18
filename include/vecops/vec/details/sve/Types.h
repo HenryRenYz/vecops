@@ -129,12 +129,12 @@ VECOPS_VEC_SVE_PREDICATE_ACCESS svboolx4_t set_word(
   return svset4(value, static_cast<uint64_t>(Index), word);
 }
 
-VECOPS_VEC_SVE_PREDICATE_ACCESS svboolx2_t create_mask_tuple(
+VECOPS_VEC_SVE_PREDICATE_ACCESS svboolx2_t make_word_group(
     svbool_t word0, svbool_t word1) {
   return svcreate2(word0, word1);
 }
 
-VECOPS_VEC_SVE_PREDICATE_ACCESS svboolx4_t create_mask_tuple(
+VECOPS_VEC_SVE_PREDICATE_ACCESS svboolx4_t make_word_group(
     svbool_t word0, svbool_t word1, svbool_t word2, svbool_t word3) {
   return svcreate4(word0, word1, word2, word3);
 }
@@ -180,6 +180,31 @@ VECOPS_VEC_DEFINE_SVE_TUPLE_ACCESS(int64)
 VECOPS_VEC_DEFINE_SVE_TUPLE_ACCESS(uint64)
 
 #undef VECOPS_VEC_DEFINE_SVE_TUPLE_ACCESS
+
+#define VECOPS_VEC_DEFINE_SVE_WORD_GROUP(Name)                         \
+  VECOPS_ALWAYS_INLINE sv##Name##x2_t make_word_group(                 \
+      sv##Name##_t word0, sv##Name##_t word1) {                        \
+    return svcreate2(word0, word1);                                    \
+  }                                                                    \
+  VECOPS_ALWAYS_INLINE sv##Name##x4_t make_word_group(                 \
+      sv##Name##_t word0, sv##Name##_t word1,                          \
+      sv##Name##_t word2, sv##Name##_t word3) {                        \
+    return svcreate4(word0, word1, word2, word3);                      \
+  }
+
+VECOPS_VEC_DEFINE_SVE_WORD_GROUP(float16)
+VECOPS_VEC_DEFINE_SVE_WORD_GROUP(float32)
+VECOPS_VEC_DEFINE_SVE_WORD_GROUP(float64)
+VECOPS_VEC_DEFINE_SVE_WORD_GROUP(int8)
+VECOPS_VEC_DEFINE_SVE_WORD_GROUP(uint8)
+VECOPS_VEC_DEFINE_SVE_WORD_GROUP(int16)
+VECOPS_VEC_DEFINE_SVE_WORD_GROUP(uint16)
+VECOPS_VEC_DEFINE_SVE_WORD_GROUP(int32)
+VECOPS_VEC_DEFINE_SVE_WORD_GROUP(uint32)
+VECOPS_VEC_DEFINE_SVE_WORD_GROUP(int64)
+VECOPS_VEC_DEFINE_SVE_WORD_GROUP(uint64)
+
+#undef VECOPS_VEC_DEFINE_SVE_WORD_GROUP
 
 template <nint_t Index>
 VECOPS_ALWAYS_INLINE svbfloat16_t get_word(svbfloat16x2_t value) {
@@ -228,6 +253,31 @@ VECOPS_ALWAYS_INLINE svbfloat16x4_t set_word(
       svreinterpret_u16_bf16_x4(value),
       static_cast<uint64_t>(Index),
       svreinterpret_u16_bf16(word)));
+#endif
+}
+
+VECOPS_ALWAYS_INLINE svbfloat16x2_t make_word_group(
+    svbfloat16_t word0, svbfloat16_t word1) {
+#if defined(HAS_BF16)
+  return svcreate2(word0, word1);
+#else
+  return svreinterpret_bf16_u16_x2(svcreate2(
+      svreinterpret_u16_bf16(word0),
+      svreinterpret_u16_bf16(word1)));
+#endif
+}
+
+VECOPS_ALWAYS_INLINE svbfloat16x4_t make_word_group(
+    svbfloat16_t word0, svbfloat16_t word1,
+    svbfloat16_t word2, svbfloat16_t word3) {
+#if defined(HAS_BF16)
+  return svcreate4(word0, word1, word2, word3);
+#else
+  return svreinterpret_bf16_u16_x4(svcreate4(
+      svreinterpret_u16_bf16(word0),
+      svreinterpret_u16_bf16(word1),
+      svreinterpret_u16_bf16(word2),
+      svreinterpret_u16_bf16(word3)));
 #endif
 }
 
