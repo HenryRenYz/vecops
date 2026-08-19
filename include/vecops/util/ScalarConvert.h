@@ -56,6 +56,33 @@ VECOPS_INLINE constexpr TOut convert(TIn v) {
     } else {
       return TOut(v);
     }
+  } else if constexpr (is_int<TOut> && is_float<TIn>) {
+    // Clamp in the floating-point domain before converting: a plain
+    // static_cast<uint>(negative float) is undefined behavior, and
+    // compilers resolve that UB differently at different optimization
+    // levels. Clamping the already-converted integer is too late — the
+    // UB has already produced a wrapped value.
+    const auto f = static_cast<TPromoteIn>(v);
+    if (std::isnan(static_cast<double>(f))) return TOut(0);
+    if constexpr (is_unsigned_int<TOut>) {
+      constexpr auto hi = [] {
+        using F = TPromoteIn;
+        // Largest float exactly representable in TOut.
+        F value = F(1);
+        while (value * F(2) <= F(std::numeric_limits<TOut>::max())) {
+          value *= F(2);
+        }
+        return value - F(1) == F(std::numeric_limits<TOut>::max())
+            ? F(std::numeric_limits<TOut>::max())
+            : value - F(1);
+      }();
+      return TOut(std::min(std::max(f, TPromoteIn(0)), hi));
+    } else {
+      using F = TPromoteIn;
+      constexpr F hi = F(std::numeric_limits<TOut>::max());
+      constexpr F lo = F(std::numeric_limits<TOut>::min());
+      return TOut(std::min(std::max(f, lo), hi));
+    }
   } else {
     return TOut(TPromoteOut(TPromoteIn(v)));
   }
