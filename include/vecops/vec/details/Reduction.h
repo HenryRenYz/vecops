@@ -13,6 +13,7 @@
  */
 
 #include "vecops/vec/details/Options.h"
+#include "vecops/vec/details/Request.h"
 
 namespace vecops::vec::details {
 
@@ -38,6 +39,17 @@ VECOPS_ALWAYS_INLINE ElementOf<Tag> execute_reduction_options(
 /* **************************************************************************** */
 //    Balanced continuation fold for multi-word reductions                      //
 /* **************************************************************************** */
+
+/** Request-driven reduction dispatch. */
+template <typename Op, VectorTag Tag, Active A>
+VECOPS_ALWAYS_INLINE ElementOf<Tag> execute_reduction_request(
+    Op op, Tag tag, Vec<Tag> value, const ReduceRequest<Tag, A>& request) {
+  if constexpr (A == Active::Unmasked) {
+    return execute(op, tag, value);
+  } else {
+    return execute(op, tag, value, *request.mask);
+  }
+}
 
 /**
  * Balanced continuation fold for reductions.

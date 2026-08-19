@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "vecops/vec/details/Wordwise.h"
+#include "vecops/vec/details/Request.h"
 
 namespace vecops::vec::details {
 
@@ -93,6 +94,52 @@ VECOPS_ALWAYS_INLINE Mask<Tag> execute_comparison_options(
       const auto& inactive = find_option<IsMaskMergeOption>(
           std::forward<Options>(options)...).value;
       return mask_or(tag, active_result, mask_andnot(tag, active, inactive));
+    } else {
+      return active_result;
+    }
+  }
+}
+
+/** Request-driven comparison dispatch (binary). */
+template <typename Op, VectorTag Tag, Active A, Inactive I>
+VECOPS_ALWAYS_INLINE Mask<Tag> execute_comparison_request(
+    Op op, Tag tag, Vec<Tag> a, Vec<Tag> b,
+    const OpRequest<Tag, A, I>& request) {
+  static_assert(
+      A != Active::First,
+      "comparison operations have no first-count form");
+  if constexpr (A == Active::Unmasked) {
+    return execute(op, tag, a, b);
+  } else {
+    const auto active_result =
+        execute(op, tag, a, b, *request.mask);
+    if constexpr (I == Inactive::MergeMask) {
+      return mask_or(
+          tag, active_result,
+          mask_andnot(tag, *request.mask, *request.mask_merge));
+    } else {
+      return active_result;
+    }
+  }
+}
+
+/** Request-driven comparison dispatch (unary / value-to-scalar forms). */
+template <typename Op, VectorTag Tag, Active A, Inactive I>
+VECOPS_ALWAYS_INLINE Mask<Tag> execute_comparison_request(
+    Op op, Tag tag, Vec<Tag> value,
+    const OpRequest<Tag, A, I>& request) {
+  static_assert(
+      A != Active::First,
+      "comparison operations have no first-count form");
+  if constexpr (A == Active::Unmasked) {
+    return execute(op, tag, value);
+  } else {
+    const auto active_result =
+        execute(op, tag, value, *request.mask);
+    if constexpr (I == Inactive::MergeMask) {
+      return mask_or(
+          tag, active_result,
+          mask_andnot(tag, *request.mask, *request.mask_merge));
     } else {
       return active_result;
     }

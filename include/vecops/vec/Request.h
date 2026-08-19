@@ -230,6 +230,20 @@ struct StoreConvertRequest {
   const IndexVector* indices = nullptr;     ///< Addr == Indexed.
 };
 
+/**
+ * @brief Resolved descriptor for reductions.
+ *
+ * Reductions filter participating lanes with a single active kind; there
+ * are no population options because a reduction has no inactive output
+ * lanes.
+ */
+template <VectorTag Tag, Active A = Active::Unmasked>
+struct ReduceRequest {
+  using TagType = Tag;
+  static constexpr Active active_kind = A;
+  const Mask<Tag>* mask = nullptr;  ///< A == Masked.
+};
+
 } // namespace vecops::vec
 
 #endif // VECOPS_VEC_REQUEST_H

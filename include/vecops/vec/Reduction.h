@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "vecops/vec/Arithmetic.h"
+#include "vecops/vec/Request.h"
 
 namespace vecops::vec {
 
@@ -33,6 +34,10 @@ concept ReductionFilterOptions =
       requires details::ReductionFilterOptions<Tag, Options...>        \
     VECOPS_ALWAYS_INLINE ElementOf<Tag> operator()(                     \
         Tag tag, Vec<Tag> value, Options&&... options) const;           \
+    template <VectorTag Tag, Active A>                                  \
+    VECOPS_ALWAYS_INLINE ElementOf<Tag> operator()(                     \
+        Tag tag, Vec<Tag> value,                                       \
+        const ReduceRequest<Tag, A>& request) const;                    \
   }
 
 VECOPS_VEC_DECLARE_REDUCTION_OP(ReduceAddOp);
@@ -116,6 +121,12 @@ VECOPS_ALWAYS_INLINE ElementOf<Tag> ReduceAddOp::operator()(
   return details::execute_reduction_options(
       *this, tag, value, std::forward<Options>(options)...);
 }
+template <VectorTag Tag, Active A>
+VECOPS_ALWAYS_INLINE ElementOf<Tag> ReduceAddOp::operator()(
+    Tag tag, Vec<Tag> value,
+    const ReduceRequest<Tag, A>& request) const {
+  return details::execute_reduction_request(*this, tag, value, request);
+}
 
 inline constexpr ReduceAddOp reduce_add{};
 
@@ -147,6 +158,12 @@ VECOPS_ALWAYS_INLINE ElementOf<Tag> ReduceMaxOp::operator()(
     Tag tag, Vec<Tag> value, Options&&... options) const {
   return details::execute_reduction_options(
       *this, tag, value, std::forward<Options>(options)...);
+}
+template <VectorTag Tag, Active A>
+VECOPS_ALWAYS_INLINE ElementOf<Tag> ReduceMaxOp::operator()(
+    Tag tag, Vec<Tag> value,
+    const ReduceRequest<Tag, A>& request) const {
+  return details::execute_reduction_request(*this, tag, value, request);
 }
 
 inline constexpr ReduceMaxOp reduce_max{};
@@ -180,6 +197,12 @@ VECOPS_ALWAYS_INLINE ElementOf<Tag> ReduceMinOp::operator()(
     Tag tag, Vec<Tag> value, Options&&... options) const {
   return details::execute_reduction_options(
       *this, tag, value, std::forward<Options>(options)...);
+}
+template <VectorTag Tag, Active A>
+VECOPS_ALWAYS_INLINE ElementOf<Tag> ReduceMinOp::operator()(
+    Tag tag, Vec<Tag> value,
+    const ReduceRequest<Tag, A>& request) const {
+  return details::execute_reduction_request(*this, tag, value, request);
 }
 
 inline constexpr ReduceMinOp reduce_min{};

@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "vecops/vec/details/Options.h"
+#include "vecops/vec/details/Request.h"
 #include "vecops/vec/details/Wordwise.h"
 
 namespace vecops::vec::details {
@@ -117,6 +118,31 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_bit_shift_options(
         find_option<IsMaskedOption>(
             std::forward<Options>(options)...).value,
         inactive, bit_inactive_policy<Options...>());
+  }
+}
+
+/** Request-driven bit-shift dispatch. */
+template <typename Op, IntegerTag Tag, typename Count, Active A, Inactive I>
+VECOPS_ALWAYS_INLINE Vec<Tag> execute_bit_shift_request(
+    Op op, Tag tag, Vec<Tag> value, Count count,
+    const OpRequest<Tag, A, I>& request) {
+  static_assert(
+      A != Active::First,
+      "bit operations have no first-count form");
+  if constexpr (A == Active::Unmasked) {
+    return execute(op, tag, value, count);
+  } else if constexpr (I == Inactive::Zero) {
+    return execute(
+        op, tag, value, count, *request.mask, zeros(tag),
+        ZeroBitLanes{});
+  } else if constexpr (I == Inactive::MergeScalar) {
+    return execute(
+        op, tag, value, count, *request.mask,
+        fill(tag, request.merge_scalar), MergeBitLanes{});
+  } else {
+    return execute(
+        op, tag, value, count, *request.mask, value,
+        PreserveBitLanes{});
   }
 }
 

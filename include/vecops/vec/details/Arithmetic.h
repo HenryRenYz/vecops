@@ -12,6 +12,7 @@
 
 #include "vecops/vec/details/Elementwise.h"
 #include "vecops/vec/details/Options.h"
+#include "vecops/vec/details/Request.h"
 
 namespace vecops::vec::details {
 
@@ -288,6 +289,34 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_arithmetic_options(
   }
 }
 
+/** Request-driven binary elementwise dispatch. */
+template <typename Op, VectorTag Tag, Active A, Inactive I>
+VECOPS_ALWAYS_INLINE Vec<Tag> execute_arithmetic_request(
+    Op op, Tag tag, Vec<Tag> a, Vec<Tag> b,
+    const OpRequest<Tag, A, I>& request) {
+  static_assert(
+      A != Active::First,
+      "elementwise operations have no first-count form");
+  if constexpr (A == Active::Unmasked) {
+    return execute(op, tag, a, b);
+  } else if constexpr (I == Inactive::Zero) {
+    return execute(
+        op, tag, a, b, *request.mask, zeros(tag),
+        ZeroArithmeticInactive{});
+  } else if constexpr (I == Inactive::MergeVector) {
+    return execute(
+        op, tag, a, b, *request.mask, *request.merge_vector,
+        MergeArithmeticInactive{});
+  } else if constexpr (I == Inactive::MergeScalar) {
+    return execute(
+        op, tag, a, b, *request.mask, fill(tag, request.merge_scalar),
+        MergeArithmeticInactive{});
+  } else {
+    return execute(
+        op, tag, a, b, *request.mask, a, PreserveArithmeticInactive{});
+  }
+}
+
 /**
  * Same Option validation and dispatch pattern as execute_arithmetic_options,
  * but for unary operations (neg, abs, sqrt, rcp, rsqrt).
@@ -402,6 +431,63 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_ternary_arithmetic_options(
         std::forward<Options>(options)...).value;
     return execute(
         op, tag, a, b, c, mask, a, PreserveArithmeticInactive{});
+  }
+}
+
+/** Request-driven ternary elementwise dispatch (FMA family). */
+template <typename Op, VectorTag Tag, Active A, Inactive I>
+VECOPS_ALWAYS_INLINE Vec<Tag> execute_ternary_arithmetic_request(
+    Op op, Tag tag, Vec<Tag> a, Vec<Tag> b, Vec<Tag> c,
+    const OpRequest<Tag, A, I>& request) {
+  static_assert(
+      A != Active::First,
+      "elementwise operations have no first-count form");
+  if constexpr (A == Active::Unmasked) {
+    return execute(op, tag, a, b, c);
+  } else if constexpr (I == Inactive::Zero) {
+    return execute(
+        op, tag, a, b, c, *request.mask, zeros(tag),
+        ZeroArithmeticInactive{});
+  } else if constexpr (I == Inactive::MergeVector) {
+    return execute(
+        op, tag, a, b, c, *request.mask, *request.merge_vector,
+        MergeArithmeticInactive{});
+  } else if constexpr (I == Inactive::MergeScalar) {
+    return execute(
+        op, tag, a, b, c, *request.mask, fill(tag, request.merge_scalar),
+        MergeArithmeticInactive{});
+  } else {
+    return execute(
+        op, tag, a, b, c, *request.mask, a, PreserveArithmeticInactive{});
+  }
+}
+
+/** Request-driven unary elementwise dispatch. */
+template <typename Op, VectorTag Tag, Active A, Inactive I>
+VECOPS_ALWAYS_INLINE Vec<Tag> execute_unary_arithmetic_request(
+    Op op, Tag tag, Vec<Tag> value,
+    const OpRequest<Tag, A, I>& request) {
+  static_assert(
+      A != Active::First,
+      "elementwise operations have no first-count form");
+  if constexpr (A == Active::Unmasked) {
+    return execute(op, tag, value);
+  } else if constexpr (I == Inactive::Zero) {
+    return execute(
+        op, tag, value, *request.mask, zeros(tag),
+        ZeroArithmeticInactive{});
+  } else if constexpr (I == Inactive::MergeVector) {
+    return execute(
+        op, tag, value, *request.mask, *request.merge_vector,
+        MergeArithmeticInactive{});
+  } else if constexpr (I == Inactive::MergeScalar) {
+    return execute(
+        op, tag, value, *request.mask, fill(tag, request.merge_scalar),
+        MergeArithmeticInactive{});
+  } else {
+    return execute(
+        op, tag, value, *request.mask, value,
+        PreserveArithmeticInactive{});
   }
 }
 

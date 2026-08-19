@@ -2,6 +2,7 @@
 #define VECOPS_VEC_ARITHMETIC_H
 
 #include "vecops/vec/Basic.h"
+#include "vecops/vec/Request.h"
 
 namespace vecops::vec {
 
@@ -34,7 +35,11 @@ struct AddOp {
   template <VectorTag Tag, typename... Options>
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
+      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const; \
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const;
 
   template <TagInferableVector V, typename... Options>
   VECOPS_ALWAYS_INLINE V operator()(
@@ -52,7 +57,11 @@ struct SubOp {
   template <VectorTag Tag, typename... Options>
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
+      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const; \
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const;
 
   template <TagInferableVector V, typename... Options>
   VECOPS_ALWAYS_INLINE V operator()(
@@ -70,7 +79,11 @@ struct MulOp {
   template <VectorTag Tag, typename... Options>
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
+      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const; \
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const;
 
   template <TagInferableVector V, typename... Options>
   VECOPS_ALWAYS_INLINE V operator()(
@@ -88,7 +101,11 @@ struct DivOp {
   template <FloatingTag Tag, typename... Options>
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
+      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const; \
+  template <FloatingTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const;
 
   template <FloatingVectorValue V, typename... Options>
   VECOPS_ALWAYS_INLINE V operator()(
@@ -110,7 +127,11 @@ struct DivOp {
     template <VectorTag Tag, typename... Options>                       \
       requires (sizeof...(Options) > 0)                                \
     VECOPS_ALWAYS_INLINE Vec<Tag> operator()(                           \
-        Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;   \
+        Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const; \
+    template <VectorTag Tag, Active A, Inactive I>                       \
+    VECOPS_ALWAYS_INLINE Vec<Tag> operator()(                           \
+        Tag tag, Vec<Tag> a, Vec<Tag> b,                                          \
+        const OpRequest<Tag, A, I>& request) const;   \
     template <TagInferableVector V, typename... Options>                \
     VECOPS_ALWAYS_INLINE V operator()(                                  \
         V a, V b, Options&&... options) const {                         \
@@ -136,7 +157,11 @@ VECOPS_VEC_DECLARE_EXTREMA_OP(MaxOp);
     template <VectorTag Tag, typename... Options>                       \
       requires (sizeof...(Options) > 0)                                \
     VECOPS_ALWAYS_INLINE Vec<Tag> operator()(                           \
-        Tag tag, Vec<Tag> value, Options&&... options) const;           \
+        Tag tag, Vec<Tag> value, Options&&... options) const; \
+    template <VectorTag Tag, Active A, Inactive I>                       \
+    VECOPS_ALWAYS_INLINE Vec<Tag> operator()(                           \
+        Tag tag, Vec<Tag> value,                                          \
+        const OpRequest<Tag, A, I>& request) const;           \
     template <TagInferableVector V, typename... Options>                \
     VECOPS_ALWAYS_INLINE V operator()(                                  \
         V value, Options&&... options) const {                          \
@@ -162,7 +187,11 @@ VECOPS_VEC_DECLARE_UNARY_ARITHMETIC_OP(AbsOp);
     template <FloatingTag Tag, typename... Options>                     \
       requires (sizeof...(Options) > 0)                                \
     VECOPS_ALWAYS_INLINE Vec<Tag> operator()(                           \
-        Tag tag, Vec<Tag> value, Options&&... options) const;           \
+        Tag tag, Vec<Tag> value, Options&&... options) const; \
+    template <FloatingTag Tag, Active A, Inactive I>                       \
+    VECOPS_ALWAYS_INLINE Vec<Tag> operator()(                           \
+        Tag tag, Vec<Tag> value,                                          \
+        const OpRequest<Tag, A, I>& request) const;           \
     template <FloatingVectorValue V, typename... Options>               \
     VECOPS_ALWAYS_INLINE V operator()(                                  \
         V value, Options&&... options) const {                          \
@@ -190,7 +219,11 @@ VECOPS_VEC_DECLARE_FLOATING_UNARY_OP(RsqrtOp);
       requires (sizeof...(Options) > 0)                                \
     VECOPS_ALWAYS_INLINE Vec<Tag> operator()(                           \
         Tag tag, Vec<Tag> a, Vec<Tag> b, Vec<Tag> c,                    \
-        Options&&... options) const;                                    \
+        Options&&... options) const; \
+    template <VectorTag Tag, Active A, Inactive I>                       \
+    VECOPS_ALWAYS_INLINE Vec<Tag> operator()(                           \
+        Tag tag, Vec<Tag> a, Vec<Tag> b, Vec<Tag> c,                    \
+        const OpRequest<Tag, A, I>& request) const;                                    \
     template <TagInferableVector V, typename... Options>                \
     VECOPS_ALWAYS_INLINE V operator()(                                  \
         V a, V b, V c, Options&&... options) const {                    \
@@ -256,6 +289,12 @@ VECOPS_ALWAYS_INLINE Vec<Tag> AddOp::operator()(
   return details::execute_arithmetic_options(
       *this, tag, a, b, std::forward<Options>(options)...);
 }
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Vec<Tag> AddOp::operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const {
+    return details::execute_arithmetic_request(*this, tag, a, b, request);
+  }
 
 /**
  * Computes r[i] = a[i] - b[i] for every logical lane 0 <= i < size(tag).
@@ -284,6 +323,12 @@ VECOPS_ALWAYS_INLINE Vec<Tag> SubOp::operator()(
   return details::execute_arithmetic_options(
       *this, tag, a, b, std::forward<Options>(options)...);
 }
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Vec<Tag> SubOp::operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const {
+    return details::execute_arithmetic_request(*this, tag, a, b, request);
+  }
 
 inline constexpr SubOp sub{};
 
@@ -314,6 +359,12 @@ VECOPS_ALWAYS_INLINE Vec<Tag> MulOp::operator()(
   return details::execute_arithmetic_options(
       *this, tag, a, b, std::forward<Options>(options)...);
 }
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Vec<Tag> MulOp::operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const {
+    return details::execute_arithmetic_request(*this, tag, a, b, request);
+  }
 
 inline constexpr MulOp mul{};
 
@@ -344,6 +395,12 @@ VECOPS_ALWAYS_INLINE Vec<Tag> DivOp::operator()(
   return details::execute_arithmetic_options(
       *this, tag, a, b, std::forward<Options>(options)...);
 }
+  template <FloatingTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Vec<Tag> DivOp::operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const {
+    return details::execute_arithmetic_request(*this, tag, a, b, request);
+  }
 
 inline constexpr DivOp div{};
 
@@ -359,6 +416,13 @@ inline constexpr DivOp div{};
       Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const {   \
     return details::execute_arithmetic_options(                        \
         *this, tag, a, b, std::forward<Options>(options)...);          \
+  }                                                                    \
+  template <VectorTag Tag, Active A, Inactive I>                       \
+  VECOPS_ALWAYS_INLINE Vec<Tag> OpType::operator()(                    \
+      Tag tag, Vec<Tag> a, Vec<Tag> b,                                 \
+      const OpRequest<Tag, A, I>& request) const {                     \
+    return details::execute_arithmetic_request(                        \
+        *this, tag, a, b, request);                                    \
   }                                                                    \
   inline constexpr OpType Name{}
 
@@ -392,6 +456,13 @@ VECOPS_VEC_DEFINE_EXTREMA_OP(MaxOp, max);
       Tag tag, Vec<Tag> value, Options&&... options) const {           \
     return details::execute_unary_arithmetic_options(                  \
         *this, tag, value, std::forward<Options>(options)...);         \
+  }                                                                    \
+  template <VectorTag Tag, Active A, Inactive I>                       \
+  VECOPS_ALWAYS_INLINE Vec<Tag> OpType::operator()(                    \
+      Tag tag, Vec<Tag> value,                                        \
+      const OpRequest<Tag, A, I>& request) const {                     \
+    return details::execute_unary_arithmetic_request(                  \
+        *this, tag, value, request);                                  \
   }                                                                    \
   inline constexpr OpType Name{}
 
@@ -497,6 +568,13 @@ inline constexpr RsqrtOp rsqrt{};
       Options&&... options) const {                                      \
     return details::execute_ternary_arithmetic_options(                 \
         *this, tag, a, b, c, std::forward<Options>(options)...);        \
+  }                                                                      \
+  template <VectorTag Tag, Active A, Inactive I>                         \
+  VECOPS_ALWAYS_INLINE Vec<Tag> OpType::operator()(                      \
+      Tag tag, Vec<Tag> a, Vec<Tag> b, Vec<Tag> c,                       \
+      const OpRequest<Tag, A, I>& request) const {                       \
+    return details::execute_ternary_arithmetic_request(                  \
+        *this, tag, a, b, c, request);                                   \
   }                                                                      \
   inline constexpr OpType Name{}
 

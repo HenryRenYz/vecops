@@ -2,6 +2,7 @@
 #define VECOPS_VEC_COMPARISON_H
 
 #include "vecops/vec/Basic.h"
+#include "vecops/vec/Request.h"
 
 namespace vecops::vec {
 
@@ -23,6 +24,10 @@ struct CmpEqOp {
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
       Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const;
   template <TagInferableVector V, typename... Options>
   VECOPS_ALWAYS_INLINE Mask<VecToTagT<V>> operator()(
       V a, V b, Options&&... options) const {
@@ -45,6 +50,10 @@ struct CmpNeOp {
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
       Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const;
   template <TagInferableVector V, typename... Options>
   VECOPS_ALWAYS_INLINE Mask<VecToTagT<V>> operator()(
       V a, V b, Options&&... options) const {
@@ -61,6 +70,10 @@ struct CmpLtOp {
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
       Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const;
   template <TagInferableVector V, typename... Options>
   VECOPS_ALWAYS_INLINE Mask<VecToTagT<V>> operator()(
       V a, V b, Options&&... options) const {
@@ -77,6 +90,10 @@ struct CmpGtOp {
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
       Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const;
   template <TagInferableVector V, typename... Options>
   VECOPS_ALWAYS_INLINE Mask<VecToTagT<V>> operator()(
       V a, V b, Options&&... options) const {
@@ -93,6 +110,10 @@ struct CmpLeOp {
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
       Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const;
   template <TagInferableVector V, typename... Options>
   VECOPS_ALWAYS_INLINE Mask<VecToTagT<V>> operator()(
       V a, V b, Options&&... options) const {
@@ -109,6 +130,10 @@ struct CmpGeOp {
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
       Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b,
+      const OpRequest<Tag, A, I>& request) const;
   template <TagInferableVector V, typename... Options>
   VECOPS_ALWAYS_INLINE Mask<VecToTagT<V>> operator()(
       V a, V b, Options&&... options) const {
@@ -130,6 +155,10 @@ struct CmpGeOp {
           && (sizeof...(Options) > 0)                                     \
   VECOPS_ALWAYS_INLINE Mask<Tag> operator()(                              \
       Tag, Vec<Tag>, Options&&...) const;                                 \
+  template <VectorTag Tag, Active A, Inactive I>                          \
+    requires ::vecops::IsFloatV<ElementOf<Tag>>                           \
+  VECOPS_ALWAYS_INLINE Mask<Tag> operator()(                              \
+      Tag, Vec<Tag>, const OpRequest<Tag, A, I>&) const;                   \
   template <FloatingVectorValue V, typename... Options>                   \
   VECOPS_ALWAYS_INLINE Mask<VecToTagT<V>> operator()(                     \
       V value, Options&&... options) const {                              \
@@ -197,6 +226,13 @@ namespace vecops::vec {
     return details::execute_comparison_options(                           \
         *this, tag, a, b, std::forward<Options>(options)...);             \
   }                                                                       \
+  template <VectorTag Tag, Active A, Inactive I>                          \
+  VECOPS_ALWAYS_INLINE Mask<Tag> OpType::operator()(                      \
+      Tag tag, Vec<Tag> a, Vec<Tag> b,                                    \
+      const OpRequest<Tag, A, I>& request) const {                        \
+    return details::execute_comparison_request(                           \
+        *this, tag, a, b, request);                                       \
+  }                                                                       \
   inline constexpr OpType Name{}
 
 VECOPS_VEC_DEFINE_BINARY_COMPARISON(CmpEqOp, cmpeq, a[i] == b[i]);
@@ -233,6 +269,14 @@ VECOPS_VEC_DEFINE_BINARY_COMPARISON(CmpGeOp, cmpge, a[i] >= b[i]);
       Tag tag, Vec<Tag> value, Options&&... options) const {              \
     return details::execute_comparison_options(                           \
         *this, tag, value, std::forward<Options>(options)...);            \
+  }                                                                       \
+  template <VectorTag Tag, Active A, Inactive I>                          \
+    requires ::vecops::IsFloatV<ElementOf<Tag>>                           \
+  VECOPS_ALWAYS_INLINE Mask<Tag> OpType::operator()(                      \
+      Tag tag, Vec<Tag> value,                                            \
+      const OpRequest<Tag, A, I>& request) const {                        \
+    return details::execute_comparison_request(                           \
+        *this, tag, value, request);                                      \
   }                                                                       \
   inline constexpr OpType Name{}
 
