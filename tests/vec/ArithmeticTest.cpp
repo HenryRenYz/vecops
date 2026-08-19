@@ -5,8 +5,10 @@
 #include <cstdint>
 #include <limits>
 #include <type_traits>
+#include <vector>
 
 #include "vecops/vec/Arithmetic.h"
+#include "vecops/vec/Memory.h"
 #include "TestHelpers.h"
 
 namespace vec = vecops::vec;
@@ -81,9 +83,9 @@ T expected_arithmetic(T a, T b) {
 template <ArithmeticKind Kind, bool FullOptions = true, vec::VectorTag Tag>
 void verify_arithmetic(Tag tag) {
   using T = vec::ElementOf<Tag>;
-  auto a = vec::zeros(tag);
-  auto b = vec::zeros(tag);
-  auto vector_merge = vec::zeros(tag);
+  std::vector<T> a_lanes(static_cast<std::size_t>(vec::size(tag)));
+  std::vector<T> b_lanes(static_cast<std::size_t>(vec::size(tag)));
+  std::vector<T> merge_lanes(static_cast<std::size_t>(vec::size(tag)));
   auto mask = vec::mfill(tag, false);
   const T scalar_merge = [] {
     if constexpr (
@@ -96,12 +98,17 @@ void verify_arithmetic(Tag tag) {
     }
   }();
   for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
-    a = vec::set(tag, a, lane, arithmetic_operand<T>(lane, false));
-    b = vec::set(tag, b, lane, arithmetic_operand<T>(lane, true));
-    vector_merge = vec::set(
-        tag, vector_merge, lane, arithmetic_operand<T>(lane + 11, true));
+    a_lanes[static_cast<std::size_t>(lane)] =
+        arithmetic_operand<T>(lane, false);
+    b_lanes[static_cast<std::size_t>(lane)] =
+        arithmetic_operand<T>(lane, true);
+    merge_lanes[static_cast<std::size_t>(lane)] =
+        arithmetic_operand<T>(lane + 11, true);
     mask = vec::set(tag, mask, lane, (lane % 3) != 1);
   }
+  const auto a = vec::load(tag, a_lanes.data());
+  const auto b = vec::load(tag, b_lanes.data());
+  const auto vector_merge = vec::load(tag, merge_lanes.data());
 
   const auto result = [&] {
     if constexpr (Kind == ArithmeticKind::Add) return vec::add(a, b);
@@ -215,18 +222,23 @@ vec::Vec<Tag> invoke_extrema(
 template <ExtremaKind Kind, bool FullOptions = true, vec::VectorTag Tag>
 void verify_extrema(Tag tag) {
   using T = vec::ElementOf<Tag>;
-  auto a = vec::zeros(tag);
-  auto b = vec::zeros(tag);
-  auto vector_merge = vec::zeros(tag);
+  std::vector<T> a_lanes(static_cast<std::size_t>(vec::size(tag)));
+  std::vector<T> b_lanes(static_cast<std::size_t>(vec::size(tag)));
+  std::vector<T> merge_lanes(static_cast<std::size_t>(vec::size(tag)));
   auto mask = vec::mfalse(tag);
   const T scalar_merge = static_cast<T>(9);
   for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
-    a = vec::set(tag, a, lane, extrema_operand<T>(lane, false));
-    b = vec::set(tag, b, lane, extrema_operand<T>(lane, true));
-    vector_merge = vec::set(
-        tag, vector_merge, lane, extrema_operand<T>(lane + 17, true));
+    a_lanes[static_cast<std::size_t>(lane)] =
+        extrema_operand<T>(lane, false);
+    b_lanes[static_cast<std::size_t>(lane)] =
+        extrema_operand<T>(lane, true);
+    merge_lanes[static_cast<std::size_t>(lane)] =
+        extrema_operand<T>(lane + 17, true);
     mask = vec::set(tag, mask, lane, (lane % 3) != 0);
   }
+  const auto a = vec::load(tag, a_lanes.data());
+  const auto b = vec::load(tag, b_lanes.data());
+  const auto vector_merge = vec::load(tag, merge_lanes.data());
 
   const auto result = invoke_extrema<Kind>(tag, a, b);
   const auto unmasked_result =
@@ -323,20 +335,27 @@ vec::Vec<Tag> invoke_fma(
 template <FmaKind Kind, bool FullOptions = true, vec::VectorTag Tag>
 void verify_fma(Tag tag) {
   using T = vec::ElementOf<Tag>;
-  auto a = vec::zeros(tag);
-  auto b = vec::zeros(tag);
-  auto c = vec::zeros(tag);
-  auto vector_merge = vec::zeros(tag);
+  std::vector<T> a_lanes(static_cast<std::size_t>(vec::size(tag)));
+  std::vector<T> b_lanes(static_cast<std::size_t>(vec::size(tag)));
+  std::vector<T> c_lanes(static_cast<std::size_t>(vec::size(tag)));
+  std::vector<T> merge_lanes(static_cast<std::size_t>(vec::size(tag)));
   auto mask = vec::mfalse(tag);
   const T scalar_merge = static_cast<T>(3);
   for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
-    a = vec::set(tag, a, lane, arithmetic_operand<T>(lane, false));
-    b = vec::set(tag, b, lane, arithmetic_operand<T>(lane, true));
-    c = vec::set(tag, c, lane, arithmetic_operand<T>(lane + 7, true));
-    vector_merge = vec::set(
-        tag, vector_merge, lane, arithmetic_operand<T>(lane + 13, false));
+    a_lanes[static_cast<std::size_t>(lane)] =
+        arithmetic_operand<T>(lane, false);
+    b_lanes[static_cast<std::size_t>(lane)] =
+        arithmetic_operand<T>(lane, true);
+    c_lanes[static_cast<std::size_t>(lane)] =
+        arithmetic_operand<T>(lane + 7, true);
+    merge_lanes[static_cast<std::size_t>(lane)] =
+        arithmetic_operand<T>(lane + 13, false);
     mask = vec::set(tag, mask, lane, (lane % 3) != 0);
   }
+  const auto a = vec::load(tag, a_lanes.data());
+  const auto b = vec::load(tag, b_lanes.data());
+  const auto c = vec::load(tag, c_lanes.data());
+  const auto vector_merge = vec::load(tag, merge_lanes.data());
 
   const auto result = invoke_fma<Kind>(tag, a, b, c);
   const auto unmasked_result =

@@ -360,12 +360,8 @@ struct NativeWordImpl<SVEBackend, BlendOp> {
     const auto v0 = sve_basic_raw_word(false_value);
     const auto v1 = sve_basic_raw_word(true_value);
     if constexpr (std::same_as<T, bfloat16_t>) {
-#if defined(HAS_BF16)
-      return sve_basic_wrap_word<Tag>(svsel_bf16(mask, v1, v0));
-#else
       return sve_basic_wrap_word<Tag>(svreinterpret_bf16_u16(svsel_u16(
           mask, svreinterpret_u16_bf16(v1), svreinterpret_u16_bf16(v0))));
-#endif
     } else if constexpr (std::same_as<T, float16_t>) {
       return sve_basic_wrap_word<Tag>(svsel_f16(mask, v1, v0));
     } else if constexpr (std::same_as<T, float32_t>) {
@@ -441,12 +437,8 @@ struct NativeWordImpl<SVEBackend, GetVecLaneOp> {
     const auto predicate = sve_single_lane_predicate<T>(lane);
     const auto raw = sve_basic_raw_word(value);
     if constexpr (std::same_as<T, bfloat16_t>) {
-#if defined(HAS_BF16)
-      return bfloat16_t{svlastb_bf16(predicate, raw)};
-#else
       return bfloat16_t::from_bits(
           svlastb_u16(predicate, svreinterpret_u16_bf16(raw)));
-#endif
     } else if constexpr (std::same_as<T, float16_t>) {
       return float16_t{svlastb_f16(predicate, raw)};
     } else if constexpr (std::same_as<T, float32_t>) {
@@ -493,15 +485,10 @@ struct NativeWordImpl<SVEBackend, SetVecLaneOp> {
             FillOp{}, tag, replacement);
     const auto replacement_raw = sve_basic_raw_word(replacement_word);
     if constexpr (std::same_as<T, bfloat16_t>) {
-#if defined(HAS_BF16)
-      return sve_basic_wrap_word<Tag>(
-          svsel_bf16(predicate, replacement_raw, raw));
-#else
       return sve_basic_wrap_word<Tag>(svreinterpret_bf16_u16(svsel_u16(
           predicate,
           svreinterpret_u16_bf16(replacement_raw),
           svreinterpret_u16_bf16(raw))));
-#endif
     } else if constexpr (std::same_as<T, float16_t>) {
       return sve_basic_wrap_word<Tag>(svsel_f16(predicate, replacement_raw, raw));
     } else if constexpr (std::same_as<T, float32_t>) {

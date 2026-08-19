@@ -54,9 +54,14 @@ VECOPS_ALWAYS_INLINE svuint32_t sve_float32_to_bfloat16_rne_bits(
 VECOPS_ALWAYS_INLINE svbfloat16_t sve_float32_pair_to_bfloat16(
     svfloat32_t low, svfloat32_t high) {
 #if defined(__ARM_FEATURE_SVE_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
+  // Keep UZP1 in the integer domain. The operation is bitwise-identical, but
+  // avoids a bf16 vector_interleave that BiSheng 5.1 cannot select at -O2.
   const auto predicate = svptrue_b16();
-  return svuzp1(
-      svcvt_bf16_x(predicate, low), svcvt_bf16_x(predicate, high));
+  const auto low_converted = svcvt_bf16_f32_x(predicate, low);
+  const auto high_converted = svcvt_bf16_f32_x(predicate, high);
+  return svreinterpret_bf16_u16(svuzp1_u16(
+      svreinterpret_u16_bf16(low_converted),
+      svreinterpret_u16_bf16(high_converted)));
 #else
   const auto low_bits = svreinterpret_u16_u32(
       sve_float32_to_bfloat16_rne_bits(low));

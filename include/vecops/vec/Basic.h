@@ -575,6 +575,37 @@ template <VectorTag Tag>
 VECOPS_ALWAYS_INLINE ElementOf<Tag> GetOp::operator()(
     Tag tag, Vec<Tag> value, nint_t index) const {
   assert(index >= 0 && index < size(tag));
+#if defined(CPU_CAPABILITY_SVE) && !defined(HAS_FIXED_SVE_BITS)
+  if constexpr (
+      std::same_as<ElementOf<Tag>, bfloat16_t> &&
+      details::RepresentationTraits<
+          details::CurrentBackend, Tag>::word_count > 1) {
+    // Select the runtime tuple word as u16. BiSheng 5.1 otherwise creates a
+    // scalar-conditioned nxv8bf16 select that its AArch64 instruction
+    // selector cannot lower at -O2. Both bitcasts are representation-only.
+    constexpr nint_t count = details::RepresentationTraits<
+        details::CurrentBackend, Tag>::word_count;
+    using BitsTag = Rebind<uint16_t, Tag>;
+    const Vec<BitsTag> bits = [&] {
+      if constexpr (count == 2)
+        return svreinterpret_u16_bf16_x2(value);
+      else {
+        static_assert(count == 4);
+        return svreinterpret_u16_bf16_x4(value);
+      }
+    }();
+    const nint_t word_lanes = native_word_size(tag);
+    return bfloat16_t::from_bits(
+        details::visit_runtime_word<details::CurrentBackend>(
+            BitsTag{}, index / word_lanes, [&]<nint_t Index>() {
+              return details::execute_word<
+                  Index, details::CurrentBackend>(
+                      GetVecLaneOp{}, BitsTag{},
+                      get_word<Index>(BitsTag{}, bits),
+                      index % word_lanes);
+            }));
+  }
+#endif
   const nint_t word_lanes = native_word_size(tag);
   return details::visit_runtime_word<details::CurrentBackend>(
       tag,

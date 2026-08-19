@@ -57,8 +57,15 @@ VECOPS_ALWAYS_INLINE constexpr decltype(auto) visit_runtime_word(
     Tag, nint_t ordinal, Visitor&& visitor) {
   constexpr nint_t count = RepresentationTraits<Backend, Tag>::word_count;
   assert(ordinal >= 0 && ordinal < count);
-  return visit_runtime_word_impl<0, count>(
-      ordinal, std::forward<Visitor>(visitor));
+  if constexpr (count == 1) {
+    // Single-word fast path: no runtime dispatch, so the compiler cannot
+    // fold the word chain into a predicated vector select. Some bf16
+    // instruction selectors cannot lower such selects.
+    return std::forward<Visitor>(visitor).template operator()<0>();
+  } else {
+    return visit_runtime_word_impl<0, count>(
+        ordinal, std::forward<Visitor>(visitor));
+  }
 }
 
 /** Backend hook for representations that cannot be default-constructed. */
