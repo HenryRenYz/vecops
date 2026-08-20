@@ -1941,6 +1941,19 @@ TEST_F(TensorEllipsisTest, EllipsisWithConstShape_8D) {
     EXPECT_EQ(s.size(4), 5);
 }
 
+TEST_F(TensorEllipsisTest, TakeLeadingAndTrailingUseZeroDiscardedAxes) {
+    Array<int64_t, 3> tensor(data_3d_.data(), {3, 4, 5});
+    auto leading = take_leading<2>(tensor);
+    auto trailing = take_trailing<2>(tensor);
+
+    static_assert(decltype(leading)::Ndim == 2);
+    static_assert(decltype(trailing)::Ndim == 2);
+    EXPECT_EQ(leading.data(), tensor.data());
+    EXPECT_EQ(trailing.data(), tensor.data());
+    EXPECT_EQ(leading(2, 3), tensor(2, 3, 0));
+    EXPECT_EQ(trailing(2, 4), tensor(0, 2, 4));
+}
+
 // ============================================================================
 // Main
 // ============================================================================

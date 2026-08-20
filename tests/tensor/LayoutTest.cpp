@@ -1901,6 +1901,37 @@ TEST_F(LayoutTransposeTest, TransposeRT_SameAxis) {
   EXPECT_EQ(size<1>(t), 6);
 }
 
+TEST(LayoutDimensionTakeTest, KeepsLeadingAndTrailingMetadata) {
+  auto layout = make_layout(
+      make_shape(cint<2>, Any{3}, cint<4>, Any{5}),
+      make_strides(cint<60>, Any{20}, cint<5>, Any{1}));
+  auto leading = take_leading<2>(layout);
+  auto trailing = take_trailing<2>(layout);
+
+  static_assert(decltype(leading)::Ndim == 2);
+  static_assert(decltype(trailing)::Ndim == 2);
+  EXPECT_EQ(leading.shape()[0], 2);
+  EXPECT_EQ(leading.shape()[1], 3);
+  EXPECT_EQ(leading.strides()[0], 60);
+  EXPECT_EQ(leading.strides()[1], 20);
+  EXPECT_EQ(trailing.shape()[0], 4);
+  EXPECT_EQ(trailing.shape()[1], 5);
+  EXPECT_EQ(trailing.strides()[0], 5);
+  EXPECT_EQ(trailing.strides()[1], 1);
+  EXPECT_TRUE(leading.shape().template is_const<0>());
+  EXPECT_TRUE(trailing.shape().template is_const<0>());
+}
+
+TEST(LayoutDimensionTakeTest, FullRankIsIdentity) {
+  auto layout = make_layout(make_shape(2, 3), make_strides(7, 2));
+  auto leading = take_leading<2>(layout);
+  auto trailing = take_trailing<2>(layout);
+  static_assert(std::same_as<decltype(leading), decltype(layout)>);
+  static_assert(std::same_as<decltype(trailing), decltype(layout)>);
+  EXPECT_EQ(leading.shape()[1], 3);
+  EXPECT_EQ(trailing.strides()[0], 7);
+}
+
 #ifdef VECOPS_DEBUG
 TEST_F(LayoutTransposeTest, TransposeRT_InvalidIndexDeath) {
   auto layout = make_layout(make_shape(4, 6), make_strides(6, 1));

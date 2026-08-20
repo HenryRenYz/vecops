@@ -25,9 +25,7 @@ void data_access_load(benchmark::State& state) {
   }
   auto tensor = make_tensor<1>(storage.data(), {kElements * LogicalStride});
   auto spec = input<float32_t>(tensor);
-  using Policy = InputAccessPolicy<
-      0, 1, AccessPlan::direct, vec::cvt::Ordered,
-      vec::cvt::Saturate, DefaultMemoryPolicy, false>;
+  using Policy = InputAccessPolicy<0, 1, AccessPlan::direct>;
   kernel::Workspace workspace_storage(0);
   auto workspace = workspace_storage.view();
   auto access = bind(spec, Policy{}, workspace);

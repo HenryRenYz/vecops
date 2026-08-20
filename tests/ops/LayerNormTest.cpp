@@ -320,7 +320,7 @@ TEST(LayerNormRankTest, CoversRanksOneThroughFour) {
 }
 
 TEST(LayerNormVectorBoundaryTest, CoversGroupedLoopAndTailBoundaries) {
-  using Tag = LayerNormConfig<float32_t>::Tag;
+  using Tag = LayerNorm<LayerNormConfig<float32_t>>::Tag;
   const nint_t lanes = vec::size(Tag{});
   ASSERT_GT(lanes, 0);
 
@@ -372,7 +372,7 @@ TEST(LayerNormVectorBoundaryTest, CoversGroupedLoopAndTailBoundaries) {
 
 template <typename T>
 void run_sve_16bit_boundary_cases() {
-  using Tag = LayerNormConfig<float32_t>::Tag;
+  using Tag = LayerNorm<LayerNormConfig<float32_t>>::Tag;
   const nint_t half_lanes = 2 * vec::size(Tag{});
   const std::array<nint_t, 8> sizes = {
       1,
@@ -553,6 +553,7 @@ TEST(LayerNormWorkspaceTest, HandlesStridedInputAndSecondLastContiguousOutput) {
   Workspace workspace(bytes);
   auto view = workspace.view();
   op(view, x_spec, s_spec, b_spec, y_spec);
+  EXPECT_LE(view.high_watermark(), bytes + vec::DEFAULT_ALIGNMENT);
 
   for (nint_t row = 0; row < 2; ++row) {
     for (nint_t col = 0; col < 7; ++col) {

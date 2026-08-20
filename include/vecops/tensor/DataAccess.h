@@ -57,8 +57,12 @@
  *
  * `with_operands` resolves dynamic Layout choices before entering the callback,
  * materializes inputs if required, supplies statically typed direct or
- * materialized sessions, verifies output commit ownership in debug builds, and
- * rewinds its workspace mark after sessions are destroyed.
+ * materialized sessions, and verifies output commit ownership in debug builds.
+ * Groups containing a materialized operand are scoped under a workspace mark
+ * that is rewound after the sessions are destroyed. An all-direct group does
+ * not touch workspace state. The callback must not directly mutate the
+ * `WorkspaceView` passed to `with_operands`; workspace authority belongs to
+ * the bound operand sessions for the duration of the callback.
  *
  * ## Coordinate vector semantics
  *
@@ -108,6 +112,25 @@
  * and transform calls, and reassembles the requested vector. Context subspans
  * preserve original lane coordinates. Large `vec::load_convert/store_convert`
  * requests use the same recursive principle at the raw-memory layer.
+ * Conversion order/value and memory hints are access options. Stateless
+ * defaults may instead be attached at `operand(spec, policy,
+ * access_defaults(...))`; eager preparation and deferred commit use those
+ * defaults because they execute outside a hot-loop access call.
+ *
+ * ## Deferred materialization and unordered regions
+ *
+ * `AccessPlan::automatic_deferred` follows automatic input planning but leaves
+ * an after-transform Compute buffer uninitialized. Loads marked with
+ * `tensor::materialize::populate` read the source and fill the canonical
+ * buffer; subsequent unmarked loads reuse it. The kernel promises a complete
+ * populate pass before reuse. Debug builds reject reuse-before-populate and
+ * populate-after-reuse, but do not maintain an element coverage bitmap.
+ *
+ * `tensor::with_unordered_access(args..., fn)` means unordered conversion is
+ * permitted, not guaranteed. It inspects every bound access and invokes `fn`
+ * with either all-unordered or all-ordered proxies. Any canonical materialized
+ * Compute buffer, incompatible storage width, or non-equivariant transform
+ * makes the entire region ordered.
  *
  * ## Cursor choice
  *
@@ -131,13 +154,143 @@
  *   move their execution or split one request into several calls.
  * - Tensor-level `indexed` rejects explicit byte scale. Indices are logical
  *   offsets and are scaled by Layout exactly once.
- * - Unordered conversion is a kernel-wide lane-order contract, not a local
- *   speed flag. Incompatible operands are rejected at binding time.
+ * - Unordered conversion is an operation-region lane-order contract, not a
+ *   local speed flag. Use `with_unordered_access` for related operands.
  * - `required_workspace()` must use the same Spec and Policy as binding.
  */
 namespace vecops::tensor {
 
+namespace materialize {
+
+/**
+ * Marks a load as the population pass of an automatic-deferred input.
+ * Direct and eagerly materialized inputs accept the option as a no-op.
+ */
+struct Populate {};
+inline constexpr Populate populate{};
+
+} // namespace materialize
+
 namespace details {
+
+template <typename T>
+struct IsMaterializePopulate : std::false_type {};
+template <>
+struct IsMaterializePopulate<materialize::Populate> : std::true_type {};
+
+template <template <typename> typename Predicate, typename Default,
+          typename... Options>
+struct OptionTypeOr {
+  using type = Default;
+};
+
+template <template <typename> typename Predicate, typename Default,
+          typename First, typename... Rest>
+struct OptionTypeOr<Predicate, Default, First, Rest...> {
+  using Clean = std::remove_cvref_t<First>;
+  using type = std::conditional_t<
+      Predicate<Clean>::value, Clean,
+      typename OptionTypeOr<Predicate, Default, Rest...>::type>;
+};
+
+template <template <typename> typename Predicate, typename Default,
+          typename... Options>
+using OptionTypeOrT = typename OptionTypeOr<
+    Predicate, Default, Options...>::type;
+
+template <typename T>
+struct IsConversionOrderOption : std::bool_constant<
+    std::same_as<T, vec::cvt::Ordered> ||
+    std::same_as<T, vec::cvt::Unordered>> {};
+
+template <typename T>
+struct IsConversionValueOption : std::bool_constant<
+    vec::details::IsSaturateOption<T>::value ||
+    vec::details::IsWrapOption<T>::value> {};
+
+template <typename T>
+using IsTemporalityOption = vec::details::IsMemoryTemporalityOption<T>;
+
+template <typename T>
+using IsPackingOption = vec::details::IsConversionMemoryPackingOption<T>;
+
+template <typename T>
+using IsAlignmentOption = vec::details::IsMemoryAlignmentOption<T>;
+
+template <typename... Options>
+consteval bool valid_access_default_options() {
+  constexpr auto allowed = []<typename T>() {
+    return IsConversionOrderOption<T>::value ||
+        IsConversionValueOption<T>::value ||
+        IsTemporalityOption<T>::value || IsPackingOption<T>::value ||
+        IsAlignmentOption<T>::value;
+  };
+  return (allowed.template operator()<std::remove_cvref_t<Options>>() && ...) &&
+      vec::details::option_count<IsConversionOrderOption, Options...> <= 1 &&
+      vec::details::option_count<IsConversionValueOption, Options...> <= 1 &&
+      vec::details::option_count<IsTemporalityOption, Options...> <= 1 &&
+      vec::details::option_count<IsPackingOption, Options...> <= 1 &&
+      vec::details::option_count<IsAlignmentOption, Options...> <= 1;
+}
+
+template <typename Defaults, typename Order>
+using ReorderAccessDefaults = AccessDefaults<
+    Order, typename Defaults::ConversionValueOption,
+    typename Defaults::TemporalityOption, typename Defaults::PackingOption,
+    typename Defaults::AlignmentOption>;
+
+template <typename... Options>
+using MakeAccessDefaults = AccessDefaults<
+    OptionTypeOrT<IsConversionOrderOption, vec::cvt::Ordered, Options...>,
+    OptionTypeOrT<IsConversionValueOption, vec::cvt::Saturate, Options...>,
+    OptionTypeOrT<IsTemporalityOption, vec::mem::Temporal, Options...>,
+    OptionTypeOrT<IsPackingOption, vec::mem::Packed, Options...>,
+    OptionTypeOrT<IsAlignmentOption, vec::mem::Unaligned, Options...>>;
+
+template <typename Base, typename... Options>
+using OverrideAccessDefaults = AccessDefaults<
+    OptionTypeOrT<IsConversionOrderOption,
+                  typename Base::ConversionOrderOption, Options...>,
+    OptionTypeOrT<IsConversionValueOption,
+                  typename Base::ConversionValueOption, Options...>,
+    OptionTypeOrT<IsTemporalityOption,
+                  typename Base::TemporalityOption, Options...>,
+    OptionTypeOrT<IsPackingOption,
+                  typename Base::PackingOption, Options...>,
+    OptionTypeOrT<IsAlignmentOption,
+                  typename Base::AlignmentOption, Options...>>;
+
+template <typename... Options>
+inline constexpr bool has_access_default_option_v =
+    ((IsConversionOrderOption<std::remove_cvref_t<Options>>::value ||
+      IsConversionValueOption<std::remove_cvref_t<Options>>::value ||
+      IsTemporalityOption<std::remove_cvref_t<Options>>::value ||
+      IsPackingOption<std::remove_cvref_t<Options>>::value ||
+      IsAlignmentOption<std::remove_cvref_t<Options>>::value) || ...);
+
+template <typename Defaults>
+struct AccessMemoryDefaults {
+  using TemporalityOption = typename Defaults::TemporalityOption;
+  using PackingOption = typename Defaults::PackingOption;
+  using AlignmentOption = typename Defaults::AlignmentOption;
+};
+
+/** Combines a lifetime policy with call-site defaults for existing lowering. */
+template <typename PlanningPolicy, typename Defaults>
+struct AccessLoweringPolicy : PlanningPolicy {
+  using PlanningPolicyType = PlanningPolicy;
+  using AccessDefaultsType = Defaults;
+  using ConversionOrderOption = typename Defaults::ConversionOrderOption;
+  using ConversionValueOption = typename Defaults::ConversionValueOption;
+  using MemoryOptions = AccessMemoryDefaults<Defaults>;
+  static constexpr bool permutation_safe = std::same_as<
+      typename Defaults::ConversionOrderOption, vec::cvt::Unordered>;
+};
+
+template <typename T>
+inline constexpr bool is_unordered_policy = std::same_as<
+    typename std::remove_cvref_t<T>::ConversionOrderOption,
+    vec::cvt::Unordered>;
 
 template <typename T>
 struct IsOperandFact : std::false_type {};
@@ -280,6 +433,65 @@ template <typename... Options>
 VECOPS_ALWAYS_INLINE auto non_address_options(Options&&... options) {
   return std::tuple_cat(
       retain_non_address_option(std::forward<Options>(options))...);
+}
+
+template <typename Option>
+VECOPS_ALWAYS_INLINE auto retain_non_materialize_option(Option&& option) {
+  using Clean = std::remove_cvref_t<Option>;
+  if constexpr (IsMaterializePopulate<Clean>::value) {
+    return std::tuple<>{};
+  } else {
+    return std::forward_as_tuple(std::forward<Option>(option));
+  }
+}
+
+template <typename... Options>
+VECOPS_ALWAYS_INLINE auto non_materialize_options(Options&&... options) {
+  return std::tuple_cat(
+      retain_non_materialize_option(std::forward<Options>(options))...);
+}
+
+template <typename Option>
+VECOPS_ALWAYS_INLINE auto retain_cache_store_option(Option&& option) {
+  using Clean = std::remove_cvref_t<Option>;
+  if constexpr (
+      vec::details::IsZeroOption<Clean>::value ||
+      vec::details::IsVectorMergeOption<Clean>::value ||
+      vec::details::IsScalarMergeOption<Clean>::value ||
+      IsConversionOrderOption<Clean>::value ||
+      IsConversionValueOption<Clean>::value ||
+      IsTemporalityOption<Clean>::value || IsPackingOption<Clean>::value ||
+      IsAlignmentOption<Clean>::value) {
+    return std::tuple<>{};
+  } else {
+    return std::forward_as_tuple(std::forward<Option>(option));
+  }
+}
+
+template <typename... Options>
+VECOPS_ALWAYS_INLINE auto cache_store_options(Options&&... options) {
+  return std::tuple_cat(
+      retain_cache_store_option(std::forward<Options>(options))...);
+}
+
+template <typename Option>
+VECOPS_ALWAYS_INLINE auto retain_non_access_default_option(Option&& option) {
+  using Clean = std::remove_cvref_t<Option>;
+  if constexpr (
+      IsConversionOrderOption<Clean>::value ||
+      IsConversionValueOption<Clean>::value ||
+      IsTemporalityOption<Clean>::value || IsPackingOption<Clean>::value ||
+      IsAlignmentOption<Clean>::value) {
+    return std::tuple<>{};
+  } else {
+    return std::forward_as_tuple(std::forward<Option>(option));
+  }
+}
+
+template <typename... Options>
+VECOPS_ALWAYS_INLINE auto non_access_default_options(Options&&... options) {
+  return std::tuple_cat(
+      retain_non_access_default_option(std::forward<Options>(options))...);
 }
 
 template <vec::VectorTag Tag, typename... Options>
@@ -1427,7 +1639,7 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
       vec::LoadConvertRequest<
           Tag, MemoryElement, KernelRequest::active_kind,
           vec::Addressing::Contiguous, KernelRequest::populate_kind,
-          Alignment, Temporal, 0>
+          Alignment, Temporal, 0, vec::Vec<vec::IndexTag<Tag>>, Order, Value>
           out{};
       copy_memory_request_fields(out, request);
       return execute_resolved_load_convert(tag, pointer, out);
@@ -1440,7 +1652,8 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
       vec::LoadConvertRequest<
           Tag, MemoryElement, KernelRequest::active_kind,
           vec::Addressing::Strided, KernelRequest::populate_kind,
-          vec::mem::Unaligned, Temporal, 0>
+          vec::mem::Unaligned, Temporal, 0,
+          vec::Vec<vec::IndexTag<Tag>>, Order, Value>
           out{};
       copy_memory_request_fields(out, request);
       out.stride = physical_stride;
@@ -1512,7 +1725,8 @@ VECOPS_ALWAYS_INLINE void store_memory(
         TensorUnitStride) {
       vec::StoreConvertRequest<
           Tag, MemoryElement, KernelRequest::active_kind,
-          vec::Addressing::Contiguous, Alignment, Temporal, 0>
+          vec::Addressing::Contiguous, Alignment, Temporal, 0,
+          vec::Vec<vec::IndexTag<Tag>>, Order, Value, Packing>
           out{};
       if constexpr (out.active_kind == vec::Active::First) {
         out.first_count = request.first_count;
@@ -1529,7 +1743,8 @@ VECOPS_ALWAYS_INLINE void store_memory(
       }
       vec::StoreConvertRequest<
           Tag, MemoryElement, KernelRequest::active_kind,
-          vec::Addressing::Strided, vec::mem::Unaligned, Temporal, 0>
+          vec::Addressing::Strided, vec::mem::Unaligned, Temporal, 0,
+          vec::Vec<vec::IndexTag<Tag>>, Order, Value, Packing>
           out{};
       if constexpr (out.active_kind == vec::Active::First) {
         out.first_count = request.first_count;
@@ -1662,7 +1877,8 @@ struct OtherAxisStrideScan<Strides<Ts...>, SkipDim> {
  */
 template <typename Spec, typename Policy>
 consteval AccessPlan resolve_plan() {
-  if constexpr (Policy::requested_plan != AccessPlan::automatic) {
+  if constexpr (Policy::requested_plan != AccessPlan::automatic &&
+                Policy::requested_plan != AccessPlan::automatic_deferred) {
     return Policy::requested_plan;
   } else if constexpr (Spec::is_input) {
     if constexpr (!transform_reads_input<typename Spec::TransformType>) {
@@ -1694,6 +1910,20 @@ consteval AccessPlan resolve_plan() {
 }
 
 } // namespace details
+
+/** Build stateless call-site defaults for an operand binding. */
+template <typename... Options>
+  requires (details::valid_access_default_options<Options...>())
+VECOPS_INLINE constexpr auto access_defaults(Options...) {
+  return details::MakeAccessDefaults<Options...>{};
+}
+
+template <typename PlanningPolicy, typename Defaults, int SlicedDim>
+struct SliceAccessPolicy<
+    details::AccessLoweringPolicy<PlanningPolicy, Defaults>, SlicedDim> {
+  using type = details::AccessLoweringPolicy<
+      SliceAccessPolicyT<PlanningPolicy, SlicedDim>, Defaults>;
+};
 
 template <
     typename Compute,
@@ -1964,6 +2194,32 @@ VECOPS_INLINE auto slice_view(
       sliced_tensor, spec.transform(), projection};
 }
 
+/** @brief Keep the first N Spec dimensions at zero on trailing axes. */
+template <int N, typename Spec>
+  requires (is_input_spec_v<Spec> || is_output_spec_v<Spec>)
+VECOPS_INLINE auto take_leading(const Spec& spec) {
+  constexpr int Rank = [] {
+    if constexpr (is_input_spec_v<Spec>) return Spec::InputTensor::Ndim;
+    else return Spec::OutputTensor::Ndim;
+  }();
+  static_assert(1 <= N && N <= Rank);
+  if constexpr (N == Rank) return spec;
+  else return take_leading<N>(slice_view<N>(spec, 0));
+}
+
+/** @brief Keep the last N Spec dimensions at zero on leading axes. */
+template <int N, typename Spec>
+  requires (is_input_spec_v<Spec> || is_output_spec_v<Spec>)
+VECOPS_INLINE auto take_trailing(const Spec& spec) {
+  constexpr int Rank = [] {
+    if constexpr (is_input_spec_v<Spec>) return Spec::InputTensor::Ndim;
+    else return Spec::OutputTensor::Ndim;
+  }();
+  static_assert(1 <= N && N <= Rank);
+  if constexpr (N == Rank) return spec;
+  else return take_trailing<N>(slice_view<0>(spec, 0));
+}
+
 template <typename Access, typename Tag, int Dim, typename Mapping>
 class ScanCursor;
 
@@ -2028,6 +2284,56 @@ public:
       const Coord<Rank>& position,
       Axis<Dim>,
       Options&&... options) const {
+    constexpr bool HasAccessDefaults =
+        details::has_access_default_option_v<Options...>;
+    constexpr bool HasPopulate =
+        vec::details::option_count<
+            details::IsMaterializePopulate, Options...> != 0;
+    if constexpr (HasAccessDefaults) {
+      static_assert(
+          vec::details::option_count<
+              details::IsConversionOrderOption, Options...> <= 1);
+      static_assert(
+          vec::details::option_count<
+              details::IsConversionValueOption, Options...> <= 1);
+      static_assert(
+          vec::details::option_count<
+              details::IsTemporalityOption, Options...> <= 1);
+      static_assert(
+          vec::details::option_count<
+              details::IsAlignmentOption, Options...> <= 1);
+      static_assert(
+          vec::details::option_count<details::IsPackingOption, Options...> == 0,
+          "packing options are only valid for tensor stores");
+      using Planning = typename Policy::PlanningPolicyType;
+      using Defaults = details::OverrideAccessDefaults<
+          typename Policy::AccessDefaultsType, Options...>;
+      using CallPolicy = details::AccessLoweringPolicy<Planning, Defaults>;
+      InputDataAccess<Spec, CallPolicy> access{
+          *spec_, CallPolicy{static_cast<const Planning&>(policy_)}};
+      auto retained = details::non_access_default_options(
+          std::forward<Options>(options)...);
+      auto invoke = [&](auto&&... retained_options)
+          VECOPS_INLINE_LAMBDA -> vec::Vec<Tag> {
+        return access.load(
+            tag, position, Axis<Dim>{},
+            std::forward<decltype(retained_options)>(retained_options)...);
+      };
+      return details::apply_inline(invoke, retained);
+    } else if constexpr (HasPopulate) {
+      static_assert(
+          vec::details::option_count<
+              details::IsMaterializePopulate, Options...> == 1);
+      auto retained = details::non_materialize_options(
+          std::forward<Options>(options)...);
+      auto invoke = [&](auto&&... retained_options)
+          VECOPS_INLINE_LAMBDA -> vec::Vec<Tag> {
+        return load(
+            tag, position, Axis<Dim>{},
+            std::forward<decltype(retained_options)>(retained_options)...);
+      };
+      return details::apply_inline(invoke, retained);
+    } else {
     static_assert(0 <= Dim && Dim < Rank);
     details::validate_access_options<true, Options...>();
     const auto& tensor = spec_->tensor();
@@ -2106,6 +2412,7 @@ public:
                 tag, result, std::forward<Options>(options)...);
           },
           options...);
+    }
     }
   }
 
@@ -2232,6 +2539,38 @@ public:
       Axis<Dim>,
       vec::Vec<Tag> value,
       Options&&... options) const {
+    constexpr bool HasAccessDefaults =
+        details::has_access_default_option_v<Options...>;
+    if constexpr (HasAccessDefaults) {
+      static_assert(
+          vec::details::option_count<
+              details::IsConversionOrderOption, Options...> <= 1);
+      static_assert(
+          vec::details::option_count<
+              details::IsConversionValueOption, Options...> <= 1);
+      static_assert(
+          vec::details::option_count<
+              details::IsTemporalityOption, Options...> <= 1);
+      static_assert(
+          vec::details::option_count<details::IsPackingOption, Options...> <= 1);
+      static_assert(
+          vec::details::option_count<
+              details::IsAlignmentOption, Options...> <= 1);
+      using Planning = typename Policy::PlanningPolicyType;
+      using Defaults = details::OverrideAccessDefaults<
+          typename Policy::AccessDefaultsType, Options...>;
+      using CallPolicy = details::AccessLoweringPolicy<Planning, Defaults>;
+      OutputDataAccess<Spec, CallPolicy> access{
+          *spec_, CallPolicy{static_cast<const Planning&>(policy_)}};
+      auto retained = details::non_access_default_options(
+          std::forward<Options>(options)...);
+      auto invoke = [&](auto&&... retained_options) VECOPS_INLINE_LAMBDA {
+        access.store(
+            tag, position, Axis<Dim>{}, value,
+            std::forward<decltype(retained_options)>(retained_options)...);
+      };
+      details::apply_inline(invoke, retained);
+    } else {
     static_assert(0 <= Dim && Dim < Rank);
     details::validate_access_options<false, Options...>();
     const auto& tensor = spec_->tensor();
@@ -2297,6 +2636,7 @@ public:
           },
           options...);
     }
+    }
   }
 
   template <vec::VectorTag Tag, int Dim,
@@ -2354,6 +2694,180 @@ private:
   MemoryElement* data_;
   [[no_unique_address]] Policy policy_;
   bool committed_ = false;
+};
+
+/**
+ * Input session whose canonical ComputeType materialization is populated by
+ * loads carrying `tensor::materialize::populate`.
+ */
+template <typename OriginalSpec, typename AuxSpec, typename SourcePolicy>
+class DeferredMaterializedInputDataAccess {
+public:
+  using ComputeType = typename OriginalSpec::ComputeType;
+  using MemoryElement = typename OriginalSpec::MemoryElement;
+  using Transform = typename OriginalSpec::TransformType;
+  static constexpr int Rank = OriginalSpec::InputTensor::Ndim;
+  static constexpr bool is_input = true;
+  static constexpr bool is_canonical_compute_materialized = true;
+
+  using CachePlanningPolicy = InputAccessPolicy<
+      SourcePolicy::vector_axis, SourcePolicy::read_passes,
+      AccessPlan::direct>;
+  using CachePolicy = details::AccessLoweringPolicy<
+      CachePlanningPolicy, DefaultAccessDefaults>;
+
+  DeferredMaterializedInputDataAccess(
+      OriginalSpec original, AuxSpec auxiliary, SourcePolicy policy)
+      : original_(std::move(original)), auxiliary_(std::move(auxiliary)),
+        source_policy_(policy) {}
+
+  template <vec::VectorTag Tag, typename... Options>
+  VECOPS_ALWAYS_INLINE vec::Vec<Tag> load(
+      Tag tag, const Coord<Rank>& position, Options&&... options) const {
+    return load(
+        tag, position, axis<Rank - 1>,
+        std::forward<Options>(options)...);
+  }
+
+  template <vec::VectorTag Tag, int Dim, typename... Options>
+  VECOPS_ALWAYS_INLINE vec::Vec<Tag> load(
+      Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
+      Options&&... options) const {
+    constexpr bool Populate =
+        vec::details::option_count<
+            details::IsMaterializePopulate, Options...> != 0;
+    static_assert(
+        vec::details::option_count<
+            details::IsMaterializePopulate, Options...> <= 1);
+    auto retained = details::non_materialize_options(
+        std::forward<Options>(options)...);
+    auto invoke = [&](auto&&... access_options)
+        VECOPS_INLINE_LAMBDA -> vec::Vec<Tag> {
+      if constexpr (Populate) {
+        static_assert(
+            vec::details::option_count<
+                vec::details::IsUnorderedOption,
+                decltype(access_options)...> == 0,
+            "canonical deferred materialization must be populated ordered");
+#if defined(VECOPS_DEBUG)
+        VECOPS_ASSERT(!reuse_started_,
+                      "deferred materialization populated after reuse began");
+        populate_started_ = true;
+#endif
+        InputDataAccess<OriginalSpec, SourcePolicy> source{
+            original_, source_policy_};
+        auto value = source.load(
+            tag, position, dim, access_options...);
+        auto cache_output_spec = output<ComputeType>(auxiliary_.tensor());
+        OutputDataAccess<decltype(cache_output_spec), CachePolicy> cache{
+            cache_output_spec,
+            CachePolicy{CachePlanningPolicy{}}};
+        auto store_options = details::cache_store_options(access_options...);
+        auto store = [&](auto&&... options) VECOPS_INLINE_LAMBDA {
+          cache.store(tag, position, dim, value, options...);
+        };
+        details::apply_inline(store, store_options);
+        cache.commit();
+        return value;
+      } else {
+        static_assert(
+            vec::details::option_count<
+                details::IsConversionOrderOption,
+                decltype(access_options)...> == 0 &&
+            vec::details::option_count<
+                details::IsConversionValueOption,
+                decltype(access_options)...> == 0,
+            "canonical Compute materialization cannot be reinterpreted");
+#if defined(VECOPS_DEBUG)
+        VECOPS_ASSERT(populate_started_,
+                      "deferred materialization reused before population");
+        reuse_started_ = true;
+#endif
+        InputDataAccess<AuxSpec, CachePolicy> cache{
+            auxiliary_, CachePolicy{CachePlanningPolicy{}}};
+        return cache.load(tag, position, dim, access_options...);
+      }
+    };
+    return details::apply_inline(invoke, retained);
+  }
+
+  template <vec::VectorTag Tag, int Dim,
+            typename Mapping = ContiguousLaneMapping>
+  VECOPS_INLINE auto scan(
+      Tag tag, Coord<Rank> origin, Axis<Dim>, nint_t count,
+      Mapping mapping = {}) {
+    return ScanCursor<
+        DeferredMaterializedInputDataAccess, Tag, Dim, Mapping>{
+            *this, tag, origin, count, mapping};
+  }
+
+  template <vec::VectorTag Tag, int TraverseDim, int VectorDim>
+  VECOPS_INLINE auto project(
+      Tag tag, Coord<Rank> origin, TraversalAxis<TraverseDim>,
+      VectorAxis<VectorDim>, nint_t iterations,
+      nint_t traversal_step = 1) {
+    return ProjectCursor<
+        DeferredMaterializedInputDataAccess, Tag, TraverseDim, VectorDim>{
+            *this, tag, origin, iterations, traversal_step};
+  }
+
+  const AuxSpec& spec() const { return auxiliary_; }
+  const OriginalSpec& original_spec() const { return original_; }
+  const SourcePolicy& policy() const { return source_policy_; }
+
+private:
+  OriginalSpec original_;
+  AuxSpec auxiliary_;
+  [[no_unique_address]] SourcePolicy source_policy_;
+#if defined(VECOPS_DEBUG)
+  mutable bool populate_started_ = false;
+  mutable bool reuse_started_ = false;
+#endif
+};
+
+/** Fully prepared canonical ComputeType input materialization. */
+template <typename AuxSpec, typename CachePolicy>
+class CanonicalMaterializedInputDataAccess {
+public:
+  using ComputeType = typename AuxSpec::ComputeType;
+  using MemoryElement = typename AuxSpec::MemoryElement;
+  using Transform = typename AuxSpec::TransformType;
+  static constexpr int Rank = AuxSpec::InputTensor::Ndim;
+  static constexpr bool is_input = true;
+  static constexpr bool is_canonical_compute_materialized = true;
+
+  CanonicalMaterializedInputDataAccess(AuxSpec auxiliary, CachePolicy policy)
+      : auxiliary_(std::move(auxiliary)), policy_(policy) {}
+
+  template <vec::VectorTag Tag, typename... Options>
+  VECOPS_ALWAYS_INLINE auto load(
+      Tag tag, const Coord<Rank>& position, Options&&... options) const {
+    return load(
+        tag, position, axis<Rank - 1>,
+        std::forward<Options>(options)...);
+  }
+
+  template <vec::VectorTag Tag, int Dim, typename... Options>
+  VECOPS_ALWAYS_INLINE auto load(
+      Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
+      Options&&... options) const {
+    static_assert(
+        vec::details::option_count<
+            details::IsConversionOrderOption, Options...> == 0 &&
+        vec::details::option_count<
+            details::IsConversionValueOption, Options...> == 0,
+        "canonical Compute materialization cannot be reinterpreted");
+    InputDataAccess<AuxSpec, CachePolicy> cache{auxiliary_, policy_};
+    return cache.load(
+        tag, position, dim, std::forward<Options>(options)...);
+  }
+
+  const AuxSpec& spec() const { return auxiliary_; }
+  const CachePolicy& policy() const { return policy_; }
+
+private:
+  AuxSpec auxiliary_;
+  [[no_unique_address]] CachePolicy policy_;
 };
 
 /**
@@ -2623,6 +3137,10 @@ public:
   VECOPS_ALWAYS_INLINE auto load(
       Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
       Options&&... options) const {
+    static_assert(
+        vec::details::option_count<
+            details::IsConversionOrderOption, Options...> == 0,
+        "with_unordered_access owns the conversion-order option");
     InputDataAccess<Spec, Policy> access{spec_, policy_};
     return access.load(
         tag, position, dim, std::forward<Options>(options)...);
@@ -2643,6 +3161,10 @@ public:
   VECOPS_ALWAYS_INLINE void store(
       Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
       vec::Vec<Tag> value, Options&&... options) const {
+    static_assert(
+        vec::details::option_count<
+            details::IsConversionOrderOption, Options...> == 0,
+        "with_unordered_access owns the conversion-order option");
     OutputDataAccess<Spec, Policy> access{spec_, policy_};
     access.store(
         tag, position, dim, value,
@@ -2715,6 +3237,17 @@ VECOPS_INLINE auto slice_view(
       std::move(sliced), SlicedPolicy{}};
 }
 
+template <int Dim, typename AuxSpec, typename CachePolicy>
+VECOPS_INLINE auto slice_view(
+    const CanonicalMaterializedInputDataAccess<AuxSpec, CachePolicy>& access,
+    nint_t index) {
+  auto auxiliary = slice_view<Dim>(access.spec(), index);
+  using SlicedPolicy = SliceAccessPolicyT<CachePolicy, Dim>;
+  return CanonicalMaterializedInputDataAccess<
+      decltype(auxiliary), SlicedPolicy>{
+      std::move(auxiliary), SlicedPolicy{}};
+}
+
 /**
  * @brief Owning output session backed by a contiguous auxiliary Tensor.
  *
@@ -2764,6 +3297,14 @@ public:
   VECOPS_ALWAYS_INLINE void store(
       Tag tag, const Coord<Rank>& position, vec::Vec<Tag> value,
       Options&&... options) const {
+    if constexpr (Plan == AccessPlan::materialize_before_transform) {
+      static_assert(
+          vec::details::option_count<
+              details::IsConversionOrderOption, Options...> == 0 &&
+          vec::details::option_count<
+              details::IsConversionValueOption, Options...> == 0,
+          "before-transform output conversion is selected at operand binding");
+    }
     OutputDataAccess<AuxSpec, Policy> hot{auxiliary_, policy_};
     hot.store(tag, position, value, std::forward<Options>(options)...);
   }
@@ -2772,6 +3313,14 @@ public:
   VECOPS_ALWAYS_INLINE void store(
       Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
       vec::Vec<Tag> value, Options&&... options) const {
+    if constexpr (Plan == AccessPlan::materialize_before_transform) {
+      static_assert(
+          vec::details::option_count<
+              details::IsConversionOrderOption, Options...> == 0 &&
+          vec::details::option_count<
+              details::IsConversionValueOption, Options...> == 0,
+          "before-transform output conversion is selected at operand binding");
+    }
     OutputDataAccess<AuxSpec, Policy> hot{auxiliary_, policy_};
     hot.store(
         tag, position, dim, value, std::forward<Options>(options)...);
@@ -2810,7 +3359,7 @@ public:
 
   /**
    * @brief Write the complete auxiliary region back to the original Tensor.
-   * @note Idempotent. Must run before `with_operands` rewinds workspace.
+   * @note Idempotent. Must run before the materialized operand scope ends.
    */
   void commit() {
     if (committed_) return;
@@ -2833,9 +3382,11 @@ private:
     constexpr int AxisValue = Policy::vector_axis;
     using Tag = vec::ScalableTag<ComputeType, 0>;
     using AuxInputPolicy = InputAccessPolicy<AxisValue, 1, AccessPlan::direct>;
+    using AuxLoweringPolicy = details::AccessLoweringPolicy<
+        AuxInputPolicy, DefaultAccessDefaults>;
     auto aux_input_spec = input<ComputeType>(auxiliary_.tensor());
-    InputDataAccess<decltype(aux_input_spec), AuxInputPolicy> source{
-        aux_input_spec};
+    InputDataAccess<decltype(aux_input_spec), AuxLoweringPolicy> source{
+        aux_input_spec, AuxLoweringPolicy{AuxInputPolicy{}}};
     OutputDataAccess<OriginalSpec, Policy> destination{*original_, policy_};
     Coord<Rank> position{};
     details::for_each_line<AxisValue>(
@@ -2890,6 +3441,334 @@ VECOPS_INLINE auto slice_view(
       std::move(sliced), SlicedPolicy{}};
 }
 
+namespace details {
+
+template <typename Order, typename Spec, typename Policy,
+          vec::VectorTag Tag, int Dim, typename... Options>
+VECOPS_ALWAYS_INLINE auto load_with_order(
+    InputDataAccess<Spec, Policy>& access, Tag tag,
+    const Coord<Spec::InputTensor::Ndim>& position, Axis<Dim> dim,
+    Options&&... options) {
+  using Planning = typename Policy::PlanningPolicyType;
+  using Defaults = ReorderAccessDefaults<
+      typename Policy::AccessDefaultsType, Order>;
+  using ReorderedPolicy = AccessLoweringPolicy<Planning, Defaults>;
+  InputDataAccess<Spec, ReorderedPolicy> reordered{
+      access.spec(), ReorderedPolicy{
+          static_cast<const Planning&>(access.policy())}};
+  return reordered.load(
+      tag, position, dim, std::forward<Options>(options)...);
+}
+
+template <typename Order, typename OriginalSpec, typename AuxSpec,
+          typename SourcePolicy, vec::VectorTag Tag, int Dim,
+          typename... Options>
+VECOPS_ALWAYS_INLINE auto load_with_order(
+    DeferredMaterializedInputDataAccess<
+        OriginalSpec, AuxSpec, SourcePolicy>& access,
+    Tag tag, const Coord<OriginalSpec::InputTensor::Ndim>& position,
+    Axis<Dim> dim, Options&&... options) {
+  static_assert(std::same_as<Order, vec::cvt::Ordered>);
+  return access.load(
+      tag, position, dim, std::forward<Options>(options)...);
+}
+
+template <typename Order, typename Spec, typename Policy,
+          vec::VectorTag Tag, int Dim, typename... Options>
+VECOPS_ALWAYS_INLINE auto load_with_order(
+    BorrowedDataAccess<Spec, Policy>& access, Tag tag,
+    const Coord<BorrowedDataAccess<Spec, Policy>::Rank>& position,
+    Axis<Dim> dim, Options&&... options)
+  requires Spec::is_input
+{
+  using Planning = typename Policy::PlanningPolicyType;
+  using Defaults = ReorderAccessDefaults<
+      typename Policy::AccessDefaultsType, Order>;
+  using ReorderedPolicy = AccessLoweringPolicy<Planning, Defaults>;
+  BorrowedDataAccess<Spec, ReorderedPolicy> reordered{
+      access.spec(), ReorderedPolicy{
+          static_cast<const Planning&>(access.policy())}};
+  return reordered.load(
+      tag, position, dim, std::forward<Options>(options)...);
+}
+
+template <typename Order, typename AuxSpec, typename CachePolicy,
+          vec::VectorTag Tag, int Dim, typename... Options>
+VECOPS_ALWAYS_INLINE auto load_with_order(
+    CanonicalMaterializedInputDataAccess<AuxSpec, CachePolicy>& access,
+    Tag tag, const Coord<AuxSpec::InputTensor::Ndim>& position,
+    Axis<Dim> dim, Options&&... options) {
+  static_assert(std::same_as<Order, vec::cvt::Ordered>);
+  return access.load(
+      tag, position, dim, std::forward<Options>(options)...);
+}
+
+template <typename Order, typename Spec, typename Policy,
+          vec::VectorTag Tag, int Dim, typename... Options>
+VECOPS_ALWAYS_INLINE void store_with_order(
+    OutputDataAccess<Spec, Policy>& access, Tag tag,
+    const Coord<Spec::OutputTensor::Ndim>& position, Axis<Dim> dim,
+    vec::Vec<Tag> value, Options&&... options) {
+  using Planning = typename Policy::PlanningPolicyType;
+  using Defaults = ReorderAccessDefaults<
+      typename Policy::AccessDefaultsType, Order>;
+  using ReorderedPolicy = AccessLoweringPolicy<Planning, Defaults>;
+  OutputDataAccess<Spec, ReorderedPolicy> reordered{
+      access.spec(), ReorderedPolicy{
+          static_cast<const Planning&>(access.policy())}};
+  reordered.store(
+      tag, position, dim, value, std::forward<Options>(options)...);
+  reordered.commit();
+}
+
+template <typename Order, AccessPlan Plan, typename OriginalSpec,
+          typename AuxSpec, typename Policy, vec::VectorTag Tag, int Dim,
+          typename... Options>
+VECOPS_ALWAYS_INLINE void store_with_order(
+    MaterializedOutputDataAccess<Plan, OriginalSpec, AuxSpec, Policy>& access,
+    Tag tag, const Coord<OriginalSpec::OutputTensor::Ndim>& position,
+    Axis<Dim> dim, vec::Vec<Tag> value, Options&&... options) {
+  static_assert(Plan == AccessPlan::materialize_after_transform ||
+                std::same_as<Order, vec::cvt::Ordered>);
+  using Planning = typename Policy::PlanningPolicyType;
+  using Defaults = ReorderAccessDefaults<
+      typename Policy::AccessDefaultsType, Order>;
+  using ReorderedPolicy = AccessLoweringPolicy<Planning, Defaults>;
+  OutputDataAccess<AuxSpec, ReorderedPolicy> hot{
+      access.auxiliary_spec(), ReorderedPolicy{
+          static_cast<const Planning&>(access.policy())}};
+  hot.store(
+      tag, position, dim, value, std::forward<Options>(options)...);
+  hot.commit();
+}
+
+template <typename Order, typename Spec, typename Policy,
+          vec::VectorTag Tag, int Dim, typename... Options>
+VECOPS_ALWAYS_INLINE void store_with_order(
+    BorrowedDataAccess<Spec, Policy>& access, Tag tag,
+    const Coord<BorrowedDataAccess<Spec, Policy>::Rank>& position,
+    Axis<Dim> dim, vec::Vec<Tag> value, Options&&... options)
+  requires (!Spec::is_input)
+{
+  using Planning = typename Policy::PlanningPolicyType;
+  using Defaults = ReorderAccessDefaults<
+      typename Policy::AccessDefaultsType, Order>;
+  using ReorderedPolicy = AccessLoweringPolicy<Planning, Defaults>;
+  BorrowedDataAccess<Spec, ReorderedPolicy> reordered{
+      access.spec(), ReorderedPolicy{
+          static_cast<const Planning&>(access.policy())}};
+  reordered.store(
+      tag, position, dim, value, std::forward<Options>(options)...);
+}
+
+template <typename Access>
+struct UnorderedAccessTraits {
+  static constexpr bool eligible = false;
+};
+
+template <typename Memory, typename Compute>
+consteval bool unordered_conversion_preferred() {
+#if defined(CPU_CAPABILITY_SVE)
+  if constexpr (sizeof(Memory) == sizeof(Compute)) {
+    return true;
+  } else {
+    return IsFloat16V<Memory> && std::same_as<Compute, float32_t>;
+  }
+#else
+  return true;
+#endif
+}
+
+template <typename Spec, typename Policy>
+struct UnorderedAccessTraits<InputDataAccess<Spec, Policy>> {
+  using ComputeType = typename Spec::ComputeType;
+  static constexpr std::size_t storage_bytes = sizeof(typename Spec::MemoryElement);
+  static constexpr bool eligible =
+      transform_permutation_equivariant<typename Spec::TransformType> &&
+      unordered_conversion_preferred<
+          typename Spec::MemoryElement, ComputeType>();
+};
+
+template <typename Spec, typename Policy>
+struct UnorderedAccessTraits<OutputDataAccess<Spec, Policy>> {
+  using ComputeType = typename Spec::ComputeType;
+  static constexpr std::size_t storage_bytes = sizeof(typename Spec::MemoryElement);
+  static constexpr bool eligible =
+      transform_permutation_equivariant<typename Spec::TransformType> &&
+      unordered_conversion_preferred<
+          typename Spec::MemoryElement, ComputeType>();
+};
+
+template <typename Spec, typename Policy>
+struct UnorderedAccessTraits<BorrowedDataAccess<Spec, Policy>> {
+  using ComputeType = typename Spec::ComputeType;
+  static constexpr std::size_t storage_bytes = sizeof(typename Spec::MemoryElement);
+  static constexpr bool canonical_compute_output =
+      !Spec::is_input &&
+      Policy::requested_plan == AccessPlan::materialize_before_transform;
+  static constexpr bool eligible =
+      !canonical_compute_output &&
+      transform_permutation_equivariant<typename Spec::TransformType> &&
+      unordered_conversion_preferred<
+          typename Spec::MemoryElement, ComputeType>();
+};
+
+template <typename OriginalSpec, typename AuxSpec, typename Policy>
+struct UnorderedAccessTraits<
+    DeferredMaterializedInputDataAccess<OriginalSpec, AuxSpec, Policy>> {
+  using ComputeType = typename OriginalSpec::ComputeType;
+  static constexpr std::size_t storage_bytes = sizeof(ComputeType);
+  static constexpr bool eligible = false;
+};
+
+template <typename AuxSpec, typename Policy>
+struct UnorderedAccessTraits<
+    CanonicalMaterializedInputDataAccess<AuxSpec, Policy>> {
+  using ComputeType = typename AuxSpec::ComputeType;
+  static constexpr std::size_t storage_bytes = sizeof(ComputeType);
+  static constexpr bool eligible = false;
+};
+
+template <AccessPlan Plan, typename OriginalSpec, typename AuxSpec,
+          typename Policy>
+struct UnorderedAccessTraits<
+    MaterializedOutputDataAccess<Plan, OriginalSpec, AuxSpec, Policy>> {
+  using ComputeType = typename OriginalSpec::ComputeType;
+  static constexpr std::size_t storage_bytes =
+      sizeof(typename OriginalSpec::MemoryElement);
+  static constexpr bool eligible =
+      Plan == AccessPlan::materialize_after_transform &&
+      transform_permutation_equivariant<typename OriginalSpec::TransformType> &&
+      unordered_conversion_preferred<
+          typename OriginalSpec::MemoryElement, ComputeType>();
+};
+
+template <typename First, typename... Rest>
+consteval bool unordered_group_compatible() {
+  using FirstTraits = UnorderedAccessTraits<std::remove_cvref_t<First>>;
+  if constexpr (!FirstTraits::eligible ||
+                !(UnorderedAccessTraits<std::remove_cvref_t<Rest>>::eligible && ...)) {
+    return false;
+  } else if constexpr (sizeof...(Rest) == 0) {
+    return true;
+  } else {
+    return ((std::same_as<
+                 typename FirstTraits::ComputeType,
+                 typename UnorderedAccessTraits<
+                     std::remove_cvref_t<Rest>>::ComputeType> &&
+             FirstTraits::storage_bytes ==
+                 UnorderedAccessTraits<
+                     std::remove_cvref_t<Rest>>::storage_bytes) && ...);
+  }
+}
+
+} // namespace details
+
+/**
+ * Access proxy used by `with_unordered_access`.
+ * `is_unordered` reports the group-wide compile-time decision.
+ */
+template <typename Access, bool Unordered>
+class AccessOrderView {
+public:
+  static constexpr bool is_unordered = Unordered;
+  using ComputeType = typename Access::ComputeType;
+  static constexpr int Rank = Access::Rank;
+
+  explicit AccessOrderView(Access& access) : access_(&access) {}
+
+  template <vec::VectorTag Tag, typename... Options>
+  VECOPS_ALWAYS_INLINE auto load(
+      Tag tag, const Coord<Rank>& position, Options&&... options) const {
+    return load(
+        tag, position, axis<Rank - 1>,
+        std::forward<Options>(options)...);
+  }
+
+  template <vec::VectorTag Tag, int Dim, typename... Options>
+  VECOPS_ALWAYS_INLINE auto load(
+      Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
+      Options&&... options) const {
+    using Order = std::conditional_t<
+        Unordered, vec::cvt::Unordered, vec::cvt::Ordered>;
+    return details::load_with_order<Order>(
+        *access_, tag, position, dim, std::forward<Options>(options)...);
+  }
+
+  template <vec::VectorTag Tag, typename... Options>
+  VECOPS_ALWAYS_INLINE void store(
+      Tag tag, const Coord<Rank>& position, vec::Vec<Tag> value,
+      Options&&... options) const {
+    store(
+        tag, position, axis<Rank - 1>, value,
+        std::forward<Options>(options)...);
+  }
+
+  template <vec::VectorTag Tag, int Dim, typename... Options>
+  VECOPS_ALWAYS_INLINE void store(
+      Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
+      vec::Vec<Tag> value, Options&&... options) const {
+    using Order = std::conditional_t<
+        Unordered, vec::cvt::Unordered, vec::cvt::Ordered>;
+    details::store_with_order<Order>(
+        *access_, tag, position, dim, value,
+        std::forward<Options>(options)...);
+  }
+
+  void commit() requires requires(Access& access) { access.commit(); } {
+    access_->commit();
+  }
+
+private:
+  Access* access_;
+};
+
+/**
+ * Prefer one compatible unordered lane-order region, otherwise invoke `fn`
+ * with ordered proxies for every argument. The decision always covers all
+ * operands; it is never made independently per argument.
+ */
+template <typename... Accesses, typename Fn>
+VECOPS_INLINE decltype(auto) with_unordered_access(
+    std::tuple<Accesses&...> accesses, Fn&& fn) {
+  constexpr bool Unordered =
+      details::unordered_group_compatible<Accesses...>();
+  return std::apply(
+      [&](auto&... access) -> decltype(auto) {
+        return std::forward<Fn>(fn)(
+            AccessOrderView<std::remove_reference_t<decltype(access)>,
+                            Unordered>{access}...);
+      },
+      accesses);
+}
+
+template <typename A0, typename Fn>
+VECOPS_INLINE decltype(auto) with_unordered_access(A0& a0, Fn&& fn) {
+  return with_unordered_access(
+      std::tie(a0), std::forward<Fn>(fn));
+}
+
+template <typename A0, typename A1, typename Fn>
+VECOPS_INLINE decltype(auto) with_unordered_access(
+    A0& a0, A1& a1, Fn&& fn) {
+  return with_unordered_access(
+      std::tie(a0, a1), std::forward<Fn>(fn));
+}
+
+template <typename A0, typename A1, typename A2, typename Fn>
+VECOPS_INLINE decltype(auto) with_unordered_access(
+    A0& a0, A1& a1, A2& a2, Fn&& fn) {
+  return with_unordered_access(
+      std::tie(a0, a1, a2), std::forward<Fn>(fn));
+}
+
+template <typename A0, typename A1, typename A2, typename A3, typename Fn>
+VECOPS_INLINE decltype(auto) with_unordered_access(
+    A0& a0, A1& a1, A2& a2, A3& a3, Fn&& fn) {
+  return with_unordered_access(
+      std::tie(a0, a1, a2, a3), std::forward<Fn>(fn));
+}
+
 /**
  * @brief Return workspace bytes required by the resolved Spec/Policy plan.
  *
@@ -2941,34 +3820,44 @@ VECOPS_INLINE nint_t required_workspace(const Spec& spec, Policy policy) {
  * kernels should use `kernel::with_operands`, which handles dynamic plans,
  * workspace lifetime, input preparation, and output ownership.
  */
-template <typename Spec, typename Policy>
-VECOPS_INLINE auto bind(const Spec& spec, Policy policy, kernel::WorkspaceView&) {
+template <typename Spec, typename Policy,
+          typename Defaults = DefaultAccessDefaults>
+VECOPS_INLINE auto bind(
+    const Spec& spec, Policy policy, kernel::WorkspaceView&,
+    Defaults defaults = {}) {
+  using LoweringPolicy = details::AccessLoweringPolicy<Policy, Defaults>;
   VECOPS_ASSERT(
       (details::resolve_plan<Spec, Policy>() == AccessPlan::direct),
                 "tensor::bind only binds direct plans; use kernel::with_operands");
   if constexpr (is_input_spec_v<Spec>) {
-    return InputDataAccess<Spec, Policy>{spec, policy};
+    return InputDataAccess<Spec, LoweringPolicy>{
+        spec, LoweringPolicy{policy}};
   } else {
     static_assert(is_output_spec_v<Spec>);
-    return OutputDataAccess<Spec, Policy>{spec, policy};
+    return OutputDataAccess<Spec, LoweringPolicy>{
+        spec, LoweringPolicy{policy}};
   }
 }
 
 /** @brief Pair a caller-owned Spec reference with a kernel-owned Policy. */
-template <typename Spec, typename Policy>
+template <typename Spec, typename Policy,
+          typename Defaults = DefaultAccessDefaults>
 struct OperandBinding {
   using SpecType = Spec;
   using PolicyType = Policy;
+  using DefaultsType = Defaults;
 
   const Spec& spec;
   [[no_unique_address]] Policy policy;
+  [[no_unique_address]] Defaults defaults;
 };
 
 template <typename T>
 struct IsOperandBinding : std::false_type {};
 
-template <typename Spec, typename Policy>
-struct IsOperandBinding<OperandBinding<Spec, Policy>> : std::true_type {};
+template <typename Spec, typename Policy, typename Defaults>
+struct IsOperandBinding<OperandBinding<Spec, Policy, Defaults>>
+    : std::true_type {};
 
 template <typename T>
 inline constexpr bool is_operand_binding_v =
@@ -2978,21 +3867,33 @@ inline constexpr bool is_operand_binding_v =
  * @brief Create an operand binding consumed by `kernel::with_operands`.
  * @note The referenced Spec must outlive the `with_operands` call.
  */
-template <typename Spec, typename Policy>
-VECOPS_INLINE auto operand(const Spec& spec, Policy policy) {
-  return OperandBinding<Spec, Policy>{spec, policy};
+template <typename Spec, typename Policy,
+          typename Defaults = DefaultAccessDefaults>
+VECOPS_INLINE auto operand(
+    const Spec& spec, Policy policy, Defaults defaults = {}) {
+  return OperandBinding<Spec, Policy, Defaults>{spec, policy, defaults};
 }
 
 namespace details {
 
-template <typename Spec, typename Policy, typename Fn>
+template <typename Binding>
+inline constexpr bool binding_resolves_direct_v = [] {
+  using B = std::remove_cvref_t<Binding>;
+  static_assert(is_operand_binding_v<B>);
+  return resolve_plan<typename B::SpecType, typename B::PolicyType>() ==
+      AccessPlan::direct;
+}();
+
+template <typename Spec, typename Policy, typename Defaults, typename Fn>
 VECOPS_INLINE decltype(auto) with_bound_input(
-    const Spec& spec, Policy policy, kernel::WorkspaceView& workspace,
-    Fn&& fn) {
+    const Spec& spec, Policy policy, Defaults defaults,
+    kernel::WorkspaceView& workspace, Fn&& fn) {
   constexpr int AxisValue = Policy::vector_axis;
   constexpr AccessPlan plan = resolve_plan<Spec, Policy>();
+  using LoweringPolicy = AccessLoweringPolicy<Policy, Defaults>;
   if constexpr (plan == AccessPlan::direct) {
-    InputDataAccess<Spec, Policy> access{spec, policy};
+    InputDataAccess<Spec, LoweringPolicy> access{
+        spec, LoweringPolicy{policy}};
     return std::forward<Fn>(fn)(access);
   } else {
 
@@ -3015,7 +3916,8 @@ VECOPS_INLINE decltype(auto) with_bound_input(
         typename Spec::ProjectionType>;
     AuxSpec aux_spec{
         auxiliary_tensor, spec.transform(), spec.projection()};
-    InputDataAccess<AuxSpec, Policy> access{aux_spec, policy};
+    InputDataAccess<AuxSpec, LoweringPolicy> access{
+        aux_spec, LoweringPolicy{policy}};
     return std::forward<Fn>(fn)(access);
   }
 
@@ -3023,7 +3925,18 @@ VECOPS_INLINE decltype(auto) with_bound_input(
   using Tag = vec::ScalableTag<Compute, 0>;
   Compute* buffer = workspace.allocate<Compute>(count);
   auto auxiliary_tensor = make_tensor(buffer, aux_layout);
-  InputDataAccess<Spec, Policy> source{spec, policy};
+  if constexpr (Policy::requested_plan == AccessPlan::automatic_deferred) {
+    auto aux_spec = input<Compute>(auxiliary_tensor);
+    using OrderedDefaults = ReorderAccessDefaults<Defaults, vec::cvt::Ordered>;
+    using SourcePolicy = AccessLoweringPolicy<Policy, OrderedDefaults>;
+    using Access = DeferredMaterializedInputDataAccess<
+        Spec, decltype(aux_spec), SourcePolicy>;
+    Access access{
+        spec, std::move(aux_spec), SourcePolicy{policy}};
+    return std::forward<Fn>(fn)(access);
+  } else {
+  InputDataAccess<Spec, LoweringPolicy> source{
+      spec, LoweringPolicy{policy}};
   Coord<Spec::InputTensor::Ndim> position{};
   for_each_line<AxisValue>(
       spec.input_layout(), position,
@@ -3045,19 +3958,26 @@ VECOPS_INLINE decltype(auto) with_bound_input(
   auto aux_spec = input<Compute>(auxiliary_tensor);
   using AuxPolicy = InputAccessPolicy<AxisValue, Policy::read_passes,
                                       AccessPlan::direct>;
-  InputDataAccess<decltype(aux_spec), AuxPolicy> access{aux_spec};
+  using AuxLoweringPolicy = AccessLoweringPolicy<
+      AuxPolicy, DefaultAccessDefaults>;
+  CanonicalMaterializedInputDataAccess<
+      decltype(aux_spec), AuxLoweringPolicy> access{
+          std::move(aux_spec), AuxLoweringPolicy{AuxPolicy{}}};
   return std::forward<Fn>(fn)(access);
+  }
   }
 }
 
-template <typename Spec, typename Policy, typename Fn>
+template <typename Spec, typename Policy, typename Defaults, typename Fn>
 VECOPS_INLINE decltype(auto) with_bound_output(
-    const Spec& spec, Policy policy, kernel::WorkspaceView& workspace,
-    Fn&& fn) {
+    const Spec& spec, Policy policy, Defaults defaults,
+    kernel::WorkspaceView& workspace, Fn&& fn) {
   constexpr int AxisValue = Policy::vector_axis;
   constexpr AccessPlan plan = resolve_plan<Spec, Policy>();
+  using LoweringPolicy = AccessLoweringPolicy<Policy, Defaults>;
   if constexpr (plan == AccessPlan::direct) {
-    OutputDataAccess<Spec, Policy> access{spec, policy};
+    OutputDataAccess<Spec, LoweringPolicy> access{
+        spec, LoweringPolicy{policy}};
     return std::forward<Fn>(fn)(access);
   } else {
 
@@ -3070,8 +3990,8 @@ VECOPS_INLINE decltype(auto) with_bound_output(
     auto aux_spec = output<Compute>(auxiliary_tensor);
     using Access = MaterializedOutputDataAccess<
         AccessPlan::materialize_before_transform, Spec,
-        decltype(aux_spec), Policy>;
-    Access access{spec, std::move(aux_spec), policy};
+        decltype(aux_spec), LoweringPolicy>;
+    Access access{spec, std::move(aux_spec), LoweringPolicy{policy}};
     return std::forward<Fn>(fn)(access);
   }
 
@@ -3085,22 +4005,25 @@ VECOPS_INLINE decltype(auto) with_bound_output(
   AuxSpec aux_spec{
       auxiliary_tensor, spec.transform(), spec.projection()};
   using Access = MaterializedOutputDataAccess<
-      AccessPlan::materialize_after_transform, Spec, AuxSpec, Policy>;
-  Access access{spec, std::move(aux_spec), policy};
+      AccessPlan::materialize_after_transform, Spec, AuxSpec, LoweringPolicy>;
+  Access access{
+      spec, std::move(aux_spec), LoweringPolicy{policy}};
   return std::forward<Fn>(fn)(access);
   }
 }
 
-template <typename Spec, typename Policy, typename Fn>
+template <typename Spec, typename Policy, typename Defaults, typename Fn>
 VECOPS_INLINE decltype(auto) with_bound_operand(
-    const OperandBinding<Spec, Policy>& binding,
+    const OperandBinding<Spec, Policy, Defaults>& binding,
     kernel::WorkspaceView& workspace, Fn&& fn) {
   if constexpr (is_input_spec_v<Spec>) {
     return with_bound_input(
-        binding.spec, binding.policy, workspace, std::forward<Fn>(fn));
+        binding.spec, binding.policy, binding.defaults, workspace,
+        std::forward<Fn>(fn));
   } else {
     return with_bound_output(
-        binding.spec, binding.policy, workspace, std::forward<Fn>(fn));
+        binding.spec, binding.policy, binding.defaults, workspace,
+        std::forward<Fn>(fn));
   }
 }
 
@@ -3153,16 +4076,19 @@ VECOPS_INLINE decltype(auto) with_workspace_rewind(
   }
 }
 
-template <typename... Bindings>
-consteval bool lane_orders_compatible() {
-  constexpr bool any_unordered =
-      (tensor::details::is_unordered_policy<
-           typename Bindings::PolicyType> || ...);
-  constexpr bool all_unordered =
-      (tensor::details::is_unordered_policy<
-           typename Bindings::PolicyType> && ...);
-  return !any_unordered || all_unordered;
+template <bool NeedsWorkspaceScope, typename Fn>
+VECOPS_INLINE decltype(auto) with_operand_workspace_scope(
+    WorkspaceView& workspace, Fn&& fn) {
+  if constexpr (NeedsWorkspaceScope) {
+    return with_workspace_rewind(workspace, std::forward<Fn>(fn));
+  } else {
+    return std::forward<Fn>(fn)();
+  }
 }
+
+template <typename... Bindings>
+inline constexpr bool operands_need_workspace_scope_v =
+    !(tensor::details::binding_resolves_direct_v<Bindings> && ...);
 
 } // namespace details
 
@@ -3172,8 +4098,10 @@ consteval bool lane_orders_compatible() {
  * The callback runs after every input preparation and receives lvalue
  * references to statically typed DataAccess sessions. Output sessions owning
  * auxiliary storage must be committed inside the callback. After callback
- * return, sessions are destroyed and the workspace is rewound to its entry
- * mark, including when the callback returns a non-void result.
+ * return, sessions are destroyed. If any operand materializes, the workspace
+ * is then rewound to its entry mark, including for a non-void callback result.
+ * An all-direct group creates no mark and leaves workspace state untouched.
+ * The callback must not otherwise mutate the supplied WorkspaceView.
  *
  * All bindings in one unordered permutation region must use compatible
  * unordered policies; mixing ordered and unordered operands is rejected at
@@ -3184,14 +4112,12 @@ VECOPS_INLINE decltype(auto) with_operand_tuple(
     WorkspaceView& workspace,
     const std::tuple<Bindings...>& bindings,
     Fn&& fn) {
-  static_assert(
-      details::lane_orders_compatible<Bindings...>(),
-      "all operands participating in a permutation-safe region must use "
-      "compatible unordered lane-order policies");
-  return details::with_workspace_rewind(workspace, [&]() -> decltype(auto) {
-    return details::bind_operands_recursive<0>(
-        workspace, bindings, std::tuple<>{}, std::forward<Fn>(fn));
-  });
+  return details::with_operand_workspace_scope<
+      details::operands_need_workspace_scope_v<Bindings...>>(
+      workspace, [&]() VECOPS_INLINE_LAMBDA -> decltype(auto) {
+        return details::bind_operands_recursive<0>(
+            workspace, bindings, std::tuple<>{}, std::forward<Fn>(fn));
+      });
 }
 
 /**
@@ -3199,25 +4125,24 @@ VECOPS_INLINE decltype(auto) with_operand_tuple(
  *
  * Semantics and lifetime are identical to `with_operand_tuple`: plans resolve
  * outside the callback, materialized output must be committed inside it, and
- * workspace rewinds after all sessions are destroyed. Each arity expands as
- * straight-line nested bindings: no recursion, tuple packing, or std::apply
- * stands between the callback and the compiler's inliner.
+ * groups containing materialized operands rewind workspace after all sessions
+ * are destroyed. Each arity expands as straight-line nested bindings: no
+ * recursion, tuple packing, or std::apply stands between the callback and the
+ * compiler's inliner.
  */
 template <typename Binding, typename Fn>
   requires tensor::is_operand_binding_v<Binding>
 VECOPS_INLINE decltype(auto) with_operands(
     WorkspaceView& workspace, Binding&& binding, Fn&& fn) {
-  static_assert(
-      details::lane_orders_compatible<std::remove_cvref_t<Binding>>(),
-      "all operands participating in a permutation-safe region must use "
-      "compatible unordered lane-order policies");
-  return details::with_workspace_rewind(workspace, [&]() -> decltype(auto) {
-    return tensor::details::with_bound_operand(
-        binding, workspace,
-        [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
-          return std::forward<Fn>(fn)(a0);
-        });
-  });
+  return details::with_operand_workspace_scope<
+      details::operands_need_workspace_scope_v<Binding>>(
+      workspace, [&]() VECOPS_INLINE_LAMBDA -> decltype(auto) {
+        return tensor::details::with_bound_operand(
+            binding, workspace,
+            [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+              return std::forward<Fn>(fn)(a0);
+            });
+      });
 }
 
 template <typename B0, typename B1, typename Fn>
@@ -3225,22 +4150,19 @@ template <typename B0, typename B1, typename Fn>
             tensor::is_operand_binding_v<B1>)
 VECOPS_INLINE decltype(auto) with_operands(
     WorkspaceView& workspace, B0&& b0, B1&& b1, Fn&& fn) {
-  static_assert(
-      details::lane_orders_compatible<
-          std::remove_cvref_t<B0>, std::remove_cvref_t<B1>>(),
-      "all operands participating in a permutation-safe region must use "
-      "compatible unordered lane-order policies");
-  return details::with_workspace_rewind(workspace, [&]() -> decltype(auto) {
-    return tensor::details::with_bound_operand(
-        b0, workspace,
-        [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
-          return tensor::details::with_bound_operand(
-              b1, workspace,
-              [&](auto& a1) VECOPS_INLINE_LAMBDA -> decltype(auto) {
-                return std::forward<Fn>(fn)(a0, a1);
-              });
-        });
-  });
+  return details::with_operand_workspace_scope<
+      details::operands_need_workspace_scope_v<B0, B1>>(
+      workspace, [&]() VECOPS_INLINE_LAMBDA -> decltype(auto) {
+        return tensor::details::with_bound_operand(
+            b0, workspace,
+            [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+              return tensor::details::with_bound_operand(
+                  b1, workspace,
+                  [&](auto& a1) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                    return std::forward<Fn>(fn)(a0, a1);
+                  });
+            });
+      });
 }
 
 template <typename B0, typename B1, typename B2, typename Fn>
@@ -3249,27 +4171,23 @@ template <typename B0, typename B1, typename B2, typename Fn>
             tensor::is_operand_binding_v<B2>)
 VECOPS_INLINE decltype(auto) with_operands(
     WorkspaceView& workspace, B0&& b0, B1&& b1, B2&& b2, Fn&& fn) {
-  static_assert(
-      details::lane_orders_compatible<
-          std::remove_cvref_t<B0>, std::remove_cvref_t<B1>,
-          std::remove_cvref_t<B2>>(),
-      "all operands participating in a permutation-safe region must use "
-      "compatible unordered lane-order policies");
-  return details::with_workspace_rewind(workspace, [&]() -> decltype(auto) {
-    return tensor::details::with_bound_operand(
-        b0, workspace,
-        [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
-          return tensor::details::with_bound_operand(
-              b1, workspace,
-              [&](auto& a1) VECOPS_INLINE_LAMBDA -> decltype(auto) {
-                return tensor::details::with_bound_operand(
-                    b2, workspace,
-                    [&](auto& a2) VECOPS_INLINE_LAMBDA -> decltype(auto) {
-                      return std::forward<Fn>(fn)(a0, a1, a2);
-                    });
-              });
-        });
-  });
+  return details::with_operand_workspace_scope<
+      details::operands_need_workspace_scope_v<B0, B1, B2>>(
+      workspace, [&]() VECOPS_INLINE_LAMBDA -> decltype(auto) {
+        return tensor::details::with_bound_operand(
+            b0, workspace,
+            [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+              return tensor::details::with_bound_operand(
+                  b1, workspace,
+                  [&](auto& a1) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                    return tensor::details::with_bound_operand(
+                        b2, workspace,
+                        [&](auto& a2) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                          return std::forward<Fn>(fn)(a0, a1, a2);
+                        });
+                  });
+            });
+      });
 }
 
 template <typename B0, typename B1, typename B2, typename B3, typename Fn>
@@ -3280,32 +4198,28 @@ template <typename B0, typename B1, typename B2, typename B3, typename Fn>
 VECOPS_INLINE decltype(auto) with_operands(
     WorkspaceView& workspace, B0&& b0, B1&& b1, B2&& b2, B3&& b3,
     Fn&& fn) {
-  static_assert(
-      details::lane_orders_compatible<
-          std::remove_cvref_t<B0>, std::remove_cvref_t<B1>,
-          std::remove_cvref_t<B2>, std::remove_cvref_t<B3>>(),
-      "all operands participating in a permutation-safe region must use "
-      "compatible unordered lane-order policies");
-  return details::with_workspace_rewind(workspace, [&]() -> decltype(auto) {
-    return tensor::details::with_bound_operand(
-        b0, workspace,
-        [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
-          return tensor::details::with_bound_operand(
-              b1, workspace,
-              [&](auto& a1) VECOPS_INLINE_LAMBDA -> decltype(auto) {
-                return tensor::details::with_bound_operand(
-                    b2, workspace,
-                    [&](auto& a2) VECOPS_INLINE_LAMBDA -> decltype(auto) {
-                      return tensor::details::with_bound_operand(
-                          b3, workspace,
-                          [&](auto& a3) VECOPS_INLINE_LAMBDA
-                              -> decltype(auto) {
-                            return std::forward<Fn>(fn)(a0, a1, a2, a3);
-                          });
-                    });
-              });
-        });
-  });
+  return details::with_operand_workspace_scope<
+      details::operands_need_workspace_scope_v<B0, B1, B2, B3>>(
+      workspace, [&]() VECOPS_INLINE_LAMBDA -> decltype(auto) {
+        return tensor::details::with_bound_operand(
+            b0, workspace,
+            [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+              return tensor::details::with_bound_operand(
+                  b1, workspace,
+                  [&](auto& a1) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                    return tensor::details::with_bound_operand(
+                        b2, workspace,
+                        [&](auto& a2) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                          return tensor::details::with_bound_operand(
+                              b3, workspace,
+                              [&](auto& a3) VECOPS_INLINE_LAMBDA
+                                  -> decltype(auto) {
+                                return std::forward<Fn>(fn)(a0, a1, a2, a3);
+                              });
+                        });
+                  });
+            });
+      });
 }
 
 } // namespace vecops::kernel

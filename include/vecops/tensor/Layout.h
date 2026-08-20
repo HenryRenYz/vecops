@@ -1018,6 +1018,24 @@ constexpr auto remove(const TLayout& m) {
   return make_layout(remove<I>(m.shape()), remove<I>(m.strides()));
 }
 
+/** @brief Keep the first N dimensions, fixing discarded trailing axes at 0. */
+template <int N, typename TLayout,
+          std::enable_if_t<is_layout<TLayout>, bool> = true>
+constexpr auto take_leading(const TLayout& layout) {
+  static_assert(1 <= N && N <= TLayout::Ndim);
+  if constexpr (N == TLayout::Ndim) return layout;
+  else return take_leading<N>(remove<N>(layout));
+}
+
+/** @brief Keep the last N dimensions, fixing discarded leading axes at 0. */
+template <int N, typename TLayout,
+          std::enable_if_t<is_layout<TLayout>, bool> = true>
+constexpr auto take_trailing(const TLayout& layout) {
+  static_assert(1 <= N && N <= TLayout::Ndim);
+  if constexpr (N == TLayout::Ndim) return layout;
+  else return take_trailing<N>(remove<0>(layout));
+}
+
 /**
  * @brief Set dimension I in an ArrayMeta to a new value.
  *

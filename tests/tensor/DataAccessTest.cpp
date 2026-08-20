@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <limits>
 #include <vector>
 
 #include "vecops/kernel/Loop.h"
@@ -291,6 +293,37 @@ TEST(TensorDataAccessTest, SlicedDataAccessIsBorrowedAndKeepsCoordinates) {
   }
 }
 
+TEST(TensorDataAccessTest, TakeSpecsKeepZeroedOriginalCoordinates) {
+  std::array<float64_t, 2 * 3 * 64> input_values{};
+  std::array<float64_t, 2 * 3 * 64> output_values{};
+  auto transform = [](auto tag, auto value, const auto& context) {
+    const auto logical = context.lane_coord(0);
+    return vec::add(
+        value, vec::fill(
+                   tag, logical[0] * 100 + logical[1] * 10 +
+                       logical[2]));
+  };
+  auto in = input<float64_t>(
+      make_tensor<3>(input_values.data(), {2, 3, 64}), transform);
+  auto out = output<float64_t>(
+      make_tensor<3>(output_values.data(), {2, 3, 64}), transform);
+  auto in_trailing = take_trailing<1>(in);
+  auto out_leading = take_leading<2>(out);
+  using InTakePolicy = InputAccessPolicy<0, 1, AccessPlan::direct>;
+  using OutTakePolicy = OutputAccessPolicy<1, AccessPlan::direct>;
+  kernel::Workspace storage(0);
+  auto workspace = storage.view();
+  auto x = bind(in_trailing, InTakePolicy{}, workspace);
+  auto y = bind(out_leading, OutTakePolicy{}, workspace);
+  vec::ScalableTag<float64_t, 0> tag{};
+
+  auto loaded = x.load(tag, coord(7), vec::opt::first(1));
+  EXPECT_DOUBLE_EQ(vec::get(tag, loaded, 0), 7.0);
+  y.store(tag, coord(1, 2), vec::fill(tag, 3.0), vec::opt::first(1));
+  EXPECT_DOUBLE_EQ(output_values[static_cast<std::size_t>(1 * 3 * 64 + 2 * 64)],
+                   123.0);
+}
+
 TEST(TensorDataAccessTest, AutomaticInputMaterializesAfterTransformForMultiplePasses) {
   std::array<float, 3 * 16> values{};
   for (nint_t row = 0; row < 3; ++row) {
@@ -382,6 +415,49 @@ TEST(TensorDataAccessTest, ReadlessTransformNeedsNoSourceOrWorkspace) {
           EXPECT_FLOAT_EQ(vec::get(tag, value, lane), 0.0f);
         }
       });
+}
+
+TEST(TensorDataAccessTest, OperandScopeIsElidedOnlyWhenEveryBindingIsDirect) {
+  std::array<float, 128> values{};
+  values[0] = 7.0f;
+  auto direct_spec = input<float32_t>(
+      make_tensor<1>(values.data(), {64}));
+  auto materialized_spec = input<float32_t>(
+      make_tensor<1>(values.data(), {64}, {2}));
+  using Policy = InputAccessPolicy<0, 2, AccessPlan::automatic>;
+  auto direct_binding = operand(direct_spec, Policy{});
+  auto materialized_binding = operand(materialized_spec, Policy{});
+  static_assert(!kernel::details::operands_need_workspace_scope_v<
+                decltype(direct_binding)>);
+  static_assert(kernel::details::operands_need_workspace_scope_v<
+                decltype(materialized_binding)>);
+
+  kernel::Workspace direct_storage(0);
+  auto direct_workspace = direct_storage.view();
+  const auto direct_result = kernel::with_operand_tuple(
+      direct_workspace, std::tuple{direct_binding}, [](auto& access) {
+        const auto value = access.load(
+            Tag{}, coord(0), vec::opt::first(1));
+        return vec::get(Tag{}, value, 0);
+      });
+  EXPECT_FLOAT_EQ(direct_result, 7.0f);
+  EXPECT_EQ(direct_workspace.used(), 0);
+  EXPECT_EQ(direct_workspace.high_watermark(), 0);
+
+  const nint_t bytes = required_workspace(materialized_spec, Policy{});
+  kernel::Workspace materialized_storage(bytes + vec::DEFAULT_ALIGNMENT);
+  auto materialized_workspace = materialized_storage.view();
+  (void)materialized_workspace.allocate<std::byte>(1);
+  const nint_t entry_offset = materialized_workspace.used();
+  const auto materialized_result = kernel::with_operands(
+      materialized_workspace, materialized_binding, [](auto& access) {
+        const auto value = access.load(
+            Tag{}, coord(0), vec::opt::first(1));
+        return vec::get(Tag{}, value, 0);
+      });
+  EXPECT_FLOAT_EQ(materialized_result, 7.0f);
+  EXPECT_EQ(materialized_workspace.used(), entry_offset);
+  EXPECT_GT(materialized_workspace.high_watermark(), entry_offset);
 }
 
 TEST(TensorDataAccessTest, MaterializedOutputRequiresExplicitCommitAndWritesLayout) {
@@ -555,6 +631,219 @@ TEST(TensorDataAccessTest, TransformRemapsRequestedMaskAcrossDtypes) {
           output_values[static_cast<std::size_t>(lane)], -1.0);
     }
   }
+}
+
+TEST(TensorDataAccessTest, AutomaticDeferredPopulatesAndReusesCanonicalValues) {
+  Tag tag{};
+  const nint_t lanes = vec::size(tag);
+  const nint_t rows = 2;
+  const nint_t columns = 2 * lanes + 3;
+  const nint_t row_stride = 2 * columns + 5;
+  std::vector<float> values(
+      static_cast<std::size_t>(rows * row_stride), -1.0f);
+  for (nint_t row = 0; row < rows; ++row) {
+    for (nint_t column = 0; column < columns; ++column) {
+      values[static_cast<std::size_t>(row * row_stride + 2 * column)] =
+          static_cast<float>(100 * row + column);
+    }
+  }
+
+  auto spec = input<float32_t>(make_tensor<2>(
+      values.data(), {rows, columns}, {row_stride, 2}));
+  using Policy = InputAccessPolicy<
+      1, 2, AccessPlan::automatic_deferred>;
+  kernel::Workspace storage(required_workspace(spec, Policy{}));
+  auto workspace = storage.view();
+  kernel::with_operands(
+      workspace, operand(spec, Policy{}), [&](auto& access) {
+        with_unordered_access(access, [&](auto deferred) {
+          static_assert(!decltype(deferred)::is_unordered);
+          for (nint_t row = 0; row < rows; ++row) {
+            for (nint_t column = 0; column < columns; column += lanes) {
+              const nint_t active = std::min(columns - column, lanes);
+              auto value = deferred.load(
+                  tag, coord(row, column), axis<1>, vec::opt::first(active),
+                  materialize::populate);
+              for (nint_t lane = 0; lane < active; ++lane) {
+                EXPECT_FLOAT_EQ(
+                    vec::get(tag, value, lane),
+                    static_cast<float>(100 * row + column + lane));
+              }
+            }
+          }
+        });
+
+        std::fill(values.begin(), values.end(), -99.0f);
+        for (nint_t row = 0; row < rows; ++row) {
+          for (nint_t column = 0; column < columns; column += lanes) {
+            const nint_t active = std::min(columns - column, lanes);
+            auto value = access.load(
+                tag, coord(row, column), axis<1>, vec::opt::first(active));
+            for (nint_t lane = 0; lane < active; ++lane) {
+              EXPECT_FLOAT_EQ(
+                  vec::get(tag, value, lane),
+                  static_cast<float>(100 * row + column + lane));
+            }
+          }
+        }
+      });
+}
+
+#if defined(VECOPS_DEBUG)
+TEST(TensorDataAccessDeathTest, DeferredMaterializationEnforcesPhaseOrder) {
+  std::array<float, 64> values{};
+  auto spec = input<float32_t>(make_tensor<1>(values.data(), {32}, {2}));
+  using Policy = InputAccessPolicy<
+      0, 2, AccessPlan::automatic_deferred>;
+  kernel::Workspace storage(required_workspace(spec, Policy{}));
+  auto workspace = storage.view();
+  kernel::with_operands(
+      workspace, operand(spec, Policy{}), [&](auto& access) {
+        EXPECT_DEATH(
+            (void)access.load(Tag{}, coord(0), vec::opt::first(1)),
+            "reused before population");
+        (void)access.load(
+            Tag{}, coord(0), vec::opt::first(1), materialize::populate);
+        (void)access.load(Tag{}, coord(0), vec::opt::first(1));
+        EXPECT_DEATH(
+            (void)access.load(
+                Tag{}, coord(0), vec::opt::first(1),
+                materialize::populate),
+            "populated after reuse");
+      });
+}
+#endif
+
+TEST(TensorDataAccessTest, DeferredDirectPopulateIsNoOpAndAllowsUnordered) {
+  std::array<vecops::float16_t, 64> values{};
+  auto tensor = make_tensor(
+      values.data(), make_shape(cint<64>), make_strides(cint<1>));
+  auto spec = input<float32_t>(tensor);
+  using Policy = InputAccessPolicy<
+      0, 2, AccessPlan::automatic_deferred>;
+  EXPECT_EQ(required_workspace(spec, Policy{}), 0);
+  kernel::Workspace storage(0);
+  auto workspace = storage.view();
+  kernel::with_operands(
+      workspace, operand(spec, Policy{}), [&](auto& access) {
+        with_unordered_access(access, [&](auto unordered) {
+          static_assert(decltype(unordered)::is_unordered);
+          (void)unordered.load(
+              vec::ScalableTag<float32_t, 0>{}, coord(0),
+              vec::opt::first(1), materialize::populate);
+        });
+      });
+}
+
+TEST(TensorDataAccessTest, UnorderedRegionChecksEveryArgument) {
+  std::array<vecops::float16_t, 32> direct_values{};
+  auto direct_tensor = make_tensor(
+      direct_values.data(), make_shape(cint<32>), make_strides(cint<1>));
+  auto direct_spec = input<float32_t>(direct_tensor);
+
+  std::array<vecops::float16_t, 64> strided_values{};
+  auto strided_spec = input<float32_t>(
+      make_tensor<1>(strided_values.data(), {32}, {2}));
+  using DirectPolicy = InputAccessPolicy<0, 1, AccessPlan::direct>;
+  using EagerPolicy = InputAccessPolicy<0, 2, AccessPlan::automatic>;
+  kernel::Workspace storage(required_workspace(strided_spec, EagerPolicy{}));
+  auto workspace = storage.view();
+  kernel::with_operands(
+      workspace, operand(direct_spec, DirectPolicy{}),
+      operand(strided_spec, EagerPolicy{}), [&](auto& first, auto& second) {
+        with_unordered_access(first, second, [&](auto a, auto b) {
+          static_assert(!decltype(a)::is_unordered);
+          static_assert(!decltype(b)::is_unordered);
+        });
+      });
+}
+
+TEST(TensorDataAccessTest, UnorderedRegionAcceptsSameWidthMixedStorage) {
+  std::array<vecops::float16_t, 32> x_values{};
+  std::array<uint16_t, 32> scale_values{};
+  std::array<int16_t, 32> out_values{};
+  auto layout = Layout{
+      make_shape(cint<32>), make_strides(cint<1>)};
+  auto x_spec = input<float32_t>(make_tensor(x_values.data(), layout));
+  auto scale_spec = input<float32_t>(make_tensor(scale_values.data(), layout));
+  auto out_spec = output<float32_t>(make_tensor(out_values.data(), layout));
+  kernel::Workspace storage(0);
+  auto workspace = storage.view();
+  auto x = bind(x_spec, InputAccessPolicy<0>{}, workspace);
+  auto scale = bind(scale_spec, InputAccessPolicy<0>{}, workspace);
+  auto out = bind(out_spec, OutputAccessPolicy<0>{}, workspace);
+  with_unordered_access(x, scale, out, [&](auto a, auto b, auto c) {
+#if defined(CPU_CAPABILITY_SVE)
+    // The provenance is compatible, but SVE currently selects unordered only
+    // for the measured-profitable fp16<->fp32 pair.
+    static_assert(!decltype(a)::is_unordered);
+    static_assert(!decltype(b)::is_unordered);
+    static_assert(!decltype(c)::is_unordered);
+#else
+    static_assert(decltype(a)::is_unordered);
+    static_assert(decltype(b)::is_unordered);
+    static_assert(decltype(c)::is_unordered);
+#endif
+  });
+  out.commit();
+}
+
+TEST(TensorDataAccessTest, CallConversionOptionsOverrideOperandDefaults) {
+  std::array<int16_t, 64> values{};
+  values[0] = 300;
+  auto tensor = make_tensor(
+      values.data(), make_shape(cint<64>), make_strides(cint<1>));
+  auto spec = input<int8_t>(tensor);
+  kernel::Workspace storage(0);
+  auto workspace = storage.view();
+  auto access = bind(spec, InputAccessPolicy<0>{}, workspace);
+  using I8Tag = vec::ScalableTag<int8_t, 0>;
+  const auto saturated = access.load(
+      I8Tag{}, coord(0), vec::opt::first(1));
+  const auto wrapped = access.load(
+      I8Tag{}, coord(0), vec::opt::first(1), vec::cvt::wrap);
+  EXPECT_EQ(vec::get(I8Tag{}, saturated, 0), std::numeric_limits<int8_t>::max());
+  EXPECT_EQ(vec::get(I8Tag{}, wrapped, 0), static_cast<int8_t>(300));
+}
+
+TEST(TensorDataAccessTest, OperandDefaultsConfigureEagerPreparation) {
+  std::array<int16_t, 128> values{};
+  values[0] = 300;
+  auto spec = input<int8_t>(make_tensor<1>(values.data(), {64}, {2}));
+  using Policy = InputAccessPolicy<0, 2, AccessPlan::automatic>;
+  kernel::Workspace storage(required_workspace(spec, Policy{}));
+  auto workspace = storage.view();
+  kernel::with_operands(
+      workspace,
+      operand(spec, Policy{}, access_defaults(vec::cvt::wrap)),
+      [&](auto& access) {
+        using I8Tag = vec::ScalableTag<int8_t, 0>;
+        const auto value = access.load(
+            I8Tag{}, coord(0), vec::opt::first(1));
+        EXPECT_EQ(vec::get(I8Tag{}, value, 0), static_cast<int8_t>(300));
+      });
+}
+
+TEST(TensorDataAccessTest, OperandDefaultsConfigureMaterializedCommit) {
+  std::array<int8_t, 64> values{};
+  auto tensor = make_tensor(
+      values.data(), make_shape(cint<64>), make_strides(cint<1>));
+  auto spec = output<int16_t>(tensor);
+  using Policy = OutputAccessPolicy<
+      0, AccessPlan::materialize_before_transform>;
+  kernel::Workspace storage(required_workspace(spec, Policy{}));
+  auto workspace = storage.view();
+  kernel::with_operands(
+      workspace,
+      operand(spec, Policy{}, access_defaults(vec::cvt::wrap)),
+      [&](auto& access) {
+        using I16Tag = vec::ScalableTag<int16_t, 0>;
+        access.store(
+            I16Tag{}, coord(0), vec::fill(I16Tag{}, int16_t{300}),
+            vec::opt::first(1));
+        access.commit();
+      });
+  EXPECT_EQ(values[0], static_cast<int8_t>(300));
 }
 
 } // namespace

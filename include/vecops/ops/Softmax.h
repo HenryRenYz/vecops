@@ -50,12 +50,6 @@ VECOPS_INLINE void validate_softmax_layouts(
                 "Softmax normalized dimension must be non-empty");
 }
 
-template <int Count, typename Spec>
-VECOPS_INLINE auto softmax_row_spec(const Spec& spec) {
-  if constexpr (Count == 0) return spec;
-  else return softmax_row_spec<Count - 1>(tensor::slice_view<0>(spec, 0));
-}
-
 template <typename Memory>
 class ContiguousSoftmaxInput {
 public:
@@ -116,8 +110,8 @@ public:
     details::validate_softmax_layouts(
         in.input_layout(), out.output_layout());
     constexpr int PrefixRank = InSpec::InputTensor::Ndim - 1;
-    const auto in_row = details::softmax_row_spec<PrefixRank>(in);
-    const auto out_row = details::softmax_row_spec<PrefixRank>(out);
+    const auto in_row = tensor::take_trailing<1>(in);
+    const auto out_row = tensor::take_trailing<1>(out);
     using InPolicy = tensor::InputAccessPolicy<0, 2>;
     using OutPolicy = tensor::OutputAccessPolicy<0>;
     const nint_t n = in.input_layout().shape()[PrefixRank];
@@ -731,14 +725,6 @@ private:
       using OutputMemory = typename OutSpec::MemoryElement;
       details::ContiguousSoftmaxInput<InputMemory> x{in.tensor().data()};
       details::ContiguousSoftmaxOutput<OutputMemory> y{out.tensor().data()};
-      compute(x, y);
-    } else if constexpr (StaticDirect) {
-      using DirectInPolicy = tensor::InputAccessPolicy<
-          0, 2, tensor::AccessPlan::direct>;
-      using DirectOutPolicy = tensor::OutputAccessPolicy<
-          0, tensor::AccessPlan::direct>;
-      auto x = tensor::bind(in, DirectInPolicy{}, workspace);
-      auto y = tensor::bind(out, DirectOutPolicy{}, workspace);
       compute(x, y);
     } else {
       kernel::with_operands(

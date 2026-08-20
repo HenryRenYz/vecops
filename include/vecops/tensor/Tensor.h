@@ -1154,6 +1154,18 @@ constexpr auto make_tensor(
   return make_tensor(data, make_layout<Ndim>(shape_vals));
 }
 
+/** @brief Keep the first N dimensions at the zero coordinate of trailing axes. */
+template <int N, typename T, typename TShape, typename TStrides>
+constexpr auto take_leading(const Tensor<T, TShape, TStrides>& tensor) {
+  return make_tensor(tensor.data(), take_leading<N>(tensor.layout()));
+}
+
+/** @brief Keep the last N dimensions at the zero coordinate of leading axes. */
+template <int N, typename T, typename TShape, typename TStrides>
+constexpr auto take_trailing(const Tensor<T, TShape, TStrides>& tensor) {
+  return make_tensor(tensor.data(), take_trailing<N>(tensor.layout()));
+}
+
 // ======================== Transpose ========================
 
 /**
