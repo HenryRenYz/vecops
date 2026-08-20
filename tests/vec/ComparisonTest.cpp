@@ -1,3 +1,5 @@
+// @vecops-test-shards: 12
+
 #include <gtest/gtest.h>
 
 #include <bit>
@@ -8,13 +10,22 @@
 
 #include "vecops/vec/Comparison.h"
 #include "TestHelpers.h"
+#include "TestShard.h"
 
 namespace vec = vecops::vec;
 
 template <typename T>
-class VecComparisonElementTest : public ::testing::Test {};
+void run_comparisons_test();
+template <typename T>
+void run_classification_test();
+template <typename T>
+void run_fixed_comparisons_test();
+template <typename T>
+void run_fixed_classification_test();
 
-TYPED_TEST_SUITE(VecComparisonElementTest, vec_test::AllElementTypes);
+#if defined(VECOPS_TEST_SHARD_ACTIVE)
+
+static_assert(VECOPS_TEST_SHARD_COUNT == vec_test::AllElements::size);
 
 template <typename T>
 T comparison_value(vecops::nint_t lane, bool rhs) {
@@ -108,23 +119,12 @@ void verify_comparisons(Tag tag) {
   }
 }
 
-TYPED_TEST(VecComparisonElementTest, AllComparisonsCoverEveryLaneAndShape) {
-  using T = TypeParam;
+template <typename T>
+void run_comparisons_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
     verify_comparisons(Tag{});
   });
 }
-
-using VecFloatingTypes = ::testing::Types<
-    vecops::bfloat16_t,
-    vecops::float16_t,
-    vecops::float32_t,
-    vecops::float64_t>;
-
-template <typename T>
-class VecClassificationTest : public ::testing::Test {};
-
-TYPED_TEST_SUITE(VecClassificationTest, VecFloatingTypes);
 
 template <typename T>
 T classification_value(vecops::nint_t lane) {
@@ -202,8 +202,8 @@ void verify_classification(Tag tag) {
   }
 }
 
-TYPED_TEST(VecClassificationTest, SpecialValuesCoverEveryLaneAndShape) {
-  using T = TypeParam;
+template <typename T>
+void run_classification_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
     verify_classification(Tag{});
   });
@@ -211,8 +211,8 @@ TYPED_TEST(VecClassificationTest, SpecialValuesCoverEveryLaneAndShape) {
 
 #if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
 
-TYPED_TEST(VecComparisonElementTest, FixedSVEBatchesBeyondFourWords) {
-  using T = TypeParam;
+template <typename T>
+void run_fixed_comparisons_test() {
   constexpr vecops::nint_t word_lanes =
       FIXED_SVE_BITS / 8 / static_cast<vecops::nint_t>(sizeof(T));
   constexpr vecops::nint_t lanes = static_cast<vecops::nint_t>(
@@ -222,8 +222,8 @@ TYPED_TEST(VecComparisonElementTest, FixedSVEBatchesBeyondFourWords) {
   verify_comparisons(Tag{});
 }
 
-TYPED_TEST(VecClassificationTest, FixedSVEBatchesBeyondFourWords) {
-  using T = TypeParam;
+template <typename T>
+void run_fixed_classification_test() {
   constexpr vecops::nint_t word_lanes =
       FIXED_SVE_BITS / 8 / static_cast<vecops::nint_t>(sizeof(T));
   constexpr vecops::nint_t lanes = static_cast<vecops::nint_t>(
@@ -232,5 +232,55 @@ TYPED_TEST(VecClassificationTest, FixedSVEBatchesBeyondFourWords) {
   EXPECT_GT(vec::num_words(Tag{}), 4);
   verify_classification(Tag{});
 }
+
+#endif
+
+using ShardType = vec_test::ElementAt<VECOPS_TEST_SHARD_INDEX>;
+template void run_comparisons_test<ShardType>();
+#if VECOPS_TEST_SHARD_INDEX < 4
+template void run_classification_test<ShardType>();
+#endif
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+template void run_fixed_comparisons_test<ShardType>();
+#if VECOPS_TEST_SHARD_INDEX < 4
+template void run_fixed_classification_test<ShardType>();
+#endif
+#endif
+
+#else
+
+template <typename T>
+class VecComparisonElementTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(
+    VecComparisonElementTest,
+    vec_test::AllElementTypes,
+    vec_test::ElementTypeName);
+
+TYPED_TEST(VecComparisonElementTest, AllComparisonsCoverEveryLaneAndShape) {
+  run_comparisons_test<TypeParam>();
+}
+
+template <typename T>
+class VecClassificationTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(
+    VecClassificationTest,
+    vec_test::FloatingElementTypes,
+    vec_test::ElementTypeName);
+
+TYPED_TEST(VecClassificationTest, SpecialValuesCoverEveryLaneAndShape) {
+  run_classification_test<TypeParam>();
+}
+
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+TYPED_TEST(VecComparisonElementTest, FixedSVEBatchesBeyondFourWords) {
+  run_fixed_comparisons_test<TypeParam>();
+}
+
+TYPED_TEST(VecClassificationTest, FixedSVEBatchesBeyondFourWords) {
+  run_fixed_classification_test<TypeParam>();
+}
+#endif
 
 #endif

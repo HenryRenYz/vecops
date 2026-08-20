@@ -646,22 +646,9 @@ struct X86BinaryComparisonImpl {
   static VECOPS_ALWAYS_INLINE NativeWordMask<Tag> call(
       Op op, Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b,
       NativeWordMask<Tag> mask) {
-#if defined(HAS_AVX512_FP16)
-    using Traits = RepresentationTraits<X86Backend, Tag>;
-    using T = ElementOf<Tag>;
-    if constexpr (std::same_as<T, float16_t>) {
-      static_assert(Index >= 0 && Index < Traits::word_count);
-      return NativeWordMask<Tag>{
-          x86_compare_float16_native_masked<Op>(
-              mask.value, a.value, b.value)};
-    } else {
-#endif
     auto result = call<Index>(op, tag, a, b);
     result.value = x86_mask_and(result.value, mask.value);
     return result;
-#if defined(HAS_AVX512_FP16)
-    }
-#endif
   }
 };
 

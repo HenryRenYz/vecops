@@ -1,6 +1,7 @@
 #ifndef VECOPS_VEC_VECBASE_H
 #define VECOPS_VEC_VECBASE_H
 
+#include <cassert>
 #include <concepts>
 #include <type_traits>
 
@@ -77,6 +78,55 @@ using NativeWordVec = typename details::CurrentRepresentation<Tag>::WordVec;
 /** Physical mask type for one native SIMD word of the given Tag. */
 template <VectorTag Tag>
 using NativeWordMask = typename details::CurrentRepresentation<Tag>::WordMask;
+
+namespace details {
+
+/** Backend customization point for runtime physical-word access. */
+template <typename Backend, VectorTag Tag>
+struct RuntimeWordAccess {
+  static constexpr bool sized_vec = is_word_array<Vec<Tag>>;
+  static constexpr bool sized_mask = is_word_array<Mask<Tag>>;
+
+  static VECOPS_ALWAYS_INLINE constexpr NativeWordVec<Tag> get_vec(
+      Tag, const Vec<Tag>& value, nint_t ordinal)
+    requires sized_vec
+  {
+    return details::get_word(value, ordinal);
+  }
+
+  static VECOPS_ALWAYS_INLINE constexpr NativeWordVec<Tag> get_vec(
+      Tag, Vec<Tag> value, nint_t ordinal)
+    requires (!sized_vec)
+  {
+    return details::get_word(value, ordinal);
+  }
+
+  static VECOPS_ALWAYS_INLINE constexpr Vec<Tag> set_vec(
+      Tag, Vec<Tag> value, nint_t ordinal, NativeWordVec<Tag> word) {
+    return details::set_word(value, ordinal, word);
+  }
+
+  static VECOPS_ALWAYS_INLINE constexpr NativeWordMask<Tag> get_mask(
+      Tag, const Mask<Tag>& value, nint_t ordinal)
+    requires sized_mask
+  {
+    return details::get_word(value, ordinal);
+  }
+
+  static VECOPS_ALWAYS_INLINE constexpr NativeWordMask<Tag> get_mask(
+      Tag, Mask<Tag> value, nint_t ordinal)
+    requires (!sized_mask)
+  {
+    return details::get_word(value, ordinal);
+  }
+
+  static VECOPS_ALWAYS_INLINE constexpr Mask<Tag> set_mask(
+      Tag, Mask<Tag> value, nint_t ordinal, NativeWordMask<Tag> word) {
+    return details::set_word(value, ordinal, word);
+  }
+};
+
+} // namespace details
 
 /**
  * Maps a Vec representation to its canonical physical Tag.
@@ -196,7 +246,17 @@ inline constexpr bool is_subword =
  * Sizeless SVE tuple access is provided by the SVE access layer.
  */
 template <nint_t Index, VectorTag Tag>
-  requires requires(Vec<Tag> value) {
+  requires details::is_word_array<Vec<Tag>> &&
+           requires(const Vec<Tag>& value) {
+             details::get_word<Index>(value);
+           }
+VECOPS_ALWAYS_INLINE constexpr NativeWordVec<Tag> get_word(
+    Tag, const Vec<Tag>& value) {
+  return details::get_word<Index>(value);
+}
+
+template <nint_t Index, VectorTag Tag>
+  requires (!details::is_word_array<Vec<Tag>>) && requires(Vec<Tag> value) {
     details::get_word<Index>(value);
   }
 VECOPS_ALWAYS_INLINE constexpr NativeWordVec<Tag> get_word(
@@ -211,6 +271,34 @@ template <nint_t Index, VectorTag Tag>
 VECOPS_ALWAYS_INLINE constexpr Vec<Tag> set_word(
     Tag, Vec<Tag> value, NativeWordVec<Tag> word) {
   return details::set_word<Index>(value, word);
+}
+
+/** Returns a physical vector word selected by a runtime ordinal. */
+template <VectorTag Tag>
+  requires details::is_word_array<Vec<Tag>>
+VECOPS_ALWAYS_INLINE constexpr NativeWordVec<Tag> get_word(
+    Tag tag, const Vec<Tag>& value, nint_t ordinal) {
+  assert(ordinal >= 0 && ordinal < num_words(tag));
+  return details::RuntimeWordAccess<details::CurrentBackend, Tag>::get_vec(
+      tag, value, ordinal);
+}
+
+template <VectorTag Tag>
+  requires (!details::is_word_array<Vec<Tag>>)
+VECOPS_ALWAYS_INLINE constexpr NativeWordVec<Tag> get_word(
+    Tag tag, Vec<Tag> value, nint_t ordinal) {
+  assert(ordinal >= 0 && ordinal < num_words(tag));
+  return details::RuntimeWordAccess<details::CurrentBackend, Tag>::get_vec(
+      tag, value, ordinal);
+}
+
+/** Replaces a physical vector word selected by a runtime ordinal. */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE constexpr Vec<Tag> set_word(
+    Tag tag, Vec<Tag> value, nint_t ordinal, NativeWordVec<Tag> word) {
+  assert(ordinal >= 0 && ordinal < num_words(tag));
+  return details::RuntimeWordAccess<details::CurrentBackend, Tag>::set_vec(
+      tag, value, ordinal, word);
 }
 
 /** Constructs a complete Vec directly from all of its physical words. */
@@ -234,7 +322,17 @@ VECOPS_ALWAYS_INLINE constexpr Vec<Tag> from_words(
 
 /** Returns a physical predicate word from a Mask selected by tag. */
 template <nint_t Index, VectorTag Tag>
-  requires requires(Mask<Tag> value) {
+  requires details::is_word_array<Mask<Tag>> &&
+           requires(const Mask<Tag>& value) {
+             details::get_word<Index>(value);
+           }
+VECOPS_ALWAYS_INLINE constexpr NativeWordMask<Tag> get_word(
+    Tag, const Mask<Tag>& value) {
+  return details::get_word<Index>(value);
+}
+
+template <nint_t Index, VectorTag Tag>
+  requires (!details::is_word_array<Mask<Tag>>) && requires(Mask<Tag> value) {
     details::get_word<Index>(value);
   }
 VECOPS_ALWAYS_INLINE constexpr NativeWordMask<Tag> get_word(
@@ -250,6 +348,34 @@ template <nint_t Index, VectorTag Tag>
 VECOPS_ALWAYS_INLINE constexpr Mask<Tag> set_word(
     Tag, Mask<Tag> value, NativeWordMask<Tag> word) {
   return details::set_word<Index>(value, word);
+}
+
+/** Returns a physical predicate word selected by a runtime ordinal. */
+template <VectorTag Tag>
+  requires details::is_word_array<Mask<Tag>>
+VECOPS_ALWAYS_INLINE constexpr NativeWordMask<Tag> get_word(
+    Tag tag, const Mask<Tag>& value, nint_t ordinal) {
+  assert(ordinal >= 0 && ordinal < num_words(tag));
+  return details::RuntimeWordAccess<details::CurrentBackend, Tag>::get_mask(
+      tag, value, ordinal);
+}
+
+template <VectorTag Tag>
+  requires (!details::is_word_array<Mask<Tag>>)
+VECOPS_ALWAYS_INLINE constexpr NativeWordMask<Tag> get_word(
+    Tag tag, Mask<Tag> value, nint_t ordinal) {
+  assert(ordinal >= 0 && ordinal < num_words(tag));
+  return details::RuntimeWordAccess<details::CurrentBackend, Tag>::get_mask(
+      tag, value, ordinal);
+}
+
+/** Replaces a physical predicate word selected by a runtime ordinal. */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE constexpr Mask<Tag> set_word(
+    Tag tag, Mask<Tag> value, nint_t ordinal, NativeWordMask<Tag> word) {
+  assert(ordinal >= 0 && ordinal < num_words(tag));
+  return details::RuntimeWordAccess<details::CurrentBackend, Tag>::set_mask(
+      tag, value, ordinal, word);
 }
 
 /** Constructs a complete Mask directly from all of its physical words. */

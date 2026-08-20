@@ -25,10 +25,9 @@ void data_access_load(benchmark::State& state) {
   }
   auto tensor = make_tensor<1>(storage.data(), {kElements * LogicalStride});
   auto spec = input<float32_t>(tensor);
-  using PrefetchOption = PrefetchPolicy<Prefetch, 4>;
   using Policy = InputAccessPolicy<
       0, 1, AccessPlan::direct, vec::cvt::Ordered,
-      vec::cvt::Saturate, DefaultMemoryPolicy, false, PrefetchOption>;
+      vec::cvt::Saturate, DefaultMemoryPolicy, false>;
   kernel::Workspace workspace_storage(0);
   auto workspace = workspace_storage.view();
   auto access = bind(spec, Policy{}, workspace);
@@ -38,26 +37,45 @@ void data_access_load(benchmark::State& state) {
   for (auto _ : state) {
     auto accumulator = vec::zeros(tag);
     if constexpr (Cursor) {
+      nint_t offset = 0;
       if constexpr (Strided) {
         auto cursor = access.scan(
             tag, coord(0), axis<0>, kElements,
-            vec::strided(LogicalStride), PrefetchOption{});
+            vec::strided(LogicalStride));
         while (cursor.has_full()) {
+          if constexpr (Prefetch) {
+            if (offset + 4 * lanes < kElements)
+              vec::prefetch(
+                  tag, storage.data() +
+                           (offset + 4 * lanes) * LogicalStride);
+          }
           accumulator = vec::add(accumulator, cursor.load_full());
           cursor.advance_full();
+          offset += lanes;
         }
       } else {
         auto cursor = access.scan(
             tag, coord(0), axis<0>, kElements,
-            ContiguousLaneMapping{}, PrefetchOption{});
+            ContiguousLaneMapping{});
         while (cursor.has_full()) {
+          if constexpr (Prefetch) {
+            if (offset + 4 * lanes < kElements)
+              vec::prefetch(tag, storage.data() + offset + 4 * lanes);
+          }
           accumulator = vec::add(accumulator, cursor.load_full());
           cursor.advance_full();
+          offset += lanes;
         }
       }
     } else {
       for (nint_t offset = 0; offset + lanes <= kElements;
            offset += lanes) {
+        if constexpr (Prefetch) {
+          if (offset + 4 * lanes < kElements)
+            vec::prefetch(
+                tag, storage.data() +
+                         (offset + 4 * lanes) * LogicalStride);
+        }
         if constexpr (Strided) {
           accumulator = vec::add(
               accumulator,
@@ -72,7 +90,7 @@ void data_access_load(benchmark::State& state) {
         }
       }
     }
-    benchmark::DoNotOptimize(accumulator);
+    benchmark::DoNotOptimize(vec::reduce_add(tag, accumulator));
   }
   state.SetItemsProcessed(state.iterations() * kElements);
 }
@@ -109,7 +127,7 @@ void raw_load(benchmark::State& state) {
       pointer += lanes * LogicalStride;
       remaining -= lanes;
     }
-    benchmark::DoNotOptimize(accumulator);
+    benchmark::DoNotOptimize(vec::reduce_add(tag, accumulator));
   }
   state.SetItemsProcessed(state.iterations() * kElements);
 }
@@ -149,7 +167,7 @@ void indexed_load(benchmark::State& state) {
                 vec::indexed(indices)));
       }
     }
-    benchmark::DoNotOptimize(accumulator);
+    benchmark::DoNotOptimize(vec::reduce_add(tag, accumulator));
   }
   state.SetItemsProcessed(state.iterations() * kElements);
 }

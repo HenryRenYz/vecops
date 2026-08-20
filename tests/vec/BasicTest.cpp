@@ -1,3 +1,5 @@
+// @vecops-test-shards: 13
+
 #include <gtest/gtest.h>
 
 #include <bit>
@@ -9,19 +11,39 @@
 #include <vector>
 
 #include "vecops/vec/Basic.h"
+#include "vecops/vec/Memory.h"
 #include "TestHelpers.h"
+#include "TestShard.h"
 
 namespace vec = vecops::vec;
 
 template <typename T>
-class VecBasicElementTest : public ::testing::Test {};
+void run_fill_and_lane_access_test();
+template <typename T>
+void run_masks_and_logic_test();
+template <typename T>
+void run_blend_and_conditional_fill_test();
+template <typename T>
+void run_bitcast_shapes_test();
+template <typename T>
+void run_extreme_values_test();
+template <typename T>
+void run_fixed_sve_basic_test();
+void run_resizing_bitcast_test();
 
-TYPED_TEST_SUITE(VecBasicElementTest, vec_test::AllElementTypes);
+#if defined(VECOPS_TEST_SHARD_ACTIVE)
+
+static_assert(
+    VECOPS_TEST_SHARD_COUNT == vec_test::AllElements::size + 1);
 
 template <typename T>
 T test_value(int seed) {
   if constexpr (std::same_as<T, vecops::bfloat16_t>) {
-    return vecops::bfloat16_t(static_cast<float>(seed) + 0.25F);
+    const float scalar = static_cast<float>(seed) + 0.25F;
+    const uint32_t bits = ::vecops::bitcast<uint32_t>(scalar);
+    const uint32_t bias = ((bits >> 16) & 1U) + uint32_t{0x7fff};
+    return vecops::bfloat16_t::from_bits(
+        static_cast<uint16_t>((bits + bias) >> 16));
   } else if constexpr (std::same_as<T, vecops::float16_t>) {
     return vecops::float16_t(static_cast<float>(seed) + 0.25F);
   } else if constexpr (std::same_as<T, vecops::float32_t>) {
@@ -287,14 +309,13 @@ void verify_bitcast(FromTag from) {
   static_assert(sizeof(From) == sizeof(To));
   EXPECT_EQ(vec::size(ToTag{}), vec::size(FromTag{}));
 
-  auto source = vec::zeros(from);
   std::vector<From> expected(
       static_cast<std::size_t>(vec::size(from)), From{});
   for (vecops::nint_t lane = 0; lane < vec::size(from); ++lane) {
     const From value = test_value<From>(static_cast<int>(lane + 11));
-    source = vec::set(from, source, lane, value);
     expected[static_cast<std::size_t>(lane)] = value;
   }
+  const auto source = vec::load(from, expected.data());
 
   const auto result = vec::bitcast(ToTag{}, from, source);
   for (vecops::nint_t lane = 0; lane < vec::size(from); ++lane) {
@@ -306,6 +327,7 @@ void verify_bitcast(FromTag from) {
   }
 }
 
+#if VECOPS_TEST_SHARD_INDEX == 12
 void verify_resizing_bitcast() {
   using Small = vec::ScalableTag<std::uint8_t, -1>;
   using Large = vec::ScalableTag<std::uint8_t, 0>;
@@ -330,6 +352,7 @@ void verify_resizing_bitcast() {
         << "lane=" << lane;
   }
 }
+#endif
 
 template <vec::VectorTag Tag>
 void verify_extreme_values(Tag tag) {
@@ -388,41 +411,43 @@ void verify_extreme_values(Tag tag) {
   }
 }
 
-TYPED_TEST(VecBasicElementTest, FillZerosAndLaneAccessCoverEveryShape) {
-  using T = TypeParam;
+template <typename T>
+void run_fill_and_lane_access_test() {
   for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
     verify_fill_and_zeros(Tag{});
     verify_lane_get_set(Tag{});
   });
 }
 
-TYPED_TEST(VecBasicElementTest, MasksAndLogicCoverEveryShape) {
-  using T = TypeParam;
+template <typename T>
+void run_masks_and_logic_test() {
   for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
     verify_mask_construction_and_logic(Tag{});
   });
 }
 
-TYPED_TEST(VecBasicElementTest, BlendAndConditionalFillCoverEveryShape) {
-  using T = TypeParam;
+template <typename T>
+void run_blend_and_conditional_fill_test() {
   for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
     verify_blend_and_conditional_fill(Tag{});
   });
 }
 
-TYPED_TEST(VecBasicElementTest, BitcastCoversEveryShape) {
-  using T = TypeParam;
+template <typename T>
+void run_bitcast_shapes_test() {
   for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
     verify_bitcast(Tag{});
   });
 }
 
-TEST(VecBasicTest, BitcastCanResizeLowBytes) {
+#if VECOPS_TEST_SHARD_INDEX == 12
+void run_resizing_bitcast_test() {
   verify_resizing_bitcast();
 }
+#endif
 
-TYPED_TEST(VecBasicElementTest, ExtremeValuesPreserveBitsAndSignedZero) {
-  using T = TypeParam;
+template <typename T>
+void run_extreme_values_test() {
   // One and four words catch both the primitive and the multiword path while
   // avoiding redundant copies of the expensive NaN/Inf matrix.
   verify_extreme_values(vec::ScalableTag<T, 0>{});
@@ -431,8 +456,8 @@ TYPED_TEST(VecBasicElementTest, ExtremeValuesPreserveBitsAndSignedZero) {
 
 #if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
 
-TYPED_TEST(VecBasicElementTest, FixedSVEArrayPathCrossesTupleLimit) {
-  using T = TypeParam;
+template <typename T>
+void run_fixed_sve_basic_test() {
   constexpr vecops::nint_t word_lanes =
       FIXED_SVE_BITS / 8 / static_cast<vecops::nint_t>(sizeof(T));
   using Tag = vec::FixedTag<T, word_lanes * 8>;
@@ -443,5 +468,59 @@ TYPED_TEST(VecBasicElementTest, FixedSVEArrayPathCrossesTupleLimit) {
   verify_blend_and_conditional_fill(Tag{});
   verify_bitcast(Tag{});
 }
+
+#endif
+
+#if VECOPS_TEST_SHARD_INDEX < 12
+using ShardType = vec_test::ElementAt<VECOPS_TEST_SHARD_INDEX>;
+template void run_fill_and_lane_access_test<ShardType>();
+template void run_masks_and_logic_test<ShardType>();
+template void run_blend_and_conditional_fill_test<ShardType>();
+template void run_bitcast_shapes_test<ShardType>();
+template void run_extreme_values_test<ShardType>();
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+template void run_fixed_sve_basic_test<ShardType>();
+#endif
+#endif
+
+#else
+
+template <typename T>
+class VecBasicTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(
+    VecBasicTest,
+    vec_test::AllElementTypes,
+    vec_test::ElementTypeName);
+
+TYPED_TEST(VecBasicTest, FillZerosAndLaneAccessCoverEveryShape) {
+  run_fill_and_lane_access_test<TypeParam>();
+}
+
+TYPED_TEST(VecBasicTest, MasksAndLogicCoverEveryShape) {
+  run_masks_and_logic_test<TypeParam>();
+}
+
+TYPED_TEST(VecBasicTest, BlendAndConditionalFillCoverEveryShape) {
+  run_blend_and_conditional_fill_test<TypeParam>();
+}
+
+TYPED_TEST(VecBasicTest, BitcastCoversEveryShape) {
+  run_bitcast_shapes_test<TypeParam>();
+}
+
+TEST(VecBasicTest, BitcastCanResizeLowBytes) {
+  run_resizing_bitcast_test();
+}
+
+TYPED_TEST(VecBasicTest, ExtremeValuesPreserveBitsAndSignedZero) {
+  run_extreme_values_test<TypeParam>();
+}
+
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+TYPED_TEST(VecBasicTest, FixedSVEArrayPathCrossesTupleLimit) {
+  run_fixed_sve_basic_test<TypeParam>();
+}
+#endif
 
 #endif

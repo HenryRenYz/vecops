@@ -267,7 +267,10 @@ VECOPS_ALWAYS_INLINE Mask<ToTag> x86_convert_mask_native(
       "unsupported x86 mask conversion source element type");
 
   if constexpr (ToTraits::word_count == 1 && FromTraits::word_count == 1) {
-    return x86_convert_mask_single_word(to, from, value);
+    auto converted = x86_convert_mask_single_word(to, from, value);
+    const auto valid = execute(MaskFillOp{}, to, true);
+    converted.value = x86_mask_and(converted.value, valid.value);
+    return converted;
   } else {
     using ToHalf = Half<ToTag>;
     using FromHalf = Half<FromTag>;

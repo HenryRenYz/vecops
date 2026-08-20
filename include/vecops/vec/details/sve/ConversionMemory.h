@@ -25,8 +25,10 @@ inline constexpr bool sve_has_oversized_contiguous_conversion_lowering =
     option_count<IsWrapOption, Options...> == 0;
 
 template <VectorTag Tag>
-inline constexpr bool sve_conversion_tag_representable =
-    is_fixed_tag<Tag> || scale_power<Tag> <= VEC_MAX_POW;
+inline constexpr bool sve_conversion_tag_representable = [] {
+  if constexpr (is_fixed_tag<Tag>) return true;
+  else return scale_power<Tag> <= VEC_MAX_POW;
+}();
 
 /**
  * Ordered saturating SVE conversion recursively lowers the logical Tag until

@@ -145,16 +145,154 @@ VECOPS_ALWAYS_INLINE svbool_t sve_single_lane_predicate(nint_t lane) {
 template <nint_t Index, VectorTag Tag>
 VECOPS_ALWAYS_INLINE nint_t sve_valid_word_lanes(Tag tag) {
   const nint_t word_lanes = native_word_size(tag);
-  if constexpr (is_scalable_tag<Tag> && scale_power<Tag> >= 0) {
-    // Every physical word of a non-subword scalable tuple is complete. Keep
-    // this explicit so Clang does not retain per-word whilelo predicates for
-    // a multi-word Tag whose runtime size is expressed through svcnt*().
-    return word_lanes;
+  if constexpr (is_scalable_tag<Tag>) {
+    if constexpr (scale_power<Tag> >= 0) {
+      // Every physical word of a non-subword scalable tuple is complete. Keep
+      // this explicit so Clang does not retain per-word whilelo predicates for
+      // a multi-word Tag whose runtime size is expressed through svcnt*().
+      return word_lanes;
+    } else {
+      return std::clamp<nint_t>(
+          size(tag) - Index * word_lanes, 0, word_lanes);
+    }
   } else {
     return std::clamp<nint_t>(
         size(tag) - Index * word_lanes, 0, word_lanes);
   }
 }
+
+/**
+ * Runtime physical-word access for SVE representations.
+ *
+ * VLS values use sized arrays, while VLA x2/x4 values require immediate tuple
+ * indices and therefore retain the backend-local runtime dispatch. BF16 tuple
+ * selection stays in the u16 domain to avoid BiSheng 5.1 producing an
+ * unselectable scalar-conditioned scalable-BF16 vector select.
+ */
+template <VectorTag Tag>
+struct RuntimeWordAccess<SVEBackend, Tag> {
+  static constexpr bool sized_vec = is_word_array<Vec<Tag>>;
+  static constexpr bool sized_mask = is_word_array<Mask<Tag>>;
+
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> get_vec(
+      Tag tag, const Vec<Tag>& value, nint_t ordinal)
+    requires sized_vec
+  {
+    if constexpr (
+        std::same_as<ElementOf<Tag>, bfloat16_t> &&
+        RepresentationTraits<SVEBackend, Tag>::word_count > 1) {
+      using BitsTag = Rebind<uint16_t, Tag>;
+      const auto bits = execute(BitCastOp{}, BitsTag{}, tag, value);
+      const auto selected = details::get_word(bits, ordinal);
+      return execute_word<0, SVEBackend>(
+          BitCastOp{}, tag, BitsTag{}, selected);
+    } else {
+      return details::get_word(value, ordinal);
+    }
+  }
+
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> get_vec(
+      Tag, Vec<Tag> value, nint_t ordinal)
+    requires (!sized_vec)
+  {
+    if constexpr (
+        std::same_as<ElementOf<Tag>, bfloat16_t> &&
+        RepresentationTraits<SVEBackend, Tag>::word_count > 1) {
+      using BitsTag = Rebind<uint16_t, Tag>;
+      const auto bits = [&] {
+        if constexpr (RepresentationTraits<SVEBackend, Tag>::word_count == 2)
+          return svreinterpret_u16_bf16_x2(value);
+        else {
+          static_assert(
+              RepresentationTraits<SVEBackend, Tag>::word_count == 4);
+          return svreinterpret_u16_bf16_x4(value);
+        }
+      }();
+      const auto selected = ::vecops::vec::get_word(
+          BitsTag{}, bits, ordinal);
+      return svreinterpret_bf16_u16(selected);
+    } else {
+      return visit_runtime_word<SVEBackend>(
+          Tag{}, ordinal, [&]<nint_t Index>() {
+            return ::vecops::vec::get_word<Index>(Tag{}, value);
+          });
+    }
+  }
+
+  static VECOPS_ALWAYS_INLINE Vec<Tag> set_vec(
+      Tag tag, Vec<Tag> value, nint_t ordinal, NativeWordVec<Tag> word) {
+    if constexpr (
+        std::same_as<ElementOf<Tag>, bfloat16_t> &&
+        RepresentationTraits<SVEBackend, Tag>::word_count > 1) {
+      using BitsTag = Rebind<uint16_t, Tag>;
+      const auto bit_word = execute_word<0, SVEBackend>(
+          BitCastOp{}, BitsTag{}, tag, word);
+      if constexpr (is_word_array<Vec<Tag>>) {
+        auto bits = execute(BitCastOp{}, BitsTag{}, tag, value);
+        bits = ::vecops::vec::set_word(
+            BitsTag{}, bits, ordinal, bit_word);
+        return execute(BitCastOp{}, tag, BitsTag{}, bits);
+      } else {
+        const auto bits = [&] {
+          if constexpr (RepresentationTraits<SVEBackend, Tag>::word_count == 2)
+            return svreinterpret_u16_bf16_x2(value);
+          else {
+            static_assert(
+                RepresentationTraits<SVEBackend, Tag>::word_count == 4);
+            return svreinterpret_u16_bf16_x4(value);
+          }
+        }();
+        const auto updated = ::vecops::vec::set_word(
+            BitsTag{}, bits, ordinal, bit_word);
+        if constexpr (RepresentationTraits<SVEBackend, Tag>::word_count == 2)
+          return svreinterpret_bf16_u16_x2(updated);
+        else
+          return svreinterpret_bf16_u16_x4(updated);
+      }
+    } else if constexpr (is_word_array<Vec<Tag>>) {
+      return details::set_word(value, ordinal, word);
+    } else {
+      return visit_runtime_word<SVEBackend>(
+          tag, ordinal, [&]<nint_t Index>() {
+            return ::vecops::vec::set_word<Index>(tag, value, word);
+          });
+    }
+  }
+
+  static VECOPS_ALWAYS_INLINE NativeWordMask<Tag> get_mask(
+      Tag, const Mask<Tag>& value, nint_t ordinal)
+    requires sized_mask
+  {
+    return details::get_word(value, ordinal);
+  }
+
+  static VECOPS_ALWAYS_INLINE NativeWordMask<Tag> get_mask(
+      Tag tag, Mask<Tag> value, nint_t ordinal)
+    requires (!sized_mask)
+  {
+    return visit_runtime_word<SVEBackend>(
+        tag, ordinal, [&]<nint_t Index>() {
+          return ::vecops::vec::get_word<Index>(tag, value);
+        });
+  }
+
+  static VECOPS_ALWAYS_INLINE Mask<Tag> set_mask(
+      Tag tag, Mask<Tag> value, nint_t ordinal, NativeWordMask<Tag> word) {
+    const nint_t valid = std::clamp<nint_t>(
+        size(tag) - ordinal * native_word_size(tag),
+        0, native_word_size(tag));
+    const auto active = sve_prefix_predicate<ElementOf<Tag>>(valid);
+    word = svand_b_z(active, word, active);
+    if constexpr (is_word_array<Mask<Tag>>) {
+      return details::set_word(value, ordinal, word);
+    } else {
+      return visit_runtime_word<SVEBackend>(
+          tag, ordinal, [&]<nint_t Index>() {
+            return ::vecops::vec::set_word<Index>(tag, value, word);
+          });
+    }
+  }
+};
 
 /* **************************************************************************** */
 //    Construction hooks — ConstructWordsHook, ConstructMaskWordsHook        //

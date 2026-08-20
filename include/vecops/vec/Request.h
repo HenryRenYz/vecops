@@ -19,8 +19,8 @@
  * mask and index vectors, merge values) are fields, so numeric combinations
  * no longer multiply template instantiations.
  *
- * Scalar value fields are meaningful only for the matching kind. Vector
- * values (mask, merge vector, indices) are referenced, never stored:
+ * Only runtime fields selected by those kinds are present in the descriptor.
+ * Vector values (mask, merge vector, indices) are referenced, never stored:
  * scalable-SVE vectors are sizeless and cannot be data members, so requests
  * borrow caller-owned storage exactly like opt::masked does. Null vector
  * pointers simply mean the matching kind is not selected.
@@ -49,6 +49,76 @@ enum class Populate {
   MergeScalar,   ///< Inactive lanes read the merge scalar.
 };
 
+/** Inactive-lane population policy for elementwise operations. */
+enum class Inactive {
+  PreserveInput,  ///< Inactive lanes keep the first operand's value.
+  Zero,           ///< Inactive lanes read as zero.
+  MergeVector,    ///< Inactive lanes read the merge vector.
+  MergeScalar,    ///< Inactive lanes read the merge scalar.
+  MergeMask,      ///< Mask-result operations merge the inactive mask bits.
+};
+
+namespace details::request_storage {
+
+template <Active A, typename MaskVector>
+struct ActiveFields {};
+
+template <typename MaskVector>
+struct ActiveFields<Active::First, MaskVector> {
+  nint_t first_count = 0;
+};
+
+template <typename MaskVector>
+struct ActiveFields<Active::Masked, MaskVector> {
+  const MaskVector* mask = nullptr;
+};
+
+template <Addressing Addr, typename IndexVector>
+struct AddressingFields {};
+
+template <typename IndexVector>
+struct AddressingFields<Addressing::Strided, IndexVector> {
+  nint_t stride = 1;
+};
+
+template <typename IndexVector>
+struct AddressingFields<Addressing::Indexed, IndexVector> {
+  const IndexVector* indices = nullptr;
+};
+
+template <Populate P, VectorTag Tag>
+struct PopulateFields {};
+
+template <VectorTag Tag>
+struct PopulateFields<Populate::MergeVector, Tag> {
+  const Vec<Tag>* merge_vector = nullptr;
+};
+
+template <VectorTag Tag>
+struct PopulateFields<Populate::MergeScalar, Tag> {
+  ElementOf<Tag> merge_scalar = ElementOf<Tag>{};
+};
+
+template <Inactive I, VectorTag Tag>
+struct InactiveFields {};
+
+template <VectorTag Tag>
+struct InactiveFields<Inactive::MergeVector, Tag> {
+  const Vec<Tag>* merge_vector = nullptr;
+};
+
+template <VectorTag Tag>
+struct InactiveFields<Inactive::MergeScalar, Tag> {
+  ElementOf<Tag> merge_scalar = ElementOf<Tag>{};
+};
+
+template <VectorTag Tag>
+struct InactiveFields<Inactive::MergeMask, Tag> {
+  const Mask<Tag>* mask_merge = nullptr;
+};
+
+} // namespace details::request_storage
+
 /**
  * @brief Resolved descriptor for `load`.
  *
@@ -64,7 +134,10 @@ template <
     typename Temporality = mem::Temporal,
     int IndexScale = 0,
     VectorValue IndexVector = Vec<IndexTag<Tag>>>
-struct LoadRequest {
+struct LoadRequest
+    : details::request_storage::ActiveFields<A, Mask<Tag>>,
+      details::request_storage::AddressingFields<Addr, IndexVector>,
+      details::request_storage::PopulateFields<P, Tag> {
   using TagType = Tag;
   static constexpr Active active_kind = A;
   static constexpr Addressing addressing_kind = Addr;
@@ -74,12 +147,6 @@ struct LoadRequest {
   static constexpr int index_scale = IndexScale;
   using IndexVectorType = IndexVector;
 
-  nint_t first_count = 0;          ///< Meaningful when A == First.
-  const Mask<Tag>* mask = nullptr;          ///< A == Masked.
-  const Vec<Tag>* merge_vector = nullptr;   ///< P == MergeVector.
-  ElementOf<Tag> merge_scalar = ElementOf<Tag>{};  ///< P == MergeScalar.
-  nint_t stride = 1;               ///< Meaningful when Addr == Strided.
-  const IndexVector* indices = nullptr;     ///< Addr == Indexed.
 };
 
 /**
@@ -95,7 +162,9 @@ template <
     typename Temporality = mem::Temporal,
     int IndexScale = 0,
     VectorValue IndexVector = Vec<IndexTag<Tag>>>
-struct StoreRequest {
+struct StoreRequest
+    : details::request_storage::ActiveFields<A, Mask<Tag>>,
+      details::request_storage::AddressingFields<Addr, IndexVector> {
   using TagType = Tag;
   static constexpr Active active_kind = A;
   static constexpr Addressing addressing_kind = Addr;
@@ -104,19 +173,6 @@ struct StoreRequest {
   static constexpr int index_scale = IndexScale;
   using IndexVectorType = IndexVector;
 
-  nint_t first_count = 0;      ///< Meaningful when A == First.
-  const Mask<Tag>* mask = nullptr;          ///< A == Masked.
-  nint_t stride = 1;           ///< Meaningful when Addr == Strided.
-  const IndexVector* indices = nullptr;     ///< Addr == Indexed.
-};
-
-/** Inactive-lane population policy for elementwise operations. */
-enum class Inactive {
-  PreserveInput,  ///< Inactive lanes keep the first operand's value.
-  Zero,           ///< Inactive lanes read as zero.
-  MergeVector,    ///< Inactive lanes read the merge vector.
-  MergeScalar,    ///< Inactive lanes read the merge scalar.
-  MergeMask,      ///< Mask-result operations merge the inactive mask bits.
 };
 
 /**
@@ -131,15 +187,13 @@ template <
     VectorTag Tag,
     Active A = Active::Unmasked,
     Inactive I = Inactive::PreserveInput>
-struct OpRequest {
+struct OpRequest
+    : details::request_storage::ActiveFields<A, Mask<Tag>>,
+      details::request_storage::InactiveFields<I, Tag> {
   using TagType = Tag;
   static constexpr Active active_kind = A;
   static constexpr Inactive inactive_kind = I;
 
-  const Mask<Tag>* mask = nullptr;          ///< A == Masked.
-  const Vec<Tag>* merge_vector = nullptr;   ///< I == MergeVector.
-  ElementOf<Tag> merge_scalar = ElementOf<Tag>{};  ///< I == MergeScalar.
-  const Mask<Tag>* mask_merge = nullptr;    ///< I == MergeMask.
 };
 
 /**
@@ -163,7 +217,10 @@ template <
     typename Layout = cvt::Ordered,
     typename ValuePolicy = cvt::Saturate,
     MaskValue MaskVector = Mask<ToTag>>
-struct LoadConvertRequest {
+struct LoadConvertRequest
+    : details::request_storage::ActiveFields<A, MaskVector>,
+      details::request_storage::AddressingFields<Addr, IndexVector>,
+      details::request_storage::PopulateFields<P, ToTag> {
   using TagType = ToTag;
   using FromElement = From;
   static constexpr Active active_kind = A;
@@ -182,12 +239,6 @@ struct LoadConvertRequest {
       Rebind<From, ToTag>,
       ToTag>;
 
-  nint_t first_count = 0;      ///< Meaningful when A == First.
-  const MaskVector* mask = nullptr;         ///< A == Masked.
-  const Vec<ToTag>* merge_vector = nullptr;  ///< P == MergeVector.
-  ElementOf<ToTag> merge_scalar = ElementOf<ToTag>{};  ///< P == MergeScalar.
-  nint_t stride = 1;           ///< Meaningful when Addr == Strided.
-  const IndexVector* indices = nullptr;     ///< Addr == Indexed.
 };
 
 /**
@@ -210,7 +261,9 @@ template <
     typename ValuePolicy = cvt::Saturate,
     typename Packing = mem::Packed,
     MaskValue MaskVector = Mask<Rebind<To, FromTag>>>
-struct StoreConvertRequest {
+struct StoreConvertRequest
+    : details::request_storage::ActiveFields<A, MaskVector>,
+      details::request_storage::AddressingFields<Addr, IndexVector> {
   using TagType = FromTag;
   using ToElement = To;
   static constexpr Active active_kind = A;
@@ -224,10 +277,6 @@ struct StoreConvertRequest {
   using PackingOption = Packing;
   using MaskVectorType = MaskVector;
 
-  nint_t first_count = 0;      ///< Meaningful when A == First.
-  const MaskVector* mask = nullptr;         ///< A == Masked.
-  nint_t stride = 1;           ///< Meaningful when Addr == Strided.
-  const IndexVector* indices = nullptr;     ///< Addr == Indexed.
 };
 
 /**
@@ -238,10 +287,10 @@ struct StoreConvertRequest {
  * lanes.
  */
 template <VectorTag Tag, Active A = Active::Unmasked>
-struct ReduceRequest {
+struct ReduceRequest
+    : details::request_storage::ActiveFields<A, Mask<Tag>> {
   using TagType = Tag;
   static constexpr Active active_kind = A;
-  const Mask<Tag>* mask = nullptr;  ///< A == Masked.
 };
 
 } // namespace vecops::vec

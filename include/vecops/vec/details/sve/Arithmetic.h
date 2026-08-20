@@ -256,6 +256,27 @@ struct NativeWordImpl<SVEBackend, MaxOp> : SVEArithmeticWordImpl<MaxOp> {};
 //    SVEUnaryArithmeticWordImpl and registrations                            //
 /* **************************************************************************** */
 
+// WORKAROUND(BiSheng 5.1): its AArch64 SVE instruction selector cannot lower
+// the scalable-BF16 form produced after combining the equivalent u16 ACLE
+// intrinsics with the surrounding BF16 reinterpret/select. Force the sign-bit
+// operation to remain an integer EOR/AND until that compiler bug is fixed.
+template <bool Negate>
+VECOPS_ALWAYS_INLINE svuint16_t sve_bfloat16_sign_bits(
+    svuint16_t bits) {
+  const auto sign_mask = svdup_n_u16(Negate ? 0x8000u : 0x7fffu);
+  svuint16_t result;
+  if constexpr (Negate) {
+    __asm__("eor %0.d, %1.d, %2.d"
+            : "=w"(result)
+            : "w"(bits), "w"(sign_mask));
+  } else {
+    __asm__("and %0.d, %1.d, %2.d"
+            : "=w"(result)
+            : "w"(bits), "w"(sign_mask));
+  }
+  return result;
+}
+
 template <typename Op>
 struct SVEUnaryArithmeticWordImpl {
   template <nint_t Index, VectorTag Tag>
@@ -278,12 +299,8 @@ struct SVEUnaryArithmeticWordImpl {
     const auto raw_result = [&]() {
       if constexpr (std::same_as<T, bfloat16_t>) {
         const auto bits = svreinterpret_u16_bf16(raw_value);
-        const auto computed = [&] {
-          if constexpr (std::same_as<Op, NegOp>)
-            return sveor_n_u16_x(svptrue_b16(), bits, 0x8000u);
-          else
-            return svand_n_u16_x(svptrue_b16(), bits, 0x7fffu);
-        }();
+        const auto computed = sve_bfloat16_sign_bits<
+            std::same_as<Op, NegOp>>(bits);
         return svreinterpret_bf16_u16(svsel_u16(
             mask, computed, svreinterpret_u16_bf16(raw_inactive)));
 #define VECOPS_VEC_SVE_UNARY(Suffix)                                   \

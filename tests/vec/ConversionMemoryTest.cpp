@@ -440,7 +440,7 @@ void verify_indexed_store_convert_pair() {
   }
 }
 
-TEST(VecConversionMemoryTest, IndexedSubwordConversionMatrix) {
+TEST(VecConversionMemoryTest, IndexedSubwordConversionsCoverWidthPairs) {
   verify_indexed_load_convert_pair<int8_t, int16_t>();
   verify_indexed_load_convert_pair<int8_t, uint16_t>();
   verify_indexed_load_convert_pair<int8_t, int32_t>();
@@ -739,22 +739,35 @@ TEST(VecConversionMemoryTest, FirstCoversEveryBoundaryCount) {
   }
 }
 
-#ifdef VECOPS_DEBUG
-TEST(VecConversionMemoryTest, FirstRejectsOutOfRangeCounts) {
+TEST(VecConversionMemoryTest, FirstCountsFollowMwhileltSemantics) {
   using Tag = vec::ScalableTag<int32_t>;
   std::array<int16_t, 4096> storage{};
-  const auto value = vec::zeros(Tag{});
-  EXPECT_DEATH((void)vec::load_convert(
-      Tag{}, storage.data(), vec::opt::first(-1)), "count");
-  EXPECT_DEATH((void)vec::load_convert(
-      Tag{}, storage.data(), vec::opt::first(vec::size(Tag{}) + 1)), "count");
-  EXPECT_DEATH(vec::store_convert(
-      Tag{}, storage.data(), value, vec::opt::first(-1)), "count");
-  EXPECT_DEATH(vec::store_convert(
-      Tag{}, storage.data(), value,
-      vec::opt::first(vec::size(Tag{}) + 1)), "count");
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane)
+    storage[static_cast<std::size_t>(lane)] =
+        static_cast<int16_t>(lane + 11);
+  const auto empty = vec::load_convert(
+      Tag{}, storage.data(), vec::opt::first(-1));
+  const auto full = vec::load_convert(
+      Tag{}, storage.data(), vec::opt::first(vec::size(Tag{}) + 1));
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane) {
+    EXPECT_EQ(vec::get(Tag{}, empty, lane), 0);
+    EXPECT_EQ(
+        vec::get(Tag{}, full, lane),
+        static_cast<int32_t>(storage[static_cast<std::size_t>(lane)]));
+  }
+
+  std::array<int16_t, 4096> output;
+  output.fill(int16_t{-1});
+  const auto value = vec::fill(Tag{}, int32_t{37});
+  vec::store_convert(Tag{}, output.data(), value, vec::opt::first(-1));
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane)
+    EXPECT_EQ(output[static_cast<std::size_t>(lane)], int16_t{-1});
+  vec::store_convert(
+      Tag{}, output.data(), value,
+      vec::opt::first(vec::size(Tag{}) + 1));
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane)
+    EXPECT_EQ(output[static_cast<std::size_t>(lane)], int16_t{37});
 }
-#endif
 
 template <typename Tag, typename From, typename... Options>
 concept AcceptsLoadConvert = requires(

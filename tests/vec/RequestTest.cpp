@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <type_traits>
 #include <vector>
 
 #include "TestHelpers.h"
@@ -25,14 +26,28 @@ std::vector<vecops::float32_t> iota_buffer(nint_t lanes, nint_t stride = 1) {
 void expect_same_lanes(Tag comparison_tag, vec::Vec<Tag> packed,
                        vec::Vec<Tag> resolved) {
   for (nint_t lane = 0; lane < vec::size(comparison_tag); ++lane) {
-    ASSERT_FLOAT_EQ(
+    ASSERT_TRUE(vec_test::values_identical(
         vec::get(comparison_tag, packed, lane),
-        vec::get(comparison_tag, resolved, lane))
+        vec::get(comparison_tag, resolved, lane)))
         << "lane=" << lane;
   }
 }
 
 } // namespace
+
+using ResolvedLoad = decltype(vec::details::resolve_load_request<Tag>());
+using ResolvedStore = decltype(vec::details::resolve_store_request<Tag>());
+using ResolvedOp = decltype(vec::details::resolve_op_request<Tag>());
+using ResolvedFirst = decltype(
+    vec::details::resolve_load_request<Tag>(vec::opt::first(0)));
+using ResolvedStrided = decltype(
+    vec::details::resolve_store_request<Tag>(vec::strided(nint_t{1})));
+static_assert(std::is_empty_v<ResolvedLoad>);
+static_assert(std::is_empty_v<ResolvedStore>);
+static_assert(std::is_empty_v<ResolvedOp>);
+static_assert(
+    sizeof(ResolvedFirst) == sizeof(nint_t));
+static_assert(sizeof(ResolvedStrided) == sizeof(nint_t));
 
 TEST(VecRequestTest, ResolvedLoadMatchesOptionPackLoad) {
   const nint_t lanes = vec::size(tag);

@@ -1,13 +1,23 @@
+// @vecops-test-shards: 13
+
 #include <gtest/gtest.h>
 
 #include <type_traits>
 
 #include "vecops/vec/Conversion.h"
 #include "TestHelpers.h"
+#include "TestShard.h"
 
 namespace vec = vecops::vec;
 
-namespace {
+template <typename T>
+void run_mask_conversion_test();
+void run_fixed_mask_conversion_test();
+
+#if defined(VECOPS_TEST_SHARD_ACTIVE)
+
+static_assert(
+    VECOPS_TEST_SHARD_COUNT == vec_test::AllElements::size + 1);
 
 template <vec::VectorTag FromTag, vec::VectorTag ToTag>
 void verify_mask_conversion(FromTag from, ToTag to) {
@@ -37,13 +47,8 @@ void verify_mask_conversion(FromTag from, ToTag to) {
   verify(boundary, "word-boundaries");
 }
 
-template <typename T>
-class VecMaskConversionTest : public ::testing::Test {};
-
-TYPED_TEST_SUITE(VecMaskConversionTest, vec_test::AllElementTypes);
-
-TYPED_TEST(VecMaskConversionTest, EveryDestinationAndScalableShape) {
-  using From = TypeParam;
+template <typename From>
+void run_mask_conversion_test() {
   vec_test::for_each_element_type([&]<typename To>() {
     vec_test::for_each_scalable_conversion_shape<From, To>(
         []<vec::VectorTag FromTag, vec::VectorTag ToTag>() {
@@ -52,8 +57,9 @@ TYPED_TEST(VecMaskConversionTest, EveryDestinationAndScalableShape) {
   });
 }
 
+#if VECOPS_TEST_SHARD_INDEX == 12
 #if !defined(CPU_CAPABILITY_SVE) || defined(HAS_FIXED_SVE_BITS)
-TEST(VecMaskConversionFixedTest, MultiwordAllLanes) {
+void run_fixed_mask_conversion_test() {
   using FromTag = vec::FixedTag<int8_t, 64>;
   verify_mask_conversion(FromTag{}, vec::Rebind<vecops::float64_t, FromTag>{});
   using ReverseTag = vec::FixedTag<vecops::float64_t, 64>;
@@ -80,5 +86,31 @@ static_assert(!ConvertsMask<
 static_assert(!ConvertsMask<
               vec::FixedTag<int64_t, 2>, vec::FixedTag<int8_t, 4>>);
 #endif
+#endif
 
-} // namespace
+#if VECOPS_TEST_SHARD_INDEX < 12
+using ShardType = vec_test::ElementAt<VECOPS_TEST_SHARD_INDEX>;
+template void run_mask_conversion_test<ShardType>();
+#endif
+
+#else
+
+template <typename T>
+class VecMaskConversionTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(
+    VecMaskConversionTest,
+    vec_test::AllElementTypes,
+    vec_test::ElementTypeName);
+
+TYPED_TEST(VecMaskConversionTest, EveryDestinationAndScalableShape) {
+  run_mask_conversion_test<TypeParam>();
+}
+
+#if !defined(CPU_CAPABILITY_SVE) || defined(HAS_FIXED_SVE_BITS)
+TEST(VecMaskConversionFixedTest, MultiwordAllLanes) {
+  run_fixed_mask_conversion_test();
+}
+#endif
+
+#endif

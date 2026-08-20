@@ -32,6 +32,19 @@ if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND EXISTS "/proc/cpuinfo")
             string(APPEND VECOPS_MAP_ARM_Native "+${_FEAT}")
         endif()
     endforeach()
+
+    # Keep benchmark Native targets on the same compiler-validated mapping as
+    # tests. GCC accepts bare `native` but rejects Clang-style feature suffixes.
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag(
+        "-march=${VECOPS_MAP_ARM_Native}"
+        VECOPS_BENCH_COMPILER_ACCEPTS_ARM_NATIVE_FEATURES)
+    if(NOT VECOPS_BENCH_COMPILER_ACCEPTS_ARM_NATIVE_FEATURES)
+        message(STATUS
+            "Compiler rejects benchmark -march=${VECOPS_MAP_ARM_Native}; "
+            "falling back to -march=native")
+        set(VECOPS_MAP_ARM_Native "native")
+    endif()
     unset(_CPUINFO)
     unset(_FEAT_LINE)
 endif()

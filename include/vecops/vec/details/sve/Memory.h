@@ -14,6 +14,11 @@
 
 namespace vecops::vec::details {
 
+// Float16/BFloat16 are two-byte wrapper types.  SVE bitwise memory leaves
+// access their object representation through a may-alias scalar so GCC cannot
+// assume that the intrinsic load/store is disjoint from the wrapper array.
+using SVEAliasU16 = uint16_t __attribute__((__may_alias__));
+
 
 /* **************************************************************************** */
 //                    Load and store word implementations                     //
@@ -475,24 +480,19 @@ VECOPS_ALWAYS_INLINE auto sve_load_memory_word(
   constexpr bool non_temporal =
       std::same_as<Temporality, mem::NonTemporal>;
   if constexpr (std::same_as<T, bfloat16_t>) {
-#if defined(HAS_BF16)
-    if constexpr (non_temporal)
-      return svldnt1_bf16(mask, reinterpret_cast<const __bf16*>(pointer));
-    else
-      return svld1_bf16(mask, reinterpret_cast<const __bf16*>(pointer));
-#else
     if constexpr (non_temporal)
       return svreinterpret_bf16_u16(
-          svldnt1_u16(mask, reinterpret_cast<const uint16_t*>(pointer)));
+          svldnt1_u16(mask, reinterpret_cast<const SVEAliasU16*>(pointer)));
     else
       return svreinterpret_bf16_u16(
-          svld1_u16(mask, reinterpret_cast<const uint16_t*>(pointer)));
-#endif
+          svld1_u16(mask, reinterpret_cast<const SVEAliasU16*>(pointer)));
   } else if constexpr (std::same_as<T, float16_t>) {
     if constexpr (non_temporal)
-      return svldnt1_f16(mask, reinterpret_cast<const __fp16*>(pointer));
+      return svreinterpret_f16_u16(
+          svldnt1_u16(mask, reinterpret_cast<const SVEAliasU16*>(pointer)));
     else
-      return svld1_f16(mask, reinterpret_cast<const __fp16*>(pointer));
+      return svreinterpret_f16_u16(
+          svld1_u16(mask, reinterpret_cast<const SVEAliasU16*>(pointer)));
   } else if constexpr (std::same_as<T, float32_t>) {
     if constexpr (non_temporal) return svldnt1_f32(mask, pointer);
     else return svld1_f32(mask, pointer);
@@ -534,26 +534,23 @@ VECOPS_ALWAYS_INLINE void sve_store_memory_word(
   constexpr bool non_temporal =
       std::same_as<Temporality, mem::NonTemporal>;
   if constexpr (std::same_as<T, bfloat16_t>) {
-#if defined(HAS_BF16)
-    if constexpr (non_temporal)
-      svstnt1_bf16(mask, reinterpret_cast<__bf16*>(pointer), value);
-    else
-      svst1_bf16(mask, reinterpret_cast<__bf16*>(pointer), value);
-#else
     if constexpr (non_temporal)
       svstnt1_u16(
-          mask, reinterpret_cast<uint16_t*>(pointer),
+          mask, reinterpret_cast<SVEAliasU16*>(pointer),
           svreinterpret_u16_bf16(value));
     else
       svst1_u16(
-          mask, reinterpret_cast<uint16_t*>(pointer),
+          mask, reinterpret_cast<SVEAliasU16*>(pointer),
           svreinterpret_u16_bf16(value));
-#endif
   } else if constexpr (std::same_as<T, float16_t>) {
     if constexpr (non_temporal)
-      svstnt1_f16(mask, reinterpret_cast<__fp16*>(pointer), value);
+      svstnt1_u16(
+          mask, reinterpret_cast<SVEAliasU16*>(pointer),
+          svreinterpret_u16_f16(value));
     else
-      svst1_f16(mask, reinterpret_cast<__fp16*>(pointer), value);
+      svst1_u16(
+          mask, reinterpret_cast<SVEAliasU16*>(pointer),
+          svreinterpret_u16_f16(value));
   } else if constexpr (std::same_as<T, float32_t>) {
     if constexpr (non_temporal) svstnt1_f32(mask, pointer, value);
     else svst1_f32(mask, pointer, value);

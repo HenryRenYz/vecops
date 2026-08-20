@@ -215,16 +215,8 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> LoadConvertOp::operator()(
         ToTag, From, A, Addr, P, Alignment, Temporality, IndexScale,
         IndexVector, Layout, ValuePolicy, MaskVector> request) const {
   if constexpr (std::same_as<From, ElementOf<ToTag>>) {
-    LoadRequest<ToTag, A, Addr, P, Alignment, Temporality, IndexScale,
-                IndexVector>
-        memory_request;
-    memory_request.first_count = request.first_count;
-    memory_request.mask = request.mask;
-    memory_request.merge_vector = request.merge_vector;
-    memory_request.merge_scalar = request.merge_scalar;
-    memory_request.stride = request.stride;
-    memory_request.indices = request.indices;
-    return LoadOp{}(to, pointer, memory_request);
+    return details::execute_load_request(
+        LoadOp{}, to, pointer, request);
   } else {
     return details::execute_load_convert_request(
         *this, to, pointer, request);
@@ -299,14 +291,8 @@ VECOPS_ALWAYS_INLINE void StoreConvertOp::operator()(
         IndexVector, Layout, ValuePolicy, Packing, MaskVector>
         request) const {
   if constexpr (std::same_as<To, ElementOf<FromTag>>) {
-    StoreRequest<FromTag, A, Addr, Alignment, Temporality, IndexScale,
-                 IndexVector>
-        memory_request;
-    memory_request.first_count = request.first_count;
-    memory_request.mask = request.mask;
-    memory_request.stride = request.stride;
-    memory_request.indices = request.indices;
-    StoreOp{}(from, pointer, value, memory_request);
+    details::execute_store_request(
+        StoreOp{}, from, pointer, value, request);
   } else {
     details::execute_store_convert_request(
         *this, from, pointer, value, request);

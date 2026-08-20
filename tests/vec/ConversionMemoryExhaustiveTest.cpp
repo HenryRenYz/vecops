@@ -1,5 +1,8 @@
+// @vecops-test-shards: 40
+
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <limits>
 #include <type_traits>
 #include <typeinfo>
@@ -9,40 +12,41 @@
 #include "vecops/vec/Memory.h"
 #include "vecops/util/ScalarConvert.h"
 #include "TestHelpers.h"
-
-#ifndef VECOPS_TEST_SOURCE_BYTES
-#error "VECOPS_TEST_SOURCE_BYTES must select one conversion-memory shard"
-#endif
+#include "TestShard.h"
 
 namespace vec = vecops::vec;
 
+enum class ConversionMemoryOperation { Load, Store, RoundTrip };
+
+template <ConversionMemoryOperation Operation, typename From>
+void run_scalable_conversion_memory_exhaustive_test();
+template <int SourceBytes>
+void run_fixed_conversion_memory_exhaustive_test();
+
+#if defined(VECOPS_TEST_SHARD_ACTIVE)
+
+static_assert(
+    VECOPS_TEST_SHARD_COUNT == vec_test::AllElements::size * 3 + 4);
+
 namespace {
 
-#if defined(VECOPS_TEST_SOURCE_ELEM)
-using SourceTypes = ::testing::Types<VECOPS_TEST_SOURCE_ELEM>;
-#elif VECOPS_TEST_SOURCE_BYTES == 1
-using SourceTypes = ::testing::Types<vecops::int8_t, vecops::uint8_t>;
-#elif VECOPS_TEST_SOURCE_BYTES == 2
-using SourceTypes = ::testing::Types<
-    vecops::bfloat16_t, vecops::float16_t,
-    vecops::int16_t, vecops::uint16_t>;
-#elif VECOPS_TEST_SOURCE_BYTES == 4
-using SourceTypes = ::testing::Types<
-    vecops::float32_t, vecops::int32_t, vecops::uint32_t>;
-#elif VECOPS_TEST_SOURCE_BYTES == 8
-using SourceTypes = ::testing::Types<
-    vecops::float64_t, vecops::int64_t, vecops::uint64_t>;
-#else
-#error "unsupported conversion-memory source width"
-#endif
-
 template <typename From, typename To>
-From matrix_input(vecops::nint_t lane) {
+From exhaustive_input(vecops::nint_t lane, double runtime_zero = 0.0) {
   if constexpr (::vecops::IsFloatV<From>) {
     const double magnitude = static_cast<double>(lane % 9) * 0.5;
     const double value = std::unsigned_integral<To>
         ? magnitude : ((lane % 2) == 0 ? magnitude : -magnitude);
-    return static_cast<From>(value);
+    if constexpr (std::same_as<From, vecops::bfloat16_t>) {
+      const float scalar = static_cast<float>(value + runtime_zero);
+      if (std::isnan(scalar))
+        return vecops::bfloat16_t::from_bits(uint16_t{0x7fc0});
+      const uint32_t bits = ::vecops::bitcast<uint32_t>(scalar);
+      const uint32_t bias = ((bits >> 16) & 1U) + uint32_t{0x7fff};
+      return vecops::bfloat16_t::from_bits(
+          static_cast<uint16_t>((bits + bias) >> 16));
+    } else {
+      return static_cast<From>(value + runtime_zero);
+    }
   } else if constexpr (std::signed_integral<From>) {
     if (lane == 0) return std::numeric_limits<From>::lowest();
     if (lane == 1) return std::numeric_limits<From>::max();
@@ -67,8 +71,14 @@ void verify_load_case() {
                << ", to_words=" << vec::num_words(ToTag{}));
 
   std::vector<From> input(static_cast<std::size_t>(lanes));
+  // BiSheng 5.1 cannot select a constant FCVT/BFCVT feeding an unrolled
+  // pre-increment store.  Keep the values runtime-visible without changing
+  // them, matching the workaround used by the LayerNorm strided-row test.
+  volatile double opaque_zero = 0.0;
+  const double runtime_zero = opaque_zero;
   for (vecops::nint_t lane = 0; lane < lanes; ++lane)
-    input[static_cast<std::size_t>(lane)] = matrix_input<From, To>(lane);
+    input[static_cast<std::size_t>(lane)] =
+        exhaustive_input<From, To>(lane, runtime_zero);
 
   const auto implicit = vec::load_convert(ToTag{}, input.data());
   const auto explicit_policy = vec::load_convert(
@@ -120,8 +130,11 @@ void verify_store_case() {
   std::vector<To> packed(static_cast<std::size_t>(lanes));
   std::vector<To> split(static_cast<std::size_t>(lanes));
   std::vector<To> wrapped(static_cast<std::size_t>(lanes));
+  volatile double opaque_zero = 0.0;
+  const double runtime_zero = opaque_zero;
   for (vecops::nint_t lane = 0; lane < lanes; ++lane)
-    input[static_cast<std::size_t>(lane)] = matrix_input<From, To>(lane);
+    input[static_cast<std::size_t>(lane)] =
+        exhaustive_input<From, To>(lane, runtime_zero);
 
   const auto source = vec::load(FromTag{}, input.data());
   vec::store_convert(FromTag{}, implicit.data(), source);
@@ -179,10 +192,13 @@ void verify_unordered_round_trip() {
                << ", to_words=" << vec::num_words(ToTag{}));
   std::vector<From> input(static_cast<std::size_t>(lanes));
   std::vector<From> output(static_cast<std::size_t>(lanes));
+  volatile int opaque_zero = 0;
+  const int runtime_zero = opaque_zero;
   for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
     const int small =
         (std::unsigned_integral<From> || std::unsigned_integral<To>)
-        ? static_cast<int>(lane % 7) : static_cast<int>(lane % 7) - 3;
+        ? static_cast<int>(lane % 7) + runtime_zero
+        : static_cast<int>(lane % 7) - 3 + runtime_zero;
     input[static_cast<std::size_t>(lane)] = static_cast<From>(small);
   }
   const auto converted = vec::load_convert(
@@ -198,27 +214,25 @@ void verify_unordered_round_trip() {
   }
 }
 
-template <typename From, typename To>
+template <ConversionMemoryOperation Operation, typename From, typename To>
 void verify_scalable_pair() {
   vec_test::for_each_scalable_conversion_shape<From, To>(
       []<vec::VectorTag FromTag, vec::VectorTag ToTag>() {
-        verify_load_case<FromTag, ToTag>();
-        verify_store_case<FromTag, ToTag>();
-        verify_unordered_round_trip<FromTag, ToTag>();
+        if constexpr (Operation == ConversionMemoryOperation::Load)
+          verify_load_case<FromTag, ToTag>();
+        else if constexpr (Operation == ConversionMemoryOperation::Store)
+          verify_store_case<FromTag, ToTag>();
+        else
+          verify_unordered_round_trip<FromTag, ToTag>();
       });
 }
 
-template <typename T>
-class VecConversionMemoryMatrixTest : public ::testing::Test {};
+} // namespace
 
-TYPED_TEST_SUITE(VecConversionMemoryMatrixTest, SourceTypes);
-
-TYPED_TEST(
-    VecConversionMemoryMatrixTest,
-    IndependentLoadAndStoreEveryDestinationAndScalableWordPair) {
-  using From = TypeParam;
+template <ConversionMemoryOperation Operation, typename From>
+void run_scalable_conversion_memory_exhaustive_test() {
   vec_test::for_each_element_type([&]<typename To>() {
-    verify_scalable_pair<From, To>();
+    verify_scalable_pair<Operation, From, To>();
   });
 }
 
@@ -234,18 +248,71 @@ void verify_fixed_pair() {
       });
 }
 
-TEST(VecConversionMemoryFixedMatrixTest, EveryWordCountForWidthRatio) {
-#if VECOPS_TEST_SOURCE_BYTES == 1
-  verify_fixed_pair<vecops::int8_t, vecops::int64_t>();
-#elif VECOPS_TEST_SOURCE_BYTES == 2
-  verify_fixed_pair<vecops::int16_t, vecops::int8_t>();
-#elif VECOPS_TEST_SOURCE_BYTES == 4
-  verify_fixed_pair<vecops::int32_t, vecops::int8_t>();
-#elif VECOPS_TEST_SOURCE_BYTES == 8
-  verify_fixed_pair<vecops::int64_t, vecops::int8_t>();
-#endif
+template <int SourceBytes>
+void run_fixed_conversion_memory_exhaustive_test() {
+  if constexpr (SourceBytes == 1)
+    verify_fixed_pair<vecops::int8_t, vecops::int64_t>();
+  else if constexpr (SourceBytes == 2)
+    verify_fixed_pair<vecops::int16_t, vecops::int8_t>();
+  else if constexpr (SourceBytes == 4)
+    verify_fixed_pair<vecops::int32_t, vecops::int8_t>();
+  else if constexpr (SourceBytes == 8)
+    verify_fixed_pair<vecops::int64_t, vecops::int8_t>();
 }
 
 #endif
 
-} // namespace
+#if VECOPS_TEST_SHARD_INDEX < 36
+constexpr auto shard_operation = static_cast<ConversionMemoryOperation>(
+    VECOPS_TEST_SHARD_INDEX / vec_test::AllElements::size);
+constexpr std::size_t shard_type_index =
+    VECOPS_TEST_SHARD_INDEX % vec_test::AllElements::size;
+using ShardType = vec_test::ElementAt<shard_type_index>;
+template void run_scalable_conversion_memory_exhaustive_test<
+    shard_operation, ShardType>();
+#elif !defined(CPU_CAPABILITY_SVE) || defined(HAS_FIXED_SVE_BITS)
+constexpr int shard_source_bytes = 1 << (VECOPS_TEST_SHARD_INDEX - 36);
+template void run_fixed_conversion_memory_exhaustive_test<shard_source_bytes>();
+#endif
+
+#else
+
+template <typename T>
+class VecConversionMemoryExhaustiveTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(
+    VecConversionMemoryExhaustiveTest,
+    vec_test::AllElementTypes,
+    vec_test::ElementTypeName);
+
+TYPED_TEST(
+    VecConversionMemoryExhaustiveTest,
+    LoadsEveryDestinationAndScalableWordPair) {
+  run_scalable_conversion_memory_exhaustive_test<
+      ConversionMemoryOperation::Load, TypeParam>();
+}
+
+TYPED_TEST(
+    VecConversionMemoryExhaustiveTest,
+    StoresEveryDestinationAndScalableWordPair) {
+  run_scalable_conversion_memory_exhaustive_test<
+      ConversionMemoryOperation::Store, TypeParam>();
+}
+
+TYPED_TEST(
+    VecConversionMemoryExhaustiveTest,
+    RoundTripsEveryDestinationAndScalableWordPair) {
+  run_scalable_conversion_memory_exhaustive_test<
+      ConversionMemoryOperation::RoundTrip, TypeParam>();
+}
+
+#if !defined(CPU_CAPABILITY_SVE) || defined(HAS_FIXED_SVE_BITS)
+TEST(VecConversionMemoryExhaustiveTest, EveryWordCountForWidthRatio) {
+  run_fixed_conversion_memory_exhaustive_test<1>();
+  run_fixed_conversion_memory_exhaustive_test<2>();
+  run_fixed_conversion_memory_exhaustive_test<4>();
+  run_fixed_conversion_memory_exhaustive_test<8>();
+}
+#endif
+
+#endif

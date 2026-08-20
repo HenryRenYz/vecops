@@ -1,3 +1,5 @@
+// @vecops-test-shards: 24
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -10,16 +12,34 @@
 
 #include "vecops/vec/Math.h"
 #include "TestHelpers.h"
+#include "TestShard.h"
 
 namespace vec = vecops::vec;
 
-namespace {
+enum class MathOperation {
+  ExpStrict,
+  ExpFast,
+  ExpEstimate,
+  ExpNegStrict,
+  ExpNegFast,
+  ExpNegEstimate,
+};
 
-using FloatingTypes = ::testing::Types<
-    vecops::bfloat16_t,
-    vecops::float16_t,
-    vecops::float32_t,
-    vecops::float64_t>;
+template <MathOperation Operation, typename T>
+void run_math_shapes_test();
+template <MathOperation Operation, typename T>
+void run_math_dense_test();
+template <typename T>
+void run_math_ieee_edges_test();
+template <MathOperation Operation, typename T>
+void run_fixed_sve_math_test();
+
+#if defined(VECOPS_TEST_SHARD_ACTIVE)
+
+static_assert(
+    VECOPS_TEST_SHARD_COUNT == vec_test::FloatingElements::size * 6);
+
+namespace {
 
 template <typename T>
 double as_double(T value) {
@@ -229,14 +249,21 @@ void verify_lane_shape(Tag tag) {
   }
 }
 
-template <typename T, bool FullOptions = true, vec::FloatingTag Tag>
+template <MathOperation Operation, typename T, bool FullOptions = true,
+          vec::FloatingTag Tag>
 void verify_every_operation(Tag tag) {
-  verify_lane_shape<vec::Accuracy::Strict, false, FullOptions>(tag);
-  verify_lane_shape<vec::Accuracy::Fast, false, FullOptions>(tag);
-  verify_lane_shape<vec::Accuracy::Estimate, false, FullOptions>(tag);
-  verify_lane_shape<vec::Accuracy::Strict, true, FullOptions>(tag);
-  verify_lane_shape<vec::Accuracy::Fast, true, FullOptions>(tag);
-  verify_lane_shape<vec::Accuracy::Estimate, true, FullOptions>(tag);
+  if constexpr (Operation == MathOperation::ExpStrict)
+    verify_lane_shape<vec::Accuracy::Strict, false, FullOptions>(tag);
+  else if constexpr (Operation == MathOperation::ExpFast)
+    verify_lane_shape<vec::Accuracy::Fast, false, FullOptions>(tag);
+  else if constexpr (Operation == MathOperation::ExpEstimate)
+    verify_lane_shape<vec::Accuracy::Estimate, false, FullOptions>(tag);
+  else if constexpr (Operation == MathOperation::ExpNegStrict)
+    verify_lane_shape<vec::Accuracy::Strict, true, FullOptions>(tag);
+  else if constexpr (Operation == MathOperation::ExpNegFast)
+    verify_lane_shape<vec::Accuracy::Fast, true, FullOptions>(tag);
+  else
+    verify_lane_shape<vec::Accuracy::Estimate, true, FullOptions>(tag);
 }
 
 template <vec::Accuracy Tier, bool NegativeOnly, typename T>
@@ -259,34 +286,37 @@ void verify_dense_samples() {
   }
 }
 
-template <typename T>
-class VecMathTest : public ::testing::Test {};
+} // namespace
 
-TYPED_TEST_SUITE(VecMathTest, FloatingTypes);
-
-TYPED_TEST(VecMathTest, EveryOperationShapeAndOptions) {
-  using T = TypeParam;
+template <MathOperation Operation, typename T>
+void run_math_shapes_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::FloatingTag Tag>() {
     constexpr bool options = vec_test::exhaustive_options_shape<Tag> &&
         (vec::scale_power<Tag> != vec_test::details::maximum_scalable_power ||
          std::same_as<T, vecops::float32_t>);
-    verify_every_operation<T, options>(Tag{});
+    verify_every_operation<Operation, T, options>(Tag{});
   });
 }
 
-TYPED_TEST(VecMathTest, DenseAccuracyAndNegativeDomain) {
-  using T = TypeParam;
-  verify_dense_samples<vec::Accuracy::Strict, false, T>();
-  verify_dense_samples<vec::Accuracy::Fast, false, T>();
-  verify_dense_samples<vec::Accuracy::Estimate, false, T>();
-  verify_dense_samples<vec::Accuracy::Strict, true, T>();
-  verify_dense_samples<vec::Accuracy::Fast, true, T>();
-  verify_dense_samples<vec::Accuracy::Estimate, true, T>();
+template <MathOperation Operation, typename T>
+void run_math_dense_test() {
+  if constexpr (Operation == MathOperation::ExpStrict)
+    verify_dense_samples<vec::Accuracy::Strict, false, T>();
+  else if constexpr (Operation == MathOperation::ExpFast)
+    verify_dense_samples<vec::Accuracy::Fast, false, T>();
+  else if constexpr (Operation == MathOperation::ExpEstimate)
+    verify_dense_samples<vec::Accuracy::Estimate, false, T>();
+  else if constexpr (Operation == MathOperation::ExpNegStrict)
+    verify_dense_samples<vec::Accuracy::Strict, true, T>();
+  else if constexpr (Operation == MathOperation::ExpNegFast)
+    verify_dense_samples<vec::Accuracy::Fast, true, T>();
+  else
+    verify_dense_samples<vec::Accuracy::Estimate, true, T>();
 }
 
-#ifndef VECOPS_MATH_ASSUME_VALID_INPUTS
-TYPED_TEST(VecMathTest, IeeeEdges) {
-  using T = TypeParam;
+#if !defined(VECOPS_MATH_ASSUME_VALID_INPUTS)
+template <typename T>
+void run_math_ieee_edges_test() {
   vec::ScalableTag<T, 0> tag;
   auto input = vec::zeros(tag);
   constexpr double values[] = {0.0, -0.0, 1.0, -1.0};
@@ -311,8 +341,8 @@ TYPED_TEST(VecMathTest, IeeeEdges) {
 #endif
 
 #if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
-TYPED_TEST(VecMathTest, FixedSVEBatchesBeyondTupleLimit) {
-  using T = TypeParam;
+template <MathOperation Operation, typename T>
+void run_fixed_sve_math_test() {
   if constexpr (!std::same_as<T, vecops::float32_t>) {
     GTEST_SKIP() << "f32 is the representative >4-word floating type";
   } else {
@@ -322,9 +352,84 @@ TYPED_TEST(VecMathTest, FixedSVEBatchesBeyondTupleLimit) {
         std::bit_ceil(static_cast<std::uint64_t>(word_lanes * 4 + 1)));
     using Tag = vec::FixedTag<T, lanes>;
     EXPECT_GT(vec::num_words(Tag{}), 4);
-    verify_every_operation<T, false>(Tag{});
+    verify_every_operation<Operation, T, false>(Tag{});
   }
 }
 #endif
 
-} // namespace
+constexpr auto shard_math_operation = static_cast<MathOperation>(
+    VECOPS_TEST_SHARD_INDEX / vec_test::FloatingElements::size);
+constexpr std::size_t shard_math_type_index =
+    VECOPS_TEST_SHARD_INDEX % vec_test::FloatingElements::size;
+using ShardType = vec_test::FloatingElementAt<shard_math_type_index>;
+template void run_math_shapes_test<shard_math_operation, ShardType>();
+template void run_math_dense_test<shard_math_operation, ShardType>();
+#if !defined(VECOPS_MATH_ASSUME_VALID_INPUTS)
+#if VECOPS_TEST_SHARD_INDEX < 4
+template void run_math_ieee_edges_test<ShardType>();
+#endif
+#endif
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+template void run_fixed_sve_math_test<shard_math_operation, ShardType>();
+#endif
+
+#else
+
+template <typename T>
+class VecMathTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(
+    VecMathTest,
+    vec_test::FloatingElementTypes,
+    vec_test::ElementTypeName);
+
+template <typename T>
+void run_all_math_shapes() {
+  run_math_shapes_test<MathOperation::ExpStrict, T>();
+  run_math_shapes_test<MathOperation::ExpFast, T>();
+  run_math_shapes_test<MathOperation::ExpEstimate, T>();
+  run_math_shapes_test<MathOperation::ExpNegStrict, T>();
+  run_math_shapes_test<MathOperation::ExpNegFast, T>();
+  run_math_shapes_test<MathOperation::ExpNegEstimate, T>();
+}
+
+template <typename T>
+void run_all_math_dense_cases() {
+  run_math_dense_test<MathOperation::ExpStrict, T>();
+  run_math_dense_test<MathOperation::ExpFast, T>();
+  run_math_dense_test<MathOperation::ExpEstimate, T>();
+  run_math_dense_test<MathOperation::ExpNegStrict, T>();
+  run_math_dense_test<MathOperation::ExpNegFast, T>();
+  run_math_dense_test<MathOperation::ExpNegEstimate, T>();
+}
+
+TYPED_TEST(VecMathTest, EveryOperationShapeAndOptions) {
+  run_all_math_shapes<TypeParam>();
+}
+
+TYPED_TEST(VecMathTest, DenseAccuracyAndNegativeDomain) {
+  run_all_math_dense_cases<TypeParam>();
+}
+
+#if !defined(VECOPS_MATH_ASSUME_VALID_INPUTS)
+TYPED_TEST(VecMathTest, IeeeEdges) {
+  run_math_ieee_edges_test<TypeParam>();
+}
+#endif
+
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+TYPED_TEST(VecMathTest, FixedSVEBatchesBeyondTupleLimit) {
+  if constexpr (!std::same_as<TypeParam, vecops::float32_t>) {
+    GTEST_SKIP() << "f32 is the representative >4-word floating type";
+  } else {
+    run_fixed_sve_math_test<MathOperation::ExpStrict, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::ExpFast, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::ExpEstimate, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::ExpNegStrict, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::ExpNegFast, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::ExpNegEstimate, TypeParam>();
+  }
+}
+#endif
+
+#endif

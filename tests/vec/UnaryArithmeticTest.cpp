@@ -1,3 +1,5 @@
+// @vecops-test-shards: 12
+
 #include <gtest/gtest.h>
 
 #include <bit>
@@ -7,8 +9,18 @@
 
 #include "vecops/vec/Arithmetic.h"
 #include "TestHelpers.h"
+#include "TestShard.h"
 
 namespace vec = vecops::vec;
+
+template <typename T>
+void run_unary_arithmetic_test();
+template <typename T>
+void run_fixed_unary_arithmetic_test();
+
+#if defined(VECOPS_TEST_SHARD_ACTIVE)
+
+static_assert(VECOPS_TEST_SHARD_COUNT == vec_test::AllElements::size);
 
 enum class UnaryKind { Neg, Abs };
 
@@ -137,12 +149,7 @@ void verify_unary(Tag tag) {
 }
 
 template <typename T>
-class VecUnaryArithmeticTest : public ::testing::Test {};
-
-TYPED_TEST_SUITE(VecUnaryArithmeticTest, vec_test::AllElementTypes);
-
-TYPED_TEST(VecUnaryArithmeticTest, CoversEveryLaneShapeAndPopulation) {
-  using T = TypeParam;
+void run_unary_arithmetic_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
     constexpr bool options = vec_test::exhaustive_options_shape<Tag>;
     verify_unary<UnaryKind::Neg, options>(Tag{});
@@ -152,8 +159,8 @@ TYPED_TEST(VecUnaryArithmeticTest, CoversEveryLaneShapeAndPopulation) {
 
 #if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
 
-TYPED_TEST(VecUnaryArithmeticTest, FixedSVEBatchesBeyondTupleLimit) {
-  using T = TypeParam;
+template <typename T>
+void run_fixed_unary_arithmetic_test() {
   if constexpr (
       !std::same_as<T, vecops::float32_t> &&
       !std::same_as<T, vecops::int32_t>) {
@@ -169,5 +176,33 @@ TYPED_TEST(VecUnaryArithmeticTest, FixedSVEBatchesBeyondTupleLimit) {
     verify_unary<UnaryKind::Abs, false>(Tag{});
   }
 }
+
+#endif
+
+using ShardType = vec_test::ElementAt<VECOPS_TEST_SHARD_INDEX>;
+template void run_unary_arithmetic_test<ShardType>();
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+template void run_fixed_unary_arithmetic_test<ShardType>();
+#endif
+
+#else
+
+template <typename T>
+class VecUnaryArithmeticTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(
+    VecUnaryArithmeticTest,
+    vec_test::AllElementTypes,
+    vec_test::ElementTypeName);
+
+TYPED_TEST(VecUnaryArithmeticTest, CoversEveryLaneShapeAndPopulation) {
+  run_unary_arithmetic_test<TypeParam>();
+}
+
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+TYPED_TEST(VecUnaryArithmeticTest, FixedSVEBatchesBeyondTupleLimit) {
+  run_fixed_unary_arithmetic_test<TypeParam>();
+}
+#endif
 
 #endif

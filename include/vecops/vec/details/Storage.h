@@ -11,6 +11,7 @@
 
 #include <array>
 #include <bitset>
+#include <cassert>
 #include <concepts>
 #include <cstddef>
 #include <type_traits>
@@ -82,6 +83,21 @@ constexpr Word get_word(const WordArray<Word, Count>& value) {
   return value.words[static_cast<std::size_t>(Index)];
 }
 
+/** Returns a physical word selected by a runtime ordinal from sized storage. */
+template <typename Word>
+VECOPS_ALWAYS_INLINE constexpr Word get_word(
+    const Word& value, nint_t ordinal) {
+  assert(ordinal == 0);
+  return value;
+}
+
+template <typename Word, nint_t Count>
+VECOPS_ALWAYS_INLINE constexpr Word get_word(
+    const WordArray<Word, Count>& value, nint_t ordinal) {
+  assert(ordinal >= 0 && ordinal < Count);
+  return value.words[static_cast<std::size_t>(ordinal)];
+}
+
 template <nint_t Index, typename Word>
 constexpr Word set_word(Word, Word word) {
   static_assert(Index == 0);
@@ -93,6 +109,22 @@ constexpr WordArray<Word, Count> set_word(
     WordArray<Word, Count> value, Word word) {
   static_assert(Index >= 0 && Index < Count);
   value.words[static_cast<std::size_t>(Index)] = word;
+  return value;
+}
+
+/** Replaces a physical word selected by a runtime ordinal in sized storage. */
+template <typename Word>
+VECOPS_ALWAYS_INLINE constexpr Word set_word(
+    Word, nint_t ordinal, Word word) {
+  assert(ordinal == 0);
+  return word;
+}
+
+template <typename Word, nint_t Count>
+VECOPS_ALWAYS_INLINE constexpr WordArray<Word, Count> set_word(
+    WordArray<Word, Count> value, nint_t ordinal, Word word) {
+  assert(ordinal >= 0 && ordinal < Count);
+  value.words[static_cast<std::size_t>(ordinal)] = word;
   return value;
 }
 

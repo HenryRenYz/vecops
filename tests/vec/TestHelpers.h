@@ -1,39 +1,14 @@
 #ifndef VECOPS_TESTS_NVEC_TESTHELPERS_H
 #define VECOPS_TESTS_NVEC_TESTHELPERS_H
 
-#include <gtest/gtest.h>
-
 #include <cstdint>
 #include <type_traits>
 #include <utility>
 
+#include "TestTypes.h"
 #include "vecops/vec/VecBase.h"
 
 namespace vec_test {
-
-using AllElementTypes = ::testing::Types<
-    vecops::bfloat16_t,
-    vecops::float16_t,
-    vecops::float32_t,
-    vecops::float64_t,
-    vecops::int8_t,
-    vecops::uint8_t,
-    vecops::int16_t,
-    vecops::uint16_t,
-    vecops::int32_t,
-    vecops::uint32_t,
-    vecops::int64_t,
-    vecops::uint64_t>;
-
-using FloatingElementTypes = ::testing::Types<
-    vecops::bfloat16_t, vecops::float16_t,
-    vecops::float32_t, vecops::float64_t>;
-
-using IntegerElementTypes = ::testing::Types<
-    vecops::int8_t, vecops::uint8_t,
-    vecops::int16_t, vecops::uint16_t,
-    vecops::int32_t, vecops::uint32_t,
-    vecops::int64_t, vecops::uint64_t>;
 
 template <typename Visitor>
 void for_each_element_type(Visitor&& visitor) {

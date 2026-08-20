@@ -43,37 +43,67 @@ VECOPS_INLINE void validate_layernorm_layouts(
                 "LayerNorm scale/bias size mismatch");
 }
 
-template <typename Compute, typename Tensor, typename Transform,
-          typename Projection, typename... Facts>
-VECOPS_INLINE auto remove_first_dimension(
-    const tensor::InputSpec<
-        Compute, Tensor, Transform, Projection, Facts...>& spec) {
-  auto sliced_tensor = tensor::make_tensor(
-      spec.tensor().data(), tensor::remove<0>(spec.input_layout()));
-  auto projection = spec.projection().template sliced<0>(0);
-  return tensor::InputSpec<Compute, decltype(sliced_tensor), Transform,
-                           decltype(projection)>{
-      sliced_tensor, spec.transform(), projection};
-}
-
-template <typename Compute, typename Tensor, typename Transform,
-          typename Projection, typename... Facts>
-VECOPS_INLINE auto remove_first_dimension(
-    const tensor::OutputSpec<
-        Compute, Tensor, Transform, Projection, Facts...>& spec) {
-  auto sliced_tensor = tensor::make_tensor(
-      spec.tensor().data(), tensor::remove<0>(spec.output_layout()));
-  auto projection = spec.projection().template sliced<0>(0);
-  return tensor::OutputSpec<Compute, decltype(sliced_tensor), Transform,
-                            decltype(projection)>{
-      sliced_tensor, spec.transform(), projection};
-}
-
+// Recursively drop leading dimensions until only the normalized row remains.
+// `slice_view` preserves stride meta types and composes the projection.
 template <int Count, typename Spec>
 VECOPS_INLINE auto row_spec(const Spec& spec) {
   if constexpr (Count == 0) return spec;
-  else return row_spec<Count - 1>(remove_first_dimension(spec));
+  else return row_spec<Count - 1>(tensor::slice_view<0>(spec, 0));
 }
+
+/**
+ * @brief Per-row access policies and loop tuning for one storage family.
+ *
+ * A recipe keeps every policy-level difference between row paths in one
+ * place: the conversion order shared by all four operands, permutation
+ * safety, the unroll and fusion parameters `run_row` consumes, and where
+ * parameter sessions are constructed. `PerRowParams` records a measured
+ * compiler preference rather than an algorithmic need: BiSheng schedules
+ * the 16-bit row kernel better with sessions constructed inside the row
+ * frame, while GCC keeps the generic path fastest with one hoisted
+ * construction before the loop.
+ */
+template <typename ConversionOrder, int Full, int Tail, bool Fused,
+          kernel::loop::TailCarryPolicy Carry, bool PermutationSafe,
+          bool PerRowParams>
+struct RowRecipe {
+  static constexpr int FullFactor = Full;
+  static constexpr int TailFactor = Tail;
+  static constexpr bool FusedShift = Fused;
+  static constexpr kernel::loop::TailCarryPolicy TailPolicy = Carry;
+  static constexpr bool BindParamsPerRow = PerRowParams;
+
+  template <tensor::AccessPlan Plan, int ReadPasses>
+  using InputPolicy = tensor::InputAccessPolicy<
+      0, ReadPasses, Plan, ConversionOrder, vec::cvt::Saturate,
+      tensor::DefaultMemoryPolicy, PermutationSafe>;
+  using OutputPolicy = tensor::OutputAccessPolicy<
+      0, tensor::AccessPlan::direct, ConversionOrder, vec::cvt::Saturate,
+      tensor::DefaultMemoryPolicy, PermutationSafe>;
+  using ParamPolicy = tensor::InputAccessPolicy<
+      0, 1, tensor::AccessPlan::direct, ConversionOrder, vec::cvt::Saturate,
+      tensor::DefaultMemoryPolicy, PermutationSafe>;
+};
+
+/** @brief Ordered-conversion baseline with hoisted parameter sessions. */
+using GenericRowRecipe = RowRecipe<
+    vec::cvt::Ordered, 4, 1, false,
+    kernel::loop::TailCarryPolicy::independent, false, false>;
+
+#if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE2) && \
+    !defined(VECOPS_DISABLE_SVE_16BIT_LAYERNORM_FAST_PATH)
+/**
+ * @brief Half-precision specialization: one order-free saturating conversion
+ * for the whole row region, fused shift, and a wider tail block. Layouts
+ * whose stride is not provably unit keep this recipe and simply lower to
+ * strided (gather/scatter) access.
+ */
+template <typename Element>
+using SVE16RowRecipe = RowRecipe<
+    std::conditional_t<
+        IsFloat16V<Element>, vec::cvt::Unordered, vec::cvt::Ordered>,
+    4, 2, true, kernel::loop::TailCarryPolicy::reuse_prefix, true, true>;
+#endif
 
 } // namespace details
 
@@ -126,7 +156,6 @@ public:
     details::validate_layernorm_layouts(
         in.input_layout(), scale.input_layout(), bias.input_layout(),
         out.output_layout());
-    constexpr int PrefixRank = InSpec::InputTensor::Ndim - 1;
 
 #if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE2) && \
     !defined(VECOPS_DISABLE_SVE_16BIT_LAYERNORM_FAST_PATH)
@@ -142,6 +171,9 @@ public:
 #else
     constexpr bool SupportedElement = IsFloat16V<InElement>;
 #endif
+    // Storage-element and transform eligibility only: a layout whose final
+    // stride is not provably unit keeps the same recipe and lowers to
+    // strided access inside the row.
     constexpr bool UseSVE16 =
         std::same_as<ComputeType, float32_t> &&
         std::same_as<Tag, vec::ScalableTag<float32_t, 0>> &&
@@ -151,67 +183,18 @@ public:
         std::same_as<typename InSpec::TransformType, tensor::NoTransform> &&
         std::same_as<typename ScaleSpec::TransformType, tensor::NoTransform> &&
         std::same_as<typename BiasSpec::TransformType, tensor::NoTransform> &&
-        std::same_as<typename OutSpec::TransformType, tensor::NoTransform> &&
-        tensor::is_ct_last_contiguous<typename InSpec::InputLayout, 1>::value &&
-        tensor::is_ct_last_contiguous<
-            typename ScaleSpec::InputLayout, 1>::value &&
-        tensor::is_ct_last_contiguous<
-            typename BiasSpec::InputLayout, 1>::value &&
-        tensor::is_ct_last_contiguous<
-            typename OutSpec::OutputLayout, 1>::value;
-    if constexpr (UseSVE16) {
-      kernel::loop::for_each_dims<PrefixRank>(
-          [this, &workspace, &scale, &bias](
-              const auto& in_row, const auto& out_row)
-              VECOPS_INLINE_LAMBDA {
-            bind_sve_16bit_row(
-                workspace, in_row, scale, bias, out_row);
-          },
-          in, out);
-      return;
-    }
+        std::same_as<typename OutSpec::TransformType, tensor::NoTransform>;
+    using RowRecipe = std::conditional_t<
+        UseSVE16, details::SVE16RowRecipe<InElement>,
+        details::GenericRowRecipe>;
+#else
+    using RowRecipe = details::GenericRowRecipe;
 #endif
 
-    // Parameters are shared by every row. Bind them once outside the row loop
-    // so short/decode kernels do not repeatedly construct equivalent sessions.
-    // They are single-pass rank-1 inputs, therefore direct is also the resolved
-    // automatic plan for every layout.
-    using ParamPolicy = tensor::InputAccessPolicy<
-        0, 1, tensor::AccessPlan::direct>;
-    kernel::with_operands(
-        workspace, tensor::operand(scale, ParamPolicy{}),
-        tensor::operand(bias, ParamPolicy{}),
-        [this, &workspace, &in, &out](auto& gamma, auto& beta) {
-          // Resolve the only plan that can differ for a row before entering
-          // the row loop. A rank-1 output has no alternate unit-stride commit
-          // axis, so its automatic plan is always direct. The row stride is
-          // decided from the layout's meta type: anything not provably unit
-          // is treated as strided.
-          using RowStrideMeta = typename tensor::details::MetaElement<
-              PrefixRank,
-              typename InSpec::InputLayout::Strides>::type;
-          constexpr bool RowUnitStride =
-              tensor::details::is_definitely_one_meta_v<RowStrideMeta>;
-          if constexpr (RowUnitStride) {
-            kernel::loop::for_each_dims<PrefixRank>(
-                [this, &workspace, &gamma, &beta](const auto& in_row,
-                                                  const auto& out_row)
-                    VECOPS_INLINE_LAMBDA {
-                  bind_row<tensor::AccessPlan::direct>(
-                      workspace, in_row, gamma, beta, out_row);
-                },
-                in, out);
-          } else {
-            kernel::loop::for_each_dims<PrefixRank>(
-                [this, &workspace, &gamma, &beta](const auto& in_row,
-                                                  const auto& out_row)
-                    VECOPS_INLINE_LAMBDA {
-                  bind_row<tensor::AccessPlan::automatic>(
-                      workspace, in_row, gamma, beta, out_row);
-                },
-                in, out);
-          }
-        });
+    // The row pipeline lives in its own frame; see the attribute rationale
+    // on `run_rows`. The call happens once per operator() invocation,
+    // never per row.
+    run_rows<RowRecipe>(workspace, in, scale, bias, out);
   }
 
   template <typename InSpec, typename ScaleSpec, typename BiasSpec,
@@ -225,81 +208,104 @@ public:
   }
 
 private:
-#if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE2) && \
-    !defined(VECOPS_DISABLE_SVE_16BIT_LAYERNORM_FAST_PATH)
-  template <typename InSpec, typename ScaleSpec, typename BiasSpec,
-            typename OutSpec>
-  VECOPS_ALWAYS_INLINE void bind_sve_16bit_row(
+  // The row stride is decided from the layout's meta type: anything not
+  // provably unit is treated as strided. Parameters are rank-1 inputs whose
+  // direct-forced plan always resolves without the operand-scoping
+  // machinery, so they bind with plain `tensor::bind`; the recipe decides
+  // whether that happens once before the loop or inside each row frame.
+  //
+  // The frame itself encodes a measured per-compiler preference: GCC folds
+  // the whole row nest into the caller when inlineable, and the hot loops
+  // inherit the caller's layout, costing 2-6% on large prefill shapes;
+  // BiSheng instead compiles the outlined nest 25% slower on rank-3 medium
+  // fp16. x86/GCC keeps the outline, SVE keeps full inlining.
+  template <typename Recipe, typename InSpec, typename ScaleSpec,
+            typename BiasSpec, typename OutSpec>
+#if defined(ARCH_X86_FAMILY)
+  VECOPS_NOINLINE
+#else
+  VECOPS_ALWAYS_INLINE
+#endif
+  void run_rows(
       kernel::WorkspaceView& workspace, const InSpec& in,
       const ScaleSpec& scale, const BiasSpec& bias,
       const OutSpec& out) const {
-    using Element = std::remove_const_t<typename InSpec::MemoryElement>;
-    using ConversionOrder = std::conditional_t<
-        IsFloat16V<Element>, vec::cvt::Unordered, vec::cvt::Ordered>;
-    using XPolicy = tensor::InputAccessPolicy<
-        0, 2, tensor::AccessPlan::direct, ConversionOrder,
-        vec::cvt::Saturate, tensor::DefaultMemoryPolicy, true>;
-    using ParamPolicy = tensor::InputAccessPolicy<
-        0, 1, tensor::AccessPlan::direct, ConversionOrder,
-        vec::cvt::Saturate, tensor::DefaultMemoryPolicy, true>;
-    using YPolicy = tensor::OutputAccessPolicy<
-        0, tensor::AccessPlan::direct, ConversionOrder,
-        vec::cvt::Saturate, tensor::DefaultMemoryPolicy, true>;
-    using F32Tag = vec::ScalableTag<float32_t, 0>;
-
-    // Every fast-path operand is compile-time direct. Binding each one here
-    // avoids routing the row kernel through std::invoke; BiSheng otherwise
-    // outlines that wrapper despite the callback's always_inline attribute.
-    auto x = tensor::bind(in, XPolicy{}, workspace);
-    auto gamma = tensor::bind(scale, ParamPolicy{}, workspace);
-    auto beta = tensor::bind(bias, ParamPolicy{}, workspace);
-    auto y = tensor::bind(out, YPolicy{}, workspace);
-    run_row<
-        F32Tag, 4, 2, true,
-        kernel::loop::TailCarryPolicy::reuse_prefix>(
-        in, x, gamma, beta, y);
+    constexpr int PrefixRank = InSpec::InputTensor::Ndim - 1;
+    using RowStrideMeta = typename tensor::details::MetaElement<
+        PrefixRank, typename InSpec::InputLayout::Strides>::type;
+    constexpr bool RowUnitStride =
+        tensor::details::is_definitely_one_meta_v<RowStrideMeta>;
+    if constexpr (RowUnitStride && Recipe::BindParamsPerRow) {
+      kernel::loop::for_each_dims<PrefixRank>(
+          [this, &workspace, &scale, &bias](const auto& in_row,
+                                            const auto& out_row)
+              VECOPS_INLINE_LAMBDA {
+            auto gamma = tensor::bind(
+                scale, typename Recipe::ParamPolicy{}, workspace);
+            auto beta = tensor::bind(
+                bias, typename Recipe::ParamPolicy{}, workspace);
+            bind_row<tensor::AccessPlan::direct, Recipe>(
+                workspace, in_row, gamma, beta, out_row);
+          },
+          in, out);
+    } else {
+      auto gamma = tensor::bind(
+          scale, typename Recipe::ParamPolicy{}, workspace);
+      auto beta = tensor::bind(
+          bias, typename Recipe::ParamPolicy{}, workspace);
+      if constexpr (RowUnitStride) {
+        kernel::loop::for_each_dims<PrefixRank>(
+            [this, &workspace, &gamma, &beta](const auto& in_row,
+                                              const auto& out_row)
+                VECOPS_INLINE_LAMBDA {
+              bind_row<tensor::AccessPlan::direct, Recipe>(
+                  workspace, in_row, gamma, beta, out_row);
+            },
+            in, out);
+      } else {
+        kernel::loop::for_each_dims<PrefixRank>(
+            [this, &workspace, &gamma, &beta](const auto& in_row,
+                                              const auto& out_row)
+                VECOPS_INLINE_LAMBDA {
+              bind_row<tensor::AccessPlan::automatic, Recipe>(
+                  workspace, in_row, gamma, beta, out_row);
+            },
+            in, out);
+      }
+    }
   }
-#endif
 
-  template <tensor::AccessPlan InPlan, typename InSpec, typename ScaleAccess,
-            typename BiasAccess, typename OutSpec>
+  template <tensor::AccessPlan InPlan, typename Recipe, typename InSpec,
+            typename ScaleAccess, typename BiasAccess, typename OutSpec>
   VECOPS_ALWAYS_INLINE void bind_row(
       kernel::WorkspaceView& workspace, const InSpec& in,
       ScaleAccess& gamma, BiasAccess& beta, const OutSpec& out) const {
     static_assert(InSpec::InputTensor::Ndim == 1);
-    using InPolicy = tensor::InputAccessPolicy<0, 2, InPlan>;
-    using OutPolicy = tensor::OutputAccessPolicy<
-        0, tensor::AccessPlan::direct>;
+    using InPolicy = typename Recipe::template InputPolicy<InPlan, 2>;
+    using OutPolicy = typename Recipe::OutputPolicy;
     if constexpr (InPlan == tensor::AccessPlan::direct) {
       auto x = tensor::bind(in, InPolicy{}, workspace);
       auto y = tensor::bind(out, OutPolicy{}, workspace);
-      run_row<
-          Tag, 4, 1, false,
-          kernel::loop::TailCarryPolicy::independent>(
-          in, x, gamma, beta, y);
+      run_row<Recipe>(in, x, gamma, beta, y);
     } else {
       kernel::with_operands(
           workspace, tensor::operand(in, InPolicy{}),
           tensor::operand(out, OutPolicy{}),
           [this, &in, &gamma, &beta](auto& x, auto& y)
               VECOPS_INLINE_LAMBDA {
-            run_row<
-                Tag, 4, 1, false,
-                kernel::loop::TailCarryPolicy::independent>(
-                in, x, gamma, beta, y);
+            run_row<Recipe>(in, x, gamma, beta, y);
           });
     }
   }
 
-  template <vec::VectorTag BaseTag, int FullFactor, int TailFactor,
-            bool FusedShift, kernel::loop::TailCarryPolicy TailPolicy,
+  template <typename Recipe,
             typename InSpec,
             typename X, typename Gamma, typename Beta, typename Y>
   VECOPS_ALWAYS_INLINE void run_row(
       const InSpec& in, X& x, Gamma& gamma, Beta& beta, Y& y) const {
     static_assert(InSpec::InputTensor::Ndim == 1);
 
-    BaseTag base_tag{};
+    Tag base_tag{};
     const nint_t n = in.input_layout().shape()[0];
 
     ComputeType sum_value{};
@@ -312,7 +318,8 @@ private:
       sum = vec::add(sum, value);
       sum_sq = vec::fmadd(value, value, sum_sq);
     };
-    kernel::loop::fold<FullFactor, TailFactor, TailPolicy>(
+    kernel::loop::fold<Recipe::FullFactor, Recipe::TailFactor,
+                       Recipe::TailPolicy>(
         base_tag, n, accumulate_block,
         kernel::loop::reduce_add(sum_value),
         kernel::loop::reduce_add(sum_sq_value));
@@ -324,7 +331,7 @@ private:
         std::max(sum_sq_value * inv_n - mean * mean, ComputeType(0));
     const ComputeType rstd =
         ComputeType(1) / std::sqrt(variance + config.eps);
-    const ComputeType center = FusedShift ? -mean * rstd : mean;
+    const ComputeType center = Recipe::FusedShift ? -mean * rstd : mean;
 
     auto write_block = [&, n](
                            auto block_tag, nint_t col, auto active,
@@ -334,7 +341,7 @@ private:
       auto value = x.load(block_tag, position, active);
       auto scale_value = gamma.load(block_tag, position, active);
       auto bias_value = beta.load(block_tag, position, active);
-      if constexpr (FusedShift) {
+      if constexpr (Recipe::FusedShift) {
         value = vec::fmadd(value, rstd_v, center_v);
       } else {
         value = vec::mul(vec::sub(value, center_v), rstd_v);
@@ -343,7 +350,7 @@ private:
           block_tag, position,
           vec::fmadd(value, scale_value, bias_value), active);
     };
-    kernel::loop::fold<FullFactor, TailFactor>(
+    kernel::loop::fold<Recipe::FullFactor, Recipe::TailFactor>(
         base_tag, n, write_block,
         kernel::loop::invariant(center),
         kernel::loop::invariant(rstd));

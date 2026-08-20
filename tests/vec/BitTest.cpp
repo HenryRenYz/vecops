@@ -1,3 +1,5 @@
+// @vecops-test-shards: 8
+
 #include <gtest/gtest.h>
 
 #include <bit>
@@ -7,19 +9,19 @@
 
 #include "vecops/vec/Bit.h"
 #include "TestHelpers.h"
+#include "TestShard.h"
 
 namespace vec = vecops::vec;
 
-using IntegerElementTypes = ::testing::Types<
-    vecops::int8_t, vecops::uint8_t,
-    vecops::int16_t, vecops::uint16_t,
-    vecops::int32_t, vecops::uint32_t,
-    vecops::int64_t, vecops::uint64_t>;
+template <typename T>
+void run_bit_operations_test();
 
 template <typename T>
-class VecBitElementTest : public ::testing::Test {};
+void run_fixed_bit_operations_test();
 
-TYPED_TEST_SUITE(VecBitElementTest, IntegerElementTypes);
+#if defined(VECOPS_TEST_SHARD_ACTIVE)
+
+static_assert(VECOPS_TEST_SHARD_COUNT == vec_test::IntegerElements::size);
 
 template <typename T>
 using UnsignedBits = std::make_unsigned_t<T>;
@@ -245,8 +247,8 @@ void verify_bit_operations(Tag tag) {
   }
 }
 
-TYPED_TEST(VecBitElementTest, CoversEveryLaneSubwordAndMultiwordShape) {
-  using T = TypeParam;
+template <typename T>
+void run_bit_operations_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::IntegerTag Tag>() {
     verify_bit_operations(Tag{});
   });
@@ -254,8 +256,8 @@ TYPED_TEST(VecBitElementTest, CoversEveryLaneSubwordAndMultiwordShape) {
 
 #if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
 
-TYPED_TEST(VecBitElementTest, FixedSVEBatchesBeyondFourWords) {
-  using T = TypeParam;
+template <typename T>
+void run_fixed_bit_operations_test() {
   constexpr vecops::nint_t word_lanes =
       FIXED_SVE_BITS / 8 / static_cast<vecops::nint_t>(sizeof(T));
   constexpr vecops::nint_t array_lanes = static_cast<vecops::nint_t>(
@@ -265,5 +267,33 @@ TYPED_TEST(VecBitElementTest, FixedSVEBatchesBeyondFourWords) {
   EXPECT_GT(vec::num_words(Tag{}), 4);
   verify_bit_operations(Tag{});
 }
+
+#endif
+
+using ShardType = vec_test::IntegerElementAt<VECOPS_TEST_SHARD_INDEX>;
+template void run_bit_operations_test<ShardType>();
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+template void run_fixed_bit_operations_test<ShardType>();
+#endif
+
+#else
+
+template <typename T>
+class VecBitTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(
+    VecBitTest,
+    vec_test::IntegerElementTypes,
+    vec_test::ElementTypeName);
+
+TYPED_TEST(VecBitTest, CoversEveryLaneSubwordAndMultiwordShape) {
+  run_bit_operations_test<TypeParam>();
+}
+
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+TYPED_TEST(VecBitTest, FixedSVEBatchesBeyondFourWords) {
+  run_fixed_bit_operations_test<TypeParam>();
+}
+#endif
 
 #endif

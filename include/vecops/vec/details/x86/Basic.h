@@ -1615,13 +1615,14 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_interleave_parity_word(
 #endif
   };
   const auto f64 = []<typename R>(R av, R bv) -> R {
-    constexpr int select = Odd ? 0xff : 0x00;
-    if constexpr (sizeof(R) == 16) return _mm_shuffle_pd(av, bv, select);
+    if constexpr (sizeof(R) == 16)
+      return _mm_shuffle_pd(av, bv, Odd ? 0x3 : 0x0);
 #if VEC_WIDTH >= 256
-    else if constexpr (sizeof(R) == 32) return _mm256_shuffle_pd(av, bv, select);
+    else if constexpr (sizeof(R) == 32)
+      return _mm256_shuffle_pd(av, bv, Odd ? 0xf : 0x0);
 #endif
 #if VEC_WIDTH >= 512
-    else return _mm512_shuffle_pd(av, bv, select);
+    else return _mm512_shuffle_pd(av, bv, Odd ? 0xff : 0x00);
 #endif
   };
   const auto i16 = []<typename R>(R av, R bv) -> R {

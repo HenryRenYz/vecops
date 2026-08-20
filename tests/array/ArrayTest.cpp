@@ -10,6 +10,15 @@
 #include <memory>
 #include "vecops/array/Array.h"
 
+// Array argument validation is implemented with VECOPS_ASSERT. In Release
+// those calls are intentionally unchecked, so assertion-only death tests are
+// skipped instead of executing invalid accesses and expecting termination.
+#if !defined(VECOPS_DEBUG)
+#undef EXPECT_DEATH
+#define EXPECT_DEATH(statement, matcher) \
+  GTEST_SKIP() << "requires VECOPS_DEBUG assertions"
+#endif
+
 using namespace vecops;
 using namespace vecops::array;
 

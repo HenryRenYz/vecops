@@ -1,3 +1,5 @@
+// @vecops-test-shards: 13
+
 #include <gtest/gtest.h>
 
 #include <concepts>
@@ -6,9 +8,22 @@
 #include <type_traits>
 
 #include "TestHelpers.h"
+#include "TestShard.h"
 #include "vecops/vec/Reduction.h"
 
 namespace vec = vecops::vec;
+
+template <typename T>
+void run_scalable_reduction_test();
+template <typename T>
+void run_fixed_reduction_test();
+void run_reduction_options_test();
+void run_reduction_skeleton_test();
+
+#if defined(VECOPS_TEST_SHARD_ACTIVE)
+
+static_assert(
+    VECOPS_TEST_SHARD_COUNT == vec_test::AllElements::size + 1);
 
 namespace {
 
@@ -221,13 +236,10 @@ void verify_integer_overflow(Tag tag) {
   }
 }
 
+} // namespace
+
 template <typename T>
-class VecReductionTest : public ::testing::Test {};
-
-TYPED_TEST_SUITE(VecReductionTest, vec_test::AllElementTypes);
-
-TYPED_TEST(VecReductionTest, AllScalableShapes) {
-  using T = TypeParam;
+void run_scalable_reduction_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
     verify_reduction_shape(Tag{});
   });
@@ -243,8 +255,8 @@ TYPED_TEST(VecReductionTest, AllScalableShapes) {
 }
 
 #if !defined(CPU_CAPABILITY_SVE) || defined(HAS_FIXED_SVE_BITS)
-TYPED_TEST(VecReductionTest, FixedShapes) {
-  using T = TypeParam;
+template <typename T>
+void run_fixed_reduction_test() {
   verify_reduction_shape(vec::FixedTag<T, 1>{});
   verify_reduction_shape(vec::FixedTag<T, 2>{});
   verify_reduction_shape(vec::FixedTag<T, 8>{});
@@ -253,13 +265,14 @@ TYPED_TEST(VecReductionTest, FixedShapes) {
 }
 #endif
 
+#if VECOPS_TEST_SHARD_INDEX == 12
 template <typename Tag, typename... Options>
 concept CanReduceAddWith = requires(
     Tag tag, vec::Vec<Tag> value, Options&&... options) {
   vec::reduce_add(tag, value, std::forward<Options>(options)...);
 };
 
-TEST(VecReductionOptionsTest, RejectsPositionalMaskAndPopulationOptions) {
+void run_reduction_options_test() {
 #if defined(CPU_CAPABILITY_SVE) && !defined(HAS_FIXED_SVE_BITS)
   using Tag = vec::ScalableTag<vecops::float32_t, 0>;
 #else
@@ -274,10 +287,47 @@ TEST(VecReductionOptionsTest, RejectsPositionalMaskAndPopulationOptions) {
       Tag, vec::opt::Masked<Mask>, vec::opt::Masked<Mask>>);
 }
 
-TEST(VecReductionSkeletonTest, DeclaresAllReductionCpos) {
+void run_reduction_skeleton_test() {
   static_assert(std::same_as<decltype(vec::reduce_add), const vec::ReduceAddOp>);
   static_assert(std::same_as<decltype(vec::reduce_max), const vec::ReduceMaxOp>);
   static_assert(std::same_as<decltype(vec::reduce_min), const vec::ReduceMinOp>);
 }
+#endif
 
-} // namespace
+#if VECOPS_TEST_SHARD_INDEX < 12
+using ShardType = vec_test::ElementAt<VECOPS_TEST_SHARD_INDEX>;
+template void run_scalable_reduction_test<ShardType>();
+#if !defined(CPU_CAPABILITY_SVE) || defined(HAS_FIXED_SVE_BITS)
+template void run_fixed_reduction_test<ShardType>();
+#endif
+#endif
+
+#else
+
+template <typename T>
+class VecReductionTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(
+    VecReductionTest,
+    vec_test::AllElementTypes,
+    vec_test::ElementTypeName);
+
+TYPED_TEST(VecReductionTest, AllScalableShapes) {
+  run_scalable_reduction_test<TypeParam>();
+}
+
+#if !defined(CPU_CAPABILITY_SVE) || defined(HAS_FIXED_SVE_BITS)
+TYPED_TEST(VecReductionTest, FixedShapes) {
+  run_fixed_reduction_test<TypeParam>();
+}
+#endif
+
+TEST(VecReductionOptionsTest, RejectsPositionalMaskAndPopulationOptions) {
+  run_reduction_options_test();
+}
+
+TEST(VecReductionSkeletonTest, DeclaresAllReductionCpos) {
+  run_reduction_skeleton_test();
+}
+
+#endif

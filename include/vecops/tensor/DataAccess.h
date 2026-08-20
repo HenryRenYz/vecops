@@ -500,6 +500,40 @@ consteval bool can_transform_chunk_with_memory() {
 template <typename Tag>
 consteval bool can_split_tag();
 
+template <typename Request>
+VECOPS_ALWAYS_INLINE vec::Vec<typename Request::TagType>
+execute_resolved_load_convert(
+    typename Request::TagType tag,
+    const typename Request::FromElement* pointer,
+    const Request& request) {
+  if constexpr (std::same_as<
+                    typename Request::FromElement,
+                    vec::ElementOf<typename Request::TagType>>) {
+    return vec::details::execute_load_request(
+        vec::LoadOp{}, tag, pointer, request);
+  } else {
+    return vec::details::execute_load_convert_request(
+        vec::LoadConvertOp{}, tag, pointer, request);
+  }
+}
+
+template <typename Request>
+VECOPS_ALWAYS_INLINE void execute_resolved_store_convert(
+    typename Request::TagType tag,
+    typename Request::ToElement* pointer,
+    vec::Vec<typename Request::TagType> value,
+    const Request& request) {
+  if constexpr (std::same_as<
+                    typename Request::ToElement,
+                    vec::ElementOf<typename Request::TagType>>) {
+    vec::details::execute_store_request(
+        vec::StoreOp{}, tag, pointer, value, request);
+  } else {
+    vec::details::execute_store_convert_request(
+        vec::StoreConvertOp{}, tag, pointer, value, request);
+  }
+}
+
 // ============================================================================
 // Scalable-SVE transform chunk lowering (per-lane reference path).
 //
@@ -828,8 +862,8 @@ load_transform_vector(
       if constexpr (AddrKind == 2) {
         request.indices = &physical;
       }
-      transform_input =
-          vec::load_convert(TransformInTag{}, chunk_base, request);
+      transform_input = execute_resolved_load_convert(
+          TransformInTag{}, chunk_base, request);
     } else {
       transform_input = vec::zeros(TransformInTag{});
     }
@@ -1069,7 +1103,8 @@ VECOPS_ALWAYS_INLINE void store_transform_vector(
     if constexpr (AddrKind == 2) {
       request.indices = &physical;
     }
-    vec::store_convert(TransformOutTag{}, chunk_base, transformed, request);
+    execute_resolved_store_convert(
+        TransformOutTag{}, chunk_base, transformed, request);
   } else {
     static_assert(
         can_split_tag<ChunkTag>(),
@@ -1384,7 +1419,7 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
           out{};
       copy_memory_request_fields(out, request);
       out.indices = &physical;
-      return vec::load_convert(tag, pointer, out);
+      return execute_resolved_load_convert(tag, pointer, out);
     } else if constexpr (
         KernelRequest::addressing_kind ==
             vec::Addressing::Contiguous &&
@@ -1395,7 +1430,7 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
           Alignment, Temporal, 0>
           out{};
       copy_memory_request_fields(out, request);
-      return vec::load_convert(tag, pointer, out);
+      return execute_resolved_load_convert(tag, pointer, out);
     } else {
       nint_t physical_stride = static_cast<nint_t>(tensor_axis_stride);
       if constexpr (
@@ -1409,7 +1444,7 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
           out{};
       copy_memory_request_fields(out, request);
       out.stride = physical_stride;
-      return vec::load_convert(tag, pointer, out);
+      return execute_resolved_load_convert(tag, pointer, out);
     }
   } else {
     return load_memory_options<Tag, Pointer, Policy>(
@@ -1470,7 +1505,7 @@ VECOPS_ALWAYS_INLINE void store_memory(
         out.mask = request.mask;
       }
       out.indices = &physical;
-      vec::store_convert(tag, pointer, value, out);
+      execute_resolved_store_convert(tag, pointer, value, out);
     } else if constexpr (
         KernelRequest::addressing_kind ==
             vec::Addressing::Contiguous &&
@@ -1485,7 +1520,7 @@ VECOPS_ALWAYS_INLINE void store_memory(
       if constexpr (out.active_kind == vec::Active::Masked) {
         out.mask = request.mask;
       }
-      vec::store_convert(tag, pointer, value, out);
+      execute_resolved_store_convert(tag, pointer, value, out);
     } else {
       nint_t physical_stride = static_cast<nint_t>(tensor_axis_stride);
       if constexpr (
@@ -1503,7 +1538,7 @@ VECOPS_ALWAYS_INLINE void store_memory(
         out.mask = request.mask;
       }
       out.stride = physical_stride;
-      vec::store_convert(tag, pointer, value, out);
+      execute_resolved_store_convert(tag, pointer, value, out);
     }
   } else {
     store_memory_options<Tag, Pointer, Policy>(
@@ -3100,6 +3135,35 @@ VECOPS_INLINE decltype(auto) bind_operands_recursive(
   }
 }
 
+/**
+ * @brief Run one binding callback under a workspace mark that is always
+ *        rewound, preserving a non-void callback result.
+ */
+template <typename Fn>
+VECOPS_INLINE decltype(auto) with_workspace_rewind(
+    WorkspaceView& workspace, Fn&& fn) {
+  const auto mark = workspace.mark();
+  if constexpr (std::is_void_v<decltype(std::forward<Fn>(fn)())>) {
+    std::forward<Fn>(fn)();
+    workspace.rewind(mark);
+  } else {
+    auto result = std::forward<Fn>(fn)();
+    workspace.rewind(mark);
+    return result;
+  }
+}
+
+template <typename... Bindings>
+consteval bool lane_orders_compatible() {
+  constexpr bool any_unordered =
+      (tensor::details::is_unordered_policy<
+           typename Bindings::PolicyType> || ...);
+  constexpr bool all_unordered =
+      (tensor::details::is_unordered_policy<
+           typename Bindings::PolicyType> && ...);
+  return !any_unordered || all_unordered;
+}
+
 } // namespace details
 
 /**
@@ -3120,29 +3184,14 @@ VECOPS_INLINE decltype(auto) with_operand_tuple(
     WorkspaceView& workspace,
     const std::tuple<Bindings...>& bindings,
     Fn&& fn) {
-  constexpr bool any_unordered =
-      (tensor::details::is_unordered_policy<
-           typename Bindings::PolicyType> || ...);
-  constexpr bool all_unordered =
-      (tensor::details::is_unordered_policy<
-           typename Bindings::PolicyType> && ...);
   static_assert(
-      !any_unordered || all_unordered,
+      details::lane_orders_compatible<Bindings...>(),
       "all operands participating in a permutation-safe region must use "
       "compatible unordered lane-order policies");
-  const auto mark = workspace.mark();
-  if constexpr (std::is_void_v<decltype(details::bind_operands_recursive<0>(
-                    workspace, bindings, std::tuple<>{},
-                    std::forward<Fn>(fn)))>) {
-    details::bind_operands_recursive<0>(
+  return details::with_workspace_rewind(workspace, [&]() -> decltype(auto) {
+    return details::bind_operands_recursive<0>(
         workspace, bindings, std::tuple<>{}, std::forward<Fn>(fn));
-    workspace.rewind(mark);
-  } else {
-    auto result = details::bind_operands_recursive<0>(
-        workspace, bindings, std::tuple<>{}, std::forward<Fn>(fn));
-    workspace.rewind(mark);
-    return result;
-  }
+  });
 }
 
 /**
@@ -3150,17 +3199,25 @@ VECOPS_INLINE decltype(auto) with_operand_tuple(
  *
  * Semantics and lifetime are identical to `with_operand_tuple`: plans resolve
  * outside the callback, materialized output must be committed inside it, and
- * workspace rewinds after all sessions are destroyed.
+ * workspace rewinds after all sessions are destroyed. Each arity expands as
+ * straight-line nested bindings: no recursion, tuple packing, or std::apply
+ * stands between the callback and the compiler's inliner.
  */
 template <typename Binding, typename Fn>
   requires tensor::is_operand_binding_v<Binding>
 VECOPS_INLINE decltype(auto) with_operands(
     WorkspaceView& workspace, Binding&& binding, Fn&& fn) {
-  return with_operand_tuple(
-      workspace,
-      std::tuple<std::remove_cvref_t<Binding>>{
-          std::forward<Binding>(binding)},
-      std::forward<Fn>(fn));
+  static_assert(
+      details::lane_orders_compatible<std::remove_cvref_t<Binding>>(),
+      "all operands participating in a permutation-safe region must use "
+      "compatible unordered lane-order policies");
+  return details::with_workspace_rewind(workspace, [&]() -> decltype(auto) {
+    return tensor::details::with_bound_operand(
+        binding, workspace,
+        [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+          return std::forward<Fn>(fn)(a0);
+        });
+  });
 }
 
 template <typename B0, typename B1, typename Fn>
@@ -3168,11 +3225,22 @@ template <typename B0, typename B1, typename Fn>
             tensor::is_operand_binding_v<B1>)
 VECOPS_INLINE decltype(auto) with_operands(
     WorkspaceView& workspace, B0&& b0, B1&& b1, Fn&& fn) {
-  return with_operand_tuple(
-      workspace,
-      std::tuple<std::remove_cvref_t<B0>, std::remove_cvref_t<B1>>{
-          std::forward<B0>(b0), std::forward<B1>(b1)},
-      std::forward<Fn>(fn));
+  static_assert(
+      details::lane_orders_compatible<
+          std::remove_cvref_t<B0>, std::remove_cvref_t<B1>>(),
+      "all operands participating in a permutation-safe region must use "
+      "compatible unordered lane-order policies");
+  return details::with_workspace_rewind(workspace, [&]() -> decltype(auto) {
+    return tensor::details::with_bound_operand(
+        b0, workspace,
+        [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+          return tensor::details::with_bound_operand(
+              b1, workspace,
+              [&](auto& a1) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                return std::forward<Fn>(fn)(a0, a1);
+              });
+        });
+  });
 }
 
 template <typename B0, typename B1, typename B2, typename Fn>
@@ -3181,13 +3249,27 @@ template <typename B0, typename B1, typename B2, typename Fn>
             tensor::is_operand_binding_v<B2>)
 VECOPS_INLINE decltype(auto) with_operands(
     WorkspaceView& workspace, B0&& b0, B1&& b1, B2&& b2, Fn&& fn) {
-  return with_operand_tuple(
-      workspace,
-      std::tuple<std::remove_cvref_t<B0>, std::remove_cvref_t<B1>,
-                 std::remove_cvref_t<B2>>{
-          std::forward<B0>(b0), std::forward<B1>(b1),
-          std::forward<B2>(b2)},
-      std::forward<Fn>(fn));
+  static_assert(
+      details::lane_orders_compatible<
+          std::remove_cvref_t<B0>, std::remove_cvref_t<B1>,
+          std::remove_cvref_t<B2>>(),
+      "all operands participating in a permutation-safe region must use "
+      "compatible unordered lane-order policies");
+  return details::with_workspace_rewind(workspace, [&]() -> decltype(auto) {
+    return tensor::details::with_bound_operand(
+        b0, workspace,
+        [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+          return tensor::details::with_bound_operand(
+              b1, workspace,
+              [&](auto& a1) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                return tensor::details::with_bound_operand(
+                    b2, workspace,
+                    [&](auto& a2) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                      return std::forward<Fn>(fn)(a0, a1, a2);
+                    });
+              });
+        });
+  });
 }
 
 template <typename B0, typename B1, typename B2, typename B3, typename Fn>
@@ -3198,13 +3280,32 @@ template <typename B0, typename B1, typename B2, typename B3, typename Fn>
 VECOPS_INLINE decltype(auto) with_operands(
     WorkspaceView& workspace, B0&& b0, B1&& b1, B2&& b2, B3&& b3,
     Fn&& fn) {
-  return with_operand_tuple(
-      workspace,
-      std::tuple<std::remove_cvref_t<B0>, std::remove_cvref_t<B1>,
-                 std::remove_cvref_t<B2>, std::remove_cvref_t<B3>>{
-          std::forward<B0>(b0), std::forward<B1>(b1),
-          std::forward<B2>(b2), std::forward<B3>(b3)},
-      std::forward<Fn>(fn));
+  static_assert(
+      details::lane_orders_compatible<
+          std::remove_cvref_t<B0>, std::remove_cvref_t<B1>,
+          std::remove_cvref_t<B2>, std::remove_cvref_t<B3>>(),
+      "all operands participating in a permutation-safe region must use "
+      "compatible unordered lane-order policies");
+  return details::with_workspace_rewind(workspace, [&]() -> decltype(auto) {
+    return tensor::details::with_bound_operand(
+        b0, workspace,
+        [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+          return tensor::details::with_bound_operand(
+              b1, workspace,
+              [&](auto& a1) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                return tensor::details::with_bound_operand(
+                    b2, workspace,
+                    [&](auto& a2) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                      return tensor::details::with_bound_operand(
+                          b3, workspace,
+                          [&](auto& a3) VECOPS_INLINE_LAMBDA
+                              -> decltype(auto) {
+                            return std::forward<Fn>(fn)(a0, a1, a2, a3);
+                          });
+                    });
+              });
+        });
+  });
 }
 
 } // namespace vecops::kernel

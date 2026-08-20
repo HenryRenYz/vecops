@@ -1,3 +1,5 @@
+// @vecops-test-shards: 4
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -8,16 +10,22 @@
 
 #include "vecops/vec/Arithmetic.h"
 #include "TestHelpers.h"
+#include "TestShard.h"
 
 namespace vec = vecops::vec;
 
-enum class FloatingUnaryKind { Sqrt, Rcp, Rsqrt };
+template <typename T>
+void run_floating_unary_test();
+template <typename T>
+void run_floating_unary_special_values_test();
+template <typename T>
+void run_fixed_floating_unary_test();
 
-using FloatingTypes = ::testing::Types<
-    vecops::bfloat16_t,
-    vecops::float16_t,
-    vecops::float32_t,
-    vecops::float64_t>;
+#if defined(VECOPS_TEST_SHARD_ACTIVE)
+
+static_assert(VECOPS_TEST_SHARD_COUNT == vec_test::FloatingElements::size);
+
+enum class FloatingUnaryKind { Sqrt, Rcp, Rsqrt };
 
 template <typename T>
 T floating_unary_operand(vecops::nint_t lane, bool active = true) {
@@ -140,12 +148,7 @@ void verify_floating_unary(Tag tag) {
 }
 
 template <typename T>
-class VecFloatingUnaryTest : public ::testing::Test {};
-
-TYPED_TEST_SUITE(VecFloatingUnaryTest, FloatingTypes);
-
-TYPED_TEST(VecFloatingUnaryTest, CoversEveryLaneShapeAndPopulation) {
-  using T = TypeParam;
+void run_floating_unary_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::FloatingTag Tag>() {
     constexpr bool options = vec_test::exhaustive_options_shape<Tag>;
     verify_floating_unary<FloatingUnaryKind::Sqrt, options>(Tag{});
@@ -154,8 +157,8 @@ TYPED_TEST(VecFloatingUnaryTest, CoversEveryLaneShapeAndPopulation) {
   });
 }
 
-TYPED_TEST(VecFloatingUnaryTest, PreservesIEEESpecialValueClasses) {
-  using T = TypeParam;
+template <typename T>
+void run_floating_unary_special_values_test() {
   using Tag = vec::ScalableTag<T>;
   const auto nan = static_cast<T>(std::numeric_limits<double>::quiet_NaN());
   const auto infinity = static_cast<T>(std::numeric_limits<double>::infinity());
@@ -189,8 +192,8 @@ TYPED_TEST(VecFloatingUnaryTest, PreservesIEEESpecialValueClasses) {
 
 #if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
 
-TYPED_TEST(VecFloatingUnaryTest, FixedSVEBatchesBeyondTupleLimit) {
-  using T = TypeParam;
+template <typename T>
+void run_fixed_floating_unary_test() {
   if constexpr (!std::same_as<T, vecops::float32_t>) {
     GTEST_SKIP() << "f32 is the representative >4-word floating type";
   } else {
@@ -205,5 +208,38 @@ TYPED_TEST(VecFloatingUnaryTest, FixedSVEBatchesBeyondTupleLimit) {
     verify_floating_unary<FloatingUnaryKind::Rsqrt, false>(Tag{});
   }
 }
+
+#endif
+
+using ShardType = vec_test::FloatingElementAt<VECOPS_TEST_SHARD_INDEX>;
+template void run_floating_unary_test<ShardType>();
+template void run_floating_unary_special_values_test<ShardType>();
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+template void run_fixed_floating_unary_test<ShardType>();
+#endif
+
+#else
+
+template <typename T>
+class VecFloatingUnaryTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(
+    VecFloatingUnaryTest,
+    vec_test::FloatingElementTypes,
+    vec_test::ElementTypeName);
+
+TYPED_TEST(VecFloatingUnaryTest, CoversEveryLaneShapeAndPopulation) {
+  run_floating_unary_test<TypeParam>();
+}
+
+TYPED_TEST(VecFloatingUnaryTest, PreservesIEEESpecialValueClasses) {
+  run_floating_unary_special_values_test<TypeParam>();
+}
+
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+TYPED_TEST(VecFloatingUnaryTest, FixedSVEBatchesBeyondTupleLimit) {
+  run_fixed_floating_unary_test<TypeParam>();
+}
+#endif
 
 #endif

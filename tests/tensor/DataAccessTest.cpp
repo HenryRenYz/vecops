@@ -456,7 +456,8 @@ TEST(TensorDataAccessDeathTest, MaterializedOutputMustBeCommitted) {
         std::array<float, 3 * 16> values{};
         auto spec = output<float32_t>(
             make_tensor<2>(values.data(), {3, 16}, {1, 3}));
-        using Policy = OutputAccessPolicy<1>;
+        using Policy = OutputAccessPolicy<
+            1, AccessPlan::materialize_after_transform>;
         kernel::Workspace storage(required_workspace(spec, Policy{}));
         auto workspace = storage.view();
         kernel::with_operands(

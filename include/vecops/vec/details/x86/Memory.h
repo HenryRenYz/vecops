@@ -669,7 +669,38 @@ template <int Scale, VectorTag Tag, VectorTag IndexTag>
 VECOPS_ALWAYS_INLINE Vec<Tag> x86_load_indexed_native(
     Tag tag, const ElementOf<Tag>* pointer, Vec<IndexTag> indices,
     Mask<Tag> mask, Vec<Tag> inactive) {
-  if constexpr (num_words(tag) > 1 || num_words(IndexTag{}) > 1) {
+  using Traits = RepresentationTraits<X86Backend, Tag>;
+  using IndexTraits = RepresentationTraits<X86Backend, IndexTag>;
+  using WordTag = FixedTag<ElementOf<Tag>, Traits::word_lanes>;
+  using IndexChunkTag = Rebind<ElementOf<IndexTag>, WordTag>;
+  using IndexChunkTraits =
+      RepresentationTraits<X86Backend, IndexChunkTag>;
+  constexpr bool complete_output_words =
+      Traits::logical_lanes == Traits::word_count * Traits::word_lanes;
+  constexpr bool directly_partitioned_output =
+      Traits::word_count > 1 && complete_output_words &&
+      IndexTraits::word_count ==
+          Traits::word_count * IndexChunkTraits::word_count;
+
+  if constexpr (directly_partitioned_output) {
+    return construct_words<X86Backend>(
+        tag, [&]<nint_t OutputIndex>(Tag) VECOPS_INLINE_LAMBDA {
+      const auto index_chunk = construct_words<X86Backend>(
+          IndexChunkTag{},
+          [&]<nint_t InputIndex>(IndexChunkTag) VECOPS_INLINE_LAMBDA {
+            constexpr nint_t source_index =
+                OutputIndex * IndexChunkTraits::word_count + InputIndex;
+            return ::vecops::vec::get_word<source_index>(
+                IndexTag{}, indices);
+          });
+      const auto loaded = x86_load_indexed_native<
+          Scale, WordTag, IndexChunkTag>(
+          WordTag{}, pointer, index_chunk,
+          ::vecops::vec::get_word<OutputIndex>(tag, mask),
+          ::vecops::vec::get_word<OutputIndex>(tag, inactive));
+      return ::vecops::vec::get_word<0>(WordTag{}, loaded);
+    });
+  } else if constexpr (num_words(tag) > 1 || num_words(IndexTag{}) > 1) {
     const auto lower = x86_load_indexed_native<
         Scale, Half<Tag>, Half<IndexTag>>(
         Half<Tag>{}, pointer, execute(LowerOp{}, IndexTag{}, indices),
@@ -798,7 +829,41 @@ template <int Scale, VectorTag Tag, VectorTag IndexTag>
 VECOPS_ALWAYS_INLINE void x86_store_indexed_native(
     Tag tag, ElementOf<Tag>* pointer, Vec<Tag> value,
     Vec<IndexTag> indices, Mask<Tag> mask) {
-  if constexpr (num_words(tag) > 1 || num_words(IndexTag{}) > 1) {
+  using Traits = RepresentationTraits<X86Backend, Tag>;
+  using IndexTraits = RepresentationTraits<X86Backend, IndexTag>;
+  using WordTag = FixedTag<ElementOf<Tag>, Traits::word_lanes>;
+  using IndexChunkTag = Rebind<ElementOf<IndexTag>, WordTag>;
+  using IndexChunkTraits =
+      RepresentationTraits<X86Backend, IndexChunkTag>;
+  constexpr bool complete_output_words =
+      Traits::logical_lanes == Traits::word_count * Traits::word_lanes;
+  constexpr bool directly_partitioned_output =
+      Traits::word_count > 1 && complete_output_words &&
+      IndexTraits::word_count ==
+          Traits::word_count * IndexChunkTraits::word_count;
+
+  if constexpr (directly_partitioned_output) {
+    [&]<std::size_t... OutputIndex>(std::index_sequence<OutputIndex...>) {
+      ([&]() VECOPS_INLINE_LAMBDA {
+        constexpr nint_t output_index =
+            static_cast<nint_t>(OutputIndex);
+        const auto index_chunk = construct_words<X86Backend>(
+            IndexChunkTag{},
+            [&]<nint_t InputIndex>(IndexChunkTag) VECOPS_INLINE_LAMBDA {
+              constexpr nint_t source_index =
+                  output_index * IndexChunkTraits::word_count + InputIndex;
+              return ::vecops::vec::get_word<source_index>(
+                  IndexTag{}, indices);
+            });
+        x86_store_indexed_native<Scale, WordTag, IndexChunkTag>(
+            WordTag{}, pointer,
+            ::vecops::vec::get_word<output_index>(tag, value),
+            index_chunk,
+            ::vecops::vec::get_word<output_index>(tag, mask));
+      }(), ...);
+    }(std::make_index_sequence<
+        static_cast<std::size_t>(Traits::word_count)>{});
+  } else if constexpr (num_words(tag) > 1 || num_words(IndexTag{}) > 1) {
     x86_store_indexed_native<Scale, Half<Tag>, Half<IndexTag>>(
         Half<Tag>{}, pointer, execute(LowerOp{}, tag, value),
         execute(LowerOp{}, IndexTag{}, indices),

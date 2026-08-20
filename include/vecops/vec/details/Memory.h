@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -131,9 +132,25 @@ struct GenericImpl<Backend, LoadOp, Tag> {
       opt::Indexed<Indices, Scale> addressing,
       Mask<Tag> mask, Vec<Tag> inactive) {
     using IndexTag = Rebind<ElementOf<VecToTagT<Indices>>, Tag>;
+    using IndexElement = ElementOf<IndexTag>;
     constexpr nint_t byte_scale =
         Scale == 0 ? static_cast<nint_t>(sizeof(ElementOf<Tag>)) : Scale;
     const auto* base = reinterpret_cast<const std::byte*>(pointer);
+    constexpr std::size_t ScalarIndexCount = [] {
+      if constexpr (std::same_as<Backend, ScalarBackend>)
+        return static_cast<std::size_t>(
+            RepresentationTraits<Backend, IndexTag>::logical_lanes);
+      else
+        return std::size_t{1};
+    }();
+    std::array<IndexElement, ScalarIndexCount> scalar_indices{};
+    if constexpr (std::same_as<Backend, ScalarBackend>) {
+      static_assert(
+          sizeof(scalar_indices) <= sizeof(addressing.indices));
+      std::memcpy(
+          scalar_indices.data(), &addressing.indices,
+          sizeof(scalar_indices));
+    }
     return construct_words<Backend>(
         tag, [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA {
       auto word = ::vecops::vec::get_word<Index>(tag, inactive);
@@ -145,7 +162,12 @@ struct GenericImpl<Backend, LoadOp, Tag> {
       for (nint_t lane = begin; lane < end; ++lane) {
         if (!execute_word<Index, Backend>(
                 GetMaskLaneOp{}, tag, mask_word, lane - begin)) continue;
-        const auto index = index_lane(IndexTag{}, addressing.indices, lane);
+        const auto index = [&]() VECOPS_INLINE_LAMBDA {
+          if constexpr (std::same_as<Backend, ScalarBackend>)
+            return scalar_indices[static_cast<std::size_t>(lane)];
+          else
+            return index_lane(IndexTag{}, addressing.indices, lane);
+        }();
         ElementOf<Tag> loaded;
         std::memcpy(
             &loaded, base + static_cast<nint_t>(index) * byte_scale,

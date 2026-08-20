@@ -1,3 +1,5 @@
+// @vecops-test-shards: 12
+
 #include <gtest/gtest.h>
 
 #include <bit>
@@ -7,13 +9,24 @@
 
 #include "vecops/vec/Basic.h"
 #include "TestHelpers.h"
+#include "TestShard.h"
 
 namespace vec = vecops::vec;
 
 template <typename T>
-class VecShuffleElementTest : public ::testing::Test {};
+void run_vector_indices_shuffle_test();
+template <typename T>
+void run_repeating_patterns_shuffle_test();
+template <typename T>
+void run_halves_shuffle_test();
+template <typename T>
+void run_same_width_shuffle_test();
+template <typename T>
+void run_fixed_shuffle_test();
 
-TYPED_TEST_SUITE(VecShuffleElementTest, vec_test::AllElementTypes);
+#if defined(VECOPS_TEST_SHARD_ACTIVE)
+
+static_assert(VECOPS_TEST_SHARD_COUNT == vec_test::AllElements::size);
 
 template <typename T>
 T lane_value(vecops::nint_t lane) {
@@ -343,30 +356,30 @@ void verify_repeating_local_shuffle_patterns(Tag tag) {
   }
 }
 
-TYPED_TEST(VecShuffleElementTest, VectorIndicesUseTheirDocumentedDomains) {
-  using T = TypeParam;
+template <typename T>
+void run_vector_indices_shuffle_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
     verify_word_local_vector_shuffle(Tag{});
     verify_block_local_vector_shuffle(Tag{});
   });
 }
 
-TYPED_TEST(VecShuffleElementTest, ScalarAndCompileTimePatternsRepeatPerBlock) {
-  using T = TypeParam;
+template <typename T>
+void run_repeating_patterns_shuffle_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
     verify_repeating_local_shuffle_patterns(Tag{});
   });
 }
 
-TYPED_TEST(VecShuffleElementTest, HalvesConcatSelectionAndInterleaveKeepGlobalOrder) {
-  using T = TypeParam;
+template <typename T>
+void run_halves_shuffle_test() {
   for_each_halvable_rearrange_shape<T>([]<vec::VectorTag Tag>() {
     verify_halves_concat_and_selection(Tag{});
   });
 }
 
-TYPED_TEST(VecShuffleElementTest, SameWidthRearrangementsKeepDocumentedOrder) {
-  using T = TypeParam;
+template <typename T>
+void run_same_width_shuffle_test() {
   for_each_same_width_rearrange_shape<T>([]<vec::VectorTag Tag>() {
     verify_same_width_rearrangements(Tag{});
   });
@@ -374,8 +387,8 @@ TYPED_TEST(VecShuffleElementTest, SameWidthRearrangementsKeepDocumentedOrder) {
 
 #if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
 
-TYPED_TEST(VecShuffleElementTest, FixedSVEArrayPathKeepsShuffleLocality) {
-  using T = TypeParam;
+template <typename T>
+void run_fixed_shuffle_test() {
   constexpr vecops::nint_t word_lanes =
       FIXED_SVE_BITS / 8 / static_cast<vecops::nint_t>(sizeof(T));
   // SVE VL is a 128-bit multiple, not necessarily a power of two. Select the
@@ -391,5 +404,48 @@ TYPED_TEST(VecShuffleElementTest, FixedSVEArrayPathKeepsShuffleLocality) {
   verify_halves_concat_and_selection(Tag{});
   verify_same_width_rearrangements(Tag{});
 }
+
+#endif
+
+using ShardType = vec_test::ElementAt<VECOPS_TEST_SHARD_INDEX>;
+template void run_vector_indices_shuffle_test<ShardType>();
+template void run_repeating_patterns_shuffle_test<ShardType>();
+template void run_halves_shuffle_test<ShardType>();
+template void run_same_width_shuffle_test<ShardType>();
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+template void run_fixed_shuffle_test<ShardType>();
+#endif
+
+#else
+
+template <typename T>
+class VecShuffleElementTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(
+    VecShuffleElementTest,
+    vec_test::AllElementTypes,
+    vec_test::ElementTypeName);
+
+TYPED_TEST(VecShuffleElementTest, VectorIndicesUseTheirDocumentedDomains) {
+  run_vector_indices_shuffle_test<TypeParam>();
+}
+
+TYPED_TEST(VecShuffleElementTest, ScalarAndCompileTimePatternsRepeatPerBlock) {
+  run_repeating_patterns_shuffle_test<TypeParam>();
+}
+
+TYPED_TEST(VecShuffleElementTest, HalvesConcatSelectionAndInterleaveKeepGlobalOrder) {
+  run_halves_shuffle_test<TypeParam>();
+}
+
+TYPED_TEST(VecShuffleElementTest, SameWidthRearrangementsKeepDocumentedOrder) {
+  run_same_width_shuffle_test<TypeParam>();
+}
+
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+TYPED_TEST(VecShuffleElementTest, FixedSVEArrayPathKeepsShuffleLocality) {
+  run_fixed_shuffle_test<TypeParam>();
+}
+#endif
 
 #endif

@@ -1,3 +1,5 @@
+// @vecops-test-shards: 241
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -8,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <sys/mman.h>
@@ -15,15 +18,43 @@
 
 #include "vecops/vec/Memory.h"
 #include "TestHelpers.h"
+#include "TestShard.h"
 
 namespace vec = vecops::vec;
+
+template <typename T>
+void run_consecutive_memory_test();
+template <typename T, int Slot>
+void run_indexed_loads_test();
+template <typename T>
+void run_indexed_stores_test();
+template <typename T>
+void run_filtered_access_test();
+template <typename T>
+void run_filtered_indexed_access_test();
+template <typename T>
+void run_fixed_sve_memory_test();
+void run_repeated_addressing_test();
+void run_first_counts_test();
+void run_initializer_list_test();
+
+#if defined(VECOPS_TEST_SHARD_ACTIVE)
+
+static_assert(
+    VECOPS_TEST_SHARD_COUNT ==
+        vec_test::AllElements::size * 20 + 1);
 
 namespace {
 
 template <typename T>
 T memory_value(int seed) {
-  if constexpr (std::same_as<T, vecops::bfloat16_t>)
-    return T(static_cast<float>(seed) + 0.25F);
+  if constexpr (std::same_as<T, vecops::bfloat16_t>) {
+    const float scalar = static_cast<float>(seed) + 0.25F;
+    const uint32_t bits = ::vecops::bitcast<uint32_t>(scalar);
+    const uint32_t bias = ((bits >> 16) & 1U) + uint32_t{0x7fff};
+    return vecops::bfloat16_t::from_bits(
+        static_cast<uint16_t>((bits + bias) >> 16));
+  }
   else if constexpr (std::same_as<T, vecops::float16_t>)
     return T(static_cast<float>(seed) + 0.25F);
   else if constexpr (std::floating_point<T>)
@@ -211,8 +242,18 @@ inline constexpr bool memory_index_shape_supported = [] {
 #endif
 }();
 
-template <vec::VectorTag Tag>
+template <int Case = 0, vec::VectorTag Tag>
 void verify_indexed_loads(Tag tag) {
+  if constexpr (Case == 0) {
+    verify_indexed_loads<1>(tag);
+    verify_indexed_loads<2>(tag);
+    verify_indexed_loads<3>(tag);
+    verify_indexed_loads<4>(tag);
+    verify_indexed_loads<5>(tag);
+    verify_indexed_loads<6>(tag);
+    return;
+  }
+
   using T = vec::ElementOf<Tag>;
   const auto lanes = static_cast<std::size_t>(vec::size(tag));
   const auto capacity = std::max<std::size_t>(20, (lanes - 1) * 7 + 4);
@@ -230,58 +271,74 @@ void verify_indexed_loads(Tag tag) {
   }
   using I32Tag = vec::Rebind<int32_t, Tag>;
   const auto indices32 = vec::load(I32Tag{}, indices32_values.data());
-  const auto by_i32 = vec::load(tag, input.data(), vec::indexed(indices32));
-  const auto by_i32_non_temporal = vec::load(
-      tag, input.data(), vec::indexed(indices32), vec::mem::non_temporal);
-  const auto by_constant_stride =
-      vec::load(tag, input.data(), vec::strided(vecops::meta::cint<7>));
-  const auto by_dynamic_stride =
-      vec::load(tag, input.data(), vec::strided(vecops::meta::dyn<1>(7)));
 
-  auto mask = vec::mfalse(tag);
-  for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane)
-    mask = vec::set(tag, mask, lane, lane % 2 == 0);
-  const T merge = memory_value<T>(701);
-  const auto filtered = vec::load(
-      tag, input.data(), vec::indexed(indices32),
-      vec::opt::masked(mask), vec::opt::merge(merge));
-
-  for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
-    const T indexed_expected =
-        input[static_cast<std::size_t>(indices32_values[lane])];
-    const T strided_expected = input[static_cast<std::size_t>(lane * 7)];
-    EXPECT_TRUE(vec_test::values_identical(
-        indexed_expected, vec::get(tag, by_i32, lane)));
-    EXPECT_TRUE(vec_test::values_identical(
-        indexed_expected, vec::get(tag, by_i32_non_temporal, lane)));
-    EXPECT_TRUE(vec_test::values_identical(
-        strided_expected, vec::get(tag, by_constant_stride, lane)));
-    EXPECT_TRUE(vec_test::values_identical(
-        strided_expected, vec::get(tag, by_dynamic_stride, lane)));
-    EXPECT_TRUE(vec_test::values_identical(
-        lane % 2 == 0 ? indexed_expected : merge,
-        vec::get(tag, filtered, lane)));
-  }
-  if constexpr (memory_index_shape_supported<int64_t, Tag>) {
-    using I64Tag = vec::Rebind<int64_t, Tag>;
-    const auto indices64 = vec::load(I64Tag{}, indices64_values.data());
-    const auto by_i64 = vec::load(tag, input.data(), vec::indexed(indices64));
-    const auto by_i64_non_temporal = vec::load(
-        tag, input.data(), vec::indexed(indices64), vec::mem::non_temporal);
+  if constexpr (Case == 1) {
+    const auto loaded = vec::load(tag, input.data(), vec::indexed(indices32));
+    const auto non_temporal = vec::load(
+        tag, input.data(), vec::indexed(indices32), vec::mem::non_temporal);
     for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
+      const T expected =
+          input[static_cast<std::size_t>(indices32_values[lane])];
       EXPECT_TRUE(vec_test::values_identical(
-          input[static_cast<std::size_t>(indices64_values[lane])],
-          vec::get(tag, by_i64, lane)));
+          expected, vec::get(tag, loaded, lane)));
       EXPECT_TRUE(vec_test::values_identical(
-          input[static_cast<std::size_t>(indices64_values[lane])],
-          vec::get(tag, by_i64_non_temporal, lane)));
+          expected, vec::get(tag, non_temporal, lane)));
     }
   }
-
-  verify_scaled_indexed_load<1>(tag);
-  verify_scaled_indexed_load<2>(tag);
-  verify_scaled_indexed_load<4>(tag);
-  verify_scaled_indexed_load<8>(tag);
+  else if constexpr (Case == 2) {
+    const auto constant =
+        vec::load(tag, input.data(), vec::strided(vecops::meta::cint<7>));
+    const auto dynamic =
+        vec::load(tag, input.data(), vec::strided(vecops::meta::dyn<1>(7)));
+    for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
+      const T expected = input[static_cast<std::size_t>(lane * 7)];
+      EXPECT_TRUE(vec_test::values_identical(
+          expected, vec::get(tag, constant, lane)));
+      EXPECT_TRUE(vec_test::values_identical(
+          expected, vec::get(tag, dynamic, lane)));
+    }
+  }
+  else if constexpr (Case == 3) {
+    auto mask = vec::mfalse(tag);
+    for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane)
+      mask = vec::set(tag, mask, lane, lane % 2 == 0);
+    const T merge = memory_value<T>(701);
+    const auto filtered = vec::load(
+        tag, input.data(), vec::indexed(indices32),
+        vec::opt::masked(mask), vec::opt::merge(merge));
+    for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
+      const T expected =
+          input[static_cast<std::size_t>(indices32_values[lane])];
+      EXPECT_TRUE(vec_test::values_identical(
+          lane % 2 == 0 ? expected : merge,
+          vec::get(tag, filtered, lane)));
+    }
+  }
+  else if constexpr (Case == 4) {
+    if constexpr (memory_index_shape_supported<int64_t, Tag>) {
+      using I64Tag = vec::Rebind<int64_t, Tag>;
+      const auto indices64 = vec::load(I64Tag{}, indices64_values.data());
+      const auto loaded = vec::load(tag, input.data(), vec::indexed(indices64));
+      const auto non_temporal = vec::load(
+          tag, input.data(), vec::indexed(indices64), vec::mem::non_temporal);
+      for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
+        const T expected =
+            input[static_cast<std::size_t>(indices64_values[lane])];
+        EXPECT_TRUE(vec_test::values_identical(
+            expected, vec::get(tag, loaded, lane)));
+        EXPECT_TRUE(vec_test::values_identical(
+            expected, vec::get(tag, non_temporal, lane)));
+      }
+    }
+  }
+  else if constexpr (Case == 5) {
+    verify_scaled_indexed_load<1>(tag);
+    verify_scaled_indexed_load<2>(tag);
+  }
+  else if constexpr (Case == 6) {
+    verify_scaled_indexed_load<4>(tag);
+    verify_scaled_indexed_load<8>(tag);
+  }
 }
 
 template <int Scale, vec::VectorTag Tag>
@@ -401,36 +458,39 @@ void verify_indexed_stores(Tag tag) {
   verify_scaled_indexed_store<8>(tag);
 }
 
+} // namespace
+
 template <typename T>
-class VecMemoryTest : public ::testing::Test {};
-
-TYPED_TEST_SUITE(VecMemoryTest, vec_test::AllElementTypes);
-
-TYPED_TEST(VecMemoryTest, ConsecutiveOptionsCoverEveryShape) {
-  using T = TypeParam;
+void run_consecutive_memory_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
     verify_memory_shape<vec_test::exhaustive_options_shape<Tag>>(Tag{});
   });
 }
 
-TYPED_TEST(VecMemoryTest, IndexedAndStridedLoadsCoverEveryShape) {
-  using T = TypeParam;
-  vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
+template <typename T, int Slot>
+void run_indexed_loads_test() {
+  static_assert(Slot >= 0 && Slot < 17);
+  constexpr int power = Slot < 11 ? Slot - 6 : 5;
+  constexpr int test_case = Slot < 11 ? 0 : Slot - 10;
+  if constexpr (
+      power >= vec_test::details::minimum_scalable_power<T> &&
+      power <= vec_test::details::maximum_scalable_power) {
+    using Tag = vec::ScalableTag<T, power>;
     if constexpr (memory_index_shape_supported<int32_t, Tag>)
-      verify_indexed_loads(Tag{});
-  });
+      verify_indexed_loads<test_case>(Tag{});
+  }
 }
 
-TYPED_TEST(VecMemoryTest, IndexedAndStridedStoresCoverEveryShape) {
-  using T = TypeParam;
+template <typename T>
+void run_indexed_stores_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
     if constexpr (memory_index_shape_supported<int32_t, Tag>)
       verify_indexed_stores(Tag{});
   });
 }
 
-TYPED_TEST(VecMemoryTest, FilteredAccessStopsAtProtectedPage) {
-  using T = TypeParam;
+template <typename T>
+void run_filtered_access_test() {
   vec::ScalableTag<T, 0> tag;
   const long page_size = sysconf(_SC_PAGESIZE);
   ASSERT_GT(page_size, 0);
@@ -470,8 +530,8 @@ TYPED_TEST(VecMemoryTest, FilteredAccessStopsAtProtectedPage) {
   EXPECT_EQ(munmap(mapping, static_cast<std::size_t>(page_size * 2)), 0);
 }
 
-TYPED_TEST(VecMemoryTest, FilteredIndexedAccessSkipsProtectedPage) {
-  using T = TypeParam;
+template <typename T>
+void run_filtered_indexed_access_test() {
   using Tag = vec::ScalableTag<T>;
   using IndexTag = vec::Rebind<int32_t, Tag>;
   Tag tag;
@@ -510,7 +570,8 @@ TYPED_TEST(VecMemoryTest, FilteredIndexedAccessSkipsProtectedPage) {
   EXPECT_EQ(munmap(mapping, static_cast<std::size_t>(page_size * 2)), 0);
 }
 
-TEST(VecMemoryEdgeTest, ZeroNegativeAndRepeatedAddressing) {
+#if VECOPS_TEST_SHARD_INDEX == 240
+void run_repeated_addressing_test() {
   using Tag = vec::ScalableTag<int32_t>;
   using IndexTag = vec::Rebind<int32_t, Tag>;
   constexpr std::size_t capacity = 4096;
@@ -543,24 +604,37 @@ TEST(VecMemoryEdgeTest, ZeroNegativeAndRepeatedAddressing) {
               output[static_cast<std::size_t>(vec::size(Tag{}) - 1 - lane)]);
 }
 
-#ifdef VECOPS_DEBUG
-TEST(VecMemoryEdgeTest, FirstRejectsOutOfRangeCounts) {
+void run_first_counts_test() {
   using Tag = vec::ScalableTag<int32_t>;
   std::array<int32_t, 4096> storage{};
-  const auto value = vec::zeros(Tag{});
-  EXPECT_DEATH((void)vec::load(
-      Tag{}, storage.data(), vec::opt::first(-1)), "count");
-  EXPECT_DEATH((void)vec::load(
-      Tag{}, storage.data(), vec::opt::first(vec::size(Tag{}) + 1)), "count");
-  EXPECT_DEATH(vec::store(
-      Tag{}, storage.data(), value, vec::opt::first(-1)), "count");
-  EXPECT_DEATH(vec::store(
-      Tag{}, storage.data(), value,
-      vec::opt::first(vec::size(Tag{}) + 1)), "count");
-}
-#endif
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane)
+    storage[static_cast<std::size_t>(lane)] =
+        static_cast<int32_t>(lane + 11);
+  const auto empty = vec::load(
+      Tag{}, storage.data(), vec::opt::first(-1));
+  const auto full = vec::load(
+      Tag{}, storage.data(), vec::opt::first(vec::size(Tag{}) + 1));
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane) {
+    EXPECT_EQ(vec::get(Tag{}, empty, lane), 0);
+    EXPECT_EQ(
+        vec::get(Tag{}, full, lane),
+        storage[static_cast<std::size_t>(lane)]);
+  }
 
-TEST(VecMemoryInitializerListTest, LoadsExactlyOneLogicalVector) {
+  std::array<int32_t, 4096> output;
+  output.fill(-1);
+  const auto value = vec::fill(Tag{}, int32_t{37});
+  vec::store(Tag{}, output.data(), value, vec::opt::first(-1));
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane)
+    EXPECT_EQ(output[static_cast<std::size_t>(lane)], -1);
+  vec::store(
+      Tag{}, output.data(), value,
+      vec::opt::first(vec::size(Tag{}) + 1));
+  for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane)
+    EXPECT_EQ(output[static_cast<std::size_t>(lane)], 37);
+}
+
+void run_initializer_list_test() {
   using Tag = vec::ScalableTag<float>;
   const auto value = vec::load(
       Tag{},
@@ -569,10 +643,11 @@ TEST(VecMemoryInitializerListTest, LoadsExactlyOneLogicalVector) {
   for (vecops::nint_t lane = 0; lane < vec::size(Tag{}); ++lane)
     EXPECT_EQ(vec::get(Tag{}, value, lane), static_cast<float>(lane + 1));
 }
+#endif
 
 #if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
-TYPED_TEST(VecMemoryTest, FixedSVEBatchesBeyondTupleLimit) {
-  using T = TypeParam;
+template <typename T>
+void run_fixed_sve_memory_test() {
   if constexpr (!std::same_as<T, vecops::float32_t>) {
     GTEST_SKIP() << "f32 is the representative >4-word memory type";
   } else {
@@ -583,12 +658,13 @@ TYPED_TEST(VecMemoryTest, FixedSVEBatchesBeyondTupleLimit) {
     using Tag = vec::FixedTag<T, lanes>;
     EXPECT_GT(vec::num_words(Tag{}), 4);
     verify_memory_shape<false>(Tag{});
-    verify_indexed_loads(Tag{});
+    verify_indexed_loads<0>(Tag{});
     verify_indexed_stores(Tag{});
   }
 }
 #endif
 
+#if VECOPS_TEST_SHARD_INDEX == 240
 template <typename Tag>
 concept AcceptsAlignedNonTemporalLoad =
     requires(Tag tag, const vec::ElementOf<Tag>* pointer) {
@@ -661,5 +737,80 @@ static_assert(!AcceptsRawIndexedMask<ConstraintTag>);
 static_assert(!AcceptsDuplicateIndexedActive<ConstraintTag>);
 static_assert(!AcceptsIndexedStorePopulation<ConstraintTag>);
 static_assert(AcceptsNonTemporalIndexedAccess<ConstraintTag>);
+#endif
 
-} // namespace
+#if VECOPS_TEST_SHARD_INDEX < 12
+using ShardType = vec_test::ElementAt<VECOPS_TEST_SHARD_INDEX>;
+template void run_consecutive_memory_test<ShardType>();
+#elif VECOPS_TEST_SHARD_INDEX < 216
+constexpr std::size_t shard_type_index =
+    (VECOPS_TEST_SHARD_INDEX - 12) / 17;
+constexpr int shard_slot = (VECOPS_TEST_SHARD_INDEX - 12) % 17;
+using ShardType = vec_test::ElementAt<shard_type_index>;
+template void run_indexed_loads_test<ShardType, shard_slot>();
+#elif VECOPS_TEST_SHARD_INDEX < 228
+using ShardType = vec_test::ElementAt<VECOPS_TEST_SHARD_INDEX - 216>;
+template void run_indexed_stores_test<ShardType>();
+#elif VECOPS_TEST_SHARD_INDEX < 240
+using ShardType = vec_test::ElementAt<VECOPS_TEST_SHARD_INDEX - 228>;
+template void run_filtered_access_test<ShardType>();
+template void run_filtered_indexed_access_test<ShardType>();
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+template void run_fixed_sve_memory_test<ShardType>();
+#endif
+#endif
+
+#else
+
+template <typename T>
+class VecMemoryTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(
+    VecMemoryTest,
+    vec_test::AllElementTypes,
+    vec_test::ElementTypeName);
+
+TYPED_TEST(VecMemoryTest, ConsecutiveOptionsCoverEveryShape) {
+  run_consecutive_memory_test<TypeParam>();
+}
+
+template <typename T, std::size_t... Slots>
+void run_all_indexed_loads(std::index_sequence<Slots...>) {
+  (run_indexed_loads_test<T, static_cast<int>(Slots)>(), ...);
+}
+
+TYPED_TEST(VecMemoryTest, IndexedAndStridedLoadsCoverEveryShape) {
+  run_all_indexed_loads<TypeParam>(std::make_index_sequence<17>{});
+}
+
+TYPED_TEST(VecMemoryTest, IndexedAndStridedStoresCoverEveryShape) {
+  run_indexed_stores_test<TypeParam>();
+}
+
+TYPED_TEST(VecMemoryTest, FilteredAccessStopsAtProtectedPage) {
+  run_filtered_access_test<TypeParam>();
+}
+
+TYPED_TEST(VecMemoryTest, FilteredIndexedAccessSkipsProtectedPage) {
+  run_filtered_indexed_access_test<TypeParam>();
+}
+
+TEST(VecMemoryEdgeTest, ZeroNegativeAndRepeatedAddressing) {
+  run_repeated_addressing_test();
+}
+
+TEST(VecMemoryEdgeTest, FirstCountsFollowMwhileltSemantics) {
+  run_first_counts_test();
+}
+
+TEST(VecMemoryInitializerListTest, LoadsExactlyOneLogicalVector) {
+  run_initializer_list_test();
+}
+
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+TYPED_TEST(VecMemoryTest, FixedSVEBatchesBeyondTupleLimit) {
+  run_fixed_sve_memory_test<TypeParam>();
+}
+#endif
+
+#endif

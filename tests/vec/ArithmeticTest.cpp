@@ -1,3 +1,5 @@
+// @vecops-test-shards: 48
+
 #include <gtest/gtest.h>
 
 #include <bit>
@@ -10,13 +12,27 @@
 #include "vecops/vec/Arithmetic.h"
 #include "vecops/vec/Memory.h"
 #include "TestHelpers.h"
+#include "TestShard.h"
 
 namespace vec = vecops::vec;
 
 template <typename T>
-class VecArithmeticElementTest : public ::testing::Test {};
+void run_basic_arithmetic_test();
+template <typename T>
+void run_extrema_test();
+template <typename T>
+void run_fma_test();
+template <typename T>
+void run_floating_division_edge_test();
+template <typename T>
+void run_floating_extrema_edge_test();
+template <typename T>
+void run_fixed_sve_arithmetic_test();
 
-TYPED_TEST_SUITE(VecArithmeticElementTest, vec_test::AllElementTypes);
+#if defined(VECOPS_TEST_SHARD_ACTIVE)
+
+static_assert(
+    VECOPS_TEST_SHARD_COUNT == vec_test::AllElements::size * 4);
 
 template <typename T>
 T arithmetic_operand(vecops::nint_t lane, bool rhs) {
@@ -404,8 +420,8 @@ void verify_fma(Tag tag) {
   }
 }
 
-TYPED_TEST(VecArithmeticElementTest, OperationsCoverEveryLaneAndScalableShape) {
-  using T = TypeParam;
+template <typename T>
+void run_basic_arithmetic_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
     constexpr bool options = vec_test::exhaustive_options_shape<Tag>;
     verify_arithmetic<ArithmeticKind::Add, options>(Tag{});
@@ -413,8 +429,22 @@ TYPED_TEST(VecArithmeticElementTest, OperationsCoverEveryLaneAndScalableShape) {
     verify_arithmetic<ArithmeticKind::Mul, options>(Tag{});
     if constexpr (::vecops::IsFloatV<T>)
       verify_arithmetic<ArithmeticKind::Div, options>(Tag{});
+  });
+}
+
+template <typename T>
+void run_extrema_test() {
+  vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
+    constexpr bool options = vec_test::exhaustive_options_shape<Tag>;
     verify_extrema<ExtremaKind::Min, options>(Tag{});
     verify_extrema<ExtremaKind::Max, options>(Tag{});
+  });
+}
+
+template <typename T>
+void run_fma_test() {
+  vec_test::for_each_scalable_shape<T>([]<vec::VectorTag Tag>() {
+    constexpr bool options = vec_test::exhaustive_options_shape<Tag>;
     verify_fma<FmaKind::Fmadd, options>(Tag{});
     verify_fma<FmaKind::Fmsub, options>(Tag{});
     verify_fma<FmaKind::Fnmadd, options>(Tag{});
@@ -422,8 +452,8 @@ TYPED_TEST(VecArithmeticElementTest, OperationsCoverEveryLaneAndScalableShape) {
   });
 }
 
-TYPED_TEST(VecArithmeticElementTest, FloatingDivisionByZeroAndNaN) {
-  using T = TypeParam;
+template <typename T>
+void run_floating_division_edge_test() {
   if constexpr (!::vecops::IsFloatV<T>) {
     GTEST_SKIP() << "floating-point edge case";
   } else {
@@ -448,8 +478,8 @@ TYPED_TEST(VecArithmeticElementTest, FloatingDivisionByZeroAndNaN) {
   }
 }
 
-TYPED_TEST(VecArithmeticElementTest, ExtremaRetainBackendFloatingSpecialValues) {
-  using T = TypeParam;
+template <typename T>
+void run_floating_extrema_edge_test() {
   if constexpr (::vecops::IsFloatV<T>) {
     using Tag = vec::ScalableTag<T, 0>;
     const Tag tag{};
@@ -513,13 +543,14 @@ TYPED_TEST(VecArithmeticElementTest, ExtremaRetainBackendFloatingSpecialValues) 
     EXPECT_FALSE(std::signbit(static_cast<double>(max_positive_negative)));
     EXPECT_FALSE(std::signbit(static_cast<double>(max_negative_positive)));
 #endif
+
   }
 }
 
 #if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
 
-TYPED_TEST(VecArithmeticElementTest, FixedSVEBatchesBeyondTupleLimit) {
-  using T = TypeParam;
+template <typename T>
+void run_fixed_sve_arithmetic_test() {
   if constexpr (
       !std::same_as<T, vecops::float32_t> &&
       !std::same_as<T, vecops::int32_t>) {
@@ -546,5 +577,61 @@ TYPED_TEST(VecArithmeticElementTest, FixedSVEBatchesBeyondTupleLimit) {
     verify_fma<FmaKind::Fnmsub, false>(Tag{});
   }
 }
+
+#endif
+
+constexpr std::size_t arithmetic_type_index =
+    VECOPS_TEST_SHARD_INDEX % vec_test::AllElements::size;
+using ShardType = vec_test::ElementAt<arithmetic_type_index>;
+
+#if VECOPS_TEST_SHARD_INDEX < 12
+template void run_basic_arithmetic_test<ShardType>();
+#elif VECOPS_TEST_SHARD_INDEX < 24
+template void run_extrema_test<ShardType>();
+#elif VECOPS_TEST_SHARD_INDEX < 36
+template void run_fma_test<ShardType>();
+#else
+template void run_floating_division_edge_test<ShardType>();
+template void run_floating_extrema_edge_test<ShardType>();
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+template void run_fixed_sve_arithmetic_test<ShardType>();
+#endif
+#endif
+
+#else
+
+template <typename T>
+class VecArithmeticTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(
+    VecArithmeticTest,
+    vec_test::AllElementTypes,
+    vec_test::ElementTypeName);
+
+TYPED_TEST(VecArithmeticTest, BasicOperationsCoverEveryLaneAndScalableShape) {
+  run_basic_arithmetic_test<TypeParam>();
+}
+
+TYPED_TEST(VecArithmeticTest, ExtremaCoverEveryLaneAndScalableShape) {
+  run_extrema_test<TypeParam>();
+}
+
+TYPED_TEST(VecArithmeticTest, FmaOperationsCoverEveryLaneAndScalableShape) {
+  run_fma_test<TypeParam>();
+}
+
+TYPED_TEST(VecArithmeticTest, FloatingDivisionByZeroAndNaN) {
+  run_floating_division_edge_test<TypeParam>();
+}
+
+TYPED_TEST(VecArithmeticTest, ExtremaRetainBackendFloatingSpecialValues) {
+  run_floating_extrema_edge_test<TypeParam>();
+}
+
+#if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
+TYPED_TEST(VecArithmeticTest, FixedSVEBatchesBeyondTupleLimit) {
+  run_fixed_sve_arithmetic_test<TypeParam>();
+}
+#endif
 
 #endif
