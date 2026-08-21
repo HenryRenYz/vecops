@@ -30,9 +30,10 @@
  * subnormal results. Fast and Estimate always flush subnormal outputs to zero.
  *
  * Accuracy is orthogonal to the unary masking options. Calls may combine one
- * accuracy option with exactly one `opt::masked(mask)` or `opt::unmasked` and
- * the usual `opt::zero`/`opt::merge` inactive-lane policy, in any order. A call
- * containing only an accuracy option is an ordinary unmasked call.
+ * accuracy option with exactly one `opt::masked(mask)`, `opt::first(count)`, or
+ * `opt::unmasked` and the usual `opt::zero`/`opt::merge` inactive-lane policy,
+ * in any order. `opt::first` is lowered to a backend mask. A call containing
+ * only an accuracy option is an ordinary unmasked call.
  */
 
 #include "vecops/vec/Arithmetic.h"
@@ -53,7 +54,8 @@ consteval bool valid_exp_options_for() {
       option_count<IsMathAccuracyOption, Options...>;
   if constexpr (accuracy_count > 1) return false;
   if constexpr (!((is_math_accuracy_option<Options> ||
-                    is_arithmetic_option_for<Tag, Options>) && ...))
+                    is_arithmetic_option_for<Tag, Options> ||
+                    is_first_option<Options>) && ...))
     return false;
 
   constexpr std::size_t arithmetic_count =
@@ -64,13 +66,17 @@ consteval bool valid_exp_options_for() {
       option_count<IsMaskedOption, Options...>;
   constexpr std::size_t unmasked_count =
       option_count<IsUnmaskedOption, Options...>;
+  constexpr std::size_t first_count =
+      option_count<IsFirstOption, Options...>;
   constexpr std::size_t zero_count = option_count<IsZeroOption, Options...>;
   constexpr std::size_t vector_merge_count =
       option_count<IsVectorMergeOption, Options...>;
   constexpr std::size_t scalar_merge_count =
       option_count<IsScalarMergeOption, Options...>;
-  return masked_count + unmasked_count == 1 &&
-      masked_count * unmasked_count == 0 && zero_count <= 1 &&
+  return masked_count + unmasked_count + first_count == 1 &&
+      masked_count * unmasked_count == 0 &&
+      masked_count * first_count == 0 &&
+      unmasked_count * first_count == 0 && zero_count <= 1 &&
       vector_merge_count + scalar_merge_count <= 1 &&
       zero_count + vector_merge_count + scalar_merge_count <= 1;
 }
@@ -182,15 +188,27 @@ template <Accuracy A, FloatingTag Tag, typename... ArithmeticOptions>
 VECOPS_ALWAYS_INLINE Vec<Tag> ExpCpo<NegativeOnly>::operator()(
     Tag tag,
     Vec<Tag> value,
-    opt::math::AccuracyOption<A>,
+    opt::math::AccuracyOption<A> accuracy,
     ArithmeticOptions&&... arithmetic_options) const {
+  (void)accuracy;
   if constexpr (sizeof...(ArithmeticOptions) == 0) {
     return details::execute(details::ExpOp<A, NegativeOnly>{}, tag, value);
+  } else if constexpr (
+      details::option_count<
+          details::IsFirstOption, ArithmeticOptions...> == 1) {
+    const nint_t count = details::find_option<details::IsFirstOption>(
+        arithmetic_options...).count;
+    const auto mask = mwhilelt(tag, 0, count);
+    return details::invoke_replacing_first(
+        [&](auto&&... lowered_options) -> Vec<Tag> {
+          return details::execute_unary_arithmetic_options(
+              details::ExpOp<A, NegativeOnly>{}, tag, value,
+              std::forward<decltype(lowered_options)>(lowered_options)...);
+        },
+        mask, std::forward<ArithmeticOptions>(arithmetic_options)...);
   } else {
     return details::execute_unary_arithmetic_options(
-        details::ExpOp<A, NegativeOnly>{},
-        tag,
-        value,
+        details::ExpOp<A, NegativeOnly>{}, tag, value,
         std::forward<ArithmeticOptions>(arithmetic_options)...);
   }
 }

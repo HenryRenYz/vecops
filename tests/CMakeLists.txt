@@ -5,6 +5,7 @@ vecops_add_test(NAME TensorTest FILES tensor/TensorTest.cpp FOLDER tensor/tensor
 vecops_add_test(NAME GemmTest FILES array/GemmTest.cpp FOLDER array/gemm)
 vecops_add_test(NAME LayoutTest FILES tensor/LayoutTest.cpp FOLDER tensor/layout)
 vecops_add_test(NAME KernelLoopTest FILES kernel/LoopTest.cpp FOLDER kernel/loop)
+vecops_add_test(NAME UtilMathTest FILES util/MathTest.cpp FOLDER util/math)
 
 if(VECOPS_ARCH_FAMILY STREQUAL "ARM")
     vecops_add_test(

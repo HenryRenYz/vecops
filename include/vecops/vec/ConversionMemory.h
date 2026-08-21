@@ -37,6 +37,8 @@
  *
  * Ordered conversion uses a caller-logical mask. Unordered conversion normally
  * uses the memory-side rebound Tag's mask because the backend may permute lanes.
+ * Its lane permutation is the same stable, compositional layout specified by
+ * `convert`; fused and load/convert or convert/store lowerings are equivalent.
  * When that rebound Tag is not representable, only the caller-logical mask
  * type is valid, whether a backend handles the whole request directly or the
  * generic boundary partitions it. `first(n)` avoids this distinction and is

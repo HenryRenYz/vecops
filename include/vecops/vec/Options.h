@@ -309,9 +309,13 @@ namespace vecops::vec::cvt {
 struct Ordered {};
 
 /**
- * Allows a backend-native lane order.
- * The ordering must round-trip losslessly: widening followed by the inverse
- * narrowing restores original lane values.
+ * Allows a stable backend-native lane permutation.
+ *
+ * Equal-width element conversion has ordered lane provenance. For any three
+ * compatible element types A, B, and C, converting A->B->C has the same lane
+ * provenance as converting A->C directly. Consequently A->B->A restores the
+ * original lane positions. This contract concerns ordering only; value loss,
+ * rounding, saturation, and wrapping follow the selected value policy.
  */
 struct Unordered {};
 

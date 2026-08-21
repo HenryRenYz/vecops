@@ -3808,7 +3808,7 @@ VECOPS_INLINE nint_t required_workspace(const Spec& spec, Policy policy) {
       return details::tensor_numel(spec.output_layout());
     }
   }();
-  return kernel::details::workspace_round_up(
+  return align_up(
       elements * element_bytes,
       vec::DEFAULT_ALIGNMENT);
 }

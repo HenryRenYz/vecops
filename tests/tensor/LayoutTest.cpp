@@ -12,6 +12,26 @@ using namespace vecops;
 using namespace vecops::meta;
 using namespace vecops::tensor;
 
+static_assert(has_lower_bound_v<Const<8>>);
+static_assert(has_upper_bound_v<Const<8>>);
+static_assert(is_bounded_v<Const<8>>);
+static_assert(range_within_v<Const<8>, 4, 16>);
+static_assert(range_within_v<Dynamic<4, 8, 32>, 8, 32>);
+static_assert(!range_within_v<Dynamic<4, 8, 32>, 9, 32>);
+static_assert(lower_bound_at_least_v<Dynamic<4, 8, 32>, 8>);
+static_assert(upper_bound_at_most_v<Dynamic<4, 8, 32>, 32>);
+static_assert(!is_bounded_v<Any>);
+
+using TypedLayout = Layout<
+    Shape<Const<2>, Dynamic<4, 8, 32>, Const<16>>,
+    Strides<Dynamic<4>, Const<16>, Const<1>>>;
+static_assert(std::same_as<size_type_t<0, TypedLayout>, Const<2>>);
+static_assert(std::same_as<
+              size_type_t<1, TypedLayout>, Dynamic<4, 8, 32>>);
+static_assert(std::same_as<stride_type_t<2, TypedLayout>, Const<1>>);
+static_assert(std::same_as<
+              numel_type_t<TypedLayout>, Dynamic<128, 256, 1024>>);
+
 // ======================================================================
 // Helper: capture operator<< output to std::string
 // ======================================================================

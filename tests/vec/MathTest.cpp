@@ -232,6 +232,10 @@ void verify_lane_shape(Tag tag) {
       tag, input, vec::opt::masked(mask), vec::opt::merge(scalar_merge));
   const auto vector = invoke_exp<Tier, NegativeOnly>(
       tag, input, vec::opt::merge(vector_merge), vec::opt::masked(mask));
+  const vecops::nint_t prefix_count = vec::size(tag) / 2;
+  const auto prefix = invoke_exp<Tier, NegativeOnly>(
+      tag, input, vec::opt::first(prefix_count),
+      vec::opt::merge(scalar_merge));
   for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
     const bool active = lane % 3 != 0;
     if (active) {
@@ -245,6 +249,13 @@ void verify_lane_shape(Tag tag) {
       EXPECT_EQ(bits(T{}), bits(vec::get(tag, zeroed, lane)));
       EXPECT_EQ(bits(scalar_merge), bits(vec::get(tag, scalar, lane)));
       EXPECT_EQ(bits(vec::get(tag, vector_merge, lane)), bits(vec::get(tag, vector, lane)));
+    }
+    if (lane < prefix_count) {
+      expect_accurate<Tier>(
+          vec::get(tag, input, lane), vec::get(tag, prefix, lane));
+    } else {
+      EXPECT_EQ(
+          bits(scalar_merge), bits(vec::get(tag, prefix, lane)));
     }
   }
 }

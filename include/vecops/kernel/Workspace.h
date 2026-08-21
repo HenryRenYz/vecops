@@ -7,6 +7,7 @@
 
 #include "vecops/Assertion.h"
 #include "vecops/CoreTypes.h"
+#include "vecops/util/Math.h"
 #include "vecops/vec/Vec.h"
 
 #include <cstddef>
@@ -49,14 +50,6 @@
  * - Per-thread views are independent only when each thread uses its own tid.
  */
 namespace vecops::kernel {
-
-namespace details {
-
-constexpr nint_t workspace_round_up(nint_t value, nint_t alignment) {
-  return (value + alignment - 1) / alignment * alignment;
-}
-
-} // namespace details
 
 /**
  * @brief Non-owning single-thread workspace view.
@@ -194,7 +187,7 @@ public:
     VECOPS_ASSERT(per_thread_bytes >= 0, "per-thread workspace size must be non-negative");
     _num_threads = num_threads;
     _per_thread_bytes = per_thread_bytes;
-    _stride = details::workspace_round_up(
+    _stride = align_up(
         per_thread_bytes + vec::DEFAULT_ALIGNMENT,
         vec::DEFAULT_ALIGNMENT);
     _storage.resize(static_cast<size_t>(_stride * num_threads + vec::DEFAULT_ALIGNMENT));

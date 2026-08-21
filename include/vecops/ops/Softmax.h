@@ -5,7 +5,6 @@
 #include <cmath>
 #include <limits>
 #include <type_traits>
-#include <utility>
 
 #include "vecops/Assertion.h"
 #include "vecops/CoreTypes.h"
@@ -17,24 +16,28 @@
 namespace vecops::ops {
 
 template <typename ComputeT = float32_t,
-          typename VecTag = vec::ScalableTag<ComputeT, 0>,
-          vec::Accuracy ExpAccuracy = vec::Accuracy::Strict>
+          vec::Accuracy ExpAccuracy = vec::Accuracy::Strict,
+          bool AllowOnline = true>
 struct SoftmaxConfig {
   using ComputeType = ComputeT;
-  using Tag = VecTag;
   static constexpr vec::Accuracy exp_accuracy = ExpAccuracy;
-  bool allow_online = true;
+  static constexpr bool allow_online = AllowOnline;
 };
 
 namespace details {
 
 template <typename Config>
-VECOPS_INLINE constexpr bool softmax_online_allowed(const Config& config) {
-  if constexpr (requires { config.allow_online; }) {
-    return static_cast<bool>(config.allow_online);
+consteval bool softmax_online_allowed() {
+  if constexpr (requires { Config::allow_online; }) {
+    return Config::allow_online;
   } else {
     return true;
   }
+}
+
+template <typename Config>
+consteval bool softmax_online_allowed(const Config&) {
+  return softmax_online_allowed<Config>();
 }
 
 template <typename InLayout, typename OutLayout>
@@ -50,53 +53,29 @@ VECOPS_INLINE void validate_softmax_layouts(
                 "Softmax normalized dimension must be non-empty");
 }
 
-template <typename Memory>
-class ContiguousSoftmaxInput {
-public:
-  explicit ContiguousSoftmaxInput(const Memory* data) : data_(data) {}
-
-  template <vec::VectorTag Tag, typename... Options>
-  VECOPS_ALWAYS_INLINE auto load(
-      Tag tag, const tensor::Coord<1>& position,
-      Options&&... options) const {
-    return vec::load_convert(
-        tag, data_ + position[0],
-        std::forward<Options>(options)...);
-  }
-
-private:
-  const Memory* data_;
+template <int Fold, int Store>
+struct SoftmaxRowRecipe {
+  static constexpr int FoldFactor = Fold;
+  static constexpr int StoreFactor = Store;
 };
 
-template <typename Memory>
-class ContiguousSoftmaxOutput {
-public:
-  explicit ContiguousSoftmaxOutput(Memory* data) : data_(data) {}
-
-  template <vec::VectorTag Tag, typename... Options>
-  VECOPS_ALWAYS_INLINE void store(
-      Tag tag, const tensor::Coord<1>& position, vec::Vec<Tag> value,
-      Options&&... options) const {
-    vec::store_convert(
-        tag, data_ + position[0], value,
-        std::forward<Options>(options)...);
-  }
-
-  VECOPS_ALWAYS_INLINE void commit() const {}
-
-private:
-  Memory* data_;
-};
+using GenericSoftmaxRecipe = SoftmaxRowRecipe<1, 2>;
+using PackedSoftmaxRecipe = SoftmaxRowRecipe<1, 2>;
+using UnrolledSoftmaxRecipe = SoftmaxRowRecipe<4, 4>;
+using SingleStoreSoftmaxRecipe = SoftmaxRowRecipe<1, 1>;
 
 } // namespace details
 
 template <typename Config = SoftmaxConfig<>>
 class Softmax {
+  using XPolicy = tensor::InputAccessPolicy<
+      0, 2, tensor::AccessPlan::automatic_deferred>;
+  using YPolicy = tensor::OutputAccessPolicy<0>;
+
 public:
-  using ConfigType = std::remove_cvref_t<Config>;
-  using ComputeType = typename ConfigType::ComputeType;
-  using Tag = typename ConfigType::Tag;
-  static constexpr vec::Accuracy ExpAccuracy = ConfigType::exp_accuracy;
+  using ComputeType = typename Config::ComputeType;
+  using Tag = vec::ScalableTag<ComputeType, 0>;
+  static constexpr vec::Accuracy ExpAccuracy = Config::exp_accuracy;
 
   const Config config;
 
@@ -112,20 +91,18 @@ public:
     constexpr int PrefixRank = InSpec::InputTensor::Ndim - 1;
     const auto in_row = tensor::take_trailing<1>(in);
     const auto out_row = tensor::take_trailing<1>(out);
-    using InPolicy = tensor::InputAccessPolicy<0, 2>;
-    using OutPolicy = tensor::OutputAccessPolicy<0>;
-    const nint_t n = in.input_layout().shape()[PrefixRank];
+    const nint_t n = tensor::size<PrefixRank>(in.input_layout());
     nint_t cache_elements = n;
-    if (should_use_online(in, out)) {
+    if constexpr (should_use_online<InSpec, OutSpec>()) {
       const nint_t tile_step = 4 * vec::size(Tag{});
-      const nint_t tile_count = (n + tile_step - 1) / tile_step;
+      const nint_t tile_count = ceil_div(n, tile_step);
       cache_elements += 2 * tile_count;
     }
-    const nint_t cache_bytes = kernel::details::workspace_round_up(
+    const nint_t cache_bytes = align_up(
         cache_elements * static_cast<nint_t>(sizeof(ComputeType)),
         vec::DEFAULT_ALIGNMENT);
-    return cache_bytes + tensor::required_workspace(in_row, InPolicy{}) +
-        tensor::required_workspace(out_row, OutPolicy{});
+    return cache_bytes + tensor::required_workspace(in_row, XPolicy{}) +
+        tensor::required_workspace(out_row, YPolicy{});
   }
 
   template <typename InSpec, typename OutSpec>
@@ -137,19 +114,13 @@ public:
     details::validate_softmax_layouts(
         in.input_layout(), out.output_layout());
     constexpr int PrefixRank = InSpec::InputTensor::Ndim - 1;
-    const bool use_online = should_use_online(in, out);
-    const auto run_rows =
-        [&]<bool Online, bool PackedBf16Output, bool Unrolled = false>() {
+    const auto run_rows = [&]<bool Online, typename Recipe>() {
       kernel::loop::for_each_dims<PrefixRank>(
           [this, &workspace](const auto& in_row, const auto& out_row) {
             if constexpr (Online) {
-#if defined(CPU_CAPABILITY_SVE) || defined(CPU_CAPABILITY_AVX512)
-              run_row_online<PackedBf16Output>(
-                  workspace, in_row, out_row);
-#endif
+              run_row_online<Recipe>(workspace, in_row, out_row);
             } else {
-              run_row<PackedBf16Output, Unrolled>(
-                  workspace, in_row, out_row);
+              run_row<Recipe>(workspace, in_row, out_row);
             }
           },
           in, out);
@@ -158,37 +129,62 @@ public:
     !defined(VECOPS_PRESERVE_SUBNORMALS)
     constexpr bool CanPackBf16Output =
         std::same_as<ComputeType, float32_t> &&
-        std::same_as<Tag, vec::ScalableTag<float32_t, 0>> &&
         std::same_as<typename OutSpec::MemoryElement, bfloat16_t> &&
         std::same_as<typename OutSpec::TransformType, tensor::NoTransform> &&
         tensor::is_ct_last_contiguous<
             typename OutSpec::OutputLayout, 1>::value;
-    if constexpr (CanPackBf16Output) {
-      nint_t element_count = 1;
-      for (int d = 0; d <= PrefixRank; ++d) {
-        element_count *= in.input_layout().shape()[d];
+    using ElementCount = tensor::numel_type_t<
+        typename InSpec::InputLayout>;
+    constexpr bool UsePackedBf16Output = CanPackBf16Output &&
+        meta::lower_bound_at_least_v<ElementCount, 64 * 1024 + 1>;
+    if constexpr (UsePackedBf16Output) {
+      if constexpr (should_use_online<InSpec, OutSpec>()) {
+        run_rows.template operator()<true, details::PackedSoftmaxRecipe>();
+      } else {
+        run_rows.template operator()<false, details::PackedSoftmaxRecipe>();
       }
-      if (element_count > 64 * 1024) {
-        if (use_online) run_rows.template operator()<true, true>();
-        else run_rows.template operator()<false, true>();
-        return;
-      }
+      return;
     }
 #endif
-    if (use_online) {
-      run_rows.template operator()<true, false>();
+    if constexpr (should_use_online<InSpec, OutSpec>()) {
+      run_rows.template operator()<true, details::SingleStoreSoftmaxRecipe>();
     } else {
+#if defined(ARCH_X86_FAMILY) && defined(__GNUC__) && !defined(__clang__)
+      using GenericRecipe = std::conditional_t<
+          std::same_as<typename OutSpec::MemoryElement, bfloat16_t>,
+          details::SingleStoreSoftmaxRecipe,
+          details::GenericSoftmaxRecipe>;
+#elif defined(CPU_CAPABILITY_SVE) && defined(__GNUC__) && !defined(__clang__)
+      // GCC expands the paired FP16 conversion/store body into a longer
+      // dependency chain than the single-vector form on SVE.
+      using GenericRecipe = std::conditional_t<
+          std::same_as<typename OutSpec::MemoryElement, float16_t>,
+          details::SingleStoreSoftmaxRecipe,
+          details::GenericSoftmaxRecipe>;
+#else
+      using GenericRecipe = details::GenericSoftmaxRecipe;
+#endif
 #if defined(CPU_CAPABILITY_AVX512)
-      const nint_t normalized_n =
-          in.input_layout().shape()[PrefixRank];
-      const nint_t lanes = vec::size(Tag{});
-      if (normalized_n >= 16 * lanes && normalized_n <= 1024) {
-        run_rows.template operator()<false, false, true>();
+      using NormalizedSize = tensor::size_type_t<
+          PrefixRank, typename InSpec::InputLayout>;
+      constexpr nint_t lanes = vec::size(Tag{});
+      constexpr nint_t max_unrolled_n =
+          sizeof(typename InSpec::MemoryElement) < sizeof(ComputeType)
+          ? 4096
+          : 1024;
+      // For an unconstrained caller, prefer the throughput recipe used by
+      // common neural-network widths. Explicit bounds outside the tuned range
+      // select the smaller generic recipe without a runtime branch.
+      constexpr bool UseUnrolled = meta::range_within_v<
+          NormalizedSize, 16 * lanes, max_unrolled_n> ||
+          !meta::is_bounded_v<NormalizedSize>;
+      if constexpr (UseUnrolled) {
+        run_rows.template operator()<false, details::UnrolledSoftmaxRecipe>();
       } else {
-        run_rows.template operator()<false, false, false>();
+        run_rows.template operator()<false, GenericRecipe>();
       }
 #else
-      run_rows.template operator()<false, false, false>();
+      run_rows.template operator()<false, GenericRecipe>();
 #endif
     }
   }
@@ -202,37 +198,28 @@ public:
 
 private:
   template <typename InSpec, typename OutSpec>
-  VECOPS_INLINE bool should_use_online(
-      const InSpec& in, const OutSpec& out) const {
+  static consteval bool should_use_online() {
 #if defined(CPU_CAPABILITY_SVE) || defined(CPU_CAPABILITY_AVX512)
-    if (!details::softmax_online_allowed(config)) return false;
+    if constexpr (!details::softmax_online_allowed<Config>()) return false;
     constexpr int Rank = InSpec::InputTensor::Ndim;
-    const auto& in_layout = in.input_layout();
-    const auto& out_layout = out.output_layout();
-    if constexpr (!tensor::is_ct_last_contiguous<
-                      typename InSpec::InputLayout, 1>::value) {
-      if (in_layout.strides()[Rank - 1] != 1) return false;
-    }
-    if constexpr (!tensor::is_ct_last_contiguous<
-                      typename OutSpec::OutputLayout, 1>::value) {
-      if (out_layout.strides()[Rank - 1] != 1) return false;
-    }
-
+    if constexpr (
+        !tensor::is_ct_last_contiguous<
+            typename InSpec::InputLayout, 1>::value ||
+        !tensor::is_ct_last_contiguous<
+            typename OutSpec::OutputLayout, 1>::value) return false;
     using InElement = std::remove_const_t<typename InSpec::MemoryElement>;
-    const nint_t normalized_n = in_layout.shape()[Rank - 1];
-    const auto element_count = [&] {
-      nint_t count = 1;
-      for (int d = 0; d < Rank; ++d) count *= in_layout.shape()[d];
-      return count;
-    };
+    using NormalizedSize = tensor::size_type_t<
+        Rank - 1, typename InSpec::InputLayout>;
+    using ElementCount = tensor::numel_type_t<
+        typename InSpec::InputLayout>;
 #if defined(CPU_CAPABILITY_SVE)
     if constexpr (
         std::same_as<ComputeType, float32_t> &&
         std::same_as<InElement, float32_t> &&
         ExpAccuracy != vec::Accuracy::Estimate) {
-      if (normalized_n < 8192 || normalized_n > 16384) return false;
-      const nint_t count = element_count();
-      return count >= 512 * 1024 && count <= 8 * 1024 * 1024;
+      return meta::range_within_v<NormalizedSize, 8192, 16384> &&
+          meta::range_within_v<
+              ElementCount, 512 * 1024, 8 * 1024 * 1024>;
     } else {
       return false;
     }
@@ -241,27 +228,28 @@ private:
         std::same_as<ComputeType, float32_t> &&
         std::same_as<InElement, float32_t>) {
       if constexpr (ExpAccuracy == vec::Accuracy::Strict) {
-        if (normalized_n < 2048 || normalized_n > 4096) return false;
-        return element_count() >= 512 * 1024;
+        return meta::range_within_v<NormalizedSize, 2048, 4096> &&
+            meta::lower_bound_at_least_v<ElementCount, 512 * 1024>;
       } else {
-        if (normalized_n < 2048 || normalized_n > 32768) return false;
-        return element_count() >= 512 * 1024;
+        return meta::range_within_v<NormalizedSize, 2048, 32768> &&
+            meta::lower_bound_at_least_v<ElementCount, 512 * 1024>;
       }
     } else if constexpr (
         std::same_as<ComputeType, float64_t> &&
         std::same_as<InElement, float64_t>) {
-      if (normalized_n < 2048) return false;
       if constexpr (ExpAccuracy == vec::Accuracy::Estimate) {
-        return element_count() >= 512 * 1024;
+        return meta::lower_bound_at_least_v<NormalizedSize, 2048> &&
+            meta::lower_bound_at_least_v<ElementCount, 512 * 1024>;
       } else {
-        return element_count() >= 16 * 1024 * 1024;
+        return meta::lower_bound_at_least_v<NormalizedSize, 2048> &&
+            meta::lower_bound_at_least_v<ElementCount, 16 * 1024 * 1024>;
       }
     } else if constexpr (
         std::same_as<ComputeType, float32_t> &&
         std::same_as<InElement, float16_t>) {
       if constexpr (ExpAccuracy == vec::Accuracy::Estimate) {
-        return normalized_n == 2048 &&
-            element_count() >= 16 * 1024 * 1024;
+        return meta::range_within_v<NormalizedSize, 2048, 2048> &&
+            meta::lower_bound_at_least_v<ElementCount, 16 * 1024 * 1024>;
       } else {
         return false;
       }
@@ -270,25 +258,19 @@ private:
     }
 #endif
 #else
-    (void)in;
-    (void)out;
     return false;
 #endif
   }
 
-#if defined(CPU_CAPABILITY_SVE) || defined(CPU_CAPABILITY_AVX512)
-  template <bool PackedBf16Output, typename InSpec, typename OutSpec>
+  template <typename Recipe, typename InSpec, typename OutSpec>
   VECOPS_NOINLINE void run_row_online(
       kernel::WorkspaceView& workspace, const InSpec& in,
       const OutSpec& out) const {
     static_assert(InSpec::InputTensor::Ndim == 1);
-    using InPolicy = tensor::InputAccessPolicy<0, 2>;
-    using OutPolicy = tensor::OutputAccessPolicy<0>;
     Tag tag{};
-    const nint_t n = in.input_layout().shape()[0];
-    const nint_t lanes = vec::size(tag);
-    const nint_t tile_step = 4 * lanes;
-    const nint_t tile_count = (n + tile_step - 1) / tile_step;
+    const nint_t n = tensor::size<0>(in.input_layout());
+    const nint_t tile_step = 4 * vec::size(tag);
+    const nint_t tile_count = ceil_div(n, tile_step);
     const auto mark = workspace.mark();
     ComputeType* exp_cache = static_cast<ComputeType*>(workspace.allocate(
         n * static_cast<nint_t>(sizeof(ComputeType)),
@@ -300,437 +282,197 @@ private:
     bool fallback = false;
 
     kernel::with_operands(
-        workspace, tensor::operand(in, InPolicy{}),
-        tensor::operand(out, OutPolicy{}),
-        [this, n, lanes, tile_step, tile_count, exp_cache,
+        workspace, tensor::operand(in, XPolicy{}),
+        tensor::operand(out, YPolicy{}),
+        [this, n, tile_step, tile_count, exp_cache,
          tile_max_cache, tile_sum_cache, &fallback](auto& x, auto& y) {
           Tag tag{};
           const ComputeType negative_infinity =
               -std::numeric_limits<ComputeType>::infinity();
-          const auto zero = vec::zeros(tag);
-          nint_t col = 0;
           nint_t tile = 0;
-          for (; col + tile_step <= n; col += tile_step, ++tile) {
-            auto x0 = x.load(
-                tag, tensor::coord(col), vec::opt::unmasked);
-            auto x1 = x.load(
-                tag, tensor::coord(col + lanes), vec::opt::unmasked);
-            auto x2 = x.load(
-                tag, tensor::coord(col + 2 * lanes),
-                vec::opt::unmasked);
-            auto x3 = x.load(
-                tag, tensor::coord(col + 3 * lanes),
-                vec::opt::unmasked);
-            const auto tile_max_vector = vec::max(
-                vec::max(x0, x1), vec::max(x2, x3));
-            const ComputeType tile_max =
-                vec::reduce_max(tag, tile_max_vector);
-            tile_max_cache[tile] = tile_max;
-            const auto max_vector = vec::fill(tag, tile_max);
-            auto exp0 = vec::exp_neg(
-                vec::sub(x0, max_vector),
-                vec::opt::math::accuracy<ExpAccuracy>);
-            auto exp1 = vec::exp_neg(
-                vec::sub(x1, max_vector),
-                vec::opt::math::accuracy<ExpAccuracy>);
-            auto exp2 = vec::exp_neg(
-                vec::sub(x2, max_vector),
-                vec::opt::math::accuracy<ExpAccuracy>);
-            auto exp3 = vec::exp_neg(
-                vec::sub(x3, max_vector),
-                vec::opt::math::accuracy<ExpAccuracy>);
-            vec::store(tag, exp_cache + col, exp0);
-            vec::store(tag, exp_cache + col + lanes, exp1);
-            vec::store(tag, exp_cache + col + 2 * lanes, exp2);
-            vec::store(tag, exp_cache + col + 3 * lanes, exp3);
-            tile_sum_cache[tile] = vec::reduce_add(
-                tag, vec::add(
-                         vec::add(exp0, exp1), vec::add(exp2, exp3)));
-          }
+          kernel::loop::fold<4, 4>(
+              tag, n,
+              [&](auto block_tag, nint_t col, auto active,
+                  const auto& negative_infinity_v) VECOPS_INLINE_LAMBDA {
+                auto value = x.load(
+                    block_tag, tensor::coord(col), active,
+                    vec::opt::merge(negative_infinity_v),
+                    tensor::materialize::populate);
+                const ComputeType tile_max =
+                    vec::reduce_max(block_tag, value);
+                const auto maximum = vec::fill(block_tag, tile_max);
+                auto centered = vec::sub(value, maximum);
+                const auto zero = vec::zeros(block_tag);
+                auto exponential = vec::exp_neg(
+                    block_tag, centered,
+                    vec::opt::math::accuracy<ExpAccuracy>, active,
+                    vec::opt::merge(zero));
+                vec::store(block_tag, exp_cache + col, exponential, active);
+                tile_max_cache[tile] = tile_max;
+                tile_sum_cache[tile] = vec::reduce_add(block_tag, exponential);
+                ++tile;
+              },
+              kernel::loop::invariant(negative_infinity));
 
-          if (col < n) {
-            const nint_t remaining = n - col;
-            auto tile_max_vector =
-                vec::fill(tag, negative_infinity);
-            nint_t local = 0;
-            for (; local + lanes <= remaining; local += lanes) {
-              tile_max_vector = vec::max(
-                  tile_max_vector,
-                  x.load(
-                      tag, tensor::coord(col + local),
-                      vec::opt::unmasked));
-            }
-            if (local < remaining) {
-              const nint_t active = remaining - local;
-              tile_max_vector = vec::max(
-                  tile_max_vector,
-                  x.load(
-                      tag, tensor::coord(col + local),
-                      vec::opt::first(active),
-                      vec::opt::merge(negative_infinity)));
-            }
-
-            const ComputeType tile_max =
-                vec::reduce_max(tag, tile_max_vector);
-            tile_max_cache[tile] = tile_max;
-            const auto max_vector = vec::fill(tag, tile_max);
-            auto tile_sum_vector = vec::zeros(tag);
-            local = 0;
-            for (; local + lanes <= remaining; local += lanes) {
-              auto exponential = vec::exp_neg(
-                  vec::sub(
-                      x.load(
-                          tag, tensor::coord(col + local),
-                          vec::opt::unmasked),
-                      max_vector),
-                  vec::opt::math::accuracy<ExpAccuracy>);
-              vec::store(tag, exp_cache + col + local, exponential);
-              tile_sum_vector = vec::add(tile_sum_vector, exponential);
-            }
-            if (local < remaining) {
-              const nint_t active = remaining - local;
-              const auto mask = vec::mwhilelt(tag, 0, active);
-              auto exponential = vec::exp_neg(
-                  vec::sub(
-                      x.load(
-                          tag, tensor::coord(col + local),
-                          vec::opt::first(active)),
-                      max_vector),
-                  vec::opt::math::accuracy<ExpAccuracy>,
-                  vec::opt::masked(mask),
-                  vec::opt::merge(zero));
-              vec::store(
-                  tag, exp_cache + col + local, exponential,
-                  vec::opt::first(active));
-              tile_sum_vector = vec::add(tile_sum_vector, exponential);
-            }
-            tile_sum_cache[tile] =
-                vec::reduce_add(tag, tile_sum_vector);
-            ++tile;
-          }
-
-          auto metadata_max = vec::fill(tag, negative_infinity);
-          tile = 0;
-          for (; tile + lanes <= tile_count; tile += lanes) {
-            metadata_max = vec::max(
-                metadata_max, vec::load(tag, tile_max_cache + tile));
-          }
-          if (tile < tile_count) {
-            metadata_max = vec::max(
-                metadata_max,
-                vec::load(
-                    tag, tile_max_cache + tile,
-                    vec::opt::first(tile_count - tile),
-                    vec::opt::merge(negative_infinity)));
-          }
-          const ComputeType global_max =
-              vec::reduce_max(tag, metadata_max);
+          ComputeType global_max{};
+          kernel::loop::fold(
+              tag, tile_count,
+              [&](auto block_tag, nint_t i, auto active, auto& maximum) VECOPS_INLINE_LAMBDA {
+                auto tile_max = vec::load(
+                    block_tag, tile_max_cache + i, active,
+                    vec::opt::merge(negative_infinity));
+                maximum = vec::max(maximum, tile_max);
+              },
+              kernel::loop::reduce_max(global_max));
           if (!std::isfinite(static_cast<double>(global_max))) {
             fallback = true;
             return;
           }
 
-          const auto global_max_vector = vec::fill(tag, global_max);
-          auto metadata_sum = vec::zeros(tag);
-          tile = 0;
-          for (; tile + lanes <= tile_count; tile += lanes) {
-            auto scale = vec::exp_neg(
-                vec::sub(
-                    vec::load(tag, tile_max_cache + tile),
-                    global_max_vector),
-                vec::opt::math::accuracy<ExpAccuracy>);
-            vec::store(tag, tile_max_cache + tile, scale);
-            metadata_sum = vec::fmadd(
-                scale, vec::load(tag, tile_sum_cache + tile),
-                metadata_sum);
-          }
-          if (tile < tile_count) {
-            const nint_t active = tile_count - tile;
-            const auto mask = vec::mwhilelt(tag, 0, active);
-            auto scale = vec::exp_neg(
-                vec::sub(
-                    vec::load(
-                        tag, tile_max_cache + tile,
-                        vec::opt::first(active)),
-                    global_max_vector),
-                vec::opt::math::accuracy<ExpAccuracy>,
-                vec::opt::masked(mask),
-                vec::opt::merge(zero));
-            vec::store(
-                tag, tile_max_cache + tile, scale,
-                vec::opt::first(active));
-            metadata_sum = vec::fmadd(
-                scale,
-                vec::load(
-                    tag, tile_sum_cache + tile,
-                    vec::opt::first(active)),
-                metadata_sum);
-          }
-          const ComputeType global_sum =
-              vec::reduce_add(tag, metadata_sum);
+          ComputeType global_sum{};
+          kernel::loop::fold(
+              tag, tile_count,
+              [&](auto block_tag, nint_t i, auto active, auto& sum) VECOPS_INLINE_LAMBDA {
+                auto tile_max = vec::load(
+                    block_tag, tile_max_cache + i, active,
+                    vec::opt::merge(global_max));
+                const auto maximum = vec::fill(block_tag, global_max);
+                auto centered = vec::sub(tile_max, maximum);
+                const auto zero = vec::zeros(block_tag);
+                auto scale = vec::exp_neg(
+                    block_tag, centered,
+                    vec::opt::math::accuracy<ExpAccuracy>, active,
+                    vec::opt::merge(zero));
+                vec::store(block_tag, tile_max_cache + i, scale, active);
+                auto tile_sum = vec::load(
+                    block_tag, tile_sum_cache + i, active,
+                    vec::opt::merge(ComputeType(0)));
+                sum = vec::fmadd(scale, tile_sum, sum);
+              },
+              kernel::loop::reduce_add(global_sum));
           if (!std::isfinite(static_cast<double>(global_sum)) ||
               !(global_sum > ComputeType(0))) {
             fallback = true;
             return;
           }
-          const ComputeType inverse_sum = ComputeType(1) / global_sum;
 
-          col = 0;
+          nint_t col = 0;
+          const ComputeType inverse_sum = ComputeType(1) / global_sum;
           for (tile = 0; tile < tile_count; ++tile) {
             const nint_t count = std::min(tile_step, n - col);
-            const auto scale = vec::fill(
-                tag, tile_max_cache[tile] * inverse_sum);
-            nint_t local = 0;
-            if constexpr (PackedBf16Output) {
-              using PairTag = vec::Twice<Tag>;
-              PairTag pair_tag{};
-              for (; local + 2 * lanes <= count; local += 2 * lanes) {
-                auto out0 = vec::mul(
-                    vec::load(tag, exp_cache + col + local), scale);
-                auto out1 = vec::mul(
-                    vec::load(
-                        tag, exp_cache + col + local + lanes),
-                    scale);
-                y.store(
-                    pair_tag, tensor::coord(col + local),
-                    vec::concat(pair_tag, out0, out1),
-                    vec::opt::unmasked);
-              }
-            }
-            for (; local + lanes <= count; local += lanes) {
-              y.store(
-                  tag, tensor::coord(col + local),
-                  vec::mul(
-                      vec::load(tag, exp_cache + col + local), scale),
-                  vec::opt::unmasked);
-            }
-            if (local < count) {
-              const nint_t active = count - local;
-              y.store(
-                  tag, tensor::coord(col + local),
-                  vec::mul(
-                      vec::load(
-                          tag, exp_cache + col + local,
-                          vec::opt::first(active)),
-                      scale),
-                  vec::opt::first(active));
-            }
+            const ComputeType scale = tile_max_cache[tile] * inverse_sum;
+            kernel::loop::fold<Recipe::StoreFactor>(
+                tag, count,
+                [&](auto block_tag, nint_t local, auto active,
+                    const auto& scale_v) VECOPS_INLINE_LAMBDA {
+                  auto exponential = vec::load(
+                      block_tag, exp_cache + col + local, active);
+                  auto normalized = vec::mul(exponential, scale_v);
+                  y.store(
+                      block_tag, tensor::coord(col + local),
+                      normalized, active);
+                },
+                kernel::loop::invariant(scale));
             col += count;
           }
           y.commit();
         });
     workspace.rewind(mark);
     if (fallback) {
-      run_row<PackedBf16Output>(workspace, in, out);
+      run_row<Recipe>(workspace, in, out);
     }
   }
-#endif
-
-  template <bool PackedBf16Output, bool Unrolled = false,
-            typename InSpec, typename OutSpec>
+  template <typename Recipe, typename InSpec, typename OutSpec>
   VECOPS_INLINE void run_row(
       kernel::WorkspaceView& workspace, const InSpec& in,
       const OutSpec& out) const {
     static_assert(InSpec::InputTensor::Ndim == 1);
-    using InPolicy = tensor::InputAccessPolicy<0, 2>;
-    using OutPolicy = tensor::OutputAccessPolicy<0>;
-    const nint_t n = in.input_layout().shape()[0];
+    nint_t n = tensor::size<0>(in.input_layout());
+#if defined(CPU_CAPABILITY_SVE) && defined(__GNUC__) && !defined(__clang__)
+    if constexpr (std::same_as<typename InSpec::MemoryElement, float16_t>) {
+      // Keeping the trip count in a register prevents GCC from over-unrolling
+      // large Const-shaped rows; the loop recipe remains compile-time.
+      asm volatile("" : "+r"(n));
+    }
+#endif
     const auto mark = workspace.mark();
     ComputeType* exp_cache = static_cast<ComputeType*>(workspace.allocate(
         n * static_cast<nint_t>(sizeof(ComputeType)),
         vec::DEFAULT_ALIGNMENT));
-    auto compute = [this, n, exp_cache](auto& x, auto& y) {
+    auto compute =
+        [this, n, exp_cache](auto& x, auto& y) VECOPS_INLINE_LAMBDA {
           Tag tag{};
-          const nint_t lanes = vec::size(tag);
           const ComputeType negative_infinity =
               -std::numeric_limits<ComputeType>::infinity();
-          auto maximum = vec::fill(tag, negative_infinity);
-          nint_t col = 0;
-          if constexpr (Unrolled) {
-            auto maximum1 = maximum;
-            auto maximum2 = maximum;
-            auto maximum3 = maximum;
-            for (; col + 4 * lanes <= n; col += 4 * lanes) {
-              maximum = vec::max(
-                  maximum,
-                  x.load(tag, tensor::coord(col), vec::opt::unmasked));
-              maximum1 = vec::max(
-                  maximum1, x.load(
-                      tag, tensor::coord(col + lanes),
-                      vec::opt::unmasked));
-              maximum2 = vec::max(
-                  maximum2, x.load(
-                      tag, tensor::coord(col + 2 * lanes),
-                      vec::opt::unmasked));
-              maximum3 = vec::max(
-                  maximum3, x.load(
-                      tag, tensor::coord(col + 3 * lanes),
-                      vec::opt::unmasked));
-            }
-            maximum = vec::max(
-                vec::max(maximum, maximum1),
-                vec::max(maximum2, maximum3));
-          }
-          for (; col + lanes <= n; col += lanes) {
-            maximum = vec::max(
-                maximum,
-                x.load(tag, tensor::coord(col), vec::opt::unmasked));
-          }
-          if (col < n) {
-            maximum = vec::max(
-                maximum,
-                x.load(tag, tensor::coord(col), vec::opt::first(n - col),
-                       vec::opt::merge(negative_infinity)));
-          }
-          const ComputeType max_value = vec::reduce_max(tag, maximum);
-          const auto max_vector = vec::fill(tag, max_value);
-
-          auto sum = vec::zeros(tag);
-          col = 0;
-          if constexpr (Unrolled) {
-            auto sum1 = sum;
-            auto sum2 = sum;
-            auto sum3 = sum;
-            for (; col + 4 * lanes <= n; col += 4 * lanes) {
-              auto value0 = x.load(
-                  tag, tensor::coord(col), vec::opt::unmasked);
-              auto value1 = x.load(
-                  tag, tensor::coord(col + lanes), vec::opt::unmasked);
-              auto value2 = x.load(
-                  tag, tensor::coord(col + 2 * lanes),
-                  vec::opt::unmasked);
-              auto value3 = x.load(
-                  tag, tensor::coord(col + 3 * lanes),
-                  vec::opt::unmasked);
-              auto exp0 = vec::exp_neg(
-                  vec::sub(value0, max_vector),
-                  vec::opt::math::accuracy<ExpAccuracy>);
-              auto exp1 = vec::exp_neg(
-                  vec::sub(value1, max_vector),
-                  vec::opt::math::accuracy<ExpAccuracy>);
-              auto exp2 = vec::exp_neg(
-                  vec::sub(value2, max_vector),
-                  vec::opt::math::accuracy<ExpAccuracy>);
-              auto exp3 = vec::exp_neg(
-                  vec::sub(value3, max_vector),
-                  vec::opt::math::accuracy<ExpAccuracy>);
-              vec::store(tag, exp_cache + col, exp0);
-              vec::store(tag, exp_cache + col + lanes, exp1);
-              vec::store(tag, exp_cache + col + 2 * lanes, exp2);
-              vec::store(tag, exp_cache + col + 3 * lanes, exp3);
-              sum = vec::add(sum, exp0);
-              sum1 = vec::add(sum1, exp1);
-              sum2 = vec::add(sum2, exp2);
-              sum3 = vec::add(sum3, exp3);
-            }
-            sum = vec::add(
-                vec::add(sum, sum1), vec::add(sum2, sum3));
-          }
-          for (; col + lanes <= n; col += lanes) {
-            auto value = x.load(
-                tag, tensor::coord(col), vec::opt::unmasked);
-            auto exponential = vec::exp_neg(
-                vec::sub(value, max_vector),
-                vec::opt::math::accuracy<ExpAccuracy>);
-            vec::store(tag, exp_cache + col, exponential);
-            sum = vec::add(sum, exponential);
-          }
-          if (col < n) {
-            const nint_t active = n - col;
-            const auto mask = vec::mwhilelt(tag, 0, active);
-            const auto zero = vec::zeros(tag);
-            auto value = x.load(
-                tag, tensor::coord(col), vec::opt::first(active));
-            auto exponential = vec::exp_neg(
-                vec::sub(value, max_vector),
-                vec::opt::math::accuracy<ExpAccuracy>,
-                vec::opt::masked(mask),
-                vec::opt::merge(zero));
-            vec::store(
-                tag, exp_cache + col, exponential, vec::opt::first(active));
-            sum = vec::add(sum, exponential);
-          }
-          const ComputeType inverse_sum =
-              ComputeType(1) / vec::reduce_add(tag, sum);
-          const auto inverse = vec::fill(tag, inverse_sum);
-
-          col = 0;
-          if constexpr (PackedBf16Output) {
-            using PairTag = vec::Twice<Tag>;
-            PairTag pair_tag{};
-            for (; col + 2 * lanes <= n; col += 2 * lanes) {
-              auto value0 = vec::load(tag, exp_cache + col);
-              auto value1 = vec::load(tag, exp_cache + col + lanes);
-              y.store(
-                  pair_tag, tensor::coord(col),
-                  vec::concat(
-                      pair_tag, vec::mul(value0, inverse),
-                      vec::mul(value1, inverse)),
-                  vec::opt::unmasked);
-            }
-          }
-          if constexpr (Unrolled) {
-            for (; col + 4 * lanes <= n; col += 4 * lanes) {
-              auto value0 = vec::load(tag, exp_cache + col);
-              auto value1 = vec::load(tag, exp_cache + col + lanes);
-              auto value2 = vec::load(tag, exp_cache + col + 2 * lanes);
-              auto value3 = vec::load(tag, exp_cache + col + 3 * lanes);
-              y.store(tag, tensor::coord(col), vec::mul(value0, inverse),
-                      vec::opt::unmasked);
-              y.store(tag, tensor::coord(col + lanes),
-                      vec::mul(value1, inverse), vec::opt::unmasked);
-              y.store(tag, tensor::coord(col + 2 * lanes),
-                      vec::mul(value2, inverse), vec::opt::unmasked);
-              y.store(tag, tensor::coord(col + 3 * lanes),
-                      vec::mul(value3, inverse), vec::opt::unmasked);
+          ComputeType max_value{};
+          auto fold_max = [&](auto&& ux) VECOPS_INLINE_LAMBDA {
+            kernel::loop::fold<Recipe::FoldFactor>(
+                tag, n,
+                [&](auto block_tag, nint_t col, auto active,
+                    auto& maximum) VECOPS_INLINE_LAMBDA {
+                  auto value = ux.load(
+                      block_tag, tensor::coord(col), active,
+                      vec::opt::merge(negative_infinity),
+                      tensor::materialize::populate);
+                  maximum = vec::max(maximum, value);
+                },
+                kernel::loop::reduce_max(max_value));
+          };
+          // Equal-width unordered conversion has ordered provenance. Keeping
+          // this path direct also avoids GCC retaining the proxy in tail code.
+          if constexpr (
+              sizeof(typename InSpec::MemoryElement) ==
+              sizeof(ComputeType)) {
+            if constexpr (
+                tensor::details::resolve_plan<InSpec, XPolicy>() ==
+                tensor::AccessPlan::direct) {
+              auto direct_x = x;
+              fold_max(direct_x);
+            } else {
+              fold_max(x);
             }
           } else {
-            for (; col + 2 * lanes <= n; col += 2 * lanes) {
-              auto value0 = vec::load(tag, exp_cache + col);
-              auto value1 = vec::load(tag, exp_cache + col + lanes);
-              y.store(tag, tensor::coord(col), vec::mul(value0, inverse),
-                      vec::opt::unmasked);
-              y.store(tag, tensor::coord(col + lanes),
-                      vec::mul(value1, inverse), vec::opt::unmasked);
-            }
+            tensor::with_unordered_access(x, fold_max);
           }
-          for (; col + lanes <= n; col += lanes) {
-            auto value = vec::load(tag, exp_cache + col);
-            y.store(
-                tag, tensor::coord(col), vec::mul(value, inverse),
-                vec::opt::unmasked);
-          }
-          if (col < n) {
-            const nint_t active = n - col;
-            auto value = vec::load(
-                tag, exp_cache + col, vec::opt::first(active));
-            y.store(tag, tensor::coord(col), vec::mul(value, inverse),
-                    vec::opt::first(active));
-          }
-      y.commit();
-    };
-    constexpr bool StaticDirect =
-        tensor::is_ct_last_contiguous<typename InSpec::InputLayout, 1>::value &&
-        tensor::is_ct_last_contiguous<typename OutSpec::OutputLayout, 1>::value;
-#if defined(ARCH_X86_FAMILY)
-    constexpr bool RawContiguous = StaticDirect &&
-        std::same_as<typename InSpec::TransformType, tensor::NoTransform> &&
-        std::same_as<typename OutSpec::TransformType, tensor::NoTransform>;
-#else
-    constexpr bool RawContiguous = false;
-#endif
-    if constexpr (RawContiguous) {
-      using InputMemory =
-          std::remove_const_t<typename InSpec::MemoryElement>;
-      using OutputMemory = typename OutSpec::MemoryElement;
-      details::ContiguousSoftmaxInput<InputMemory> x{in.tensor().data()};
-      details::ContiguousSoftmaxOutput<OutputMemory> y{out.tensor().data()};
-      compute(x, y);
-    } else {
-      kernel::with_operands(
-          workspace, tensor::operand(in, InPolicy{}),
-          tensor::operand(out, OutPolicy{}), compute);
-    }
+
+          ComputeType sum{};
+          kernel::loop::fold<Recipe::FoldFactor>(
+              tag, n,
+              [&](auto block_tag, nint_t col, auto active, auto& sum_vector)
+                  VECOPS_INLINE_LAMBDA {
+                auto value = x.load(
+                    block_tag, tensor::coord(col), active,
+                    vec::opt::merge(negative_infinity));
+                const auto maximum = vec::fill(block_tag, max_value);
+                auto centered = vec::sub(value, maximum);
+                const auto zero = vec::zeros(block_tag);
+                auto exponential = vec::exp_neg(
+                    block_tag, centered,
+                    vec::opt::math::accuracy<ExpAccuracy>, active,
+                    vec::opt::merge(zero));
+                vec::store(block_tag, exp_cache + col, exponential, active);
+                sum_vector = vec::add(sum_vector, exponential);
+              },
+              kernel::loop::reduce_add(sum));
+
+          const ComputeType inverse_sum = ComputeType(1) / sum;
+          kernel::loop::fold<Recipe::StoreFactor>(
+              tag, n,
+              [&](auto block_tag, nint_t col, auto active,
+                  const auto& inverse)
+                  VECOPS_INLINE_LAMBDA {
+                auto exponential = vec::load(
+                    block_tag, exp_cache + col, active);
+                auto normalized = vec::mul(exponential, inverse);
+                y.store(
+                    block_tag, tensor::coord(col), normalized, active);
+              },
+              kernel::loop::invariant(inverse_sum));
+          y.commit();
+        };
+    kernel::with_operands(
+        workspace, tensor::operand(in, XPolicy{}),
+        tensor::operand(out, YPolicy{}), compute);
     workspace.rewind(mark);
   }
 };

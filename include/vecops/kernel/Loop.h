@@ -1525,12 +1525,15 @@ VECOPS_ALWAYS_INLINE void fold(
                   Reduction1, ::vecops::vec::ElementOf<Tag>>());
         }
       }();
-      VECOPS_NOUNROLL
-      while (i < n_int) {
+      for (; i + tail_lanes <= n_int; i += tail_lanes) {
+        block_ref(
+            tail_tag, i, ::vecops::vec::opt::unmasked,
+            tail_carry0, tail_carry1);
+      }
+      if (i < n_int) {
         block_ref(
             tail_tag, i, ::vecops::vec::opt::first(n_int - i),
             tail_carry0, tail_carry1);
-        i += tail_lanes;
       }
       if constexpr (Policy == TailCarryPolicy::independent) {
         tail_carry0 = details::combine_reduction_carries<Reduction0>(
@@ -1572,12 +1575,15 @@ VECOPS_ALWAYS_INLINE void fold(
           full_tag, tail_tag, full_carry1);
       const auto& const_tail_carry0 = tail_carry0;
       const auto& const_tail_carry1 = tail_carry1;
-      VECOPS_NOUNROLL
-      while (i < n_int) {
+      for (; i + tail_lanes <= n_int; i += tail_lanes) {
+        block_ref(
+            tail_tag, i, ::vecops::vec::opt::unmasked,
+            const_tail_carry0, const_tail_carry1);
+      }
+      if (i < n_int) {
         block_ref(
             tail_tag, i, ::vecops::vec::opt::first(n_int - i),
             const_tail_carry0, const_tail_carry1);
-        i += tail_lanes;
       }
     }
   } else {
@@ -1597,13 +1603,16 @@ VECOPS_ALWAYS_INLINE void fold(
         };
         auto use_tail_carries = [&](auto&... tail_carries)
             VECOPS_INLINE_LAMBDA {
-          VECOPS_NOUNROLL
-          while (i < n_int) {
+          for (; i + tail_lanes <= n_int; i += tail_lanes) {
+            block_ref(
+                tail_tag, i, ::vecops::vec::opt::unmasked,
+                tail_carries...);
+          }
+          if (i < n_int) {
             block_ref(
                 tail_tag, i,
                 ::vecops::vec::opt::first(n_int - i),
                 tail_carries...);
-            i += tail_lanes;
           }
         };
         details::with_vector_tail_carries<0, Policy>(

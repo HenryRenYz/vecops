@@ -51,11 +51,15 @@ namespace vecops::vec {
  * policies. The defaults are cvt::ordered and cvt::saturate.
  *
  * Ordered conversion sets output lane i from input lane i. Unordered permits
- * backend-native ordering, but widening followed by the inverse narrowing
- * preserves lane values. cvt::lane<P> operates on equal-byte Tags: widening
- * selects input lane ratio*i+P, while narrowing writes converted input lane i
- * to output lane ratio*i+P. Inactive narrowing lanes use zero by default, or
- * opt::zero/opt::merge(scalar)/opt::merge(vector) when supplied.
+ * a stable backend-native permutation with a compositional contract. It is
+ * ordered when source and destination elements have equal size; for any
+ * compatible element types A, B, and C, A->B->C has the same lane provenance
+ * as A->C, so A->B->A restores the original lane positions. This guarantee is
+ * about ordering, not numerical round-trip equality. cvt::lane<P> operates on
+ * equal-byte Tags: widening selects input lane ratio*i+P, while narrowing
+ * writes converted input lane i to output lane ratio*i+P. Inactive narrowing
+ * lanes use zero by default, or opt::zero/opt::merge(scalar)/
+ * opt::merge(vector) when supplied.
  *
  * Saturating integer conversions clamp to the destination range; floating
  * conversions use the destination format's backend/scalar rounding behavior.

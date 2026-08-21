@@ -481,6 +481,86 @@ TEST(VecConversionPolicyTest, UnorderedMatchesPublicLanesForAdjacentPairs) {
 }
 #endif
 
+template <typename Visitor>
+void for_each_unordered_contract_width(Visitor&& visitor) {
+  visitor.template operator()<int8_t>();
+  visitor.template operator()<int16_t>();
+  visitor.template operator()<int32_t>();
+  visitor.template operator()<int64_t>();
+}
+
+template <typename From, typename Middle, typename To>
+void verify_unordered_composition() {
+  // Power -1 keeps the complete 1/2/4/8-byte width family representable and
+  // crosses the one-word boundary on SVE, where unordered phases are native.
+  using BaseTag = vec::ScalableTag<int8_t, -1>;
+  using FromTag = vec::Rebind<From, BaseTag>;
+  using MiddleTag = vec::Rebind<Middle, BaseTag>;
+  using ToTag = vec::Rebind<To, BaseTag>;
+
+  auto source = vec::zeros(FromTag{});
+  for (vecops::nint_t lane = 0; lane < vec::size(FromTag{}); ++lane) {
+    // All contract types represent these values exactly, including when a
+    // path temporarily narrows before widening again.
+    source = vec::set(
+        FromTag{}, source, lane, static_cast<From>(lane % 61 + 1));
+  }
+
+  const auto direct = vec::convert(
+      ToTag{}, FromTag{}, source, vec::cvt::unordered);
+  const auto middle = vec::convert(
+      MiddleTag{}, FromTag{}, source, vec::cvt::unordered);
+  const auto indirect = vec::convert(
+      ToTag{}, MiddleTag{}, middle, vec::cvt::unordered);
+  for (vecops::nint_t lane = 0; lane < vec::size(ToTag{}); ++lane) {
+    EXPECT_TRUE(vec_test::values_identical(
+        vec::get(ToTag{}, direct, lane),
+        vec::get(ToTag{}, indirect, lane)))
+        << "lane=" << lane;
+  }
+}
+
+TEST(VecConversionPolicyTest, UnorderedSameWidthMatchesOrdered) {
+  using BaseTag = vec::ScalableTag<int8_t, -1>;
+  vec_test::for_each_element_type([]<typename From>() {
+    vec_test::for_each_element_type([]<typename To>() {
+      if constexpr (sizeof(From) == sizeof(To)) {
+        using FromTag = vec::Rebind<From, BaseTag>;
+        using ToTag = vec::Rebind<To, BaseTag>;
+        auto source = vec::zeros(FromTag{});
+        for (vecops::nint_t lane = 0; lane < vec::size(FromTag{}); ++lane)
+          source = vec::set(
+              FromTag{}, source, lane,
+              static_cast<From>(lane % 61 + 1));
+        const auto ordered = vec::convert(
+            ToTag{}, FromTag{}, source, vec::cvt::ordered);
+        const auto unordered = vec::convert(
+            ToTag{}, FromTag{}, source, vec::cvt::unordered);
+        for (vecops::nint_t lane = 0; lane < vec::size(ToTag{}); ++lane) {
+          EXPECT_TRUE(vec_test::values_identical(
+              vec::get(ToTag{}, ordered, lane),
+              vec::get(ToTag{}, unordered, lane)))
+              << "lane=" << lane;
+        }
+      }
+    });
+  });
+}
+
+TEST(VecConversionPolicyTest, UnorderedCompositionIsPathIndependent) {
+  for_each_unordered_contract_width([]<typename From>() {
+    for_each_unordered_contract_width([]<typename Middle>() {
+      for_each_unordered_contract_width([]<typename To>() {
+        SCOPED_TRACE(::testing::Message()
+                     << "From=" << typeid(From).name()
+                     << ", Middle=" << typeid(Middle).name()
+                     << ", To=" << typeid(To).name());
+        verify_unordered_composition<From, Middle, To>();
+      });
+    });
+  });
+}
+
 template <typename From, typename To>
 void verify_ordered_wrap_pair() {
 #if defined(CPU_CAPABILITY_SVE) && !defined(HAS_FIXED_SVE_BITS)

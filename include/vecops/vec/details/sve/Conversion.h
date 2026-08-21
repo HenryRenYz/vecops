@@ -1001,6 +1001,47 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_unordered_ratio2(
   }
 }
 
+template <bool Wrap = false, VectorTag ToTag, VectorTag FromTag>
+VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_unordered(
+    ToTag to, FromTag from, Vec<FromTag> value) {
+  using To = ElementOf<ToTag>;
+  using From = ElementOf<FromTag>;
+  constexpr bool same_width = sizeof(To) == sizeof(From);
+  constexpr bool widens = sizeof(To) > sizeof(From);
+  constexpr bool ratio2 =
+      sizeof(To) == sizeof(From) * 2 || sizeof(From) == sizeof(To) * 2;
+
+  if constexpr (same_width) {
+    // Equal-width unordered conversion is ordered by contract.
+    return sve_convert_vector<Wrap>(to, from, value);
+  } else if constexpr (ratio2) {
+    constexpr bool ratio2_word_shape = widens
+        ? num_words(to) == num_words(from) * 2
+        : num_words(from) == num_words(to) * 2;
+    if constexpr (ratio2_word_shape) {
+      return sve_convert_unordered_ratio2<Wrap>(to, from, value);
+    } else {
+      // An adjacent conversion without a 2:1 physical-word shape has no
+      // independent top/bottom word phases. Make this edge ordered; wider
+      // unordered conversions compose it and therefore stay path-independent.
+      return sve_convert_vector<Wrap>(to, from, value);
+    }
+  } else if constexpr (widens) {
+    static_assert(!Wrap);
+    using Mid = SVEWidenedElement<From>;
+    using MidTag = Rebind<Mid, FromTag>;
+    const auto middle = sve_convert_unordered(
+        MidTag{}, from, value);
+    return sve_convert_unordered(to, MidTag{}, middle);
+  } else {
+    using Mid = SVENarrowedElement<To>;
+    using MidTag = Rebind<Mid, FromTag>;
+    const auto middle = sve_convert_unordered<Wrap>(
+        MidTag{}, from, value);
+    return sve_convert_unordered<Wrap>(to, MidTag{}, middle);
+  }
+}
+
 template <VectorTag ToTag>
 struct NativeImpl<SVEBackend, ConvertOp, ToTag> {
   template <VectorTag FromTag, typename... Options>
@@ -1013,24 +1054,13 @@ struct NativeImpl<SVEBackend, ConvertOp, ToTag> {
         option_count<IsUnorderedOption, Options...> == 1;
     constexpr bool wraps = option_count<IsWrapOption, Options...> == 1;
     constexpr bool masked = option_count<IsMaskedOption, Options...> == 1;
-    constexpr std::size_t to_bytes = sizeof(ElementOf<ToTag>);
-    constexpr std::size_t from_bytes = sizeof(ElementOf<FromTag>);
-    constexpr bool ratio2 =
-        to_bytes == from_bytes * 2 || from_bytes == to_bytes * 2;
-    constexpr bool ratio2_word_shape = to_bytes > from_bytes
-        ? num_words(to) == num_words(from) * 2
-        : num_words(from) == num_words(to) * 2;
     auto converted = [&] {
       if constexpr (lane_layout) {
         return sve_convert_lane_native(
             to, from, value, std::forward<Options>(options)...);
-      } else if constexpr (
-          unordered_layout && ratio2 && ratio2_word_shape) {
-        return sve_convert_unordered_ratio2<wraps>(to, from, value);
+      } else if constexpr (unordered_layout) {
+        return sve_convert_unordered<wraps>(to, from, value);
       } else {
-        // Equal-width and ratio-4/8 unordered conversions intentionally use
-        // the ordered implementation until a separately benchmarked phase
-        // tree is justified.
         return sve_convert_vector<wraps>(to, from, value);
       }
     }();

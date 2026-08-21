@@ -78,36 +78,67 @@ using AlignedVector = std::vector<T, AlignedAllocator<T>>;
 #define VECOPS_SOURCE_DIR "."
 #endif
 
+struct SmallGroup { static constexpr const char* name = "small"; };
+struct MediumGroup { static constexpr const char* name = "medium"; };
+struct LargeGroup { static constexpr const char* name = "large"; };
+struct TailGroup { static constexpr const char* name = "tail"; };
+struct DecodeGroup { static constexpr const char* name = "llm_decode"; };
+struct PrefillGroup { static constexpr const char* name = "llm_prefill"; };
+struct VocabGroup { static constexpr const char* name = "llm_vocab"; };
+struct StressGroup { static constexpr const char* name = "llm_stress"; };
+
+template <typename Group, nint_t... Dimensions>
 struct SoftmaxCase {
-  const char* group;
-  std::array<nint_t, 4> shape;
-  int rank;
+  static_assert(sizeof...(Dimensions) > 0);
+  using GroupType = Group;
+  static constexpr int rank = sizeof...(Dimensions);
+  static constexpr std::array<nint_t, rank> shape{Dimensions...};
+  static constexpr nint_t elements = (Dimensions * ...);
+  static constexpr nint_t normalized = shape.back();
+  static constexpr nint_t rows = elements / normalized;
+
+  template <bool CompileTimeShape>
+  static constexpr auto tensor_shape() {
+    if constexpr (CompileTimeShape) {
+      return make_shape(cint<Dimensions>...);
+    } else {
+      return make_shape(Any{Dimensions}...);
+    }
+  }
 };
 
-constexpr SoftmaxCase kCases[] = {
-    {"small", {64, 1, 1, 1}, 1},
-    {"small", {8, 128, 1, 1}, 2},
-    {"small", {4, 8, 256, 1}, 3},
-    {"small", {2, 4, 8, 128}, 4},
-    {"medium", {64, 768, 1, 1}, 2},
-    {"medium", {32, 128, 1024, 1}, 3},
-    {"medium", {8, 16, 32, 768}, 4},
-    {"large", {4096, 1024, 1, 1}, 2},
-    {"large", {16, 64, 4096, 1}, 3},
-    {"tail", {7, 1, 1, 1}, 1},
-    {"tail", {64, 513, 1, 1}, 2},
-    {"tail", {16, 32, 1000, 1}, 3},
-    // Decode shapes are [batch, heads, keys].  The prefill shape is
-    // [batch, heads, queries, keys].  Softmax is over the final dimension.
-    {"llm_decode", {1, 64, 128, 1}, 3},
-    {"llm_decode", {1, 64, 640, 1}, 3},
-    {"llm_decode", {1, 128, 1152, 1}, 3},
-    {"llm_decode", {1, 64, 2048, 1}, 3},
-    {"llm_decode", {1, 128, 8320, 1}, 3},
-    {"llm_prefill", {1, 64, 128, 2048}, 4},
-    {"llm_vocab", {1, 154880, 1, 1}, 2},
-    {"llm_stress", {1, 64, 262144, 1}, 3},
-};
+template <typename... Cases>
+struct CaseList {};
+
+// Every case is registered with both Const and Any shape metadata so the
+// benchmark exposes the cost of losing compile-time dispatch information.
+#ifdef VECOPS_BENCH_QUICK_FP16
+using SoftmaxCases = CaseList<SoftmaxCase<LargeGroup, 16, 64, 4096>>;
+#else
+using SoftmaxCases = CaseList<
+    SoftmaxCase<SmallGroup, 64>,
+    SoftmaxCase<SmallGroup, 8, 128>,
+    SoftmaxCase<SmallGroup, 4, 8, 256>,
+    SoftmaxCase<SmallGroup, 2, 4, 8, 128>,
+    SoftmaxCase<MediumGroup, 64, 768>,
+    SoftmaxCase<MediumGroup, 32, 128, 1024>,
+    SoftmaxCase<MediumGroup, 8, 16, 32, 768>,
+    SoftmaxCase<LargeGroup, 4096, 1024>,
+    SoftmaxCase<LargeGroup, 16, 64, 4096>,
+    SoftmaxCase<TailGroup, 7>,
+    SoftmaxCase<TailGroup, 64, 513>,
+    SoftmaxCase<TailGroup, 16, 32, 1000>,
+    // Decode is [batch, heads, keys], prefill is
+    // [batch, heads, queries, keys]. Softmax uses the final dimension.
+    SoftmaxCase<DecodeGroup, 1, 64, 128>,
+    SoftmaxCase<DecodeGroup, 1, 64, 640>,
+    SoftmaxCase<DecodeGroup, 1, 128, 1152>,
+    SoftmaxCase<DecodeGroup, 1, 64, 2048>,
+    SoftmaxCase<DecodeGroup, 1, 128, 8320>,
+    SoftmaxCase<PrefillGroup, 1, 64, 128, 2048>,
+    SoftmaxCase<VocabGroup, 1, 154880>,
+    SoftmaxCase<StressGroup, 1, 64, 262144>>;
+#endif
 
 template <typename T>
 const char* dtype_name() {
@@ -155,39 +186,39 @@ using softmax_compute_type_t =
         vecops::float64_t,
         vecops::float32_t>;
 
-std::string shape_name(const SoftmaxCase& c) {
+template <typename Case>
+std::string shape_name() {
   std::ostringstream os;
-  for (int i = 0; i < c.rank; ++i) {
+  for (int i = 0; i < Case::rank; ++i) {
     if (i != 0) os << "x";
-    os << c.shape[static_cast<size_t>(i)];
+    os << Case::shape[static_cast<size_t>(i)];
   }
   return os.str();
 }
 
-nint_t total_elements(const SoftmaxCase& c) {
-  nint_t total = 1;
-  for (int i = 0; i < c.rank; ++i) total *= c.shape[static_cast<size_t>(i)];
-  return total;
-}
+struct RuntimeSoftmaxCase {
+  std::array<nint_t, 4> shape{};
+  int rank{};
+  nint_t elements{};
+  nint_t normalized{};
+  nint_t rows{};
+};
 
-nint_t normalized_size(const SoftmaxCase& c) {
-  return c.shape[static_cast<size_t>(c.rank - 1)];
-}
-
-nint_t row_count(const SoftmaxCase& c) {
-  return total_elements(c) / normalized_size(c);
+template <typename Case>
+constexpr RuntimeSoftmaxCase runtime_case() {
+  RuntimeSoftmaxCase result{};
+  for (int i = 0; i < Case::rank; ++i) {
+    result.shape[static_cast<size_t>(i)] =
+        Case::shape[static_cast<size_t>(i)];
+  }
+  result.rank = Case::rank;
+  result.elements = Case::elements;
+  result.normalized = Case::normalized;
+  result.rows = Case::rows;
+  return result;
 }
 
 #ifdef VECOPS_BENCH_USE_ONEDNN
-dnnl::memory::dims onednn_dims(const SoftmaxCase& c) {
-  dnnl::memory::dims dims;
-  dims.reserve(static_cast<size_t>(c.rank));
-  for (int i = 0; i < c.rank; ++i) {
-    dims.push_back(c.shape[static_cast<size_t>(i)]);
-  }
-  return dims;
-}
-
 dnnl::memory::desc onednn_plain_desc(
     const dnnl::memory::dims& dims,
     dnnl::memory::data_type dtype) {
@@ -254,11 +285,12 @@ bool verify_output(
   return true;
 }
 
-template <int Rank, vec::Accuracy Mode, typename T>
-void run_case(benchmark::State& state, const SoftmaxCase& c) {
-  const nint_t total = total_elements(c);
-  const nint_t n = normalized_size(c);
-  const nint_t rows = row_count(c);
+template <vec::Accuracy Mode, typename T>
+void run_onednn_case(
+    benchmark::State& state, const RuntimeSoftmaxCase& benchmark_case) {
+  const nint_t total = benchmark_case.elements;
+  const nint_t n = benchmark_case.normalized;
+  const nint_t rows = benchmark_case.rows;
   AlignedVector<T> x(static_cast<size_t>(total));
   AlignedVector<T> out(static_cast<size_t>(total), T{});
   fill_input(x);
@@ -270,7 +302,12 @@ void run_case(benchmark::State& state, const SoftmaxCase& c) {
       std::is_same_v<T, vecops::bfloat16_t>);
   const dnnl::engine engine(dnnl::engine::kind::cpu, 0);
   const dnnl::stream stream(engine);
-  const auto data_md = onednn_plain_desc(onednn_dims(c), onednn_dtype<T>());
+  dnnl::memory::dims dims;
+  dims.reserve(static_cast<size_t>(benchmark_case.rank));
+  for (int i = 0; i < benchmark_case.rank; ++i) {
+    dims.push_back(benchmark_case.shape[static_cast<size_t>(i)]);
+  }
+  const auto data_md = onednn_plain_desc(dims, onednn_dtype<T>());
   dnnl::primitive_attr attr;
   attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
   const dnnl::softmax_forward::primitive_desc pd(
@@ -279,7 +316,7 @@ void run_case(benchmark::State& state, const SoftmaxCase& c) {
       dnnl::algorithm::softmax_accurate,
       data_md,
       data_md,
-      c.rank - 1,
+      benchmark_case.rank - 1,
       attr);
   const std::string impl = pd.impl_info_str();
   const std::string required_impl = VECOPS_BENCH_ONEDNN_IMPL_TOKEN;
@@ -330,125 +367,199 @@ void run_case(benchmark::State& state, const SoftmaxCase& c) {
   state.counters["workspace_bytes"] =
       benchmark::Counter(double(scratchpad_bytes));
 #else
-  using ComputeT = softmax_compute_type_t<T>;
-  using Config = SoftmaxConfig<ComputeT, vec::ScalableTag<ComputeT, 0>, Mode>;
-  Config config{};
-#ifdef VECOPS_BENCH_DISABLE_ONLINE
-  config.allow_online = false;
-#endif
-  if (std::getenv("VECOPS_BENCH_DISABLE_ONLINE") != nullptr) {
-    config.allow_online = false;
-  }
-  auto op = softmax(config);
-
-  if constexpr (Rank == 1) {
-    auto x_t = make_tensor<1>(x.data(), {c.shape[0]});
-    auto y_t = make_tensor<1>(out.data(), {c.shape[0]});
-    auto x_spec = input<ComputeT>(x_t);
-    auto y_spec = output<ComputeT>(y_t);
-    Workspace workspace(op.required_workspace(x_spec, y_spec));
-    auto view = workspace.view();
-    op(view, x_spec, y_spec);
-    if (!verify_output<Mode>(x, out, rows, n)) {
-      state.SkipWithError("Softmax output verification failed");
-      return;
-    }
-    for (auto _ : state) {
-      benchmark::DoNotOptimize(x.data());
-      op(view, x_spec, y_spec);
-      benchmark::ClobberMemory();
-    }
-    state.counters["workspace_bytes"] = benchmark::Counter(double(workspace.requested_capacity()));
-  } else if constexpr (Rank == 2) {
-    auto x_t = make_tensor<2>(x.data(), {c.shape[0], c.shape[1]});
-    auto y_t = make_tensor<2>(out.data(), {c.shape[0], c.shape[1]});
-    auto x_spec = input<ComputeT>(x_t);
-    auto y_spec = output<ComputeT>(y_t);
-    Workspace workspace(op.required_workspace(x_spec, y_spec));
-    auto view = workspace.view();
-    op(view, x_spec, y_spec);
-    if (!verify_output<Mode>(x, out, rows, n)) {
-      state.SkipWithError("Softmax output verification failed");
-      return;
-    }
-    for (auto _ : state) {
-      benchmark::DoNotOptimize(x.data());
-      op(view, x_spec, y_spec);
-      benchmark::ClobberMemory();
-    }
-    state.counters["workspace_bytes"] = benchmark::Counter(double(workspace.requested_capacity()));
-  } else if constexpr (Rank == 3) {
-    auto x_t = make_tensor<3>(x.data(), {c.shape[0], c.shape[1], c.shape[2]});
-    auto y_t = make_tensor<3>(out.data(), {c.shape[0], c.shape[1], c.shape[2]});
-    auto x_spec = input<ComputeT>(x_t);
-    auto y_spec = output<ComputeT>(y_t);
-    Workspace workspace(op.required_workspace(x_spec, y_spec));
-    auto view = workspace.view();
-    op(view, x_spec, y_spec);
-    if (!verify_output<Mode>(x, out, rows, n)) {
-      state.SkipWithError("Softmax output verification failed");
-      return;
-    }
-    for (auto _ : state) {
-      benchmark::DoNotOptimize(x.data());
-      op(view, x_spec, y_spec);
-      benchmark::ClobberMemory();
-    }
-    state.counters["workspace_bytes"] = benchmark::Counter(double(workspace.requested_capacity()));
-  } else {
-    auto x_t = make_tensor<4>(x.data(), {c.shape[0], c.shape[1], c.shape[2], c.shape[3]});
-    auto y_t = make_tensor<4>(out.data(), {c.shape[0], c.shape[1], c.shape[2], c.shape[3]});
-    auto x_spec = input<ComputeT>(x_t);
-    auto y_spec = output<ComputeT>(y_t);
-    Workspace workspace(op.required_workspace(x_spec, y_spec));
-    auto view = workspace.view();
-    op(view, x_spec, y_spec);
-    if (!verify_output<Mode>(x, out, rows, n)) {
-      state.SkipWithError("Softmax output verification failed");
-      return;
-    }
-    for (auto _ : state) {
-      benchmark::DoNotOptimize(x.data());
-      op(view, x_spec, y_spec);
-      benchmark::ClobberMemory();
-    }
-    state.counters["workspace_bytes"] = benchmark::Counter(double(workspace.requested_capacity()));
-  }
+  (void)state;
+  (void)benchmark_case;
 #endif
 
   const double bytes_per_iter = double(total * sizeof(T) * 2);
   state.SetItemsProcessed(state.iterations() * total);
-  state.SetBytesProcessed(state.iterations() * static_cast<int64_t>(bytes_per_iter));
-  state.counters["rank"] = benchmark::Counter(double(c.rank));
+  state.SetBytesProcessed(
+      state.iterations() * static_cast<int64_t>(bytes_per_iter));
+  state.counters["rank"] = benchmark::Counter(double(benchmark_case.rank));
   state.counters["rows"] = benchmark::Counter(double(rows));
   state.counters["norm"] = benchmark::Counter(double(n));
   state.counters["elements"] = benchmark::Counter(double(total));
 }
 
+#ifndef VECOPS_BENCH_USE_ONEDNN
+template <vec::Accuracy Mode, typename T, bool AllowOnline, typename Shape>
+void run_vecops_case(
+    benchmark::State& state, Shape shape, nint_t total, int rank,
+    nint_t rows, nint_t n) {
+  AlignedVector<T> x(static_cast<size_t>(total));
+  AlignedVector<T> out(static_cast<size_t>(total), T{});
+  fill_input(x);
+  using ComputeT = softmax_compute_type_t<T>;
+  using Config = SoftmaxConfig<ComputeT, Mode, AllowOnline>;
+  auto op = softmax(Config{});
+  auto x_t = make_tensor(x.data(), shape);
+  auto y_t = make_tensor(out.data(), shape);
+  auto x_spec = input<ComputeT>(x_t);
+  auto y_spec = output<ComputeT>(y_t);
+  Workspace workspace(op.required_workspace(x_spec, y_spec));
+  auto view = workspace.view();
+  op(view, x_spec, y_spec);
+  if (!verify_output<Mode>(x, out, rows, n)) {
+    state.SkipWithError("Softmax output verification failed");
+    return;
+  }
+  for (auto _ : state) {
+    benchmark::DoNotOptimize(x.data());
+    op(view, x_spec, y_spec);
+    benchmark::ClobberMemory();
+  }
+  state.counters["workspace_bytes"] =
+      benchmark::Counter(double(workspace.requested_capacity()));
+
+  const double bytes_per_iter = double(total * sizeof(T) * 2);
+  state.SetItemsProcessed(state.iterations() * total);
+  state.SetBytesProcessed(
+      state.iterations() * static_cast<int64_t>(bytes_per_iter));
+  state.counters["rank"] = benchmark::Counter(double(rank));
+  state.counters["rows"] = benchmark::Counter(double(rows));
+  state.counters["norm"] = benchmark::Counter(double(n));
+  state.counters["elements"] = benchmark::Counter(double(total));
+}
+
+template <typename Case, vec::Accuracy Mode, typename T, bool AllowOnline>
+void run_compile_time_case(benchmark::State& state) {
+  run_vecops_case<Mode, T, AllowOnline>(
+      state, Case::template tensor_shape<true>(), Case::elements,
+      Case::rank, Case::rows, Case::normalized);
+}
+
+template <int Rank, vec::Accuracy Mode, typename T, bool AllowOnline>
+void run_runtime_rank_case(
+    benchmark::State& state, const RuntimeSoftmaxCase& benchmark_case) {
+  const auto& d = benchmark_case.shape;
+  if constexpr (Rank == 1) {
+    run_vecops_case<Mode, T, AllowOnline>(
+        state, make_shape(Any{d[0]}), benchmark_case.elements, Rank,
+        benchmark_case.rows, benchmark_case.normalized);
+  } else if constexpr (Rank == 2) {
+    run_vecops_case<Mode, T, AllowOnline>(
+        state, make_shape(Any{d[0]}, Any{d[1]}), benchmark_case.elements,
+        Rank, benchmark_case.rows, benchmark_case.normalized);
+  } else if constexpr (Rank == 3) {
+    run_vecops_case<Mode, T, AllowOnline>(
+        state, make_shape(Any{d[0]}, Any{d[1]}, Any{d[2]}),
+        benchmark_case.elements, Rank, benchmark_case.rows,
+        benchmark_case.normalized);
+  } else {
+    static_assert(Rank == 4);
+    run_vecops_case<Mode, T, AllowOnline>(
+        state,
+        make_shape(Any{d[0]}, Any{d[1]}, Any{d[2]}, Any{d[3]}),
+        benchmark_case.elements, Rank, benchmark_case.rows,
+        benchmark_case.normalized);
+  }
+}
+
+template <typename Case, vec::Accuracy Mode, typename T>
+void bench_compile_time_softmax(benchmark::State& state) {
+  const bool disable_online =
+      std::getenv("VECOPS_BENCH_DISABLE_ONLINE") != nullptr;
+#ifdef VECOPS_BENCH_DISABLE_ONLINE
+  constexpr bool DefaultAllowOnline = false;
+#else
+  constexpr bool DefaultAllowOnline = true;
+#endif
+  if (disable_online) {
+    return run_compile_time_case<Case, Mode, T, false>(state);
+  }
+  return run_compile_time_case<Case, Mode, T, DefaultAllowOnline>(state);
+}
+
+template <vec::Accuracy Mode, typename T, bool AllowOnline>
+void run_runtime_case(
+    benchmark::State& state, const RuntimeSoftmaxCase& benchmark_case) {
+  switch (benchmark_case.rank) {
+    case 1:
+      return run_runtime_rank_case<1, Mode, T, AllowOnline>(
+          state, benchmark_case);
+    case 2:
+      return run_runtime_rank_case<2, Mode, T, AllowOnline>(
+          state, benchmark_case);
+    case 3:
+      return run_runtime_rank_case<3, Mode, T, AllowOnline>(
+          state, benchmark_case);
+    default:
+      return run_runtime_rank_case<4, Mode, T, AllowOnline>(
+          state, benchmark_case);
+  }
+}
+
 template <vec::Accuracy Mode, typename T>
-void bench_softmax(benchmark::State& state, SoftmaxCase c) {
-  if (c.rank == 1) return run_case<1, Mode, T>(state, c);
-  if (c.rank == 2) return run_case<2, Mode, T>(state, c);
-  if (c.rank == 3) return run_case<3, Mode, T>(state, c);
-  return run_case<4, Mode, T>(state, c);
+void bench_runtime_softmax(
+    benchmark::State& state, RuntimeSoftmaxCase benchmark_case) {
+  const bool disable_online =
+      std::getenv("VECOPS_BENCH_DISABLE_ONLINE") != nullptr;
+#ifdef VECOPS_BENCH_DISABLE_ONLINE
+  constexpr bool DefaultAllowOnline = false;
+#else
+  constexpr bool DefaultAllowOnline = true;
+#endif
+  if (disable_online) {
+    return run_runtime_case<Mode, T, false>(state, benchmark_case);
+  }
+  return run_runtime_case<Mode, T, DefaultAllowOnline>(
+      state, benchmark_case);
+}
+#endif
+
+template <typename Case, vec::Accuracy Mode, typename T>
+std::string benchmark_name(const char* shape_metadata) {
+  return
+      "Softmax/" + std::string(Case::GroupType::name) +
+      "/rank:" + std::to_string(Case::rank) +
+      "/shape:" + shape_name<Case>() +
+      "/shape_meta:" + shape_metadata +
+      "/dtype:" + dtype_name<T>() +
+      "/mode:" + mode_name<Mode>() +
+      "/arch:" + VECOPS_BENCH_ARCH_CODE;
+}
+
+template <typename Case, vec::Accuracy Mode, typename T>
+void register_case() {
+#ifdef VECOPS_BENCH_USE_ONEDNN
+  const std::string name =
+      benchmark_name<Case, Mode, T>("runtime");
+  benchmark::RegisterBenchmark(
+      name.c_str(), &run_onednn_case<Mode, T>, runtime_case<Case>())
+      ->Unit(benchmark::kMicrosecond)
+      ->MinTime(0.02)
+      ->Repetitions(3)
+      ->ReportAggregatesOnly(true);
+#else
+  const std::string compile_name =
+      benchmark_name<Case, Mode, T>("compile_time");
+  benchmark::RegisterBenchmark(
+      compile_name.c_str(), &bench_compile_time_softmax<Case, Mode, T>)
+      ->Unit(benchmark::kMicrosecond)
+      ->MinTime(0.02)
+      ->Repetitions(3)
+      ->ReportAggregatesOnly(true);
+
+  const std::string runtime_name =
+      benchmark_name<Case, Mode, T>("runtime");
+  benchmark::RegisterBenchmark(
+      runtime_name.c_str(), &bench_runtime_softmax<Mode, T>,
+      runtime_case<Case>())
+      ->Unit(benchmark::kMicrosecond)
+      ->MinTime(0.02)
+      ->Repetitions(3)
+      ->ReportAggregatesOnly(true);
+#endif
+}
+
+template <vec::Accuracy Mode, typename T, typename... Cases>
+void register_cases(CaseList<Cases...>) {
+  (register_case<Cases, Mode, T>(), ...);
 }
 
 template <vec::Accuracy Mode, typename T>
 void register_mode_dtype() {
-  for (const auto& c : kCases) {
-    const std::string name =
-        "Softmax/" + std::string(c.group) +
-        "/rank:" + std::to_string(c.rank) +
-        "/shape:" + shape_name(c) +
-        "/dtype:" + dtype_name<T>() +
-        "/mode:" + mode_name<Mode>() +
-        "/arch:" + VECOPS_BENCH_ARCH_CODE;
-    benchmark::RegisterBenchmark(name.c_str(), &bench_softmax<Mode, T>, c)
-        ->Unit(benchmark::kMicrosecond)
-        ->MinTime(0.02)
-        ->Repetitions(3)
-        ->ReportAggregatesOnly(true);
-  }
+  register_cases<Mode, T>(SoftmaxCases{});
 }
 
 template <typename T>
@@ -463,7 +574,9 @@ void register_dtype() {
 }
 
 void register_softmax_benchmarks() {
-#ifdef VECOPS_BENCH_USE_ONEDNN
+#ifdef VECOPS_BENCH_QUICK_FP16
+  register_mode_dtype<vec::Accuracy::Strict, vecops::float16_t>();
+#elif defined(VECOPS_BENCH_USE_ONEDNN)
   register_dtype<vecops::float32_t>();
   register_dtype<vecops::float16_t>();
   register_dtype<vecops::bfloat16_t>();

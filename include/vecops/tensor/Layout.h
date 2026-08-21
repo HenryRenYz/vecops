@@ -937,11 +937,44 @@ struct IsLayout : std::false_type {};
 template <typename TShape, typename TStrides>
 struct IsLayout<Layout<TShape, TStrides>> : std::true_type {};
 
+template <int I, typename TMeta>
+struct ArrayMetaElement;
+
+template <int I, template <typename...> class TMeta, typename... Values>
+struct ArrayMetaElement<I, TMeta<Values...>> {
+  static_assert(0 <= I && I < sizeof...(Values));
+  using Type = std::tuple_element_t<I, std::tuple<Values...>>;
+};
+
+template <typename TShape>
+struct ShapeProduct;
+
+template <typename... Values>
+struct ShapeProduct<Shape<Values...>> {
+  using Type = typename Product<Values...>::type;
+};
+
 } // namespace details
 
 /// Type trait: `true` if T is a Layout.
 template <typename T>
 static constexpr bool is_layout = details::IsLayout<T>::value;
+
+template <int I, typename TMeta>
+using meta_element_t = typename details::ArrayMetaElement<
+    I, std::remove_cvref_t<TMeta>>::Type;
+
+template <int I, typename TLayout>
+using size_type_t = meta_element_t<
+    I, typename std::remove_cvref_t<TLayout>::Shape>;
+
+template <int I, typename TLayout>
+using stride_type_t = meta_element_t<
+    I, typename std::remove_cvref_t<TLayout>::Strides>;
+
+template <typename TLayout>
+using numel_type_t = typename details::ShapeProduct<
+    typename std::remove_cvref_t<TLayout>::Shape>::Type;
 
 /**
  * @brief Get the size (shape value) of dimension I from a Layout.

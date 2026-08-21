@@ -7,12 +7,15 @@
 
 #include <algorithm>
 #include <array>
+#include <concepts>
 #include <ostream>
+#include <type_traits>
 #include <tuple>
 #include <utility>
 
 #include "vecops/CoreTypes.h"
 #include "vecops/Assertion.h"
+#include "vecops/util/Math.h"
 #include "vecops/util/TypeTraits.h"
 
 /**
@@ -203,6 +206,11 @@ struct Value {
   static constexpr bool is_const = false;
   /// Whether instances of this type carry a run-time value (stored per instance).
   static constexpr bool is_runtime = false;
+  /// Conservative bounds used by generic range queries for custom values.
+  static constexpr bool has_lower = false;
+  static constexpr bool has_upper = false;
+  static constexpr nint_t lo = kLoInf;
+  static constexpr nint_t hi = kHiInf;
 
   /**
    * Check whether a compile-time value `v` satisfies this type's constraints
@@ -231,6 +239,9 @@ struct Value {
   /// Convert to raw `nint_t`. Default implementation returns an invalid sentinel.
   constexpr explicit operator nint_t() const { return -100; }
 }; // struct Value
+
+template <typename T>
+concept ValueType = std::derived_from<std::remove_cvref_t<T>, Value>;
 
 /**
  * @brief A compile-time constant integer with value N.
@@ -617,26 +628,6 @@ constexpr auto operator*(nint_t lhs, T rhs) {
 
 // ---- Division ----
 
-namespace details {
-
-/**
- * Ceiling division: `ceil(a / b)` for integer `a`, `b` (b != 0).
- * Handles negative numerators correctly with truncating division.
- */
-constexpr nint_t ceil_div(nint_t a, nint_t b) {
-  return a >= 0 ? (a + b - 1) / b : a / b;
-}
-
-/**
- * Floor division: `floor(a / b)` for integer `a`, `b` (b != 0).
- * Handles negative numerators correctly with truncating division.
- */
-constexpr nint_t floor_div(nint_t a, nint_t b) {
-  return a >= 0 ? a / b : (a - b + 1) / b;
-}
-
-} // namespace details
-
 template <nint_t N, nint_t M>
 constexpr Const<N / M> operator/(Const<N>, Const<M>) { return Const<N / M>(); }
 
@@ -653,8 +644,8 @@ constexpr auto operator/(Dynamic<A, L, H> lhs, Const<N>) {
     constexpr nint_t g = (A % N == 0) ? A / N : 1;
     return Dynamic<g>{lhs.value / N};
   } else {
-    constexpr nint_t k_min = details::ceil_div(L, A);
-    constexpr nint_t k_max = details::floor_div(H, A);
+    constexpr nint_t k_min = ceil_div(L, A);
+    constexpr nint_t k_max = floor_div(H, A);
     constexpr nint_t min_val = k_min * A / N;
     constexpr nint_t max_val = k_max * A / N;
     constexpr nint_t rl = std::min(min_val, max_val);
@@ -682,8 +673,8 @@ constexpr auto operator/(Const<N>, Dynamic<A, L, H> rhs) {
   if constexpr (L == kLoInf || H == kHiInf) {
     return Dynamic<1>{N / rhs.value};
   } else {
-    constexpr nint_t k_min = details::ceil_div(L, A);
-    constexpr nint_t k_max = details::floor_div(H, A);
+    constexpr nint_t k_min = ceil_div(L, A);
+    constexpr nint_t k_max = floor_div(H, A);
     constexpr bool has_pos = (k_max >= 1);
     constexpr bool has_neg = (k_min <= -1);
     constexpr nint_t k_min_pos = has_pos ? ((k_min < 1) ? 1 : k_min) : 0;
@@ -786,8 +777,8 @@ constexpr auto operator%(Const<N>, Dynamic<A, L, H> rhs) {
   if constexpr (L == kLoInf || H == kHiInf) {
     return Dynamic<1>{N % rhs.value};
   } else {
-    constexpr nint_t k_min = details::ceil_div(L, A);
-    constexpr nint_t k_max = details::floor_div(H, A);
+    constexpr nint_t k_min = ceil_div(L, A);
+    constexpr nint_t k_max = floor_div(H, A);
     constexpr bool has_pos = (k_max >= 1);
     constexpr bool has_neg = (k_min <= -1);
     constexpr nint_t k_min_pos = has_pos ? ((k_min < 1) ? 1 : k_min) : 0;
@@ -1135,6 +1126,50 @@ private:
  */
 template <typename T>
 using ToValue = details::ValuePromote<std::remove_cvref_t<T>>::Type;
+
+template <ValueType T>
+inline constexpr bool has_lower_bound_v = [] {
+  using V = std::remove_cvref_t<T>;
+  if constexpr (V::is_const) return true;
+  else return V::has_lower;
+}();
+
+template <ValueType T>
+inline constexpr bool has_upper_bound_v = [] {
+  using V = std::remove_cvref_t<T>;
+  if constexpr (V::is_const) return true;
+  else return V::has_upper;
+}();
+
+template <ValueType T>
+inline constexpr nint_t lower_bound_v = [] {
+  using V = std::remove_cvref_t<T>;
+  if constexpr (V::is_const) return V::value;
+  else return V::lo;
+}();
+
+template <ValueType T>
+inline constexpr nint_t upper_bound_v = [] {
+  using V = std::remove_cvref_t<T>;
+  if constexpr (V::is_const) return V::value;
+  else return V::hi;
+}();
+
+template <ValueType T>
+inline constexpr bool is_bounded_v =
+    has_lower_bound_v<T> && has_upper_bound_v<T>;
+
+template <ValueType T, nint_t Lo, nint_t Hi>
+inline constexpr bool range_within_v =
+    is_bounded_v<T> && lower_bound_v<T> >= Lo && upper_bound_v<T> <= Hi;
+
+template <ValueType T, nint_t Lo>
+inline constexpr bool lower_bound_at_least_v =
+    has_lower_bound_v<T> && lower_bound_v<T> >= Lo;
+
+template <ValueType T, nint_t Hi>
+inline constexpr bool upper_bound_at_most_v =
+    has_upper_bound_v<T> && upper_bound_v<T> <= Hi;
 
 } // namespace vecops::meta
 
