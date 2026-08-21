@@ -6,6 +6,7 @@
 #include <type_traits>
 
 #include "vecops/CoreTypes.h"
+#include "vecops/util/TypeTraits.h"
 
 namespace vecops::vec {
 
@@ -37,7 +38,7 @@ struct FixedExtent {
 
 template <int ScalePower>
 struct ScalableExtent {
-  static constexpr int scale_power = ScalePower;
+  static constexpr int scale_power_v = ScalePower;
 };
 
 /**
@@ -114,14 +115,14 @@ template <typename NewElement, typename OldElement, nint_t N>
 struct RebindImpl<
     NewElement,
     VectorDescriptor<OldElement, FixedExtent<N>>> {
-  using Type = VectorDescriptor<NewElement, FixedExtent<N>>;
+  using type = VectorDescriptor<NewElement, FixedExtent<N>>;
 };
 
 template <typename NewElement, typename OldElement, int ScalePower>
 struct RebindImpl<
     NewElement,
     VectorDescriptor<OldElement, ScalableExtent<ScalePower>>> {
-  using Type = VectorDescriptor<
+  using type = VectorDescriptor<
       NewElement,
       ScalableExtent<
           ScalePower + element_size_shift(sizeof(OldElement), sizeof(NewElement))>>;
@@ -138,7 +139,7 @@ struct ViewAsImpl<
   static_assert(
       bytes % sizeof(NewElement) == 0,
       "ViewAs requires an integral number of output lanes");
-  using Type = VectorDescriptor<
+  using type = VectorDescriptor<
       NewElement,
       FixedExtent<static_cast<nint_t>(bytes / sizeof(NewElement))>>;
 };
@@ -147,7 +148,7 @@ template <typename NewElement, typename OldElement, int ScalePower>
 struct ViewAsImpl<
     NewElement,
     VectorDescriptor<OldElement, ScalableExtent<ScalePower>>> {
-  using Type = VectorDescriptor<NewElement, ScalableExtent<ScalePower>>;
+  using type = VectorDescriptor<NewElement, ScalableExtent<ScalePower>>;
 };
 
 template <typename Tag>
@@ -156,12 +157,12 @@ struct HalfImpl;
 template <typename T, nint_t N>
 struct HalfImpl<VectorDescriptor<T, FixedExtent<N>>> {
   static_assert(N % 2 == 0, "Half requires an even fixed lane count");
-  using Type = VectorDescriptor<T, FixedExtent<N / 2>>;
+  using type = VectorDescriptor<T, FixedExtent<N / 2>>;
 };
 
 template <typename T, int ScalePower>
 struct HalfImpl<VectorDescriptor<T, ScalableExtent<ScalePower>>> {
-  using Type = VectorDescriptor<T, ScalableExtent<ScalePower - 1>>;
+  using type = VectorDescriptor<T, ScalableExtent<ScalePower - 1>>;
 };
 
 template <typename Tag>
@@ -169,29 +170,29 @@ struct TwiceImpl;
 
 template <typename T, nint_t N>
 struct TwiceImpl<VectorDescriptor<T, FixedExtent<N>>> {
-  using Type = VectorDescriptor<T, FixedExtent<N * 2>>;
+  using type = VectorDescriptor<T, FixedExtent<N * 2>>;
 };
 
 template <typename T, int ScalePower>
 struct TwiceImpl<VectorDescriptor<T, ScalableExtent<ScalePower>>> {
-  using Type = VectorDescriptor<T, ScalableExtent<ScalePower + 1>>;
+  using type = VectorDescriptor<T, ScalableExtent<ScalePower + 1>>;
 };
 
 template <typename T>
 struct IndexElementImpl;
 
-template <> struct IndexElementImpl<bfloat16_t> { using Type = int16_t; };
-template <> struct IndexElementImpl<float16_t> { using Type = int16_t; };
-template <> struct IndexElementImpl<float32_t> { using Type = int32_t; };
-template <> struct IndexElementImpl<float64_t> { using Type = int64_t; };
-template <> struct IndexElementImpl<int8_t> { using Type = int8_t; };
-template <> struct IndexElementImpl<uint8_t> { using Type = int8_t; };
-template <> struct IndexElementImpl<int16_t> { using Type = int16_t; };
-template <> struct IndexElementImpl<uint16_t> { using Type = int16_t; };
-template <> struct IndexElementImpl<int32_t> { using Type = int32_t; };
-template <> struct IndexElementImpl<uint32_t> { using Type = int32_t; };
-template <> struct IndexElementImpl<int64_t> { using Type = int64_t; };
-template <> struct IndexElementImpl<uint64_t> { using Type = int64_t; };
+template <> struct IndexElementImpl<bfloat16_t> { using type = int16_t; };
+template <> struct IndexElementImpl<float16_t> { using type = int16_t; };
+template <> struct IndexElementImpl<float32_t> { using type = int32_t; };
+template <> struct IndexElementImpl<float64_t> { using type = int64_t; };
+template <> struct IndexElementImpl<int8_t> { using type = int8_t; };
+template <> struct IndexElementImpl<uint8_t> { using type = int8_t; };
+template <> struct IndexElementImpl<int16_t> { using type = int16_t; };
+template <> struct IndexElementImpl<uint16_t> { using type = int16_t; };
+template <> struct IndexElementImpl<int32_t> { using type = int32_t; };
+template <> struct IndexElementImpl<uint32_t> { using type = int32_t; };
+template <> struct IndexElementImpl<int64_t> { using type = int64_t; };
+template <> struct IndexElementImpl<uint64_t> { using type = int64_t; };
 
 } // namespace details
 
@@ -235,48 +236,56 @@ using ScalableTag =
 template <VectorTag Tag>
 using ElementOf = typename std::remove_cvref_t<Tag>::ElementType;
 
+/**
+ * A VectorTag whose element type is one of the floating-point Element types
+ * (bfloat16_t, float16_t, float32_t, float64_t).
+ */
+template <typename Tag>
+concept FloatingTag =
+    VectorTag<Tag> && ::vecops::is_float_v<ElementOf<Tag>>;
+
 /** True when the Tag describes a compile-time-known lane count (FixedTag). */
 template <VectorTag Tag>
-inline constexpr bool is_fixed_tag = details::IsFixedExtent<
+inline constexpr bool is_fixed_tag_v = details::IsFixedExtent<
     typename std::remove_cvref_t<Tag>::ExtentType>::value;
 
 /** True when the Tag describes a runtime-dependent lane count (ScalableTag). */
 template <VectorTag Tag>
-inline constexpr bool is_scalable_tag = details::IsScalableExtent<
+inline constexpr bool is_scalable_tag_v = details::IsScalableExtent<
     typename std::remove_cvref_t<Tag>::ExtentType>::value;
 
-/** The compile-time logical lane count of a FixedTag. Requires is_fixed_tag<Tag>. */
+/** The compile-time logical lane count of a FixedTag. Requires is_fixed_tag_v<Tag>. */
 template <VectorTag Tag>
-  requires is_fixed_tag<Tag>
-inline constexpr nint_t fixed_lanes =
+  requires is_fixed_tag_v<Tag>
+inline constexpr nint_t fixed_lanes_v =
     std::remove_cvref_t<Tag>::ExtentType::lanes;
 
 /**
  * Base-2 exponent of the number of native words a ScalableTag covers.
- * Requires is_scalable_tag<Tag>.
+ * Requires is_scalable_tag_v<Tag>.
  */
 template <VectorTag Tag>
-  requires is_scalable_tag<Tag>
-inline constexpr int scale_power =
-    std::remove_cvref_t<Tag>::ExtentType::scale_power;
+  requires is_scalable_tag_v<Tag>
+inline constexpr int scale_power_v =
+    std::remove_cvref_t<Tag>::ExtentType::scale_power_v;
 
 /** Keeps the logical lane count while changing the element type. */
 template <Element NewElement, VectorTag Tag>
 using Rebind = typename details::RebindImpl<
-    NewElement, std::remove_cvref_t<Tag>>::Type;
+    NewElement, std::remove_cvref_t<Tag>>::type;
 
 /** Keeps the logical byte extent while changing the element type. */
 template <Element NewElement, VectorTag Tag>
 using ViewAs = typename details::ViewAsImpl<
-    NewElement, std::remove_cvref_t<Tag>>::Type;
+    NewElement, std::remove_cvref_t<Tag>>::type;
 
 /** Describes the lower or upper half of a Tag's logical lanes. */
 template <VectorTag Tag>
-using Half = typename details::HalfImpl<std::remove_cvref_t<Tag>>::Type;
+using Half = typename details::HalfImpl<std::remove_cvref_t<Tag>>::type;
 
 /** Describes twice a Tag's logical lanes without changing its element type. */
 template <VectorTag Tag>
-using Twice = typename details::TwiceImpl<std::remove_cvref_t<Tag>>::Type;
+using Twice = typename details::TwiceImpl<std::remove_cvref_t<Tag>>::type;
 
 /**
  * Signed integer element used to index lanes of T.
@@ -286,7 +295,7 @@ using Twice = typename details::TwiceImpl<std::remove_cvref_t<Tag>>::Type;
  * their signed counterpart (e.g. uint32_t → int32_t).
  */
 template <Element T>
-using IndexElement = typename details::IndexElementImpl<T>::Type;
+using IndexElement = typename details::IndexElementImpl<T>::type;
 
 /**
  * Descriptor for one signed lane index per logical lane of Tag.
@@ -304,12 +313,12 @@ namespace details {
  * Tags must share an identical scale power.
  */
 template <VectorTag A, VectorTag B>
-inline constexpr bool same_logical_bytes = [] {
-  if constexpr (is_fixed_tag<A> && is_fixed_tag<B>) {
-    return fixed_lanes<A> * static_cast<nint_t>(sizeof(ElementOf<A>)) ==
-           fixed_lanes<B> * static_cast<nint_t>(sizeof(ElementOf<B>));
-  } else if constexpr (is_scalable_tag<A> && is_scalable_tag<B>) {
-    return scale_power<A> == scale_power<B>;
+inline constexpr bool same_logical_bytes_v = [] {
+  if constexpr (is_fixed_tag_v<A> && is_fixed_tag_v<B>) {
+    return fixed_lanes_v<A> * static_cast<nint_t>(sizeof(ElementOf<A>)) ==
+           fixed_lanes_v<B> * static_cast<nint_t>(sizeof(ElementOf<B>));
+  } else if constexpr (is_scalable_tag_v<A> && is_scalable_tag_v<B>) {
+    return scale_power_v<A> == scale_power_v<B>;
   } else {
     return false;
   }

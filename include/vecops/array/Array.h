@@ -751,7 +751,6 @@ template <
     int64_t N,       // num of dim of original array
     int64_t D,       // index of dim of original array this slicer currently handle
     int FLAGS,       // flags of original arry
-    typename = void, // SFINAE
     typename... TIndices
 >
 struct SliceHelper;
@@ -787,8 +786,9 @@ template <
     typename TIndex,
     typename... TIndices
 >
-struct SliceHelper<T, N, D, FLAGS, std::enable_if_t<std::is_integral_v<std::decay_t<TIndex>>>, TIndex, TIndices...> {
-  using Next = SliceHelper<T, N, D + 1, FLAGS, void, TIndices...>;
+  requires std::integral<std::decay_t<TIndex>>
+struct SliceHelper<T, N, D, FLAGS, TIndex, TIndices...> {
+  using Next = SliceHelper<T, N, D + 1, FLAGS, TIndices...>;
   static constexpr int64_t NewLength = Next::NewLength - 1;
   static_assert(NewLength >= 0);
   static constexpr int64_t LastNContiguous = Next::LastNContiguous; // breaks contiguity
@@ -822,8 +822,9 @@ template <
     typename TIndex,
     typename... TIndices
 >
-struct SliceHelper<T, N, D, FLAGS, std::enable_if_t<std::is_same_v<std::decay_t<TIndex>, details::ReserveAxis>>, TIndex, TIndices...> {
-  using Next = SliceHelper<T, N, D + 1, FLAGS, void, TIndices...>;
+  requires std::same_as<std::decay_t<TIndex>, details::ReserveAxis>
+struct SliceHelper<T, N, D, FLAGS, TIndex, TIndices...> {
+  using Next = SliceHelper<T, N, D + 1, FLAGS, TIndices...>;
   static constexpr int64_t NewLength = Next::NewLength;
   static_assert(NewLength >= 0);
   static constexpr int64_t LastNContiguous = Next::LastNContiguous == N - D - 1 ? Next::LastNContiguous + 1 : Next::LastNContiguous;
@@ -850,8 +851,9 @@ template <
     typename TIndex,
     typename... TIndices
 >
-struct SliceHelper<T, N, D, FLAGS, std::enable_if_t<std::is_same_v<std::decay_t<TIndex>, details::NewAxis>>, TIndex, TIndices...> {
-  using Next = SliceHelper<T, N, D, FLAGS, void, TIndices...>;
+  requires std::same_as<std::decay_t<TIndex>, details::NewAxis>
+struct SliceHelper<T, N, D, FLAGS, TIndex, TIndices...> {
+  using Next = SliceHelper<T, N, D, FLAGS, TIndices...>;
   static constexpr int64_t NewLength = Next::NewLength + 1;
   static_assert(NewLength >= 0);
   static constexpr int64_t LastNContiguous = Next::LastNContiguous; // breaks contiguity
@@ -878,8 +880,9 @@ template <
     typename TIndex,
     typename... TIndices
 >
-struct SliceHelper<T, N, D, FLAGS, std::enable_if_t<std::is_same_v<std::decay_t<TIndex>, details::Range>>, TIndex, TIndices...> {
-  using Next = SliceHelper<T, N, D + 1, FLAGS, void, TIndices...>;
+  requires std::same_as<std::decay_t<TIndex>, details::Range>
+struct SliceHelper<T, N, D, FLAGS, TIndex, TIndices...> {
+  using Next = SliceHelper<T, N, D + 1, FLAGS, TIndices...>;
   static constexpr int64_t NewLength = Next::NewLength;
   static_assert(NewLength >= 0);
   static constexpr int64_t LastNContiguous = Next::LastNContiguous; // breaks contiguity
@@ -930,7 +933,7 @@ template <typename T, int64_t N, int FLAGS>
 template <typename... TIndices>
 VECOPS_ALWAYS_INLINE
 constexpr decltype(auto) Array<T, N, FLAGS>::operator()(TIndices... indices) const {
-  using Helper = typename details::SliceHelper<T, N, 0, FLAGS, void, TIndices...>;
+  using Helper = typename details::SliceHelper<T, N, 0, FLAGS, TIndices...>;
   constexpr int64_t new_length = Helper::NewLength;
 
   std::array<int64_t, new_length> new_sizes, new_strides;

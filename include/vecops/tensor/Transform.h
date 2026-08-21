@@ -6,6 +6,7 @@
 #define VECOPS_TENSOR_TRANSFORM_H
 
 #include "vecops/CoreTypes.h"
+#include "vecops/util/TypeTraits.h"
 #include "vecops/tensor/AccessOptions.h"
 #include "vecops/vec/Vec.h"
 
@@ -232,10 +233,10 @@ consteval int vec_transform_log2(int value) {
 }
 
 template <typename To, typename Ei>
-static constexpr bool rebind_vec_supported_v =
+inline constexpr bool rebind_vec_supported_v =
 #if defined(CPU_CAPABILITY_SVE)
-    vec::is_scalable_tag<To> &&
-    (vec::scale_power<vec::Rebind<Ei, To>> <= VEC_MAX_POW);
+    vec::is_scalable_tag_v<To> &&
+    (vec::scale_power_v<vec::Rebind<Ei, To>> <= VEC_MAX_POW);
 #else
     true;
 #endif
@@ -285,7 +286,7 @@ struct IsVecTransformLike<T, std::void_t<
 } // namespace details
 
 template <typename T>
-static constexpr bool is_vec_transform_like_v =
+inline constexpr bool is_vec_transform_like_v =
     details::IsVecTransformLike<T>::value;
 
 /**
@@ -346,12 +347,12 @@ struct LambdaVecTransform : public VecTransform<EOut, EIn, Elementwise> {
   constexpr explicit LambdaVecTransform(const Fn& fn) : _fn(fn) {}
 
   template <vec::VectorTag To, typename... Coords>
-    requires vec::is_scalable_tag<To> &&
+    requires vec::is_scalable_tag_v<To> &&
              std::same_as<vec::ElementOf<To>, EOut> &&
-             (Base::min_output_pow2 <= vec::scale_power<To>) &&
-             (vec::scale_power<To> <= Base::max_output_pow2)
+             (Base::min_output_pow2 <= vec::scale_power_v<To>) &&
+             (vec::scale_power_v<To> <= Base::max_output_pow2)
   vec::Vec<To> operator()(To t, vec::Vec<vec::Rebind<EIn, To>> v_in, Coords... coords) const {
-    constexpr int pow2 = vec::scale_power<To>;
+    constexpr int pow2 = vec::scale_power_v<To>;
     if constexpr (Elementwise) {
       ((void) coords, ...);
       return call_elementwise<To, pow2>(t, v_in);
@@ -422,7 +423,7 @@ private:
 
   template <typename To>
   vec::Vec<To> try_downward_elementwise(To t, vec::Vec<vec::Rebind<EIn, To>> v_in) const {
-    constexpr int pow2 = vec::scale_power<To>;
+    constexpr int pow2 = vec::scale_power_v<To>;
 
     if constexpr (details::CanCallElementwise<To, Fn, EIn>::value) {
       return _fn(t, v_in);
@@ -444,7 +445,7 @@ private:
       To t,
       vec::Vec<vec::Rebind<EIn, To>> v_in,
       Coords... coords) const {
-    constexpr int pow2 = vec::scale_power<To>;
+    constexpr int pow2 = vec::scale_power_v<To>;
 
     if constexpr (details::CanCallCoordinate<To, Fn, EIn, Coords...>::value) {
       return _fn(t, v_in, coords...);
@@ -481,10 +482,10 @@ struct ZeroVecTransform : public VecTransform<EOut, EIn, true> {
   static constexpr bool reads_input = false;
 
   template <vec::VectorTag To, vec::VectorValue Vi, typename... Coords>
-    requires vec::is_scalable_tag<To> &&
+    requires vec::is_scalable_tag_v<To> &&
              std::same_as<vec::ElementOf<To>, EOut> &&
-             (Base::min_output_pow2 <= vec::scale_power<To>) &&
-             (vec::scale_power<To> <= Base::max_output_pow2)
+             (Base::min_output_pow2 <= vec::scale_power_v<To>) &&
+             (vec::scale_power_v<To> <= Base::max_output_pow2)
   vec::Vec<To> operator()(To t, Vi, Coords... coords) const {
     ((void) coords, ...);
     return vec::zeros(t);
@@ -505,10 +506,10 @@ struct IdentityVecTransform : public VecTransform<EOut, EIn, true> {
   using Base = VecTransform<EOut, EIn, true>;
 
   template <vec::VectorTag To, typename... Coords>
-    requires vec::is_scalable_tag<To> &&
+    requires vec::is_scalable_tag_v<To> &&
              std::same_as<vec::ElementOf<To>, EOut> &&
-             (Base::min_output_pow2 <= vec::scale_power<To>) &&
-             (vec::scale_power<To> <= Base::max_output_pow2)
+             (Base::min_output_pow2 <= vec::scale_power_v<To>) &&
+             (vec::scale_power_v<To> <= Base::max_output_pow2)
   vec::Vec<To> operator()(To t, vec::Vec<vec::Rebind<EIn, To>> v_in, Coords... coords) const {
     ((void) coords, ...);
     return v_in;
@@ -552,8 +553,8 @@ constexpr auto adapt_vec_transform(Fn&& fn) {
   using FnT = std::remove_cvref_t<Fn>;
   if constexpr (is_vec_transform_like_v<FnT>) {
     static_assert(
-        is_any<typename FnT::TIn, EIn> &&
-            is_any<typename FnT::TOut, EOut>,
+        is_any_v<typename FnT::TIn, EIn> &&
+            is_any_v<typename FnT::TOut, EOut>,
         "transform dtype adaptation belongs to tensor::DataAccess");
     return FnT(std::forward<Fn>(fn));
   } else {
@@ -568,28 +569,6 @@ inline constexpr ZeroVecTransform<EOut, EIn> zeros_transform {};
 /** @brief Stateless same-dtype identity transform value. */
 template <typename EOut, typename EIn = EOut>
 inline constexpr IdentityVecTransform<EOut, EIn> identity_transform {};
-
-namespace details {
-
-template <typename T>
-struct IsZeroVecTransform : std::false_type {};
-template <typename EOut, typename EIn>
-struct IsZeroVecTransform<ZeroVecTransform<EOut, EIn>> : std::true_type {};
-
-template <typename T>
-struct IsIdentityVecTransform : std::false_type {};
-template <typename EOut, typename EIn>
-struct IsIdentityVecTransform<IdentityVecTransform<EOut, EIn>> : std::true_type {};
-
-} // namespace details
-
-template <typename T>
-static constexpr bool is_zero_vec_transform_v =
-    details::IsZeroVecTransform<std::remove_cvref_t<T>>::value;
-
-template <typename T>
-static constexpr bool is_identity_vec_transform_v =
-    details::IsIdentityVecTransform<std::remove_cvref_t<T>>::value;
 
 } // namespace vecops::tensor
 

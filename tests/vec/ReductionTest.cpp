@@ -59,7 +59,7 @@ static_assert(!HasMaskedTaglessReduceAdd<
 
 template <typename T>
 T reduction_value(vecops::nint_t lane) {
-  if constexpr (::vecops::IsFloatV<T>) {
+  if constexpr (::vecops::is_float_v<T>) {
     return static_cast<T>(static_cast<float>((lane % 5) - 2));
   } else if constexpr (std::is_signed_v<T>) {
     return static_cast<T>((lane % 5) - 2);
@@ -70,7 +70,7 @@ T reduction_value(vecops::nint_t lane) {
 
 template <typename T>
 T wrapping_add(T a, T b) {
-  if constexpr (::vecops::IsFloatV<T>) {
+  if constexpr (::vecops::is_float_v<T>) {
     return static_cast<T>(a + b);
   } else {
     using U = std::make_unsigned_t<T>;
@@ -86,7 +86,7 @@ T wrapping_add(T a, T b) {
 
 template <typename T>
 T max_identity() {
-  if constexpr (::vecops::IsFloatV<T>)
+  if constexpr (::vecops::is_float_v<T>)
     return static_cast<T>(-std::numeric_limits<double>::infinity());
   else
     return std::numeric_limits<T>::lowest();
@@ -94,7 +94,7 @@ T max_identity() {
 
 template <typename T>
 T min_identity() {
-  if constexpr (::vecops::IsFloatV<T>)
+  if constexpr (::vecops::is_float_v<T>)
     return static_cast<T>(std::numeric_limits<double>::infinity());
   else
     return std::numeric_limits<T>::max();
@@ -109,11 +109,11 @@ void verify_reduction_shape(Tag tag) {
   // lanes leaves nonzero padding behind and catches subword over-reduction.
   auto add_value = vec::fill(tag, static_cast<T>(7));
   const T high_padding = [] {
-    if constexpr (::vecops::IsFloatV<T>) return static_cast<T>(100);
+    if constexpr (::vecops::is_float_v<T>) return static_cast<T>(100);
     else return std::numeric_limits<T>::max();
   }();
   const T low_padding = [] {
-    if constexpr (::vecops::IsFloatV<T>) return static_cast<T>(-100);
+    if constexpr (::vecops::is_float_v<T>) return static_cast<T>(-100);
     else return std::numeric_limits<T>::lowest();
   }();
   auto max_value = vec::fill(tag, high_padding);

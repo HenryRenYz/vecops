@@ -131,8 +131,8 @@ public:
         std::same_as<ComputeType, float32_t> &&
         std::same_as<typename OutSpec::MemoryElement, bfloat16_t> &&
         std::same_as<typename OutSpec::TransformType, tensor::NoTransform> &&
-        tensor::is_ct_last_contiguous<
-            typename OutSpec::OutputLayout, 1>::value;
+        tensor::is_ct_last_contiguous_v<
+            typename OutSpec::OutputLayout, 1>;
     using ElementCount = tensor::numel_type_t<
         typename InSpec::InputLayout>;
     constexpr bool UsePackedBf16Output = CanPackBf16Output &&
@@ -203,10 +203,10 @@ private:
     if constexpr (!details::softmax_online_allowed<Config>()) return false;
     constexpr int Rank = InSpec::InputTensor::Ndim;
     if constexpr (
-        !tensor::is_ct_last_contiguous<
-            typename InSpec::InputLayout, 1>::value ||
-        !tensor::is_ct_last_contiguous<
-            typename OutSpec::OutputLayout, 1>::value) return false;
+        !tensor::is_ct_last_contiguous_v<
+            typename InSpec::InputLayout, 1> ||
+        !tensor::is_ct_last_contiguous_v<
+            typename OutSpec::OutputLayout, 1>) return false;
     using InElement = std::remove_const_t<typename InSpec::MemoryElement>;
     using NormalizedSize = tensor::size_type_t<
         Rank - 1, typename InSpec::InputLayout>;

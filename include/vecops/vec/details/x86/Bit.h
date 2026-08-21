@@ -320,19 +320,19 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_variable_raw(
 }
 
 #if defined(CPU_CAPABILITY_AVX512) && defined(HAS_AVX512DQ)
-inline constexpr bool x86_has_native_masked_shift = true;
+inline constexpr bool x86_has_native_masked_shift_v = true;
 #else
-inline constexpr bool x86_has_native_masked_shift = false;
+inline constexpr bool x86_has_native_masked_shift_v = false;
 #endif
 
 template <typename Op, typename T, typename Policy, typename Raw, typename MaskRaw>
-  requires x86_has_native_masked_shift
+  requires x86_has_native_masked_shift_v
 VECOPS_ALWAYS_INLINE Raw x86_bit_masked_shift_raw(
     Raw value, Raw inactive, MaskRaw mask, int count);
 
 #if defined(CPU_CAPABILITY_AVX512) && defined(HAS_AVX512DQ)
 template <typename Op, typename T, typename Policy, typename Raw, typename MaskRaw>
-  requires x86_has_native_masked_shift
+  requires x86_has_native_masked_shift_v
 VECOPS_ALWAYS_INLINE Raw x86_bit_masked_shift_raw(
     Raw value, Raw inactive, MaskRaw mask, int count) {
   static_assert(sizeof(T) == 4 || sizeof(T) == 8);

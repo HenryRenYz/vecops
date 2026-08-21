@@ -145,8 +145,8 @@ VECOPS_ALWAYS_INLINE svbool_t sve_single_lane_predicate(nint_t lane) {
 template <nint_t Index, VectorTag Tag>
 VECOPS_ALWAYS_INLINE nint_t sve_valid_word_lanes(Tag tag) {
   const nint_t word_lanes = native_word_size(tag);
-  if constexpr (is_scalable_tag<Tag>) {
-    if constexpr (scale_power<Tag> >= 0) {
+  if constexpr (is_scalable_tag_v<Tag>) {
+    if constexpr (scale_power_v<Tag> >= 0) {
       // Every physical word of a non-subword scalable tuple is complete. Keep
       // this explicit so Clang does not retain per-word whilelo predicates for
       // a multi-word Tag whose runtime size is expressed through svcnt*().
@@ -171,8 +171,8 @@ VECOPS_ALWAYS_INLINE nint_t sve_valid_word_lanes(Tag tag) {
  */
 template <VectorTag Tag>
 struct RuntimeWordAccess<SVEBackend, Tag> {
-  static constexpr bool sized_vec = is_word_array<Vec<Tag>>;
-  static constexpr bool sized_mask = is_word_array<Mask<Tag>>;
+  static constexpr bool sized_vec = is_word_array_v<Vec<Tag>>;
+  static constexpr bool sized_mask = is_word_array_v<Mask<Tag>>;
 
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> get_vec(
       Tag tag, const Vec<Tag>& value, nint_t ordinal)
@@ -227,7 +227,7 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
       using BitsTag = Rebind<uint16_t, Tag>;
       const auto bit_word = execute_word<0, SVEBackend>(
           BitCastOp{}, BitsTag{}, tag, word);
-      if constexpr (is_word_array<Vec<Tag>>) {
+      if constexpr (is_word_array_v<Vec<Tag>>) {
         auto bits = execute(BitCastOp{}, BitsTag{}, tag, value);
         bits = ::vecops::vec::set_word(
             BitsTag{}, bits, ordinal, bit_word);
@@ -249,7 +249,7 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
         else
           return svreinterpret_bf16_u16_x4(updated);
       }
-    } else if constexpr (is_word_array<Vec<Tag>>) {
+    } else if constexpr (is_word_array_v<Vec<Tag>>) {
       return details::set_word(value, ordinal, word);
     } else {
       return visit_runtime_word<SVEBackend>(
@@ -283,7 +283,7 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
         0, native_word_size(tag));
     const auto active = sve_prefix_predicate<ElementOf<Tag>>(valid);
     word = svand_b_z(active, word, active);
-    if constexpr (is_word_array<Mask<Tag>>) {
+    if constexpr (is_word_array_v<Mask<Tag>>) {
       return details::set_word(value, ordinal, word);
     } else {
       return visit_runtime_word<SVEBackend>(
@@ -841,7 +841,7 @@ template <VectorTag Tag>
 struct NativeImpl<SVEBackend, UpperOp, Tag> {
   static VECOPS_ALWAYS_INLINE Vec<Half<Tag>> call(
       UpperOp, Tag tag, Vec<Tag> value) {
-    if constexpr (num_words(Tag{}) > 1 && !is_subword<Half<Tag>>) {
+    if constexpr (num_words(Tag{}) > 1 && !is_subword_v<Half<Tag>>) {
       return ::vecops::vec::get_word<1>(tag, value);
     }
     using T = ElementOf<Tag>;
@@ -893,7 +893,7 @@ struct NativeImpl<SVEBackend, ConcatOp, Tag> {
       Vec<Half<Tag>> lower_value,
       Vec<Half<Tag>> upper_value) {
     using T = ElementOf<Tag>;
-    if constexpr (num_words(Tag{}) > 1 && !is_subword<Half<Tag>>) {
+    if constexpr (num_words(Tag{}) > 1 && !is_subword_v<Half<Tag>>) {
       const auto lower_raw = sve_basic_raw_word(lower_value);
       const auto upper_raw = sve_basic_raw_word(upper_value);
       return construct_words<SVEBackend>(

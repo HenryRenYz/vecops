@@ -172,7 +172,7 @@ struct SliceAccessPolicy<
 
 /** @brief Result type of `SliceAccessPolicy`. */
 template <typename Policy, int SlicedDim>
-using SliceAccessPolicyT = typename SliceAccessPolicy<
+using slice_access_policy_t = typename SliceAccessPolicy<
     std::remove_cvref_t<Policy>, SlicedDim>::type;
 
 } // namespace vecops::tensor

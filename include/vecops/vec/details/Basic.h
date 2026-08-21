@@ -13,7 +13,7 @@ namespace vecops::vec::details {
 template <typename Backend, VectorTag ToTag>
 struct GenericImpl<Backend, ResizeBitCastOp, ToTag> {
   template <VectorTag FromTag>
-    requires (is_fixed_tag<ToTag> == is_fixed_tag<FromTag>)
+    requires (is_fixed_tag_v<ToTag> == is_fixed_tag_v<FromTag>)
   static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
       ResizeBitCastOp, ToTag to, FromTag from, Vec<FromTag> value) {
     using ToTraits = RepresentationTraits<Backend, ToTag>;
@@ -114,7 +114,7 @@ template <typename Backend, VectorTag ToTag>
   requires (RepresentationTraits<Backend, ToTag>::word_count > 1)
 struct GenericImpl<Backend, BitCastOp, ToTag> {
   template <VectorTag FromTag>
-    requires same_logical_bytes<ToTag, FromTag> &&
+    requires same_logical_bytes_v<ToTag, FromTag> &&
              (RepresentationTraits<Backend, ToTag>::word_count ==
               RepresentationTraits<Backend, FromTag>::word_count)
   static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
@@ -310,18 +310,18 @@ VECOPS_VEC_DEFINE_GENERIC_SHUFFLE(LocalShuffleOp);
 #undef VECOPS_VEC_DEFINE_GENERIC_SHUFFLE
 
 template <VectorTag Tag, typename Option>
-inline constexpr bool is_fill_option_for = [] {
+inline constexpr bool is_fill_option_for_v = [] {
   using Clean = std::remove_cvref_t<Option>;
-  if constexpr (IsUnmaskedOption<Clean>::value) {
+  if constexpr (is_unmasked_option_v<Clean>) {
     return true;
-  } else if constexpr (is_masked_option<Clean>) {
+  } else if constexpr (is_masked_option_v<Clean>) {
     return std::same_as<typename IsMaskedOption<Clean>::Value, Mask<Tag>>;
-  } else if constexpr (is_first_option<Clean>) {
+  } else if constexpr (is_first_option_v<Clean>) {
     return true;
-  } else if constexpr (is_vector_merge_option<Clean>) {
+  } else if constexpr (is_vector_merge_option_v<Clean>) {
     return std::same_as<
         typename IsVectorMergeOption<Clean>::Value, Vec<Tag>>;
-  } else if constexpr (is_scalar_merge_option<Clean>) {
+  } else if constexpr (is_scalar_merge_option_v<Clean>) {
     return std::same_as<
         typename IsScalarMergeOption<Clean>::Value, ElementOf<Tag>>;
   } else {

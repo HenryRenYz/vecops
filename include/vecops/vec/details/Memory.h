@@ -4,7 +4,7 @@
 /**
  * @file Memory.h
  * @brief Memory operation infrastructure: option validation
- * (valid_memory_options, is_memory_option_for), GenericImpl for LoadOp
+ * (valid_memory_options, is_memory_option_for_v), GenericImpl for LoadOp
  * and StoreOp (contiguous, indexed, and strided access), and
  * StridedIndicesOp for building linear index sequences.
  */
@@ -31,11 +31,11 @@ namespace vecops::vec::details {
 // The IsMemory*Option group predicates live in details/Options.h.
 
 template <VectorTag Tag, typename Option>
-inline constexpr bool is_memory_addressing_option_for = [] {
+inline constexpr bool is_memory_addressing_option_for_v = [] {
   using Clean = std::remove_cvref_t<Option>;
   if constexpr (IsIndexedOption<Clean>::value) {
     using Indices = typename IsIndexedOption<Clean>::Value;
-    using IndexElement = ElementOf<VecToTagT<Indices>>;
+    using IndexElement = ElementOf<VecToTag<Indices>>;
     if constexpr (std::same_as<IndexElement, int32_t>)
       return std::same_as<Indices, Vec<Rebind<int32_t, Tag>>>;
     else if constexpr (std::same_as<IndexElement, int64_t>)
@@ -53,7 +53,7 @@ consteval bool supported_memory_access() {
 }
 
 template <VectorTag Tag, bool IsStore, typename Option>
-inline constexpr bool is_memory_option_for = [] {
+inline constexpr bool is_memory_option_for_v = [] {
   using Clean = std::remove_cvref_t<Option>;
   if constexpr (
       IsMemoryAlignmentOption<Clean>::value ||
@@ -62,11 +62,11 @@ inline constexpr bool is_memory_option_for = [] {
       IsFirstOption<Clean>::value) {
     return true;
   } else if constexpr (IsMaskedOption<Clean>::value) {
-    return is_masked_option_for<Tag, Clean>;
+    return is_masked_option_for_v<Tag, Clean>;
   } else if constexpr (IsMemoryAddressingOption<Clean>::value) {
-    return is_memory_addressing_option_for<Tag, Clean>;
+    return is_memory_addressing_option_for_v<Tag, Clean>;
   } else if constexpr (!IsStore && IsMemoryPopulationOption<Clean>::value) {
-    return is_vector_population_option_for<Tag, Clean>;
+    return is_vector_population_option_for_v<Tag, Clean>;
   } else {
     return false;
   }
@@ -74,21 +74,21 @@ inline constexpr bool is_memory_option_for = [] {
 
 template <VectorTag Tag, bool IsStore, typename... Options>
 consteval bool valid_memory_options() {
-  if constexpr (!(is_memory_option_for<Tag, IsStore, Options> && ...)) {
+  if constexpr (!(is_memory_option_for_v<Tag, IsStore, Options> && ...)) {
     return false;
   } else {
     constexpr std::size_t alignment_count =
-        option_count<IsMemoryAlignmentOption, Options...>;
+        option_count_v<IsMemoryAlignmentOption, Options...>;
     constexpr std::size_t temporality_count =
-        option_count<IsMemoryTemporalityOption, Options...>;
+        option_count_v<IsMemoryTemporalityOption, Options...>;
     constexpr std::size_t active_count =
-        option_count<IsMemoryActiveOption, Options...>;
+        option_count_v<IsMemoryActiveOption, Options...>;
     constexpr std::size_t population_count =
-        option_count<IsMemoryPopulationOption, Options...>;
+        option_count_v<IsMemoryPopulationOption, Options...>;
     constexpr std::size_t indexed_count =
-        option_count<IsIndexedOption, Options...>;
+        option_count_v<IsIndexedOption, Options...>;
     constexpr std::size_t strided_count =
-        option_count<IsStridedOption, Options...>;
+        option_count_v<IsStridedOption, Options...>;
     return alignment_count <= 1 && temporality_count <= 1 &&
         active_count <= 1 && population_count <= 1 &&
         indexed_count <= 1 && strided_count <= 1 &&
@@ -131,7 +131,7 @@ struct GenericImpl<Backend, LoadOp, Tag> {
       Tag tag, const ElementOf<Tag>* pointer,
       opt::Indexed<Indices, Scale> addressing,
       Mask<Tag> mask, Vec<Tag> inactive) {
-    using IndexTag = Rebind<ElementOf<VecToTagT<Indices>>, Tag>;
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, Tag>;
     using IndexElement = ElementOf<IndexTag>;
     constexpr nint_t byte_scale =
         Scale == 0 ? static_cast<nint_t>(sizeof(ElementOf<Tag>)) : Scale;
@@ -315,7 +315,7 @@ struct GenericImpl<Backend, StoreOp, Tag> {
   static VECOPS_ALWAYS_INLINE void store_indexed(
       Tag tag, ElementOf<Tag>* pointer, Vec<Tag> value,
       opt::Indexed<Indices, Scale> addressing, Mask<Tag> mask) {
-    using IndexTag = Rebind<ElementOf<VecToTagT<Indices>>, Tag>;
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, Tag>;
     constexpr nint_t byte_scale =
         Scale == 0 ? static_cast<nint_t>(sizeof(ElementOf<Tag>)) : Scale;
     auto* base = reinterpret_cast<std::byte*>(pointer);
@@ -401,15 +401,15 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_load_options(
       valid_memory_options<Tag, false, Options...>(),
       "load received invalid, duplicate, or mismatched options");
   constexpr std::size_t active_count =
-      option_count<IsMemoryActiveOption, Options...>;
+      option_count_v<IsMemoryActiveOption, Options...>;
   constexpr std::size_t population_count =
-      option_count<IsMemoryPopulationOption, Options...>;
+      option_count_v<IsMemoryPopulationOption, Options...>;
   constexpr std::size_t alignment_count =
-      option_count<IsMemoryAlignmentOption, Options...>;
+      option_count_v<IsMemoryAlignmentOption, Options...>;
   constexpr std::size_t temporality_count =
-      option_count<IsMemoryTemporalityOption, Options...>;
+      option_count_v<IsMemoryTemporalityOption, Options...>;
   constexpr std::size_t addressing_count =
-      option_count<IsMemoryAddressingOption, Options...>;
+      option_count_v<IsMemoryAddressingOption, Options...>;
 
   auto invoke = [&](auto alignment, auto temporality) -> Vec<Tag> {
     if constexpr (std::same_as<decltype(alignment), mem::Aligned>) {
@@ -421,7 +421,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_load_options(
     }
     if constexpr (
         active_count == 0 ||
-        option_count<IsUnmaskedOption, Options...> == 1) {
+        option_count_v<IsUnmaskedOption, Options...> == 1) {
       if constexpr (addressing_count == 0) {
         return execute(op, tag, pointer, alignment, temporality);
       } else {
@@ -439,7 +439,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_load_options(
       }
     } else {
       Mask<Tag> mask;
-      if constexpr (option_count<IsMaskedOption, Options...> == 1) {
+      if constexpr (option_count_v<IsMaskedOption, Options...> == 1) {
         mask = find_option<IsMaskedOption>(
             std::forward<Options>(options)...).value;
       } else {
@@ -450,10 +450,10 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_load_options(
 
       Vec<Tag> inactive;
       if constexpr (population_count == 0 ||
-                    option_count<IsZeroOption, Options...> == 1) {
+                    option_count_v<IsZeroOption, Options...> == 1) {
         inactive = zeros(tag);
       } else if constexpr (
-          option_count<IsVectorMergeOption, Options...> == 1) {
+          option_count_v<IsVectorMergeOption, Options...> == 1) {
         inactive = find_option<IsVectorMergeOption>(
             std::forward<Options>(options)...).value;
       } else {
@@ -509,13 +509,13 @@ VECOPS_ALWAYS_INLINE void execute_store_options(
       valid_memory_options<Tag, true, Options...>(),
       "store received invalid, duplicate, mismatched, or population options");
   constexpr std::size_t active_count =
-      option_count<IsMemoryActiveOption, Options...>;
+      option_count_v<IsMemoryActiveOption, Options...>;
   constexpr std::size_t alignment_count =
-      option_count<IsMemoryAlignmentOption, Options...>;
+      option_count_v<IsMemoryAlignmentOption, Options...>;
   constexpr std::size_t temporality_count =
-      option_count<IsMemoryTemporalityOption, Options...>;
+      option_count_v<IsMemoryTemporalityOption, Options...>;
   constexpr std::size_t addressing_count =
-      option_count<IsMemoryAddressingOption, Options...>;
+      option_count_v<IsMemoryAddressingOption, Options...>;
 
   auto invoke = [&](auto alignment, auto temporality) {
     if constexpr (std::same_as<decltype(alignment), mem::Aligned>) {
@@ -527,7 +527,7 @@ VECOPS_ALWAYS_INLINE void execute_store_options(
     }
     if constexpr (
         active_count == 0 ||
-        option_count<IsUnmaskedOption, Options...> == 1) {
+        option_count_v<IsUnmaskedOption, Options...> == 1) {
       if constexpr (addressing_count == 0) {
         execute(op, tag, pointer, value, alignment, temporality);
       } else {
@@ -545,7 +545,7 @@ VECOPS_ALWAYS_INLINE void execute_store_options(
       }
     } else {
       Mask<Tag> mask;
-      if constexpr (option_count<IsMaskedOption, Options...> == 1) {
+      if constexpr (option_count_v<IsMaskedOption, Options...> == 1) {
         mask = find_option<IsMaskedOption>(
             std::forward<Options>(options)...).value;
       } else {

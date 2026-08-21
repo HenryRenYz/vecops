@@ -216,7 +216,7 @@ struct Shape : public ArrayMeta<Is...> {
  * @endcode
  */
 template <typename... Ints>
-constexpr auto make_shape(Ints&& ... is) -> Shape<ToValue<std::remove_cvref_t<Ints>>...> {
+constexpr auto make_shape(Ints&& ... is) -> Shape<to_value_t<std::remove_cvref_t<Ints>>...> {
   return {std::forward<Ints>(is)...};
 }
 
@@ -241,7 +241,7 @@ struct Strides : public ArrayMeta<Is...> {
  * @brief Create Strides, automatically wrapping bare integers as Any.
  */
 template <typename... Ints>
-constexpr auto make_strides(Ints&& ... is) -> Strides<ToValue<std::remove_cvref_t<Ints>>...> {
+constexpr auto make_strides(Ints&& ... is) -> Strides<to_value_t<std::remove_cvref_t<Ints>>...> {
   return {std::forward<Ints>(is)...};
 }
 
@@ -290,7 +290,7 @@ template <
     int N,
     int I,
     int J,
-    typename = void, // SFINAE
+    typename InI0,
     typename... InIs
 >
 struct ArrayMetaRemoveDim {
@@ -305,16 +305,17 @@ template <
     typename InI0,
     typename... InIs
 >
-struct ArrayMetaRemoveDim<Meta, N, I, J, std::enable_if_t<(I < J)>, InI0, InIs...> {
+  requires (I < J)
+struct ArrayMetaRemoveDim<Meta, N, I, J, InI0, InIs...> {
   static_assert(0 <= I && I < N, "I out of range");
 
   template <typename... OutIs>
   struct Holder {
-    using Inner = typename ArrayMetaRemoveDim<Meta, N, I + 1, J, void, InIs...>
+    using Inner = typename ArrayMetaRemoveDim<Meta, N, I + 1, J, InIs...>
     ::template Holder<OutIs..., InI0>;
-    using Type = Inner::Type;
+    using type = Inner::type;
 
-    constexpr Type transform(const Meta<OutIs..., InI0, InIs...>& m) {
+    constexpr type transform(const Meta<OutIs..., InI0, InIs...>& m) {
       return Inner{}.transform(m);
     }
   };
@@ -327,20 +328,20 @@ template <
     typename InI0,
     typename... InIs
 >
-struct ArrayMetaRemoveDim<Meta, N, I, I, void, InI0, InIs...> {
+struct ArrayMetaRemoveDim<Meta, N, I, I, InI0, InIs...> {
   static_assert(0 <= I && I < N, "I out of range");
 
   template <typename... OutIs>
   struct Holder {
-    using Type = Meta<OutIs..., InIs...>;  // InI0 removed
+    using type = Meta<OutIs..., InIs...>;  // InI0 removed
 
-    constexpr Type transform(const Meta<OutIs..., InI0, InIs...>& m) {
+    constexpr type transform(const Meta<OutIs..., InI0, InIs...>& m) {
       std::array<nint_t, N - 1> out;
       auto in = m._stor.to_array();
       std::copy(in.data(), in.data() + I, out.data());
       std::copy(in.data() + I + 1, in.data() + N, out.data() + I);
       return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
-        return Type{out[Idx]...};
+        return type{out[Idx]...};
       }(std::make_index_sequence<N - 1>{});
     }
   };
@@ -348,7 +349,7 @@ struct ArrayMetaRemoveDim<Meta, N, I, I, void, InI0, InIs...> {
 
 template <int I, template <typename... xIs> typename TMeta, typename... Is>
 constexpr auto remove_dim(const TMeta<Is...>& m) {
-  return typename details::ArrayMetaRemoveDim<TMeta, int(sizeof...(Is)), 0, I, void, Is...>::template Holder<>{}.transform(m);
+  return typename details::ArrayMetaRemoveDim<TMeta, int(sizeof...(Is)), 0, I, Is...>::template Holder<>{}.transform(m);
 }
 
 
@@ -369,7 +370,7 @@ template <
     int I,
     int J,
     typename InNew,
-    typename = void,
+    typename InI0,
     typename... InIs
 >
 struct ArrayMetaSetDim {
@@ -385,16 +386,17 @@ template <
     typename InI0,
     typename... InIs
 >
-struct ArrayMetaSetDim<Meta, N, I, J, InNew, std::enable_if_t<(I < J)>, InI0, InIs...> {
+  requires (I < J)
+struct ArrayMetaSetDim<Meta, N, I, J, InNew, InI0, InIs...> {
   static_assert(0 <= I && I < N, "I out of range");
 
   template <typename... OutIs>
   struct Holder {
-    using Inner = typename ArrayMetaSetDim<Meta, N, I + 1, J, InNew, void, InIs...>
+    using Inner = typename ArrayMetaSetDim<Meta, N, I + 1, J, InNew, InIs...>
     ::template Holder<OutIs..., InI0>;
-    using Type = Inner::Type;
+    using type = Inner::type;
 
-    constexpr Type transform(const Meta<OutIs..., InI0, InIs...>& m, InNew v) {
+    constexpr type transform(const Meta<OutIs..., InI0, InIs...>& m, InNew v) {
       return Inner{}.transform(m, v);
     }
   };
@@ -408,21 +410,21 @@ template <
     typename InI0,
     typename... InIs
 >
-struct ArrayMetaSetDim<Meta, N, I, I, InNew, void, InI0, InIs...> {
+struct ArrayMetaSetDim<Meta, N, I, I, InNew, InI0, InIs...> {
   static_assert(0 <= I && I < N, "I out of range");
 
   template <typename... OutIs>
   struct Holder {
-    using Type = Meta<OutIs..., InNew, InIs...>;  // InI0 replaced by InNew
+    using type = Meta<OutIs..., InNew, InIs...>;  // InI0 replaced by InNew
 
-    constexpr Type transform(const Meta<OutIs..., InI0, InIs...>& m, InNew v) {
+    constexpr type transform(const Meta<OutIs..., InI0, InIs...>& m, InNew v) {
       std::array<nint_t, N> out;
       auto in = m._stor.to_array();
       std::copy(in.data(), in.data() + I, out.data());
       out[I] = nint_t(v);
       std::copy(in.data() + I + 1, in.data() + N, out.data() + I + 1);
       return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
-        return Type{out[Idx]...};
+        return type{out[Idx]...};
       }(std::make_index_sequence<N>{});
     }
   };
@@ -430,7 +432,7 @@ struct ArrayMetaSetDim<Meta, N, I, I, InNew, void, InI0, InIs...> {
 
 template <int I, typename Inew, template <typename... xIs> typename TMeta, typename... Is>
 constexpr auto set_dim(const TMeta<Is...>& m, Inew v) {
-  return typename details::ArrayMetaSetDim<TMeta, int(sizeof...(Is)), 0, I, Inew, void, Is...>::template Holder<>{}.transform(m, v);
+  return typename details::ArrayMetaSetDim<TMeta, int(sizeof...(Is)), 0, I, Inew, Is...>::template Holder<>{}.transform(m, v);
 }
 
 
@@ -452,7 +454,6 @@ template <
     int I,
     int J,
     typename InNew,
-    typename = void,
     typename... InIs
 >
 struct ArrayMetaInsertDim {
@@ -468,16 +469,17 @@ template <
     typename InI0,
     typename... InIs
 >
-struct ArrayMetaInsertDim<Meta, N, I, J, InNew, std::enable_if_t<(I < J)>, InI0, InIs...> {
+  requires (I < J)
+struct ArrayMetaInsertDim<Meta, N, I, J, InNew, InI0, InIs...> {
   static_assert(0 <= I && I <= N, "I out of range");
 
   template <typename... OutIs>
   struct Holder {
-    using Inner = typename ArrayMetaInsertDim<Meta, N, I + 1, J, InNew, void, InIs...>
+    using Inner = typename ArrayMetaInsertDim<Meta, N, I + 1, J, InNew, InIs...>
     ::template Holder<OutIs..., InI0>;
-    using Type = Inner::Type;
+    using type = Inner::type;
 
-    constexpr Type transform(const Meta<OutIs..., InI0, InIs...>& m, InNew v) {
+    constexpr type transform(const Meta<OutIs..., InI0, InIs...>& m, InNew v) {
       return Inner{}.transform(m, v);
     }
   };
@@ -490,21 +492,21 @@ template <
     typename InNew,
     typename... InIs
 >
-struct ArrayMetaInsertDim<Meta, N, I, I, InNew, void, InIs...> {
+struct ArrayMetaInsertDim<Meta, N, I, I, InNew, InIs...> {
   static_assert(0 <= I && I <= N, "I out of range");
 
   template <typename... OutIs>
   struct Holder {
-    using Type = Meta<OutIs..., InNew, InIs...>;
+    using type = Meta<OutIs..., InNew, InIs...>;
 
-    constexpr Type transform(const Meta<OutIs..., InIs...>& m, InNew v) {
+    constexpr type transform(const Meta<OutIs..., InIs...>& m, InNew v) {
       std::array<nint_t, N + 1> out;
       auto in = m._stor.to_array();
       std::copy(in.data(), in.data() + I, out.data());
       out[I] = nint_t(v);
       std::copy(in.data() + I, in.data() + N, out.data() + I + 1);
       return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
-        return Type{out[Idx]...};
+        return type{out[Idx]...};
       }(std::make_index_sequence<N + 1>{});
     }
   };
@@ -512,20 +514,20 @@ struct ArrayMetaInsertDim<Meta, N, I, I, InNew, void, InIs...> {
 
 template <int I, typename Inew, template <typename... xIs> typename TMeta, typename... Is>
 constexpr auto insert_dim(const TMeta<Is...>& m, Inew v) {
-  return typename details::ArrayMetaInsertDim<TMeta, int(sizeof...(Is)), 0, I, Inew, void, Is...>::template Holder<>{}.transform(m, v);
+  return typename details::ArrayMetaInsertDim<TMeta, int(sizeof...(Is)), 0, I, Inew, Is...>::template Holder<>{}.transform(m, v);
 }
 
 } // namespace details
 
 /// Type trait: `true` if T is an ArrayMeta, Shape, or Strides.
 template <typename T>
-static constexpr bool is_array_meta = details::IsArrayMeta<T>::value;
+inline constexpr bool is_array_meta_v = details::IsArrayMeta<T>::value;
 /// Type trait: `true` if T is a Shape.
 template <typename T>
-static constexpr bool is_shape = details::IsShape<T>::value;
+inline constexpr bool is_shape_v = details::IsShape<T>::value;
 /// Type trait: `true` if T is a Strides.
 template <typename T>
-static constexpr bool is_strides = details::IsStrides<T>::value;
+inline constexpr bool is_strides_v = details::IsStrides<T>::value;
 
 /**
  * @brief Get the value of dimension I from an ArrayMeta.
@@ -537,7 +539,8 @@ static constexpr bool is_strides = details::IsStrides<T>::value;
  * @param  m     The metadata container.
  * @return The integer value for dimension I.
  */
-template <int I, typename TMeta, std::enable_if_t<is_array_meta<TMeta>, bool> = true>
+template <int I, typename TMeta>
+  requires (is_array_meta_v<TMeta>)
 constexpr nint_t get(const TMeta& m) {
   return m.template get<I>();
 }
@@ -545,7 +548,8 @@ constexpr nint_t get(const TMeta& m) {
 /**
  * @brief Check whether dimension I of an ArrayMeta is a compile-time constant.
  */
-template <int I, typename TMeta, std::enable_if_t<is_array_meta<TMeta>, bool> = true>
+template <int I, typename TMeta>
+  requires (is_array_meta_v<TMeta>)
 constexpr bool is_const(const TMeta& m) {
   return m.template is_const<I>();
 }
@@ -553,7 +557,8 @@ constexpr bool is_const(const TMeta& m) {
 /**
  * @brief Check whether dimension I of an ArrayMeta is a runtime value.
  */
-template <int I, typename TMeta, std::enable_if_t<is_array_meta<TMeta>, bool> = true>
+template <int I, typename TMeta>
+  requires (is_array_meta_v<TMeta>)
 constexpr bool is_runtime(const TMeta& m) {
   return m.template is_runtime<I>();
 }
@@ -649,7 +654,7 @@ struct IsLenientPatternMeta<Strides<Ss...>, Patterns...>
  * @endcode
  */
 template <typename Meta, typename... Patterns>
-static constexpr bool is_lenient_v =
+inline constexpr bool is_lenient_v =
     details::IsLenientPatternMeta<std::remove_cvref_t<Meta>, Patterns...>::value;
 
 
@@ -686,8 +691,8 @@ static constexpr bool is_lenient_v =
  */
 template <typename TShape, typename TStrides>
 struct Layout {
-  static_assert(is_shape<TShape>, "TShape must be Shape<_,_>");
-  static_assert(is_strides<TStrides>, "TStride must be Stride<_,_>");
+  static_assert(is_shape_v<TShape>, "TShape must be Shape<_,_>");
+  static_assert(is_strides_v<TStrides>, "TStride must be Stride<_,_>");
   static_assert(TShape::Ndim == TStrides::Ndim, "TShape and TStride must have the same rank");
   static constexpr int Ndim = TShape::Ndim;
 
@@ -731,8 +736,8 @@ struct Layout {
    */
   template <typename TShape2, typename TStrides2>
   constexpr Layout<TShape2, TStrides2> as() const {
-    static_assert(is_shape<TShape2>, "TShape2 must be Shape<...>");
-    static_assert(is_strides<TStrides2>, "TStrides2 must be Strides<...>");
+    static_assert(is_shape_v<TShape2>, "TShape2 must be Shape<...>");
+    static_assert(is_strides_v<TStrides2>, "TStrides2 must be Strides<...>");
     static_assert(TShape2::Ndim == Ndim, "Target Shape rank must match Layout rank");
     static_assert(TStrides2::Ndim == Ndim, "Target Strides rank must match Layout rank");
 
@@ -755,12 +760,8 @@ struct Layout {
    * constrained `Dynamic` to less constrained `Dynamic`. More strict
    * conversions remain explicit through `as()`.
    */
-  template <typename TShape2, typename TStrides2,
-      std::enable_if_t<
-          !(std::is_same_v<TShape, TShape2> && std::is_same_v<TStrides, TStrides2>) &&
-          details::IsMoreLenientMeta<TShape, TShape2>::value &&
-          details::IsMoreLenientMeta<TStrides, TStrides2>::value,
-      bool> = true>
+  template <typename TShape2, typename TStrides2>
+  requires (!(std::is_same_v<TShape, TShape2> && std::is_same_v<TStrides, TStrides2>) && details::IsMoreLenientMeta<TShape, TShape2>::value && details::IsMoreLenientMeta<TStrides, TStrides2>::value)
   constexpr operator Layout<TShape2, TStrides2>() const {
     return as<TShape2, TStrides2>();
   }
@@ -943,7 +944,7 @@ struct ArrayMetaElement;
 template <int I, template <typename...> class TMeta, typename... Values>
 struct ArrayMetaElement<I, TMeta<Values...>> {
   static_assert(0 <= I && I < sizeof...(Values));
-  using Type = std::tuple_element_t<I, std::tuple<Values...>>;
+  using type = std::tuple_element_t<I, std::tuple<Values...>>;
 };
 
 template <typename TShape>
@@ -951,18 +952,18 @@ struct ShapeProduct;
 
 template <typename... Values>
 struct ShapeProduct<Shape<Values...>> {
-  using Type = typename Product<Values...>::type;
+  using type = typename Product<Values...>::type;
 };
 
 } // namespace details
 
 /// Type trait: `true` if T is a Layout.
 template <typename T>
-static constexpr bool is_layout = details::IsLayout<T>::value;
+inline constexpr bool is_layout_v = details::IsLayout<T>::value;
 
 template <int I, typename TMeta>
 using meta_element_t = typename details::ArrayMetaElement<
-    I, std::remove_cvref_t<TMeta>>::Type;
+    I, std::remove_cvref_t<TMeta>>::type;
 
 template <int I, typename TLayout>
 using size_type_t = meta_element_t<
@@ -974,7 +975,7 @@ using stride_type_t = meta_element_t<
 
 template <typename TLayout>
 using numel_type_t = typename details::ShapeProduct<
-    typename std::remove_cvref_t<TLayout>::Shape>::Type;
+    typename std::remove_cvref_t<TLayout>::Shape>::type;
 
 /**
  * @brief Get the size (shape value) of dimension I from a Layout.
@@ -984,7 +985,8 @@ using numel_type_t = typename details::ShapeProduct<
  * @param  layout  The layout.
  * @return The size of dimension I (always non-negative).
  */
-template <int I, typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+template <int I, typename TLayout>
+  requires (is_layout_v<TLayout>)
 constexpr nint_t size(const TLayout& layout) {
   return get<I>(layout.shape());
 }
@@ -992,7 +994,8 @@ constexpr nint_t size(const TLayout& layout) {
 /**
  * @brief Get the stride value of dimension I from a Layout.
  */
-template <int I, typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+template <int I, typename TLayout>
+  requires (is_layout_v<TLayout>)
 constexpr nint_t stride(const TLayout& layout) {
   return get<I>(layout.strides());
 }
@@ -1003,7 +1006,8 @@ constexpr nint_t stride(const TLayout& layout) {
  * Bounds are checked with VECOPS_ASSERT, so release builds do not pay for the
  * validation when assertions are disabled.
  */
-template <typename TLayout, std::enable_if_t<is_layout<std::remove_cvref_t<TLayout>>, bool> = true>
+template <typename TLayout>
+  requires (is_layout_v<std::remove_cvref_t<TLayout>>)
 constexpr nint_t offset_at(
     const TLayout& layout,
     const std::array<nint_t, std::remove_cvref_t<TLayout>::Ndim>& coords) {
@@ -1023,8 +1027,8 @@ constexpr nint_t offset_at(
  */
 template <
     typename TLayout,
-    typename... Is,
-    std::enable_if_t<is_layout<std::remove_cvref_t<TLayout>>, bool> = true>
+    typename... Is>
+  requires (is_layout_v<std::remove_cvref_t<TLayout>>)
 constexpr nint_t offset_at(const TLayout& layout, Is... is) {
   using LayoutT = std::remove_cvref_t<TLayout>;
   static_assert(sizeof...(Is) == LayoutT::Ndim, "coordinate count must match layout rank");
@@ -1040,20 +1044,22 @@ constexpr nint_t offset_at(const TLayout& layout, Is... is) {
  * @note This is a compile-time O(N) type transformation — the return
  *       type carries the modified type parameter pack.
  */
-template <int I, typename TMeta, std::enable_if_t<is_array_meta<TMeta>, bool> = true>
+template <int I, typename TMeta>
+  requires (is_array_meta_v<TMeta>)
 constexpr auto remove(const TMeta& m) { return details::remove_dim<I>(m); }
 
 /**
  * @brief Remove dimension I from a Layout (both shape and strides).
  */
-template <int I, typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+template <int I, typename TLayout>
+  requires (is_layout_v<TLayout>)
 constexpr auto remove(const TLayout& m) {
   return make_layout(remove<I>(m.shape()), remove<I>(m.strides()));
 }
 
 /** @brief Keep the first N dimensions, fixing discarded trailing axes at 0. */
-template <int N, typename TLayout,
-          std::enable_if_t<is_layout<TLayout>, bool> = true>
+template <int N, typename TLayout>
+  requires (is_layout_v<TLayout>)
 constexpr auto take_leading(const TLayout& layout) {
   static_assert(1 <= N && N <= TLayout::Ndim);
   if constexpr (N == TLayout::Ndim) return layout;
@@ -1061,8 +1067,8 @@ constexpr auto take_leading(const TLayout& layout) {
 }
 
 /** @brief Keep the last N dimensions, fixing discarded leading axes at 0. */
-template <int N, typename TLayout,
-          std::enable_if_t<is_layout<TLayout>, bool> = true>
+template <int N, typename TLayout>
+  requires (is_layout_v<TLayout>)
 constexpr auto take_trailing(const TLayout& layout) {
   static_assert(1 <= N && N <= TLayout::Ndim);
   if constexpr (N == TLayout::Ndim) return layout;
@@ -1079,13 +1085,15 @@ constexpr auto take_trailing(const TLayout& layout) {
  * @param  v     The new value.
  * @return A new ArrayMeta with dimension I replaced.
  */
-template <int I, typename TMeta, typename Inew, std::enable_if_t<is_array_meta<TMeta>, bool> = true>
+template <int I, typename TMeta, typename Inew>
+  requires (is_array_meta_v<TMeta>)
 constexpr auto set(const TMeta& m, Inew v) { return details::set_dim<I>(m, v); }
 
 /**
  * @brief Set dimension I in a Layout to new shape and stride values.
  */
-template <int I, typename TLayout, typename IShapeNew, typename IStridesNew, std::enable_if_t<is_layout<TLayout>, bool> = true>
+template <int I, typename TLayout, typename IShapeNew, typename IStridesNew>
+  requires (is_layout_v<TLayout>)
 constexpr auto set(const TLayout& m, IShapeNew v_size, IStridesNew v_stride) {
   return make_layout(set<I>(m.shape(), v_size), set<I>(m.strides(), v_stride));
 }
@@ -1102,14 +1110,16 @@ constexpr auto set(const TLayout& m, IShapeNew v_size, IStridesNew v_stride) {
  * @param  v     The value for the new dimension.
  * @return A new ArrayMeta of rank `Ndim+1`.
  */
-template <int I, typename TMeta, typename Inew, std::enable_if_t<is_array_meta<TMeta>, bool> = true>
+template <int I, typename TMeta, typename Inew>
+  requires (is_array_meta_v<TMeta>)
 constexpr auto insert(const TMeta& m, Inew v) { return details::insert_dim<I>(m, v); }
 
 /**
  * @brief Insert a new dimension before position I in a Layout
  *        (both shape and strides).
  */
-template <int I, typename TLayout, typename IShapeNew, typename IStridesNew, std::enable_if_t<is_layout<TLayout>, bool> = true>
+template <int I, typename TLayout, typename IShapeNew, typename IStridesNew>
+  requires (is_layout_v<TLayout>)
 constexpr auto insert(const TLayout& m, IShapeNew v_size, IStridesNew v_stride) {
   return make_layout(insert<I>(m.shape(), v_size), insert<I>(m.strides(), v_stride));
 }
@@ -1158,13 +1168,13 @@ private:
   static constexpr Meta<typename select<Idx>::type...> _make_type(std::integer_sequence<int, Idx...>);
 
 public:
-  using Type = decltype(_make_type(std::make_integer_sequence<int, N>{}));
+  using type = decltype(_make_type(std::make_integer_sequence<int, N>{}));
 
-  static constexpr Type transform(const Meta<Is...>& m) {
+  static constexpr type transform(const Meta<Is...>& m) {
     std::array<nint_t, N> arr = m._stor.to_array();
     std::swap(arr[I], arr[J]);
     return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
-      return Type{arr[Idx]...};
+      return type{arr[Idx]...};
     }(std::make_index_sequence<N>{});
   }
 };
@@ -1198,7 +1208,8 @@ constexpr auto swap_dim(const TMeta<Is...>& m) {
  * @param  layout  The layout to transpose.
  * @return A new Layout with dimensions I and J exchanged, preserving type info.
  */
-template <int I, int J, typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+template <int I, int J, typename TLayout>
+  requires (is_layout_v<TLayout>)
 constexpr auto transpose(const TLayout& layout) {
   static_assert(0 <= I && I < TLayout::Ndim, "I out of range");
   static_assert(0 <= J && J < TLayout::Ndim, "J out of range");
@@ -1223,7 +1234,8 @@ constexpr auto transpose(const TLayout& layout) {
  * @param  j       Second dimension index (runtime).
  * @return A new Layout with all-Any Shape and Strides.
  */
-template <typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+template <typename TLayout>
+  requires (is_layout_v<TLayout>)
 constexpr auto transpose(const TLayout& layout, int i, int j) {
   constexpr int ndim = TLayout::Ndim;
   VECOPS_ASSERT(0 <= i && i < ndim, "i(%d) out of range [0, %d)", i, ndim);
@@ -1262,10 +1274,10 @@ namespace details {
  * @tparam N        How many trailing dimensions to check.
  */
 template <typename TLayout, int N>
-struct is_ct_last_contiguous_impl;
+struct IsCtLastContiguous;
 
 template <typename... Ss, typename... Ts, int N>
-struct is_ct_last_contiguous_impl<Layout<Shape<Ss...>, Strides<Ts...>>, N> {
+struct IsCtLastContiguous<Layout<Shape<Ss...>, Strides<Ts...>>, N> {
 private:
   static constexpr int ndim = sizeof...(Ss);
 
@@ -1314,20 +1326,22 @@ public:
  * @tparam N        Number of trailing dimensions to check.
  */
 template <typename TLayout, int N>
-struct is_ct_last_contiguous : details::is_ct_last_contiguous_impl<std::remove_cvref_t<TLayout>, N> {};
+inline constexpr bool is_ct_last_contiguous_v =
+    details::IsCtLastContiguous<std::remove_cvref_t<TLayout>, N>::value;
 
 /**
  * @brief Compile-time check: are all dimensions of TLayout contiguous?
  *
- * Equivalent to `is_ct_last_contiguous<TLayout, TLayout::Ndim>`.
+ * Equivalent to `is_ct_last_contiguous_v<TLayout, TLayout::Ndim>`.
  */
 template <typename TLayout>
-struct is_ct_contiguous : is_ct_last_contiguous<std::remove_cvref_t<TLayout>, std::remove_cvref_t<TLayout>::Ndim> {};
+inline constexpr bool is_ct_contiguous_v =
+    is_ct_last_contiguous_v<TLayout, std::remove_cvref_t<TLayout>::Ndim>;
 
 /**
  * @brief Runtime check: are the last N dimensions of `layout` contiguous?
  *
- * If the compile-time check (`is_ct_last_contiguous`) already returns `true`,
+ * If the compile-time check (`is_ct_last_contiguous_v`) already returns `true`,
  * this function returns `true` at compile time with no runtime cost.
  *
  * @tparam N       Number of trailing dimensions to check.
@@ -1335,9 +1349,10 @@ struct is_ct_contiguous : is_ct_last_contiguous<std::remove_cvref_t<TLayout>, st
  * @param  layout  The layout.
  * @return `true` if the last N dimensions are row-major contiguous.
  */
-template <int N, typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+template <int N, typename TLayout>
+  requires (is_layout_v<TLayout>)
 inline bool is_last_contiguous(const TLayout& layout) {
-  if constexpr (is_ct_last_contiguous<TLayout, N>::value) {
+  if constexpr (is_ct_last_contiguous_v<TLayout, N>) {
     return true;
   }
   if constexpr (N <= 0) {
@@ -1360,7 +1375,8 @@ inline bool is_last_contiguous(const TLayout& layout) {
  * @param  layout  The layout.
  * @return `true` if the layout is fully row-major contiguous.
  */
-template <typename TLayout, std::enable_if_t<is_layout<TLayout>, bool> = true>
+template <typename TLayout>
+  requires (is_layout_v<TLayout>)
 inline bool is_contiguous(const TLayout& layout) {
   return is_last_contiguous<TLayout::Ndim>(layout);
 }

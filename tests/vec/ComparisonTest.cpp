@@ -30,7 +30,7 @@ static_assert(VECOPS_TEST_SHARD_COUNT == vec_test::AllElements::size);
 template <typename T>
 T comparison_value(vecops::nint_t lane, bool rhs) {
   const int pattern = static_cast<int>(lane % 6);
-  if constexpr (::vecops::IsFloatV<T>) {
+  if constexpr (::vecops::is_float_v<T>) {
     if (pattern == 5) return std::numeric_limits<T>::quiet_NaN();
     if (pattern == 1) return static_cast<T>(rhs ? -0.0F : 0.0F);
     const float base = static_cast<float>((lane * 7) % 19) - 8.0F;

@@ -21,24 +21,24 @@ namespace vecops::vec::details {
 /* **************************************************************************** */
 
 template <VectorTag Tag, typename Option>
-inline constexpr bool is_comparison_option_for =
+inline constexpr bool is_comparison_option_for_v =
     IsUnmaskedOption<std::remove_cvref_t<Option>>::value ||
-    is_masked_option_for<Tag, Option> ||
-    is_mask_population_option_for<Tag, Option>;
+    is_masked_option_for_v<Tag, Option> ||
+    is_mask_population_option_for_v<Tag, Option>;
 
 template <VectorTag Tag, typename... Options>
 consteval void validate_comparison_options() {
   static_assert(
-      (is_comparison_option_for<Tag, Options> && ...),
+      (is_comparison_option_for_v<Tag, Options> && ...),
       "comparison received an option with the wrong kind or mask type");
   constexpr std::size_t masked_count =
-      (std::size_t{0} + ... + std::size_t{is_masked_option<Options>});
+      (std::size_t{0} + ... + std::size_t{is_masked_option_v<Options>});
   constexpr std::size_t unmasked_count =
-      option_count<IsUnmaskedOption, Options...>;
+      option_count_v<IsUnmaskedOption, Options...>;
   constexpr std::size_t zero_count =
-      (std::size_t{0} + ... + std::size_t{is_zero_option<Options>});
+      (std::size_t{0} + ... + std::size_t{is_zero_option_v<Options>});
   constexpr std::size_t merge_count =
-      (std::size_t{0} + ... + std::size_t{is_mask_merge_option<Options>});
+      (std::size_t{0} + ... + std::size_t{is_mask_merge_option_v<Options>});
   static_assert(
       masked_count + unmasked_count == 1,
       "comparison requires exactly one opt::masked or opt::unmasked");
@@ -57,9 +57,9 @@ VECOPS_ALWAYS_INLINE Mask<Tag> execute_comparison_options(
     Op op, Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) {
   validate_comparison_options<Tag, Options...>();
   constexpr std::size_t unmasked_count =
-      option_count<IsUnmaskedOption, Options...>;
+      option_count_v<IsUnmaskedOption, Options...>;
   constexpr std::size_t merge_count =
-      (std::size_t{0} + ... + std::size_t{is_mask_merge_option<Options>});
+      (std::size_t{0} + ... + std::size_t{is_mask_merge_option_v<Options>});
   if constexpr (unmasked_count == 1) {
     return execute(op, tag, a, b);
   } else {
@@ -81,9 +81,9 @@ VECOPS_ALWAYS_INLINE Mask<Tag> execute_comparison_options(
     Op op, Tag tag, Vec<Tag> value, Options&&... options) {
   validate_comparison_options<Tag, Options...>();
   constexpr std::size_t unmasked_count =
-      option_count<IsUnmaskedOption, Options...>;
+      option_count_v<IsUnmaskedOption, Options...>;
   constexpr std::size_t merge_count =
-      (std::size_t{0} + ... + std::size_t{is_mask_merge_option<Options>});
+      (std::size_t{0} + ... + std::size_t{is_mask_merge_option_v<Options>});
   if constexpr (unmasked_count == 1) {
     return execute(op, tag, value);
   } else {

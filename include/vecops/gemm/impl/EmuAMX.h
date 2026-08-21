@@ -37,7 +37,7 @@ consteval auto infer_A_packed_layout() {
 }
 
 template <typename TLayout, int dtype_size>
-consteval bool is_A_packed_layout() {
+consteval bool is_a_packed_layout() {
   constexpr auto M_R = meta::cint<16>;
   constexpr auto K_R = meta::cint<64 / dtype_size>;
 
@@ -53,7 +53,7 @@ consteval bool is_A_packed_layout() {
 
 template <typename TInArray, typename TOutArray, typename Prologue>
 VECOPS_INLINE void pack_A(const TInArray &src, TOutArray &dst, const Prologue &prologue) {
-  static_assert(is_tensor<TInArray> && is_tensor<TOutArray>);
+  static_assert(is_tensor_v<TInArray> && is_tensor_v<TOutArray>);
   using EIn = TInArray::ElementType;
   using EOut = TOutArray::ElementType;
   constexpr auto M_R = meta::cint<16>;
@@ -65,7 +65,7 @@ VECOPS_INLINE void pack_A(const TInArray &src, TOutArray &dst, const Prologue &p
   auto out_layout = dst.layout();
 
   static_assert(in_layout.ndim() == 2);
-  static_assert(is_A_packed_layout<decltype(out_layout), sizeof(EOut)>());
+  static_assert(is_a_packed_layout<decltype(out_layout), sizeof(EOut)>());
 
   auto M = size<0>(in_layout);
   auto K = size<1>(in_layout);
@@ -104,7 +104,7 @@ consteval auto infer_B_packed_layout() {
 }
 
 template <typename TLayout, int dtype_size>
-consteval bool is_B_packed_layout() {
+consteval bool is_b_packed_layout() {
   constexpr auto N_R = meta::cint<16>;
   constexpr auto K_R = meta::cint<64 / dtype_size>;
   constexpr auto K_P = meta::cint<4 / dtype_size>;
@@ -138,7 +138,7 @@ struct AtomBF16BF16F32 {
   using APackedLayout = decltype(details::infer_A_packed_layout<TLayout, sizeof(TA)>());
 
   template <typename TLayout>
-  static constexpr bool is_A_packed_layout = details::is_A_packed_layout<TLayout, sizeof(TA)>();
+  static constexpr bool is_a_packed_layout = details::is_a_packed_layout<TLayout, sizeof(TA)>();
 
   template <
       typename TSrcA, typename SrcALayout, typename SrcAPackedLayout, typename Prologue>
@@ -148,7 +148,7 @@ struct AtomBF16BF16F32 {
   using BPackedLayout = decltype(details::infer_B_packed_layout<TLayout, sizeof(TB)>());
 
   template <typename TLayout>
-  static constexpr bool is_B_packed_layout = details::is_B_packed_layout<TLayout, sizeof(TB)>();
+  static constexpr bool is_b_packed_layout = details::is_b_packed_layout<TLayout, sizeof(TB)>();
 
   template <
       typename TSrcB, typename SrcBLayout, typename SrcBPackedLayout, typename Prologue>

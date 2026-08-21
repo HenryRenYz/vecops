@@ -32,7 +32,7 @@ namespace {
 
 template <typename From, typename To>
 From exhaustive_input(vecops::nint_t lane, double runtime_zero = 0.0) {
-  if constexpr (::vecops::IsFloatV<From>) {
+  if constexpr (::vecops::is_float_v<From>) {
     const double magnitude = static_cast<double>(lane % 9) * 0.5;
     const double value = std::unsigned_integral<To>
         ? magnitude : ((lane % 2) == 0 ? magnitude : -magnitude);

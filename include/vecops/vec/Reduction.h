@@ -14,10 +14,10 @@ namespace details {
 template <typename Tag, typename... Options>
 concept ReductionFilterOptions =
     VectorTag<Tag> && (sizeof...(Options) > 0) &&
-    ((is_masked_option_for<Tag, Options> ||
-      IsUnmaskedOption<std::remove_cvref_t<Options>>::value) && ...) &&
-    (option_count<IsMaskedOption, Options...> +
-         option_count<IsUnmaskedOption, Options...> == 1);
+    ((is_masked_option_for_v<Tag, Options> ||
+      is_unmasked_option_v<std::remove_cvref_t<Options>>) && ...) &&
+    (option_count_v<IsMaskedOption, Options...> +
+         option_count_v<IsUnmaskedOption, Options...> == 1);
 
 } // namespace details
 
@@ -57,13 +57,13 @@ VECOPS_ALWAYS_INLINE T reduction_identity() {
   if constexpr (std::same_as<Op, ReduceAddOp>) {
     return T{};
   } else if constexpr (std::same_as<Op, ReduceMaxOp>) {
-    if constexpr (::vecops::IsFloatV<T>) {
+    if constexpr (::vecops::is_float_v<T>) {
       return static_cast<T>(-std::numeric_limits<double>::infinity());
     } else {
       return std::numeric_limits<T>::lowest();
     }
   } else if constexpr (std::same_as<Op, ReduceMinOp>) {
-    if constexpr (::vecops::IsFloatV<T>) {
+    if constexpr (::vecops::is_float_v<T>) {
       return static_cast<T>(std::numeric_limits<double>::infinity());
     } else {
       return std::numeric_limits<T>::max();

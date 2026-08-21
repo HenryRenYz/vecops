@@ -41,7 +41,7 @@
  * | Value hierarchy| Compile-time/run-time typed integers with constraints     |
  * | PackedStorage  | Space-efficient storage eliding compile-time constants    |
  * | PackedStorage  | Stores only runtime members of a heterogeneous Value pack |
- * | ToValue        | Promotes raw integral types to unconstrained `Any`         |
+ * | to_value_t        | Promotes raw integral types to unconstrained `Any`         |
  *
  * ## Usage overview
  *
@@ -512,13 +512,15 @@ constexpr auto operator+(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
 }
 
 /// Value + nint_t → Value + Any{nint_t}
-template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
+template <typename T>
+  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
 constexpr auto operator+(T lhs, nint_t rhs) {
   return lhs + Any{rhs};
 }
 
 /// nint_t + Value → Any{nint_t} + Value
-template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
+template <typename T>
+  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
 constexpr auto operator+(nint_t lhs, T rhs) {
   return Any{lhs} + rhs;
 }
@@ -553,13 +555,15 @@ constexpr auto operator-(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
 }
 
 /// Value - nint_t → Value - Any{nint_t}
-template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
+template <typename T>
+  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
 constexpr auto operator-(T lhs, nint_t rhs) {
   return lhs - Any{rhs};
 }
 
 /// nint_t - Value → Any{nint_t} - Value
-template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
+template <typename T>
+  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
 constexpr auto operator-(nint_t lhs, T rhs) {
   return Any{lhs} - rhs;
 }
@@ -615,13 +619,15 @@ constexpr auto operator*(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
 }
 
 /// Value * nint_t → Value * Any{nint_t}
-template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
+template <typename T>
+  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
 constexpr auto operator*(T lhs, nint_t rhs) {
   return lhs * Any{rhs};
 }
 
 /// nint_t * Value → Any{nint_t} * Value
-template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
+template <typename T>
+  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
 constexpr auto operator*(nint_t lhs, T rhs) {
   return Any{lhs} * rhs;
 }
@@ -727,13 +733,15 @@ constexpr auto operator/(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
 }
 
 /// Value / nint_t → Value / Any{nint_t}
-template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
+template <typename T>
+  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
 constexpr auto operator/(T lhs, nint_t rhs) {
   return lhs / Any{rhs};
 }
 
 /// nint_t / Value → Any{nint_t} / Value
-template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
+template <typename T>
+  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
 constexpr auto operator/(nint_t lhs, T rhs) {
   return Any{lhs} / rhs;
 }
@@ -823,13 +831,15 @@ constexpr auto operator%(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
 }
 
 /// Value % nint_t → Value % Any{nint_t}
-template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
+template <typename T>
+  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
 constexpr auto operator%(T lhs, nint_t rhs) {
   return lhs % Any{rhs};
 }
 
 /// nint_t % Value → Any{nint_t} % Value
-template <typename T, std::enable_if_t<std::is_base_of_v<Value, T> && !is_int<T>, bool> = true>
+template <typename T>
+  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
 constexpr auto operator%(nint_t lhs, T rhs) {
   return Any{lhs} % rhs;
 }
@@ -842,13 +852,16 @@ namespace details {
  * Non-integer types (already Value subclasses) pass through unchanged.
  * Integer types (int8_t, uint32_t, etc.) are promoted to `Any`.
  *
- * Used by `ToValue<T>` to normalize user-provided shape/stride parameters
+ * Used by `to_value_t<T>` to normalize user-provided shape/stride parameters
  * so that bare integers are automatically wrapped as `Any{v}`.
  */
 template <typename T, typename = void/*SFINAE*/>
-struct ValuePromote { using Type = T; };
+struct ValuePromote { using type = T; };
 template <typename T>
-struct ValuePromote<T, std::enable_if_t<is_int<T>>> { using Type = Any; };
+  requires is_int_v<T>
+struct ValuePromote<T, void> {
+  using type = Any;
+};
 
 // ======================== IsMoreLenientValue ========================
 
@@ -1120,12 +1133,12 @@ private:
  * `make_strides`, etc.
  *
  * @code
- * using T = ToValue<int32_t>;   // T = Any
- * using U = ToValue<Const<4>>;  // U = Const<4>
+ * using T = to_value_t<int32_t>;   // T = Any
+ * using U = to_value_t<Const<4>>;  // U = Const<4>
  * @endcode
  */
 template <typename T>
-using ToValue = details::ValuePromote<std::remove_cvref_t<T>>::Type;
+using to_value_t = details::ValuePromote<std::remove_cvref_t<T>>::type;
 
 template <ValueType T>
 inline constexpr bool has_lower_bound_v = [] {

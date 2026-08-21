@@ -38,7 +38,8 @@ struct alignas(2) BFloat16 {
 
   VECOPS_INLINE constexpr BFloat16(double x) : BFloat16(float(x)) { }
 
-  template <typename Int, std::enable_if_t<std::is_integral_v<Int>, bool> = false>
+  template <typename Int>
+    requires std::is_integral_v<Int>
   VECOPS_INLINE explicit constexpr BFloat16(Int x) : BFloat16(float(x)) { }
 
   VECOPS_INLINE constexpr BFloat16(__bf16 x) {
@@ -67,7 +68,8 @@ struct alignas(2) BFloat16 {
     return bitcast<__bf16>(this->x);
   }
 
-  template <typename Int, std::enable_if_t<std::is_integral_v<Int>, bool> = false>
+  template <typename Int>
+    requires std::is_integral_v<Int>
   VECOPS_INLINE explicit constexpr operator Int() const {
     return Int(float(*this));
   }

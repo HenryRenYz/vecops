@@ -62,21 +62,21 @@ using vec_test::values_identical;
 template <typename T>
 struct BitcastPeer;
 
-template <> struct BitcastPeer<vecops::bfloat16_t> { using Type = vecops::uint16_t; };
-template <> struct BitcastPeer<vecops::float16_t> { using Type = vecops::int16_t; };
-template <> struct BitcastPeer<vecops::float32_t> { using Type = vecops::uint32_t; };
-template <> struct BitcastPeer<vecops::float64_t> { using Type = vecops::uint64_t; };
-template <> struct BitcastPeer<vecops::int8_t> { using Type = vecops::uint8_t; };
-template <> struct BitcastPeer<vecops::uint8_t> { using Type = vecops::int8_t; };
-template <> struct BitcastPeer<vecops::int16_t> { using Type = vecops::float16_t; };
-template <> struct BitcastPeer<vecops::uint16_t> { using Type = vecops::bfloat16_t; };
-template <> struct BitcastPeer<vecops::int32_t> { using Type = vecops::float32_t; };
-template <> struct BitcastPeer<vecops::uint32_t> { using Type = vecops::int32_t; };
-template <> struct BitcastPeer<vecops::int64_t> { using Type = vecops::float64_t; };
-template <> struct BitcastPeer<vecops::uint64_t> { using Type = vecops::int64_t; };
+template <> struct BitcastPeer<vecops::bfloat16_t> { using type = vecops::uint16_t; };
+template <> struct BitcastPeer<vecops::float16_t> { using type = vecops::int16_t; };
+template <> struct BitcastPeer<vecops::float32_t> { using type = vecops::uint32_t; };
+template <> struct BitcastPeer<vecops::float64_t> { using type = vecops::uint64_t; };
+template <> struct BitcastPeer<vecops::int8_t> { using type = vecops::uint8_t; };
+template <> struct BitcastPeer<vecops::uint8_t> { using type = vecops::int8_t; };
+template <> struct BitcastPeer<vecops::int16_t> { using type = vecops::float16_t; };
+template <> struct BitcastPeer<vecops::uint16_t> { using type = vecops::bfloat16_t; };
+template <> struct BitcastPeer<vecops::int32_t> { using type = vecops::float32_t; };
+template <> struct BitcastPeer<vecops::uint32_t> { using type = vecops::int32_t; };
+template <> struct BitcastPeer<vecops::int64_t> { using type = vecops::float64_t; };
+template <> struct BitcastPeer<vecops::uint64_t> { using type = vecops::int64_t; };
 
 template <typename T>
-using BitcastPeerOf = typename BitcastPeer<T>::Type;
+using BitcastPeerOf = typename BitcastPeer<T>::type;
 
 using vec_test::for_each_scalable_shape;
 

@@ -6,14 +6,6 @@
 
 namespace vecops::vec {
 
-/**
- * A VectorTag whose element type is one of the floating-point Element types
- * (bfloat16_t, float16_t, float32_t, float64_t).
- */
-template <typename Tag>
-concept FloatingTag =
-    VectorTag<Tag> && ::vecops::IsFloatV<ElementOf<Tag>>;
-
 namespace details {
 /** Policy tag: preserve the first operand's lanes where inactive. */
 struct PreserveArithmeticInactive {};
@@ -45,7 +37,7 @@ struct AddOp {
   VECOPS_ALWAYS_INLINE V operator()(
       V a, V b, Options&&... options) const {
     return (*this)(
-        VecToTagT<V>{}, a, b, std::forward<Options>(options)...);
+        VecToTag<V>{}, a, b, std::forward<Options>(options)...);
   }
 };
 
@@ -67,7 +59,7 @@ struct SubOp {
   VECOPS_ALWAYS_INLINE V operator()(
       V a, V b, Options&&... options) const {
     return (*this)(
-        VecToTagT<V>{}, a, b, std::forward<Options>(options)...);
+        VecToTag<V>{}, a, b, std::forward<Options>(options)...);
   }
 };
 
@@ -89,7 +81,7 @@ struct MulOp {
   VECOPS_ALWAYS_INLINE V operator()(
       V a, V b, Options&&... options) const {
     return (*this)(
-        VecToTagT<V>{}, a, b, std::forward<Options>(options)...);
+        VecToTag<V>{}, a, b, std::forward<Options>(options)...);
   }
 };
 
@@ -111,7 +103,7 @@ struct DivOp {
   VECOPS_ALWAYS_INLINE V operator()(
       V a, V b, Options&&... options) const {
     return (*this)(
-        VecToTagT<V>{}, a, b, std::forward<Options>(options)...);
+        VecToTag<V>{}, a, b, std::forward<Options>(options)...);
   }
 };
 
@@ -136,7 +128,7 @@ struct DivOp {
     VECOPS_ALWAYS_INLINE V operator()(                                  \
         V a, V b, Options&&... options) const {                         \
       return (*this)(                                                   \
-          VecToTagT<V>{}, a, b, std::forward<Options>(options)...);     \
+          VecToTag<V>{}, a, b, std::forward<Options>(options)...);     \
     }                                                                   \
   }
 
@@ -166,7 +158,7 @@ VECOPS_VEC_DECLARE_EXTREMA_OP(MaxOp);
     VECOPS_ALWAYS_INLINE V operator()(                                  \
         V value, Options&&... options) const {                          \
       return (*this)(                                                   \
-          VecToTagT<V>{}, value, std::forward<Options>(options)...);    \
+          VecToTag<V>{}, value, std::forward<Options>(options)...);    \
     }                                                                   \
   }
 
@@ -196,7 +188,7 @@ VECOPS_VEC_DECLARE_UNARY_ARITHMETIC_OP(AbsOp);
     VECOPS_ALWAYS_INLINE V operator()(                                  \
         V value, Options&&... options) const {                          \
       return (*this)(                                                   \
-          VecToTagT<V>{}, value, std::forward<Options>(options)...);    \
+          VecToTag<V>{}, value, std::forward<Options>(options)...);    \
     }                                                                   \
   }
 
@@ -228,7 +220,7 @@ VECOPS_VEC_DECLARE_FLOATING_UNARY_OP(RsqrtOp);
     VECOPS_ALWAYS_INLINE V operator()(                                  \
         V a, V b, V c, Options&&... options) const {                    \
       return (*this)(                                                   \
-          VecToTagT<V>{}, a, b, c, std::forward<Options>(options)...);  \
+          VecToTag<V>{}, a, b, c, std::forward<Options>(options)...);  \
     }                                                                   \
   }
 

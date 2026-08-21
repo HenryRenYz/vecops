@@ -21,24 +21,24 @@ namespace vecops::vec::details {
 /* **************************************************************************** */
 
 template <typename T>
-inline constexpr bool sve_is_signed_integer_element =
+inline constexpr bool sve_is_signed_integer_element_v =
     std::same_as<T, int8_t> || std::same_as<T, int16_t> ||
     std::same_as<T, int32_t> || std::same_as<T, int64_t>;
 
 template <typename T>
-inline constexpr bool sve_is_unsigned_integer_element =
+inline constexpr bool sve_is_unsigned_integer_element_v =
     std::same_as<T, uint8_t> || std::same_as<T, uint16_t> ||
     std::same_as<T, uint32_t> || std::same_as<T, uint64_t>;
 
 template <typename T>
-inline constexpr bool sve_is_integer_element =
-    sve_is_signed_integer_element<T> || sve_is_unsigned_integer_element<T>;
+inline constexpr bool sve_is_integer_element_v =
+    sve_is_signed_integer_element_v<T> || sve_is_unsigned_integer_element_v<T>;
 
 template <typename T>
-inline constexpr bool sve_is_conversion_element =
+inline constexpr bool sve_is_conversion_element_v =
     std::same_as<T, bfloat16_t> || std::same_as<T, float16_t> ||
     std::same_as<T, float32_t> || std::same_as<T, float64_t> ||
-    sve_is_integer_element<T>;
+    sve_is_integer_element_v<T>;
 
 template <Element To, Element From, typename Raw>
 VECOPS_ALWAYS_INLINE auto sve_convert_same_size(Raw value) {
@@ -213,7 +213,7 @@ using SVEWidenedElement = std::conditional_t<
     float32_t,
     std::conditional_t<
         std::same_as<From, float32_t>, float64_t,
-        SVEInteger<sizeof(From) * 2, sve_is_signed_integer_element<From>>>>;
+        SVEInteger<sizeof(From) * 2, sve_is_signed_integer_element_v<From>>>>;
 
 template <Element To>
 using SVENarrowedElement = std::conditional_t<
@@ -221,33 +221,33 @@ using SVENarrowedElement = std::conditional_t<
     std::conditional_t<
         std::same_as<To, float16_t> || std::same_as<To, bfloat16_t>,
         float32_t,
-        SVEInteger<sizeof(To) * 2, sve_is_signed_integer_element<To>>>>;
+        SVEInteger<sizeof(To) * 2, sve_is_signed_integer_element_v<To>>>>;
 
 template <Element To, Element From, bool Wrap = false, typename Raw>
 VECOPS_ALWAYS_INLINE auto sve_convert_one_word_raw(Raw value);
 
 template <Element To, Element From, typename Raw>
 VECOPS_ALWAYS_INLINE auto sve_reinterpret_integer(Raw value) {
-  static_assert(sve_is_integer_element<To> && sve_is_integer_element<From>);
+  static_assert(sve_is_integer_element_v<To> && sve_is_integer_element_v<From>);
   static_assert(sizeof(To) == sizeof(From));
   if constexpr (std::same_as<To, From> ||
-                sve_is_signed_integer_element<To> ==
-                    sve_is_signed_integer_element<From>) {
+                sve_is_signed_integer_element_v<To> ==
+                    sve_is_signed_integer_element_v<From>) {
     return value;
   } else if constexpr (sizeof(To) == 1) {
-    if constexpr (sve_is_signed_integer_element<To>)
+    if constexpr (sve_is_signed_integer_element_v<To>)
       return svreinterpret_s8_u8(value);
     else return svreinterpret_u8_s8(value);
   } else if constexpr (sizeof(To) == 2) {
-    if constexpr (sve_is_signed_integer_element<To>)
+    if constexpr (sve_is_signed_integer_element_v<To>)
       return svreinterpret_s16_u16(value);
     else return svreinterpret_u16_s16(value);
   } else if constexpr (sizeof(To) == 4) {
-    if constexpr (sve_is_signed_integer_element<To>)
+    if constexpr (sve_is_signed_integer_element_v<To>)
       return svreinterpret_s32_u32(value);
     else return svreinterpret_u32_s32(value);
   } else {
-    if constexpr (sve_is_signed_integer_element<To>)
+    if constexpr (sve_is_signed_integer_element_v<To>)
       return svreinterpret_s64_u64(value);
     else return svreinterpret_u64_s64(value);
   }
@@ -264,7 +264,7 @@ VECOPS_ALWAYS_INLINE auto sve_promote_one_step(Raw value) {
       return svcvt_f32_f16_x(svptrue_b32(), svzip1_f16(value, value));
     else if constexpr (std::same_as<From, float32_t>)
       return svcvt_f64_f32_x(svptrue_b64(), svzip1_f32(value, value));
-    else if constexpr (sve_is_signed_integer_element<From>) {
+    else if constexpr (sve_is_signed_integer_element_v<From>) {
       if constexpr (sizeof(From) == 1) return svunpklo_s16(value);
       else if constexpr (sizeof(From) == 2) return svunpklo_s32(value);
       else return svunpklo_s64(value);
@@ -274,8 +274,8 @@ VECOPS_ALWAYS_INLINE auto sve_promote_one_step(Raw value) {
       else return svunpklo_u64(value);
     }
   }();
-  if constexpr (sve_is_integer_element<To> &&
-                sve_is_integer_element<Widened>) {
+  if constexpr (sve_is_integer_element_v<To> &&
+                sve_is_integer_element_v<Widened>) {
     // Widening follows scalar cast semantics. In particular, a negative
     // signed input converted to a wider unsigned type is sign-extended and
     // then reinterpreted modulo the wider width; applying the equal-width
@@ -288,7 +288,7 @@ VECOPS_ALWAYS_INLINE auto sve_promote_one_step(Raw value) {
 
 template <Element To, Element From, bool Wrap = false, typename Raw>
 VECOPS_ALWAYS_INLINE auto sve_demote_integer_one_step(Raw value) {
-  static_assert(sve_is_integer_element<To> && sve_is_integer_element<From>);
+  static_assert(sve_is_integer_element_v<To> && sve_is_integer_element_v<From>);
   static_assert(sizeof(To) * 2 == sizeof(From));
   if constexpr (Wrap) {
     if constexpr (sizeof(To) == 1) {
@@ -374,9 +374,9 @@ VECOPS_ALWAYS_INLINE auto sve_demote_integer_one_step(Raw value) {
 #endif
   const auto pg = sve_prefix_predicate<From>(sve_word_lanes<From>());
   auto same_sign = [&] {
-    if constexpr (sve_is_signed_integer_element<To>) {
+    if constexpr (sve_is_signed_integer_element_v<To>) {
       auto signed_value = [&] {
-        if constexpr (sve_is_signed_integer_element<From>) return value;
+        if constexpr (sve_is_signed_integer_element_v<From>) return value;
         else return sve_convert_same_size<SVEInteger<sizeof(From), true>, From>(value);
       }();
       const auto clamped = [&] {
@@ -404,7 +404,7 @@ VECOPS_ALWAYS_INLINE auto sve_demote_integer_one_step(Raw value) {
             svreinterpret_u32_s64(clamped), svreinterpret_u32_s64(clamped)));
     } else {
       auto unsigned_value = [&] {
-        if constexpr (sve_is_unsigned_integer_element<From>) return value;
+        if constexpr (sve_is_unsigned_integer_element_v<From>) return value;
         else return sve_convert_same_size<SVEInteger<sizeof(From), false>, From>(value);
       }();
       const auto clamped = [&] {
@@ -435,7 +435,7 @@ VECOPS_ALWAYS_INLINE auto sve_demote_integer_one_step(Raw value) {
 template <Element To, Element From, bool Wrap = false, typename Raw>
 VECOPS_ALWAYS_INLINE auto sve_demote_one_step(Raw value) {
   static_assert(sizeof(To) * 2 == sizeof(From));
-  if constexpr (sve_is_integer_element<From> && sve_is_integer_element<To>) {
+  if constexpr (sve_is_integer_element_v<From> && sve_is_integer_element_v<To>) {
     return sve_demote_integer_one_step<To, From, Wrap>(value);
   } else if constexpr (sizeof(From) == 8) {
     auto narrowed = [&] {
@@ -450,14 +450,14 @@ VECOPS_ALWAYS_INLINE auto sve_demote_one_step(Raw value) {
         if constexpr (std::same_as<From, float64_t>)
           return svcvt_s32_f64_x(svptrue_b64(), value);
         else {
-          using Mid = SVEInteger<8, sve_is_signed_integer_element<From>>;
+          using Mid = SVEInteger<8, sve_is_signed_integer_element_v<From>>;
           return sve_demote_integer_one_step<int32_t, Mid>(value);
         }
       } else if constexpr (std::same_as<To, uint32_t>) {
         if constexpr (std::same_as<From, float64_t>)
           return svcvt_u32_f64_x(svptrue_b64(), value);
         else {
-          using Mid = SVEInteger<8, sve_is_signed_integer_element<From>>;
+          using Mid = SVEInteger<8, sve_is_signed_integer_element_v<From>>;
           return sve_demote_integer_one_step<uint32_t, Mid>(value);
         }
       } else {
@@ -487,13 +487,13 @@ VECOPS_ALWAYS_INLINE auto sve_demote_one_step(Raw value) {
       return sve_f32_to_bf16_lo(
           sve_convert_same_size<float32_t, From>(value));
     } else {
-      using Mid = SVEInteger<4, sve_is_signed_integer_element<To>>;
+      using Mid = SVEInteger<4, sve_is_signed_integer_element_v<To>>;
       return sve_demote_integer_one_step<To, Mid>(
           sve_convert_same_size<Mid, From>(value));
     }
   } else {
     static_assert(sizeof(From) == 2);
-    using Mid = SVEInteger<2, sve_is_signed_integer_element<To>>;
+    using Mid = SVEInteger<2, sve_is_signed_integer_element_v<To>>;
     return sve_demote_integer_one_step<To, Mid>(
         sve_convert_same_size<Mid, From>(value));
   }
@@ -502,7 +502,7 @@ VECOPS_ALWAYS_INLINE auto sve_demote_one_step(Raw value) {
 template <Element To, Element From, bool Wrap, typename Raw>
 VECOPS_ALWAYS_INLINE auto sve_convert_one_word_raw(Raw value) {
   static_assert(
-      sve_is_conversion_element<To> && sve_is_conversion_element<From>,
+      sve_is_conversion_element_v<To> && sve_is_conversion_element_v<From>,
       "unsupported SVE conversion element type");
   if constexpr (sizeof(To) == sizeof(From)) {
     return sve_convert_same_size<To, From>(value);
@@ -600,10 +600,10 @@ consteval int sve_conversion_lane_phase() {
 template <VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<Tag> sve_conversion_population(
     Tag tag, Options&&... options) {
-  if constexpr (option_count<IsVectorMergeOption, Options...> == 1) {
+  if constexpr (option_count_v<IsVectorMergeOption, Options...> == 1) {
     return find_option<IsVectorMergeOption>(
         std::forward<Options>(options)...).value;
-  } else if constexpr (option_count<IsScalarMergeOption, Options...> == 1) {
+  } else if constexpr (option_count_v<IsScalarMergeOption, Options...> == 1) {
     return execute(
         FillOp{}, tag,
         find_option<IsScalarMergeOption>(
@@ -674,7 +674,7 @@ VECOPS_ALWAYS_INLINE auto sve_convert_lane_ratio2_widen_raw(Raw value) {
         return svcvt_f64_f32_x(svptrue_b64(), value);
       else
         return svcvtlt_f64_f32_x(svptrue_b64(), value);
-    } else if constexpr (sve_is_signed_integer_element<From>) {
+    } else if constexpr (sve_is_signed_integer_element_v<From>) {
       if constexpr (sizeof(From) == 1) {
         if constexpr (Phase == 0) return svshllb_n_s16(value, 0);
         else return svshllt_n_s16(value, 0);
@@ -686,7 +686,7 @@ VECOPS_ALWAYS_INLINE auto sve_convert_lane_ratio2_widen_raw(Raw value) {
         else return svshllt_n_s64(value, 0);
       }
     } else {
-      static_assert(sve_is_unsigned_integer_element<From>);
+      static_assert(sve_is_unsigned_integer_element_v<From>);
       if constexpr (sizeof(From) == 1) {
         if constexpr (Phase == 0) return svshllb_n_u16(value, 0);
         else return svshllt_n_u16(value, 0);
@@ -700,8 +700,8 @@ VECOPS_ALWAYS_INLINE auto sve_convert_lane_ratio2_widen_raw(Raw value) {
     }
   }();
 
-  if constexpr (sve_is_integer_element<To> &&
-                sve_is_integer_element<Widened>)
+  if constexpr (sve_is_integer_element_v<To> &&
+                sve_is_integer_element_v<Widened>)
     return sve_reinterpret_integer<To, Widened>(widened);
   else
     return sve_convert_same_size<To, Widened>(widened);
@@ -709,8 +709,8 @@ VECOPS_ALWAYS_INLINE auto sve_convert_lane_ratio2_widen_raw(Raw value) {
 
 template <Element To, Element From, typename Raw>
 VECOPS_ALWAYS_INLINE auto sve_lane_qxt_bottom(Raw value) {
-  static_assert(sve_is_integer_element<To> &&
-                sve_is_integer_element<From>);
+  static_assert(sve_is_integer_element_v<To> &&
+                sve_is_integer_element_v<From>);
   static_assert(sizeof(To) * 2 == sizeof(From));
   if constexpr (std::is_signed_v<From> && std::is_signed_v<To>) {
     if constexpr (sizeof(From) == 2) return svqxtnb_s16(value);
@@ -746,8 +746,8 @@ VECOPS_ALWAYS_INLINE auto sve_lane_qxt_bottom(Raw value) {
 
 template <Element To, Element From, typename NarrowRaw, typename Raw>
 VECOPS_ALWAYS_INLINE auto sve_lane_qxt_top(NarrowRaw fallback, Raw value) {
-  static_assert(sve_is_integer_element<To> &&
-                sve_is_integer_element<From>);
+  static_assert(sve_is_integer_element_v<To> &&
+                sve_is_integer_element_v<From>);
   static_assert(sizeof(To) * 2 == sizeof(From));
   if constexpr (std::is_signed_v<From> && std::is_signed_v<To>) {
     if constexpr (sizeof(From) == 2) return svqxtnt_s16(fallback, value);
@@ -822,8 +822,8 @@ VECOPS_ALWAYS_INLINE auto sve_convert_lane_ratio2_narrow_raw(
           svuzp1_u16(fallback_bits, fallback_bits), compact_bits));
 #endif
   } else {
-    static_assert(sve_is_integer_element<To>);
-    if constexpr (sve_is_integer_element<From>) {
+    static_assert(sve_is_integer_element_v<To>);
+    if constexpr (sve_is_integer_element_v<From>) {
       if constexpr (Phase == 0)
         return sve_lane_qxt_bottom<To, From>(value);
       else
@@ -874,10 +874,10 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
   constexpr int phase = sve_conversion_lane_phase<Options...>();
 
 #if defined(HAS_SVE2)
-  constexpr bool wraps = option_count<IsWrapOption, Options...> == 1;
+  constexpr bool wraps = option_count_v<IsWrapOption, Options...> == 1;
   constexpr bool nonzero_population =
-      option_count<IsVectorMergeOption, Options...> == 1 ||
-      option_count<IsScalarMergeOption, Options...> == 1;
+      option_count_v<IsVectorMergeOption, Options...> == 1 ||
+      option_count_v<IsScalarMergeOption, Options...> == 1;
   if constexpr (
       ratio == 2 && !wraps &&
       (!narrows || phase == 1 || !nonzero_population)) {
@@ -926,7 +926,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
     }
   } else {
     constexpr bool wraps_fallback =
-        option_count<IsWrapOption, Options...> == 1;
+        option_count_v<IsWrapOption, Options...> == 1;
     using CompactTag = Rebind<ElementOf<ToTag>, FromTag>;
     const auto compact = sve_convert_vector<wraps_fallback>(
         CompactTag{}, from, value);
@@ -1049,11 +1049,11 @@ struct NativeImpl<SVEBackend, ConvertOp, ToTag> {
   static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
       ConvertOp, ToTag to, FromTag from, Vec<FromTag> value,
       Options&&... options) {
-    constexpr bool lane_layout = option_count<IsLaneOption, Options...> == 1;
+    constexpr bool lane_layout = option_count_v<IsLaneOption, Options...> == 1;
     constexpr bool unordered_layout =
-        option_count<IsUnorderedOption, Options...> == 1;
-    constexpr bool wraps = option_count<IsWrapOption, Options...> == 1;
-    constexpr bool masked = option_count<IsMaskedOption, Options...> == 1;
+        option_count_v<IsUnorderedOption, Options...> == 1;
+    constexpr bool wraps = option_count_v<IsWrapOption, Options...> == 1;
+    constexpr bool masked = option_count_v<IsMaskedOption, Options...> == 1;
     auto converted = [&] {
       if constexpr (lane_layout) {
         return sve_convert_lane_native(

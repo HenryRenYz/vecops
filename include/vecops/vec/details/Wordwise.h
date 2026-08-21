@@ -80,7 +80,7 @@ template <typename Value, VectorTag Tag, typename Builder,
           std::size_t... Index>
 VECOPS_ALWAYS_INLINE constexpr Value construct_sized_value(
     Tag tag, Builder& builder, std::index_sequence<Index...>) {
-  if constexpr (is_word_array<Value>) {
+  if constexpr (is_word_array_v<Value>) {
     // Keep this as one aggregate initialization. Repeated
     // `result = set_word(result, word)` creates partially-covered whole-value
     // copies; GCC 13 then fails SRA for four 64-byte words and spills them.

@@ -44,7 +44,7 @@ static std::string to_string(const T& v) {
 }
 
 // ======================================================================
-// Value Suite — Value / Const / Dynamic / Any / ToValue
+// Value Suite — Value / Const / Dynamic / Any / to_value_t
 // ======================================================================
 
 class ValueTest : public ::testing::Test {};
@@ -671,14 +671,14 @@ TEST_F(ValueTest, OperatorOnPackedValue) {
 }
 
 TEST_F(ValueTest, ToValuePromotesInt) {
-  EXPECT_TRUE((std::is_same_v<ToValue<int>, Any>));
-  EXPECT_TRUE((std::is_same_v<ToValue<uint32_t>, Any>));
+  EXPECT_TRUE((std::is_same_v<to_value_t<int>, Any>));
+  EXPECT_TRUE((std::is_same_v<to_value_t<uint32_t>, Any>));
 }
 
 TEST_F(ValueTest, ToValuePreservesValueType) {
-  EXPECT_TRUE((std::is_same_v<ToValue<Const<5>>, Const<5>>));
-  EXPECT_TRUE((std::is_same_v<ToValue<Dynamic<16>>, Dynamic<16>>));
-  EXPECT_TRUE((std::is_same_v<ToValue<Any>, Any>));
+  EXPECT_TRUE((std::is_same_v<to_value_t<Const<5>>, Const<5>>));
+  EXPECT_TRUE((std::is_same_v<to_value_t<Dynamic<16>>, Dynamic<16>>));
+  EXPECT_TRUE((std::is_same_v<to_value_t<Any>, Any>));
 }
 
 // ======================================================================
@@ -1331,39 +1331,39 @@ TEST_F(LayoutIOTest, PrintBoundsUpperOnly) {
 class TypeTraitsTest : public ::testing::Test {};
 
 TEST_F(TypeTraitsTest, IsArrayMeta) {
-  EXPECT_TRUE((is_array_meta<ArrayMeta<Any, Any>>));
-  EXPECT_FALSE((is_array_meta<int>));
-  EXPECT_FALSE((is_array_meta<Layout<Shape<Any>, Strides<Any>>>));
+  EXPECT_TRUE((is_array_meta_v<ArrayMeta<Any, Any>>));
+  EXPECT_FALSE((is_array_meta_v<int>));
+  EXPECT_FALSE((is_array_meta_v<Layout<Shape<Any>, Strides<Any>>>));
 }
 
 TEST_F(TypeTraitsTest, IsShape) {
-  EXPECT_TRUE((is_shape<Shape<Any, Any>>));
-  EXPECT_TRUE((is_shape<Shape<Const<128>, Any>>));
-  EXPECT_FALSE((is_shape<int>));
-  EXPECT_FALSE((is_shape<ArrayMeta<Any, Any>>));
-  EXPECT_FALSE((is_shape<Strides<Any, Any>>));
+  EXPECT_TRUE((is_shape_v<Shape<Any, Any>>));
+  EXPECT_TRUE((is_shape_v<Shape<Const<128>, Any>>));
+  EXPECT_FALSE((is_shape_v<int>));
+  EXPECT_FALSE((is_shape_v<ArrayMeta<Any, Any>>));
+  EXPECT_FALSE((is_shape_v<Strides<Any, Any>>));
 }
 
 TEST_F(TypeTraitsTest, IsStrides) {
-  EXPECT_TRUE((is_strides<Strides<Any, Any>>));
-  EXPECT_TRUE((is_strides<Strides<Const<64>>>));
-  EXPECT_FALSE((is_strides<int>));
-  EXPECT_FALSE((is_strides<ArrayMeta<Any, Any>>));
-  EXPECT_FALSE((is_strides<Shape<Any, Any>>));
+  EXPECT_TRUE((is_strides_v<Strides<Any, Any>>));
+  EXPECT_TRUE((is_strides_v<Strides<Const<64>>>));
+  EXPECT_FALSE((is_strides_v<int>));
+  EXPECT_FALSE((is_strides_v<ArrayMeta<Any, Any>>));
+  EXPECT_FALSE((is_strides_v<Shape<Any, Any>>));
 }
 
 TEST_F(TypeTraitsTest, IsLayout) {
-  EXPECT_TRUE((is_layout<Layout<Shape<Any, Any>, Strides<Any, Any>>>));
-  EXPECT_FALSE((is_layout<int>));
-  EXPECT_FALSE((is_layout<ArrayMeta<Any, Any>>));
+  EXPECT_TRUE((is_layout_v<Layout<Shape<Any, Any>, Strides<Any, Any>>>));
+  EXPECT_FALSE((is_layout_v<int>));
+  EXPECT_FALSE((is_layout_v<ArrayMeta<Any, Any>>));
 }
 
 TEST_F(TypeTraitsTest, IsArrayMetaSubsumesShape) {
-  EXPECT_TRUE((is_array_meta<Shape<Any, Any>>));
+  EXPECT_TRUE((is_array_meta_v<Shape<Any, Any>>));
 }
 
 TEST_F(TypeTraitsTest, IsArrayMetaSubsumesStrides) {
-  EXPECT_TRUE((is_array_meta<Strides<Any, Any>>));
+  EXPECT_TRUE((is_array_meta_v<Strides<Any, Any>>));
 }
 
 // ======================================================================
@@ -1432,9 +1432,9 @@ TEST_F(MetaDetailsTest, PickConstValue) {
 TEST_F(MetaDetailsTest, ValuePromote) {
   using namespace vecops::meta::details;
   using namespace vecops::tensor::details;
-  EXPECT_TRUE((std::is_same_v<ValuePromote<int>::Type, Any>));
-  EXPECT_TRUE((std::is_same_v<ValuePromote<Const<5>>::Type, Const<5>>));
-  EXPECT_TRUE((std::is_same_v<ValuePromote<Dynamic<16>>::Type, Dynamic<16>>));
+  EXPECT_TRUE((std::is_same_v<ValuePromote<int>::type, Any>));
+  EXPECT_TRUE((std::is_same_v<ValuePromote<Const<5>>::type, Const<5>>));
+  EXPECT_TRUE((std::is_same_v<ValuePromote<Dynamic<16>>::type, Dynamic<16>>));
 }
 
 TEST_F(MetaDetailsTest, IsArrayMetaDetails) {
@@ -1640,15 +1640,15 @@ TEST_F(LayoutConversionTest, ImplicitConversionRejectsMoreStrictLayout) {
 TEST_F(ContiguityTest, CtLastContiguous_FullConst) {
   auto layout = make_layout(make_shape(cint<4>, cint<6>),
                             make_strides(cint<6>, cint<1>));
-  EXPECT_TRUE((is_ct_last_contiguous<decltype(layout), 2>::value));
-  EXPECT_TRUE((is_ct_last_contiguous<decltype(layout), 1>::value));
-  EXPECT_TRUE((is_ct_contiguous<decltype(layout)>::value));
+  EXPECT_TRUE((is_ct_last_contiguous_v<decltype(layout), 2>));
+  EXPECT_TRUE((is_ct_last_contiguous_v<decltype(layout), 1>));
+  EXPECT_TRUE((is_ct_contiguous_v<decltype(layout)>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_LastOneConst) {
   auto layout = make_layout(make_shape(Any{4}, Any{6}),
                             make_strides(Any{6}, cint<1>));
-  EXPECT_TRUE((is_ct_last_contiguous<decltype(layout), 1>::value));
+  EXPECT_TRUE((is_ct_last_contiguous_v<decltype(layout), 1>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_ShapeNotConst) {
@@ -1656,72 +1656,72 @@ TEST_F(ContiguityTest, CtLastContiguous_ShapeNotConst) {
   // uses Zd1=shape[1]; shape[0] is not checked in that position.
   auto layout = make_layout(make_shape(cint<4>, Any{6}),
                             make_strides(cint<6>, cint<1>));
-  EXPECT_FALSE((is_ct_last_contiguous<decltype(layout), 2>::value));
+  EXPECT_FALSE((is_ct_last_contiguous_v<decltype(layout), 2>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_StrideNotConst) {
   auto layout = make_layout(make_shape(cint<4>, cint<6>),
                             make_strides(Any{6}, cint<1>));
-  EXPECT_FALSE((is_ct_last_contiguous<decltype(layout), 2>::value));
+  EXPECT_FALSE((is_ct_last_contiguous_v<decltype(layout), 2>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_N_Exceeds_Ndim) {
   auto layout = make_layout(make_shape(cint<4>, cint<6>),
                             make_strides(cint<6>, cint<1>));
-  EXPECT_FALSE((is_ct_last_contiguous<decltype(layout), 3>::value));
+  EXPECT_FALSE((is_ct_last_contiguous_v<decltype(layout), 3>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_N_Zero) {
   auto layout = make_layout(make_shape(cint<4>, cint<6>),
                             make_strides(cint<6>, cint<1>));
-  EXPECT_TRUE((is_ct_last_contiguous<decltype(layout), 0>::value));
+  EXPECT_TRUE((is_ct_last_contiguous_v<decltype(layout), 0>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_NonUnitLastStride) {
   auto layout = make_layout(make_shape(cint<4>, cint<6>),
                             make_strides(cint<6>, cint<2>));
-  EXPECT_FALSE((is_ct_last_contiguous<decltype(layout), 1>::value));
+  EXPECT_FALSE((is_ct_last_contiguous_v<decltype(layout), 1>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_4D_FullConst) {
   auto s = make_shape(cint<2>, cint<3>, cint<4>, cint<5>);
   auto st = make_strides(cint<60>, cint<20>, cint<5>, cint<1>);
   auto layout = make_layout(s, st);
-  EXPECT_TRUE((is_ct_last_contiguous<decltype(layout), 4>::value));
-  EXPECT_TRUE((is_ct_last_contiguous<decltype(layout), 2>::value));
-  EXPECT_TRUE((is_ct_contiguous<decltype(layout)>::value));
+  EXPECT_TRUE((is_ct_last_contiguous_v<decltype(layout), 4>));
+  EXPECT_TRUE((is_ct_last_contiguous_v<decltype(layout), 2>));
+  EXPECT_TRUE((is_ct_contiguous_v<decltype(layout)>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_4D_Last2) {
   auto s = make_shape(cint<2>, cint<3>, cint<4>, cint<5>);
   auto st = make_strides(cint<20>, cint<5>, cint<1>, Any{1});
   auto layout = make_layout(s, st);
-  EXPECT_FALSE((is_ct_last_contiguous<decltype(layout), 4>::value));
+  EXPECT_FALSE((is_ct_last_contiguous_v<decltype(layout), 4>));
 }
 
 TEST_F(ContiguityTest, CtIsContiguous_NotContiguous) {
   auto layout = make_layout(make_shape(cint<4>, cint<6>),
                             make_strides(cint<5>, cint<1>));
-  EXPECT_FALSE((is_ct_contiguous<decltype(layout)>::value));
+  EXPECT_FALSE((is_ct_contiguous_v<decltype(layout)>));
 }
 
 TEST_F(ContiguityTest, CtContiguous_1D) {
   auto layout = make_layout(make_shape(cint<10>), make_strides(cint<1>));
-  EXPECT_TRUE((is_ct_contiguous<decltype(layout)>::value));
+  EXPECT_TRUE((is_ct_contiguous_v<decltype(layout)>));
 }
 
 TEST_F(ContiguityTest, CtContiguous_3D_FullConst) {
   auto s = make_shape(cint<3>, cint<4>, cint<5>);
   auto st = make_strides(cint<20>, cint<5>, cint<1>);
   auto layout = make_layout(s, st);
-  EXPECT_TRUE((is_ct_contiguous<decltype(layout)>::value));
+  EXPECT_TRUE((is_ct_contiguous_v<decltype(layout)>));
 }
 
 TEST_F(ContiguityTest, CtContiguous_3D_NotContiguous_Mismatch) {
   auto s = make_shape(cint<3>, cint<4>, cint<5>);
   auto st = make_strides(cint<30>, cint<5>, cint<1>);
   auto layout = make_layout(s, st);
-  EXPECT_FALSE((is_ct_contiguous<decltype(layout)>::value));
+  EXPECT_FALSE((is_ct_contiguous_v<decltype(layout)>));
 }
 
 // ======================================================================

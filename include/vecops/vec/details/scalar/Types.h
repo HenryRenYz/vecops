@@ -34,8 +34,8 @@ struct ScalarLayout<VectorDescriptor<T, FixedExtent<N>>> {
   static constexpr nint_t word_lanes = scalar_word_lanes<T>;
   static constexpr nint_t word_count =
       (logical_lanes + word_lanes - 1) / word_lanes;
-  static constexpr bool is_runtime_size = false;
-  static constexpr bool is_subword = logical_lanes < word_lanes;
+  static constexpr bool is_runtime_size_v = false;
+  static constexpr bool is_subword_v = logical_lanes < word_lanes;
 };
 
 template <Element T, int ScalePower>
@@ -52,8 +52,8 @@ struct ScalarLayout<VectorDescriptor<T, ScalableExtent<ScalePower>>> {
   }();
   static constexpr nint_t word_count =
       ScalePower > 0 ? (nint_t{1} << ScalePower) : 1;
-  static constexpr bool is_runtime_size = false;
-  static constexpr bool is_subword = ScalePower < 0;
+  static constexpr bool is_runtime_size_v = false;
+  static constexpr bool is_subword_v = ScalePower < 0;
 };
 
 template <VectorTag Tag>
@@ -64,8 +64,8 @@ struct RepresentationTraits<ScalarBackend, Tag> {
   static constexpr nint_t logical_lanes = Layout::logical_lanes;
   static constexpr nint_t word_lanes = Layout::word_lanes;
   static constexpr nint_t word_count = Layout::word_count;
-  static constexpr bool is_runtime_size = Layout::is_runtime_size;
-  static constexpr bool is_subword = Layout::is_subword;
+  static constexpr bool is_runtime_size_v = Layout::is_runtime_size_v;
+  static constexpr bool is_subword_v = Layout::is_subword_v;
 
   using WordVec = ScalarVector<Element, word_lanes, scalar_word_bytes>;
   using WordMask = ScalarMask<sizeof(Element), word_lanes>;
@@ -89,12 +89,12 @@ struct IsMaskRepresentation<WordArray<Word, Count>>
 
 template <Element T, nint_t N, nint_t Alignment>
 struct InferredTagTraits<ScalarVector<T, N, Alignment>> {
-  using Type = FixedTag<T, N>;
+  using type = FixedTag<T, N>;
 };
 
 template <Element T, nint_t N, nint_t Alignment, nint_t Count>
 struct InferredTagTraits<WordArray<ScalarVector<T, N, Alignment>, Count>> {
-  using Type = FixedTag<T, N * Count>;
+  using type = FixedTag<T, N * Count>;
 };
 
 } // namespace vecops::vec::details

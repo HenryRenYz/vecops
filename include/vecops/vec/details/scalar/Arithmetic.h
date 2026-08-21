@@ -89,7 +89,7 @@ struct ScalarArithmeticWordImpl {
         a[lane] = scalar_arithmetic_binary<T>(
             a[lane], b[lane], [](auto x, auto y) { return x * y; });
       } else if constexpr (std::same_as<Op, DivOp>) {
-        static_assert(::vecops::IsFloatV<T>);
+        static_assert(::vecops::is_float_v<T>);
         a[lane] = static_cast<T>(a[lane] / b[lane]);
       } else if constexpr (std::same_as<Op, MinOp>) {
         a[lane] = std::min(a[lane], b[lane]);
@@ -156,7 +156,7 @@ struct ScalarFmaWordImpl {
     using T = ElementOf<Tag>;
     static_assert(Index >= 0 && Index < Traits::word_count);
     for (nint_t lane = 0; lane < Traits::word_lanes; ++lane) {
-      if constexpr (::vecops::IsFloatV<T>) {
+      if constexpr (::vecops::is_float_v<T>) {
         if constexpr (std::same_as<Op, FmaddOp>)
           a[lane] = static_cast<T>(a[lane] * b[lane] + c[lane]);
         else if constexpr (std::same_as<Op, FmsubOp>)

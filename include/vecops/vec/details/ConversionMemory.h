@@ -21,25 +21,25 @@ namespace vecops::vec::details {
 template <VectorTag LogicalTag, Element Other>
 consteval bool memory_rebind_supported() {
   using MemoryTag = Rebind<Other, LogicalTag>;
-  if constexpr (is_fixed_tag<LogicalTag>) {
+  if constexpr (is_fixed_tag_v<LogicalTag>) {
     return true;
   } else {
     // A below-word memory-side Tag is already handled by the existing
     // predicate/subword lowering.  Recursive partitioning is needed only
     // when rebinding would require more backend words than can be represented
     // (for example int8/P2 requested from double/P5 memory on SVE).
-    return scale_power<MemoryTag> <= VEC_MAX_POW;
+    return scale_power_v<MemoryTag> <= VEC_MAX_POW;
   }
 }
 
 template <VectorTag LogicalTag, Element Other, bool MemorySide>
 struct MemoryConversionMask {
-  using Type = Mask<LogicalTag>;
+  using type = Mask<LogicalTag>;
 };
 
 template <VectorTag LogicalTag, Element Other>
 struct MemoryConversionMask<LogicalTag, Other, true> {
-  using Type = Mask<Rebind<Other, LogicalTag>>;
+  using type = Mask<Rebind<Other, LogicalTag>>;
 };
 
 
@@ -60,7 +60,7 @@ struct IsConversionMemoryPackingOption : std::bool_constant<
     IsPackedOption<T>::value || IsSplitOption<T>::value> {};
 
 template <VectorTag LogicalTag, Element Other, bool IsStore, typename Option>
-inline constexpr bool is_memory_conversion_option_for = [] {
+inline constexpr bool is_memory_conversion_option_for_v = [] {
   using Clean = std::remove_cvref_t<Option>;
   using MemoryTag = Rebind<Other, LogicalTag>;
   if constexpr (
@@ -73,7 +73,7 @@ inline constexpr bool is_memory_conversion_option_for = [] {
       IsFirstOption<Clean>::value || IsZeroOption<Clean>::value) {
     return true;
   } else if constexpr (IsMemoryAddressingOption<Clean>::value) {
-    return is_memory_addressing_option_for<LogicalTag, Clean>;
+    return is_memory_addressing_option_for_v<LogicalTag, Clean>;
   } else if constexpr (IsMaskedOption<Clean>::value) {
     using MaskType = typename IsMaskedOption<Clean>::Value;
     if constexpr (memory_rebind_supported<LogicalTag, Other>()) {
@@ -102,26 +102,26 @@ consteval bool valid_memory_conversion_options() {
   using Output = std::conditional_t<IsStore, Other, ElementOf<LogicalTag>>;
   using MemoryTag = Rebind<Other, LogicalTag>;
   constexpr std::size_t layout_count =
-      option_count<IsConversionMemoryLayoutOption, Options...>;
+      option_count_v<IsConversionMemoryLayoutOption, Options...>;
   constexpr std::size_t value_count =
-      option_count<IsConversionMemoryValueOption, Options...>;
+      option_count_v<IsConversionMemoryValueOption, Options...>;
   constexpr std::size_t alignment_count =
-      option_count<IsMemoryAlignmentOption, Options...>;
+      option_count_v<IsMemoryAlignmentOption, Options...>;
   constexpr std::size_t temporality_count =
-      option_count<IsMemoryTemporalityOption, Options...>;
+      option_count_v<IsMemoryTemporalityOption, Options...>;
   constexpr std::size_t indexed_count =
-      option_count<IsIndexedOption, Options...>;
+      option_count_v<IsIndexedOption, Options...>;
   constexpr std::size_t strided_count =
-      option_count<IsStridedOption, Options...>;
+      option_count_v<IsStridedOption, Options...>;
   constexpr std::size_t packing_count =
-      option_count<IsConversionMemoryPackingOption, Options...>;
+      option_count_v<IsConversionMemoryPackingOption, Options...>;
   constexpr std::size_t active_count =
-      option_count<IsMemoryActiveOption, Options...>;
+      option_count_v<IsMemoryActiveOption, Options...>;
   constexpr std::size_t population_count =
-      option_count<IsMemoryPopulationOption, Options...>;
-  constexpr bool unordered = option_count<IsUnorderedOption, Options...> == 1;
-  constexpr bool wraps = option_count<IsWrapOption, Options...> == 1;
-  constexpr bool split = option_count<IsSplitOption, Options...> == 1;
+      option_count_v<IsMemoryPopulationOption, Options...>;
+  constexpr bool unordered = option_count_v<IsUnorderedOption, Options...> == 1;
+  constexpr bool wraps = option_count_v<IsWrapOption, Options...> == 1;
+  constexpr bool split = option_count_v<IsSplitOption, Options...> == 1;
   constexpr bool mask_type_matches = [] {
     bool valid = true;
     ([&]<typename Option>() {
@@ -130,14 +130,14 @@ consteval bool valid_memory_conversion_options() {
         using Actual = typename IsMaskedOption<Clean>::Value;
         using Expected = typename MemoryConversionMask<
             LogicalTag, Other,
-            unordered && memory_rebind_supported<LogicalTag, Other>()>::Type;
+            unordered && memory_rebind_supported<LogicalTag, Other>()>::type;
         valid = std::same_as<Actual, Expected>;
       }
     }.template operator()<Options>(), ...);
     return valid;
   }();
 
-  if constexpr (!(is_memory_conversion_option_for<
+  if constexpr (!(is_memory_conversion_option_for_v<
                     LogicalTag, Other, IsStore, Options> && ...)) {
     return false;
   } else {
@@ -162,7 +162,7 @@ template <template <typename> typename Predicate, typename Default,
           typename... Options>
 VECOPS_ALWAYS_INLINE constexpr decltype(auto) memory_conversion_option_or(
     Default&& default_value, Options&&... options) {
-  if constexpr (option_count<Predicate, Options...> == 0)
+  if constexpr (option_count_v<Predicate, Options...> == 0)
     return std::forward<Default>(default_value);
   else
     return find_option<Predicate>(std::forward<Options>(options)...);
@@ -171,7 +171,7 @@ VECOPS_ALWAYS_INLINE constexpr decltype(auto) memory_conversion_option_or(
 template <bool IsStore, VectorTag Tag, typename Option>
 VECOPS_ALWAYS_INLINE auto retain_identity_memory_option(Option&& option) {
   using Clean = std::remove_cvref_t<Option>;
-  if constexpr (is_memory_option_for<Tag, IsStore, Clean>) {
+  if constexpr (is_memory_option_for_v<Tag, IsStore, Clean>) {
     return std::forward_as_tuple(std::forward<Option>(option));
   } else {
     return std::tuple<>{};
@@ -300,7 +300,7 @@ struct GenericImpl<Backend, StoreConvertOp, FromTag> {
 template <Element To, typename From, typename... Options>
 VECOPS_ALWAYS_INLINE To boundary_scalar_convert(
     From value, Options&&...) {
-  if constexpr (option_count<IsWrapOption, Options...> == 1) {
+  if constexpr (option_count_v<IsWrapOption, Options...> == 1) {
     return ::vecops::wrap_convert<To>(value);
   } else {
     return ::vecops::convert<To>(value);
@@ -310,10 +310,10 @@ VECOPS_ALWAYS_INLINE To boundary_scalar_convert(
 template <VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE bool boundary_lane_active(
     Tag tag, nint_t lane, Options&&... options) {
-  if constexpr (option_count<IsMaskedOption, Options...> == 1) {
+  if constexpr (option_count_v<IsMaskedOption, Options...> == 1) {
     const auto& masked = find_option<IsMaskedOption>(options...);
     return get(tag, masked.value, lane);
-  } else if constexpr (option_count<IsFirstOption, Options...> == 1) {
+  } else if constexpr (option_count_v<IsFirstOption, Options...> == 1) {
     const nint_t count = find_option<IsFirstOption>(options...).count;
     return lane < count;
   } else {
@@ -324,10 +324,10 @@ VECOPS_ALWAYS_INLINE bool boundary_lane_active(
 template <Element Memory, VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE const Memory* boundary_memory_address(
     Tag, const Memory* pointer, nint_t lane, Options&&... options) {
-  if constexpr (option_count<IsIndexedOption, Options...> == 1) {
+  if constexpr (option_count_v<IsIndexedOption, Options...> == 1) {
     const auto& indexed = find_option<IsIndexedOption>(options...);
     using Indexed = std::remove_cvref_t<decltype(indexed)>;
-    using IndexTag = VecToTagT<typename IsIndexedOption<Indexed>::Value>;
+    using IndexTag = VecToTag<typename IsIndexedOption<Indexed>::Value>;
     const nint_t index = static_cast<nint_t>(
         get(IndexTag{}, indexed.indices, lane));
     if constexpr (IsIndexedOption<Indexed>::scale == 0) {
@@ -337,7 +337,7 @@ VECOPS_ALWAYS_INLINE const Memory* boundary_memory_address(
       return reinterpret_cast<const Memory*>(
           bytes + index * IsIndexedOption<Indexed>::scale);
     }
-  } else if constexpr (option_count<IsStridedOption, Options...> == 1) {
+  } else if constexpr (option_count_v<IsStridedOption, Options...> == 1) {
     const auto& strided = find_option<IsStridedOption>(options...);
     return pointer + lane * static_cast<nint_t>(strided.stride);
   } else {
@@ -391,18 +391,18 @@ template <VectorTag ToTag, Element From, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<ToTag> execute_large_load_convert(
     ToTag to, const From* pointer, Options&&... options) {
   constexpr bool full_contiguous =
-      option_count<IsMemoryAddressingOption, Options...> == 0 &&
-      option_count<IsMaskedOption, Options...> == 0 &&
-      option_count<IsFirstOption, Options...> == 0;
+      option_count_v<IsMemoryAddressingOption, Options...> == 0 &&
+      option_count_v<IsMaskedOption, Options...> == 0 &&
+      option_count_v<IsFirstOption, Options...> == 0;
   if constexpr (full_contiguous) {
     return execute_large_load_convert_contiguous(
         to, pointer, std::forward<Options>(options)...);
   }
 
   Vec<ToTag> result;
-  if constexpr (option_count<IsVectorMergeOption, Options...> == 1) {
+  if constexpr (option_count_v<IsVectorMergeOption, Options...> == 1) {
     result = find_option<IsVectorMergeOption>(options...).value;
-  } else if constexpr (option_count<IsScalarMergeOption, Options...> == 1) {
+  } else if constexpr (option_count_v<IsScalarMergeOption, Options...> == 1) {
     result = fill(to, find_option<IsScalarMergeOption>(options...).value);
   } else {
     result = zeros(to);
@@ -428,9 +428,9 @@ VECOPS_ALWAYS_INLINE void execute_large_store_convert(
     Vec<FromTag> value,
     Options&&... options) {
   constexpr bool full_contiguous =
-      option_count<IsMemoryAddressingOption, Options...> == 0 &&
-      option_count<IsMaskedOption, Options...> == 0 &&
-      option_count<IsFirstOption, Options...> == 0;
+      option_count_v<IsMemoryAddressingOption, Options...> == 0 &&
+      option_count_v<IsMaskedOption, Options...> == 0 &&
+      option_count_v<IsFirstOption, Options...> == 0;
   if constexpr (full_contiguous) {
     execute_large_store_convert_contiguous(
         from, pointer, value, std::forward<Options>(options)...);
@@ -451,24 +451,24 @@ template <VectorTag ToTag, Element From, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<ToTag> execute_load_convert_options(
     LoadConvertOp op, ToTag to, const From* pointer, Options&&... options) {
   constexpr std::size_t active_count =
-      option_count<IsMemoryActiveOption, Options...>;
+      option_count_v<IsMemoryActiveOption, Options...>;
   constexpr std::size_t population_count =
-      option_count<IsMemoryPopulationOption, Options...>;
-  constexpr bool unordered = option_count<IsUnorderedOption, Options...> == 1;
+      option_count_v<IsMemoryPopulationOption, Options...>;
+  constexpr bool unordered = option_count_v<IsUnorderedOption, Options...> == 1;
   constexpr std::size_t addressing_count =
-      option_count<IsMemoryAddressingOption, Options...>;
+      option_count_v<IsMemoryAddressingOption, Options...>;
   using FromTag = Rebind<From, ToTag>;
 
   auto invoke = [&](auto layout, auto value_policy, auto alignment,
                     auto temporality) VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
     if constexpr (
         active_count == 0 ||
-        option_count<IsUnmaskedOption, Options...> == 1) {
+        option_count_v<IsUnmaskedOption, Options...> == 1) {
       return execute(
           op, to, pointer, layout, value_policy, alignment, temporality);
     } else if constexpr (unordered) {
       Mask<FromTag> mask;
-      if constexpr (option_count<IsMaskedOption, Options...> == 1) {
+      if constexpr (option_count_v<IsMaskedOption, Options...> == 1) {
         mask = find_option<IsMaskedOption>(
             std::forward<Options>(options)...).value;
       } else {
@@ -481,7 +481,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> execute_load_convert_options(
           alignment, temporality);
     } else {
       Mask<ToTag> mask;
-      if constexpr (option_count<IsMaskedOption, Options...> == 1) {
+      if constexpr (option_count_v<IsMaskedOption, Options...> == 1) {
         mask = find_option<IsMaskedOption>(
             std::forward<Options>(options)...).value;
       } else {
@@ -491,10 +491,10 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> execute_load_convert_options(
       }
       Vec<ToTag> inactive;
       if constexpr (population_count == 0 ||
-                    option_count<IsZeroOption, Options...> == 1) {
+                    option_count_v<IsZeroOption, Options...> == 1) {
         inactive = zeros(to);
       } else if constexpr (
-          option_count<IsVectorMergeOption, Options...> == 1) {
+          option_count_v<IsVectorMergeOption, Options...> == 1) {
         inactive = find_option<IsVectorMergeOption>(
             std::forward<Options>(options)...).value;
       } else {
@@ -542,23 +542,23 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_options(
     StoreConvertOp op, FromTag from, To* pointer, Vec<FromTag> value,
     Options&&... options) {
   constexpr std::size_t active_count =
-      option_count<IsMemoryActiveOption, Options...>;
-  constexpr bool unordered = option_count<IsUnorderedOption, Options...> == 1;
+      option_count_v<IsMemoryActiveOption, Options...>;
+  constexpr bool unordered = option_count_v<IsUnorderedOption, Options...> == 1;
   constexpr std::size_t addressing_count =
-      option_count<IsMemoryAddressingOption, Options...>;
+      option_count_v<IsMemoryAddressingOption, Options...>;
   using ToTag = Rebind<To, FromTag>;
 
   auto invoke = [&](auto layout, auto value_policy, auto alignment,
                     auto temporality, auto packing) VECOPS_INLINE_LAMBDA {
     if constexpr (
         active_count == 0 ||
-        option_count<IsUnmaskedOption, Options...> == 1) {
+        option_count_v<IsUnmaskedOption, Options...> == 1) {
       execute(
           op, from, pointer, value, layout, value_policy,
           alignment, temporality, packing);
     } else if constexpr (unordered) {
       Mask<ToTag> mask;
-      if constexpr (option_count<IsMaskedOption, Options...> == 1) {
+      if constexpr (option_count_v<IsMaskedOption, Options...> == 1) {
         mask = find_option<IsMaskedOption>(
             std::forward<Options>(options)...).value;
       } else {
@@ -571,7 +571,7 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_options(
           alignment, temporality, packing);
     } else {
       Mask<FromTag> mask;
-      if constexpr (option_count<IsMaskedOption, Options...> == 1) {
+      if constexpr (option_count_v<IsMaskedOption, Options...> == 1) {
         mask = find_option<IsMaskedOption>(
             std::forward<Options>(options)...).value;
       } else {

@@ -182,7 +182,7 @@ namespace details {
 // ======================== Value Normalization ========================
 
 template <typename T>
-using HopValue = ::vecops::meta::ToValue<std::remove_cvref_t<T>>;
+using HopValue = ::vecops::meta::to_value_t<std::remove_cvref_t<T>>;
 
 template <typename T>
 VECOPS_ALWAYS_INLINE constexpr HopValue<T> to_hop_value(T&& value) {
@@ -200,7 +200,7 @@ struct ConstValue<Const<N>> : std::true_type {
 };
 
 template <typename T>
-static constexpr bool is_const_value_v = ConstValue<std::remove_cvref_t<T>>::value;
+inline constexpr bool is_const_value_v = ConstValue<std::remove_cvref_t<T>>::value;
 
 template <typename N, typename Step>
 struct HasNoTail : std::false_type {};
@@ -220,7 +220,7 @@ template <nint_t A, nint_t Lo, nint_t Hi>
 struct HasNoTail<Const<0>, Dynamic<A, Lo, Hi>> : std::true_type {};
 
 template <typename N, typename Step>
-static constexpr bool has_no_tail_v =
+inline constexpr bool has_no_tail_v =
     HasNoTail<std::remove_cvref_t<N>, std::remove_cvref_t<Step>>::value;
 
 template <typename N, typename Step>
@@ -234,7 +234,7 @@ template <nint_t N>
 struct HasConstTail<Const<N>, Const<0>> : std::false_type {};
 
 template <typename N, typename Step>
-static constexpr bool has_const_tail_v =
+inline constexpr bool has_const_tail_v =
     HasConstTail<std::remove_cvref_t<N>, std::remove_cvref_t<Step>>::value;
 
 template <typename N, typename Step>
@@ -369,31 +369,31 @@ consteval int floor_log2_positive(int value) {
 
 template <::vecops::vec::VectorTag Tag, int Power>
 struct GrowVectorTag {
-  using Type = typename GrowVectorTag<
-      ::vecops::vec::Twice<Tag>, Power - 1>::Type;
+  using type = typename GrowVectorTag<
+      ::vecops::vec::Twice<Tag>, Power - 1>::type;
 };
 
 template <::vecops::vec::VectorTag Tag>
 struct GrowVectorTag<Tag, 0> {
-  using Type = Tag;
+  using type = Tag;
 };
 
 template <::vecops::vec::VectorTag Tag, int Factor,
-          bool Scalable = ::vecops::vec::is_scalable_tag<Tag>>
+          bool Scalable = ::vecops::vec::is_scalable_tag_v<Tag>>
 struct SuggestedFactorTag;
 
 template <::vecops::vec::VectorTag Tag, int Factor>
 struct SuggestedFactorTag<Tag, Factor, true> {
   static_assert(Factor > 0, "vector loop factor must be positive");
   static_assert(
-      ::vecops::vec::scale_power<Tag> <= VEC_MAX_POW,
+      ::vecops::vec::scale_power_v<Tag> <= VEC_MAX_POW,
       "base vector tag exceeds the backend multi-word limit");
   static constexpr int requested_power = floor_log2_positive(Factor);
   static constexpr int available_power =
-      VEC_MAX_POW - ::vecops::vec::scale_power<Tag>;
+      VEC_MAX_POW - ::vecops::vec::scale_power_v<Tag>;
   static constexpr int actual_power =
       requested_power < available_power ? requested_power : available_power;
-  using Type = typename GrowVectorTag<Tag, actual_power>::Type;
+  using type = typename GrowVectorTag<Tag, actual_power>::type;
 };
 
 template <::vecops::vec::VectorTag Tag, int Factor>
@@ -405,7 +405,7 @@ struct SuggestedFactorTag<Tag, Factor, false> {
         static_cast<nint_t>(MAX_VEC_WIDTH / 8) /
         static_cast<nint_t>(sizeof(::vecops::vec::ElementOf<Tag>));
     constexpr nint_t max_lanes = max_word_lanes << VEC_MAX_POW;
-    nint_t lanes = ::vecops::vec::fixed_lanes<Tag>;
+    nint_t lanes = ::vecops::vec::fixed_lanes_v<Tag>;
     int power = 0;
     while (power < requested_power && lanes <= max_lanes / 2) {
       lanes *= 2;
@@ -413,11 +413,11 @@ struct SuggestedFactorTag<Tag, Factor, false> {
     }
     return power;
   }();
-  using Type = typename GrowVectorTag<Tag, actual_power>::Type;
+  using type = typename GrowVectorTag<Tag, actual_power>::type;
 };
 
 template <::vecops::vec::VectorTag Tag, int Factor>
-using SuggestedFactorTagT = typename SuggestedFactorTag<Tag, Factor>::Type;
+using suggested_factor_tag_t = typename SuggestedFactorTag<Tag, Factor>::type;
 
 template <::vecops::vec::VectorTag ParentTag,
           ::vecops::vec::VectorTag ChildTag>
@@ -778,10 +778,10 @@ struct SliceTraits<Access> {
 };
 
 template <typename T>
-static constexpr int slice_rank_v = SliceTraits<std::remove_cvref_t<T>>::rank;
+inline constexpr int slice_rank_v = SliceTraits<std::remove_cvref_t<T>>::rank;
 
 template <typename T>
-static constexpr bool is_sliceable_v = SliceTraits<std::remove_cvref_t<T>>::is_sliceable;
+inline constexpr bool is_sliceable_v = SliceTraits<std::remove_cvref_t<T>>::is_sliceable;
 
 template <int I, typename T>
 using slice_shape_dim_t = typename SliceTraits<std::remove_cvref_t<T>>::template shape_dim<I>;
@@ -793,7 +793,7 @@ template <>
 struct IsConstOne<Const<1>> : std::true_type {};
 
 template <int I, typename T>
-static constexpr bool is_const_one_dim_v =
+inline constexpr bool is_const_one_dim_v =
     IsConstOne<slice_shape_dim_t<I, T>>::value;
 
 constexpr int max2(int a, int b) {
@@ -810,10 +810,10 @@ template <int N, int... Ns>
 struct MaxInt<N, Ns...> : std::integral_constant<int, max2(N, MaxInt<Ns...>::value)> {};
 
 template <int... Is>
-static constexpr int max_index_plus_one_v = MaxInt<(Is + 1)...>::value;
+inline constexpr int max_index_plus_one_v = MaxInt<(Is + 1)...>::value;
 
 template <typename... Ts>
-static constexpr int max_slice_rank_v = MaxInt<slice_rank_v<Ts>...>::value;
+inline constexpr int max_slice_rank_v = MaxInt<slice_rank_v<Ts>...>::value;
 
 // ======================== Dimension Validation ========================
 
@@ -850,11 +850,11 @@ constexpr int adjust_dim_after_slice() {
 // ======================== Logical-to-Actual Dimension Mapping ========================
 
 template <int LogicalRank, int LogicalDim, typename T>
-static constexpr int actual_dim_v =
+inline constexpr int actual_dim_v =
     LogicalDim - (LogicalRank - slice_rank_v<T>);
 
 template <int LogicalRank, int LogicalDim, typename T>
-static constexpr bool has_actual_dim_v =
+inline constexpr bool has_actual_dim_v =
     is_sliceable_v<T> && (0 <= actual_dim_v<LogicalRank, LogicalDim, T>) &&
     (actual_dim_v<LogicalRank, LogicalDim, T> < slice_rank_v<T>);
 
@@ -866,7 +866,7 @@ struct IsBroadcastDim<true, ActualDim, T>
     : std::bool_constant<is_const_one_dim_v<ActualDim, T>> {};
 
 template <int LogicalRank, int LogicalDim, typename T>
-static constexpr bool is_broadcast_dim_v =
+inline constexpr bool is_broadcast_dim_v =
     IsBroadcastDim<
         has_actual_dim_v<LogicalRank, LogicalDim, T>,
         actual_dim_v<LogicalRank, LogicalDim, T>,
@@ -1401,8 +1401,8 @@ VECOPS_ALWAYS_INLINE void map(Tag base_tag, N n, Fn&& block) {
       TailFactor <= FullFactor,
       "map tail factor cannot exceed full factor");
 
-  using FullTag = details::SuggestedFactorTagT<Tag, FullFactor>;
-  using TailTag = details::SuggestedFactorTagT<Tag, TailFactor>;
+  using FullTag = details::suggested_factor_tag_t<Tag, FullFactor>;
+  using TailTag = details::suggested_factor_tag_t<Tag, TailFactor>;
   auto n_value = details::to_hop_value(n);
   if constexpr (details::is_const_value_v<decltype(n_value)>) {
     static_assert(
@@ -1456,8 +1456,8 @@ VECOPS_ALWAYS_INLINE void fold(
       (details::is_vector_carry_definition_v<Definitions> && ...),
       "fold accepts only reduce_add/max/min or invariant definitions");
 
-  using FullTag = details::SuggestedFactorTagT<Tag, FullFactor>;
-  using TailTag = details::SuggestedFactorTagT<Tag, TailFactor>;
+  using FullTag = details::suggested_factor_tag_t<Tag, FullFactor>;
+  using TailTag = details::suggested_factor_tag_t<Tag, TailFactor>;
   auto n_value = details::to_hop_value(n);
   if constexpr (details::is_const_value_v<decltype(n_value)>) {
     static_assert(

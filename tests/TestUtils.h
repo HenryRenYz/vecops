@@ -237,25 +237,25 @@ template <typename T> T scalar_fnmsub(T a, T b, T c) { return scalar_sub(scalar_
 
 template <typename T>
 T scalar_div(T a, T b) {
-  if constexpr (vecops::is_float<T>) return a / b;
+  if constexpr (vecops::is_float_v<T>) return a / b;
   else return static_cast<T>(0);
 }
 
 template <typename T>
 T scalar_max(T a, T b) {
-  if constexpr (vecops::is_float<T>) return std::max(a, b);
+  if constexpr (vecops::is_float_v<T>) return std::max(a, b);
   else return (a > b) ? a : b;
 }
 
 template <typename T>
 T scalar_min(T a, T b) {
-  if constexpr (vecops::is_float<T>) return std::min(a, b);
+  if constexpr (vecops::is_float_v<T>) return std::min(a, b);
   else return (a < b) ? a : b;
 }
 
 template <typename T>
 T scalar_abs(T a) {
-  if constexpr (vecops::is_float<T>) return std::fabs(a);
+  if constexpr (vecops::is_float_v<T>) return std::fabs(a);
   else return (a < T{}) ? -a : a;
 }
 
@@ -309,7 +309,7 @@ T scalar_bit_shr(T a, int count) {
 
 template <typename T>
 T scalar_sqrt(T a) {
-  if constexpr (vecops::is_float<T>) return std::sqrt((vecops::float64_t)a);
+  if constexpr (vecops::is_float_v<T>) return std::sqrt((vecops::float64_t)a);
   else return static_cast<T>(0);
 }
 

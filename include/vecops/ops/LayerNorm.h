@@ -114,7 +114,7 @@ public:
     using InElement = std::remove_const_t<typename InSpec::MemoryElement>;
     constexpr bool UseSVE16 =
         std::same_as<ComputeType, float32_t> &&
-        (IsFloat16V<InElement> || IsBfloat16V<InElement>);
+        (is_float16_v<InElement> || is_bfloat16_v<InElement>);
     using RowRecipe = std::conditional_t<
         UseSVE16, details::SVE16RowRecipe,
         details::GenericRowRecipe>;

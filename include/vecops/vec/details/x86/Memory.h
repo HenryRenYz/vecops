@@ -727,7 +727,7 @@ struct NativeImpl<X86Backend, LoadOp, Tag> {
     // deliberately fall through to GenericImpl's lane-by-lane byte addressing;
     // a future path may range-check and narrow indices to i32 first.
     requires (!(sizeof(ElementOf<Tag>) < 4 &&
-                sizeof(ElementOf<VecToTagT<Indices>>) == 8))
+                sizeof(ElementOf<VecToTag<Indices>>) == 8))
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(
       LoadOp op, Tag tag, const ElementOf<Tag>* pointer,
       opt::Indexed<Indices, Scale> addressing, Temporality temporality) {
@@ -738,12 +738,12 @@ struct NativeImpl<X86Backend, LoadOp, Tag> {
 
   template <VectorValue Indices, int Scale, typename Temporality>
     requires (!(sizeof(ElementOf<Tag>) < 4 &&
-                sizeof(ElementOf<VecToTagT<Indices>>) == 8))
+                sizeof(ElementOf<VecToTag<Indices>>) == 8))
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(
       LoadOp, Tag tag, const ElementOf<Tag>* pointer,
       opt::Indexed<Indices, Scale> addressing,
       Mask<Tag> mask, Vec<Tag> inactive, Temporality) {
-    using IndexTag = Rebind<ElementOf<VecToTagT<Indices>>, Tag>;
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, Tag>;
     constexpr int scale = Scale == 0 ? sizeof(ElementOf<Tag>) : Scale;
     return x86_load_indexed_native<scale, Tag, IndexTag>(
         tag, pointer, addressing.indices, mask, inactive);
@@ -894,7 +894,7 @@ struct NativeImpl<X86Backend, StoreOp, Tag> {
   static VECOPS_ALWAYS_INLINE void call(
       StoreOp, Tag tag, ElementOf<Tag>* pointer, Vec<Tag> value,
       opt::Indexed<Indices, Scale> addressing, Mask<Tag> mask, Temporality) {
-    using IndexTag = Rebind<ElementOf<VecToTagT<Indices>>, Tag>;
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, Tag>;
     constexpr int scale = Scale == 0 ? sizeof(ElementOf<Tag>) : Scale;
     x86_store_indexed_native<scale, Tag, IndexTag>(
         tag, pointer, value, addressing.indices, mask);

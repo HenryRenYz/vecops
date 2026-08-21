@@ -91,7 +91,7 @@ template <typename From, typename To, int Power, int Last, typename Visitor>
 void visit_scalable_conversion_powers(Visitor& visitor) {
   using FromTag = vecops::vec::ScalableTag<From, Power>;
   using ToTag = vecops::vec::Rebind<To, FromTag>;
-  constexpr int to_power = vecops::vec::scale_power<ToTag>;
+  constexpr int to_power = vecops::vec::scale_power_v<ToTag>;
   if constexpr (
       to_power >= minimum_scalable_power<To> &&
       to_power <= maximum_scalable_power)
@@ -135,9 +135,9 @@ void for_each_scalable_conversion_shape(Visitor&& visitor) {
 /** Shapes on which every orthogonal Options population is instantiated. */
 template <vecops::vec::VectorTag Tag>
 inline constexpr bool exhaustive_options_shape = [] {
-  if constexpr (vecops::vec::is_scalable_tag<Tag>) {
+  if constexpr (vecops::vec::is_scalable_tag_v<Tag>) {
     using T = vecops::vec::ElementOf<Tag>;
-    constexpr int power = vecops::vec::scale_power<Tag>;
+    constexpr int power = vecops::vec::scale_power_v<Tag>;
     return power == details::minimum_scalable_power<T> ||
         power == 0 || power == details::maximum_scalable_power;
   } else {

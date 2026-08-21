@@ -28,30 +28,30 @@ using option_type_or_t = std::conditional_t<
 namespace request_resolve {
 
 template <typename... Options>
-inline constexpr Active active_kind_of =
-    option_count<IsFirstOption, Options...> == 1
+inline constexpr Active active_kind_of_v =
+    option_count_v<IsFirstOption, Options...> == 1
         ? Active::First
-        : (option_count<IsMaskedOption, Options...> == 1 ? Active::Masked
+        : (option_count_v<IsMaskedOption, Options...> == 1 ? Active::Masked
                                                          : Active::Unmasked);
 
 template <typename... Options>
-inline constexpr Addressing addressing_kind_of =
-    option_count<IsIndexedOption, Options...> == 1
+inline constexpr Addressing addressing_kind_of_v =
+    option_count_v<IsIndexedOption, Options...> == 1
         ? Addressing::Indexed
-        : (option_count<IsStridedOption, Options...> == 1
+        : (option_count_v<IsStridedOption, Options...> == 1
                ? Addressing::Strided
                : Addressing::Contiguous);
 
 template <typename... Options>
-inline constexpr Populate populate_kind_of =
-    option_count<IsVectorMergeOption, Options...> == 1
+inline constexpr Populate populate_kind_of_v =
+    option_count_v<IsVectorMergeOption, Options...> == 1
         ? Populate::MergeVector
-        : (option_count<IsScalarMergeOption, Options...> == 1
+        : (option_count_v<IsScalarMergeOption, Options...> == 1
                ? Populate::MergeScalar
                : Populate::Zero);
 
 template <typename... Options>
-inline constexpr int index_scale_of = [] {
+inline constexpr int index_scale_of_v = [] {
   using Indexed = find_option_type_t<IsIndexedOption, Options...>;
   if constexpr (!std::is_void_v<Indexed>) {
     return Indexed::scale;
@@ -85,12 +85,12 @@ template <VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE auto resolve_load_request(Options&&... options) {
   using Request = LoadRequest<
       Tag,
-      request_resolve::active_kind_of<Options...>,
-      request_resolve::addressing_kind_of<Options...>,
-      request_resolve::populate_kind_of<Options...>,
+      request_resolve::active_kind_of_v<Options...>,
+      request_resolve::addressing_kind_of_v<Options...>,
+      request_resolve::populate_kind_of_v<Options...>,
       option_type_or_t<IsMemoryAlignmentOption, mem::Unaligned, Options...>,
       option_type_or_t<IsMemoryTemporalityOption, mem::Temporal, Options...>,
-      request_resolve::index_scale_of<Options...>,
+      request_resolve::index_scale_of_v<Options...>,
       request_resolve::index_vector_of_t<Tag, Options...>>;
   Request request;
   if constexpr (Request::active_kind == Active::First) {
@@ -123,11 +123,11 @@ template <VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE auto resolve_store_request(Options&&... options) {
   using Request = StoreRequest<
       Tag,
-      request_resolve::active_kind_of<Options...>,
-      request_resolve::addressing_kind_of<Options...>,
+      request_resolve::active_kind_of_v<Options...>,
+      request_resolve::addressing_kind_of_v<Options...>,
       option_type_or_t<IsMemoryAlignmentOption, mem::Unaligned, Options...>,
       option_type_or_t<IsMemoryTemporalityOption, mem::Temporal, Options...>,
-      request_resolve::index_scale_of<Options...>,
+      request_resolve::index_scale_of_v<Options...>,
       request_resolve::index_vector_of_t<Tag, Options...>>;
   Request request;
   if constexpr (Request::active_kind == Active::First) {
@@ -175,24 +175,24 @@ struct ConvertMaskVectorOf<ToTag, opt::Masked<M>> {
 namespace request_resolve {
 
 template <typename... Options>
-inline constexpr bool is_mask_merge_option_pack =
+inline constexpr bool is_mask_merge_option_pack_v =
     ((IsMaskMergeOption<std::remove_cvref_t<Options>>::value) || ...);
 
 template <typename... Options>
 inline constexpr Active op_active_kind_of =
-    option_count<IsMaskedOption, Options...> == 1
+    option_count_v<IsMaskedOption, Options...> == 1
         ? Active::Masked
         : Active::Unmasked;
 
 template <typename... Options>
 inline constexpr Inactive op_inactive_kind_of =
-    option_count<IsZeroOption, Options...> == 1
+    option_count_v<IsZeroOption, Options...> == 1
         ? Inactive::Zero
-        : (option_count<IsVectorMergeOption, Options...> == 1
+        : (option_count_v<IsVectorMergeOption, Options...> == 1
                ? Inactive::MergeVector
-               : (option_count<IsScalarMergeOption, Options...> == 1
+               : (option_count_v<IsScalarMergeOption, Options...> == 1
                       ? Inactive::MergeScalar
-                      : (is_mask_merge_option_pack<Options...>
+                      : (is_mask_merge_option_pack_v<Options...>
                              ? Inactive::MergeMask
                              : Inactive::PreserveInput)));
 
@@ -238,12 +238,12 @@ VECOPS_ALWAYS_INLINE auto resolve_load_convert_request(Options&&... options) {
   using Request = LoadConvertRequest<
       ToTag,
       From,
-      request_resolve::active_kind_of<Options...>,
-      request_resolve::addressing_kind_of<Options...>,
-      request_resolve::populate_kind_of<Options...>,
+      request_resolve::active_kind_of_v<Options...>,
+      request_resolve::addressing_kind_of_v<Options...>,
+      request_resolve::populate_kind_of_v<Options...>,
       option_type_or_t<IsMemoryAlignmentOption, mem::Unaligned, Options...>,
       option_type_or_t<IsMemoryTemporalityOption, mem::Temporal, Options...>,
-      request_resolve::index_scale_of<Options...>,
+      request_resolve::index_scale_of_v<Options...>,
       request_resolve::index_vector_of_t<ToTag, Options...>,
       option_type_or_t<
           request_resolve::IsAnyConversionLayoutOption,
@@ -288,11 +288,11 @@ VECOPS_ALWAYS_INLINE auto resolve_store_convert_request(
   using Request = StoreConvertRequest<
       FromTag,
       To,
-      request_resolve::active_kind_of<Options...>,
-      request_resolve::addressing_kind_of<Options...>,
+      request_resolve::active_kind_of_v<Options...>,
+      request_resolve::addressing_kind_of_v<Options...>,
       option_type_or_t<IsMemoryAlignmentOption, mem::Unaligned, Options...>,
       option_type_or_t<IsMemoryTemporalityOption, mem::Temporal, Options...>,
-      request_resolve::index_scale_of<Options...>,
+      request_resolve::index_scale_of_v<Options...>,
       request_resolve::index_vector_of_t<FromTag, Options...>,
       option_type_or_t<
           request_resolve::IsAnyConversionLayoutOption,

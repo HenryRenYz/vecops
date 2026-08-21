@@ -1686,7 +1686,7 @@ struct X86FmaWordImpl {
     else if constexpr (std::same_as<Op, FnmsubOp>) {
       using T = ElementOf<Tag>;
       const T negative_zero = [] {
-        if constexpr (IsFloatV<T>) return static_cast<T>(-0.0F);
+        if constexpr (is_float_v<T>) return static_cast<T>(-0.0F);
         else return T{};
       }();
       const auto zero = NativeWordImpl<X86Backend, FillOp>::template call<Index>(

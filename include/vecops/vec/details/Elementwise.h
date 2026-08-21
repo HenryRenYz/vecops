@@ -28,7 +28,7 @@ template <typename Op>
 struct EnableMaskElementwiseWordBatching : std::false_type {};
 
 template <typename Value, VectorTag Tag>
-inline constexpr bool is_elementwise_value =
+inline constexpr bool is_elementwise_value_v =
     std::same_as<std::remove_cvref_t<Value>, Vec<Tag>> ||
     std::same_as<std::remove_cvref_t<Value>, Mask<Tag>>;
 
@@ -66,7 +66,7 @@ struct ElementwiseWordBatch {
 
  public:
   template <typename... Rest>
-    requires (is_elementwise_value<Rest, Tag> && ...)
+    requires (is_elementwise_value_v<Rest, Tag> && ...)
   static VECOPS_ALWAYS_INLINE Value call(
       Op op, Tag tag, Value first, Rest&&... rest) {
     return call_words(
@@ -86,7 +86,7 @@ template <typename Backend, typename Op, VectorTag Tag>
 struct GenericImpl<Backend, Op, Tag> {
   template <typename... Rest>
     requires EnableElementwiseWordBatching<Op>::value &&
-             (is_elementwise_value<Rest, Tag> && ...)
+             (is_elementwise_value_v<Rest, Tag> && ...)
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(
       Op op, Tag tag, Vec<Tag> first, Rest&&... rest) {
     return ElementwiseWordBatch<Backend, Op, Tag, Vec<Tag>>::call(
@@ -95,7 +95,7 @@ struct GenericImpl<Backend, Op, Tag> {
 
   template <typename... Rest>
     requires EnableMaskElementwiseWordBatching<Op>::value &&
-             (is_elementwise_value<Rest, Tag> && ...)
+             (is_elementwise_value_v<Rest, Tag> && ...)
   static VECOPS_ALWAYS_INLINE Mask<Tag> call(
       Op op, Tag tag, Mask<Tag> first, Rest&&... rest) {
     return ElementwiseWordBatch<Backend, Op, Tag, Mask<Tag>>::call(

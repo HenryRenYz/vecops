@@ -24,7 +24,7 @@ namespace vecops::vec::details {
 /* **************************************************************************** */
 
 template <typename T>
-inline constexpr bool is_x86_conversion_element =
+inline constexpr bool is_x86_conversion_element_v =
     std::same_as<T, bfloat16_t> || std::same_as<T, float16_t> ||
     std::same_as<T, float32_t> || std::same_as<T, float64_t> ||
     std::same_as<T, int8_t> || std::same_as<T, uint8_t> ||
@@ -260,10 +260,10 @@ VECOPS_ALWAYS_INLINE Mask<ToTag> x86_convert_mask_native(
   using ToTraits = RepresentationTraits<X86Backend, ToTag>;
   using FromTraits = RepresentationTraits<X86Backend, FromTag>;
   static_assert(
-      is_x86_conversion_element<ElementOf<ToTag>>,
+      is_x86_conversion_element_v<ElementOf<ToTag>>,
       "unsupported x86 mask conversion destination element type");
   static_assert(
-      is_x86_conversion_element<ElementOf<FromTag>>,
+      is_x86_conversion_element_v<ElementOf<FromTag>>,
       "unsupported x86 mask conversion source element type");
 
   if constexpr (ToTraits::word_count == 1 && FromTraits::word_count == 1) {
@@ -935,8 +935,8 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_native(
   using FromTraits = RepresentationTraits<X86Backend, FromTag>;
   using To = ElementOf<ToTag>;
   using From = ElementOf<FromTag>;
-  static_assert(is_x86_conversion_element<ElementOf<ToTag>>);
-  static_assert(is_x86_conversion_element<ElementOf<FromTag>>);
+  static_assert(is_x86_conversion_element_v<ElementOf<ToTag>>);
+  static_assert(is_x86_conversion_element_v<ElementOf<FromTag>>);
 
   constexpr bool split_bfloat32_narrowing =
       std::same_as<ElementOf<ToTag>, bfloat16_t> &&

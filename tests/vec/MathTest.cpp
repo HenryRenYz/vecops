@@ -303,7 +303,7 @@ template <MathOperation Operation, typename T>
 void run_math_shapes_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::FloatingTag Tag>() {
     constexpr bool options = vec_test::exhaustive_options_shape<Tag> &&
-        (vec::scale_power<Tag> != vec_test::details::maximum_scalable_power ||
+        (vec::scale_power_v<Tag> != vec_test::details::maximum_scalable_power ||
          std::same_as<T, vecops::float32_t>);
     verify_every_operation<Operation, T, options>(Tag{});
   });

@@ -36,7 +36,7 @@ struct InferredTagTraits;
 
 template <typename V>
 concept HasInferredTag = requires {
-  typename InferredTagTraits<std::remove_cvref_t<V>>::Type;
+  typename InferredTagTraits<std::remove_cvref_t<V>>::type;
 };
 
 } // namespace vecops::vec::details
@@ -54,7 +54,7 @@ concept MaskValue = details::IsMaskRepresentation<
 template <VectorValue V>
   requires details::HasInferredTag<V>
 using InferredTagOf = typename details::InferredTagTraits<
-    std::remove_cvref_t<V>>::Type;
+    std::remove_cvref_t<V>>::type;
 
 } // namespace vecops::vec
 

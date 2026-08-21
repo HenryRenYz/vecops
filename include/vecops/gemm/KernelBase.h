@@ -62,26 +62,30 @@ struct Atom {
    * 返回布局为Shape<ceil(xM/M_R), ceil(xK/K_R), ...>, Stride<Dynamic<64> | Int<*>, Dynamic<64> | Int<*>>的特化。
    * 注：可能并不总是连续的，在一些输入下为了防止cache thrashing可能会特意留意些空隙。
    */
-  template <typename TLayout, std::enable_if_t<tensor::is_layout<TLayout>, bool> = true>
+  template <typename TLayout>
+    requires tensor::is_layout_v<TLayout>
   using APackedLayout = TLayout;
 
   /**
    * ALayout是否为打包布局，即判断其是否为APackedLayout<ALayout>的宽松类型：
    * Shape<*, *, ...>, Stride<Dynamic<64> | Int<*>, Dynamic<64> | Int<*>>。
    */
-  template <typename TLayout, std::enable_if_t<tensor::is_layout<TLayout>, bool> = true>
-  static constexpr bool is_A_packed_layout = true;
+  template <typename TLayout>
+    requires tensor::is_layout_v<TLayout>
+  static constexpr bool is_a_packed_layout = true;
 
   template <
       typename TSrcA, typename SrcALayout, typename SrcAPackedLayout, typename Prologue>
   void pack_A(const TSrcA *src, SrcALayout src_layout, TA *dst, SrcAPackedLayout dst_layout, const Prologue &prologue);
 
 
-  template <typename TLayout, std::enable_if_t<tensor::is_layout<TLayout>, bool> = true>
+  template <typename TLayout>
+    requires tensor::is_layout_v<TLayout>
   using BPackedLayout = TLayout;
 
-  template <typename TLayout, std::enable_if_t<tensor::is_layout<TLayout>, bool> = true>
-  static constexpr bool is_B_packed_layout = true;
+  template <typename TLayout>
+    requires tensor::is_layout_v<TLayout>
+  static constexpr bool is_b_packed_layout = true;
 
   template <
       typename TSrcB, typename SrcBLayout, typename SrcBPackedLayout, typename Prologue>
@@ -131,11 +135,11 @@ struct Kernel {
    * 执行K累加循环核心函数。
    * @tparam TSrcA, TSrcB, TSrcDstC A B C类型。
    * @tparam SrcALayout 输入A的布局，必须为非打包布局Shape<xM, xK>, Stride<*, *>或者打包布局，
-   *                    即满足Atom::is_A_packed_layout<SrcALayout>。其中xM, xN当前分块大小，
+   *                    即满足Atom::is_a_packed_layout<SrcALayout>。其中xM, xN当前分块大小，
    *                    不大于内核分块大小M_R, N_R，xK为K轴累加长度，任意，下同。
    * @tparam APrologue 用于非打包A的前处理，A打包时必须为identity。一般使用identity。
    * @tparam SrcBLayout 输入B的布局，必须为非打包布局Shape<xN, xK>, Stride<*, *>或者打包布局，
-   *                    即满足Atom::is_B_packed_layout<SrcBLayout>。
+   *                    即满足Atom::is_b_packed_layout<SrcBLayout>。
    * @tparam BPrologue 用于非打包B的前处理，B打包时必须为identity。一般使用identity。
    * @tparam SrcDstCLayout 输入C的布局，必须为非打包布局Shape<xM, xN>, Stride<*, *>。
    * @tparam CPrologue 用于非ld_acc时的C的前处理，一般使用zeros（零初始化）。

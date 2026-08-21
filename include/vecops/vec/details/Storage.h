@@ -64,7 +64,7 @@ template <typename Word, nint_t Count>
 struct IsWordArray<WordArray<Word, Count>> : std::true_type {};
 
 template <typename T>
-inline constexpr bool is_word_array =
+inline constexpr bool is_word_array_v =
     IsWordArray<std::remove_cvref_t<T>>::value;
 
 template <typename Word, nint_t Count>

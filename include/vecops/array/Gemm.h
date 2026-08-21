@@ -46,9 +46,9 @@ using Any = Aligned<1>;
 
 namespace details {
 template <typename T>
-struct ValueDefPromote { using Type = T; };
+struct ValueDefPromote { using type = T; };
 template <>
-struct ValueDefPromote<int> { using Type = Any; };
+struct ValueDefPromote<int> { using type = Any; };
 
 template <typename T>
 struct IntDefChecker : std::false_type {};
@@ -57,10 +57,10 @@ struct IntDefChecker<Int<N>> : std::true_type {};
 } // namespace details
 
 template <typename T>
-using ToValueDef = details::ValueDefPromote<T>::Type;
+using to_value_def_t = details::ValueDefPromote<T>::type;
 
 template <typename T>
-static constexpr bool is_int = details::IntDefChecker<T>::value;
+static constexpr bool is_int_def_v = details::IntDefChecker<T>::value;
 
 namespace details {
 
@@ -135,7 +135,7 @@ struct ConformCheck<I0, Is...> {
 template <
     int I,
     template<typename... xIs> typename Meta,
-    typename = void/*SFINAE*/,
+    typename I0,
     typename... IsRem
 >
 struct MetaTakeHelper;
@@ -145,10 +145,10 @@ template <
     typename I0,
     typename... IsRem
 >
-struct MetaTakeHelper<0, Meta, void, I0, IsRem...> {
+struct MetaTakeHelper<0, Meta, I0, IsRem...> {
   template <typename... IsProcessed>
   struct Holder {
-    using Type = Meta<IsProcessed..., IsRem...>;
+    using type = Meta<IsProcessed..., IsRem...>;
     static void set(const int * is, int * os, int n) {
       if constexpr (I0::is_runtime) {
         is += 1;
@@ -166,11 +166,12 @@ template <
     typename I0,
     typename... IsRem
 >
-struct MetaTakeHelper<I, Meta, std::enable_if_t<(I > 0)>, I0, IsRem...> {
+  requires (I > 0)
+struct MetaTakeHelper<I, Meta, I0, IsRem...> {
   template <typename... IsProcessed>
   struct Holder {
     using Next = MetaTakeHelper<I - 1, Meta, IsRem...>::template Holder<IsProcessed..., I0>;
-    using Type = typename Next::Type;
+    using type = typename Next::type;
     static void set(const int * is, int * os, int n) {
       if constexpr (I0::is_runtime) {
         os[0] = is[0];
@@ -185,7 +186,7 @@ struct MetaTakeHelper<I, Meta, std::enable_if_t<(I > 0)>, I0, IsRem...> {
 template <
     int I,
     template<typename... xIs> typename Meta,
-    typename = void/*SFINAE*/,
+    typename I0,
     typename... IsRem
 >
 struct ShapeTileHelper;
@@ -195,23 +196,23 @@ template <
     typename I0,
     typename... IsRem
 >
-struct ShapeTileHelper<0, Meta, void, I0, IsRem...> {
+struct ShapeTileHelper<0, Meta, I0, IsRem...> {
   template <typename... IsProcessed>
   struct Holder {
     // index I is a runtime value, or it is not divisible by tile size
     template <typename Ts>
-    static constexpr bool has_tail = !I0::is_const || !is_int<Ts> || (I0::value % Ts::value != 0);
+    static constexpr bool has_tail = !I0::is_const || !is_int_def_v<Ts> || (I0::value % Ts::value != 0);
     template <typename Ts>
-    using FullType = Meta<IsProcessed..., std::conditional_t<is_int<Ts>, Ts, Any>, IsRem...>;
+    using FullType = Meta<IsProcessed..., std::conditional_t<is_int_def_v<Ts>, Ts, Any>, IsRem...>;
     template <typename Ts>
-    using TailType = Meta<IsProcessed..., std::conditional_t<I0::is_const && is_int<Ts>, Int<I0::value % Ts::value>, Any>, IsRem...>;
+    using TailType = Meta<IsProcessed..., std::conditional_t<I0::is_const && is_int_def_v<Ts>, Int<I0::value % Ts::value>, Any>, IsRem...>;
     template <typename Ts>
     static void set_full(const int * is, int * os, int n, Ts ts) {
       if constexpr (I0::is_runtime) {
         is += 1;
       }
-      if constexpr (!is_int<Ts>) {
-        os[0] = ToValueDef<Ts>{ts}.value;
+      if constexpr (!is_int_def_v<Ts>) {
+        os[0] = to_value_def_t<Ts>{ts}.value;
         ++os;
       }
       for (int i = 0; i < n - 1; ++i) {
@@ -221,7 +222,7 @@ struct ShapeTileHelper<0, Meta, void, I0, IsRem...> {
     template <typename Ts>
     static void set_tail(const int * is, int * os, int n, Ts ts) {
       if constexpr (I0::is_runtime) {
-        os[0] = is[0] % ToValueDef<Ts>{ts}.value;
+        os[0] = is[0] % to_value_def_t<Ts>{ts}.value;
         os += 1;
         is += 1;
       }
@@ -238,7 +239,8 @@ template <
     typename I0,
     typename... IsRem
 >
-struct ShapeTileHelper<I, Meta, std::enable_if_t<(I > 0)>, I0, IsRem...> {
+  requires (I > 0)
+struct ShapeTileHelper<I, Meta, I0, IsRem...> {
   template <typename... IsProcessed>
   struct Holder {
     using Next = typename ShapeTileHelper<I - 1, Meta, IsRem...>::template Holder<IsProcessed..., I0>;
@@ -326,7 +328,7 @@ struct Shape : public MatrixMeta<Is...> {
   template <int I = 0>
   constexpr auto take() const {
     using H = details::MetaTakeHelper<I, Shape, Is...>::template Holder<>;
-    auto r = typename H::Type{};
+    auto r = typename H::type{};
     H::set(this->_is, r->_is, this->_IsLen);
     return r;
   }
@@ -363,7 +365,7 @@ struct Stride : public MatrixMeta<Is...> {
   template <int I = 0>
   constexpr auto take() const {
     using H = details::MetaTakeHelper<I, Stride, Is...>::template Holder<>;
-    auto r = typename H::Type{};
+    auto r = typename H::type{};
     H::set(this->_is, r->_is, this->_IsLen);
     return r;
   }
@@ -385,26 +387,26 @@ struct Stride : public MatrixMeta<Is...> {
 
 namespace details {
 template <typename T>
-struct ShapeChecker : public std::false_type {};
+struct IsShape : public std::false_type {};
 template <typename... Is>
-struct ShapeChecker<Shape<Is...>> : public std::true_type {};
+struct IsShape<Shape<Is...>> : public std::true_type {};
 
 template <typename T>
-struct StrideChecker : public std::false_type {};
+struct IsStride : public std::false_type {};
 template <typename... Is>
-struct StrideChecker<Stride<Is...>> : public std::true_type {};
+struct IsStride<Stride<Is...>> : public std::true_type {};
 } // namespace details
 
 template <typename T>
-static constexpr bool is_shape = details::ShapeChecker<T>::value;
+inline constexpr bool is_shape_v = details::IsShape<T>::value;
 
 template <typename T>
-static constexpr bool is_stride = details::StrideChecker<T>::value;
+inline constexpr bool is_stride_v = details::IsStride<T>::value;
 
 template <typename TShape, typename TStride>
 struct Layout {
-  static_assert(is_shape<TShape>, "TShape must be Shape<_,_>");
-  static_assert(is_stride<TStride>, "TStride must be Stride<_,_>");
+  static_assert(is_shape_v<TShape>, "TShape must be Shape<_,_>");
+  static_assert(is_stride_v<TStride>, "TStride must be Stride<_,_>");
   static_assert(TShape::Ndim == TStride::Ndim, "TShape and TStride must have the same rank");
   static constexpr int Ndim = TShape::Ndim;
 
@@ -454,49 +456,27 @@ private:
 
 namespace details {
 template <typename T>
-struct LayoutChecker : std::false_type {};
+struct IsLayout : std::false_type {};
 template <typename TShape, typename TStride>
-struct LayoutChecker<Layout<TShape, TStride>> : std::true_type {};
+struct IsLayout<Layout<TShape, TStride>> : std::true_type {};
 } // namespace details
 
 template <typename T>
-static constexpr bool is_layout = details::LayoutChecker<T>::value;
+inline constexpr bool is_layout_v = details::IsLayout<T>::value;
 
 namespace details {
-
-template <typename ShapeT>
-struct KDimType;
-template <typename D0, typename D1>
-struct KDimType<Shape<D0, D1>> { using type = D1; };
-
-template <typename OrigShape, typename NewD0, typename NewD1>
-struct SubShape2D;
-template <typename D0_orig, typename D1_orig, typename NewD0, typename NewD1>
-struct SubShape2D<Shape<D0_orig, D1_orig>, NewD0, NewD1> {
-  using Type = Shape<NewD0, NewD1>;
-  static Type create(int d0_val, int d1_val) {
-    if constexpr (NewD0::is_const && NewD1::is_const)
-      return Type{};
-    else if constexpr (NewD0::is_const && NewD1::is_runtime)
-      return Type{NewD0::value, d1_val};
-    else if constexpr (NewD0::is_runtime && NewD1::is_const)
-      return Type{d0_val, NewD1::value};
-    else
-      return Type{d0_val, d1_val};
-  }
-};
 
 template <int I, typename Meta>
 struct MetaParamAt;
 
 template <int I, template<typename...> typename Meta, typename I0, typename... Is>
 struct MetaParamAt<I, Meta<I0, Is...>> {
-  using Type = typename MetaParamAt<I - 1, Meta<Is...>>::Type;
+  using type = typename MetaParamAt<I - 1, Meta<Is...>>::type;
 };
 
 template <template<typename...> typename Meta, typename I0, typename... Is>
 struct MetaParamAt<0, Meta<I0, Is...>> {
-  using Type = I0;
+  using type = I0;
 };
 
 template <typename T>
@@ -521,7 +501,7 @@ struct StrideIsCompileTime : std::false_type {};
 
 template <typename... Is>
 struct StrideIsCompileTime<Stride<Is...>>
-    : std::bool_constant<(is_int<Is> && ...)> {};
+    : std::bool_constant<(is_int_def_v<Is> && ...)> {};
 
 template <typename ShapeT, int Dim>
 struct ShapeDim;
@@ -539,13 +519,13 @@ struct ShapeDim<Shape<D0, D1>, 1> {
 } // namespace details
 
 template <typename... IsOrInts>
-static constexpr Shape<ToValueDef<IsOrInts>...> make_shape(IsOrInts... vs) {
-  return Shape<ToValueDef<IsOrInts>...>{ToValueDef<IsOrInts>{vs}.value...};
+static constexpr Shape<to_value_def_t<IsOrInts>...> make_shape(IsOrInts... vs) {
+  return Shape<to_value_def_t<IsOrInts>...>{to_value_def_t<IsOrInts>{vs}.value...};
 }
 
 template <typename... IsOrInts>
-static constexpr Stride<ToValueDef<IsOrInts>...> make_stride(IsOrInts... vs) {
-  return Stride<ToValueDef<IsOrInts>...>{ToValueDef<IsOrInts>{vs}.value...};
+static constexpr Stride<to_value_def_t<IsOrInts>...> make_stride(IsOrInts... vs) {
+  return Stride<to_value_def_t<IsOrInts>...>{to_value_def_t<IsOrInts>{vs}.value...};
 }
 
 template <typename TShape, typename TStride>

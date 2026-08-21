@@ -27,8 +27,8 @@ struct DoubleP2CoordinateTransform {
   static constexpr bool reads_input = true;
 
   template <vec::VectorTag TransformTag, TransformContextLike Context>
-    requires vec::is_scalable_tag<TransformTag> &&
-             (vec::scale_power<TransformTag> == 2)
+    requires vec::is_scalable_tag_v<TransformTag> &&
+             (vec::scale_power_v<TransformTag> == 2)
   vec::Vec<TransformTag> operator()(
       TransformTag tag,
       vec::Vec<TransformTag> input,

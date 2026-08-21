@@ -28,8 +28,8 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_load_convert_ordered_saturating(
     ToTag to, const From* pointer) {
   using FromTag = Rebind<From, ToTag>;
   using ToTraits = RepresentationTraits<X86Backend, ToTag>;
-  static_assert(is_x86_conversion_element<ElementOf<ToTag>>);
-  static_assert(is_x86_conversion_element<From>);
+  static_assert(is_x86_conversion_element_v<ElementOf<ToTag>>);
+  static_assert(is_x86_conversion_element_v<From>);
   if constexpr (ToTraits::word_count > 1) {
     using WordTag = FixedTag<ElementOf<ToTag>, ToTraits::word_lanes>;
     return construct_words<X86Backend>(
@@ -50,8 +50,8 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_load_convert_ordered_saturating(
     ToTag to, const From* pointer, Mask<ToTag> mask, Vec<ToTag> inactive) {
   using FromTag = Rebind<From, ToTag>;
   using ToTraits = RepresentationTraits<X86Backend, ToTag>;
-  static_assert(is_x86_conversion_element<ElementOf<ToTag>>);
-  static_assert(is_x86_conversion_element<From>);
+  static_assert(is_x86_conversion_element_v<ElementOf<ToTag>>);
+  static_assert(is_x86_conversion_element_v<From>);
 
   if constexpr (ToTraits::word_count > 1) {
     using WordTag = FixedTag<ElementOf<ToTag>, ToTraits::word_lanes>;
@@ -156,8 +156,8 @@ template <Element To, VectorTag FromTag>
 VECOPS_ALWAYS_INLINE void x86_store_convert_ordered_saturating_packed(
     FromTag from, To* pointer, Vec<FromTag> value, Mask<FromTag> mask) {
   using ToTag = Rebind<To, FromTag>;
-  static_assert(is_x86_conversion_element<To>);
-  static_assert(is_x86_conversion_element<ElementOf<FromTag>>);
+  static_assert(is_x86_conversion_element_v<To>);
+  static_assert(is_x86_conversion_element_v<ElementOf<FromTag>>);
 
 #if defined(CPU_CAPABILITY_AVX512)
   if (x86_try_narrow_integer_store_avx512<To, FromTag>(
