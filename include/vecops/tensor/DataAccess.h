@@ -1925,6 +1925,13 @@ struct SliceAccessPolicy<
       SliceAccessPolicyT<PlanningPolicy, SlicedDim>, Defaults>;
 };
 
+template <typename PlanningPolicy, typename Defaults, int I, int J>
+struct TransposeAccessPolicy<
+    details::AccessLoweringPolicy<PlanningPolicy, Defaults>, I, J> {
+  using type = details::AccessLoweringPolicy<
+      TransposeAccessPolicyT<PlanningPolicy, I, J>, Defaults>;
+};
+
 template <
     typename Compute,
     typename Tensor,
@@ -2132,6 +2139,57 @@ template <typename T>
 inline constexpr bool is_output_spec_v =
     IsOutputSpec<std::remove_cvref_t<T>>::value;
 
+/** True for unbound Tensor/Spec values accepted by high-level operators. */
+template <typename T>
+concept UnboundTensorView =
+    is_tensor<std::remove_cvref_t<T>> || is_input_spec_v<T> ||
+    is_output_spec_v<T>;
+
+template <typename T>
+concept InputOperand =
+    is_tensor<std::remove_cvref_t<T>> || is_input_spec_v<T>;
+
+template <typename T>
+concept OutputOperand = [] {
+  using O = std::remove_cvref_t<T>;
+  if constexpr (is_output_spec_v<O>) return true;
+  else if constexpr (is_tensor<O>) {
+    return !std::is_const_v<typename O::ElementType>;
+  } else return false;
+}();
+
+/** Normalize a Tensor or an existing input Spec without discarding metadata. */
+template <typename Compute, typename Tensor>
+  requires is_tensor<std::remove_cvref_t<Tensor>>
+VECOPS_INLINE auto as_input_spec(Tensor&& tensor) {
+  return input<Compute>(std::forward<Tensor>(tensor));
+}
+
+template <typename Compute, typename Spec>
+  requires (is_input_spec_v<Spec> &&
+            std::same_as<typename std::remove_cvref_t<Spec>::ComputeType,
+                         Compute>)
+VECOPS_INLINE auto as_input_spec(Spec&& spec) {
+  return std::forward<Spec>(spec);
+}
+
+/** Normalize a mutable Tensor or an existing output Spec. */
+template <typename Compute, typename Tensor>
+  requires (is_tensor<std::remove_cvref_t<Tensor>> &&
+            !std::is_const_v<
+                typename std::remove_cvref_t<Tensor>::ElementType>)
+VECOPS_INLINE auto as_output_spec(Tensor&& tensor) {
+  return output<Compute>(std::forward<Tensor>(tensor));
+}
+
+template <typename Compute, typename Spec>
+  requires (is_output_spec_v<Spec> &&
+            std::same_as<typename std::remove_cvref_t<Spec>::ComputeType,
+                         Compute>)
+VECOPS_INLINE auto as_output_spec(Spec&& spec) {
+  return std::forward<Spec>(spec);
+}
+
 template <typename Spec, typename Policy>
 class InputDataAccess;
 
@@ -2176,6 +2234,19 @@ VECOPS_INLINE auto slice_view(
       sliced_tensor, spec.transform(), projection};
 }
 
+template <int I, int J, typename Compute, typename Tensor,
+          typename Transform, typename Projection, typename... Facts>
+VECOPS_INLINE auto transpose_view(
+    const InputSpec<Compute, Tensor, Transform, Projection, Facts...>& spec) {
+  static_assert(0 <= I && I < Tensor::Ndim);
+  static_assert(0 <= J && J < Tensor::Ndim);
+  auto transposed_tensor = tensor::transpose_view<I, J>(spec.tensor());
+  auto projection = spec.projection().template transposed<I, J>();
+  return InputSpec<Compute, decltype(transposed_tensor), Transform,
+                   decltype(projection)>{
+      transposed_tensor, spec.transform(), projection};
+}
+
 /**
  * @brief Slice one output Spec dimension while preserving original coordinates.
  * @return A new OutputSpec with sliced Tensor and composed projection.
@@ -2192,6 +2263,19 @@ VECOPS_INLINE auto slice_view(
   return OutputSpec<Compute, decltype(sliced_tensor), Transform,
                     decltype(projection)>{
       sliced_tensor, spec.transform(), projection};
+}
+
+template <int I, int J, typename Compute, typename Tensor,
+          typename Transform, typename Projection, typename... Facts>
+VECOPS_INLINE auto transpose_view(
+    const OutputSpec<Compute, Tensor, Transform, Projection, Facts...>& spec) {
+  static_assert(0 <= I && I < Tensor::Ndim);
+  static_assert(0 <= J && J < Tensor::Ndim);
+  auto transposed_tensor = tensor::transpose_view<I, J>(spec.tensor());
+  auto projection = spec.projection().template transposed<I, J>();
+  return OutputSpec<Compute, decltype(transposed_tensor), Transform,
+                    decltype(projection)>{
+      transposed_tensor, spec.transform(), projection};
 }
 
 /** @brief Keep the first N Spec dimensions at zero on trailing axes. */
@@ -2218,6 +2302,25 @@ VECOPS_INLINE auto take_trailing(const Spec& spec) {
   static_assert(1 <= N && N <= Rank);
   if constexpr (N == Rank) return spec;
   else return take_trailing<N>(slice_view<0>(spec, 0));
+}
+
+template <typename View>
+  requires (is_tensor<std::remove_cvref_t<View>> ||
+            is_input_spec_v<View> || is_output_spec_v<View> ||
+            requires(const View& view) { view.spec(); })
+VECOPS_INLINE constexpr decltype(auto) logical_layout(const View& view) {
+  using V = std::remove_cvref_t<View>;
+  if constexpr (is_tensor<V>) return view.layout();
+  else if constexpr (is_input_spec_v<V>) return view.input_layout();
+  else if constexpr (is_output_spec_v<V>) return view.output_layout();
+  else {
+    const auto& spec = view.spec();
+    if constexpr (std::remove_cvref_t<decltype(spec)>::is_input) {
+      return spec.input_layout();
+    } else {
+      return spec.output_layout();
+    }
+  }
 }
 
 template <typename Access, typename Tag, int Dim, typename Mapping>
@@ -3219,6 +3322,15 @@ VECOPS_INLINE auto slice_view(
       std::move(sliced), SlicedPolicy{}};
 }
 
+template <int I, int J, typename Spec, typename Policy>
+VECOPS_INLINE auto transpose_view(
+    const InputDataAccess<Spec, Policy>& access) {
+  auto transposed = transpose_view<I, J>(access.spec());
+  using TransposedPolicy = TransposeAccessPolicyT<Policy, I, J>;
+  return BorrowedDataAccess<decltype(transposed), TransposedPolicy>{
+      std::move(transposed), TransposedPolicy{}};
+}
+
 template <int Dim, typename Spec, typename Policy>
 VECOPS_INLINE auto slice_view(
     const OutputDataAccess<Spec, Policy>& access, nint_t index) {
@@ -3228,6 +3340,15 @@ VECOPS_INLINE auto slice_view(
       std::move(sliced), SlicedPolicy{}};
 }
 
+template <int I, int J, typename Spec, typename Policy>
+VECOPS_INLINE auto transpose_view(
+    const OutputDataAccess<Spec, Policy>& access) {
+  auto transposed = transpose_view<I, J>(access.spec());
+  using TransposedPolicy = TransposeAccessPolicyT<Policy, I, J>;
+  return BorrowedDataAccess<decltype(transposed), TransposedPolicy>{
+      std::move(transposed), TransposedPolicy{}};
+}
+
 template <int Dim, typename Spec, typename Policy>
 VECOPS_INLINE auto slice_view(
     const BorrowedDataAccess<Spec, Policy>& access, nint_t index) {
@@ -3235,6 +3356,15 @@ VECOPS_INLINE auto slice_view(
   using SlicedPolicy = SliceAccessPolicyT<Policy, Dim>;
   return BorrowedDataAccess<decltype(sliced), SlicedPolicy>{
       std::move(sliced), SlicedPolicy{}};
+}
+
+template <int I, int J, typename Spec, typename Policy>
+VECOPS_INLINE auto transpose_view(
+    const BorrowedDataAccess<Spec, Policy>& access) {
+  auto transposed = transpose_view<I, J>(access.spec());
+  using TransposedPolicy = TransposeAccessPolicyT<Policy, I, J>;
+  return BorrowedDataAccess<decltype(transposed), TransposedPolicy>{
+      std::move(transposed), TransposedPolicy{}};
 }
 
 template <int Dim, typename AuxSpec, typename CachePolicy>
@@ -3247,6 +3377,72 @@ VECOPS_INLINE auto slice_view(
       decltype(auxiliary), SlicedPolicy>{
       std::move(auxiliary), SlicedPolicy{}};
 }
+
+template <int I, int J, typename AuxSpec, typename CachePolicy>
+VECOPS_INLINE auto transpose_view(
+    const CanonicalMaterializedInputDataAccess<AuxSpec, CachePolicy>& access) {
+  auto auxiliary = transpose_view<I, J>(access.spec());
+  using TransposedPolicy = TransposeAccessPolicyT<CachePolicy, I, J>;
+  return CanonicalMaterializedInputDataAccess<
+      decltype(auxiliary), TransposedPolicy>{
+      std::move(auxiliary), TransposedPolicy{}};
+}
+
+// DeferredMaterializedInputDataAccess intentionally has no structural-view
+// overload. Its population/reuse phase state belongs to the complete bound
+// region; create sliced or transposed Specs before binding it.
+
+template <int N, typename Access>
+  requires requires(const Access& access) {
+    Access::Rank;
+    access.spec();
+    tensor::slice_view<N>(access, 0);
+  }
+VECOPS_INLINE decltype(auto) take_leading(const Access& access) {
+  static_assert(1 <= N && N <= Access::Rank);
+  if constexpr (N == Access::Rank) return (access);
+  else return take_leading<N>(slice_view<N>(access, 0));
+}
+
+template <int N, typename Access>
+  requires requires(const Access& access) {
+    Access::Rank;
+    access.spec();
+    tensor::slice_view<0>(access, 0);
+  }
+VECOPS_INLINE decltype(auto) take_trailing(const Access& access) {
+  static_assert(1 <= N && N <= Access::Rank);
+  if constexpr (N == Access::Rank) return (access);
+  else return take_trailing<N>(slice_view<0>(access, 0));
+}
+
+/** A bound session exposing its Spec and kernel-owned access policy. */
+template <typename T>
+concept BoundTensorAccess = requires(const std::remove_cvref_t<T>& access) {
+  std::remove_cvref_t<T>::Rank;
+  access.spec();
+  access.policy();
+};
+
+template <typename T>
+concept BoundInputAccess = BoundTensorAccess<T> && [] {
+  using Spec = std::remove_cvref_t<decltype(
+      std::declval<const std::remove_cvref_t<T>&>().spec())>;
+  return Spec::is_input;
+}();
+
+template <typename T>
+concept BoundOutputAccess = BoundTensorAccess<T> && [] {
+  using Spec = std::remove_cvref_t<decltype(
+      std::declval<const std::remove_cvref_t<T>&>().spec())>;
+  return !Spec::is_input;
+}();
+
+template <typename T>
+concept CommittableBoundOutputAccess =
+    BoundOutputAccess<T> && requires(std::remove_cvref_t<T>& access) {
+      access.commit();
+    };
 
 /**
  * @brief Owning output session backed by a contiguous auxiliary Tensor.
@@ -3439,6 +3635,17 @@ VECOPS_INLINE auto slice_view(
   using SlicedPolicy = SliceAccessPolicyT<Policy, Dim>;
   return BorrowedDataAccess<decltype(sliced), SlicedPolicy>{
       std::move(sliced), SlicedPolicy{}};
+}
+
+template <int I, int J, AccessPlan Plan, typename OriginalSpec,
+          typename AuxSpec, typename Policy>
+VECOPS_INLINE auto transpose_view(
+    const MaterializedOutputDataAccess<
+        Plan, OriginalSpec, AuxSpec, Policy>& access) {
+  auto transposed = transpose_view<I, J>(access.auxiliary_spec());
+  using TransposedPolicy = TransposeAccessPolicyT<Policy, I, J>;
+  return BorrowedDataAccess<decltype(transposed), TransposedPolicy>{
+      std::move(transposed), TransposedPolicy{}};
 }
 
 namespace details {

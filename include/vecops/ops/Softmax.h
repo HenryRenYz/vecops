@@ -82,10 +82,10 @@ public:
   VECOPS_INLINE constexpr explicit Softmax(Config cfg = {}) : config(cfg) {}
 
   template <typename InSpec, typename OutSpec>
+    requires (tensor::is_input_spec_v<InSpec> &&
+              tensor::is_output_spec_v<OutSpec>)
   VECOPS_INLINE nint_t required_workspace(
       const InSpec& in, const OutSpec& out) const {
-    static_assert(tensor::is_input_spec_v<InSpec>);
-    static_assert(tensor::is_output_spec_v<OutSpec>);
     details::validate_softmax_layouts(
         in.input_layout(), out.output_layout());
     constexpr int PrefixRank = InSpec::InputTensor::Ndim - 1;
@@ -105,12 +105,24 @@ public:
         tensor::required_workspace(out_row, YPolicy{});
   }
 
+  template <typename InOperand, typename OutOperand>
+    requires (tensor::InputOperand<InOperand> &&
+              tensor::OutputOperand<OutOperand> &&
+              !(tensor::is_input_spec_v<InOperand> &&
+                tensor::is_output_spec_v<OutOperand>))
+  VECOPS_INLINE nint_t required_workspace(
+      const InOperand& in, const OutOperand& out) const {
+    auto in_spec = tensor::as_input_spec<ComputeType>(in);
+    auto out_spec = tensor::as_output_spec<ComputeType>(out);
+    return required_workspace(in_spec, out_spec);
+  }
+
   template <typename InSpec, typename OutSpec>
+    requires (tensor::is_input_spec_v<InSpec> &&
+              tensor::is_output_spec_v<OutSpec>)
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace, const InSpec& in,
       const OutSpec& out) const {
-    static_assert(tensor::is_input_spec_v<InSpec>);
-    static_assert(tensor::is_output_spec_v<OutSpec>);
     details::validate_softmax_layouts(
         in.input_layout(), out.output_layout());
     constexpr int PrefixRank = InSpec::InputTensor::Ndim - 1;
@@ -189,11 +201,44 @@ public:
     }
   }
 
-  template <typename InSpec, typename OutSpec>
-  VECOPS_INLINE void operator()(const InSpec& in, const OutSpec& out) const {
+  template <typename InOperand, typename OutOperand>
+    requires (tensor::InputOperand<InOperand> &&
+              tensor::OutputOperand<OutOperand> &&
+              !(tensor::is_input_spec_v<InOperand> &&
+                tensor::is_output_spec_v<OutOperand>))
+  VECOPS_INLINE void operator()(
+      kernel::WorkspaceView& workspace, const InOperand& in,
+      const OutOperand& out) const {
+    auto in_spec = tensor::as_input_spec<ComputeType>(in);
+    auto out_spec = tensor::as_output_spec<ComputeType>(out);
+    (*this)(workspace, in_spec, out_spec);
+  }
+
+  template <typename InOperand, typename OutOperand>
+    requires (tensor::InputOperand<InOperand> &&
+              tensor::OutputOperand<OutOperand>)
+  VECOPS_INLINE void operator()(
+      const InOperand& in, const OutOperand& out) const {
     kernel::Workspace storage(required_workspace(in, out));
     auto workspace = storage.view();
     (*this)(workspace, in, out);
+  }
+
+  /**
+   * Execute one already-bound row using the regular stable Softmax path.
+   * `exp_cache` points to at least logical_layout(x).shape()[0] Compute values
+   * allocated before entering the operand-binding scope.
+   */
+  template <typename X, typename Y>
+    requires (tensor::BoundInputAccess<X> &&
+              tensor::CommittableBoundOutputAccess<Y>)
+  VECOPS_INLINE void run_bound(
+      ComputeType* exp_cache, X& x, Y& y) const {
+    static_assert(X::Rank == 1 && Y::Rank == 1);
+    const nint_t n = tensor::logical_layout(x).shape()[0];
+    VECOPS_ASSERT(exp_cache != nullptr, "Softmax bound cache is null");
+    run_bound_cached<details::GenericSoftmaxRecipe, false>(
+        n, exp_cache, x, y);
   }
 
 private:
@@ -382,6 +427,72 @@ private:
       run_row<Recipe>(workspace, in, out);
     }
   }
+
+  template <typename Recipe, bool CopyDirectInput, typename X, typename Y>
+  VECOPS_ALWAYS_INLINE void run_bound_cached(
+      nint_t n, ComputeType* exp_cache, X& x, Y& y) const {
+    Tag tag{};
+    const ComputeType negative_infinity =
+        -std::numeric_limits<ComputeType>::infinity();
+    ComputeType max_value{};
+    auto fold_max = [&](auto&& ux) VECOPS_INLINE_LAMBDA {
+      kernel::loop::fold<Recipe::FoldFactor>(
+          tag, n,
+          [&](auto block_tag, nint_t col, auto active,
+              auto& maximum) VECOPS_INLINE_LAMBDA {
+            auto value = ux.load(
+                block_tag, tensor::coord(col), active,
+                vec::opt::merge(negative_infinity),
+                tensor::materialize::populate);
+            maximum = vec::max(maximum, value);
+          },
+          kernel::loop::reduce_max(max_value));
+    };
+    if constexpr (sizeof(typename X::MemoryElement) == sizeof(ComputeType)) {
+      if constexpr (CopyDirectInput) {
+        auto direct_x = x;
+        fold_max(direct_x);
+      } else {
+        fold_max(x);
+      }
+    } else {
+      tensor::with_unordered_access(x, fold_max);
+    }
+
+    ComputeType sum{};
+    kernel::loop::fold<Recipe::FoldFactor>(
+        tag, n,
+        [&](auto block_tag, nint_t col, auto active, auto& sum_vector)
+            VECOPS_INLINE_LAMBDA {
+          auto value = x.load(
+              block_tag, tensor::coord(col), active,
+              vec::opt::merge(negative_infinity));
+          const auto maximum = vec::fill(block_tag, max_value);
+          auto centered = vec::sub(value, maximum);
+          const auto zero = vec::zeros(block_tag);
+          auto exponential = vec::exp_neg(
+              block_tag, centered,
+              vec::opt::math::accuracy<ExpAccuracy>, active,
+              vec::opt::merge(zero));
+          vec::store(block_tag, exp_cache + col, exponential, active);
+          sum_vector = vec::add(sum_vector, exponential);
+        },
+        kernel::loop::reduce_add(sum));
+
+    const ComputeType inverse_sum = ComputeType(1) / sum;
+    kernel::loop::fold<Recipe::StoreFactor>(
+        tag, n,
+        [&](auto block_tag, nint_t col, auto active,
+            const auto& inverse) VECOPS_INLINE_LAMBDA {
+          auto exponential = vec::load(
+              block_tag, exp_cache + col, active);
+          auto normalized = vec::mul(exponential, inverse);
+          y.store(block_tag, tensor::coord(col), normalized, active);
+        },
+        kernel::loop::invariant(inverse_sum));
+    y.commit();
+  }
+
   template <typename Recipe, typename InSpec, typename OutSpec>
   VECOPS_INLINE void run_row(
       kernel::WorkspaceView& workspace, const InSpec& in,
@@ -401,74 +512,11 @@ private:
         vec::DEFAULT_ALIGNMENT));
     auto compute =
         [this, n, exp_cache](auto& x, auto& y) VECOPS_INLINE_LAMBDA {
-          Tag tag{};
-          const ComputeType negative_infinity =
-              -std::numeric_limits<ComputeType>::infinity();
-          ComputeType max_value{};
-          auto fold_max = [&](auto&& ux) VECOPS_INLINE_LAMBDA {
-            kernel::loop::fold<Recipe::FoldFactor>(
-                tag, n,
-                [&](auto block_tag, nint_t col, auto active,
-                    auto& maximum) VECOPS_INLINE_LAMBDA {
-                  auto value = ux.load(
-                      block_tag, tensor::coord(col), active,
-                      vec::opt::merge(negative_infinity),
-                      tensor::materialize::populate);
-                  maximum = vec::max(maximum, value);
-                },
-                kernel::loop::reduce_max(max_value));
-          };
-          // Equal-width unordered conversion has ordered provenance. Keeping
-          // this path direct also avoids GCC retaining the proxy in tail code.
-          if constexpr (
-              sizeof(typename InSpec::MemoryElement) ==
-              sizeof(ComputeType)) {
-            if constexpr (
-                tensor::details::resolve_plan<InSpec, XPolicy>() ==
-                tensor::AccessPlan::direct) {
-              auto direct_x = x;
-              fold_max(direct_x);
-            } else {
-              fold_max(x);
-            }
-          } else {
-            tensor::with_unordered_access(x, fold_max);
-          }
-
-          ComputeType sum{};
-          kernel::loop::fold<Recipe::FoldFactor>(
-              tag, n,
-              [&](auto block_tag, nint_t col, auto active, auto& sum_vector)
-                  VECOPS_INLINE_LAMBDA {
-                auto value = x.load(
-                    block_tag, tensor::coord(col), active,
-                    vec::opt::merge(negative_infinity));
-                const auto maximum = vec::fill(block_tag, max_value);
-                auto centered = vec::sub(value, maximum);
-                const auto zero = vec::zeros(block_tag);
-                auto exponential = vec::exp_neg(
-                    block_tag, centered,
-                    vec::opt::math::accuracy<ExpAccuracy>, active,
-                    vec::opt::merge(zero));
-                vec::store(block_tag, exp_cache + col, exponential, active);
-                sum_vector = vec::add(sum_vector, exponential);
-              },
-              kernel::loop::reduce_add(sum));
-
-          const ComputeType inverse_sum = ComputeType(1) / sum;
-          kernel::loop::fold<Recipe::StoreFactor>(
-              tag, n,
-              [&](auto block_tag, nint_t col, auto active,
-                  const auto& inverse)
-                  VECOPS_INLINE_LAMBDA {
-                auto exponential = vec::load(
-                    block_tag, exp_cache + col, active);
-                auto normalized = vec::mul(exponential, inverse);
-                y.store(
-                    block_tag, tensor::coord(col), normalized, active);
-              },
-              kernel::loop::invariant(inverse_sum));
-          y.commit();
+          constexpr bool CopyDirectInput =
+              sizeof(typename InSpec::MemoryElement) == sizeof(ComputeType) &&
+              tensor::details::resolve_plan<InSpec, XPolicy>() ==
+                  tensor::AccessPlan::direct;
+          run_bound_cached<Recipe, CopyDirectInput>(n, exp_cache, x, y);
         };
     kernel::with_operands(
         workspace, tensor::operand(in, XPolicy{}),

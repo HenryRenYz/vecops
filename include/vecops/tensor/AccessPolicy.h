@@ -175,6 +175,31 @@ template <typename Policy, int SlicedDim>
 using SliceAccessPolicyT = typename SliceAccessPolicy<
     std::remove_cvref_t<Policy>, SlicedDim>::type;
 
+/** Rebase a policy after swapping two logical Tensor dimensions. */
+template <typename Policy, int I, int J>
+struct TransposeAccessPolicy;
+
+template <int VectorAxis, int ReadPasses, AccessPlan Plan, int I, int J>
+struct TransposeAccessPolicy<
+    InputAccessPolicy<VectorAxis, ReadPasses, Plan>, I, J> {
+  static_assert(I >= 0 && J >= 0);
+  static constexpr int NewAxis =
+      VectorAxis == I ? J : (VectorAxis == J ? I : VectorAxis);
+  using type = InputAccessPolicy<NewAxis, ReadPasses, Plan>;
+};
+
+template <int VectorAxis, AccessPlan Plan, int I, int J>
+struct TransposeAccessPolicy<OutputAccessPolicy<VectorAxis, Plan>, I, J> {
+  static_assert(I >= 0 && J >= 0);
+  static constexpr int NewAxis =
+      VectorAxis == I ? J : (VectorAxis == J ? I : VectorAxis);
+  using type = OutputAccessPolicy<NewAxis, Plan>;
+};
+
+template <typename Policy, int I, int J>
+using TransposeAccessPolicyT = typename TransposeAccessPolicy<
+    std::remove_cvref_t<Policy>, I, J>::type;
+
 } // namespace vecops::tensor
 
 #endif // VECOPS_TENSOR_ACCESS_POLICY_H

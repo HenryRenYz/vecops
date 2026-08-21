@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <tuple>
@@ -9,6 +10,7 @@
 #include <vector>
 
 #include "vecops/kernel/Loop.h"
+#include "vecops/tensor/OptionalOperand.h"
 
 using namespace vecops;
 using namespace vecops::meta;
@@ -140,6 +142,24 @@ TEST(HOPForEachTest, NonTensorInputsAreForwardedWithoutAffectingTraversal) {
 
   EXPECT_EQ(calls, 6);
   EXPECT_EQ(sum, 7 * (0 + 1 + 2 + 3 + 4 + 5));
+}
+
+TEST(HOPForEachTest, NulloptIsForwardedAsRankZeroOperand) {
+  static_assert(hop::details::slice_rank_v<tensor::nullopt_t> == 0);
+  static_assert(!hop::details::is_sliceable_v<tensor::nullopt_t>);
+  std::array<int64_t, 6> data{0, 1, 2, 3, 4, 5};
+  auto tensor = make_tensor(
+      data.data(), make_shape(cint<2>, cint<3>),
+      make_strides(cint<3>, cint<1>));
+  int calls = 0;
+  hop::for_each_dims<2>(
+      [&](auto missing, auto&& value) {
+        static_assert(tensor::is_nullopt_v<decltype(missing)>);
+        ++calls;
+        EXPECT_GE(static_cast<int64_t>(value), 0);
+      },
+      tensor::nullopt, tensor);
+  EXPECT_EQ(calls, 6);
 }
 
 TEST(HOPForEachTest, ForEachDimsCanWriteScalarElements) {

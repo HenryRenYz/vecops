@@ -58,6 +58,16 @@ concept CanMakeOutputSpec = requires(Tensor tensor) {
 template <typename Access>
 concept HasCommit = requires(Access& access) { access.commit(); };
 
+template <typename T>
+concept CanNormalizeInput = requires(T value) {
+  as_input_spec<float32_t>(value);
+};
+
+template <typename T>
+concept CanTransposeView = requires(const T& value) {
+  transpose_view<0, 1>(value);
+};
+
 static_assert(CanMakeOutputSpec<decltype(make_tensor<1>(
     static_cast<float*>(nullptr), {1}))>);
 static_assert(!CanMakeOutputSpec<decltype(make_tensor<1>(
@@ -71,6 +81,23 @@ TEST(TensorDataAccessTest, OperandSpecsRetainValidatedExternalFacts) {
   static_assert(std::tuple_size_v<typename decltype(in)::ExternalFacts> == 1);
   static_assert(std::tuple_size_v<typename decltype(out)::ExternalFacts> == 1);
   EXPECT_EQ(std::tuple_size_v<typename decltype(in)::ExternalFacts>, 1u);
+}
+
+TEST(TensorDataAccessTest, NormalizesTensorsAndSpecsWithoutAcceptingAccess) {
+  std::array<float, 12> values{};
+  auto tensor = make_tensor<2>(values.data(), {3, 4});
+  auto from_tensor = as_input_spec<float32_t>(tensor);
+  auto from_spec = as_input_spec<float32_t>(from_tensor);
+  static_assert(is_input_spec_v<decltype(from_tensor)>);
+  static_assert(is_input_spec_v<decltype(from_spec)>);
+  EXPECT_EQ(logical_layout(tensor).shape()[0], 3);
+  EXPECT_EQ(logical_layout(from_spec).shape()[1], 4);
+
+  kernel::Workspace storage(0);
+  auto workspace = storage.view();
+  auto access = bind(from_spec, InPolicy{}, workspace);
+  static_assert(!CanNormalizeInput<decltype(access)>);
+  EXPECT_EQ(logical_layout(access).shape()[0], 3);
 }
 
 TEST(TensorDataAccessTest, LoadsAlongAnyLogicalAxis) {
@@ -324,6 +351,51 @@ TEST(TensorDataAccessTest, TakeSpecsKeepZeroedOriginalCoordinates) {
                    123.0);
 }
 
+TEST(TensorDataAccessTest, TransposeViewsPreserveCoordinatesAndPolicyAxis) {
+  constexpr nint_t rows = 3;
+  constexpr nint_t columns = 64;
+  std::array<float, rows * columns> values{};
+  for (nint_t row = 0; row < rows; ++row) {
+    for (nint_t column = 0; column < columns; ++column) {
+      values[static_cast<size_t>(row * columns + column)] =
+          static_cast<float>(row * columns + column);
+    }
+  }
+  auto transform = [](auto tag, auto value, const auto& context) {
+    const auto original = context.lane_coord(0);
+    return vec::add(
+        value, vec::fill(tag, static_cast<float>(
+                              original[0] * 100 + original[1])));
+  };
+  auto spec = input<float32_t>(
+      make_tensor<2>(values.data(), {rows, columns}), transform);
+  auto transposed_spec = transpose_view<0, 1>(spec);
+  static_assert(decltype(transposed_spec)::InputTensor::Ndim == 2);
+  EXPECT_EQ(transposed_spec.input_layout().shape()[0], columns);
+  EXPECT_EQ(transposed_spec.input_layout().shape()[1], rows);
+
+  kernel::Workspace storage(0);
+  auto workspace = storage.view();
+  auto original_access = bind(spec, InPolicy{}, workspace);
+  auto transposed_access = transpose_view<0, 1>(original_access);
+  static_assert(decltype(transposed_access)::Rank == 2);
+  static_assert(
+      std::remove_cvref_t<decltype(transposed_access.policy())>::vector_axis ==
+      0);
+  EXPECT_EQ(logical_layout(transposed_access).shape()[0], columns);
+
+  Tag tag{};
+  const nint_t active = std::min<nint_t>(7, vec::size(tag));
+  auto loaded = transposed_access.load(
+      tag, coord(0, 1), axis<0>, vec::opt::first(active));
+  for (nint_t lane = 0; lane < active; ++lane) {
+    const float source = static_cast<float>(columns + lane);
+    const float transform_value = 100.0f;
+    EXPECT_FLOAT_EQ(
+        vec::get(tag, loaded, lane), source + transform_value);
+  }
+}
+
 TEST(TensorDataAccessTest, AutomaticInputMaterializesAfterTransformForMultiplePasses) {
   std::array<float, 3 * 16> values{};
   for (nint_t row = 0; row < 3; ++row) {
@@ -525,6 +597,53 @@ TEST(TensorDataAccessTest, LoopSlicesMaterializedOutputAsBorrowedViews) {
   }
 }
 
+TEST(TensorDataAccessTest, TransposesCanonicalInputAndMaterializedOutputViews) {
+  constexpr nint_t rows = 3;
+  constexpr nint_t columns = 16;
+  std::array<float, rows * columns> input_values{};
+  std::array<float, rows * columns> output_values{};
+  for (nint_t row = 0; row < rows; ++row) {
+    for (nint_t column = 0; column < columns; ++column) {
+      input_values[static_cast<size_t>(row + column * rows)] =
+          static_cast<float>(100 * row + column);
+    }
+  }
+  auto in_spec = input<float32_t>(make_tensor(
+      input_values.data(), make_shape(cint<rows>, cint<columns>),
+      make_strides(cint<1>, cint<rows>)));
+  auto out_spec = output<float32_t>(make_tensor(
+      output_values.data(), make_shape(cint<rows>, cint<columns>),
+      make_strides(cint<1>, cint<rows>)));
+  using InMaterialize = InputAccessPolicy<1, 2, AccessPlan::automatic>;
+  using OutMaterialize = OutputAccessPolicy<1, AccessPlan::automatic>;
+  kernel::Workspace storage(
+      required_workspace(in_spec, InMaterialize{}) +
+      required_workspace(out_spec, OutMaterialize{}));
+  auto workspace = storage.view();
+  kernel::with_operands(
+      workspace, operand(in_spec, InMaterialize{}),
+      operand(out_spec, OutMaterialize{}), [&](auto& x, auto& y) {
+        auto tx = transpose_view<0, 1>(x);
+        auto ty = transpose_view<0, 1>(y);
+        static_assert(!HasCommit<decltype(ty)>);
+        static_assert(
+            std::remove_cvref_t<decltype(tx.policy())>::vector_axis == 0);
+        Tag tag{};
+        const nint_t active = std::min<nint_t>(7, vec::size(tag));
+        auto value = tx.load(
+            tag, coord(0, 2), axis<0>, vec::opt::first(active));
+        ty.store(tag, coord(0, 2), axis<0>, value,
+                 vec::opt::first(active));
+        y.commit();
+      });
+  const nint_t active = std::min<nint_t>(7, vec::size(Tag{}));
+  for (nint_t column = 0; column < columns; ++column) {
+    EXPECT_FLOAT_EQ(
+        output_values[static_cast<size_t>(2 + column * rows)],
+        column < active ? static_cast<float>(200 + column) : 0.0f);
+  }
+}
+
 #ifdef VECOPS_DEBUG
 TEST(TensorDataAccessDeathTest, MaterializedOutputMustBeCommitted) {
   EXPECT_DEATH(
@@ -656,6 +775,7 @@ TEST(TensorDataAccessTest, AutomaticDeferredPopulatesAndReusesCanonicalValues) {
   auto workspace = storage.view();
   kernel::with_operands(
       workspace, operand(spec, Policy{}), [&](auto& access) {
+        static_assert(!CanTransposeView<std::remove_cvref_t<decltype(access)>>);
         with_unordered_access(access, [&](auto deferred) {
           static_assert(!decltype(deferred)::is_unordered);
           for (nint_t row = 0; row < rows; ++row) {

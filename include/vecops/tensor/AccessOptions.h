@@ -115,6 +115,18 @@ struct CoordinateProjection {
     }
     return result;
   }
+
+  /** Map a transposed local view back to the same original coordinates. */
+  template <int I, int J>
+  VECOPS_ALWAYS_INLINE constexpr auto transposed() const {
+    static_assert(0 <= I && I < static_cast<int>(LocalRank));
+    static_assert(0 <= J && J < static_cast<int>(LocalRank));
+    auto result = *this;
+    const int temporary = result.local_to_original[I];
+    result.local_to_original[I] = result.local_to_original[J];
+    result.local_to_original[J] = temporary;
+    return result;
+  }
 };
 
 /** @brief Create an identity coordinate projection for an unsliced rank. */

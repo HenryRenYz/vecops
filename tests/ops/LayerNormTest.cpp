@@ -28,6 +28,14 @@ namespace {
 template <typename... Ts>
 struct TypeList {};
 
+template <typename Op, typename In, typename Gamma, typename Beta,
+          typename Out>
+concept CanQueryLayerNormWorkspace = requires(
+    const Op& op, const In& in, const Gamma& gamma,
+    const Beta& beta, const Out& out) {
+  op.required_workspace(in, gamma, beta, out);
+};
+
 using LayerNormFloatTypes = TypeList<
     vecops::float16_t,
     float32_t,
@@ -171,6 +179,103 @@ void reference_layernorm_rows(
                scale[static_cast<size_t>(col)] +
            bias[static_cast<size_t>(col)]) *
           post_scale;
+    }
+  }
+}
+
+template <bool HasGamma, bool HasBeta>
+void run_optional_parameter_case(bool strided) {
+  constexpr nint_t rows = 3;
+  constexpr nint_t n = 9;
+  std::vector<float> x_storage(
+      static_cast<size_t>(strided ? rows * 23 : rows * n), -99.0f);
+  std::vector<float> gamma(static_cast<size_t>(n));
+  std::vector<float> beta(static_cast<size_t>(n));
+  std::vector<float> out(static_cast<size_t>(rows * n), -77.0f);
+  std::vector<float> dense_x(static_cast<size_t>(rows * n));
+
+  for (nint_t row = 0; row < rows; ++row) {
+    for (nint_t col = 0; col < n; ++col) {
+      const float value = float((row * 11 + col * 7) % 23 - 11) * 0.13f;
+      dense_x[static_cast<size_t>(row * n + col)] = value;
+      const nint_t offset = strided ? row * 23 + col * 2 : row * n + col;
+      x_storage[static_cast<size_t>(offset)] = value;
+    }
+  }
+  for (nint_t col = 0; col < n; ++col) {
+    gamma[static_cast<size_t>(col)] = 0.65f + float(col) * 0.04f;
+    beta[static_cast<size_t>(col)] = -0.2f + float(col) * 0.03f;
+  }
+
+  const auto x_t = strided
+      ? make_tensor(
+            x_storage.data(), make_shape(cint<rows>, cint<n>),
+            make_strides(Any{23}, Any{2}))
+      : make_tensor(
+            x_storage.data(), make_shape(cint<rows>, cint<n>),
+            make_strides(Any{n}, Any{1}));
+  auto g_t = make_tensor(
+      gamma.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto b_t = make_tensor(
+      beta.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto y_t = make_tensor(
+      out.data(), make_shape(cint<rows>, cint<n>),
+      make_strides(cint<n>, cint<1>));
+
+  auto x_spec = input<float32_t>(x_t);
+  auto g_spec = input<float32_t>(g_t);
+  auto b_spec = input<float32_t>(b_t);
+  auto y_spec = output<float32_t>(y_t);
+  auto op = layer_norm(LayerNormConfig<float32_t>{.eps = 1e-5f});
+
+  const nint_t bytes = [&] {
+    if constexpr (HasGamma && HasBeta) {
+      return op.required_workspace(x_spec, g_spec, b_spec, y_spec);
+    } else if constexpr (HasGamma) {
+      return op.required_workspace(x_spec, g_spec, y_spec);
+    } else if constexpr (HasBeta) {
+      return op.required_workspace(
+          x_spec, tensor::nullopt, b_spec, y_spec);
+    } else {
+      return op.required_workspace(x_spec, y_spec);
+    }
+  }();
+  if (strided) EXPECT_GT(bytes, 0);
+
+  Workspace storage(bytes);
+  auto workspace = storage.view();
+  if constexpr (HasGamma && HasBeta) {
+    op(workspace, x_spec, g_spec, b_spec, y_spec);
+  } else if constexpr (HasGamma) {
+    op(workspace, x_spec, g_spec, y_spec);
+  } else if constexpr (HasBeta) {
+    op(workspace, x_spec, tensor::nullopt, b_spec, y_spec);
+  } else {
+    op(workspace, x_spec, y_spec);
+  }
+
+  for (nint_t row = 0; row < rows; ++row) {
+    float sum = 0.0f;
+    float sum_sq = 0.0f;
+    for (nint_t col = 0; col < n; ++col) {
+      const float value = dense_x[static_cast<size_t>(row * n + col)];
+      sum += value;
+      sum_sq += value * value;
+    }
+    const float mean = sum / float(n);
+    const float variance =
+        std::max(sum_sq / float(n) - mean * mean, 0.0f);
+    const float rstd = 1.0f / std::sqrt(variance + 1e-5f);
+    for (nint_t col = 0; col < n; ++col) {
+      float expected =
+          (dense_x[static_cast<size_t>(row * n + col)] - mean) * rstd;
+      if constexpr (HasGamma) expected *= gamma[static_cast<size_t>(col)];
+      if constexpr (HasBeta) expected += beta[static_cast<size_t>(col)];
+      EXPECT_NEAR(
+          expected, out[static_cast<size_t>(row * n + col)], 2e-5f)
+          << "row=" << row << " col=" << col
+          << " gamma=" << HasGamma << " beta=" << HasBeta
+          << " strided=" << strided;
     }
   }
 }
@@ -319,6 +424,129 @@ TEST(LayerNormRankTest, CoversRanksOneThroughFour) {
   run_contiguous_rank_case<4>();
 }
 
+TEST(LayerNormOptionalParameterTest, CoversAllCompileTimeAffineModes) {
+  run_optional_parameter_case<true, true>(false);
+  run_optional_parameter_case<true, false>(false);
+  run_optional_parameter_case<false, true>(false);
+  run_optional_parameter_case<false, false>(false);
+}
+
+TEST(LayerNormOptionalParameterTest, CoversDeferredStridedInput) {
+  run_optional_parameter_case<true, false>(true);
+  run_optional_parameter_case<false, true>(true);
+  run_optional_parameter_case<false, false>(true);
+}
+
+TEST(LayerNormOptionalParameterTest, ConvenienceOverloadsMatchPlaceholders) {
+  constexpr nint_t n = 7;
+  std::array<float, n> x{2.0f, -1.0f, 0.5f, 3.0f, -2.0f, 1.5f, 0.25f};
+  std::array<float, n> gamma{0.7f, 0.8f, 0.9f, 1.0f, 1.1f, 1.2f, 1.3f};
+  std::array<float, n> y_short{};
+  std::array<float, n> y_full{};
+
+  auto x_t = make_tensor(
+      x.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto g_t = make_tensor(
+      gamma.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto ys_t = make_tensor(
+      y_short.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto yf_t = make_tensor(
+      y_full.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto op = layer_norm(LayerNormConfig<float32_t>{.eps = 1e-5f});
+  auto x_spec = input<float32_t>(x_t);
+  auto g_spec = input<float32_t>(g_t);
+
+  op(x_spec, g_spec, output<float32_t>(ys_t));
+  op(x_spec, g_spec, tensor::nullopt, output<float32_t>(yf_t));
+  EXPECT_EQ(y_short, y_full);
+
+  y_short.fill(0.0f);
+  y_full.fill(0.0f);
+  op(x_spec, output<float32_t>(ys_t));
+  op(x_spec, tensor::nullopt, tensor::nullopt, output<float32_t>(yf_t));
+  EXPECT_EQ(y_short, y_full);
+}
+
+TEST(LayerNormCompositionTest, AcceptsRawTensorsAndBoundRowAccesses) {
+  constexpr nint_t n = 9;
+  std::array<float, n> x{2.0f, -1.0f, 0.5f, 3.0f, -2.0f,
+                         1.5f, 0.25f, -0.75f, 4.0f};
+  std::array<float, n> gamma{0.7f, 0.8f, 0.9f, 1.0f, 1.1f,
+                             1.2f, 1.3f, 1.4f, 1.5f};
+  std::array<float, n> tensor_out{};
+  std::array<float, n> bound_out{};
+  auto x_t = make_tensor(
+      x.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto g_t = make_tensor(
+      gamma.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto tensor_y_t = make_tensor(
+      tensor_out.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto bound_y_t = make_tensor(
+      bound_out.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto op = layer_norm(LayerNormConfig<float32_t>{.eps = 1e-5f});
+
+  EXPECT_EQ(op.required_workspace(x_t, g_t, tensor_y_t), 0);
+  op(x_t, g_t, tensor_y_t);
+
+  auto x_spec = input<float32_t>(x_t);
+  auto g_spec = input<float32_t>(g_t);
+  auto y_spec = output<float32_t>(bound_y_t);
+  Workspace storage(0);
+  auto workspace = storage.view();
+  auto x_access = bind(
+      x_spec, InputAccessPolicy<0, 2, AccessPlan::direct>{}, workspace);
+  auto gamma_access = bind(
+      g_spec, InputAccessPolicy<0, 1, AccessPlan::direct>{}, workspace);
+  auto y_access = bind(
+      y_spec, OutputAccessPolicy<0, AccessPlan::direct>{}, workspace);
+  auto no_beta = tensor::nullopt;
+  op.run_bound(x_access, gamma_access, no_beta, y_access);
+  EXPECT_EQ(tensor_out, bound_out);
+}
+
+TEST(LayerNormOptionalParameterTest, RejectsRankTwoParameterAtInterface) {
+  using InTensor = decltype(make_tensor(
+      static_cast<float*>(nullptr), make_shape(cint<2>, cint<7>),
+      make_strides(cint<7>, cint<1>)));
+  using ParamTensor = decltype(make_tensor(
+      static_cast<float*>(nullptr), make_shape(cint<7>),
+      make_strides(cint<1>)));
+  using OutTensor = InTensor;
+  using BadParamTensor = InTensor;
+  using InSpec = decltype(input<float32_t>(std::declval<InTensor>()));
+  using ParamSpec = decltype(input<float32_t>(std::declval<ParamTensor>()));
+  using BadParamSpec = decltype(
+      input<float32_t>(std::declval<BadParamTensor>()));
+  using OutSpec = decltype(output<float32_t>(std::declval<OutTensor>()));
+  using Op = LayerNorm<LayerNormConfig<float32_t>>;
+  static_assert(CanQueryLayerNormWorkspace<
+                Op, InSpec, ParamSpec, ParamSpec, OutSpec>);
+  static_assert(!CanQueryLayerNormWorkspace<
+                Op, InSpec, BadParamSpec, ParamSpec, OutSpec>);
+}
+
+#if defined(VECOPS_DEBUG)
+TEST(LayerNormOptionalParameterDeathTest, RejectsPresentParameterSizeMismatch) {
+  std::array<float, 14> x{};
+  std::array<float, 6> gamma{};
+  std::array<float, 14> y{};
+  auto x_t = make_tensor(
+      x.data(), make_shape(cint<2>, cint<7>),
+      make_strides(cint<7>, cint<1>));
+  auto g_t = make_tensor(
+      gamma.data(), make_shape(cint<6>), make_strides(cint<1>));
+  auto y_t = make_tensor(
+      y.data(), make_shape(cint<2>, cint<7>),
+      make_strides(cint<7>, cint<1>));
+  auto op = layer_norm(LayerNormConfig<float32_t>{.eps = 1e-5f});
+  EXPECT_DEATH_IF_SUPPORTED(
+      (void)op.required_workspace(
+          input<float32_t>(x_t), input<float32_t>(g_t),
+          tensor::nullopt, output<float32_t>(y_t)),
+      "LayerNorm parameter size mismatch");
+}
+#endif
+
 TEST(LayerNormVectorBoundaryTest, CoversGroupedLoopAndTailBoundaries) {
   using Tag = LayerNorm<LayerNormConfig<float32_t>>::Tag;
   const nint_t lanes = vec::size(Tag{});
@@ -370,7 +598,7 @@ TEST(LayerNormVectorBoundaryTest, CoversGroupedLoopAndTailBoundaries) {
   }
 }
 
-template <typename T>
+template <typename T, bool HasGamma = true, bool HasBeta = true>
 void run_sve_16bit_boundary_cases() {
   using Tag = LayerNorm<LayerNormConfig<float32_t>>::Tag;
   const nint_t half_lanes = 2 * vec::size(Tag{});
@@ -408,8 +636,18 @@ void run_sve_16bit_boundary_cases() {
     auto b_t = make_tensor<1>(bias.data(), {n});
     auto y_t = make_tensor<2>(out.data(), {rows, n});
     auto op = layer_norm(LayerNormConfig<float32_t>{.eps = 1e-5f});
-    op(input<float32_t>(x_t), input<float32_t>(s_t),
-       input<float32_t>(b_t), output<float32_t>(y_t));
+    if constexpr (HasGamma && HasBeta) {
+      op(input<float32_t>(x_t), input<float32_t>(s_t),
+         input<float32_t>(b_t), output<float32_t>(y_t));
+    } else if constexpr (HasGamma) {
+      op(input<float32_t>(x_t), input<float32_t>(s_t),
+         output<float32_t>(y_t));
+    } else if constexpr (HasBeta) {
+      op(input<float32_t>(x_t), tensor::nullopt,
+         input<float32_t>(b_t), output<float32_t>(y_t));
+    } else {
+      op(input<float32_t>(x_t), output<float32_t>(y_t));
+    }
 
     for (nint_t row = 0; row < rows; ++row) {
       float sum = 0.0f;
@@ -426,10 +664,17 @@ void run_sve_16bit_boundary_cases() {
       const float rstd = 1.0f / std::sqrt(variance + 1e-5f);
       for (nint_t col = 0; col < n; ++col) {
         const size_t index = static_cast<size_t>(row * n + col);
-        const T expected = static_cast<T>(
-            (static_cast<float>(x[index]) - mean) * rstd *
-                static_cast<float>(scale[static_cast<size_t>(col)]) +
-            static_cast<float>(bias[static_cast<size_t>(col)]));
+        float expected_value =
+            (static_cast<float>(x[index]) - mean) * rstd;
+        if constexpr (HasGamma) {
+          expected_value *=
+              static_cast<float>(scale[static_cast<size_t>(col)]);
+        }
+        if constexpr (HasBeta) {
+          expected_value +=
+              static_cast<float>(bias[static_cast<size_t>(col)]);
+        }
+        const T expected = static_cast<T>(expected_value);
         EXPECT_NEAR(as_double(expected), as_double(out[index]), tolerance<T>())
             << "row=" << row << " col=" << col;
       }
@@ -439,8 +684,14 @@ void run_sve_16bit_boundary_cases() {
 
 TEST(LayerNormVectorBoundaryTest, CoversSVE16BitFullLoadsAndTails) {
   run_sve_16bit_boundary_cases<vecops::float16_t>();
+  run_sve_16bit_boundary_cases<vecops::float16_t, true, false>();
+  run_sve_16bit_boundary_cases<vecops::float16_t, false, true>();
+  run_sve_16bit_boundary_cases<vecops::float16_t, false, false>();
 #if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
   run_sve_16bit_boundary_cases<vecops::bfloat16_t>();
+  run_sve_16bit_boundary_cases<vecops::bfloat16_t, true, false>();
+  run_sve_16bit_boundary_cases<vecops::bfloat16_t, false, true>();
+  run_sve_16bit_boundary_cases<vecops::bfloat16_t, false, false>();
 #endif
 }
 
@@ -685,6 +936,40 @@ TEST(LayerNormFusionTest, AppliesInputPrologueAndOutputEpilogue) {
   for (nint_t i = 0; i < rows * n; ++i) {
     EXPECT_NEAR(ref[static_cast<size_t>(i)], out[static_cast<size_t>(i)], 2e-5f)
         << "i=" << i;
+  }
+}
+
+TEST(LayerNormFusionTest, AppliesTransformsWithoutAffineParameters) {
+  constexpr nint_t rows = 2;
+  constexpr nint_t n = 7;
+  std::array<float, rows * n> x{};
+  std::array<float, rows * n> out{};
+  for (nint_t i = 0; i < rows * n; ++i) {
+    x[static_cast<size_t>(i)] = float((i * 5) % 17 - 8) * 0.21f;
+  }
+  auto x_t = make_tensor<2>(x.data(), {rows, n});
+  auto y_t = make_tensor<2>(out.data(), {rows, n});
+  auto op = layer_norm(LayerNormConfig<float32_t>{.eps = 1e-5f});
+  op(input<float32_t>(x_t, AddOneTransform{}),
+     output<float32_t>(y_t, HalfTransform{}));
+
+  for (nint_t row = 0; row < rows; ++row) {
+    float sum = 0.0f;
+    float sum_sq = 0.0f;
+    for (nint_t col = 0; col < n; ++col) {
+      const float value = x[static_cast<size_t>(row * n + col)] + 1.0f;
+      sum += value;
+      sum_sq += value * value;
+    }
+    const float mean = sum / float(n);
+    const float variance =
+        std::max(sum_sq / float(n) - mean * mean, 0.0f);
+    const float rstd = 1.0f / std::sqrt(variance + 1e-5f);
+    for (nint_t col = 0; col < n; ++col) {
+      const float value = x[static_cast<size_t>(row * n + col)] + 1.0f;
+      EXPECT_NEAR(out[static_cast<size_t>(row * n + col)],
+                  (value - mean) * rstd * 0.5f, 2e-5f);
+    }
   }
 }
 

@@ -757,3 +757,39 @@ TEST(SoftmaxAliasingTest, SupportsContiguousInPlaceExecution) {
     EXPECT_NEAR(ref[static_cast<size_t>(i)], values[static_cast<size_t>(i)], 3e-5);
   }
 }
+
+TEST(SoftmaxCompositionTest, AcceptsRawTensorsAndBoundRowAccesses) {
+  constexpr nint_t n = 9;
+  std::array<float, n> x{2.0f, -1.0f, 0.5f, 3.0f, -2.0f,
+                         1.5f, 0.25f, -0.75f, 4.0f};
+  std::array<float, n> tensor_out{};
+  std::array<float, n> bound_out{};
+  auto x_t = make_tensor(
+      x.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto tensor_y_t = make_tensor(
+      tensor_out.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto bound_y_t = make_tensor(
+      bound_out.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto op = softmax(SoftmaxConfig<float32_t>{});
+
+  EXPECT_GT(op.required_workspace(x_t, tensor_y_t), 0);
+  op(x_t, tensor_y_t);
+
+  auto x_spec = input<float32_t>(x_t);
+  auto y_spec = output<float32_t>(bound_y_t);
+  kernel::Workspace access_storage(
+      n * static_cast<nint_t>(sizeof(float32_t)) +
+      vec::DEFAULT_ALIGNMENT);
+  auto workspace = access_storage.view();
+  auto* exp_cache = workspace.allocate<float32_t>(n);
+  auto x_access = bind(
+      x_spec, InputAccessPolicy<0, 2, AccessPlan::direct>{}, workspace);
+  auto y_access = bind(
+      y_spec, OutputAccessPolicy<0, AccessPlan::direct>{}, workspace);
+  op.run_bound(exp_cache, x_access, y_access);
+
+  for (nint_t i = 0; i < n; ++i) {
+    EXPECT_NEAR(tensor_out[static_cast<size_t>(i)],
+                bound_out[static_cast<size_t>(i)], 2e-6f);
+  }
+}

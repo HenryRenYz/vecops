@@ -1185,6 +1185,12 @@ constexpr auto transpose(const Tensor<T, TShape, TStrides>& t) {
   return make_tensor(t.data(), new_layout);
 }
 
+/** Compile-time structural view spelling shared with Spec/DataAccess. */
+template <int I, int J, typename T, typename TShape, typename TStrides>
+constexpr auto transpose_view(const Tensor<T, TShape, TStrides>& tensor) {
+  return transpose<I, J>(tensor);
+}
+
 /**
  * @brief Runtime transpose: swap dimensions i and j.
  *

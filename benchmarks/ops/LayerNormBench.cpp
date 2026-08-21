@@ -45,6 +45,24 @@ struct LayerNormCase {
   int rank;
 };
 
+enum class AffineMode { gamma_beta, gamma, beta, none };
+
+template <AffineMode Mode>
+inline constexpr bool has_gamma_v =
+    Mode == AffineMode::gamma_beta || Mode == AffineMode::gamma;
+
+template <AffineMode Mode>
+inline constexpr bool has_beta_v =
+    Mode == AffineMode::gamma_beta || Mode == AffineMode::beta;
+
+template <AffineMode Mode>
+const char* affine_name() {
+  if constexpr (Mode == AffineMode::gamma_beta) return "gamma_beta";
+  if constexpr (Mode == AffineMode::gamma) return "gamma";
+  if constexpr (Mode == AffineMode::beta) return "beta";
+  return "none";
+}
+
 constexpr LayerNormCase kCases[] = {
     {"small", {64, 1, 1, 1}, 1},
     {"small", {8, 128, 1, 1}, 2},
@@ -157,7 +175,7 @@ void fill_inputs(std::vector<T>& x, std::vector<T>& scale, std::vector<T>& bias)
   }
 }
 
-template <typename T, typename ScaleT, typename BiasT>
+template <AffineMode Mode, typename T, typename ScaleT, typename BiasT>
 bool verify_output(
     const std::vector<T>& x,
     const std::vector<ScaleT>& scale,
@@ -181,10 +199,13 @@ bool verify_output(
     const double rstd = 1.0 / std::sqrt(var + eps);
     for (nint_t col = 0; col < n; ++col) {
       const size_t idx = static_cast<size_t>(base + col);
-      const double expected =
-          (static_cast<double>(x[idx]) - mean) * rstd *
-          static_cast<double>(scale[static_cast<size_t>(col)]) +
-          static_cast<double>(bias[static_cast<size_t>(col)]);
+      double expected = (static_cast<double>(x[idx]) - mean) * rstd;
+      if constexpr (has_gamma_v<Mode>) {
+        expected *= static_cast<double>(scale[static_cast<size_t>(col)]);
+      }
+      if constexpr (has_beta_v<Mode>) {
+        expected += static_cast<double>(bias[static_cast<size_t>(col)]);
+      }
       const double actual = static_cast<double>(out[idx]);
       const double scale_ref = std::max({1.0, std::abs(expected), std::abs(actual)});
       if (std::abs(expected - actual) > tol * scale_ref) return false;
@@ -193,7 +214,8 @@ bool verify_output(
   return true;
 }
 
-template <int Rank, typename T>
+template <int Rank, typename T,
+          AffineMode Mode = AffineMode::gamma_beta>
 void run_case(benchmark::State& state, const LayerNormCase& c) {
   const nint_t total = total_elements(c);
   const nint_t n = normalized_size(c);
@@ -206,6 +228,7 @@ void run_case(benchmark::State& state, const LayerNormCase& c) {
   fill_inputs(x, scale, bias);
 
 #ifdef VECOPS_BENCH_USE_ONEDNN
+  static_assert(Mode == AffineMode::gamma_beta);
   static_assert(std::is_same_v<T, vecops::float32_t>);
   const dnnl::engine engine(dnnl::engine::kind::cpu, 0);
   const dnnl::stream stream(engine);
@@ -268,7 +291,7 @@ void run_case(benchmark::State& state, const LayerNormCase& c) {
     state.SkipWithError("oneDNN LayerNorm execution failed");
     return;
   }
-  if (!verify_output(x, scale, bias, out, rows, n)) {
+  if (!verify_output<Mode>(x, scale, bias, out, rows, n)) {
     state.SkipWithError("oneDNN LayerNorm output verification failed");
     return;
   }
@@ -288,22 +311,46 @@ void run_case(benchmark::State& state, const LayerNormCase& c) {
   auto op = layer_norm(LayerNormConfig<ComputeT>{.eps = eps});
   auto s_spec = input<ComputeT>(s_t);
   auto b_spec = input<ComputeT>(b_t);
+  auto workspace_bytes = [&](const auto& x_spec, const auto& y_spec) {
+    if constexpr (Mode == AffineMode::gamma_beta) {
+      return op.required_workspace(x_spec, s_spec, b_spec, y_spec);
+    } else if constexpr (Mode == AffineMode::gamma) {
+      return op.required_workspace(x_spec, s_spec, y_spec);
+    } else if constexpr (Mode == AffineMode::beta) {
+      return op.required_workspace(
+          x_spec, tensor::nullopt, b_spec, y_spec);
+    } else {
+      return op.required_workspace(x_spec, y_spec);
+    }
+  };
+  auto invoke = [&](auto& workspace, const auto& x_spec,
+                    const auto& y_spec) {
+    if constexpr (Mode == AffineMode::gamma_beta) {
+      op(workspace, x_spec, s_spec, b_spec, y_spec);
+    } else if constexpr (Mode == AffineMode::gamma) {
+      op(workspace, x_spec, s_spec, y_spec);
+    } else if constexpr (Mode == AffineMode::beta) {
+      op(workspace, x_spec, tensor::nullopt, b_spec, y_spec);
+    } else {
+      op(workspace, x_spec, y_spec);
+    }
+  };
 
   if constexpr (Rank == 1) {
     auto x_t = make_tensor<1>(x.data(), {c.shape[0]});
     auto y_t = make_tensor<1>(out.data(), {c.shape[0]});
     auto x_spec = input<ComputeT>(x_t);
     auto y_spec = output<ComputeT>(y_t);
-    Workspace workspace(op.required_workspace(x_spec, s_spec, b_spec, y_spec));
+    Workspace workspace(workspace_bytes(x_spec, y_spec));
     auto view = workspace.view();
-    op(view, x_spec, s_spec, b_spec, y_spec);
-    if (!verify_output(x, scale, bias, out, rows, n)) {
+    invoke(view, x_spec, y_spec);
+    if (!verify_output<Mode>(x, scale, bias, out, rows, n)) {
       state.SkipWithError("LayerNorm output verification failed");
       return;
     }
     for (auto _ : state) {
       benchmark::DoNotOptimize(x.data());
-      op(view, x_spec, s_spec, b_spec, y_spec);
+      invoke(view, x_spec, y_spec);
       benchmark::ClobberMemory();
     }
     state.counters["workspace_bytes"] = benchmark::Counter(double(workspace.requested_capacity()));
@@ -312,16 +359,16 @@ void run_case(benchmark::State& state, const LayerNormCase& c) {
     auto y_t = make_tensor<2>(out.data(), {c.shape[0], c.shape[1]});
     auto x_spec = input<ComputeT>(x_t);
     auto y_spec = output<ComputeT>(y_t);
-    Workspace workspace(op.required_workspace(x_spec, s_spec, b_spec, y_spec));
+    Workspace workspace(workspace_bytes(x_spec, y_spec));
     auto view = workspace.view();
-    op(view, x_spec, s_spec, b_spec, y_spec);
-    if (!verify_output(x, scale, bias, out, rows, n)) {
+    invoke(view, x_spec, y_spec);
+    if (!verify_output<Mode>(x, scale, bias, out, rows, n)) {
       state.SkipWithError("LayerNorm output verification failed");
       return;
     }
     for (auto _ : state) {
       benchmark::DoNotOptimize(x.data());
-      op(view, x_spec, s_spec, b_spec, y_spec);
+      invoke(view, x_spec, y_spec);
       benchmark::ClobberMemory();
     }
     state.counters["workspace_bytes"] = benchmark::Counter(double(workspace.requested_capacity()));
@@ -330,16 +377,16 @@ void run_case(benchmark::State& state, const LayerNormCase& c) {
     auto y_t = make_tensor<3>(out.data(), {c.shape[0], c.shape[1], c.shape[2]});
     auto x_spec = input<ComputeT>(x_t);
     auto y_spec = output<ComputeT>(y_t);
-    Workspace workspace(op.required_workspace(x_spec, s_spec, b_spec, y_spec));
+    Workspace workspace(workspace_bytes(x_spec, y_spec));
     auto view = workspace.view();
-    op(view, x_spec, s_spec, b_spec, y_spec);
-    if (!verify_output(x, scale, bias, out, rows, n)) {
+    invoke(view, x_spec, y_spec);
+    if (!verify_output<Mode>(x, scale, bias, out, rows, n)) {
       state.SkipWithError("LayerNorm output verification failed");
       return;
     }
     for (auto _ : state) {
       benchmark::DoNotOptimize(x.data());
-      op(view, x_spec, s_spec, b_spec, y_spec);
+      invoke(view, x_spec, y_spec);
       benchmark::ClobberMemory();
     }
     state.counters["workspace_bytes"] = benchmark::Counter(double(workspace.requested_capacity()));
@@ -348,16 +395,16 @@ void run_case(benchmark::State& state, const LayerNormCase& c) {
     auto y_t = make_tensor<4>(out.data(), {c.shape[0], c.shape[1], c.shape[2], c.shape[3]});
     auto x_spec = input<ComputeT>(x_t);
     auto y_spec = output<ComputeT>(y_t);
-    Workspace workspace(op.required_workspace(x_spec, s_spec, b_spec, y_spec));
+    Workspace workspace(workspace_bytes(x_spec, y_spec));
     auto view = workspace.view();
-    op(view, x_spec, s_spec, b_spec, y_spec);
-    if (!verify_output(x, scale, bias, out, rows, n)) {
+    invoke(view, x_spec, y_spec);
+    if (!verify_output<Mode>(x, scale, bias, out, rows, n)) {
       state.SkipWithError("LayerNorm output verification failed");
       return;
     }
     for (auto _ : state) {
       benchmark::DoNotOptimize(x.data());
-      op(view, x_spec, s_spec, b_spec, y_spec);
+      invoke(view, x_spec, y_spec);
       benchmark::ClobberMemory();
     }
     state.counters["workspace_bytes"] = benchmark::Counter(double(workspace.requested_capacity()));
@@ -368,7 +415,9 @@ void run_case(benchmark::State& state, const LayerNormCase& c) {
 #ifdef VECOPS_BENCH_USE_ONEDNN
       double(n * sizeof(float) * 2);
 #else
-      double(n * sizeof(T) * 2);
+      double(n * sizeof(T) *
+             (static_cast<int>(has_gamma_v<Mode>) +
+              static_cast<int>(has_beta_v<Mode>)));
 #endif
   const double bytes_per_iter =
       double(total * sizeof(T) * 2) + parameter_bytes;
@@ -380,29 +429,42 @@ void run_case(benchmark::State& state, const LayerNormCase& c) {
   state.counters["elements"] = benchmark::Counter(double(total));
 }
 
-template <typename T>
+template <typename T, AffineMode Mode = AffineMode::gamma_beta>
 void bench_layernorm(benchmark::State& state, LayerNormCase c) {
-  if (c.rank == 1) return run_case<1, T>(state, c);
-  if (c.rank == 2) return run_case<2, T>(state, c);
-  if (c.rank == 3) return run_case<3, T>(state, c);
-  return run_case<4, T>(state, c);
+  if (c.rank == 1) return run_case<1, T, Mode>(state, c);
+  if (c.rank == 2) return run_case<2, T, Mode>(state, c);
+  if (c.rank == 3) return run_case<3, T, Mode>(state, c);
+  return run_case<4, T, Mode>(state, c);
 }
 
-template <typename T>
-void register_dtype() {
+template <typename T, AffineMode Mode>
+void register_affine_mode() {
   for (const auto& c : kCases) {
     const std::string name =
         "LayerNorm/" + std::string(c.group) +
         "/rank:" + std::to_string(c.rank) +
         "/shape:" + shape_name(c) +
         "/dtype:" + dtype_name<T>() +
+        "/affine:" + affine_name<Mode>() +
         "/arch:" + VECOPS_BENCH_ARCH_CODE;
-    benchmark::RegisterBenchmark(name.c_str(), &bench_layernorm<T>, c)
+    benchmark::RegisterBenchmark(name.c_str(), &bench_layernorm<T, Mode>, c)
         ->Unit(benchmark::kMicrosecond)
         ->MinTime(0.02)
         ->Repetitions(3)
         ->ReportAggregatesOnly(true);
   }
+}
+
+template <typename T>
+void register_dtype() {
+#ifdef VECOPS_BENCH_USE_ONEDNN
+  register_affine_mode<T, AffineMode::gamma_beta>();
+#else
+  register_affine_mode<T, AffineMode::gamma_beta>();
+  register_affine_mode<T, AffineMode::gamma>();
+  register_affine_mode<T, AffineMode::beta>();
+  register_affine_mode<T, AffineMode::none>();
+#endif
 }
 
 void register_layernorm_benchmarks() {
