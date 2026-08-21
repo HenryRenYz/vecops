@@ -81,11 +81,9 @@ public:
 
   VECOPS_INLINE constexpr explicit Softmax(Config cfg = {}) : config(cfg) {}
 
-  template <typename InSpec, typename OutSpec>
+  template <tensor::InputSpecLike InSpec, tensor::OutputSpecLike OutSpec>
   VECOPS_INLINE nint_t required_workspace(
       const InSpec& in, const OutSpec& out) const {
-    static_assert(tensor::is_input_spec_v<InSpec>);
-    static_assert(tensor::is_output_spec_v<OutSpec>);
     details::validate_softmax_layouts(
         in.input_layout(), out.output_layout());
     constexpr int PrefixRank = InSpec::InputTensor::Ndim - 1;
@@ -105,12 +103,10 @@ public:
         tensor::required_workspace(out_row, YPolicy{});
   }
 
-  template <typename InSpec, typename OutSpec>
+  template <tensor::InputSpecLike InSpec, tensor::OutputSpecLike OutSpec>
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace, const InSpec& in,
       const OutSpec& out) const {
-    static_assert(tensor::is_input_spec_v<InSpec>);
-    static_assert(tensor::is_output_spec_v<OutSpec>);
     details::validate_softmax_layouts(
         in.input_layout(), out.output_layout());
     constexpr int PrefixRank = InSpec::InputTensor::Ndim - 1;
@@ -189,7 +185,7 @@ public:
     }
   }
 
-  template <typename InSpec, typename OutSpec>
+  template <tensor::InputSpecLike InSpec, tensor::OutputSpecLike OutSpec>
   VECOPS_INLINE void operator()(const InSpec& in, const OutSpec& out) const {
     kernel::Workspace storage(required_workspace(in, out));
     auto workspace = storage.view();
@@ -197,7 +193,7 @@ public:
   }
 
 private:
-  template <typename InSpec, typename OutSpec>
+  template <tensor::InputSpecLike InSpec, tensor::OutputSpecLike OutSpec>
   static consteval bool should_use_online() {
 #if defined(CPU_CAPABILITY_SVE) || defined(CPU_CAPABILITY_AVX512)
     if constexpr (!details::softmax_online_allowed<Config>()) return false;

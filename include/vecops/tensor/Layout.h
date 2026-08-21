@@ -522,6 +522,9 @@ constexpr auto insert_dim(const TMeta<Is...>& m, Inew v) {
 /// Type trait: `true` if T is an ArrayMeta, Shape, or Strides.
 template <typename T>
 inline constexpr bool is_array_meta_v = details::IsArrayMeta<T>::value;
+/// Concept form of is_array_meta_v.
+template <typename T>
+concept ArrayMetaLike = is_array_meta_v<std::remove_cvref_t<T>>;
 /// Type trait: `true` if T is a Shape.
 template <typename T>
 inline constexpr bool is_shape_v = details::IsShape<T>::value;
@@ -539,8 +542,7 @@ inline constexpr bool is_strides_v = details::IsStrides<T>::value;
  * @param  m     The metadata container.
  * @return The integer value for dimension I.
  */
-template <int I, typename TMeta>
-  requires (is_array_meta_v<TMeta>)
+template <int I, ArrayMetaLike TMeta>
 constexpr nint_t get(const TMeta& m) {
   return m.template get<I>();
 }
@@ -548,8 +550,7 @@ constexpr nint_t get(const TMeta& m) {
 /**
  * @brief Check whether dimension I of an ArrayMeta is a compile-time constant.
  */
-template <int I, typename TMeta>
-  requires (is_array_meta_v<TMeta>)
+template <int I, ArrayMetaLike TMeta>
 constexpr bool is_const(const TMeta& m) {
   return m.template is_const<I>();
 }
@@ -557,8 +558,7 @@ constexpr bool is_const(const TMeta& m) {
 /**
  * @brief Check whether dimension I of an ArrayMeta is a runtime value.
  */
-template <int I, typename TMeta>
-  requires (is_array_meta_v<TMeta>)
+template <int I, ArrayMetaLike TMeta>
 constexpr bool is_runtime(const TMeta& m) {
   return m.template is_runtime<I>();
 }
@@ -761,7 +761,7 @@ struct Layout {
    * conversions remain explicit through `as()`.
    */
   template <typename TShape2, typename TStrides2>
-  requires (!(std::is_same_v<TShape, TShape2> && std::is_same_v<TStrides, TStrides2>) && details::IsMoreLenientMeta<TShape, TShape2>::value && details::IsMoreLenientMeta<TStrides, TStrides2>::value)
+  requires (!(std::same_as<TShape, TShape2> && std::same_as<TStrides, TStrides2>) && details::IsMoreLenientMeta<TShape, TShape2>::value && details::IsMoreLenientMeta<TStrides, TStrides2>::value)
   constexpr operator Layout<TShape2, TStrides2>() const {
     return as<TShape2, TStrides2>();
   }
@@ -960,6 +960,9 @@ struct ShapeProduct<Shape<Values...>> {
 /// Type trait: `true` if T is a Layout.
 template <typename T>
 inline constexpr bool is_layout_v = details::IsLayout<T>::value;
+/// Concept form of is_layout_v.
+template <typename T>
+concept LayoutLike = is_layout_v<std::remove_cvref_t<T>>;
 
 template <int I, typename TMeta>
 using meta_element_t = typename details::ArrayMetaElement<
@@ -985,8 +988,7 @@ using numel_type_t = typename details::ShapeProduct<
  * @param  layout  The layout.
  * @return The size of dimension I (always non-negative).
  */
-template <int I, typename TLayout>
-  requires (is_layout_v<TLayout>)
+template <int I, LayoutLike TLayout>
 constexpr nint_t size(const TLayout& layout) {
   return get<I>(layout.shape());
 }
@@ -994,8 +996,7 @@ constexpr nint_t size(const TLayout& layout) {
 /**
  * @brief Get the stride value of dimension I from a Layout.
  */
-template <int I, typename TLayout>
-  requires (is_layout_v<TLayout>)
+template <int I, LayoutLike TLayout>
 constexpr nint_t stride(const TLayout& layout) {
   return get<I>(layout.strides());
 }
@@ -1006,8 +1007,7 @@ constexpr nint_t stride(const TLayout& layout) {
  * Bounds are checked with VECOPS_ASSERT, so release builds do not pay for the
  * validation when assertions are disabled.
  */
-template <typename TLayout>
-  requires (is_layout_v<std::remove_cvref_t<TLayout>>)
+template <LayoutLike TLayout>
 constexpr nint_t offset_at(
     const TLayout& layout,
     const std::array<nint_t, std::remove_cvref_t<TLayout>::Ndim>& coords) {
@@ -1026,9 +1026,8 @@ constexpr nint_t offset_at(
  *        layout dimension.
  */
 template <
-    typename TLayout,
+    LayoutLike TLayout,
     typename... Is>
-  requires (is_layout_v<std::remove_cvref_t<TLayout>>)
 constexpr nint_t offset_at(const TLayout& layout, Is... is) {
   using LayoutT = std::remove_cvref_t<TLayout>;
   static_assert(sizeof...(Is) == LayoutT::Ndim, "coordinate count must match layout rank");
@@ -1044,22 +1043,19 @@ constexpr nint_t offset_at(const TLayout& layout, Is... is) {
  * @note This is a compile-time O(N) type transformation — the return
  *       type carries the modified type parameter pack.
  */
-template <int I, typename TMeta>
-  requires (is_array_meta_v<TMeta>)
+template <int I, ArrayMetaLike TMeta>
 constexpr auto remove(const TMeta& m) { return details::remove_dim<I>(m); }
 
 /**
  * @brief Remove dimension I from a Layout (both shape and strides).
  */
-template <int I, typename TLayout>
-  requires (is_layout_v<TLayout>)
+template <int I, LayoutLike TLayout>
 constexpr auto remove(const TLayout& m) {
   return make_layout(remove<I>(m.shape()), remove<I>(m.strides()));
 }
 
 /** @brief Keep the first N dimensions, fixing discarded trailing axes at 0. */
-template <int N, typename TLayout>
-  requires (is_layout_v<TLayout>)
+template <int N, LayoutLike TLayout>
 constexpr auto take_leading(const TLayout& layout) {
   static_assert(1 <= N && N <= TLayout::Ndim);
   if constexpr (N == TLayout::Ndim) return layout;
@@ -1067,8 +1063,7 @@ constexpr auto take_leading(const TLayout& layout) {
 }
 
 /** @brief Keep the last N dimensions, fixing discarded leading axes at 0. */
-template <int N, typename TLayout>
-  requires (is_layout_v<TLayout>)
+template <int N, LayoutLike TLayout>
 constexpr auto take_trailing(const TLayout& layout) {
   static_assert(1 <= N && N <= TLayout::Ndim);
   if constexpr (N == TLayout::Ndim) return layout;
@@ -1085,15 +1080,13 @@ constexpr auto take_trailing(const TLayout& layout) {
  * @param  v     The new value.
  * @return A new ArrayMeta with dimension I replaced.
  */
-template <int I, typename TMeta, typename Inew>
-  requires (is_array_meta_v<TMeta>)
+template <int I, ArrayMetaLike TMeta, typename Inew>
 constexpr auto set(const TMeta& m, Inew v) { return details::set_dim<I>(m, v); }
 
 /**
  * @brief Set dimension I in a Layout to new shape and stride values.
  */
-template <int I, typename TLayout, typename IShapeNew, typename IStridesNew>
-  requires (is_layout_v<TLayout>)
+template <int I, LayoutLike TLayout, typename IShapeNew, typename IStridesNew>
 constexpr auto set(const TLayout& m, IShapeNew v_size, IStridesNew v_stride) {
   return make_layout(set<I>(m.shape(), v_size), set<I>(m.strides(), v_stride));
 }
@@ -1110,16 +1103,14 @@ constexpr auto set(const TLayout& m, IShapeNew v_size, IStridesNew v_stride) {
  * @param  v     The value for the new dimension.
  * @return A new ArrayMeta of rank `Ndim+1`.
  */
-template <int I, typename TMeta, typename Inew>
-  requires (is_array_meta_v<TMeta>)
+template <int I, ArrayMetaLike TMeta, typename Inew>
 constexpr auto insert(const TMeta& m, Inew v) { return details::insert_dim<I>(m, v); }
 
 /**
  * @brief Insert a new dimension before position I in a Layout
  *        (both shape and strides).
  */
-template <int I, typename TLayout, typename IShapeNew, typename IStridesNew>
-  requires (is_layout_v<TLayout>)
+template <int I, LayoutLike TLayout, typename IShapeNew, typename IStridesNew>
 constexpr auto insert(const TLayout& m, IShapeNew v_size, IStridesNew v_stride) {
   return make_layout(insert<I>(m.shape(), v_size), insert<I>(m.strides(), v_stride));
 }
@@ -1208,8 +1199,7 @@ constexpr auto swap_dim(const TMeta<Is...>& m) {
  * @param  layout  The layout to transpose.
  * @return A new Layout with dimensions I and J exchanged, preserving type info.
  */
-template <int I, int J, typename TLayout>
-  requires (is_layout_v<TLayout>)
+template <int I, int J, LayoutLike TLayout>
 constexpr auto transpose(const TLayout& layout) {
   static_assert(0 <= I && I < TLayout::Ndim, "I out of range");
   static_assert(0 <= J && J < TLayout::Ndim, "J out of range");
@@ -1234,8 +1224,7 @@ constexpr auto transpose(const TLayout& layout) {
  * @param  j       Second dimension index (runtime).
  * @return A new Layout with all-Any Shape and Strides.
  */
-template <typename TLayout>
-  requires (is_layout_v<TLayout>)
+template <LayoutLike TLayout>
 constexpr auto transpose(const TLayout& layout, int i, int j) {
   constexpr int ndim = TLayout::Ndim;
   VECOPS_ASSERT(0 <= i && i < ndim, "i(%d) out of range [0, %d)", i, ndim);
@@ -1349,8 +1338,7 @@ inline constexpr bool is_ct_contiguous_v =
  * @param  layout  The layout.
  * @return `true` if the last N dimensions are row-major contiguous.
  */
-template <int N, typename TLayout>
-  requires (is_layout_v<TLayout>)
+template <int N, LayoutLike TLayout>
 inline bool is_last_contiguous(const TLayout& layout) {
   if constexpr (is_ct_last_contiguous_v<TLayout, N>) {
     return true;
@@ -1375,8 +1363,7 @@ inline bool is_last_contiguous(const TLayout& layout) {
  * @param  layout  The layout.
  * @return `true` if the layout is fully row-major contiguous.
  */
-template <typename TLayout>
-  requires (is_layout_v<TLayout>)
+template <LayoutLike TLayout>
 inline bool is_contiguous(const TLayout& layout) {
   return is_last_contiguous<TLayout::Ndim>(layout);
 }

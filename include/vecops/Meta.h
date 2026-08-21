@@ -513,14 +513,14 @@ constexpr auto operator+(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
 
 /// Value + nint_t → Value + Any{nint_t}
 template <typename T>
-  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
+  requires (std::derived_from<T, Value> && !is_int_v<T>)
 constexpr auto operator+(T lhs, nint_t rhs) {
   return lhs + Any{rhs};
 }
 
 /// nint_t + Value → Any{nint_t} + Value
 template <typename T>
-  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
+  requires (std::derived_from<T, Value> && !is_int_v<T>)
 constexpr auto operator+(nint_t lhs, T rhs) {
   return Any{lhs} + rhs;
 }
@@ -556,14 +556,14 @@ constexpr auto operator-(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
 
 /// Value - nint_t → Value - Any{nint_t}
 template <typename T>
-  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
+  requires (std::derived_from<T, Value> && !is_int_v<T>)
 constexpr auto operator-(T lhs, nint_t rhs) {
   return lhs - Any{rhs};
 }
 
 /// nint_t - Value → Any{nint_t} - Value
 template <typename T>
-  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
+  requires (std::derived_from<T, Value> && !is_int_v<T>)
 constexpr auto operator-(nint_t lhs, T rhs) {
   return Any{lhs} - rhs;
 }
@@ -620,14 +620,14 @@ constexpr auto operator*(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
 
 /// Value * nint_t → Value * Any{nint_t}
 template <typename T>
-  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
+  requires (std::derived_from<T, Value> && !is_int_v<T>)
 constexpr auto operator*(T lhs, nint_t rhs) {
   return lhs * Any{rhs};
 }
 
 /// nint_t * Value → Any{nint_t} * Value
 template <typename T>
-  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
+  requires (std::derived_from<T, Value> && !is_int_v<T>)
 constexpr auto operator*(nint_t lhs, T rhs) {
   return Any{lhs} * rhs;
 }
@@ -734,14 +734,14 @@ constexpr auto operator/(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
 
 /// Value / nint_t → Value / Any{nint_t}
 template <typename T>
-  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
+  requires (std::derived_from<T, Value> && !is_int_v<T>)
 constexpr auto operator/(T lhs, nint_t rhs) {
   return lhs / Any{rhs};
 }
 
 /// nint_t / Value → Any{nint_t} / Value
 template <typename T>
-  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
+  requires (std::derived_from<T, Value> && !is_int_v<T>)
 constexpr auto operator/(nint_t lhs, T rhs) {
   return Any{lhs} / rhs;
 }
@@ -832,14 +832,14 @@ constexpr auto operator%(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
 
 /// Value % nint_t → Value % Any{nint_t}
 template <typename T>
-  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
+  requires (std::derived_from<T, Value> && !is_int_v<T>)
 constexpr auto operator%(T lhs, nint_t rhs) {
   return lhs % Any{rhs};
 }
 
 /// nint_t % Value → Any{nint_t} % Value
 template <typename T>
-  requires (std::is_base_of_v<Value, T> && !is_int_v<T>)
+  requires (std::derived_from<T, Value> && !is_int_v<T>)
 constexpr auto operator%(nint_t lhs, T rhs) {
   return Any{lhs} % rhs;
 }

@@ -62,16 +62,14 @@ struct Atom {
    * 返回布局为Shape<ceil(xM/M_R), ceil(xK/K_R), ...>, Stride<Dynamic<64> | Int<*>, Dynamic<64> | Int<*>>的特化。
    * 注：可能并不总是连续的，在一些输入下为了防止cache thrashing可能会特意留意些空隙。
    */
-  template <typename TLayout>
-    requires tensor::is_layout_v<TLayout>
+  template <tensor::LayoutLike TLayout>
   using APackedLayout = TLayout;
 
   /**
    * ALayout是否为打包布局，即判断其是否为APackedLayout<ALayout>的宽松类型：
    * Shape<*, *, ...>, Stride<Dynamic<64> | Int<*>, Dynamic<64> | Int<*>>。
    */
-  template <typename TLayout>
-    requires tensor::is_layout_v<TLayout>
+  template <tensor::LayoutLike TLayout>
   static constexpr bool is_a_packed_layout = true;
 
   template <
@@ -79,12 +77,10 @@ struct Atom {
   void pack_A(const TSrcA *src, SrcALayout src_layout, TA *dst, SrcAPackedLayout dst_layout, const Prologue &prologue);
 
 
-  template <typename TLayout>
-    requires tensor::is_layout_v<TLayout>
+  template <tensor::LayoutLike TLayout>
   using BPackedLayout = TLayout;
 
-  template <typename TLayout>
-    requires tensor::is_layout_v<TLayout>
+  template <tensor::LayoutLike TLayout>
   static constexpr bool is_b_packed_layout = true;
 
   template <

@@ -2124,6 +2124,14 @@ template <typename T>
 inline constexpr bool is_output_spec_v =
     IsOutputSpec<std::remove_cvref_t<T>>::value;
 
+/** @brief Concept form of is_input_spec_v. */
+template <typename T>
+concept InputSpecLike = is_input_spec_v<T>;
+
+/** @brief Concept form of is_output_spec_v. */
+template <typename T>
+concept OutputSpecLike = is_output_spec_v<T>;
+
 template <typename Spec, typename Policy>
 class InputDataAccess;
 
@@ -2188,7 +2196,7 @@ VECOPS_INLINE auto slice_view(
 
 /** @brief Keep the first N Spec dimensions at zero on trailing axes. */
 template <int N, typename Spec>
-  requires (is_input_spec_v<Spec> || is_output_spec_v<Spec>)
+  requires (InputSpecLike<Spec> || OutputSpecLike<Spec>)
 VECOPS_INLINE auto take_leading(const Spec& spec) {
   constexpr int Rank = [] {
     if constexpr (is_input_spec_v<Spec>) return Spec::InputTensor::Ndim;
@@ -2201,7 +2209,7 @@ VECOPS_INLINE auto take_leading(const Spec& spec) {
 
 /** @brief Keep the last N Spec dimensions at zero on leading axes. */
 template <int N, typename Spec>
-  requires (is_input_spec_v<Spec> || is_output_spec_v<Spec>)
+  requires (InputSpecLike<Spec> || OutputSpecLike<Spec>)
 VECOPS_INLINE auto take_trailing(const Spec& spec) {
   constexpr int Rank = [] {
     if constexpr (is_input_spec_v<Spec>) return Spec::InputTensor::Ndim;

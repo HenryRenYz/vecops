@@ -203,8 +203,7 @@ static constexpr auto new_axis() {
  *
  * @note The runtime value `repeat` must be >= 0 (assertion).
  */
-template <typename V>
-  requires (std::is_base_of_v<Value, std::decay_t<V>>)
+template <ValueType V>
 static constexpr auto new_axis(V repeat) {
   VECOPS_ASSERT(nint_t(repeat) >= 0, "Cannot repeat negative times");
   return details::NewAxis<std::decay_t<V>>{nint_t(repeat)};
@@ -245,10 +244,7 @@ static constexpr auto new_axis(nint_t repeat) {
  * @param end    Exclusive end index.
  * @param step   Step within the slice (default: 1). Must not be 0.
  */
-template <typename S, typename E, typename T = Any>
-  requires std::is_base_of_v<Value, std::decay_t<S>> &&
-           std::is_base_of_v<Value, std::decay_t<E>> &&
-           std::is_base_of_v<Value, std::decay_t<T>>
+template <ValueType S, ValueType E, ValueType T = Any>
 static constexpr auto range(S start, E end, T step = T{1}) {
   return details::Range<std::decay_t<S>, std::decay_t<E>, std::decay_t<T>>{
       nint_t(start), nint_t(end), nint_t(step)};
@@ -721,7 +717,7 @@ public:
    * @tparam TStrides2 Target Strides type (must be more-or-equal lenient).
    */
   template <typename TShape2, typename TStrides2>
-  requires (!(std::is_same_v<Shape, TShape2> && std::is_same_v<Stride, TStrides2>) && details::IsMoreLenientMeta<Shape, TShape2>::value && details::IsMoreLenientMeta<Stride, TStrides2>::value)
+  requires (!(std::same_as<Shape, TShape2> && std::same_as<Stride, TStrides2>) && details::IsMoreLenientMeta<Shape, TShape2>::value && details::IsMoreLenientMeta<Stride, TStrides2>::value)
   constexpr operator Tensor<T, TShape2, TStrides2>() const {
     return as<TShape2, TStrides2>();
   }
@@ -1052,8 +1048,7 @@ using Array = Tensor<T,
  * @param layout   Layout descriptor.
  * @return A Tensor with the given layout.
  */
-template <typename T, typename TLayout>
-  requires (is_layout_v<std::remove_cvref_t<TLayout>>)
+template <typename T, LayoutLike TLayout>
 constexpr auto make_tensor(T* data, TLayout&& layout) {
   using L = std::remove_cvref_t<TLayout>;
   return Tensor<T, typename L::Shape, typename L::Strides>(data, std::forward<TLayout>(layout));

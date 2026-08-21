@@ -79,15 +79,11 @@ public:
 
   VECOPS_INLINE constexpr explicit LayerNorm(Config cfg = {}) : config(cfg) {}
 
-  template <typename InSpec, typename ScaleSpec, typename BiasSpec,
-            typename OutSpec>
+  template <tensor::InputSpecLike InSpec, tensor::InputSpecLike ScaleSpec,
+            tensor::InputSpecLike BiasSpec, tensor::OutputSpecLike OutSpec>
   VECOPS_INLINE nint_t required_workspace(
       const InSpec& in, const ScaleSpec& scale, const BiasSpec& bias,
       const OutSpec& out) const {
-    static_assert(tensor::is_input_spec_v<InSpec>);
-    static_assert(tensor::is_input_spec_v<ScaleSpec>);
-    static_assert(tensor::is_input_spec_v<BiasSpec>);
-    static_assert(tensor::is_output_spec_v<OutSpec>);
     details::validate_layernorm_layouts(
         in.input_layout(), scale.input_layout(), bias.input_layout(),
         out.output_layout());
@@ -95,16 +91,12 @@ public:
         tensor::take_trailing<1>(in), XPolicy{});
   }
 
-  template <typename InSpec, typename ScaleSpec, typename BiasSpec,
-            typename OutSpec>
+  template <tensor::InputSpecLike InSpec, tensor::InputSpecLike ScaleSpec,
+            tensor::InputSpecLike BiasSpec, tensor::OutputSpecLike OutSpec>
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace, const InSpec& in,
       const ScaleSpec& scale, const BiasSpec& bias,
       const OutSpec& out) const {
-    static_assert(tensor::is_input_spec_v<InSpec>);
-    static_assert(tensor::is_input_spec_v<ScaleSpec>);
-    static_assert(tensor::is_input_spec_v<BiasSpec>);
-    static_assert(tensor::is_output_spec_v<OutSpec>);
     details::validate_layernorm_layouts(
         in.input_layout(), scale.input_layout(), bias.input_layout(),
         out.output_layout());
@@ -125,8 +117,8 @@ public:
     run_rows<RowRecipe>(workspace, in, scale, bias, out);
   }
 
-  template <typename InSpec, typename ScaleSpec, typename BiasSpec,
-            typename OutSpec>
+  template <tensor::InputSpecLike InSpec, tensor::InputSpecLike ScaleSpec,
+            tensor::InputSpecLike BiasSpec, tensor::OutputSpecLike OutSpec>
   VECOPS_INLINE void operator()(
       const InSpec& in, const ScaleSpec& scale, const BiasSpec& bias,
       const OutSpec& out) const {

@@ -129,10 +129,18 @@ struct RuntimeWordAccess {
 
 } // namespace details
 
+/**
+ * A VectorValue whose canonical physical Tag can be reconstructed via \ref
+ * VecToTag. Most operations accept Tag-inferable vectors and internally
+ * resolve VecToTag<V> to forward to the explicit-Tag overload.
+ */
+template <typename V>
+concept TagInferableVector =
+    VectorValue<V> && details::HasInferredTag<V>;
+
 namespace details {
 
-template <VectorValue V>
-  requires HasInferredTag<V>
+template <TagInferableVector V>
 struct VecToTagImpl {
   using type = InferredTagOf<V>;
 };
@@ -147,18 +155,8 @@ struct VecToTagImpl {
  * callers that need explicit subword semantics must keep passing the original
  * Tag to the operation.
  */
-template <VectorValue V>
-  requires details::HasInferredTag<V>
+template <TagInferableVector V>
 using VecToTag = typename details::VecToTagImpl<std::remove_cvref_t<V>>::type;
-
-/**
- * A VectorValue whose canonical physical Tag can be reconstructed via \ref
- * VecToTag. Most operations accept Tag-inferable vectors and internally
- * resolve VecToTag<V> to forward to the explicit-Tag overload.
- */
-template <typename V>
-concept TagInferableVector =
-    VectorValue<V> && details::HasInferredTag<V>;
 
 /**
  * A Tag-inferable vector whose element type is integral (signed or unsigned).

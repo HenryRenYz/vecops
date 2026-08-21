@@ -147,16 +147,13 @@ struct CmpGeOp {
 /* **************************************************************************** */
 
 #define VECOPS_VEC_CLASSIFICATION_MEMBERS                                 \
-  template <VectorTag Tag>                                                \
-    requires FloatingTag<Tag>                           \
+  template <FloatingTag Tag>                                            \
   VECOPS_ALWAYS_INLINE Mask<Tag> operator()(Tag, Vec<Tag>) const;         \
-  template <VectorTag Tag, typename... Options>                           \
-    requires FloatingTag<Tag>                           \
-          && (sizeof...(Options) > 0)                                     \
+  template <FloatingTag Tag, typename... Options>                       \
+    requires (sizeof...(Options) > 0)                                   \
   VECOPS_ALWAYS_INLINE Mask<Tag> operator()(                              \
       Tag, Vec<Tag>, Options&&...) const;                                 \
-  template <VectorTag Tag, Active A, Inactive I>                          \
-    requires FloatingTag<Tag>                           \
+  template <FloatingTag Tag, Active A, Inactive I>                        \
   VECOPS_ALWAYS_INLINE Mask<Tag> operator()(                              \
       Tag, Vec<Tag>, const OpRequest<Tag, A, I>&) const;                   \
   template <FloatingVectorValue V, typename... Options>                   \
@@ -250,8 +247,7 @@ VECOPS_VEC_DEFINE_BINARY_COMPARISON(CmpGeOp, cmpge, a[i] >= b[i]);
    * exactly when value[i] has this CPO's classification. Finite values,  \
    * and other non-matching IEEE values produce false.                    \
    */                                                                     \
-  template <VectorTag Tag>                                                \
-    requires FloatingTag<Tag>                           \
+  template <FloatingTag Tag>                                            \
   VECOPS_ALWAYS_INLINE Mask<Tag> OpType::operator()(                      \
       Tag tag, Vec<Tag> value) const {                                    \
     return details::execute(*this, tag, value);                           \
@@ -262,16 +258,14 @@ VECOPS_VEC_DEFINE_BINARY_COMPARISON(CmpGeOp, cmpge, a[i] >= b[i]);
    * default and with `opt::zero`; `opt::merge(mask_value)` preserves the  \
    * supplied mask lanes instead.                                         \
    */                                                                     \
-  template <VectorTag Tag, typename... Options>                           \
-    requires FloatingTag<Tag>                           \
-          && (sizeof...(Options) > 0)                                     \
+  template <FloatingTag Tag, typename... Options>                       \
+    requires (sizeof...(Options) > 0)                                   \
   VECOPS_ALWAYS_INLINE Mask<Tag> OpType::operator()(                      \
       Tag tag, Vec<Tag> value, Options&&... options) const {              \
     return details::execute_comparison_options(                           \
         *this, tag, value, std::forward<Options>(options)...);            \
   }                                                                       \
-  template <VectorTag Tag, Active A, Inactive I>                          \
-    requires FloatingTag<Tag>                           \
+  template <FloatingTag Tag, Active A, Inactive I>                        \
   VECOPS_ALWAYS_INLINE Mask<Tag> OpType::operator()(                      \
       Tag tag, Vec<Tag> value,                                            \
       const OpRequest<Tag, A, I>& request) const {                        \

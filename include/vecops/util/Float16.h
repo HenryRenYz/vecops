@@ -6,6 +6,7 @@
 #define VECOPS_FLOAT16_H
 
 #include <cmath>
+#include <concepts>
 #include <cstring>
 #include <cstdint>
 #include <iostream>
@@ -31,8 +32,7 @@ struct alignas(2) Float16 {
 
   VECOPS_INLINE Float16(double x) : Float16(float(x)) { }
 
-  template <typename Int>
-    requires std::is_integral_v<Int>
+  template <std::integral Int>
   VECOPS_INLINE explicit Float16(Int x) : Float16(float(x)) { }
 
   #if defined(ARCH_ARM64)
@@ -69,8 +69,7 @@ struct alignas(2) Float16 {
   }
   #endif
 
-  template <typename Int>
-    requires std::is_integral_v<Int>
+  template <std::integral Int>
   VECOPS_INLINE explicit constexpr operator Int() const {
     return Int(float(*this));
   }
