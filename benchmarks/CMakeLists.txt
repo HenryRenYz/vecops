@@ -80,6 +80,11 @@ function(add_multiarch_benchmark NAME)
         add_executable(${TARGET_NAME} ${ARG_FILES})
         target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         target_compile_options(${TARGET_NAME} PRIVATE -march=${MARCH})
+        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
+           CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+           NOT CODE STREQUAL "Scalar")
+            target_compile_options(${TARGET_NAME} PRIVATE -Wno-psabi)
+        endif()
         target_compile_definitions(${TARGET_NAME} PRIVATE
             VECOPS_BENCH_ARCH_CODE="${CODE}"
             VECOPS_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
@@ -164,6 +169,10 @@ if(VECOPS_ENABLE_ONEDNN_BENCHMARKS)
             ${CMAKE_CURRENT_SOURCE_DIR})
         target_compile_options(${TARGET_NAME} PRIVATE
             -march=${VECOPS_MAP_${VECOPS_ARCH_FAMILY}_Native})
+        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
+           CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(${TARGET_NAME} PRIVATE -Wno-psabi)
+        endif()
         target_compile_definitions(${TARGET_NAME} PRIVATE
             VECOPS_BENCH_ARCH_CODE="${VECOPS_ONEDNN_BENCH_ARCH}"
             VECOPS_BENCH_USE_ONEDNN=1

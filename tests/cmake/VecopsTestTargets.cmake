@@ -246,6 +246,12 @@ function(vecops_add_test)
             target_compile_options(${_TARGET_NAME} PRIVATE "-march=${_MARCH}")
         endif()
         if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
+           CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+           NOT _ARCH STREQUAL "NONE" AND
+           NOT _ARCH STREQUAL "Scalar")
+            target_compile_options(${_TARGET_NAME} PRIVATE "-Wno-psabi")
+        endif()
+        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
            _ARCH STREQUAL "NativeFixedSVE")
             target_compile_options(${_TARGET_NAME} PRIVATE
                 "-msve-vector-bits=${VECOPS_NATIVE_FIXED_SVE_BITS}")

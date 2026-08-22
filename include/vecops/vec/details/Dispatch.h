@@ -36,6 +36,14 @@ struct GenericImpl;
 template <typename...>
 inline constexpr bool dispatch_dependent_false = false;
 
+#if defined(COMPILER_GCC) && defined(CPU_CAPABILITY_SVE)
+// GCC diagnoses attributes on builtin sizeless SVE values when a variadic
+// dispatch boundary deduces them as template arguments. The backend retains
+// the attributes, so suppress only this known false positive.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wattributes"
+#endif
+
 /** Selects a whole-Tag native implementation before word or generic paths. */
 template <VectorTag Tag, typename Op, typename... Args>
 VECOPS_ALWAYS_INLINE constexpr decltype(auto) execute(
@@ -86,6 +94,10 @@ VECOPS_ALWAYS_INLINE constexpr decltype(auto) execute_word(
         "operation has no native word implementation for this Tag");
   }
 }
+
+#if defined(COMPILER_GCC) && defined(CPU_CAPABILITY_SVE)
+#pragma GCC diagnostic pop
+#endif
 
 } // namespace vecops::vec::details
 

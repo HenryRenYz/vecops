@@ -489,30 +489,6 @@ inline constexpr bool is_vector_carry_definition_v =
     is_vector_reduction_definition_v<T> ||
     is_vector_invariant_definition_v<T>;
 
-template <typename... Definitions>
-struct AreTwoVectorReductions : std::false_type {};
-
-template <typename A, typename B>
-struct AreTwoVectorReductions<A, B> : std::bool_constant<
-    is_vector_reduction_definition_v<A> &&
-    is_vector_reduction_definition_v<B>> {};
-
-template <typename... Definitions>
-inline constexpr bool are_two_vector_reductions_v =
-    AreTwoVectorReductions<Definitions...>::value;
-
-template <typename... Definitions>
-struct AreTwoVectorInvariants : std::false_type {};
-
-template <typename A, typename B>
-struct AreTwoVectorInvariants<A, B> : std::bool_constant<
-    is_vector_invariant_definition_v<A> &&
-    is_vector_invariant_definition_v<B>> {};
-
-template <typename... Definitions>
-inline constexpr bool are_two_vector_invariants_v =
-    AreTwoVectorInvariants<Definitions...>::value;
-
 template <typename Reduction, ::vecops::vec::VectorTag Tag>
 VECOPS_ALWAYS_INLINE ::vecops::vec::Vec<Tag> combine_reduction_carries(
     Tag, ::vecops::vec::Vec<Tag> lhs,
@@ -558,6 +534,15 @@ VECOPS_ALWAYS_INLINE auto make_full_invariant(
         full_tag, base_tag, definition.value);
   }
 }
+
+#if defined(COMPILER_GCC) && defined(CPU_CAPABILITY_SVE)
+// GCC diagnoses the attributes on sizeless SVE types when they are deduced
+// through these variadic carry helpers, even though the attributes are
+// preserved by the underlying builtin types. Keep the workaround local so
+// unrelated attribute diagnostics remain visible.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wattributes"
+#endif
 
 template <std::size_t Wanted, std::size_t Current = 0,
           typename Fn, typename First, typename... Rest>
@@ -662,6 +647,10 @@ VECOPS_ALWAYS_INLINE void with_vector_tail_carries(
         });
   }
 }
+
+#if defined(COMPILER_GCC) && defined(CPU_CAPABILITY_SVE)
+#pragma GCC diagnostic pop
+#endif
 
 // ======================== Slice Traits ========================
 
@@ -1437,6 +1426,11 @@ VECOPS_ALWAYS_INLINE void map(Tag base_tag, N n, Fn&& block) {
  * in an aggregate, so this overload supports sizeless SVE vectors. Definitions
  * are passed to the callback in declaration order after `(tag, i, active)`.
  */
+#if defined(COMPILER_GCC) && defined(CPU_CAPABILITY_SVE)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wattributes"
+#endif
+
 template <
     int FullFactor = 1, int TailFactor = 1,
     TailCarryPolicy Policy = TailCarryPolicy::independent,
@@ -1474,156 +1468,46 @@ VECOPS_ALWAYS_INLINE void fold(
   auto definition_tuple = std::forward_as_tuple(definitions...);
   auto&& block_ref = block;
 
-  if constexpr (details::are_two_vector_reductions_v<Definitions...>) {
-    auto&& definition0 = std::get<0>(definition_tuple);
-    auto&& definition1 = std::get<1>(definition_tuple);
-    using Definition0 = std::remove_cvref_t<decltype(definition0)>;
-    using Definition1 = std::remove_cvref_t<decltype(definition1)>;
-    using Reduction0 = typename Definition0::ReductionType;
-    using Reduction1 = typename Definition1::ReductionType;
-    static_assert(std::same_as<
-        std::remove_cvref_t<decltype(definition0.result)>,
-        ::vecops::vec::ElementOf<Tag>>);
-    static_assert(std::same_as<
-        std::remove_cvref_t<decltype(definition1.result)>,
-        ::vecops::vec::ElementOf<Tag>>);
-
-    auto full_carry0 = ::vecops::vec::fill(
-        full_tag,
-        ::vecops::vec::details::reduction_identity<
-            Reduction0, ::vecops::vec::ElementOf<Tag>>());
-    auto full_carry1 = ::vecops::vec::fill(
-        full_tag,
-        ::vecops::vec::details::reduction_identity<
-            Reduction1, ::vecops::vec::ElementOf<Tag>>());
+  auto use_full_carries = [&](auto&... full_carries)
+      VECOPS_INLINE_LAMBDA {
     nint_t i = 0;
     for (; i + full_lanes <= n_int; i += full_lanes) {
       block_ref(
           full_tag, i, ::vecops::vec::opt::unmasked,
-          full_carry0, full_carry1);
+          full_carries...);
     }
     if (i < n_int) {
-      auto tail_carry0 = [&]() VECOPS_INLINE_LAMBDA {
-        if constexpr (Policy == TailCarryPolicy::reuse_prefix) {
-          return details::vector_prefix(
-              full_tag, tail_tag, full_carry0);
-        } else {
-          return ::vecops::vec::fill(
-              tail_tag,
-              ::vecops::vec::details::reduction_identity<
-                  Reduction0, ::vecops::vec::ElementOf<Tag>>());
-        }
-      }();
-      auto tail_carry1 = [&]() VECOPS_INLINE_LAMBDA {
-        if constexpr (Policy == TailCarryPolicy::reuse_prefix) {
-          return details::vector_prefix(
-              full_tag, tail_tag, full_carry1);
-        } else {
-          return ::vecops::vec::fill(
-              tail_tag,
-              ::vecops::vec::details::reduction_identity<
-                  Reduction1, ::vecops::vec::ElementOf<Tag>>());
-        }
-      }();
-      for (; i + tail_lanes <= n_int; i += tail_lanes) {
-        block_ref(
-            tail_tag, i, ::vecops::vec::opt::unmasked,
-            tail_carry0, tail_carry1);
-      }
-      if (i < n_int) {
-        block_ref(
-            tail_tag, i, ::vecops::vec::opt::first(n_int - i),
-            tail_carry0, tail_carry1);
-      }
-      if constexpr (Policy == TailCarryPolicy::independent) {
-        tail_carry0 = details::combine_reduction_carries<Reduction0>(
-            tail_tag,
-            details::vector_prefix(full_tag, tail_tag, full_carry0),
-            tail_carry0);
-        tail_carry1 = details::combine_reduction_carries<Reduction1>(
-            tail_tag,
-            details::vector_prefix(full_tag, tail_tag, full_carry1),
-            tail_carry1);
-      }
-      full_carry0 = details::replace_vector_prefix(
-          full_tag, tail_tag, full_carry0, tail_carry0);
-      full_carry1 = details::replace_vector_prefix(
-          full_tag, tail_tag, full_carry1, tail_carry1);
-    }
-    definition0.result = Reduction0{}(full_tag, full_carry0);
-    definition1.result = Reduction1{}(full_tag, full_carry1);
-  } else if constexpr (
-      details::are_two_vector_invariants_v<Definitions...>) {
-    auto&& definition0 = std::get<0>(definition_tuple);
-    auto&& definition1 = std::get<1>(definition_tuple);
-    auto full_carry0 = details::make_full_invariant(
-        full_tag, base_tag, definition0);
-    auto full_carry1 = details::make_full_invariant(
-        full_tag, base_tag, definition1);
-    const auto& const_full_carry0 = full_carry0;
-    const auto& const_full_carry1 = full_carry1;
-    nint_t i = 0;
-    for (; i + full_lanes <= n_int; i += full_lanes) {
-      block_ref(
-          full_tag, i, ::vecops::vec::opt::unmasked,
-          const_full_carry0, const_full_carry1);
-    }
-    if (i < n_int) {
-      auto tail_carry0 = details::vector_prefix(
-          full_tag, tail_tag, full_carry0);
-      auto tail_carry1 = details::vector_prefix(
-          full_tag, tail_tag, full_carry1);
-      const auto& const_tail_carry0 = tail_carry0;
-      const auto& const_tail_carry1 = tail_carry1;
-      for (; i + tail_lanes <= n_int; i += tail_lanes) {
-        block_ref(
-            tail_tag, i, ::vecops::vec::opt::unmasked,
-            const_tail_carry0, const_tail_carry1);
-      }
-      if (i < n_int) {
-        block_ref(
-            tail_tag, i, ::vecops::vec::opt::first(n_int - i),
-            const_tail_carry0, const_tail_carry1);
-      }
-    }
-  } else {
-    auto use_full_carries = [&](auto&... full_carries)
+      auto full_dispatch = [&]<std::size_t Wanted>(auto&& fn)
+          VECOPS_INLINE_LAMBDA -> decltype(auto) {
+        return details::invoke_vector_carry<Wanted>(
+            std::forward<decltype(fn)>(fn), full_carries...);
+      };
+      auto use_tail_carries = [&](auto&... tail_carries)
         VECOPS_INLINE_LAMBDA {
-      nint_t i = 0;
-      for (; i + full_lanes <= n_int; i += full_lanes) {
-        block_ref(
-            full_tag, i, ::vecops::vec::opt::unmasked,
-            full_carries...);
-      }
-      if (i < n_int) {
-        auto full_dispatch = [&]<std::size_t Wanted>(auto&& fn)
-            VECOPS_INLINE_LAMBDA -> decltype(auto) {
-          return details::invoke_vector_carry<Wanted>(
-              std::forward<decltype(fn)>(fn), full_carries...);
-        };
-        auto use_tail_carries = [&](auto&... tail_carries)
-            VECOPS_INLINE_LAMBDA {
-          for (; i + tail_lanes <= n_int; i += tail_lanes) {
-            block_ref(
-                tail_tag, i, ::vecops::vec::opt::unmasked,
-                tail_carries...);
-          }
-          if (i < n_int) {
-            block_ref(
-                tail_tag, i,
-                ::vecops::vec::opt::first(n_int - i),
-                tail_carries...);
-          }
-        };
-        details::with_vector_tail_carries<0, Policy>(
-            definition_tuple, full_tag, tail_tag,
-            full_dispatch, use_tail_carries);
-      }
-    };
-    details::with_vector_full_carries<0>(
-        definition_tuple, base_tag, full_tag, use_full_carries);
-  }
+        for (; i + tail_lanes <= n_int; i += tail_lanes) {
+          block_ref(
+              tail_tag, i, ::vecops::vec::opt::unmasked,
+              tail_carries...);
+        }
+        if (i < n_int) {
+          block_ref(
+              tail_tag, i,
+              ::vecops::vec::opt::first(n_int - i),
+              tail_carries...);
+        }
+      };
+      details::with_vector_tail_carries<0, Policy>(
+          definition_tuple, full_tag, tail_tag,
+          full_dispatch, use_tail_carries);
+    }
+  };
+  details::with_vector_full_carries<0>(
+      definition_tuple, base_tag, full_tag, use_full_carries);
 }
+
+#if defined(COMPILER_GCC) && defined(CPU_CAPABILITY_SVE)
+#pragma GCC diagnostic pop
+#endif
 
 /**
  * @brief Traverse selected logical dimensions and invoke `fn` on the resulting
