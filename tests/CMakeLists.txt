@@ -5,6 +5,21 @@ vecops_add_test(NAME TensorTest FILES tensor/TensorTest.cpp FOLDER tensor/tensor
 vecops_add_test(NAME GemmTest FILES array/GemmTest.cpp FOLDER array/gemm)
 vecops_add_test(NAME LayoutTest FILES tensor/LayoutTest.cpp FOLDER tensor/layout)
 vecops_add_test(NAME KernelLoopTest FILES kernel/LoopTest.cpp FOLDER kernel/loop)
+vecops_add_test(NAME KernelTile2DTest FILES kernel/Tile2DTest.cpp FOLDER kernel/tile2d)
+
+if(VECOPS_ARCH_FAMILY STREQUAL "x86")
+    set(VECOPS_TILE2D_GEMM_ARCH Scalar AVX512 Native)
+else()
+    set(VECOPS_TILE2D_GEMM_ARCH Scalar SVE Native)
+    if(VECOPS_NATIVE_FIXED_SVE_BITS)
+        list(APPEND VECOPS_TILE2D_GEMM_ARCH NativeFixedSVE)
+    endif()
+endif()
+vecops_add_test(
+    NAME KernelTile2DGemmTest
+    FILES kernel/Tile2DGemmTest.cpp
+    FOLDER kernel/tile2d
+    ARCH ${VECOPS_TILE2D_GEMM_ARCH})
 vecops_add_test(NAME UtilMathTest FILES util/MathTest.cpp FOLDER util/math)
 
 if(VECOPS_ARCH_FAMILY STREQUAL "ARM")
