@@ -81,6 +81,34 @@ public:
 
   VECOPS_INLINE constexpr explicit Softmax(Config cfg = {}) : config(cfg) {}
 
+  /** Centers an already-loaded block, exponentiates it, and caches it.
+   *  Shared leaf of the online and offline row paths so the numerical
+   *  sequence (subtract max, exp_neg, masked store) has one definition. */
+  template <typename BlockTag, typename Active>
+  VECOPS_ALWAYS_INLINE static auto exp_cache_block(
+      BlockTag block_tag, nint_t col, Active active,
+      vec::Vec<BlockTag> centered, ComputeType* exp_cache) {
+    const auto zero = vec::zeros(block_tag);
+    auto exponential = vec::exp_neg(
+        block_tag, centered,
+        vec::opt::math::accuracy<ExpAccuracy>, active,
+        vec::opt::merge(zero));
+    vec::store(block_tag, exp_cache + col, exponential, active);
+    return exponential;
+  }
+
+  /** Loads a cached block, scales it, and stores it to the output.
+   *  @p col is the row-local lane offset of the block. */
+  template <typename Y, typename BlockTag, typename Active, typename ScaleV>
+  VECOPS_ALWAYS_INLINE static void store_normalized_block(
+      Y& y, BlockTag block_tag, nint_t col, Active active, ScaleV scale_v,
+      const ComputeType* exp_cache) {
+    auto exponential = vec::load(block_tag, exp_cache + col, active);
+    y.store(
+        block_tag, tensor::coord(col),
+        vec::mul(exponential, scale_v), active);
+  }
+
   template <tensor::InputSpecLike InSpec, tensor::OutputSpecLike OutSpec>
   VECOPS_INLINE nint_t required_workspace(
       const InSpec& in, const OutSpec& out) const {
@@ -297,13 +325,9 @@ private:
                 const ComputeType tile_max =
                     vec::reduce_max(block_tag, value);
                 const auto maximum = vec::fill(block_tag, tile_max);
-                auto centered = vec::sub(value, maximum);
-                const auto zero = vec::zeros(block_tag);
-                auto exponential = vec::exp_neg(
-                    block_tag, centered,
-                    vec::opt::math::accuracy<ExpAccuracy>, active,
-                    vec::opt::merge(zero));
-                vec::store(block_tag, exp_cache + col, exponential, active);
+                auto exponential = exp_cache_block(
+                    block_tag, col, active,
+                    vec::sub(value, maximum), exp_cache);
                 tile_max_cache[tile] = tile_max;
                 tile_sum_cache[tile] = vec::reduce_add(block_tag, exponential);
                 ++tile;
@@ -361,12 +385,9 @@ private:
                 tag, count,
                 [&](auto block_tag, nint_t local, auto active,
                     const auto& scale_v) VECOPS_INLINE_LAMBDA {
-                  auto exponential = vec::load(
-                      block_tag, exp_cache + col + local, active);
-                  auto normalized = vec::mul(exponential, scale_v);
-                  y.store(
-                      block_tag, tensor::coord(col + local),
-                      normalized, active);
+                  store_normalized_block(
+                      y, block_tag, col + local, active, scale_v,
+                      exp_cache);
                 },
                 kernel::loop::invariant(scale));
             col += count;
@@ -440,13 +461,9 @@ private:
                     block_tag, tensor::coord(col), active,
                     vec::opt::merge(negative_infinity));
                 const auto maximum = vec::fill(block_tag, max_value);
-                auto centered = vec::sub(value, maximum);
-                const auto zero = vec::zeros(block_tag);
-                auto exponential = vec::exp_neg(
-                    block_tag, centered,
-                    vec::opt::math::accuracy<ExpAccuracy>, active,
-                    vec::opt::merge(zero));
-                vec::store(block_tag, exp_cache + col, exponential, active);
+                auto exponential = exp_cache_block(
+                    block_tag, col, active,
+                    vec::sub(value, maximum), exp_cache);
                 sum_vector = vec::add(sum_vector, exponential);
               },
               kernel::loop::reduce_add(sum));
@@ -457,11 +474,8 @@ private:
               [&](auto block_tag, nint_t col, auto active,
                   const auto& inverse)
                   VECOPS_INLINE_LAMBDA {
-                auto exponential = vec::load(
-                    block_tag, exp_cache + col, active);
-                auto normalized = vec::mul(exponential, inverse);
-                y.store(
-                    block_tag, tensor::coord(col), normalized, active);
+                store_normalized_block(
+                    y, block_tag, col, active, inverse, exp_cache);
               },
               kernel::loop::invariant(inverse_sum));
           y.commit();

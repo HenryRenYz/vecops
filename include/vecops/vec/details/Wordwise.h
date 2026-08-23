@@ -14,6 +14,7 @@
  * constructed in an array.
  */
 
+#include <algorithm>
 #include <cassert>
 #include <type_traits>
 #include <utility>
@@ -26,6 +27,19 @@ namespace vecops::vec::details {
 /* **************************************************************************** */
 //                        Runtime word index expansion                        //
 /* **************************************************************************** */
+
+/**
+ * Lanes of word @p Index that lie inside the tag's logical lane count,
+ * clamped to [0, word_lanes]. Backends whose representation completes every
+ * physical word (for example non-subword scalable SVE tuples) override this
+ * with a backend-specific fast path.
+ */
+template <nint_t Index, VectorTag Tag>
+VECOPS_ALWAYS_INLINE constexpr nint_t valid_word_lanes(Tag = {}) {
+  const nint_t word_lanes = native_word_size(Tag{});
+  return std::clamp<nint_t>(
+      size(Tag{}) - Index * word_lanes, 0, word_lanes);
+}
 
 template <nint_t Index, nint_t Count, typename Visitor>
 VECOPS_ALWAYS_INLINE constexpr decltype(auto) visit_runtime_word_impl(

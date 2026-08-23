@@ -13,63 +13,10 @@
  */
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/sve/Bf16.h"
 
 namespace vecops::vec::details {
 
-
-/* **************************************************************************** */
-//    bfloat16 conversion helpers                                             //
-/* **************************************************************************** */
-
-VECOPS_ALWAYS_INLINE svfloat32_t sve_bfloat16_to_float32_low(
-    svbfloat16_t value) {
-  const auto bits = svunpklo_u32(svreinterpret_u16_bf16(value));
-  return svreinterpret_f32_u32(
-      svlsl_n_u32_x(svptrue_b32(), bits, 16));
-}
-
-VECOPS_ALWAYS_INLINE svfloat32_t sve_bfloat16_to_float32_high(
-    svbfloat16_t value) {
-  const auto bits = svunpkhi_u32(svreinterpret_u16_bf16(value));
-  return svreinterpret_f32_u32(
-      svlsl_n_u32_x(svptrue_b32(), bits, 16));
-}
-
-VECOPS_ALWAYS_INLINE svuint32_t sve_float32_to_bfloat16_rne_bits(
-    svfloat32_t value) {
-  const auto predicate = svptrue_b32();
-  const auto bits = svreinterpret_u32_f32(value);
-  const auto lsb = svand_n_u32_x(
-      predicate, svlsr_n_u32_x(predicate, bits, 16), 1);
-  const auto rounded = svlsr_n_u32_x(
-      predicate,
-      svadd_u32_x(
-          predicate, bits, svadd_n_u32_x(predicate, lsb, 0x7fffu)),
-      16);
-  const auto absolute = svand_n_u32_x(predicate, bits, 0x7fffffffu);
-  const auto is_nan = svcmpgt_n_u32(predicate, absolute, 0x7f800000u);
-  return svsel_u32(is_nan, svdup_n_u32(0x7fc0u), rounded);
-}
-
-VECOPS_ALWAYS_INLINE svbfloat16_t sve_float32_pair_to_bfloat16(
-    svfloat32_t low, svfloat32_t high) {
-#if defined(__ARM_FEATURE_SVE_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
-  // Keep UZP1 in the integer domain. The operation is bitwise-identical, but
-  // avoids a bf16 vector_interleave that BiSheng 5.1 cannot select at -O2.
-  const auto predicate = svptrue_b16();
-  const auto low_converted = svcvt_bf16_f32_x(predicate, low);
-  const auto high_converted = svcvt_bf16_f32_x(predicate, high);
-  return svreinterpret_bf16_u16(svuzp1_u16(
-      svreinterpret_u16_bf16(low_converted),
-      svreinterpret_u16_bf16(high_converted)));
-#else
-  const auto low_bits = svreinterpret_u16_u32(
-      sve_float32_to_bfloat16_rne_bits(low));
-  const auto high_bits = svreinterpret_u16_u32(
-      sve_float32_to_bfloat16_rne_bits(high));
-  return svreinterpret_bf16_u16(svuzp1_u16(low_bits, high_bits));
-#endif
-}
 
 /* **************************************************************************** */
 //    sve_bfloat16_binary helper                                              //
@@ -79,10 +26,10 @@ template <typename Op, typename Policy>
 VECOPS_ALWAYS_INLINE svbfloat16_t sve_bfloat16_binary(
     svbfloat16_t a, svbfloat16_t b, svbool_t mask,
     svbfloat16_t inactive, Policy) {
-  const auto a_low = sve_bfloat16_to_float32_low(a);
-  const auto a_high = sve_bfloat16_to_float32_high(a);
-  const auto b_low = sve_bfloat16_to_float32_low(b);
-  const auto b_high = sve_bfloat16_to_float32_high(b);
+  const auto a_low = sve_bf16_to_f32_lo(a);
+  const auto a_high = sve_bf16_to_f32_hi(a);
+  const auto b_low = sve_bf16_to_f32_lo(b);
+  const auto b_high = sve_bf16_to_f32_hi(b);
   const auto mask_low = svunpklo_b(mask);
   const auto mask_high = svunpkhi_b(mask);
 #define VECOPS_VEC_SVE_BF16_BINARY(Mask, A, B)                          \
@@ -136,7 +83,7 @@ VECOPS_ALWAYS_INLINE svbfloat16_t sve_bfloat16_binary(
         mask_high, a_high, b_high);
   }();
 #undef VECOPS_VEC_SVE_BF16_BINARY
-  const auto computed = sve_float32_pair_to_bfloat16(low, high);
+  const auto computed = sve_f32_pair_to_bf16(low, high);
   if constexpr (std::same_as<Policy, ZeroArithmeticInactive>) {
     return computed;
   } else {
@@ -388,12 +335,12 @@ struct SVEFloatingUnaryWordImpl {
     const auto raw_inactive = sve_basic_raw_word(inactive);
     const auto result = [&]() {
       if constexpr (std::same_as<T, bfloat16_t>) {
-        const auto low = sve_bfloat16_to_float32_low(raw_value);
-        const auto high = sve_bfloat16_to_float32_high(raw_value);
+        const auto low = sve_bf16_to_f32_lo(raw_value);
+        const auto high = sve_bf16_to_f32_hi(raw_value);
         const auto inactive_low =
-            sve_bfloat16_to_float32_low(raw_inactive);
+            sve_bf16_to_f32_lo(raw_inactive);
         const auto inactive_high =
-            sve_bfloat16_to_float32_high(raw_inactive);
+            sve_bf16_to_f32_hi(raw_inactive);
         const auto mask_low = svunpklo_b(mask);
         const auto mask_high = svunpkhi_b(mask);
         const auto compute = [](
@@ -407,7 +354,7 @@ struct SVEFloatingUnaryWordImpl {
           else
             static_assert(dispatch_dependent_false<Op>);
         };
-        return sve_float32_pair_to_bfloat16(
+        return sve_f32_pair_to_bf16(
             compute(low, inactive_low, mask_low),
             compute(high, inactive_high, mask_high));
       } else {

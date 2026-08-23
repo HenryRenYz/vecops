@@ -536,18 +536,7 @@ public:
       std::initializer_list<nint_t> shape_vals,
       std::initializer_list<nint_t> stride_vals
   )
-      : _data(data),
-        _layout(
-            [&] {
-              VECOPS_ASSERT(shape_vals.size() == Ndim, "shape_vals.size() != Ndim");
-              VECOPS_ASSERT(stride_vals.size() == Ndim, "stride_vals.size() != Ndim");
-              return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
-                return Layout{
-                    TShape{Any{*(shape_vals.begin() + (nint_t) Idx)}...},
-                    TStrides{Any{*(stride_vals.begin() + (nint_t) Idx)}...}
-                };
-              }(std::make_index_sequence<Ndim>{});
-            }()) {}
+      : Tensor(data, make_layout<Ndim>(shape_vals, stride_vals)) {}
 
   /**
    * Construct from a shape initializer_list only; strides are computed
@@ -568,12 +557,8 @@ public:
               VECOPS_ASSERT(shape_vals.size() == Ndim, "shape_vals.size() != Ndim");
               return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
                 std::array<nint_t, Ndim> shapes = {*(shape_vals.begin() + Idx)...};
-                std::array<nint_t, Ndim> stride_vals;
-                nint_t prod = 1;
-                for (int d = Ndim - 1; d >= 0; --d) {
-                  stride_vals[d] = prod;
-                  prod *= shapes[d];
-                }
+                const std::array<nint_t, Ndim> stride_vals =
+                    details::row_major_strides(shapes);
                 return Layout{
                     TShape{Any{shapes[Idx]}...},
                     TStrides{Any{stride_vals[Idx]}...}
@@ -631,11 +616,7 @@ public:
    *
    * @note This is computed at runtime by iterating over all dimensions.
    */
-  nint_t numel() const {
-    nint_t n = 1;
-    for (int i = 0; i < Ndim; ++i) n *= size(i);
-    return n;
-  }
+  nint_t numel() const { return tensor::numel(_layout); }
 
   // -------- Continuity --------
 
@@ -842,44 +823,6 @@ private:
   }
 
   /**
-   * Compute the linearized element offset given a pack of slicing indices.
-   * This is the private implementation used during slicing.
-   *
-   * For each index:
-   * - Integer `i`: contributes `i * stride(D)` to the offset.
-   * - `ReserveAxis`: contributes 0 to offset (passes dimension through).
-   * - `NewAxis<V>`: contributes 0 to offset; D is NOT incremented.
-   * - `Range<S,E,T>`: contributes `start * stride(D)` to offset.
-   */
-  template <int D>
-  nint_t _slice_index() const { return 0; }
-
-  template <int D, typename I, typename... Is>
-    requires std::integral<std::decay_t<I>>
-  nint_t _slice_index(I i, Is... rest) const {
-    nint_t idx = nint_t(i);
-    VECOPS_ASSERT(0 <= idx && idx < size(D), "index out of range");
-    return idx * stride(D) + _slice_index<D + 1>(rest...);
-  }
-
-  template <int D, typename... Is>
-  nint_t _slice_index(details::ReserveAxis, Is... rest) const {
-    return _slice_index<D + 1>(rest...);
-  }
-
-  template <int D, typename V, typename... Is>
-  nint_t _slice_index(details::NewAxis<V>, Is... rest) const {
-    return _slice_index<D>(rest...);
-  }
-
-  template <int D, typename S, typename E, typename TStep, typename... Is>
-  nint_t _slice_index(details::Range<S, E, TStep> r, Is... rest) const {
-    VECOPS_ASSERT(0 <= r.start && r.start < size(D), "range start out of range");
-    VECOPS_ASSERT(0 <= r.end && r.end <= size(D), "range end out of range");
-    return r.start * stride(D) + _slice_index<D + 1>(rest...);
-  }
-
-  /**
    * Tail case of `_slice_make_meta_impl`: fill remaining dimensions.
    */
   template <typename NewShape, typename NewStrides, int D, int OutD>
@@ -1002,18 +945,9 @@ private:
   Layout _layout;
 };
 
-namespace details {
-
-template <typename T>
-struct IsTensor : std::false_type {};
-template <typename T, typename TShape, typename TStrides>
-struct IsTensor<Tensor<T, TShape, TStrides>> : std::true_type {};
-
-} // namespace details
-
 /// Type trait: `true` if T is a Tensor.
 template <typename T>
-inline constexpr bool is_tensor_v = details::IsTensor<T>::value;
+inline constexpr bool is_tensor_v = is_specialization_of_v<Tensor, T>;
 
 // ======================== Array alias ========================
 

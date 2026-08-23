@@ -7,6 +7,8 @@
 #include <type_traits>
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/scalar/Basic.h"
+#include "vecops/vec/details/Wordwise.h"
 
 /**
  * @file Arithmetic.h
@@ -108,13 +110,8 @@ struct ScalarArithmeticWordImpl {
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
       Op op, Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
-    const auto computed = call<Index>(op, tag, a, b);
-    for (nint_t lane = 0; lane < native_word_size(tag); ++lane) {
-      if (mask.bits.test(static_cast<std::size_t>(lane))) {
-        inactive[lane] = computed[lane];
-      }
-    }
-    return inactive;
+    return scalar_masked_merge<Index>(
+        tag, call<Index>(op, tag, a, b), mask, inactive);
   }
 };
 
@@ -196,12 +193,8 @@ struct ScalarFmaWordImpl {
       Op op, Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b,
       NativeWordVec<Tag> c, NativeWordMask<Tag> mask,
       NativeWordVec<Tag> inactive, Policy) {
-    const auto computed = call<Index>(op, tag, a, b, c);
-    for (nint_t lane = 0; lane < native_word_size(tag); ++lane) {
-      if (mask.bits.test(static_cast<std::size_t>(lane)))
-        inactive[lane] = computed[lane];
-    }
-    return inactive;
+    return scalar_masked_merge<Index>(
+        tag, call<Index>(op, tag, a, b, c), mask, inactive);
   }
 };
 
@@ -280,12 +273,8 @@ struct ScalarUnaryArithmeticWordImpl {
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
       Op op, Tag tag, NativeWordVec<Tag> value,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
-    const auto computed = call<Index>(op, tag, value);
-    for (nint_t lane = 0; lane < native_word_size(tag); ++lane) {
-      if (mask.bits.test(static_cast<std::size_t>(lane)))
-        inactive[lane] = computed[lane];
-    }
-    return inactive;
+    return scalar_masked_merge<Index>(
+        tag, call<Index>(op, tag, value), mask, inactive);
   }
 };
 
@@ -342,12 +331,8 @@ struct ScalarFloatingUnaryWordImpl {
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
       Op op, Tag tag, NativeWordVec<Tag> value,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
-    const auto computed = call<Index>(op, tag, value);
-    for (nint_t lane = 0; lane < native_word_size(tag); ++lane) {
-      if (mask.bits.test(static_cast<std::size_t>(lane)))
-        inactive[lane] = computed[lane];
-    }
-    return inactive;
+    return scalar_masked_merge<Index>(
+        tag, call<Index>(op, tag, value), mask, inactive);
   }
 };
 

@@ -133,30 +133,36 @@ VECOPS_ALWAYS_INLINE Vec<Tag> conversion_population(
   }
 }
 
-template <typename Backend, VectorTag Tag>
-VECOPS_ALWAYS_INLINE ElementOf<Tag> conversion_get_vec_lane(
-    Tag tag, Vec<Tag> value, nint_t lane) {
-  const nint_t word_lanes = native_word_size(tag);
-  return visit_runtime_word<Backend>(
-      tag, lane / word_lanes, [&]<nint_t Index>() {
-        return execute_word<Index, Backend>(
-            GetVecLaneOp{}, tag,
-            ::vecops::vec::get_word<Index>(tag, value),
-            lane % word_lanes);
-      });
+/** Recursively selects the even lanes Levels times, halving the tag. */
+template <int Levels, VectorTag Tag>
+VECOPS_ALWAYS_INLINE auto conversion_select_even(
+    Tag tag, Vec<Tag> value) {
+  if constexpr (Levels == 0) {
+    return value;
+  } else {
+    using HalfTag = Half<Tag>;
+    return conversion_select_even<Levels - 1>(
+        HalfTag{}, execute(EvenOp{}, tag, value));
+  }
 }
 
-template <typename Backend, VectorTag Tag>
-VECOPS_ALWAYS_INLINE bool conversion_get_mask_lane(
-    Tag tag, Mask<Tag> value, nint_t lane) {
-  const nint_t word_lanes = native_word_size(tag);
-  return visit_runtime_word<Backend>(
-      tag, lane / word_lanes, [&]<nint_t Index>() {
-        return execute_word<Index, Backend>(
-            GetMaskLaneOp{}, tag,
-            ::vecops::vec::get_word<Index>(tag, value),
-            lane % word_lanes);
-      });
+/** Recursively widens @p values (tag ValuesTag) back to Tag, writing them
+ *  into the even lanes and preserving the fallback's odd lanes. */
+template <int Levels, VectorTag Tag, VectorTag ValuesTag>
+VECOPS_ALWAYS_INLINE Vec<Tag> conversion_insert_even(
+    Tag tag, Vec<ValuesTag> values, Vec<Tag> fallback) {
+  if constexpr (Levels == 0) {
+    static_assert(std::same_as<Tag, ValuesTag>);
+    return values;
+  } else {
+    using HalfTag = Half<Tag>;
+    const auto fallback_even = execute(EvenOp{}, tag, fallback);
+    const auto fallback_odd = execute(OddOp{}, tag, fallback);
+    const auto result_even =
+        conversion_insert_even<Levels - 1, HalfTag, ValuesTag>(
+            HalfTag{}, values, fallback_even);
+    return execute(InterleaveOp{}, tag, result_even, fallback_odd);
+  }
 }
 
 /* **************************************************************************** */
@@ -207,10 +213,10 @@ struct GenericImpl<Backend, ConvertOp, ToTag> {
         if constexpr (masked) {
           const auto& output_mask = find_option<IsMaskedOption>(
               std::forward<Options>(options)...).value;
-          if (!conversion_get_mask_lane<Backend>(
+          if (!get_mask_lane_at<Backend>(
                   to, output_mask, output_lane)) continue;
         }
-        const auto input = conversion_get_vec_lane<Backend>(
+        const auto input = get_vec_lane_at<Backend>(
             from, value, input_lane);
         const auto converted = [&] {
           if constexpr (wraps)
@@ -240,7 +246,7 @@ struct GenericImpl<Backend, ConvertOp, ToTag> {
       for (nint_t lane = begin; lane < end; ++lane) {
         word = execute_word<Index, Backend>(
             SetMaskLaneOp{}, to, word, lane - begin,
-            conversion_get_mask_lane<Backend>(from, value, lane));
+            get_mask_lane_at<Backend>(from, value, lane));
       }
       return word;
     });

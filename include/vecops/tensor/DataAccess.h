@@ -337,14 +337,6 @@ template <typename T>
 inline constexpr bool is_definitely_one_meta_v =
     IsDefinitelyOneMeta<std::remove_cvref_t<T>>::value;
 
-template <int I, typename T>
-struct MetaElement;
-
-template <int I, typename... Ts>
-struct MetaElement<I, Strides<Ts...>> {
-  using type = std::tuple_element_t<I, std::tuple<Ts...>>;
-};
-
 template <bool Load, typename... Options>
 VECOPS_ALWAYS_INLINE constexpr void validate_access_options() {
   constexpr std::size_t active =
@@ -409,81 +401,65 @@ VECOPS_ALWAYS_INLINE decltype(auto) apply_inline(F&& fn, Tuple&& tuple) {
           std::tuple_size_v<std::remove_reference_t<Tuple>>>{});
 }
 
-template <typename Option>
-VECOPS_ALWAYS_INLINE auto retain_non_address_option(Option&& option) {
-  using Clean = std::remove_cvref_t<Option>;
-  if constexpr (
-      vec::details::IsIndexedOption<Clean>::value ||
-      vec::details::IsStridedOption<Clean>::value) {
-    return std::tuple<>{};
-  } else {
-    return std::forward_as_tuple(std::forward<Option>(option));
-  }
+/** Tuple of the options that do NOT match @p Drop; order and value category
+ *  are preserved. */
+template <template <typename> typename Drop, typename... Options>
+VECOPS_ALWAYS_INLINE auto drop_options_if(Options&&... options) {
+  return std::tuple_cat(
+      []<typename Option>(Option&& option) {
+        using Clean = std::remove_cvref_t<Option>;
+        if constexpr (Drop<Clean>::value) {
+          return std::tuple<>{};
+        } else {
+          return std::forward_as_tuple(std::forward<Option>(option));
+        }
+      }(std::forward<Options>(options))...);
 }
+
+template <typename T>
+struct IsAddressOption : std::bool_constant<
+    vec::details::IsIndexedOption<T>::value ||
+    vec::details::IsStridedOption<T>::value> {};
+
+template <typename T>
+struct IsCacheStoreStrippedOption : std::bool_constant<
+    vec::details::IsZeroOption<T>::value ||
+    vec::details::IsVectorMergeOption<T>::value ||
+    vec::details::IsScalarMergeOption<T>::value ||
+    IsConversionOrderOption<T>::value ||
+    IsConversionValueOption<T>::value ||
+    IsTemporalityOption<T>::value || IsPackingOption<T>::value ||
+    IsAlignmentOption<T>::value> {};
+
+template <typename T>
+struct IsAccessDefaultOwnedOption : std::bool_constant<
+    IsConversionOrderOption<T>::value ||
+    IsConversionValueOption<T>::value ||
+    IsTemporalityOption<T>::value || IsPackingOption<T>::value ||
+    IsAlignmentOption<T>::value> {};
 
 template <typename... Options>
 VECOPS_ALWAYS_INLINE auto non_address_options(Options&&... options) {
-  return std::tuple_cat(
-      retain_non_address_option(std::forward<Options>(options))...);
-}
-
-template <typename Option>
-VECOPS_ALWAYS_INLINE auto retain_non_materialize_option(Option&& option) {
-  using Clean = std::remove_cvref_t<Option>;
-  if constexpr (IsMaterializePopulate<Clean>::value) {
-    return std::tuple<>{};
-  } else {
-    return std::forward_as_tuple(std::forward<Option>(option));
-  }
+  return drop_options_if<IsAddressOption>(
+      std::forward<Options>(options)...);
 }
 
 template <typename... Options>
 VECOPS_ALWAYS_INLINE auto non_materialize_options(Options&&... options) {
-  return std::tuple_cat(
-      retain_non_materialize_option(std::forward<Options>(options))...);
-}
-
-template <typename Option>
-VECOPS_ALWAYS_INLINE auto retain_cache_store_option(Option&& option) {
-  using Clean = std::remove_cvref_t<Option>;
-  if constexpr (
-      vec::details::IsZeroOption<Clean>::value ||
-      vec::details::IsVectorMergeOption<Clean>::value ||
-      vec::details::IsScalarMergeOption<Clean>::value ||
-      IsConversionOrderOption<Clean>::value ||
-      IsConversionValueOption<Clean>::value ||
-      IsTemporalityOption<Clean>::value || IsPackingOption<Clean>::value ||
-      IsAlignmentOption<Clean>::value) {
-    return std::tuple<>{};
-  } else {
-    return std::forward_as_tuple(std::forward<Option>(option));
-  }
+  return drop_options_if<IsMaterializePopulate>(
+      std::forward<Options>(options)...);
 }
 
 template <typename... Options>
 VECOPS_ALWAYS_INLINE auto cache_store_options(Options&&... options) {
-  return std::tuple_cat(
-      retain_cache_store_option(std::forward<Options>(options))...);
-}
-
-template <typename Option>
-VECOPS_ALWAYS_INLINE auto retain_non_access_default_option(Option&& option) {
-  using Clean = std::remove_cvref_t<Option>;
-  if constexpr (
-      IsConversionOrderOption<Clean>::value ||
-      IsConversionValueOption<Clean>::value ||
-      IsTemporalityOption<Clean>::value || IsPackingOption<Clean>::value ||
-      IsAlignmentOption<Clean>::value) {
-    return std::tuple<>{};
-  } else {
-    return std::forward_as_tuple(std::forward<Option>(option));
-  }
+  return drop_options_if<IsCacheStoreStrippedOption>(
+      std::forward<Options>(options)...);
 }
 
 template <typename... Options>
 VECOPS_ALWAYS_INLINE auto non_access_default_options(Options&&... options) {
-  return std::tuple_cat(
-      retain_non_access_default_option(std::forward<Options>(options))...);
+  return drop_options_if<IsAccessDefaultOwnedOption>(
+      std::forward<Options>(options)...);
 }
 
 template <vec::VectorTag Tag, typename... Options>
@@ -1431,11 +1407,13 @@ VECOPS_ALWAYS_INLINE void copy_memory_request_fields(
   if constexpr (OutRequest::active_kind == vec::Active::Masked) {
     out.mask = in.mask;
   }
-  if constexpr (OutRequest::populate_kind == vec::Populate::MergeVector) {
-    out.merge_vector = in.merge_vector;
-  }
-  if constexpr (OutRequest::populate_kind == vec::Populate::MergeScalar) {
-    out.merge_scalar = in.merge_scalar;
+  if constexpr (requires { OutRequest::populate_kind; }) {
+    if constexpr (OutRequest::populate_kind == vec::Populate::MergeVector) {
+      out.merge_vector = in.merge_vector;
+    }
+    if constexpr (OutRequest::populate_kind == vec::Populate::MergeScalar) {
+      out.merge_scalar = in.merge_scalar;
+    }
   }
 }
 
@@ -1703,12 +1681,7 @@ VECOPS_ALWAYS_INLINE void store_memory(
           vec::Addressing::Indexed, vec::mem::Unaligned, Temporal, 0,
           std::remove_cvref_t<decltype(physical)>, Order, Value, Packing>
           out{};
-      if constexpr (out.active_kind == vec::Active::First) {
-        out.first_count = request.first_count;
-      }
-      if constexpr (out.active_kind == vec::Active::Masked) {
-        out.mask = request.mask;
-      }
+      copy_memory_request_fields(out, request);
       out.indices = &physical;
       execute_resolved_store_convert(tag, pointer, value, out);
     } else if constexpr (
@@ -1720,12 +1693,7 @@ VECOPS_ALWAYS_INLINE void store_memory(
           vec::Addressing::Contiguous, Alignment, Temporal, 0,
           vec::Vec<vec::IndexTag<Tag>>, Order, Value, Packing>
           out{};
-      if constexpr (out.active_kind == vec::Active::First) {
-        out.first_count = request.first_count;
-      }
-      if constexpr (out.active_kind == vec::Active::Masked) {
-        out.mask = request.mask;
-      }
+      copy_memory_request_fields(out, request);
       execute_resolved_store_convert(tag, pointer, value, out);
     } else {
       nint_t physical_stride = static_cast<nint_t>(tensor_axis_stride);
@@ -1738,12 +1706,7 @@ VECOPS_ALWAYS_INLINE void store_memory(
           vec::Addressing::Strided, vec::mem::Unaligned, Temporal, 0,
           vec::Vec<vec::IndexTag<Tag>>, Order, Value, Packing>
           out{};
-      if constexpr (out.active_kind == vec::Active::First) {
-        out.first_count = request.first_count;
-      }
-      if constexpr (out.active_kind == vec::Active::Masked) {
-        out.mask = request.mask;
-      }
+      copy_memory_request_fields(out, request);
       out.stride = physical_stride;
       execute_resolved_store_convert(tag, pointer, value, out);
     }
@@ -1754,26 +1717,13 @@ VECOPS_ALWAYS_INLINE void store_memory(
   }
 }
 
-template <typename Layout>
-VECOPS_ALWAYS_INLINE nint_t tensor_numel(const Layout& layout) {
-  nint_t result = 1;
-  for (int d = 0; d < Layout::Ndim; ++d) result *= layout.shape()[d];
-  return result;
-}
-
 template <int Axis, typename Layout>
 VECOPS_INLINE auto auxiliary_layout(const Layout& layout) {
   constexpr int Rank = Layout::Ndim;
   std::array<nint_t, Rank> shape{};
-  std::array<nint_t, Rank> strides{};
   for (int d = 0; d < Rank; ++d) shape[d] = layout.shape()[d];
-  strides[Axis] = 1;
-  nint_t next = shape[Axis];
-  for (int d = Rank - 1; d >= 0; --d) {
-    if (d == Axis) continue;
-    strides[d] = next;
-    next *= shape[d];
-  }
+  const std::array<nint_t, Rank> strides =
+      details::row_major_strides(shape, Axis);
   return [&]<std::size_t... I>(std::index_sequence<I...>) {
     return make_layout(
         make_shape(Any{shape[I]}...),
@@ -1841,16 +1791,14 @@ struct OtherAxisStrideScan<Strides<Ts...>, SkipDim> {
   template <std::size_t... Is>
   static consteval bool any_definitely_one(std::index_sequence<Is...>) {
     return ((Is != static_cast<std::size_t>(SkipDim) &&
-             is_definitely_one_meta_v<
-                 typename MetaElement<Is, Strides<Ts...>>::type>) ||
+             is_definitely_one_meta_v<meta_element_t<Is, Strides<Ts...>>>) ||
             ...);
   }
 
   template <std::size_t... Is>
   static consteval bool all_cannot_be_one(std::index_sequence<Is...>) {
     return ((Is == static_cast<std::size_t>(SkipDim) ||
-             meta_cannot_be_one_v<
-                 typename MetaElement<Is, Strides<Ts...>>::type>) &&
+             meta_cannot_be_one_v<meta_element_t<Is, Strides<Ts...>>>) &&
             ...);
   }
 
@@ -1876,9 +1824,8 @@ consteval AccessPlan resolve_plan() {
     if constexpr (!transform_reads_input_v<typename Spec::TransformType>) {
       return AccessPlan::direct;
     }
-    using AxisStride = typename MetaElement<
-        Policy::vector_axis,
-        typename Spec::InputLayout::Strides>::type;
+    using AxisStride =
+        stride_type_t<Policy::vector_axis, typename Spec::InputLayout>;
     if constexpr (Policy::read_passes == 1 ||
                   is_definitely_one_meta_v<AxisStride>) {
       return AccessPlan::direct;
@@ -1886,9 +1833,8 @@ consteval AccessPlan resolve_plan() {
       return AccessPlan::materialize_after_transform;
     }
   } else {
-    using AxisStride = typename MetaElement<
-        Policy::vector_axis,
-        typename Spec::OutputLayout::Strides>::type;
+    using AxisStride =
+        stride_type_t<Policy::vector_axis, typename Spec::OutputLayout>;
     using Scan = OtherAxisStrideScan<
         typename Spec::OutputLayout::Strides, Policy::vector_axis>;
     if constexpr (is_definitely_one_meta_v<AxisStride>) {
@@ -2109,17 +2055,15 @@ VECOPS_INLINE auto output(
 }
 
 template <typename T>
-struct IsInputSpec : std::false_type {};
-template <typename... Args>
-struct IsInputSpec<InputSpec<Args...>> : std::true_type {};
+struct IsInputSpec : std::bool_constant<
+    is_specialization_of_v<InputSpec, T>> {};
 template <typename T>
 inline constexpr bool is_input_spec_v =
     IsInputSpec<std::remove_cvref_t<T>>::value;
 
 template <typename T>
-struct IsOutputSpec : std::false_type {};
-template <typename... Args>
-struct IsOutputSpec<OutputSpec<Args...>> : std::true_type {};
+struct IsOutputSpec : std::bool_constant<
+    is_specialization_of_v<OutputSpec, T>> {};
 template <typename T>
 inline constexpr bool is_output_spec_v =
     IsOutputSpec<std::remove_cvref_t<T>>::value;
@@ -2337,8 +2281,7 @@ public:
     static_assert(0 <= Dim && Dim < Rank);
     details::validate_access_options<true, Options...>();
     const auto& tensor = spec_->tensor();
-    using StrideMeta = typename details::MetaElement<
-        Dim, typename Spec::InputLayout::Strides>::type;
+    using StrideMeta = stride_type_t<Dim, typename Spec::InputLayout>;
     constexpr bool UnitRankOne =
         Rank == 1 && details::is_const_one_meta_v<StrideMeta>;
     const nint_t base = [&] {
@@ -2574,8 +2517,7 @@ public:
     static_assert(0 <= Dim && Dim < Rank);
     details::validate_access_options<false, Options...>();
     const auto& tensor = spec_->tensor();
-    using StrideMeta = typename details::MetaElement<
-        Dim, typename Spec::OutputLayout::Strides>::type;
+    using StrideMeta = stride_type_t<Dim, typename Spec::OutputLayout>;
     constexpr bool UnitRankOne =
         Rank == 1 && details::is_const_one_meta_v<StrideMeta>;
     const nint_t base = [&] {
@@ -3803,9 +3745,9 @@ VECOPS_INLINE nint_t required_workspace(const Spec& spec, Policy policy) {
   }();
   const nint_t elements = [&] {
     if constexpr (is_input_spec_v<Spec>) {
-      return details::tensor_numel(spec.input_layout());
+      return numel(spec.input_layout());
     } else {
-      return details::tensor_numel(spec.output_layout());
+      return numel(spec.output_layout());
     }
   }();
   return align_up(
@@ -3853,11 +3795,8 @@ struct OperandBinding {
 };
 
 template <typename T>
-struct IsOperandBinding : std::false_type {};
-
-template <typename Spec, typename Policy, typename Defaults>
-struct IsOperandBinding<OperandBinding<Spec, Policy, Defaults>>
-    : std::true_type {};
+struct IsOperandBinding : std::bool_constant<
+    is_specialization_of_v<OperandBinding, T>> {};
 
 template <typename T>
 inline constexpr bool is_operand_binding_v =
@@ -3897,7 +3836,7 @@ VECOPS_INLINE decltype(auto) with_bound_input(
     return std::forward<Fn>(fn)(access);
   } else {
 
-  const nint_t count = tensor_numel(spec.input_layout());
+  const nint_t count = numel(spec.input_layout());
   auto aux_layout = auxiliary_layout<AxisValue>(spec.input_layout());
   if constexpr (plan == AccessPlan::materialize_before_transform) {
     using Memory = typename Spec::MemoryElement;
@@ -3981,7 +3920,7 @@ VECOPS_INLINE decltype(auto) with_bound_output(
     return std::forward<Fn>(fn)(access);
   } else {
 
-  const nint_t count = tensor_numel(spec.output_layout());
+  const nint_t count = numel(spec.output_layout());
   auto aux_layout = auxiliary_layout<AxisValue>(spec.output_layout());
   if constexpr (plan == AccessPlan::materialize_before_transform) {
     using Compute = typename Spec::ComputeType;

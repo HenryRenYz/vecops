@@ -918,7 +918,7 @@ struct NativeWordImpl<X86Backend, LoadOp> {
     using T = ElementOf<Tag>;
     using Raw = typename Traits::RawVec;
     using MaskRaw = typename Traits::RawMask;
-    constexpr nint_t valid = x86_valid_word_lanes<Index, Tag>();
+    constexpr nint_t valid = valid_word_lanes<Index, Tag>();
     if constexpr (valid == Traits::word_lanes) {
       return NativeWordVec<Tag>{x86_load_memory_word<Raw>(
           pointer, alignment, temporality)};
@@ -959,7 +959,7 @@ struct NativeWordImpl<X86Backend, StoreOp> {
     using Traits = RepresentationTraits<X86Backend, Tag>;
     using T = ElementOf<Tag>;
     using MaskRaw = typename Traits::RawMask;
-    constexpr nint_t valid = x86_valid_word_lanes<Index, Tag>();
+    constexpr nint_t valid = valid_word_lanes<Index, Tag>();
     if constexpr (valid == Traits::word_lanes) {
       x86_store_memory_word(pointer, value.value, alignment, temporality);
     } else {

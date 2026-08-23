@@ -10,6 +10,7 @@
 #include <limits>
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/sve/Bf16.h"
 
 namespace vecops::vec::details {
 
@@ -350,9 +351,9 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> sve_exp_dispatch(
 #else
         Accuracy::Estimate;
 #endif
-    const auto low = sve_bfloat16_to_float32_low(raw);
-    const auto high = sve_bfloat16_to_float32_high(raw);
-    return sve_basic_wrap_word<Tag>(sve_float32_pair_to_bfloat16(
+    const auto low = sve_bf16_to_f32_lo(raw);
+    const auto high = sve_bf16_to_f32_hi(raw);
+    return sve_basic_wrap_word<Tag>(sve_f32_pair_to_bf16(
         sve_exp_f32<compute_tier, NegativeOnly>(low),
         sve_exp_f32<compute_tier, NegativeOnly>(high)));
   }

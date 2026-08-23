@@ -592,20 +592,6 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_indexed_integer_unmasked(
   }
 }
 
-VECOPS_ALWAYS_INLINE svbfloat16_t sve_pack_f32x2_to_bf16(
-    svfloat32_t lower, svfloat32_t upper) {
-#if defined(__ARM_FEATURE_SVE_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
-  const auto lo = svcvt_bf16_f32_x(svptrue_b16(), lower);
-  const auto hi = svcvt_bf16_f32_x(svptrue_b16(), upper);
-  return svuzp1_bf16(lo, hi);
-#else
-  const auto lo = sve_f32_to_bf16_rne_bits(lower);
-  const auto hi = sve_f32_to_bf16_rne_bits(upper);
-  return svreinterpret_bf16_u16(svuzp1_u16(
-      svreinterpret_u16_u32(lo), svreinterpret_u16_u32(hi)));
-#endif
-}
-
 #if defined(HAS_SVE2)
 template <Element To, VectorTag FromTag>
 VECOPS_ALWAYS_INLINE auto sve_pack_narrow_integer_x2(
@@ -729,7 +715,7 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
       num_words(from) == 2 && num_words(ToTag{}) == 1) {
     // Two F32 words exactly fill one BF16 word. Keeping this as one packed
     // conversion and one full-width store is important for LayerNorm streams.
-    const auto packed = sve_pack_f32x2_to_bf16(
+    const auto packed = sve_f32_pair_to_bf16(
         sve_basic_raw_word(execute(LowerOp{}, from, value)),
         sve_basic_raw_word(execute(UpperOp{}, from, value)));
     const auto memory_mask = sve_convert_mask(ToTag{}, from, mask);
@@ -790,7 +776,7 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
   if constexpr (
       std::same_as<From, float32_t> && std::same_as<To, bfloat16_t> &&
       num_words(from) == 2 && num_words(ToTag{}) == 1) {
-    const auto packed = sve_pack_f32x2_to_bf16(
+    const auto packed = sve_f32_pair_to_bf16(
         sve_basic_raw_word(execute(LowerOp{}, from, value)),
         sve_basic_raw_word(execute(UpperOp{}, from, value)));
     const auto active = sve_prefix_predicate<To>(size(ToTag{}));
@@ -855,65 +841,25 @@ struct NativeImpl<SVEBackend, LoadConvertOp, ToTag> {
         to, pointer, addressing.indices, mask, inactive, temporality);
   }
 
-  template <Element From, typename Layout, typename ValuePolicy,
-            typename Alignment, typename Temporality>
+  template <Element From, typename Alignment, typename Temporality>
     requires IsMemoryAlignmentOption<Alignment>::value &&
              IsMemoryTemporalityOption<Temporality>::value
   static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
       LoadConvertOp, ToTag to, const From* pointer,
-      Layout layout, ValuePolicy value_policy,
-      Alignment alignment, Temporality temporality) {
-    if constexpr (std::same_as<Layout, cvt::Ordered> &&
-                  std::same_as<ValuePolicy, cvt::Saturate>) {
-      return sve_load_convert_ordered_saturating(to, pointer);
-    } else {
-      using FromTag = Rebind<From, ToTag>;
-      const auto loaded = execute_load_options(
-          LoadOp{}, FromTag{}, pointer, alignment, temporality);
-      return execute(
-          ConvertOp{}, to, FromTag{}, loaded, layout, value_policy);
-    }
+      cvt::Ordered, cvt::Saturate, Alignment alignment,
+      Temporality temporality) {
+    return sve_load_convert_ordered_saturating(to, pointer);
   }
 
-  template <Element From, typename ValuePolicy, typename Alignment,
-            typename Temporality>
+  template <Element From, typename Alignment, typename Temporality>
     requires IsMemoryAlignmentOption<Alignment>::value &&
              IsMemoryTemporalityOption<Temporality>::value
   static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
       LoadConvertOp, ToTag to, const From* pointer,
       Mask<ToTag> mask, Vec<ToTag> inactive,
-      cvt::Ordered layout, ValuePolicy value_policy,
-      Alignment alignment, Temporality temporality) {
-    if constexpr (std::same_as<ValuePolicy, cvt::Saturate>) {
-      return sve_load_convert_ordered_saturating(
-          to, pointer, mask, inactive);
-    } else {
-      using FromTag = Rebind<From, ToTag>;
-      const auto memory_mask = sve_convert_mask(FromTag{}, to, mask);
-      const auto loaded = execute_load_options(
-          LoadOp{}, FromTag{}, pointer, opt::masked(memory_mask),
-          opt::zero, alignment, temporality);
-      const auto converted = execute(
-          ConvertOp{}, to, FromTag{}, loaded, layout, value_policy);
-      return execute(BlendOp{}, to, inactive, mask, converted);
-    }
-  }
-
-  template <Element From, typename ValuePolicy, typename Alignment,
-            typename Temporality>
-    requires IsMemoryAlignmentOption<Alignment>::value &&
-             IsMemoryTemporalityOption<Temporality>::value
-  static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
-      LoadConvertOp, ToTag to, const From* pointer,
-      Mask<Rebind<From, ToTag>> memory_mask,
-      cvt::Unordered layout, ValuePolicy value_policy,
-      Alignment alignment, Temporality temporality) {
-    using FromTag = Rebind<From, ToTag>;
-    const auto loaded = execute_load_options(
-        LoadOp{}, FromTag{}, pointer, opt::masked(memory_mask),
-        opt::zero, alignment, temporality);
-    return execute(
-        ConvertOp{}, to, FromTag{}, loaded, layout, value_policy);
+      cvt::Ordered, cvt::Saturate, Alignment alignment,
+      Temporality temporality) {
+    return sve_load_convert_ordered_saturating(to, pointer, mask, inactive);
   }
 };
 
@@ -952,8 +898,8 @@ struct NativeImpl<SVEBackend, StoreConvertOp, FromTag> {
         from, pointer, value, addressing.indices, mask, temporality);
   }
 
-  template <Element To, typename Layout, typename ValuePolicy,
-            typename Alignment, typename Temporality, typename Packing>
+  template <Element To, typename Alignment, typename Temporality,
+            typename Packing>
     requires (
         IsMemoryAlignmentOption<Alignment>::value &&
         IsMemoryTemporalityOption<Temporality>::value &&
@@ -961,23 +907,13 @@ struct NativeImpl<SVEBackend, StoreConvertOp, FromTag> {
          std::same_as<Packing, mem::Split>))
   static VECOPS_ALWAYS_INLINE void call(
       StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
-      Layout layout, ValuePolicy value_policy, Alignment alignment,
+      cvt::Ordered, cvt::Saturate, Alignment alignment,
       Temporality temporality, Packing packing) {
-    if constexpr (std::same_as<Layout, cvt::Ordered> &&
-                  std::same_as<ValuePolicy, cvt::Saturate>) {
-      sve_store_convert_ordered_saturating(from, pointer, value);
-    } else {
-      using ToTag = Rebind<To, FromTag>;
-      const auto converted = execute(
-          ConvertOp{}, ToTag{}, from, value, layout, value_policy);
-      execute_store_options(
-          StoreOp{}, ToTag{}, pointer, converted, alignment, temporality);
-      (void)packing;
-    }
+    sve_store_convert_ordered_saturating(from, pointer, value);
   }
 
-  template <Element To, typename ValuePolicy, typename Alignment,
-            typename Temporality, typename Packing>
+  template <Element To, typename Alignment, typename Temporality,
+            typename Packing>
     requires (
         IsMemoryAlignmentOption<Alignment>::value &&
         IsMemoryTemporalityOption<Temporality>::value &&
@@ -985,41 +921,9 @@ struct NativeImpl<SVEBackend, StoreConvertOp, FromTag> {
          std::same_as<Packing, mem::Split>))
   static VECOPS_ALWAYS_INLINE void call(
       StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
-      Mask<FromTag> mask, cvt::Ordered layout, ValuePolicy value_policy,
+      Mask<FromTag> mask, cvt::Ordered, cvt::Saturate,
       Alignment alignment, Temporality temporality, Packing packing) {
-    if constexpr (std::same_as<ValuePolicy, cvt::Saturate>) {
-      sve_store_convert_ordered_saturating(
-          from, pointer, value, mask);
-    } else {
-      using ToTag = Rebind<To, FromTag>;
-      const auto converted = execute(
-          ConvertOp{}, ToTag{}, from, value, layout, value_policy);
-      const auto memory_mask = sve_convert_mask(ToTag{}, from, mask);
-      execute_store_options(
-          StoreOp{}, ToTag{}, pointer, converted,
-          opt::masked(memory_mask), alignment, temporality);
-      (void)packing;
-    }
-  }
-
-  template <Element To, typename ValuePolicy, typename Alignment,
-            typename Temporality, typename Packing>
-    requires (
-        IsMemoryAlignmentOption<Alignment>::value &&
-        IsMemoryTemporalityOption<Temporality>::value &&
-        std::same_as<Packing, mem::Packed>)
-  static VECOPS_ALWAYS_INLINE void call(
-      StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
-      Mask<Rebind<To, FromTag>> memory_mask, cvt::Unordered layout,
-      ValuePolicy value_policy, Alignment alignment,
-      Temporality temporality, Packing packing) {
-    using ToTag = Rebind<To, FromTag>;
-    const auto converted = execute(
-        ConvertOp{}, ToTag{}, from, value, layout, value_policy);
-    execute_store_options(
-        StoreOp{}, ToTag{}, pointer, converted, opt::masked(memory_mask),
-        alignment, temporality);
-    (void)packing;
+    sve_store_convert_ordered_saturating(from, pointer, value, mask);
   }
 };
 

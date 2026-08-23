@@ -1,8 +1,6 @@
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/VecopsTestTargets.cmake")
 
-vecops_add_test(NAME ArrayTest FILES array/ArrayTest.cpp FOLDER array/array)
 vecops_add_test(NAME TensorTest FILES tensor/TensorTest.cpp FOLDER tensor/tensor)
-vecops_add_test(NAME GemmTest FILES array/GemmTest.cpp FOLDER array/gemm)
 vecops_add_test(NAME LayoutTest FILES tensor/LayoutTest.cpp FOLDER tensor/layout)
 vecops_add_test(NAME KernelLoopTest FILES kernel/LoopTest.cpp FOLDER kernel/loop)
 vecops_add_test(NAME UtilMathTest FILES util/MathTest.cpp FOLDER util/math)

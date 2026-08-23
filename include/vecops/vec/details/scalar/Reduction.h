@@ -12,14 +12,6 @@ namespace vecops::vec::details {
 //                       Reduction word implementations                       //
 /* **************************************************************************** */
 
-template <nint_t Index, VectorTag Tag>
-VECOPS_ALWAYS_INLINE constexpr nint_t scalar_valid_reduce_lanes(Tag tag) {
-  constexpr nint_t word_lanes =
-      RepresentationTraits<ScalarBackend, Tag>::word_lanes;
-  return std::clamp<nint_t>(
-      size(tag) - Index * word_lanes, 0, word_lanes);
-}
-
 template <typename Op>
 struct ScalarReductionWordImpl {
   template <nint_t Index, VectorTag Tag>
@@ -27,7 +19,7 @@ struct ScalarReductionWordImpl {
       Op, Tag tag, NativeWordVec<Tag> value) {
     using T = ElementOf<Tag>;
     T result = reduction_identity<Op, T>();
-    const nint_t valid = scalar_valid_reduce_lanes<Index>(tag);
+    const nint_t valid = valid_word_lanes<Index, Tag>();
     for (nint_t lane = 0; lane < valid; ++lane) {
       if constexpr (std::same_as<Op, ReduceAddOp>) {
         result = scalar_arithmetic_binary<T>(
@@ -47,7 +39,7 @@ struct ScalarReductionWordImpl {
       NativeWordMask<Tag> mask) {
     using T = ElementOf<Tag>;
     T result = reduction_identity<Op, T>();
-    const nint_t valid = scalar_valid_reduce_lanes<Index>(tag);
+    const nint_t valid = valid_word_lanes<Index, Tag>();
     for (nint_t lane = 0; lane < valid; ++lane) {
       if (mask.bits.test(static_cast<std::size_t>(lane))) {
         if constexpr (std::same_as<Op, ReduceAddOp>) {

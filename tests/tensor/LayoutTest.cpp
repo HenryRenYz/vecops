@@ -1444,20 +1444,6 @@ TEST_F(MetaDetailsTest, IsArrayMetaDetails) {
   EXPECT_FALSE((IsArrayMeta<int>::value));
 }
 
-TEST_F(MetaDetailsTest, IsShapeDetails) {
-  using namespace vecops::meta::details;
-  using namespace vecops::tensor::details;
-  EXPECT_TRUE((IsShape<Shape<Any, Any>>::value));
-  EXPECT_FALSE((IsShape<ArrayMeta<Any, Any>>::value));
-}
-
-TEST_F(MetaDetailsTest, IsStridesDetails) {
-  using namespace vecops::meta::details;
-  using namespace vecops::tensor::details;
-  EXPECT_TRUE((IsStrides<Strides<Any, Any>>::value));
-  EXPECT_FALSE((IsStrides<ArrayMeta<Any, Any>>::value));
-}
-
 TEST_F(MetaDetailsTest, IsLayoutDetails) {
   using namespace vecops::meta::details;
   using namespace vecops::tensor::details;

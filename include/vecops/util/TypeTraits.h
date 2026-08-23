@@ -36,6 +36,21 @@ struct IsAnyHelper<T, T1, TArgs...> {
 template <typename T, typename... TArgs>
 inline constexpr bool is_any_v = details::IsAnyHelper<T, TArgs...>::value;
 
+namespace details {
+
+template <template <typename...> class Template, typename T>
+struct IsSpecializationOf : std::false_type {};
+
+template <template <typename...> class Template, typename... Args>
+struct IsSpecializationOf<Template, Template<Args...>> : std::true_type {};
+
+} // namespace details
+
+/** True iff T is a specialization of the class template @p Template. */
+template <template <typename...> class Template, typename T>
+inline constexpr bool is_specialization_of_v =
+    details::IsSpecializationOf<Template, std::remove_cvref_t<T>>::value;
+
 /** True iff T is none of TArgs (vacuously true for an empty list). */
 template <typename T, typename ... TArgs>
 inline constexpr bool is_none_v = !is_any_v<T, TArgs...> || sizeof...(TArgs) == 0;

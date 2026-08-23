@@ -27,7 +27,7 @@ VECOPS_ALWAYS_INLINE ElementOf<Tag> x86_scalar_reduction(
   alignas(64) T values[lanes];
   std::memcpy(values, &value.value, sizeof(value.value));
   T result = reduction_identity<Op, T>();
-  const nint_t valid = x86_valid_word_lanes<Index, Tag>();
+  const nint_t valid = valid_word_lanes<Index, Tag>();
   for (nint_t lane = 0; lane < valid; ++lane) {
     if (mask == nullptr || execute_word<Index, X86Backend>(
                                GetMaskLaneOp{}, tag, *mask, lane)) {
@@ -53,7 +53,7 @@ struct X86ReductionWordImpl {
     using Traits = RepresentationTraits<X86Backend, Tag>;
     using T = ElementOf<Tag>;
     using Raw = typename Traits::RawVec;
-    constexpr nint_t valid = x86_valid_word_lanes<Index, Tag>();
+    constexpr nint_t valid = valid_word_lanes<Index, Tag>();
     constexpr nint_t lanes = static_cast<nint_t>(sizeof(Raw) / sizeof(T));
 #if defined(HAS_AVX512F)
     if constexpr (sizeof(Raw) == 64) {
@@ -143,7 +143,7 @@ struct X86ReductionWordImpl {
     if constexpr (sizeof(Raw) == 64) {
       using MaskRaw = typename Traits::RawMask;
       const MaskRaw valid = x86_mask_prefix<T, MaskRaw>(
-          x86_valid_word_lanes<Index, Tag>());
+          valid_word_lanes<Index, Tag>());
       const MaskRaw active = x86_mask_and(mask.value, valid);
       if constexpr (std::same_as<Op, ReduceAddOp>) {
         if constexpr (std::same_as<T, float32_t>)

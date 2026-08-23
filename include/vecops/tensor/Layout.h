@@ -250,23 +250,10 @@ namespace details {
 // --- Type trait helpers for ArrayMeta / Shape / Strides ---
 
 template <typename T>
-struct IsArrayMeta : std::false_type {};
-template <typename... Is>
-struct IsArrayMeta<ArrayMeta<Is...>> : std::true_type {};
-template <typename... Is>
-struct IsArrayMeta<Shape<Is...>> : std::true_type {};
-template <typename... Is>
-struct IsArrayMeta<Strides<Is...>> : std::true_type {};
-
-template <typename T>
-struct IsShape : std::false_type {};
-template <typename... Is>
-struct IsShape<Shape<Is...>> : std::true_type {};
-
-template <typename T>
-struct IsStrides : std::false_type {};
-template <typename... Is>
-struct IsStrides<Strides<Is...>> : std::true_type {};
+struct IsArrayMeta : std::bool_constant<
+    is_specialization_of_v<ArrayMeta, T> ||
+    is_specialization_of_v<Shape, T> ||
+    is_specialization_of_v<Strides, T>> {};
 
 
 /**
@@ -527,10 +514,10 @@ template <typename T>
 concept ArrayMetaLike = is_array_meta_v<std::remove_cvref_t<T>>;
 /// Type trait: `true` if T is a Shape.
 template <typename T>
-inline constexpr bool is_shape_v = details::IsShape<T>::value;
+inline constexpr bool is_shape_v = is_specialization_of_v<Shape, T>;
 /// Type trait: `true` if T is a Strides.
 template <typename T>
-inline constexpr bool is_strides_v = details::IsStrides<T>::value;
+inline constexpr bool is_strides_v = is_specialization_of_v<Strides, T>;
 
 /**
  * @brief Get the value of dimension I from an ArrayMeta.
@@ -582,21 +569,13 @@ struct IsMoreLenientMeta : std::false_type {};
 template <bool SameRank, typename MSrc, typename MDst>
 struct IsMoreLenientMetaImpl : std::false_type {};
 
-template <typename... Ss, typename... Ds>
-struct IsMoreLenientMetaImpl<true, Shape<Ss...>, Shape<Ds...>>
+template <template <typename...> class Meta, typename... Ss, typename... Ds>
+struct IsMoreLenientMetaImpl<true, Meta<Ss...>, Meta<Ds...>>
     : std::bool_constant<(IsMoreLenientValue<Ss, Ds>::value && ...)> {};
 
-template <typename... Ss, typename... Ds>
-struct IsMoreLenientMetaImpl<true, Strides<Ss...>, Strides<Ds...>>
-    : std::bool_constant<(IsMoreLenientValue<Ss, Ds>::value && ...)> {};
-
-template <typename... Ss, typename... Ds>
-struct IsMoreLenientMeta<Shape<Ss...>, Shape<Ds...>>
-    : IsMoreLenientMetaImpl<sizeof...(Ss) == sizeof...(Ds), Shape<Ss...>, Shape<Ds...>> {};
-
-template <typename... Ss, typename... Ds>
-struct IsMoreLenientMeta<Strides<Ss...>, Strides<Ds...>>
-    : IsMoreLenientMetaImpl<sizeof...(Ss) == sizeof...(Ds), Strides<Ss...>, Strides<Ds...>> {};
+template <template <typename...> class Meta, typename... Ss, typename... Ds>
+struct IsMoreLenientMeta<Meta<Ss...>, Meta<Ds...>>
+    : IsMoreLenientMetaImpl<sizeof...(Ss) == sizeof...(Ds), Meta<Ss...>, Meta<Ds...>> {};
 
 /**
  * @brief Match one metadata Value against a lenient pattern.
@@ -614,12 +593,8 @@ struct IsLenientPatternValue<Actual, any> : std::true_type {};
 template <bool SameRank, typename Meta, typename... Patterns>
 struct IsLenientPatternMetaImpl : std::false_type {};
 
-template <typename... Ss, typename... Patterns>
-struct IsLenientPatternMetaImpl<true, Shape<Ss...>, Patterns...>
-    : std::bool_constant<(IsLenientPatternValue<Ss, Patterns>::value && ...)> {};
-
-template <typename... Ss, typename... Patterns>
-struct IsLenientPatternMetaImpl<true, Strides<Ss...>, Patterns...>
+template <template <typename...> class Meta, typename... Ss, typename... Patterns>
+struct IsLenientPatternMetaImpl<true, Meta<Ss...>, Patterns...>
     : std::bool_constant<(IsLenientPatternValue<Ss, Patterns>::value && ...)> {};
 
 /**
@@ -631,13 +606,9 @@ struct IsLenientPatternMetaImpl<true, Strides<Ss...>, Patterns...>
 template <typename Meta, typename... Patterns>
 struct IsLenientPatternMeta : std::false_type {};
 
-template <typename... Ss, typename... Patterns>
-struct IsLenientPatternMeta<Shape<Ss...>, Patterns...>
-    : IsLenientPatternMetaImpl<sizeof...(Ss) == sizeof...(Patterns), Shape<Ss...>, Patterns...> {};
-
-template <typename... Ss, typename... Patterns>
-struct IsLenientPatternMeta<Strides<Ss...>, Patterns...>
-    : IsLenientPatternMetaImpl<sizeof...(Ss) == sizeof...(Patterns), Strides<Ss...>, Patterns...> {};
+template <template <typename...> class Meta, typename... Ss, typename... Patterns>
+struct IsLenientPatternMeta<Meta<Ss...>, Patterns...>
+    : IsLenientPatternMetaImpl<sizeof...(Ss) == sizeof...(Patterns), Meta<Ss...>, Patterns...> {};
 
 } // namespace details
 
@@ -900,6 +871,28 @@ constexpr auto make_layout(
   }(std::make_index_sequence<Ndim>{});
 }
 
+namespace details {
+
+/**
+ * Strides that traverse @p shape in row-major order with @p unit_axis as the
+ * fastest-varying (unit-stride) dimension; defaults to the last axis.
+ */
+template <std::size_t N>
+constexpr std::array<nint_t, N> row_major_strides(
+    const std::array<nint_t, N>& shape, int unit_axis = int(N) - 1) {
+  std::array<nint_t, N> strides{};
+  strides[unit_axis] = 1;
+  nint_t product = shape[unit_axis];
+  for (int d = N - 1; d >= 0; --d) {
+    if (d == unit_axis) continue;
+    strides[d] = product;
+    product *= shape[d];
+  }
+  return strides;
+}
+
+} // namespace details
+
 /**
  * @brief Create a Layout of rank Ndim from a shape initializer_list only.
  *        Strides are auto-computed as row-major contiguous, preserving the
@@ -918,10 +911,8 @@ constexpr auto make_layout(
   std::array<nint_t, Ndim> shapes{};
   std::copy(shape_vals.begin(), shape_vals.end(), shapes.begin());
 
-  std::array<nint_t, Ndim> stride_vals{};
-  stride_vals[Ndim - 1] = 1;
-  for (int i = Ndim - 2; i >= 0; --i)
-    stride_vals[i] = stride_vals[i + 1] * shapes[i + 1];
+  const std::array<nint_t, Ndim> stride_vals =
+      details::row_major_strides(shapes);
 
   return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
     return Layout<S, St>{
@@ -934,9 +925,7 @@ constexpr auto make_layout(
 namespace details {
 
 template <typename T>
-struct IsLayout : std::false_type {};
-template <typename TShape, typename TStrides>
-struct IsLayout<Layout<TShape, TStrides>> : std::true_type {};
+struct IsLayout : std::bool_constant<is_specialization_of_v<Layout, T>> {};
 
 template <int I, typename TMeta>
 struct ArrayMetaElement;
@@ -963,6 +952,14 @@ inline constexpr bool is_layout_v = details::IsLayout<T>::value;
 /// Concept form of is_layout_v.
 template <typename T>
 concept LayoutLike = is_layout_v<std::remove_cvref_t<T>>;
+
+/// Total element count of a layout: the product of all dimension sizes.
+template <LayoutLike Layout>
+VECOPS_ALWAYS_INLINE nint_t numel(const Layout& layout) {
+  nint_t result = 1;
+  for (int d = 0; d < Layout::Ndim; ++d) result *= layout.shape()[d];
+  return result;
+}
 
 template <int I, typename TMeta>
 using meta_element_t = typename details::ArrayMetaElement<

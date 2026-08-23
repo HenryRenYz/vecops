@@ -358,15 +358,6 @@ VECOPS_ALWAYS_INLINE void invoke_remaining_map_chunks(
 
 // ======================== Vector Block Traversal ========================
 
-consteval int floor_log2_positive(int value) {
-  int power = 0;
-  while (value > 1) {
-    value >>= 1;
-    ++power;
-  }
-  return power;
-}
-
 template <::vecops::vec::VectorTag Tag, int Power>
 struct GrowVectorTag {
   using type = typename GrowVectorTag<
@@ -388,7 +379,7 @@ struct SuggestedFactorTag<Tag, Factor, true> {
   static_assert(
       ::vecops::vec::scale_power_v<Tag> <= VEC_MAX_POW,
       "base vector tag exceeds the backend multi-word limit");
-  static constexpr int requested_power = floor_log2_positive(Factor);
+  static constexpr int requested_power = ::vecops::log2_floor(Factor);
   static constexpr int available_power =
       VEC_MAX_POW - ::vecops::vec::scale_power_v<Tag>;
   static constexpr int actual_power =
@@ -399,7 +390,7 @@ struct SuggestedFactorTag<Tag, Factor, true> {
 template <::vecops::vec::VectorTag Tag, int Factor>
 struct SuggestedFactorTag<Tag, Factor, false> {
   static_assert(Factor > 0, "vector loop factor must be positive");
-  static constexpr int requested_power = floor_log2_positive(Factor);
+  static constexpr int requested_power = ::vecops::log2_floor(Factor);
   static constexpr int actual_power = []() consteval {
     constexpr nint_t max_word_lanes =
         static_cast<nint_t>(MAX_VEC_WIDTH / 8) /
@@ -939,24 +930,9 @@ VECOPS_ALWAYS_INLINE constexpr decltype(auto) slice_one(T&& input, nint_t index)
 
 // ======================== Recursive Traversal ========================
 
-template <int LogicalRank, typename Fn, typename... Inputs>
-VECOPS_ALWAYS_INLINE void for_each_impl(Fn& fn, Inputs&&... inputs) {
-  fn(inputs...);
-}
-
-template <int LogicalRank, int I0, int... Is, typename Fn, typename... Inputs>
-VECOPS_ALWAYS_INLINE void for_each_impl(Fn& fn, Inputs&&... inputs) {
-  static_assert(LogicalRank > 0, "logical rank exhausted");
-  nint_t extent = 1;
-  bool has_extent = false;
-  (update_extent<LogicalRank, I0>(extent, has_extent, inputs), ...);
-
-  for (nint_t i = 0; i < extent; ++i) {
-    for_each_impl<LogicalRank - 1, adjust_dim_after_slice<I0, Is>()...>(
-        fn,
-        slice_one<LogicalRank, I0>(inputs, i)...);
-  }
-}
+/** How a traversal leaf forwards the accumulated dimension indices: not at
+ *  all, expanded as leading call arguments, or as one tuple argument. */
+enum class for_each_index_mode { none, expand, tuple };
 
 template <typename Fn, typename IndexTuple, typename... Inputs, size_t... Js>
 VECOPS_ALWAYS_INLINE void invoke_with_index_impl(
@@ -980,73 +956,51 @@ VECOPS_ALWAYS_INLINE void invoke_with_index(
       std::forward<Inputs>(inputs)...);
 }
 
-template <int LogicalRank, typename IndexTuple, typename Fn, typename... Inputs>
-VECOPS_ALWAYS_INLINE void for_each_with_index_impl(
-    Fn& fn,
-    const IndexTuple& indices,
-    Inputs&&... inputs) {
-  invoke_with_index(fn, indices, std::forward<Inputs>(inputs)...);
-}
-
-template <int LogicalRank, typename IndexTuple, typename Fn, typename... Inputs>
-VECOPS_ALWAYS_INLINE void for_each_with_index_tuple_impl(
-    Fn& fn,
-    const IndexTuple& indices,
-    Inputs&&... inputs) {
-  fn(indices, std::forward<Inputs>(inputs)...);
-}
-
+// Leaf overload: no remaining sliced dimensions.
 template <
     int LogicalRank,
-    int I0,
-    int... Is,
+    for_each_index_mode Mode,
     typename IndexTuple,
     typename Fn,
     typename... Inputs>
-VECOPS_ALWAYS_INLINE void for_each_with_index_impl(
-    Fn& fn,
-    const IndexTuple& indices,
-    Inputs&&... inputs) {
-  static_assert(LogicalRank > 0, "logical rank exhausted");
-  nint_t extent = 1;
-  bool has_extent = false;
-  (update_extent<LogicalRank, I0>(extent, has_extent, inputs), ...);
-
-  for (nint_t i = 0; i < extent; ++i) {
-    const auto next_indices = std::tuple_cat(indices, std::tuple<nint_t>{i});
-    for_each_with_index_impl<
-        LogicalRank - 1,
-        adjust_dim_after_slice<I0, Is>()...>(
-        fn,
-        next_indices,
-        slice_one<LogicalRank, I0>(inputs, i)...);
+VECOPS_ALWAYS_INLINE void for_each_impl(
+    Fn& fn, const IndexTuple& indices, Inputs&&... inputs) {
+  static_assert(LogicalRank >= 0, "logical rank exhausted");
+  if constexpr (Mode == for_each_index_mode::none) {
+    fn(std::forward<Inputs>(inputs)...);
+  } else if constexpr (Mode == for_each_index_mode::expand) {
+    invoke_with_index(fn, indices, std::forward<Inputs>(inputs)...);
+  } else {
+    fn(indices, std::forward<Inputs>(inputs)...);
   }
 }
 
+// Recursive overload: one dimension at a time. A single traversal serves all
+// three index modes; only the leaf differs.
 template <
     int LogicalRank,
+    for_each_index_mode Mode,
     int I0,
     int... Is,
     typename IndexTuple,
     typename Fn,
     typename... Inputs>
-VECOPS_ALWAYS_INLINE void for_each_with_index_tuple_impl(
-    Fn& fn,
-    const IndexTuple& indices,
-    Inputs&&... inputs) {
+VECOPS_ALWAYS_INLINE void for_each_impl(
+    Fn& fn, const IndexTuple& indices, Inputs&&... inputs) {
   static_assert(LogicalRank > 0, "logical rank exhausted");
   nint_t extent = 1;
   bool has_extent = false;
   (update_extent<LogicalRank, I0>(extent, has_extent, inputs), ...);
 
   for (nint_t i = 0; i < extent; ++i) {
-    const auto next_indices = std::tuple_cat(indices, std::tuple<nint_t>{i});
-    for_each_with_index_tuple_impl<
-        LogicalRank - 1,
-        adjust_dim_after_slice<I0, Is>()...>(
-        fn,
-        next_indices,
-        slice_one<LogicalRank, I0>(inputs, i)...);
+    if constexpr (Mode == for_each_index_mode::none) {
+      for_each_impl<LogicalRank - 1, Mode, adjust_dim_after_slice<I0, Is>()...>(
+          fn, indices, slice_one<LogicalRank, I0>(inputs, i)...);
+    } else {
+      const auto next_indices = std::tuple_cat(indices, std::tuple<nint_t>{i});
+      for_each_impl<LogicalRank - 1, Mode, adjust_dim_after_slice<I0, Is>()...>(
+          fn, next_indices, slice_one<LogicalRank, I0>(inputs, i)...);
+    }
   }
 }
 
@@ -1058,7 +1012,8 @@ struct LeadingDims<N, std::integer_sequence<int, Is...>> {
   template <typename Fn, typename... Inputs>
   VECOPS_ALWAYS_INLINE static void run(Fn& fn, Inputs&&... inputs) {
     constexpr int logical_rank = max2(N, max_slice_rank_v<Inputs...>);
-    for_each_impl<logical_rank, Is...>(fn, std::forward<Inputs>(inputs)...);
+    for_each_impl<logical_rank, for_each_index_mode::none, Is...>(
+        fn, std::tuple<>{}, std::forward<Inputs>(inputs)...);
   }
 };
 
@@ -1070,10 +1025,8 @@ struct LeadingDimsWithIndex<N, std::integer_sequence<int, Is...>> {
   template <typename Fn, typename... Inputs>
   VECOPS_ALWAYS_INLINE static void run(Fn& fn, Inputs&&... inputs) {
     constexpr int logical_rank = max2(N, max_slice_rank_v<Inputs...>);
-    for_each_with_index_impl<logical_rank, Is...>(
-        fn,
-        std::tuple<>{},
-        std::forward<Inputs>(inputs)...);
+    for_each_impl<logical_rank, for_each_index_mode::expand, Is...>(
+        fn, std::tuple<>{}, std::forward<Inputs>(inputs)...);
   }
 };
 
@@ -1085,10 +1038,8 @@ struct LeadingDimsWithIndexTuple<N, std::integer_sequence<int, Is...>> {
   template <typename Fn, typename... Inputs>
   VECOPS_ALWAYS_INLINE static void run(Fn& fn, Inputs&&... inputs) {
     constexpr int logical_rank = max2(N, max_slice_rank_v<Inputs...>);
-    for_each_with_index_tuple_impl<logical_rank, Is...>(
-        fn,
-        std::tuple<>{},
-        std::forward<Inputs>(inputs)...);
+    for_each_impl<logical_rank, for_each_index_mode::tuple, Is...>(
+        fn, std::tuple<>{}, std::forward<Inputs>(inputs)...);
   }
 };
 
@@ -1661,7 +1612,8 @@ VECOPS_ALWAYS_INLINE void for_each(Fn&& fn, Inputs&&... inputs) {
   constexpr int logical_rank = details::max2(
       details::max_index_plus_one_v<Is...>,
       details::max_slice_rank_v<Inputs...>);
-  details::for_each_impl<logical_rank, Is...>(fn, std::forward<Inputs>(inputs)...);
+  details::for_each_impl<logical_rank, details::for_each_index_mode::none, Is...>(
+      fn, std::tuple<>{}, std::forward<Inputs>(inputs)...);
 }
 
 /**
@@ -1699,7 +1651,7 @@ VECOPS_ALWAYS_INLINE void for_each_with_index(Fn&& fn, Inputs&&... inputs) {
   constexpr int logical_rank = details::max2(
       details::max_index_plus_one_v<Is...>,
       details::max_slice_rank_v<Inputs...>);
-  details::for_each_with_index_impl<logical_rank, Is...>(
+  details::for_each_impl<logical_rank, details::for_each_index_mode::expand, Is...>(
       fn,
       std::tuple<>{},
       std::forward<Inputs>(inputs)...);
@@ -1728,7 +1680,7 @@ VECOPS_ALWAYS_INLINE void for_each_with_index_tuple(Fn&& fn, Inputs&&... inputs)
   constexpr int logical_rank = details::max2(
       details::max_index_plus_one_v<Is...>,
       details::max_slice_rank_v<Inputs...>);
-  details::for_each_with_index_tuple_impl<logical_rank, Is...>(
+  details::for_each_impl<logical_rank, details::for_each_index_mode::tuple, Is...>(
       fn,
       std::tuple<>{},
       std::forward<Inputs>(inputs)...);

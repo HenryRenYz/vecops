@@ -426,6 +426,41 @@ inline constexpr MaskWhileGtOp mwhilegt{};
 
 #include "vecops/vec/details/Basic.h"
 
+namespace vecops::vec::details {
+
+/**
+ * Runtime-lane word access shared by the lane APIs, the generic memory
+ * indexed paths, and the conversion fallback. Expands the lane's word ordinal
+ * to a compile-time index and reads through the backend word op.
+ */
+template <typename Backend, VectorTag Tag>
+VECOPS_ALWAYS_INLINE ElementOf<Tag> get_vec_lane_at(
+    Tag tag, Vec<Tag> value, nint_t lane) {
+  const nint_t word_lanes = native_word_size(tag);
+  return visit_runtime_word<Backend>(
+      tag, lane / word_lanes, [&]<nint_t Index>() {
+        return execute_word<Index, Backend>(
+            GetVecLaneOp{}, tag,
+            ::vecops::vec::get_word<Index>(tag, value),
+            lane % word_lanes);
+      });
+}
+
+template <typename Backend, VectorTag Tag>
+VECOPS_ALWAYS_INLINE bool get_mask_lane_at(
+    Tag tag, Mask<Tag> value, nint_t lane) {
+  const nint_t word_lanes = native_word_size(tag);
+  return visit_runtime_word<Backend>(
+      tag, lane / word_lanes, [&]<nint_t Index>() {
+        return execute_word<Index, Backend>(
+            GetMaskLaneOp{}, tag,
+            ::vecops::vec::get_word<Index>(tag, value),
+            lane % word_lanes);
+      });
+}
+
+} // namespace vecops::vec::details
+
 namespace vecops::vec {
 
 /**

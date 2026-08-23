@@ -5,6 +5,8 @@
 #include <type_traits>
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/scalar/Basic.h"
+#include "vecops/vec/details/Wordwise.h"
 
 namespace vecops::vec::details {
 
@@ -48,11 +50,8 @@ VECOPS_ALWAYS_INLINE T scalar_bit_value(std::make_unsigned_t<T> value) {
     static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                 \
         OpType op, Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b, \
         NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {\
-      auto result = call<Index>(op, tag, a, b);                          \
-      for (nint_t lane = 0; lane < native_word_size(tag); ++lane)       \
-        if (mask.bits.test(static_cast<std::size_t>(lane)))              \
-          inactive[lane] = result[lane];                                 \
-      return inactive;                                                    \
+      return scalar_masked_merge<Index>(                                 \
+          tag, call<Index>(op, tag, a, b), mask, inactive);              \
     }                                                                    \
   }
 
@@ -147,22 +146,16 @@ VECOPS_ALWAYS_INLINE T scalar_shift_right(T value, int count) {
     static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                 \
         OpType op, Tag tag, NativeWordVec<Tag> value, int count,        \
         NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {\
-      const auto shifted = call<Index>(op, tag, value, count);          \
-      for (nint_t lane = 0; lane < native_word_size(tag); ++lane)       \
-        if (mask.bits.test(static_cast<std::size_t>(lane)))              \
-          inactive[lane] = shifted[lane];                                \
-      return inactive;                                                    \
+      return scalar_masked_merge<Index>(                                 \
+          tag, call<Index>(op, tag, value, count), mask, inactive);      \
     }                                                                    \
     template <nint_t Index, IntegerTag Tag, typename Policy>             \
     static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                 \
         OpType op, Tag tag, NativeWordVec<Tag> value,                   \
         NativeWordVec<Tag> counts, NativeWordMask<Tag> mask,            \
         NativeWordVec<Tag> inactive, Policy) {                           \
-      const auto shifted = call<Index>(op, tag, value, counts);         \
-      for (nint_t lane = 0; lane < native_word_size(tag); ++lane)       \
-        if (mask.bits.test(static_cast<std::size_t>(lane)))              \
-          inactive[lane] = shifted[lane];                                \
-      return inactive;                                                    \
+      return scalar_masked_merge<Index>(                                 \
+          tag, call<Index>(op, tag, value, counts), mask, inactive);     \
     }                                                                    \
   }
 

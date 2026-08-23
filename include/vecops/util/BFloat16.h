@@ -8,10 +8,10 @@
 #include <cmath>
 #include <concepts>
 #include <cstdint>
-#include <iostream>
 
 #include "vecops/CoreDefs.h"
 #include "./Bitcast.h"
+#include "./SmallFloat.h"
 
 #if defined(ARCH_ARM64)
 #include <arm_neon.h>
@@ -19,7 +19,7 @@
 
 namespace vecops {
 
-struct alignas(2) BFloat16 {
+struct alignas(2) BFloat16 : SmallFloatOps<BFloat16> {
 
   VECOPS_INLINE constexpr BFloat16() = default;
 
@@ -77,150 +77,15 @@ private:
   uint16_t x;
 };
 
-VECOPS_INLINE std::ostream& operator<<(std::ostream& out, const BFloat16& v) {
-  out << float(v);
-  return out;
-}
-
-VECOPS_INLINE BFloat16 operator+(const BFloat16& a, const BFloat16& b) {
-  return float(a) + float(b);
-}
-
-VECOPS_INLINE BFloat16 operator-(const BFloat16& a, const BFloat16& b) {
-  return float(a) - float(b);
-}
-
-VECOPS_INLINE BFloat16 operator*(const BFloat16& a, const BFloat16& b) {
-  return float(a) * float(b);
-}
-
-VECOPS_INLINE BFloat16 operator/(const BFloat16& a, const BFloat16& b) {
-  return float(a) / float(b);
-}
-
-VECOPS_INLINE BFloat16 operator-(const BFloat16& a) {
-  return -float(a);
-}
-
-VECOPS_INLINE BFloat16& operator+=(BFloat16& a, const BFloat16& b) {
-  a = a + b;
-  return a;
-}
-
-VECOPS_INLINE BFloat16& operator-=(BFloat16& a, const BFloat16& b) {
-  a = a - b;
-  return a;
-}
-
-VECOPS_INLINE BFloat16& operator*=(BFloat16& a, const BFloat16& b) {
-  a = a * b;
-  return a;
-}
-
-VECOPS_INLINE BFloat16& operator/=(BFloat16& a, const BFloat16& b) {
-  a = a / b;
-  return a;
-}
-
-VECOPS_INLINE bool operator<(const BFloat16& a, const BFloat16& b) {
-  return float(a) < float(b);
-}
-
-VECOPS_INLINE bool operator>(const BFloat16& a, const BFloat16& b) {
-  return float(a) > float(b);
-}
-
-VECOPS_INLINE bool operator<=(const BFloat16& a, const BFloat16& b) {
-  return float(a) <= float(b);
-}
-
-VECOPS_INLINE bool operator>=(const BFloat16& a, const BFloat16& b) {
-  return float(a) >= float(b);
-}
-
-VECOPS_INLINE bool operator==(const BFloat16& a, const BFloat16& b) {
-  return float(a) == float(b);
-}
-
-VECOPS_INLINE bool operator!=(const BFloat16& a, const BFloat16& b) {
-  return float(a) != float(b);
-}
-
 } // namespace vecops
 
 namespace std {
 
-VECOPS_INLINE constexpr vecops::BFloat16 fabs(vecops::BFloat16 x) {
-  return vecops::BFloat16::from_bits(x.to_bits() & 0x7fff);
-}
+VECOPS_DEFINE_STD_ABS(BFloat16)
 
-VECOPS_INLINE constexpr vecops::BFloat16 abs(vecops::BFloat16 x) {
-  return std::fabs(x);
-}
-
-template <>
-class numeric_limits<vecops::BFloat16> {
-public:
-  static constexpr bool is_signed = true;
-  static constexpr bool is_specialized = true;
-  static constexpr bool is_integer = false;
-  static constexpr bool is_exact = false;
-  static constexpr bool has_infinity = true;
-  static constexpr bool has_quiet_NaN = true;
-  static constexpr bool has_signaling_NaN = true;
-  static constexpr auto has_denorm = numeric_limits<float>::has_denorm;
-  static constexpr auto has_denorm_loss = numeric_limits<float>::has_denorm_loss;
-  static constexpr auto round_style = numeric_limits<float>::round_style;
-  static constexpr bool is_iec559 = false;
-  static constexpr bool is_bounded = true;
-  static constexpr bool is_modulo = false;
-  static constexpr int digits = 8;
-  static constexpr int digits10 = 2;
-  static constexpr int max_digits10 = 4;
-  static constexpr int radix = 2;
-  static constexpr int min_exponent = -125;
-  static constexpr int min_exponent10 = -37;
-  static constexpr int max_exponent = 128;
-  static constexpr int max_exponent10 = 38;
-  static constexpr auto traps = numeric_limits<float>::traps;
-  static constexpr auto tinyness_before =numeric_limits<float>::tinyness_before;
-
-  static constexpr vecops::BFloat16 min() {
-    return vecops::BFloat16::from_bits(0x0080);
-  }
-
-  static constexpr vecops::BFloat16 lowest() {
-    return vecops::BFloat16::from_bits(0xFF7F);
-  }
-
-  static constexpr vecops::BFloat16 max() {
-    return vecops::BFloat16::from_bits(0x7F7F);
-  }
-
-  static constexpr vecops::BFloat16 epsilon() {
-    return vecops::BFloat16::from_bits(0x3C00);
-  }
-
-  static constexpr vecops::BFloat16 round_error() {
-    return vecops::BFloat16::from_bits(0x3F00);
-  }
-
-  static constexpr vecops::BFloat16 infinity() {
-    return vecops::BFloat16::from_bits(0x7F80);
-  }
-
-  static constexpr vecops::BFloat16 quiet_NaN() {
-    return vecops::BFloat16::from_bits(0x7FC0);
-  }
-
-  static constexpr vecops::BFloat16 signaling_NaN() {
-    return vecops::BFloat16::from_bits(0x7F80);
-  }
-
-  static constexpr vecops::BFloat16 denorm_min() {
-    return vecops::BFloat16::from_bits(0x0001);
-  }
-};
+VECOPS_DEFINE_SMALL_FLOAT_LIMITS(
+    BFloat16, false, 8, 2, 4, -125, -37, 128, 38,
+    0x0080, 0xFF7F, 0x7F7F, 0x3C00, 0x3F00, 0x7F80, 0x7FC0, 0x7F80, 0x0001)
 
 } // namespace std
 

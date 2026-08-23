@@ -10,6 +10,7 @@
 #include <limits>
 #include <type_traits>
 
+#include "vecops/vec/details/Conversion.h"
 #include "vecops/vec/details/sve/Basic.h"
 #include "vecops/vec/details/sve/Bf16.h"
 
@@ -574,62 +575,6 @@ VECOPS_ALWAYS_INLINE Mask<ToTag> sve_convert_mask(
   }
 }
 
-template <int Levels, VectorTag Tag>
-VECOPS_ALWAYS_INLINE auto sve_conversion_select_even(
-    Tag tag, Vec<Tag> value) {
-  if constexpr (Levels == 0) {
-    return value;
-  } else {
-    using HalfTag = Half<Tag>;
-    return sve_conversion_select_even<Levels - 1>(
-        HalfTag{}, execute(EvenOp{}, tag, value));
-  }
-}
-
-template <typename... Options>
-consteval int sve_conversion_lane_phase() {
-  int phase = -1;
-  ([]<typename Option>(int& result) {
-    using Clean = std::remove_cvref_t<Option>;
-    if constexpr (IsLaneOption<Clean>::value)
-      result = IsLaneOption<Clean>::phase;
-  }.template operator()<Options>(phase), ...);
-  return phase;
-}
-
-template <VectorTag Tag, typename... Options>
-VECOPS_ALWAYS_INLINE Vec<Tag> sve_conversion_population(
-    Tag tag, Options&&... options) {
-  if constexpr (option_count_v<IsVectorMergeOption, Options...> == 1) {
-    return find_option<IsVectorMergeOption>(
-        std::forward<Options>(options)...).value;
-  } else if constexpr (option_count_v<IsScalarMergeOption, Options...> == 1) {
-    return execute(
-        FillOp{}, tag,
-        find_option<IsScalarMergeOption>(
-            std::forward<Options>(options)...).value);
-  } else {
-    return execute(FillOp{}, tag, ElementOf<Tag>{});
-  }
-}
-
-template <int Levels, VectorTag Tag, VectorTag ValuesTag>
-VECOPS_ALWAYS_INLINE Vec<Tag> sve_conversion_insert_even(
-    Tag tag, Vec<ValuesTag> values, Vec<Tag> fallback) {
-  if constexpr (Levels == 0) {
-    static_assert(std::same_as<Tag, ValuesTag>);
-    return values;
-  } else {
-    using HalfTag = Half<Tag>;
-    const auto fallback_even = execute(EvenOp{}, tag, fallback);
-    const auto fallback_odd = execute(OddOp{}, tag, fallback);
-    const auto result_even =
-        sve_conversion_insert_even<Levels - 1, HalfTag, ValuesTag>(
-            HalfTag{}, values, fallback_even);
-    return execute(InterleaveOp{}, tag, result_even, fallback_odd);
-  }
-}
-
 #if defined(HAS_SVE2)
 template <int Phase, Element To, Element From, typename Raw>
 VECOPS_ALWAYS_INLINE auto sve_convert_lane_ratio2_widen_raw(Raw value) {
@@ -871,7 +816,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
       ? static_cast<int>(sizeof(ElementOf<FromTag>) / sizeof(ElementOf<ToTag>))
       : static_cast<int>(sizeof(ElementOf<ToTag>) / sizeof(ElementOf<FromTag>));
   constexpr int levels = ratio == 2 ? 1 : ratio == 4 ? 2 : 3;
-  constexpr int phase = sve_conversion_lane_phase<Options...>();
+  constexpr int phase = conversion_lane_phase<Options...>();
 
 #if defined(HAS_SVE2)
   constexpr bool wraps = option_count_v<IsWrapOption, Options...> == 1;
@@ -883,7 +828,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
       (!narrows || phase == 1 || !nonzero_population)) {
     auto fallback = [&] {
       if constexpr (narrows)
-        return sve_conversion_population(
+        return conversion_population<SVEBackend>(
             to, std::forward<Options>(options)...);
       else
         return value;
@@ -911,7 +856,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
 
   if constexpr (!narrows) {
     if constexpr (phase == 0) {
-      const auto selected = sve_conversion_select_even<levels>(from, value);
+      const auto selected = conversion_select_even<levels>(from, value);
       using SelectedTag = decltype([] {
         if constexpr (levels == 1) return Half<FromTag>{};
         else if constexpr (levels == 2) return Half<Half<FromTag>>{};
@@ -930,10 +875,10 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
     using CompactTag = Rebind<ElementOf<ToTag>, FromTag>;
     const auto compact = sve_convert_vector<wraps_fallback>(
         CompactTag{}, from, value);
-    auto fallback = sve_conversion_population(
+    auto fallback = conversion_population<SVEBackend>(
         to, std::forward<Options>(options)...);
     if constexpr (phase == 0) {
-      return sve_conversion_insert_even<levels, ToTag, CompactTag>(
+      return conversion_insert_even<levels, ToTag, CompactTag>(
           to, compact, fallback);
     } else {
       static_assert(ratio == 2 && phase == 1);
@@ -1065,7 +1010,7 @@ struct NativeImpl<SVEBackend, ConvertOp, ToTag> {
       }
     }();
     if constexpr (masked) {
-      const auto inactive = sve_conversion_population(
+      const auto inactive = conversion_population<SVEBackend>(
           to, std::forward<Options>(options)...);
       const auto& mask = find_option<IsMaskedOption>(
           std::forward<Options>(options)...).value;
