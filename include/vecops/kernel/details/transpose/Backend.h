@@ -52,7 +52,7 @@ template <>
 struct ImplementationBackend<transpose2d_implementation::Vector>
     : CurrentVectorBackend {
   using ResourceRequirements =
-      typename execution::details::CurrentBackend::DefaultRequirements;
+      typename execution::details::current_backend_t::DefaultRequirements;
 };
 
 #if defined(HAS_SME)

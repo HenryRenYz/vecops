@@ -6,6 +6,7 @@
 #include <type_traits>
 
 #include "vecops/CoreDefs.h"
+#include "vecops/util/TypeTraits.h"
 #include "vecops/vec/Tag.h"
 #include "vecops/vec/details/Backend.h"
 #include "vecops/vec/details/Representation.h"
@@ -84,8 +85,8 @@ namespace details {
 /** Backend customization point for runtime physical-word access. */
 template <typename Backend, VectorTag Tag>
 struct RuntimeWordAccess {
-  static constexpr bool sized_vec = is_word_array<Vec<Tag>>;
-  static constexpr bool sized_mask = is_word_array<Mask<Tag>>;
+  static constexpr bool sized_vec = is_word_array_v<Vec<Tag>>;
+  static constexpr bool sized_mask = is_word_array_v<Mask<Tag>>;
 
   static VECOPS_ALWAYS_INLINE constexpr NativeWordVec<Tag> get_vec(
       Tag, const Vec<Tag>& value, nint_t ordinal)
@@ -129,6 +130,24 @@ struct RuntimeWordAccess {
 } // namespace details
 
 /**
+ * A VectorValue whose canonical physical Tag can be reconstructed via \ref
+ * VecToTag. Most operations accept Tag-inferable vectors and internally
+ * resolve VecToTag<V> to forward to the explicit-Tag overload.
+ */
+template <typename V>
+concept TagInferableVector =
+    VectorValue<V> && details::HasInferredTag<V>;
+
+namespace details {
+
+template <TagInferableVector V>
+struct VecToTagImpl {
+  using type = InferredTagOf<V>;
+};
+
+} // namespace details
+
+/**
  * Maps a Vec representation to its canonical physical Tag.
  *
  * A representation does not retain a subword's logical extent. Consequently
@@ -136,38 +155,22 @@ struct RuntimeWordAccess {
  * callers that need explicit subword semantics must keep passing the original
  * Tag to the operation.
  */
-template <VectorValue V>
-  requires details::HasInferredTag<V>
-struct VecToTag {
-  using Type = InferredTagOf<V>;
-};
-
-template <VectorValue V>
-  requires details::HasInferredTag<V>
-using VecToTagT = typename VecToTag<std::remove_cvref_t<V>>::Type;
-
-/**
- * A VectorValue whose canonical physical Tag can be reconstructed via \ref
- * VecToTag. Most operations accept Tag-inferable vectors and internally
- * resolve VecToTagT<V> to forward to the explicit-Tag overload.
- */
-template <typename V>
-concept TagInferableVector =
-    VectorValue<V> && details::HasInferredTag<V>;
+template <TagInferableVector V>
+using VecToTag = typename details::VecToTagImpl<std::remove_cvref_t<V>>::type;
 
 /**
  * A Tag-inferable vector whose element type is integral (signed or unsigned).
  */
 template <typename V>
 concept IntegerVectorValue =
-    TagInferableVector<V> && std::integral<ElementOf<VecToTagT<V>>>;
+    TagInferableVector<V> && std::integral<ElementOf<VecToTag<V>>>;
 
 /**
  * A Tag-inferable vector whose element type is floating-point.
  */
 template <typename V>
 concept FloatingVectorValue =
-    TagInferableVector<V> && ::vecops::IsFloatV<ElementOf<VecToTagT<V>>>;
+    TagInferableVector<V> && ::vecops::is_float_v<ElementOf<VecToTag<V>>>;
 
 /**
  * Returns the exact logical lane count described by tag.
@@ -178,10 +181,10 @@ concept FloatingVectorValue =
  */
 template <VectorTag Tag>
 VECOPS_ALWAYS_INLINE constexpr nint_t size(Tag = {}) {
-  if constexpr (is_fixed_tag<Tag>) {
+  if constexpr (is_fixed_tag_v<Tag>) {
     // FixedTag is usable as architecture-independent metadata even when the
     // current scalable SVE mode cannot materialize its Vec representation.
-    return fixed_lanes<Tag>;
+    return fixed_lanes_v<Tag>;
   } else {
     return details::representation_logical_lanes<
         details::CurrentRepresentation<Tag>>();
@@ -229,8 +232,8 @@ VECOPS_ALWAYS_INLINE constexpr nint_t memory_alignment(Tag tag = {}) {
  * True only for SVE-backed scalable Tags on a sizeless SVE compilation mode.
  */
 template <VectorTag Tag>
-inline constexpr bool is_runtime_size =
-    details::CurrentRepresentation<Tag>::is_runtime_size;
+inline constexpr bool is_runtime_size_v =
+    details::CurrentRepresentation<Tag>::is_runtime_size_v;
 
 /**
  * Whether the logical extent occupies only part of its physical word.
@@ -238,15 +241,15 @@ inline constexpr bool is_runtime_size =
  * has a negative scale power (describing a subword fraction).
  */
 template <VectorTag Tag>
-inline constexpr bool is_subword =
-    details::CurrentRepresentation<Tag>::is_subword;
+inline constexpr bool is_subword_v =
+    details::CurrentRepresentation<Tag>::is_subword_v;
 
 /**
  * Returns a physical word from sized Scalar, x86, or VLS representations.
  * Sizeless SVE tuple access is provided by the SVE access layer.
  */
 template <nint_t Index, VectorTag Tag>
-  requires details::is_word_array<Vec<Tag>> &&
+  requires details::is_word_array_v<Vec<Tag>> &&
            requires(const Vec<Tag>& value) {
              details::get_word<Index>(value);
            }
@@ -256,7 +259,7 @@ VECOPS_ALWAYS_INLINE constexpr NativeWordVec<Tag> get_word(
 }
 
 template <nint_t Index, VectorTag Tag>
-  requires (!details::is_word_array<Vec<Tag>>) && requires(Vec<Tag> value) {
+  requires (!details::is_word_array_v<Vec<Tag>>) && requires(Vec<Tag> value) {
     details::get_word<Index>(value);
   }
 VECOPS_ALWAYS_INLINE constexpr NativeWordVec<Tag> get_word(
@@ -275,7 +278,7 @@ VECOPS_ALWAYS_INLINE constexpr Vec<Tag> set_word(
 
 /** Returns a physical vector word selected by a runtime ordinal. */
 template <VectorTag Tag>
-  requires details::is_word_array<Vec<Tag>>
+  requires details::is_word_array_v<Vec<Tag>>
 VECOPS_ALWAYS_INLINE constexpr NativeWordVec<Tag> get_word(
     Tag tag, const Vec<Tag>& value, nint_t ordinal) {
   assert(ordinal >= 0 && ordinal < num_words(tag));
@@ -284,7 +287,7 @@ VECOPS_ALWAYS_INLINE constexpr NativeWordVec<Tag> get_word(
 }
 
 template <VectorTag Tag>
-  requires (!details::is_word_array<Vec<Tag>>)
+  requires (!details::is_word_array_v<Vec<Tag>>)
 VECOPS_ALWAYS_INLINE constexpr NativeWordVec<Tag> get_word(
     Tag tag, Vec<Tag> value, nint_t ordinal) {
   assert(ordinal >= 0 && ordinal < num_words(tag));
@@ -322,7 +325,7 @@ VECOPS_ALWAYS_INLINE constexpr Vec<Tag> from_words(
 
 /** Returns a physical predicate word from a Mask selected by tag. */
 template <nint_t Index, VectorTag Tag>
-  requires details::is_word_array<Mask<Tag>> &&
+  requires details::is_word_array_v<Mask<Tag>> &&
            requires(const Mask<Tag>& value) {
              details::get_word<Index>(value);
            }
@@ -332,7 +335,7 @@ VECOPS_ALWAYS_INLINE constexpr NativeWordMask<Tag> get_word(
 }
 
 template <nint_t Index, VectorTag Tag>
-  requires (!details::is_word_array<Mask<Tag>>) && requires(Mask<Tag> value) {
+  requires (!details::is_word_array_v<Mask<Tag>>) && requires(Mask<Tag> value) {
     details::get_word<Index>(value);
   }
 VECOPS_ALWAYS_INLINE constexpr NativeWordMask<Tag> get_word(
@@ -352,7 +355,7 @@ VECOPS_ALWAYS_INLINE constexpr Mask<Tag> set_word(
 
 /** Returns a physical predicate word selected by a runtime ordinal. */
 template <VectorTag Tag>
-  requires details::is_word_array<Mask<Tag>>
+  requires details::is_word_array_v<Mask<Tag>>
 VECOPS_ALWAYS_INLINE constexpr NativeWordMask<Tag> get_word(
     Tag tag, const Mask<Tag>& value, nint_t ordinal) {
   assert(ordinal >= 0 && ordinal < num_words(tag));
@@ -361,7 +364,7 @@ VECOPS_ALWAYS_INLINE constexpr NativeWordMask<Tag> get_word(
 }
 
 template <VectorTag Tag>
-  requires (!details::is_word_array<Mask<Tag>>)
+  requires (!details::is_word_array_v<Mask<Tag>>)
 VECOPS_ALWAYS_INLINE constexpr NativeWordMask<Tag> get_word(
     Tag tag, Mask<Tag> value, nint_t ordinal) {
   assert(ordinal >= 0 && ordinal < num_words(tag));

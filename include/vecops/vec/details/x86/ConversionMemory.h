@@ -28,8 +28,8 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_load_convert_ordered_saturating(
     ToTag to, const From* pointer) {
   using FromTag = Rebind<From, ToTag>;
   using ToTraits = RepresentationTraits<X86Backend, ToTag>;
-  static_assert(is_x86_conversion_element<ElementOf<ToTag>>);
-  static_assert(is_x86_conversion_element<From>);
+  static_assert(is_x86_conversion_element_v<ElementOf<ToTag>>);
+  static_assert(is_x86_conversion_element_v<From>);
   if constexpr (ToTraits::word_count > 1) {
     using WordTag = FixedTag<ElementOf<ToTag>, ToTraits::word_lanes>;
     return construct_words<X86Backend>(
@@ -50,8 +50,8 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_load_convert_ordered_saturating(
     ToTag to, const From* pointer, Mask<ToTag> mask, Vec<ToTag> inactive) {
   using FromTag = Rebind<From, ToTag>;
   using ToTraits = RepresentationTraits<X86Backend, ToTag>;
-  static_assert(is_x86_conversion_element<ElementOf<ToTag>>);
-  static_assert(is_x86_conversion_element<From>);
+  static_assert(is_x86_conversion_element_v<ElementOf<ToTag>>);
+  static_assert(is_x86_conversion_element_v<From>);
 
   if constexpr (ToTraits::word_count > 1) {
     using WordTag = FixedTag<ElementOf<ToTag>, ToTraits::word_lanes>;
@@ -156,8 +156,8 @@ template <Element To, VectorTag FromTag>
 VECOPS_ALWAYS_INLINE void x86_store_convert_ordered_saturating_packed(
     FromTag from, To* pointer, Vec<FromTag> value, Mask<FromTag> mask) {
   using ToTag = Rebind<To, FromTag>;
-  static_assert(is_x86_conversion_element<To>);
-  static_assert(is_x86_conversion_element<ElementOf<FromTag>>);
+  static_assert(is_x86_conversion_element_v<To>);
+  static_assert(is_x86_conversion_element_v<ElementOf<FromTag>>);
 
 #if defined(CPU_CAPABILITY_AVX512)
   if (x86_try_narrow_integer_store_avx512<To, FromTag>(
@@ -226,144 +226,62 @@ VECOPS_ALWAYS_INLINE void x86_store_convert_ordered_saturating_split(
 
 template <VectorTag ToTag>
 struct NativeImpl<X86Backend, LoadConvertOp, ToTag> {
-  template <Element From, typename Layout, typename ValuePolicy,
-            typename Alignment, typename Temporality>
+  template <Element From, typename Alignment, typename Temporality>
     requires IsMemoryAlignmentOption<Alignment>::value &&
              IsMemoryTemporalityOption<Temporality>::value
   static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
       LoadConvertOp, ToTag to, const From* pointer,
-      Layout layout, ValuePolicy value_policy,
-      Alignment alignment, Temporality temporality) {
-    if constexpr (std::same_as<Layout, cvt::Ordered> &&
-                  std::same_as<ValuePolicy, cvt::Saturate>) {
-      return x86_load_convert_ordered_saturating(to, pointer);
-    } else {
-      using FromTag = Rebind<From, ToTag>;
-      const auto loaded = execute_load_options(
-          LoadOp{}, FromTag{}, pointer, alignment, temporality);
-      return execute(
-          ConvertOp{}, to, FromTag{}, loaded, layout, value_policy);
-    }
+      cvt::Ordered, cvt::Saturate, Alignment alignment,
+      Temporality temporality) {
+    return x86_load_convert_ordered_saturating(to, pointer);
   }
 
-  template <Element From, typename ValuePolicy, typename Alignment,
-            typename Temporality>
+  template <Element From, typename Alignment, typename Temporality>
     requires IsMemoryAlignmentOption<Alignment>::value &&
              IsMemoryTemporalityOption<Temporality>::value
   static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
       LoadConvertOp, ToTag to, const From* pointer,
       Mask<ToTag> mask, Vec<ToTag> inactive,
-      cvt::Ordered layout, ValuePolicy value_policy,
+      cvt::Ordered, cvt::Saturate,
       Alignment alignment, Temporality temporality) {
-    if constexpr (std::same_as<ValuePolicy, cvt::Saturate>) {
-      return x86_load_convert_ordered_saturating(
-          to, pointer, mask, inactive);
-    } else {
-      using FromTag = Rebind<From, ToTag>;
-      const auto memory_mask = x86_convert_mask_native(
-          FromTag{}, to, mask);
-      const auto loaded = execute_load_options(
-          LoadOp{}, FromTag{}, pointer, opt::masked(memory_mask),
-          opt::zero, alignment, temporality);
-      const auto converted = execute(
-          ConvertOp{}, to, FromTag{}, loaded, layout, value_policy);
-      return execute(BlendOp{}, to, inactive, mask, converted);
-    }
-  }
-
-  template <Element From, typename ValuePolicy, typename Alignment,
-            typename Temporality>
-    requires IsMemoryAlignmentOption<Alignment>::value &&
-             IsMemoryTemporalityOption<Temporality>::value
-  static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
-      LoadConvertOp, ToTag to, const From* pointer,
-      Mask<Rebind<From, ToTag>> memory_mask,
-      cvt::Unordered layout, ValuePolicy value_policy,
-      Alignment alignment, Temporality temporality) {
-    using FromTag = Rebind<From, ToTag>;
-    const auto loaded = execute_load_options(
-        LoadOp{}, FromTag{}, pointer, opt::masked(memory_mask),
-        opt::zero, alignment, temporality);
-    return execute(
-        ConvertOp{}, to, FromTag{}, loaded, layout, value_policy);
+    return x86_load_convert_ordered_saturating(to, pointer, mask, inactive);
   }
 };
 
 template <VectorTag FromTag>
 struct NativeImpl<X86Backend, StoreConvertOp, FromTag> {
-  template <Element To, typename Layout, typename ValuePolicy,
-            typename Alignment, typename Temporality, typename Packing>
+  template <Element To, typename Alignment, typename Temporality,
+            typename Packing>
     requires IsMemoryAlignmentOption<Alignment>::value &&
              IsMemoryTemporalityOption<Temporality>::value &&
              (std::same_as<Packing, mem::Packed> ||
               std::same_as<Packing, mem::Split>)
   static VECOPS_ALWAYS_INLINE void call(
       StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
-      Layout layout, ValuePolicy value_policy, Alignment alignment,
+      cvt::Ordered, cvt::Saturate, Alignment alignment,
       Temporality temporality, Packing packing) {
-    if constexpr (std::same_as<Layout, cvt::Ordered> &&
-                  std::same_as<ValuePolicy, cvt::Saturate>) {
-      if constexpr (std::same_as<Packing, mem::Packed>)
-        x86_store_convert_ordered_saturating_packed(from, pointer, value);
-      else
-        x86_store_convert_ordered_saturating_split(from, pointer, value);
-    } else {
-      using ToTag = Rebind<To, FromTag>;
-      const auto converted = execute(
-          ConvertOp{}, ToTag{}, from, value, layout, value_policy);
-      execute_store_options(
-          StoreOp{}, ToTag{}, pointer, converted, alignment, temporality);
-      (void)packing;
-    }
+    if constexpr (std::same_as<Packing, mem::Packed>)
+      x86_store_convert_ordered_saturating_packed(from, pointer, value);
+    else
+      x86_store_convert_ordered_saturating_split(from, pointer, value);
   }
 
-  template <Element To, typename ValuePolicy, typename Alignment,
-            typename Temporality, typename Packing>
+  template <Element To, typename Alignment, typename Temporality,
+            typename Packing>
     requires IsMemoryAlignmentOption<Alignment>::value &&
              IsMemoryTemporalityOption<Temporality>::value &&
              (std::same_as<Packing, mem::Packed> ||
               std::same_as<Packing, mem::Split>)
   static VECOPS_ALWAYS_INLINE void call(
       StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
-      Mask<FromTag> mask, cvt::Ordered layout, ValuePolicy value_policy,
+      Mask<FromTag> mask, cvt::Ordered, cvt::Saturate,
       Alignment alignment, Temporality temporality, Packing packing) {
-    if constexpr (std::same_as<ValuePolicy, cvt::Saturate>) {
-      if constexpr (std::same_as<Packing, mem::Packed>)
-        x86_store_convert_ordered_saturating_packed(
-            from, pointer, value, mask);
-      else
-        x86_store_convert_ordered_saturating_split(
-            from, pointer, value, mask);
-    } else {
-      using ToTag = Rebind<To, FromTag>;
-      const auto converted = execute(
-          ConvertOp{}, ToTag{}, from, value, layout, value_policy);
-      const auto memory_mask = x86_convert_mask_native(
-          ToTag{}, from, mask);
-      execute_store_options(
-          StoreOp{}, ToTag{}, pointer, converted, opt::masked(memory_mask),
-          alignment, temporality);
-      (void)packing;
-    }
-  }
-
-  template <Element To, typename ValuePolicy, typename Alignment,
-            typename Temporality, typename Packing>
-    requires IsMemoryAlignmentOption<Alignment>::value &&
-             IsMemoryTemporalityOption<Temporality>::value &&
-             std::same_as<Packing, mem::Packed>
-  static VECOPS_ALWAYS_INLINE void call(
-      StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
-      Mask<Rebind<To, FromTag>> memory_mask, cvt::Unordered layout,
-      ValuePolicy value_policy, Alignment alignment,
-      Temporality temporality, Packing packing) {
-    using ToTag = Rebind<To, FromTag>;
-    const auto converted = execute(
-        ConvertOp{}, ToTag{}, from, value, layout, value_policy);
-    execute_store_options(
-        StoreOp{}, ToTag{}, pointer, converted, opt::masked(memory_mask),
-        alignment, temporality);
-    (void)packing;
+    if constexpr (std::same_as<Packing, mem::Packed>)
+      x86_store_convert_ordered_saturating_packed(
+          from, pointer, value, mask);
+    else
+      x86_store_convert_ordered_saturating_split(
+          from, pointer, value, mask);
   }
 };
 

@@ -1421,7 +1421,7 @@ TEST_F(TensorConstexprTest, Constexpr_Layout_Size) {
 TEST_F(TensorConstexprTest, Constexpr_Layout_IsCtContiguous) {
     constexpr auto layout = make_layout(make_shape(cint<4>, cint<6>),
                                         make_strides(cint<6>, cint<1>));
-    constexpr bool v = is_ct_last_contiguous<decltype(layout), 2>::value;
+    constexpr bool v = is_ct_last_contiguous_v<decltype(layout), 2>;
     EXPECT_TRUE(v);
 }
 

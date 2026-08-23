@@ -48,8 +48,9 @@ public:
       kernel::transpose2d_implementation::SME,
       kernel::transpose2d_implementation::Vector>;
   /** Resources required by the selected Vector or SME implementation. */
-  using ResourceRequirements = typename kernel::transpose2d_implementation::
-      Traits<Implementation>::ResourceRequirements;
+  using ResourceRequirements =
+      kernel::transpose2d_implementation::resource_requirements_t<
+          Implementation>;
 
   /** Construct a prepared operation from normalized input/output Specs. */
   VECOPS_INLINE Transpose(

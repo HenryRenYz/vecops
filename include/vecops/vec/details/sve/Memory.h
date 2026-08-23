@@ -276,7 +276,7 @@ struct NativeImpl<SVEBackend, LoadOp, Tag> {
       LoadOp, Tag tag, const ElementOf<Tag>* pointer,
       opt::Indexed<Indices, Scale> addressing,
       Mask<Tag> mask, Vec<Tag> inactive, Temporality temporality) {
-    using IndexTag = Rebind<ElementOf<VecToTagT<Indices>>, Tag>;
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, Tag>;
     constexpr int scale = Scale == 0 ? sizeof(ElementOf<Tag>) : Scale;
     return sve_load_indexed_memory<scale, Tag, IndexTag>(
         tag, pointer, addressing.indices, mask, inactive, temporality);
@@ -467,7 +467,7 @@ struct NativeImpl<SVEBackend, StoreOp, Tag> {
       StoreOp, Tag tag, ElementOf<Tag>* pointer, Vec<Tag> value,
       opt::Indexed<Indices, Scale> addressing, Mask<Tag> mask,
       Temporality temporality) {
-    using IndexTag = Rebind<ElementOf<VecToTagT<Indices>>, Tag>;
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, Tag>;
     constexpr int scale = Scale == 0 ? sizeof(ElementOf<Tag>) : Scale;
     sve_store_indexed_memory<scale, Tag, IndexTag>(
         tag, pointer, value, addressing.indices, mask, temporality);

@@ -146,22 +146,22 @@ TEST(VecOptionsTest, FindsAndCountsCategoryOptions) {
   auto merge = vec::opt::merge(value);
   auto mask_merge = vec::opt::merge(mask);
 
-  static_assert(vecops::vec::details::is_masked_option_for<
+  static_assert(vecops::vec::details::is_masked_option_for_v<
                 Tag, decltype(masked)>);
-  static_assert(vecops::vec::details::is_vector_population_option_for<
+  static_assert(vecops::vec::details::is_vector_population_option_for_v<
                 Tag, decltype(vec::opt::zero)>);
-  static_assert(vecops::vec::details::is_vector_population_option_for<
+  static_assert(vecops::vec::details::is_vector_population_option_for_v<
                 Tag, decltype(merge)>);
-  static_assert(vecops::vec::details::is_mask_population_option_for<
+  static_assert(vecops::vec::details::is_mask_population_option_for_v<
                 Tag, decltype(mask_merge)>);
 
-  static_assert(vecops::vec::details::option_count<
+  static_assert(vecops::vec::details::option_count_v<
       vecops::vec::details::IsMaskedOption,
       decltype(masked), decltype(first), decltype(merge)> == 1);
-  static_assert(vecops::vec::details::option_count<
+  static_assert(vecops::vec::details::option_count_v<
       vecops::vec::details::IsUnmaskedOption,
       decltype(masked), decltype(unmasked), decltype(merge)> == 1);
-  static_assert(vecops::vec::details::option_count<
+  static_assert(vecops::vec::details::option_count_v<
       vecops::vec::details::IsFirstOption,
       decltype(masked), decltype(first), decltype(merge)> == 1);
   EXPECT_EQ(

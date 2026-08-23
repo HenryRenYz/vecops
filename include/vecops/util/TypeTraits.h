@@ -9,13 +9,9 @@
 
 #include "CoreTypes.h"
 
-/**
- * Alias macro defining an constraint for a function, used as template parameter.
- * Used like:
- *   template <typename T, TL_IF(sizeof(T) == 4)>
- *   void something(T t, int a) { ... }
- */
-#define TL_IF(...) std::enable_if_t<(__VA_ARGS__), bool> = true
+// Single home of the base element-type predicates (see docs/TemplateStyle.md).
+// Whitelist semantics: only fixed-width integers and float32/64/float16/bfloat16
+// qualify; long double, bool and char do not. All traits are snake_case + _v.
 
 namespace vecops {
 namespace details {
@@ -36,29 +32,53 @@ struct IsAnyHelper<T, T1, TArgs...> {
 
 } // namespace details
 
+/** True iff T is one of TArgs. */
 template <typename T, typename... TArgs>
-static constexpr bool is_any = details::IsAnyHelper<T, TArgs...>::value;
+inline constexpr bool is_any_v = details::IsAnyHelper<T, TArgs...>::value;
 
+namespace details {
+
+template <template <typename...> class Template, typename T>
+struct IsSpecializationOf : std::false_type {};
+
+template <template <typename...> class Template, typename... Args>
+struct IsSpecializationOf<Template, Template<Args...>> : std::true_type {};
+
+} // namespace details
+
+/** True iff T is a specialization of the class template @p Template. */
+template <template <typename...> class Template, typename T>
+inline constexpr bool is_specialization_of_v =
+    details::IsSpecializationOf<Template, std::remove_cvref_t<T>>::value;
+
+/** True iff T is none of TArgs (vacuously true for an empty list). */
 template <typename T, typename ... TArgs>
-static constexpr bool is_none = !is_any<T, TArgs...> || sizeof...(TArgs) == 0;
+inline constexpr bool is_none_v = !is_any_v<T, TArgs...> || sizeof...(TArgs) == 0;
 
-template <typename Ta, typename Tb>
-static constexpr bool is_same = is_any<Ta, Tb>;
-
+/** True for the fixed-width integer element types (int8..uint64; no bool/char). */
 template <typename T>
-static constexpr bool is_int = is_any<T, int8_t, uint8_t, int16_t, uint16_t, int32_t, uint32_t, int64_t, uint64_t>;
+inline constexpr bool is_int_v =
+    is_any_v<T, int8_t, uint8_t, int16_t, uint16_t, int32_t, uint32_t, int64_t, uint64_t>;
 
+/** True for float16_t / bfloat16_t. */
 template <typename T>
-static constexpr bool is_small_float = is_any<T, float16_t, bfloat16_t>;
+inline constexpr bool is_small_float_v = is_any_v<T, float16_t, bfloat16_t>;
 
+/** True for float32_t / float64_t / float16_t / bfloat16_t (no long double). */
 template <typename T>
-static constexpr bool is_float = is_any<T, float32_t, float64_t> || is_small_float<T>;
+inline constexpr bool is_float_v = is_any_v<T, float32_t, float64_t> || is_small_float_v<T>;
 
+/** True for bfloat16_t. */
 template <typename T>
-static constexpr bool is_signed_int = is_any<T, int8_t, int16_t, int32_t, int64_t>;
+inline constexpr bool is_bfloat16_v = std::is_same_v<T, bfloat16_t>;
 
+/** True for float16_t. */
 template <typename T>
-static constexpr bool is_unsigned_int = is_any<T, uint8_t, uint16_t, uint32_t, uint64_t>;
+inline constexpr bool is_float16_v = std::is_same_v<T, float16_t>;
+
+/** True for the unsigned fixed-width integer element types. */
+template <typename T>
+inline constexpr bool is_unsigned_int_v = is_any_v<T, uint8_t, uint16_t, uint32_t, uint64_t>;
 
 /**
  * @brief One branch in a compile-time first-match type selection chain.

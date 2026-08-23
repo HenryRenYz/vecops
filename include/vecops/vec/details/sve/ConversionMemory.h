@@ -19,15 +19,15 @@
 namespace vecops::vec::details {
 
 template <typename... Options>
-inline constexpr bool sve_has_oversized_contiguous_conversion_lowering =
-    option_count<IsMemoryAddressingOption, Options...> == 0 &&
-    option_count<IsUnorderedOption, Options...> == 0 &&
-    option_count<IsWrapOption, Options...> == 0;
+inline constexpr bool sve_has_oversized_contiguous_conversion_lowering_v =
+    option_count_v<IsMemoryAddressingOption, Options...> == 0 &&
+    option_count_v<IsUnorderedOption, Options...> == 0 &&
+    option_count_v<IsWrapOption, Options...> == 0;
 
 template <VectorTag Tag>
-inline constexpr bool sve_conversion_tag_representable = [] {
-  if constexpr (is_fixed_tag<Tag>) return true;
-  else return scale_power<Tag> <= VEC_MAX_POW;
+inline constexpr bool sve_conversion_tag_representable_v = [] {
+  if constexpr (is_fixed_tag_v<Tag>) return true;
+  else return scale_power_v<Tag> <= VEC_MAX_POW;
 }();
 
 /**
@@ -40,13 +40,13 @@ template <VectorTag ToTag, Element From, typename... Options>
 struct HasOversizedMemoryConversionLowering<
     SVEBackend, LoadConvertOp, ToTag, From, Options...>
     : std::bool_constant<
-          sve_has_oversized_contiguous_conversion_lowering<Options...>> {};
+          sve_has_oversized_contiguous_conversion_lowering_v<Options...>> {};
 
 template <VectorTag FromTag, Element To, typename... Options>
 struct HasOversizedMemoryConversionLowering<
     SVEBackend, StoreConvertOp, FromTag, To, Options...>
     : std::bool_constant<
-          sve_has_oversized_contiguous_conversion_lowering<Options...>> {};
+          sve_has_oversized_contiguous_conversion_lowering_v<Options...>> {};
 
 
 /* **************************************************************************** */
@@ -57,7 +57,7 @@ template <Element To, Element From>
 VECOPS_ALWAYS_INLINE auto sve_load_extend_integer(
     svbool_t active, const From* pointer) {
   static_assert(
-      sve_is_integer_element<To> && sve_is_integer_element<From> &&
+      sve_is_integer_element_v<To> && sve_is_integer_element_v<From> &&
       sizeof(From) < sizeof(To));
   using Wide = SVEInteger<sizeof(To), std::is_signed_v<From>>;
   auto widened = [&] {
@@ -101,7 +101,7 @@ template <Element Wide, Element From, Element Index, typename Offset,
 VECOPS_ALWAYS_INLINE auto sve_load_extend_integer_indexed_raw(
     svbool_t active, const From* pointer, Offset offsets, Temporality) {
   static_assert(
-      sve_is_integer_element<Wide> && sve_is_integer_element<From> &&
+      sve_is_integer_element_v<Wide> && sve_is_integer_element_v<From> &&
       sizeof(From) < sizeof(Wide));
   constexpr bool wide_signed = std::is_signed_v<Wide>;
   if constexpr (sizeof(Index) == 4) {
@@ -281,7 +281,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_word(
   const auto active = svand_b_z(valid, valid, mask);
   const auto converted = [&] {
     if constexpr (
-        sve_is_integer_element<To> && sve_is_integer_element<From> &&
+        sve_is_integer_element_v<To> && sve_is_integer_element_v<From> &&
         sizeof(From) < sizeof(To)) {
       return sve_load_extend_integer<To>(active, pointer);
     } else if constexpr (
@@ -313,7 +313,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_word_unmasked(
   const auto active = sve_prefix_predicate<To>(size(to));
   const auto converted = [&] {
     if constexpr (
-        sve_is_integer_element<To> && sve_is_integer_element<From> &&
+        sve_is_integer_element_v<To> && sve_is_integer_element_v<From> &&
         sizeof(From) < sizeof(To)) {
       return sve_load_extend_integer<To>(active, pointer);
     } else if constexpr (
@@ -338,15 +338,15 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_ordered_saturating(
     ToTag to, const From* pointer, Mask<ToTag> mask,
     Vec<ToTag> inactive) {
   using FromTag = Rebind<From, ToTag>;
-  static_assert(sve_is_conversion_element<ElementOf<ToTag>>);
-  static_assert(sve_is_conversion_element<From>);
+  static_assert(sve_is_conversion_element_v<ElementOf<ToTag>>);
+  static_assert(sve_is_conversion_element_v<From>);
   constexpr bool OneWordPair = [] {
-    if constexpr (!sve_conversion_tag_representable<FromTag>) return false;
+    if constexpr (!sve_conversion_tag_representable_v<FromTag>) return false;
     else return num_words(ToTag{}) == 1 && num_words(FromTag{}) == 1;
   }();
   if constexpr (OneWordPair) {
     return sve_load_convert_word(to, pointer, mask, inactive);
-  } else if constexpr (is_scalable_tag<ToTag> && num_words(to) > 1) {
+  } else if constexpr (is_scalable_tag_v<ToTag> && num_words(to) > 1) {
     using WordTag = ScalableTag<ElementOf<ToTag>, 0>;
     return construct_words<SVEBackend>(
         to, [&]<nint_t Index>(ToTag) VECOPS_INLINE_LAMBDA {
@@ -373,15 +373,15 @@ template <VectorTag ToTag, Element From>
 VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_ordered_saturating(
     ToTag to, const From* pointer) {
   using FromTag = Rebind<From, ToTag>;
-  static_assert(sve_is_conversion_element<ElementOf<ToTag>>);
-  static_assert(sve_is_conversion_element<From>);
+  static_assert(sve_is_conversion_element_v<ElementOf<ToTag>>);
+  static_assert(sve_is_conversion_element_v<From>);
   constexpr bool OneWordPair = [] {
-    if constexpr (!sve_conversion_tag_representable<FromTag>) return false;
+    if constexpr (!sve_conversion_tag_representable_v<FromTag>) return false;
     else return num_words(ToTag{}) == 1 && num_words(FromTag{}) == 1;
   }();
   if constexpr (OneWordPair) {
     return sve_load_convert_word_unmasked(to, pointer);
-  } else if constexpr (is_scalable_tag<ToTag> && num_words(to) > 1) {
+  } else if constexpr (is_scalable_tag_v<ToTag> && num_words(to) > 1) {
     using WordTag = ScalableTag<ElementOf<ToTag>, 0>;
     return construct_words<SVEBackend>(
         to, [&]<nint_t Index>(ToTag) VECOPS_INLINE_LAMBDA {
@@ -403,7 +403,7 @@ VECOPS_ALWAYS_INLINE void sve_narrow_integer_store_word(
     To* pointer, Vec<FromTag> value, svbool_t active) {
   using From = ElementOf<FromTag>;
   static_assert(
-      sve_is_integer_element<From> && sve_is_integer_element<To> &&
+      sve_is_integer_element_v<From> && sve_is_integer_element_v<To> &&
       sizeof(From) > sizeof(To) && num_words(FromTag{}) == 1);
   auto raw = sve_basic_raw_word(value);
   if constexpr (std::is_signed_v<From>) {
@@ -455,7 +455,7 @@ template <Element To, Element From, typename Raw>
 VECOPS_ALWAYS_INLINE Raw sve_clamp_narrow_integer_raw(
     svbool_t active, Raw raw) {
   static_assert(
-      sve_is_integer_element<From> && sve_is_integer_element<To> &&
+      sve_is_integer_element_v<From> && sve_is_integer_element_v<To> &&
       sizeof(From) > sizeof(To));
   if constexpr (std::is_signed_v<From>) {
     constexpr From low = std::is_signed_v<To>
@@ -592,27 +592,13 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_indexed_integer_unmasked(
   }
 }
 
-VECOPS_ALWAYS_INLINE svbfloat16_t sve_pack_f32x2_to_bf16(
-    svfloat32_t lower, svfloat32_t upper) {
-#if defined(__ARM_FEATURE_SVE_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
-  const auto lo = svcvt_bf16_f32_x(svptrue_b16(), lower);
-  const auto hi = svcvt_bf16_f32_x(svptrue_b16(), upper);
-  return svuzp1_bf16(lo, hi);
-#else
-  const auto lo = sve_f32_to_bf16_rne_bits(lower);
-  const auto hi = sve_f32_to_bf16_rne_bits(upper);
-  return svreinterpret_bf16_u16(svuzp1_u16(
-      svreinterpret_u16_u32(lo), svreinterpret_u16_u32(hi)));
-#endif
-}
-
 #if defined(HAS_SVE2)
 template <Element To, VectorTag FromTag>
 VECOPS_ALWAYS_INLINE auto sve_pack_narrow_integer_x2(
     FromTag from, Vec<FromTag> value) {
   using From = ElementOf<FromTag>;
   static_assert(
-      sve_is_integer_element<From> && sve_is_integer_element<To> &&
+      sve_is_integer_element_v<From> && sve_is_integer_element_v<To> &&
       sizeof(From) == sizeof(To) * 2 && num_words(from) == 2);
   const auto lower = sve_basic_raw_word(execute(LowerOp{}, from, value));
   const auto upper = sve_basic_raw_word(execute(UpperOp{}, from, value));
@@ -701,10 +687,10 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
     FromTag from, To* pointer, Vec<FromTag> value, Mask<FromTag> mask) {
   using From = ElementOf<FromTag>;
   using ToTag = Rebind<To, FromTag>;
-  static_assert(sve_is_conversion_element<From>);
-  static_assert(sve_is_conversion_element<To>);
+  static_assert(sve_is_conversion_element_v<From>);
+  static_assert(sve_is_conversion_element_v<To>);
 
-  if constexpr (!sve_conversion_tag_representable<ToTag>) {
+  if constexpr (!sve_conversion_tag_representable_v<ToTag>) {
     using FromHalf = Half<FromTag>;
     sve_store_convert_ordered_saturating(
         FromHalf{}, pointer, execute(LowerOp{}, from, value),
@@ -715,7 +701,7 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
   } else {
 #if defined(HAS_SVE2)
   if constexpr (
-      sve_is_integer_element<From> && sve_is_integer_element<To> &&
+      sve_is_integer_element_v<From> && sve_is_integer_element_v<To> &&
       sizeof(From) == sizeof(To) * 2 && num_words(from) == 2 &&
       num_words(ToTag{}) == 1) {
     const auto packed = sve_pack_narrow_integer_x2<To>(from, value);
@@ -729,7 +715,7 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
       num_words(from) == 2 && num_words(ToTag{}) == 1) {
     // Two F32 words exactly fill one BF16 word. Keeping this as one packed
     // conversion and one full-width store is important for LayerNorm streams.
-    const auto packed = sve_pack_f32x2_to_bf16(
+    const auto packed = sve_f32_pair_to_bf16(
         sve_basic_raw_word(execute(LowerOp{}, from, value)),
         sve_basic_raw_word(execute(UpperOp{}, from, value)));
     const auto memory_mask = sve_convert_mask(ToTag{}, from, mask);
@@ -739,7 +725,7 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
     const auto valid = sve_prefix_predicate<From>(size(from));
     const auto active = svand_b_z(valid, valid, mask);
     if constexpr (
-        sve_is_integer_element<From> && sve_is_integer_element<To> &&
+        sve_is_integer_element_v<From> && sve_is_integer_element_v<To> &&
         sizeof(From) > sizeof(To)) {
       sve_narrow_integer_store_word<To, FromTag>(pointer, value, active);
     } else {
@@ -766,10 +752,10 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
     FromTag from, To* pointer, Vec<FromTag> value) {
   using From = ElementOf<FromTag>;
   using ToTag = Rebind<To, FromTag>;
-  static_assert(sve_is_conversion_element<From>);
-  static_assert(sve_is_conversion_element<To>);
+  static_assert(sve_is_conversion_element_v<From>);
+  static_assert(sve_is_conversion_element_v<To>);
 
-  if constexpr (!sve_conversion_tag_representable<ToTag>) {
+  if constexpr (!sve_conversion_tag_representable_v<ToTag>) {
     using FromHalf = Half<FromTag>;
     sve_store_convert_ordered_saturating(
         FromHalf{}, pointer, execute(LowerOp{}, from, value));
@@ -779,7 +765,7 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
   } else {
 #if defined(HAS_SVE2)
   if constexpr (
-      sve_is_integer_element<From> && sve_is_integer_element<To> &&
+      sve_is_integer_element_v<From> && sve_is_integer_element_v<To> &&
       sizeof(From) == sizeof(To) * 2 && num_words(from) == 2 &&
       num_words(ToTag{}) == 1) {
     const auto packed = sve_pack_narrow_integer_x2<To>(from, value);
@@ -790,7 +776,7 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
   if constexpr (
       std::same_as<From, float32_t> && std::same_as<To, bfloat16_t> &&
       num_words(from) == 2 && num_words(ToTag{}) == 1) {
-    const auto packed = sve_pack_f32x2_to_bf16(
+    const auto packed = sve_f32_pair_to_bf16(
         sve_basic_raw_word(execute(LowerOp{}, from, value)),
         sve_basic_raw_word(execute(UpperOp{}, from, value)));
     const auto active = sve_prefix_predicate<To>(size(ToTag{}));
@@ -798,7 +784,7 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
   } else if constexpr (num_words(from) == 1 && num_words(ToTag{}) == 1) {
     const auto active = sve_prefix_predicate<From>(size(from));
     if constexpr (
-        sve_is_integer_element<From> && sve_is_integer_element<To> &&
+        sve_is_integer_element_v<From> && sve_is_integer_element_v<To> &&
         sizeof(From) > sizeof(To)) {
       sve_narrow_integer_store_word<To, FromTag>(pointer, value, active);
     } else {
@@ -825,14 +811,14 @@ struct NativeImpl<SVEBackend, LoadConvertOp, ToTag> {
   template <Element From, VectorValue Indices, int Scale,
             typename Temporality>
     requires (
-        sve_is_integer_element<From> &&
-        sve_is_integer_element<ElementOf<ToTag>> &&
+        sve_is_integer_element_v<From> &&
+        sve_is_integer_element_v<ElementOf<ToTag>> &&
         sizeof(From) < sizeof(ElementOf<ToTag>) && sizeof(From) < 4)
   static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
       LoadConvertOp, ToTag to, const From* pointer,
       cvt::Ordered, cvt::Saturate,
       opt::Indexed<Indices, Scale> addressing, Temporality temporality) {
-    using IndexTag = Rebind<ElementOf<VecToTagT<Indices>>, ToTag>;
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, ToTag>;
     constexpr int scale = Scale == 0 ? sizeof(From) : Scale;
     return sve_load_convert_indexed_integer_unmasked<
         scale, ToTag, From, IndexTag>(
@@ -842,78 +828,38 @@ struct NativeImpl<SVEBackend, LoadConvertOp, ToTag> {
   template <Element From, VectorValue Indices, int Scale,
             typename Temporality>
     requires (
-        sve_is_integer_element<From> &&
-        sve_is_integer_element<ElementOf<ToTag>> &&
+        sve_is_integer_element_v<From> &&
+        sve_is_integer_element_v<ElementOf<ToTag>> &&
         sizeof(From) < sizeof(ElementOf<ToTag>) && sizeof(From) < 4)
   static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
       LoadConvertOp, ToTag to, const From* pointer, Mask<ToTag> mask,
       Vec<ToTag> inactive, cvt::Ordered, cvt::Saturate,
       opt::Indexed<Indices, Scale> addressing, Temporality temporality) {
-    using IndexTag = Rebind<ElementOf<VecToTagT<Indices>>, ToTag>;
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, ToTag>;
     constexpr int scale = Scale == 0 ? sizeof(From) : Scale;
     return sve_load_convert_indexed_integer<scale, ToTag, From, IndexTag>(
         to, pointer, addressing.indices, mask, inactive, temporality);
   }
 
-  template <Element From, typename Layout, typename ValuePolicy,
-            typename Alignment, typename Temporality>
+  template <Element From, typename Alignment, typename Temporality>
     requires IsMemoryAlignmentOption<Alignment>::value &&
              IsMemoryTemporalityOption<Temporality>::value
   static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
       LoadConvertOp, ToTag to, const From* pointer,
-      Layout layout, ValuePolicy value_policy,
-      Alignment alignment, Temporality temporality) {
-    if constexpr (std::same_as<Layout, cvt::Ordered> &&
-                  std::same_as<ValuePolicy, cvt::Saturate>) {
-      return sve_load_convert_ordered_saturating(to, pointer);
-    } else {
-      using FromTag = Rebind<From, ToTag>;
-      const auto loaded = execute_load_options(
-          LoadOp{}, FromTag{}, pointer, alignment, temporality);
-      return execute(
-          ConvertOp{}, to, FromTag{}, loaded, layout, value_policy);
-    }
+      cvt::Ordered, cvt::Saturate, Alignment alignment,
+      Temporality temporality) {
+    return sve_load_convert_ordered_saturating(to, pointer);
   }
 
-  template <Element From, typename ValuePolicy, typename Alignment,
-            typename Temporality>
+  template <Element From, typename Alignment, typename Temporality>
     requires IsMemoryAlignmentOption<Alignment>::value &&
              IsMemoryTemporalityOption<Temporality>::value
   static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
       LoadConvertOp, ToTag to, const From* pointer,
       Mask<ToTag> mask, Vec<ToTag> inactive,
-      cvt::Ordered layout, ValuePolicy value_policy,
-      Alignment alignment, Temporality temporality) {
-    if constexpr (std::same_as<ValuePolicy, cvt::Saturate>) {
-      return sve_load_convert_ordered_saturating(
-          to, pointer, mask, inactive);
-    } else {
-      using FromTag = Rebind<From, ToTag>;
-      const auto memory_mask = sve_convert_mask(FromTag{}, to, mask);
-      const auto loaded = execute_load_options(
-          LoadOp{}, FromTag{}, pointer, opt::masked(memory_mask),
-          opt::zero, alignment, temporality);
-      const auto converted = execute(
-          ConvertOp{}, to, FromTag{}, loaded, layout, value_policy);
-      return execute(BlendOp{}, to, inactive, mask, converted);
-    }
-  }
-
-  template <Element From, typename ValuePolicy, typename Alignment,
-            typename Temporality>
-    requires IsMemoryAlignmentOption<Alignment>::value &&
-             IsMemoryTemporalityOption<Temporality>::value
-  static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
-      LoadConvertOp, ToTag to, const From* pointer,
-      Mask<Rebind<From, ToTag>> memory_mask,
-      cvt::Unordered layout, ValuePolicy value_policy,
-      Alignment alignment, Temporality temporality) {
-    using FromTag = Rebind<From, ToTag>;
-    const auto loaded = execute_load_options(
-        LoadOp{}, FromTag{}, pointer, opt::masked(memory_mask),
-        opt::zero, alignment, temporality);
-    return execute(
-        ConvertOp{}, to, FromTag{}, loaded, layout, value_policy);
+      cvt::Ordered, cvt::Saturate, Alignment alignment,
+      Temporality temporality) {
+    return sve_load_convert_ordered_saturating(to, pointer, mask, inactive);
   }
 };
 
@@ -922,14 +868,14 @@ struct NativeImpl<SVEBackend, StoreConvertOp, FromTag> {
   template <Element To, VectorValue Indices, int Scale,
             typename Temporality, typename Packing>
     requires (
-        sve_is_integer_element<ElementOf<FromTag>> &&
-        sve_is_integer_element<To> && sizeof(ElementOf<FromTag>) > sizeof(To))
+        sve_is_integer_element_v<ElementOf<FromTag>> &&
+        sve_is_integer_element_v<To> && sizeof(ElementOf<FromTag>) > sizeof(To))
   static VECOPS_ALWAYS_INLINE void call(
       StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
       cvt::Ordered, cvt::Saturate,
       opt::Indexed<Indices, Scale> addressing, Temporality temporality,
       Packing) {
-    using IndexTag = Rebind<ElementOf<VecToTagT<Indices>>, FromTag>;
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, FromTag>;
     constexpr int scale = Scale == 0 ? sizeof(To) : Scale;
     sve_store_convert_indexed_integer_unmasked<
         scale, To, FromTag, IndexTag>(
@@ -939,21 +885,21 @@ struct NativeImpl<SVEBackend, StoreConvertOp, FromTag> {
   template <Element To, VectorValue Indices, int Scale,
             typename Temporality, typename Packing>
     requires (
-        sve_is_integer_element<ElementOf<FromTag>> &&
-        sve_is_integer_element<To> && sizeof(ElementOf<FromTag>) > sizeof(To))
+        sve_is_integer_element_v<ElementOf<FromTag>> &&
+        sve_is_integer_element_v<To> && sizeof(ElementOf<FromTag>) > sizeof(To))
   static VECOPS_ALWAYS_INLINE void call(
       StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
       Mask<FromTag> mask, cvt::Ordered, cvt::Saturate,
       opt::Indexed<Indices, Scale> addressing, Temporality temporality,
       Packing) {
-    using IndexTag = Rebind<ElementOf<VecToTagT<Indices>>, FromTag>;
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, FromTag>;
     constexpr int scale = Scale == 0 ? sizeof(To) : Scale;
     sve_store_convert_indexed_integer<scale, To, FromTag, IndexTag>(
         from, pointer, value, addressing.indices, mask, temporality);
   }
 
-  template <Element To, typename Layout, typename ValuePolicy,
-            typename Alignment, typename Temporality, typename Packing>
+  template <Element To, typename Alignment, typename Temporality,
+            typename Packing>
     requires (
         IsMemoryAlignmentOption<Alignment>::value &&
         IsMemoryTemporalityOption<Temporality>::value &&
@@ -961,23 +907,13 @@ struct NativeImpl<SVEBackend, StoreConvertOp, FromTag> {
          std::same_as<Packing, mem::Split>))
   static VECOPS_ALWAYS_INLINE void call(
       StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
-      Layout layout, ValuePolicy value_policy, Alignment alignment,
+      cvt::Ordered, cvt::Saturate, Alignment alignment,
       Temporality temporality, Packing packing) {
-    if constexpr (std::same_as<Layout, cvt::Ordered> &&
-                  std::same_as<ValuePolicy, cvt::Saturate>) {
-      sve_store_convert_ordered_saturating(from, pointer, value);
-    } else {
-      using ToTag = Rebind<To, FromTag>;
-      const auto converted = execute(
-          ConvertOp{}, ToTag{}, from, value, layout, value_policy);
-      execute_store_options(
-          StoreOp{}, ToTag{}, pointer, converted, alignment, temporality);
-      (void)packing;
-    }
+    sve_store_convert_ordered_saturating(from, pointer, value);
   }
 
-  template <Element To, typename ValuePolicy, typename Alignment,
-            typename Temporality, typename Packing>
+  template <Element To, typename Alignment, typename Temporality,
+            typename Packing>
     requires (
         IsMemoryAlignmentOption<Alignment>::value &&
         IsMemoryTemporalityOption<Temporality>::value &&
@@ -985,41 +921,9 @@ struct NativeImpl<SVEBackend, StoreConvertOp, FromTag> {
          std::same_as<Packing, mem::Split>))
   static VECOPS_ALWAYS_INLINE void call(
       StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
-      Mask<FromTag> mask, cvt::Ordered layout, ValuePolicy value_policy,
+      Mask<FromTag> mask, cvt::Ordered, cvt::Saturate,
       Alignment alignment, Temporality temporality, Packing packing) {
-    if constexpr (std::same_as<ValuePolicy, cvt::Saturate>) {
-      sve_store_convert_ordered_saturating(
-          from, pointer, value, mask);
-    } else {
-      using ToTag = Rebind<To, FromTag>;
-      const auto converted = execute(
-          ConvertOp{}, ToTag{}, from, value, layout, value_policy);
-      const auto memory_mask = sve_convert_mask(ToTag{}, from, mask);
-      execute_store_options(
-          StoreOp{}, ToTag{}, pointer, converted,
-          opt::masked(memory_mask), alignment, temporality);
-      (void)packing;
-    }
-  }
-
-  template <Element To, typename ValuePolicy, typename Alignment,
-            typename Temporality, typename Packing>
-    requires (
-        IsMemoryAlignmentOption<Alignment>::value &&
-        IsMemoryTemporalityOption<Temporality>::value &&
-        std::same_as<Packing, mem::Packed>)
-  static VECOPS_ALWAYS_INLINE void call(
-      StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
-      Mask<Rebind<To, FromTag>> memory_mask, cvt::Unordered layout,
-      ValuePolicy value_policy, Alignment alignment,
-      Temporality temporality, Packing packing) {
-    using ToTag = Rebind<To, FromTag>;
-    const auto converted = execute(
-        ConvertOp{}, ToTag{}, from, value, layout, value_policy);
-    execute_store_options(
-        StoreOp{}, ToTag{}, pointer, converted, opt::masked(memory_mask),
-        alignment, temporality);
-    (void)packing;
+    sve_store_convert_ordered_saturating(from, pointer, value, mask);
   }
 };
 

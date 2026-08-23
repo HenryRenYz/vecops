@@ -40,8 +40,8 @@ inline constexpr bool use_sme_v = [] {
     return false;
   } else if constexpr (
       std::same_as<Policy, kernel::transpose2d_policy::Automatic> &&
-      tensor::is_tensor<std::remove_cvref_t<Input>> &&
-      tensor::is_tensor<std::remove_cvref_t<Output>> &&
+      tensor::is_tensor_v<std::remove_cvref_t<Input>> &&
+      tensor::is_tensor_v<std::remove_cvref_t<Output>> &&
       std::same_as<typename InputSpec::TransformType, tensor::NoTransform> &&
       std::same_as<typename OutputSpec::TransformType, tensor::NoTransform> &&
       std::same_as<typename InputSpec::MemoryElement,

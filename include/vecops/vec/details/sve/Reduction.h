@@ -18,8 +18,8 @@ namespace vecops::vec::details {
 template <typename Op, typename T, typename Raw>
 VECOPS_ALWAYS_INLINE T sve_reduction_raw(Raw value, svbool_t active) {
   if constexpr (std::same_as<T, bfloat16_t>) {
-    const auto low_value = sve_bfloat16_to_float32_low(value);
-    const auto high_value = sve_bfloat16_to_float32_high(value);
+    const auto low_value = sve_bf16_to_f32_lo(value);
+    const auto high_value = sve_bf16_to_f32_hi(value);
     const auto low_mask = svunpklo_b(active);
     const auto high_mask = svunpkhi_b(active);
     if constexpr (std::same_as<Op, ReduceAddOp>) {

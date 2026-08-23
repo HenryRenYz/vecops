@@ -35,7 +35,7 @@ template <int ScalePower>
 void verify_float_tagless() {
   using SourceTag = vec::ScalableTag<float, ScalePower>;
   using V = vec::Vec<SourceTag>;
-  using Tag = vec::VecToTagT<V>;
+  using Tag = vec::VecToTag<V>;
   static_assert(vec::VectorValue<V>);
   static_assert(std::same_as<V, vec::Vec<Tag>>);
   static_assert(std::same_as<Tag, vec::InferredTagOf<V>>);
@@ -145,7 +145,7 @@ template <int ScalePower>
 void verify_integer_tagless() {
   using SourceTag = vec::ScalableTag<std::int32_t, ScalePower>;
   using V = vec::Vec<SourceTag>;
-  using Tag = vec::VecToTagT<V>;
+  using Tag = vec::VecToTag<V>;
   constexpr Tag tag{};
   auto a = vec::fill(tag, std::int32_t{0x12345678});
   auto b = vec::fill(tag, std::int32_t{0x0f0f0f0f});
@@ -181,7 +181,7 @@ TEST(VecTaglessTest, CanonicalPhysicalTagAndForwarding) {
 }
 
 using SubwordTag = vec::ScalableTag<float, -1>;
-using SubwordInferredTag = vec::VecToTagT<vec::Vec<SubwordTag>>;
+using SubwordInferredTag = vec::VecToTag<vec::Vec<SubwordTag>>;
 static_assert(!std::same_as<SubwordTag, SubwordInferredTag>);
 
 } // namespace

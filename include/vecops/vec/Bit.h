@@ -35,7 +35,7 @@ concept IntegerTag = VectorTag<Tag> && std::integral<ElementOf<Tag>>;
     VECOPS_ALWAYS_INLINE V operator()(                                  \
         V a, V b, Options&&... options) const {                         \
       return (*this)(                                                   \
-          VecToTagT<V>{}, a, b, std::forward<Options>(options)...);     \
+          VecToTag<V>{}, a, b, std::forward<Options>(options)...);     \
     }                                                                   \
   }
 
@@ -63,7 +63,7 @@ struct BitNotOp {
   VECOPS_ALWAYS_INLINE V operator()(
       V value, Options&&... options) const {
     return (*this)(
-        VecToTagT<V>{}, value, std::forward<Options>(options)...);
+        VecToTag<V>{}, value, std::forward<Options>(options)...);
   }
 };
 
@@ -117,13 +117,13 @@ struct BitShiftLeftOp {
     requires requires(
         BitShiftLeftOp op, V value, Count&& count, Options&&... options) {
       op(
-          VecToTagT<V>{}, value, std::forward<Count>(count),
+          VecToTag<V>{}, value, std::forward<Count>(count),
           std::forward<Options>(options)...);
     }
   VECOPS_ALWAYS_INLINE V operator()(
       V value, Count&& count, Options&&... options) const {
     return (*this)(
-        VecToTagT<V>{}, value, std::forward<Count>(count),
+        VecToTag<V>{}, value, std::forward<Count>(count),
         std::forward<Options>(options)...);
   }
 };
@@ -174,13 +174,13 @@ struct BitShiftRightOp {
     requires requires(
         BitShiftRightOp op, V value, Count&& count, Options&&... options) {
       op(
-          VecToTagT<V>{}, value, std::forward<Count>(count),
+          VecToTag<V>{}, value, std::forward<Count>(count),
           std::forward<Options>(options)...);
     }
   VECOPS_ALWAYS_INLINE V operator()(
       V value, Count&& count, Options&&... options) const {
     return (*this)(
-        VecToTagT<V>{}, value, std::forward<Count>(count),
+        VecToTag<V>{}, value, std::forward<Count>(count),
         std::forward<Options>(options)...);
   }
 };
@@ -218,7 +218,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> BitAndOp::operator()(
     Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const {
   details::validate_bit_options<Tag, Options...>();
   if constexpr (
-      details::option_count<details::IsUnmaskedOption, Options...> == 1) {
+      details::option_count_v<details::IsUnmaskedOption, Options...> == 1) {
     return details::execute(*this, tag, a, b);
   } else {
     const auto inactive = details::bit_inactive_value(
@@ -250,7 +250,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> BitOrOp::operator()(
     Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const {
   details::validate_bit_options<Tag, Options...>();
   if constexpr (
-      details::option_count<details::IsUnmaskedOption, Options...> == 1) {
+      details::option_count_v<details::IsUnmaskedOption, Options...> == 1) {
     return details::execute(*this, tag, a, b);
   } else {
     const auto inactive = details::bit_inactive_value(
@@ -282,7 +282,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> BitXorOp::operator()(
     Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const {
   details::validate_bit_options<Tag, Options...>();
   if constexpr (
-      details::option_count<details::IsUnmaskedOption, Options...> == 1) {
+      details::option_count_v<details::IsUnmaskedOption, Options...> == 1) {
     return details::execute(*this, tag, a, b);
   } else {
     const auto inactive = details::bit_inactive_value(
@@ -314,7 +314,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> BitAndNotOp::operator()(
     Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const {
   details::validate_bit_options<Tag, Options...>();
   if constexpr (
-      details::option_count<details::IsUnmaskedOption, Options...> == 1) {
+      details::option_count_v<details::IsUnmaskedOption, Options...> == 1) {
     return details::execute(*this, tag, a, b);
   } else {
     const auto inactive = details::bit_inactive_value(
@@ -346,7 +346,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> BitNotOp::operator()(
     Tag tag, Vec<Tag> value, Options&&... options) const {
   details::validate_bit_options<Tag, Options...>();
   if constexpr (
-      details::option_count<details::IsUnmaskedOption, Options...> == 1) {
+      details::option_count_v<details::IsUnmaskedOption, Options...> == 1) {
     return details::execute(*this, tag, value);
   } else {
     const auto inactive = details::bit_inactive_value(

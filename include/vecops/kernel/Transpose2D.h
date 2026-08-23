@@ -27,10 +27,8 @@ namespace transpose2d_implementation {
 
 template <typename Implementation>
 /** Resource contract exported by a transpose implementation backend. */
-struct Traits {
-  using ResourceRequirements = typename transpose2d_details::
-      ImplementationBackend<Implementation>::ResourceRequirements;
-};
+using resource_requirements_t = typename transpose2d_details::
+    ImplementationBackend<Implementation>::ResourceRequirements;
 
 } // namespace transpose2d_implementation
 

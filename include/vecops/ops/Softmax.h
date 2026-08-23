@@ -18,10 +18,9 @@
  * @file Softmax.h
  * @brief Last-dimension Softmax with DataAccess and ExecutionSession support.
  *
- * The operator normalizes every row independently, supports Tensor or Spec
- * operands, conversion transforms, cached and selected online algorithms, and
- * caller-owned or internally allocated workspace. Algorithm selection uses
- * compile-time layout/shape ranges; no runtime ISA fallback is introduced.
+ * Every prefix coordinate defines an independently normalized row. Tensor and
+ * Spec operands share the same typed DataAccess plan, while algorithm and
+ * resource selection use compile-time layout/shape information only.
  */
 
 namespace vecops::ops {
@@ -89,8 +88,8 @@ template <typename Config = SoftmaxConfig<>>
  * @tparam Config `SoftmaxConfig`-compatible type.
  *
  * Input and output shapes must match and the last dimension must be non-empty.
- * `ResourceRequirements` makes ordinary ARM instantiations non-streaming-only;
- * calling through a scope enforces that contract at compile time.
+ * `ResourceRequirements` lets ExecutionSession reject incompatible hardware
+ * modes at compile time without introducing runtime capability tests.
  */
 class Softmax {
   using XPolicy = tensor::InputAccessPolicy<
@@ -102,21 +101,47 @@ public:
   using Tag = vec::ScalableTag<ComputeType, 0>;
   /** Compile-time hardware-mode contract consumed by ExecutionSession. */
   using ResourceRequirements =
-      typename execution::details::CurrentBackend::DefaultRequirements;
+      typename execution::details::current_backend_t::DefaultRequirements;
   static constexpr vec::Accuracy ExpAccuracy = Config::exp_accuracy;
 
   const Config config;
 
   VECOPS_INLINE constexpr explicit Softmax(Config cfg = {}) : config(cfg) {}
 
-  template <typename InSpec, typename OutSpec>
-    requires (tensor::is_input_spec_v<InSpec> &&
-              tensor::is_output_spec_v<OutSpec>)
+  /** Centers an already-loaded block, exponentiates it, and caches it.
+   *  Shared leaf of the online and offline row paths so the numerical
+   *  sequence (subtract max, exp_neg, masked store) has one definition. */
+  template <typename BlockTag, typename Active>
+  VECOPS_ALWAYS_INLINE static auto exp_cache_block(
+      BlockTag block_tag, nint_t col, Active active,
+      vec::Vec<BlockTag> centered, ComputeType* exp_cache) {
+    const auto zero = vec::zeros(block_tag);
+    auto exponential = vec::exp_neg(
+        block_tag, centered,
+        vec::opt::math::accuracy<ExpAccuracy>, active,
+        vec::opt::merge(zero));
+    vec::store(block_tag, exp_cache + col, exponential, active);
+    return exponential;
+  }
+
+  /** Loads a cached block, scales it, and stores it to the output.
+   *  @p col is the row-local lane offset of the block. */
+  template <typename Y, typename BlockTag, typename Active, typename ScaleV>
+  VECOPS_ALWAYS_INLINE static void store_normalized_block(
+      Y& y, BlockTag block_tag, nint_t col, Active active, ScaleV scale_v,
+      const ComputeType* exp_cache) {
+    auto exponential = vec::load(block_tag, exp_cache + col, active);
+    y.store(
+        block_tag, tensor::coord(col),
+        vec::mul(exponential, scale_v), active);
+  }
+
+  template <tensor::InputSpecLike InSpec, tensor::OutputSpecLike OutSpec>
   /**
-   * @brief Compute workspace bytes for normalized input/output Specs.
-   * @return Cache, DataAccess materialization, and alignment bytes required by
-   *         the exact typed plan.
-   * @note The same Specs and runtime layouts must be used for execution.
+   * @brief Compute exact workspace bytes for normalized input/output Specs.
+   * @param in Readable input Spec.
+   * @param out Writable output Spec with the same shape.
+   * @return Cache, DataAccess materialization, and alignment bytes.
    */
   VECOPS_INLINE nint_t required_workspace(
       const InSpec& in, const OutSpec& out) const {
@@ -139,11 +164,9 @@ public:
         tensor::required_workspace(out_row, YPolicy{});
   }
 
-  template <typename InOperand, typename OutOperand>
-    requires (tensor::InputOperand<InOperand> &&
-              tensor::OutputOperand<OutOperand> &&
-              !(tensor::is_input_spec_v<InOperand> &&
-                tensor::is_output_spec_v<OutOperand>))
+  template <tensor::InputOperand InOperand, tensor::OutputOperand OutOperand>
+    requires (!tensor::InputSpecLike<InOperand> ||
+              !tensor::OutputSpecLike<OutOperand>)
   /** Normalize Tensor operands to Specs and return exact workspace bytes. */
   VECOPS_INLINE nint_t required_workspace(
       const InOperand& in, const OutOperand& out) const {
@@ -152,11 +175,9 @@ public:
     return required_workspace(in_spec, out_spec);
   }
 
-  template <typename InSpec, typename OutSpec>
-    requires (tensor::is_input_spec_v<InSpec> &&
-              tensor::is_output_spec_v<OutSpec>)
+  template <tensor::InputSpecLike InSpec, tensor::OutputSpecLike OutSpec>
   /**
-   * @brief Execute with caller-owned workspace and normalized Specs.
+   * @brief Execute normalized Specs with caller-owned workspace.
    * @param workspace Scratch storage at least `required_workspace()` bytes.
    * @param in Readable input Spec.
    * @param out Writable output Spec with identical shape.
@@ -184,8 +205,8 @@ public:
         std::same_as<ComputeType, float32_t> &&
         std::same_as<typename OutSpec::MemoryElement, bfloat16_t> &&
         std::same_as<typename OutSpec::TransformType, tensor::NoTransform> &&
-        tensor::is_ct_last_contiguous<
-            typename OutSpec::OutputLayout, 1>::value;
+        tensor::is_ct_last_contiguous_v<
+            typename OutSpec::OutputLayout, 1>;
     using ElementCount = tensor::numel_type_t<
         typename InSpec::InputLayout>;
     constexpr bool UsePackedBf16Output = CanPackBf16Output &&
@@ -205,17 +226,15 @@ public:
 #if defined(ARCH_X86_FAMILY) && defined(__GNUC__) && !defined(__clang__)
       // WORKAROUND/TUNING: GCC's paired BF16 conversion/store path increases
       // register pressure and emits a slower dependency chain on AVX-512.
-      // Retain one-vector stores for BF16 only; other dtypes use the generic
-      // recipe. Validate generated assembly before removing this split.
+      // Validate generated assembly before removing this compiler split.
       using GenericRecipe = std::conditional_t<
           std::same_as<typename OutSpec::MemoryElement, bfloat16_t>,
           details::SingleStoreSoftmaxRecipe,
           details::GenericSoftmaxRecipe>;
 #elif defined(CPU_CAPABILITY_SVE) && defined(__GNUC__) && !defined(__clang__)
       // WORKAROUND/TUNING: GCC 15 expands paired FP16 conversion/store into a
-      // longer dependency chain than the single-vector SVE form. Keep this
-      // compiler-specific recipe until generated assembly no longer shows the
-      // extra chain; Clang benefits from the generic two-vector store recipe.
+      // longer dependency chain than the single-vector SVE form. Clang still
+      // benefits from the generic two-vector recipe.
       using GenericRecipe = std::conditional_t<
           std::same_as<typename OutSpec::MemoryElement, float16_t>,
           details::SingleStoreSoftmaxRecipe,
@@ -248,11 +267,9 @@ public:
     }
   }
 
-  template <typename InOperand, typename OutOperand>
-    requires (tensor::InputOperand<InOperand> &&
-              tensor::OutputOperand<OutOperand> &&
-              !(tensor::is_input_spec_v<InOperand> &&
-                tensor::is_output_spec_v<OutOperand>))
+  template <tensor::InputOperand InOperand, tensor::OutputOperand OutOperand>
+    requires (!tensor::InputSpecLike<InOperand> ||
+              !tensor::OutputSpecLike<OutOperand>)
   /** Execute Tensor operands using caller-owned workspace. */
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace, const InOperand& in,
@@ -263,17 +280,15 @@ public:
   }
 
   template <execution::ExecutionScope Scope,
-            typename InOperand, typename OutOperand>
-    requires (tensor::InputOperand<InOperand> &&
-              tensor::OutputOperand<OutOperand>)
+            tensor::InputOperand InOperand, tensor::OutputOperand OutOperand>
   /**
    * @brief Execute through an ExecutionSession or active enclosing scope.
    * @param scope Scope providing resource transitions and worker workspace.
-   * @param in Input Tensor/Spec operand.
-   * @param out Output Tensor/Spec operand with identical shape.
+   * @param in Readable Tensor or Spec operand.
+   * @param out Writable Tensor or Spec operand with identical shape.
    *
-   * `with_resources` is nested deliberately: if an enclosing region already
-   * satisfies the operator, all transition logic is removed by `if constexpr`.
+   * A nested call under an already-compatible region compiles to no additional
+   * hardware transition because resource membership is part of `Scope`'s type.
    */
   VECOPS_INLINE void operator()(
       Scope& scope, const InOperand& in, const OutOperand& out) const {
@@ -283,10 +298,8 @@ public:
         });
   }
 
-  template <typename InOperand, typename OutOperand>
-    requires (tensor::InputOperand<InOperand> &&
-              tensor::OutputOperand<OutOperand>)
-  /** Allocate exact temporary workspace, create a session, and execute once. */
+  template <tensor::InputOperand InOperand, tensor::OutputOperand OutOperand>
+  /** Allocate exact workspace, create an ExecutionSession, and execute once. */
   VECOPS_INLINE void operator()(
       const InOperand& in, const OutOperand& out) const {
     kernel::Workspace storage(required_workspace(in, out));
@@ -295,17 +308,14 @@ public:
     (*this)(execution, in, out);
   }
 
+  template <tensor::BoundInputAccess X,
+            tensor::CommittableBoundOutputAccess Y>
   /**
-   * @brief Execute one already-bound row using the regular stable Softmax path.
-   * @param exp_cache Storage for at least one Compute value per logical lane.
+   * @brief Execute one already-bound row without replanning or rebinding.
+   * @param exp_cache Storage for one `ComputeType` value per logical lane.
    * @param x Bound rank-one readable access.
    * @param y Bound rank-one committable writable access.
-   * `exp_cache` points to at least logical_layout(x).shape()[0] Compute values
-   * allocated before entering the operand-binding scope.
    */
-  template <typename X, typename Y>
-    requires (tensor::BoundInputAccess<X> &&
-              tensor::CommittableBoundOutputAccess<Y>)
   VECOPS_INLINE void run_bound(
       ComputeType* exp_cache, X& x, Y& y) const {
     static_assert(X::Rank == 1 && Y::Rank == 1);
@@ -316,16 +326,16 @@ public:
   }
 
 private:
-  template <typename InSpec, typename OutSpec>
+  template <tensor::InputSpecLike InSpec, tensor::OutputSpecLike OutSpec>
   static consteval bool should_use_online() {
 #if defined(CPU_CAPABILITY_SVE) || defined(CPU_CAPABILITY_AVX512)
     if constexpr (!details::softmax_online_allowed<Config>()) return false;
     constexpr int Rank = InSpec::InputTensor::Ndim;
     if constexpr (
-        !tensor::is_ct_last_contiguous<
-            typename InSpec::InputLayout, 1>::value ||
-        !tensor::is_ct_last_contiguous<
-            typename OutSpec::OutputLayout, 1>::value) return false;
+        !tensor::is_ct_last_contiguous_v<
+            typename InSpec::InputLayout, 1> ||
+        !tensor::is_ct_last_contiguous_v<
+            typename OutSpec::OutputLayout, 1>) return false;
     using InElement = std::remove_const_t<typename InSpec::MemoryElement>;
     using NormalizedSize = tensor::size_type_t<
         Rank - 1, typename InSpec::InputLayout>;
@@ -420,13 +430,9 @@ private:
                 const ComputeType tile_max =
                     vec::reduce_max(block_tag, value);
                 const auto maximum = vec::fill(block_tag, tile_max);
-                auto centered = vec::sub(value, maximum);
-                const auto zero = vec::zeros(block_tag);
-                auto exponential = vec::exp_neg(
-                    block_tag, centered,
-                    vec::opt::math::accuracy<ExpAccuracy>, active,
-                    vec::opt::merge(zero));
-                vec::store(block_tag, exp_cache + col, exponential, active);
+                auto exponential = exp_cache_block(
+                    block_tag, col, active,
+                    vec::sub(value, maximum), exp_cache);
                 tile_max_cache[tile] = tile_max;
                 tile_sum_cache[tile] = vec::reduce_add(block_tag, exponential);
                 ++tile;
@@ -484,12 +490,9 @@ private:
                 tag, count,
                 [&](auto block_tag, nint_t local, auto active,
                     const auto& scale_v) VECOPS_INLINE_LAMBDA {
-                  auto exponential = vec::load(
-                      block_tag, exp_cache + col + local, active);
-                  auto normalized = vec::mul(exponential, scale_v);
-                  y.store(
-                      block_tag, tensor::coord(col + local),
-                      normalized, active);
+                  store_normalized_block(
+                      y, block_tag, col + local, active, scale_v,
+                      exp_cache);
                 },
                 kernel::loop::invariant(scale));
             col += count;
@@ -502,19 +505,21 @@ private:
     }
   }
 
-  template <typename Recipe, bool CopyDirectInput, typename X, typename Y>
+  template <typename Recipe, bool CopyDirectInput,
+            tensor::BoundInputAccess X,
+            tensor::CommittableBoundOutputAccess Y>
   VECOPS_ALWAYS_INLINE void run_bound_cached(
       nint_t n, ComputeType* exp_cache, X& x, Y& y) const {
     Tag tag{};
     const ComputeType negative_infinity =
         -std::numeric_limits<ComputeType>::infinity();
     ComputeType max_value{};
-    auto fold_max = [&](auto&& ux) VECOPS_INLINE_LAMBDA {
+    auto fold_max = [&](auto&& unordered_x) VECOPS_INLINE_LAMBDA {
       kernel::loop::fold<Recipe::FoldFactor>(
           tag, n,
           [&](auto block_tag, nint_t col, auto active,
               auto& maximum) VECOPS_INLINE_LAMBDA {
-            auto value = ux.load(
+            auto value = unordered_x.load(
                 block_tag, tensor::coord(col), active,
                 vec::opt::merge(negative_infinity),
                 tensor::materialize::populate);
@@ -536,19 +541,15 @@ private:
     ComputeType sum{};
     kernel::loop::fold<Recipe::FoldFactor>(
         tag, n,
-        [&](auto block_tag, nint_t col, auto active, auto& sum_vector)
-            VECOPS_INLINE_LAMBDA {
+        [&](auto block_tag, nint_t col, auto active,
+            auto& sum_vector) VECOPS_INLINE_LAMBDA {
           auto value = x.load(
               block_tag, tensor::coord(col), active,
               vec::opt::merge(negative_infinity));
           const auto maximum = vec::fill(block_tag, max_value);
-          auto centered = vec::sub(value, maximum);
-          const auto zero = vec::zeros(block_tag);
-          auto exponential = vec::exp_neg(
-              block_tag, centered,
-              vec::opt::math::accuracy<ExpAccuracy>, active,
-              vec::opt::merge(zero));
-          vec::store(block_tag, exp_cache + col, exponential, active);
+          auto exponential = exp_cache_block(
+              block_tag, col, active,
+              vec::sub(value, maximum), exp_cache);
           sum_vector = vec::add(sum_vector, exponential);
         },
         kernel::loop::reduce_add(sum));
@@ -558,10 +559,8 @@ private:
         tag, n,
         [&](auto block_tag, nint_t col, auto active,
             const auto& inverse) VECOPS_INLINE_LAMBDA {
-          auto exponential = vec::load(
-              block_tag, exp_cache + col, active);
-          auto normalized = vec::mul(exponential, inverse);
-          y.store(block_tag, tensor::coord(col), normalized, active);
+          store_normalized_block(
+              y, block_tag, col, active, inverse, exp_cache);
         },
         kernel::loop::invariant(inverse_sum));
     y.commit();
@@ -577,8 +576,8 @@ private:
     if constexpr (std::same_as<typename InSpec::MemoryElement, float16_t>) {
       // WORKAROUND: GCC 15 otherwise propagates large Const-shaped FP16 row
       // counts into the fold and aggressively unrolls them, causing excessive
-      // code size and compile time. The empty asm keeps only the trip count
-      // value runtime-visible; access plans and loop recipes remain compile-time.
+      // code size and compile time. Only the trip-count value is obscured;
+      // access plans and recipes remain compile-time choices.
       asm volatile("" : "+r"(n));
     }
 #endif

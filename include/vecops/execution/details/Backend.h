@@ -33,7 +33,7 @@ struct Backend;
 
 namespace vecops::execution::details {
 /** Execution-state backend selected for this translation unit. */
-using CurrentBackend = Backend<platform::CurrentTarget>;
+using current_backend_t = Backend<platform::current_target_t>;
 } // namespace vecops::execution::details
 
 #endif // VECOPS_EXECUTION_DETAILS_BACKEND_H

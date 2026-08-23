@@ -58,18 +58,18 @@ struct EnableElementwiseWordBatching<RsqrtOp> : std::true_type {};
 /* **************************************************************************** */
 
 template <VectorTag Tag, typename Option>
-inline constexpr bool is_arithmetic_option_for = [] {
+inline constexpr bool is_arithmetic_option_for_v = [] {
   using Clean = std::remove_cvref_t<Option>;
-  if constexpr (IsUnmaskedOption<Clean>::value) {
+  if constexpr (is_unmasked_option_v<Clean>) {
     return true;
-  } else if constexpr (is_masked_option<Clean>) {
+  } else if constexpr (is_masked_option_v<Clean>) {
     return std::same_as<typename IsMaskedOption<Clean>::Value, Mask<Tag>>;
-  } else if constexpr (is_zero_option<Clean>) {
+  } else if constexpr (is_zero_option_v<Clean>) {
     return true;
-  } else if constexpr (is_vector_merge_option<Clean>) {
+  } else if constexpr (is_vector_merge_option_v<Clean>) {
     return std::same_as<
         typename IsVectorMergeOption<Clean>::Value, Vec<Tag>>;
-  } else if constexpr (is_scalar_merge_option<Clean>) {
+  } else if constexpr (is_scalar_merge_option_v<Clean>) {
     return std::same_as<
         typename IsScalarMergeOption<Clean>::Value, ElementOf<Tag>>;
   } else {
@@ -234,16 +234,16 @@ template <typename Op, VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<Tag> execute_arithmetic_options(
     Op op, Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) {
   static_assert(
-      (is_arithmetic_option_for<Tag, Options> && ...),
+      (is_arithmetic_option_for_v<Tag, Options> && ...),
       "arithmetic received an option with the wrong kind or value type");
-  constexpr std::size_t masked_count = option_count<IsMaskedOption, Options...>;
+  constexpr std::size_t masked_count = option_count_v<IsMaskedOption, Options...>;
   constexpr std::size_t unmasked_count =
-      option_count<IsUnmaskedOption, Options...>;
-  constexpr std::size_t zero_count = option_count<IsZeroOption, Options...>;
+      option_count_v<IsUnmaskedOption, Options...>;
+  constexpr std::size_t zero_count = option_count_v<IsZeroOption, Options...>;
   constexpr std::size_t vector_merge_count =
-      option_count<IsVectorMergeOption, Options...>;
+      option_count_v<IsVectorMergeOption, Options...>;
   constexpr std::size_t scalar_merge_count =
-      option_count<IsScalarMergeOption, Options...>;
+      option_count_v<IsScalarMergeOption, Options...>;
   static_assert(
       masked_count + unmasked_count == 1,
       "arithmetic requires exactly one opt::masked or opt::unmasked option");
@@ -325,16 +325,16 @@ template <typename Op, VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<Tag> execute_unary_arithmetic_options(
     Op op, Tag tag, Vec<Tag> value, Options&&... options) {
   static_assert(
-      (is_arithmetic_option_for<Tag, Options> && ...),
+      (is_arithmetic_option_for_v<Tag, Options> && ...),
       "unary arithmetic received an invalid option or value type");
-  constexpr std::size_t masked_count = option_count<IsMaskedOption, Options...>;
+  constexpr std::size_t masked_count = option_count_v<IsMaskedOption, Options...>;
   constexpr std::size_t unmasked_count =
-      option_count<IsUnmaskedOption, Options...>;
-  constexpr std::size_t zero_count = option_count<IsZeroOption, Options...>;
+      option_count_v<IsUnmaskedOption, Options...>;
+  constexpr std::size_t zero_count = option_count_v<IsZeroOption, Options...>;
   constexpr std::size_t vector_merge_count =
-      option_count<IsVectorMergeOption, Options...>;
+      option_count_v<IsVectorMergeOption, Options...>;
   constexpr std::size_t scalar_merge_count =
-      option_count<IsScalarMergeOption, Options...>;
+      option_count_v<IsScalarMergeOption, Options...>;
   static_assert(
       masked_count + unmasked_count == 1,
       "unary arithmetic requires exactly one opt::masked or opt::unmasked");
@@ -384,16 +384,16 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_ternary_arithmetic_options(
     Op op, Tag tag, Vec<Tag> a, Vec<Tag> b, Vec<Tag> c,
     Options&&... options) {
   static_assert(
-      (is_arithmetic_option_for<Tag, Options> && ...),
+      (is_arithmetic_option_for_v<Tag, Options> && ...),
       "ternary arithmetic received an invalid option or value type");
-  constexpr std::size_t masked_count = option_count<IsMaskedOption, Options...>;
+  constexpr std::size_t masked_count = option_count_v<IsMaskedOption, Options...>;
   constexpr std::size_t unmasked_count =
-      option_count<IsUnmaskedOption, Options...>;
-  constexpr std::size_t zero_count = option_count<IsZeroOption, Options...>;
+      option_count_v<IsUnmaskedOption, Options...>;
+  constexpr std::size_t zero_count = option_count_v<IsZeroOption, Options...>;
   constexpr std::size_t vector_merge_count =
-      option_count<IsVectorMergeOption, Options...>;
+      option_count_v<IsVectorMergeOption, Options...>;
   constexpr std::size_t scalar_merge_count =
-      option_count<IsScalarMergeOption, Options...>;
+      option_count_v<IsScalarMergeOption, Options...>;
   static_assert(
       masked_count + unmasked_count == 1,
       "ternary arithmetic requires exactly one opt::masked or opt::unmasked");

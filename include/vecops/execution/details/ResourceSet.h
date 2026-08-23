@@ -29,28 +29,28 @@ struct ConcatResourceSets;
 
 template <>
 struct ConcatResourceSets<> {
-  using Type = ResourceSet<>;
+  using type = ResourceSet<>;
 };
 
 template <typename... Resources>
 struct ConcatResourceSets<ResourceSet<Resources...>> {
-  using Type = ResourceSet<Resources...>;
+  using type = ResourceSet<Resources...>;
 };
 
 template <typename... Resources, typename... Rest>
 struct ConcatResourceSets<ResourceSet<Resources...>, ResourceSet<Rest...>> {
-  using Type = ResourceSet<Resources..., Rest...>;
+  using type = ResourceSet<Resources..., Rest...>;
 };
 
 template <typename... Resources, typename... Rest, typename... Tail>
 struct ConcatResourceSets<
     ResourceSet<Resources...>, ResourceSet<Rest...>, Tail...> {
-  using Type = typename ConcatResourceSets<
-      ResourceSet<Resources..., Rest...>, Tail...>::Type;
+  using type = typename ConcatResourceSets<
+      ResourceSet<Resources..., Rest...>, Tail...>::type;
 };
 
 template <typename... Sets>
-using ConcatResourceSetsT = typename ConcatResourceSets<Sets...>::Type;
+using concat_resource_sets_t = typename ConcatResourceSets<Sets...>::type;
 
 /** Metafunction testing whether `Resource` occurs in `Set`. */
 template <typename Resource, typename Set>

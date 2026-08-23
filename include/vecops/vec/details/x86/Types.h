@@ -54,28 +54,28 @@ struct X86RawVector;
 
 template <Element T>
 struct X86RawVector<T, 16> {
-  using Type = std::conditional_t<
+  using type = std::conditional_t<
       std::same_as<T, float32_t>, __m128,
       std::conditional_t<std::same_as<T, float64_t>, __m128d, __m128i>>;
 };
 
 template <Element T>
 struct X86RawVector<T, 32> {
-  using Type = std::conditional_t<
+  using type = std::conditional_t<
       std::same_as<T, float32_t>, __m256,
       std::conditional_t<std::same_as<T, float64_t>, __m256d, __m256i>>;
 };
 
 template <Element T>
 struct X86RawVector<T, 64> {
-  using Type = std::conditional_t<
+  using type = std::conditional_t<
       std::same_as<T, float32_t>, __m512,
       std::conditional_t<std::same_as<T, float64_t>, __m512d, __m512i>>;
 };
 
 template <nint_t Lanes>
 struct X86PredicateRaw {
-  using Type = std::conditional_t<
+  using type = std::conditional_t<
       (Lanes <= 8), __mmask8,
       std::conditional_t<
           (Lanes <= 16), __mmask16,
@@ -86,11 +86,11 @@ template <nint_t Bytes>
 struct X86VectorMaskRaw;
 
 template <>
-struct X86VectorMaskRaw<16> { using Type = __m128i; };
+struct X86VectorMaskRaw<16> { using type = __m128i; };
 template <>
-struct X86VectorMaskRaw<32> { using Type = __m256i; };
+struct X86VectorMaskRaw<32> { using type = __m256i; };
 template <>
-struct X86VectorMaskRaw<64> { using Type = __m512i; };
+struct X86VectorMaskRaw<64> { using type = __m512i; };
 
 inline constexpr nint_t x86_native_bytes = VEC_WIDTH / 8;
 static_assert(
@@ -117,8 +117,8 @@ struct X86Layout<VectorDescriptor<T, FixedExtent<N>>> {
       word_bytes / static_cast<nint_t>(sizeof(T));
   static constexpr nint_t word_count =
       (logical_lanes + word_lanes - 1) / word_lanes;
-  static constexpr bool is_runtime_size = false;
-  static constexpr bool is_subword = logical_lanes < word_lanes;
+  static constexpr bool is_runtime_size_v = false;
+  static constexpr bool is_subword_v = logical_lanes < word_lanes;
 };
 
 template <Element T, int ScalePower>
@@ -142,8 +142,8 @@ struct X86Layout<VectorDescriptor<T, ScalableExtent<ScalePower>>> {
       word_bytes / static_cast<nint_t>(sizeof(T));
   static constexpr nint_t word_count =
       ScalePower > 0 ? (nint_t{1} << ScalePower) : 1;
-  static constexpr bool is_runtime_size = false;
-  static constexpr bool is_subword = requested_bytes < word_bytes;
+  static constexpr bool is_runtime_size_v = false;
+  static constexpr bool is_subword_v = requested_bytes < word_bytes;
 };
 
 template <VectorTag Tag>
@@ -155,16 +155,16 @@ struct RepresentationTraits<X86Backend, Tag> {
   static constexpr nint_t word_lanes = Layout::word_lanes;
   static constexpr nint_t word_count = Layout::word_count;
   static constexpr nint_t word_bytes = Layout::word_bytes;
-  static constexpr bool is_runtime_size = Layout::is_runtime_size;
-  static constexpr bool is_subword = Layout::is_subword;
+  static constexpr bool is_runtime_size_v = Layout::is_runtime_size_v;
+  static constexpr bool is_subword_v = Layout::is_subword_v;
 
-  using RawVec = typename X86RawVector<Element, word_bytes>::Type;
+  using RawVec = typename X86RawVector<Element, word_bytes>::type;
   using WordVec = X86Vector<Element, word_lanes, RawVec>;
 
 #if defined(CPU_CAPABILITY_AVX512)
-  using RawMask = typename X86PredicateRaw<word_lanes>::Type;
+  using RawMask = typename X86PredicateRaw<word_lanes>::type;
 #else
-  using RawMask = typename X86VectorMaskRaw<word_bytes>::Type;
+  using RawMask = typename X86VectorMaskRaw<word_bytes>::type;
 #endif
   using WordMask = X86Mask<sizeof(Element), word_lanes, RawMask>;
   using VecType = SingleOrArray<WordVec, word_count>;
@@ -179,12 +179,12 @@ struct IsMaskRepresentation<X86Mask<ElementBytes, N, Raw>> : std::true_type {};
 
 template <Element T, nint_t N, typename Raw>
 struct InferredTagTraits<X86Vector<T, N, Raw>> {
-  using Type = FixedTag<T, N>;
+  using type = FixedTag<T, N>;
 };
 
 template <Element T, nint_t N, typename Raw, nint_t Count>
 struct InferredTagTraits<WordArray<X86Vector<T, N, Raw>, Count>> {
-  using Type = FixedTag<T, N * Count>;
+  using type = FixedTag<T, N * Count>;
 };
 
 } // namespace vecops::vec::details

@@ -13,13 +13,6 @@ namespace vecops::vec::details {
 //                    Load and store word implementations                     //
 /* **************************************************************************** */
 
-template <nint_t Index, VectorTag Tag>
-VECOPS_ALWAYS_INLINE constexpr nint_t scalar_valid_memory_lanes(Tag tag) {
-  const nint_t word_lanes = native_word_size(tag);
-  return std::clamp<nint_t>(
-      size(tag) - Index * word_lanes, 0, word_lanes);
-}
-
 template <>
 struct NativeWordImpl<ScalarBackend, LoadOp> {
   template <nint_t Index, VectorTag Tag,
@@ -32,7 +25,7 @@ struct NativeWordImpl<ScalarBackend, LoadOp> {
       LoadOp, Tag tag, const ElementOf<Tag>* pointer,
       Alignment, Temporality) {
     NativeWordVec<Tag> result{};
-    const nint_t valid = scalar_valid_memory_lanes<Index>(tag);
+    const nint_t valid = valid_word_lanes<Index, Tag>();
     for (nint_t lane = 0; lane < valid; ++lane) result[lane] = pointer[lane];
     return result;
   }
@@ -47,7 +40,7 @@ struct NativeWordImpl<ScalarBackend, LoadOp> {
       LoadOp, Tag tag, const ElementOf<Tag>* pointer,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive,
       Alignment, Temporality) {
-    const nint_t valid = scalar_valid_memory_lanes<Index>(tag);
+    const nint_t valid = valid_word_lanes<Index, Tag>();
     for (nint_t lane = 0; lane < valid; ++lane) {
       if (mask.bits.test(static_cast<std::size_t>(lane)))
         inactive[lane] = pointer[lane];
@@ -67,7 +60,7 @@ struct NativeWordImpl<ScalarBackend, StoreOp> {
   static VECOPS_ALWAYS_INLINE void call(
       StoreOp, Tag tag, ElementOf<Tag>* pointer, NativeWordVec<Tag> value,
       Alignment, Temporality) {
-    const nint_t valid = scalar_valid_memory_lanes<Index>(tag);
+    const nint_t valid = valid_word_lanes<Index, Tag>();
     for (nint_t lane = 0; lane < valid; ++lane) pointer[lane] = value[lane];
   }
 
@@ -81,7 +74,7 @@ struct NativeWordImpl<ScalarBackend, StoreOp> {
       StoreOp, Tag tag, ElementOf<Tag>* pointer,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> value,
       Alignment, Temporality) {
-    const nint_t valid = scalar_valid_memory_lanes<Index>(tag);
+    const nint_t valid = valid_word_lanes<Index, Tag>();
     for (nint_t lane = 0; lane < valid; ++lane) {
       if (mask.bits.test(static_cast<std::size_t>(lane))) pointer[lane] = value[lane];
     }

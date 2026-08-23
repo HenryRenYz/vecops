@@ -32,7 +32,7 @@ VECOPS_ALWAYS_INLINE decltype(auto) invoke_without_math_accuracy(F&& f) {
 template <typename F, typename First, typename... Rest>
 VECOPS_ALWAYS_INLINE decltype(auto) invoke_without_math_accuracy(
     F&& f, First&& first, Rest&&... rest) {
-  if constexpr (is_math_accuracy_option<First>) {
+  if constexpr (is_math_accuracy_option_v<First>) {
     return invoke_without_math_accuracy(
         std::forward<F>(f), std::forward<Rest>(rest)...);
   } else {
@@ -55,7 +55,7 @@ VECOPS_ALWAYS_INLINE decltype(auto) invoke_replacing_first(
 template <typename F, MaskValue Mask, typename First, typename... Rest>
 VECOPS_ALWAYS_INLINE decltype(auto) invoke_replacing_first(
     F&& f, const Mask& mask, First&& first, Rest&&... rest) {
-  if constexpr (is_first_option<First>) {
+  if constexpr (is_first_option_v<First>) {
     return invoke_replacing_first(
         [&f, &mask]<typename... Tail>(Tail&&... tail) -> decltype(auto) {
           return std::forward<F>(f)(
@@ -87,7 +87,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_exp_options(
     if constexpr (sizeof...(ArithmeticOptions) == 0) {
       return execute(ExpOp<accuracy, NegativeOnly>{}, tag, value);
     } else if constexpr (
-        option_count<IsFirstOption, ArithmeticOptions...> == 1) {
+        option_count_v<IsFirstOption, ArithmeticOptions...> == 1) {
       const nint_t count = find_option<IsFirstOption>(
           arithmetic_options...).count;
       const auto mask = mwhilelt(tag, 0, count);

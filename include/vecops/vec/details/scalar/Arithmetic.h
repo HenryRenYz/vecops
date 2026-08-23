@@ -7,6 +7,8 @@
 #include <type_traits>
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/scalar/Basic.h"
+#include "vecops/vec/details/Wordwise.h"
 
 /**
  * @file Arithmetic.h
@@ -89,7 +91,7 @@ struct ScalarArithmeticWordImpl {
         a[lane] = scalar_arithmetic_binary<T>(
             a[lane], b[lane], [](auto x, auto y) { return x * y; });
       } else if constexpr (std::same_as<Op, DivOp>) {
-        static_assert(::vecops::IsFloatV<T>);
+        static_assert(::vecops::is_float_v<T>);
         a[lane] = static_cast<T>(a[lane] / b[lane]);
       } else if constexpr (std::same_as<Op, MinOp>) {
         a[lane] = std::min(a[lane], b[lane]);
@@ -108,13 +110,8 @@ struct ScalarArithmeticWordImpl {
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
       Op op, Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
-    const auto computed = call<Index>(op, tag, a, b);
-    for (nint_t lane = 0; lane < native_word_size(tag); ++lane) {
-      if (mask.bits.test(static_cast<std::size_t>(lane))) {
-        inactive[lane] = computed[lane];
-      }
-    }
-    return inactive;
+    return scalar_masked_merge<Index>(
+        tag, call<Index>(op, tag, a, b), mask, inactive);
   }
 };
 
@@ -156,7 +153,7 @@ struct ScalarFmaWordImpl {
     using T = ElementOf<Tag>;
     static_assert(Index >= 0 && Index < Traits::word_count);
     for (nint_t lane = 0; lane < Traits::word_lanes; ++lane) {
-      if constexpr (::vecops::IsFloatV<T>) {
+      if constexpr (::vecops::is_float_v<T>) {
         if constexpr (std::same_as<Op, FmaddOp>)
           a[lane] = static_cast<T>(a[lane] * b[lane] + c[lane]);
         else if constexpr (std::same_as<Op, FmsubOp>)
@@ -196,12 +193,8 @@ struct ScalarFmaWordImpl {
       Op op, Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b,
       NativeWordVec<Tag> c, NativeWordMask<Tag> mask,
       NativeWordVec<Tag> inactive, Policy) {
-    const auto computed = call<Index>(op, tag, a, b, c);
-    for (nint_t lane = 0; lane < native_word_size(tag); ++lane) {
-      if (mask.bits.test(static_cast<std::size_t>(lane)))
-        inactive[lane] = computed[lane];
-    }
-    return inactive;
+    return scalar_masked_merge<Index>(
+        tag, call<Index>(op, tag, a, b, c), mask, inactive);
   }
 };
 
@@ -280,12 +273,8 @@ struct ScalarUnaryArithmeticWordImpl {
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
       Op op, Tag tag, NativeWordVec<Tag> value,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
-    const auto computed = call<Index>(op, tag, value);
-    for (nint_t lane = 0; lane < native_word_size(tag); ++lane) {
-      if (mask.bits.test(static_cast<std::size_t>(lane)))
-        inactive[lane] = computed[lane];
-    }
-    return inactive;
+    return scalar_masked_merge<Index>(
+        tag, call<Index>(op, tag, value), mask, inactive);
   }
 };
 
@@ -342,12 +331,8 @@ struct ScalarFloatingUnaryWordImpl {
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
       Op op, Tag tag, NativeWordVec<Tag> value,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
-    const auto computed = call<Index>(op, tag, value);
-    for (nint_t lane = 0; lane < native_word_size(tag); ++lane) {
-      if (mask.bits.test(static_cast<std::size_t>(lane)))
-        inactive[lane] = computed[lane];
-    }
-    return inactive;
+    return scalar_masked_merge<Index>(
+        tag, call<Index>(op, tag, value), mask, inactive);
   }
 };
 

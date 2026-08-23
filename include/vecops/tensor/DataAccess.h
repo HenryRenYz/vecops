@@ -200,7 +200,7 @@ struct OptionTypeOr<Predicate, Default, First, Rest...> {
 
 template <template <typename> typename Predicate, typename Default,
           typename... Options>
-using OptionTypeOrT = typename OptionTypeOr<
+using option_type_or_t = typename OptionTypeOr<
     Predicate, Default, Options...>::type;
 
 template <typename T>
@@ -231,11 +231,11 @@ consteval bool valid_access_default_options() {
         IsAlignmentOption<T>::value;
   };
   return (allowed.template operator()<std::remove_cvref_t<Options>>() && ...) &&
-      vec::details::option_count<IsConversionOrderOption, Options...> <= 1 &&
-      vec::details::option_count<IsConversionValueOption, Options...> <= 1 &&
-      vec::details::option_count<IsTemporalityOption, Options...> <= 1 &&
-      vec::details::option_count<IsPackingOption, Options...> <= 1 &&
-      vec::details::option_count<IsAlignmentOption, Options...> <= 1;
+      vec::details::option_count_v<IsConversionOrderOption, Options...> <= 1 &&
+      vec::details::option_count_v<IsConversionValueOption, Options...> <= 1 &&
+      vec::details::option_count_v<IsTemporalityOption, Options...> <= 1 &&
+      vec::details::option_count_v<IsPackingOption, Options...> <= 1 &&
+      vec::details::option_count_v<IsAlignmentOption, Options...> <= 1;
 }
 
 template <typename Defaults, typename Order>
@@ -246,23 +246,23 @@ using ReorderAccessDefaults = AccessDefaults<
 
 template <typename... Options>
 using MakeAccessDefaults = AccessDefaults<
-    OptionTypeOrT<IsConversionOrderOption, vec::cvt::Ordered, Options...>,
-    OptionTypeOrT<IsConversionValueOption, vec::cvt::Saturate, Options...>,
-    OptionTypeOrT<IsTemporalityOption, vec::mem::Temporal, Options...>,
-    OptionTypeOrT<IsPackingOption, vec::mem::Packed, Options...>,
-    OptionTypeOrT<IsAlignmentOption, vec::mem::Unaligned, Options...>>;
+    option_type_or_t<IsConversionOrderOption, vec::cvt::Ordered, Options...>,
+    option_type_or_t<IsConversionValueOption, vec::cvt::Saturate, Options...>,
+    option_type_or_t<IsTemporalityOption, vec::mem::Temporal, Options...>,
+    option_type_or_t<IsPackingOption, vec::mem::Packed, Options...>,
+    option_type_or_t<IsAlignmentOption, vec::mem::Unaligned, Options...>>;
 
 template <typename Base, typename... Options>
 using OverrideAccessDefaults = AccessDefaults<
-    OptionTypeOrT<IsConversionOrderOption,
+    option_type_or_t<IsConversionOrderOption,
                   typename Base::ConversionOrderOption, Options...>,
-    OptionTypeOrT<IsConversionValueOption,
+    option_type_or_t<IsConversionValueOption,
                   typename Base::ConversionValueOption, Options...>,
-    OptionTypeOrT<IsTemporalityOption,
+    option_type_or_t<IsTemporalityOption,
                   typename Base::TemporalityOption, Options...>,
-    OptionTypeOrT<IsPackingOption,
+    option_type_or_t<IsPackingOption,
                   typename Base::PackingOption, Options...>,
-    OptionTypeOrT<IsAlignmentOption,
+    option_type_or_t<IsAlignmentOption,
                   typename Base::AlignmentOption, Options...>>;
 
 template <typename... Options>
@@ -293,7 +293,7 @@ struct AccessLoweringPolicy : PlanningPolicy {
 };
 
 template <typename T>
-inline constexpr bool is_unordered_policy = std::same_as<
+inline constexpr bool is_unordered_policy_v = std::same_as<
     typename std::remove_cvref_t<T>::ConversionOrderOption,
     vec::cvt::Unordered>;
 
@@ -342,27 +342,19 @@ template <typename T>
 inline constexpr bool is_definitely_one_meta_v =
     IsDefinitelyOneMeta<std::remove_cvref_t<T>>::value;
 
-template <int I, typename T>
-struct MetaElement;
-
-template <int I, typename... Ts>
-struct MetaElement<I, Strides<Ts...>> {
-  using type = std::tuple_element_t<I, std::tuple<Ts...>>;
-};
-
 template <bool Load, typename... Options>
 VECOPS_ALWAYS_INLINE constexpr void validate_access_options() {
   constexpr std::size_t active =
-      vec::details::option_count<vec::details::IsUnmaskedOption, Options...> +
-      vec::details::option_count<vec::details::IsFirstOption, Options...> +
-      vec::details::option_count<vec::details::IsMaskedOption, Options...>;
+      vec::details::option_count_v<vec::details::IsUnmaskedOption, Options...> +
+      vec::details::option_count_v<vec::details::IsFirstOption, Options...> +
+      vec::details::option_count_v<vec::details::IsMaskedOption, Options...>;
   constexpr std::size_t addressing =
-      vec::details::option_count<vec::details::IsStridedOption, Options...> +
-      vec::details::option_count<vec::details::IsIndexedOption, Options...>;
+      vec::details::option_count_v<vec::details::IsStridedOption, Options...> +
+      vec::details::option_count_v<vec::details::IsIndexedOption, Options...>;
   constexpr std::size_t population =
-      vec::details::option_count<vec::details::IsZeroOption, Options...> +
-      vec::details::option_count<vec::details::IsVectorMergeOption, Options...> +
-      vec::details::option_count<vec::details::IsScalarMergeOption, Options...>;
+      vec::details::option_count_v<vec::details::IsZeroOption, Options...> +
+      vec::details::option_count_v<vec::details::IsVectorMergeOption, Options...> +
+      vec::details::option_count_v<vec::details::IsScalarMergeOption, Options...>;
   static_assert(active <= 1, "at most one tensor active option is allowed");
   static_assert(addressing <= 1,
                 "at most one tensor lane-addressing option is allowed");
@@ -373,26 +365,18 @@ VECOPS_ALWAYS_INLINE constexpr void validate_access_options() {
 }
 
 template <typename T>
-inline constexpr bool is_no_transform =
+inline constexpr bool is_no_transform_v =
     std::same_as<std::remove_cvref_t<T>, NoTransform>;
 
-template <typename Transform, typename Memory>
-using transform_input_t = std::conditional_t<
-    is_no_transform<Transform>, Memory, typename Transform::TIn>;
-
-template <typename Transform, typename Compute>
-using transform_output_t = std::conditional_t<
-    is_no_transform<Transform>, Compute, typename Transform::TOut>;
-
 template <typename Transform>
-inline constexpr bool transform_permutation_equivariant = [] {
-  if constexpr (is_no_transform<Transform>) return true;
+inline constexpr bool transform_permutation_equivariant_v = [] {
+  if constexpr (is_no_transform_v<Transform>) return true;
   else return Transform::permutation_equivariant;
 }();
 
 template <typename Transform>
-inline constexpr bool transform_reads_input = [] {
-  if constexpr (is_no_transform<Transform>) return true;
+inline constexpr bool transform_reads_input_v = [] {
+  if constexpr (is_no_transform_v<Transform>) return true;
   else return Transform::reads_input;
 }();
 
@@ -422,90 +406,74 @@ VECOPS_ALWAYS_INLINE decltype(auto) apply_inline(F&& fn, Tuple&& tuple) {
           std::tuple_size_v<std::remove_reference_t<Tuple>>>{});
 }
 
-template <typename Option>
-VECOPS_ALWAYS_INLINE auto retain_non_address_option(Option&& option) {
-  using Clean = std::remove_cvref_t<Option>;
-  if constexpr (
-      vec::details::IsIndexedOption<Clean>::value ||
-      vec::details::IsStridedOption<Clean>::value) {
-    return std::tuple<>{};
-  } else {
-    return std::forward_as_tuple(std::forward<Option>(option));
-  }
+/** Tuple of the options that do NOT match @p Drop; order and value category
+ *  are preserved. */
+template <template <typename> typename Drop, typename... Options>
+VECOPS_ALWAYS_INLINE auto drop_options_if(Options&&... options) {
+  return std::tuple_cat(
+      []<typename Option>(Option&& option) {
+        using Clean = std::remove_cvref_t<Option>;
+        if constexpr (Drop<Clean>::value) {
+          return std::tuple<>{};
+        } else {
+          return std::forward_as_tuple(std::forward<Option>(option));
+        }
+      }(std::forward<Options>(options))...);
 }
+
+template <typename T>
+struct IsAddressOption : std::bool_constant<
+    vec::details::IsIndexedOption<T>::value ||
+    vec::details::IsStridedOption<T>::value> {};
+
+template <typename T>
+struct IsCacheStoreStrippedOption : std::bool_constant<
+    vec::details::IsZeroOption<T>::value ||
+    vec::details::IsVectorMergeOption<T>::value ||
+    vec::details::IsScalarMergeOption<T>::value ||
+    IsConversionOrderOption<T>::value ||
+    IsConversionValueOption<T>::value ||
+    IsTemporalityOption<T>::value || IsPackingOption<T>::value ||
+    IsAlignmentOption<T>::value> {};
+
+template <typename T>
+struct IsAccessDefaultOwnedOption : std::bool_constant<
+    IsConversionOrderOption<T>::value ||
+    IsConversionValueOption<T>::value ||
+    IsTemporalityOption<T>::value || IsPackingOption<T>::value ||
+    IsAlignmentOption<T>::value> {};
 
 template <typename... Options>
 VECOPS_ALWAYS_INLINE auto non_address_options(Options&&... options) {
-  return std::tuple_cat(
-      retain_non_address_option(std::forward<Options>(options))...);
-}
-
-template <typename Option>
-VECOPS_ALWAYS_INLINE auto retain_non_materialize_option(Option&& option) {
-  using Clean = std::remove_cvref_t<Option>;
-  if constexpr (IsMaterializePopulate<Clean>::value) {
-    return std::tuple<>{};
-  } else {
-    return std::forward_as_tuple(std::forward<Option>(option));
-  }
+  return drop_options_if<IsAddressOption>(
+      std::forward<Options>(options)...);
 }
 
 template <typename... Options>
 VECOPS_ALWAYS_INLINE auto non_materialize_options(Options&&... options) {
-  return std::tuple_cat(
-      retain_non_materialize_option(std::forward<Options>(options))...);
-}
-
-template <typename Option>
-VECOPS_ALWAYS_INLINE auto retain_cache_store_option(Option&& option) {
-  using Clean = std::remove_cvref_t<Option>;
-  if constexpr (
-      vec::details::IsZeroOption<Clean>::value ||
-      vec::details::IsVectorMergeOption<Clean>::value ||
-      vec::details::IsScalarMergeOption<Clean>::value ||
-      IsConversionOrderOption<Clean>::value ||
-      IsConversionValueOption<Clean>::value ||
-      IsTemporalityOption<Clean>::value || IsPackingOption<Clean>::value ||
-      IsAlignmentOption<Clean>::value) {
-    return std::tuple<>{};
-  } else {
-    return std::forward_as_tuple(std::forward<Option>(option));
-  }
+  return drop_options_if<IsMaterializePopulate>(
+      std::forward<Options>(options)...);
 }
 
 template <typename... Options>
 VECOPS_ALWAYS_INLINE auto cache_store_options(Options&&... options) {
-  return std::tuple_cat(
-      retain_cache_store_option(std::forward<Options>(options))...);
-}
-
-template <typename Option>
-VECOPS_ALWAYS_INLINE auto retain_non_access_default_option(Option&& option) {
-  using Clean = std::remove_cvref_t<Option>;
-  if constexpr (
-      IsConversionOrderOption<Clean>::value ||
-      IsConversionValueOption<Clean>::value ||
-      IsTemporalityOption<Clean>::value || IsPackingOption<Clean>::value ||
-      IsAlignmentOption<Clean>::value) {
-    return std::tuple<>{};
-  } else {
-    return std::forward_as_tuple(std::forward<Option>(option));
-  }
+  return drop_options_if<IsCacheStoreStrippedOption>(
+      std::forward<Options>(options)...);
 }
 
 template <typename... Options>
 VECOPS_ALWAYS_INLINE auto non_access_default_options(Options&&... options) {
-  return std::tuple_cat(
-      retain_non_access_default_option(std::forward<Options>(options))...);
+  return drop_options_if<IsAccessDefaultOwnedOption>(
+      std::forward<Options>(options)...);
 }
 
 template <vec::VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE auto make_logical_mapping(
     Tag, Options&&... options) {
   constexpr std::size_t indexed_count =
-      vec::details::option_count<vec::details::IsIndexedOption, Options...>;
+      vec::details::option_count_v<vec::details::IsIndexedOption, Options...>;
   constexpr std::size_t strided_count =
-      vec::details::option_count<vec::details::IsStridedOption, Options...>;
+      vec::details::option_count_v<vec::details::IsStridedOption, Options...>;
   static_assert(indexed_count <= 1 && strided_count <= 1);
   static_assert(indexed_count + strided_count <= 1);
 
@@ -516,7 +484,7 @@ VECOPS_ALWAYS_INLINE auto make_logical_mapping(
     static_assert(
         vec::details::IsIndexedOption<Indexed>::scale == 0,
         "tensor indexed addressing only accepts element-scale indices");
-    using IndexTag = vec::VecToTagT<
+    using IndexTag = vec::VecToTag<
         typename vec::details::IsIndexedOption<Indexed>::Value>;
     return IndexedLaneMapping<IndexTag>{IndexTag{}, indexed.indices};
   } else {
@@ -534,11 +502,11 @@ template <vec::VectorTag Tag, typename Mapping, typename F, typename... Options>
 VECOPS_ALWAYS_INLINE decltype(auto) with_active_context(
     Tag tag, Mapping mapping, F&& fn, Options&&... options) {
   constexpr std::size_t first_count =
-      vec::details::option_count<vec::details::IsFirstOption, Options...>;
+      vec::details::option_count_v<vec::details::IsFirstOption, Options...>;
   constexpr std::size_t masked_count =
-      vec::details::option_count<vec::details::IsMaskedOption, Options...>;
+      vec::details::option_count_v<vec::details::IsMaskedOption, Options...>;
   constexpr std::size_t unmasked_count =
-      vec::details::option_count<vec::details::IsUnmaskedOption, Options...>;
+      vec::details::option_count_v<vec::details::IsUnmaskedOption, Options...>;
   static_assert(first_count + masked_count + unmasked_count <= 1);
 
   if constexpr (first_count == 1) {
@@ -606,9 +574,9 @@ template <vec::VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE vec::Vec<Tag> populate_inactive(
     Tag tag, vec::Vec<Tag> value, Options&&... options) {
   constexpr std::size_t first_count =
-      vec::details::option_count<vec::details::IsFirstOption, Options...>;
+      vec::details::option_count_v<vec::details::IsFirstOption, Options...>;
   constexpr std::size_t masked_count =
-      vec::details::option_count<vec::details::IsMaskedOption, Options...>;
+      vec::details::option_count_v<vec::details::IsMaskedOption, Options...>;
   if constexpr (first_count + masked_count == 0) {
     return value;
   } else {
@@ -626,10 +594,10 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> populate_inactive(
 
     vec::Vec<Tag> inactive = vec::zeros(tag);
     constexpr std::size_t vector_merge_count =
-        vec::details::option_count<vec::details::IsVectorMergeOption,
+        vec::details::option_count_v<vec::details::IsVectorMergeOption,
                                    Options...>;
     constexpr std::size_t scalar_merge_count =
-        vec::details::option_count<vec::details::IsScalarMergeOption,
+        vec::details::option_count_v<vec::details::IsScalarMergeOption,
                                    Options...>;
     if constexpr (vector_merge_count == 1) {
       auto&& merge = vec::details::find_option<
@@ -663,11 +631,11 @@ consteval bool transform_tags_representable() {
   using InTag = vec::Rebind<typename Transform::TIn, RequestedTag>;
   using OutTag = vec::Rebind<typename Transform::TOut, RequestedTag>;
   if constexpr (
-      vec::is_scalable_tag<RequestedTag> &&
-      (vec::scale_power<InTag> < VEC_HW_MIN_POW ||
-       vec::scale_power<InTag> > VEC_MAX_POW ||
-       vec::scale_power<OutTag> < VEC_HW_MIN_POW ||
-       vec::scale_power<OutTag> > VEC_MAX_POW)) {
+      vec::is_scalable_tag_v<RequestedTag> &&
+      (vec::scale_power_v<InTag> < VEC_HW_MIN_POW ||
+       vec::scale_power_v<InTag> > VEC_MAX_POW ||
+       vec::scale_power_v<OutTag> < VEC_HW_MIN_POW ||
+       vec::scale_power_v<OutTag> > VEC_MAX_POW)) {
     return false;
   } else {
     return true;
@@ -703,9 +671,9 @@ consteval bool can_transform_chunk_with_memory() {
   } else {
     using MemoryTag = vec::Rebind<Memory, RequestedTag>;
     if constexpr (
-        vec::is_scalable_tag<RequestedTag> &&
-        (vec::scale_power<MemoryTag> < VEC_HW_MIN_POW ||
-         vec::scale_power<MemoryTag> > VEC_MAX_POW)) {
+        vec::is_scalable_tag_v<RequestedTag> &&
+        (vec::scale_power_v<MemoryTag> < VEC_HW_MIN_POW ||
+         vec::scale_power_v<MemoryTag> > VEC_MAX_POW)) {
       return false;
     } else {
       return true;
@@ -768,12 +736,12 @@ VECOPS_ALWAYS_INLINE void execute_resolved_store_convert(
 template <vec::VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE bool lane_is_active(
     Tag tag, nint_t lane, Options&&... options) {
-  if constexpr (vec::details::option_count<
+  if constexpr (vec::details::option_count_v<
                     vec::details::IsFirstOption, Options...> == 1) {
     auto&& first = vec::details::find_option<
         vec::details::IsFirstOption>(options...);
     return 0 <= lane && lane < first.count;
-  } else if constexpr (vec::details::option_count<
+  } else if constexpr (vec::details::option_count_v<
                            vec::details::IsMaskedOption, Options...> == 1) {
     auto&& masked = vec::details::find_option<
         vec::details::IsMaskedOption>(options...);
@@ -786,18 +754,18 @@ VECOPS_ALWAYS_INLINE bool lane_is_active(
 template <vec::VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE nint_t logical_lane_offset(
     Tag, nint_t lane, Options&&... options) {
-  if constexpr (vec::details::option_count<
+  if constexpr (vec::details::option_count_v<
                     vec::details::IsIndexedOption, Options...> == 1) {
     auto&& indexed = vec::details::find_option<
         vec::details::IsIndexedOption>(options...);
     using Indexed = std::remove_cvref_t<decltype(indexed)>;
     static_assert(vec::details::IsIndexedOption<Indexed>::scale == 0,
                   "tensor indexed addressing rejects byte scales");
-    using IndexTag = vec::VecToTagT<
+    using IndexTag = vec::VecToTag<
         typename vec::details::IsIndexedOption<Indexed>::Value>;
     return static_cast<nint_t>(
         vec::get(IndexTag{}, indexed.indices, lane));
-  } else if constexpr (vec::details::option_count<
+  } else if constexpr (vec::details::option_count_v<
                            vec::details::IsStridedOption, Options...> == 1) {
     auto&& strided = vec::details::find_option<
         vec::details::IsStridedOption>(options...);
@@ -810,12 +778,12 @@ VECOPS_ALWAYS_INLINE nint_t logical_lane_offset(
 template <vec::VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE vec::ElementOf<Tag> inactive_scalar(
     Tag tag, nint_t lane, Options&&... options) {
-  if constexpr (vec::details::option_count<
+  if constexpr (vec::details::option_count_v<
                     vec::details::IsVectorMergeOption, Options...> == 1) {
     auto&& merge = vec::details::find_option<
         vec::details::IsVectorMergeOption>(options...);
     return vec::get(tag, merge.value, lane);
-  } else if constexpr (vec::details::option_count<
+  } else if constexpr (vec::details::option_count_v<
                            vec::details::IsScalarMergeOption,
                            Options...> == 1) {
     auto&& merge = vec::details::find_option<
@@ -851,7 +819,7 @@ VECOPS_ALWAYS_INLINE void load_transform_chunks_scalar(
     auto transform_input = vec::zeros(TransformInTag{});
     const nint_t chunk_lanes = vec::size(TransformInTag{});
 
-    if constexpr (transform_reads_input<Transform>) {
+    if constexpr (transform_reads_input_v<Transform>) {
       for (nint_t lane = 0; lane < chunk_lanes; ++lane) {
         const nint_t root_lane = lane_begin + lane;
         if (!lane_is_active(root_tag, root_lane, options...)) continue;
@@ -954,13 +922,13 @@ VECOPS_ALWAYS_INLINE void store_transform_chunks_scalar(
 
 template <typename Tag>
 consteval bool can_split_tag() {
-  if constexpr (vec::is_fixed_tag<Tag>) {
-    return vec::fixed_lanes<Tag> > 1;
+  if constexpr (vec::is_fixed_tag_v<Tag>) {
+    return vec::fixed_lanes_v<Tag> > 1;
   } else {
     // The largest supported element-size ratio is eight.  Once a requested
     // tag is more than three powers below the backend minimum, rebinding it
     // cannot produce a legal transform tag for any supported element type.
-    return vec::scale_power<Tag> > VEC_HW_MIN_POW - 3;
+    return vec::scale_power_v<Tag> > VEC_HW_MIN_POW - 3;
   }
 }
 
@@ -1026,7 +994,7 @@ load_transform_vector(
       if constexpr (AddrKind == 2) {
         using IndexElement = vec::ElementOf<IndexVec>;
         const auto stride_scale = vec::fill(
-            vec::VecToTagT<IndexVec>{},
+            vec::VecToTag<IndexVec>{},
             static_cast<IndexElement>(physical_stride));
         return vec::mul(logical_indices, stride_scale);
       } else {
@@ -1034,7 +1002,7 @@ load_transform_vector(
       }
     }();
     vec::Vec<TransformInTag> transform_input;
-    if constexpr (transform_reads_input<Transform>) {
+    if constexpr (transform_reads_input_v<Transform>) {
       constexpr vec::Active ActiveKind =
           HasActive ? vec::Active::Masked : vec::Active::Unmasked;
       constexpr vec::Addressing AddressingKind =
@@ -1097,7 +1065,7 @@ load_transform_vector(
         "DataAccess cannot find a legal vector size for this transform");
     using HalfTag = vec::Half<ChunkTag>;
     using HalfIndexVec = std::conditional_t<
-        AddrKind == 2, vec::Vec<vec::Half<vec::VecToTagT<IndexVec>>>,
+        AddrKind == 2, vec::Vec<vec::Half<vec::VecToTag<IndexVec>>>,
         IndexVec>;
     using HalfMaskVec = std::conditional_t<
         HasActive, vec::Mask<HalfTag>, MaskVec>;
@@ -1260,7 +1228,7 @@ VECOPS_ALWAYS_INLINE void store_transform_vector(
       if constexpr (AddrKind == 2) {
         using IndexElement = vec::ElementOf<IndexVec>;
         const auto stride_scale = vec::fill(
-            vec::VecToTagT<IndexVec>{},
+            vec::VecToTag<IndexVec>{},
             static_cast<IndexElement>(physical_stride));
         return vec::mul(logical_indices, stride_scale);
       } else {
@@ -1330,7 +1298,7 @@ VECOPS_ALWAYS_INLINE void store_transform_vector(
         "DataAccess cannot find a legal vector size for this transform");
     using HalfTag = vec::Half<ChunkTag>;
     using HalfIndexVec = std::conditional_t<
-        AddrKind == 2, vec::Vec<vec::Half<vec::VecToTagT<IndexVec>>>,
+        AddrKind == 2, vec::Vec<vec::Half<vec::VecToTag<IndexVec>>>,
         IndexVec>;
     using HalfMaskVec = std::conditional_t<
         HasActive, vec::Mask<HalfTag>, MaskVec>;
@@ -1446,11 +1414,13 @@ VECOPS_ALWAYS_INLINE void copy_memory_request_fields(
   if constexpr (OutRequest::active_kind == vec::Active::Masked) {
     out.mask = in.mask;
   }
-  if constexpr (OutRequest::populate_kind == vec::Populate::MergeVector) {
-    out.merge_vector = in.merge_vector;
-  }
-  if constexpr (OutRequest::populate_kind == vec::Populate::MergeScalar) {
-    out.merge_scalar = in.merge_scalar;
+  if constexpr (requires { OutRequest::populate_kind; }) {
+    if constexpr (OutRequest::populate_kind == vec::Populate::MergeVector) {
+      out.merge_vector = in.merge_vector;
+    }
+    if constexpr (OutRequest::populate_kind == vec::Populate::MergeScalar) {
+      out.merge_scalar = in.merge_scalar;
+    }
   }
 }
 
@@ -1470,9 +1440,9 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory_options(
     StrideMeta tensor_axis_stride,
     Options&&... options) {
   constexpr std::size_t indexed_count =
-      vec::details::option_count<vec::details::IsIndexedOption, Options...>;
+      vec::details::option_count_v<vec::details::IsIndexedOption, Options...>;
   constexpr std::size_t strided_count =
-      vec::details::option_count<vec::details::IsStridedOption, Options...>;
+      vec::details::option_count_v<vec::details::IsStridedOption, Options...>;
   auto retained = non_address_options(std::forward<Options>(options)...);
   using Order = typename Policy::ConversionOrderOption;
   using Value = typename Policy::ConversionValueOption;
@@ -1486,7 +1456,7 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory_options(
       using Indexed = std::remove_cvref_t<decltype(indexed)>;
       static_assert(vec::details::IsIndexedOption<Indexed>::scale == 0,
                     "tensor indexed addressing rejects byte scales");
-      using IndexTag = vec::VecToTagT<
+      using IndexTag = vec::VecToTag<
           typename vec::details::IsIndexedOption<Indexed>::Value>;
       using Index = vec::ElementOf<IndexTag>;
       const auto scale = vec::fill(
@@ -1533,9 +1503,9 @@ VECOPS_ALWAYS_INLINE void store_memory_options(
     StrideMeta tensor_axis_stride,
     Options&&... options) {
   constexpr std::size_t indexed_count =
-      vec::details::option_count<vec::details::IsIndexedOption, Options...>;
+      vec::details::option_count_v<vec::details::IsIndexedOption, Options...>;
   constexpr std::size_t strided_count =
-      vec::details::option_count<vec::details::IsStridedOption, Options...>;
+      vec::details::option_count_v<vec::details::IsStridedOption, Options...>;
   auto retained = non_address_options(std::forward<Options>(options)...);
   using Order = typename Policy::ConversionOrderOption;
   using Value = typename Policy::ConversionValueOption;
@@ -1550,7 +1520,7 @@ VECOPS_ALWAYS_INLINE void store_memory_options(
       using Indexed = std::remove_cvref_t<decltype(indexed)>;
       static_assert(vec::details::IsIndexedOption<Indexed>::scale == 0,
                     "tensor indexed addressing rejects byte scales");
-      using IndexTag = vec::VecToTagT<
+      using IndexTag = vec::VecToTag<
           typename vec::details::IsIndexedOption<Indexed>::Value>;
       using Index = vec::ElementOf<IndexTag>;
       const auto scale = vec::fill(
@@ -1624,7 +1594,7 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
           KernelRequest::index_scale == 0,
           "tensor indexed addressing rejects byte scales");
       using IndexTag =
-          vec::VecToTagT<typename KernelRequest::IndexVectorType>;
+          vec::VecToTag<typename KernelRequest::IndexVectorType>;
       using Index = vec::ElementOf<IndexTag>;
       const auto scale = vec::fill(
           IndexTag{},
@@ -1707,7 +1677,7 @@ VECOPS_ALWAYS_INLINE void store_memory(
           KernelRequest::index_scale == 0,
           "tensor indexed addressing rejects byte scales");
       using IndexTag =
-          vec::VecToTagT<typename KernelRequest::IndexVectorType>;
+          vec::VecToTag<typename KernelRequest::IndexVectorType>;
       using Index = vec::ElementOf<IndexTag>;
       const auto scale = vec::fill(
           IndexTag{},
@@ -1718,12 +1688,7 @@ VECOPS_ALWAYS_INLINE void store_memory(
           vec::Addressing::Indexed, vec::mem::Unaligned, Temporal, 0,
           std::remove_cvref_t<decltype(physical)>, Order, Value, Packing>
           out{};
-      if constexpr (out.active_kind == vec::Active::First) {
-        out.first_count = request.first_count;
-      }
-      if constexpr (out.active_kind == vec::Active::Masked) {
-        out.mask = request.mask;
-      }
+      copy_memory_request_fields(out, request);
       out.indices = &physical;
       execute_resolved_store_convert(tag, pointer, value, out);
     } else if constexpr (
@@ -1735,12 +1700,7 @@ VECOPS_ALWAYS_INLINE void store_memory(
           vec::Addressing::Contiguous, Alignment, Temporal, 0,
           vec::Vec<vec::IndexTag<Tag>>, Order, Value, Packing>
           out{};
-      if constexpr (out.active_kind == vec::Active::First) {
-        out.first_count = request.first_count;
-      }
-      if constexpr (out.active_kind == vec::Active::Masked) {
-        out.mask = request.mask;
-      }
+      copy_memory_request_fields(out, request);
       execute_resolved_store_convert(tag, pointer, value, out);
     } else {
       nint_t physical_stride = static_cast<nint_t>(tensor_axis_stride);
@@ -1753,12 +1713,7 @@ VECOPS_ALWAYS_INLINE void store_memory(
           vec::Addressing::Strided, vec::mem::Unaligned, Temporal, 0,
           vec::Vec<vec::IndexTag<Tag>>, Order, Value, Packing>
           out{};
-      if constexpr (out.active_kind == vec::Active::First) {
-        out.first_count = request.first_count;
-      }
-      if constexpr (out.active_kind == vec::Active::Masked) {
-        out.mask = request.mask;
-      }
+      copy_memory_request_fields(out, request);
       out.stride = physical_stride;
       execute_resolved_store_convert(tag, pointer, value, out);
     }
@@ -1767,14 +1722,6 @@ VECOPS_ALWAYS_INLINE void store_memory(
         tag, pointer, value, tensor_axis_stride,
         std::forward<Options>(options)...);
   }
-}
-
-template <typename Layout>
-/** Return the runtime number of logical elements in `layout`. */
-VECOPS_ALWAYS_INLINE nint_t tensor_numel(const Layout& layout) {
-  nint_t result = 1;
-  for (int d = 0; d < Layout::Ndim; ++d) result *= layout.shape()[d];
-  return result;
 }
 
 template <int Axis, typename Layout>
@@ -1833,8 +1780,8 @@ consteval int first_unit_axis() {
   if constexpr (Dim == StridesPack::Ndim) {
     return -1;
   } else if constexpr (
-      Dim != SkipDim && is_definitely_one_meta_v<
-          typename MetaElement<Dim, StridesPack>::type>) {
+      Dim != SkipDim &&
+      is_definitely_one_meta_v<meta_element_t<Dim, StridesPack>>) {
     return Dim;
   } else {
     return first_unit_axis<StridesPack, SkipDim, Dim + 1>();
@@ -1968,16 +1915,14 @@ struct OtherAxisStrideScan<Strides<Ts...>, SkipDim> {
   template <std::size_t... Is>
   static consteval bool any_definitely_one(std::index_sequence<Is...>) {
     return ((Is != static_cast<std::size_t>(SkipDim) &&
-             is_definitely_one_meta_v<
-                 typename MetaElement<Is, Strides<Ts...>>::type>) ||
+             is_definitely_one_meta_v<meta_element_t<Is, Strides<Ts...>>>) ||
             ...);
   }
 
   template <std::size_t... Is>
   static consteval bool all_cannot_be_one(std::index_sequence<Is...>) {
     return ((Is == static_cast<std::size_t>(SkipDim) ||
-             meta_cannot_be_one_v<
-                 typename MetaElement<Is, Strides<Ts...>>::type>) &&
+             meta_cannot_be_one_v<meta_element_t<Is, Strides<Ts...>>>) &&
             ...);
   }
 
@@ -2000,12 +1945,11 @@ consteval AccessPlan resolve_plan() {
                 Policy::requested_plan != AccessPlan::automatic_deferred) {
     return Policy::requested_plan;
   } else if constexpr (Spec::is_input) {
-    if constexpr (!transform_reads_input<typename Spec::TransformType>) {
+    if constexpr (!transform_reads_input_v<typename Spec::TransformType>) {
       return AccessPlan::direct;
     }
-    using AxisStride = typename MetaElement<
-        Policy::vector_axis,
-        typename Spec::InputLayout::Strides>::type;
+    using AxisStride =
+        stride_type_t<Policy::vector_axis, typename Spec::InputLayout>;
     if constexpr (Policy::read_passes == 1 ||
                   is_definitely_one_meta_v<AxisStride>) {
       return AccessPlan::direct;
@@ -2013,9 +1957,8 @@ consteval AccessPlan resolve_plan() {
       return AccessPlan::materialize_after_transform;
     }
   } else {
-    using AxisStride = typename MetaElement<
-        Policy::vector_axis,
-        typename Spec::OutputLayout::Strides>::type;
+    using AxisStride =
+        stride_type_t<Policy::vector_axis, typename Spec::OutputLayout>;
     using Scan = OtherAxisStrideScan<
         typename Spec::OutputLayout::Strides, Policy::vector_axis>;
     if constexpr (is_definitely_one_meta_v<AxisStride>) {
@@ -2041,14 +1984,14 @@ template <typename PlanningPolicy, typename Defaults, int SlicedDim>
 struct SliceAccessPolicy<
     details::AccessLoweringPolicy<PlanningPolicy, Defaults>, SlicedDim> {
   using type = details::AccessLoweringPolicy<
-      SliceAccessPolicyT<PlanningPolicy, SlicedDim>, Defaults>;
+      slice_access_policy_t<PlanningPolicy, SlicedDim>, Defaults>;
 };
 
 template <typename PlanningPolicy, typename Defaults, int I, int J>
 struct TransposeAccessPolicy<
     details::AccessLoweringPolicy<PlanningPolicy, Defaults>, I, J> {
   using type = details::AccessLoweringPolicy<
-      TransposeAccessPolicyT<PlanningPolicy, I, J>, Defaults>;
+      transpose_access_policy_t<PlanningPolicy, I, J>, Defaults>;
 };
 
 template <
@@ -2251,68 +2194,79 @@ VECOPS_INLINE auto output(
 }
 
 template <typename T>
-struct IsInputSpec : std::false_type {};
-template <typename... Args>
-struct IsInputSpec<InputSpec<Args...>> : std::true_type {};
+struct IsInputSpec : std::bool_constant<
+    is_specialization_of_v<InputSpec, T>> {};
 template <typename T>
 inline constexpr bool is_input_spec_v =
     IsInputSpec<std::remove_cvref_t<T>>::value;
 
 template <typename T>
-struct IsOutputSpec : std::false_type {};
-template <typename... Args>
-struct IsOutputSpec<OutputSpec<Args...>> : std::true_type {};
+struct IsOutputSpec : std::bool_constant<
+    is_specialization_of_v<OutputSpec, T>> {};
 template <typename T>
 inline constexpr bool is_output_spec_v =
     IsOutputSpec<std::remove_cvref_t<T>>::value;
 
 /** True for unbound Tensor/Spec values accepted by high-level operators. */
 template <typename T>
-concept UnboundTensorView =
-    is_tensor<std::remove_cvref_t<T>> || is_input_spec_v<T> ||
+inline constexpr bool is_unbound_tensor_view_v =
+    is_tensor_v<std::remove_cvref_t<T>> || is_input_spec_v<T> ||
     is_output_spec_v<T>;
 
 template <typename T>
-concept InputOperand =
-    is_tensor<std::remove_cvref_t<T>> || is_input_spec_v<T>;
+concept UnboundTensorView = is_unbound_tensor_view_v<T>;
 
 template <typename T>
-concept OutputOperand = [] {
+inline constexpr bool is_input_operand_v =
+    is_tensor_v<std::remove_cvref_t<T>> || is_input_spec_v<T>;
+
+template <typename T>
+concept InputOperand = is_input_operand_v<T>;
+
+template <typename T>
+inline constexpr bool is_output_operand_v = [] {
   using O = std::remove_cvref_t<T>;
   if constexpr (is_output_spec_v<O>) return true;
-  else if constexpr (is_tensor<O>) {
+  else if constexpr (is_tensor_v<O>) {
     return !std::is_const_v<typename O::ElementType>;
   } else return false;
 }();
 
+template <typename T>
+concept OutputOperand = is_output_operand_v<T>;
+
+/** @brief Concept form of is_input_spec_v. */
+template <typename T>
+concept InputSpecLike = is_input_spec_v<T>;
+
+/** @brief Concept form of is_output_spec_v. */
+template <typename T>
+concept OutputSpecLike = is_output_spec_v<T>;
+
 /** Normalize a Tensor or an existing input Spec without discarding metadata. */
-template <typename Compute, typename Tensor>
-  requires is_tensor<std::remove_cvref_t<Tensor>>
+template <typename Compute, TensorLike Tensor>
 VECOPS_INLINE auto as_input_spec(Tensor&& tensor) {
   return input<Compute>(std::forward<Tensor>(tensor));
 }
 
-template <typename Compute, typename Spec>
-  requires (is_input_spec_v<Spec> &&
-            std::same_as<typename std::remove_cvref_t<Spec>::ComputeType,
-                         Compute>)
+template <typename Compute, InputSpecLike Spec>
+  requires std::same_as<
+      typename std::remove_cvref_t<Spec>::ComputeType, Compute>
 VECOPS_INLINE auto as_input_spec(Spec&& spec) {
   return std::forward<Spec>(spec);
 }
 
 /** Normalize a mutable Tensor or an existing output Spec. */
-template <typename Compute, typename Tensor>
-  requires (is_tensor<std::remove_cvref_t<Tensor>> &&
-            !std::is_const_v<
-                typename std::remove_cvref_t<Tensor>::ElementType>)
+template <typename Compute, TensorLike Tensor>
+  requires (!std::is_const_v<
+      typename std::remove_cvref_t<Tensor>::ElementType>)
 VECOPS_INLINE auto as_output_spec(Tensor&& tensor) {
   return output<Compute>(std::forward<Tensor>(tensor));
 }
 
-template <typename Compute, typename Spec>
-  requires (is_output_spec_v<Spec> &&
-            std::same_as<typename std::remove_cvref_t<Spec>::ComputeType,
-                         Compute>)
+template <typename Compute, OutputSpecLike Spec>
+  requires std::same_as<
+      typename std::remove_cvref_t<Spec>::ComputeType, Compute>
 VECOPS_INLINE auto as_output_spec(Spec&& spec) {
   return std::forward<Spec>(spec);
 }
@@ -2407,7 +2361,7 @@ VECOPS_INLINE auto transpose_view(
 
 /** @brief Keep the first N Spec dimensions at zero on trailing axes. */
 template <int N, typename Spec>
-  requires (is_input_spec_v<Spec> || is_output_spec_v<Spec>)
+  requires (InputSpecLike<Spec> || OutputSpecLike<Spec>)
 VECOPS_INLINE auto take_leading(const Spec& spec) {
   constexpr int Rank = [] {
     if constexpr (is_input_spec_v<Spec>) return Spec::InputTensor::Ndim;
@@ -2420,7 +2374,7 @@ VECOPS_INLINE auto take_leading(const Spec& spec) {
 
 /** @brief Keep the last N Spec dimensions at zero on leading axes. */
 template <int N, typename Spec>
-  requires (is_input_spec_v<Spec> || is_output_spec_v<Spec>)
+  requires (InputSpecLike<Spec> || OutputSpecLike<Spec>)
 VECOPS_INLINE auto take_trailing(const Spec& spec) {
   constexpr int Rank = [] {
     if constexpr (is_input_spec_v<Spec>) return Spec::InputTensor::Ndim;
@@ -2432,12 +2386,12 @@ VECOPS_INLINE auto take_trailing(const Spec& spec) {
 }
 
 template <typename View>
-  requires (is_tensor<std::remove_cvref_t<View>> ||
+  requires (is_tensor_v<std::remove_cvref_t<View>> ||
             is_input_spec_v<View> || is_output_spec_v<View> ||
             requires(const View& view) { view.spec(); })
 VECOPS_INLINE constexpr decltype(auto) logical_layout(const View& view) {
   using V = std::remove_cvref_t<View>;
-  if constexpr (is_tensor<V>) return view.layout();
+  if constexpr (is_tensor_v<V>) return view.layout();
   else if constexpr (is_input_spec_v<V>) return view.input_layout();
   else if constexpr (is_output_spec_v<V>) return view.output_layout();
   else {
@@ -2479,9 +2433,9 @@ public:
       : spec_(&spec), data_(spec.tensor().data()), policy_(policy) {
     static_assert(Policy::vector_axis < Rank);
     static_assert(
-        !details::is_unordered_policy<Policy> ||
+        !details::is_unordered_policy_v<Policy> ||
             (Policy::permutation_safe &&
-             details::transform_permutation_equivariant<Transform>),
+             details::transform_permutation_equivariant_v<Transform>),
         "unordered input conversion requires a permutation-safe kernel and transform");
   }
 
@@ -2517,23 +2471,23 @@ public:
     constexpr bool HasAccessDefaults =
         details::has_access_default_option_v<Options...>;
     constexpr bool HasPopulate =
-        vec::details::option_count<
+        vec::details::option_count_v<
             details::IsMaterializePopulate, Options...> != 0;
     if constexpr (HasAccessDefaults) {
       static_assert(
-          vec::details::option_count<
+          vec::details::option_count_v<
               details::IsConversionOrderOption, Options...> <= 1);
       static_assert(
-          vec::details::option_count<
+          vec::details::option_count_v<
               details::IsConversionValueOption, Options...> <= 1);
       static_assert(
-          vec::details::option_count<
+          vec::details::option_count_v<
               details::IsTemporalityOption, Options...> <= 1);
       static_assert(
-          vec::details::option_count<
+          vec::details::option_count_v<
               details::IsAlignmentOption, Options...> <= 1);
       static_assert(
-          vec::details::option_count<details::IsPackingOption, Options...> == 0,
+          vec::details::option_count_v<details::IsPackingOption, Options...> == 0,
           "packing options are only valid for tensor stores");
       using Planning = typename Policy::PlanningPolicyType;
       using Defaults = details::OverrideAccessDefaults<
@@ -2552,7 +2506,7 @@ public:
       return details::apply_inline(invoke, retained);
     } else if constexpr (HasPopulate) {
       static_assert(
-          vec::details::option_count<
+          vec::details::option_count_v<
               details::IsMaterializePopulate, Options...> == 1);
       auto retained = details::non_materialize_options(
           std::forward<Options>(options)...);
@@ -2567,8 +2521,7 @@ public:
     static_assert(0 <= Dim && Dim < Rank);
     details::validate_access_options<true, Options...>();
     const auto& tensor = spec_->tensor();
-    using StrideMeta = typename details::MetaElement<
-        Dim, typename Spec::InputLayout::Strides>::type;
+    using StrideMeta = stride_type_t<Dim, typename Spec::InputLayout>;
     constexpr bool UnitRankOne =
         Rank == 1 && details::is_const_one_meta_v<StrideMeta>;
     const nint_t base = [&] {
@@ -2583,7 +2536,7 @@ public:
       }
     }();
 
-    if constexpr (details::is_no_transform<Transform>) {
+    if constexpr (details::is_no_transform_v<Transform>) {
       return details::load_memory<Tag, const MemoryElement*, Policy>(
           tag, data_ + base, axis_stride,
           std::forward<Options>(options)...);
@@ -2593,11 +2546,11 @@ public:
           [&](const auto& context) VECOPS_INLINE_LAMBDA {
             vec::Vec<Tag> result;
             constexpr bool NeedsLogicalMaskLowering =
-                (vec::details::option_count<
+                (vec::details::option_count_v<
                      vec::details::IsMaskedOption, Options...> != 0 ||
-                 vec::details::option_count<
+                 vec::details::option_count_v<
                      vec::details::IsVectorMergeOption, Options...> != 0 ||
-                 vec::details::option_count<
+                 vec::details::option_count_v<
                      vec::details::IsScalarMergeOption, Options...> != 0) &&
                 !std::same_as<typename Transform::TIn, ComputeType>;
             if constexpr (!details::transform_tags_representable<
@@ -2618,7 +2571,7 @@ public:
               using TransformOutTag =
                   vec::Rebind<typename Transform::TOut, Tag>;
               auto transform_input = [&]() VECOPS_INLINE_LAMBDA {
-                if constexpr (details::transform_reads_input<Transform>) {
+                if constexpr (details::transform_reads_input_v<Transform>) {
                   return details::load_memory<
                       TransformInTag, const MemoryElement*, Policy>(
                           TransformInTag{}, data_ + base, axis_stride,
@@ -2739,9 +2692,9 @@ public:
       : spec_(&spec), data_(spec.tensor().data()), policy_(policy) {
     static_assert(Policy::vector_axis < Rank);
     static_assert(
-        !details::is_unordered_policy<Policy> ||
+        !details::is_unordered_policy_v<Policy> ||
             (Policy::permutation_safe &&
-             details::transform_permutation_equivariant<Transform>),
+             details::transform_permutation_equivariant_v<Transform>),
         "unordered output conversion requires a permutation-safe kernel and transform");
   }
 
@@ -2782,18 +2735,18 @@ public:
         details::has_access_default_option_v<Options...>;
     if constexpr (HasAccessDefaults) {
       static_assert(
-          vec::details::option_count<
+          vec::details::option_count_v<
               details::IsConversionOrderOption, Options...> <= 1);
       static_assert(
-          vec::details::option_count<
+          vec::details::option_count_v<
               details::IsConversionValueOption, Options...> <= 1);
       static_assert(
-          vec::details::option_count<
+          vec::details::option_count_v<
               details::IsTemporalityOption, Options...> <= 1);
       static_assert(
-          vec::details::option_count<details::IsPackingOption, Options...> <= 1);
+          vec::details::option_count_v<details::IsPackingOption, Options...> <= 1);
       static_assert(
-          vec::details::option_count<
+          vec::details::option_count_v<
               details::IsAlignmentOption, Options...> <= 1);
       using Planning = typename Policy::PlanningPolicyType;
       using Defaults = details::OverrideAccessDefaults<
@@ -2813,8 +2766,7 @@ public:
     static_assert(0 <= Dim && Dim < Rank);
     details::validate_access_options<false, Options...>();
     const auto& tensor = spec_->tensor();
-    using StrideMeta = typename details::MetaElement<
-        Dim, typename Spec::OutputLayout::Strides>::type;
+    using StrideMeta = stride_type_t<Dim, typename Spec::OutputLayout>;
     constexpr bool UnitRankOne =
         Rank == 1 && details::is_const_one_meta_v<StrideMeta>;
     const nint_t base = [&] {
@@ -2828,7 +2780,7 @@ public:
         return StrideMeta{stride<Dim>(tensor.layout())};
       }
     }();
-    if constexpr (details::is_no_transform<Transform>) {
+    if constexpr (details::is_no_transform_v<Transform>) {
       details::store_memory<Tag, MemoryElement*, Policy>(
           tag, data_ + base, value, axis_stride,
           std::forward<Options>(options)...);
@@ -2838,7 +2790,7 @@ public:
           [&](const auto& context) VECOPS_INLINE_LAMBDA {
             vec::Vec<Tag> result;
             constexpr bool NeedsLogicalMaskLowering =
-                vec::details::option_count<
+                vec::details::option_count_v<
                     vec::details::IsMaskedOption, Options...> != 0 &&
                 !std::same_as<typename Transform::TOut, ComputeType>;
             if constexpr (!details::transform_tags_representable<
@@ -2982,10 +2934,10 @@ public:
       Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
       Options&&... options) const {
     constexpr bool Populate =
-        vec::details::option_count<
+        vec::details::option_count_v<
             details::IsMaterializePopulate, Options...> != 0;
     static_assert(
-        vec::details::option_count<
+        vec::details::option_count_v<
             details::IsMaterializePopulate, Options...> <= 1);
     auto retained = details::non_materialize_options(
         std::forward<Options>(options)...);
@@ -2993,7 +2945,7 @@ public:
         VECOPS_INLINE_LAMBDA -> vec::Vec<Tag> {
       if constexpr (Populate) {
         static_assert(
-            vec::details::option_count<
+            vec::details::option_count_v<
                 vec::details::IsUnorderedOption,
                 decltype(access_options)...> == 0,
             "canonical deferred materialization must be populated ordered");
@@ -3019,10 +2971,10 @@ public:
         return value;
       } else {
         static_assert(
-            vec::details::option_count<
+            vec::details::option_count_v<
                 details::IsConversionOrderOption,
                 decltype(access_options)...> == 0 &&
-            vec::details::option_count<
+            vec::details::option_count_v<
                 details::IsConversionValueOption,
                 decltype(access_options)...> == 0,
             "canonical Compute materialization cannot be reinterpreted");
@@ -3101,9 +3053,9 @@ public:
       Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
       Options&&... options) const {
     static_assert(
-        vec::details::option_count<
+        vec::details::option_count_v<
             details::IsConversionOrderOption, Options...> == 0 &&
-        vec::details::option_count<
+        vec::details::option_count_v<
             details::IsConversionValueOption, Options...> == 0,
         "canonical Compute materialization cannot be reinterpreted");
     InputDataAccess<AuxSpec, CachePolicy> cache{auxiliary_, policy_};
@@ -3387,7 +3339,7 @@ public:
       Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
       Options&&... options) const {
     static_assert(
-        vec::details::option_count<
+        vec::details::option_count_v<
             details::IsConversionOrderOption, Options...> == 0,
         "with_unordered_access owns the conversion-order option");
     InputDataAccess<Spec, Policy> access{spec_, policy_};
@@ -3411,7 +3363,7 @@ public:
       Tag tag, const Coord<Rank>& position, Axis<Dim> dim,
       vec::Vec<Tag> value, Options&&... options) const {
     static_assert(
-        vec::details::option_count<
+        vec::details::option_count_v<
             details::IsConversionOrderOption, Options...> == 0,
         "with_unordered_access owns the conversion-order option");
     OutputDataAccess<Spec, Policy> access{spec_, policy_};
@@ -3463,7 +3415,7 @@ template <int Dim, typename Spec, typename Policy>
 VECOPS_INLINE auto slice_view(
     const InputDataAccess<Spec, Policy>& access, nint_t index) {
   auto sliced = slice_view<Dim>(access.spec(), index);
-  using SlicedPolicy = SliceAccessPolicyT<Policy, Dim>;
+  using SlicedPolicy = slice_access_policy_t<Policy, Dim>;
   return BorrowedDataAccess<decltype(sliced), SlicedPolicy>{
       std::move(sliced), SlicedPolicy{}};
 }
@@ -3472,7 +3424,7 @@ template <int I, int J, typename Spec, typename Policy>
 VECOPS_INLINE auto transpose_view(
     const InputDataAccess<Spec, Policy>& access) {
   auto transposed = transpose_view<I, J>(access.spec());
-  using TransposedPolicy = TransposeAccessPolicyT<Policy, I, J>;
+  using TransposedPolicy = transpose_access_policy_t<Policy, I, J>;
   return BorrowedDataAccess<decltype(transposed), TransposedPolicy>{
       std::move(transposed), TransposedPolicy{}};
 }
@@ -3481,7 +3433,7 @@ template <int Dim, typename Spec, typename Policy>
 VECOPS_INLINE auto slice_view(
     const OutputDataAccess<Spec, Policy>& access, nint_t index) {
   auto sliced = slice_view<Dim>(access.spec(), index);
-  using SlicedPolicy = SliceAccessPolicyT<Policy, Dim>;
+  using SlicedPolicy = slice_access_policy_t<Policy, Dim>;
   return BorrowedDataAccess<decltype(sliced), SlicedPolicy>{
       std::move(sliced), SlicedPolicy{}};
 }
@@ -3490,7 +3442,7 @@ template <int I, int J, typename Spec, typename Policy>
 VECOPS_INLINE auto transpose_view(
     const OutputDataAccess<Spec, Policy>& access) {
   auto transposed = transpose_view<I, J>(access.spec());
-  using TransposedPolicy = TransposeAccessPolicyT<Policy, I, J>;
+  using TransposedPolicy = transpose_access_policy_t<Policy, I, J>;
   return BorrowedDataAccess<decltype(transposed), TransposedPolicy>{
       std::move(transposed), TransposedPolicy{}};
 }
@@ -3499,7 +3451,7 @@ template <int Dim, typename Spec, typename Policy>
 VECOPS_INLINE auto slice_view(
     const BorrowedDataAccess<Spec, Policy>& access, nint_t index) {
   auto sliced = slice_view<Dim>(access.spec(), index);
-  using SlicedPolicy = SliceAccessPolicyT<Policy, Dim>;
+  using SlicedPolicy = slice_access_policy_t<Policy, Dim>;
   return BorrowedDataAccess<decltype(sliced), SlicedPolicy>{
       std::move(sliced), SlicedPolicy{}};
 }
@@ -3508,7 +3460,7 @@ template <int I, int J, typename Spec, typename Policy>
 VECOPS_INLINE auto transpose_view(
     const BorrowedDataAccess<Spec, Policy>& access) {
   auto transposed = transpose_view<I, J>(access.spec());
-  using TransposedPolicy = TransposeAccessPolicyT<Policy, I, J>;
+  using TransposedPolicy = transpose_access_policy_t<Policy, I, J>;
   return BorrowedDataAccess<decltype(transposed), TransposedPolicy>{
       std::move(transposed), TransposedPolicy{}};
 }
@@ -3518,7 +3470,7 @@ VECOPS_INLINE auto slice_view(
     const CanonicalMaterializedInputDataAccess<AuxSpec, CachePolicy>& access,
     nint_t index) {
   auto auxiliary = slice_view<Dim>(access.spec(), index);
-  using SlicedPolicy = SliceAccessPolicyT<CachePolicy, Dim>;
+  using SlicedPolicy = slice_access_policy_t<CachePolicy, Dim>;
   return CanonicalMaterializedInputDataAccess<
       decltype(auxiliary), SlicedPolicy>{
       std::move(auxiliary), SlicedPolicy{}};
@@ -3528,7 +3480,7 @@ template <int I, int J, typename AuxSpec, typename CachePolicy>
 VECOPS_INLINE auto transpose_view(
     const CanonicalMaterializedInputDataAccess<AuxSpec, CachePolicy>& access) {
   auto auxiliary = transpose_view<I, J>(access.spec());
-  using TransposedPolicy = TransposeAccessPolicyT<CachePolicy, I, J>;
+  using TransposedPolicy = transpose_access_policy_t<CachePolicy, I, J>;
   return CanonicalMaterializedInputDataAccess<
       decltype(auxiliary), TransposedPolicy>{
       std::move(auxiliary), TransposedPolicy{}};
@@ -3564,31 +3516,54 @@ VECOPS_INLINE decltype(auto) take_trailing(const Access& access) {
 
 /** A bound session exposing its Spec and kernel-owned access policy. */
 template <typename T>
-concept BoundTensorAccess = requires(const std::remove_cvref_t<T>& access) {
+inline constexpr bool is_bound_tensor_access_v = requires(
+    const std::remove_cvref_t<T>& access) {
   std::remove_cvref_t<T>::Rank;
   access.spec();
   access.policy();
 };
 
 template <typename T>
-concept BoundInputAccess = BoundTensorAccess<T> && [] {
-  using Spec = std::remove_cvref_t<decltype(
-      std::declval<const std::remove_cvref_t<T>&>().spec())>;
-  return Spec::is_input;
+concept BoundTensorAccess = is_bound_tensor_access_v<T>;
+
+template <typename T>
+inline constexpr bool is_bound_input_access_v = [] {
+  if constexpr (!is_bound_tensor_access_v<T>) {
+    return false;
+  } else {
+    using Spec = std::remove_cvref_t<decltype(
+        std::declval<const std::remove_cvref_t<T>&>().spec())>;
+    return Spec::is_input;
+  }
 }();
 
 template <typename T>
-concept BoundOutputAccess = BoundTensorAccess<T> && [] {
-  using Spec = std::remove_cvref_t<decltype(
-      std::declval<const std::remove_cvref_t<T>&>().spec())>;
-  return !Spec::is_input;
+concept BoundInputAccess = is_bound_input_access_v<T>;
+
+template <typename T>
+inline constexpr bool is_bound_output_access_v = [] {
+  if constexpr (!is_bound_tensor_access_v<T>) {
+    return false;
+  } else {
+    using Spec = std::remove_cvref_t<decltype(
+        std::declval<const std::remove_cvref_t<T>&>().spec())>;
+    return !Spec::is_input;
+  }
 }();
+
+template <typename T>
+concept BoundOutputAccess = is_bound_output_access_v<T>;
+
+template <typename T>
+inline constexpr bool is_committable_bound_output_access_v =
+    is_bound_output_access_v<T> &&
+    requires(std::remove_cvref_t<T>& access) {
+      access.commit();
+    };
 
 template <typename T>
 concept CommittableBoundOutputAccess =
-    BoundOutputAccess<T> && requires(std::remove_cvref_t<T>& access) {
-      access.commit();
-    };
+    is_committable_bound_output_access_v<T>;
 
 /**
  * @brief Owning output session backed by a contiguous auxiliary Tensor.
@@ -3648,9 +3623,9 @@ public:
       Options&&... options) const {
     if constexpr (Plan == AccessPlan::materialize_before_transform) {
       static_assert(
-          vec::details::option_count<
+          vec::details::option_count_v<
               details::IsConversionOrderOption, Options...> == 0 &&
-          vec::details::option_count<
+          vec::details::option_count_v<
               details::IsConversionValueOption, Options...> == 0,
           "before-transform output conversion is selected at operand binding");
     }
@@ -3664,9 +3639,9 @@ public:
       vec::Vec<Tag> value, Options&&... options) const {
     if constexpr (Plan == AccessPlan::materialize_before_transform) {
       static_assert(
-          vec::details::option_count<
+          vec::details::option_count_v<
               details::IsConversionOrderOption, Options...> == 0 &&
-          vec::details::option_count<
+          vec::details::option_count_v<
               details::IsConversionValueOption, Options...> == 0,
           "before-transform output conversion is selected at operand binding");
     }
@@ -3823,7 +3798,7 @@ VECOPS_INLINE auto slice_view(
         Plan, OriginalSpec, AuxSpec, Policy, Scope>& access,
     nint_t index) {
   auto sliced = slice_view<Dim>(access.auxiliary_spec(), index);
-  using SlicedPolicy = SliceAccessPolicyT<Policy, Dim>;
+  using SlicedPolicy = slice_access_policy_t<Policy, Dim>;
   return BorrowedDataAccess<decltype(sliced), SlicedPolicy>{
       std::move(sliced), SlicedPolicy{}};
 }
@@ -3834,7 +3809,7 @@ VECOPS_INLINE auto transpose_view(
     const MaterializedOutputDataAccess<
         Plan, OriginalSpec, AuxSpec, Policy, Scope>& access) {
   auto transposed = transpose_view<I, J>(access.auxiliary_spec());
-  using TransposedPolicy = TransposeAccessPolicyT<Policy, I, J>;
+  using TransposedPolicy = transpose_access_policy_t<Policy, I, J>;
   return BorrowedDataAccess<decltype(transposed), TransposedPolicy>{
       std::move(transposed), TransposedPolicy{}};
 }
@@ -3972,7 +3947,7 @@ consteval bool unordered_conversion_preferred() {
   if constexpr (sizeof(Memory) == sizeof(Compute)) {
     return true;
   } else {
-    return IsFloat16V<Memory> && std::same_as<Compute, float32_t>;
+    return is_float16_v<Memory> && std::same_as<Compute, float32_t>;
   }
 #else
   return true;
@@ -3984,7 +3959,7 @@ struct UnorderedAccessTraits<InputDataAccess<Spec, Policy>> {
   using ComputeType = typename Spec::ComputeType;
   static constexpr std::size_t storage_bytes = sizeof(typename Spec::MemoryElement);
   static constexpr bool eligible =
-      transform_permutation_equivariant<typename Spec::TransformType> &&
+      transform_permutation_equivariant_v<typename Spec::TransformType> &&
       unordered_conversion_preferred<
           typename Spec::MemoryElement, ComputeType>();
 };
@@ -3994,7 +3969,7 @@ struct UnorderedAccessTraits<OutputDataAccess<Spec, Policy>> {
   using ComputeType = typename Spec::ComputeType;
   static constexpr std::size_t storage_bytes = sizeof(typename Spec::MemoryElement);
   static constexpr bool eligible =
-      transform_permutation_equivariant<typename Spec::TransformType> &&
+      transform_permutation_equivariant_v<typename Spec::TransformType> &&
       unordered_conversion_preferred<
           typename Spec::MemoryElement, ComputeType>();
 };
@@ -4008,7 +3983,7 @@ struct UnorderedAccessTraits<BorrowedDataAccess<Spec, Policy>> {
       Policy::requested_plan == AccessPlan::materialize_before_transform;
   static constexpr bool eligible =
       !canonical_compute_output &&
-      transform_permutation_equivariant<typename Spec::TransformType> &&
+      transform_permutation_equivariant_v<typename Spec::TransformType> &&
       unordered_conversion_preferred<
           typename Spec::MemoryElement, ComputeType>();
 };
@@ -4039,7 +4014,7 @@ struct UnorderedAccessTraits<
       sizeof(typename OriginalSpec::MemoryElement);
   static constexpr bool eligible =
       Plan == AccessPlan::materialize_after_transform &&
-      transform_permutation_equivariant<typename OriginalSpec::TransformType> &&
+      transform_permutation_equivariant_v<typename OriginalSpec::TransformType> &&
       unordered_conversion_preferred<
           typename OriginalSpec::MemoryElement, ComputeType>();
 };
@@ -4183,7 +4158,7 @@ VECOPS_INLINE nint_t required_workspace(const Spec& spec, Policy policy) {
       details::resolve_plan<Spec, Policy>();
   if constexpr (plan == AccessPlan::direct) return 0;
   if constexpr (is_input_spec_v<Spec>) {
-    if constexpr (!details::transform_reads_input<typename Spec::TransformType>) {
+    if constexpr (!details::transform_reads_input_v<typename Spec::TransformType>) {
       return 0;
     }
   }
@@ -4204,9 +4179,9 @@ VECOPS_INLINE nint_t required_workspace(const Spec& spec, Policy policy) {
   }();
   const nint_t elements = [&] {
     if constexpr (is_input_spec_v<Spec>) {
-      return details::tensor_numel(spec.input_layout());
+      return numel(spec.input_layout());
     } else {
-      return details::tensor_numel(spec.output_layout());
+      return numel(spec.output_layout());
     }
   }();
   return align_up(
@@ -4253,16 +4228,20 @@ struct OperandBinding {
   [[no_unique_address]] Defaults defaults;
 };
 
-template <typename T>
-struct IsOperandBinding : std::false_type {};
+namespace details {
 
-template <typename Spec, typename Policy, typename Defaults>
-struct IsOperandBinding<OperandBinding<Spec, Policy, Defaults>>
-    : std::true_type {};
+template <typename T>
+struct IsOperandBinding : std::bool_constant<
+    is_specialization_of_v<OperandBinding, T>> {};
+
+} // namespace details
 
 template <typename T>
 inline constexpr bool is_operand_binding_v =
-    IsOperandBinding<std::remove_cvref_t<T>>::value;
+    details::IsOperandBinding<std::remove_cvref_t<T>>::value;
+
+template <typename T>
+concept OperandBindingLike = is_operand_binding_v<T>;
 
 /**
  * @brief Create an operand binding consumed by `kernel::with_operands`.
@@ -4314,7 +4293,7 @@ VECOPS_INLINE decltype(auto) with_bound_input(
 
   auto& workspace = context.workspace_view();
 
-  const nint_t count = tensor_numel(spec.input_layout());
+  const nint_t count = numel(spec.input_layout());
   auto aux_layout = auxiliary_layout<AxisValue>(spec.input_layout());
   if constexpr (plan == AccessPlan::materialize_before_transform) {
     using Memory = typename Spec::MemoryElement;
@@ -4447,7 +4426,7 @@ VECOPS_INLINE decltype(auto) with_bound_output(
 
   auto& workspace = context.workspace_view();
 
-  const nint_t count = tensor_numel(spec.output_layout());
+  const nint_t count = numel(spec.output_layout());
   auto aux_layout = auxiliary_layout<AxisValue>(spec.output_layout());
   if constexpr (plan == AccessPlan::materialize_before_transform) {
     using Compute = typename Spec::ComputeType;
@@ -4675,8 +4654,7 @@ VECOPS_INLINE decltype(auto) with_operand_tuple(
  * recursion, tuple packing, or std::apply stands between the callback and the
  * compiler's inliner.
  */
-template <typename Binding, typename Fn>
-  requires tensor::is_operand_binding_v<Binding>
+template <tensor::OperandBindingLike Binding, typename Fn>
 VECOPS_INLINE decltype(auto) with_operands(
     WorkspaceView& workspace, Binding&& binding, Fn&& fn) {
   return details::with_operand_workspace_scope<
@@ -4690,8 +4668,8 @@ VECOPS_INLINE decltype(auto) with_operands(
       });
 }
 
-template <execution::ExecutionScope Context, typename Binding, typename Fn>
-  requires tensor::is_operand_binding_v<Binding>
+template <execution::ExecutionScope Context,
+          tensor::OperandBindingLike Binding, typename Fn>
 /**
  * @brief Bind one operand under an execution scope.
  * @return Callback result; direct plans introduce no workspace operations.
@@ -4713,9 +4691,8 @@ VECOPS_INLINE decltype(auto) with_operands(
   }
 }
 
-template <typename B0, typename B1, typename Fn>
-  requires (tensor::is_operand_binding_v<B0> &&
-            tensor::is_operand_binding_v<B1>)
+template <tensor::OperandBindingLike B0,
+          tensor::OperandBindingLike B1, typename Fn>
 VECOPS_INLINE decltype(auto) with_operands(
     WorkspaceView& workspace, B0&& b0, B1&& b1, Fn&& fn) {
   return details::with_operand_workspace_scope<
@@ -4734,9 +4711,8 @@ VECOPS_INLINE decltype(auto) with_operands(
 }
 
 template <execution::ExecutionScope Context,
-          typename B0, typename B1, typename Fn>
-  requires (tensor::is_operand_binding_v<B0> &&
-            tensor::is_operand_binding_v<B1>)
+          tensor::OperandBindingLike B0,
+          tensor::OperandBindingLike B1, typename Fn>
 /** Bind two operands under one execution/workspace lifetime. */
 VECOPS_INLINE decltype(auto) with_operands(
     Context& context, B0&& b0, B1&& b1, Fn&& fn) {
@@ -4759,10 +4735,9 @@ VECOPS_INLINE decltype(auto) with_operands(
   }
 }
 
-template <typename B0, typename B1, typename B2, typename Fn>
-  requires (tensor::is_operand_binding_v<B0> &&
-            tensor::is_operand_binding_v<B1> &&
-            tensor::is_operand_binding_v<B2>)
+template <tensor::OperandBindingLike B0,
+          tensor::OperandBindingLike B1,
+          tensor::OperandBindingLike B2, typename Fn>
 VECOPS_INLINE decltype(auto) with_operands(
     WorkspaceView& workspace, B0&& b0, B1&& b1, B2&& b2, Fn&& fn) {
   return details::with_operand_workspace_scope<
@@ -4785,10 +4760,9 @@ VECOPS_INLINE decltype(auto) with_operands(
 }
 
 template <execution::ExecutionScope Context,
-          typename B0, typename B1, typename B2, typename Fn>
-  requires (tensor::is_operand_binding_v<B0> &&
-            tensor::is_operand_binding_v<B1> &&
-            tensor::is_operand_binding_v<B2>)
+          tensor::OperandBindingLike B0,
+          tensor::OperandBindingLike B1,
+          tensor::OperandBindingLike B2, typename Fn>
 /** Bind three operands under one execution/workspace lifetime. */
 VECOPS_INLINE decltype(auto) with_operands(
     Context& context, B0&& b0, B1&& b1, B2&& b2, Fn&& fn) {
@@ -4815,11 +4789,10 @@ VECOPS_INLINE decltype(auto) with_operands(
   }
 }
 
-template <typename B0, typename B1, typename B2, typename B3, typename Fn>
-  requires (tensor::is_operand_binding_v<B0> &&
-            tensor::is_operand_binding_v<B1> &&
-            tensor::is_operand_binding_v<B2> &&
-            tensor::is_operand_binding_v<B3>)
+template <tensor::OperandBindingLike B0,
+          tensor::OperandBindingLike B1,
+          tensor::OperandBindingLike B2,
+          tensor::OperandBindingLike B3, typename Fn>
 VECOPS_INLINE decltype(auto) with_operands(
     WorkspaceView& workspace, B0&& b0, B1&& b1, B2&& b2, B3&& b3,
     Fn&& fn) {
@@ -4848,11 +4821,10 @@ VECOPS_INLINE decltype(auto) with_operands(
 }
 
 template <execution::ExecutionScope Context,
-          typename B0, typename B1, typename B2, typename B3, typename Fn>
-  requires (tensor::is_operand_binding_v<B0> &&
-            tensor::is_operand_binding_v<B1> &&
-            tensor::is_operand_binding_v<B2> &&
-            tensor::is_operand_binding_v<B3>)
+          tensor::OperandBindingLike B0,
+          tensor::OperandBindingLike B1,
+          tensor::OperandBindingLike B2,
+          tensor::OperandBindingLike B3, typename Fn>
 /** Bind four operands under one execution/workspace lifetime. */
 VECOPS_INLINE decltype(auto) with_operands(
     Context& context, B0&& b0, B1&& b1, B2&& b2, B3&& b3,

@@ -13,6 +13,7 @@
 #include <type_traits>
 #include <cstring>
 
+#include "vecops/vec/details/Conversion.h"
 #include "vecops/vec/details/x86/Basic.h"
 #include "vecops/util/ScalarConvert.h"
 
@@ -24,7 +25,7 @@ namespace vecops::vec::details {
 /* **************************************************************************** */
 
 template <typename T>
-inline constexpr bool is_x86_conversion_element =
+inline constexpr bool is_x86_conversion_element_v =
     std::same_as<T, bfloat16_t> || std::same_as<T, float16_t> ||
     std::same_as<T, float32_t> || std::same_as<T, float64_t> ||
     std::same_as<T, int8_t> || std::same_as<T, uint8_t> ||
@@ -260,10 +261,10 @@ VECOPS_ALWAYS_INLINE Mask<ToTag> x86_convert_mask_native(
   using ToTraits = RepresentationTraits<X86Backend, ToTag>;
   using FromTraits = RepresentationTraits<X86Backend, FromTag>;
   static_assert(
-      is_x86_conversion_element<ElementOf<ToTag>>,
+      is_x86_conversion_element_v<ElementOf<ToTag>>,
       "unsupported x86 mask conversion destination element type");
   static_assert(
-      is_x86_conversion_element<ElementOf<FromTag>>,
+      is_x86_conversion_element_v<ElementOf<FromTag>>,
       "unsupported x86 mask conversion source element type");
 
   if constexpr (ToTraits::word_count == 1 && FromTraits::word_count == 1) {
@@ -279,67 +280,6 @@ VECOPS_ALWAYS_INLINE Mask<ToTag> x86_convert_mask_native(
     const auto upper = x86_convert_mask_native(
         ToHalf{}, FromHalf{}, x86_conversion_mask_upper(from, value));
     return x86_conversion_mask_concat(to, lower, upper);
-  }
-}
-
-template <typename>
-struct X86LaneOption : std::false_type {};
-
-template <int Phase>
-struct X86LaneOption<cvt::Lane<Phase>> : std::true_type {
-  static constexpr int phase = Phase;
-};
-
-template <typename>
-struct X86VectorMergeOption : std::false_type {};
-
-template <VectorValue V>
-struct X86VectorMergeOption<opt::VectorMerge<V>> : std::true_type {
-  using Value = V;
-};
-
-template <typename>
-struct X86ScalarMergeOption : std::false_type {};
-
-template <Element T>
-struct X86ScalarMergeOption<opt::ScalarMerge<T>> : std::true_type {
-  using Value = T;
-};
-
-template <typename... Options>
-consteval int x86_conversion_lane_phase() {
-  int phase = -1;
-  ([]<typename Option>(int& result) {
-    using Clean = std::remove_cvref_t<Option>;
-    if constexpr (X86LaneOption<Clean>::value)
-      result = X86LaneOption<Clean>::phase;
-  }.template operator()<Options>(phase), ...);
-  return phase;
-}
-
-template <VectorTag Tag, typename... Options>
-VECOPS_ALWAYS_INLINE Vec<Tag> x86_conversion_population(
-    Tag tag, Options&&... options) {
-  if constexpr ((X86VectorMergeOption<
-                    std::remove_cvref_t<Options>>::value || ...)) {
-    const Vec<Tag>* result = nullptr;
-    ([&]<typename Option>(Option&& option) {
-      if constexpr (X86VectorMergeOption<
-                        std::remove_cvref_t<Option>>::value)
-        result = &option.value;
-    }(std::forward<Options>(options)), ...);
-    return *result;
-  } else if constexpr ((X86ScalarMergeOption<
-                           std::remove_cvref_t<Options>>::value || ...)) {
-    ElementOf<Tag> scalar{};
-    ([&]<typename Option>(Option&& option) {
-      if constexpr (X86ScalarMergeOption<
-                        std::remove_cvref_t<Option>>::value)
-        scalar = option.value;
-    }(std::forward<Options>(options)), ...);
-    return execute(FillOp{}, tag, scalar);
-  } else {
-    return execute(FillOp{}, tag, ElementOf<Tag>{});
   }
 }
 
@@ -850,35 +790,6 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_single_word(
   }
 }
 
-template <int Levels, VectorTag Tag>
-VECOPS_ALWAYS_INLINE auto x86_conversion_select_even(
-    Tag tag, Vec<Tag> value) {
-  if constexpr (Levels == 0) {
-    return value;
-  } else {
-    using HalfTag = Half<Tag>;
-    return x86_conversion_select_even<Levels - 1>(
-        HalfTag{}, execute(EvenOp{}, tag, value));
-  }
-}
-
-template <int Levels, VectorTag Tag, VectorTag ValuesTag>
-VECOPS_ALWAYS_INLINE Vec<Tag> x86_conversion_insert_even(
-    Tag tag, Vec<ValuesTag> values, Vec<Tag> fallback) {
-  if constexpr (Levels == 0) {
-    static_assert(std::same_as<Tag, ValuesTag>);
-    return values;
-  } else {
-    using HalfTag = Half<Tag>;
-    const auto fallback_even = execute(EvenOp{}, tag, fallback);
-    const auto fallback_odd = execute(OddOp{}, tag, fallback);
-    const auto result_even =
-        x86_conversion_insert_even<Levels - 1, HalfTag, ValuesTag>(
-            HalfTag{}, values, fallback_even);
-    return execute(InterleaveOp{}, tag, result_even, fallback_odd);
-  }
-}
-
 template <VectorTag ToTag, VectorTag FromTag, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_lane_native(
     ToTag to, FromTag from, Vec<FromTag> value, Options&&... options) {
@@ -888,11 +799,11 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_lane_native(
       ? static_cast<int>(sizeof(ElementOf<FromTag>) / sizeof(ElementOf<ToTag>))
       : static_cast<int>(sizeof(ElementOf<ToTag>) / sizeof(ElementOf<FromTag>));
   constexpr int levels = ratio == 2 ? 1 : ratio == 4 ? 2 : 3;
-  constexpr int phase = x86_conversion_lane_phase<Options...>();
+  constexpr int phase = conversion_lane_phase<Options...>();
 
   if constexpr (!narrows) {
     if constexpr (phase == 0) {
-      const auto selected = x86_conversion_select_even<levels>(from, value);
+      const auto selected = conversion_select_even<levels>(from, value);
       using SelectedTag = decltype([] {
         if constexpr (levels == 1) return Half<FromTag>{};
         else if constexpr (levels == 2) return Half<Half<FromTag>>{};
@@ -915,10 +826,10 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_lane_native(
       else
         return x86_convert_vec_native(CompactTag{}, from, value);
     }();
-    auto fallback = x86_conversion_population(
+    auto fallback = conversion_population<X86Backend>(
         to, std::forward<Options>(options)...);
     if constexpr (phase == 0) {
-      return x86_conversion_insert_even<levels, ToTag, CompactTag>(
+      return conversion_insert_even<levels, ToTag, CompactTag>(
           to, compact, fallback);
     } else {
       static_assert(ratio == 2 && phase == 1);
@@ -935,8 +846,8 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_native(
   using FromTraits = RepresentationTraits<X86Backend, FromTag>;
   using To = ElementOf<ToTag>;
   using From = ElementOf<FromTag>;
-  static_assert(is_x86_conversion_element<ElementOf<ToTag>>);
-  static_assert(is_x86_conversion_element<ElementOf<FromTag>>);
+  static_assert(is_x86_conversion_element_v<ElementOf<ToTag>>);
+  static_assert(is_x86_conversion_element_v<ElementOf<FromTag>>);
 
   constexpr bool split_bfloat32_narrowing =
       std::same_as<ElementOf<ToTag>, bfloat16_t> &&
@@ -1006,7 +917,7 @@ struct NativeImpl<X86Backend, ConvertOp, ToTag> {
       ConvertOp, ToTag to, FromTag from, Vec<FromTag> value,
       Options&&... options) {
     constexpr bool lane_layout =
-        (X86LaneOption<std::remove_cvref_t<Options>>::value || ...);
+        (is_lane_option_v<std::remove_cvref_t<Options>> || ...);
     constexpr bool wraps =
         (std::same_as<std::remove_cvref_t<Options>, cvt::Wrap> || ...);
     constexpr bool masked =
@@ -1022,7 +933,7 @@ struct NativeImpl<X86Backend, ConvertOp, ToTag> {
       }
     }();
     if constexpr (masked) {
-      const auto inactive = x86_conversion_population(
+      const auto inactive = conversion_population<X86Backend>(
           to, std::forward<Options>(options)...);
       const Mask<ToTag>* mask = nullptr;
       ([&]<typename Option>(Option&& option) {

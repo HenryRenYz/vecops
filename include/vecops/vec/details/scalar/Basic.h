@@ -52,44 +52,6 @@ struct NativeWordImpl<ScalarBackend, MaskFillOp> {
   }
 };
 
-template <VectorTag Tag>
-struct NativeImpl<ScalarBackend, FillOp, Tag> {
-  static VECOPS_ALWAYS_INLINE Vec<Tag> call(
-      FillOp, Tag, ElementOf<Tag> value) {
-    using Traits = RepresentationTraits<ScalarBackend, Tag>;
-    Vec<Tag> result{};
-    if constexpr (Traits::word_count == 1) {
-      for (nint_t lane = 0; lane < Traits::word_lanes; ++lane) {
-        result[lane] = value;
-      }
-    } else {
-      for (nint_t word = 0; word < Traits::word_count; ++word) {
-        for (nint_t lane = 0; lane < Traits::word_lanes; ++lane) {
-          result[word][lane] = value;
-        }
-      }
-    }
-    return result;
-  }
-};
-
-template <VectorTag Tag>
-struct NativeImpl<ScalarBackend, MaskFillOp, Tag> {
-  static VECOPS_ALWAYS_INLINE Mask<Tag> call(
-      MaskFillOp, Tag, bool value) {
-    using Traits = RepresentationTraits<ScalarBackend, Tag>;
-    Mask<Tag> result{};
-    if constexpr (Traits::word_count == 1) {
-      value ? result.bits.set() : result.bits.reset();
-    } else {
-      for (nint_t word = 0; word < Traits::word_count; ++word) {
-        value ? result[word].bits.set() : result[word].bits.reset();
-      }
-    }
-    return result;
-  }
-};
-
 /* **************************************************************************** */
 //    scalar_while_mask and MaskWhile                                         //
 /* **************************************************************************** */
@@ -149,6 +111,19 @@ struct NativeWordImpl<ScalarBackend, BlendOp> {
     return false_value;
   }
 };
+
+/**
+ * Composes every masked scalar word operation: computed lanes replace the
+ * policy-provided inactive word under the lane mask. The policy itself is
+ * applied by the caller through the inactive fill.
+ */
+template <nint_t Index, VectorTag Tag>
+VECOPS_ALWAYS_INLINE NativeWordVec<Tag> scalar_masked_merge(
+    Tag tag, NativeWordVec<Tag> computed, NativeWordMask<Tag> mask,
+    NativeWordVec<Tag> inactive) {
+  return NativeWordImpl<ScalarBackend, BlendOp>::call<Index>(
+      BlendOp{}, tag, inactive, mask, computed);
+}
 
 /* **************************************************************************** */
 //    Mask binary / unary operations                                          //
@@ -254,6 +229,7 @@ struct NativeWordImpl<ScalarBackend, BitCastOp> {
 /* **************************************************************************** */
 
 template <VectorTag Tag>
+  requires (RepresentationTraits<ScalarBackend, Tag>::word_count == 1)
 struct NativeImpl<ScalarBackend, LowerOp, Tag> {
   static VECOPS_ALWAYS_INLINE Vec<Half<Tag>> call(
       LowerOp, Tag tag, Vec<Tag> value) {
@@ -279,6 +255,7 @@ struct NativeImpl<ScalarBackend, LowerOp, Tag> {
 };
 
 template <VectorTag Tag>
+  requires (RepresentationTraits<ScalarBackend, Tag>::word_count == 1)
 struct NativeImpl<ScalarBackend, UpperOp, Tag> {
   static VECOPS_ALWAYS_INLINE Vec<Half<Tag>> call(
       UpperOp, Tag tag, Vec<Tag> value) {
@@ -310,6 +287,7 @@ struct NativeImpl<ScalarBackend, UpperOp, Tag> {
 /* **************************************************************************** */
 
 template <VectorTag Tag>
+  requires (RepresentationTraits<ScalarBackend, Tag>::word_count == 1)
 struct NativeImpl<ScalarBackend, ConcatOp, Tag> {
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(
       ConcatOp, Tag tag, Vec<Half<Tag>> lower_value,
@@ -373,6 +351,9 @@ VECOPS_VEC_DEFINE_SCALAR_EVEN_ODD(OddOp, 1);
 //    ConcatEven / ConcatOdd                                                  //
 /* **************************************************************************** */
 
+// Width-preserving selects must not go through the generic
+// Concat(Even(a), Even(b)) fallback: subword scalable Tags have no valid
+// Half, so the lanewise implementation below is the only well-formed path.
 #define VECOPS_VEC_DEFINE_SCALAR_CONCAT_SELECT(OpType, Offset)           \
   template <VectorTag Tag>                                               \
   struct NativeImpl<ScalarBackend, OpType, Tag> {                        \

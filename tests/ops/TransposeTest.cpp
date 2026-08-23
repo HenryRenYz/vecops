@@ -121,7 +121,7 @@ TEST(TransposeTest, ConvertsAtDataAccessBoundary) {
       input_tensor, output_tensor);
   static_assert(std::same_as<
       typename decltype(operation)::ResourceRequirements,
-      typename execution::details::CurrentBackend::DefaultRequirements>);
+      typename execution::details::current_backend_t::DefaultRequirements>);
   ExecutionSession execution{};
   execution.with_region(
       operation, [&](auto& region) VECOPS_INLINE_LAMBDA {

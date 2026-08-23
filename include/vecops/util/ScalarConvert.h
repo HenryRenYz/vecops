@@ -17,27 +17,29 @@ namespace details {
 
 template <typename T, typename = void/*SFINAE*/>
 struct DTypePromote {
-  using Type = T;
+  using type = T;
 };
 
 template <typename T>
-struct DTypePromote<T, std::enable_if_t<(is_int<T> && is_none<T, uint32_t> && sizeof(T) <= sizeof(int32_t))>> {
-  using Type = int32_t;
+  requires (is_int_v<T> && is_none_v<T, uint32_t> && sizeof(T) <= sizeof(int32_t))
+struct DTypePromote<T, void> {
+  using type = int32_t;
 };
 
 template <typename T>
-struct DTypePromote<T, std::enable_if_t<(is_float<T> && sizeof(T) <= sizeof(float32_t))>> {
-  using Type = float32_t;
+  requires (is_float_v<T> && sizeof(T) <= sizeof(float32_t))
+struct DTypePromote<T, void> {
+  using type = float32_t;
 };
 
 } // namespace details
 
 template <typename TOut, typename TIn>
 VECOPS_INLINE constexpr TOut convert(TIn v) {
-  using TPromoteIn = details::DTypePromote<TIn>::Type;
-  using TPromoteOut = details::DTypePromote<TOut>::Type;
-  if constexpr (is_int<TOut> && sizeof(TOut) < sizeof(TIn)) {
-    if constexpr (is_unsigned_int<TIn>) {
+  using TPromoteIn = details::DTypePromote<TIn>::type;
+  using TPromoteOut = details::DTypePromote<TOut>::type;
+  if constexpr (is_int_v<TOut> && sizeof(TOut) < sizeof(TIn)) {
+    if constexpr (is_unsigned_int_v<TIn>) {
       const auto HI = TIn(std::numeric_limits<TOut>::max());
       return TOut(std::min(HI, v));
     } else {
@@ -46,17 +48,17 @@ VECOPS_INLINE constexpr TOut convert(TIn v) {
       const auto LO = Wide(std::numeric_limits<TOut>::min());
       return TOut(std::max(LO, std::min(HI, Wide(v))));
     }
-  } else if constexpr (is_int<TOut> && is_int<TIn> && sizeof(TOut) == sizeof(TIn)) {
-    if constexpr (is_unsigned_int<TOut>) {
+  } else if constexpr (is_int_v<TOut> && is_int_v<TIn> && sizeof(TOut) == sizeof(TIn)) {
+    if constexpr (is_unsigned_int_v<TOut>) {
       const auto LO = TIn(0);
       return TOut(std::max(v, LO));
-    } else if constexpr (is_unsigned_int<TIn>) {
+    } else if constexpr (is_unsigned_int_v<TIn>) {
       const auto HI = TIn(std::numeric_limits<TOut>::max());
       return TOut(std::min(v, HI));
     } else {
       return TOut(v);
     }
-  } else if constexpr (is_int<TOut> && is_float<TIn>) {
+  } else if constexpr (is_int_v<TOut> && is_float_v<TIn>) {
     // Clamp in the floating-point domain before converting: a plain
     // static_cast<uint>(negative float) is undefined behavior, and
     // compilers resolve that UB differently at different optimization
@@ -64,7 +66,7 @@ VECOPS_INLINE constexpr TOut convert(TIn v) {
     // UB has already produced a wrapped value.
     const auto f = static_cast<TPromoteIn>(v);
     if (std::isnan(static_cast<double>(f))) return TOut(0);
-    if constexpr (is_unsigned_int<TOut>) {
+    if constexpr (is_unsigned_int_v<TOut>) {
       constexpr auto hi = [] {
         using F = TPromoteIn;
         // Largest float exactly representable in TOut.

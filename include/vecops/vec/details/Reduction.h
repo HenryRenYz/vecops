@@ -27,7 +27,7 @@ VECOPS_ALWAYS_INLINE ElementOf<Tag> execute_reduction_options(
   static_assert(
       ReductionFilterOptions<Tag, Options...>,
       "reduction accepts exactly one opt::masked or opt::unmasked");
-  if constexpr (option_count<IsUnmaskedOption, Options...> == 1) {
+  if constexpr (option_count_v<IsUnmaskedOption, Options...> == 1) {
     return execute(op, tag, value);
   } else {
     const auto& mask = find_option<IsMaskedOption>(
@@ -71,14 +71,14 @@ template <typename ReduceOp>
 struct ReductionCombineOp;
 
 template <>
-struct ReductionCombineOp<ReduceAddOp> { using Type = AddOp; };
+struct ReductionCombineOp<ReduceAddOp> { using type = AddOp; };
 template <>
-struct ReductionCombineOp<ReduceMaxOp> { using Type = MaxOp; };
+struct ReductionCombineOp<ReduceMaxOp> { using type = MaxOp; };
 template <>
-struct ReductionCombineOp<ReduceMinOp> { using Type = MinOp; };
+struct ReductionCombineOp<ReduceMinOp> { using type = MinOp; };
 
 template <typename ReduceOp>
-using ReductionCombineOpOf = typename ReductionCombineOp<ReduceOp>::Type;
+using ReductionCombineOpOf = typename ReductionCombineOp<ReduceOp>::type;
 
 template <typename Backend, typename ReduceOp,
           nint_t Begin, nint_t Count,

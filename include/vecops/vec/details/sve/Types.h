@@ -36,18 +36,18 @@ inline constexpr bool dependent_false = false;
 template <Element T>
 struct SVERawVector;
 
-template <> struct SVERawVector<bfloat16_t> { using Type = svbfloat16_t; };
-template <> struct SVERawVector<float16_t> { using Type = svfloat16_t; };
-template <> struct SVERawVector<float32_t> { using Type = svfloat32_t; };
-template <> struct SVERawVector<float64_t> { using Type = svfloat64_t; };
-template <> struct SVERawVector<int8_t> { using Type = svint8_t; };
-template <> struct SVERawVector<uint8_t> { using Type = svuint8_t; };
-template <> struct SVERawVector<int16_t> { using Type = svint16_t; };
-template <> struct SVERawVector<uint16_t> { using Type = svuint16_t; };
-template <> struct SVERawVector<int32_t> { using Type = svint32_t; };
-template <> struct SVERawVector<uint32_t> { using Type = svuint32_t; };
-template <> struct SVERawVector<int64_t> { using Type = svint64_t; };
-template <> struct SVERawVector<uint64_t> { using Type = svuint64_t; };
+template <> struct SVERawVector<bfloat16_t> { using type = svbfloat16_t; };
+template <> struct SVERawVector<float16_t> { using type = svfloat16_t; };
+template <> struct SVERawVector<float32_t> { using type = svfloat32_t; };
+template <> struct SVERawVector<float64_t> { using type = svfloat64_t; };
+template <> struct SVERawVector<int8_t> { using type = svint8_t; };
+template <> struct SVERawVector<uint8_t> { using type = svuint8_t; };
+template <> struct SVERawVector<int16_t> { using type = svint16_t; };
+template <> struct SVERawVector<uint16_t> { using type = svuint16_t; };
+template <> struct SVERawVector<int32_t> { using type = svint32_t; };
+template <> struct SVERawVector<uint32_t> { using type = svuint32_t; };
+template <> struct SVERawVector<int64_t> { using type = svint64_t; };
+template <> struct SVERawVector<uint64_t> { using type = svuint64_t; };
 
 template <Element T, int ScalePower>
 struct SVEScalableVector;
@@ -57,10 +57,10 @@ struct SVEScalableVector<T, 0> : SVERawVector<T> {};
 
 #define VECOPS_VEC_DEFINE_SVE_TUPLES(ElementType, Name)                    \
   template <> struct SVEScalableVector<ElementType, 1> {                   \
-    using Type = sv##Name##x2_t;                                           \
+    using type = sv##Name##x2_t;                                           \
   };                                                                        \
   template <> struct SVEScalableVector<ElementType, 2> {                   \
-    using Type = sv##Name##x4_t;                                           \
+    using type = sv##Name##x4_t;                                           \
   }
 
 VECOPS_VEC_DEFINE_SVE_TUPLES(bfloat16_t, bfloat16);
@@ -87,9 +87,9 @@ struct SVEScalableMask;
 #error "VLA multiword SVE masks require predicate-tuple support; use GCC 13 or newer, Clang, or compile with -msve-vector-bits=<bits> to select the fixed-SVE array representation"
 #endif
 
-template <> struct SVEScalableMask<0> { using Type = svbool_t; };
-template <> struct SVEScalableMask<1> { using Type = svboolx2_t; };
-template <> struct SVEScalableMask<2> { using Type = svboolx4_t; };
+template <> struct SVEScalableMask<0> { using type = svbool_t; };
+template <> struct SVEScalableMask<1> { using type = svboolx2_t; };
+template <> struct SVEScalableMask<2> { using type = svboolx4_t; };
 
 // Clang 19 gates predicate-tuple access behind SVE2.1 even though these
 // create/get/set operations only describe predicate-register grouping. Keep
@@ -304,15 +304,15 @@ struct RepresentationTraits<
       "ScalableTag subword may contain no lanes on a conforming SVE target");
 
   using Element = T;
-  using WordVec = typename SVERawVector<T>::Type;
+  using WordVec = typename SVERawVector<T>::type;
   using WordMask = svbool_t;
-  using VecType = typename SVEScalableVector<T, (ScalePower > 0 ? ScalePower : 0)>::Type;
-  using MaskType = typename SVEScalableMask<(ScalePower > 0 ? ScalePower : 0)>::Type;
+  using VecType = typename SVEScalableVector<T, (ScalePower > 0 ? ScalePower : 0)>::type;
+  using MaskType = typename SVEScalableMask<(ScalePower > 0 ? ScalePower : 0)>::type;
 
   static constexpr nint_t word_count =
       ScalePower > 0 ? (nint_t{1} << ScalePower) : 1;
-  static constexpr bool is_runtime_size = true;
-  static constexpr bool is_subword = ScalePower < 0;
+  static constexpr bool is_runtime_size_v = true;
+  static constexpr bool is_subword_v = ScalePower < 0;
 
   static VECOPS_ALWAYS_INLINE nint_t word_lanes() {
     return sve_word_lanes<T>();
@@ -336,7 +336,7 @@ struct SVEFixedRawVector;
 
 #define VECOPS_VEC_DEFINE_FIXED_SVE(ElementType, Name)                    \
   template <> struct SVEFixedRawVector<ElementType> {                      \
-    using Type = sv##Name##_t                                              \
+    using type = sv##Name##_t                                              \
         __attribute__((arm_sve_vector_bits(FIXED_SVE_BITS)));              \
   }
 
@@ -358,7 +358,7 @@ VECOPS_VEC_DEFINE_FIXED_SVE(uint64_t, uint64);
 /** Sized VLS word that retains its element type for Vec-to-Tag inference. */
 template <Element T>
 struct SVEFixedVector {
-  using RawType = typename SVEFixedRawVector<T>::Type;
+  using RawType = typename SVEFixedRawVector<T>::type;
   static constexpr nint_t physical_lanes =
       FIXED_SVE_BITS / 8 / static_cast<nint_t>(sizeof(T));
 
@@ -389,8 +389,8 @@ struct RepresentationTraits<
       : (word_lanes >> (-ScalePower));
   static constexpr nint_t word_count =
       ScalePower > 0 ? (nint_t{1} << ScalePower) : 1;
-  static constexpr bool is_runtime_size = false;
-  static constexpr bool is_subword = ScalePower < 0;
+  static constexpr bool is_runtime_size_v = false;
+  static constexpr bool is_subword_v = ScalePower < 0;
 
   // Sized SVE words can be ordinary array members. Besides lifting the
   // architectural x2/x4 tuple limit, this keeps multiword predicates usable
@@ -409,8 +409,8 @@ struct RepresentationTraits<
   static constexpr nint_t logical_lanes = N;
   static constexpr nint_t word_count =
       (logical_lanes + word_lanes - 1) / word_lanes;
-  static constexpr bool is_runtime_size = false;
-  static constexpr bool is_subword = logical_lanes < word_lanes;
+  static constexpr bool is_runtime_size_v = false;
+  static constexpr bool is_subword_v = logical_lanes < word_lanes;
 
   using WordVec = SVEFixedVector<T>;
   using WordMask = SVEFixedMask;
@@ -439,13 +439,13 @@ struct RepresentationTraits<
   template <> struct IsVectorRepresentation<sv##Name##x4_t>               \
       : std::true_type {};                                                 \
   template <> struct InferredTagTraits<sv##Name##_t> {                    \
-    using Type = ScalableTag<ElementType, 0>;                              \
+    using type = ScalableTag<ElementType, 0>;                              \
   };                                                                        \
   template <> struct InferredTagTraits<sv##Name##x2_t> {                  \
-    using Type = ScalableTag<ElementType, 1>;                              \
+    using type = ScalableTag<ElementType, 1>;                              \
   };                                                                        \
   template <> struct InferredTagTraits<sv##Name##x4_t> {                  \
-    using Type = ScalableTag<ElementType, 2>;                              \
+    using type = ScalableTag<ElementType, 2>;                              \
   }
 
 VECOPS_VEC_REGISTER_SVE_VECTOR(bfloat16_t, bfloat16);
@@ -477,7 +477,7 @@ struct IsVectorRepresentation<SVEFixedVector<T>> : std::true_type {};
 
 template <Element T>
 struct InferredTagTraits<SVEFixedVector<T>> {
-  using Type = FixedTag<T, SVEFixedVector<T>::physical_lanes>;
+  using type = FixedTag<T, SVEFixedVector<T>::physical_lanes>;
 };
 
 template <Element T, nint_t Count>
@@ -487,7 +487,7 @@ struct IsVectorRepresentation<
 template <Element T, nint_t Count>
 struct InferredTagTraits<
     WordArray<SVEFixedVector<T>, Count>> {
-  using Type = FixedTag<
+  using type = FixedTag<
       T, Count * FIXED_SVE_BITS / 8 / static_cast<nint_t>(sizeof(T))>;
 };
 

@@ -46,7 +46,7 @@ struct IsMathAccuracyOption<opt::math::AccuracyOption<A>>
 };
 
 template <typename T>
-inline constexpr bool is_math_accuracy_option =
+inline constexpr bool is_math_accuracy_option_v =
     IsMathAccuracyOption<std::remove_cvref_t<T>>::value;
 
 /** Detects opt::Masked<M> wrappers; the Value alias extracts the mask type. */
@@ -59,7 +59,7 @@ struct IsMaskedOption<opt::Masked<M>> : std::true_type {
 };
 
 template <typename T>
-inline constexpr bool is_masked_option =
+inline constexpr bool is_masked_option_v =
     IsMaskedOption<std::remove_cvref_t<T>>::value;
 
 template <typename T>
@@ -67,21 +67,22 @@ struct IsUnmaskedOption : std::bool_constant<
     std::same_as<std::remove_cvref_t<T>, opt::Unmasked>> {};
 
 template <typename T>
-inline constexpr bool is_unmasked_option = IsUnmaskedOption<T>::value;
+inline constexpr bool is_unmasked_option_v =
+    IsUnmaskedOption<std::remove_cvref_t<T>>::value;
 
 template <typename T>
 struct IsFirstOption : std::bool_constant<
     std::same_as<std::remove_cvref_t<T>, opt::First>> {};
 
 template <typename T>
-inline constexpr bool is_first_option = IsFirstOption<T>::value;
+inline constexpr bool is_first_option_v = IsFirstOption<T>::value;
 
 template <typename T>
 struct IsZeroOption : std::bool_constant<
     std::same_as<std::remove_cvref_t<T>, opt::Zero>> {};
 
 template <typename T>
-inline constexpr bool is_zero_option = IsZeroOption<T>::value;
+inline constexpr bool is_zero_option_v = IsZeroOption<T>::value;
 
 template <typename>
 struct IsVectorMergeOption : std::false_type {};
@@ -92,7 +93,7 @@ struct IsVectorMergeOption<opt::VectorMerge<V>> : std::true_type {
 };
 
 template <typename T>
-inline constexpr bool is_vector_merge_option =
+inline constexpr bool is_vector_merge_option_v =
     IsVectorMergeOption<std::remove_cvref_t<T>>::value;
 
 template <typename>
@@ -104,7 +105,7 @@ struct IsMaskMergeOption<opt::MaskMerge<M>> : std::true_type {
 };
 
 template <typename T>
-inline constexpr bool is_mask_merge_option =
+inline constexpr bool is_mask_merge_option_v =
     IsMaskMergeOption<std::remove_cvref_t<T>>::value;
 
 template <typename>
@@ -116,7 +117,7 @@ struct IsScalarMergeOption<opt::ScalarMerge<T>> : std::true_type {
 };
 
 template <typename T>
-inline constexpr bool is_scalar_merge_option =
+inline constexpr bool is_scalar_merge_option_v =
     IsScalarMergeOption<std::remove_cvref_t<T>>::value;
 
 /* **************************************************************************** */
@@ -125,9 +126,9 @@ inline constexpr bool is_scalar_merge_option =
 
 /** True when the Option's mask type matches Mask<Tag>. */
 template <VectorTag Tag, typename Option>
-inline constexpr bool is_masked_option_for = [] {
+inline constexpr bool is_masked_option_for_v = [] {
   using Clean = std::remove_cvref_t<Option>;
-  if constexpr (is_masked_option<Clean>) {
+  if constexpr (is_masked_option_v<Clean>) {
     return std::same_as<typename IsMaskedOption<Clean>::Value, Mask<Tag>>;
   } else {
     return false;
@@ -137,13 +138,13 @@ inline constexpr bool is_masked_option_for = [] {
 /** True when an option is a valid inactive-lane population policy for Tag.
  *  Accepts opt::zero, opt::VectorMerge<Tag>, or opt::ScalarMerge<ElementOf<Tag>>. */
 template <VectorTag Tag, typename Option>
-inline constexpr bool is_vector_population_option_for = [] {
+inline constexpr bool is_vector_population_option_for_v = [] {
   using Clean = std::remove_cvref_t<Option>;
-  if constexpr (is_zero_option<Clean>) {
+  if constexpr (is_zero_option_v<Clean>) {
     return true;
-  } else if constexpr (is_vector_merge_option<Clean>) {
+  } else if constexpr (is_vector_merge_option_v<Clean>) {
     return std::same_as<typename IsVectorMergeOption<Clean>::Value, Vec<Tag>>;
-  } else if constexpr (is_scalar_merge_option<Clean>) {
+  } else if constexpr (is_scalar_merge_option_v<Clean>) {
     return std::same_as<typename IsScalarMergeOption<Clean>::Value,
                         ElementOf<Tag>>;
   } else {
@@ -153,11 +154,11 @@ inline constexpr bool is_vector_population_option_for = [] {
 
 /** True when an option is a valid mask-population policy: opt::zero or opt::MaskMerge<Tag>. */
 template <VectorTag Tag, typename Option>
-inline constexpr bool is_mask_population_option_for = [] {
+inline constexpr bool is_mask_population_option_for_v = [] {
   using Clean = std::remove_cvref_t<Option>;
-  if constexpr (is_zero_option<Clean>) {
+  if constexpr (is_zero_option_v<Clean>) {
     return true;
-  } else if constexpr (is_mask_merge_option<Clean>) {
+  } else if constexpr (is_mask_merge_option_v<Clean>) {
     return std::same_as<typename IsMaskMergeOption<Clean>::Value, Mask<Tag>>;
   } else {
     return false;
@@ -173,11 +174,23 @@ struct IsOrderedOption : std::bool_constant<
     std::same_as<std::remove_cvref_t<T>, cvt::Ordered>> {};
 
 template <typename T>
+inline constexpr bool is_ordered_option_v =
+    IsOrderedOption<std::remove_cvref_t<T>>::value;
+
+template <typename T>
 struct IsUnorderedOption : std::bool_constant<
     std::same_as<std::remove_cvref_t<T>, cvt::Unordered>> {};
 
+template <typename T>
+inline constexpr bool is_unordered_option_v =
+    IsUnorderedOption<std::remove_cvref_t<T>>::value;
+
 template <typename>
 struct IsLaneOption : std::false_type {};
+
+template <typename T>
+inline constexpr bool is_lane_option_v =
+    IsLaneOption<std::remove_cvref_t<T>>::value;
 
 template <int Phase>
 struct IsLaneOption<cvt::Lane<Phase>> : std::true_type {
@@ -189,8 +202,16 @@ struct IsSaturateOption : std::bool_constant<
     std::same_as<std::remove_cvref_t<T>, cvt::Saturate>> {};
 
 template <typename T>
+inline constexpr bool is_saturate_option_v =
+    IsSaturateOption<std::remove_cvref_t<T>>::value;
+
+template <typename T>
 struct IsWrapOption : std::bool_constant<
     std::same_as<std::remove_cvref_t<T>, cvt::Wrap>> {};
+
+template <typename T>
+inline constexpr bool is_wrap_option_v =
+    IsWrapOption<std::remove_cvref_t<T>>::value;
 
 /* **************************************************************************** */
 //    Memory option detection traits                                            //
@@ -297,7 +318,7 @@ struct IsMemoryAddressingOption : std::bool_constant<
  * Each option's type is cleaned via std::remove_cvref_t before testing.
  */
 template <template <typename> typename Predicate, typename... Options>
-inline constexpr std::size_t option_count =
+inline constexpr std::size_t option_count_v =
     (std::size_t{0} + ... +
      std::size_t{Predicate<std::remove_cvref_t<Options>>::value});
 
@@ -309,9 +330,9 @@ inline constexpr std::size_t option_count =
 template <typename... Options>
 consteval bool valid_prefetch_options() {
   return (IsPrefetchOption<std::remove_cvref_t<Options>>::value && ...) &&
-      option_count<IsPrefetchLocalityOption, Options...> <= 1 &&
-      option_count<IsPrefetchTemporalityOption, Options...> <= 1 &&
-      option_count<IsPrefetchIntentOption, Options...> <= 1;
+      option_count_v<IsPrefetchLocalityOption, Options...> <= 1 &&
+      option_count_v<IsPrefetchTemporalityOption, Options...> <= 1 &&
+      option_count_v<IsPrefetchIntentOption, Options...> <= 1;
 }
 
 /**

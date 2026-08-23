@@ -36,21 +36,22 @@ namespace details {
 /** Extract an operator's requirements, defaulting to the backend contract. */
 template <typename T, typename = void>
 struct RequirementsOf {
-  using Type = typename CurrentBackend::DefaultRequirements;
+  using type = typename current_backend_t::DefaultRequirements;
 };
 
 template <typename T>
 struct RequirementsOf<T, std::void_t<
     typename std::remove_cvref_t<T>::ResourceRequirements>> {
-  using Type = typename std::remove_cvref_t<T>::ResourceRequirements;
+  using type = typename std::remove_cvref_t<T>::ResourceRequirements;
 };
 
 template <typename T>
-using RequirementsOfT = typename RequirementsOf<T>::Type;
+using requirements_of_t = typename RequirementsOf<T>::type;
 
 /** Concatenate the requirements of all operators in one region. */
 template <typename... Operators>
-using RequirementsForT = ConcatResourceSetsT<RequirementsOfT<Operators>...>;
+using requirements_for_t = concat_resource_sets_t<
+    requirements_of_t<Operators>...>;
 
 template <typename ActiveResources, typename ActiveConfiguration = void>
 class Scope;
@@ -68,11 +69,14 @@ VECOPS_ALWAYS_INLINE decltype(auto) enter_resources(
  * to the per-worker workspace. Scope values must not escape their callback.
  */
 template <typename T>
-concept ExecutionScope = requires(T& scope) {
+inline constexpr bool is_execution_scope_v = requires(T& scope) {
   typename std::remove_cvref_t<T>::ActiveResources;
   typename std::remove_cvref_t<T>::ActiveConfiguration;
   { scope.workspace_view() } -> std::same_as<kernel::WorkspaceView&>;
 };
+
+template <typename T>
+concept ExecutionScope = is_execution_scope_v<T>;
 
 namespace details {
 
@@ -114,7 +118,7 @@ public:
    */
   VECOPS_ALWAYS_INLINE decltype(auto) with_resources(
       const Operator&, Fn&& fn) const {
-    using Required = RequirementsOfT<Operator>;
+    using Required = requirements_of_t<Operator>;
     return enter_resources<Resources, Required>(
         workspace_, std::forward<Fn>(fn));
   }
@@ -134,7 +138,7 @@ public:
       Scope<Resources, NewConfiguration> configured{workspace_};
       return std::forward<Fn>(fn)(configured);
     };
-    return CurrentBackend::template configure<Resources>(
+    return current_backend_t::template configure<Resources>(
         configuration, invoke);
   }
 
@@ -146,21 +150,21 @@ template <typename Current, typename Required, typename Fn>
 /**
  * @brief Backend-neutral implementation of a lexical resource transition.
  *
- * `CurrentBackend::validate` runs at compile time. `CurrentBackend::enter`
+ * `current_backend_t::validate` runs at compile time. The backend's `enter`
  * receives both the current and requested type sets, allowing it to omit a
  * nested transition with `if constexpr`.
  */
 VECOPS_ALWAYS_INLINE decltype(auto) enter_resources(
     kernel::WorkspaceView* workspace, Fn&& fn) {
-  using Active = ConcatResourceSetsT<Current, Required>;
-  CurrentBackend::template validate<Active>();
+  using Active = concat_resource_sets_t<Current, Required>;
+  current_backend_t::template validate<Active>();
 
   auto invoke = [&]() VECOPS_INLINE_LAMBDA -> decltype(auto) {
     Scope<Active> active{workspace};
     return std::forward<Fn>(fn)(active);
   };
 
-  return CurrentBackend::template enter<Current, Required>(invoke);
+  return current_backend_t::template enter<Current, Required>(invoke);
 }
 
 } // namespace details
@@ -202,7 +206,7 @@ public:
   VECOPS_ALWAYS_INLINE decltype(auto) with_region(
       const Operator&, Fn&& fn) const {
     return details::enter_resources<
-        ActiveResources, details::RequirementsForT<Operator>>(
+        ActiveResources, details::requirements_for_t<Operator>>(
         workspace_, std::forward<Fn>(fn));
   }
 
@@ -218,7 +222,7 @@ public:
   VECOPS_ALWAYS_INLINE decltype(auto) with_region(
       const Op0&, const Op1&, Fn&& fn) const {
     return details::enter_resources<
-        ActiveResources, details::RequirementsForT<Op0, Op1>>(
+        ActiveResources, details::requirements_for_t<Op0, Op1>>(
         workspace_, std::forward<Fn>(fn));
   }
 
@@ -227,7 +231,7 @@ public:
   VECOPS_ALWAYS_INLINE decltype(auto) with_region(
       const Op0&, const Op1&, const Op2&, Fn&& fn) const {
     return details::enter_resources<
-        ActiveResources, details::RequirementsForT<Op0, Op1, Op2>>(
+        ActiveResources, details::requirements_for_t<Op0, Op1, Op2>>(
         workspace_, std::forward<Fn>(fn));
   }
 
@@ -238,7 +242,7 @@ public:
       const Op0&, const Op1&, const Op2&, const Op3&, Fn&& fn) const {
     return details::enter_resources<
         ActiveResources,
-        details::RequirementsForT<Op0, Op1, Op2, Op3>>(
+        details::requirements_for_t<Op0, Op1, Op2, Op3>>(
         workspace_, std::forward<Fn>(fn));
   }
 

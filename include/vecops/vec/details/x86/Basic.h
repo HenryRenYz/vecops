@@ -20,8 +20,20 @@
 #include <type_traits>
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/Wordwise.h"
 
 namespace vecops::vec::details {
+
+/** Register-domain classification: every element type except float32 and
+ *  float64 shares the integer (__m128i-family) register domain, so the
+ *  wide-to-narrow chains only need to special-case the two float domains. */
+enum class x86_reg_domain { f32, f64, bits };
+
+template <typename T>
+inline constexpr x86_reg_domain x86_reg_domain_of_v =
+    std::same_as<T, float32_t> ? x86_reg_domain::f32
+    : std::same_as<T, float64_t> ? x86_reg_domain::f64
+                                 : x86_reg_domain::bits;
 
 #if !defined(CPU_CAPABILITY_AVX512)
 template <nint_t ElementBytes, typename Raw>
@@ -99,16 +111,88 @@ VECOPS_ALWAYS_INLINE Raw x86_mask_prefix(nint_t count) {
 #endif
 }
 
+/* Raw integer-word plumbing shared by the bitwise ops and the mask ops. */
+template <typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_and_raw(Raw a, Raw b) {
+  if constexpr (sizeof(Raw) == 16) return _mm_and_si128(a, b);
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Raw) == 32) return _mm256_and_si256(a, b);
+#endif
+#if VEC_WIDTH >= 512
+  else return _mm512_and_si512(a, b);
+#endif
+}
+
+template <typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_or_raw(Raw a, Raw b) {
+  if constexpr (sizeof(Raw) == 16) return _mm_or_si128(a, b);
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Raw) == 32) return _mm256_or_si256(a, b);
+#endif
+#if VEC_WIDTH >= 512
+  else return _mm512_or_si512(a, b);
+#endif
+}
+
+template <typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_xor_raw(Raw a, Raw b) {
+  if constexpr (sizeof(Raw) == 16) return _mm_xor_si128(a, b);
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Raw) == 32) return _mm256_xor_si256(a, b);
+#endif
+#if VEC_WIDTH >= 512
+  else return _mm512_xor_si512(a, b);
+#endif
+}
+
+template <typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_andnot_raw(Raw a, Raw b) {
+  if constexpr (sizeof(Raw) == 16) return _mm_andnot_si128(a, b);
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Raw) == 32) return _mm256_andnot_si256(a, b);
+#endif
+#if VEC_WIDTH >= 512
+  else return _mm512_andnot_si512(a, b);
+#endif
+}
+
+template <typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_ones_raw() {
+  if constexpr (sizeof(Raw) == 16) return _mm_set1_epi32(-1);
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Raw) == 32) return _mm256_set1_epi32(-1);
+#endif
+#if VEC_WIDTH >= 512
+  else return _mm512_set1_epi32(-1);
+#endif
+}
+
+template <typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_zero_raw() {
+  if constexpr (sizeof(Raw) == 16) return _mm_setzero_si128();
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Raw) == 32) return _mm256_setzero_si256();
+#endif
+#if VEC_WIDTH >= 512
+  else return _mm512_setzero_si512();
+#endif
+}
+
+template <typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_mask_ones() {
+#if defined(CPU_CAPABILITY_AVX512)
+  return static_cast<Raw>(~Raw{0});
+#else
+  return x86_bit_ones_raw<Raw>();
+#endif
+}
+
 template <typename Raw>
 VECOPS_ALWAYS_INLINE Raw x86_mask_and(Raw a, Raw b) {
 #if defined(CPU_CAPABILITY_AVX512)
   return static_cast<Raw>(a & b);
 #else
-  if constexpr (sizeof(Raw) == 16) return _mm_and_si128(a, b);
-#if VEC_WIDTH >= 256
-  else if constexpr (sizeof(Raw) == 32) return _mm256_and_si256(a, b);
-#endif
-  else static_assert(dispatch_dependent_false<Raw>, "unsupported x86 mask width");
+  return x86_bit_and_raw(a, b);
 #endif
 }
 
@@ -117,11 +201,7 @@ VECOPS_ALWAYS_INLINE Raw x86_mask_or(Raw a, Raw b) {
 #if defined(CPU_CAPABILITY_AVX512)
   return static_cast<Raw>(a | b);
 #else
-  if constexpr (sizeof(Raw) == 16) return _mm_or_si128(a, b);
-#if VEC_WIDTH >= 256
-  else if constexpr (sizeof(Raw) == 32) return _mm256_or_si256(a, b);
-#endif
-  else static_assert(dispatch_dependent_false<Raw>, "unsupported x86 mask width");
+  return x86_bit_or_raw(a, b);
 #endif
 }
 
@@ -130,11 +210,7 @@ VECOPS_ALWAYS_INLINE Raw x86_mask_xor(Raw a, Raw b) {
 #if defined(CPU_CAPABILITY_AVX512)
   return static_cast<Raw>(a ^ b);
 #else
-  if constexpr (sizeof(Raw) == 16) return _mm_xor_si128(a, b);
-#if VEC_WIDTH >= 256
-  else if constexpr (sizeof(Raw) == 32) return _mm256_xor_si256(a, b);
-#endif
-  else static_assert(dispatch_dependent_false<Raw>, "unsupported x86 mask width");
+  return x86_bit_xor_raw(a, b);
 #endif
 }
 
@@ -143,22 +219,8 @@ VECOPS_ALWAYS_INLINE Raw x86_mask_andnot(Raw a, Raw b) {
 #if defined(CPU_CAPABILITY_AVX512)
   return static_cast<Raw>((~a) & b);
 #else
-  if constexpr (sizeof(Raw) == 16) return _mm_andnot_si128(a, b);
-#if VEC_WIDTH >= 256
-  else if constexpr (sizeof(Raw) == 32) return _mm256_andnot_si256(a, b);
+  return x86_bit_andnot_raw(a, b);
 #endif
-  else static_assert(dispatch_dependent_false<Raw>, "unsupported x86 mask width");
-#endif
-}
-
-template <nint_t Index, VectorTag Tag>
-VECOPS_ALWAYS_INLINE constexpr nint_t x86_valid_word_lanes() {
-  using Traits = RepresentationTraits<X86Backend, Tag>;
-  constexpr nint_t start = Index * Traits::word_lanes;
-  constexpr nint_t remaining = Traits::logical_lanes - start;
-  if constexpr (remaining <= 0) return 0;
-  else if constexpr (remaining < Traits::word_lanes) return remaining;
-  else return Traits::word_lanes;
 }
 
 template <>
@@ -266,7 +328,7 @@ struct NativeWordImpl<X86Backend, MaskFillOp> {
     using Traits = RepresentationTraits<X86Backend, Tag>;
     static_assert(Index >= 0 && Index < Traits::word_count);
     using Raw = typename Traits::RawMask;
-    const nint_t valid = x86_valid_word_lanes<Index, Tag>();
+    const nint_t valid = valid_word_lanes<Index, Tag>();
     return NativeWordMask<Tag>{
         value ? x86_mask_prefix<ElementOf<Tag>, Raw>(valid) : Raw{}};
   }
@@ -282,7 +344,7 @@ struct NativeWordImpl<X86Backend, MaskWhileLtOp> {
     using Raw = typename Traits::RawMask;
     const nint_t base = Index * Traits::word_lanes;
     const nint_t count = std::clamp<nint_t>(
-        b - a - base, 0, x86_valid_word_lanes<Index, Tag>());
+        b - a - base, 0, valid_word_lanes<Index, Tag>());
     return NativeWordMask<Tag>{x86_mask_prefix<ElementOf<Tag>, Raw>(count)};
   }
 };
@@ -296,7 +358,7 @@ struct NativeWordImpl<X86Backend, MaskWhileGeOp> {
     static_assert(Index >= 0 && Index < Traits::word_count);
     using Raw = typename Traits::RawMask;
     const nint_t base = Index * Traits::word_lanes;
-    const nint_t valid = x86_valid_word_lanes<Index, Tag>();
+    const nint_t valid = valid_word_lanes<Index, Tag>();
     const nint_t first = std::clamp<nint_t>(b - a - base, 0, valid);
     const Raw active = x86_mask_prefix<ElementOf<Tag>, Raw>(valid);
     const Raw before = x86_mask_prefix<ElementOf<Tag>, Raw>(first);
@@ -421,21 +483,9 @@ struct NativeWordImpl<X86Backend, MaskNotOp> {
     using Traits = RepresentationTraits<X86Backend, Tag>;
     static_assert(Index >= 0 && Index < Traits::word_count);
     const auto active = x86_mask_prefix<ElementOf<Tag>, typename Traits::RawMask>(
-        x86_valid_word_lanes<Index, Tag>());
-#if defined(CPU_CAPABILITY_AVX512)
-    const auto inverted = static_cast<typename Traits::RawMask>(~value.value);
-#else
-    const auto inverted = [&] {
-      if constexpr (sizeof(typename Traits::RawMask) == 16)
-        return _mm_xor_si128(value.value, _mm_set1_epi32(-1));
-#if VEC_WIDTH >= 256
-      else if constexpr (sizeof(typename Traits::RawMask) == 32)
-        return _mm256_xor_si256(value.value, _mm256_set1_epi32(-1));
-#endif
-      else static_assert(
-          dispatch_dependent_false<Tag>, "unsupported x86 mask width");
-    }();
-#endif
+        valid_word_lanes<Index, Tag>());
+    const auto inverted = x86_mask_xor(
+        value.value, x86_mask_ones<typename Traits::RawMask>());
     return NativeWordMask<Tag>{x86_mask_and(inverted, active)};
   }
 };
@@ -520,9 +570,8 @@ struct NativeWordImpl<X86Backend, BitCastOp> {
         sizeof(FromRaw) == sizeof(typename ToTraits::RawVec),
         "word bitcast requires equal physical word widths");
     const auto bits = [&] {
-      if constexpr (std::same_as<From, bfloat16_t>) return value.value;
-      else if constexpr (std::same_as<From, float16_t>) return value.value;
-      else if constexpr (std::same_as<From, float32_t>) {
+      constexpr auto domain = x86_reg_domain_of_v<From>;
+      if constexpr (domain == x86_reg_domain::f32) {
         if constexpr (sizeof(FromRaw) == 16) return _mm_castps_si128(value.value);
 #if VEC_WIDTH >= 256
         else if constexpr (sizeof(FromRaw) == 32) return _mm256_castps_si256(value.value);
@@ -530,7 +579,7 @@ struct NativeWordImpl<X86Backend, BitCastOp> {
 #if VEC_WIDTH >= 512
         else return _mm512_castps_si512(value.value);
 #endif
-      } else if constexpr (std::same_as<From, float64_t>) {
+      } else if constexpr (domain == x86_reg_domain::f64) {
         if constexpr (sizeof(FromRaw) == 16) return _mm_castpd_si128(value.value);
 #if VEC_WIDTH >= 256
         else if constexpr (sizeof(FromRaw) == 32) return _mm256_castpd_si256(value.value);
@@ -538,25 +587,14 @@ struct NativeWordImpl<X86Backend, BitCastOp> {
 #if VEC_WIDTH >= 512
         else return _mm512_castpd_si512(value.value);
 #endif
-      } else if constexpr (std::same_as<From, int8_t>) return value.value;
-      else if constexpr (std::same_as<From, uint8_t>) return value.value;
-      else if constexpr (std::same_as<From, int16_t>) return value.value;
-      else if constexpr (std::same_as<From, uint16_t>) return value.value;
-      else if constexpr (std::same_as<From, int32_t>) return value.value;
-      else if constexpr (std::same_as<From, uint32_t>) return value.value;
-      else if constexpr (std::same_as<From, int64_t>) return value.value;
-      else if constexpr (std::same_as<From, uint64_t>) return value.value;
-      else static_assert(
-          dispatch_dependent_false<From>,
-          "x86 bitcast has no implementation for this source element type");
+      } else {
+        return value.value;
+      }
     }();
 
     using To = ElementOf<ToTag>;
-    if constexpr (std::same_as<To, bfloat16_t>) {
-      return NativeWordVec<ToTag>{bits};
-    } else if constexpr (std::same_as<To, float16_t>) {
-      return NativeWordVec<ToTag>{bits};
-    } else if constexpr (std::same_as<To, float32_t>) {
+    constexpr auto domain = x86_reg_domain_of_v<To>;
+    if constexpr (domain == x86_reg_domain::f32) {
       if constexpr (sizeof(bits) == 16)
         return NativeWordVec<ToTag>{_mm_castsi128_ps(bits)};
 #if VEC_WIDTH >= 256
@@ -567,7 +605,7 @@ struct NativeWordImpl<X86Backend, BitCastOp> {
       else
         return NativeWordVec<ToTag>{_mm512_castsi512_ps(bits)};
 #endif
-    } else if constexpr (std::same_as<To, float64_t>) {
+    } else if constexpr (domain == x86_reg_domain::f64) {
       if constexpr (sizeof(bits) == 16)
         return NativeWordVec<ToTag>{_mm_castsi128_pd(bits)};
 #if VEC_WIDTH >= 256
@@ -578,26 +616,8 @@ struct NativeWordImpl<X86Backend, BitCastOp> {
       else
         return NativeWordVec<ToTag>{_mm512_castsi512_pd(bits)};
 #endif
-    } else if constexpr (std::same_as<To, int8_t>) {
-      return NativeWordVec<ToTag>{bits};
-    } else if constexpr (std::same_as<To, uint8_t>) {
-      return NativeWordVec<ToTag>{bits};
-    } else if constexpr (std::same_as<To, int16_t>) {
-      return NativeWordVec<ToTag>{bits};
-    } else if constexpr (std::same_as<To, uint16_t>) {
-      return NativeWordVec<ToTag>{bits};
-    } else if constexpr (std::same_as<To, int32_t>) {
-      return NativeWordVec<ToTag>{bits};
-    } else if constexpr (std::same_as<To, uint32_t>) {
-      return NativeWordVec<ToTag>{bits};
-    } else if constexpr (std::same_as<To, int64_t>) {
-      return NativeWordVec<ToTag>{bits};
-    } else if constexpr (std::same_as<To, uint64_t>) {
-      return NativeWordVec<ToTag>{bits};
     } else {
-      static_assert(
-          dispatch_dependent_false<To>,
-          "x86 bitcast has no implementation for this target element type");
+      return NativeWordVec<ToTag>{bits};
     }
   }
 
@@ -722,56 +742,19 @@ struct NativeImpl<X86Backend, LowerOp, Tag> {
       VECOPS_VEC_X86_EXACT_REARRANGE_DISPATCH(
           Vec<Half<Tag>>{value.value}, "unsupported x86 lower element type");
     } else {
-      if constexpr (std::same_as<T, bfloat16_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_castsi256_si128(value.value)};
-        else return Vec<Half<Tag>>{_mm512_castsi512_si256(value.value)};
-      } else if constexpr (std::same_as<T, float16_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_castsi256_si128(value.value)};
-        else return Vec<Half<Tag>>{_mm512_castsi512_si256(value.value)};
-      } else if constexpr (std::same_as<T, float32_t>) {
+      constexpr auto domain = x86_reg_domain_of_v<T>;
+      if constexpr (domain == x86_reg_domain::f32) {
         if constexpr (sizeof(InRaw) == 32)
           return Vec<Half<Tag>>{_mm256_castps256_ps128(value.value)};
         else return Vec<Half<Tag>>{_mm512_castps512_ps256(value.value)};
-      } else if constexpr (std::same_as<T, float64_t>) {
+      } else if constexpr (domain == x86_reg_domain::f64) {
         if constexpr (sizeof(InRaw) == 32)
           return Vec<Half<Tag>>{_mm256_castpd256_pd128(value.value)};
         else return Vec<Half<Tag>>{_mm512_castpd512_pd256(value.value)};
-      } else if constexpr (std::same_as<T, int8_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_castsi256_si128(value.value)};
-        else return Vec<Half<Tag>>{_mm512_castsi512_si256(value.value)};
-      } else if constexpr (std::same_as<T, uint8_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_castsi256_si128(value.value)};
-        else return Vec<Half<Tag>>{_mm512_castsi512_si256(value.value)};
-      } else if constexpr (std::same_as<T, int16_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_castsi256_si128(value.value)};
-        else return Vec<Half<Tag>>{_mm512_castsi512_si256(value.value)};
-      } else if constexpr (std::same_as<T, uint16_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_castsi256_si128(value.value)};
-        else return Vec<Half<Tag>>{_mm512_castsi512_si256(value.value)};
-      } else if constexpr (std::same_as<T, int32_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_castsi256_si128(value.value)};
-        else return Vec<Half<Tag>>{_mm512_castsi512_si256(value.value)};
-      } else if constexpr (std::same_as<T, uint32_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_castsi256_si128(value.value)};
-        else return Vec<Half<Tag>>{_mm512_castsi512_si256(value.value)};
-      } else if constexpr (std::same_as<T, int64_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_castsi256_si128(value.value)};
-        else return Vec<Half<Tag>>{_mm512_castsi512_si256(value.value)};
-      } else if constexpr (std::same_as<T, uint64_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_castsi256_si128(value.value)};
-        else return Vec<Half<Tag>>{_mm512_castsi512_si256(value.value)};
       } else {
-        static_assert(dispatch_dependent_false<T>, "unsupported x86 lower element type");
+        if constexpr (sizeof(InRaw) == 32)
+          return Vec<Half<Tag>>{_mm256_castsi256_si128(value.value)};
+        else return Vec<Half<Tag>>{_mm512_castsi512_si256(value.value)};
       }
     }
   }
@@ -801,119 +784,36 @@ struct NativeImpl<X86Backend, UpperOp, Tag> {
       constexpr int logical_bytes = static_cast<int>(
           InTraits::logical_lanes * static_cast<nint_t>(sizeof(T)));
       constexpr int half_bytes = logical_bytes / 2;
-      if constexpr (std::same_as<T, float32_t>) {
+      constexpr auto domain = x86_reg_domain_of_v<T>;
+      if constexpr (domain == x86_reg_domain::f32) {
         if constexpr (logical_bytes == 8)
           return Vec<Half<Tag>>{_mm_shuffle_ps(
               value.value, value.value, _MM_SHUFFLE(0, 0, 0, 1))};
         else return Vec<Half<Tag>>{_mm_shuffle_ps(
             value.value, value.value, _MM_SHUFFLE(0, 0, 3, 2))};
-      } else if constexpr (std::same_as<T, float64_t>) {
+      } else if constexpr (domain == x86_reg_domain::f64) {
         return Vec<Half<Tag>>{_mm_shuffle_pd(
             value.value, value.value, _MM_SHUFFLE2(0, 1))};
-      } else if constexpr (std::same_as<T, bfloat16_t>) {
-        if constexpr (logical_bytes == 16)
-          return Vec<Half<Tag>>{_mm_shuffle_epi32(
-              value.value, _MM_SHUFFLE(0, 0, 3, 2))};
-        else return Vec<Half<Tag>>{_mm_srli_si128(value.value, half_bytes)};
-      } else if constexpr (std::same_as<T, float16_t>) {
-        if constexpr (logical_bytes == 16)
-          return Vec<Half<Tag>>{_mm_shuffle_epi32(
-              value.value, _MM_SHUFFLE(0, 0, 3, 2))};
-        else return Vec<Half<Tag>>{_mm_srli_si128(value.value, half_bytes)};
-      } else if constexpr (std::same_as<T, int8_t>) {
-        if constexpr (logical_bytes == 16)
-          return Vec<Half<Tag>>{_mm_shuffle_epi32(
-              value.value, _MM_SHUFFLE(0, 0, 3, 2))};
-        else return Vec<Half<Tag>>{_mm_srli_si128(value.value, half_bytes)};
-      } else if constexpr (std::same_as<T, uint8_t>) {
-        if constexpr (logical_bytes == 16)
-          return Vec<Half<Tag>>{_mm_shuffle_epi32(
-              value.value, _MM_SHUFFLE(0, 0, 3, 2))};
-        else return Vec<Half<Tag>>{_mm_srli_si128(value.value, half_bytes)};
-      } else if constexpr (std::same_as<T, int16_t>) {
-        if constexpr (logical_bytes == 16)
-          return Vec<Half<Tag>>{_mm_shuffle_epi32(
-              value.value, _MM_SHUFFLE(0, 0, 3, 2))};
-        else return Vec<Half<Tag>>{_mm_srli_si128(value.value, half_bytes)};
-      } else if constexpr (std::same_as<T, uint16_t>) {
-        if constexpr (logical_bytes == 16)
-          return Vec<Half<Tag>>{_mm_shuffle_epi32(
-              value.value, _MM_SHUFFLE(0, 0, 3, 2))};
-        else return Vec<Half<Tag>>{_mm_srli_si128(value.value, half_bytes)};
-      } else if constexpr (std::same_as<T, int32_t>) {
-        if constexpr (logical_bytes == 16)
-          return Vec<Half<Tag>>{_mm_shuffle_epi32(
-              value.value, _MM_SHUFFLE(0, 0, 3, 2))};
-        else return Vec<Half<Tag>>{_mm_srli_si128(value.value, half_bytes)};
-      } else if constexpr (std::same_as<T, uint32_t>) {
-        if constexpr (logical_bytes == 16)
-          return Vec<Half<Tag>>{_mm_shuffle_epi32(
-              value.value, _MM_SHUFFLE(0, 0, 3, 2))};
-        else return Vec<Half<Tag>>{_mm_srli_si128(value.value, half_bytes)};
-      } else if constexpr (std::same_as<T, int64_t>) {
-        if constexpr (logical_bytes == 16)
-          return Vec<Half<Tag>>{_mm_shuffle_epi32(
-              value.value, _MM_SHUFFLE(0, 0, 3, 2))};
-        else return Vec<Half<Tag>>{_mm_srli_si128(value.value, half_bytes)};
-      } else if constexpr (std::same_as<T, uint64_t>) {
-        if constexpr (logical_bytes == 16)
-          return Vec<Half<Tag>>{_mm_shuffle_epi32(
-              value.value, _MM_SHUFFLE(0, 0, 3, 2))};
-        else return Vec<Half<Tag>>{_mm_srli_si128(value.value, half_bytes)};
       } else {
-        static_assert(dispatch_dependent_false<T>, "unsupported x86 upper element type");
+        if constexpr (logical_bytes == 16)
+          return Vec<Half<Tag>>{_mm_shuffle_epi32(
+              value.value, _MM_SHUFFLE(0, 0, 3, 2))};
+        else return Vec<Half<Tag>>{_mm_srli_si128(value.value, half_bytes)};
       }
     } else {
-      if constexpr (std::same_as<T, bfloat16_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_extracti128_si256(value.value, 1)};
-        else return Vec<Half<Tag>>{_mm512_extracti32x8_epi32(value.value, 1)};
-      } else if constexpr (std::same_as<T, float16_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_extracti128_si256(value.value, 1)};
-        else return Vec<Half<Tag>>{_mm512_extracti32x8_epi32(value.value, 1)};
-      } else if constexpr (std::same_as<T, float32_t>) {
+      constexpr auto domain = x86_reg_domain_of_v<T>;
+      if constexpr (domain == x86_reg_domain::f32) {
         if constexpr (sizeof(InRaw) == 32)
           return Vec<Half<Tag>>{_mm256_extractf128_ps(value.value, 1)};
         else return Vec<Half<Tag>>{_mm512_extractf32x8_ps(value.value, 1)};
-      } else if constexpr (std::same_as<T, float64_t>) {
+      } else if constexpr (domain == x86_reg_domain::f64) {
         if constexpr (sizeof(InRaw) == 32)
           return Vec<Half<Tag>>{_mm256_extractf128_pd(value.value, 1)};
         else return Vec<Half<Tag>>{_mm512_extractf64x4_pd(value.value, 1)};
-      } else if constexpr (std::same_as<T, int8_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_extracti128_si256(value.value, 1)};
-        else return Vec<Half<Tag>>{_mm512_extracti32x8_epi32(value.value, 1)};
-      } else if constexpr (std::same_as<T, uint8_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_extracti128_si256(value.value, 1)};
-        else return Vec<Half<Tag>>{_mm512_extracti32x8_epi32(value.value, 1)};
-      } else if constexpr (std::same_as<T, int16_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_extracti128_si256(value.value, 1)};
-        else return Vec<Half<Tag>>{_mm512_extracti32x8_epi32(value.value, 1)};
-      } else if constexpr (std::same_as<T, uint16_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_extracti128_si256(value.value, 1)};
-        else return Vec<Half<Tag>>{_mm512_extracti32x8_epi32(value.value, 1)};
-      } else if constexpr (std::same_as<T, int32_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_extracti128_si256(value.value, 1)};
-        else return Vec<Half<Tag>>{_mm512_extracti32x8_epi32(value.value, 1)};
-      } else if constexpr (std::same_as<T, uint32_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_extracti128_si256(value.value, 1)};
-        else return Vec<Half<Tag>>{_mm512_extracti32x8_epi32(value.value, 1)};
-      } else if constexpr (std::same_as<T, int64_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_extracti128_si256(value.value, 1)};
-        else return Vec<Half<Tag>>{_mm512_extracti32x8_epi32(value.value, 1)};
-      } else if constexpr (std::same_as<T, uint64_t>) {
-        if constexpr (sizeof(InRaw) == 32)
-          return Vec<Half<Tag>>{_mm256_extracti128_si256(value.value, 1)};
-        else return Vec<Half<Tag>>{_mm512_extracti32x8_epi32(value.value, 1)};
       } else {
-        static_assert(dispatch_dependent_false<T>, "unsupported x86 upper element type");
+        if constexpr (sizeof(InRaw) == 32)
+          return Vec<Half<Tag>>{_mm256_extracti128_si256(value.value, 1)};
+        else return Vec<Half<Tag>>{_mm512_extracti32x8_epi32(value.value, 1)};
       }
     }
   }
@@ -1286,69 +1186,23 @@ VECOPS_ALWAYS_INLINE Vec<Half<Tag>> x86_extract_parity(Vec<Tag> value) {
   } else {
     const auto packed = x86_concat_parity<Odd, Tag>(value, value);
     if constexpr (sizeof(InRaw) == sizeof(OutRaw)) {
-      if constexpr (std::same_as<T, bfloat16_t>) return Vec<Half<Tag>>{packed.value};
-      else if constexpr (std::same_as<T, float16_t>) return Vec<Half<Tag>>{packed.value};
-      else if constexpr (std::same_as<T, float32_t>) return Vec<Half<Tag>>{packed.value};
-      else if constexpr (std::same_as<T, float64_t>) return Vec<Half<Tag>>{packed.value};
-      else if constexpr (std::same_as<T, int8_t>) return Vec<Half<Tag>>{packed.value};
-      else if constexpr (std::same_as<T, uint8_t>) return Vec<Half<Tag>>{packed.value};
-      else if constexpr (std::same_as<T, int16_t>) return Vec<Half<Tag>>{packed.value};
-      else if constexpr (std::same_as<T, uint16_t>) return Vec<Half<Tag>>{packed.value};
-      else if constexpr (std::same_as<T, int32_t>) return Vec<Half<Tag>>{packed.value};
-      else if constexpr (std::same_as<T, uint32_t>) return Vec<Half<Tag>>{packed.value};
-      else if constexpr (std::same_as<T, int64_t>) return Vec<Half<Tag>>{packed.value};
-      else if constexpr (std::same_as<T, uint64_t>) return Vec<Half<Tag>>{packed.value};
-      else static_assert(dispatch_dependent_false<T>, "unsupported x86 parity element type");
-    } else if constexpr (std::same_as<T, float32_t>) {
-      if constexpr (sizeof(InRaw) == 32)
-        return Vec<Half<Tag>>{_mm256_castps256_ps128(packed.value)};
-      else return Vec<Half<Tag>>{_mm512_castps512_ps256(packed.value)};
-    } else if constexpr (std::same_as<T, float64_t>) {
-      if constexpr (sizeof(InRaw) == 32)
-        return Vec<Half<Tag>>{_mm256_castpd256_pd128(packed.value)};
-      else return Vec<Half<Tag>>{_mm512_castpd512_pd256(packed.value)};
-    } else if constexpr (std::same_as<T, bfloat16_t>) {
-      if constexpr (sizeof(InRaw) == 32)
-        return Vec<Half<Tag>>{_mm256_castsi256_si128(packed.value)};
-      else return Vec<Half<Tag>>{_mm512_castsi512_si256(packed.value)};
-    } else if constexpr (std::same_as<T, float16_t>) {
-      if constexpr (sizeof(InRaw) == 32)
-        return Vec<Half<Tag>>{_mm256_castsi256_si128(packed.value)};
-      else return Vec<Half<Tag>>{_mm512_castsi512_si256(packed.value)};
-    } else if constexpr (std::same_as<T, int8_t>) {
-      if constexpr (sizeof(InRaw) == 32)
-        return Vec<Half<Tag>>{_mm256_castsi256_si128(packed.value)};
-      else return Vec<Half<Tag>>{_mm512_castsi512_si256(packed.value)};
-    } else if constexpr (std::same_as<T, uint8_t>) {
-      if constexpr (sizeof(InRaw) == 32)
-        return Vec<Half<Tag>>{_mm256_castsi256_si128(packed.value)};
-      else return Vec<Half<Tag>>{_mm512_castsi512_si256(packed.value)};
-    } else if constexpr (std::same_as<T, int16_t>) {
-      if constexpr (sizeof(InRaw) == 32)
-        return Vec<Half<Tag>>{_mm256_castsi256_si128(packed.value)};
-      else return Vec<Half<Tag>>{_mm512_castsi512_si256(packed.value)};
-    } else if constexpr (std::same_as<T, uint16_t>) {
-      if constexpr (sizeof(InRaw) == 32)
-        return Vec<Half<Tag>>{_mm256_castsi256_si128(packed.value)};
-      else return Vec<Half<Tag>>{_mm512_castsi512_si256(packed.value)};
-    } else if constexpr (std::same_as<T, int32_t>) {
-      if constexpr (sizeof(InRaw) == 32)
-        return Vec<Half<Tag>>{_mm256_castsi256_si128(packed.value)};
-      else return Vec<Half<Tag>>{_mm512_castsi512_si256(packed.value)};
-    } else if constexpr (std::same_as<T, uint32_t>) {
-      if constexpr (sizeof(InRaw) == 32)
-        return Vec<Half<Tag>>{_mm256_castsi256_si128(packed.value)};
-      else return Vec<Half<Tag>>{_mm512_castsi512_si256(packed.value)};
-    } else if constexpr (std::same_as<T, int64_t>) {
-      if constexpr (sizeof(InRaw) == 32)
-        return Vec<Half<Tag>>{_mm256_castsi256_si128(packed.value)};
-      else return Vec<Half<Tag>>{_mm512_castsi512_si256(packed.value)};
-    } else if constexpr (std::same_as<T, uint64_t>) {
-      if constexpr (sizeof(InRaw) == 32)
-        return Vec<Half<Tag>>{_mm256_castsi256_si128(packed.value)};
-      else return Vec<Half<Tag>>{_mm512_castsi512_si256(packed.value)};
+      VECOPS_VEC_X86_EXACT_REARRANGE_DISPATCH(
+          Vec<Half<Tag>>{packed.value}, "unsupported x86 parity element type");
     } else {
-      static_assert(dispatch_dependent_false<T>, "unsupported x86 parity element type");
+      constexpr auto domain = x86_reg_domain_of_v<T>;
+      if constexpr (domain == x86_reg_domain::f32) {
+        if constexpr (sizeof(InRaw) == 32)
+          return Vec<Half<Tag>>{_mm256_castps256_ps128(packed.value)};
+        else return Vec<Half<Tag>>{_mm512_castps512_ps256(packed.value)};
+      } else if constexpr (domain == x86_reg_domain::f64) {
+        if constexpr (sizeof(InRaw) == 32)
+          return Vec<Half<Tag>>{_mm256_castpd256_pd128(packed.value)};
+        else return Vec<Half<Tag>>{_mm512_castpd512_pd256(packed.value)};
+      } else {
+        if constexpr (sizeof(InRaw) == 32)
+          return Vec<Half<Tag>>{_mm256_castsi256_si128(packed.value)};
+        else return Vec<Half<Tag>>{_mm512_castsi512_si256(packed.value)};
+      }
     }
   }
 }

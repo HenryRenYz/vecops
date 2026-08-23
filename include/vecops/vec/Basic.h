@@ -58,8 +58,8 @@ struct BlendOp {
 
   template <TagInferableVector V>
   VECOPS_ALWAYS_INLINE V operator()(
-      V false_value, Mask<VecToTagT<V>> mask, V true_value) const {
-    return (*this)(VecToTagT<V>{}, false_value, mask, true_value);
+      V false_value, Mask<VecToTag<V>> mask, V true_value) const {
+    return (*this)(VecToTag<V>{}, false_value, mask, true_value);
   }
 };
 
@@ -112,9 +112,9 @@ struct GetOp {
       Tag tag, Mask<Tag> value, nint_t index) const;
 
   template <TagInferableVector V>
-  VECOPS_ALWAYS_INLINE ElementOf<VecToTagT<V>> operator()(
+  VECOPS_ALWAYS_INLINE ElementOf<VecToTag<V>> operator()(
       V value, nint_t index) const {
-    return (*this)(VecToTagT<V>{}, value, index);
+    return (*this)(VecToTag<V>{}, value, index);
   }
 };
 
@@ -129,8 +129,8 @@ struct SetOp {
 
   template <TagInferableVector V>
   VECOPS_ALWAYS_INLINE V operator()(
-      V value, nint_t index, ElementOf<VecToTagT<V>> lane) const {
-    return (*this)(VecToTagT<V>{}, value, index, lane);
+      V value, nint_t index, ElementOf<VecToTag<V>> lane) const {
+    return (*this)(VecToTag<V>{}, value, index, lane);
   }
 };
 
@@ -225,7 +225,7 @@ struct InterleaveEvenOp {
 
   template <TagInferableVector V>
   VECOPS_ALWAYS_INLINE V operator()(V a, V b) const {
-    return (*this)(VecToTagT<V>{}, a, b);
+    return (*this)(VecToTag<V>{}, a, b);
   }
 };
 
@@ -236,7 +236,7 @@ struct InterleaveOddOp {
 
   template <TagInferableVector V>
   VECOPS_ALWAYS_INLINE V operator()(V a, V b) const {
-    return (*this)(VecToTagT<V>{}, a, b);
+    return (*this)(VecToTag<V>{}, a, b);
   }
 };
 
@@ -247,7 +247,7 @@ struct LocalInterleaveLowerOp {
 
   template <TagInferableVector V>
   VECOPS_ALWAYS_INLINE V operator()(V a, V b) const {
-    return (*this)(VecToTagT<V>{}, a, b);
+    return (*this)(VecToTag<V>{}, a, b);
   }
 };
 
@@ -258,7 +258,7 @@ struct LocalInterleaveUpperOp {
 
   template <TagInferableVector V>
   VECOPS_ALWAYS_INLINE V operator()(V a, V b) const {
-    return (*this)(VecToTagT<V>{}, a, b);
+    return (*this)(VecToTag<V>{}, a, b);
   }
 };
 
@@ -273,8 +273,8 @@ struct ShuffleOp {
 
   template <TagInferableVector V>
   VECOPS_ALWAYS_INLINE V operator()(
-      V value, Vec<IndexTag<VecToTagT<V>>> indices) const {
-    return (*this)(VecToTagT<V>{}, value, indices);
+      V value, Vec<IndexTag<VecToTag<V>>> indices) const {
+    return (*this)(VecToTag<V>{}, value, indices);
   }
 };
 
@@ -294,20 +294,20 @@ struct LocalShuffleOp {
 
   template <TagInferableVector V>
   VECOPS_ALWAYS_INLINE V operator()(
-      V value, Vec<IndexTag<VecToTagT<V>>> indices) const {
-    return (*this)(VecToTagT<V>{}, value, indices);
+      V value, Vec<IndexTag<VecToTag<V>>> indices) const {
+    return (*this)(VecToTag<V>{}, value, indices);
   }
 
   template <int... Indices, TagInferableVector V>
   VECOPS_ALWAYS_INLINE V operator()(
       V value, opt::LaneOrder<Indices...> order) const {
-    return (*this)(VecToTagT<V>{}, value, order);
+    return (*this)(VecToTag<V>{}, value, order);
   }
 
   template <TagInferableVector V, typename... Indices>
     requires (std::integral<std::remove_cvref_t<Indices>> && ...)
   VECOPS_ALWAYS_INLINE V operator()(V value, Indices... indices) const {
-    return (*this)(VecToTagT<V>{}, value, indices...);
+    return (*this)(VecToTag<V>{}, value, indices...);
   }
 };
 
@@ -426,6 +426,41 @@ inline constexpr MaskWhileGtOp mwhilegt{};
 
 #include "vecops/vec/details/Basic.h"
 
+namespace vecops::vec::details {
+
+/**
+ * Runtime-lane word access shared by the lane APIs, the generic memory
+ * indexed paths, and the conversion fallback. Expands the lane's word ordinal
+ * to a compile-time index and reads through the backend word op.
+ */
+template <typename Backend, VectorTag Tag>
+VECOPS_ALWAYS_INLINE ElementOf<Tag> get_vec_lane_at(
+    Tag tag, Vec<Tag> value, nint_t lane) {
+  const nint_t word_lanes = native_word_size(tag);
+  return visit_runtime_word<Backend>(
+      tag, lane / word_lanes, [&]<nint_t Index>() {
+        return execute_word<Index, Backend>(
+            GetVecLaneOp{}, tag,
+            ::vecops::vec::get_word<Index>(tag, value),
+            lane % word_lanes);
+      });
+}
+
+template <typename Backend, VectorTag Tag>
+VECOPS_ALWAYS_INLINE bool get_mask_lane_at(
+    Tag tag, Mask<Tag> value, nint_t lane) {
+  const nint_t word_lanes = native_word_size(tag);
+  return visit_runtime_word<Backend>(
+      tag, lane / word_lanes, [&]<nint_t Index>() {
+        return execute_word<Index, Backend>(
+            GetMaskLaneOp{}, tag,
+            ::vecops::vec::get_word<Index>(tag, value),
+            lane % word_lanes);
+      });
+}
+
+} // namespace vecops::vec::details
+
 namespace vecops::vec {
 
 /**
@@ -457,20 +492,20 @@ template <VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<Tag> FillOp::operator()(
     Tag tag, ElementOf<Tag> value, Options&&... options) const {
   static_assert(
-      (details::is_fill_option_for<Tag, Options> && ...),
+      (details::is_fill_option_for_v<Tag, Options> && ...),
       "fill received an option with the wrong kind or value type");
   constexpr std::size_t masked_count =
-      (std::size_t{0} + ... + std::size_t{details::is_masked_option<Options>});
+      (std::size_t{0} + ... + std::size_t{details::is_masked_option_v<Options>});
   constexpr std::size_t unmasked_count =
-      details::option_count<details::IsUnmaskedOption, Options...>;
+      details::option_count_v<details::IsUnmaskedOption, Options...>;
   constexpr std::size_t first_count =
-      (std::size_t{0} + ... + std::size_t{details::is_first_option<Options>});
+      (std::size_t{0} + ... + std::size_t{details::is_first_option_v<Options>});
   constexpr std::size_t vector_merge_count =
       (std::size_t{0} + ... +
-       std::size_t{details::is_vector_merge_option<Options>});
+       std::size_t{details::is_vector_merge_option_v<Options>});
   constexpr std::size_t scalar_merge_count =
       (std::size_t{0} + ... +
-       std::size_t{details::is_scalar_merge_option<Options>});
+       std::size_t{details::is_scalar_merge_option_v<Options>});
   static_assert(
       masked_count + unmasked_count + first_count == 1,
       "fill requires exactly one active-lane option");
@@ -636,9 +671,9 @@ template <VectorTag ToTag, VectorTag FromTag>
 VECOPS_ALWAYS_INLINE Vec<ToTag> BitCastOp::operator()(
     ToTag to, FromTag from, Vec<FromTag> value) const {
   static_assert(
-      is_fixed_tag<ToTag> == is_fixed_tag<FromTag>,
+      is_fixed_tag_v<ToTag> == is_fixed_tag_v<FromTag>,
       "bitcast cannot mix fixed and scalable descriptors");
-  if constexpr (details::same_logical_bytes<ToTag, FromTag>) {
+  if constexpr (details::same_logical_bytes_v<ToTag, FromTag>) {
     return details::execute(*this, to, from, value);
   } else {
     return details::execute(

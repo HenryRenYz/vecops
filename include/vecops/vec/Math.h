@@ -51,11 +51,11 @@ struct ExpOp {};
 template <FloatingTag Tag, typename... Options>
 consteval bool valid_exp_options_for() {
   constexpr std::size_t accuracy_count =
-      option_count<IsMathAccuracyOption, Options...>;
+      option_count_v<IsMathAccuracyOption, Options...>;
   if constexpr (accuracy_count > 1) return false;
-  if constexpr (!((is_math_accuracy_option<Options> ||
-                    is_arithmetic_option_for<Tag, Options> ||
-                    is_first_option<Options>) && ...))
+  if constexpr (!((is_math_accuracy_option_v<Options> ||
+                    is_arithmetic_option_for_v<Tag, Options> ||
+                    is_first_option_v<Options>) && ...))
     return false;
 
   constexpr std::size_t arithmetic_count =
@@ -63,16 +63,16 @@ consteval bool valid_exp_options_for() {
   if constexpr (arithmetic_count == 0) return true;
 
   constexpr std::size_t masked_count =
-      option_count<IsMaskedOption, Options...>;
+      option_count_v<IsMaskedOption, Options...>;
   constexpr std::size_t unmasked_count =
-      option_count<IsUnmaskedOption, Options...>;
+      option_count_v<IsUnmaskedOption, Options...>;
   constexpr std::size_t first_count =
-      option_count<IsFirstOption, Options...>;
-  constexpr std::size_t zero_count = option_count<IsZeroOption, Options...>;
+      option_count_v<IsFirstOption, Options...>;
+  constexpr std::size_t zero_count = option_count_v<IsZeroOption, Options...>;
   constexpr std::size_t vector_merge_count =
-      option_count<IsVectorMergeOption, Options...>;
+      option_count_v<IsVectorMergeOption, Options...>;
   constexpr std::size_t scalar_merge_count =
-      option_count<IsScalarMergeOption, Options...>;
+      option_count_v<IsScalarMergeOption, Options...>;
   return masked_count + unmasked_count + first_count == 1 &&
       masked_count * unmasked_count == 0 &&
       masked_count * first_count == 0 &&
@@ -86,15 +86,15 @@ consteval Accuracy selected_math_accuracy() {
   Accuracy result = Accuracy::Strict;
   ([&] {
     using Option = std::remove_cvref_t<Options>;
-    if constexpr (IsMathAccuracyOption<Option>::value)
+    if constexpr (is_math_accuracy_option_v<Option>)
       result = IsMathAccuracyOption<Option>::accuracy;
   }(), ...);
   return result;
 }
 
 template <typename... Options>
-inline constexpr bool has_math_accuracy_option =
-    option_count<IsMathAccuracyOption, Options...> != 0;
+inline constexpr bool has_math_accuracy_option_v =
+    option_count_v<IsMathAccuracyOption, Options...> != 0;
 
 } // namespace details
 
@@ -105,7 +105,7 @@ struct ExpCpo {
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(Tag tag, Vec<Tag> value) const;
 
   template <Accuracy A, FloatingTag Tag, typename... ArithmeticOptions>
-    requires ((!details::is_math_accuracy_option<ArithmeticOptions>) && ... &&
+    requires ((!details::is_math_accuracy_option_v<ArithmeticOptions>) && ... &&
               details::valid_exp_options_for<
                   Tag,
                   opt::math::AccuracyOption<A>,
@@ -123,10 +123,10 @@ struct ExpCpo {
       Tag tag, Vec<Tag> value, Options&&... options) const;
 
   template <FloatingVectorValue V, typename... Options>
-    requires (details::valid_exp_options_for<VecToTagT<V>, Options...>())
+    requires (details::valid_exp_options_for<VecToTag<V>, Options...>())
   VECOPS_ALWAYS_INLINE V operator()(V value, Options&&... options) const {
     return (*this)(
-        VecToTagT<V>{}, value, std::forward<Options>(options)...);
+        VecToTag<V>{}, value, std::forward<Options>(options)...);
   }
 };
 
@@ -134,7 +134,7 @@ struct ExpCpo {
 template <Accuracy A, bool NegativeOnly>
 struct FixedAccuracyExpCpo {
   template <FloatingTag Tag, typename... Options>
-    requires (!details::has_math_accuracy_option<Options...> &&
+    requires (!details::has_math_accuracy_option_v<Options...> &&
               details::valid_exp_options_for<
                   Tag, Options..., decltype(opt::math::accuracy<A>)>())
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
@@ -145,13 +145,13 @@ struct FixedAccuracyExpCpo {
   }
 
   template <FloatingVectorValue V, typename... Options>
-    requires (!details::has_math_accuracy_option<Options...> &&
+    requires (!details::has_math_accuracy_option_v<Options...> &&
               details::valid_exp_options_for<
-                  VecToTagT<V>, Options...,
+                  VecToTag<V>, Options...,
                   decltype(opt::math::accuracy<A>)>())
   VECOPS_ALWAYS_INLINE V operator()(V value, Options&&... options) const {
     return (*this)(
-        VecToTagT<V>{}, value, std::forward<Options>(options)...);
+        VecToTag<V>{}, value, std::forward<Options>(options)...);
   }
 };
 
@@ -180,7 +180,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> ExpCpo<NegativeOnly>::operator()(
 
 template <bool NegativeOnly>
 template <Accuracy A, FloatingTag Tag, typename... ArithmeticOptions>
-  requires ((!details::is_math_accuracy_option<ArithmeticOptions>) && ... &&
+  requires ((!details::is_math_accuracy_option_v<ArithmeticOptions>) && ... &&
             details::valid_exp_options_for<
                 Tag,
                 opt::math::AccuracyOption<A>,
@@ -194,7 +194,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> ExpCpo<NegativeOnly>::operator()(
   if constexpr (sizeof...(ArithmeticOptions) == 0) {
     return details::execute(details::ExpOp<A, NegativeOnly>{}, tag, value);
   } else if constexpr (
-      details::option_count<
+      details::option_count_v<
           details::IsFirstOption, ArithmeticOptions...> == 1) {
     const nint_t count = details::find_option<details::IsFirstOption>(
         arithmetic_options...).count;

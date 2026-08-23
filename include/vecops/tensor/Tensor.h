@@ -203,7 +203,7 @@ static constexpr auto new_axis() {
  *
  * @note The runtime value `repeat` must be >= 0 (assertion).
  */
-template <typename V, std::enable_if_t<std::is_base_of_v<Value, std::decay_t<V>>, bool> = true>
+template <ValueType V>
 static constexpr auto new_axis(V repeat) {
   VECOPS_ASSERT(nint_t(repeat) >= 0, "Cannot repeat negative times");
   return details::NewAxis<std::decay_t<V>>{nint_t(repeat)};
@@ -244,12 +244,7 @@ static constexpr auto new_axis(nint_t repeat) {
  * @param end    Exclusive end index.
  * @param step   Step within the slice (default: 1). Must not be 0.
  */
-template <
-    typename S, typename E, typename T = Any,
-    std::enable_if_t<std::is_base_of_v<Value, std::decay_t<S>>, bool> = true,
-    std::enable_if_t<std::is_base_of_v<Value, std::decay_t<E>>, bool> = true,
-    std::enable_if_t<std::is_base_of_v<Value, std::decay_t<T>>, bool> = true
->
+template <ValueType S, ValueType E, ValueType T = Any>
 static constexpr auto range(S start, E end, T step = T{1}) {
   return details::Range<std::decay_t<S>, std::decay_t<E>, std::decay_t<T>>{
       nint_t(start), nint_t(end), nint_t(step)};
@@ -296,7 +291,7 @@ struct PrependMeta<S0, Meta<Ss...>> { using type = Meta<S0, Ss...>; };
 /**
  * @brief Compile-time type computation for Tensor slicing results.
  *
- * `SlicedTraitsImpl<TShape, TStrides, void, TIndices...>` recursively
+ * `SlicedTraitsImpl<TShape, TStrides, TIndices...>` recursively
  * consumes the source shape and stride types together with the slicing
  * index types to compute:
  * - `NewShape`: the resulting Shape type.
@@ -325,7 +320,7 @@ struct SlicedTraitsImpl;
 
 /// Base case: no more indices → result is the remaining shape/strides.
 template <typename TShape, typename TStrides>
-struct SlicedTraitsImpl<TShape, TStrides, void> {
+struct SlicedTraitsImpl<TShape, TStrides> {
   using NewShape = TShape;
   using NewStrides = TStrides;
   static constexpr int Ndim = TShape::Ndim;
@@ -333,10 +328,9 @@ struct SlicedTraitsImpl<TShape, TStrides, void> {
 
 /// Integer index: consumes one dimension.
 template <typename S0, typename... Ss, typename T0, typename... Ts, typename I, typename... Is>
-struct SlicedTraitsImpl<Shape<S0, Ss...>, Strides<T0, Ts...>,
-    std::enable_if_t<std::is_integral_v<std::decay_t<I>>>,
-    I, Is...> {
-  using Next = SlicedTraitsImpl<Shape<Ss...>, Strides<Ts...>, void, Is...>;
+  requires std::integral<std::decay_t<I>>
+struct SlicedTraitsImpl<Shape<S0, Ss...>, Strides<T0, Ts...>, I, Is...> {
+  using Next = SlicedTraitsImpl<Shape<Ss...>, Strides<Ts...>, Is...>;
   using NewShape = typename Next::NewShape;
   using NewStrides = typename Next::NewStrides;
   static constexpr int Ndim = Next::Ndim;
@@ -344,8 +338,8 @@ struct SlicedTraitsImpl<Shape<S0, Ss...>, Strides<T0, Ts...>,
 
 /// ReserveAxis: keeps the dimension unchanged.
 template <typename S0, typename... Ss, typename T0, typename... Ts, typename... Is>
-struct SlicedTraitsImpl<Shape<S0, Ss...>, Strides<T0, Ts...>, void, ReserveAxis, Is...> {
-  using Next = SlicedTraitsImpl<Shape<Ss...>, Strides<Ts...>, void, Is...>;
+struct SlicedTraitsImpl<Shape<S0, Ss...>, Strides<T0, Ts...>, ReserveAxis, Is...> {
+  using Next = SlicedTraitsImpl<Shape<Ss...>, Strides<Ts...>, Is...>;
   using NewShape = typename PrependMeta<S0, typename Next::NewShape>::type;
   using NewStrides = typename PrependMeta<T0, typename Next::NewStrides>::type;
   static constexpr int Ndim = NewShape::Ndim;
@@ -353,8 +347,8 @@ struct SlicedTraitsImpl<Shape<S0, Ss...>, Strides<T0, Ts...>, void, ReserveAxis,
 
 /// NewAxis<V>: inserts a new dimension (does NOT consume original dim).
 template <typename V, typename... Ss, typename... Ts, typename... Is>
-struct SlicedTraitsImpl<Shape<Ss...>, Strides<Ts...>, void, NewAxis<V>, Is...> {
-  using Next = SlicedTraitsImpl<Shape<Ss...>, Strides<Ts...>, void, Is...>;
+struct SlicedTraitsImpl<Shape<Ss...>, Strides<Ts...>, NewAxis<V>, Is...> {
+  using Next = SlicedTraitsImpl<Shape<Ss...>, Strides<Ts...>, Is...>;
   using NewShape = typename PrependMeta<V, typename Next::NewShape>::type;
   using NewStrides = typename PrependMeta<Const<0>, typename Next::NewStrides>::type;
   static constexpr int Ndim = NewShape::Ndim;
@@ -365,8 +359,8 @@ template <
     typename S, typename E, typename T, typename S0, typename... Ss,
     typename T0, typename... Ts, typename... Is
 >
-struct SlicedTraitsImpl<Shape<S0, Ss...>, Strides<T0, Ts...>, void, Range<S, E, T>, Is...> {
-  using Next = SlicedTraitsImpl<Shape<Ss...>, Strides<Ts...>, void, Is...>;
+struct SlicedTraitsImpl<Shape<S0, Ss...>, Strides<T0, Ts...>, Range<S, E, T>, Is...> {
+  using Next = SlicedTraitsImpl<Shape<Ss...>, Strides<Ts...>, Is...>;
 
   /// Range slicing loses compile-time size information.
   using new_sz = Any;
@@ -391,11 +385,11 @@ constexpr int count_ellipsis_v = ((std::is_same_v<std::decay_t<Ts>, Ellipsis> ? 
 
 /// Trait to detect Range<S, E, T> types.
 template <typename T>
-struct is_range : std::false_type {};
+struct IsRange : std::false_type {};
 template <typename S, typename E, typename T>
-struct is_range<Range<S, E, T>> : std::true_type {};
+struct IsRange<Range<S, E, T>> : std::true_type {};
 template <typename T>
-constexpr bool is_range_v = is_range<std::decay_t<T>>::value;
+constexpr bool is_range_v = IsRange<std::decay_t<T>>::value;
 
 /// True if the type consumes one source dimension (integer, ReserveAxis, or Range).
 template <typename T>
@@ -498,8 +492,8 @@ struct FindIndexInPack<I, Target, T0, Ts...> {
  */
 template <typename T, typename TShape, typename TStrides>
 class Tensor {
-  static_assert(is_shape<TShape>, "TShape must be Shape<...>");
-  static_assert(is_strides<TStrides>, "TStrides must be Strides<...>");
+  static_assert(is_shape_v<TShape>, "TShape must be Shape<...>");
+  static_assert(is_strides_v<TStrides>, "TStrides must be Strides<...>");
   static_assert(TShape::Ndim == TStrides::Ndim, "Shape and Strides ndim mismatch");
 
 public:
@@ -542,18 +536,7 @@ public:
       std::initializer_list<nint_t> shape_vals,
       std::initializer_list<nint_t> stride_vals
   )
-      : _data(data),
-        _layout(
-            [&] {
-              VECOPS_ASSERT(shape_vals.size() == Ndim, "shape_vals.size() != Ndim");
-              VECOPS_ASSERT(stride_vals.size() == Ndim, "stride_vals.size() != Ndim");
-              return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
-                return Layout{
-                    TShape{Any{*(shape_vals.begin() + (nint_t) Idx)}...},
-                    TStrides{Any{*(stride_vals.begin() + (nint_t) Idx)}...}
-                };
-              }(std::make_index_sequence<Ndim>{});
-            }()) {}
+      : Tensor(data, make_layout<Ndim>(shape_vals, stride_vals)) {}
 
   /**
    * Construct from a shape initializer_list only; strides are computed
@@ -574,12 +557,8 @@ public:
               VECOPS_ASSERT(shape_vals.size() == Ndim, "shape_vals.size() != Ndim");
               return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
                 std::array<nint_t, Ndim> shapes = {*(shape_vals.begin() + Idx)...};
-                std::array<nint_t, Ndim> stride_vals;
-                nint_t prod = 1;
-                for (int d = Ndim - 1; d >= 0; --d) {
-                  stride_vals[d] = prod;
-                  prod *= shapes[d];
-                }
+                const std::array<nint_t, Ndim> stride_vals =
+                    details::row_major_strides(shapes);
                 return Layout{
                     TShape{Any{shapes[Idx]}...},
                     TStrides{Any{stride_vals[Idx]}...}
@@ -637,20 +616,16 @@ public:
    *
    * @note This is computed at runtime by iterating over all dimensions.
    */
-  nint_t numel() const {
-    nint_t n = 1;
-    for (int i = 0; i < Ndim; ++i) n *= size(i);
-    return n;
-  }
+  nint_t numel() const { return tensor::numel(_layout); }
 
   // -------- Continuity --------
 
   /// Compile-time check: are the last N dimensions contiguous?
   template <int N>
-  static constexpr bool ct_is_last_contiguous = is_ct_last_contiguous<Layout, N>::value;
+  static constexpr bool ct_is_last_contiguous = is_ct_last_contiguous_v<Layout, N>;
 
   /// Compile-time check: are all dimensions contiguous?
-  static constexpr bool ct_is_contiguous = is_ct_contiguous<Layout>::value;
+  static constexpr bool ct_is_contiguous = is_ct_contiguous_v<Layout>;
 
   /**
    * Runtime check: are the last N dimensions contiguous?
@@ -722,12 +697,8 @@ public:
    * @tparam TShape2   Target Shape type (must be more-or-equal lenient).
    * @tparam TStrides2 Target Strides type (must be more-or-equal lenient).
    */
-  template <typename TShape2, typename TStrides2,
-      std::enable_if_t<
-          !(std::is_same_v<Shape, TShape2> && std::is_same_v<Stride, TStrides2>) &&
-          details::IsMoreLenientMeta<Shape, TShape2>::value &&
-          details::IsMoreLenientMeta<Stride, TStrides2>::value,
-      bool> = true>
+  template <typename TShape2, typename TStrides2>
+  requires (!(std::same_as<Shape, TShape2> && std::same_as<Stride, TStrides2>) && details::IsMoreLenientMeta<Shape, TShape2>::value && details::IsMoreLenientMeta<Stride, TStrides2>::value)
   constexpr operator Tensor<T, TShape2, TStrides2>() const {
     return as<TShape2, TStrides2>();
   }
@@ -773,7 +744,7 @@ public:
       nint_t offset = offset_at(_layout, indices...);
       return _data[offset];
     } else {
-      using Traits = details::SlicedTraitsImpl<Shape, Stride, void, std::decay_t<TIndices>...>;
+      using Traits = details::SlicedTraitsImpl<Shape, Stride, std::decay_t<TIndices>...>;
       using RetShape = typename Traits::NewShape;
       using RetStrides = typename Traits::NewStrides;
       constexpr int new_ndim = RetShape::Ndim;
@@ -828,8 +799,8 @@ private:
    * @tparam Nfill   Number of reserve markers to insert (= Ndim - consumed).
    * @tparam TIndices  Original index types (contains exactly one Ellipsis).
    */
-  template <int Nfill, typename... TIndices,
-      std::enable_if_t<(Nfill >= 0), bool> = true>
+  template <int Nfill, typename... TIndices>
+    requires (Nfill >= 0)
   constexpr decltype(auto) _slice_expand_ellipsis(TIndices... indices) const {
     constexpr int Pos = details::FindIndexInPack<0, details::Ellipsis,
                         std::decay_t<TIndices>...>::value;
@@ -852,46 +823,6 @@ private:
   }
 
   /**
-   * Compute the linearized element offset given a pack of slicing indices.
-   * This is the private implementation used during slicing.
-   *
-   * For each index:
-   * - Integer `i`: contributes `i * stride(D)` to the offset.
-   * - `ReserveAxis`: contributes 0 to offset (passes dimension through).
-   * - `NewAxis<V>`: contributes 0 to offset; D is NOT incremented.
-   * - `Range<S,E,T>`: contributes `start * stride(D)` to offset.
-   */
-  template <int D>
-  nint_t _slice_index() const { return 0; }
-
-  template <
-      int D, typename I, typename... Is,
-      std::enable_if_t<std::is_integral_v<std::decay_t<I>>, bool> = true
-  >
-  nint_t _slice_index(I i, Is... rest) const {
-    nint_t idx = nint_t(i);
-    VECOPS_ASSERT(0 <= idx && idx < size(D), "index out of range");
-    return idx * stride(D) + _slice_index<D + 1>(rest...);
-  }
-
-  template <int D, typename... Is>
-  nint_t _slice_index(details::ReserveAxis, Is... rest) const {
-    return _slice_index<D + 1>(rest...);
-  }
-
-  template <int D, typename V, typename... Is>
-  nint_t _slice_index(details::NewAxis<V>, Is... rest) const {
-    return _slice_index<D>(rest...);
-  }
-
-  template <int D, typename S, typename E, typename TStep, typename... Is>
-  nint_t _slice_index(details::Range<S, E, TStep> r, Is... rest) const {
-    VECOPS_ASSERT(0 <= r.start && r.start < size(D), "range start out of range");
-    VECOPS_ASSERT(0 <= r.end && r.end <= size(D), "range end out of range");
-    return r.start * stride(D) + _slice_index<D + 1>(rest...);
-  }
-
-  /**
    * Tail case of `_slice_make_meta_impl`: fill remaining dimensions.
    */
   template <typename NewShape, typename NewStrides, int D, int OutD>
@@ -910,11 +841,9 @@ private:
    * Integer index in `_slice_make_meta_impl`: consumes dimension D,
    * contributes `idx * stride(D)` to offset.
    */
-  template <
-      typename NewShape, typename NewStrides, int D, int OutD,
-      typename I, typename... Is,
-      std::enable_if_t<std::is_integral_v<std::decay_t<I>>, bool> = true
-  >
+  template <typename NewShape, typename NewStrides, int D, int OutD,
+            typename I, typename... Is>
+    requires std::integral<std::decay_t<I>>
   auto _slice_make_meta_impl(
       std::array<nint_t, NewShape::Ndim>& ns_arr,
       std::array<nint_t, NewStrides::Ndim>& nt_arr,
@@ -1016,18 +945,13 @@ private:
   Layout _layout;
 };
 
-namespace details {
-
-template <typename T>
-struct IsTensor : std::false_type {};
-template <typename T, typename TShape, typename TStrides>
-struct IsTensor<Tensor<T, TShape, TStrides>> : std::true_type {};
-
-} // namespace details
-
 /// Type trait: `true` if T is a Tensor.
 template <typename T>
-static constexpr bool is_tensor = details::IsTensor<T>::value;
+inline constexpr bool is_tensor_v = is_specialization_of_v<Tensor, T>;
+
+/** Constraint-facing wrapper for is_tensor_v. */
+template <typename T>
+concept TensorLike = is_tensor_v<std::remove_cvref_t<T>>;
 
 // ======================== Array alias ========================
 
@@ -1062,8 +986,7 @@ using Array = Tensor<T,
  * @param layout   Layout descriptor.
  * @return A Tensor with the given layout.
  */
-template <typename T, typename TLayout,
-    std::enable_if_t<is_layout<std::remove_cvref_t<TLayout>>, bool> = true>
+template <typename T, LayoutLike TLayout>
 constexpr auto make_tensor(T* data, TLayout&& layout) {
   using L = std::remove_cvref_t<TLayout>;
   return Tensor<T, typename L::Shape, typename L::Strides>(data, std::forward<TLayout>(layout));
@@ -1109,8 +1032,8 @@ constexpr auto make_tensor(T* data, TShape&& shape, TStrides&& strides) {
  * @param shape   Shape descriptor.
  * @return A Tensor with inferred contiguous Strides.
  */
-template <typename T, typename TShape,
-    std::enable_if_t<is_shape<std::remove_cvref_t<TShape>>, bool> = true>
+template <typename T, typename TShape>
+  requires (is_shape_v<std::remove_cvref_t<TShape>>)
 constexpr auto make_tensor(T* data, TShape&& shape) {
   return make_tensor(data, make_layout(std::forward<TShape>(shape)));
 }

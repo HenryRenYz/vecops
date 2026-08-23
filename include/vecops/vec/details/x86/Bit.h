@@ -21,72 +21,6 @@ namespace vecops::vec::details {
 /* **************************************************************************** */
 
 template <typename Raw>
-VECOPS_ALWAYS_INLINE Raw x86_bit_and_raw(Raw a, Raw b) {
-  if constexpr (sizeof(Raw) == 16) return _mm_and_si128(a, b);
-#if VEC_WIDTH >= 256
-  else if constexpr (sizeof(Raw) == 32) return _mm256_and_si256(a, b);
-#endif
-#if VEC_WIDTH >= 512
-  else return _mm512_and_si512(a, b);
-#endif
-}
-
-template <typename Raw>
-VECOPS_ALWAYS_INLINE Raw x86_bit_or_raw(Raw a, Raw b) {
-  if constexpr (sizeof(Raw) == 16) return _mm_or_si128(a, b);
-#if VEC_WIDTH >= 256
-  else if constexpr (sizeof(Raw) == 32) return _mm256_or_si256(a, b);
-#endif
-#if VEC_WIDTH >= 512
-  else return _mm512_or_si512(a, b);
-#endif
-}
-
-template <typename Raw>
-VECOPS_ALWAYS_INLINE Raw x86_bit_xor_raw(Raw a, Raw b) {
-  if constexpr (sizeof(Raw) == 16) return _mm_xor_si128(a, b);
-#if VEC_WIDTH >= 256
-  else if constexpr (sizeof(Raw) == 32) return _mm256_xor_si256(a, b);
-#endif
-#if VEC_WIDTH >= 512
-  else return _mm512_xor_si512(a, b);
-#endif
-}
-
-template <typename Raw>
-VECOPS_ALWAYS_INLINE Raw x86_bit_andnot_raw(Raw a, Raw b) {
-  if constexpr (sizeof(Raw) == 16) return _mm_andnot_si128(a, b);
-#if VEC_WIDTH >= 256
-  else if constexpr (sizeof(Raw) == 32) return _mm256_andnot_si256(a, b);
-#endif
-#if VEC_WIDTH >= 512
-  else return _mm512_andnot_si512(a, b);
-#endif
-}
-
-template <typename Raw>
-VECOPS_ALWAYS_INLINE Raw x86_bit_ones_raw() {
-  if constexpr (sizeof(Raw) == 16) return _mm_set1_epi32(-1);
-#if VEC_WIDTH >= 256
-  else if constexpr (sizeof(Raw) == 32) return _mm256_set1_epi32(-1);
-#endif
-#if VEC_WIDTH >= 512
-  else return _mm512_set1_epi32(-1);
-#endif
-}
-
-template <typename Raw>
-VECOPS_ALWAYS_INLINE Raw x86_bit_zero_raw() {
-  if constexpr (sizeof(Raw) == 16) return _mm_setzero_si128();
-#if VEC_WIDTH >= 256
-  else if constexpr (sizeof(Raw) == 32) return _mm256_setzero_si256();
-#endif
-#if VEC_WIDTH >= 512
-  else return _mm512_setzero_si512();
-#endif
-}
-
-template <typename Raw>
 VECOPS_ALWAYS_INLINE Raw x86_bit_set1_i8(int value) {
   if constexpr (sizeof(Raw) == 16) return _mm_set1_epi8(static_cast<char>(value));
 #if VEC_WIDTH >= 256
@@ -320,19 +254,19 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_variable_raw(
 }
 
 #if defined(CPU_CAPABILITY_AVX512) && defined(HAS_AVX512DQ)
-inline constexpr bool x86_has_native_masked_shift = true;
+inline constexpr bool x86_has_native_masked_shift_v = true;
 #else
-inline constexpr bool x86_has_native_masked_shift = false;
+inline constexpr bool x86_has_native_masked_shift_v = false;
 #endif
 
 template <typename Op, typename T, typename Policy, typename Raw, typename MaskRaw>
-  requires x86_has_native_masked_shift
+  requires x86_has_native_masked_shift_v
 VECOPS_ALWAYS_INLINE Raw x86_bit_masked_shift_raw(
     Raw value, Raw inactive, MaskRaw mask, int count);
 
 #if defined(CPU_CAPABILITY_AVX512) && defined(HAS_AVX512DQ)
 template <typename Op, typename T, typename Policy, typename Raw, typename MaskRaw>
-  requires x86_has_native_masked_shift
+  requires x86_has_native_masked_shift_v
 VECOPS_ALWAYS_INLINE Raw x86_bit_masked_shift_raw(
     Raw value, Raw inactive, MaskRaw mask, int count) {
   static_assert(sizeof(T) == 4 || sizeof(T) == 8);

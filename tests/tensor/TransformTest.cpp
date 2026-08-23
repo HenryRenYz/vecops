@@ -33,7 +33,7 @@ TEST(TensorTransformTest, ElementwiseTransformIgnoresContext) {
 
 struct HalfOnlyCoordinateTransform {
   template <vec::VectorTag Tag, TransformContextLike Context>
-    requires (vec::scale_power<Tag> == vec::scale_power<HalfTag>)
+    requires (vec::scale_power_v<Tag> == vec::scale_power_v<HalfTag>)
   vec::Vec<Tag> operator()(
       Tag tag, vec::Vec<Tag>, const Context& context) const {
     auto result = vec::zeros(tag);

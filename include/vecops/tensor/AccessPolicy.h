@@ -172,7 +172,7 @@ struct SliceAccessPolicy<
 
 /** @brief Result type of `SliceAccessPolicy`. */
 template <typename Policy, int SlicedDim>
-using SliceAccessPolicyT = typename SliceAccessPolicy<
+using slice_access_policy_t = typename SliceAccessPolicy<
     std::remove_cvref_t<Policy>, SlicedDim>::type;
 
 /** Rebase a policy after swapping two logical Tensor dimensions. */
@@ -197,7 +197,7 @@ struct TransposeAccessPolicy<OutputAccessPolicy<VectorAxis, Plan>, I, J> {
 };
 
 template <typename Policy, int I, int J>
-using TransposeAccessPolicyT = typename TransposeAccessPolicy<
+using transpose_access_policy_t = typename TransposeAccessPolicy<
     std::remove_cvref_t<Policy>, I, J>::type;
 
 } // namespace vecops::tensor

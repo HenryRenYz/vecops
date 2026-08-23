@@ -65,36 +65,15 @@ VECOPS_ALWAYS_INLINE auto sve_basic_word_bytes(Raw raw) {
 
 template <Element T>
 VECOPS_ALWAYS_INLINE svbool_t sve_prefix_predicate(nint_t count) {
+  // Signed/unsigned and bf16/f16 pairs share one predicate width.
+  const auto begin = static_cast<uint64_t>(0);
   const auto end = static_cast<uint64_t>(count);
-  if constexpr (std::same_as<T, bfloat16_t>) {
-    return svwhilelt_b16_u64(0, end);
-  } else if constexpr (std::same_as<T, float16_t>) {
-    return svwhilelt_b16_u64(0, end);
-  } else if constexpr (std::same_as<T, float32_t>) {
-    return svwhilelt_b32_u64(0, end);
-  } else if constexpr (std::same_as<T, float64_t>) {
-    return svwhilelt_b64_u64(0, end);
-  } else if constexpr (std::same_as<T, int8_t>) {
-    return svwhilelt_b8_u64(0, end);
-  } else if constexpr (std::same_as<T, uint8_t>) {
-    return svwhilelt_b8_u64(0, end);
-  } else if constexpr (std::same_as<T, int16_t>) {
-    return svwhilelt_b16_u64(0, end);
-  } else if constexpr (std::same_as<T, uint16_t>) {
-    return svwhilelt_b16_u64(0, end);
-  } else if constexpr (std::same_as<T, int32_t>) {
-    return svwhilelt_b32_u64(0, end);
-  } else if constexpr (std::same_as<T, uint32_t>) {
-    return svwhilelt_b32_u64(0, end);
-  } else if constexpr (std::same_as<T, int64_t>) {
-    return svwhilelt_b64_u64(0, end);
-  } else if constexpr (std::same_as<T, uint64_t>) {
-    return svwhilelt_b64_u64(0, end);
-  } else {
-    static_assert(
-        dispatch_dependent_false<T>,
-        "SVE predicate construction has no implementation for this element type");
-  }
+#define VECOPS_VEC_SVE_PREFIX(W) return svwhilelt_b##W##_u64(begin, end)
+  if constexpr (sizeof(T) == 1) VECOPS_VEC_SVE_PREFIX(8);
+  else if constexpr (sizeof(T) == 2) VECOPS_VEC_SVE_PREFIX(16);
+  else if constexpr (sizeof(T) == 4) VECOPS_VEC_SVE_PREFIX(32);
+  else VECOPS_VEC_SVE_PREFIX(64);
+#undef VECOPS_VEC_SVE_PREFIX
 }
 
 template <Element T>
@@ -144,20 +123,19 @@ VECOPS_ALWAYS_INLINE svbool_t sve_single_lane_predicate(nint_t lane) {
 
 template <nint_t Index, VectorTag Tag>
 VECOPS_ALWAYS_INLINE nint_t sve_valid_word_lanes(Tag tag) {
-  const nint_t word_lanes = native_word_size(tag);
-  if constexpr (is_scalable_tag<Tag>) {
-    if constexpr (scale_power<Tag> >= 0) {
+  // Keep the scalable test nested: flattening it into a conjunction makes
+  // Clang instantiate scale_power_v for fixed Tags, where it is ill-formed.
+  if constexpr (is_scalable_tag_v<Tag>) {
+    if constexpr (scale_power_v<Tag> >= 0) {
       // Every physical word of a non-subword scalable tuple is complete. Keep
       // this explicit so Clang does not retain per-word whilelo predicates for
       // a multi-word Tag whose runtime size is expressed through svcnt*().
-      return word_lanes;
+      return native_word_size(tag);
     } else {
-      return std::clamp<nint_t>(
-          size(tag) - Index * word_lanes, 0, word_lanes);
+      return valid_word_lanes<Index, Tag>();
     }
   } else {
-    return std::clamp<nint_t>(
-        size(tag) - Index * word_lanes, 0, word_lanes);
+    return valid_word_lanes<Index, Tag>();
   }
 }
 
@@ -171,8 +149,8 @@ VECOPS_ALWAYS_INLINE nint_t sve_valid_word_lanes(Tag tag) {
  */
 template <VectorTag Tag>
 struct RuntimeWordAccess<SVEBackend, Tag> {
-  static constexpr bool sized_vec = is_word_array<Vec<Tag>>;
-  static constexpr bool sized_mask = is_word_array<Mask<Tag>>;
+  static constexpr bool sized_vec = is_word_array_v<Vec<Tag>>;
+  static constexpr bool sized_mask = is_word_array_v<Mask<Tag>>;
 
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> get_vec(
       Tag tag, const Vec<Tag>& value, nint_t ordinal)
@@ -227,7 +205,7 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
       using BitsTag = Rebind<uint16_t, Tag>;
       const auto bit_word = execute_word<0, SVEBackend>(
           BitCastOp{}, BitsTag{}, tag, word);
-      if constexpr (is_word_array<Vec<Tag>>) {
+      if constexpr (is_word_array_v<Vec<Tag>>) {
         auto bits = execute(BitCastOp{}, BitsTag{}, tag, value);
         bits = ::vecops::vec::set_word(
             BitsTag{}, bits, ordinal, bit_word);
@@ -249,7 +227,7 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
         else
           return svreinterpret_bf16_u16_x4(updated);
       }
-    } else if constexpr (is_word_array<Vec<Tag>>) {
+    } else if constexpr (is_word_array_v<Vec<Tag>>) {
       return details::set_word(value, ordinal, word);
     } else {
       return visit_runtime_word<SVEBackend>(
@@ -283,7 +261,7 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
         0, native_word_size(tag));
     const auto active = sve_prefix_predicate<ElementOf<Tag>>(valid);
     word = svand_b_z(active, word, active);
-    if constexpr (is_word_array<Mask<Tag>>) {
+    if constexpr (is_word_array_v<Mask<Tag>>) {
       return details::set_word(value, ordinal, word);
     } else {
       return visit_runtime_word<SVEBackend>(
@@ -845,7 +823,7 @@ template <VectorTag Tag>
 struct NativeImpl<SVEBackend, UpperOp, Tag> {
   static VECOPS_ALWAYS_INLINE Vec<Half<Tag>> call(
       UpperOp, Tag tag, Vec<Tag> value) {
-    if constexpr (num_words(Tag{}) > 1 && !is_subword<Half<Tag>>) {
+    if constexpr (num_words(Tag{}) > 1 && !is_subword_v<Half<Tag>>) {
       return ::vecops::vec::get_word<1>(tag, value);
     }
     using T = ElementOf<Tag>;
@@ -897,7 +875,7 @@ struct NativeImpl<SVEBackend, ConcatOp, Tag> {
       Vec<Half<Tag>> lower_value,
       Vec<Half<Tag>> upper_value) {
     using T = ElementOf<Tag>;
-    if constexpr (num_words(Tag{}) > 1 && !is_subword<Half<Tag>>) {
+    if constexpr (num_words(Tag{}) > 1 && !is_subword_v<Half<Tag>>) {
       const auto lower_raw = sve_basic_raw_word(lower_value);
       const auto upper_raw = sve_basic_raw_word(upper_value);
       return construct_words<SVEBackend>(
@@ -1439,119 +1417,24 @@ struct NativeWordImpl<SVEBackend, LocalShuffleOp> {
     }();
     const auto raw = sve_basic_raw_word(value);
     const auto signed_indices = sve_basic_raw_word(indices);
-    if constexpr (std::same_as<T, bfloat16_t>) {
-      const auto active = svptrue_b16();
-      auto base = svindex_u16(0, 1);
-      base = svlsl_n_u16_z(
-          active, svlsr_n_u16_z(active, base, shift), shift);
-      return sve_table_lookup_word<Tag>(
-          raw,
-          svadd_u16_z(
-              active, base, svreinterpret_u16_s16(signed_indices)));
-    } else if constexpr (std::same_as<T, float16_t>) {
-      const auto active = svptrue_b16();
-      auto base = svindex_u16(0, 1);
-      base = svlsl_n_u16_z(
-          active, svlsr_n_u16_z(active, base, shift), shift);
-      return sve_table_lookup_word<Tag>(
-          raw,
-          svadd_u16_z(
-              active, base, svreinterpret_u16_s16(signed_indices)));
-    } else if constexpr (std::same_as<T, float32_t>) {
-      const auto active = svptrue_b32();
-      auto base = svindex_u32(0, 1);
-      base = svlsl_n_u32_z(
-          active, svlsr_n_u32_z(active, base, shift), shift);
-      return sve_table_lookup_word<Tag>(
-          raw,
-          svadd_u32_z(
-              active, base, svreinterpret_u32_s32(signed_indices)));
-    } else if constexpr (std::same_as<T, float64_t>) {
-      const auto active = svptrue_b64();
-      auto base = svindex_u64(0, 1);
-      base = svlsl_n_u64_z(
-          active, svlsr_n_u64_z(active, base, shift), shift);
-      return sve_table_lookup_word<Tag>(
-          raw,
-          svadd_u64_z(
-              active, base, svreinterpret_u64_s64(signed_indices)));
-    } else if constexpr (std::same_as<T, int8_t>) {
-      const auto active = svptrue_b8();
-      auto base = svindex_u8(0, 1);
-      base = svlsl_n_u8_z(
-          active, svlsr_n_u8_z(active, base, shift), shift);
-      return sve_table_lookup_word<Tag>(
-          raw,
-          svadd_u8_z(
-              active, base, svreinterpret_u8_s8(signed_indices)));
-    } else if constexpr (std::same_as<T, uint8_t>) {
-      const auto active = svptrue_b8();
-      auto base = svindex_u8(0, 1);
-      base = svlsl_n_u8_z(
-          active, svlsr_n_u8_z(active, base, shift), shift);
-      return sve_table_lookup_word<Tag>(
-          raw,
-          svadd_u8_z(
-              active, base, svreinterpret_u8_s8(signed_indices)));
-    } else if constexpr (std::same_as<T, int16_t>) {
-      const auto active = svptrue_b16();
-      auto base = svindex_u16(0, 1);
-      base = svlsl_n_u16_z(
-          active, svlsr_n_u16_z(active, base, shift), shift);
-      return sve_table_lookup_word<Tag>(
-          raw,
-          svadd_u16_z(
-              active, base, svreinterpret_u16_s16(signed_indices)));
-    } else if constexpr (std::same_as<T, uint16_t>) {
-      const auto active = svptrue_b16();
-      auto base = svindex_u16(0, 1);
-      base = svlsl_n_u16_z(
-          active, svlsr_n_u16_z(active, base, shift), shift);
-      return sve_table_lookup_word<Tag>(
-          raw,
-          svadd_u16_z(
-              active, base, svreinterpret_u16_s16(signed_indices)));
-    } else if constexpr (std::same_as<T, int32_t>) {
-      const auto active = svptrue_b32();
-      auto base = svindex_u32(0, 1);
-      base = svlsl_n_u32_z(
-          active, svlsr_n_u32_z(active, base, shift), shift);
-      return sve_table_lookup_word<Tag>(
-          raw,
-          svadd_u32_z(
-              active, base, svreinterpret_u32_s32(signed_indices)));
-    } else if constexpr (std::same_as<T, uint32_t>) {
-      const auto active = svptrue_b32();
-      auto base = svindex_u32(0, 1);
-      base = svlsl_n_u32_z(
-          active, svlsr_n_u32_z(active, base, shift), shift);
-      return sve_table_lookup_word<Tag>(
-          raw,
-          svadd_u32_z(
-              active, base, svreinterpret_u32_s32(signed_indices)));
-    } else if constexpr (std::same_as<T, int64_t>) {
-      const auto active = svptrue_b64();
-      auto base = svindex_u64(0, 1);
-      base = svlsl_n_u64_z(
-          active, svlsr_n_u64_z(active, base, shift), shift);
-      return sve_table_lookup_word<Tag>(
-          raw,
-          svadd_u64_z(
-              active, base, svreinterpret_u64_s64(signed_indices)));
-    } else if constexpr (std::same_as<T, uint64_t>) {
-      const auto active = svptrue_b64();
-      auto base = svindex_u64(0, 1);
-      base = svlsl_n_u64_z(
-          active, svlsr_n_u64_z(active, base, shift), shift);
-      return sve_table_lookup_word<Tag>(
-          raw,
-          svadd_u64_z(
-              active, base, svreinterpret_u64_s64(signed_indices)));
-    } else {
-      static_assert(
-          dispatch_dependent_false<T>,
-          "SVE local shuffle has no implementation for this element type");
-    }
+    // All element types share the same body; the suffix families (uN, sN,
+    // bN) differ only in the element byte width.
+#define VECOPS_VEC_SVE_LOCAL_SHUFFLE_WIDTH(W)                           \
+  {                                                                      \
+    const auto active = svptrue_b##W();                                  \
+    auto base = svindex_u##W(0, 1);                                      \
+    base = svlsl_n_u##W##_z(                                             \
+        active, svlsr_n_u##W##_z(active, base, shift), shift);           \
+    return sve_table_lookup_word<Tag>(                                   \
+        raw,                                                             \
+        svadd_u##W##_z(                                                  \
+            active, base, svreinterpret_u##W##_s##W(signed_indices)));   \
+  }
+    if constexpr (sizeof(T) == 1) VECOPS_VEC_SVE_LOCAL_SHUFFLE_WIDTH(8)
+    else if constexpr (sizeof(T) == 2) VECOPS_VEC_SVE_LOCAL_SHUFFLE_WIDTH(16)
+    else if constexpr (sizeof(T) == 4) VECOPS_VEC_SVE_LOCAL_SHUFFLE_WIDTH(32)
+    else VECOPS_VEC_SVE_LOCAL_SHUFFLE_WIDTH(64);
+#undef VECOPS_VEC_SVE_LOCAL_SHUFFLE_WIDTH
   }
 };
 

@@ -6,12 +6,13 @@
 #define VECOPS_FLOAT16_H
 
 #include <cmath>
+#include <concepts>
 #include <cstring>
 #include <cstdint>
-#include <iostream>
 
 #include "vecops/CoreDefs.h"
 #include "./Bitcast.h"
+#include "./SmallFloat.h"
 
 #ifdef ARCH_X86_FAMILY
 #include <immintrin.h>
@@ -23,7 +24,7 @@
 
 namespace vecops {
 
-struct alignas(2) Float16 {
+struct alignas(2) Float16 : SmallFloatOps<Float16> {
 
   VECOPS_INLINE constexpr Float16() = default;
 
@@ -31,7 +32,7 @@ struct alignas(2) Float16 {
 
   VECOPS_INLINE Float16(double x) : Float16(float(x)) { }
 
-  template <typename Int, std::enable_if_t<std::is_integral_v<Int>, bool> = false>
+  template <std::integral Int>
   VECOPS_INLINE explicit Float16(Int x) : Float16(float(x)) { }
 
   #if defined(ARCH_ARM64)
@@ -68,7 +69,7 @@ struct alignas(2) Float16 {
   }
   #endif
 
-  template <typename Int, std::enable_if_t<std::is_integral_v<Int>, bool> = false>
+  template <std::integral Int>
   VECOPS_INLINE explicit constexpr operator Int() const {
     return Int(float(*this));
   }
@@ -267,144 +268,15 @@ VECOPS_INLINE Float16::operator float() const {
   return details::fp16_to_fp32(x);
 }
 
-VECOPS_INLINE std::ostream& operator<<(std::ostream& out, const Float16& v) {
-  out << float(v);
-  return out;
-}
-
-
-VECOPS_INLINE Float16 operator+(const Float16& a, const Float16& b) {
-  return float(a) + float(b);
-}
-
-VECOPS_INLINE Float16 operator-(const Float16& a, const Float16& b) {
-  return float(a) - float(b);
-}
-
-VECOPS_INLINE Float16 operator*(const Float16& a, const Float16& b) {
-  return float(a) * float(b);
-}
-
-VECOPS_INLINE Float16 operator/(const Float16& a, const Float16& b) {
-  return float(a) / float(b);
-}
-
-VECOPS_INLINE Float16 operator-(const Float16& a) {
-  return -float(a);
-}
-
-VECOPS_INLINE Float16& operator+=(Float16& a, const Float16& b) {
-  a = a + b;
-  return a;
-}
-
-VECOPS_INLINE Float16& operator-=(Float16& a, const Float16& b) {
-  a = a - b;
-  return a;
-}
-
-VECOPS_INLINE Float16& operator*=(Float16& a, const Float16& b) {
-  a = a * b;
-  return a;
-}
-
-VECOPS_INLINE Float16& operator/=(Float16& a, const Float16& b) {
-  a = a / b;
-  return a;
-}
-
-
-VECOPS_INLINE bool operator<(const Float16& a, const Float16& b) {
-  return float(a) < float(b);
-}
-
-VECOPS_INLINE bool operator>(const Float16& a, const Float16& b) {
-  return float(a) > float(b);
-}
-
-VECOPS_INLINE bool operator<=(const Float16& a, const Float16& b) {
-  return float(a) <= float(b);
-}
-
-VECOPS_INLINE bool operator>=(const Float16& a, const Float16& b) {
-  return float(a) >= float(b);
-}
-
-VECOPS_INLINE bool operator==(const Float16& a, const Float16& b) {
-  return float(a) == float(b);
-}
-
-VECOPS_INLINE bool operator!=(const Float16& a, const Float16& b) {
-  return float(a) != float(b);
-}
-
 } // namespace vecops
 
 namespace std {
 
-VECOPS_INLINE constexpr vecops::Float16 fabs(vecops::Float16 x) {
-  return vecops::Float16::from_bits(x.to_bits() & 0x7fff);
-}
+VECOPS_DEFINE_STD_ABS(Float16)
 
-VECOPS_INLINE constexpr vecops::Float16 abs(vecops::Float16 x) {
-  return std::fabs(x);
-}
-
-template <>
-class numeric_limits<vecops::Float16> {
-public:
-  static constexpr bool is_specialized = true;
-  static constexpr bool is_signed = true;
-  static constexpr bool is_integer = false;
-  static constexpr bool is_exact = false;
-  static constexpr bool has_infinity = true;
-  static constexpr bool has_quiet_NaN = true;
-  static constexpr bool has_signaling_NaN = true;
-  static constexpr auto has_denorm = numeric_limits<float>::has_denorm;
-  static constexpr auto has_denorm_loss = numeric_limits<float>::has_denorm_loss;
-  static constexpr auto round_style = numeric_limits<float>::round_style;
-  static constexpr bool is_iec559 = true;
-  static constexpr bool is_bounded = true;
-  static constexpr bool is_modulo = false;
-  static constexpr int digits = 11;
-  static constexpr int digits10 = 3;
-  static constexpr int max_digits10 = 5;
-  static constexpr int radix = 2;
-  static constexpr int min_exponent = -13;
-  static constexpr int min_exponent10 = -4;
-  static constexpr int max_exponent = 16;
-  static constexpr int max_exponent10 = 4;
-  static constexpr auto traps = numeric_limits<float>::traps;
-  static constexpr auto tinyness_before = numeric_limits<float>::tinyness_before;
-
-  static constexpr vecops::Float16 min() {
-    return vecops::Float16::from_bits(0x0400);
-  }
-  static constexpr vecops::Float16 lowest() {
-    return vecops::Float16::from_bits(0xFBFF);
-  }
-  static constexpr vecops::Float16 max() {
-    return vecops::Float16::from_bits(0x7BFF);
-  }
-  static constexpr vecops::Float16 epsilon() {
-    return vecops::Float16::from_bits(0x1400);
-  }
-  static constexpr vecops::Float16 round_error() {
-    return vecops::Float16::from_bits(0x3800);
-  }
-  static constexpr vecops::Float16 infinity() {
-    return vecops::Float16::from_bits(0x7C00);
-  }
-  static constexpr vecops::Float16 quiet_NaN() {
-    return vecops::Float16::from_bits(0x7E00);
-  }
-  static constexpr vecops::Float16 signaling_NaN() {
-    return vecops::Float16::from_bits(0x7D00);
-  }
-  static constexpr vecops::Float16 denorm_min() {
-    return vecops::Float16::from_bits(0x0001);
-  }
-};
+VECOPS_DEFINE_SMALL_FLOAT_LIMITS(
+    Float16, true, 11, 3, 5, -13, -4, 16, 4,
+    0x0400, 0xFBFF, 0x7BFF, 0x1400, 0x3800, 0x7C00, 0x7E00, 0x7D00, 0x0001)
 
 } // namespace std
 

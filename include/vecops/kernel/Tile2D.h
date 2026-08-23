@@ -132,7 +132,7 @@ struct Tile2DKernelCase {
 namespace tile2d_details {
 
 template <typename T>
-using TileValue = ::vecops::meta::ToValue<std::remove_cvref_t<T>>;
+using TileValue = ::vecops::meta::to_value_t<std::remove_cvref_t<T>>;
 
 template <typename T>
 VECOPS_ALWAYS_INLINE constexpr TileValue<T> to_tile_value(T&& value) {
@@ -414,7 +414,7 @@ struct FamilyFor<Tile2DGeneratedCatalog<Provider, Search>, A, B> {
 };
 
 template <typename Catalog, int A, int B>
-using FamilyForT = typename FamilyFor<Catalog, A, B>::type;
+using family_for_t = typename FamilyFor<Catalog, A, B>::type;
 
 template <typename Catalog>
 consteval Choice select_bulk() {
@@ -660,7 +660,7 @@ VECOPS_ALWAYS_INLINE void run(
     Fn& fn) {
   constexpr Choice bulk_choice = select_bulk<Catalog>();
   static_assert(bulk_choice.power >= 0, "tile2d catalog has no bulk family");
-  using Bulk = FamilyForT<Catalog, bulk_choice.a, bulk_choice.b>;
+  using Bulk = family_for_t<Catalog, bulk_choice.a, bulk_choice.b>;
   using BulkCapM = Capacity<TM, Bulk::a>;
   using BulkCapN = Capacity<TN, Bulk::b>;
 
@@ -671,7 +671,7 @@ VECOPS_ALWAYS_INLINE void run(
 
   if constexpr (std::same_as<Policy, tile2d_policy::SingleKernel>) {
     constexpr Choice single_choice = select_single<Catalog>();
-    using Single = FamilyForT<Catalog, single_choice.a, single_choice.b>;
+    using Single = family_for_t<Catalog, single_choice.a, single_choice.b>;
     using SingleCapM = Capacity<TM, Single::a>;
     using SingleCapN = Capacity<TN, Single::b>;
     constexpr bool single_no_tail_m = has_no_tail_v<M, SingleCapM>;
@@ -696,9 +696,9 @@ VECOPS_ALWAYS_INLINE void run(
     static_assert(right_choice.power >= 0 && bottom_choice.power >= 0 &&
                   corner_choice.power >= 0,
                   "tile2d catalog cannot cover a natural-order boundary");
-    using Right = FamilyForT<Catalog, right_choice.a, right_choice.b>;
-    using Bottom = FamilyForT<Catalog, bottom_choice.a, bottom_choice.b>;
-    using Corner = FamilyForT<Catalog, corner_choice.a, corner_choice.b>;
+    using Right = family_for_t<Catalog, right_choice.a, right_choice.b>;
+    using Bottom = family_for_t<Catalog, bottom_choice.a, bottom_choice.b>;
+    using Corner = family_for_t<Catalog, corner_choice.a, corner_choice.b>;
     const auto [right_cap_m, right_cap_n] = capacities<TM, TN, Right>(tm, tn);
     const auto [bottom_cap_m, bottom_cap_n] = capacities<TM, TN, Bottom>(tm, tn);
     const auto [corner_cap_m, corner_cap_n] = capacities<TM, TN, Corner>(tm, tn);
@@ -767,7 +767,7 @@ VECOPS_ALWAYS_INLINE void run(
 
   if constexpr (std::same_as<Policy, tile2d_policy::BulkAndTail>) {
     constexpr Choice tail_choice = select_single<Catalog>();
-    using Tail = FamilyForT<Catalog, tail_choice.a, tail_choice.b>;
+    using Tail = family_for_t<Catalog, tail_choice.a, tail_choice.b>;
     const auto [tail_cap_m, tail_cap_n] = capacities<TM, TN, Tail>(tm, tn);
     if constexpr (!no_tail_m) {
       if (m_bulk < m_extent) {
@@ -811,9 +811,9 @@ VECOPS_ALWAYS_INLINE void run(
   static_assert(lower_choice.power >= 0 && right_choice.power >= 0 &&
                 corner_choice.power >= 0,
                 "tile2d catalog cannot cover a four-region boundary");
-  using Lower = FamilyForT<Catalog, lower_choice.a, lower_choice.b>;
-  using Right = FamilyForT<Catalog, right_choice.a, right_choice.b>;
-  using Corner = FamilyForT<Catalog, corner_choice.a, corner_choice.b>;
+  using Lower = family_for_t<Catalog, lower_choice.a, lower_choice.b>;
+  using Right = family_for_t<Catalog, right_choice.a, right_choice.b>;
+  using Corner = family_for_t<Catalog, corner_choice.a, corner_choice.b>;
   const auto [lower_cap_m, lower_cap_n] = capacities<TM, TN, Lower>(tm, tn);
   const auto [right_cap_m, right_cap_n] = capacities<TM, TN, Right>(tm, tn);
   const auto [corner_cap_m, corner_cap_n] = capacities<TM, TN, Corner>(tm, tn);

@@ -44,18 +44,22 @@ using SpecOf = std::remove_cvref_t<decltype(
 
 template <typename Source, typename Destination>
 /** Bound source/destination pair accepted by the generic transpose kernels. */
-concept CompatibleAccesses = requires {
+inline constexpr bool are_compatible_accesses_v = requires {
   typename ComputeOf<Source>;
   typename ComputeOf<Destination>;
 } && std::same_as<ComputeOf<Source>, ComputeOf<Destination>> &&
     vec::Element<ComputeOf<Source>>;
+
+template <typename Source, typename Destination>
+concept CompatibleAccesses =
+    are_compatible_accesses_v<Source, Destination>;
 
 template <typename Access>
 /**
  * Access exposing untransformed raw storage with memory dtype == compute dtype.
  * SME uses this stronger contract; generic vector code only needs load/store.
  */
-concept RawDirectAccess = requires(Access& access) {
+inline constexpr bool is_raw_direct_access_v = requires(Access& access) {
   typename std::remove_cvref_t<Access>::MemoryElement;
   typename std::remove_cvref_t<Access>::Transform;
   { access.raw_data() };
@@ -68,8 +72,11 @@ concept RawDirectAccess = requires(Access& access) {
             typename std::remove_cvref_t<Access>::MemoryElement>,
         ComputeOf<Access>>;
 
+template <typename Access>
+concept RawDirectAccess = is_raw_direct_access_v<Access>;
+
 template <typename T>
-using MetaValue = meta::ToValue<std::remove_cvref_t<T>>;
+using MetaValue = meta::to_value_t<std::remove_cvref_t<T>>;
 
 template <typename T>
 /** Convert a meta extent to a value preserving all compile-time bounds. */
@@ -91,7 +98,7 @@ template <std::size_t Stage, vec::VectorTag Tag, std::size_t N>
  */
 VECOPS_ALWAYS_INLINE auto transpose_16byte_stage(
     const std::array<vec::Vec<Tag>, N>& input) {
-  static_assert(vec::is_fixed_tag<Tag>);
+  static_assert(vec::is_fixed_tag_v<Tag>);
   static_assert(
       static_cast<nint_t>(N * sizeof(vec::ElementOf<Tag>)) == 16);
   if constexpr ((std::size_t{1} << Stage) == N) {
@@ -129,8 +136,8 @@ template <vec::VectorTag Tag, std::size_t N>
  */
 VECOPS_ALWAYS_INLINE auto transpose_square(
     const std::array<vec::Vec<Tag>, N>& rows) {
-  static_assert(vec::is_fixed_tag<Tag>);
-  static_assert(static_cast<nint_t>(N) == vec::fixed_lanes<Tag>);
+  static_assert(vec::is_fixed_tag_v<Tag>);
+  static_assert(static_cast<nint_t>(N) == vec::fixed_lanes_v<Tag>);
   if constexpr (N == 1) {
     return rows;
   } else if constexpr (N * sizeof(vec::ElementOf<Tag>) == 16) {

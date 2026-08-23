@@ -30,17 +30,17 @@ struct ZeroBitLanes {};
 struct MergeBitLanes {};
 
 template <VectorTag Tag, typename Option>
-inline constexpr bool is_bit_option_for = [] {
+inline constexpr bool is_bit_option_for_v = [] {
   using Clean = std::remove_cvref_t<Option>;
   if constexpr (IsUnmaskedOption<Clean>::value) {
     return true;
-  } else if constexpr (is_masked_option<Clean>) {
+  } else if constexpr (is_masked_option_v<Clean>) {
     return std::same_as<typename IsMaskedOption<Clean>::Value, Mask<Tag>>;
-  } else if constexpr (is_zero_option<Clean>) {
+  } else if constexpr (is_zero_option_v<Clean>) {
     return true;
-  } else if constexpr (is_vector_merge_option<Clean>) {
+  } else if constexpr (is_vector_merge_option_v<Clean>) {
     return std::same_as<typename IsVectorMergeOption<Clean>::Value, Vec<Tag>>;
-  } else if constexpr (is_scalar_merge_option<Clean>) {
+  } else if constexpr (is_scalar_merge_option_v<Clean>) {
     return std::same_as<typename IsScalarMergeOption<Clean>::Value,
                         ElementOf<Tag>>;
   } else {
@@ -52,11 +52,11 @@ template <VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<Tag> bit_inactive_value(
     Tag tag, Vec<Tag> preserve, Options&&... options) {
   constexpr std::size_t zero_count =
-      option_count<IsZeroOption, Options...>;
+      option_count_v<IsZeroOption, Options...>;
   constexpr std::size_t vector_count =
-      option_count<IsVectorMergeOption, Options...>;
+      option_count_v<IsVectorMergeOption, Options...>;
   constexpr std::size_t scalar_count =
-      option_count<IsScalarMergeOption, Options...>;
+      option_count_v<IsScalarMergeOption, Options...>;
   if constexpr (zero_count == 1) {
     return zeros(tag);
   } else if constexpr (vector_count == 1) {
@@ -73,12 +73,12 @@ VECOPS_ALWAYS_INLINE Vec<Tag> bit_inactive_value(
 template <VectorTag Tag, typename... Options>
 consteval void validate_bit_options() {
   static_assert(
-      (is_bit_option_for<Tag, Options> && ...),
+      (is_bit_option_for_v<Tag, Options> && ...),
       "bit operation received an option with the wrong kind or value type");
   constexpr std::size_t masked_count =
-      option_count<IsMaskedOption, Options...>;
+      option_count_v<IsMaskedOption, Options...>;
   constexpr std::size_t unmasked_count =
-      option_count<IsUnmaskedOption, Options...>;
+      option_count_v<IsUnmaskedOption, Options...>;
   static_assert(
       masked_count + unmasked_count == 1,
       "bit operation requires exactly one opt::masked or opt::unmasked");
@@ -86,19 +86,19 @@ consteval void validate_bit_options() {
       masked_count * unmasked_count == 0,
       "opt::masked and opt::unmasked are mutually exclusive");
   static_assert(
-      option_count<IsZeroOption, Options...> +
-          option_count<IsVectorMergeOption, Options...> +
-          option_count<IsScalarMergeOption, Options...> <= 1,
+      option_count_v<IsZeroOption, Options...> +
+          option_count_v<IsVectorMergeOption, Options...> +
+          option_count_v<IsScalarMergeOption, Options...> <= 1,
       "bit operation accepts at most one zero or merge option");
 }
 
 template <typename... Options>
 VECOPS_ALWAYS_INLINE constexpr auto bit_inactive_policy() {
-  if constexpr (option_count<IsZeroOption, Options...> == 1)
+  if constexpr (option_count_v<IsZeroOption, Options...> == 1)
     return ZeroBitLanes{};
   else if constexpr (
-      option_count<IsVectorMergeOption, Options...> +
-      option_count<IsScalarMergeOption, Options...> == 1)
+      option_count_v<IsVectorMergeOption, Options...> +
+      option_count_v<IsScalarMergeOption, Options...> == 1)
     return MergeBitLanes{};
   else
     return PreserveBitLanes{};
@@ -108,7 +108,7 @@ template <typename Op, IntegerTag Tag, typename Count, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<Tag> execute_bit_shift_options(
     Op op, Tag tag, Vec<Tag> value, Count count, Options&&... options) {
   validate_bit_options<Tag, Options...>();
-  if constexpr (option_count<IsUnmaskedOption, Options...> == 1) {
+  if constexpr (option_count_v<IsUnmaskedOption, Options...> == 1) {
     return execute(op, tag, value, count);
   } else {
     const auto inactive = bit_inactive_value(

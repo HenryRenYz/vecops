@@ -53,8 +53,7 @@ VECOPS_INLINE nint_t validate_layernorm_io_layouts(
   return n;
 }
 
-template <typename ParamSpec>
-  requires tensor::is_input_spec_v<ParamSpec>
+template <tensor::InputSpecLike ParamSpec>
 VECOPS_INLINE void validate_layernorm_param(
     nint_t n, const ParamSpec& param) {
   static_assert(ParamSpec::InputTensor::Ndim == 1);
@@ -65,23 +64,19 @@ VECOPS_INLINE void validate_layernorm_param(
 VECOPS_INLINE constexpr void validate_layernorm_param(
     nint_t, tensor::nullopt_t) {}
 
-template <typename Operand>
-inline constexpr bool is_input_operand_v =
-    tensor::InputOperand<Operand>;
-
-template <typename Operand>
-inline constexpr bool is_output_operand_v = tensor::OutputOperand<Operand>;
-
 template <typename Param>
 inline constexpr bool is_layernorm_param_operand_v = [] {
   using P = std::remove_cvref_t<Param>;
   if constexpr (tensor::is_nullopt_v<P>) return true;
   else if constexpr (tensor::is_input_spec_v<P>) {
     return P::InputTensor::Ndim == 1;
-  } else if constexpr (tensor::is_tensor<P>) {
+  } else if constexpr (tensor::is_tensor_v<P>) {
     return P::Ndim == 1;
   } else return false;
 }();
+
+template <typename Param>
+concept LayerNormParamOperand = is_layernorm_param_operand_v<Param>;
 
 template <typename Param>
 inline constexpr bool is_normalized_layernorm_param_v =
@@ -99,8 +94,7 @@ VECOPS_INLINE constexpr tensor::nullopt_t as_layernorm_param(
   return tensor::nullopt;
 }
 
-template <typename ParamSpec, typename Policy>
-  requires tensor::is_input_spec_v<ParamSpec>
+template <tensor::InputSpecLike ParamSpec, typename Policy>
 VECOPS_INLINE auto bind_layernorm_param(
     const ParamSpec& spec, Policy policy,
     kernel::WorkspaceView& workspace) {
@@ -189,18 +183,16 @@ public:
   using Tag = vec::ScalableTag<ComputeType, 0>;
   /** Compile-time hardware-mode contract consumed by ExecutionSession. */
   using ResourceRequirements =
-      typename execution::details::CurrentBackend::DefaultRequirements;
+      typename execution::details::current_backend_t::DefaultRequirements;
 
   const Config config;
 
   VECOPS_INLINE constexpr explicit LayerNorm(Config cfg = {}) : config(cfg) {}
 
-  template <typename InOperand, typename ScaleOperand, typename BiasOperand,
-            typename OutOperand>
-    requires (details::is_input_operand_v<InOperand> &&
-              details::is_layernorm_param_operand_v<ScaleOperand> &&
-              details::is_layernorm_param_operand_v<BiasOperand> &&
-              details::is_output_operand_v<OutOperand>)
+  template <tensor::InputOperand InOperand,
+            details::LayerNormParamOperand ScaleOperand,
+            details::LayerNormParamOperand BiasOperand,
+            tensor::OutputOperand OutOperand>
   /**
    * @brief Return exact DataAccess workspace bytes for four operands.
    * @param in Input Tensor/Spec.
@@ -227,9 +219,8 @@ public:
     }
   }
 
-  template <typename InOperand, typename OutOperand>
-    requires (details::is_input_operand_v<InOperand> &&
-              details::is_output_operand_v<OutOperand>)
+  template <tensor::InputOperand InOperand,
+            tensor::OutputOperand OutOperand>
   /** Workspace query for LayerNorm without affine parameters. */
   VECOPS_INLINE nint_t required_workspace(
       const InOperand& in, const OutOperand& out) const {
@@ -237,11 +228,10 @@ public:
         in, tensor::nullopt, tensor::nullopt, out);
   }
 
-  template <typename InOperand, typename ScaleOperand, typename OutOperand>
-    requires (details::is_input_operand_v<InOperand> &&
-              details::is_layernorm_param_operand_v<ScaleOperand> &&
-              !tensor::is_nullopt_v<ScaleOperand> &&
-              details::is_output_operand_v<OutOperand>)
+  template <tensor::InputOperand InOperand,
+            details::LayerNormParamOperand ScaleOperand,
+            tensor::OutputOperand OutOperand>
+    requires (!tensor::is_nullopt_v<ScaleOperand>)
   /** Workspace query for LayerNorm with gamma and no beta. */
   VECOPS_INLINE nint_t required_workspace(
       const InOperand& in, const ScaleOperand& scale,
@@ -249,12 +239,10 @@ public:
     return required_workspace(in, scale, tensor::nullopt, out);
   }
 
-  template <typename InOperand, typename ScaleOperand, typename BiasOperand,
-            typename OutOperand>
-    requires (details::is_input_operand_v<InOperand> &&
-              details::is_layernorm_param_operand_v<ScaleOperand> &&
-              details::is_layernorm_param_operand_v<BiasOperand> &&
-              details::is_output_operand_v<OutOperand>)
+  template <tensor::InputOperand InOperand,
+            details::LayerNormParamOperand ScaleOperand,
+            details::LayerNormParamOperand BiasOperand,
+            tensor::OutputOperand OutOperand>
   /**
    * @brief Execute with caller-owned workspace and optional affine operands.
    * @param workspace Scratch storage at least `required_workspace()` bytes.
@@ -278,9 +266,8 @@ public:
     }
   }
 
-  template <typename InOperand, typename OutOperand>
-    requires (details::is_input_operand_v<InOperand> &&
-              details::is_output_operand_v<OutOperand>)
+  template <tensor::InputOperand InOperand,
+            tensor::OutputOperand OutOperand>
   /** Caller-workspace overload without affine parameters. */
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace, const InOperand& in,
@@ -288,11 +275,10 @@ public:
     (*this)(workspace, in, tensor::nullopt, tensor::nullopt, out);
   }
 
-  template <typename InOperand, typename ScaleOperand, typename OutOperand>
-    requires (details::is_input_operand_v<InOperand> &&
-              details::is_layernorm_param_operand_v<ScaleOperand> &&
-              !tensor::is_nullopt_v<ScaleOperand> &&
-              details::is_output_operand_v<OutOperand>)
+  template <tensor::InputOperand InOperand,
+            details::LayerNormParamOperand ScaleOperand,
+            tensor::OutputOperand OutOperand>
+    requires (!tensor::is_nullopt_v<ScaleOperand>)
   /** Caller-workspace overload with gamma and no beta. */
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace, const InOperand& in,
@@ -301,12 +287,10 @@ public:
   }
 
   template <execution::ExecutionScope Scope,
-            typename InOperand, typename ScaleOperand, typename BiasOperand,
-            typename OutOperand>
-    requires (details::is_input_operand_v<InOperand> &&
-              details::is_layernorm_param_operand_v<ScaleOperand> &&
-              details::is_layernorm_param_operand_v<BiasOperand> &&
-              details::is_output_operand_v<OutOperand>)
+            tensor::InputOperand InOperand,
+            details::LayerNormParamOperand ScaleOperand,
+            details::LayerNormParamOperand BiasOperand,
+            tensor::OutputOperand OutOperand>
   /**
    * @brief Execute through an ExecutionSession or active enclosing scope.
    * @param scope Scope providing resources and worker-local workspace.
@@ -324,9 +308,8 @@ public:
   }
 
   template <execution::ExecutionScope Scope,
-            typename InOperand, typename OutOperand>
-    requires (details::is_input_operand_v<InOperand> &&
-              details::is_output_operand_v<OutOperand>)
+            tensor::InputOperand InOperand,
+            tensor::OutputOperand OutOperand>
   /** Execution-scope overload without affine parameters. */
   VECOPS_INLINE void operator()(
       Scope& scope, const InOperand& in, const OutOperand& out) const {
@@ -334,11 +317,10 @@ public:
   }
 
   template <execution::ExecutionScope Scope,
-            typename InOperand, typename ScaleOperand, typename OutOperand>
-    requires (details::is_input_operand_v<InOperand> &&
-              details::is_layernorm_param_operand_v<ScaleOperand> &&
-              !tensor::is_nullopt_v<ScaleOperand> &&
-              details::is_output_operand_v<OutOperand>)
+            tensor::InputOperand InOperand,
+            details::LayerNormParamOperand ScaleOperand,
+            tensor::OutputOperand OutOperand>
+    requires (!tensor::is_nullopt_v<ScaleOperand>)
   /** Execution-scope overload with gamma and no beta. */
   VECOPS_INLINE void operator()(
       Scope& scope, const InOperand& in, const ScaleOperand& scale,
@@ -346,12 +328,10 @@ public:
     (*this)(scope, in, scale, tensor::nullopt, out);
   }
 
-  template <typename InOperand, typename ScaleOperand, typename BiasOperand,
-            typename OutOperand>
-    requires (details::is_input_operand_v<InOperand> &&
-              details::is_layernorm_param_operand_v<ScaleOperand> &&
-              details::is_layernorm_param_operand_v<BiasOperand> &&
-              details::is_output_operand_v<OutOperand>)
+  template <tensor::InputOperand InOperand,
+            details::LayerNormParamOperand ScaleOperand,
+            details::LayerNormParamOperand BiasOperand,
+            tensor::OutputOperand OutOperand>
   /** Allocate exact workspace, create an ExecutionSession, and execute once. */
   VECOPS_INLINE void operator()(
       const InOperand& in, const ScaleOperand& scale,
@@ -362,19 +342,17 @@ public:
     (*this)(execution, in, scale, bias, out);
   }
 
-  template <typename InOperand, typename OutOperand>
-    requires (details::is_input_operand_v<InOperand> &&
-              details::is_output_operand_v<OutOperand>)
+  template <tensor::InputOperand InOperand,
+            tensor::OutputOperand OutOperand>
   VECOPS_INLINE void operator()(
       const InOperand& in, const OutOperand& out) const {
     (*this)(in, tensor::nullopt, tensor::nullopt, out);
   }
 
-  template <typename InOperand, typename ScaleOperand, typename OutOperand>
-    requires (details::is_input_operand_v<InOperand> &&
-              details::is_layernorm_param_operand_v<ScaleOperand> &&
-              !tensor::is_nullopt_v<ScaleOperand> &&
-              details::is_output_operand_v<OutOperand>)
+  template <tensor::InputOperand InOperand,
+            details::LayerNormParamOperand ScaleOperand,
+            tensor::OutputOperand OutOperand>
+    requires (!tensor::is_nullopt_v<ScaleOperand>)
   VECOPS_INLINE void operator()(
       const InOperand& in, const ScaleOperand& scale,
       const OutOperand& out) const {
@@ -388,13 +366,13 @@ public:
    * @param beta Optional bound rank-one bias.
    * @param y Bound rank-one committable output.
    */
-  template <typename X, typename Gamma, typename Beta, typename Y>
-    requires (tensor::BoundInputAccess<X> &&
-              (tensor::BoundInputAccess<Gamma> ||
+  template <tensor::BoundInputAccess X,
+            typename Gamma, typename Beta,
+            tensor::CommittableBoundOutputAccess Y>
+    requires ((tensor::BoundInputAccess<Gamma> ||
                tensor::is_nullopt_v<Gamma>) &&
               (tensor::BoundInputAccess<Beta> ||
-               tensor::is_nullopt_v<Beta>) &&
-              tensor::CommittableBoundOutputAccess<Y>)
+               tensor::is_nullopt_v<Beta>))
   VECOPS_ALWAYS_INLINE void run_bound(
       X& x, Gamma& gamma, Beta& beta, Y& y) const {
     static_assert(X::Rank == 1 && Y::Rank == 1);
@@ -410,7 +388,7 @@ public:
     using InElement = std::remove_const_t<typename X::MemoryElement>;
     constexpr bool UseSVE16 =
         std::same_as<ComputeType, float32_t> &&
-        (IsFloat16V<InElement> || IsBfloat16V<InElement>);
+        (is_float16_v<InElement> || is_bfloat16_v<InElement>);
     using Recipe = std::conditional_t<
         UseSVE16, details::SVE16RowRecipe,
         details::GenericRowRecipe>;
@@ -449,7 +427,7 @@ private:
     using InElement = std::remove_const_t<typename InSpec::MemoryElement>;
     constexpr bool UseSVE16 =
         std::same_as<ComputeType, float32_t> &&
-        (IsFloat16V<InElement> || IsBfloat16V<InElement>);
+        (is_float16_v<InElement> || is_bfloat16_v<InElement>);
     using Recipe = std::conditional_t<
         UseSVE16, details::SVE16RowRecipe,
         details::GenericRowRecipe>;

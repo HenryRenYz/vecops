@@ -208,7 +208,7 @@ void verify_arithmetic(Tag tag) {
 
 template <typename T>
 T extrema_operand(vecops::nint_t lane, bool rhs) {
-  if constexpr (::vecops::IsFloatV<T> || std::is_signed_v<T>) {
+  if constexpr (::vecops::is_float_v<T> || std::is_signed_v<T>) {
     const int base = static_cast<int>(lane % 11) - 5;
     return static_cast<T>(rhs
         ? base + ((lane % 2) == 0 ? 7 : -7)
@@ -303,7 +303,7 @@ void verify_extrema(Tag tag) {
 
 template <FmaKind Kind, typename T>
 T expected_fma(T a, T b, T c) {
-  if constexpr (::vecops::IsFloatV<T>) {
+  if constexpr (::vecops::is_float_v<T>) {
     if constexpr (Kind == FmaKind::Fmadd)
       return static_cast<T>(a * b + c);
     else if constexpr (Kind == FmaKind::Fmsub)
@@ -427,7 +427,7 @@ void run_basic_arithmetic_test() {
     verify_arithmetic<ArithmeticKind::Add, options>(Tag{});
     verify_arithmetic<ArithmeticKind::Sub, options>(Tag{});
     verify_arithmetic<ArithmeticKind::Mul, options>(Tag{});
-    if constexpr (::vecops::IsFloatV<T>)
+    if constexpr (::vecops::is_float_v<T>)
       verify_arithmetic<ArithmeticKind::Div, options>(Tag{});
   });
 }
@@ -454,7 +454,7 @@ void run_fma_test() {
 
 template <typename T>
 void run_floating_division_edge_test() {
-  if constexpr (!::vecops::IsFloatV<T>) {
+  if constexpr (!::vecops::is_float_v<T>) {
     GTEST_SKIP() << "floating-point edge case";
   } else {
     using Tag = vec::ScalableTag<T>;
@@ -480,7 +480,7 @@ void run_floating_division_edge_test() {
 
 template <typename T>
 void run_floating_extrema_edge_test() {
-  if constexpr (::vecops::IsFloatV<T>) {
+  if constexpr (::vecops::is_float_v<T>) {
     using Tag = vec::ScalableTag<T, 0>;
     const Tag tag{};
     const T nan = std::numeric_limits<T>::quiet_NaN();
@@ -566,7 +566,7 @@ void run_fixed_sve_arithmetic_test() {
     verify_arithmetic<ArithmeticKind::Add>(Tag{});
     verify_arithmetic<ArithmeticKind::Sub, false>(Tag{});
     verify_arithmetic<ArithmeticKind::Mul, false>(Tag{});
-    if constexpr (::vecops::IsFloatV<T>) {
+    if constexpr (::vecops::is_float_v<T>) {
       verify_arithmetic<ArithmeticKind::Div, false>(Tag{});
     }
     verify_extrema<ExtremaKind::Min>(Tag{});

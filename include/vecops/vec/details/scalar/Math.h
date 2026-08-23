@@ -5,6 +5,8 @@
 #include <limits>
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/scalar/Basic.h"
+#include "vecops/vec/details/Wordwise.h"
 
 namespace vecops::vec::details {
 
@@ -47,12 +49,9 @@ struct ScalarExpWordImpl {
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
       ExpOp<A, NegativeOnly>, Tag tag, NativeWordVec<Tag> value,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
-    static_assert(Index >= 0 && Index < num_words(tag));
-    for (nint_t lane = 0; lane < native_word_size(tag); ++lane) {
-      if (mask.bits.test(static_cast<std::size_t>(lane)))
-        inactive[lane] = scalar_exp_value<A>(value[lane]);
-    }
-    return inactive;
+    return scalar_masked_merge<Index>(
+        tag, call<Index>(ExpOp<A, NegativeOnly>{}, tag, value), mask,
+        inactive);
   }
 };
 

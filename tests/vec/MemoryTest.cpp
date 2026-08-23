@@ -236,7 +236,7 @@ void verify_scaled_indexed_load(Tag tag) {
 template <typename Index, vec::VectorTag Tag>
 inline constexpr bool memory_index_shape_supported = [] {
 #if defined(CPU_CAPABILITY_SVE) && !defined(HAS_FIXED_SVE_BITS)
-  return vec::scale_power<vec::Rebind<Index, Tag>> <= 2;
+  return vec::scale_power_v<vec::Rebind<Index, Tag>> <= 2;
 #else
   return true;
 #endif

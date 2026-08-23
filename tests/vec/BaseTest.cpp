@@ -45,19 +45,19 @@ void expect_scalable_metadata() {
   }();
 
   EXPECT_TRUE((std::same_as<vec::ElementOf<Tag>, T>));
-  EXPECT_TRUE(vec::is_scalable_tag<Tag>);
-  EXPECT_FALSE(vec::is_fixed_tag<Tag>);
-  EXPECT_EQ(vec::scale_power<Tag>, ScalePower);
+  EXPECT_TRUE(vec::is_scalable_tag_v<Tag>);
+  EXPECT_FALSE(vec::is_fixed_tag_v<Tag>);
+  EXPECT_EQ(vec::scale_power_v<Tag>, ScalePower);
   EXPECT_EQ(vec::size(Tag{}), expected_lanes);
   EXPECT_EQ(vec::num_words(Tag{}),
             ScalePower > 0 ? (vecops::nint_t{1} << ScalePower) : 1);
   EXPECT_EQ(
-      vec::is_subword<Tag>,
+      vec::is_subword_v<Tag>,
       vec::size(Tag{}) < vec::native_word_size(Tag{}));
 #if defined(CPU_CAPABILITY_SVE) && !defined(HAS_FIXED_SVE_BITS)
-  EXPECT_TRUE(vec::is_runtime_size<Tag>);
+  EXPECT_TRUE(vec::is_runtime_size_v<Tag>);
 #else
-  EXPECT_FALSE(vec::is_runtime_size<Tag>);
+  EXPECT_FALSE(vec::is_runtime_size_v<Tag>);
 #endif
 
   using V = vec::Vec<Tag>;
@@ -164,14 +164,14 @@ TYPED_TEST(VecBaseElementTest, FixedTagRetainsPositivePowerOfTwoExtents) {
   using Two = vec::FixedTag<T, 2>;
   using Four = vec::FixedTag<T, 4>;
 
-  EXPECT_TRUE(vec::is_fixed_tag<One>);
-  EXPECT_TRUE(vec::is_fixed_tag<Two>);
-  EXPECT_TRUE(vec::is_fixed_tag<Four>);
-  EXPECT_FALSE(vec::is_scalable_tag<One>);
+  EXPECT_TRUE(vec::is_fixed_tag_v<One>);
+  EXPECT_TRUE(vec::is_fixed_tag_v<Two>);
+  EXPECT_TRUE(vec::is_fixed_tag_v<Four>);
+  EXPECT_FALSE(vec::is_scalable_tag_v<One>);
   EXPECT_TRUE((std::same_as<vec::ElementOf<One>, T>));
-  EXPECT_EQ(vec::fixed_lanes<One>, 1);
-  EXPECT_EQ(vec::fixed_lanes<Two>, 2);
-  EXPECT_EQ(vec::fixed_lanes<Four>, 4);
+  EXPECT_EQ(vec::fixed_lanes_v<One>, 1);
+  EXPECT_EQ(vec::fixed_lanes_v<Two>, 2);
+  EXPECT_EQ(vec::fixed_lanes_v<Four>, 4);
   EXPECT_EQ(vec::size(One{}), 1);
   EXPECT_EQ(vec::size(Two{}), 2);
   EXPECT_EQ(vec::size(Four{}), 4);
@@ -280,7 +280,7 @@ TYPED_TEST(VecBaseElementTest, VectorInferenceCanonicalizesPhysicalStorage) {
   using SubwordVec = vec::Vec<LogicalSubword>;
   using SubwordPhysical = vec::InferredTagOf<SubwordVec>;
 
-  EXPECT_TRUE(vec::is_subword<LogicalSubword>);
+  EXPECT_TRUE(vec::is_subword_v<LogicalSubword>);
   EXPECT_GT(
       vec::native_word_size(LogicalSubword{}), vec::size(LogicalSubword{}));
   EXPECT_FALSE((std::same_as<LogicalSubword, SubwordPhysical>));
@@ -292,18 +292,18 @@ TYPED_TEST(VecBaseElementTest, VectorInferenceCanonicalizesPhysicalStorage) {
   EXPECT_TRUE((std::same_as<vec::Vec<MultiwordPhysical>, MultiwordVec>));
 
 #if defined(CPU_CAPABILITY_SVE) && !defined(HAS_FIXED_SVE_BITS)
-  EXPECT_TRUE(vec::is_scalable_tag<SubwordPhysical>);
-  EXPECT_EQ(vec::scale_power<SubwordPhysical>, 0);
-  EXPECT_TRUE(vec::is_scalable_tag<MultiwordPhysical>);
-  EXPECT_EQ(vec::scale_power<MultiwordPhysical>, 1);
+  EXPECT_TRUE(vec::is_scalable_tag_v<SubwordPhysical>);
+  EXPECT_EQ(vec::scale_power_v<SubwordPhysical>, 0);
+  EXPECT_TRUE(vec::is_scalable_tag_v<MultiwordPhysical>);
+  EXPECT_EQ(vec::scale_power_v<MultiwordPhysical>, 1);
 #else
-  EXPECT_TRUE(vec::is_fixed_tag<SubwordPhysical>);
+  EXPECT_TRUE(vec::is_fixed_tag_v<SubwordPhysical>);
   EXPECT_EQ(
-      vec::fixed_lanes<SubwordPhysical>,
+      vec::fixed_lanes_v<SubwordPhysical>,
       vec::native_word_size(LogicalSubword{}));
-  EXPECT_TRUE(vec::is_fixed_tag<MultiwordPhysical>);
+  EXPECT_TRUE(vec::is_fixed_tag_v<MultiwordPhysical>);
   EXPECT_EQ(
-      vec::fixed_lanes<MultiwordPhysical>, vec::size(LogicalMultiword{}));
+      vec::fixed_lanes_v<MultiwordPhysical>, vec::size(LogicalMultiword{}));
 #endif
 }
 
@@ -386,16 +386,16 @@ TYPED_TEST(VecBaseElementTest, FixedRepresentationCoversSubwordAndMultiword) {
 
   EXPECT_EQ(vec::size(Subword{}), 1);
   EXPECT_EQ(vec::num_words(Subword{}), 1);
-  EXPECT_TRUE(vec::is_subword<Subword>);
+  EXPECT_TRUE(vec::is_subword_v<Subword>);
 
   EXPECT_EQ(vec::size(CompleteWord{}), subword_physical_lanes);
   EXPECT_EQ(vec::num_words(CompleteWord{}), 1);
-  EXPECT_FALSE(vec::is_subword<CompleteWord>);
+  EXPECT_FALSE(vec::is_subword_v<CompleteWord>);
 
   EXPECT_EQ(vec::size(TwoWords{}), native_lanes * 2);
   EXPECT_EQ(vec::native_word_size(TwoWords{}), native_lanes);
   EXPECT_EQ(vec::num_words(TwoWords{}), 2);
-  EXPECT_FALSE(vec::is_subword<TwoWords>);
+  EXPECT_FALSE(vec::is_subword_v<TwoWords>);
   EXPECT_TRUE(vec::VectorValue<vec::Vec<TwoWords>>);
   EXPECT_TRUE(vec::MaskValue<vec::Mask<TwoWords>>);
   EXPECT_TRUE(HasTwoWordVectorAccess<TwoWords>);
@@ -430,8 +430,8 @@ TYPED_TEST(VecBaseElementTest, FixedSVEUsesSizedArraysBeyondTupleLimits) {
   EXPECT_EQ(vec::num_words(EightWords{}), 8);
   EXPECT_TRUE((requires { sizeof(V); }));
   EXPECT_TRUE((requires { sizeof(M); }));
-  EXPECT_TRUE(vec_details::is_word_array<V>);
-  EXPECT_TRUE(vec_details::is_word_array<M>);
+  EXPECT_TRUE(vec_details::is_word_array_v<V>);
+  EXPECT_TRUE(vec_details::is_word_array_v<M>);
   EXPECT_TRUE(vec::VectorValue<V>);
   EXPECT_TRUE(vec::MaskValue<M>);
   EXPECT_FALSE(vec_details::HasInferredTag<M>);

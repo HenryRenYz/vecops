@@ -12,7 +12,7 @@
  * @brief Architecture-family identity shared by independent CPU subsystems.
  *
  * A target is deliberately not a vector or execution backend. The vec,
- * execution, transpose, and future modules map the same `CurrentTarget` to
+ * execution, transpose, and future modules map the same `current_target_t` to
  * their own backend interfaces without depending on one another.
  */
 
@@ -29,13 +29,13 @@ struct AArch64Target {};
 
 /** Architecture-family target selected for the current translation unit. */
 #if defined(CPU_CAPABILITY_GENERIC)
-using CurrentTarget = GenericTarget;
+using current_target_t = GenericTarget;
 #elif defined(ARCH_X86_FAMILY)
-using CurrentTarget = X86Target;
+using current_target_t = X86Target;
 #elif defined(ARCH_ARM_FAMILY)
-using CurrentTarget = AArch64Target;
+using current_target_t = AArch64Target;
 #else
-using CurrentTarget = GenericTarget;
+using current_target_t = GenericTarget;
 #endif
 
 } // namespace vecops::platform
