@@ -6,6 +6,11 @@ vecops_add_test(NAME GemmTest FILES array/GemmTest.cpp FOLDER array/gemm)
 vecops_add_test(NAME LayoutTest FILES tensor/LayoutTest.cpp FOLDER tensor/layout)
 vecops_add_test(NAME KernelLoopTest FILES kernel/LoopTest.cpp FOLDER kernel/loop)
 vecops_add_test(NAME KernelTile2DTest FILES kernel/Tile2DTest.cpp FOLDER kernel/tile2d)
+vecops_add_test(
+    NAME ExecutionSessionTest
+    FILES execution/ExecutionSessionTest.cpp
+    FOLDER execution/session
+    ARCH Scalar Native)
 
 if(VECOPS_ARCH_FAMILY STREQUAL "x86")
     set(VECOPS_TILE2D_GEMM_ARCH Scalar AVX512 Native)
@@ -107,5 +112,14 @@ vecops_add_test(
     FILES ops/SoftmaxTest.cpp TestUtils.cpp
     FOLDER ops/softmax
     ARCH ${VECOPS_TENSOR_KERNEL_ARCH})
+set(VECOPS_TRANSPOSE_ARCH ${VECOPS_TENSOR_KERNEL_ARCH})
+if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND VECOPS_NATIVE_FIXED_SVE_BITS)
+    list(APPEND VECOPS_TRANSPOSE_ARCH NativeFixedSVE)
+endif()
+vecops_add_test(
+    NAME TransposeTest
+    FILES ops/TransposeTest.cpp
+    FOLDER ops/transpose
+    ARCH ${VECOPS_TRANSPOSE_ARCH})
 vecops_add_test(NAME VecRequestTest FILES vec/RequestTest.cpp
     FOLDER vec/request ARCH ${VEC_BASE_ARCH} LABELS vec)

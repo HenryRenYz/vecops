@@ -462,6 +462,16 @@
   #define HAS_SME 1
 #endif
 
+// COMPILER WORKAROUND: GCC 15 accepts __arm_locally_streaming and emits correct
+// SMSTART/SMSTOP boundaries but does not publish the ACLE feature-test macro
+// __ARM_FEATURE_LOCALLY_STREAMING. Treat an SME-enabled GCC target as the tested
+// implementation capability. Clang must continue to advertise the ACLE macro.
+// Remove the GCC clause only after supported GCC versions publish the macro.
+#if defined(HAS_SME) && \
+    (defined(__ARM_FEATURE_LOCALLY_STREAMING) || defined(COMPILER_GCC))
+  #define HAS_ARM_LOCALLY_STREAMING 1
+#endif
+
 // SME F64F64 (64-bit 浮点矩阵)
 #if defined(__ARM_FEATURE_SME_F64F64)
   #define HAS_SME_F64F64 1

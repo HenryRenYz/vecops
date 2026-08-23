@@ -10,6 +10,8 @@
 #include <utility>
 
 #include "vecops/Assertion.h"
+#include "vecops/execution/ExecutionSession.h"
+#include "vecops/kernel/Transpose2D.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/tensor/AccessPolicy.h"
 #include "vecops/tensor/Tensor.h"
@@ -157,6 +159,9 @@
  * - Unordered conversion is an operation-region lane-order contract, not a
  *   local speed flag. Use `with_unordered_access` for related operands.
  * - `required_workspace()` must use the same Spec and Policy as binding.
+ * - Layout-transpose materialization uses `kernel::transpose2d_bound` only when
+ *   a non-vector axis is provably unit-stride from its meta type. A runtime
+ *   stride equal to one does not activate a hidden fast-path branch.
  */
 namespace vecops::tensor {
 
@@ -749,11 +754,13 @@ VECOPS_ALWAYS_INLINE void execute_resolved_store_convert(
 // ============================================================================
 // Scalable-SVE transform chunk lowering (per-lane reference path).
 //
-// The vectorized chunk pipeline relies on tag-representation ranges that the
-// scalable-SVE backend expresses differently (sizeless word groups), so the
-// reference per-lane implementation below serves that target. It shares the
-// public entry points; x86, scalar, and fixed-SVE builds use the vectorized
-// recursion defined later in this file.
+// BACKEND WORKAROUND: the vectorized chunk pipeline relies on sized
+// tag-representation ranges. VLA SVE uses sizeless word groups, which cannot be
+// placed in the temporary arrays used by that recursion. The compile-time SVE
+// backend therefore selects the reference per-lane implementation below; this
+// is not a runtime VL/fallback branch. x86, scalar, and fixed-SVE builds use the
+// vectorized recursion defined later in this file. Replace this path only with
+// an explicitly sizeless-compatible chunk representation.
 // ============================================================================
 
 #if defined(CPU_CAPABILITY_SVE) && !defined(HAS_FIXED_SVE_BITS)
@@ -1763,6 +1770,7 @@ VECOPS_ALWAYS_INLINE void store_memory(
 }
 
 template <typename Layout>
+/** Return the runtime number of logical elements in `layout`. */
 VECOPS_ALWAYS_INLINE nint_t tensor_numel(const Layout& layout) {
   nint_t result = 1;
   for (int d = 0; d < Layout::Ndim; ++d) result *= layout.shape()[d];
@@ -1770,26 +1778,127 @@ VECOPS_ALWAYS_INLINE nint_t tensor_numel(const Layout& layout) {
 }
 
 template <int Axis, typename Layout>
+/**
+ * @brief Build a dense auxiliary layout whose innermost physical axis is Axis.
+ * @param layout Original logical shape and compile-time stride metadata.
+ * @return Layout with unchanged shape and `stride[Axis] == Const<1>`.
+ *
+ * Runtime strides are computed without sorting. Compile-time stride types retain
+ * shape products where possible, allowing later materialization loops and tail
+ * decisions to consume the original Const/constrained Dynamic information.
+ */
 VECOPS_INLINE auto auxiliary_layout(const Layout& layout) {
   constexpr int Rank = Layout::Ndim;
-  std::array<nint_t, Rank> shape{};
   std::array<nint_t, Rank> strides{};
-  for (int d = 0; d < Rank; ++d) shape[d] = layout.shape()[d];
   strides[Axis] = 1;
-  nint_t next = shape[Axis];
+  nint_t next = layout.shape()[Axis];
   for (int d = Rank - 1; d >= 0; --d) {
     if (d == Axis) continue;
     strides[d] = next;
-    next *= shape[d];
+    next *= layout.shape()[d];
   }
-  return [&]<std::size_t... I>(std::index_sequence<I...>) {
+
+  using Shape = typename Layout::Shape;
+  // Moving Axis to the innermost physical position keeps the ordinary suffix
+  // product for dimensions before Axis. Dimensions after Axis additionally
+  // include shape[Axis] in their stride.
+  auto make = [&]<std::size_t... I>(std::index_sequence<I...>) {
+    using AuxStrides = Strides<std::conditional_t<
+        static_cast<int>(I) == Axis,
+        Const<1>,
+        std::conditional_t<
+            (static_cast<int>(I) < Axis),
+            typename ::vecops::tensor::details::StrideTypeForDim<
+                static_cast<int>(I), Shape>::type,
+            decltype(
+                std::declval<typename ::vecops::tensor::details::StrideTypeForDim<
+                    static_cast<int>(I), Shape>::type>() *
+                std::declval<meta_element_t<Axis, Shape>>())>>...>;
     return make_layout(
-        make_shape(Any{shape[I]}...),
-        make_strides(Any{strides[I]}...));
-  }(std::make_index_sequence<Rank>{});
+        layout.shape(), AuxStrides{strides[I]...});
+  };
+  return make(std::make_index_sequence<Rank>{});
+}
+
+template <typename StridesPack, int SkipDim, int Dim = 0>
+/**
+ * @brief Find the first non-skipped axis provably unit-stride at compile time.
+ * @return Axis index, or -1 if no stride type proves the value one.
+ *
+ * This intentionally does not test runtime stride values. If metadata cannot
+ * prove unit stride, DataAccess selects its general copy/gather lowering rather
+ * than adding a runtime branch that would increase every kernel's overhead.
+ */
+consteval int first_unit_axis() {
+  if constexpr (Dim == StridesPack::Ndim) {
+    return -1;
+  } else if constexpr (
+      Dim != SkipDim && is_definitely_one_meta_v<
+          typename MetaElement<Dim, StridesPack>::type>) {
+    return Dim;
+  } else {
+    return first_unit_axis<StridesPack, SkipDim, Dim + 1>();
+  }
+}
+
+template <int FirstSkip, int SecondSkip, int Dim = 0,
+          typename Layout, typename Fn>
+/**
+ * @brief Enumerate origins of all 2-D planes spanning two selected axes.
+ * @param layout N-D logical layout supplying prefix/suffix extents.
+ * @param position Mutable traversal coordinate; selected axes are fixed at zero.
+ * @param fn Callback receiving each complete plane origin exactly once.
+ */
+VECOPS_INLINE void for_each_plane(
+    const Layout& layout, Coord<Layout::Ndim>& position, Fn&& fn) {
+  if constexpr (Dim == Layout::Ndim) {
+    std::forward<Fn>(fn)(position);
+  } else if constexpr (Dim == FirstSkip || Dim == SecondSkip) {
+    position[Dim] = 0;
+    for_each_plane<FirstSkip, SecondSkip, Dim + 1>(
+        layout, position, std::forward<Fn>(fn));
+  } else {
+    for (position[Dim] = 0; position[Dim] < layout.shape()[Dim];
+         ++position[Dim]) {
+      for_each_plane<FirstSkip, SecondSkip, Dim + 1>(
+          layout, position, std::forward<Fn>(fn));
+    }
+  }
+}
+
+template <int SrcRow, int SrcCol, int DstRow, int DstCol,
+          execution::ExecutionScope Context,
+          typename Layout, typename Source, typename Destination>
+/**
+ * @brief Transpose every selected 2-D plane through the active execution scope.
+ * @param context Scope used by Transpose2D for compile-time resource proofs.
+ * @param layout Logical N-D iteration shape.
+ * @param source Bound readable access.
+ * @param destination Bound writable access.
+ *
+ * No cache tiling is performed: DataAccess materialization is already a
+ * kernel-bottom operation and the complete auxiliary buffer lifetime is owned
+ * by the surrounding operand scope.
+ */
+VECOPS_INLINE void transpose_planes(
+    Context& context, const Layout& layout,
+    Source& source, Destination& destination) {
+  Coord<Layout::Ndim> origin{};
+  using M = size_type_t<SrcRow, Layout>;
+  using N = size_type_t<SrcCol, Layout>;
+  const M m{get<SrcRow>(layout.shape())};
+  const N n{get<SrcCol>(layout.shape())};
+  for_each_plane<SrcRow, SrcCol>(
+      layout, origin,
+      [&](const auto& plane_origin) VECOPS_INLINE_LAMBDA {
+        kernel::transpose2d_bound<SrcRow, SrcCol, DstRow, DstCol>(
+            context, m, n, source, plane_origin,
+            destination, plane_origin);
+      });
 }
 
 template <int SkipDim, int Dim = 0, typename Layout, typename Fn>
+/** Enumerate vector-line origins while holding `SkipDim` at zero. */
 VECOPS_INLINE void for_each_line(
     const Layout& layout, Coord<Layout::Ndim>& position, Fn&& fn) {
   if constexpr (Dim == Layout::Ndim) {
@@ -1805,6 +1914,16 @@ VECOPS_INLINE void for_each_line(
           layout, position, std::forward<Fn>(fn));
     }
   }
+}
+
+template <int SrcRow, int SrcCol, int DstRow, int DstCol,
+          typename Layout, typename Source, typename Destination>
+/** Compatibility overload using an empty root ExecutionSession. */
+VECOPS_INLINE void transpose_planes(
+    const Layout& layout, Source& source, Destination& destination) {
+  execution::ExecutionSession context{};
+  transpose_planes<SrcRow, SrcCol, DstRow, DstCol>(
+      context, layout, source, destination);
 }
 
 template <int Dim = 0, typename Layout, typename Fn>
@@ -1949,28 +2068,32 @@ public:
   using ExternalFacts = std::tuple<Facts...>;
   using InputLayout = typename Tensor::Layout;
 
-  InputSpec(
+  VECOPS_ALWAYS_INLINE InputSpec(
       Tensor tensor, Transform transform, Projection projection,
       Facts... facts)
       : tensor_(tensor), transform_(std::move(transform)),
         projection_(projection), facts_(std::move(facts)...) {}
 
-  InputSpec(Tensor tensor, Transform transform)
+  VECOPS_ALWAYS_INLINE InputSpec(Tensor tensor, Transform transform)
     requires (sizeof...(Facts) == 0)
       : InputSpec(
             tensor, std::move(transform),
             identity_projection<Tensor::Ndim>()) {}
 
-  explicit InputSpec(Tensor tensor)
+  VECOPS_ALWAYS_INLINE explicit InputSpec(Tensor tensor)
     requires (std::same_as<Transform, NoTransform> &&
               sizeof...(Facts) == 0)
       : InputSpec(tensor, NoTransform{}) {}
 
-  const Tensor& tensor() const { return tensor_; }
-  const InputLayout& input_layout() const { return tensor_.layout(); }
-  const Transform& transform() const { return transform_; }
-  const Projection& projection() const { return projection_; }
-  const ExternalFacts& facts() const { return facts_; }
+  VECOPS_ALWAYS_INLINE const Tensor& tensor() const { return tensor_; }
+  VECOPS_ALWAYS_INLINE const InputLayout& input_layout() const {
+    return tensor_.layout();
+  }
+  VECOPS_ALWAYS_INLINE const Transform& transform() const { return transform_; }
+  VECOPS_ALWAYS_INLINE const Projection& projection() const {
+    return projection_;
+  }
+  VECOPS_ALWAYS_INLINE const ExternalFacts& facts() const { return facts_; }
 
 private:
   Tensor tensor_;
@@ -2005,28 +2128,32 @@ public:
   using ExternalFacts = std::tuple<Facts...>;
   using OutputLayout = typename Tensor::Layout;
 
-  OutputSpec(
+  VECOPS_ALWAYS_INLINE OutputSpec(
       Tensor tensor, Transform transform, Projection projection,
       Facts... facts)
       : tensor_(tensor), transform_(std::move(transform)),
         projection_(projection), facts_(std::move(facts)...) {}
 
-  OutputSpec(Tensor tensor, Transform transform)
+  VECOPS_ALWAYS_INLINE OutputSpec(Tensor tensor, Transform transform)
     requires (sizeof...(Facts) == 0)
       : OutputSpec(
             tensor, std::move(transform),
             identity_projection<Tensor::Ndim>()) {}
 
-  explicit OutputSpec(Tensor tensor)
+  VECOPS_ALWAYS_INLINE explicit OutputSpec(Tensor tensor)
     requires (std::same_as<Transform, NoTransform> &&
               sizeof...(Facts) == 0)
       : OutputSpec(tensor, NoTransform{}) {}
 
-  const Tensor& tensor() const { return tensor_; }
-  const OutputLayout& output_layout() const { return tensor_.layout(); }
-  const Transform& transform() const { return transform_; }
-  const Projection& projection() const { return projection_; }
-  const ExternalFacts& facts() const { return facts_; }
+  VECOPS_ALWAYS_INLINE const Tensor& tensor() const { return tensor_; }
+  VECOPS_ALWAYS_INLINE const OutputLayout& output_layout() const {
+    return tensor_.layout();
+  }
+  VECOPS_ALWAYS_INLINE const Transform& transform() const { return transform_; }
+  VECOPS_ALWAYS_INLINE const Projection& projection() const {
+    return projection_;
+  }
+  VECOPS_ALWAYS_INLINE const ExternalFacts& facts() const { return facts_; }
 
 private:
   Tensor tensor_;
@@ -2348,7 +2475,7 @@ public:
   using Transform = typename Spec::TransformType;
   static constexpr int Rank = Spec::InputTensor::Ndim;
 
-  InputDataAccess(const Spec& spec, Policy policy = {})
+  VECOPS_ALWAYS_INLINE InputDataAccess(const Spec& spec, Policy policy = {})
       : spec_(&spec), data_(spec.tensor().data()), policy_(policy) {
     static_assert(Policy::vector_axis < Rank);
     static_assert(
@@ -2573,8 +2700,17 @@ public:
             *this, tag, origin, iterations, traversal_step};
   }
 
-  const Spec& spec() const { return *spec_; }
-  const Policy& policy() const { return policy_; }
+  VECOPS_ALWAYS_INLINE const Spec& spec() const { return *spec_; }
+  VECOPS_ALWAYS_INLINE const Policy& policy() const { return policy_; }
+  VECOPS_ALWAYS_INLINE const MemoryElement* raw_data() const { return data_; }
+  VECOPS_ALWAYS_INLINE Coord<Rank> raw_strides() const {
+    Coord<Rank> result{};
+    VECOPS_UNROLL
+    for (int d = 0; d < Rank; ++d) {
+      result[d] = spec_->input_layout().strides()[d];
+    }
+    return result;
+  }
 
 private:
   const Spec* spec_;
@@ -2599,7 +2735,7 @@ public:
   using Transform = typename Spec::TransformType;
   static constexpr int Rank = Spec::OutputTensor::Ndim;
 
-  OutputDataAccess(const Spec& spec, Policy policy = {})
+  VECOPS_ALWAYS_INLINE OutputDataAccess(const Spec& spec, Policy policy = {})
       : spec_(&spec), data_(spec.tensor().data()), policy_(policy) {
     static_assert(Policy::vector_axis < Rank);
     static_assert(
@@ -2784,13 +2920,22 @@ public:
    * @note No copy is performed. The method exists so kernels can use the same
    * unconditional commit discipline for direct and materialized sessions.
    */
-  void commit() { committed_ = true; }
+  VECOPS_ALWAYS_INLINE void commit() { committed_ = true; }
 
   /** @brief Whether this direct session has been explicitly committed. */
   bool committed() const { return committed_; }
 
-  const Spec& spec() const { return *spec_; }
-  const Policy& policy() const { return policy_; }
+  VECOPS_ALWAYS_INLINE const Spec& spec() const { return *spec_; }
+  VECOPS_ALWAYS_INLINE const Policy& policy() const { return policy_; }
+  VECOPS_ALWAYS_INLINE MemoryElement* raw_data() const { return data_; }
+  VECOPS_ALWAYS_INLINE Coord<Rank> raw_strides() const {
+    Coord<Rank> result{};
+    VECOPS_UNROLL
+    for (int d = 0; d < Rank; ++d) {
+      result[d] = spec_->output_layout().strides()[d];
+    }
+    return result;
+  }
 
 private:
   const Spec* spec_;
@@ -2939,7 +3084,8 @@ public:
   static constexpr bool is_input = true;
   static constexpr bool is_canonical_compute_materialized = true;
 
-  CanonicalMaterializedInputDataAccess(AuxSpec auxiliary, CachePolicy policy)
+  VECOPS_ALWAYS_INLINE CanonicalMaterializedInputDataAccess(
+      AuxSpec auxiliary, CachePolicy policy)
       : auxiliary_(std::move(auxiliary)), policy_(policy) {}
 
   template <vec::VectorTag Tag, typename... Options>
@@ -3455,9 +3601,13 @@ concept CommittableBoundOutputAccess =
  * The session is move-only. Moving transfers commit responsibility. `commit()`
  * is idempotent, but destruction of an uncommitted owning session triggers a
  * debug assertion and never performs implicit write-back.
+ *
+ * @tparam Scope Execution scope copied from operand binding. It allows commit
+ *         to reuse an enclosing hardware mode when layout write-back invokes
+ *         Transpose2D; the scope remains a non-owning lexical proof.
  */
 template <AccessPlan Plan, typename OriginalSpec, typename AuxSpec,
-          typename Policy>
+          typename Policy, typename Scope = execution::ExecutionSession>
 class MaterializedOutputDataAccess {
   static_assert(
       Plan == AccessPlan::materialize_before_transform ||
@@ -3468,17 +3618,20 @@ public:
   using MemoryElement = typename OriginalSpec::MemoryElement;
   static constexpr int Rank = OriginalSpec::OutputTensor::Ndim;
 
-  MaterializedOutputDataAccess(
-      const OriginalSpec& original, AuxSpec auxiliary, Policy policy)
+  VECOPS_ALWAYS_INLINE MaterializedOutputDataAccess(
+      const OriginalSpec& original, AuxSpec auxiliary, Policy policy,
+      Scope context = {})
       : original_(&original), auxiliary_(std::move(auxiliary)),
-        policy_(policy) {}
+        policy_(policy), context_(context) {}
 
   MaterializedOutputDataAccess(const MaterializedOutputDataAccess&) = delete;
   MaterializedOutputDataAccess& operator=(const MaterializedOutputDataAccess&) = delete;
 
-  MaterializedOutputDataAccess(MaterializedOutputDataAccess&& other) noexcept
+  VECOPS_ALWAYS_INLINE MaterializedOutputDataAccess(
+      MaterializedOutputDataAccess&& other) noexcept
       : original_(other.original_), auxiliary_(std::move(other.auxiliary_)),
-        policy_(other.policy_), committed_(other.committed_), owning_(true) {
+        policy_(other.policy_), context_(other.context_),
+        committed_(other.committed_), owning_(true) {
     other.owning_ = false;
   }
 
@@ -3584,39 +3737,77 @@ private:
     InputDataAccess<decltype(aux_input_spec), AuxLoweringPolicy> source{
         aux_input_spec, AuxLoweringPolicy{AuxInputPolicy{}}};
     OutputDataAccess<OriginalSpec, Policy> destination{*original_, policy_};
-    Coord<Rank> position{};
-    details::for_each_line<AxisValue>(
-        original_->output_layout(), position,
-        [&](Coord<Rank>& line) VECOPS_INLINE_LAMBDA {
-          Tag tag{};
-          const nint_t count = original_->output_layout().shape()[AxisValue];
-          for (nint_t offset = 0; offset < count; offset += vec::size(tag)) {
-            line[AxisValue] = offset;
-            const nint_t active = std::min(count - offset, vec::size(tag));
-            auto value = source.load(
-                tag, line, axis<AxisValue>, vec::opt::first(active));
-            destination.store(
-                tag, line, axis<AxisValue>, value, vec::opt::first(active));
-          }
-        });
+    constexpr int UnitAxis = details::first_unit_axis<
+        typename OriginalSpec::OutputLayout::Strides, AxisValue>();
+    if constexpr (UnitAxis >= 0) {
+      details::transpose_planes<
+          UnitAxis, AxisValue, AxisValue, UnitAxis>(
+          context_, original_->output_layout(), source, destination);
+    } else {
+      Coord<Rank> position{};
+      details::for_each_line<AxisValue>(
+          original_->output_layout(), position,
+          [&](Coord<Rank>& line) VECOPS_INLINE_LAMBDA {
+            Tag tag{};
+            const nint_t count = original_->output_layout().shape()[AxisValue];
+            for (nint_t offset = 0; offset < count; offset += vec::size(tag)) {
+              line[AxisValue] = offset;
+              const nint_t active = std::min(count - offset, vec::size(tag));
+              auto value = source.load(
+                  tag, line, axis<AxisValue>, vec::opt::first(active));
+              destination.store(
+                  tag, line, axis<AxisValue>, value,
+                  vec::opt::first(active));
+            }
+          });
+    }
     destination.commit();
   }
 
   void commit_after() {
-    Coord<Rank> position{};
     const auto& source = auxiliary_.tensor();
     auto& destination = original_->tensor();
-    details::for_each_coordinate(
-        original_->output_layout(), position,
-        [&](const Coord<Rank>& current) VECOPS_INLINE_LAMBDA {
-          destination.data()[offset_at(destination.layout(), current)] =
-              source.data()[offset_at(source.layout(), current)];
-        });
+    constexpr int AxisValue = Policy::vector_axis;
+    constexpr int UnitAxis = details::first_unit_axis<
+        typename OriginalSpec::OutputLayout::Strides, AxisValue>();
+    if constexpr (UnitAxis >= 0) {
+      using Memory = typename OriginalSpec::MemoryElement;
+      auto source_spec = input<Memory>(source);
+      auto destination_spec = output<Memory>(destination);
+      using SourcePlanning = InputAccessPolicy<
+          AxisValue, 1, AccessPlan::direct>;
+      using DestinationPlanning = OutputAccessPolicy<
+          UnitAxis, AccessPlan::direct>;
+      using SourcePolicy = details::AccessLoweringPolicy<
+          SourcePlanning, DefaultAccessDefaults>;
+      using DestinationPolicy = details::AccessLoweringPolicy<
+          DestinationPlanning, DefaultAccessDefaults>;
+      InputDataAccess<decltype(source_spec), SourcePolicy> source_access{
+          source_spec, SourcePolicy{SourcePlanning{}}};
+      OutputDataAccess<decltype(destination_spec), DestinationPolicy>
+          destination_access{
+              destination_spec,
+              DestinationPolicy{DestinationPlanning{}}};
+      details::transpose_planes<
+          UnitAxis, AxisValue, AxisValue, UnitAxis>(
+          context_, original_->output_layout(),
+          source_access, destination_access);
+      destination_access.commit();
+    } else {
+      Coord<Rank> position{};
+      details::for_each_coordinate(
+          original_->output_layout(), position,
+          [&](const Coord<Rank>& current) VECOPS_INLINE_LAMBDA {
+            destination.data()[offset_at(destination.layout(), current)] =
+                source.data()[offset_at(source.layout(), current)];
+          });
+    }
   }
 
   const OriginalSpec* original_;
   AuxSpec auxiliary_;
   [[no_unique_address]] Policy policy_;
+  [[no_unique_address]] Scope context_;
   bool committed_ = false;
   bool owning_ = true;
 };
@@ -3626,10 +3817,10 @@ private:
  * @note The parent session still must be committed after all slice use.
  */
 template <int Dim, AccessPlan Plan, typename OriginalSpec, typename AuxSpec,
-          typename Policy>
+          typename Policy, typename Scope>
 VECOPS_INLINE auto slice_view(
     const MaterializedOutputDataAccess<
-        Plan, OriginalSpec, AuxSpec, Policy>& access,
+        Plan, OriginalSpec, AuxSpec, Policy, Scope>& access,
     nint_t index) {
   auto sliced = slice_view<Dim>(access.auxiliary_spec(), index);
   using SlicedPolicy = SliceAccessPolicyT<Policy, Dim>;
@@ -3638,10 +3829,10 @@ VECOPS_INLINE auto slice_view(
 }
 
 template <int I, int J, AccessPlan Plan, typename OriginalSpec,
-          typename AuxSpec, typename Policy>
+          typename AuxSpec, typename Policy, typename Scope>
 VECOPS_INLINE auto transpose_view(
     const MaterializedOutputDataAccess<
-        Plan, OriginalSpec, AuxSpec, Policy>& access) {
+        Plan, OriginalSpec, AuxSpec, Policy, Scope>& access) {
   auto transposed = transpose_view<I, J>(access.auxiliary_spec());
   using TransposedPolicy = TransposeAccessPolicyT<Policy, I, J>;
   return BorrowedDataAccess<decltype(transposed), TransposedPolicy>{
@@ -3729,10 +3920,12 @@ VECOPS_ALWAYS_INLINE void store_with_order(
 }
 
 template <typename Order, AccessPlan Plan, typename OriginalSpec,
-          typename AuxSpec, typename Policy, vec::VectorTag Tag, int Dim,
+          typename AuxSpec, typename Policy, typename Scope,
+          vec::VectorTag Tag, int Dim,
           typename... Options>
 VECOPS_ALWAYS_INLINE void store_with_order(
-    MaterializedOutputDataAccess<Plan, OriginalSpec, AuxSpec, Policy>& access,
+    MaterializedOutputDataAccess<
+        Plan, OriginalSpec, AuxSpec, Policy, Scope>& access,
     Tag tag, const Coord<OriginalSpec::OutputTensor::Ndim>& position,
     Axis<Dim> dim, vec::Vec<Tag> value, Options&&... options) {
   static_assert(Plan == AccessPlan::materialize_after_transform ||
@@ -3837,9 +4030,10 @@ struct UnorderedAccessTraits<
 };
 
 template <AccessPlan Plan, typename OriginalSpec, typename AuxSpec,
-          typename Policy>
+          typename Policy, typename Scope>
 struct UnorderedAccessTraits<
-    MaterializedOutputDataAccess<Plan, OriginalSpec, AuxSpec, Policy>> {
+    MaterializedOutputDataAccess<
+        Plan, OriginalSpec, AuxSpec, Policy, Scope>> {
   using ComputeType = typename OriginalSpec::ComputeType;
   static constexpr std::size_t storage_bytes =
       sizeof(typename OriginalSpec::MemoryElement);
@@ -4091,10 +4285,24 @@ inline constexpr bool binding_resolves_direct_v = [] {
       AccessPlan::direct;
 }();
 
-template <typename Spec, typename Policy, typename Defaults, typename Fn>
+template <execution::ExecutionScope Context,
+          typename Spec, typename Policy, typename Defaults, typename Fn>
+/**
+ * @brief Resolve and bind one input under an execution context.
+ * @param spec Typed input description.
+ * @param policy Lifetime access policy controlling axis, passes, and plan.
+ * @param defaults Call-site conversion/memory defaults.
+ * @param context Execution scope supplying workspace and hardware proofs.
+ * @param fn Callback receiving the bound input session.
+ * @return Callback result.
+ *
+ * Direct plans do not touch the workspace. Materialized plans allocate from the
+ * context and, when a unit axis is statically known, populate the auxiliary
+ * layout through Transpose2D. Otherwise the compile-time general loop is used.
+ */
 VECOPS_INLINE decltype(auto) with_bound_input(
     const Spec& spec, Policy policy, Defaults defaults,
-    kernel::WorkspaceView& workspace, Fn&& fn) {
+    Context& context, Fn&& fn) {
   constexpr int AxisValue = Policy::vector_axis;
   constexpr AccessPlan plan = resolve_plan<Spec, Policy>();
   using LoweringPolicy = AccessLoweringPolicy<Policy, Defaults>;
@@ -4104,19 +4312,45 @@ VECOPS_INLINE decltype(auto) with_bound_input(
     return std::forward<Fn>(fn)(access);
   } else {
 
+  auto& workspace = context.workspace_view();
+
   const nint_t count = tensor_numel(spec.input_layout());
   auto aux_layout = auxiliary_layout<AxisValue>(spec.input_layout());
   if constexpr (plan == AccessPlan::materialize_before_transform) {
     using Memory = typename Spec::MemoryElement;
-    Memory* buffer = workspace.allocate<Memory>(count);
+    Memory* buffer = workspace.template allocate<Memory>(count);
     auto auxiliary_tensor = make_tensor(buffer, aux_layout);
-    Coord<Spec::InputTensor::Ndim> position{};
-    for_each_coordinate(
-        spec.input_layout(), position,
-        [&](const auto& current) VECOPS_INLINE_LAMBDA {
-          buffer[offset_at(aux_layout, current)] =
-              spec.tensor().data()[offset_at(spec.input_layout(), current)];
-        });
+    constexpr int UnitAxis = first_unit_axis<
+        typename Spec::InputLayout::Strides, AxisValue>();
+    if constexpr (UnitAxis >= 0) {
+      auto source_spec = input<Memory>(spec.tensor());
+      auto destination_spec = output<Memory>(auxiliary_tensor);
+      using SourcePlanning = InputAccessPolicy<
+          UnitAxis, 1, AccessPlan::direct>;
+      using DestinationPlanning = OutputAccessPolicy<
+          AxisValue, AccessPlan::direct>;
+      using SourcePolicy = AccessLoweringPolicy<
+          SourcePlanning, DefaultAccessDefaults>;
+      using DestinationPolicy = AccessLoweringPolicy<
+          DestinationPlanning, DefaultAccessDefaults>;
+      InputDataAccess<decltype(source_spec), SourcePolicy> source{
+          source_spec, SourcePolicy{SourcePlanning{}}};
+      OutputDataAccess<decltype(destination_spec), DestinationPolicy>
+          destination{
+              destination_spec,
+              DestinationPolicy{DestinationPlanning{}}};
+      transpose_planes<AxisValue, UnitAxis, UnitAxis, AxisValue>(
+          context, spec.input_layout(), source, destination);
+      destination.commit();
+    } else {
+      Coord<Spec::InputTensor::Ndim> position{};
+      for_each_coordinate(
+          spec.input_layout(), position,
+          [&](const auto& current) VECOPS_INLINE_LAMBDA {
+            buffer[offset_at(aux_layout, current)] =
+                spec.tensor().data()[offset_at(spec.input_layout(), current)];
+          });
+    }
     using AuxTensor = decltype(auxiliary_tensor);
     using AuxSpec = InputSpec<
         typename Spec::ComputeType, AuxTensor, typename Spec::TransformType,
@@ -4130,7 +4364,7 @@ VECOPS_INLINE decltype(auto) with_bound_input(
 
   using Compute = typename Spec::ComputeType;
   using Tag = vec::ScalableTag<Compute, 0>;
-  Compute* buffer = workspace.allocate<Compute>(count);
+  Compute* buffer = workspace.template allocate<Compute>(count);
   auto auxiliary_tensor = make_tensor(buffer, aux_layout);
   if constexpr (Policy::requested_plan == AccessPlan::automatic_deferred) {
     auto aux_spec = input<Compute>(auxiliary_tensor);
@@ -4144,24 +4378,41 @@ VECOPS_INLINE decltype(auto) with_bound_input(
   } else {
   InputDataAccess<Spec, LoweringPolicy> source{
       spec, LoweringPolicy{policy}};
-  Coord<Spec::InputTensor::Ndim> position{};
-  for_each_line<AxisValue>(
-      spec.input_layout(), position,
-      [&](auto& line) VECOPS_INLINE_LAMBDA {
-        Tag tag{};
-        const nint_t line_size = spec.input_layout().shape()[AxisValue];
-        for (nint_t offset = 0; offset < line_size;
-             offset += vec::size(tag)) {
-          line[AxisValue] = offset;
-          const nint_t active =
-              std::min(line_size - offset, vec::size(tag));
-          auto value = source.load(
-              tag, line, axis<AxisValue>, vec::opt::first(active));
-          vec::store(
-              tag, buffer + offset_at(aux_layout, line), value,
-              vec::opt::first(active));
-        }
-      });
+  constexpr int UnitAxis = first_unit_axis<
+      typename Spec::InputLayout::Strides, AxisValue>();
+  if constexpr (UnitAxis >= 0) {
+    auto destination_spec = output<Compute>(auxiliary_tensor);
+    using DestinationPlanning = OutputAccessPolicy<
+        AxisValue, AccessPlan::direct>;
+    using DestinationPolicy = AccessLoweringPolicy<
+        DestinationPlanning, DefaultAccessDefaults>;
+    OutputDataAccess<decltype(destination_spec), DestinationPolicy>
+        destination{
+            destination_spec,
+            DestinationPolicy{DestinationPlanning{}}};
+    transpose_planes<AxisValue, UnitAxis, UnitAxis, AxisValue>(
+        context, spec.input_layout(), source, destination);
+    destination.commit();
+  } else {
+    Coord<Spec::InputTensor::Ndim> position{};
+    for_each_line<AxisValue>(
+        spec.input_layout(), position,
+        [&](auto& line) VECOPS_INLINE_LAMBDA {
+          Tag tag{};
+          const nint_t line_size = spec.input_layout().shape()[AxisValue];
+          for (nint_t offset = 0; offset < line_size;
+               offset += vec::size(tag)) {
+            line[AxisValue] = offset;
+            const nint_t active =
+                std::min(line_size - offset, vec::size(tag));
+            auto value = source.load(
+                tag, line, axis<AxisValue>, vec::opt::first(active));
+            vec::store(
+                tag, buffer + offset_at(aux_layout, line), value,
+                vec::opt::first(active));
+          }
+        });
+  }
   auto aux_spec = input<Compute>(auxiliary_tensor);
   using AuxPolicy = InputAccessPolicy<AxisValue, Policy::read_passes,
                                       AccessPlan::direct>;
@@ -4175,10 +4426,16 @@ VECOPS_INLINE decltype(auto) with_bound_input(
   }
 }
 
-template <typename Spec, typename Policy, typename Defaults, typename Fn>
+template <execution::ExecutionScope Context,
+          typename Spec, typename Policy, typename Defaults, typename Fn>
+/**
+ * @brief Resolve and bind one output under an execution context.
+ * @return Callback result from a direct or owning materialized output session.
+ * @note An owning result must be committed inside `fn` before scope teardown.
+ */
 VECOPS_INLINE decltype(auto) with_bound_output(
     const Spec& spec, Policy policy, Defaults defaults,
-    kernel::WorkspaceView& workspace, Fn&& fn) {
+    Context& context, Fn&& fn) {
   constexpr int AxisValue = Policy::vector_axis;
   constexpr AccessPlan plan = resolve_plan<Spec, Policy>();
   using LoweringPolicy = AccessLoweringPolicy<Policy, Defaults>;
@@ -4188,22 +4445,25 @@ VECOPS_INLINE decltype(auto) with_bound_output(
     return std::forward<Fn>(fn)(access);
   } else {
 
+  auto& workspace = context.workspace_view();
+
   const nint_t count = tensor_numel(spec.output_layout());
   auto aux_layout = auxiliary_layout<AxisValue>(spec.output_layout());
   if constexpr (plan == AccessPlan::materialize_before_transform) {
     using Compute = typename Spec::ComputeType;
-    Compute* buffer = workspace.allocate<Compute>(count);
+    Compute* buffer = workspace.template allocate<Compute>(count);
     auto auxiliary_tensor = make_tensor(buffer, aux_layout);
     auto aux_spec = output<Compute>(auxiliary_tensor);
     using Access = MaterializedOutputDataAccess<
         AccessPlan::materialize_before_transform, Spec,
-        decltype(aux_spec), LoweringPolicy>;
-    Access access{spec, std::move(aux_spec), LoweringPolicy{policy}};
+        decltype(aux_spec), LoweringPolicy, Context>;
+    Access access{
+        spec, std::move(aux_spec), LoweringPolicy{policy}, context};
     return std::forward<Fn>(fn)(access);
   }
 
   using Memory = typename Spec::MemoryElement;
-  Memory* buffer = workspace.allocate<Memory>(count);
+  Memory* buffer = workspace.template allocate<Memory>(count);
   auto auxiliary_tensor = make_tensor(buffer, aux_layout);
   using AuxTensor = decltype(auxiliary_tensor);
   using AuxSpec = OutputSpec<
@@ -4212,26 +4472,38 @@ VECOPS_INLINE decltype(auto) with_bound_output(
   AuxSpec aux_spec{
       auxiliary_tensor, spec.transform(), spec.projection()};
   using Access = MaterializedOutputDataAccess<
-      AccessPlan::materialize_after_transform, Spec, AuxSpec, LoweringPolicy>;
+      AccessPlan::materialize_after_transform, Spec, AuxSpec, LoweringPolicy,
+      Context>;
   Access access{
-      spec, std::move(aux_spec), LoweringPolicy{policy}};
+      spec, std::move(aux_spec), LoweringPolicy{policy}, context};
   return std::forward<Fn>(fn)(access);
   }
 }
 
-template <typename Spec, typename Policy, typename Defaults, typename Fn>
+template <execution::ExecutionScope Context,
+          typename Spec, typename Policy, typename Defaults, typename Fn>
+/** Dispatch one `OperandBinding` to input or output binding by Spec type. */
 VECOPS_INLINE decltype(auto) with_bound_operand(
     const OperandBinding<Spec, Policy, Defaults>& binding,
-    kernel::WorkspaceView& workspace, Fn&& fn) {
+    Context& context, Fn&& fn) {
   if constexpr (is_input_spec_v<Spec>) {
     return with_bound_input(
-        binding.spec, binding.policy, binding.defaults, workspace,
+        binding.spec, binding.policy, binding.defaults, context,
         std::forward<Fn>(fn));
   } else {
     return with_bound_output(
-        binding.spec, binding.policy, binding.defaults, workspace,
+        binding.spec, binding.policy, binding.defaults, context,
         std::forward<Fn>(fn));
   }
+}
+
+template <typename Spec, typename Policy, typename Defaults, typename Fn>
+/** WorkspaceView compatibility overload creating a borrowing ExecutionSession. */
+VECOPS_INLINE decltype(auto) with_bound_operand(
+    const OperandBinding<Spec, Policy, Defaults>& binding,
+    kernel::WorkspaceView& workspace, Fn&& fn) {
+  execution::ExecutionSession context{workspace};
+  return with_bound_operand(binding, context, std::forward<Fn>(fn));
 }
 
 } // namespace details
@@ -4242,6 +4514,40 @@ namespace vecops::kernel {
 
 namespace details {
 
+template <typename Fn, typename Tuple, std::size_t... I>
+VECOPS_ALWAYS_INLINE decltype(auto) apply_bound_tuple(
+    Fn&& fn, Tuple&& tuple, std::index_sequence<I...>) {
+  return std::forward<Fn>(fn)(
+      std::get<I>(std::forward<Tuple>(tuple))...);
+}
+
+template <std::size_t I, execution::ExecutionScope Context,
+          typename Tuple, typename BoundTuple, typename Fn>
+VECOPS_INLINE decltype(auto) bind_operands_recursive(
+    Context& context,
+    const Tuple& bindings,
+    BoundTuple&& bound,
+    Fn&& fn) {
+  if constexpr (I == std::tuple_size_v<Tuple>) {
+    return apply_bound_tuple(
+        std::forward<Fn>(fn), std::forward<BoundTuple>(bound),
+        std::make_index_sequence<std::tuple_size_v<
+            std::remove_reference_t<BoundTuple>>>{});
+  } else {
+    const auto& binding = std::get<I>(bindings);
+    return tensor::details::with_bound_operand(
+        binding, context,
+        [&](auto& access) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+          return bind_operands_recursive<I + 1>(
+              context, bindings,
+              std::tuple_cat(
+                  std::forward<BoundTuple>(bound),
+                  std::forward_as_tuple(access)),
+              std::forward<Fn>(fn));
+        });
+  }
+}
+
 template <std::size_t I, typename Tuple, typename BoundTuple, typename Fn>
 VECOPS_INLINE decltype(auto) bind_operands_recursive(
     WorkspaceView& workspace,
@@ -4249,7 +4555,10 @@ VECOPS_INLINE decltype(auto) bind_operands_recursive(
     BoundTuple&& bound,
     Fn&& fn) {
   if constexpr (I == std::tuple_size_v<Tuple>) {
-    return std::apply(std::forward<Fn>(fn), std::forward<BoundTuple>(bound));
+    return apply_bound_tuple(
+        std::forward<Fn>(fn), std::forward<BoundTuple>(bound),
+        std::make_index_sequence<std::tuple_size_v<
+            std::remove_reference_t<BoundTuple>>>{});
   } else {
     const auto& binding = std::get<I>(bindings);
     return tensor::details::with_bound_operand(
@@ -4298,6 +4607,35 @@ inline constexpr bool operands_need_workspace_scope_v =
     !(tensor::details::binding_resolves_direct_v<Bindings> && ...);
 
 } // namespace details
+
+template <execution::ExecutionScope Context, typename... Bindings, typename Fn>
+/**
+ * @brief Bind a tuple of operands under an existing execution scope.
+ * @param context Scope supplying resources and optional workspace.
+ * @param bindings Typed operand bindings whose plans resolve at compile time.
+ * @param fn Callback receiving bound lvalue sessions in tuple order.
+ * @return Callback result.
+ *
+ * An all-direct tuple never requests `context.workspace_view()`. If any binding
+ * materializes, one workspace mark covers the complete group and is rewound
+ * after all bound sessions are destroyed.
+ */
+VECOPS_INLINE decltype(auto) with_operand_tuple(
+    Context& context,
+    const std::tuple<Bindings...>& bindings,
+    Fn&& fn) {
+  if constexpr (details::operands_need_workspace_scope_v<Bindings...>) {
+    auto& workspace = context.workspace_view();
+    return details::with_operand_workspace_scope<true>(
+        workspace, [&]() VECOPS_INLINE_LAMBDA -> decltype(auto) {
+          return details::bind_operands_recursive<0>(
+              context, bindings, std::tuple<>{}, std::forward<Fn>(fn));
+        });
+  } else {
+    return details::bind_operands_recursive<0>(
+        context, bindings, std::tuple<>{}, std::forward<Fn>(fn));
+  }
+}
 
 /**
  * @brief Resolve, materialize, bind, and scope a tuple of operands.
@@ -4352,6 +4690,29 @@ VECOPS_INLINE decltype(auto) with_operands(
       });
 }
 
+template <execution::ExecutionScope Context, typename Binding, typename Fn>
+  requires tensor::is_operand_binding_v<Binding>
+/**
+ * @brief Bind one operand under an execution scope.
+ * @return Callback result; direct plans introduce no workspace operations.
+ */
+VECOPS_INLINE decltype(auto) with_operands(
+    Context& context, Binding&& binding, Fn&& fn) {
+  auto invoke = [&]() VECOPS_INLINE_LAMBDA -> decltype(auto) {
+    return tensor::details::with_bound_operand(
+        binding, context,
+        [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+          return std::forward<Fn>(fn)(a0);
+        });
+  };
+  if constexpr (details::operands_need_workspace_scope_v<Binding>) {
+    return details::with_operand_workspace_scope<true>(
+        context.workspace_view(), invoke);
+  } else {
+    return invoke();
+  }
+}
+
 template <typename B0, typename B1, typename Fn>
   requires (tensor::is_operand_binding_v<B0> &&
             tensor::is_operand_binding_v<B1>)
@@ -4370,6 +4731,32 @@ VECOPS_INLINE decltype(auto) with_operands(
                   });
             });
       });
+}
+
+template <execution::ExecutionScope Context,
+          typename B0, typename B1, typename Fn>
+  requires (tensor::is_operand_binding_v<B0> &&
+            tensor::is_operand_binding_v<B1>)
+/** Bind two operands under one execution/workspace lifetime. */
+VECOPS_INLINE decltype(auto) with_operands(
+    Context& context, B0&& b0, B1&& b1, Fn&& fn) {
+  auto invoke = [&]() VECOPS_INLINE_LAMBDA -> decltype(auto) {
+    return tensor::details::with_bound_operand(
+        b0, context,
+        [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+          return tensor::details::with_bound_operand(
+              b1, context,
+              [&](auto& a1) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                return std::forward<Fn>(fn)(a0, a1);
+              });
+        });
+  };
+  if constexpr (details::operands_need_workspace_scope_v<B0, B1>) {
+    return details::with_operand_workspace_scope<true>(
+        context.workspace_view(), invoke);
+  } else {
+    return invoke();
+  }
 }
 
 template <typename B0, typename B1, typename B2, typename Fn>
@@ -4395,6 +4782,37 @@ VECOPS_INLINE decltype(auto) with_operands(
                   });
             });
       });
+}
+
+template <execution::ExecutionScope Context,
+          typename B0, typename B1, typename B2, typename Fn>
+  requires (tensor::is_operand_binding_v<B0> &&
+            tensor::is_operand_binding_v<B1> &&
+            tensor::is_operand_binding_v<B2>)
+/** Bind three operands under one execution/workspace lifetime. */
+VECOPS_INLINE decltype(auto) with_operands(
+    Context& context, B0&& b0, B1&& b1, B2&& b2, Fn&& fn) {
+  auto invoke = [&]() VECOPS_INLINE_LAMBDA -> decltype(auto) {
+    return tensor::details::with_bound_operand(
+        b0, context,
+        [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+          return tensor::details::with_bound_operand(
+              b1, context,
+              [&](auto& a1) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                return tensor::details::with_bound_operand(
+                    b2, context,
+                    [&](auto& a2) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                      return std::forward<Fn>(fn)(a0, a1, a2);
+                    });
+              });
+        });
+  };
+  if constexpr (details::operands_need_workspace_scope_v<B0, B1, B2>) {
+    return details::with_operand_workspace_scope<true>(
+        context.workspace_view(), invoke);
+  } else {
+    return invoke();
+  }
 }
 
 template <typename B0, typename B1, typename B2, typename B3, typename Fn>
@@ -4427,6 +4845,44 @@ VECOPS_INLINE decltype(auto) with_operands(
                   });
             });
       });
+}
+
+template <execution::ExecutionScope Context,
+          typename B0, typename B1, typename B2, typename B3, typename Fn>
+  requires (tensor::is_operand_binding_v<B0> &&
+            tensor::is_operand_binding_v<B1> &&
+            tensor::is_operand_binding_v<B2> &&
+            tensor::is_operand_binding_v<B3>)
+/** Bind four operands under one execution/workspace lifetime. */
+VECOPS_INLINE decltype(auto) with_operands(
+    Context& context, B0&& b0, B1&& b1, B2&& b2, B3&& b3,
+    Fn&& fn) {
+  auto invoke = [&]() VECOPS_INLINE_LAMBDA -> decltype(auto) {
+    return tensor::details::with_bound_operand(
+        b0, context,
+        [&](auto& a0) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+          return tensor::details::with_bound_operand(
+              b1, context,
+              [&](auto& a1) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                return tensor::details::with_bound_operand(
+                    b2, context,
+                    [&](auto& a2) VECOPS_INLINE_LAMBDA -> decltype(auto) {
+                      return tensor::details::with_bound_operand(
+                          b3, context,
+                          [&](auto& a3) VECOPS_INLINE_LAMBDA
+                              -> decltype(auto) {
+                            return std::forward<Fn>(fn)(a0, a1, a2, a3);
+                          });
+                    });
+              });
+        });
+  };
+  if constexpr (details::operands_need_workspace_scope_v<B0, B1, B2, B3>) {
+    return details::with_operand_workspace_scope<true>(
+        context.workspace_view(), invoke);
+  } else {
+    return invoke();
+  }
 }
 
 } // namespace vecops::kernel

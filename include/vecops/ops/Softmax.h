@@ -8,16 +8,33 @@
 
 #include "vecops/Assertion.h"
 #include "vecops/CoreTypes.h"
+#include "vecops/execution/ExecutionSession.h"
 #include "vecops/kernel/Loop.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/tensor/DataAccess.h"
 #include "vecops/vec/Vec.h"
+
+/**
+ * @file Softmax.h
+ * @brief Last-dimension Softmax with DataAccess and ExecutionSession support.
+ *
+ * The operator normalizes every row independently, supports Tensor or Spec
+ * operands, conversion transforms, cached and selected online algorithms, and
+ * caller-owned or internally allocated workspace. Algorithm selection uses
+ * compile-time layout/shape ranges; no runtime ISA fallback is introduced.
+ */
 
 namespace vecops::ops {
 
 template <typename ComputeT = float32_t,
           vec::Accuracy ExpAccuracy = vec::Accuracy::Strict,
           bool AllowOnline = true>
+/**
+ * @brief Compile-time Softmax numerical and algorithm configuration.
+ * @tparam ComputeT Accumulation and exponential element type.
+ * @tparam ExpAccuracy Accuracy contract forwarded to `vec::exp_neg`.
+ * @tparam AllowOnline Whether eligible typed shapes may use online tiling.
+ */
 struct SoftmaxConfig {
   using ComputeType = ComputeT;
   static constexpr vec::Accuracy exp_accuracy = ExpAccuracy;
@@ -67,6 +84,14 @@ using SingleStoreSoftmaxRecipe = SoftmaxRowRecipe<1, 1>;
 } // namespace details
 
 template <typename Config = SoftmaxConfig<>>
+/**
+ * @brief Softmax operator normalizing the final dimension of an N-D operand.
+ * @tparam Config `SoftmaxConfig`-compatible type.
+ *
+ * Input and output shapes must match and the last dimension must be non-empty.
+ * `ResourceRequirements` makes ordinary ARM instantiations non-streaming-only;
+ * calling through a scope enforces that contract at compile time.
+ */
 class Softmax {
   using XPolicy = tensor::InputAccessPolicy<
       0, 2, tensor::AccessPlan::automatic_deferred>;
@@ -75,6 +100,9 @@ class Softmax {
 public:
   using ComputeType = typename Config::ComputeType;
   using Tag = vec::ScalableTag<ComputeType, 0>;
+  /** Compile-time hardware-mode contract consumed by ExecutionSession. */
+  using ResourceRequirements =
+      typename execution::details::CurrentBackend::DefaultRequirements;
   static constexpr vec::Accuracy ExpAccuracy = Config::exp_accuracy;
 
   const Config config;
@@ -84,6 +112,12 @@ public:
   template <typename InSpec, typename OutSpec>
     requires (tensor::is_input_spec_v<InSpec> &&
               tensor::is_output_spec_v<OutSpec>)
+  /**
+   * @brief Compute workspace bytes for normalized input/output Specs.
+   * @return Cache, DataAccess materialization, and alignment bytes required by
+   *         the exact typed plan.
+   * @note The same Specs and runtime layouts must be used for execution.
+   */
   VECOPS_INLINE nint_t required_workspace(
       const InSpec& in, const OutSpec& out) const {
     details::validate_softmax_layouts(
@@ -110,6 +144,7 @@ public:
               tensor::OutputOperand<OutOperand> &&
               !(tensor::is_input_spec_v<InOperand> &&
                 tensor::is_output_spec_v<OutOperand>))
+  /** Normalize Tensor operands to Specs and return exact workspace bytes. */
   VECOPS_INLINE nint_t required_workspace(
       const InOperand& in, const OutOperand& out) const {
     auto in_spec = tensor::as_input_spec<ComputeType>(in);
@@ -120,6 +155,12 @@ public:
   template <typename InSpec, typename OutSpec>
     requires (tensor::is_input_spec_v<InSpec> &&
               tensor::is_output_spec_v<OutSpec>)
+  /**
+   * @brief Execute with caller-owned workspace and normalized Specs.
+   * @param workspace Scratch storage at least `required_workspace()` bytes.
+   * @param in Readable input Spec.
+   * @param out Writable output Spec with identical shape.
+   */
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace, const InSpec& in,
       const OutSpec& out) const {
@@ -162,13 +203,19 @@ public:
       run_rows.template operator()<true, details::SingleStoreSoftmaxRecipe>();
     } else {
 #if defined(ARCH_X86_FAMILY) && defined(__GNUC__) && !defined(__clang__)
+      // WORKAROUND/TUNING: GCC's paired BF16 conversion/store path increases
+      // register pressure and emits a slower dependency chain on AVX-512.
+      // Retain one-vector stores for BF16 only; other dtypes use the generic
+      // recipe. Validate generated assembly before removing this split.
       using GenericRecipe = std::conditional_t<
           std::same_as<typename OutSpec::MemoryElement, bfloat16_t>,
           details::SingleStoreSoftmaxRecipe,
           details::GenericSoftmaxRecipe>;
 #elif defined(CPU_CAPABILITY_SVE) && defined(__GNUC__) && !defined(__clang__)
-      // GCC expands the paired FP16 conversion/store body into a longer
-      // dependency chain than the single-vector form on SVE.
+      // WORKAROUND/TUNING: GCC 15 expands paired FP16 conversion/store into a
+      // longer dependency chain than the single-vector SVE form. Keep this
+      // compiler-specific recipe until generated assembly no longer shows the
+      // extra chain; Clang benefits from the generic two-vector store recipe.
       using GenericRecipe = std::conditional_t<
           std::same_as<typename OutSpec::MemoryElement, float16_t>,
           details::SingleStoreSoftmaxRecipe,
@@ -206,6 +253,7 @@ public:
               tensor::OutputOperand<OutOperand> &&
               !(tensor::is_input_spec_v<InOperand> &&
                 tensor::is_output_spec_v<OutOperand>))
+  /** Execute Tensor operands using caller-owned workspace. */
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace, const InOperand& in,
       const OutOperand& out) const {
@@ -214,18 +262,44 @@ public:
     (*this)(workspace, in_spec, out_spec);
   }
 
+  template <execution::ExecutionScope Scope,
+            typename InOperand, typename OutOperand>
+    requires (tensor::InputOperand<InOperand> &&
+              tensor::OutputOperand<OutOperand>)
+  /**
+   * @brief Execute through an ExecutionSession or active enclosing scope.
+   * @param scope Scope providing resource transitions and worker workspace.
+   * @param in Input Tensor/Spec operand.
+   * @param out Output Tensor/Spec operand with identical shape.
+   *
+   * `with_resources` is nested deliberately: if an enclosing region already
+   * satisfies the operator, all transition logic is removed by `if constexpr`.
+   */
+  VECOPS_INLINE void operator()(
+      Scope& scope, const InOperand& in, const OutOperand& out) const {
+    scope.with_resources(
+        *this, [&](auto& active) VECOPS_INLINE_LAMBDA {
+          (*this)(active.workspace_view(), in, out);
+        });
+  }
+
   template <typename InOperand, typename OutOperand>
     requires (tensor::InputOperand<InOperand> &&
               tensor::OutputOperand<OutOperand>)
+  /** Allocate exact temporary workspace, create a session, and execute once. */
   VECOPS_INLINE void operator()(
       const InOperand& in, const OutOperand& out) const {
     kernel::Workspace storage(required_workspace(in, out));
     auto workspace = storage.view();
-    (*this)(workspace, in, out);
+    ExecutionSession execution{workspace};
+    (*this)(execution, in, out);
   }
 
   /**
-   * Execute one already-bound row using the regular stable Softmax path.
+   * @brief Execute one already-bound row using the regular stable Softmax path.
+   * @param exp_cache Storage for at least one Compute value per logical lane.
+   * @param x Bound rank-one readable access.
+   * @param y Bound rank-one committable writable access.
    * `exp_cache` points to at least logical_layout(x).shape()[0] Compute values
    * allocated before entering the operand-binding scope.
    */
@@ -501,8 +575,10 @@ private:
     nint_t n = tensor::size<0>(in.input_layout());
 #if defined(CPU_CAPABILITY_SVE) && defined(__GNUC__) && !defined(__clang__)
     if constexpr (std::same_as<typename InSpec::MemoryElement, float16_t>) {
-      // Keeping the trip count in a register prevents GCC from over-unrolling
-      // large Const-shaped rows; the loop recipe remains compile-time.
+      // WORKAROUND: GCC 15 otherwise propagates large Const-shaped FP16 row
+      // counts into the fold and aggressively unrolls them, causing excessive
+      // code size and compile time. The empty asm keeps only the trip count
+      // value runtime-visible; access plans and loop recipes remain compile-time.
       asm volatile("" : "+r"(n));
     }
 #endif
@@ -526,6 +602,7 @@ private:
 };
 
 template <typename Config = SoftmaxConfig<>>
+/** Construct a Softmax operator from its compile-time configuration type. */
 VECOPS_INLINE constexpr auto softmax(Config config = {}) {
   return Softmax<Config>{config};
 }

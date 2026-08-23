@@ -4,6 +4,7 @@
 /.opencode/
 /.claude/
 /.codex/
+/.zcode/
 
 # ============ Build ============
 /cmake-build*/

@@ -459,6 +459,10 @@ struct NativeWordImpl<SVEBackend, MaskWhileGeOp> {
   }
 };
 
+// COMPILER WORKAROUND: keep the VLA-SVE generic lambda inside tuple mask
+// construction. GCC/BiSheng may otherwise outline the callback, introducing
+// calls around sizeless predicate values and blocking constant word-index
+// propagation. Recheck generated assembly before removing INLINE_LAMBDA.
 #define VECOPS_VEC_SVE_DEFINE_MASK_CONSTRUCTOR(OpType)                   \
   template <VectorTag Tag>                                               \
   struct NativeImpl<SVEBackend, OpType, Tag> {                           \
@@ -467,7 +471,7 @@ struct NativeWordImpl<SVEBackend, MaskWhileGeOp> {
         OpType op, Tag tag, Args... args) {                              \
       return construct_mask_words<SVEBackend>(                          \
           tag,                                                          \
-          [&]<nint_t Index>(Tag) {                                      \
+          [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA {                 \
             return NativeWordImpl<SVEBackend, OpType>::template call<Index>( \
                 op, tag, args...);                                      \
           });                                                           \

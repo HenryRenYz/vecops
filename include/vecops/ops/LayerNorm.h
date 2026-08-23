@@ -8,15 +8,30 @@
 
 #include "vecops/Assertion.h"
 #include "vecops/CoreTypes.h"
+#include "vecops/execution/ExecutionSession.h"
 #include "vecops/kernel/Loop.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/tensor/DataAccess.h"
 #include "vecops/tensor/OptionalOperand.h"
 #include "vecops/vec/Vec.h"
 
+/**
+ * @file LayerNorm.h
+ * @brief Last-dimension LayerNorm with optional affine parameters.
+ *
+ * Every prefix coordinate defines one independently normalized row. Input,
+ * gamma, beta, and output use DataAccess so dtype conversion and transforms
+ * remain composable. The operator accepts an ExecutionSession/active scope,
+ * caller-owned workspace, or a self-allocating convenience call.
+ */
+
 namespace vecops::ops {
 
 template <typename ComputeT = float32_t>
+/**
+ * @brief LayerNorm compute configuration.
+ * @tparam ComputeT Accumulation, mean, variance, and output compute type.
+ */
 struct LayerNormConfig {
   using ComputeType = ComputeT;
   ComputeT eps = ComputeT(1e-5f);
@@ -152,6 +167,14 @@ using SVE16RowRecipe = RowRecipe<
 
 } // namespace details
 
+/**
+ * @brief Normalize the final dimension and optionally apply gamma and beta.
+ * @tparam Config `LayerNormConfig`-compatible type.
+ *
+ * Input/output shapes must match. Gamma and beta, when present, are rank-one
+ * operands whose length equals the final dimension. Variance is computed as
+ * `E[x^2] - E[x]^2`, clamped to zero before applying `eps`.
+ */
 template <typename Config = LayerNormConfig<>>
 class LayerNorm {
   using XPolicy = tensor::InputAccessPolicy<
@@ -164,6 +187,9 @@ class LayerNorm {
 public:
   using ComputeType = typename Config::ComputeType;
   using Tag = vec::ScalableTag<ComputeType, 0>;
+  /** Compile-time hardware-mode contract consumed by ExecutionSession. */
+  using ResourceRequirements =
+      typename execution::details::CurrentBackend::DefaultRequirements;
 
   const Config config;
 
@@ -175,6 +201,13 @@ public:
               details::is_layernorm_param_operand_v<ScaleOperand> &&
               details::is_layernorm_param_operand_v<BiasOperand> &&
               details::is_output_operand_v<OutOperand>)
+  /**
+   * @brief Return exact DataAccess workspace bytes for four operands.
+   * @param in Input Tensor/Spec.
+   * @param scale Optional gamma Tensor/Spec or `tensor::nullopt`.
+   * @param bias Optional beta Tensor/Spec or `tensor::nullopt`.
+   * @param out Output Tensor/Spec with input shape.
+   */
   VECOPS_INLINE nint_t required_workspace(
       const InOperand& in, const ScaleOperand& scale,
       const BiasOperand& bias, const OutOperand& out) const {
@@ -197,6 +230,7 @@ public:
   template <typename InOperand, typename OutOperand>
     requires (details::is_input_operand_v<InOperand> &&
               details::is_output_operand_v<OutOperand>)
+  /** Workspace query for LayerNorm without affine parameters. */
   VECOPS_INLINE nint_t required_workspace(
       const InOperand& in, const OutOperand& out) const {
     return required_workspace(
@@ -208,6 +242,7 @@ public:
               details::is_layernorm_param_operand_v<ScaleOperand> &&
               !tensor::is_nullopt_v<ScaleOperand> &&
               details::is_output_operand_v<OutOperand>)
+  /** Workspace query for LayerNorm with gamma and no beta. */
   VECOPS_INLINE nint_t required_workspace(
       const InOperand& in, const ScaleOperand& scale,
       const OutOperand& out) const {
@@ -220,6 +255,10 @@ public:
               details::is_layernorm_param_operand_v<ScaleOperand> &&
               details::is_layernorm_param_operand_v<BiasOperand> &&
               details::is_output_operand_v<OutOperand>)
+  /**
+   * @brief Execute with caller-owned workspace and optional affine operands.
+   * @param workspace Scratch storage at least `required_workspace()` bytes.
+   */
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace, const InOperand& in,
       const ScaleOperand& scale, const BiasOperand& bias,
@@ -242,6 +281,7 @@ public:
   template <typename InOperand, typename OutOperand>
     requires (details::is_input_operand_v<InOperand> &&
               details::is_output_operand_v<OutOperand>)
+  /** Caller-workspace overload without affine parameters. */
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace, const InOperand& in,
       const OutOperand& out) const {
@@ -253,10 +293,57 @@ public:
               details::is_layernorm_param_operand_v<ScaleOperand> &&
               !tensor::is_nullopt_v<ScaleOperand> &&
               details::is_output_operand_v<OutOperand>)
+  /** Caller-workspace overload with gamma and no beta. */
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace, const InOperand& in,
       const ScaleOperand& scale, const OutOperand& out) const {
     (*this)(workspace, in, scale, tensor::nullopt, out);
+  }
+
+  template <execution::ExecutionScope Scope,
+            typename InOperand, typename ScaleOperand, typename BiasOperand,
+            typename OutOperand>
+    requires (details::is_input_operand_v<InOperand> &&
+              details::is_layernorm_param_operand_v<ScaleOperand> &&
+              details::is_layernorm_param_operand_v<BiasOperand> &&
+              details::is_output_operand_v<OutOperand>)
+  /**
+   * @brief Execute through an ExecutionSession or active enclosing scope.
+   * @param scope Scope providing resources and worker-local workspace.
+   *
+   * Nested `with_resources` is compile-time-elided when an outer operator region
+   * already satisfies LayerNorm's requirements.
+   */
+  VECOPS_INLINE void operator()(
+      Scope& scope, const InOperand& in, const ScaleOperand& scale,
+      const BiasOperand& bias, const OutOperand& out) const {
+    scope.with_resources(
+        *this, [&](auto& active) VECOPS_INLINE_LAMBDA {
+          (*this)(active.workspace_view(), in, scale, bias, out);
+        });
+  }
+
+  template <execution::ExecutionScope Scope,
+            typename InOperand, typename OutOperand>
+    requires (details::is_input_operand_v<InOperand> &&
+              details::is_output_operand_v<OutOperand>)
+  /** Execution-scope overload without affine parameters. */
+  VECOPS_INLINE void operator()(
+      Scope& scope, const InOperand& in, const OutOperand& out) const {
+    (*this)(scope, in, tensor::nullopt, tensor::nullopt, out);
+  }
+
+  template <execution::ExecutionScope Scope,
+            typename InOperand, typename ScaleOperand, typename OutOperand>
+    requires (details::is_input_operand_v<InOperand> &&
+              details::is_layernorm_param_operand_v<ScaleOperand> &&
+              !tensor::is_nullopt_v<ScaleOperand> &&
+              details::is_output_operand_v<OutOperand>)
+  /** Execution-scope overload with gamma and no beta. */
+  VECOPS_INLINE void operator()(
+      Scope& scope, const InOperand& in, const ScaleOperand& scale,
+      const OutOperand& out) const {
+    (*this)(scope, in, scale, tensor::nullopt, out);
   }
 
   template <typename InOperand, typename ScaleOperand, typename BiasOperand,
@@ -265,12 +352,14 @@ public:
               details::is_layernorm_param_operand_v<ScaleOperand> &&
               details::is_layernorm_param_operand_v<BiasOperand> &&
               details::is_output_operand_v<OutOperand>)
+  /** Allocate exact workspace, create an ExecutionSession, and execute once. */
   VECOPS_INLINE void operator()(
       const InOperand& in, const ScaleOperand& scale,
       const BiasOperand& bias, const OutOperand& out) const {
     kernel::Workspace storage(required_workspace(in, scale, bias, out));
     auto workspace = storage.view();
-    (*this)(workspace, in, scale, bias, out);
+    ExecutionSession execution{workspace};
+    (*this)(execution, in, scale, bias, out);
   }
 
   template <typename InOperand, typename OutOperand>
@@ -292,7 +381,13 @@ public:
     (*this)(in, scale, tensor::nullopt, out);
   }
 
-  /** Execute one already-bound row without replanning or rebinding operands. */
+  /**
+   * @brief Execute one already-bound row without replanning or rebinding.
+   * @param x Bound rank-one input.
+   * @param gamma Optional bound rank-one scale.
+   * @param beta Optional bound rank-one bias.
+   * @param y Bound rank-one committable output.
+   */
   template <typename X, typename Gamma, typename Beta, typename Y>
     requires (tensor::BoundInputAccess<X> &&
               (tensor::BoundInputAccess<Gamma> ||
@@ -364,7 +459,10 @@ private:
     run_rows<Recipe>(workspace, in, scale, bias, out);
   }
 
-  // Measured compiler tuning: x86 keeps the row nest outlined; SVE inlines it.
+  // COMPILER TUNING: GCC/Clang x86 generate a smaller and faster outer loop
+  // when the row nest is outlined, while SVE must inline it so scalable-vector
+  // loop state and DataAccess projections optimize together. Re-check both code
+  // size and row-loop assembly before making this annotation uniform.
   template <typename Recipe, typename InSpec, typename ScaleSpec,
             typename BiasSpec, typename OutSpec>
 #if defined(ARCH_X86_FAMILY)
@@ -485,6 +583,7 @@ private:
 };
 
 template <typename Config = LayerNormConfig<>>
+/** Construct a LayerNorm operator from its configuration value. */
 VECOPS_INLINE constexpr auto layer_norm(Config config = {}) {
   return LayerNorm<Config>{config};
 }

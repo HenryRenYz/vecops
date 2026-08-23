@@ -7,23 +7,21 @@
 
 #include "vecops/CoreTypes.h"
 #include "vecops/Meta.h"
+#include "vecops/execution/ExecutionSession.h"
 #include "vecops/tensor/Layout.h"
 
 namespace vecops::gemm {
 
 /**
  * 微内核种类，表示实现内核的硬件种类，比如SME, AMX这种。实际类型，不是模板，因此没有参数。
- * 包含属于此种类代表的加速器的硬件特征和状态管理函数。
+ * 包含属于此种类代表的加速器的硬件特征和编译期资源需求。
+ *
+ * `ResourceRequirements`由ExecutionSession在外层region统一获取。特化应覆盖
+ * 此别名来声明AMX Tiles、ARM Streaming等资源；不得在内核调用中运行时探测。
  */
 struct KernelKind {
-  /**
-   * 获取/释放当前Atom对应的内核所需的硬件资源。上层调用属于此Atom的内核之前必须调用
-   * acquire()，之后必须释放release()，否则执行行为未定义。
-   *
-   * 比如AMX的标志位设置、SME进入streaming mode开启ZA寄存器。
-   */
-  static void acquire();
-  static void release();
+  using ResourceRequirements =
+      typename execution::details::CurrentBackend::DefaultRequirements;
 };
 
 /**
@@ -113,6 +111,9 @@ template <
     MaskMode M_mask_, MaskMode N_mask_>
 struct Kernel {
   using Atom = Atom_;
+  /** 由Atom种类传播到调度器的编译期ExecutionSession资源需求。 */
+  using ResourceRequirements =
+      typename Atom::KernelKind::ResourceRequirements;
   static constexpr auto nM_R = meta::cint<nM_R_>;
   static constexpr auto nN_R = meta::cint<nN_R_>;
   static constexpr MaskMode M_mask = M_mask_;
@@ -176,14 +177,11 @@ struct Kernel {
       typename Atom::TAcc *acc, LdAccFlag ld_acc, StAccFlag st_acc, const Epilogue &epilogue) const;
 
   /**
-   * 获取/释放运行此kernel所需的硬件资源，进入kernel前必须调用begin_kernel()，退出kernel后必须调用end_kernel()，
-   * 否则执行结果未定义。
+   * @brief 有状态特化可以额外提供configuration()。
    *
-   * 多次调用同一种内核之间不需要调用end_kernel+begin_kernel。
-   *   - 比如AMX的LDTILECFG和设置tile形状。
+   * 调度器应使用`scope.with_configuration()`包围一组配置相同的微内核，
+   * 避免每个tile重复执行LDTILECFG或同类硬件配置操作。
    */
-  void begin_kernel() const;
-  void end_kernel() const;
 };
 
 

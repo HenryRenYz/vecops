@@ -256,6 +256,18 @@ function(vecops_add_test)
             target_compile_options(${_TARGET_NAME} PRIVATE
                 "-msve-vector-bits=${VECOPS_NATIVE_FIXED_SVE_BITS}")
         endif()
+        # SME ACLE private-ZA functions use AAPCS64 helper routines such as
+        # __arm_tpidr2_save/restore. BiSheng Clang ships them in compiler-rt
+        # but otherwise defaults to the system libgcc on this platform.
+        # TODO let target that uses vecops w/ SME handle these nasty stuff automatically.
+        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
+           CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND
+           _MARCH MATCHES "(^|\\+)sme($|\\+)")
+            target_compile_options(${_TARGET_NAME} PRIVATE
+                "-Wno-aarch64-sme-attributes")
+            target_link_options(${_TARGET_NAME} PRIVATE
+                "-rtlib=compiler-rt" "-unwindlib=libgcc")
+        endif()
         if(ARG_DEFINITIONS)
             target_compile_definitions(${_TARGET_NAME} PRIVATE ${ARG_DEFINITIONS})
         endif()

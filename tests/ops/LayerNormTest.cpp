@@ -973,4 +973,35 @@ TEST(LayerNormFusionTest, AppliesTransformsWithoutAffineParameters) {
   }
 }
 
+TEST(LayerNormCompositionTest,
+     ExecutesThroughExecutionSessionAndActiveRegion) {
+  constexpr nint_t n = 7;
+  std::array<float, n> x{-2.0f, -1.0f, 0.0f, 0.5f, 1.0f, 2.0f, 3.0f};
+  std::array<float, n> direct_out{};
+  std::array<float, n> region_out{};
+  auto x_t = make_tensor(
+      x.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto direct_t = make_tensor(
+      direct_out.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto region_t = make_tensor(
+      region_out.data(), make_shape(cint<n>), make_strides(cint<1>));
+  auto op = layer_norm();
+  static_assert(requires { typename decltype(op)::ResourceRequirements; });
+
+  const nint_t bytes = op.required_workspace(x_t, direct_t);
+  Workspace storage(bytes);
+  auto workspace = storage.view();
+  ExecutionSession execution{workspace};
+  op(execution, x_t, direct_t);
+  execution.with_region(
+      op, [&](auto& region) VECOPS_INLINE_LAMBDA {
+        op(region, x_t, region_t);
+      });
+
+  for (nint_t i = 0; i < n; ++i) {
+    EXPECT_NEAR(direct_out[static_cast<size_t>(i)],
+                region_out[static_cast<size_t>(i)], 2e-6f);
+  }
+}
+
 #endif
