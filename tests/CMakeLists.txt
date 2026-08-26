@@ -125,11 +125,21 @@ if(VECOPS_ARCH_FAMILY STREQUAL "x86")
         FILES ops/MatmulPackAMXTest.cpp TestUtils.cpp
         FOLDER ops/matmul_pack
         ARCH Scalar AVX512 Native)
+    vecops_add_test(
+        NAME MatmulAMXTest
+        FILES ops/MatmulAMXTest.cpp TestUtils.cpp
+        FOLDER ops/matmul
+        ARCH Native)
 elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
     vecops_add_test(
         NAME MatmulPackSMETest
         FILES ops/MatmulPackSMETest.cpp TestUtils.cpp
         FOLDER ops/matmul_pack
+        ARCH Native)
+    vecops_add_test(
+        NAME MatmulSMETest
+        FILES ops/MatmulSMETest.cpp TestUtils.cpp
+        FOLDER ops/matmul
         ARCH Native)
 endif()
 vecops_add_test(NAME VecRequestTest FILES vec/RequestTest.cpp

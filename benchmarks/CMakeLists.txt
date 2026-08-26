@@ -32,6 +32,10 @@ if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND EXISTS "/proc/cpuinfo")
             string(APPEND VECOPS_MAP_ARM_Native "+${_FEAT}")
         endif()
     endforeach()
+    string(FIND "${_FEAT_LINE}" " smef64f64 " _SME_F64_POS)
+    if(NOT _SME_F64_POS EQUAL -1)
+        string(APPEND VECOPS_MAP_ARM_Native "+sme-f64f64")
+    endif()
 
     # Keep benchmark Native targets on the same compiler-validated mapping as
     # tests. GCC accepts bare `native` but rejects Clang-style feature suffixes.
@@ -121,9 +125,15 @@ if(VECOPS_ARCH_FAMILY STREQUAL "x86")
     add_multiarch_benchmark(MatmulPackAMXBench
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulPackAMXBench.cpp
         ARCH Native)
+    add_multiarch_benchmark(MatmulAMXBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulAMXBench.cpp
+        ARCH Native)
 elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
     add_multiarch_benchmark(MatmulPackSMEBench
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulPackSMEBench.cpp
+        ARCH Native)
+    add_multiarch_benchmark(MatmulSMEBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulSMEBench.cpp
         ARCH Native)
 endif()
 

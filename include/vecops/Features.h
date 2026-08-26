@@ -216,7 +216,7 @@
 #endif
 
 // AMX FP16
-#if defined(__AMXFP16__)
+#if defined(__AMX_FP16__) || defined(__AMXFP16__)
   #define HAS_AMX_FP16 1
 #endif
 

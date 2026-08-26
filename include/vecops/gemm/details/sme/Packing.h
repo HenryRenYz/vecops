@@ -20,7 +20,7 @@ template <typename T>
 inline constexpr bool supported_element_v =
     std::same_as<T, float32_t> || std::same_as<T, bfloat16_t> ||
     std::same_as<T, float16_t> || std::same_as<T, int8_t> ||
-    std::same_as<T, uint8_t>;
+    std::same_as<T, uint8_t> || std::same_as<T, float64_t>;
 
 VECOPS_INLINE nint_t panel_lanes() {
   return 2 * static_cast<nint_t>(svcntsw());
@@ -33,8 +33,15 @@ struct Packing {
   static_assert(supported_element_v<Element>);
 
   static constexpr int VectorAxis = 0;
-  static constexpr nint_t KPack = 4 / sizeof(Element);
+  static constexpr nint_t KPack = sizeof(Element) > 4 ? 1 : 4 / sizeof(Element);
   static_assert(KPack > 0);
+
+  VECOPS_INLINE static nint_t panel() {
+    if constexpr (sizeof(Element) == 8)
+      return 2 * static_cast<nint_t>(svcntsd());
+    else
+      return panel_lanes();
+  }
 
   template <tensor::LayoutLike InputLayout>
   VECOPS_INLINE static auto packed_layout(const InputLayout& input) {
@@ -42,7 +49,7 @@ struct Packing {
                   "matrix packing accepts a rank-two input layout");
     const nint_t spatial = tensor::size<0>(input);
     const nint_t k = tensor::size<1>(input);
-    const nint_t panel = panel_lanes();
+    const nint_t panel = Packing::panel();
     packing_details::validate_packed_size(spatial, k, panel, KPack);
     return tensor::make_layout(tensor::make_shape(
         meta::Any{ceil_div(spatial, panel)},

@@ -32,6 +32,10 @@ if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND EXISTS "/proc/cpuinfo")
             string(APPEND VECOPS_MAP_ARM_Native "+${_FEAT}")
         endif()
     endforeach()
+    string(FIND "${_FEAT_LINE}" " smef64f64 " _SME_F64_POS)
+    if(NOT _SME_F64_POS EQUAL -1)
+        string(APPEND VECOPS_MAP_ARM_Native "+sme-f64f64")
+    endif()
 
     include(CheckCXXCompilerFlag)
     check_cxx_compiler_flag(

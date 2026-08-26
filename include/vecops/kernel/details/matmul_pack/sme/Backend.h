@@ -51,6 +51,7 @@ struct Backend<
 
   template <typename InputSpec, typename OutputSpec>
   static constexpr bool eligible =
+      sizeof(typename InputSpec::ComputeType) <= 4 &&
       std::same_as<typename InputSpec::TransformType, tensor::NoTransform> &&
       std::same_as<typename InputSpec::MemoryElement,
                    typename InputSpec::ComputeType> &&
