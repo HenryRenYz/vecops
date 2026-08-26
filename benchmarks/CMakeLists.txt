@@ -85,6 +85,14 @@ function(add_multiarch_benchmark NAME)
            NOT CODE STREQUAL "Scalar")
             target_compile_options(${TARGET_NAME} PRIVATE -Wno-psabi)
         endif()
+        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
+           CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND
+           MARCH MATCHES "(^|\\+)sme($|\\+)")
+            target_compile_options(${TARGET_NAME} PRIVATE
+                -Wno-aarch64-sme-attributes)
+            target_link_options(${TARGET_NAME} PRIVATE
+                -rtlib=compiler-rt -unwindlib=libgcc)
+        endif()
         target_compile_definitions(${TARGET_NAME} PRIVATE
             VECOPS_BENCH_ARCH_CODE="${CODE}"
             VECOPS_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
@@ -108,6 +116,16 @@ add_multiarch_benchmark(SoftmaxBench
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/SoftmaxBench.cpp
     ARCH Native Scalar
 )
+
+if(VECOPS_ARCH_FAMILY STREQUAL "x86")
+    add_multiarch_benchmark(MatmulPackAMXBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulPackAMXBench.cpp
+        ARCH Native)
+elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
+    add_multiarch_benchmark(MatmulPackSMEBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulPackSMEBench.cpp
+        ARCH Native)
+endif()
 
 option(VECOPS_ENABLE_ONEDNN_BENCHMARKS
        "Build LayerNorm and Softmax benchmarks against oneDNN" OFF)

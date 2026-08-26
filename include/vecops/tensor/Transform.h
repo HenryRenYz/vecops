@@ -87,6 +87,11 @@
  * - Transforms are deterministic, side-effect-free functions. DataAccess may
  *   call them during materialization or split one logical request into
  *   multiple legal internal vector calls.
+ * - A transform lambda that may be fused into an SME streaming kernel must be
+ *   declared with `VECOPS_KERNEL_LAMBDA`. This makes the callable inherit the
+ *   caller's streaming mode and forces inlining; it does not start or stop
+ *   streaming mode. Ordinary helper functions use
+ *   `VECOPS_KERNEL_FUNCTION(complete_function_declaration)`.
  */
 
 namespace vecops::tensor {
@@ -351,7 +356,9 @@ struct LambdaVecTransform : public VecTransform<EOut, EIn, Elementwise> {
              std::same_as<vec::ElementOf<To>, EOut> &&
              (Base::min_output_pow2 <= vec::scale_power_v<To>) &&
              (vec::scale_power_v<To> <= Base::max_output_pow2)
-  vec::Vec<To> operator()(To t, vec::Vec<vec::Rebind<EIn, To>> v_in, Coords... coords) const {
+  VECOPS_KERNEL_FUNCTION(vec::Vec<To> operator()(
+      To t, vec::Vec<vec::Rebind<EIn, To>> v_in,
+      Coords... coords) const) {
     constexpr int pow2 = vec::scale_power_v<To>;
     if constexpr (Elementwise) {
       ((void) coords, ...);
@@ -365,7 +372,8 @@ private:
   Fn _fn;
 
   template <typename To, int Pow2>
-  vec::Vec<To> call_elementwise(To t, vec::Vec<vec::Rebind<EIn, To>> v_in) const {
+  VECOPS_ALWAYS_INLINE vec::Vec<To> call_elementwise(
+      To t, vec::Vec<vec::Rebind<EIn, To>> v_in) const {
     if constexpr (details::CanCallElementwise<To, Fn, EIn>::value) {
       return _fn(t, v_in);
     } else {
@@ -374,7 +382,9 @@ private:
   }
 
   template <typename To, int Pow2, typename... Coords>
-  vec::Vec<To> call_coordinate(To t, vec::Vec<vec::Rebind<EIn, To>> v_in, Coords... coords) const {
+  VECOPS_ALWAYS_INLINE vec::Vec<To> call_coordinate(
+      To t, vec::Vec<vec::Rebind<EIn, To>> v_in,
+      Coords... coords) const {
     if constexpr (details::CanCallCoordinate<To, Fn, EIn, Coords...>::value) {
       return _fn(t, v_in, coords...);
     } else {
@@ -383,7 +393,8 @@ private:
   }
 
   template <typename To, int TryPow2>
-  vec::Vec<To> try_upward_elementwise(To t, vec::Vec<vec::Rebind<EIn, To>> v_in) const {
+  VECOPS_ALWAYS_INLINE vec::Vec<To> try_upward_elementwise(
+      To t, vec::Vec<vec::Rebind<EIn, To>> v_in) const {
     if constexpr (TryPow2 > Base::max_input_pow2) {
       return try_downward_elementwise<To>(t, v_in);
     } else {
@@ -401,7 +412,7 @@ private:
   }
 
   template <typename To, int TryPow2, typename... Coords>
-  vec::Vec<To> try_upward_coordinate(
+  VECOPS_ALWAYS_INLINE vec::Vec<To> try_upward_coordinate(
       To t,
       vec::Vec<vec::Rebind<EIn, To>> v_in,
       Coords... coords) const {
@@ -422,7 +433,8 @@ private:
   }
 
   template <typename To>
-  vec::Vec<To> try_downward_elementwise(To t, vec::Vec<vec::Rebind<EIn, To>> v_in) const {
+  VECOPS_ALWAYS_INLINE vec::Vec<To> try_downward_elementwise(
+      To t, vec::Vec<vec::Rebind<EIn, To>> v_in) const {
     constexpr int pow2 = vec::scale_power_v<To>;
 
     if constexpr (details::CanCallElementwise<To, Fn, EIn>::value) {
@@ -441,7 +453,7 @@ private:
   }
 
   template <typename To, typename... Coords>
-  vec::Vec<To> try_downward_coordinate(
+  VECOPS_ALWAYS_INLINE vec::Vec<To> try_downward_coordinate(
       To t,
       vec::Vec<vec::Rebind<EIn, To>> v_in,
       Coords... coords) const {
@@ -486,7 +498,8 @@ struct ZeroVecTransform : public VecTransform<EOut, EIn, true> {
              std::same_as<vec::ElementOf<To>, EOut> &&
              (Base::min_output_pow2 <= vec::scale_power_v<To>) &&
              (vec::scale_power_v<To> <= Base::max_output_pow2)
-  vec::Vec<To> operator()(To t, Vi, Coords... coords) const {
+  VECOPS_KERNEL_FUNCTION(vec::Vec<To> operator()(
+      To t, Vi, Coords... coords) const) {
     ((void) coords, ...);
     return vec::zeros(t);
   }
@@ -510,7 +523,9 @@ struct IdentityVecTransform : public VecTransform<EOut, EIn, true> {
              std::same_as<vec::ElementOf<To>, EOut> &&
              (Base::min_output_pow2 <= vec::scale_power_v<To>) &&
              (vec::scale_power_v<To> <= Base::max_output_pow2)
-  vec::Vec<To> operator()(To t, vec::Vec<vec::Rebind<EIn, To>> v_in, Coords... coords) const {
+  VECOPS_KERNEL_FUNCTION(vec::Vec<To> operator()(
+      To t, vec::Vec<vec::Rebind<EIn, To>> v_in,
+      Coords... coords) const) {
     ((void) coords, ...);
     return v_in;
   }

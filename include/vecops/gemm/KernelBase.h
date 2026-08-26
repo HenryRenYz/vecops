@@ -5,12 +5,18 @@
 #ifndef VECOPS_KERNELBASE_H
 #define VECOPS_KERNELBASE_H
 
+#include <concepts>
+#include <type_traits>
+
 #include "vecops/CoreTypes.h"
 #include "vecops/Meta.h"
 #include "vecops/execution/ExecutionSession.h"
 #include "vecops/tensor/Layout.h"
 
 namespace vecops::gemm {
+
+/** Matrix operand whose logical raw layout is A=[M,K] or B=[N,K]. */
+enum class Operand { A, B };
 
 /**
  * 微内核种类，表示实现内核的硬件种类，比如SME, AMX这种。实际类型，不是模板，因此没有参数。
@@ -29,71 +35,19 @@ struct KernelKind {
  * 命名方式，直接定义了底层实现和累加器类型。如AMX_BF16F32, AMX_I8U8I32, SME_F16F32, SME_F64F64
  * 这种命名方式。实际类型，不是模板，因此没有参数。
  */
-struct Atom {
-  using KernelKind = gemm::KernelKind;
-  /**
-   * 硬件累加器M N分块大小，可能是常量或者运行时量（如SME）
-   * 可能不是constexpr
-   */
-  static constexpr auto M_R = meta::cint<16>;
-  static constexpr auto N_R = meta::cint<16>;
-  /**
-   * 单条指令 K 轴长度 (SME: 1, AMX BF16: 32, AMX INT8: 64)。
-   */
-  static constexpr auto K_R = meta::cint<16>;
-
-  /**
-   * 内核期望的A, B, C元素类型。如果内核传入的实际A, B, C类型和此保持一致则不需要类型转换。
-   */
-  using TA = float32_t;
-  using TB = float32_t;
-  using TC = float32_t;
-
-  /**
-   * 累加器类型。一般和TC保持一致，但不绝对。
-   */
-  using TAcc = float32_t;
-
-  /**
-   * 打包布局为ALayout的A后的打包布局。
-   * 输入类型ALayout: 必须为Shape<xM, xK>, Stride<*, *>形式，其中xM xK任意。
-   * 返回布局为Shape<ceil(xM/M_R), ceil(xK/K_R), ...>, Stride<Dynamic<64> | Int<*>, Dynamic<64> | Int<*>>的特化。
-   * 注：可能并不总是连续的，在一些输入下为了防止cache thrashing可能会特意留意些空隙。
-   */
-  template <tensor::LayoutLike TLayout>
-  using APackedLayout = TLayout;
-
-  /**
-   * ALayout是否为打包布局，即判断其是否为APackedLayout<ALayout>的宽松类型：
-   * Shape<*, *, ...>, Stride<Dynamic<64> | Int<*>, Dynamic<64> | Int<*>>。
-   */
-  template <tensor::LayoutLike TLayout>
-  static constexpr bool is_a_packed_layout = true;
-
-  template <
-      typename TSrcA, typename SrcALayout, typename SrcAPackedLayout, typename Prologue>
-  void pack_A(const TSrcA *src, SrcALayout src_layout, TA *dst, SrcAPackedLayout dst_layout, const Prologue &prologue);
-
-
-  template <tensor::LayoutLike TLayout>
-  using BPackedLayout = TLayout;
-
-  template <tensor::LayoutLike TLayout>
-  static constexpr bool is_b_packed_layout = true;
-
-  template <
-      typename TSrcB, typename SrcBLayout, typename SrcBPackedLayout, typename Prologue>
-  void pack_B(const TSrcB *src, SrcBLayout src_layout, TB *dst, SrcBPackedLayout dst_layout, const Prologue &prologue);
-
-  /**
-   * 用于不打包时 Kernel 内部的向量加载优化路径选择
-   *   - 0: 偏好第一维（M 或 N）连续 → column-major
-   *   - 1: 偏好第二维（K）连续 → row-major
-   */
-  static constexpr int A_prefers_contiguous_dim = 1;
-  static constexpr int B_prefers_contiguous_dim = 1;
-
-};
+template <typename T>
+concept Atom = requires {
+  typename T::KernelKind;
+  typename T::TA;
+  typename T::TB;
+  typename T::TC;
+  typename T::TAcc;
+  typename T::template Packing<Operand::A>;
+  typename T::template Packing<Operand::B>;
+  T::M_R;
+  T::N_R;
+  T::K_R;
+} && std::same_as<T, std::remove_cvref_t<T>>;
 
 enum MaskMode {
   Masked, Unmasked
@@ -101,12 +55,12 @@ enum MaskMode {
 
 /**
  * 一个K累加循环的实现。模板类型，但每个特化需要手动实现。
- * @tparam Atom Kernel的Atom
+ * @tparam Atom_ Kernel的Atom
  * @tparam nM_R, nN_R 一个内核分块M N方向各包含几个累加器分块。大于0
  * @tparam M_mask, N_mask 定义M N方向是否开启运行时mask
  */
 template <
-    typename Atom_,
+    Atom Atom_,
     int nM_R_, int nN_R_,
     MaskMode M_mask_, MaskMode N_mask_>
 struct Kernel {
@@ -132,11 +86,11 @@ struct Kernel {
    * 执行K累加循环核心函数。
    * @tparam TSrcA, TSrcB, TSrcDstC A B C类型。
    * @tparam SrcALayout 输入A的布局，必须为非打包布局Shape<xM, xK>, Stride<*, *>或者打包布局，
-   *                    即满足Atom::is_a_packed_layout<SrcALayout>。其中xM, xN当前分块大小，
+   *                    即满足gemm::is_packed_layout<Atom, Operand::A, SrcALayout>()。其中xM, xN当前分块大小，
    *                    不大于内核分块大小M_R, N_R，xK为K轴累加长度，任意，下同。
    * @tparam APrologue 用于非打包A的前处理，A打包时必须为identity。一般使用identity。
    * @tparam SrcBLayout 输入B的布局，必须为非打包布局Shape<xN, xK>, Stride<*, *>或者打包布局，
-   *                    即满足Atom::is_b_packed_layout<SrcBLayout>。
+   *                    即满足gemm::is_packed_layout<Atom, Operand::B, SrcBLayout>()。
    * @tparam BPrologue 用于非打包B的前处理，B打包时必须为identity。一般使用identity。
    * @tparam SrcDstCLayout 输入C的布局，必须为非打包布局Shape<xM, xN>, Stride<*, *>。
    * @tparam CPrologue 用于非ld_acc时的C的前处理，一般使用zeros（零初始化）。

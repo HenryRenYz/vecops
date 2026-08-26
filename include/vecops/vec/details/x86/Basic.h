@@ -343,8 +343,8 @@ struct NativeWordImpl<X86Backend, MaskWhileLtOp> {
     static_assert(Index >= 0 && Index < Traits::word_count);
     using Raw = typename Traits::RawMask;
     const nint_t base = Index * Traits::word_lanes;
-    const nint_t count = std::clamp<nint_t>(
-        b - a - base, 0, valid_word_lanes<Index, Tag>());
+    const nint_t count = while_prefix_count<false>(
+        a, b, base, valid_word_lanes<Index, Tag>());
     return NativeWordMask<Tag>{x86_mask_prefix<ElementOf<Tag>, Raw>(count)};
   }
 };
@@ -359,7 +359,7 @@ struct NativeWordImpl<X86Backend, MaskWhileGeOp> {
     using Raw = typename Traits::RawMask;
     const nint_t base = Index * Traits::word_lanes;
     const nint_t valid = valid_word_lanes<Index, Tag>();
-    const nint_t first = std::clamp<nint_t>(b - a - base, 0, valid);
+    const nint_t first = while_prefix_count<false>(a, b, base, valid);
     const Raw active = x86_mask_prefix<ElementOf<Tag>, Raw>(valid);
     const Raw before = x86_mask_prefix<ElementOf<Tag>, Raw>(first);
     return NativeWordMask<Tag>{x86_mask_andnot(before, active)};

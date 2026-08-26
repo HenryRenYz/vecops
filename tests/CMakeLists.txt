@@ -119,5 +119,18 @@ vecops_add_test(
     FILES ops/TransposeTest.cpp
     FOLDER ops/transpose
     ARCH ${VECOPS_TRANSPOSE_ARCH})
+if(VECOPS_ARCH_FAMILY STREQUAL "x86")
+    vecops_add_test(
+        NAME MatmulPackAMXTest
+        FILES ops/MatmulPackAMXTest.cpp TestUtils.cpp
+        FOLDER ops/matmul_pack
+        ARCH Scalar AVX512 Native)
+elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
+    vecops_add_test(
+        NAME MatmulPackSMETest
+        FILES ops/MatmulPackSMETest.cpp TestUtils.cpp
+        FOLDER ops/matmul_pack
+        ARCH Native)
+endif()
 vecops_add_test(NAME VecRequestTest FILES vec/RequestTest.cpp
     FOLDER vec/request ARCH ${VEC_BASE_ARCH} LABELS vec)

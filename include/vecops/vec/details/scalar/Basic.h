@@ -61,8 +61,10 @@ VECOPS_ALWAYS_INLINE Mask<Tag> scalar_while_mask(
     nint_t a, nint_t b) {
   using Traits = RepresentationTraits<ScalarBackend, Tag>;
   Mask<Tag> result{};
+  const nint_t prefix = while_prefix_count<false>(
+      a, b, 0, Traits::logical_lanes);
   for (nint_t index = 0; index < Traits::logical_lanes; ++index) {
-    const bool active = Less ? (a + index < b) : (a + index >= b);
+    const bool active = Less ? index < prefix : index >= prefix;
     const nint_t word = index / Traits::word_lanes;
     const nint_t lane = index % Traits::word_lanes;
     if constexpr (Traits::word_count == 1) {

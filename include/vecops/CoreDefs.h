@@ -53,6 +53,40 @@
 #endif
 
 /**
+ * Marks a small VecOps kernel callable as inheriting the caller's ARM
+ * streaming mode and forces it to inline.
+ *
+ * The two forms differ syntactically because GCC requires always_inline before
+ * a function definition while ACLE requires __arm_streaming_compatible after
+ * the function declarator:
+ *
+ *   VECOPS_KERNEL_FUNCTION(int helper(int x)) { return x + 1; }
+ *   auto helper = [](int x) VECOPS_KERNEL_LAMBDA { return x + 1; };
+ *
+ * These macros never enter or leave streaming mode. On non-SME targets they
+ * retain only the force-inline behavior.
+ */
+#if defined(COMPILER_GCC) || defined(COMPILER_CLANG)
+#if defined(HAS_SME)
+#define VECOPS_STREAMING_COMPATIBLE_FUNCTION \
+  __arm_streaming_compatible
+#define VECOPS_STREAMING_COMPATIBLE_LAMBDA \
+  __attribute__((always_inline)) __arm_streaming_compatible
+#else
+#define VECOPS_STREAMING_COMPATIBLE_FUNCTION
+#define VECOPS_STREAMING_COMPATIBLE_LAMBDA \
+  __attribute__((always_inline))
+#endif
+#else
+#define VECOPS_STREAMING_COMPATIBLE_FUNCTION
+#define VECOPS_STREAMING_COMPATIBLE_LAMBDA
+#endif
+
+#define VECOPS_KERNEL_FUNCTION(...) \
+  VECOPS_ALWAYS_INLINE __VA_ARGS__ VECOPS_STREAMING_COMPATIBLE_FUNCTION
+#define VECOPS_KERNEL_LAMBDA VECOPS_STREAMING_COMPATIBLE_LAMBDA
+
+/**
  * Pretty function name
  */
 #if defined(COMPILER_GCC) || defined(COMPILER_CLANG)

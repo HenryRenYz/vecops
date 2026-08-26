@@ -415,8 +415,8 @@ struct NativeWordImpl<SVEBackend, MaskWhileLtOp> {
     using Traits = RepresentationTraits<SVEBackend, Tag>;
     static_assert(Index >= 0 && Index < Traits::word_count);
     const nint_t base = Index * native_word_size(tag);
-    const nint_t count = std::clamp<nint_t>(
-        b - a - base, 0, sve_valid_word_lanes<Index>(tag));
+    const nint_t count = while_prefix_count<false>(
+        a, b, base, sve_valid_word_lanes<Index>(tag));
     return sve_prefix_predicate<ElementOf<Tag>>(count);
   }
 };
@@ -430,7 +430,7 @@ struct NativeWordImpl<SVEBackend, MaskWhileGeOp> {
     static_assert(Index >= 0 && Index < Traits::word_count);
     const nint_t base = Index * native_word_size(tag);
     const nint_t valid = sve_valid_word_lanes<Index>(tag);
-    const nint_t first = std::clamp<nint_t>(b - a - base, 0, valid);
+    const nint_t first = while_prefix_count<false>(a, b, base, valid);
     const auto active = sve_prefix_predicate<ElementOf<Tag>>(valid);
     const auto before = sve_prefix_predicate<ElementOf<Tag>>(first);
     return svbic_b_z(active, active, before);

@@ -74,11 +74,11 @@ VECOPS_ALWAYS_INLINE svbfloat16_t sve_bfloat16_binary(
           dispatch_dependent_false<Op>,                                  \
           "unsupported SVE bfloat16 arithmetic operation");            \
     }
-  const auto low = [&]() {
+  const auto low = [&]() VECOPS_KERNEL_LAMBDA {
     VECOPS_VEC_SVE_BF16_BINARY(
         mask_low, a_low, b_low);
   }();
-  const auto high = [&]() {
+  const auto high = [&]() VECOPS_KERNEL_LAMBDA {
     VECOPS_VEC_SVE_BF16_BINARY(
         mask_high, a_high, b_high);
   }();
@@ -123,7 +123,7 @@ struct SVEArithmeticWordImpl {
     const auto raw_a = sve_basic_raw_word(a);
     const auto raw_b = sve_basic_raw_word(b);
     const auto raw_inactive = sve_basic_raw_word(inactive);
-    const auto raw_result = [&]() {
+    const auto raw_result = [&]() VECOPS_KERNEL_LAMBDA {
       if constexpr (std::same_as<T, bfloat16_t>) {
         return sve_bfloat16_binary<Op>(
             raw_a, raw_b, mask, raw_inactive, policy);
@@ -243,7 +243,7 @@ struct SVEUnaryArithmeticWordImpl {
     static_assert(Index >= 0 && Index < Traits::word_count);
     const auto raw_value = sve_basic_raw_word(value);
     const auto raw_inactive = sve_basic_raw_word(inactive);
-    const auto raw_result = [&]() {
+    const auto raw_result = [&]() VECOPS_KERNEL_LAMBDA {
       if constexpr (std::same_as<T, bfloat16_t>) {
         const auto bits = svreinterpret_u16_bf16(raw_value);
         const auto computed = sve_bfloat16_sign_bits<
@@ -333,7 +333,7 @@ struct SVEFloatingUnaryWordImpl {
     static_assert(Index >= 0 && Index < num_words(tag));
     const auto raw_value = sve_basic_raw_word(value);
     const auto raw_inactive = sve_basic_raw_word(inactive);
-    const auto result = [&]() {
+    const auto result = [&]() VECOPS_KERNEL_LAMBDA {
       if constexpr (std::same_as<T, bfloat16_t>) {
         const auto low = sve_bf16_to_f32_lo(raw_value);
         const auto high = sve_bf16_to_f32_hi(raw_value);
@@ -344,7 +344,8 @@ struct SVEFloatingUnaryWordImpl {
         const auto mask_low = svunpklo_b(mask);
         const auto mask_high = svunpkhi_b(mask);
         const auto compute = [](
-            svfloat32_t input, svfloat32_t fallback, svbool_t active) {
+            svfloat32_t input, svfloat32_t fallback, svbool_t active)
+            VECOPS_KERNEL_LAMBDA {
           if constexpr (std::same_as<Op, SqrtOp>)
             return svsqrt_f32_m(fallback, active, input);
           else if constexpr (std::same_as<Op, RcpOp>)
@@ -475,7 +476,7 @@ struct SVEFmaWordImpl {
       const auto product =
           NativeWordImpl<SVEBackend, MulOp>::template call<Index>(
               MulOp{}, tag, a, b);
-      const auto computed = [&]() {
+      const auto computed = [&]() VECOPS_KERNEL_LAMBDA {
         if constexpr (std::same_as<Op, FmaddOp>)
           return NativeWordImpl<SVEBackend, AddOp>::template call<Index>(
               AddOp{}, tag, product, c);

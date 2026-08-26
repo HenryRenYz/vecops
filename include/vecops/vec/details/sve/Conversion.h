@@ -999,7 +999,7 @@ struct NativeImpl<SVEBackend, ConvertOp, ToTag> {
         option_count_v<IsUnorderedOption, Options...> == 1;
     constexpr bool wraps = option_count_v<IsWrapOption, Options...> == 1;
     constexpr bool masked = option_count_v<IsMaskedOption, Options...> == 1;
-    auto converted = [&] {
+    auto converted = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (lane_layout) {
         return sve_convert_lane_native(
             to, from, value, std::forward<Options>(options)...);

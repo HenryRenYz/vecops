@@ -175,6 +175,21 @@ void verify_mask_construction_and_logic(Tag tag) {
     EXPECT_FALSE(vec::get(tag, ge_none, lane));
   }
 
+  const auto min = std::numeric_limits<vecops::nint_t>::min();
+  const auto max = std::numeric_limits<vecops::nint_t>::max();
+  const auto lt_extreme = vec::mwhilelt(tag, min, max);
+  const auto ge_extreme = vec::mwhilege(tag, min, max);
+  const auto le_min = vec::mwhilele(tag, min, min);
+  const auto gt_max = vec::mwhilegt(tag, max, max);
+  const auto lt_near_max = vec::mwhilelt(tag, max - 1, max);
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    EXPECT_TRUE(vec::get(tag, lt_extreme, lane));
+    EXPECT_FALSE(vec::get(tag, ge_extreme, lane));
+    EXPECT_EQ(vec::get(tag, le_min, lane), lane == 0);
+    EXPECT_EQ(vec::get(tag, gt_max, lane), lane != 0);
+    EXPECT_EQ(vec::get(tag, lt_near_max, lane), lane == 0);
+  }
+
   auto lhs = vec::mfalse(tag);
   auto rhs = vec::mfalse(tag);
   for (vecops::nint_t lane = 0; lane < lanes; ++lane) {

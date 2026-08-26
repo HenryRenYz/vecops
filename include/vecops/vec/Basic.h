@@ -10,6 +10,43 @@
 
 namespace vecops::vec {
 
+namespace details {
+
+/** Number of leading lanes satisfying a+i < b, or a+i <= b. */
+template <bool Inclusive>
+VECOPS_ALWAYS_INLINE constexpr nint_t while_prefix_count(
+    nint_t a, nint_t b, nint_t lane_base, nint_t valid_lanes) {
+  using U = std::make_unsigned_t<nint_t>;
+  if (valid_lanes <= 0 || lane_base < 0) return 0;
+  if constexpr (Inclusive) {
+    if (a > b) return 0;
+  } else {
+    if (a >= b) return 0;
+  }
+
+  // The signed comparison above proves that the mathematical distance is
+  // nonnegative. Unsigned subtraction then represents that distance without
+  // overflowing even for [nint_t::min, nint_t::max].
+  const U distance = static_cast<U>(b) - static_cast<U>(a);
+  const U base = static_cast<U>(lane_base);
+  const U valid = static_cast<U>(valid_lanes);
+  if constexpr (Inclusive) {
+    if (distance < base) return 0;
+    const U after_base = distance - base;
+    return after_base >= valid - 1
+        ? valid_lanes
+        : static_cast<nint_t>(after_base + 1);
+  } else {
+    if (distance <= base) return 0;
+    const U after_base = distance - base;
+    return after_base >= valid
+        ? valid_lanes
+        : static_cast<nint_t>(after_base);
+  }
+}
+
+} // namespace details
+
 /* **************************************************************************** */
 //    Initialization: fill, mfill, zeros, mtrue, mfalse                    //
 /* **************************************************************************** */
@@ -375,32 +412,34 @@ struct MaskFalseOp {
 struct MaskWhileLeOp {
   /**
    * Returns mask i = (a + i <= b) for 0 <= i < size(tag).
-   * b == nint_t::max is handled as an always-true overflow guard.
+   * The comparison uses mathematical integer addition and is overflow-safe
+   * for every nint_t a and b.
    * @see mwhilelt for strict less-than.
    * @see mwhilege for greater-or-equal.
    */
   template <VectorTag Tag>
   VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
       Tag tag, nint_t a, nint_t b) const {
-    return b == std::numeric_limits<nint_t>::max()
-        ? mfill(tag, true)
-        : mwhilelt(tag, a, b + 1);
+    const nint_t count = details::while_prefix_count<true>(
+        a, b, 0, size(tag));
+    return mwhilelt(tag, 0, count);
   }
 };
 
 struct MaskWhileGtOp {
   /**
    * Returns mask i = (a + i > b) for 0 <= i < size(tag).
-   * b == nint_t::max is handled as an always-false overflow guard.
+   * The comparison uses mathematical integer addition and is overflow-safe
+   * for every nint_t a and b.
    * @see mwhilege for greater-or-equal.
    * @see mwhilelt for strict less-than.
    */
   template <VectorTag Tag>
   VECOPS_ALWAYS_INLINE Mask<Tag> operator()(
       Tag tag, nint_t a, nint_t b) const {
-    return b == std::numeric_limits<nint_t>::max()
-        ? mfill(tag, false)
-        : mwhilege(tag, a, b + 1);
+    const nint_t count = details::while_prefix_count<true>(
+        a, b, 0, size(tag));
+    return mwhilege(tag, 0, count);
   }
 };
 
