@@ -1,3 +1,5 @@
+// @vecops-target-shards: 4
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -467,23 +469,53 @@ void register_dtype() {
 #endif
 }
 
+#if defined(VECOPS_BENCH_USE_ONEDNN) && \
+    !defined(VECOPS_TARGET_SHARD_ACTIVE)
 void register_layernorm_benchmarks() {
-#ifdef VECOPS_BENCH_USE_ONEDNN
   register_dtype<float32_t>();
-#else
-  register_dtype<float32_t>();
-  register_dtype<float64_t>();
-  register_dtype<vecops::float16_t>();
-#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-  register_dtype<vecops::bfloat16_t>();
-#endif
-#endif
 }
+#endif
 
 } // namespace
 
+#if defined(VECOPS_TARGET_SHARD_ACTIVE)
+
+static_assert(VECOPS_TARGET_SHARD_COUNT == 4);
+
+#if VECOPS_TARGET_SHARD_INDEX == 0
+void register_layernorm_benchmarks_fp32() { register_dtype<float32_t>(); }
+#elif VECOPS_TARGET_SHARD_INDEX == 1
+void register_layernorm_benchmarks_fp64() { register_dtype<float64_t>(); }
+#elif VECOPS_TARGET_SHARD_INDEX == 2
+void register_layernorm_benchmarks_fp16() {
+  register_dtype<vecops::float16_t>();
+}
+#elif VECOPS_TARGET_SHARD_INDEX == 3
+void register_layernorm_benchmarks_bf16() {
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
+  register_dtype<vecops::bfloat16_t>();
+#endif
+}
+#endif
+
+#else
+
+#if !defined(VECOPS_BENCH_USE_ONEDNN)
+void register_layernorm_benchmarks_fp32();
+void register_layernorm_benchmarks_fp64();
+void register_layernorm_benchmarks_fp16();
+void register_layernorm_benchmarks_bf16();
+#endif
+
 int main(int argc, char** argv) {
+#if defined(VECOPS_BENCH_USE_ONEDNN)
   register_layernorm_benchmarks();
+#else
+  register_layernorm_benchmarks_fp32();
+  register_layernorm_benchmarks_fp64();
+  register_layernorm_benchmarks_fp16();
+  register_layernorm_benchmarks_bf16();
+#endif
 
   const auto default_csv = vecops::bench::default_result_path(
       VECOPS_SOURCE_DIR, "layernorm", VECOPS_BENCH_ARCH_CODE, "csv");
@@ -503,3 +535,5 @@ int main(int argc, char** argv) {
   vecops::bench::print_default_output_path(argc, argv, default_csv);
   return 0;
 }
+
+#endif

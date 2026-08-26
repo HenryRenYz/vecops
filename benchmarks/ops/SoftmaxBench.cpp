@@ -1,3 +1,5 @@
+// @vecops-target-shards: 12
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -573,6 +575,9 @@ void register_dtype() {
 #endif
 }
 
+#if (defined(VECOPS_BENCH_QUICK_FP16) || \
+     defined(VECOPS_BENCH_USE_ONEDNN)) && \
+    !defined(VECOPS_TARGET_SHARD_ACTIVE)
 void register_softmax_benchmarks() {
 #ifdef VECOPS_BENCH_QUICK_FP16
   register_mode_dtype<vec::Accuracy::Strict, vecops::float16_t>();
@@ -580,20 +585,67 @@ void register_softmax_benchmarks() {
   register_dtype<vecops::float32_t>();
   register_dtype<vecops::float16_t>();
   register_dtype<vecops::bfloat16_t>();
-#else
-  register_dtype<vecops::float32_t>();
-  register_dtype<vecops::float64_t>();
-  register_dtype<vecops::float16_t>();
-#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
-  register_dtype<vecops::bfloat16_t>();
-#endif
 #endif
 }
+#endif
 
 } // namespace
 
+#if defined(VECOPS_TARGET_SHARD_ACTIVE)
+
+static_assert(VECOPS_TARGET_SHARD_COUNT == 12);
+
+template <int Shard>
+void register_softmax_benchmark_shard() {
+  static_assert(Shard == VECOPS_TARGET_SHARD_INDEX);
+  constexpr auto mode = Shard < 4
+      ? vec::Accuracy::Strict
+      : Shard < 8 ? vec::Accuracy::Fast : vec::Accuracy::Estimate;
+  constexpr int dtype = Shard % 4;
+  using T = std::conditional_t<
+      dtype == 0, float32_t,
+      std::conditional_t<
+          dtype == 1, float64_t,
+          std::conditional_t<
+              dtype == 2, vecops::float16_t, vecops::bfloat16_t>>>;
+  if constexpr (dtype != 3) {
+    register_mode_dtype<mode, T>();
+  } else {
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
+    register_mode_dtype<mode, T>();
+#endif
+  }
+}
+
+template void register_softmax_benchmark_shard<
+    VECOPS_TARGET_SHARD_INDEX>();
+
+#else
+
+#if !defined(VECOPS_BENCH_QUICK_FP16) && \
+    !defined(VECOPS_BENCH_USE_ONEDNN)
+template <int Shard>
+void register_softmax_benchmark_shard();
+#endif
+
 int main(int argc, char** argv) {
+#if defined(VECOPS_BENCH_QUICK_FP16) || \
+    defined(VECOPS_BENCH_USE_ONEDNN)
   register_softmax_benchmarks();
+#else
+  register_softmax_benchmark_shard<0>();
+  register_softmax_benchmark_shard<1>();
+  register_softmax_benchmark_shard<2>();
+  register_softmax_benchmark_shard<3>();
+  register_softmax_benchmark_shard<4>();
+  register_softmax_benchmark_shard<5>();
+  register_softmax_benchmark_shard<6>();
+  register_softmax_benchmark_shard<7>();
+  register_softmax_benchmark_shard<8>();
+  register_softmax_benchmark_shard<9>();
+  register_softmax_benchmark_shard<10>();
+  register_softmax_benchmark_shard<11>();
+#endif
 
   const auto default_csv = vecops::bench::default_result_path(
       VECOPS_SOURCE_DIR, "softmax", VECOPS_BENCH_ARCH_CODE, "csv");
@@ -613,3 +665,5 @@ int main(int argc, char** argv) {
   vecops::bench::print_default_output_path(argc, argv, default_csv);
   return 0;
 }
+
+#endif

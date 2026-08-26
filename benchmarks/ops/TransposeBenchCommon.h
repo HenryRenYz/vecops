@@ -426,7 +426,6 @@ void register_int8_conversion_benchmarks();
 void register_fp16_conversion_benchmarks();
 void register_fp32_conversion_benchmarks();
 void register_fp64_conversion_benchmarks();
-void register_conversion_benchmarks();
 void register_compare_int8_benchmarks();
 void register_compare_fp16_benchmarks();
 void register_compare_bf16_benchmarks();

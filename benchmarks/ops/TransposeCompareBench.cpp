@@ -1,3 +1,5 @@
+// @vecops-target-shards: 5
+
 #include <cstddef>
 #include <vector>
 
@@ -9,6 +11,40 @@
 #ifndef VECOPS_SOURCE_DIR
 #define VECOPS_SOURCE_DIR "."
 #endif
+
+#if defined(VECOPS_TARGET_SHARD_ACTIVE)
+
+static_assert(VECOPS_TARGET_SHARD_COUNT == 5);
+
+namespace vecops::bench::transpose {
+
+#if VECOPS_TARGET_SHARD_INDEX == 0
+void register_compare_int8_benchmarks() {
+  register_compare_same_dtype<int8_t>();
+}
+#elif VECOPS_TARGET_SHARD_INDEX == 1
+void register_compare_fp16_benchmarks() {
+  register_compare_same_dtype<vecops::float16_t>();
+}
+#elif VECOPS_TARGET_SHARD_INDEX == 2
+void register_compare_bf16_benchmarks() {
+#if defined(HAS_BFLOAT16) || defined(ARCH_X86_FAMILY)
+  register_compare_same_dtype<vecops::bfloat16_t>();
+#endif
+}
+#elif VECOPS_TARGET_SHARD_INDEX == 3
+void register_compare_fp32_benchmarks() {
+  register_compare_same_dtype<vecops::float32_t>();
+}
+#elif VECOPS_TARGET_SHARD_INDEX == 4
+void register_compare_fp64_benchmarks() {
+  register_compare_same_dtype<vecops::float64_t>();
+}
+#endif
+
+} // namespace vecops::bench::transpose
+
+#else
 
 int main(int argc, char** argv) {
   using namespace vecops::bench::transpose;
@@ -35,3 +71,5 @@ int main(int argc, char** argv) {
   vecops::bench::print_default_output_path(argc, argv, default_csv);
   return 0;
 }
+
+#endif
