@@ -15,7 +15,9 @@ set(VECOPS_GITHUB_ENDPOINT "https://github.com" CACHE STRING "Set endpoint addre
 option(VECOPS_PRESERVE_SUBNORMALS
        "Preserve representable subnormal results in strict vector operations" OFF)
 set(VECOPS_FIXED_SVE_BITS "" CACHE STRING
-    "SVE vector width in bits for NativeFixedSVE tests; empty detects the host maximum")
+    "SVE vector width in bits for fixed-SVE targets; empty detects the host maximum")
+
+include(cmake/VecopsMultiarchTargets.cmake)
 
 # -------------------------------- Dependencies --------------------------------
 include(FetchContent)

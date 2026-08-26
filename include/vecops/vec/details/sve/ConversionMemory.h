@@ -60,7 +60,7 @@ VECOPS_ALWAYS_INLINE auto sve_load_extend_integer(
       sve_is_integer_element_v<To> && sve_is_integer_element_v<From> &&
       sizeof(From) < sizeof(To));
   using Wide = SVEInteger<sizeof(To), std::is_signed_v<From>>;
-  auto widened = [&] {
+  auto widened = [&]() VECOPS_INLINE_LAMBDA {
     if constexpr (std::same_as<From, int8_t> && sizeof(To) == 2)
       return svld1sb_s16(active, pointer);
     else if constexpr (std::same_as<From, int8_t> && sizeof(To) == 4)
@@ -213,7 +213,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_indexed_integer(
     const auto offsets = sve_scale_indexed_offsets<Scale>(active, raw_indices);
     const auto wide = sve_load_extend_integer_indexed_raw<Wide, From, I>(
         active, pointer, offsets, temporality);
-    const auto converted = [&] {
+    const auto converted = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (sizeof(To) == sizeof(Wide))
         return sve_reinterpret_integer<To, Wide>(wide);
       else if constexpr (
@@ -256,7 +256,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_indexed_integer_unmasked(
     const auto offsets = sve_scale_indexed_offsets<Scale>(active, raw_indices);
     const auto wide = sve_load_extend_integer_indexed_raw<Wide, From, I>(
         active, pointer, offsets, temporality);
-    const auto converted = [&] {
+    const auto converted = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (sizeof(To) == sizeof(Wide))
         return sve_reinterpret_integer<To, Wide>(wide);
       else if constexpr (
@@ -279,7 +279,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_word(
   static_assert(num_words(to) == 1 && num_words(FromTag{}) == 1);
   const auto valid = sve_prefix_predicate<To>(size(to));
   const auto active = svand_b_z(valid, valid, mask);
-  const auto converted = [&] {
+  const auto converted = [&]() VECOPS_INLINE_LAMBDA {
     if constexpr (
         sve_is_integer_element_v<To> && sve_is_integer_element_v<From> &&
         sizeof(From) < sizeof(To)) {
@@ -311,7 +311,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_word_unmasked(
   using FromTag = Rebind<From, ToTag>;
   static_assert(num_words(to) == 1 && num_words(FromTag{}) == 1);
   const auto active = sve_prefix_predicate<To>(size(to));
-  const auto converted = [&] {
+  const auto converted = [&]() VECOPS_INLINE_LAMBDA {
     if constexpr (
         sve_is_integer_element_v<To> && sve_is_integer_element_v<From> &&
         sizeof(From) < sizeof(To)) {
@@ -557,7 +557,7 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_indexed_integer_unmasked(
     // The scatter operates at the wider of the data and index granularities.
     // Construct that predicate directly: unpacking a logical subword prefix
     // would reduce its active-lane count at every widening step.
-    const auto memory_active = [&] {
+    const auto memory_active = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (sizeof(I) > sizeof(From))
         return sve_prefix_predicate<I>(size(IndexTag{}));
       else
@@ -605,7 +605,7 @@ VECOPS_ALWAYS_INLINE auto sve_pack_narrow_integer_x2(
   // QXTNB/QXTNT write the bottom/top narrow half of each wide lane, so using
   // lower and upper directly would interleave the two logical words. Unzip
   // their even/odd wide lanes first; narrowing then restores concatenation.
-  const auto even = [&] {
+  const auto even = [&]() VECOPS_INLINE_LAMBDA {
     if constexpr (sizeof(From) == 2 && std::is_signed_v<From>)
       return svuzp1_s16(lower, upper);
     else if constexpr (sizeof(From) == 2)
@@ -619,7 +619,7 @@ VECOPS_ALWAYS_INLINE auto sve_pack_narrow_integer_x2(
     else
       return svuzp1_u64(lower, upper);
   }();
-  const auto odd = [&] {
+  const auto odd = [&]() VECOPS_INLINE_LAMBDA {
     if constexpr (sizeof(From) == 2 && std::is_signed_v<From>)
       return svuzp2_s16(lower, upper);
     else if constexpr (sizeof(From) == 2)
@@ -656,7 +656,7 @@ VECOPS_ALWAYS_INLINE auto sve_pack_narrow_integer_x2(
       return svqxtunt_s64(svqxtunb_s64(even), odd);
   } else {
     constexpr From high = static_cast<From>(std::numeric_limits<To>::max());
-    const auto lo = [&] {
+    const auto lo = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (sizeof(From) == 2)
         return svmin_n_u16_x(svptrue_b16(), even, high);
       else if constexpr (sizeof(From) == 4)
@@ -664,7 +664,7 @@ VECOPS_ALWAYS_INLINE auto sve_pack_narrow_integer_x2(
       else
         return svmin_n_u64_x(svptrue_b64(), even, high);
     }();
-    const auto hi = [&] {
+    const auto hi = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (sizeof(From) == 2)
         return svmin_n_u16_x(svptrue_b16(), odd, high);
       else if constexpr (sizeof(From) == 4)

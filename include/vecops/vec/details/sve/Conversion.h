@@ -258,7 +258,7 @@ template <Element To, Element From, typename Raw>
 VECOPS_ALWAYS_INLINE auto sve_promote_one_step(Raw value) {
   static_assert(sizeof(To) == sizeof(From) * 2);
   using Widened = SVEWidenedElement<From>;
-  auto widened = [&] {
+  auto widened = [&]() VECOPS_INLINE_LAMBDA {
     if constexpr (std::same_as<From, bfloat16_t>)
       return sve_bf16_to_f32_lo(value);
     else if constexpr (std::same_as<From, float16_t>)
@@ -293,7 +293,7 @@ VECOPS_ALWAYS_INLINE auto sve_demote_integer_one_step(Raw value) {
   static_assert(sizeof(To) * 2 == sizeof(From));
   if constexpr (Wrap) {
     if constexpr (sizeof(To) == 1) {
-      const auto bytes = [&] {
+      const auto bytes = [&]() VECOPS_INLINE_LAMBDA {
         if constexpr (std::is_signed_v<From>)
           return svreinterpret_u8_s16(value);
         else
@@ -305,7 +305,7 @@ VECOPS_ALWAYS_INLINE auto sve_demote_integer_one_step(Raw value) {
       else
         return compact;
     } else if constexpr (sizeof(To) == 2) {
-      const auto halves = [&] {
+      const auto halves = [&]() VECOPS_INLINE_LAMBDA {
         if constexpr (std::is_signed_v<From>)
           return svreinterpret_u16_s32(value);
         else
@@ -317,7 +317,7 @@ VECOPS_ALWAYS_INLINE auto sve_demote_integer_one_step(Raw value) {
       else
         return compact;
     } else {
-      const auto words = [&] {
+      const auto words = [&]() VECOPS_INLINE_LAMBDA {
         if constexpr (std::is_signed_v<From>)
           return svreinterpret_u32_s64(value);
         else
@@ -374,13 +374,13 @@ VECOPS_ALWAYS_INLINE auto sve_demote_integer_one_step(Raw value) {
   }
 #endif
   const auto pg = sve_prefix_predicate<From>(sve_word_lanes<From>());
-  auto same_sign = [&] {
+  auto same_sign = [&]() VECOPS_INLINE_LAMBDA {
     if constexpr (sve_is_signed_integer_element_v<To>) {
-      auto signed_value = [&] {
+      auto signed_value = [&]() VECOPS_INLINE_LAMBDA {
         if constexpr (sve_is_signed_integer_element_v<From>) return value;
         else return sve_convert_same_size<SVEInteger<sizeof(From), true>, From>(value);
       }();
-      const auto clamped = [&] {
+      const auto clamped = [&]() VECOPS_INLINE_LAMBDA {
         if constexpr (sizeof(From) == 2)
           return svmax_n_s16_z(pg, svmin_n_s16_z(
               pg, signed_value, std::numeric_limits<To>::max()),
@@ -404,11 +404,11 @@ VECOPS_ALWAYS_INLINE auto sve_demote_integer_one_step(Raw value) {
         return svreinterpret_s32_u32(svuzp1_u32(
             svreinterpret_u32_s64(clamped), svreinterpret_u32_s64(clamped)));
     } else {
-      auto unsigned_value = [&] {
+      auto unsigned_value = [&]() VECOPS_INLINE_LAMBDA {
         if constexpr (sve_is_unsigned_integer_element_v<From>) return value;
         else return sve_convert_same_size<SVEInteger<sizeof(From), false>, From>(value);
       }();
-      const auto clamped = [&] {
+      const auto clamped = [&]() VECOPS_INLINE_LAMBDA {
         if constexpr (sizeof(From) == 2)
           return svmin_n_u16_z(pg, unsigned_value,
                                std::numeric_limits<To>::max());
@@ -439,7 +439,7 @@ VECOPS_ALWAYS_INLINE auto sve_demote_one_step(Raw value) {
   if constexpr (sve_is_integer_element_v<From> && sve_is_integer_element_v<To>) {
     return sve_demote_integer_one_step<To, From, Wrap>(value);
   } else if constexpr (sizeof(From) == 8) {
-    auto narrowed = [&] {
+    auto narrowed = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (std::same_as<To, float32_t>) {
         if constexpr (std::same_as<From, float64_t>)
           return svcvt_f32_f64_x(svptrue_b64(), value);
@@ -599,10 +599,10 @@ VECOPS_ALWAYS_INLINE auto sve_convert_lane_ratio2_widen_raw(Raw value) {
 
   // FCVT/FCVTLT and SHLLB/SHLLT already implement the public lane layout:
   // phase 0 consumes source lanes 2*i and phase 1 consumes 2*i+1.
-  const auto widened = [&] {
+  const auto widened = [&]() VECOPS_INLINE_LAMBDA {
     if constexpr (std::same_as<From, bfloat16_t>) {
       const auto bits = svreinterpret_u16_bf16(value);
-      const auto widened_bits = [&] {
+      const auto widened_bits = [&]() VECOPS_INLINE_LAMBDA {
         if constexpr (Phase == 0) return svshllb_n_u32(bits, 0);
         else return svshllt_n_u32(bits, 0);
       }();
@@ -672,7 +672,7 @@ VECOPS_ALWAYS_INLINE auto sve_lane_qxt_bottom(Raw value) {
     else return svqxtunb_s64(value);
   } else {
     constexpr From high = static_cast<From>(std::numeric_limits<To>::max());
-    const auto clamped = [&] {
+    const auto clamped = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (sizeof(From) == 2)
         return svmin_n_u16_x(svptrue_b16(), value, high);
       else if constexpr (sizeof(From) == 4)
@@ -709,7 +709,7 @@ VECOPS_ALWAYS_INLINE auto sve_lane_qxt_top(NarrowRaw fallback, Raw value) {
     else return svqxtunt_s64(fallback, value);
   } else {
     constexpr From high = static_cast<From>(std::numeric_limits<To>::max());
-    const auto clamped = [&] {
+    const auto clamped = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (sizeof(From) == 2)
         return svmin_n_u16_x(svptrue_b16(), value, high);
       else if constexpr (sizeof(From) == 4)
@@ -826,7 +826,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
   if constexpr (
       ratio == 2 && !wraps &&
       (!narrows || phase == 1 || !nonzero_population)) {
-    auto fallback = [&] {
+    auto fallback = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (narrows)
         return conversion_population<SVEBackend>(
             to, std::forward<Options>(options)...);

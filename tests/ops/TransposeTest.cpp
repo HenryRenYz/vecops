@@ -218,6 +218,41 @@ TEST(TransposeTest, PreparedFloatOperatorUsesSMEPath) {
   }
 }
 
+TEST(TransposeTest, PreparedConversionOperatorUsesSMEPath) {
+  constexpr nint_t M = 63;
+  constexpr nint_t N = 129;
+  std::array<int8_t, M * N> input{};
+  std::array<float32_t, M * N> output{};
+  for (nint_t i = 0; i < M; ++i) {
+    for (nint_t j = 0; j < N; ++j) {
+      input[static_cast<std::size_t>(i * N + j)] =
+          static_cast<int8_t>((i * 19 + j) % 127 - 63);
+    }
+  }
+  auto input_tensor = make_tensor(
+      input.data(), make_layout(make_shape(cint<M>, cint<N>)));
+  auto output_tensor = make_tensor(
+      output.data(), make_layout(make_shape(cint<N>, cint<M>)));
+  auto operation = ops::make_transpose<float32_t>(
+      input_tensor, output_tensor);
+  static_assert(execution::details::has_resource_v<
+      execution::details::arm::Streaming,
+      typename decltype(operation)::ResourceRequirements>);
+  ExecutionSession execution{};
+  execution.with_region(
+      operation, [&](auto& region) VECOPS_INLINE_LAMBDA {
+        operation(region);
+      });
+  for (nint_t i = 0; i < M; ++i) {
+    for (nint_t j = 0; j < N; ++j) {
+      EXPECT_EQ(
+          output[static_cast<std::size_t>(j * M + i)],
+          static_cast<float32_t>(
+              input[static_cast<std::size_t>(i * N + j)]));
+    }
+  }
+}
+
 extern "C" VECOPS_NOINLINE void transpose_i32_streaming_probe(
     const int32_t* input, int32_t* output) {
   auto input_tensor = make_tensor(

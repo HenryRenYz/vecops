@@ -597,8 +597,7 @@ struct NativeWordImpl<SVEBackend, LoadOp> {
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
       LoadOp, Tag tag, const ElementOf<Tag>* pointer,
       Alignment, Temporality temporality) {
-    const auto active = sve_prefix_predicate<ElementOf<Tag>>(
-        sve_valid_word_lanes<Index>(tag));
+    const auto active = sve_valid_word_predicate<Index>(tag);
     return sve_basic_wrap_word<Tag>(
         sve_load_memory_word(active, pointer, temporality));
   }
@@ -613,9 +612,14 @@ struct NativeWordImpl<SVEBackend, LoadOp> {
       LoadOp, Tag tag, const ElementOf<Tag>* pointer,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive,
       Alignment, Temporality temporality) {
-    const auto valid = sve_prefix_predicate<ElementOf<Tag>>(
-        sve_valid_word_lanes<Index>(tag));
-    const auto active = svand_b_z(valid, valid, mask);
+    const auto active = [&] {
+      if constexpr (sve_word_is_always_full<Tag>()) {
+        return mask;
+      } else {
+        const auto valid = sve_valid_word_predicate<Index>(tag);
+        return svand_b_z(valid, valid, mask);
+      }
+    }();
     const auto loaded = sve_basic_wrap_word<Tag>(
         sve_load_memory_word(active, pointer, temporality));
     return execute_word<Index, SVEBackend>(
@@ -634,8 +638,7 @@ struct NativeWordImpl<SVEBackend, StoreOp> {
   static VECOPS_ALWAYS_INLINE void call(
       StoreOp, Tag tag, ElementOf<Tag>* pointer, NativeWordVec<Tag> value,
       Alignment, Temporality temporality) {
-    const auto active = sve_prefix_predicate<ElementOf<Tag>>(
-        sve_valid_word_lanes<Index>(tag));
+    const auto active = sve_valid_word_predicate<Index>(tag);
     sve_store_memory_word(
         active, pointer, sve_basic_raw_word(value), temporality);
   }
@@ -650,9 +653,14 @@ struct NativeWordImpl<SVEBackend, StoreOp> {
       StoreOp, Tag tag, ElementOf<Tag>* pointer,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> value,
       Alignment, Temporality temporality) {
-    const auto valid = sve_prefix_predicate<ElementOf<Tag>>(
-        sve_valid_word_lanes<Index>(tag));
-    const auto active = svand_b_z(valid, valid, mask);
+    const auto active = [&] {
+      if constexpr (sve_word_is_always_full<Tag>()) {
+        return mask;
+      } else {
+        const auto valid = sve_valid_word_predicate<Index>(tag);
+        return svand_b_z(valid, valid, mask);
+      }
+    }();
     sve_store_memory_word(
         active, pointer, sve_basic_raw_word(value), temporality);
   }
