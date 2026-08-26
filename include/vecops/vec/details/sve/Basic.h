@@ -77,6 +77,23 @@ VECOPS_ALWAYS_INLINE svbool_t sve_prefix_predicate(nint_t count) {
 }
 
 template <Element T>
+VECOPS_ALWAYS_INLINE svbool_t sve_full_predicate() {
+  if constexpr (sizeof(T) == 1) return svptrue_b8();
+  else if constexpr (sizeof(T) == 2) return svptrue_b16();
+  else if constexpr (sizeof(T) == 4) return svptrue_b32();
+  else return svptrue_b64();
+}
+
+template <VectorTag Tag>
+consteval bool sve_word_is_always_full() {
+  if constexpr (is_scalable_tag_v<Tag>) {
+    return scale_power_v<Tag> >= 0;
+  } else {
+    return false;
+  }
+}
+
+template <Element T>
 VECOPS_ALWAYS_INLINE svbool_t sve_single_lane_predicate(nint_t lane) {
   if constexpr (std::same_as<T, bfloat16_t>) {
     return svcmpeq_n_u16(svptrue_b16(), svindex_u16(0, 1),
@@ -136,6 +153,16 @@ VECOPS_ALWAYS_INLINE nint_t sve_valid_word_lanes(Tag tag) {
     }
   } else {
     return valid_word_lanes<Index, Tag>();
+  }
+}
+
+template <nint_t Index, VectorTag Tag>
+VECOPS_ALWAYS_INLINE svbool_t sve_valid_word_predicate(Tag tag) {
+  if constexpr (sve_word_is_always_full<Tag>()) {
+    return sve_full_predicate<ElementOf<Tag>>();
+  } else {
+    return sve_prefix_predicate<ElementOf<Tag>>(
+        sve_valid_word_lanes<Index>(tag));
   }
 }
 

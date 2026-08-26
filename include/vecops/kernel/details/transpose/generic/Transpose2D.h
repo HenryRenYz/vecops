@@ -55,22 +55,27 @@ concept CompatibleAccesses =
     are_compatible_accesses_v<Source, Destination>;
 
 template <typename Access>
-/**
- * Access exposing untransformed raw storage with memory dtype == compute dtype.
- * SME uses this stronger contract; generic vector code only needs load/store.
- */
-inline constexpr bool is_raw_direct_access_v = requires(Access& access) {
+/** Access exposing untransformed raw storage, including converted accesses. */
+inline constexpr bool is_raw_no_transform_access_v = requires(Access& access) {
   typename std::remove_cvref_t<Access>::MemoryElement;
   typename std::remove_cvref_t<Access>::Transform;
   { access.raw_data() };
   { access.raw_strides() };
   { access.spec() };
 } && std::same_as<
-    typename std::remove_cvref_t<Access>::Transform, tensor::NoTransform> &&
+    typename std::remove_cvref_t<Access>::Transform, tensor::NoTransform>;
+
+template <typename Access>
+/** Untransformed raw storage whose memory and compute dtypes are identical. */
+inline constexpr bool is_raw_direct_access_v =
+    is_raw_no_transform_access_v<Access> &&
     std::same_as<
         std::remove_cv_t<
             typename std::remove_cvref_t<Access>::MemoryElement>,
         ComputeOf<Access>>;
+
+template <typename Access>
+concept RawNoTransformAccess = is_raw_no_transform_access_v<Access>;
 
 template <typename Access>
 concept RawDirectAccess = is_raw_direct_access_v<Access>;
@@ -287,7 +292,8 @@ template <nint_t Rows, nint_t Columns,
  * @param src_origin Source plane origin.
  * @param dst_origin Destination plane origin.
  *
- * Full tiles use `fixed_kernel`; all tail regions are redirected to
+ * Full tiles use `fixed_kernel`. A raw same-dtype bottom edge keeps the fixed
+ * network with masked row stores; right and corner tails use
  * `gather_transpose`. Tile2D receives meta extents unchanged, so Const and
  * constrained Dynamic information can remove empty tail regions at compile time.
  */
@@ -303,9 +309,15 @@ VECOPS_ALWAYS_INLINE void fixed_transpose(
       [&](auto kernel_case, nint_t mi, nint_t ni,
           nint_t active_m, nint_t active_n) VECOPS_INLINE_LAMBDA {
         using Case = decltype(kernel_case);
-        if constexpr (
+        constexpr bool FullTile =
             Case::m_mask == Tile2DMaskMode::unmasked &&
-            Case::n_mask == Tile2DMaskMode::unmasked) {
+            Case::n_mask == Tile2DMaskMode::unmasked;
+        constexpr bool ContiguousBottomEdge =
+            Case::m_mask == Tile2DMaskMode::masked &&
+            Case::n_mask == Tile2DMaskMode::unmasked &&
+            is_raw_direct_access_v<Source> &&
+            is_raw_direct_access_v<Destination>;
+        if constexpr (FullTile || ContiguousBottomEdge) {
           fixed_kernel<Rows, Columns, Source, Destination,
                        SrcRow, SrcCol, DstRow, DstCol,
                        Case::m_mask, Case::n_mask>(

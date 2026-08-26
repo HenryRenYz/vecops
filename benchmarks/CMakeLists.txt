@@ -60,7 +60,7 @@ add_compile_definitions(VECOPS_MATH_ASSUME_VALID_INPUTS)
 # ======================================================================
 
 function(add_multiarch_benchmark NAME)
-    set(options "")
+    set(options FIXED_SVE)
     set(oneValueArgs "")
     set(multiValueArgs FILES ARCH)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
@@ -80,10 +80,23 @@ function(add_multiarch_benchmark NAME)
         add_executable(${TARGET_NAME} ${ARG_FILES})
         target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         target_compile_options(${TARGET_NAME} PRIVATE -march=${MARCH})
+        if(ARG_FIXED_SVE AND VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
+           CODE MATCHES "^SVE" AND VECOPS_FIXED_SVE_BITS)
+            target_compile_options(${TARGET_NAME} PRIVATE
+                -msve-vector-bits=${VECOPS_FIXED_SVE_BITS})
+        endif()
         if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
            CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
            NOT CODE STREQUAL "Scalar")
             target_compile_options(${TARGET_NAME} PRIVATE -Wno-psabi)
+        endif()
+        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
+           CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND
+           MARCH MATCHES "(^|\\+)sme($|\\+)")
+            target_compile_options(${TARGET_NAME} PRIVATE
+                -Wno-aarch64-sme-attributes)
+            target_link_options(${TARGET_NAME} PRIVATE
+                -rtlib=compiler-rt -unwindlib=libgcc)
         endif()
         target_compile_definitions(${TARGET_NAME} PRIVATE
             VECOPS_BENCH_ARCH_CODE="${CODE}"
@@ -108,6 +121,36 @@ add_multiarch_benchmark(SoftmaxBench
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/SoftmaxBench.cpp
     ARCH Native Scalar
 )
+
+add_multiarch_benchmark(TransposeBench
+    FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeBench.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeBenchInt8.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeBenchFp16.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeBenchBf16.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeBenchFp32.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeBenchFp64.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeBenchConversion.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeBenchConversionInt8.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeBenchConversionFp16.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeBenchConversionFp32.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeBenchConversionFp64.cpp
+    ARCH Native SVE2 Scalar
+)
+
+if(VECOPS_ARCH_FAMILY STREQUAL "ARM")
+    add_multiarch_benchmark(TransposeCompareBench
+        FIXED_SVE
+        FILES
+            ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeCompareBench.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeCompareInt8.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeCompareFp16.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeCompareBf16.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeCompareFp32.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/ops/TransposeCompareFp64.cpp
+        ARCH Native SVE2
+    )
+endif()
 
 option(VECOPS_ENABLE_ONEDNN_BENCHMARKS
        "Build LayerNorm and Softmax benchmarks against oneDNN" OFF)
