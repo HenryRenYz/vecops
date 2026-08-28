@@ -12,7 +12,7 @@
 #include "vecops/gemm/details/amx/Atoms.h"
 #endif
 
-#if defined(HAS_SME_FA64)
+#if defined(HAS_SME)
 #include "vecops/gemm/details/sme/Atoms.h"
 #endif
 

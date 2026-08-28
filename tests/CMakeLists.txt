@@ -140,7 +140,7 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
     if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
         list(APPEND VECOPS_SME_TEST_ARCH NativeFixedStreamingSVE)
     endif()
-    if(VECOPS_NATIVE_HAS_SME_FA64)
+    if(VECOPS_NATIVE_HAS_SME)
         vecops_add_test(
             NAME VecSMETest
             FILES vec/SMETest.cpp
@@ -181,7 +181,7 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
         FILES ops/MatmulBatchSMETest.cpp
         FOLDER ops/matmul
         ARCH ${VECOPS_SME_TEST_ARCH})
-    if(VECOPS_NATIVE_HAS_SME_FA64 AND CMAKE_OBJDUMP)
+    if(VECOPS_NATIVE_HAS_SME AND CMAKE_OBJDUMP)
         set(_VECOPS_SME_MATMUL_TARGETS
             MatmulSMETest-Native MatmulBatchSMETest-Native)
         if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)

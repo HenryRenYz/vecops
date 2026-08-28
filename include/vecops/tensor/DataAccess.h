@@ -281,13 +281,15 @@ struct AccessMemoryDefaults {
 };
 
 /** Combines a lifetime policy with call-site defaults for existing lowering. */
-template <typename PlanningPolicy, typename Defaults>
+template <typename PlanningPolicy, typename Defaults,
+          typename Resources = execution::details::ResourceSet<>>
 struct AccessLoweringPolicy : PlanningPolicy {
   using PlanningPolicyType = PlanningPolicy;
   using AccessDefaultsType = Defaults;
   using ConversionOrderOption = typename Defaults::ConversionOrderOption;
   using ConversionValueOption = typename Defaults::ConversionValueOption;
   using MemoryOptions = AccessMemoryDefaults<Defaults>;
+  using ActiveResources = Resources;
   static constexpr bool permutation_safe = std::same_as<
       typename Defaults::ConversionOrderOption, vec::cvt::Unordered>;
 };
@@ -355,6 +357,8 @@ VECOPS_ALWAYS_INLINE constexpr void validate_access_options() {
       vec::details::option_count_v<vec::details::IsZeroOption, Options...> +
       vec::details::option_count_v<vec::details::IsVectorMergeOption, Options...> +
       vec::details::option_count_v<vec::details::IsScalarMergeOption, Options...>;
+  constexpr std::size_t resources =
+      vec::details::option_count_v<vec::details::IsResourcesOption, Options...>;
   static_assert(active <= 1, "at most one tensor active option is allowed");
   static_assert(addressing <= 1,
                 "at most one tensor lane-addressing option is allowed");
@@ -362,6 +366,16 @@ VECOPS_ALWAYS_INLINE constexpr void validate_access_options() {
                 "at most one inactive-population option is allowed");
   static_assert(Load || population == 0,
                 "inactive-population options are only valid for tensor loads");
+  static_assert(resources == 0,
+                "tensor access resources come from the execution scope");
+  static_assert(([]<typename Option>() {
+    using Clean = std::remove_cvref_t<Option>;
+    if constexpr (vec::details::IsStridedOption<Clean>::value)
+      return vec::details::IsStridedOption<Clean>::scale == 0;
+    else
+      return true;
+  }.template operator()<Options>() && ...),
+                "tensor strided addressing accepts only element strides");
 }
 
 template <typename T>
@@ -1012,7 +1026,8 @@ load_transform_vector(
       vec::LoadConvertRequest<
           TransformInTag, Memory, ActiveKind, AddressingKind,
           vec::Populate::Zero, vec::mem::Unaligned, Temporal,
-          0, std::remove_cvref_t<IndexVec>, Order, Value>
+          0, std::remove_cvref_t<IndexVec>, Order, Value,
+          vec::Mask<TransformInTag>, typename Policy::ActiveResources>
           request;
       // The mask must outlive `request`: requests reference, never store,
       // vector values, so the leaf mask lives at function scope in the
@@ -1256,7 +1271,9 @@ VECOPS_ALWAYS_INLINE void store_transform_vector(
     vec::StoreConvertRequest<
         TransformOutTag, Memory, ActiveKind, AddressingKind,
         vec::mem::Unaligned, Temporal, 0,
-        std::remove_cvref_t<IndexVec>, Order, Value, Packing>
+        std::remove_cvref_t<IndexVec>, Order, Value, Packing,
+        vec::Mask<vec::Rebind<Memory, TransformOutTag>>,
+        typename Policy::ActiveResources>
         request;
     using LeafMask = std::conditional_t<
         HasActive && !std::same_as<ChunkTag, TransformOutTag>,
@@ -1584,7 +1601,8 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
   if constexpr (
       std::same_as<MemoryElement, vec::ElementOf<Tag>> ||
       vec::details::memory_rebind_supported<Tag, MemoryElement>()) {
-    const auto request = vec::details::resolve_load_request<Tag>(
+    const auto request = vec::details::resolve_load_request<
+        Tag, typename Policy::ActiveResources>(
         std::forward<Options>(options)...);
     using KernelRequest = decltype(request);
 
@@ -1604,7 +1622,8 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
           Tag, MemoryElement, KernelRequest::active_kind,
           vec::Addressing::Indexed, KernelRequest::populate_kind,
           vec::mem::Unaligned, Temporal, 0,
-          std::remove_cvref_t<decltype(physical)>, Order, Value>
+          std::remove_cvref_t<decltype(physical)>, Order, Value,
+          vec::Mask<Tag>, typename Policy::ActiveResources>
           out{};
       copy_memory_request_fields(out, request);
       out.indices = &physical;
@@ -1616,7 +1635,8 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
       vec::LoadConvertRequest<
           Tag, MemoryElement, KernelRequest::active_kind,
           vec::Addressing::Contiguous, KernelRequest::populate_kind,
-          Alignment, Temporal, 0, vec::Vec<vec::IndexTag<Tag>>, Order, Value>
+          Alignment, Temporal, 0, vec::Vec<vec::IndexTag<Tag>>, Order, Value,
+          vec::Mask<Tag>, typename Policy::ActiveResources>
           out{};
       copy_memory_request_fields(out, request);
       return execute_resolved_load_convert(tag, pointer, out);
@@ -1630,7 +1650,8 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> load_memory(
           Tag, MemoryElement, KernelRequest::active_kind,
           vec::Addressing::Strided, KernelRequest::populate_kind,
           vec::mem::Unaligned, Temporal, 0,
-          vec::Vec<vec::IndexTag<Tag>>, Order, Value>
+          vec::Vec<vec::IndexTag<Tag>>, Order, Value,
+          vec::Mask<Tag>, typename Policy::ActiveResources>
           out{};
       copy_memory_request_fields(out, request);
       out.stride = physical_stride;
@@ -1667,7 +1688,8 @@ VECOPS_ALWAYS_INLINE void store_memory(
   if constexpr (
       std::same_as<MemoryElement, vec::ElementOf<Tag>> ||
       vec::details::memory_rebind_supported<Tag, MemoryElement>()) {
-    const auto request = vec::details::resolve_store_request<Tag>(
+    const auto request = vec::details::resolve_store_request<
+        Tag, typename Policy::ActiveResources>(
         std::forward<Options>(options)...);
     using KernelRequest = decltype(request);
 
@@ -1686,7 +1708,9 @@ VECOPS_ALWAYS_INLINE void store_memory(
       vec::StoreConvertRequest<
           Tag, MemoryElement, KernelRequest::active_kind,
           vec::Addressing::Indexed, vec::mem::Unaligned, Temporal, 0,
-          std::remove_cvref_t<decltype(physical)>, Order, Value, Packing>
+          std::remove_cvref_t<decltype(physical)>, Order, Value, Packing,
+          vec::Mask<vec::Rebind<MemoryElement, Tag>>,
+          typename Policy::ActiveResources>
           out{};
       copy_memory_request_fields(out, request);
       out.indices = &physical;
@@ -1698,7 +1722,9 @@ VECOPS_ALWAYS_INLINE void store_memory(
       vec::StoreConvertRequest<
           Tag, MemoryElement, KernelRequest::active_kind,
           vec::Addressing::Contiguous, Alignment, Temporal, 0,
-          vec::Vec<vec::IndexTag<Tag>>, Order, Value, Packing>
+          vec::Vec<vec::IndexTag<Tag>>, Order, Value, Packing,
+          vec::Mask<vec::Rebind<MemoryElement, Tag>>,
+          typename Policy::ActiveResources>
           out{};
       copy_memory_request_fields(out, request);
       execute_resolved_store_convert(tag, pointer, value, out);
@@ -1711,7 +1737,9 @@ VECOPS_ALWAYS_INLINE void store_memory(
       vec::StoreConvertRequest<
           Tag, MemoryElement, KernelRequest::active_kind,
           vec::Addressing::Strided, vec::mem::Unaligned, Temporal, 0,
-          vec::Vec<vec::IndexTag<Tag>>, Order, Value, Packing>
+          vec::Vec<vec::IndexTag<Tag>>, Order, Value, Packing,
+          vec::Mask<vec::Rebind<MemoryElement, Tag>>,
+          typename Policy::ActiveResources>
           out{};
       copy_memory_request_fields(out, request);
       out.stride = physical_stride;
@@ -1980,18 +2008,21 @@ VECOPS_INLINE constexpr auto access_defaults(Options...) {
   return details::MakeAccessDefaults<Options...>{};
 }
 
-template <typename PlanningPolicy, typename Defaults, int SlicedDim>
+template <typename PlanningPolicy, typename Defaults, typename Resources,
+          int SlicedDim>
 struct SliceAccessPolicy<
-    details::AccessLoweringPolicy<PlanningPolicy, Defaults>, SlicedDim> {
+    details::AccessLoweringPolicy<PlanningPolicy, Defaults, Resources>,
+    SlicedDim> {
   using type = details::AccessLoweringPolicy<
-      slice_access_policy_t<PlanningPolicy, SlicedDim>, Defaults>;
+      slice_access_policy_t<PlanningPolicy, SlicedDim>, Defaults, Resources>;
 };
 
-template <typename PlanningPolicy, typename Defaults, int I, int J>
+template <typename PlanningPolicy, typename Defaults, typename Resources,
+          int I, int J>
 struct TransposeAccessPolicy<
-    details::AccessLoweringPolicy<PlanningPolicy, Defaults>, I, J> {
+    details::AccessLoweringPolicy<PlanningPolicy, Defaults, Resources>, I, J> {
   using type = details::AccessLoweringPolicy<
-      transpose_access_policy_t<PlanningPolicy, I, J>, Defaults>;
+      transpose_access_policy_t<PlanningPolicy, I, J>, Defaults, Resources>;
 };
 
 template <
@@ -2424,6 +2455,7 @@ class ProjectCursor;
 template <typename Spec, typename Policy>
 class InputDataAccess {
 public:
+  using SpecType = Spec;
   using ComputeType = typename Spec::ComputeType;
   using MemoryElement = typename Spec::MemoryElement;
   using Transform = typename Spec::TransformType;
@@ -2492,7 +2524,8 @@ public:
       using Planning = typename Policy::PlanningPolicyType;
       using Defaults = details::OverrideAccessDefaults<
           typename Policy::AccessDefaultsType, Options...>;
-      using CallPolicy = details::AccessLoweringPolicy<Planning, Defaults>;
+      using CallPolicy = details::AccessLoweringPolicy<
+          Planning, Defaults, typename Policy::ActiveResources>;
       InputDataAccess<Spec, CallPolicy> access{
           *spec_, CallPolicy{static_cast<const Planning&>(policy_)}};
       auto retained = details::non_access_default_options(
@@ -2683,6 +2716,7 @@ private:
 template <typename Spec, typename Policy>
 class OutputDataAccess {
 public:
+  using SpecType = Spec;
   using ComputeType = typename Spec::ComputeType;
   using MemoryElement = typename Spec::MemoryElement;
   using Transform = typename Spec::TransformType;
@@ -2751,7 +2785,8 @@ public:
       using Planning = typename Policy::PlanningPolicyType;
       using Defaults = details::OverrideAccessDefaults<
           typename Policy::AccessDefaultsType, Options...>;
-      using CallPolicy = details::AccessLoweringPolicy<Planning, Defaults>;
+      using CallPolicy = details::AccessLoweringPolicy<
+          Planning, Defaults, typename Policy::ActiveResources>;
       OutputDataAccess<Spec, CallPolicy> access{
           *spec_, CallPolicy{static_cast<const Planning&>(policy_)}};
       auto retained = details::non_access_default_options(
@@ -2896,6 +2931,30 @@ private:
   bool committed_ = false;
 };
 
+template <typename Resources, typename Spec,
+          typename Planning, typename Defaults, typename PreviousResources>
+VECOPS_ALWAYS_INLINE auto rebind_active_resources(
+    const InputDataAccess<
+        Spec, details::AccessLoweringPolicy<
+                  Planning, Defaults, PreviousResources>>& access) {
+  using Policy = details::AccessLoweringPolicy<
+      Planning, Defaults, Resources>;
+  return InputDataAccess<Spec, Policy>{
+      access.spec(), Policy{static_cast<const Planning&>(access.policy())}};
+}
+
+template <typename Resources, typename Spec,
+          typename Planning, typename Defaults, typename PreviousResources>
+VECOPS_ALWAYS_INLINE auto rebind_active_resources(
+    OutputDataAccess<
+        Spec, details::AccessLoweringPolicy<
+                  Planning, Defaults, PreviousResources>>& access) {
+  using Policy = details::AccessLoweringPolicy<
+      Planning, Defaults, Resources>;
+  return OutputDataAccess<Spec, Policy>{
+      access.spec(), Policy{static_cast<const Planning&>(access.policy())}};
+}
+
 /**
  * Input session whose canonical ComputeType materialization is populated by
  * loads carrying `tensor::materialize::populate`.
@@ -2914,7 +2973,8 @@ public:
       SourcePolicy::vector_axis, SourcePolicy::read_passes,
       AccessPlan::direct>;
   using CachePolicy = details::AccessLoweringPolicy<
-      CachePlanningPolicy, DefaultAccessDefaults>;
+      CachePlanningPolicy, DefaultAccessDefaults,
+      typename SourcePolicy::ActiveResources>;
 
   DeferredMaterializedInputDataAccess(
       OriginalSpec original, AuxSpec auxiliary, SourcePolicy policy)
@@ -3707,7 +3767,8 @@ private:
     using Tag = vec::ScalableTag<ComputeType, 0>;
     using AuxInputPolicy = InputAccessPolicy<AxisValue, 1, AccessPlan::direct>;
     using AuxLoweringPolicy = details::AccessLoweringPolicy<
-        AuxInputPolicy, DefaultAccessDefaults>;
+        AuxInputPolicy, DefaultAccessDefaults,
+        typename Policy::ActiveResources>;
     auto aux_input_spec = input<ComputeType>(auxiliary_.tensor());
     InputDataAccess<decltype(aux_input_spec), AuxLoweringPolicy> source{
         aux_input_spec, AuxLoweringPolicy{AuxInputPolicy{}}};
@@ -3754,9 +3815,11 @@ private:
       using DestinationPlanning = OutputAccessPolicy<
           UnitAxis, AccessPlan::direct>;
       using SourcePolicy = details::AccessLoweringPolicy<
-          SourcePlanning, DefaultAccessDefaults>;
+          SourcePlanning, DefaultAccessDefaults,
+          typename Policy::ActiveResources>;
       using DestinationPolicy = details::AccessLoweringPolicy<
-          DestinationPlanning, DefaultAccessDefaults>;
+          DestinationPlanning, DefaultAccessDefaults,
+          typename Policy::ActiveResources>;
       InputDataAccess<decltype(source_spec), SourcePolicy> source_access{
           source_spec, SourcePolicy{SourcePlanning{}}};
       OutputDataAccess<decltype(destination_spec), DestinationPolicy>
@@ -3825,7 +3888,8 @@ VECOPS_ALWAYS_INLINE auto load_with_order(
   using Planning = typename Policy::PlanningPolicyType;
   using Defaults = ReorderAccessDefaults<
       typename Policy::AccessDefaultsType, Order>;
-  using ReorderedPolicy = AccessLoweringPolicy<Planning, Defaults>;
+  using ReorderedPolicy = AccessLoweringPolicy<
+      Planning, Defaults, typename Policy::ActiveResources>;
   InputDataAccess<Spec, ReorderedPolicy> reordered{
       access.spec(), ReorderedPolicy{
           static_cast<const Planning&>(access.policy())}};
@@ -3857,7 +3921,8 @@ VECOPS_ALWAYS_INLINE auto load_with_order(
   using Planning = typename Policy::PlanningPolicyType;
   using Defaults = ReorderAccessDefaults<
       typename Policy::AccessDefaultsType, Order>;
-  using ReorderedPolicy = AccessLoweringPolicy<Planning, Defaults>;
+  using ReorderedPolicy = AccessLoweringPolicy<
+      Planning, Defaults, typename Policy::ActiveResources>;
   BorrowedDataAccess<Spec, ReorderedPolicy> reordered{
       access.spec(), ReorderedPolicy{
           static_cast<const Planning&>(access.policy())}};
@@ -3885,7 +3950,8 @@ VECOPS_ALWAYS_INLINE void store_with_order(
   using Planning = typename Policy::PlanningPolicyType;
   using Defaults = ReorderAccessDefaults<
       typename Policy::AccessDefaultsType, Order>;
-  using ReorderedPolicy = AccessLoweringPolicy<Planning, Defaults>;
+  using ReorderedPolicy = AccessLoweringPolicy<
+      Planning, Defaults, typename Policy::ActiveResources>;
   OutputDataAccess<Spec, ReorderedPolicy> reordered{
       access.spec(), ReorderedPolicy{
           static_cast<const Planning&>(access.policy())}};
@@ -3908,7 +3974,8 @@ VECOPS_ALWAYS_INLINE void store_with_order(
   using Planning = typename Policy::PlanningPolicyType;
   using Defaults = ReorderAccessDefaults<
       typename Policy::AccessDefaultsType, Order>;
-  using ReorderedPolicy = AccessLoweringPolicy<Planning, Defaults>;
+  using ReorderedPolicy = AccessLoweringPolicy<
+      Planning, Defaults, typename Policy::ActiveResources>;
   OutputDataAccess<AuxSpec, ReorderedPolicy> hot{
       access.auxiliary_spec(), ReorderedPolicy{
           static_cast<const Planning&>(access.policy())}};
@@ -3928,7 +3995,8 @@ VECOPS_ALWAYS_INLINE void store_with_order(
   using Planning = typename Policy::PlanningPolicyType;
   using Defaults = ReorderAccessDefaults<
       typename Policy::AccessDefaultsType, Order>;
-  using ReorderedPolicy = AccessLoweringPolicy<Planning, Defaults>;
+  using ReorderedPolicy = AccessLoweringPolicy<
+      Planning, Defaults, typename Policy::ActiveResources>;
   BorrowedDataAccess<Spec, ReorderedPolicy> reordered{
       access.spec(), ReorderedPolicy{
           static_cast<const Planning&>(access.policy())}};
@@ -4284,7 +4352,8 @@ VECOPS_INLINE decltype(auto) with_bound_input(
     Context& context, Fn&& fn) {
   constexpr int AxisValue = Policy::vector_axis;
   constexpr AccessPlan plan = resolve_plan<Spec, Policy>();
-  using LoweringPolicy = AccessLoweringPolicy<Policy, Defaults>;
+  using Resources = typename std::remove_cvref_t<Context>::ActiveResources;
+  using LoweringPolicy = AccessLoweringPolicy<Policy, Defaults, Resources>;
   if constexpr (plan == AccessPlan::direct) {
     InputDataAccess<Spec, LoweringPolicy> access{
         spec, LoweringPolicy{policy}};
@@ -4309,9 +4378,9 @@ VECOPS_INLINE decltype(auto) with_bound_input(
       using DestinationPlanning = OutputAccessPolicy<
           AxisValue, AccessPlan::direct>;
       using SourcePolicy = AccessLoweringPolicy<
-          SourcePlanning, DefaultAccessDefaults>;
+          SourcePlanning, DefaultAccessDefaults, Resources>;
       using DestinationPolicy = AccessLoweringPolicy<
-          DestinationPlanning, DefaultAccessDefaults>;
+          DestinationPlanning, DefaultAccessDefaults, Resources>;
       InputDataAccess<decltype(source_spec), SourcePolicy> source{
           source_spec, SourcePolicy{SourcePlanning{}}};
       OutputDataAccess<decltype(destination_spec), DestinationPolicy>
@@ -4348,7 +4417,8 @@ VECOPS_INLINE decltype(auto) with_bound_input(
   if constexpr (Policy::requested_plan == AccessPlan::automatic_deferred) {
     auto aux_spec = input<Compute>(auxiliary_tensor);
     using OrderedDefaults = ReorderAccessDefaults<Defaults, vec::cvt::Ordered>;
-    using SourcePolicy = AccessLoweringPolicy<Policy, OrderedDefaults>;
+    using SourcePolicy = AccessLoweringPolicy<
+        Policy, OrderedDefaults, Resources>;
     using Access = DeferredMaterializedInputDataAccess<
         Spec, decltype(aux_spec), SourcePolicy>;
     Access access{
@@ -4364,7 +4434,7 @@ VECOPS_INLINE decltype(auto) with_bound_input(
     using DestinationPlanning = OutputAccessPolicy<
         AxisValue, AccessPlan::direct>;
     using DestinationPolicy = AccessLoweringPolicy<
-        DestinationPlanning, DefaultAccessDefaults>;
+        DestinationPlanning, DefaultAccessDefaults, Resources>;
     OutputDataAccess<decltype(destination_spec), DestinationPolicy>
         destination{
             destination_spec,
@@ -4396,7 +4466,7 @@ VECOPS_INLINE decltype(auto) with_bound_input(
   using AuxPolicy = InputAccessPolicy<AxisValue, Policy::read_passes,
                                       AccessPlan::direct>;
   using AuxLoweringPolicy = AccessLoweringPolicy<
-      AuxPolicy, DefaultAccessDefaults>;
+      AuxPolicy, DefaultAccessDefaults, Resources>;
   CanonicalMaterializedInputDataAccess<
       decltype(aux_spec), AuxLoweringPolicy> access{
           std::move(aux_spec), AuxLoweringPolicy{AuxPolicy{}}};
@@ -4417,7 +4487,8 @@ VECOPS_INLINE decltype(auto) with_bound_output(
     Context& context, Fn&& fn) {
   constexpr int AxisValue = Policy::vector_axis;
   constexpr AccessPlan plan = resolve_plan<Spec, Policy>();
-  using LoweringPolicy = AccessLoweringPolicy<Policy, Defaults>;
+  using Resources = typename std::remove_cvref_t<Context>::ActiveResources;
+  using LoweringPolicy = AccessLoweringPolicy<Policy, Defaults, Resources>;
   if constexpr (plan == AccessPlan::direct) {
     OutputDataAccess<Spec, LoweringPolicy> access{
         spec, LoweringPolicy{policy}};

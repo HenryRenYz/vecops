@@ -27,6 +27,20 @@ using option_type_or_t = std::conditional_t<
 
 namespace request_resolve {
 
+template <typename Default, typename MaybeResources>
+struct ResourcesOf {
+  using type = Default;
+};
+
+template <typename Default, typename Resources>
+struct ResourcesOf<Default, opt::Resources<Resources>> {
+  using type = Resources;
+};
+
+template <typename Default, typename... Options>
+using resources_of_t = typename ResourcesOf<
+    Default, find_option_type_t<IsResourcesOption, Options...>>::type;
+
 template <typename... Options>
 inline constexpr Active active_kind_of_v =
     option_count_v<IsFirstOption, Options...> == 1
@@ -56,7 +70,9 @@ inline constexpr int index_scale_of_v = [] {
   if constexpr (!std::is_void_v<Indexed>) {
     return Indexed::scale;
   } else {
-    return 0;
+    using Strided = find_option_type_t<IsStridedOption, Options...>;
+    if constexpr (!std::is_void_v<Strided>) return Strided::scale;
+    else return 0;
   }
 }();
 
@@ -81,7 +97,9 @@ using index_vector_of_t = typename IndexVectorOf<
  * already satisfy `valid_memory_options<Tag, false, Options...>()`; only the
  * fields matching the resolved kinds are populated.
  */
-template <VectorTag Tag, typename... Options>
+template <VectorTag Tag,
+          typename Resources = execution::details::ResourceSet<>,
+          typename... Options>
 VECOPS_ALWAYS_INLINE auto resolve_load_request(Options&&... options) {
   using Request = LoadRequest<
       Tag,
@@ -91,7 +109,8 @@ VECOPS_ALWAYS_INLINE auto resolve_load_request(Options&&... options) {
       option_type_or_t<IsMemoryAlignmentOption, mem::Unaligned, Options...>,
       option_type_or_t<IsMemoryTemporalityOption, mem::Temporal, Options...>,
       request_resolve::index_scale_of_v<Options...>,
-      request_resolve::index_vector_of_t<Tag, Options...>>;
+      request_resolve::index_vector_of_t<Tag, Options...>,
+      request_resolve::resources_of_t<Resources, Options...>>;
   Request request;
   if constexpr (Request::active_kind == Active::First) {
     request.first_count = find_option<IsFirstOption>(options...).count;
@@ -119,7 +138,9 @@ VECOPS_ALWAYS_INLINE auto resolve_load_request(Options&&... options) {
  * Folds a validated `store` option pack into a StoreRequest. The pack must
  * already satisfy `valid_memory_options<Tag, true, Options...>()`.
  */
-template <VectorTag Tag, typename... Options>
+template <VectorTag Tag,
+          typename Resources = execution::details::ResourceSet<>,
+          typename... Options>
 VECOPS_ALWAYS_INLINE auto resolve_store_request(Options&&... options) {
   using Request = StoreRequest<
       Tag,
@@ -128,7 +149,8 @@ VECOPS_ALWAYS_INLINE auto resolve_store_request(Options&&... options) {
       option_type_or_t<IsMemoryAlignmentOption, mem::Unaligned, Options...>,
       option_type_or_t<IsMemoryTemporalityOption, mem::Temporal, Options...>,
       request_resolve::index_scale_of_v<Options...>,
-      request_resolve::index_vector_of_t<Tag, Options...>>;
+      request_resolve::index_vector_of_t<Tag, Options...>,
+      request_resolve::resources_of_t<Resources, Options...>>;
   Request request;
   if constexpr (Request::active_kind == Active::First) {
     request.first_count = find_option<IsFirstOption>(options...).count;
@@ -233,7 +255,9 @@ VECOPS_ALWAYS_INLINE auto resolve_op_request(Options&&... options) {
  * The pack must already satisfy
  * `valid_memory_conversion_options<ToTag, From, false, Options...>()`.
  */
-template <VectorTag ToTag, Element From, typename... Options>
+template <VectorTag ToTag, Element From,
+          typename Resources = execution::details::ResourceSet<>,
+          typename... Options>
 VECOPS_ALWAYS_INLINE auto resolve_load_convert_request(Options&&... options) {
   using Request = LoadConvertRequest<
       ToTag,
@@ -253,7 +277,8 @@ VECOPS_ALWAYS_INLINE auto resolve_load_convert_request(Options&&... options) {
           cvt::Saturate, Options...>,
       typename request_resolve::ConvertMaskVectorOf<
           ToTag,
-          find_option_type_t<IsMaskedOption, Options...>>::type>;
+          find_option_type_t<IsMaskedOption, Options...>>::type,
+      request_resolve::resources_of_t<Resources, Options...>>;
   Request request;
   if constexpr (Request::active_kind == Active::First) {
     request.first_count = find_option<IsFirstOption>(options...).count;
@@ -282,7 +307,9 @@ VECOPS_ALWAYS_INLINE auto resolve_load_convert_request(Options&&... options) {
  * The pack must already satisfy
  * `valid_memory_conversion_options<FromTag, To, true, Options...>()`.
  */
-template <VectorTag FromTag, Element To, typename... Options>
+template <VectorTag FromTag, Element To,
+          typename Resources = execution::details::ResourceSet<>,
+          typename... Options>
 VECOPS_ALWAYS_INLINE auto resolve_store_convert_request(
     Options&&... options) {
   using Request = StoreConvertRequest<
@@ -305,7 +332,8 @@ VECOPS_ALWAYS_INLINE auto resolve_store_convert_request(
           mem::Packed, Options...>,
       typename request_resolve::ConvertMaskVectorOf<
           FromTag,
-          find_option_type_t<IsMaskedOption, Options...>>::type>;
+          find_option_type_t<IsMaskedOption, Options...>>::type,
+      request_resolve::resources_of_t<Resources, Options...>>;
   Request request;
   if constexpr (Request::active_kind == Active::First) {
     request.first_count = find_option<IsFirstOption>(options...).count;

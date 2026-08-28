@@ -35,6 +35,8 @@ struct Area4Provider {
 
 using Area4Catalog = hop::Tile2DGeneratedCatalog<
     Area4Provider, hop::Tile2DSearchSpace<4, 4, 4>>;
+using Area4Max3Catalog = hop::Tile2DGeneratedCatalog<
+    Area4Provider, hop::Tile2DSearchSpace<3, 3, 4>>;
 
 struct Visit {
   int a;
@@ -131,6 +133,25 @@ TEST(Tile2DTest, RuntimeExactArea4ExhaustivelyCoversDynamicSmallShapes) {
         for (nint_t n = 0; n <= 13; ++n) {
           run_and_check_cover<hop::tile2d_policy::RuntimeExactArea4>(
               Any{m}, Any{n}, Any{tm}, Any{tn}, Area4Catalog{});
+        }
+      }
+    }
+  }
+}
+
+TEST(Tile2DTest, RuntimeExactArea4Max3ExhaustivelyCoversDynamicSmallShapes) {
+  for (nint_t tm = 1; tm <= 3; ++tm) {
+    for (nint_t tn = 1; tn <= 3; ++tn) {
+      for (nint_t m = 0; m <= 13; ++m) {
+        for (nint_t n = 0; n <= 13; ++n) {
+          const auto visits = run_and_check_cover<
+              hop::tile2d_policy::RuntimeExactArea4Max3>(
+              Any{m}, Any{n}, Any{tm}, Any{tn}, Area4Max3Catalog{});
+          for (const auto& visit : visits) {
+            EXPECT_LE(visit.a, 3);
+            EXPECT_LE(visit.b, 3);
+            EXPECT_LE(visit.a * visit.b, 4);
+          }
         }
       }
     }

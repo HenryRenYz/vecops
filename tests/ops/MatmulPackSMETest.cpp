@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
 #include <vector>
 
@@ -331,6 +332,29 @@ TEST(MatmulPackSMETest, DirectAAndBAllElementWidths) {
   check_direct_pack<gemm::SME_F16F32, gemm::Operand::B>(29, 65);
   check_direct_pack<gemm::SME_I8I32<int8_t, uint8_t>, gemm::Operand::B>(
       37, 69);
+}
+
+template <typename Atom, gemm::Operand Side>
+void check_pipelined_direct_pack() {
+  using Packing = gemm::packing_t<Atom, Side>;
+  using T = typename Packing::Element;
+  const nint_t panel = static_cast<nint_t>(Packing::panel());
+  const nint_t word_chunk = panel * nint_t{sizeof(uint32_t)} /
+      (2 * nint_t{sizeof(T)});
+  check_direct_pack<Atom, Side>(
+      2 * panel + 3, 5 * word_chunk + Packing::KPack - 1);
+}
+
+TEST(MatmulPackSMETest, FullPanelsPipelineAcrossKChunks) {
+  check_pipelined_direct_pack<gemm::SME_F32F32, gemm::Operand::A>();
+  check_pipelined_direct_pack<gemm::SME_F32F32, gemm::Operand::B>();
+  check_pipelined_direct_pack<gemm::SME_BF16F32, gemm::Operand::A>();
+  check_pipelined_direct_pack<gemm::SME_BF16F32, gemm::Operand::B>();
+  check_pipelined_direct_pack<gemm::SME_F16F32, gemm::Operand::A>();
+  check_pipelined_direct_pack<gemm::SME_F16F32, gemm::Operand::B>();
+  using Int8Atom = gemm::SME_I8I32<int8_t, uint8_t>;
+  check_pipelined_direct_pack<Int8Atom, gemm::Operand::A>();
+  check_pipelined_direct_pack<Int8Atom, gemm::Operand::B>();
 }
 
 TEST(MatmulPackSMETest, StridedTransformUsesVectorFallback) {

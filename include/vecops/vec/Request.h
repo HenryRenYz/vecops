@@ -2,6 +2,7 @@
 #define VECOPS_VEC_REQUEST_H
 
 #include "vecops/CoreTypes.h"
+#include "vecops/execution/details/ResourceSet.h"
 #include "vecops/vec/Options.h"
 #include "vecops/vec/Tag.h"
 #include "vecops/vec/VecBase.h"
@@ -27,6 +28,14 @@
  */
 
 namespace vecops::vec {
+
+namespace details {
+
+/** Backend hook for execution states where indexed memory must be scalarized. */
+template <typename Backend, typename Resources>
+inline constexpr bool scalarize_indexed_memory_v = false;
+
+} // namespace details
 
 /** Inactive-lane addressing policy of a memory or elementwise operation. */
 enum class Active {
@@ -133,7 +142,8 @@ template <
     typename Alignment = mem::Unaligned,
     typename Temporality = mem::Temporal,
     int IndexScale = 0,
-    VectorValue IndexVector = Vec<IndexTag<Tag>>>
+    VectorValue IndexVector = Vec<IndexTag<Tag>>,
+    typename Resources = execution::details::ResourceSet<>>
 struct LoadRequest
     : details::request_storage::ActiveFields<A, Mask<Tag>>,
       details::request_storage::AddressingFields<Addr, IndexVector>,
@@ -146,6 +156,7 @@ struct LoadRequest
   using TemporalityOption = Temporality;
   static constexpr int index_scale = IndexScale;
   using IndexVectorType = IndexVector;
+  using ActiveResources = Resources;
 
   VECOPS_ALWAYS_INLINE constexpr LoadRequest() = default;
 
@@ -163,7 +174,8 @@ template <
     typename Alignment = mem::Unaligned,
     typename Temporality = mem::Temporal,
     int IndexScale = 0,
-    VectorValue IndexVector = Vec<IndexTag<Tag>>>
+    VectorValue IndexVector = Vec<IndexTag<Tag>>,
+    typename Resources = execution::details::ResourceSet<>>
 struct StoreRequest
     : details::request_storage::ActiveFields<A, Mask<Tag>>,
       details::request_storage::AddressingFields<Addr, IndexVector> {
@@ -174,6 +186,7 @@ struct StoreRequest
   using TemporalityOption = Temporality;
   static constexpr int index_scale = IndexScale;
   using IndexVectorType = IndexVector;
+  using ActiveResources = Resources;
 
   VECOPS_ALWAYS_INLINE constexpr StoreRequest() = default;
 
@@ -220,7 +233,8 @@ template <
     VectorValue IndexVector = Vec<IndexTag<ToTag>>,
     typename Layout = cvt::Ordered,
     typename ValuePolicy = cvt::Saturate,
-    MaskValue MaskVector = Mask<ToTag>>
+    MaskValue MaskVector = Mask<ToTag>,
+    typename Resources = execution::details::ResourceSet<>>
 struct LoadConvertRequest
     : details::request_storage::ActiveFields<A, MaskVector>,
       details::request_storage::AddressingFields<Addr, IndexVector>,
@@ -236,12 +250,12 @@ struct LoadConvertRequest
   using IndexVectorType = IndexVector;
   using LayoutOption = Layout;
   using ValuePolicyOption = ValuePolicy;
+  using MaskVectorType = MaskVector;
+  using ActiveResources = Resources;
   /// Natural mask domain for the layout: memory-side for unordered
   /// conversion, output-side otherwise.
   using MaskTag = std::conditional_t<
-      std::same_as<Layout, cvt::Unordered>,
-      Rebind<From, ToTag>,
-      ToTag>;
+      std::same_as<MaskVector, Mask<ToTag>>, ToTag, Rebind<From, ToTag>>;
 
 };
 
@@ -264,7 +278,8 @@ template <
     typename Layout = cvt::Ordered,
     typename ValuePolicy = cvt::Saturate,
     typename Packing = mem::Packed,
-    MaskValue MaskVector = Mask<Rebind<To, FromTag>>>
+    MaskValue MaskVector = Mask<Rebind<To, FromTag>>,
+    typename Resources = execution::details::ResourceSet<>>
 struct StoreConvertRequest
     : details::request_storage::ActiveFields<A, MaskVector>,
       details::request_storage::AddressingFields<Addr, IndexVector> {
@@ -280,6 +295,10 @@ struct StoreConvertRequest
   using ValuePolicyOption = ValuePolicy;
   using PackingOption = Packing;
   using MaskVectorType = MaskVector;
+  using MaskTag = std::conditional_t<
+      std::same_as<MaskVector, Mask<FromTag>>,
+      FromTag, Rebind<To, FromTag>>;
+  using ActiveResources = Resources;
 
 };
 

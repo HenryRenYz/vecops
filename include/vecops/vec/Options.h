@@ -50,6 +50,15 @@ enum class Accuracy { Strict, Fast, Estimate };
 
 namespace vecops::vec::opt {
 
+/** Compile-time proof of the execution resources active at a memory access. */
+template <typename Set>
+struct Resources {
+  using type = Set;
+};
+
+template <typename Set>
+inline constexpr Resources<Set> resources{};
+
 /** Compile-time options which select an operation-defined math accuracy. */
 namespace math {
 
@@ -265,10 +274,14 @@ struct IsStrideMetadata<meta::Dynamic<Alignment, Lo, Hi>> : std::true_type {};
  * indexed addressing are mutually exclusive and cannot be combined with
  * alignment options.
  */
-template <typename Stride>
+template <typename Stride, int S = 0>
   requires details::IsStrideMetadata<std::remove_cvref_t<Stride>>::value
 struct Strided {
+  static_assert(
+      S == 0 || S == 1 || S == 2 || S == 4 || S == 8,
+      "strided scale must be 0 (pointer elements), 1, 2, 4, or 8 bytes");
   using StrideType = std::remove_cvref_t<Stride>;
+  static constexpr int scale = S;
   StrideType stride;
 };
 
@@ -288,12 +301,26 @@ VECOPS_ALWAYS_INLINE constexpr Strided<meta::Any> strided(nint_t stride) {
   return {meta::Any{stride}};
 }
 
+template <int S>
+VECOPS_ALWAYS_INLINE constexpr Strided<meta::Any, S> strided(
+    nint_t stride, Scale<S>) {
+  return {meta::Any{stride}};
+}
+
+template <typename Stride, int S>
+  requires details::IsStrideMetadata<std::remove_cvref_t<Stride>>::value
+VECOPS_ALWAYS_INLINE constexpr Strided<std::remove_cvref_t<Stride>, S>
+strided(Stride stride, Scale<S>) {
+  return {stride};
+}
+
 } // namespace vecops::vec::opt
 
 namespace vecops::vec {
 
 // Addressing factories are also available unqualified alongside load/store.
 using opt::indexed;
+using opt::resources;
 using opt::scale;
 using opt::strided;
 

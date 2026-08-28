@@ -90,7 +90,9 @@ void check_raw(M m_value, N n_value, K k_value) {
       typename Operation::NExtentType, meta::to_value_t<N>>);
   static_assert(std::same_as<
       typename Operation::KExtentType, meta::to_value_t<K>>);
-  ExecutionSession execution{};
+  kernel::Workspace operation_storage(operation.required_workspace());
+  auto operation_workspace = operation_storage.view();
+  ExecutionSession execution{operation_workspace};
   operation(execution);
   for (nint_t i = 0; i < m; ++i) {
     for (nint_t j = 0; j < n; ++j) {
@@ -106,6 +108,54 @@ void check_raw(M m_value, N n_value, K k_value) {
         EXPECT_EQ(c[i * n + j], expected)
             << "m=" << i << " n=" << j;
       }
+    }
+  }
+}
+
+VECOPS_NOINLINE void check_dynamic_inner_stride(nint_t inner_stride) {
+  using Atom = gemm::SME_BF16F32;
+  using T = typename Atom::TA;
+  using Acc = typename Atom::TAcc;
+  constexpr nint_t m = 19;
+  constexpr nint_t n = 21;
+  constexpr nint_t k = 23;
+  const nint_t a_row_stride = k * inner_stride + 3;
+  const nint_t b_row_stride = k * inner_stride + 5;
+  std::vector<T> a(static_cast<std::size_t>(m * a_row_stride));
+  std::vector<T> b(static_cast<std::size_t>(n * b_row_stride));
+  std::vector<Acc> c(static_cast<std::size_t>(m * n), Acc{});
+  for (nint_t i = 0; i < m; ++i) {
+    for (nint_t kk = 0; kk < k; ++kk) {
+      a[i * a_row_stride + kk * inner_stride] = value<T>(i * k + kk, 13);
+    }
+  }
+  for (nint_t j = 0; j < n; ++j) {
+    for (nint_t kk = 0; kk < k; ++kk) {
+      b[j * b_row_stride + kk * inner_stride] = value<T>(j * k + kk, 11);
+    }
+  }
+  auto al = make_layout(
+      make_shape(m, k), make_strides(a_row_stride, inner_stride));
+  auto bl = make_layout(
+      make_shape(n, k), make_strides(b_row_stride, inner_stride));
+  static_assert(!std::same_as<stride_type_t<1, decltype(al)>, Const<1>>);
+  static_assert(!std::same_as<stride_type_t<1, decltype(bl)>, Const<1>>);
+  auto at = make_tensor(a.data(), al);
+  auto bt = make_tensor(b.data(), bl);
+  auto ct = make_tensor(c.data(), make_layout(make_shape(m, n)));
+  auto operation = ops::make_matmul<Atom>(m, n, k, at, bt, ct);
+  ExecutionSession execution{};
+  operation(execution);
+  for (nint_t i = 0; i < m; ++i) {
+    for (nint_t j = 0; j < n; ++j) {
+      Acc expected{};
+      for (nint_t kk = 0; kk < k; ++kk) {
+        expected += static_cast<Acc>(
+            a[i * a_row_stride + kk * inner_stride]) *
+            static_cast<Acc>(b[j * b_row_stride + kk * inner_stride]);
+      }
+      EXPECT_NEAR(c[i * n + j], expected, 3.0e-4f)
+          << "inner_stride=" << inner_stride << " m=" << i << " n=" << j;
     }
   }
 }
@@ -236,6 +286,24 @@ TEST(MatmulSMETest, FloatingInputTypes) {
 #if defined(HAS_SME_F64F64)
   check_raw<gemm::SME_F64F64>(11, 13, 17);
 #endif
+}
+
+TEST(MatmulSMETest, LargeRawProblemUsesOnTheFlyPackingWorkspace) {
+  using Atom = gemm::SME_BF16F32;
+  constexpr nint_t M = 32, N = 32, K = 64;
+  std::vector<typename Atom::TA> a(M * K), b(N * K);
+  std::vector<typename Atom::TAcc> c(M * N);
+  auto at = make_tensor(a.data(), make_layout(make_shape(M, K)));
+  auto bt = make_tensor(b.data(), make_layout(make_shape(N, K)));
+  auto ct = make_tensor(c.data(), make_layout(make_shape(M, N)));
+  auto operation = ops::make_matmul<Atom>(M, N, K, at, bt, ct);
+  EXPECT_GT(operation.required_workspace(), 0);
+  check_raw<Atom>(M, N, K);
+}
+
+TEST(MatmulSMETest, DynamicInnerStrideAlwaysUsesGenericLoad) {
+  check_dynamic_inner_stride(1);
+  check_dynamic_inner_stride(2);
 }
 
 TEST(MatmulSMETest, AllInt8SignednessCombinations) {

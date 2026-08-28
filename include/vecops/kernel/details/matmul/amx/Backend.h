@@ -9,7 +9,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <type_traits>
 #include <utility>
 
@@ -63,13 +62,21 @@ inline constexpr bool direct_row_major_output_v =
     std::same_as<
         tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
 
-/** One TILECFG image works for every supported AMX micro-kernel shape. */
+/** One TILECFG image spans a traversal; decode may shorten its active rows. */
 struct Configuration : execution::details::x86::TileConfiguration {
   Configuration() {
     for (int i = 0; i < 8; ++i) {
       column_bytes[i] = 64;
       rows[i] = 16;
     }
+  }
+
+  void set_horizontal_1x3_rows(nint_t active_m) {
+    VECOPS_ASSERT(active_m > 0 && active_m <= 16,
+                  "AMX 1x3 row count must be in [1, 16]");
+    const auto tile_rows = static_cast<std::uint8_t>(active_m);
+    // C0-C2 and A0 use tmm0-tmm3. B0-B2 remain sixteen rows.
+    for (int i = 0; i < 4; ++i) rows[i] = tile_rows;
   }
 };
 
@@ -103,24 +110,8 @@ consteval int sixteen_lane_power() {
   return power;
 }
 
-template <nint_t KPack, typename T>
-VECOPS_ALWAYS_INLINE void pack_b_full_panel_direct(
-    const T* source, nint_t row_stride, T* destination, nint_t k_tile) {
-  static_assert(KPack == 2 || KPack == 4);
-  static_assert(sizeof(T) * KPack == sizeof(uint32_t));
-  const __m512i lanes = _mm512_setr_epi32(
-      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-  const __m512i offsets = _mm512_mullo_epi32(
-      lanes, _mm512_set1_epi32(static_cast<int32_t>(row_stride)));
-  auto* output = reinterpret_cast<__m512i*>(destination);
-  for (nint_t kg = 0; kg < k_tile / KPack; ++kg) {
-    const __m512i words = _mm512_i32gather_epi32(
-        offsets, source + kg * KPack, sizeof(T));
-    _mm512_storeu_si512(output + kg, words);
-  }
-}
-
-template <gemm::Atom Atom, bool SpatialGuaranteed, typename Source>
+template <gemm::Atom Atom, bool SpatialGuaranteed, bool KGuaranteed,
+          typename Source>
 VECOPS_ALWAYS_INLINE const typename Atom::TA* prepare_a(
     const Source& source, nint_t m, nint_t k, nint_t logical_m,
     nint_t logical_k, typename Atom::TA* buffer) {
@@ -129,41 +120,21 @@ VECOPS_ALWAYS_INLINE const typename Atom::TA* prepare_a(
   if constexpr (is_packed_access_v<Atom, gemm::Operand::A, Source>) {
     static_assert(generic::RawDirectAccess<Source>,
                   "packed AMX A must be direct and untransformed");
-    if constexpr (!SpatialGuaranteed) {
-      if (m >= logical_m) {
-        std::fill_n(buffer, 16 * KR, T{});
-        return buffer;
-      }
-    }
     const auto& layout = source.spec().input_layout();
     const nint_t offset = tensor::offset_at(layout, m / 16, k / KR, 0, 0);
     return reinterpret_cast<const T*>(source.raw_data()) + offset;
   } else {
     static_assert(Source::Rank == 2, "unpacked AMX A must be rank two");
     using Tag = vec::ScalableTag<T, 0>;
-    const nint_t active_k = std::clamp(logical_k - k, nint_t{0}, KR);
-    for (nint_t row = 0; row < 16; ++row) {
-      const nint_t logical_row = m + row;
-      const auto value = [&] VECOPS_INLINE_LAMBDA {
-        if constexpr (SpatialGuaranteed) {
-          return source.load(
-              Tag{}, tensor::coord(logical_row, k), tensor::axis<1>,
-              vec::opt::first(active_k), vec::opt::zero);
-        } else {
-          return logical_row < logical_m
-              ? source.load(
-                    Tag{}, tensor::coord(logical_row, k), tensor::axis<1>,
-                    vec::opt::first(active_k), vec::opt::zero)
-              : vec::zeros(Tag{});
-        }
-      }();
-      vec::store(Tag{}, buffer + row * KR, value);
-    }
+    matmul_pack_details::amx::pack_a_tile<
+        KR, Tag, SpatialGuaranteed, KGuaranteed>(
+        source, buffer, m, k, logical_m, logical_k);
     return buffer;
   }
 }
 
-template <gemm::Atom Atom, bool SpatialGuaranteed, typename Source>
+template <gemm::Atom Atom, bool SpatialGuaranteed, bool KGuaranteed,
+          typename Source>
 VECOPS_ALWAYS_INLINE const typename Atom::TB* prepare_b(
     const Source& source, nint_t n, nint_t k, nint_t logical_n,
     nint_t logical_k, typename Atom::TB* buffer) {
@@ -174,12 +145,6 @@ VECOPS_ALWAYS_INLINE const typename Atom::TB* prepare_b(
   if constexpr (is_packed_access_v<Atom, gemm::Operand::B, Source>) {
     static_assert(generic::RawDirectAccess<Source>,
                   "packed AMX B must be direct and untransformed");
-    if constexpr (!SpatialGuaranteed) {
-      if (n >= logical_n) {
-        std::fill_n(buffer, 16 * KR, T{});
-        return buffer;
-      }
-    }
     const auto& layout = source.spec().input_layout();
     const nint_t offset = tensor::offset_at(
         layout, n / 16, k / KR, 0, 0, 0);
@@ -191,85 +156,103 @@ VECOPS_ALWAYS_INLINE const typename Atom::TB* prepare_b(
       const nint_t active_n = SpatialGuaranteed
           ? nint_t{16}
           : std::clamp(logical_n - n, nint_t{0}, nint_t{16});
-      const nint_t active_k = std::clamp(
-          logical_k - k, nint_t{0}, KR);
-      const bool gather_offsets_fit =
-          strides[0] >= std::numeric_limits<int32_t>::min() / 15 &&
-          strides[0] <= std::numeric_limits<int32_t>::max() / 15;
-      // Reuse the AMX packer's indexed word gathers for the common direct
-      // row-major path.  A complete KPack is required because its tail
-      // handling deliberately backs the word load up to stay in bounds.
-      if (gather_offsets_fit && active_n == 16 && active_k == KR) {
+      const nint_t active_k = KGuaranteed
+          ? KR
+          : std::clamp(logical_k - k, nint_t{0}, KR);
+      if constexpr (SpatialGuaranteed && KGuaranteed) {
         const auto* pointer = reinterpret_cast<const T*>(source.raw_data()) +
             n * strides[0] + k;
-        pack_b_full_panel_direct<KP>(
+        matmul_pack_details::amx::pack_b_full_panel_direct<KP>(
             pointer, strides[0], buffer, KR);
         return buffer;
+      } else if constexpr (KGuaranteed) {
+        if (active_n == 16) {
+          const auto* pointer = reinterpret_cast<const T*>(source.raw_data()) +
+              n * strides[0] + k;
+          matmul_pack_details::amx::pack_b_full_panel_direct<KP>(
+              pointer, strides[0], buffer, KR);
+          return buffer;
+        }
       }
-      if (gather_offsets_fit && active_n > 0 && active_k >= KP) {
-        const auto* pointer = reinterpret_cast<const T*>(source.raw_data()) +
-            n * strides[0] + k;
-        matmul_pack_details::amx::pack_b_direct<KP>(
-            pointer, strides[0], buffer, active_n, active_k, 16, KR);
-        return buffer;
-      }
+      // load_b_tile has already rejected an inactive N tile, and the enclosing
+      // K loop only calls prepare_b for k < logical_k.
+      const auto* pointer = reinterpret_cast<const T*>(source.raw_data()) +
+          n * strides[0] + k;
+      matmul_pack_details::amx::pack_b_partial_panel_direct<KP>(
+          pointer, strides[0], buffer, active_n, active_k);
+      return buffer;
     }
     using Tag = vec::ScalableTag<T, sixteen_lane_power<T>()>;
-    for (nint_t kg = 0; kg < KR / KP; ++kg) {
-      auto load_k = [&](nint_t ki) VECOPS_INLINE_LAMBDA {
-        const nint_t kk = k + kg * KP + ki;
-        const nint_t active_n = std::clamp(
-            logical_n - n, nint_t{0}, nint_t{16});
-        if constexpr (SpatialGuaranteed) {
-          return kk < logical_k
-              ? source.load(
-                    Tag{}, tensor::coord(n, kk), tensor::axis<0>,
-                    vec::opt::first(active_n), vec::opt::zero)
-              : vec::zeros(Tag{});
-        } else {
-          return kk < logical_k && active_n > 0
-              ? source.load(
-                    Tag{}, tensor::coord(n, kk), tensor::axis<0>,
-                    vec::opt::first(active_n), vec::opt::zero)
-              : vec::zeros(Tag{});
-        }
-      };
-      if constexpr (KP == 2) {
-        using PackedTag = vec::Twice<Tag>;
-        const auto packed = generic::interleave_pair<Tag>(load_k(0), load_k(1));
-        vec::store(PackedTag{}, buffer + kg * 16 * KP, packed);
-      } else {
-        static_assert(KP == 4);
-        using PackedTag = vec::Twice<vec::Twice<Tag>>;
-        const auto packed = generic::interleave_quad<Tag>(
-            load_k(0), load_k(1), load_k(2), load_k(3));
-        vec::store(PackedTag{}, buffer + kg * 16 * KP, packed);
-      }
-    }
+    matmul_pack_details::amx::pack_b_tile<
+        KP, KR, Tag, SpatialGuaranteed, KGuaranteed>(
+            source, buffer, n, k, logical_n, logical_k);
     return buffer;
   }
 }
 
-template <int Tile, typename CInput>
+template <bool Full, bool NonEmpty, nint_t Offset>
+VECOPS_ALWAYS_INLINE auto tile_active_extent(nint_t active) {
+  if constexpr (Full) {
+    return meta::cint<16>;
+  } else {
+    const nint_t value = std::clamp(
+        active - Offset, nint_t{0}, nint_t{16});
+    if constexpr (NonEmpty) return meta::dyn<1, 1, 16>(value);
+    else return meta::dyn<1, 0, 16>(value);
+  }
+}
+
+template <typename Extent>
+inline constexpr bool full_tile_extent_v = [] {
+  using E = std::remove_cvref_t<Extent>;
+  if constexpr (E::is_const) return E::value == 16;
+  else return false;
+}();
+
+template <typename Extent>
+inline constexpr bool nonempty_tile_extent_v =
+    meta::has_lower_bound_v<std::remove_cvref_t<Extent>> &&
+    meta::lower_bound_v<std::remove_cvref_t<Extent>> > 0;
+
+template <int Tile, meta::ValueType ActiveM, meta::ValueType ActiveN,
+          typename CInput>
 VECOPS_ALWAYS_INLINE void initialize_c_tile(
     const CInput& input, nint_t m, nint_t n,
-    nint_t active_m, nint_t active_n,
+    ActiveM active_m, ActiveN active_n,
     typename CInput::ComputeType* buffer) {
   using T = typename CInput::ComputeType;
   using Transform = typename CInput::Transform;
+  constexpr bool FullM = full_tile_extent_v<ActiveM>;
+  constexpr bool FullN = full_tile_extent_v<ActiveN>;
+  constexpr bool NonEmpty =
+      nonempty_tile_extent_v<ActiveM> && nonempty_tile_extent_v<ActiveN>;
+  const nint_t active_m_value = static_cast<nint_t>(active_m);
+  const nint_t active_n_value = static_cast<nint_t>(active_n);
   // A resident family may be wider than a boundary region.  Such completely
   // inactive accumulator tiles still participate in the AMX dot instruction,
   // so initialize them to zero without asking DataAccess for an out-of-range
   // base coordinate.
-  if (active_m == 0 || active_n == 0) {
-    amx_intrinsics::zero<Tile>();
-    return;
+  // Keep the existing zero-prologue instruction schedule unchanged. A
+  // statically nonempty nonzero prologue does not need the runtime check.
+  if constexpr (IsZeroTransform<Transform>::value || !NonEmpty) {
+    if (active_m_value == 0 || active_n_value == 0) {
+      amx_intrinsics::zero<Tile>();
+      return;
+    }
   }
   if constexpr (IsZeroTransform<Transform>::value) {
     amx_intrinsics::zero<Tile>();
   } else {
     if constexpr (direct_row_major_input_v<CInput>) {
-      if (active_m == 16 && active_n == 16) {
+      if constexpr (FullM && FullN) {
+        const auto strides = input.raw_strides();
+        const auto* pointer = reinterpret_cast<const T*>(input.raw_data()) +
+            m * strides[0] + n;
+        amx_intrinsics::load<Tile>(
+            pointer, strides[0] * static_cast<nint_t>(sizeof(T)));
+        return;
+      } else if ((FullM || active_m_value == 16) &&
+                 (FullN || active_n_value == 16)) {
         const auto strides = input.raw_strides();
         const auto* pointer = reinterpret_cast<const T*>(input.raw_data()) +
             m * strides[0] + n;
@@ -279,28 +262,58 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
       }
     }
     using Tag = vec::ScalableTag<T, 0>;
-    for (nint_t row = 0; row < 16; ++row) {
-      const auto value = row < active_m
-          ? input.load(
-                Tag{}, tensor::coord(m + row, n), tensor::axis<1>,
-                vec::opt::first(active_n), vec::opt::zero)
-          : vec::zeros(Tag{});
-      vec::store(Tag{}, buffer + row * 16, value);
+    auto load_row = [&](nint_t row) VECOPS_INLINE_LAMBDA {
+      if constexpr (FullN) {
+        return input.load(
+            Tag{}, tensor::coord(m + row, n), tensor::axis<1>);
+      } else {
+        return input.load(
+            Tag{}, tensor::coord(m + row, n), tensor::axis<1>,
+            vec::opt::first(active_n_value), vec::opt::zero);
+      }
+    };
+    if constexpr (FullM) {
+      VECOPS_UNROLL
+      for (nint_t row = 0; row < 16; ++row) {
+        vec::store(Tag{}, buffer + row * 16, load_row(row));
+      }
+    } else {
+      for (nint_t row = 0; row < active_m_value; ++row) {
+        vec::store(Tag{}, buffer + row * 16, load_row(row));
+      }
+      const auto zero = vec::zeros(Tag{});
+      for (nint_t row = active_m_value; row < 16; ++row) {
+        vec::store(Tag{}, buffer + row * 16, zero);
+      }
     }
     amx_intrinsics::load<Tile>(buffer, 16 * sizeof(T));
   }
 }
 
-template <gemm::Atom Atom, int Tile, bool SpatialGuaranteed, typename Source>
+template <gemm::Atom Atom, int Tile, bool SpatialGuaranteed, bool NonEmpty,
+          bool DirectInactiveZero, bool KGuaranteed, typename Source>
 VECOPS_ALWAYS_INLINE void load_a_tile(
     const Source& source, nint_t m, nint_t k,
     nint_t logical_m, nint_t logical_k,
     typename Atom::TA* buffer) {
   using T = typename Atom::TA;
   constexpr nint_t KR = decltype(Atom::K_R)::value;
+  if constexpr (!NonEmpty && DirectInactiveZero) {
+    if (m >= logical_m) {
+      amx_intrinsics::zero<Tile>();
+      return;
+    }
+  }
   if constexpr (direct_row_major_input_v<Source>) {
-    if ((SpatialGuaranteed || m + 16 <= logical_m) &&
-        k + KR <= logical_k) {
+    if constexpr (SpatialGuaranteed && KGuaranteed) {
+      const auto strides = source.raw_strides();
+      const auto* pointer = reinterpret_cast<const T*>(source.raw_data()) +
+          m * strides[0] + k;
+      amx_intrinsics::load<Tile>(
+          pointer, strides[0] * static_cast<nint_t>(sizeof(T)));
+      return;
+    } else if ((SpatialGuaranteed || m + 16 <= logical_m) &&
+               (KGuaranteed || k + KR <= logical_k)) {
       const auto strides = source.raw_strides();
       const auto* pointer = reinterpret_cast<const T*>(source.raw_data()) +
           m * strides[0] + k;
@@ -308,11 +321,50 @@ VECOPS_ALWAYS_INLINE void load_a_tile(
           pointer, strides[0] * static_cast<nint_t>(sizeof(T)));
       return;
     }
+    if constexpr (!DirectInactiveZero) {
+      // Keep the raw-A / packed-B tail pack in a separate AVX-512 function.
+      // GCC 13 otherwise misallocates tile state when this vector pack is
+      // inlined into exact 1xN AMX families.
+      const auto strides = source.raw_strides();
+      const auto* pointer = reinterpret_cast<const T*>(source.raw_data()) +
+          m * strides[0] + k;
+      const nint_t active_m = std::clamp(
+          logical_m - m, nint_t{0}, nint_t{16});
+      const nint_t active_k = KGuaranteed
+          ? KR
+          : std::clamp(logical_k - k, nint_t{0}, KR);
+      matmul_pack_details::amx::pack_a_partial_tile_direct(
+          pointer, strides[0], buffer, active_m, active_k);
+      amx_intrinsics::load<Tile>(buffer, 64);
+      return;
+    }
   }
   amx_intrinsics::load<Tile>(
-      prepare_a<Atom, SpatialGuaranteed>(
+      prepare_a<Atom, SpatialGuaranteed, KGuaranteed>(
           source, m, k, logical_m, logical_k, buffer),
       64);
+}
+
+template <gemm::Atom Atom, int Tile, bool SpatialGuaranteed, bool NonEmpty,
+          bool KGuaranteed, typename Source>
+VECOPS_ALWAYS_INLINE void load_b_tile(
+    const Source& source, nint_t n, nint_t k,
+    nint_t logical_n, nint_t logical_k,
+    typename Atom::TB* buffer, bool stream) {
+  if constexpr (!NonEmpty) {
+    if (n >= logical_n) {
+      amx_intrinsics::zero<Tile>();
+      return;
+    }
+  }
+  const auto* pointer = prepare_b<Atom, SpatialGuaranteed, KGuaranteed>(
+      source, n, k, logical_n, logical_k, buffer);
+  if constexpr (is_packed_access_v<Atom, gemm::Operand::B, Source>) {
+    if (stream) amx_intrinsics::stream_load<Tile>(pointer, 64);
+    else amx_intrinsics::load<Tile>(pointer, 64);
+  } else {
+    amx_intrinsics::load<Tile>(pointer, 64);
+  }
 }
 
 template <gemm::Atom Atom, int NM, int NN, std::size_t... I>
@@ -329,25 +381,77 @@ VECOPS_ALWAYS_INLINE void compute_tiles() {
   compute_tiles_impl<Atom, NM, NN>(std::make_index_sequence<NM * NN>{});
 }
 
-template <int Tile, bool FullTile, bool NonEmpty, typename COutput>
+template <gemm::Atom Atom, typename Case, bool KGuaranteed,
+          bool DirectInactiveZeroA, typename A, typename B>
+VECOPS_ALWAYS_INLINE void multiply_k_tile(
+    const A& a, const B& b,
+    nint_t logical_m, nint_t logical_n, nint_t logical_k,
+    nint_t m, nint_t n, nint_t k,
+    typename Atom::TA* a_buffers, typename Atom::TB* b_buffers,
+    bool stream_b) {
+  constexpr int NM = Case::a;
+  constexpr int NN = Case::b;
+  constexpr int Outputs = NM * NN;
+  constexpr bool FullM =
+      Case::m_mask == tile::Tile2DMaskMode::unmasked;
+  constexpr bool FullN =
+      Case::n_mask == tile::Tile2DMaskMode::unmasked;
+  constexpr bool NonEmptyM = FullM || Case::exact_blocks;
+  constexpr bool NonEmptyN = FullN || Case::exact_blocks;
+  auto load_a = [&]<std::size_t I>() VECOPS_INLINE_LAMBDA {
+    load_a_tile<
+        Atom, Outputs + static_cast<int>(I),
+        FullM || (Case::exact_blocks && I + 1 < NM), NonEmptyM,
+        DirectInactiveZeroA, KGuaranteed>(
+        a, m + static_cast<nint_t>(I) * 16, k,
+        logical_m, logical_k,
+        a_buffers + I * 1024 / sizeof(typename Atom::TA));
+  };
+  auto load_b = [&]<std::size_t I>() VECOPS_INLINE_LAMBDA {
+    load_b_tile<
+        Atom, Outputs + NM + static_cast<int>(I),
+        FullN || (Case::exact_blocks && I + 1 < NN), NonEmptyN,
+        KGuaranteed>(
+        b, n + static_cast<nint_t>(I) * 16, k,
+        logical_n, logical_k,
+        b_buffers + I * 1024 / sizeof(typename Atom::TB), stream_b);
+  };
+  [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
+    (load_a.template operator()<I>(), ...);
+  }(std::make_index_sequence<NM>{});
+  [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
+    (load_b.template operator()<I>(), ...);
+  }(std::make_index_sequence<NN>{});
+  compute_tiles<Atom, NM, NN>();
+}
+
+template <int Tile, meta::ValueType ActiveM, meta::ValueType ActiveN,
+          typename COutput>
 VECOPS_ALWAYS_INLINE void store_c_tile(
     COutput& output, nint_t m, nint_t n,
-    nint_t active_m, nint_t active_n,
+    ActiveM active_m, ActiveN active_n,
     typename COutput::ComputeType* buffer) {
   using T = typename COutput::ComputeType;
+  constexpr bool FullM = full_tile_extent_v<ActiveM>;
+  constexpr bool FullN = full_tile_extent_v<ActiveN>;
+  constexpr bool NonEmpty =
+      nonempty_tile_extent_v<ActiveM> && nonempty_tile_extent_v<ActiveN>;
+  const nint_t active_m_value = static_cast<nint_t>(active_m);
+  const nint_t active_n_value = static_cast<nint_t>(active_n);
   // Do not form a DataAccess base coordinate for an empty resident sub-tile.
   if constexpr (!NonEmpty) {
-    if (active_m == 0 || active_n == 0) return;
+    if (active_m_value == 0 || active_n_value == 0) return;
   }
   if constexpr (direct_row_major_output_v<COutput>) {
-    if constexpr (FullTile) {
+    if constexpr (FullM && FullN) {
       const auto strides = output.raw_strides();
       auto* pointer = reinterpret_cast<T*>(output.raw_data()) +
           m * strides[0] + n;
       amx_intrinsics::store<Tile>(
           pointer, strides[0] * static_cast<nint_t>(sizeof(T)));
       return;
-    } else if (active_m == 16 && active_n == 16) {
+    } else if ((FullM || active_m_value == 16) &&
+               (FullN || active_n_value == 16)) {
       const auto strides = output.raw_strides();
       auto* pointer = reinterpret_cast<T*>(output.raw_data()) +
           m * strides[0] + n;
@@ -358,15 +462,25 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
   }
   amx_intrinsics::store<Tile>(buffer, 16 * sizeof(T));
   using Tag = vec::ScalableTag<T, 0>;
-  for (nint_t row = 0; row < active_m; ++row) {
+  auto store_row = [&](nint_t row) VECOPS_INLINE_LAMBDA {
     const auto value = vec::load(Tag{}, buffer + row * 16);
-    output.store(
-        Tag{}, tensor::coord(m + row, n), tensor::axis<1>, value,
-        vec::opt::first(active_n));
+    if constexpr (FullN) {
+      output.store(
+          Tag{}, tensor::coord(m + row, n), tensor::axis<1>, value);
+    } else {
+      output.store(
+          Tag{}, tensor::coord(m + row, n), tensor::axis<1>, value,
+          vec::opt::first(active_n_value));
+    }
+  };
+  if constexpr (FullM) {
+    for (nint_t row = 0; row < 16; ++row) store_row(row);
+  } else {
+    for (nint_t row = 0; row < active_m_value; ++row) store_row(row);
   }
 }
 
-template <gemm::Atom Atom, typename Case,
+template <gemm::Atom Atom, typename Case, typename Plan,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_ALWAYS_INLINE void microkernel(
     const A& a, const B& b, const CInput& c_input, COutput& c_output,
@@ -381,8 +495,12 @@ VECOPS_ALWAYS_INLINE void microkernel(
       Case::m_mask == tile::Tile2DMaskMode::unmasked;
   constexpr bool FullN =
       Case::n_mask == tile::Tile2DMaskMode::unmasked;
-  constexpr bool GuaranteedM = FullM || Case::exact_blocks;
-  constexpr bool GuaranteedN = FullN || Case::exact_blocks;
+  // GCC miscompiles the early AMX tile-zero control flow for the raw-A /
+  // packed-B specialization. Keep its inactive A tile on the scratch path;
+  // every other covered input combination safely uses the faster tile zero.
+  constexpr bool DirectInactiveZeroA =
+      is_packed_access_v<Atom, gemm::Operand::A, A> ||
+      !is_packed_access_v<Atom, gemm::Operand::B, B>;
   auto* bytes = static_cast<std::byte*>(scratch);
   auto* a_buffers = reinterpret_cast<typename Atom::TA*>(bytes);
   auto* b_buffers = reinterpret_cast<typename Atom::TB*>(bytes + NM * 1024);
@@ -394,44 +512,94 @@ VECOPS_ALWAYS_INLINE void microkernel(
          c_input,
          m + static_cast<nint_t>(I / NN) * 16,
          n + static_cast<nint_t>(I % NN) * 16,
-         std::clamp(active_m - static_cast<nint_t>(I / NN) * 16,
-                    nint_t{0}, nint_t{16}),
-         std::clamp(active_n - static_cast<nint_t>(I % NN) * 16,
-                    nint_t{0}, nint_t{16}),
+         tile_active_extent<
+             FullM || (Case::exact_blocks && I / NN + 1 < NM),
+             FullM || Case::exact_blocks,
+             static_cast<nint_t>(I / NN) * 16>(active_m),
+         tile_active_extent<
+             FullN || (Case::exact_blocks && I % NN + 1 < NN),
+             FullN || Case::exact_blocks,
+             static_cast<nint_t>(I % NN) * 16>(active_n),
          c_buffers + I * 256), ...);
   }(std::make_index_sequence<Outputs>{});
 
-  for (nint_t k = 0; k < logical_k; k += KR) {
-    [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
-      (load_a_tile<Atom, Outputs + static_cast<int>(I), GuaranteedM>(
-           a, m + static_cast<nint_t>(I) * 16, k,
-           logical_m, logical_k,
-           a_buffers + I * 1024 / sizeof(typename Atom::TA)), ...);
-    }(std::make_index_sequence<NM>{});
-    [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
-      (amx_intrinsics::load<Outputs + NM + static_cast<int>(I)>(
-           prepare_b<Atom, GuaranteedN>(
-               b, n + static_cast<nint_t>(I) * 16, k,
-               logical_n, logical_k,
-               b_buffers + I * 1024 / sizeof(typename Atom::TB)),
-           64), ...);
-    }(std::make_index_sequence<NN>{});
-    compute_tiles<Atom, NM, NN>();
+  constexpr bool SplitKForAccess =
+      (!is_packed_access_v<Atom, gemm::Operand::A, A> &&
+       !direct_row_major_input_v<A>) ||
+      (!is_packed_access_v<Atom, gemm::Operand::B, B> &&
+       !direct_row_major_input_v<B>);
+  const bool stream_b = [&] VECOPS_INLINE_LAMBDA {
+    if constexpr (is_packed_access_v<Atom, gemm::Operand::B, B>) {
+      // Match oneDNN's cache-footprint policy: TILELOADDT1 is valuable once
+      // the packed weights no longer fit in this CPU's 48 KiB private L1D,
+      // but hurts the reuse of small panels.
+      constexpr nint_t L1Elements =
+          (48 * 1024) / sizeof(typename Atom::TB);
+      return logical_k > 0 &&
+          (logical_k >= L1Elements ||
+           logical_n > (L1Elements - 1) / logical_k);
+    } else {
+      return false;
+    }
+  }();
+  if constexpr (Plan::value) {
+    for (nint_t k = 0; k < logical_k; k += KR) {
+      multiply_k_tile<Atom, Case, true, DirectInactiveZeroA>(
+          a, b, logical_m, logical_n, logical_k, m, n, k,
+          a_buffers, b_buffers, stream_b);
+    }
+  } else if constexpr (!SplitKForAccess) {
+    // Direct inputs already select an unmasked tileload/full-panel pack at
+    // runtime, while packed panels are padded in K. Splitting either kind
+    // would clone the kernel body merely to remove a predictable condition.
+    for (nint_t k = 0; k < logical_k; k += KR) {
+      multiply_k_tile<Atom, Case, false, DirectInactiveZeroA>(
+          a, b, logical_m, logical_n, logical_k, m, n, k,
+          a_buffers, b_buffers, stream_b);
+    }
+  } else {
+    const nint_t full_k = logical_k / KR * KR;
+    for (nint_t k = 0; k < full_k; k += KR) {
+      multiply_k_tile<Atom, Case, true, DirectInactiveZeroA>(
+          a, b, logical_m, logical_n, logical_k, m, n, k,
+          a_buffers, b_buffers, stream_b);
+    }
+    if (full_k < logical_k) {
+      multiply_k_tile<Atom, Case, false, DirectInactiveZeroA>(
+          a, b, logical_m, logical_n, logical_k, m, n, full_k,
+          a_buffers, b_buffers, stream_b);
+    }
   }
 
   [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
-    (store_c_tile<
-         static_cast<int>(I), FullM && FullN,
-         (FullM && FullN) || Case::exact_blocks>(
+    (store_c_tile<static_cast<int>(I)>(
          c_output,
          m + static_cast<nint_t>(I / NN) * 16,
          n + static_cast<nint_t>(I % NN) * 16,
-         std::clamp(active_m - static_cast<nint_t>(I / NN) * 16,
-                    nint_t{0}, nint_t{16}),
-         std::clamp(active_n - static_cast<nint_t>(I % NN) * 16,
-                    nint_t{0}, nint_t{16}),
+         tile_active_extent<
+             FullM || (Case::exact_blocks && I / NN + 1 < NM),
+             FullM || Case::exact_blocks,
+             static_cast<nint_t>(I / NN) * 16>(active_m),
+         tile_active_extent<
+             FullN || (Case::exact_blocks && I % NN + 1 < NN),
+             FullN || Case::exact_blocks,
+             static_cast<nint_t>(I % NN) * 16>(active_n),
          c_buffers + I * 256), ...);
   }(std::make_index_sequence<Outputs>{});
+}
+
+template <gemm::Atom Atom, typename Case, typename Plan,
+          typename A, typename B, typename CInput, typename COutput>
+VECOPS_NOINLINE void exact_microkernel(
+    const A& a, const B& b, const CInput& c_input, COutput& c_output,
+    nint_t logical_m, nint_t logical_n, nint_t logical_k,
+    nint_t m, nint_t n, nint_t active_m, nint_t active_n,
+    void* scratch) {
+  static_assert(Case::exact_blocks);
+  microkernel<Atom, Case, Plan>(
+      a, b, c_input, c_output,
+      logical_m, logical_n, logical_k,
+      m, n, active_m, active_n, scratch);
 }
 
 } // namespace vecops::kernel::matmul_details::amx
@@ -452,7 +620,7 @@ struct Backend<matmul_implementation::AMX> {
             typename A, typename B>
   using EffectivePolicy = std::conditional_t<
       std::same_as<Policy, matmul_policy::Automatic>,
-      kernel::loop::tile2d_policy::FourRegions, Policy>;
+      kernel::loop::tile2d_policy::RuntimeExactArea4Max3, Policy>;
 
   template <gemm::Atom Atom, typename Policy,
             execution::ExecutionScope Scope,
@@ -467,6 +635,18 @@ struct Backend<matmul_implementation::AMX> {
         execution::details::x86::Tiles, Scope>);
     VECOPS_ASSERT(scratch != nullptr, "AMX matmul scratch is null");
     amx::Configuration configuration;
+    if constexpr (
+        std::same_as<Policy, matmul_policy::Automatic> &&
+        amx::is_packed_access_v<Atom, gemm::Operand::B, B>) {
+      const nint_t logical_m = static_cast<nint_t>(m);
+      const nint_t logical_n = static_cast<nint_t>(n);
+      if (logical_m > 0 && logical_m <= 16) {
+        const nint_t n_blocks = ceil_div(logical_n, nint_t{16});
+        if (n_blocks > 0 && n_blocks % 3 == 0) {
+          configuration.set_horizontal_1x3_rows(logical_m);
+        }
+      }
+    }
     scope.with_configuration(configuration, [&](auto&)
         VECOPS_INLINE_LAMBDA_NOEXCEPT {
       matmul_details::run_tiles<Backend, Atom, Policy>(
@@ -474,10 +654,13 @@ struct Backend<matmul_implementation::AMX> {
     });
   }
 
-  template <gemm::Atom, typename A, typename B,
+  template <gemm::Atom Atom, typename A, typename B,
             meta::ValueType K, typename Fn>
   VECOPS_ALWAYS_INLINE static void dispatch_plan(K, Fn&& fn) {
-    std::forward<Fn>(fn).template operator()<std::false_type>();
+    constexpr nint_t KR = decltype(Atom::K_R)::value;
+    using Plan = std::bool_constant<
+        std::remove_cvref_t<K>::aligns(KR)>;
+    std::forward<Fn>(fn).template operator()<Plan>();
   }
 
   template <gemm::Atom Atom, typename Case, typename Plan,
@@ -487,10 +670,17 @@ struct Backend<matmul_implementation::AMX> {
       nint_t logical_m, nint_t logical_n, nint_t logical_k,
       nint_t m, nint_t n, nint_t active_m, nint_t active_n,
       void* scratch) {
-    amx::microkernel<Atom, Case>(
-        a, b, c_input, c_output,
-        logical_m, logical_n, logical_k,
-        m, n, active_m, active_n, scratch);
+    if constexpr (Case::exact_blocks) {
+      amx::exact_microkernel<Atom, Case, Plan>(
+          a, b, c_input, c_output,
+          logical_m, logical_n, logical_k,
+          m, n, active_m, active_n, scratch);
+    } else {
+      amx::microkernel<Atom, Case, Plan>(
+          a, b, c_input, c_output,
+          logical_m, logical_n, logical_k,
+          m, n, active_m, active_n, scratch);
+    }
   }
 };
 

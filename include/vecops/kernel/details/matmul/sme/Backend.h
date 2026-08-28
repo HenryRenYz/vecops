@@ -123,13 +123,6 @@ VECOPS_ALWAYS_INLINE auto as_native(V value) {
   return static_cast<vec::Vec<Tag>>(value);
 }
 
-#if defined(HAS_SME_FA64)
-VECOPS_ALWAYS_INLINE svuint32_t gather_words(
-    svbool_t pg, const uint32_t* base, svint32_t offsets) {
-  return svld1_gather_s32offset_u32(pg, base, offsets);
-}
-#endif
-
 template <gemm::Atom Atom, gemm::Operand Side, int Block,
           bool FullK, typename Source>
 VECOPS_ALWAYS_INLINE auto load_operand(
@@ -155,60 +148,37 @@ VECOPS_ALWAYS_INLINE auto load_operand(
     static_assert(Source::Rank == 2, "unpacked SME input must be rank two");
     const nint_t active = vec::details::sme::clamp_value(
         logical_spatial - spatial, nint_t{0}, lanes);
-#if defined(HAS_SME_FA64)
-    if constexpr (generic::RawDirectAccess<Source> && sizeof(T) <= 4) {
+    if constexpr (direct_row_major_input_v<Source> && sizeof(T) <= 4) {
       const auto strides = source.raw_strides();
       const nint_t k = kg * KP;
       const nint_t row_bytes = strides[0] * static_cast<nint_t>(sizeof(T));
-      if (strides[1] == 1 && (FullK || k + KP <= logical_k) &&
+      if ((FullK || k + KP <= logical_k) &&
           row_bytes >= std::numeric_limits<int32_t>::min() &&
           row_bytes <= std::numeric_limits<int32_t>::max()) {
-        const svbool_t pg = svwhilelt_b32(nint_t{0}, active);
-        const svint32_t offsets = svindex_s32(
-            0, static_cast<int32_t>(row_bytes));
+        using WordTag = vec::ScalableTag<uint32_t, 0>;
+        using Resources = typename std::remove_cvref_t<
+            decltype(source.policy())>::ActiveResources;
         const auto* base = reinterpret_cast<const uint32_t*>(
             source.raw_data() + spatial * strides[0] + k);
-        const svuint32_t words = gather_words(pg, base, offsets);
-        if constexpr (std::same_as<T, float32_t>) {
-          return svreinterpret_f32_u32(words);
-        } else if constexpr (std::same_as<T, float16_t>) {
-          return svreinterpret_f16_u32(words);
-        } else if constexpr (std::same_as<T, bfloat16_t>) {
-          return svreinterpret_bf16_u32(words);
-        } else if constexpr (std::same_as<T, int8_t>) {
-          return svreinterpret_s8_u32(words);
-        } else {
-          static_assert(std::same_as<T, uint8_t>);
-          return svreinterpret_u8_u32(words);
-        }
+        const auto words = vec::load(
+            WordTag{}, base, vec::opt::first(active),
+            vec::strided(row_bytes, vec::scale<1>),
+            vec::resources<Resources>);
+        return vec::bitcast(NativeTag{}, WordTag{}, words);
       }
     }
-#endif
     auto load_k = [&](nint_t ki) VECOPS_INLINE_LAMBDA {
       const nint_t k = kg * KP + ki;
-      auto result = vec::zeros(ScalarTag{});
       if constexpr (FullK) {
-        for (nint_t lane = 0; lane < active; ++lane) {
-          const auto one = source.load(
-              ScalarTag{}, tensor::coord(spatial + lane, k), tensor::axis<1>,
-              vec::opt::first(1), vec::opt::zero);
-          result = vec::set(
-              ScalarTag{}, result, lane, vec::get(ScalarTag{}, one, 0));
-        }
+        return source.load(
+            ScalarTag{}, tensor::coord(spatial, k), tensor::axis<0>,
+            vec::opt::first(active), vec::opt::zero);
       } else if (k < logical_k) {
-        // TODO: Provide a streaming-safe vector gather/scatter lowering for
-        // SME targets that have normal-mode SVE gather/scatter but lack FA64.
-        // Until then scalar-width DataAccess calls preserve every conversion
-        // and transform contract without requiring a streaming gather.
-        for (nint_t lane = 0; lane < active; ++lane) {
-          const auto one = source.load(
-              ScalarTag{}, tensor::coord(spatial + lane, k), tensor::axis<1>,
-              vec::opt::first(1), vec::opt::zero);
-          result = vec::set(
-              ScalarTag{}, result, lane, vec::get(ScalarTag{}, one, 0));
-        }
+        return source.load(
+            ScalarTag{}, tensor::coord(spatial, k), tensor::axis<0>,
+            vec::opt::first(active), vec::opt::zero);
       }
-      return result;
+      return vec::zeros(ScalarTag{});
     };
     if constexpr (KP == 1) {
       return as_native<T>(load_k(0));
@@ -267,10 +237,8 @@ VECOPS_ALWAYS_INLINE void compute_packed_groups(
   const nint_t b_step = b.raw_strides()[1];
 
   if constexpr (NN == 1) {
-    const auto* b0 = packed_block_pointer<
-        Atom, gemm::Operand::B, 0>(b, n);
-    const auto* a0 = packed_block_pointer<
-        Atom, gemm::Operand::A, 0>(a, m);
+    const auto* b0 = packed_block_pointer<Atom, gemm::Operand::B, 0>(b, n);
+    const auto* a0 = packed_block_pointer<Atom, gemm::Operand::A, 0>(a, m);
     auto* a1 = a0;
     auto* a2 = a0;
     auto* a3 = a0;
@@ -291,12 +259,9 @@ VECOPS_ALWAYS_INLINE void compute_packed_groups(
         mopa<Atom, 3>(vec::load(ATag{}, a3 + kg * a_step), bv);
     }
   } else if constexpr (NM == 1) {
-    const auto* a0 = packed_block_pointer<
-        Atom, gemm::Operand::A, 0>(a, m);
-    const auto* b0 = packed_block_pointer<
-        Atom, gemm::Operand::B, 0>(b, n);
-    const auto* b1 = packed_block_pointer<
-        Atom, gemm::Operand::B, 1>(b, n);
+    const auto* a0 = packed_block_pointer<Atom, gemm::Operand::A, 0>(a, m);
+    const auto* b0 = packed_block_pointer<Atom, gemm::Operand::B, 0>(b, n);
+    const auto* b1 = packed_block_pointer<Atom, gemm::Operand::B, 1>(b, n);
     auto* b2 = b0;
     auto* b3 = b0;
     if constexpr (NN >= 3)
@@ -314,24 +279,11 @@ VECOPS_ALWAYS_INLINE void compute_packed_groups(
     }
   } else {
     static_assert(NM == 2 && NN == 2);
-    const auto* a0 = packed_block_pointer<
-        Atom, gemm::Operand::A, 0>(a, m);
-    const auto* a1 = packed_block_pointer<
-        Atom, gemm::Operand::A, 1>(a, m);
-    const auto* b0 = packed_block_pointer<
-        Atom, gemm::Operand::B, 0>(b, n);
-    const auto* b1 = packed_block_pointer<
-        Atom, gemm::Operand::B, 1>(b, n);
-    VECOPS_LOOP_ALIGN(64) for (
-        nint_t kg = 0; kg < groups; ++kg) {
-      // Keep the four-load/four-MOPA hot loop in one 64-byte I-cache line.
-      // Without an explicit boundary Clang may place this 60-byte loop at
-      // offset 52, making every K group straddle two lines.  A second,
-      // otherwise-unused kernel plan used to hide the issue by changing code
-      // layout; align the loop itself instead of cloning the traversal.
-      // The 1xN/Nx1 packed loops and the 72+ byte raw loop are intentionally
-      // left unaligned: measurements show no frontend gain, while their entry
-      // padding is paid once per output tile.
+    const auto* a0 = packed_block_pointer<Atom, gemm::Operand::A, 0>(a, m);
+    const auto* a1 = packed_block_pointer<Atom, gemm::Operand::A, 1>(a, m);
+    const auto* b0 = packed_block_pointer<Atom, gemm::Operand::B, 0>(b, n);
+    const auto* b1 = packed_block_pointer<Atom, gemm::Operand::B, 1>(b, n);
+    VECOPS_LOOP_ALIGN(64) for (nint_t kg = 0; kg < groups; ++kg) {
       const auto av0 = vec::load(ATag{}, a0 + kg * a_step);
       const auto av1 = vec::load(ATag{}, a1 + kg * a_step);
       const auto bv0 = vec::load(BTag{}, b0 + kg * b_step);
@@ -373,8 +325,7 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
   const auto pg = vec::mwhilelt(Tag{}, nint_t{0}, active_n);
   if constexpr (direct_row_major_input_v<CInput>) {
     const auto strides = input.raw_strides();
-    const auto* base = reinterpret_cast<const T*>(input.raw_data()) +
-        m * strides[0] + n;
+    const auto* base = reinterpret_cast<const T*>(input.raw_data()) + m * strides[0] + n;
     for (nint_t row = 0; row < active_m; ++row) {
       using U = std::conditional_t<sizeof(T) == 8, uint64_t, uint32_t>;
       using BitsTag = vec::ScalableTag<U, 0>;
@@ -402,8 +353,7 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
   const auto pg = vec::mwhilelt(Tag{}, nint_t{0}, active_n);
   if constexpr (direct_row_major_output_v<COutput>) {
     const auto strides = output.raw_strides();
-    auto* base = reinterpret_cast<T*>(output.raw_data()) +
-        m * strides[0] + n;
+    auto* base = reinterpret_cast<T*>(output.raw_data()) + m * strides[0] + n;
     for (nint_t row = 0; row < active_m; ++row) {
       using U = std::conditional_t<sizeof(T) == 8, uint64_t, uint32_t>;
       using BitsTag = vec::ScalableTag<U, 0>;
@@ -436,8 +386,7 @@ VECOPS_ALWAYS_INLINE void compute_group(
           a, m, kg, logical_m, logical_k);
       mopa<Atom, MI>(av, bv);
     };
-    [&]<std::size_t... MI>(std::index_sequence<MI...>)
-        VECOPS_INLINE_LAMBDA {
+    [&]<std::size_t... MI>(std::index_sequence<MI...>) VECOPS_INLINE_LAMBDA {
       (one_m.template operator()<static_cast<int>(MI)>(), ...);
     }(std::make_index_sequence<NM>{});
   } else if constexpr (NM == 1) {
@@ -448,8 +397,7 @@ VECOPS_ALWAYS_INLINE void compute_group(
           b, n, kg, logical_n, logical_k);
       mopa<Atom, NI>(av, bv);
     };
-    [&]<std::size_t... NI>(std::index_sequence<NI...>)
-        VECOPS_INLINE_LAMBDA {
+    [&]<std::size_t... NI>(std::index_sequence<NI...>) VECOPS_INLINE_LAMBDA {
       (one_n.template operator()<static_cast<int>(NI)>(), ...);
     }(std::make_index_sequence<NN>{});
   } else {
@@ -493,16 +441,18 @@ VECOPS_ALWAYS_INLINE void microkernel(
 
   auto compute_generic = [&]() VECOPS_INLINE_LAMBDA {
     constexpr nint_t KP = gemm::packing_t<Atom, gemm::Operand::A>::KPack;
-    if constexpr (std::same_as<Atom, gemm::SME_BF16F32>) {
+    if constexpr (KP == 1 || std::same_as<Atom, gemm::SME_BF16F32>) {
       const nint_t full_groups = logical_k / KP;
       for (nint_t kg = 0; kg < full_groups; ++kg) {
         compute_group<Atom, NM, NN, true>(
             a, b, m, n, kg, logical_m, logical_n, logical_k);
       }
-      if (full_groups * KP < logical_k) {
-        compute_group<Atom, NM, NN, false>(
-            a, b, m, n, full_groups,
-            logical_m, logical_n, logical_k);
+      if constexpr (KP > 1) {
+        if (full_groups * KP < logical_k) {
+          compute_group<Atom, NM, NN, false>(
+              a, b, m, n, full_groups,
+              logical_m, logical_n, logical_k);
+        }
       }
     } else {
       const nint_t groups = ceil_div(logical_k, KP);
@@ -579,9 +529,26 @@ struct Backend<matmul_implementation::SME> {
     static_assert(std::same_as<typename Atom::KernelKind, gemm::SMEKernelKind>);
     scope.with_resources(
         execution::details::arm::StreamingZARegion{},
-        [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-          matmul_details::run_tiles<Backend, Atom, Policy>(
-              m, n, k, a, b, c_input, c_output, scratch);
+        [&](auto& active) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          if constexpr (
+              sme::is_packed_access_v<Atom, gemm::Operand::A, A> &&
+              sme::is_packed_access_v<Atom, gemm::Operand::B, B>) {
+            matmul_details::run_tiles<Backend, Atom, Policy>(
+                m, n, k, a, b, c_input, c_output, scratch);
+          } else {
+            using Resources = typename std::remove_cvref_t<
+                decltype(active)>::ActiveResources;
+            auto active_a = tensor::rebind_active_resources<Resources>(a);
+            auto active_b = tensor::rebind_active_resources<Resources>(b);
+            auto active_c_input =
+                tensor::rebind_active_resources<Resources>(c_input);
+            auto active_c_output =
+                tensor::rebind_active_resources<Resources>(c_output);
+            matmul_details::run_tiles<Backend, Atom, Policy>(
+                m, n, k, active_a, active_b,
+                active_c_input, active_c_output, scratch);
+            active_c_output.commit();
+          }
         });
   }
 

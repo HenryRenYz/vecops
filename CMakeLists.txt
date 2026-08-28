@@ -20,6 +20,7 @@ set(VECOPS_FIXED_STREAMING_SVE_BITS "" CACHE STRING
     "SME streaming vector width in bits; empty detects the native host maximum")
 
 include(cmake/VecopsMultiarchTargets.cmake)
+include(cmake/VecopsKernelOptimizations.cmake)
 
 # -------------------------------- Dependencies --------------------------------
 include(FetchContent)

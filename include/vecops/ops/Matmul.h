@@ -13,6 +13,7 @@
 #include "vecops/gemm/Packing.h"
 #include "vecops/kernel/Loop.h"
 #include "vecops/kernel/Matmul.h"
+#include "vecops/ops/MatmulPack.h"
 #include "vecops/tensor/DataAccess.h"
 
 namespace vecops::ops {
@@ -43,7 +44,7 @@ struct SelectImplementation<gemm::AMXKernelKind> {
 };
 #endif
 
-#if defined(HAS_SME_FA64)
+#if defined(HAS_SME)
 template <>
 struct SelectImplementation<gemm::SMEKernelKind> {
   using type = kernel::matmul_implementation::SME;
@@ -141,10 +142,17 @@ public:
         a_(std::move(a)), b_(std::move(b)),
         c_input_(std::move(c_input)), c_output_(std::move(c_output)) {
     validate();
+    initialize_auto_packing();
   }
 
   VECOPS_INLINE nint_t required_workspace() const {
-    return kernel::matmul_implementation::scratch_bytes<Implementation>();
+    nint_t bytes =
+        kernel::matmul_implementation::scratch_bytes<Implementation>();
+    if (auto_packing_enabled()) {
+      bytes += auto_packed_bytes<gemm::Operand::A>(a_);
+      bytes += auto_packed_bytes<gemm::Operand::B>(b_);
+    }
+    return bytes;
   }
 
   template <execution::ExecutionScope Scope>
@@ -161,6 +169,134 @@ public:
   }
 
 private:
+  template <gemm::Operand Side, typename Spec>
+  static constexpr bool AutoPackOperand = [] {
+    using Layout = typename Spec::InputLayout;
+    using Element = typename gemm::packing_t<Atom, Side>::Element;
+    if constexpr (
+        !std::same_as<Implementation, kernel::matmul_implementation::SME> ||
+        COutputSpec::OutputTensor::Ndim != 2 ||
+        gemm::is_packed_layout<Atom, Side, Layout>()) {
+      return false;
+    } else {
+      return sizeof(Element) <= 4 && Spec::InputTensor::Ndim == 2 &&
+          std::same_as<typename Spec::MemoryElement, Element> &&
+          std::same_as<typename Spec::ComputeType, Element> &&
+          std::same_as<typename Spec::TransformType, tensor::NoTransform> &&
+          std::same_as<
+              tensor::stride_type_t<1, Layout>, meta::Const<1>>;
+    }
+  }();
+
+  static constexpr bool AutoPackA =
+      AutoPackOperand<gemm::Operand::A, ASpec>;
+  static constexpr bool AutoPackB =
+      AutoPackOperand<gemm::Operand::B, BSpec>;
+
+  struct NoAutoPackingState {};
+  using AutoPackingState = std::conditional_t<
+      AutoPackA || AutoPackB, bool, NoAutoPackingState>;
+
+  VECOPS_INLINE void initialize_auto_packing() {
+    if constexpr (AutoPackA || AutoPackB)
+      auto_pack_ = use_auto_packing();
+  }
+
+  VECOPS_INLINE bool auto_packing_enabled() const {
+    if constexpr (AutoPackA || AutoPackB) return auto_pack_;
+    else return false;
+  }
+
+  VECOPS_INLINE bool use_auto_packing() const {
+    if constexpr (!AutoPackA && !AutoPackB) {
+      return false;
+    } else {
+      const nint_t m = static_cast<nint_t>(m_);
+      const nint_t n = static_cast<nint_t>(n_);
+      const nint_t k = static_cast<nint_t>(k_);
+      if (m <= 0 || n <= 0 || k <= 0) return false;
+      // Packing pays for itself once enough output dot products reuse it.
+      // Require both aggregate work and spatial reuse; a 1x1 product with a
+      // very long K has high work but cannot amortize copying either operand.
+      // Express both tests with divisions to avoid overflowing M*N*K.
+      constexpr nint_t ReuseThreshold = 128;
+      constexpr nint_t WorkThreshold = AutoPackA && AutoPackB
+          ? 64 * 1024
+          : 128 * 1024;
+      if (m < 1 + (ReuseThreshold - 1) / n) return false;
+      nint_t remaining = 1 + (WorkThreshold - 1) / m;
+      remaining = 1 + (remaining - 1) / n;
+      return k >= remaining;
+    }
+  }
+
+  template <gemm::Operand Side, typename Spec>
+  VECOPS_INLINE nint_t auto_packed_bytes(const Spec& spec) const {
+    if constexpr (AutoPackOperand<Side, Spec>) {
+      using Element = typename gemm::packing_t<Atom, Side>::Element;
+      const auto layout = matmul_packed_layout<Atom, Side>(
+          spec.input_layout());
+      // WorkspaceView may need up to 63 bytes to establish 64B alignment.
+      return tensor::numel(layout) * static_cast<nint_t>(sizeof(Element)) + 63;
+    } else {
+      return 0;
+    }
+  }
+
+  template <execution::ExecutionScope Scope>
+  VECOPS_NOINLINE void execute_auto_packed(Scope& scope) const {
+    static_assert(AutoPackA || AutoPackB);
+    auto& workspace = scope.workspace_view();
+    const auto mark = workspace.mark();
+
+    if constexpr (AutoPackA && AutoPackB) {
+      const auto a_layout = matmul_packed_layout<Atom, gemm::Operand::A>(
+          a_.input_layout());
+      const auto b_layout = matmul_packed_layout<Atom, gemm::Operand::B>(
+          b_.input_layout());
+      using TA = typename Atom::TA;
+      using TB = typename Atom::TB;
+      const nint_t a_bytes =
+          tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA));
+      const nint_t b_bytes =
+          tensor::numel(b_layout) * static_cast<nint_t>(sizeof(TB));
+      auto* a_data = static_cast<TA*>(workspace.allocate(a_bytes, 64));
+      auto* b_data = static_cast<TB*>(workspace.allocate(b_bytes, 64));
+      auto a_tensor = tensor::make_tensor(a_data, a_layout);
+      auto b_tensor = tensor::make_tensor(b_data, b_layout);
+      matmul_pack<Atom, gemm::Operand::A>(scope, a_, a_tensor);
+      matmul_pack<Atom, gemm::Operand::B>(scope, b_, b_tensor);
+      execute_problem(
+          scope, tensor::input<TA>(a_tensor), tensor::input<TB>(b_tensor),
+          c_input_, c_output_, nullptr);
+    } else if constexpr (AutoPackA) {
+      const auto layout = matmul_packed_layout<Atom, gemm::Operand::A>(
+          a_.input_layout());
+      using TA = typename Atom::TA;
+      const nint_t bytes =
+          tensor::numel(layout) * static_cast<nint_t>(sizeof(TA));
+      auto* data = static_cast<TA*>(workspace.allocate(bytes, 64));
+      auto packed_tensor = tensor::make_tensor(data, layout);
+      matmul_pack<Atom, gemm::Operand::A>(scope, a_, packed_tensor);
+      execute_problem(
+          scope, tensor::input<TA>(packed_tensor), b_,
+          c_input_, c_output_, nullptr);
+    } else {
+      const auto layout = matmul_packed_layout<Atom, gemm::Operand::B>(
+          b_.input_layout());
+      using TB = typename Atom::TB;
+      const nint_t bytes =
+          tensor::numel(layout) * static_cast<nint_t>(sizeof(TB));
+      auto* data = static_cast<TB*>(workspace.allocate(bytes, 64));
+      auto packed_tensor = tensor::make_tensor(data, layout);
+      matmul_pack<Atom, gemm::Operand::B>(scope, b_, packed_tensor);
+      execute_problem(
+          scope, a_, tensor::input<TB>(packed_tensor),
+          c_input_, c_output_, nullptr);
+    }
+    workspace.rewind(mark);
+  }
+
   VECOPS_INLINE void validate() const {
     constexpr int Rank = COutputSpec::OutputTensor::Ndim;
     static_assert(ProblemRank >= 2);
@@ -243,6 +379,12 @@ private:
       const auto mark = workspace.mark();
       run(workspace.allocate(required_workspace(), 64));
       workspace.rewind(mark);
+    } else if constexpr (AutoPackA || AutoPackB) {
+      if (VECOPS_UNLIKELY(auto_packing_enabled())) {
+        execute_auto_packed(scope);
+      } else {
+        run(nullptr);
+      }
     } else {
       run(nullptr);
     }
@@ -255,6 +397,7 @@ private:
   BSpec b_;
   CInputSpec c_input_;
   COutputSpec c_output_;
+  [[no_unique_address]] AutoPackingState auto_pack_{};
 };
 
 /** Build C = A*B^T with a hardware-zero accumulator prologue. */

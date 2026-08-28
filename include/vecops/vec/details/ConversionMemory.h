@@ -68,6 +68,7 @@ inline constexpr bool is_memory_conversion_option_for_v = [] {
       IsConversionMemoryValueOption<Clean>::value ||
       IsMemoryAlignmentOption<Clean>::value ||
       IsMemoryTemporalityOption<Clean>::value ||
+      IsResourcesOption<Clean>::value ||
       IsConversionMemoryPackingOption<Clean>::value ||
       IsUnmaskedOption<Clean>::value ||
       IsFirstOption<Clean>::value || IsZeroOption<Clean>::value) {
@@ -113,6 +114,8 @@ consteval bool valid_memory_conversion_options() {
       option_count_v<IsIndexedOption, Options...>;
   constexpr std::size_t strided_count =
       option_count_v<IsStridedOption, Options...>;
+  constexpr std::size_t resources_count =
+      option_count_v<IsResourcesOption, Options...>;
   constexpr std::size_t packing_count =
       option_count_v<IsConversionMemoryPackingOption, Options...>;
   constexpr std::size_t active_count =
@@ -143,7 +146,7 @@ consteval bool valid_memory_conversion_options() {
   } else {
     const bool unique = layout_count <= 1 && value_count <= 1 &&
         alignment_count <= 1 && temporality_count <= 1 &&
-        indexed_count <= 1 && strided_count <= 1 &&
+        indexed_count <= 1 && strided_count <= 1 && resources_count <= 1 &&
         indexed_count + strided_count <= 1 &&
         ((indexed_count + strided_count == 0) || alignment_count == 0) &&
         packing_count <= 1 && active_count <= 1 && population_count <= 1;
@@ -618,6 +621,57 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_options(
 //    Request-driven conversion-memory execution                                //
 /* **************************************************************************** */
 
+template <typename Request>
+VECOPS_ALWAYS_INLINE Vec<typename Request::TagType>
+execute_scalar_load_convert_request(
+    typename Request::TagType to,
+    const typename Request::FromElement* pointer,
+    const Request& request) {
+  using ToTag = typename Request::TagType;
+  using To = ElementOf<ToTag>;
+  using From = typename Request::FromElement;
+  using ValuePolicy = typename Request::ValuePolicyOption;
+  Vec<ToTag> result = [&]() VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
+    if constexpr (Request::populate_kind == Populate::MergeVector) {
+      return *request.merge_vector;
+    } else if constexpr (Request::populate_kind == Populate::MergeScalar) {
+      return fill(to, request.merge_scalar);
+    } else {
+      return zeros(to);
+    }
+  }();
+  for (nint_t lane = 0; lane < size(to); ++lane) {
+    if (!request_lane_active(
+            typename Request::MaskTag{}, request, lane)) continue;
+    From scalar;
+    const From* address = request_memory_address(
+        to, pointer, request, lane);
+    std::memcpy(&scalar, address, sizeof(From));
+    result = set(
+        to, result, lane,
+        boundary_scalar_convert<To>(scalar, ValuePolicy{}));
+  }
+  return result;
+}
+
+template <typename Request>
+VECOPS_ALWAYS_INLINE void execute_scalar_store_convert_request(
+    typename Request::TagType from,
+    typename Request::ToElement* pointer,
+    Vec<typename Request::TagType> value,
+    const Request& request) {
+  using To = typename Request::ToElement;
+  using ValuePolicy = typename Request::ValuePolicyOption;
+  for (nint_t lane = 0; lane < size(from); ++lane) {
+    if (!request_lane_active(
+            typename Request::MaskTag{}, request, lane)) continue;
+    const To scalar = boundary_scalar_convert<To>(
+        get(from, value, lane), ValuePolicy{});
+    To* address = request_memory_address(from, pointer, request, lane);
+    std::memcpy(address, &scalar, sizeof(To));
+  }
+}
+
 /**
  * Executes a converting load from a resolved LoadConvertRequest. The emitted
  * operations match the equivalent option-pack call exactly: addressing rides
@@ -641,6 +695,13 @@ execute_load_convert_request(
   constexpr Populate P = Request::populate_kind;
   constexpr bool Unordered =
       std::same_as<Layout, cvt::Unordered>;
+
+  if constexpr (
+      Addr != Addressing::Contiguous &&
+      scalarize_indexed_memory_v<
+          CurrentBackend, typename Request::ActiveResources>) {
+    return execute_scalar_load_convert_request(to, pointer, request);
+  }
 
   // Addressing rides in the alignment slot (see LoadConvertRequest); only
   // its construction differs between indexed, strided, and contiguous.
@@ -690,7 +751,8 @@ execute_load_convert_request(
   } else if constexpr (Addr == Addressing::Strided) {
     const auto indices =
         make_strided_indices<CurrentBackend>(to, request.stride);
-    opt::Indexed<Vec<Rebind<int32_t, ToTag>>, 0> addressing{indices};
+    opt::Indexed<
+        Vec<Rebind<int32_t, ToTag>>, Request::index_scale> addressing{indices};
     return dispatch(addressing);
   } else {
     return dispatch(Alignment{});
@@ -715,6 +777,14 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_request(
   constexpr Addressing Addr = Request::addressing_kind;
   constexpr bool Unordered =
       std::same_as<Layout, cvt::Unordered>;
+
+  if constexpr (
+      Addr != Addressing::Contiguous &&
+      scalarize_indexed_memory_v<
+          CurrentBackend, typename Request::ActiveResources>) {
+    execute_scalar_store_convert_request(from, pointer, value, request);
+    return;
+  }
 
   auto dispatch = [&](auto access) VECOPS_INLINE_LAMBDA {
     if constexpr (A == Active::Unmasked) {
@@ -747,7 +817,8 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_request(
   } else if constexpr (Addr == Addressing::Strided) {
     const auto indices =
         make_strided_indices<CurrentBackend>(from, request.stride);
-    opt::Indexed<Vec<Rebind<int32_t, FromTag>>, 0> addressing{indices};
+    opt::Indexed<
+        Vec<Rebind<int32_t, FromTag>>, Request::index_scale> addressing{indices};
     dispatch(addressing);
   } else {
     dispatch(Alignment{});

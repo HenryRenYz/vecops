@@ -103,14 +103,14 @@ struct LoadConvertOp {
   template <VectorTag ToTag, Element From, Active A, Addressing Addr,
             Populate P, typename Alignment, typename Temporality,
             int IndexScale, VectorValue IndexVector, typename Layout,
-            typename ValuePolicy, MaskValue MaskVector>
+            typename ValuePolicy, MaskValue MaskVector, typename Resources>
     requires (std::same_as<From, ElementOf<ToTag>> ||
               details::memory_rebind_supported<ToTag, From>())
   VECOPS_ALWAYS_INLINE Vec<ToTag> operator()(
       ToTag to, const From* pointer,
       LoadConvertRequest<
           ToTag, From, A, Addr, P, Alignment, Temporality, IndexScale,
-          IndexVector, Layout, ValuePolicy, MaskVector> request) const;
+          IndexVector, Layout, ValuePolicy, MaskVector, Resources> request) const;
 };
 
 struct StoreConvertOp {
@@ -126,14 +126,14 @@ struct StoreConvertOp {
   template <VectorTag FromTag, Element To, Active A, Addressing Addr,
             typename Alignment, typename Temporality, int IndexScale,
             VectorValue IndexVector, typename Layout, typename ValuePolicy,
-            typename Packing, MaskValue MaskVector>
+            typename Packing, MaskValue MaskVector, typename Resources>
     requires (std::same_as<To, ElementOf<FromTag>> ||
               details::memory_rebind_supported<FromTag, To>())
   VECOPS_ALWAYS_INLINE void operator()(
       FromTag from, To* pointer, Vec<FromTag> value,
       StoreConvertRequest<
           FromTag, To, A, Addr, Alignment, Temporality, IndexScale,
-          IndexVector, Layout, ValuePolicy, Packing, MaskVector>
+          IndexVector, Layout, ValuePolicy, Packing, MaskVector, Resources>
           request) const;
 };
 
@@ -208,14 +208,14 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> LoadConvertOp::operator()(
 template <VectorTag ToTag, Element From, Active A, Addressing Addr,
           Populate P, typename Alignment, typename Temporality,
           int IndexScale, VectorValue IndexVector, typename Layout,
-          typename ValuePolicy, MaskValue MaskVector>
+          typename ValuePolicy, MaskValue MaskVector, typename Resources>
   requires (std::same_as<From, ElementOf<ToTag>> ||
             details::memory_rebind_supported<ToTag, From>())
 VECOPS_ALWAYS_INLINE Vec<ToTag> LoadConvertOp::operator()(
     ToTag to, const From* pointer,
     LoadConvertRequest<
         ToTag, From, A, Addr, P, Alignment, Temporality, IndexScale,
-        IndexVector, Layout, ValuePolicy, MaskVector> request) const {
+        IndexVector, Layout, ValuePolicy, MaskVector, Resources> request) const {
   if constexpr (std::same_as<From, ElementOf<ToTag>>) {
     return details::execute_load_request(
         LoadOp{}, to, pointer, request);
@@ -283,14 +283,14 @@ VECOPS_ALWAYS_INLINE void StoreConvertOp::operator()(
 template <VectorTag FromTag, Element To, Active A, Addressing Addr,
           typename Alignment, typename Temporality, int IndexScale,
           VectorValue IndexVector, typename Layout, typename ValuePolicy,
-          typename Packing, MaskValue MaskVector>
+          typename Packing, MaskValue MaskVector, typename Resources>
   requires (std::same_as<To, ElementOf<FromTag>> ||
             details::memory_rebind_supported<FromTag, To>())
 VECOPS_ALWAYS_INLINE void StoreConvertOp::operator()(
     FromTag from, To* pointer, Vec<FromTag> value,
     StoreConvertRequest<
         FromTag, To, A, Addr, Alignment, Temporality, IndexScale,
-        IndexVector, Layout, ValuePolicy, Packing, MaskVector>
+        IndexVector, Layout, ValuePolicy, Packing, MaskVector, Resources>
         request) const {
   if constexpr (std::same_as<To, ElementOf<FromTag>>) {
     details::execute_store_request(

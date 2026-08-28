@@ -14,8 +14,8 @@
 #include "vecops/CoreDefs.h"
 #include "vecops/Meta.h"
 
-#if !defined(__aarch64__) || !defined(HAS_SME_FA64)
-#error "Manual SME state management requires an AArch64 SME+FA64 target"
+#if !defined(__aarch64__) || !defined(HAS_SME)
+#error "Manual SME state management requires an AArch64 SME target"
 #endif
 
 // A no_sanitize function attribute is itself an optimization boundary in the

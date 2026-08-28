@@ -102,6 +102,130 @@ VECOPS_ALWAYS_INLINE void store_quad(
       InTag{}, out + word_lanes, vec::get_word<1>(OutTag{}, packed));
 }
 
+template <int LoadBase, int StoreBase, bool Prefetch,
+          typename T, typename U>
+VECOPS_ALWAYS_INLINE void transfer_full_word_panel(
+    const T* input, nint_t panel_base, nint_t kb, nint_t row_stride,
+    nint_t k_chunk, U*& output) noexcept {
+  // SME outer products consume K in 32-bit groups: one FP32 value, two
+  // BF16/FP16 values, or four bytes.  Treating every full source chunk as
+  // one streaming vector of packed words turns packing into a native ZA32
+  // transpose and
+  // removes the read-ZA + ZIP + store sequence from the common path.  Separate
+  // ZA tile pairs let loads for one K chunk overlap stores from the previous.
+  using Word = uint32_t;
+  using WordTag = vec::ScalableTag<Word, 0>;
+  const nint_t word_lanes = vec::size(WordTag{});
+  const auto pg = vec::mtrue(WordTag{});
+  auto* words = reinterpret_cast<Word*>(output);
+
+  for (nint_t row = 0; row < word_lanes; ++row) {
+    const auto* first_row =
+        input + (panel_base + row) * row_stride + kb;
+    const auto* second_row =
+        input + (panel_base + word_lanes + row) * row_stride + kb;
+    if constexpr (Prefetch) {
+      __builtin_prefetch(first_row + 4 * k_chunk, 0, 3);
+      __builtin_prefetch(second_row + 4 * k_chunk, 0, 3);
+    }
+    vec::details::sme::load_hor<LoadBase>(
+        static_cast<uint32_t>(row), pg,
+        reinterpret_cast<const Word*>(first_row));
+    vec::details::sme::load_hor<LoadBase + 1>(
+        static_cast<uint32_t>(row), pg,
+        reinterpret_cast<const Word*>(second_row));
+    vec::details::sme::store_ver<StoreBase>(
+        static_cast<uint32_t>(row), pg, words);
+    words += word_lanes;
+    vec::details::sme::store_ver<StoreBase + 1>(
+        static_cast<uint32_t>(row), pg, words);
+    words += word_lanes;
+  }
+  output = reinterpret_cast<U*>(words);
+}
+
+template <int TileBase, bool Prefetch, typename T>
+VECOPS_ALWAYS_INLINE void load_full_word_panel(
+    const T* input, nint_t panel_base, nint_t kb, nint_t row_stride,
+    nint_t k_chunk) noexcept {
+  using Word = uint32_t;
+  using WordTag = vec::ScalableTag<Word, 0>;
+  const nint_t word_lanes = vec::size(WordTag{});
+  const auto pg = vec::mtrue(WordTag{});
+  for (nint_t row = 0; row < word_lanes; ++row) {
+    const auto* first_row =
+        input + (panel_base + row) * row_stride + kb;
+    const auto* second_row =
+        input + (panel_base + word_lanes + row) * row_stride + kb;
+    if constexpr (Prefetch) {
+      __builtin_prefetch(first_row + 4 * k_chunk, 0, 3);
+      __builtin_prefetch(second_row + 4 * k_chunk, 0, 3);
+    }
+    vec::details::sme::load_hor<TileBase>(
+        static_cast<uint32_t>(row), pg,
+        reinterpret_cast<const Word*>(first_row));
+    vec::details::sme::load_hor<TileBase + 1>(
+        static_cast<uint32_t>(row), pg,
+        reinterpret_cast<const Word*>(second_row));
+  }
+}
+
+template <int TileBase, typename U>
+VECOPS_ALWAYS_INLINE void store_full_word_panel(U*& output) noexcept {
+  using Word = uint32_t;
+  using WordTag = vec::ScalableTag<Word, 0>;
+  const nint_t word_lanes = vec::size(WordTag{});
+  const auto pg = vec::mtrue(WordTag{});
+  auto* words = reinterpret_cast<Word*>(output);
+  for (nint_t group = 0; group < word_lanes; ++group) {
+    vec::details::sme::store_ver<TileBase>(
+        static_cast<uint32_t>(group), pg, words);
+    words += word_lanes;
+    vec::details::sme::store_ver<TileBase + 1>(
+        static_cast<uint32_t>(group), pg, words);
+    words += word_lanes;
+  }
+  output = reinterpret_cast<U*>(words);
+}
+
+template <typename T, typename U>
+VECOPS_ALWAYS_INLINE nint_t pack_full_word_panels(
+    const T* input, nint_t panel_base, nint_t k, nint_t row_stride,
+    nint_t k_chunk, U*& output) noexcept {
+  const nint_t chunks = k / k_chunk;
+  if (chunks == 0) return 0;
+
+  if (chunks > 4) {
+    load_full_word_panel<0, true>(
+        input, panel_base, 0, row_stride, k_chunk);
+  } else {
+    load_full_word_panel<0, false>(
+        input, panel_base, 0, row_stride, k_chunk);
+  }
+  for (nint_t chunk = 1; chunk < chunks; ++chunk) {
+    const nint_t kb = chunk * k_chunk;
+    const bool prefetch = chunk + 4 < chunks;
+    if (chunk & 1) {
+      if (prefetch) {
+        transfer_full_word_panel<2, 0, true>(
+            input, panel_base, kb, row_stride, k_chunk, output);
+      } else {
+        transfer_full_word_panel<2, 0, false>(
+            input, panel_base, kb, row_stride, k_chunk, output);
+      }
+    } else if (prefetch) {
+      transfer_full_word_panel<0, 2, true>(
+          input, panel_base, kb, row_stride, k_chunk, output);
+    } else {
+      transfer_full_word_panel<0, 2, false>(
+          input, panel_base, kb, row_stride, k_chunk, output);
+    }
+  }
+  if (chunks & 1) store_full_word_panel<0>(output);
+  else store_full_word_panel<2>(output);
+  return chunks * k_chunk;
+}
+
 template <gemm::Atom Atom, gemm::Operand Side>
 VECOPS_ALWAYS_INLINE void pack(
     const typename gemm::packing_t<Atom, Side>::Element* input,
@@ -119,10 +243,10 @@ VECOPS_ALWAYS_INLINE void pack(
 
   for (nint_t sp = 0; sp < panels; ++sp) {
     const nint_t panel_base = sp * panel;
+    const bool full_panel = spatial - panel_base >= panel;
     const nint_t first_active = vec::details::sme::clamp_value(
         spatial - panel_base, nint_t{0}, vec::details::sme::min_value(panel, lanes));
     const auto first_pg = first<U>(first_active);
-    const auto write_pg = all<U>();
 
     auto pack_chunk = [&]<bool FullK, bool Prefetch>(
         nint_t kb, nint_t active_k) VECOPS_INLINE_LAMBDA_NOEXCEPT {
@@ -138,9 +262,9 @@ VECOPS_ALWAYS_INLINE void pack(
           __builtin_prefetch(
               row_input + PrefetchChunks * k_chunk, 0, 3);
         }
-        write_hor<0, U>(
-            static_cast<uint32_t>(r), write_pg,
-            load_bits<U>(load_pg, input + row * row_stride + kb));
+        vec::details::sme::load_hor<0>(
+            static_cast<uint32_t>(r), load_pg,
+            reinterpret_cast<const U*>(input + row * row_stride + kb));
       }
 
       if constexpr (sizeof(U) == 4) {
@@ -153,9 +277,9 @@ VECOPS_ALWAYS_INLINE void pack(
             __builtin_prefetch(
                 row_input + PrefetchChunks * k_chunk, 0, 3);
           }
-          write_hor<1, U>(
-              static_cast<uint32_t>(r), write_pg,
-              load_bits<U>(load_pg, input + row * row_stride + kb));
+          vec::details::sme::load_hor<1>(
+              static_cast<uint32_t>(r), load_pg,
+              reinterpret_cast<const U*>(input + row * row_stride + kb));
         }
         const auto pg1 = first<U>(active1);
         for (nint_t g = 0; g < groups; ++g) {
@@ -192,7 +316,10 @@ VECOPS_ALWAYS_INLINE void pack(
       }
     };
 
-    nint_t kb = 0;
+    nint_t kb = full_panel
+        ? pack_full_word_panels(
+              input, panel_base, k, row_stride, k_chunk, out)
+        : 0;
     constexpr nint_t PrefetchChunks = 4;
     constexpr nint_t PrefetchMinRowBytes = 1024;
     if (k * static_cast<nint_t>(sizeof(U)) >= PrefetchMinRowBytes) {

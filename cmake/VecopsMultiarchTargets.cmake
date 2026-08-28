@@ -26,6 +26,7 @@ set(VECOPS_MAP_ARM_SVE2      "armv8-a+sve2")
 # Some compilers (including BiSheng releases) do not enable all advertised
 # native extensions with the bare -march=native spelling.
 set(VECOPS_MAP_ARM_Native "native")
+set(VECOPS_NATIVE_HAS_SME OFF)
 set(VECOPS_NATIVE_HAS_SME_FA64 OFF)
 if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND EXISTS "/proc/cpuinfo")
     file(READ "/proc/cpuinfo" _VECOPS_CPUINFO)
@@ -48,6 +49,9 @@ if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND EXISTS "/proc/cpuinfo")
         string(FIND "${_VECOPS_FEAT_LINE}" " ${_VECOPS_FEAT} " _VECOPS_POS)
         if(NOT _VECOPS_POS EQUAL -1)
             string(APPEND VECOPS_MAP_ARM_Native "+${_VECOPS_FEAT}")
+            if(_VECOPS_FEAT STREQUAL "sme")
+                set(VECOPS_NATIVE_HAS_SME ON)
+            endif()
         endif()
     endforeach()
     # Linux reports FEAT_SME_FA64 as "smefa64", while compiler -march
@@ -153,7 +157,7 @@ if(VECOPS_ARCH_FAMILY STREQUAL "ARM")
     set(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS
         "${VECOPS_FIXED_STREAMING_SVE_BITS}")
     if(NOT VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS AND
-       NOT CMAKE_CROSSCOMPILING AND VECOPS_NATIVE_HAS_SME_FA64)
+       NOT CMAKE_CROSSCOMPILING AND VECOPS_NATIVE_HAS_SME)
         set(_VECOPS_SME_SVL_PROBE
             "${CMAKE_BINARY_DIR}/CMakeFiles/vecops_sme_svl_probe.c")
         file(WRITE "${_VECOPS_SME_SVL_PROBE}" [=[
@@ -422,7 +426,16 @@ function(vecops_add_multiarch_executable)
             target_compile_definitions(${_TARGET_NAME} PRIVATE
                 VECOPS_TARGET_SME_FA64=1)
         endif()
-        if(_VECOPS_TARGET_HAS_SME_FA64 AND
+        set(_VECOPS_TARGET_HAS_SME OFF)
+        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
+           ((_MARCH MATCHES "(^|\\+)sme($|\\+)") OR
+            (VECOPS_NATIVE_HAS_SME AND
+             ((_ARCH STREQUAL "Native") OR
+              (_ARCH STREQUAL "NativeFixedSVE") OR
+              (_ARCH STREQUAL "NativeFixedStreamingSVE")))))
+            set(_VECOPS_TARGET_HAS_SME ON)
+        endif()
+        if(_VECOPS_TARGET_HAS_SME AND
            VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS AND
            ((_ARCH STREQUAL "NativeFixedStreamingSVE") OR
             ARG_FIXED_STREAMING_SVE))

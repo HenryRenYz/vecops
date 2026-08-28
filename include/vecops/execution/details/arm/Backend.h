@@ -11,7 +11,7 @@
 #include "vecops/execution/details/ResourceSet.h"
 #include "vecops/execution/details/arm/Resources.h"
 #include "vecops/platform/Target.h"
-#if defined(HAS_SME_FA64)
+#if defined(HAS_SME)
 #include "vecops/vec/details/sme/State.h"
 #endif
 
@@ -40,13 +40,13 @@ struct Backend<platform::AArch64Target> {
         has_resource_v<arm::StreamingZA, Required> &&
         !has_resource_v<arm::StreamingZA, Current>;
     if constexpr (EnterStreamingZA) {
-#if defined(HAS_SME_FA64)
+#if defined(HAS_SME)
       static_assert(std::is_nothrow_invocable_v<Fn&&>,
                     "manual SME region callback must be noexcept");
       return vec::details::sme::with_streaming_za(std::forward<Fn>(fn));
 #else
       static_assert(!EnterStreamingZA,
-                    "Arm StreamingZA requires an SME+FA64 target");
+                    "Arm StreamingZA requires an SME target");
 #endif
     } else {
       return std::forward<Fn>(fn)();

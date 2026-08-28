@@ -9,10 +9,21 @@
 #include <limits>
 #include <type_traits>
 
+#include "vecops/execution/details/ResourceSet.h"
+#include "vecops/execution/details/arm/Resources.h"
 #include "vecops/vec/details/sve/Basic.h"
 #include "vecops/vec/details/Options.h"
 
 namespace vecops::vec::details {
+
+template <typename Resources>
+inline constexpr bool scalarize_indexed_memory_v<SVEBackend, Resources> =
+#if defined(HAS_SME_FA64)
+    false;
+#else
+    execution::details::has_resource_v<
+        execution::details::arm::StreamingZA, Resources>;
+#endif
 
 // Float16/BFloat16 are two-byte wrapper types.  SVE bitwise memory leaves
 // access their object representation through a may-alias scalar so GCC cannot

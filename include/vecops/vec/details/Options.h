@@ -229,9 +229,18 @@ struct IsIndexedOption<opt::Indexed<V, Scale>> : std::true_type {
 template <typename>
 struct IsStridedOption : std::false_type {};
 
-template <typename Stride>
-struct IsStridedOption<opt::Strided<Stride>> : std::true_type {
+template <typename Stride, int Scale>
+struct IsStridedOption<opt::Strided<Stride, Scale>> : std::true_type {
   using Value = Stride;
+  static constexpr int scale = Scale;
+};
+
+template <typename>
+struct IsResourcesOption : std::false_type {};
+
+template <typename Resources>
+struct IsResourcesOption<opt::Resources<Resources>> : std::true_type {
+  using type = Resources;
 };
 
 template <typename T>

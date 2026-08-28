@@ -35,11 +35,11 @@ struct LoadOp {
   /// Direct entry with an already-resolved request; skips option parsing.
   template <VectorTag Tag, Active A, Addressing Addr, Populate P,
             typename Alignment, typename Temporality, int IndexScale,
-            VectorValue IndexVector>
+            VectorValue IndexVector, typename Resources>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
       Tag tag, const ElementOf<Tag>* pointer,
       LoadRequest<Tag, A, Addr, P, Alignment, Temporality, IndexScale,
-                  IndexVector> request) const;
+                  IndexVector, Resources> request) const;
 
   template <VectorTag Tag>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
@@ -56,11 +56,11 @@ struct StoreOp {
   /// Direct entry with an already-resolved request; skips option parsing.
   template <VectorTag Tag, Active A, Addressing Addr,
             typename Alignment, typename Temporality, int IndexScale,
-            VectorValue IndexVector>
+            VectorValue IndexVector, typename Resources>
   VECOPS_ALWAYS_INLINE void operator()(
       Tag tag, ElementOf<Tag>* pointer, Vec<Tag> value,
       StoreRequest<Tag, A, Addr, Alignment, Temporality, IndexScale,
-                   IndexVector> request) const;
+                   IndexVector, Resources> request) const;
 };
 
 } // namespace vecops::vec
@@ -109,11 +109,11 @@ VECOPS_ALWAYS_INLINE Vec<Tag> LoadOp::operator()(
 
 template <VectorTag Tag, Active A, Addressing Addr, Populate P,
           typename Alignment, typename Temporality, int IndexScale,
-          VectorValue IndexVector>
+          VectorValue IndexVector, typename Resources>
 VECOPS_ALWAYS_INLINE Vec<Tag> LoadOp::operator()(
     Tag tag, const ElementOf<Tag>* pointer,
     LoadRequest<Tag, A, Addr, P, Alignment, Temporality, IndexScale,
-                IndexVector> request) const {
+                IndexVector, Resources> request) const {
   return details::execute_load_request(*this, tag, pointer, request);
 }
 
@@ -155,11 +155,11 @@ VECOPS_ALWAYS_INLINE void StoreOp::operator()(
 
 template <VectorTag Tag, Active A, Addressing Addr,
           typename Alignment, typename Temporality, int IndexScale,
-          VectorValue IndexVector>
+          VectorValue IndexVector, typename Resources>
 VECOPS_ALWAYS_INLINE void StoreOp::operator()(
     Tag tag, ElementOf<Tag>* pointer, Vec<Tag> value,
     StoreRequest<Tag, A, Addr, Alignment, Temporality, IndexScale,
-                 IndexVector> request) const {
+                 IndexVector, Resources> request) const {
   details::execute_store_request(*this, tag, pointer, value, request);
 }
 

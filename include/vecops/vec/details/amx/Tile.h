@@ -65,6 +65,20 @@ VECOPS_ALWAYS_INLINE void load(const void* pointer, std::intptr_t stride) {
 }
 
 template <int Tile>
+VECOPS_ALWAYS_INLINE void stream_load(
+    const void* pointer, std::intptr_t stride) {
+  validate_tile<Tile>();
+  if constexpr (Tile == 0) _tile_stream_loadd(0, pointer, stride);
+  else if constexpr (Tile == 1) _tile_stream_loadd(1, pointer, stride);
+  else if constexpr (Tile == 2) _tile_stream_loadd(2, pointer, stride);
+  else if constexpr (Tile == 3) _tile_stream_loadd(3, pointer, stride);
+  else if constexpr (Tile == 4) _tile_stream_loadd(4, pointer, stride);
+  else if constexpr (Tile == 5) _tile_stream_loadd(5, pointer, stride);
+  else if constexpr (Tile == 6) _tile_stream_loadd(6, pointer, stride);
+  else _tile_stream_loadd(7, pointer, stride);
+}
+
+template <int Tile>
 VECOPS_ALWAYS_INLINE void store(void* pointer, std::intptr_t stride) {
   validate_tile<Tile>();
   if constexpr (Tile == 0) _tile_stored(0, pointer, stride);

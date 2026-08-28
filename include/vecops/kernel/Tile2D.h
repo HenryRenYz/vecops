@@ -74,6 +74,14 @@ struct BulkAndTail {};
  */
 struct RuntimeExactArea4 {};
 
+/**
+ * Runtime exact-area scheduling for an eight-register resident tile file.
+ *
+ * Unlike RuntimeExactArea4 this policy never requires 1x4 or 4x1 families;
+ * it uses 1x3/3x1 strips so A + B + C occupies at most seven tiles.
+ */
+struct RuntimeExactArea4Max3 {};
+
 } // namespace tile2d_policy
 
 /**
@@ -648,6 +656,72 @@ VECOPS_ALWAYS_INLINE void run_runtime_exact_area4(
       invoke_runtime_exact_area4<1, 3, Catalog>(
           fn, m_extent, n_extent, tm, tn, bm, bn);
     else if (nb - bn == 2)
+      invoke_runtime_exact_area4<1, 2, Catalog>(
+          fn, m_extent, n_extent, tm, tn, bm, bn);
+    else if (nb - bn == 1)
+      invoke_runtime_exact_area4<1, 1, Catalog>(
+          fn, m_extent, n_extent, tm, tn, bm, bn);
+  }
+}
+
+template <typename Catalog, typename Fn>
+VECOPS_ALWAYS_INLINE void run_runtime_exact_area4_max3(
+    nint_t m_extent, nint_t n_extent,
+    nint_t tm, nint_t tn,
+    Fn& fn) {
+  static_assert(
+      has_family<Catalog, 1, 1>() && has_family<Catalog, 1, 2>() &&
+      has_family<Catalog, 1, 3>() && has_family<Catalog, 2, 1>() &&
+      has_family<Catalog, 2, 2>() && has_family<Catalog, 3, 1>(),
+      "RuntimeExactArea4Max3 requires every exact family with A*B <= 4 "
+      "and A,B <= 3");
+  if (m_extent == 0 || n_extent == 0) return;
+
+  const nint_t bulk_m = 2 * tm;
+  const nint_t bulk_n = 2 * tn;
+  if (m_extent % bulk_m == 0 && n_extent % bulk_n == 0) {
+    using Bulk = family_for_t<Catalog, 2, 2>;
+    for (nint_t m = 0; m < m_extent; m += bulk_m) {
+      for (nint_t n = 0; n < n_extent; n += bulk_n) {
+        invoke<Bulk, Tile2DMaskMode::unmasked, Tile2DMaskMode::unmasked>(
+            fn, m, n, bulk_m, bulk_n);
+      }
+    }
+    return;
+  }
+
+  const nint_t mb = m_extent / tm + (m_extent % tm != 0);
+  const nint_t nb = n_extent / tn + (n_extent % tn != 0);
+  if (nb == 1) {
+    nint_t bm = 0;
+    for (; bm + 3 <= mb; bm += 3)
+      invoke_runtime_exact_area4<3, 1, Catalog>(
+          fn, m_extent, n_extent, tm, tn, bm, 0);
+    if (mb - bm == 2)
+      invoke_runtime_exact_area4<2, 1, Catalog>(
+          fn, m_extent, n_extent, tm, tn, bm, 0);
+    else if (mb - bm == 1)
+      invoke_runtime_exact_area4<1, 1, Catalog>(
+          fn, m_extent, n_extent, tm, tn, bm, 0);
+    return;
+  }
+
+  nint_t bm = 0;
+  for (; bm + 2 <= mb; bm += 2) {
+    nint_t bn = 0;
+    for (; bn + 2 <= nb; bn += 2)
+      invoke_runtime_exact_area4<2, 2, Catalog>(
+          fn, m_extent, n_extent, tm, tn, bm, bn);
+    if (bn < nb)
+      invoke_runtime_exact_area4<2, 1, Catalog>(
+          fn, m_extent, n_extent, tm, tn, bm, bn);
+  }
+  if (bm < mb) {
+    nint_t bn = 0;
+    for (; bn + 3 <= nb; bn += 3)
+      invoke_runtime_exact_area4<1, 3, Catalog>(
+          fn, m_extent, n_extent, tm, tn, bm, bn);
+    if (nb - bn == 2)
       invoke_runtime_exact_area4<1, 2, Catalog>(
           fn, m_extent, n_extent, tm, tn, bm, bn);
     else if (nb - bn == 1)
@@ -1310,6 +1384,14 @@ VECOPS_ALWAYS_INLINE void tile2d(
         tn_int <= std::numeric_limits<nint_t>::max() / 4,
         "RuntimeExactArea4 kernel capacity overflows nint_t");
     tile2d_details::run_runtime_exact_area4<Catalog>(
+        m_int, n_int, tm_int, tn_int, fn_ref);
+  } else if constexpr (std::same_as<
+                           Policy, tile2d_policy::RuntimeExactArea4Max3>) {
+    VECOPS_ASSERT(
+        tm_int <= std::numeric_limits<nint_t>::max() / 3 &&
+        tn_int <= std::numeric_limits<nint_t>::max() / 3,
+        "RuntimeExactArea4Max3 kernel capacity overflows nint_t");
+    tile2d_details::run_runtime_exact_area4_max3<Catalog>(
         m_int, n_int, tm_int, tn_int, fn_ref);
   } else if constexpr (
       std::same_as<Policy, tile2d_policy::FourRegions> &&

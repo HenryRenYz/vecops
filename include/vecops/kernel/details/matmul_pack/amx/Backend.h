@@ -5,8 +5,6 @@
 #ifndef VECOPS_KERNEL_DETAILS_MATMUL_PACK_AMX_BACKEND_H
 #define VECOPS_KERNEL_DETAILS_MATMUL_PACK_AMX_BACKEND_H
 
-#include <limits>
-
 #include "vecops/execution/ExecutionSession.h"
 #include "vecops/gemm/details/amx/Packing.h"
 #include "vecops/kernel/details/matmul_pack/amx/Pack.h"
@@ -72,31 +70,31 @@ struct Backend<
             input, row_stride, output, spatial, k,
             Packing::Panel, Packing::KTile);
       } else {
-        constexpr nint_t MaxGatherStride =
-            std::numeric_limits<int32_t>::max() / (Packing::Panel - 1);
-        if (k >= Packing::KPack && row_stride >= 0 &&
-            row_stride <= MaxGatherStride) {
-          amx::pack_b_direct<Packing::KPack>(
-              input, row_stride, output, spatial, k,
-              Packing::Panel, Packing::KTile);
-        } else {
-          const nint_t padded_groups =
-              ceil_div(k, Packing::KTile) *
-              (Packing::KTile / Packing::KPack);
-          generic::pack_interleaved_panels<Packing::KPack, Tag>(
-              source, output, spatial, k,
-              Packing::Panel, padded_groups);
-        }
+        amx::pack_b_direct<Packing::KPack>(
+            input, row_stride, output, spatial, k,
+            Packing::Panel, Packing::KTile);
       }
     } else if constexpr (Side == gemm::Operand::A) {
-      generic::pack_blocked_rows<Tag>(source, output, spatial, k,
-                                      Packing::Panel, Packing::KTile);
+      if constexpr (VEC_WIDTH >= 512) {
+        using ATag = vec::ScalableTag<T, 0>;
+        amx::pack_a_access<Packing::KTile, ATag>(
+            source, output, spatial, k);
+      } else {
+        generic::pack_blocked_rows<Tag>(source, output, spatial, k,
+                                        Packing::Panel, Packing::KTile);
+      }
     } else {
-      const nint_t padded_groups =
-          ceil_div(k, Packing::KTile) *
-          (Packing::KTile / Packing::KPack);
-      generic::pack_interleaved_panels<Packing::KPack, Tag>(
-          source, output, spatial, k, Packing::Panel, padded_groups);
+      if constexpr (VEC_WIDTH >= 512) {
+        amx::pack_b_access<
+            Packing::KPack, Packing::KTile, Tag>(
+                source, output, spatial, k);
+      } else {
+        const nint_t padded_groups =
+            ceil_div(k, Packing::KTile) *
+            (Packing::KTile / Packing::KPack);
+        generic::pack_interleaved_panels<Packing::KPack, Tag>(
+            source, output, spatial, k, Packing::Panel, padded_groups);
+      }
     }
   }
 };

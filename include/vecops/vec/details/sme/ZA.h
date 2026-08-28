@@ -167,9 +167,27 @@ VECOPS_SME_DEFINE_ZA_MOVE_WIDTH(std::int32_t, s)
         : [row] "r"(row), [tile] "i"(Tile), [pg] "Upl"(predicate),    \
           [pointer] "r"(pointer)                                        \
         : "x12", "za", "memory");                                    \
+  }                                                                      \
+  template <int Tile>                                                     \
+  VECOPS_ALWAYS_INLINE void store_ver(                                    \
+      std::uint32_t column, Mask<WordTag<Type>> pg,                       \
+      Type* pointer) noexcept {                                           \
+    validate_tile<Tile, Type>();                                          \
+    const auto predicate = raw_mask<Type>(pg);                            \
+    asm volatile(                                                         \
+        "mov w12, %w[column]\n\t"                                      \
+        "st1" #MemorySuffix " {za%c[tile]v." #ZASuffix                \
+            "[w12, 0]}, %[pg], [%[pointer]]"                            \
+        :                                                                 \
+        : [column] "r"(column), [tile] "i"(Tile),                       \
+          [pg] "Upl"(predicate), [pointer] "r"(pointer)                 \
+        : "x12", "za", "memory");                                    \
   }
 
-// These are the direct ZA-memory forms used by the current matmul backend.
+// Direct ZA-memory forms.  Besides avoiding an intermediate Z register, these
+// let transpose/packing kernels issue one horizontal ZA load per source row.
+VECOPS_SME_DEFINE_ZA_MEMORY_WIDTH(std::uint8_t, ld1b, b, b)
+VECOPS_SME_DEFINE_ZA_MEMORY_WIDTH(std::uint16_t, ld1h, h, h)
 VECOPS_SME_DEFINE_ZA_MEMORY_WIDTH(std::uint32_t, ld1w, w, s)
 VECOPS_SME_DEFINE_ZA_MEMORY_WIDTH(std::uint64_t, ld1d, d, d)
 

@@ -36,7 +36,11 @@ function(vecops_add_benchmark)
         ARCH ${ARG_ARCH}
         ARCH_DEFINITION VECOPS_BENCH_ARCH_CODE
         DEFINITIONS VECOPS_SOURCE_DIR="${CMAKE_SOURCE_DIR}" ${ARG_DEFINITIONS}
-        LIBRARIES vecops benchmark::benchmark ${ARG_LIBRARIES}
+        LIBRARIES
+            vecops
+            vecops_optimize_for_kernels
+            benchmark::benchmark
+            ${ARG_LIBRARIES}
         INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}")
 endfunction()
 
@@ -180,7 +184,7 @@ if(VECOPS_ENABLE_ONEDNN_BENCHMARKS)
             VECOPS_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
         )
         target_link_libraries(${TARGET_NAME} PRIVATE
-            vecops benchmark::benchmark dnnl)
+            vecops vecops_optimize_for_kernels benchmark::benchmark dnnl)
     endfunction()
 
     add_onednn_benchmark(LayerNormBench
