@@ -11,14 +11,14 @@
 #include <type_traits>
 #include <utility>
 
-#include <arm_sme.h>
-
 #include "vecops/execution/details/arm/Resources.h"
 #include "vecops/gemm/Packing.h"
 #include "vecops/gemm/details/sme/Atoms.h"
 #include "vecops/kernel/Tile2D.h"
+#include "vecops/kernel/details/matmul/Traversal.h"
 #include "vecops/kernel/details/matmul_pack/generic/Pack.h"
 #include "vecops/tensor/DataAccess.h"
+#include "vecops/vec/details/sme/ZA.h"
 
 namespace vecops::kernel::matmul_details::sme {
 
@@ -60,58 +60,81 @@ inline constexpr bool direct_row_major_output_v =
 struct KernelProvider {
   template <int A, int B, tile::Tile2DMaskMode, tile::Tile2DMaskMode>
   static consteval int power() {
-    if constexpr (A * B <= 4) return 100 * A * B + 4 * (A + B);
-    else return -1;
+    if constexpr (A * B <= 4) {
+      constexpr int imbalance = A > B ? A - B : B - A;
+      return 100 * A * B + 4 * (A + B) - 8 * imbalance;
+    } else {
+      return -1;
+    }
   }
 };
 
 using Catalog = tile::Tile2DGeneratedCatalog<
     KernelProvider, tile::Tile2DSearchSpace<4, 4, 4>>;
 
+template <gemm::Atom Atom, meta::ValueType M, meta::ValueType N>
+inline constexpr bool use_constraint_area4_v =
+    tile::tile2d_details::has_max_block_count_v<
+        M, decltype(Atom::M_R)> ||
+    tile::tile2d_details::has_max_block_count_v<
+        N, decltype(Atom::N_R)>;
+
+template <gemm::Atom Atom,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K,
+          typename A, typename B>
+inline constexpr bool prefer_constraint_area4_v = [] {
+  if constexpr (!use_constraint_area4_v<Atom, M, N>) {
+    return false;
+  } else if constexpr (
+      is_packed_access_v<Atom, gemm::Operand::A, A> &&
+      is_packed_access_v<Atom, gemm::Operand::B, B>) {
+    constexpr bool FixedSquare =
+        tile::tile2d_details::fixed_value_v<M> &&
+        tile::tile2d_details::fixed_value_v<N> &&
+        tile::tile2d_details::fixed_value_n<M> ==
+            tile::tile2d_details::fixed_value_n<N>;
+    constexpr nint_t KP = gemm::packing_t<
+        Atom, gemm::Operand::A>::KPack;
+    constexpr bool ShortK = meta::has_upper_bound_v<K> &&
+        meta::upper_bound_v<K> < 32 * KP;
+    // Very short packed kernels are dominated by entry/code-layout effects,
+    // while fixed square packed kernels currently receive better register
+    // allocation from the compact RuntimeExact loop.  Preserve those proven
+    // winners; constrained raw, rectangular, and long-K packed problems use
+    // the statically pruned plan.
+    return !FixedSquare && !ShortK;
+  } else {
+    return true;
+  }
+}();
+
 consteval int log2_kpack(nint_t kpack) {
   return kpack == 4 ? 2 : (kpack == 2 ? 1 : 0);
 }
 
 template <gemm::Atom Atom>
-VECOPS_ALWAYS_INLINE nint_t accumulator_lanes()
-    __arm_streaming {
-  if constexpr (sizeof(typename Atom::TAcc) == 8)
-    return static_cast<nint_t>(svcntd());
-  else
-    return static_cast<nint_t>(svcntw());
+VECOPS_ALWAYS_INLINE nint_t accumulator_lanes() {
+  return static_cast<nint_t>(Atom::M_R);
 }
 
 template <typename T, vec::VectorValue V>
-VECOPS_ALWAYS_INLINE auto as_native(V value)
-    __arm_streaming {
+VECOPS_ALWAYS_INLINE auto as_native(V value) {
   using Tag = vec::ScalableTag<T, 0>;
   return static_cast<vec::Vec<Tag>>(value);
 }
 
+#if defined(HAS_SME_FA64)
 VECOPS_ALWAYS_INLINE svuint32_t gather_words(
-    svbool_t pg, const uint32_t* base, svint32_t offsets)
-    __arm_streaming {
-#if defined(COMPILER_CLANG)
-  // WORKAROUND: BiSheng Clang 19 crashes while selecting the ACLE
-  // s32-offset gather in streaming mode. Spell the same instruction directly;
-  // unlike a scalar fallback this keeps online packing to one load per row.
-  svuint32_t result;
-  asm volatile(
-      "ld1w {%0.s}, %1/z, [%2, %3.s, sxtw]"
-      : "=w"(result)
-      : "Upl"(pg), "r"(base), "w"(offsets)
-      : "memory");
-  return result;
-#else
+    svbool_t pg, const uint32_t* base, svint32_t offsets) {
   return svld1_gather_s32offset_u32(pg, base, offsets);
-#endif
 }
+#endif
 
-template <gemm::Atom Atom, gemm::Operand Side, int Block, typename Source>
+template <gemm::Atom Atom, gemm::Operand Side, int Block,
+          bool FullK, typename Source>
 VECOPS_ALWAYS_INLINE auto load_operand(
     const Source& source, nint_t origin, nint_t kg,
-    nint_t logical_spatial, nint_t logical_k)
-    __arm_streaming {
+    nint_t logical_spatial, nint_t logical_k) {
   using Packing = gemm::packing_t<Atom, Side>;
   using T = typename Packing::Element;
   constexpr nint_t KP = Packing::KPack;
@@ -123,20 +146,21 @@ VECOPS_ALWAYS_INLINE auto load_operand(
     static_assert(generic::RawDirectAccess<Source>,
                   "packed SME input must be direct and untransformed");
     const auto& layout = source.spec().input_layout();
-    const nint_t panel = Packing::panel();
+    const nint_t panel = static_cast<nint_t>(Packing::panel());
     const nint_t offset = tensor::offset_at(
         layout, spatial / panel, kg, spatial % panel, 0);
     return vec::load(
         NativeTag{}, reinterpret_cast<const T*>(source.raw_data()) + offset);
   } else {
     static_assert(Source::Rank == 2, "unpacked SME input must be rank two");
-    const nint_t active = std::clamp(
+    const nint_t active = vec::details::sme::clamp_value(
         logical_spatial - spatial, nint_t{0}, lanes);
+#if defined(HAS_SME_FA64)
     if constexpr (generic::RawDirectAccess<Source> && sizeof(T) <= 4) {
       const auto strides = source.raw_strides();
       const nint_t k = kg * KP;
       const nint_t row_bytes = strides[0] * static_cast<nint_t>(sizeof(T));
-      if (strides[1] == 1 && k + KP <= logical_k &&
+      if (strides[1] == 1 && (FullK || k + KP <= logical_k) &&
           row_bytes >= std::numeric_limits<int32_t>::min() &&
           row_bytes <= std::numeric_limits<int32_t>::max()) {
         const svbool_t pg = svwhilelt_b32(nint_t{0}, active);
@@ -159,14 +183,23 @@ VECOPS_ALWAYS_INLINE auto load_operand(
         }
       }
     }
-    auto load_k = [&](nint_t ki) VECOPS_INLINE_LAMBDA __arm_streaming {
+#endif
+    auto load_k = [&](nint_t ki) VECOPS_INLINE_LAMBDA {
       const nint_t k = kg * KP + ki;
       auto result = vec::zeros(ScalarTag{});
-      if (k < logical_k) {
-        // Keep the online-pack path on contiguous K loads. Some production
-        // SME compilers still mis-select predicated 64-bit-offset gathers in
-        // streaming mode; scalar-width DataAccess calls also preserve every
-        // conversion/transform contract without entering that compiler path.
+      if constexpr (FullK) {
+        for (nint_t lane = 0; lane < active; ++lane) {
+          const auto one = source.load(
+              ScalarTag{}, tensor::coord(spatial + lane, k), tensor::axis<1>,
+              vec::opt::first(1), vec::opt::zero);
+          result = vec::set(
+              ScalarTag{}, result, lane, vec::get(ScalarTag{}, one, 0));
+        }
+      } else if (k < logical_k) {
+        // TODO: Provide a streaming-safe vector gather/scatter lowering for
+        // SME targets that have normal-mode SVE gather/scatter but lack FA64.
+        // Until then scalar-width DataAccess calls preserve every conversion
+        // and transform contract without requiring a streaming gather.
         for (nint_t lane = 0; lane < active; ++lane) {
           const auto one = source.load(
               ScalarTag{}, tensor::coord(spatial + lane, k), tensor::axis<1>,
@@ -191,56 +224,28 @@ VECOPS_ALWAYS_INLINE auto load_operand(
 }
 
 template <gemm::Atom Atom, int Tile, typename VA, typename VB>
-VECOPS_ALWAYS_INLINE void mopa(VA a, VB b)
-    __arm_streaming __arm_inout("za") {
-  const svbool_t pg = []() VECOPS_INLINE_LAMBDA __arm_streaming {
-    if constexpr (sizeof(typename Atom::TA) == 1) return svptrue_b8();
-    else if constexpr (sizeof(typename Atom::TA) == 2) return svptrue_b16();
-    else if constexpr (sizeof(typename Atom::TA) == 4) return svptrue_b32();
-    else return svptrue_b64();
-  }();
-  if constexpr (std::same_as<Atom, gemm::SME_F32F32>) {
-    svmopa_za32_f32_m(Tile, pg, pg, a, b);
-  } else if constexpr (std::same_as<Atom, gemm::SME_F16F32>) {
-    svmopa_za32_f16_m(Tile, pg, pg, a, b);
-  } else if constexpr (std::same_as<Atom, gemm::SME_BF16F32>) {
-    svmopa_za32_bf16_m(Tile, pg, pg, a, b);
-  } else if constexpr (
-      std::same_as<typename Atom::TA, int8_t> &&
-      std::same_as<typename Atom::TB, int8_t>) {
-    svmopa_za32_s8_m(Tile, pg, pg, a, b);
-  } else if constexpr (
-      std::same_as<typename Atom::TA, uint8_t> &&
-      std::same_as<typename Atom::TB, uint8_t>) {
-    svmopa_za32_u8_m(Tile, pg, pg, a, b);
-  } else if constexpr (
-      std::same_as<typename Atom::TA, int8_t> &&
-      std::same_as<typename Atom::TB, uint8_t>) {
-    svsumopa_za32_s8_m(Tile, pg, pg, a, b);
-  } else if constexpr (
-      std::same_as<typename Atom::TA, uint8_t> &&
-      std::same_as<typename Atom::TB, int8_t>) {
-    svusmopa_za32_u8_m(Tile, pg, pg, a, b);
-#if defined(HAS_SME_F64F64)
-  } else if constexpr (std::same_as<Atom, gemm::SME_F64F64>) {
-    svmopa_za64_f64_m(Tile, pg, pg, a, b);
-#endif
-  } else {
-    static_assert(execution::details::dependent_false_v<Atom>,
-                  "unsupported SME atom");
-  }
+VECOPS_ALWAYS_INLINE void mopa(VA a, VB b) {
+  using TA = typename Atom::TA;
+  using TB = typename Atom::TB;
+  using TAcc = typename Atom::TAcc;
+  using ATag = vec::ScalableTag<TA, 0>;
+  using BTag = vec::ScalableTag<TB, 0>;
+  const auto pga = vec::mtrue(ATag{});
+  const auto pgb = vec::mtrue(BTag{});
+  vec::details::sme::mopa<Tile, TAcc, TA, TB>(
+      pga, pgb, static_cast<vec::Vec<ATag>>(a),
+      static_cast<vec::Vec<BTag>>(b));
 }
 
 template <gemm::Atom Atom, gemm::Operand Side, int Block, typename Source>
 VECOPS_ALWAYS_INLINE auto packed_block_pointer(
-    const Source& source, nint_t origin)
-    __arm_streaming __arm_inout("za") {
+    const Source& source, nint_t origin) {
   static_assert(is_packed_access_v<Atom, Side, Source>);
   using Packing = gemm::packing_t<Atom, Side>;
   using T = typename Packing::Element;
   const nint_t lanes = accumulator_lanes<Atom>();
   const nint_t spatial = origin + static_cast<nint_t>(Block) * lanes;
-  const nint_t panel = Packing::panel();
+  const nint_t panel = static_cast<nint_t>(Packing::panel());
   const nint_t offset = tensor::offset_at(
       source.spec().input_layout(), spatial / panel, 0,
       spatial % panel, 0);
@@ -248,9 +253,8 @@ VECOPS_ALWAYS_INLINE auto packed_block_pointer(
 }
 
 template <gemm::Atom Atom, int NM, int NN, typename A, typename B>
-VECOPS_NOINLINE void compute_packed_groups(
-    const A& a, const B& b, nint_t m, nint_t n, nint_t logical_k)
-    __arm_streaming __arm_inout("za") {
+VECOPS_ALWAYS_INLINE void compute_packed_groups(
+    const A& a, const B& b, nint_t m, nint_t n, nint_t logical_k) {
   static_assert(is_packed_access_v<Atom, gemm::Operand::A, A>);
   static_assert(is_packed_access_v<Atom, gemm::Operand::B, B>);
   using TA = typename Atom::TA;
@@ -318,7 +322,16 @@ VECOPS_NOINLINE void compute_packed_groups(
         Atom, gemm::Operand::B, 0>(b, n);
     const auto* b1 = packed_block_pointer<
         Atom, gemm::Operand::B, 1>(b, n);
-    for (nint_t kg = 0; kg < groups; ++kg) {
+    VECOPS_LOOP_ALIGN(64) for (
+        nint_t kg = 0; kg < groups; ++kg) {
+      // Keep the four-load/four-MOPA hot loop in one 64-byte I-cache line.
+      // Without an explicit boundary Clang may place this 60-byte loop at
+      // offset 52, making every K group straddle two lines.  A second,
+      // otherwise-unused kernel plan used to hide the issue by changing code
+      // layout; align the loop itself instead of cloning the traversal.
+      // The 1xN/Nx1 packed loops and the 72+ byte raw loop are intentionally
+      // left unaligned: measurements show no frontend gain, while their entry
+      // padding is paid once per output tile.
       const auto av0 = vec::load(ATag{}, a0 + kg * a_step);
       const auto av1 = vec::load(ATag{}, a1 + kg * a_step);
       const auto bv0 = vec::load(BTag{}, b0 + kg * b_step);
@@ -331,58 +344,46 @@ VECOPS_NOINLINE void compute_packed_groups(
   }
 }
 
-template <int Tile, typename T, vec::VectorValue V>
-VECOPS_ALWAYS_INLINE void write_row(uint32_t row, svbool_t pg, V value)
-    __arm_streaming __arm_inout("za") {
-  if constexpr (std::same_as<T, float32_t>) {
-    svwrite_hor_za32_f32_m(Tile, row, pg, value);
-  } else if constexpr (std::same_as<T, float64_t>) {
-    svwrite_hor_za64_f64_m(Tile, row, pg, value);
-  } else {
-    svwrite_hor_za32_s32_m(Tile, row, pg, value);
-  }
+template <int Tile, typename T, vec::VectorValue V, typename Mask>
+VECOPS_ALWAYS_INLINE void write_row(
+    uint32_t row, Mask pg, V value) noexcept {
+  using Tag = vec::ScalableTag<T, 0>;
+  vec::details::sme::write_hor<Tile>(
+      row, static_cast<vec::Mask<Tag>>(pg),
+      static_cast<vec::Vec<Tag>>(value));
 }
 
-template <int Tile, typename T>
-VECOPS_ALWAYS_INLINE auto read_row(uint32_t row, svbool_t pg)
-    __arm_streaming __arm_inout("za") {
-  if constexpr (std::same_as<T, float32_t>) {
-    return svread_hor_za32_f32_m(svdup_f32(0.0f), pg, Tile, row);
-  } else if constexpr (std::same_as<T, float64_t>) {
-    return svread_hor_za64_f64_m(svdup_f64(0.0), pg, Tile, row);
-  } else {
-    return svread_hor_za32_s32_m(svdup_s32(0), pg, Tile, row);
-  }
+template <int Tile, typename T, typename Mask>
+VECOPS_ALWAYS_INLINE auto read_row(
+    uint32_t row, Mask pg) noexcept {
+  using Tag = vec::ScalableTag<T, 0>;
+  return vec::details::sme::read_hor<Tile>(
+      Tag{}, row, static_cast<vec::Mask<Tag>>(pg));
 }
 
 template <int Tile, typename CInput>
 VECOPS_ALWAYS_INLINE void initialize_c_tile(
     const CInput& input, nint_t m, nint_t n,
-    nint_t active_m, nint_t active_n)
-    __arm_streaming __arm_inout("za") {
+    nint_t active_m, nint_t active_n) {
   using T = typename CInput::ComputeType;
   if constexpr (IsZeroTransform<typename CInput::Transform>::value) {
     return;
   }
-  const svbool_t pg = [] (nint_t count)
-      VECOPS_INLINE_LAMBDA __arm_streaming {
-    if constexpr (sizeof(T) == 8) return svwhilelt_b64(nint_t{0}, count);
-    else return svwhilelt_b32(nint_t{0}, count);
-  }(active_n);
+  using Tag = vec::ScalableTag<T, 0>;
+  const auto pg = vec::mwhilelt(Tag{}, nint_t{0}, active_n);
   if constexpr (direct_row_major_input_v<CInput>) {
     const auto strides = input.raw_strides();
     const auto* base = reinterpret_cast<const T*>(input.raw_data()) +
         m * strides[0] + n;
     for (nint_t row = 0; row < active_m; ++row) {
-      if constexpr (sizeof(T) == 8)
-        svld1_hor_za64(Tile, static_cast<uint32_t>(row), pg,
-                       base + row * strides[0]);
-      else
-        svld1_hor_za32(Tile, static_cast<uint32_t>(row), pg,
-                       base + row * strides[0]);
+      using U = std::conditional_t<sizeof(T) == 8, uint64_t, uint32_t>;
+      using BitsTag = vec::ScalableTag<U, 0>;
+      vec::details::sme::load_hor<Tile>(
+          static_cast<uint32_t>(row),
+          static_cast<vec::Mask<BitsTag>>(pg),
+          reinterpret_cast<const U*>(base + row * strides[0]));
     }
   } else {
-    using Tag = vec::ScalableTag<T, 0>;
     for (nint_t row = 0; row < active_m; ++row) {
       const auto value = input.load(
           Tag{}, tensor::coord(m + row, n), tensor::axis<1>,
@@ -395,28 +396,23 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
 template <int Tile, typename COutput>
 VECOPS_ALWAYS_INLINE void store_c_tile(
     COutput& output, nint_t m, nint_t n,
-    nint_t active_m, nint_t active_n)
-    __arm_streaming __arm_inout("za") {
+    nint_t active_m, nint_t active_n) {
   using T = typename COutput::ComputeType;
-  const svbool_t pg = [] (nint_t count)
-      VECOPS_INLINE_LAMBDA __arm_streaming {
-    if constexpr (sizeof(T) == 8) return svwhilelt_b64(nint_t{0}, count);
-    else return svwhilelt_b32(nint_t{0}, count);
-  }(active_n);
+  using Tag = vec::ScalableTag<T, 0>;
+  const auto pg = vec::mwhilelt(Tag{}, nint_t{0}, active_n);
   if constexpr (direct_row_major_output_v<COutput>) {
     const auto strides = output.raw_strides();
     auto* base = reinterpret_cast<T*>(output.raw_data()) +
         m * strides[0] + n;
     for (nint_t row = 0; row < active_m; ++row) {
-      if constexpr (sizeof(T) == 8)
-        svst1_hor_za64(Tile, static_cast<uint32_t>(row), pg,
-                       base + row * strides[0]);
-      else
-        svst1_hor_za32(Tile, static_cast<uint32_t>(row), pg,
-                       base + row * strides[0]);
+      using U = std::conditional_t<sizeof(T) == 8, uint64_t, uint32_t>;
+      using BitsTag = vec::ScalableTag<U, 0>;
+      vec::details::sme::store_hor<Tile>(
+          static_cast<uint32_t>(row),
+          static_cast<vec::Mask<BitsTag>>(pg),
+          reinterpret_cast<U*>(base + row * strides[0]));
     }
   } else {
-    using Tag = vec::ScalableTag<T, 0>;
     for (nint_t row = 0; row < active_m; ++row) {
       const auto value = static_cast<vec::Vec<Tag>>(
           read_row<Tile, T>(static_cast<uint32_t>(row), pg));
@@ -427,47 +423,44 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
   }
 }
 
-template <gemm::Atom Atom, int NM, int NN,
+template <gemm::Atom Atom, int NM, int NN, bool FullK,
           typename A, typename B>
 VECOPS_ALWAYS_INLINE void compute_group(
     const A& a, const B& b, nint_t m, nint_t n, nint_t kg,
-    nint_t logical_m, nint_t logical_n, nint_t logical_k)
-    __arm_streaming __arm_inout("za") {
+    nint_t logical_m, nint_t logical_n, nint_t logical_k) {
   if constexpr (NN == 1) {
-    const auto bv = load_operand<Atom, gemm::Operand::B, 0>(
+    const auto bv = load_operand<Atom, gemm::Operand::B, 0, FullK>(
         b, n, kg, logical_n, logical_k);
-    auto one_m = [&]<int MI>() VECOPS_INLINE_LAMBDA
-        __arm_streaming __arm_inout("za") {
-      const auto av = load_operand<Atom, gemm::Operand::A, MI>(
+    auto one_m = [&]<int MI>() VECOPS_INLINE_LAMBDA {
+      const auto av = load_operand<Atom, gemm::Operand::A, MI, FullK>(
           a, m, kg, logical_m, logical_k);
       mopa<Atom, MI>(av, bv);
     };
     [&]<std::size_t... MI>(std::index_sequence<MI...>)
-        VECOPS_INLINE_LAMBDA __arm_streaming __arm_inout("za") {
+        VECOPS_INLINE_LAMBDA {
       (one_m.template operator()<static_cast<int>(MI)>(), ...);
     }(std::make_index_sequence<NM>{});
   } else if constexpr (NM == 1) {
-    const auto av = load_operand<Atom, gemm::Operand::A, 0>(
+    const auto av = load_operand<Atom, gemm::Operand::A, 0, FullK>(
         a, m, kg, logical_m, logical_k);
-    auto one_n = [&]<int NI>() VECOPS_INLINE_LAMBDA
-        __arm_streaming __arm_inout("za") {
-      const auto bv = load_operand<Atom, gemm::Operand::B, NI>(
+    auto one_n = [&]<int NI>() VECOPS_INLINE_LAMBDA {
+      const auto bv = load_operand<Atom, gemm::Operand::B, NI, FullK>(
           b, n, kg, logical_n, logical_k);
       mopa<Atom, NI>(av, bv);
     };
     [&]<std::size_t... NI>(std::index_sequence<NI...>)
-        VECOPS_INLINE_LAMBDA __arm_streaming __arm_inout("za") {
+        VECOPS_INLINE_LAMBDA {
       (one_n.template operator()<static_cast<int>(NI)>(), ...);
     }(std::make_index_sequence<NN>{});
   } else {
     static_assert(NM == 2 && NN == 2);
-    const auto a0 = load_operand<Atom, gemm::Operand::A, 0>(
+    const auto a0 = load_operand<Atom, gemm::Operand::A, 0, FullK>(
         a, m, kg, logical_m, logical_k);
-    const auto a1 = load_operand<Atom, gemm::Operand::A, 1>(
+    const auto a1 = load_operand<Atom, gemm::Operand::A, 1, FullK>(
         a, m, kg, logical_m, logical_k);
-    const auto b0 = load_operand<Atom, gemm::Operand::B, 0>(
+    const auto b0 = load_operand<Atom, gemm::Operand::B, 0, FullK>(
         b, n, kg, logical_n, logical_k);
-    const auto b1 = load_operand<Atom, gemm::Operand::B, 1>(
+    const auto b1 = load_operand<Atom, gemm::Operand::B, 1, FullK>(
         b, n, kg, logical_n, logical_k);
     mopa<Atom, 0>(a0, b0);
     mopa<Atom, 1>(a0, b1);
@@ -476,100 +469,80 @@ VECOPS_ALWAYS_INLINE void compute_group(
   }
 }
 
-template <gemm::Atom Atom, bool FastPacked, typename Case,
+template <gemm::Atom Atom, bool FastPacked, int NM, int NN,
+          bool ExactBlocks,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_ALWAYS_INLINE void microkernel(
     const A& a, const B& b, const CInput& c_input, COutput& c_output,
     nint_t logical_m, nint_t logical_n, nint_t logical_k,
-    nint_t m, nint_t n, nint_t active_m, nint_t active_n)
-    __arm_streaming __arm_inout("za") {
-  constexpr int NM = Case::a;
-  constexpr int NN = Case::b;
+    nint_t m, nint_t n, nint_t active_m, nint_t active_n) {
   constexpr int Outputs = NM * NN;
-  const nint_t lanes = accumulator_lanes<Atom>();
-  svzero_za();
+  const nint_t lanes = static_cast<nint_t>(Atom::M_R);
+  vec::details::sme::zero_za();
   [&]<std::size_t... I>(std::index_sequence<I...>)
-      VECOPS_INLINE_LAMBDA __arm_streaming __arm_inout("za") {
+      VECOPS_INLINE_LAMBDA {
     (initialize_c_tile<static_cast<int>(I)>(
          c_input,
          m + static_cast<nint_t>(I / NN) * lanes,
          n + static_cast<nint_t>(I % NN) * lanes,
-         std::clamp(active_m - static_cast<nint_t>(I / NN) * lanes,
+         vec::details::sme::clamp_value(active_m - static_cast<nint_t>(I / NN) * lanes,
                     nint_t{0}, lanes),
-         std::clamp(active_n - static_cast<nint_t>(I % NN) * lanes,
+         vec::details::sme::clamp_value(active_n - static_cast<nint_t>(I % NN) * lanes,
                     nint_t{0}, lanes)), ...);
   }(std::make_index_sequence<Outputs>{});
 
-  if constexpr (FastPacked) {
+  auto compute_generic = [&]() VECOPS_INLINE_LAMBDA {
+    constexpr nint_t KP = gemm::packing_t<Atom, gemm::Operand::A>::KPack;
+    if constexpr (std::same_as<Atom, gemm::SME_BF16F32>) {
+      const nint_t full_groups = logical_k / KP;
+      for (nint_t kg = 0; kg < full_groups; ++kg) {
+        compute_group<Atom, NM, NN, true>(
+            a, b, m, n, kg, logical_m, logical_n, logical_k);
+      }
+      if (full_groups * KP < logical_k) {
+        compute_group<Atom, NM, NN, false>(
+            a, b, m, n, full_groups,
+            logical_m, logical_n, logical_k);
+      }
+    } else {
+      const nint_t groups = ceil_div(logical_k, KP);
+      for (nint_t kg = 0; kg < groups; ++kg) {
+        compute_group<Atom, NM, NN, false>(
+            a, b, m, n, kg, logical_m, logical_n, logical_k);
+      }
+    }
+  };
+
+  if constexpr (FastPacked && ExactBlocks) {
     static_assert(is_packed_access_v<Atom, gemm::Operand::A, A>);
     static_assert(is_packed_access_v<Atom, gemm::Operand::B, B>);
     compute_packed_groups<Atom, NM, NN>(a, b, m, n, logical_k);
-  } else {
-    constexpr nint_t KP = gemm::packing_t<Atom, gemm::Operand::A>::KPack;
-    const nint_t groups = ceil_div(logical_k, KP);
-    for (nint_t kg = 0; kg < groups; ++kg) {
-      compute_group<Atom, NM, NN>(
-          a, b, m, n, kg, logical_m, logical_n, logical_k);
+  } else if constexpr (FastPacked) {
+    static_assert(is_packed_access_v<Atom, gemm::Operand::A, A>);
+    static_assert(is_packed_access_v<Atom, gemm::Operand::B, B>);
+    const bool all_logical_blocks_exist =
+        active_m > static_cast<nint_t>(NM - 1) * lanes &&
+        active_n > static_cast<nint_t>(NN - 1) * lanes;
+    if (all_logical_blocks_exist) {
+      compute_packed_groups<Atom, NM, NN>(a, b, m, n, logical_k);
+    } else {
+      compute_generic();
     }
+  } else {
+    compute_generic();
   }
 
   [&]<std::size_t... I>(std::index_sequence<I...>)
-      VECOPS_INLINE_LAMBDA __arm_streaming __arm_inout("za") {
+      VECOPS_INLINE_LAMBDA {
     (store_c_tile<static_cast<int>(I)>(
          c_output,
          m + static_cast<nint_t>(I / NN) * lanes,
          n + static_cast<nint_t>(I % NN) * lanes,
-         std::clamp(active_m - static_cast<nint_t>(I / NN) * lanes,
+         vec::details::sme::clamp_value(active_m - static_cast<nint_t>(I / NN) * lanes,
                     nint_t{0}, lanes),
-         std::clamp(active_n - static_cast<nint_t>(I % NN) * lanes,
+         vec::details::sme::clamp_value(active_n - static_cast<nint_t>(I % NN) * lanes,
                     nint_t{0}, lanes)), ...);
   }(std::make_index_sequence<Outputs>{});
-}
-
-template <gemm::Atom Atom, bool FastPacked = false,
-          typename A, typename B, typename CInput, typename COutput>
-__arm_new("za") VECOPS_NOINLINE void run_tiles(
-    nint_t m, nint_t n, nint_t k,
-    const A& a, const B& b, const CInput& c_input, COutput& c_output)
-    __arm_streaming {
-  const nint_t lanes = accumulator_lanes<Atom>();
-  const nint_t mb = ceil_div(m, lanes);
-  const nint_t nb = ceil_div(n, lanes);
-  auto invoke = [&]<int NM, int NN>(nint_t bm, nint_t bn)
-      VECOPS_INLINE_LAMBDA __arm_streaming __arm_inout("za") {
-    using Family = tile::Tile2DKernelFamily<NM, NN, 1>;
-    using Case = tile::Tile2DKernelCase<
-        Family, tile::Tile2DMaskMode::masked, tile::Tile2DMaskMode::masked>;
-    const nint_t mi = bm * lanes;
-    const nint_t ni = bn * lanes;
-    microkernel<Atom, FastPacked, Case>(
-        a, b, c_input, c_output, m, n, k, mi, ni,
-        std::min(m - mi, static_cast<nint_t>(NM) * lanes),
-        std::min(n - ni, static_cast<nint_t>(NN) * lanes));
-  };
-
-  if (nb == 1) {
-    nint_t bm = 0;
-    for (; bm + 4 <= mb; bm += 4) invoke.template operator()<4, 1>(bm, 0);
-    if (mb - bm == 3) invoke.template operator()<3, 1>(bm, 0);
-    else if (mb - bm == 2) invoke.template operator()<2, 1>(bm, 0);
-    else if (mb - bm == 1) invoke.template operator()<1, 1>(bm, 0);
-    return;
-  }
-
-  nint_t bm = 0;
-  for (; bm + 2 <= mb; bm += 2) {
-    nint_t bn = 0;
-    for (; bn + 2 <= nb; bn += 2) invoke.template operator()<2, 2>(bm, bn);
-    if (bn < nb) invoke.template operator()<2, 1>(bm, bn);
-  }
-  if (bm < mb) {
-    nint_t bn = 0;
-    for (; bn + 4 <= nb; bn += 4) invoke.template operator()<1, 4>(bm, bn);
-    if (nb - bn == 3) invoke.template operator()<1, 3>(bm, bn);
-    else if (nb - bn == 2) invoke.template operator()<1, 2>(bm, bn);
-    else if (nb - bn == 1) invoke.template operator()<1, 1>(bm, bn);
-  }
 }
 
 } // namespace vecops::kernel::matmul_details::sme
@@ -578,32 +551,86 @@ namespace vecops::kernel::matmul_details {
 
 template <>
 struct Backend<matmul_implementation::SME> {
-  using ResourceRequirements = execution::details::ResourceSet<
-      execution::details::arm::Streaming>;
+  using ResourceRequirements = execution::details::ResourceSet<>;
+  using Catalog = sme::Catalog;
+  static constexpr int ProblemRank = 2;
 
   static nint_t scratch_bytes() { return 0; }
 
-  template <gemm::Atom Atom, execution::ExecutionScope Scope,
+  template <gemm::Atom Atom, typename Policy,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B>
+  using EffectivePolicy = std::conditional_t<
+      std::same_as<Policy, matmul_policy::Automatic>,
+      std::conditional_t<
+          sme::prefer_constraint_area4_v<Atom, M, N, K, A, B>,
+          kernel::loop::tile2d_policy::FourRegions,
+          kernel::loop::tile2d_policy::RuntimeExactArea4>,
+      Policy>;
+
+  template <gemm::Atom Atom, typename Policy,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename A, typename B, typename CInput, typename COutput>
   VECOPS_ALWAYS_INLINE static void run(
-      Scope&, nint_t m, nint_t n, nint_t k,
+      Scope& scope, M m, N n, K k,
       const A& a, const B& b, const CInput& c_input, COutput& c_output,
-      void*) {
+      void* scratch) {
     static_assert(std::same_as<typename Atom::KernelKind, gemm::SMEKernelKind>);
-    static_assert(execution::has_resource_v<
-        execution::details::arm::Streaming, Scope>);
+    scope.with_resources(
+        execution::details::arm::StreamingZARegion{},
+        [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          matmul_details::run_tiles<Backend, Atom, Policy>(
+              m, n, k, a, b, c_input, c_output, scratch);
+        });
+  }
+
+  template <gemm::Atom Atom, typename A, typename B,
+            meta::ValueType K, typename Fn>
+  VECOPS_ALWAYS_INLINE static void dispatch_plan(K k, Fn&& fn) {
+    auto invoke = [&]<bool FastPacked>() VECOPS_INLINE_LAMBDA_NOEXCEPT {
+      std::forward<Fn>(fn).template operator()<
+          std::bool_constant<FastPacked>>();
+    };
     if constexpr (
         sme::is_packed_access_v<Atom, gemm::Operand::A, A> &&
         sme::is_packed_access_v<Atom, gemm::Operand::B, B>) {
       constexpr nint_t KP = gemm::packing_t<
           Atom, gemm::Operand::A>::KPack;
-      if (ceil_div(k, KP) >= 32)
-        sme::run_tiles<Atom, true>(m, n, k, a, b, c_input, c_output);
-      else
-        sme::run_tiles<Atom, false>(m, n, k, a, b, c_input, c_output);
+      const auto k_groups = gemm::packing_details::ceil_div_value(
+          k, meta::cint<KP>);
+      if constexpr (decltype(k_groups)::is_const) {
+        invoke.template operator()<decltype(k_groups)::value >= 32>();
+      } else if constexpr (
+          meta::has_upper_bound_v<decltype(k_groups)> &&
+          meta::upper_bound_v<decltype(k_groups)> < 32) {
+        invoke.template operator()<false>();
+      } else if constexpr (
+          meta::has_lower_bound_v<decltype(k_groups)> &&
+          meta::lower_bound_v<decltype(k_groups)> >= 32) {
+        invoke.template operator()<true>();
+      } else {
+        // A single direct packed-pointer loop is faster overall for an
+        // unconstrained K and avoids cloning the complete tile traversal.
+        invoke.template operator()<true>();
+      }
     } else {
-      sme::run_tiles<Atom, false>(m, n, k, a, b, c_input, c_output);
+      invoke.template operator()<false>();
     }
+  }
+
+  template <gemm::Atom Atom, typename Case, typename Plan,
+            typename A, typename B, typename CInput, typename COutput>
+  VECOPS_ALWAYS_INLINE static void run_case(
+      const A& a, const B& b, const CInput& c_input, COutput& c_output,
+      nint_t logical_m, nint_t logical_n, nint_t logical_k,
+      nint_t m, nint_t n, nint_t active_m, nint_t active_n,
+      void*) {
+    sme::microkernel<
+        Atom, Plan::value, Case::a, Case::b, Case::exact_blocks>(
+            a, b, c_input, c_output,
+            logical_m, logical_n, logical_k,
+            m, n, active_m, active_n);
   }
 };
 

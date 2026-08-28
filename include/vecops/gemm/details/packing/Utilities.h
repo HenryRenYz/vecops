@@ -28,7 +28,22 @@ VECOPS_INLINE constexpr auto ceil_div_value(
     meta::Dynamic<Alignment, Low, High> value,
     meta::Const<Divisor>) {
   static_assert(Divisor > 0);
-  return meta::Any{ceil_div(static_cast<nint_t>(value), Divisor)};
+  constexpr nint_t ResultAlignment =
+      Alignment % Divisor == 0 ? Alignment / Divisor : 1;
+  constexpr nint_t ResultLow = Low == meta::kLoInf
+      ? meta::kLoInf : ceil_div(Low, Divisor);
+  constexpr nint_t ResultHigh = High == meta::kHiInf
+      ? meta::kHiInf : ceil_div(High, Divisor);
+  return meta::Dynamic<ResultAlignment, ResultLow, ResultHigh>{
+      ceil_div(static_cast<nint_t>(value), Divisor)};
+}
+
+template <meta::ValueType Value,
+          nint_t Alignment, nint_t Low, nint_t High>
+VECOPS_INLINE constexpr auto ceil_div_value(
+    Value value, meta::Dynamic<Alignment, Low, High> divisor) {
+  return meta::Any{ceil_div(
+      static_cast<nint_t>(value), static_cast<nint_t>(divisor))};
 }
 
 VECOPS_INLINE constexpr void validate_packed_size(

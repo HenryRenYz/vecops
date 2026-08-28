@@ -16,9 +16,9 @@ namespace {
 using namespace vecops;
 
 struct FakeStatefulGemm {
-#if defined(HAS_ARM_LOCALLY_STREAMING)
+#if defined(HAS_SME_FA64)
   using ResourceRequirements = execution::details::ResourceSet<
-      execution::details::arm::Streaming>;
+      execution::details::arm::StreamingZA>;
 #elif defined(HAS_AMX_TILE)
   using ResourceRequirements = execution::details::ResourceSet<
       execution::details::x86::Tiles>;
@@ -71,9 +71,9 @@ struct FakeStatefulGemm {
 };
 
 static_assert(execution::ExecutionScope<ExecutionSession>);
-#if defined(HAS_ARM_LOCALLY_STREAMING)
+#if defined(HAS_SME_FA64)
 static_assert(!execution::details::has_resource_v<
-    execution::details::arm::Streaming,
+    execution::details::arm::StreamingZA,
     ExecutionSession::ActiveResources>);
 #elif defined(HAS_AMX_TILE)
 static_assert(!execution::details::has_resource_v<
@@ -100,10 +100,10 @@ TEST(ExecutionSessionTest, StatefulScalarGemmProducesExpectedValues) {
   FakeStatefulGemm gemm;
   ExecutionSession execution{};
   execution.with_region(
-      gemm, [&](auto& region) VECOPS_INLINE_LAMBDA {
-#if defined(HAS_ARM_LOCALLY_STREAMING)
+      gemm, [&](auto& region) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+#if defined(HAS_SME_FA64)
         static_assert(execution::has_resource_v<
-            execution::details::arm::Streaming, decltype(region)>);
+            execution::details::arm::StreamingZA, decltype(region)>);
 #elif defined(HAS_AMX_TILE)
         static_assert(execution::has_resource_v<
             execution::details::x86::Tiles, decltype(region)>);
@@ -121,7 +121,7 @@ extern "C" VECOPS_NOINLINE void fake_stateful_gemm_probe(
   FakeStatefulGemm gemm;
   ExecutionSession execution{};
   execution.with_region(
-      gemm, [&](auto& region) VECOPS_INLINE_LAMBDA {
+      gemm, [&](auto& region) VECOPS_INLINE_LAMBDA_NOEXCEPT {
         // Model an operator-level resource scope nested inside the outer
         // region. Its requirements are already active and must not emit a
         // second AMX/streaming transition.

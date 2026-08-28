@@ -186,7 +186,7 @@ struct GenericImpl<Backend, ConvertOp, ToTag> {
         : static_cast<int>(sizeof(ElementOf<FromTag>) / sizeof(ElementOf<ToTag>));
     constexpr int phase = lane_layout
         ? conversion_lane_phase<Options...>() : 0;
-    const auto initial = [&] {
+    const auto initial = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr ((lane_layout && narrows) || masked)
         return conversion_population<Backend>(
             to, std::forward<Options>(options)...);
@@ -218,7 +218,7 @@ struct GenericImpl<Backend, ConvertOp, ToTag> {
         }
         const auto input = get_vec_lane_at<Backend>(
             from, value, input_lane);
-        const auto converted = [&] {
+        const auto converted = [&]() VECOPS_INLINE_LAMBDA {
           if constexpr (wraps)
             return ::vecops::wrap_convert<ElementOf<ToTag>>(input);
           else

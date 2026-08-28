@@ -89,7 +89,7 @@ VECOPS_ALWAYS_INLINE Mask<Tag> execute_comparison_options(
     Op op, Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) {
   return comparison_options_dispatch(
       tag,
-      [&] { return execute(op, tag, a, b); },
+      [&]() VECOPS_INLINE_LAMBDA { return execute(op, tag, a, b); },
       [&](const Mask<Tag>& active) {
         return execute(op, tag, a, b, active);
       },
@@ -101,7 +101,7 @@ VECOPS_ALWAYS_INLINE Mask<Tag> execute_comparison_options(
     Op op, Tag tag, Vec<Tag> value, Options&&... options) {
   return comparison_options_dispatch(
       tag,
-      [&] { return execute(op, tag, value); },
+      [&]() VECOPS_INLINE_LAMBDA { return execute(op, tag, value); },
       [&](const Mask<Tag>& active) {
         return execute(op, tag, value, active);
       },
@@ -141,8 +141,8 @@ VECOPS_ALWAYS_INLINE Mask<Tag> execute_comparison_request(
     const OpRequest<Tag, A, I>& request) {
   return comparison_request_dispatch<Tag, A, I>(
       tag,
-      [&] { return execute(op, tag, a, b); },
-      [&] { return execute(op, tag, a, b, *request.mask); },
+      [&]() VECOPS_INLINE_LAMBDA { return execute(op, tag, a, b); },
+      [&]() VECOPS_INLINE_LAMBDA { return execute(op, tag, a, b, *request.mask); },
       [&](const Mask<Tag>& partial) {
         return mask_or(
             tag, partial,
@@ -157,8 +157,8 @@ VECOPS_ALWAYS_INLINE Mask<Tag> execute_comparison_request(
     const OpRequest<Tag, A, I>& request) {
   return comparison_request_dispatch<Tag, A, I>(
       tag,
-      [&] { return execute(op, tag, value); },
-      [&] { return execute(op, tag, value, *request.mask); },
+      [&]() VECOPS_INLINE_LAMBDA { return execute(op, tag, value); },
+      [&]() VECOPS_INLINE_LAMBDA { return execute(op, tag, value, *request.mask); },
       [&](const Mask<Tag>& partial) {
         return mask_or(
             tag, partial,

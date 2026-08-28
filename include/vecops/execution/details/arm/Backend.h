@@ -5,52 +5,48 @@
 #ifndef VECOPS_EXECUTION_DETAILS_ARM_BACKEND_H
 #define VECOPS_EXECUTION_DETAILS_ARM_BACKEND_H
 
+#include <type_traits>
 #include <utility>
 
 #include "vecops/execution/details/ResourceSet.h"
 #include "vecops/execution/details/arm/Resources.h"
 #include "vecops/platform/Target.h"
+#if defined(HAS_SME_FA64)
+#include "vecops/vec/details/sme/State.h"
+#endif
 
 /** @file Backend.h @brief AArch64 execution-state backend. */
 
 namespace vecops::execution::details {
 
 /**
- * @brief AArch64 execution backend for streaming-mode resource ownership.
- *
- * Ordinary operators default to `arm::NonStreaming`. A region requesting
- * `arm::Streaming` is entered through the ACLE locally-streaming trampoline.
- * Combining both requirements is a compile-time error; no runtime mode test or
- * transition schedule is synthesized.
+ * @brief AArch64 execution backend for manual Streaming+ZA ownership.
  */
 template <>
 struct Backend<platform::AArch64Target> {
-  using DefaultRequirements = ResourceSet<arm::NonStreaming>;
+  using DefaultRequirements = ResourceSet<>;
 
   template <typename Resources>
-  /** Reject a region containing mutually exclusive ARM mode requirements. */
-  static consteval void validate() {
-    static_assert(
-        !(has_resource_v<arm::Streaming, Resources> &&
-          has_resource_v<arm::NonStreaming, Resources>),
-        "streaming and non-streaming-only operators cannot share a region");
-  }
+  /** Manual StreamingZA is the only ARM execution-state resource. */
+  static consteval void validate() {}
 
   template <typename Current, typename Required, typename Fn>
   /**
-   * @brief Enter streaming mode only when newly required, then invoke `fn`.
+   * @brief Enter Streaming+ZA only when newly required, then invoke `fn`.
    * @return The callback result.
    */
   VECOPS_ALWAYS_INLINE static decltype(auto) enter(Fn&& fn) {
-    constexpr bool EnterStreaming =
-        has_resource_v<arm::Streaming, Required> &&
-        !has_resource_v<arm::Streaming, Current>;
-    if constexpr (EnterStreaming) {
-#if defined(HAS_ARM_LOCALLY_STREAMING)
-      return arm::invoke_streaming(std::forward<Fn>(fn));
+    constexpr bool EnterStreamingZA =
+        has_resource_v<arm::StreamingZA, Required> &&
+        !has_resource_v<arm::StreamingZA, Current>;
+    if constexpr (EnterStreamingZA) {
+#if defined(HAS_SME_FA64)
+      static_assert(std::is_nothrow_invocable_v<Fn&&>,
+                    "manual SME region callback must be noexcept");
+      return vec::details::sme::with_streaming_za(std::forward<Fn>(fn));
 #else
-      static_assert(!EnterStreaming,
-                    "Arm streaming resource requires SME ACLE support");
+      static_assert(!EnterStreamingZA,
+                    "Arm StreamingZA requires an SME+FA64 target");
 #endif
     } else {
       return std::forward<Fn>(fn)();

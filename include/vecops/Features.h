@@ -409,6 +409,20 @@
   #define FIXED_SVE_BITS __ARM_FEATURE_SVE_BITS
 #endif
 
+// SME streaming vector length can differ from the ordinary SVE VL.  Until
+// compilers standardize a predefined macro for a fixed SVL, CMake propagates
+// the target guarantee explicitly after validating/detecting the requested
+// architectural width.
+#if defined(VECOPS_TARGET_FIXED_STREAMING_SVE_BITS)
+  #if VECOPS_TARGET_FIXED_STREAMING_SVE_BITS < 128 || \
+      VECOPS_TARGET_FIXED_STREAMING_SVE_BITS > 2048 || \
+      (VECOPS_TARGET_FIXED_STREAMING_SVE_BITS % 128) != 0
+    #error "fixed streaming SVE bits must be a multiple of 128 in [128, 2048]"
+  #endif
+  #define HAS_FIXED_STREAMING_SVE_BITS 1
+  #define FIXED_STREAMING_SVE_BITS VECOPS_TARGET_FIXED_STREAMING_SVE_BITS
+#endif
+
 // Predicate tuples (svboolx2_t/svboolx4_t and svcreate/get/set) are exposed
 // by Clang and by GCC 13 or newer.  Older GCC can still use SVE in VLS mode,
 // where masks are represented as ordinary arrays and do not need these types.
@@ -462,14 +476,12 @@
   #define HAS_SME 1
 #endif
 
-// COMPILER WORKAROUND: GCC 15 accepts __arm_locally_streaming and emits correct
-// SMSTART/SMSTOP boundaries but does not publish the ACLE feature-test macro
-// __ARM_FEATURE_LOCALLY_STREAMING. Treat an SME-enabled GCC target as the tested
-// implementation capability. Clang must continue to advertise the ACLE macro.
-// Remove the GCC clause only after supported GCC versions publish the macro.
+// SME Full A64 support in Streaming SVE mode. ACLE does not currently define
+// a portable feature-test macro for FEAT_SME_FA64, so native CMake targets
+// propagate the accepted -march=...+sme-fa64 guarantee explicitly.
 #if defined(HAS_SME) && \
-    (defined(__ARM_FEATURE_LOCALLY_STREAMING) || defined(COMPILER_GCC))
-  #define HAS_ARM_LOCALLY_STREAMING 1
+    (defined(__ARM_FEATURE_SME_FA64) || defined(VECOPS_TARGET_SME_FA64))
+  #define HAS_SME_FA64 1
 #endif
 
 // SME F64F64 (64-bit 浮点矩阵)

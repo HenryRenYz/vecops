@@ -35,7 +35,7 @@ namespace vecops::ops::transpose_details {
 template <typename Input, typename Output,
           typename InputSpec, typename OutputSpec, typename Policy>
 inline constexpr bool use_sme_v = [] {
-#if defined(HAS_SME)
+#if defined(HAS_SME_FA64)
   if constexpr (
       InputSpec::InputTensor::Ndim != 2 ||
       OutputSpec::OutputTensor::Ndim != 2) {

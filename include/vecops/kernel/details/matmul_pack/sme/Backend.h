@@ -28,7 +28,7 @@ struct Backend<
             execution::ExecutionScope Scope,
             typename Source, typename Destination>
   VECOPS_ALWAYS_INLINE static void run(
-      Scope&, const Source& source, Destination& destination) {
+      Scope& scope, const Source& source, Destination& destination) {
     using Packing = gemm::packing_t<Atom, Side>;
     using T = typename Packing::Element;
     using Tag = vec::ScalableTag<T, 0>;
@@ -46,8 +46,7 @@ template <>
 struct Backend<
     gemm::details::sme::Format,
     matmul_pack_implementation::SME> {
-  using ResourceRequirements = execution::details::ResourceSet<
-      execution::details::arm::Streaming>;
+  using ResourceRequirements = execution::details::ResourceSet<>;
 
   template <typename InputSpec, typename OutputSpec>
   static constexpr bool eligible =
@@ -66,18 +65,23 @@ struct Backend<
             execution::ExecutionScope Scope,
             typename Source, typename Destination>
   VECOPS_ALWAYS_INLINE static void run(
-      Scope&, const Source& source, Destination& destination) {
-    static_assert(execution::has_resource_v<
-        execution::details::arm::Streaming, Scope>);
+      Scope& scope, const Source& source, Destination& destination) {
     static_assert(generic::RawDirectAccess<Destination>);
     using Packing = gemm::packing_t<Atom, Side>;
     using T = typename Packing::Element;
     const auto& layout = source.spec().input_layout();
     static_assert(generic::RawDirectAccess<Source>);
-    sme::pack<Atom, Side>(
-        reinterpret_cast<const T*>(source.raw_data()),
-        layout.shape()[0], layout.shape()[1], source.raw_strides()[0],
-        reinterpret_cast<T*>(destination.raw_data()));
+    const auto* input = reinterpret_cast<const T*>(source.raw_data());
+    const nint_t spatial = layout.shape()[0];
+    const nint_t k = layout.shape()[1];
+    const nint_t row_stride = source.raw_strides()[0];
+    auto* output = reinterpret_cast<T*>(destination.raw_data());
+    scope.with_resources(
+        execution::details::arm::StreamingZARegion{},
+        [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          sme::pack<Atom, Side>(
+              input, spatial, k, row_stride, output);
+        });
   }
 };
 
@@ -94,8 +98,7 @@ template <>
 struct Backend<
     gemm::details::sme::Format,
     matmul_pack_implementation::SMEPostprocess> {
-  using ResourceRequirements = execution::details::ResourceSet<
-      execution::details::arm::Streaming>;
+  using ResourceRequirements = execution::details::ResourceSet<>;
 
   template <typename InputSpec, typename OutputSpec>
   static constexpr bool eligible =
@@ -108,17 +111,21 @@ struct Backend<
             execution::ExecutionScope Scope,
             typename Source, typename Destination>
   VECOPS_ALWAYS_INLINE static void run(
-      Scope&, const Source& source, Destination& destination) {
-    static_assert(execution::has_resource_v<
-        execution::details::arm::Streaming, Scope>);
+      Scope& scope, const Source& source, Destination& destination) {
     static_assert(generic::RawDirectAccess<Destination>);
     using T = typename gemm::packing_t<Atom, Side>::Element;
     static_assert(std::same_as<T, bfloat16_t>);
     const auto& layout = source.spec().input_layout();
-    sme::pack_postprocess<Atom, Side>(
-        source, layout.shape()[0], layout.shape()[1],
-        source.raw_strides()[0],
-        reinterpret_cast<T*>(destination.raw_data()));
+    const nint_t spatial = layout.shape()[0];
+    const nint_t k = layout.shape()[1];
+    const nint_t row_stride = source.raw_strides()[0];
+    auto* output = reinterpret_cast<T*>(destination.raw_data());
+    scope.with_resources(
+        execution::details::arm::StreamingZARegion{},
+        [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          sme::pack_postprocess<Atom, Side>(
+              source, spatial, k, row_stride, output);
+        });
   }
 };
 
@@ -151,9 +158,9 @@ struct Backend<
             execution::ExecutionScope Scope,
             typename Source, typename Destination>
   VECOPS_ALWAYS_INLINE static void run(
-      Scope&, const Source& source, Destination& destination) {
-    static_assert(execution::has_resource_v<
-        execution::details::arm::NonStreaming, Scope>);
+      Scope& scope, const Source& source, Destination& destination) {
+    static_assert(!execution::has_resource_v<
+        execution::details::arm::StreamingZA, Scope>);
     static_assert(generic::RawDirectAccess<Destination>);
     using Packing = gemm::packing_t<Atom, Side>;
     using T = typename Packing::Element;
@@ -164,13 +171,16 @@ struct Backend<
     static_assert(std::same_as<typename Transform::TIn, T>);
     static_assert(std::same_as<typename Transform::TOut, T>);
     const auto& layout = source.spec().input_layout();
+    const auto* input = reinterpret_cast<const T*>(source.raw_data());
+    const nint_t spatial = layout.shape()[0];
+    const nint_t k = layout.shape()[1];
+    const nint_t row_stride = source.raw_strides()[0];
     auto* output = reinterpret_cast<T*>(destination.raw_data());
-    execution::details::arm::invoke_streaming(
-        [&]() VECOPS_INLINE_LAMBDA {
+    scope.with_resources(
+        execution::details::arm::StreamingZARegion{},
+        [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
           sme::pack<Atom, Side>(
-              reinterpret_cast<const T*>(source.raw_data()),
-              layout.shape()[0], layout.shape()[1],
-              source.raw_strides()[0], output);
+              input, spatial, k, row_stride, output);
         });
     const nint_t panel = destination.spec().output_layout().shape()[2];
     sme::transform_packed_inplace(
@@ -197,9 +207,9 @@ struct Backend<
             execution::ExecutionScope Scope,
             typename Source, typename Destination>
   VECOPS_ALWAYS_INLINE static void run(
-      Scope&, const Source& source, Destination& destination) {
-    static_assert(execution::has_resource_v<
-        execution::details::arm::NonStreaming, Scope>);
+      Scope& scope, const Source& source, Destination& destination) {
+    static_assert(!execution::has_resource_v<
+        execution::details::arm::StreamingZA, Scope>);
     static_assert(generic::RawDirectAccess<Destination>);
     using Packing = gemm::packing_t<Atom, Side>;
     using T = typename Packing::Element;
@@ -207,13 +217,17 @@ struct Backend<
     static_assert(std::same_as<typename Source::MemoryElement, float16_t>);
     static_assert(std::same_as<typename Source::Transform, tensor::NoTransform>);
     const auto& layout = source.spec().input_layout();
+    const auto* input = source.raw_data();
+    const nint_t spatial = layout.shape()[0];
+    const nint_t k = layout.shape()[1];
+    const nint_t row_stride = source.raw_strides()[0];
     auto* output = reinterpret_cast<T*>(destination.raw_data());
     auto* temporary = reinterpret_cast<float16_t*>(output);
-    execution::details::arm::invoke_streaming(
-        [&]() VECOPS_INLINE_LAMBDA {
+    scope.with_resources(
+        execution::details::arm::StreamingZARegion{},
+        [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
           sme::pack<gemm::SME_F16F32, Side>(
-              source.raw_data(), layout.shape()[0], layout.shape()[1],
-              source.raw_strides()[0], temporary);
+              input, spatial, k, row_stride, temporary);
         });
     const nint_t panel = destination.spec().output_layout().shape()[2];
     sme::expand_fp16_packed_to_fp32(

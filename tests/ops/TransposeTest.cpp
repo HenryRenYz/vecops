@@ -155,7 +155,7 @@ extern "C" VECOPS_NOINLINE void transpose_i32_aligned_probe(
   ops::transpose<int32_t>(execution, input_tensor, output_tensor);
 }
 
-#if defined(HAS_ARM_LOCALLY_STREAMING)
+#if defined(HAS_SME_FA64)
 
 TEST(TransposeTest, PreparedOperatorDeclaresAndUsesSMEPath) {
   constexpr nint_t M = 19;
@@ -172,8 +172,8 @@ TEST(TransposeTest, PreparedOperatorDeclaresAndUsesSMEPath) {
   auto output_tensor = make_tensor(
       output.data(), make_layout(make_shape(cint<N>, cint<M>)));
   auto operation = ops::make_transpose<int32_t>(input_tensor, output_tensor);
-  static_assert(execution::details::has_resource_v<
-      execution::details::arm::Streaming,
+  static_assert(!execution::details::has_resource_v<
+      execution::details::arm::StreamingZA,
       typename decltype(operation)::ResourceRequirements>);
   ExecutionSession execution{};
   execution.with_region(
@@ -235,8 +235,8 @@ TEST(TransposeTest, PreparedConversionOperatorUsesSMEPath) {
       output.data(), make_layout(make_shape(cint<N>, cint<M>)));
   auto operation = ops::make_transpose<float32_t>(
       input_tensor, output_tensor);
-  static_assert(execution::details::has_resource_v<
-      execution::details::arm::Streaming,
+  static_assert(!execution::details::has_resource_v<
+      execution::details::arm::StreamingZA,
       typename decltype(operation)::ResourceRequirements>);
   ExecutionSession execution{};
   execution.with_region(

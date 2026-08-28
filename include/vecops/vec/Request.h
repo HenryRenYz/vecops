@@ -147,6 +147,8 @@ struct LoadRequest
   static constexpr int index_scale = IndexScale;
   using IndexVectorType = IndexVector;
 
+  VECOPS_ALWAYS_INLINE constexpr LoadRequest() = default;
+
 };
 
 /**
@@ -172,6 +174,8 @@ struct StoreRequest
   using TemporalityOption = Temporality;
   static constexpr int index_scale = IndexScale;
   using IndexVectorType = IndexVector;
+
+  VECOPS_ALWAYS_INLINE constexpr StoreRequest() = default;
 
 };
 

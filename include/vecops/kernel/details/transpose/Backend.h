@@ -28,7 +28,7 @@
 #include "vecops/kernel/details/transpose/scalar/Backend.h"
 #endif
 
-#if defined(HAS_SME)
+#if defined(HAS_SME_FA64)
 #include "vecops/kernel/details/transpose/sme/Transpose2D.h"
 #endif
 
@@ -55,7 +55,7 @@ struct ImplementationBackend<transpose2d_implementation::Vector>
       typename execution::details::current_backend_t::DefaultRequirements;
 };
 
-#if defined(HAS_SME)
+#if defined(HAS_SME_FA64)
 template <>
 /** SME implementation mapped to the streaming/ZA backend. */
 struct ImplementationBackend<transpose2d_implementation::SME> : SMEBackend {};
@@ -75,7 +75,7 @@ struct ImplementationBackend<transpose2d_implementation::SME> {
     (void)DstCol;
     static_assert(
         execution::details::dependent_false_v<Args...>,
-        "SME transpose implementation requires an SME target");
+        "SME transpose implementation requires an SME+FA64 target");
   }
 };
 #endif

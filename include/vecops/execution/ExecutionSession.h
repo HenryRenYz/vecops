@@ -95,8 +95,8 @@ public:
   using ActiveResources = Resources;
   using ActiveConfiguration = CurrentConfiguration;
 
-  constexpr Scope() = default;
-  constexpr explicit Scope(kernel::WorkspaceView* workspace)
+  VECOPS_ALWAYS_INLINE constexpr Scope() = default;
+  VECOPS_ALWAYS_INLINE constexpr explicit Scope(kernel::WorkspaceView* workspace)
       : workspace_(workspace) {}
 
   /**
@@ -159,7 +159,9 @@ VECOPS_ALWAYS_INLINE decltype(auto) enter_resources(
   using Active = concat_resource_sets_t<Current, Required>;
   current_backend_t::template validate<Active>();
 
-  auto invoke = [&]() VECOPS_INLINE_LAMBDA -> decltype(auto) {
+  auto invoke = [&]() VECOPS_INLINE_LAMBDA_NOEXCEPT_IF(noexcept(
+      std::forward<Fn>(fn)(std::declval<Scope<Active>&>())))
+      -> decltype(auto) {
     Scope<Active> active{workspace};
     return std::forward<Fn>(fn)(active);
   };

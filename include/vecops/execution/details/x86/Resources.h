@@ -11,7 +11,7 @@
 #include "vecops/CoreDefs.h"
 
 #if defined(HAS_AMX_TILE)
-#include <immintrin.h>
+#include "vecops/vec/details/amx/AMX.h"
 #endif
 
 /**
@@ -45,7 +45,7 @@ struct alignas(64) TileConfiguration {
 #if defined(HAS_AMX_TILE)
   /** Load this configuration into the current thread's AMX tile state. */
   VECOPS_ALWAYS_INLINE void load() const {
-    _tile_loadconfig(this);
+    vec::details::amx::load_configuration(this);
   }
 #else
   void load() const = delete;
@@ -61,7 +61,7 @@ struct TileReleaseGuard {
   TileReleaseGuard() = default;
   TileReleaseGuard(const TileReleaseGuard&) = delete;
   TileReleaseGuard& operator=(const TileReleaseGuard&) = delete;
-  VECOPS_ALWAYS_INLINE ~TileReleaseGuard() { _tile_release(); }
+  VECOPS_ALWAYS_INLINE ~TileReleaseGuard() { vec::details::amx::release(); }
 };
 #endif
 

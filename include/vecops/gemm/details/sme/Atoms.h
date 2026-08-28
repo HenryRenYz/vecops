@@ -10,12 +10,13 @@
 #include "vecops/execution/details/ResourceSet.h"
 #include "vecops/execution/details/arm/Resources.h"
 #include "vecops/gemm/details/sme/Packing.h"
+#include "vecops/vec/details/sme/State.h"
 
 namespace vecops::gemm {
 
 struct SMEKernelKind {
   using ResourceRequirements = execution::details::ResourceSet<
-      execution::details::arm::Streaming>;
+      execution::details::arm::StreamingZA>;
 };
 
 template <typename A, typename B, typename Acc>
@@ -26,15 +27,18 @@ struct SMEAtomBase {
   using TC = Acc;
   using TAcc = Acc;
 
-  // One ZA.S tile is SVL.W by SVL.W. Packing uses two such spatial
-  // sub-panels, but the micro-kernel base tile must describe one ZA tile.
-  inline static const meta::Any M_R{[] {
-    if constexpr (sizeof(Acc) == 8)
-      return static_cast<nint_t>(svcntsd());
-    else
-      return static_cast<nint_t>(svcntsw());
-  }()};
-  inline static const meta::Any N_R{static_cast<nint_t>(M_R)};
+  // One ZA tile is SVL/sizeof(Acc) by SVL/sizeof(Acc).  In a fixed-SVL build
+  // these are Const values; otherwise they retain the architectural SVL byte
+  // alignment and bounds through Meta arithmetic.
+#if defined(HAS_FIXED_STREAMING_SVE_BITS)
+  static constexpr auto M_R =
+      vec::details::sme::streaming_lanes_value<Acc>();
+  static constexpr auto N_R = M_R;
+#else
+  inline static const auto M_R =
+      vec::details::sme::streaming_lanes_value<Acc>();
+  inline static const auto N_R = M_R;
+#endif
   static constexpr auto K_R = meta::cint<
       (sizeof(A) > 4 ? 1 : 4 / sizeof(A))>;
 

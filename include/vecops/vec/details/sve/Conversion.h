@@ -834,7 +834,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
         return value;
     }();
     return construct_words<SVEBackend>(
-        to, [&]<nint_t Index>(auto) {
+        to, [&]<nint_t Index>(auto) VECOPS_INLINE_LAMBDA {
           const auto source_word = ::vecops::vec::get_word<Index>(from, value);
           if constexpr (!narrows) {
             return sve_basic_wrap_word<ToTag>(

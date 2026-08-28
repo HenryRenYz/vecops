@@ -569,7 +569,7 @@ public:
   // -------- Data access --------
 
   /// Get the raw pointer while preserving the Tensor element cv-qualification.
-  constexpr T* data() const { return _data; }
+  VECOPS_ALWAYS_INLINE constexpr T* data() const { return _data; }
 
   // -------- Dimension access --------
 
@@ -580,7 +580,7 @@ public:
    * @tparam I  Dimension index (0 <= I < Ndim).
    */
   template <int I>
-  constexpr nint_t size() const {
+  VECOPS_ALWAYS_INLINE constexpr nint_t size() const {
     return tensor::size<I>(_layout);
   }
 
@@ -591,32 +591,36 @@ public:
    * @tparam I  Dimension index (0 <= I < Ndim).
    */
   template <int I>
-  constexpr nint_t stride() const {
+  VECOPS_ALWAYS_INLINE constexpr nint_t stride() const {
     return tensor::stride<I>(_layout);
   }
 
   /// Get the size of dimension `i` (runtime index).
-  nint_t size(int i) const {
+  VECOPS_ALWAYS_INLINE nint_t size(int i) const {
     return _layout.shape()[i];
   }
 
   /// Get the stride of dimension `i` (runtime index).
-  nint_t stride(int i) const {
+  VECOPS_ALWAYS_INLINE nint_t stride(int i) const {
     return _layout.strides()[i];
   }
 
   /// Get the number of dimensions.
-  constexpr int ndim() const { return Ndim; }
+  VECOPS_ALWAYS_INLINE constexpr int ndim() const { return Ndim; }
 
   /// Get the full Layout.
-  constexpr const Layout& layout() const { return _layout; }
+  VECOPS_ALWAYS_INLINE constexpr const Layout& layout() const {
+    return _layout;
+  }
 
   /**
    * Compute the total number of elements: prod of all dimension sizes.
    *
    * @note This is computed at runtime by iterating over all dimensions.
    */
-  nint_t numel() const { return tensor::numel(_layout); }
+  VECOPS_ALWAYS_INLINE nint_t numel() const {
+    return tensor::numel(_layout);
+  }
 
   // -------- Continuity --------
 

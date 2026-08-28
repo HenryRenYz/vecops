@@ -151,17 +151,20 @@ bool verify_samples(
   return true;
 }
 
-template <typename Atom, InputMode Mode, typename ATensor, typename BTensor,
-          typename CTensor>
+template <typename Atom, InputMode Mode,
+          typename TilePolicy = kernel::matmul_policy::Automatic,
+          typename ATensor, typename BTensor,
+          typename CTensor, typename M, typename N, typename K>
 void run_operation(
     benchmark::State& state, const MatmulCase& test_case,
+    M m, N n, K k,
     const ATensor& a_input, const BTensor& b_input, const CTensor& c_output,
     const std::vector<typename Atom::TA>& a,
     const std::vector<typename Atom::TB>& b,
     std::vector<typename Atom::TAcc>& c,
     nint_t packed_a_elements, nint_t packed_b_elements) {
-  auto operation = ops::make_matmul<Atom>(
-      test_case.m, test_case.n, test_case.k, a_input, b_input, c_output);
+  auto operation = ops::make_matmul<Atom, TilePolicy>(
+      m, n, k, a_input, b_input, c_output);
   kernel::Workspace operation_storage(operation.required_workspace());
   auto operation_workspace = operation_storage.view();
   ExecutionSession execution{operation_workspace};
@@ -226,8 +229,12 @@ void run_operation(
                 double(logical_packed_elements));
 }
 
-template <typename Atom, InputMode Mode>
-void run_case(benchmark::State& state, const MatmulCase& test_case) {
+template <typename Atom, InputMode Mode,
+          typename TilePolicy = kernel::matmul_policy::Automatic,
+          typename M, typename N, typename K>
+void run_case_with_extents(
+    benchmark::State& state, const MatmulCase& test_case,
+    M m, N n, K k) {
   using TA = typename Atom::TA;
   using TB = typename Atom::TB;
   using Acc = typename Atom::TAcc;
@@ -241,9 +248,9 @@ void run_case(benchmark::State& state, const MatmulCase& test_case) {
   fill_input(a, 3);
   fill_input(b, 11);
 
-  auto a_layout = make_layout(make_shape(Any{test_case.m}, Any{test_case.k}));
-  auto b_layout = make_layout(make_shape(Any{test_case.n}, Any{test_case.k}));
-  auto c_layout = make_layout(make_shape(Any{test_case.m}, Any{test_case.n}));
+  auto a_layout = make_layout(make_shape(m, k));
+  auto b_layout = make_layout(make_shape(n, k));
+  auto c_layout = make_layout(make_shape(m, n));
   auto a_tensor = make_tensor(a.data(), a_layout);
   auto b_tensor = make_tensor(b.data(), b_layout);
   auto c_tensor = make_tensor(c.data(), c_layout);
@@ -278,22 +285,42 @@ void run_case(benchmark::State& state, const MatmulCase& test_case) {
   }
 
   if constexpr (Mode == InputMode::Raw) {
-    run_operation<Atom, Mode>(
-        state, test_case, a_tensor, b_tensor, c_tensor, a, b, c,
+    run_operation<Atom, Mode, TilePolicy>(
+        state, test_case, m, n, k,
+        a_tensor, b_tensor, c_tensor, a, b, c,
         packed_a_elements, packed_b_elements);
   } else if constexpr (Mode == InputMode::PackedA) {
-    run_operation<Atom, Mode>(
-        state, test_case, packed_a_tensor, b_tensor, c_tensor, a, b, c,
+    run_operation<Atom, Mode, TilePolicy>(
+        state, test_case, m, n, k,
+        packed_a_tensor, b_tensor, c_tensor, a, b, c,
         packed_a_elements, packed_b_elements);
   } else if constexpr (Mode == InputMode::PackedB) {
-    run_operation<Atom, Mode>(
-        state, test_case, a_tensor, packed_b_tensor, c_tensor, a, b, c,
+    run_operation<Atom, Mode, TilePolicy>(
+        state, test_case, m, n, k,
+        a_tensor, packed_b_tensor, c_tensor, a, b, c,
         packed_a_elements, packed_b_elements);
   } else {
-    run_operation<Atom, Mode>(
-        state, test_case, packed_a_tensor, packed_b_tensor, c_tensor,
+    run_operation<Atom, Mode, TilePolicy>(
+        state, test_case, m, n, k,
+        packed_a_tensor, packed_b_tensor, c_tensor,
         a, b, c, packed_a_elements, packed_b_elements);
   }
+}
+
+template <typename Atom, InputMode Mode,
+          typename TilePolicy = kernel::matmul_policy::Automatic>
+void run_case(benchmark::State& state, const MatmulCase& test_case) {
+  run_case_with_extents<Atom, Mode, TilePolicy>(
+      state, test_case,
+      Any{test_case.m}, Any{test_case.n}, Any{test_case.k});
+}
+
+template <typename Atom, InputMode Mode,
+          nint_t M, nint_t N, nint_t K,
+          typename TilePolicy = kernel::matmul_policy::Automatic>
+void run_fixed_case(benchmark::State& state, const MatmulCase& test_case) {
+  run_case_with_extents<Atom, Mode, TilePolicy>(
+      state, test_case, cint<M>, cint<N>, cint<K>);
 }
 
 template <typename Atom, InputMode Mode>
@@ -321,6 +348,42 @@ void register_mode(const MatmulCase& test_case) {
       name.c_str(),
       [test_case](benchmark::State& state) {
         run_case<Atom, Mode>(state, test_case);
+      })
+      ->Unit(benchmark::kMicrosecond)
+      ->MinTime(0.02)
+      ->Repetitions(3)
+      ->ReportAggregatesOnly(true);
+}
+
+template <typename Atom, InputMode Mode,
+          nint_t M, nint_t N, nint_t K>
+void register_fixed_mode(const char* group, const char* name) {
+  constexpr uint32_t ModeMask = mode_bit(Mode);
+  const MatmulCase test_case{group, name, M, N, K, ModeMask};
+  const auto full_name = benchmark_name<Atom, Mode>(test_case);
+  benchmark::RegisterBenchmark(
+      full_name.c_str(),
+      [test_case](benchmark::State& state) {
+        run_fixed_case<Atom, Mode, M, N, K>(state, test_case);
+      })
+      ->Unit(benchmark::kMicrosecond)
+      ->MinTime(0.02)
+      ->Repetitions(3)
+      ->ReportAggregatesOnly(true);
+}
+
+template <typename Atom, InputMode Mode, typename TilePolicy,
+          nint_t M, nint_t N, nint_t K>
+void register_fixed_policy_mode(
+    const char* group, const char* name, const char* policy_name) {
+  constexpr uint32_t ModeMask = mode_bit(Mode);
+  const MatmulCase test_case{group, name, M, N, K, ModeMask};
+  const auto full_name = benchmark_name<Atom, Mode>(test_case) +
+      "/policy:" + policy_name;
+  benchmark::RegisterBenchmark(
+      full_name.c_str(),
+      [test_case](benchmark::State& state) {
+        run_fixed_case<Atom, Mode, M, N, K, TilePolicy>(state, test_case);
       })
       ->Unit(benchmark::kMicrosecond)
       ->MinTime(0.02)

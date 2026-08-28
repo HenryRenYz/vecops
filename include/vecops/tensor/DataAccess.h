@@ -580,7 +580,7 @@ VECOPS_ALWAYS_INLINE vec::Vec<Tag> populate_inactive(
   if constexpr (first_count + masked_count == 0) {
     return value;
   } else {
-    auto mask = [&] {
+    auto mask = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (first_count == 1) {
         auto&& first = vec::details::find_option<vec::details::IsFirstOption>(
             std::forward<Options>(options)...);
@@ -1736,7 +1736,7 @@ template <int Axis, typename Layout>
  */
 VECOPS_INLINE auto auxiliary_layout(const Layout& layout) {
   constexpr int Rank = Layout::Ndim;
-  std::array<nint_t, Rank> strides{};
+  ::vecops::details::InlineArray<nint_t, Rank> strides{};
   strides[Axis] = 1;
   nint_t next = layout.shape()[Axis];
   for (int d = Rank - 1; d >= 0; --d) {
@@ -2524,7 +2524,7 @@ public:
     using StrideMeta = stride_type_t<Dim, typename Spec::InputLayout>;
     constexpr bool UnitRankOne =
         Rank == 1 && details::is_const_one_meta_v<StrideMeta>;
-    const nint_t base = [&] {
+    const nint_t base = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (UnitRankOne) return position[0];
       else return offset_at(tensor.layout(), position);
     }();
@@ -2769,7 +2769,7 @@ public:
     using StrideMeta = stride_type_t<Dim, typename Spec::OutputLayout>;
     constexpr bool UnitRankOne =
         Rank == 1 && details::is_const_one_meta_v<StrideMeta>;
-    const nint_t base = [&] {
+    const nint_t base = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (UnitRankOne) return position[0];
       else return offset_at(tensor.layout(), position);
     }();
@@ -4162,7 +4162,7 @@ VECOPS_INLINE nint_t required_workspace(const Spec& spec, Policy policy) {
       return 0;
     }
   }
-  const nint_t element_bytes = [&] {
+  const nint_t element_bytes = [&]() VECOPS_INLINE_LAMBDA {
     if constexpr (plan == AccessPlan::materialize_before_transform) {
       if constexpr (is_input_spec_v<Spec>) {
         return static_cast<nint_t>(sizeof(typename Spec::MemoryElement));
@@ -4177,7 +4177,7 @@ VECOPS_INLINE nint_t required_workspace(const Spec& spec, Policy policy) {
       }
     }
   }();
-  const nint_t elements = [&] {
+  const nint_t elements = [&]() VECOPS_INLINE_LAMBDA {
     if constexpr (is_input_spec_v<Spec>) {
       return numel(spec.input_layout());
     } else {

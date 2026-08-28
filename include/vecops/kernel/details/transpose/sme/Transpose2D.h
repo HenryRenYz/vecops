@@ -9,8 +9,6 @@
 #include <cstdint>
 #include <type_traits>
 
-#include <arm_sme.h>
-
 #include "vecops/CoreDefs.h"
 #include "vecops/CoreTypes.h"
 #include "vecops/execution/ExecutionSession.h"
@@ -18,6 +16,7 @@
 #include "vecops/kernel/details/transpose/generic/Transpose2D.h"
 #include "vecops/tensor/Layout.h"
 #include "vecops/vec/ConversionMemory.h"
+#include "vecops/vec/details/sme/ZA.h"
 
 /**
  * @file Transpose2D.h
@@ -35,44 +34,13 @@ template <typename T>
 /** Unsigned integer type with the same storage width as `T`. */
 using UnsignedBits = generic::UIntOfSize<sizeof(T)>;
 
-template <typename U>
-/** Read one vertical ZA slice, merging inactive lanes with zero. */
-VECOPS_ALWAYS_INLINE auto read_ver(uint32_t slice, svbool_t pg)
-    __arm_streaming __arm_inout("za") {
-  using Tag = vec::ScalableTag<U, 0>;
-  const auto zero = vec::details::sve_basic_raw_word(vec::zeros(Tag{}));
-  if constexpr (sizeof(U) == 1) {
-    return svread_ver_za8_u8_m(zero, pg, 0, slice);
-  } else if constexpr (sizeof(U) == 2) {
-    return svread_ver_za16_u16_m(zero, pg, 0, slice);
-  } else if constexpr (sizeof(U) == 4) {
-    return svread_ver_za32_u32_m(zero, pg, 0, slice);
-  } else {
-    return svread_ver_za64_u64_m(zero, pg, 0, slice);
-  }
-}
-
-template <vec::VectorTag Tag>
-/** Bridge a raw ZA/SVE predicate to the active vec backend representation. */
-VECOPS_ALWAYS_INLINE vec::Mask<Tag> predicate_mask(svbool_t pg)
-    __arm_streaming {
-#if defined(HAS_FIXED_SVE_BITS)
-  using WordMask = vec::NativeWordMask<Tag>;
-  return vec::mask_from_words(Tag{}, static_cast<WordMask>(pg));
-#else
-  return pg;
-#endif
-}
-
-template <typename Compute, typename Memory>
+template <typename Compute, typename Memory, typename Mask>
 /** Load memory lanes as Compute and reinterpret them as unsigned ZA bits. */
 VECOPS_ALWAYS_INLINE auto load_compute_bits(
-    svbool_t pg, nint_t active_lanes, const Memory* pointer)
-    __arm_streaming {
+    Mask active, nint_t active_lanes, const Memory* pointer) noexcept {
   using U = UnsignedBits<Compute>;
   using ValueTag = vec::ScalableTag<Compute, 0>;
   using BitsTag = vec::ScalableTag<U, 0>;
-  const auto active = predicate_mask<ValueTag>(pg);
   const auto value = [&]() VECOPS_INLINE_LAMBDA {
     // Besides removing predicate work, the unmasked full-row form keeps a
     // width-changing Rebind on the SVE whole-operation lowering. The generic
@@ -93,20 +61,16 @@ VECOPS_ALWAYS_INLINE auto load_compute_bits(
       }
     }
   }();
-  return vec::details::sve_basic_raw_word(
-      vec::bitcast(BitsTag{}, ValueTag{}, value));
+  return vec::bitcast(BitsTag{}, ValueTag{}, value);
 }
 
-template <typename Compute, typename Memory, typename Raw>
+template <typename Compute, typename Memory, typename Bits, typename Mask>
 /** Reinterpret unsigned ZA bits as Compute and store-convert if required. */
 VECOPS_ALWAYS_INLINE void store_compute_bits(
-    svbool_t pg, nint_t active_lanes, Memory* pointer, Raw value)
-    __arm_streaming {
+    Mask active, nint_t active_lanes, Memory* pointer, Bits bits) noexcept {
   using U = UnsignedBits<Compute>;
   using ValueTag = vec::ScalableTag<Compute, 0>;
   using BitsTag = vec::ScalableTag<U, 0>;
-  const auto active = predicate_mask<ValueTag>(pg);
-  const auto bits = vec::details::sve_basic_wrap_word<BitsTag>(value);
   const auto converted = vec::bitcast(ValueTag{}, BitsTag{}, bits);
   if (active_lanes == vec::size(ValueTag{})) {
     if constexpr (std::same_as<std::remove_cv_t<Memory>, Compute>) {
@@ -123,20 +87,6 @@ VECOPS_ALWAYS_INLINE void store_compute_bits(
           ValueTag{}, pointer, converted, vec::opt::masked(active));
     }
   }
-}
-
-template <typename U, typename Raw>
-/** Write one horizontal ZA slice under `pg`. */
-VECOPS_ALWAYS_INLINE void write_hor(
-    uint32_t slice, svbool_t pg, Raw value)
-    __arm_streaming __arm_inout("za") {
-  const auto raw = vec::details::sve_basic_raw_word(value);
-  if constexpr (sizeof(U) == 1) svwrite_hor_za8_u8_m(0, slice, pg, raw);
-  else if constexpr (sizeof(U) == 2)
-    svwrite_hor_za16_u16_m(0, slice, pg, raw);
-  else if constexpr (sizeof(U) == 4)
-    svwrite_hor_za32_u32_m(0, slice, pg, raw);
-  else svwrite_hor_za64_u64_m(0, slice, pg, raw);
 }
 
 template <typename SourceMemory, typename DestinationMemory, typename Compute,
@@ -160,21 +110,17 @@ template <typename SourceMemory, typename DestinationMemory, typename Compute,
  * @param src_origin Source logical plane origin.
  * @param dst_origin Destination logical plane origin.
  *
- * `__arm_new("za")` is intentional: the leaf clears/overwrites every used ZA
- * slice and does not consume caller ZA contents. Using `__arm_inout("za")`
- * would unnecessarily make the caller preserve a live ZA value. Current
- * compilers may still emit `__arm_tpidr2_save` as required by the SME ABI; that
- * helper is ABI state management, not a duplicate framework transition.
+ * The surrounding Execution region owns Streaming+ZA. This function and all
+ * helpers below it must inline into that manually-managed interval.
  */
-__arm_new("za") VECOPS_NOINLINE void transpose(
+VECOPS_ALWAYS_INLINE void transpose(
     M m, N n,
     const SourceMemory* source_data,
     tensor::Coord<SrcRank> src_strides,
     tensor::Coord<SrcRank> src_origin,
     DestinationMemory* destination_data,
     tensor::Coord<DstRank> dst_strides,
-    tensor::Coord<DstRank> dst_origin)
-    __arm_streaming {
+    tensor::Coord<DstRank> dst_origin) noexcept {
   using U = UnsignedBits<Compute>;
   using BitsTag = vec::ScalableTag<U, 0>;
   constexpr bool SourceNative =
@@ -219,11 +165,11 @@ __arm_new("za") VECOPS_NOINLINE void transpose(
     dst_base += dst_origin[d] * dst_strides[d];
   }
   for (nint_t mi = 0; mi < m_extent; mi += lanes) {
-    const nint_t active_m = std::min(lanes, m_extent - mi);
-    const svbool_t m_pg = vec::mwhilelt(BitsTag{}, nint_t{0}, active_m);
+    const nint_t active_m = vec::details::sme::min_value(lanes, m_extent - mi);
+    const auto m_pg = vec::mwhilelt(BitsTag{}, nint_t{0}, active_m);
     for (nint_t ni = 0; ni < n_extent; ni += lanes) {
-      const nint_t active_n = std::min(lanes, n_extent - ni);
-      const svbool_t n_pg = vec::mwhilelt(BitsTag{}, nint_t{0}, active_n);
+      const nint_t active_n = vec::details::sme::min_value(lanes, n_extent - ni);
+      const auto n_pg = vec::mwhilelt(BitsTag{}, nint_t{0}, active_n);
 
       if constexpr (PipelinePairs) {
         nint_t r = 0;
@@ -236,14 +182,16 @@ __arm_new("za") VECOPS_NOINLINE void transpose(
               n_pg, active_n, source_data + offset0);
           const auto value1 = load_compute_bits<Compute>(
               n_pg, active_n, source_data + offset1);
-          write_hor<U>(static_cast<uint32_t>(r), n_pg, value0);
-          write_hor<U>(static_cast<uint32_t>(r + 1), n_pg, value1);
+          vec::details::sme::write_hor<0>(
+              static_cast<uint32_t>(r), n_pg, value0);
+          vec::details::sme::write_hor<0>(
+              static_cast<uint32_t>(r + 1), n_pg, value1);
         }
         if (r < active_m) {
           const nint_t offset =
               src_base + (mi + r) * src_strides[SrcRow] +
               ni * src_strides[SrcCol];
-          write_hor<U>(
+          vec::details::sme::write_hor<0>(
               static_cast<uint32_t>(r), n_pg,
               load_compute_bits<Compute>(
                   n_pg, active_n, source_data + offset));
@@ -253,7 +201,7 @@ __arm_new("za") VECOPS_NOINLINE void transpose(
           const nint_t offset =
               src_base + (mi + r) * src_strides[SrcRow] +
               ni * src_strides[SrcCol];
-          write_hor<U>(
+          vec::details::sme::write_hor<0>(
               static_cast<uint32_t>(r), n_pg,
               load_compute_bits<Compute>(
                   n_pg, active_n, source_data + offset));
@@ -263,8 +211,10 @@ __arm_new("za") VECOPS_NOINLINE void transpose(
       if constexpr (PipelinePairs) {
         nint_t c = 0;
         for (; c + 1 < active_n; c += 2) {
-          const auto raw0 = read_ver<U>(static_cast<uint32_t>(c), m_pg);
-          const auto raw1 = read_ver<U>(static_cast<uint32_t>(c + 1), m_pg);
+          const auto raw0 = vec::details::sme::read_ver<0>(
+              BitsTag{}, static_cast<uint32_t>(c), m_pg);
+          const auto raw1 = vec::details::sme::read_ver<0>(
+              BitsTag{}, static_cast<uint32_t>(c + 1), m_pg);
           const nint_t offset0 =
               dst_base + (ni + c) * dst_strides[DstRow] +
               mi * dst_strides[DstCol];
@@ -275,7 +225,8 @@ __arm_new("za") VECOPS_NOINLINE void transpose(
               m_pg, active_m, destination_data + offset1, raw1);
         }
         if (c < active_n) {
-          const auto raw = read_ver<U>(static_cast<uint32_t>(c), m_pg);
+          const auto raw = vec::details::sme::read_ver<0>(
+              BitsTag{}, static_cast<uint32_t>(c), m_pg);
           const nint_t offset =
               dst_base + (ni + c) * dst_strides[DstRow] +
               mi * dst_strides[DstCol];
@@ -284,7 +235,8 @@ __arm_new("za") VECOPS_NOINLINE void transpose(
         }
       } else {
         for (nint_t c = 0; c < active_n; ++c) {
-          const auto raw = read_ver<U>(static_cast<uint32_t>(c), m_pg);
+          const auto raw = vec::details::sme::read_ver<0>(
+              BitsTag{}, static_cast<uint32_t>(c), m_pg);
           const nint_t offset =
               dst_base + (ni + c) * dst_strides[DstRow] +
               mi * dst_strides[DstCol];
@@ -303,15 +255,13 @@ namespace vecops::kernel::transpose2d_details {
 /**
  * @brief SME transpose backend owning the streaming/ZA contract.
  *
- * The execution region owns PSTATE.SM, while each leaf invocation owns a
- * private ZA instance through `__arm_new("za")`. Raw no-transform,
+ * The execution region owns PSTATE.SM and destructive ZA. Raw no-transform,
  * unit-column-stride accesses are accepted. Numeric conversion is fused into
  * the SME tile boundary: load-convert before ZA and/or store-convert after ZA.
  */
 struct SMEBackend {
-  /** Execution resource required before entering the streaming leaf. */
-  using ResourceRequirements = execution::details::ResourceSet<
-      execution::details::arm::Streaming>;
+  /** Binding and validation execute before the inner StreamingZA region. */
+  using ResourceRequirements = execution::details::ResourceSet<>;
 
   template <int SrcRow, int SrcCol, int DstRow, int DstCol,
             execution::ExecutionScope Scope,
@@ -319,7 +269,7 @@ struct SMEBackend {
             typename Policy>
   /**
    * @brief Validate a direct DataAccess pair and invoke the SME leaf.
-   * @param scope Active scope proving `arm::Streaming`.
+   * @param scope Active scope proving `arm::StreamingZA`.
    * @param m Logical source rows.
    * @param n Logical source columns.
    * @param source Bound direct readable access.
@@ -337,9 +287,6 @@ struct SMEBackend {
     static_assert(std::same_as<Policy, transpose2d_policy::Automatic>,
                   "SME transpose does not implement Gather policy");
     static_assert(
-        execution::has_resource_v<execution::details::arm::Streaming, Scope>,
-        "SME transpose requires an active streaming execution scope");
-    static_assert(
         generic::RawNoTransformAccess<Source> &&
         generic::RawNoTransformAccess<Destination>,
         "SME transpose requires raw no-transform DataAccess");
@@ -356,17 +303,21 @@ struct SMEBackend {
         typename std::remove_cvref_t<Source>::MemoryElement;
     using DestinationMemory =
         typename std::remove_cvref_t<Destination>::MemoryElement;
-    sme::transpose<
-        SourceMemory, DestinationMemory, Compute, M, N,
-        std::remove_cvref_t<Source>::Rank,
-        std::remove_cvref_t<Destination>::Rank,
-        SrcRow, SrcCol, DstRow, DstCol>(
-        m, n,
-        source.raw_data(),
-        source.raw_strides(), src_origin,
-        destination.raw_data(),
-        destination.raw_strides(), dst_origin);
-    (void)scope;
+    const auto* source_data = source.raw_data();
+    const auto source_strides = source.raw_strides();
+    auto* destination_data = destination.raw_data();
+    const auto destination_strides = destination.raw_strides();
+    scope.with_resources(
+        execution::details::arm::StreamingZARegion{},
+        [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          sme::transpose<
+              SourceMemory, DestinationMemory, Compute, M, N,
+              std::remove_cvref_t<Source>::Rank,
+              std::remove_cvref_t<Destination>::Rank,
+              SrcRow, SrcCol, DstRow, DstCol>(
+              m, n, source_data, source_strides, src_origin,
+              destination_data, destination_strides, dst_origin);
+        });
   }
 };
 

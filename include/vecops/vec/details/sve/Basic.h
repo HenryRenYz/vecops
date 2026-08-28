@@ -204,7 +204,7 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
         std::same_as<ElementOf<Tag>, bfloat16_t> &&
         RepresentationTraits<SVEBackend, Tag>::word_count > 1) {
       using BitsTag = Rebind<uint16_t, Tag>;
-      const auto bits = [&] {
+      const auto bits = [&]() VECOPS_INLINE_LAMBDA {
         if constexpr (RepresentationTraits<SVEBackend, Tag>::word_count == 2)
           return svreinterpret_u16_bf16_x2(value);
         else {
@@ -218,7 +218,7 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
       return svreinterpret_bf16_u16(selected);
     } else {
       return visit_runtime_word<SVEBackend>(
-          Tag{}, ordinal, [&]<nint_t Index>() {
+          Tag{}, ordinal, [&]<nint_t Index>() VECOPS_INLINE_LAMBDA {
             return ::vecops::vec::get_word<Index>(Tag{}, value);
           });
     }
@@ -238,7 +238,7 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
             BitsTag{}, bits, ordinal, bit_word);
         return execute(BitCastOp{}, tag, BitsTag{}, bits);
       } else {
-        const auto bits = [&] {
+        const auto bits = [&]() VECOPS_INLINE_LAMBDA {
           if constexpr (RepresentationTraits<SVEBackend, Tag>::word_count == 2)
             return svreinterpret_u16_bf16_x2(value);
           else {
@@ -258,7 +258,7 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
       return details::set_word(value, ordinal, word);
     } else {
       return visit_runtime_word<SVEBackend>(
-          tag, ordinal, [&]<nint_t Index>() {
+          tag, ordinal, [&]<nint_t Index>() VECOPS_INLINE_LAMBDA {
             return ::vecops::vec::set_word<Index>(tag, value, word);
           });
     }
@@ -276,7 +276,7 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
     requires (!sized_mask)
   {
     return visit_runtime_word<SVEBackend>(
-        tag, ordinal, [&]<nint_t Index>() {
+        tag, ordinal, [&]<nint_t Index>() VECOPS_INLINE_LAMBDA {
           return ::vecops::vec::get_word<Index>(tag, value);
         });
   }
@@ -292,7 +292,7 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
       return details::set_word(value, ordinal, word);
     } else {
       return visit_runtime_word<SVEBackend>(
-          tag, ordinal, [&]<nint_t Index>() {
+          tag, ordinal, [&]<nint_t Index>() VECOPS_INLINE_LAMBDA {
             return ::vecops::vec::set_word<Index>(tag, value, word);
           });
     }
@@ -707,7 +707,7 @@ struct NativeWordImpl<SVEBackend, BitCastOp> {
     using To = ElementOf<ToTag>;
     static_assert(Index >= 0 && Index < ToTraits::word_count);
     const auto raw = sve_basic_raw_word(value);
-    const auto bits = [&] {
+    const auto bits = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (std::same_as<From, bfloat16_t>) {
 #if defined(HAS_BF16)
         return svreinterpret_u8_bf16(raw);
@@ -1135,7 +1135,7 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> sve_concat_parity_word(
   using T = ElementOf<Tag>;
   const auto raw_a = sve_basic_raw_word(a);
   const auto raw_b = sve_basic_raw_word(b);
-  const auto select = []<typename Raw>(Raw raw) {
+  const auto select = []<typename Raw>(Raw raw) VECOPS_INLINE_LAMBDA {
     if constexpr (std::same_as<T, bfloat16_t>) {
       const auto bits = svreinterpret_u16_bf16(raw);
       return svreinterpret_bf16_u16(

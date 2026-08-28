@@ -17,6 +17,31 @@ using namespace vecops;
 using namespace vecops::meta;
 using namespace vecops::tensor;
 
+TEST(MatmulPackSMETest, PackedLayoutPreservesStreamingMetadata) {
+  using Atom = gemm::SME_F32F32;
+  using Packing = gemm::packing_t<Atom, gemm::Operand::A>;
+  const auto input = make_layout(make_shape(cint<33>, cint<70>));
+  const auto packed = ops::matmul_packed_layout<
+      Atom, gemm::Operand::A>(input);
+  using Layout = decltype(packed);
+
+#if defined(HAS_FIXED_STREAMING_SVE_BITS)
+  constexpr nint_t Panel =
+      2 * FIXED_STREAMING_SVE_BITS / 8 / sizeof(float32_t);
+  static_assert(std::same_as<size_type_t<0, Layout>,
+                             Const<ceil_div(33, Panel)>>);
+  static_assert(std::same_as<size_type_t<2, Layout>, Const<Panel>>);
+#else
+  static_assert(std::same_as<size_type_t<0, Layout>, Any>);
+  static_assert(std::same_as<size_type_t<2, Layout>,
+                             Dynamic<8, 8, 128>>);
+#endif
+  static_assert(std::same_as<size_type_t<1, Layout>, Const<70>>);
+  static_assert(std::same_as<size_type_t<3, Layout>, Const<1>>);
+  EXPECT_EQ(packed.shape()[2],
+            static_cast<nint_t>(Packing::panel()));
+}
+
 template <typename T>
 struct PackedStorage {
   kernel::Workspace owner;
@@ -47,8 +72,8 @@ void check_direct_pack(nint_t spatial, nint_t k) {
   auto output_tensor = make_tensor(storage.data, output_layout);
   auto operation = ops::make_matmul_pack<Atom, Side>(
       input_tensor, output_tensor);
-  static_assert(execution::details::has_resource_v<
-      execution::details::arm::Streaming,
+  static_assert(!execution::details::has_resource_v<
+      execution::details::arm::StreamingZA,
       typename decltype(operation)::ResourceRequirements>);
   ExecutionSession execution{};
   operation(execution);
@@ -223,8 +248,8 @@ void check_fp32_to_bf16_postprocess() {
   static_assert(std::same_as<
       typename decltype(operation)::Implementation,
       kernel::matmul_pack_implementation::SMEPostprocess>);
-  static_assert(execution::details::has_resource_v<
-      execution::details::arm::Streaming,
+  static_assert(!execution::details::has_resource_v<
+      execution::details::arm::StreamingZA,
       typename decltype(operation)::ResourceRequirements>);
   ExecutionSession execution{};
   operation(execution);

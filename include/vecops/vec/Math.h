@@ -84,7 +84,7 @@ consteval bool valid_exp_options_for() {
 template <typename... Options>
 consteval Accuracy selected_math_accuracy() {
   Accuracy result = Accuracy::Strict;
-  ([&] {
+  ([&]() VECOPS_INLINE_LAMBDA {
     using Option = std::remove_cvref_t<Options>;
     if constexpr (is_math_accuracy_option_v<Option>)
       result = IsMathAccuracyOption<Option>::accuracy;

@@ -19,14 +19,17 @@
 #include "vecops/gemm/Packing.h"
 #include "vecops/gemm/details/amx/Atoms.h"
 #include "vecops/kernel/Tile2D.h"
+#include "vecops/kernel/details/matmul/Traversal.h"
 #include "vecops/kernel/details/matmul_pack/amx/Pack.h"
 #include "vecops/kernel/details/matmul_pack/generic/Pack.h"
 #include "vecops/tensor/DataAccess.h"
+#include "vecops/vec/details/amx/AMX.h"
 
 namespace vecops::kernel::matmul_details::amx {
 
 namespace generic = matmul_pack_details::generic;
 namespace tile = kernel::loop;
+namespace amx_intrinsics = vec::details::amx;
 
 template <typename T>
 struct IsZeroTransform : std::false_type {};
@@ -100,65 +103,6 @@ consteval int sixteen_lane_power() {
   return power;
 }
 
-#if defined(HAS_AMX_BF16)
-#define VECOPS_AMX_BF16(Dst, SrcA, SrcB, AtomType) \
-  _tile_dpbf16ps(Dst, SrcA, SrcB)
-#else
-#define VECOPS_AMX_BF16(Dst, SrcA, SrcB, AtomType)                       \
-  static_assert(execution::details::dependent_false_v<AtomType>,          \
-                "AMX BF16 is not enabled for this target")
-#endif
-
-#if defined(HAS_AMX_FP16)
-#define VECOPS_AMX_FP16(Dst, SrcA, SrcB, AtomType) \
-  _tile_dpfp16ps(Dst, SrcA, SrcB)
-#else
-#define VECOPS_AMX_FP16(Dst, SrcA, SrcB, AtomType)                       \
-  static_assert(execution::details::dependent_false_v<AtomType>,          \
-                "AMX FP16 is not enabled for this target")
-#endif
-
-#if defined(HAS_AMX_INT8)
-#define VECOPS_AMX_SS(Dst, SrcA, SrcB, AtomType) _tile_dpbssd(Dst, SrcA, SrcB)
-#define VECOPS_AMX_SU(Dst, SrcA, SrcB, AtomType) _tile_dpbsud(Dst, SrcA, SrcB)
-#define VECOPS_AMX_US(Dst, SrcA, SrcB, AtomType) _tile_dpbusd(Dst, SrcA, SrcB)
-#define VECOPS_AMX_UU(Dst, SrcA, SrcB, AtomType) _tile_dpbuud(Dst, SrcA, SrcB)
-#else
-#define VECOPS_AMX_INT8_UNAVAILABLE(Dst, SrcA, SrcB, AtomType)           \
-  static_assert(execution::details::dependent_false_v<AtomType>,          \
-                "AMX INT8 is not enabled for this target")
-#define VECOPS_AMX_SS VECOPS_AMX_INT8_UNAVAILABLE
-#define VECOPS_AMX_SU VECOPS_AMX_INT8_UNAVAILABLE
-#define VECOPS_AMX_US VECOPS_AMX_INT8_UNAVAILABLE
-#define VECOPS_AMX_UU VECOPS_AMX_INT8_UNAVAILABLE
-#endif
-
-#define VECOPS_AMX_DOT(AtomType, Dst, SrcA, SrcB)                        \
-  if constexpr (std::same_as<AtomType, gemm::AMX_BF16F32>) {            \
-    VECOPS_AMX_BF16(Dst, SrcA, SrcB, AtomType);                          \
-  } else if constexpr (std::same_as<AtomType, gemm::AMX_F16F32>) {       \
-    VECOPS_AMX_FP16(Dst, SrcA, SrcB, AtomType);                          \
-  } else if constexpr (                                                   \
-      std::same_as<typename AtomType::TA, int8_t> &&                      \
-      std::same_as<typename AtomType::TB, int8_t>) {                      \
-    VECOPS_AMX_SS(Dst, SrcA, SrcB, AtomType);                            \
-  } else if constexpr (                                                   \
-      std::same_as<typename AtomType::TA, int8_t> &&                      \
-      std::same_as<typename AtomType::TB, uint8_t>) {                     \
-    VECOPS_AMX_SU(Dst, SrcA, SrcB, AtomType);                            \
-  } else if constexpr (                                                   \
-      std::same_as<typename AtomType::TA, uint8_t> &&                     \
-      std::same_as<typename AtomType::TB, int8_t>) {                      \
-    VECOPS_AMX_US(Dst, SrcA, SrcB, AtomType);                            \
-  } else if constexpr (                                                   \
-      std::same_as<typename AtomType::TA, uint8_t> &&                     \
-      std::same_as<typename AtomType::TB, uint8_t>) {                     \
-    VECOPS_AMX_UU(Dst, SrcA, SrcB, AtomType);                            \
-  } else {                                                                \
-    static_assert(execution::details::dependent_false_v<AtomType>,        \
-                  "unsupported AMX atom");                               \
-  }
-
 template <nint_t KPack, typename T>
 VECOPS_ALWAYS_INLINE void pack_b_full_panel_direct(
     const T* source, nint_t row_stride, T* destination, nint_t k_tile) {
@@ -176,7 +120,7 @@ VECOPS_ALWAYS_INLINE void pack_b_full_panel_direct(
   }
 }
 
-template <gemm::Atom Atom, typename Source>
+template <gemm::Atom Atom, bool SpatialGuaranteed, typename Source>
 VECOPS_ALWAYS_INLINE const typename Atom::TA* prepare_a(
     const Source& source, nint_t m, nint_t k, nint_t logical_m,
     nint_t logical_k, typename Atom::TA* buffer) {
@@ -185,6 +129,12 @@ VECOPS_ALWAYS_INLINE const typename Atom::TA* prepare_a(
   if constexpr (is_packed_access_v<Atom, gemm::Operand::A, Source>) {
     static_assert(generic::RawDirectAccess<Source>,
                   "packed AMX A must be direct and untransformed");
+    if constexpr (!SpatialGuaranteed) {
+      if (m >= logical_m) {
+        std::fill_n(buffer, 16 * KR, T{});
+        return buffer;
+      }
+    }
     const auto& layout = source.spec().input_layout();
     const nint_t offset = tensor::offset_at(layout, m / 16, k / KR, 0, 0);
     return reinterpret_cast<const T*>(source.raw_data()) + offset;
@@ -194,18 +144,26 @@ VECOPS_ALWAYS_INLINE const typename Atom::TA* prepare_a(
     const nint_t active_k = std::clamp(logical_k - k, nint_t{0}, KR);
     for (nint_t row = 0; row < 16; ++row) {
       const nint_t logical_row = m + row;
-      const auto value = logical_row < logical_m && active_k > 0
-          ? source.load(
-                Tag{}, tensor::coord(logical_row, k), tensor::axis<1>,
-                vec::opt::first(active_k), vec::opt::zero)
-          : vec::zeros(Tag{});
+      const auto value = [&] VECOPS_INLINE_LAMBDA {
+        if constexpr (SpatialGuaranteed) {
+          return source.load(
+              Tag{}, tensor::coord(logical_row, k), tensor::axis<1>,
+              vec::opt::first(active_k), vec::opt::zero);
+        } else {
+          return logical_row < logical_m
+              ? source.load(
+                    Tag{}, tensor::coord(logical_row, k), tensor::axis<1>,
+                    vec::opt::first(active_k), vec::opt::zero)
+              : vec::zeros(Tag{});
+        }
+      }();
       vec::store(Tag{}, buffer + row * KR, value);
     }
     return buffer;
   }
 }
 
-template <gemm::Atom Atom, typename Source>
+template <gemm::Atom Atom, bool SpatialGuaranteed, typename Source>
 VECOPS_ALWAYS_INLINE const typename Atom::TB* prepare_b(
     const Source& source, nint_t n, nint_t k, nint_t logical_n,
     nint_t logical_k, typename Atom::TB* buffer) {
@@ -216,6 +174,12 @@ VECOPS_ALWAYS_INLINE const typename Atom::TB* prepare_b(
   if constexpr (is_packed_access_v<Atom, gemm::Operand::B, Source>) {
     static_assert(generic::RawDirectAccess<Source>,
                   "packed AMX B must be direct and untransformed");
+    if constexpr (!SpatialGuaranteed) {
+      if (n >= logical_n) {
+        std::fill_n(buffer, 16 * KR, T{});
+        return buffer;
+      }
+    }
     const auto& layout = source.spec().input_layout();
     const nint_t offset = tensor::offset_at(
         layout, n / 16, k / KR, 0, 0, 0);
@@ -224,8 +188,9 @@ VECOPS_ALWAYS_INLINE const typename Atom::TB* prepare_b(
     static_assert(Source::Rank == 2, "unpacked AMX B must be rank two");
     if constexpr (direct_row_major_input_v<Source>) {
       const auto strides = source.raw_strides();
-      const nint_t active_n = std::clamp(
-          logical_n - n, nint_t{0}, nint_t{16});
+      const nint_t active_n = SpatialGuaranteed
+          ? nint_t{16}
+          : std::clamp(logical_n - n, nint_t{0}, nint_t{16});
       const nint_t active_k = std::clamp(
           logical_k - k, nint_t{0}, KR);
       const bool gather_offsets_fit =
@@ -255,11 +220,19 @@ VECOPS_ALWAYS_INLINE const typename Atom::TB* prepare_b(
         const nint_t kk = k + kg * KP + ki;
         const nint_t active_n = std::clamp(
             logical_n - n, nint_t{0}, nint_t{16});
-        return kk < logical_k && active_n > 0
-            ? source.load(
-                  Tag{}, tensor::coord(n, kk), tensor::axis<0>,
-                  vec::opt::first(active_n), vec::opt::zero)
-            : vec::zeros(Tag{});
+        if constexpr (SpatialGuaranteed) {
+          return kk < logical_k
+              ? source.load(
+                    Tag{}, tensor::coord(n, kk), tensor::axis<0>,
+                    vec::opt::first(active_n), vec::opt::zero)
+              : vec::zeros(Tag{});
+        } else {
+          return kk < logical_k && active_n > 0
+              ? source.load(
+                    Tag{}, tensor::coord(n, kk), tensor::axis<0>,
+                    vec::opt::first(active_n), vec::opt::zero)
+              : vec::zeros(Tag{});
+        }
       };
       if constexpr (KP == 2) {
         using PackedTag = vec::Twice<Tag>;
@@ -284,42 +257,27 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
     typename CInput::ComputeType* buffer) {
   using T = typename CInput::ComputeType;
   using Transform = typename CInput::Transform;
+  // A resident family may be wider than a boundary region.  Such completely
+  // inactive accumulator tiles still participate in the AMX dot instruction,
+  // so initialize them to zero without asking DataAccess for an out-of-range
+  // base coordinate.
+  if (active_m == 0 || active_n == 0) {
+    amx_intrinsics::zero<Tile>();
+    return;
+  }
   if constexpr (IsZeroTransform<Transform>::value) {
-    if constexpr (Tile == 0) _tile_zero(0);
-    else if constexpr (Tile == 1) _tile_zero(1);
-    else if constexpr (Tile == 2) _tile_zero(2);
-    else if constexpr (Tile == 3) _tile_zero(3);
-    else if constexpr (Tile == 4) _tile_zero(4);
-    else if constexpr (Tile == 5) _tile_zero(5);
-  } else if constexpr (direct_row_major_input_v<CInput>) {
-    if (active_m == 16 && active_n == 16) {
-      const auto strides = input.raw_strides();
-      const auto* pointer = reinterpret_cast<const T*>(input.raw_data()) +
-          m * strides[0] + n;
-      if constexpr (Tile == 0) _tile_loadd(0, pointer, strides[0] * sizeof(T));
-      else if constexpr (Tile == 1) _tile_loadd(1, pointer, strides[0] * sizeof(T));
-      else if constexpr (Tile == 2) _tile_loadd(2, pointer, strides[0] * sizeof(T));
-      else if constexpr (Tile == 3) _tile_loadd(3, pointer, strides[0] * sizeof(T));
-      else if constexpr (Tile == 4) _tile_loadd(4, pointer, strides[0] * sizeof(T));
-      else if constexpr (Tile == 5) _tile_loadd(5, pointer, strides[0] * sizeof(T));
-      return;
-    }
-    using Tag = vec::ScalableTag<T, 0>;
-    for (nint_t row = 0; row < 16; ++row) {
-      const auto value = row < active_m
-          ? input.load(
-                Tag{}, tensor::coord(m + row, n), tensor::axis<1>,
-                vec::opt::first(active_n), vec::opt::zero)
-          : vec::zeros(Tag{});
-      vec::store(Tag{}, buffer + row * 16, value);
-    }
-    if constexpr (Tile == 0) _tile_loadd(0, buffer, 16 * sizeof(T));
-    else if constexpr (Tile == 1) _tile_loadd(1, buffer, 16 * sizeof(T));
-    else if constexpr (Tile == 2) _tile_loadd(2, buffer, 16 * sizeof(T));
-    else if constexpr (Tile == 3) _tile_loadd(3, buffer, 16 * sizeof(T));
-    else if constexpr (Tile == 4) _tile_loadd(4, buffer, 16 * sizeof(T));
-    else if constexpr (Tile == 5) _tile_loadd(5, buffer, 16 * sizeof(T));
+    amx_intrinsics::zero<Tile>();
   } else {
+    if constexpr (direct_row_major_input_v<CInput>) {
+      if (active_m == 16 && active_n == 16) {
+        const auto strides = input.raw_strides();
+        const auto* pointer = reinterpret_cast<const T*>(input.raw_data()) +
+            m * strides[0] + n;
+        amx_intrinsics::load<Tile>(
+            pointer, strides[0] * static_cast<nint_t>(sizeof(T)));
+        return;
+      }
+    }
     using Tag = vec::ScalableTag<T, 0>;
     for (nint_t row = 0; row < 16; ++row) {
       const auto value = row < active_m
@@ -329,28 +287,11 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
           : vec::zeros(Tag{});
       vec::store(Tag{}, buffer + row * 16, value);
     }
-    if constexpr (Tile == 0) _tile_loadd(0, buffer, 16 * sizeof(T));
-    else if constexpr (Tile == 1) _tile_loadd(1, buffer, 16 * sizeof(T));
-    else if constexpr (Tile == 2) _tile_loadd(2, buffer, 16 * sizeof(T));
-    else if constexpr (Tile == 3) _tile_loadd(3, buffer, 16 * sizeof(T));
-    else if constexpr (Tile == 4) _tile_loadd(4, buffer, 16 * sizeof(T));
-    else if constexpr (Tile == 5) _tile_loadd(5, buffer, 16 * sizeof(T));
+    amx_intrinsics::load<Tile>(buffer, 16 * sizeof(T));
   }
 }
 
-template <int Tile, typename T>
-VECOPS_ALWAYS_INLINE void load_tile(const T* pointer, nint_t stride) {
-  if constexpr (Tile == 0) _tile_loadd(0, pointer, stride);
-  else if constexpr (Tile == 1) _tile_loadd(1, pointer, stride);
-  else if constexpr (Tile == 2) _tile_loadd(2, pointer, stride);
-  else if constexpr (Tile == 3) _tile_loadd(3, pointer, stride);
-  else if constexpr (Tile == 4) _tile_loadd(4, pointer, stride);
-  else if constexpr (Tile == 5) _tile_loadd(5, pointer, stride);
-  else if constexpr (Tile == 6) _tile_loadd(6, pointer, stride);
-  else if constexpr (Tile == 7) _tile_loadd(7, pointer, stride);
-}
-
-template <gemm::Atom Atom, int Tile, typename Source>
+template <gemm::Atom Atom, int Tile, bool SpatialGuaranteed, typename Source>
 VECOPS_ALWAYS_INLINE void load_a_tile(
     const Source& source, nint_t m, nint_t k,
     nint_t logical_m, nint_t logical_k,
@@ -358,73 +299,64 @@ VECOPS_ALWAYS_INLINE void load_a_tile(
   using T = typename Atom::TA;
   constexpr nint_t KR = decltype(Atom::K_R)::value;
   if constexpr (direct_row_major_input_v<Source>) {
-    if (m + 16 <= logical_m && k + KR <= logical_k) {
+    if ((SpatialGuaranteed || m + 16 <= logical_m) &&
+        k + KR <= logical_k) {
       const auto strides = source.raw_strides();
       const auto* pointer = reinterpret_cast<const T*>(source.raw_data()) +
           m * strides[0] + k;
-      load_tile<Tile>(pointer, strides[0] * static_cast<nint_t>(sizeof(T)));
+      amx_intrinsics::load<Tile>(
+          pointer, strides[0] * static_cast<nint_t>(sizeof(T)));
       return;
     }
   }
-  load_tile<Tile>(
-      prepare_a<Atom>(
+  amx_intrinsics::load<Tile>(
+      prepare_a<Atom, SpatialGuaranteed>(
           source, m, k, logical_m, logical_k, buffer),
       64);
 }
 
-template <gemm::Atom Atom, int NM, int NN>
-VECOPS_ALWAYS_INLINE void compute_tiles() {
-  if constexpr (NM == 1 && NN == 1) {
-    VECOPS_AMX_DOT(Atom, 0, 1, 2);
-  } else if constexpr (NM == 1 && NN == 2) {
-    VECOPS_AMX_DOT(Atom, 0, 2, 3);
-    VECOPS_AMX_DOT(Atom, 1, 2, 4);
-  } else if constexpr (NM == 1 && NN == 3) {
-    VECOPS_AMX_DOT(Atom, 0, 3, 4);
-    VECOPS_AMX_DOT(Atom, 1, 3, 5);
-    VECOPS_AMX_DOT(Atom, 2, 3, 6);
-  } else if constexpr (NM == 2 && NN == 1) {
-    VECOPS_AMX_DOT(Atom, 0, 2, 4);
-    VECOPS_AMX_DOT(Atom, 1, 3, 4);
-  } else if constexpr (NM == 3 && NN == 1) {
-    VECOPS_AMX_DOT(Atom, 0, 3, 6);
-    VECOPS_AMX_DOT(Atom, 1, 4, 6);
-    VECOPS_AMX_DOT(Atom, 2, 5, 6);
-  } else {
-    static_assert(NM == 2 && NN == 2);
-    VECOPS_AMX_DOT(Atom, 0, 4, 6);
-    VECOPS_AMX_DOT(Atom, 1, 4, 7);
-    VECOPS_AMX_DOT(Atom, 2, 5, 6);
-    VECOPS_AMX_DOT(Atom, 3, 5, 7);
-  }
+template <gemm::Atom Atom, int NM, int NN, std::size_t... I>
+VECOPS_ALWAYS_INLINE void compute_tiles_impl(std::index_sequence<I...>) {
+  constexpr int Outputs = NM * NN;
+  (amx_intrinsics::dot<
+       typename Atom::TAcc, typename Atom::TA, typename Atom::TB,
+       static_cast<int>(I), Outputs + static_cast<int>(I / NN),
+       Outputs + NM + static_cast<int>(I % NN)>(), ...);
 }
 
-template <int Tile, typename COutput>
+template <gemm::Atom Atom, int NM, int NN>
+VECOPS_ALWAYS_INLINE void compute_tiles() {
+  compute_tiles_impl<Atom, NM, NN>(std::make_index_sequence<NM * NN>{});
+}
+
+template <int Tile, bool FullTile, bool NonEmpty, typename COutput>
 VECOPS_ALWAYS_INLINE void store_c_tile(
     COutput& output, nint_t m, nint_t n,
     nint_t active_m, nint_t active_n,
     typename COutput::ComputeType* buffer) {
   using T = typename COutput::ComputeType;
+  // Do not form a DataAccess base coordinate for an empty resident sub-tile.
+  if constexpr (!NonEmpty) {
+    if (active_m == 0 || active_n == 0) return;
+  }
   if constexpr (direct_row_major_output_v<COutput>) {
-    if (active_m == 16 && active_n == 16) {
+    if constexpr (FullTile) {
       const auto strides = output.raw_strides();
       auto* pointer = reinterpret_cast<T*>(output.raw_data()) +
           m * strides[0] + n;
-      if constexpr (Tile == 0) _tile_stored(0, pointer, strides[0] * sizeof(T));
-      else if constexpr (Tile == 1) _tile_stored(1, pointer, strides[0] * sizeof(T));
-      else if constexpr (Tile == 2) _tile_stored(2, pointer, strides[0] * sizeof(T));
-      else if constexpr (Tile == 3) _tile_stored(3, pointer, strides[0] * sizeof(T));
-      else if constexpr (Tile == 4) _tile_stored(4, pointer, strides[0] * sizeof(T));
-      else if constexpr (Tile == 5) _tile_stored(5, pointer, strides[0] * sizeof(T));
+      amx_intrinsics::store<Tile>(
+          pointer, strides[0] * static_cast<nint_t>(sizeof(T)));
+      return;
+    } else if (active_m == 16 && active_n == 16) {
+      const auto strides = output.raw_strides();
+      auto* pointer = reinterpret_cast<T*>(output.raw_data()) +
+          m * strides[0] + n;
+      amx_intrinsics::store<Tile>(
+          pointer, strides[0] * static_cast<nint_t>(sizeof(T)));
       return;
     }
   }
-  if constexpr (Tile == 0) _tile_stored(0, buffer, 16 * sizeof(T));
-  else if constexpr (Tile == 1) _tile_stored(1, buffer, 16 * sizeof(T));
-  else if constexpr (Tile == 2) _tile_stored(2, buffer, 16 * sizeof(T));
-  else if constexpr (Tile == 3) _tile_stored(3, buffer, 16 * sizeof(T));
-  else if constexpr (Tile == 4) _tile_stored(4, buffer, 16 * sizeof(T));
-  else if constexpr (Tile == 5) _tile_stored(5, buffer, 16 * sizeof(T));
+  amx_intrinsics::store<Tile>(buffer, 16 * sizeof(T));
   using Tag = vec::ScalableTag<T, 0>;
   for (nint_t row = 0; row < active_m; ++row) {
     const auto value = vec::load(Tag{}, buffer + row * 16);
@@ -445,6 +377,12 @@ VECOPS_ALWAYS_INLINE void microkernel(
   constexpr int NN = Case::b;
   constexpr int Outputs = NM * NN;
   constexpr nint_t KR = decltype(Atom::K_R)::value;
+  constexpr bool FullM =
+      Case::m_mask == tile::Tile2DMaskMode::unmasked;
+  constexpr bool FullN =
+      Case::n_mask == tile::Tile2DMaskMode::unmasked;
+  constexpr bool GuaranteedM = FullM || Case::exact_blocks;
+  constexpr bool GuaranteedN = FullN || Case::exact_blocks;
   auto* bytes = static_cast<std::byte*>(scratch);
   auto* a_buffers = reinterpret_cast<typename Atom::TA*>(bytes);
   auto* b_buffers = reinterpret_cast<typename Atom::TB*>(bytes + NM * 1024);
@@ -465,14 +403,14 @@ VECOPS_ALWAYS_INLINE void microkernel(
 
   for (nint_t k = 0; k < logical_k; k += KR) {
     [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
-      (load_a_tile<Atom, Outputs + static_cast<int>(I)>(
+      (load_a_tile<Atom, Outputs + static_cast<int>(I), GuaranteedM>(
            a, m + static_cast<nint_t>(I) * 16, k,
            logical_m, logical_k,
            a_buffers + I * 1024 / sizeof(typename Atom::TA)), ...);
     }(std::make_index_sequence<NM>{});
     [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
-      (load_tile<Outputs + NM + static_cast<int>(I)>(
-           prepare_b<Atom>(
+      (amx_intrinsics::load<Outputs + NM + static_cast<int>(I)>(
+           prepare_b<Atom, GuaranteedN>(
                b, n + static_cast<nint_t>(I) * 16, k,
                logical_n, logical_k,
                b_buffers + I * 1024 / sizeof(typename Atom::TB)),
@@ -482,7 +420,9 @@ VECOPS_ALWAYS_INLINE void microkernel(
   }
 
   [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
-    (store_c_tile<static_cast<int>(I)>(
+    (store_c_tile<
+         static_cast<int>(I), FullM && FullN,
+         (FullM && FullN) || Case::exact_blocks>(
          c_output,
          m + static_cast<nint_t>(I / NN) * 16,
          n + static_cast<nint_t>(I % NN) * 16,
@@ -502,13 +442,24 @@ template <>
 struct Backend<matmul_implementation::AMX> {
   using ResourceRequirements = execution::details::ResourceSet<
       execution::details::x86::Tiles>;
+  using Catalog = amx::Catalog;
+  static constexpr int ProblemRank = 2;
 
   static nint_t scratch_bytes() { return 8 * 1024 + 63; }
 
-  template <gemm::Atom Atom, execution::ExecutionScope Scope,
+  template <gemm::Atom, typename Policy,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B>
+  using EffectivePolicy = std::conditional_t<
+      std::same_as<Policy, matmul_policy::Automatic>,
+      kernel::loop::tile2d_policy::FourRegions, Policy>;
+
+  template <gemm::Atom Atom, typename Policy,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename A, typename B, typename CInput, typename COutput>
   VECOPS_ALWAYS_INLINE static void run(
-      Scope& scope, nint_t m, nint_t n, nint_t k,
+      Scope& scope, M m, N n, K k,
       const A& a, const B& b, const CInput& c_input, COutput& c_output,
       void* scratch) {
     static_assert(std::same_as<typename Atom::KernelKind, gemm::AMXKernelKind>);
@@ -516,32 +467,33 @@ struct Backend<matmul_implementation::AMX> {
         execution::details::x86::Tiles, Scope>);
     VECOPS_ASSERT(scratch != nullptr, "AMX matmul scratch is null");
     amx::Configuration configuration;
-    scope.with_configuration(configuration, [&](auto&) VECOPS_INLINE_LAMBDA {
-      kernel::loop::tile2d<kernel::loop::tile2d_policy::FourRegions>(
-          meta::Any{m}, meta::Any{n}, Atom::M_R, Atom::N_R,
-          amx::Catalog{},
-          [&]<typename Case>(Case, nint_t mi, nint_t ni,
-                             nint_t active_m, nint_t active_n)
-              VECOPS_INLINE_LAMBDA {
-            amx::microkernel<Atom, Case>(
-                a, b, c_input, c_output, m, n, k,
-                mi, ni, active_m, active_n, scratch);
-          });
+    scope.with_configuration(configuration, [&](auto&)
+        VECOPS_INLINE_LAMBDA_NOEXCEPT {
+      matmul_details::run_tiles<Backend, Atom, Policy>(
+          m, n, k, a, b, c_input, c_output, scratch);
     });
+  }
+
+  template <gemm::Atom, typename A, typename B,
+            meta::ValueType K, typename Fn>
+  VECOPS_ALWAYS_INLINE static void dispatch_plan(K, Fn&& fn) {
+    std::forward<Fn>(fn).template operator()<std::false_type>();
+  }
+
+  template <gemm::Atom Atom, typename Case, typename Plan,
+            typename A, typename B, typename CInput, typename COutput>
+  VECOPS_ALWAYS_INLINE static void run_case(
+      const A& a, const B& b, const CInput& c_input, COutput& c_output,
+      nint_t logical_m, nint_t logical_n, nint_t logical_k,
+      nint_t m, nint_t n, nint_t active_m, nint_t active_n,
+      void* scratch) {
+    amx::microkernel<Atom, Case>(
+        a, b, c_input, c_output,
+        logical_m, logical_n, logical_k,
+        m, n, active_m, active_n, scratch);
   }
 };
 
 } // namespace vecops::kernel::matmul_details
-
-#undef VECOPS_AMX_DOT
-#undef VECOPS_AMX_BF16
-#undef VECOPS_AMX_FP16
-#undef VECOPS_AMX_SS
-#undef VECOPS_AMX_SU
-#undef VECOPS_AMX_US
-#undef VECOPS_AMX_UU
-#if defined(VECOPS_AMX_INT8_UNAVAILABLE)
-#undef VECOPS_AMX_INT8_UNAVAILABLE
-#endif
 
 #endif // VECOPS_KERNEL_DETAILS_MATMUL_AMX_BACKEND_H

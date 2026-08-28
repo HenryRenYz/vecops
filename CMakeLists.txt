@@ -16,6 +16,8 @@ option(VECOPS_PRESERVE_SUBNORMALS
        "Preserve representable subnormal results in strict vector operations" OFF)
 set(VECOPS_FIXED_SVE_BITS "" CACHE STRING
     "SVE vector width in bits for fixed-SVE targets; empty detects the host maximum")
+set(VECOPS_FIXED_STREAMING_SVE_BITS "" CACHE STRING
+    "SME streaming vector width in bits; empty detects the native host maximum")
 
 include(cmake/VecopsMultiarchTargets.cmake)
 

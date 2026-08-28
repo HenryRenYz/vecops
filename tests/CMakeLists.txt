@@ -130,17 +130,76 @@ if(VECOPS_ARCH_FAMILY STREQUAL "x86")
         FILES ops/MatmulAMXTest.cpp TestUtils.cpp
         FOLDER ops/matmul
         ARCH Native)
+    vecops_add_test(
+        NAME MatmulBatchAMXTest
+        FILES ops/MatmulBatchAMXTest.cpp
+        FOLDER ops/matmul
+        ARCH Native)
 elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
+    set(VECOPS_SME_TEST_ARCH Native)
+    if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
+        list(APPEND VECOPS_SME_TEST_ARCH NativeFixedStreamingSVE)
+    endif()
+    if(VECOPS_NATIVE_HAS_SME_FA64)
+        vecops_add_test(
+            NAME VecSMETest
+            FILES vec/SMETest.cpp
+            FOLDER vec/sme
+            ARCH ${VECOPS_SME_TEST_ARCH}
+            LABELS vec sme)
+        if(CMAKE_OBJDUMP)
+            set(_VECOPS_SME_VEC_TARGETS VecSMETest-Native)
+            if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
+                list(APPEND _VECOPS_SME_VEC_TARGETS
+                    VecSMETest-NativeFixedStreamingSVE)
+            endif()
+            foreach(_TARGET IN LISTS _VECOPS_SME_VEC_TARGETS)
+                add_test(
+                    NAME ${_TARGET}-Disassembly
+                    COMMAND "${CMAKE_COMMAND}"
+                        "-DOBJDUMP=${CMAKE_OBJDUMP}"
+                        "-DBINARY=$<TARGET_FILE:${_TARGET}>"
+                        -P "${CMAKE_CURRENT_LIST_DIR}/cmake/VerifyManualSMEDisassembly.cmake")
+                set_tests_properties(
+                    ${_TARGET}-Disassembly
+                    PROPERTIES LABELS "vec;sme;disassembly")
+            endforeach()
+        endif()
+    endif()
     vecops_add_test(
         NAME MatmulPackSMETest
         FILES ops/MatmulPackSMETest.cpp TestUtils.cpp
         FOLDER ops/matmul_pack
-        ARCH Native)
+        ARCH ${VECOPS_SME_TEST_ARCH})
     vecops_add_test(
         NAME MatmulSMETest
         FILES ops/MatmulSMETest.cpp TestUtils.cpp
         FOLDER ops/matmul
-        ARCH Native)
+        ARCH ${VECOPS_SME_TEST_ARCH})
+    vecops_add_test(
+        NAME MatmulBatchSMETest
+        FILES ops/MatmulBatchSMETest.cpp
+        FOLDER ops/matmul
+        ARCH ${VECOPS_SME_TEST_ARCH})
+    if(VECOPS_NATIVE_HAS_SME_FA64 AND CMAKE_OBJDUMP)
+        set(_VECOPS_SME_MATMUL_TARGETS
+            MatmulSMETest-Native MatmulBatchSMETest-Native)
+        if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
+            list(APPEND _VECOPS_SME_MATMUL_TARGETS
+                MatmulSMETest-NativeFixedStreamingSVE
+                MatmulBatchSMETest-NativeFixedStreamingSVE)
+        endif()
+        foreach(_TARGET IN LISTS _VECOPS_SME_MATMUL_TARGETS)
+            add_test(
+                NAME ${_TARGET}-Disassembly
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DOBJDUMP=${CMAKE_OBJDUMP}"
+                    "-DBINARY=$<TARGET_FILE:${_TARGET}>"
+                    -P "${CMAKE_CURRENT_LIST_DIR}/cmake/VerifyManualSMEDisassembly.cmake")
+            set_tests_properties(
+                ${_TARGET}-Disassembly PROPERTIES LABELS "matmul;sme;disassembly")
+        endforeach()
+    endif()
 endif()
 vecops_add_test(NAME VecRequestTest FILES vec/RequestTest.cpp
     FOLDER vec/request ARCH ${VEC_BASE_ARCH} LABELS vec)

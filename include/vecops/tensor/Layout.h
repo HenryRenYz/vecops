@@ -150,11 +150,11 @@ struct ArrayMeta {
    * @tparam I  Zero-based dimension index.
    */
   template <int I>
-  constexpr nint_t get() const {
+  VECOPS_ALWAYS_INLINE constexpr nint_t get() const {
     return _stor.template get<I>();
   }
 
-  constexpr nint_t operator[](int i) const {
+  VECOPS_ALWAYS_INLINE constexpr nint_t operator[](int i) const {
     return _stor[i];
   }
 
@@ -671,18 +671,19 @@ struct Layout {
   using Stride = TStrides;
   using Strides = TStrides;
 
-  constexpr Layout(TShape shape, TStrides stride) : _shape(shape), _stride(stride) {
+  VECOPS_ALWAYS_INLINE constexpr Layout(TShape shape, TStrides stride)
+      : _shape(shape), _stride(stride) {
   }
 
-  constexpr const TShape& shape() const {
+  VECOPS_ALWAYS_INLINE constexpr const TShape& shape() const {
     return _shape;
   }
 
-  constexpr const TStrides& strides() const {
+  VECOPS_ALWAYS_INLINE constexpr const TStrides& strides() const {
     return _stride;
   }
 
-  constexpr int ndim() const {
+  VECOPS_ALWAYS_INLINE constexpr int ndim() const {
     return Ndim;
   }
 
@@ -1004,10 +1005,10 @@ constexpr nint_t stride(const TLayout& layout) {
  * Bounds are checked with VECOPS_ASSERT, so release builds do not pay for the
  * validation when assertions are disabled.
  */
-template <LayoutLike TLayout>
-constexpr nint_t offset_at(
+template <LayoutLike TLayout, typename Coordinates>
+VECOPS_ALWAYS_INLINE constexpr nint_t offset_at_coordinates(
     const TLayout& layout,
-    const std::array<nint_t, std::remove_cvref_t<TLayout>::Ndim>& coords) {
+    const Coordinates& coords) {
   using LayoutT = std::remove_cvref_t<TLayout>;
   nint_t offset = 0;
   VECOPS_UNROLL
@@ -1018,6 +1019,21 @@ constexpr nint_t offset_at(
   return offset;
 }
 
+template <LayoutLike TLayout>
+VECOPS_ALWAYS_INLINE constexpr nint_t offset_at(
+    const TLayout& layout,
+    const ::vecops::details::InlineArray<
+        nint_t, std::remove_cvref_t<TLayout>::Ndim>& coords) {
+  return offset_at_coordinates(layout, coords);
+}
+
+template <LayoutLike TLayout>
+VECOPS_ALWAYS_INLINE constexpr nint_t offset_at(
+    const TLayout& layout,
+    const std::array<nint_t, std::remove_cvref_t<TLayout>::Ndim>& coords) {
+  return offset_at_coordinates(layout, coords);
+}
+
 /**
  * @brief Compute the linear storage offset from one integer coordinate per
  *        layout dimension.
@@ -1025,11 +1041,15 @@ constexpr nint_t offset_at(
 template <
     LayoutLike TLayout,
     typename... Is>
-constexpr nint_t offset_at(const TLayout& layout, Is... is) {
+VECOPS_ALWAYS_INLINE constexpr nint_t offset_at(
+    const TLayout& layout, Is... is) {
   using LayoutT = std::remove_cvref_t<TLayout>;
   static_assert(sizeof...(Is) == LayoutT::Ndim, "coordinate count must match layout rank");
   static_assert((std::is_integral_v<std::decay_t<Is>> && ...), "coordinates must be integers");
-  return offset_at(layout, std::array<nint_t, LayoutT::Ndim>{static_cast<nint_t>(is)...});
+  return offset_at(
+      layout,
+      ::vecops::details::InlineArray<nint_t, LayoutT::Ndim>{
+          static_cast<nint_t>(is)...});
 }
 
 /**

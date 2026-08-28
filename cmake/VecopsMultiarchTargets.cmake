@@ -26,16 +26,43 @@ set(VECOPS_MAP_ARM_SVE2      "armv8-a+sve2")
 # Some compilers (including BiSheng releases) do not enable all advertised
 # native extensions with the bare -march=native spelling.
 set(VECOPS_MAP_ARM_Native "native")
+set(VECOPS_NATIVE_HAS_SME_FA64 OFF)
 if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND EXISTS "/proc/cpuinfo")
     file(READ "/proc/cpuinfo" _VECOPS_CPUINFO)
     string(REGEX MATCH "Features[ \t]*:.*" _VECOPS_FEAT_LINE
         "${_VECOPS_CPUINFO}")
+    # GCC does not permit feature modifiers after the special "native"
+    # architecture name.  The 920 SME toolchain also resolves its custom CPU
+    # to a generic core, so spell the architectural baseline explicitly before
+    # appending the features reported by Linux.  SME and SVE2.1 imply an
+    # Armv9-A baseline; the remaining advertised extensions are valid on the
+    # Armv8-A baseline.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        if(_VECOPS_FEAT_LINE MATCHES " (sme|sve2p1) ")
+            set(VECOPS_MAP_ARM_Native "armv9-a")
+        else()
+            set(VECOPS_MAP_ARM_Native "armv8-a")
+        endif()
+    endif()
     foreach(_VECOPS_FEAT IN ITEMS sve2p1 bf16 sme)
         string(FIND "${_VECOPS_FEAT_LINE}" " ${_VECOPS_FEAT} " _VECOPS_POS)
         if(NOT _VECOPS_POS EQUAL -1)
             string(APPEND VECOPS_MAP_ARM_Native "+${_VECOPS_FEAT}")
         endif()
     endforeach()
+    # Linux reports FEAT_SME_FA64 as "smefa64", while compiler -march
+    # strings use "sme-fa64". Native SME code needs the explicit compiler
+    # feature because some compilers do not infer it from -march=native.
+    string(FIND "${_VECOPS_FEAT_LINE}" " smefa64 " _VECOPS_SME_FA64_POS)
+    if(NOT _VECOPS_SME_FA64_POS EQUAL -1)
+        set(VECOPS_NATIVE_HAS_SME_FA64 ON)
+        # GCC 15 recognizes the hardware and accepts SME asm, but does not
+        # accept "sme-fa64" as an -march feature modifier. Clang needs the
+        # explicit spelling because -march=native can omit it.
+        if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            string(APPEND VECOPS_MAP_ARM_Native "+sme-fa64")
+        endif()
+    endif()
     string(FIND "${_VECOPS_FEAT_LINE}" " smef64f64 " _VECOPS_SME_F64_POS)
     if(NOT _VECOPS_SME_F64_POS EQUAL -1)
         string(APPEND VECOPS_MAP_ARM_Native "+sme-f64f64")
@@ -113,6 +140,91 @@ int main(void) {
                 "VECOPS_FIXED_SVE_BITS must be a multiple of 128 in [128, 2048]")
         endif()
         set(VECOPS_MAP_ARM_NativeFixedSVE "${VECOPS_MAP_ARM_Native}")
+    endif()
+endif()
+
+# Fixed streaming SVE is independent of the ordinary SVE VL.  Detect the
+# native SME SVL separately, and let cross builds provide the target guarantee
+# explicitly.  Probe -msve-streaming-vector-bits because support varies by
+# compiler version (and GCC does not currently document the option).  The
+# project feature definition remains useful on compiler-specific manual-SME
+# targets when the driver flag is unavailable.
+if(VECOPS_ARCH_FAMILY STREQUAL "ARM")
+    set(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS
+        "${VECOPS_FIXED_STREAMING_SVE_BITS}")
+    if(NOT VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS AND
+       NOT CMAKE_CROSSCOMPILING AND VECOPS_NATIVE_HAS_SME_FA64)
+        set(_VECOPS_SME_SVL_PROBE
+            "${CMAKE_BINARY_DIR}/CMakeFiles/vecops_sme_svl_probe.c")
+        file(WRITE "${_VECOPS_SME_SVL_PROBE}" [=[
+#include <stdio.h>
+#include <sys/prctl.h>
+
+#ifndef PR_SME_SET_VL
+#define PR_SME_SET_VL 63
+#endif
+#ifndef PR_SME_VL_LEN_MASK
+#define PR_SME_VL_LEN_MASK 0xffff
+#endif
+
+int main(void) {
+  const int result = prctl(PR_SME_SET_VL, 256UL, 0UL, 0UL, 0UL);
+  if (result < 0) return 1;
+  printf("%d", (result & PR_SME_VL_LEN_MASK) * 8);
+  return 0;
+}
+]=])
+        try_run(
+            _VECOPS_SME_SVL_RUN_RESULT
+            _VECOPS_SME_SVL_COMPILE_RESULT
+            "${CMAKE_BINARY_DIR}/CMakeFiles/vecops_sme_svl_probe"
+            "${_VECOPS_SME_SVL_PROBE}"
+            RUN_OUTPUT_VARIABLE _VECOPS_SME_SVL_OUTPUT)
+        if(_VECOPS_SME_SVL_COMPILE_RESULT AND
+           _VECOPS_SME_SVL_RUN_RESULT EQUAL 0)
+            string(STRIP "${_VECOPS_SME_SVL_OUTPUT}"
+                VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
+            message(STATUS
+                "Detected maximum native streaming SVE width: "
+                "${VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS} bits")
+        else()
+            message(WARNING
+                "Could not detect the maximum native streaming SVE width; "
+                "set VECOPS_FIXED_STREAMING_SVE_BITS explicitly to enable "
+                "fixed-SVL SME metadata.")
+        endif()
+    endif()
+
+    if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
+        if(NOT VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS MATCHES "^[0-9]+$")
+            message(FATAL_ERROR
+                "VECOPS_FIXED_STREAMING_SVE_BITS must be an integer number "
+                "of bits")
+        endif()
+        math(EXPR _VECOPS_SME_SVL_REMAINDER
+            "${VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS} % 128")
+        if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS LESS 128 OR
+           VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS GREATER 2048 OR
+           NOT _VECOPS_SME_SVL_REMAINDER EQUAL 0)
+            message(FATAL_ERROR
+                "VECOPS_FIXED_STREAMING_SVE_BITS must be a multiple of 128 "
+                "in [128, 2048]")
+        endif()
+
+        set(_VECOPS_SAVED_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS}")
+        set(CMAKE_REQUIRED_FLAGS
+            "${CMAKE_REQUIRED_FLAGS} -march=${VECOPS_MAP_ARM_Native}")
+        check_cxx_compiler_flag(
+            "-msve-streaming-vector-bits=${VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS}"
+            VECOPS_COMPILER_ACCEPTS_FIXED_STREAMING_SVE_BITS)
+        set(CMAKE_REQUIRED_FLAGS "${_VECOPS_SAVED_REQUIRED_FLAGS}")
+        if(NOT VECOPS_COMPILER_ACCEPTS_FIXED_STREAMING_SVE_BITS)
+            message(STATUS
+                "Compiler has no -msve-streaming-vector-bits support; "
+                "using the fixed-SVL project target guarantee only")
+        endif()
+        set(VECOPS_MAP_ARM_NativeFixedStreamingSVE
+            "${VECOPS_MAP_ARM_Native}")
     endif()
 endif()
 
@@ -214,7 +326,7 @@ endfunction()
 # Public primitive used by vecops_add_test and vecops_add_benchmark. It owns
 # source sharding and all architecture-specific compile/link policy.
 function(vecops_add_multiarch_executable)
-    set(options FIXED_SVE)
+    set(options FIXED_SVE FIXED_STREAMING_SVE)
     set(oneValueArgs NAME FOLDER OUT_TARGETS ARCH_DEFINITION)
     set(multiValueArgs
         FILES ARCH DEFINITIONS LIBRARIES INCLUDE_DIRECTORIES
@@ -296,6 +408,31 @@ function(vecops_add_multiarch_executable)
         if(_MARCH)
             target_compile_options(${_TARGET_NAME} PRIVATE "-march=${_MARCH}")
         endif()
+        # ACLE currently has no portable FEAT_SME_FA64 feature-test macro.
+        # Propagate the CMake target guarantee so streaming kernels can select
+        # ordinary SVE gather/scatter only when Full A64 is available.
+        set(_VECOPS_TARGET_HAS_SME_FA64 OFF)
+        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
+           ((_MARCH MATCHES "(^|\\+)sme-fa64($|\\+)") OR
+            (VECOPS_NATIVE_HAS_SME_FA64 AND
+             ((_ARCH STREQUAL "Native") OR
+              (_ARCH STREQUAL "NativeFixedSVE") OR
+              (_ARCH STREQUAL "NativeFixedStreamingSVE")))))
+            set(_VECOPS_TARGET_HAS_SME_FA64 ON)
+            target_compile_definitions(${_TARGET_NAME} PRIVATE
+                VECOPS_TARGET_SME_FA64=1)
+        endif()
+        if(_VECOPS_TARGET_HAS_SME_FA64 AND
+           VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS AND
+           ((_ARCH STREQUAL "NativeFixedStreamingSVE") OR
+            ARG_FIXED_STREAMING_SVE))
+            target_compile_definitions(${_TARGET_NAME} PRIVATE
+                "VECOPS_TARGET_FIXED_STREAMING_SVE_BITS=${VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS}")
+            if(VECOPS_COMPILER_ACCEPTS_FIXED_STREAMING_SVE_BITS)
+                target_compile_options(${_TARGET_NAME} PRIVATE
+                    "-msve-streaming-vector-bits=${VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS}")
+            endif()
+        endif()
         if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
            CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND _MARCH AND
            NOT _ARCH STREQUAL "Scalar")
@@ -307,15 +444,6 @@ function(vecops_add_multiarch_executable)
            VECOPS_NATIVE_FIXED_SVE_BITS)
             target_compile_options(${_TARGET_NAME} PRIVATE
                 "-msve-vector-bits=${VECOPS_NATIVE_FIXED_SVE_BITS}")
-        endif()
-        # SME ACLE private-ZA functions use AAPCS64 compiler-rt helpers.
-        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
-           CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND
-           _MARCH MATCHES "(^|\\+)sme($|\\+)")
-            target_compile_options(${_TARGET_NAME} PRIVATE
-                "-Wno-aarch64-sme-attributes")
-            target_link_options(${_TARGET_NAME} PRIVATE
-                "-rtlib=compiler-rt" "-unwindlib=libgcc")
         endif()
         if(ARG_DEFINITIONS)
             target_compile_definitions(${_TARGET_NAME} PRIVATE

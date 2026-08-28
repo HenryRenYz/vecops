@@ -69,7 +69,9 @@ public:
    */
   VECOPS_INLINE void operator()(Scope& scope) const {
     scope.with_resources(
-        *this, [&](auto& active) VECOPS_INLINE_LAMBDA { execute(active); });
+        *this, [&](auto& active) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          execute(active);
+        });
   }
 
 private:

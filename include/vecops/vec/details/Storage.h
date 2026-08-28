@@ -72,13 +72,14 @@ using SingleOrArray = std::conditional_t<
     Count == 1, Word, WordArray<Word, Count>>;
 
 template <nint_t Index, typename Word>
-constexpr Word get_word(const Word& value) {
+VECOPS_ALWAYS_INLINE constexpr Word get_word(const Word& value) {
   static_assert(Index == 0);
   return value;
 }
 
 template <nint_t Index, typename Word, nint_t Count>
-constexpr Word get_word(const WordArray<Word, Count>& value) {
+VECOPS_ALWAYS_INLINE constexpr Word get_word(
+    const WordArray<Word, Count>& value) {
   static_assert(Index >= 0 && Index < Count);
   return value.words[static_cast<std::size_t>(Index)];
 }
@@ -99,13 +100,13 @@ VECOPS_ALWAYS_INLINE constexpr Word get_word(
 }
 
 template <nint_t Index, typename Word>
-constexpr Word set_word(Word, Word word) {
+VECOPS_ALWAYS_INLINE constexpr Word set_word(Word, Word word) {
   static_assert(Index == 0);
   return word;
 }
 
 template <nint_t Index, typename Word, nint_t Count>
-constexpr WordArray<Word, Count> set_word(
+VECOPS_ALWAYS_INLINE constexpr WordArray<Word, Count> set_word(
     WordArray<Word, Count> value, Word word) {
   static_assert(Index >= 0 && Index < Count);
   value.words[static_cast<std::size_t>(Index)] = word;

@@ -24,10 +24,9 @@ using PanelTag = vec::ScalableTag<T, panel_scale_power<T>>;
 template <typename T>
 using WordTag = vec::ScalableTag<T, 0>;
 
-template <typename T>
+template <typename T, typename Mask0, typename Mask1>
 VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> read_panel(
-    uint32_t slice, svbool_t pg0, svbool_t pg1)
-    __arm_streaming __arm_inout("za") {
+    uint32_t slice, Mask0 pg0, Mask1 pg1) noexcept {
   using U = Bits<T>;
   using BitsPanelTag = PanelTag<U>;
   if constexpr (sizeof(T) == 4) {
@@ -47,8 +46,7 @@ VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> read_panel(
 template <typename T, typename Source>
 VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> postprocess_panel(
     const Source& source,
-    vec::Vec<PanelTag<typename Source::MemoryElement>> input)
-    __arm_streaming {
+    vec::Vec<PanelTag<typename Source::MemoryElement>> input) noexcept {
   using Memory = typename Source::MemoryElement;
   using Transform = typename Source::Transform;
   using MemoryTag = PanelTag<Memory>;
@@ -59,7 +57,7 @@ VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> postprocess_panel(
   } else {
     using TransformInTag = vec::Rebind<typename Transform::TIn, MemoryTag>;
     using TransformOutTag = vec::Rebind<typename Transform::TOut, MemoryTag>;
-    const auto transform_input = [&]() VECOPS_INLINE_LAMBDA {
+    const auto transform_input = [&]() VECOPS_INLINE_LAMBDA_NOEXCEPT {
       if constexpr (std::same_as<Memory, typename Transform::TIn>) return input;
       else return vec::convert(TransformInTag{}, MemoryTag{}, input);
     }();
@@ -75,10 +73,10 @@ VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> postprocess_panel(
 
 template <typename T>
 VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> zero_inactive_spatial(
-    vec::Vec<PanelTag<T>> value, nint_t active_spatial)
-    __arm_streaming {
+    vec::Vec<PanelTag<T>> value, nint_t active_spatial) noexcept {
   using Tag = PanelTag<T>;
-  const nint_t panel = 2 * static_cast<nint_t>(svcntw());
+  const nint_t panel =
+      2 * vec::details::sme::streaming_lanes<uint32_t>();
   if (active_spatial >= panel) return value;
   return vec::blend(
       Tag{}, vec::zeros(Tag{}),
@@ -87,7 +85,7 @@ VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> zero_inactive_spatial(
 
 template <typename T>
 VECOPS_ALWAYS_INLINE void store_single_panel(
-    T*& output, vec::Vec<PanelTag<T>> value) __arm_streaming {
+    T*& output, vec::Vec<PanelTag<T>> value) noexcept {
   static_assert(sizeof(T) == 4);
   using U = Bits<T>;
   using Tag = PanelTag<T>;
@@ -96,17 +94,17 @@ VECOPS_ALWAYS_INLINE void store_single_panel(
       BitsWordTag{}, WordTag<T>{}, vec::lower(Tag{}, value));
   const auto hi = vec::bitcast(
       BitsWordTag{}, WordTag<T>{}, vec::upper(Tag{}, value));
-  svst1_u32(svptrue_b32(), reinterpret_cast<uint32_t*>(output), lo);
-  output += svcntw();
-  svst1_u32(svptrue_b32(), reinterpret_cast<uint32_t*>(output), hi);
-  output += svcntw();
+  vec::store(BitsWordTag{}, reinterpret_cast<U*>(output), lo);
+  output += vec::size(BitsWordTag{});
+  vec::store(BitsWordTag{}, reinterpret_cast<U*>(output), hi);
+  output += vec::size(BitsWordTag{});
 }
 
 template <typename T>
 VECOPS_ALWAYS_INLINE void store_pair_panel(
     T*& output,
     vec::Vec<PanelTag<T>> v0,
-    vec::Vec<PanelTag<T>> v1) __arm_streaming {
+    vec::Vec<PanelTag<T>> v1) noexcept {
   static_assert(sizeof(T) == 2);
   using U = Bits<T>;
   using BitsTag = PanelTag<U>;
@@ -114,7 +112,7 @@ VECOPS_ALWAYS_INLINE void store_pair_panel(
       output,
       vec::bitcast(BitsTag{}, PanelTag<T>{}, v0),
       vec::bitcast(BitsTag{}, PanelTag<T>{}, v1));
-  output += 2 * svcnth();
+  output += 2 * vec::size(WordTag<U>{});
 }
 
 template <typename T>
@@ -123,32 +121,34 @@ VECOPS_ALWAYS_INLINE void store_quad_panel(
     vec::Vec<PanelTag<T>> v0,
     vec::Vec<PanelTag<T>> v1,
     vec::Vec<PanelTag<T>> v2,
-    vec::Vec<PanelTag<T>> v3) __arm_streaming {
+    vec::Vec<PanelTag<T>> v3) noexcept {
   static_assert(sizeof(T) == 1);
   using U = Bits<T>;
   using BitsTag = PanelTag<U>;
-  const auto pg = first<U>(2 * static_cast<nint_t>(svcntw()));
+  const nint_t panel =
+      2 * vec::details::sme::streaming_lanes<uint32_t>();
+  const auto pg = first<U>(panel);
   store_quad<U>(
       output, pg,
       vec::bitcast(BitsTag{}, PanelTag<T>{}, v0),
       vec::bitcast(BitsTag{}, PanelTag<T>{}, v1),
       vec::bitcast(BitsTag{}, PanelTag<T>{}, v2),
       vec::bitcast(BitsTag{}, PanelTag<T>{}, v3));
-  output += 4 * 2 * svcntw();
+  output += 4 * panel;
 }
 
 template <gemm::Atom Atom, gemm::Operand Side,
           typename Source>
-__arm_new("za") VECOPS_NOINLINE void pack_postprocess(
+VECOPS_ALWAYS_INLINE void pack_postprocess(
     const Source& source, nint_t spatial, nint_t k, nint_t row_stride,
-    typename gemm::packing_t<Atom, Side>::Element* output)
-    __arm_streaming {
+    typename gemm::packing_t<Atom, Side>::Element* output) noexcept {
   using Packing = gemm::packing_t<Atom, Side>;
   using T = typename Packing::Element;
   using Memory = typename Source::MemoryElement;
   using U = Bits<Memory>;
   constexpr nint_t KPack = Packing::KPack;
-  const nint_t panel = 2 * static_cast<nint_t>(svcntw());
+  const nint_t panel =
+      2 * vec::details::sme::streaming_lanes<uint32_t>();
   const nint_t lanes = vec::size(WordTag<Memory>{});
   const nint_t k_chunk = lanes;
   const nint_t panels = ceil_div(spatial, panel);
@@ -157,24 +157,24 @@ __arm_new("za") VECOPS_NOINLINE void pack_postprocess(
 
   for (nint_t sp = 0; sp < panels; ++sp) {
     const nint_t panel_base = sp * panel;
-    const nint_t active_spatial = std::clamp(
+    const nint_t active_spatial = vec::details::sme::clamp_value(
         spatial - panel_base, nint_t{0}, panel);
-    const nint_t active0 = std::min(active_spatial, lanes);
+    const nint_t active0 = vec::details::sme::min_value(active_spatial, lanes);
     const nint_t active1 = sizeof(Memory) == 4
-        ? std::max(nint_t{0}, active_spatial - lanes)
+        ? vec::details::sme::max_value(nint_t{0}, active_spatial - lanes)
         : 0;
     const auto pg0 = first<U>(active0);
     const auto pg1 = first<U>(active1);
     const auto write_pg = all<U>();
 
     auto pack_chunk = [&](nint_t kb, nint_t active_k)
-        VECOPS_INLINE_LAMBDA __arm_streaming __arm_inout("za") {
+        VECOPS_INLINE_LAMBDA_NOEXCEPT {
       const auto load_pg = first<U>(active_k);
-      auto load_row = [&](nint_t row) VECOPS_INLINE_LAMBDA __arm_streaming {
+      auto load_row = [&](nint_t row) VECOPS_INLINE_LAMBDA_NOEXCEPT {
         return load_bits<U>(load_pg, input + row * row_stride + kb);
       };
       auto write_rows = [&]<int Tile>(nint_t begin, nint_t count)
-          VECOPS_INLINE_LAMBDA __arm_streaming __arm_inout("za") {
+          VECOPS_INLINE_LAMBDA_NOEXCEPT {
         for (nint_t r = 0; r < count; ++r) {
           const nint_t row = begin + r;
           write_hor<Tile, U>(
@@ -187,7 +187,7 @@ __arm_new("za") VECOPS_NOINLINE void pack_postprocess(
       }
 
       auto process_slice = [&](nint_t slice)
-          VECOPS_INLINE_LAMBDA __arm_streaming __arm_inout("za") {
+          VECOPS_INLINE_LAMBDA_NOEXCEPT {
         using OutputTag = PanelTag<T>;
         if (slice >= active_k) return vec::zeros(OutputTag{});
         const auto memory = read_panel<Memory>(
@@ -219,7 +219,7 @@ __arm_new("za") VECOPS_NOINLINE void pack_postprocess(
     };
 
     for (nint_t kb = 0; kb < k; kb += k_chunk) {
-      pack_chunk(kb, std::min(k_chunk, k - kb));
+      pack_chunk(kb, vec::details::sme::min_value(k_chunk, k - kb));
     }
   }
 }
@@ -233,7 +233,7 @@ VECOPS_ALWAYS_INLINE void zero_contiguous(
   for (nint_t offset = 0; offset < count; offset += lanes) {
     vec::store(
         Tag{}, pointer + offset, zero,
-        vec::opt::first(std::min(lanes, count - offset)));
+        vec::opt::first(vec::details::sme::min_value(lanes, count - offset)));
   }
 }
 
@@ -246,7 +246,7 @@ VECOPS_ALWAYS_INLINE void zero_strided(
   for (nint_t offset = 0; offset < count; offset += lanes) {
     vec::store(
         Tag{}, pointer + offset * stride, zero,
-        vec::opt::first(std::min(lanes, count - offset)),
+        vec::opt::first(vec::details::sme::min_value(lanes, count - offset)),
         vec::opt::strided(stride));
   }
 }
@@ -277,7 +277,7 @@ VECOPS_NOINLINE void transform_packed_inplace(
   }
 
   for (nint_t sp = 0; sp < spatial_panels; ++sp) {
-    const nint_t active_spatial = std::min(panel, spatial - sp * panel);
+    const nint_t active_spatial = vec::details::sme::min_value(panel, spatial - sp * panel);
     if (active_spatial < panel) {
       for (nint_t kg = 0; kg < k_groups; ++kg) {
         auto* group = output + (sp * k_groups + kg) * panel * k_pack;

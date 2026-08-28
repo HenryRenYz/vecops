@@ -1,7 +1,6 @@
 #ifndef VECOPS_TENSOR_ACCESS_OPTIONS_H
 #define VECOPS_TENSOR_ACCESS_OPTIONS_H
 
-#include <array>
 #include <cstddef>
 #include <type_traits>
 
@@ -45,7 +44,7 @@ namespace vecops::tensor {
 
 /** Fixed-rank logical coordinate used by Tensor DataAccess. */
 template <std::size_t Rank>
-using Coord = std::array<nint_t, Rank>;
+using Coord = ::vecops::details::InlineArray<nint_t, Rank>;
 
 /**
  * @brief Construct a coordinate while deducing its rank.
@@ -92,7 +91,7 @@ inline constexpr VectorAxis<Dim> vector_axis{};
 template <std::size_t OriginalRank, std::size_t LocalRank>
 struct CoordinateProjection {
   Coord<OriginalRank> fixed{};
-  std::array<int, LocalRank> local_to_original{};
+  ::vecops::details::InlineArray<int, LocalRank> local_to_original{};
 
   VECOPS_ALWAYS_INLINE constexpr Coord<OriginalRank> project(
       const Coord<LocalRank>& local) const {

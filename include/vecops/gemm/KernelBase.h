@@ -75,8 +75,11 @@ struct Kernel {
   /**
    * 一次内核调用处理的元素数。
    */
-  static constexpr auto tile_M = nM_R * Atom::M_R;
-  static constexpr auto tile_N = nN_R * Atom::N_R;
+  // The metadata type remains Const for fixed-size atoms and Dynamic for
+  // scalable atoms.  The object itself cannot be constexpr in the latter
+  // case because its value is obtained from the architectural vector length.
+  inline static const auto tile_M = nM_R * Atom::M_R;
+  inline static const auto tile_N = nN_R * Atom::N_R;
   /**
    * 算力参考值，手动设定，用于组合搜索。
    */

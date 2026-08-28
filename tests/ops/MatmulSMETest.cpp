@@ -14,6 +14,41 @@ using namespace vecops;
 using namespace vecops::meta;
 using namespace vecops::tensor;
 
+using SMEF32Tile2x2 = gemm::Kernel<
+    gemm::SME_F32F32, 2, 2, gemm::Masked, gemm::Masked>;
+
+#if defined(HAS_FIXED_STREAMING_SVE_BITS)
+static_assert(std::same_as<
+    std::remove_cv_t<decltype(
+        vec::details::sme::streaming_vector_bytes_value())>,
+    Const<FIXED_STREAMING_SVE_BITS / 8>>);
+static_assert(std::same_as<
+    std::remove_cv_t<decltype(gemm::SME_F32F32::M_R)>,
+    Const<FIXED_STREAMING_SVE_BITS / 8 / sizeof(float32_t)>>);
+static_assert(std::same_as<
+    std::remove_cv_t<decltype(SMEF32Tile2x2::tile_M)>,
+    Const<2 * FIXED_STREAMING_SVE_BITS / 8 / sizeof(float32_t)>>);
+#else
+static_assert(std::same_as<
+    std::remove_cv_t<decltype(
+        vec::details::sme::streaming_vector_bytes_value())>,
+    Dynamic<16, 16, 256>>);
+static_assert(std::same_as<
+    std::remove_cv_t<decltype(gemm::SME_F32F32::M_R)>,
+    Dynamic<4, 4, 64>>);
+static_assert(std::same_as<
+    std::remove_cv_t<decltype(SMEF32Tile2x2::tile_M)>,
+    Dynamic<8, 8, 128>>);
+#endif
+static_assert(std::same_as<
+    std::remove_cv_t<decltype(gemm::SME_F32F32::K_R)>, Const<1>>);
+static_assert(kernel::matmul_details::sme::use_constraint_area4_v<
+              gemm::SME_F32F32, Const<16>, Any>);
+static_assert(kernel::matmul_details::sme::use_constraint_area4_v<
+              gemm::SME_F32F32, Dynamic<1, 0, 32>, Any>);
+static_assert(!kernel::matmul_details::sme::use_constraint_area4_v<
+              gemm::SME_F32F32, Any, Any>);
+
 template <typename T>
 T value(nint_t index, int modulus) {
   if constexpr (std::same_as<T, uint8_t>) {
@@ -25,8 +60,13 @@ T value(nint_t index, int modulus) {
   }
 }
 
-template <typename Atom>
-void check_raw(nint_t m, nint_t n, nint_t k) {
+template <typename Atom,
+          typename TilePolicy = kernel::matmul_policy::Automatic,
+          typename M, typename N, typename K>
+void check_raw(M m_value, N n_value, K k_value) {
+  const nint_t m = static_cast<nint_t>(m_value);
+  const nint_t n = static_cast<nint_t>(n_value);
+  const nint_t k = static_cast<nint_t>(k_value);
   using TA = typename Atom::TA;
   using TB = typename Atom::TB;
   using Acc = typename Atom::TAcc;
@@ -36,12 +76,20 @@ void check_raw(nint_t m, nint_t n, nint_t k) {
   for (nint_t i = 0; i < m * k; ++i) a[i] = value<TA>(i, 13);
   for (nint_t i = 0; i < n * k; ++i) b[i] = value<TB>(i, 11);
   auto at = make_tensor(
-      a.data(), make_layout(make_shape(Any{m}, Any{k})));
+      a.data(), make_layout(make_shape(m_value, k_value)));
   auto bt = make_tensor(
-      b.data(), make_layout(make_shape(Any{n}, Any{k})));
+      b.data(), make_layout(make_shape(n_value, k_value)));
   auto ct = make_tensor(
-      c.data(), make_layout(make_shape(Any{m}, Any{n})));
-  auto operation = ops::make_matmul<Atom>(m, n, k, at, bt, ct);
+      c.data(), make_layout(make_shape(m_value, n_value)));
+  auto operation = ops::make_matmul<Atom, TilePolicy>(
+      m_value, n_value, k_value, at, bt, ct);
+  using Operation = decltype(operation);
+  static_assert(std::same_as<
+      typename Operation::MExtentType, meta::to_value_t<M>>);
+  static_assert(std::same_as<
+      typename Operation::NExtentType, meta::to_value_t<N>>);
+  static_assert(std::same_as<
+      typename Operation::KExtentType, meta::to_value_t<K>>);
   ExecutionSession execution{};
   operation(execution);
   for (nint_t i = 0; i < m; ++i) {
@@ -65,7 +113,7 @@ void check_raw(nint_t m, nint_t n, nint_t k) {
 template <gemm::Operand Side>
 void check_mixed_packing() {
   using Atom = gemm::SME_F32F32;
-  const nint_t lanes = static_cast<nint_t>(svcntsw());
+  const nint_t lanes = vec::details::sme::streaming_lanes<float32_t>();
   const nint_t m = 2 * lanes + 3;
   const nint_t n = 3 * lanes + 5;
   const nint_t k = 19;
@@ -107,19 +155,20 @@ void check_mixed_packing() {
   }
 }
 
-void check_fast_packed_path() {
+template <meta::ValueType KExtent>
+void check_fast_packed_path(KExtent k_value) {
   using Atom = gemm::SME_BF16F32;
   using T = typename Atom::TA;
-  const nint_t lanes = static_cast<nint_t>(svcntsw());
+  const nint_t lanes = vec::details::sme::streaming_lanes<float32_t>();
   const nint_t m = 2 * lanes + 3;
   const nint_t n = 2 * lanes + 5;
-  const nint_t k = 73;
+  const nint_t k = static_cast<nint_t>(k_value);
   std::vector<T> a(m * k), b(n * k);
   std::vector<float32_t> c(m * n);
   for (nint_t i = 0; i < m * k; ++i) a[i] = value<T>(i, 13);
   for (nint_t i = 0; i < n * k; ++i) b[i] = value<T>(i, 11);
-  auto al = make_layout(make_shape(Any{m}, Any{k}));
-  auto bl = make_layout(make_shape(Any{n}, Any{k}));
+  auto al = make_layout(make_shape(Any{m}, k_value));
+  auto bl = make_layout(make_shape(Any{n}, k_value));
   auto at = make_tensor(a.data(), al);
   auto bt = make_tensor(b.data(), bl);
   auto apl = ops::matmul_packed_layout<Atom, gemm::Operand::A>(al);
@@ -139,7 +188,7 @@ void check_fast_packed_path() {
   ops::matmul_pack<Atom, gemm::Operand::A>(execution, at, apt);
   ops::matmul_pack<Atom, gemm::Operand::B>(execution, bt, bpt);
   auto ct = make_tensor(c.data(), make_layout(make_shape(Any{m}, Any{n})));
-  auto operation = ops::make_matmul<Atom>(m, n, k, apt, bpt, ct);
+  auto operation = ops::make_matmul<Atom>(m, n, k_value, apt, bpt, ct);
   operation(execution);
   for (nint_t i = 0; i < m; ++i) {
     for (nint_t j = 0; j < n; ++j) {
@@ -154,7 +203,7 @@ void check_fast_packed_path() {
 }
 
 TEST(MatmulSMETest, AllZA32MicrokernelShapesAndKTails) {
-  const nint_t l = static_cast<nint_t>(svcntsw());
+  const nint_t l = vec::details::sme::streaming_lanes<float32_t>();
   check_raw<gemm::SME_F32F32>(l, l, 19);
   check_raw<gemm::SME_F32F32>(l, 2 * l, 19);
   check_raw<gemm::SME_F32F32>(l, 3 * l, 19);
@@ -164,6 +213,21 @@ TEST(MatmulSMETest, AllZA32MicrokernelShapesAndKTails) {
   check_raw<gemm::SME_F32F32>(4 * l, l, 19);
   check_raw<gemm::SME_F32F32>(2 * l, 2 * l, 19);
   check_raw<gemm::SME_F32F32>(2 * l + 3, 3 * l + 5, 19);
+}
+
+TEST(MatmulSMETest, FixedExtentsReachFourRegionsAsMetaConstants) {
+  check_raw<
+      gemm::SME_F32F32, kernel::loop::tile2d_policy::FourRegions>(
+          cint<19>, cint<53>, cint<17>);
+}
+
+TEST(MatmulSMETest, SingleAxisConstraintsReachFourRegions) {
+  check_raw<
+      gemm::SME_F32F32, kernel::loop::tile2d_policy::FourRegions>(
+          Dynamic<1, 0, 16>{16}, Any{53}, cint<17>);
+  check_raw<
+      gemm::SME_F32F32, kernel::loop::tile2d_policy::FourRegions>(
+          Any{53}, Dynamic<1, 0, 16>{16}, cint<17>);
 }
 
 TEST(MatmulSMETest, FloatingInputTypes) {
@@ -187,7 +251,16 @@ TEST(MatmulSMETest, EitherOperandMayBePrepacked) {
 }
 
 TEST(MatmulSMETest, BothPackedLargeKUsesFastPath) {
-  check_fast_packed_path();
+  check_fast_packed_path(Dynamic<2, 64, 128>{74});
+}
+
+TEST(MatmulSMETest, PackedKBoundsEliminateFastPathRuntimeChoice) {
+  check_fast_packed_path(Dynamic<2, 2, 62>{30});
+}
+
+TEST(MatmulSMETest, UnboundedPackedKUsesFastPlan) {
+  check_fast_packed_path(Any{30});
+  check_fast_packed_path(Any{74});
 }
 
 TEST(MatmulSMETest, CPrologueAndEpilogueUseDataAccess) {

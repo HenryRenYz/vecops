@@ -32,7 +32,7 @@ struct Backend {
 #include "vecops/kernel/details/matmul_pack/amx/Backend.h"
 #endif
 
-#if defined(HAS_SME)
+#if defined(HAS_SME_FA64)
 #include "vecops/kernel/details/matmul_pack/sme/Backend.h"
 #endif
 

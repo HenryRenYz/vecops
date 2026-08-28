@@ -5,6 +5,7 @@
 #ifndef VECOPS_CORETYPES_H
 #define VECOPS_CORETYPES_H
 
+#include <cstddef>
 #include <cstdint>  // for standard int defs
 
 #include "vecops/Features.h"
@@ -13,6 +14,45 @@
 #include "vecops/util/Float16.h"
 
 namespace vecops {
+
+namespace details {
+
+/**
+ * Fixed-size storage whose trivial accessors are part of the kernel ABI.
+ *
+ * Unlike std::array, operator[]/data/begin/end are unconditionally force
+ * inlined even after a surrounding accelerator owner becomes very large.
+ */
+template <typename T, std::size_t N>
+struct InlineArray {
+  T storage[N == 0 ? 1 : N]{};
+
+  VECOPS_ALWAYS_INLINE constexpr InlineArray() = default;
+
+  template <typename... U>
+    requires (N > 0 && sizeof...(U) == N)
+  VECOPS_ALWAYS_INLINE constexpr InlineArray(U... values)
+      : storage{static_cast<T>(values)...} {}
+
+  VECOPS_ALWAYS_INLINE constexpr T& operator[](std::size_t index) {
+    return storage[index];
+  }
+
+  VECOPS_ALWAYS_INLINE constexpr const T& operator[](
+      std::size_t index) const {
+    return storage[index];
+  }
+
+  VECOPS_ALWAYS_INLINE constexpr T* data() { return storage; }
+  VECOPS_ALWAYS_INLINE constexpr const T* data() const { return storage; }
+  VECOPS_ALWAYS_INLINE constexpr T* begin() { return storage; }
+  VECOPS_ALWAYS_INLINE constexpr const T* begin() const { return storage; }
+  VECOPS_ALWAYS_INLINE constexpr T* end() { return storage + N; }
+  VECOPS_ALWAYS_INLINE constexpr const T* end() const { return storage + N; }
+  VECOPS_ALWAYS_INLINE static constexpr std::size_t size() { return N; }
+};
+
+} // namespace details
 
 /**
  * Float types

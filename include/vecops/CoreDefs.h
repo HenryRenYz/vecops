@@ -46,45 +46,60 @@
   #define VECOPS_ALWAYS_INLINE inline
   #define VECOPS_INLINE_LAMBDA
 #endif
-#if VECOPS_RELEASE
+#if defined(VECOPS_RELEASE)
 #define VECOPS_INLINE VECOPS_ALWAYS_INLINE
 #else
 #define VECOPS_INLINE inline
 #endif
 
 /**
- * Marks a small VecOps kernel callable as inheriting the caller's ARM
- * streaming mode and forces it to inline.
+ * Code-placement alignment controls.
  *
- * The two forms differ syntactically because GCC requires always_inline before
- * a function definition while ACLE requires __arm_streaming_compatible after
- * the function declarator:
+ * VECOPS_FUNCTION_ALIGN: request a minimum alignment for a function entry.
+ * VECOPS_LOOP_ALIGN: request a minimum alignment for one loop header.  This is
+ * currently available only in Clang; unsupported compilers treat it as a
+ * performance-only no-op.
  *
- *   VECOPS_KERNEL_FUNCTION(int helper(int x)) { return x + 1; }
- *   auto helper = [](int x) VECOPS_KERNEL_LAMBDA { return x + 1; };
- *
- * These macros never enter or leave streaming mode. On non-SME targets they
- * retain only the force-inline behavior.
+ * Both arguments must be power-of-two byte counts.  Function alignment may be
+ * capped by the object format or linker.  These macros align generated code,
+ * not objects or pointed-to storage; use standard alignas for data instead.
  */
 #if defined(COMPILER_GCC) || defined(COMPILER_CLANG)
-#if defined(HAS_SME)
-#define VECOPS_STREAMING_COMPATIBLE_FUNCTION \
-  __arm_streaming_compatible
-#define VECOPS_STREAMING_COMPATIBLE_LAMBDA \
-  __attribute__((always_inline)) __arm_streaming_compatible
+#define VECOPS_FUNCTION_ALIGN(bytes) __attribute__((aligned(bytes)))
 #else
-#define VECOPS_STREAMING_COMPATIBLE_FUNCTION
-#define VECOPS_STREAMING_COMPATIBLE_LAMBDA \
-  __attribute__((always_inline))
-#endif
-#else
-#define VECOPS_STREAMING_COMPATIBLE_FUNCTION
-#define VECOPS_STREAMING_COMPATIBLE_LAMBDA
+#define VECOPS_FUNCTION_ALIGN(bytes)
 #endif
 
-#define VECOPS_KERNEL_FUNCTION(...) \
-  VECOPS_ALWAYS_INLINE __VA_ARGS__ VECOPS_STREAMING_COMPATIBLE_FUNCTION
-#define VECOPS_KERNEL_LAMBDA VECOPS_STREAMING_COMPATIBLE_LAMBDA
+#if defined(COMPILER_CLANG)
+#if __has_cpp_attribute(clang::code_align)
+#define VECOPS_LOOP_ALIGN(bytes) [[clang::code_align(bytes)]]
+#else
+#define VECOPS_LOOP_ALIGN(bytes)
+#endif
+#else
+#define VECOPS_LOOP_ALIGN(bytes)
+#endif
+
+/* Clang and GCC require opposite ordering for a GNU lambda attribute and
+ * noexcept. Keep that grammar difference out of kernel call sites. */
+#if defined(COMPILER_CLANG)
+#define VECOPS_INLINE_LAMBDA_NOEXCEPT \
+  VECOPS_INLINE_LAMBDA noexcept
+#define VECOPS_INLINE_LAMBDA_NOEXCEPT_IF(...) \
+  VECOPS_INLINE_LAMBDA noexcept(__VA_ARGS__)
+#elif defined(COMPILER_GCC)
+#define VECOPS_INLINE_LAMBDA_NOEXCEPT \
+  noexcept VECOPS_INLINE_LAMBDA
+#define VECOPS_INLINE_LAMBDA_NOEXCEPT_IF(...) \
+  noexcept(__VA_ARGS__) VECOPS_INLINE_LAMBDA
+#else
+#define VECOPS_INLINE_LAMBDA_NOEXCEPT noexcept
+#define VECOPS_INLINE_LAMBDA_NOEXCEPT_IF(...) noexcept(__VA_ARGS__)
+#endif
+
+/** Force-inline syntax shared by generic kernel functions and lambdas. */
+#define VECOPS_KERNEL_FUNCTION(...) VECOPS_ALWAYS_INLINE __VA_ARGS__
+#define VECOPS_KERNEL_LAMBDA VECOPS_INLINE_LAMBDA
 
 /**
  * Pretty function name
@@ -130,6 +145,23 @@
 #else
 #define VECOPS_LIKELY(x)   (x)
 #define VECOPS_UNLIKELY(x) (x)
+#endif
+
+/**
+ * Express a caller-side contract to the optimizer.  Unlike an assertion this
+ * emits no failure path; violating the condition is undefined behavior.
+ */
+#if defined(COMPILER_CLANG)
+#define VECOPS_ASSUME(cond) __builtin_assume(cond)
+#elif defined(COMPILER_GCC)
+#define VECOPS_ASSUME(cond)                              \
+  do {                                                   \
+    if (!(cond)) __builtin_unreachable();                \
+  } while (0)
+#elif defined(COMPILER_MSVC)
+#define VECOPS_ASSUME(cond) __assume(cond)
+#else
+#define VECOPS_ASSUME(cond) ((void)0)
 #endif
 
 /**

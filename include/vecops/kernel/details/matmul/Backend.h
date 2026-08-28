@@ -14,6 +14,7 @@ namespace vecops::kernel::matmul_details {
 template <typename Implementation>
 struct Backend {
   using ResourceRequirements = execution::details::ResourceSet<>;
+  static constexpr int ProblemRank = 2;
 
   static nint_t scratch_bytes() { return 0; }
 
@@ -31,7 +32,7 @@ struct Backend {
 #include "vecops/kernel/details/matmul/amx/Backend.h"
 #endif
 
-#if defined(HAS_SME)
+#if defined(HAS_SME_FA64)
 #include "vecops/kernel/details/matmul/sme/Backend.h"
 #endif
 

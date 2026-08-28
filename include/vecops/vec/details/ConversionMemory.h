@@ -283,7 +283,7 @@ struct GenericImpl<Backend, StoreConvertOp, FromTag> {
     using ToTag = Rebind<To, FromTag>;
     const auto converted = execute(
         ConvertOp{}, ToTag{}, from, value, layout, value_policy);
-    const auto memory_mask = [&] {
+    const auto memory_mask = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (std::same_as<
                         std::remove_cvref_t<MaskValueType>, Mask<ToTag>>)
         return mask;

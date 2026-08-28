@@ -21,6 +21,21 @@ using F21 = hop::Tile2DKernelFamily<2, 1, 2, 8, 3, 4>;
 using F22 = hop::Tile2DKernelFamily<2, 2, 10, 10, 10, 4>;
 using Catalog = hop::Tile2DKernelCatalog<F11, F12, F21, F22>;
 
+struct Area4Provider {
+  template <int A, int B, hop::Tile2DMaskMode, hop::Tile2DMaskMode>
+  static consteval int power() {
+    if constexpr (A * B <= 4) {
+      constexpr int imbalance = A > B ? A - B : B - A;
+      return 100 * A * B + 4 * (A + B) - 8 * imbalance;
+    } else {
+      return -1;
+    }
+  }
+};
+
+using Area4Catalog = hop::Tile2DGeneratedCatalog<
+    Area4Provider, hop::Tile2DSearchSpace<4, 4, 4>>;
+
 struct Visit {
   int a;
   int b;
@@ -109,6 +124,152 @@ TEST(Tile2DTest, BulkAndTailExhaustivelyCoversDynamicSmallShapes) {
   check_exhaustive_dynamic_cover<hop::tile2d_policy::BulkAndTail>();
 }
 
+TEST(Tile2DTest, RuntimeExactArea4ExhaustivelyCoversDynamicSmallShapes) {
+  for (nint_t tm = 1; tm <= 3; ++tm) {
+    for (nint_t tn = 1; tn <= 3; ++tn) {
+      for (nint_t m = 0; m <= 13; ++m) {
+        for (nint_t n = 0; n <= 13; ++n) {
+          run_and_check_cover<hop::tile2d_policy::RuntimeExactArea4>(
+              Any{m}, Any{n}, Any{tm}, Any{tn}, Area4Catalog{});
+        }
+      }
+    }
+  }
+}
+
+TEST(Tile2DTest, RuntimeExactArea4UsesOnlyExistingLogicalBlocks) {
+  hop::tile2d<hop::tile2d_policy::RuntimeExactArea4>(
+      Any{5}, Any{7}, Any{2}, Any{3}, Area4Catalog{},
+      []<typename Case>(Case, auto, auto, auto, auto) {
+        static_assert(Case::exact_blocks);
+        static_assert(Case::m_mask == hop::Tile2DMaskMode::masked);
+        static_assert(Case::n_mask == hop::Tile2DMaskMode::masked);
+      });
+  const auto broad =
+      run_and_check_cover<hop::tile2d_policy::RuntimeExactArea4>(
+          Any{5}, Any{7}, Any{2}, Any{3}, Area4Catalog{});
+  ASSERT_EQ(broad.size(), 3u);
+  EXPECT_EQ(std::tie(broad[0].a, broad[0].b), (std::tuple{2, 2}));
+  EXPECT_EQ(std::tie(broad[1].a, broad[1].b), (std::tuple{2, 1}));
+  EXPECT_EQ(std::tie(broad[2].a, broad[2].b), (std::tuple{1, 3}));
+
+  const auto narrow =
+      run_and_check_cover<hop::tile2d_policy::RuntimeExactArea4>(
+          Any{11}, Any{2}, Any{2}, Any{3}, Area4Catalog{});
+  ASSERT_EQ(narrow.size(), 2u);
+  EXPECT_EQ(std::tie(narrow[0].a, narrow[0].b), (std::tuple{4, 1}));
+  EXPECT_EQ(std::tie(narrow[1].a, narrow[1].b), (std::tuple{2, 1}));
+}
+
+struct OneLogicalRowOnly {
+  template <typename Case>
+    requires (Case::a == 1)
+  void operator()(Case, nint_t, nint_t, nint_t, nint_t) const {
+    static_assert(Case::exact_blocks);
+  }
+
+  template <typename Case>
+    requires (Case::a != 1)
+  void operator()(Case, nint_t, nint_t, nint_t, nint_t) const = delete;
+};
+
+struct OneLogicalColumnOnly {
+  template <typename Case>
+    requires (Case::b == 1)
+  void operator()(Case, nint_t, nint_t, nint_t, nint_t) const {
+    static_assert(Case::exact_blocks);
+  }
+
+  template <typename Case>
+    requires (Case::b != 1)
+  void operator()(Case, nint_t, nint_t, nint_t, nint_t) const = delete;
+};
+
+struct AtMostTwoRowsOnly {
+  template <typename Case>
+    requires (Case::a <= 2 && Case::b == 1)
+  void operator()(Case, nint_t, nint_t, nint_t, nint_t) const {
+    static_assert(Case::exact_blocks);
+  }
+
+  template <typename Case>
+    requires (Case::a > 2 || Case::b != 1)
+  void operator()(Case, nint_t, nint_t, nint_t, nint_t) const = delete;
+};
+
+struct AtMostThreeColumnsOnly {
+  template <typename Case>
+    requires (Case::a == 1 && Case::b <= 3)
+  void operator()(Case, nint_t, nint_t, nint_t, nint_t) const {
+    static_assert(Case::exact_blocks);
+  }
+
+  template <typename Case>
+    requires (Case::a != 1 || Case::b > 3)
+  void operator()(Case, nint_t, nint_t, nint_t, nint_t) const = delete;
+};
+
+TEST(Tile2DTest, FourRegionsUsesFixedArea4RowPlan) {
+  const auto visits = run_and_check_cover<hop::tile2d_policy::FourRegions>(
+      cint<16>, cint<1152>, cint<16>, cint<16>, Area4Catalog{});
+  ASSERT_EQ(visits.size(), 18u);
+  EXPECT_TRUE(std::all_of(visits.begin(), visits.end(), [](const Visit& v) {
+    return v.a == 1 && v.b == 4 &&
+        v.m_mask == hop::Tile2DMaskMode::masked &&
+        v.n_mask == hop::Tile2DMaskMode::masked;
+  }));
+}
+
+TEST(Tile2DTest, FourRegionsUsesFixedArea4ColumnPlan) {
+  const auto visits = run_and_check_cover<hop::tile2d_policy::FourRegions>(
+      cint<64>, cint<16>, cint<16>, cint<16>, Area4Catalog{});
+  ASSERT_EQ(visits.size(), 1u);
+  EXPECT_EQ(std::tie(visits[0].a, visits[0].b), (std::tuple{4, 1}));
+  EXPECT_TRUE(visits[0].m_mask == hop::Tile2DMaskMode::masked);
+  EXPECT_TRUE(visits[0].n_mask == hop::Tile2DMaskMode::masked);
+}
+
+TEST(Tile2DTest, FourRegionsPrunesFamiliesFromOneConstrainedAxis) {
+  hop::tile2d<hop::tile2d_policy::FourRegions>(
+      Dynamic<1, 0, 16>{16}, Any{1152}, cint<16>, cint<16>,
+      Area4Catalog{}, OneLogicalRowOnly{});
+  hop::tile2d<hop::tile2d_policy::FourRegions>(
+      Any{1152}, Dynamic<1, 0, 16>{16}, cint<16>, cint<16>,
+      Area4Catalog{}, OneLogicalColumnOnly{});
+  hop::tile2d<hop::tile2d_policy::FourRegions>(
+      Dynamic<1, 0, 32>{31}, cint<16>, cint<16>, cint<16>,
+      Area4Catalog{}, AtMostTwoRowsOnly{});
+  hop::tile2d<hop::tile2d_policy::FourRegions>(
+      cint<16>, Dynamic<1, 0, 48>{47}, cint<16>, cint<16>,
+      Area4Catalog{}, AtMostThreeColumnsOnly{});
+}
+
+TEST(Tile2DTest, FourRegionsFixedArea4PrunesRuntimeRemainderFamilies) {
+  const auto visits = run_and_check_cover<hop::tile2d_policy::FourRegions>(
+      cint<10>, cint<14>, cint<2>, cint<3>, Area4Catalog{});
+  ASSERT_EQ(visits.size(), 8u);
+  EXPECT_EQ(std::tie(visits[0].a, visits[0].b), (std::tuple{2, 2}));
+  EXPECT_EQ(std::tie(visits[2].a, visits[2].b), (std::tuple{2, 1}));
+  EXPECT_EQ(std::tie(visits[6].a, visits[6].b), (std::tuple{1, 4}));
+  EXPECT_EQ(std::tie(visits[7].a, visits[7].b), (std::tuple{1, 1}));
+}
+
+TEST(Tile2DTest, Area4ScorePrefersSquareBulk) {
+  constexpr auto uu = hop::Tile2DMaskMode::unmasked;
+  static_assert(
+      Area4Provider::power<2, 2, uu, uu>() >
+      Area4Provider::power<1, 4, uu, uu>());
+  static_assert(
+      Area4Provider::power<2, 2, uu, uu>() >
+      Area4Provider::power<4, 1, uu, uu>());
+
+  const auto visits = run_and_check_cover<hop::tile2d_policy::FourRegions>(
+      Any{24}, Any{36}, Any{2}, Any{3}, Area4Catalog{});
+  ASSERT_FALSE(visits.empty());
+  EXPECT_EQ(std::tie(visits.front().a, visits.front().b),
+            (std::tuple{2, 2}));
+}
+
 TEST(Tile2DTest, NaturalPreservesClassicInterleavedOrder) {
   const auto visits = run_and_check_cover<hop::tile2d_policy::Natural>(
       cint<10>, cint<14>, cint<2>, cint<3>);
@@ -138,13 +299,48 @@ TEST(Tile2DTest, FourRegionsGroupsBulkLowerRightAndCorner) {
   EXPECT_EQ(std::tie(visits[3].m, visits[3].n), (std::tuple{nint_t{4}, nint_t{6}}));
   // Lower region follows the four bulk calls and uses the selected 1x2 family.
   EXPECT_EQ(std::tie(visits[4].a, visits[4].b), (std::tuple{1, 2}));
+  EXPECT_EQ(visits[4].m_mask, hop::Tile2DMaskMode::masked);
+  EXPECT_EQ(visits[4].n_mask, hop::Tile2DMaskMode::unmasked);
   EXPECT_EQ(std::tie(visits[4].m, visits[4].n), (std::tuple{nint_t{8}, nint_t{0}}));
   // Right region is column-major and uses 2x1.
   EXPECT_EQ(std::tie(visits[6].a, visits[6].b), (std::tuple{2, 1}));
+  EXPECT_EQ(visits[6].m_mask, hop::Tile2DMaskMode::unmasked);
+  EXPECT_EQ(visits[6].n_mask, hop::Tile2DMaskMode::masked);
   EXPECT_EQ(std::tie(visits[6].m, visits[6].n), (std::tuple{nint_t{0}, nint_t{12}}));
   EXPECT_EQ(std::tie(visits[7].m, visits[7].n), (std::tuple{nint_t{4}, nint_t{12}}));
   EXPECT_EQ(std::tie(visits[8].a, visits[8].b), (std::tuple{1, 1}));
+  EXPECT_EQ(visits[8].m_mask, hop::Tile2DMaskMode::masked);
+  EXPECT_EQ(visits[8].n_mask, hop::Tile2DMaskMode::masked);
   EXPECT_EQ(std::tie(visits[8].m, visits[8].n), (std::tuple{nint_t{8}, nint_t{12}}));
+}
+
+struct FourRegionsOnlyExpectedCases {
+  using UU = hop::Tile2DKernelCase<
+      F22, hop::Tile2DMaskMode::unmasked,
+      hop::Tile2DMaskMode::unmasked>;
+  using MU = hop::Tile2DKernelCase<
+      F22, hop::Tile2DMaskMode::masked,
+      hop::Tile2DMaskMode::unmasked>;
+  using UM = hop::Tile2DKernelCase<
+      F22, hop::Tile2DMaskMode::unmasked,
+      hop::Tile2DMaskMode::masked>;
+  using MM = hop::Tile2DKernelCase<
+      F22, hop::Tile2DMaskMode::masked,
+      hop::Tile2DMaskMode::masked>;
+
+  void operator()(UU, nint_t, nint_t, nint_t, nint_t) const {}
+  void operator()(MU, nint_t, nint_t, nint_t, nint_t) const {}
+  void operator()(UM, nint_t, nint_t, nint_t, nint_t) const {}
+  void operator()(MM, nint_t, nint_t, nint_t, nint_t) const {}
+
+  template <typename Case>
+  void operator()(Case, nint_t, nint_t, nint_t, nint_t) const = delete;
+};
+
+TEST(Tile2DTest, FourRegionsInstantiatesOneCasePerRegion) {
+  hop::tile2d<hop::tile2d_policy::FourRegions>(
+      Any{13}, Any{17}, Any{2}, Any{3}, Catalog{},
+      FourRegionsOnlyExpectedCases{});
 }
 
 TEST(Tile2DTest, ZeroExtentDoesNotInvokeCallback) {

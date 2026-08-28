@@ -284,13 +284,17 @@ struct Const : public Value {
    *
    * @note The default parameter (`v = N`) allows default construction.
    */
-  constexpr explicit Const(nint_t v = N) {
+  VECOPS_ALWAYS_INLINE constexpr explicit Const(nint_t v = N) {
     VECOPS_ASSERT(v == N, "%td != %td", v, N);
   }
 
-  constexpr bool is_aligned(nint_t v) { return N % v == 0; }
+  VECOPS_ALWAYS_INLINE constexpr bool is_aligned(nint_t v) {
+    return N % v == 0;
+  }
 
-  constexpr explicit operator nint_t() const { return N; }
+  VECOPS_ALWAYS_INLINE constexpr explicit operator nint_t() const {
+    return N;
+  }
 }; // struct Const
 
 /**
@@ -385,7 +389,7 @@ struct Dynamic : public Value {
    * Construct a `Dynamic` with the given runtime value.
    * Asserts that `v` satisfies all compile-time constraints (alignment, bounds).
    */
-  constexpr explicit Dynamic(nint_t v) : value(v) {
+  VECOPS_ALWAYS_INLINE constexpr explicit Dynamic(nint_t v) : value(v) {
     VECOPS_ASSERT(conforms(v),
                   "value %td fails Dynamic<A=%td, Lo=%td, Hi=%td> constraints", v, Alignment, Lo, Hi);
   }
@@ -393,9 +397,20 @@ struct Dynamic : public Value {
   /**
    * Check whether **this specific instance's** runtime value is divisible by `v`.
    */
-  constexpr bool is_aligned(nint_t v) const { return value % v == 0; }
+  VECOPS_ALWAYS_INLINE constexpr bool is_aligned(nint_t v) const {
+    return value % v == 0;
+  }
 
-  constexpr explicit operator nint_t() const { return value; }
+  VECOPS_ALWAYS_INLINE constexpr explicit operator nint_t() const {
+    // Spell the constraint out here: some Clang versions conservatively
+    // treat even this constexpr helper call as potentially side-effecting and
+    // consequently discard __builtin_assume(conforms(value)).
+    VECOPS_ASSUME(
+        (value & (Alignment - 1)) == 0 &&
+        (!has_lower || value >= Lo) &&
+        (!has_upper || value <= Hi));
+    return value;
+  }
 
   const nint_t value;
 }; // struct Dynamic
@@ -1014,15 +1029,20 @@ struct PackedStorage {
 private:
   static constexpr nint_t const_values[] = {PickConstValue<Is>::value...};
 
+  struct StorageData {
+    ::vecops::details::InlineArray<int, sizeof...(Is)> offsets{};
+    int count = 0;
+  };
+
   /// Fold over the type pack directly to compute offsets at compile time.
   /// Uses Is::is_runtime (class-level static) rather than is_runtime[i]
   /// which avoids clang's "array without known bound" constexpr limitation.
   template <size_t... Js>
   static constexpr auto _compute_offsets(std::index_sequence<Js...>) {
-    std::array<int, sizeof...(Is)> arr{};
+    ::vecops::details::InlineArray<int, sizeof...(Is)> arr{};
     int off = 0;
     ((arr[Js] = off, off += int(Is::is_runtime)), ...);
-    return std::make_pair(arr, off);
+    return StorageData{arr, off};
   }
   static constexpr auto stor_data = _compute_offsets(std::index_sequence_for<Is...>{});
 public:
@@ -1030,9 +1050,9 @@ public:
    * Offset mapping: `offsets[i]` gives the position in the compressed
    * `values` array for logical dimension i (meaningless for Const entries).
    */
-  static constexpr std::array<int, sizeof...(Is)> offsets = stor_data.first;
+  static constexpr auto offsets = stor_data.offsets;
   /// Number of actually stored runtime values.
-  static constexpr int num_stor = stor_data.second;
+  static constexpr int num_stor = stor_data.count;
 
   constexpr PackedStorage() = default;
 
@@ -1066,7 +1086,7 @@ public:
    * @return The value (constexpr or runtime depending on type).
    */
   template <int I>
-  [[nodiscard]] constexpr nint_t get() const {
+  [[nodiscard]] VECOPS_ALWAYS_INLINE constexpr nint_t get() const {
     using DimType = std::tuple_element_t<I, std::tuple<Is...>>;
     if constexpr (DimType::is_runtime) {
       return values[offsets[I]];
@@ -1082,7 +1102,7 @@ public:
    * @param i  Zero-based dimension index (runtime value).
    * @return The integer value.
    */
-  [[nodiscard]] nint_t operator[](int i) const {
+  [[nodiscard]] VECOPS_ALWAYS_INLINE nint_t operator[](int i) const {
     VECOPS_ASSERT(0 <= i && i < n_dim, "%d !in 0..%d", i, n_dim);
     if (is_runtime[i]) {
       return values[offsets[i]];
@@ -1103,7 +1123,7 @@ public:
   /**
    * Get the internal compressed array (runtime values only, no Const entries).
    */
-  [[nodiscard]] constexpr const std::array<nint_t, num_stor>& to_packed_array() const {
+  [[nodiscard]] constexpr const auto& to_packed_array() const {
     return this->values;
   }
 
@@ -1120,7 +1140,7 @@ public:
   }
 
 private:
-  std::array<nint_t, num_stor> values;
+  ::vecops::details::InlineArray<nint_t, num_stor> values;
 }; // struct PackedStorage
 
 } // namespace details

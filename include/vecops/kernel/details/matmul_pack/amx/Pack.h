@@ -22,7 +22,8 @@ VECOPS_NOINLINE void pack_a_direct(
     nint_t spatial, nint_t k, nint_t panel, nint_t k_tile) {
   using TileTag = vec::FixedTag<T, 64 / sizeof(T)>;
   static_assert(64 % sizeof(T) == 0);
-  VECOPS_ASSERT(64 / sizeof(T) == k_tile);
+  VECOPS_ASSERT(64 / sizeof(T) == k_tile,
+                "AMX A-pack k tile must occupy 64 bytes");
   const nint_t panels = ceil_div(spatial, panel);
   const nint_t k_tiles = ceil_div(k, k_tile);
   for (nint_t sp = 0; sp < panels; ++sp) {
@@ -49,7 +50,7 @@ VECOPS_NOINLINE void pack_b_direct(
     nint_t spatial, nint_t k, nint_t panel, nint_t k_tile) {
   static_assert(KPack == 1 || KPack == 2 || KPack == 4);
   static_assert(sizeof(T) * KPack == sizeof(uint32_t));
-  VECOPS_ASSERT(panel == 16);
+  VECOPS_ASSERT(panel == 16, "AMX B-pack panel must contain 16 rows");
   using WordTag = vec::FixedTag<uint32_t, 16>;
   using IndexTag = vec::FixedTag<int32_t, 16>;
   std::array<int32_t, 16> row_offsets{};

@@ -5,8 +5,6 @@
 #ifndef VECOPS_KERNEL_DETAILS_MATMUL_PACK_SME_PACK_H
 #define VECOPS_KERNEL_DETAILS_MATMUL_PACK_SME_PACK_H
 
-#include <arm_sme.h>
-
 #include <algorithm>
 #include <cstdint>
 #include <type_traits>
@@ -14,6 +12,8 @@
 #include "vecops/CoreDefs.h"
 #include "vecops/CoreTypes.h"
 #include "vecops/gemm/Packing.h"
+#include "vecops/vec/Vec.h"
+#include "vecops/vec/details/sme/ZA.h"
 
 namespace vecops::kernel::matmul_pack_details::sme {
 
@@ -23,109 +23,109 @@ using Bits = std::conditional_t<
     std::conditional_t<sizeof(T) == 2, uint16_t, uint32_t>>;
 
 template <typename U>
-VECOPS_ALWAYS_INLINE auto load_bits(svbool_t pg, const void* pointer)
-    __arm_streaming {
-  if constexpr (sizeof(U) == 1)
-    return svld1_u8(pg, static_cast<const uint8_t*>(pointer));
-  else if constexpr (sizeof(U) == 2)
-    return svld1_u16(pg, static_cast<const uint16_t*>(pointer));
-  else
-    return svld1_u32(pg, static_cast<const uint32_t*>(pointer));
+VECOPS_ALWAYS_INLINE auto load_bits(
+    vec::Mask<vec::ScalableTag<U, 0>> pg, const void* pointer) noexcept {
+  using Tag = vec::ScalableTag<U, 0>;
+  return vec::load(
+      Tag{}, static_cast<const U*>(pointer),
+      vec::opt::masked(pg), vec::opt::zero);
 }
 
 template <typename U>
-VECOPS_ALWAYS_INLINE auto zero_bits() __arm_streaming {
-  if constexpr (sizeof(U) == 1) return svdup_u8(0);
-  else if constexpr (sizeof(U) == 2) return svdup_u16(0);
-  else return svdup_u32(0);
+VECOPS_ALWAYS_INLINE auto first(nint_t count) noexcept {
+  using Tag = vec::ScalableTag<U, 0>;
+  return vec::mwhilelt(Tag{}, nint_t{0}, count);
 }
 
 template <typename U>
-VECOPS_ALWAYS_INLINE svbool_t first(nint_t count) __arm_streaming {
-  if constexpr (sizeof(U) == 1) return svwhilelt_b8(nint_t{0}, count);
-  else if constexpr (sizeof(U) == 2)
-    return svwhilelt_b16(nint_t{0}, count);
-  else return svwhilelt_b32(nint_t{0}, count);
-}
-
-template <typename U>
-VECOPS_ALWAYS_INLINE svbool_t all() __arm_streaming {
-  if constexpr (sizeof(U) == 1) return svptrue_b8();
-  else if constexpr (sizeof(U) == 2) return svptrue_b16();
-  else return svptrue_b32();
+VECOPS_ALWAYS_INLINE auto all() noexcept {
+  return vec::mtrue(vec::ScalableTag<U, 0>{});
 }
 
 template <int Tile, typename U, typename Raw>
 VECOPS_ALWAYS_INLINE void write_hor(
-    uint32_t slice, svbool_t pg, Raw value)
-    __arm_streaming __arm_inout("za") {
-  if constexpr (sizeof(U) == 1)
-    svwrite_hor_za8_u8_m(Tile, slice, pg, value);
-  else if constexpr (sizeof(U) == 2)
-    svwrite_hor_za16_u16_m(Tile, slice, pg, value);
-  else
-    svwrite_hor_za32_u32_m(Tile, slice, pg, value);
+    uint32_t slice, vec::Mask<vec::ScalableTag<U, 0>> pg,
+    Raw value) noexcept {
+  vec::details::sme::write_hor<Tile>(slice, pg, value);
 }
 
 template <int Tile, typename U>
-VECOPS_ALWAYS_INLINE auto read_ver(uint32_t slice, svbool_t pg)
-    __arm_streaming __arm_inout("za") {
-  if constexpr (sizeof(U) == 1)
-    return svread_ver_za8_u8_m(zero_bits<U>(), pg, Tile, slice);
-  else if constexpr (sizeof(U) == 2)
-    return svread_ver_za16_u16_m(zero_bits<U>(), pg, Tile, slice);
-  else
-    return svread_ver_za32_u32_m(zero_bits<U>(), pg, Tile, slice);
+VECOPS_ALWAYS_INLINE auto read_ver(
+    uint32_t slice, vec::Mask<vec::ScalableTag<U, 0>> pg) noexcept {
+  using Tag = vec::ScalableTag<U, 0>;
+  return vec::details::sme::read_ver<Tile>(Tag{}, slice, pg);
 }
 
 template <typename U, typename V0, typename V1>
 VECOPS_ALWAYS_INLINE void store_pair(void* output, V0 v0, V1 v1)
-    __arm_streaming {
-  svst2_u16(
-      svptrue_b16(), static_cast<uint16_t*>(output),
-      svcreate2_u16(v0, v1));
+    noexcept {
+  using InTag = vec::ScalableTag<U, 0>;
+  using OutTag = vec::ScalableTag<U, 1>;
+  vec::store(OutTag{}, static_cast<U*>(output),
+             vec::interleave(OutTag{},
+                             static_cast<vec::Vec<InTag>>(v0),
+                             static_cast<vec::Vec<InTag>>(v1)));
 }
 
 template <typename U, typename V0, typename V1, typename V2, typename V3>
 VECOPS_ALWAYS_INLINE void store_quad(
-    void* output, svbool_t pg, V0 v0, V1 v1, V2 v2, V3 v3)
-    __arm_streaming {
-  svst4_u8(
-      pg, static_cast<uint8_t*>(output),
-      svcreate4_u8(v0, v1, v2, v3));
+    void* output, vec::Mask<vec::ScalableTag<U, 0>> pg,
+    V0 v0, V1 v1, V2 v2, V3 v3) noexcept {
+  using InTag = vec::ScalableTag<U, 0>;
+  using PairTag = vec::ScalableTag<U, 1>;
+  using PairViewTag = vec::ViewAs<uint16_t, PairTag>;
+  using QuadViewTag = vec::Twice<PairViewTag>;
+  using OutTag = vec::ScalableTag<U, 2>;
+  const auto pair01 = vec::interleave(
+      PairTag{}, static_cast<vec::Vec<InTag>>(v0),
+      static_cast<vec::Vec<InTag>>(v1));
+  const auto pair23 = vec::interleave(
+      PairTag{}, static_cast<vec::Vec<InTag>>(v2),
+      static_cast<vec::Vec<InTag>>(v3));
+  const auto pair01_view = vec::bitcast(PairViewTag{}, PairTag{}, pair01);
+  const auto pair23_view = vec::bitcast(PairViewTag{}, PairTag{}, pair23);
+  const auto quad_view = vec::interleave(
+      QuadViewTag{}, pair01_view, pair23_view);
+  const auto packed = vec::bitcast(OutTag{}, QuadViewTag{}, quad_view);
+  (void)pg;
+  // A byte K-pack contains exactly two native vector words.  Storing those
+  // words directly avoids constructing a four-word predicate tuple.  Clang
+  // otherwise lowers that tuple construction/access through out-of-line
+  // SVE2.1-target helpers on CPUs where base SVE is selected, which would put
+  // calls inside the manual Streaming+ZA region.
+  auto* out = static_cast<U*>(output);
+  constexpr nint_t StoredWords = 2;
+  static_assert(vec::num_words(OutTag{}) >= StoredWords);
+  const nint_t word_lanes = vec::size(InTag{});
+  vec::store(InTag{}, out, vec::get_word<0>(OutTag{}, packed));
+  vec::store(
+      InTag{}, out + word_lanes, vec::get_word<1>(OutTag{}, packed));
 }
 
 template <gemm::Atom Atom, gemm::Operand Side>
-__arm_new("za") VECOPS_NOINLINE void pack(
+VECOPS_ALWAYS_INLINE void pack(
     const typename gemm::packing_t<Atom, Side>::Element* input,
     nint_t spatial, nint_t k, nint_t row_stride,
-    typename gemm::packing_t<Atom, Side>::Element* output)
-    __arm_streaming {
+    typename gemm::packing_t<Atom, Side>::Element* output) noexcept {
   using Packing = gemm::packing_t<Atom, Side>;
   using T = typename Packing::Element;
   using U = Bits<T>;
   constexpr nint_t KPack = Packing::KPack;
-  const nint_t panel = 2 * static_cast<nint_t>(svcntw());
-  const nint_t lanes = []() VECOPS_INLINE_LAMBDA __arm_streaming {
-    if constexpr (sizeof(U) == 1) return static_cast<nint_t>(svcntb());
-    else if constexpr (sizeof(U) == 2)
-      return static_cast<nint_t>(svcnth());
-    else return static_cast<nint_t>(svcntw());
-  }();
+  const nint_t panel = 2 * vec::details::sme::streaming_lanes<uint32_t>();
+  const nint_t lanes = vec::size(vec::ScalableTag<U, 0>{});
   const nint_t k_chunk = (lanes / KPack) * KPack;
   const nint_t panels = ceil_div(spatial, panel);
   auto* out = reinterpret_cast<U*>(output);
 
   for (nint_t sp = 0; sp < panels; ++sp) {
     const nint_t panel_base = sp * panel;
-    const nint_t first_active = std::clamp(
-        spatial - panel_base, nint_t{0}, std::min(panel, lanes));
+    const nint_t first_active = vec::details::sme::clamp_value(
+        spatial - panel_base, nint_t{0}, vec::details::sme::min_value(panel, lanes));
     const auto first_pg = first<U>(first_active);
     const auto write_pg = all<U>();
 
     auto pack_chunk = [&]<bool FullK, bool Prefetch>(
-        nint_t kb, nint_t active_k)
-        VECOPS_INLINE_LAMBDA __arm_streaming __arm_inout("za") {
+        nint_t kb, nint_t active_k) VECOPS_INLINE_LAMBDA_NOEXCEPT {
       const nint_t groups = FullK
           ? k_chunk / KPack
           : ceil_div(active_k, KPack);
@@ -144,7 +144,7 @@ __arm_new("za") VECOPS_NOINLINE void pack(
       }
 
       if constexpr (sizeof(U) == 4) {
-        const nint_t active1 = std::clamp(
+        const nint_t active1 = vec::details::sme::clamp_value(
             spatial - (panel_base + lanes), nint_t{0}, lanes);
         for (nint_t r = 0; r < active1; ++r) {
           const nint_t row = panel_base + lanes + r;
@@ -161,9 +161,9 @@ __arm_new("za") VECOPS_NOINLINE void pack(
         for (nint_t g = 0; g < groups; ++g) {
           const auto v0 = read_ver<0, U>(static_cast<uint32_t>(g), first_pg);
           const auto v1 = read_ver<1, U>(static_cast<uint32_t>(g), pg1);
-          svst1_u32(svptrue_b32(), reinterpret_cast<uint32_t*>(out), v0);
+          vec::store(vec::ScalableTag<U, 0>{}, out, v0);
           out += lanes;
-          svst1_u32(svptrue_b32(), reinterpret_cast<uint32_t*>(out), v1);
+          vec::store(vec::ScalableTag<U, 0>{}, out, v1);
           out += lanes;
         }
       } else if constexpr (sizeof(U) == 2) {

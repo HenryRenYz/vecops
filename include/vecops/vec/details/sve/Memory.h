@@ -51,7 +51,8 @@ template <VectorTag IndexTag>
 struct NativeImpl<SVEBackend, StridedIndicesOp, IndexTag> {
   static VECOPS_ALWAYS_INLINE Vec<IndexTag> call(
       StridedIndicesOp op, IndexTag tag, nint_t stride) {
-    return construct_words<SVEBackend>(tag, [&]<nint_t Index>(IndexTag) {
+    return construct_words<SVEBackend>(
+        tag, [&]<nint_t Index>(IndexTag) VECOPS_INLINE_LAMBDA {
       return execute_word<Index, SVEBackend>(op, tag, stride);
     });
   }
@@ -296,7 +297,7 @@ VECOPS_ALWAYS_INLINE svuint32_t sve_expand_indexed_store_u32_bits(
     else
       return raw;
   } else if constexpr (sizeof(T) == 2) {
-    const auto bits = [&] {
+    const auto bits = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (std::same_as<T, float16_t>)
         return svreinterpret_u16_f16(raw);
       else if constexpr (std::same_as<T, bfloat16_t>)
@@ -308,7 +309,7 @@ VECOPS_ALWAYS_INLINE svuint32_t sve_expand_indexed_store_u32_bits(
     }();
     return svunpklo_u32(bits);
   } else {
-    const auto bits = [&] {
+    const auto bits = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (std::same_as<T, int8_t>)
         return svreinterpret_u8_s8(raw);
       else
@@ -612,7 +613,7 @@ struct NativeWordImpl<SVEBackend, LoadOp> {
       LoadOp, Tag tag, const ElementOf<Tag>* pointer,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive,
       Alignment, Temporality temporality) {
-    const auto active = [&] {
+    const auto active = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (sve_word_is_always_full<Tag>()) {
         return mask;
       } else {
@@ -653,7 +654,7 @@ struct NativeWordImpl<SVEBackend, StoreOp> {
       StoreOp, Tag tag, ElementOf<Tag>* pointer,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> value,
       Alignment, Temporality temporality) {
-    const auto active = [&] {
+    const auto active = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (sve_word_is_always_full<Tag>()) {
         return mask;
       } else {

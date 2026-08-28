@@ -11,12 +11,27 @@
 #include "vecops/Assertion.h"
 #include "vecops/execution/ExecutionSession.h"
 #include "vecops/gemm/Packing.h"
+#include "vecops/kernel/Loop.h"
 #include "vecops/kernel/Matmul.h"
 #include "vecops/tensor/DataAccess.h"
 
 namespace vecops::ops {
 
 namespace matmul_details {
+
+template <typename T>
+concept Extent = meta::ValueType<std::remove_cvref_t<T>> ||
+    is_int_v<std::remove_cvref_t<T>>;
+
+template <Extent T>
+VECOPS_INLINE constexpr auto extent_value(T&& value) {
+  using V = meta::to_value_t<std::remove_cvref_t<T>>;
+  if constexpr (meta::ValueType<std::remove_cvref_t<T>>) {
+    return std::forward<T>(value);
+  } else {
+    return V{static_cast<nint_t>(value)};
+  }
+}
 
 template <typename KernelKind>
 struct SelectImplementation;
@@ -28,7 +43,7 @@ struct SelectImplementation<gemm::AMXKernelKind> {
 };
 #endif
 
-#if defined(HAS_SME)
+#if defined(HAS_SME_FA64)
 template <>
 struct SelectImplementation<gemm::SMEKernelKind> {
   using type = kernel::matmul_implementation::SME;
@@ -39,11 +54,16 @@ template <gemm::Atom Atom>
 using SelectedImplementation =
     typename SelectImplementation<typename Atom::KernelKind>::type;
 
-template <gemm::Atom Atom, gemm::Operand Side, typename Spec>
+template <gemm::Atom Atom, gemm::Operand Side,
+          int LogicalRank, typename Spec, typename CLayout>
 VECOPS_INLINE void validate_input(
-    const Spec& spec, nint_t spatial, nint_t k) {
+    const Spec& spec, const CLayout& c_layout,
+    nint_t spatial, nint_t k) {
   using Layout = typename Spec::InputLayout;
   if constexpr (gemm::is_packed_layout<Atom, Side, Layout>()) {
+    static_assert(
+        LogicalRank == 2,
+        "current packed matmul formats do not carry batch dimensions");
     using Packing = gemm::packing_t<Atom, Side>;
     static_assert(
         std::same_as<typename Spec::MemoryElement,
@@ -51,8 +71,11 @@ VECOPS_INLINE void validate_input(
         std::same_as<typename Spec::TransformType, tensor::NoTransform>,
         "packed matmul operands must have their native dtype and no transform");
     const nint_t panel = [&] {
-      if constexpr (requires { Packing::Panel; }) return Packing::Panel;
-      else return Packing::panel();
+      if constexpr (requires { Packing::Panel; }) {
+        return static_cast<nint_t>(Packing::Panel);
+      } else {
+        return static_cast<nint_t>(Packing::panel());
+      }
     }();
     VECOPS_ASSERT(
         spec.input_layout().shape()[0] * panel >= spatial,
@@ -66,11 +89,17 @@ VECOPS_INLINE void validate_input(
     }();
     VECOPS_ASSERT(padded_k >= k, "packed matmul K extent is too small");
   } else {
-    static_assert(Spec::InputTensor::Ndim == 2,
-                  "unpacked matmul operands must be rank two");
+    static_assert(Spec::InputTensor::Ndim == LogicalRank,
+                  "unpacked matmul operands must have the same rank as C");
+    static_assert(LogicalRank >= 2);
+    for (int d = 0; d < LogicalRank - 2; ++d) {
+      VECOPS_ASSERT(
+          spec.input_layout().shape()[d] == c_layout.shape()[d],
+          "matmul batch extent mismatch");
+    }
     VECOPS_ASSERT(
-        spec.input_layout().shape()[0] == spatial &&
-        spec.input_layout().shape()[1] == k,
+        spec.input_layout().shape()[LogicalRank - 2] == spatial &&
+        spec.input_layout().shape()[LogicalRank - 1] == k,
         "unpacked matmul operand shape mismatch");
   }
 }
@@ -81,21 +110,32 @@ VECOPS_INLINE void validate_input(
  * Prepared accelerator matrix multiplication.
  *
  * The logical operation is C[M,N] = C-prologue + A[M,K] * B[N,K]^T,
- * followed by COutput's epilogue. A and B may independently be raw or in the
- * Atom's packed format. Raw operands are converted, transformed, padded, and
- * packed one hardware K step at a time.
+ * followed by COutput's epilogue. Equal raw leading dimensions are traversed
+ * independently before entering the backend problem rank. A and B may
+ * independently be raw or in the Atom's packed format for an unbatched
+ * problem. Raw operands are converted, transformed, padded, and packed one
+ * hardware K step at a time.
  */
 template <gemm::Atom Atom,
+          typename TilePolicy,
+          meta::ValueType MExtent,
+          meta::ValueType NExtent,
+          meta::ValueType KExtent,
           typename ASpec, typename BSpec,
           typename CInputSpec, typename COutputSpec>
 class Matmul {
 public:
+  using MExtentType = MExtent;
+  using NExtentType = NExtent;
+  using KExtentType = KExtent;
   using Implementation = matmul_details::SelectedImplementation<Atom>;
   using ResourceRequirements =
       kernel::matmul_implementation::resource_requirements_t<Implementation>;
+  static constexpr int ProblemRank =
+      kernel::matmul_implementation::problem_rank_v<Implementation>;
 
   VECOPS_INLINE Matmul(
-      nint_t m, nint_t n, nint_t k,
+      MExtent m, NExtent n, KExtent k,
       ASpec a, BSpec b, CInputSpec c_input, COutputSpec c_output)
       : m_(m), n_(n), k_(k),
         a_(std::move(a)), b_(std::move(b)),
@@ -110,7 +150,9 @@ public:
   template <execution::ExecutionScope Scope>
   VECOPS_INLINE void operator()(Scope& scope) const {
     scope.with_resources(
-        *this, [&](auto& active) VECOPS_INLINE_LAMBDA { execute(active); });
+        *this, [&](auto& active) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          execute(active);
+        });
   }
 
   VECOPS_INLINE void operator()(kernel::WorkspaceView& workspace) const {
@@ -120,45 +162,80 @@ public:
 
 private:
   VECOPS_INLINE void validate() const {
-    VECOPS_ASSERT(m_ >= 0 && n_ >= 0 && k_ >= 0,
+    constexpr int Rank = COutputSpec::OutputTensor::Ndim;
+    static_assert(ProblemRank >= 2);
+    static_assert(Rank >= ProblemRank,
+                  "matmul rank is smaller than the backend problem rank");
+    static_assert(CInputSpec::InputTensor::Ndim == Rank,
+                  "matmul C input/output ranks must match");
+    const nint_t m = static_cast<nint_t>(m_);
+    const nint_t n = static_cast<nint_t>(n_);
+    const nint_t k = static_cast<nint_t>(k_);
+    VECOPS_ASSERT(m >= 0 && n >= 0 && k >= 0,
                   "matmul extents must be non-negative");
-    matmul_details::validate_input<Atom, gemm::Operand::A>(a_, m_, k_);
-    matmul_details::validate_input<Atom, gemm::Operand::B>(b_, n_, k_);
-    static_assert(CInputSpec::InputTensor::Ndim == 2);
-    static_assert(COutputSpec::OutputTensor::Ndim == 2);
+    matmul_details::validate_input<
+        Atom, gemm::Operand::A, Rank>(
+            a_, c_output_.output_layout(), m, k);
+    matmul_details::validate_input<
+        Atom, gemm::Operand::B, Rank>(
+            b_, c_output_.output_layout(), n, k);
+    for (int d = 0; d < Rank; ++d) {
+      VECOPS_ASSERT(
+          c_input_.input_layout().shape()[d] ==
+              c_output_.output_layout().shape()[d],
+          "matmul C input/output shape mismatch");
+    }
     VECOPS_ASSERT(
-        c_input_.input_layout().shape()[0] == m_ &&
-        c_input_.input_layout().shape()[1] == n_ &&
-        c_output_.output_layout().shape()[0] == m_ &&
-        c_output_.output_layout().shape()[1] == n_,
+        c_output_.output_layout().shape()[Rank - 2] == m &&
+        c_output_.output_layout().shape()[Rank - 1] == n,
         "matmul C shape mismatch");
   }
 
-  template <execution::ExecutionScope Scope>
-  VECOPS_ALWAYS_INLINE void execute(Scope& scope) const {
-    validate();
+  template <execution::ExecutionScope Scope,
+            typename ALeaf, typename BLeaf,
+            typename CInputLeaf, typename COutputLeaf>
+  VECOPS_KERNEL_FUNCTION(void execute_problem(
+      Scope& scope, const ALeaf& a, const BLeaf& b,
+      const CInputLeaf& c_input, const COutputLeaf& c_output,
+      void* scratch) const) {
     using APolicy = tensor::InputAccessPolicy<
-        ASpec::InputTensor::Ndim - 1, 1, tensor::AccessPlan::direct>;
+        ALeaf::InputTensor::Ndim - 1, 1, tensor::AccessPlan::direct>;
     using BPolicy = tensor::InputAccessPolicy<
-        BSpec::InputTensor::Ndim - 1, 1, tensor::AccessPlan::direct>;
+        BLeaf::InputTensor::Ndim - 1, 1, tensor::AccessPlan::direct>;
     using CInputPolicy = tensor::InputAccessPolicy<
-        1, 1, tensor::AccessPlan::direct>;
+        CInputLeaf::InputTensor::Ndim - 1, 1, tensor::AccessPlan::direct>;
     using COutputPolicy = tensor::OutputAccessPolicy<
-        1, tensor::AccessPlan::direct>;
-    auto run = [&](void* scratch) VECOPS_INLINE_LAMBDA {
-      kernel::with_operands(
-          scope,
-          tensor::operand(a_, APolicy{}),
-          tensor::operand(b_, BPolicy{}),
-          tensor::operand(c_input_, CInputPolicy{}),
-          tensor::operand(c_output_, COutputPolicy{}),
-          [&](auto& a, auto& b, auto& c_input, auto& c_output)
-              VECOPS_INLINE_LAMBDA {
-            kernel::matmul_bound<Atom>(
-                scope, m_, n_, k_, a, b, c_input, c_output,
-                scratch, Implementation{});
-            c_output.commit();
-          });
+        COutputLeaf::OutputTensor::Ndim - 1, tensor::AccessPlan::direct>;
+    kernel::with_operands(
+        scope,
+        tensor::operand(a, APolicy{}),
+        tensor::operand(b, BPolicy{}),
+        tensor::operand(c_input, CInputPolicy{}),
+        tensor::operand(c_output, COutputPolicy{}),
+        [&](auto& a_access, auto& b_access,
+            auto& c_input_access, auto& c_output_access)
+            VECOPS_KERNEL_LAMBDA {
+          kernel::matmul_bound<Atom, TilePolicy>(
+              scope, m_, n_, k_, a_access, b_access,
+              c_input_access, c_output_access, scratch, Implementation{});
+          c_output_access.commit();
+        });
+  }
+
+  template <execution::ExecutionScope Scope>
+  VECOPS_KERNEL_FUNCTION(void execute(Scope& scope) const) {
+    validate();
+    constexpr int Rank = COutputSpec::OutputTensor::Ndim;
+    constexpr int PrefixRank = Rank - ProblemRank;
+    auto run = [&](void* scratch) VECOPS_KERNEL_LAMBDA {
+      kernel::loop::for_each_dims<PrefixRank>(
+          [this, &scope, scratch](const auto& a, const auto& b,
+                                  const auto& c_input,
+                                  const auto& c_output)
+              VECOPS_KERNEL_LAMBDA {
+            execute_problem(scope, a, b, c_input, c_output, scratch);
+          },
+          a_, b_, c_input_, c_output_);
     };
     if constexpr (std::same_as<
                       Implementation, kernel::matmul_implementation::AMX>) {
@@ -171,9 +248,9 @@ private:
     }
   }
 
-  nint_t m_;
-  nint_t n_;
-  nint_t k_;
+  MExtent m_;
+  NExtent n_;
+  KExtent k_;
   ASpec a_;
   BSpec b_;
   CInputSpec c_input_;
@@ -182,10 +259,17 @@ private:
 
 /** Build C = A*B^T with a hardware-zero accumulator prologue. */
 template <gemm::Atom Atom,
+          typename TilePolicy = kernel::matmul_policy::Automatic,
+          matmul_details::Extent M,
+          matmul_details::Extent N,
+          matmul_details::Extent K,
           tensor::InputOperand A, tensor::InputOperand B,
           tensor::OutputOperand C>
 VECOPS_INLINE auto make_matmul(
-    nint_t m, nint_t n, nint_t k, A&& a, B&& b, C&& c) {
+    M&& m, N&& n, K&& k, A&& a, B&& b, C&& c) {
+  auto m_value = matmul_details::extent_value(std::forward<M>(m));
+  auto n_value = matmul_details::extent_value(std::forward<N>(n));
+  auto k_value = matmul_details::extent_value(std::forward<K>(k));
   auto a_spec = tensor::as_input_spec<typename Atom::TA>(std::forward<A>(a));
   auto b_spec = tensor::as_input_spec<typename Atom::TB>(std::forward<B>(b));
   auto c_output = tensor::as_output_spec<typename Atom::TAcc>(
@@ -195,19 +279,29 @@ VECOPS_INLINE auto make_matmul(
       c_output.tensor(),
       tensor::zeros_transform<typename Atom::TAcc, Memory>);
   return Matmul<
-      Atom, decltype(a_spec), decltype(b_spec),
+      Atom, TilePolicy,
+      decltype(m_value), decltype(n_value), decltype(k_value),
+      decltype(a_spec), decltype(b_spec),
       decltype(c_input), decltype(c_output)>{
-          m, n, k, std::move(a_spec), std::move(b_spec),
+          m_value, n_value, k_value,
+          std::move(a_spec), std::move(b_spec),
           std::move(c_input), std::move(c_output)};
 }
 
 /** Build C = C-prologue + A*B^T with an explicit C input and output. */
 template <gemm::Atom Atom,
+          typename TilePolicy = kernel::matmul_policy::Automatic,
+          matmul_details::Extent M,
+          matmul_details::Extent N,
+          matmul_details::Extent K,
           tensor::InputOperand A, tensor::InputOperand B,
           tensor::InputOperand CInput, tensor::OutputOperand COutput>
 VECOPS_INLINE auto make_matmul_accumulate(
-    nint_t m, nint_t n, nint_t k,
+    M&& m, N&& n, K&& k,
     A&& a, B&& b, CInput&& c_input, COutput&& c_output) {
+  auto m_value = matmul_details::extent_value(std::forward<M>(m));
+  auto n_value = matmul_details::extent_value(std::forward<N>(n));
+  auto k_value = matmul_details::extent_value(std::forward<K>(k));
   auto a_spec = tensor::as_input_spec<typename Atom::TA>(std::forward<A>(a));
   auto b_spec = tensor::as_input_spec<typename Atom::TB>(std::forward<B>(b));
   auto c_input_spec = tensor::as_input_spec<typename Atom::TAcc>(
@@ -215,35 +309,49 @@ VECOPS_INLINE auto make_matmul_accumulate(
   auto c_output_spec = tensor::as_output_spec<typename Atom::TAcc>(
       std::forward<COutput>(c_output));
   return Matmul<
-      Atom, decltype(a_spec), decltype(b_spec),
+      Atom, TilePolicy,
+      decltype(m_value), decltype(n_value), decltype(k_value),
+      decltype(a_spec), decltype(b_spec),
       decltype(c_input_spec), decltype(c_output_spec)>{
-          m, n, k, std::move(a_spec), std::move(b_spec),
+          m_value, n_value, k_value,
+          std::move(a_spec), std::move(b_spec),
           std::move(c_input_spec), std::move(c_output_spec)};
 }
 
-template <gemm::Atom Atom, execution::ExecutionScope Scope,
+template <gemm::Atom Atom,
+          typename TilePolicy = kernel::matmul_policy::Automatic,
+          execution::ExecutionScope Scope,
+          matmul_details::Extent M,
+          matmul_details::Extent N,
+          matmul_details::Extent K,
           tensor::InputOperand A, tensor::InputOperand B,
           tensor::OutputOperand C>
 VECOPS_INLINE void matmul(
-    Scope& scope, nint_t m, nint_t n, nint_t k,
+    Scope& scope, M&& m, N&& n, K&& k,
     A&& a, B&& b, C&& c) {
-  auto operation = make_matmul<Atom>(
-      m, n, k, std::forward<A>(a), std::forward<B>(b),
+  auto operation = make_matmul<Atom, TilePolicy>(
+      std::forward<M>(m), std::forward<N>(n), std::forward<K>(k),
+      std::forward<A>(a), std::forward<B>(b),
       std::forward<C>(c));
   operation(scope);
 }
 
 template <gemm::Atom Atom,
+          typename TilePolicy = kernel::matmul_policy::Automatic,
+          matmul_details::Extent M,
+          matmul_details::Extent N,
+          matmul_details::Extent K,
           tensor::InputOperand A, tensor::InputOperand B,
           tensor::OutputOperand C>
 VECOPS_INLINE void matmul(
     kernel::WorkspaceView& workspace,
-    nint_t m, nint_t n, nint_t k,
+    M&& m, N&& n, K&& k,
     A&& a, B&& b, C&& c) {
   ExecutionSession execution{workspace};
-  matmul<Atom>(execution, m, n, k,
-               std::forward<A>(a), std::forward<B>(b),
-               std::forward<C>(c));
+  matmul<Atom, TilePolicy>(
+      execution,
+      std::forward<M>(m), std::forward<N>(n), std::forward<K>(k),
+      std::forward<A>(a), std::forward<B>(b), std::forward<C>(c));
 }
 
 } // namespace vecops::ops

@@ -4,7 +4,7 @@ add_compile_definitions(VECOPS_MATH_ASSUME_VALID_INPUTS)
 
 # Benchmark wrapper around the common sharding and architecture primitive.
 function(vecops_add_benchmark)
-    set(options FIXED_SVE)
+    set(options FIXED_SVE FIXED_STREAMING_SVE)
     set(oneValueArgs NAME FOLDER)
     set(multiValueArgs FILES ARCH DEFINITIONS LIBRARIES)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
@@ -23,8 +23,13 @@ function(vecops_add_benchmark)
     if(ARG_FIXED_SVE)
         set(_FIXED_SVE_ARG FIXED_SVE)
     endif()
+    set(_FIXED_STREAMING_SVE_ARG "")
+    if(ARG_FIXED_STREAMING_SVE)
+        set(_FIXED_STREAMING_SVE_ARG FIXED_STREAMING_SVE)
+    endif()
     vecops_add_multiarch_executable(
         ${_FIXED_SVE_ARG}
+        ${_FIXED_STREAMING_SVE_ARG}
         NAME ${ARG_NAME}
         FILES ${ARG_FILES}
         FOLDER ${ARG_FOLDER}
@@ -59,16 +64,32 @@ if(VECOPS_ARCH_FAMILY STREQUAL "x86")
         ARCH Native
     )
 elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
+    set(VECOPS_SME_BENCH_ARCH Native)
+    if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
+        list(APPEND VECOPS_SME_BENCH_ARCH NativeFixedStreamingSVE)
+    endif()
     vecops_add_benchmark(
         NAME MatmulPackSMEBench
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulPackSMEBench.cpp
-        ARCH Native
+        ARCH ${VECOPS_SME_BENCH_ARCH}
     )
     vecops_add_benchmark(
         NAME MatmulSMEBench
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulSMEBench.cpp
-        ARCH Native
+        ARCH ${VECOPS_SME_BENCH_ARCH}
     )
+    if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
+        vecops_add_benchmark(
+            NAME MatmulSMEFixedBench
+            FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulSMEFixedBench.cpp
+            ARCH NativeFixedStreamingSVE
+        )
+        vecops_add_benchmark(
+            NAME MatmulSMEFixedPolicyBench
+            FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulSMEFixedPolicyBench.cpp
+            ARCH NativeFixedStreamingSVE
+        )
+    endif()
 endif()
 
 vecops_add_benchmark(
