@@ -12,7 +12,7 @@
 #include <algorithm>
 
 #include "vecops/vec/details/Basic.h"
-#include "vecops/vec/details/Options.h"
+#include "vecops/vec/Options.h"
 #include "vecops/util/ScalarConvert.h"
 
 namespace vecops::vec::details {

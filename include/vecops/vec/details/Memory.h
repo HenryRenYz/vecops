@@ -19,7 +19,7 @@
 
 #include "vecops/Assertion.h"
 #include "vecops/vec/Request.h"
-#include "vecops/vec/details/Options.h"
+#include "vecops/vec/Options.h"
 #include "vecops/vec/details/Request.h"
 #include "vecops/vec/details/Wordwise.h"
 

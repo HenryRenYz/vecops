@@ -27,7 +27,7 @@ struct AddOp {
   template <VectorTag Tag, typename... Options>
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const; \
+      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
   template <VectorTag Tag, Active A, Inactive I>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
       Tag tag, Vec<Tag> a, Vec<Tag> b,
@@ -49,7 +49,7 @@ struct SubOp {
   template <VectorTag Tag, typename... Options>
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const; \
+      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
   template <VectorTag Tag, Active A, Inactive I>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
       Tag tag, Vec<Tag> a, Vec<Tag> b,
@@ -71,7 +71,7 @@ struct MulOp {
   template <VectorTag Tag, typename... Options>
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const; \
+      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
   template <VectorTag Tag, Active A, Inactive I>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
       Tag tag, Vec<Tag> a, Vec<Tag> b,
@@ -93,7 +93,7 @@ struct DivOp {
   template <FloatingTag Tag, typename... Options>
     requires (sizeof...(Options) > 0)
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
-      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const; \
+      Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const;
   template <FloatingTag Tag, Active A, Inactive I>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
       Tag tag, Vec<Tag> a, Vec<Tag> b,
@@ -234,6 +234,7 @@ VECOPS_VEC_DECLARE_FMA_OP(FnmsubOp);
 } // namespace vecops::vec
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/Arithmetic.h"
 #include "vecops/vec/details/scalar/Arithmetic.h"
 
 #if defined(ARCH_X86_FAMILY) && !defined(CPU_CAPABILITY_GENERIC)
@@ -241,8 +242,6 @@ VECOPS_VEC_DECLARE_FMA_OP(FnmsubOp);
 #elif defined(CPU_CAPABILITY_SVE)
 #include "vecops/vec/details/sve/Arithmetic.h"
 #endif
-
-#include "vecops/vec/details/Arithmetic.h"
 
 namespace vecops::vec {
 

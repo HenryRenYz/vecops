@@ -10,7 +10,7 @@
 #include <type_traits>
 
 #include "vecops/vec/details/sve/Basic.h"
-#include "vecops/vec/details/Options.h"
+#include "vecops/vec/Options.h"
 
 namespace vecops::vec::details {
 

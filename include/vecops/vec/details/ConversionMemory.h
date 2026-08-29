@@ -14,7 +14,7 @@
 #include <tuple>
 
 #include "vecops/util/ScalarConvert.h"
-#include "vecops/vec/details/Options.h"
+#include "vecops/vec/Options.h"
 
 namespace vecops::vec::details {
 
@@ -54,10 +54,6 @@ struct IsConversionMemoryLayoutOption : std::bool_constant<
 template <typename T>
 struct IsConversionMemoryValueOption : std::bool_constant<
     IsSaturateOption<T>::value || IsWrapOption<T>::value> {};
-
-template <typename T>
-struct IsConversionMemoryPackingOption : std::bool_constant<
-    IsPackedOption<T>::value || IsSplitOption<T>::value> {};
 
 template <VectorTag LogicalTag, Element Other, bool IsStore, typename Option>
 inline constexpr bool is_memory_conversion_option_for_v = [] {

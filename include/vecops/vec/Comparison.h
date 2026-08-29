@@ -187,6 +187,7 @@ struct IsInfOp { VECOPS_VEC_CLASSIFICATION_MEMBERS; };
 } // namespace vecops::vec
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/Comparison.h"
 #include "vecops/vec/details/scalar/Comparison.h"
 
 #if defined(ARCH_X86_FAMILY) && !defined(CPU_CAPABILITY_GENERIC)
@@ -194,8 +195,6 @@ struct IsInfOp { VECOPS_VEC_CLASSIFICATION_MEMBERS; };
 #elif defined(CPU_CAPABILITY_SVE)
 #include "vecops/vec/details/sve/Comparison.h"
 #endif
-
-#include "vecops/vec/details/Comparison.h"
 
 namespace vecops::vec {
 

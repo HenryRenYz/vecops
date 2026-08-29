@@ -78,6 +78,7 @@ VECOPS_ALWAYS_INLINE T reduction_identity() {
 } // namespace vecops::vec
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/Reduction.h"
 #include "vecops/vec/details/scalar/Reduction.h"
 
 #if defined(ARCH_X86_FAMILY) && !defined(CPU_CAPABILITY_GENERIC)
@@ -85,8 +86,6 @@ VECOPS_ALWAYS_INLINE T reduction_identity() {
 #elif defined(CPU_CAPABILITY_SVE)
 #include "vecops/vec/details/sve/Reduction.h"
 #endif
-
-#include "vecops/vec/details/Reduction.h"
 
 namespace vecops::vec {
 

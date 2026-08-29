@@ -158,6 +158,7 @@ struct FixedAccuracyExpCpo {
 } // namespace vecops::vec
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/Math.h"
 #include "vecops/vec/details/scalar/Math.h"
 
 #if defined(ARCH_X86_FAMILY) && !defined(CPU_CAPABILITY_GENERIC)
@@ -165,8 +166,6 @@ struct FixedAccuracyExpCpo {
 #elif defined(CPU_CAPABILITY_SVE)
 #include "vecops/vec/details/sve/Math.h"
 #endif
-
-#include "vecops/vec/details/Math.h"
 
 namespace vecops::vec {
 

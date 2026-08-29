@@ -35,14 +35,13 @@ struct ConvertOp {
 } // namespace vecops::vec
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/Conversion.h"
 
 #if defined(ARCH_X86_FAMILY) && !defined(CPU_CAPABILITY_GENERIC)
 #include "vecops/vec/details/x86/Conversion.h"
 #elif defined(CPU_CAPABILITY_SVE)
 #include "vecops/vec/details/sve/Conversion.h"
 #endif
-
-#include "vecops/vec/details/Conversion.h"
 
 namespace vecops::vec {
 

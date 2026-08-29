@@ -472,36 +472,8 @@ struct SVEFmaWordImpl {
       }
 #undef VECOPS_VEC_SVE_FMA
     } else {
-      const auto product =
-          NativeWordImpl<SVEBackend, MulOp>::template call<Index>(
-              MulOp{}, tag, a, b);
-      const auto computed = [&]() {
-        if constexpr (std::same_as<Op, FmaddOp>)
-          return NativeWordImpl<SVEBackend, AddOp>::template call<Index>(
-              AddOp{}, tag, product, c);
-        else if constexpr (std::same_as<Op, FmsubOp>)
-          return NativeWordImpl<SVEBackend, SubOp>::template call<Index>(
-              SubOp{}, tag, product, c);
-        else if constexpr (std::same_as<Op, FnmaddOp>)
-          return NativeWordImpl<SVEBackend, SubOp>::template call<Index>(
-              SubOp{}, tag, c, product);
-        else if constexpr (std::same_as<Op, FnmsubOp>) {
-          using T = ElementOf<Tag>;
-          const T negative_zero = [] {
-            if constexpr (is_float_v<T>) return static_cast<T>(-0.0F);
-            else return T{};
-          }();
-          const auto zero =
-              NativeWordImpl<SVEBackend, FillOp>::template call<Index>(
-                  FillOp{}, tag, negative_zero);
-          const auto negative_product =
-              NativeWordImpl<SVEBackend, SubOp>::template call<Index>(
-                  SubOp{}, tag, zero, product);
-          return NativeWordImpl<SVEBackend, SubOp>::template call<Index>(
-              SubOp{}, tag, negative_product, c);
-        } else
-          static_assert(dispatch_dependent_false<Op>);
-      }();
+      const auto computed =
+          synthesize_fma_word<SVEBackend, Op, Index>(tag, a, b, c);
       return NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(
           BlendOp{}, tag, inactive, mask, computed);
     }

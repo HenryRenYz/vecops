@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <concepts>
+#include <numeric>
 #include <ostream>
 #include <type_traits>
 #include <tuple>
@@ -999,7 +1000,8 @@ VECOPS_INLINE constexpr void unzip_packed_values(nint_t* v_out, const nint_t* v_
  * @code
  * // PackedStorage<Const<2>, Dynamic<4>, Const<3>>
  * // stores only 1 runtime value (the Dynamic<4> entry)
- * PackedStorage<Const<2>, Dynamic<4>, Const<3>> stor(2, 128, 3);
+ * PackedStorage<Const<2>, Dynamic<4>, Const<3>> stor(
+ *     Const<2>{}, Dynamic<4>{128}, Const<3>{});
  * auto v0 = stor.get<0>();   // 2 (constexpr)
  * auto v1 = stor.get<1>();   // 128 (runtime read)
  * auto arr = stor.to_array(); // {2, 128, 3}
@@ -1185,5 +1187,423 @@ inline constexpr bool upper_bound_at_most_v =
     has_upper_bound_v<T> && upper_bound_v<T> <= Hi;
 
 } // namespace vecops::meta
+
+namespace vecops {
+
+// ================== Value-aware overloads of util/Math.h ==================
+//
+// min/max/clamp and the integer-division family accept meta::Const /
+// meta::Dynamic operands and propagate constraints, mirroring the arithmetic
+// operators above:
+//   Const  op  Const  → Const (folded at compile time)
+//   Const  op  Dyn    → tighter bounds, alignment degrades to gcd
+//   Dyn    op  Dyn    → merged bounds (min/max) or degraded (division)
+//   nint_t op  Value  → Any{nint_t} op Value, matching the arithmetic
+//                       operators: constraints on the raw integer side are
+//                       lost.
+//
+// Alignment notes (A, A1, A2 are positive powers of two, so every gcd below
+// is a power of two as required by Dynamic):
+//   min/max      : the result is one of the two operands, hence a multiple
+//                  of gcd(A1, A2).
+//   clamp        : the result is v, Lo, or Hi, hence a multiple of
+//                  gcd(gcd(A, Lo), Hi).
+//   ceil_div/floor_div by Const<N>: A % N == 0 keeps divisibility (result
+//                  alignment A/N), otherwise degrades to 1 — same rule as
+//                  operator/.
+//   align_up/align_down by Const<N>: A % N == 0 means every runtime value is
+//                  already an N-multiple, so the alignment A survives
+//                  (align_up is the identity); otherwise gcd(A, N).
+// The division family is monotonic for positive divisors, so bounds are
+// computed from the endpoints via the scalar util/Math.h primitives.
+//
+// Bound sentinels participate naturally in min/max comparisons (kLoInf is
+// the smallest representable nint_t, kHiInf the largest), so min/max bound
+// merging needs no sentinel special case. The division family, in contrast,
+// must keep the explicit unbounded branches: kLoInf / N would silently
+// destroy the sentinel.
+
+/**
+ * @brief Compile-time minimum of two Const values.
+ * @code
+ * static_assert(std::same_as<decltype(min(cint<3>, cint<7>)), Const<3>>);
+ * @endcode
+ */
+template <nint_t N, nint_t M>
+constexpr meta::Const<(N < M) ? N : M> min(meta::Const<N>, meta::Const<M>) {
+  return meta::Const<(N < M) ? N : M>();
+}
+
+/**
+ * @brief min of a Const and a Dynamic, with constraint propagation.
+ *
+ * If every runtime value of the Dynamic side is >= N (or <= N), the result
+ * folds to Const<N> (or passes the Dynamic through unchanged). Otherwise the
+ * upper bound tightens to min(H, N) and the alignment degrades to gcd(A, N).
+ */
+template <nint_t N, nint_t A, nint_t L, nint_t H>
+constexpr auto min(meta::Const<N>, meta::Dynamic<A, L, H> rhs) {
+  if constexpr (L != meta::kLoInf && N <= L) {
+    return meta::Const<N>();
+  } else if constexpr (H != meta::kHiInf && H < N) {
+    return rhs;
+  } else {
+    constexpr nint_t g = std::gcd(A, N);
+    constexpr nint_t rh = (H < N) ? H : N;
+    return meta::Dynamic<g, L, rh>((rhs.value < N) ? rhs.value : N);
+  }
+}
+
+/// @copydoc min(meta::Const<N>, meta::Dynamic<A,L,H>)
+template <nint_t N, nint_t A, nint_t L, nint_t H>
+constexpr auto min(meta::Dynamic<A, L, H> lhs, meta::Const<N> rhs) {
+  return min(rhs, lhs);
+}
+
+/**
+ * @brief min of two Dynamics: bounds merge component-wise, alignment degrades
+ * to gcd(A1, A2).
+ */
+template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
+constexpr auto min(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+  constexpr nint_t lo = (L1 < L2) ? L1 : L2;
+  constexpr nint_t hi = (H1 < H2) ? H1 : H2;
+  return meta::Dynamic<std::gcd(A1, A2), lo, hi>(
+      (rhs.value < lhs.value) ? rhs.value : lhs.value);
+}
+
+/// Value min nint_t → Value min Any{nint_t}
+template <typename T>
+  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
+constexpr auto min(T lhs, nint_t rhs) {
+  return min(lhs, meta::Any{rhs});
+}
+
+/// nint_t min Value → Any{nint_t} min Value
+template <typename T>
+  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
+constexpr auto min(nint_t lhs, T rhs) {
+  return min(meta::Any{lhs}, rhs);
+}
+
+/**
+ * @brief Compile-time maximum of two Const values.
+ * @code
+ * static_assert(std::same_as<decltype(max(cint<3>, cint<7>)), Const<7>>);
+ * @endcode
+ */
+template <nint_t N, nint_t M>
+constexpr meta::Const<(N > M) ? N : M> max(meta::Const<N>, meta::Const<M>) {
+  return meta::Const<(N > M) ? N : M>();
+}
+
+/**
+ * @brief max of a Const and a Dynamic, with constraint propagation.
+ *
+ * Dual of min(Const<N>, Dynamic<A,L,H>): folds to Const<N> when every
+ * runtime value is <= N, passes the Dynamic through when every runtime value
+ * is >= N, otherwise the lower bound tightens to max(L, N) and the alignment
+ * degrades to gcd(A, N).
+ */
+template <nint_t N, nint_t A, nint_t L, nint_t H>
+constexpr auto max(meta::Const<N>, meta::Dynamic<A, L, H> rhs) {
+  if constexpr (H != meta::kHiInf && N >= H) {
+    return meta::Const<N>();
+  } else if constexpr (L != meta::kLoInf && N <= L) {
+    return rhs;
+  } else {
+    constexpr nint_t g = std::gcd(A, N);
+    constexpr nint_t rl = (N > L) ? N : L;
+    return meta::Dynamic<g, rl, H>((N > rhs.value) ? N : rhs.value);
+  }
+}
+
+/// @copydoc max(meta::Const<N>, meta::Dynamic<A,L,H>)
+template <nint_t N, nint_t A, nint_t L, nint_t H>
+constexpr auto max(meta::Dynamic<A, L, H> lhs, meta::Const<N> rhs) {
+  return max(rhs, lhs);
+}
+
+/**
+ * @brief max of two Dynamics: bounds merge component-wise, alignment degrades
+ * to gcd(A1, A2).
+ */
+template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
+constexpr auto max(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+  constexpr nint_t lo = (L1 > L2) ? L1 : L2;
+  constexpr nint_t hi = (H1 > H2) ? H1 : H2;
+  return meta::Dynamic<std::gcd(A1, A2), lo, hi>(
+      (lhs.value > rhs.value) ? lhs.value : rhs.value);
+}
+
+/// Value max nint_t → Value max Any{nint_t}
+template <typename T>
+  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
+constexpr auto max(T lhs, nint_t rhs) {
+  return max(lhs, meta::Any{rhs});
+}
+
+/// nint_t max Value → Any{nint_t} max Value
+template <typename T>
+  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
+constexpr auto max(nint_t lhs, T rhs) {
+  return max(meta::Any{lhs}, rhs);
+}
+
+/**
+ * @brief Compile-time clamp of a Const into [Const<Lo>, Const<Hi>].
+ */
+template <nint_t N, nint_t Lo, nint_t Hi>
+constexpr meta::Const<(N < Lo) ? Lo : (Hi < N) ? Hi : N>
+clamp(meta::Const<N>, meta::Const<Lo>, meta::Const<Hi>) {
+  constexpr nint_t v = (N < Lo) ? Lo : (Hi < N) ? Hi : N;
+  return meta::Const<v>();
+}
+
+/**
+ * @brief clamp of a Dynamic into compile-time bounds [Lo, Hi].
+ *
+ * Bounds tighten to the intersection [max(L, Lo), min(H, Hi)]; when the
+ * intersection collapses (or the Dynamic lies entirely outside [Lo, Hi]) the
+ * result folds to a Const. The result is v, Lo, or Hi, so the alignment
+ * degrades to gcd(gcd(A, Lo), Hi).
+ *
+ * No nint_t-bound overloads exist: runtime bounds have no constraint to
+ * propagate, so callers should convert explicitly.
+ */
+template <nint_t A, nint_t L, nint_t H, nint_t Lo, nint_t Hi>
+constexpr auto clamp(meta::Dynamic<A, L, H> v, meta::Const<Lo>, meta::Const<Hi>) {
+  static_assert(Lo <= Hi, "clamp bounds must be ordered");
+  if constexpr (L != meta::kLoInf && L > Hi) {
+    return meta::Const<Hi>();
+  } else if constexpr (H != meta::kHiInf && H < Lo) {
+    return meta::Const<Lo>();
+  } else {
+    constexpr nint_t rl = (Lo > L) ? Lo : L;
+    constexpr nint_t rh = (Hi < H) ? Hi : H;
+    if constexpr (rl == rh) {
+      return meta::Const<rl>();
+    } else {
+      constexpr nint_t g = std::gcd(std::gcd(A, Lo), Hi);
+      return meta::Dynamic<g, rl, rh>(::vecops::clamp(nint_t(v), Lo, Hi));
+    }
+  }
+}
+
+/**
+ * @brief Compile-time ceiling division of Const values.
+ */
+template <nint_t N, nint_t M>
+constexpr meta::Const<::vecops::ceil_div(N, M)> ceil_div(meta::Const<N>, meta::Const<M>) {
+  return meta::Const<::vecops::ceil_div(N, M)>();
+}
+
+/**
+ * @brief ceil_div of a Dynamic by a Const divisor (N > 0).
+ *
+ * Alignment follows operator/: A % N == 0 → A/N, otherwise 1. Bounds are the
+ * endpoint ceil_div values (monotonic for positive divisors).
+ */
+template <nint_t A, nint_t L, nint_t H, nint_t N>
+constexpr auto ceil_div(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
+  static_assert(N > 0, "ceil_div divisor must be positive");
+  constexpr nint_t g = (A % N == 0) ? A / N : 1;
+  if constexpr (L == meta::kLoInf || H == meta::kHiInf) {
+    return meta::Dynamic<g>(::vecops::ceil_div(lhs.value, N));
+  } else {
+    return meta::Dynamic<g, ::vecops::ceil_div(L, N), ::vecops::ceil_div(H, N)>(
+        ::vecops::ceil_div(lhs.value, N));
+  }
+}
+
+/// @brief ceil_div by a runtime divisor: no constraint survives.
+template <nint_t N, nint_t A, nint_t L, nint_t H>
+constexpr meta::Any ceil_div(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
+  return meta::Any(::vecops::ceil_div(nint_t(lhs), rhs.value));
+}
+
+/// @brief ceil_div with runtime dividend and divisor: no constraint survives.
+template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
+constexpr meta::Any
+ceil_div(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+  return meta::Any(::vecops::ceil_div(lhs.value, rhs.value));
+}
+
+/// Value ceil_div nint_t → Value ceil_div Any{nint_t}
+template <typename T>
+  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
+constexpr auto ceil_div(T lhs, nint_t rhs) {
+  return ceil_div(lhs, meta::Any{rhs});
+}
+
+/// nint_t ceil_div Value → Any{nint_t} ceil_div Value
+template <typename T>
+  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
+constexpr auto ceil_div(nint_t lhs, T rhs) {
+  return ceil_div(meta::Any{lhs}, rhs);
+}
+
+/**
+ * @brief Compile-time floor division of Const values.
+ */
+template <nint_t N, nint_t M>
+constexpr meta::Const<::vecops::floor_div(N, M)> floor_div(meta::Const<N>, meta::Const<M>) {
+  return meta::Const<::vecops::floor_div(N, M)>();
+}
+
+/**
+ * @brief floor_div of a Dynamic by a Const divisor (N > 0).
+ *
+ * Alignment follows operator/: A % N == 0 → A/N, otherwise 1. Bounds are the
+ * endpoint floor_div values (monotonic for positive divisors).
+ */
+template <nint_t A, nint_t L, nint_t H, nint_t N>
+constexpr auto floor_div(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
+  static_assert(N > 0, "floor_div divisor must be positive");
+  constexpr nint_t g = (A % N == 0) ? A / N : 1;
+  if constexpr (L == meta::kLoInf || H == meta::kHiInf) {
+    return meta::Dynamic<g>(::vecops::floor_div(lhs.value, N));
+  } else {
+    return meta::Dynamic<g, ::vecops::floor_div(L, N), ::vecops::floor_div(H, N)>(
+        ::vecops::floor_div(lhs.value, N));
+  }
+}
+
+/// @brief floor_div by a runtime divisor: no constraint survives.
+template <nint_t N, nint_t A, nint_t L, nint_t H>
+constexpr meta::Any floor_div(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
+  return meta::Any(::vecops::floor_div(nint_t(lhs), rhs.value));
+}
+
+/// @brief floor_div with runtime dividend and divisor: no constraint survives.
+template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
+constexpr meta::Any
+floor_div(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+  return meta::Any(::vecops::floor_div(lhs.value, rhs.value));
+}
+
+/// Value floor_div nint_t → Value floor_div Any{nint_t}
+template <typename T>
+  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
+constexpr auto floor_div(T lhs, nint_t rhs) {
+  return floor_div(lhs, meta::Any{rhs});
+}
+
+/// nint_t floor_div Value → Any{nint_t} floor_div Value
+template <typename T>
+  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
+constexpr auto floor_div(nint_t lhs, T rhs) {
+  return floor_div(meta::Any{lhs}, rhs);
+}
+
+/**
+ * @brief Compile-time upward alignment of a Const.
+ */
+template <nint_t N, nint_t M>
+constexpr meta::Const<::vecops::align_up(N, M)> align_up(meta::Const<N>, meta::Const<M>) {
+  return meta::Const<::vecops::align_up(N, M)>();
+}
+
+/**
+ * @brief align_up of a Dynamic to a Const alignment (N > 0).
+ *
+ * A % N == 0 means every runtime value is already N-aligned, so align_up is
+ * the identity and alignment A survives; otherwise the result is a multiple
+ * of gcd(A, N).
+ */
+template <nint_t A, nint_t L, nint_t H, nint_t N>
+constexpr auto align_up(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
+  static_assert(N > 0, "align_up alignment must be positive");
+  constexpr nint_t g = (A % N == 0) ? A : std::gcd(A, N);
+  if constexpr (L == meta::kLoInf || H == meta::kHiInf) {
+    return meta::Dynamic<g>(::vecops::align_up(lhs.value, N));
+  } else {
+    return meta::Dynamic<g, ::vecops::align_up(L, N), ::vecops::align_up(H, N)>(
+        ::vecops::align_up(lhs.value, N));
+  }
+}
+
+/// @brief align_up to a runtime alignment: the result keeps only the gcd.
+template <nint_t N, nint_t A, nint_t L, nint_t H>
+constexpr meta::Any align_up(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
+  return meta::Any(::vecops::align_up(nint_t(lhs), rhs.value));
+}
+
+/// @brief align_up with runtime value and alignment: no constraint survives.
+template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
+constexpr meta::Any
+align_up(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+  return meta::Any(::vecops::align_up(lhs.value, rhs.value));
+}
+
+/// Value align_up nint_t → Value align_up Any{nint_t}
+template <typename T>
+  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
+constexpr auto align_up(T lhs, nint_t rhs) {
+  return align_up(lhs, meta::Any{rhs});
+}
+
+/// nint_t align_up Value → Any{nint_t} align_up Value
+template <typename T>
+  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
+constexpr auto align_up(nint_t lhs, T rhs) {
+  return align_up(meta::Any{lhs}, rhs);
+}
+
+/**
+ * @brief Compile-time downward alignment of a Const.
+ */
+template <nint_t N, nint_t M>
+constexpr meta::Const<::vecops::align_down(N, M)> align_down(meta::Const<N>, meta::Const<M>) {
+  return meta::Const<::vecops::align_down(N, M)>();
+}
+
+/**
+ * @brief align_down of a Dynamic to a Const alignment (N > 0).
+ *
+ * A % N == 0 means every runtime value is already N-aligned, so align_down is
+ * the identity and alignment A survives; otherwise the result is a multiple
+ * of gcd(A, N).
+ */
+template <nint_t A, nint_t L, nint_t H, nint_t N>
+constexpr auto align_down(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
+  static_assert(N > 0, "align_down alignment must be positive");
+  constexpr nint_t g = (A % N == 0) ? A : std::gcd(A, N);
+  if constexpr (L == meta::kLoInf || H == meta::kHiInf) {
+    return meta::Dynamic<g>(::vecops::align_down(lhs.value, N));
+  } else {
+    return meta::Dynamic<g, ::vecops::align_down(L, N), ::vecops::align_down(H, N)>(
+        ::vecops::align_down(lhs.value, N));
+  }
+}
+
+/// @brief align_down to a runtime alignment: the result keeps only the gcd.
+template <nint_t N, nint_t A, nint_t L, nint_t H>
+constexpr meta::Any align_down(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
+  return meta::Any(::vecops::align_down(nint_t(lhs), rhs.value));
+}
+
+/// @brief align_down with runtime value and alignment: no constraint survives.
+template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
+constexpr meta::Any
+align_down(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+  return meta::Any(::vecops::align_down(lhs.value, rhs.value));
+}
+
+/// Value align_down nint_t → Value align_down Any{nint_t}
+template <typename T>
+  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
+constexpr auto align_down(T lhs, nint_t rhs) {
+  return align_down(lhs, meta::Any{rhs});
+}
+
+/// nint_t align_down Value → Any{nint_t} align_down Value
+template <typename T>
+  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
+constexpr auto align_down(nint_t lhs, T rhs) {
+  return align_down(meta::Any{lhs}, rhs);
+}
+
+} // namespace vecops
 
 #endif // VECOPS_META_H

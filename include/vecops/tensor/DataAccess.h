@@ -18,7 +18,7 @@
 #include "vecops/tensor/Transform.h"
 #include "vecops/util/ScalarConvert.h"
 #include "vecops/vec/Vec.h"
-#include "vecops/vec/details/Options.h"
+#include "vecops/vec/Options.h"
 
 /**
  * @file DataAccess.h

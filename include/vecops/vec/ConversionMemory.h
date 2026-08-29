@@ -139,13 +139,14 @@ struct StoreConvertOp {
 
 } // namespace vecops::vec
 
+#include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/ConversionMemory.h"
+
 #if defined(ARCH_X86_FAMILY) && !defined(CPU_CAPABILITY_GENERIC)
 #include "vecops/vec/details/x86/ConversionMemory.h"
 #elif defined(CPU_CAPABILITY_SVE)
 #include "vecops/vec/details/sve/ConversionMemory.h"
 #endif
-
-#include "vecops/vec/details/ConversionMemory.h"
 
 namespace vecops::vec {
 

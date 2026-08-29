@@ -1672,32 +1672,7 @@ struct X86FmaWordImpl {
     }
 #undef VECOPS_VEC_X86_FMA_PH
 #endif
-    const auto product = NativeWordImpl<X86Backend, MulOp>::template call<Index>(
-        MulOp{}, tag, a, b);
-    if constexpr (std::same_as<Op, FmaddOp>)
-      return NativeWordImpl<X86Backend, AddOp>::template call<Index>(
-          AddOp{}, tag, product, c);
-    else if constexpr (std::same_as<Op, FmsubOp>)
-      return NativeWordImpl<X86Backend, SubOp>::template call<Index>(
-          SubOp{}, tag, product, c);
-    else if constexpr (std::same_as<Op, FnmaddOp>)
-      return NativeWordImpl<X86Backend, SubOp>::template call<Index>(
-          SubOp{}, tag, c, product);
-    else if constexpr (std::same_as<Op, FnmsubOp>) {
-      using T = ElementOf<Tag>;
-      const T negative_zero = [] {
-        if constexpr (is_float_v<T>) return static_cast<T>(-0.0F);
-        else return T{};
-      }();
-      const auto zero = NativeWordImpl<X86Backend, FillOp>::template call<Index>(
-          FillOp{}, tag, negative_zero);
-      const auto negative_product =
-          NativeWordImpl<X86Backend, SubOp>::template call<Index>(
-              SubOp{}, tag, zero, product);
-      return NativeWordImpl<X86Backend, SubOp>::template call<Index>(
-          SubOp{}, tag, negative_product, c);
-    } else
-      static_assert(dispatch_dependent_false<Op>);
+    return synthesize_fma_word<X86Backend, Op, Index>(tag, a, b, c);
   }
 
   template <nint_t Index, VectorTag Tag, typename Policy>

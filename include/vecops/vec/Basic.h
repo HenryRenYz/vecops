@@ -415,7 +415,7 @@ inline constexpr MaskWhileGtOp mwhilegt{};
 // Backend specializations must precede the operator() definitions below so
 // that details::execute() can resolve them during template instantiation.
 #include "vecops/vec/details/Dispatch.h"
-
+#include "vecops/vec/details/Basic.h"
 #include "vecops/vec/details/scalar/Basic.h"
 
 #if defined(ARCH_X86_FAMILY) && !defined(CPU_CAPABILITY_GENERIC)
@@ -423,8 +423,6 @@ inline constexpr MaskWhileGtOp mwhilegt{};
 #elif defined(CPU_CAPABILITY_SVE)
 #include "vecops/vec/details/sve/Basic.h"
 #endif
-
-#include "vecops/vec/details/Basic.h"
 
 namespace vecops::vec::details {
 

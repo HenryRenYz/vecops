@@ -66,6 +66,7 @@ struct StoreOp {
 } // namespace vecops::vec
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/Memory.h"
 #include "vecops/vec/details/scalar/Memory.h"
 
 #if defined(ARCH_X86_FAMILY) && !defined(CPU_CAPABILITY_GENERIC)
@@ -73,8 +74,6 @@ struct StoreOp {
 #elif defined(CPU_CAPABILITY_SVE)
 #include "vecops/vec/details/sve/Memory.h"
 #endif
-
-#include "vecops/vec/details/Memory.h"
 
 namespace vecops::vec {
 

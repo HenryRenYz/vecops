@@ -12,7 +12,7 @@
  * cannot be stored as ordinary struct members.
  */
 
-#include "vecops/vec/details/Options.h"
+#include "vecops/vec/Options.h"
 #include "vecops/vec/details/Request.h"
 
 namespace vecops::vec::details {

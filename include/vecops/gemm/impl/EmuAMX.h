@@ -31,8 +31,8 @@ consteval auto infer_A_packed_layout() {
   static_assert(layout.ndim() == 2, "Ndim mismatch");
   auto M = size<0>(layout);
   auto K = size<1>(layout);
-  auto nM_R = cdiv(M, M_R);
-  auto nK_R = cdiv(K, K_R);
+  auto nM_R = ceil_div(M, M_R);
+  auto nK_R = ceil_div(K, K_R);
   return make_layout(make_shape(nM_R, nK_R, M_R, K_R));
 }
 
@@ -72,8 +72,8 @@ VECOPS_INLINE void pack_A(const TInArray &src, TOutArray &dst, const Prologue &p
   auto nM_R = size<0>(out_layout);
   auto nK_R = size<1>(out_layout);
 
-  VECOPS_ASSERT(nM_R == cdiv(M, M_R), "M dim size mismatch: expected %zd, got %zd", cdiv(M, M_R), nM_R);
-  VECOPS_ASSERT(nK_R == cdiv(K, K_R), "K dim size mismatch: expected %zd, got %zd", cdiv(K, K_R), nK_R);
+  VECOPS_ASSERT(nM_R == ceil_div(M, M_R), "M dim size mismatch: expected %zd, got %zd", ceil_div(M, M_R), nM_R);
+  VECOPS_ASSERT(nK_R == ceil_div(K, K_R), "K dim size mismatch: expected %zd, got %zd", ceil_div(K, K_R), nK_R);
 
   nint_t i;
   for (nint_t i = 0; i < M; i += nM_R) {
@@ -98,8 +98,8 @@ consteval auto infer_B_packed_layout() {
   static_assert(layout.ndim() == 2, "Ndim mismatch");
   auto N = size<0>(layout);
   auto K = size<1>(layout);
-  auto nN_R = cdiv(N, N_R);
-  auto nK_R = cdiv(K, K_R);
+  auto nN_R = ceil_div(N, N_R);
+  auto nK_R = ceil_div(K, K_R);
   return make_layout(make_shape(nN_R, nK_R, K_R / K_P, N_R, K_P));
 }
 

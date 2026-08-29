@@ -11,7 +11,7 @@
 #include <type_traits>
 
 #include "vecops/vec/details/x86/Basic.h"
-#include "vecops/vec/details/Options.h"
+#include "vecops/vec/Options.h"
 
 namespace vecops::vec::details {
 

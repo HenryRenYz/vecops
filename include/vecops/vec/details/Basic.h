@@ -6,7 +6,7 @@
 #include <utility>
 
 #include "vecops/vec/details/Elementwise.h"
-#include "vecops/vec/details/Options.h"
+#include "vecops/vec/Options.h"
 
 namespace vecops::vec::details {
 
