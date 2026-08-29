@@ -47,12 +47,6 @@ struct EnableElementwiseWordBatching<AbsOp> : std::true_type {};
 template <>
 struct EnableElementwiseWordBatching<SqrtOp> : std::true_type {};
 
-template <>
-struct EnableElementwiseWordBatching<RcpOp> : std::true_type {};
-
-template <>
-struct EnableElementwiseWordBatching<RsqrtOp> : std::true_type {};
-
 /* **************************************************************************** */
 //    Option validation for arithmetic operations                               //
 /* **************************************************************************** */
@@ -165,14 +159,6 @@ struct GenericImpl<Backend, AbsOp, Tag>
 template <typename Backend, VectorTag Tag>
 struct GenericImpl<Backend, SqrtOp, Tag>
     : UnaryArithmeticGenericImpl<Backend, SqrtOp, Tag> {};
-
-template <typename Backend, VectorTag Tag>
-struct GenericImpl<Backend, RcpOp, Tag>
-    : UnaryArithmeticGenericImpl<Backend, RcpOp, Tag> {};
-
-template <typename Backend, VectorTag Tag>
-struct GenericImpl<Backend, RsqrtOp, Tag>
-    : UnaryArithmeticGenericImpl<Backend, RsqrtOp, Tag> {};
 
 template <typename Backend, typename Op, VectorTag Tag>
 struct TernaryArithmeticGenericImpl {
@@ -362,7 +348,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_arithmetic_request(
 
 /**
  * Same Option validation and dispatch pattern as execute_arithmetic_options,
- * but for unary operations (neg, abs, sqrt, rcp, rsqrt).
+ * but for unary operations (neg, abs, sqrt).
  */
 template <typename Op, VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<Tag> execute_unary_arithmetic_options(

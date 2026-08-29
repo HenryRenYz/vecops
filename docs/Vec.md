@@ -363,7 +363,7 @@ halves and *produce* a full vector.
 | `min` / `max(tag, a, b)` | lane-wise extrema | Floating NaN and signed-zero selection follow the active backend. |
 | `neg` / `abs(tag, v)` | negate / absolute value | `neg` flips only the sign bit (preserves NaN payloads, signed zeros); integer negation is modular; `abs(INT_MIN)` keeps the `INT_MIN` bit pattern; unsigned `abs` is a no-op. |
 | `sqrt(tag, v)` | square root | floating only |
-| `rcp` / `rsqrt(tag, v)` | reciprocal / reciprocal sqrt | **Estimate tier — NOT IEEE-full precision** (x86 `rcpps/rcp14`, SVE reciprocal estimate). Use `div(1.0f, x)` / `sqrt` when accuracy matters. |
+| `rcp` / `rsqrt(tag, v)` | reciprocal / reciprocal sqrt | Math-module ops with accuracy tiers — see [Math](#math-vecmathh); default `Strict` is within 1 ULP. |
 | `fmadd` / `fmsub` / `fnmadd` / `fnmsub(tag, a, b, c)` | `a*b±c` fused family | Native fusion when available; fallback paths may round the product separately (**no single-rounding guarantee**). `fnmsub` fallback preserves IEEE signed zero. Integer lanes wrap. |
 
 ### Bit (`vec/Bit.h`)
@@ -485,8 +485,10 @@ Special behavior worth knowing:
 
 ### Math (`vec/Math.h`)
 
-`exp` / `exp_neg` (plus fixed-accuracy spellings `exp_strict`, `exp_fast`,
-`exp_est`, `exp_neg_*`). Floating Tags only.
+The exponential family covers three bases: `exp` / `exp_neg` (e^x),
+`exp2` / `exp2_neg` (2^x), and `exp10` / `exp10_neg` (10^x), each with the
+fixed-accuracy spellings (`exp_strict`, `exp_fast`, `exp_est`,
+`exp2_*`/`exp10_*` and their `_neg_*` counterparts). Floating Tags only.
 
 | Accuracy | Normal-input error contract |
 |---|---|
@@ -497,14 +499,46 @@ Special behavior worth knowing:
 - Accuracy combines orthogonally with one active option (`masked` / `first` /
   `unmasked`) and the usual population options, in any order.
 - The fixed-accuracy CPOs (`exp_fast`, ...) deliberately **reject** a
-  conflicting accuracy option; use plain `exp` when forwarding a
-  template-selected accuracy.
-- `exp_neg` assumes every active lane is `x <= 0` and skips the overflow
-  test — **positive active lanes have unspecified results**. Defining
+  conflicting accuracy option; use the canonical CPO (`exp`, `exp2`, `exp10`)
+  when forwarding a template-selected accuracy.
+- The `*_neg` variants assume every active lane is `x <= 0` and skip the
+  overflow test — **positive active lanes have unspecified results**. Defining
   `VECOPS_MATH_ASSUME_VALID_INPUTS` additionally skips NaN propagation on
-  this path.
+  these paths.
 - Fast/Estimate always flush subnormal outputs to zero; with
   `VECOPS_PRESERVE_SUBNORMALS` defined, Strict preserves them.
+
+The reciprocal family covers `rcp` (1/x) and `rsqrt` (1/sqrt(x)) with the
+same option grammar (`rcp_strict`, `rcp_fast`, `rcp_est`, `rsqrt_*`).
+Their per-tier contracts follow the estimate-plus-Newton ladder the
+hardware offers (SVE `FRSQRTTE`/`FRECPE` + `FRSQRTTS`/`FRECPS`; x86
+`RCP14`/`RSQRT14`, legacy `RCPPS`/`RSQRTPS`):
+
+| Accuracy | rcp / rsqrt contract (f32, f64) | f16, bf16 |
+|---|---|---|
+| `Strict` (default) | ULP error <= 1 | ULP error <= 1 |
+| `Fast` | relative error <= 2^-15 | ULP error <= 2 |
+| `Estimate` | relative error <= 2^-7 | relative error <= 2^-7 |
+
+The ladder mirrors common industry tiers: **Estimate** is the raw hardware
+estimate (architecturally 2^-8 on SVE, tighter on x86), **Fast** adds one
+Newton step — the classic NEON/SSE estimate-plus-refinement tier used by
+game math and ML normalization kernels — and **Strict** refines with
+Markstein-style exact-residual FMA steps to at most 1 ULP (the SLEEF u10
+class, tighter than CUDA's 2-ULP `rsqrtf`). The SVE backend follows the
+Arm optimized-routines SVE `rsqrt` design (estimate + step instructions +
+one `NOINLINE` scaled special path owning every tail); x86 uses
+`RCP14`/`RSQRT14` refinement with a cold long-double repair loop, falling
+back to IEEE `1/x` / `1/sqrt(x)` on tiers lacking FMA or estimates.
+
+Special inputs are **tier-independent**: `rcp(+-0) = +-inf`,
+`rcp(+-inf) = +-0` with the input's sign, `rsqrt(+-0) = +inf`,
+`rsqrt(+inf) = +0`, `rsqrt(x < 0) = NaN` (including `-inf`), and NaN
+propagates. rcp's Strict tier produces gradual subnormal results under
+`VECOPS_PRESERVE_SUBNORMALS` (rcp of huge magnitudes); Fast/Estimate flush
+them to signed zero.
+- NaN inputs propagate through every tier and family, including mixed
+  vectors whose special-tail lanes force the slow path.
 
 ### Reductions (`vec/Reduction.h`)
 
@@ -601,8 +635,13 @@ preserve `a[i]` in inactive lanes; comparisons yield false; loads yield
 zero (see the table above). If you assumed one uniform rule, audit your
 masked call sites.
 
-**`rcp`/`rsqrt` are estimates; `div` is the full-precision reciprocal.**
-Estimate instructions differ per backend and are not IEEE-exact.
+**`rcp`/`rsqrt` live in `vec/Math.h` with accuracy tiers** (default
+`Strict` is within 1 ULP — see [Math](#math-vecmathh)); `div` remains the
+IEEE division. The raw hardware-estimate behavior is now the `estimate`
+tier: `rcp_est`/`rsqrt_est` match the old bare instructions. Estimate-seed
+instructions are not bit-deterministic across compiled call shapes (masked
+vs unmasked forms), so two calls in one program may differ in the last
+estimate bits while staying inside the tier bound.
 
 **`cmpne` is true for NaN operands**, unlike every other comparison. Use
 `!(a == b)`-style logic (i.e. `mask_not` over `cmpeq`) if you need the

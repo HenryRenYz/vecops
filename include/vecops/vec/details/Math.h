@@ -10,18 +10,33 @@
 
 namespace vecops::vec::details {
 
-template <Accuracy A, bool NegativeOnly>
-struct EnableElementwiseWordBatching<ExpOp<A, NegativeOnly>>
+template <ExpBase Base, Accuracy A, bool NegativeOnly>
+struct EnableElementwiseWordBatching<ExpOp<Base, A, NegativeOnly>>
     : std::true_type {};
 
 template <
     typename Backend,
+    ExpBase Base,
     Accuracy A,
     bool NegativeOnly,
     VectorTag Tag>
-struct GenericImpl<Backend, ExpOp<A, NegativeOnly>, Tag>
+struct GenericImpl<Backend, ExpOp<Base, A, NegativeOnly>, Tag>
     : UnaryArithmeticGenericImpl<
-          Backend, ExpOp<A, NegativeOnly>, Tag> {};
+          Backend, ExpOp<Base, A, NegativeOnly>, Tag> {};
+
+template <Accuracy A>
+struct EnableElementwiseWordBatching<RsqrtOp<A>> : std::true_type {};
+
+template <Accuracy A>
+struct EnableElementwiseWordBatching<RcpOp<A>> : std::true_type {};
+
+template <typename Backend, Accuracy A, VectorTag Tag>
+struct GenericImpl<Backend, RsqrtOp<A>, Tag>
+    : UnaryArithmeticGenericImpl<Backend, RsqrtOp<A>, Tag> {};
+
+template <typename Backend, Accuracy A, VectorTag Tag>
+struct GenericImpl<Backend, RcpOp<A>, Tag>
+    : UnaryArithmeticGenericImpl<Backend, RcpOp<A>, Tag> {};
 
 /** Invokes f with every option except the compile-time math-accuracy option. */
 template <typename F>
@@ -76,7 +91,7 @@ VECOPS_ALWAYS_INLINE decltype(auto) invoke_replacing_first(
  * Selects one ExpOp specialization, removes the accuracy option, and reuses
  * the standard unary mask/population dispatcher for the remaining options.
  */
-template <bool NegativeOnly, FloatingTag Tag, typename... Options>
+template <ExpBase Base, bool NegativeOnly, FloatingTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<Tag> execute_exp_options(
     Tag tag, Vec<Tag> value, Options&&... options) {
   static_assert(valid_exp_options_for<Tag, Options...>());
@@ -85,7 +100,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_exp_options(
                             ArithmeticOptions&&... arithmetic_options)
       -> Vec<Tag> {
     if constexpr (sizeof...(ArithmeticOptions) == 0) {
-      return execute(ExpOp<accuracy, NegativeOnly>{}, tag, value);
+      return execute(ExpOp<Base, accuracy, NegativeOnly>{}, tag, value);
     } else if constexpr (
         option_count_v<IsFirstOption, ArithmeticOptions...> == 1) {
       const nint_t count = find_option<IsFirstOption>(
@@ -94,13 +109,74 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_exp_options(
       return invoke_replacing_first(
           [&](auto&&... lowered_options) -> Vec<Tag> {
             return execute_unary_arithmetic_options(
-                ExpOp<accuracy, NegativeOnly>{}, tag, value,
+                ExpOp<Base, accuracy, NegativeOnly>{}, tag, value,
                 std::forward<decltype(lowered_options)>(lowered_options)...);
           },
           mask, std::forward<ArithmeticOptions>(arithmetic_options)...);
     } else {
       return execute_unary_arithmetic_options(
-          ExpOp<accuracy, NegativeOnly>{}, tag, value,
+          ExpOp<Base, accuracy, NegativeOnly>{}, tag, value,
+          std::forward<ArithmeticOptions>(arithmetic_options)...);
+    }
+  };
+  return invoke_without_math_accuracy(
+      dispatch, std::forward<Options>(options)...);
+}
+
+/**
+ * Same dispatch shape as execute_exp_options, but for the unary math ops
+ * whose token is a template over Accuracy alone (RsqrtOp, RcpOp). Selects
+ * the tier, strips the accuracy option, and reuses the standard unary
+ * mask/population dispatcher — including the opt::first-to-mask lowering —
+ * for whatever remains.
+ */
+template <template <Accuracy> class OpToken, FloatingTag Tag, typename... Options>
+VECOPS_ALWAYS_INLINE Vec<Tag> execute_unary_math_options(
+    Tag tag, Vec<Tag> value, Options&&... options) {
+  constexpr Accuracy accuracy = selected_math_accuracy<Options...>();
+  const auto dispatch = [&]<typename... ArithmeticOptions>(
+                            ArithmeticOptions&&... arithmetic_options)
+      -> Vec<Tag> {
+    if constexpr (sizeof...(ArithmeticOptions) == 0) {
+      return execute(OpToken<accuracy>{}, tag, value);
+    } else if constexpr (
+        option_count_v<IsFirstOption, ArithmeticOptions...> == 1) {
+      // opt::first is the only masking option in a valid pack; lower it to
+      // a mask and dispatch the population explicitly. The branches are
+      // spelled out (instead of re-entering execute_unary_arithmetic_options
+      // through a replacement lambda) to keep the op token's compile-time
+      // accuracy out of nested closure captures.
+      const auto count = find_option<IsFirstOption>(
+          arithmetic_options...).count;
+      const auto mask = mwhilelt(tag, 0, count);
+      constexpr std::size_t zero_count =
+          option_count_v<IsZeroOption, ArithmeticOptions...>;
+      constexpr std::size_t vector_merge_count =
+          option_count_v<IsVectorMergeOption, ArithmeticOptions...>;
+      constexpr std::size_t scalar_merge_count =
+          option_count_v<IsScalarMergeOption, ArithmeticOptions...>;
+      constexpr OpToken<accuracy> op{};
+      if constexpr (zero_count == 1) {
+        return execute(op, tag, value, mask, zeros(tag),
+                       ZeroArithmeticInactive{});
+      } else if constexpr (vector_merge_count == 1) {
+        const auto& inactive = find_option<IsVectorMergeOption>(
+            arithmetic_options...).value;
+        return execute(
+            op, tag, value, mask, inactive, MergeArithmeticInactive{});
+      } else if constexpr (scalar_merge_count == 1) {
+        const auto inactive = fill(
+            tag, find_option<IsScalarMergeOption>(
+                     arithmetic_options...).value);
+        return execute(
+            op, tag, value, mask, inactive, MergeArithmeticInactive{});
+      } else {
+        return execute(
+            op, tag, value, mask, value, PreserveArithmeticInactive{});
+      }
+    } else {
+      return execute_unary_arithmetic_options(
+          OpToken<accuracy>{}, tag, value,
           std::forward<ArithmeticOptions>(arithmetic_options)...);
     }
   };

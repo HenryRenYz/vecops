@@ -168,7 +168,7 @@ VECOPS_VEC_DECLARE_UNARY_ARITHMETIC_OP(AbsOp);
 #undef VECOPS_VEC_DECLARE_UNARY_ARITHMETIC_OP
 
 /* **************************************************************************** */
-//    Floating-point unary: sqrt, rcp, rsqrt                              //
+//    Floating-point unary: sqrt                                           //
 /* **************************************************************************** */
 
 #define VECOPS_VEC_DECLARE_FLOATING_UNARY_OP(OpType)                   \
@@ -193,9 +193,6 @@ VECOPS_VEC_DECLARE_UNARY_ARITHMETIC_OP(AbsOp);
   }
 
 VECOPS_VEC_DECLARE_FLOATING_UNARY_OP(SqrtOp);
-VECOPS_VEC_DECLARE_FLOATING_UNARY_OP(RcpOp);
-VECOPS_VEC_DECLARE_FLOATING_UNARY_OP(RsqrtOp);
-
 #undef VECOPS_VEC_DECLARE_FLOATING_UNARY_OP
 
 /* **************************************************************************** */
@@ -366,7 +363,7 @@ inline constexpr MulOp mul{};
  * by zero produces a backend-dependent result (typically infinity or NaN).
  * Integer division is not available; use bit_shr for power-of-two division.
  *
- * @see rcp, rsqrt for reciprocal and reciprocal square root.
+ * @see Math.h rcp for a reciprocal with selectable accuracy.
  */
 template <FloatingTag Tag>
 VECOPS_ALWAYS_INLINE Vec<Tag> DivOp::operator()(
@@ -492,57 +489,6 @@ VECOPS_ALWAYS_INLINE Vec<Tag> SqrtOp::operator()(
       *this, tag, value, std::forward<Options>(options)...);
 }
 inline constexpr SqrtOp sqrt{};
-
-/**
- * Computes a reciprocal (1/x) using the active backend's legacy instruction
- * tier. x86 and SVE estimate instructions remain estimates where previously
- * used — this is NOT a full-precision IEEE reciprocal. rcp(0) may produce
- * infinity or NaN depending on the backend.
- *
- * Filtered calls use the Options population policy and have no positional
- * mask/default overload.
- *
- * @see rsqrt for reciprocal square root.
- * @see div for full-precision floating-point division.
- */
-template <FloatingTag Tag>
-VECOPS_ALWAYS_INLINE Vec<Tag> RcpOp::operator()(
-    Tag tag, Vec<Tag> value) const {
-  return details::execute(*this, tag, value);
-}
-template <FloatingTag Tag, typename... Options>
-  requires (sizeof...(Options) > 0)
-VECOPS_ALWAYS_INLINE Vec<Tag> RcpOp::operator()(
-    Tag tag, Vec<Tag> value, Options&&... options) const {
-  return details::execute_unary_arithmetic_options(
-      *this, tag, value, std::forward<Options>(options)...);
-}
-inline constexpr RcpOp rcp{};
-
-/**
- * Computes a reciprocal square root (1/sqrt(x)) using the active backend's
- * legacy estimate instruction tier. Like rcp, this is NOT full-precision.
- * rsqrt(0) may produce infinity or NaN. Negative inputs may produce NaN.
- *
- * Filtered calls use exactly one opt::masked plus optional opt::zero or
- * scalar/vector opt::merge population.
- *
- * @see sqrt for full-precision square root.
- * @see rcp for reciprocal.
- */
-template <FloatingTag Tag>
-VECOPS_ALWAYS_INLINE Vec<Tag> RsqrtOp::operator()(
-    Tag tag, Vec<Tag> value) const {
-  return details::execute(*this, tag, value);
-}
-template <FloatingTag Tag, typename... Options>
-  requires (sizeof...(Options) > 0)
-VECOPS_ALWAYS_INLINE Vec<Tag> RsqrtOp::operator()(
-    Tag tag, Vec<Tag> value, Options&&... options) const {
-  return details::execute_unary_arithmetic_options(
-      *this, tag, value, std::forward<Options>(options)...);
-}
-inline constexpr RsqrtOp rsqrt{};
 
 #undef VECOPS_VEC_DEFINE_UNARY_ARITHMETIC_OP
 

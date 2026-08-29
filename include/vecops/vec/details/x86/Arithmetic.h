@@ -1334,43 +1334,17 @@ struct X86FloatingUnaryWordImpl {
   static VECOPS_ALWAYS_INLINE RawFloat compute_float32(RawFloat value) {
     if constexpr (sizeof(RawFloat) == 16) {
       if constexpr (std::same_as<Op, SqrtOp>) return _mm_sqrt_ps(value);
-      else if constexpr (std::same_as<Op, RcpOp>) {
-#if defined(CPU_CAPABILITY_AVX512)
-        return _mm_rcp14_ps(value);
-#else
-        return _mm_rcp_ps(value);
-#endif
-      } else if constexpr (std::same_as<Op, RsqrtOp>) {
-#if defined(CPU_CAPABILITY_AVX512)
-        return _mm_rsqrt14_ps(value);
-#else
-        return _mm_rsqrt_ps(value);
-#endif
-      } else static_assert(dispatch_dependent_false<Op>);
+      else static_assert(dispatch_dependent_false<Op>);
     }
 #if VEC_WIDTH >= 256
     else if constexpr (sizeof(RawFloat) == 32) {
       if constexpr (std::same_as<Op, SqrtOp>) return _mm256_sqrt_ps(value);
-      else if constexpr (std::same_as<Op, RcpOp>) {
-#if defined(CPU_CAPABILITY_AVX512)
-        return _mm256_rcp14_ps(value);
-#else
-        return _mm256_rcp_ps(value);
-#endif
-      } else if constexpr (std::same_as<Op, RsqrtOp>) {
-#if defined(CPU_CAPABILITY_AVX512)
-        return _mm256_rsqrt14_ps(value);
-#else
-        return _mm256_rsqrt_ps(value);
-#endif
-      } else static_assert(dispatch_dependent_false<Op>);
+      else static_assert(dispatch_dependent_false<Op>);
     }
 #endif
 #if VEC_WIDTH >= 512
     else {
       if constexpr (std::same_as<Op, SqrtOp>) return _mm512_sqrt_ps(value);
-      else if constexpr (std::same_as<Op, RcpOp>) return _mm512_rcp14_ps(value);
-      else if constexpr (std::same_as<Op, RsqrtOp>) return _mm512_rsqrt14_ps(value);
       else static_assert(dispatch_dependent_false<Op>);
     }
 #endif
@@ -1415,20 +1389,16 @@ struct X86FloatingUnaryWordImpl {
           const auto raw = _mm_castsi128_ph(value.value);
           if constexpr (std::same_as<Op, SqrtOp>)
             return _mm_castph_si128(_mm_sqrt_ph(raw));
-          else if constexpr (std::same_as<Op, RcpOp>)
-            return _mm_castph_si128(_mm_rcp_ph(raw));
           else
-            return _mm_castph_si128(_mm_rsqrt_ph(raw));
+            static_assert(dispatch_dependent_false<Op>);
         }
 #if VEC_WIDTH >= 256
         else if constexpr (sizeof(Raw) == 32) {
           const auto raw = _mm256_castsi256_ph(value.value);
           if constexpr (std::same_as<Op, SqrtOp>)
             return _mm256_castph_si256(_mm256_sqrt_ph(raw));
-          else if constexpr (std::same_as<Op, RcpOp>)
-            return _mm256_castph_si256(_mm256_rcp_ph(raw));
           else
-            return _mm256_castph_si256(_mm256_rsqrt_ph(raw));
+            static_assert(dispatch_dependent_false<Op>);
         }
 #endif
 #if VEC_WIDTH >= 512
@@ -1436,10 +1406,8 @@ struct X86FloatingUnaryWordImpl {
           const auto raw = _mm512_castsi512_ph(value.value);
           if constexpr (std::same_as<Op, SqrtOp>)
             return _mm512_castph_si512(_mm512_sqrt_ph(raw));
-          else if constexpr (std::same_as<Op, RcpOp>)
-            return _mm512_castph_si512(_mm512_rcp_ph(raw));
           else
-            return _mm512_castph_si512(_mm512_rsqrt_ph(raw));
+            static_assert(dispatch_dependent_false<Op>);
         }
 #endif
 #elif defined(HAS_F16C)
@@ -1474,10 +1442,8 @@ struct X86FloatingUnaryWordImpl {
               const auto widened = static_cast<float>(input);
               if constexpr (std::same_as<Op, SqrtOp>)
                 return static_cast<T>(std::sqrt(widened));
-              else if constexpr (std::same_as<Op, RcpOp>)
-                return static_cast<T>(1.0F / widened);
               else
-                return static_cast<T>(1.0F / std::sqrt(widened));
+                static_assert(dispatch_dependent_false<Op>);
             });
 #endif
       } else if constexpr (std::same_as<T, float32_t>) {
@@ -1485,34 +1451,18 @@ struct X86FloatingUnaryWordImpl {
       } else if constexpr (std::same_as<T, float64_t>) {
         if constexpr (sizeof(Raw) == 16) {
           if constexpr (std::same_as<Op, SqrtOp>) return _mm_sqrt_pd(value.value);
-#if defined(CPU_CAPABILITY_AVX512)
-          else if constexpr (std::same_as<Op, RcpOp>) return _mm_rcp14_pd(value.value);
-          else return _mm_rsqrt14_pd(value.value);
-#else
-          else if constexpr (std::same_as<Op, RcpOp>)
-            return _mm_div_pd(_mm_set1_pd(1.0), value.value);
-          else return _mm_div_pd(_mm_set1_pd(1.0), _mm_sqrt_pd(value.value));
-#endif
+          else static_assert(dispatch_dependent_false<Op>);
         }
 #if VEC_WIDTH >= 256
         else if constexpr (sizeof(Raw) == 32) {
           if constexpr (std::same_as<Op, SqrtOp>) return _mm256_sqrt_pd(value.value);
-#if defined(CPU_CAPABILITY_AVX512)
-          else if constexpr (std::same_as<Op, RcpOp>) return _mm256_rcp14_pd(value.value);
-          else return _mm256_rsqrt14_pd(value.value);
-#else
-          else if constexpr (std::same_as<Op, RcpOp>)
-            return _mm256_div_pd(_mm256_set1_pd(1.0), value.value);
-          else return _mm256_div_pd(
-              _mm256_set1_pd(1.0), _mm256_sqrt_pd(value.value));
-#endif
+          else static_assert(dispatch_dependent_false<Op>);
         }
 #endif
 #if VEC_WIDTH >= 512
         else {
           if constexpr (std::same_as<Op, SqrtOp>) return _mm512_sqrt_pd(value.value);
-          else if constexpr (std::same_as<Op, RcpOp>) return _mm512_rcp14_pd(value.value);
-          else return _mm512_rsqrt14_pd(value.value);
+          else static_assert(dispatch_dependent_false<Op>);
         }
 #endif
       }
@@ -1534,18 +1484,8 @@ struct X86FloatingUnaryWordImpl {
             mask.value, value.value)};                                \
       else return NativeWordVec<Tag>{_mm##Width##_mask_sqrt_##Suffix( \
           inactive.value, mask.value, value.value)};                  \
-    } else if constexpr (std::same_as<Op, RcpOp>) {                    \
-      if constexpr (std::same_as<Policy, ZeroArithmeticInactive>)     \
-        return NativeWordVec<Tag>{_mm##Width##_maskz_rcp14_##Suffix(  \
-            mask.value, value.value)};                                \
-      else return NativeWordVec<Tag>{_mm##Width##_mask_rcp14_##Suffix(\
-          inactive.value, mask.value, value.value)};                  \
     } else {                                                           \
-      if constexpr (std::same_as<Policy, ZeroArithmeticInactive>)     \
-        return NativeWordVec<Tag>{_mm##Width##_maskz_rsqrt14_##Suffix(\
-            mask.value, value.value)};                                \
-      else return NativeWordVec<Tag>{_mm##Width##_mask_rsqrt14_##Suffix(\
-          inactive.value, mask.value, value.value)};                  \
+      static_assert(dispatch_dependent_false<Op>);                    \
     }
     if constexpr (std::same_as<T, float32_t>) {
       if constexpr (sizeof(Raw) == 16) {
@@ -1574,13 +1514,6 @@ struct X86FloatingUnaryWordImpl {
 template <>
 struct NativeWordImpl<X86Backend, SqrtOp>
     : X86FloatingUnaryWordImpl<SqrtOp> {};
-template <>
-struct NativeWordImpl<X86Backend, RcpOp>
-    : X86FloatingUnaryWordImpl<RcpOp> {};
-template <>
-struct NativeWordImpl<X86Backend, RsqrtOp>
-    : X86FloatingUnaryWordImpl<RsqrtOp> {};
-
 /* **************************************************************************** */
 //                          FMA word implementation                           //
 /* **************************************************************************** */

@@ -5,9 +5,10 @@
  * @file Math.h
  * @brief Exponential operations with compile-time accuracy options.
  *
- * `exp` and `exp_neg` are the canonical entry points.  With no math option
- * they use `Accuracy::Strict`; callers can select another implementation with
- * `opt::math::strict`, `opt::math::fast`, `opt::math::estimate`, or the generic
+ * `exp`, `exp2`, and `exp10` (plus their `*_neg` counterparts) are the
+ * canonical entry points.  With no math option they use `Accuracy::Strict`;
+ * callers can select another implementation with `opt::math::strict`,
+ * `opt::math::fast`, `opt::math::estimate`, or the generic
  * `opt::math::accuracy<A>` option.
  *
  * | Accuracy | Normal-input error contract |
@@ -16,10 +17,11 @@
  * | Fast     | ULP error <= 4              |
  * | Estimate | ULP error <= 4 or relative error <= 0.006 |
  *
- * `exp_strict`, `exp_fast`, and `exp_est` are convenience forwarding CPOs.
- * Their `exp_neg_*` counterparts select the same accuracy while assuming every
- * active input lane is `x <= 0`.  Accuracy options are deliberately rejected by
- * these fixed-accuracy CPOs; use `exp` or `exp_neg` when forwarding an accuracy
+ * `exp_strict`, `exp_fast`, and `exp_est` (and the `exp2_*` / `exp10_*`
+ * spellings) are convenience forwarding CPOs.  Their `*_neg_*` counterparts
+ * select the same accuracy while assuming every active input lane is
+ * `x <= 0`.  Accuracy options are deliberately rejected by these
+ * fixed-accuracy CPOs; use the canonical CPO when forwarding an accuracy
  * selected by a template parameter.
  *
  * The negative-only family skips the overflow-test path. Active positive lanes
@@ -34,7 +36,37 @@
  * `opt::unmasked` and the usual `opt::zero`/`opt::merge` inactive-lane policy,
  * in any order. `opt::first` is lowered to a backend mask. A call containing
  * only an accuracy option is an ordinary unmasked call.
+ *
+ * ***
+ *
+ * `rcp` and `rsqrt` are the reciprocal entry points of the same option
+ * system: `rsqrt_strict` / `rsqrt_fast` / `rsqrt_est` and the `rcp_*`
+ * spellings are the fixed-accuracy forwarding CPOs. Their per-tier
+ * normal-input contracts, keyed to the estimate-plus-Newton ladder the
+ * hardware offers (SVE FRSQRTE/FRECPE and FRSQRTS/FRECPS, x86
+ * RCP14/RSQRT14 and RCPPS/RSQRTPS):
+ *
+ * | Accuracy | rcp / rsqrt contract (f32, f64)   | f16, bf16        |
+ * |----------|-----------------------------------|------------------|
+ * | Strict   | ULP error <= 1                    | ULP error <= 1   |
+ * | Fast     | relative error <= 2^-15           | ULP error <= 2   |
+ * | Estimate | relative error <= 2^-7            | relative error <= 2^-7 |
+ *
+ * The ladder mirrors common industry tiers: Estimate is the raw hardware
+ * estimate (architecturally 2^-8 on SVE, tighter on x86), Fast adds one
+ * Newton step (the classic NEON/SSE estimate-plus-refinement tier used for
+ * game math and ML normalization kernels), and Strict refines to at most
+ * 1 ULP — the SLEEF u10 class, tighter than CUDA's 2-ULP `rsqrtf`.
+ *
+ * Special inputs are tier-independent: rcp(+-0) = +-inf, rcp(+-inf) = +-0,
+ * rsqrt(+-0) = +inf, rsqrt(x < 0) = NaN, and NaN propagates. When
+ * `VECOPS_PRESERVE_SUBNORMALS` is defined, Strict produces gradual subnormal
+ * results (rcp of huge inputs); Fast and Estimate always flush subnormal
+ * outputs to zero. Accuracy options apply exactly as for the exponential
+ * family, including combination with masking options.
  */
+
+#include <cstdint>
 
 #include "vecops/vec/Arithmetic.h"
 #include "vecops/vec/Bit.h"
@@ -42,10 +74,17 @@
 
 namespace vecops::vec {
 
+/** Exponential base distinguishing exp, exp2, and exp10 op tokens. */
+enum class ExpBase : std::uint8_t {
+  E,      //< e^x
+  Base2,  //< 2^x
+  Base10, //< 10^x
+};
+
 namespace details {
 
-/** One related implementation token for every accuracy/domain combination. */
-template <Accuracy A, bool NegativeOnly>
+/** One related implementation token for every base/accuracy/domain combination. */
+template <ExpBase Base, Accuracy A, bool NegativeOnly>
 struct ExpOp {};
 
 template <FloatingTag Tag, typename... Options>
@@ -98,8 +137,8 @@ inline constexpr bool has_math_accuracy_option_v =
 
 } // namespace details
 
-/** Canonical exponential CPO, parameterized only by its valid input domain. */
-template <bool NegativeOnly>
+/** Canonical exponential CPO, parameterized by base and valid input domain. */
+template <ExpBase Base, bool NegativeOnly>
 struct ExpCpo {
   template <FloatingTag Tag>
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(Tag tag, Vec<Tag> value) const;
@@ -131,7 +170,7 @@ struct ExpCpo {
 };
 
 /** Fixed-accuracy forwarding CPO used by exp_fast/exp_est/etc. */
-template <Accuracy A, bool NegativeOnly>
+template <ExpBase Base, Accuracy A, bool NegativeOnly>
 struct FixedAccuracyExpCpo {
   template <FloatingTag Tag, typename... Options>
     requires (!details::has_math_accuracy_option_v<Options...> &&
@@ -139,7 +178,7 @@ struct FixedAccuracyExpCpo {
                   Tag, Options..., decltype(opt::math::accuracy<A>)>())
   VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
       Tag tag, Vec<Tag> value, Options&&... options) const {
-    return ExpCpo<NegativeOnly>{}(
+    return ExpCpo<Base, NegativeOnly>{}(
         tag, value, opt::math::accuracy<A>,
         std::forward<Options>(options)...);
   }
@@ -147,6 +186,88 @@ struct FixedAccuracyExpCpo {
   template <FloatingVectorValue V, typename... Options>
     requires (!details::has_math_accuracy_option_v<Options...> &&
               details::valid_exp_options_for<
+                  VecToTag<V>, Options...,
+                  decltype(opt::math::accuracy<A>)>())
+  VECOPS_ALWAYS_INLINE V operator()(V value, Options&&... options) const {
+    return (*this)(
+        VecToTag<V>{}, value, std::forward<Options>(options)...);
+  }
+};
+
+/* **************************************************************************** */
+//    Reciprocal operations: rcp, rsqrt                                        //
+/* **************************************************************************** */
+
+namespace details {
+
+/** One related implementation token for every reciprocal accuracy tier. */
+template <Accuracy A>
+struct RsqrtOp {};
+
+template <Accuracy A>
+struct RcpOp {};
+
+/**
+ * Option rules for rcp/rsqrt mirror the exp family: at most one accuracy
+ * option, exactly one of masked/unmasked/first when masking at all, and at
+ * most one zero/merge population option.
+ */
+template <FloatingTag Tag, typename... Options>
+consteval bool valid_reciprocal_options_for() {
+  return valid_exp_options_for<Tag, Options...>();
+}
+
+} // namespace details
+
+/** Canonical unary-math CPO shared by rcp and rsqrt. */
+template <template <Accuracy> class OpToken>
+struct UnaryMathCpo {
+  template <FloatingTag Tag>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(Tag tag, Vec<Tag> value) const;
+
+  template <Accuracy A, FloatingTag Tag, typename... ArithmeticOptions>
+    requires ((!details::is_math_accuracy_option_v<ArithmeticOptions>) && ... &&
+              details::valid_reciprocal_options_for<
+                  Tag,
+                  opt::math::AccuracyOption<A>,
+                  ArithmeticOptions...>())
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag,
+      Vec<Tag> value,
+      opt::math::AccuracyOption<A> accuracy,
+      ArithmeticOptions&&... arithmetic_options) const;
+
+  template <FloatingTag Tag, typename... Options>
+    requires (sizeof...(Options) > 0 &&
+              details::valid_reciprocal_options_for<Tag, Options...>())
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Options&&... options) const;
+
+  template <FloatingVectorValue V, typename... Options>
+    requires (details::valid_reciprocal_options_for<VecToTag<V>, Options...>())
+  VECOPS_ALWAYS_INLINE V operator()(V value, Options&&... options) const {
+    return (*this)(
+        VecToTag<V>{}, value, std::forward<Options>(options)...);
+  }
+};
+
+/** Fixed-accuracy forwarding CPO used by rsqrt_fast/rcp_est/etc. */
+template <template <Accuracy> class OpToken, Accuracy A>
+struct FixedAccuracyUnaryMathCpo {
+  template <FloatingTag Tag, typename... Options>
+    requires (!details::has_math_accuracy_option_v<Options...> &&
+              details::valid_reciprocal_options_for<
+                  Tag, Options..., decltype(opt::math::accuracy<A>)>())
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Options&&... options) const {
+    return UnaryMathCpo<OpToken>{}(
+        tag, value, opt::math::accuracy<A>,
+        std::forward<Options>(options)...);
+  }
+
+  template <FloatingVectorValue V, typename... Options>
+    requires (!details::has_math_accuracy_option_v<Options...> &&
+              details::valid_reciprocal_options_for<
                   VecToTag<V>, Options...,
                   decltype(opt::math::accuracy<A>)>())
   VECOPS_ALWAYS_INLINE V operator()(V value, Options&&... options) const {
@@ -169,29 +290,30 @@ struct FixedAccuracyExpCpo {
 
 namespace vecops::vec {
 
-template <bool NegativeOnly>
+template <ExpBase Base, bool NegativeOnly>
 template <FloatingTag Tag>
-VECOPS_ALWAYS_INLINE Vec<Tag> ExpCpo<NegativeOnly>::operator()(
+VECOPS_ALWAYS_INLINE Vec<Tag> ExpCpo<Base, NegativeOnly>::operator()(
     Tag tag, Vec<Tag> value) const {
   return details::execute(
-      details::ExpOp<Accuracy::Strict, NegativeOnly>{}, tag, value);
+      details::ExpOp<Base, Accuracy::Strict, NegativeOnly>{}, tag, value);
 }
 
-template <bool NegativeOnly>
+template <ExpBase Base, bool NegativeOnly>
 template <Accuracy A, FloatingTag Tag, typename... ArithmeticOptions>
   requires ((!details::is_math_accuracy_option_v<ArithmeticOptions>) && ... &&
             details::valid_exp_options_for<
                 Tag,
                 opt::math::AccuracyOption<A>,
                 ArithmeticOptions...>())
-VECOPS_ALWAYS_INLINE Vec<Tag> ExpCpo<NegativeOnly>::operator()(
+VECOPS_ALWAYS_INLINE Vec<Tag> ExpCpo<Base, NegativeOnly>::operator()(
     Tag tag,
     Vec<Tag> value,
     opt::math::AccuracyOption<A> accuracy,
     ArithmeticOptions&&... arithmetic_options) const {
   (void)accuracy;
   if constexpr (sizeof...(ArithmeticOptions) == 0) {
-    return details::execute(details::ExpOp<A, NegativeOnly>{}, tag, value);
+    return details::execute(
+        details::ExpOp<Base, A, NegativeOnly>{}, tag, value);
   } else if constexpr (
       details::option_count_v<
           details::IsFirstOption, ArithmeticOptions...> == 1) {
@@ -201,50 +323,217 @@ VECOPS_ALWAYS_INLINE Vec<Tag> ExpCpo<NegativeOnly>::operator()(
     return details::invoke_replacing_first(
         [&](auto&&... lowered_options) -> Vec<Tag> {
           return details::execute_unary_arithmetic_options(
-              details::ExpOp<A, NegativeOnly>{}, tag, value,
+              details::ExpOp<Base, A, NegativeOnly>{}, tag, value,
               std::forward<decltype(lowered_options)>(lowered_options)...);
         },
         mask, std::forward<ArithmeticOptions>(arithmetic_options)...);
   } else {
     return details::execute_unary_arithmetic_options(
-        details::ExpOp<A, NegativeOnly>{}, tag, value,
+        details::ExpOp<Base, A, NegativeOnly>{}, tag, value,
         std::forward<ArithmeticOptions>(arithmetic_options)...);
   }
 }
 
-template <bool NegativeOnly>
+template <ExpBase Base, bool NegativeOnly>
 template <FloatingTag Tag, typename... Options>
   requires (sizeof...(Options) > 0 &&
             details::valid_exp_options_for<Tag, Options...>())
-VECOPS_ALWAYS_INLINE Vec<Tag> ExpCpo<NegativeOnly>::operator()(
+VECOPS_ALWAYS_INLINE Vec<Tag> ExpCpo<Base, NegativeOnly>::operator()(
     Tag tag, Vec<Tag> value, Options&&... options) const {
-  return details::execute_exp_options<NegativeOnly>(
+  return details::execute_exp_options<Base, NegativeOnly>(
       tag, value, std::forward<Options>(options)...);
 }
 
 /** Full-domain exponential; defaults to opt::math::strict. */
-inline constexpr ExpCpo<false> exp{};
+inline constexpr ExpCpo<ExpBase::E, false> exp{};
 
 /** Negative-only exponential; defaults to opt::math::strict. */
-inline constexpr ExpCpo<true> exp_neg{};
+inline constexpr ExpCpo<ExpBase::E, true> exp_neg{};
 
 /** Fixed Strict forwarding entry point for exp. */
-inline constexpr FixedAccuracyExpCpo<Accuracy::Strict, false> exp_strict{};
+inline constexpr FixedAccuracyExpCpo<ExpBase::E, Accuracy::Strict, false>
+    exp_strict{};
 
 /** Fixed Fast forwarding entry point for exp. */
-inline constexpr FixedAccuracyExpCpo<Accuracy::Fast, false> exp_fast{};
+inline constexpr FixedAccuracyExpCpo<ExpBase::E, Accuracy::Fast, false>
+    exp_fast{};
 
 /** Fixed Estimate forwarding entry point for exp. */
-inline constexpr FixedAccuracyExpCpo<Accuracy::Estimate, false> exp_est{};
+inline constexpr FixedAccuracyExpCpo<ExpBase::E, Accuracy::Estimate, false>
+    exp_est{};
 
 /** Fixed Strict forwarding entry point for exp_neg. */
-inline constexpr FixedAccuracyExpCpo<Accuracy::Strict, true> exp_neg_strict{};
+inline constexpr FixedAccuracyExpCpo<ExpBase::E, Accuracy::Strict, true>
+    exp_neg_strict{};
 
 /** Fixed Fast forwarding entry point for exp_neg. */
-inline constexpr FixedAccuracyExpCpo<Accuracy::Fast, true> exp_neg_fast{};
+inline constexpr FixedAccuracyExpCpo<ExpBase::E, Accuracy::Fast, true>
+    exp_neg_fast{};
 
 /** Fixed Estimate forwarding entry point for exp_neg. */
-inline constexpr FixedAccuracyExpCpo<Accuracy::Estimate, true> exp_neg_est{};
+inline constexpr FixedAccuracyExpCpo<ExpBase::E, Accuracy::Estimate, true>
+    exp_neg_est{};
+
+/** Full-domain base-2 exponential; defaults to opt::math::strict. */
+inline constexpr ExpCpo<ExpBase::Base2, false> exp2{};
+
+/** Negative-only base-2 exponential; defaults to opt::math::strict. */
+inline constexpr ExpCpo<ExpBase::Base2, true> exp2_neg{};
+
+/** Fixed Strict forwarding entry point for exp2. */
+inline constexpr FixedAccuracyExpCpo<ExpBase::Base2, Accuracy::Strict, false>
+    exp2_strict{};
+
+/** Fixed Fast forwarding entry point for exp2. */
+inline constexpr FixedAccuracyExpCpo<ExpBase::Base2, Accuracy::Fast, false>
+    exp2_fast{};
+
+/** Fixed Estimate forwarding entry point for exp2. */
+inline constexpr FixedAccuracyExpCpo<ExpBase::Base2, Accuracy::Estimate, false>
+    exp2_est{};
+
+/** Fixed Strict forwarding entry point for exp2_neg. */
+inline constexpr FixedAccuracyExpCpo<ExpBase::Base2, Accuracy::Strict, true>
+    exp2_neg_strict{};
+
+/** Fixed Fast forwarding entry point for exp2_neg. */
+inline constexpr FixedAccuracyExpCpo<ExpBase::Base2, Accuracy::Fast, true>
+    exp2_neg_fast{};
+
+/** Fixed Estimate forwarding entry point for exp2_neg. */
+inline constexpr FixedAccuracyExpCpo<ExpBase::Base2, Accuracy::Estimate, true>
+    exp2_neg_est{};
+
+/** Full-domain base-10 exponential; defaults to opt::math::strict. */
+inline constexpr ExpCpo<ExpBase::Base10, false> exp10{};
+
+/** Negative-only base-10 exponential; defaults to opt::math::strict. */
+inline constexpr ExpCpo<ExpBase::Base10, true> exp10_neg{};
+
+/** Fixed Strict forwarding entry point for exp10. */
+inline constexpr FixedAccuracyExpCpo<ExpBase::Base10, Accuracy::Strict, false>
+    exp10_strict{};
+
+/** Fixed Fast forwarding entry point for exp10. */
+inline constexpr FixedAccuracyExpCpo<ExpBase::Base10, Accuracy::Fast, false>
+    exp10_fast{};
+
+/** Fixed Estimate forwarding entry point for exp10. */
+inline constexpr FixedAccuracyExpCpo<ExpBase::Base10, Accuracy::Estimate, false>
+    exp10_est{};
+
+/** Fixed Strict forwarding entry point for exp10_neg. */
+inline constexpr FixedAccuracyExpCpo<ExpBase::Base10, Accuracy::Strict, true>
+    exp10_neg_strict{};
+
+/** Fixed Fast forwarding entry point for exp10_neg. */
+inline constexpr FixedAccuracyExpCpo<ExpBase::Base10, Accuracy::Fast, true>
+    exp10_neg_fast{};
+
+/** Fixed Estimate forwarding entry point for exp10_neg. */
+inline constexpr FixedAccuracyExpCpo<ExpBase::Base10, Accuracy::Estimate, true>
+    exp10_neg_est{};
+
+/* **************************************************************************** */
+//    rcp / rsqrt definitions                                                  //
+/* **************************************************************************** */
+
+template <template <Accuracy> class OpToken>
+template <FloatingTag Tag>
+VECOPS_ALWAYS_INLINE Vec<Tag> UnaryMathCpo<OpToken>::operator()(
+    Tag tag, Vec<Tag> value) const {
+  return details::execute(OpToken<Accuracy::Strict>{}, tag, value);
+}
+
+template <template <Accuracy> class OpToken>
+template <Accuracy A, FloatingTag Tag, typename... ArithmeticOptions>
+  requires ((!details::is_math_accuracy_option_v<ArithmeticOptions>) && ... &&
+            details::valid_reciprocal_options_for<
+                Tag,
+                opt::math::AccuracyOption<A>,
+                ArithmeticOptions...>())
+VECOPS_ALWAYS_INLINE Vec<Tag> UnaryMathCpo<OpToken>::operator()(
+    Tag tag,
+    Vec<Tag> value,
+    opt::math::AccuracyOption<A> accuracy,
+    ArithmeticOptions&&... arithmetic_options) const {
+  // Re-read the tier from the option type instead of relying on the
+  // deduced A through deep inline chains.
+  constexpr Accuracy tier =
+      details::IsMathAccuracyOption<opt::math::AccuracyOption<A>>::accuracy;
+  if constexpr (sizeof...(ArithmeticOptions) == 0) {
+    return details::execute(OpToken<tier>{}, tag, value);
+  } else if constexpr (
+      details::option_count_v<
+          details::IsFirstOption, ArithmeticOptions...> == 1) {
+    // opt::first is the only masking option in a valid pack; lower it
+    // explicitly (details::execute_unary_math_options has the spelled-out
+    // population branches).
+    return details::execute_unary_math_options<OpToken>(
+        tag, value, opt::math::accuracy<tier>,
+        std::forward<ArithmeticOptions>(arithmetic_options)...);
+  } else {
+    return details::execute_unary_arithmetic_options(
+        OpToken<tier>{}, tag, value,
+        std::forward<ArithmeticOptions>(arithmetic_options)...);
+  }
+}
+
+template <template <Accuracy> class OpToken>
+template <FloatingTag Tag, typename... Options>
+  requires (sizeof...(Options) > 0 &&
+            details::valid_reciprocal_options_for<Tag, Options...>())
+VECOPS_ALWAYS_INLINE Vec<Tag> UnaryMathCpo<OpToken>::operator()(
+    Tag tag, Vec<Tag> value, Options&&... options) const {
+  return details::execute_unary_math_options<OpToken>(
+      tag, value, std::forward<Options>(options)...);
+}
+
+/**
+ * Computes the reciprocal square root 1/sqrt(x). With no math option the
+ * call uses Accuracy::Strict; see the file header for the per-tier error
+ * contracts. rsqrt(+-0) = +inf, rsqrt(x < 0) = NaN, rsqrt(+inf) = +0, NaN
+ * propagates. Special inputs produce identical results in every tier.
+ *
+ * @see rcp for the plain reciprocal.
+ * @see sqrt for the correctly-rounded square root.
+ */
+inline constexpr UnaryMathCpo<details::RsqrtOp> rsqrt{};
+
+/** Fixed Strict forwarding entry point for rsqrt. */
+inline constexpr FixedAccuracyUnaryMathCpo<details::RsqrtOp, Accuracy::Strict>
+    rsqrt_strict{};
+
+/** Fixed Fast forwarding entry point for rsqrt. */
+inline constexpr FixedAccuracyUnaryMathCpo<details::RsqrtOp, Accuracy::Fast>
+    rsqrt_fast{};
+
+/** Fixed Estimate forwarding entry point for rsqrt. */
+inline constexpr FixedAccuracyUnaryMathCpo<details::RsqrtOp, Accuracy::Estimate>
+    rsqrt_est{};
+
+/**
+ * Computes the reciprocal 1/x. With no math option the call uses
+ * Accuracy::Strict; see the file header for the per-tier error contracts.
+ * rcp(+-0) = +-inf, rcp(+-inf) = +-0 with the sign of the input, NaN
+ * propagates. Special inputs produce identical results in every tier.
+ *
+ * @see rsqrt for the reciprocal square root.
+ * @see div for full-precision division.
+ */
+inline constexpr UnaryMathCpo<details::RcpOp> rcp{};
+
+/** Fixed Strict forwarding entry point for rcp. */
+inline constexpr FixedAccuracyUnaryMathCpo<details::RcpOp, Accuracy::Strict>
+    rcp_strict{};
+
+/** Fixed Fast forwarding entry point for rcp. */
+inline constexpr FixedAccuracyUnaryMathCpo<details::RcpOp, Accuracy::Fast>
+    rcp_fast{};
+
+/** Fixed Estimate forwarding entry point for rcp. */
+inline constexpr FixedAccuracyUnaryMathCpo<details::RcpOp, Accuracy::Estimate>
+    rcp_est{};
 
 } // namespace vecops::vec
 

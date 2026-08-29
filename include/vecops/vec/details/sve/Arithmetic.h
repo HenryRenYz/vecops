@@ -347,10 +347,6 @@ struct SVEFloatingUnaryWordImpl {
             svfloat32_t input, svfloat32_t fallback, svbool_t active) {
           if constexpr (std::same_as<Op, SqrtOp>)
             return svsqrt_f32_m(fallback, active, input);
-          else if constexpr (std::same_as<Op, RcpOp>)
-            return svsel_f32(active, svrecpe_f32(input), fallback);
-          else if constexpr (std::same_as<Op, RsqrtOp>)
-            return svsel_f32(active, svrsqrte_f32(input), fallback);
           else
             static_assert(dispatch_dependent_false<Op>);
         };
@@ -361,12 +357,6 @@ struct SVEFloatingUnaryWordImpl {
 #define VECOPS_VEC_SVE_FLOATING_UNARY(Suffix)                          \
         if constexpr (std::same_as<Op, SqrtOp>)                        \
           return svsqrt_##Suffix##_m(raw_inactive, mask, raw_value);   \
-        else if constexpr (std::same_as<Op, RcpOp>)                    \
-          return svsel_##Suffix(                                       \
-              mask, svrecpe_##Suffix(raw_value), raw_inactive);       \
-        else if constexpr (std::same_as<Op, RsqrtOp>)                  \
-          return svsel_##Suffix(                                       \
-              mask, svrsqrte_##Suffix(raw_value), raw_inactive);      \
         else static_assert(dispatch_dependent_false<Op>)
         if constexpr (std::same_as<T, float16_t>) {
           VECOPS_VEC_SVE_FLOATING_UNARY(f16);
@@ -385,13 +375,6 @@ struct SVEFloatingUnaryWordImpl {
 template <>
 struct NativeWordImpl<SVEBackend, SqrtOp>
     : SVEFloatingUnaryWordImpl<SqrtOp> {};
-template <>
-struct NativeWordImpl<SVEBackend, RcpOp>
-    : SVEFloatingUnaryWordImpl<RcpOp> {};
-template <>
-struct NativeWordImpl<SVEBackend, RsqrtOp>
-    : SVEFloatingUnaryWordImpl<RsqrtOp> {};
-
 /* **************************************************************************** */
 //    SVEFmaWordImpl and registrations                                        //
 /* **************************************************************************** */

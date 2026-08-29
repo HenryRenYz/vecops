@@ -64,6 +64,8 @@ vecops_add_test(NAME VecFloatingUnaryTest FILES vec/FloatingUnaryTest.cpp
     FOLDER vec/arithmetic ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecMathTest FILES vec/MathTest.cpp
     FOLDER vec/math ARCH ${VEC_BASE_ARCH} LABELS vec)
+vecops_add_test(NAME VecReciprocalTest FILES vec/ReciprocalTest.cpp
+    FOLDER vec/math ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecMemoryTest FILES vec/MemoryTest.cpp
     FOLDER vec/memory ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecPrefetchTest FILES vec/PrefetchTest.cpp

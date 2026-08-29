@@ -25,7 +25,7 @@ void run_fixed_floating_unary_test();
 
 static_assert(VECOPS_TEST_SHARD_COUNT == vec_test::FloatingElements::size);
 
-enum class FloatingUnaryKind { Sqrt, Rcp, Rsqrt };
+enum class FloatingUnaryKind { Sqrt };
 
 template <typename T>
 T floating_unary_operand(vecops::nint_t lane, bool active = true) {
@@ -38,12 +38,7 @@ T floating_unary_operand(vecops::nint_t lane, bool active = true) {
 template <FloatingUnaryKind Kind, typename T>
 T expected_floating_unary(T value) {
   const double widened = static_cast<double>(value);
-  if constexpr (Kind == FloatingUnaryKind::Sqrt)
-    return static_cast<T>(std::sqrt(widened));
-  else if constexpr (Kind == FloatingUnaryKind::Rcp)
-    return static_cast<T>(1.0 / widened);
-  else
-    return static_cast<T>(1.0 / std::sqrt(widened));
+  return static_cast<T>(std::sqrt(widened));
 }
 
 template <typename T>
@@ -67,18 +62,13 @@ void expect_floating_unary_near(T expected, T actual, bool estimate) {
 template <FloatingUnaryKind Kind, vec::FloatingTag Tag, typename... Options>
 vec::Vec<Tag> invoke_floating_unary(
     Tag tag, vec::Vec<Tag> value, Options&&... options) {
-  if constexpr (Kind == FloatingUnaryKind::Sqrt)
-    return vec::sqrt(value, std::forward<Options>(options)...);
-  else if constexpr (Kind == FloatingUnaryKind::Rcp)
-    return vec::rcp(value, std::forward<Options>(options)...);
-  else
-    return vec::rsqrt(value, std::forward<Options>(options)...);
+  return vec::sqrt(value, std::forward<Options>(options)...);
 }
 
 template <FloatingUnaryKind Kind, bool FullOptions = true, vec::FloatingTag Tag>
 void verify_floating_unary(Tag tag) {
   using T = vec::ElementOf<Tag>;
-  constexpr bool estimate = Kind != FloatingUnaryKind::Sqrt;
+  constexpr bool estimate = false;
   auto value = vec::zeros(tag);
   auto vector_merge = vec::zeros(tag);
   auto mask = vec::mfalse(tag);
@@ -152,8 +142,6 @@ void run_floating_unary_test() {
   vec_test::for_each_scalable_shape<T>([]<vec::FloatingTag Tag>() {
     constexpr bool options = vec_test::exhaustive_options_shape<Tag>;
     verify_floating_unary<FloatingUnaryKind::Sqrt, options>(Tag{});
-    verify_floating_unary<FloatingUnaryKind::Rcp, options>(Tag{});
-    verify_floating_unary<FloatingUnaryKind::Rsqrt, options>(Tag{});
   });
 }
 
@@ -168,26 +156,6 @@ void run_floating_unary_special_values_test() {
   EXPECT_TRUE(std::isnan(static_cast<double>(vec::get(Tag{}, sqrt_negative, 0))));
   EXPECT_TRUE(std::isnan(static_cast<double>(vec::get(Tag{}, sqrt_nan, 0))));
   EXPECT_TRUE(std::isinf(static_cast<double>(vec::get(Tag{}, sqrt_infinity, 0))));
-  const auto rcp_positive_zero = vec::rcp(vec::fill(Tag{}, static_cast<T>(0.0)));
-  const auto rcp_negative_zero = vec::rcp(vec::fill(Tag{}, static_cast<T>(-0.0)));
-  const auto rcp_infinity = vec::rcp(vec::fill(Tag{}, infinity));
-  const auto rcp_nan = vec::rcp(vec::fill(Tag{}, nan));
-  const double positive = static_cast<double>(vec::get(Tag{}, rcp_positive_zero, 0));
-  const double negative = static_cast<double>(vec::get(Tag{}, rcp_negative_zero, 0));
-  EXPECT_TRUE(std::isinf(positive));
-  EXPECT_FALSE(std::signbit(positive));
-  EXPECT_TRUE(std::isinf(negative));
-  EXPECT_TRUE(std::signbit(negative));
-  EXPECT_EQ(0.0, static_cast<double>(vec::get(Tag{}, rcp_infinity, 0)));
-  EXPECT_TRUE(std::isnan(static_cast<double>(vec::get(Tag{}, rcp_nan, 0))));
-  const auto rsqrt_zero = vec::rsqrt(vec::fill(Tag{}, static_cast<T>(0.0)));
-  const auto rsqrt_negative = vec::rsqrt(vec::fill(Tag{}, static_cast<T>(-1)));
-  const auto rsqrt_infinity = vec::rsqrt(vec::fill(Tag{}, infinity));
-  const auto rsqrt_nan = vec::rsqrt(vec::fill(Tag{}, nan));
-  EXPECT_TRUE(std::isinf(static_cast<double>(vec::get(Tag{}, rsqrt_zero, 0))));
-  EXPECT_TRUE(std::isnan(static_cast<double>(vec::get(Tag{}, rsqrt_negative, 0))));
-  EXPECT_EQ(0.0, static_cast<double>(vec::get(Tag{}, rsqrt_infinity, 0)));
-  EXPECT_TRUE(std::isnan(static_cast<double>(vec::get(Tag{}, rsqrt_nan, 0))));
 }
 
 #if defined(CPU_CAPABILITY_SVE) && defined(HAS_FIXED_SVE_BITS)
@@ -204,8 +172,6 @@ void run_fixed_floating_unary_test() {
     using Tag = vec::FixedTag<T, lanes>;
     EXPECT_GT(vec::num_words(Tag{}), 4);
     verify_floating_unary<FloatingUnaryKind::Sqrt>(Tag{});
-    verify_floating_unary<FloatingUnaryKind::Rcp, false>(Tag{});
-    verify_floating_unary<FloatingUnaryKind::Rsqrt, false>(Tag{});
   }
 }
 

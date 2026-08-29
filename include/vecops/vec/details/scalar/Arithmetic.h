@@ -287,7 +287,7 @@ struct NativeWordImpl<ScalarBackend, AbsOp>
     : ScalarUnaryArithmeticWordImpl<AbsOp> {};
 
 /* **************************************************************************** */
-//    ScalarFloatingUnaryWordImpl — SqrtOp, RcpOp, RsqrtOp and registrations //
+//    ScalarFloatingUnaryWordImpl — SqrtOp and registrations              //
 /* **************************************************************************** */
 
 template <typename Op>
@@ -304,22 +304,12 @@ struct ScalarFloatingUnaryWordImpl {
         if constexpr (std::same_as<Op, SqrtOp>) {
           value[lane] = static_cast<T>(
               std::sqrt(static_cast<float>(value[lane])));
-        } else if constexpr (std::same_as<Op, RcpOp>) {
-          value[lane] = static_cast<T>(T(1.0F) / value[lane]);
-        } else if constexpr (std::same_as<Op, RsqrtOp>) {
-          const T root = static_cast<T>(
-              std::sqrt(static_cast<float>(value[lane])));
-          value[lane] = static_cast<T>(T(1.0F) / root);
         } else {
           static_assert(dispatch_dependent_false<Op>);
         }
       } else {
         if constexpr (std::same_as<Op, SqrtOp>)
           value[lane] = static_cast<T>(std::sqrt(value[lane]));
-        else if constexpr (std::same_as<Op, RcpOp>)
-          value[lane] = static_cast<T>(T(1) / value[lane]);
-        else if constexpr (std::same_as<Op, RsqrtOp>)
-          value[lane] = static_cast<T>(T(1) / std::sqrt(value[lane]));
         else
           static_assert(dispatch_dependent_false<Op>);
       }
@@ -339,13 +329,6 @@ struct ScalarFloatingUnaryWordImpl {
 template <>
 struct NativeWordImpl<ScalarBackend, SqrtOp>
     : ScalarFloatingUnaryWordImpl<SqrtOp> {};
-template <>
-struct NativeWordImpl<ScalarBackend, RcpOp>
-    : ScalarFloatingUnaryWordImpl<RcpOp> {};
-template <>
-struct NativeWordImpl<ScalarBackend, RsqrtOp>
-    : ScalarFloatingUnaryWordImpl<RsqrtOp> {};
-
 } // namespace vecops::vec::details
 
 #endif // VECOPS_VEC_DETAILS_SCALAR_ARITHMETIC_H
