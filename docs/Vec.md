@@ -508,6 +508,17 @@ fixed-accuracy spellings (`exp_strict`, `exp_fast`, `exp_est`,
 - Fast/Estimate always flush subnormal outputs to zero; with
   `VECOPS_PRESERVE_SUBNORMALS` defined, Strict preserves them.
 
+Implementation notes: the SVE backend derives all bases from the Arm
+optimized-routines SVE exp kernels (FEXPA table + shared reduction
+skeleton). The x86 backend runs one family kernel over the bases:
+`n = rint(x*log2(base))` plus a two-part Cody-Waite residual, a per-base
+minimax polynomial, and SCALEF reconstruction (integer exponent injection
+before AVX-512) — base 2 degenerates to the exact `n = rint(x)`,
+`r = x - n` reduction, which makes `exp2` the cheapest member of the
+family; f64 coefficients come from SLEEF's u10 `xexp2`/`xexp10` sets and
+the f32/f16 sets are bespoke Remez/grid fits. The scalar backend leans on
+the platform libm per lane.
+
 The reciprocal family covers `rcp` (1/x) and `rsqrt` (1/sqrt(x)) with the
 same option grammar (`rcp_strict`, `rcp_fast`, `rcp_est`, `rsqrt_*`).
 Their per-tier contracts follow the estimate-plus-Newton ladder the
@@ -539,6 +550,49 @@ propagates. rcp's Strict tier produces gradual subnormal results under
 them to signed zero.
 - NaN inputs propagate through every tier and family, including mixed
   vectors whose special-tail lanes force the slow path.
+
+The logarithm family covers `log`, `log2`, and `log10` with the same
+option grammar (`log_strict`, `log_fast`, `log_est`, `log2_*`, `log10_*`).
+Logarithms have no hardware estimate instruction to refine against, so
+the tiers ladder along the remaining cost axes — table lookups and
+polynomial degree — and the top tier targets the accuracy class of Arm's
+own production SVE libm routines rather than the 1-ULP reciprocal class:
+
+| Accuracy | log family (f32) | log family (f64) | f16, bf16 |
+|---|---|---|---|
+| `Strict` (default) | ULP error <= 1 | ULP error <= 4 | ULP error <= 1 |
+| `Fast` | relative error <= 2^-13 | relative error <= 2^-13 | ULP error <= 2 |
+| `Estimate` | relative error <= 2^-7 | relative error <= 2^-7 | relative error <= 2^-7 |
+
+**f64 Strict** is the optimized-routines vector-libm class: the SVE
+backend ports their 128-entry `invc`/`logc`-table kernels verbatim
+(measured 2.64/2.58/2.46 ULP for log/log2/log10; SLEEF's relaxed "u35"
+tier is the same class), and a 1-ULP log would need double-double
+accumulation of the table terms. **f32 Strict** can afford the wider
+detour instead: it widens to f64, evaluates the f64 table kernel, and
+narrows once — the same double-precision-intermediate trick as the
+upstream scalar `logf` family — so it stays within 1 ULP after the final
+rounding. **Fast** drops the table for a six-term Taylor kernel on the
+[2/3, 4/3) reduction window (`r = z - 1` is exact by Sterbenz); non-e
+bases scale once at the end, which preserves the relative-error bound.
+**Estimate** keeps three terms for the same 2^-7 budget as the reciprocal
+Estimate tier.
+
+Reduction and tails follow the upstream design: `bits(x) - off` splits
+`x = 2^k * z` with the table index masked to the table size (any input
+bit pattern gathers in range), and one `NOINLINE` special routine owns
+subnormals (renormalized by an exact power of two plus a logarithmic
+correction), zero, negatives, `+inf`, and NaN. Special inputs are
+tier-independent: `log(+-0) = -inf`, `log(+inf) = +inf`,
+`log(x < 0) = NaN` (including `-inf`), `log(1) = +0` exactly, NaN
+propagates. Log outputs are never subnormal, so the
+`VECOPS_PRESERVE_SUBNORMALS` build modes differ only in accuracy. f16 and
+bf16 widen through the f32 pipelines (every f16 value is normal in f32).
+
+The x86 and scalar backends currently evaluate the IEEE libm logarithm
+per lane (through a float intermediate for the narrow formats), which
+satisfies every tier contract including f32/f64 Strict; vector-native
+kernels remain future work there.
 
 ### Reductions (`vec/Reduction.h`)
 

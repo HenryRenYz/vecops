@@ -3,10 +3,11 @@
 
 /**
  * @file Math.h
- * @brief Exponential operations with compile-time accuracy options.
+ * @brief The math module: exp, reciprocal, and logarithm operations with
+ * compile-time accuracy options.
  *
  * `exp`, `exp2`, and `exp10` (plus their `*_neg` counterparts) are the
- * canonical entry points.  With no math option they use `Accuracy::Strict`;
+ * canonical exponential entry points.  With no math option they use `Accuracy::Strict`;
  * callers can select another implementation with `opt::math::strict`,
  * `opt::math::fast`, `opt::math::estimate`, or the generic
  * `opt::math::accuracy<A>` option.
@@ -64,6 +65,43 @@
  * results (rcp of huge inputs); Fast and Estimate always flush subnormal
  * outputs to zero. Accuracy options apply exactly as for the exponential
  * family, including combination with masking options.
+ *
+ * ***
+ *
+ * `log`, `log2`, and `log10` are the logarithm entry points of the same
+ * option system, with the fixed-accuracy spellings `log_strict` / `log_fast`
+ * / `log_est` (and the `log2_*` / `log10_*` forms). Logarithms have no
+ * hardware estimate instruction to refine against, so the tiers ladder along
+ * the two remaining cost axes — table lookups and polynomial degree — and
+ * the top tier targets the accuracy class of Arm's own production SVE
+ * libm routines (the optimized-routines implementations that ship in glibc
+ * and ArmPL), not the 1-ULP reciprocal class:
+ *
+ * | Accuracy | f32 (log/log2/log10) | f64              | f16, bf16        |
+ * |----------|----------------------|------------------|------------------|
+ * | Strict   | ULP error <= 1       | ULP error <= 4   | ULP error <= 1   |
+ * | Fast     | relative error <= 2^-13                | ULP error <= 2   |
+ * | Estimate | relative error <= 2^-7                 | relative error <= 2^-7 |
+ *
+ * f64 Strict is the optimized-routines vector-libm class (their measured
+ * maxima are 2.64/2.58/2.46 ULP for log/log2/log10; SLEEF's relaxed u35
+ * tier is the same class), and pushing it to 1 ULP would need double-double
+ * accumulation of the table terms. f32 Strict can afford the wider
+ * detour instead: it evaluates the f64 table kernel on widened lanes (the
+ * same double-precision-intermediate trick as the upstream scalar logf
+ * family), so after the single narrowing rounding it stays within 1 ULP.
+ * Fast is the table-free reduced-degree kernel used by ML and statistics
+ * pipelines that only need ~1e-4 relative accuracy; Estimate keeps three
+ * polynomial terms for the same 2^-7 budget as the reciprocal Estimate
+ * tier.
+ *
+ * Special inputs are tier-independent: log(+-0) = -inf, log(+inf) = +inf,
+ * log(x < 0) = NaN (including -inf), NaN propagates, and log(1) = +0
+ * exactly. Logarithm outputs are never subnormal, so the tiers differ from
+ * `VECOPS_PRESERVE_SUBNORMALS` builds only through their accuracy; subnormal
+ * *inputs* are handled exactly in every tier. Accuracy options apply
+ * exactly as for the exponential family, including combination with masking
+ * options.
  */
 
 #include <cstdint>
@@ -79,6 +117,13 @@ enum class ExpBase : std::uint8_t {
   E,      //< e^x
   Base2,  //< 2^x
   Base10, //< 10^x
+};
+
+/** Logarithm base distinguishing log, log2, and log10 op tokens. */
+enum class LogBase : std::uint8_t {
+  E,      //< log_e
+  Base2,  //< log_2
+  Base10, //< log_10
 };
 
 namespace details {
@@ -268,6 +313,85 @@ struct FixedAccuracyUnaryMathCpo {
   template <FloatingVectorValue V, typename... Options>
     requires (!details::has_math_accuracy_option_v<Options...> &&
               details::valid_reciprocal_options_for<
+                  VecToTag<V>, Options...,
+                  decltype(opt::math::accuracy<A>)>())
+  VECOPS_ALWAYS_INLINE V operator()(V value, Options&&... options) const {
+    return (*this)(
+        VecToTag<V>{}, value, std::forward<Options>(options)...);
+  }
+};
+
+/* **************************************************************************** */
+//    Logarithm operations: log, log2, log10                                  //
+/* **************************************************************************** */
+
+namespace details {
+
+/** One related implementation token for every log base/accuracy tier. */
+template <LogBase Base, Accuracy A>
+struct LogOp {};
+
+/**
+ * Option rules match the exp and reciprocal families: at most one accuracy
+ * option, exactly one of masked/unmasked/first when masking at all, and at
+ * most one zero/merge population option.
+ */
+template <FloatingTag Tag, typename... Options>
+consteval bool valid_log_options_for() {
+  return valid_exp_options_for<Tag, Options...>();
+}
+
+} // namespace details
+
+/** Canonical logarithm CPO, parameterized by base. */
+template <LogBase Base>
+struct LogCpo {
+  template <FloatingTag Tag>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(Tag tag, Vec<Tag> value) const;
+
+  template <Accuracy A, FloatingTag Tag, typename... ArithmeticOptions>
+    requires ((!details::is_math_accuracy_option_v<ArithmeticOptions>) && ... &&
+              details::valid_log_options_for<
+                  Tag,
+                  opt::math::AccuracyOption<A>,
+                  ArithmeticOptions...>())
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag,
+      Vec<Tag> value,
+      opt::math::AccuracyOption<A> accuracy,
+      ArithmeticOptions&&... arithmetic_options) const;
+
+  template <FloatingTag Tag, typename... Options>
+    requires (sizeof...(Options) > 0 &&
+              details::valid_log_options_for<Tag, Options...>())
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Options&&... options) const;
+
+  template <FloatingVectorValue V, typename... Options>
+    requires (details::valid_log_options_for<VecToTag<V>, Options...>())
+  VECOPS_ALWAYS_INLINE V operator()(V value, Options&&... options) const {
+    return (*this)(
+        VecToTag<V>{}, value, std::forward<Options>(options)...);
+  }
+};
+
+/** Fixed-accuracy forwarding CPO used by log_fast/log10_est/etc. */
+template <LogBase Base, Accuracy A>
+struct FixedAccuracyLogCpo {
+  template <FloatingTag Tag, typename... Options>
+    requires (!details::has_math_accuracy_option_v<Options...> &&
+              details::valid_log_options_for<
+                  Tag, Options..., decltype(opt::math::accuracy<A>)>())
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Options&&... options) const {
+    return LogCpo<Base>{}(
+        tag, value, opt::math::accuracy<A>,
+        std::forward<Options>(options)...);
+  }
+
+  template <FloatingVectorValue V, typename... Options>
+    requires (!details::has_math_accuracy_option_v<Options...> &&
+              details::valid_log_options_for<
                   VecToTag<V>, Options...,
                   decltype(opt::math::accuracy<A>)>())
   VECOPS_ALWAYS_INLINE V operator()(V value, Options&&... options) const {
@@ -534,6 +658,128 @@ inline constexpr FixedAccuracyUnaryMathCpo<details::RcpOp, Accuracy::Fast>
 /** Fixed Estimate forwarding entry point for rcp. */
 inline constexpr FixedAccuracyUnaryMathCpo<details::RcpOp, Accuracy::Estimate>
     rcp_est{};
+
+/* **************************************************************************** */
+//    log / log2 / log10 definitions                                           //
+/* **************************************************************************** */
+
+template <LogBase Base>
+template <FloatingTag Tag>
+VECOPS_ALWAYS_INLINE Vec<Tag> LogCpo<Base>::operator()(
+    Tag tag, Vec<Tag> value) const {
+  return details::execute(details::LogOp<Base, Accuracy::Strict>{}, tag,
+                          value);
+}
+
+template <LogBase Base>
+template <Accuracy A, FloatingTag Tag, typename... ArithmeticOptions>
+  requires ((!details::is_math_accuracy_option_v<ArithmeticOptions>) && ... &&
+            details::valid_log_options_for<
+                Tag,
+                opt::math::AccuracyOption<A>,
+                ArithmeticOptions...>())
+VECOPS_ALWAYS_INLINE Vec<Tag> LogCpo<Base>::operator()(
+    Tag tag,
+    Vec<Tag> value,
+    opt::math::AccuracyOption<A> accuracy,
+    ArithmeticOptions&&... arithmetic_options) const {
+  // Re-read the tier from the option type instead of relying on the deduced
+  // A through deep inline chains (same hardening as the reciprocal CPO).
+  constexpr Accuracy tier =
+      details::IsMathAccuracyOption<opt::math::AccuracyOption<A>>::accuracy;
+  if constexpr (sizeof...(ArithmeticOptions) == 0) {
+    return details::execute(details::LogOp<Base, tier>{}, tag, value);
+  } else if constexpr (
+      details::option_count_v<
+          details::IsFirstOption, ArithmeticOptions...> == 1) {
+    // opt::first is the only masking option in a valid pack; lower it
+    // explicitly (details::execute_log_options has the spelled-out
+    // population branches).
+    return details::execute_log_options<Base>(
+        tag, value, opt::math::accuracy<tier>,
+        std::forward<ArithmeticOptions>(arithmetic_options)...);
+  } else {
+    return details::execute_unary_arithmetic_options(
+        details::LogOp<Base, tier>{}, tag, value,
+        std::forward<ArithmeticOptions>(arithmetic_options)...);
+  }
+}
+
+template <LogBase Base>
+template <FloatingTag Tag, typename... Options>
+  requires (sizeof...(Options) > 0 &&
+            details::valid_log_options_for<Tag, Options...>())
+VECOPS_ALWAYS_INLINE Vec<Tag> LogCpo<Base>::operator()(
+    Tag tag, Vec<Tag> value, Options&&... options) const {
+  return details::execute_log_options<Base>(
+      tag, value, std::forward<Options>(options)...);
+}
+
+/**
+ * Computes the natural logarithm log_e(x). With no math option the call uses
+ * Accuracy::Strict; see the file header for the per-tier error contracts.
+ * log(+-0) = -inf, log(+inf) = +inf, log(x < 0) = NaN, log(1) = +0, and NaN
+ * propagates. Special inputs produce identical results in every tier.
+ *
+ * @see log2, log10 for other bases.
+ * @see exp for the inverse operation.
+ */
+inline constexpr LogCpo<LogBase::E> log{};
+
+/** Fixed Strict forwarding entry point for log. */
+inline constexpr FixedAccuracyLogCpo<LogBase::E, Accuracy::Strict>
+    log_strict{};
+
+/** Fixed Fast forwarding entry point for log. */
+inline constexpr FixedAccuracyLogCpo<LogBase::E, Accuracy::Fast> log_fast{};
+
+/** Fixed Estimate forwarding entry point for log. */
+inline constexpr FixedAccuracyLogCpo<LogBase::E, Accuracy::Estimate>
+    log_est{};
+
+/**
+ * Computes the base-2 logarithm log_2(x). With no math option the call uses
+ * Accuracy::Strict; see the file header for the per-tier error contracts.
+ * Special inputs match the log contract, with log2(2^k) exactly k.
+ *
+ * @see log, log10 for other bases.
+ * @see exp2 for the inverse operation.
+ */
+inline constexpr LogCpo<LogBase::Base2> log2{};
+
+/** Fixed Strict forwarding entry point for log2. */
+inline constexpr FixedAccuracyLogCpo<LogBase::Base2, Accuracy::Strict>
+    log2_strict{};
+
+/** Fixed Fast forwarding entry point for log2. */
+inline constexpr FixedAccuracyLogCpo<LogBase::Base2, Accuracy::Fast>
+    log2_fast{};
+
+/** Fixed Estimate forwarding entry point for log2. */
+inline constexpr FixedAccuracyLogCpo<LogBase::Base2, Accuracy::Estimate>
+    log2_est{};
+
+/**
+ * Computes the base-10 logarithm log_10(x). With no math option the call
+ * uses Accuracy::Strict; see the file header for the per-tier error
+ * contracts. Special inputs match the log contract.
+ *
+ * @see log, log2 for other bases.
+ * @see exp10 for the inverse operation.
+ */
+inline constexpr LogCpo<LogBase::Base10> log10{};
+
+/** Fixed Strict forwarding entry point for log10. */
+inline constexpr FixedAccuracyLogCpo<LogBase::Base10, Accuracy::Strict>
+    log10_strict{};
+
+/** Fixed Fast forwarding entry point for log10. */
+inline constexpr FixedAccuracyLogCpo<LogBase::Base10, Accuracy::Fast>
+    log10_fast{};
+
+/** Fixed Estimate forwarding entry point for log10. */
+inline constexpr FixedAccuracyLogCpo<LogBase::Base10, Accuracy::Estimate>
+    log10_est{};
 
 } // namespace vecops::vec
 

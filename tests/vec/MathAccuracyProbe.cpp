@@ -1,8 +1,9 @@
 // Standalone full-range accuracy probe for the vec math module: the exp
-// family (exp, exp2, exp10, and their *_neg domains) and the reciprocal
-// family (rcp, rsqrt). Mirrors the tolerance contracts of the regular test
-// suites (tests/vec/MathTest.cpp, tests/vec/ReciprocalTest.cpp) but sweeps
-// the whole input domain — directed boundary sweeps, random bit patterns,
+// family (exp, exp2, exp10, and their *_neg domains), the reciprocal
+// family (rcp, rsqrt), and the log family (log, log2, log10). Mirrors the
+// tolerance contracts of the regular test suites (tests/vec/MathTest.cpp,
+// tests/vec/ReciprocalTest.cpp, tests/vec/LogTest.cpp) but sweeps the
+// whole input domain — directed boundary sweeps, random bit patterns,
 // boundary-bit neighborhoods, masked mixed-tail words, and (with
 // --exhaustive) the complete f32 bit pattern space. Not part of the test
 // suite and not registered in CMake; compile manually, e.g.
@@ -12,7 +13,7 @@
 //   SVE: clang++ -std=c++20 -O2 -march=armv8-a+sve -Iinclude \
 //            -Iinclude/vecops tests/vec/MathAccuracyProbe.cpp -o ~/tmp/mathprobe
 //
-// Usage: mathprobe [--family=exp|exp2|exp10|rcp|rsqrt|all]
+// Usage: mathprobe [--family=exp|exp2|exp10|exp_neg|rcp|rsqrt|log|log2|log10|all]
 //                  [--mode=quick|exhaustive]   (default quick)
 //
 // quick      : sweeps + random + boundary neighborhoods + masked mixed-tail
@@ -125,6 +126,8 @@ struct ExpFamily {
   }
   // The *_neg contract only defines x <= 0 active lanes.
   static constexpr bool negative_only = NegativeOnly;
+  static constexpr bool is_log = false;
+  static constexpr bool positive_only = false;
 
   template <vec::FloatingTag Tag, typename... Options>
   static auto invoke(Tag tag, vec::Vec<Tag> v, Options&&... options) {
@@ -157,6 +160,12 @@ struct ExpFamily {
   static constexpr bool estimate_ulp_contract = true;
   static constexpr unsigned estimate_ulp_bound = 4;
   static constexpr long double estimate_rel_bound = 0.006L;
+
+  static constexpr bool crosses_zero = false;
+  template <typename T>
+  static constexpr unsigned strict_ulp_bound() {
+    return 1;
+  }
 };
 
 template <bool IsRsqrt>
@@ -166,6 +175,8 @@ struct RecipFamily {
   }
   static constexpr bool negative_only = false;
   static constexpr bool is_recip = true;
+  static constexpr bool is_log = false;
+  static constexpr bool positive_only = false;
 
   template <vec::FloatingTag Tag, typename... Options>
   static auto invoke(Tag tag, vec::Vec<Tag> v, Options&&... options) {
@@ -202,6 +213,67 @@ struct RecipFamily {
   static constexpr bool estimate_ulp_contract = false;
   static constexpr unsigned estimate_ulp_bound = 0;
   static constexpr long double estimate_rel_bound = 7.8125e-3L;  // 2^-7
+
+  static constexpr bool crosses_zero = false;
+  template <typename T>
+  static constexpr unsigned strict_ulp_bound() {
+    return 1;
+  }
+};
+
+template <vec::LogBase Base>
+struct LogFamily {
+  static constexpr vec::LogBase base = Base;
+  static const char* name() {
+    if constexpr (Base == vec::LogBase::E) return "log";
+    else if constexpr (Base == vec::LogBase::Base2) return "log2";
+    else return "log10";
+  }
+  static constexpr bool negative_only = false;
+  static constexpr bool is_recip = false;
+  static constexpr bool is_log = true;
+  // Only x > 0 (and NaN) lanes are inside the log contract.
+  static constexpr bool positive_only = true;
+
+  template <vec::FloatingTag Tag, typename... Options>
+  static auto invoke(Tag tag, vec::Vec<Tag> v, Options&&... options) {
+    return vec::LogCpo<Base>{}(tag, v, std::forward<Options>(options)...);
+  }
+
+  template <typename T>
+  static long double reference_widened(T v) {
+    const long double w = static_cast<long double>(as_double(v));
+    if constexpr (Base == vec::LogBase::E) return std::log(w);
+    else if constexpr (Base == vec::LogBase::Base2) return std::log2(w);
+    else return std::log10(w);
+  }
+
+  template <typename T>
+  static T reference(T v) {
+    const long double r = reference_widened(v);
+    if constexpr (sizeof(T) < 4) return T((float)r);
+    else return (T)r;
+  }
+
+  // Contract table (matches tests/vec/LogTest.cpp and the Math.h header):
+  // Strict <= 1 ULP (f32 via the f64 kernel; narrow formats) and
+  // <= 4 ULP for f64 (the optimized-routines libm class), Fast <= 2^-13
+  // relative (narrow: 2 ULP), Estimate <= 2^-7 relative.
+  static constexpr bool fast_ulp_contract = false;
+  static constexpr unsigned fast_ulp_bound = 0;
+  static constexpr long double fast_rel_bound_wide = 1.220703125e-4L;  // 2^-13
+  static constexpr bool estimate_ulp_contract = false;
+  static constexpr unsigned estimate_ulp_bound = 0;
+  static constexpr long double estimate_rel_bound = 7.8125e-3L;  // 2^-7
+
+  // log crosses zero at x = 1: a sign disagreement is always a violation.
+  static constexpr bool crosses_zero = true;
+  template <typename T>
+  static constexpr unsigned strict_ulp_bound() {
+    // f32 evaluates through the f64 kernel (<= 1 ULP); f64 keeps the
+    // optimized-routines libm class; narrow formats round once from f32.
+    return std::is_same_v<T, float64_t> ? 4 : 1;
+  }
 };
 
 /* **************************************************************************** */
@@ -236,6 +308,37 @@ bool check_one(T input, T actual, Stats& s) {
 
   const double ed = as_double(expected);
   const double ad = as_double(actual);
+
+  // Log exact-class results: log(+-0) = -inf and log(+inf) = +inf are
+  // bit-exact in every tier, and log(1) is exactly +0.
+  if constexpr (Family::is_log) {
+    if (std::isinf(ed)) {
+      if (bits(expected) != bits(actual)) {
+        ++s.violations;
+        if (s.violations < 8)
+          printf("  LOG-INF MISMATCH x=%g got=%.9g want=%.9g\n", in, ad, ed);
+        return false;
+      }
+      return true;
+    }
+    if (ed == 0.0) {
+      // x == 1: the reduction is exact there, so require +0 bit-exactly.
+      if (bits(actual) != bits(T(0))) {
+        ++s.violations;
+        if (s.violations < 8)
+          printf("  LOG-ZERO MISMATCH x=%g got=%.9g\n", in, ad);
+        return false;
+      }
+      return true;
+    }
+    // The zero crossing at x = 1: a sign flip is outside every contract.
+    if (std::signbit(ed) != std::signbit(ad)) {
+      ++s.violations;
+      if (s.violations < 8)
+        printf("  LOG-SIGN MISMATCH x=%g got=%.9g want=%.9g\n", in, ad, ed);
+      return false;
+    }
+  }
 
   // Reciprocal exact-class results: overflow to +-inf (and back), and
   // rcp(+-inf) = signed zero, compare bit-exactly (with an estimate-tier
@@ -300,7 +403,8 @@ bool check_one(T input, T actual, Stats& s) {
   };
 
   if constexpr (Tier == vec::Accuracy::Strict) {
-    if (ulps > 1ull && !(ad == 0.0 && ed == 0.0)) {
+    if (ulps > (uint64_t)Family::template strict_ulp_bound<T>() &&
+        !(ad == 0.0 && ed == 0.0)) {
       ++s.violations;
       if (s.violations < 8)
         printf("  STRICT VIOLATION x=%g expected=%.9g actual=%.9g "
@@ -433,6 +537,10 @@ void run_all_tiers(const char* mode, const std::vector<T>& inputs) {
     if constexpr (Family::negative_only) {
       if (positive_or_nan) continue;  // *_neg contract: only x <= 0 defined
     }
+    if constexpr (Family::positive_only) {
+      // The log contract only defines positive lanes (plus NaN).
+      if (!positive_or_nan) continue;
+    }
     selected.push_back(v);
   }
   const auto drive = [&]<vec::Accuracy Tier>() {
@@ -473,6 +581,22 @@ std::vector<double> boundary_probes() {
       probes.push_back(-0x1p1022);
       probes.push_back(0x1p-1021);
     }
+  } else if constexpr (Family::is_log) {
+    probes = {0.0, -0.0, 1.0, 2.0 / 3.0, 4.0 / 3.0, 0.5, 2.0, 3.0, 1e-30,
+              1e30, 1.0 - 1e-7, 1.0 + 1e-7, 1.0 + 1e-4, 1.0 - 1e-4,
+              std::numeric_limits<double>::infinity(),
+              -std::numeric_limits<double>::infinity()};
+    if constexpr (std::is_same_v<T, float32_t>) {
+      probes.push_back(0x1p-126);
+      probes.push_back(0x1p126);
+      probes.push_back(0x1p-125);
+      probes.push_back((double)0x1.000002p+0f);
+      probes.push_back((double)0x1.fffffep-1f);
+    } else if constexpr (std::is_same_v<T, float64_t>) {
+      probes.push_back(0x1p-1022);
+      probes.push_back(0x1p1022);
+      probes.push_back(0x1p-1021);
+    }
   } else {
     constexpr vec::ExpBase Base = Family::base;
     if constexpr (std::is_same_v<T, float32_t>) {
@@ -500,7 +624,29 @@ std::vector<double> boundary_probes() {
 template <typename Family, typename T>
 std::vector<T> make_sweep_inputs() {
   std::vector<T> xs;
-  if constexpr (std::is_same_v<T, float32_t>) {
+  if constexpr (Family::is_log) {
+    // Log-uniform magnitude sweep over +-40 decades plus dense clusters
+    // around the x=1 zero crossing and the [2/3, 4/3) reduction window
+    // edges, where the bit tricks change shape.
+    if constexpr (std::is_same_v<T, float32_t> ||
+                  std::is_same_v<T, float64_t>) {
+      for (int i = 0; i < 200000; ++i) {
+        const double u = -40.0 + 80.0 * i / 199999.0;
+        xs.push_back((T)(std::pow(2.0, u)));
+      }
+      for (int i = 0; i < 100000; ++i) {
+        const double u = (double)i / 99999.0;
+        const double near_one = 1.0 + (u - 0.5) * 2e-3;
+        xs.push_back((T)near_one);
+      }
+      for (int i = 0; i < 50000; ++i) {
+        const double u = (double)i / 49999.0;
+        xs.push_back((T)(0.66 + 0.68 * u));
+      }
+    } else {
+      for (uint32_t b = 0; b < 65536; ++b) xs.push_back(from_bits<T>(b));
+    }
+  } else if constexpr (std::is_same_v<T, float32_t>) {
     const double lo = [] {
       if constexpr (Family::is_recip)
         return -40.0;
@@ -681,7 +827,8 @@ int main(int argc, char** argv) {
     else if (arg == "--mode=quick") exhaustive = false;
     else {
       fprintf(stderr,
-              "usage: %s [--family=exp|exp2|exp10|exp_neg|rcp|rsqrt|all] "
+              "usage: %s "
+              "[--family=exp|exp2|exp10|exp_neg|rcp|rsqrt|log|log2|log10|all] "
               "[--mode=quick|exhaustive]\n",
               argv[0]);
       return 2;
@@ -708,6 +855,12 @@ int main(int argc, char** argv) {
     probe_family<RecipFamily<false>>(exhaustive);
   if (want_all || family == "rsqrt")
     probe_family<RecipFamily<true>>(exhaustive);
+  if (want_all || family == "log")
+    probe_family<LogFamily<vec::LogBase::E>>(exhaustive);
+  if (want_all || family == "log2")
+    probe_family<LogFamily<vec::LogBase::Base2>>(exhaustive);
+  if (want_all || family == "log10")
+    probe_family<LogFamily<vec::LogBase::Base10>>(exhaustive);
   printf("PROBE DONE\n");
   return 0;
 }

@@ -12,5 +12,6 @@
 
 #include "vecops/vec/details/sve/math/Exp.h"
 #include "vecops/vec/details/sve/math/Reciprocal.h"
+#include "vecops/vec/details/sve/math/Log.h"
 
 #endif // VECOPS_VEC_DETAILS_SVE_MATH_H

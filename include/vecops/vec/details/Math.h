@@ -38,6 +38,13 @@ template <typename Backend, Accuracy A, VectorTag Tag>
 struct GenericImpl<Backend, RcpOp<A>, Tag>
     : UnaryArithmeticGenericImpl<Backend, RcpOp<A>, Tag> {};
 
+template <LogBase Base, Accuracy A>
+struct EnableElementwiseWordBatching<LogOp<Base, A>> : std::true_type {};
+
+template <typename Backend, LogBase Base, Accuracy A, VectorTag Tag>
+struct GenericImpl<Backend, LogOp<Base, A>, Tag>
+    : UnaryArithmeticGenericImpl<Backend, LogOp<Base, A>, Tag> {};
+
 /** Invokes f with every option except the compile-time math-accuracy option. */
 template <typename F>
 VECOPS_ALWAYS_INLINE decltype(auto) invoke_without_math_accuracy(F&& f) {
@@ -177,6 +184,63 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_unary_math_options(
     } else {
       return execute_unary_arithmetic_options(
           OpToken<accuracy>{}, tag, value,
+          std::forward<ArithmeticOptions>(arithmetic_options)...);
+    }
+  };
+  return invoke_without_math_accuracy(
+      dispatch, std::forward<Options>(options)...);
+}
+
+/**
+ * Same dispatch shape for the logarithm family, whose token additionally
+ * carries the LogBase. Selects the tier, strips the accuracy option, and
+ * lowers opt::first to an explicitly dispatched population branch (the
+ * spelled-out form avoids nested closure captures around the compile-time
+ * accuracy, mirroring execute_unary_math_options).
+ */
+template <LogBase Base, FloatingTag Tag, typename... Options>
+VECOPS_ALWAYS_INLINE Vec<Tag> execute_log_options(
+    Tag tag, Vec<Tag> value, Options&&... options) {
+  static_assert(valid_log_options_for<Tag, Options...>());
+  constexpr Accuracy accuracy = selected_math_accuracy<Options...>();
+  const auto dispatch = [&]<typename... ArithmeticOptions>(
+                            ArithmeticOptions&&... arithmetic_options)
+      -> Vec<Tag> {
+    if constexpr (sizeof...(ArithmeticOptions) == 0) {
+      return execute(LogOp<Base, accuracy>{}, tag, value);
+    } else if constexpr (
+        option_count_v<IsFirstOption, ArithmeticOptions...> == 1) {
+      const auto count = find_option<IsFirstOption>(
+          arithmetic_options...).count;
+      const auto mask = mwhilelt(tag, 0, count);
+      constexpr std::size_t zero_count =
+          option_count_v<IsZeroOption, ArithmeticOptions...>;
+      constexpr std::size_t vector_merge_count =
+          option_count_v<IsVectorMergeOption, ArithmeticOptions...>;
+      constexpr std::size_t scalar_merge_count =
+          option_count_v<IsScalarMergeOption, ArithmeticOptions...>;
+      constexpr LogOp<Base, accuracy> op{};
+      if constexpr (zero_count == 1) {
+        return execute(op, tag, value, mask, zeros(tag),
+                       ZeroArithmeticInactive{});
+      } else if constexpr (vector_merge_count == 1) {
+        const auto& inactive = find_option<IsVectorMergeOption>(
+            arithmetic_options...).value;
+        return execute(
+            op, tag, value, mask, inactive, MergeArithmeticInactive{});
+      } else if constexpr (scalar_merge_count == 1) {
+        const auto inactive = fill(
+            tag, find_option<IsScalarMergeOption>(
+                     arithmetic_options...).value);
+        return execute(
+            op, tag, value, mask, inactive, MergeArithmeticInactive{});
+      } else {
+        return execute(
+            op, tag, value, mask, value, PreserveArithmeticInactive{});
+      }
+    } else {
+      return execute_unary_arithmetic_options(
+          LogOp<Base, accuracy>{}, tag, value,
           std::forward<ArithmeticOptions>(arithmetic_options)...);
     }
   };

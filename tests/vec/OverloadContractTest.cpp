@@ -68,6 +68,18 @@ CHECK_UNARY_CPO(exp_neg, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(exp_neg_strict, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(exp_neg_fast, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(exp_neg_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(log, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(log_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(log_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(log_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(log2, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(log2_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(log2_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(log2_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(log10, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(log10_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(log10_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(log10_est, FTag, FV, MaskedF);
 
 static_assert(accepts<decltype(vec::rsqrt), FTag, FV, MathStrict>);
 static_assert(accepts<decltype(vec::rsqrt), FV, MathFast>);
