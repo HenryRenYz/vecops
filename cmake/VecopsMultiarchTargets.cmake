@@ -23,16 +23,6 @@ set(VECOPS_MAP_ARM_NEON      "armv8-a+simd")
 set(VECOPS_MAP_ARM_SVE       "armv8-a+sve")
 set(VECOPS_MAP_ARM_SVE2      "armv8-a+sve2")
 
-if(VECOPS_ARCH_FAMILY STREQUAL "ARM")
-    option(VECOPS_ENABLE_SME_FUSED_F64_EXTERNAL_LEAF
-        "Build and link the ISA-specific SME fused FP64 leaf" ON)
-    option(VECOPS_ENABLE_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF
-        "Build and link the ISA-specific SME runtime-quantized INT8 GEMV leaf"
-        ON)
-    option(VECOPS_ENABLE_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF
-        "Build and link the SME mixed-sign INT8 skinny leaf" ON)
-endif()
-
 # Some compilers (including BiSheng releases) do not enable all advertised
 # native extensions with the bare -march=native spelling.
 set(VECOPS_MAP_ARM_Native "native")
@@ -561,10 +551,8 @@ function(vecops_add_multiarch_executable)
               (_ARCH STREQUAL "NativeFixedStreamingSVE")))))
             set(_VECOPS_TARGET_HAS_I8MM ON)
         endif()
-
         set(_VECOPS_USE_SME_F64_LEAF OFF)
-        if(VECOPS_ENABLE_SME_FUSED_F64_EXTERNAL_LEAF AND
-           _VECOPS_TARGET_HAS_SME AND
+        if(_VECOPS_TARGET_HAS_SME AND
            ((_MARCH MATCHES "(^|\\+)sme-f64f64($|\\+)") OR
             (VECOPS_NATIVE_HAS_SME_F64F64 AND
              ((_ARCH STREQUAL "Native") OR
@@ -574,16 +562,14 @@ function(vecops_add_multiarch_executable)
         endif()
 
         set(_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF OFF)
-        if(VECOPS_ENABLE_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF AND
-           _VECOPS_TARGET_HAS_SME AND
+        if(_VECOPS_TARGET_HAS_SME AND
            _VECOPS_TARGET_HAS_SME_FA64 AND
            _VECOPS_TARGET_HAS_I8MM)
             set(_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF ON)
         endif()
 
         set(_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF OFF)
-        if(VECOPS_ENABLE_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF AND
-           _VECOPS_TARGET_HAS_SME AND
+        if(_VECOPS_TARGET_HAS_SME AND
            _VECOPS_TARGET_HAS_I8MM)
             set(_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF ON)
         endif()

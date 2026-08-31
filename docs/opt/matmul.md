@@ -3445,6 +3445,42 @@ full-K特化和多种conversion postprocess；继续重写普通转置的低风�
   BiSheng Clang 19.1.7、显式 clang/clang++、Release、tests/benchmarks ON 和
   `VECOPS_FIXED_STREAMING_SVE_BITS=512`。
 
+## 2026-08-31：SME experimental 路径收敛与 arch leaf 边界复核
+
+### MATMUL-SME-X48：编译期 owner 生产化复核与 experimental 清理
+
+- 日期：2026-08-31。状态：清理完成；保留三个已通过生产门禁的独立 arch object，
+  删除六个 `VECOPS_EXPERIMENTAL_SME_*` 宏及约690行默认关闭实现。F64 fused skinny、
+  runtime-quant INT8、mixed-sign INT8三个leaf继续分别位于`src/arch/sme/*.cpp`；没有
+  搬回`Backend.h`。历史A/B已证明独立object的按引用抽取、ISA隔离和代码放置是控制
+  未命中路径回退的必要条件，不是可以由`inline noinline/COMDAT`替代的构建冗余。
+- `VECOPS_EXPERIMENTAL_SME_PACKED_PIPELINE`曾改成`KernelPlan`编译期布尔，仅允许
+  metadata可证明的BF16 PackedAB square、短中K、Zero-C/direct-output实例生成双-bank
+  loop；没有运行时shape分支，也不与大工作集prefetch重叠。但完整674-case二进制的
+  CPU64 B-A-A-B中，`acc_2x2`和256^3 square分别回退约8%和3.8%，与X07记录的前端
+  布局敏感性一致。该路径未通过生产门禁，最终连同宏和实现一起删除。
+- 保守BF16单边packed-GEMV也曾接入`PackedGemvRow/Column`编译期owner，并把计算放入
+  新的独立arch object。六个`M/N<=64`命中点提升约5--7倍，Dynamic实例没有callsite；
+  但完整链接后未命中的PackedAB/microkernel/256^3 control仍出现可重复约10%--21%
+  回退。撤掉双-bank后回退仍在，确认不能归因于运行时dispatch，而是新增caller/object
+  对当前巨型header二进制的放置扰动。按“未命中零回退”门禁，外部leaf、owner和CMake
+  接线全部撤回；不再以新的experimental宏保留生产代码。
+- `PACKED_GEMV_ALL_TYPES`、`DISABLE_RAW_SHARED_UNROLL`、
+  `LEGACY_INLINE_RAW_SHARED_UNROLL`、`OUT_OF_LINE_DISPATCH`均为失败扩展或诊断对照，
+  一并从production header删除；需要复现实验时应使用冻结patch/独立benchmark，不能
+  继续让生产Backend承担条件编译矩阵。
+- CMake删除三个默认ON的`VECOPS_ENABLE_SME_*_EXTERNAL_LEAF`用户选项。multiarch层现在
+  只依据目标ISA自动构建和链接三个production leaf，并继续用内部`VECOPS_HAS_*`定义
+  表示外部符号确实可链接；不使用multiarch helper的header消费者仍会安全回退，不会
+  产生undefined symbol。
+- 验证环境为`920f-4:/home/ryz/vecops-neo`，构建目录
+  `cmake-build-sme-compile-dispatch-v2`，显式BiSheng Clang/Clang++ 19.1.7、Release、
+  `-march=native+bf16+i8mm+sme+sme-fa64+sme-f64f64`、固定SVL元数据512。生产候选阶段
+  Matmul 22/22通过；最终清理版Matmul 21/21通过。最终`MatmulBench-Native`仍注册
+  674个Dynamic/Const case，text/data/bss与清理前生产基线逐字节同尺寸，为
+  5,030,897/49,304/1,240B；SME archive仍仅含F64、runtime-quant INT8、mixed-sign
+  INT8三个object，不存在packed-GEMV符号。
+
 ## 实验记录模板
 
 ```text
