@@ -299,10 +299,10 @@ VECOPS_ALWAYS_INLINE svfloat16_t sve_recip_f16_via_f32(svfloat16_t raw) {
 #if defined(__ARM_FEATURE_SVE2)
   const auto high = svcvtlt_f32_f16_x(svptrue_b32(), raw);
 #else
-  const auto odd = svuzp2_u16(
+  const auto odd_value = svuzp2_u16(
       svreinterpret_u16_f16(raw), svreinterpret_u16_f16(raw));
   const auto high = svcvt_f32_f16_x(
-      svptrue_b32(), svreinterpret_f16_u16(svzip1_u16(odd, odd)));
+      svptrue_b32(), svreinterpret_f16_u16(svzip1_u16(odd_value, odd_value)));
 #endif
   svfloat32_t result_low;
   svfloat32_t result_high;
@@ -408,18 +408,13 @@ struct SVERecipWordImpl {
     if constexpr (sizeof(ElementOf<Tag>) >= 4) {
       const auto computed =
           sve_recip_dispatch<A, IsRsqrt>(tag, value, sve_basic_raw_word(mask));
-      return NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(
-          BlendOp{}, tag, inactive, mask, computed);
+      return blend(tag, inactive, mask, computed);
     } else {
-      const auto zero =
-          NativeWordImpl<SVEBackend, FillOp>::template call<Index>(
-              FillOp{}, tag, ElementOf<Tag>{});
-      const auto safe = NativeWordImpl<SVEBackend, BlendOp>::template call<
-          Index>(BlendOp{}, tag, zero, mask, value);
-      const auto computed = sve_recip_dispatch<A, IsRsqrt>(
-          tag, safe, sve_full_predicate<ElementOf<Tag>>());
-      return NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(
-          BlendOp{}, tag, inactive, mask, computed);
+      return masked_unary_word(
+          tag, mask, inactive, value, [&](NativeWordVec<Tag> safe) {
+            return sve_recip_dispatch<A, IsRsqrt>(
+                tag, safe, sve_full_predicate<ElementOf<Tag>>());
+          });
     }
   }
 };

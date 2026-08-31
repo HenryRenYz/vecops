@@ -63,6 +63,12 @@ struct StoreOp {
                    IndexVector> request) const;
 };
 
+/** Public entry-point variables, declared before the backend includes
+ * so that details-layer implementations can call them by short names
+ * (same layout as Basic.h and Arithmetic.h). */
+inline constexpr LoadOp load{};
+inline constexpr StoreOp store{};
+
 } // namespace vecops::vec
 
 #include "vecops/vec/details/Dispatch.h"
@@ -162,8 +168,6 @@ VECOPS_ALWAYS_INLINE void StoreOp::operator()(
   details::execute_store_request(*this, tag, pointer, value, request);
 }
 
-inline constexpr LoadOp load{};
-inline constexpr StoreOp store{};
 
 } // namespace vecops::vec
 

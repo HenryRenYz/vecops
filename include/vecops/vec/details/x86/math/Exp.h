@@ -51,71 +51,6 @@ namespace vecops::vec::details {
 //                Exponential helpers and word implementations                //
 /* **************************************************************************** */
 
-template <nint_t Index, FloatingTag Tag>
-struct X86ExpContext {
-  using T = ElementOf<Tag>;
-  using Word = NativeWordVec<Tag>;
-  using MaskWord = NativeWordMask<Tag>;
-  using ITag = IndexTag<Tag>;
-  using IWord = NativeWordVec<ITag>;
-
-  static VECOPS_ALWAYS_INLINE Word fill(Tag tag, T value) {
-    return execute_word<Index, X86Backend>(FillOp{}, tag, value);
-  }
-  static VECOPS_ALWAYS_INLINE Word add(Tag tag, Word a, Word b) {
-    return execute_word<Index, X86Backend>(AddOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE Word sub(Tag tag, Word a, Word b) {
-    return execute_word<Index, X86Backend>(SubOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE Word mul(Tag tag, Word a, Word b) {
-    return execute_word<Index, X86Backend>(MulOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE Word fmadd(
-      Tag tag, Word a, Word b, Word c) {
-    return execute_word<Index, X86Backend>(FmaddOp{}, tag, a, b, c);
-  }
-  static VECOPS_ALWAYS_INLINE Word min(Tag tag, Word a, Word b) {
-    return execute_word<Index, X86Backend>(MinOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE Word max(Tag tag, Word a, Word b) {
-    return execute_word<Index, X86Backend>(MaxOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE MaskWord lt(Tag tag, Word a, Word b) {
-    return execute_word<Index, X86Backend>(CmpLtOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE MaskWord gt(Tag tag, Word a, Word b) {
-    return execute_word<Index, X86Backend>(CmpGtOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE MaskWord ne(Tag tag, Word a, Word b) {
-    return execute_word<Index, X86Backend>(CmpNeOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE Word select(
-      Tag tag, Word fallback, MaskWord mask, Word selected) {
-    return execute_word<Index, X86Backend>(
-        BlendOp{}, tag, fallback, mask, selected);
-  }
-  static VECOPS_ALWAYS_INLINE IWord iadd(ITag tag, IWord a, IWord b) {
-    return execute_word<Index, X86Backend>(AddOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE IWord isub(ITag tag, IWord a, IWord b) {
-    return execute_word<Index, X86Backend>(SubOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE IWord ishr(ITag tag, IWord a, int count) {
-    return execute_word<Index, X86Backend>(
-        BitShiftRightOp{}, tag, a, count);
-  }
-  static VECOPS_ALWAYS_INLINE IWord ishl(ITag tag, IWord a, int count) {
-    return execute_word<Index, X86Backend>(
-        BitShiftLeftOp{}, tag, a, count);
-  }
-  static VECOPS_ALWAYS_INLINE IWord ifill(ITag tag, IndexElement<T> value) {
-    return execute_word<Index, X86Backend>(FillOp{}, tag, value);
-  }
-  static VECOPS_ALWAYS_INLINE Word from_bits(Tag tag, IWord value) {
-    return execute_word<Index, X86Backend>(BitCastOp{}, tag, value);
-  }
-};
 
 template <FloatingTag Tag>
 VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_round_nearest(
@@ -393,76 +328,75 @@ template <ExpBase Base, Accuracy Tier, nint_t Index, FloatingTag Tag>
 VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_poly(
     Tag tag, NativeWordVec<Tag> r) {
   using T = ElementOf<Tag>;
-  using C = X86ExpContext<Index, Tag>;
-  const auto r2 = C::mul(tag, r, r);
+  const auto r2 = mul(tag, r, r);
   if constexpr (Tier == Accuracy::Estimate) {
     if constexpr (std::same_as<T, float16_t>) {
       constexpr const double* k = x86_exp_f16_estimate<Base>();
-      auto p = C::fill(tag, T(k[2]));
-      p = C::fmadd(tag, p, r, C::fill(tag, T(k[1])));
-      p = C::fmadd(tag, p, r, C::fill(tag, T(k[0])));
-      return C::fmadd(tag, p, r, C::fill(tag, T(1)));
+      auto p = fill_word(tag, T(k[2]));
+      p = fmadd(tag, p, r, fill_word(tag, T(k[1])));
+      p = fmadd(tag, p, r, fill_word(tag, T(k[0])));
+      return fmadd(tag, p, r, fill_word(tag, T(1)));
     }
     constexpr const double* k = x86_exp_estimate<Base>();
-    return C::fmadd(
-        tag, C::fill(tag, T(k[1])), r2,
-        C::fmadd(
-            tag, C::fill(tag, T(k[0])), r,
-            C::fill(tag, T(1))));
+    return fmadd(
+        tag, fill_word(tag, T(k[1])), r2,
+        fmadd(
+            tag, fill_word(tag, T(k[0])), r,
+            fill_word(tag, T(1))));
   } else if constexpr (std::same_as<T, float16_t>) {
     constexpr const double* k = x86_exp_f16_strict<Base>();
-    auto p = C::fill(tag, T(k[3]));
-    p = C::fmadd(tag, p, r, C::fill(tag, T(k[2])));
-    p = C::fmadd(tag, p, r, C::fill(tag, T(k[1])));
-    p = C::fmadd(tag, p, r, C::fill(tag, T(k[0])));
-    return C::fmadd(tag, p, r, C::fill(tag, T(1)));
+    auto p = fill_word(tag, T(k[3]));
+    p = fmadd(tag, p, r, fill_word(tag, T(k[2])));
+    p = fmadd(tag, p, r, fill_word(tag, T(k[1])));
+    p = fmadd(tag, p, r, fill_word(tag, T(k[0])));
+    return fmadd(tag, p, r, fill_word(tag, T(1)));
   } else if constexpr (Tier == Accuracy::Fast && std::same_as<T, float32_t>) {
     if constexpr (Base == ExpBase::E) {
-      auto p = C::fill(tag, T(0.0083691484928131103515625));
-      p = C::fmadd(tag, p, r, C::fill(tag, T(0.0419175066053867340087891)));
-      p = C::fmadd(tag, p, r, C::fill(tag, T(0.166665047407150268554688)));
-      p = C::fmadd(tag, p, r, C::fill(tag, T(0.499988704919815063476562)));
-      p = C::fmadd(tag, p, r, C::fill(tag, T(1)));
-      return C::fmadd(tag, p, r, C::fill(tag, T(1)));
+      auto p = fill_word(tag, T(0.0083691484928131103515625));
+      p = fmadd(tag, p, r, fill_word(tag, T(0.0419175066053867340087891)));
+      p = fmadd(tag, p, r, fill_word(tag, T(0.166665047407150268554688)));
+      p = fmadd(tag, p, r, fill_word(tag, T(0.499988704919815063476562)));
+      p = fmadd(tag, p, r, fill_word(tag, T(1)));
+      return fmadd(tag, p, r, fill_word(tag, T(1)));
     } else {
       constexpr const double* k =
           Base == ExpBase::Base2 ? kX86ExpF32FastB2 : kX86ExpF32FastB10;
-      auto p = C::fill(tag, T(k[4]));
-      p = C::fmadd(tag, p, r, C::fill(tag, T(k[3])));
-      p = C::fmadd(tag, p, r, C::fill(tag, T(k[2])));
-      p = C::fmadd(tag, p, r, C::fill(tag, T(k[1])));
-      p = C::fmadd(tag, p, r, C::fill(tag, T(k[0])));
-      return C::fmadd(tag, p, r, C::fill(tag, T(1)));
+      auto p = fill_word(tag, T(k[4]));
+      p = fmadd(tag, p, r, fill_word(tag, T(k[3])));
+      p = fmadd(tag, p, r, fill_word(tag, T(k[2])));
+      p = fmadd(tag, p, r, fill_word(tag, T(k[1])));
+      p = fmadd(tag, p, r, fill_word(tag, T(k[0])));
+      return fmadd(tag, p, r, fill_word(tag, T(1)));
     }
   } else if constexpr (std::same_as<T, float32_t>) {
     if constexpr (Base == ExpBase::E) {
-      const auto p0 = C::fmadd(
-          tag, C::fill(tag, T(0.166666671633720397949219)), r,
-          C::fill(tag, T(0.5)));
-      const auto p1 = C::fmadd(
-          tag, C::fill(tag, T(0.00833336077630519866943359)), r,
-          C::fill(tag, T(0.0416664853692054748535156)));
-      const auto p2 = C::fmadd(
-          tag, C::fill(tag, T(0.000198527617612853646278381)), r,
-          C::fill(tag, T(0.00139304355252534151077271)));
-      const auto q = C::fmadd(
-          tag, C::fmadd(tag, p2, r2, p1), r2, p0);
-      return C::add(
-          tag, C::fmadd(tag, q, r2, r), C::fill(tag, T(1)));
+      const auto p0 = fmadd(
+          tag, fill_word(tag, T(0.166666671633720397949219)), r,
+          fill_word(tag, T(0.5)));
+      const auto p1 = fmadd(
+          tag, fill_word(tag, T(0.00833336077630519866943359)), r,
+          fill_word(tag, T(0.0416664853692054748535156)));
+      const auto p2 = fmadd(
+          tag, fill_word(tag, T(0.000198527617612853646278381)), r,
+          fill_word(tag, T(0.00139304355252534151077271)));
+      const auto q = fmadd(
+          tag, fmadd(tag, p2, r2, p1), r2, p0);
+      return add(
+          tag, fmadd(tag, q, r2, r), fill_word(tag, T(1)));
     } else {
       constexpr const double* k =
           Base == ExpBase::Base2 ? kX86ExpF32StrictB2 : kX86ExpF32StrictB10;
-      const auto p0 = C::fmadd(
-          tag, C::fill(tag, T(k[2])), r, C::fill(tag, T(k[1])));
-      const auto p1 = C::fmadd(
-          tag, C::fill(tag, T(k[4])), r, C::fill(tag, T(k[3])));
-      const auto p2 = C::fmadd(
-          tag, C::fill(tag, T(k[6])), r, C::fill(tag, T(k[5])));
-      const auto q = C::fmadd(
-          tag, C::fmadd(tag, p2, r2, p1), r2, p0);
-      return C::fmadd(
-          tag, C::fmadd(tag, q, r, C::fill(tag, T(k[0]))), r,
-          C::fill(tag, T(1)));
+      const auto p0 = fmadd(
+          tag, fill_word(tag, T(k[2])), r, fill_word(tag, T(k[1])));
+      const auto p1 = fmadd(
+          tag, fill_word(tag, T(k[4])), r, fill_word(tag, T(k[3])));
+      const auto p2 = fmadd(
+          tag, fill_word(tag, T(k[6])), r, fill_word(tag, T(k[5])));
+      const auto q = fmadd(
+          tag, fmadd(tag, p2, r2, p1), r2, p0);
+      return fmadd(
+          tag, fmadd(tag, q, r, fill_word(tag, T(k[0]))), r,
+          fill_word(tag, T(1)));
     }
   } else if constexpr (Base == ExpBase::E) {
     constexpr double coefficients[] = {
@@ -473,47 +407,47 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_poly(
         2.75573911234900471893338e-7, 2.51112930892876518610661e-8,
         2.08860621107283687536341e-9};
     const auto pair = [&](int low) {
-      return C::fmadd(
-          tag, C::fill(tag, T(coefficients[low + 1])), r,
-          C::fill(tag, T(coefficients[low])));
+      return fmadd(
+          tag, fill_word(tag, T(coefficients[low + 1])), r,
+          fill_word(tag, T(coefficients[low])));
     };
     const auto p0 = pair(0);
     const auto p1 = pair(2);
     const auto p2 = pair(4);
     const auto p3 = pair(6);
     const auto p4 = pair(8);
-    const auto p5 = C::fill(tag, T(coefficients[10]));
-    const auto r4 = C::mul(tag, r2, r2);
-    const auto r8 = C::mul(tag, r4, r4);
-    const auto q0 = C::fmadd(tag, p1, r2, p0);
-    const auto q1 = C::fmadd(tag, p3, r2, p2);
-    const auto q2 = C::fmadd(tag, p5, r2, p4);
-    const auto q = C::fmadd(
-        tag, q2, r8, C::fmadd(tag, q1, r4, q0));
-    return C::add(
-        tag, C::fmadd(tag, q, r2, r), C::fill(tag, T(1)));
+    const auto p5 = fill_word(tag, T(coefficients[10]));
+    const auto r4 = mul(tag, r2, r2);
+    const auto r8 = mul(tag, r4, r4);
+    const auto q0 = fmadd(tag, p1, r2, p0);
+    const auto q1 = fmadd(tag, p3, r2, p2);
+    const auto q2 = fmadd(tag, p5, r2, p4);
+    const auto q = fmadd(
+        tag, q2, r8, fmadd(tag, q1, r4, q0));
+    return add(
+        tag, fmadd(tag, q, r2, r), fill_word(tag, T(1)));
   } else {
     constexpr const double* k =
         Base == ExpBase::Base2 ? kX86ExpF64PolyB2 : kX86ExpF64PolyB10;
     const auto pair = [&](int low) {
-      return C::fmadd(
-          tag, C::fill(tag, T(k[low + 1])), r, C::fill(tag, T(k[low])));
+      return fmadd(
+          tag, fill_word(tag, T(k[low + 1])), r, fill_word(tag, T(k[low])));
     };
     const auto p0 = pair(1);
     const auto p1 = pair(3);
     const auto p2 = pair(5);
     const auto p3 = pair(7);
     const auto p4 = pair(9);
-    const auto r4 = C::mul(tag, r2, r2);
-    const auto r8 = C::mul(tag, r4, r4);
-    const auto q = C::fmadd(
+    const auto r4 = mul(tag, r2, r2);
+    const auto r8 = mul(tag, r4, r4);
+    const auto q = fmadd(
         tag, p4, r8,
-        C::fmadd(
-            tag, C::fmadd(tag, p3, r2, p2), r4,
-            C::fmadd(tag, p1, r2, p0)));
-    return C::fmadd(
-        tag, C::fmadd(tag, q, r, C::fill(tag, T(k[0]))), r,
-        C::fill(tag, T(1)));
+        fmadd(
+            tag, fmadd(tag, p3, r2, p2), r4,
+            fmadd(tag, p1, r2, p0)));
+    return fmadd(
+        tag, fmadd(tag, q, r, fill_word(tag, T(k[0]))), r,
+        fill_word(tag, T(1)));
   }
 }
 
@@ -523,7 +457,6 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_family(
     Tag tag, NativeWordVec<Tag> x) {
   using T = ElementOf<Tag>;
   using Raw = decltype(x.value);
-  using C = X86ExpContext<Index, Tag>;
   using D = X86ExpDomain<Base, T>;
   constexpr bool strict = Tier == Accuracy::Strict;
   constexpr bool estimate = Tier == Accuracy::Estimate;
@@ -541,26 +474,26 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_family(
   const T lower = natural_underflow
       ? T(D::zero_sentinel) : T(gradual ? D::zero_limit : D::normal_limit);
 
-  auto xc = C::max(tag, x, C::fill(tag, lower));
+  auto xc = max(tag, x, fill_word(tag, lower));
   if constexpr (!NegativeOnly)
-    xc = C::min(tag, xc, C::fill(tag, overflow));
+    xc = min(tag, xc, fill_word(tag, overflow));
 
   // Range reduction: n = rint(x*log2(base)), r = x - n*log_base(2).
   NativeWordVec<Tag> qf;
   NativeWordVec<Tag> r;
   if constexpr (Base == ExpBase::Base2) {
     qf = x86_exp_round_nearest<Tag>(xc);
-    r = C::sub(tag, xc, qf);
+    r = sub(tag, xc, qf);
   } else {
     constexpr double log2_base =
         Base == ExpBase::E ? X86ExpReduction<ExpBase::E>::log2_base
                            : X86ExpReduction<ExpBase::Base10>::log2_base;
     qf = x86_exp_round_nearest<Tag>(
-        C::mul(tag, xc, C::fill(tag, T(log2_base))));
+        mul(tag, xc, fill_word(tag, T(log2_base))));
     if constexpr (Base == ExpBase::E) {
-      r = C::fmadd(
+      r = fmadd(
           tag, qf,
-          C::fill(tag, estimate ? T(-0.693147180559945309417232121458)
+          fill_word(tag, estimate ? T(-0.693147180559945309417232121458)
                                 : std::same_as<T, float16_t>
                                       ? T(-0.693359375)
                                       : std::same_as<T, float32_t>
@@ -568,9 +501,9 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_family(
                                             : T(-0.6931471805596629565116018)),
           xc);
       if constexpr (!estimate) {
-        r = C::fmadd(
+        r = fmadd(
             tag, qf,
-            C::fill(tag, std::same_as<T, float16_t>
+            fill_word(tag, std::same_as<T, float16_t>
                              ? T(0.000212192535400390625)
                              : std::same_as<T, float32_t>
                                    ? T(-1.428606765330187045e-6F)
@@ -585,9 +518,9 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_family(
       const auto lo = std::same_as<T, float16_t> ? T(R::inv_lo_f16)
           : std::same_as<T, float32_t> ? T(R::inv_lo_f32)
                                        : T(R::inv_lo);
-      r = C::fmadd(tag, qf, C::fill(tag, -hi), xc);
+      r = fmadd(tag, qf, fill_word(tag, -hi), xc);
       if constexpr (!estimate)
-        r = C::fmadd(tag, qf, C::fill(tag, -lo), r);
+        r = fmadd(tag, qf, fill_word(tag, -lo), r);
     }
   }
   const auto poly = x86_exp_poly<Base, Tier, Index>(tag, r);
@@ -622,41 +555,41 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_family(
     else y = NativeWordVec<Tag>{_mm512_scalef_pd(poly.value, qf.value)};
   }
 #else
-  constexpr typename C::ITag index_tag{};
+  constexpr IndexTag<Tag> index_tag{};
   const auto qi = x86_exp_to_index<Tag>(tag, qf);
-  const auto half = C::ishr(index_tag, qi, 1);
-  const auto rest = C::isub(index_tag, qi, half);
-  const auto bias = C::ifill(
+  const auto half = bit_shr(index_tag, qi, 1);
+  const auto rest = sub(index_tag, qi, half);
+  const auto bias = fill_word(
       index_tag, std::same_as<T, float32_t> ? 127 : 1023);
   const int shift = std::same_as<T, float32_t> ? 23 : 52;
   if constexpr (NegativeOnly && !gradual) {
-    const auto scale = C::from_bits(
-        tag, C::ishl(index_tag, C::iadd(index_tag, qi, bias), shift));
-    y = C::mul(tag, poly, scale);
+    const auto scale = bitcast(
+        tag, bit_shl(index_tag, add(index_tag, qi, bias), shift));
+    y = mul(tag, poly, scale);
   } else {
-    const auto a = C::from_bits(
-        tag, C::ishl(index_tag, C::iadd(index_tag, half, bias), shift));
-    const auto b = C::from_bits(
-        tag, C::ishl(index_tag, C::iadd(index_tag, rest, bias), shift));
-    y = C::mul(tag, C::mul(tag, poly, a), b);
+    const auto a = bitcast(
+        tag, bit_shl(index_tag, add(index_tag, half, bias), shift));
+    const auto b = bitcast(
+        tag, bit_shl(index_tag, add(index_tag, rest, bias), shift));
+    y = mul(tag, mul(tag, poly, a), b);
   }
 #endif
   if constexpr (!NegativeOnly) {
-    y = C::select(
-        tag, y, C::gt(tag, x, C::fill(tag, overflow)),
-        C::fill(tag, std::numeric_limits<T>::infinity()));
+    y = blend(
+        tag, y, cmpgt(tag, x, fill_word(tag, overflow)),
+        fill_word(tag, std::numeric_limits<T>::infinity()));
   }
   if constexpr (!natural_underflow) {
-    y = C::select(
+    y = blend(
         tag, y,
-        C::lt(tag, x, C::fill(tag, gradual ? T(D::zero_limit)
+        cmplt(tag, x, fill_word(tag, gradual ? T(D::zero_limit)
                                            : T(D::normal_limit))),
-        C::fill(tag, T(0)));
+        fill_word(tag, T(0)));
   }
 #ifndef VECOPS_MATH_ASSUME_VALID_INPUTS
   if constexpr (!NegativeOnly) {
-    y = C::select(
-        tag, y, C::ne(tag, x, x), C::add(tag, x, x));
+    y = blend(
+        tag, y, cmpne(tag, x, x), add(tag, x, x));
   }
 #endif
   return y;
@@ -766,10 +699,10 @@ struct X86ExpWordImpl {
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
       ExpOp<Base, A, NegativeOnly> op, Tag tag, NativeWordVec<Tag> value,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
-    const auto zero = X86ExpContext<Index, Tag>::fill(tag, ElementOf<Tag>{});
-    const auto safe = X86ExpContext<Index, Tag>::select(
+    const auto zero = fill_word(tag, ElementOf<Tag>{});
+    const auto safe = blend(
         tag, zero, mask, value);
-    return X86ExpContext<Index, Tag>::select(
+    return blend(
         tag, inactive, mask, call<Index>(op, tag, safe));
   }
 };

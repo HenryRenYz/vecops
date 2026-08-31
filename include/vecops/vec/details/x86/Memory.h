@@ -374,7 +374,7 @@ VECOPS_ALWAYS_INLINE Raw x86_indexed_subword_offsets(
     Raw indices, const void* pointer, Raw& shifts) {
   const int remainder = static_cast<int>(
       reinterpret_cast<std::uintptr_t>(pointer) & std::uintptr_t{3});
-  const auto fill = [=](int value) {
+  const auto fill_value = [=](int value) {
     if constexpr (sizeof(Raw) == 16) return _mm_set1_epi32(value);
     else if constexpr (sizeof(Raw) == 32) return _mm256_set1_epi32(value);
     else return _mm512_set1_epi32(value);
@@ -396,20 +396,20 @@ VECOPS_ALWAYS_INLINE Raw x86_indexed_subword_offsets(
   };
   constexpr int shift = Scale == 1 ? 0 : Scale == 2 ? 1 : Scale == 4 ? 2 : 3;
   const auto byte_indices = add(
-      shift == 0 ? indices : shift_left(indices, shift), fill(remainder));
+      shift == 0 ? indices : shift_left(indices, shift), fill_value(remainder));
   if constexpr (sizeof(ElementOf<Tag>) == 1) {
-    shifts = shift_left(bit_and(byte_indices, fill(3)), 3);
-    return bit_and(byte_indices, fill(~3));
+    shifts = shift_left(bit_and(byte_indices, fill_value(3)), 3);
+    return bit_and(byte_indices, fill_value(~3));
   } else {
     const auto at_offset_three = bit_and(
-        bit_and(byte_indices, shift_left(byte_indices, 1)), fill(2));
+        bit_and(byte_indices, shift_left(byte_indices, 1)), fill_value(2));
     const auto tail = [&] {
       if constexpr (sizeof(Raw) == 16)
-        return _mm_xor_si128(at_offset_three, fill(3));
+        return _mm_xor_si128(at_offset_three, fill_value(3));
       else if constexpr (sizeof(Raw) == 32)
-        return _mm256_xor_si256(at_offset_three, fill(3));
+        return _mm256_xor_si256(at_offset_three, fill_value(3));
       else
-        return _mm512_xor_si512(at_offset_three, fill(3));
+        return _mm512_xor_si512(at_offset_three, fill_value(3));
     }();
     shifts = shift_left(bit_and(byte_indices, tail), 3);
     if constexpr (sizeof(Raw) == 16)
@@ -701,19 +701,19 @@ VECOPS_ALWAYS_INLINE Vec<Tag> x86_load_indexed_native(
       return ::vecops::vec::get_word<0>(WordTag{}, loaded);
     });
   } else if constexpr (num_words(tag) > 1 || num_words(IndexTag{}) > 1) {
-    const auto lower = x86_load_indexed_native<
+    const auto lower_value = x86_load_indexed_native<
         Scale, Half<Tag>, Half<IndexTag>>(
-        Half<Tag>{}, pointer, execute(LowerOp{}, IndexTag{}, indices),
-        execute(LowerOp{}, tag, mask), execute(LowerOp{}, tag, inactive));
-    const auto upper = x86_load_indexed_native<
+        Half<Tag>{}, pointer, lower(IndexTag{}, indices),
+        lower(tag, mask), lower(tag, inactive));
+    const auto upper_value = x86_load_indexed_native<
         Scale, Half<Tag>, Half<IndexTag>>(
-        Half<Tag>{}, pointer, execute(UpperOp{}, IndexTag{}, indices),
-        execute(UpperOp{}, tag, mask), execute(UpperOp{}, tag, inactive));
-    return execute(ConcatOp{}, tag, lower, upper);
+        Half<Tag>{}, pointer, upper(IndexTag{}, indices),
+        upper(tag, mask), upper(tag, inactive));
+    return concat(tag, lower_value, upper_value);
   } else if constexpr (sizeof(ElementOf<Tag>) < 4) {
     const auto loaded = x86_load_indexed_subword_leaf<Scale>(
         tag, pointer, indices, mask);
-    return execute(BlendOp{}, tag, inactive, mask, loaded);
+    return blend(tag, inactive, mask, loaded);
   } else {
     return x86_load_indexed_leaf<Scale, Tag, IndexTag>(
         tag, pointer, indices, mask, inactive);
@@ -732,8 +732,8 @@ struct NativeImpl<X86Backend, LoadOp, Tag> {
       LoadOp op, Tag tag, const ElementOf<Tag>* pointer,
       opt::Indexed<Indices, Scale> addressing, Temporality temporality) {
     return call(
-        op, tag, pointer, addressing, execute(MaskFillOp{}, tag, true),
-        execute(FillOp{}, tag, ElementOf<Tag>{}), temporality);
+        op, tag, pointer, addressing, mfill(tag, true),
+        fill(tag, ElementOf<Tag>{}), temporality);
   }
 
   template <VectorValue Indices, int Scale, typename Temporality>
@@ -865,13 +865,13 @@ VECOPS_ALWAYS_INLINE void x86_store_indexed_native(
         static_cast<std::size_t>(Traits::word_count)>{});
   } else if constexpr (num_words(tag) > 1 || num_words(IndexTag{}) > 1) {
     x86_store_indexed_native<Scale, Half<Tag>, Half<IndexTag>>(
-        Half<Tag>{}, pointer, execute(LowerOp{}, tag, value),
-        execute(LowerOp{}, IndexTag{}, indices),
-        execute(LowerOp{}, tag, mask));
+        Half<Tag>{}, pointer, lower(tag, value),
+        lower(IndexTag{}, indices),
+        lower(tag, mask));
     x86_store_indexed_native<Scale, Half<Tag>, Half<IndexTag>>(
-        Half<Tag>{}, pointer, execute(UpperOp{}, tag, value),
-        execute(UpperOp{}, IndexTag{}, indices),
-        execute(UpperOp{}, tag, mask));
+        Half<Tag>{}, pointer, upper(tag, value),
+        upper(IndexTag{}, indices),
+        upper(tag, mask));
   } else {
     x86_store_indexed_leaf<Scale, Tag, IndexTag>(
         tag, pointer, value, indices, mask);
@@ -887,7 +887,7 @@ struct NativeImpl<X86Backend, StoreOp, Tag> {
       opt::Indexed<Indices, Scale> addressing, Temporality temporality) {
     call(
         op, tag, pointer, value, addressing,
-        execute(MaskFillOp{}, tag, true), temporality);
+        mfill(tag, true), temporality);
   }
 
   template <VectorValue Indices, int Scale, typename Temporality>
@@ -923,7 +923,7 @@ struct NativeWordImpl<X86Backend, LoadOp> {
       return NativeWordVec<Tag>{x86_load_memory_word<Raw>(
           pointer, alignment, temporality)};
     } else {
-      const auto zero = execute_word<Index, X86Backend>(FillOp{}, Tag{}, T{});
+      const auto zero = fill_word(Tag{}, T{});
       return NativeWordVec<Tag>{x86_masked_load_memory_word<T>(
           pointer, x86_mask_prefix<T, MaskRaw>(valid), zero.value)};
     }

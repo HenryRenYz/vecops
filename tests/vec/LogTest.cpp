@@ -1,3 +1,4 @@
+// @vecops-test-shards: 8
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -61,8 +62,8 @@ std::uint64_t ulps_between(T expected, T actual) {
 /**
  * Checks one tier result against the long-double reference under the
  * documented log-family contracts:
- *   Strict   <= 1 ULP (f32, via the f64 kernel; and f16/bf16),
- *              <= 4 ULP (f64, the optimized-routines libm class)
+ *   Strict   <= 1 ULP (f32 native kernel on SVE; f16/bf16 via the f32
+ *              pipeline), <= 4 ULP (f64, the optimized-routines libm class)
  *   Fast     <= 2^-13 relative (f32/f64), <= 2 ULP (f16/bf16)
  *   Estimate <= 2^-7 relative
  * Exact-class results are pinned bit-exactly in every tier: log(+-0) is

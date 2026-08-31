@@ -124,7 +124,7 @@ VECOPS_ALWAYS_INLINE __m128i x86_float32_pair_to_bfloat16(
 #if defined(HAS_AVX512_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
   return x86_cast_bfloat16_to_si128(_mm_cvtne2ps_pbh(high, low));
 #else
-  const auto convert = [](__m128 value) {
+  const auto convert_value = [](__m128 value) {
     const auto bits = _mm_castps_si128(value);
     const auto lsb = _mm_and_si128(
         _mm_srli_epi32(bits, 16), _mm_set1_epi32(1));
@@ -134,7 +134,7 @@ VECOPS_ALWAYS_INLINE __m128i x86_float32_pair_to_bfloat16(
     return _mm_blendv_epi8(
         _mm_set1_epi32(0x7fc0), rounded, ordered);
   };
-  return _mm_packus_epi32(convert(low), convert(high));
+  return _mm_packus_epi32(convert_value(low), convert_value(high));
 #endif
 }
 
@@ -160,7 +160,7 @@ VECOPS_ALWAYS_INLINE __m256i x86_float32_pair_to_bfloat16(
 #if defined(HAS_AVX512_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
   return x86_cast_bfloat16_to_si256(_mm256_cvtne2ps_pbh(high, low));
 #else
-  const auto convert = [](__m256 value) {
+  const auto convert_value = [](__m256 value) {
     const auto bits = _mm256_castps_si256(value);
     const auto lsb = _mm256_and_si256(
         _mm256_srli_epi32(bits, 16), _mm256_set1_epi32(1));
@@ -171,7 +171,7 @@ VECOPS_ALWAYS_INLINE __m256i x86_float32_pair_to_bfloat16(
     return _mm256_blendv_epi8(
         _mm256_set1_epi32(0x7fc0), rounded, ordered);
   };
-  const auto packed = _mm256_packus_epi32(convert(low), convert(high));
+  const auto packed = _mm256_packus_epi32(convert_value(low), convert_value(high));
   return _mm256_permute4x64_epi64(packed, 0xd8);
 #endif
 }
@@ -425,29 +425,29 @@ VECOPS_ALWAYS_INLINE Raw x86_small_float_binary_simd(
 template <typename Raw>
 VECOPS_ALWAYS_INLINE Raw x86_mullo_epi8(Raw a, Raw b) {
   if constexpr (sizeof(Raw) == 16) {
-    const auto even = _mm_mullo_epi16(a, b);
-    const auto odd = _mm_mullo_epi16(_mm_srli_epi16(a, 8), _mm_srli_epi16(b, 8));
+    const auto even_value = _mm_mullo_epi16(a, b);
+    const auto odd_value = _mm_mullo_epi16(_mm_srli_epi16(a, 8), _mm_srli_epi16(b, 8));
     return _mm_or_si128(
-        _mm_slli_epi16(odd, 8), _mm_and_si128(even, _mm_set1_epi16(0xff)));
+        _mm_slli_epi16(odd_value, 8), _mm_and_si128(even_value, _mm_set1_epi16(0xff)));
   }
 #if VEC_WIDTH >= 256
   else if constexpr (sizeof(Raw) == 32) {
-    const auto even = _mm256_mullo_epi16(a, b);
-    const auto odd = _mm256_mullo_epi16(
+    const auto even_value = _mm256_mullo_epi16(a, b);
+    const auto odd_value = _mm256_mullo_epi16(
         _mm256_srli_epi16(a, 8), _mm256_srli_epi16(b, 8));
     return _mm256_or_si256(
-        _mm256_slli_epi16(odd, 8),
-        _mm256_and_si256(even, _mm256_set1_epi16(0xff)));
+        _mm256_slli_epi16(odd_value, 8),
+        _mm256_and_si256(even_value, _mm256_set1_epi16(0xff)));
   }
 #endif
 #if VEC_WIDTH >= 512
   else {
-    const auto even = _mm512_mullo_epi16(a, b);
-    const auto odd = _mm512_mullo_epi16(
+    const auto even_value = _mm512_mullo_epi16(a, b);
+    const auto odd_value = _mm512_mullo_epi16(
         _mm512_srli_epi16(a, 8), _mm512_srli_epi16(b, 8));
     return _mm512_or_si512(
-        _mm512_slli_epi16(odd, 8),
-        _mm512_and_si512(even, _mm512_set1_epi16(0xff)));
+        _mm512_slli_epi16(odd_value, 8),
+        _mm512_and_si512(even_value, _mm512_set1_epi16(0xff)));
   }
 #endif
 }
@@ -682,8 +682,7 @@ struct X86ArithmeticWordImpl {
         else if constexpr (sizeof(Raw) == 32) VECOPS_VEC_X86_MASK_BINARY(256, mul, pd);
         else VECOPS_VEC_X86_MASK_BINARY(512, mul, pd);
       } else if constexpr (std::same_as<T, bfloat16_t>) {
-        return NativeWordImpl<X86Backend, BlendOp>::template call<Index>(
-            BlendOp{}, tag, inactive, mask, call<Index>(op, tag, a, b)).value;
+        return blend(tag, inactive, mask, call<Index>(op, tag, a, b)).value;
       } else if constexpr (std::same_as<T, float16_t>) {
 #if defined(HAS_AVX512_FP16)
         if constexpr (sizeof(Raw) == 16) {
@@ -772,13 +771,11 @@ struct X86ArithmeticWordImpl {
           }
         }
 #else
-        return NativeWordImpl<X86Backend, BlendOp>::template call<Index>(
-            BlendOp{}, tag, inactive, mask, call<Index>(op, tag, a, b)).value;
+        return blend(tag, inactive, mask, call<Index>(op, tag, a, b)).value;
 #endif
       } else if constexpr (std::same_as<T, int8_t> || std::same_as<T, uint8_t>) {
         if constexpr (std::same_as<Op, MulOp>) {
-          return NativeWordImpl<X86Backend, BlendOp>::template call<Index>(
-              BlendOp{}, tag, inactive, mask, call<Index>(op, tag, a, b)).value;
+          return blend(tag, inactive, mask, call<Index>(op, tag, a, b)).value;
         } else if constexpr (sizeof(Raw) == 16) {
           if constexpr (std::same_as<Op, AddOp>) {
             if constexpr (std::same_as<Policy, ZeroArithmeticInactive>) return _mm_maskz_add_epi8(mask.value, a.value, b.value);
@@ -826,8 +823,7 @@ struct X86ArithmeticWordImpl {
     }();
     return NativeWordVec<Tag>{masked};
 #else
-    return NativeWordImpl<X86Backend, BlendOp>::template call<Index>(
-        BlendOp{}, tag, inactive, mask, call<Index>(op, tag, a, b));
+    return blend(tag, inactive, mask, call<Index>(op, tag, a, b));
 #endif
   }
 };
@@ -1154,8 +1150,7 @@ struct X86ExtremaWordImpl {
 #undef VECOPS_VEC_X86_MASKED_EXTREMA
 #endif
     const auto computed = call<Index>(op, tag, a, b);
-    return NativeWordImpl<X86Backend, BlendOp>::template call<Index>(
-        BlendOp{}, tag, inactive, mask, computed);
+    return blend(tag, inactive, mask, computed);
   }
 };
 
@@ -1311,8 +1306,7 @@ struct X86UnaryArithmeticWordImpl {
   static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
       Op op, Tag tag, NativeWordVec<Tag> value,
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
-    return NativeWordImpl<X86Backend, BlendOp>::template call<Index>(
-        BlendOp{}, tag, inactive, mask, call<Index>(op, tag, value));
+    return blend(tag, inactive, mask, call<Index>(op, tag, value));
   }
 };
 
@@ -1506,8 +1500,7 @@ struct X86FloatingUnaryWordImpl {
     }
 #undef VECOPS_VEC_X86_MASKED_FLOAT_UNARY
 #endif
-    return NativeWordImpl<X86Backend, BlendOp>::template call<Index>(
-        BlendOp{}, tag, inactive, mask, call<Index>(op, tag, value));
+    return blend(tag, inactive, mask, call<Index>(op, tag, value));
   }
 };
 
@@ -1723,8 +1716,7 @@ struct X86FmaWordImpl {
     }
 #endif
     const auto computed = call<Index>(op, tag, a, b, c);
-    return NativeWordImpl<X86Backend, BlendOp>::template call<Index>(
-        BlendOp{}, tag, inactive, mask, computed);
+    return blend(tag, inactive, mask, computed);
   }
 };
 

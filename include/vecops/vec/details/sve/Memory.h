@@ -234,7 +234,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> sve_load_indexed_memory_leaf(
     else
       loaded = sve_compact_indexed_memory_bits<Tag>(bits);
   }
-  return execute(BlendOp{}, tag, inactive, mask, loaded);
+  return blend(tag, inactive, mask, loaded);
 }
 
 template <int Scale, VectorTag Tag, VectorTag IndexTag,
@@ -243,17 +243,17 @@ VECOPS_ALWAYS_INLINE Vec<Tag> sve_load_indexed_memory(
     Tag tag, const ElementOf<Tag>* pointer, Vec<IndexTag> indices,
     Mask<Tag> mask, Vec<Tag> inactive, Temporality temporality) {
   if constexpr (num_words(tag) > 1 || num_words(IndexTag{}) > 1) {
-    const auto lower = sve_load_indexed_memory<
+    const auto lower_value = sve_load_indexed_memory<
         Scale, Half<Tag>, Half<IndexTag>>(
-        Half<Tag>{}, pointer, execute(LowerOp{}, IndexTag{}, indices),
-        execute(LowerOp{}, tag, mask), execute(LowerOp{}, tag, inactive),
+        Half<Tag>{}, pointer, lower(IndexTag{}, indices),
+        lower(tag, mask), lower(tag, inactive),
         temporality);
-    const auto upper = sve_load_indexed_memory<
+    const auto upper_value = sve_load_indexed_memory<
         Scale, Half<Tag>, Half<IndexTag>>(
-        Half<Tag>{}, pointer, execute(UpperOp{}, IndexTag{}, indices),
-        execute(UpperOp{}, tag, mask), execute(UpperOp{}, tag, inactive),
+        Half<Tag>{}, pointer, upper(IndexTag{}, indices),
+        upper(tag, mask), upper(tag, inactive),
         temporality);
-    return execute(ConcatOp{}, tag, lower, upper);
+    return concat(tag, lower_value, upper_value);
   } else {
     return sve_load_indexed_memory_leaf<Scale, Tag, IndexTag>(
         tag, pointer, indices, mask, inactive, temporality);
@@ -267,8 +267,8 @@ struct NativeImpl<SVEBackend, LoadOp, Tag> {
       LoadOp op, Tag tag, const ElementOf<Tag>* pointer,
       opt::Indexed<Indices, Scale> addressing, Temporality temporality) {
     return call(
-        op, tag, pointer, addressing, execute(MaskFillOp{}, tag, true),
-        execute(FillOp{}, tag, ElementOf<Tag>{}), temporality);
+        op, tag, pointer, addressing, mfill(tag, true),
+        fill(tag, ElementOf<Tag>{}), temporality);
   }
 
   template <VectorValue Indices, int Scale, typename Temporality>
@@ -438,13 +438,13 @@ VECOPS_ALWAYS_INLINE void sve_store_indexed_memory(
     Vec<IndexTag> indices, Mask<Tag> mask, Temporality temporality) {
   if constexpr (num_words(tag) > 1 || num_words(IndexTag{}) > 1) {
     sve_store_indexed_memory<Scale, Half<Tag>, Half<IndexTag>>(
-        Half<Tag>{}, pointer, execute(LowerOp{}, tag, value),
-        execute(LowerOp{}, IndexTag{}, indices),
-        execute(LowerOp{}, tag, mask), temporality);
+        Half<Tag>{}, pointer, lower(tag, value),
+        lower(IndexTag{}, indices),
+        lower(tag, mask), temporality);
     sve_store_indexed_memory<Scale, Half<Tag>, Half<IndexTag>>(
-        Half<Tag>{}, pointer, execute(UpperOp{}, tag, value),
-        execute(UpperOp{}, IndexTag{}, indices),
-        execute(UpperOp{}, tag, mask), temporality);
+        Half<Tag>{}, pointer, upper(tag, value),
+        upper(IndexTag{}, indices),
+        upper(tag, mask), temporality);
   } else {
     sve_store_indexed_memory_leaf<Scale, Tag, IndexTag>(
         tag, pointer, value, indices, mask, temporality);
@@ -459,7 +459,7 @@ struct NativeImpl<SVEBackend, StoreOp, Tag> {
       opt::Indexed<Indices, Scale> addressing, Temporality temporality) {
     call(
         op, tag, pointer, value, addressing,
-        execute(MaskFillOp{}, tag, true), temporality);
+        mfill(tag, true), temporality);
   }
 
   template <VectorValue Indices, int Scale, typename Temporality>

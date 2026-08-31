@@ -32,6 +32,11 @@ struct ConvertOp {
       ToTag to, FromTag from, Mask<FromTag> value) const;
 };
 
+/** Public entry-point variables, declared before the backend includes
+ * so that details-layer implementations can call them by short names
+ * (same layout as Basic.h and Arithmetic.h). */
+inline constexpr ConvertOp convert{};
+
 } // namespace vecops::vec
 
 #include "vecops/vec/details/Dispatch.h"
@@ -95,7 +100,6 @@ VECOPS_ALWAYS_INLINE Mask<ToTag> ConvertOp::operator()(
   return details::execute(*this, to, from, value);
 }
 
-inline constexpr ConvertOp convert{};
 
 } // namespace vecops::vec
 

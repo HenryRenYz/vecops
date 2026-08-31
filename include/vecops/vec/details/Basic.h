@@ -10,6 +10,33 @@
 
 namespace vecops::vec::details {
 
+/**
+ * Broadcasts one scalar into a physical word. The word twin of the public
+ * fill: fill's (Tag, scalar) parameter shape cannot distinguish the two
+ * representations by overload resolution, so the word form lives under its
+ * own name.
+ */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE NativeWordVec<Tag> fill_word(
+    Tag tag, ElementOf<Tag> value) {
+  return execute_word<0, CurrentBackend>(FillOp{}, tag, value);
+}
+
+/**
+ * Shared sanitize-compute-blend skeleton for masked unary math word
+ * implementations: inactive-lane inputs are replaced by zero before the
+ * computation, then the caller's inactive value is blended back in. compute
+ * receives the sanitized input word and returns the unmasked result word.
+ */
+template <VectorTag Tag, typename Compute>
+VECOPS_ALWAYS_INLINE NativeWordVec<Tag> masked_unary_word(
+    Tag tag, NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive,
+    NativeWordVec<Tag> value, Compute&& compute) {
+  const auto safe = BlendOp{}(
+      tag, fill_word(tag, ElementOf<Tag>{}), mask, value);
+  return BlendOp{}(tag, inactive, mask, compute(safe));
+}
+
 template <typename Backend, VectorTag ToTag>
 struct GenericImpl<Backend, ResizeBitCastOp, ToTag> {
   template <VectorTag FromTag>
@@ -235,8 +262,8 @@ struct GenericImpl<Backend, ConcatOp, Tag> {
     static VECOPS_ALWAYS_INLINE Vec<Half<Tag>> call(                     \
         OpType op, Tag tag, Vec<Tag> value) {                             \
       using Child = Half<Tag>;                                           \
-      const auto lo = execute(LowerOp{}, tag, value);                    \
-      const auto hi = execute(UpperOp{}, tag, value);                    \
+      const auto lo = lower(tag, value);                    \
+      const auto hi = upper(tag, value);                    \
       return execute(                                                    \
           ConcatOp{}, Child{},                                           \
           execute(op, Child{}, lo), execute(op, Child{}, hi));           \
@@ -254,7 +281,7 @@ struct GenericImpl<Backend, ConcatEvenOp, Tag> {
       ConcatEvenOp, Tag tag, Vec<Tag> a, Vec<Tag> b) {
     return execute(
         ConcatOp{}, tag,
-        execute(EvenOp{}, tag, a), execute(EvenOp{}, tag, b));
+        even(tag, a), even(tag, b));
   }
 };
 
@@ -264,7 +291,7 @@ struct GenericImpl<Backend, ConcatOddOp, Tag> {
       ConcatOddOp, Tag tag, Vec<Tag> a, Vec<Tag> b) {
     return execute(
         ConcatOp{}, tag,
-        execute(OddOp{}, tag, a), execute(OddOp{}, tag, b));
+        odd(tag, a), odd(tag, b));
   }
 };
 
@@ -276,13 +303,13 @@ struct GenericImpl<Backend, InterleaveOp, Tag> {
     using Child = Half<Tag>;
     const auto lo = execute(
         op, Child{},
-        execute(LowerOp{}, Child{}, a),
-        execute(LowerOp{}, Child{}, b));
+        lower(Child{}, a),
+        lower(Child{}, b));
     const auto hi = execute(
         op, Child{},
-        execute(UpperOp{}, Child{}, a),
-        execute(UpperOp{}, Child{}, b));
-    return execute(ConcatOp{}, tag, lo, hi);
+        upper(Child{}, a),
+        upper(Child{}, b));
+    return concat(tag, lo, hi);
   }
 };
 

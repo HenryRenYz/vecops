@@ -457,8 +457,7 @@ struct SVEFmaWordImpl {
     } else {
       const auto computed =
           synthesize_fma_word<SVEBackend, Op, Index>(tag, a, b, c);
-      return NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(
-          BlendOp{}, tag, inactive, mask, computed);
+      return blend(tag, inactive, mask, computed);
     }
   }
 };

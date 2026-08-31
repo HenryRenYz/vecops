@@ -568,31 +568,53 @@ own production SVE libm routines rather than the 1-ULP reciprocal class:
 backend ports their 128-entry `invc`/`logc`-table kernels verbatim
 (measured 2.64/2.58/2.46 ULP for log/log2/log10; SLEEF's relaxed "u35"
 tier is the same class), and a 1-ULP log would need double-double
-accumulation of the table terms. **f32 Strict** can afford the wider
-detour instead: it widens to f64, evaluates the f64 table kernel, and
-narrows once — the same double-precision-intermediate trick as the
-upstream scalar `logf` family — so it stays within 1 ULP after the final
-rounding. **Fast** drops the table for a six-term Taylor kernel on the
-[2/3, 4/3) reduction window (`r = z - 1` is exact by Sterbenz); non-e
-bases scale once at the end, which preserves the relative-error bound.
-**Estimate** keeps three terms for the same 2^-7 budget as the reciprocal
-Estimate tier.
+accumulation of the table terms. **f32 Strict** stays native: a
+degree-13 minimax of `(log_b(1+r) - alpha*r)/r^2` on the symmetric
+`[1/sqrt2, sqrt2)` reduction window, assembled Cody-Waite style —
+`k*log_b(2)` is split into a `hi` quantized to 15 significant mantissa
+bits (so `k*hi` stays exact inside the final FMA) plus a tiny-`lo`
+correction folded ahead of it, and `|log_b(z)| <= |log_b(x)|` on every
+`k` band keeps each rounding at or below the result binade. Measured 1
+ULP on the SVE backend. **Fast** drops the table for a six-term Taylor
+kernel on the [2/3, 4/3) reduction window (`r = z - 1` is exact by
+Sterbenz); non-e bases scale once at the end, which preserves the
+relative-error bound. **Estimate** keeps three terms for the same 2^-7
+budget as the reciprocal Estimate tier.
 
 Reduction and tails follow the upstream design: `bits(x) - off` splits
 `x = 2^k * z` with the table index masked to the table size (any input
 bit pattern gathers in range), and one `NOINLINE` special routine owns
-subnormals (renormalized by an exact power of two plus a logarithmic
-correction), zero, negatives, `+inf`, and NaN. Special inputs are
-tier-independent: `log(+-0) = -inf`, `log(+inf) = +inf`,
+subnormals (renormalized by an exact power of two, with the logarithmic
+correction folded into the extracted exponent as an integer bias on the
+f32/f16 polynomial kernels), zero, negatives, `+inf`, and NaN. Special
+inputs are tier-independent: `log(+-0) = -inf`, `log(+inf) = +inf`,
 `log(x < 0) = NaN` (including `-inf`), `log(1) = +0` exactly, NaN
 propagates. Log outputs are never subnormal, so the
-`VECOPS_PRESERVE_SUBNORMALS` build modes differ only in accuracy. f16 and
-bf16 widen through the f32 pipelines (every f16 value is normal in f32).
+`VECOPS_PRESERVE_SUBNORMALS` build modes differ only in accuracy. On
+SVE, f16 Fast/Estimate run native half-precision kernels of the same
+skeleton (exhaustively validated over all 65536 bit patterns), while f16
+Strict and bf16 widen through the f32 pipeline: pure f16 arithmetic
+cannot absorb one 2^-11 rounding per FMA in the `k*log_b(2) + log_b(z)`
+cancellation band, so the 1-ULP class rides the native f32 kernel and
+narrows once.
 
-The x86 and scalar backends currently evaluate the IEEE libm logarithm
-per lane (through a float intermediate for the narrow formats), which
-satisfies every tier contract including f32/f64 Strict; vector-native
-kernels remain future work there.
+The x86 backend evaluates the same shared-constant kernels as SVE
+(`vec/details/Math.h` owns the tables and polynomial coefficients, so
+both vector backends and all three bases run identical instruction
+sequences with matching throughput): f64 Strict is the
+optimized-routines table kernel with AVX2/AVX-512 hardware gathers for
+the `invc`/`logc` pairs (128-bit words load each entry with one
+16-byte load and unpack the halves), f32 Strict is the native
+degree-13 kernel, and Fast/Estimate are the shared Taylor kernels.
+Special routines mirror the SVE structure — f64 renormalizes subnormal
+lanes by 2^52 with the additive correction, f32 folds the correction
+into the extracted exponent as an integer bias on the renormalized
+lanes — and every f16 tier and bf16 widen through the f32 pipeline.
+Targets without AVX-512DQ convert the extracted exponent to f64 via
+the exact exponent-bias trick (biased into one binade so negative
+exponents cannot borrow into the exponent field). Only the scalar
+backend still evaluates the IEEE libm logarithm per lane (through a
+float intermediate for the narrow formats).
 
 ### Reductions (`vec/Reduction.h`)
 
@@ -627,9 +649,10 @@ vec/details/{scalar,sve,x86}/X.h   ISA specializations (NativeImpl /
                              NativeWordImpl) for that backend tag
 ```
 
-**Dispatch.** Each top-level header declares its Op functor types, then
-includes the backend specializations, then defines the `operator()` bodies.
-`details::execute()` probes, at compile time and in this order:
+**Dispatch.** Each top-level header declares its Op functor types and the
+`inline constexpr` entry variables, then includes the backend specializations,
+then defines the `operator()` bodies. `details::execute()` probes, at compile
+time and in this order:
 
 ```cpp
 if constexpr (requires { NativeImpl<CurrentBackend, Op, Tag>::call(...); })
@@ -641,6 +664,25 @@ else if constexpr (requires { GenericImpl<CurrentBackend, Op, Tag>::call(...); }
   // 3. architecture-independent fallback (per-word batching, lane loops)
 else static_assert(...);  // clear compile error naming Op and Tag
 ```
+
+**Internal calls use the same short names.** Because the entry variables are
+declared before the backend includes, implementations inside `vec/details/`
+call other operations through the very same names external users see —
+`mul(tag, a, b)`, `blend(tag, inactive, mask, computed)`. Every Op carries a
+word-level `operator()` entry written inline in its own definition (via
+forward declarations of `details::execute`/`execute_word` at the end of
+`VecBase.h`) so the same call shape works on physical words: on single-word
+Tags (where `Vec<Tag>` and `NativeWordVec<Tag>` name the same type) the
+public whole-Tag overloads take over and dispatch routes into
+`NativeWordImpl<0>` identically.
+Inside the details layer the math tokens additionally expose
+`details::exp<Base, Accuracy, NegativeOnly>(tag, v)`-style variable templates
+that shadow the public variables and force an explicit accuracy tier; word
+broadcast uses `fill_word`, and masked unary math word implementations share
+the `masked_unary_word` sanitize→compute→blend skeleton. The explicit
+`execute_word<Index>(op, ...)` spelling survives only where it means
+something: index-sensitive conversion/memory word calls, and the
+backend-agnostic batching loops of `GenericImpl`.
 
 Consequences:
 

@@ -113,7 +113,7 @@ VECOPS_ALWAYS_INLINE Mask<Half<Tag>> x86_conversion_mask_upper(
 
 template <VectorTag Tag>
 VECOPS_ALWAYS_INLINE Mask<Tag> x86_conversion_mask_concat(
-    Tag, Mask<Half<Tag>> lower, Mask<Half<Tag>> upper) {
+    Tag, Mask<Half<Tag>> lower_value, Mask<Half<Tag>> upper_value) {
   using OutTraits = RepresentationTraits<X86Backend, Tag>;
   using InTag = Half<Tag>;
   using InTraits = RepresentationTraits<X86Backend, InTag>;
@@ -123,9 +123,9 @@ VECOPS_ALWAYS_INLINE Mask<Tag> x86_conversion_mask_concat(
     return construct_mask_words<X86Backend>(
         Tag{}, [&]<nint_t Index>(Tag) {
           if constexpr (Index < split) {
-            return ::vecops::vec::get_word<Index>(InTag{}, lower);
+            return ::vecops::vec::get_word<Index>(InTag{}, lower_value);
           } else {
-            return ::vecops::vec::get_word<Index - split>(InTag{}, upper);
+            return ::vecops::vec::get_word<Index - split>(InTag{}, upper_value);
           }
         });
   } else {
@@ -133,21 +133,21 @@ VECOPS_ALWAYS_INLINE Mask<Tag> x86_conversion_mask_concat(
     using InRaw = typename InTraits::RawMask;
     constexpr int half_lanes = static_cast<int>(InTraits::logical_lanes);
 #if defined(CPU_CAPABILITY_AVX512)
-    const uint64_t bits = static_cast<uint64_t>(lower.value) |
-        (static_cast<uint64_t>(upper.value) << half_lanes);
+    const uint64_t bits = static_cast<uint64_t>(lower_value.value) |
+        (static_cast<uint64_t>(upper_value.value) << half_lanes);
     return Mask<Tag>{static_cast<OutRaw>(bits)};
 #else
     if constexpr (sizeof(OutRaw) == sizeof(InRaw)) {
       constexpr int half_bytes =
           half_lanes * static_cast<int>(sizeof(ElementOf<Tag>));
       const auto kept_lower = _mm_srli_si128(
-          _mm_slli_si128(lower.value, 16 - half_bytes), 16 - half_bytes);
+          _mm_slli_si128(lower_value.value, 16 - half_bytes), 16 - half_bytes);
       return Mask<Tag>{
-          _mm_or_si128(kept_lower, _mm_slli_si128(upper.value, half_bytes))};
+          _mm_or_si128(kept_lower, _mm_slli_si128(upper_value.value, half_bytes))};
     } else {
       static_assert(sizeof(OutRaw) == 32 && sizeof(InRaw) == 16);
       return Mask<Tag>{_mm256_inserti128_si256(
-          _mm256_castsi128_si256(lower.value), upper.value, 1)};
+          _mm256_castsi128_si256(lower_value.value), upper_value.value, 1)};
     }
 #endif
   }
@@ -269,17 +269,17 @@ VECOPS_ALWAYS_INLINE Mask<ToTag> x86_convert_mask_native(
 
   if constexpr (ToTraits::word_count == 1 && FromTraits::word_count == 1) {
     auto converted = x86_convert_mask_single_word(to, from, value);
-    const auto valid = execute(MaskFillOp{}, to, true);
+    const auto valid = mfill(to, true);
     converted.value = x86_mask_and(converted.value, valid.value);
     return converted;
   } else {
     using ToHalf = Half<ToTag>;
     using FromHalf = Half<FromTag>;
-    const auto lower = x86_convert_mask_native(
+    const auto lower_value = x86_convert_mask_native(
         ToHalf{}, FromHalf{}, x86_conversion_mask_lower(from, value));
-    const auto upper = x86_convert_mask_native(
+    const auto upper_value = x86_convert_mask_native(
         ToHalf{}, FromHalf{}, x86_conversion_mask_upper(from, value));
-    return x86_conversion_mask_concat(to, lower, upper);
+    return x86_conversion_mask_concat(to, lower_value, upper_value);
   }
 }
 
@@ -338,11 +338,11 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_narrow_integer_vec_native(
       FromTraits::logical_lanes > 16 / static_cast<nint_t>(sizeof(From))) {
     using ToHalf = Half<ToTag>;
     using FromHalf = Half<FromTag>;
-    const auto lower = x86_narrow_integer_vec_native(
-        ToHalf{}, FromHalf{}, execute(LowerOp{}, from, value));
-    const auto upper = x86_narrow_integer_vec_native(
-        ToHalf{}, FromHalf{}, execute(UpperOp{}, from, value));
-    return execute(ConcatOp{}, to, lower, upper);
+    const auto lower_value = x86_narrow_integer_vec_native(
+        ToHalf{}, FromHalf{}, lower(from, value));
+    const auto upper_value = x86_narrow_integer_vec_native(
+        ToHalf{}, FromHalf{}, upper(from, value));
+    return concat(to, lower_value, upper_value);
   } else {
     static_assert(sizeof(typename FromTraits::RawVec) == 16);
     static_assert(sizeof(typename ToTraits::RawVec) == 16);
@@ -396,11 +396,11 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_wrap_native(
   } else {
     using ToHalf = Half<ToTag>;
     using FromHalf = Half<FromTag>;
-    const auto lower = x86_convert_vec_wrap_native(
-        ToHalf{}, FromHalf{}, execute(LowerOp{}, from, value));
-    const auto upper = x86_convert_vec_wrap_native(
-        ToHalf{}, FromHalf{}, execute(UpperOp{}, from, value));
-    return execute(ConcatOp{}, to, lower, upper);
+    const auto lower_value = x86_convert_vec_wrap_native(
+        ToHalf{}, FromHalf{}, lower(from, value));
+    const auto upper_value = x86_convert_vec_wrap_native(
+        ToHalf{}, FromHalf{}, upper(from, value));
+    return concat(to, lower_value, upper_value);
   }
 }
 
@@ -814,7 +814,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_lane_native(
       static_assert(ratio == 2 && phase == 1);
       using SelectedTag = Half<FromTag>;
       return x86_convert_vec_native(
-          to, SelectedTag{}, execute(OddOp{}, from, value));
+          to, SelectedTag{}, odd(from, value));
     }
   } else {
     constexpr bool wraps =
@@ -833,8 +833,8 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_lane_native(
           to, compact, fallback);
     } else {
       static_assert(ratio == 2 && phase == 1);
-      const auto fallback_even = execute(EvenOp{}, to, fallback);
-      return execute(InterleaveOp{}, to, fallback_even, compact);
+      const auto fallback_even = even(to, fallback);
+      return interleave(to, fallback_even, compact);
     }
   }
 }
@@ -901,11 +901,11 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_native(
   } else {
     using ToHalf = Half<ToTag>;
     using FromHalf = Half<FromTag>;
-    const auto lower = x86_convert_vec_native(
-        ToHalf{}, FromHalf{}, execute(LowerOp{}, from, value));
-    const auto upper = x86_convert_vec_native(
-        ToHalf{}, FromHalf{}, execute(UpperOp{}, from, value));
-    return execute(ConcatOp{}, to, lower, upper);
+    const auto lower_value = x86_convert_vec_native(
+        ToHalf{}, FromHalf{}, lower(from, value));
+    const auto upper_value = x86_convert_vec_native(
+        ToHalf{}, FromHalf{}, upper(from, value));
+    return concat(to, lower_value, upper_value);
   }
 }
 
@@ -941,7 +941,7 @@ struct NativeImpl<X86Backend, ConvertOp, ToTag> {
                           std::remove_cvref_t<Option>>::value)
           mask = &option.value;
       }(std::forward<Options>(options)), ...);
-      return execute(BlendOp{}, to, inactive, *mask, converted);
+      return blend(to, inactive, *mask, converted);
     } else {
       return converted;
     }

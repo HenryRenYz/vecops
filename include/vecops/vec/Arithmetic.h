@@ -6,15 +6,6 @@
 
 namespace vecops::vec {
 
-namespace details {
-/** Policy tag: preserve the first operand's lanes where inactive. */
-struct PreserveArithmeticInactive {};
-/** Policy tag: set inactive lanes to zero. */
-struct ZeroArithmeticInactive {};
-/** Policy tag: set inactive lanes from a supplied vector or scalar merge. */
-struct MergeArithmeticInactive {};
-} // namespace details
-
 /* **************************************************************************** */
 //    Binary arithmetic: add, sub, mul, div                               //
 /* **************************************************************************** */
@@ -39,6 +30,30 @@ struct AddOp {
     return (*this)(
         VecToTag<V>{}, a, b, std::forward<Options>(options)...);
   }
+
+  /**
+   * Low-layer masked entry used by option dispatchers and backends:
+   * (tag, values..., mask, inactive, policy) bypasses option parsing.
+   */
+  template <VectorTag Tag, typename Policy>
+    requires (details::arithmetic_inactive_policy<Policy>)
+  inline Vec<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b, Mask<Tag> mask,
+      Vec<Tag> inactive, Policy policy) const {
+    return details::execute(*this, tag, a, b, mask, inactive, policy);
+  }
+
+  /**
+   * Word-level entry for multi-word Tags; single-word Tags resolve to the
+   * whole-Tag overloads above via execute()'s word_count == 1 branch. Used
+   * by backend implementations and shared helpers.
+   */
+  template <VectorTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordVec<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) const {
+    return details::execute_word<0, details::CurrentBackend>(*this, tag, a, b);
+  }
 };
 
 struct SubOp {
@@ -60,6 +75,30 @@ struct SubOp {
       V a, V b, Options&&... options) const {
     return (*this)(
         VecToTag<V>{}, a, b, std::forward<Options>(options)...);
+  }
+
+  /**
+   * Low-layer masked entry used by option dispatchers and backends:
+   * (tag, values..., mask, inactive, policy) bypasses option parsing.
+   */
+  template <VectorTag Tag, typename Policy>
+    requires (details::arithmetic_inactive_policy<Policy>)
+  inline Vec<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b, Mask<Tag> mask,
+      Vec<Tag> inactive, Policy policy) const {
+    return details::execute(*this, tag, a, b, mask, inactive, policy);
+  }
+
+  /**
+   * Word-level entry for multi-word Tags; single-word Tags resolve to the
+   * whole-Tag overloads above via execute()'s word_count == 1 branch. Used
+   * by backend implementations and shared helpers.
+   */
+  template <VectorTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordVec<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) const {
+    return details::execute_word<0, details::CurrentBackend>(*this, tag, a, b);
   }
 };
 
@@ -83,6 +122,30 @@ struct MulOp {
     return (*this)(
         VecToTag<V>{}, a, b, std::forward<Options>(options)...);
   }
+
+  /**
+   * Low-layer masked entry used by option dispatchers and backends:
+   * (tag, values..., mask, inactive, policy) bypasses option parsing.
+   */
+  template <VectorTag Tag, typename Policy>
+    requires (details::arithmetic_inactive_policy<Policy>)
+  inline Vec<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b, Mask<Tag> mask,
+      Vec<Tag> inactive, Policy policy) const {
+    return details::execute(*this, tag, a, b, mask, inactive, policy);
+  }
+
+  /**
+   * Word-level entry for multi-word Tags; single-word Tags resolve to the
+   * whole-Tag overloads above via execute()'s word_count == 1 branch. Used
+   * by backend implementations and shared helpers.
+   */
+  template <VectorTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordVec<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) const {
+    return details::execute_word<0, details::CurrentBackend>(*this, tag, a, b);
+  }
 };
 
 struct DivOp {
@@ -104,6 +167,23 @@ struct DivOp {
       V a, V b, Options&&... options) const {
     return (*this)(
         VecToTag<V>{}, a, b, std::forward<Options>(options)...);
+  }
+
+  /** Low-layer masked entry; see AddOp for the protocol. */
+  template <FloatingTag Tag, typename Policy>
+    requires (details::arithmetic_inactive_policy<Policy>)
+  inline Vec<Tag> operator()(
+      Tag tag, Vec<Tag> a, Vec<Tag> b, Mask<Tag> mask,
+      Vec<Tag> inactive, Policy policy) const {
+    return details::execute(*this, tag, a, b, mask, inactive, policy);
+  }
+
+  /** Word-level entry for multi-word Tags; see AddOp. */
+  template <FloatingTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordVec<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) const {
+    return details::execute_word<0, details::CurrentBackend>(*this, tag, a, b);
   }
 };
 
@@ -129,6 +209,21 @@ struct DivOp {
         V a, V b, Options&&... options) const {                         \
       return (*this)(                                                   \
           VecToTag<V>{}, a, b, std::forward<Options>(options)...);     \
+    }                                                                   \
+    template <VectorTag Tag, typename Policy>                           \
+      requires (details::arithmetic_inactive_policy<Policy>)            \
+    inline Vec<Tag> operator()(                           \
+        Tag tag, Vec<Tag> a, Vec<Tag> b, Mask<Tag> mask,                \
+        Vec<Tag> inactive, Policy policy) const {                      \
+      return details::execute(                                          \
+          *this, tag, a, b, mask, inactive, policy);                    \
+    }                                                                   \
+    template <VectorTag Tag>                                            \
+      requires (details::multi_word_tag_v<Tag>)                         \
+    inline NativeWordVec<Tag> operator()(                \
+        Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) const {   \
+      return details::execute_word<0, details::CurrentBackend>(                 \
+          *this, tag, a, b);                                            \
     }                                                                   \
   }
 
@@ -160,6 +255,21 @@ VECOPS_VEC_DECLARE_EXTREMA_OP(MaxOp);
       return (*this)(                                                   \
           VecToTag<V>{}, value, std::forward<Options>(options)...);    \
     }                                                                   \
+    template <VectorTag Tag, typename Policy>                           \
+      requires (details::arithmetic_inactive_policy<Policy>)            \
+    inline Vec<Tag> operator()(                           \
+        Tag tag, Vec<Tag> value, Mask<Tag> mask,                        \
+        Vec<Tag> inactive, Policy policy) const {                      \
+      return details::execute(                                          \
+          *this, tag, value, mask, inactive, policy);                   \
+    }                                                                   \
+    template <VectorTag Tag>                                            \
+      requires (details::multi_word_tag_v<Tag>)                         \
+    inline NativeWordVec<Tag> operator()(                \
+        Tag tag, NativeWordVec<Tag> value) const {                     \
+      return details::execute_word<0, details::CurrentBackend>(                 \
+          *this, tag, value);                                           \
+    }                                                                   \
   }
 
 VECOPS_VEC_DECLARE_UNARY_ARITHMETIC_OP(NegOp);
@@ -190,6 +300,21 @@ VECOPS_VEC_DECLARE_UNARY_ARITHMETIC_OP(AbsOp);
       return (*this)(                                                   \
           VecToTag<V>{}, value, std::forward<Options>(options)...);    \
     }                                                                   \
+    template <FloatingTag Tag, typename Policy>                         \
+      requires (details::arithmetic_inactive_policy<Policy>)            \
+    inline Vec<Tag> operator()(                           \
+        Tag tag, Vec<Tag> value, Mask<Tag> mask,                        \
+        Vec<Tag> inactive, Policy policy) const {                      \
+      return details::execute(                                          \
+          *this, tag, value, mask, inactive, policy);                   \
+    }                                                                   \
+    template <FloatingTag Tag>                                          \
+      requires (details::multi_word_tag_v<Tag>)                         \
+    inline NativeWordVec<Tag> operator()(                \
+        Tag tag, NativeWordVec<Tag> value) const {                     \
+      return details::execute_word<0, details::CurrentBackend>(                 \
+          *this, tag, value);                                           \
+    }                                                                   \
   }
 
 VECOPS_VEC_DECLARE_FLOATING_UNARY_OP(SqrtOp);
@@ -219,6 +344,22 @@ VECOPS_VEC_DECLARE_FLOATING_UNARY_OP(SqrtOp);
       return (*this)(                                                   \
           VecToTag<V>{}, a, b, c, std::forward<Options>(options)...);  \
     }                                                                   \
+    template <VectorTag Tag, typename Policy>                           \
+      requires (details::arithmetic_inactive_policy<Policy>)            \
+    inline Vec<Tag> operator()(                           \
+        Tag tag, Vec<Tag> a, Vec<Tag> b, Vec<Tag> c, Mask<Tag> mask,    \
+        Vec<Tag> inactive, Policy policy) const {                      \
+      return details::execute(                                          \
+          *this, tag, a, b, c, mask, inactive, policy);                 \
+    }                                                                   \
+    template <VectorTag Tag>                                            \
+      requires (details::multi_word_tag_v<Tag>)                         \
+    inline NativeWordVec<Tag> operator()(                \
+        Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b,            \
+        NativeWordVec<Tag> c) const {                                  \
+      return details::execute_word<0, details::CurrentBackend>(                 \
+          *this, tag, a, b, c);                                         \
+    }                                                                   \
   }
 
 VECOPS_VEC_DECLARE_FMA_OP(FmaddOp);
@@ -227,6 +368,27 @@ VECOPS_VEC_DECLARE_FMA_OP(FnmaddOp);
 VECOPS_VEC_DECLARE_FMA_OP(FnmsubOp);
 
 #undef VECOPS_VEC_DECLARE_FMA_OP
+
+/**
+ * Public entry-point variables. Declared before the backend includes below so
+ * that details-layer implementations can call them by their short names
+ * (details/Basic.h already follows this layout for fill/zeros/blend). The
+ * operator() definitions live after the backend includes: backends must be
+ * able to specialize dispatch before those definitions instantiate them.
+ */
+inline constexpr AddOp add{};
+inline constexpr SubOp sub{};
+inline constexpr MulOp mul{};
+inline constexpr DivOp div{};
+inline constexpr MinOp min{};
+inline constexpr MaxOp max{};
+inline constexpr NegOp neg{};
+inline constexpr AbsOp abs{};
+inline constexpr SqrtOp sqrt{};
+inline constexpr FmaddOp fmadd{};
+inline constexpr FmsubOp fmsub{};
+inline constexpr FnmaddOp fnmadd{};
+inline constexpr FnmsubOp fnmsub{};
 
 } // namespace vecops::vec
 
@@ -258,7 +420,6 @@ VECOPS_ALWAYS_INLINE Vec<Tag> AddOp::operator()(
   return details::execute(*this, tag, a, b);
 }
 
-inline constexpr AddOp add{};
 
 /**
  * Computes r[i] = a[i] + b[i] in lanes selected by exactly one
@@ -318,7 +479,6 @@ VECOPS_ALWAYS_INLINE Vec<Tag> SubOp::operator()(
     return details::execute_arithmetic_request(*this, tag, a, b, request);
   }
 
-inline constexpr SubOp sub{};
 
 /**
  * Computes r[i] = a[i] * b[i] for every logical lane 0 <= i < size(tag).
@@ -354,7 +514,6 @@ VECOPS_ALWAYS_INLINE Vec<Tag> MulOp::operator()(
     return details::execute_arithmetic_request(*this, tag, a, b, request);
   }
 
-inline constexpr MulOp mul{};
 
 /**
  * Computes floating-point r[i] = a[i] / b[i] in every logical lane.
@@ -390,7 +549,6 @@ VECOPS_ALWAYS_INLINE Vec<Tag> DivOp::operator()(
     return details::execute_arithmetic_request(*this, tag, a, b, request);
   }
 
-inline constexpr DivOp div{};
 
 #define VECOPS_VEC_DEFINE_EXTREMA_OP(OpType, Name)                     \
   template <VectorTag Tag>                                             \
@@ -412,8 +570,6 @@ inline constexpr DivOp div{};
     return details::execute_arithmetic_request(                        \
         *this, tag, a, b, request);                                    \
   }                                                                    \
-  inline constexpr OpType Name{}
-
 /**
  * Computes the lane-wise minimum. Floating NaN and signed-zero selection
  * follows the active backend, matching the legacy operation. Filtered calls
@@ -452,7 +608,6 @@ VECOPS_VEC_DEFINE_EXTREMA_OP(MaxOp, max);
     return details::execute_unary_arithmetic_request(                  \
         *this, tag, value, request);                                  \
   }                                                                    \
-  inline constexpr OpType Name{}
 
 /**
  * Toggles the sign of every lane. Floating values are transformed by toggling
@@ -488,7 +643,6 @@ VECOPS_ALWAYS_INLINE Vec<Tag> SqrtOp::operator()(
   return details::execute_unary_arithmetic_options(
       *this, tag, value, std::forward<Options>(options)...);
 }
-inline constexpr SqrtOp sqrt{};
 
 #undef VECOPS_VEC_DEFINE_UNARY_ARITHMETIC_OP
 
@@ -513,7 +667,6 @@ inline constexpr SqrtOp sqrt{};
     return details::execute_ternary_arithmetic_request(                  \
         *this, tag, a, b, c, request);                                   \
   }                                                                      \
-  inline constexpr OpType Name{}
 
 /**
  * Computes r[i] = a[i] * b[i] + c[i]. A backend-native fused instruction is

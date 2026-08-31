@@ -256,9 +256,9 @@ struct LogFamily {
   }
 
   // Contract table (matches tests/vec/LogTest.cpp and the Math.h header):
-  // Strict <= 1 ULP (f32 via the f64 kernel; narrow formats) and
-  // <= 4 ULP for f64 (the optimized-routines libm class), Fast <= 2^-13
-  // relative (narrow: 2 ULP), Estimate <= 2^-7 relative.
+  // Strict <= 1 ULP (f32 native kernel on SVE; narrow formats round once
+  // from f32) and <= 4 ULP for f64 (the optimized-routines libm class),
+  // Fast <= 2^-13 relative (narrow: 2 ULP), Estimate <= 2^-7 relative.
   static constexpr bool fast_ulp_contract = false;
   static constexpr unsigned fast_ulp_bound = 0;
   static constexpr long double fast_rel_bound_wide = 1.220703125e-4L;  // 2^-13
@@ -270,7 +270,7 @@ struct LogFamily {
   static constexpr bool crosses_zero = true;
   template <typename T>
   static constexpr unsigned strict_ulp_bound() {
-    // f32 evaluates through the f64 kernel (<= 1 ULP); f64 keeps the
+    // f32 native kernel (<= 1 ULP on SVE); f64 keeps the
     // optimized-routines libm class; narrow formats round once from f32.
     return std::is_same_v<T, float64_t> ? 4 : 1;
   }

@@ -34,6 +34,18 @@ struct CmpEqOp {
     return (*this)(
         VecToTag<V>{}, a, b, std::forward<Options>(options)...);
   }
+
+  /**
+   * Word-level entry for multi-word Tags; single-word Tags resolve to the
+   * whole-Tag overloads above via execute()'s word_count == 1 branch. Used
+   * by backend implementations.
+   */
+  template <VectorTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordMask<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) const {
+    return details::execute_word<0, details::CurrentBackend>(*this, tag, a, b);
+  }
 };
 
 /**
@@ -60,6 +72,18 @@ struct CmpNeOp {
     return (*this)(
         VecToTag<V>{}, a, b, std::forward<Options>(options)...);
   }
+
+  /**
+   * Word-level entry for multi-word Tags; single-word Tags resolve to the
+   * whole-Tag overloads above via execute()'s word_count == 1 branch. Used
+   * by backend implementations.
+   */
+  template <VectorTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordMask<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) const {
+    return details::execute_word<0, details::CurrentBackend>(*this, tag, a, b);
+  }
 };
 
 /** Lane-wise less-than. The masked overload returns mask[i] && (a[i] < b[i]). */
@@ -79,6 +103,18 @@ struct CmpLtOp {
       V a, V b, Options&&... options) const {
     return (*this)(
         VecToTag<V>{}, a, b, std::forward<Options>(options)...);
+  }
+
+  /**
+   * Word-level entry for multi-word Tags; single-word Tags resolve to the
+   * whole-Tag overloads above via execute()'s word_count == 1 branch. Used
+   * by backend implementations.
+   */
+  template <VectorTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordMask<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) const {
+    return details::execute_word<0, details::CurrentBackend>(*this, tag, a, b);
   }
 };
 
@@ -100,6 +136,18 @@ struct CmpGtOp {
     return (*this)(
         VecToTag<V>{}, a, b, std::forward<Options>(options)...);
   }
+
+  /**
+   * Word-level entry for multi-word Tags; single-word Tags resolve to the
+   * whole-Tag overloads above via execute()'s word_count == 1 branch. Used
+   * by backend implementations.
+   */
+  template <VectorTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordMask<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) const {
+    return details::execute_word<0, details::CurrentBackend>(*this, tag, a, b);
+  }
 };
 
 /** Lane-wise <= comparison. The masked overload returns mask[i] && (a[i] <= b[i]). */
@@ -120,6 +168,18 @@ struct CmpLeOp {
     return (*this)(
         VecToTag<V>{}, a, b, std::forward<Options>(options)...);
   }
+
+  /**
+   * Word-level entry for multi-word Tags; single-word Tags resolve to the
+   * whole-Tag overloads above via execute()'s word_count == 1 branch. Used
+   * by backend implementations.
+   */
+  template <VectorTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordMask<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) const {
+    return details::execute_word<0, details::CurrentBackend>(*this, tag, a, b);
+  }
 };
 
 /** Lane-wise >= comparison. The masked overload returns mask[i] && (a[i] >= b[i]). */
@@ -139,6 +199,18 @@ struct CmpGeOp {
       V a, V b, Options&&... options) const {
     return (*this)(
         VecToTag<V>{}, a, b, std::forward<Options>(options)...);
+  }
+
+  /**
+   * Word-level entry for multi-word Tags; single-word Tags resolve to the
+   * whole-Tag overloads above via execute()'s word_count == 1 branch. Used
+   * by backend implementations.
+   */
+  template <VectorTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordMask<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) const {
+    return details::execute_word<0, details::CurrentBackend>(*this, tag, a, b);
   }
 };
 
@@ -183,6 +255,22 @@ struct IsNegInfOp { VECOPS_VEC_CLASSIFICATION_MEMBERS; };
 struct IsInfOp { VECOPS_VEC_CLASSIFICATION_MEMBERS; };
 
 #undef VECOPS_VEC_CLASSIFICATION_MEMBERS
+
+/**
+ * Public entry-point variables, declared before the backend includes so that
+ * details-layer implementations can call them by short names (same layout as
+ * Basic.h and Arithmetic.h).
+ */
+inline constexpr CmpEqOp cmpeq{};
+inline constexpr CmpNeOp cmpne{};
+inline constexpr CmpLtOp cmplt{};
+inline constexpr CmpGtOp cmpgt{};
+inline constexpr CmpLeOp cmple{};
+inline constexpr CmpGeOp cmpge{};
+inline constexpr IsNanOp isnan{};
+inline constexpr IsPosInfOp isposinf{};
+inline constexpr IsNegInfOp isneginf{};
+inline constexpr IsInfOp isinf{};
 
 } // namespace vecops::vec
 
@@ -229,7 +317,6 @@ namespace vecops::vec {
     return details::execute_comparison_request(                           \
         *this, tag, a, b, request);                                       \
   }                                                                       \
-  inline constexpr OpType Name{}
 
 VECOPS_VEC_DEFINE_BINARY_COMPARISON(CmpEqOp, cmpeq, a[i] == b[i]);
 VECOPS_VEC_DEFINE_BINARY_COMPARISON(CmpNeOp, cmpne, a[i] != b[i]);
@@ -271,7 +358,6 @@ VECOPS_VEC_DEFINE_BINARY_COMPARISON(CmpGeOp, cmpge, a[i] >= b[i]);
     return details::execute_comparison_request(                           \
         *this, tag, value, request);                                      \
   }                                                                       \
-  inline constexpr OpType Name{}
 
 VECOPS_VEC_DEFINE_CLASSIFICATION(IsNanOp, isnan, is a NaN);
 VECOPS_VEC_DEFINE_CLASSIFICATION(IsPosInfOp, isposinf, is positive infinity);

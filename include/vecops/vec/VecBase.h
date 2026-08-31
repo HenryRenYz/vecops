@@ -400,6 +400,51 @@ VECOPS_ALWAYS_INLINE constexpr Mask<Tag> mask_from_words(
   }
 }
 
+namespace details {
+
+/**
+ * Forward declarations of the dispatch entry points, defined in
+ * details/Dispatch.h. Top-level headers declare their Op functors in the
+ * declaration half, long before the sandwich middle includes Dispatch.h, and
+ * the word-level / low-layer operator() entries written inline into those
+ * functors call through these names. Every such call site is itself a
+ * template, so it instantiates at its point of use — after the definitions
+ * are visible — and links against them.
+ */
+template <VectorTag Tag, typename Op, typename... Args>
+VECOPS_ALWAYS_INLINE constexpr decltype(auto) execute(
+    Op op, Tag tag, Args&&... args);
+
+template <nint_t Index, typename Backend, VectorTag Tag,
+          typename Op, typename... Words>
+VECOPS_ALWAYS_INLINE constexpr decltype(auto) execute_word(
+    Op op, Tag tag, Words&&... words);
+
+/**
+ * Inactive-lane policy tags accepted by the low-layer masked entries
+ * (tag, values..., mask, inactive, policy) that option dispatchers and
+ * backends use to bypass option parsing.
+ */
+struct PreserveArithmeticInactive {};
+/** Policy tag: set inactive lanes to zero. */
+struct ZeroArithmeticInactive {};
+/** Policy tag: set inactive lanes from a supplied vector or scalar merge. */
+struct MergeArithmeticInactive {};
+
+/** Concepts naming the policies accepted by low-layer masked entries. */
+template <typename Policy>
+concept arithmetic_inactive_policy =
+    std::same_as<Policy, PreserveArithmeticInactive> ||
+    std::same_as<Policy, ZeroArithmeticInactive> ||
+    std::same_as<Policy, MergeArithmeticInactive>;
+
+/** True when the Tag's value representation differs from one physical word. */
+template <VectorTag Tag>
+inline constexpr bool multi_word_tag_v =
+    !std::same_as<Vec<Tag>, NativeWordVec<Tag>>;
+
+} // namespace vecops::vec::details
+
 } // namespace vecops::vec
 
 #endif // VECOPS_VEC_VECBASE_H

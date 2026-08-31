@@ -121,8 +121,7 @@ template <nint_t Index, VectorTag Tag>
 VECOPS_ALWAYS_INLINE NativeWordVec<Tag> scalar_masked_merge(
     Tag tag, NativeWordVec<Tag> computed, NativeWordMask<Tag> mask,
     NativeWordVec<Tag> inactive) {
-  return NativeWordImpl<ScalarBackend, BlendOp>::call<Index>(
-      BlendOp{}, tag, inactive, mask, computed);
+  return blend(tag, inactive, mask, computed);
 }
 
 /* **************************************************************************** */

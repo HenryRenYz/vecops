@@ -76,7 +76,13 @@ VECOPS_ALWAYS_INLINE constexpr decltype(auto) execute(
   }
 }
 
-/** Executes an operation on one physical word while retaining its parent Tag. */
+/**
+ * Executes an operation on one physical word while retaining its parent Tag.
+ *
+ * Both template arguments are always spelled explicitly: shared batching
+ * loops iterate a generic Backend (not CurrentBackend), and backend-internal
+ * index-sensitive call sites keep their Index visible.
+ */
 template <nint_t Index, typename Backend, VectorTag Tag,
           typename Op, typename... Words>
 VECOPS_ALWAYS_INLINE constexpr decltype(auto) execute_word(

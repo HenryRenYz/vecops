@@ -129,7 +129,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> conversion_population(
         find_option<IsScalarMergeOption>(
             std::forward<Options>(options)...).value);
   } else {
-    return execute(FillOp{}, tag, ElementOf<Tag>{});
+    return fill(tag, ElementOf<Tag>{});
   }
 }
 
@@ -142,7 +142,7 @@ VECOPS_ALWAYS_INLINE auto conversion_select_even(
   } else {
     using HalfTag = Half<Tag>;
     return conversion_select_even<Levels - 1>(
-        HalfTag{}, execute(EvenOp{}, tag, value));
+        HalfTag{}, even(tag, value));
   }
 }
 
@@ -156,12 +156,12 @@ VECOPS_ALWAYS_INLINE Vec<Tag> conversion_insert_even(
     return values;
   } else {
     using HalfTag = Half<Tag>;
-    const auto fallback_even = execute(EvenOp{}, tag, fallback);
-    const auto fallback_odd = execute(OddOp{}, tag, fallback);
+    const auto fallback_even = even(tag, fallback);
+    const auto fallback_odd = odd(tag, fallback);
     const auto result_even =
         conversion_insert_even<Levels - 1, HalfTag, ValuesTag>(
             HalfTag{}, values, fallback_even);
-    return execute(InterleaveOp{}, tag, result_even, fallback_odd);
+    return interleave(tag, result_even, fallback_odd);
   }
 }
 
@@ -191,7 +191,7 @@ struct GenericImpl<Backend, ConvertOp, ToTag> {
         return conversion_population<Backend>(
             to, std::forward<Options>(options)...);
       else
-        return execute(FillOp{}, to, ElementOf<ToTag>{});
+        return fill(to, ElementOf<ToTag>{});
     }();
     return construct_words<Backend>(
         to, [&]<nint_t Index>(ToTag) VECOPS_INLINE_LAMBDA {

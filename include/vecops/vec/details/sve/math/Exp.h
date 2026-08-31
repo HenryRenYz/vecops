@@ -530,10 +530,10 @@ VECOPS_ALWAYS_INLINE svfloat16_t sve_exp_f16_via_f32(svfloat16_t raw) {
 #if defined(__ARM_FEATURE_SVE2)
   const auto high = svcvtlt_f32_f16_x(svptrue_b32(), raw);
 #else
-  const auto odd = svuzp2_u16(
+  const auto odd_value = svuzp2_u16(
       svreinterpret_u16_f16(raw), svreinterpret_u16_f16(raw));
   const auto high = svcvt_f32_f16_x(
-      svptrue_b32(), svreinterpret_f16_u16(svzip1_u16(odd, odd)));
+      svptrue_b32(), svreinterpret_f16_u16(svzip1_u16(odd_value, odd_value)));
 #endif
   const auto result_low = sve_exp_f32<C, Tier, NegativeOnly>(
       low, svptrue_b32());
@@ -632,20 +632,15 @@ struct SVEExpWordImpl {
       // need the final blend.
       const auto computed = sve_exp_dispatch<A, Acc, NegativeOnly>(
           tag, value, sve_basic_raw_word(mask));
-      return NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(
-          BlendOp{}, tag, inactive, mask, computed);
+      return blend(tag, inactive, mask, computed);
     } else {
       // Narrow types widen through whole-word f32 conversions on the way to
       // the cores; sanitize inactive lanes first so the widening (and the
       // special-tail tests inside it) cannot observe stale values.
-      const auto zero =
-          NativeWordImpl<SVEBackend, FillOp>::template call<Index>(
-              FillOp{}, tag, ElementOf<Tag>{});
-      const auto safe = NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(
-          BlendOp{}, tag, zero, mask, value);
-      const auto computed = call<Index>(op, tag, safe);
-      return NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(
-          BlendOp{}, tag, inactive, mask, computed);
+      return masked_unary_word(
+          tag, mask, inactive, value, [&](NativeWordVec<Tag> safe) {
+            return call<Index>(op, tag, safe);
+          });
     }
   }
 };

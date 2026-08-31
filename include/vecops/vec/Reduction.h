@@ -75,6 +75,13 @@ VECOPS_ALWAYS_INLINE T reduction_identity() {
 
 } // namespace details
 
+/** Public entry-point variables, declared before the backend includes
+ * so that details-layer implementations can call them by short names
+ * (same layout as Basic.h and Arithmetic.h). */
+inline constexpr ReduceAddOp reduce_add{};
+inline constexpr ReduceMaxOp reduce_max{};
+inline constexpr ReduceMinOp reduce_min{};
+
 } // namespace vecops::vec
 
 #include "vecops/vec/details/Dispatch.h"
@@ -127,7 +134,6 @@ VECOPS_ALWAYS_INLINE ElementOf<Tag> ReduceAddOp::operator()(
   return details::execute_reduction_request(*this, tag, value, request);
 }
 
-inline constexpr ReduceAddOp reduce_add{};
 
 /**
  * Returns the greatest logical lane. Multi-word values are combined with
@@ -165,7 +171,6 @@ VECOPS_ALWAYS_INLINE ElementOf<Tag> ReduceMaxOp::operator()(
   return details::execute_reduction_request(*this, tag, value, request);
 }
 
-inline constexpr ReduceMaxOp reduce_max{};
 
 /**
  * Returns the least logical lane. Multi-word values are combined with
@@ -204,7 +209,6 @@ VECOPS_ALWAYS_INLINE ElementOf<Tag> ReduceMinOp::operator()(
   return details::execute_reduction_request(*this, tag, value, request);
 }
 
-inline constexpr ReduceMinOp reduce_min{};
 
 } // namespace vecops::vec
 

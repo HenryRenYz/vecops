@@ -41,6 +41,7 @@
 
 #include "vecops/vec/details/Dispatch.h"
 #include "vecops/vec/details/x86/Arithmetic.h"
+#include "vecops/vec/details/x86/Basic.h"
 #include "vecops/vec/details/x86/Types.h"
 
 namespace vecops::vec::details {
@@ -60,94 +61,6 @@ inline constexpr bool x86_recip_has_avx512 = true;
 inline constexpr bool x86_recip_has_avx512 = false;
 #endif
 
-/** Word-level operation context shared by every tier chain below. */
-template <nint_t Index, FloatingTag Tag>
-struct X86RecipContext {
-  using T = ElementOf<Tag>;
-  using Word = NativeWordVec<Tag>;
-  using MaskWord = NativeWordMask<Tag>;
-
-  static VECOPS_ALWAYS_INLINE Word fill(Tag tag, T value) {
-    return execute_word<Index, X86Backend>(FillOp{}, tag, value);
-  }
-  static VECOPS_ALWAYS_INLINE Word add(Tag tag, Word a, Word b) {
-    return execute_word<Index, X86Backend>(AddOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE Word sub(Tag tag, Word a, Word b) {
-    return execute_word<Index, X86Backend>(SubOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE Word mul(Tag tag, Word a, Word b) {
-    return execute_word<Index, X86Backend>(MulOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE Word div(Tag tag, Word a, Word b) {
-    return execute_word<Index, X86Backend>(DivOp{}, tag, a, b);
-  }
-  static VECOPS_ALWAYS_INLINE Word sqrt(Tag tag, Word a) {
-    return execute_word<Index, X86Backend>(SqrtOp{}, tag, a);
-  }
-  static VECOPS_ALWAYS_INLINE Word fmadd(Tag tag, Word a, Word b, Word c) {
-    return execute_word<Index, X86Backend>(FmaddOp{}, tag, a, b, c);
-  }
-  /** c - a*b, the residual form used by every Markstein step. */
-  static VECOPS_ALWAYS_INLINE Word fnmadd(Tag tag, Word a, Word b, Word c) {
-    return execute_word<Index, X86Backend>(FnmaddOp{}, tag, a, b, c);
-  }
-  static VECOPS_ALWAYS_INLINE MaskWord lt(Tag tag, Word a, T b) {
-    return execute_word<Index, X86Backend>(CmpLtOp{}, tag, a, fill(tag, b));
-  }
-  static VECOPS_ALWAYS_INLINE MaskWord gt(Tag tag, Word a, T b) {
-    return execute_word<Index, X86Backend>(CmpGtOp{}, tag, a, fill(tag, b));
-  }
-  static VECOPS_ALWAYS_INLINE MaskWord ne(Tag tag, Word a, T b) {
-    return execute_word<Index, X86Backend>(CmpNeOp{}, tag, a, fill(tag, b));
-  }
-  static VECOPS_ALWAYS_INLINE Word select(
-      Tag tag, Word fallback, MaskWord mask, Word selected) {
-    return execute_word<Index, X86Backend>(
-        BlendOp{}, tag, fallback, mask, selected);
-  }
-};
-
-/** Per-lane OR of two x86 mask words. */
-template <FloatingTag Tag>
-VECOPS_ALWAYS_INLINE NativeWordMask<Tag> x86_recip_mask_or(
-    NativeWordMask<Tag> a, NativeWordMask<Tag> b) {
-  using Raw = decltype(a.value);
-  if constexpr (std::is_integral_v<Raw>) {
-    return NativeWordMask<Tag>{static_cast<Raw>(a.value | b.value)};
-  } else if constexpr (sizeof(Raw) == 16) {
-    return NativeWordMask<Tag>{_mm_or_si128(a.value, b.value)};
-  } else {
-    return NativeWordMask<Tag>{_mm256_or_si256(a.value, b.value)};
-  }
-}
-
-/** Per-lane AND of two x86 mask words. */
-template <FloatingTag Tag>
-VECOPS_ALWAYS_INLINE NativeWordMask<Tag> x86_recip_mask_and(
-    NativeWordMask<Tag> a, NativeWordMask<Tag> b) {
-  using Raw = decltype(a.value);
-  if constexpr (std::is_integral_v<Raw>) {
-    return NativeWordMask<Tag>{static_cast<Raw>(a.value & b.value)};
-  } else if constexpr (sizeof(Raw) == 16) {
-    return NativeWordMask<Tag>{_mm_and_si128(a.value, b.value)};
-  } else {
-    return NativeWordMask<Tag>{_mm256_and_si256(a.value, b.value)};
-  }
-}
-
-/** True when any lane of an x86 mask word is set. */
-template <FloatingTag Tag>
-VECOPS_ALWAYS_INLINE bool x86_recip_mask_any(NativeWordMask<Tag> mask) {
-  using Raw = decltype(mask.value);
-  if constexpr (std::is_integral_v<Raw>) {
-    return mask.value != 0;
-  } else if constexpr (sizeof(Raw) == 16) {
-    return _mm_movemask_epi8(mask.value) != 0;
-  } else {
-    return _mm256_movemask_epi8(mask.value) != 0;
-  }
-}
 
 /* **************************************************************************** */
 //    estimate instructions                                                     //
@@ -204,7 +117,7 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_rsqrt_estimate(
     if constexpr (sizeof(Raw) == 16)
       return NativeWordVec<Tag>{_mm_rsqrt_ps(x.value)};
     else
-      return NativeWordVec<Tag>{_mm_rsqrt_ps(x.value)};
+      return NativeWordVec<Tag>{_mm256_rsqrt_ps(x.value)};
 #endif
   } else {
 #if defined(CPU_CAPABILITY_AVX512)
@@ -227,52 +140,52 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_rsqrt_estimate(
 template <nint_t Index, FloatingTag Tag>
 VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_recip_markstein(
     Tag tag, NativeWordVec<Tag> x, NativeWordVec<Tag> y) {
-  const auto one = X86RecipContext<Index, Tag>::fill(
+  const auto one = fill_word(
       tag, ElementOf<Tag>(1));
   const auto residual =
-      X86RecipContext<Index, Tag>::fnmadd(tag, x, y, one);
-  return X86RecipContext<Index, Tag>::fmadd(tag, residual, y, y);
+      fnmadd(tag, x, y, one);
+  return fmadd(tag, residual, y, y);
 }
 
 template <nint_t Index, FloatingTag Tag>
 VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_rsqrt_markstein(
     Tag tag, NativeWordVec<Tag> x, NativeWordVec<Tag> y) {
-  const auto one = X86RecipContext<Index, Tag>::fill(
+  const auto one = fill_word(
       tag, ElementOf<Tag>(1));
-  const auto half = X86RecipContext<Index, Tag>::fill(
+  const auto half = fill_word(
       tag, ElementOf<Tag>(0.5));
-  const auto half_y = X86RecipContext<Index, Tag>::mul(tag, y, half);
-  const auto square = X86RecipContext<Index, Tag>::mul(tag, y, y);
+  const auto half_y = mul(tag, y, half);
+  const auto square = mul(tag, y, y);
   const auto residual =
-      X86RecipContext<Index, Tag>::fnmadd(tag, x, square, one);
-  return X86RecipContext<Index, Tag>::fmadd(tag, residual, half_y, y);
+      fnmadd(tag, x, square, one);
+  return fmadd(tag, residual, half_y, y);
 }
 
 /** FMA-less Newton step, used only by the Fast tier on pre-FMA targets. */
 template <nint_t Index, FloatingTag Tag>
 VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_recip_plain(
     Tag tag, NativeWordVec<Tag> x, NativeWordVec<Tag> y) {
-  const auto one = X86RecipContext<Index, Tag>::fill(
+  const auto one = fill_word(
       tag, ElementOf<Tag>(1));
-  const auto residual = X86RecipContext<Index, Tag>::sub(
-      tag, one, X86RecipContext<Index, Tag>::mul(tag, x, y));
-  return X86RecipContext<Index, Tag>::add(
-      tag, y, X86RecipContext<Index, Tag>::mul(tag, residual, y));
+  const auto residual = sub(
+      tag, one, mul(tag, x, y));
+  return add(
+      tag, y, mul(tag, residual, y));
 }
 
 template <nint_t Index, FloatingTag Tag>
 VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_rsqrt_plain(
     Tag tag, NativeWordVec<Tag> x, NativeWordVec<Tag> y) {
-  const auto one = X86RecipContext<Index, Tag>::fill(
+  const auto one = fill_word(
       tag, ElementOf<Tag>(1));
-  const auto half = X86RecipContext<Index, Tag>::fill(
+  const auto half = fill_word(
       tag, ElementOf<Tag>(0.5));
-  const auto half_y = X86RecipContext<Index, Tag>::mul(tag, y, half);
-  const auto square = X86RecipContext<Index, Tag>::mul(tag, y, y);
-  const auto residual = X86RecipContext<Index, Tag>::sub(
-      tag, one, X86RecipContext<Index, Tag>::mul(tag, x, square));
-  return X86RecipContext<Index, Tag>::add(
-      tag, y, X86RecipContext<Index, Tag>::mul(tag, residual, half_y));
+  const auto half_y = mul(tag, y, half);
+  const auto square = mul(tag, y, y);
+  const auto residual = sub(
+      tag, one, mul(tag, x, square));
+  return add(
+      tag, y, mul(tag, residual, half_y));
 }
 
 /* **************************************************************************** */
@@ -360,7 +273,6 @@ template <Accuracy Tier, bool IsRsqrt, nint_t Index, FloatingTag Tag>
 VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_recip_word(
     Tag tag, NativeWordVec<Tag> x) {
   using T = ElementOf<Tag>;
-  using C = X86RecipContext<Index, Tag>;
 #if defined(HAS_FMA)
   constexpr bool fused = true;
 #else
@@ -377,10 +289,10 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_recip_word(
       // No estimate (f64 pre-AVX512) or no FMA for the Strict ladder: the
       // IEEE composition meets every tier bound.
       if constexpr (IsRsqrt) {
-        const auto root = C::sqrt(tag, x);
-        return C::div(tag, C::fill(tag, T(1)), root);
+        const auto root = sqrt(tag, x);
+        return div(tag, fill_word(tag, T(1)), root);
       } else {
-        return C::div(tag, C::fill(tag, T(1)), x);
+        return div(tag, fill_word(tag, T(1)), x);
       }
     } else if constexpr (Tier == Accuracy::Estimate) {
       if constexpr (IsRsqrt) return x86_rsqrt_estimate<Tag>(tag, x);
@@ -416,14 +328,14 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_recip_word(
 
   const T small_bound = std::same_as<T, float32_t> ? T(0x1p-125f) : T(0x1p-1021);
   const T huge_bound = std::same_as<T, float32_t> ? T(0x1p125f) : T(0x1p1021);
-  const auto small = C::lt(tag, x, small_bound);
+  const auto small = cmplt(tag, x, fill_word(tag, small_bound));
   // Both ops repair infinities: the inline Markstein chains would form
   // inf*0 NaNs on those lanes.
-  const auto bad = x86_recip_mask_or<Tag>(
+  const auto bad = x86_mask_word_or(
       small,
-      x86_recip_mask_or<Tag>(
-          C::gt(tag, x, huge_bound), C::lt(tag, x, -huge_bound)));
-  if (x86_recip_mask_any<Tag>(bad)) {
+      x86_mask_word_or(
+          cmpgt(tag, x, fill_word(tag, huge_bound)), cmplt(tag, x, fill_word(tag, -huge_bound))));
+  if (x86_mask_word_any(bad)) {
     y = NativeWordVec<Tag>{x86_recip_repair_word<Tier, IsRsqrt, T>(
         x.value, y.value)};
   }
@@ -447,14 +359,13 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_recip_flush_narrow(
     return y;
   } else {
     using T = ElementOf<Tag>;
-    using C = X86RecipContext<Index, Tag>;
-    const T smallest = T(0x1p-14f);
-    const auto magnitude = x86_recip_mask_and<Tag>(
-        C::lt(tag, y, smallest), C::gt(tag, y, -smallest));
-    const auto flush = x86_recip_mask_and<Tag>(
-        magnitude, C::ne(tag, y, T(0)));
-    return C::select(
-        tag, y, flush, C::mul(tag, y, C::fill(tag, T(0))));
+      const T smallest = T(0x1p-14f);
+    const auto magnitude = x86_mask_word_and(
+        cmplt(tag, y, fill_word(tag, smallest)), cmpgt(tag, y, fill_word(tag, -smallest)));
+    const auto flush = x86_mask_word_and(
+        magnitude, cmpne(tag, y, fill_word(tag, T(0))));
+    return blend(
+        tag, y, flush, mul(tag, y, fill_word(tag, T(0))));
   }
 }
 
@@ -575,11 +486,11 @@ struct X86RecipWordImpl {
       NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
     // Sanitize inactive lanes first: the narrowing conversions and the
     // repair-branch compares must not observe stale values.
-    const auto zero = X86RecipContext<Index, Tag>::fill(
+    const auto zero = fill_word(
         tag, ElementOf<Tag>{});
-    const auto safe = X86RecipContext<Index, Tag>::select(
+    const auto safe = blend(
         tag, zero, mask, value);
-    return X86RecipContext<Index, Tag>::select(
+    return blend(
         tag, inactive, mask, call<Index>(op, tag, safe));
   }
 };
