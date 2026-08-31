@@ -12,6 +12,7 @@
 #include <sstream>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "BenchmarkUtils.h"
@@ -70,6 +71,7 @@ struct CaseList {};
 VECOPS_PACK_CASE_NAME(TinyName, "tiny_tail");
 VECOPS_PACK_CASE_NAME(TileTailName, "tile_tail");
 VECOPS_PACK_CASE_NAME(SmallName, "small");
+VECOPS_PACK_CASE_NAME(WideName, "wide");
 VECOPS_PACK_CASE_NAME(MediumTailName, "medium_tail");
 VECOPS_PACK_CASE_NAME(LargeTailName, "large_tail");
 VECOPS_PACK_CASE_NAME(Qwen05DecodeName, "qwen2.5_0.5b_decode");
@@ -109,6 +111,7 @@ using RepresentativeCases = CaseList<
     PackCase<GenericGroup, TinyName, 1, 1>,
     PackCase<GenericGroup, TileTailName, 17, 65>,
     PackCase<GenericGroup, SmallName, 64, 256>,
+    PackCase<GenericGroup, WideName, 1024, 256>,
     PackCase<GenericGroup, MediumTailName, 513, 1000>,
     PackCase<GenericGroup, LargeTailName, 1025, 1027>,
 
@@ -145,11 +148,18 @@ using RepresentativeCases = CaseList<
 using DTypeProbeCases = CaseList<
     PackCase<DTypeGroup, DTypeProbeName, 17, 65>>;
 
+using SecondaryCases = CaseList<
+    PackCase<DTypeGroup, DTypeProbeName, 17, 65>,
+    PackCase<GenericGroup, SmallName, 64, 256>,
+    PackCase<GenericGroup, MediumTailName, 513, 1000>,
+    PackCase<GenericGroup, LargeTailName, 1025, 1027>>;
+
 template <typename T>
 const char* dtype_name() {
   if constexpr (std::same_as<T, bfloat16_t>) return "bf16";
   if constexpr (std::same_as<T, float16_t>) return "fp16";
   if constexpr (std::same_as<T, float32_t>) return "fp32";
+  if constexpr (std::same_as<T, float64_t>) return "fp64";
   if constexpr (std::same_as<T, int8_t>) return "int8";
   if constexpr (std::same_as<T, uint8_t>) return "uint8";
   return "unknown";
@@ -164,7 +174,7 @@ const char* operand_name() {
 template <bool ConstShape>
 const char* shape_metadata_name() {
   if constexpr (ConstShape) return "Const";
-  return "Dyn";
+  return "Dynamic";
 }
 
 template <typename Atom>
@@ -245,7 +255,7 @@ std::string benchmark_name() {
       "/case:" + Case::NameType::name +
       "/operand:" + operand_name<Side>() +
       "/shape:" + shape_name<Case>() +
-      "/shape_meta:" + shape_metadata_name<ConstShape>() +
+      "/extent:" + shape_metadata_name<ConstShape>() +
       "/dtype:" + dtype_name<T>() +
       "/atom:" + atom_name<Atom>() +
       "/arch:" + VECOPS_BENCH_ARCH_CODE;
@@ -255,12 +265,11 @@ template <typename Atom, gemm::Operand Side,
           typename Case, bool ConstShape>
 void register_shape_metadata() {
   const auto name = benchmark_name<Atom, Side, Case, ConstShape>();
-  benchmark::RegisterBenchmark(
+  auto* registered = benchmark::RegisterBenchmark(
       name.c_str(), &run_case<Atom, Side, Case, ConstShape>)
-      ->Unit(benchmark::kMicrosecond)
-      ->MinTime(0.02)
-      ->Repetitions(3)
-      ->ReportAggregatesOnly(true);
+      ->Unit(benchmark::kMicrosecond);
+  ::vecops::bench::configure_registered_benchmark(
+      registered, 0.02, 3)->ReportAggregatesOnly(true);
 }
 
 template <typename Atom, gemm::Operand Side, typename Case>

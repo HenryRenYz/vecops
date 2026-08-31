@@ -1,12 +1,19 @@
 #pragma once
 
+#include <charconv>
 #include <chrono>
 #include <ctime>
+#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace vecops::bench {
@@ -62,6 +69,51 @@ inline void print_default_output_path(
   if (!has_arg(argc, argv, "--benchmark_out")) {
     std::cout << "Benchmark output: " << path.string() << '\n';
   }
+}
+
+inline std::optional<int64_t> positive_integer_environment(
+    const char* name) {
+  const char* value = std::getenv(name);
+  if (value == nullptr) return std::nullopt;
+  const std::string_view text{value};
+  int64_t parsed = 0;
+  const auto result = std::from_chars(
+      text.data(), text.data() + text.size(), parsed);
+  if (result.ec != std::errc{} ||
+      result.ptr != text.data() + text.size() || parsed <= 0) {
+    throw std::runtime_error(
+        std::string{name} + " must be a positive integer");
+  }
+  return parsed;
+}
+
+/**
+ * Apply the standard adaptive benchmark policy, or a fixed-work policy for
+ * perf/ABBA when VECOPS_BENCH_ITERATIONS is set.  The environment is read at
+ * registration time, before Google Benchmark starts calibration; this avoids
+ * comparing different iteration counts when an optimization changes runtime.
+ */
+template <typename RegisteredBenchmark>
+RegisteredBenchmark* configure_registered_benchmark(
+    RegisteredBenchmark* registered,
+    double default_min_time, int default_repetitions) {
+  static const auto FixedIterations =
+      positive_integer_environment("VECOPS_BENCH_ITERATIONS");
+  static const auto ConfiguredRepetitions =
+      positive_integer_environment("VECOPS_BENCH_REPETITIONS");
+  if (FixedIterations) {
+    registered->Iterations(*FixedIterations);
+  } else {
+    registered->MinTime(default_min_time);
+  }
+  const int64_t repetitions =
+      ConfiguredRepetitions.value_or(default_repetitions);
+  if (repetitions > std::numeric_limits<int>::max()) {
+    throw std::runtime_error(
+        "VECOPS_BENCH_REPETITIONS exceeds the supported int range");
+  }
+  registered->Repetitions(static_cast<int>(repetitions));
+  return registered;
 }
 
 } // namespace vecops::bench

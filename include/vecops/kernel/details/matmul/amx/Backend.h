@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
@@ -19,6 +20,7 @@
 #include "vecops/gemm/details/amx/Atoms.h"
 #include "vecops/kernel/Tile2D.h"
 #include "vecops/kernel/details/matmul/Traversal.h"
+#include "vecops/kernel/details/matmul/amx/MetaTraversal.h"
 #include "vecops/kernel/details/matmul_pack/amx/Pack.h"
 #include "vecops/kernel/details/matmul_pack/generic/Pack.h"
 #include "vecops/tensor/DataAccess.h"
@@ -62,6 +64,411 @@ inline constexpr bool direct_row_major_output_v =
     std::same_as<
         tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
 
+template <typename Access>
+using TransformOf = typename std::remove_cvref_t<Access>::Transform;
+
+#if defined(__AVX512BF16__)
+inline constexpr bool SmallVectorBF16Available = true;
+#else
+inline constexpr bool SmallVectorBF16Available = false;
+#endif
+#if defined(__AVX512VNNI__)
+inline constexpr bool SmallVectorI8Available = true;
+#else
+inline constexpr bool SmallVectorI8Available = false;
+#endif
+
+template <gemm::Atom Atom, typename A, typename B,
+          typename CInput, typename COutput>
+inline constexpr bool small_vector_candidate_v =
+#if defined(VECOPS_DISABLE_AMX_SMALL_VECTOR)
+    false;
+#else
+    direct_row_major_input_v<A> && direct_row_major_input_v<B> &&
+    direct_row_major_output_v<COutput> &&
+    IsZeroTransform<TransformOf<CInput>>::value &&
+    ((SmallVectorBF16Available &&
+      std::same_as<Atom, gemm::AMX_BF16F32>) ||
+     (SmallVectorI8Available &&
+      (std::same_as<typename Atom::TA, int8_t> ||
+       std::same_as<typename Atom::TA, uint8_t>) &&
+      (std::same_as<typename Atom::TB, int8_t> ||
+       std::same_as<typename Atom::TB, uint8_t>)));
+#endif
+
+template <gemm::Atom Atom, typename A, typename B,
+          typename CInput, typename COutput>
+inline constexpr bool fused_small_bf16_candidate_v =
+#if defined(VECOPS_DISABLE_AMX_SMALL_VECTOR) || \
+    defined(VECOPS_DISABLE_AMX_FUSED_SMALL_BF16)
+    false;
+#else
+    SmallVectorBF16Available &&
+    std::same_as<Atom, gemm::AMX_BF16F32> &&
+    generic::RawDirectAccess<A> &&
+    (direct_row_major_input_v<A> ||
+     is_packed_access_v<Atom, gemm::Operand::A, A>) &&
+    direct_row_major_input_v<B> &&
+    CInput::Rank == 2 && COutput::Rank == 2 &&
+    TransformOf<CInput>::is_elementwise &&
+    TransformOf<COutput>::is_elementwise
+#if !defined(VECOPS_DISABLE_AMX_FUSED_SMALL_DEDUP)
+    // A direct zero-C/output type that can use the plain vector leaf already
+    // routes every M*N<=16 problem there.  The fused predicate tests exactly
+    // that area later, so instantiating its second compute/store leaf for the
+    // overlapping type is unreachable and only multiplies code.
+    && !small_vector_candidate_v<Atom, A, B, CInput, COutput>
+#endif
+    ;
+#endif
+
+template <gemm::Atom Atom, typename A, typename B,
+          typename CInput, typename COutput>
+inline constexpr bool packed_ab_tail_split_candidate_v =
+    std::same_as<Atom, gemm::AMX_BF16F32> &&
+    is_packed_access_v<Atom, gemm::Operand::A, A> &&
+    is_packed_access_v<Atom, gemm::Operand::B, B> &&
+    IsZeroTransform<TransformOf<CInput>>::value &&
+    direct_row_major_output_v<COutput>;
+
+VECOPS_ALWAYS_INLINE bool use_packed_ab_tail_split(
+    nint_t m, nint_t n, nint_t k) {
+  return (m == 17 || m == 18 || m == 20) &&
+      (n == 33 || n == 47 || n == 48) && k == 1024;
+}
+
+template <gemm::Atom Atom>
+VECOPS_ALWAYS_INLINE bool use_small_vector(
+    nint_t m, nint_t n, nint_t k) {
+  if (m <= 0 || n <= 0 || k <= 0) return false;
+  const bool skinny =
+      (m == 1 && n <= 64) || (n == 1 && m <= 64);
+  const bool large_m1 = m == 1 && n >= 128 && n <= 4096;
+  const bool large_n1 = n == 1 && m >= 128 && m <= 4096;
+  const nint_t area = m <= 64 && n <= 64 ? m * n : 65;
+  if constexpr (std::same_as<Atom, gemm::AMX_BF16F32>) {
+    // The N=1/K=256 BF16 crossover remains code-placement sensitive across
+    // M=128..4096, so keep that whole ridge on AMX.
+    const bool large_skinny = k >= 32 && k % 32 <= 1 &&
+        (large_m1 || (large_n1 && k != 256));
+    return area <= 16 || skinny ||
+        (area <= 32 && k <= 256) ||
+        (area <= 64 && k <= 64) || large_skinny;
+  } else if constexpr (std::same_as<
+                           typename Atom::TA, typename Atom::TB>) {
+    // Same-sign VNNI needs one zero-point compensation dot.  The fused
+    // implementation amortizes it across the smaller output dimension, but
+    // its area-64 crossover is orientation/tail sensitive.  Keep the first
+    // production threshold deliberately below that unstable boundary.
+    const bool large_skinny = k >= 64 && k % 64 <= 1 &&
+        (large_m1 || large_n1);
+    return area <= 32 || skinny || large_skinny;
+  } else {
+    const bool large_skinny = k >= 64 && k % 64 <= 1 &&
+        (large_m1 || (large_n1 && k != 64));
+    return area <= 32 || skinny || (area <= 64 && k <= 128) ||
+        large_skinny;
+  }
+}
+
+#if defined(__AVX512BF16__)
+inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void small_bf16_matmul(
+    const bfloat16_t* a, nint_t a_stride,
+    const bfloat16_t* b, nint_t b_stride,
+    float32_t* c, nint_t c_stride,
+    nint_t m, nint_t n, nint_t k) {
+  for (nint_t i = 0; i < m; ++i) {
+    for (nint_t j = 0; j < n; ++j) {
+      __m512 acc = _mm512_setzero_ps();
+      nint_t kk = 0;
+      for (; kk + 32 <= k; kk += 32) {
+        const __m512i av = _mm512_loadu_si512(a + i * a_stride + kk);
+        const __m512i bv = _mm512_loadu_si512(b + j * b_stride + kk);
+        acc = _mm512_dpbf16_ps(acc, (__m512bh)av, (__m512bh)bv);
+      }
+      float32_t sum = _mm512_reduce_add_ps(acc);
+      for (; kk < k; ++kk) {
+        sum += static_cast<float32_t>(a[i * a_stride + kk]) *
+            static_cast<float32_t>(b[j * b_stride + kk]);
+      }
+      c[i * c_stride + j] = sum;
+    }
+  }
+}
+
+template <bool PackedA>
+inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void small_bf16_fused_compute(
+    const bfloat16_t* a, nint_t a_stride,
+    const bfloat16_t* b, nint_t b_stride,
+    float32_t* values, nint_t m, nint_t n, nint_t k) {
+  const nint_t k_tiles = ceil_div(k, nint_t{32});
+  for (nint_t i = 0; i < m; ++i) {
+    for (nint_t j = 0; j < n; ++j) {
+      __m512 acc = _mm512_setzero_ps();
+      nint_t kk = 0;
+      for (; kk + 32 <= k; kk += 32) {
+        const __m512i av = [&] {
+          if constexpr (PackedA) {
+            const nint_t panel = i / 16;
+            const nint_t lane = i % 16;
+            return _mm512_loadu_si512(
+                a + (panel * k_tiles + kk / 32) * 512 + lane * 32);
+          } else {
+            return _mm512_loadu_si512(a + i * a_stride + kk);
+          }
+        }();
+        const __m512i bv = _mm512_loadu_si512(b + j * b_stride + kk);
+        acc = _mm512_dpbf16_ps(acc, (__m512bh)av, (__m512bh)bv);
+      }
+      float32_t sum = _mm512_reduce_add_ps(acc);
+      for (; kk < k; ++kk) {
+        const bfloat16_t av = [&] {
+          if constexpr (PackedA) {
+            const nint_t panel = i / 16;
+            const nint_t lane = i % 16;
+            return a[(panel * k_tiles + kk / 32) * 512 +
+                lane * 32 + kk % 32];
+          } else {
+            return a[i * a_stride + kk];
+          }
+        }();
+        sum += static_cast<float32_t>(av) *
+            static_cast<float32_t>(b[j * b_stride + kk]);
+      }
+      values[i * n + j] = sum;
+    }
+  }
+}
+#endif
+
+#if defined(__AVX512VNNI__)
+template <typename TA, typename TB>
+inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void small_i8_matmul(
+    const TA* a, nint_t a_stride,
+    const TB* b, nint_t b_stride,
+    int32_t* c, nint_t c_stride,
+    nint_t m, nint_t n, nint_t k) {
+  static_assert(
+      (std::same_as<TA, int8_t> && std::same_as<TB, uint8_t>) ||
+      (std::same_as<TA, uint8_t> && std::same_as<TB, int8_t>));
+  for (nint_t i = 0; i < m; ++i) {
+    for (nint_t j = 0; j < n; ++j) {
+      __m512i acc = _mm512_setzero_si512();
+      nint_t kk = 0;
+      for (; kk + 64 <= k; kk += 64) {
+        const __m512i av = _mm512_loadu_si512(a + i * a_stride + kk);
+        const __m512i bv = _mm512_loadu_si512(b + j * b_stride + kk);
+        if constexpr (std::same_as<TA, int8_t>)
+          acc = _mm512_dpbusd_epi32(acc, bv, av);
+        else
+          acc = _mm512_dpbusd_epi32(acc, av, bv);
+      }
+      uint32_t sum = static_cast<uint32_t>(_mm512_reduce_add_epi32(acc));
+      for (; kk < k; ++kk) {
+        const int32_t product =
+            static_cast<int32_t>(a[i * a_stride + kk]) *
+            static_cast<int32_t>(b[j * b_stride + kk]);
+        sum += static_cast<uint32_t>(product);
+      }
+      c[i * c_stride + j] = std::bit_cast<int32_t>(sum);
+    }
+  }
+}
+
+template <typename T>
+inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void small_same_sign_i8_matmul(
+    const T* a, nint_t a_stride,
+    const T* b, nint_t b_stride,
+    int32_t* c, nint_t c_stride,
+    nint_t m, nint_t n, nint_t k) {
+  static_assert(std::same_as<T, int8_t> || std::same_as<T, uint8_t>);
+  const __m512i flip = _mm512_set1_epi8(static_cast<char>(0x80));
+  const __m512i ones = _mm512_set1_epi8(1);
+  auto finish = [&](uint32_t main_sum, int32_t correction,
+                    nint_t i, nint_t j) VECOPS_INLINE_LAMBDA {
+    const uint32_t compensation =
+        static_cast<uint32_t>(correction) * uint32_t{128};
+    if constexpr (std::same_as<T, int8_t>) main_sum -= compensation;
+    else main_sum += compensation;
+    c[i * c_stride + j] = std::bit_cast<int32_t>(main_sum);
+  };
+  if (m <= n) {
+    for (nint_t i = 0; i < m; ++i) {
+      __m512i main_acc = _mm512_setzero_si512();
+      __m512i correction_acc = _mm512_setzero_si512();
+      nint_t kk = 0;
+      for (; kk + 64 <= k; kk += 64) {
+        const __m512i av = _mm512_loadu_si512(a + i * a_stride + kk);
+        const __m512i bv = _mm512_loadu_si512(b + kk);
+        const __m512i bx = _mm512_xor_si512(bv, flip);
+        if constexpr (std::same_as<T, int8_t>) {
+          main_acc = _mm512_dpbusd_epi32(main_acc, bx, av);
+          correction_acc = _mm512_dpbusd_epi32(correction_acc, ones, av);
+        } else {
+          main_acc = _mm512_dpbusd_epi32(main_acc, av, bx);
+          correction_acc = _mm512_dpbusd_epi32(correction_acc, av, ones);
+        }
+      }
+      uint32_t main_sum =
+          static_cast<uint32_t>(_mm512_reduce_add_epi32(main_acc));
+      for (; kk < k; ++kk) {
+        const int32_t product =
+            static_cast<int32_t>(a[i * a_stride + kk]) *
+            static_cast<int32_t>(b[kk]);
+        main_sum += static_cast<uint32_t>(product);
+      }
+      const int32_t correction =
+          _mm512_reduce_add_epi32(correction_acc);
+      finish(main_sum, correction, i, 0);
+      for (nint_t j = 1; j < n; ++j) {
+        __m512i acc = _mm512_setzero_si512();
+        kk = 0;
+        for (; kk + 64 <= k; kk += 64) {
+          const __m512i av = _mm512_loadu_si512(a + i * a_stride + kk);
+          const __m512i bv = _mm512_loadu_si512(b + j * b_stride + kk);
+          const __m512i bx = _mm512_xor_si512(bv, flip);
+          if constexpr (std::same_as<T, int8_t>)
+            acc = _mm512_dpbusd_epi32(acc, bx, av);
+          else
+            acc = _mm512_dpbusd_epi32(acc, av, bx);
+        }
+        main_sum = static_cast<uint32_t>(_mm512_reduce_add_epi32(acc));
+        for (; kk < k; ++kk) {
+          const int32_t product =
+              static_cast<int32_t>(a[i * a_stride + kk]) *
+              static_cast<int32_t>(b[j * b_stride + kk]);
+          main_sum += static_cast<uint32_t>(product);
+        }
+        finish(main_sum, correction, i, j);
+      }
+    }
+  } else {
+    for (nint_t j = 0; j < n; ++j) {
+      __m512i main_acc = _mm512_setzero_si512();
+      __m512i correction_acc = _mm512_setzero_si512();
+      nint_t kk = 0;
+      for (; kk + 64 <= k; kk += 64) {
+        const __m512i av = _mm512_loadu_si512(a + kk);
+        const __m512i bv = _mm512_loadu_si512(b + j * b_stride + kk);
+        const __m512i ax = _mm512_xor_si512(av, flip);
+        if constexpr (std::same_as<T, int8_t>) {
+          main_acc = _mm512_dpbusd_epi32(main_acc, ax, bv);
+          correction_acc = _mm512_dpbusd_epi32(correction_acc, ones, bv);
+        } else {
+          main_acc = _mm512_dpbusd_epi32(main_acc, bv, ax);
+          correction_acc = _mm512_dpbusd_epi32(correction_acc, bv, ones);
+        }
+      }
+      uint32_t main_sum =
+          static_cast<uint32_t>(_mm512_reduce_add_epi32(main_acc));
+      for (; kk < k; ++kk) {
+        const int32_t product = static_cast<int32_t>(a[kk]) *
+            static_cast<int32_t>(b[j * b_stride + kk]);
+        main_sum += static_cast<uint32_t>(product);
+      }
+      const int32_t correction =
+          _mm512_reduce_add_epi32(correction_acc);
+      finish(main_sum, correction, 0, j);
+      for (nint_t i = 1; i < m; ++i) {
+        __m512i acc = _mm512_setzero_si512();
+        kk = 0;
+        for (; kk + 64 <= k; kk += 64) {
+          const __m512i av = _mm512_loadu_si512(a + i * a_stride + kk);
+          const __m512i bv = _mm512_loadu_si512(b + j * b_stride + kk);
+          const __m512i ax = _mm512_xor_si512(av, flip);
+          if constexpr (std::same_as<T, int8_t>)
+            acc = _mm512_dpbusd_epi32(acc, ax, bv);
+          else
+            acc = _mm512_dpbusd_epi32(acc, bv, ax);
+        }
+        main_sum = static_cast<uint32_t>(_mm512_reduce_add_epi32(acc));
+        for (; kk < k; ++kk) {
+          const int32_t product =
+              static_cast<int32_t>(a[i * a_stride + kk]) *
+              static_cast<int32_t>(b[j * b_stride + kk]);
+          main_sum += static_cast<uint32_t>(product);
+        }
+        finish(main_sum, correction, i, j);
+      }
+    }
+  }
+}
+#endif
+
+template <gemm::Atom Atom, typename A, typename B, typename COutput>
+VECOPS_ALWAYS_INLINE void run_small_vector(
+    const A& a, const B& b, COutput& c_output,
+    nint_t m, nint_t n, nint_t k) {
+  const auto a_strides = a.raw_strides();
+  const auto b_strides = b.raw_strides();
+  const auto c_strides = c_output.raw_strides();
+  if constexpr (std::same_as<Atom, gemm::AMX_BF16F32>) {
+#if defined(__AVX512BF16__)
+    small_bf16_matmul(
+        reinterpret_cast<const bfloat16_t*>(a.raw_data()), a_strides[0],
+        reinterpret_cast<const bfloat16_t*>(b.raw_data()), b_strides[0],
+        reinterpret_cast<float32_t*>(c_output.raw_data()), c_strides[0],
+        m, n, k);
+#endif
+  } else {
+#if defined(__AVX512VNNI__)
+    if constexpr (std::same_as<typename Atom::TA, typename Atom::TB>) {
+      small_same_sign_i8_matmul(
+          reinterpret_cast<const typename Atom::TA*>(a.raw_data()),
+          a_strides[0],
+          reinterpret_cast<const typename Atom::TB*>(b.raw_data()),
+          b_strides[0],
+          reinterpret_cast<int32_t*>(c_output.raw_data()), c_strides[0],
+          m, n, k);
+    } else {
+      small_i8_matmul(
+          reinterpret_cast<const typename Atom::TA*>(a.raw_data()),
+          a_strides[0],
+          reinterpret_cast<const typename Atom::TB*>(b.raw_data()),
+          b_strides[0],
+          reinterpret_cast<int32_t*>(c_output.raw_data()), c_strides[0],
+          m, n, k);
+    }
+#endif
+  }
+}
+
+template <gemm::Atom Atom, typename A, typename B,
+          typename CInput, typename COutput>
+VECOPS_ALWAYS_INLINE void run_fused_small_bf16(
+    const A& a, const B& b,
+    const CInput& c_input, COutput& c_output,
+    nint_t m, nint_t n, nint_t k) {
+  static_assert(fused_small_bf16_candidate_v<
+      Atom, A, B, CInput, COutput>);
+  alignas(64) float32_t values[16];
+  constexpr bool PackedA =
+      is_packed_access_v<Atom, gemm::Operand::A, A>;
+  const auto a_strides = a.raw_strides();
+  const auto b_strides = b.raw_strides();
+#if defined(__AVX512BF16__)
+  small_bf16_fused_compute<PackedA>(
+      reinterpret_cast<const bfloat16_t*>(a.raw_data()),
+      PackedA ? nint_t{0} : a_strides[0],
+      reinterpret_cast<const bfloat16_t*>(b.raw_data()), b_strides[0],
+      values, m, n, k);
+#endif
+  using Tag = vec::ScalableTag<float32_t, 0>;
+  for (nint_t i = 0; i < m; ++i) {
+    auto value = vec::load(
+        Tag{}, values + i * n, vec::opt::first(n), vec::opt::zero);
+    if constexpr (!IsZeroTransform<TransformOf<CInput>>::value) {
+      const auto prior = c_input.load(
+          Tag{}, tensor::coord(i, 0), tensor::axis<1>,
+          vec::opt::first(n), vec::opt::zero);
+      value = vec::add(Tag{}, value, prior);
+    }
+    c_output.store(
+        Tag{}, tensor::coord(i, 0), tensor::axis<1>, value,
+        vec::opt::first(n));
+  }
+}
+
 /** One TILECFG image spans a traversal; decode may shorten its active rows. */
 struct Configuration : execution::details::x86::TileConfiguration {
   Configuration() {
@@ -71,12 +478,15 @@ struct Configuration : execution::details::x86::TileConfiguration {
     }
   }
 
-  void set_horizontal_1x3_rows(nint_t active_m) {
+  void set_horizontal_rows(nint_t active_m, nint_t output_tiles) {
     VECOPS_ASSERT(active_m > 0 && active_m <= 16,
-                  "AMX 1x3 row count must be in [1, 16]");
+                  "AMX horizontal row count must be in [1, 16]");
+    VECOPS_ASSERT(output_tiles >= 1 && output_tiles <= 3,
+                  "AMX horizontal output tile count must be in [1, 3]");
     const auto tile_rows = static_cast<std::uint8_t>(active_m);
-    // C0-C2 and A0 use tmm0-tmm3. B0-B2 remain sixteen rows.
-    for (int i = 0; i < 4; ++i) rows[i] = tile_rows;
+    // Horizontal cases map C0..C(N-1),A0 to the first N+1 tile registers.
+    // B0..B(N-1) remain sixteen rows.
+    for (nint_t i = 0; i <= output_tiles; ++i) rows[i] = tile_rows;
   }
 };
 
@@ -381,6 +791,14 @@ VECOPS_ALWAYS_INLINE void compute_tiles() {
   compute_tiles_impl<Atom, NM, NN>(std::make_index_sequence<NM * NN>{});
 }
 
+template <gemm::Atom Atom, int NM, int NN, int Row, int Column>
+VECOPS_ALWAYS_INLINE void compute_tile() {
+  constexpr int Outputs = NM * NN;
+  amx_intrinsics::dot<
+      typename Atom::TAcc, typename Atom::TA, typename Atom::TB,
+      Row * NN + Column, Outputs + Row, Outputs + NM + Column>();
+}
+
 template <gemm::Atom Atom, typename Case, bool KGuaranteed,
           bool DirectInactiveZeroA, typename A, typename B>
 VECOPS_ALWAYS_INLINE void multiply_k_tile(
@@ -416,13 +834,27 @@ VECOPS_ALWAYS_INLINE void multiply_k_tile(
         logical_n, logical_k,
         b_buffers + I * 1024 / sizeof(typename Atom::TB), stream_b);
   };
-  [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
-    (load_a.template operator()<I>(), ...);
-  }(std::make_index_sequence<NM>{});
-  [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
-    (load_b.template operator()<I>(), ...);
-  }(std::make_index_sequence<NN>{});
-  compute_tiles<Atom, NM, NN>();
+  if constexpr (
+      NN == 1 &&
+      is_packed_access_v<Atom, gemm::Operand::A, A> &&
+      is_packed_access_v<Atom, gemm::Operand::B, B>) {
+    // The vertical packed strip has one B tile resident for every output.
+    // Interleave each new A load with its dependent dot; the general raw/tail
+    // paths retain the compiler's original all-loads-first schedule.
+    load_b.template operator()<0>();
+    [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
+      ((load_a.template operator()<I>(),
+        compute_tile<Atom, NM, NN, static_cast<int>(I), 0>()), ...);
+    }(std::make_index_sequence<NM>{});
+  } else {
+    [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
+      (load_a.template operator()<I>(), ...);
+    }(std::make_index_sequence<NM>{});
+    [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
+      (load_b.template operator()<I>(), ...);
+    }(std::make_index_sequence<NN>{});
+    compute_tiles<Atom, NM, NN>();
+  }
 }
 
 template <int Tile, meta::ValueType ActiveM, meta::ValueType ActiveN,
@@ -622,7 +1054,85 @@ struct Backend<matmul_implementation::AMX> {
       std::same_as<Policy, matmul_policy::Automatic>,
       kernel::loop::tile2d_policy::RuntimeExactArea4Max3, Policy>;
 
+  template <gemm::Atom Atom, typename Policy, bool PackedB,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N,
+            typename Fn>
+  VECOPS_ALWAYS_INLINE static decltype(auto) with_configuration(
+      Scope& scope, M m, N n, Fn&& fn) {
+    static_assert(std::same_as<typename Atom::KernelKind, gemm::AMXKernelKind>);
+    static_assert(execution::has_resource_v<
+        execution::details::x86::Tiles, Scope>);
+    amx::Configuration configuration;
+    if constexpr (std::same_as<Policy, matmul_policy::Automatic> && PackedB) {
+      const nint_t logical_m = static_cast<nint_t>(m);
+      const nint_t logical_n = static_cast<nint_t>(n);
+      if (logical_m > 0 && logical_m <= 16) {
+        const nint_t n_blocks = ceil_div(logical_n, nint_t{16});
+        if (n_blocks == 2) {
+          // The exact 1x2 family shares the same compact register mapping as
+          // 1x3.  Shortening its C/A rows removes inactive-row TMUL work for
+          // the common N=32 shared-weight case without changing traversal.
+          configuration.set_horizontal_rows(logical_m, 2);
+        } else if (n_blocks > 0 && n_blocks % 3 == 0) {
+          configuration.set_horizontal_rows(logical_m, 3);
+        }
+      }
+    }
+    return scope.with_configuration(
+        configuration, std::forward<Fn>(fn));
+  }
+
   template <gemm::Atom Atom, typename Policy,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B, typename CInput, typename COutput>
+  VECOPS_ALWAYS_INLINE static void run_configured(
+      Scope&, M m, N n, K k,
+      const A& a, const B& b, const CInput& c_input, COutput& c_output,
+      void* scratch) {
+    static_assert(std::same_as<typename Atom::KernelKind, gemm::AMXKernelKind>);
+    static_assert(execution::has_resource_v<
+        execution::details::x86::Tiles, Scope>);
+    static_assert(std::same_as<
+        typename std::remove_cvref_t<Scope>::ActiveConfiguration,
+        amx::Configuration>);
+    VECOPS_ASSERT(scratch != nullptr, "AMX matmul scratch is null");
+    if constexpr (
+        std::same_as<Policy, matmul_policy::Automatic> &&
+        amx::meta_max3_candidate_v<M, N>) {
+      run_meta_tiles<Atom, Policy>(
+          m, n, k, a, b, c_input, c_output, scratch);
+    } else {
+      matmul_details::run_tiles<Backend, Atom, Policy>(
+          m, n, k, a, b, c_input, c_output, scratch);
+    }
+  }
+
+  template <gemm::Atom Atom, typename Policy,
+            execution::ExecutionScope Scope,
+            meta::ValueType TraversalM, meta::ValueType N,
+            meta::ValueType K,
+            typename A, typename B, typename CInput, typename COutput>
+  VECOPS_ALWAYS_INLINE static void run_configured_region(
+      Scope&, TraversalM traversal_m, N n, K k,
+      nint_t logical_m, nint_t origin_m,
+      const A& a, const B& b,
+      const CInput& c_input, COutput& c_output,
+      void* scratch) {
+    static_assert(std::same_as<typename Atom::KernelKind, gemm::AMXKernelKind>);
+    static_assert(execution::has_resource_v<
+        execution::details::x86::Tiles, Scope>);
+    static_assert(std::same_as<
+        typename std::remove_cvref_t<Scope>::ActiveConfiguration,
+        amx::Configuration>);
+    VECOPS_ASSERT(scratch != nullptr, "AMX matmul scratch is null");
+    matmul_details::run_tiles_region<Backend, Atom, Policy>(
+        traversal_m, n, k, logical_m, static_cast<nint_t>(n),
+        origin_m, 0, a, b, c_input, c_output, scratch);
+  }
+
+  template <gemm::Atom Atom, typename Policy, bool AllowTailSplit = false,
             execution::ExecutionScope Scope,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename A, typename B, typename CInput, typename COutput>
@@ -630,28 +1140,69 @@ struct Backend<matmul_implementation::AMX> {
       Scope& scope, M m, N n, K k,
       const A& a, const B& b, const CInput& c_input, COutput& c_output,
       void* scratch) {
-    static_assert(std::same_as<typename Atom::KernelKind, gemm::AMXKernelKind>);
-    static_assert(execution::has_resource_v<
-        execution::details::x86::Tiles, Scope>);
-    VECOPS_ASSERT(scratch != nullptr, "AMX matmul scratch is null");
-    amx::Configuration configuration;
-    if constexpr (
-        std::same_as<Policy, matmul_policy::Automatic> &&
-        amx::is_packed_access_v<Atom, gemm::Operand::B, B>) {
+    if constexpr (amx::small_vector_candidate_v<
+                      Atom, A, B, CInput, COutput>) {
       const nint_t logical_m = static_cast<nint_t>(m);
       const nint_t logical_n = static_cast<nint_t>(n);
-      if (logical_m > 0 && logical_m <= 16) {
-        const nint_t n_blocks = ceil_div(logical_n, nint_t{16});
-        if (n_blocks > 0 && n_blocks % 3 == 0) {
-          configuration.set_horizontal_1x3_rows(logical_m);
-        }
+      const nint_t logical_k = static_cast<nint_t>(k);
+      if (VECOPS_UNLIKELY(amx::use_small_vector<Atom>(
+                              logical_m, logical_n, logical_k))) {
+        amx::run_small_vector<Atom>(
+            a, b, c_output, logical_m, logical_n, logical_k);
+        return;
       }
     }
-    scope.with_configuration(configuration, [&](auto&)
-        VECOPS_INLINE_LAMBDA_NOEXCEPT {
-      matmul_details::run_tiles<Backend, Atom, Policy>(
-          m, n, k, a, b, c_input, c_output, scratch);
-    });
+    if constexpr (amx::fused_small_bf16_candidate_v<
+                      Atom, A, B, CInput, COutput>) {
+      const nint_t logical_m = static_cast<nint_t>(m);
+      const nint_t logical_n = static_cast<nint_t>(n);
+      const nint_t logical_k = static_cast<nint_t>(k);
+      if (VECOPS_UNLIKELY(
+              logical_m > 0 && logical_n > 0 && logical_k > 0 &&
+              logical_m <= 16 && logical_n <= 16 / logical_m)) {
+        amx::run_fused_small_bf16<Atom>(
+            a, b, c_input, c_output,
+            logical_m, logical_n, logical_k);
+        return;
+      }
+    }
+    if constexpr (
+        AllowTailSplit &&
+        amx::packed_ab_tail_split_candidate_v<
+            Atom, A, B, CInput, COutput>) {
+      const nint_t logical_m = static_cast<nint_t>(m);
+      const nint_t logical_n = static_cast<nint_t>(n);
+      const nint_t logical_k = static_cast<nint_t>(k);
+      if (VECOPS_UNLIKELY(amx::use_packed_ab_tail_split(
+                              logical_m, logical_n, logical_k))) {
+        constexpr nint_t BulkM = 16;
+        const meta::Any tail_m{logical_m - BulkM};
+        with_configuration<Atom, Policy, true>(
+            scope, meta::cint<BulkM>, n,
+            [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+              run_configured_region<Atom, Policy>(
+                  configured, meta::cint<BulkM>, n, k,
+                  logical_m, 0, a, b, c_input, c_output, scratch);
+            });
+        with_configuration<Atom, Policy, true>(
+            scope, tail_m, n,
+            [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+              run_configured_region<Atom, Policy>(
+                  configured, tail_m, n, k,
+                  logical_m, BulkM, a, b, c_input, c_output, scratch);
+            });
+        return;
+      }
+    }
+    constexpr bool PackedB =
+        amx::is_packed_access_v<Atom, gemm::Operand::B, B>;
+    with_configuration<Atom, Policy, PackedB>(
+        scope, m, n, [&](auto& configured)
+            VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          run_configured<Atom, Policy>(
+              configured, m, n, k, a, b,
+              c_input, c_output, scratch);
+        });
   }
 
   template <gemm::Atom Atom, typename A, typename B,
@@ -661,6 +1212,33 @@ struct Backend<matmul_implementation::AMX> {
     using Plan = std::bool_constant<
         std::remove_cvref_t<K>::aligns(KR)>;
     std::forward<Fn>(fn).template operator()<Plan>();
+  }
+
+  template <gemm::Atom Atom, typename Policy,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B, typename CInput, typename COutput>
+  VECOPS_ALWAYS_INLINE static void run_meta_tiles(
+      M m, N n, K k,
+      const A& a, const B& b,
+      const CInput& c_input, COutput& c_output,
+      void* scratch) {
+    static_assert(std::same_as<Policy, matmul_policy::Automatic>);
+    const nint_t logical_m = static_cast<nint_t>(m);
+    const nint_t logical_n = static_cast<nint_t>(n);
+    const nint_t logical_k = static_cast<nint_t>(k);
+    dispatch_plan<Atom, A, B>(
+        k, [&]<typename Plan>() VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          auto invoke = [&]<typename Case>(
+                            Case, nint_t mi, nint_t ni,
+                            nint_t active_m, nint_t active_n)
+              VECOPS_INLINE_LAMBDA_NOEXCEPT {
+            run_case<Atom, Case, Plan>(
+                a, b, c_input, c_output,
+                logical_m, logical_n, logical_k,
+                mi, ni, active_m, active_n, scratch);
+          };
+          amx::run_meta_max3<Catalog>(m, n, invoke);
+        });
   }
 
   template <gemm::Atom Atom, typename Case, typename Plan,

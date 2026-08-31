@@ -14,6 +14,7 @@ namespace vecops::kernel::matmul_pack_details {
 template <typename Format, typename Implementation>
 struct Backend {
   using ResourceRequirements = execution::details::ResourceSet<>;
+  static constexpr bool supports_column_compensation = false;
 
   template <typename InputSpec, typename OutputSpec>
   static constexpr bool eligible = false;

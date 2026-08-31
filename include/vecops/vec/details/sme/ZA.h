@@ -136,6 +136,25 @@ VECOPS_SME_DEFINE_ZA_MOVE_WIDTH(std::int32_t, s)
 
 #undef VECOPS_SME_DEFINE_ZA_MOVE_WIDTH
 
+template <int Tile, typename T>
+VECOPS_ALWAYS_INLINE void addha(
+    Mask<WordTag<T>> row_pg, Mask<WordTag<T>> column_pg,
+    Vec<WordTag<T>> value) noexcept {
+  static_assert(
+      std::same_as<T, std::int32_t> || std::same_as<T, std::uint32_t>,
+      "SME ADDHA supports 32-bit integer ZA tiles in this wrapper");
+  validate_tile<Tile, T>();
+  const auto rows = raw_mask<T>(row_pg);
+  const auto columns = raw_mask<T>(column_pg);
+  const auto vector = raw_word<T>(value);
+  asm volatile(
+      "addha za%c[tile].s, %[rows]/m, %[columns]/m, %[vector].s"
+      :
+      : [tile] "i"(Tile), [rows] "Upl"(rows),
+        [columns] "Upl"(columns), [vector] "w"(vector)
+      : "za");
+}
+
 #define VECOPS_SME_DEFINE_ZA_MEMORY_WIDTH(                               \
     Type, LoadMnemonic, MemorySuffix, ZASuffix)                          \
   template <int Tile>                                                    \

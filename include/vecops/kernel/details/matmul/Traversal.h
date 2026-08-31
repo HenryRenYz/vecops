@@ -19,6 +19,36 @@ namespace vecops::kernel::matmul_details {
  * lexical hardware-state interval.
  */
 template <typename Backend, gemm::Atom Atom, typename Policy,
+          meta::ValueType TraversalM, meta::ValueType TraversalN,
+          meta::ValueType K,
+          typename A, typename B, typename CInput, typename COutput>
+VECOPS_KERNEL_FUNCTION(void run_tiles_region(
+    TraversalM traversal_m, TraversalN traversal_n, K k,
+    nint_t logical_m, nint_t logical_n,
+    nint_t origin_m, nint_t origin_n,
+    const A& a, const B& b, const CInput& c_input, COutput& c_output,
+    void* scratch)) {
+  using EffectivePolicy = typename Backend::template EffectivePolicy<
+      Atom, Policy, TraversalM, TraversalN, K, A, B>;
+  const nint_t logical_k = static_cast<nint_t>(k);
+  Backend::template dispatch_plan<Atom, A, B>(
+      k, [&]<typename Plan>() VECOPS_INLINE_LAMBDA_NOEXCEPT {
+        kernel::loop::tile2d<EffectivePolicy>(
+            traversal_m, traversal_n,
+            Atom::M_R, Atom::N_R, typename Backend::Catalog{},
+            [&]<typename Case>(Case, nint_t mi, nint_t ni,
+                               nint_t active_m, nint_t active_n)
+                VECOPS_INLINE_LAMBDA_NOEXCEPT {
+              Backend::template run_case<Atom, Case, Plan>(
+                  a, b, c_input, c_output,
+                  logical_m, logical_n, logical_k,
+                  origin_m + mi, origin_n + ni,
+                  active_m, active_n, scratch);
+            });
+      });
+}
+
+template <typename Backend, gemm::Atom Atom, typename Policy,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_KERNEL_FUNCTION(void run_tiles(
@@ -39,8 +69,8 @@ VECOPS_KERNEL_FUNCTION(void run_tiles(
                 VECOPS_INLINE_LAMBDA_NOEXCEPT {
               Backend::template run_case<Atom, Case, Plan>(
                   a, b, c_input, c_output,
-                  logical_m, logical_n, logical_k,
-                  mi, ni, active_m, active_n, scratch);
+                  logical_m, logical_n, logical_k, mi, ni,
+                  active_m, active_n, scratch);
             });
       });
 }

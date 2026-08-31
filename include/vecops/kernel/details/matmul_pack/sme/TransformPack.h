@@ -167,9 +167,14 @@ VECOPS_ALWAYS_INLINE void pack_postprocess(
     const auto pg1 = first<U>(active1);
     const auto write_pg = all<U>();
 
-    auto pack_chunk = [&](nint_t kb, nint_t active_k)
+    auto pack_chunk = [&]<bool FullPanel, bool FullK>(
+        nint_t kb, nint_t active_k)
         VECOPS_INLINE_LAMBDA_NOEXCEPT {
-      const auto load_pg = first<U>(active_k);
+      const auto load_pg = FullK ? all<U>() : first<U>(active_k);
+      const auto read_pg0 = FullPanel ? all<U>() : pg0;
+      const auto read_pg1 = FullPanel ? all<U>() : pg1;
+      const nint_t rows0 = FullPanel ? lanes : active0;
+      const nint_t rows1 = FullPanel ? lanes : active1;
       auto load_row = [&](nint_t row) VECOPS_INLINE_LAMBDA_NOEXCEPT {
         return load_bits<U>(load_pg, input + row * row_stride + kb);
       };
@@ -179,24 +184,29 @@ VECOPS_ALWAYS_INLINE void pack_postprocess(
           const nint_t row = begin + r;
           write_hor<Tile, U>(
               static_cast<uint32_t>(r), write_pg, load_row(row));
-        }
+          }
       };
-      write_rows.template operator()<0>(panel_base, active0);
+      write_rows.template operator()<0>(panel_base, rows0);
       if constexpr (sizeof(Memory) == 4) {
-        write_rows.template operator()<1>(panel_base + lanes, active1);
+        write_rows.template operator()<1>(panel_base + lanes, rows1);
       }
 
       auto process_slice = [&](nint_t slice)
           VECOPS_INLINE_LAMBDA_NOEXCEPT {
         using OutputTag = PanelTag<T>;
-        if (slice >= active_k) return vec::zeros(OutputTag{});
+        if constexpr (!FullK) {
+          if (slice >= active_k) return vec::zeros(OutputTag{});
+        }
         const auto memory = read_panel<Memory>(
-            static_cast<uint32_t>(slice), pg0, pg1);
-        return zero_inactive_spatial<T>(
-            postprocess_panel<T>(source, memory), active_spatial);
+            static_cast<uint32_t>(slice), read_pg0, read_pg1);
+        const auto processed = postprocess_panel<T>(source, memory);
+        if constexpr (FullPanel) return processed;
+        else return zero_inactive_spatial<T>(processed, active_spatial);
       };
 
-      const nint_t groups = ceil_div(active_k, KPack);
+      const nint_t groups = FullK
+          ? k_chunk / KPack
+          : ceil_div(active_k, KPack);
       if constexpr (KPack == 1) {
         for (nint_t g = 0; g < groups; ++g) {
           store_single_panel(out, process_slice(g));
@@ -218,9 +228,17 @@ VECOPS_ALWAYS_INLINE void pack_postprocess(
       }
     };
 
-    for (nint_t kb = 0; kb < k; kb += k_chunk) {
-      pack_chunk(kb, vec::details::sme::min_value(k_chunk, k - kb));
-    }
+    auto pack_panel = [&]<bool FullPanel>() VECOPS_INLINE_LAMBDA_NOEXCEPT {
+      nint_t kb = 0;
+      for (; kb + k_chunk <= k; kb += k_chunk) {
+        pack_chunk.template operator()<FullPanel, true>(kb, k_chunk);
+      }
+      if (kb < k) {
+        pack_chunk.template operator()<FullPanel, false>(kb, k - kb);
+      }
+    };
+    if (active_spatial == panel) pack_panel.template operator()<true>();
+    else pack_panel.template operator()<false>();
   }
 }
 

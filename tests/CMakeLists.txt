@@ -121,18 +121,26 @@ vecops_add_test(
     ARCH ${VECOPS_TRANSPOSE_ARCH})
 if(VECOPS_ARCH_FAMILY STREQUAL "x86")
     vecops_add_test(
-        NAME MatmulPackAMXTest
-        FILES ops/MatmulPackAMXTest.cpp TestUtils.cpp
+        NAME MatmulPackTest
+        FILES ops/MatmulPackTest.cpp TestUtils.cpp
         FOLDER ops/matmul_pack
         ARCH Scalar AVX512 Native)
     vecops_add_test(
-        NAME MatmulAMXTest
-        FILES ops/MatmulAMXTest.cpp TestUtils.cpp
+        NAME MatmulTest
+        FILES
+            ops/MatmulTest.cpp
+            ops/MatmulMixedPackingTest.cpp
+            TestUtils.cpp
         FOLDER ops/matmul
         ARCH Native)
     vecops_add_test(
-        NAME MatmulBatchAMXTest
-        FILES ops/MatmulBatchAMXTest.cpp
+        NAME MatmulFusionTest
+        FILES ops/MatmulFusionTest.cpp
+        FOLDER ops/matmul
+        ARCH Native)
+    vecops_add_test(
+        NAME MatmulBatchTest
+        FILES ops/MatmulBatchTest.cpp
         FOLDER ops/matmul
         ARCH Native)
 elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
@@ -167,37 +175,101 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
         endif()
     endif()
     vecops_add_test(
-        NAME MatmulPackSMETest
-        FILES ops/MatmulPackSMETest.cpp TestUtils.cpp
+        NAME MatmulPackTest
+        FILES ops/MatmulPackTest.cpp TestUtils.cpp
         FOLDER ops/matmul_pack
         ARCH ${VECOPS_SME_TEST_ARCH})
     vecops_add_test(
-        NAME MatmulSMETest
-        FILES ops/MatmulSMETest.cpp TestUtils.cpp
+        NAME MatmulTest
+        FILES
+            ops/MatmulTest.cpp
+            ops/MatmulMixedPackingTest.cpp
+            TestUtils.cpp
         FOLDER ops/matmul
         ARCH ${VECOPS_SME_TEST_ARCH})
     vecops_add_test(
-        NAME MatmulBatchSMETest
-        FILES ops/MatmulBatchSMETest.cpp
+        NAME MatmulFusionTest
+        FILES ops/MatmulFusionTest.cpp
+        FOLDER ops/matmul
+        ARCH ${VECOPS_SME_TEST_ARCH})
+    vecops_add_test(
+        NAME MatmulBatchTest
+        FILES ops/MatmulBatchTest.cpp
         FOLDER ops/matmul
         ARCH ${VECOPS_SME_TEST_ARCH})
     if(VECOPS_NATIVE_HAS_SME AND CMAKE_OBJDUMP)
-        set(_VECOPS_SME_MATMUL_TARGETS
-            MatmulSMETest-Native MatmulBatchSMETest-Native)
+        # BiSheng/Clang 19 keeps predicate-tuple accessors behind an SVE2.1
+        # target boundary.  The helpers only regroup predicate registers, but
+        # cannot be inlined into the base-SVE caller.  Allow exactly these
+        # compiler boundary calls while rejecting every other call in an SME
+        # interval.
+        set(_VECOPS_SME_PREDICATE_TUPLE_CALL_REGEX
+            "(make_word_groupEu10__SVBool_tS2_|get_wordILl[01]EEEu10__SVBool_t10svboolx2_t)")
+        set(_VECOPS_SME_PACK_TARGETS MatmulPackTest-Native)
         if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
-            list(APPEND _VECOPS_SME_MATMUL_TARGETS
-                MatmulSMETest-NativeFixedStreamingSVE
-                MatmulBatchSMETest-NativeFixedStreamingSVE)
+            list(APPEND _VECOPS_SME_PACK_TARGETS
+                MatmulPackTest-NativeFixedStreamingSVE)
         endif()
-        foreach(_TARGET IN LISTS _VECOPS_SME_MATMUL_TARGETS)
+        foreach(_TARGET IN LISTS _VECOPS_SME_PACK_TARGETS)
             add_test(
                 NAME ${_TARGET}-Disassembly
                 COMMAND "${CMAKE_COMMAND}"
                     "-DOBJDUMP=${CMAKE_OBJDUMP}"
                     "-DBINARY=$<TARGET_FILE:${_TARGET}>"
+                    -DREQUIRE_MOPA=OFF
+                    "-DALLOWED_CALL_REGEX=${_VECOPS_SME_PREDICATE_TUPLE_CALL_REGEX}"
+                    -DREQUIRE_ALLOWED_CALL=ON
+                    -P "${CMAKE_CURRENT_LIST_DIR}/cmake/VerifyManualSMEDisassembly.cmake")
+            set_tests_properties(
+                ${_TARGET}-Disassembly
+                PROPERTIES LABELS "matmul_pack;sme;disassembly")
+        endforeach()
+        set(_VECOPS_SME_MATMUL_TARGETS
+            MatmulTest-Native MatmulBatchTest-Native)
+        if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
+            list(APPEND _VECOPS_SME_MATMUL_TARGETS
+                MatmulTest-NativeFixedStreamingSVE
+                MatmulBatchTest-NativeFixedStreamingSVE)
+        endif()
+        foreach(_TARGET IN LISTS _VECOPS_SME_MATMUL_TARGETS)
+            set(_VECOPS_SME_MATMUL_CALL_ARGS "")
+            if(_TARGET MATCHES "^MatmulTest-")
+                list(APPEND _VECOPS_SME_MATMUL_CALL_ARGS
+                    "-DALLOWED_CALL_REGEX=${_VECOPS_SME_PREDICATE_TUPLE_CALL_REGEX}"
+                    -DREQUIRE_ALLOWED_CALL=ON)
+            endif()
+            add_test(
+                NAME ${_TARGET}-Disassembly
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DOBJDUMP=${CMAKE_OBJDUMP}"
+                    "-DBINARY=$<TARGET_FILE:${_TARGET}>"
+                    ${_VECOPS_SME_MATMUL_CALL_ARGS}
                     -P "${CMAKE_CURRENT_LIST_DIR}/cmake/VerifyManualSMEDisassembly.cmake")
             set_tests_properties(
                 ${_TARGET}-Disassembly PROPERTIES LABELS "matmul;sme;disassembly")
+        endforeach()
+        # Clang emits out-of-line numeric_limits min/max/infinity calls in the
+        # runtime-VL gather and activation paths.  Keep these exact compiler
+        # artifacts visible together with the predicate-tuple boundary calls.
+        set(_VECOPS_SME_FUSION_TARGETS MatmulFusionTest-Native)
+        if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
+            list(APPEND _VECOPS_SME_FUSION_TARGETS
+                MatmulFusionTest-NativeFixedStreamingSVE)
+        endif()
+        set(_VECOPS_SME_FUSION_CALL_REGEX
+            "(${_VECOPS_SME_PREDICATE_TUPLE_CALL_REGEX}|numeric_limitsI(i|f)E(3(min|max)|8infinity)Ev)")
+        foreach(_TARGET IN LISTS _VECOPS_SME_FUSION_TARGETS)
+            add_test(
+                NAME ${_TARGET}-Disassembly
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DOBJDUMP=${CMAKE_OBJDUMP}"
+                    "-DBINARY=$<TARGET_FILE:${_TARGET}>"
+                    "-DALLOWED_CALL_REGEX=${_VECOPS_SME_FUSION_CALL_REGEX}"
+                    -DREQUIRE_ALLOWED_CALL=ON
+                    -P "${CMAKE_CURRENT_LIST_DIR}/cmake/VerifyManualSMEDisassembly.cmake")
+            set_tests_properties(
+                ${_TARGET}-Disassembly
+                PROPERTIES LABELS "matmul;sme;disassembly")
         endforeach()
     endif()
 endif()

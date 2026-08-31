@@ -2561,7 +2561,7 @@ public:
       if constexpr (UnitRankOne) return position[0];
       else return offset_at(tensor.layout(), position);
     }();
-    const StrideMeta axis_stride = [&]() -> StrideMeta {
+    const StrideMeta axis_stride = [&]() VECOPS_INLINE_LAMBDA -> StrideMeta {
       if constexpr (UnitRankOne) {
         return StrideMeta{nint_t{1}};
       } else {
@@ -2573,6 +2573,15 @@ public:
       return details::load_memory<Tag, const MemoryElement*, Policy>(
           tag, data_ + base, axis_stride,
           std::forward<Options>(options)...);
+    } else if constexpr (is_zero_vec_transform_v<Transform>) {
+      // A zero prologue does not depend on memory, its dtype, addressing or
+      // transform context.  In particular, do not send mixed-width zeros
+      // through scalable-SVE transform chunking: a narrower transform input
+      // can have no representable sizeless subword tag even though the output
+      // Tag itself is legal.  Generate the compute-domain zero directly and
+      // apply only the caller's inactive-lane population contract.
+      return details::populate_inactive(
+          tag, vec::zeros(tag), std::forward<Options>(options)...);
     } else {
       return details::with_transform_context(
           tag, position, Dim, spec_->projection(),
@@ -2808,7 +2817,7 @@ public:
       if constexpr (UnitRankOne) return position[0];
       else return offset_at(tensor.layout(), position);
     }();
-    const StrideMeta axis_stride = [&]() -> StrideMeta {
+    const StrideMeta axis_stride = [&]() VECOPS_INLINE_LAMBDA -> StrideMeta {
       if constexpr (UnitRankOne) {
         return StrideMeta{nint_t{1}};
       } else {

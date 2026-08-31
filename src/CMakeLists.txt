@@ -2,6 +2,9 @@
 file(GLOB_RECURSE _VECOPS_SRCS
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
+# Architecture-specialized objects are compiled with the target ISA by
+# VecopsMultiarchTargets.cmake.  They must not enter the generic libvecops.a.
+list(FILTER _VECOPS_SRCS EXCLUDE REGEX "/arch/")
 
 add_library(vecops ${_VECOPS_SRCS})
 target_compile_features(vecops PUBLIC cxx_std_20)

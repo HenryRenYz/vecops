@@ -212,6 +212,157 @@ VECOPS_ALWAYS_INLINE void transpose_16x16_dwords(__m512i (&rows)[16]) {
   rows[15] = _mm512_shuffle_i32x4(tmp[7], tmp[15], 0xdd);
 }
 
+VECOPS_ALWAYS_INLINE __m512i accumulate_s8_column_sums(
+    __m512i sums, const __m512i (&packed_groups)[16]) {
+  const auto ones = _mm512_set1_epi8(1);
+  VECOPS_UNROLL
+  for (nint_t group = 0; group < 16; ++group) {
+    // Each dword lane contains four adjacent K values for one logical B row.
+    // VPDPBUSD therefore reduces four signed bytes into the corresponding
+    // int32 column accumulator while the vectors are already resident for the
+    // packed store.
+    sums = _mm512_dpbusd_epi32(sums, ones, packed_groups[group]);
+  }
+  return sums;
+}
+
+VECOPS_ALWAYS_INLINE void store_s8_column_compensation(
+    __m512i sums, int32_t* destination,
+    nint_t active_rows, int32_t a_zero_point) {
+  VECOPS_ASSERT(active_rows >= 0 && active_rows <= 16,
+                "AMX B compensation tail must be in [0, 16]");
+  const auto factor = _mm512_sub_epi32(
+      _mm512_setzero_si512(), _mm512_set1_epi32(a_zero_point));
+  const auto correction = _mm512_mullo_epi32(sums, factor);
+  const auto mask = active_rows == 16
+      ? static_cast<__mmask16>(0xffffu)
+      : static_cast<__mmask16>(
+            (uint32_t{1} << static_cast<unsigned>(active_rows)) - 1u);
+  _mm512_mask_storeu_epi32(destination, mask, correction);
+}
+
+struct NoColumnCompensation {
+  static constexpr bool enabled = false;
+
+  VECOPS_ALWAYS_INLINE void begin_panel(nint_t) {}
+  VECOPS_ALWAYS_INLINE void observe(nint_t, __m512i) {}
+  VECOPS_ALWAYS_INLINE void end_panel(nint_t, nint_t) {}
+};
+
+class S8ColumnCompensation {
+public:
+  static constexpr bool enabled = true;
+
+  VECOPS_ALWAYS_INLINE S8ColumnCompensation(
+      int32_t* destination, int32_t a_zero_point)
+      : destination_(destination), a_zero_point_(a_zero_point),
+        ones_(_mm512_set1_epi8(1)) {}
+
+  VECOPS_ALWAYS_INLINE void begin_panel(nint_t) {
+    sums_even_ = _mm512_setzero_si512();
+    sums_odd_ = _mm512_setzero_si512();
+  }
+
+  VECOPS_ALWAYS_INLINE void observe(
+      nint_t group, __m512i packed_group) {
+    if (group & 1) {
+      sums_odd_ = _mm512_dpbusd_epi32(
+          sums_odd_, ones_, packed_group);
+    } else {
+      sums_even_ = _mm512_dpbusd_epi32(
+          sums_even_, ones_, packed_group);
+    }
+  }
+
+  VECOPS_ALWAYS_INLINE void end_panel(
+      nint_t row_base, nint_t active_rows) {
+    store_s8_column_compensation(
+        _mm512_add_epi32(sums_even_, sums_odd_),
+        destination_ + row_base, active_rows, a_zero_point_);
+  }
+
+private:
+  int32_t* destination_;
+  int32_t a_zero_point_;
+  __m512i sums_even_;
+  __m512i sums_odd_;
+  __m512i ones_;
+};
+
+template <typename T, typename Observer>
+VECOPS_ALWAYS_INLINE void store_packed_b_groups(
+    const __m512i (&rows)[16], T* destination, Observer& observer) {
+  if constexpr (Observer::enabled) static_assert(std::same_as<T, int8_t>);
+  auto* output = reinterpret_cast<__m512i*>(destination);
+  VECOPS_UNROLL
+  for (nint_t group = 0; group < 16; ++group) {
+    if constexpr (Observer::enabled) observer.observe(group, rows[group]);
+    _mm512_storeu_si512(output + group, rows[group]);
+  }
+}
+
+/**
+ * Pack a logically row-major B access whose DataAccess transform prevents the
+ * raw-pointer fast path.  Loading along K keeps conversion/transform work on
+ * contiguous vectors; the existing dword transpose then produces exactly the
+ * same AMX VNNI panel as pack_b_direct().
+ */
+template <nint_t KPack, nint_t KTile,
+          typename Source, typename T, typename Observer>
+VECOPS_ALWAYS_INLINE void pack_b_row_major_access_impl(
+    const Source& source, T* destination,
+    nint_t spatial, nint_t k, Observer& observer) {
+  static_assert(KPack == 2 || KPack == 4);
+  static_assert(sizeof(T) * KPack == sizeof(uint32_t));
+  static_assert(KTile * static_cast<nint_t>(sizeof(T)) == 64);
+  using RowTag = vec::ScalableTag<T, 0>;
+  static_assert(vec::size(RowTag{}) == KTile);
+
+  alignas(64) T row_major[16 * KTile];
+  const nint_t panels = ceil_div(spatial, nint_t{16});
+  const nint_t k_tiles = ceil_div(k, KTile);
+  for (nint_t sp = 0; sp < panels; ++sp) {
+    const nint_t row_base = sp * 16;
+    observer.begin_panel(row_base);
+    for (nint_t kt = 0; kt < k_tiles; ++kt) {
+      pack_a_tile<KTile, RowTag, false>(
+          source, row_major, row_base, kt * KTile, spatial, k);
+
+      __m512i rows[16];
+      VECOPS_UNROLL
+      for (nint_t row = 0; row < 16; ++row) {
+        rows[row] = _mm512_load_si512(row_major + row * KTile);
+      }
+      transpose_16x16_dwords(rows);
+      store_packed_b_groups(rows, destination, observer);
+      destination += 16 * KTile;
+    }
+    observer.end_panel(
+        row_base, std::min(nint_t{16}, spatial - row_base));
+  }
+}
+
+template <nint_t KPack, nint_t KTile, typename Source, typename T>
+VECOPS_NOINLINE void pack_b_row_major_access(
+    const Source& source, T* destination, nint_t spatial, nint_t k) {
+  NoColumnCompensation observer;
+  pack_b_row_major_access_impl<KPack, KTile>(
+      source, destination, spatial, k, observer);
+}
+
+/** Row-major signed-byte B pack with a fused asymmetric-quantization sidecar. */
+template <nint_t KPack, nint_t KTile, typename Source>
+VECOPS_NOINLINE void pack_b_row_major_access_compensated(
+    const Source& source, int8_t* destination,
+    int32_t* compensation, nint_t spatial, nint_t k,
+    int32_t a_zero_point) {
+  static_assert(KPack == 4);
+  static_assert(KTile == 64);
+  S8ColumnCompensation observer{compensation, a_zero_point};
+  pack_b_row_major_access_impl<KPack, KTile>(
+      source, destination, spatial, k, observer);
+}
+
 template <typename T>
 VECOPS_ALWAYS_INLINE __m512i load_b_row_direct(
     const T* source, nint_t active_k) {
@@ -247,9 +398,10 @@ VECOPS_NOINLINE void pack_a_partial_tile_direct(
   }
 }
 
-template <nint_t KPack, typename T>
+template <nint_t KPack, typename T, typename Observer>
 VECOPS_ALWAYS_INLINE void pack_b_full_panel_direct_impl(
-    const T* source, nint_t row_stride, T* destination, nint_t k_tile) {
+    const T* source, nint_t row_stride, T* destination,
+    nint_t k_tile, Observer& observer) {
   static_assert(KPack == 2 || KPack == 4);
   static_assert(sizeof(T) * KPack == sizeof(uint32_t));
   VECOPS_ASSERT(k_tile * static_cast<nint_t>(sizeof(T)) == 64,
@@ -260,17 +412,13 @@ VECOPS_ALWAYS_INLINE void pack_b_full_panel_direct_impl(
     rows[row] = _mm512_loadu_si512(source + row * row_stride);
   }
   transpose_16x16_dwords(rows);
-  auto* output = reinterpret_cast<__m512i*>(destination);
-  VECOPS_UNROLL
-  for (nint_t group = 0; group < 16; ++group) {
-    _mm512_storeu_si512(output + group, rows[group]);
-  }
+  store_packed_b_groups(rows, destination, observer);
 }
 
-template <nint_t KPack, typename T>
+template <nint_t KPack, typename T, typename Observer>
 VECOPS_ALWAYS_INLINE void pack_b_partial_panel_direct_impl(
     const T* source, nint_t row_stride, T* destination,
-    nint_t active_rows, nint_t active_k) {
+    nint_t active_rows, nint_t active_k, Observer& observer) {
   static_assert(KPack == 2 || KPack == 4);
   static_assert(sizeof(T) * KPack == sizeof(uint32_t));
   __m512i rows[16];
@@ -281,11 +429,24 @@ VECOPS_ALWAYS_INLINE void pack_b_partial_panel_direct_impl(
         : _mm512_setzero_si512();
   }
   transpose_16x16_dwords(rows);
-  auto* output = reinterpret_cast<__m512i*>(destination);
-  VECOPS_UNROLL
-  for (nint_t group = 0; group < 16; ++group) {
-    _mm512_storeu_si512(output + group, rows[group]);
-  }
+  store_packed_b_groups(rows, destination, observer);
+}
+
+template <nint_t KPack, typename T>
+VECOPS_ALWAYS_INLINE void pack_b_full_panel_direct_impl(
+    const T* source, nint_t row_stride, T* destination, nint_t k_tile) {
+  NoColumnCompensation observer;
+  pack_b_full_panel_direct_impl<KPack>(
+      source, row_stride, destination, k_tile, observer);
+}
+
+template <nint_t KPack, typename T>
+VECOPS_ALWAYS_INLINE void pack_b_partial_panel_direct_impl(
+    const T* source, nint_t row_stride, T* destination,
+    nint_t active_rows, nint_t active_k) {
+  NoColumnCompensation observer;
+  pack_b_partial_panel_direct_impl<KPack>(
+      source, row_stride, destination, active_rows, active_k, observer);
 }
 
 // Matmul calls these wrappers from several generated micro-kernel families.
@@ -334,12 +495,17 @@ VECOPS_NOINLINE void pack_a_direct(
   }
 }
 
-template <nint_t KPack, typename T>
-VECOPS_NOINLINE void pack_b_direct(
+template <nint_t KPack, typename T, typename Observer>
+VECOPS_ALWAYS_INLINE void pack_b_direct_impl(
     const T* source, nint_t row_stride, T* destination,
-    nint_t spatial, nint_t k, nint_t panel, nint_t k_tile) {
+    nint_t spatial, nint_t k, nint_t panel, nint_t k_tile,
+    Observer& observer) {
   static_assert(KPack == 2 || KPack == 4);
   static_assert(sizeof(T) * KPack == sizeof(uint32_t));
+  if constexpr (Observer::enabled) {
+    static_assert(KPack == 4);
+    static_assert(std::same_as<T, int8_t>);
+  }
   VECOPS_ASSERT(panel == 16, "AMX B-pack panel must contain 16 rows");
   VECOPS_ASSERT(k_tile * static_cast<nint_t>(sizeof(T)) == 64,
                 "AMX B-pack k tile must occupy 64 bytes");
@@ -348,21 +514,76 @@ VECOPS_NOINLINE void pack_b_direct(
 
   for (nint_t sp = 0; sp < panels; ++sp) {
     const nint_t row_base = sp * panel;
-    const T* panel_source = source + row_base * row_stride;
+    const T* panel_source = k_tiles == 0
+        ? source
+        : source + row_base * row_stride;
     const nint_t active_rows = std::min(panel, spatial - row_base);
+    observer.begin_panel(row_base);
     for (nint_t kt = 0; kt < k_tiles; ++kt) {
       const nint_t kk = kt * k_tile;
       const nint_t active_k = std::min(k_tile, k - kk);
+      // Keep full and partial networks separate.  Trying to join after only
+      // splitting the loads makes GCC spill the 16 live ZMM rows; moving the
+      // observer across a noinline helper boundary spills its accumulator.
+      // Both alternatives save text but cost 22% or more on multi-tile S8.
       if (active_rows == panel && active_k == k_tile) {
         pack_b_full_panel_direct_impl<KPack>(
-            panel_source + kk, row_stride, destination, k_tile);
+            panel_source + kk, row_stride, destination, k_tile, observer);
       } else {
         pack_b_partial_panel_direct_impl<KPack>(
             panel_source + kk, row_stride, destination,
-            active_rows, active_k);
+            active_rows, active_k, observer);
       }
       destination += panel * k_tile;
     }
+    observer.end_panel(row_base, active_rows);
+  }
+}
+
+template <nint_t KPack, typename T>
+VECOPS_NOINLINE void pack_b_direct(
+    const T* source, nint_t row_stride, T* destination,
+    nint_t spatial, nint_t k, nint_t panel, nint_t k_tile) {
+  NoColumnCompensation observer;
+  pack_b_direct_impl<KPack>(
+      source, row_stride, destination, spatial, k, panel, k_tile, observer);
+}
+
+template <nint_t KPack>
+VECOPS_NOINLINE void pack_b_direct_compensated(
+    const int8_t* source, nint_t row_stride, int8_t* destination,
+    int32_t* compensation, nint_t spatial, nint_t k,
+    nint_t panel, nint_t k_tile, int32_t a_zero_point) {
+  S8ColumnCompensation observer{compensation, a_zero_point};
+  pack_b_direct_impl<KPack>(
+      source, row_stride, destination, spatial, k,
+      panel, k_tile, observer);
+}
+
+VECOPS_NOINLINE inline void compensate_packed_s8_b(
+    const int8_t* source, int32_t* compensation,
+    nint_t spatial, nint_t k, nint_t panel, nint_t k_tile,
+    int32_t a_zero_point) {
+  VECOPS_ASSERT(panel == 16, "AMX B-pack panel must contain 16 rows");
+  VECOPS_ASSERT(k_tile == 64,
+                "AMX compensated B-pack K tile must contain 64 bytes");
+  const nint_t panels = ceil_div(spatial, panel);
+  const nint_t k_tiles = ceil_div(k, k_tile);
+  for (nint_t sp = 0; sp < panels; ++sp) {
+    __m512i sums = _mm512_setzero_si512();
+    for (nint_t kt = 0; kt < k_tiles; ++kt) {
+      __m512i groups[16];
+      VECOPS_UNROLL
+      for (nint_t group = 0; group < 16; ++group) {
+        groups[group] = _mm512_loadu_si512(source);
+        source += 64;
+      }
+      sums = accumulate_s8_column_sums(sums, groups);
+    }
+    const nint_t row_base = sp * panel;
+    store_s8_column_compensation(
+        sums, compensation + row_base,
+        std::min(panel, spatial - row_base), a_zero_point);
   }
 }
 

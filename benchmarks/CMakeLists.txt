@@ -58,42 +58,113 @@ vecops_add_benchmark(
 
 if(VECOPS_ARCH_FAMILY STREQUAL "x86")
     vecops_add_benchmark(
-        NAME MatmulPackAMXBench
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulPackAMXBench.cpp
+        NAME MatmulPackBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulPackBench.cpp
         ARCH Native
     )
     vecops_add_benchmark(
-        NAME MatmulAMXBench
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulAMXBench.cpp
+        NAME MatmulBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulBench.cpp
         ARCH Native
     )
+    vecops_add_benchmark(
+        NAME MatmulScenarioBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulScenarioBench.cpp
+        ARCH Native
+    )
+    vecops_add_benchmark(
+        NAME MatmulFusionBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulFusionBench.cpp
+        ARCH Native
+    )
+    vecops_add_benchmark(
+        NAME MatmulPackedBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulPackedBench.cpp
+        ARCH Native
+    )
+    set(VECOPS_MATMUL_WEIGHT_REUSE_ARCH Native)
 elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
+    option(VECOPS_ENABLE_SME_MMLA_EXPERIMENT_BENCHMARK
+        "Build the isolated PackedAB SVE-MMLA versus SME-MOPA benchmark" OFF)
     set(VECOPS_SME_BENCH_ARCH Native)
     if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
         list(APPEND VECOPS_SME_BENCH_ARCH NativeFixedStreamingSVE)
     endif()
     vecops_add_benchmark(
-        NAME MatmulPackSMEBench
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulPackSMEBench.cpp
+        NAME MatmulPackBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulPackBench.cpp
         ARCH ${VECOPS_SME_BENCH_ARCH}
     )
     vecops_add_benchmark(
-        NAME MatmulSMEBench
-        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulSMEBench.cpp
+        NAME MatmulBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulBench.cpp
         ARCH ${VECOPS_SME_BENCH_ARCH}
     )
+    if(VECOPS_ENABLE_SME_MMLA_EXPERIMENT_BENCHMARK)
+        vecops_add_benchmark(
+            NAME MatmulMMLAExperimentBench
+            FILES
+                ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulMMLAExperimentBench.cpp
+            ARCH Native
+        )
+    endif()
+    vecops_add_benchmark(
+        NAME MatmulScenarioBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulScenarioBench.cpp
+        ARCH ${VECOPS_SME_BENCH_ARCH}
+    )
+    vecops_add_benchmark(
+        NAME MatmulFusionBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulFusionBench.cpp
+        ARCH ${VECOPS_SME_BENCH_ARCH}
+    )
+    vecops_add_benchmark(
+        NAME MatmulPackedBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulPackedBench.cpp
+        ARCH ${VECOPS_SME_BENCH_ARCH}
+    )
+    set(VECOPS_MATMUL_WEIGHT_REUSE_ARCH ${VECOPS_SME_BENCH_ARCH})
     if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
         vecops_add_benchmark(
-            NAME MatmulSMEFixedBench
-            FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulSMEFixedBench.cpp
-            ARCH NativeFixedStreamingSVE
-        )
-        vecops_add_benchmark(
-            NAME MatmulSMEFixedPolicyBench
-            FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulSMEFixedPolicyBench.cpp
+            NAME MatmulPolicyBench
+            FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulPolicyBench.cpp
             ARCH NativeFixedStreamingSVE
         )
     endif()
+endif()
+
+if(VECOPS_MATMUL_WEIGHT_REUSE_ARCH)
+    set(_VECOPS_WEIGHT_REUSE_SOURCE
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulWeightReuseBench.cpp)
+    vecops_add_benchmark(
+        NAME MatmulWeightReuseBench
+        FILES ${_VECOPS_WEIGHT_REUSE_SOURCE}
+        ARCH ${VECOPS_MATMUL_WEIGHT_REUSE_ARCH}
+    )
+    vecops_add_benchmark(
+        NAME MatmulWeightReuseBF16Bench
+        FILES ${_VECOPS_WEIGHT_REUSE_SOURCE}
+        ARCH ${VECOPS_MATMUL_WEIGHT_REUSE_ARCH}
+        DEFINITIONS
+            VECOPS_WEIGHT_REUSE_PIPELINE=0
+            VECOPS_WEIGHT_REUSE_RESULT_STEM="matmul_weight_reuse_bf16"
+    )
+    vecops_add_benchmark(
+        NAME MatmulWeightReuseConvertBench
+        FILES ${_VECOPS_WEIGHT_REUSE_SOURCE}
+        ARCH ${VECOPS_MATMUL_WEIGHT_REUSE_ARCH}
+        DEFINITIONS
+            VECOPS_WEIGHT_REUSE_PIPELINE=1
+            VECOPS_WEIGHT_REUSE_RESULT_STEM="matmul_weight_reuse_convert"
+    )
+    vecops_add_benchmark(
+        NAME MatmulWeightReuseQuantBench
+        FILES ${_VECOPS_WEIGHT_REUSE_SOURCE}
+        ARCH ${VECOPS_MATMUL_WEIGHT_REUSE_ARCH}
+        DEFINITIONS
+            VECOPS_WEIGHT_REUSE_PIPELINE=2
+            VECOPS_WEIGHT_REUSE_RESULT_STEM="matmul_weight_reuse_quant"
+    )
 endif()
 
 vecops_add_benchmark(

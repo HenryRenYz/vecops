@@ -530,7 +530,7 @@ inline constexpr bool is_strides_v = is_specialization_of_v<Strides, T>;
  * @return The integer value for dimension I.
  */
 template <int I, ArrayMetaLike TMeta>
-constexpr nint_t get(const TMeta& m) {
+VECOPS_ALWAYS_INLINE constexpr nint_t get(const TMeta& m) {
   return m.template get<I>();
 }
 
@@ -987,7 +987,7 @@ using numel_type_t = typename details::ShapeProduct<
  * @return The size of dimension I (always non-negative).
  */
 template <int I, LayoutLike TLayout>
-constexpr nint_t size(const TLayout& layout) {
+VECOPS_ALWAYS_INLINE constexpr nint_t size(const TLayout& layout) {
   return get<I>(layout.shape());
 }
 
@@ -995,7 +995,7 @@ constexpr nint_t size(const TLayout& layout) {
  * @brief Get the stride value of dimension I from a Layout.
  */
 template <int I, LayoutLike TLayout>
-constexpr nint_t stride(const TLayout& layout) {
+VECOPS_ALWAYS_INLINE constexpr nint_t stride(const TLayout& layout) {
   return get<I>(layout.strides());
 }
 

@@ -6,8 +6,8 @@
 #define VECOPS_SMALL_FLOAT_H
 
 #include <cstdint>
-#include <iostream>
 #include <limits>
+#include <ostream>
 
 #include "vecops/CoreDefs.h"
 

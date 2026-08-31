@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "BenchmarkUtils.h"
@@ -32,6 +33,13 @@
 
 namespace vecops::bench::matmul {
 
+#if !defined(VECOPS_MATMUL_CATALOG_CASE_SHARDS)
+#define VECOPS_MATMUL_CATALOG_CASE_SHARDS 1
+#endif
+
+inline constexpr int MatmulCatalogCaseShardCount =
+    VECOPS_MATMUL_CATALOG_CASE_SHARDS;
+
 using namespace ::vecops::meta;
 using namespace ::vecops::tensor;
 
@@ -40,7 +48,21 @@ enum class InputMode : uint32_t {
   PackedA = 1u << 1,
   PackedB = 1u << 2,
   PackedAB = 1u << 3,
+  OnlinePackedA = 1u << 4,
+  OnlinePackedB = 1u << 5,
+  OnlinePackedAB = 1u << 6,
 };
+
+enum class ExtentMode : uint8_t {
+  Dynamic,
+  Const,
+};
+
+template <ExtentMode Mode>
+constexpr const char* extent_mode_name() {
+  if constexpr (Mode == ExtentMode::Dynamic) return "Dynamic";
+  return "Const";
+}
 
 inline constexpr uint32_t mode_bit(InputMode mode) {
   return static_cast<uint32_t>(mode);
@@ -89,7 +111,10 @@ const char* input_mode_name() {
   if constexpr (Mode == InputMode::Raw) return "raw";
   if constexpr (Mode == InputMode::PackedA) return "packed_a";
   if constexpr (Mode == InputMode::PackedB) return "packed_b";
-  return "packed_ab";
+  if constexpr (Mode == InputMode::PackedAB) return "packed_ab";
+  if constexpr (Mode == InputMode::OnlinePackedA) return "online_packed_a";
+  if constexpr (Mode == InputMode::OnlinePackedB) return "online_packed_b";
+  return "online_packed_ab";
 }
 
 template <typename T>
@@ -324,7 +349,9 @@ void run_fixed_case(benchmark::State& state, const MatmulCase& test_case) {
 }
 
 template <typename Atom, InputMode Mode>
-std::string benchmark_name(const MatmulCase& test_case) {
+std::string benchmark_name(
+    const MatmulCase& test_case,
+    const char* extent = extent_mode_name<ExtentMode::Dynamic>()) {
   using TA = typename Atom::TA;
   using TB = typename Atom::TB;
   using Acc = typename Atom::TAcc;
@@ -337,22 +364,93 @@ std::string benchmark_name(const MatmulCase& test_case) {
          "/dtype:" + dtype_name<TA>() + "x" + dtype_name<TB>() +
              "_acc_" + dtype_name<Acc>() +
          "/atom:" + atom_name<Atom>() +
+         "/extent:" + extent +
          "/arch:" + VECOPS_BENCH_ARCH_CODE;
+}
+
+template <typename Atom, InputMode Mode, ExtentMode Extents,
+          nint_t M, nint_t N, nint_t K,
+          typename TilePolicy = kernel::matmul_policy::Automatic>
+void register_extent_mode(const char* group, const char* name) {
+  constexpr uint32_t ModeMask = mode_bit(Mode);
+  const MatmulCase test_case{group, name, M, N, K, ModeMask};
+  const auto full_name = benchmark_name<Atom, Mode>(
+      test_case, extent_mode_name<Extents>());
+  auto* registered = benchmark::RegisterBenchmark(
+      full_name.c_str(),
+      [test_case](benchmark::State& state) {
+        if constexpr (Extents == ExtentMode::Dynamic) {
+          run_case<Atom, Mode, TilePolicy>(state, test_case);
+        } else {
+          run_fixed_case<Atom, Mode, M, N, K, TilePolicy>(state, test_case);
+        }
+      })
+      ->Unit(benchmark::kMicrosecond);
+  ::vecops::bench::configure_registered_benchmark(
+      registered, 0.02, 3)->ReportAggregatesOnly(true);
+}
+
+template <typename Atom, InputMode Mode,
+          nint_t M, nint_t N, nint_t K,
+          typename TilePolicy = kernel::matmul_policy::Automatic>
+void register_extent_pair_mode(const char* group, const char* name) {
+#if defined(VECOPS_SPLIT_EXTENT_SHARDS) && \
+    defined(VECOPS_TARGET_SHARD_ACTIVE)
+  if constexpr ((VECOPS_TARGET_SHARD_INDEX % 2) == 0) {
+    register_extent_mode<
+        Atom, Mode, ExtentMode::Dynamic, M, N, K, TilePolicy>(group, name);
+  } else {
+    register_extent_mode<
+        Atom, Mode, ExtentMode::Const, M, N, K, TilePolicy>(group, name);
+  }
+#else
+  register_extent_mode<
+      Atom, Mode, ExtentMode::Dynamic, M, N, K, TilePolicy>(group, name);
+  register_extent_mode<
+      Atom, Mode, ExtentMode::Const, M, N, K, TilePolicy>(group, name);
+#endif
+}
+
+template <typename Atom, nint_t M, nint_t N, nint_t K,
+          uint32_t Modes, int CaseShard = 0, int ShardTag = 0>
+void register_extent_pair(const char* group, const char* name) {
+#if defined(VECOPS_TARGET_SHARD_ACTIVE)
+  static_assert(CaseShard >= 0);
+  constexpr bool ActiveCaseShard =
+      (ShardTag % MatmulCatalogCaseShardCount) ==
+      (CaseShard % MatmulCatalogCaseShardCount);
+#else
+  constexpr bool ActiveCaseShard = true;
+#endif
+  if constexpr (ActiveCaseShard) {
+    if constexpr ((Modes & mode_bit(InputMode::Raw)) != 0) {
+      register_extent_pair_mode<Atom, InputMode::Raw, M, N, K>(group, name);
+    }
+    if constexpr ((Modes & mode_bit(InputMode::PackedA)) != 0) {
+      register_extent_pair_mode<Atom, InputMode::PackedA, M, N, K>(group, name);
+    }
+    if constexpr ((Modes & mode_bit(InputMode::PackedB)) != 0) {
+      register_extent_pair_mode<Atom, InputMode::PackedB, M, N, K>(group, name);
+    }
+    if constexpr ((Modes & mode_bit(InputMode::PackedAB)) != 0) {
+      register_extent_pair_mode<Atom, InputMode::PackedAB, M, N, K>(
+          group, name);
+    }
+  }
 }
 
 template <typename Atom, InputMode Mode>
 void register_mode(const MatmulCase& test_case) {
   if ((test_case.modes & mode_bit(Mode)) == 0) return;
   const auto name = benchmark_name<Atom, Mode>(test_case);
-  benchmark::RegisterBenchmark(
+  auto* registered = benchmark::RegisterBenchmark(
       name.c_str(),
       [test_case](benchmark::State& state) {
         run_case<Atom, Mode>(state, test_case);
       })
-      ->Unit(benchmark::kMicrosecond)
-      ->MinTime(0.02)
-      ->Repetitions(3)
-      ->ReportAggregatesOnly(true);
+      ->Unit(benchmark::kMicrosecond);
+  ::vecops::bench::configure_registered_benchmark(
+      registered, 0.02, 3)->ReportAggregatesOnly(true);
 }
 
 template <typename Atom, InputMode Mode,
@@ -361,34 +459,61 @@ void register_fixed_mode(const char* group, const char* name) {
   constexpr uint32_t ModeMask = mode_bit(Mode);
   const MatmulCase test_case{group, name, M, N, K, ModeMask};
   const auto full_name = benchmark_name<Atom, Mode>(test_case);
-  benchmark::RegisterBenchmark(
+  auto* registered = benchmark::RegisterBenchmark(
       full_name.c_str(),
       [test_case](benchmark::State& state) {
         run_fixed_case<Atom, Mode, M, N, K>(state, test_case);
       })
-      ->Unit(benchmark::kMicrosecond)
-      ->MinTime(0.02)
-      ->Repetitions(3)
-      ->ReportAggregatesOnly(true);
+      ->Unit(benchmark::kMicrosecond);
+  ::vecops::bench::configure_registered_benchmark(
+      registered, 0.02, 3)->ReportAggregatesOnly(true);
+}
+
+template <typename Atom, InputMode Mode, typename TilePolicy,
+          nint_t M, nint_t N, nint_t K, ExtentMode Extents>
+void register_policy_extent_mode(
+    const char* group, const char* name, const char* policy_name) {
+  constexpr uint32_t ModeMask = mode_bit(Mode);
+  const MatmulCase test_case{group, name, M, N, K, ModeMask};
+  const auto full_name = benchmark_name<Atom, Mode>(
+      test_case, extent_mode_name<Extents>()) + "/policy:" + policy_name;
+  auto* registered = benchmark::RegisterBenchmark(
+      full_name.c_str(),
+      [test_case](benchmark::State& state) {
+        if constexpr (Extents == ExtentMode::Dynamic) {
+          run_case<Atom, Mode, TilePolicy>(state, test_case);
+        } else {
+          run_fixed_case<Atom, Mode, M, N, K, TilePolicy>(state, test_case);
+        }
+      })
+      ->Unit(benchmark::kMicrosecond);
+  ::vecops::bench::configure_registered_benchmark(
+      registered, 0.02, 3)->ReportAggregatesOnly(true);
 }
 
 template <typename Atom, InputMode Mode, typename TilePolicy,
           nint_t M, nint_t N, nint_t K>
-void register_fixed_policy_mode(
+void register_policy_extent_pair(
     const char* group, const char* name, const char* policy_name) {
-  constexpr uint32_t ModeMask = mode_bit(Mode);
-  const MatmulCase test_case{group, name, M, N, K, ModeMask};
-  const auto full_name = benchmark_name<Atom, Mode>(test_case) +
-      "/policy:" + policy_name;
-  benchmark::RegisterBenchmark(
-      full_name.c_str(),
-      [test_case](benchmark::State& state) {
-        run_fixed_case<Atom, Mode, M, N, K, TilePolicy>(state, test_case);
-      })
-      ->Unit(benchmark::kMicrosecond)
-      ->MinTime(0.02)
-      ->Repetitions(3)
-      ->ReportAggregatesOnly(true);
+#if defined(VECOPS_SPLIT_EXTENT_SHARDS) && \
+    defined(VECOPS_TARGET_SHARD_ACTIVE)
+  if constexpr ((VECOPS_TARGET_SHARD_INDEX % 2) == 0) {
+    register_policy_extent_mode<
+        Atom, Mode, TilePolicy, M, N, K, ExtentMode::Dynamic>(
+            group, name, policy_name);
+  } else {
+    register_policy_extent_mode<
+        Atom, Mode, TilePolicy, M, N, K, ExtentMode::Const>(
+            group, name, policy_name);
+  }
+#else
+  register_policy_extent_mode<
+      Atom, Mode, TilePolicy, M, N, K, ExtentMode::Dynamic>(
+          group, name, policy_name);
+  register_policy_extent_mode<
+      Atom, Mode, TilePolicy, M, N, K, ExtentMode::Const>(
+          group, name, policy_name);
+#endif
 }
 
 template <typename Atom>
@@ -404,12 +529,15 @@ void register_cases(const std::vector<MatmulCase>& cases) {
   for (const auto& test_case : cases) register_case<Atom>(test_case);
 }
 
-// Mixed packing is covered by the primary Atom. Dtype probes instantiate only
-// the two end points to keep this template-heavy benchmark reasonably small.
+// Dtype probes cover both mixed-packing directions as well as the two end
+// points.  Packing formats and mixed raw/packed kernel plans are Atom-specific;
+// validating only the primary Atom can hide dtype-specific regressions.
 template <typename Atom>
 void register_probe_cases(const std::vector<MatmulCase>& cases) {
   for (const auto& test_case : cases) {
     register_mode<Atom, InputMode::Raw>(test_case);
+    register_mode<Atom, InputMode::PackedA>(test_case);
+    register_mode<Atom, InputMode::PackedB>(test_case);
     register_mode<Atom, InputMode::PackedAB>(test_case);
   }
 }
@@ -446,7 +574,7 @@ inline std::vector<MatmulCase> representative_cases(
       {"representative", "batch_projection", 128, 1024, 768,
        kWeightReuseModes},
       {"representative", "square", 256, 256, 256,
-       kWeightReuseModes},
+       kAllInputModes},
       {"representative", "ragged_projection", 127, 1025, 769,
        kWeightReuseModes},
   };
@@ -469,8 +597,443 @@ inline std::vector<MatmulCase> representative_cases(
 
 inline std::vector<MatmulCase> dtype_probe_cases(
     nint_t tile, nint_t k_step) {
-  return {{"dtype_coverage", "tail_probe", tile + 3, tile + 5,
-           8 * k_step + 1, kRawAndPackedAB}};
+  return {
+      {"dtype_coverage", "tail_probe", tile + 3, tile + 5,
+       8 * k_step + 1, kAllInputModes},
+      {"dtype_coverage", "decode_probe", 1, 1024, 1024,
+       kAllInputModes},
+      {"dtype_coverage", "batch_probe", 64, 256, 256,
+       kAllInputModes},
+  };
+}
+
+/**
+ * Runtime-shape coverage shared by the primary AMX/SME atom.
+ *
+ * Keep these separate from representative_cases(): the latter is a compact
+ * microkernel/tail regression set, while this list deliberately spans model
+ * serving, convolution lowering, skinny-K and strongly rectangular GEMMs.
+ * All dimensions are runtime values, so expanding the list adds benchmark
+ * registrations without multiplying kernel template instantiations.
+ */
+inline std::vector<MatmulCase> workload_shape_cases(
+    nint_t tile, nint_t k_step) {
+  return {
+      // Boundary probes around the native spatial and K tiles.
+      {"shape_coverage", "below_tile", tile - 1, tile - 1,
+       4 * k_step - 1, kRawAndPackedAB},
+      {"shape_coverage", "one_by_one", 1, 1, 8 * k_step + 1,
+       kRawAndPackedAB},
+      {"shape_coverage", "single_row_wide", 1, 8 * tile + 3,
+       16 * k_step + 1, kAllInputModes},
+      {"shape_coverage", "single_col_tall", 8 * tile + 3, 1,
+       16 * k_step + 1, kAllInputModes},
+      {"shape_coverage", "skinny_k", 16 * tile, 16 * tile,
+       2 * k_step, kWeightReuseModes},
+      {"shape_coverage", "long_k", 2 * tile + 1, 2 * tile + 3,
+       256 * k_step + 1, kWeightReuseModes},
+
+      // Transformer inference: token/decode, small batches and prefill.
+      {"transformer", "decode_qkv_4k", 1, 4096, 4096,
+       kWeightReuseModes},
+      {"transformer", "decode_qkv_batch4", 4, 4096, 4096,
+       kWeightReuseModes},
+      {"transformer", "prefill_qkv_4k", 128, 4096, 4096,
+       kWeightReuseModes},
+      {"transformer", "decode_mlp_up", 1, 11008, 4096,
+       kWeightReuseModes},
+      {"transformer", "decode_mlp_down", 1, 4096, 11008,
+       kWeightReuseModes},
+      {"transformer", "prefill_mlp_up", 128, 11008, 4096,
+       kWeightReuseModes},
+      {"transformer", "attention_score", 128, 128, 128,
+       kWeightReuseModes},
+
+      // Common GEMM shapes outside transformer projections.
+      {"workload", "conv_1x1_lowering", 3136, 64, 576,
+       kWeightReuseModes},
+      {"workload", "batched_square_k4k", 256, 256, 4096,
+       kWeightReuseModes},
+      {"workload", "rank_reduction", 1024, 64, 4096,
+       kWeightReuseModes},
+      {"workload", "rank_expansion", 64, 1024, 4096,
+       kWeightReuseModes},
+  };
+}
+
+/**
+ * Runtime grid for shape-aware dispatch and vector-fallback crossovers.
+ *
+ * x86 already dispatches selected raw tiny/GEMV problems away from AMX.  SME
+ * currently always enters its MOPA traversal, so keep an architecture-common
+ * grid that makes the two backends directly comparable and provides controls
+ * for future SVE-vs-SME selection.  Values are absolute rather than k_step
+ * scaled so both machines benchmark the same mathematical shapes.
+ */
+inline std::vector<MatmulCase> dispatch_shape_cases(nint_t tile) {
+  return {
+      {"dispatch_tiny", "m1_n8_k64", 1, 8, 64, kRawAndPackedAB},
+      {"dispatch_tiny", "m8_n1_k64", 8, 1, 64, kRawAndPackedAB},
+      {"dispatch_tiny", "m2_n4_k65", 2, 4, 65, kRawAndPackedAB},
+      {"dispatch_tiny", "m4_n2_k65", 4, 2, 65, kRawAndPackedAB},
+      {"dispatch_tiny", "m4_n4_k256", 4, 4, 256, kRawAndPackedAB},
+      {"dispatch_tiny", "m8_n8_k257", 8, 8, 257, kRawAndPackedAB},
+      {"dispatch_tiny", "m16_n16_k1024", 16, 16, 1024,
+       kRawAndPackedAB},
+
+      {"dispatch_gemv_row", "n16_k65", 1, 16, 65, kWeightReuseModes},
+      {"dispatch_gemv_row", "n32_k256", 1, 32, 256,
+       kWeightReuseModes},
+      {"dispatch_gemv_row", "n64_k257", 1, 64, 257,
+       kWeightReuseModes},
+      {"dispatch_gemv_row", "n128_k1024", 1, 128, 1024,
+       kWeightReuseModes},
+      {"dispatch_gemv_row", "n256_k1025", 1, 256, 1025,
+       kWeightReuseModes},
+      {"dispatch_gemv_row", "n512_k4096", 1, 512, 4096,
+       kWeightReuseModes},
+      {"dispatch_gemv_row", "n1024_k4097", 1, 1024, 4097,
+       kWeightReuseModes},
+
+      {"dispatch_gemv_col", "m16_k65", 16, 1, 65, kAllInputModes},
+      {"dispatch_gemv_col", "m32_k256", 32, 1, 256, kAllInputModes},
+      {"dispatch_gemv_col", "m64_k257", 64, 1, 257, kAllInputModes},
+      {"dispatch_gemv_col", "m128_k1024", 128, 1, 1024,
+       kAllInputModes},
+      {"dispatch_gemv_col", "m256_k1025", 256, 1, 1025,
+       kAllInputModes},
+      {"dispatch_gemv_col", "m512_k4096", 512, 1, 4096,
+       kAllInputModes},
+      {"dispatch_gemv_col", "m1024_k4097", 1024, 1, 4097,
+       kAllInputModes},
+
+      {"dispatch_tail", "short_m_long_k", tile + 1, 2 * tile + 1,
+       1024, kAllInputModes},
+      {"dispatch_tail", "short_n_long_k", 2 * tile + 1, tile + 1,
+       1025, kAllInputModes},
+  };
+}
+
+/** Compact raw-only SVE/SME crossover coverage for secondary floating atoms. */
+inline std::vector<MatmulCase> floating_skinny_probe_cases() {
+  constexpr uint32_t Raw = mode_bit(InputMode::Raw);
+  return {
+      {"dispatch_float_skinny", "m1_n8_k64", 1, 8, 64, Raw},
+      {"dispatch_float_skinny", "m8_n1_k64", 8, 1, 64, Raw},
+      {"dispatch_float_skinny", "m1_n16_k65", 1, 16, 65, Raw},
+      {"dispatch_float_skinny", "m16_n1_k65", 16, 1, 65, Raw},
+      {"dispatch_float_skinny", "m1_n64_k257", 1, 64, 257, Raw},
+      {"dispatch_float_skinny", "m64_n1_k257", 64, 1, 257, Raw},
+  };
+}
+
+/** Compact raw-only SVE dot/SME crossover coverage for integer atoms. */
+inline std::vector<MatmulCase> integer_skinny_probe_cases() {
+  constexpr uint32_t Raw = mode_bit(InputMode::Raw);
+  return {
+      {"dispatch_integer_skinny", "m1_n8_k64", 1, 8, 64, Raw},
+      {"dispatch_integer_skinny", "m8_n1_k64", 8, 1, 64, Raw},
+      {"dispatch_integer_skinny", "m1_n16_k65", 1, 16, 65, Raw},
+      {"dispatch_integer_skinny", "m16_n1_k65", 16, 1, 65, Raw},
+      {"dispatch_integer_skinny", "m1_n64_k257", 1, 64, 257, Raw},
+      {"dispatch_integer_skinny", "m64_n1_k257", 64, 1, 257, Raw},
+  };
+}
+
+/** PackedAB tiny shapes used to gate ordinary-SVE MMLA against SME MOPA. */
+inline std::vector<MatmulCase> packed_mmla_probe_cases() {
+  constexpr uint32_t PackedAB = mode_bit(InputMode::PackedAB);
+  return {
+      {"dispatch_packed_mmla", "m2_n2_k65", 2, 2, 65, PackedAB},
+      {"dispatch_packed_mmla", "m2_n2_k257", 2, 2, 257, PackedAB},
+      {"dispatch_packed_mmla", "m2_n2_k513", 2, 2, 513, PackedAB},
+      {"dispatch_packed_mmla", "m2_n2_k1025", 2, 2, 1025, PackedAB},
+      {"dispatch_packed_mmla", "m2_n4_k65", 2, 4, 65, PackedAB},
+      {"dispatch_packed_mmla", "m2_n4_k257", 2, 4, 257, PackedAB},
+      {"dispatch_packed_mmla", "m2_n4_k513", 2, 4, 513, PackedAB},
+      {"dispatch_packed_mmla", "m2_n4_k1025", 2, 4, 1025, PackedAB},
+      {"dispatch_packed_mmla", "m4_n2_k65", 4, 2, 65, PackedAB},
+      {"dispatch_packed_mmla", "m4_n2_k257", 4, 2, 257, PackedAB},
+      {"dispatch_packed_mmla", "m4_n2_k513", 4, 2, 513, PackedAB},
+      {"dispatch_packed_mmla", "m4_n2_k1025", 4, 2, 1025, PackedAB},
+      {"dispatch_packed_mmla", "m2_n8_k65", 2, 8, 65, PackedAB},
+      {"dispatch_packed_mmla", "m2_n8_k257", 2, 8, 257, PackedAB},
+      {"dispatch_packed_mmla", "m2_n8_k513", 2, 8, 513, PackedAB},
+      {"dispatch_packed_mmla", "m2_n8_k1025", 2, 8, 1025, PackedAB},
+      {"dispatch_packed_mmla", "m8_n2_k65", 8, 2, 65, PackedAB},
+      {"dispatch_packed_mmla", "m8_n2_k257", 8, 2, 257, PackedAB},
+      {"dispatch_packed_mmla", "m8_n2_k513", 8, 2, 513, PackedAB},
+      {"dispatch_packed_mmla", "m8_n2_k1025", 8, 2, 1025, PackedAB},
+      {"dispatch_packed_mmla", "m4_n4_k65", 4, 4, 65, PackedAB},
+      {"dispatch_packed_mmla", "m4_n4_k257", 4, 4, 257, PackedAB},
+      {"dispatch_packed_mmla", "m4_n4_k513", 4, 4, 513, PackedAB},
+      {"dispatch_packed_mmla", "m4_n4_k1025", 4, 4, 1025, PackedAB},
+  };
+}
+
+// Compile-time counterparts of the runtime catalogs above.  Keeping the
+// dimensions as non-type template arguments is what lets the Const variant
+// expose the complete shape to the matmul metaprogram, while the paired
+// Dynamic registration still constructs Any extents from the same values.
+template <typename Atom, nint_t Tile, nint_t KStep, int MaxStrip,
+          int ShardTag = 0>
+void register_representative_extent_pairs() {
+  register_extent_pair<Atom, Tile, Tile, 4 * KStep,
+                       mode_bit(InputMode::PackedAB), 0, ShardTag>(
+      "microkernel", "acc_1x1");
+  register_extent_pair<Atom, Tile, 2 * Tile, 4 * KStep,
+                       mode_bit(InputMode::PackedAB), 1, ShardTag>(
+      "microkernel", "acc_1x2");
+  register_extent_pair<Atom, Tile, 3 * Tile, 4 * KStep,
+                       mode_bit(InputMode::PackedAB), 2, ShardTag>(
+      "microkernel", "acc_1x3");
+  register_extent_pair<Atom, 2 * Tile, Tile, 4 * KStep,
+                       mode_bit(InputMode::PackedAB), 3, ShardTag>(
+      "microkernel", "acc_2x1");
+  register_extent_pair<Atom, 3 * Tile, Tile, 4 * KStep,
+                       mode_bit(InputMode::PackedAB), 4, ShardTag>(
+      "microkernel", "acc_3x1");
+  register_extent_pair<Atom, 2 * Tile, 2 * Tile, 4 * KStep,
+                       mode_bit(InputMode::PackedAB), 5, ShardTag>(
+      "microkernel", "acc_2x2");
+  if constexpr (MaxStrip >= 4) {
+    register_extent_pair<Atom, Tile, 4 * Tile, 4 * KStep,
+                         mode_bit(InputMode::PackedAB), 6, ShardTag>(
+        "microkernel", "acc_1x4");
+    register_extent_pair<Atom, 4 * Tile, Tile, 4 * KStep,
+                         mode_bit(InputMode::PackedAB), 7, ShardTag>(
+        "microkernel", "acc_4x1");
+  }
+  if constexpr (MaxStrip >= 5) {
+    register_extent_pair<Atom, Tile, 5 * Tile, 4 * KStep,
+                         mode_bit(InputMode::PackedAB), 8, ShardTag>(
+        "microkernel", "acc_1x5");
+    register_extent_pair<Atom, 5 * Tile, Tile, 4 * KStep,
+                         mode_bit(InputMode::PackedAB), 9, ShardTag>(
+        "microkernel", "acc_5x1");
+  }
+  if constexpr (MaxStrip >= 6) {
+    register_extent_pair<Atom, Tile, 6 * Tile, 4 * KStep,
+                         mode_bit(InputMode::PackedAB), 10, ShardTag>(
+        "microkernel", "acc_1x6");
+    register_extent_pair<Atom, 6 * Tile, Tile, 4 * KStep,
+                         mode_bit(InputMode::PackedAB), 11, ShardTag>(
+        "microkernel", "acc_6x1");
+  }
+  register_extent_pair<Atom, 2 * Tile + 1, 2 * Tile, 8 * KStep,
+                       kRawAndPackedAB, 12, ShardTag>("tail", "m_tail");
+  register_extent_pair<Atom, 2 * Tile, 2 * Tile + 1, 8 * KStep,
+                       kRawAndPackedAB, 13, ShardTag>("tail", "n_tail");
+  register_extent_pair<Atom, 2 * Tile + 3, 3 * Tile + 5, 8 * KStep,
+                       kRawAndPackedAB, 14, ShardTag>("tail", "mn_tail");
+  register_extent_pair<Atom, 2 * Tile, 2 * Tile, 8 * KStep + 1,
+                       kRawAndPackedAB, 15, ShardTag>("tail", "k_tail");
+  register_extent_pair<Atom, 2 * Tile + 3, 3 * Tile + 5,
+                       8 * KStep + 1, kAllInputModes, 16, ShardTag>(
+      "tail", "mnk_tail");
+  register_extent_pair<Atom, 1, 1152, 896, kWeightReuseModes, 17, ShardTag>(
+      "representative", "decode_projection");
+  register_extent_pair<Atom, 128, 1024, 768, kWeightReuseModes, 18,
+                       ShardTag>(
+      "representative", "batch_projection");
+  register_extent_pair<Atom, 256, 256, 256, kAllInputModes, 19, ShardTag>(
+      "representative", "square");
+  register_extent_pair<Atom, 127, 1025, 769, kWeightReuseModes, 20,
+                       ShardTag>(
+      "representative", "ragged_projection");
+}
+
+template <typename Atom, nint_t Tile, nint_t KStep, int CaseBase = 0,
+          int ShardTag = 0>
+void register_dtype_probe_extent_pairs() {
+  register_extent_pair<Atom, Tile + 3, Tile + 5, 8 * KStep + 1,
+                       kAllInputModes, CaseBase + 0, ShardTag>(
+      "dtype_coverage", "tail_probe");
+  register_extent_pair<Atom, 1, 1024, 1024, kAllInputModes, CaseBase + 1,
+                       ShardTag>(
+      "dtype_coverage", "decode_probe");
+  register_extent_pair<Atom, 64, 256, 256, kAllInputModes, CaseBase + 2,
+                       ShardTag>(
+      "dtype_coverage", "batch_probe");
+}
+
+template <typename Atom, nint_t Tile, nint_t KStep, int ShardTag = 0>
+void register_workload_extent_pairs() {
+  register_extent_pair<Atom, Tile - 1, Tile - 1, 4 * KStep - 1,
+                       kRawAndPackedAB, 0, ShardTag>(
+      "shape_coverage", "below_tile");
+  register_extent_pair<Atom, 1, 1, 8 * KStep + 1, kRawAndPackedAB, 1,
+                       ShardTag>(
+      "shape_coverage", "one_by_one");
+  register_extent_pair<Atom, 1, 8 * Tile + 3, 16 * KStep + 1,
+                       kAllInputModes, 2, ShardTag>(
+      "shape_coverage", "single_row_wide");
+  register_extent_pair<Atom, 8 * Tile + 3, 1, 16 * KStep + 1,
+                       kAllInputModes, 3, ShardTag>(
+      "shape_coverage", "single_col_tall");
+  register_extent_pair<Atom, 16 * Tile, 16 * Tile, 2 * KStep,
+                       kWeightReuseModes, 4, ShardTag>(
+      "shape_coverage", "skinny_k");
+  register_extent_pair<Atom, 2 * Tile + 1, 2 * Tile + 3,
+                       256 * KStep + 1, kWeightReuseModes, 5, ShardTag>(
+      "shape_coverage", "long_k");
+  register_extent_pair<Atom, 1, 4096, 4096, kWeightReuseModes, 6, ShardTag>(
+      "transformer", "decode_qkv_4k");
+  register_extent_pair<Atom, 4, 4096, 4096, kWeightReuseModes, 7, ShardTag>(
+      "transformer", "decode_qkv_batch4");
+  register_extent_pair<Atom, 128, 4096, 4096, kWeightReuseModes, 8,
+                       ShardTag>(
+      "transformer", "prefill_qkv_4k");
+  register_extent_pair<Atom, 1, 11008, 4096, kWeightReuseModes, 9,
+                       ShardTag>(
+      "transformer", "decode_mlp_up");
+  register_extent_pair<Atom, 1, 4096, 11008, kWeightReuseModes, 10,
+                       ShardTag>(
+      "transformer", "decode_mlp_down");
+  register_extent_pair<Atom, 128, 11008, 4096, kWeightReuseModes, 11,
+                       ShardTag>(
+      "transformer", "prefill_mlp_up");
+  register_extent_pair<Atom, 128, 128, 128, kWeightReuseModes, 12,
+                       ShardTag>(
+      "transformer", "attention_score");
+  register_extent_pair<Atom, 3136, 64, 576, kWeightReuseModes, 13,
+                       ShardTag>(
+      "workload", "conv_1x1_lowering");
+  register_extent_pair<Atom, 256, 256, 4096, kWeightReuseModes, 14,
+                       ShardTag>(
+      "workload", "batched_square_k4k");
+  register_extent_pair<Atom, 1024, 64, 4096, kWeightReuseModes, 15,
+                       ShardTag>(
+      "workload", "rank_reduction");
+  register_extent_pair<Atom, 64, 1024, 4096, kWeightReuseModes, 16,
+                       ShardTag>(
+      "workload", "rank_expansion");
+}
+
+template <typename Atom, nint_t Tile, int ShardTag = 0>
+void register_dispatch_extent_pairs() {
+  register_extent_pair<Atom, 1, 8, 64, kRawAndPackedAB, 0, ShardTag>(
+      "dispatch_tiny", "m1_n8_k64");
+  register_extent_pair<Atom, 8, 1, 64, kRawAndPackedAB, 1, ShardTag>(
+      "dispatch_tiny", "m8_n1_k64");
+  register_extent_pair<Atom, 2, 4, 65, kRawAndPackedAB, 2, ShardTag>(
+      "dispatch_tiny", "m2_n4_k65");
+  register_extent_pair<Atom, 4, 2, 65, kRawAndPackedAB, 3, ShardTag>(
+      "dispatch_tiny", "m4_n2_k65");
+  register_extent_pair<Atom, 4, 4, 256, kRawAndPackedAB, 4, ShardTag>(
+      "dispatch_tiny", "m4_n4_k256");
+  register_extent_pair<Atom, 8, 8, 257, kRawAndPackedAB, 5, ShardTag>(
+      "dispatch_tiny", "m8_n8_k257");
+  register_extent_pair<Atom, 16, 16, 1024, kRawAndPackedAB, 6, ShardTag>(
+      "dispatch_tiny", "m16_n16_k1024");
+#define VECOPS_REGISTER_GEMV_PAIR(SIDE, LABEL, M, N, K, MODES, CASE_INDEX) \
+  register_extent_pair<Atom, M, N, K, MODES, CASE_INDEX, ShardTag>( \
+      SIDE, LABEL)
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_row", "n16_k65", 1, 16, 65, kWeightReuseModes, 7);
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_row", "n32_k256", 1, 32, 256, kWeightReuseModes, 8);
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_row", "n64_k257", 1, 64, 257, kWeightReuseModes, 9);
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_row", "n128_k1024", 1, 128, 1024,
+      kWeightReuseModes, 10);
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_row", "n256_k1025", 1, 256, 1025,
+      kWeightReuseModes, 11);
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_row", "n512_k4096", 1, 512, 4096,
+      kWeightReuseModes, 12);
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_row", "n1024_k4097", 1, 1024, 4097,
+      kWeightReuseModes, 13);
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_col", "m16_k65", 16, 1, 65, kAllInputModes, 14);
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_col", "m32_k256", 32, 1, 256, kAllInputModes, 15);
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_col", "m64_k257", 64, 1, 257, kAllInputModes, 16);
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_col", "m128_k1024", 128, 1, 1024,
+      kAllInputModes, 17);
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_col", "m256_k1025", 256, 1, 1025,
+      kAllInputModes, 18);
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_col", "m512_k4096", 512, 1, 4096,
+      kAllInputModes, 19);
+  VECOPS_REGISTER_GEMV_PAIR(
+      "dispatch_gemv_col", "m1024_k4097", 1024, 1, 4097,
+      kAllInputModes, 20);
+#undef VECOPS_REGISTER_GEMV_PAIR
+  register_extent_pair<Atom, Tile + 1, 2 * Tile + 1, 1024,
+                       kAllInputModes, 21, ShardTag>(
+      "dispatch_tail", "short_m_long_k");
+  register_extent_pair<Atom, 2 * Tile + 1, Tile + 1, 1025,
+                       kAllInputModes, 22, ShardTag>(
+      "dispatch_tail", "short_n_long_k");
+}
+
+template <typename Atom, uint32_t Modes = mode_bit(InputMode::Raw),
+          int CaseBase = 0, int ShardTag = 0>
+void register_skinny_extent_pairs(const char* group) {
+#define VECOPS_REGISTER_SKINNY_PAIR(LABEL, M, N, K, CASE_OFFSET) \
+  register_extent_pair<Atom, M, N, K, Modes, CaseBase + CASE_OFFSET, \
+                       ShardTag>( \
+      group, LABEL)
+  VECOPS_REGISTER_SKINNY_PAIR("m1_n8_k64", 1, 8, 64, 0);
+  VECOPS_REGISTER_SKINNY_PAIR("m8_n1_k64", 8, 1, 64, 1);
+  VECOPS_REGISTER_SKINNY_PAIR("m1_n16_k65", 1, 16, 65, 2);
+  VECOPS_REGISTER_SKINNY_PAIR("m16_n1_k65", 16, 1, 65, 3);
+  VECOPS_REGISTER_SKINNY_PAIR("m1_n64_k257", 1, 64, 257, 4);
+  VECOPS_REGISTER_SKINNY_PAIR("m64_n1_k257", 64, 1, 257, 5);
+#undef VECOPS_REGISTER_SKINNY_PAIR
+}
+
+template <typename Atom, int CaseBase = 0, int ShardTag = 0>
+void register_extended_integer_skinny_extent_pairs() {
+  register_skinny_extent_pairs<
+      Atom, mode_bit(InputMode::Raw), CaseBase, ShardTag>(
+      "dispatch_integer_skinny");
+  register_extent_pair<Atom, 1, 8, 4097, mode_bit(InputMode::Raw),
+                       CaseBase + 6, ShardTag>(
+      "dispatch_integer_skinny", "m1_n8_k4097");
+  register_extent_pair<Atom, 8, 1, 4097, mode_bit(InputMode::Raw),
+                       CaseBase + 7, ShardTag>(
+      "dispatch_integer_skinny", "m8_n1_k4097");
+}
+
+template <typename Atom, int CaseBase = 0, int ShardTag = 0>
+void register_packed_mmla_extent_pairs() {
+#define VECOPS_REGISTER_MMLA_PAIR(M, N, K, CASE_OFFSET) \
+  register_extent_pair<Atom, M, N, K, mode_bit(InputMode::PackedAB), \
+                       CaseBase + CASE_OFFSET, ShardTag>( \
+      "dispatch_packed_mmla", "m" #M "_n" #N "_k" #K)
+  VECOPS_REGISTER_MMLA_PAIR(2, 2, 65, 0);
+  VECOPS_REGISTER_MMLA_PAIR(2, 2, 257, 1);
+  VECOPS_REGISTER_MMLA_PAIR(2, 2, 513, 2);
+  VECOPS_REGISTER_MMLA_PAIR(2, 2, 1025, 3);
+  VECOPS_REGISTER_MMLA_PAIR(2, 4, 65, 4);
+  VECOPS_REGISTER_MMLA_PAIR(2, 4, 257, 5);
+  VECOPS_REGISTER_MMLA_PAIR(2, 4, 513, 6);
+  VECOPS_REGISTER_MMLA_PAIR(2, 4, 1025, 7);
+  VECOPS_REGISTER_MMLA_PAIR(4, 2, 65, 8);
+  VECOPS_REGISTER_MMLA_PAIR(4, 2, 257, 9);
+  VECOPS_REGISTER_MMLA_PAIR(4, 2, 513, 10);
+  VECOPS_REGISTER_MMLA_PAIR(4, 2, 1025, 11);
+  VECOPS_REGISTER_MMLA_PAIR(2, 8, 65, 12);
+  VECOPS_REGISTER_MMLA_PAIR(2, 8, 257, 13);
+  VECOPS_REGISTER_MMLA_PAIR(2, 8, 513, 14);
+  VECOPS_REGISTER_MMLA_PAIR(2, 8, 1025, 15);
+  VECOPS_REGISTER_MMLA_PAIR(8, 2, 65, 16);
+  VECOPS_REGISTER_MMLA_PAIR(8, 2, 257, 17);
+  VECOPS_REGISTER_MMLA_PAIR(8, 2, 513, 18);
+  VECOPS_REGISTER_MMLA_PAIR(8, 2, 1025, 19);
+  VECOPS_REGISTER_MMLA_PAIR(4, 4, 65, 20);
+  VECOPS_REGISTER_MMLA_PAIR(4, 4, 257, 21);
+  VECOPS_REGISTER_MMLA_PAIR(4, 4, 513, 22);
+  VECOPS_REGISTER_MMLA_PAIR(4, 4, 1025, 23);
+#undef VECOPS_REGISTER_MMLA_PAIR
 }
 
 inline int run_benchmarks(

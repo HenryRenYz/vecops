@@ -283,9 +283,10 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
 
   static VECOPS_ALWAYS_INLINE Mask<Tag> set_mask(
       Tag tag, Mask<Tag> value, nint_t ordinal, NativeWordMask<Tag> word) {
-    const nint_t valid = std::clamp<nint_t>(
-        size(tag) - ordinal * native_word_size(tag),
-        0, native_word_size(tag));
+    const nint_t word_lanes = native_word_size(tag);
+    const nint_t remaining = size(tag) - ordinal * word_lanes;
+    const nint_t valid =
+        remaining < 0 ? 0 : (remaining > word_lanes ? word_lanes : remaining);
     const auto active = sve_prefix_predicate<ElementOf<Tag>>(valid);
     word = svand_b_z(active, word, active);
     if constexpr (is_word_array_v<Mask<Tag>>) {
@@ -907,7 +908,7 @@ struct NativeImpl<SVEBackend, ConcatOp, Tag> {
       const auto upper_raw = sve_basic_raw_word(upper_value);
       return construct_words<SVEBackend>(
           tag,
-          [&]<nint_t Index>(Tag) -> NativeWordVec<Tag> {
+          [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA -> NativeWordVec<Tag> {
             static_assert(Index == 0 || Index == 1);
             if constexpr (Index == 0)
               return sve_basic_wrap_word<Tag>(lower_raw);
@@ -921,7 +922,7 @@ struct NativeImpl<SVEBackend, ConcatOp, Tag> {
       const nint_t word_lanes = native_word_size(tag);
       return construct_words<SVEBackend>(
           tag,
-          [&]<nint_t Index>(Tag) -> NativeWordVec<Tag> {
+          [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA -> NativeWordVec<Tag> {
             static_assert(Index == 0 || Index == 1);
             if constexpr (Index == 0) {
               return sve_splice_words<Tag>(
@@ -1205,7 +1206,7 @@ struct NativeImpl<SVEBackend, InterleaveOp, Tag> {
     const auto raw_b = sve_basic_raw_word(b);
     return construct_words<SVEBackend>(
         tag,
-        [&]<nint_t Index>(Tag) -> NativeWordVec<Tag> {
+        [&]<nint_t Index>(Tag) VECOPS_INLINE_LAMBDA -> NativeWordVec<Tag> {
           static_assert(Index == 0 || Index == 1);
           if constexpr (std::same_as<T, bfloat16_t>) {
             if constexpr (Index == 0) {

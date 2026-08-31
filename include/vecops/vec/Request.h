@@ -70,60 +70,86 @@ enum class Inactive {
 namespace details::request_storage {
 
 template <Active A, typename MaskVector>
-struct ActiveFields {};
+struct ActiveFields {
+  VECOPS_ALWAYS_INLINE constexpr ActiveFields() = default;
+};
 
 template <typename MaskVector>
 struct ActiveFields<Active::First, MaskVector> {
   nint_t first_count = 0;
+
+  VECOPS_ALWAYS_INLINE constexpr ActiveFields() = default;
 };
 
 template <typename MaskVector>
 struct ActiveFields<Active::Masked, MaskVector> {
   const MaskVector* mask = nullptr;
+
+  VECOPS_ALWAYS_INLINE constexpr ActiveFields() = default;
 };
 
 template <Addressing Addr, typename IndexVector>
-struct AddressingFields {};
+struct AddressingFields {
+  VECOPS_ALWAYS_INLINE constexpr AddressingFields() = default;
+};
 
 template <typename IndexVector>
 struct AddressingFields<Addressing::Strided, IndexVector> {
   nint_t stride = 1;
+
+  VECOPS_ALWAYS_INLINE constexpr AddressingFields() = default;
 };
 
 template <typename IndexVector>
 struct AddressingFields<Addressing::Indexed, IndexVector> {
   const IndexVector* indices = nullptr;
+
+  VECOPS_ALWAYS_INLINE constexpr AddressingFields() = default;
 };
 
 template <Populate P, VectorTag Tag>
-struct PopulateFields {};
+struct PopulateFields {
+  VECOPS_ALWAYS_INLINE constexpr PopulateFields() = default;
+};
 
 template <VectorTag Tag>
 struct PopulateFields<Populate::MergeVector, Tag> {
   const Vec<Tag>* merge_vector = nullptr;
+
+  VECOPS_ALWAYS_INLINE constexpr PopulateFields() = default;
 };
 
 template <VectorTag Tag>
 struct PopulateFields<Populate::MergeScalar, Tag> {
   ElementOf<Tag> merge_scalar = ElementOf<Tag>{};
+
+  VECOPS_ALWAYS_INLINE constexpr PopulateFields() = default;
 };
 
 template <Inactive I, VectorTag Tag>
-struct InactiveFields {};
+struct InactiveFields {
+  VECOPS_ALWAYS_INLINE constexpr InactiveFields() = default;
+};
 
 template <VectorTag Tag>
 struct InactiveFields<Inactive::MergeVector, Tag> {
   const Vec<Tag>* merge_vector = nullptr;
+
+  VECOPS_ALWAYS_INLINE constexpr InactiveFields() = default;
 };
 
 template <VectorTag Tag>
 struct InactiveFields<Inactive::MergeScalar, Tag> {
   ElementOf<Tag> merge_scalar = ElementOf<Tag>{};
+
+  VECOPS_ALWAYS_INLINE constexpr InactiveFields() = default;
 };
 
 template <VectorTag Tag>
 struct InactiveFields<Inactive::MergeMask, Tag> {
   const Mask<Tag>* mask_merge = nullptr;
+
+  VECOPS_ALWAYS_INLINE constexpr InactiveFields() = default;
 };
 
 } // namespace details::request_storage
@@ -211,6 +237,7 @@ struct OpRequest
   static constexpr Active active_kind = A;
   static constexpr Inactive inactive_kind = I;
 
+  VECOPS_ALWAYS_INLINE constexpr OpRequest() = default;
 };
 
 /**
@@ -257,6 +284,7 @@ struct LoadConvertRequest
   using MaskTag = std::conditional_t<
       std::same_as<MaskVector, Mask<ToTag>>, ToTag, Rebind<From, ToTag>>;
 
+  VECOPS_ALWAYS_INLINE constexpr LoadConvertRequest() = default;
 };
 
 /**
@@ -300,6 +328,7 @@ struct StoreConvertRequest
       FromTag, Rebind<To, FromTag>>;
   using ActiveResources = Resources;
 
+  VECOPS_ALWAYS_INLINE constexpr StoreConvertRequest() = default;
 };
 
 /**
@@ -314,6 +343,8 @@ struct ReduceRequest
     : details::request_storage::ActiveFields<A, Mask<Tag>> {
   using TagType = Tag;
   static constexpr Active active_kind = A;
+
+  VECOPS_ALWAYS_INLINE constexpr ReduceRequest() = default;
 };
 
 } // namespace vecops::vec

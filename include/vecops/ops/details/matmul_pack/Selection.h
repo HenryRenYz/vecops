@@ -23,22 +23,28 @@ using SelectedImplementation = std::conditional_t<
     std::conditional_t<
         kernel::matmul_pack_details::Backend<
             typename gemm::packing_t<Atom, Side>::FormatType,
-            kernel::matmul_pack_implementation::SMEStagedTransform>::
+            kernel::matmul_pack_implementation::SMEFP32ToFP64>::
             template eligible<InputSpec, OutputSpec>,
-        kernel::matmul_pack_implementation::SMEStagedTransform,
+        kernel::matmul_pack_implementation::SMEFP32ToFP64,
         std::conditional_t<
             kernel::matmul_pack_details::Backend<
                 typename gemm::packing_t<Atom, Side>::FormatType,
-                kernel::matmul_pack_implementation::SMEStagedFP16ToFP32>::
+                kernel::matmul_pack_implementation::SMEStagedTransform>::
                 template eligible<InputSpec, OutputSpec>,
-            kernel::matmul_pack_implementation::SMEStagedFP16ToFP32,
+            kernel::matmul_pack_implementation::SMEStagedTransform,
             std::conditional_t<
                 kernel::matmul_pack_details::Backend<
                     typename gemm::packing_t<Atom, Side>::FormatType,
-                    kernel::matmul_pack_implementation::SMEPostprocess>::
+                    kernel::matmul_pack_implementation::SMEStagedFP16ToFP32>::
                     template eligible<InputSpec, OutputSpec>,
-                kernel::matmul_pack_implementation::SMEPostprocess,
-                kernel::matmul_pack_implementation::Vector>>>>;
+                kernel::matmul_pack_implementation::SMEStagedFP16ToFP32,
+                std::conditional_t<
+                    kernel::matmul_pack_details::Backend<
+                        typename gemm::packing_t<Atom, Side>::FormatType,
+                        kernel::matmul_pack_implementation::SMEPostprocess>::
+                        template eligible<InputSpec, OutputSpec>,
+                    kernel::matmul_pack_implementation::SMEPostprocess,
+                    kernel::matmul_pack_implementation::Vector>>>>>;
 
 } // namespace vecops::ops::matmul_pack_details
 

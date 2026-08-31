@@ -74,6 +74,9 @@ struct BulkAndTail {};
  */
 struct RuntimeExactArea4 {};
 
+/** Runtime exact-area scheduling for kernels owning up to eight base tiles. */
+struct RuntimeExactArea8 {};
+
 /**
  * Runtime exact-area scheduling for an eight-register resident tile file.
  *
@@ -662,6 +665,90 @@ VECOPS_ALWAYS_INLINE void run_runtime_exact_area4(
       invoke_runtime_exact_area4<1, 1, Catalog>(
           fn, m_extent, n_extent, tm, tn, bm, bn);
   }
+}
+
+template <int A, int BMax, typename Catalog, typename Fn>
+VECOPS_ALWAYS_INLINE void emit_runtime_exact_area8_row(
+    Fn& fn, nint_t m_extent, nint_t n_extent,
+    nint_t tm, nint_t tn, nint_t block_m, nint_t nb) {
+  nint_t bn = 0;
+  for (; bn + BMax <= nb; bn += BMax) {
+    invoke_runtime_exact_area4<A, BMax, Catalog>(
+        fn, m_extent, n_extent, tm, tn, block_m, bn);
+  }
+  const nint_t remaining = nb - bn;
+  if constexpr (BMax >= 7)
+    if (remaining == 7)
+      return invoke_runtime_exact_area4<A, 7, Catalog>(
+          fn, m_extent, n_extent, tm, tn, block_m, bn);
+  if constexpr (BMax >= 6)
+    if (remaining == 6)
+      return invoke_runtime_exact_area4<A, 6, Catalog>(
+          fn, m_extent, n_extent, tm, tn, block_m, bn);
+  if constexpr (BMax >= 5)
+    if (remaining == 5)
+      return invoke_runtime_exact_area4<A, 5, Catalog>(
+          fn, m_extent, n_extent, tm, tn, block_m, bn);
+  if constexpr (BMax >= 4)
+    if (remaining == 4)
+      return invoke_runtime_exact_area4<A, 4, Catalog>(
+          fn, m_extent, n_extent, tm, tn, block_m, bn);
+  if constexpr (BMax >= 3)
+    if (remaining == 3)
+      return invoke_runtime_exact_area4<A, 3, Catalog>(
+          fn, m_extent, n_extent, tm, tn, block_m, bn);
+  if constexpr (BMax >= 2)
+    if (remaining == 2)
+      return invoke_runtime_exact_area4<A, 2, Catalog>(
+          fn, m_extent, n_extent, tm, tn, block_m, bn);
+  if (remaining == 1)
+    invoke_runtime_exact_area4<A, 1, Catalog>(
+        fn, m_extent, n_extent, tm, tn, block_m, bn);
+}
+
+template <typename Catalog, typename Fn>
+VECOPS_ALWAYS_INLINE void run_runtime_exact_area8(
+    nint_t m_extent, nint_t n_extent,
+    nint_t tm, nint_t tn, Fn& fn) {
+  if (m_extent == 0 || n_extent == 0) return;
+  const nint_t mb = m_extent / tm + (m_extent % tm != 0);
+  const nint_t nb = n_extent / tn + (n_extent % tn != 0);
+  if (mb == 1) {
+    emit_runtime_exact_area8_row<1, 4, Catalog>(
+        fn, m_extent, n_extent, tm, tn, 0, nb);
+    return;
+  }
+  if (nb == 1) {
+    nint_t bm = 0;
+    for (; bm + 4 <= mb; bm += 4)
+      invoke_runtime_exact_area4<4, 1, Catalog>(
+          fn, m_extent, n_extent, tm, tn, bm, 0);
+    const nint_t remaining = mb - bm;
+    if (remaining == 3)
+      invoke_runtime_exact_area4<3, 1, Catalog>(
+          fn, m_extent, n_extent, tm, tn, bm, 0);
+    else if (remaining == 2)
+      invoke_runtime_exact_area4<2, 1, Catalog>(
+          fn, m_extent, n_extent, tm, tn, bm, 0);
+    else if (remaining == 1)
+      invoke_runtime_exact_area4<1, 1, Catalog>(
+          fn, m_extent, n_extent, tm, tn, bm, 0);
+    return;
+  }
+
+  nint_t bm = 0;
+  for (; bm + 4 <= mb; bm += 4)
+    emit_runtime_exact_area8_row<4, 2, Catalog>(
+        fn, m_extent, n_extent, tm, tn, bm, nb);
+  if (mb - bm == 3)
+    emit_runtime_exact_area8_row<3, 2, Catalog>(
+        fn, m_extent, n_extent, tm, tn, bm, nb);
+  else if (mb - bm == 2)
+    emit_runtime_exact_area8_row<2, 4, Catalog>(
+        fn, m_extent, n_extent, tm, tn, bm, nb);
+  else if (mb - bm == 1)
+    emit_runtime_exact_area8_row<1, 4, Catalog>(
+        fn, m_extent, n_extent, tm, tn, bm, nb);
 }
 
 template <typename Catalog, typename Fn>
@@ -1384,6 +1471,14 @@ VECOPS_ALWAYS_INLINE void tile2d(
         tn_int <= std::numeric_limits<nint_t>::max() / 4,
         "RuntimeExactArea4 kernel capacity overflows nint_t");
     tile2d_details::run_runtime_exact_area4<Catalog>(
+        m_int, n_int, tm_int, tn_int, fn_ref);
+  } else if constexpr (std::same_as<
+                           Policy, tile2d_policy::RuntimeExactArea8>) {
+    VECOPS_ASSERT(
+        tm_int <= std::numeric_limits<nint_t>::max() / 8 &&
+        tn_int <= std::numeric_limits<nint_t>::max() / 8,
+        "RuntimeExactArea8 kernel capacity overflows nint_t");
+    tile2d_details::run_runtime_exact_area8<Catalog>(
         m_int, n_int, tm_int, tn_int, fn_ref);
   } else if constexpr (std::same_as<
                            Policy, tile2d_policy::RuntimeExactArea4Max3>) {

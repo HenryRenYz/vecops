@@ -14,7 +14,6 @@
  * constructed in an array.
  */
 
-#include <algorithm>
 #include <cassert>
 #include <type_traits>
 #include <utility>
@@ -37,8 +36,9 @@ namespace vecops::vec::details {
 template <nint_t Index, VectorTag Tag>
 VECOPS_ALWAYS_INLINE constexpr nint_t valid_word_lanes(Tag = {}) {
   const nint_t word_lanes = native_word_size(Tag{});
-  return std::clamp<nint_t>(
-      size(Tag{}) - Index * word_lanes, 0, word_lanes);
+  const nint_t remaining = size(Tag{}) - Index * word_lanes;
+  return remaining < 0 ? 0
+                       : (remaining > word_lanes ? word_lanes : remaining);
 }
 
 template <nint_t Index, nint_t Count, typename Visitor>

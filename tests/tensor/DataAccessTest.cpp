@@ -131,6 +131,26 @@ TEST(TensorDataAccessTest, LoadsAlongAnyLogicalAxis) {
   }
 }
 
+TEST(TensorDataAccessTest, MixedWidthZeroTransformDoesNotReadOrSplitInput) {
+  std::array<vecops::bfloat16_t, 128> values;
+  std::fill(values.begin(), values.end(), vecops::bfloat16_t{3.0f});
+  auto tensor = make_tensor(
+      values.data(), make_shape(cint<2>, cint<64>));
+  auto spec = input<float32_t>(
+      tensor, zeros_transform<float32_t, vecops::bfloat16_t>);
+  kernel::Workspace workspace(0);
+  auto view = workspace.view();
+  auto access = bind(spec, InPolicy{}, view);
+
+  Tag tag;
+  const nint_t active = std::min<nint_t>(vec::size(tag), 13);
+  const auto result = access.load(
+      tag, coord(1, 0), axis<1>, vec::opt::first(active));
+  for (nint_t lane = 0; lane < active; ++lane) {
+    EXPECT_FLOAT_EQ(vec::get(tag, result, lane), 0.0f);
+  }
+}
+
 TEST(TensorDataAccessTest, LogicalStridedAddressingComposesWithLayout) {
   std::array<float, 128> values{};
   for (nint_t i = 0; i < static_cast<nint_t>(values.size()); ++i) {

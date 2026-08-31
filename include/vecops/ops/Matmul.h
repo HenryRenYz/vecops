@@ -5,11 +5,13 @@
 #ifndef VECOPS_OPS_MATMUL_H
 #define VECOPS_OPS_MATMUL_H
 
+#include <limits>
 #include <type_traits>
 #include <utility>
 
 #include "vecops/Assertion.h"
 #include "vecops/execution/ExecutionSession.h"
+#include "vecops/execution/details/arm/Resources.h"
 #include "vecops/gemm/Packing.h"
 #include "vecops/kernel/Loop.h"
 #include "vecops/kernel/Matmul.h"
@@ -55,6 +57,32 @@ template <gemm::Atom Atom>
 using SelectedImplementation =
     typename SelectImplementation<typename Atom::KernelKind>::type;
 
+template <typename Spec>
+struct BroadcastPackedOperand {
+  const Spec* spec;
+};
+
+template <gemm::Atom Atom, gemm::Operand Side, typename Spec>
+VECOPS_INLINE auto batch_loop_operand(const Spec& spec) {
+  if constexpr (gemm::is_packed_layout<
+                    Atom, Side, typename Spec::InputLayout>()) {
+    return BroadcastPackedOperand<Spec>{&spec};
+  } else {
+    return spec;
+  }
+}
+
+template <typename Spec>
+VECOPS_INLINE const Spec& batch_loop_leaf(
+    const BroadcastPackedOperand<Spec>& operand) {
+  return *operand.spec;
+}
+
+template <typename Leaf>
+VECOPS_INLINE const Leaf& batch_loop_leaf(const Leaf& leaf) {
+  return leaf;
+}
+
 template <gemm::Atom Atom, gemm::Operand Side,
           int LogicalRank, typename Spec, typename CLayout>
 VECOPS_INLINE void validate_input(
@@ -62,9 +90,7 @@ VECOPS_INLINE void validate_input(
     nint_t spatial, nint_t k) {
   using Layout = typename Spec::InputLayout;
   if constexpr (gemm::is_packed_layout<Atom, Side, Layout>()) {
-    static_assert(
-        LogicalRank == 2,
-        "current packed matmul formats do not carry batch dimensions");
+    static_assert(LogicalRank >= 2);
     using Packing = gemm::packing_t<Atom, Side>;
     static_assert(
         std::same_as<typename Spec::MemoryElement,
@@ -113,9 +139,10 @@ VECOPS_INLINE void validate_input(
  * The logical operation is C[M,N] = C-prologue + A[M,K] * B[N,K]^T,
  * followed by COutput's epilogue. Equal raw leading dimensions are traversed
  * independently before entering the backend problem rank. A and B may
- * independently be raw or in the Atom's packed format for an unbatched
- * problem. Raw operands are converted, transformed, padded, and packed one
- * hardware K step at a time.
+ * independently be raw or in the Atom's packed format. A rank-two packed
+ * operand is broadcast across any logical batch prefix; packed formats do not
+ * store batch dimensions. Raw operands are converted, transformed, padded,
+ * and packed one hardware K step at a time.
  */
 template <gemm::Atom Atom,
           typename TilePolicy,
@@ -143,15 +170,26 @@ public:
         c_input_(std::move(c_input)), c_output_(std::move(c_output)) {
     validate();
     initialize_auto_packing();
+    initialize_batch_rows_pack_a();
   }
 
   VECOPS_INLINE nint_t required_workspace() const {
     nint_t bytes =
         kernel::matmul_implementation::scratch_bytes<Implementation>();
-    if (auto_packing_enabled()) {
-      bytes += auto_packed_bytes<gemm::Operand::A>(a_);
+    if (full_auto_packing_enabled()) {
+      if constexpr (SMEBatchRowsFullPackCandidate) {
+        bytes += batch_rows_flatten_enabled()
+            ? batch_rows_packed_a_bytes()
+            : auto_packed_bytes<gemm::Operand::A>(a_);
+      } else {
+        bytes += auto_packed_bytes<gemm::Operand::A>(a_);
+      }
       bytes += auto_packed_bytes<gemm::Operand::B>(b_);
     }
+    if (batch_rows_pack_a_enabled())
+      bytes += this->batch_rows_packed_a_bytes();
+    if (batch_columns_periodic_c_input_enabled())
+      bytes += batch_columns_periodic_c_input_bytes();
     return bytes;
   }
 
@@ -173,29 +211,443 @@ private:
   static constexpr bool AutoPackOperand = [] {
     using Layout = typename Spec::InputLayout;
     using Element = typename gemm::packing_t<Atom, Side>::Element;
+    constexpr int Rank = COutputSpec::OutputTensor::Ndim;
     if constexpr (
-        !std::same_as<Implementation, kernel::matmul_implementation::SME> ||
-        COutputSpec::OutputTensor::Ndim != 2 ||
+        (Rank != 2 && Rank != 3) ||
         gemm::is_packed_layout<Atom, Side, Layout>()) {
       return false;
     } else {
-      return sizeof(Element) <= 4 && Spec::InputTensor::Ndim == 2 &&
-          std::same_as<typename Spec::MemoryElement, Element> &&
+      using Memory = typename Spec::MemoryElement;
+      using Transform = typename Spec::TransformType;
+      if constexpr (std::same_as<
+                        Implementation, kernel::matmul_implementation::AMX>) {
+        // AMX raw B needs a 16x16 AVX-512 transpose for every resident M
+        // family.  For reused rank-two operands, packing once avoids repeating
+        // that transpose and also makes the K loop a direct 1 KiB panel walk.
+        // A shared rank-three B is logically one rank-two matrix reused by
+        // every batch item.  Packing it once can therefore remove the raw-B
+        // transpose from every batch traversal.  Keep rank-three A disabled:
+        // it is normally independent and would have to be repacked per item.
+        constexpr bool ReusableRank = Rank == 2 ||
+            (Rank == 3 && Side == gemm::Operand::B);
+        constexpr bool NativeMemory = std::same_as<Memory, Element>;
+        constexpr bool SupportedConversion =
+            std::same_as<Element, bfloat16_t> &&
+            std::same_as<Memory, float32_t>;
+        constexpr bool SupportedQuantization = [] {
+          if constexpr (std::same_as<Transform, tensor::NoTransform>) {
+            return false;
+          } else {
+            return std::same_as<Memory, float32_t> &&
+                (std::same_as<Element, int8_t> ||
+                 std::same_as<Element, uint8_t>) &&
+                Transform::is_elementwise &&
+                Transform::permutation_equivariant &&
+                std::same_as<typename Transform::TIn, float32_t> &&
+                std::same_as<typename Transform::TOut, float32_t>;
+          }
+        }();
+        return ReusableRank &&
+            std::same_as<typename Spec::ComputeType, Element> &&
+            (std::same_as<Transform, tensor::NoTransform> ||
+             SupportedQuantization) &&
+            (NativeMemory || SupportedConversion || SupportedQuantization) &&
+            std::same_as<
+                tensor::stride_type_t<Rank - 1, Layout>, meta::Const<1>>;
+      } else if constexpr (!std::same_as<
+                               Implementation,
+                               kernel::matmul_implementation::SME>) {
+        return false;
+      }
+      constexpr bool NativeMemory = std::same_as<Memory, Element>;
+      constexpr bool SupportedConversion =
+          (std::same_as<Element, bfloat16_t> &&
+           std::same_as<Memory, float32_t>) ||
+          (std::same_as<Element, float32_t> &&
+           (std::same_as<Memory, bfloat16_t> ||
+            std::same_as<Memory, float16_t>)) ||
+          (std::same_as<Element, float64_t> &&
+           std::same_as<Memory, float32_t>);
+      constexpr bool SupportedQuantization = [] {
+        if constexpr (std::same_as<Transform, tensor::NoTransform>) {
+          return false;
+        } else {
+          return std::same_as<Memory, float32_t> &&
+              (std::same_as<Element, int8_t> ||
+               std::same_as<Element, uint8_t>) &&
+              Transform::is_elementwise &&
+              Transform::permutation_equivariant &&
+              std::same_as<typename Transform::TIn, float32_t> &&
+              std::same_as<typename Transform::TOut, float32_t>;
+        }
+      }();
+      return sizeof(Element) <= 8 && Spec::InputTensor::Ndim == Rank &&
           std::same_as<typename Spec::ComputeType, Element> &&
-          std::same_as<typename Spec::TransformType, tensor::NoTransform> &&
+          (std::same_as<Transform, tensor::NoTransform> ||
+           SupportedQuantization) &&
+          (NativeMemory || SupportedConversion || SupportedQuantization) &&
           std::same_as<
-              tensor::stride_type_t<1, Layout>, meta::Const<1>>;
+              tensor::stride_type_t<Rank - 1, Layout>, meta::Const<1>>;
     }
   }();
 
-  static constexpr bool AutoPackA =
+  static constexpr bool PackedAInput = gemm::is_packed_layout<
+      Atom, gemm::Operand::A, typename ASpec::InputLayout>();
+  static constexpr bool PackedBInput = gemm::is_packed_layout<
+      Atom, gemm::Operand::B, typename BSpec::InputLayout>();
+
+  static constexpr bool Rank3SharedB = [] {
+    if constexpr (COutputSpec::OutputTensor::Ndim != 3) {
+      return false;
+    } else if constexpr (PackedBInput) {
+      return true;
+    } else {
+      return std::same_as<
+          tensor::stride_type_t<0, typename BSpec::InputLayout>,
+          meta::Const<0>>;
+    }
+  }();
+
+  static constexpr bool Rank3SharedA = [] {
+    if constexpr (COutputSpec::OutputTensor::Ndim != 3) {
+      return false;
+    } else if constexpr (PackedAInput) {
+      // Packed operands carry no batch dimension and are broadcast by the
+      // rank-three facade.
+      return true;
+    } else if constexpr (ASpec::InputTensor::Ndim != 3) {
+      return false;
+    } else {
+      return std::same_as<
+          tensor::stride_type_t<0, typename ASpec::InputLayout>,
+          meta::Const<0>>;
+    }
+  }();
+
+  // A dense rank-three [batch, M, K] activation with one shared B is
+  // mathematically one rank-two [batch*M, K] product.  Collapsing the two
+  // leading A/C dimensions lets one matrix tile use rows from several batches,
+  // instead of executing a mostly inactive M<=16 tile once per batch.
+  // Coordinate-aware transforms cannot be rebound because the flattened row
+  // no longer has a one-axis CoordinateProjection back to {batch, M}; pure
+  // elementwise transforms are coordinate-free and remain safe.
+  static constexpr bool BatchRowsFlattenCandidate =
+      (std::same_as<Implementation, kernel::matmul_implementation::AMX>
+       || std::same_as<Implementation, kernel::matmul_implementation::SME>
+       ) &&
+      Rank3SharedB && !PackedAInput &&
+      ASpec::TransformType::is_elementwise &&
+      CInputSpec::TransformType::is_elementwise &&
+      COutputSpec::TransformType::is_elementwise;
+
+  // The symmetric shared-A case can combine batch columns only when M=1:
+  // C[batch, 0, N] and a rank-two C[0, batch*N] then have identical physical
+  // order.  For M>1 the two orders differ and would need a scatter/transpose.
+  static constexpr bool BatchColumnsFlattenCandidate =
+      (std::same_as<Implementation, kernel::matmul_implementation::AMX>
+       || std::same_as<Implementation, kernel::matmul_implementation::SME>
+       ) &&
+      Rank3SharedA && !PackedBInput &&
+      BSpec::InputTensor::Ndim == 3 &&
+      ASpec::TransformType::is_elementwise &&
+      BSpec::TransformType::is_elementwise &&
+      CInputSpec::TransformType::is_elementwise &&
+      COutputSpec::TransformType::is_elementwise;
+
+  // A shared per-N accumulator bias has physical strides {0,0,1}.  Flattening
+  // batch columns needs a non-affine `flat_column % N` address, which Layout
+  // deliberately cannot encode.  For the native/no-transform form, repeat at
+  // most 64 accumulator values into workspace and feed the same dense rank-2
+  // access type as an ordinary flattened C input.
+  static constexpr bool BatchColumnsPeriodicCInputCandidate =
+      BatchColumnsFlattenCandidate &&
+      std::same_as<
+          typename CInputSpec::MemoryElement, typename Atom::TAcc> &&
+      std::same_as<
+          typename CInputSpec::TransformType, tensor::NoTransform>;
+
+  VECOPS_INLINE bool batch_rows_flatten_enabled() const {
+    if constexpr (!BatchRowsFlattenCandidate) {
+      return false;
+    } else {
+      const auto& a_layout = a_.input_layout();
+      const auto& ci_layout = c_input_.input_layout();
+      const auto& co_layout = c_output_.output_layout();
+      const nint_t batch = co_layout.shape()[0];
+      const nint_t m = static_cast<nint_t>(m_);
+      const nint_t n = static_cast<nint_t>(n_);
+      const nint_t k = static_cast<nint_t>(k_);
+      if (batch <= 1 || m <= 0 || n <= 0 || k <= 0 || m > 16)
+        return false;
+      if (batch > 64 / m) return false;
+      const nint_t flat_m = batch * m;
+      // This first implementation intentionally targets products that need no
+      // cache/K tiling.  Larger flattened M values should be handled by the
+      // future parallel macro-block path rather than cloned here.
+      if (flat_m > 64) return false;
+
+      const bool dense_a =
+          a_layout.strides()[2] == 1 &&
+          a_layout.strides()[1] == k &&
+          a_layout.strides()[0] == m * k;
+      const bool dense_co =
+          co_layout.strides()[2] == 1 &&
+          co_layout.strides()[1] == n &&
+          co_layout.strides()[0] == m * n;
+      const bool dense_ci =
+          ci_layout.strides()[2] == 1 &&
+          ci_layout.strides()[1] == n &&
+          ci_layout.strides()[0] == m * n;
+      const bool broadcast_ci =
+          ci_layout.strides()[2] == 1 &&
+          ci_layout.strides()[1] == 0 &&
+          ci_layout.strides()[0] == 0;
+      return dense_a && dense_co && (dense_ci || broadcast_ci);
+    }
+  }
+
+  VECOPS_INLINE bool batch_columns_flatten_enabled() const {
+    if constexpr (!BatchColumnsFlattenCandidate) {
+      return false;
+    } else {
+      const auto& a_layout = a_.input_layout();
+      const auto& b_layout = b_.input_layout();
+      const auto& ci_layout = c_input_.input_layout();
+      const auto& co_layout = c_output_.output_layout();
+      const nint_t batch = co_layout.shape()[0];
+      const nint_t m = static_cast<nint_t>(m_);
+      const nint_t n = static_cast<nint_t>(n_);
+      const nint_t k = static_cast<nint_t>(k_);
+      if (batch < 4 || m != 1 || n <= 0 || k <= 0) return false;
+      if (n > 64 / batch) return false;
+
+      const bool shared_a = [&] {
+        if constexpr (PackedAInput) {
+          return true;
+        } else {
+          return a_layout.strides()[2] == 1 &&
+              a_layout.strides()[1] == k &&
+              a_layout.strides()[0] == 0;
+        }
+      }();
+      const nint_t b_row_stride = b_layout.strides()[1];
+      const bool mergeable_b =
+          b_layout.strides()[2] == 1 && b_row_stride >= k &&
+          b_layout.strides()[0] == n * b_row_stride;
+      const bool dense_co =
+          co_layout.strides()[2] == 1 && co_layout.strides()[0] == n;
+      // A shared per-N bias has strides {0,0,1}; flattening would require a
+      // periodic modulo-N mapping and is therefore deliberately rejected.
+      const bool dense_ci =
+          ci_layout.strides()[2] == 1 && ci_layout.strides()[0] == n;
+      const bool periodic_ci =
+          BatchColumnsPeriodicCInputCandidate &&
+          ci_layout.strides()[2] == 1 &&
+          ci_layout.strides()[1] == 0 &&
+          ci_layout.strides()[0] == 0;
+      return shared_a && mergeable_b && dense_co &&
+          (dense_ci || periodic_ci);
+    }
+  }
+
+  VECOPS_INLINE bool batch_columns_periodic_c_input_enabled() const {
+    if constexpr (!BatchColumnsPeriodicCInputCandidate) {
+      return false;
+    } else {
+      if (!batch_columns_flatten_enabled()) return false;
+      const auto& layout = c_input_.input_layout();
+      return layout.strides()[2] == 1 &&
+          layout.strides()[1] == 0 && layout.strides()[0] == 0;
+    }
+  }
+
+  VECOPS_INLINE nint_t batch_columns_periodic_c_input_bytes() const {
+    if constexpr (!BatchColumnsPeriodicCInputCandidate) {
+      return 0;
+    } else {
+      const nint_t batch = c_output_.output_layout().shape()[0];
+      return batch * static_cast<nint_t>(n_) *
+          static_cast<nint_t>(sizeof(typename Atom::TAcc)) + 63;
+    }
+  }
+
+  template <typename Spec>
+  VECOPS_INLINE auto flatten_batch_rows_input(
+      const Spec& spec, nint_t flat_rows, nint_t columns,
+      nint_t row_stride) const {
+    auto tensor = tensor::make_tensor(
+        spec.tensor().data(), tensor::make_layout(
+            tensor::make_shape(meta::Any{flat_rows}, meta::Any{columns}),
+            tensor::make_strides(meta::Any{row_stride}, meta::cint<1>)));
+    return tensor::InputSpec<
+        typename Spec::ComputeType, decltype(tensor),
+        typename Spec::TransformType>{tensor, spec.transform()};
+  }
+
+  template <typename Spec>
+  VECOPS_INLINE auto flatten_batch_rows_output(
+      const Spec& spec, nint_t flat_rows, nint_t columns,
+      nint_t row_stride) const {
+    auto tensor = tensor::make_tensor(
+        spec.tensor().data(), tensor::make_layout(
+            tensor::make_shape(meta::Any{flat_rows}, meta::Any{columns}),
+            tensor::make_strides(meta::Any{row_stride}, meta::cint<1>)));
+    return tensor::OutputSpec<
+        typename Spec::ComputeType, decltype(tensor),
+        typename Spec::TransformType>{tensor, spec.transform()};
+  }
+
+  VECOPS_INLINE auto shared_b_leaf() const {
+    if constexpr (PackedBInput) return b_;
+    else return tensor::slice_view<0>(b_, 0);
+  }
+
+  VECOPS_INLINE auto shared_a_leaf() const {
+    if constexpr (PackedAInput) return a_;
+    else return tensor::slice_view<0>(a_, 0);
+  }
+
+  // Keep the ordinary rank-three traversal byte-for-byte compact.  Enabling
+  // the auto-pack branch for a runtime-unknown batch stride adds a large typed
+  // fallback to every tiny independent-batch operation.  A statically
+  // broadcast B has unambiguous reuse and receives a separate specialization.
+  static constexpr bool RankAllowsAutoPack =
+      COutputSpec::OutputTensor::Ndim == 2 || Rank3SharedB;
+  static constexpr bool AutoPackA = RankAllowsAutoPack &&
       AutoPackOperand<gemm::Operand::A, ASpec>;
-  static constexpr bool AutoPackB =
+  static constexpr bool AutoPackB = RankAllowsAutoPack &&
       AutoPackOperand<gemm::Operand::B, BSpec>;
+  static constexpr bool Rank3CompletesPackedPair = Rank3SharedB &&
+      ((AutoPackA && PackedBInput) || (AutoPackB && PackedAInput));
+  // AMX avoids cloning a raw-B flatten leaf when conversion-aware auto-pack
+  // already owns the flattened operation; native B keeps its large-weight
+  // fallback.  SME must retain the direct leaf for every B type: tiny/tail
+  // shapes reject online packing, and without it they would still pay one
+  // StreamingZA/MOPA traversal per batch even though flattening is legal.
+  static constexpr bool NativeBInput =
+      std::same_as<typename BSpec::MemoryElement, typename Atom::TB> &&
+      std::same_as<typename BSpec::TransformType, tensor::NoTransform>;
+  static constexpr bool DirectBatchRowsFlattenCandidate =
+      BatchRowsFlattenCandidate &&
+      (std::same_as<Implementation, kernel::matmul_implementation::SME> ||
+       !AutoPackB || PackedBInput || NativeBInput);
+
+  static constexpr bool NativeAInput =
+      std::same_as<typename ASpec::MemoryElement, typename Atom::TA> &&
+      std::same_as<typename ASpec::TransformType, tensor::NoTransform>;
+  static constexpr bool SMERank3SkinnyF64APack =
+      std::same_as<Implementation, kernel::matmul_implementation::SME> &&
+      Rank3SharedB && AutoPackA &&
+      std::same_as<typename Atom::TA, float64_t> &&
+      std::same_as<typename ASpec::MemoryElement, float32_t>;
+  // If SME's existing cost model has already chosen to pack both operands,
+  // pack the complete dense [batch*M,K] A once and execute one packed problem.
+  // The old path reused a panel-sized A buffer and therefore still launched
+  // one mostly empty ZA problem per batch item.
+  static constexpr bool SMEBatchRowsFullPackCandidate =
+      std::same_as<Implementation, kernel::matmul_implementation::SME> &&
+      BatchRowsFlattenCandidate && AutoPackA && AutoPackB;
+  static constexpr bool BatchRowsPackACandidate =
+#if defined(VECOPS_DISABLE_AMX_BATCH_ROWS_PACK_A)
+      false;
+#else
+      std::same_as<Implementation, kernel::matmul_implementation::AMX> &&
+      BatchRowsFlattenCandidate && NativeAInput &&
+      (std::same_as<typename Atom::TA, bfloat16_t> ||
+       std::is_integral_v<typename Atom::TA>);
+#endif
+
+  template <gemm::Operand Side, typename Spec>
+  static constexpr bool StreamingCompatibleAutoPack = [] {
+    if constexpr (!AutoPackOperand<Side, Spec>) {
+      return true;
+    } else {
+      using Memory = typename Spec::MemoryElement;
+      using Element = typename gemm::packing_t<Atom, Side>::Element;
+      using Transform = typename Spec::TransformType;
+      constexpr bool StreamingQuantization = [] {
+        if constexpr (std::same_as<Transform, tensor::NoTransform>) {
+          return false;
+        } else {
+          return std::same_as<Memory, float32_t> &&
+              (std::same_as<Element, int8_t> ||
+               std::same_as<Element, uint8_t>) &&
+              Transform::is_elementwise &&
+              Transform::permutation_equivariant &&
+              std::same_as<typename Transform::TIn, float32_t> &&
+              std::same_as<typename Transform::TOut, float32_t>;
+        }
+      }();
+      // Native, FP32->BF16, and the fused FP32->I8/U8 postprocess pack execute
+      // entirely in Streaming+ZA mode.  BF16/FP16->FP32 still finish with
+      // ordinary-SVE postprocessing and retain separate SME intervals.
+      return std::same_as<Memory, Element> ||
+          (std::same_as<Memory, float32_t> &&
+           std::same_as<Element, bfloat16_t>) ||
+          StreamingQuantization;
+    }
+  }();
+
+  static constexpr bool SingleStreamingAutoPackCandidate =
+#if defined(HAS_SME)
+      // Rank-two BF16/F32 showed 4-14% wins.  Other rank-two atoms stay compact,
+      // but the distinct shared-B specialization crosses up to 17 SME region
+      // boundaries per call and can amortize one inlined traversal over all
+      // batches.
+      Rank3SharedB || std::same_as<Atom, gemm::SME_BF16F32> ||
+      std::same_as<Atom, gemm::SME_F32F32>;
+#else
+      false;
+#endif
+
+  static constexpr bool SingleStreamingAutoPackRegion =
+      std::same_as<Implementation, kernel::matmul_implementation::SME> &&
+      SingleStreamingAutoPackCandidate &&
+      // Keep mixed raw/packed operations on the compact existing path.  A
+      // rank-three shared operand is already a distinct specialization and
+      // amortizes its one remaining pack over the full batch, so completing a
+      // packed pair there also merits one region.
+      ((AutoPackA && AutoPackB) || Rank3CompletesPackedPair) &&
+      StreamingCompatibleAutoPack<gemm::Operand::A, ASpec> &&
+      StreamingCompatibleAutoPack<gemm::Operand::B, BSpec>;
+
+  template <gemm::Operand Side, typename Spec>
+  static constexpr bool AutoPackWidensBF16 =
+      AutoPackOperand<Side, Spec> &&
+      std::same_as<typename Spec::MemoryElement, bfloat16_t> &&
+      std::same_as<typename gemm::packing_t<Atom, Side>::Element, float32_t>;
+
+  template <gemm::Operand Side, typename Spec>
+  static constexpr bool AutoPackQuantizes = [] {
+    using Transform = typename Spec::TransformType;
+    using Element = typename gemm::packing_t<Atom, Side>::Element;
+    if constexpr (!AutoPackOperand<Side, Spec> ||
+                  std::same_as<Transform, tensor::NoTransform>) {
+      return false;
+    } else {
+      return std::same_as<typename Spec::MemoryElement, float32_t> &&
+          (std::same_as<Element, int8_t> ||
+           std::same_as<Element, uint8_t>);
+    }
+  }();
+
+  template <gemm::Operand Side, typename Spec>
+  static constexpr bool AutoPackElidesInputWork = [] {
+    if constexpr (!AutoPackOperand<Side, Spec>) {
+      return false;
+    } else {
+      using Element = typename gemm::packing_t<Atom, Side>::Element;
+      return !std::same_as<typename Spec::MemoryElement, Element> ||
+          !std::same_as<typename Spec::TransformType, tensor::NoTransform>;
+    }
+  }();
 
   struct NoAutoPackingState {};
+  struct NoBatchRowsPackAState {};
   using AutoPackingState = std::conditional_t<
       AutoPackA || AutoPackB, bool, NoAutoPackingState>;
+  using BatchRowsPackAState = std::conditional_t<
+      BatchRowsPackACandidate, bool, NoBatchRowsPackAState>;
 
   VECOPS_INLINE void initialize_auto_packing() {
     if constexpr (AutoPackA || AutoPackB)
@@ -207,6 +659,43 @@ private:
     else return false;
   }
 
+  VECOPS_INLINE bool full_auto_packing_enabled() const {
+    if constexpr (AutoPackA || AutoPackB) return auto_pack_;
+    else return false;
+  }
+
+  VECOPS_INLINE void initialize_batch_rows_pack_a() {
+    if constexpr (BatchRowsPackACandidate)
+      batch_rows_pack_a_ = use_batch_rows_pack_a();
+  }
+
+  VECOPS_INLINE bool batch_rows_pack_a_enabled() const {
+    if constexpr (BatchRowsPackACandidate) return batch_rows_pack_a_;
+    else return false;
+  }
+
+  VECOPS_INLINE bool use_batch_rows_pack_a() const {
+    if constexpr (!BatchRowsPackACandidate) {
+      return false;
+    } else {
+      if (!batch_rows_flatten_enabled()) return false;
+      // A raw shared-B operation can only consume packed A through the branch
+      // that also packed B.  Explicit packed-B inputs enter directly.
+      if constexpr (!PackedBInput)
+        if (!full_auto_packing_enabled()) return false;
+      const nint_t batch = c_output_.output_layout().shape()[0];
+      const nint_t m = static_cast<nint_t>(m_);
+      const nint_t n = static_cast<nint_t>(n_);
+      const nint_t k = static_cast<nint_t>(k_);
+      const nint_t flat_m = batch * m;
+      // The standalone grid supported N=64, but full fused Scenario ABBA made
+      // that boundary output-pipeline sensitive (one +3.2% regression).
+      // N>=128 retained uniform wins, including the N=128/K=64 boundary.
+      if (flat_m > 8 || n < 128 || k < 64) return false;
+      return true;
+    }
+  }
+
   VECOPS_INLINE bool use_auto_packing() const {
     if constexpr (!AutoPackA && !AutoPackB) {
       return false;
@@ -215,18 +704,155 @@ private:
       const nint_t n = static_cast<nint_t>(n_);
       const nint_t k = static_cast<nint_t>(k_);
       if (m <= 0 || n <= 0 || k <= 0) return false;
+      nint_t effective_m = m;
+      if constexpr (Rank3SharedB) {
+        const nint_t batch = c_output_.output_layout().shape()[0];
+        if (batch <= 0) return false;
+        constexpr nint_t Limit = std::numeric_limits<nint_t>::max();
+        effective_m = m > Limit / batch ? Limit : m * batch;
+      }
+      if constexpr (std::same_as<
+                        Implementation, kernel::matmul_implementation::AMX>) {
+        // Online AMX packing is most valuable for B, whose raw path repeats a
+        // 16x16 transpose for each resident M family.  Requiring at least four
+        // M tiles avoids paying a full matrix copy for decode, tails, and the
+        // 33x35 long-K probe.  When just A is raw, a wide prepacked-B product
+        // can amortize making A's tile panels contiguous; the symmetric
+        // B-only path retains the M-reuse requirement.
+        if constexpr (AutoPackA && AutoPackB) {
+          // Native decode/tail products do not reuse a copied B often enough,
+          // but conversion/quantization changes the trade-off completely:
+          // packing B also removes the strided transform from the resident
+          // kernel.  Enhanced scenario measurements show 4--20x wins for
+          // transformed small-M shapes, so retain only the N-panel guard for
+          // those types and let the work/reuse tests below decide.
+          if constexpr (!AutoPackElidesInputWork<
+                            gemm::Operand::B, BSpec>) {
+            if (m < 64) return false;
+          }
+          if (n < 16) return false;
+        } else if constexpr (AutoPackA) {
+          if (n < 256) return false;
+        } else {
+          static_assert(AutoPackB);
+          if constexpr (Rank3SharedB) {
+            // Eight decode rows already reuse each packed B panel enough to
+            // amortize one copy; the generic work threshold below filters the
+            // tiny and short-K shared-weight cases.  Native B packing ceases
+            // to pay once the packed weight no longer fits a private L2: the
+            // 8 MiB MLP and 25--33 MiB Qwen weights regressed by 7--12% from
+            // rereading and rewriting the full matrix.  Conversion-aware
+            // packing has a different gate because it also removes repeated
+            // conversion/transform work.
+            if (effective_m < 8 || n < 16) return false;
+            using Memory = typename BSpec::MemoryElement;
+            using Element =
+                typename gemm::packing_t<Atom, gemm::Operand::B>::Element;
+            if constexpr (std::same_as<Memory, Element>) {
+              constexpr nint_t MaxPackedElements =
+                  (2 * 1024 * 1024) / static_cast<nint_t>(sizeof(Element));
+              if (n > MaxPackedElements / k) return false;
+            }
+          } else {
+            // If A is already packed but B still performs conversion or
+            // quantization, packing B also removes that transform from the
+            // resident kernel. Mirror the two-raw exception above; native
+            // and prequantized B retain the M-reuse guard.
+            if constexpr (!AutoPackElidesInputWork<
+                              gemm::Operand::B, BSpec>) {
+              if (m < 64) return false;
+            }
+            if (n < 16) return false;
+          }
+        }
+      }
+      // The generic BF16->FP32 pack doubles the packed operand footprint.
+      // Do not widen a side unless the opposite output dimension reuses each
+      // packed row at least four times.  In particular, widening a 1024x1024
+      // B for M=1 decode measured slower than direct conversion, while batch
+      // shapes amortize it well.  FP16->FP32 has a dedicated staged pack and
+      // remains profitable at M=1, so it intentionally has no such guard.
+      constexpr nint_t WidenReuseThreshold = 4;
+      if constexpr (AutoPackWidensBF16<gemm::Operand::A, ASpec>)
+        if (n < WidenReuseThreshold) return false;
+      if constexpr (AutoPackWidensBF16<gemm::Operand::B, BSpec>)
+        if (effective_m < WidenReuseThreshold) return false;
+      if constexpr (
+          Rank3CompletesPackedPair && AutoPackA &&
+          AutoPackQuantizes<gemm::Operand::A, ASpec>) {
+        // A is different for every batch, so shared B does not amortize its
+        // FP32->I8/U8 transform.  The 64x128 boundary regressed, while either
+        // twice the N reuse or twice the K work remained profitable.
+        if (n < 128 && k < 256) return false;
+      }
       // Packing pays for itself once enough output dot products reuse it.
       // Require both aggregate work and spatial reuse; a 1x1 product with a
       // very long K has high work but cannot amortize copying either operand.
       // Express both tests with divisions to avoid overflowing M*N*K.
-      constexpr nint_t ReuseThreshold = 128;
-      constexpr nint_t WorkThreshold = AutoPackA && AutoPackB
-          ? 64 * 1024
-          : 128 * 1024;
-      if (m < 1 + (ReuseThreshold - 1) / n) return false;
-      nint_t remaining = 1 + (WorkThreshold - 1) / m;
+      constexpr bool AMXBPackElidesInputWork =
+          std::same_as<
+              Implementation, kernel::matmul_implementation::AMX> &&
+          AutoPackB &&
+          AutoPackElidesInputWork<gemm::Operand::B, BSpec>;
+      constexpr bool AMXRank3BOnly =
+          std::same_as<
+              Implementation, kernel::matmul_implementation::AMX> &&
+          Rank3SharedB && !AutoPackA && AutoPackB;
+      constexpr bool SMERank3QuantizedPair =
+#if defined(VECOPS_DISABLE_SME_RANK3_QUANT_FULL_PACKING)
+          false;
+#else
+          std::same_as<
+              Implementation, kernel::matmul_implementation::SME> &&
+          Rank3SharedB && AutoPackA && AutoPackB &&
+          AutoPackQuantizes<gemm::Operand::A, ASpec> &&
+          AutoPackQuantizes<gemm::Operand::B, BSpec>;
+#endif
+      constexpr bool LowWorkTransformPair =
+          AMXBPackElidesInputWork || SMERank3QuantizedPair;
+      constexpr bool SMEF64ConversionPair =
+          std::same_as<
+              Implementation, kernel::matmul_implementation::SME> &&
+          AutoPackA && AutoPackB &&
+          std::same_as<typename Atom::TA, float64_t> &&
+          std::same_as<typename Atom::TB, float64_t> &&
+          std::same_as<typename ASpec::MemoryElement, float32_t> &&
+          std::same_as<typename BSpec::MemoryElement, float32_t>;
+      constexpr nint_t ReuseThreshold =
+          LowWorkTransformPair ? 64 : 128;
+      constexpr nint_t WorkThreshold =
+          LowWorkTransformPair
+          ? 8 * 1024
+          // A rank-three shared B is copied once for the complete batch.
+          // Native lifecycle measurements break even around 16 Ki dots;
+          // retaining the rank-two 128 Ki threshold leaves the tail/tiny/
+          // small shared catalog 38--83% slower than explicit online pack.
+          : AMXRank3BOnly
+              ? 16 * 1024
+          : SMEF64ConversionPair && !Rank3SharedB
+              ? 256 * 1024
+          : (AutoPackA && AutoPackB) || Rank3CompletesPackedPair
+              ? 64 * 1024
+              : 128 * 1024;
+      if (effective_m < 1 + (ReuseThreshold - 1) / n) return false;
+      nint_t remaining = 1 + (WorkThreshold - 1) / effective_m;
       remaining = 1 + (remaining - 1) / n;
       return k >= remaining;
+    }
+  }
+
+  template <gemm::Operand Side, typename Spec>
+  VECOPS_INLINE auto auto_packed_layout(const Spec& spec) const {
+    constexpr int Rank = Spec::InputTensor::Ndim;
+    if constexpr (Rank == 2) {
+      return matmul_packed_layout<Atom, Side>(spec.input_layout());
+    } else {
+      static_assert(Rank == 3);
+      const auto& layout = spec.input_layout();
+      return matmul_packed_layout<Atom, Side>(tensor::make_layout(
+          tensor::make_shape(
+              meta::Any{layout.shape()[Rank - 2]},
+              meta::Any{layout.shape()[Rank - 1]})));
     }
   }
 
@@ -234,8 +860,7 @@ private:
   VECOPS_INLINE nint_t auto_packed_bytes(const Spec& spec) const {
     if constexpr (AutoPackOperand<Side, Spec>) {
       using Element = typename gemm::packing_t<Atom, Side>::Element;
-      const auto layout = matmul_packed_layout<Atom, Side>(
-          spec.input_layout());
+      const auto layout = auto_packed_layout<Side>(spec);
       // WorkspaceView may need up to 63 bytes to establish 64B alignment.
       return tensor::numel(layout) * static_cast<nint_t>(sizeof(Element)) + 63;
     } else {
@@ -243,58 +868,316 @@ private:
     }
   }
 
+  VECOPS_INLINE auto batch_rows_packed_a_layout() const {
+    static_assert(
+        BatchRowsPackACandidate || SMEBatchRowsFullPackCandidate);
+    const nint_t batch = c_output_.output_layout().shape()[0];
+    const nint_t flat_m = batch * static_cast<nint_t>(m_);
+    const auto flat_layout = tensor::make_layout(tensor::make_shape(
+        meta::Any{flat_m}, meta::Any{static_cast<nint_t>(k_)}));
+    return matmul_packed_layout<Atom, gemm::Operand::A>(flat_layout);
+  }
+
+  VECOPS_INLINE nint_t batch_rows_packed_a_bytes() const {
+    if constexpr (
+        !BatchRowsPackACandidate && !SMEBatchRowsFullPackCandidate) {
+      return 0;
+    } else {
+      const auto layout = batch_rows_packed_a_layout();
+      return tensor::numel(layout) *
+          static_cast<nint_t>(sizeof(typename Atom::TA)) + 63;
+    }
+  }
+
+  template <typename PackImplementation,
+            execution::ExecutionScope Scope,
+            tensor::InputOperand Input, tensor::OutputOperand Output>
+  VECOPS_ALWAYS_INLINE void matmul_pack_forced(
+      Scope& scope, const Input& input, const Output& output) const {
+    using Packing = gemm::packing_t<Atom, gemm::Operand::A>;
+    using Element = typename Packing::Element;
+    auto input_spec = tensor::as_input_spec<Element>(input);
+    auto output_spec = tensor::as_output_spec<Element>(output);
+    using InputPolicy = tensor::InputAccessPolicy<
+        Packing::VectorAxis, 1, tensor::AccessPlan::direct>;
+    using OutputPolicy = tensor::OutputAccessPolicy<
+        std::remove_cvref_t<decltype(output_spec)>::OutputTensor::Ndim - 1,
+        tensor::AccessPlan::direct>;
+    kernel::with_operands(
+        scope,
+        tensor::operand(input_spec, InputPolicy{}),
+        tensor::operand(output_spec, OutputPolicy{}),
+        [&](auto& source, auto& destination) VECOPS_INLINE_LAMBDA {
+          kernel::matmul_pack_bound<Atom, gemm::Operand::A>(
+              scope, source, destination, PackImplementation{});
+          destination.commit();
+        });
+  }
+
+  template <execution::ExecutionScope Scope,
+            tensor::InputOperand Input, tensor::OutputOperand Output>
+  VECOPS_ALWAYS_INLINE void matmul_pack_batched_a(
+      Scope& scope, const Input& input, const Output& output) const {
+    if constexpr (SMERank3SkinnyF64APack) {
+      const nint_t panel = static_cast<nint_t>(
+          gemm::packing_t<Atom, gemm::Operand::A>::panel());
+      const auto input_spec = tensor::as_input_spec<
+          typename Atom::TA>(input);
+      constexpr int Rank = decltype(input_spec)::InputTensor::Ndim;
+      if (input_spec.input_layout().shape()[Rank - 2] < panel) {
+        matmul_pack_forced<
+            kernel::matmul_pack_implementation::SMEFP32ToFP64Single>(
+                scope, input, output);
+        return;
+      }
+    }
+    matmul_pack<Atom, gemm::Operand::A>(scope, input, output);
+  }
+
   template <execution::ExecutionScope Scope>
-  VECOPS_NOINLINE void execute_auto_packed(Scope& scope) const {
+  VECOPS_ALWAYS_INLINE void execute_auto_packed_batched_in_scope(
+      Scope& scope) const {
+    static_assert(COutputSpec::OutputTensor::Ndim == 3);
     static_assert(AutoPackA || AutoPackB);
     auto& workspace = scope.workspace_view();
     const auto mark = workspace.mark();
+    void* scratch = nullptr;
+    if constexpr (std::same_as<
+                      Implementation, kernel::matmul_implementation::AMX>) {
+      scratch = workspace.allocate(
+          kernel::matmul_implementation::scratch_bytes<Implementation>(), 64);
+    }
 
     if constexpr (AutoPackA && AutoPackB) {
-      const auto a_layout = matmul_packed_layout<Atom, gemm::Operand::A>(
-          a_.input_layout());
-      const auto b_layout = matmul_packed_layout<Atom, gemm::Operand::B>(
-          b_.input_layout());
-      using TA = typename Atom::TA;
+      const auto b_layout = auto_packed_layout<gemm::Operand::B>(b_);
       using TB = typename Atom::TB;
-      const nint_t a_bytes =
-          tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA));
-      const nint_t b_bytes =
-          tensor::numel(b_layout) * static_cast<nint_t>(sizeof(TB));
-      auto* a_data = static_cast<TA*>(workspace.allocate(a_bytes, 64));
-      auto* b_data = static_cast<TB*>(workspace.allocate(b_bytes, 64));
-      auto a_tensor = tensor::make_tensor(a_data, a_layout);
+      auto* b_data = static_cast<TB*>(workspace.allocate(
+          tensor::numel(b_layout) * static_cast<nint_t>(sizeof(TB)), 64));
       auto b_tensor = tensor::make_tensor(b_data, b_layout);
-      matmul_pack<Atom, gemm::Operand::A>(scope, a_, a_tensor);
-      matmul_pack<Atom, gemm::Operand::B>(scope, b_, b_tensor);
-      execute_problem(
-          scope, tensor::input<TA>(a_tensor), tensor::input<TB>(b_tensor),
-          c_input_, c_output_, nullptr);
-    } else if constexpr (AutoPackA) {
-      const auto layout = matmul_packed_layout<Atom, gemm::Operand::A>(
-          a_.input_layout());
+      if constexpr (SMEBatchRowsFullPackCandidate) {
+        if (VECOPS_LIKELY(batch_rows_flatten_enabled())) {
+          const auto b = tensor::slice_view<0>(b_, 0);
+          matmul_pack<Atom, gemm::Operand::B>(scope, b, b_tensor);
+          const auto a_layout = batch_rows_packed_a_layout();
+          using TA = typename Atom::TA;
+          auto* a_data = static_cast<TA*>(workspace.allocate(
+              tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA)), 64));
+          auto a_tensor = tensor::make_tensor(a_data, a_layout);
+          const nint_t batch = c_output_.output_layout().shape()[0];
+          const nint_t m = static_cast<nint_t>(m_);
+          const nint_t k = static_cast<nint_t>(k_);
+          const auto a = flatten_batch_rows_input(a_, batch * m, k, k);
+          matmul_pack_batched_a(scope, a, a_tensor);
+          execute_flattened_batch_rows_operands(
+              scope, tensor::input<TA>(a_tensor),
+              tensor::input<TB>(b_tensor), scratch);
+          workspace.rewind(mark);
+          return;
+        }
+      }
+      const bool reuse_b = b_.input_layout().strides()[0] == 0;
+      bool b_ready = false;
+      const auto a_layout = auto_packed_layout<gemm::Operand::A>(a_);
       using TA = typename Atom::TA;
-      const nint_t bytes =
-          tensor::numel(layout) * static_cast<nint_t>(sizeof(TA));
-      auto* data = static_cast<TA*>(workspace.allocate(bytes, 64));
+      auto* a_data = static_cast<TA*>(workspace.allocate(
+          tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA)), 64));
+      auto a_tensor = tensor::make_tensor(a_data, a_layout);
+      const bool reuse_a = a_.input_layout().strides()[0] == 0;
+      bool a_ready = false;
+      kernel::loop::for_each_dims<1>(
+          [&](const auto& a, const auto& b,
+              const auto& c_input, const auto& c_output)
+              VECOPS_KERNEL_LAMBDA {
+            if (!reuse_a || !a_ready) {
+              matmul_pack_batched_a(scope, a, a_tensor);
+              a_ready = true;
+            }
+            if (!reuse_b || !b_ready) {
+              matmul_pack<Atom, gemm::Operand::B>(
+                  scope, b, b_tensor);
+              b_ready = true;
+            }
+            execute_problem(
+                scope, tensor::input<TA>(a_tensor),
+                tensor::input<TB>(b_tensor), c_input, c_output, scratch);
+          },
+          a_, b_, c_input_, c_output_);
+    } else if constexpr (AutoPackA) {
+      const auto layout = auto_packed_layout<gemm::Operand::A>(a_);
+      using TA = typename Atom::TA;
+      auto* data = static_cast<TA*>(workspace.allocate(
+          tensor::numel(layout) * static_cast<nint_t>(sizeof(TA)), 64));
       auto packed_tensor = tensor::make_tensor(data, layout);
-      matmul_pack<Atom, gemm::Operand::A>(scope, a_, packed_tensor);
-      execute_problem(
-          scope, tensor::input<TA>(packed_tensor), b_,
-          c_input_, c_output_, nullptr);
+      const bool reuse = a_.input_layout().strides()[0] == 0;
+      bool ready = false;
+      const auto b_loop = matmul_details::batch_loop_operand<
+          Atom, gemm::Operand::B>(b_);
+      kernel::loop::for_each_dims<1>(
+          [&](const auto& a, const auto& b,
+              const auto& c_input, const auto& c_output)
+              VECOPS_KERNEL_LAMBDA {
+            if (!reuse || !ready) {
+              matmul_pack_batched_a(scope, a, packed_tensor);
+              ready = true;
+            }
+            execute_problem(
+                scope, tensor::input<TA>(packed_tensor),
+                matmul_details::batch_loop_leaf(b),
+                c_input, c_output, scratch);
+          },
+          a_, b_loop, c_input_, c_output_);
     } else {
-      const auto layout = matmul_packed_layout<Atom, gemm::Operand::B>(
-          b_.input_layout());
+      const auto layout = auto_packed_layout<gemm::Operand::B>(b_);
       using TB = typename Atom::TB;
-      const nint_t bytes =
-          tensor::numel(layout) * static_cast<nint_t>(sizeof(TB));
-      auto* data = static_cast<TB*>(workspace.allocate(bytes, 64));
+      auto* data = static_cast<TB*>(workspace.allocate(
+          tensor::numel(layout) * static_cast<nint_t>(sizeof(TB)), 64));
       auto packed_tensor = tensor::make_tensor(data, layout);
-      matmul_pack<Atom, gemm::Operand::B>(scope, b_, packed_tensor);
-      execute_problem(
-          scope, a_, tensor::input<TB>(packed_tensor),
-          c_input_, c_output_, nullptr);
+      const bool reuse = b_.input_layout().strides()[0] == 0;
+      bool ready = false;
+      if constexpr (BatchRowsFlattenCandidate) {
+        if (VECOPS_LIKELY(batch_rows_flatten_enabled())) {
+          const auto b = tensor::slice_view<0>(b_, 0);
+          matmul_pack<Atom, gemm::Operand::B>(
+              scope, b, packed_tensor);
+          if constexpr (BatchRowsPackACandidate) {
+            if (VECOPS_UNLIKELY(batch_rows_pack_a_enabled())) {
+              const auto a_layout = batch_rows_packed_a_layout();
+              using TA = typename Atom::TA;
+              auto* a_data = static_cast<TA*>(workspace.allocate(
+                  tensor::numel(a_layout) *
+                      static_cast<nint_t>(sizeof(TA)),
+                  64));
+              auto a_tensor = tensor::make_tensor(a_data, a_layout);
+              const nint_t batch = c_output_.output_layout().shape()[0];
+              const nint_t m = static_cast<nint_t>(m_);
+              const nint_t k = static_cast<nint_t>(k_);
+              const auto a = flatten_batch_rows_input(
+                  a_, batch * m, k, k);
+              matmul_pack<Atom, gemm::Operand::A>(scope, a, a_tensor);
+              execute_flattened_batch_rows_operands(
+                  scope, tensor::input<TA>(a_tensor),
+                  tensor::input<TB>(packed_tensor), scratch);
+              workspace.rewind(mark);
+              return;
+            }
+          }
+          execute_flattened_batch_rows(
+              scope, tensor::input<TB>(packed_tensor), scratch);
+          workspace.rewind(mark);
+          return;
+        }
+      }
+      const auto a_loop = matmul_details::batch_loop_operand<
+          Atom, gemm::Operand::A>(a_);
+      auto run_loop = [&]<bool Configured>(auto& active_scope)
+          VECOPS_KERNEL_LAMBDA {
+        kernel::loop::for_each_dims<1>(
+            [&](const auto& a, const auto& b,
+                const auto& c_input, const auto& c_output)
+                VECOPS_KERNEL_LAMBDA {
+              if (!reuse || !ready) {
+                matmul_pack<Atom, gemm::Operand::B>(
+                    active_scope, b, packed_tensor);
+                ready = true;
+              }
+              execute_problem<Configured>(
+                  active_scope, matmul_details::batch_loop_leaf(a),
+                  tensor::input<TB>(packed_tensor),
+                  c_input, c_output, scratch);
+            },
+            a_loop, b_, c_input_, c_output_);
+      };
+      if constexpr (std::same_as<
+                        Implementation,
+                        kernel::matmul_implementation::AMX>) {
+        kernel::with_matmul_configuration<Atom, TilePolicy, true>(
+            scope, m_, n_, Implementation{},
+            [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+              run_loop.template operator()<true>(configured);
+            });
+      } else {
+        run_loop.template operator()<false>(scope);
+      }
     }
     workspace.rewind(mark);
+  }
+
+  template <execution::ExecutionScope Scope>
+  VECOPS_ALWAYS_INLINE void execute_auto_packed_in_scope(Scope& scope) const {
+    static_assert(AutoPackA || AutoPackB);
+    if constexpr (COutputSpec::OutputTensor::Ndim == 3) {
+      execute_auto_packed_batched_in_scope(scope);
+    } else {
+      auto& workspace = scope.workspace_view();
+      const auto mark = workspace.mark();
+      void* scratch = nullptr;
+      if constexpr (std::same_as<
+                        Implementation, kernel::matmul_implementation::AMX>) {
+        scratch = workspace.allocate(
+            kernel::matmul_implementation::scratch_bytes<Implementation>(),
+            64);
+      }
+
+      if constexpr (AutoPackA && AutoPackB) {
+        const auto a_layout = matmul_packed_layout<Atom, gemm::Operand::A>(
+            a_.input_layout());
+        const auto b_layout = matmul_packed_layout<Atom, gemm::Operand::B>(
+            b_.input_layout());
+        using TA = typename Atom::TA;
+        using TB = typename Atom::TB;
+        const nint_t a_bytes =
+            tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA));
+        const nint_t b_bytes =
+            tensor::numel(b_layout) * static_cast<nint_t>(sizeof(TB));
+        auto* a_data = static_cast<TA*>(workspace.allocate(a_bytes, 64));
+        auto* b_data = static_cast<TB*>(workspace.allocate(b_bytes, 64));
+        auto a_tensor = tensor::make_tensor(a_data, a_layout);
+        auto b_tensor = tensor::make_tensor(b_data, b_layout);
+        matmul_pack<Atom, gemm::Operand::A>(scope, a_, a_tensor);
+        matmul_pack<Atom, gemm::Operand::B>(scope, b_, b_tensor);
+        execute_problem(
+            scope, tensor::input<TA>(a_tensor), tensor::input<TB>(b_tensor),
+            c_input_, c_output_, scratch);
+      } else if constexpr (AutoPackA) {
+        const auto layout = matmul_packed_layout<Atom, gemm::Operand::A>(
+            a_.input_layout());
+        using TA = typename Atom::TA;
+        const nint_t bytes =
+            tensor::numel(layout) * static_cast<nint_t>(sizeof(TA));
+        auto* data = static_cast<TA*>(workspace.allocate(bytes, 64));
+        auto packed_tensor = tensor::make_tensor(data, layout);
+        matmul_pack<Atom, gemm::Operand::A>(scope, a_, packed_tensor);
+        execute_problem(
+            scope, tensor::input<TA>(packed_tensor), b_,
+            c_input_, c_output_, scratch);
+      } else {
+        const auto layout = matmul_packed_layout<Atom, gemm::Operand::B>(
+            b_.input_layout());
+        using TB = typename Atom::TB;
+        const nint_t bytes =
+            tensor::numel(layout) * static_cast<nint_t>(sizeof(TB));
+        auto* data = static_cast<TB*>(workspace.allocate(bytes, 64));
+        auto packed_tensor = tensor::make_tensor(data, layout);
+        matmul_pack<Atom, gemm::Operand::B>(scope, b_, packed_tensor);
+        execute_problem(
+            scope, a_, tensor::input<TB>(packed_tensor),
+            c_input_, c_output_, scratch);
+      }
+      workspace.rewind(mark);
+    }
+  }
+
+  template <execution::ExecutionScope Scope>
+  VECOPS_NOINLINE void execute_auto_packed(Scope& scope) const {
+    if constexpr (SingleStreamingAutoPackRegion) {
+      scope.with_resources(
+          execution::details::arm::StreamingZARegion{},
+          [&](auto& active) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+            execute_auto_packed_in_scope(active);
+          });
+    } else {
+      execute_auto_packed_in_scope(scope);
+    }
   }
 
   VECOPS_INLINE void validate() const {
@@ -327,11 +1210,14 @@ private:
         "matmul C shape mismatch");
   }
 
-  template <execution::ExecutionScope Scope,
+  template <bool Configured = false,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename ALeaf, typename BLeaf,
             typename CInputLeaf, typename COutputLeaf>
-  VECOPS_KERNEL_FUNCTION(void execute_problem(
-      Scope& scope, const ALeaf& a, const BLeaf& b,
+  VECOPS_KERNEL_FUNCTION(void execute_problem_extents(
+      Scope& scope, M m, N n, K k,
+      const ALeaf& a, const BLeaf& b,
       const CInputLeaf& c_input, const COutputLeaf& c_output,
       void* scratch) const) {
     using APolicy = tensor::InputAccessPolicy<
@@ -351,40 +1237,246 @@ private:
         [&](auto& a_access, auto& b_access,
             auto& c_input_access, auto& c_output_access)
             VECOPS_KERNEL_LAMBDA {
-          kernel::matmul_bound<Atom, TilePolicy>(
-              scope, m_, n_, k_, a_access, b_access,
-              c_input_access, c_output_access, scratch, Implementation{});
+          if constexpr (Configured) {
+            kernel::matmul_bound_configured<Atom, TilePolicy>(
+                scope, m, n, k, a_access, b_access,
+                c_input_access, c_output_access, scratch, Implementation{});
+          } else {
+            kernel::matmul_bound<
+                Atom, TilePolicy, PackedAInput && PackedBInput>(
+                scope, m, n, k, a_access, b_access,
+                c_input_access, c_output_access, scratch, Implementation{});
+          }
           c_output_access.commit();
         });
+  }
+
+  template <bool Configured = false,
+            execution::ExecutionScope Scope,
+            typename ALeaf, typename BLeaf,
+            typename CInputLeaf, typename COutputLeaf>
+  VECOPS_KERNEL_FUNCTION(void execute_problem(
+      Scope& scope, const ALeaf& a, const BLeaf& b,
+      const CInputLeaf& c_input, const COutputLeaf& c_output,
+      void* scratch) const) {
+    execute_problem_extents<Configured>(
+        scope, m_, n_, k_, a, b, c_input, c_output, scratch);
+  }
+
+  template <execution::ExecutionScope Scope,
+            typename ALeaf, typename BLeaf>
+  VECOPS_ALWAYS_INLINE void execute_flattened_batch_rows_operands(
+      Scope& scope, const ALeaf& a, const BLeaf& b, void* scratch) const {
+    static_assert(BatchRowsFlattenCandidate);
+    const nint_t batch = c_output_.output_layout().shape()[0];
+    const nint_t m = static_cast<nint_t>(m_);
+    const nint_t n = static_cast<nint_t>(n_);
+    const nint_t flat_m_value = batch * m;
+    const meta::Any flat_m{flat_m_value};
+    const nint_t ci_stride = c_input_.input_layout().strides()[1];
+    const auto c_input = flatten_batch_rows_input(
+        c_input_, flat_m_value, n, ci_stride);
+    const auto c_output = flatten_batch_rows_output(
+        c_output_, flat_m_value, n, n);
+    constexpr bool FlatPackedB = gemm::is_packed_layout<
+        Atom, gemm::Operand::B, typename BLeaf::InputLayout>();
+    if constexpr (std::same_as<
+                      Implementation, kernel::matmul_implementation::AMX>) {
+      kernel::with_matmul_configuration<Atom, TilePolicy, FlatPackedB>(
+          scope, flat_m, n_, Implementation{},
+          [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+            execute_problem_extents<true>(
+                configured, flat_m, n_, k_, a, b,
+                c_input, c_output, scratch);
+          });
+    } else {
+      execute_problem_extents(
+          scope, flat_m, n_, k_, a, b,
+          c_input, c_output, scratch);
+    }
+  }
+
+  template <execution::ExecutionScope Scope, typename BLeaf>
+  VECOPS_ALWAYS_INLINE void execute_flattened_batch_rows(
+      Scope& scope, const BLeaf& b, void* scratch) const {
+    static_assert(BatchRowsFlattenCandidate);
+    const nint_t batch = c_output_.output_layout().shape()[0];
+    const nint_t m = static_cast<nint_t>(m_);
+    const nint_t k = static_cast<nint_t>(k_);
+    const auto a = flatten_batch_rows_input(a_, batch * m, k, k);
+    execute_flattened_batch_rows_operands(scope, a, b, scratch);
+  }
+
+  template <execution::ExecutionScope Scope>
+  VECOPS_ALWAYS_INLINE void execute_packed_a_flattened_batch_rows(
+      Scope& scope) const {
+    static_assert(BatchRowsPackACandidate && PackedBInput);
+    auto& workspace = scope.workspace_view();
+    const auto mark = workspace.mark();
+    void* scratch = workspace.allocate(
+        kernel::matmul_implementation::scratch_bytes<Implementation>(), 64);
+    const auto a_layout = batch_rows_packed_a_layout();
+    using TA = typename Atom::TA;
+    auto* a_data = static_cast<TA*>(workspace.allocate(
+        tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA)), 64));
+    auto a_tensor = tensor::make_tensor(a_data, a_layout);
+    const nint_t batch = c_output_.output_layout().shape()[0];
+    const nint_t m = static_cast<nint_t>(m_);
+    const nint_t k = static_cast<nint_t>(k_);
+    const auto a = flatten_batch_rows_input(a_, batch * m, k, k);
+    matmul_pack<Atom, gemm::Operand::A>(scope, a, a_tensor);
+    const auto b = shared_b_leaf();
+    execute_flattened_batch_rows_operands(
+        scope, tensor::input<TA>(a_tensor), b, scratch);
+    workspace.rewind(mark);
+  }
+
+  template <execution::ExecutionScope Scope, typename ALeaf>
+  VECOPS_ALWAYS_INLINE void execute_flattened_batch_columns(
+      Scope& scope, const ALeaf& a, void* scratch) const {
+    static_assert(BatchColumnsFlattenCandidate);
+    auto& workspace = scope.workspace_view();
+    const auto workspace_mark = workspace.mark();
+    const nint_t batch = c_output_.output_layout().shape()[0];
+    const nint_t n = static_cast<nint_t>(n_);
+    const nint_t k = static_cast<nint_t>(k_);
+    const nint_t flat_n_value = batch * n;
+    const meta::Any flat_n{flat_n_value};
+    const nint_t b_row_stride = b_.input_layout().strides()[1];
+    const auto b = flatten_batch_rows_input(
+        b_, flat_n_value, k, b_row_stride);
+    const auto c_output = flatten_batch_rows_output(
+        c_output_, 1, flat_n_value, flat_n_value);
+    auto run = [&](const auto& c_input) VECOPS_INLINE_LAMBDA {
+      if constexpr (std::same_as<
+                        Implementation, kernel::matmul_implementation::AMX>) {
+        kernel::with_matmul_configuration<Atom, TilePolicy, false>(
+            scope, m_, flat_n, Implementation{},
+            [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+              execute_problem_extents<true>(
+                  configured, m_, flat_n, k_, a, b,
+                  c_input, c_output, scratch);
+            });
+      } else {
+        execute_problem_extents(
+            scope, m_, flat_n, k_, a, b,
+            c_input, c_output, scratch);
+      }
+    };
+    if constexpr (BatchColumnsPeriodicCInputCandidate) {
+      using Acc = typename Atom::TAcc;
+      auto* flat_data = reinterpret_cast<Acc*>(c_input_.tensor().data());
+      if (VECOPS_UNLIKELY(batch_columns_periodic_c_input_enabled())) {
+        auto* dense = static_cast<Acc*>(workspace.allocate(
+            flat_n_value * static_cast<nint_t>(sizeof(Acc)), 64));
+        for (nint_t batch_index = 0; batch_index < batch; ++batch_index)
+          for (nint_t column = 0; column < n; ++column)
+            dense[batch_index * n + column] = flat_data[column];
+        flat_data = dense;
+      }
+      // Build one direct rank-2 type for both dense and materialized input so
+      // the compiler emits a single fused Matmul leaf per output pipeline.
+      const auto flat_tensor = tensor::make_tensor(
+          flat_data, tensor::make_layout(
+              tensor::make_shape(meta::Any{1}, meta::Any{flat_n_value}),
+              tensor::make_strides(meta::Any{flat_n_value}, meta::cint<1>)));
+      run(tensor::input<Acc>(flat_tensor));
+    } else {
+      run(flatten_batch_rows_input(
+          c_input_, 1, flat_n_value, flat_n_value));
+    }
+    workspace.rewind(workspace_mark);
   }
 
   template <execution::ExecutionScope Scope>
   VECOPS_KERNEL_FUNCTION(void execute(Scope& scope) const) {
     validate();
+    if constexpr (BatchRowsPackACandidate && PackedBInput) {
+      if (VECOPS_UNLIKELY(batch_rows_pack_a_enabled())) {
+        execute_packed_a_flattened_batch_rows(scope);
+        return;
+      }
+    }
     constexpr int Rank = COutputSpec::OutputTensor::Ndim;
     constexpr int PrefixRank = Rank - ProblemRank;
-    auto run = [&](void* scratch) VECOPS_KERNEL_LAMBDA {
+    const auto a_loop = matmul_details::batch_loop_operand<
+        Atom, gemm::Operand::A>(a_);
+    const auto b_loop = matmul_details::batch_loop_operand<
+        Atom, gemm::Operand::B>(b_);
+    auto run_loop = [&]<bool Configured>(
+                        auto& active_scope, void* scratch)
+        VECOPS_KERNEL_LAMBDA {
       kernel::loop::for_each_dims<PrefixRank>(
-          [this, &scope, scratch](const auto& a, const auto& b,
-                                  const auto& c_input,
-                                  const auto& c_output)
+          [this, &active_scope, scratch](
+              const auto& a, const auto& b,
+              const auto& c_input, const auto& c_output)
               VECOPS_KERNEL_LAMBDA {
-            execute_problem(scope, a, b, c_input, c_output, scratch);
+            execute_problem<Configured>(
+                active_scope, matmul_details::batch_loop_leaf(a),
+                matmul_details::batch_loop_leaf(b),
+                c_input, c_output, scratch);
           },
-          a_, b_, c_input_, c_output_);
+          a_loop, b_loop, c_input_, c_output_);
     };
-    if constexpr (std::same_as<
-                      Implementation, kernel::matmul_implementation::AMX>) {
-      auto& workspace = scope.workspace_view();
-      const auto mark = workspace.mark();
-      run(workspace.allocate(required_workspace(), 64));
-      workspace.rewind(mark);
-    } else if constexpr (AutoPackA || AutoPackB) {
-      if (VECOPS_UNLIKELY(auto_packing_enabled())) {
+    auto run = [&](void* scratch) VECOPS_KERNEL_LAMBDA {
+      if constexpr (PrefixRank > 0) {
+        // Preserve the zero-batch behavior: no leaf means no TILECFG load.
+        for (int d = 0; d < PrefixRank; ++d)
+          if (c_output_.output_layout().shape()[d] == 0) return;
+      }
+      if constexpr (BatchColumnsFlattenCandidate) {
+        if (VECOPS_LIKELY(batch_columns_flatten_enabled())) {
+          const auto a = shared_a_leaf();
+          execute_flattened_batch_columns(scope, a, scratch);
+          return;
+        }
+      }
+      if constexpr (DirectBatchRowsFlattenCandidate) {
+        if (VECOPS_LIKELY(batch_rows_flatten_enabled())) {
+          const auto b = shared_b_leaf();
+          execute_flattened_batch_rows(scope, b, scratch);
+          return;
+        }
+      }
+      if constexpr (
+          std::same_as<
+              Implementation, kernel::matmul_implementation::AMX> &&
+          PrefixRank > 0) {
+        kernel::with_matmul_configuration<
+            Atom, TilePolicy, PackedBInput>(
+                scope, m_, n_, Implementation{},
+                [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+                  run_loop.template operator()<true>(configured, scratch);
+                });
+      } else {
+        run_loop.template operator()<false>(scope, scratch);
+      }
+    };
+    if constexpr (AutoPackA || AutoPackB) {
+      if (VECOPS_UNLIKELY(full_auto_packing_enabled())) {
         execute_auto_packed(scope);
       } else {
-        run(nullptr);
+        if constexpr (std::same_as<
+                          Implementation,
+                          kernel::matmul_implementation::AMX>) {
+          auto& workspace = scope.workspace_view();
+          const auto mark = workspace.mark();
+          run(workspace.allocate(
+              kernel::matmul_implementation::scratch_bytes<Implementation>(),
+              64));
+          workspace.rewind(mark);
+        } else {
+          run(nullptr);
+        }
       }
+    } else if constexpr (std::same_as<
+                             Implementation,
+                             kernel::matmul_implementation::AMX>) {
+      auto& workspace = scope.workspace_view();
+      const auto mark = workspace.mark();
+      run(workspace.allocate(
+          kernel::matmul_implementation::scratch_bytes<Implementation>(), 64));
+      workspace.rewind(mark);
     } else {
       run(nullptr);
     }
@@ -398,6 +1490,7 @@ private:
   CInputSpec c_input_;
   COutputSpec c_output_;
   [[no_unique_address]] AutoPackingState auto_pack_{};
+  [[no_unique_address]] BatchRowsPackAState batch_rows_pack_a_{};
 };
 
 /** Build C = A*B^T with a hardware-zero accumulator prologue. */

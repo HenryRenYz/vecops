@@ -50,7 +50,7 @@ struct Backend<
 
   template <typename InputSpec, typename OutputSpec>
   static constexpr bool eligible =
-      sizeof(typename InputSpec::ComputeType) <= 4 &&
+      sizeof(typename InputSpec::ComputeType) <= 8 &&
       std::same_as<typename InputSpec::TransformType, tensor::NoTransform> &&
       std::same_as<typename InputSpec::MemoryElement,
                    typename InputSpec::ComputeType> &&
@@ -101,11 +101,30 @@ struct Backend<
   using ResourceRequirements = execution::details::ResourceSet<>;
 
   template <typename InputSpec, typename OutputSpec>
-  static constexpr bool eligible =
-      sme_common_eligible_v<InputSpec, OutputSpec> &&
-      std::same_as<typename InputSpec::TransformType, tensor::NoTransform> &&
-      std::same_as<typename InputSpec::MemoryElement, float32_t> &&
-      std::same_as<typename InputSpec::ComputeType, bfloat16_t>;
+  static constexpr bool eligible = [] {
+    using Transform = typename InputSpec::TransformType;
+    using Memory = typename InputSpec::MemoryElement;
+    using Compute = typename InputSpec::ComputeType;
+    if constexpr (!sme_common_eligible_v<InputSpec, OutputSpec>) {
+      return false;
+    } else if constexpr (std::same_as<Transform, tensor::NoTransform>) {
+      return
+          (std::same_as<Memory, float32_t> &&
+           (std::same_as<Compute, bfloat16_t> ||
+            std::same_as<Compute, float16_t>)) ||
+          ((std::same_as<Memory, bfloat16_t> ||
+            std::same_as<Memory, float16_t>) &&
+           std::same_as<Compute, float32_t>);
+    } else {
+      return std::same_as<Memory, float32_t> &&
+          (std::same_as<Compute, int8_t> ||
+              std::same_as<Compute, uint8_t>) &&
+          Transform::is_elementwise &&
+          Transform::permutation_equivariant &&
+          std::same_as<typename Transform::TIn, float32_t> &&
+          std::same_as<typename Transform::TOut, float32_t>;
+    }
+  }();
 
   template <gemm::Atom Atom, gemm::Operand Side,
             execution::ExecutionScope Scope,
@@ -114,7 +133,10 @@ struct Backend<
       Scope& scope, const Source& source, Destination& destination) {
     static_assert(generic::RawDirectAccess<Destination>);
     using T = typename gemm::packing_t<Atom, Side>::Element;
-    static_assert(std::same_as<T, bfloat16_t>);
+    static_assert(
+        std::same_as<T, float32_t> || std::same_as<T, float16_t> ||
+        std::same_as<T, bfloat16_t> || std::same_as<T, int8_t> ||
+        std::same_as<T, uint8_t>);
     const auto& layout = source.spec().input_layout();
     const nint_t spatial = layout.shape()[0];
     const nint_t k = layout.shape()[1];
@@ -232,6 +254,83 @@ struct Backend<
     const nint_t panel = destination.spec().output_layout().shape()[2];
     sme::expand_fp16_packed_to_fp32(
         temporary, output, layout.shape()[0], layout.shape()[1], panel);
+  }
+};
+
+template <>
+struct Backend<
+    gemm::details::sme::Format,
+    matmul_pack_implementation::SMEFP32ToFP64> {
+  using ResourceRequirements = execution::details::ResourceSet<>;
+
+  template <typename InputSpec, typename OutputSpec>
+  static constexpr bool eligible =
+      sme_common_eligible_v<InputSpec, OutputSpec> &&
+      std::same_as<typename InputSpec::TransformType, tensor::NoTransform> &&
+      std::same_as<typename InputSpec::MemoryElement, float32_t> &&
+      std::same_as<typename InputSpec::ComputeType, float64_t>;
+
+  template <gemm::Atom Atom, gemm::Operand Side,
+            execution::ExecutionScope Scope,
+            typename Source, typename Destination>
+  VECOPS_ALWAYS_INLINE static void run(
+      Scope& scope, const Source& source, Destination& destination) {
+    static_assert(generic::RawDirectAccess<Destination>);
+    static_assert(std::same_as<typename Source::MemoryElement, float32_t>);
+    static_assert(std::same_as<typename Source::ComputeType, float64_t>);
+    static_assert(std::same_as<typename Source::Transform, tensor::NoTransform>);
+    using Packing = gemm::packing_t<Atom, Side>;
+    static_assert(std::same_as<typename Packing::Element, float64_t>);
+    const auto& layout = source.spec().input_layout();
+    const auto* input = source.raw_data();
+    const nint_t spatial = layout.shape()[0];
+    const nint_t k = layout.shape()[1];
+    const nint_t row_stride = source.raw_strides()[0];
+    auto* output = reinterpret_cast<float64_t*>(destination.raw_data());
+    scope.with_resources(
+        execution::details::arm::StreamingZARegion{},
+        [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          sme::pack_fp32_to_fp64(
+              input, spatial, k, row_stride, output);
+        });
+  }
+};
+
+template <>
+struct Backend<
+    gemm::details::sme::Format,
+    matmul_pack_implementation::SMEFP32ToFP64Single> {
+  using ResourceRequirements = execution::details::ResourceSet<>;
+
+  template <typename InputSpec, typename OutputSpec>
+  static constexpr bool eligible = Backend<
+      gemm::details::sme::Format,
+      matmul_pack_implementation::SMEFP32ToFP64>::template eligible<
+          InputSpec, OutputSpec>;
+
+  template <gemm::Atom Atom, gemm::Operand Side,
+            execution::ExecutionScope Scope,
+            typename Source, typename Destination>
+  VECOPS_ALWAYS_INLINE static void run(
+      Scope& scope, const Source& source, Destination& destination) {
+    static_assert(generic::RawDirectAccess<Destination>);
+    static_assert(std::same_as<typename Source::MemoryElement, float32_t>);
+    static_assert(std::same_as<typename Source::ComputeType, float64_t>);
+    static_assert(std::same_as<typename Source::Transform, tensor::NoTransform>);
+    using Packing = gemm::packing_t<Atom, Side>;
+    static_assert(std::same_as<typename Packing::Element, float64_t>);
+    const auto& layout = source.spec().input_layout();
+    const auto* input = source.raw_data();
+    const nint_t spatial = layout.shape()[0];
+    const nint_t k = layout.shape()[1];
+    const nint_t row_stride = source.raw_strides()[0];
+    auto* output = reinterpret_cast<float64_t*>(destination.raw_data());
+    scope.with_resources(
+        execution::details::arm::StreamingZARegion{},
+        [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          sme::pack_fp32_to_fp64_single(
+              input, spatial, k, row_stride, output);
+        });
   }
 };
 

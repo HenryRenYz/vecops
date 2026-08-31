@@ -39,6 +39,7 @@ struct Backend<
     matmul_pack_implementation::Vector> {
   using ResourceRequirements =
       typename execution::details::current_backend_t::DefaultRequirements;
+  static constexpr bool supports_column_compensation = true;
 
   template <typename InputSpec, typename OutputSpec>
   static constexpr bool eligible = false;
@@ -85,9 +86,29 @@ struct Backend<
       }
     } else {
       if constexpr (VEC_WIDTH >= 512) {
-        amx::pack_b_access<
-            Packing::KPack, Packing::KTile, Tag>(
-                source, output, spatial, k);
+        using Transform =
+            typename generic::SpecOf<Source>::TransformType;
+        constexpr bool RowwiseCompatibleTransform = [] {
+          if constexpr (std::same_as<Transform, tensor::NoTransform>) {
+            return true;
+          } else {
+            return Transform::is_elementwise &&
+                Transform::permutation_equivariant;
+          }
+        }();
+        constexpr bool RowMajorInput = std::same_as<
+            tensor::stride_type_t<
+                1, typename generic::SpecOf<Source>::InputLayout>,
+            meta::Const<1>> && RowwiseCompatibleTransform;
+        if constexpr (RowMajorInput) {
+          amx::pack_b_row_major_access<
+              Packing::KPack, Packing::KTile>(
+                  source, output, spatial, k);
+        } else {
+          amx::pack_b_access<
+              Packing::KPack, Packing::KTile, Tag>(
+                  source, output, spatial, k);
+        }
       } else {
         const nint_t padded_groups =
             ceil_div(k, Packing::KTile) *
@@ -95,6 +116,71 @@ struct Backend<
         generic::pack_interleaved_panels<Packing::KPack, Tag>(
             source, output, spatial, k, Packing::Panel, padded_groups);
       }
+    }
+  }
+
+  template <gemm::Atom Atom,
+            execution::ExecutionScope Scope,
+            typename Source, typename Destination,
+            typename CompensationDestination>
+  VECOPS_ALWAYS_INLINE static void run_compensated(
+      Scope& scope, const Source& source, Destination& destination,
+      CompensationDestination& compensation, int32_t a_zero_point) {
+    using Packing = gemm::packing_t<Atom, gemm::Operand::B>;
+    static_assert(std::same_as<typename Atom::TA, uint8_t>);
+    static_assert(std::same_as<typename Atom::TB, int8_t>);
+    static_assert(std::same_as<typename Atom::TAcc, int32_t>);
+    static_assert(std::same_as<typename Source::ComputeType, int8_t>);
+    static_assert(std::same_as<typename Destination::ComputeType, int8_t>);
+    static_assert(std::same_as<
+                  typename CompensationDestination::ComputeType, int32_t>);
+    const auto& layout = source.spec().input_layout();
+    const nint_t spatial = layout.shape()[0];
+    const nint_t k = layout.shape()[1];
+    auto* output = reinterpret_cast<int8_t*>(destination.raw_data());
+    auto* correction =
+        reinterpret_cast<int32_t*>(compensation.raw_data());
+    constexpr bool Direct = VEC_WIDTH >= 512 &&
+        generic::RawDirectAccess<Source> &&
+        std::same_as<
+            tensor::stride_type_t<
+                1, typename generic::SpecOf<Source>::InputLayout>,
+            meta::Const<1>>;
+    if constexpr (Direct) {
+      const auto* input =
+          reinterpret_cast<const int8_t*>(source.raw_data());
+      amx::pack_b_direct_compensated<Packing::KPack>(
+          input, source.raw_strides()[0], output, correction, spatial, k,
+          Packing::Panel, Packing::KTile, a_zero_point);
+    } else if constexpr (VEC_WIDTH >= 512) {
+      using Transform = typename generic::SpecOf<Source>::TransformType;
+      constexpr bool RowwiseCompatibleTransform = [] {
+        if constexpr (std::same_as<Transform, tensor::NoTransform>) {
+          return true;
+        } else {
+          return Transform::is_elementwise &&
+              Transform::permutation_equivariant;
+        }
+      }();
+      constexpr bool RowMajorInput = std::same_as<
+          tensor::stride_type_t<
+              1, typename generic::SpecOf<Source>::InputLayout>,
+          meta::Const<1>> && RowwiseCompatibleTransform;
+      if constexpr (RowMajorInput) {
+        amx::pack_b_row_major_access_compensated<
+            Packing::KPack, Packing::KTile>(
+                source, output, correction, spatial, k, a_zero_point);
+      } else {
+        run<Atom, gemm::Operand::B>(scope, source, destination);
+        amx::compensate_packed_s8_b(
+            output, correction, spatial, k, Packing::Panel, Packing::KTile,
+            a_zero_point);
+      }
+    } else {
+      run<Atom, gemm::Operand::B>(scope, source, destination);
+      amx::compensate_packed_s8_b(
+          output, correction, spatial, k, Packing::Panel, Packing::KTile,
+          a_zero_point);
     }
   }
 };

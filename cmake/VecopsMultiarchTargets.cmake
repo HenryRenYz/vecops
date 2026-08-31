@@ -23,11 +23,23 @@ set(VECOPS_MAP_ARM_NEON      "armv8-a+simd")
 set(VECOPS_MAP_ARM_SVE       "armv8-a+sve")
 set(VECOPS_MAP_ARM_SVE2      "armv8-a+sve2")
 
+if(VECOPS_ARCH_FAMILY STREQUAL "ARM")
+    option(VECOPS_ENABLE_SME_FUSED_F64_EXTERNAL_LEAF
+        "Build and link the ISA-specific SME fused FP64 leaf" ON)
+    option(VECOPS_ENABLE_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF
+        "Build and link the ISA-specific SME runtime-quantized INT8 GEMV leaf"
+        ON)
+    option(VECOPS_ENABLE_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF
+        "Build and link the SME mixed-sign INT8 skinny leaf" ON)
+endif()
+
 # Some compilers (including BiSheng releases) do not enable all advertised
 # native extensions with the bare -march=native spelling.
 set(VECOPS_MAP_ARM_Native "native")
 set(VECOPS_NATIVE_HAS_SME OFF)
 set(VECOPS_NATIVE_HAS_SME_FA64 OFF)
+set(VECOPS_NATIVE_HAS_SME_F64F64 OFF)
+set(VECOPS_NATIVE_HAS_I8MM OFF)
 if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND EXISTS "/proc/cpuinfo")
     file(READ "/proc/cpuinfo" _VECOPS_CPUINFO)
     string(REGEX MATCH "Features[ \t]*:.*" _VECOPS_FEAT_LINE
@@ -45,13 +57,25 @@ if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND EXISTS "/proc/cpuinfo")
             set(VECOPS_MAP_ARM_Native "armv8-a")
         endif()
     endif()
-    foreach(_VECOPS_FEAT IN ITEMS sve2p1 bf16 sme)
+    # Matrix-vector fallbacks use the ordinary-SVE dot/MMLA extensions when
+    # the native CPU exposes them.  These are independent of SME_FA64:
+    # i8mm enables SVE integer MMLA, while f32mm/f64mm enable FP FMMLA.
+    foreach(_VECOPS_FEAT IN ITEMS sve2p1 bf16 i8mm sme)
         string(FIND "${_VECOPS_FEAT_LINE}" " ${_VECOPS_FEAT} " _VECOPS_POS)
         if(NOT _VECOPS_POS EQUAL -1)
             string(APPEND VECOPS_MAP_ARM_Native "+${_VECOPS_FEAT}")
             if(_VECOPS_FEAT STREQUAL "sme")
                 set(VECOPS_NATIVE_HAS_SME ON)
+            elseif(_VECOPS_FEAT STREQUAL "i8mm")
+                set(VECOPS_NATIVE_HAS_I8MM ON)
             endif()
+        endif()
+    endforeach()
+    # Linux names the SVE floating matrix HWCAPs svef32mm/svef64mm,
+    # whereas compiler feature modifiers omit the "sve" prefix.
+    foreach(_VECOPS_MM_FEAT IN ITEMS f32mm f64mm)
+        if(_VECOPS_FEAT_LINE MATCHES " (sve)?${_VECOPS_MM_FEAT} ")
+            string(APPEND VECOPS_MAP_ARM_Native "+${_VECOPS_MM_FEAT}")
         endif()
     endforeach()
     # Linux reports FEAT_SME_FA64 as "smefa64", while compiler -march
@@ -69,6 +93,7 @@ if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND EXISTS "/proc/cpuinfo")
     endif()
     string(FIND "${_VECOPS_FEAT_LINE}" " smef64f64 " _VECOPS_SME_F64_POS)
     if(NOT _VECOPS_SME_F64_POS EQUAL -1)
+        set(VECOPS_NATIVE_HAS_SME_F64F64 ON)
         string(APPEND VECOPS_MAP_ARM_Native "+sme-f64f64")
     endif()
 
@@ -251,6 +276,8 @@ endfunction()
 # registry/main translation unit; generated stubs compile the heavy shards.
 #
 #   // @vecops-target-shards: 4
+#   // @vecops-target-shards-x86: 4
+#   // @vecops-target-shards-ARM: 16
 #   // @vecops-test-shards: 4   (backward compatible)
 function(_vecops_expand_target_source OUT_VAR TARGET_NAME SOURCE)
     if(IS_ABSOLUTE "${SOURCE}")
@@ -268,19 +295,43 @@ function(_vecops_expand_target_source OUT_VAR TARGET_NAME SOURCE)
     file(READ "${_SOURCE}" _SOURCE_HEADER LIMIT 1024)
     string(REGEX MATCHALL
         "(^|\n)[ \t]*//[ \t]+@vecops-(target|test)-shards:[ \t]*[1-9][0-9]*[ \t]*(\n|$)"
-        _SHARD_MARKERS "${_SOURCE_HEADER}")
-    list(LENGTH _SHARD_MARKERS _MARKER_COUNT)
-    if(_MARKER_COUNT GREATER 1)
-        message(FATAL_ERROR "Multiple vecops shard markers in ${_SOURCE}")
+        _GENERIC_SHARD_MARKERS "${_SOURCE_HEADER}")
+    string(REGEX MATCHALL
+        "(^|\n)[ \t]*//[ \t]+@vecops-target-shards-(x86|ARM):[ \t]*[1-9][0-9]*[ \t]*(\n|$)"
+        _FAMILY_SHARD_MARKERS "${_SOURCE_HEADER}")
+    list(LENGTH _GENERIC_SHARD_MARKERS _GENERIC_MARKER_COUNT)
+    list(LENGTH _FAMILY_SHARD_MARKERS _FAMILY_MARKER_COUNT)
+    if(_GENERIC_MARKER_COUNT GREATER 1 OR _FAMILY_MARKER_COUNT GREATER 2)
+        message(FATAL_ERROR "Duplicate vecops shard markers in ${_SOURCE}")
     endif()
-    if(_MARKER_COUNT EQUAL 0)
+    if(_GENERIC_MARKER_COUNT GREATER 0 AND _FAMILY_MARKER_COUNT GREATER 0)
+        message(FATAL_ERROR
+            "Cannot mix generic and architecture-specific shard markers in ${_SOURCE}")
+    endif()
+    if(_GENERIC_MARKER_COUNT EQUAL 0 AND _FAMILY_MARKER_COUNT EQUAL 0)
         set(${OUT_VAR} "${_SOURCE}" PARENT_SCOPE)
         return()
     endif()
 
-    list(GET _SHARD_MARKERS 0 _SHARD_MARKER)
+    if(_GENERIC_MARKER_COUNT EQUAL 1)
+        list(GET _GENERIC_SHARD_MARKERS 0 _SHARD_MARKER)
+    else()
+        set(_SELECTED_FAMILY_MARKERS "")
+        foreach(_MARKER IN LISTS _FAMILY_SHARD_MARKERS)
+            if(_MARKER MATCHES
+               "@vecops-target-shards-${VECOPS_ARCH_FAMILY}:")
+                list(APPEND _SELECTED_FAMILY_MARKERS "${_MARKER}")
+            endif()
+        endforeach()
+        list(LENGTH _SELECTED_FAMILY_MARKERS _SELECTED_MARKER_COUNT)
+        if(NOT _SELECTED_MARKER_COUNT EQUAL 1)
+            message(FATAL_ERROR
+                "Expected exactly one ${VECOPS_ARCH_FAMILY} shard marker in ${_SOURCE}")
+        endif()
+        list(GET _SELECTED_FAMILY_MARKERS 0 _SHARD_MARKER)
+    endif()
     string(REGEX REPLACE
-        "^.*@vecops-(target|test)-shards:[ \t]*([1-9][0-9]*).*$" "\\2"
+        "^.*@vecops-(target|test)-shards(-x86|-ARM)?:[ \t]*([1-9][0-9]*).*$" "\\3"
         _SHARD_COUNT "${_SHARD_MARKER}")
     string(STRIP "${_SHARD_COUNT}" _SHARD_COUNT)
     if(_SHARD_COUNT GREATER 512)
@@ -325,6 +376,72 @@ ${_SHARD_LEGACY_DEFINITIONS}
         list(APPEND _EXPANDED_SOURCES "${_STUB}")
     endforeach()
     set(${OUT_VAR} "${_EXPANDED_SOURCES}" PARENT_SCOPE)
+endfunction()
+
+# Return one ISA-specific archive containing the selected non-header SME matmul
+# leaves.  The archive is shared by targets with the same -march and feature
+# set. Each leaf remains a separate object, so a static linker extracts only
+# the objects referenced by a consumer's header instantiations.
+function(_vecops_get_sme_matmul_leaf_library
+        OUT_VAR MARCH USE_F64 USE_RUNTIME_QUANT_INT8 USE_MIXED_SIGN_SKINNY)
+    set(_LEAF_KEY
+        "${MARCH};f64=${USE_F64};runtime_i8=${USE_RUNTIME_QUANT_INT8};mixed_sign_skinny=${USE_MIXED_SIGN_SKINNY}")
+    string(SHA1 _MARCH_HASH "${_LEAF_KEY}")
+    string(SUBSTRING "${_MARCH_HASH}" 0 12 _MARCH_ID)
+    set(_LEAF_TARGET "vecops_sme_matmul_leaves_${_MARCH_ID}")
+    if(NOT TARGET ${_LEAF_TARGET})
+        set(_LEAF_SOURCES "")
+        if(USE_F64)
+            list(APPEND _LEAF_SOURCES
+                "${CMAKE_SOURCE_DIR}/src/arch/sme/FusedSkinnyF64.cpp")
+        endif()
+        if(USE_RUNTIME_QUANT_INT8)
+            list(APPEND _LEAF_SOURCES
+                "${CMAKE_SOURCE_DIR}/src/arch/sme/RuntimeQuantInt8.cpp")
+        endif()
+        if(USE_MIXED_SIGN_SKINNY)
+            list(APPEND _LEAF_SOURCES
+                "${CMAKE_SOURCE_DIR}/src/arch/sme/MixedSignSkinnyInt8.cpp")
+        endif()
+        if(NOT _LEAF_SOURCES)
+            message(FATAL_ERROR
+                "SME matmul leaf library requested without any leaves")
+        endif()
+        add_library(${_LEAF_TARGET} STATIC ${_LEAF_SOURCES})
+        target_compile_features(${_LEAF_TARGET} PRIVATE cxx_std_20)
+        target_include_directories(${_LEAF_TARGET} PRIVATE
+            "${CMAKE_SOURCE_DIR}/include"
+            "${CMAKE_SOURCE_DIR}/include/vecops")
+        target_compile_definitions(${_LEAF_TARGET} PRIVATE
+            "$<$<CONFIG:Debug>:VECOPS_DEBUG>")
+        if(USE_F64)
+            target_compile_definitions(${_LEAF_TARGET} PRIVATE
+                VECOPS_HAS_SME_FUSED_F64_EXTERNAL_LEAF=1)
+        endif()
+        if(USE_RUNTIME_QUANT_INT8)
+            target_compile_definitions(${_LEAF_TARGET} PRIVATE
+                VECOPS_HAS_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF=1
+                VECOPS_TARGET_SME_FA64=1)
+        endif()
+        if(USE_MIXED_SIGN_SKINNY)
+            target_compile_definitions(${_LEAF_TARGET} PRIVATE
+                VECOPS_HAS_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF=1)
+        endif()
+        if(VECOPS_PRESERVE_SUBNORMALS)
+            target_compile_definitions(${_LEAF_TARGET} PRIVATE
+                VECOPS_PRESERVE_SUBNORMALS=1)
+        endif()
+        target_compile_options(${_LEAF_TARGET} PRIVATE
+            "-march=${MARCH}" "-Wno-ignored-attributes")
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(${_LEAF_TARGET} PRIVATE "-Wno-psabi")
+        endif()
+        target_link_libraries(${_LEAF_TARGET} PRIVATE
+            vecops_optimize_for_kernels)
+        set_property(TARGET ${_LEAF_TARGET} PROPERTY FOLDER
+            "internal/sme_matmul")
+    endif()
+    set(${OUT_VAR} "${_LEAF_TARGET}" PARENT_SCOPE)
 endfunction()
 
 # Public primitive used by vecops_add_test and vecops_add_benchmark. It owns
@@ -434,6 +551,65 @@ function(vecops_add_multiarch_executable)
               (_ARCH STREQUAL "NativeFixedSVE") OR
               (_ARCH STREQUAL "NativeFixedStreamingSVE")))))
             set(_VECOPS_TARGET_HAS_SME ON)
+        endif()
+        set(_VECOPS_TARGET_HAS_I8MM OFF)
+        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
+           ((_MARCH MATCHES "(^|\\+)i8mm($|\\+)") OR
+            (VECOPS_NATIVE_HAS_I8MM AND
+             ((_ARCH STREQUAL "Native") OR
+              (_ARCH STREQUAL "NativeFixedSVE") OR
+              (_ARCH STREQUAL "NativeFixedStreamingSVE")))))
+            set(_VECOPS_TARGET_HAS_I8MM ON)
+        endif()
+
+        set(_VECOPS_USE_SME_F64_LEAF OFF)
+        if(VECOPS_ENABLE_SME_FUSED_F64_EXTERNAL_LEAF AND
+           _VECOPS_TARGET_HAS_SME AND
+           ((_MARCH MATCHES "(^|\\+)sme-f64f64($|\\+)") OR
+            (VECOPS_NATIVE_HAS_SME_F64F64 AND
+             ((_ARCH STREQUAL "Native") OR
+              (_ARCH STREQUAL "NativeFixedSVE") OR
+              (_ARCH STREQUAL "NativeFixedStreamingSVE")))))
+            set(_VECOPS_USE_SME_F64_LEAF ON)
+        endif()
+
+        set(_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF OFF)
+        if(VECOPS_ENABLE_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF AND
+           _VECOPS_TARGET_HAS_SME AND
+           _VECOPS_TARGET_HAS_SME_FA64 AND
+           _VECOPS_TARGET_HAS_I8MM)
+            set(_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF ON)
+        endif()
+
+        set(_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF OFF)
+        if(VECOPS_ENABLE_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF AND
+           _VECOPS_TARGET_HAS_SME AND
+           _VECOPS_TARGET_HAS_I8MM)
+            set(_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF ON)
+        endif()
+
+        if(_VECOPS_USE_SME_F64_LEAF OR
+           _VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF OR
+           _VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF)
+            _vecops_get_sme_matmul_leaf_library(
+                _VECOPS_SME_MATMUL_LEAF_LIBRARY "${_MARCH}"
+                "${_VECOPS_USE_SME_F64_LEAF}"
+                "${_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF}"
+                "${_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF}")
+            target_link_libraries(${_TARGET_NAME} PRIVATE
+                ${_VECOPS_SME_MATMUL_LEAF_LIBRARY})
+            if(_VECOPS_USE_SME_F64_LEAF)
+                target_compile_definitions(${_TARGET_NAME} PRIVATE
+                    VECOPS_HAS_SME_FUSED_F64_EXTERNAL_LEAF=1)
+            endif()
+            if(_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF)
+                target_compile_definitions(${_TARGET_NAME} PRIVATE
+                    VECOPS_HAS_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF=1)
+            endif()
+            if(_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF)
+                target_compile_definitions(${_TARGET_NAME} PRIVATE
+                    VECOPS_HAS_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF=1)
+            endif()
         endif()
         if(_VECOPS_TARGET_HAS_SME AND
            VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS AND

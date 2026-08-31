@@ -39,6 +39,7 @@
  * | `ZeroVecTransform`           | Built-in transform that returns zeros        |
  * | `IdentityVecTransform`       | Built-in conversion/identity transform       |
  * | `make_vec_transform()`       | Factory for coordinate-aware callables       |
+ * | `make_lane_local_vec_transform()` | Coordinate-aware, lane-independent factory |
  * | `make_elementwise_vec_transform()` | Factory for coordinate-free callables  |
  * | `adapt_vec_transform()`      | Wrap or convert a callable/transform         |
  *
@@ -58,7 +59,10 @@
  *
  * Elementwise transforms are not a separate class hierarchy. They are ordinary
  * transforms with `is_elementwise == true`; coordinate arguments are accepted
- * by the wrapper and ignored before calling the wrapped callable.
+ * by the wrapper and ignored before calling the wrapped callable. A
+ * coordinate-aware transform may instead promise `is_lane_local == true`:
+ * output lane i then depends only on input lane i, but may also depend on that
+ * lane's logical coordinate or external per-lane parameters.
  *
  * ## Vector-size adaptation
  *
@@ -212,6 +216,7 @@ concept TransformContextLike = requires(
  */
 struct NoTransform {
   static constexpr bool is_elementwise = true;
+  static constexpr bool is_lane_local = true;
   static constexpr bool permutation_equivariant = true;
   static constexpr bool reads_input = true;
 };
@@ -299,14 +304,17 @@ inline constexpr bool is_vec_transform_like_v =
  *
  * `VecTransform` is an interface-by-convention base. Derived classes provide
  * `operator()(out_tag, in_vec, context)`; the base only defines the element
- * types, the elementwise marker, and the valid vector POW2 ranges implied by
- * the input/output element sizes.
+ * types, the transform-planning markers, and the valid vector POW2 ranges
+ * implied by the input/output element sizes.
  *
  * `TIn` and `TOut` are transform-boundary types, not Tensor memory and kernel
  * compute types. DataAccess performs conversions on both sides. The traits are
  * semantic promises used for planning:
  *
- * - `is_elementwise`: output lane i depends only on input lane i;
+ * - `is_elementwise`: the callable is coordinate-independent and output lane
+ *   i depends only on input lane i;
+ * - `is_lane_local`: output lane i depends only on input lane i, while logical
+ *   coordinates or external per-lane parameters may affect the result;
  * - `permutation_equivariant`: permuting input lanes equivalently permutes
  *   output lanes, which is required for unordered conversion;
  * - `reads_input`: false allows input materialization and source reads to be
@@ -321,6 +329,7 @@ struct VecTransform {
   using TOut = EOut;
 
   static constexpr bool is_elementwise = Elementwise;
+  static constexpr bool is_lane_local = Elementwise;
   static constexpr bool permutation_equivariant = Elementwise;
   static constexpr bool reads_input = true;
 
@@ -482,6 +491,23 @@ private:
 };
 
 /**
+ * @brief Coordinate-aware transform whose output lanes remain independent.
+ *
+ * Unlike an elementwise transform, the callable still receives TransformContext
+ * and is not permutation-equivariant. The lane-local promise only permits a
+ * consumer to repartition naturally ordered lanes while preserving each lane's
+ * logical coordinate.
+ */
+template <typename EOut, typename EIn, typename Fn>
+struct LaneLocalLambdaVecTransform
+    : public LambdaVecTransform<EOut, EIn, Fn, false> {
+  using Base = LambdaVecTransform<EOut, EIn, Fn, false>;
+  using Base::Base;
+
+  static constexpr bool is_lane_local = true;
+};
+
+/**
  * @brief Pure transform that synthesizes zero without reading Tensor memory.
  *
  * `reads_input=false` lets the planner eliminate source reads and input
@@ -504,6 +530,16 @@ struct ZeroVecTransform : public VecTransform<EOut, EIn, true> {
     return vec::zeros(t);
   }
 };
+
+template <typename T>
+struct IsZeroVecTransform : std::false_type {};
+
+template <typename EOut, typename EIn>
+struct IsZeroVecTransform<ZeroVecTransform<EOut, EIn>> : std::true_type {};
+
+template <typename T>
+inline constexpr bool is_zero_vec_transform_v =
+    IsZeroVecTransform<std::remove_cvref_t<T>>::value;
 
 /**
  * @brief Explicit same-dtype identity transform.
@@ -540,6 +576,21 @@ struct IdentityVecTransform : public VecTransform<EOut, EIn, true> {
 template <typename EOut, typename EIn, typename Fn>
 constexpr auto make_vec_transform(Fn&& fn) {
   using Transform = LambdaVecTransform<EOut, EIn, std::remove_cvref_t<Fn>, false>;
+  return Transform(std::forward<Fn>(fn));
+}
+
+/**
+ * @brief Wrap a coordinate-aware callable whose lanes are independent.
+ *
+ * The callable signature is `fn(out_tag, input_vec, context)`. It may use each
+ * lane's logical coordinate and external per-lane parameters, but output lane i
+ * must not depend on any input lane other than i. This does not promise
+ * permutation equivariance.
+ */
+template <typename EOut, typename EIn, typename Fn>
+constexpr auto make_lane_local_vec_transform(Fn&& fn) {
+  using Transform = LaneLocalLambdaVecTransform<
+      EOut, EIn, std::remove_cvref_t<Fn>>;
   return Transform(std::forward<Fn>(fn));
 }
 

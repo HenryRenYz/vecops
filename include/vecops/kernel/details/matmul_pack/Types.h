@@ -12,6 +12,8 @@ struct SME {};
 struct SMEPostprocess {};
 struct SMEStagedTransform {};
 struct SMEStagedFP16ToFP32 {};
+struct SMEFP32ToFP64 {};
+struct SMEFP32ToFP64Single {};
 
 } // namespace vecops::kernel::matmul_pack_implementation
 
