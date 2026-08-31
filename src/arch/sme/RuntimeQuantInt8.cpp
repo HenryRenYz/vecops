@@ -13,8 +13,7 @@
 
 namespace vecops::kernel::matmul_details::sme {
 
-#if defined(VECOPS_HAS_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF) && \
-    defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+#if defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
 
 // TODO: Keep this mixed-sign lane-DOT helper SME-backend-local until its
 // packed-B segment contract and signedness semantics have another backend

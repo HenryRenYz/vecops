@@ -369,9 +369,11 @@ ${_SHARD_LEGACY_DEFINITIONS}
 endfunction()
 
 # Return one ISA-specific archive containing the selected non-header SME matmul
-# leaves.  The archive is shared by targets with the same -march and feature
+# leaves. The archive is shared by targets with the same -march and feature
 # set. Each leaf remains a separate object, so a static linker extracts only
-# the objects referenced by a consumer's header instantiations.
+# the objects referenced by a consumer's header instantiations. Target ISA
+# features are the compile-time availability contract: every multiarch target
+# that can instantiate one of these paths is linked to the matching archive.
 function(_vecops_get_sme_matmul_leaf_library
         OUT_VAR MARCH USE_F64 USE_RUNTIME_QUANT_INT8 USE_MIXED_SIGN_SKINNY)
     set(_LEAF_KEY
@@ -404,18 +406,9 @@ function(_vecops_get_sme_matmul_leaf_library
             "${CMAKE_SOURCE_DIR}/include/vecops")
         target_compile_definitions(${_LEAF_TARGET} PRIVATE
             "$<$<CONFIG:Debug>:VECOPS_DEBUG>")
-        if(USE_F64)
-            target_compile_definitions(${_LEAF_TARGET} PRIVATE
-                VECOPS_HAS_SME_FUSED_F64_EXTERNAL_LEAF=1)
-        endif()
         if(USE_RUNTIME_QUANT_INT8)
             target_compile_definitions(${_LEAF_TARGET} PRIVATE
-                VECOPS_HAS_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF=1
                 VECOPS_TARGET_SME_FA64=1)
-        endif()
-        if(USE_MIXED_SIGN_SKINNY)
-            target_compile_definitions(${_LEAF_TARGET} PRIVATE
-                VECOPS_HAS_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF=1)
         endif()
         if(VECOPS_PRESERVE_SUBNORMALS)
             target_compile_definitions(${_LEAF_TARGET} PRIVATE
@@ -584,18 +577,6 @@ function(vecops_add_multiarch_executable)
                 "${_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF}")
             target_link_libraries(${_TARGET_NAME} PRIVATE
                 ${_VECOPS_SME_MATMUL_LEAF_LIBRARY})
-            if(_VECOPS_USE_SME_F64_LEAF)
-                target_compile_definitions(${_TARGET_NAME} PRIVATE
-                    VECOPS_HAS_SME_FUSED_F64_EXTERNAL_LEAF=1)
-            endif()
-            if(_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF)
-                target_compile_definitions(${_TARGET_NAME} PRIVATE
-                    VECOPS_HAS_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF=1)
-            endif()
-            if(_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF)
-                target_compile_definitions(${_TARGET_NAME} PRIVATE
-                    VECOPS_HAS_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF=1)
-            endif()
         endif()
         if(_VECOPS_TARGET_HAS_SME AND
            VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS AND

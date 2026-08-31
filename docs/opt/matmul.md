@@ -3470,9 +3470,9 @@ full-K特化和多种conversion postprocess；继续重写普通转置的低风�
   一并从production header删除；需要复现实验时应使用冻结patch/独立benchmark，不能
   继续让生产Backend承担条件编译矩阵。
 - CMake删除三个默认ON的`VECOPS_ENABLE_SME_*_EXTERNAL_LEAF`用户选项。multiarch层现在
-  只依据目标ISA自动构建和链接三个production leaf，并继续用内部`VECOPS_HAS_*`定义
-  表示外部符号确实可链接；不使用multiarch helper的header消费者仍会安全回退，不会
-  产生undefined symbol。
+  只依据目标ISA自动构建和链接三个production leaf。X48提交时仍用内部
+  `VECOPS_HAS_SME_*_EXTERNAL_LEAF`表示外部符号可链接；该临时链接标记随后由X49清理，
+  当前状态以X49为准。
 - 验证环境为`920f-4:/home/ryz/vecops-neo`，构建目录
   `cmake-build-sme-compile-dispatch-v2`，显式BiSheng Clang/Clang++ 19.1.7、Release、
   `-march=native+bf16+i8mm+sme+sme-fa64+sme-f64f64`、固定SVL元数据512。生产候选阶段
@@ -3480,6 +3480,29 @@ full-K特化和多种conversion postprocess；继续重写普通转置的低风�
   674个Dynamic/Const case，text/data/bss与清理前生产基线逐字节同尺寸，为
   5,030,897/49,304/1,240B；SME archive仍仅含F64、runtime-quant INT8、mixed-sign
   INT8三个object，不存在packed-GEMV符号。
+
+### MATMUL-SME-X49：external-leaf链接标记收敛到ISA编译期契约
+
+- 日期：2026-08-31。状态：完成。删除三个内部
+  `VECOPS_HAS_SME_{FUSED_F64,RUNTIME_QUANT_INT8,MIXED_SIGN_SKINNY}_EXTERNAL_LEAF`
+  宏及其在`Backend.h`、arch source和CMake中的全部条件块/定义。它们从来不是运行时
+  shape dispatch；owner仍由`select_dispatch_owner()`的`consteval`和调用端
+  `if constexpr`仅依据Atom、transform、packing及`Meta.h`的extent证明决定。
+- 外部leaf的编译期可用性现在直接等同于目标ISA能力：F64 skinny要求
+  `HAS_SME_F64F64`，runtime-quant INT8要求`HAS_SME_FA64`与SVE I8MM，mixed-sign
+  skinny要求SVE I8MM。`vecops_add_multiarch_executable()`使用完全相同的能力判定构建并
+  链接对应archive，因此不存在“header选择路径但CMake未提供符号”的第二套布尔状态。
+  三个实现继续保留为独立`.cpp` object，以维持X41/X46验证过的代码布局和按引用抽取。
+- 这项清理不新增运行时判断，也不改变任何metadata触发条件，预期性能和最终二进制
+  抽取集合不变。直接绕过multiarch helper、手工以SME ISA编译调用端的工程，现在必须
+  同时链接匹配的SME leaf archive；这是ISA target的显式链接契约，不再以静默放弃已验证
+  特殊路径作为容错方式。
+- 验证主机为920f-4，源码`/home/ryz/vecops-neo`，构建目录
+  `/home/ryz/vecops-neo/cmake-build-sme-compile-dispatch-v2`；显式使用BiSheng
+  Clang/Clang++、Release、`-march=native+bf16+i8mm+sme+sme-fa64+sme-f64f64`及固定
+  streaming SVE元数据512。`MatmulTest-Native` 21/21、`MatmulFusionTest-Native`
+  8/8通过，Native Matmul反汇编门禁通过。leaf archive仍恰含F64、runtime-quant INT8、
+  mixed-sign INT8三个object，五个外部入口均有定义；本轮未在共享机上运行benchmark。
 
 ## 实验记录模板
 

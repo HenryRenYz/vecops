@@ -533,8 +533,7 @@ inline constexpr bool sve_skinny_candidate_v =
      (std::is_integral_v<typename Atom::TA> &&
       std::same_as<typename Atom::TAcc, int32_t>));
 
-#if defined(VECOPS_HAS_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF) && \
-    defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+#if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
 bool try_raw_mixed_sign_skinny_s8u8(
     nint_t logical_m, nint_t logical_n, nint_t logical_k,
     const int8_t* a, nint_t a_stride,
@@ -599,8 +598,7 @@ try_mixed_sign_sve_skinny(
 #endif
 
 #if !defined(VECOPS_DISABLE_SME_FUSED_SKINNY)
-#if defined(VECOPS_HAS_SME_FUSED_F64_EXTERNAL_LEAF) && \
-    defined(HAS_SME_F64F64)
+#if defined(HAS_SME_F64F64)
 void sve_skinny_fused_compute_f64_row(
     const float64_t* a_data, nint_t a_stride,
     const float64_t* b_data, nint_t b_stride,
@@ -612,8 +610,7 @@ void sve_skinny_fused_compute_f64_col(
     float64_t* values, nint_t outputs, nint_t logical_k);
 #endif
 
-#if defined(VECOPS_HAS_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF) && \
-    defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+#if defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
 void fused_runtime_quant_int8_packed_b_gemv_1x4vl(
     const float32_t* a, const int8_t* packed_b,
     nint_t b_outer_stride, nint_t b_group_stride,
@@ -832,8 +829,7 @@ sve_skinny_fused_lane_local_matmul(
       a, b, c_output, outputs, logical_k);
 }
 
-#if defined(VECOPS_HAS_SME_FUSED_F64_EXTERNAL_LEAF) && \
-    defined(HAS_SME_F64F64)
+#if defined(HAS_SME_F64F64)
 template <bool VaryRows, typename A, typename B, typename COutput>
 VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void
 sve_skinny_fused_matmul_f64_external(
@@ -879,8 +875,7 @@ sve_skinny_fused_matmul_f64_external(
 }
 #endif
 
-#if defined(VECOPS_HAS_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF) && \
-    defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+#if defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
 template <gemm::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 inline constexpr bool fused_runtime_quant_int8_candidate_v =
@@ -980,8 +975,7 @@ inline constexpr bool sve_skinny_fused_candidate_v =
     std::same_as<typename B::ComputeType, typename Atom::TB> &&
     std::same_as<typename COutput::ComputeType, typename Atom::TAcc> &&
     std::same_as<typename Atom::TA, typename Atom::TB> &&
-#if defined(VECOPS_HAS_SME_FUSED_F64_EXTERNAL_LEAF) && \
-    defined(HAS_SME_F64F64)
+#if defined(HAS_SME_F64F64)
     (sizeof(typename Atom::TAcc) <= sizeof(float32_t) ||
      std::same_as<typename Atom::TAcc, float64_t>) &&
 #else
@@ -1361,8 +1355,7 @@ consteval DispatchOwner select_dispatch_owner() {
   using KV = std::remove_cvref_t<K>;
   if constexpr (!execution::has_resource_v<
                     execution::details::arm::StreamingZA, Scope>) {
-#if defined(VECOPS_HAS_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF) && \
-    defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+#if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
     if constexpr (mixed_sign_sve_skinny_candidate_v<
                       Atom, A, B, CInput, COutput> &&
                   meta::lower_bound_at_least_v<KV, 0> &&
@@ -1410,8 +1403,7 @@ consteval DispatchOwner select_dispatch_owner() {
       }
     }
 #endif
-#if defined(VECOPS_HAS_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF) && \
-    defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+#if defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
     if constexpr (fused_runtime_quant_int8_candidate_v<
                       Atom, A, B, CInput, COutput> &&
                   extent_is_v<MV, 1> &&
@@ -1881,8 +1873,7 @@ struct Backend<matmul_implementation::SME> {
     static_assert(std::same_as<typename Atom::KernelKind, gemm::SMEKernelKind>);
     constexpr auto Owner = sme::select_dispatch_owner<
         Atom, M, N, K, A, B, CInput, COutput, Scope>();
-#if defined(VECOPS_HAS_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF) && \
-    defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+#if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
     if constexpr (Owner == sme::DispatchOwner::MixedSignSkinnyRow ||
                   Owner == sme::DispatchOwner::MixedSignSkinnyColumn) {
       const bool handled = sme::try_mixed_sign_sve_skinny<Atom>(
@@ -1906,8 +1897,7 @@ struct Backend<matmul_implementation::SME> {
 #if !defined(VECOPS_DISABLE_SME_SVE_SKINNY) && \
     !defined(VECOPS_DISABLE_SME_FUSED_SKINNY)
     if constexpr (Owner == sme::DispatchOwner::FusedSkinnyRow) {
-#if defined(VECOPS_HAS_SME_FUSED_F64_EXTERNAL_LEAF) && \
-    defined(HAS_SME_F64F64)
+#if defined(HAS_SME_F64F64)
       if constexpr (std::same_as<Atom, gemm::SME_F64F64>) {
         sme::sve_skinny_fused_matmul_f64_external<false>(
             a, b, c_output, static_cast<nint_t>(n), static_cast<nint_t>(k));
@@ -1924,8 +1914,7 @@ struct Backend<matmul_implementation::SME> {
       }
       return;
     } else if constexpr (Owner == sme::DispatchOwner::FusedSkinnyColumn) {
-#if defined(VECOPS_HAS_SME_FUSED_F64_EXTERNAL_LEAF) && \
-    defined(HAS_SME_F64F64)
+#if defined(HAS_SME_F64F64)
       if constexpr (std::same_as<Atom, gemm::SME_F64F64>) {
         sme::sve_skinny_fused_matmul_f64_external<true>(
             a, b, c_output, static_cast<nint_t>(m), static_cast<nint_t>(k));
@@ -1943,8 +1932,7 @@ struct Backend<matmul_implementation::SME> {
       return;
     }
 #endif
-#if defined(VECOPS_HAS_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF) && \
-    defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+#if defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
     if constexpr (Owner == sme::DispatchOwner::RuntimeQuantINT8) {
       if (sme::try_fused_runtime_quant_int8_packed_b_gemv<Atom>(
               static_cast<nint_t>(m), static_cast<nint_t>(n),

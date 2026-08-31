@@ -14,8 +14,7 @@
 
 namespace vecops::kernel::matmul_details::sme {
 
-#if defined(VECOPS_HAS_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF) && \
-    defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+#if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
 
 // TODO: Keep mixed-sign widening DOT SME-backend-local until signedness,
 // operand ordering, and accumulator semantics have a second backend consumer.
