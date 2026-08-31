@@ -80,6 +80,39 @@ struct KernelProvider {
 using Catalog = tile::Tile2DGeneratedCatalog<
     KernelProvider, tile::Tile2DSearchSpace<4, 4, 8>>;
 
+template <bool FastPacked, bool PrefetchLargeWorkingSet>
+struct KernelPlan : std::bool_constant<FastPacked> {
+  static constexpr bool prefetch_large_working_set =
+      PrefetchLargeWorkingSet;
+};
+
+template <gemm::Atom Atom,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K>
+inline constexpr bool large_packed_prefetch_v = [] {
+#if !defined(VECOPS_DISABLE_SME_LARGE_PACKED_PREFETCH)
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  using KV = std::remove_cvref_t<K>;
+  if constexpr (std::same_as<Atom, gemm::SME_BF16F32> &&
+                meta::lower_bound_at_least_v<MV, 1> &&
+                meta::lower_bound_at_least_v<NV, 1> &&
+                meta::lower_bound_at_least_v<KV, 1>) {
+    constexpr nint_t LogicalM = meta::lower_bound_v<MV>;
+    constexpr nint_t LogicalN = meta::lower_bound_v<NV>;
+    constexpr nint_t LogicalK = meta::lower_bound_v<KV>;
+    constexpr uint64_t MinPackedBytes = uint64_t{2} * 1024 * 1024;
+    constexpr uint64_t BytesPerK =
+        static_cast<uint64_t>(LogicalM) * sizeof(typename Atom::TA) +
+        static_cast<uint64_t>(LogicalN) * sizeof(typename Atom::TB);
+    constexpr uint64_t MinBytesPerK =
+        (MinPackedBytes + static_cast<uint64_t>(LogicalK) - 1) /
+        static_cast<uint64_t>(LogicalK);
+    return BytesPerK >= MinBytesPerK;
+  }
+#endif
+  return false;
+}();
+
 template <gemm::Atom Atom, meta::ValueType M, meta::ValueType N>
 inline constexpr bool use_constraint_area4_v =
     tile::tile2d_details::has_max_block_count_v<
@@ -1524,12 +1557,7 @@ template <gemm::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 inline constexpr bool sve_skinny_fused_output_supported_v =
     COutput::Transform::is_elementwise ||
-#if defined(VECOPS_EXPERIMENTAL_SME_FUSED_LANE_LOCAL) && \
-    !defined(VECOPS_DISABLE_SME_FUSED_LANE_LOCAL)
     COutput::Transform::is_lane_local;
-#else
-    false;
-#endif
 
 template <gemm::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
@@ -1897,38 +1925,129 @@ VECOPS_ALWAYS_INLINE bool try_packed_mmla_tiny(
 }
 #endif
 
-template <gemm::Atom Atom, int NM, int NN>
-VECOPS_ALWAYS_INLINE bool prefer_large_packed_prefetch(
-    nint_t logical_m, nint_t logical_n, nint_t logical_k) {
-#if !defined(VECOPS_DISABLE_SME_LARGE_PACKED_PREFETCH)
-  if constexpr (
-      std::same_as<Atom, gemm::SME_BF16F32> && NM == 2 && NN == 2) {
-    // X37/X43 found that A+B L2 prefetch at distance 48 is profitable only
-    // once the complete packed operands exceed the private-cache working
-    // set. Keep short-N and small-output long-K on the original loop.
-    constexpr uint64_t MinPackedBytes = uint64_t{2} * 1024 * 1024;
-    if (logical_m > 0 && logical_n > 0 && logical_k > 0) {
-      const uint64_t bytes_per_k =
-          static_cast<uint64_t>(logical_m) * sizeof(typename Atom::TA) +
-          static_cast<uint64_t>(logical_n) * sizeof(typename Atom::TB);
-      const uint64_t min_bytes_per_k =
-          (MinPackedBytes + static_cast<uint64_t>(logical_k) - 1) /
-          static_cast<uint64_t>(logical_k);
-      return bytes_per_k >= min_bytes_per_k;
+enum class DispatchOwner {
+  General,
+  MixedSignSkinnyRow,
+  MixedSignSkinnyColumn,
+  RawSkinnyRow,
+  RawSkinnyColumn,
+  FusedSkinnyRow,
+  FusedSkinnyColumn,
+  RuntimeQuantINT8,
+  PackedMMLAPrimary,
+  PackedMMLATiny,
+};
+
+template <meta::ValueType E, nint_t Value>
+inline constexpr bool extent_is_v =
+    meta::range_within_v<std::remove_cvref_t<E>, Value, Value>;
+
+template <gemm::Atom Atom,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K,
+          typename A, typename B, typename CInput, typename COutput,
+          typename Scope>
+consteval DispatchOwner select_dispatch_owner() {
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  using KV = std::remove_cvref_t<K>;
+  if constexpr (!execution::has_resource_v<
+                    execution::details::arm::StreamingZA, Scope>) {
+#if defined(VECOPS_HAS_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF) && \
+    defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+    if constexpr (mixed_sign_sve_skinny_candidate_v<
+                      Atom, A, B, CInput, COutput> &&
+                  meta::lower_bound_at_least_v<KV, 0> &&
+                  extent_is_v<MV, 1> &&
+                  meta::range_within_v<NV, 0, 64>) {
+      return DispatchOwner::MixedSignSkinnyRow;
+    } else if constexpr (mixed_sign_sve_skinny_candidate_v<
+                             Atom, A, B, CInput, COutput> &&
+                         meta::lower_bound_at_least_v<KV, 0> &&
+                         extent_is_v<NV, 1> &&
+                         meta::range_within_v<MV, 0, 64>) {
+      return DispatchOwner::MixedSignSkinnyColumn;
     }
-  }
-#else
-  (void)logical_m;
-  (void)logical_n;
-  (void)logical_k;
 #endif
-  return false;
+#if !defined(VECOPS_DISABLE_SME_SVE_SKINNY)
+    if constexpr (sve_skinny_candidate_v<
+                      Atom, A, B, CInput, COutput>) {
+      constexpr nint_t MaxOutputs =
+          std::same_as<Atom, gemm::SME_F16F32> ? 16 : 64;
+      if constexpr (extent_is_v<MV, 1> &&
+                    meta::range_within_v<NV, 0, MaxOutputs> &&
+                    meta::lower_bound_at_least_v<KV, 0>) {
+        return DispatchOwner::RawSkinnyRow;
+      } else if constexpr (extent_is_v<NV, 1> &&
+                           meta::range_within_v<MV, 0, MaxOutputs> &&
+                           meta::lower_bound_at_least_v<KV, 0>) {
+        return DispatchOwner::RawSkinnyColumn;
+      }
+    }
+#endif
+#if !defined(VECOPS_DISABLE_SME_SVE_SKINNY) && \
+    !defined(VECOPS_DISABLE_SME_FUSED_SKINNY)
+    if constexpr (sve_skinny_fused_candidate_v<
+                      Atom, A, B, CInput, COutput>) {
+      constexpr nint_t MaxOutputs =
+          std::same_as<Atom, gemm::SME_F16F32> ? 16 : 64;
+      if constexpr (extent_is_v<MV, 1> &&
+                    meta::range_within_v<NV, 0, MaxOutputs> &&
+                    meta::lower_bound_at_least_v<KV, 0>) {
+        return DispatchOwner::FusedSkinnyRow;
+      } else if constexpr (extent_is_v<NV, 1> &&
+                           meta::range_within_v<MV, 0, MaxOutputs> &&
+                           meta::lower_bound_at_least_v<KV, 0>) {
+        return DispatchOwner::FusedSkinnyColumn;
+      }
+    }
+#endif
+#if defined(VECOPS_HAS_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF) && \
+    defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+    if constexpr (fused_runtime_quant_int8_candidate_v<
+                      Atom, A, B, CInput, COutput> &&
+                  extent_is_v<MV, 1> &&
+                  meta::lower_bound_at_least_v<NV, 1> && NV::aligns(64) &&
+                  meta::lower_bound_at_least_v<KV, 0> && KV::aligns(64)) {
+      return DispatchOwner::RuntimeQuantINT8;
+    }
+#endif
+#if defined(CPU_CAPABILITY_SVE)
+    if constexpr (packed_mmla_candidate_v<
+                      Atom, A, B, CInput, COutput>) {
+      constexpr bool Elongated =
+          (extent_is_v<MV, 2> && extent_is_v<NV, 8>) ||
+          (extent_is_v<MV, 8> && extent_is_v<NV, 2>);
+      constexpr bool Square =
+          extent_is_v<MV, 4> && extent_is_v<NV, 4>;
+      constexpr nint_t PrimaryMaxK = Square
+          ? 257
+          : (std::same_as<Atom, gemm::SME_BF16F32> ? 1025 : 513);
+      if constexpr ((Elongated || Square) &&
+                    meta::range_within_v<KV, 0, PrimaryMaxK>) {
+        return DispatchOwner::PackedMMLAPrimary;
+      }
+      constexpr bool ShortWide =
+          extent_is_v<MV, 2> &&
+          (extent_is_v<NV, 2> || extent_is_v<NV, 4>);
+      constexpr bool TallNarrow =
+          extent_is_v<MV, 4> && extent_is_v<NV, 2>;
+      constexpr nint_t TinyMaxK = TallNarrow
+          ? 257
+          : (std::same_as<Atom, gemm::SME_BF16F32> ? 1025 : 513);
+      if constexpr ((ShortWide || TallNarrow) &&
+                    meta::range_within_v<KV, 0, TinyMaxK>) {
+        return DispatchOwner::PackedMMLATiny;
+      }
+    }
+#endif
+  }
+  return DispatchOwner::General;
 }
 
-template <gemm::Atom Atom, int NM, int NN, typename A, typename B>
+template <gemm::Atom Atom, int NM, int NN, bool PrefetchLargeWorkingSet,
+          typename A, typename B>
 VECOPS_ALWAYS_INLINE void compute_packed_groups(
-    const A& a, const B& b, nint_t m, nint_t n, nint_t logical_k,
-    bool prefetch_large_working_set = false) {
+    const A& a, const B& b, nint_t m, nint_t n, nint_t logical_k) {
   static_assert(is_packed_access_v<Atom, gemm::Operand::A, A>);
   static_assert(is_packed_access_v<Atom, gemm::Operand::B, B>);
   using TA = typename Atom::TA;
@@ -2036,33 +2155,35 @@ VECOPS_ALWAYS_INLINE void compute_packed_groups(
 #if !defined(VECOPS_DISABLE_SME_LARGE_PACKED_PREFETCH)
       constexpr nint_t PrefetchDistance = 48;
       nint_t kg = 0;
-      if (prefetch_large_working_set && groups > PrefetchDistance) {
-        const nint_t prefetch_groups = groups - PrefetchDistance;
-        VECOPS_LOOP_ALIGN(64) for (; kg < prefetch_groups; ++kg) {
-          vec::prefetch(
-              ATag{}, a0 + (kg + PrefetchDistance) * a_step,
-              vec::mem::prefetch_l2, vec::mem::prefetch_keep,
-              vec::mem::prefetch_read);
-          vec::prefetch(
-              ATag{}, a1 + (kg + PrefetchDistance) * a_step,
-              vec::mem::prefetch_l2, vec::mem::prefetch_keep,
-              vec::mem::prefetch_read);
-          vec::prefetch(
-              BTag{}, b0 + (kg + PrefetchDistance) * b_step,
-              vec::mem::prefetch_l2, vec::mem::prefetch_keep,
-              vec::mem::prefetch_read);
-          vec::prefetch(
-              BTag{}, b1 + (kg + PrefetchDistance) * b_step,
-              vec::mem::prefetch_l2, vec::mem::prefetch_keep,
-              vec::mem::prefetch_read);
-          const auto av0 = vec::load(ATag{}, a0 + kg * a_step);
-          const auto av1 = vec::load(ATag{}, a1 + kg * a_step);
-          const auto bv0 = vec::load(BTag{}, b0 + kg * b_step);
-          const auto bv1 = vec::load(BTag{}, b1 + kg * b_step);
-          mopa<Atom, 0>(av0, bv0);
-          mopa<Atom, 1>(av0, bv1);
-          mopa<Atom, 2>(av1, bv0);
-          mopa<Atom, 3>(av1, bv1);
+      if constexpr (PrefetchLargeWorkingSet) {
+        if (groups > PrefetchDistance) {
+          const nint_t prefetch_groups = groups - PrefetchDistance;
+          VECOPS_LOOP_ALIGN(64) for (; kg < prefetch_groups; ++kg) {
+            vec::prefetch(
+                ATag{}, a0 + (kg + PrefetchDistance) * a_step,
+                vec::mem::prefetch_l2, vec::mem::prefetch_keep,
+                vec::mem::prefetch_read);
+            vec::prefetch(
+                ATag{}, a1 + (kg + PrefetchDistance) * a_step,
+                vec::mem::prefetch_l2, vec::mem::prefetch_keep,
+                vec::mem::prefetch_read);
+            vec::prefetch(
+                BTag{}, b0 + (kg + PrefetchDistance) * b_step,
+                vec::mem::prefetch_l2, vec::mem::prefetch_keep,
+                vec::mem::prefetch_read);
+            vec::prefetch(
+                BTag{}, b1 + (kg + PrefetchDistance) * b_step,
+                vec::mem::prefetch_l2, vec::mem::prefetch_keep,
+                vec::mem::prefetch_read);
+            const auto av0 = vec::load(ATag{}, a0 + kg * a_step);
+            const auto av1 = vec::load(ATag{}, a1 + kg * a_step);
+            const auto bv0 = vec::load(BTag{}, b0 + kg * b_step);
+            const auto bv1 = vec::load(BTag{}, b1 + kg * b_step);
+            mopa<Atom, 0>(av0, bv0);
+            mopa<Atom, 1>(av0, bv1);
+            mopa<Atom, 2>(av1, bv0);
+            mopa<Atom, 3>(av1, bv1);
+          }
         }
       }
       VECOPS_LOOP_ALIGN(64) for (; kg < groups; ++kg) {
@@ -2262,7 +2383,7 @@ VECOPS_ALWAYS_INLINE void compute_group(
   }
 }
 
-template <gemm::Atom Atom, bool FastPacked, int NM, int NN,
+template <gemm::Atom Atom, typename Plan, int NM, int NN,
           bool ExactBlocks,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_ALWAYS_INLINE void microkernel(
@@ -2270,6 +2391,10 @@ VECOPS_ALWAYS_INLINE void microkernel(
     nint_t logical_m, nint_t logical_n, nint_t logical_k,
     nint_t m, nint_t n, nint_t active_m, nint_t active_n) {
   constexpr int Outputs = NM * NN;
+  constexpr bool FastPacked = Plan::value;
+  constexpr bool PrefetchLargeWorkingSet =
+      Plan::prefetch_large_working_set &&
+      std::same_as<Atom, gemm::SME_BF16F32> && NM == 2 && NN == 2;
   const nint_t lanes = static_cast<nint_t>(Atom::M_R);
   vec::details::sme::zero_za();
   const OperandInvariants<Atom, gemm::Operand::A, A> a_invariants(a);
@@ -2318,11 +2443,8 @@ VECOPS_ALWAYS_INLINE void microkernel(
   if constexpr (FastPacked && ExactBlocks && Outputs <= 4) {
     static_assert(is_packed_access_v<Atom, gemm::Operand::A, A>);
     static_assert(is_packed_access_v<Atom, gemm::Operand::B, B>);
-    const bool prefetch_large_working_set =
-        prefer_large_packed_prefetch<Atom, NM, NN>(
-            logical_m, logical_n, logical_k);
-    compute_packed_groups<Atom, NM, NN>(
-        a, b, m, n, logical_k, prefetch_large_working_set);
+    compute_packed_groups<Atom, NM, NN, PrefetchLargeWorkingSet>(
+        a, b, m, n, logical_k);
   } else if constexpr (FastPacked && Outputs <= 4) {
     static_assert(is_packed_access_v<Atom, gemm::Operand::A, A>);
     static_assert(is_packed_access_v<Atom, gemm::Operand::B, B>);
@@ -2330,11 +2452,8 @@ VECOPS_ALWAYS_INLINE void microkernel(
         active_m > static_cast<nint_t>(NM - 1) * lanes &&
         active_n > static_cast<nint_t>(NN - 1) * lanes;
     if (all_logical_blocks_exist) {
-      const bool prefetch_large_working_set =
-          prefer_large_packed_prefetch<Atom, NM, NN>(
-              logical_m, logical_n, logical_k);
-      compute_packed_groups<Atom, NM, NN>(
-          a, b, m, n, logical_k, prefetch_large_working_set);
+      compute_packed_groups<Atom, NM, NN, PrefetchLargeWorkingSet>(
+          a, b, m, n, logical_k);
     } else {
       compute_generic();
     }
@@ -2397,104 +2516,73 @@ struct Backend<matmul_implementation::SME> {
       const A& a, const B& b, const CInput& c_input, COutput& c_output,
       void* scratch) {
     static_assert(std::same_as<typename Atom::KernelKind, gemm::SMEKernelKind>);
+    constexpr auto Owner = sme::select_dispatch_owner<
+        Atom, M, N, K, A, B, CInput, COutput, Scope>();
 #if defined(VECOPS_HAS_SME_MIXED_SIGN_SKINNY_EXTERNAL_LEAF) && \
     defined(__ARM_FEATURE_SVE_MATMUL_INT8)
-    if constexpr (
-        !execution::has_resource_v<
-            execution::details::arm::StreamingZA, Scope> &&
-        sme::mixed_sign_sve_skinny_candidate_v<
-            Atom, A, B, CInput, COutput>) {
-      if (sme::try_mixed_sign_sve_skinny<Atom>(
-              static_cast<nint_t>(m), static_cast<nint_t>(n),
-              static_cast<nint_t>(k), a, b, c_input, c_output)) {
-        return;
-      }
+    if constexpr (Owner == sme::DispatchOwner::MixedSignSkinnyRow ||
+                  Owner == sme::DispatchOwner::MixedSignSkinnyColumn) {
+      const bool handled = sme::try_mixed_sign_sve_skinny<Atom>(
+          static_cast<nint_t>(m), static_cast<nint_t>(n),
+          static_cast<nint_t>(k), a, b, c_input, c_output);
+      VECOPS_ASSERT(handled, "compile-time mixed-sign skinny plan rejected");
+      return;
     }
 #endif
 #if !defined(VECOPS_DISABLE_SME_SVE_SKINNY)
-    if constexpr (
-        !execution::has_resource_v<
-            execution::details::arm::StreamingZA, Scope> &&
-        sme::sve_skinny_candidate_v<Atom, A, B, CInput, COutput>) {
-      const nint_t logical_m = static_cast<nint_t>(m);
-      const nint_t logical_n = static_cast<nint_t>(n);
-      const nint_t logical_k = static_cast<nint_t>(k);
-      constexpr nint_t MaxOutputs =
-          std::same_as<Atom, gemm::SME_F16F32> ? 16 : 64;
-      if (logical_m == 1 &&
-          0 <= logical_n && logical_n <= MaxOutputs) {
-        sme::sve_skinny_matmul<false>(
-            a, b, c_output, logical_n, logical_k);
-        return;
-      }
-      if (logical_n == 1 &&
-          0 <= logical_m && logical_m <= MaxOutputs) {
-        sme::sve_skinny_matmul<true>(
-            a, b, c_output, logical_m, logical_k);
-        return;
-      }
+    if constexpr (Owner == sme::DispatchOwner::RawSkinnyRow) {
+      sme::sve_skinny_matmul<false>(
+          a, b, c_output, static_cast<nint_t>(n), static_cast<nint_t>(k));
+      return;
+    } else if constexpr (Owner == sme::DispatchOwner::RawSkinnyColumn) {
+      sme::sve_skinny_matmul<true>(
+          a, b, c_output, static_cast<nint_t>(m), static_cast<nint_t>(k));
+      return;
     }
 #endif
 #if !defined(VECOPS_DISABLE_SME_SVE_SKINNY) && \
     !defined(VECOPS_DISABLE_SME_FUSED_SKINNY)
-    if constexpr (
-        !execution::has_resource_v<
-            execution::details::arm::StreamingZA, Scope> &&
-        sme::sve_skinny_fused_candidate_v<Atom, A, B, CInput, COutput>) {
-      const nint_t logical_m = static_cast<nint_t>(m);
-      const nint_t logical_n = static_cast<nint_t>(n);
-      const nint_t logical_k = static_cast<nint_t>(k);
-      constexpr nint_t MaxOutputs =
-          std::same_as<Atom, gemm::SME_F16F32> ? 16 : 64;
-      if (logical_m == 1 &&
-          0 <= logical_n && logical_n <= MaxOutputs) {
+    if constexpr (Owner == sme::DispatchOwner::FusedSkinnyRow) {
 #if defined(VECOPS_HAS_SME_FUSED_F64_EXTERNAL_LEAF) && \
     defined(HAS_SME_F64F64)
-        if constexpr (std::same_as<Atom, gemm::SME_F64F64>) {
-          sme::sve_skinny_fused_matmul_f64_external<false>(
-              a, b, c_output, logical_n, logical_k);
-        } else
+      if constexpr (std::same_as<Atom, gemm::SME_F64F64>) {
+        sme::sve_skinny_fused_matmul_f64_external<false>(
+            a, b, c_output, static_cast<nint_t>(n), static_cast<nint_t>(k));
+      } else
 #endif
-        {
-          if constexpr (COutput::Transform::is_elementwise) {
-            sme::sve_skinny_fused_matmul<false>(
-                a, b, c_output, logical_n, logical_k);
-          } else {
-            sme::sve_skinny_fused_lane_local_matmul<false>(
-                a, b, c_output, logical_n, logical_k);
-          }
+      {
+        if constexpr (COutput::Transform::is_elementwise) {
+          sme::sve_skinny_fused_matmul<false>(
+              a, b, c_output, static_cast<nint_t>(n), static_cast<nint_t>(k));
+        } else {
+          sme::sve_skinny_fused_lane_local_matmul<false>(
+              a, b, c_output, static_cast<nint_t>(n), static_cast<nint_t>(k));
         }
-        return;
       }
-      if (logical_n == 1 &&
-          0 <= logical_m && logical_m <= MaxOutputs) {
+      return;
+    } else if constexpr (Owner == sme::DispatchOwner::FusedSkinnyColumn) {
 #if defined(VECOPS_HAS_SME_FUSED_F64_EXTERNAL_LEAF) && \
     defined(HAS_SME_F64F64)
-        if constexpr (std::same_as<Atom, gemm::SME_F64F64>) {
-          sme::sve_skinny_fused_matmul_f64_external<true>(
-              a, b, c_output, logical_m, logical_k);
-        } else
+      if constexpr (std::same_as<Atom, gemm::SME_F64F64>) {
+        sme::sve_skinny_fused_matmul_f64_external<true>(
+            a, b, c_output, static_cast<nint_t>(m), static_cast<nint_t>(k));
+      } else
 #endif
-        {
-          if constexpr (COutput::Transform::is_elementwise) {
-            sme::sve_skinny_fused_matmul<true>(
-                a, b, c_output, logical_m, logical_k);
-          } else {
-            sme::sve_skinny_fused_lane_local_matmul<true>(
-                a, b, c_output, logical_m, logical_k);
-          }
+      {
+        if constexpr (COutput::Transform::is_elementwise) {
+          sme::sve_skinny_fused_matmul<true>(
+              a, b, c_output, static_cast<nint_t>(m), static_cast<nint_t>(k));
+        } else {
+          sme::sve_skinny_fused_lane_local_matmul<true>(
+              a, b, c_output, static_cast<nint_t>(m), static_cast<nint_t>(k));
         }
-        return;
       }
+      return;
     }
 #endif
 #if defined(VECOPS_HAS_SME_RUNTIME_QUANT_INT8_EXTERNAL_LEAF) && \
     defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
-    if constexpr (
-        !execution::has_resource_v<
-            execution::details::arm::StreamingZA, Scope> &&
-        sme::fused_runtime_quant_int8_candidate_v<
-            Atom, A, B, CInput, COutput>) {
+    if constexpr (Owner == sme::DispatchOwner::RuntimeQuantINT8) {
       if (sme::try_fused_runtime_quant_int8_packed_b_gemv<Atom>(
               static_cast<nint_t>(m), static_cast<nint_t>(n),
               static_cast<nint_t>(k), a, b, c_input, c_output)) {
@@ -2503,15 +2591,13 @@ struct Backend<matmul_implementation::SME> {
     }
 #endif
 #if defined(CPU_CAPABILITY_SVE)
-    if constexpr (
-        !execution::has_resource_v<
-            execution::details::arm::StreamingZA, Scope> &&
-        sme::packed_mmla_candidate_v<Atom, A, B, CInput, COutput>) {
+    if constexpr (Owner == sme::DispatchOwner::PackedMMLAPrimary) {
       if (sme::try_packed_mmla<Atom>(
               static_cast<nint_t>(m), static_cast<nint_t>(n),
               static_cast<nint_t>(k), a, b, c_input, c_output)) {
         return;
       }
+    } else if constexpr (Owner == sme::DispatchOwner::PackedMMLATiny) {
       if (sme::try_packed_mmla_tiny<Atom>(
               static_cast<nint_t>(m), static_cast<nint_t>(n),
               static_cast<nint_t>(k), a, b, c_input, c_output)) {
@@ -2579,11 +2665,19 @@ struct Backend<matmul_implementation::SME> {
   }
 
   template <gemm::Atom Atom, typename A, typename B,
-            meta::ValueType K, typename Fn>
-  VECOPS_ALWAYS_INLINE static void dispatch_plan(K k, Fn&& fn) {
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename Fn>
+  VECOPS_ALWAYS_INLINE static void dispatch_plan(M, N, K k, Fn&& fn) {
+    using MV = std::remove_cvref_t<M>;
+    using NV = std::remove_cvref_t<N>;
+    using KV = std::remove_cvref_t<K>;
+    constexpr bool PrefetchLargeWorkingSet =
+        sme::is_packed_access_v<Atom, gemm::Operand::A, A> &&
+        sme::is_packed_access_v<Atom, gemm::Operand::B, B> &&
+        sme::large_packed_prefetch_v<Atom, MV, NV, KV>;
     auto invoke = [&]<bool FastPacked>() VECOPS_INLINE_LAMBDA_NOEXCEPT {
       std::forward<Fn>(fn).template operator()<
-          std::bool_constant<FastPacked>>();
+          sme::KernelPlan<FastPacked, PrefetchLargeWorkingSet>>();
     };
     if constexpr (
         sme::is_packed_access_v<Atom, gemm::Operand::A, A> &&
@@ -2620,7 +2714,7 @@ struct Backend<matmul_implementation::SME> {
       nint_t m, nint_t n, nint_t active_m, nint_t active_n,
       void*) {
     sme::microkernel<
-        Atom, Plan::value, Case::a, Case::b, Case::exact_blocks>(
+        Atom, Plan, Case::a, Case::b, Case::exact_blocks>(
             a, b, c_input, c_output,
             logical_m, logical_n, logical_k,
             m, n, active_m, active_n);

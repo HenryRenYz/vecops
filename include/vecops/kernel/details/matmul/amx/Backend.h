@@ -131,43 +131,140 @@ inline constexpr bool packed_ab_tail_split_candidate_v =
     IsZeroTransform<TransformOf<CInput>>::value &&
     direct_row_major_output_v<COutput>;
 
-VECOPS_ALWAYS_INLINE bool use_packed_ab_tail_split(
-    nint_t m, nint_t n, nint_t k) {
-  return (m == 17 || m == 18 || m == 20) &&
-      (n == 33 || n == 47 || n == 48) && k == 1024;
+enum class DispatchOwner {
+  General,
+  SmallVector,
+  FusedSmallBF16,
+  PackedABTailSplit,
+};
+
+template <meta::ValueType E, nint_t Value>
+inline constexpr bool extent_is_v =
+    meta::range_within_v<std::remove_cvref_t<E>, Value, Value>;
+
+template <meta::ValueType M, meta::ValueType N, nint_t Limit>
+inline constexpr bool max_area_at_most_v = [] {
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  if constexpr (meta::has_upper_bound_v<MV> &&
+                meta::has_upper_bound_v<NV> &&
+                meta::upper_bound_v<MV> > 0 &&
+                meta::upper_bound_v<NV> > 0) {
+    return meta::upper_bound_v<MV> <=
+        Limit / meta::upper_bound_v<NV>;
+  } else {
+    return false;
+  }
+}();
+
+template <meta::ValueType E, nint_t Alignment>
+inline constexpr bool remainder_at_most_one_v = [] {
+  using EV = std::remove_cvref_t<E>;
+  if constexpr (EV::aligns(Alignment)) {
+    return true;
+  } else if constexpr (meta::is_bounded_v<EV> &&
+                       meta::lower_bound_v<EV> == meta::upper_bound_v<EV>) {
+    return meta::lower_bound_v<EV> % Alignment <= 1;
+  } else {
+    return false;
+  }
+}();
+
+template <meta::ValueType E, nint_t Value>
+inline constexpr bool extent_excludes_v = [] {
+  using EV = std::remove_cvref_t<E>;
+  return (meta::has_upper_bound_v<EV> &&
+          meta::upper_bound_v<EV> < Value) ||
+      (meta::has_lower_bound_v<EV> &&
+       meta::lower_bound_v<EV> > Value);
+}();
+
+template <gemm::Atom Atom,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K>
+consteval bool small_vector_guaranteed() {
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  using KV = std::remove_cvref_t<K>;
+  if constexpr (!meta::lower_bound_at_least_v<MV, 1> ||
+                !meta::lower_bound_at_least_v<NV, 1> ||
+                !meta::lower_bound_at_least_v<KV, 1>) {
+    return false;
+  } else {
+    constexpr bool Skinny =
+        (extent_is_v<MV, 1> && meta::upper_bound_at_most_v<NV, 64>) ||
+        (extent_is_v<NV, 1> && meta::upper_bound_at_most_v<MV, 64>);
+    constexpr bool LargeM1 = extent_is_v<MV, 1> &&
+        meta::lower_bound_at_least_v<NV, 128> &&
+        meta::upper_bound_at_most_v<NV, 4096>;
+    constexpr bool LargeN1 = extent_is_v<NV, 1> &&
+        meta::lower_bound_at_least_v<MV, 128> &&
+        meta::upper_bound_at_most_v<MV, 4096>;
+    if constexpr (std::same_as<Atom, gemm::AMX_BF16F32>) {
+      constexpr bool LargeSkinny =
+          meta::lower_bound_at_least_v<KV, 32> &&
+          remainder_at_most_one_v<KV, 32> &&
+          (LargeM1 ||
+           (LargeN1 && extent_excludes_v<KV, 256>));
+      return max_area_at_most_v<MV, NV, 16> || Skinny ||
+          (max_area_at_most_v<MV, NV, 32> &&
+           meta::upper_bound_at_most_v<KV, 256>) ||
+          (max_area_at_most_v<MV, NV, 64> &&
+           meta::upper_bound_at_most_v<KV, 64>) ||
+          LargeSkinny;
+    } else if constexpr (std::same_as<
+                             typename Atom::TA, typename Atom::TB>) {
+      constexpr bool LargeSkinny =
+          meta::lower_bound_at_least_v<KV, 64> &&
+          remainder_at_most_one_v<KV, 64> &&
+          (LargeM1 || LargeN1);
+      return max_area_at_most_v<MV, NV, 32> || Skinny || LargeSkinny;
+    } else {
+      constexpr bool LargeSkinny =
+          meta::lower_bound_at_least_v<KV, 64> &&
+          remainder_at_most_one_v<KV, 64> &&
+          (LargeM1 ||
+           (LargeN1 && extent_excludes_v<KV, 64>));
+      return max_area_at_most_v<MV, NV, 32> || Skinny ||
+          (max_area_at_most_v<MV, NV, 64> &&
+           meta::upper_bound_at_most_v<KV, 128>) ||
+          LargeSkinny;
+    }
+  }
 }
 
-template <gemm::Atom Atom>
-VECOPS_ALWAYS_INLINE bool use_small_vector(
-    nint_t m, nint_t n, nint_t k) {
-  if (m <= 0 || n <= 0 || k <= 0) return false;
-  const bool skinny =
-      (m == 1 && n <= 64) || (n == 1 && m <= 64);
-  const bool large_m1 = m == 1 && n >= 128 && n <= 4096;
-  const bool large_n1 = n == 1 && m >= 128 && m <= 4096;
-  const nint_t area = m <= 64 && n <= 64 ? m * n : 65;
-  if constexpr (std::same_as<Atom, gemm::AMX_BF16F32>) {
-    // The N=1/K=256 BF16 crossover remains code-placement sensitive across
-    // M=128..4096, so keep that whole ridge on AMX.
-    const bool large_skinny = k >= 32 && k % 32 <= 1 &&
-        (large_m1 || (large_n1 && k != 256));
-    return area <= 16 || skinny ||
-        (area <= 32 && k <= 256) ||
-        (area <= 64 && k <= 64) || large_skinny;
-  } else if constexpr (std::same_as<
-                           typename Atom::TA, typename Atom::TB>) {
-    // Same-sign VNNI needs one zero-point compensation dot.  The fused
-    // implementation amortizes it across the smaller output dimension, but
-    // its area-64 crossover is orientation/tail sensitive.  Keep the first
-    // production threshold deliberately below that unstable boundary.
-    const bool large_skinny = k >= 64 && k % 64 <= 1 &&
-        (large_m1 || large_n1);
-    return area <= 32 || skinny || large_skinny;
+template <gemm::Atom Atom, bool AllowTailSplit,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K,
+          typename A, typename B, typename CInput, typename COutput>
+consteval DispatchOwner select_dispatch_owner() {
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  using KV = std::remove_cvref_t<K>;
+  if constexpr (small_vector_candidate_v<
+                    Atom, A, B, CInput, COutput> &&
+                small_vector_guaranteed<Atom, MV, NV, KV>()) {
+    return DispatchOwner::SmallVector;
+  } else if constexpr (fused_small_bf16_candidate_v<
+                           Atom, A, B, CInput, COutput> &&
+                       meta::lower_bound_at_least_v<MV, 1> &&
+                       meta::lower_bound_at_least_v<NV, 1> &&
+                       meta::lower_bound_at_least_v<KV, 1> &&
+                       max_area_at_most_v<MV, NV, 16>) {
+    return DispatchOwner::FusedSmallBF16;
+  } else if constexpr (
+      AllowTailSplit &&
+      packed_ab_tail_split_candidate_v<
+          Atom, A, B, CInput, COutput> &&
+      (extent_is_v<MV, 17> || extent_is_v<MV, 18> ||
+       extent_is_v<MV, 20>) &&
+      (extent_is_v<NV, 33> || extent_is_v<NV, 47> ||
+       extent_is_v<NV, 48>) &&
+      extent_is_v<KV, 1024>) {
+    return DispatchOwner::PackedABTailSplit;
   } else {
-    const bool large_skinny = k >= 64 && k % 64 <= 1 &&
-        (large_m1 || (large_n1 && k != 64));
-    return area <= 32 || skinny || (area <= 64 && k <= 128) ||
-        large_skinny;
+    // Unconstrained Dynamic extents intentionally own only the general AMX
+    // implementation. A bounded/aligned Dynamic type may select a special
+    // owner only when every value admitted by its Meta contract is eligible.
+    return DispatchOwner::General;
   }
 }
 
@@ -501,6 +598,11 @@ struct KernelProvider {
   }
 };
 
+template <bool KGuaranteed, bool StreamB>
+struct KernelPlan : std::bool_constant<KGuaranteed> {
+  static constexpr bool stream_b = StreamB;
+};
+
 using Catalog = tile::Tile2DGeneratedCatalog<
     KernelProvider, tile::Tile2DSearchSpace<3, 3, 4>>;
 
@@ -756,11 +858,11 @@ VECOPS_ALWAYS_INLINE void load_a_tile(
 }
 
 template <gemm::Atom Atom, int Tile, bool SpatialGuaranteed, bool NonEmpty,
-          bool KGuaranteed, typename Source>
+          bool KGuaranteed, bool StreamB, typename Source>
 VECOPS_ALWAYS_INLINE void load_b_tile(
     const Source& source, nint_t n, nint_t k,
     nint_t logical_n, nint_t logical_k,
-    typename Atom::TB* buffer, bool stream) {
+    typename Atom::TB* buffer) {
   if constexpr (!NonEmpty) {
     if (n >= logical_n) {
       amx_intrinsics::zero<Tile>();
@@ -770,7 +872,7 @@ VECOPS_ALWAYS_INLINE void load_b_tile(
   const auto* pointer = prepare_b<Atom, SpatialGuaranteed, KGuaranteed>(
       source, n, k, logical_n, logical_k, buffer);
   if constexpr (is_packed_access_v<Atom, gemm::Operand::B, Source>) {
-    if (stream) amx_intrinsics::stream_load<Tile>(pointer, 64);
+    if constexpr (StreamB) amx_intrinsics::stream_load<Tile>(pointer, 64);
     else amx_intrinsics::load<Tile>(pointer, 64);
   } else {
     amx_intrinsics::load<Tile>(pointer, 64);
@@ -799,14 +901,13 @@ VECOPS_ALWAYS_INLINE void compute_tile() {
       Row * NN + Column, Outputs + Row, Outputs + NM + Column>();
 }
 
-template <gemm::Atom Atom, typename Case, bool KGuaranteed,
+template <gemm::Atom Atom, typename Case, bool KGuaranteed, bool StreamB,
           bool DirectInactiveZeroA, typename A, typename B>
 VECOPS_ALWAYS_INLINE void multiply_k_tile(
     const A& a, const B& b,
     nint_t logical_m, nint_t logical_n, nint_t logical_k,
     nint_t m, nint_t n, nint_t k,
-    typename Atom::TA* a_buffers, typename Atom::TB* b_buffers,
-    bool stream_b) {
+    typename Atom::TA* a_buffers, typename Atom::TB* b_buffers) {
   constexpr int NM = Case::a;
   constexpr int NN = Case::b;
   constexpr int Outputs = NM * NN;
@@ -829,10 +930,10 @@ VECOPS_ALWAYS_INLINE void multiply_k_tile(
     load_b_tile<
         Atom, Outputs + NM + static_cast<int>(I),
         FullN || (Case::exact_blocks && I + 1 < NN), NonEmptyN,
-        KGuaranteed>(
+        KGuaranteed, StreamB>(
         b, n + static_cast<nint_t>(I) * 16, k,
         logical_n, logical_k,
-        b_buffers + I * 1024 / sizeof(typename Atom::TB), stream_b);
+        b_buffers + I * 1024 / sizeof(typename Atom::TB));
   };
   if constexpr (
       NN == 1 &&
@@ -960,46 +1061,36 @@ VECOPS_ALWAYS_INLINE void microkernel(
        !direct_row_major_input_v<A>) ||
       (!is_packed_access_v<Atom, gemm::Operand::B, B> &&
        !direct_row_major_input_v<B>);
-  const bool stream_b = [&] VECOPS_INLINE_LAMBDA {
-    if constexpr (is_packed_access_v<Atom, gemm::Operand::B, B>) {
-      // Match oneDNN's cache-footprint policy: TILELOADDT1 is valuable once
-      // the packed weights no longer fit in this CPU's 48 KiB private L1D,
-      // but hurts the reuse of small panels.
-      constexpr nint_t L1Elements =
-          (48 * 1024) / sizeof(typename Atom::TB);
-      return logical_k > 0 &&
-          (logical_k >= L1Elements ||
-           logical_n > (L1Elements - 1) / logical_k);
-    } else {
-      return false;
-    }
-  }();
   if constexpr (Plan::value) {
     for (nint_t k = 0; k < logical_k; k += KR) {
-      multiply_k_tile<Atom, Case, true, DirectInactiveZeroA>(
+      multiply_k_tile<
+          Atom, Case, true, Plan::stream_b, DirectInactiveZeroA>(
           a, b, logical_m, logical_n, logical_k, m, n, k,
-          a_buffers, b_buffers, stream_b);
+          a_buffers, b_buffers);
     }
   } else if constexpr (!SplitKForAccess) {
     // Direct inputs already select an unmasked tileload/full-panel pack at
     // runtime, while packed panels are padded in K. Splitting either kind
     // would clone the kernel body merely to remove a predictable condition.
     for (nint_t k = 0; k < logical_k; k += KR) {
-      multiply_k_tile<Atom, Case, false, DirectInactiveZeroA>(
+      multiply_k_tile<
+          Atom, Case, false, Plan::stream_b, DirectInactiveZeroA>(
           a, b, logical_m, logical_n, logical_k, m, n, k,
-          a_buffers, b_buffers, stream_b);
+          a_buffers, b_buffers);
     }
   } else {
     const nint_t full_k = logical_k / KR * KR;
     for (nint_t k = 0; k < full_k; k += KR) {
-      multiply_k_tile<Atom, Case, true, DirectInactiveZeroA>(
+      multiply_k_tile<
+          Atom, Case, true, Plan::stream_b, DirectInactiveZeroA>(
           a, b, logical_m, logical_n, logical_k, m, n, k,
-          a_buffers, b_buffers, stream_b);
+          a_buffers, b_buffers);
     }
     if (full_k < logical_k) {
-      multiply_k_tile<Atom, Case, false, DirectInactiveZeroA>(
+      multiply_k_tile<
+          Atom, Case, false, Plan::stream_b, DirectInactiveZeroA>(
           a, b, logical_m, logical_n, logical_k, m, n, full_k,
-          a_buffers, b_buffers, stream_b);
+          a_buffers, b_buffers);
     }
   }
 
@@ -1064,19 +1155,24 @@ struct Backend<matmul_implementation::AMX> {
     static_assert(execution::has_resource_v<
         execution::details::x86::Tiles, Scope>);
     amx::Configuration configuration;
-    if constexpr (std::same_as<Policy, matmul_policy::Automatic> && PackedB) {
-      const nint_t logical_m = static_cast<nint_t>(m);
-      const nint_t logical_n = static_cast<nint_t>(n);
-      if (logical_m > 0 && logical_m <= 16) {
-        const nint_t n_blocks = ceil_div(logical_n, nint_t{16});
-        if (n_blocks == 2) {
+    using MV = std::remove_cvref_t<M>;
+    using NV = std::remove_cvref_t<N>;
+    if constexpr (std::same_as<Policy, matmul_policy::Automatic> && PackedB &&
+                  meta::range_within_v<MV, 1, 16> &&
+                  meta::lower_bound_at_least_v<NV, 1> &&
+                  meta::has_upper_bound_v<NV>) {
+      constexpr nint_t MinNBlocks =
+          ceil_div(meta::lower_bound_v<NV>, nint_t{16});
+      constexpr nint_t MaxNBlocks =
+          ceil_div(meta::upper_bound_v<NV>, nint_t{16});
+      if constexpr (MinNBlocks == 2 && MaxNBlocks == 2) {
           // The exact 1x2 family shares the same compact register mapping as
           // 1x3.  Shortening its C/A rows removes inactive-row TMUL work for
           // the common N=32 shared-weight case without changing traversal.
-          configuration.set_horizontal_rows(logical_m, 2);
-        } else if (n_blocks > 0 && n_blocks % 3 == 0) {
-          configuration.set_horizontal_rows(logical_m, 3);
-        }
+        configuration.set_horizontal_rows(static_cast<nint_t>(m), 2);
+      } else if constexpr (MinNBlocks == MaxNBlocks &&
+                           MinNBlocks % 3 == 0) {
+        configuration.set_horizontal_rows(static_cast<nint_t>(m), 3);
       }
     }
     return scope.with_configuration(
@@ -1140,77 +1236,75 @@ struct Backend<matmul_implementation::AMX> {
       Scope& scope, M m, N n, K k,
       const A& a, const B& b, const CInput& c_input, COutput& c_output,
       void* scratch) {
-    if constexpr (amx::small_vector_candidate_v<
-                      Atom, A, B, CInput, COutput>) {
+    constexpr auto Owner = amx::select_dispatch_owner<
+        Atom, AllowTailSplit, M, N, K, A, B, CInput, COutput>();
+    if constexpr (Owner == amx::DispatchOwner::SmallVector) {
       const nint_t logical_m = static_cast<nint_t>(m);
       const nint_t logical_n = static_cast<nint_t>(n);
       const nint_t logical_k = static_cast<nint_t>(k);
-      if (VECOPS_UNLIKELY(amx::use_small_vector<Atom>(
-                              logical_m, logical_n, logical_k))) {
-        amx::run_small_vector<Atom>(
-            a, b, c_output, logical_m, logical_n, logical_k);
-        return;
-      }
-    }
-    if constexpr (amx::fused_small_bf16_candidate_v<
-                      Atom, A, B, CInput, COutput>) {
+      amx::run_small_vector<Atom>(
+          a, b, c_output, logical_m, logical_n, logical_k);
+    } else if constexpr (Owner == amx::DispatchOwner::FusedSmallBF16) {
       const nint_t logical_m = static_cast<nint_t>(m);
       const nint_t logical_n = static_cast<nint_t>(n);
       const nint_t logical_k = static_cast<nint_t>(k);
-      if (VECOPS_UNLIKELY(
-              logical_m > 0 && logical_n > 0 && logical_k > 0 &&
-              logical_m <= 16 && logical_n <= 16 / logical_m)) {
-        amx::run_fused_small_bf16<Atom>(
-            a, b, c_input, c_output,
-            logical_m, logical_n, logical_k);
-        return;
-      }
-    }
-    if constexpr (
-        AllowTailSplit &&
-        amx::packed_ab_tail_split_candidate_v<
-            Atom, A, B, CInput, COutput>) {
+      amx::run_fused_small_bf16<Atom>(
+          a, b, c_input, c_output,
+          logical_m, logical_n, logical_k);
+    } else if constexpr (Owner == amx::DispatchOwner::PackedABTailSplit) {
       const nint_t logical_m = static_cast<nint_t>(m);
-      const nint_t logical_n = static_cast<nint_t>(n);
-      const nint_t logical_k = static_cast<nint_t>(k);
-      if (VECOPS_UNLIKELY(amx::use_packed_ab_tail_split(
-                              logical_m, logical_n, logical_k))) {
-        constexpr nint_t BulkM = 16;
-        const meta::Any tail_m{logical_m - BulkM};
-        with_configuration<Atom, Policy, true>(
-            scope, meta::cint<BulkM>, n,
-            [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-              run_configured_region<Atom, Policy>(
-                  configured, meta::cint<BulkM>, n, k,
-                  logical_m, 0, a, b, c_input, c_output, scratch);
-            });
-        with_configuration<Atom, Policy, true>(
-            scope, tail_m, n,
-            [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-              run_configured_region<Atom, Policy>(
-                  configured, tail_m, n, k,
-                  logical_m, BulkM, a, b, c_input, c_output, scratch);
-            });
-        return;
-      }
+      constexpr nint_t BulkM = 16;
+      const meta::Any tail_m{logical_m - BulkM};
+      with_configuration<Atom, Policy, true>(
+          scope, meta::cint<BulkM>, n,
+          [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+            run_configured_region<Atom, Policy>(
+                configured, meta::cint<BulkM>, n, k,
+                logical_m, 0, a, b, c_input, c_output, scratch);
+          });
+      with_configuration<Atom, Policy, true>(
+          scope, tail_m, n,
+          [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+            run_configured_region<Atom, Policy>(
+                configured, tail_m, n, k,
+                logical_m, BulkM, a, b, c_input, c_output, scratch);
+          });
+    } else {
+      constexpr bool PackedB =
+          amx::is_packed_access_v<Atom, gemm::Operand::B, B>;
+      with_configuration<Atom, Policy, PackedB>(
+          scope, m, n, [&](auto& configured)
+              VECOPS_INLINE_LAMBDA_NOEXCEPT {
+            run_configured<Atom, Policy>(
+                configured, m, n, k, a, b,
+                c_input, c_output, scratch);
+          });
     }
-    constexpr bool PackedB =
-        amx::is_packed_access_v<Atom, gemm::Operand::B, B>;
-    with_configuration<Atom, Policy, PackedB>(
-        scope, m, n, [&](auto& configured)
-            VECOPS_INLINE_LAMBDA_NOEXCEPT {
-          run_configured<Atom, Policy>(
-              configured, m, n, k, a, b,
-              c_input, c_output, scratch);
-        });
   }
 
   template <gemm::Atom Atom, typename A, typename B,
-            meta::ValueType K, typename Fn>
-  VECOPS_ALWAYS_INLINE static void dispatch_plan(K, Fn&& fn) {
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename Fn>
+  VECOPS_ALWAYS_INLINE static void dispatch_plan(M, N, K, Fn&& fn) {
     constexpr nint_t KR = decltype(Atom::K_R)::value;
-    using Plan = std::bool_constant<
-        std::remove_cvref_t<K>::aligns(KR)>;
+    using NV = std::remove_cvref_t<N>;
+    using KV = std::remove_cvref_t<K>;
+    constexpr bool StreamB = [] {
+      if constexpr (
+          amx::is_packed_access_v<Atom, gemm::Operand::B, B> &&
+          meta::lower_bound_at_least_v<NV, 0> &&
+          meta::lower_bound_at_least_v<KV, 1>) {
+        constexpr nint_t LogicalN = meta::lower_bound_v<NV>;
+        constexpr nint_t LogicalK = meta::lower_bound_v<KV>;
+        constexpr nint_t L1Elements =
+            (48 * 1024) / sizeof(typename Atom::TB);
+        return LogicalK >= L1Elements ||
+            LogicalN > (L1Elements - 1) / LogicalK;
+      } else {
+        return false;
+      }
+    }();
+    using Plan = amx::KernelPlan<KV::aligns(KR), StreamB>;
     std::forward<Fn>(fn).template operator()<Plan>();
   }
 
@@ -1227,7 +1321,7 @@ struct Backend<matmul_implementation::AMX> {
     const nint_t logical_n = static_cast<nint_t>(n);
     const nint_t logical_k = static_cast<nint_t>(k);
     dispatch_plan<Atom, A, B>(
-        k, [&]<typename Plan>() VECOPS_INLINE_LAMBDA_NOEXCEPT {
+        m, n, k, [&]<typename Plan>() VECOPS_INLINE_LAMBDA_NOEXCEPT {
           auto invoke = [&]<typename Case>(
                             Case, nint_t mi, nint_t ni,
                             nint_t active_m, nint_t active_n)

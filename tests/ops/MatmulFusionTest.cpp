@@ -75,7 +75,9 @@ TEST(MatmulFusionTest, DualAsymmetricU8UsesRowAndColumnCorrection) {
   vecops::test::matmul::check_dual_asymmetric_quantized<
       vecops::gemm::AMX_I8I32<uint8_t, uint8_t>>(19, 23, 65);
   vecops::test::matmul::check_dual_asymmetric_quantized<
-      vecops::gemm::AMX_I8I32<uint8_t, uint8_t>>(32, 64, 128, true);
+      vecops::gemm::AMX_I8I32<uint8_t, uint8_t>>(
+          vecops::meta::cint<32>, vecops::meta::cint<64>,
+          vecops::meta::cint<128>, true);
 #endif
 }
 
@@ -139,6 +141,19 @@ TEST(MatmulFusionTest, RuntimePerColumnScaleAndClampAreFused) {
       vecops::gemm::SME_BF16F32>(19, 23, 17);
   vecops::test::matmul::check_bias_clamp<
       vecops::gemm::SME_BF16F32>(19, 23, 17);
+  vecops::test::matmul::check_runtime_and_per_column_scale<
+      vecops::gemm::SME_BF16F32>(
+          vecops::meta::cint<1>, vecops::meta::cint<8>,
+          vecops::meta::cint<129>);
+  vecops::test::matmul::check_runtime_and_per_column_scale<
+      vecops::gemm::SME_BF16F32>(
+          vecops::meta::cint<8>, vecops::meta::cint<1>,
+          vecops::meta::cint<129>);
+  vecops::test::matmul::check_runtime_and_per_column_scale<
+      vecops::gemm::SME_BF16F32>(
+          vecops::meta::dyn<1, 1, 1>(1),
+          vecops::meta::dyn<1, 1, 8>(8),
+          vecops::meta::dyn<1, 0, 129>(129));
 }
 
 #elif VECOPS_TARGET_SHARD_INDEX == 1
@@ -181,7 +196,9 @@ TEST(MatmulFusionTest, DualAsymmetricU8UsesRowAndColumnCorrection) {
   vecops::test::matmul::check_dual_asymmetric_quantized<
       vecops::gemm::SME_I8I32<uint8_t, uint8_t>>(19, 23, 33);
   vecops::test::matmul::check_dual_asymmetric_quantized<
-      vecops::gemm::SME_I8I32<uint8_t, uint8_t>>(32, 64, 128, true);
+      vecops::gemm::SME_I8I32<uint8_t, uint8_t>>(
+          vecops::meta::cint<32>, vecops::meta::cint<64>,
+          vecops::meta::cint<128>, true);
 }
 
 #elif VECOPS_TARGET_SHARD_INDEX == 3
@@ -236,7 +253,8 @@ TEST(MatmulFusionTest, LargeF32ToF64ConversionUsesAutoPacking) {
   vecops::test::matmul::check_conversion<
       vecops::gemm::SME_F64F64,
       vecops::float32_t, vecops::float32_t, vecops::float32_t>(
-          64, 256, 256, true);
+          vecops::meta::cint<64>, vecops::meta::cint<256>,
+          vecops::meta::cint<256>, true);
 }
 #endif
 
@@ -271,5 +289,3 @@ TEST(MatmulFusionTest, RuntimePerColumnScaleAndClampF16AreFused) {
 #endif
 
 #endif
-
-

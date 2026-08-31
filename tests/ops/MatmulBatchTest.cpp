@@ -35,7 +35,7 @@ void run_native_batch_case() {
     test::matmul::check_batched_native_extent_pair<
         Atom, BroadcastB, 8, 1, 256, K>();
     test::matmul::check_batched_native<Atom, BroadcastB>(
-        8, 1, 256, K, true);
+        cint<8>, cint<1>, cint<256>, cint<K>, true);
     test::matmul::check_batched_packed_b<Atom>(8, 1, 256, K);
   } else {
     test::matmul::check_batched_native_extent_pair<
@@ -244,12 +244,14 @@ TEST(MatmulBatchTest, ConfiguredBatchHandlesZeroAndShortenedRows) {
   using Atom = gemm::AMX_BF16F32;
   test::matmul::check_batched_native<Atom, true>(0, 1, 48, 64);
   test::matmul::check_batched_packed_b<Atom>(8, 1, 32, 64);
-  test::matmul::check_batched_native<Atom, true>(8, 1, 47, 65, true);
+  test::matmul::check_batched_native<Atom, true>(
+      cint<8>, cint<1>, cint<47>, cint<65>, true);
   test::matmul::check_batched_packed_b<Atom>(8, 1, 47, 65);
   // Exercise the batch-row flattening path beyond decode's M=1 case.  The
   // first product fills one 16-row AMX tile; the second reaches the deliberate
   // 64-row gate and therefore spans four row tiles in one configured problem.
-  test::matmul::check_batched_native<Atom, true>(4, 4, 127, 129, true);
+  test::matmul::check_batched_native<Atom, true>(
+      cint<4>, cint<4>, cint<127>, cint<129>, true);
   test::matmul::check_batched_packed_b<Atom>(4, 16, 48, 64);
   // N=48 selects the shortened 1x3 TILECFG for M=1.  Follow it with a full
   // 16-row operation to ensure configuration values remain operation-scoped.
@@ -307,7 +309,7 @@ void run_native_batch_case() {
     test::matmul::check_batched_native_extent_pair<
         Atom, BroadcastB, 8, 1, 256, K>();
     test::matmul::check_batched_native<Atom, BroadcastB>(
-        8, 1, 256, K, true);
+        cint<8>, cint<1>, cint<256>, cint<K>, true);
     test::matmul::check_batched_packed_b<Atom>(8, 1, 256, K);
   } else {
     test::matmul::check_batched_native_extent_pair<
@@ -318,7 +320,8 @@ void run_native_batch_case() {
 
 template <typename Atom>
 void run_quantized_shared_b_case() {
-  test::matmul::check_batched_quantized_shared_b<Atom>(4, 1, 64, 128);
+  test::matmul::check_batched_quantized_shared_b<Atom>(
+      cint<4>, cint<1>, cint<64>, cint<128>);
 }
 
 #if VECOPS_TARGET_SHARD_INDEX == 0
@@ -536,7 +539,8 @@ TEST(MatmulBatchTest, SmallQuantizedSharedBUsesLowWorkFullPacking) {
 
 TEST(MatmulBatchTest, SharedOperandsFlattenIntoOneProblem) {
   using Atom = gemm::SME_BF16F32;
-  test::matmul::check_batched_native<Atom, true>(4, 4, 127, 129, true);
+  test::matmul::check_batched_native<Atom, true>(
+      cint<4>, cint<4>, cint<127>, cint<129>, true);
   test::matmul::check_batched_packed_b<Atom>(4, 16, 48, 64);
   check_shared_a_batch_columns<Atom, false>();
   check_shared_a_batch_columns<Atom, true>();
@@ -547,10 +551,14 @@ TEST(MatmulBatchTest, SharedOperandsFlattenIntoOneProblem) {
 TEST(MatmulBatchTest, SharedOperandFlattenBoundariesAndFallbacks) {
   using Atom = gemm::SME_BF16F32;
   // shared-B: M and flat-M upper boundaries, followed by both fallback sides.
-  test::matmul::check_batched_native<Atom, true>(4, 16, 48, 64, true);
-  test::matmul::check_batched_native<Atom, true>(4, 17, 48, 64, true);
-  test::matmul::check_batched_native<Atom, true>(8, 8, 47, 65, true);
-  test::matmul::check_batched_native<Atom, true>(8, 9, 47, 65, true);
+  test::matmul::check_batched_native<Atom, true>(
+      cint<4>, cint<16>, cint<48>, cint<64>, true);
+  test::matmul::check_batched_native<Atom, true>(
+      cint<4>, cint<17>, cint<48>, cint<64>, true);
+  test::matmul::check_batched_native<Atom, true>(
+      cint<8>, cint<8>, cint<47>, cint<65>, true);
+  test::matmul::check_batched_native<Atom, true>(
+      cint<8>, cint<9>, cint<47>, cint<65>, true);
   test::matmul::check_batched_native<Atom, true>(0, 1, 16, 65, false);
   test::matmul::check_batched_packed_b<Atom>(0, 1, 16, 65);
 
@@ -564,5 +572,3 @@ TEST(MatmulBatchTest, SharedOperandFlattenBoundariesAndFallbacks) {
 #endif
 
 #endif
-
-

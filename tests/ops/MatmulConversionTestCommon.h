@@ -50,13 +50,17 @@ bool conversion_values_equal(T expected, T actual) {
   }
 }
 
-template <typename Atom, typename MemoryA, typename MemoryB, typename MemoryC>
+template <typename Atom, typename MemoryA, typename MemoryB, typename MemoryC,
+          typename MExtent, typename NExtent, typename KExtent>
 void check_conversion(
-    nint_t m, nint_t n, nint_t k,
+    MExtent m_extent, NExtent n_extent, KExtent k_extent,
     bool expect_workspace = false) {
   using TA = typename Atom::TA;
   using TB = typename Atom::TB;
   using Acc = typename Atom::TAcc;
+  const nint_t m = static_cast<nint_t>(m_extent);
+  const nint_t n = static_cast<nint_t>(n_extent);
+  const nint_t k = static_cast<nint_t>(k_extent);
   std::vector<MemoryA> a(static_cast<std::size_t>(m * k));
   std::vector<MemoryB> b(static_cast<std::size_t>(n * k));
   std::vector<MemoryC> c(static_cast<std::size_t>(m * n));
@@ -66,13 +70,17 @@ void check_conversion(
       conversion_value<MemoryB>(i, 11);
 
   auto at = tensor::make_tensor(
-      a.data(), tensor::make_layout(tensor::make_shape(meta::Any{m}, meta::Any{k})));
+      a.data(), tensor::make_layout(
+                    tensor::make_shape(m_extent, k_extent)));
   auto bt = tensor::make_tensor(
-      b.data(), tensor::make_layout(tensor::make_shape(meta::Any{n}, meta::Any{k})));
+      b.data(), tensor::make_layout(
+                    tensor::make_shape(n_extent, k_extent)));
   auto ct = tensor::make_tensor(
-      c.data(), tensor::make_layout(tensor::make_shape(meta::Any{m}, meta::Any{n})));
+      c.data(), tensor::make_layout(
+                    tensor::make_shape(m_extent, n_extent)));
   auto operation = ops::make_matmul<Atom>(
-      m, n, k, tensor::input<TA>(at), tensor::input<TB>(bt),
+      m_extent, n_extent, k_extent,
+      tensor::input<TA>(at), tensor::input<TB>(bt),
       tensor::output<Acc>(ct));
   if (expect_workspace) {
     EXPECT_GT(
@@ -102,13 +110,20 @@ void check_conversion(
   }
 }
 
-template <typename Atom, bool BroadcastB>
+template <typename Atom, bool BroadcastB,
+          typename BatchExtent, typename MExtent,
+          typename NExtent, typename KExtent>
 void check_batched_native(
-    nint_t batch, nint_t m, nint_t n, nint_t k,
+    BatchExtent batch_extent, MExtent m_extent,
+    NExtent n_extent, KExtent k_extent,
     bool expect_workspace = false) {
   using TA = typename Atom::TA;
   using TB = typename Atom::TB;
   using Acc = typename Atom::TAcc;
+  const nint_t batch = static_cast<nint_t>(batch_extent);
+  const nint_t m = static_cast<nint_t>(m_extent);
+  const nint_t n = static_cast<nint_t>(n_extent);
+  const nint_t k = static_cast<nint_t>(k_extent);
   const nint_t b_batches = BroadcastB ? 1 : batch;
   std::vector<TA> a(static_cast<std::size_t>(batch * m * k));
   std::vector<TB> b(static_cast<std::size_t>(b_batches * n * k));
@@ -120,24 +135,25 @@ void check_batched_native(
 
   auto at = tensor::make_tensor(
       a.data(), tensor::make_layout(tensor::make_shape(
-                    meta::Any{batch}, meta::Any{m}, meta::Any{k})));
+                    batch_extent, m_extent, k_extent)));
   auto bl = [&] {
     if constexpr (BroadcastB) {
       return tensor::make_layout(
           tensor::make_shape(
-              meta::Any{batch}, meta::Any{n}, meta::Any{k}),
+              batch_extent, n_extent, k_extent),
           tensor::make_strides(
-              meta::cint<0>, meta::Any{k}, meta::cint<1>));
+              meta::cint<0>, k_extent, meta::cint<1>));
     } else {
       return tensor::make_layout(tensor::make_shape(
-          meta::Any{batch}, meta::Any{n}, meta::Any{k}));
+          batch_extent, n_extent, k_extent));
     }
   }();
   auto bt = tensor::make_tensor(b.data(), bl);
   auto ct = tensor::make_tensor(
       c.data(), tensor::make_layout(tensor::make_shape(
-                    meta::Any{batch}, meta::Any{m}, meta::Any{n})));
-  auto operation = ops::make_matmul<Atom>(m, n, k, at, bt, ct);
+                    batch_extent, m_extent, n_extent)));
+  auto operation = ops::make_matmul<Atom>(
+      m_extent, n_extent, k_extent, at, bt, ct);
   if (expect_workspace) {
     EXPECT_GT(operation.required_workspace(), 0);
   } else {
@@ -231,14 +247,21 @@ void check_batched_packed_b(
   }
 }
 
-template <typename Atom>
+template <typename Atom,
+          typename BatchExtent, typename MExtent,
+          typename NExtent, typename KExtent>
 void check_batched_quantized_shared_b(
-    nint_t batch, nint_t m, nint_t n, nint_t k) {
+    BatchExtent batch_extent, MExtent m_extent,
+    NExtent n_extent, KExtent k_extent) {
   using TA = typename Atom::TA;
   using TB = typename Atom::TB;
   using Acc = typename Atom::TAcc;
   static_assert(std::is_integral_v<TA> && std::is_integral_v<TB>);
   static_assert(std::same_as<Acc, int32_t>);
+  const nint_t batch = static_cast<nint_t>(batch_extent);
+  const nint_t m = static_cast<nint_t>(m_extent);
+  const nint_t n = static_cast<nint_t>(n_extent);
+  const nint_t k = static_cast<nint_t>(k_extent);
   std::vector<float32_t> a(static_cast<std::size_t>(batch * m * k));
   std::vector<float32_t> b(static_cast<std::size_t>(n * k));
   std::vector<float32_t> c(static_cast<std::size_t>(batch * m * n));
@@ -251,17 +274,17 @@ void check_batched_quantized_shared_b(
 
   auto at = tensor::make_tensor(
       a.data(), tensor::make_layout(tensor::make_shape(
-                    meta::Any{batch}, meta::Any{m}, meta::Any{k})));
+                    batch_extent, m_extent, k_extent)));
   auto bt = tensor::make_tensor(
       b.data(),
       tensor::make_layout(
           tensor::make_shape(
-              meta::Any{batch}, meta::Any{n}, meta::Any{k}),
+              batch_extent, n_extent, k_extent),
           tensor::make_strides(
-              meta::cint<0>, meta::Any{k}, meta::cint<1>)));
+              meta::cint<0>, k_extent, meta::cint<1>)));
   auto ct = tensor::make_tensor(
       c.data(), tensor::make_layout(tensor::make_shape(
-                    meta::Any{batch}, meta::Any{m}, meta::Any{n})));
+                    batch_extent, m_extent, n_extent)));
   auto quantize = tensor::make_elementwise_vec_transform<
       float32_t, float32_t>(
       [](auto tag, auto value) VECOPS_KERNEL_LAMBDA {
@@ -273,14 +296,14 @@ void check_batched_quantized_shared_b(
         return vec::mul(tag, value, vec::fill(tag, 0.125f));
       });
   auto operation = ops::make_matmul<Atom>(
-      m, n, k,
+      m_extent, n_extent, k_extent,
       tensor::input<TA>(at, quantize),
       tensor::input<TB>(bt, quantize),
       tensor::output<Acc>(ct, dequantize));
   auto a_matrix_layout = tensor::make_layout(
-      tensor::make_shape(meta::Any{m}, meta::Any{k}));
+      tensor::make_shape(m_extent, k_extent));
   auto b_matrix_layout = tensor::make_layout(
-      tensor::make_shape(meta::Any{n}, meta::Any{k}));
+      tensor::make_shape(n_extent, k_extent));
   const auto packed_a_layout = ops::matmul_packed_layout<
       Atom, gemm::Operand::A>(a_matrix_layout);
   const auto packed_b_layout = ops::matmul_packed_layout<
@@ -439,9 +462,10 @@ void check_bias_relu(nint_t m, nint_t n, nint_t k) {
   }
 }
 
-template <typename Atom, bool DirectB = false>
+template <typename Atom, bool DirectB = false,
+          typename MExtent, typename NExtent, typename KExtent>
 void check_asymmetric_quantized(
-    nint_t m, nint_t n, nint_t k,
+    MExtent m_extent, NExtent n_extent, KExtent k_extent,
     bool expect_workspace = false) {
   using TA = typename Atom::TA;
   using TB = typename Atom::TB;
@@ -450,6 +474,9 @@ void check_asymmetric_quantized(
   static_assert(std::same_as<TB, int8_t>);
   static_assert(std::same_as<Acc, int32_t>);
   constexpr Acc ZeroPointA = 3;
+  const nint_t m = static_cast<nint_t>(m_extent);
+  const nint_t n = static_cast<nint_t>(n_extent);
+  const nint_t k = static_cast<nint_t>(k_extent);
   std::vector<float32_t> a(static_cast<std::size_t>(m * k));
   using MemoryB = std::conditional_t<DirectB, TB, float32_t>;
   std::vector<MemoryB> b(static_cast<std::size_t>(n * k));
@@ -480,18 +507,18 @@ void check_asymmetric_quantized(
 
   auto at = tensor::make_tensor(
       a.data(), tensor::make_layout(
-                    tensor::make_shape(meta::Any{m}, meta::Any{k})));
+                    tensor::make_shape(m_extent, k_extent)));
   auto bt = tensor::make_tensor(
       b.data(), tensor::make_layout(
-                    tensor::make_shape(meta::Any{n}, meta::Any{k})));
+                    tensor::make_shape(n_extent, k_extent)));
   auto correction_tensor = tensor::make_tensor(
       correction.data(),
       tensor::make_layout(
-          tensor::make_shape(meta::Any{m}, meta::Any{n}),
+          tensor::make_shape(m_extent, n_extent),
           tensor::make_strides(meta::cint<0>, meta::cint<1>)));
   auto ct = tensor::make_tensor(
       c.data(), tensor::make_layout(
-                    tensor::make_shape(meta::Any{m}, meta::Any{n})));
+                    tensor::make_shape(m_extent, n_extent)));
   auto quantize_a = tensor::make_elementwise_vec_transform<
       float32_t, float32_t>(
       [](auto tag, auto value) VECOPS_KERNEL_LAMBDA {
@@ -517,7 +544,7 @@ void check_asymmetric_quantized(
     }
   }();
   auto operation = ops::make_matmul_accumulate<Atom>(
-      m, n, k,
+      m_extent, n_extent, k_extent,
       tensor::input<TA>(at, quantize_a),
       b_operand,
       tensor::input<Acc>(correction_tensor),
@@ -557,12 +584,17 @@ void check_asymmetric_quantized(
   }
 }
 
-template <typename Atom>
-void check_runtime_and_per_column_scale(nint_t m, nint_t n, nint_t k) {
+template <typename Atom,
+          typename MExtent, typename NExtent, typename KExtent>
+void check_runtime_and_per_column_scale(
+    MExtent m_extent, NExtent n_extent, KExtent k_extent) {
   using TA = typename Atom::TA;
   using TB = typename Atom::TB;
   using Acc = typename Atom::TAcc;
   static_assert(std::is_floating_point_v<Acc>);
+  const nint_t m = static_cast<nint_t>(m_extent);
+  const nint_t n = static_cast<nint_t>(n_extent);
+  const nint_t k = static_cast<nint_t>(k_extent);
   std::vector<TA> a(static_cast<std::size_t>(m * k));
   std::vector<TB> b(static_cast<std::size_t>(n * k));
   std::vector<Acc> dynamic_output(static_cast<std::size_t>(m * n));
@@ -581,16 +613,16 @@ void check_runtime_and_per_column_scale(nint_t m, nint_t n, nint_t k) {
 
   auto at = tensor::make_tensor(
       a.data(), tensor::make_layout(
-                    tensor::make_shape(meta::Any{m}, meta::Any{k})));
+                    tensor::make_shape(m_extent, k_extent)));
   auto bt = tensor::make_tensor(
       b.data(), tensor::make_layout(
-                    tensor::make_shape(meta::Any{n}, meta::Any{k})));
+                    tensor::make_shape(n_extent, k_extent)));
   auto dynamic_tensor = tensor::make_tensor(
       dynamic_output.data(), tensor::make_layout(
-                                 tensor::make_shape(meta::Any{m}, meta::Any{n})));
+          tensor::make_shape(m_extent, n_extent)));
   auto column_tensor = tensor::make_tensor(
       column_output.data(), tensor::make_layout(
-                                tensor::make_shape(meta::Any{m}, meta::Any{n})));
+          tensor::make_shape(m_extent, n_extent)));
   auto dynamic_transform = tensor::make_elementwise_vec_transform<Acc, Acc>(
       [scale = &dynamic_scale](auto tag, auto value) VECOPS_KERNEL_LAMBDA {
         return vec::mul(tag, value, vec::fill(tag, *scale));
@@ -604,10 +636,10 @@ void check_runtime_and_per_column_scale(nint_t m, nint_t n, nint_t k) {
         return vec::mul(tag, value, vec::load(tag, scales + column));
       });
   auto dynamic_operation = ops::make_matmul<Atom>(
-      m, n, k, at, bt,
+      m_extent, n_extent, k_extent, at, bt,
       tensor::output<Acc>(dynamic_tensor, dynamic_transform));
   auto column_operation = ops::make_matmul<Atom>(
-      m, n, k, at, bt,
+      m_extent, n_extent, k_extent, at, bt,
       tensor::output<Acc>(column_tensor, column_transform));
   kernel::Workspace dynamic_storage(dynamic_operation.required_workspace());
   auto dynamic_workspace = dynamic_storage.view();
@@ -694,9 +726,10 @@ void check_bias_clamp(nint_t m, nint_t n, nint_t k) {
   }
 }
 
-template <typename Atom>
+template <typename Atom,
+          typename MExtent, typename NExtent, typename KExtent>
 void check_dual_asymmetric_quantized(
-    nint_t m, nint_t n, nint_t k,
+    MExtent m_extent, NExtent n_extent, KExtent k_extent,
     bool expect_workspace = false) {
   using TA = typename Atom::TA;
   using TB = typename Atom::TB;
@@ -705,6 +738,9 @@ void check_dual_asymmetric_quantized(
   static_assert(std::same_as<Acc, int32_t>);
   constexpr Acc ZeroPointA = 3;
   constexpr Acc ZeroPointB = 5;
+  const nint_t m = static_cast<nint_t>(m_extent);
+  const nint_t n = static_cast<nint_t>(n_extent);
+  const nint_t k = static_cast<nint_t>(k_extent);
   std::vector<float32_t> a(static_cast<std::size_t>(m * k));
   std::vector<float32_t> b(static_cast<std::size_t>(n * k));
   std::vector<Acc> correction(static_cast<std::size_t>(m * n));
@@ -732,16 +768,16 @@ void check_dual_asymmetric_quantized(
   }
   auto at = tensor::make_tensor(
       a.data(), tensor::make_layout(
-                    tensor::make_shape(meta::Any{m}, meta::Any{k})));
+                    tensor::make_shape(m_extent, k_extent)));
   auto bt = tensor::make_tensor(
       b.data(), tensor::make_layout(
-                    tensor::make_shape(meta::Any{n}, meta::Any{k})));
+                    tensor::make_shape(n_extent, k_extent)));
   auto correction_tensor = tensor::make_tensor(
       correction.data(), tensor::make_layout(
-                             tensor::make_shape(meta::Any{m}, meta::Any{n})));
+          tensor::make_shape(m_extent, n_extent)));
   auto ct = tensor::make_tensor(
       c.data(), tensor::make_layout(
-                    tensor::make_shape(meta::Any{m}, meta::Any{n})));
+                    tensor::make_shape(m_extent, n_extent)));
   auto quantize_a = tensor::make_elementwise_vec_transform<
       float32_t, float32_t>(
       [](auto tag, auto value) VECOPS_KERNEL_LAMBDA {
@@ -762,7 +798,8 @@ void check_dual_asymmetric_quantized(
         return vec::mul(tag, value, vec::fill(tag, 0.0625f));
       });
   auto operation = ops::make_matmul_accumulate<Atom>(
-      m, n, k, tensor::input<TA>(at, quantize_a),
+      m_extent, n_extent, k_extent,
+      tensor::input<TA>(at, quantize_a),
       tensor::input<TB>(bt, quantize_b),
       tensor::input<Acc>(correction_tensor),
       tensor::output<Acc>(ct, dequantize));

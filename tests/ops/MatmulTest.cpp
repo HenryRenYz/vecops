@@ -41,7 +41,8 @@ T value(nint_t index, int modulus) {
 template <typename Atom, typename M, typename N, typename K>
 void check_raw(
     M m_extent, N n_extent, K k_extent,
-    bool expect_auto_packing = false) {
+    bool expect_auto_packing = false,
+    bool expect_no_auto_packing = false) {
   using TA = typename Atom::TA;
   using TB = typename Atom::TB;
   using Acc = typename Atom::TAcc;
@@ -72,6 +73,10 @@ void check_raw(
     const nint_t scratch = kernel::matmul_implementation::scratch_bytes<
         kernel::matmul_implementation::AMX>();
     EXPECT_GT(operation.required_workspace(), scratch);
+  } else if (expect_no_auto_packing) {
+    const nint_t scratch = kernel::matmul_implementation::scratch_bytes<
+        kernel::matmul_implementation::AMX>();
+    EXPECT_EQ(operation.required_workspace(), scratch);
   }
   kernel::Workspace storage(operation.required_workspace());
   auto workspace = storage.view();
@@ -343,12 +348,24 @@ TEST(MatmulTest, CompileTimeExtentsAndFullKPlan) {
       dyn<32, 64, 128>(96));
   check_raw<gemm::AMX_BF16F32>(
       dyn<32, 32, 64>(32), dyn<16, 32, 64>(48), dyn<32, 64, 128>(96));
+  // Bounded runtime extents may select a special owner only when the full
+  // admissible Meta range satisfies that owner's crossover.
+  check_raw<gemm::AMX_BF16F32>(
+      dyn<1, 1, 1>(1), dyn<1, 1, 16>(8), dyn<32, 32, 256>(64));
 }
 
 TEST(MatmulTest, LargeNativeInputsUseAutoPacking) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  check_raw<gemm::AMX_BF16F32>(64, 64, 64, true);
-  check_raw<gemm::AMX_I8I32<int8_t, uint8_t>>(64, 64, 128, true);
+  check_raw<gemm::AMX_BF16F32>(cint<64>, cint<64>, cint<64>, true);
+  check_raw<gemm::AMX_I8I32<int8_t, uint8_t>>(
+      cint<64>, cint<64>, cint<128>, true);
+}
+
+TEST(MatmulTest, DynamicExtentsDoNotSelectAutoPacking) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  check_raw<gemm::AMX_BF16F32>(64, 64, 64, false, true);
+  check_raw<gemm::AMX_I8I32<int8_t, uint8_t>>(
+      64, 64, 128, false, true);
 }
 
 TEST(MatmulTest, TransformedInputsUseFullAndTailKPlans) {
@@ -403,7 +420,7 @@ TEST(MatmulTest, LargeConversionInputsUseAutoPacking) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   test::matmul::check_conversion<
       gemm::AMX_BF16F32, float32_t, float32_t, float32_t>(
-          64, 64, 64, true);
+          cint<64>, cint<64>, cint<64>, true);
 }
 
 #elif VECOPS_TARGET_SHARD_INDEX == 2
@@ -551,7 +568,8 @@ TEST(MatmulTest, AsymmetricU8S8UsesColumnSumCorrection) {
   test::matmul::check_asymmetric_quantized<
       gemm::AMX_I8I32<uint8_t, int8_t>>(19, 23, 65);
   test::matmul::check_asymmetric_quantized<
-      gemm::AMX_I8I32<uint8_t, int8_t>>(64, 128, 128, true);
+      gemm::AMX_I8I32<uint8_t, int8_t>>(
+          cint<64>, cint<128>, cint<128>, true);
 #endif
 }
 
@@ -939,21 +957,23 @@ TEST(MatmulTest, SingleAxisConstraintsReachFourRegions) {
 }
 
 TEST(MatmulTest, LargePackedPrefetchUsesFootprintGate) {
-  using kernel::matmul_details::sme::prefer_large_packed_prefetch;
+  using kernel::matmul_details::sme::large_packed_prefetch_v;
+  static_assert(!large_packed_prefetch_v<
+      gemm::SME_BF16F32, Const<33>, Const<35>, Const<513>>);
+  static_assert(!large_packed_prefetch_v<
+      gemm::SME_BF16F32, Const<128>, Const<1024>, Const<768>>);
 #if !defined(VECOPS_DISABLE_SME_LARGE_PACKED_PREFETCH)
-  EXPECT_FALSE((prefer_large_packed_prefetch<gemm::SME_BF16F32, 2, 2>(
-      33, 35, 513)));
-  EXPECT_FALSE((prefer_large_packed_prefetch<gemm::SME_BF16F32, 2, 2>(
-      128, 1024, 768)));
-  EXPECT_TRUE((prefer_large_packed_prefetch<gemm::SME_BF16F32, 2, 2>(
-      256, 256, 4096)));
-  EXPECT_TRUE((prefer_large_packed_prefetch<gemm::SME_BF16F32, 2, 2>(
-      3136, 64, 576)));
+  static_assert(large_packed_prefetch_v<
+      gemm::SME_BF16F32, Const<256>, Const<256>, Const<4096>>);
+  static_assert(large_packed_prefetch_v<
+      gemm::SME_BF16F32, Const<3136>, Const<64>, Const<576>>);
+  static_assert(large_packed_prefetch_v<
+      gemm::SME_BF16F32,
+      Dynamic<16, 256, 512>, Dynamic<16, 256, 512>,
+      Dynamic<64, 4096, 8192>>);
 #endif
-  EXPECT_FALSE((prefer_large_packed_prefetch<gemm::SME_BF16F32, 1, 2>(
-      128, 4096, 4096)));
-  EXPECT_FALSE((prefer_large_packed_prefetch<gemm::SME_F16F32, 2, 2>(
-      128, 4096, 4096)));
+  static_assert(!large_packed_prefetch_v<
+      gemm::SME_F16F32, Const<128>, Const<4096>, Const<4096>>);
 }
 
 #elif VECOPS_TARGET_SHARD_INDEX == 1
@@ -984,15 +1004,15 @@ TEST(MatmulTest, EndToEndMemoryComputeOutputConversions) {
 TEST(MatmulTest, LargeConversionsUseOnTheFlyPacking) {
   test::matmul::check_conversion<
       gemm::SME_BF16F32, float32_t, float32_t, float32_t>(
-          32, 32, 64, true);
+          cint<32>, cint<32>, cint<64>, true);
   test::matmul::check_conversion<
       gemm::SME_F32F32,
       vecops::bfloat16_t, vecops::bfloat16_t, vecops::bfloat16_t>(
-          32, 32, 64, true);
+          cint<32>, cint<32>, cint<64>, true);
   test::matmul::check_conversion<
       gemm::SME_F32F32,
       vecops::float16_t, vecops::float16_t, vecops::float16_t>(
-          32, 32, 64, true);
+          cint<32>, cint<32>, cint<64>, true);
 }
 
 TEST(MatmulTest, LargeRawProblemUsesOnTheFlyPackingWorkspace) {
@@ -1000,11 +1020,18 @@ TEST(MatmulTest, LargeRawProblemUsesOnTheFlyPackingWorkspace) {
   constexpr nint_t M = 32, N = 32, K = 64;
   std::vector<typename Atom::TA> a(M * K), b(N * K);
   std::vector<typename Atom::TAcc> c(M * N);
-  auto at = make_tensor(a.data(), make_layout(make_shape(M, K)));
-  auto bt = make_tensor(b.data(), make_layout(make_shape(N, K)));
-  auto ct = make_tensor(c.data(), make_layout(make_shape(M, N)));
-  auto operation = ops::make_matmul<Atom>(M, N, K, at, bt, ct);
+  auto at = make_tensor(
+      a.data(), make_layout(make_shape(cint<M>, cint<K>)));
+  auto bt = make_tensor(
+      b.data(), make_layout(make_shape(cint<N>, cint<K>)));
+  auto ct = make_tensor(
+      c.data(), make_layout(make_shape(cint<M>, cint<N>)));
+  auto operation = ops::make_matmul<Atom>(
+      cint<M>, cint<N>, cint<K>, at, bt, ct);
   EXPECT_GT(operation.required_workspace(), 0);
+  auto dynamic_operation = ops::make_matmul<Atom>(M, N, K, at, bt, ct);
+  EXPECT_EQ(dynamic_operation.required_workspace(), 0);
+  check_raw<Atom>(cint<M>, cint<N>, cint<K>);
   check_raw<Atom>(M, N, K);
 }
 
@@ -1080,7 +1107,8 @@ TEST(MatmulTest, AsymmetricU8S8UsesColumnSumCorrection) {
 
 TEST(MatmulTest, LargeQuantizedTransformsUseOnTheFlyPacking) {
   test::matmul::check_asymmetric_quantized<
-      gemm::SME_I8I32<uint8_t, int8_t>>(16, 128, 128, true);
+      gemm::SME_I8I32<uint8_t, int8_t>>(
+          cint<16>, cint<128>, cint<128>, true);
 }
 
 #elif VECOPS_TARGET_SHARD_INDEX == 4
@@ -1106,5 +1134,3 @@ TEST(MatmulTest, DynamicAndConstExtentPairs) {
 #endif // VECOPS_TARGET_SHARD_ACTIVE
 
 #endif
-
-

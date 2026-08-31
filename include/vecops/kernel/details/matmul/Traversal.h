@@ -32,7 +32,8 @@ VECOPS_KERNEL_FUNCTION(void run_tiles_region(
       Atom, Policy, TraversalM, TraversalN, K, A, B>;
   const nint_t logical_k = static_cast<nint_t>(k);
   Backend::template dispatch_plan<Atom, A, B>(
-      k, [&]<typename Plan>() VECOPS_INLINE_LAMBDA_NOEXCEPT {
+      traversal_m, traversal_n, k,
+      [&]<typename Plan>() VECOPS_INLINE_LAMBDA_NOEXCEPT {
         kernel::loop::tile2d<EffectivePolicy>(
             traversal_m, traversal_n,
             Atom::M_R, Atom::N_R, typename Backend::Catalog{},
@@ -61,7 +62,7 @@ VECOPS_KERNEL_FUNCTION(void run_tiles(
   const nint_t logical_n = static_cast<nint_t>(n);
   const nint_t logical_k = static_cast<nint_t>(k);
   Backend::template dispatch_plan<Atom, A, B>(
-      k, [&]<typename Plan>() VECOPS_INLINE_LAMBDA_NOEXCEPT {
+      m, n, k, [&]<typename Plan>() VECOPS_INLINE_LAMBDA_NOEXCEPT {
         kernel::loop::tile2d<EffectivePolicy>(
             m, n, Atom::M_R, Atom::N_R, typename Backend::Catalog{},
             [&]<typename Case>(Case, nint_t mi, nint_t ni,

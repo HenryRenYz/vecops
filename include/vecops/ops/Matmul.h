@@ -169,14 +169,13 @@ public:
         a_(std::move(a)), b_(std::move(b)),
         c_input_(std::move(c_input)), c_output_(std::move(c_output)) {
     validate();
-    initialize_auto_packing();
     initialize_batch_rows_pack_a();
   }
 
   VECOPS_INLINE nint_t required_workspace() const {
     nint_t bytes =
         kernel::matmul_implementation::scratch_bytes<Implementation>();
-    if (full_auto_packing_enabled()) {
+    if constexpr (CompileTimeAutoPacking) {
       if constexpr (SMEBatchRowsFullPackCandidate) {
         bytes += batch_rows_flatten_enabled()
             ? batch_rows_packed_a_bytes()
@@ -642,27 +641,9 @@ private:
     }
   }();
 
-  struct NoAutoPackingState {};
   struct NoBatchRowsPackAState {};
-  using AutoPackingState = std::conditional_t<
-      AutoPackA || AutoPackB, bool, NoAutoPackingState>;
   using BatchRowsPackAState = std::conditional_t<
       BatchRowsPackACandidate, bool, NoBatchRowsPackAState>;
-
-  VECOPS_INLINE void initialize_auto_packing() {
-    if constexpr (AutoPackA || AutoPackB)
-      auto_pack_ = use_auto_packing();
-  }
-
-  VECOPS_INLINE bool auto_packing_enabled() const {
-    if constexpr (AutoPackA || AutoPackB) return auto_pack_;
-    else return false;
-  }
-
-  VECOPS_INLINE bool full_auto_packing_enabled() const {
-    if constexpr (AutoPackA || AutoPackB) return auto_pack_;
-    else return false;
-  }
 
   VECOPS_INLINE void initialize_batch_rows_pack_a() {
     if constexpr (BatchRowsPackACandidate)
@@ -681,8 +662,7 @@ private:
       if (!batch_rows_flatten_enabled()) return false;
       // A raw shared-B operation can only consume packed A through the branch
       // that also packed B.  Explicit packed-B inputs enter directly.
-      if constexpr (!PackedBInput)
-        if (!full_auto_packing_enabled()) return false;
+      if constexpr (!PackedBInput && !CompileTimeAutoPacking) return false;
       const nint_t batch = c_output_.output_layout().shape()[0];
       const nint_t m = static_cast<nint_t>(m_);
       const nint_t n = static_cast<nint_t>(n_);
@@ -696,21 +676,12 @@ private:
     }
   }
 
-  VECOPS_INLINE bool use_auto_packing() const {
+  VECOPS_INLINE static constexpr bool use_auto_packing_for(
+      nint_t m, nint_t n, nint_t k, nint_t effective_m) {
     if constexpr (!AutoPackA && !AutoPackB) {
       return false;
     } else {
-      const nint_t m = static_cast<nint_t>(m_);
-      const nint_t n = static_cast<nint_t>(n_);
-      const nint_t k = static_cast<nint_t>(k_);
       if (m <= 0 || n <= 0 || k <= 0) return false;
-      nint_t effective_m = m;
-      if constexpr (Rank3SharedB) {
-        const nint_t batch = c_output_.output_layout().shape()[0];
-        if (batch <= 0) return false;
-        constexpr nint_t Limit = std::numeric_limits<nint_t>::max();
-        effective_m = m > Limit / batch ? Limit : m * batch;
-      }
       if constexpr (std::same_as<
                         Implementation, kernel::matmul_implementation::AMX>) {
         // Online AMX packing is most valuable for B, whose raw path repeats a
@@ -840,6 +811,53 @@ private:
       return k >= remaining;
     }
   }
+
+  static constexpr bool CompileTimeAutoPacking = [] {
+    using MV = std::remove_cvref_t<MExtent>;
+    using NV = std::remove_cvref_t<NExtent>;
+    using KV = std::remove_cvref_t<KExtent>;
+    if constexpr ((AutoPackA || AutoPackB) &&
+                  COutputSpec::OutputTensor::Ndim == 2 &&
+                  MV::is_const && NV::is_const && KV::is_const) {
+      constexpr nint_t MValue =
+          kernel::loop::tile2d_details::fixed_value_n<MV>;
+      constexpr nint_t NValue =
+          kernel::loop::tile2d_details::fixed_value_n<NV>;
+      constexpr nint_t KValue =
+          kernel::loop::tile2d_details::fixed_value_n<KV>;
+      return use_auto_packing_for(
+          MValue, NValue, KValue, MValue);
+    } else if constexpr ((AutoPackA || AutoPackB) && Rank3SharedB &&
+                         COutputSpec::OutputTensor::Ndim == 3 &&
+                         MV::is_const && NV::is_const && KV::is_const) {
+      using Batch = tensor::size_type_t<
+          0, typename COutputSpec::OutputLayout>;
+      if constexpr (Batch::is_const) {
+        constexpr nint_t MValue =
+            kernel::loop::tile2d_details::fixed_value_n<MV>;
+        constexpr nint_t NValue =
+            kernel::loop::tile2d_details::fixed_value_n<NV>;
+        constexpr nint_t KValue =
+            kernel::loop::tile2d_details::fixed_value_n<KV>;
+        constexpr nint_t BatchValue =
+            kernel::loop::tile2d_details::fixed_value_n<Batch>;
+        if constexpr (MValue <= 0 || BatchValue <= 0) {
+          return false;
+        } else {
+          constexpr nint_t Limit = std::numeric_limits<nint_t>::max();
+          constexpr nint_t EffectiveM = BatchValue > Limit / MValue
+              ? Limit
+              : MValue * BatchValue;
+          return use_auto_packing_for(
+              MValue, NValue, KValue, EffectiveM);
+        }
+      } else {
+        return false;
+      }
+    } else {
+      return false;
+    }
+  }();
 
   template <gemm::Operand Side, typename Spec>
   VECOPS_INLINE auto auto_packed_layout(const Spec& spec) const {
@@ -1453,7 +1471,7 @@ private:
       }
     };
     if constexpr (AutoPackA || AutoPackB) {
-      if (VECOPS_UNLIKELY(full_auto_packing_enabled())) {
+      if constexpr (CompileTimeAutoPacking) {
         execute_auto_packed(scope);
       } else {
         if constexpr (std::same_as<
@@ -1489,7 +1507,6 @@ private:
   BSpec b_;
   CInputSpec c_input_;
   COutputSpec c_output_;
-  [[no_unique_address]] AutoPackingState auto_pack_{};
   [[no_unique_address]] BatchRowsPackAState batch_rows_pack_a_{};
 };
 
