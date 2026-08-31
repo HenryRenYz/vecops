@@ -37,6 +37,13 @@ concept IntegerTag = VectorTag<Tag> && std::integral<ElementOf<Tag>>;
       return (*this)(                                                   \
           VecToTag<V>{}, a, b, std::forward<Options>(options)...);     \
     }                                                                   \
+    template <IntegerTag Tag>                                            \
+      requires (details::multi_word_tag_v<Tag>)                         \
+    inline NativeWordVec<Tag> operator()(                \
+        Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) const {   \
+      return details::execute_word<0, details::CurrentBackend>(                 \
+          *this, tag, a, b);                                            \
+    }                                                                   \
   }
 
 VECOPS_VEC_DECLARE_BIT_BINARY(BitAndOp);
@@ -64,6 +71,15 @@ struct BitNotOp {
       V value, Options&&... options) const {
     return (*this)(
         VecToTag<V>{}, value, std::forward<Options>(options)...);
+  }
+
+  /** Word-level entry for multi-word Tags; single-word Tags resolve to the
+   * whole-Tag overloads above. */
+  template <IntegerTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordVec<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> value) const {
+    return details::execute_word<0, details::CurrentBackend>(*this, tag, value);
   }
 };
 
@@ -126,6 +142,15 @@ struct BitShiftLeftOp {
         VecToTag<V>{}, value, std::forward<Count>(count),
         std::forward<Options>(options)...);
   }
+
+  /** Word-level int-count entry for multi-word Tags; single-word Tags
+   * resolve to the whole-Tag overloads above. */
+  template <IntegerTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordVec<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> value, int count) const {
+    return details::execute_word<0, details::CurrentBackend>(*this, tag, value, count);
+  }
 };
 
 struct BitShiftRightOp {
@@ -183,7 +208,28 @@ struct BitShiftRightOp {
         VecToTag<V>{}, value, std::forward<Count>(count),
         std::forward<Options>(options)...);
   }
+
+  /** Word-level int-count entry for multi-word Tags; single-word Tags
+   * resolve to the whole-Tag overloads above. */
+  template <IntegerTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordVec<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> value, int count) const {
+    return details::execute_word<0, details::CurrentBackend>(
+        *this, tag, value, count);
+  }
 };
+
+/** Public entry-point variables, declared before the backend includes so
+ * that details-layer implementations can call them by short names (same
+ * layout as Basic.h and Arithmetic.h). */
+inline constexpr BitAndOp bit_and{};
+inline constexpr BitOrOp bit_or{};
+inline constexpr BitXorOp bit_xor{};
+inline constexpr BitAndNotOp bit_andnot{};
+inline constexpr BitNotOp bit_not{};
+inline constexpr BitShiftLeftOp bit_shl{};
+inline constexpr BitShiftRightOp bit_shr{};
 
 } // namespace vecops::vec
 
@@ -515,14 +561,6 @@ VECOPS_ALWAYS_INLINE Vec<Tag> BitShiftRightOp::operator()(
   return details::execute_bit_shift_options(
       *this, tag, value, counts, std::forward<Options>(options)...);
 }
-
-inline constexpr BitAndOp bit_and{};
-inline constexpr BitOrOp bit_or{};
-inline constexpr BitXorOp bit_xor{};
-inline constexpr BitAndNotOp bit_andnot{};
-inline constexpr BitNotOp bit_not{};
-inline constexpr BitShiftLeftOp bit_shl{};
-inline constexpr BitShiftRightOp bit_shr{};
 
 } // namespace vecops::vec
 

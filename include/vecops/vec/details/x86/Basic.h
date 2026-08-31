@@ -223,6 +223,33 @@ VECOPS_ALWAYS_INLINE Raw x86_mask_andnot(Raw a, Raw b) {
 #endif
 }
 
+/** Per-lane OR of two word masks. */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE NativeWordMask<Tag> x86_mask_word_or(
+    NativeWordMask<Tag> a, NativeWordMask<Tag> b) {
+  return NativeWordMask<Tag>{x86_mask_or(a.value, b.value)};
+}
+
+/** Per-lane AND of two word masks. */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE NativeWordMask<Tag> x86_mask_word_and(
+    NativeWordMask<Tag> a, NativeWordMask<Tag> b) {
+  return NativeWordMask<Tag>{x86_mask_and(a.value, b.value)};
+}
+
+/** True when any lane of a word mask is set. */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE bool x86_mask_word_any(NativeWordMask<Tag> mask) {
+  using Raw = decltype(mask.value);
+  if constexpr (std::is_integral_v<Raw>) {
+    return mask.value != 0;
+  } else if constexpr (sizeof(Raw) == 16) {
+    return _mm_movemask_epi8(mask.value) != 0;
+  } else {
+    return _mm256_movemask_epi8(mask.value) != 0;
+  }
+}
+
 template <>
 struct NativeWordImpl<X86Backend, FillOp> {
   template <nint_t Index, VectorTag Tag>
@@ -692,17 +719,17 @@ VECOPS_ALWAYS_INLINE Mask<Half<Tag>> x86_extract_mask_half(
 
 template <VectorTag Tag>
 VECOPS_ALWAYS_INLINE Mask<Tag> x86_concat_mask_halves(
-    Tag tag, Mask<Half<Tag>> lower, Mask<Half<Tag>> upper) {
+    Tag tag, Mask<Half<Tag>> lower_value, Mask<Half<Tag>> upper_value) {
   using HalfTag = Half<Tag>;
   Mask<Tag> result{};
   constexpr nint_t half = RepresentationTraits<X86Backend, HalfTag>::logical_lanes;
   for (nint_t lane = 0; lane < half; ++lane) {
     result = x86_set_mask_logical_lane(
         tag, result, lane,
-        x86_get_mask_logical_lane(HalfTag{}, lower, lane));
+        x86_get_mask_logical_lane(HalfTag{}, lower_value, lane));
     result = x86_set_mask_logical_lane(
         tag, result, half + lane,
-        x86_get_mask_logical_lane(HalfTag{}, upper, lane));
+        x86_get_mask_logical_lane(HalfTag{}, upper_value, lane));
   }
   return result;
 }
@@ -723,7 +750,7 @@ VECOPS_ALWAYS_INLINE Mask<Tag> x86_concat_mask_halves(
   else static_assert(dispatch_dependent_false<T>, Message)
 
 /* **************************************************************************** */
-//                Lower, upper, and concatenation operations                 //
+//                Lower, upper_value, and concatenation operations                 //
 /* **************************************************************************** */
 
 template <VectorTag Tag>
@@ -737,10 +764,10 @@ struct NativeImpl<X86Backend, LowerOp, Tag> {
     using OutRaw = typename RepresentationTraits<X86Backend, Half<Tag>>::RawVec;
     if constexpr (RepresentationTraits<X86Backend, Tag>::word_count == 2) {
       VECOPS_VEC_X86_EXACT_REARRANGE_DISPATCH(
-          value.words[0], "unsupported x86 lower element type");
+          value.words[0], "unsupported x86 lower_value element type");
     } else if constexpr (sizeof(InRaw) == sizeof(OutRaw)) {
       VECOPS_VEC_X86_EXACT_REARRANGE_DISPATCH(
-          Vec<Half<Tag>>{value.value}, "unsupported x86 lower element type");
+          Vec<Half<Tag>>{value.value}, "unsupported x86 lower_value element type");
     } else {
       constexpr auto domain = x86_reg_domain_of_v<T>;
       if constexpr (domain == x86_reg_domain::f32) {
@@ -779,7 +806,7 @@ struct NativeImpl<X86Backend, UpperOp, Tag> {
     using OutRaw = typename RepresentationTraits<X86Backend, Half<Tag>>::RawVec;
     if constexpr (RepresentationTraits<X86Backend, Tag>::word_count == 2) {
       VECOPS_VEC_X86_EXACT_REARRANGE_DISPATCH(
-          value.words[1], "unsupported x86 upper element type");
+          value.words[1], "unsupported x86 upper_value element type");
     } else if constexpr (sizeof(InRaw) == sizeof(OutRaw)) {
       constexpr int logical_bytes = static_cast<int>(
           InTraits::logical_lanes * static_cast<nint_t>(sizeof(T)));
@@ -832,14 +859,14 @@ template <VectorTag Tag>
       RepresentationTraits<X86Backend, Half<Tag>>::word_count == 1)
 struct NativeImpl<X86Backend, ConcatOp, Tag> {
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(
-      ConcatOp, Tag tag, Vec<Half<Tag>> lower, Vec<Half<Tag>> upper) {
+      ConcatOp, Tag tag, Vec<Half<Tag>> lower_value, Vec<Half<Tag>> upper_value) {
     using T = ElementOf<Tag>;
     using OutTraits = RepresentationTraits<X86Backend, Tag>;
     using OutRaw = typename OutTraits::RawVec;
     using InRaw = typename RepresentationTraits<X86Backend, Half<Tag>>::RawVec;
     if constexpr (RepresentationTraits<X86Backend, Tag>::word_count == 2) {
       VECOPS_VEC_X86_EXACT_REARRANGE_DISPATCH(
-          ::vecops::vec::from_words(tag, lower, upper),
+          ::vecops::vec::from_words(tag, lower_value, upper_value),
           "unsupported x86 concat element type");
     } else if constexpr (sizeof(OutRaw) == sizeof(InRaw)) {
       constexpr int logical_bytes = static_cast<int>(
@@ -847,17 +874,17 @@ struct NativeImpl<X86Backend, ConcatOp, Tag> {
       constexpr int half_bytes = logical_bytes / 2;
       const auto lower_bits = [&] {
         if constexpr (std::same_as<T, float32_t>)
-          return _mm_castps_si128(lower.value);
+          return _mm_castps_si128(lower_value.value);
         else if constexpr (std::same_as<T, float64_t>)
-          return _mm_castpd_si128(lower.value);
-        else return lower.value;
+          return _mm_castpd_si128(lower_value.value);
+        else return lower_value.value;
       }();
       const auto upper_bits = [&] {
         if constexpr (std::same_as<T, float32_t>)
-          return _mm_castps_si128(upper.value);
+          return _mm_castps_si128(upper_value.value);
         else if constexpr (std::same_as<T, float64_t>)
-          return _mm_castpd_si128(upper.value);
-        else return upper.value;
+          return _mm_castpd_si128(upper_value.value);
+        else return upper_value.value;
       }();
       const auto bits = [&] {
         if constexpr (half_bytes == 1)
@@ -902,46 +929,46 @@ struct NativeImpl<X86Backend, ConcatOp, Tag> {
       if constexpr (std::same_as<T, float32_t>) {
         if constexpr (sizeof(OutRaw) == 32)
           return Vec<Tag>{_mm256_insertf128_ps(
-              _mm256_castps128_ps256(lower.value), upper.value, 1)};
+              _mm256_castps128_ps256(lower_value.value), upper_value.value, 1)};
         else return Vec<Tag>{_mm512_insertf32x8(
-            _mm512_castps256_ps512(lower.value), upper.value, 1)};
+            _mm512_castps256_ps512(lower_value.value), upper_value.value, 1)};
       } else if constexpr (std::same_as<T, float64_t>) {
         if constexpr (sizeof(OutRaw) == 32)
           return Vec<Tag>{_mm256_insertf128_pd(
-              _mm256_castpd128_pd256(lower.value), upper.value, 1)};
+              _mm256_castpd128_pd256(lower_value.value), upper_value.value, 1)};
         else return Vec<Tag>{_mm512_insertf64x4(
-            _mm512_castpd256_pd512(lower.value), upper.value, 1)};
+            _mm512_castpd256_pd512(lower_value.value), upper_value.value, 1)};
       } else if constexpr (std::same_as<T, bfloat16_t>) {
-        return Vec<Tag>{concat_integer(lower.value, upper.value)};
+        return Vec<Tag>{concat_integer(lower_value.value, upper_value.value)};
       } else if constexpr (std::same_as<T, float16_t>) {
-        return Vec<Tag>{concat_integer(lower.value, upper.value)};
+        return Vec<Tag>{concat_integer(lower_value.value, upper_value.value)};
       } else if constexpr (std::same_as<T, int8_t>) {
-        return Vec<Tag>{concat_integer(lower.value, upper.value)};
+        return Vec<Tag>{concat_integer(lower_value.value, upper_value.value)};
       } else if constexpr (std::same_as<T, uint8_t>) {
-        return Vec<Tag>{concat_integer(lower.value, upper.value)};
+        return Vec<Tag>{concat_integer(lower_value.value, upper_value.value)};
       } else if constexpr (std::same_as<T, int16_t>) {
-        return Vec<Tag>{concat_integer(lower.value, upper.value)};
+        return Vec<Tag>{concat_integer(lower_value.value, upper_value.value)};
       } else if constexpr (std::same_as<T, uint16_t>) {
-        return Vec<Tag>{concat_integer(lower.value, upper.value)};
+        return Vec<Tag>{concat_integer(lower_value.value, upper_value.value)};
       } else if constexpr (std::same_as<T, int32_t>) {
-        return Vec<Tag>{concat_integer(lower.value, upper.value)};
+        return Vec<Tag>{concat_integer(lower_value.value, upper_value.value)};
       } else if constexpr (std::same_as<T, uint32_t>) {
-        return Vec<Tag>{concat_integer(lower.value, upper.value)};
+        return Vec<Tag>{concat_integer(lower_value.value, upper_value.value)};
       } else if constexpr (std::same_as<T, int64_t>) {
-        return Vec<Tag>{concat_integer(lower.value, upper.value)};
+        return Vec<Tag>{concat_integer(lower_value.value, upper_value.value)};
       } else if constexpr (std::same_as<T, uint64_t>) {
-        return Vec<Tag>{concat_integer(lower.value, upper.value)};
+        return Vec<Tag>{concat_integer(lower_value.value, upper_value.value)};
       } else {
         static_assert(dispatch_dependent_false<T>, "unsupported x86 concat element type");
       }
     }
   }
   static VECOPS_ALWAYS_INLINE Mask<Tag> call(
-      ConcatOp, Tag tag, Mask<Half<Tag>> lower, Mask<Half<Tag>> upper) {
+      ConcatOp, Tag tag, Mask<Half<Tag>> lower_value, Mask<Half<Tag>> upper_value) {
     if constexpr (RepresentationTraits<X86Backend, Tag>::word_count == 2) {
-      return ::vecops::vec::mask_from_words(tag, lower, upper);
+      return ::vecops::vec::mask_from_words(tag, lower_value, upper_value);
     } else {
-      return x86_concat_mask_halves(tag, lower, upper);
+      return x86_concat_mask_halves(tag, lower_value, upper_value);
     }
   }
 };
@@ -1819,15 +1846,15 @@ struct NativeWordImpl<X86Backend, ShuffleOp> {
 #else
           const auto lane0 = _mm256_permute2f128_si256(v, v, 0x00);
           const auto lane1 = _mm256_permute2f128_si256(v, v, 0x11);
-          const auto lower = _mm256_shuffle_epi8(lane0, i);
+          const auto lower_value = _mm256_shuffle_epi8(lane0, i);
 #ifdef HAS_AVX512BW
           const auto lane_mask = _mm256_movepi8_mask(
               _mm256_slli_epi16(i, 3));
-          return _mm256_mask_shuffle_epi8(lower, lane_mask, lane1, i);
+          return _mm256_mask_shuffle_epi8(lower_value, lane_mask, lane1, i);
 #else
           const auto lane_mask = _mm256_slli_epi16(i, 3);
-          const auto upper = _mm256_shuffle_epi8(lane1, i);
-          return _mm256_blendv_epi8(lower, upper, lane_mask);
+          const auto upper_value = _mm256_shuffle_epi8(lane1, i);
+          return _mm256_blendv_epi8(lower_value, upper_value, lane_mask);
 #endif
 #endif
         }

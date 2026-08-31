@@ -98,6 +98,20 @@ struct BlendOp {
       V false_value, Mask<VecToTag<V>> mask, V true_value) const {
     return (*this)(VecToTag<V>{}, false_value, mask, true_value);
   }
+
+  /**
+   * Word-level entry for multi-word Tags; single-word Tags resolve to the
+   * whole-Tag overload above via execute()'s word_count == 1 branch. Used by
+   * backend implementations and shared masked-path helpers.
+   */
+  template <VectorTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordVec<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> false_value, NativeWordMask<Tag> mask,
+      NativeWordVec<Tag> true_value) const {
+    return details::execute_word<0, details::CurrentBackend>(
+        *this, tag, false_value, mask, true_value);
+  }
 };
 
 struct MaskAndOp {
@@ -175,6 +189,19 @@ struct BitCastOp {
   template <VectorTag ToTag, VectorTag FromTag>
   VECOPS_ALWAYS_INLINE Vec<ToTag> operator()(
       ToTag to, FromTag from, Vec<FromTag> value) const;
+
+  /**
+   * Word-level two-argument entry matching the backend word specializations,
+   * which deduce the source element format from the concrete word type
+   * instead of taking a FromTag (an alias cannot be deduced). The public
+   * whole-Tag form stays three-argument (to, from, value); the arities keep
+   * the two entries apart.
+   */
+  template <VectorTag ToTag, typename FromWord>
+  VECOPS_ALWAYS_INLINE NativeWordVec<ToTag> operator()(
+      ToTag to, FromWord value) const {
+    return details::execute_word<0, details::CurrentBackend>(*this, to, value);
+  }
 };
 
 namespace details {
@@ -454,7 +481,7 @@ inline constexpr MaskWhileGtOp mwhilegt{};
 // Backend specializations must precede the operator() definitions below so
 // that details::execute() can resolve them during template instantiation.
 #include "vecops/vec/details/Dispatch.h"
-
+#include "vecops/vec/details/Basic.h"
 #include "vecops/vec/details/scalar/Basic.h"
 
 #if defined(ARCH_X86_FAMILY) && !defined(CPU_CAPABILITY_GENERIC)
@@ -462,8 +489,6 @@ inline constexpr MaskWhileGtOp mwhilegt{};
 #elif defined(CPU_CAPABILITY_SVE)
 #include "vecops/vec/details/sve/Basic.h"
 #endif
-
-#include "vecops/vec/details/Basic.h"
 
 namespace vecops::vec::details {
 

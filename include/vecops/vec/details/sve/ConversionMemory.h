@@ -195,17 +195,17 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_indexed_integer(
       num_words(to) > 1 || num_words(IndexTag{}) > 1 ||
       num_words(WideTag{}) > 1) {
     using ToHalf = Half<ToTag>;
-    const auto lower = sve_load_convert_indexed_integer<
+    const auto lower_value = sve_load_convert_indexed_integer<
         Scale, ToHalf, From, Half<IndexTag>>(
-        ToHalf{}, pointer, execute(LowerOp{}, IndexTag{}, indices),
-        execute(LowerOp{}, to, mask), execute(LowerOp{}, to, inactive),
+        ToHalf{}, pointer, lower(IndexTag{}, indices),
+        lower(to, mask), lower(to, inactive),
         temporality);
-    const auto upper = sve_load_convert_indexed_integer<
+    const auto upper_value = sve_load_convert_indexed_integer<
         Scale, ToHalf, From, Half<IndexTag>>(
-        ToHalf{}, pointer, execute(UpperOp{}, IndexTag{}, indices),
-        execute(UpperOp{}, to, mask), execute(UpperOp{}, to, inactive),
+        ToHalf{}, pointer, upper(IndexTag{}, indices),
+        upper(to, mask), upper(to, inactive),
         temporality);
-    return execute(ConcatOp{}, to, lower, upper);
+    return concat(to, lower_value, upper_value);
   } else {
     const auto wide_mask = sve_convert_mask(WideTag{}, to, mask);
     const auto active = ::vecops::vec::get_word<0>(WideTag{}, wide_mask);
@@ -224,7 +224,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_indexed_integer(
         return sve_convert_one_word_raw<To, Wide>(wide);
     }();
     const auto result = sve_basic_wrap_word<ToTag>(converted);
-    return execute(BlendOp{}, to, inactive, mask, result);
+    return blend(to, inactive, mask, result);
   }
 }
 
@@ -241,15 +241,15 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_indexed_integer_unmasked(
       num_words(to) > 1 || num_words(IndexTag{}) > 1 ||
       num_words(WideTag{}) > 1) {
     using ToHalf = Half<ToTag>;
-    const auto lower = sve_load_convert_indexed_integer_unmasked<
+    const auto lower_value = sve_load_convert_indexed_integer_unmasked<
         Scale, ToHalf, From, Half<IndexTag>>(
-        ToHalf{}, pointer, execute(LowerOp{}, IndexTag{}, indices),
+        ToHalf{}, pointer, lower(IndexTag{}, indices),
         temporality);
-    const auto upper = sve_load_convert_indexed_integer_unmasked<
+    const auto upper_value = sve_load_convert_indexed_integer_unmasked<
         Scale, ToHalf, From, Half<IndexTag>>(
-        ToHalf{}, pointer, execute(UpperOp{}, IndexTag{}, indices),
+        ToHalf{}, pointer, upper(IndexTag{}, indices),
         temporality);
-    return execute(ConcatOp{}, to, lower, upper);
+    return concat(to, lower_value, upper_value);
   } else {
     const auto active = sve_prefix_predicate<Wide>(size(WideTag{}));
     const auto raw_indices = sve_basic_raw_word(indices);
@@ -301,7 +301,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_word(
     }
   }();
   const auto result = sve_basic_wrap_word<ToTag>(converted);
-  return execute(BlendOp{}, to, inactive, active, result);
+  return blend(to, inactive, active, result);
 }
 
 template <VectorTag ToTag, Element From>
@@ -359,13 +359,13 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_ordered_saturating(
     // Shape-changing conversion cannot use independent word batching: split
     // both complete Tags so the pointer offset remains a logical lane count.
     using ToHalf = Half<ToTag>;
-    const auto lower = sve_load_convert_ordered_saturating(
+    const auto lower_value = sve_load_convert_ordered_saturating(
         ToHalf{}, pointer,
-        execute(LowerOp{}, to, mask), execute(LowerOp{}, to, inactive));
-    const auto upper = sve_load_convert_ordered_saturating(
+        lower(to, mask), lower(to, inactive));
+    const auto upper_value = sve_load_convert_ordered_saturating(
         ToHalf{}, pointer + size(ToHalf{}),
-        execute(UpperOp{}, to, mask), execute(UpperOp{}, to, inactive));
-    return execute(ConcatOp{}, to, lower, upper);
+        upper(to, mask), upper(to, inactive));
+    return concat(to, lower_value, upper_value);
   }
 }
 
@@ -390,11 +390,11 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_ordered_saturating(
         });
   } else {
     using ToHalf = Half<ToTag>;
-    const auto lower = sve_load_convert_ordered_saturating(
+    const auto lower_value = sve_load_convert_ordered_saturating(
         ToHalf{}, pointer);
-    const auto upper = sve_load_convert_ordered_saturating(
+    const auto upper_value = sve_load_convert_ordered_saturating(
         ToHalf{}, pointer + size(ToHalf{}));
-    return execute(ConcatOp{}, to, lower, upper);
+    return concat(to, lower_value, upper_value);
   }
 }
 
@@ -488,13 +488,13 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_indexed_integer(
   if constexpr (num_words(from) > 1 || num_words(IndexTag{}) > 1) {
     using FromHalf = Half<FromTag>;
     sve_store_convert_indexed_integer<Scale, To, FromHalf, Half<IndexTag>>(
-        FromHalf{}, pointer, execute(LowerOp{}, from, value),
-        execute(LowerOp{}, IndexTag{}, indices),
-        execute(LowerOp{}, from, mask), temporality);
+        FromHalf{}, pointer, lower(from, value),
+        lower(IndexTag{}, indices),
+        lower(from, mask), temporality);
     sve_store_convert_indexed_integer<Scale, To, FromHalf, Half<IndexTag>>(
-        FromHalf{}, pointer, execute(UpperOp{}, from, value),
-        execute(UpperOp{}, IndexTag{}, indices),
-        execute(UpperOp{}, from, mask), temporality);
+        FromHalf{}, pointer, upper(from, value),
+        upper(IndexTag{}, indices),
+        upper(from, mask), temporality);
   } else {
     const auto conversion_active =
         ::vecops::vec::get_word<0>(from, mask);
@@ -545,12 +545,12 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_indexed_integer_unmasked(
     using FromHalf = Half<FromTag>;
     sve_store_convert_indexed_integer_unmasked<
         Scale, To, FromHalf, Half<IndexTag>>(
-        FromHalf{}, pointer, execute(LowerOp{}, from, value),
-        execute(LowerOp{}, IndexTag{}, indices), temporality);
+        FromHalf{}, pointer, lower(from, value),
+        lower(IndexTag{}, indices), temporality);
     sve_store_convert_indexed_integer_unmasked<
         Scale, To, FromHalf, Half<IndexTag>>(
-        FromHalf{}, pointer, execute(UpperOp{}, from, value),
-        execute(UpperOp{}, IndexTag{}, indices), temporality);
+        FromHalf{}, pointer, upper(from, value),
+        upper(IndexTag{}, indices), temporality);
   } else {
     const auto conversion_active =
         sve_prefix_predicate<From>(size(from));
@@ -600,77 +600,77 @@ VECOPS_ALWAYS_INLINE auto sve_pack_narrow_integer_x2(
   static_assert(
       sve_is_integer_element_v<From> && sve_is_integer_element_v<To> &&
       sizeof(From) == sizeof(To) * 2 && num_words(from) == 2);
-  const auto lower = sve_basic_raw_word(execute(LowerOp{}, from, value));
-  const auto upper = sve_basic_raw_word(execute(UpperOp{}, from, value));
+  const auto lower_value = sve_basic_raw_word(lower(from, value));
+  const auto upper_value = sve_basic_raw_word(upper(from, value));
   // QXTNB/QXTNT write the bottom/top narrow half of each wide lane, so using
-  // lower and upper directly would interleave the two logical words. Unzip
-  // their even/odd wide lanes first; narrowing then restores concatenation.
-  const auto even = [&]() VECOPS_INLINE_LAMBDA {
+  // lower_value and upper_value directly would interleave the two logical words. Unzip
+  // their even_value/odd_value wide lanes first; narrowing then restores concatenation.
+  const auto even_value = [&]() VECOPS_INLINE_LAMBDA {
     if constexpr (sizeof(From) == 2 && std::is_signed_v<From>)
-      return svuzp1_s16(lower, upper);
+      return svuzp1_s16(lower_value, upper_value);
     else if constexpr (sizeof(From) == 2)
-      return svuzp1_u16(lower, upper);
+      return svuzp1_u16(lower_value, upper_value);
     else if constexpr (sizeof(From) == 4 && std::is_signed_v<From>)
-      return svuzp1_s32(lower, upper);
+      return svuzp1_s32(lower_value, upper_value);
     else if constexpr (sizeof(From) == 4)
-      return svuzp1_u32(lower, upper);
+      return svuzp1_u32(lower_value, upper_value);
     else if constexpr (std::is_signed_v<From>)
-      return svuzp1_s64(lower, upper);
+      return svuzp1_s64(lower_value, upper_value);
     else
-      return svuzp1_u64(lower, upper);
+      return svuzp1_u64(lower_value, upper_value);
   }();
-  const auto odd = [&]() VECOPS_INLINE_LAMBDA {
+  const auto odd_value = [&]() VECOPS_INLINE_LAMBDA {
     if constexpr (sizeof(From) == 2 && std::is_signed_v<From>)
-      return svuzp2_s16(lower, upper);
+      return svuzp2_s16(lower_value, upper_value);
     else if constexpr (sizeof(From) == 2)
-      return svuzp2_u16(lower, upper);
+      return svuzp2_u16(lower_value, upper_value);
     else if constexpr (sizeof(From) == 4 && std::is_signed_v<From>)
-      return svuzp2_s32(lower, upper);
+      return svuzp2_s32(lower_value, upper_value);
     else if constexpr (sizeof(From) == 4)
-      return svuzp2_u32(lower, upper);
+      return svuzp2_u32(lower_value, upper_value);
     else if constexpr (std::is_signed_v<From>)
-      return svuzp2_s64(lower, upper);
+      return svuzp2_s64(lower_value, upper_value);
     else
-      return svuzp2_u64(lower, upper);
+      return svuzp2_u64(lower_value, upper_value);
   }();
   if constexpr (std::is_signed_v<From> && std::is_signed_v<To>) {
     if constexpr (sizeof(From) == 2)
-      return svqxtnt_s16(svqxtnb_s16(even), odd);
+      return svqxtnt_s16(svqxtnb_s16(even_value), odd_value);
     else if constexpr (sizeof(From) == 4)
-      return svqxtnt_s32(svqxtnb_s32(even), odd);
+      return svqxtnt_s32(svqxtnb_s32(even_value), odd_value);
     else
-      return svqxtnt_s64(svqxtnb_s64(even), odd);
+      return svqxtnt_s64(svqxtnb_s64(even_value), odd_value);
   } else if constexpr (std::is_unsigned_v<From> && std::is_unsigned_v<To>) {
     if constexpr (sizeof(From) == 2)
-      return svqxtnt_u16(svqxtnb_u16(even), odd);
+      return svqxtnt_u16(svqxtnb_u16(even_value), odd_value);
     else if constexpr (sizeof(From) == 4)
-      return svqxtnt_u32(svqxtnb_u32(even), odd);
+      return svqxtnt_u32(svqxtnb_u32(even_value), odd_value);
     else
-      return svqxtnt_u64(svqxtnb_u64(even), odd);
+      return svqxtnt_u64(svqxtnb_u64(even_value), odd_value);
   } else if constexpr (std::is_signed_v<From>) {
     if constexpr (sizeof(From) == 2)
-      return svqxtunt_s16(svqxtunb_s16(even), odd);
+      return svqxtunt_s16(svqxtunb_s16(even_value), odd_value);
     else if constexpr (sizeof(From) == 4)
-      return svqxtunt_s32(svqxtunb_s32(even), odd);
+      return svqxtunt_s32(svqxtunb_s32(even_value), odd_value);
     else
-      return svqxtunt_s64(svqxtunb_s64(even), odd);
+      return svqxtunt_s64(svqxtunb_s64(even_value), odd_value);
   } else {
     constexpr From high = static_cast<From>(std::numeric_limits<To>::max());
     const auto lo = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (sizeof(From) == 2)
-        return svmin_n_u16_x(svptrue_b16(), even, high);
+        return svmin_n_u16_x(svptrue_b16(), even_value, high);
       else if constexpr (sizeof(From) == 4)
-        return svmin_n_u32_x(svptrue_b32(), even, high);
+        return svmin_n_u32_x(svptrue_b32(), even_value, high);
       else
-        return svmin_n_u64_x(svptrue_b64(), even, high);
+        return svmin_n_u64_x(svptrue_b64(), even_value, high);
     }();
     const auto hi = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (sizeof(From) == 2)
-        return svmin_n_u16_x(svptrue_b16(), odd, high);
+        return svmin_n_u16_x(svptrue_b16(), odd_value, high);
       else if constexpr (sizeof(From) == 4)
-        return svmin_n_u32_x(svptrue_b32(), odd, high);
+        return svmin_n_u32_x(svptrue_b32(), odd_value, high);
       else
-        return svmin_n_u64_x(svptrue_b64(), odd, high);
+        return svmin_n_u64_x(svptrue_b64(), odd_value, high);
     }();
     if constexpr (sizeof(From) == 2)
       return svreinterpret_s8_u8(svqxtnt_u16(svqxtnb_u16(lo), hi));
@@ -693,11 +693,11 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
   if constexpr (!sve_conversion_tag_representable_v<ToTag>) {
     using FromHalf = Half<FromTag>;
     sve_store_convert_ordered_saturating(
-        FromHalf{}, pointer, execute(LowerOp{}, from, value),
-        execute(LowerOp{}, from, mask));
+        FromHalf{}, pointer, lower(from, value),
+        lower(from, mask));
     sve_store_convert_ordered_saturating(
         FromHalf{}, pointer + size(FromHalf{}),
-        execute(UpperOp{}, from, value), execute(UpperOp{}, from, mask));
+        upper(from, value), upper(from, mask));
   } else {
 #if defined(HAS_SVE2)
   if constexpr (
@@ -716,8 +716,8 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
     // Two F32 words exactly fill one BF16 word. Keeping this as one packed
     // conversion and one full-width store is important for LayerNorm streams.
     const auto packed = sve_f32_pair_to_bf16(
-        sve_basic_raw_word(execute(LowerOp{}, from, value)),
-        sve_basic_raw_word(execute(UpperOp{}, from, value)));
+        sve_basic_raw_word(lower(from, value)),
+        sve_basic_raw_word(upper(from, value)));
     const auto memory_mask = sve_convert_mask(ToTag{}, from, mask);
     sve_store_memory_word(
         memory_mask, pointer, packed, mem::Temporal{});
@@ -738,11 +738,11 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
   } else {
     using FromHalf = Half<FromTag>;
     sve_store_convert_ordered_saturating(
-        FromHalf{}, pointer, execute(LowerOp{}, from, value),
-        execute(LowerOp{}, from, mask));
+        FromHalf{}, pointer, lower(from, value),
+        lower(from, mask));
     sve_store_convert_ordered_saturating(
         FromHalf{}, pointer + size(FromHalf{}),
-        execute(UpperOp{}, from, value), execute(UpperOp{}, from, mask));
+        upper(from, value), upper(from, mask));
   }
   }
 }
@@ -758,10 +758,10 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
   if constexpr (!sve_conversion_tag_representable_v<ToTag>) {
     using FromHalf = Half<FromTag>;
     sve_store_convert_ordered_saturating(
-        FromHalf{}, pointer, execute(LowerOp{}, from, value));
+        FromHalf{}, pointer, lower(from, value));
     sve_store_convert_ordered_saturating(
         FromHalf{}, pointer + size(FromHalf{}),
-        execute(UpperOp{}, from, value));
+        upper(from, value));
   } else {
 #if defined(HAS_SVE2)
   if constexpr (
@@ -777,8 +777,8 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
       std::same_as<From, float32_t> && std::same_as<To, bfloat16_t> &&
       num_words(from) == 2 && num_words(ToTag{}) == 1) {
     const auto packed = sve_f32_pair_to_bf16(
-        sve_basic_raw_word(execute(LowerOp{}, from, value)),
-        sve_basic_raw_word(execute(UpperOp{}, from, value)));
+        sve_basic_raw_word(lower(from, value)),
+        sve_basic_raw_word(upper(from, value)));
     const auto active = sve_prefix_predicate<To>(size(ToTag{}));
     sve_store_memory_word(active, pointer, packed, mem::Temporal{});
   } else if constexpr (num_words(from) == 1 && num_words(ToTag{}) == 1) {
@@ -798,10 +798,10 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
   } else {
     using FromHalf = Half<FromTag>;
     sve_store_convert_ordered_saturating(
-        FromHalf{}, pointer, execute(LowerOp{}, from, value));
+        FromHalf{}, pointer, lower(from, value));
     sve_store_convert_ordered_saturating(
         FromHalf{}, pointer + size(FromHalf{}),
-        execute(UpperOp{}, from, value));
+        upper(from, value));
   }
   }
 }

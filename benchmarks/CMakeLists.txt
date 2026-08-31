@@ -282,6 +282,24 @@ vecops_add_benchmark(
     ARCH Native
 )
 
+vecops_add_benchmark(
+    NAME RsqrtBench
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/RsqrtBench.cpp
+    ARCH Native
+)
+
+vecops_add_benchmark(
+    NAME RcpBench
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/RcpBench.cpp
+    ARCH Native
+)
+
+vecops_add_benchmark(
+    NAME LogBench
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/vec/LogBench.cpp
+    ARCH Native
+)
+
 set(INSTRUCTION_BENCH_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/inst/InstructionBench.cpp
 )

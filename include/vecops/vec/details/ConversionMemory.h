@@ -14,7 +14,7 @@
 #include <tuple>
 
 #include "vecops/util/ScalarConvert.h"
-#include "vecops/vec/details/Options.h"
+#include "vecops/vec/Options.h"
 
 namespace vecops::vec::details {
 
@@ -54,10 +54,6 @@ struct IsConversionMemoryLayoutOption : std::bool_constant<
 template <typename T>
 struct IsConversionMemoryValueOption : std::bool_constant<
     IsSaturateOption<T>::value || IsWrapOption<T>::value> {};
-
-template <typename T>
-struct IsConversionMemoryPackingOption : std::bool_constant<
-    IsPackedOption<T>::value || IsSplitOption<T>::value> {};
 
 template <VectorTag LogicalTag, Element Other, bool IsStore, typename Option>
 inline constexpr bool is_memory_conversion_option_for_v = [] {
@@ -257,7 +253,7 @@ struct GenericImpl<Backend, LoadConvertOp, ToTag> {
     const auto converted = call(
         op, to, pointer, memory_mask, layout, value_policy,
         alignment, temporality);
-    return execute(BlendOp{}, to, inactive, output_mask, converted);
+    return blend(to, inactive, output_mask, converted);
   }
 };
 
@@ -291,7 +287,7 @@ struct GenericImpl<Backend, StoreConvertOp, FromTag> {
                         std::remove_cvref_t<MaskValueType>, Mask<ToTag>>)
         return mask;
       else
-        return execute(ConvertOp{}, ToTag{}, from, mask);
+        return convert(ToTag{}, from, mask);
     }();
     execute_store_options(
         StoreOp{}, ToTag{}, pointer, converted, opt::masked(memory_mask),
@@ -363,12 +359,12 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> execute_large_load_convert_contiguous(
         LoadConvertOp{}, to, pointer, std::forward<Options>(options)...);
   } else {
     using HalfTag = Half<ToTag>;
-    auto lower = execute_large_load_convert_contiguous(
+    auto lower_value = execute_large_load_convert_contiguous(
         HalfTag{}, pointer, options...);
     const nint_t half_lanes = size(HalfTag{});
-    auto upper = execute_large_load_convert_contiguous(
+    auto upper_value = execute_large_load_convert_contiguous(
         HalfTag{}, pointer + half_lanes, options...);
-    return execute(ConcatOp{}, to, lower, upper);
+    return concat(to, lower_value, upper_value);
   }
 }
 
@@ -382,11 +378,11 @@ VECOPS_ALWAYS_INLINE void execute_large_store_convert_contiguous(
   } else {
     using HalfTag = Half<FromTag>;
     execute_large_store_convert_contiguous(
-        HalfTag{}, pointer, execute(LowerOp{}, from, value), options...);
+        HalfTag{}, pointer, lower(from, value), options...);
     const nint_t half_lanes = size(HalfTag{});
     execute_large_store_convert_contiguous(
         HalfTag{}, pointer + half_lanes,
-        execute(UpperOp{}, from, value), options...);
+        upper(from, value), options...);
   }
 }
 

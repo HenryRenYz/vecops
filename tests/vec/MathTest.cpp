@@ -1,4 +1,4 @@
-// @vecops-test-shards: 24
+// @vecops-test-shards: 72
 
 #include <gtest/gtest.h>
 
@@ -16,6 +16,9 @@
 
 namespace vec = vecops::vec;
 
+constexpr int kMathOperationCount = 18;
+constexpr long double kLog2Base10Long = 3.321928094887362347870319429489L;
+
 enum class MathOperation {
   ExpStrict,
   ExpFast,
@@ -23,7 +26,33 @@ enum class MathOperation {
   ExpNegStrict,
   ExpNegFast,
   ExpNegEstimate,
+  Exp2Strict,
+  Exp2Fast,
+  Exp2Estimate,
+  Exp2NegStrict,
+  Exp2NegFast,
+  Exp2NegEstimate,
+  Exp10Strict,
+  Exp10Fast,
+  Exp10Estimate,
+  Exp10NegStrict,
+  Exp10NegFast,
+  Exp10NegEstimate,
 };
+
+constexpr vec::ExpBase operation_base(MathOperation op) {
+  return static_cast<vec::ExpBase>(static_cast<int>(op) / 6);
+}
+
+constexpr vec::Accuracy operation_tier(MathOperation op) {
+  constexpr vec::Accuracy tiers[] = {
+      vec::Accuracy::Strict, vec::Accuracy::Fast, vec::Accuracy::Estimate};
+  return tiers[static_cast<int>(op) % 3];
+}
+
+constexpr bool operation_negative(MathOperation op) {
+  return static_cast<int>(op) % 6 >= 3;
+}
 
 template <MathOperation Operation, typename T>
 void run_math_shapes_test();
@@ -37,7 +66,8 @@ void run_fixed_sve_math_test();
 #if defined(VECOPS_TEST_SHARD_ACTIVE)
 
 static_assert(
-    VECOPS_TEST_SHARD_COUNT == vec_test::FloatingElements::size * 6);
+    VECOPS_TEST_SHARD_COUNT ==
+    vec_test::FloatingElements::size * kMathOperationCount);
 
 namespace {
 
@@ -61,59 +91,65 @@ std::uint64_t bits(T value) {
   }
 }
 
-template <typename T>
+template <vec::ExpBase Base, typename T>
 T reference_exp(T value) {
   if constexpr (
       std::same_as<T, vecops::float16_t> ||
       std::same_as<T, vecops::bfloat16_t>) {
-    return T(static_cast<float>(std::exp(
-        static_cast<long double>(static_cast<float>(value)))));
+    const long double widened = static_cast<float>(value);
+    if constexpr (Base == vec::ExpBase::E)
+      return T(static_cast<float>(std::exp(widened)));
+    else if constexpr (Base == vec::ExpBase::Base2)
+      return T(static_cast<float>(std::exp2(widened)));
+    else
+      return T(static_cast<float>(
+          std::exp2(widened * kLog2Base10Long)));
   } else {
-    return static_cast<T>(std::exp(static_cast<long double>(value)));
+    const long double widened = static_cast<long double>(value);
+    if constexpr (Base == vec::ExpBase::E)
+      return static_cast<T>(std::exp(widened));
+    else if constexpr (Base == vec::ExpBase::Base2)
+      return static_cast<T>(std::exp2(widened));
+    else
+      return static_cast<T>(std::exp2(widened * kLog2Base10Long));
   }
 }
 
-template <vec::Accuracy Tier, bool NegativeOnly, vec::FloatingTag Tag,
-          typename... Options>
+template <vec::Accuracy Tier, vec::ExpBase Base, bool NegativeOnly,
+          vec::FloatingTag Tag, typename... Options>
 vec::Vec<Tag> invoke_exp(
     Tag tag, vec::Vec<Tag> value, Options&&... options) {
-  if constexpr (NegativeOnly) {
-    return vec::exp_neg(
-        tag,
-        value,
-        std::forward<Options>(options)...,
-        vec::opt::math::accuracy<Tier>);
-  } else {
-    return vec::exp(
-        tag,
-        value,
-        std::forward<Options>(options)...,
-        vec::opt::math::accuracy<Tier>);
-  }
+  return vec::ExpCpo<Base, NegativeOnly>{}(
+      tag,
+      value,
+      std::forward<Options>(options)...,
+      vec::opt::math::accuracy<Tier>);
 }
 
-template <vec::Accuracy Tier, bool NegativeOnly, vec::FloatingTag Tag>
+template <vec::Accuracy Tier, vec::ExpBase Base, bool NegativeOnly,
+          vec::FloatingTag Tag>
 vec::Vec<Tag> invoke_fixed_exp(Tag tag, vec::Vec<Tag> value) {
-  if constexpr (NegativeOnly) {
-    if constexpr (Tier == vec::Accuracy::Strict)
-      return vec::exp_neg_strict(tag, value);
-    else if constexpr (Tier == vec::Accuracy::Fast)
-      return vec::exp_neg_fast(tag, value);
-    else
-      return vec::exp_neg_est(tag, value);
-  } else {
-    if constexpr (Tier == vec::Accuracy::Strict)
-      return vec::exp_strict(tag, value);
-    else if constexpr (Tier == vec::Accuracy::Fast)
-      return vec::exp_fast(tag, value);
-    else
-      return vec::exp_est(tag, value);
-  }
+  return vec::FixedAccuracyExpCpo<Base, Tier, NegativeOnly>{}(tag, value);
 }
 
-template <vec::Accuracy Tier, typename T>
+/** Full-precision reference used for the Estimate relative-error budget. */
+template <vec::ExpBase Base, typename T>
+long double reference_exp_exact(T value) {
+  const long double widened = [&] {
+    if constexpr (
+        std::same_as<T, vecops::float16_t> ||
+        std::same_as<T, vecops::bfloat16_t>)
+      return static_cast<long double>(static_cast<float>(value));
+    else return static_cast<long double>(value);
+  }();
+  if constexpr (Base == vec::ExpBase::E) return std::exp(widened);
+  else if constexpr (Base == vec::ExpBase::Base2) return std::exp2(widened);
+  else return std::exp2(widened * kLog2Base10Long);
+}
+
+template <vec::Accuracy Tier, vec::ExpBase Base, typename T>
 void expect_accurate(T input, T actual) {
-  const T expected = reference_exp(input);
+  const T expected = reference_exp<Base>(input);
   ASSERT_EQ(std::isnan(as_double(expected)), std::isnan(as_double(actual)))
       << "x=" << as_double(input);
   if (std::isnan(as_double(expected))) return;
@@ -138,8 +174,7 @@ void expect_accurate(T input, T actual) {
       EXPECT_LE(ulps, 4u) << "x=" << as_double(input);
   } else if (std::isfinite(as_double(expected)) &&
              as_double(expected) >= as_double(std::numeric_limits<T>::min())) {
-    const long double exact = std::exp(
-        static_cast<long double>(as_double(input)));
+    const long double exact = reference_exp_exact<Base>(input);
     const long double relative = std::abs(
         static_cast<long double>(as_double(actual)) / exact - 1.0L);
     EXPECT_TRUE(ulps <= 4u || relative <= 0.006L)
@@ -148,22 +183,42 @@ void expect_accurate(T input, T actual) {
   }
 }
 
-template <typename T>
+template <typename T, vec::ExpBase Base>
 constexpr double lower_bound() {
-  if constexpr (std::same_as<T, double>) return -700.0;
-  else if constexpr (std::same_as<T, float>) return -80.0;
-  else return -9.0;
+  if constexpr (std::same_as<T, double>) {
+    if constexpr (Base == vec::ExpBase::E) return -700.0;
+    else if constexpr (Base == vec::ExpBase::Base2) return -1000.0;
+    else return -300.0;
+  } else if constexpr (std::same_as<T, float>) {
+    if constexpr (Base == vec::ExpBase::E) return -80.0;
+    else if constexpr (Base == vec::ExpBase::Base2) return -120.0;
+    else return -37.0;
+  } else {
+    if constexpr (Base == vec::ExpBase::E) return -9.0;
+    else if constexpr (Base == vec::ExpBase::Base2) return -9.0;
+    else return -4.0;
+  }
 }
 
-template <typename T>
+template <typename T, vec::ExpBase Base>
 constexpr double upper_bound() {
-  if constexpr (std::same_as<T, double>) return 700.0;
-  else if constexpr (std::same_as<T, float>) return 80.0;
-  else return 9.0;
+  if constexpr (std::same_as<T, double>) {
+    if constexpr (Base == vec::ExpBase::E) return 700.0;
+    else if constexpr (Base == vec::ExpBase::Base2) return 1000.0;
+    else return 300.0;
+  } else if constexpr (std::same_as<T, float>) {
+    if constexpr (Base == vec::ExpBase::E) return 80.0;
+    else if constexpr (Base == vec::ExpBase::Base2) return 120.0;
+    else return 37.0;
+  } else {
+    if constexpr (Base == vec::ExpBase::E) return 9.0;
+    else if constexpr (Base == vec::ExpBase::Base2) return 9.0;
+    else return 4.0;
+  }
 }
 
-template <vec::Accuracy Tier, bool NegativeOnly, bool FullOptions = true,
-          vec::FloatingTag Tag>
+template <vec::Accuracy Tier, vec::ExpBase Base, bool NegativeOnly,
+          bool FullOptions = true, vec::FloatingTag Tag>
 void verify_lane_shape(Tag tag) {
   using T = vec::ElementOf<Tag>;
   auto input = vec::zeros(tag);
@@ -189,22 +244,20 @@ void verify_lane_shape(Tag tag) {
         : -1.5 + 0.25 * static_cast<double>(lane % 13);
     valid_input = vec::set(tag, valid_input, lane, T(value));
   }
-  const auto result = invoke_exp<Tier, NegativeOnly>(tag, valid_input);
-  const auto fixed_result = invoke_fixed_exp<Tier, NegativeOnly>(
+  const auto result = invoke_exp<Tier, Base, NegativeOnly>(tag, valid_input);
+  const auto fixed_result = invoke_fixed_exp<Tier, Base, NegativeOnly>(
       tag, valid_input);
-  const auto unmasked_result = invoke_exp<Tier, NegativeOnly>(
+  const auto unmasked_result = invoke_exp<Tier, Base, NegativeOnly>(
       tag, valid_input, vec::opt::unmasked);
   const auto default_result = [&] {
     if constexpr (Tier != vec::Accuracy::Strict) {
       return result;
-    } else if constexpr (NegativeOnly) {
-      return vec::exp_neg(tag, valid_input);
     } else {
-      return vec::exp(tag, valid_input);
+      return vec::ExpCpo<Base, NegativeOnly>{}(tag, valid_input);
     }
   }();
   for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
-    expect_accurate<Tier>(
+    expect_accurate<Tier, Base>(
         vec::get(tag, valid_input, lane), vec::get(tag, result, lane));
     EXPECT_EQ(
         bits(vec::get(tag, result, lane)),
@@ -224,26 +277,26 @@ void verify_lane_shape(Tag tag) {
 
   if constexpr (!FullOptions) return;
   const T scalar_merge = T(-7.0);
-  const auto preserved = invoke_exp<Tier, NegativeOnly>(
+  const auto preserved = invoke_exp<Tier, Base, NegativeOnly>(
       tag, input, vec::opt::masked(mask));
-  const auto zeroed = invoke_exp<Tier, NegativeOnly>(
+  const auto zeroed = invoke_exp<Tier, Base, NegativeOnly>(
       tag, input, vec::opt::zero, vec::opt::masked(mask));
-  const auto scalar = invoke_exp<Tier, NegativeOnly>(
+  const auto scalar = invoke_exp<Tier, Base, NegativeOnly>(
       tag, input, vec::opt::masked(mask), vec::opt::merge(scalar_merge));
-  const auto vector = invoke_exp<Tier, NegativeOnly>(
+  const auto vector = invoke_exp<Tier, Base, NegativeOnly>(
       tag, input, vec::opt::merge(vector_merge), vec::opt::masked(mask));
   const vecops::nint_t prefix_count = vec::size(tag) / 2;
-  const auto prefix = invoke_exp<Tier, NegativeOnly>(
+  const auto prefix = invoke_exp<Tier, Base, NegativeOnly>(
       tag, input, vec::opt::first(prefix_count),
       vec::opt::merge(scalar_merge));
   for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
     const bool active = lane % 3 != 0;
     if (active) {
       const T expected_input = vec::get(tag, input, lane);
-      expect_accurate<Tier>(expected_input, vec::get(tag, preserved, lane));
-      expect_accurate<Tier>(expected_input, vec::get(tag, zeroed, lane));
-      expect_accurate<Tier>(expected_input, vec::get(tag, scalar, lane));
-      expect_accurate<Tier>(expected_input, vec::get(tag, vector, lane));
+      expect_accurate<Tier, Base>(expected_input, vec::get(tag, preserved, lane));
+      expect_accurate<Tier, Base>(expected_input, vec::get(tag, zeroed, lane));
+      expect_accurate<Tier, Base>(expected_input, vec::get(tag, scalar, lane));
+      expect_accurate<Tier, Base>(expected_input, vec::get(tag, vector, lane));
     } else {
       EXPECT_EQ(bits(vec::get(tag, input, lane)), bits(vec::get(tag, preserved, lane)));
       EXPECT_EQ(bits(T{}), bits(vec::get(tag, zeroed, lane)));
@@ -251,7 +304,7 @@ void verify_lane_shape(Tag tag) {
       EXPECT_EQ(bits(vec::get(tag, vector_merge, lane)), bits(vec::get(tag, vector, lane)));
     }
     if (lane < prefix_count) {
-      expect_accurate<Tier>(
+      expect_accurate<Tier, Base>(
           vec::get(tag, input, lane), vec::get(tag, prefix, lane));
     } else {
       EXPECT_EQ(
@@ -263,21 +316,19 @@ void verify_lane_shape(Tag tag) {
 template <MathOperation Operation, typename T, bool FullOptions = true,
           vec::FloatingTag Tag>
 void verify_every_operation(Tag tag) {
-  if constexpr (Operation == MathOperation::ExpStrict)
-    verify_lane_shape<vec::Accuracy::Strict, false, FullOptions>(tag);
-  else if constexpr (Operation == MathOperation::ExpFast)
-    verify_lane_shape<vec::Accuracy::Fast, false, FullOptions>(tag);
-  else if constexpr (Operation == MathOperation::ExpEstimate)
-    verify_lane_shape<vec::Accuracy::Estimate, false, FullOptions>(tag);
-  else if constexpr (Operation == MathOperation::ExpNegStrict)
-    verify_lane_shape<vec::Accuracy::Strict, true, FullOptions>(tag);
-  else if constexpr (Operation == MathOperation::ExpNegFast)
-    verify_lane_shape<vec::Accuracy::Fast, true, FullOptions>(tag);
+  constexpr vec::ExpBase base = operation_base(Operation);
+  constexpr vec::Accuracy tier = operation_tier(Operation);
+  constexpr bool negative = operation_negative(Operation);
+  if constexpr (tier == vec::Accuracy::Strict)
+    verify_lane_shape<vec::Accuracy::Strict, base, negative, FullOptions>(tag);
+  else if constexpr (tier == vec::Accuracy::Fast)
+    verify_lane_shape<vec::Accuracy::Fast, base, negative, FullOptions>(tag);
   else
-    verify_lane_shape<vec::Accuracy::Estimate, true, FullOptions>(tag);
+    verify_lane_shape<vec::Accuracy::Estimate, base, negative, FullOptions>(tag);
 }
 
-template <vec::Accuracy Tier, bool NegativeOnly, typename T>
+template <vec::Accuracy Tier, vec::ExpBase Base, bool NegativeOnly,
+          typename T>
 void verify_dense_samples() {
   vec::ScalableTag<T, 0> tag;
   constexpr int sample_count = 4096;
@@ -285,16 +336,29 @@ void verify_dense_samples() {
     auto input = vec::zeros(tag);
     for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
       const int index = std::min(base + static_cast<int>(lane), sample_count);
-      const double lower = lower_bound<T>();
-      const double upper = NegativeOnly ? 0.0 : upper_bound<T>();
+      const double lower = lower_bound<T, Base>();
+      const double upper = NegativeOnly ? 0.0 : upper_bound<T, Base>();
       input = vec::set(tag, input, lane, T(
           lower + (upper - lower) * index / sample_count));
     }
-    const auto result = invoke_exp<Tier, NegativeOnly>(tag, input);
+    const auto result = invoke_exp<Tier, Base, NegativeOnly>(tag, input);
     for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane)
-      expect_accurate<Tier>(
+      expect_accurate<Tier, Base>(
           vec::get(tag, input, lane), vec::get(tag, result, lane));
   }
+}
+
+template <MathOperation Operation, typename T>
+void verify_dense_for_operation() {
+  constexpr vec::ExpBase b = operation_base(Operation);
+  constexpr vec::Accuracy tier = operation_tier(Operation);
+  constexpr bool negative = operation_negative(Operation);
+  if constexpr (tier == vec::Accuracy::Strict)
+    verify_dense_samples<vec::Accuracy::Strict, b, negative, T>();
+  else if constexpr (tier == vec::Accuracy::Fast)
+    verify_dense_samples<vec::Accuracy::Fast, b, negative, T>();
+  else
+    verify_dense_samples<vec::Accuracy::Estimate, b, negative, T>();
 }
 
 } // namespace
@@ -311,18 +375,7 @@ void run_math_shapes_test() {
 
 template <MathOperation Operation, typename T>
 void run_math_dense_test() {
-  if constexpr (Operation == MathOperation::ExpStrict)
-    verify_dense_samples<vec::Accuracy::Strict, false, T>();
-  else if constexpr (Operation == MathOperation::ExpFast)
-    verify_dense_samples<vec::Accuracy::Fast, false, T>();
-  else if constexpr (Operation == MathOperation::ExpEstimate)
-    verify_dense_samples<vec::Accuracy::Estimate, false, T>();
-  else if constexpr (Operation == MathOperation::ExpNegStrict)
-    verify_dense_samples<vec::Accuracy::Strict, true, T>();
-  else if constexpr (Operation == MathOperation::ExpNegFast)
-    verify_dense_samples<vec::Accuracy::Fast, true, T>();
-  else
-    verify_dense_samples<vec::Accuracy::Estimate, true, T>();
+  verify_dense_for_operation<Operation, T>();
 }
 
 #if !defined(VECOPS_MATH_ASSUME_VALID_INPUTS)
@@ -345,7 +398,7 @@ void run_math_ieee_edges_test() {
     if (std::isnan(in)) EXPECT_TRUE(std::isnan(out));
     else if (in == std::numeric_limits<double>::infinity()) EXPECT_TRUE(std::isinf(out));
     else if (in == -std::numeric_limits<double>::infinity()) EXPECT_EQ(out, 0.0);
-    else expect_accurate<vec::Accuracy::Strict>(
+    else expect_accurate<vec::Accuracy::Strict, vec::ExpBase::E>(
         vec::get(tag, input, lane), vec::get(tag, result, lane));
   }
 }
@@ -402,6 +455,18 @@ void run_all_math_shapes() {
   run_math_shapes_test<MathOperation::ExpNegStrict, T>();
   run_math_shapes_test<MathOperation::ExpNegFast, T>();
   run_math_shapes_test<MathOperation::ExpNegEstimate, T>();
+  run_math_shapes_test<MathOperation::Exp2Strict, T>();
+  run_math_shapes_test<MathOperation::Exp2Fast, T>();
+  run_math_shapes_test<MathOperation::Exp2Estimate, T>();
+  run_math_shapes_test<MathOperation::Exp2NegStrict, T>();
+  run_math_shapes_test<MathOperation::Exp2NegFast, T>();
+  run_math_shapes_test<MathOperation::Exp2NegEstimate, T>();
+  run_math_shapes_test<MathOperation::Exp10Strict, T>();
+  run_math_shapes_test<MathOperation::Exp10Fast, T>();
+  run_math_shapes_test<MathOperation::Exp10Estimate, T>();
+  run_math_shapes_test<MathOperation::Exp10NegStrict, T>();
+  run_math_shapes_test<MathOperation::Exp10NegFast, T>();
+  run_math_shapes_test<MathOperation::Exp10NegEstimate, T>();
 }
 
 template <typename T>
@@ -412,6 +477,18 @@ void run_all_math_dense_cases() {
   run_math_dense_test<MathOperation::ExpNegStrict, T>();
   run_math_dense_test<MathOperation::ExpNegFast, T>();
   run_math_dense_test<MathOperation::ExpNegEstimate, T>();
+  run_math_dense_test<MathOperation::Exp2Strict, T>();
+  run_math_dense_test<MathOperation::Exp2Fast, T>();
+  run_math_dense_test<MathOperation::Exp2Estimate, T>();
+  run_math_dense_test<MathOperation::Exp2NegStrict, T>();
+  run_math_dense_test<MathOperation::Exp2NegFast, T>();
+  run_math_dense_test<MathOperation::Exp2NegEstimate, T>();
+  run_math_dense_test<MathOperation::Exp10Strict, T>();
+  run_math_dense_test<MathOperation::Exp10Fast, T>();
+  run_math_dense_test<MathOperation::Exp10Estimate, T>();
+  run_math_dense_test<MathOperation::Exp10NegStrict, T>();
+  run_math_dense_test<MathOperation::Exp10NegFast, T>();
+  run_math_dense_test<MathOperation::Exp10NegEstimate, T>();
 }
 
 TYPED_TEST(VecMathTest, EveryOperationShapeAndOptions) {
@@ -439,6 +516,18 @@ TYPED_TEST(VecMathTest, FixedSVEBatchesBeyondTupleLimit) {
     run_fixed_sve_math_test<MathOperation::ExpNegStrict, TypeParam>();
     run_fixed_sve_math_test<MathOperation::ExpNegFast, TypeParam>();
     run_fixed_sve_math_test<MathOperation::ExpNegEstimate, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::Exp2Strict, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::Exp2Fast, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::Exp2Estimate, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::Exp2NegStrict, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::Exp2NegFast, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::Exp2NegEstimate, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::Exp10Strict, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::Exp10Fast, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::Exp10Estimate, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::Exp10NegStrict, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::Exp10NegFast, TypeParam>();
+    run_fixed_sve_math_test<MathOperation::Exp10NegEstimate, TypeParam>();
   }
 }
 #endif

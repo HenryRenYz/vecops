@@ -681,6 +681,240 @@ TEST_F(ValueTest, ToValuePreservesValueType) {
   EXPECT_TRUE((std::is_same_v<to_value_t<Any>, Any>));
 }
 
+// --- Value-aware min/max ---
+
+TEST_F(ValueTest, MinMaxConstConstFold) {
+  auto lo = min(cint<10>, cint<20>);
+  auto hi = max(cint<10>, cint<20>);
+  EXPECT_EQ(nint_t(lo), 10);
+  EXPECT_TRUE((std::is_same_v<decltype(lo), Const<10>>));
+  EXPECT_EQ(nint_t(hi), 20);
+  EXPECT_TRUE((std::is_same_v<decltype(hi), Const<20>>));
+  EXPECT_TRUE((std::is_same_v<decltype(min(cint<20>, cint<10>)), Const<10>>));
+  EXPECT_TRUE((std::is_same_v<decltype(max(cint<20>, cint<10>)), Const<20>>));
+}
+
+TEST_F(ValueTest, MinConstDynFoldsWhenBelowLowerBound) {
+  auto d = Dynamic<8, 16, 128>{32};
+  auto r = min(cint<4>, d);
+  EXPECT_EQ(nint_t(r), 4);
+  EXPECT_TRUE((std::is_same_v<decltype(r), Const<4>>));
+}
+
+TEST_F(ValueTest, MinConstDynPassesThroughWhenAboveUpperBound) {
+  auto d = Dynamic<8, 16, 128>{32};
+  auto r = min(cint<200>, d);
+  EXPECT_EQ(nint_t(r), 32);
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<8, 16, 128>>));
+}
+
+TEST_F(ValueTest, MinConstDynTightensUpperBound) {
+  auto d = Dynamic<8, 16, 128>{96};
+  auto r = min(cint<64>, d);
+  EXPECT_EQ(nint_t(r), 64);
+  // gcd(8, 64) = 8, upper bound min(128, 64) = 64.
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<8, 16, 64>>));
+  // Argument order must not matter.
+  auto r2 = min(d, cint<64>);
+  EXPECT_TRUE((std::is_same_v<decltype(r2), Dynamic<8, 16, 64>>));
+}
+
+TEST_F(ValueTest, MinConstDynUnboundedKeepsSentinels) {
+  auto d = Dynamic<8>{96};
+  auto r = min(cint<64>, d);
+  EXPECT_EQ(nint_t(r), 64);
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<8, kLoInf, 64>>));
+}
+
+TEST_F(ValueTest, MaxConstDynFoldsWhenAboveUpperBound) {
+  auto d = Dynamic<8, 16, 128>{32};
+  auto r = max(cint<200>, d);
+  EXPECT_EQ(nint_t(r), 200);
+  EXPECT_TRUE((std::is_same_v<decltype(r), Const<200>>));
+}
+
+TEST_F(ValueTest, MaxConstDynPassesThroughWhenBelowLowerBound) {
+  auto d = Dynamic<8, 16, 128>{32};
+  auto r = max(cint<4>, d);
+  EXPECT_EQ(nint_t(r), 32);
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<8, 16, 128>>));
+}
+
+TEST_F(ValueTest, MaxConstDynTightensLowerBound) {
+  auto d = Dynamic<8, 16, 128>{32};
+  auto r = max(cint<64>, d);
+  EXPECT_EQ(nint_t(r), 64);
+  // gcd(8, 64) = 8, lower bound max(16, 64) = 64.
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<8, 64, 128>>));
+  auto r2 = max(d, cint<64>);
+  EXPECT_TRUE((std::is_same_v<decltype(r2), Dynamic<8, 64, 128>>));
+}
+
+TEST_F(ValueTest, MinMaxDynDynMergeBounds) {
+  auto a = Dynamic<8, 0, 64>{48};
+  auto b = Dynamic<16, 16, 128>{32};
+  auto lo = min(a, b);
+  auto hi = max(a, b);
+  EXPECT_EQ(nint_t(lo), 32);
+  EXPECT_EQ(nint_t(hi), 48);
+  // gcd(8, 16) = 8; min merges [max of lowers' min, min of uppers].
+  EXPECT_TRUE((std::is_same_v<decltype(lo), Dynamic<8, 0, 64>>));
+  EXPECT_TRUE((std::is_same_v<decltype(hi), Dynamic<8, 16, 128>>));
+}
+
+TEST_F(ValueTest, MinMaxValueWithRawIntWrapAsAny) {
+  auto d = Dynamic<8, 16, 128>{32};
+  auto lo = min(d, nint_t{5});
+  auto hi = max(nint_t{5}, d);
+  EXPECT_EQ(nint_t(lo), 5);
+  EXPECT_EQ(nint_t(hi), 32);
+  // Any carries no bounds: lower bound is lost, upper bound survives.
+  EXPECT_TRUE((std::is_same_v<decltype(lo), Dynamic<1, kLoInf, 128>>));
+  EXPECT_TRUE((std::is_same_v<decltype(hi), Dynamic<1, 16, kHiInf>>));
+}
+
+// --- Value-aware clamp ---
+
+TEST_F(ValueTest, ClampConstFolds) {
+  EXPECT_EQ(nint_t(clamp(cint<5>, cint<0>, cint<8>)), 5);
+  EXPECT_TRUE((std::is_same_v<decltype(clamp(cint<5>, cint<0>, cint<8>)), Const<5>>));
+  EXPECT_TRUE((std::is_same_v<decltype(clamp(cint<-1>, cint<0>, cint<8>)), Const<0>>));
+  EXPECT_TRUE((std::is_same_v<decltype(clamp(cint<9>, cint<0>, cint<8>)), Const<8>>));
+}
+
+TEST_F(ValueTest, ClampDynTightensToIntersection) {
+  auto d = Dynamic<8, 16, 128>{64};
+  auto r = clamp(d, cint<32>, cint<96>);
+  EXPECT_EQ(nint_t(r), 64);
+  // gcd(gcd(8, 32), 96) = 8, bounds [max(16,32), min(128,96)].
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<8, 32, 96>>));
+}
+
+TEST_F(ValueTest, ClampDynFoldsWhenOutsideBounds) {
+  // Dynamic entirely above [0, 8].
+  auto above = clamp(Dynamic<8, 16, 128>{32}, cint<0>, cint<8>);
+  EXPECT_TRUE((std::is_same_v<decltype(above), Const<8>>));
+  // Dynamic entirely below [0, 8].
+  auto below = clamp(Dynamic<8, -128, -16>{-32}, cint<0>, cint<8>);
+  EXPECT_TRUE((std::is_same_v<decltype(below), Const<0>>));
+}
+
+TEST_F(ValueTest, ClampDynFoldsWhenIntersectionCollapses) {
+  // [max(16, 64), min(128, 64)] collapses to the single point 64.
+  auto r = clamp(Dynamic<8, 16, 128>{64}, cint<64>, cint<64>);
+  EXPECT_TRUE((std::is_same_v<decltype(r), Const<64>>));
+}
+
+TEST_F(ValueTest, ClampUnboundedDyn) {
+  auto d = Dynamic<8>{40};
+  auto r = clamp(d, cint<0>, cint<64>);
+  EXPECT_EQ(nint_t(r), 40);
+  // gcd(gcd(8, 0), 64) = 8, bounds [0, 64].
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<8, 0, 64>>));
+}
+
+// --- Value-aware division family ---
+
+TEST_F(ValueTest, DivFamilyConstConstFold) {
+  EXPECT_TRUE((std::is_same_v<decltype(ceil_div(cint<9>, cint<4>)), Const<3>>));
+  EXPECT_TRUE((std::is_same_v<decltype(floor_div(cint<-9>, cint<4>)), Const<-3>>));
+  EXPECT_TRUE((std::is_same_v<decltype(align_up(cint<17>, cint<8>)), Const<24>>));
+  EXPECT_TRUE((std::is_same_v<decltype(align_down(cint<17>, cint<8>)), Const<16>>));
+}
+
+TEST_F(ValueTest, CeilDivDynConstExactAlignment) {
+  auto d = Dynamic<8, 16, 128>{100};
+  auto r = ceil_div(d, cint<8>);
+  EXPECT_EQ(nint_t(r), 13);
+  // A=8 divides N=8: alignment A/N = 1, bounds [2, 16].
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<1, 2, 16>>));
+}
+
+TEST_F(ValueTest, CeilDivDynConstKeepsDivisibility) {
+  auto d = Dynamic<8, 16, 128>{100};
+  auto r = ceil_div(d, cint<4>);
+  EXPECT_EQ(nint_t(r), 25);
+  // A=8 divides N=4: alignment A/N = 2, bounds [4, 32].
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<2, 4, 32>>));
+}
+
+TEST_F(ValueTest, CeilDivDynConstDegradesAlignment) {
+  auto d = Dynamic<8, 16, 128>{100};
+  auto r = ceil_div(d, cint<3>);
+  EXPECT_EQ(nint_t(r), 34);
+  // 8 % 3 != 0: alignment degrades to 1, bounds [ceil(16/3), ceil(128/3)].
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<1, 6, 43>>));
+}
+
+TEST_F(ValueTest, FloorDivDynConst) {
+  auto d = Dynamic<8, 16, 128>{100};
+  auto r = floor_div(d, cint<8>);
+  EXPECT_EQ(nint_t(r), 12);
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<1, 2, 16>>));
+}
+
+TEST_F(ValueTest, CeilDivUnboundedDyn) {
+  auto d = Dynamic<8>{100};
+  auto r = ceil_div(d, cint<8>);
+  EXPECT_EQ(nint_t(r), 13);
+  EXPECT_TRUE((std::is_same_v<decltype(r), Any>));
+}
+
+TEST_F(ValueTest, AlignUpDynConstIdentityWhenAligned) {
+  auto d = Dynamic<8, 16, 128>{100};
+  auto r = align_up(d, cint<8>);
+  EXPECT_EQ(nint_t(r), 104);
+  // Every value is already 8-aligned: alignment A survives untouched.
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<8, 16, 128>>));
+}
+
+TEST_F(ValueTest, AlignUpDynConstDegradesToGcd) {
+  auto d = Dynamic<16, 32, 192>{100};
+  auto r = align_up(d, cint<24>);
+  EXPECT_EQ(nint_t(r), 120);
+  // gcd(16, 24) = 8, bounds [align_up(32,24), align_up(192,24)].
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<8, 48, 192>>));
+}
+
+TEST_F(ValueTest, AlignDownDynConst) {
+  auto d = Dynamic<8, 16, 128>{100};
+  auto r = align_down(d, cint<8>);
+  EXPECT_EQ(nint_t(r), 96);
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<8, 16, 128>>));
+  auto r2 = align_down(Dynamic<16, 32, 192>{100}, cint<24>);
+  EXPECT_EQ(nint_t(r2), 96);
+  EXPECT_TRUE((std::is_same_v<decltype(r2), Dynamic<8, 24, 192>>));
+}
+
+TEST_F(ValueTest, DivFamilyRuntimeDivisorDegrades) {
+  auto d = Dynamic<8>{9};
+  EXPECT_EQ(nint_t(ceil_div(cint<100>, d)), 12);
+  EXPECT_TRUE((std::is_same_v<decltype(ceil_div(cint<100>, d)), Any>));
+  auto e = Dynamic<8>{100};
+  auto f = Dynamic<4>{9};
+  EXPECT_EQ(nint_t(ceil_div(e, f)), 12);
+  EXPECT_TRUE((std::is_same_v<decltype(ceil_div(e, f)), Any>));
+  EXPECT_TRUE((std::is_same_v<decltype(floor_div(e, f)), Any>));
+  EXPECT_TRUE((std::is_same_v<decltype(align_up(e, f)), Any>));
+  EXPECT_TRUE((std::is_same_v<decltype(align_down(e, f)), Any>));
+}
+
+TEST_F(ValueTest, DivFamilyValueWithRawIntWrapAsAny) {
+  auto d = Dynamic<8, 16, 128>{100};
+  auto r = ceil_div(d, nint_t{3});
+  EXPECT_EQ(nint_t(r), 34);
+  EXPECT_TRUE((std::is_same_v<decltype(r), Any>));
+}
+
+TEST_F(ValueTest, DivFamilyWorksWithLayoutAccessPattern) {
+  // The EmuAMX-style call pattern: ceil_div(nint_t extent, Const tile size).
+  auto tile = cint<16>;
+  nint_t extent = 33;
+  auto r = ceil_div(extent, tile);
+  EXPECT_EQ(nint_t(r), 3);
+  EXPECT_TRUE(decltype(r)::is_runtime);
+}
+
 // ======================================================================
 // PackedStorage Suite
 // ======================================================================

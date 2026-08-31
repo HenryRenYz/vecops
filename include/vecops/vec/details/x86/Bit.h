@@ -174,8 +174,8 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_right_signed_raw(
     const auto low_mask = x86_bit_set1_i8<Raw>((0xffu >> count) & 0xffu);
     return x86_bit_or_raw(logical, x86_bit_andnot_raw(low_mask, sign));
   }
-  const auto fill = x86_bit_shift_left_raw(sign, width - count, width);
-  return x86_bit_or_raw(logical, fill);
+  const auto fill_value = x86_bit_shift_left_raw(sign, width - count, width);
+  return x86_bit_or_raw(logical, fill_value);
 }
 
 template <typename Op, typename T, typename Raw>

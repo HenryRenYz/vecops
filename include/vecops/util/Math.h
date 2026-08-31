@@ -7,6 +7,7 @@
 
 #include <bit>
 #include <concepts>
+#include <initializer_list>
 #include <type_traits>
 
 #include "Assertion.h"
@@ -20,7 +21,7 @@
 namespace vecops {
 
 template <typename T>
-constexpr int log2_floor(T x) noexcept {
+VECOPS_ALWAYS_INLINE constexpr int log2_floor(T x) noexcept {
   if (x == 0) return -1;
   return std::bit_width(std::make_unsigned_t<T>(x)) - 1;
 }
@@ -100,10 +101,53 @@ VECOPS_ALWAYS_INLINE constexpr T align_up(T value, X alignment) {
   return ceil_div(value, a) * a;
 }
 
-template <std::integral T, typename X>
-  requires std::convertible_to<X, T>
-VECOPS_ALWAYS_INLINE constexpr T cdiv(T value, X divisor) {
-  return ceil_div(value, divisor);
+/**
+ * Force-inlined equivalents of std::min/std::max/std::clamp. Standard
+ * library implementations carry no always-inline guarantee (e.g. MSVC never
+ * marks them __forceinline), so a failed inline inside a large operator
+ * instantiation can cost a call per loop iteration. The formulas below
+ * match the standard semantics exactly, including NaN behaviour (the
+ * first argument is returned when the comparison is false).
+ *
+ * The `std::totally_ordered` constraint keeps these scalar-only: vector
+ * types (which have their own vec::min/vec::max entry points) fail the
+ * constraint and are excluded from overload resolution.
+ */
+template <std::totally_ordered T>
+VECOPS_ALWAYS_INLINE constexpr T min(T a, T b) noexcept {
+  return (b < a) ? b : a;
+}
+
+/// @see min(T, T)
+template <std::totally_ordered T>
+VECOPS_ALWAYS_INLINE constexpr T max(T a, T b) noexcept {
+  return (a < b) ? b : a;
+}
+
+/// @see min(T, T)
+template <std::totally_ordered T>
+VECOPS_ALWAYS_INLINE constexpr T clamp(T v, T lo, T hi) noexcept {
+  return (v < lo) ? lo : (hi < v) ? hi : v;
+}
+
+/// @see min(T, T); returns the first smallest element, as std::min(ilist).
+template <typename T>
+VECOPS_ALWAYS_INLINE constexpr T min(std::initializer_list<T> list) noexcept {
+  T result = *list.begin();
+  for (auto it = list.begin() + 1; it != list.end(); ++it) {
+    result = min(result, *it);
+  }
+  return result;
+}
+
+/// @see min(T, T); returns the first largest element, as std::max(ilist).
+template <typename T>
+VECOPS_ALWAYS_INLINE constexpr T max(std::initializer_list<T> list) noexcept {
+  T result = *list.begin();
+  for (auto it = list.begin() + 1; it != list.end(); ++it) {
+    result = max(result, *it);
+  }
+  return result;
 }
 
 } // vecops

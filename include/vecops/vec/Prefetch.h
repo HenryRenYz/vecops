@@ -4,7 +4,6 @@
 #include <utility>
 
 #include "vecops/vec/Options.h"
-#include "vecops/vec/details/Options.h"
 
 namespace vecops::vec {
 

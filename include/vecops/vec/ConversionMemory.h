@@ -137,15 +137,22 @@ struct StoreConvertOp {
           request) const;
 };
 
+/** Public entry-point variables, declared before the backend includes
+ * so that details-layer implementations can call them by short names
+ * (same layout as Basic.h and Arithmetic.h). */
+inline constexpr LoadConvertOp load_convert{};
+inline constexpr StoreConvertOp store_convert{};
+
 } // namespace vecops::vec
+
+#include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/ConversionMemory.h"
 
 #if defined(ARCH_X86_FAMILY) && !defined(CPU_CAPABILITY_GENERIC)
 #include "vecops/vec/details/x86/ConversionMemory.h"
 #elif defined(CPU_CAPABILITY_SVE)
 #include "vecops/vec/details/sve/ConversionMemory.h"
 #endif
-
-#include "vecops/vec/details/ConversionMemory.h"
 
 namespace vecops::vec {
 
@@ -301,8 +308,6 @@ VECOPS_ALWAYS_INLINE void StoreConvertOp::operator()(
   }
 }
 
-inline constexpr LoadConvertOp load_convert{};
-inline constexpr StoreConvertOp store_convert{};
 
 } // namespace vecops::vec
 

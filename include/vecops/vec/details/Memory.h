@@ -19,7 +19,7 @@
 
 #include "vecops/Assertion.h"
 #include "vecops/vec/Request.h"
-#include "vecops/vec/details/Options.h"
+#include "vecops/vec/Options.h"
 #include "vecops/vec/details/Request.h"
 #include "vecops/vec/details/Wordwise.h"
 
@@ -291,8 +291,8 @@ struct GenericImpl<Backend, LoadOp, Tag> {
       LoadOp, Tag tag, const ElementOf<Tag>* pointer,
       opt::Indexed<Indices, Scale> addressing, Temporality) {
     return load_indexed(
-        tag, pointer, addressing, execute(MaskFillOp{}, tag, true),
-        execute(FillOp{}, tag, ElementOf<Tag>{}));
+        tag, pointer, addressing, mfill(tag, true),
+        fill(tag, ElementOf<Tag>{}));
   }
 
   template <VectorValue Indices, int Scale, typename Temporality>
@@ -424,7 +424,7 @@ struct GenericImpl<Backend, StoreOp, Tag> {
       opt::Indexed<Indices, Scale> addressing, Temporality) {
     store_indexed(
         tag, pointer, value, addressing,
-        execute(MaskFillOp{}, tag, true));
+        mfill(tag, true));
   }
 
   template <VectorValue Indices, int Scale, typename Temporality>

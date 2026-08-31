@@ -286,8 +286,7 @@ VECOPS_ALWAYS_INLINE auto sve_bit_shift_right_variable_raw(
             sve_basic_raw_word(a), sve_basic_raw_word(b), mask));        \
       else {                                                             \
         const auto computed = call<Index>(op, tag, a, b);               \
-        return NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(\
-            BlendOp{}, tag, inactive, mask, computed);                   \
+        return blend(tag, inactive, mask, computed);                   \
       }                                                                  \
     }                                                                    \
   }
@@ -324,8 +323,7 @@ struct NativeWordImpl<SVEBackend, BitAndNotOp> {
           sve_basic_raw_word(a), sve_basic_raw_word(b), mask));
     }
     const auto computed = call<Index>(op, tag, a, b);
-    return NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(
-        BlendOp{}, tag, inactive, mask, computed);
+    return blend(tag, inactive, mask, computed);
   }
 };
 
@@ -398,8 +396,7 @@ struct NativeWordImpl<SVEBackend, BitShiftLeftOp> {
           sve_basic_raw_word(value), count, mask));
     else {
       const auto computed = call<Index>(BitShiftLeftOp{}, Tag{}, value, count);
-      return NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(
-          BlendOp{}, Tag{}, inactive, mask, computed);
+      return blend(Tag{}, inactive, mask, computed);
     }
   }
 
@@ -409,8 +406,7 @@ struct NativeWordImpl<SVEBackend, BitShiftLeftOp> {
       NativeWordVec<Tag> counts, NativeWordMask<Tag> mask,
       NativeWordVec<Tag> inactive, Policy) {
     const auto computed = call<Index>(op, tag, value, counts);
-    return NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(
-        BlendOp{}, tag, inactive, mask, computed);
+    return blend(tag, inactive, mask, computed);
   }
 };
 
@@ -452,8 +448,7 @@ struct NativeWordImpl<SVEBackend, BitShiftRightOp> {
           sve_basic_raw_word(value), count, mask));
     else {
       const auto computed = call<Index>(BitShiftRightOp{}, Tag{}, value, count);
-      return NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(
-          BlendOp{}, Tag{}, inactive, mask, computed);
+      return blend(Tag{}, inactive, mask, computed);
     }
   }
 
@@ -463,8 +458,7 @@ struct NativeWordImpl<SVEBackend, BitShiftRightOp> {
       NativeWordVec<Tag> counts, NativeWordMask<Tag> mask,
       NativeWordVec<Tag> inactive, Policy) {
     const auto computed = call<Index>(op, tag, value, counts);
-    return NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(
-        BlendOp{}, tag, inactive, mask, computed);
+    return blend(tag, inactive, mask, computed);
   }
 };
 

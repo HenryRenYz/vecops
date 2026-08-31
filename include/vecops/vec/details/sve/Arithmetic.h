@@ -348,10 +348,6 @@ struct SVEFloatingUnaryWordImpl {
             VECOPS_KERNEL_LAMBDA {
           if constexpr (std::same_as<Op, SqrtOp>)
             return svsqrt_f32_m(fallback, active, input);
-          else if constexpr (std::same_as<Op, RcpOp>)
-            return svsel_f32(active, svrecpe_f32(input), fallback);
-          else if constexpr (std::same_as<Op, RsqrtOp>)
-            return svsel_f32(active, svrsqrte_f32(input), fallback);
           else
             static_assert(dispatch_dependent_false<Op>);
         };
@@ -362,12 +358,6 @@ struct SVEFloatingUnaryWordImpl {
 #define VECOPS_VEC_SVE_FLOATING_UNARY(Suffix)                          \
         if constexpr (std::same_as<Op, SqrtOp>)                        \
           return svsqrt_##Suffix##_m(raw_inactive, mask, raw_value);   \
-        else if constexpr (std::same_as<Op, RcpOp>)                    \
-          return svsel_##Suffix(                                       \
-              mask, svrecpe_##Suffix(raw_value), raw_inactive);       \
-        else if constexpr (std::same_as<Op, RsqrtOp>)                  \
-          return svsel_##Suffix(                                       \
-              mask, svrsqrte_##Suffix(raw_value), raw_inactive);      \
         else static_assert(dispatch_dependent_false<Op>)
         if constexpr (std::same_as<T, float16_t>) {
           VECOPS_VEC_SVE_FLOATING_UNARY(f16);
@@ -386,13 +376,6 @@ struct SVEFloatingUnaryWordImpl {
 template <>
 struct NativeWordImpl<SVEBackend, SqrtOp>
     : SVEFloatingUnaryWordImpl<SqrtOp> {};
-template <>
-struct NativeWordImpl<SVEBackend, RcpOp>
-    : SVEFloatingUnaryWordImpl<RcpOp> {};
-template <>
-struct NativeWordImpl<SVEBackend, RsqrtOp>
-    : SVEFloatingUnaryWordImpl<RsqrtOp> {};
-
 /* **************************************************************************** */
 //    SVEFmaWordImpl and registrations                                        //
 /* **************************************************************************** */
@@ -473,38 +456,9 @@ struct SVEFmaWordImpl {
       }
 #undef VECOPS_VEC_SVE_FMA
     } else {
-      const auto product =
-          NativeWordImpl<SVEBackend, MulOp>::template call<Index>(
-              MulOp{}, tag, a, b);
-      const auto computed = [&]() VECOPS_KERNEL_LAMBDA {
-        if constexpr (std::same_as<Op, FmaddOp>)
-          return NativeWordImpl<SVEBackend, AddOp>::template call<Index>(
-              AddOp{}, tag, product, c);
-        else if constexpr (std::same_as<Op, FmsubOp>)
-          return NativeWordImpl<SVEBackend, SubOp>::template call<Index>(
-              SubOp{}, tag, product, c);
-        else if constexpr (std::same_as<Op, FnmaddOp>)
-          return NativeWordImpl<SVEBackend, SubOp>::template call<Index>(
-              SubOp{}, tag, c, product);
-        else if constexpr (std::same_as<Op, FnmsubOp>) {
-          using T = ElementOf<Tag>;
-          const T negative_zero = [] {
-            if constexpr (is_float_v<T>) return static_cast<T>(-0.0F);
-            else return T{};
-          }();
-          const auto zero =
-              NativeWordImpl<SVEBackend, FillOp>::template call<Index>(
-                  FillOp{}, tag, negative_zero);
-          const auto negative_product =
-              NativeWordImpl<SVEBackend, SubOp>::template call<Index>(
-                  SubOp{}, tag, zero, product);
-          return NativeWordImpl<SVEBackend, SubOp>::template call<Index>(
-              SubOp{}, tag, negative_product, c);
-        } else
-          static_assert(dispatch_dependent_false<Op>);
-      }();
-      return NativeWordImpl<SVEBackend, BlendOp>::template call<Index>(
-          BlendOp{}, tag, inactive, mask, computed);
+      const auto computed =
+          synthesize_fma_word<SVEBackend, Op, Index>(tag, a, b, c);
+      return blend(tag, inactive, mask, computed);
     }
   }
 };

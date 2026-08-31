@@ -38,32 +38,46 @@ const char* mode_name() {
   return "estimate";
 }
 
-template <Accuracy tier, bool negative_only, VectorTag Tag>
-Vec<Tag> apply_exp(Tag tag, Vec<Tag> x) {
-  if constexpr (negative_only) {
-    return exp_neg(tag, x, opt::math::accuracy<tier>);
-  } else {
-    return vecops::vec::exp(tag, x, opt::math::accuracy<tier>);
-  }
+template <ExpBase family>
+const char* family_name() {
+  if constexpr (family == ExpBase::E) return "Exp";
+  if constexpr (family == ExpBase::Base2) return "Exp2";
+  return "Exp10";
 }
 
-template <Accuracy tier, bool negative_only, typename E>
+// Input spans stay inside the hot domain of every dtype, including the
+// narrow ones (fp16 exp10 overflows just above 4.82).
+template <ExpBase family>
+constexpr double input_span() {
+  if constexpr (family == ExpBase::E) return 10.0;
+  else if constexpr (family == ExpBase::Base2) return 10.0;
+  else return 4.0;
+}
+
+template <ExpBase family, Accuracy tier, bool negative_only, VectorTag Tag>
+Vec<Tag> apply_exp(Tag tag, Vec<Tag> x) {
+  return ExpCpo<family, negative_only>{}(
+      tag, x, opt::math::accuracy<tier>);
+}
+
+template <ExpBase family, Accuracy tier, bool negative_only, typename E>
 void bench_exp(benchmark::State& state) {
   const ScalableTag<E> t;
   const nint_t lanes = size(t);
   const nint_t count = lanes * kBlocks;
   std::vector<E> input(static_cast<size_t>(count));
   std::vector<E> output(static_cast<size_t>(count));
+  constexpr double span = input_span<family>();
   for (nint_t i = 0; i < count; ++i) {
     const double unit = double(i % 257) / 256.0;
-    const double value = negative_only ? -10.0 * unit : 20.0 * unit - 10.0;
+    const double value = negative_only ? -span * unit : 2.0 * span * unit - span;
     input[static_cast<size_t>(i)] = E(value);
   }
 
   for (auto _ : state) {
     for (nint_t i = 0; i < count; i += lanes) {
       const auto x = load(t, input.data() + i);
-      store(t, output.data() + i, apply_exp<tier, negative_only>(t, x));
+      store(t, output.data() + i, apply_exp<family, tier, negative_only>(t, x));
     }
     benchmark::ClobberMemory();
   }
@@ -75,30 +89,38 @@ void bench_exp(benchmark::State& state) {
   state.counters["lanes"] = benchmark::Counter(double(lanes));
 }
 
-template <Accuracy tier, bool negative_only, typename E>
+template <ExpBase family, Accuracy tier, bool negative_only, typename E>
 void register_one() {
   const ScalableTag<E> t;
   const std::string name =
-      "Exp/kernel/rank:1/shape:VLx256/dtype:" +
+      std::string(family_name<family>()) +
+      "/kernel/rank:1/shape:VLx256/dtype:" +
       std::string(dtype_name<E>()) + "/mode:" + mode_name<tier>() +
       "/domain:" + (negative_only ? "negative" : "general") +
       "/arch:" + VECOPS_BENCH_ARCH_CODE;
   benchmark::RegisterBenchmark(
-      name.c_str(), &bench_exp<tier, negative_only, E>)
+      name.c_str(), &bench_exp<family, tier, negative_only, E>)
       ->Unit(benchmark::kNanosecond)
       ->MinTime(0.05)
       ->Repetitions(5)
       ->ReportAggregatesOnly(true);
 }
 
+template <ExpBase family, typename E>
+void register_tiers() {
+  register_one<family, Accuracy::Strict, false, E>();
+  register_one<family, Accuracy::Fast, false, E>();
+  register_one<family, Accuracy::Estimate, false, E>();
+  register_one<family, Accuracy::Strict, true, E>();
+  register_one<family, Accuracy::Fast, true, E>();
+  register_one<family, Accuracy::Estimate, true, E>();
+}
+
 template <typename E>
 void register_dtype() {
-  register_one<Accuracy::Strict, false, E>();
-  register_one<Accuracy::Fast, false, E>();
-  register_one<Accuracy::Estimate, false, E>();
-  register_one<Accuracy::Strict, true, E>();
-  register_one<Accuracy::Fast, true, E>();
-  register_one<Accuracy::Estimate, true, E>();
+  register_tiers<ExpBase::E, E>();
+  register_tiers<ExpBase::Base2, E>();
+  register_tiers<ExpBase::Base10, E>();
 }
 
 void register_benchmarks() {

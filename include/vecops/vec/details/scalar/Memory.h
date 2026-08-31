@@ -4,7 +4,7 @@
 #include <algorithm>
 
 #include "vecops/vec/details/Dispatch.h"
-#include "vecops/vec/details/Options.h"
+#include "vecops/vec/Options.h"
 
 namespace vecops::vec::details {
 

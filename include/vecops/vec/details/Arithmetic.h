@@ -11,7 +11,7 @@
  */
 
 #include "vecops/vec/details/Elementwise.h"
-#include "vecops/vec/details/Options.h"
+#include "vecops/vec/Options.h"
 #include "vecops/vec/details/Request.h"
 
 namespace vecops::vec::details {
@@ -46,12 +46,6 @@ struct EnableElementwiseWordBatching<AbsOp> : std::true_type {};
 
 template <>
 struct EnableElementwiseWordBatching<SqrtOp> : std::true_type {};
-
-template <>
-struct EnableElementwiseWordBatching<RcpOp> : std::true_type {};
-
-template <>
-struct EnableElementwiseWordBatching<RsqrtOp> : std::true_type {};
 
 /* **************************************************************************** */
 //    Option validation for arithmetic operations                               //
@@ -166,14 +160,6 @@ template <typename Backend, VectorTag Tag>
 struct GenericImpl<Backend, SqrtOp, Tag>
     : UnaryArithmeticGenericImpl<Backend, SqrtOp, Tag> {};
 
-template <typename Backend, VectorTag Tag>
-struct GenericImpl<Backend, RcpOp, Tag>
-    : UnaryArithmeticGenericImpl<Backend, RcpOp, Tag> {};
-
-template <typename Backend, VectorTag Tag>
-struct GenericImpl<Backend, RsqrtOp, Tag>
-    : UnaryArithmeticGenericImpl<Backend, RsqrtOp, Tag> {};
-
 template <typename Backend, typename Op, VectorTag Tag>
 struct TernaryArithmeticGenericImpl {
   static VECOPS_ALWAYS_INLINE Vec<Tag> call(
@@ -216,6 +202,49 @@ VECOPS_VEC_DEFINE_TERNARY_ARITHMETIC_GENERIC(FnmaddOp);
 VECOPS_VEC_DEFINE_TERNARY_ARITHMETIC_GENERIC(FnmsubOp);
 
 #undef VECOPS_VEC_DEFINE_TERNARY_ARITHMETIC_GENERIC
+
+/* **************************************************************************** */
+//    Backend-shared FMA synthesis fallback                                    //
+/* **************************************************************************** */
+
+/**
+ * Synthesizes one FMA variant on a single physical word from the backend's
+ * word-level Mul/Add/Sub/Fill ops. Used by backends whose instruction tier
+ * has no native fused op for the element format. FnmsubOp preserves IEEE
+ * signed zero by computing (-0) - product - c instead of flipping the
+ * product's sign bit.
+ */
+template <typename Backend, typename Op, nint_t Index, VectorTag Tag>
+VECOPS_ALWAYS_INLINE NativeWordVec<Tag> synthesize_fma_word(
+    Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b,
+    NativeWordVec<Tag> c) {
+  const auto product = NativeWordImpl<Backend, MulOp>::template call<Index>(
+      MulOp{}, tag, a, b);
+  if constexpr (std::same_as<Op, FmaddOp>)
+    return NativeWordImpl<Backend, AddOp>::template call<Index>(
+        AddOp{}, tag, product, c);
+  else if constexpr (std::same_as<Op, FmsubOp>)
+    return NativeWordImpl<Backend, SubOp>::template call<Index>(
+        SubOp{}, tag, product, c);
+  else if constexpr (std::same_as<Op, FnmaddOp>)
+    return NativeWordImpl<Backend, SubOp>::template call<Index>(
+        SubOp{}, tag, c, product);
+  else if constexpr (std::same_as<Op, FnmsubOp>) {
+    using T = ElementOf<Tag>;
+    const T negative_zero = [] {
+      if constexpr (is_float_v<T>) return static_cast<T>(-0.0F);
+      else return T{};
+    }();
+    const auto zero = NativeWordImpl<Backend, FillOp>::template call<Index>(
+        FillOp{}, tag, negative_zero);
+    const auto negative_product =
+        NativeWordImpl<Backend, SubOp>::template call<Index>(
+            SubOp{}, tag, zero, product);
+    return NativeWordImpl<Backend, SubOp>::template call<Index>(
+        SubOp{}, tag, negative_product, c);
+  } else
+    static_assert(dispatch_dependent_false<Op>, "unsupported FMA variant");
+}
 
 /* **************************************************************************** */
 //    Option dispatch: extract mask/merge from variadic pack, validate, invoke  //
@@ -319,7 +348,7 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_arithmetic_request(
 
 /**
  * Same Option validation and dispatch pattern as execute_arithmetic_options,
- * but for unary operations (neg, abs, sqrt, rcp, rsqrt).
+ * but for unary operations (neg, abs, sqrt).
  */
 template <typename Op, VectorTag Tag, typename... Options>
 VECOPS_ALWAYS_INLINE Vec<Tag> execute_unary_arithmetic_options(

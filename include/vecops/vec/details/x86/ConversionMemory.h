@@ -68,12 +68,12 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_load_convert_ordered_saturating(
     // and blending after conversion would fault on inactive addresses at a
     // page boundary and would violate the filtered-memory contract.
     const auto memory_mask = x86_convert_mask_native(FromTag{}, to, mask);
-    const auto zero = execute(FillOp{}, FromTag{}, From{});
+    const auto zero = fill(FromTag{}, From{});
     const auto loaded = execute(
         LoadOp{}, FromTag{}, pointer, memory_mask, zero,
         mem::unaligned, mem::temporal);
     const auto converted = x86_convert_vec_native(to, FromTag{}, loaded);
-    return execute(BlendOp{}, to, inactive, mask, converted);
+    return blend(to, inactive, mask, converted);
   }
 }
 
@@ -183,7 +183,7 @@ VECOPS_ALWAYS_INLINE void x86_store_convert_ordered_saturating_packed(
         StoreOp{}, from, pointer, value,
         mem::unaligned, mem::temporal);
   } else {
-    const auto mask = execute(MaskFillOp{}, from, true);
+    const auto mask = mfill(from, true);
     x86_store_convert_ordered_saturating_packed(
         from, pointer, value, mask);
   }
@@ -206,8 +206,8 @@ VECOPS_ALWAYS_INLINE void x86_store_convert_ordered_saturating_split(
         from, pointer, value, mask);
   } else {
     using FromHalf = Half<FromTag>;
-    const auto lower_value = execute(LowerOp{}, from, value);
-    const auto upper_value = execute(UpperOp{}, from, value);
+    const auto lower_value = lower(from, value);
+    const auto upper_value = upper(from, value);
     const auto lower_mask = x86_conversion_mask_lower(from, mask);
     const auto upper_mask = x86_conversion_mask_upper(from, mask);
     x86_store_convert_ordered_saturating_split(
@@ -220,7 +220,7 @@ VECOPS_ALWAYS_INLINE void x86_store_convert_ordered_saturating_split(
 template <Element To, VectorTag FromTag>
 VECOPS_ALWAYS_INLINE void x86_store_convert_ordered_saturating_split(
     FromTag from, To* pointer, Vec<FromTag> value) {
-  const auto mask = execute(MaskFillOp{}, from, true);
+  const auto mask = mfill(from, true);
   x86_store_convert_ordered_saturating_split(from, pointer, value, mask);
 }
 

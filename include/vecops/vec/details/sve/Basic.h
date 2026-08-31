@@ -187,7 +187,7 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
         std::same_as<ElementOf<Tag>, bfloat16_t> &&
         RepresentationTraits<SVEBackend, Tag>::word_count > 1) {
       using BitsTag = Rebind<uint16_t, Tag>;
-      const auto bits = execute(BitCastOp{}, BitsTag{}, tag, value);
+      const auto bits = bitcast(BitsTag{}, tag, value);
       const auto selected = details::get_word(bits, ordinal);
       return execute_word<0, SVEBackend>(
           BitCastOp{}, tag, BitsTag{}, selected);
@@ -233,10 +233,10 @@ struct RuntimeWordAccess<SVEBackend, Tag> {
       const auto bit_word = execute_word<0, SVEBackend>(
           BitCastOp{}, BitsTag{}, tag, word);
       if constexpr (is_word_array_v<Vec<Tag>>) {
-        auto bits = execute(BitCastOp{}, BitsTag{}, tag, value);
+        auto bits = bitcast(BitsTag{}, tag, value);
         bits = ::vecops::vec::set_word(
             BitsTag{}, bits, ordinal, bit_word);
-        return execute(BitCastOp{}, tag, BitsTag{}, bits);
+        return bitcast(tag, BitsTag{}, bits);
       } else {
         const auto bits = [&]() VECOPS_INLINE_LAMBDA {
           if constexpr (RepresentationTraits<SVEBackend, Tag>::word_count == 2)
@@ -628,9 +628,7 @@ struct NativeWordImpl<SVEBackend, SetVecLaneOp> {
     static_assert(Index >= 0 && Index < Traits::word_count);
     const auto predicate = sve_single_lane_predicate<T>(lane);
     const auto raw = sve_basic_raw_word(value);
-    const auto replacement_word =
-        NativeWordImpl<SVEBackend, FillOp>::template call<Index>(
-            FillOp{}, tag, replacement);
+    const auto replacement_word = fill_word(tag, replacement);
     const auto replacement_raw = sve_basic_raw_word(replacement_word);
     if constexpr (std::same_as<T, bfloat16_t>) {
       return sve_basic_wrap_word<Tag>(svreinterpret_bf16_u16(svsel_u16(
@@ -861,8 +859,8 @@ struct NativeImpl<SVEBackend, UpperOp, Tag> {
         ::vecops::vec::get_word<(num_words(Tag{}) > 1 ? 1 : 0)>(tag, value));
     const auto physical = sve_prefix_predicate<T>(native_word_size(tag));
     const auto before_upper = sve_prefix_predicate<T>(size(Half<Tag>{}));
-    const auto upper = svbic_b_z(physical, physical, before_upper);
-    return sve_splice_words<Half<Tag>>(upper, word0, word1);
+    const auto upper_value = svbic_b_z(physical, physical, before_upper);
+    return sve_splice_words<Half<Tag>>(upper_value, word0, word1);
   }
 
   static VECOPS_ALWAYS_INLINE Mask<Half<Tag>> call(
@@ -876,9 +874,9 @@ struct NativeImpl<SVEBackend, UpperOp, Tag> {
           native_word_size(tag) * static_cast<nint_t>(sizeof(ElementOf<Tag>)));
       const auto physical = svwhilelt_b8_u64(0, word_bytes);
       const auto before_upper = svwhilelt_b8_u64(0, start_bytes);
-      const auto upper = svbic_b_z(physical, physical, before_upper);
+      const auto upper_value = svbic_b_z(physical, physical, before_upper);
       const auto joined = svsplice_u8(
-          upper, svdup_u8_z(word0, 1), svdup_u8_z(word1, 1));
+          upper_value, svdup_u8_z(word0, 1), svdup_u8_z(word1, 1));
       return svcmpne_n_u8(svptrue_b8(), joined, 0);
     } else {
       const auto half_bytes = static_cast<uint64_t>(
@@ -938,40 +936,40 @@ struct NativeImpl<SVEBackend, ConcatOp, Tag> {
     } else {
       const auto lower_raw = sve_basic_raw_word(lower_value);
       const auto upper_raw = sve_basic_raw_word(upper_value);
-      const auto lower = sve_prefix_predicate<T>(size(Half<Tag>{}));
+      const auto lower_value = sve_prefix_predicate<T>(size(Half<Tag>{}));
       if constexpr (std::same_as<T, bfloat16_t>) {
 #if defined(HAS_BF16)
         return sve_basic_wrap_word<Tag>(
-            svsplice_bf16(lower, lower_raw, upper_raw));
+            svsplice_bf16(lower_value, lower_raw, upper_raw));
 #else
         return sve_basic_wrap_word<Tag>(svreinterpret_bf16_u16(
             svsplice_u16(
-                lower,
+                lower_value,
                 svreinterpret_u16_bf16(lower_raw),
                 svreinterpret_u16_bf16(upper_raw))));
 #endif
       } else if constexpr (std::same_as<T, float16_t>) {
-        return sve_basic_wrap_word<Tag>(svsplice_f16(lower, lower_raw, upper_raw));
+        return sve_basic_wrap_word<Tag>(svsplice_f16(lower_value, lower_raw, upper_raw));
       } else if constexpr (std::same_as<T, float32_t>) {
-        return sve_basic_wrap_word<Tag>(svsplice_f32(lower, lower_raw, upper_raw));
+        return sve_basic_wrap_word<Tag>(svsplice_f32(lower_value, lower_raw, upper_raw));
       } else if constexpr (std::same_as<T, float64_t>) {
-        return sve_basic_wrap_word<Tag>(svsplice_f64(lower, lower_raw, upper_raw));
+        return sve_basic_wrap_word<Tag>(svsplice_f64(lower_value, lower_raw, upper_raw));
       } else if constexpr (std::same_as<T, int8_t>) {
-        return sve_basic_wrap_word<Tag>(svsplice_s8(lower, lower_raw, upper_raw));
+        return sve_basic_wrap_word<Tag>(svsplice_s8(lower_value, lower_raw, upper_raw));
       } else if constexpr (std::same_as<T, uint8_t>) {
-        return sve_basic_wrap_word<Tag>(svsplice_u8(lower, lower_raw, upper_raw));
+        return sve_basic_wrap_word<Tag>(svsplice_u8(lower_value, lower_raw, upper_raw));
       } else if constexpr (std::same_as<T, int16_t>) {
-        return sve_basic_wrap_word<Tag>(svsplice_s16(lower, lower_raw, upper_raw));
+        return sve_basic_wrap_word<Tag>(svsplice_s16(lower_value, lower_raw, upper_raw));
       } else if constexpr (std::same_as<T, uint16_t>) {
-        return sve_basic_wrap_word<Tag>(svsplice_u16(lower, lower_raw, upper_raw));
+        return sve_basic_wrap_word<Tag>(svsplice_u16(lower_value, lower_raw, upper_raw));
       } else if constexpr (std::same_as<T, int32_t>) {
-        return sve_basic_wrap_word<Tag>(svsplice_s32(lower, lower_raw, upper_raw));
+        return sve_basic_wrap_word<Tag>(svsplice_s32(lower_value, lower_raw, upper_raw));
       } else if constexpr (std::same_as<T, uint32_t>) {
-        return sve_basic_wrap_word<Tag>(svsplice_u32(lower, lower_raw, upper_raw));
+        return sve_basic_wrap_word<Tag>(svsplice_u32(lower_value, lower_raw, upper_raw));
       } else if constexpr (std::same_as<T, int64_t>) {
-        return sve_basic_wrap_word<Tag>(svsplice_s64(lower, lower_raw, upper_raw));
+        return sve_basic_wrap_word<Tag>(svsplice_s64(lower_value, lower_raw, upper_raw));
       } else if constexpr (std::same_as<T, uint64_t>) {
-        return sve_basic_wrap_word<Tag>(svsplice_u64(lower, lower_raw, upper_raw));
+        return sve_basic_wrap_word<Tag>(svsplice_u64(lower_value, lower_raw, upper_raw));
       } else {
         static_assert(
             dispatch_dependent_false<T>,
@@ -989,8 +987,8 @@ struct NativeImpl<SVEBackend, ConcatOp, Tag> {
           size(Half<Tag>{}) * static_cast<nint_t>(sizeof(ElementOf<Tag>));
       const nint_t word_bytes =
           native_word_size(tag) * static_cast<nint_t>(sizeof(ElementOf<Tag>));
-      const auto lower = svdup_u8_z(lower_value, 1);
-      const auto upper = svdup_u8_z(upper_value, 1);
+      const auto lower_u8 = svdup_u8_z(lower_value, 1);
+      const auto upper_u8 = svdup_u8_z(upper_value, 1);
       return construct_mask_words<SVEBackend>(
           tag,
           [&]<nint_t Index>(Tag) -> NativeWordMask<Tag> {
@@ -999,7 +997,7 @@ struct NativeImpl<SVEBackend, ConcatOp, Tag> {
               const auto prefix = svwhilelt_b8_u64(
                   0, static_cast<uint64_t>(half_bytes));
               return svcmpne_n_u8(
-                  svptrue_b8(), svsplice_u8(prefix, lower, upper), 0);
+                  svptrue_b8(), svsplice_u8(prefix, lower_u8, upper_u8), 0);
             } else {
               const auto physical = svwhilelt_b8_u64(
                   0, static_cast<uint64_t>(word_bytes));
@@ -1007,16 +1005,16 @@ struct NativeImpl<SVEBackend, ConcatOp, Tag> {
                   0, static_cast<uint64_t>(word_bytes - half_bytes));
               const auto tail = svbic_b_z(physical, physical, before_tail);
               return svcmpne_n_u8(
-                  svptrue_b8(), svsplice_u8(tail, upper, upper), 0);
+                  svptrue_b8(), svsplice_u8(tail, upper_u8, upper_u8), 0);
             }
           });
     } else {
       const auto half_bytes = static_cast<uint64_t>(
           size(Half<Tag>{}) * static_cast<nint_t>(sizeof(ElementOf<Tag>)));
       const auto lower_bytes = svwhilelt_b8_u64(0, half_bytes);
-      const auto lower = svdup_u8_z(lower_value, 1);
-      const auto upper = svdup_u8_z(upper_value, 1);
-      const auto joined = svsplice_u8(lower_bytes, lower, upper);
+      const auto lower_u8 = svdup_u8_z(lower_value, 1);
+      const auto upper_u8 = svdup_u8_z(upper_value, 1);
+      const auto joined = svsplice_u8(lower_bytes, lower_u8, upper_u8);
       return svcmpne_n_u8(svptrue_b8(), joined, 0);
     }
   }

@@ -157,10 +157,10 @@ VECOPS_ALWAYS_INLINE auto sve_convert_same_size(Raw value) {
 #if defined(__ARM_FEATURE_SVE2)
       hi_f32 = svcvtlt_f32_f16_x(svptrue_b32(), value);
 #else
-      const auto odd = svuzp2_u16(
+      const auto odd_value = svuzp2_u16(
           svreinterpret_u16_f16(value), svreinterpret_u16_f16(value));
       hi_f32 = svcvt_f32_f16_x(
-          svptrue_b32(), svreinterpret_f16_u16(svzip1_u16(odd, odd)));
+          svptrue_b32(), svreinterpret_f16_u16(svzip1_u16(odd_value, odd_value)));
 #endif
     } else if constexpr (std::same_as<From, int16_t>) {
       lo_f32 = svcvt_f32_s32_x(svptrue_b32(), svunpklo_s32(value));
@@ -533,11 +533,11 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_vector(
   } else {
     using ToHalf = Half<ToTag>;
     using FromHalf = Half<FromTag>;
-    const auto lower = sve_convert_vector<Wrap>(
-        ToHalf{}, FromHalf{}, execute(LowerOp{}, from, value));
-    const auto upper = sve_convert_vector<Wrap>(
-        ToHalf{}, FromHalf{}, execute(UpperOp{}, from, value));
-    return execute(ConcatOp{}, to, lower, upper);
+    const auto lower_value = sve_convert_vector<Wrap>(
+        ToHalf{}, FromHalf{}, lower(from, value));
+    const auto upper_value = sve_convert_vector<Wrap>(
+        ToHalf{}, FromHalf{}, upper(from, value));
+    return concat(to, lower_value, upper_value);
   }
 }
 
@@ -567,11 +567,11 @@ VECOPS_ALWAYS_INLINE Mask<ToTag> sve_convert_mask(
     // cannot infer this correspondence from either predicate representation.
     using ToHalf = Half<ToTag>;
     using FromHalf = Half<FromTag>;
-    const auto lower = sve_convert_mask(
-        ToHalf{}, FromHalf{}, execute(LowerOp{}, from, value));
-    const auto upper = sve_convert_mask(
-        ToHalf{}, FromHalf{}, execute(UpperOp{}, from, value));
-    return execute(ConcatOp{}, to, lower, upper);
+    const auto lower_value = sve_convert_mask(
+        ToHalf{}, FromHalf{}, lower(from, value));
+    const auto upper_value = sve_convert_mask(
+        ToHalf{}, FromHalf{}, upper(from, value));
+    return concat(to, lower_value, upper_value);
   }
 }
 
@@ -867,7 +867,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
       static_assert(ratio == 2 && phase == 1);
       using SelectedTag = Half<FromTag>;
       return sve_convert_vector(
-          to, SelectedTag{}, execute(OddOp{}, from, value));
+          to, SelectedTag{}, odd(from, value));
     }
   } else {
     constexpr bool wraps_fallback =
@@ -882,8 +882,8 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_lane_native(
           to, compact, fallback);
     } else {
       static_assert(ratio == 2 && phase == 1);
-      const auto fallback_even = execute(EvenOp{}, to, fallback);
-      return execute(InterleaveOp{}, to, fallback_even, compact);
+      const auto fallback_even = even(to, fallback);
+      return interleave(to, fallback_even, compact);
     }
   }
 }
@@ -906,42 +906,42 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_convert_unordered_ratio2(
           ToHalf{}, from, value, cvt::lane<0>);
       const auto top = sve_convert_lane_native(
           ToHalf{}, from, value, cvt::lane<1>);
-      return execute(ConcatOp{}, to, bottom, top);
+      return concat(to, bottom, top);
     } else {
       using ToHalf = Half<ToTag>;
       using FromHalf = Half<FromTag>;
-      const auto lower = sve_convert_unordered_ratio2(
-          ToHalf{}, FromHalf{}, execute(LowerOp{}, from, value));
-      const auto upper = sve_convert_unordered_ratio2(
-          ToHalf{}, FromHalf{}, execute(UpperOp{}, from, value));
-      return execute(ConcatOp{}, to, lower, upper);
+      const auto lower_value = sve_convert_unordered_ratio2(
+          ToHalf{}, FromHalf{}, lower(from, value));
+      const auto upper_value = sve_convert_unordered_ratio2(
+          ToHalf{}, FromHalf{}, upper(from, value));
+      return concat(to, lower_value, upper_value);
     }
   } else {
     if constexpr (num_words(to) == 1) {
       static_assert(num_words(from) == 2);
       using FromHalf = Half<FromTag>;
-      const auto lower = execute(LowerOp{}, from, value);
-      const auto upper = execute(UpperOp{}, from, value);
+      const auto lower_value = lower(from, value);
+      const auto upper_value = upper(from, value);
       if constexpr (Wrap) {
         const auto bottom = sve_convert_lane_native(
-            to, FromHalf{}, lower, cvt::lane<0>, cvt::wrap, opt::zero);
+            to, FromHalf{}, lower_value, cvt::lane<0>, cvt::wrap, opt::zero);
         return sve_convert_lane_native(
-            to, FromHalf{}, upper, cvt::lane<1>, cvt::wrap,
+            to, FromHalf{}, upper_value, cvt::lane<1>, cvt::wrap,
             opt::merge(bottom));
       } else {
         const auto bottom = sve_convert_lane_native(
-            to, FromHalf{}, lower, cvt::lane<0>, opt::zero);
+            to, FromHalf{}, lower_value, cvt::lane<0>, opt::zero);
         return sve_convert_lane_native(
-            to, FromHalf{}, upper, cvt::lane<1>, opt::merge(bottom));
+            to, FromHalf{}, upper_value, cvt::lane<1>, opt::merge(bottom));
       }
     } else {
       using ToHalf = Half<ToTag>;
       using FromHalf = Half<FromTag>;
-      const auto lower = sve_convert_unordered_ratio2<Wrap>(
-          ToHalf{}, FromHalf{}, execute(LowerOp{}, from, value));
-      const auto upper = sve_convert_unordered_ratio2<Wrap>(
-          ToHalf{}, FromHalf{}, execute(UpperOp{}, from, value));
-      return execute(ConcatOp{}, to, lower, upper);
+      const auto lower_value = sve_convert_unordered_ratio2<Wrap>(
+          ToHalf{}, FromHalf{}, lower(from, value));
+      const auto upper_value = sve_convert_unordered_ratio2<Wrap>(
+          ToHalf{}, FromHalf{}, upper(from, value));
+      return concat(to, lower_value, upper_value);
     }
   }
 }
@@ -1014,7 +1014,7 @@ struct NativeImpl<SVEBackend, ConvertOp, ToTag> {
           to, std::forward<Options>(options)...);
       const auto& mask = find_option<IsMaskedOption>(
           std::forward<Options>(options)...).value;
-      return execute(BlendOp{}, to, inactive, mask, converted);
+      return blend(to, inactive, mask, converted);
     } else {
       return converted;
     }
