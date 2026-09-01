@@ -13,8 +13,8 @@
 #include <type_traits>
 #include <vector>
 
-#include "vecops/matmul/Matmul.h"
-#include "vecops/matmul/MatmulPack.h"
+#include "vecops/ops/Matmul.h"
+#include "vecops/ops/MatmulPack.h"
 
 #include "MatmulConversionTestCommon.h"
 
@@ -285,7 +285,7 @@ TEST(MatmulBatchTest, SharedAFlattensBatchColumns) {
 #include <type_traits>
 #include <vector>
 
-#include "vecops/matmul/Matmul.h"
+#include "vecops/ops/Matmul.h"
 
 #include "MatmulConversionTestCommon.h"
 

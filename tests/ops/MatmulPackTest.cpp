@@ -18,7 +18,7 @@
 #include "TestUtils.h"
 #include "vecops/matmul/Atom.h"
 #include "vecops/kernel/Workspace.h"
-#include "vecops/matmul/MatmulPack.h"
+#include "vecops/ops/MatmulPack.h"
 
 namespace {
 
@@ -520,7 +520,7 @@ TEST(MatmulPackDeathTest, RejectsNegativeExtents) {
 #include "vecops/execution/details/arm/Resources.h"
 #include "vecops/matmul/Atom.h"
 #include "vecops/kernel/Workspace.h"
-#include "vecops/matmul/MatmulPack.h"
+#include "vecops/ops/MatmulPack.h"
 
 namespace {
 

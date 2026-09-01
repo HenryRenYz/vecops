@@ -13,8 +13,8 @@
 #include <type_traits>
 #include <vector>
 
-#include "vecops/matmul/Matmul.h"
-#include "vecops/matmul/MatmulPack.h"
+#include "vecops/ops/Matmul.h"
+#include "vecops/ops/MatmulPack.h"
 #include "vecops/matmul/Quantization.h"
 
 namespace vecops::test::matmul {

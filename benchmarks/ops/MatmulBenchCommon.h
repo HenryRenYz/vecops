@@ -20,8 +20,8 @@
 #include "BenchmarkUtils.h"
 #include "vecops/matmul/Packing.h"
 #include "vecops/kernel/Workspace.h"
-#include "vecops/matmul/Matmul.h"
-#include "vecops/matmul/MatmulPack.h"
+#include "vecops/ops/Matmul.h"
+#include "vecops/ops/MatmulPack.h"
 
 #ifndef VECOPS_BENCH_ARCH_CODE
 #define VECOPS_BENCH_ARCH_CODE "unknown"
