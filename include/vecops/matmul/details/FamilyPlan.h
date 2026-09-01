@@ -17,9 +17,9 @@ namespace vecops::ops::matmul_details {
 template <typename Family, typename Config>
 struct FamilyPlan;
 
-/** Adapter for the existing whole-problem planner and specialized leaves. */
-template <typename Config>
-struct FamilyPlan<::vecops::matmul::kernel_family::WholeProblem, Config> {
+/** Shared adapter for whole-problem families and their selected backend leaf. */
+template <typename Family, typename Config>
+struct WholeProblemFamilyPlan {
   template <Extent M, Extent N, Extent K,
             tensor::InputOperand A, tensor::InputOperand B,
             tensor::OutputOperand C>
@@ -74,6 +74,10 @@ struct FamilyPlan<::vecops::matmul::kernel_family::WholeProblem, Config> {
     plan(scope);
   }
 };
+
+template <typename Family, typename Config>
+  requires ::vecops::matmul::kernel_family::WholeProblemFamily<Family>
+struct FamilyPlan<Family, Config> : WholeProblemFamilyPlan<Family, Config> {};
 
 /** Adapter for the explicitly selected generic cache-tiled family. */
 template <typename Config>

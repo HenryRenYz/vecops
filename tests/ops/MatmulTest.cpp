@@ -38,8 +38,9 @@ T value(nint_t index, int modulus) {
   else return T(static_cast<float>(x) / static_cast<float>(modulus));
 }
 
-template <typename Atom, typename M, typename N, typename K>
-void check_raw(
+template <typename Atom, typename FamilySelection,
+          typename M, typename N, typename K>
+void check_raw_family(
     M m_extent, N n_extent, K k_extent,
     bool expect_auto_packing = false,
     bool expect_no_auto_packing = false) {
@@ -60,7 +61,8 @@ void check_raw(
       b.data(), make_layout(make_shape(n_extent, k_extent)));
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(m_extent, n_extent)));
-  auto operation = ops::matmul(ops::MatmulConfig<Atom>{});
+  auto operation = ops::matmul(
+      ops::MatmulConfig<Atom, FamilySelection>{});
   const nint_t required = operation.required_workspace(
       m_extent, n_extent, k_extent, at, bt, ct);
   if (expect_auto_packing) {
@@ -91,6 +93,17 @@ void check_raw(
       }
     }
   }
+}
+
+template <typename Atom, typename M, typename N, typename K>
+void check_raw(
+    M m_extent, N n_extent, K k_extent,
+    bool expect_auto_packing = false,
+    bool expect_no_auto_packing = false) {
+  check_raw_family<
+      Atom, ::vecops::matmul::family_selection::Automatic>(
+          m_extent, n_extent, k_extent,
+          expect_auto_packing, expect_no_auto_packing);
 }
 
 VECOPS_NOINLINE void check_dynamic_inner_stride(nint_t inner_stride) {
@@ -645,6 +658,26 @@ TEST(MatmulTest, SameSignSmallVectorPreservesWrapAndTail) {
   check.template operator()<uint8_t>();
 }
 
+TEST(MatmulTest, ExplicitKernelFamiliesSelectSmallVectorOrGeneral) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  using Atom = ::vecops::matmul::AMX_BF16F32;
+  check_raw_family<
+      Atom,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::SmallVector>>(
+              cint<1>, cint<16>, cint<65>);
+  check_raw_family<
+      Atom,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::General>>(
+              cint<1>, cint<16>, cint<65>);
+  check_raw_family<
+      Atom,
+      ::vecops::matmul::family_selection::Prefer<
+          ::vecops::matmul::kernel_family::SmallVector>>(
+              cint<19>, cint<21>, cint<65>);
+}
+
 TEST(MatmulTest, OperandAMayBePrepacked) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   check_mixed_packing<::vecops::matmul::Operand::A>();
@@ -905,6 +938,8 @@ T value(nint_t index, int modulus) {
 
 template <typename Atom,
           typename TilePolicy = kernel::matmul_policy::Automatic,
+          typename FamilySelection =
+              ::vecops::matmul::family_selection::Automatic,
           typename M, typename N, typename K>
 void check_raw(M m_value, N n_value, K k_value) {
   const nint_t m = static_cast<nint_t>(m_value);
@@ -924,8 +959,9 @@ void check_raw(M m_value, N n_value, K k_value) {
       b.data(), make_layout(make_shape(n_value, k_value)));
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(m_value, n_value)));
+  using Config = ops::MatmulConfig<Atom, FamilySelection, TilePolicy>;
   auto operation = ops::matmul_details::prepare_matmul(
-      ops::MatmulSchedulerConfig<Atom, TilePolicy>{},
+      Config{},
       m_value, n_value, k_value, at, bt, ct);
   using Operation = decltype(operation);
   static_assert(std::same_as<
@@ -1268,6 +1304,25 @@ TEST(MatmulTest, AllInt8SignednessCombinations) {
   check_raw<::vecops::matmul::SME_I8I32<int8_t, uint8_t>>(19, 21, 23);
   check_raw<::vecops::matmul::SME_I8I32<uint8_t, int8_t>>(19, 21, 23);
   check_raw<::vecops::matmul::SME_I8I32<uint8_t, uint8_t>>(19, 21, 23);
+}
+
+TEST(MatmulTest, ExplicitKernelFamiliesSelectSmallVectorOrGeneral) {
+  using Atom = ::vecops::matmul::SME_F32F32;
+  check_raw<
+      Atom, kernel::matmul_policy::Automatic,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::SmallVector>>(
+              cint<1>, cint<16>, cint<17>);
+  check_raw<
+      Atom, kernel::matmul_policy::Automatic,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::General>>(
+              cint<1>, cint<16>, cint<17>);
+  check_raw<
+      Atom, kernel::matmul_policy::Automatic,
+      ::vecops::matmul::family_selection::Prefer<
+          ::vecops::matmul::kernel_family::SmallVector>>(
+              cint<19>, cint<21>, cint<17>);
 }
 
 TEST(MatmulTest, EitherOperandMayBePrepacked) {

@@ -7,6 +7,7 @@
 
 #include "vecops/Features.h"
 #include "vecops/execution/ExecutionSession.h"
+#include "vecops/matmul/Family.h"
 #include "vecops/matmul/details/Types.h"
 
 namespace vecops::kernel::matmul_details {

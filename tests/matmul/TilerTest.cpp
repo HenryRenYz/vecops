@@ -31,6 +31,11 @@ struct RequiredGenericFamilyConfig {
       matmul::kernel_family::GenericTiled>;
 };
 
+struct RequiredRuntimeQuantFamilyConfig {
+  using FamilySelection = matmul::family_selection::Require<
+      matmul::kernel_family::RuntimeQuantInt8>;
+};
+
 static_assert(std::same_as<
               matmul::details::selected_family_t<AutomaticFamilyConfig>,
               matmul::kernel_family::WholeProblem>);
@@ -40,6 +45,10 @@ static_assert(std::same_as<
 static_assert(std::same_as<
               matmul::details::selected_family_t<RequiredGenericFamilyConfig>,
               matmul::kernel_family::GenericTiled>);
+static_assert(std::same_as<
+              matmul::details::selected_family_t<
+                  RequiredRuntimeQuantFamilyConfig>,
+              matmul::kernel_family::RuntimeQuantInt8>);
 static_assert(
     matmul::details::family_selection_mode_v<PreferredGenericFamilyConfig> ==
     matmul::family_selection::Mode::prefer);
@@ -52,6 +61,18 @@ static_assert(
 static_assert(
     matmul::kernel_family::Info<
         matmul::kernel_family::GenericTiled>::name == "generic_tiled");
+static_assert(matmul::kernel_family::Info<
+                  matmul::kernel_family::General>::name == "general");
+static_assert(matmul::kernel_family::Info<
+                  matmul::kernel_family::SmallVector>::name ==
+              "small_vector");
+static_assert(matmul::kernel_family::Info<
+                  matmul::kernel_family::RuntimeQuantInt8>::name ==
+              "runtime_quant_int8");
+static_assert(matmul::kernel_family::Info<
+                  matmul::kernel_family::PackedMMLA>::name == "packed_mmla");
+static_assert(matmul::kernel_family::Info<
+                  matmul::kernel_family::PackedTail>::name == "packed_tail");
 
 #if defined(ARCH_X86_FAMILY)
 using ExplicitGenericTuning = matmul::GenericTiledTuning<

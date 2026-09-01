@@ -71,6 +71,8 @@ VECOPS_ALWAYS_INLINE decltype(auto) with_matmul_configuration(
 template <::vecops::matmul::Atom Atom,
           typename Policy = matmul_policy::Automatic,
           bool AllowTailSplit = false,
+          typename FamilyDispatch =
+              ::vecops::matmul::details::AutomaticFamilyDispatch,
           typename Scope,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
           typename A, typename B, typename CInput, typename COutput,
@@ -88,11 +90,12 @@ VECOPS_KERNEL_FUNCTION(void matmul_bound(
       std::same_as<typename COutput::ComputeType, typename Atom::TAcc>);
   using Backend = matmul_details::Backend<Implementation>;
   if constexpr (requires {
-                  Backend::template run<Atom, Policy, AllowTailSplit>(
+                  Backend::template run<
+                      Atom, Policy, AllowTailSplit, FamilyDispatch>(
                       scope, m, n, k, a, b,
                       c_input, c_output, scratch);
                 }) {
-    Backend::template run<Atom, Policy, AllowTailSplit>(
+    Backend::template run<Atom, Policy, AllowTailSplit, FamilyDispatch>(
         scope, m, n, k, a, b, c_input, c_output, scratch);
   } else {
     Backend::template run<Atom, Policy>(

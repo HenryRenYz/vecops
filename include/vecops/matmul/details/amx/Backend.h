@@ -234,7 +234,7 @@ consteval bool small_vector_guaranteed() {
 template <::vecops::matmul::Atom Atom, bool AllowTailSplit,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
           typename A, typename B, typename CInput, typename COutput>
-consteval DispatchOwner select_dispatch_owner() {
+consteval DispatchOwner select_automatic_dispatch_owner() {
   using MV = std::remove_cvref_t<M>;
   using NV = std::remove_cvref_t<N>;
   using KV = std::remove_cvref_t<K>;
@@ -264,6 +264,43 @@ consteval DispatchOwner select_dispatch_owner() {
     // implementation. A bounded/aligned Dynamic type may select a special
     // owner only when every value admitted by its Meta contract is eligible.
     return DispatchOwner::General;
+  }
+}
+
+template <typename Family, DispatchOwner Owner>
+inline constexpr bool dispatch_owner_in_family_v =
+    (std::same_as<Family, ::vecops::matmul::kernel_family::General> &&
+     Owner == DispatchOwner::General) ||
+    (std::same_as<Family, ::vecops::matmul::kernel_family::SmallVector> &&
+     (Owner == DispatchOwner::SmallVector ||
+      Owner == DispatchOwner::FusedSmallBF16)) ||
+    (std::same_as<Family, ::vecops::matmul::kernel_family::PackedTail> &&
+     Owner == DispatchOwner::PackedABTailSplit);
+
+template <typename FamilyDispatch,
+          ::vecops::matmul::Atom Atom, bool AllowTailSplit,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K,
+          typename A, typename B, typename CInput, typename COutput>
+consteval DispatchOwner select_dispatch_owner() {
+  constexpr auto AutomaticOwner = select_automatic_dispatch_owner<
+      Atom, AllowTailSplit, M, N, K, A, B, CInput, COutput>();
+  using Family = typename FamilyDispatch::Family;
+  if constexpr (std::same_as<
+                    Family, ::vecops::matmul::kernel_family::WholeProblem>) {
+    return AutomaticOwner;
+  } else if constexpr (std::same_as<
+                           Family,
+                           ::vecops::matmul::kernel_family::General>) {
+    return DispatchOwner::General;
+  } else {
+    constexpr bool Applicable =
+        dispatch_owner_in_family_v<Family, AutomaticOwner>;
+    static_assert(
+        !FamilyDispatch::required || Applicable,
+        "required matmul kernel family is not applicable to this AMX leaf");
+    // Prefer retains the proven automatic owner when the requested family is
+    // unavailable.  When applicable, AutomaticOwner already names that leaf.
+    return AutomaticOwner;
   }
 }
 
@@ -1246,7 +1283,10 @@ struct Backend<matmul_implementation::AMX> {
         origin_m, 0, a, b, c_input, c_output, scratch);
   }
 
-  template <::vecops::matmul::Atom Atom, typename Policy, bool AllowTailSplit = false,
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            bool AllowTailSplit = false,
+            typename FamilyDispatch =
+                ::vecops::matmul::details::AutomaticFamilyDispatch,
             execution::ExecutionScope Scope,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename A, typename B, typename CInput, typename COutput>
@@ -1255,7 +1295,8 @@ struct Backend<matmul_implementation::AMX> {
       const A& a, const B& b, const CInput& c_input, COutput& c_output,
       void* scratch) {
     constexpr auto Owner = amx::select_dispatch_owner<
-        Atom, AllowTailSplit, M, N, K, A, B, CInput, COutput>();
+        FamilyDispatch, Atom, AllowTailSplit,
+        M, N, K, A, B, CInput, COutput>();
     if constexpr (Owner == amx::DispatchOwner::SmallVector) {
       const nint_t logical_m = static_cast<nint_t>(m);
       const nint_t logical_n = static_cast<nint_t>(n);

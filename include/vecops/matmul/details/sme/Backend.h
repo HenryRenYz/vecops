@@ -1307,7 +1307,7 @@ template <::vecops::matmul::Atom Atom,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
           typename A, typename B, typename CInput, typename COutput,
           typename Scope>
-consteval DispatchOwner select_dispatch_owner() {
+consteval DispatchOwner select_automatic_dispatch_owner() {
   using MV = std::remove_cvref_t<M>;
   using NV = std::remove_cvref_t<N>;
   using KV = std::remove_cvref_t<K>;
@@ -1401,6 +1401,50 @@ consteval DispatchOwner select_dispatch_owner() {
 #endif
   }
   return DispatchOwner::General;
+}
+
+template <typename Family, DispatchOwner Owner>
+inline constexpr bool dispatch_owner_in_family_v =
+    (std::same_as<Family, ::vecops::matmul::kernel_family::General> &&
+     Owner == DispatchOwner::General) ||
+    (std::same_as<Family, ::vecops::matmul::kernel_family::SmallVector> &&
+     (Owner == DispatchOwner::MixedSignSkinnyRow ||
+      Owner == DispatchOwner::MixedSignSkinnyColumn ||
+      Owner == DispatchOwner::RawSkinnyRow ||
+      Owner == DispatchOwner::RawSkinnyColumn ||
+      Owner == DispatchOwner::FusedSkinnyRow ||
+      Owner == DispatchOwner::FusedSkinnyColumn)) ||
+    (std::same_as<
+         Family, ::vecops::matmul::kernel_family::RuntimeQuantInt8> &&
+     Owner == DispatchOwner::RuntimeQuantINT8) ||
+    (std::same_as<Family, ::vecops::matmul::kernel_family::PackedMMLA> &&
+     (Owner == DispatchOwner::PackedMMLAPrimary ||
+      Owner == DispatchOwner::PackedMMLATiny));
+
+template <typename FamilyDispatch,
+          ::vecops::matmul::Atom Atom,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K,
+          typename A, typename B, typename CInput, typename COutput,
+          typename Scope>
+consteval DispatchOwner select_dispatch_owner() {
+  constexpr auto AutomaticOwner = select_automatic_dispatch_owner<
+      Atom, M, N, K, A, B, CInput, COutput, Scope>();
+  using Family = typename FamilyDispatch::Family;
+  if constexpr (std::same_as<
+                    Family, ::vecops::matmul::kernel_family::WholeProblem>) {
+    return AutomaticOwner;
+  } else if constexpr (std::same_as<
+                           Family,
+                           ::vecops::matmul::kernel_family::General>) {
+    return DispatchOwner::General;
+  } else {
+    constexpr bool Applicable =
+        dispatch_owner_in_family_v<Family, AutomaticOwner>;
+    static_assert(
+        !FamilyDispatch::required || Applicable,
+        "required matmul kernel family is not applicable to this SME leaf");
+    return AutomaticOwner;
+  }
 }
 
 template <::vecops::matmul::Atom Atom, int NM, int NN,
@@ -1904,6 +1948,9 @@ struct Backend<matmul_implementation::SME> {
       Policy>;
 
   template <::vecops::matmul::Atom Atom, typename Policy,
+            bool = false,
+            typename FamilyDispatch =
+                ::vecops::matmul::details::AutomaticFamilyDispatch,
             execution::ExecutionScope Scope,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename A, typename B, typename CInput, typename COutput>
@@ -1913,7 +1960,7 @@ struct Backend<matmul_implementation::SME> {
       void* scratch) {
     static_assert(std::same_as<typename Atom::KernelKind, ::vecops::matmul::SMEKernelKind>);
     constexpr auto Owner = sme::select_dispatch_owner<
-        Atom, M, N, K, A, B, CInput, COutput, Scope>();
+        FamilyDispatch, Atom, M, N, K, A, B, CInput, COutput, Scope>();
 #if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
     if constexpr (Owner == sme::DispatchOwner::MixedSignSkinnyRow ||
                   Owner == sme::DispatchOwner::MixedSignSkinnyColumn) {
@@ -1975,24 +2022,34 @@ struct Backend<matmul_implementation::SME> {
 #endif
 #if defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
     if constexpr (Owner == sme::DispatchOwner::RuntimeQuantINT8) {
-      if (sme::try_fused_runtime_quant_int8_packed_b_gemv<Atom>(
+      const bool handled =
+          sme::try_fused_runtime_quant_int8_packed_b_gemv<Atom>(
               static_cast<nint_t>(m), static_cast<nint_t>(n),
-              static_cast<nint_t>(k), a, b, c_input, c_output)) {
+              static_cast<nint_t>(k), a, b, c_input, c_output);
+      if constexpr (FamilyDispatch::required)
+        VECOPS_ASSERT(handled, "required runtime-quant INT8 family rejected");
+      if (handled) {
         return;
       }
     }
 #endif
 #if defined(CPU_CAPABILITY_SVE)
     if constexpr (Owner == sme::DispatchOwner::PackedMMLAPrimary) {
-      if (sme::try_packed_mmla<Atom>(
+      const bool handled = sme::try_packed_mmla<Atom>(
               static_cast<nint_t>(m), static_cast<nint_t>(n),
-              static_cast<nint_t>(k), a, b, c_input, c_output)) {
+              static_cast<nint_t>(k), a, b, c_input, c_output);
+      if constexpr (FamilyDispatch::required)
+        VECOPS_ASSERT(handled, "required packed-MMLA family rejected");
+      if (handled) {
         return;
       }
     } else if constexpr (Owner == sme::DispatchOwner::PackedMMLATiny) {
-      if (sme::try_packed_mmla_tiny<Atom>(
+      const bool handled = sme::try_packed_mmla_tiny<Atom>(
               static_cast<nint_t>(m), static_cast<nint_t>(n),
-              static_cast<nint_t>(k), a, b, c_input, c_output)) {
+              static_cast<nint_t>(k), a, b, c_input, c_output);
+      if constexpr (FamilyDispatch::required)
+        VECOPS_ASSERT(handled, "required packed-MMLA family rejected");
+      if (handled) {
         return;
       }
     }

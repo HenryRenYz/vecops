@@ -6,12 +6,12 @@
 #define VECOPS_MATMUL_CONFIG_H
 
 #include <concepts>
-#include <string_view>
 #include <type_traits>
 
 #include "vecops/Meta.h"
 #include "vecops/kernel/Tile2D.h"
 #include "vecops/matmul/Atom.h"
+#include "vecops/matmul/Family.h"
 #include "vecops/matmul/details/Types.h"
 #include "vecops/platform/CacheInfo.h"
 
@@ -42,68 +42,6 @@ enum class AccBufferMode {
   workspace,
   output,
 };
-
-namespace kernel_family {
-
-/** Existing whole-problem planner, including architecture-specialized leaves. */
-struct WholeProblem {};
-
-/** General MC/NC/KC cache tiler feeding the backend Tile2D scheduler. */
-struct GenericTiled {};
-
-template <typename T>
-concept Family = std::same_as<T, WholeProblem> ||
-    std::same_as<T, GenericTiled>;
-
-template <Family FamilyT>
-struct Info;
-
-template <>
-struct Info<WholeProblem> {
-  static constexpr std::string_view name = "whole_problem";
-  static constexpr bool composite = true;
-};
-
-template <>
-struct Info<GenericTiled> {
-  static constexpr std::string_view name = "generic_tiled";
-  static constexpr bool composite = false;
-};
-
-} // namespace kernel_family
-
-namespace family_selection {
-
-enum class Mode {
-  automatic,
-  prefer,
-  require,
-};
-
-/** Let the library choose among every family made available by the backend. */
-struct Automatic {
-  static constexpr Mode mode = Mode::automatic;
-};
-
-/** Prefer one family, while allowing a future planner to fall back. */
-template <typename FamilyT>
-struct Prefer {
-  static_assert(kernel_family::Family<FamilyT>,
-                "unknown matmul kernel family");
-  using Family = FamilyT;
-  static constexpr Mode mode = Mode::prefer;
-};
-
-/** Require one family; an inapplicable family is a configuration error. */
-template <typename FamilyT>
-struct Require {
-  static_assert(kernel_family::Family<FamilyT>,
-                "unknown matmul kernel family");
-  using Family = FamilyT;
-  static constexpr Mode mode = Mode::require;
-};
-
-} // namespace family_selection
 
 template <PackingMode Mode = PackingMode::automatic,
           PackingExtent Extent = PackingExtent::automatic>

@@ -15,6 +15,7 @@
 #include "vecops/kernel/Loop.h"
 #include "vecops/matmul/Config.h"
 #include "vecops/matmul/Packing.h"
+#include "vecops/matmul/details/FamilySelector.h"
 #include "vecops/matmul/details/Kernel.h"
 #include "vecops/matmul/details/OperationCommon.h"
 #include "vecops/matmul/details/PackOperation.h"
@@ -24,6 +25,7 @@ namespace vecops::ops {
 
 template <::vecops::matmul::Atom Atom,
           typename TilePolicy,
+          typename FamilyDispatch,
           meta::ValueType MExtent,
           meta::ValueType NExtent,
           meta::ValueType KExtent,
@@ -39,6 +41,19 @@ public:
       kernel::matmul_implementation::resource_requirements_t<Implementation>;
   static constexpr int ProblemRank =
       kernel::matmul_implementation::problem_rank_v<Implementation>;
+  static constexpr int Rank = COutputSpec::OutputTensor::Ndim;
+  static_assert(
+      !FamilyDispatch::required ||
+          std::same_as<typename FamilyDispatch::Family,
+                       ::vecops::matmul::kernel_family::General> ||
+          Rank == ProblemRank,
+      "required specialized matmul family supports one leaf problem only");
+  using EffectiveFamilyDispatch = std::conditional_t<
+      Rank == ProblemRank ||
+          std::same_as<typename FamilyDispatch::Family,
+                       ::vecops::matmul::kernel_family::General>,
+      FamilyDispatch,
+      ::vecops::matmul::details::AutomaticFamilyDispatch>;
 
   VECOPS_INLINE WholeProblemPlan(
       MExtent m, NExtent n, KExtent k,
@@ -1164,7 +1179,8 @@ private:
                 c_input_access, c_output_access, scratch, Implementation{});
           } else {
             kernel::matmul_bound<
-                Atom, TilePolicy, PackedAInput && PackedBInput>(
+                Atom, TilePolicy, PackedAInput && PackedBInput,
+                EffectiveFamilyDispatch>(
                 scope, m, n, k, a_access, b_access,
                 c_input_access, c_output_access, scratch, Implementation{});
           }
@@ -1424,6 +1440,11 @@ VECOPS_INLINE auto prepare_matmul(
     M&& m, N&& n, K&& k, A&& a, B&& b, C&& c) {
   using Atom = typename Config::Atom;
   using TilePolicy = typename Config::SchedulerPolicy;
+  using Family = ::vecops::matmul::details::selected_family_t<Config>;
+  static_assert(::vecops::matmul::kernel_family::WholeProblemFamily<Family>,
+                "prepare_matmul requires a whole-problem kernel family");
+  using FamilyDispatch = ::vecops::matmul::details::FamilyDispatch<
+      Family, ::vecops::matmul::details::family_selection_mode_v<Config>>;
   auto m_value = matmul_details::extent_value(std::forward<M>(m));
   auto n_value = matmul_details::extent_value(std::forward<N>(n));
   auto k_value = matmul_details::extent_value(std::forward<K>(k));
@@ -1436,7 +1457,7 @@ VECOPS_INLINE auto prepare_matmul(
       c_output.tensor(),
       tensor::zeros_transform<typename Atom::TAcc, Memory>);
   return WholeProblemPlan<
-      Atom, TilePolicy,
+      Atom, TilePolicy, FamilyDispatch,
       decltype(m_value), decltype(n_value), decltype(k_value),
       decltype(a_spec), decltype(b_spec),
       decltype(c_input), decltype(c_output)>{
@@ -1458,6 +1479,11 @@ VECOPS_INLINE auto prepare_matmul_accumulate(
     A&& a, B&& b, CInput&& c_input, COutput&& c_output) {
   using Atom = typename Config::Atom;
   using TilePolicy = typename Config::SchedulerPolicy;
+  using Family = ::vecops::matmul::details::selected_family_t<Config>;
+  static_assert(::vecops::matmul::kernel_family::WholeProblemFamily<Family>,
+                "prepare_matmul_accumulate requires a whole-problem family");
+  using FamilyDispatch = ::vecops::matmul::details::FamilyDispatch<
+      Family, ::vecops::matmul::details::family_selection_mode_v<Config>>;
   auto m_value = matmul_details::extent_value(std::forward<M>(m));
   auto n_value = matmul_details::extent_value(std::forward<N>(n));
   auto k_value = matmul_details::extent_value(std::forward<K>(k));
@@ -1468,7 +1494,7 @@ VECOPS_INLINE auto prepare_matmul_accumulate(
   auto c_output_spec = tensor::as_output_spec<typename Atom::TAcc>(
       std::forward<COutput>(c_output));
   return WholeProblemPlan<
-      Atom, TilePolicy,
+      Atom, TilePolicy, FamilyDispatch,
       decltype(m_value), decltype(n_value), decltype(k_value),
       decltype(a_spec), decltype(b_spec),
       decltype(c_input_spec), decltype(c_output_spec)>{
