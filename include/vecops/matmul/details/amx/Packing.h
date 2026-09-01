@@ -12,7 +12,7 @@
 #include "vecops/matmul/Atom.h"
 #include "vecops/tensor/Layout.h"
 
-namespace vecops::gemm::details::amx {
+namespace vecops::matmul::details::amx {
 
 struct Format {};
 
@@ -105,6 +105,6 @@ public:
   }
 };
 
-} // namespace vecops::gemm::details::amx
+} // namespace vecops::matmul::details::amx
 
 #endif // VECOPS_MATMUL_DETAILS_AMX_PACKING_H

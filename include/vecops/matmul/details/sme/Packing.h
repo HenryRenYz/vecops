@@ -12,7 +12,7 @@
 #include "vecops/tensor/Layout.h"
 #include "vecops/vec/details/sme/State.h"
 
-namespace vecops::gemm::details::sme {
+namespace vecops::matmul::details::sme {
 
 struct Format {};
 
@@ -97,6 +97,6 @@ public:
   }
 };
 
-} // namespace vecops::gemm::details::sme
+} // namespace vecops::matmul::details::sme
 
 #endif // VECOPS_MATMUL_DETAILS_SME_PACKING_H

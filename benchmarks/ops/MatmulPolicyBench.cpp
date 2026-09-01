@@ -14,13 +14,13 @@ void register_matmul_policy_shard();
 namespace vecops::bench::matmul {
 
 template <>
-struct AtomName<gemm::SME_BF16F32> {
+struct AtomName<::vecops::matmul::SME_BF16F32> {
   static constexpr const char* value = "SME_BF16F32";
 };
 
 template <typename Policy>
 void register_policy(const char* policy) {
-  using Atom = gemm::SME_BF16F32;
+  using Atom = ::vecops::matmul::SME_BF16F32;
   register_policy_extent_pair<
       Atom, InputMode::PackedAB, Policy, 16, 16, 8>(
           "fixed_microkernel", "acc_1x1", policy);

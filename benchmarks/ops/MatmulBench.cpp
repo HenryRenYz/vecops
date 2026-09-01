@@ -64,18 +64,18 @@ namespace vecops::bench::matmul {
 #if defined(ARCH_X86_FAMILY)
 
 template <>
-struct AtomName<gemm::AMX_BF16F32> {
+struct AtomName<::vecops::matmul::AMX_BF16F32> {
   static constexpr const char* value = "AMX_BF16F32";
 };
 
 #if defined(HAS_AMX_FP16)
 template <>
-struct AtomName<gemm::AMX_F16F32> {
+struct AtomName<::vecops::matmul::AMX_F16F32> {
   static constexpr const char* value = "AMX_F16F32";
 };
 #endif
 
-using NativeI8S8U8 = gemm::AMX_I8I32<int8_t, uint8_t>;
+using NativeI8S8U8 = ::vecops::matmul::AMX_I8I32<int8_t, uint8_t>;
 
 template <>
 struct AtomName<NativeI8S8U8> {
@@ -85,31 +85,31 @@ struct AtomName<NativeI8S8U8> {
 #else
 
 template <>
-struct AtomName<gemm::SME_BF16F32> {
+struct AtomName<::vecops::matmul::SME_BF16F32> {
   static constexpr const char* value = "SME_BF16F32";
 };
 
 template <>
-struct AtomName<gemm::SME_F16F32> {
+struct AtomName<::vecops::matmul::SME_F16F32> {
   static constexpr const char* value = "SME_F16F32";
 };
 
 template <>
-struct AtomName<gemm::SME_F32F32> {
+struct AtomName<::vecops::matmul::SME_F32F32> {
   static constexpr const char* value = "SME_F32F32";
 };
 
 #if defined(HAS_SME_F64F64)
 template <>
-struct AtomName<gemm::SME_F64F64> {
+struct AtomName<::vecops::matmul::SME_F64F64> {
   static constexpr const char* value = "SME_F64F64";
 };
 #endif
 
-using NativeI8S8U8 = gemm::SME_I8I32<int8_t, uint8_t>;
-using NativeI8U8S8 = gemm::SME_I8I32<uint8_t, int8_t>;
-using NativeI8S8S8 = gemm::SME_I8I32<int8_t, int8_t>;
-using NativeI8U8U8 = gemm::SME_I8I32<uint8_t, uint8_t>;
+using NativeI8S8U8 = ::vecops::matmul::SME_I8I32<int8_t, uint8_t>;
+using NativeI8U8S8 = ::vecops::matmul::SME_I8I32<uint8_t, int8_t>;
+using NativeI8S8S8 = ::vecops::matmul::SME_I8I32<int8_t, int8_t>;
+using NativeI8U8U8 = ::vecops::matmul::SME_I8I32<uint8_t, uint8_t>;
 
 template <>
 struct AtomName<NativeI8S8U8> {
@@ -149,14 +149,14 @@ void register_matmul_bench_shard() {
       0 <= TargetShard && TargetShard < MatmulBenchArchTraits::ShardCount);
 #if defined(ARCH_X86_FAMILY)
   if constexpr (TargetShard == 0) {
-    register_representative_extent_pairs<gemm::AMX_BF16F32, 16, 32, 3>();
+    register_representative_extent_pairs<::vecops::matmul::AMX_BF16F32, 16, 32, 3>();
   } else if constexpr (TargetShard == 1) {
-    register_workload_extent_pairs<gemm::AMX_BF16F32, 16, 32>();
+    register_workload_extent_pairs<::vecops::matmul::AMX_BF16F32, 16, 32>();
   } else if constexpr (TargetShard == 2) {
-    register_dispatch_extent_pairs<gemm::AMX_BF16F32, 16>();
+    register_dispatch_extent_pairs<::vecops::matmul::AMX_BF16F32, 16>();
   } else if constexpr (TargetShard == 3) {
 #if defined(HAS_AMX_FP16)
-    register_dtype_probe_extent_pairs<gemm::AMX_F16F32, 16, 32>();
+    register_dtype_probe_extent_pairs<::vecops::matmul::AMX_F16F32, 16, 32>();
 #endif
   } else if constexpr (TargetShard == 4) {
 #if defined(HAS_AMX_INT8)
@@ -168,26 +168,26 @@ void register_matmul_bench_shard() {
       TargetShard / VECOPS_MATMUL_CATALOG_CASE_SHARDS;
   if constexpr (CatalogShard == 0) {
     register_representative_extent_pairs<
-        gemm::SME_BF16F32, 16, 2, 4, TargetShard>();
+        ::vecops::matmul::SME_BF16F32, 16, 2, 4, TargetShard>();
   } else if constexpr (CatalogShard == 1) {
     register_workload_extent_pairs<
-        gemm::SME_BF16F32, 16, 2, TargetShard>();
+        ::vecops::matmul::SME_BF16F32, 16, 2, TargetShard>();
   } else if constexpr (CatalogShard == 2) {
-    register_dispatch_extent_pairs<gemm::SME_BF16F32, 16, TargetShard>();
+    register_dispatch_extent_pairs<::vecops::matmul::SME_BF16F32, 16, TargetShard>();
   } else if constexpr (CatalogShard == 3) {
     register_packed_mmla_extent_pairs<
-        gemm::SME_BF16F32, 0, TargetShard>();
+        ::vecops::matmul::SME_BF16F32, 0, TargetShard>();
   } else if constexpr (CatalogShard == 4) {
     register_dtype_probe_extent_pairs<
-        gemm::SME_F16F32, 16, 2, 0, TargetShard>();
+        ::vecops::matmul::SME_F16F32, 16, 2, 0, TargetShard>();
     register_skinny_extent_pairs<
-        gemm::SME_F16F32, mode_bit(InputMode::Raw), 3, TargetShard>(
+        ::vecops::matmul::SME_F16F32, mode_bit(InputMode::Raw), 3, TargetShard>(
         "dispatch_float_skinny");
   } else if constexpr (CatalogShard == 5) {
     register_dtype_probe_extent_pairs<
-        gemm::SME_F32F32, 16, 1, 0, TargetShard>();
+        ::vecops::matmul::SME_F32F32, 16, 1, 0, TargetShard>();
     register_skinny_extent_pairs<
-        gemm::SME_F32F32, mode_bit(InputMode::Raw), 3, TargetShard>(
+        ::vecops::matmul::SME_F32F32, mode_bit(InputMode::Raw), 3, TargetShard>(
         "dispatch_float_skinny");
   } else if constexpr (CatalogShard == 6) {
     register_extended_integer_skinny_extent_pairs<
@@ -200,9 +200,9 @@ void register_matmul_bench_shard() {
   } else if constexpr (CatalogShard == 8) {
 #if defined(HAS_SME_F64F64)
     register_dtype_probe_extent_pairs<
-        gemm::SME_F64F64, 8, 1, 0, TargetShard>();
+        ::vecops::matmul::SME_F64F64, 8, 1, 0, TargetShard>();
     register_skinny_extent_pairs<
-        gemm::SME_F64F64, mode_bit(InputMode::Raw), 3, TargetShard>(
+        ::vecops::matmul::SME_F64F64, mode_bit(InputMode::Raw), 3, TargetShard>(
         "dispatch_float_skinny");
 #endif
   } else if constexpr (CatalogShard == 9) {

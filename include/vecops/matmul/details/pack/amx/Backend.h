@@ -35,7 +35,7 @@ consteval int amx_panel_scale_power() {
 
 template <>
 struct Backend<
-    gemm::details::amx::Format,
+    ::vecops::matmul::details::amx::Format,
     matmul_pack_implementation::Vector> {
   using ResourceRequirements =
       typename execution::details::current_backend_t::DefaultRequirements;
@@ -44,12 +44,12 @@ struct Backend<
   template <typename InputSpec, typename OutputSpec>
   static constexpr bool eligible = false;
 
-  template <gemm::Atom Atom, gemm::Operand Side,
+  template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
             execution::ExecutionScope Scope,
             typename Source, typename Destination>
   VECOPS_ALWAYS_INLINE static void run(
       Scope&, const Source& source, Destination& destination) {
-    using Packing = gemm::packing_t<Atom, Side>;
+    using Packing = ::vecops::matmul::packing_t<Atom, Side>;
     using T = typename Packing::Element;
     static_assert(std::same_as<typename Source::ComputeType, T>);
     const auto& layout = source.spec().input_layout();
@@ -71,7 +71,7 @@ struct Backend<
       const auto* input = reinterpret_cast<const T*>(source.raw_data());
       const nint_t row_stride = static_cast<nint_t>(
           tensor::stride_value<0>(layout));
-      if constexpr (Side == gemm::Operand::A) {
+      if constexpr (Side == ::vecops::matmul::Operand::A) {
         if constexpr (!SpatialGuaranteed && !KGuaranteed) {
           amx::pack_a_direct_dynamic(
               input, row_stride, output,
@@ -88,7 +88,7 @@ struct Backend<
             input, row_stride, output,
             static_cast<nint_t>(spatial), static_cast<nint_t>(k));
       }
-    } else if constexpr (Side == gemm::Operand::A) {
+    } else if constexpr (Side == ::vecops::matmul::Operand::A) {
       if constexpr (VEC_WIDTH >= 512) {
         using ATag = vec::ScalableTag<T, 0>;
         amx::pack_a_access<Packing::KTile, ATag>(
@@ -137,14 +137,14 @@ struct Backend<
     }
   }
 
-  template <gemm::Atom Atom,
+  template <::vecops::matmul::Atom Atom,
             execution::ExecutionScope Scope,
             typename Source, typename Destination,
             typename CompensationDestination>
   VECOPS_ALWAYS_INLINE static void run_compensated(
       Scope& scope, const Source& source, Destination& destination,
       CompensationDestination& compensation, int32_t a_zero_point) {
-    using Packing = gemm::packing_t<Atom, gemm::Operand::B>;
+    using Packing = ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::B>;
     static_assert(std::same_as<typename Atom::TA, uint8_t>);
     static_assert(std::same_as<typename Atom::TB, int8_t>);
     static_assert(std::same_as<typename Atom::TAcc, int32_t>);
@@ -196,14 +196,14 @@ struct Backend<
             Packing::KPack, Packing::KTile>(
                 source, output, correction, spatial, k, a_zero_point);
       } else {
-        run<Atom, gemm::Operand::B>(scope, source, destination);
+        run<Atom, ::vecops::matmul::Operand::B>(scope, source, destination);
         amx::compensate_packed_s8_b(
             output, correction,
             static_cast<nint_t>(spatial), static_cast<nint_t>(k),
             a_zero_point);
       }
     } else {
-      run<Atom, gemm::Operand::B>(scope, source, destination);
+      run<Atom, ::vecops::matmul::Operand::B>(scope, source, destination);
       amx::compensate_packed_s8_b(
           output, correction,
           static_cast<nint_t>(spatial), static_cast<nint_t>(k),

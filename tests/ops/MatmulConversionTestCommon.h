@@ -78,7 +78,7 @@ void check_conversion(
   auto ct = tensor::make_tensor(
       c.data(), tensor::make_layout(
                     tensor::make_shape(m_extent, n_extent)));
-  auto operation = ops::make_matmul<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       m_extent, n_extent, k_extent,
       tensor::input<TA>(at), tensor::input<TB>(bt),
       tensor::output<Acc>(ct));
@@ -152,7 +152,7 @@ void check_batched_native(
   auto ct = tensor::make_tensor(
       c.data(), tensor::make_layout(tensor::make_shape(
                     batch_extent, m_extent, n_extent)));
-  auto operation = ops::make_matmul<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       m_extent, n_extent, k_extent, at, bt, ct);
   if (expect_workspace) {
     EXPECT_GT(operation.required_workspace(), 0);
@@ -207,7 +207,7 @@ void check_batched_packed_b(
       b.data(), tensor::make_layout(
                     tensor::make_shape(meta::Any{n}, meta::Any{k})));
   auto packed_layout = ops::matmul_packed_layout<
-      Atom, gemm::Operand::B>(bt.layout());
+      Atom, ::vecops::matmul::Operand::B>(bt.layout());
   const nint_t packed_bytes = tensor::numel(packed_layout) *
       static_cast<nint_t>(sizeof(TB));
   kernel::Workspace packed_storage(packed_bytes + 64);
@@ -216,13 +216,13 @@ void check_batched_packed_b(
       packed_workspace.allocate(packed_bytes, 64));
   auto packed_tensor = tensor::make_tensor(packed, packed_layout);
   ExecutionSession pack_execution{};
-  ops::matmul_pack<Atom, gemm::Operand::B>(
+  ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
       pack_execution, bt, packed_tensor);
 
   auto ct = tensor::make_tensor(
       c.data(), tensor::make_layout(tensor::make_shape(
                     meta::Any{batch}, meta::Any{m}, meta::Any{n})));
-  auto operation = ops::make_matmul<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       m, n, k, at, packed_tensor, ct);
   kernel::Workspace storage(operation.required_workspace());
   auto workspace = storage.view();
@@ -295,7 +295,7 @@ void check_batched_quantized_shared_b(
       [](auto tag, auto value) VECOPS_KERNEL_LAMBDA {
         return vec::mul(tag, value, vec::fill(tag, 0.125f));
       });
-  auto operation = ops::make_matmul<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       m_extent, n_extent, k_extent,
       tensor::input<TA>(at, quantize),
       tensor::input<TB>(bt, quantize),
@@ -305,9 +305,9 @@ void check_batched_quantized_shared_b(
   auto b_matrix_layout = tensor::make_layout(
       tensor::make_shape(n_extent, k_extent));
   const auto packed_a_layout = ops::matmul_packed_layout<
-      Atom, gemm::Operand::A>(a_matrix_layout);
+      Atom, ::vecops::matmul::Operand::A>(a_matrix_layout);
   const auto packed_b_layout = ops::matmul_packed_layout<
-      Atom, gemm::Operand::B>(b_matrix_layout);
+      Atom, ::vecops::matmul::Operand::B>(b_matrix_layout);
   const nint_t expected_workspace =
       tensor::numel(packed_a_layout) * static_cast<nint_t>(sizeof(TA)) +
       tensor::numel(packed_b_layout) * static_cast<nint_t>(sizeof(TB)) + 126;
@@ -337,12 +337,12 @@ void check_batched_quantized_shared_b(
   }
 }
 
-template <typename Atom, gemm::Operand Side>
+template <typename Atom, ::vecops::matmul::Operand Side>
 void check_mixed_packing(nint_t m, nint_t n, nint_t k) {
   using TA = typename Atom::TA;
   using TB = typename Atom::TB;
   using Acc = typename Atom::TAcc;
-  using Packed = typename gemm::packing_t<Atom, Side>::Element;
+  using Packed = typename ::vecops::matmul::packing_t<Atom, Side>::Element;
   std::vector<TA> a(static_cast<std::size_t>(m * k));
   std::vector<TB> b(static_cast<std::size_t>(n * k));
   std::vector<Acc> c(static_cast<std::size_t>(m * n));
@@ -357,7 +357,7 @@ void check_mixed_packing(nint_t m, nint_t n, nint_t k) {
       tensor::make_shape(meta::Any{n}, meta::Any{k}));
   auto at = tensor::make_tensor(a.data(), al);
   auto bt = tensor::make_tensor(b.data(), bl);
-  const auto& source_layout = Side == gemm::Operand::A ? al : bl;
+  const auto& source_layout = Side == ::vecops::matmul::Operand::A ? al : bl;
   auto packed_layout = ops::matmul_packed_layout<Atom, Side>(source_layout);
   const nint_t packed_bytes =
       tensor::numel(packed_layout) * static_cast<nint_t>(sizeof(Packed));
@@ -367,19 +367,19 @@ void check_mixed_packing(nint_t m, nint_t n, nint_t k) {
       packed_workspace.allocate(packed_bytes, 64));
   auto packed_tensor = tensor::make_tensor(packed, packed_layout);
   ExecutionSession execution{};
-  if constexpr (Side == gemm::Operand::A)
-    ops::matmul_pack<Atom, Side>(execution, at, packed_tensor);
+  if constexpr (Side == ::vecops::matmul::Operand::A)
+    ops::matmul_pack_details::run_matmul_pack<Atom, Side>(execution, at, packed_tensor);
   else
-    ops::matmul_pack<Atom, Side>(execution, bt, packed_tensor);
+    ops::matmul_pack_details::run_matmul_pack<Atom, Side>(execution, bt, packed_tensor);
 
   auto ct = tensor::make_tensor(
       c.data(), tensor::make_layout(
                     tensor::make_shape(meta::Any{m}, meta::Any{n})));
   auto operation = [&] {
-    if constexpr (Side == gemm::Operand::A)
-      return ops::make_matmul<Atom>(m, n, k, packed_tensor, bt, ct);
+    if constexpr (Side == ::vecops::matmul::Operand::A)
+      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k, packed_tensor, bt, ct);
     else
-      return ops::make_matmul<Atom>(m, n, k, at, packed_tensor, ct);
+      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k, at, packed_tensor, ct);
   }();
   kernel::Workspace storage(operation.required_workspace());
   auto workspace = storage.view();
@@ -396,7 +396,7 @@ void check_mixed_packing(nint_t m, nint_t n, nint_t k) {
       }
       const auto actual = c[static_cast<std::size_t>(row * n + col)];
       EXPECT_TRUE(conversion_values_equal(expected, actual))
-          << "side=" << (Side == gemm::Operand::A ? "A" : "B")
+          << "side=" << (Side == ::vecops::matmul::Operand::A ? "A" : "B")
           << " row=" << row << " col=" << col;
     }
   }
@@ -438,7 +438,7 @@ void check_bias_relu(nint_t m, nint_t n, nint_t k) {
       [](auto tag, auto value) VECOPS_KERNEL_LAMBDA {
         return vec::max(tag, value, vec::zeros(tag));
       });
-  auto operation = ops::make_matmul_accumulate<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
       m, n, k, at, bt, tensor::input<Acc>(bias_tensor),
       tensor::output<Acc>(ct, relu));
   kernel::Workspace storage(operation.required_workspace());
@@ -543,7 +543,7 @@ void check_asymmetric_quantized(
       return tensor::input<TB>(bt, quantize_b);
     }
   }();
-  auto operation = ops::make_matmul_accumulate<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
       m_extent, n_extent, k_extent,
       tensor::input<TA>(at, quantize_a),
       b_operand,
@@ -635,10 +635,10 @@ void check_runtime_and_per_column_scale(
         const nint_t column = coordinate[coordinate.size() - 1];
         return vec::mul(tag, value, vec::load(tag, scales + column));
       });
-  auto dynamic_operation = ops::make_matmul<Atom>(
+  auto dynamic_operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       m_extent, n_extent, k_extent, at, bt,
       tensor::output<Acc>(dynamic_tensor, dynamic_transform));
-  auto column_operation = ops::make_matmul<Atom>(
+  auto column_operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       m_extent, n_extent, k_extent, at, bt,
       tensor::output<Acc>(column_tensor, column_transform));
   kernel::Workspace dynamic_storage(dynamic_operation.required_workspace());
@@ -704,7 +704,7 @@ void check_bias_clamp(nint_t m, nint_t n, nint_t k) {
             tag, vec::max(tag, value, vec::fill(tag, Acc{-0.25f})),
             vec::fill(tag, Acc{0.25f}));
       });
-  auto operation = ops::make_matmul_accumulate<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
       m, n, k, at, bt, tensor::input<Acc>(bias_tensor),
       tensor::output<Acc>(ct, clamp));
   kernel::Workspace storage(operation.required_workspace());
@@ -797,7 +797,7 @@ void check_dual_asymmetric_quantized(
       [](auto tag, auto value) VECOPS_KERNEL_LAMBDA {
         return vec::mul(tag, value, vec::fill(tag, 0.0625f));
       });
-  auto operation = ops::make_matmul_accumulate<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
       m_extent, n_extent, k_extent,
       tensor::input<TA>(at, quantize_a),
       tensor::input<TB>(bt, quantize_b),
@@ -862,7 +862,7 @@ void check_mixed_bias_relu(nint_t m, nint_t n, nint_t k) {
       [](auto tag, auto value) VECOPS_KERNEL_LAMBDA {
         return vec::max(tag, value, vec::zeros(tag));
       });
-  auto operation = ops::make_matmul_accumulate<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
       m, n, k,
       tensor::input<TA>(tensor::make_tensor(a.data(), al)),
       tensor::input<TB>(tensor::make_tensor(b.data(), bl)),
@@ -921,7 +921,7 @@ void check_quantized_a_direct_b(nint_t m, nint_t n, nint_t k) {
       [](auto tag, auto value) VECOPS_KERNEL_LAMBDA {
         return vec::mul(tag, value, vec::fill(tag, 0.125f));
       });
-  auto operation = ops::make_matmul<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       m, n, k,
       tensor::input<TA>(tensor::make_tensor(a.data(), al), quantize),
       tensor::input<TB>(tensor::make_tensor(b.data(), bl)),
@@ -969,7 +969,7 @@ void check_native_integer_accumulate(nint_t m, nint_t n, nint_t k) {
       tensor::make_shape(meta::Any{n}, meta::Any{k}));
   auto cl = tensor::make_layout(
       tensor::make_shape(meta::Any{m}, meta::Any{n}));
-  auto operation = ops::make_matmul_accumulate<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
       m, n, k, tensor::make_tensor(a.data(), al),
       tensor::make_tensor(b.data(), bl),
       tensor::make_tensor(input_c.data(), cl),
@@ -1024,12 +1024,12 @@ void check_relu_and_sigmoid(nint_t m, nint_t n, nint_t k) {
             tag, one,
             vec::add(tag, one, vec::exp(tag, vec::neg(tag, value))));
       });
-  auto relu_operation = ops::make_matmul<Atom>(
+  auto relu_operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       m, n, k, tensor::make_tensor(a.data(), al),
       tensor::make_tensor(b.data(), bl),
       tensor::output<Acc>(
           tensor::make_tensor(relu_output.data(), cl), relu));
-  auto sigmoid_operation = ops::make_matmul<Atom>(
+  auto sigmoid_operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       m, n, k, tensor::make_tensor(a.data(), al),
       tensor::make_tensor(b.data(), bl),
       tensor::output<Acc>(
@@ -1095,12 +1095,12 @@ void check_silu_and_bias_silu(nint_t m, nint_t n, nint_t k) {
             vec::add(tag, one, vec::exp(tag, vec::neg(tag, value))));
         return vec::mul(tag, value, sigmoid);
       });
-  auto silu_operation = ops::make_matmul<Atom>(
+  auto silu_operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       m, n, k, tensor::make_tensor(a.data(), al),
       tensor::make_tensor(b.data(), bl),
       tensor::output<Acc>(
           tensor::make_tensor(silu_output.data(), cl), silu));
-  auto bias_silu_operation = ops::make_matmul_accumulate<Atom>(
+  auto bias_silu_operation = ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
       m, n, k, tensor::make_tensor(a.data(), al),
       tensor::make_tensor(b.data(), bl),
       tensor::input<Acc>(tensor::make_tensor(bias.data(), bias_layout)),
@@ -1205,11 +1205,11 @@ void check_integer_bias_per_column_quantization(
       tensor::make_tensor(b.data(), bl));
   const auto bias_operand = tensor::input<Acc>(
       tensor::make_tensor(bias.data(), bias_layout));
-  auto dequant_operation = ops::make_matmul_accumulate<Atom>(
+  auto dequant_operation = ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
       m, n, k, a_operand, b_operand, bias_operand,
       tensor::output<Acc>(
           tensor::make_tensor(dequantized.data(), cl), dequantize));
-  auto requant_operation = ops::make_matmul_accumulate<Atom>(
+  auto requant_operation = ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
       m, n, k, a_operand, b_operand, bias_operand,
       tensor::output<Acc>(
           tensor::make_tensor(requantized.data(), cl), requantize));
@@ -1357,7 +1357,7 @@ void check_batched_runtime_per_row_column_quantization(
       make_runtime_per_row_column_dequantize_transform({
           row_dequant_scales.data(), column_scales.data(),
           row_scale_batch_stride});
-  auto operation = ops::make_matmul_accumulate<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
       m, n, k,
       tensor::input<TA>(tensor::make_tensor(a.data(), a_layout), quantize_a),
       tensor::input<TB>(tensor::make_tensor(b.data(), b_layout)),
@@ -1431,7 +1431,7 @@ std::vector<typename Atom::TAcc> run_native_extent_case() {
     auto ct = tensor::make_tensor(
         c.data(), tensor::make_layout(
                       tensor::make_shape(m_extent, n_extent)));
-    auto operation = ops::make_matmul<Atom>(
+    auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
         m_extent, n_extent, k_extent, at, bt, ct);
     kernel::Workspace storage(operation.required_workspace());
     auto workspace = storage.view();
@@ -1507,7 +1507,7 @@ std::vector<typename Atom::TAcc> run_batched_native_extent_case() {
     auto ct = tensor::make_tensor(
         c.data(), tensor::make_layout(tensor::make_shape(
                       batch_extent, m_extent, n_extent)));
-    auto operation = ops::make_matmul<Atom>(
+    auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
         m_extent, n_extent, k_extent, at, bt, ct);
     kernel::Workspace storage(operation.required_workspace());
     auto workspace = storage.view();

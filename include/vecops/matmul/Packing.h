@@ -16,7 +16,7 @@
 #include "vecops/matmul/details/sme/Packing.h"
 #endif
 
-namespace vecops::gemm {
+namespace vecops::matmul {
 
 template <Atom AtomT, Operand Side>
 using packing_t = typename AtomT::template Packing<Side>;
@@ -51,6 +51,6 @@ VECOPS_INLINE bool is_corresponding_packed_layout(
   }
 }
 
-} // namespace vecops::gemm
+} // namespace vecops::matmul
 
 #endif // VECOPS_MATMUL_PACKING_H

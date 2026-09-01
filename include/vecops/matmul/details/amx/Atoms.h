@@ -12,14 +12,14 @@
 #include "vecops/execution/details/x86/Resources.h"
 #include "vecops/matmul/Atom.h"
 
-namespace vecops::gemm::details::amx {
+namespace vecops::matmul::details::amx {
 
 template <typename ElementT, Operand Side>
 struct Packing;
 
-} // namespace vecops::gemm::details::amx
+} // namespace vecops::matmul::details::amx
 
-namespace vecops::gemm {
+namespace vecops::matmul {
 
 struct AMXKernelKind {
   using ResourceRequirements = execution::details::ResourceSet<
@@ -53,6 +53,6 @@ struct AMX_I8I32 : AMXAtomBase<A, B, int32_t> {};
 
 static_assert(Atom<AMX_BF16F32>);
 
-} // namespace vecops::gemm
+} // namespace vecops::matmul
 
 #endif // VECOPS_MATMUL_DETAILS_AMX_ATOMS_H

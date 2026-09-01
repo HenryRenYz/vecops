@@ -38,33 +38,33 @@ void register_matmul_packed_scenario_range() {
 namespace vecops::bench::matmul {
 
 #if defined(ARCH_X86_FAMILY)
-template <> struct AtomName<gemm::AMX_BF16F32> {
+template <> struct AtomName<::vecops::matmul::AMX_BF16F32> {
   static constexpr const char* value = "AMX_BF16F32";
 };
 #if defined(HAS_AMX_FP16)
-template <> struct AtomName<gemm::AMX_F16F32> {
+template <> struct AtomName<::vecops::matmul::AMX_F16F32> {
   static constexpr const char* value = "AMX_F16F32";
 };
 #endif
 template <typename A, typename B>
-using PackedScenarioI8 = gemm::AMX_I8I32<A, B>;
+using PackedScenarioI8 = ::vecops::matmul::AMX_I8I32<A, B>;
 #else
-template <> struct AtomName<gemm::SME_BF16F32> {
+template <> struct AtomName<::vecops::matmul::SME_BF16F32> {
   static constexpr const char* value = "SME_BF16F32";
 };
-template <> struct AtomName<gemm::SME_F16F32> {
+template <> struct AtomName<::vecops::matmul::SME_F16F32> {
   static constexpr const char* value = "SME_F16F32";
 };
-template <> struct AtomName<gemm::SME_F32F32> {
+template <> struct AtomName<::vecops::matmul::SME_F32F32> {
   static constexpr const char* value = "SME_F32F32";
 };
 #if defined(HAS_SME_F64F64)
-template <> struct AtomName<gemm::SME_F64F64> {
+template <> struct AtomName<::vecops::matmul::SME_F64F64> {
   static constexpr const char* value = "SME_F64F64";
 };
 #endif
 template <typename A, typename B>
-using PackedScenarioI8 = gemm::SME_I8I32<A, B>;
+using PackedScenarioI8 = ::vecops::matmul::SME_I8I32<A, B>;
 #endif
 
 using PackedI8S8S8 = PackedScenarioI8<int8_t, int8_t>;
@@ -150,9 +150,9 @@ void register_matmul_packed_scenario_shard() {
   if constexpr (Shard == 0) {
     register_all_packing_modes<
 #if defined(ARCH_X86_FAMILY)
-        gemm::AMX_BF16F32,
+        ::vecops::matmul::AMX_BF16F32,
 #else
-        gemm::SME_BF16F32,
+        ::vecops::matmul::SME_BF16F32,
 #endif
         bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(
@@ -160,9 +160,9 @@ void register_matmul_packed_scenario_shard() {
   } else if constexpr (Shard == 1) {
     register_all_packing_modes<
 #if defined(ARCH_X86_FAMILY)
-        gemm::AMX_BF16F32,
+        ::vecops::matmul::AMX_BF16F32,
 #else
-        gemm::SME_BF16F32,
+        ::vecops::matmul::SME_BF16F32,
 #endif
         float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Relu>(
@@ -170,25 +170,25 @@ void register_matmul_packed_scenario_shard() {
   } else if constexpr (Shard == 2) {
 #if defined(ARCH_X86_FAMILY)
     register_all_packing_modes<
-        gemm::AMX_BF16F32,
+        ::vecops::matmul::AMX_BF16F32,
         bfloat16_t, bfloat16_t, bfloat16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(
             scenario_cases(BF16KStep));
 #if defined(HAS_AMX_FP16)
     register_all_packing_modes<
-        gemm::AMX_F16F32,
+        ::vecops::matmul::AMX_F16F32,
         float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(
             scenario_cases(BF16KStep));
 #endif
 #else
     register_all_packing_modes<
-        gemm::SME_F32F32,
+        ::vecops::matmul::SME_F32F32,
         bfloat16_t, bfloat16_t, bfloat16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(
             scenario_cases(1));
     register_all_packing_modes<
-        gemm::SME_F32F32,
+        ::vecops::matmul::SME_F32F32,
         float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(
             scenario_cases(1));
@@ -215,9 +215,9 @@ void register_matmul_packed_scenario_shard() {
   } else if constexpr (Shard == 6) {
     register_all_batched_packed_b_modes<
 #if defined(ARCH_X86_FAMILY)
-        gemm::AMX_BF16F32,
+        ::vecops::matmul::AMX_BF16F32,
 #else
-        gemm::SME_BF16F32,
+        ::vecops::matmul::SME_BF16F32,
 #endif
         bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(
@@ -225,9 +225,9 @@ void register_matmul_packed_scenario_shard() {
   } else if constexpr (Shard == 7) {
     register_all_batched_packed_b_modes<
 #if defined(ARCH_X86_FAMILY)
-        gemm::AMX_BF16F32,
+        ::vecops::matmul::AMX_BF16F32,
 #else
-        gemm::SME_BF16F32,
+        ::vecops::matmul::SME_BF16F32,
 #endif
         float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Relu>(
@@ -240,9 +240,9 @@ void register_matmul_packed_scenario_shard() {
   } else if constexpr (Shard == 9) {
     register_all_packing_modes<
 #if defined(ARCH_X86_FAMILY)
-        gemm::AMX_BF16F32,
+        ::vecops::matmul::AMX_BF16F32,
 #else
-        gemm::SME_BF16F32,
+        ::vecops::matmul::SME_BF16F32,
 #endif
         bfloat16_t, bfloat16_t, bfloat16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
@@ -252,13 +252,13 @@ void register_matmul_packed_scenario_shard() {
 #if defined(ARCH_X86_FAMILY)
 #if defined(HAS_AMX_FP16)
     register_all_packing_modes<
-        gemm::AMX_F16F32, float16_t, float16_t, float32_t,
+        ::vecops::matmul::AMX_F16F32, float16_t, float16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(
             packed_dtype_probe_cases(BF16KStep));
 #endif
 #else
     register_all_packing_modes<
-        gemm::SME_F16F32, float16_t, float16_t, float32_t,
+        ::vecops::matmul::SME_F16F32, float16_t, float16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(
             packed_dtype_probe_cases(BF16KStep));
 #endif
@@ -266,14 +266,14 @@ void register_matmul_packed_scenario_shard() {
 #if defined(ARCH_X86_FAMILY)
 #if defined(HAS_AMX_FP16)
     register_all_packing_modes<
-        gemm::AMX_F16F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::AMX_F16F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float32_t>(
             packed_dtype_probe_cases(BF16KStep));
 #endif
 #else
     register_all_packing_modes<
-        gemm::SME_F16F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::SME_F16F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float32_t>(
             packed_dtype_probe_cases(BF16KStep));
@@ -281,14 +281,14 @@ void register_matmul_packed_scenario_shard() {
   } else if constexpr (Shard == 12) {
 #if !defined(ARCH_X86_FAMILY)
     register_all_packing_modes<
-        gemm::SME_F32F32, float32_t, float32_t, float32_t,
+        ::vecops::matmul::SME_F32F32, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(
             packed_dtype_probe_cases(1));
 #endif
   } else if constexpr (Shard == 13) {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_all_packing_modes<
-        gemm::SME_F64F64, float64_t, float64_t, float64_t,
+        ::vecops::matmul::SME_F64F64, float64_t, float64_t, float64_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(
             packed_dtype_probe_cases(1));
 #endif

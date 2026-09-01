@@ -230,14 +230,14 @@ VECOPS_ALWAYS_INLINE nint_t pack_full_word_panels(
   return chunks * k_chunk;
 }
 
-template <gemm::Atom Atom, gemm::Operand Side,
+template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           meta::ValueType Spatial, meta::ValueType K,
           meta::ValueType RowStride>
 VECOPS_ALWAYS_INLINE void pack(
-    const typename gemm::packing_t<Atom, Side>::Element* input,
+    const typename ::vecops::matmul::packing_t<Atom, Side>::Element* input,
     Spatial spatial_meta, K k_meta, RowStride row_stride_meta,
-    typename gemm::packing_t<Atom, Side>::Element* output) noexcept {
-  using Packing = gemm::packing_t<Atom, Side>;
+    typename ::vecops::matmul::packing_t<Atom, Side>::Element* output) noexcept {
+  using Packing = ::vecops::matmul::packing_t<Atom, Side>;
   using T = typename Packing::Element;
   using U = Bits<T>;
   const nint_t spatial = static_cast<nint_t>(spatial_meta);

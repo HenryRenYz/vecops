@@ -136,15 +136,15 @@ VECOPS_ALWAYS_INLINE void store_quad_panel(
   output += 4 * panel;
 }
 
-template <gemm::Atom Atom, gemm::Operand Side,
+template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           typename Source,
           meta::ValueType Spatial, meta::ValueType K,
           meta::ValueType RowStride>
 VECOPS_ALWAYS_INLINE void pack_postprocess(
     const Source& source, Spatial spatial_meta, K k_meta,
     RowStride row_stride_meta,
-    typename gemm::packing_t<Atom, Side>::Element* output) noexcept {
-  using Packing = gemm::packing_t<Atom, Side>;
+    typename ::vecops::matmul::packing_t<Atom, Side>::Element* output) noexcept {
+  using Packing = ::vecops::matmul::packing_t<Atom, Side>;
   using T = typename Packing::Element;
   using Memory = typename Source::MemoryElement;
   using U = Bits<Memory>;

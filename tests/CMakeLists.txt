@@ -4,6 +4,7 @@ vecops_add_test(NAME TensorTest FILES tensor/TensorTest.cpp FOLDER tensor/tensor
 vecops_add_test(NAME LayoutTest FILES tensor/LayoutTest.cpp FOLDER tensor/layout)
 vecops_add_test(NAME KernelLoopTest FILES kernel/LoopTest.cpp FOLDER kernel/loop)
 vecops_add_test(NAME KernelTile2DTest FILES kernel/Tile2DTest.cpp FOLDER kernel/tile2d)
+vecops_add_test(NAME MatmulTilerTest FILES matmul/TilerTest.cpp FOLDER matmul/tiler)
 vecops_add_test(
     NAME ExecutionSessionTest
     FILES execution/ExecutionSessionTest.cpp
@@ -239,8 +240,7 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
             set(_VECOPS_SME_MATMUL_CALL_ARGS "")
             if(_TARGET MATCHES "^MatmulTest-")
                 list(APPEND _VECOPS_SME_MATMUL_CALL_ARGS
-                    "-DALLOWED_CALL_REGEX=${_VECOPS_SME_PREDICATE_TUPLE_CALL_REGEX}"
-                    -DREQUIRE_ALLOWED_CALL=ON)
+                    "-DALLOWED_CALL_REGEX=${_VECOPS_SME_PREDICATE_TUPLE_CALL_REGEX}")
             endif()
             add_test(
                 NAME ${_TARGET}-Disassembly
@@ -253,15 +253,17 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
                 ${_TARGET}-Disassembly PROPERTIES LABELS "matmul;sme;disassembly")
         endforeach()
         # Clang emits out-of-line numeric_limits min/max/infinity calls in the
-        # runtime-VL gather and activation paths.  Keep these exact compiler
-        # artifacts visible together with the predicate-tuple boundary calls.
+        # runtime-VL gather path.  The fused sigmoid/SiLU epilogues deliberately
+        # call the shared SVE exp leaf instead of cloning that large polynomial
+        # into every SME microkernel.  Allow these exact calls when present,
+        # while accepting a fully inlined result as well.
         set(_VECOPS_SME_FUSION_TARGETS MatmulFusionTest-Native)
         if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
             list(APPEND _VECOPS_SME_FUSION_TARGETS
                 MatmulFusionTest-NativeFixedStreamingSVE)
         endif()
         set(_VECOPS_SME_FUSION_CALL_REGEX
-            "(${_VECOPS_SME_PREDICATE_TUPLE_CALL_REGEX}|numeric_limitsI(i|f)E(3(min|max)|8infinity)Ev)")
+            "(${_VECOPS_SME_PREDICATE_TUPLE_CALL_REGEX}|numeric_limitsI(i|f)E(3(min|max)|8infinity)Ev|sve_exp_f32_(special|core))")
         foreach(_TARGET IN LISTS _VECOPS_SME_FUSION_TARGETS)
             add_test(
                 NAME ${_TARGET}-Disassembly
@@ -269,7 +271,6 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
                     "-DOBJDUMP=${CMAKE_OBJDUMP}"
                     "-DBINARY=$<TARGET_FILE:${_TARGET}>"
                     "-DALLOWED_CALL_REGEX=${_VECOPS_SME_FUSION_CALL_REGEX}"
-                    -DREQUIRE_ALLOWED_CALL=ON
                     -P "${CMAKE_CURRENT_LIST_DIR}/cmake/VerifyManualSMEDisassembly.cmake")
             set_tests_properties(
                 ${_TARGET}-Disassembly

@@ -38,33 +38,33 @@ void register_matmul_scenario_range() {
 namespace vecops::bench::matmul {
 
 #if defined(ARCH_X86_FAMILY)
-template <> struct AtomName<gemm::AMX_BF16F32> {
+template <> struct AtomName<::vecops::matmul::AMX_BF16F32> {
   static constexpr const char* value = "AMX_BF16F32";
 };
 #if defined(HAS_AMX_FP16)
-template <> struct AtomName<gemm::AMX_F16F32> {
+template <> struct AtomName<::vecops::matmul::AMX_F16F32> {
   static constexpr const char* value = "AMX_F16F32";
 };
 #endif
 template <typename A, typename B>
-using NativeI8 = gemm::AMX_I8I32<A, B>;
+using NativeI8 = ::vecops::matmul::AMX_I8I32<A, B>;
 #else
-template <> struct AtomName<gemm::SME_BF16F32> {
+template <> struct AtomName<::vecops::matmul::SME_BF16F32> {
   static constexpr const char* value = "SME_BF16F32";
 };
-template <> struct AtomName<gemm::SME_F16F32> {
+template <> struct AtomName<::vecops::matmul::SME_F16F32> {
   static constexpr const char* value = "SME_F16F32";
 };
-template <> struct AtomName<gemm::SME_F32F32> {
+template <> struct AtomName<::vecops::matmul::SME_F32F32> {
   static constexpr const char* value = "SME_F32F32";
 };
 #if defined(HAS_SME_F64F64)
-template <> struct AtomName<gemm::SME_F64F64> {
+template <> struct AtomName<::vecops::matmul::SME_F64F64> {
   static constexpr const char* value = "SME_F64F64";
 };
 #endif
 template <typename A, typename B>
-using NativeI8 = gemm::SME_I8I32<A, B>;
+using NativeI8 = ::vecops::matmul::SME_I8I32<A, B>;
 #endif
 
 using I8S8S8 = NativeI8<int8_t, int8_t>;
@@ -98,14 +98,14 @@ void register_matmul_scenario_shard() {
   const auto i8_cases = scenario_cases(I8KStep);
   const auto i8_batch_cases = batched_scenario_cases(I8KStep);
   if constexpr (Shard == 0) {
-    register_scenario<gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t>(cases);
+    register_scenario<::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t>(cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t>(batch_cases);
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t>(batch_cases);
   } else if constexpr (Shard == 1) {
 #if defined(HAS_AMX_FP16)
-    register_scenario<gemm::AMX_F16F32, float16_t, float16_t, float32_t>(cases);
+    register_scenario<::vecops::matmul::AMX_F16F32, float16_t, float16_t, float32_t>(cases);
     register_batched_scenario<
-        gemm::AMX_F16F32, float16_t, float16_t, float32_t>(batch_cases);
+        ::vecops::matmul::AMX_F16F32, float16_t, float16_t, float32_t>(batch_cases);
 #endif
   } else if constexpr (Shard == 2) {
     register_scenario<I8S8S8, int8_t, int8_t, int32_t>(i8_cases);
@@ -118,62 +118,62 @@ void register_matmul_scenario_shard() {
     register_batched_scenario<I8U8S8, uint8_t, int8_t, int32_t>(i8_batch_cases);
     register_batched_scenario<I8U8U8, uint8_t, uint8_t, int32_t>(i8_batch_cases);
   } else if constexpr (Shard == 4) {
-    register_scenario<gemm::AMX_BF16F32, float32_t, float32_t, float32_t>(cases);
+    register_scenario<::vecops::matmul::AMX_BF16F32, float32_t, float32_t, float32_t>(cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, float32_t, float32_t, float32_t>(batch_cases);
+        ::vecops::matmul::AMX_BF16F32, float32_t, float32_t, float32_t>(batch_cases);
   } else if constexpr (Shard == 5) {
 #if defined(HAS_AMX_FP16)
-    register_scenario<gemm::AMX_F16F32, float32_t, float32_t, float32_t>(cases);
+    register_scenario<::vecops::matmul::AMX_F16F32, float32_t, float32_t, float32_t>(cases);
     register_batched_scenario<
-        gemm::AMX_F16F32, float32_t, float32_t, float32_t>(batch_cases);
+        ::vecops::matmul::AMX_F16F32, float32_t, float32_t, float32_t>(batch_cases);
 #endif
   } else if constexpr (Shard == 6) {
-    register_scenario<gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t>(cases);
-    register_scenario<gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float16_t>(cases);
+    register_scenario<::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t>(cases);
+    register_scenario<::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float16_t>(cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t>(batch_cases);
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t>(batch_cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float16_t>(batch_cases);
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float16_t>(batch_cases);
   } else if constexpr (Shard == 7) {
-    register_scenario<gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+    register_scenario<::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
                       InputPipeline::Convert, OutputPipeline::Accumulate>(cases);
-    register_scenario<gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+    register_scenario<::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
                       InputPipeline::Convert, OutputPipeline::Relu>(cases);
-    register_scenario<gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+    register_scenario<::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
                       InputPipeline::Convert, OutputPipeline::Scale>(cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Accumulate>(batch_cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Relu>(batch_cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Scale>(batch_cases);
   } else if constexpr (Shard == 8) {
-    register_scenario<gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+    register_scenario<::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
                       InputPipeline::Convert, OutputPipeline::Sigmoid>(cases);
-    register_scenario<gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+    register_scenario<::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
                       InputPipeline::Convert,
                       OutputPipeline::AccumulateReluScale>(cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Sigmoid>(batch_cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert,
         OutputPipeline::AccumulateReluScale>(batch_cases);
     register_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Bias>(cases);
     register_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Bias>(batch_cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(batch_cases);
   } else if constexpr (Shard == 9) {
     register_scenario<I8S8U8, float32_t, float32_t, float32_t,
@@ -219,30 +219,30 @@ void register_matmul_scenario_shard() {
         InputPipeline::Convert>(i8_batch_cases);
   } else if constexpr (Shard == 13) {
     register_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t,
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float32_t>(cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t,
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu, true,
         InputPipeline::Convert, float32_t>(batch_cases);
   } else if constexpr (Shard == 14) {
     register_scenario<
-        gemm::AMX_BF16F32, float32_t, bfloat16_t, float32_t>(cases);
+        ::vecops::matmul::AMX_BF16F32, float32_t, bfloat16_t, float32_t>(cases);
     register_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, float32_t, float32_t>(cases);
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, float32_t, float32_t>(cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, float32_t, bfloat16_t, float32_t>(batch_cases);
+        ::vecops::matmul::AMX_BF16F32, float32_t, bfloat16_t, float32_t>(batch_cases);
     register_batched_scenario<
-        gemm::AMX_BF16F32, bfloat16_t, float32_t, float32_t>(batch_cases);
+        ::vecops::matmul::AMX_BF16F32, bfloat16_t, float32_t, float32_t>(batch_cases);
   } else if constexpr (Shard == 15) {
 #if defined(HAS_AMX_FP16)
     register_scenario<
-        gemm::AMX_F16F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::AMX_F16F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float32_t>(cases);
     register_batched_scenario<
-        gemm::AMX_F16F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::AMX_F16F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu, true,
         InputPipeline::Convert, float32_t>(batch_cases);
 #endif
@@ -263,34 +263,34 @@ void register_matmul_scenario_shard() {
   constexpr nint_t BF16KStep = 2;
   constexpr nint_t I8KStep = 4;
   if constexpr (Shard == 0) {
-    register_scenario<gemm::SME_F32F32, float32_t, float32_t, float32_t>(
+    register_scenario<::vecops::matmul::SME_F32F32, float32_t, float32_t, float32_t>(
         scenario_cases(F32KStep));
     register_batched_scenario<
-        gemm::SME_F32F32, float32_t, float32_t, float32_t>(
+        ::vecops::matmul::SME_F32F32, float32_t, float32_t, float32_t>(
             batched_scenario_cases(F32KStep));
   } else if constexpr (Shard == 1) {
-    register_scenario<gemm::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t>(
+    register_scenario<::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t>(
         scenario_cases(BF16KStep));
     register_batched_scenario<
-        gemm::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t>(
+        ::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t>(
             batched_scenario_cases(BF16KStep));
   } else if constexpr (Shard == 2) {
-    register_scenario<gemm::SME_F16F32, float16_t, float16_t, float32_t>(
+    register_scenario<::vecops::matmul::SME_F16F32, float16_t, float16_t, float32_t>(
         scenario_cases(BF16KStep));
     register_batched_scenario<
-        gemm::SME_F16F32, float16_t, float16_t, float32_t>(
+        ::vecops::matmul::SME_F16F32, float16_t, float16_t, float32_t>(
             batched_scenario_cases(BF16KStep));
   } else if constexpr (Shard == 3) {
 #if defined(HAS_SME_F64F64)
-    register_scenario<gemm::SME_F64F64, float64_t, float64_t, float64_t>(
+    register_scenario<::vecops::matmul::SME_F64F64, float64_t, float64_t, float64_t>(
         scenario_cases(F32KStep));
-    register_scenario<gemm::SME_F64F64, float32_t, float32_t, float32_t>(
+    register_scenario<::vecops::matmul::SME_F64F64, float32_t, float32_t, float32_t>(
         scenario_cases(F32KStep));
     register_batched_scenario<
-        gemm::SME_F64F64, float64_t, float64_t, float64_t>(
+        ::vecops::matmul::SME_F64F64, float64_t, float64_t, float64_t>(
             batched_scenario_cases(F32KStep));
     register_batched_scenario<
-        gemm::SME_F64F64, float32_t, float32_t, float32_t>(
+        ::vecops::matmul::SME_F64F64, float32_t, float32_t, float32_t>(
             batched_scenario_cases(F32KStep));
 #endif
   } else if constexpr (Shard == 4) {
@@ -308,65 +308,65 @@ void register_matmul_scenario_shard() {
     register_batched_scenario<I8U8U8, uint8_t, uint8_t, int32_t>(
         batched_scenario_cases(I8KStep));
   } else if constexpr (Shard == 6) {
-    register_scenario<gemm::SME_BF16F32, float32_t, float32_t, float32_t>(
+    register_scenario<::vecops::matmul::SME_BF16F32, float32_t, float32_t, float32_t>(
         scenario_cases(BF16KStep));
     register_batched_scenario<
-        gemm::SME_BF16F32, float32_t, float32_t, float32_t>(
+        ::vecops::matmul::SME_BF16F32, float32_t, float32_t, float32_t>(
             batched_scenario_cases(BF16KStep));
   } else if constexpr (Shard == 7) {
-    register_scenario<gemm::SME_F32F32, bfloat16_t, bfloat16_t, bfloat16_t>(
+    register_scenario<::vecops::matmul::SME_F32F32, bfloat16_t, bfloat16_t, bfloat16_t>(
         scenario_cases(F32KStep));
-    register_scenario<gemm::SME_F32F32, float16_t, float16_t, float16_t>(
+    register_scenario<::vecops::matmul::SME_F32F32, float16_t, float16_t, float16_t>(
         scenario_cases(F32KStep));
     register_batched_scenario<
-        gemm::SME_F32F32, bfloat16_t, bfloat16_t, bfloat16_t>(
+        ::vecops::matmul::SME_F32F32, bfloat16_t, bfloat16_t, bfloat16_t>(
             batched_scenario_cases(F32KStep));
     register_batched_scenario<
-        gemm::SME_F32F32, float16_t, float16_t, float16_t>(
+        ::vecops::matmul::SME_F32F32, float16_t, float16_t, float16_t>(
             batched_scenario_cases(F32KStep));
   } else if constexpr (Shard == 8) {
     const auto cases = scenario_cases(BF16KStep);
-    register_scenario<gemm::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+    register_scenario<::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
                       InputPipeline::Convert, OutputPipeline::Accumulate>(cases);
-    register_scenario<gemm::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+    register_scenario<::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
                       InputPipeline::Convert, OutputPipeline::Relu>(cases);
-    register_scenario<gemm::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+    register_scenario<::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
                       InputPipeline::Convert, OutputPipeline::Scale>(cases);
     const auto batch_cases = batched_scenario_cases(BF16KStep);
     register_batched_scenario<
-        gemm::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Accumulate>(batch_cases);
     register_batched_scenario<
-        gemm::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Relu>(batch_cases);
     register_batched_scenario<
-        gemm::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Scale>(batch_cases);
     register_scenario<
-        gemm::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Bias>(cases);
     register_scenario<
-        gemm::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(cases);
     register_batched_scenario<
-        gemm::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Bias>(batch_cases);
     register_batched_scenario<
-        gemm::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
+        ::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(batch_cases);
   } else if constexpr (Shard == 9) {
     const auto cases = scenario_cases(F32KStep);
-    register_scenario<gemm::SME_F32F32, float32_t, float32_t, float32_t,
+    register_scenario<::vecops::matmul::SME_F32F32, float32_t, float32_t, float32_t,
                       InputPipeline::Convert, OutputPipeline::Sigmoid>(cases);
-    register_scenario<gemm::SME_F32F32, float32_t, float32_t, float32_t,
+    register_scenario<::vecops::matmul::SME_F32F32, float32_t, float32_t, float32_t,
                       InputPipeline::Convert,
                       OutputPipeline::AccumulateReluScale>(cases);
     const auto batch_cases = batched_scenario_cases(F32KStep);
     register_batched_scenario<
-        gemm::SME_F32F32, float32_t, float32_t, float32_t,
+        ::vecops::matmul::SME_F32F32, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Sigmoid>(batch_cases);
     register_batched_scenario<
-        gemm::SME_F32F32, float32_t, float32_t, float32_t,
+        ::vecops::matmul::SME_F32F32, float32_t, float32_t, float32_t,
         InputPipeline::Convert,
         OutputPipeline::AccumulateReluScale>(batch_cases);
   } else if constexpr (Shard == 10) {
@@ -404,21 +404,21 @@ void register_matmul_scenario_shard() {
         OutputPipeline::AsymmetricDequantize>(
             batched_scenario_cases(I8KStep));
   } else if constexpr (Shard == 12) {
-    register_scenario<gemm::SME_F16F32, float32_t, float32_t, float32_t>(
+    register_scenario<::vecops::matmul::SME_F16F32, float32_t, float32_t, float32_t>(
         scenario_cases(BF16KStep));
     register_batched_scenario<
-        gemm::SME_F16F32, float32_t, float32_t, float32_t>(
+        ::vecops::matmul::SME_F16F32, float32_t, float32_t, float32_t>(
             batched_scenario_cases(BF16KStep));
   } else if constexpr (Shard == 13) {
-    register_scenario<gemm::SME_F32F32, bfloat16_t, bfloat16_t, float32_t>(
+    register_scenario<::vecops::matmul::SME_F32F32, bfloat16_t, bfloat16_t, float32_t>(
         scenario_cases(F32KStep));
-    register_scenario<gemm::SME_F32F32, float16_t, float16_t, float32_t>(
+    register_scenario<::vecops::matmul::SME_F32F32, float16_t, float16_t, float32_t>(
         scenario_cases(F32KStep));
     register_batched_scenario<
-        gemm::SME_F32F32, bfloat16_t, bfloat16_t, float32_t>(
+        ::vecops::matmul::SME_F32F32, bfloat16_t, bfloat16_t, float32_t>(
             batched_scenario_cases(F32KStep));
     register_batched_scenario<
-        gemm::SME_F32F32, float16_t, float16_t, float32_t>(
+        ::vecops::matmul::SME_F32F32, float16_t, float16_t, float32_t>(
             batched_scenario_cases(F32KStep));
   } else if constexpr (Shard == 14) {
     register_scenario<
@@ -431,20 +431,20 @@ void register_matmul_scenario_shard() {
         InputPipeline::Convert>(batched_scenario_cases(I8KStep));
   } else if constexpr (Shard == 15) {
     register_scenario<
-        gemm::SME_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t,
+        ::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float32_t>(scenario_cases(BF16KStep));
     register_batched_scenario<
-        gemm::SME_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t,
+        ::vecops::matmul::SME_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu, true,
         InputPipeline::Convert, float32_t>(
             batched_scenario_cases(BF16KStep));
     register_scenario<
-        gemm::SME_F16F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::SME_F16F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float32_t>(scenario_cases(BF16KStep));
     register_batched_scenario<
-        gemm::SME_F16F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::SME_F16F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu, true,
         InputPipeline::Convert, float32_t>(
             batched_scenario_cases(BF16KStep));

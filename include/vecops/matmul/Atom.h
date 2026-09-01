@@ -12,7 +12,7 @@
 #include "vecops/Features.h"
 #include "vecops/Meta.h"
 
-namespace vecops::gemm {
+namespace vecops::matmul {
 
 /**
  * @brief Identifies one input of the logical product
@@ -51,7 +51,7 @@ concept Atom = requires {
   T::K_R;
 } && std::same_as<T, std::remove_cvref_t<T>>;
 
-} // namespace vecops::gemm
+} // namespace vecops::matmul
 
 #if defined(ARCH_X86_FAMILY)
 #include "vecops/matmul/details/amx/Atoms.h"

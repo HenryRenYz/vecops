@@ -2,8 +2,8 @@
 // Copyright (c) vecops contributors.
 //
 
-#ifndef VECOPS_MATMUL_DETAILS_TRAVERSAL_H
-#define VECOPS_MATMUL_DETAILS_TRAVERSAL_H
+#ifndef VECOPS_MATMUL_DETAILS_TILE_SCHEDULER_H
+#define VECOPS_MATMUL_DETAILS_TILE_SCHEDULER_H
 
 #include "vecops/matmul/Atom.h"
 #include "vecops/kernel/Tile2D.h"
@@ -18,7 +18,7 @@ namespace vecops::kernel::matmul_details {
  * outside this function so the backend can make this whole traversal one
  * lexical hardware-state interval.
  */
-template <typename Backend, gemm::Atom Atom, typename Policy,
+template <typename Backend, ::vecops::matmul::Atom Atom, typename Policy,
           meta::ValueType TraversalM, meta::ValueType TraversalN,
           meta::ValueType K,
           typename A, typename B, typename CInput, typename COutput>
@@ -51,7 +51,7 @@ VECOPS_KERNEL_FUNCTION(void run_tiles_region(
       });
 }
 
-template <typename Backend, gemm::Atom Atom, typename Policy,
+template <typename Backend, ::vecops::matmul::Atom Atom, typename Policy,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_KERNEL_FUNCTION(void run_tiles(
@@ -82,4 +82,4 @@ VECOPS_KERNEL_FUNCTION(void run_tiles(
 
 } // namespace vecops::kernel::matmul_details
 
-#endif // VECOPS_MATMUL_DETAILS_TRAVERSAL_H
+#endif // VECOPS_MATMUL_DETAILS_TILE_SCHEDULER_H

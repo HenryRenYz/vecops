@@ -45,34 +45,34 @@ void run_native_batch_case() {
 }
 
 #if VECOPS_TARGET_SHARD_INDEX == 0
-template void run_native_batch_case<gemm::AMX_BF16F32, false, 33>();
+template void run_native_batch_case<::vecops::matmul::AMX_BF16F32, false, 33>();
 #elif VECOPS_TARGET_SHARD_INDEX == 1
-template void run_native_batch_case<gemm::AMX_BF16F32, true, 256>();
+template void run_native_batch_case<::vecops::matmul::AMX_BF16F32, true, 256>();
 #elif VECOPS_TARGET_SHARD_INDEX == 2
 #if defined(HAS_AMX_FP16)
-template void run_native_batch_case<gemm::AMX_F16F32, false, 33>();
-template void run_native_batch_case<gemm::AMX_F16F32, true, 256>();
+template void run_native_batch_case<::vecops::matmul::AMX_F16F32, false, 33>();
+template void run_native_batch_case<::vecops::matmul::AMX_F16F32, true, 256>();
 #endif
 #elif VECOPS_TARGET_SHARD_INDEX == 3
 template void run_native_batch_case<
-    gemm::AMX_I8I32<int8_t, int8_t>, false, 65>();
+    ::vecops::matmul::AMX_I8I32<int8_t, int8_t>, false, 65>();
 template void run_native_batch_case<
-    gemm::AMX_I8I32<int8_t, int8_t>, true, 256>();
+    ::vecops::matmul::AMX_I8I32<int8_t, int8_t>, true, 256>();
 #elif VECOPS_TARGET_SHARD_INDEX == 4
 template void run_native_batch_case<
-    gemm::AMX_I8I32<int8_t, uint8_t>, false, 65>();
+    ::vecops::matmul::AMX_I8I32<int8_t, uint8_t>, false, 65>();
 template void run_native_batch_case<
-    gemm::AMX_I8I32<int8_t, uint8_t>, true, 256>();
+    ::vecops::matmul::AMX_I8I32<int8_t, uint8_t>, true, 256>();
 #elif VECOPS_TARGET_SHARD_INDEX == 5
 template void run_native_batch_case<
-    gemm::AMX_I8I32<uint8_t, int8_t>, false, 65>();
+    ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>, false, 65>();
 template void run_native_batch_case<
-    gemm::AMX_I8I32<uint8_t, int8_t>, true, 256>();
+    ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>, true, 256>();
 #else
 template void run_native_batch_case<
-    gemm::AMX_I8I32<uint8_t, uint8_t>, false, 65>();
+    ::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>, false, 65>();
 template void run_native_batch_case<
-    gemm::AMX_I8I32<uint8_t, uint8_t>, true, 256>();
+    ::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>, true, 256>();
 #endif
 
 #else
@@ -114,11 +114,11 @@ void check_shared_a_batch_columns() {
             bias.data(), make_layout(
                 make_shape(Any{Batch}, Any{M}, Any{N}),
                 make_strides(cint<0>, cint<0>, cint<1>)));
-        return ops::make_matmul_accumulate<Atom>(
+        return ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
             M, N, K, a_input, bt,
             input<Acc>(bias_tensor), output<Acc>(ct));
       } else {
-        return ops::make_matmul<Atom>(M, N, K, a_input, bt, ct);
+        return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, M, N, K, a_input, bt, ct);
       }
     }();
     if constexpr (Bias) {
@@ -134,7 +134,7 @@ void check_shared_a_batch_columns() {
     auto a2 = make_tensor(
         a.data(), make_layout(make_shape(Any{M}, Any{K})));
     const auto packed_layout =
-        ops::matmul_packed_layout<Atom, gemm::Operand::A>(a2.layout());
+        ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(a2.layout());
     std::vector<TA> packed_storage(
         static_cast<std::size_t>(numel(packed_layout) + 64));
     auto* packed_data = reinterpret_cast<TA*>(
@@ -142,7 +142,7 @@ void check_shared_a_batch_columns() {
         ~std::uintptr_t{63u});
     auto packed_a = make_tensor(packed_data, packed_layout);
     ExecutionSession execution{};
-    ops::matmul_pack<Atom, gemm::Operand::A>(
+    ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
         execution, input<TA>(a2), packed_a);
     run(input<TA>(packed_a));
   } else {
@@ -171,7 +171,7 @@ void check_shared_a_batch_columns() {
 
 TEST(MatmulBatchTest, TraversesBatchAndExposesTilePolicy) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  using Atom = gemm::AMX_BF16F32;
+  using Atom = ::vecops::matmul::AMX_BF16F32;
   using Policy = kernel::loop::tile2d_policy::RowMajor;
   constexpr nint_t Batch = 3;
   constexpr nint_t M = 19;
@@ -191,7 +191,8 @@ TEST(MatmulBatchTest, TraversesBatchAndExposesTilePolicy) {
       b.data(), make_layout(make_shape(Any{Batch}, Any{N}, Any{K})));
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(Any{Batch}, Any{M}, Any{N})));
-  auto operation = ops::make_matmul<Atom, Policy>(M, N, K, at, bt, ct);
+  auto operation = ops::matmul_details::prepare_matmul(
+      ops::MatmulSchedulerConfig<Atom, Policy>{}, M, N, K, at, bt, ct);
   kernel::Workspace storage(operation.required_workspace());
   auto workspace = storage.view();
   operation(workspace);
@@ -211,37 +212,91 @@ TEST(MatmulBatchTest, TraversesBatchAndExposesTilePolicy) {
   }
 }
 
+TEST(MatmulBatchTest, GenericTilerPreservesConfigurationAcrossBatchLeaves) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  using Atom = ::vecops::matmul::AMX_BF16F32;
+  using Tiling = ::vecops::matmul::CacheTiling<
+      meta::Const<16>, meta::Const<16>, meta::Const<32>>;
+  using Never = ::vecops::matmul::PackingPolicy<
+      ::vecops::matmul::PackingMode::never>;
+  using GenericTuning = ::vecops::matmul::GenericTiledTuning<
+      Tiling, ::vecops::matmul::loop_order::KMN, Never, Never,
+      ::vecops::matmul::AccBufferMode::workspace>;
+  using Config = ops::MatmulConfig<
+      Atom,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::GenericTiled>,
+      kernel::loop::tile2d_policy::RowMajor, GenericTuning>;
+  constexpr nint_t Batch = 2;
+  constexpr nint_t M = 17;
+  constexpr nint_t N = 19;
+  constexpr nint_t K = 33;
+  std::vector<bfloat16_t> a(Batch * M * K);
+  std::vector<bfloat16_t> b(Batch * N * K);
+  std::vector<float32_t> c(Batch * M * N);
+  for (nint_t i = 0; i < static_cast<nint_t>(a.size()); ++i)
+    a[i] = bfloat16_t(static_cast<float>(i % 9 - 4) / 9.0f);
+  for (nint_t i = 0; i < static_cast<nint_t>(b.size()); ++i)
+    b[i] = bfloat16_t(static_cast<float>(i % 7 - 3) / 7.0f);
+
+  auto at = make_tensor(
+      a.data(), make_layout(make_shape(Any{Batch}, Any{M}, Any{K})));
+  auto bt = make_tensor(
+      b.data(), make_layout(make_shape(Any{Batch}, Any{N}, Any{K})));
+  auto ct = make_tensor(
+      c.data(), make_layout(make_shape(Any{Batch}, Any{M}, Any{N})));
+  auto operation = ops::matmul(Config{});
+  kernel::Workspace storage(
+      operation.required_workspace(M, N, K, at, bt, ct));
+  auto workspace = storage.view();
+  operation(workspace, M, N, K, at, bt, ct);
+
+  for (nint_t batch = 0; batch < Batch; ++batch) {
+    for (nint_t m = 0; m < M; ++m) {
+      for (nint_t n = 0; n < N; ++n) {
+        float expected = 0;
+        for (nint_t k = 0; k < K; ++k) {
+          expected += static_cast<float>(a[(batch * M + m) * K + k]) *
+              static_cast<float>(b[(batch * N + n) * K + k]);
+        }
+        EXPECT_NEAR(c[(batch * M + m) * N + n], expected, 3.0e-4f)
+            << "batch=" << batch << " m=" << m << " n=" << n;
+      }
+    }
+  }
+}
+
 TEST(MatmulBatchTest, AllNativeAtomsAndSharedWeights) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  run_native_batch_case<gemm::AMX_BF16F32, false, 33>();
-  run_native_batch_case<gemm::AMX_BF16F32, true, 256>();
+  run_native_batch_case<::vecops::matmul::AMX_BF16F32, false, 33>();
+  run_native_batch_case<::vecops::matmul::AMX_BF16F32, true, 256>();
 #if defined(HAS_AMX_FP16)
-  run_native_batch_case<gemm::AMX_F16F32, false, 33>();
-  run_native_batch_case<gemm::AMX_F16F32, true, 256>();
+  run_native_batch_case<::vecops::matmul::AMX_F16F32, false, 33>();
+  run_native_batch_case<::vecops::matmul::AMX_F16F32, true, 256>();
 #endif
 #if defined(HAS_AMX_INT8)
   run_native_batch_case<
-      gemm::AMX_I8I32<int8_t, int8_t>, false, 65>();
+      ::vecops::matmul::AMX_I8I32<int8_t, int8_t>, false, 65>();
   run_native_batch_case<
-      gemm::AMX_I8I32<int8_t, int8_t>, true, 256>();
+      ::vecops::matmul::AMX_I8I32<int8_t, int8_t>, true, 256>();
   run_native_batch_case<
-      gemm::AMX_I8I32<int8_t, uint8_t>, false, 65>();
+      ::vecops::matmul::AMX_I8I32<int8_t, uint8_t>, false, 65>();
   run_native_batch_case<
-      gemm::AMX_I8I32<int8_t, uint8_t>, true, 256>();
+      ::vecops::matmul::AMX_I8I32<int8_t, uint8_t>, true, 256>();
   run_native_batch_case<
-      gemm::AMX_I8I32<uint8_t, int8_t>, false, 65>();
+      ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>, false, 65>();
   run_native_batch_case<
-      gemm::AMX_I8I32<uint8_t, int8_t>, true, 256>();
+      ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>, true, 256>();
   run_native_batch_case<
-      gemm::AMX_I8I32<uint8_t, uint8_t>, false, 65>();
+      ::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>, false, 65>();
   run_native_batch_case<
-      gemm::AMX_I8I32<uint8_t, uint8_t>, true, 256>();
+      ::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>, true, 256>();
 #endif
 }
 
 TEST(MatmulBatchTest, ConfiguredBatchHandlesZeroAndShortenedRows) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  using Atom = gemm::AMX_BF16F32;
+  using Atom = ::vecops::matmul::AMX_BF16F32;
   test::matmul::check_batched_native<Atom, true>(0, 1, 48, 64);
   test::matmul::check_batched_packed_b<Atom>(8, 1, 32, 64);
   test::matmul::check_batched_native<Atom, true>(
@@ -261,18 +316,18 @@ TEST(MatmulBatchTest, ConfiguredBatchHandlesZeroAndShortenedRows) {
 
 TEST(MatmulBatchTest, SharedAFlattensBatchColumns) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  check_shared_a_batch_columns<gemm::AMX_BF16F32, false>();
-  check_shared_a_batch_columns<gemm::AMX_BF16F32, true>();
-  check_shared_a_batch_columns<gemm::AMX_BF16F32, false, true>();
-  check_shared_a_batch_columns<gemm::AMX_BF16F32, true, true>();
+  check_shared_a_batch_columns<::vecops::matmul::AMX_BF16F32, false>();
+  check_shared_a_batch_columns<::vecops::matmul::AMX_BF16F32, true>();
+  check_shared_a_batch_columns<::vecops::matmul::AMX_BF16F32, false, true>();
+  check_shared_a_batch_columns<::vecops::matmul::AMX_BF16F32, true, true>();
   check_shared_a_batch_columns<
-      gemm::AMX_I8I32<int8_t, int8_t>, false, true>();
+      ::vecops::matmul::AMX_I8I32<int8_t, int8_t>, false, true>();
   check_shared_a_batch_columns<
-      gemm::AMX_I8I32<int8_t, uint8_t>, false, true>();
+      ::vecops::matmul::AMX_I8I32<int8_t, uint8_t>, false, true>();
   check_shared_a_batch_columns<
-      gemm::AMX_I8I32<uint8_t, int8_t>, false, true>();
+      ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>, false, true>();
   check_shared_a_batch_columns<
-      gemm::AMX_I8I32<uint8_t, uint8_t>, false, true>();
+      ::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>, false, true>();
 }
 
 #endif
@@ -325,42 +380,42 @@ void run_quantized_shared_b_case() {
 }
 
 #if VECOPS_TARGET_SHARD_INDEX == 0
-template void run_native_batch_case<gemm::SME_F32F32, false, 9>();
-template void run_native_batch_case<gemm::SME_F32F32, true, 256>();
+template void run_native_batch_case<::vecops::matmul::SME_F32F32, false, 9>();
+template void run_native_batch_case<::vecops::matmul::SME_F32F32, true, 256>();
 #elif VECOPS_TARGET_SHARD_INDEX == 1
-template void run_native_batch_case<gemm::SME_BF16F32, false, 17>();
+template void run_native_batch_case<::vecops::matmul::SME_BF16F32, false, 17>();
 #elif VECOPS_TARGET_SHARD_INDEX == 2
-template void run_native_batch_case<gemm::SME_BF16F32, true, 256>();
+template void run_native_batch_case<::vecops::matmul::SME_BF16F32, true, 256>();
 #elif VECOPS_TARGET_SHARD_INDEX == 3
-template void run_native_batch_case<gemm::SME_F16F32, false, 17>();
-template void run_native_batch_case<gemm::SME_F16F32, true, 256>();
+template void run_native_batch_case<::vecops::matmul::SME_F16F32, false, 17>();
+template void run_native_batch_case<::vecops::matmul::SME_F16F32, true, 256>();
 #elif VECOPS_TARGET_SHARD_INDEX == 4
 #if defined(HAS_SME_F64F64)
-template void run_native_batch_case<gemm::SME_F64F64, false, 9>();
-template void run_native_batch_case<gemm::SME_F64F64, true, 256>();
+template void run_native_batch_case<::vecops::matmul::SME_F64F64, false, 9>();
+template void run_native_batch_case<::vecops::matmul::SME_F64F64, true, 256>();
 #endif
 #elif VECOPS_TARGET_SHARD_INDEX == 5
 template void run_native_batch_case<
-    gemm::SME_I8I32<int8_t, int8_t>, false, 33>();
+    ::vecops::matmul::SME_I8I32<int8_t, int8_t>, false, 33>();
 template void run_native_batch_case<
-    gemm::SME_I8I32<int8_t, int8_t>, true, 256>();
+    ::vecops::matmul::SME_I8I32<int8_t, int8_t>, true, 256>();
 #elif VECOPS_TARGET_SHARD_INDEX == 6
 template void run_native_batch_case<
-    gemm::SME_I8I32<int8_t, uint8_t>, false, 33>();
+    ::vecops::matmul::SME_I8I32<int8_t, uint8_t>, false, 33>();
 template void run_native_batch_case<
-    gemm::SME_I8I32<int8_t, uint8_t>, true, 256>();
+    ::vecops::matmul::SME_I8I32<int8_t, uint8_t>, true, 256>();
 template void run_quantized_shared_b_case<
-    gemm::SME_I8I32<int8_t, uint8_t>>();
+    ::vecops::matmul::SME_I8I32<int8_t, uint8_t>>();
 #elif VECOPS_TARGET_SHARD_INDEX == 7
 template void run_native_batch_case<
-    gemm::SME_I8I32<uint8_t, int8_t>, false, 33>();
+    ::vecops::matmul::SME_I8I32<uint8_t, int8_t>, false, 33>();
 template void run_native_batch_case<
-    gemm::SME_I8I32<uint8_t, int8_t>, true, 256>();
+    ::vecops::matmul::SME_I8I32<uint8_t, int8_t>, true, 256>();
 #else
 template void run_native_batch_case<
-    gemm::SME_I8I32<uint8_t, uint8_t>, false, 33>();
+    ::vecops::matmul::SME_I8I32<uint8_t, uint8_t>, false, 33>();
 template void run_native_batch_case<
-    gemm::SME_I8I32<uint8_t, uint8_t>, true, 256>();
+    ::vecops::matmul::SME_I8I32<uint8_t, uint8_t>, true, 256>();
 #endif
 
 #else
@@ -399,11 +454,11 @@ void check_shared_a_batch_columns() {
             bias.data(), make_layout(
                 make_shape(Any{Batch}, Any{M}, Any{N}),
                 make_strides(cint<0>, cint<0>, cint<1>)));
-        return ops::make_matmul_accumulate<Atom>(
+        return ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
             M, N, K, a_input, bt,
             input<Acc>(bias_tensor), output<Acc>(ct));
       } else {
-        return ops::make_matmul<Atom>(M, N, K, a_input, bt, ct);
+        return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, M, N, K, a_input, bt, ct);
       }
     }();
     const nint_t expected_workspace = Bias
@@ -425,7 +480,7 @@ void check_shared_a_batch_columns() {
     auto a2 = make_tensor(
         a.data(), make_layout(make_shape(Any{M}, Any{K})));
     const auto packed_layout =
-        ops::matmul_packed_layout<Atom, gemm::Operand::A>(a2.layout());
+        ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(a2.layout());
     kernel::Workspace packed_owner(
         numel(packed_layout) * static_cast<nint_t>(sizeof(TA)) + 64);
     auto packed_workspace = packed_owner.view();
@@ -433,7 +488,7 @@ void check_shared_a_batch_columns() {
         numel(packed_layout) * static_cast<nint_t>(sizeof(TA)), 64));
     auto packed_a = make_tensor(packed_data, packed_layout);
     ExecutionSession execution{};
-    ops::matmul_pack<Atom, gemm::Operand::A>(
+    ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
         execution, input<TA>(a2), packed_a);
     run(input<TA>(packed_a));
   } else {
@@ -464,7 +519,7 @@ void check_shared_a_batch_columns() {
 }
 
 TEST(MatmulBatchTest, TraversesBatchAndExposesTilePolicy) {
-  using Atom = gemm::SME_F32F32;
+  using Atom = ::vecops::matmul::SME_F32F32;
   using Policy = kernel::loop::tile2d_policy::RowMajor;
   constexpr nint_t Batch = 3;
   constexpr nint_t M = 19;
@@ -484,7 +539,8 @@ TEST(MatmulBatchTest, TraversesBatchAndExposesTilePolicy) {
       b.data(), make_layout(make_shape(Any{Batch}, Any{N}, Any{K})));
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(Any{Batch}, Any{M}, Any{N})));
-  auto operation = ops::make_matmul<Atom, Policy>(M, N, K, at, bt, ct);
+  auto operation = ops::matmul_details::prepare_matmul(
+      ops::MatmulSchedulerConfig<Atom, Policy>{}, M, N, K, at, bt, ct);
   ExecutionSession execution{};
   operation(execution);
 
@@ -504,41 +560,41 @@ TEST(MatmulBatchTest, TraversesBatchAndExposesTilePolicy) {
 }
 
 TEST(MatmulBatchTest, AllNativeAtomsAndSharedWeights) {
-  run_native_batch_case<gemm::SME_F32F32, false, 9>();
-  run_native_batch_case<gemm::SME_F32F32, true, 256>();
-  run_native_batch_case<gemm::SME_BF16F32, false, 17>();
-  run_native_batch_case<gemm::SME_BF16F32, true, 256>();
-  run_native_batch_case<gemm::SME_F16F32, false, 17>();
-  run_native_batch_case<gemm::SME_F16F32, true, 256>();
+  run_native_batch_case<::vecops::matmul::SME_F32F32, false, 9>();
+  run_native_batch_case<::vecops::matmul::SME_F32F32, true, 256>();
+  run_native_batch_case<::vecops::matmul::SME_BF16F32, false, 17>();
+  run_native_batch_case<::vecops::matmul::SME_BF16F32, true, 256>();
+  run_native_batch_case<::vecops::matmul::SME_F16F32, false, 17>();
+  run_native_batch_case<::vecops::matmul::SME_F16F32, true, 256>();
 #if defined(HAS_SME_F64F64)
-  run_native_batch_case<gemm::SME_F64F64, false, 9>();
-  run_native_batch_case<gemm::SME_F64F64, true, 256>();
+  run_native_batch_case<::vecops::matmul::SME_F64F64, false, 9>();
+  run_native_batch_case<::vecops::matmul::SME_F64F64, true, 256>();
 #endif
   run_native_batch_case<
-      gemm::SME_I8I32<int8_t, int8_t>, false, 33>();
+      ::vecops::matmul::SME_I8I32<int8_t, int8_t>, false, 33>();
   run_native_batch_case<
-      gemm::SME_I8I32<int8_t, int8_t>, true, 256>();
+      ::vecops::matmul::SME_I8I32<int8_t, int8_t>, true, 256>();
   run_native_batch_case<
-      gemm::SME_I8I32<int8_t, uint8_t>, false, 33>();
+      ::vecops::matmul::SME_I8I32<int8_t, uint8_t>, false, 33>();
   run_native_batch_case<
-      gemm::SME_I8I32<int8_t, uint8_t>, true, 256>();
+      ::vecops::matmul::SME_I8I32<int8_t, uint8_t>, true, 256>();
   run_native_batch_case<
-      gemm::SME_I8I32<uint8_t, int8_t>, false, 33>();
+      ::vecops::matmul::SME_I8I32<uint8_t, int8_t>, false, 33>();
   run_native_batch_case<
-      gemm::SME_I8I32<uint8_t, int8_t>, true, 256>();
+      ::vecops::matmul::SME_I8I32<uint8_t, int8_t>, true, 256>();
   run_native_batch_case<
-      gemm::SME_I8I32<uint8_t, uint8_t>, false, 33>();
+      ::vecops::matmul::SME_I8I32<uint8_t, uint8_t>, false, 33>();
   run_native_batch_case<
-      gemm::SME_I8I32<uint8_t, uint8_t>, true, 256>();
+      ::vecops::matmul::SME_I8I32<uint8_t, uint8_t>, true, 256>();
 }
 
 TEST(MatmulBatchTest, SmallQuantizedSharedBUsesLowWorkFullPacking) {
   run_quantized_shared_b_case<
-      gemm::SME_I8I32<int8_t, uint8_t>>();
+      ::vecops::matmul::SME_I8I32<int8_t, uint8_t>>();
 }
 
 TEST(MatmulBatchTest, SharedOperandsFlattenIntoOneProblem) {
-  using Atom = gemm::SME_BF16F32;
+  using Atom = ::vecops::matmul::SME_BF16F32;
   test::matmul::check_batched_native<Atom, true>(
       cint<4>, cint<4>, cint<127>, cint<129>, true);
   test::matmul::check_batched_packed_b<Atom>(4, 16, 48, 64);
@@ -549,7 +605,7 @@ TEST(MatmulBatchTest, SharedOperandsFlattenIntoOneProblem) {
 }
 
 TEST(MatmulBatchTest, SharedOperandFlattenBoundariesAndFallbacks) {
-  using Atom = gemm::SME_BF16F32;
+  using Atom = ::vecops::matmul::SME_BF16F32;
   // shared-B: M and flat-M upper boundaries, followed by both fallback sides.
   test::matmul::check_batched_native<Atom, true>(
       cint<4>, cint<16>, cint<48>, cint<64>, true);

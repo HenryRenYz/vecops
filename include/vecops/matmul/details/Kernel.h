@@ -9,7 +9,7 @@
 
 #include "vecops/matmul/Atom.h"
 #include "vecops/matmul/details/Backend.h"
-#include "vecops/matmul/details/Traversal.h"
+#include "vecops/matmul/details/TileScheduler.h"
 
 namespace vecops::kernel {
 
@@ -36,7 +36,7 @@ inline constexpr int problem_rank_v =
  * forward the current scope.  PackedB describes the final leaf operand after
  * any operation-level packing, not necessarily the user's original input.
  */
-template <gemm::Atom Atom,
+template <::vecops::matmul::Atom Atom,
           typename Policy = matmul_policy::Automatic,
           bool PackedB = false,
           execution::ExecutionScope Scope,
@@ -68,7 +68,7 @@ VECOPS_ALWAYS_INLINE decltype(auto) with_matmul_configuration(
  * original operand types, so an internal online-pack instantiation cannot
  * duplicate the narrow explicit-packed tail specialization.
  */
-template <gemm::Atom Atom,
+template <::vecops::matmul::Atom Atom,
           typename Policy = matmul_policy::Automatic,
           bool AllowTailSplit = false,
           typename Scope,
@@ -106,7 +106,7 @@ VECOPS_KERNEL_FUNCTION(void matmul_bound(
  * nested calls from assuming that an equal configuration type also carries
  * equal runtime row counts.
  */
-template <gemm::Atom Atom,
+template <::vecops::matmul::Atom Atom,
           typename Policy = matmul_policy::Automatic,
           execution::ExecutionScope Scope,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,

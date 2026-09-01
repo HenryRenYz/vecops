@@ -60,27 +60,21 @@ void check_raw(
       b.data(), make_layout(make_shape(n_extent, k_extent)));
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(m_extent, n_extent)));
-  auto operation = ops::make_matmul<Atom>(
+  auto operation = ops::matmul(ops::MatmulConfig<Atom>{});
+  const nint_t required = operation.required_workspace(
       m_extent, n_extent, k_extent, at, bt, ct);
-  using Operation = decltype(operation);
-  static_assert(std::same_as<
-      typename Operation::MExtentType, meta::to_value_t<M>>);
-  static_assert(std::same_as<
-      typename Operation::NExtentType, meta::to_value_t<N>>);
-  static_assert(std::same_as<
-      typename Operation::KExtentType, meta::to_value_t<K>>);
   if (expect_auto_packing) {
     const nint_t scratch = kernel::matmul_implementation::scratch_bytes<
         kernel::matmul_implementation::AMX>();
-    EXPECT_GT(operation.required_workspace(), scratch);
+    EXPECT_GT(required, scratch);
   } else if (expect_no_auto_packing) {
     const nint_t scratch = kernel::matmul_implementation::scratch_bytes<
         kernel::matmul_implementation::AMX>();
-    EXPECT_EQ(operation.required_workspace(), scratch);
+    EXPECT_EQ(required, scratch);
   }
-  kernel::Workspace storage(operation.required_workspace());
+  kernel::Workspace storage(required);
   auto workspace = storage.view();
-  operation(workspace);
+  operation(workspace, m_extent, n_extent, k_extent, at, bt, ct);
   for (nint_t i = 0; i < m; ++i) {
     for (nint_t j = 0; j < n; ++j) {
       Acc expected{};
@@ -100,7 +94,7 @@ void check_raw(
 }
 
 VECOPS_NOINLINE void check_dynamic_inner_stride(nint_t inner_stride) {
-  using Atom = gemm::AMX_BF16F32;
+  using Atom = ::vecops::matmul::AMX_BF16F32;
   using T = typename Atom::TA;
   using Acc = typename Atom::TAcc;
   constexpr nint_t M = 19;
@@ -135,15 +129,16 @@ VECOPS_NOINLINE void check_dynamic_inner_stride(nint_t inner_stride) {
   auto bt = make_tensor(b.data(), bl);
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(cint<M>, cint<N>)));
-  auto operation = ops::make_matmul<Atom>(
+  auto operation = ops::matmul(ops::MatmulConfig<Atom>{});
+  const nint_t required = operation.required_workspace(
       cint<M>, cint<N>, cint<K>, at, bt, ct);
   EXPECT_EQ(
-      operation.required_workspace(),
+      required,
       kernel::matmul_implementation::scratch_bytes<
           kernel::matmul_implementation::AMX>());
-  kernel::Workspace owner(operation.required_workspace());
+  kernel::Workspace owner(required);
   auto workspace = owner.view();
-  operation(workspace);
+  operation(workspace, cint<M>, cint<N>, cint<K>, at, bt, ct);
   for (nint_t i = 0; i < M; ++i) {
     for (nint_t j = 0; j < N; ++j) {
       Acc expected{};
@@ -159,10 +154,10 @@ VECOPS_NOINLINE void check_dynamic_inner_stride(nint_t inner_stride) {
   }
 }
 
-template <gemm::Operand Side>
+template <::vecops::matmul::Operand Side>
 void check_mixed_packing(
     nint_t m = 37, nint_t n = 51, nint_t k = 79) {
-  using Atom = gemm::AMX_BF16F32;
+  using Atom = ::vecops::matmul::AMX_BF16F32;
   std::vector<bfloat16_t> a(m * k), b(n * k);
   std::vector<float32_t> c(m * n);
   for (nint_t i = 0; i < m * k; ++i) a[i] = value<bfloat16_t>(i, 13);
@@ -171,7 +166,7 @@ void check_mixed_packing(
   auto bl = make_layout(make_shape(Any{n}, Any{k}));
   auto at = make_tensor(a.data(), al);
   auto bt = make_tensor(b.data(), bl);
-  const auto& source_layout = Side == gemm::Operand::A ? al : bl;
+  const auto& source_layout = Side == ::vecops::matmul::Operand::A ? al : bl;
   auto packed_layout = ops::matmul_packed_layout<Atom, Side>(source_layout);
   kernel::Workspace packed_owner(
       numel(packed_layout) * static_cast<nint_t>(sizeof(bfloat16_t)) + 64);
@@ -180,18 +175,18 @@ void check_mixed_packing(
       numel(packed_layout) * static_cast<nint_t>(sizeof(bfloat16_t)), 64));
   auto packed_tensor = make_tensor(packed, packed_layout);
   ExecutionSession pack_execution{};
-  if constexpr (Side == gemm::Operand::A) {
-    ops::matmul_pack<Atom, Side>(pack_execution, at, packed_tensor);
+  if constexpr (Side == ::vecops::matmul::Operand::A) {
+    ops::matmul_pack_details::run_matmul_pack<Atom, Side>(pack_execution, at, packed_tensor);
   } else {
-    ops::matmul_pack<Atom, Side>(pack_execution, bt, packed_tensor);
+    ops::matmul_pack_details::run_matmul_pack<Atom, Side>(pack_execution, bt, packed_tensor);
   }
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(Any{m}, Any{n})));
   auto operation = [&] {
-    if constexpr (Side == gemm::Operand::A)
-      return ops::make_matmul<Atom>(m, n, k, packed_tensor, bt, ct);
+    if constexpr (Side == ::vecops::matmul::Operand::A)
+      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k, packed_tensor, bt, ct);
     else
-      return ops::make_matmul<Atom>(m, n, k, at, packed_tensor, ct);
+      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k, at, packed_tensor, ct);
   }();
   kernel::Workspace owner(operation.required_workspace());
   auto workspace = owner.view();
@@ -205,7 +200,7 @@ void check_mixed_packing(
       if (std::abs(c[i * n + j] - expected) > 2.0e-4f) {
         ADD_FAILURE()
             << "packed side="
-            << (Side == gemm::Operand::A ? "A" : "B")
+            << (Side == ::vecops::matmul::Operand::A ? "A" : "B")
             << " m=" << i << " n=" << j
             << " actual=" << c[i * n + j]
             << " expected=" << expected;
@@ -218,7 +213,7 @@ void check_mixed_packing(
 template <meta::ValueType KExtent>
 void check_both_packed(
     KExtent k_extent, nint_t m = 37, nint_t n = 16) {
-  using Atom = gemm::AMX_BF16F32;
+  using Atom = ::vecops::matmul::AMX_BF16F32;
   using T = typename Atom::TA;
   using Acc = typename Atom::TAcc;
   const nint_t k = static_cast<nint_t>(k_extent);
@@ -231,12 +226,12 @@ void check_both_packed(
   auto bl = make_layout(make_shape(Any{n}, k_extent));
   auto at = make_tensor(a.data(), al);
   auto bt = make_tensor(b.data(), bl);
-  auto apl = ops::matmul_packed_layout<Atom, gemm::Operand::A>(al);
-  auto bpl = ops::matmul_packed_layout<Atom, gemm::Operand::B>(bl);
-  static_assert(gemm::is_packed_layout<
-                Atom, gemm::Operand::A, decltype(apl)>());
-  static_assert(gemm::is_packed_layout<
-                Atom, gemm::Operand::B, decltype(bpl)>());
+  auto apl = ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(al);
+  auto bpl = ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::B>(bl);
+  static_assert(::vecops::matmul::is_packed_layout<
+                Atom, ::vecops::matmul::Operand::A, decltype(apl)>());
+  static_assert(::vecops::matmul::is_packed_layout<
+                Atom, ::vecops::matmul::Operand::B, decltype(bpl)>());
   kernel::Workspace packed_owner(
       (numel(apl) + numel(bpl)) * static_cast<nint_t>(sizeof(T)) + 128);
   auto packed_workspace = packed_owner.view();
@@ -247,11 +242,11 @@ void check_both_packed(
   auto apt = make_tensor(ap, apl);
   auto bpt = make_tensor(bp, bpl);
   ExecutionSession pack_execution{};
-  ops::matmul_pack<Atom, gemm::Operand::A>(pack_execution, at, apt);
-  ops::matmul_pack<Atom, gemm::Operand::B>(pack_execution, bt, bpt);
+  ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(pack_execution, at, apt);
+  ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(pack_execution, bt, bpt);
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(Any{m}, Any{n})));
-  auto operation = ops::make_matmul<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       Any{m}, Any{n}, k_extent, apt, bpt, ct);
   EXPECT_EQ(
       operation.required_workspace(),
@@ -275,7 +270,7 @@ void check_both_packed(
 
 template <typename KExtent>
 void check_transformed_inputs(KExtent k_extent) {
-  using Atom = gemm::AMX_BF16F32;
+  using Atom = ::vecops::matmul::AMX_BF16F32;
   constexpr nint_t M = 19, N = 21;
   const nint_t k = static_cast<nint_t>(k_extent);
   std::vector<bfloat16_t> a(M * k), b(N * k);
@@ -290,7 +285,7 @@ void check_transformed_inputs(KExtent k_extent) {
       c.data(), make_layout(make_shape(cint<M>, cint<N>)));
   auto identity = make_elementwise_vec_transform<bfloat16_t, bfloat16_t>(
       [](auto, auto x) VECOPS_KERNEL_LAMBDA { return x; });
-  auto operation = ops::make_matmul<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       cint<M>, cint<N>, k_extent,
       input<bfloat16_t>(at, identity), input<bfloat16_t>(bt, identity), ct);
   kernel::Workspace owner(operation.required_workspace());
@@ -311,61 +306,234 @@ void check_transformed_inputs(KExtent k_extent) {
 
 TEST(MatmulTest, AllResidentMicrokernelShapesAndKTails) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  check_raw<gemm::AMX_BF16F32>(16, 16, 35);
-  check_raw<gemm::AMX_BF16F32>(16, 32, 67);
-  check_raw<gemm::AMX_BF16F32>(16, 48, 79);
-  check_raw<gemm::AMX_BF16F32>(1, 48, 79);
-  check_raw<gemm::AMX_BF16F32>(32, 16, 33);
-  check_raw<gemm::AMX_BF16F32>(48, 16, 65);
-  check_raw<gemm::AMX_BF16F32>(32, 32, 97);
-  check_raw<gemm::AMX_BF16F32>(16, 64, 67);
-  check_raw<gemm::AMX_BF16F32>(16, 80, 67);
-  check_raw<gemm::AMX_BF16F32>(16, 96, 67);
-  check_raw<gemm::AMX_BF16F32>(64, 16, 67);
-  check_raw<gemm::AMX_BF16F32>(80, 16, 67);
-  check_raw<gemm::AMX_BF16F32>(96, 16, 67);
-  check_raw<gemm::AMX_BF16F32>(37, 51, 79);
-  check_raw<gemm::AMX_BF16F32>(1, 128, 65);
-  check_raw<gemm::AMX_BF16F32>(512, 1, 256);
+  check_raw<::vecops::matmul::AMX_BF16F32>(16, 16, 35);
+  check_raw<::vecops::matmul::AMX_BF16F32>(16, 32, 67);
+  check_raw<::vecops::matmul::AMX_BF16F32>(16, 48, 79);
+  check_raw<::vecops::matmul::AMX_BF16F32>(1, 48, 79);
+  check_raw<::vecops::matmul::AMX_BF16F32>(32, 16, 33);
+  check_raw<::vecops::matmul::AMX_BF16F32>(48, 16, 65);
+  check_raw<::vecops::matmul::AMX_BF16F32>(32, 32, 97);
+  check_raw<::vecops::matmul::AMX_BF16F32>(16, 64, 67);
+  check_raw<::vecops::matmul::AMX_BF16F32>(16, 80, 67);
+  check_raw<::vecops::matmul::AMX_BF16F32>(16, 96, 67);
+  check_raw<::vecops::matmul::AMX_BF16F32>(64, 16, 67);
+  check_raw<::vecops::matmul::AMX_BF16F32>(80, 16, 67);
+  check_raw<::vecops::matmul::AMX_BF16F32>(96, 16, 67);
+  check_raw<::vecops::matmul::AMX_BF16F32>(37, 51, 79);
+  check_raw<::vecops::matmul::AMX_BF16F32>(1, 128, 65);
+  check_raw<::vecops::matmul::AMX_BF16F32>(512, 1, 256);
 }
 
 TEST(MatmulTest, CompileTimeExtentsAndFullKPlan) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  check_raw<gemm::AMX_BF16F32>(cint<0>, cint<16>, cint<32>);
-  check_raw<gemm::AMX_BF16F32>(cint<16>, cint<0>, cint<32>);
-  check_raw<gemm::AMX_BF16F32>(cint<16>, cint<32>, cint<67>);
-  check_raw<gemm::AMX_BF16F32>(cint<32>, cint<16>, cint<67>);
-  check_raw<gemm::AMX_BF16F32>(cint<16>, cint<48>, cint<79>);
-  check_raw<gemm::AMX_BF16F32>(cint<48>, cint<16>, cint<79>);
-  check_raw<gemm::AMX_BF16F32>(cint<32>, cint<32>, cint<128>);
-  check_raw<gemm::AMX_BF16F32>(cint<35>, cint<53>, cint<257>);
-  check_raw<gemm::AMX_I8I32<int8_t, uint8_t>>(
+  check_raw<::vecops::matmul::AMX_BF16F32>(cint<0>, cint<16>, cint<32>);
+  check_raw<::vecops::matmul::AMX_BF16F32>(cint<16>, cint<0>, cint<32>);
+  check_raw<::vecops::matmul::AMX_BF16F32>(cint<16>, cint<32>, cint<67>);
+  check_raw<::vecops::matmul::AMX_BF16F32>(cint<32>, cint<16>, cint<67>);
+  check_raw<::vecops::matmul::AMX_BF16F32>(cint<16>, cint<48>, cint<79>);
+  check_raw<::vecops::matmul::AMX_BF16F32>(cint<48>, cint<16>, cint<79>);
+  check_raw<::vecops::matmul::AMX_BF16F32>(cint<32>, cint<32>, cint<128>);
+  check_raw<::vecops::matmul::AMX_BF16F32>(cint<35>, cint<53>, cint<257>);
+  check_raw<::vecops::matmul::AMX_I8I32<int8_t, uint8_t>>(
       cint<35>, cint<53>, cint<257>);
-  check_raw<gemm::AMX_I8I32<uint8_t, uint8_t>>(
+  check_raw<::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>>(
       cint<35>, cint<53>, cint<257>);
-  check_raw<gemm::AMX_BF16F32>(
+  check_raw<::vecops::matmul::AMX_BF16F32>(
       dyn<32, 32, 64>(64), dyn<32, 32, 64>(32),
       dyn<32, 64, 128>(96));
-  check_raw<gemm::AMX_BF16F32>(
+  check_raw<::vecops::matmul::AMX_BF16F32>(
       dyn<32, 32, 64>(32), dyn<16, 32, 64>(48), dyn<32, 64, 128>(96));
   // Bounded runtime extents may select a special owner only when the full
   // admissible Meta range satisfies that owner's crossover.
-  check_raw<gemm::AMX_BF16F32>(
+  check_raw<::vecops::matmul::AMX_BF16F32>(
       dyn<1, 1, 1>(1), dyn<1, 1, 16>(8), dyn<32, 32, 256>(64));
 }
 
 TEST(MatmulTest, LargeNativeInputsUseAutoPacking) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  check_raw<gemm::AMX_BF16F32>(cint<64>, cint<64>, cint<64>, true);
-  check_raw<gemm::AMX_I8I32<int8_t, uint8_t>>(
+  check_raw<::vecops::matmul::AMX_BF16F32>(cint<64>, cint<64>, cint<64>, true);
+  check_raw<::vecops::matmul::AMX_I8I32<int8_t, uint8_t>>(
       cint<64>, cint<64>, cint<128>, true);
 }
 
 TEST(MatmulTest, DynamicExtentsDoNotSelectAutoPacking) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  check_raw<gemm::AMX_BF16F32>(64, 64, 64, false, true);
-  check_raw<gemm::AMX_I8I32<int8_t, uint8_t>>(
+  check_raw<::vecops::matmul::AMX_BF16F32>(64, 64, 64, false, true);
+  check_raw<::vecops::matmul::AMX_I8I32<int8_t, uint8_t>>(
       64, 64, 128, false, true);
+}
+
+TEST(MatmulTest, ConfigOnlyGenericTilerKBlocks) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  using Atom = ::vecops::matmul::AMX_BF16F32;
+  using Tiles = ::vecops::matmul::CacheTiling<
+      meta::Const<32>, meta::Const<32>, meta::Const<32>>;
+  using GenericTuning = ::vecops::matmul::GenericTiledTuning<
+      Tiles, ::vecops::matmul::loop_order::MNK,
+      ::vecops::matmul::PackingPolicy<
+          ::vecops::matmul::PackingMode::never>,
+      ::vecops::matmul::PackingPolicy<
+          ::vecops::matmul::PackingMode::never>,
+      ::vecops::matmul::AccBufferMode::workspace>;
+  using Config = ops::MatmulConfig<
+      Atom,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::GenericTiled>,
+      kernel::matmul_policy::Automatic,
+      GenericTuning>;
+  constexpr nint_t M = 33;
+  constexpr nint_t N = 35;
+  constexpr nint_t K = 65;
+  std::vector<bfloat16_t> a(M * K);
+  std::vector<bfloat16_t> b(N * K);
+  std::vector<float32_t> c(M * N);
+  for (nint_t i = 0; i < M * K; ++i) a[i] = value<bfloat16_t>(i, 3);
+  for (nint_t i = 0; i < N * K; ++i) b[i] = value<bfloat16_t>(i, 11);
+  auto at = make_tensor(a.data(), make_layout(make_shape(cint<M>, cint<K>)));
+  auto bt = make_tensor(b.data(), make_layout(make_shape(cint<N>, cint<K>)));
+  auto ct = make_tensor(c.data(), make_layout(make_shape(cint<M>, cint<N>)));
+  Config config{
+      .generic_tiled = GenericTuning{
+          .cache_tiling = Tiles{
+              meta::cint<32>, meta::cint<32>, meta::cint<32>}}};
+  auto operation = ops::matmul(config);
+  kernel::Workspace storage(
+      operation.required_workspace(cint<M>, cint<N>, cint<K>, at, bt, ct));
+  auto workspace = storage.view();
+  operation(workspace, cint<M>, cint<N>, cint<K>, at, bt, ct);
+  std::vector<bfloat16_t> a_second = a;
+  std::vector<bfloat16_t> b_second = b;
+  std::vector<float32_t> c_second(M * N);
+  auto at_second = make_tensor(
+      a_second.data(), make_layout(make_shape(cint<M>, cint<K>)));
+  auto bt_second = make_tensor(
+      b_second.data(), make_layout(make_shape(cint<N>, cint<K>)));
+  auto ct_second = make_tensor(
+      c_second.data(), make_layout(make_shape(cint<M>, cint<N>)));
+  workspace.reset();
+  operation(workspace, cint<M>, cint<N>, cint<K>,
+            at_second, bt_second, ct_second);
+  for (nint_t i = 0; i < M; ++i) {
+    for (nint_t j = 0; j < N; ++j) {
+      float32_t expected = 0;
+      for (nint_t kk = 0; kk < K; ++kk) {
+        expected += static_cast<float32_t>(a[i * K + kk]) *
+            static_cast<float32_t>(b[j * K + kk]);
+      }
+      EXPECT_NEAR(c[i * N + j], expected, 3.0e-3f);
+      EXPECT_NEAR(c_second[i * N + j], expected, 3.0e-3f);
+    }
+  }
+}
+
+TEST(MatmulTest, ForcedOutputAccumulatorReuseSupportsLargerSlots) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  using Atom = ::vecops::matmul::AMX_BF16F32;
+  using Tiles = ::vecops::matmul::CacheTiling<
+      meta::Const<16>, meta::Const<16>, meta::Const<32>>;
+  using GenericTuning = ::vecops::matmul::GenericTiledTuning<
+      Tiles, ::vecops::matmul::loop_order::MNK,
+      ::vecops::matmul::PackingPolicy<
+          ::vecops::matmul::PackingMode::never>,
+      ::vecops::matmul::PackingPolicy<
+          ::vecops::matmul::PackingMode::never>,
+      ::vecops::matmul::AccBufferMode::output>;
+  using Config = ops::MatmulConfig<
+      Atom,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::GenericTiled>,
+      kernel::matmul_policy::Automatic,
+      GenericTuning>;
+  constexpr nint_t M = 17;
+  constexpr nint_t N = 19;
+  constexpr nint_t K = 65;
+  std::vector<bfloat16_t> a(M * K);
+  std::vector<bfloat16_t> b(N * K);
+  std::vector<double> c(M * N);
+  for (nint_t i = 0; i < M * K; ++i) a[i] = value<bfloat16_t>(i, 5);
+  for (nint_t i = 0; i < N * K; ++i) b[i] = value<bfloat16_t>(i, 13);
+  auto at = make_tensor(a.data(), make_layout(make_shape(cint<M>, cint<K>)));
+  auto bt = make_tensor(b.data(), make_layout(make_shape(cint<N>, cint<K>)));
+  auto ct = make_tensor(c.data(), make_layout(make_shape(cint<M>, cint<N>)));
+  auto operation = ops::matmul(Config{
+      .generic_tiled = GenericTuning{
+          .cache_tiling = Tiles{
+              meta::cint<16>, meta::cint<16>, meta::cint<32>}}});
+  kernel::Workspace storage(
+      operation.required_workspace(cint<M>, cint<N>, cint<K>, at, bt, ct));
+  auto workspace = storage.view();
+  operation(workspace, cint<M>, cint<N>, cint<K>, at, bt, ct);
+  for (nint_t i = 0; i < M; ++i) {
+    for (nint_t j = 0; j < N; ++j) {
+      float expected = 0;
+      for (nint_t kk = 0; kk < K; ++kk) {
+        expected += static_cast<float>(a[i * K + kk]) *
+            static_cast<float>(b[j * K + kk]);
+      }
+      EXPECT_NEAR(c[i * N + j], expected, 3.0e-3);
+    }
+  }
+}
+
+template <bool PackA, bool PackB>
+void check_generic_full_k_packing() {
+  SCOPED_TRACE(::testing::Message() << "PackA=" << PackA
+                                    << " PackB=" << PackB);
+  using Atom = ::vecops::matmul::AMX_BF16F32;
+  using Tiles = ::vecops::matmul::CacheTiling<
+      meta::Const<16>, meta::Const<16>, meta::Const<32>>;
+  using APolicy = ::vecops::matmul::PackingPolicy<
+      PackA ? ::vecops::matmul::PackingMode::always
+            : ::vecops::matmul::PackingMode::never,
+      ::vecops::matmul::PackingExtent::full_k>;
+  using BPolicy = ::vecops::matmul::PackingPolicy<
+      PackB ? ::vecops::matmul::PackingMode::always
+            : ::vecops::matmul::PackingMode::never,
+      ::vecops::matmul::PackingExtent::full_k>;
+  using GenericTuning = ::vecops::matmul::GenericTiledTuning<
+      Tiles, ::vecops::matmul::loop_order::MNK, APolicy, BPolicy,
+      ::vecops::matmul::AccBufferMode::workspace>;
+  using Config = ops::MatmulConfig<
+      Atom,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::GenericTiled>,
+      kernel::matmul_policy::Automatic, GenericTuning>;
+  constexpr nint_t M = 17;
+  constexpr nint_t N = 19;
+  constexpr nint_t K = 65;
+  std::vector<bfloat16_t> a(M * K);
+  std::vector<bfloat16_t> b(N * K);
+  std::vector<float> c(M * N);
+  for (nint_t i = 0; i < M * K; ++i) a[i] = value<bfloat16_t>(i, 17);
+  for (nint_t i = 0; i < N * K; ++i) b[i] = value<bfloat16_t>(i, 23);
+  auto at = make_tensor(a.data(), make_layout(make_shape(cint<M>, cint<K>)));
+  auto bt = make_tensor(b.data(), make_layout(make_shape(cint<N>, cint<K>)));
+  auto ct = make_tensor(c.data(), make_layout(make_shape(cint<M>, cint<N>)));
+  auto operation = ops::matmul(Config{
+      .generic_tiled = GenericTuning{
+          .cache_tiling = Tiles{
+              meta::cint<16>, meta::cint<16>, meta::cint<32>}}});
+  kernel::Workspace storage(
+      operation.required_workspace(cint<M>, cint<N>, cint<K>, at, bt, ct));
+  auto workspace = storage.view();
+  operation(workspace, cint<M>, cint<N>, cint<K>, at, bt, ct);
+  for (nint_t i = 0; i < M; ++i) {
+    for (nint_t j = 0; j < N; ++j) {
+      float expected = 0;
+      for (nint_t kk = 0; kk < K; ++kk) {
+        expected += static_cast<float>(a[i * K + kk]) *
+            static_cast<float>(b[j * K + kk]);
+      }
+      EXPECT_NEAR(c[i * N + j], expected, 3.0e-3f);
+    }
+  }
+}
+
+TEST(MatmulTest, GenericTilerPacksOperandsIndependentlyAtFullK) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  check_generic_full_k_packing<true, false>();
+  check_generic_full_k_packing<false, true>();
+  check_generic_full_k_packing<true, true>();
 }
 
 TEST(MatmulTest, TransformedInputsUseFullAndTailKPlans) {
@@ -395,31 +563,31 @@ TEST(MatmulTest, BothPackedInputsUseFullTailAndRuntimeKPlans) {
 #if defined(HAS_AMX_FP16)
 TEST(MatmulTest, NativeFP16UsesFullAndTailKPlans) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  check_raw<gemm::AMX_F16F32>(19, 21, 32);
-  check_raw<gemm::AMX_F16F32>(19, 21, 35);
+  check_raw<::vecops::matmul::AMX_F16F32>(19, 21, 32);
+  check_raw<::vecops::matmul::AMX_F16F32>(19, 21, 35);
 }
 #endif
 
 TEST(MatmulTest, EndToEndMemoryComputeOutputConversions) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   test::matmul::check_conversion<
-      gemm::AMX_BF16F32, float32_t, float32_t, float32_t>(19, 21, 35);
+      ::vecops::matmul::AMX_BF16F32, float32_t, float32_t, float32_t>(19, 21, 35);
   test::matmul::check_conversion<
-      gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t>(19, 21, 35);
+      ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t>(19, 21, 35);
   test::matmul::check_conversion<
-      gemm::AMX_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t>(2, 2, 35);
+      ::vecops::matmul::AMX_BF16F32, bfloat16_t, bfloat16_t, bfloat16_t>(2, 2, 35);
 #if defined(HAS_AMX_FP16)
   test::matmul::check_conversion<
-      gemm::AMX_F16F32, float32_t, float32_t, float32_t>(19, 21, 35);
+      ::vecops::matmul::AMX_F16F32, float32_t, float32_t, float32_t>(19, 21, 35);
   test::matmul::check_conversion<
-      gemm::AMX_F16F32, float16_t, float16_t, float16_t>(19, 21, 35);
+      ::vecops::matmul::AMX_F16F32, float16_t, float16_t, float16_t>(19, 21, 35);
 #endif
 }
 
 TEST(MatmulTest, LargeConversionInputsUseAutoPacking) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   test::matmul::check_conversion<
-      gemm::AMX_BF16F32, float32_t, float32_t, float32_t>(
+      ::vecops::matmul::AMX_BF16F32, float32_t, float32_t, float32_t>(
           cint<64>, cint<64>, cint<64>, true);
 }
 
@@ -427,29 +595,29 @@ TEST(MatmulTest, LargeConversionInputsUseAutoPacking) {
 
 TEST(MatmulTest, AllInt8SignednessCombinations) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  check_raw<gemm::AMX_I8I32<int8_t, int8_t>>(19, 21, 69);
-  check_raw<gemm::AMX_I8I32<int8_t, uint8_t>>(19, 21, 69);
-  check_raw<gemm::AMX_I8I32<uint8_t, int8_t>>(19, 21, 69);
-  check_raw<gemm::AMX_I8I32<uint8_t, uint8_t>>(19, 21, 69);
+  check_raw<::vecops::matmul::AMX_I8I32<int8_t, int8_t>>(19, 21, 69);
+  check_raw<::vecops::matmul::AMX_I8I32<int8_t, uint8_t>>(19, 21, 69);
+  check_raw<::vecops::matmul::AMX_I8I32<uint8_t, int8_t>>(19, 21, 69);
+  check_raw<::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>>(19, 21, 69);
   // Large raw GEMV/GEMM crossover: exercise both orientations and a one-byte
   // K tail for every signedness combination.
-  check_raw<gemm::AMX_I8I32<int8_t, int8_t>>(1, 128, 65);
-  check_raw<gemm::AMX_I8I32<int8_t, uint8_t>>(128, 1, 65);
-  check_raw<gemm::AMX_I8I32<uint8_t, int8_t>>(1, 128, 65);
-  check_raw<gemm::AMX_I8I32<uint8_t, uint8_t>>(128, 1, 65);
+  check_raw<::vecops::matmul::AMX_I8I32<int8_t, int8_t>>(1, 128, 65);
+  check_raw<::vecops::matmul::AMX_I8I32<int8_t, uint8_t>>(128, 1, 65);
+  check_raw<::vecops::matmul::AMX_I8I32<uint8_t, int8_t>>(1, 128, 65);
+  check_raw<::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>>(128, 1, 65);
   // The two mixed-signedness cases have a native VPDPBUSD mapping and use the
   // AVX-512 small-matrix crossover, including a non-multiple-of-64 K tail.
-  check_raw<gemm::AMX_I8I32<int8_t, uint8_t>>(1, 16, 129);
-  check_raw<gemm::AMX_I8I32<uint8_t, int8_t>>(16, 1, 129);
-  check_raw<gemm::AMX_I8I32<int8_t, int8_t>>(1, 16, 129);
-  check_raw<gemm::AMX_I8I32<uint8_t, uint8_t>>(16, 1, 129);
+  check_raw<::vecops::matmul::AMX_I8I32<int8_t, uint8_t>>(1, 16, 129);
+  check_raw<::vecops::matmul::AMX_I8I32<uint8_t, int8_t>>(16, 1, 129);
+  check_raw<::vecops::matmul::AMX_I8I32<int8_t, int8_t>>(1, 16, 129);
+  check_raw<::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>>(16, 1, 129);
 }
 
 TEST(MatmulTest, SameSignSmallVectorPreservesWrapAndTail) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   constexpr nint_t K = 262145;
   auto check = [=]<typename T>() {
-    using Atom = gemm::AMX_I8I32<T, T>;
+    using Atom = ::vecops::matmul::AMX_I8I32<T, T>;
     const T input = [] {
       if constexpr (std::same_as<T, int8_t>) return int8_t{127};
       else return uint8_t{255};
@@ -463,7 +631,7 @@ TEST(MatmulTest, SameSignSmallVectorPreservesWrapAndTail) {
         b.data(), make_layout(make_shape(cint<1>, Any{K})));
     auto ct = make_tensor(
         &c, make_layout(make_shape(cint<1>, cint<1>)));
-    auto operation = ops::make_matmul<Atom>(1, 1, K, at, bt, ct);
+    auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, 1, 1, K, at, bt, ct);
     kernel::Workspace owner(operation.required_workspace());
     auto workspace = owner.view();
     operation(workspace);
@@ -479,13 +647,13 @@ TEST(MatmulTest, SameSignSmallVectorPreservesWrapAndTail) {
 
 TEST(MatmulTest, OperandAMayBePrepacked) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  check_mixed_packing<gemm::Operand::A>();
-  check_mixed_packing<gemm::Operand::A>(1, 16, 65);
+  check_mixed_packing<::vecops::matmul::Operand::A>();
+  check_mixed_packing<::vecops::matmul::Operand::A>(1, 16, 65);
 }
 
 TEST(MatmulTest, OperandBMayBePrepacked) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  check_mixed_packing<gemm::Operand::B>();
+  check_mixed_packing<::vecops::matmul::Operand::B>();
 }
 
 #elif VECOPS_TARGET_SHARD_INDEX == 3
@@ -504,7 +672,8 @@ TEST(MatmulTest, CPrologueAndEpilogueUseDataAccess) {
       [](auto tag, auto x) VECOPS_KERNEL_LAMBDA {
         return vec::mul(x, vec::fill(tag, 2.0f));
       });
-  auto operation = ops::make_matmul_accumulate<gemm::AMX_BF16F32>(
+  auto operation = ops::matmul_details::prepare_matmul_accumulate(
+      ops::MatmulConfig<::vecops::matmul::AMX_BF16F32>{},
       M, N, K, at, bt, input<float32_t>(ct), output<float32_t>(ct, epilogue));
   kernel::Workspace owner(operation.required_workspace());
   auto workspace = owner.view();
@@ -539,7 +708,8 @@ TEST(MatmulTest, FullCDataAccessUsesCompileTimeExtents) {
       [](auto tag, auto x) VECOPS_KERNEL_LAMBDA {
         return vec::mul(x, vec::fill(tag, 2.0f));
       });
-  auto operation = ops::make_matmul_accumulate<gemm::AMX_BF16F32>(
+  auto operation = ops::matmul_details::prepare_matmul_accumulate(
+      ops::MatmulConfig<::vecops::matmul::AMX_BF16F32>{},
       cint<M>, cint<N>, cint<K>, at, bt,
       input<float32_t>(ct, identity), output<float32_t>(ct, scale));
   kernel::Workspace owner(operation.required_workspace());
@@ -558,17 +728,17 @@ TEST(MatmulTest, FullCDataAccessUsesCompileTimeExtents) {
 
 TEST(MatmulTest, BroadcastBiasAndReluAreFusedThroughDataAccess) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  test::matmul::check_bias_relu<gemm::AMX_BF16F32>(19, 23, 65);
-  test::matmul::check_bias_relu<gemm::AMX_BF16F32>(1, 16, 65);
+  test::matmul::check_bias_relu<::vecops::matmul::AMX_BF16F32>(19, 23, 65);
+  test::matmul::check_bias_relu<::vecops::matmul::AMX_BF16F32>(1, 16, 65);
 }
 
 TEST(MatmulTest, AsymmetricU8S8UsesColumnSumCorrection) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
 #if defined(HAS_AMX_INT8)
   test::matmul::check_asymmetric_quantized<
-      gemm::AMX_I8I32<uint8_t, int8_t>>(19, 23, 65);
+      ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>>(19, 23, 65);
   test::matmul::check_asymmetric_quantized<
-      gemm::AMX_I8I32<uint8_t, int8_t>>(
+      ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>>(
           cint<64>, cint<128>, cint<128>, true);
 #endif
 }
@@ -576,7 +746,7 @@ TEST(MatmulTest, AsymmetricU8S8UsesColumnSumCorrection) {
 TEST(MatmulTest, CompensatedPackedBFeedsAsymmetricCPrologue) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
 #if defined(HAS_AMX_INT8)
-  using Atom = gemm::AMX_I8I32<uint8_t, int8_t>;
+  using Atom = ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>;
   constexpr nint_t M = 19, N = 23, K = 65;
   constexpr int32_t ZeroPointA = 3;
   std::vector<uint8_t> a(M * K);
@@ -594,7 +764,7 @@ TEST(MatmulTest, CompensatedPackedBFeedsAsymmetricCPrologue) {
   auto b_layout = make_layout(make_shape(cint<N>, cint<K>));
   auto b_tensor = make_tensor(b.data(), b_layout);
   auto packed_layout = ops::matmul_packed_layout<
-      Atom, gemm::Operand::B>(b_layout);
+      Atom, ::vecops::matmul::Operand::B>(b_layout);
   kernel::Workspace packed_owner(
       numel(packed_layout) * static_cast<nint_t>(sizeof(int8_t)) + 64);
   auto packed_workspace = packed_owner.view();
@@ -604,7 +774,7 @@ TEST(MatmulTest, CompensatedPackedBFeedsAsymmetricCPrologue) {
   auto compensation_vector = make_tensor(
       compensation.data(), make_layout(make_shape(cint<N>)));
   ExecutionSession pack_execution{};
-  ops::matmul_pack_b_compensated<Atom>(
+  ops::matmul_pack_details::run_matmul_pack_b_compensated<Atom>(
       pack_execution, b_tensor, packed_tensor,
       compensation_vector, ZeroPointA);
 
@@ -615,7 +785,7 @@ TEST(MatmulTest, CompensatedPackedBFeedsAsymmetricCPrologue) {
           make_strides(cint<0>, cint<1>)));
   auto c_tensor = make_tensor(
       c.data(), make_layout(make_shape(cint<M>, cint<N>)));
-  auto operation = ops::make_matmul_accumulate<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
       cint<M>, cint<N>, cint<K>, a_tensor, packed_tensor,
       tensor::input<int32_t>(correction_tensor), c_tensor);
   kernel::Workspace owner(operation.required_workspace());
@@ -641,20 +811,20 @@ TEST(MatmulTest, CompensatedPackedBFeedsAsymmetricCPrologue) {
 
 TEST(MatmulTest, DynamicAndConstExtentPairs) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  test::matmul::check_native_extent_pair<gemm::AMX_BF16F32, 16, 16, 35>();
-  test::matmul::check_native_extent_pair<gemm::AMX_BF16F32, 16, 32, 67>();
-  test::matmul::check_native_extent_pair<gemm::AMX_BF16F32, 37, 51, 79>();
-  test::matmul::check_native_extent_pair<gemm::AMX_BF16F32, 1, 128, 65>();
-  test::matmul::check_native_extent_pair<gemm::AMX_BF16F32, 64, 64, 64>();
-  test::matmul::check_native_extent_pair<gemm::AMX_BF16F32, 35, 53, 257>();
+  test::matmul::check_native_extent_pair<::vecops::matmul::AMX_BF16F32, 16, 16, 35>();
+  test::matmul::check_native_extent_pair<::vecops::matmul::AMX_BF16F32, 16, 32, 67>();
+  test::matmul::check_native_extent_pair<::vecops::matmul::AMX_BF16F32, 37, 51, 79>();
+  test::matmul::check_native_extent_pair<::vecops::matmul::AMX_BF16F32, 1, 128, 65>();
+  test::matmul::check_native_extent_pair<::vecops::matmul::AMX_BF16F32, 64, 64, 64>();
+  test::matmul::check_native_extent_pair<::vecops::matmul::AMX_BF16F32, 35, 53, 257>();
 #if defined(HAS_AMX_FP16)
-  test::matmul::check_native_extent_pair<gemm::AMX_F16F32, 19, 21, 65>();
+  test::matmul::check_native_extent_pair<::vecops::matmul::AMX_F16F32, 19, 21, 65>();
 #endif
 #if defined(HAS_AMX_INT8)
   test::matmul::check_native_extent_pair<
-      gemm::AMX_I8I32<int8_t, uint8_t>, 35, 53, 257>();
+      ::vecops::matmul::AMX_I8I32<int8_t, uint8_t>, 35, 53, 257>();
   test::matmul::check_native_extent_pair<
-      gemm::AMX_I8I32<uint8_t, int8_t>, 64, 64, 128>();
+      ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>, 64, 64, 128>();
 #endif
 }
 
@@ -688,7 +858,7 @@ using namespace vecops;
 using namespace vecops::meta;
 using namespace vecops::tensor;
 
-using SMEF32Tile2x2M = decltype(cint<2> * gemm::SME_F32F32::M_R);
+using SMEF32Tile2x2M = decltype(cint<2> * ::vecops::matmul::SME_F32F32::M_R);
 
 #if defined(HAS_FIXED_STREAMING_SVE_BITS)
 static_assert(std::same_as<
@@ -696,7 +866,7 @@ static_assert(std::same_as<
         vec::details::sme::streaming_vector_bytes_value())>,
     Const<FIXED_STREAMING_SVE_BITS / 8>>);
 static_assert(std::same_as<
-    std::remove_cv_t<decltype(gemm::SME_F32F32::M_R)>,
+    std::remove_cv_t<decltype(::vecops::matmul::SME_F32F32::M_R)>,
     Const<FIXED_STREAMING_SVE_BITS / 8 / sizeof(float32_t)>>);
 static_assert(std::same_as<
         std::remove_cv_t<SMEF32Tile2x2M>,
@@ -707,20 +877,20 @@ static_assert(std::same_as<
         vec::details::sme::streaming_vector_bytes_value())>,
     Dynamic<16, 16, 256>>);
 static_assert(std::same_as<
-    std::remove_cv_t<decltype(gemm::SME_F32F32::M_R)>,
+    std::remove_cv_t<decltype(::vecops::matmul::SME_F32F32::M_R)>,
     Dynamic<4, 4, 64>>);
 static_assert(std::same_as<
         std::remove_cv_t<SMEF32Tile2x2M>,
     Dynamic<8, 8, 128>>);
 #endif
 static_assert(std::same_as<
-    std::remove_cv_t<decltype(gemm::SME_F32F32::K_R)>, Const<1>>);
+    std::remove_cv_t<decltype(::vecops::matmul::SME_F32F32::K_R)>, Const<1>>);
 static_assert(kernel::matmul_details::sme::has_bounded_tile_axis_v<
-              gemm::SME_F32F32, Const<16>, Any>);
+              ::vecops::matmul::SME_F32F32, Const<16>, Any>);
 static_assert(kernel::matmul_details::sme::has_bounded_tile_axis_v<
-              gemm::SME_F32F32, Dynamic<1, 0, 32>, Any>);
+              ::vecops::matmul::SME_F32F32, Dynamic<1, 0, 32>, Any>);
 static_assert(!kernel::matmul_details::sme::has_bounded_tile_axis_v<
-              gemm::SME_F32F32, Any, Any>);
+              ::vecops::matmul::SME_F32F32, Any, Any>);
 
 template <typename T>
 T value(nint_t index, int modulus) {
@@ -754,7 +924,8 @@ void check_raw(M m_value, N n_value, K k_value) {
       b.data(), make_layout(make_shape(n_value, k_value)));
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(m_value, n_value)));
-  auto operation = ops::make_matmul<Atom, TilePolicy>(
+  auto operation = ops::matmul_details::prepare_matmul(
+      ops::MatmulSchedulerConfig<Atom, TilePolicy>{},
       m_value, n_value, k_value, at, bt, ct);
   using Operation = decltype(operation);
   static_assert(std::same_as<
@@ -786,7 +957,7 @@ void check_raw(M m_value, N n_value, K k_value) {
 }
 
 VECOPS_NOINLINE void check_dynamic_inner_stride(nint_t inner_stride) {
-  using Atom = gemm::SME_BF16F32;
+  using Atom = ::vecops::matmul::SME_BF16F32;
   using T = typename Atom::TA;
   using Acc = typename Atom::TAcc;
   constexpr nint_t m = 19;
@@ -816,7 +987,7 @@ VECOPS_NOINLINE void check_dynamic_inner_stride(nint_t inner_stride) {
   auto at = make_tensor(a.data(), al);
   auto bt = make_tensor(b.data(), bl);
   auto ct = make_tensor(c.data(), make_layout(make_shape(m, n)));
-  auto operation = ops::make_matmul<Atom>(m, n, k, at, bt, ct);
+  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k, at, bt, ct);
   ExecutionSession execution{};
   operation(execution);
   for (nint_t i = 0; i < m; ++i) {
@@ -833,9 +1004,9 @@ VECOPS_NOINLINE void check_dynamic_inner_stride(nint_t inner_stride) {
   }
 }
 
-template <gemm::Operand Side>
+template <::vecops::matmul::Operand Side>
 void check_mixed_packing() {
-  using Atom = gemm::SME_F32F32;
+  using Atom = ::vecops::matmul::SME_F32F32;
   const nint_t lanes = vec::details::sme::streaming_lanes<float32_t>();
   const nint_t m = 2 * lanes + 3;
   const nint_t n = 3 * lanes + 5;
@@ -847,7 +1018,7 @@ void check_mixed_packing() {
   auto bl = make_layout(make_shape(Any{n}, Any{k}));
   auto at = make_tensor(a.data(), al);
   auto bt = make_tensor(b.data(), bl);
-  const auto& source_layout = Side == gemm::Operand::A ? al : bl;
+  const auto& source_layout = Side == ::vecops::matmul::Operand::A ? al : bl;
   auto packed_layout = ops::matmul_packed_layout<Atom, Side>(source_layout);
   kernel::Workspace packed_owner(
       numel(packed_layout) * static_cast<nint_t>(sizeof(float32_t)) + 64);
@@ -856,16 +1027,16 @@ void check_mixed_packing() {
       numel(packed_layout) * static_cast<nint_t>(sizeof(float32_t)), 64));
   auto packed_tensor = make_tensor(packed, packed_layout);
   ExecutionSession execution{};
-  if constexpr (Side == gemm::Operand::A)
-    ops::matmul_pack<Atom, Side>(execution, at, packed_tensor);
+  if constexpr (Side == ::vecops::matmul::Operand::A)
+    ops::matmul_pack_details::run_matmul_pack<Atom, Side>(execution, at, packed_tensor);
   else
-    ops::matmul_pack<Atom, Side>(execution, bt, packed_tensor);
+    ops::matmul_pack_details::run_matmul_pack<Atom, Side>(execution, bt, packed_tensor);
   auto ct = make_tensor(c.data(), make_layout(make_shape(Any{m}, Any{n})));
   auto operation = [&] {
-    if constexpr (Side == gemm::Operand::A)
-      return ops::make_matmul<Atom>(m, n, k, packed_tensor, bt, ct);
+    if constexpr (Side == ::vecops::matmul::Operand::A)
+      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k, packed_tensor, bt, ct);
     else
-      return ops::make_matmul<Atom>(m, n, k, at, packed_tensor, ct);
+      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k, at, packed_tensor, ct);
   }();
   operation(execution);
   for (nint_t i = 0; i < m; ++i) {
@@ -880,7 +1051,7 @@ void check_mixed_packing() {
 
 template <meta::ValueType KExtent>
 void check_fast_packed_path(KExtent k_value) {
-  using Atom = gemm::SME_BF16F32;
+  using Atom = ::vecops::matmul::SME_BF16F32;
   using T = typename Atom::TA;
   const nint_t lanes = vec::details::sme::streaming_lanes<float32_t>();
   const nint_t m = 2 * lanes + 3;
@@ -894,8 +1065,8 @@ void check_fast_packed_path(KExtent k_value) {
   auto bl = make_layout(make_shape(Any{n}, k_value));
   auto at = make_tensor(a.data(), al);
   auto bt = make_tensor(b.data(), bl);
-  auto apl = ops::matmul_packed_layout<Atom, gemm::Operand::A>(al);
-  auto bpl = ops::matmul_packed_layout<Atom, gemm::Operand::B>(bl);
+  auto apl = ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(al);
+  auto bpl = ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::B>(bl);
   kernel::Workspace packed_owner(
       (numel(apl) + numel(bpl)) *
           static_cast<nint_t>(sizeof(T)) +
@@ -908,10 +1079,10 @@ void check_fast_packed_path(KExtent k_value) {
   auto apt = make_tensor(ap, apl);
   auto bpt = make_tensor(bp, bpl);
   ExecutionSession execution{};
-  ops::matmul_pack<Atom, gemm::Operand::A>(execution, at, apt);
-  ops::matmul_pack<Atom, gemm::Operand::B>(execution, bt, bpt);
+  ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(execution, at, apt);
+  ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(execution, bt, bpt);
   auto ct = make_tensor(c.data(), make_layout(make_shape(Any{m}, Any{n})));
-  auto operation = ops::make_matmul<Atom>(m, n, k_value, apt, bpt, ct);
+  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k_value, apt, bpt, ct);
   operation(execution);
   for (nint_t i = 0; i < m; ++i) {
     for (nint_t j = 0; j < n; ++j) {
@@ -929,93 +1100,144 @@ void check_fast_packed_path(KExtent k_value) {
 
 TEST(MatmulTest, AllZA32MicrokernelShapesAndKTails) {
   const nint_t l = vec::details::sme::streaming_lanes<float32_t>();
-  check_raw<gemm::SME_F32F32>(l, l, 19);
-  check_raw<gemm::SME_F32F32>(l, 2 * l, 19);
-  check_raw<gemm::SME_F32F32>(l, 3 * l, 19);
-  check_raw<gemm::SME_F32F32>(l, 4 * l, 19);
-  check_raw<gemm::SME_F32F32>(2 * l, l, 19);
-  check_raw<gemm::SME_F32F32>(3 * l, l, 19);
-  check_raw<gemm::SME_F32F32>(4 * l, l, 19);
-  check_raw<gemm::SME_F32F32>(2 * l, 2 * l, 19);
-  check_raw<gemm::SME_F32F32>(2 * l + 3, 3 * l + 5, 19);
+  check_raw<::vecops::matmul::SME_F32F32>(l, l, 19);
+  check_raw<::vecops::matmul::SME_F32F32>(l, 2 * l, 19);
+  check_raw<::vecops::matmul::SME_F32F32>(l, 3 * l, 19);
+  check_raw<::vecops::matmul::SME_F32F32>(l, 4 * l, 19);
+  check_raw<::vecops::matmul::SME_F32F32>(2 * l, l, 19);
+  check_raw<::vecops::matmul::SME_F32F32>(3 * l, l, 19);
+  check_raw<::vecops::matmul::SME_F32F32>(4 * l, l, 19);
+  check_raw<::vecops::matmul::SME_F32F32>(2 * l, 2 * l, 19);
+  check_raw<::vecops::matmul::SME_F32F32>(2 * l + 3, 3 * l + 5, 19);
+}
+
+TEST(MatmulTest, GenericTilerRunsCacheAndKBlocksOnSME) {
+  using Atom = ::vecops::matmul::SME_F32F32;
+  using TileAxis = std::remove_cv_t<decltype(Atom::M_R)>;
+  using Tiles = ::vecops::matmul::CacheTiling<
+      TileAxis, TileAxis, meta::Const<4>>;
+  using GenericTuning = ::vecops::matmul::GenericTiledTuning<
+      Tiles, ::vecops::matmul::loop_order::MKN,
+      ::vecops::matmul::PackingPolicy<
+          ::vecops::matmul::PackingMode::never>,
+      ::vecops::matmul::PackingPolicy<
+          ::vecops::matmul::PackingMode::never>,
+      ::vecops::matmul::AccBufferMode::workspace>;
+  using Config = ops::MatmulConfig<
+      Atom,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::GenericTiled>,
+      kernel::matmul_policy::Automatic,
+      GenericTuning>;
+  const nint_t tile = vec::details::sme::streaming_lanes<float32_t>();
+  const nint_t m = tile + 3;
+  const nint_t n = tile + 5;
+  constexpr nint_t k = 9;
+  std::vector<float32_t> a(m * k);
+  std::vector<float32_t> b(n * k);
+  std::vector<float32_t> c(m * n);
+  for (nint_t i = 0; i < m * k; ++i) a[i] = value<float32_t>(i, 17);
+  for (nint_t i = 0; i < n * k; ++i) b[i] = value<float32_t>(i, 23);
+  auto at = make_tensor(
+      a.data(), make_layout(make_shape(Any{m}, cint<k>)));
+  auto bt = make_tensor(
+      b.data(), make_layout(make_shape(Any{n}, cint<k>)));
+  auto ct = make_tensor(
+      c.data(), make_layout(make_shape(Any{m}, Any{n})));
+  auto operation = ops::matmul(Config{
+      .generic_tiled = GenericTuning{
+          .cache_tiling = Tiles{
+              TileAxis{tile}, TileAxis{tile}, meta::cint<4>}}});
+  kernel::Workspace storage(
+      operation.required_workspace(Any{m}, Any{n}, cint<k>, at, bt, ct));
+  auto workspace = storage.view();
+  operation(workspace, Any{m}, Any{n}, cint<k>, at, bt, ct);
+  for (nint_t i = 0; i < m; ++i) {
+    for (nint_t j = 0; j < n; ++j) {
+      float32_t expected = 0;
+      for (nint_t kk = 0; kk < k; ++kk)
+        expected += a[i * k + kk] * b[j * k + kk];
+      EXPECT_NEAR(c[i * n + j], expected, 5.0e-4f);
+    }
+  }
 }
 
 TEST(MatmulTest, FixedExtentsReachFourRegionsAsMetaConstants) {
   check_raw<
-      gemm::SME_F32F32, kernel::loop::tile2d_policy::FourRegions>(
+      ::vecops::matmul::SME_F32F32, kernel::loop::tile2d_policy::FourRegions>(
           cint<19>, cint<53>, cint<17>);
 }
 
 TEST(MatmulTest, SingleAxisConstraintsReachFourRegions) {
   check_raw<
-      gemm::SME_F32F32, kernel::loop::tile2d_policy::FourRegions>(
+      ::vecops::matmul::SME_F32F32, kernel::loop::tile2d_policy::FourRegions>(
           Dynamic<1, 0, 16>{16}, Any{53}, cint<17>);
   check_raw<
-      gemm::SME_F32F32, kernel::loop::tile2d_policy::FourRegions>(
+      ::vecops::matmul::SME_F32F32, kernel::loop::tile2d_policy::FourRegions>(
           Any{53}, Dynamic<1, 0, 16>{16}, cint<17>);
 }
 
 TEST(MatmulTest, LargePackedPrefetchUsesFootprintGate) {
   using kernel::matmul_details::sme::large_packed_prefetch_v;
   static_assert(!large_packed_prefetch_v<
-      gemm::SME_BF16F32, Const<33>, Const<35>, Const<513>>);
+      ::vecops::matmul::SME_BF16F32, Const<33>, Const<35>, Const<513>>);
   static_assert(!large_packed_prefetch_v<
-      gemm::SME_BF16F32, Const<128>, Const<1024>, Const<768>>);
+      ::vecops::matmul::SME_BF16F32, Const<128>, Const<1024>, Const<768>>);
 #if !defined(VECOPS_DISABLE_SME_LARGE_PACKED_PREFETCH)
   static_assert(large_packed_prefetch_v<
-      gemm::SME_BF16F32, Const<256>, Const<256>, Const<4096>>);
+      ::vecops::matmul::SME_BF16F32, Const<256>, Const<256>, Const<4096>>);
   static_assert(large_packed_prefetch_v<
-      gemm::SME_BF16F32, Const<3136>, Const<64>, Const<576>>);
+      ::vecops::matmul::SME_BF16F32, Const<3136>, Const<64>, Const<576>>);
   static_assert(large_packed_prefetch_v<
-      gemm::SME_BF16F32,
+      ::vecops::matmul::SME_BF16F32,
       Dynamic<16, 256, 512>, Dynamic<16, 256, 512>,
       Dynamic<64, 4096, 8192>>);
 #endif
   static_assert(!large_packed_prefetch_v<
-      gemm::SME_F16F32, Const<128>, Const<4096>, Const<4096>>);
+      ::vecops::matmul::SME_F16F32, Const<128>, Const<4096>, Const<4096>>);
 }
 
 #elif VECOPS_TARGET_SHARD_INDEX == 1
 
 TEST(MatmulTest, FloatingInputTypes) {
-  check_raw<gemm::SME_BF16F32>(19, 21, 23);
-  check_raw<gemm::SME_F16F32>(19, 21, 23);
+  check_raw<::vecops::matmul::SME_BF16F32>(19, 21, 23);
+  check_raw<::vecops::matmul::SME_F16F32>(19, 21, 23);
 #if defined(HAS_SME_F64F64)
-  check_raw<gemm::SME_F64F64>(11, 13, 17);
+  check_raw<::vecops::matmul::SME_F64F64>(11, 13, 17);
 #endif
 }
 
 TEST(MatmulTest, EndToEndMemoryComputeOutputConversions) {
   test::matmul::check_conversion<
-      gemm::SME_BF16F32, float32_t, float32_t, float32_t>(19, 21, 23);
+      ::vecops::matmul::SME_BF16F32, float32_t, float32_t, float32_t>(19, 21, 23);
   test::matmul::check_conversion<
-      gemm::SME_F32F32,
+      ::vecops::matmul::SME_F32F32,
       vecops::bfloat16_t, vecops::bfloat16_t, vecops::bfloat16_t>(19, 21, 17);
   test::matmul::check_conversion<
-      gemm::SME_F32F32,
+      ::vecops::matmul::SME_F32F32,
       vecops::float16_t, vecops::float16_t, vecops::float16_t>(19, 21, 17);
 #if defined(HAS_SME_F64F64)
   test::matmul::check_conversion<
-      gemm::SME_F64F64, float32_t, float32_t, float32_t>(11, 13, 17);
+      ::vecops::matmul::SME_F64F64, float32_t, float32_t, float32_t>(11, 13, 17);
 #endif
 }
 
 TEST(MatmulTest, LargeConversionsUseOnTheFlyPacking) {
   test::matmul::check_conversion<
-      gemm::SME_BF16F32, float32_t, float32_t, float32_t>(
+      ::vecops::matmul::SME_BF16F32, float32_t, float32_t, float32_t>(
           cint<32>, cint<32>, cint<64>, true);
   test::matmul::check_conversion<
-      gemm::SME_F32F32,
+      ::vecops::matmul::SME_F32F32,
       vecops::bfloat16_t, vecops::bfloat16_t, vecops::bfloat16_t>(
           cint<32>, cint<32>, cint<64>, true);
   test::matmul::check_conversion<
-      gemm::SME_F32F32,
+      ::vecops::matmul::SME_F32F32,
       vecops::float16_t, vecops::float16_t, vecops::float16_t>(
           cint<32>, cint<32>, cint<64>, true);
 }
 
 TEST(MatmulTest, LargeRawProblemUsesOnTheFlyPackingWorkspace) {
-  using Atom = gemm::SME_BF16F32;
+  using Atom = ::vecops::matmul::SME_BF16F32;
   constexpr nint_t M = 32, N = 32, K = 64;
   std::vector<typename Atom::TA> a(M * K), b(N * K);
   std::vector<typename Atom::TAcc> c(M * N);
@@ -1025,10 +1247,10 @@ TEST(MatmulTest, LargeRawProblemUsesOnTheFlyPackingWorkspace) {
       b.data(), make_layout(make_shape(cint<N>, cint<K>)));
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(cint<M>, cint<N>)));
-  auto operation = ops::make_matmul<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       cint<M>, cint<N>, cint<K>, at, bt, ct);
   EXPECT_GT(operation.required_workspace(), 0);
-  auto dynamic_operation = ops::make_matmul<Atom>(M, N, K, at, bt, ct);
+  auto dynamic_operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, M, N, K, at, bt, ct);
   EXPECT_EQ(dynamic_operation.required_workspace(), 0);
   check_raw<Atom>(cint<M>, cint<N>, cint<K>);
   check_raw<Atom>(M, N, K);
@@ -1042,15 +1264,15 @@ TEST(MatmulTest, DynamicInnerStrideAlwaysUsesGenericLoad) {
 #elif VECOPS_TARGET_SHARD_INDEX == 2
 
 TEST(MatmulTest, AllInt8SignednessCombinations) {
-  check_raw<gemm::SME_I8I32<int8_t, int8_t>>(19, 21, 23);
-  check_raw<gemm::SME_I8I32<int8_t, uint8_t>>(19, 21, 23);
-  check_raw<gemm::SME_I8I32<uint8_t, int8_t>>(19, 21, 23);
-  check_raw<gemm::SME_I8I32<uint8_t, uint8_t>>(19, 21, 23);
+  check_raw<::vecops::matmul::SME_I8I32<int8_t, int8_t>>(19, 21, 23);
+  check_raw<::vecops::matmul::SME_I8I32<int8_t, uint8_t>>(19, 21, 23);
+  check_raw<::vecops::matmul::SME_I8I32<uint8_t, int8_t>>(19, 21, 23);
+  check_raw<::vecops::matmul::SME_I8I32<uint8_t, uint8_t>>(19, 21, 23);
 }
 
 TEST(MatmulTest, EitherOperandMayBePrepacked) {
-  check_mixed_packing<gemm::Operand::A>();
-  check_mixed_packing<gemm::Operand::B>();
+  check_mixed_packing<::vecops::matmul::Operand::A>();
+  check_mixed_packing<::vecops::matmul::Operand::B>();
 }
 
 TEST(MatmulTest, BothPackedLargeKUsesFastPath) {
@@ -1080,7 +1302,8 @@ TEST(MatmulTest, CPrologueAndEpilogueUseDataAccess) {
       [](auto tag, auto x) VECOPS_KERNEL_LAMBDA {
         return vec::mul(x, vec::fill(tag, 2.0f));
       });
-  auto operation = ops::make_matmul_accumulate<gemm::SME_F32F32>(
+  auto operation = ops::matmul_details::prepare_matmul_accumulate(
+      ops::MatmulConfig<::vecops::matmul::SME_F32F32>{},
       M, N, K, at, bt, input<float32_t>(ct), output<float32_t>(ct, epilogue));
   ExecutionSession execution{};
   operation(execution);
@@ -1095,35 +1318,35 @@ TEST(MatmulTest, CPrologueAndEpilogueUseDataAccess) {
 }
 
 TEST(MatmulTest, BroadcastBiasAndReluAreFusedThroughDataAccess) {
-  test::matmul::check_bias_relu<gemm::SME_BF16F32>(19, 23, 17);
-  test::matmul::check_bias_relu<gemm::SME_F32F32>(19, 23, 9);
+  test::matmul::check_bias_relu<::vecops::matmul::SME_BF16F32>(19, 23, 17);
+  test::matmul::check_bias_relu<::vecops::matmul::SME_F32F32>(19, 23, 9);
 }
 
 TEST(MatmulTest, AsymmetricU8S8UsesColumnSumCorrection) {
   test::matmul::check_asymmetric_quantized<
-      gemm::SME_I8I32<uint8_t, int8_t>>(19, 23, 33);
+      ::vecops::matmul::SME_I8I32<uint8_t, int8_t>>(19, 23, 33);
 }
 
 TEST(MatmulTest, LargeQuantizedTransformsUseOnTheFlyPacking) {
   test::matmul::check_asymmetric_quantized<
-      gemm::SME_I8I32<uint8_t, int8_t>>(
+      ::vecops::matmul::SME_I8I32<uint8_t, int8_t>>(
           cint<16>, cint<128>, cint<128>, true);
 }
 
 #elif VECOPS_TARGET_SHARD_INDEX == 4
 
 TEST(MatmulTest, DynamicAndConstExtentPairs) {
-  test::matmul::check_native_extent_pair<gemm::SME_F32F32, 16, 16, 19>();
-  test::matmul::check_native_extent_pair<gemm::SME_F32F32, 19, 53, 17>();
-  test::matmul::check_native_extent_pair<gemm::SME_BF16F32, 19, 21, 23>();
-  test::matmul::check_native_extent_pair<gemm::SME_F16F32, 19, 21, 23>();
+  test::matmul::check_native_extent_pair<::vecops::matmul::SME_F32F32, 16, 16, 19>();
+  test::matmul::check_native_extent_pair<::vecops::matmul::SME_F32F32, 19, 53, 17>();
+  test::matmul::check_native_extent_pair<::vecops::matmul::SME_BF16F32, 19, 21, 23>();
+  test::matmul::check_native_extent_pair<::vecops::matmul::SME_F16F32, 19, 21, 23>();
 #if defined(HAS_SME_F64F64)
-  test::matmul::check_native_extent_pair<gemm::SME_F64F64, 11, 13, 17>();
+  test::matmul::check_native_extent_pair<::vecops::matmul::SME_F64F64, 11, 13, 17>();
 #endif
   test::matmul::check_native_extent_pair<
-      gemm::SME_I8I32<int8_t, int8_t>, 19, 21, 23>();
+      ::vecops::matmul::SME_I8I32<int8_t, int8_t>, 19, 21, 23>();
   test::matmul::check_native_extent_pair<
-      gemm::SME_I8I32<uint8_t, int8_t>, 16, 128, 128>();
+      ::vecops::matmul::SME_I8I32<uint8_t, int8_t>, 16, 128, 128>();
 }
 
 #endif

@@ -18,7 +18,7 @@
 #include "vecops/matmul/Packing.h"
 #include "vecops/matmul/details/amx/Atoms.h"
 #include "vecops/kernel/Tile2D.h"
-#include "vecops/matmul/details/Traversal.h"
+#include "vecops/matmul/details/TileScheduler.h"
 #include "vecops/matmul/details/pack/amx/Pack.h"
 #include "vecops/matmul/details/pack/generic/Pack.h"
 #include "vecops/tensor/DataAccess.h"
@@ -47,9 +47,9 @@ using InputLayoutOf = typename SpecOf<Access>::InputLayout;
 template <typename Access>
 using OutputLayoutOf = typename SpecOf<Access>::OutputLayout;
 
-template <gemm::Atom Atom, gemm::Operand Side, typename Access>
+template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side, typename Access>
 inline constexpr bool is_packed_access_v =
-    gemm::is_packed_layout<Atom, Side, InputLayoutOf<Access>>();
+    ::vecops::matmul::is_packed_layout<Atom, Side, InputLayoutOf<Access>>();
 
 template <typename Access>
 inline constexpr bool direct_row_major_input_v =
@@ -77,7 +77,7 @@ inline constexpr bool SmallVectorI8Available = true;
 inline constexpr bool SmallVectorI8Available = false;
 #endif
 
-template <gemm::Atom Atom, typename A, typename B,
+template <::vecops::matmul::Atom Atom, typename A, typename B,
           typename CInput, typename COutput>
 inline constexpr bool small_vector_candidate_v =
 #if defined(VECOPS_DISABLE_AMX_SMALL_VECTOR)
@@ -87,7 +87,7 @@ inline constexpr bool small_vector_candidate_v =
     direct_row_major_output_v<COutput> &&
     IsZeroTransform<TransformOf<CInput>>::value &&
     ((SmallVectorBF16Available &&
-      std::same_as<Atom, gemm::AMX_BF16F32>) ||
+      std::same_as<Atom, ::vecops::matmul::AMX_BF16F32>) ||
      (SmallVectorI8Available &&
       (std::same_as<typename Atom::TA, int8_t> ||
        std::same_as<typename Atom::TA, uint8_t>) &&
@@ -95,7 +95,7 @@ inline constexpr bool small_vector_candidate_v =
        std::same_as<typename Atom::TB, uint8_t>)));
 #endif
 
-template <gemm::Atom Atom, typename A, typename B,
+template <::vecops::matmul::Atom Atom, typename A, typename B,
           typename CInput, typename COutput>
 inline constexpr bool fused_small_bf16_candidate_v =
 #if defined(VECOPS_DISABLE_AMX_SMALL_VECTOR) || \
@@ -103,10 +103,10 @@ inline constexpr bool fused_small_bf16_candidate_v =
     false;
 #else
     SmallVectorBF16Available &&
-    std::same_as<Atom, gemm::AMX_BF16F32> &&
+    std::same_as<Atom, ::vecops::matmul::AMX_BF16F32> &&
     generic::RawDirectAccess<A> &&
     (direct_row_major_input_v<A> ||
-     is_packed_access_v<Atom, gemm::Operand::A, A>) &&
+     is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A>) &&
     direct_row_major_input_v<B> &&
     CInput::Rank == 2 && COutput::Rank == 2 &&
     TransformOf<CInput>::is_elementwise &&
@@ -121,12 +121,12 @@ inline constexpr bool fused_small_bf16_candidate_v =
     ;
 #endif
 
-template <gemm::Atom Atom, typename A, typename B,
+template <::vecops::matmul::Atom Atom, typename A, typename B,
           typename CInput, typename COutput>
 inline constexpr bool packed_ab_tail_split_candidate_v =
-    std::same_as<Atom, gemm::AMX_BF16F32> &&
-    is_packed_access_v<Atom, gemm::Operand::A, A> &&
-    is_packed_access_v<Atom, gemm::Operand::B, B> &&
+    std::same_as<Atom, ::vecops::matmul::AMX_BF16F32> &&
+    is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
+    is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B> &&
     IsZeroTransform<TransformOf<CInput>>::value &&
     direct_row_major_output_v<COutput>;
 
@@ -178,7 +178,7 @@ inline constexpr bool extent_excludes_v = [] {
        meta::lower_bound_v<EV> > Value);
 }();
 
-template <gemm::Atom Atom,
+template <::vecops::matmul::Atom Atom,
           meta::ValueType M, meta::ValueType N, meta::ValueType K>
 consteval bool small_vector_guaranteed() {
   using MV = std::remove_cvref_t<M>;
@@ -198,7 +198,7 @@ consteval bool small_vector_guaranteed() {
     constexpr bool LargeN1 = extent_is_v<NV, 1> &&
         meta::lower_bound_at_least_v<MV, 128> &&
         meta::upper_bound_at_most_v<MV, 4096>;
-    if constexpr (std::same_as<Atom, gemm::AMX_BF16F32>) {
+    if constexpr (std::same_as<Atom, ::vecops::matmul::AMX_BF16F32>) {
       constexpr bool LargeSkinny =
           meta::lower_bound_at_least_v<KV, 32> &&
           remainder_at_most_one_v<KV, 32> &&
@@ -231,7 +231,7 @@ consteval bool small_vector_guaranteed() {
   }
 }
 
-template <gemm::Atom Atom, bool AllowTailSplit,
+template <::vecops::matmul::Atom Atom, bool AllowTailSplit,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
           typename A, typename B, typename CInput, typename COutput>
 consteval DispatchOwner select_dispatch_owner() {
@@ -491,14 +491,14 @@ inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void small_same_sign_i8_matmul(
 }
 #endif
 
-template <gemm::Atom Atom, typename A, typename B, typename COutput>
+template <::vecops::matmul::Atom Atom, typename A, typename B, typename COutput>
 VECOPS_ALWAYS_INLINE void run_small_vector(
     const A& a, const B& b, COutput& c_output,
     nint_t m, nint_t n, nint_t k) {
   const auto a_strides = a.raw_strides();
   const auto b_strides = b.raw_strides();
   const auto c_strides = c_output.raw_strides();
-  if constexpr (std::same_as<Atom, gemm::AMX_BF16F32>) {
+  if constexpr (std::same_as<Atom, ::vecops::matmul::AMX_BF16F32>) {
 #if defined(__AVX512BF16__)
     small_bf16_matmul(
         reinterpret_cast<const bfloat16_t*>(a.raw_data()), a_strides[0],
@@ -529,7 +529,7 @@ VECOPS_ALWAYS_INLINE void run_small_vector(
   }
 }
 
-template <gemm::Atom Atom, typename A, typename B,
+template <::vecops::matmul::Atom Atom, typename A, typename B,
           typename CInput, typename COutput>
 VECOPS_ALWAYS_INLINE void run_fused_small_bf16(
     const A& a, const B& b,
@@ -539,7 +539,7 @@ VECOPS_ALWAYS_INLINE void run_fused_small_bf16(
       Atom, A, B, CInput, COutput>);
   alignas(64) float32_t values[16];
   constexpr bool PackedA =
-      is_packed_access_v<Atom, gemm::Operand::A, A>;
+      is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A>;
   const auto a_strides = a.raw_strides();
   const auto b_strides = b.raw_strides();
 #if defined(__AVX512BF16__)
@@ -624,14 +624,14 @@ consteval int sixteen_lane_power() {
   return power;
 }
 
-template <gemm::Atom Atom, bool SpatialGuaranteed, bool KGuaranteed,
+template <::vecops::matmul::Atom Atom, bool SpatialGuaranteed, bool KGuaranteed,
           typename Source>
 VECOPS_ALWAYS_INLINE const typename Atom::TA* prepare_a(
     const Source& source, nint_t m, nint_t k, nint_t logical_m,
     nint_t logical_k, typename Atom::TA* buffer) {
   using T = typename Atom::TA;
   constexpr nint_t KR = decltype(Atom::K_R)::value;
-  if constexpr (is_packed_access_v<Atom, gemm::Operand::A, Source>) {
+  if constexpr (is_packed_access_v<Atom, ::vecops::matmul::Operand::A, Source>) {
     static_assert(generic::RawDirectAccess<Source>,
                   "packed AMX A must be direct and untransformed");
     const auto& layout = source.spec().input_layout();
@@ -647,16 +647,16 @@ VECOPS_ALWAYS_INLINE const typename Atom::TA* prepare_a(
   }
 }
 
-template <gemm::Atom Atom, bool SpatialGuaranteed, bool KGuaranteed,
+template <::vecops::matmul::Atom Atom, bool SpatialGuaranteed, bool KGuaranteed,
           typename Source>
 VECOPS_ALWAYS_INLINE const typename Atom::TB* prepare_b(
     const Source& source, nint_t n, nint_t k, nint_t logical_n,
     nint_t logical_k, typename Atom::TB* buffer) {
   using T = typename Atom::TB;
-  using Packing = gemm::packing_t<Atom, gemm::Operand::B>;
+  using Packing = ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::B>;
   constexpr nint_t KR = decltype(Atom::K_R)::value;
   constexpr nint_t KP = Packing::KPack;
-  if constexpr (is_packed_access_v<Atom, gemm::Operand::B, Source>) {
+  if constexpr (is_packed_access_v<Atom, ::vecops::matmul::Operand::B, Source>) {
     static_assert(generic::RawDirectAccess<Source>,
                   "packed AMX B must be direct and untransformed");
     const auto& layout = source.spec().input_layout();
@@ -815,7 +815,7 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
   }
 }
 
-template <gemm::Atom Atom, int Tile, bool SpatialGuaranteed, bool NonEmpty,
+template <::vecops::matmul::Atom Atom, int Tile, bool SpatialGuaranteed, bool NonEmpty,
           bool DirectInactiveZero, bool KGuaranteed, typename Source>
 VECOPS_ALWAYS_INLINE void load_a_tile(
     const Source& source, nint_t m, nint_t k,
@@ -872,7 +872,7 @@ VECOPS_ALWAYS_INLINE void load_a_tile(
       64);
 }
 
-template <gemm::Atom Atom, int Tile, bool SpatialGuaranteed, bool NonEmpty,
+template <::vecops::matmul::Atom Atom, int Tile, bool SpatialGuaranteed, bool NonEmpty,
           bool KGuaranteed, bool StreamB, typename Source>
 VECOPS_ALWAYS_INLINE void load_b_tile(
     const Source& source, nint_t n, nint_t k,
@@ -886,7 +886,7 @@ VECOPS_ALWAYS_INLINE void load_b_tile(
   }
   const auto* pointer = prepare_b<Atom, SpatialGuaranteed, KGuaranteed>(
       source, n, k, logical_n, logical_k, buffer);
-  if constexpr (is_packed_access_v<Atom, gemm::Operand::B, Source>) {
+  if constexpr (is_packed_access_v<Atom, ::vecops::matmul::Operand::B, Source>) {
     if constexpr (StreamB) amx_intrinsics::stream_load<Tile>(pointer, 64);
     else amx_intrinsics::load<Tile>(pointer, 64);
   } else {
@@ -894,7 +894,7 @@ VECOPS_ALWAYS_INLINE void load_b_tile(
   }
 }
 
-template <gemm::Atom Atom, int NM, int NN, std::size_t... I>
+template <::vecops::matmul::Atom Atom, int NM, int NN, std::size_t... I>
 VECOPS_ALWAYS_INLINE void compute_tiles_impl(std::index_sequence<I...>) {
   constexpr int Outputs = NM * NN;
   (amx_intrinsics::dot<
@@ -903,12 +903,12 @@ VECOPS_ALWAYS_INLINE void compute_tiles_impl(std::index_sequence<I...>) {
        Outputs + NM + static_cast<int>(I % NN)>(), ...);
 }
 
-template <gemm::Atom Atom, int NM, int NN>
+template <::vecops::matmul::Atom Atom, int NM, int NN>
 VECOPS_ALWAYS_INLINE void compute_tiles() {
   compute_tiles_impl<Atom, NM, NN>(std::make_index_sequence<NM * NN>{});
 }
 
-template <gemm::Atom Atom, int NM, int NN, int Row, int Column>
+template <::vecops::matmul::Atom Atom, int NM, int NN, int Row, int Column>
 VECOPS_ALWAYS_INLINE void compute_tile() {
   constexpr int Outputs = NM * NN;
   amx_intrinsics::dot<
@@ -916,7 +916,7 @@ VECOPS_ALWAYS_INLINE void compute_tile() {
       Row * NN + Column, Outputs + Row, Outputs + NM + Column>();
 }
 
-template <gemm::Atom Atom, typename Case, bool KGuaranteed, bool StreamB,
+template <::vecops::matmul::Atom Atom, typename Case, bool KGuaranteed, bool StreamB,
           bool DirectInactiveZeroA, typename A, typename B>
 VECOPS_ALWAYS_INLINE void multiply_k_tile(
     const A& a, const B& b,
@@ -952,8 +952,8 @@ VECOPS_ALWAYS_INLINE void multiply_k_tile(
   };
   if constexpr (
       NN == 1 &&
-      is_packed_access_v<Atom, gemm::Operand::A, A> &&
-      is_packed_access_v<Atom, gemm::Operand::B, B>) {
+      is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
+      is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>) {
     // The vertical packed strip has one B tile resident for every output.
     // Interleave each new A load with its dependent dot; the general raw/tail
     // paths retain the compiler's original all-loads-first schedule.
@@ -1028,7 +1028,7 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
   }
 }
 
-template <gemm::Atom Atom, typename Case, typename Plan,
+template <::vecops::matmul::Atom Atom, typename Case, typename Plan,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_ALWAYS_INLINE void microkernel(
     const A& a, const B& b, const CInput& c_input, COutput& c_output,
@@ -1052,8 +1052,8 @@ VECOPS_ALWAYS_INLINE void microkernel(
   // packed-B specialization. Keep its inactive A tile on the scratch path;
   // every other covered input combination safely uses the faster tile zero.
   constexpr bool DirectInactiveZeroA =
-      is_packed_access_v<Atom, gemm::Operand::A, A> ||
-      !is_packed_access_v<Atom, gemm::Operand::B, B>;
+      is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> ||
+      !is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>;
   auto* bytes = static_cast<std::byte*>(scratch);
   auto* a_buffers = reinterpret_cast<typename Atom::TA*>(bytes);
   auto* b_buffers = reinterpret_cast<typename Atom::TB*>(bytes + NM * 1024);
@@ -1079,9 +1079,9 @@ VECOPS_ALWAYS_INLINE void microkernel(
   }(std::make_index_sequence<Outputs>{});
 
   constexpr bool SplitKForAccess =
-      (!is_packed_access_v<Atom, gemm::Operand::A, A> &&
+      (!is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
        !direct_row_major_input_v<A>) ||
-      (!is_packed_access_v<Atom, gemm::Operand::B, B> &&
+      (!is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B> &&
        !direct_row_major_input_v<B>);
   if constexpr (Plan::value) {
     for (nint_t k = 0; k < logical_k; k += KR) {
@@ -1135,7 +1135,7 @@ VECOPS_ALWAYS_INLINE void microkernel(
   }(std::make_index_sequence<Outputs>{});
 }
 
-template <gemm::Atom Atom, typename Case, typename Plan,
+template <::vecops::matmul::Atom Atom, typename Case, typename Plan,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_NOINLINE void exact_microkernel(
     const A& a, const B& b, const CInput& c_input, COutput& c_output,
@@ -1157,26 +1157,26 @@ template <>
 struct Backend<matmul_implementation::AMX> {
   using ResourceRequirements = execution::details::ResourceSet<
       execution::details::x86::Tiles>;
-  template <gemm::Atom, typename, typename, typename>
+  template <::vecops::matmul::Atom, typename, typename, typename>
   using Catalog = amx::Catalog;
   static constexpr int ProblemRank = 2;
 
   static nint_t scratch_bytes() { return 8 * 1024 + 63; }
 
-  template <gemm::Atom, typename Policy,
+  template <::vecops::matmul::Atom, typename Policy,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename A, typename B>
   using EffectivePolicy = std::conditional_t<
       std::same_as<Policy, matmul_policy::Automatic>,
       kernel::loop::tile2d_policy::ExactCover, Policy>;
 
-  template <gemm::Atom Atom, typename Policy, bool PackedB,
+  template <::vecops::matmul::Atom Atom, typename Policy, bool PackedB,
             execution::ExecutionScope Scope,
             meta::ValueType M, meta::ValueType N,
             typename Fn>
   VECOPS_ALWAYS_INLINE static decltype(auto) with_configuration(
       Scope& scope, M m, N n, Fn&& fn) {
-    static_assert(std::same_as<typename Atom::KernelKind, gemm::AMXKernelKind>);
+    static_assert(std::same_as<typename Atom::KernelKind, ::vecops::matmul::AMXKernelKind>);
     static_assert(execution::has_resource_v<
         execution::details::x86::Tiles, Scope>);
     amx::Configuration configuration;
@@ -1204,7 +1204,7 @@ struct Backend<matmul_implementation::AMX> {
         configuration, std::forward<Fn>(fn));
   }
 
-  template <gemm::Atom Atom, typename Policy,
+  template <::vecops::matmul::Atom Atom, typename Policy,
             execution::ExecutionScope Scope,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename A, typename B, typename CInput, typename COutput>
@@ -1212,7 +1212,7 @@ struct Backend<matmul_implementation::AMX> {
       Scope&, M m, N n, K k,
       const A& a, const B& b, const CInput& c_input, COutput& c_output,
       void* scratch) {
-    static_assert(std::same_as<typename Atom::KernelKind, gemm::AMXKernelKind>);
+    static_assert(std::same_as<typename Atom::KernelKind, ::vecops::matmul::AMXKernelKind>);
     static_assert(execution::has_resource_v<
         execution::details::x86::Tiles, Scope>);
     static_assert(std::same_as<
@@ -1223,7 +1223,7 @@ struct Backend<matmul_implementation::AMX> {
         m, n, k, a, b, c_input, c_output, scratch);
   }
 
-  template <gemm::Atom Atom, typename Policy,
+  template <::vecops::matmul::Atom Atom, typename Policy,
             execution::ExecutionScope Scope,
             meta::ValueType TraversalM, meta::ValueType N,
             meta::ValueType K,
@@ -1234,7 +1234,7 @@ struct Backend<matmul_implementation::AMX> {
       const A& a, const B& b,
       const CInput& c_input, COutput& c_output,
       void* scratch) {
-    static_assert(std::same_as<typename Atom::KernelKind, gemm::AMXKernelKind>);
+    static_assert(std::same_as<typename Atom::KernelKind, ::vecops::matmul::AMXKernelKind>);
     static_assert(execution::has_resource_v<
         execution::details::x86::Tiles, Scope>);
     static_assert(std::same_as<
@@ -1246,7 +1246,7 @@ struct Backend<matmul_implementation::AMX> {
         origin_m, 0, a, b, c_input, c_output, scratch);
   }
 
-  template <gemm::Atom Atom, typename Policy, bool AllowTailSplit = false,
+  template <::vecops::matmul::Atom Atom, typename Policy, bool AllowTailSplit = false,
             execution::ExecutionScope Scope,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename A, typename B, typename CInput, typename COutput>
@@ -1289,7 +1289,7 @@ struct Backend<matmul_implementation::AMX> {
           });
     } else {
       constexpr bool PackedB =
-          amx::is_packed_access_v<Atom, gemm::Operand::B, B>;
+          amx::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>;
       with_configuration<Atom, Policy, PackedB>(
           scope, m, n, [&](auto& configured)
               VECOPS_INLINE_LAMBDA_NOEXCEPT {
@@ -1300,7 +1300,7 @@ struct Backend<matmul_implementation::AMX> {
     }
   }
 
-  template <gemm::Atom Atom, typename A, typename B,
+  template <::vecops::matmul::Atom Atom, typename A, typename B,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename Fn>
   VECOPS_ALWAYS_INLINE static void dispatch_plan(M, N, K, Fn&& fn) {
@@ -1309,7 +1309,7 @@ struct Backend<matmul_implementation::AMX> {
     using KV = std::remove_cvref_t<K>;
     constexpr bool StreamB = [] {
       if constexpr (
-          amx::is_packed_access_v<Atom, gemm::Operand::B, B> &&
+          amx::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B> &&
           meta::lower_bound_at_least_v<NV, 0> &&
           meta::lower_bound_at_least_v<KV, 1>) {
         constexpr nint_t LogicalN = meta::lower_bound_v<NV>;
@@ -1326,7 +1326,7 @@ struct Backend<matmul_implementation::AMX> {
     std::forward<Fn>(fn).template operator()<Plan>();
   }
 
-  template <gemm::Atom Atom, typename Case, typename Plan,
+  template <::vecops::matmul::Atom Atom, typename Case, typename Plan,
             typename A, typename B, typename CInput, typename COutput>
   VECOPS_ALWAYS_INLINE static void run_case(
       const A& a, const B& b, const CInput& c_input, COutput& c_output,

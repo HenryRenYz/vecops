@@ -18,37 +18,49 @@
 
 namespace vecops::ops {
 
+template <::vecops::matmul::Atom AtomT, ::vecops::matmul::Operand SideV>
+struct MatmulPackConfig {
+  using Atom = AtomT;
+  static constexpr ::vecops::matmul::Operand side = SideV;
+};
+
+template <::vecops::matmul::Atom AtomT>
+struct MatmulPackBCompensatedConfig {
+  using Atom = AtomT;
+  int32_t a_zero_point = 0;
+};
+
 namespace matmul_pack_details {
 
-template <gemm::Atom Atom, gemm::Operand Side,
+template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           typename InputSpec, typename OutputSpec>
 using SelectedImplementation = std::conditional_t<
     kernel::matmul_pack_details::Backend<
-        typename gemm::packing_t<Atom, Side>::FormatType,
+        typename ::vecops::matmul::packing_t<Atom, Side>::FormatType,
         kernel::matmul_pack_implementation::SME>::template eligible<
             InputSpec, OutputSpec>,
     kernel::matmul_pack_implementation::SME,
     std::conditional_t<
         kernel::matmul_pack_details::Backend<
-            typename gemm::packing_t<Atom, Side>::FormatType,
+            typename ::vecops::matmul::packing_t<Atom, Side>::FormatType,
             kernel::matmul_pack_implementation::SMEFP32ToFP64>::
             template eligible<InputSpec, OutputSpec>,
         kernel::matmul_pack_implementation::SMEFP32ToFP64,
         std::conditional_t<
             kernel::matmul_pack_details::Backend<
-                typename gemm::packing_t<Atom, Side>::FormatType,
+                typename ::vecops::matmul::packing_t<Atom, Side>::FormatType,
                 kernel::matmul_pack_implementation::SMEStagedTransform>::
                 template eligible<InputSpec, OutputSpec>,
             kernel::matmul_pack_implementation::SMEStagedTransform,
             std::conditional_t<
                 kernel::matmul_pack_details::Backend<
-                    typename gemm::packing_t<Atom, Side>::FormatType,
+                    typename ::vecops::matmul::packing_t<Atom, Side>::FormatType,
                     kernel::matmul_pack_implementation::SMEStagedFP16ToFP32>::
                     template eligible<InputSpec, OutputSpec>,
                 kernel::matmul_pack_implementation::SMEStagedFP16ToFP32,
                 std::conditional_t<
                     kernel::matmul_pack_details::Backend<
-                        typename gemm::packing_t<Atom, Side>::FormatType,
+                        typename ::vecops::matmul::packing_t<Atom, Side>::FormatType,
                         kernel::matmul_pack_implementation::SMEPostprocess>::
                         template eligible<InputSpec, OutputSpec>,
                     kernel::matmul_pack_implementation::SMEPostprocess,
@@ -56,16 +68,16 @@ using SelectedImplementation = std::conditional_t<
 
 } // namespace matmul_pack_details
 
-template <gemm::Atom Atom, gemm::Operand Side,
+template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           tensor::LayoutLike InputLayout>
 VECOPS_INLINE auto matmul_packed_layout(const InputLayout& input_layout) {
-  return gemm::packed_layout<Atom, Side>(input_layout);
+  return ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
 }
 
-template <gemm::Atom Atom, gemm::Operand Side,
+template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           typename InputSpec, typename OutputSpec>
-class MatmulPack {
-  using Packing = gemm::packing_t<Atom, Side>;
+class PreparedMatmulPack {
+  using Packing = ::vecops::matmul::packing_t<Atom, Side>;
 
 public:
   using ComputeType = typename Packing::Element;
@@ -75,7 +87,7 @@ public:
       kernel::matmul_pack_implementation::resource_requirements_t<
           Atom, Side, Implementation>;
 
-  VECOPS_INLINE MatmulPack(InputSpec input, OutputSpec output)
+  VECOPS_INLINE PreparedMatmulPack(InputSpec input, OutputSpec output)
       : input_(std::move(input)), output_(std::move(output)) {
     static_assert(InputSpec::InputTensor::Ndim == 2,
                   "matmul pack input must be rank two");
@@ -122,7 +134,7 @@ private:
                           input_.input_layout())) >= 0,
                   "matrix packing extents must be non-negative");
     VECOPS_ASSERT(
-        (gemm::is_corresponding_packed_layout<Atom, Side>(
+        (::vecops::matmul::is_corresponding_packed_layout<Atom, Side>(
             input_.input_layout(), output_.output_layout())),
         "packed output layout does not correspond to the input layout");
     if (tensor::numel(output_.output_layout()) != 0) {
@@ -166,21 +178,21 @@ private:
  * parallel operation instead of a nullable option on MatmulPack, so ordinary
  * packing keeps exactly the same template path and generated instructions.
  */
-template <gemm::Atom Atom,
+template <::vecops::matmul::Atom Atom,
           typename InputSpec, typename OutputSpec,
           typename CompensationOutputSpec>
-class MatmulPackBCompensated {
-  using Packing = gemm::packing_t<Atom, gemm::Operand::B>;
+class PreparedMatmulPackBCompensated {
+  using Packing = ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::B>;
 
 public:
   using ComputeType = typename Packing::Element;
   using Implementation = matmul_pack_details::SelectedImplementation<
-      Atom, gemm::Operand::B, InputSpec, OutputSpec>;
+      Atom, ::vecops::matmul::Operand::B, InputSpec, OutputSpec>;
   using ResourceRequirements =
       kernel::matmul_pack_implementation::resource_requirements_t<
-          Atom, gemm::Operand::B, Implementation>;
+          Atom, ::vecops::matmul::Operand::B, Implementation>;
 
-  VECOPS_INLINE MatmulPackBCompensated(
+  VECOPS_INLINE PreparedMatmulPackBCompensated(
       InputSpec input, OutputSpec output,
       CompensationOutputSpec compensation, int32_t a_zero_point)
       : input_(std::move(input)), output_(std::move(output)),
@@ -236,8 +248,8 @@ private:
                           tensor::size_value<1>(input_layout)) >= 0,
                   "matrix packing extents must be non-negative");
     VECOPS_ASSERT(
-        (gemm::is_corresponding_packed_layout<
-            Atom, gemm::Operand::B>(input_layout, output_.output_layout())),
+        (::vecops::matmul::is_corresponding_packed_layout<
+            Atom, ::vecops::matmul::Operand::B>(input_layout, output_.output_layout())),
         "packed B layout does not correspond to the input layout");
     VECOPS_ASSERT(
         static_cast<nint_t>(tensor::size_value<0>(
@@ -296,37 +308,49 @@ private:
   int32_t a_zero_point_;
 };
 
-template <gemm::Atom Atom, gemm::Operand Side,
+namespace matmul_pack_details {
+
+template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           tensor::InputOperand Input, tensor::OutputOperand Output>
-VECOPS_INLINE auto make_matmul_pack(Input&& input, Output&& output) {
-  using Element = typename gemm::packing_t<Atom, Side>::Element;
+VECOPS_INLINE auto prepare_matmul_pack(Input&& input, Output&& output) {
+  using Element = typename ::vecops::matmul::packing_t<Atom, Side>::Element;
   auto input_spec = tensor::as_input_spec<Element>(
       std::forward<Input>(input));
   auto output_spec = tensor::as_output_spec<Element>(
       std::forward<Output>(output));
-  return MatmulPack<
+  return PreparedMatmulPack<
       Atom, Side,
       std::remove_cvref_t<decltype(input_spec)>,
       std::remove_cvref_t<decltype(output_spec)>>{
           std::move(input_spec), std::move(output_spec)};
 }
 
-template <gemm::Atom Atom,
+template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
+          execution::ExecutionScope Scope,
+          tensor::InputOperand Input, tensor::OutputOperand Output>
+VECOPS_INLINE void run_matmul_pack(
+    Scope& scope, Input&& input, Output&& output) {
+  auto prepared = prepare_matmul_pack<Atom, Side>(
+      std::forward<Input>(input), std::forward<Output>(output));
+  prepared(scope);
+}
+
+template <::vecops::matmul::Atom Atom,
           tensor::InputOperand Input,
           tensor::OutputOperand Output,
           tensor::OutputOperand CompensationOutput>
-VECOPS_INLINE auto make_matmul_pack_b_compensated(
+VECOPS_INLINE auto prepare_matmul_pack_b_compensated(
     Input&& input, Output&& output, CompensationOutput&& compensation,
     int32_t a_zero_point) {
-  using Element = typename gemm::packing_t<
-      Atom, gemm::Operand::B>::Element;
+  using Element = typename ::vecops::matmul::packing_t<
+      Atom, ::vecops::matmul::Operand::B>::Element;
   auto input_spec = tensor::as_input_spec<Element>(
       std::forward<Input>(input));
   auto output_spec = tensor::as_output_spec<Element>(
       std::forward<Output>(output));
   auto compensation_spec = tensor::as_output_spec<int32_t>(
       std::forward<CompensationOutput>(compensation));
-  return MatmulPackBCompensated<
+  return PreparedMatmulPackBCompensated<
       Atom,
       std::remove_cvref_t<decltype(input_spec)>,
       std::remove_cvref_t<decltype(output_spec)>,
@@ -335,50 +359,103 @@ VECOPS_INLINE auto make_matmul_pack_b_compensated(
           std::move(compensation_spec), a_zero_point};
 }
 
-template <gemm::Atom Atom, gemm::Operand Side,
-          execution::ExecutionScope Scope,
-          tensor::InputOperand Input, tensor::OutputOperand Output>
-VECOPS_INLINE void matmul_pack(
-    Scope& scope, Input&& input, Output&& output) {
-  auto operation = make_matmul_pack<Atom, Side>(
-      std::forward<Input>(input), std::forward<Output>(output));
-  operation(scope);
-}
-
-template <gemm::Atom Atom, gemm::Operand Side,
-          tensor::InputOperand Input, tensor::OutputOperand Output>
-VECOPS_INLINE void matmul_pack(
-    kernel::WorkspaceView& workspace, Input&& input, Output&& output) {
-  ExecutionSession execution{workspace};
-  matmul_pack<Atom, Side>(
-      execution, std::forward<Input>(input), std::forward<Output>(output));
-}
-
-template <gemm::Atom Atom,
+template <::vecops::matmul::Atom Atom,
           execution::ExecutionScope Scope,
           tensor::InputOperand Input,
           tensor::OutputOperand Output,
           tensor::OutputOperand CompensationOutput>
-VECOPS_INLINE void matmul_pack_b_compensated(
+VECOPS_INLINE void run_matmul_pack_b_compensated(
     Scope& scope, Input&& input, Output&& output,
     CompensationOutput&& compensation, int32_t a_zero_point) {
-  auto operation = make_matmul_pack_b_compensated<Atom>(
+  auto prepared = prepare_matmul_pack_b_compensated<Atom>(
       std::forward<Input>(input), std::forward<Output>(output),
       std::forward<CompensationOutput>(compensation), a_zero_point);
-  operation(scope);
+  prepared(scope);
 }
 
-template <gemm::Atom Atom,
-          tensor::InputOperand Input,
-          tensor::OutputOperand Output,
-          tensor::OutputOperand CompensationOutput>
-VECOPS_INLINE void matmul_pack_b_compensated(
-    kernel::WorkspaceView& workspace, Input&& input, Output&& output,
-    CompensationOutput&& compensation, int32_t a_zero_point) {
-  ExecutionSession execution{workspace};
-  matmul_pack_b_compensated<Atom>(
-      execution, std::forward<Input>(input), std::forward<Output>(output),
-      std::forward<CompensationOutput>(compensation), a_zero_point);
+} // namespace matmul_pack_details
+
+template <typename Config>
+class MatmulPack {
+public:
+  const Config config;
+
+  VECOPS_INLINE constexpr explicit MatmulPack(Config cfg = {})
+      : config(std::move(cfg)) {}
+
+  template <tensor::InputOperand Input, tensor::OutputOperand Output>
+  VECOPS_INLINE nint_t required_workspace(const Input&, const Output&) const {
+    return 0;
+  }
+
+  template <execution::ExecutionScope Scope,
+            tensor::InputOperand Input, tensor::OutputOperand Output>
+  VECOPS_INLINE void operator()(
+      Scope& scope, Input&& input, Output&& output) const {
+    auto prepared = matmul_pack_details::prepare_matmul_pack<
+        typename Config::Atom, Config::side>(
+            std::forward<Input>(input), std::forward<Output>(output));
+    prepared(scope);
+  }
+
+  template <tensor::InputOperand Input, tensor::OutputOperand Output>
+  VECOPS_INLINE void operator()(
+      kernel::WorkspaceView& workspace, Input&& input, Output&& output) const {
+    ExecutionSession execution{workspace};
+    (*this)(execution, std::forward<Input>(input),
+            std::forward<Output>(output));
+  }
+};
+
+template <typename Config>
+class MatmulPackBCompensated {
+public:
+  const Config config;
+
+  VECOPS_INLINE constexpr explicit MatmulPackBCompensated(Config cfg = {})
+      : config(std::move(cfg)) {}
+
+  template <tensor::InputOperand Input, tensor::OutputOperand Output,
+            tensor::OutputOperand CompensationOutput>
+  VECOPS_INLINE nint_t required_workspace(
+      const Input&, const Output&, const CompensationOutput&) const {
+    return 0;
+  }
+
+  template <execution::ExecutionScope Scope,
+            tensor::InputOperand Input, tensor::OutputOperand Output,
+            tensor::OutputOperand CompensationOutput>
+  VECOPS_INLINE void operator()(
+      Scope& scope, Input&& input, Output&& output,
+      CompensationOutput&& compensation) const {
+    auto prepared = matmul_pack_details::prepare_matmul_pack_b_compensated<
+        typename Config::Atom>(
+            std::forward<Input>(input), std::forward<Output>(output),
+            std::forward<CompensationOutput>(compensation),
+            config.a_zero_point);
+    prepared(scope);
+  }
+
+  template <tensor::InputOperand Input, tensor::OutputOperand Output,
+            tensor::OutputOperand CompensationOutput>
+  VECOPS_INLINE void operator()(
+      kernel::WorkspaceView& workspace, Input&& input, Output&& output,
+      CompensationOutput&& compensation) const {
+    ExecutionSession execution{workspace};
+    (*this)(execution, std::forward<Input>(input),
+            std::forward<Output>(output),
+            std::forward<CompensationOutput>(compensation));
+  }
+};
+
+template <typename Config>
+VECOPS_INLINE constexpr auto matmul_pack(Config config) {
+  return MatmulPack<Config>{std::move(config)};
+}
+
+template <typename Config>
+VECOPS_INLINE constexpr auto matmul_pack_b_compensated(Config config) {
+  return MatmulPackBCompensated<Config>{std::move(config)};
 }
 
 } // namespace vecops::ops

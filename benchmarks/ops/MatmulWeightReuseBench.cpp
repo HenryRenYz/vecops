@@ -53,33 +53,33 @@ void register_matmul_weight_reuse_range() {
 namespace vecops::bench::matmul {
 
 #if defined(ARCH_X86_FAMILY)
-template <> struct AtomName<gemm::AMX_BF16F32> {
+template <> struct AtomName<::vecops::matmul::AMX_BF16F32> {
   static constexpr const char* value = "AMX_BF16F32";
 };
 #if defined(HAS_AMX_FP16)
-template <> struct AtomName<gemm::AMX_F16F32> {
+template <> struct AtomName<::vecops::matmul::AMX_F16F32> {
   static constexpr const char* value = "AMX_F16F32";
 };
 #endif
 template <typename A, typename B>
-using WeightReuseI8 = gemm::AMX_I8I32<A, B>;
+using WeightReuseI8 = ::vecops::matmul::AMX_I8I32<A, B>;
 #else
-template <> struct AtomName<gemm::SME_BF16F32> {
+template <> struct AtomName<::vecops::matmul::SME_BF16F32> {
   static constexpr const char* value = "SME_BF16F32";
 };
-template <> struct AtomName<gemm::SME_F16F32> {
+template <> struct AtomName<::vecops::matmul::SME_F16F32> {
   static constexpr const char* value = "SME_F16F32";
 };
-template <> struct AtomName<gemm::SME_F32F32> {
+template <> struct AtomName<::vecops::matmul::SME_F32F32> {
   static constexpr const char* value = "SME_F32F32";
 };
 #if defined(HAS_SME_F64F64)
-template <> struct AtomName<gemm::SME_F64F64> {
+template <> struct AtomName<::vecops::matmul::SME_F64F64> {
   static constexpr const char* value = "SME_F64F64";
 };
 #endif
 template <typename A, typename B>
-using WeightReuseI8 = gemm::SME_I8I32<A, B>;
+using WeightReuseI8 = ::vecops::matmul::SME_I8I32<A, B>;
 #endif
 
 using WeightReuseI8S8S8 = WeightReuseI8<int8_t, int8_t>;
@@ -247,9 +247,9 @@ void register_matmul_weight_reuse_shard() {
   if constexpr (LifecyclePipeline == 0) {
     register_all_batched_weight_reuse_modes<
 #if defined(ARCH_X86_FAMILY)
-        gemm::AMX_BF16F32,
+        ::vecops::matmul::AMX_BF16F32,
 #else
-        gemm::SME_BF16F32,
+        ::vecops::matmul::SME_BF16F32,
 #endif
         bfloat16_t, bfloat16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu>(
@@ -262,9 +262,9 @@ void register_matmul_weight_reuse_shard() {
   if constexpr (LifecyclePipeline == 1) {
     register_all_batched_weight_reuse_modes<
 #if defined(ARCH_X86_FAMILY)
-        gemm::AMX_BF16F32,
+        ::vecops::matmul::AMX_BF16F32,
 #else
-        gemm::SME_BF16F32,
+        ::vecops::matmul::SME_BF16F32,
 #endif
         float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Relu>(
@@ -286,9 +286,9 @@ void register_matmul_weight_reuse_shard() {
   if constexpr (DTypeShard == 0) {
     register_all_batched_weight_reuse_modes<
 #if defined(ARCH_X86_FAMILY)
-        gemm::AMX_BF16F32,
+        ::vecops::matmul::AMX_BF16F32,
 #else
-        gemm::SME_BF16F32,
+        ::vecops::matmul::SME_BF16F32,
 #endif
         bfloat16_t, bfloat16_t, bfloat16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
@@ -298,14 +298,14 @@ void register_matmul_weight_reuse_shard() {
 #if defined(ARCH_X86_FAMILY)
 #if defined(HAS_AMX_FP16)
     register_all_batched_weight_reuse_modes<
-        gemm::AMX_F16F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::AMX_F16F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float32_t, DTypePart>(
             weight_reuse_dtype_probe_cases());
 #endif
 #else
     register_all_batched_weight_reuse_modes<
-        gemm::SME_F16F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::SME_F16F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float32_t, DTypePart>(
             weight_reuse_dtype_probe_cases());
@@ -313,7 +313,7 @@ void register_matmul_weight_reuse_shard() {
   } else if constexpr (DTypeShard == 2) {
 #if !defined(ARCH_X86_FAMILY)
     register_all_batched_weight_reuse_modes<
-        gemm::SME_F32F32, float32_t, float32_t, float32_t,
+        ::vecops::matmul::SME_F32F32, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float32_t, DTypePart>(
             weight_reuse_dtype_probe_cases());
@@ -321,7 +321,7 @@ void register_matmul_weight_reuse_shard() {
   } else if constexpr (DTypeShard == 3) {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_all_batched_weight_reuse_modes<
-        gemm::SME_F64F64, float64_t, float64_t, float64_t,
+        ::vecops::matmul::SME_F64F64, float64_t, float64_t, float64_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float64_t, DTypePart>(
             weight_reuse_dtype_probe_cases());

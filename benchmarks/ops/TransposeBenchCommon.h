@@ -271,23 +271,20 @@ void run_case(
       input.data(), make_layout(input_shape));
   auto output_tensor = make_tensor(
       output.data(), make_layout(output_shape));
-  auto operation = ops::make_transpose<ComputeT>(input_tensor, output_tensor);
+  auto operation = ops::transpose(ops::TransposeConfig<ComputeT>{});
   ExecutionSession execution{};
 
-  execution.with_region(
-      operation, [&](auto& region) VECOPS_INLINE_LAMBDA {
-        operation(region);
-        if (!verify_output<InputT, OutputT, ComputeT>(
-                input, output, rows, columns)) {
-          state.SkipWithError("Transpose output verification failed");
-          return;
-        }
-        for (auto _ : state) {
-          benchmark::DoNotOptimize(input.data());
-          operation(region);
-          benchmark::ClobberMemory();
-        }
-      });
+  operation(execution, input_tensor, output_tensor);
+  if (!verify_output<InputT, OutputT, ComputeT>(
+          input, output, rows, columns)) {
+    state.SkipWithError("Transpose output verification failed");
+    return;
+  }
+  for (auto _ : state) {
+    benchmark::DoNotOptimize(input.data());
+    operation(execution, input_tensor, output_tensor);
+    benchmark::ClobberMemory();
+  }
 
   const auto bytes_per_iteration = static_cast<int64_t>(
       elements * static_cast<nint_t>(sizeof(InputT) + sizeof(OutputT)));

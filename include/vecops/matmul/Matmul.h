@@ -1,7 +1,7 @@
 #ifndef VECOPS_MATMUL_MATMUL_H
 #define VECOPS_MATMUL_MATMUL_H
 
-// Compatibility include. New operator code should include vecops/ops/Matmul.h.
+// Domain include forwarding to the public Config-only operator surface.
 #include "vecops/ops/Matmul.h"
 
 #endif // VECOPS_MATMUL_MATMUL_H

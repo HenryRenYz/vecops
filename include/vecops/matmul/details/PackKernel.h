@@ -12,21 +12,21 @@ namespace vecops::kernel {
 
 namespace matmul_pack_implementation {
 
-template <gemm::Atom Atom, gemm::Operand Side, typename Implementation>
+template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side, typename Implementation>
 using resource_requirements_t = typename matmul_pack_details::Backend<
-    typename gemm::packing_t<Atom, Side>::FormatType,
+    typename ::vecops::matmul::packing_t<Atom, Side>::FormatType,
     Implementation>::ResourceRequirements;
 
 } // namespace matmul_pack_implementation
 
-template <gemm::Atom Atom, gemm::Operand Side,
+template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           execution::ExecutionScope Scope,
           typename Source, typename Destination,
           typename Implementation = matmul_pack_implementation::Vector>
 VECOPS_ALWAYS_INLINE void matmul_pack_bound(
     Scope& scope, const Source& source, Destination& destination,
     Implementation = {}) {
-  using Packing = gemm::packing_t<Atom, Side>;
+  using Packing = ::vecops::matmul::packing_t<Atom, Side>;
   static_assert(std::same_as<typename Source::ComputeType,
                              typename Packing::Element>);
   static_assert(std::same_as<typename Destination::ComputeType,
@@ -36,7 +36,7 @@ VECOPS_ALWAYS_INLINE void matmul_pack_bound(
   Backend::template run<Atom, Side>(scope, source, destination);
 }
 
-template <gemm::Atom Atom,
+template <::vecops::matmul::Atom Atom,
           execution::ExecutionScope Scope,
           typename Source, typename Destination,
           typename CompensationDestination,
@@ -45,7 +45,7 @@ VECOPS_ALWAYS_INLINE void matmul_pack_b_compensated_bound(
     Scope& scope, const Source& source, Destination& destination,
     CompensationDestination& compensation, int32_t a_zero_point,
     Implementation = {}) {
-  using Packing = gemm::packing_t<Atom, gemm::Operand::B>;
+  using Packing = ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::B>;
   static_assert(std::same_as<typename Atom::TA, uint8_t>);
   static_assert(std::same_as<typename Atom::TB, int8_t>);
   static_assert(std::same_as<typename Atom::TAcc, int32_t>);

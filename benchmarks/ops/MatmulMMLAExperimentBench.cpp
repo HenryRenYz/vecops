@@ -34,14 +34,14 @@ void register_mmla_experiment_shard();
 
 namespace vecops::bench::matmul::mmla_experiment {
 
-using S8S8 = gemm::SME_I8I32<int8_t, int8_t>;
-using U8U8 = gemm::SME_I8I32<uint8_t, uint8_t>;
+using S8S8 = ::vecops::matmul::SME_I8I32<int8_t, int8_t>;
+using U8U8 = ::vecops::matmul::SME_I8I32<uint8_t, uint8_t>;
 
 template <typename Atom>
 struct Traits;
 
 template <>
-struct Traits<gemm::SME_BF16F32> {
+struct Traits<::vecops::matmul::SME_BF16F32> {
   using Element = bfloat16_t;
   using Acc = float32_t;
   using InputVec = svbfloat16_t;
@@ -209,7 +209,7 @@ VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void packed_ab_mmla(
     nint_t m, nint_t n, nint_t logical_k, nint_t panel) {
   using Op = Traits<Atom>;
   constexpr nint_t KPack =
-      gemm::packing_t<Atom, gemm::Operand::A>::KPack;
+      ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::A>::KPack;
   const nint_t groups = ceil_div(logical_k, KPack);
   const nint_t group_stride = panel * KPack;
 
@@ -263,7 +263,7 @@ template <typename Atom>
 inline const char* type_name();
 
 template <>
-inline const char* type_name<gemm::SME_BF16F32>() { return "bf16"; }
+inline const char* type_name<::vecops::matmul::SME_BF16F32>() { return "bf16"; }
 
 template <>
 inline const char* type_name<S8S8>() { return "s8s8"; }
@@ -291,9 +291,9 @@ void run_mmla_with_extents(
   const auto a_layout = make_layout(make_shape(m, k));
   const auto b_layout = make_layout(make_shape(n, k));
   const auto packed_a_layout =
-      ops::matmul_packed_layout<Atom, gemm::Operand::A>(a_layout);
+      ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(a_layout);
   const auto packed_b_layout =
-      ops::matmul_packed_layout<Atom, gemm::Operand::B>(b_layout);
+      ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::B>(b_layout);
   const nint_t packed_a_elements = numel(packed_a_layout);
   const nint_t packed_b_elements = numel(packed_b_layout);
   const nint_t packed_a_bytes = packed_a_elements * nint_t{sizeof(TA)};
@@ -311,9 +311,9 @@ void run_mmla_with_extents(
   auto packed_a_tensor = make_tensor(packed_a, packed_a_layout);
   auto packed_b_tensor = make_tensor(packed_b, packed_b_layout);
   ExecutionSession execution{};
-  ops::matmul_pack<Atom, gemm::Operand::A>(
+  ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
       execution, a_tensor, packed_a_tensor);
-  ops::matmul_pack<Atom, gemm::Operand::B>(
+  ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
       execution, b_tensor, packed_b_tensor);
 
   const nint_t panel = packed_a_layout.shape()[2];
@@ -427,7 +427,7 @@ void register_mmla_experiment_shard() {
   constexpr std::size_t CaseCount =
       ExperimentShapes.size() * ExperimentKValues.size();
   if constexpr (Shard / 2 == 0) {
-    register_type<gemm::SME_BF16F32, Extents>(
+    register_type<::vecops::matmul::SME_BF16F32, Extents>(
         std::make_index_sequence<CaseCount>{});
   } else if constexpr (Shard / 2 == 1) {
     register_type<S8S8, Extents>(std::make_index_sequence<CaseCount>{});

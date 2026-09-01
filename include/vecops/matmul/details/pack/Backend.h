@@ -19,7 +19,7 @@ struct Backend {
   template <typename InputSpec, typename OutputSpec>
   static constexpr bool eligible = false;
 
-  template <gemm::Atom Atom, gemm::Operand Side, typename... Args>
+  template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side, typename... Args>
   VECOPS_ALWAYS_INLINE static void run(Args&&...) {
     static_assert(
         execution::details::dependent_false_v<Format, Implementation, Args...>,

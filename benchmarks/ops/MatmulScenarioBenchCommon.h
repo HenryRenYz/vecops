@@ -248,28 +248,28 @@ inline constexpr bool supported_asymmetric_pipeline_pair_v =
     (uses_single_asymmetric_correction_v<PipelineA> &&
      !uses_asymmetric_correction_v<PipelineB>);
 
-template <gemm::Operand Side, typename Compute, InputPipeline Pipeline>
+template <::vecops::matmul::Operand Side, typename Compute, InputPipeline Pipeline>
 constexpr Compute scenario_input_zero_point() {
   if constexpr (Pipeline == InputPipeline::AsymmetricQuantize4Zp3Zp5) {
     static_assert(std::is_unsigned_v<Compute>);
-    return static_cast<Compute>(Side == gemm::Operand::A ? 3 : 5);
+    return static_cast<Compute>(Side == ::vecops::matmul::Operand::A ? 3 : 5);
   } else if constexpr (
       Pipeline == InputPipeline::AsymmetricQuantize4Zp3 &&
-      Side == gemm::Operand::A && std::is_unsigned_v<Compute>) {
+      Side == ::vecops::matmul::Operand::A && std::is_unsigned_v<Compute>) {
     return static_cast<Compute>(3);
   } else {
     return Compute{};
   }
 }
 
-template <gemm::Operand Side, typename Compute, typename Memory,
+template <::vecops::matmul::Operand Side, typename Compute, typename Memory,
           InputPipeline Pipeline>
 Compute reference_input(
     Memory value, nint_t row_scale_index = 0,
     const ScenarioInputParameters& parameters = {}) {
   if constexpr (
       Pipeline == InputPipeline::RuntimePerRowAsymmetricQuantize) {
-    static_assert(Side == gemm::Operand::A);
+    static_assert(Side == ::vecops::matmul::Operand::A);
     static_assert(std::is_unsigned_v<Compute>);
     return static_cast<Compute>(
         static_cast<float32_t>(value) *
@@ -379,14 +379,14 @@ Memory reference_output(
   }
 }
 
-template <gemm::Operand Side, typename Compute, InputPipeline Pipeline,
+template <::vecops::matmul::Operand Side, typename Compute, InputPipeline Pipeline,
           typename Tensor>
 auto make_scenario_input(
     const Tensor& tensor,
     const ScenarioInputParameters& parameters = {}) {
   if constexpr (
       Pipeline == InputPipeline::RuntimePerRowAsymmetricQuantize) {
-    static_assert(Side == gemm::Operand::A);
+    static_assert(Side == ::vecops::matmul::Operand::A);
     static_assert(std::is_unsigned_v<Compute>);
     auto quantize = ::vecops::matmul::
         make_runtime_per_row_asymmetric_quantize_transform({
@@ -826,7 +826,7 @@ void run_batched_scenario_with_extents(
           Acc sum_a{};
           for (nint_t kk = 0; kk < k; ++kk) {
             sum_a += static_cast<Acc>(reference_input<
-                gemm::Operand::A, TA, MemoryA, InPipeline>(
+                ::vecops::matmul::Operand::A, TA, MemoryA, InPipeline>(
                 a[static_cast<std::size_t>(
                     (((BroadcastA ? 0 : bi) * m + row) * k + kk))]));
           }
@@ -834,7 +834,7 @@ void run_batched_scenario_with_extents(
             Acc sum_b{};
             for (nint_t kk = 0; kk < k; ++kk) {
               sum_b += static_cast<Acc>(reference_input<
-                  gemm::Operand::B, TB, MemoryB, InPipelineB>(
+                  ::vecops::matmul::Operand::B, TB, MemoryB, InPipelineB>(
                   b[static_cast<std::size_t>(
                       (b_batch * n + col) * k + kk)]));
             }
@@ -856,7 +856,7 @@ void run_batched_scenario_with_extents(
           Acc sum{};
           for (nint_t kk = 0; kk < k; ++kk) {
             sum += static_cast<Acc>(reference_input<
-                gemm::Operand::B, TB, MemoryB, InPipelineB>(
+                ::vecops::matmul::Operand::B, TB, MemoryB, InPipelineB>(
                 b[static_cast<std::size_t>((bi * n + col) * k + kk)]));
           }
           asymmetric_correction[static_cast<std::size_t>(bi * n + col)] =
@@ -910,15 +910,15 @@ void run_batched_scenario_with_extents(
   const auto c_input_tensor =
       tensor::make_tensor(c_input.data(), c_input_layout);
   const auto a_operand = make_scenario_input<
-      gemm::Operand::A, TA, InPipeline>(a_tensor, input_parameters);
+      ::vecops::matmul::Operand::A, TA, InPipeline>(a_tensor, input_parameters);
   const auto b_operand = make_scenario_input<
-      gemm::Operand::B, TB, InPipelineB>(b_tensor);
+      ::vecops::matmul::Operand::B, TB, InPipelineB>(b_tensor);
   const auto b_matrix_operand =
-      make_scenario_input<gemm::Operand::B, TB, InPipelineB>(b_matrix_tensor);
+      make_scenario_input<::vecops::matmul::Operand::B, TB, InPipelineB>(b_matrix_tensor);
   const auto c_output = make_scenario_output<Acc, OutPipeline>(
       c_tensor, output_parameters);
   const auto packed_b_layout = ops::matmul_packed_layout<
-      Atom, gemm::Operand::B>(b_matrix_tensor.layout());
+      Atom, ::vecops::matmul::Operand::B>(b_matrix_tensor.layout());
   const nint_t packed_b_elements = tensor::numel(packed_b_layout);
   const nint_t packed_b_bytes = scenario_packs_b_v<Mode>
       ? packed_b_elements * static_cast<nint_t>(sizeof(TB))
@@ -937,18 +937,18 @@ void run_batched_scenario_with_extents(
     if constexpr (scenario_packs_b_v<Mode>) {
       if constexpr (uses_single_asymmetric_correction_v<InPipeline>) {
 #if defined(ARCH_X86_FAMILY)
-        ops::matmul_pack_b_compensated<Atom>(
+        ops::matmul_pack_details::run_matmul_pack_b_compensated<Atom>(
             execution, b_matrix_operand, packed_b_tensor,
             packed_b_compensation_tensor,
             uses_runtime_per_row_quantization_v<InPipeline>
                 ? input_zero_point
                 : int32_t{3});
 #else
-        ops::matmul_pack<Atom, gemm::Operand::B>(
+        ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
             execution, b_matrix_operand, packed_b_tensor);
 #endif
       } else {
-        ops::matmul_pack<Atom, gemm::Operand::B>(
+        ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
             execution, b_matrix_operand, packed_b_tensor);
       }
     }
@@ -977,15 +977,15 @@ void run_batched_scenario_with_extents(
       }();
       const auto correction_tensor = tensor::make_tensor(
           asymmetric_correction.data(), correction_layout);
-      return ops::make_matmul_accumulate<Atom>(
+      return ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, a_operand, selected_b,
           tensor::input<Acc>(correction_tensor), c_output);
     } else if constexpr (uses_c_prologue_v<OutPipeline>) {
-      return ops::make_matmul_accumulate<Atom>(
+      return ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, a_operand, selected_b,
           tensor::input<Acc>(c_input_tensor), c_output);
     } else {
-      return ops::make_matmul<Atom>(
+      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, a_operand, selected_b, c_output);
     }
   };
@@ -1032,11 +1032,11 @@ void run_batched_scenario_with_extents(
     for (nint_t kk = 0; kk < k; ++kk) {
       const nint_t a_scale_index = a_batch * m + row;
       const TA av = reference_input<
-          gemm::Operand::A, TA, MemoryA, InPipeline>(
+          ::vecops::matmul::Operand::A, TA, MemoryA, InPipeline>(
           a[static_cast<std::size_t>((a_batch * m + row) * k + kk)],
           a_scale_index, input_parameters);
       const TB bv = reference_input<
-          gemm::Operand::B, TB, MemoryB, InPipelineB>(
+          ::vecops::matmul::Operand::B, TB, MemoryB, InPipelineB>(
           b[static_cast<std::size_t>((b_batch * n + col) * k + kk)]);
       expected += static_cast<Acc>(av) * static_cast<Acc>(bv);
     }
@@ -1988,14 +1988,14 @@ void run_scenario_with_extents(
         Acc sum_a{};
         for (nint_t kk = 0; kk < k; ++kk) {
           sum_a += static_cast<Acc>(reference_input<
-              gemm::Operand::A, TA, MemoryA, InPipeline>(
+              ::vecops::matmul::Operand::A, TA, MemoryA, InPipeline>(
               a[static_cast<std::size_t>(row * k + kk)]));
         }
         for (nint_t col = 0; col < n; ++col) {
           Acc sum_b{};
           for (nint_t kk = 0; kk < k; ++kk) {
             sum_b += static_cast<Acc>(reference_input<
-                gemm::Operand::B, TB, MemoryB, InPipelineB>(
+                ::vecops::matmul::Operand::B, TB, MemoryB, InPipelineB>(
                 b[static_cast<std::size_t>(col * k + kk)]));
           }
           asymmetric_correction[static_cast<std::size_t>(row * n + col)] =
@@ -2013,7 +2013,7 @@ void run_scenario_with_extents(
         Acc sum{};
         for (nint_t kk = 0; kk < k; ++kk) {
           sum += static_cast<Acc>(reference_input<
-              gemm::Operand::B, TB, MemoryB, InPipelineB>(
+              ::vecops::matmul::Operand::B, TB, MemoryB, InPipelineB>(
               b[static_cast<std::size_t>(col * k + kk)]));
         }
         asymmetric_correction[static_cast<std::size_t>(col)] =
@@ -2040,16 +2040,16 @@ void run_scenario_with_extents(
   const auto c_input_tensor =
       tensor::make_tensor(c_input.data(), c_input_layout);
   const auto a_operand = make_scenario_input<
-      gemm::Operand::A, TA, InPipeline>(a_tensor, input_parameters);
+      ::vecops::matmul::Operand::A, TA, InPipeline>(a_tensor, input_parameters);
   const auto b_operand = make_scenario_input<
-      gemm::Operand::B, TB, InPipelineB>(b_tensor);
+      ::vecops::matmul::Operand::B, TB, InPipelineB>(b_tensor);
   const auto c_output = make_scenario_output<Acc, OutPipeline>(
       c_tensor, output_parameters);
 
   const auto packed_a_layout = ops::matmul_packed_layout<
-      Atom, gemm::Operand::A>(a_tensor.layout());
+      Atom, ::vecops::matmul::Operand::A>(a_tensor.layout());
   const auto packed_b_layout = ops::matmul_packed_layout<
-      Atom, gemm::Operand::B>(b_tensor.layout());
+      Atom, ::vecops::matmul::Operand::B>(b_tensor.layout());
   const nint_t packed_a_elements = tensor::numel(packed_a_layout);
   const nint_t packed_b_elements = tensor::numel(packed_b_layout);
   const nint_t packed_a_bytes = scenario_packs_a_v<Mode>
@@ -2078,7 +2078,7 @@ void run_scenario_with_extents(
 
   auto pack_a_once = [&](auto& execution) VECOPS_INLINE_LAMBDA {
     if constexpr (scenario_packs_a_v<Mode>) {
-      ops::matmul_pack<Atom, gemm::Operand::A>(
+      ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
           execution, a_operand, packed_a_tensor);
     }
   };
@@ -2086,18 +2086,18 @@ void run_scenario_with_extents(
     if constexpr (scenario_packs_b_v<Mode>) {
       if constexpr (uses_single_asymmetric_correction_v<InPipeline>) {
 #if defined(ARCH_X86_FAMILY)
-        ops::matmul_pack_b_compensated<Atom>(
+        ops::matmul_pack_details::run_matmul_pack_b_compensated<Atom>(
             execution, b_operand, packed_b_tensor,
             packed_b_compensation_tensor,
             uses_runtime_per_row_quantization_v<InPipeline>
                 ? input_zero_point
                 : int32_t{3});
 #else
-        ops::matmul_pack<Atom, gemm::Operand::B>(
+        ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
             execution, b_operand, packed_b_tensor);
 #endif
       } else {
-        ops::matmul_pack<Atom, gemm::Operand::B>(
+        ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
             execution, b_operand, packed_b_tensor);
       }
     }
@@ -2123,15 +2123,15 @@ void run_scenario_with_extents(
                   tensor::make_strides(cint<0>, cint<1>));
             }
           }());
-      return ops::make_matmul_accumulate<Atom>(
+      return ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, selected_a, selected_b,
           tensor::input<Acc>(correction_tensor), c_output);
     } else if constexpr (uses_c_prologue_v<OutPipeline>) {
-      return ops::make_matmul_accumulate<Atom>(
+      return ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, selected_a, selected_b,
           tensor::input<Acc>(c_input_tensor), c_output);
     } else {
-      return ops::make_matmul<Atom>(
+      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, selected_a, selected_b, c_output);
     }
   };
@@ -2170,11 +2170,11 @@ void run_scenario_with_extents(
     }
     for (nint_t kk = 0; kk < k; ++kk) {
       const TA av = reference_input<
-          gemm::Operand::A, TA, MemoryA, InPipeline>(
+          ::vecops::matmul::Operand::A, TA, MemoryA, InPipeline>(
           a[static_cast<std::size_t>(row * k + kk)], row,
           input_parameters);
       const TB bv = reference_input<
-          gemm::Operand::B, TB, MemoryB, InPipelineB>(
+          ::vecops::matmul::Operand::B, TB, MemoryB, InPipelineB>(
           b[static_cast<std::size_t>(col * k + kk)]);
       expected += static_cast<Acc>(av) * static_cast<Acc>(bv);
     }

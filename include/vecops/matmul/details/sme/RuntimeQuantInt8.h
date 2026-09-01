@@ -26,9 +26,9 @@ using SpecOf = std::remove_cvref_t<decltype(
 template <typename Access>
 using InputLayoutOf = typename SpecOf<Access>::InputLayout;
 
-template <gemm::Atom Atom, gemm::Operand Side, typename Access>
+template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side, typename Access>
 inline constexpr bool is_packed_access_v =
-    gemm::is_packed_layout<Atom, Side, InputLayoutOf<Access>>();
+    ::vecops::matmul::is_packed_layout<Atom, Side, InputLayoutOf<Access>>();
 
 } // namespace runtime_quant_int8_details
 
@@ -42,10 +42,10 @@ void fused_runtime_quant_int8_packed_b_gemv_1x4vl(
     float32_t quant_multiplier, int32_t input_zero_point,
     float32_t row_dequant_scale);
 
-template <gemm::Atom Atom,
+template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 inline constexpr bool fused_runtime_quant_int8_candidate_v =
-    std::same_as<Atom, gemm::SME_I8I32<uint8_t, int8_t>> &&
+    std::same_as<Atom, ::vecops::matmul::SME_I8I32<uint8_t, int8_t>> &&
     A::Rank == 2 && B::Rank == 4 &&
     CInput::Rank == 2 && COutput::Rank == 2 &&
     std::same_as<typename A::MemoryElement, float32_t> &&
@@ -53,7 +53,7 @@ inline constexpr bool fused_runtime_quant_int8_candidate_v =
     is_runtime_per_row_asymmetric_quantize_transform_v<
         typename A::Transform> &&
     runtime_quant_int8_details::is_packed_access_v<
-        Atom, gemm::Operand::B, B> &&
+        Atom, ::vecops::matmul::Operand::B, B> &&
     std::same_as<typename B::ComputeType, int8_t> &&
     std::same_as<typename CInput::MemoryElement, int32_t> &&
     std::same_as<typename CInput::ComputeType, int32_t> &&
@@ -63,7 +63,7 @@ inline constexpr bool fused_runtime_quant_int8_candidate_v =
     is_runtime_per_row_column_dequantize_transform_v<
         typename COutput::Transform>;
 
-template <gemm::Atom Atom,
+template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) bool
 try_fused_runtime_quant_int8_packed_b_gemv(
@@ -80,7 +80,7 @@ try_fused_runtime_quant_int8_packed_b_gemv(
     const nint_t output_block = 4 * vec::size(AccTag{});
     const nint_t ordinary_vl_bytes = vec::size(ATag{});
     const nint_t packed_panel = static_cast<nint_t>(
-        gemm::packing_t<Atom, gemm::Operand::B>::panel());
+        ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::B>::panel());
     if (logical_m != 1 || logical_n <= 0 || logical_k < 0 ||
         logical_n % output_block != 0 || logical_k % KChunk != 0 ||
         ordinary_vl_bytes != KChunk ||

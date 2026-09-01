@@ -22,8 +22,8 @@ static_assert(VECOPS_TARGET_SHARD_COUNT == 8);
 
 template <typename Atom, nint_t M, nint_t N, nint_t K>
 void run_mixed_packing_atom() {
-  test::matmul::check_mixed_packing<Atom, gemm::Operand::A>(M, N, K);
-  test::matmul::check_mixed_packing<Atom, gemm::Operand::B>(M, N, K);
+  test::matmul::check_mixed_packing<Atom, ::vecops::matmul::Operand::A>(M, N, K);
+  test::matmul::check_mixed_packing<Atom, ::vecops::matmul::Operand::B>(M, N, K);
 }
 
 template <typename Atom, meta::ValueType KExtent>
@@ -49,12 +49,12 @@ void check_both_packed(
       tensor::make_shape(meta::Any{n}, k_extent));
   auto at = tensor::make_tensor(a.data(), al);
   auto bt = tensor::make_tensor(b.data(), bl);
-  auto apl = ops::matmul_packed_layout<Atom, gemm::Operand::A>(al);
-  auto bpl = ops::matmul_packed_layout<Atom, gemm::Operand::B>(bl);
-  static_assert(gemm::is_packed_layout<
-      Atom, gemm::Operand::A, decltype(apl)>());
-  static_assert(gemm::is_packed_layout<
-      Atom, gemm::Operand::B, decltype(bpl)>());
+  auto apl = ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(al);
+  auto bpl = ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::B>(bl);
+  static_assert(::vecops::matmul::is_packed_layout<
+      Atom, ::vecops::matmul::Operand::A, decltype(apl)>());
+  static_assert(::vecops::matmul::is_packed_layout<
+      Atom, ::vecops::matmul::Operand::B, decltype(bpl)>());
 
   const nint_t a_bytes = tensor::numel(apl) *
       static_cast<nint_t>(sizeof(TA));
@@ -69,13 +69,13 @@ void check_both_packed(
   auto apt = tensor::make_tensor(ap, apl);
   auto bpt = tensor::make_tensor(bp, bpl);
   ExecutionSession pack_execution{};
-  ops::matmul_pack<Atom, gemm::Operand::A>(pack_execution, at, apt);
-  ops::matmul_pack<Atom, gemm::Operand::B>(pack_execution, bt, bpt);
+  ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(pack_execution, at, apt);
+  ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(pack_execution, bt, bpt);
 
   auto ct = tensor::make_tensor(
       c.data(), tensor::make_layout(
                     tensor::make_shape(meta::Any{m}, meta::Any{n})));
-  auto operation = ops::make_matmul<Atom>(
+  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
       meta::Any{m}, meta::Any{n}, k_extent, apt, bpt, ct);
   static_assert(std::same_as<
       typename decltype(operation)::KExtentType, KExtent>);
@@ -115,79 +115,79 @@ void run_both_packed_atom() {
 #if defined(ARCH_X86_FAMILY)
 
 #if VECOPS_TARGET_SHARD_INDEX == 0
-template void run_mixed_packing_atom<gemm::AMX_BF16F32, 19, 21, 65>();
-template void run_both_packed_atom<gemm::AMX_BF16F32, 19, 21, 65>();
+template void run_mixed_packing_atom<::vecops::matmul::AMX_BF16F32, 19, 21, 65>();
+template void run_both_packed_atom<::vecops::matmul::AMX_BF16F32, 19, 21, 65>();
 #elif VECOPS_TARGET_SHARD_INDEX == 1
 #if defined(HAS_AMX_FP16)
-template void run_mixed_packing_atom<gemm::AMX_F16F32, 19, 21, 65>();
-template void run_both_packed_atom<gemm::AMX_F16F32, 19, 21, 65>();
+template void run_mixed_packing_atom<::vecops::matmul::AMX_F16F32, 19, 21, 65>();
+template void run_both_packed_atom<::vecops::matmul::AMX_F16F32, 19, 21, 65>();
 #endif
 #elif VECOPS_TARGET_SHARD_INDEX == 2
 #if defined(HAS_AMX_INT8)
 template void run_mixed_packing_atom<
-    gemm::AMX_I8I32<int8_t, int8_t>, 19, 21, 65>();
+    ::vecops::matmul::AMX_I8I32<int8_t, int8_t>, 19, 21, 65>();
 template void run_both_packed_atom<
-    gemm::AMX_I8I32<int8_t, int8_t>, 19, 21, 65>();
+    ::vecops::matmul::AMX_I8I32<int8_t, int8_t>, 19, 21, 65>();
 #endif
 #elif VECOPS_TARGET_SHARD_INDEX == 3
 #if defined(HAS_AMX_INT8)
 template void run_mixed_packing_atom<
-    gemm::AMX_I8I32<int8_t, uint8_t>, 19, 21, 65>();
+    ::vecops::matmul::AMX_I8I32<int8_t, uint8_t>, 19, 21, 65>();
 template void run_both_packed_atom<
-    gemm::AMX_I8I32<int8_t, uint8_t>, 19, 21, 65>();
+    ::vecops::matmul::AMX_I8I32<int8_t, uint8_t>, 19, 21, 65>();
 #endif
 #elif VECOPS_TARGET_SHARD_INDEX == 4
 #if defined(HAS_AMX_INT8)
 template void run_mixed_packing_atom<
-    gemm::AMX_I8I32<uint8_t, int8_t>, 19, 21, 65>();
+    ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>, 19, 21, 65>();
 template void run_both_packed_atom<
-    gemm::AMX_I8I32<uint8_t, int8_t>, 19, 21, 65>();
+    ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>, 19, 21, 65>();
 #endif
 #elif VECOPS_TARGET_SHARD_INDEX == 5
 #if defined(HAS_AMX_INT8)
 template void run_mixed_packing_atom<
-    gemm::AMX_I8I32<uint8_t, uint8_t>, 19, 21, 65>();
+    ::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>, 19, 21, 65>();
 template void run_both_packed_atom<
-    gemm::AMX_I8I32<uint8_t, uint8_t>, 19, 21, 65>();
+    ::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>, 19, 21, 65>();
 #endif
 #endif
 
 #else
 
 #if VECOPS_TARGET_SHARD_INDEX == 0
-template void run_mixed_packing_atom<gemm::SME_BF16F32, 19, 21, 17>();
-template void run_both_packed_atom<gemm::SME_BF16F32, 19, 21, 17>();
+template void run_mixed_packing_atom<::vecops::matmul::SME_BF16F32, 19, 21, 17>();
+template void run_both_packed_atom<::vecops::matmul::SME_BF16F32, 19, 21, 17>();
 #elif VECOPS_TARGET_SHARD_INDEX == 1
-template void run_mixed_packing_atom<gemm::SME_F16F32, 19, 21, 17>();
-template void run_both_packed_atom<gemm::SME_F16F32, 19, 21, 17>();
+template void run_mixed_packing_atom<::vecops::matmul::SME_F16F32, 19, 21, 17>();
+template void run_both_packed_atom<::vecops::matmul::SME_F16F32, 19, 21, 17>();
 #elif VECOPS_TARGET_SHARD_INDEX == 2
-template void run_mixed_packing_atom<gemm::SME_F32F32, 19, 21, 17>();
-template void run_both_packed_atom<gemm::SME_F32F32, 19, 21, 17>();
+template void run_mixed_packing_atom<::vecops::matmul::SME_F32F32, 19, 21, 17>();
+template void run_both_packed_atom<::vecops::matmul::SME_F32F32, 19, 21, 17>();
 #elif VECOPS_TARGET_SHARD_INDEX == 3
 #if defined(HAS_SME_F64F64)
-template void run_mixed_packing_atom<gemm::SME_F64F64, 11, 13, 17>();
-template void run_both_packed_atom<gemm::SME_F64F64, 11, 13, 17>();
+template void run_mixed_packing_atom<::vecops::matmul::SME_F64F64, 11, 13, 17>();
+template void run_both_packed_atom<::vecops::matmul::SME_F64F64, 11, 13, 17>();
 #endif
 #elif VECOPS_TARGET_SHARD_INDEX == 4
 template void run_mixed_packing_atom<
-    gemm::SME_I8I32<int8_t, int8_t>, 19, 21, 33>();
+    ::vecops::matmul::SME_I8I32<int8_t, int8_t>, 19, 21, 33>();
 template void run_both_packed_atom<
-    gemm::SME_I8I32<int8_t, int8_t>, 19, 21, 33>();
+    ::vecops::matmul::SME_I8I32<int8_t, int8_t>, 19, 21, 33>();
 #elif VECOPS_TARGET_SHARD_INDEX == 5
 template void run_mixed_packing_atom<
-    gemm::SME_I8I32<int8_t, uint8_t>, 19, 21, 33>();
+    ::vecops::matmul::SME_I8I32<int8_t, uint8_t>, 19, 21, 33>();
 template void run_both_packed_atom<
-    gemm::SME_I8I32<int8_t, uint8_t>, 19, 21, 33>();
+    ::vecops::matmul::SME_I8I32<int8_t, uint8_t>, 19, 21, 33>();
 #elif VECOPS_TARGET_SHARD_INDEX == 6
 template void run_mixed_packing_atom<
-    gemm::SME_I8I32<uint8_t, int8_t>, 19, 21, 33>();
+    ::vecops::matmul::SME_I8I32<uint8_t, int8_t>, 19, 21, 33>();
 template void run_both_packed_atom<
-    gemm::SME_I8I32<uint8_t, int8_t>, 19, 21, 33>();
+    ::vecops::matmul::SME_I8I32<uint8_t, int8_t>, 19, 21, 33>();
 #else
 template void run_mixed_packing_atom<
-    gemm::SME_I8I32<uint8_t, uint8_t>, 19, 21, 33>();
+    ::vecops::matmul::SME_I8I32<uint8_t, uint8_t>, 19, 21, 33>();
 template void run_both_packed_atom<
-    gemm::SME_I8I32<uint8_t, uint8_t>, 19, 21, 33>();
+    ::vecops::matmul::SME_I8I32<uint8_t, uint8_t>, 19, 21, 33>();
 #endif
 
 #endif
@@ -205,74 +205,74 @@ bool enable_amx() {
 
 TEST(MatmulMixedPackingTest, EveryAMXAtomSupportsEitherPackedOperand) {
   ASSERT_TRUE(enable_amx());
-  run_mixed_packing_atom<gemm::AMX_BF16F32, 19, 21, 65>();
+  run_mixed_packing_atom<::vecops::matmul::AMX_BF16F32, 19, 21, 65>();
 #if defined(HAS_AMX_FP16)
-  run_mixed_packing_atom<gemm::AMX_F16F32, 19, 21, 65>();
+  run_mixed_packing_atom<::vecops::matmul::AMX_F16F32, 19, 21, 65>();
 #endif
 #if defined(HAS_AMX_INT8)
   run_mixed_packing_atom<
-      gemm::AMX_I8I32<int8_t, int8_t>, 19, 21, 65>();
+      ::vecops::matmul::AMX_I8I32<int8_t, int8_t>, 19, 21, 65>();
   run_mixed_packing_atom<
-      gemm::AMX_I8I32<int8_t, uint8_t>, 19, 21, 65>();
+      ::vecops::matmul::AMX_I8I32<int8_t, uint8_t>, 19, 21, 65>();
   run_mixed_packing_atom<
-      gemm::AMX_I8I32<uint8_t, int8_t>, 19, 21, 65>();
+      ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>, 19, 21, 65>();
   run_mixed_packing_atom<
-      gemm::AMX_I8I32<uint8_t, uint8_t>, 19, 21, 65>();
+      ::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>, 19, 21, 65>();
 #endif
 }
 
 TEST(MatmulMixedPackingTest, EveryAMXAtomSupportsBothPackedOperands) {
   ASSERT_TRUE(enable_amx());
-  run_both_packed_atom<gemm::AMX_BF16F32, 19, 21, 65>();
+  run_both_packed_atom<::vecops::matmul::AMX_BF16F32, 19, 21, 65>();
 #if defined(HAS_AMX_FP16)
-  run_both_packed_atom<gemm::AMX_F16F32, 19, 21, 65>();
+  run_both_packed_atom<::vecops::matmul::AMX_F16F32, 19, 21, 65>();
 #endif
 #if defined(HAS_AMX_INT8)
   run_both_packed_atom<
-      gemm::AMX_I8I32<int8_t, int8_t>, 19, 21, 65>();
+      ::vecops::matmul::AMX_I8I32<int8_t, int8_t>, 19, 21, 65>();
   run_both_packed_atom<
-      gemm::AMX_I8I32<int8_t, uint8_t>, 19, 21, 65>();
+      ::vecops::matmul::AMX_I8I32<int8_t, uint8_t>, 19, 21, 65>();
   run_both_packed_atom<
-      gemm::AMX_I8I32<uint8_t, int8_t>, 19, 21, 65>();
+      ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>, 19, 21, 65>();
   run_both_packed_atom<
-      gemm::AMX_I8I32<uint8_t, uint8_t>, 19, 21, 65>();
+      ::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>, 19, 21, 65>();
 #endif
 }
 
 #else
 
 TEST(MatmulMixedPackingTest, EverySMEAtomSupportsEitherPackedOperand) {
-  run_mixed_packing_atom<gemm::SME_BF16F32, 19, 21, 17>();
-  run_mixed_packing_atom<gemm::SME_F16F32, 19, 21, 17>();
-  run_mixed_packing_atom<gemm::SME_F32F32, 19, 21, 17>();
+  run_mixed_packing_atom<::vecops::matmul::SME_BF16F32, 19, 21, 17>();
+  run_mixed_packing_atom<::vecops::matmul::SME_F16F32, 19, 21, 17>();
+  run_mixed_packing_atom<::vecops::matmul::SME_F32F32, 19, 21, 17>();
 #if defined(HAS_SME_F64F64)
-  run_mixed_packing_atom<gemm::SME_F64F64, 11, 13, 17>();
+  run_mixed_packing_atom<::vecops::matmul::SME_F64F64, 11, 13, 17>();
 #endif
   run_mixed_packing_atom<
-      gemm::SME_I8I32<int8_t, int8_t>, 19, 21, 33>();
+      ::vecops::matmul::SME_I8I32<int8_t, int8_t>, 19, 21, 33>();
   run_mixed_packing_atom<
-      gemm::SME_I8I32<int8_t, uint8_t>, 19, 21, 33>();
+      ::vecops::matmul::SME_I8I32<int8_t, uint8_t>, 19, 21, 33>();
   run_mixed_packing_atom<
-      gemm::SME_I8I32<uint8_t, int8_t>, 19, 21, 33>();
+      ::vecops::matmul::SME_I8I32<uint8_t, int8_t>, 19, 21, 33>();
   run_mixed_packing_atom<
-      gemm::SME_I8I32<uint8_t, uint8_t>, 19, 21, 33>();
+      ::vecops::matmul::SME_I8I32<uint8_t, uint8_t>, 19, 21, 33>();
 }
 
 TEST(MatmulMixedPackingTest, EverySMEAtomSupportsBothPackedOperands) {
-  run_both_packed_atom<gemm::SME_BF16F32, 19, 21, 17>();
-  run_both_packed_atom<gemm::SME_F16F32, 19, 21, 17>();
-  run_both_packed_atom<gemm::SME_F32F32, 19, 21, 17>();
+  run_both_packed_atom<::vecops::matmul::SME_BF16F32, 19, 21, 17>();
+  run_both_packed_atom<::vecops::matmul::SME_F16F32, 19, 21, 17>();
+  run_both_packed_atom<::vecops::matmul::SME_F32F32, 19, 21, 17>();
 #if defined(HAS_SME_F64F64)
-  run_both_packed_atom<gemm::SME_F64F64, 11, 13, 17>();
+  run_both_packed_atom<::vecops::matmul::SME_F64F64, 11, 13, 17>();
 #endif
   run_both_packed_atom<
-      gemm::SME_I8I32<int8_t, int8_t>, 19, 21, 33>();
+      ::vecops::matmul::SME_I8I32<int8_t, int8_t>, 19, 21, 33>();
   run_both_packed_atom<
-      gemm::SME_I8I32<int8_t, uint8_t>, 19, 21, 33>();
+      ::vecops::matmul::SME_I8I32<int8_t, uint8_t>, 19, 21, 33>();
   run_both_packed_atom<
-      gemm::SME_I8I32<uint8_t, int8_t>, 19, 21, 33>();
+      ::vecops::matmul::SME_I8I32<uint8_t, int8_t>, 19, 21, 33>();
   run_both_packed_atom<
-      gemm::SME_I8I32<uint8_t, uint8_t>, 19, 21, 33>();
+      ::vecops::matmul::SME_I8I32<uint8_t, uint8_t>, 19, 21, 33>();
 }
 
 #endif

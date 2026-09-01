@@ -13,14 +13,14 @@
 #include "vecops/matmul/Atom.h"
 #include "vecops/vec/details/sme/State.h"
 
-namespace vecops::gemm::details::sme {
+namespace vecops::matmul::details::sme {
 
 template <typename ElementT, Operand Side>
 struct Packing;
 
-} // namespace vecops::gemm::details::sme
+} // namespace vecops::matmul::details::sme
 
-namespace vecops::gemm {
+namespace vecops::matmul {
 
 struct SMEKernelKind {
   using ResourceRequirements = execution::details::ResourceSet<
@@ -70,6 +70,6 @@ struct SME_I8I32 : SMEAtomBase<A, B, int32_t> {};
 
 static_assert(Atom<SME_F32F32>);
 
-} // namespace vecops::gemm
+} // namespace vecops::matmul
 
 #endif // VECOPS_MATMUL_DETAILS_SME_ATOMS_H

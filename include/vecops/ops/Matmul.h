@@ -3,7 +3,7 @@
 
 /**
  * @file Matmul.h
- * @brief Public entry point for prepared and one-shot Matmul operators.
+ * @brief Public entry point for reusable Config-only Matmul operators.
  */
 
 #include "vecops/matmul/details/Operation.h"

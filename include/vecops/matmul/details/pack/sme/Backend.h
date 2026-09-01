@@ -16,7 +16,7 @@ namespace vecops::kernel::matmul_pack_details {
 
 template <>
 struct Backend<
-    gemm::details::sme::Format,
+    ::vecops::matmul::details::sme::Format,
     matmul_pack_implementation::Vector> {
   using ResourceRequirements =
       typename execution::details::current_backend_t::DefaultRequirements;
@@ -24,12 +24,12 @@ struct Backend<
   template <typename InputSpec, typename OutputSpec>
   static constexpr bool eligible = false;
 
-  template <gemm::Atom Atom, gemm::Operand Side,
+  template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
             execution::ExecutionScope Scope,
             typename Source, typename Destination>
   VECOPS_ALWAYS_INLINE static void run(
       Scope& scope, const Source& source, Destination& destination) {
-    using Packing = gemm::packing_t<Atom, Side>;
+    using Packing = ::vecops::matmul::packing_t<Atom, Side>;
     using T = typename Packing::Element;
     using Tag = vec::ScalableTag<T, 0>;
     const auto& layout = source.spec().input_layout();
@@ -47,7 +47,7 @@ struct Backend<
 
 template <>
 struct Backend<
-    gemm::details::sme::Format,
+    ::vecops::matmul::details::sme::Format,
     matmul_pack_implementation::SME> {
   using ResourceRequirements = execution::details::ResourceSet<>;
 
@@ -64,13 +64,13 @@ struct Backend<
           tensor::stride_type_t<1, typename InputSpec::InputLayout>,
           meta::Const<1>>;
 
-  template <gemm::Atom Atom, gemm::Operand Side,
+  template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
             execution::ExecutionScope Scope,
             typename Source, typename Destination>
   VECOPS_ALWAYS_INLINE static void run(
       Scope& scope, const Source& source, Destination& destination) {
     static_assert(generic::RawDirectAccess<Destination>);
-    using Packing = gemm::packing_t<Atom, Side>;
+    using Packing = ::vecops::matmul::packing_t<Atom, Side>;
     using T = typename Packing::Element;
     const auto& layout = source.spec().input_layout();
     static_assert(generic::RawDirectAccess<Source>);
@@ -99,7 +99,7 @@ inline constexpr bool sme_common_eligible_v =
 
 template <>
 struct Backend<
-    gemm::details::sme::Format,
+    ::vecops::matmul::details::sme::Format,
     matmul_pack_implementation::SMEPostprocess> {
   using ResourceRequirements = execution::details::ResourceSet<>;
 
@@ -129,13 +129,13 @@ struct Backend<
     }
   }();
 
-  template <gemm::Atom Atom, gemm::Operand Side,
+  template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
             execution::ExecutionScope Scope,
             typename Source, typename Destination>
   VECOPS_ALWAYS_INLINE static void run(
       Scope& scope, const Source& source, Destination& destination) {
     static_assert(generic::RawDirectAccess<Destination>);
-    using T = typename gemm::packing_t<Atom, Side>::Element;
+    using T = typename ::vecops::matmul::packing_t<Atom, Side>::Element;
     static_assert(
         std::same_as<T, float32_t> || std::same_as<T, float16_t> ||
         std::same_as<T, bfloat16_t> || std::same_as<T, int8_t> ||
@@ -156,7 +156,7 @@ struct Backend<
 
 template <>
 struct Backend<
-    gemm::details::sme::Format,
+    ::vecops::matmul::details::sme::Format,
     matmul_pack_implementation::SMEStagedTransform> {
   using ResourceRequirements =
       typename execution::details::current_backend_t::DefaultRequirements;
@@ -179,7 +179,7 @@ struct Backend<
     }
   }();
 
-  template <gemm::Atom Atom, gemm::Operand Side,
+  template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
             execution::ExecutionScope Scope,
             typename Source, typename Destination>
   VECOPS_ALWAYS_INLINE static void run(
@@ -187,7 +187,7 @@ struct Backend<
     static_assert(!execution::has_resource_v<
         execution::details::arm::StreamingZA, Scope>);
     static_assert(generic::RawDirectAccess<Destination>);
-    using Packing = gemm::packing_t<Atom, Side>;
+    using Packing = ::vecops::matmul::packing_t<Atom, Side>;
     using T = typename Packing::Element;
     using Transform = typename Source::Transform;
     static_assert(std::same_as<typename Source::MemoryElement, T>);
@@ -217,7 +217,7 @@ struct Backend<
 
 template <>
 struct Backend<
-    gemm::details::sme::Format,
+    ::vecops::matmul::details::sme::Format,
     matmul_pack_implementation::SMEStagedFP16ToFP32> {
   using ResourceRequirements =
       typename execution::details::current_backend_t::DefaultRequirements;
@@ -229,7 +229,7 @@ struct Backend<
       std::same_as<typename InputSpec::MemoryElement, float16_t> &&
       std::same_as<typename InputSpec::ComputeType, float32_t>;
 
-  template <gemm::Atom Atom, gemm::Operand Side,
+  template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
             execution::ExecutionScope Scope,
             typename Source, typename Destination>
   VECOPS_ALWAYS_INLINE static void run(
@@ -237,7 +237,7 @@ struct Backend<
     static_assert(!execution::has_resource_v<
         execution::details::arm::StreamingZA, Scope>);
     static_assert(generic::RawDirectAccess<Destination>);
-    using Packing = gemm::packing_t<Atom, Side>;
+    using Packing = ::vecops::matmul::packing_t<Atom, Side>;
     using T = typename Packing::Element;
     static_assert(std::same_as<T, float32_t>);
     static_assert(std::same_as<typename Source::MemoryElement, float16_t>);
@@ -252,7 +252,7 @@ struct Backend<
     scope.with_resources(
         execution::details::arm::StreamingZARegion{},
         [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-          sme::pack<gemm::SME_F16F32, Side>(
+          sme::pack<::vecops::matmul::SME_F16F32, Side>(
               input, spatial, k, row_stride, temporary);
         });
     const auto panel = tensor::size_value<2>(
@@ -264,7 +264,7 @@ struct Backend<
 
 template <>
 struct Backend<
-    gemm::details::sme::Format,
+    ::vecops::matmul::details::sme::Format,
     matmul_pack_implementation::SMEFP32ToFP64> {
   using ResourceRequirements = execution::details::ResourceSet<>;
 
@@ -275,7 +275,7 @@ struct Backend<
       std::same_as<typename InputSpec::MemoryElement, float32_t> &&
       std::same_as<typename InputSpec::ComputeType, float64_t>;
 
-  template <gemm::Atom Atom, gemm::Operand Side,
+  template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
             execution::ExecutionScope Scope,
             typename Source, typename Destination>
   VECOPS_ALWAYS_INLINE static void run(
@@ -284,7 +284,7 @@ struct Backend<
     static_assert(std::same_as<typename Source::MemoryElement, float32_t>);
     static_assert(std::same_as<typename Source::ComputeType, float64_t>);
     static_assert(std::same_as<typename Source::Transform, tensor::NoTransform>);
-    using Packing = gemm::packing_t<Atom, Side>;
+    using Packing = ::vecops::matmul::packing_t<Atom, Side>;
     static_assert(std::same_as<typename Packing::Element, float64_t>);
     const auto& layout = source.spec().input_layout();
     const auto* input = source.raw_data();
@@ -303,17 +303,17 @@ struct Backend<
 
 template <>
 struct Backend<
-    gemm::details::sme::Format,
+    ::vecops::matmul::details::sme::Format,
     matmul_pack_implementation::SMEFP32ToFP64Single> {
   using ResourceRequirements = execution::details::ResourceSet<>;
 
   template <typename InputSpec, typename OutputSpec>
   static constexpr bool eligible = Backend<
-      gemm::details::sme::Format,
+      ::vecops::matmul::details::sme::Format,
       matmul_pack_implementation::SMEFP32ToFP64>::template eligible<
           InputSpec, OutputSpec>;
 
-  template <gemm::Atom Atom, gemm::Operand Side,
+  template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
             execution::ExecutionScope Scope,
             typename Source, typename Destination>
   VECOPS_ALWAYS_INLINE static void run(
@@ -322,7 +322,7 @@ struct Backend<
     static_assert(std::same_as<typename Source::MemoryElement, float32_t>);
     static_assert(std::same_as<typename Source::ComputeType, float64_t>);
     static_assert(std::same_as<typename Source::Transform, tensor::NoTransform>);
-    using Packing = gemm::packing_t<Atom, Side>;
+    using Packing = ::vecops::matmul::packing_t<Atom, Side>;
     static_assert(std::same_as<typename Packing::Element, float64_t>);
     const auto& layout = source.spec().input_layout();
     const auto* input = source.raw_data();

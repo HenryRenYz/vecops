@@ -39,35 +39,35 @@ void register_matmul_fusion_scenario_range() {
 namespace vecops::bench::matmul {
 
 #if defined(ARCH_X86_FAMILY)
-using FusionFloatAtom = gemm::AMX_BF16F32;
-template <> struct AtomName<gemm::AMX_BF16F32> {
+using FusionFloatAtom = ::vecops::matmul::AMX_BF16F32;
+template <> struct AtomName<::vecops::matmul::AMX_BF16F32> {
   static constexpr const char* value = "AMX_BF16F32";
 };
 #if defined(HAS_AMX_FP16)
-template <> struct AtomName<gemm::AMX_F16F32> {
+template <> struct AtomName<::vecops::matmul::AMX_F16F32> {
   static constexpr const char* value = "AMX_F16F32";
 };
 #endif
 template <typename A, typename B>
-using FusionI8 = gemm::AMX_I8I32<A, B>;
+using FusionI8 = ::vecops::matmul::AMX_I8I32<A, B>;
 #else
-using FusionFloatAtom = gemm::SME_BF16F32;
-template <> struct AtomName<gemm::SME_BF16F32> {
+using FusionFloatAtom = ::vecops::matmul::SME_BF16F32;
+template <> struct AtomName<::vecops::matmul::SME_BF16F32> {
   static constexpr const char* value = "SME_BF16F32";
 };
-template <> struct AtomName<gemm::SME_F16F32> {
+template <> struct AtomName<::vecops::matmul::SME_F16F32> {
   static constexpr const char* value = "SME_F16F32";
 };
-template <> struct AtomName<gemm::SME_F32F32> {
+template <> struct AtomName<::vecops::matmul::SME_F32F32> {
   static constexpr const char* value = "SME_F32F32";
 };
 #if defined(HAS_SME_F64F64)
-template <> struct AtomName<gemm::SME_F64F64> {
+template <> struct AtomName<::vecops::matmul::SME_F64F64> {
   static constexpr const char* value = "SME_F64F64";
 };
 #endif
 template <typename A, typename B>
-using FusionI8 = gemm::SME_I8I32<A, B>;
+using FusionI8 = ::vecops::matmul::SME_I8I32<A, B>;
 #endif
 
 using FusionI8S8S8 = FusionI8<int8_t, int8_t>;
@@ -199,69 +199,69 @@ void register_matmul_fusion_scenario_shard() {
 #if defined(ARCH_X86_FAMILY)
 #if defined(HAS_AMX_FP16)
     register_rank2_and_batched_fusion<
-        gemm::AMX_F16F32, float16_t, float16_t, float32_t,
+        ::vecops::matmul::AMX_F16F32, float16_t, float16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Clamp>(FloatKStep);
     register_rank2_and_batched_fusion<
-        gemm::AMX_F16F32, float16_t, float16_t, float32_t,
+        ::vecops::matmul::AMX_F16F32, float16_t, float16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::DynamicScale>(FloatKStep);
     register_rank2_and_batched_fusion<
-        gemm::AMX_F16F32, float16_t, float16_t, float32_t,
+        ::vecops::matmul::AMX_F16F32, float16_t, float16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::PerColumnScale>(FloatKStep);
 #endif
 #else
     register_rank2_and_batched_fusion<
-        gemm::SME_F32F32, float32_t, float32_t, float32_t,
+        ::vecops::matmul::SME_F32F32, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Clamp>(1);
     register_rank2_and_batched_fusion<
-        gemm::SME_F32F32, float32_t, float32_t, float32_t,
+        ::vecops::matmul::SME_F32F32, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::DynamicScale>(1);
     register_rank2_and_batched_fusion<
-        gemm::SME_F32F32, float32_t, float32_t, float32_t,
+        ::vecops::matmul::SME_F32F32, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::PerColumnScale>(1);
 #endif
   } else if constexpr (Shard == 6) {
 #if defined(ARCH_X86_FAMILY)
 #if defined(HAS_AMX_FP16)
     register_rank2_and_batched_fusion<
-        gemm::AMX_F16F32, float32_t, float32_t, float32_t,
+        ::vecops::matmul::AMX_F16F32, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Clamp>(FloatKStep);
     register_rank2_and_batched_fusion<
-        gemm::AMX_F16F32, float32_t, float32_t, float32_t,
+        ::vecops::matmul::AMX_F16F32, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::DynamicScale>(FloatKStep);
     register_rank2_and_batched_fusion<
-        gemm::AMX_F16F32, float32_t, float32_t, float32_t,
+        ::vecops::matmul::AMX_F16F32, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::PerColumnScale>(FloatKStep);
 #endif
 #else
     register_rank2_and_batched_fusion<
-        gemm::SME_F16F32, float16_t, float16_t, float32_t,
+        ::vecops::matmul::SME_F16F32, float16_t, float16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Clamp>(FloatKStep);
     register_rank2_and_batched_fusion<
-        gemm::SME_F16F32, float16_t, float16_t, float32_t,
+        ::vecops::matmul::SME_F16F32, float16_t, float16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::DynamicScale>(FloatKStep);
     register_rank2_and_batched_fusion<
-        gemm::SME_F16F32, float16_t, float16_t, float32_t,
+        ::vecops::matmul::SME_F16F32, float16_t, float16_t, float32_t,
         InputPipeline::Convert, OutputPipeline::PerColumnScale>(FloatKStep);
 #endif
   } else if constexpr (Shard == 7) {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_rank2_fusion<
-        gemm::SME_F64F64, float64_t, float64_t, float64_t,
+        ::vecops::matmul::SME_F64F64, float64_t, float64_t, float64_t,
         InputPipeline::Convert, OutputPipeline::Clamp>(1);
 #endif
   } else if constexpr (Shard == 8) {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_batched_fusion<
-        gemm::SME_F64F64, float32_t, float32_t, float32_t,
+        ::vecops::matmul::SME_F64F64, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Clamp>(1);
 #endif
   } else if constexpr (Shard == 9) {
 #if !defined(ARCH_X86_FAMILY)
     register_rank2_and_batched_fusion<
-        gemm::SME_F32F32, bfloat16_t, bfloat16_t, bfloat16_t,
+        ::vecops::matmul::SME_F32F32, bfloat16_t, bfloat16_t, bfloat16_t,
         InputPipeline::Convert, OutputPipeline::BiasClamp>(1);
     register_rank2_and_batched_fusion<
-        gemm::SME_F32F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::SME_F32F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasClamp>(1);
 #endif
   } else if constexpr (Shard == 10) {
@@ -284,32 +284,32 @@ void register_matmul_fusion_scenario_shard() {
 #if defined(ARCH_X86_FAMILY)
 #if defined(HAS_AMX_FP16)
     register_rank2_and_batched_fusion<
-        gemm::AMX_F16F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::AMX_F16F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::Bias,
         InputPipeline::Convert, float32_t>(FloatKStep);
     register_rank2_and_batched_fusion<
-        gemm::AMX_F16F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::AMX_F16F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float32_t>(FloatKStep);
 #endif
 #else
     register_rank2_and_batched_fusion<
-        gemm::SME_F16F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::SME_F16F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::Bias,
         InputPipeline::Convert, float32_t>(FloatKStep);
     register_rank2_and_batched_fusion<
-        gemm::SME_F16F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::SME_F16F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float32_t>(FloatKStep);
 #endif
   } else if constexpr (Shard == 13) {
 #if !defined(ARCH_X86_FAMILY)
     register_rank2_and_batched_fusion<
-        gemm::SME_F32F32, bfloat16_t, bfloat16_t, bfloat16_t,
+        ::vecops::matmul::SME_F32F32, bfloat16_t, bfloat16_t, bfloat16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float32_t>(1);
     register_rank2_and_batched_fusion<
-        gemm::SME_F32F32, float16_t, float16_t, float16_t,
+        ::vecops::matmul::SME_F32F32, float16_t, float16_t, float16_t,
         InputPipeline::Convert, OutputPipeline::BiasRelu,
         InputPipeline::Convert, float32_t>(1);
 #endif
@@ -381,61 +381,61 @@ void register_matmul_fusion_scenario_shard() {
   } else if constexpr (Shard == 23) {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_batched_fusion<
-        gemm::SME_F64F64, float64_t, float64_t, float64_t,
+        ::vecops::matmul::SME_F64F64, float64_t, float64_t, float64_t,
         InputPipeline::Convert, OutputPipeline::Clamp>(1);
 #endif
   } else if constexpr (Shard == 24) {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_rank2_fusion<
-        gemm::SME_F64F64, float64_t, float64_t, float64_t,
+        ::vecops::matmul::SME_F64F64, float64_t, float64_t, float64_t,
         InputPipeline::Convert, OutputPipeline::DynamicScale>(1);
 #endif
   } else if constexpr (Shard == 25) {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_batched_fusion<
-        gemm::SME_F64F64, float64_t, float64_t, float64_t,
+        ::vecops::matmul::SME_F64F64, float64_t, float64_t, float64_t,
         InputPipeline::Convert, OutputPipeline::DynamicScale>(1);
 #endif
   } else if constexpr (Shard == 26) {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_rank2_fusion<
-        gemm::SME_F64F64, float64_t, float64_t, float64_t,
+        ::vecops::matmul::SME_F64F64, float64_t, float64_t, float64_t,
         InputPipeline::Convert, OutputPipeline::PerColumnScale>(1);
 #endif
   } else if constexpr (Shard == 27) {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_batched_fusion<
-        gemm::SME_F64F64, float64_t, float64_t, float64_t,
+        ::vecops::matmul::SME_F64F64, float64_t, float64_t, float64_t,
         InputPipeline::Convert, OutputPipeline::PerColumnScale>(1);
 #endif
   } else if constexpr (Shard == 28) {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_rank2_fusion<
-        gemm::SME_F64F64, float32_t, float32_t, float32_t,
+        ::vecops::matmul::SME_F64F64, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::Clamp>(1);
 #endif
   } else if constexpr (Shard == 29) {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_rank2_fusion<
-        gemm::SME_F64F64, float32_t, float32_t, float32_t,
+        ::vecops::matmul::SME_F64F64, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::DynamicScale>(1);
 #endif
   } else if constexpr (Shard == 30) {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_batched_fusion<
-        gemm::SME_F64F64, float32_t, float32_t, float32_t,
+        ::vecops::matmul::SME_F64F64, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::DynamicScale>(1);
 #endif
   } else if constexpr (Shard == 31) {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_rank2_fusion<
-        gemm::SME_F64F64, float32_t, float32_t, float32_t,
+        ::vecops::matmul::SME_F64F64, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::PerColumnScale>(1);
 #endif
   } else {
 #if !defined(ARCH_X86_FAMILY) && defined(HAS_SME_F64F64)
     register_batched_fusion<
-        gemm::SME_F64F64, float32_t, float32_t, float32_t,
+        ::vecops::matmul::SME_F64F64, float32_t, float32_t, float32_t,
         InputPipeline::Convert, OutputPipeline::PerColumnScale>(1);
 #endif
   }
