@@ -987,6 +987,13 @@ using numel_type_t = typename details::ShapeProduct<
  * @return The size of dimension I (always non-negative).
  */
 template <int I, LayoutLike TLayout>
+VECOPS_ALWAYS_INLINE constexpr size_type_t<I, TLayout> size_value(
+    const TLayout& layout) {
+  using Size = size_type_t<I, TLayout>;
+  return Size{get<I>(layout.shape())};
+}
+
+template <int I, LayoutLike TLayout>
 VECOPS_ALWAYS_INLINE constexpr nint_t size(const TLayout& layout) {
   return get<I>(layout.shape());
 }
@@ -994,6 +1001,13 @@ VECOPS_ALWAYS_INLINE constexpr nint_t size(const TLayout& layout) {
 /**
  * @brief Get the stride value of dimension I from a Layout.
  */
+template <int I, LayoutLike TLayout>
+VECOPS_ALWAYS_INLINE constexpr stride_type_t<I, TLayout> stride_value(
+    const TLayout& layout) {
+  using Stride = stride_type_t<I, TLayout>;
+  return Stride{get<I>(layout.strides())};
+}
+
 template <int I, LayoutLike TLayout>
 VECOPS_ALWAYS_INLINE constexpr nint_t stride(const TLayout& layout) {
   return get<I>(layout.strides());

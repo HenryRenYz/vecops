@@ -16,9 +16,9 @@
 #include <vector>
 
 #include "TestUtils.h"
-#include "vecops/gemm/Atoms.h"
+#include "vecops/matmul/Atom.h"
 #include "vecops/kernel/Workspace.h"
-#include "vecops/ops/MatmulPack.h"
+#include "vecops/matmul/MatmulPack.h"
 
 namespace {
 
@@ -518,9 +518,9 @@ TEST(MatmulPackDeathTest, RejectsNegativeExtents) {
 
 #include "TestUtils.h"
 #include "vecops/execution/details/arm/Resources.h"
-#include "vecops/gemm/Atoms.h"
+#include "vecops/matmul/Atom.h"
 #include "vecops/kernel/Workspace.h"
-#include "vecops/ops/MatmulPack.h"
+#include "vecops/matmul/MatmulPack.h"
 
 namespace {
 

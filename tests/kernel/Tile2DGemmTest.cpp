@@ -169,9 +169,9 @@ void check_vector_gemm(nint_t M, nint_t N, nint_t K) {
   }
 }
 
-TEST(Tile2DGemmTest, NaturalHandlesFullAndTailTiles) {
+TEST(Tile2DGemmTest, RowMajorHandlesFullAndTailTiles) {
   const nint_t lanes = vec::size(GemmBaseTag{});
-  check_vector_gemm<hop::tile2d_policy::Natural>(5, 3 * lanes + 3, 11);
+  check_vector_gemm<hop::tile2d_policy::RowMajor>(5, 3 * lanes + 3, 11);
 }
 
 TEST(Tile2DGemmTest, FourRegionsHandlesFullAndTailTiles) {
@@ -179,14 +179,14 @@ TEST(Tile2DGemmTest, FourRegionsHandlesFullAndTailTiles) {
   check_vector_gemm<hop::tile2d_policy::FourRegions>(5, 3 * lanes + 3, 11);
 }
 
-TEST(Tile2DGemmTest, SingleKernelHandlesFullAndTailTiles) {
+TEST(Tile2DGemmTest, UniformHandlesFullAndTailTiles) {
   const nint_t lanes = vec::size(GemmBaseTag{});
-  check_vector_gemm<hop::tile2d_policy::SingleKernel>(5, 3 * lanes + 3, 11);
+  check_vector_gemm<hop::tile2d_policy::Uniform>(5, 3 * lanes + 3, 11);
 }
 
 TEST(Tile2DGemmTest, RuntimeVectorLengthExactMultipleIsCorrect) {
   const nint_t lanes = vec::size(GemmBaseTag{});
-  check_vector_gemm<hop::tile2d_policy::Natural>(4, 4 * lanes, 13);
+  check_vector_gemm<hop::tile2d_policy::RowMajor>(4, 4 * lanes, 13);
 }
 
 } // namespace
@@ -200,7 +200,7 @@ TEST(Tile2DGemmTest, RuntimeVectorLengthExactMultipleIsCorrect) {
 extern "C" VECOPS_NOINLINE void tile2d_gemm_fixed64_probe(
     const float* A, const float* B, float* C, nint_t K) {
   using Tag = vec::FixedTag<float, 16>;
-  vector_gemm<hop::tile2d_policy::Natural>(
+  vector_gemm<hop::tile2d_policy::RowMajor>(
       Tag{}, A, B, C, cint<2>, cint<32>, K, cint<16>);
 }
 #endif
@@ -211,7 +211,7 @@ extern "C" VECOPS_NOINLINE void tile2d_gemm_scalable_probe(
   using Tag = vec::ScalableTag<float>;
   Tag tag{};
   const nint_t lanes = vec::size(tag);
-  vector_gemm<hop::tile2d_policy::Natural>(
+  vector_gemm<hop::tile2d_policy::RowMajor>(
       tag, A, B, C, cint<2>, Any{2 * lanes}, K, Any{lanes});
 }
 #endif

@@ -17,8 +17,8 @@
 #include <type_traits>
 #include <vector>
 
-#include "vecops/ops/Matmul.h"
-#include "vecops/ops/MatmulPack.h"
+#include "vecops/matmul/Matmul.h"
+#include "vecops/matmul/MatmulPack.h"
 
 #include "MatmulConversionTestCommon.h"
 
@@ -675,8 +675,8 @@ TEST(MatmulTest, DynamicAndConstExtentPairs) {
 #include <type_traits>
 #include <vector>
 
-#include "vecops/ops/Matmul.h"
-#include "vecops/ops/MatmulPack.h"
+#include "vecops/matmul/Matmul.h"
+#include "vecops/matmul/MatmulPack.h"
 
 #include "MatmulConversionTestCommon.h"
 
@@ -688,8 +688,7 @@ using namespace vecops;
 using namespace vecops::meta;
 using namespace vecops::tensor;
 
-using SMEF32Tile2x2 = gemm::Kernel<
-    gemm::SME_F32F32, 2, 2, gemm::Masked, gemm::Masked>;
+using SMEF32Tile2x2M = decltype(cint<2> * gemm::SME_F32F32::M_R);
 
 #if defined(HAS_FIXED_STREAMING_SVE_BITS)
 static_assert(std::same_as<
@@ -700,7 +699,7 @@ static_assert(std::same_as<
     std::remove_cv_t<decltype(gemm::SME_F32F32::M_R)>,
     Const<FIXED_STREAMING_SVE_BITS / 8 / sizeof(float32_t)>>);
 static_assert(std::same_as<
-    std::remove_cv_t<decltype(SMEF32Tile2x2::tile_M)>,
+        std::remove_cv_t<SMEF32Tile2x2M>,
     Const<2 * FIXED_STREAMING_SVE_BITS / 8 / sizeof(float32_t)>>);
 #else
 static_assert(std::same_as<
@@ -711,16 +710,16 @@ static_assert(std::same_as<
     std::remove_cv_t<decltype(gemm::SME_F32F32::M_R)>,
     Dynamic<4, 4, 64>>);
 static_assert(std::same_as<
-    std::remove_cv_t<decltype(SMEF32Tile2x2::tile_M)>,
+        std::remove_cv_t<SMEF32Tile2x2M>,
     Dynamic<8, 8, 128>>);
 #endif
 static_assert(std::same_as<
     std::remove_cv_t<decltype(gemm::SME_F32F32::K_R)>, Const<1>>);
-static_assert(kernel::matmul_details::sme::use_constraint_area4_v<
+static_assert(kernel::matmul_details::sme::has_bounded_tile_axis_v<
               gemm::SME_F32F32, Const<16>, Any>);
-static_assert(kernel::matmul_details::sme::use_constraint_area4_v<
+static_assert(kernel::matmul_details::sme::has_bounded_tile_axis_v<
               gemm::SME_F32F32, Dynamic<1, 0, 32>, Any>);
-static_assert(!kernel::matmul_details::sme::use_constraint_area4_v<
+static_assert(!kernel::matmul_details::sme::has_bounded_tile_axis_v<
               gemm::SME_F32F32, Any, Any>);
 
 template <typename T>

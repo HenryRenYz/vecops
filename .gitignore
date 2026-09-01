@@ -17,4 +17,4 @@ __pycache__/
 !/docs/TemplateStyle.md
 !/docs/opt/
 /docs/opt/*
-!/docs/opt/matmul.md
+/benchmarks/**/*AB.md

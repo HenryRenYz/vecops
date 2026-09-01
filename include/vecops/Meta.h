@@ -1194,6 +1194,15 @@ template <ValueType T>
 inline constexpr bool is_bounded_v =
     has_lower_bound_v<T> && has_upper_bound_v<T>;
 
+/** True when a Value type denotes exactly one runtime value. */
+template <ValueType T>
+inline constexpr bool is_singleton_v =
+    is_bounded_v<T> && lower_bound_v<T> == upper_bound_v<T>;
+
+/** The unique value denoted by a singleton Value type. */
+template <ValueType T>
+inline constexpr nint_t singleton_value_v = lower_bound_v<T>;
+
 template <ValueType T, nint_t Lo, nint_t Hi>
 inline constexpr bool range_within_v =
     is_bounded_v<T> && lower_bound_v<T> >= Lo && upper_bound_v<T> <= Hi;
@@ -1428,12 +1437,11 @@ template <nint_t A, nint_t L, nint_t H, nint_t N>
 constexpr auto ceil_div(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
   static_assert(N > 0, "ceil_div divisor must be positive");
   constexpr nint_t g = (A % N == 0) ? A / N : 1;
-  if constexpr (L == meta::kLoInf || H == meta::kHiInf) {
-    return meta::Dynamic<g>(::vecops::ceil_div(lhs.value, N));
-  } else {
-    return meta::Dynamic<g, ::vecops::ceil_div(L, N), ::vecops::ceil_div(H, N)>(
-        ::vecops::ceil_div(lhs.value, N));
-  }
+  constexpr nint_t rl = L == meta::kLoInf
+      ? meta::kLoInf : ::vecops::ceil_div(L, N);
+  constexpr nint_t rh = H == meta::kHiInf
+      ? meta::kHiInf : ::vecops::ceil_div(H, N);
+  return meta::Dynamic<g, rl, rh>(::vecops::ceil_div(lhs.value, N));
 }
 
 /// @brief ceil_div by a runtime divisor: no constraint survives.
@@ -1481,12 +1489,11 @@ template <nint_t A, nint_t L, nint_t H, nint_t N>
 constexpr auto floor_div(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
   static_assert(N > 0, "floor_div divisor must be positive");
   constexpr nint_t g = (A % N == 0) ? A / N : 1;
-  if constexpr (L == meta::kLoInf || H == meta::kHiInf) {
-    return meta::Dynamic<g>(::vecops::floor_div(lhs.value, N));
-  } else {
-    return meta::Dynamic<g, ::vecops::floor_div(L, N), ::vecops::floor_div(H, N)>(
-        ::vecops::floor_div(lhs.value, N));
-  }
+  constexpr nint_t rl = L == meta::kLoInf
+      ? meta::kLoInf : ::vecops::floor_div(L, N);
+  constexpr nint_t rh = H == meta::kHiInf
+      ? meta::kHiInf : ::vecops::floor_div(H, N);
+  return meta::Dynamic<g, rl, rh>(::vecops::floor_div(lhs.value, N));
 }
 
 /// @brief floor_div by a runtime divisor: no constraint survives.

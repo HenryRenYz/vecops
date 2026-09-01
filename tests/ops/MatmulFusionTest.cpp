@@ -14,7 +14,7 @@
 #include "MatmulConversionTestCommon.h"
 
 #include "vecops/Features.h"
-#include "vecops/gemm/Atoms.h"
+#include "vecops/matmul/Atom.h"
 
 namespace {
 
@@ -125,7 +125,7 @@ TEST(MatmulFusionTest, IndependentQuantizationAndNativeI8Accumulate) {
 
 #include "MatmulConversionTestCommon.h"
 
-#include "vecops/gemm/Atoms.h"
+#include "vecops/matmul/Atom.h"
 
 namespace {
 

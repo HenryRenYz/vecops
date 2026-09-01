@@ -2,7 +2,7 @@
 
 #include "MatmulBenchCommon.h"
 
-#include "vecops/gemm/Atoms.h"
+#include "vecops/matmul/Atom.h"
 
 namespace vecops::bench::matmul {
 template <int Shard>
@@ -66,8 +66,8 @@ template <int Shard>
 void register_matmul_policy_shard() {
   static_assert(0 <= Shard && Shard < 3);
   if constexpr (Shard == 0) {
-    register_policy<kernel::loop::tile2d_policy::RuntimeExactArea4>(
-        "runtime_exact");
+    register_policy<kernel::loop::tile2d_policy::ExactCover>(
+        "exact_cover");
   } else if constexpr (Shard == 1) {
     register_policy<kernel::loop::tile2d_policy::FourRegions>(
         "four_regions");

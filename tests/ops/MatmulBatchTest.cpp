@@ -13,8 +13,8 @@
 #include <type_traits>
 #include <vector>
 
-#include "vecops/ops/Matmul.h"
-#include "vecops/ops/MatmulPack.h"
+#include "vecops/matmul/Matmul.h"
+#include "vecops/matmul/MatmulPack.h"
 
 #include "MatmulConversionTestCommon.h"
 
@@ -172,7 +172,7 @@ void check_shared_a_batch_columns() {
 TEST(MatmulBatchTest, TraversesBatchAndExposesTilePolicy) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   using Atom = gemm::AMX_BF16F32;
-  using Policy = kernel::loop::tile2d_policy::Natural;
+  using Policy = kernel::loop::tile2d_policy::RowMajor;
   constexpr nint_t Batch = 3;
   constexpr nint_t M = 19;
   constexpr nint_t N = 21;
@@ -285,7 +285,7 @@ TEST(MatmulBatchTest, SharedAFlattensBatchColumns) {
 #include <type_traits>
 #include <vector>
 
-#include "vecops/ops/Matmul.h"
+#include "vecops/matmul/Matmul.h"
 
 #include "MatmulConversionTestCommon.h"
 
@@ -465,7 +465,7 @@ void check_shared_a_batch_columns() {
 
 TEST(MatmulBatchTest, TraversesBatchAndExposesTilePolicy) {
   using Atom = gemm::SME_F32F32;
-  using Policy = kernel::loop::tile2d_policy::Natural;
+  using Policy = kernel::loop::tile2d_policy::RowMajor;
   constexpr nint_t Batch = 3;
   constexpr nint_t M = 19;
   constexpr nint_t N = 21;

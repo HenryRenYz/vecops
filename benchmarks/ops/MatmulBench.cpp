@@ -21,7 +21,7 @@
 #include <unistd.h>
 #endif
 
-#include "vecops/gemm/Atoms.h"
+#include "vecops/matmul/Atom.h"
 
 namespace vecops::bench::matmul {
 

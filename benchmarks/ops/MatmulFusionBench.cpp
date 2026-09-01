@@ -12,7 +12,7 @@
 #include "MatmulScenarioBenchCommon.h"
 
 #include "vecops/Features.h"
-#include "vecops/gemm/Atoms.h"
+#include "vecops/matmul/Atom.h"
 
 namespace vecops::bench::matmul {
 

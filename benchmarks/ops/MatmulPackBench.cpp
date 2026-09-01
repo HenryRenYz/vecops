@@ -7,7 +7,7 @@
 
 #include "MatmulPackBenchCommon.h"
 
-#include "vecops/gemm/Atoms.h"
+#include "vecops/matmul/Atom.h"
 
 namespace vecops::bench::matmul_pack {
 template <int Shard>
@@ -465,7 +465,7 @@ int main(int argc, char** argv) {
 
 #include "MatmulPackBenchCommon.h"
 
-#include "vecops/gemm/Atoms.h"
+#include "vecops/matmul/Atom.h"
 
 namespace vecops::bench::matmul_pack {
 template <int Shard>

@@ -16,9 +16,9 @@
 #include <vector>
 
 #include "BenchmarkUtils.h"
-#include "vecops/gemm/Packing.h"
+#include "vecops/matmul/Packing.h"
 #include "vecops/kernel/Workspace.h"
-#include "vecops/ops/MatmulPack.h"
+#include "vecops/matmul/MatmulPack.h"
 
 #ifndef VECOPS_BENCH_ARCH_CODE
 #define VECOPS_BENCH_ARCH_CODE "unknown"

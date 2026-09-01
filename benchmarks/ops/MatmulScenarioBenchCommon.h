@@ -7,7 +7,7 @@
 
 #include "MatmulBenchCommon.h"
 
-#include "vecops/kernel/details/matmul/RuntimeQuantization.h"
+#include "vecops/matmul/Quantization.h"
 
 #include <algorithm>
 #include <array>
@@ -388,7 +388,7 @@ auto make_scenario_input(
       Pipeline == InputPipeline::RuntimePerRowAsymmetricQuantize) {
     static_assert(Side == gemm::Operand::A);
     static_assert(std::is_unsigned_v<Compute>);
-    auto quantize = kernel::matmul_details::
+    auto quantize = ::vecops::matmul::
         make_runtime_per_row_asymmetric_quantize_transform({
             parameters.row_quant_multipliers,
             parameters.a_zero_point,
@@ -500,7 +500,7 @@ auto make_scenario_output(
   } else if constexpr (
       Pipeline == OutputPipeline::RuntimePerRowColumnDequantize) {
     static_assert(std::same_as<Acc, int32_t>);
-    auto transform = kernel::matmul_details::
+    auto transform = ::vecops::matmul::
         make_runtime_per_row_column_dequantize_transform({
             parameters.row_dequant_scales,
             parameters.weight_column_scales,

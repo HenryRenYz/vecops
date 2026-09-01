@@ -13,9 +13,9 @@
 #include <type_traits>
 #include <vector>
 
-#include "vecops/ops/Matmul.h"
-#include "vecops/ops/MatmulPack.h"
-#include "vecops/kernel/details/matmul/RuntimeQuantization.h"
+#include "vecops/matmul/Matmul.h"
+#include "vecops/matmul/MatmulPack.h"
+#include "vecops/matmul/Quantization.h"
 
 namespace vecops::test::matmul {
 
@@ -1349,11 +1349,11 @@ void check_batched_runtime_per_row_column_quantization(
               meta::Any{n}, meta::cint<0>, meta::cint<1>));
     }
   }();
-  auto quantize_a = kernel::matmul_details::
+  auto quantize_a = ::vecops::matmul::
       make_runtime_per_row_asymmetric_quantize_transform({
           row_quant_multipliers.data(), &input_zero_point,
           row_scale_batch_stride});
-  auto dequantize = kernel::matmul_details::
+  auto dequantize = ::vecops::matmul::
       make_runtime_per_row_column_dequantize_transform({
           row_dequant_scales.data(), column_scales.data(),
           row_scale_batch_stride});

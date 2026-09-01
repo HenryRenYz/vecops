@@ -15,7 +15,7 @@
 #include <type_traits>
 #include <utility>
 
-#include "vecops/gemm/details/sme/Atoms.h"
+#include "vecops/matmul/details/sme/Atoms.h"
 
 #if !defined(__ARM_FEATURE_SVE_BF16)
 #error "MatmulMMLAExperimentBench requires SVE BF16 matrix multiply"

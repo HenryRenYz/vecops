@@ -22,7 +22,7 @@
 #endif
 
 #include "vecops/Features.h"
-#include "vecops/gemm/Atoms.h"
+#include "vecops/matmul/Atom.h"
 
 #ifndef VECOPS_WEIGHT_REUSE_RESULT_STEM
 #define VECOPS_WEIGHT_REUSE_RESULT_STEM "matmul_weight_reuse"
