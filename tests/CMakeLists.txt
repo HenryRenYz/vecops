@@ -89,6 +89,15 @@ vecops_add_test(NAME VecComparisonTest FILES vec/ComparisonTest.cpp
     FOLDER vec/comparison ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecBasicTest FILES vec/BasicTest.cpp
     FOLDER vec/basic ARCH ${VEC_BASE_ARCH} LABELS vec)
+vecops_add_test(NAME VecMaskQueryTest FILES vec/MaskQueryTest.cpp
+    FOLDER vec/basic ARCH ${VEC_BASE_ARCH} LABELS vec)
+vecops_add_test(NAME VecSequenceTest FILES vec/SequenceTest.cpp
+    FOLDER vec/basic ARCH ${VEC_BASE_ARCH} LABELS vec)
+vecops_add_test(NAME VecCopySignTest FILES vec/CopySignTest.cpp
+    FOLDER vec/arithmetic ARCH ${VEC_BASE_ARCH} LABELS vec)
+vecops_add_test(NAME VecSaturatingArithmeticTest
+    FILES vec/SaturatingArithmeticTest.cpp
+    FOLDER vec/arithmetic ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecShuffleTest FILES vec/ShuffleTest.cpp
     FOLDER vec/shuffle ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecTaglessTest FILES vec/TaglessTest.cpp

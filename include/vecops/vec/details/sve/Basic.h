@@ -574,6 +574,67 @@ struct NativeWordImpl<SVEBackend, MaskNotOp> {
   }
 };
 
+template <Element T>
+VECOPS_ALWAYS_INLINE nint_t sve_mask_count(
+    svbool_t governing, svbool_t value) {
+  if constexpr (sizeof(T) == 1) return svcntp_b8(governing, value);
+  else if constexpr (sizeof(T) == 2) return svcntp_b16(governing, value);
+  else if constexpr (sizeof(T) == 4) return svcntp_b32(governing, value);
+  else return svcntp_b64(governing, value);
+}
+
+template <Element T>
+VECOPS_ALWAYS_INLINE nint_t sve_mask_last_index(svbool_t value) {
+  if constexpr (sizeof(T) == 1)
+    return svlastb_u8(value, svindex_u8(0, 1));
+  else if constexpr (sizeof(T) == 2)
+    return svlastb_u16(value, svindex_u16(0, 1));
+  else if constexpr (sizeof(T) == 4)
+    return svlastb_u32(value, svindex_u32(0, 1));
+  else
+    return static_cast<nint_t>(svlastb_u64(value, svindex_u64(0, 1)));
+}
+
+template <typename Op>
+struct SVEMaskQueryImpl {
+  template <nint_t Index, VectorTag Tag>
+  static VECOPS_ALWAYS_INLINE decltype(auto) call(
+      Op, Tag tag, NativeWordMask<Tag> value) {
+    using T = ElementOf<Tag>;
+    const auto active = sve_prefix_predicate<T>(
+        sve_valid_word_lanes<Index>(tag));
+    const auto selected = svand_b_z(active, active, value);
+    if constexpr (std::same_as<Op, MaskAllOp>) {
+      return !svptest_any(active, svnot_b_z(active, selected));
+    } else if constexpr (std::same_as<Op, MaskAnyOp>) {
+      return svptest_any(active, selected);
+    } else if constexpr (std::same_as<Op, MaskCountOp>) {
+      return sve_mask_count<T>(active, selected);
+    } else if constexpr (std::same_as<Op, MaskFirstOp>) {
+      if (!svptest_any(active, selected)) return nint_t{-1};
+      return sve_mask_count<T>(active, svbrkb_b_z(active, selected));
+    } else if constexpr (std::same_as<Op, MaskLastOp>) {
+      if (!svptest_any(active, selected)) return nint_t{-1};
+      return sve_mask_last_index<T>(selected);
+    } else {
+      static_assert(dispatch_dependent_false<Op>, "unsupported mask query");
+    }
+  }
+};
+
+#define VECOPS_VEC_SVE_MASK_QUERY(OpType)                               \
+  template <>                                                            \
+  struct NativeWordImpl<SVEBackend, OpType>                              \
+      : SVEMaskQueryImpl<OpType> {}
+
+VECOPS_VEC_SVE_MASK_QUERY(MaskAllOp);
+VECOPS_VEC_SVE_MASK_QUERY(MaskAnyOp);
+VECOPS_VEC_SVE_MASK_QUERY(MaskCountOp);
+VECOPS_VEC_SVE_MASK_QUERY(MaskFirstOp);
+VECOPS_VEC_SVE_MASK_QUERY(MaskLastOp);
+
+#undef VECOPS_VEC_SVE_MASK_QUERY
+
 template <>
 struct NativeWordImpl<SVEBackend, GetVecLaneOp> {
   template <nint_t Index, VectorTag Tag>

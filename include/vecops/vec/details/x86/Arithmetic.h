@@ -895,10 +895,273 @@ template <>
 struct NativeWordImpl<X86Backend, AddOp> : X86ArithmeticWordImpl<AddOp> {};
 template <>
 struct NativeWordImpl<X86Backend, SubOp> : X86ArithmeticWordImpl<SubOp> {};
+
+template <typename Op, std::integral T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_native_saturating_add_sub(Raw a, Raw b) {
+  static_assert(sizeof(T) == 1 || sizeof(T) == 2);
+#define VECOPS_VEC_X86_NATIVE_SATURATING(Width, Bits)                  \
+  if constexpr (std::same_as<Op, SaturatedAddOp>) {                    \
+    if constexpr (std::is_signed_v<T>)                                 \
+      return _mm##Width##_adds_epi##Bits(a, b);                        \
+    else                                                                \
+      return _mm##Width##_adds_epu##Bits(a, b);                        \
+  } else {                                                              \
+    if constexpr (std::is_signed_v<T>)                                 \
+      return _mm##Width##_subs_epi##Bits(a, b);                        \
+    else                                                                \
+      return _mm##Width##_subs_epu##Bits(a, b);                        \
+  }
+  if constexpr (sizeof(Raw) == 16) {
+    if constexpr (sizeof(T) == 1) {
+      VECOPS_VEC_X86_NATIVE_SATURATING(, 8);
+    } else {
+      VECOPS_VEC_X86_NATIVE_SATURATING(, 16);
+    }
+  }
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Raw) == 32) {
+    if constexpr (sizeof(T) == 1) {
+      VECOPS_VEC_X86_NATIVE_SATURATING(256, 8);
+    } else {
+      VECOPS_VEC_X86_NATIVE_SATURATING(256, 16);
+    }
+  }
+#endif
+#if VEC_WIDTH >= 512
+  else {
+    if constexpr (sizeof(T) == 1) {
+      VECOPS_VEC_X86_NATIVE_SATURATING(512, 8);
+    } else {
+      VECOPS_VEC_X86_NATIVE_SATURATING(512, 16);
+    }
+  }
+#endif
+#undef VECOPS_VEC_X86_NATIVE_SATURATING
+}
+
+template <std::integral T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_arithmetic_lane_sign_mask(Raw value) {
+  static_assert(sizeof(T) == 4 || sizeof(T) == 8);
+  if constexpr (sizeof(Raw) == 16) {
+    if constexpr (sizeof(T) == 4)
+      return _mm_srai_epi32(value, 31);
+    else
+      return _mm_sub_epi64(
+          _mm_setzero_si128(), _mm_srli_epi64(value, 63));
+  }
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Raw) == 32) {
+    if constexpr (sizeof(T) == 4)
+      return _mm256_srai_epi32(value, 31);
+    else
+      return _mm256_sub_epi64(
+          _mm256_setzero_si256(), _mm256_srli_epi64(value, 63));
+  }
+#endif
+#if VEC_WIDTH >= 512
+  else {
+    if constexpr (sizeof(T) == 4)
+      return _mm512_srai_epi32(value, 31);
+    else
+      return _mm512_sub_epi64(
+          _mm512_setzero_si512(), _mm512_srli_epi64(value, 63));
+  }
+#endif
+}
+
+template <typename Op>
+struct X86SaturatingArithmeticWordImpl {
+  template <nint_t Index, VectorTag Tag>
+    requires std::integral<ElementOf<Tag>>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      Op, Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) {
+    using T = ElementOf<Tag>;
+    using Raw = decltype(a.value);
+    static_assert(
+        Index >= 0 &&
+        Index < RepresentationTraits<X86Backend, Tag>::word_count);
+    if constexpr (sizeof(T) <= 2) {
+      return NativeWordVec<Tag>{
+          x86_native_saturating_add_sub<Op, T>(a.value, b.value)};
+    } else {
+      const auto wrapped = [&] {
+        if constexpr (std::same_as<Op, SaturatedAddOp>)
+          return NativeWordImpl<X86Backend, AddOp>::template call<Index>(
+              AddOp{}, tag, a, b).value;
+        else
+          return NativeWordImpl<X86Backend, SubOp>::template call<Index>(
+              SubOp{}, tag, a, b).value;
+      }();
+      Raw overflow_bits;
+      if constexpr (std::is_unsigned_v<T>) {
+        if constexpr (std::same_as<Op, SaturatedAddOp>) {
+          overflow_bits = x86_bit_or_raw(
+              x86_bit_and_raw(a.value, b.value),
+              x86_bit_andnot_raw(
+                  wrapped, x86_bit_or_raw(a.value, b.value)));
+        } else {
+          overflow_bits = x86_bit_or_raw(
+              x86_bit_andnot_raw(a.value, b.value),
+              x86_bit_andnot_raw(
+                  x86_bit_xor_raw(a.value, b.value), wrapped));
+        }
+      } else {
+        if constexpr (std::same_as<Op, SaturatedAddOp>)
+          overflow_bits = x86_bit_and_raw(
+              x86_bit_xor_raw(a.value, wrapped),
+              x86_bit_xor_raw(b.value, wrapped));
+        else
+          overflow_bits = x86_bit_and_raw(
+              x86_bit_xor_raw(a.value, b.value),
+              x86_bit_xor_raw(a.value, wrapped));
+      }
+      const auto overflow =
+          x86_arithmetic_lane_sign_mask<T>(overflow_bits);
+      if constexpr (std::is_unsigned_v<T>) {
+        if constexpr (std::same_as<Op, SaturatedAddOp>)
+          return NativeWordVec<Tag>{x86_bit_or_raw(wrapped, overflow)};
+        else
+          return NativeWordVec<Tag>{
+              x86_bit_andnot_raw(overflow, wrapped)};
+      } else {
+        const auto a_sign = x86_arithmetic_lane_sign_mask<T>(a.value);
+        const auto maximum =
+            NativeWordImpl<X86Backend, FillOp>::template call<Index>(
+                FillOp{}, tag, std::numeric_limits<T>::max()).value;
+        const auto limit = x86_bit_xor_raw(maximum, a_sign);
+        return NativeWordVec<Tag>{x86_bit_or_raw(
+            x86_bit_andnot_raw(overflow, wrapped),
+            x86_bit_and_raw(overflow, limit))};
+      }
+    }
+  }
+
+  template <nint_t Index, VectorTag Tag, typename Policy>
+    requires std::integral<ElementOf<Tag>>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      Op op, Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b,
+      NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
+    return blend(
+        tag, inactive, mask, call<Index>(op, tag, a, b));
+  }
+};
+
+template <>
+struct NativeWordImpl<X86Backend, SaturatedAddOp>
+    : X86SaturatingArithmeticWordImpl<SaturatedAddOp> {};
+
+template <>
+struct NativeWordImpl<X86Backend, SaturatedSubOp>
+    : X86SaturatingArithmeticWordImpl<SaturatedSubOp> {};
+
 template <>
 struct NativeWordImpl<X86Backend, MulOp> : X86ArithmeticWordImpl<MulOp> {};
 template <>
 struct NativeWordImpl<X86Backend, DivOp> : X86ArithmeticWordImpl<DivOp> {};
+
+template <Element T, typename Raw>
+VECOPS_ALWAYS_INLINE auto x86_arithmetic_to_integer_bits(Raw value) {
+  if constexpr (std::same_as<T, float32_t>) {
+    if constexpr (sizeof(Raw) == 16) return _mm_castps_si128(value);
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32) return _mm256_castps_si256(value);
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_castps_si512(value);
+#endif
+  } else if constexpr (std::same_as<T, float64_t>) {
+    if constexpr (sizeof(Raw) == 16) return _mm_castpd_si128(value);
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32) return _mm256_castpd_si256(value);
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_castpd_si512(value);
+#endif
+  } else {
+    return value;
+  }
+}
+
+template <Element T, typename Raw, typename Bits>
+VECOPS_ALWAYS_INLINE Raw x86_arithmetic_from_integer_bits(Bits bits) {
+  if constexpr (std::same_as<T, float32_t>) {
+    if constexpr (sizeof(Raw) == 16) return _mm_castsi128_ps(bits);
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32) return _mm256_castsi256_ps(bits);
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_castsi512_ps(bits);
+#endif
+  } else if constexpr (std::same_as<T, float64_t>) {
+    if constexpr (sizeof(Raw) == 16) return _mm_castsi128_pd(bits);
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32) return _mm256_castsi256_pd(bits);
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_castsi512_pd(bits);
+#endif
+  } else {
+    return bits;
+  }
+}
+
+template <Element T, typename Bits>
+VECOPS_ALWAYS_INLINE Bits x86_arithmetic_sign_mask() {
+  if constexpr (sizeof(Bits) == 16) {
+    if constexpr (sizeof(T) == 2)
+      return _mm_set1_epi16(static_cast<int16_t>(0x8000u));
+    else if constexpr (sizeof(T) == 4)
+      return _mm_set1_epi32(static_cast<int32_t>(0x80000000u));
+    else
+      return _mm_set1_epi64x(static_cast<int64_t>(0x8000000000000000ull));
+  }
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Bits) == 32) {
+    const auto half = x86_arithmetic_sign_mask<T, __m128i>();
+    return _mm256_insertf128_si256(_mm256_castsi128_si256(half), half, 1);
+  }
+#endif
+#if VEC_WIDTH >= 512
+  else {
+    if constexpr (sizeof(T) == 2)
+      return _mm512_set1_epi16(static_cast<int16_t>(0x8000u));
+    else if constexpr (sizeof(T) == 4)
+      return _mm512_set1_epi32(static_cast<int32_t>(0x80000000u));
+    else
+      return _mm512_set1_epi64(static_cast<int64_t>(0x8000000000000000ull));
+  }
+#endif
+}
+
+template <>
+struct NativeWordImpl<X86Backend, CopySignOp> {
+  template <nint_t Index, FloatingTag Tag>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      CopySignOp, Tag, NativeWordVec<Tag> magnitude,
+      NativeWordVec<Tag> sign) {
+    using T = ElementOf<Tag>;
+    using Raw = typename RepresentationTraits<X86Backend, Tag>::RawVec;
+    const auto magnitude_bits =
+        x86_arithmetic_to_integer_bits<T>(magnitude.value);
+    const auto sign_bits = x86_arithmetic_to_integer_bits<T>(sign.value);
+    using Bits = std::remove_cvref_t<decltype(magnitude_bits)>;
+    const auto sign_mask = x86_arithmetic_sign_mask<T, Bits>();
+    const auto result_bits = x86_bit_or_raw(
+        x86_bit_andnot_raw(sign_mask, magnitude_bits),
+        x86_bit_and_raw(sign_bits, sign_mask));
+    return NativeWordVec<Tag>{
+        x86_arithmetic_from_integer_bits<T, Raw>(result_bits)};
+  }
+
+  template <nint_t Index, FloatingTag Tag, typename Policy>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      CopySignOp op, Tag tag, NativeWordVec<Tag> magnitude,
+      NativeWordVec<Tag> sign, NativeWordMask<Tag> mask,
+      NativeWordVec<Tag> inactive, Policy) {
+    return blend(
+        tag, inactive, mask, call<Index>(op, tag, magnitude, sign));
+  }
+};
 
 /* **************************************************************************** */
 //                   Extrema helpers and word implementation                   //

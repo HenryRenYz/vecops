@@ -517,6 +517,76 @@ struct NativeWordImpl<X86Backend, MaskNotOp> {
   }
 };
 
+template <typename Raw>
+VECOPS_ALWAYS_INLINE uint64_t x86_mask_msb_bits(Raw value) {
+#if defined(CPU_CAPABILITY_AVX512)
+  return static_cast<uint64_t>(value);
+#else
+  if constexpr (sizeof(Raw) == 16)
+    return static_cast<uint32_t>(_mm_movemask_epi8(value));
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Raw) == 32)
+    return static_cast<uint32_t>(_mm256_movemask_epi8(value));
+#endif
+  else
+    static_assert(dispatch_dependent_false<Raw>, "unsupported x86 mask width");
+#endif
+}
+
+VECOPS_ALWAYS_INLINE constexpr uint64_t x86_low_bits(nint_t count) {
+  return count <= 0 ? uint64_t{0}
+       : count >= 64 ? ~uint64_t{0}
+                     : (uint64_t{1} << count) - 1;
+}
+
+template <typename Op>
+struct X86MaskQueryImpl {
+  template <nint_t Index, VectorTag Tag>
+  static VECOPS_ALWAYS_INLINE decltype(auto) call(
+      Op, Tag, NativeWordMask<Tag> value) {
+    const nint_t valid = valid_word_lanes<Index, Tag>();
+#if defined(CPU_CAPABILITY_AVX512)
+    constexpr nint_t bits_per_lane = 1;
+#else
+    constexpr nint_t bits_per_lane = sizeof(ElementOf<Tag>);
+#endif
+    const nint_t valid_bits = valid * bits_per_lane;
+    const uint64_t bits =
+        x86_mask_msb_bits(value.value) & x86_low_bits(valid_bits);
+    if constexpr (std::same_as<Op, MaskAllOp>) {
+      return bits == x86_low_bits(valid_bits);
+    } else if constexpr (std::same_as<Op, MaskAnyOp>) {
+      return bits != 0;
+    } else if constexpr (std::same_as<Op, MaskCountOp>) {
+      return static_cast<nint_t>(std::popcount(bits) / bits_per_lane);
+    } else if constexpr (std::same_as<Op, MaskFirstOp>) {
+      return bits == 0
+          ? nint_t{-1}
+          : static_cast<nint_t>(std::countr_zero(bits) / bits_per_lane);
+    } else if constexpr (std::same_as<Op, MaskLastOp>) {
+      return bits == 0
+          ? nint_t{-1}
+          : static_cast<nint_t>(
+                (std::bit_width(bits) - 1) / bits_per_lane);
+    } else {
+      static_assert(dispatch_dependent_false<Op>, "unsupported mask query");
+    }
+  }
+};
+
+#define VECOPS_VEC_X86_MASK_QUERY(OpType)                               \
+  template <>                                                            \
+  struct NativeWordImpl<X86Backend, OpType>                              \
+      : X86MaskQueryImpl<OpType> {}
+
+VECOPS_VEC_X86_MASK_QUERY(MaskAllOp);
+VECOPS_VEC_X86_MASK_QUERY(MaskAnyOp);
+VECOPS_VEC_X86_MASK_QUERY(MaskCountOp);
+VECOPS_VEC_X86_MASK_QUERY(MaskFirstOp);
+VECOPS_VEC_X86_MASK_QUERY(MaskLastOp);
+
+#undef VECOPS_VEC_X86_MASK_QUERY
+
 template <>
 struct NativeWordImpl<X86Backend, GetVecLaneOp> {
   template <nint_t Index, VectorTag Tag>

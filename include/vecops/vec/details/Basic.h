@@ -137,6 +137,100 @@ VECOPS_VEC_DEFINE_GENERIC_WHILE(MaskWhileGeOp);
 
 #undef VECOPS_VEC_DEFINE_GENERIC_WHILE
 
+/* **************************************************************************** */
+//    Whole-Tag mask-query folds                                               //
+/* **************************************************************************** */
+
+template <typename Backend, nint_t Index, nint_t Count, VectorTag Tag>
+VECOPS_ALWAYS_INLINE nint_t mask_first_words(Tag tag, Mask<Tag> value) {
+  const nint_t local = execute_word<Index, Backend>(
+      MaskFirstOp{}, tag, ::vecops::vec::get_word<Index>(tag, value));
+  if (local >= 0) return Index * native_word_size(tag) + local;
+  if constexpr (Index + 1 < Count)
+    return mask_first_words<Backend, Index + 1, Count>(tag, value);
+  else
+    return -1;
+}
+
+template <typename Backend, nint_t Index, VectorTag Tag>
+VECOPS_ALWAYS_INLINE nint_t mask_last_words(Tag tag, Mask<Tag> value) {
+  const nint_t local = execute_word<Index, Backend>(
+      MaskLastOp{}, tag, ::vecops::vec::get_word<Index>(tag, value));
+  if (local >= 0) return Index * native_word_size(tag) + local;
+  if constexpr (Index > 0)
+    return mask_last_words<Backend, Index - 1>(tag, value);
+  else
+    return -1;
+}
+
+template <typename Backend, VectorTag Tag>
+  requires (RepresentationTraits<Backend, Tag>::word_count > 1)
+struct GenericImpl<Backend, MaskAllOp, Tag> {
+  static VECOPS_ALWAYS_INLINE bool call(
+      MaskAllOp op, Tag tag, Mask<Tag> value) {
+    return [&]<std::size_t... Index>(std::index_sequence<Index...>) {
+      return (execute_word<static_cast<nint_t>(Index), Backend>(
+                  op, tag,
+                  ::vecops::vec::get_word<static_cast<nint_t>(Index)>(
+                      tag, value)) && ...);
+    }(std::make_index_sequence<static_cast<std::size_t>(
+        RepresentationTraits<Backend, Tag>::word_count)>{});
+  }
+};
+
+template <typename Backend, VectorTag Tag>
+  requires (RepresentationTraits<Backend, Tag>::word_count > 1)
+struct GenericImpl<Backend, MaskAnyOp, Tag> {
+  static VECOPS_ALWAYS_INLINE bool call(
+      MaskAnyOp op, Tag tag, Mask<Tag> value) {
+    return [&]<std::size_t... Index>(std::index_sequence<Index...>) {
+      return (execute_word<static_cast<nint_t>(Index), Backend>(
+                  op, tag,
+                  ::vecops::vec::get_word<static_cast<nint_t>(Index)>(
+                      tag, value)) || ...);
+    }(std::make_index_sequence<static_cast<std::size_t>(
+        RepresentationTraits<Backend, Tag>::word_count)>{});
+  }
+};
+
+template <typename Backend, VectorTag Tag>
+  requires (RepresentationTraits<Backend, Tag>::word_count > 1)
+struct GenericImpl<Backend, MaskCountOp, Tag> {
+  static VECOPS_ALWAYS_INLINE nint_t call(
+      MaskCountOp op, Tag tag, Mask<Tag> value) {
+    return [&]<std::size_t... Index>(std::index_sequence<Index...>) {
+      return (nint_t{0} + ... + execute_word<
+          static_cast<nint_t>(Index), Backend>(
+              op, tag,
+              ::vecops::vec::get_word<static_cast<nint_t>(Index)>(
+                  tag, value)));
+    }(std::make_index_sequence<static_cast<std::size_t>(
+        RepresentationTraits<Backend, Tag>::word_count)>{});
+  }
+};
+
+template <typename Backend, VectorTag Tag>
+  requires (RepresentationTraits<Backend, Tag>::word_count > 1)
+struct GenericImpl<Backend, MaskFirstOp, Tag> {
+  static VECOPS_ALWAYS_INLINE nint_t call(
+      MaskFirstOp, Tag tag, Mask<Tag> value) {
+    return mask_first_words<
+        Backend, 0, RepresentationTraits<Backend, Tag>::word_count>(
+            tag, value);
+  }
+};
+
+template <typename Backend, VectorTag Tag>
+  requires (RepresentationTraits<Backend, Tag>::word_count > 1)
+struct GenericImpl<Backend, MaskLastOp, Tag> {
+  static VECOPS_ALWAYS_INLINE nint_t call(
+      MaskLastOp, Tag tag, Mask<Tag> value) {
+    return mask_last_words<
+        Backend, RepresentationTraits<Backend, Tag>::word_count - 1>(
+            tag, value);
+  }
+};
+
 template <typename Backend, VectorTag ToTag>
   requires (RepresentationTraits<Backend, ToTag>::word_count > 1)
 struct GenericImpl<Backend, BitCastOp, ToTag> {

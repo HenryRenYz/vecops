@@ -253,6 +253,12 @@ struct IsNegInfOp { VECOPS_VEC_CLASSIFICATION_MEMBERS; };
  * @see isposinf, isneginf, isnan.
  */
 struct IsInfOp { VECOPS_VEC_CLASSIFICATION_MEMBERS; };
+/** True for every finite lane, including zero and subnormal values. */
+struct IsFiniteOp { VECOPS_VEC_CLASSIFICATION_MEMBERS; };
+/** True exactly for finite, nonzero, non-subnormal lanes. */
+struct IsNormalOp { VECOPS_VEC_CLASSIFICATION_MEMBERS; };
+/** True when the IEEE sign bit is set, including -0 and signed NaNs. */
+struct SignBitOp { VECOPS_VEC_CLASSIFICATION_MEMBERS; };
 
 #undef VECOPS_VEC_CLASSIFICATION_MEMBERS
 
@@ -271,6 +277,9 @@ inline constexpr IsNanOp isnan{};
 inline constexpr IsPosInfOp isposinf{};
 inline constexpr IsNegInfOp isneginf{};
 inline constexpr IsInfOp isinf{};
+inline constexpr IsFiniteOp isfinite{};
+inline constexpr IsNormalOp isnormal{};
+inline constexpr SignBitOp signbit{};
 
 } // namespace vecops::vec
 
@@ -363,6 +372,9 @@ VECOPS_VEC_DEFINE_CLASSIFICATION(IsNanOp, isnan, is a NaN);
 VECOPS_VEC_DEFINE_CLASSIFICATION(IsPosInfOp, isposinf, is positive infinity);
 VECOPS_VEC_DEFINE_CLASSIFICATION(IsNegInfOp, isneginf, is negative infinity);
 VECOPS_VEC_DEFINE_CLASSIFICATION(IsInfOp, isinf, is either infinity);
+VECOPS_VEC_DEFINE_CLASSIFICATION(IsFiniteOp, isfinite, is finite);
+VECOPS_VEC_DEFINE_CLASSIFICATION(IsNormalOp, isnormal, is normal);
+VECOPS_VEC_DEFINE_CLASSIFICATION(SignBitOp, signbit, has its sign bit set);
 
 #undef VECOPS_VEC_DEFINE_CLASSIFICATION
 

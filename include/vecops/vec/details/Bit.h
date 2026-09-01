@@ -3,10 +3,9 @@
 
 /**
  * @file Bit.h
- * @brief Bitwise operation infrastructure: inactive-lane policy tags
- * (PreserveBitLanes, ZeroBitLanes, MergeBitLanes), options validation
- * (validate_bit_options), and the multi-word GenericImpl fallback for
- * bitwise operations.
+ * @brief Bitwise operation infrastructure: inactive-lane policy tags,
+ * option validation, and multi-word fallbacks for logical operations,
+ * shifts, bit counts, and rotations.
  */
 
 #include <type_traits>
@@ -102,6 +101,23 @@ VECOPS_ALWAYS_INLINE constexpr auto bit_inactive_policy() {
     return MergeBitLanes{};
   else
     return PreserveBitLanes{};
+}
+
+template <typename Op, IntegerTag Tag, typename... Options>
+VECOPS_ALWAYS_INLINE Vec<Tag> execute_bit_unary_options(
+    Op op, Tag tag, Vec<Tag> value, Options&&... options) {
+  validate_bit_options<Tag, Options...>();
+  if constexpr (option_count_v<IsUnmaskedOption, Options...> == 1) {
+    return execute(op, tag, value);
+  } else {
+    const auto inactive = bit_inactive_value(
+        tag, value, std::forward<Options>(options)...);
+    return execute(
+        op, tag, value,
+        find_option<IsMaskedOption>(
+            std::forward<Options>(options)...).value,
+        inactive, bit_inactive_policy<Options...>());
+  }
 }
 
 template <typename Op, IntegerTag Tag, typename Count, typename... Options>
@@ -204,12 +220,58 @@ struct GenericImpl<Backend, BitNotOp, Tag> {
   }
 };
 
+#define VECOPS_VEC_DEFINE_GENERIC_BIT_UNARY(OpType)                     \
+  template <typename Backend, IntegerTag Tag>                           \
+    requires (RepresentationTraits<Backend, Tag>::word_count > 1)      \
+  struct GenericImpl<Backend, OpType, Tag> {                            \
+    static VECOPS_ALWAYS_INLINE Vec<Tag> call(                          \
+        OpType op, Tag tag, Vec<Tag> value) {                           \
+      return construct_words<Backend>(                                 \
+          tag, [&]<nint_t Index>(Tag parent) {                          \
+            return execute_word<Index, Backend>(                        \
+                op, parent, ::vecops::vec::get_word<Index>(tag, value));\
+          });                                                           \
+    }                                                                   \
+    template <typename Policy>                                         \
+    static VECOPS_ALWAYS_INLINE Vec<Tag> call(                          \
+        OpType op, Tag tag, Vec<Tag> value, Mask<Tag> mask,             \
+        Vec<Tag> inactive, Policy policy) {                             \
+      return construct_words<Backend>(                                 \
+          tag, [&]<nint_t Index>(Tag parent) {                          \
+            return execute_word<Index, Backend>(                        \
+                op, parent, ::vecops::vec::get_word<Index>(tag, value), \
+                ::vecops::vec::get_word<Index>(tag, mask),              \
+                ::vecops::vec::get_word<Index>(tag, inactive), policy); \
+          });                                                           \
+    }                                                                   \
+  }
+
+VECOPS_VEC_DEFINE_GENERIC_BIT_UNARY(PopCountOp);
+VECOPS_VEC_DEFINE_GENERIC_BIT_UNARY(CountLeadingZeroOp);
+VECOPS_VEC_DEFINE_GENERIC_BIT_UNARY(CountLeadingOneOp);
+VECOPS_VEC_DEFINE_GENERIC_BIT_UNARY(CountTrailingZeroOp);
+VECOPS_VEC_DEFINE_GENERIC_BIT_UNARY(CountTrailingOneOp);
+
+#undef VECOPS_VEC_DEFINE_GENERIC_BIT_UNARY
+
+template <typename T>
+struct IsImmediateBitShiftCount : std::false_type {};
+
+template <nint_t Count>
+struct IsImmediateBitShiftCount<meta::Const<Count>> : std::true_type {};
+
+template <typename T>
+concept ScalarBitShiftCount =
+    std::same_as<std::remove_cvref_t<T>, int> ||
+    IsImmediateBitShiftCount<std::remove_cvref_t<T>>::value;
+
 #define VECOPS_VEC_DEFINE_GENERIC_SHIFT(OpType)                          \
   template <typename Backend, IntegerTag Tag>                            \
     requires (RepresentationTraits<Backend, Tag>::word_count > 1)       \
   struct GenericImpl<Backend, OpType, Tag> {                             \
+    template <ScalarBitShiftCount Count>                                 \
     static VECOPS_ALWAYS_INLINE Vec<Tag> call(                           \
-        OpType op, Tag tag, Vec<Tag> value, int count) {                 \
+        OpType op, Tag tag, Vec<Tag> value, Count count) {               \
       return construct_words<Backend>(tag, [&]<nint_t Index>(Tag parent) {\
         return execute_word<Index, Backend>(                             \
             op, parent, ::vecops::vec::get_word<Index>(tag, value),    \
@@ -224,9 +286,9 @@ struct GenericImpl<Backend, BitNotOp, Tag> {
             ::vecops::vec::get_word<Index>(tag, counts));              \
       });                                                                \
     }                                                                    \
-    template <typename Policy>                                          \
+    template <ScalarBitShiftCount Count, typename Policy>                \
     static VECOPS_ALWAYS_INLINE Vec<Tag> call(                           \
-        OpType op, Tag tag, Vec<Tag> value, int count, Mask<Tag> mask, \
+        OpType op, Tag tag, Vec<Tag> value, Count count, Mask<Tag> mask,\
         Vec<Tag> inactive, Policy policy) {                              \
       return construct_words<Backend>(tag, [&]<nint_t Index>(Tag parent) {\
         return execute_word<Index, Backend>(                             \
@@ -252,6 +314,8 @@ struct GenericImpl<Backend, BitNotOp, Tag> {
 
 VECOPS_VEC_DEFINE_GENERIC_SHIFT(BitShiftLeftOp);
 VECOPS_VEC_DEFINE_GENERIC_SHIFT(BitShiftRightOp);
+VECOPS_VEC_DEFINE_GENERIC_SHIFT(RotateLeftOp);
+VECOPS_VEC_DEFINE_GENERIC_SHIFT(RotateRightOp);
 
 #undef VECOPS_VEC_DEFINE_GENERIC_SHIFT
 

@@ -557,20 +557,20 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_family(
 #else
   constexpr IndexTag<Tag> index_tag{};
   const auto qi = x86_exp_to_index<Tag>(tag, qf);
-  const auto half = bit_shr(index_tag, qi, 1);
+  const auto half = shr(index_tag, qi, 1);
   const auto rest = sub(index_tag, qi, half);
   const auto bias = fill_word(
       index_tag, std::same_as<T, float32_t> ? 127 : 1023);
   const int shift = std::same_as<T, float32_t> ? 23 : 52;
   if constexpr (NegativeOnly && !gradual) {
     const auto scale = bitcast(
-        tag, bit_shl(index_tag, add(index_tag, qi, bias), shift));
+        tag, shl(index_tag, add(index_tag, qi, bias), shift));
     y = mul(tag, poly, scale);
   } else {
     const auto a = bitcast(
-        tag, bit_shl(index_tag, add(index_tag, half, bias), shift));
+        tag, shl(index_tag, add(index_tag, half, bias), shift));
     const auto b = bitcast(
-        tag, bit_shl(index_tag, add(index_tag, rest, bias), shift));
+        tag, shl(index_tag, add(index_tag, rest, bias), shift));
     y = mul(tag, mul(tag, poly, a), b);
   }
 #endif

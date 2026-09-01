@@ -173,9 +173,9 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_log_f64_table_core(
   constexpr std::int64_t kExponentBits = ~kMantissaLow;
   const auto bits = bitcast(itag, x);
   const auto tmp = sub(itag, bits, fill_word(itag, kOff));
-  const auto k = bit_shr(itag, tmp, 52);
+  const auto k = shr(itag, tmp, 52);
   const auto i = bit_and(
-      itag, bit_shr(itag, tmp, 44), fill_word(itag, std::int64_t{0xfe}));
+      itag, shr(itag, tmp, 44), fill_word(itag, std::int64_t{0xfe}));
   const auto z = bitcast(
       tag,
       sub(itag, bits, bit_and(itag, tmp, fill_word(itag, kExponentBits))));
@@ -211,7 +211,7 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_log_f64_poly_core(
   constexpr std::int64_t kExponentBits = ~kMantissaLow;
   const auto bits = bitcast(itag, x);
   const auto tmp = sub(itag, bits, fill_word(itag, kOff));
-  const auto n = x86_log_index_to_float(tag, bit_shr(itag, tmp, 52));
+  const auto n = x86_log_index_to_float(tag, shr(itag, tmp, 52));
   const auto z = bitcast(
       tag,
       sub(itag, bits, bit_and(itag, tmp, fill_word(itag, kExponentBits))));
@@ -314,7 +314,7 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_log_f32_poly_core(
   const auto bits = bitcast(itag, x);
   const auto u_off = sub(itag, bits, fill_word(itag, kOff));
   const auto k_int = [&] {
-    const auto shifted = bit_shr(itag, u_off, 23);
+    const auto shifted = shr(itag, u_off, 23);
     if constexpr (KBias == 0)
       return shifted;
     else
@@ -370,7 +370,7 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_log_f32_strict_core(
   const auto bits = bitcast(itag, x);
   const auto u_off = sub(itag, bits, fill_word(itag, kOff));
   const auto k_int = [&] {
-    const auto shifted = bit_shr(itag, u_off, 23);
+    const auto shifted = shr(itag, u_off, 23);
     if constexpr (KBias == 0)
       return shifted;
     else

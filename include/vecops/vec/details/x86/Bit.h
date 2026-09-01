@@ -3,7 +3,8 @@
 
 /**
  * @file Bit.h
- * @brief x86 backend implementations for bitwise operations.
+ * @brief x86 backend implementations for bitwise operations, shifts, bit
+ * counts, and rotations.
  */
 
 #include <array>
@@ -32,11 +33,66 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_set1_i8(int value) {
 #endif
 }
 
-template <typename Raw>
-VECOPS_ALWAYS_INLINE Raw x86_bit_shift_left_raw(Raw value, int count,
-                                                 int width) {
+template <nint_t Count, typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_shift_left_immediate_raw(Raw value) {
+  using U = std::make_unsigned_t<T>;
+  constexpr int width = std::numeric_limits<U>::digits;
+  static_assert(Count >= 0);
+  if constexpr (Count >= width) {
+    return x86_bit_zero_raw<Raw>();
+  } else if constexpr (sizeof(T) == 1) {
+    const auto shifted = [&] {
+      if constexpr (sizeof(Raw) == 16)
+        return _mm_slli_epi16(value, static_cast<int>(Count));
+#if VEC_WIDTH >= 256
+      else if constexpr (sizeof(Raw) == 32)
+        return _mm256_slli_epi16(value, static_cast<int>(Count));
+#endif
+#if VEC_WIDTH >= 512
+      else return _mm512_slli_epi16(value, static_cast<int>(Count));
+#endif
+    }();
+    constexpr int mask = static_cast<int>(0xffu << Count);
+    return x86_bit_and_raw(shifted, x86_bit_set1_i8<Raw>(mask));
+  } else if constexpr (sizeof(T) == 2) {
+    if constexpr (sizeof(Raw) == 16)
+      return _mm_slli_epi16(value, static_cast<int>(Count));
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32)
+      return _mm256_slli_epi16(value, static_cast<int>(Count));
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_slli_epi16(value, static_cast<int>(Count));
+#endif
+  } else if constexpr (sizeof(T) == 4) {
+    if constexpr (sizeof(Raw) == 16)
+      return _mm_slli_epi32(value, static_cast<int>(Count));
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32)
+      return _mm256_slli_epi32(value, static_cast<int>(Count));
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_slli_epi32(value, static_cast<int>(Count));
+#endif
+  } else {
+    if constexpr (sizeof(Raw) == 16)
+      return _mm_slli_epi64(value, static_cast<int>(Count));
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32)
+      return _mm256_slli_epi64(value, static_cast<int>(Count));
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_slli_epi64(value, static_cast<int>(Count));
+#endif
+  }
+}
+
+template <typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_shift_left_scalar_raw(
+    Raw value, int count) {
   const auto shift = _mm_cvtsi32_si128(count);
-  if (width == 8) {
+  if constexpr (sizeof(T) == 1) {
+    if (count >= 8) return x86_bit_zero_raw<Raw>();
     const auto shifted = [&] {
       if constexpr (sizeof(Raw) == 16) return _mm_sll_epi16(value, shift);
 #if VEC_WIDTH >= 256
@@ -48,8 +104,7 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_left_raw(Raw value, int count,
     }();
     const auto byte_mask = x86_bit_set1_i8<Raw>(0xff << count);
     return x86_bit_and_raw(shifted, byte_mask);
-  }
-  if (width == 16) {
+  } else if constexpr (sizeof(T) == 2) {
     if constexpr (sizeof(Raw) == 16) return _mm_sll_epi16(value, shift);
 #if VEC_WIDTH >= 256
     else if constexpr (sizeof(Raw) == 32) return _mm256_sll_epi16(value, shift);
@@ -57,8 +112,7 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_left_raw(Raw value, int count,
 #if VEC_WIDTH >= 512
     else return _mm512_sll_epi16(value, shift);
 #endif
-  }
-  if (width == 32) {
+  } else if constexpr (sizeof(T) == 4) {
     if constexpr (sizeof(Raw) == 16) return _mm_sll_epi32(value, shift);
 #if VEC_WIDTH >= 256
     else if constexpr (sizeof(Raw) == 32) return _mm256_sll_epi32(value, shift);
@@ -66,8 +120,7 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_left_raw(Raw value, int count,
 #if VEC_WIDTH >= 512
     else return _mm512_sll_epi32(value, shift);
 #endif
-  }
-  if constexpr (sizeof(Raw) == 16) return _mm_sll_epi64(value, shift);
+  } else if constexpr (sizeof(Raw) == 16) return _mm_sll_epi64(value, shift);
 #if VEC_WIDTH >= 256
   else if constexpr (sizeof(Raw) == 32) return _mm256_sll_epi64(value, shift);
 #endif
@@ -76,11 +129,67 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_left_raw(Raw value, int count,
 #endif
 }
 
-template <typename Raw>
-VECOPS_ALWAYS_INLINE Raw x86_bit_shift_right_logical_raw(
-    Raw value, int count, int width) {
+template <nint_t Count, typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_shift_right_logical_immediate_raw(
+    Raw value) {
+  using U = std::make_unsigned_t<T>;
+  constexpr int width = std::numeric_limits<U>::digits;
+  static_assert(Count >= 0);
+  if constexpr (Count >= width) {
+    return x86_bit_zero_raw<Raw>();
+  } else if constexpr (sizeof(T) == 1) {
+    const auto shifted = [&] {
+      if constexpr (sizeof(Raw) == 16)
+        return _mm_srli_epi16(value, static_cast<int>(Count));
+#if VEC_WIDTH >= 256
+      else if constexpr (sizeof(Raw) == 32)
+        return _mm256_srli_epi16(value, static_cast<int>(Count));
+#endif
+#if VEC_WIDTH >= 512
+      else return _mm512_srli_epi16(value, static_cast<int>(Count));
+#endif
+    }();
+    constexpr int mask = static_cast<int>((0xffu >> Count) & 0xffu);
+    return x86_bit_and_raw(shifted, x86_bit_set1_i8<Raw>(mask));
+  } else if constexpr (sizeof(T) == 2) {
+    if constexpr (sizeof(Raw) == 16)
+      return _mm_srli_epi16(value, static_cast<int>(Count));
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32)
+      return _mm256_srli_epi16(value, static_cast<int>(Count));
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_srli_epi16(value, static_cast<int>(Count));
+#endif
+  } else if constexpr (sizeof(T) == 4) {
+    if constexpr (sizeof(Raw) == 16)
+      return _mm_srli_epi32(value, static_cast<int>(Count));
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32)
+      return _mm256_srli_epi32(value, static_cast<int>(Count));
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_srli_epi32(value, static_cast<int>(Count));
+#endif
+  } else {
+    if constexpr (sizeof(Raw) == 16)
+      return _mm_srli_epi64(value, static_cast<int>(Count));
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32)
+      return _mm256_srli_epi64(value, static_cast<int>(Count));
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_srli_epi64(value, static_cast<int>(Count));
+#endif
+  }
+}
+
+template <typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_shift_right_logical_scalar_raw(
+    Raw value, int count) {
   const auto shift = _mm_cvtsi32_si128(count);
-  if (width <= 8) {
+  if constexpr (sizeof(T) == 1) {
+    if (count >= 8) return x86_bit_zero_raw<Raw>();
     const auto shifted = [&] {
       if constexpr (sizeof(Raw) == 16) return _mm_srl_epi16(value, shift);
 #if VEC_WIDTH >= 256
@@ -92,8 +201,7 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_right_logical_raw(
     }();
     const auto byte_mask = x86_bit_set1_i8<Raw>((0xffu >> count) & 0xffu);
     return x86_bit_and_raw(shifted, byte_mask);
-  }
-  if (width == 16) {
+  } else if constexpr (sizeof(T) == 2) {
     if constexpr (sizeof(Raw) == 16) return _mm_srl_epi16(value, shift);
 #if VEC_WIDTH >= 256
     else if constexpr (sizeof(Raw) == 32) return _mm256_srl_epi16(value, shift);
@@ -101,8 +209,7 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_right_logical_raw(
 #if VEC_WIDTH >= 512
     else return _mm512_srl_epi16(value, shift);
 #endif
-  }
-  if (width == 32) {
+  } else if constexpr (sizeof(T) == 4) {
     if constexpr (sizeof(Raw) == 16) return _mm_srl_epi32(value, shift);
 #if VEC_WIDTH >= 256
     else if constexpr (sizeof(Raw) == 32) return _mm256_srl_epi32(value, shift);
@@ -110,8 +217,7 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_right_logical_raw(
 #if VEC_WIDTH >= 512
     else return _mm512_srl_epi32(value, shift);
 #endif
-  }
-  if constexpr (sizeof(Raw) == 16) return _mm_srl_epi64(value, shift);
+  } else if constexpr (sizeof(Raw) == 16) return _mm_srl_epi64(value, shift);
 #if VEC_WIDTH >= 256
   else if constexpr (sizeof(Raw) == 32) return _mm256_srl_epi64(value, shift);
 #endif
@@ -120,10 +226,10 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_right_logical_raw(
 #endif
 }
 
-template <typename Raw>
-VECOPS_ALWAYS_INLINE Raw x86_bit_negative_mask(Raw value, int width) {
+template <typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_negative_mask(Raw value) {
   const auto zero = x86_bit_zero_raw<Raw>();
-  if (width == 8) {
+  if constexpr (sizeof(T) == 1) {
     if constexpr (sizeof(Raw) == 16) return _mm_cmpgt_epi8(zero, value);
 #if VEC_WIDTH >= 256
     else if constexpr (sizeof(Raw) == 32) return _mm256_cmpgt_epi8(zero, value);
@@ -131,8 +237,7 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_negative_mask(Raw value, int width) {
 #if VEC_WIDTH >= 512
     else return _mm512_movm_epi8(_mm512_cmpgt_epi8_mask(zero, value));
 #endif
-  }
-  if (width == 16) {
+  } else if constexpr (sizeof(T) == 2) {
     if constexpr (sizeof(Raw) == 16) return _mm_cmpgt_epi16(zero, value);
 #if VEC_WIDTH >= 256
     else if constexpr (sizeof(Raw) == 32) return _mm256_cmpgt_epi16(zero, value);
@@ -140,8 +245,8 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_negative_mask(Raw value, int width) {
 #if VEC_WIDTH >= 512
     else return _mm512_movm_epi16(_mm512_cmpgt_epi16_mask(zero, value));
 #endif
-  }
-  const auto sign32 = [&] {
+  } else {
+    const auto sign32 = [&] {
     if constexpr (sizeof(Raw) == 16) return _mm_srai_epi32(value, 31);
 #if VEC_WIDTH >= 256
     else if constexpr (sizeof(Raw) == 32) return _mm256_srai_epi32(value, 31);
@@ -149,33 +254,37 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_negative_mask(Raw value, int width) {
 #if VEC_WIDTH >= 512
     else return _mm512_srai_epi32(value, 31);
 #endif
-  }();
-  if (width == 32) return sign32;
-  if constexpr (sizeof(Raw) == 16)
-    return _mm_shuffle_epi32(sign32, _MM_SHUFFLE(3, 3, 1, 1));
+    }();
+    if constexpr (sizeof(T) == 4) return sign32;
+    else if constexpr (sizeof(Raw) == 16)
+      return _mm_shuffle_epi32(sign32, _MM_SHUFFLE(3, 3, 1, 1));
 #if VEC_WIDTH >= 256
-  else if constexpr (sizeof(Raw) == 32)
-    return _mm256_shuffle_epi32(sign32, _MM_SHUFFLE(3, 3, 1, 1));
+    else if constexpr (sizeof(Raw) == 32)
+      return _mm256_shuffle_epi32(sign32, _MM_SHUFFLE(3, 3, 1, 1));
 #endif
 #if VEC_WIDTH >= 512
-  else return _mm512_shuffle_epi32(
-      sign32, static_cast<_MM_PERM_ENUM>(_MM_SHUFFLE(3, 3, 1, 1)));
+    else return _mm512_shuffle_epi32(
+        sign32, static_cast<_MM_PERM_ENUM>(_MM_SHUFFLE(3, 3, 1, 1)));
 #endif
+  }
 }
 
-template <typename Raw>
-VECOPS_ALWAYS_INLINE Raw x86_bit_shift_right_signed_raw(
-    Raw value, int count, int width) {
-  const auto sign = x86_bit_negative_mask(value, width);
-  if (count >= width) return sign;
-  if (count == 0) return value;
-  const auto logical = x86_bit_shift_right_logical_raw(value, count, width);
-  if (width == 8) {
-    const auto low_mask = x86_bit_set1_i8<Raw>((0xffu >> count) & 0xffu);
-    return x86_bit_or_raw(logical, x86_bit_andnot_raw(low_mask, sign));
-  }
-  const auto fill_value = x86_bit_shift_left_raw(sign, width - count, width);
-  return x86_bit_or_raw(logical, fill_value);
+template <nint_t Count, typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_shift_right_signed_immediate_raw(
+    Raw value) {
+  const auto sign = x86_bit_negative_mask<T>(value);
+  const auto magnitude = x86_bit_xor_raw(value, sign);
+  return x86_bit_xor_raw(
+      x86_bit_shift_right_logical_immediate_raw<Count, T>(magnitude), sign);
+}
+
+template <typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_shift_right_signed_scalar_raw(
+    Raw value, int count) {
+  const auto sign = x86_bit_negative_mask<T>(value);
+  const auto magnitude = x86_bit_xor_raw(value, sign);
+  return x86_bit_xor_raw(
+      x86_bit_shift_right_logical_scalar_raw<T>(magnitude, count), sign);
 }
 
 template <typename Op, typename T, typename Raw>
@@ -240,9 +349,13 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_variable_raw(
   std::array<T, sizeof(Raw) / sizeof(T)> lane_counts{};
   std::memcpy(values.data(), &value, sizeof(Raw));
   std::memcpy(lane_counts.data(), &counts, sizeof(Raw));
+  using U = std::make_unsigned_t<T>;
+  constexpr U width = std::numeric_limits<U>::digits;
   for (std::size_t lane = 0; lane < values.size(); ++lane) {
-    const int count = static_cast<int>(lane_counts[lane]);
-    if (count < 0) continue;
+    const U lane_count = static_cast<U>(lane_counts[lane]);
+    const int count = lane_count >= width
+        ? static_cast<int>(width)
+        : static_cast<int>(lane_count);
     if constexpr (std::same_as<Op, BitShiftLeftOp>)
       values[lane] = scalar_shift_left(values[lane], count);
     else
@@ -251,6 +364,379 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_variable_raw(
   Raw result;
   std::memcpy(&result, values.data(), sizeof(Raw));
   return result;
+}
+
+template <typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_set1_lane(std::make_unsigned_t<T> value) {
+  if constexpr (sizeof(T) == 1) {
+    if constexpr (sizeof(Raw) == 16)
+      return _mm_set1_epi8(static_cast<int8_t>(value));
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32)
+      return _mm256_set1_epi8(static_cast<int8_t>(value));
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_set1_epi8(static_cast<int8_t>(value));
+#endif
+  } else if constexpr (sizeof(T) == 2) {
+    if constexpr (sizeof(Raw) == 16)
+      return _mm_set1_epi16(static_cast<int16_t>(value));
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32)
+      return _mm256_set1_epi16(static_cast<int16_t>(value));
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_set1_epi16(static_cast<int16_t>(value));
+#endif
+  } else if constexpr (sizeof(T) == 4) {
+    if constexpr (sizeof(Raw) == 16)
+      return _mm_set1_epi32(static_cast<int32_t>(value));
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32)
+      return _mm256_set1_epi32(static_cast<int32_t>(value));
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_set1_epi32(static_cast<int32_t>(value));
+#endif
+  } else {
+    if constexpr (sizeof(Raw) == 16)
+      return _mm_set1_epi64x(static_cast<int64_t>(value));
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32)
+      return _mm256_set1_epi64x(static_cast<int64_t>(value));
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_set1_epi64(static_cast<int64_t>(value));
+#endif
+  }
+}
+
+template <typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_add_lanes(Raw a, Raw b) {
+  if constexpr (sizeof(Raw) == 16) {
+    if constexpr (sizeof(T) == 1) return _mm_add_epi8(a, b);
+    else if constexpr (sizeof(T) == 2) return _mm_add_epi16(a, b);
+    else if constexpr (sizeof(T) == 4) return _mm_add_epi32(a, b);
+    else return _mm_add_epi64(a, b);
+  }
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Raw) == 32) {
+    if constexpr (sizeof(T) == 1) return _mm256_add_epi8(a, b);
+    else if constexpr (sizeof(T) == 2) return _mm256_add_epi16(a, b);
+    else if constexpr (sizeof(T) == 4) return _mm256_add_epi32(a, b);
+    else return _mm256_add_epi64(a, b);
+  }
+#endif
+#if VEC_WIDTH >= 512
+  else {
+    if constexpr (sizeof(T) == 1) return _mm512_add_epi8(a, b);
+    else if constexpr (sizeof(T) == 2) return _mm512_add_epi16(a, b);
+    else if constexpr (sizeof(T) == 4) return _mm512_add_epi32(a, b);
+    else return _mm512_add_epi64(a, b);
+  }
+#endif
+}
+
+template <typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_sub_lanes(Raw a, Raw b) {
+  if constexpr (sizeof(Raw) == 16) {
+    if constexpr (sizeof(T) == 1) return _mm_sub_epi8(a, b);
+    else if constexpr (sizeof(T) == 2) return _mm_sub_epi16(a, b);
+    else if constexpr (sizeof(T) == 4) return _mm_sub_epi32(a, b);
+    else return _mm_sub_epi64(a, b);
+  }
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Raw) == 32) {
+    if constexpr (sizeof(T) == 1) return _mm256_sub_epi8(a, b);
+    else if constexpr (sizeof(T) == 2) return _mm256_sub_epi16(a, b);
+    else if constexpr (sizeof(T) == 4) return _mm256_sub_epi32(a, b);
+    else return _mm256_sub_epi64(a, b);
+  }
+#endif
+#if VEC_WIDTH >= 512
+  else {
+    if constexpr (sizeof(T) == 1) return _mm512_sub_epi8(a, b);
+    else if constexpr (sizeof(T) == 2) return _mm512_sub_epi16(a, b);
+    else if constexpr (sizeof(T) == 4) return _mm512_sub_epi32(a, b);
+    else return _mm512_sub_epi64(a, b);
+  }
+#endif
+}
+
+template <typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_popcount_bytes(Raw value) {
+#if defined(HAS_SSSE3)
+  const auto table128 = _mm_setr_epi8(
+      0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
+  const auto table = [&] {
+    if constexpr (sizeof(Raw) == 16) return table128;
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32)
+      return _mm256_broadcastsi128_si256(table128);
+#endif
+#if VEC_WIDTH >= 512
+    else return _mm512_broadcast_i32x4(table128);
+#endif
+  }();
+  const auto low_mask = x86_bit_set1_lane<uint8_t, Raw>(0x0f);
+  const auto low = x86_bit_and_raw(value, low_mask);
+  const auto high = x86_bit_and_raw(
+      x86_bit_shift_right_logical_immediate_raw<4, uint8_t>(value),
+      low_mask);
+  if constexpr (sizeof(Raw) == 16)
+    return _mm_add_epi8(
+        _mm_shuffle_epi8(table, low), _mm_shuffle_epi8(table, high));
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Raw) == 32)
+    return _mm256_add_epi8(
+        _mm256_shuffle_epi8(table, low),
+        _mm256_shuffle_epi8(table, high));
+#endif
+#if VEC_WIDTH >= 512
+  else return _mm512_add_epi8(
+      _mm512_shuffle_epi8(table, low),
+      _mm512_shuffle_epi8(table, high));
+#endif
+#else
+  const auto mask55 = x86_bit_set1_lane<uint8_t, Raw>(0x55);
+  const auto mask33 = x86_bit_set1_lane<uint8_t, Raw>(0x33);
+  const auto mask0f = x86_bit_set1_lane<uint8_t, Raw>(0x0f);
+  value = x86_bit_sub_lanes<uint8_t>(
+      value,
+      x86_bit_and_raw(
+          x86_bit_shift_right_logical_immediate_raw<1, uint8_t>(value),
+          mask55));
+  value = x86_bit_add_lanes<uint8_t>(
+      x86_bit_and_raw(value, mask33),
+      x86_bit_and_raw(
+          x86_bit_shift_right_logical_immediate_raw<2, uint8_t>(value),
+          mask33));
+  return x86_bit_and_raw(
+      x86_bit_add_lanes<uint8_t>(
+          value,
+          x86_bit_shift_right_logical_immediate_raw<4, uint8_t>(value)),
+      mask0f);
+#endif
+}
+
+template <typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_popcount_raw(Raw value) {
+#if VEC_WIDTH >= 512 && defined(HAS_AVX512BITALG)
+  if constexpr (sizeof(Raw) == 64 && sizeof(T) == 1)
+    return _mm512_popcnt_epi8(value);
+  else if constexpr (sizeof(Raw) == 64 && sizeof(T) == 2)
+    return _mm512_popcnt_epi16(value);
+  else
+#endif
+#if VEC_WIDTH >= 512 && defined(HAS_AVX512VPOPCNTDQ)
+  if constexpr (sizeof(Raw) == 64 && sizeof(T) == 4)
+    return _mm512_popcnt_epi32(value);
+  else if constexpr (sizeof(Raw) == 64 && sizeof(T) == 8)
+    return _mm512_popcnt_epi64(value);
+  else
+#endif
+  {
+    auto count = x86_bit_popcount_bytes(value);
+    if constexpr (sizeof(T) >= 2) {
+      count = x86_bit_and_raw(
+          x86_bit_add_lanes<uint16_t>(
+              count,
+              x86_bit_shift_right_logical_immediate_raw<8, uint16_t>(
+                  count)),
+          x86_bit_set1_lane<uint16_t, Raw>(0x00ff));
+    }
+    if constexpr (sizeof(T) >= 4) {
+      count = x86_bit_and_raw(
+          x86_bit_add_lanes<uint32_t>(
+              count,
+              x86_bit_shift_right_logical_immediate_raw<16, uint32_t>(
+                  count)),
+          x86_bit_set1_lane<uint32_t, Raw>(0x000000ff));
+    }
+    if constexpr (sizeof(T) >= 8) {
+      count = x86_bit_and_raw(
+          x86_bit_add_lanes<uint64_t>(
+              count,
+              x86_bit_shift_right_logical_immediate_raw<32, uint64_t>(
+                  count)),
+          x86_bit_set1_lane<uint64_t, Raw>(0xff));
+    }
+    return count;
+  }
+}
+
+template <typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_countl_zero_raw(Raw value) {
+#if VEC_WIDTH >= 512 && defined(HAS_AVX512CD)
+  if constexpr (sizeof(Raw) == 64 && sizeof(T) == 4)
+    return _mm512_lzcnt_epi32(value);
+  else if constexpr (sizeof(Raw) == 64 && sizeof(T) == 8)
+    return _mm512_lzcnt_epi64(value);
+  else
+#endif
+  {
+    auto spread = value;
+    spread = x86_bit_or_raw(
+        spread,
+        x86_bit_shift_right_logical_immediate_raw<1, T>(spread));
+    spread = x86_bit_or_raw(
+        spread,
+        x86_bit_shift_right_logical_immediate_raw<2, T>(spread));
+    spread = x86_bit_or_raw(
+        spread,
+        x86_bit_shift_right_logical_immediate_raw<4, T>(spread));
+    if constexpr (sizeof(T) >= 2)
+      spread = x86_bit_or_raw(
+          spread,
+          x86_bit_shift_right_logical_immediate_raw<8, T>(spread));
+    if constexpr (sizeof(T) >= 4)
+      spread = x86_bit_or_raw(
+          spread,
+          x86_bit_shift_right_logical_immediate_raw<16, T>(spread));
+    if constexpr (sizeof(T) >= 8)
+      spread = x86_bit_or_raw(
+          spread,
+          x86_bit_shift_right_logical_immediate_raw<32, T>(spread));
+    constexpr auto width = static_cast<std::make_unsigned_t<T>>(
+        std::numeric_limits<std::make_unsigned_t<T>>::digits);
+    return x86_bit_sub_lanes<T>(
+        x86_bit_set1_lane<T, Raw>(width),
+        x86_bit_popcount_raw<T>(spread));
+  }
+}
+
+template <typename Op, typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_count_raw(Raw value) {
+  if constexpr (std::same_as<Op, PopCountOp>) {
+    return x86_bit_popcount_raw<T>(value);
+  } else if constexpr (std::same_as<Op, CountLeadingZeroOp>) {
+    return x86_bit_countl_zero_raw<T>(value);
+  } else if constexpr (std::same_as<Op, CountLeadingOneOp>) {
+    return x86_bit_countl_zero_raw<T>(
+        x86_bit_xor_raw(value, x86_bit_ones_raw<Raw>()));
+  } else if constexpr (
+      std::same_as<Op, CountTrailingZeroOp> ||
+      std::same_as<Op, CountTrailingOneOp>) {
+    if constexpr (std::same_as<Op, CountTrailingOneOp>)
+      value = x86_bit_xor_raw(value, x86_bit_ones_raw<Raw>());
+    return x86_bit_popcount_raw<T>(x86_bit_andnot_raw(
+        value,
+        x86_bit_sub_lanes<T>(
+            value, x86_bit_set1_lane<T, Raw>(1))));
+  } else {
+    static_assert(dispatch_dependent_false<Op>, "unknown bit-count op");
+  }
+}
+
+template <typename Op, nint_t Count, typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_rotate_immediate_raw(Raw value) {
+  using U = std::make_unsigned_t<T>;
+  constexpr nint_t width = std::numeric_limits<U>::digits;
+  constexpr nint_t remainder = Count % width;
+  constexpr int rotate = static_cast<int>(
+      remainder < 0 ? remainder + width : remainder);
+  constexpr int inverse = (-rotate) & (static_cast<int>(width) - 1);
+  if constexpr (rotate == 0) return value;
+#if VEC_WIDTH >= 512 && defined(HAS_AVX512F)
+  else if constexpr (sizeof(Raw) == 64 && sizeof(T) == 4) {
+    if constexpr (std::same_as<Op, RotateLeftOp>)
+      return _mm512_rol_epi32(value, rotate);
+    else return _mm512_ror_epi32(value, rotate);
+  } else if constexpr (sizeof(Raw) == 64 && sizeof(T) == 8) {
+    if constexpr (std::same_as<Op, RotateLeftOp>)
+      return _mm512_rol_epi64(value, rotate);
+    else return _mm512_ror_epi64(value, rotate);
+  }
+#endif
+  else if constexpr (std::same_as<Op, RotateLeftOp>) {
+    return x86_bit_or_raw(
+        x86_bit_shift_left_immediate_raw<rotate, T>(value),
+        x86_bit_shift_right_logical_immediate_raw<inverse, T>(value));
+  } else {
+    return x86_bit_or_raw(
+        x86_bit_shift_right_logical_immediate_raw<rotate, T>(value),
+        x86_bit_shift_left_immediate_raw<inverse, T>(value));
+  }
+}
+
+template <typename Op, typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_rotate_scalar_raw(Raw value, int count) {
+  using U = std::make_unsigned_t<T>;
+  constexpr unsigned width = std::numeric_limits<U>::digits;
+  const int rotate = static_cast<int>(
+      static_cast<unsigned>(count) & (width - 1));
+  const int inverse = (-rotate) & (width - 1);
+  if (rotate == 0) return value;
+#if VEC_WIDTH >= 512 && defined(HAS_AVX512F)
+  if constexpr (sizeof(Raw) == 64 && sizeof(T) == 4) {
+    const auto counts = x86_bit_set1_lane<T, Raw>(static_cast<U>(rotate));
+    if constexpr (std::same_as<Op, RotateLeftOp>)
+      return _mm512_rolv_epi32(value, counts);
+    else return _mm512_rorv_epi32(value, counts);
+  } else if constexpr (sizeof(Raw) == 64 && sizeof(T) == 8) {
+    const auto counts = x86_bit_set1_lane<T, Raw>(static_cast<U>(rotate));
+    if constexpr (std::same_as<Op, RotateLeftOp>)
+      return _mm512_rolv_epi64(value, counts);
+    else return _mm512_rorv_epi64(value, counts);
+  } else
+#endif
+  if constexpr (std::same_as<Op, RotateLeftOp>) {
+    return x86_bit_or_raw(
+        x86_bit_shift_left_scalar_raw<T>(value, rotate),
+        x86_bit_shift_right_logical_scalar_raw<T>(value, inverse));
+  } else {
+    return x86_bit_or_raw(
+        x86_bit_shift_right_logical_scalar_raw<T>(value, rotate),
+        x86_bit_shift_left_scalar_raw<T>(value, inverse));
+  }
+}
+
+template <typename Op, typename T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_bit_rotate_variable_raw(
+    Raw value, Raw counts) {
+  using U = std::make_unsigned_t<T>;
+#if VEC_WIDTH >= 512 && defined(HAS_AVX512F)
+  if constexpr (sizeof(Raw) == 64 && sizeof(T) == 4) {
+    if constexpr (std::same_as<Op, RotateLeftOp>)
+      return _mm512_rolv_epi32(value, counts);
+    else return _mm512_rorv_epi32(value, counts);
+  } else if constexpr (sizeof(Raw) == 64 && sizeof(T) == 8) {
+    if constexpr (std::same_as<Op, RotateLeftOp>)
+      return _mm512_rolv_epi64(value, counts);
+    else return _mm512_rorv_epi64(value, counts);
+  } else
+#endif
+  if constexpr (
+      sizeof(T) >= 4
+#if VEC_WIDTH >= 512 && defined(HAS_AVX512BW)
+      || (sizeof(Raw) == 64 && sizeof(T) == 2)
+#endif
+  ) {
+    constexpr U lane_mask = std::numeric_limits<U>::digits - 1;
+    const auto mask = x86_bit_set1_lane<T, Raw>(lane_mask);
+    const auto normalized = x86_bit_and_raw(counts, mask);
+    const auto inverse = x86_bit_and_raw(
+        x86_bit_sub_lanes<T>(x86_bit_zero_raw<Raw>(), normalized), mask);
+    const auto left = x86_bit_shift_variable_raw<BitShiftLeftOp, U>(
+        value, std::same_as<Op, RotateLeftOp> ? normalized : inverse);
+    const auto right = x86_bit_shift_variable_raw<BitShiftRightOp, U>(
+        value, std::same_as<Op, RotateLeftOp> ? inverse : normalized);
+    return x86_bit_or_raw(left, right);
+  } else {
+    std::array<T, sizeof(Raw) / sizeof(T)> values{};
+    std::array<T, sizeof(Raw) / sizeof(T)> lane_counts{};
+    std::memcpy(values.data(), &value, sizeof(Raw));
+    std::memcpy(lane_counts.data(), &counts, sizeof(Raw));
+    constexpr U lane_mask = std::numeric_limits<U>::digits - 1;
+    for (std::size_t lane = 0; lane < values.size(); ++lane) {
+      const int count = static_cast<int>(
+          scalar_bit_bits(lane_counts[lane]) & lane_mask);
+      values[lane] = scalar_rotate<Op>(values[lane], count);
+    }
+    Raw result;
+    std::memcpy(&result, values.data(), sizeof(Raw));
+    return result;
+  }
 }
 
 #if defined(CPU_CAPABILITY_AVX512) && defined(HAS_AVX512DQ)
@@ -524,23 +1010,56 @@ struct NativeWordImpl<X86Backend, BitNotOp> {
   }
 };
 
-#define VECOPS_VEC_DEFINE_X86_SHIFT(OpType, Expression)                 \
+#define VECOPS_VEC_DEFINE_X86_BIT_COUNT(OpType)                         \
+  template <>                                                           \
+  struct NativeWordImpl<X86Backend, OpType> {                           \
+    template <nint_t Index, IntegerTag Tag>                             \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType, Tag, NativeWordVec<Tag> value) {                        \
+      using Traits = RepresentationTraits<X86Backend, Tag>;            \
+      using T = ElementOf<Tag>;                                         \
+      static_assert(Index >= 0 && Index < Traits::word_count);          \
+      return NativeWordVec<Tag>{                                        \
+          x86_bit_count_raw<OpType, T>(value.value)};                   \
+    }                                                                   \
+    template <nint_t Index, IntegerTag Tag, typename Policy>            \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType op, Tag tag, NativeWordVec<Tag> value,                   \
+        NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {\
+      const auto computed = call<Index>(op, tag, value);                \
+      return NativeWordImpl<X86Backend, BlendOp>::template call<Index>(\
+          BlendOp{}, tag, inactive, mask, computed);                    \
+    }                                                                   \
+  }
+
+VECOPS_VEC_DEFINE_X86_BIT_COUNT(PopCountOp);
+VECOPS_VEC_DEFINE_X86_BIT_COUNT(CountLeadingZeroOp);
+VECOPS_VEC_DEFINE_X86_BIT_COUNT(CountLeadingOneOp);
+VECOPS_VEC_DEFINE_X86_BIT_COUNT(CountTrailingZeroOp);
+VECOPS_VEC_DEFINE_X86_BIT_COUNT(CountTrailingOneOp);
+
+#undef VECOPS_VEC_DEFINE_X86_BIT_COUNT
+
+#define VECOPS_VEC_DEFINE_X86_SHIFT(                                    \
+    OpType, ImmediateExpression, ScalarExpression)                      \
   template <>                                                            \
   struct NativeWordImpl<X86Backend, OpType> {                            \
+    template <nint_t Index, IntegerTag Tag, nint_t Count>                \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                 \
+        OpType, Tag, NativeWordVec<Tag> value, meta::Const<Count>) {     \
+      using Traits = RepresentationTraits<X86Backend, Tag>;             \
+      using T = ElementOf<Tag>;                                          \
+      static_assert(Count >= 0);                                         \
+      static_assert(Index >= 0 && Index < Traits::word_count);           \
+      return NativeWordVec<Tag>{ImmediateExpression};                    \
+    }                                                                    \
     template <nint_t Index, IntegerTag Tag>                              \
     static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                 \
         OpType, Tag, NativeWordVec<Tag> value, int count) {              \
       using Traits = RepresentationTraits<X86Backend, Tag>;             \
       using T = ElementOf<Tag>;                                          \
-      constexpr int width = std::numeric_limits<                        \
-          std::make_unsigned_t<T>>::digits;                              \
       static_assert(Index >= 0 && Index < Traits::word_count);           \
-      if constexpr (std::same_as<OpType, BitShiftLeftOp>) {              \
-        if (count >= width)                                              \
-          return NativeWordVec<Tag>{                                    \
-              x86_bit_zero_raw<decltype(value.value)>()};                \
-      }                                                                  \
-      return NativeWordVec<Tag>{Expression};                             \
+      return NativeWordVec<Tag>{ScalarExpression};                       \
     }                                                                    \
     template <nint_t Index, IntegerTag Tag>                              \
     static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                 \
@@ -550,6 +1069,15 @@ struct NativeWordImpl<X86Backend, BitNotOp> {
       static_assert(Index >= 0 && Index < num_words(Tag{}));             \
       return NativeWordVec<Tag>{x86_bit_shift_variable_raw<OpType, T>(  \
           value.value, counts.value)};                                  \
+    }                                                                    \
+    template <nint_t Index, IntegerTag Tag, nint_t Count, typename Policy>\
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                 \
+        OpType op, Tag tag, NativeWordVec<Tag> value,                   \
+        meta::Const<Count> count, NativeWordMask<Tag> mask,             \
+        NativeWordVec<Tag> inactive, Policy) {                           \
+      const auto computed = call<Index>(op, tag, value, count);         \
+      return NativeWordImpl<X86Backend, BlendOp>::template call<Index>( \
+          BlendOp{}, tag, inactive, mask, computed);                     \
     }                                                                    \
     template <nint_t Index, IntegerTag Tag, typename Policy>             \
     static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                 \
@@ -581,16 +1109,82 @@ struct NativeWordImpl<X86Backend, BitNotOp> {
   }
 
 VECOPS_VEC_DEFINE_X86_SHIFT(
-    BitShiftLeftOp, x86_bit_shift_left_raw(value.value, count, width));
+    BitShiftLeftOp,
+    (x86_bit_shift_left_immediate_raw<Count, T>(value.value)),
+    x86_bit_shift_left_scalar_raw<T>(value.value, count));
 VECOPS_VEC_DEFINE_X86_SHIFT(
     BitShiftRightOp,
     (std::is_signed_v<T>
-         ? x86_bit_shift_right_signed_raw(value.value, count, width)
-         : (count >= width
-                ? x86_bit_zero_raw<decltype(value.value)>()
-                : x86_bit_shift_right_logical_raw(value.value, count, width))));
+         ? x86_bit_shift_right_signed_immediate_raw<Count, T>(value.value)
+         : x86_bit_shift_right_logical_immediate_raw<Count, T>(value.value)),
+    (std::is_signed_v<T>
+         ? x86_bit_shift_right_signed_scalar_raw<T>(value.value, count)
+         : x86_bit_shift_right_logical_scalar_raw<T>(value.value, count)));
 
 #undef VECOPS_VEC_DEFINE_X86_SHIFT
+
+#define VECOPS_VEC_DEFINE_X86_ROTATE(OpType)                            \
+  template <>                                                           \
+  struct NativeWordImpl<X86Backend, OpType> {                           \
+    template <nint_t Index, IntegerTag Tag, nint_t Count>               \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType, Tag, NativeWordVec<Tag> value, meta::Const<Count>) {    \
+      using Traits = RepresentationTraits<X86Backend, Tag>;            \
+      using T = ElementOf<Tag>;                                         \
+      static_assert(Index >= 0 && Index < Traits::word_count);          \
+      return NativeWordVec<Tag>{                                        \
+          x86_bit_rotate_immediate_raw<OpType, Count, T>(value.value)}; \
+    }                                                                   \
+    template <nint_t Index, IntegerTag Tag>                             \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType, Tag, NativeWordVec<Tag> value, int count) {             \
+      using Traits = RepresentationTraits<X86Backend, Tag>;            \
+      using T = ElementOf<Tag>;                                         \
+      static_assert(Index >= 0 && Index < Traits::word_count);          \
+      return NativeWordVec<Tag>{                                        \
+          x86_bit_rotate_scalar_raw<OpType, T>(value.value, count)};    \
+    }                                                                   \
+    template <nint_t Index, IntegerTag Tag>                             \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType, Tag, NativeWordVec<Tag> value,                          \
+        NativeWordVec<Tag> counts) {                                   \
+      using T = ElementOf<Tag>;                                         \
+      static_assert(Index >= 0 && Index < num_words(Tag{}));            \
+      return NativeWordVec<Tag>{x86_bit_rotate_variable_raw<OpType, T>(\
+          value.value, counts.value)};                                  \
+    }                                                                   \
+    template <nint_t Index, IntegerTag Tag, nint_t Count, typename Policy>\
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType op, Tag tag, NativeWordVec<Tag> value,                   \
+        meta::Const<Count> count, NativeWordMask<Tag> mask,             \
+        NativeWordVec<Tag> inactive, Policy) {                          \
+      const auto computed = call<Index>(op, tag, value, count);        \
+      return NativeWordImpl<X86Backend, BlendOp>::template call<Index>(\
+          BlendOp{}, tag, inactive, mask, computed);                    \
+    }                                                                   \
+    template <nint_t Index, IntegerTag Tag, typename Policy>            \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType op, Tag tag, NativeWordVec<Tag> value, int count,        \
+        NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {\
+      const auto computed = call<Index>(op, tag, value, count);        \
+      return NativeWordImpl<X86Backend, BlendOp>::template call<Index>(\
+          BlendOp{}, tag, inactive, mask, computed);                    \
+    }                                                                   \
+    template <nint_t Index, IntegerTag Tag, typename Policy>            \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType op, Tag tag, NativeWordVec<Tag> value,                   \
+        NativeWordVec<Tag> counts, NativeWordMask<Tag> mask,            \
+        NativeWordVec<Tag> inactive, Policy) {                          \
+      const auto computed = call<Index>(op, tag, value, counts);       \
+      return NativeWordImpl<X86Backend, BlendOp>::template call<Index>(\
+          BlendOp{}, tag, inactive, mask, computed);                    \
+    }                                                                   \
+  }
+
+VECOPS_VEC_DEFINE_X86_ROTATE(RotateLeftOp);
+VECOPS_VEC_DEFINE_X86_ROTATE(RotateRightOp);
+
+#undef VECOPS_VEC_DEFINE_X86_ROTATE
 
 } // namespace vecops::vec::details
 

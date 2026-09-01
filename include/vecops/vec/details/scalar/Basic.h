@@ -160,6 +160,52 @@ struct NativeWordImpl<ScalarBackend, MaskNotOp> {
   }
 };
 
+template <typename Op>
+struct ScalarMaskQueryImpl {
+  template <nint_t Index, VectorTag Tag>
+  static VECOPS_ALWAYS_INLINE decltype(auto) call(
+      Op, Tag, NativeWordMask<Tag> value) {
+    const nint_t valid = valid_word_lanes<Index, Tag>();
+    if constexpr (std::same_as<Op, MaskAllOp>) {
+      for (nint_t lane = 0; lane < valid; ++lane)
+        if (!value.bits.test(static_cast<std::size_t>(lane))) return false;
+      return true;
+    } else if constexpr (std::same_as<Op, MaskAnyOp>) {
+      for (nint_t lane = 0; lane < valid; ++lane)
+        if (value.bits.test(static_cast<std::size_t>(lane))) return true;
+      return false;
+    } else if constexpr (std::same_as<Op, MaskCountOp>) {
+      nint_t count = 0;
+      for (nint_t lane = 0; lane < valid; ++lane)
+        count += value.bits.test(static_cast<std::size_t>(lane));
+      return count;
+    } else if constexpr (std::same_as<Op, MaskFirstOp>) {
+      for (nint_t lane = 0; lane < valid; ++lane)
+        if (value.bits.test(static_cast<std::size_t>(lane))) return lane;
+      return nint_t{-1};
+    } else if constexpr (std::same_as<Op, MaskLastOp>) {
+      for (nint_t lane = valid; lane-- > 0;)
+        if (value.bits.test(static_cast<std::size_t>(lane))) return lane;
+      return nint_t{-1};
+    } else {
+      static_assert(dispatch_dependent_false<Op>, "unsupported mask query");
+    }
+  }
+};
+
+#define VECOPS_VEC_SCALAR_MASK_QUERY(OpType)                            \
+  template <>                                                            \
+  struct NativeWordImpl<ScalarBackend, OpType>                           \
+      : ScalarMaskQueryImpl<OpType> {}
+
+VECOPS_VEC_SCALAR_MASK_QUERY(MaskAllOp);
+VECOPS_VEC_SCALAR_MASK_QUERY(MaskAnyOp);
+VECOPS_VEC_SCALAR_MASK_QUERY(MaskCountOp);
+VECOPS_VEC_SCALAR_MASK_QUERY(MaskFirstOp);
+VECOPS_VEC_SCALAR_MASK_QUERY(MaskLastOp);
+
+#undef VECOPS_VEC_SCALAR_MASK_QUERY
+
 /* **************************************************************************** */
 //    Lane access — Get / Set                                                 //
 /* **************************************************************************** */

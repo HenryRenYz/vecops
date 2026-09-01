@@ -1,6 +1,7 @@
 #ifndef VECOPS_VEC_DETAILS_SCALAR_COMPARISON_H
 #define VECOPS_VEC_DETAILS_SCALAR_COMPARISON_H
 
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <type_traits>
@@ -55,6 +56,39 @@ VECOPS_ALWAYS_INLINE bool scalar_classify_lane(Op, T value) {
     return std::isinf(widened) && std::signbit(widened);
   } else if constexpr (std::same_as<Op, IsInfOp>) {
     return std::isinf(widened);
+  } else if constexpr (
+      std::same_as<Op, IsFiniteOp> ||
+      std::same_as<Op, IsNormalOp> ||
+      std::same_as<Op, SignBitOp>) {
+    const auto bits = [&] {
+      if constexpr (std::same_as<T, bfloat16_t> ||
+                    std::same_as<T, float16_t>)
+        return static_cast<uint64_t>(value.to_bits());
+      else if constexpr (std::same_as<T, float32_t>)
+        return static_cast<uint64_t>(::vecops::bitcast<uint32_t>(value));
+      else
+        return ::vecops::bitcast<uint64_t>(value);
+    }();
+    constexpr uint64_t sign = sizeof(T) == 2 ? 0x8000ull
+                                  : sizeof(T) == 4 ? 0x80000000ull
+                                                   : 0x8000000000000000ull;
+    constexpr uint64_t infinity =
+        std::same_as<T, bfloat16_t> ? 0x7f80ull
+        : std::same_as<T, float16_t> ? 0x7c00ull
+        : std::same_as<T, float32_t> ? 0x7f800000ull
+                                     : 0x7ff0000000000000ull;
+    constexpr uint64_t minimum_normal =
+        std::same_as<T, bfloat16_t> ? 0x0080ull
+        : std::same_as<T, float16_t> ? 0x0400ull
+        : std::same_as<T, float32_t> ? 0x00800000ull
+                                     : 0x0010000000000000ull;
+    const uint64_t absolute = bits & ~sign;
+    if constexpr (std::same_as<Op, IsFiniteOp>)
+      return absolute < infinity;
+    else if constexpr (std::same_as<Op, IsNormalOp>)
+      return absolute >= minimum_normal && absolute < infinity;
+    else
+      return (bits & sign) != 0;
   } else {
     static_assert(dispatch_dependent_false<Op>, "unsupported scalar classification");
   }
@@ -136,6 +170,9 @@ VECOPS_VEC_SCALAR_CLASSIFICATION(IsNanOp);
 VECOPS_VEC_SCALAR_CLASSIFICATION(IsPosInfOp);
 VECOPS_VEC_SCALAR_CLASSIFICATION(IsNegInfOp);
 VECOPS_VEC_SCALAR_CLASSIFICATION(IsInfOp);
+VECOPS_VEC_SCALAR_CLASSIFICATION(IsFiniteOp);
+VECOPS_VEC_SCALAR_CLASSIFICATION(IsNormalOp);
+VECOPS_VEC_SCALAR_CLASSIFICATION(SignBitOp);
 
 #undef VECOPS_VEC_SCALAR_CLASSIFICATION
 

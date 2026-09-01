@@ -1,6 +1,8 @@
 #ifndef VECOPS_VEC_DETAILS_SVE_ARITHMETIC_H
 #define VECOPS_VEC_DETAILS_SVE_ARITHMETIC_H
 
+#include <limits>
+
 /**
  * @file Arithmetic.h
  * @brief SVE backend arithmetic operations using ARM SVE intrinsics.
@@ -206,6 +208,159 @@ template <>
 struct NativeWordImpl<SVEBackend, AddOp> : SVEArithmeticWordImpl<AddOp> {};
 template <>
 struct NativeWordImpl<SVEBackend, SubOp> : SVEArithmeticWordImpl<SubOp> {};
+
+template <typename Op>
+struct SVESaturatingArithmeticWordImpl {
+  template <nint_t Index, VectorTag Tag>
+    requires std::integral<ElementOf<Tag>>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      Op op, Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) {
+    return call<Index>(
+        op, tag, a, b, svptrue_b8(), a,
+        PreserveArithmeticInactive{});
+  }
+
+  template <nint_t Index, VectorTag Tag, typename Policy>
+    requires std::integral<ElementOf<Tag>>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      Op, Tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b,
+      NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
+    using Traits = RepresentationTraits<SVEBackend, Tag>;
+    using T = ElementOf<Tag>;
+    static_assert(Index >= 0 && Index < Traits::word_count);
+    const auto raw_a = sve_basic_raw_word(a);
+    const auto raw_b = sve_basic_raw_word(b);
+    const auto raw_inactive = sve_basic_raw_word(inactive);
+#if defined(HAS_SVE2)
+#define VECOPS_VEC_SVE_SATURATING_ARITHMETIC(Suffix)                   \
+    if constexpr (std::same_as<Op, SaturatedAddOp>) {                   \
+      if constexpr (std::same_as<Policy, PreserveArithmeticInactive>)  \
+        return sve_basic_wrap_word<Tag>(                               \
+            svqadd_##Suffix##_m(mask, raw_a, raw_b));                  \
+      else if constexpr (std::same_as<Policy, ZeroArithmeticInactive>) \
+        return sve_basic_wrap_word<Tag>(                               \
+            svqadd_##Suffix##_z(mask, raw_a, raw_b));                  \
+      else                                                              \
+        return sve_basic_wrap_word<Tag>(svsel_##Suffix(                \
+            mask, svqadd_##Suffix##_x(mask, raw_a, raw_b),             \
+            raw_inactive));                                             \
+    } else {                                                            \
+      if constexpr (std::same_as<Policy, PreserveArithmeticInactive>)  \
+        return sve_basic_wrap_word<Tag>(                               \
+            svqsub_##Suffix##_m(mask, raw_a, raw_b));                  \
+      else if constexpr (std::same_as<Policy, ZeroArithmeticInactive>) \
+        return sve_basic_wrap_word<Tag>(                               \
+            svqsub_##Suffix##_z(mask, raw_a, raw_b));                  \
+      else                                                              \
+        return sve_basic_wrap_word<Tag>(svsel_##Suffix(                \
+            mask, svqsub_##Suffix##_x(mask, raw_a, raw_b),             \
+            raw_inactive));                                             \
+    }
+    if constexpr (std::same_as<T, int8_t>) {
+      VECOPS_VEC_SVE_SATURATING_ARITHMETIC(s8);
+    } else if constexpr (std::same_as<T, uint8_t>) {
+      VECOPS_VEC_SVE_SATURATING_ARITHMETIC(u8);
+    } else if constexpr (std::same_as<T, int16_t>) {
+      VECOPS_VEC_SVE_SATURATING_ARITHMETIC(s16);
+    } else if constexpr (std::same_as<T, uint16_t>) {
+      VECOPS_VEC_SVE_SATURATING_ARITHMETIC(u16);
+    } else if constexpr (std::same_as<T, int32_t>) {
+      VECOPS_VEC_SVE_SATURATING_ARITHMETIC(s32);
+    } else if constexpr (std::same_as<T, uint32_t>) {
+      VECOPS_VEC_SVE_SATURATING_ARITHMETIC(u32);
+    } else if constexpr (std::same_as<T, int64_t>) {
+      VECOPS_VEC_SVE_SATURATING_ARITHMETIC(s64);
+    } else {
+      VECOPS_VEC_SVE_SATURATING_ARITHMETIC(u64);
+    }
+#undef VECOPS_VEC_SVE_SATURATING_ARITHMETIC
+#else
+#define VECOPS_VEC_SVE_SYNTHESIZE_SATURATING(Suffix, Bits)             \
+    {                                                                   \
+      const auto full = svptrue_b##Bits();                              \
+      const auto wrapped = [&]() VECOPS_KERNEL_LAMBDA {                \
+        if constexpr (std::same_as<Op, SaturatedAddOp>)                \
+          return svadd_##Suffix##_x(full, raw_a, raw_b);                \
+        else                                                            \
+          return svsub_##Suffix##_x(full, raw_a, raw_b);                \
+      }();                                                              \
+      const auto saturated = [&]() VECOPS_KERNEL_LAMBDA {              \
+        if constexpr (std::is_unsigned_v<T>) {                          \
+          const auto overflow = [&]() VECOPS_KERNEL_LAMBDA {           \
+            if constexpr (std::same_as<Op, SaturatedAddOp>)            \
+              return svcmplt_##Suffix(full, wrapped, raw_a);            \
+            else                                                        \
+              return svcmplt_##Suffix(full, raw_a, raw_b);              \
+          }();                                                          \
+          const auto limit = [&]() VECOPS_KERNEL_LAMBDA {              \
+            if constexpr (std::same_as<Op, SaturatedAddOp>)            \
+              return svdup_n_##Suffix(std::numeric_limits<T>::max());  \
+            else                                                        \
+              return svdup_n_##Suffix(T{0});                            \
+          }();                                                          \
+          return svsel_##Suffix(overflow, limit, wrapped);              \
+        } else {                                                        \
+          const auto overflow_bits = [&]() VECOPS_KERNEL_LAMBDA {      \
+            if constexpr (std::same_as<Op, SaturatedAddOp>)            \
+              return svand_##Suffix##_x(                               \
+                  full,                                                 \
+                  sveor_##Suffix##_x(full, raw_a, wrapped),            \
+                  sveor_##Suffix##_x(full, raw_b, wrapped));           \
+            else                                                        \
+              return svand_##Suffix##_x(                               \
+                  full, sveor_##Suffix##_x(full, raw_a, raw_b),        \
+                  sveor_##Suffix##_x(full, raw_a, wrapped));           \
+          }();                                                          \
+          const auto overflow =                                        \
+              svcmplt_n_##Suffix(full, overflow_bits, 0);               \
+          const auto negative = svcmplt_n_##Suffix(full, raw_a, 0);    \
+          const auto limit = svsel_##Suffix(                            \
+              negative,                                                \
+              svdup_n_##Suffix(std::numeric_limits<T>::min()),         \
+              svdup_n_##Suffix(std::numeric_limits<T>::max()));        \
+          return svsel_##Suffix(overflow, limit, wrapped);              \
+        }                                                               \
+      }();                                                              \
+      if constexpr (std::same_as<Policy, PreserveArithmeticInactive>)  \
+        return sve_basic_wrap_word<Tag>(                               \
+            svsel_##Suffix(mask, saturated, raw_a));                   \
+      else if constexpr (std::same_as<Policy, ZeroArithmeticInactive>) \
+        return sve_basic_wrap_word<Tag>(svsel_##Suffix(                \
+            mask, saturated, svdup_n_##Suffix(T{0})));                 \
+      else                                                              \
+        return sve_basic_wrap_word<Tag>(                               \
+            svsel_##Suffix(mask, saturated, raw_inactive));            \
+    }
+    if constexpr (std::same_as<T, int8_t>) {
+      VECOPS_VEC_SVE_SYNTHESIZE_SATURATING(s8, 8);
+    } else if constexpr (std::same_as<T, uint8_t>) {
+      VECOPS_VEC_SVE_SYNTHESIZE_SATURATING(u8, 8);
+    } else if constexpr (std::same_as<T, int16_t>) {
+      VECOPS_VEC_SVE_SYNTHESIZE_SATURATING(s16, 16);
+    } else if constexpr (std::same_as<T, uint16_t>) {
+      VECOPS_VEC_SVE_SYNTHESIZE_SATURATING(u16, 16);
+    } else if constexpr (std::same_as<T, int32_t>) {
+      VECOPS_VEC_SVE_SYNTHESIZE_SATURATING(s32, 32);
+    } else if constexpr (std::same_as<T, uint32_t>) {
+      VECOPS_VEC_SVE_SYNTHESIZE_SATURATING(u32, 32);
+    } else if constexpr (std::same_as<T, int64_t>) {
+      VECOPS_VEC_SVE_SYNTHESIZE_SATURATING(s64, 64);
+    } else {
+      VECOPS_VEC_SVE_SYNTHESIZE_SATURATING(u64, 64);
+    }
+#undef VECOPS_VEC_SVE_SYNTHESIZE_SATURATING
+#endif
+  }
+};
+
+template <>
+struct NativeWordImpl<SVEBackend, SaturatedAddOp>
+    : SVESaturatingArithmeticWordImpl<SaturatedAddOp> {};
+
+template <>
+struct NativeWordImpl<SVEBackend, SaturatedSubOp>
+    : SVESaturatingArithmeticWordImpl<SaturatedSubOp> {};
+
 template <>
 struct NativeWordImpl<SVEBackend, MulOp> : SVEArithmeticWordImpl<MulOp> {};
 template <>
@@ -214,6 +369,61 @@ template <>
 struct NativeWordImpl<SVEBackend, MinOp> : SVEArithmeticWordImpl<MinOp> {};
 template <>
 struct NativeWordImpl<SVEBackend, MaxOp> : SVEArithmeticWordImpl<MaxOp> {};
+
+template <>
+struct NativeWordImpl<SVEBackend, CopySignOp> {
+  template <nint_t Index, FloatingTag Tag>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      CopySignOp, Tag, NativeWordVec<Tag> magnitude,
+      NativeWordVec<Tag> sign) {
+    using T = ElementOf<Tag>;
+    const auto magnitude_raw = sve_basic_raw_word(magnitude);
+    const auto sign_raw = sve_basic_raw_word(sign);
+    if constexpr (std::same_as<T, bfloat16_t>) {
+      const auto magnitude_bits = svreinterpret_u16_bf16(magnitude_raw);
+      const auto sign_bits = svreinterpret_u16_bf16(sign_raw);
+      const auto changed = sveor_u16_x(svptrue_b16(), magnitude_bits, sign_bits);
+      const auto bits = sveor_u16_x(
+          svptrue_b16(), magnitude_bits,
+          svand_n_u16_x(svptrue_b16(), changed, 0x8000u));
+      return sve_basic_wrap_word<Tag>(svreinterpret_bf16_u16(bits));
+    } else if constexpr (std::same_as<T, float16_t>) {
+      const auto magnitude_bits = svreinterpret_u16_f16(magnitude_raw);
+      const auto sign_bits = svreinterpret_u16_f16(sign_raw);
+      const auto changed = sveor_u16_x(svptrue_b16(), magnitude_bits, sign_bits);
+      const auto bits = sveor_u16_x(
+          svptrue_b16(), magnitude_bits,
+          svand_n_u16_x(svptrue_b16(), changed, 0x8000u));
+      return sve_basic_wrap_word<Tag>(svreinterpret_f16_u16(bits));
+    } else if constexpr (std::same_as<T, float32_t>) {
+      const auto magnitude_bits = svreinterpret_u32_f32(magnitude_raw);
+      const auto sign_bits = svreinterpret_u32_f32(sign_raw);
+      const auto changed = sveor_u32_x(svptrue_b32(), magnitude_bits, sign_bits);
+      const auto bits = sveor_u32_x(
+          svptrue_b32(), magnitude_bits,
+          svand_n_u32_x(svptrue_b32(), changed, 0x80000000u));
+      return sve_basic_wrap_word<Tag>(svreinterpret_f32_u32(bits));
+    } else {
+      const auto magnitude_bits = svreinterpret_u64_f64(magnitude_raw);
+      const auto sign_bits = svreinterpret_u64_f64(sign_raw);
+      const auto changed = sveor_u64_x(svptrue_b64(), magnitude_bits, sign_bits);
+      const auto bits = sveor_u64_x(
+          svptrue_b64(), magnitude_bits,
+          svand_n_u64_x(
+              svptrue_b64(), changed, 0x8000000000000000ull));
+      return sve_basic_wrap_word<Tag>(svreinterpret_f64_u64(bits));
+    }
+  }
+
+  template <nint_t Index, FloatingTag Tag, typename Policy>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      CopySignOp op, Tag tag, NativeWordVec<Tag> magnitude,
+      NativeWordVec<Tag> sign, NativeWordMask<Tag> mask,
+      NativeWordVec<Tag> inactive, Policy) {
+    return blend(
+        tag, inactive, mask, call<Index>(op, tag, magnitude, sign));
+  }
+};
 
 /* **************************************************************************** */
 //    SVEClampWordImpl                                                         //

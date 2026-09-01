@@ -157,16 +157,28 @@ void verify_integer_tagless() {
   expect_same(tag, vec::bit_xor(tag, a, b), vec::bit_xor(a, b));
   expect_same(tag, vec::bit_andnot(tag, a, b), vec::bit_andnot(a, b));
   expect_same(tag, vec::bit_not(tag, a), vec::bit_not(a));
-  expect_same(tag, vec::bit_shl(tag, a, 3), vec::bit_shl(a, 3));
-  expect_same(tag, vec::bit_shr(tag, a, 3), vec::bit_shr(a, 3));
+  expect_same(tag, vec::shl(tag, a, 3), vec::shl(a, 3));
+  expect_same(tag, vec::shr(tag, a, 3), vec::shr(a, 3));
   expect_same(
-      tag, vec::bit_shl(tag, a, vecops::meta::cint<3>),
-      vec::bit_shl(a, vecops::meta::cint<3>));
+      tag, vec::shl(tag, a, vecops::meta::cint<3>),
+      vec::shl(a, vecops::meta::cint<3>));
   expect_same(
-      tag, vec::bit_shr(tag, a, vecops::meta::dyn<1>(3)),
-      vec::bit_shr(a, vecops::meta::dyn<1>(3)));
-  expect_same(tag, vec::bit_shl(tag, a, counts), vec::bit_shl(a, counts));
-  expect_same(tag, vec::bit_shr(tag, a, counts), vec::bit_shr(a, counts));
+      tag, vec::shr(tag, a, vecops::meta::cint<3>),
+      vec::shr(a, vecops::meta::cint<3>));
+  expect_same(tag, vec::shl(tag, a, counts), vec::shl(a, counts));
+  expect_same(tag, vec::shr(tag, a, counts), vec::shr(a, counts));
+  expect_same(tag, vec::popcount(tag, a), vec::popcount(a));
+  expect_same(tag, vec::countl_zero(tag, a), vec::countl_zero(a));
+  expect_same(tag, vec::countl_one(tag, a), vec::countl_one(a));
+  expect_same(tag, vec::countr_zero(tag, a), vec::countr_zero(a));
+  expect_same(tag, vec::countr_one(tag, a), vec::countr_one(a));
+  expect_same(tag, vec::rotl(tag, a, 3), vec::rotl(a, 3));
+  expect_same(tag, vec::rotr(tag, a, -3), vec::rotr(a, -3));
+  expect_same(
+      tag, vec::rotl(tag, a, vecops::meta::cint<-3>),
+      vec::rotl(a, vecops::meta::cint<-3>));
+  expect_same(tag, vec::rotl(tag, a, counts), vec::rotl(a, counts));
+  expect_same(tag, vec::rotr(tag, a, counts), vec::rotr(a, counts));
   expect_same(
       tag,
       vec::bit_xor(tag, a, b, vec::opt::masked(mask), vec::opt::zero),

@@ -104,6 +104,16 @@ VECOPS_ALWAYS_INLINE svbool_t sve_classify_raw(
       return svcmpeq_n_u16(active, bits, 0xff80u);
     else if constexpr (std::same_as<Op, IsInfOp>)
       return svcmpeq_n_u16(active, absolute, 0x7f80u);
+    else if constexpr (std::same_as<Op, IsFiniteOp>)
+      return svcmplt_n_u16(active, absolute, 0x7f80u);
+    else if constexpr (std::same_as<Op, IsNormalOp>)
+      return svand_b_z(
+          active,
+          svcmpge_n_u16(active, absolute, 0x0080u),
+          svcmplt_n_u16(active, absolute, 0x7f80u));
+    else if constexpr (std::same_as<Op, SignBitOp>)
+      return svcmpeq_n_u16(
+          active, svand_n_u16_x(active, bits, 0x8000u), 0x8000u);
     else static_assert(dispatch_dependent_false<Op>, "unsupported SVE classification");
   } else if constexpr (std::same_as<T, float16_t>) {
     const auto bits = svreinterpret_u16_f16(value);
@@ -116,6 +126,16 @@ VECOPS_ALWAYS_INLINE svbool_t sve_classify_raw(
       return svcmpeq_n_u16(active, bits, 0xfc00u);
     else if constexpr (std::same_as<Op, IsInfOp>)
       return svcmpeq_n_u16(active, absolute, 0x7c00u);
+    else if constexpr (std::same_as<Op, IsFiniteOp>)
+      return svcmplt_n_u16(active, absolute, 0x7c00u);
+    else if constexpr (std::same_as<Op, IsNormalOp>)
+      return svand_b_z(
+          active,
+          svcmpge_n_u16(active, absolute, 0x0400u),
+          svcmplt_n_u16(active, absolute, 0x7c00u));
+    else if constexpr (std::same_as<Op, SignBitOp>)
+      return svcmpeq_n_u16(
+          active, svand_n_u16_x(active, bits, 0x8000u), 0x8000u);
     else static_assert(dispatch_dependent_false<Op>, "unsupported SVE classification");
   } else if constexpr (std::same_as<T, float32_t>) {
     const auto bits = svreinterpret_u32_f32(value);
@@ -128,6 +148,18 @@ VECOPS_ALWAYS_INLINE svbool_t sve_classify_raw(
       return svcmpeq_n_u32(active, bits, 0xff800000u);
     else if constexpr (std::same_as<Op, IsInfOp>)
       return svcmpeq_n_u32(active, absolute, 0x7f800000u);
+    else if constexpr (std::same_as<Op, IsFiniteOp>)
+      return svcmplt_n_u32(active, absolute, 0x7f800000u);
+    else if constexpr (std::same_as<Op, IsNormalOp>)
+      return svand_b_z(
+          active,
+          svcmpge_n_u32(active, absolute, 0x00800000u),
+          svcmplt_n_u32(active, absolute, 0x7f800000u));
+    else if constexpr (std::same_as<Op, SignBitOp>)
+      return svcmpeq_n_u32(
+          active,
+          svand_n_u32_x(active, bits, 0x80000000u),
+          0x80000000u);
     else static_assert(dispatch_dependent_false<Op>, "unsupported SVE classification");
   } else if constexpr (std::same_as<T, float64_t>) {
     const auto bits = svreinterpret_u64_f64(value);
@@ -140,6 +172,18 @@ VECOPS_ALWAYS_INLINE svbool_t sve_classify_raw(
       return svcmpeq_n_u64(active, bits, 0xfff0000000000000ull);
     else if constexpr (std::same_as<Op, IsInfOp>)
       return svcmpeq_n_u64(active, absolute, 0x7ff0000000000000ull);
+    else if constexpr (std::same_as<Op, IsFiniteOp>)
+      return svcmplt_n_u64(active, absolute, 0x7ff0000000000000ull);
+    else if constexpr (std::same_as<Op, IsNormalOp>)
+      return svand_b_z(
+          active,
+          svcmpge_n_u64(active, absolute, 0x0010000000000000ull),
+          svcmplt_n_u64(active, absolute, 0x7ff0000000000000ull));
+    else if constexpr (std::same_as<Op, SignBitOp>)
+      return svcmpeq_n_u64(
+          active,
+          svand_n_u64_x(active, bits, 0x8000000000000000ull),
+          0x8000000000000000ull);
     else static_assert(dispatch_dependent_false<Op>, "unsupported SVE classification");
   } else {
     static_assert(
@@ -218,6 +262,9 @@ VECOPS_VEC_SVE_CLASSIFICATION(IsNanOp);
 VECOPS_VEC_SVE_CLASSIFICATION(IsPosInfOp);
 VECOPS_VEC_SVE_CLASSIFICATION(IsNegInfOp);
 VECOPS_VEC_SVE_CLASSIFICATION(IsInfOp);
+VECOPS_VEC_SVE_CLASSIFICATION(IsFiniteOp);
+VECOPS_VEC_SVE_CLASSIFICATION(IsNormalOp);
+VECOPS_VEC_SVE_CLASSIFICATION(SignBitOp);
 
 #undef VECOPS_VEC_SVE_CLASSIFICATION
 

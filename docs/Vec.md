@@ -182,7 +182,7 @@ three namespaces:
 
 | Namespace | Options | Used by |
 |---|---|---|
-| `vec::opt` | `masked(m)`, `unmasked`, `first(n)`, `zero`, `merge(vec_or_scalar)` (three overloads: vector / mask / scalar), `indexed(idx[, scale])`, `strided(s)`, `lanes<I...>` | nearly everything |
+| `vec::opt` | `masked(m)`, `unmasked`, `first(n)`, `zero`, `merge(vec_or_scalar)` (three overloads: vector / mask / scalar), `wrap`, `saturate`, `indexed(idx[, scale])`, `strided(s)`, `lanes<I...>` | nearly everything; `wrap`/`saturate` are integer `add/sub` overflow policies |
 | `vec::opt::math` | `strict` / `fast` / `estimate` / `accuracy<A>` | complex math functions only (see below) |
 | `vec::cvt` | `ordered`, `unordered`, `lane<P>`, `saturate`, `wrap` | `convert`, `load_convert`, `store_convert` |
 | `vec::mem` | `aligned`, `unaligned`, `temporal`, `non_temporal`, `packed`, `split`, prefetch hints (`prefetch_l1/l2/keep/stream/read/write`) | memory family |
@@ -193,6 +193,12 @@ three namespaces:
 - `opt::unmasked` — every logical lane (the explicit spelling of the default).
 - `opt::first(n)` — lanes `[0, clamp(n, 0, size(tag)))`; the idiomatic tail
   form for memory operations.
+
+**Integer overflow options** — `opt::wrap` explicitly selects the default
+modulo-2^N behavior of integer `add`/`sub`; `opt::saturate` instead evaluates
+the mathematical result and clamps it to the element type's range. At most one
+is accepted, floating Tags reject both, and an overflow-policy-only call is
+unmasked. They compose normally with `opt::masked` and inactive-lane options.
 
 **Population options** — what inactive *result* lanes contain:
 
@@ -322,6 +328,17 @@ usual active + population options.
 **Mask logic** — `mask_and`, `mask_or`, `mask_xor`, `mask_andnot`
 (`(!a) && b`), `mask_not`.
 
+**Mask queries** — `mask_all`, `mask_any`, and `mask_none` test the complete
+logical mask; `mask_count` returns its true-lane count; `mask_first` and
+`mask_last` return the lowest/highest true lane index, or `-1` for an empty
+mask. Multi-word queries operate across the complete Tag, not per word.
+
+**Lane sequences** — `iota(tag, start)` returns `start + i`, and
+`iota(tag, start, step)` returns `start + i*step`. Integer results wrap modulo
+the element width. For floating elements the lane ordinal is first represented
+in the destination element type, then multiplied and added in that type's
+normal compute format.
+
 **Lane access**
 
 | Call | Semantics | Notes |
@@ -358,11 +375,12 @@ halves and *produce* a full vector.
 
 | Call | Semantics | Notes |
 |---|---|---|
-| `add` / `sub` / `mul(tag, a, b)` | lane-wise arithmetic | Integer wraps modulo 2^bits; `float16_t`/`bfloat16_t` round back to their formats. |
+| `add` / `sub` / `mul(tag, a, b)` | lane-wise arithmetic | Integer wraps modulo 2^bits; `float16_t`/`bfloat16_t` round back to their formats. Integer `add/sub(..., opt::saturate)` instead clamp the mathematical result to the element range; `opt::wrap` explicitly selects the default. |
 | `div(tag, a, b)` | floating division | **Floating Tags only.** No integer division — use `bit_shr` for power-of-two division. `div(0)` yields inf/NaN per backend. |
 | `min` / `max(tag, a, b)` | lane-wise extrema | Floating NaN and signed-zero selection follow the active backend. |
 | `clamp(tag, value, lower, upper)` | `min(max(value, lower), upper)` lane-wise | Bounds need not be ordered; floating NaN and signed-zero selection match the active backend's `max` then `min`. Masked calls preserve `value` by default. |
 | `neg` / `abs(tag, v)` | negate / absolute value | `neg` flips only the sign bit (preserves NaN payloads, signed zeros); integer negation is modular; `abs(INT_MIN)` keeps the `INT_MIN` bit pattern; unsigned `abs` is a no-op. |
+| `copysign(tag, magnitude, sign)` | replace only magnitude's sign bit | Floating only; preserves all exponent/significand bits, including NaN payloads and signed zero. |
 | `sqrt(tag, v)` | square root | floating only |
 | `rcp` / `rsqrt(tag, v)` | reciprocal / reciprocal sqrt | Math-module ops with accuracy tiers — see [Math](#math-vecmathh); default `Strict` is within 1 ULP. |
 | `fmadd` / `fmsub` / `fnmadd` / `fnmsub(tag, a, b, c)` | `a*b±c` fused family | Native fusion when available; fallback paths may round the product separately (**no single-rounding guarantee**). `fnmsub` fallback preserves IEEE signed zero. Integer lanes wrap. |
@@ -417,11 +435,22 @@ cannot be recovered from the Vec representation alone.
 Integer Tags only (`IntegerTag`). All operations act on the *unsigned bit
 pattern* (signed elements participate via two's complement).
 
+Shift names follow the standard SIMD vocabulary: use `shl` / `shr`. The old
+`bit_shl` / `bit_shr` entry variables are not retained as aliases.
+
 | Call | Semantics | Notes |
 |---|---|---|
 | `bit_and` / `bit_or` / `bit_xor` / `bit_andnot` | `(~a) & b` for andnot | |
 | `bit_not(tag, v)` | bitwise complement | |
-| `bit_shl` / `bit_shr(tag, v, count)` | shifts | Count may be a runtime `int`, `vecops::meta::Const<N>`, bounded `vecops::meta::Dynamic`, or a per-lane `Vec`. **Negative counts are a no-op.** `bit_shr` is logical for unsigned and **arithmetic for signed** elements; oversized counts zero (logical) or sign-fill (arithmetic). |
+| `shl` / `shr(tag, v, count)` | shifts | Count is one of three forms: `vecops::meta::Const<N>` selects the compile-time immediate path, `int` selects the runtime-scalar path, and a same-Tag `Vec` supplies per-lane counts. Counts must be non-negative; a negative `Const` is rejected and negative runtime counts are UB. `shr` is logical for unsigned and **arithmetic for signed** elements; oversized counts zero (logical) or sign-fill (arithmetic). |
+| `popcount(tag, v)` | number of one bits in each lane | The result retains the input Tag and lies in `[0, element_bits]`. |
+| `countl_zero` / `countl_one(tag, v)` | leading zero/one count | Zero input returns `element_bits` for `countl_zero`; all-one input does so for `countl_one`. |
+| `countr_zero` / `countr_one(tag, v)` | trailing zero/one count | Zero input returns `element_bits` for `countr_zero`; all-one input does so for `countr_one`. |
+| `rotl` / `rotr(tag, v, count)` | lane-wise bit rotation | Accepts the same immediate, runtime-scalar, and per-lane count forms as shifts. Counts are reduced modulo the element width; negative counts rotate in the opposite direction. |
+
+Signed values are interpreted through their unsigned bit representation for
+counts and rotations. Masked operations preserve the input by default, or use
+the normal `opt::zero` / scalar merge / vector merge policies.
 
 ### Comparison (`vec/Comparison.h`)
 
@@ -430,7 +459,9 @@ All comparisons produce a `Mask<Tag>`.
 | Call | Semantics | Notes |
 |---|---|---|
 | `cmpeq/ne/lt/gt/le/ge(tag, a, b)` | lane-wise comparison | Floating comparisons use C++ *ordered* semantics: any comparison with NaN is false — **except `cmpne`, which is true whenever either operand is NaN** (including NaN != NaN). |
-| `isnan` / `isinf` / `isposinf` / `isneginf(tag, v)` | classification predicates (floating only) | `isinf` = either sign; anything not matching is false. |
+| `isnan` / `isinf` / `isposinf` / `isneginf(tag, v)` | NaN/infinity classification (floating only) | `isinf` = either sign; anything not matching is false. |
+| `isfinite` / `isnormal(tag, v)` | finite / normal classification | `isfinite` includes zero and subnormals; `isnormal` excludes both. |
+| `signbit(tag, v)` | test the IEEE sign bit | True for negative zero and negative-sign NaNs as well as ordinary negative values. |
 
 Masked comparisons AND the result with the governing mask; inactive lanes
 default to **false** (only `opt::merge(mask_value)` can preserve given bits).
@@ -789,8 +820,16 @@ estimate bits while staying inside the tier bound.
 `!(a == b)`-style logic (i.e. `mask_not` over `cmpeq`) if you need the
 "ordered unequal" meaning.
 
-**`bit_shr` on signed elements is an arithmetic shift.** Logical shifting
-requires unsigned elements. Negative shift counts are no-ops, not UB.
+**`shr` on signed elements is an arithmetic shift.** Logical shifting
+requires unsigned elements. Every scalar or per-lane shift count must be
+non-negative; violating this precondition has undefined behavior. Use
+`meta::cint<N>` when the count must reach the backend as an immediate;
+an ordinary integer literal has type `int` and therefore uses the
+runtime-scalar API category even if the compiler later constant-folds it.
+
+**Rotation counts do not share the shift precondition.** `rotl` and `rotr`
+reduce every count modulo the element width, and negative counts reverse the
+direction, matching the standard C++ bit-rotation functions.
 
 **Shuffles never cross their granularity boundary** — native word for
 `shuf`, 16-byte block for `local_shuf` / `local_interleave_*`. Indices are

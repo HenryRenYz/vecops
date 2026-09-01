@@ -27,6 +27,12 @@ template <>
 struct EnableElementwiseWordBatching<SubOp> : std::true_type {};
 
 template <>
+struct EnableElementwiseWordBatching<SaturatedAddOp> : std::true_type {};
+
+template <>
+struct EnableElementwiseWordBatching<SaturatedSubOp> : std::true_type {};
+
+template <>
 struct EnableElementwiseWordBatching<MulOp> : std::true_type {};
 
 template <>
@@ -37,6 +43,9 @@ struct EnableElementwiseWordBatching<MinOp> : std::true_type {};
 
 template <>
 struct EnableElementwiseWordBatching<MaxOp> : std::true_type {};
+
+template <>
+struct EnableElementwiseWordBatching<CopySignOp> : std::true_type {};
 
 template <>
 struct EnableElementwiseWordBatching<NegOp> : std::true_type {};
@@ -116,10 +125,13 @@ struct ArithmeticGenericImpl {
 
 VECOPS_VEC_DEFINE_ARITHMETIC_GENERIC(AddOp);
 VECOPS_VEC_DEFINE_ARITHMETIC_GENERIC(SubOp);
+VECOPS_VEC_DEFINE_ARITHMETIC_GENERIC(SaturatedAddOp);
+VECOPS_VEC_DEFINE_ARITHMETIC_GENERIC(SaturatedSubOp);
 VECOPS_VEC_DEFINE_ARITHMETIC_GENERIC(MulOp);
 VECOPS_VEC_DEFINE_ARITHMETIC_GENERIC(DivOp);
 VECOPS_VEC_DEFINE_ARITHMETIC_GENERIC(MinOp);
 VECOPS_VEC_DEFINE_ARITHMETIC_GENERIC(MaxOp);
+VECOPS_VEC_DEFINE_ARITHMETIC_GENERIC(CopySignOp);
 
 #undef VECOPS_VEC_DEFINE_ARITHMETIC_GENERIC
 
@@ -317,6 +329,92 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_arithmetic_options(
     return execute(
         op, tag, a, b, mask, a, PreserveArithmeticInactive{});
   }
+}
+
+/** Invokes f with every integer-overflow option removed. */
+template <typename F>
+VECOPS_ALWAYS_INLINE decltype(auto) invoke_without_arithmetic_overflow(
+    F&& f) {
+  return std::forward<F>(f)();
+}
+
+template <typename F, typename First, typename... Rest>
+VECOPS_ALWAYS_INLINE decltype(auto) invoke_without_arithmetic_overflow(
+    F&& f, First&& first, Rest&&... rest) {
+  if constexpr (is_arithmetic_overflow_option_v<First>) {
+    return invoke_without_arithmetic_overflow(
+        std::forward<F>(f), std::forward<Rest>(rest)...);
+  } else {
+    return invoke_without_arithmetic_overflow(
+        [&f, &first]<typename... Tail>(Tail&&... tail) -> decltype(auto) {
+          return std::forward<F>(f)(
+              std::forward<First>(first),
+              std::forward<Tail>(tail)...);
+        },
+        std::forward<Rest>(rest)...);
+  }
+}
+
+/** Returns the selected add/sub overflow mode; wrap is the default. */
+template <typename... Options>
+consteval OverflowMode selected_arithmetic_overflow_mode() {
+  OverflowMode result = OverflowMode::Wrap;
+  ([&]() VECOPS_INLINE_LAMBDA {
+    using Option = std::remove_cvref_t<Options>;
+    if constexpr (is_arithmetic_overflow_option_v<Option>)
+      result = IsArithmeticOverflowOption<Option>::mode;
+  }(), ...);
+  return result;
+}
+
+/**
+ * Selects wrap or saturating add/sub, removes that semantic option, then
+ * reuses the ordinary mask/population dispatcher. A policy-only call is an
+ * ordinary unmasked operation.
+ */
+template <typename WrapOp, typename SaturatedOp, VectorTag Tag,
+          typename... Options>
+VECOPS_ALWAYS_INLINE Vec<Tag> execute_add_sub_options(
+    WrapOp wrap_op, SaturatedOp saturated_op, Tag tag,
+    Vec<Tag> a, Vec<Tag> b, Options&&... options) {
+  static_assert(
+      ((is_arithmetic_option_for_v<Tag, Options> ||
+        is_arithmetic_overflow_option_v<Options>) && ...),
+      "add/sub received an option with the wrong kind or value type");
+  constexpr std::size_t overflow_count =
+      option_count_v<IsArithmeticOverflowOption, Options...>;
+  static_assert(
+      overflow_count <= 1,
+      "add/sub accepts at most one opt::wrap or opt::saturate");
+  if constexpr (overflow_count != 0) {
+    static_assert(
+        std::integral<ElementOf<Tag>>,
+        "opt::wrap and opt::saturate require an integer element type");
+  }
+
+  constexpr OverflowMode mode =
+      selected_arithmetic_overflow_mode<Options...>();
+  const auto dispatch = [&]<typename... ArithmeticOptions>(
+                            ArithmeticOptions&&... arithmetic_options)
+      -> Vec<Tag> {
+    if constexpr (sizeof...(ArithmeticOptions) == 0) {
+      if constexpr (mode == OverflowMode::Saturate)
+        return execute(saturated_op, tag, a, b);
+      else
+        return execute(wrap_op, tag, a, b);
+    } else {
+      if constexpr (mode == OverflowMode::Saturate)
+        return execute_arithmetic_options(
+            saturated_op, tag, a, b,
+            std::forward<ArithmeticOptions>(arithmetic_options)...);
+      else
+        return execute_arithmetic_options(
+            wrap_op, tag, a, b,
+            std::forward<ArithmeticOptions>(arithmetic_options)...);
+    }
+  };
+  return invoke_without_arithmetic_overflow(
+      dispatch, std::forward<Options>(options)...);
 }
 
 /** Request-driven binary elementwise dispatch. */

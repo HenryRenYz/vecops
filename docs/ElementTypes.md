@@ -117,6 +117,12 @@ canonicalization. They are the honest way to move bits (I/O, hashing,
 reinterpretation); arithmetic on arbitrary bit patterns then follows IEEE
 rules via the f32 round-trip.
 
+The vector classification and sign operations inspect these native 16-bit
+encodings directly. In particular, `isnormal` distinguishes bf16/fp16
+subnormals before any widening (a small-float subnormal can become a normal
+f32 value), while `signbit` and `copysign` preserve NaN payloads and signed
+zero without a float round trip.
+
 **Conversions need hardware to be fast.** Without F16C / NEON / AVX512-BF16,
 scalar conversion falls back to a software implementation (the fp16 one is
 the classic bit-twiddling from PyTorch's `Half.h`). Bulk conversions should
