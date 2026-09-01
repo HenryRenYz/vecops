@@ -140,6 +140,39 @@ struct NativeWordImpl<ScalarBackend, MaxOp>
     : ScalarArithmeticWordImpl<MaxOp> {};
 
 /* **************************************************************************** */
+//    ScalarClampWordImpl                                                      //
+/* **************************************************************************** */
+
+struct ScalarClampWordImpl {
+  template <nint_t Index, VectorTag Tag>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      ClampOp, Tag tag, NativeWordVec<Tag> value,
+      NativeWordVec<Tag> lower, NativeWordVec<Tag> upper) {
+    const auto bounded_low =
+        ScalarArithmeticWordImpl<MaxOp>::template call<Index>(
+            MaxOp{}, tag, value, lower);
+    return ScalarArithmeticWordImpl<MinOp>::template call<Index>(
+        MinOp{}, tag, bounded_low, upper);
+  }
+
+  template <nint_t Index, VectorTag Tag, typename Policy>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      ClampOp, Tag tag, NativeWordVec<Tag> value,
+      NativeWordVec<Tag> lower, NativeWordVec<Tag> upper,
+      NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive,
+      Policy policy) {
+    const auto bounded_low =
+        ScalarArithmeticWordImpl<MaxOp>::template call<Index>(
+            MaxOp{}, tag, value, lower);
+    return ScalarArithmeticWordImpl<MinOp>::template call<Index>(
+        MinOp{}, tag, bounded_low, upper, mask, inactive, policy);
+  }
+};
+
+template <>
+struct NativeWordImpl<ScalarBackend, ClampOp> : ScalarClampWordImpl {};
+
+/* **************************************************************************** */
 //    ScalarFmaWordImpl and registrations                                      //
 /* **************************************************************************** */
 

@@ -16,10 +16,11 @@
  *    concrete types selected by the active backend (scalar, x86, or SVE)
  *    from a Tag.
  *
- * 3. **Operations** (Arithmetic.h, Basic.h, Bit.h, Comparison.h,
- *    Conversion.h, Math.h, Memory.h, Reduction.h): Each operation is a
- *    callable CPO object (e.g., add, mul, load) dispatched through
- *    backend-specialized NativeImpl / NativeWordImpl with automatic
+ * 3. **Operations** (Arithmetic.h, Rounding.h, Basic.h, Bit.h,
+ *    Comparison.h, Conversion.h, WideningDot.h, Math.h, Memory.h,
+ *    Reduction.h): Each
+ *    operation is a callable CPO object (e.g., add, mul, load) dispatched
+ *    through backend-specialized NativeImpl / NativeWordImpl with automatic
  *    multi-word batching.
  *
  * 4. **Options** (Options.h): Tag types in namespaces opt, cvt, and mem
@@ -30,9 +31,11 @@
 #include "vecops/vec/VecBase.h"
 #include "vecops/vec/Basic.h"
 #include "vecops/vec/Arithmetic.h"
+#include "vecops/vec/Rounding.h"
 #include "vecops/vec/Bit.h"
 #include "vecops/vec/Comparison.h"
 #include "vecops/vec/Conversion.h"
+#include "vecops/vec/WideningDot.h"
 #include "vecops/vec/ConversionMemory.h"
 #include "vecops/vec/Math.h"
 #include "vecops/vec/Memory.h"

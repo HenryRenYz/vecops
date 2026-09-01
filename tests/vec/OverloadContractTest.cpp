@@ -29,6 +29,32 @@ using MathStrict = decltype(vec::opt::math::strict);
 using MathFast = decltype(vec::opt::math::fast);
 using MathEstimate = decltype(vec::opt::math::estimate);
 
+using DotToTag = vec::ScalableTag<vecops::float32_t>;
+using DotF16Tag = vec::ViewAs<vecops::float16_t, DotToTag>;
+using DotBF16Tag = vec::ViewAs<vecops::bfloat16_t, DotToTag>;
+using DotF16V = vec::Vec<DotF16Tag>;
+using DotBF16V = vec::Vec<DotBF16Tag>;
+using DotToV = vec::Vec<DotToTag>;
+
+static_assert(accepts<
+              decltype(vec::widening_dot), DotToTag,
+              DotF16Tag, DotBF16Tag, DotF16V, DotBF16V>);
+static_assert(accepts<
+              decltype(vec::widening_dot), DotToTag,
+              DotF16Tag, DotBF16Tag, DotF16V, DotBF16V, DotToV>);
+static_assert(accepts<
+              decltype(vec::widening_dot), DotToTag,
+              DotF16V, DotBF16V>);
+static_assert(accepts<
+              decltype(vec::widening_dot), DotToTag,
+              DotF16V, DotBF16V, DotToV>);
+static_assert(!accepts<
+              decltype(vec::widening_dot), DotToTag,
+              DotToTag, DotF16Tag, DotToV, DotF16V>);
+static_assert(!accepts<
+              decltype(vec::widening_dot), DotF16Tag,
+              DotF16Tag, DotBF16Tag, DotF16V, DotBF16V>);
+
 #define CHECK_BINARY_CPO(Name, Tag, Value, Masked)                    \
   static_assert(accepts<decltype(vec::Name), Tag, Value, Value>);     \
   static_assert(accepts<                                              \
@@ -58,6 +84,13 @@ CHECK_BINARY_CPO(max, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(neg, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(abs, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(sqrt, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(floor, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(ceil, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(trunc, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(round, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(round_even, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(nearbyint, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(rint, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(rcp, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(rsqrt, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(exp, FTag, FV, MaskedF);
@@ -124,6 +157,10 @@ CHECK_FMA_CPO(fmadd);
 CHECK_FMA_CPO(fmsub);
 CHECK_FMA_CPO(fnmadd);
 CHECK_FMA_CPO(fnmsub);
+CHECK_FMA_CPO(clamp);
+
+static_assert(!accepts<decltype(vec::clamp), FTag, FV, FV, IV>);
+static_assert(!accepts<decltype(vec::clamp), FV, FV, IV>);
 
 #undef CHECK_FMA_CPO
 

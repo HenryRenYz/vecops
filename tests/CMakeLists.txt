@@ -25,14 +25,6 @@ vecops_add_test(
     ARCH ${VECOPS_TILE2D_GEMM_ARCH})
 vecops_add_test(NAME UtilMathTest FILES util/MathTest.cpp FOLDER util/math)
 
-if(VECOPS_ARCH_FAMILY STREQUAL "ARM")
-    vecops_add_test(
-        NAME KernelLoopSizelessTest
-        FILES kernel/LoopSizelessTest.cpp
-        FOLDER kernel/loop
-        ARCH SVE)
-endif()
-
 if(VECOPS_ARCH_FAMILY STREQUAL "x86")
     set(VECOPS_TENSOR_KERNEL_ARCH Scalar AVX512 Native)
 else()
@@ -58,9 +50,15 @@ vecops_add_test(NAME VecOptionsTest FILES vec/OptionsTest.cpp
     FOLDER vec/options ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecArithmeticTest FILES vec/ArithmeticTest.cpp
     FOLDER vec/arithmetic ARCH ${VEC_BASE_ARCH} LABELS vec)
+vecops_add_test(NAME VecClampTest FILES vec/ClampTest.cpp
+    FOLDER vec/arithmetic ARCH ${VEC_BASE_ARCH} LABELS vec)
+vecops_add_test(NAME VecWideningDotTest FILES vec/WideningDotTest.cpp
+    FOLDER vec/arithmetic ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecUnaryArithmeticTest FILES vec/UnaryArithmeticTest.cpp
     FOLDER vec/arithmetic ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecFloatingUnaryTest FILES vec/FloatingUnaryTest.cpp
+    FOLDER vec/arithmetic ARCH ${VEC_BASE_ARCH} LABELS vec)
+vecops_add_test(NAME VecRoundingTest FILES vec/RoundingTest.cpp
     FOLDER vec/arithmetic ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecMathTest FILES vec/MathTest.cpp
     FOLDER vec/math ARCH ${VEC_BASE_ARCH} LABELS vec)

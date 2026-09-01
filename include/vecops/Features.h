@@ -168,6 +168,11 @@
   #define HAS_AVX512VNNI 1
 #endif
 
+// AVX VNNI (128/256-bit VEX forms)
+#if defined(__AVXVNNI__)
+  #define HAS_AVX_VNNI 1
+#endif
+
 // AVX512BF16 (BFloat16)
 #if defined(__AVX512BF16__)
   #define HAS_AVX512_BF16 1

@@ -94,6 +94,22 @@ VECOPS_ALWAYS_INLINE svbfloat16_t sve_bfloat16_binary(
   }
 }
 
+VECOPS_ALWAYS_INLINE svbfloat16_t sve_bfloat16_clamp(
+    svbfloat16_t value, svbfloat16_t lower, svbfloat16_t upper) {
+  const auto clamp_part = [](svfloat32_t input, svfloat32_t low,
+                             svfloat32_t high) {
+    const auto full = svptrue_b32();
+    return svmin_f32_x(full, svmax_f32_x(full, input, low), high);
+  };
+  return sve_f32_pair_to_bf16(
+      clamp_part(
+          sve_bf16_to_f32_lo(value), sve_bf16_to_f32_lo(lower),
+          sve_bf16_to_f32_lo(upper)),
+      clamp_part(
+          sve_bf16_to_f32_hi(value), sve_bf16_to_f32_hi(lower),
+          sve_bf16_to_f32_hi(upper)));
+}
+
 /* **************************************************************************** */
 //    SVEArithmeticWordImpl and registrations                                 //
 /* **************************************************************************** */
@@ -198,6 +214,96 @@ template <>
 struct NativeWordImpl<SVEBackend, MinOp> : SVEArithmeticWordImpl<MinOp> {};
 template <>
 struct NativeWordImpl<SVEBackend, MaxOp> : SVEArithmeticWordImpl<MaxOp> {};
+
+/* **************************************************************************** */
+//    SVEClampWordImpl                                                         //
+/* **************************************************************************** */
+
+struct SVEClampWordImpl {
+  template <nint_t Index, VectorTag Tag>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      ClampOp, Tag tag, NativeWordVec<Tag> value,
+      NativeWordVec<Tag> lower, NativeWordVec<Tag> upper) {
+    using T = ElementOf<Tag>;
+    static_assert(Index >= 0 && Index < num_words(tag));
+    if constexpr (std::same_as<T, bfloat16_t>) {
+      return sve_basic_wrap_word<Tag>(sve_bfloat16_clamp(
+          sve_basic_raw_word(value), sve_basic_raw_word(lower),
+          sve_basic_raw_word(upper)));
+    }
+    // ACLE permits these intrinsics in an ordinary non-streaming function
+    // only with SVE2.1. SME enables integer CLAMP in streaming functions and
+    // SME2 enables floating CLAMP there, but this vec backend is non-streaming.
+#if defined(HAS_SVE2P1)
+    else {
+      const auto raw_value = sve_basic_raw_word(value);
+      const auto raw_lower = sve_basic_raw_word(lower);
+      const auto raw_upper = sve_basic_raw_word(upper);
+#define VECOPS_VEC_SVE_CLAMP(Suffix)                                   \
+      return sve_basic_wrap_word<Tag>(                                 \
+          svclamp_##Suffix(raw_value, raw_lower, raw_upper))
+      if constexpr (std::same_as<T, float16_t>) {
+        VECOPS_VEC_SVE_CLAMP(f16);
+      } else if constexpr (std::same_as<T, float32_t>) {
+        VECOPS_VEC_SVE_CLAMP(f32);
+      } else if constexpr (std::same_as<T, float64_t>) {
+        VECOPS_VEC_SVE_CLAMP(f64);
+      } else if constexpr (std::same_as<T, int8_t>) {
+        VECOPS_VEC_SVE_CLAMP(s8);
+      } else if constexpr (std::same_as<T, uint8_t>) {
+        VECOPS_VEC_SVE_CLAMP(u8);
+      } else if constexpr (std::same_as<T, int16_t>) {
+        VECOPS_VEC_SVE_CLAMP(s16);
+      } else if constexpr (std::same_as<T, uint16_t>) {
+        VECOPS_VEC_SVE_CLAMP(u16);
+      } else if constexpr (std::same_as<T, int32_t>) {
+        VECOPS_VEC_SVE_CLAMP(s32);
+      } else if constexpr (std::same_as<T, uint32_t>) {
+        VECOPS_VEC_SVE_CLAMP(u32);
+      } else if constexpr (std::same_as<T, int64_t>) {
+        VECOPS_VEC_SVE_CLAMP(s64);
+      } else if constexpr (std::same_as<T, uint64_t>) {
+        VECOPS_VEC_SVE_CLAMP(u64);
+      } else {
+        static_assert(dispatch_dependent_false<T>);
+      }
+#undef VECOPS_VEC_SVE_CLAMP
+    }
+#endif
+    const auto bounded_low =
+        SVEArithmeticWordImpl<MaxOp>::template call<Index>(
+            MaxOp{}, tag, value, lower);
+    return SVEArithmeticWordImpl<MinOp>::template call<Index>(
+        MinOp{}, tag, bounded_low, upper);
+  }
+
+  template <nint_t Index, VectorTag Tag, typename Policy>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      ClampOp op, Tag tag, NativeWordVec<Tag> value,
+      NativeWordVec<Tag> lower, NativeWordVec<Tag> upper,
+      NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive,
+      Policy policy) {
+    using T = ElementOf<Tag>;
+    if constexpr (std::same_as<T, bfloat16_t>) {
+      const auto computed = call<Index>(op, tag, value, lower, upper);
+      return blend(tag, inactive, mask, computed);
+    }
+#if defined(HAS_SVE2P1)
+    else {
+      const auto computed = call<Index>(op, tag, value, lower, upper);
+      return blend(tag, inactive, mask, computed);
+    }
+#endif
+    const auto bounded_low =
+        SVEArithmeticWordImpl<MaxOp>::template call<Index>(
+            MaxOp{}, tag, value, lower);
+    return SVEArithmeticWordImpl<MinOp>::template call<Index>(
+        MinOp{}, tag, bounded_low, upper, mask, inactive, policy);
+  }
+};
+
+template <>
+struct NativeWordImpl<SVEBackend, ClampOp> : SVEClampWordImpl {};
 
 /* **************************************************************************** */
 //    SVEUnaryArithmeticWordImpl and registrations                            //

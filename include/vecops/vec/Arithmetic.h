@@ -233,6 +233,53 @@ VECOPS_VEC_DECLARE_EXTREMA_OP(MaxOp);
 #undef VECOPS_VEC_DECLARE_EXTREMA_OP
 
 /* **************************************************************************** */
+//    Clamp                                                                     //
+/* **************************************************************************** */
+
+struct ClampOp {
+  template <VectorTag Tag>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper) const;
+
+  template <VectorTag Tag, typename... Options>
+    requires (sizeof...(Options) > 0)
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper,
+      Options&&... options) const;
+
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper,
+      const OpRequest<Tag, A, I>& request) const;
+
+  template <TagInferableVector V, typename... Options>
+  VECOPS_ALWAYS_INLINE V operator()(
+      V value, V lower, V upper, Options&&... options) const {
+    return (*this)(
+        VecToTag<V>{}, value, lower, upper,
+        std::forward<Options>(options)...);
+  }
+
+  template <VectorTag Tag, typename Policy>
+    requires (details::arithmetic_inactive_policy<Policy>)
+  inline Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper,
+      Mask<Tag> mask, Vec<Tag> inactive, Policy policy) const {
+    return details::execute(
+        *this, tag, value, lower, upper, mask, inactive, policy);
+  }
+
+  template <VectorTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordVec<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> value, NativeWordVec<Tag> lower,
+      NativeWordVec<Tag> upper) const {
+    return details::execute_word<0, details::CurrentBackend>(
+        *this, tag, value, lower, upper);
+  }
+};
+
+/* **************************************************************************** */
 //    Unary arithmetic: neg, abs                                          //
 /* **************************************************************************** */
 
@@ -382,6 +429,7 @@ inline constexpr MulOp mul{};
 inline constexpr DivOp div{};
 inline constexpr MinOp min{};
 inline constexpr MaxOp max{};
+inline constexpr ClampOp clamp{};
 inline constexpr NegOp neg{};
 inline constexpr AbsOp abs{};
 inline constexpr SqrtOp sqrt{};
@@ -587,6 +635,40 @@ VECOPS_VEC_DEFINE_EXTREMA_OP(MinOp, min);
 VECOPS_VEC_DEFINE_EXTREMA_OP(MaxOp, max);
 
 #undef VECOPS_VEC_DEFINE_EXTREMA_OP
+
+/**
+ * Computes `r[i] = min(max(value[i], lower[i]), upper[i])` lane-wise.
+ * Bounds are not required to be ordered; the expression above defines the
+ * result when `lower[i] > upper[i]`. Floating NaN and signed-zero selection
+ * follows the active backend's `max` followed by `min` semantics.
+ *
+ * Filtered calls require exactly one `opt::masked(mask)`. Inactive lanes
+ * preserve `value` by default, or use `opt::zero` or one scalar/vector
+ * `opt::merge` value.
+ */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE Vec<Tag> ClampOp::operator()(
+    Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper) const {
+  return details::execute(*this, tag, value, lower, upper);
+}
+
+template <VectorTag Tag, typename... Options>
+  requires (sizeof...(Options) > 0)
+VECOPS_ALWAYS_INLINE Vec<Tag> ClampOp::operator()(
+    Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper,
+    Options&&... options) const {
+  return details::execute_ternary_arithmetic_options(
+      *this, tag, value, lower, upper,
+      std::forward<Options>(options)...);
+}
+
+template <VectorTag Tag, Active A, Inactive I>
+VECOPS_ALWAYS_INLINE Vec<Tag> ClampOp::operator()(
+    Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper,
+    const OpRequest<Tag, A, I>& request) const {
+  return details::execute_ternary_arithmetic_request(
+      *this, tag, value, lower, upper, request);
+}
 
 #define VECOPS_VEC_DEFINE_UNARY_ARITHMETIC_OP(OpType, Name)            \
   template <VectorTag Tag>                                             \

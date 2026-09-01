@@ -361,10 +361,56 @@ halves and *produce* a full vector.
 | `add` / `sub` / `mul(tag, a, b)` | lane-wise arithmetic | Integer wraps modulo 2^bits; `float16_t`/`bfloat16_t` round back to their formats. |
 | `div(tag, a, b)` | floating division | **Floating Tags only.** No integer division — use `bit_shr` for power-of-two division. `div(0)` yields inf/NaN per backend. |
 | `min` / `max(tag, a, b)` | lane-wise extrema | Floating NaN and signed-zero selection follow the active backend. |
+| `clamp(tag, value, lower, upper)` | `min(max(value, lower), upper)` lane-wise | Bounds need not be ordered; floating NaN and signed-zero selection match the active backend's `max` then `min`. Masked calls preserve `value` by default. |
 | `neg` / `abs(tag, v)` | negate / absolute value | `neg` flips only the sign bit (preserves NaN payloads, signed zeros); integer negation is modular; `abs(INT_MIN)` keeps the `INT_MIN` bit pattern; unsigned `abs` is a no-op. |
 | `sqrt(tag, v)` | square root | floating only |
 | `rcp` / `rsqrt(tag, v)` | reciprocal / reciprocal sqrt | Math-module ops with accuracy tiers — see [Math](#math-vecmathh); default `Strict` is within 1 ULP. |
 | `fmadd` / `fmsub` / `fnmadd` / `fnmsub(tag, a, b, c)` | `a*b±c` fused family | Native fusion when available; fallback paths may round the product separately (**no single-rounding guarantee**). `fnmsub` fallback preserves IEEE signed zero. Integer lanes wrap. |
+
+### Rounding (`vec/Rounding.h`)
+
+| Call | Direction | Notes |
+|---|---|---|
+| `floor` / `ceil` / `trunc(tag, v)` | toward -inf / +inf / zero | Returns an integral floating value in the original element type. |
+| `round(tag, v)` | nearest, halfway away from zero | Independent of the current floating-point rounding mode. |
+| `round_even(tag, v)` | nearest, halfway to even | Independent of the current floating-point rounding mode. |
+| `nearbyint(tag, v)` | current floating-point environment | Suppresses the inexact exception. |
+| `rint(tag, v)` | current floating-point environment | May raise the inexact exception. |
+
+All entries support the arithmetic mask/zero/merge population options.
+NaNs, infinities, and signed zeros remain in their corresponding IEEE class;
+the exact NaN payload behavior follows the backend and element format.
+
+### Widening dot (`vec/WideningDot.h`)
+
+```cpp
+using Out = vec::ScalableTag<float32_t>;
+using F16 = vec::ViewAs<float16_t, Out>;
+using BF16 = vec::ViewAs<bfloat16_t, Out>;
+
+auto products = vec::widening_dot(Out{}, F16{}, BF16{}, a, b);
+auto accumulated = vec::widening_dot(Out{}, a, b, c); // source Tags inferred
+```
+
+For widening calls, both source elements have the same byte width but may be
+different types, such as `float16_t * bfloat16_t` or `int8_t * uint8_t`.
+The destination is a wider type in the same arithmetic category and all three
+Tags describe the same logical byte span. If
+`G = sizeof(To) / sizeof(From)`, output lane `k` is:
+
+```text
+c[k] + sum(widen(a[G*k+j]) * widen(b[G*k+j]), j=0..G-1)
+```
+
+The overload without `c` starts from zero. When all three types and Tags are
+identical, the two forms are exactly `mul` and `fmadd`, respectively. Integer
+inputs retain their individual signedness while widening and destination-width
+arithmetic wraps modulo 2^bits. Floating backends may fuse or reassociate the
+per-group operations, so results need not be bit-identical across ISAs.
+
+The inferred overloads reconstruct each source Tag with `ViewAs<Source,ToTag>`;
+`ToTag` therefore retains fixed/scalable and subword extent information that
+cannot be recovered from the Vec representation alone.
 
 ### Bit (`vec/Bit.h`)
 

@@ -96,6 +96,14 @@ VECOPS_ALWAYS_INLINE __m256i x86_cast_bfloat16_to_si256(__m256bh value) {
 #endif
 
 #if VEC_WIDTH >= 512
+VECOPS_ALWAYS_INLINE __m512bh x86_cast_si512_to_bfloat16(__m512i value) {
+  union {
+    __m512i integer;
+    __m512bh bfloat;
+  } cast{.integer = value};
+  return cast.bfloat;
+}
+
 VECOPS_ALWAYS_INLINE __m512i x86_cast_bfloat16_to_si512(__m512bh value) {
   union {
     __m512i integer;
@@ -420,6 +428,61 @@ VECOPS_ALWAYS_INLINE Raw x86_small_float_binary_simd(
         x86_float32_binary<Op>(a_high, b_high));
   }
 #endif
+}
+
+template <Element T, typename Raw>
+VECOPS_ALWAYS_INLINE Raw x86_small_float_clamp_simd(
+    Raw value, Raw lower, Raw upper) {
+  static_assert(
+      std::same_as<T, float16_t> || std::same_as<T, bfloat16_t>);
+  const auto expand = []<typename Float>(
+                          Raw input, Float& low, Float& high) {
+    if constexpr (std::same_as<T, bfloat16_t>)
+      x86_bfloat16_to_float32_pair(input, low, high);
+    else
+      x86_float16_to_float32_pair(input, low, high);
+  };
+  const auto narrow = []<typename Float>(Float low, Float high) -> Raw {
+    if constexpr (std::same_as<T, bfloat16_t>) {
+#if defined(HAS_AVX512_BF16) && !defined(VECOPS_PRESERVE_SUBNORMALS)
+      return x86_float32_pair_to_bfloat16(
+          x86_canonicalize_float32_nan(low),
+          x86_canonicalize_float32_nan(high));
+#else
+      return x86_float32_pair_to_bfloat16(low, high);
+#endif
+    } else {
+      return x86_float32_pair_to_float16(low, high);
+    }
+  };
+  const auto clamp_part = [](auto input, auto low, auto high) {
+    return x86_float32_binary<MinOp>(
+        x86_float32_binary<MaxOp>(input, low), high);
+  };
+
+#define VECOPS_VEC_X86_SMALL_FLOAT_CLAMP(Float)                        \
+  Float value_low, value_high, lower_low, lower_high;                  \
+  Float upper_low, upper_high;                                        \
+  expand(value, value_low, value_high);                               \
+  expand(lower, lower_low, lower_high);                               \
+  expand(upper, upper_low, upper_high);                               \
+  return narrow(                                                      \
+      clamp_part(value_low, lower_low, upper_low),                    \
+      clamp_part(value_high, lower_high, upper_high))
+  if constexpr (sizeof(Raw) == 16) {
+    VECOPS_VEC_X86_SMALL_FLOAT_CLAMP(__m128);
+  }
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(Raw) == 32) {
+    VECOPS_VEC_X86_SMALL_FLOAT_CLAMP(__m256);
+  }
+#endif
+#if VEC_WIDTH >= 512
+  else {
+    VECOPS_VEC_X86_SMALL_FLOAT_CLAMP(__m512);
+  }
+#endif
+#undef VECOPS_VEC_X86_SMALL_FLOAT_CLAMP
 }
 
 template <typename Raw>
@@ -1158,6 +1221,63 @@ template <>
 struct NativeWordImpl<X86Backend, MinOp> : X86ExtremaWordImpl<MinOp> {};
 template <>
 struct NativeWordImpl<X86Backend, MaxOp> : X86ExtremaWordImpl<MaxOp> {};
+
+/* **************************************************************************** */
+//                    Clamp word implementation                               //
+/* **************************************************************************** */
+
+struct X86ClampWordImpl {
+  template <nint_t Index, VectorTag Tag>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      ClampOp, Tag tag, NativeWordVec<Tag> value,
+      NativeWordVec<Tag> lower, NativeWordVec<Tag> upper) {
+    using T = ElementOf<Tag>;
+    if constexpr (std::same_as<T, bfloat16_t>) {
+      return NativeWordVec<Tag>{x86_small_float_clamp_simd<T>(
+          value.value, lower.value, upper.value)};
+    } else if constexpr (std::same_as<T, float16_t>) {
+#if !defined(HAS_AVX512_FP16)
+      return NativeWordVec<Tag>{x86_small_float_clamp_simd<T>(
+          value.value, lower.value, upper.value)};
+#endif
+    }
+    const auto bounded_low =
+        X86ExtremaWordImpl<MaxOp>::template call<Index>(
+            MaxOp{}, tag, value, lower);
+    return X86ExtremaWordImpl<MinOp>::template call<Index>(
+        MinOp{}, tag, bounded_low, upper);
+  }
+
+  template <nint_t Index, VectorTag Tag, typename Policy>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      ClampOp, Tag tag, NativeWordVec<Tag> value,
+      NativeWordVec<Tag> lower, NativeWordVec<Tag> upper,
+      NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive,
+      Policy policy) {
+    using T = ElementOf<Tag>;
+    if constexpr (std::same_as<T, bfloat16_t>) {
+      return blend(
+          tag, inactive, mask,
+          NativeWordVec<Tag>{x86_small_float_clamp_simd<T>(
+              value.value, lower.value, upper.value)});
+    } else if constexpr (std::same_as<T, float16_t>) {
+#if !defined(HAS_AVX512_FP16)
+      return blend(
+          tag, inactive, mask,
+          NativeWordVec<Tag>{x86_small_float_clamp_simd<T>(
+              value.value, lower.value, upper.value)});
+#endif
+    }
+    const auto bounded_low =
+        X86ExtremaWordImpl<MaxOp>::template call<Index>(
+            MaxOp{}, tag, value, lower);
+    return X86ExtremaWordImpl<MinOp>::template call<Index>(
+        MinOp{}, tag, bounded_low, upper, mask, inactive, policy);
+  }
+};
+
+template <>
+struct NativeWordImpl<X86Backend, ClampOp> : X86ClampWordImpl {};
 
 /* **************************************************************************** */
 //                    Unary arithmetic word implementation                    //
