@@ -18,7 +18,7 @@
 #include <vector>
 
 #include "BenchmarkUtils.h"
-#include "vecops/gemm/Packing.h"
+#include "vecops/matmul/Packing.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/ops/Matmul.h"
 #include "vecops/ops/MatmulPack.h"
@@ -188,13 +188,15 @@ void run_operation(
     const std::vector<typename Atom::TB>& b,
     std::vector<typename Atom::TAcc>& c,
     nint_t packed_a_elements, nint_t packed_b_elements) {
-  auto operation = ops::make_matmul<Atom, TilePolicy>(
-      m, n, k, a_input, b_input, c_output);
-  kernel::Workspace operation_storage(operation.required_workspace());
+  using Config = ops::MatmulConfig<
+      Atom, ::vecops::matmul::family_selection::Automatic, TilePolicy>;
+  auto operation = ops::matmul(Config{});
+  kernel::Workspace operation_storage(
+      operation.required_workspace(m, n, k, a_input, b_input, c_output));
   auto operation_workspace = operation_storage.view();
   ExecutionSession execution{operation_workspace};
 
-  operation(execution);
+  operation(execution, m, n, k, a_input, b_input, c_output);
   if (!verify_samples<Atom>(
           a, b, c, test_case.m, test_case.n, test_case.k)) {
     state.SkipWithError("matmul result verification failed");
@@ -204,7 +206,7 @@ void run_operation(
   for (auto _ : state) {
     benchmark::DoNotOptimize(a.data());
     benchmark::DoNotOptimize(b.data());
-    operation(execution);
+    operation(execution, m, n, k, a_input, b_input, c_output);
     benchmark::DoNotOptimize(c.data());
     benchmark::ClobberMemory();
   }
@@ -244,7 +246,8 @@ void run_operation(
   state.counters["n"] = benchmark::Counter(double(test_case.n));
   state.counters["k"] = benchmark::Counter(double(test_case.k));
   state.counters["workspace_bytes"] =
-      benchmark::Counter(double(operation.required_workspace()));
+      benchmark::Counter(double(operation.required_workspace(
+          m, n, k, a_input, b_input, c_output)));
   state.counters["packed_elements"] = benchmark::Counter(
       double(active_packed_a + active_packed_b));
   state.counters["packing_ratio"] = benchmark::Counter(
@@ -281,9 +284,9 @@ void run_case_with_extents(
   auto c_tensor = make_tensor(c.data(), c_layout);
 
   auto packed_a_layout =
-      ops::matmul_packed_layout<Atom, gemm::Operand::A>(a_layout);
+      ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::A>(a_layout);
   auto packed_b_layout =
-      ops::matmul_packed_layout<Atom, gemm::Operand::B>(b_layout);
+      ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::B>(b_layout);
   const nint_t packed_a_elements = numel(packed_a_layout);
   const nint_t packed_b_elements = numel(packed_b_layout);
   const nint_t packed_a_bytes = packed_a_elements * nint_t{sizeof(TA)};
@@ -301,12 +304,14 @@ void run_case_with_extents(
 
   ExecutionSession pack_execution{};
   if constexpr (Mode == InputMode::PackedA || Mode == InputMode::PackedAB) {
-    ops::matmul_pack<Atom, gemm::Operand::A>(
-        pack_execution, a_tensor, packed_a_tensor);
+    ops::matmul_pack(ops::MatmulPackConfig<
+        Atom, ::vecops::matmul::Operand::A>{})(
+            pack_execution, a_tensor, packed_a_tensor);
   }
   if constexpr (Mode == InputMode::PackedB || Mode == InputMode::PackedAB) {
-    ops::matmul_pack<Atom, gemm::Operand::B>(
-        pack_execution, b_tensor, packed_b_tensor);
+    ops::matmul_pack(ops::MatmulPackConfig<
+        Atom, ::vecops::matmul::Operand::B>{})(
+            pack_execution, b_tensor, packed_b_tensor);
   }
 
   if constexpr (Mode == InputMode::Raw) {

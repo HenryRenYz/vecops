@@ -51,7 +51,8 @@ void run_transpose(M m, N n, Policy policy = {}) {
   // A direct transpose needs no workspace. Keeping this session empty makes
   // accidental materialization or a runtime fallback fail immediately.
   ExecutionSession execution{};
-  ops::transpose<T>(execution, input_tensor, output_tensor, policy);
+  auto operation = ops::transpose(ops::TransposeConfig<T, Policy>{policy});
+  operation(execution, input_tensor, output_tensor);
   for (nint_t i = 0; i < mi; ++i) {
     for (nint_t j = 0; j < ni; ++j) {
       EXPECT_EQ(
@@ -117,22 +118,32 @@ TEST(TransposeTest, ConvertsAtDataAccessBoundary) {
       input.data(), make_layout(make_shape(cint<M>, cint<N>)));
   auto output_tensor = make_tensor(
       output.data(), make_layout(make_shape(cint<N>, cint<M>)));
-  auto operation = ops::make_transpose<float32_t>(
-      input_tensor, output_tensor);
-  static_assert(std::same_as<
-      typename decltype(operation)::ResourceRequirements,
-      typename execution::details::current_backend_t::DefaultRequirements>);
+  auto operation = ops::transpose(ops::TransposeConfig<float32_t>{});
   ExecutionSession execution{};
-  execution.with_region(
-      operation, [&](auto& region) VECOPS_INLINE_LAMBDA {
-        operation(region);
-      });
+  operation(execution, input_tensor, output_tensor);
   for (nint_t i = 0; i < M; ++i) {
     for (nint_t j = 0; j < N; ++j) {
       EXPECT_EQ(output[static_cast<std::size_t>(j * M + i)],
                 static_cast<float32_t>(input[static_cast<std::size_t>(i * N + j)]));
     }
   }
+}
+
+TEST(TransposeTest, ConfigOnlyOperatorCanBindDifferentOperands) {
+  std::array<int32_t, 6> first{1, 2, 3, 4, 5, 6};
+  std::array<int32_t, 6> second{7, 8, 9, 10, 11, 12};
+  std::array<int32_t, 6> first_output{};
+  std::array<int32_t, 6> second_output{};
+  auto layout = make_layout(make_shape(cint<2>, cint<3>));
+  auto transposed = make_layout(make_shape(cint<3>, cint<2>));
+  auto operation = ops::transpose(ops::TransposeConfig<int32_t>{});
+  ExecutionSession execution{};
+  operation(execution, make_tensor(first.data(), layout),
+            make_tensor(first_output.data(), transposed));
+  operation(execution, make_tensor(second.data(), layout),
+            make_tensor(second_output.data(), transposed));
+  EXPECT_EQ(first_output, (std::array<int32_t, 6>{1, 4, 2, 5, 3, 6}));
+  EXPECT_EQ(second_output, (std::array<int32_t, 6>{7, 10, 8, 11, 9, 12}));
 }
 
 extern "C" VECOPS_NOINLINE void transpose_i32_const_probe(
@@ -142,7 +153,8 @@ extern "C" VECOPS_NOINLINE void transpose_i32_const_probe(
   auto output_tensor = make_tensor(
       output, make_layout(make_shape(cint<16>, cint<16>)));
   ExecutionSession execution{};
-  ops::transpose<int32_t>(execution, input_tensor, output_tensor);
+  ops::transpose(ops::TransposeConfig<int32_t>{})(
+      execution, input_tensor, output_tensor);
 }
 
 extern "C" VECOPS_NOINLINE void transpose_i32_aligned_probe(
@@ -152,12 +164,13 @@ extern "C" VECOPS_NOINLINE void transpose_i32_aligned_probe(
   auto output_tensor = make_tensor(
       output, make_layout(make_shape(Dynamic<16>{n}, Dynamic<16>{m})));
   ExecutionSession execution{};
-  ops::transpose<int32_t>(execution, input_tensor, output_tensor);
+  ops::transpose(ops::TransposeConfig<int32_t>{})(
+      execution, input_tensor, output_tensor);
 }
 
 #if defined(HAS_SME_FA64)
 
-TEST(TransposeTest, PreparedOperatorDeclaresAndUsesSMEPath) {
+TEST(TransposeTest, ConfigOnlyOperatorUsesSMEPath) {
   constexpr nint_t M = 19;
   constexpr nint_t N = 23;
   std::array<int32_t, M * N> input{};
@@ -171,15 +184,9 @@ TEST(TransposeTest, PreparedOperatorDeclaresAndUsesSMEPath) {
       input.data(), make_layout(make_shape(cint<M>, cint<N>)));
   auto output_tensor = make_tensor(
       output.data(), make_layout(make_shape(cint<N>, cint<M>)));
-  auto operation = ops::make_transpose<int32_t>(input_tensor, output_tensor);
-  static_assert(!execution::details::has_resource_v<
-      execution::details::arm::StreamingZA,
-      typename decltype(operation)::ResourceRequirements>);
+  auto operation = ops::transpose(ops::TransposeConfig<int32_t>{});
   ExecutionSession execution{};
-  execution.with_region(
-      operation, [&](auto& region) VECOPS_INLINE_LAMBDA {
-        operation(region);
-      });
+  operation(execution, input_tensor, output_tensor);
   for (nint_t i = 0; i < M; ++i) {
     for (nint_t j = 0; j < N; ++j) {
       EXPECT_EQ(output[static_cast<std::size_t>(j * M + i)],
@@ -188,7 +195,7 @@ TEST(TransposeTest, PreparedOperatorDeclaresAndUsesSMEPath) {
   }
 }
 
-TEST(TransposeTest, PreparedFloatOperatorUsesSMEPath) {
+TEST(TransposeTest, ConfigOnlyFloatOperatorUsesSMEPath) {
   constexpr nint_t M = 17;
   constexpr nint_t N = 18;
   std::array<float32_t, M * N> input{};
@@ -203,13 +210,9 @@ TEST(TransposeTest, PreparedFloatOperatorUsesSMEPath) {
       input.data(), make_layout(make_shape(cint<M>, cint<N>)));
   auto output_tensor = make_tensor(
       output.data(), make_layout(make_shape(cint<N>, cint<M>)));
-  auto operation = ops::make_transpose<float32_t>(
-      input_tensor, output_tensor);
+  auto operation = ops::transpose(ops::TransposeConfig<float32_t>{});
   ExecutionSession execution{};
-  execution.with_region(
-      operation, [&](auto& region) VECOPS_INLINE_LAMBDA {
-        operation(region);
-      });
+  operation(execution, input_tensor, output_tensor);
   for (nint_t i = 0; i < M; ++i) {
     for (nint_t j = 0; j < N; ++j) {
       EXPECT_EQ(output[static_cast<std::size_t>(j * M + i)],
@@ -218,7 +221,7 @@ TEST(TransposeTest, PreparedFloatOperatorUsesSMEPath) {
   }
 }
 
-TEST(TransposeTest, PreparedConversionOperatorUsesSMEPath) {
+TEST(TransposeTest, ConfigOnlyConversionOperatorUsesSMEPath) {
   constexpr nint_t M = 63;
   constexpr nint_t N = 129;
   std::array<int8_t, M * N> input{};
@@ -233,16 +236,9 @@ TEST(TransposeTest, PreparedConversionOperatorUsesSMEPath) {
       input.data(), make_layout(make_shape(cint<M>, cint<N>)));
   auto output_tensor = make_tensor(
       output.data(), make_layout(make_shape(cint<N>, cint<M>)));
-  auto operation = ops::make_transpose<float32_t>(
-      input_tensor, output_tensor);
-  static_assert(!execution::details::has_resource_v<
-      execution::details::arm::StreamingZA,
-      typename decltype(operation)::ResourceRequirements>);
+  auto operation = ops::transpose(ops::TransposeConfig<float32_t>{});
   ExecutionSession execution{};
-  execution.with_region(
-      operation, [&](auto& region) VECOPS_INLINE_LAMBDA {
-        operation(region);
-      });
+  operation(execution, input_tensor, output_tensor);
   for (nint_t i = 0; i < M; ++i) {
     for (nint_t j = 0; j < N; ++j) {
       EXPECT_EQ(
@@ -259,12 +255,9 @@ extern "C" VECOPS_NOINLINE void transpose_i32_streaming_probe(
       input, make_layout(make_shape(cint<16>, cint<16>)));
   auto output_tensor = make_tensor(
       output, make_layout(make_shape(cint<16>, cint<16>)));
-  auto operation = ops::make_transpose<int32_t>(input_tensor, output_tensor);
+  auto operation = ops::transpose(ops::TransposeConfig<int32_t>{});
   ExecutionSession execution{};
-  execution.with_region(
-      operation, [&](auto& region) VECOPS_INLINE_LAMBDA {
-        operation(region);
-      });
+  operation(execution, input_tensor, output_tensor);
 }
 
 #endif

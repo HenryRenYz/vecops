@@ -2,7 +2,7 @@
 
 #include "MatmulBenchCommon.h"
 
-#include "vecops/gemm/Atoms.h"
+#include "vecops/matmul/Atom.h"
 
 namespace vecops::bench::matmul {
 template <int Shard>
@@ -14,13 +14,13 @@ void register_matmul_policy_shard();
 namespace vecops::bench::matmul {
 
 template <>
-struct AtomName<gemm::SME_BF16F32> {
+struct AtomName<::vecops::matmul::SME_BF16F32> {
   static constexpr const char* value = "SME_BF16F32";
 };
 
 template <typename Policy>
 void register_policy(const char* policy) {
-  using Atom = gemm::SME_BF16F32;
+  using Atom = ::vecops::matmul::SME_BF16F32;
   register_policy_extent_pair<
       Atom, InputMode::PackedAB, Policy, 16, 16, 8>(
           "fixed_microkernel", "acc_1x1", policy);
@@ -66,8 +66,8 @@ template <int Shard>
 void register_matmul_policy_shard() {
   static_assert(0 <= Shard && Shard < 3);
   if constexpr (Shard == 0) {
-    register_policy<kernel::loop::tile2d_policy::RuntimeExactArea4>(
-        "runtime_exact");
+    register_policy<kernel::loop::tile2d_policy::ExactCover>(
+        "exact_cover");
   } else if constexpr (Shard == 1) {
     register_policy<kernel::loop::tile2d_policy::FourRegions>(
         "four_regions");

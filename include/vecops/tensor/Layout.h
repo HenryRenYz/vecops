@@ -215,7 +215,7 @@ struct Shape : public ArrayMeta<Is...> {
  * auto s = make_shape(cint<3>, 128);  // Shape<Const<3>, Any>
  * @endcode
  */
-template <typename... Ints>
+template <meta::ValueInput... Ints>
 constexpr auto make_shape(Ints&& ... is) -> Shape<to_value_t<std::remove_cvref_t<Ints>>...> {
   return {std::forward<Ints>(is)...};
 }
@@ -240,7 +240,7 @@ struct Strides : public ArrayMeta<Is...> {
 /**
  * @brief Create Strides, automatically wrapping bare integers as Any.
  */
-template <typename... Ints>
+template <meta::ValueInput... Ints>
 constexpr auto make_strides(Ints&& ... is) -> Strides<to_value_t<std::remove_cvref_t<Ints>>...> {
   return {std::forward<Ints>(is)...};
 }
@@ -987,6 +987,13 @@ using numel_type_t = typename details::ShapeProduct<
  * @return The size of dimension I (always non-negative).
  */
 template <int I, LayoutLike TLayout>
+VECOPS_ALWAYS_INLINE constexpr size_type_t<I, TLayout> size_value(
+    const TLayout& layout) {
+  using Size = size_type_t<I, TLayout>;
+  return Size{get<I>(layout.shape())};
+}
+
+template <int I, LayoutLike TLayout>
 VECOPS_ALWAYS_INLINE constexpr nint_t size(const TLayout& layout) {
   return get<I>(layout.shape());
 }
@@ -994,6 +1001,13 @@ VECOPS_ALWAYS_INLINE constexpr nint_t size(const TLayout& layout) {
 /**
  * @brief Get the stride value of dimension I from a Layout.
  */
+template <int I, LayoutLike TLayout>
+VECOPS_ALWAYS_INLINE constexpr stride_type_t<I, TLayout> stride_value(
+    const TLayout& layout) {
+  using Stride = stride_type_t<I, TLayout>;
+  return Stride{get<I>(layout.strides())};
+}
+
 template <int I, LayoutLike TLayout>
 VECOPS_ALWAYS_INLINE constexpr nint_t stride(const TLayout& layout) {
   return get<I>(layout.strides());

@@ -5,7 +5,7 @@
 // targets.  This source is intentionally excluded from generic libvecops.a
 // and compiled in an ISA-specific archive with the consumer target's -march.
 
-#include "vecops/kernel/details/matmul/Backend.h"
+#include "vecops/matmul/details/Backend.h"
 
 namespace vecops::kernel::matmul_details::sme {
 

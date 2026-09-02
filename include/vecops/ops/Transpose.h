@@ -15,7 +15,7 @@
 
 /**
  * @file Transpose.h
- * @brief Prepared and one-shot rank-two transpose operators.
+ * @brief Reusable Config-only rank-two transpose operator.
  *
  * Operand/layout types are normalized before execution, making SME eligibility
  * and resource requirements part of the operation type. Calling an operation
@@ -24,6 +24,17 @@
  */
 
 namespace vecops::ops {
+
+template <vec::Element ComputeT = float32_t,
+          typename PolicyT = kernel::transpose2d_policy::Automatic>
+struct TransposeConfig {
+  using ComputeType = ComputeT;
+  using Policy = PolicyT;
+
+  [[no_unique_address]] PolicyT policy{};
+};
+
+namespace transpose_details {
 
 /**
  * @brief Prepared rank-two transpose operation with typed resource requirements.
@@ -40,7 +51,7 @@ namespace vecops::ops {
 template <vec::Element Compute,
           typename InputSpec, typename OutputSpec, typename Policy,
           bool UseSME>
-class Transpose {
+class PreparedTranspose {
 public:
   using ComputeType = Compute;
   using Implementation = std::conditional_t<
@@ -53,7 +64,7 @@ public:
           Implementation>;
 
   /** Construct a prepared operation from normalized input/output Specs. */
-  VECOPS_INLINE Transpose(
+  VECOPS_INLINE PreparedTranspose(
       InputSpec input, OutputSpec output, Policy policy = {})
       : input_(std::move(input)), output_(std::move(output)), policy_(policy) {
     static_assert(InputSpec::InputTensor::Ndim == 2,
@@ -79,13 +90,13 @@ private:
   VECOPS_INLINE void execute(Scope& scope) const {
     using M = tensor::size_type_t<0, typename InputSpec::InputLayout>;
     using N = tensor::size_type_t<1, typename InputSpec::InputLayout>;
-    const M m{tensor::get<0>(input_.input_layout().shape())};
-    const N n{tensor::get<1>(input_.input_layout().shape())};
+    const M m{tensor::size_value<0>(input_.input_layout())};
+    const N n{tensor::size_value<1>(input_.input_layout())};
     VECOPS_ASSERT(
-        static_cast<nint_t>(tensor::get<0>(
-            output_.output_layout().shape())) == static_cast<nint_t>(n) &&
-        static_cast<nint_t>(tensor::get<1>(
-            output_.output_layout().shape())) == static_cast<nint_t>(m),
+        static_cast<nint_t>(tensor::size_value<0>(
+            output_.output_layout())) == static_cast<nint_t>(n) &&
+        static_cast<nint_t>(tensor::size_value<1>(
+            output_.output_layout())) == static_cast<nint_t>(m),
         "transpose output shape must be (N, M)");
 
     using InputPolicy = tensor::InputAccessPolicy<
@@ -110,22 +121,13 @@ private:
   [[no_unique_address]] Policy policy_;
 };
 
-template <vec::Element Compute,
+template <typename Config,
           tensor::InputOperand Input,
-          tensor::OutputOperand Output,
-          typename Policy = kernel::transpose2d_policy::Automatic>
-/**
- * @brief Normalize operands and construct a typed transpose operation.
- * @param input Readable rank-two Tensor or InputSpec.
- * @param output Writable rank-two Tensor or OutputSpec shaped `(N,M)`.
- * @param policy Automatic or Gather policy.
- * @return Prepared `Transpose` whose type includes the implementation choice.
- *
- * SME is selected only when tensor and layout types prove every required
- * property. Runtime contiguity does not introduce an SME fallback branch.
- */
-VECOPS_INLINE auto make_transpose(
-    Input&& input, Output&& output, Policy policy = {}) {
+          tensor::OutputOperand Output>
+VECOPS_INLINE auto prepare_transpose(
+    const Config& config, Input&& input, Output&& output) {
+  using Compute = typename Config::ComputeType;
+  using Policy = typename Config::Policy;
   auto input_spec = tensor::as_input_spec<Compute>(std::forward<Input>(input));
   auto output_spec = tensor::as_output_spec<Compute>(
       std::forward<Output>(output));
@@ -133,50 +135,52 @@ VECOPS_INLINE auto make_transpose(
   using OutputSpec = std::remove_cvref_t<decltype(output_spec)>;
   constexpr bool UseSME = transpose_details::use_sme_v<
       Input, Output, InputSpec, OutputSpec, Policy>;
-  return Transpose<Compute, InputSpec, OutputSpec, Policy, UseSME>{
-      std::move(input_spec), std::move(output_spec), policy};
+  return PreparedTranspose<Compute, InputSpec, OutputSpec, Policy, UseSME>{
+      std::move(input_spec), std::move(output_spec), config.policy};
 }
 
-template <vec::Element Compute,
-          execution::ExecutionScope Scope,
-          tensor::InputOperand Input,
-          tensor::OutputOperand Output,
-          typename Policy = kernel::transpose2d_policy::Automatic>
-/**
- * @brief Execute one transpose through an existing execution scope.
- * @param scope Root session or active enclosing region.
- * @param input Readable rank-two operand of shape `(M,N)`.
- * @param output Writable rank-two operand of shape `(N,M)`.
- * @param policy Automatic or forced Gather policy.
- */
-VECOPS_INLINE void transpose(
-    Scope& scope, Input&& input, Output&& output, Policy policy = {}) {
-  auto operation = make_transpose<Compute>(
-      std::forward<Input>(input), std::forward<Output>(output), policy);
-  operation(scope);
-}
+} // namespace transpose_details
 
-template <vec::Element Compute,
-          tensor::InputOperand Input,
-          tensor::OutputOperand Output,
-          typename Policy = kernel::transpose2d_policy::Automatic>
 /**
- * @brief WorkspaceView compatibility overload for one-shot transpose.
- * @param workspace Caller-owned scratch storage used by DataAccess.
- * @param input Readable rank-two operand of shape `(M,N)`.
- * @param output Writable rank-two operand of shape `(N,M)`.
- * @param policy Automatic or forced Gather policy.
- *
- * A temporary `ExecutionSession` borrows the workspace and applies the same
- * compile-time resource protocol as the scope overload.
+ * Reusable rank-two transpose operator. The object stores configuration only;
+ * operand types select the prepared implementation independently per call.
  */
-VECOPS_INLINE void transpose(
-    kernel::WorkspaceView& workspace,
-    Input&& input, Output&& output, Policy policy = {}) {
-  ExecutionSession execution{workspace};
-  transpose<Compute>(
-      execution, std::forward<Input>(input), std::forward<Output>(output),
-      policy);
+template <typename Config = TransposeConfig<>>
+class Transpose {
+public:
+  const Config config;
+
+  VECOPS_INLINE constexpr explicit Transpose(Config cfg = {})
+      : config(std::move(cfg)) {}
+
+  template <tensor::InputOperand Input, tensor::OutputOperand Output>
+  VECOPS_INLINE nint_t required_workspace(
+      const Input&, const Output&) const {
+    return 0;
+  }
+
+  template <execution::ExecutionScope Scope,
+            tensor::InputOperand Input, tensor::OutputOperand Output>
+  VECOPS_INLINE void operator()(
+      Scope& scope, Input&& input, Output&& output) const {
+    auto prepared = transpose_details::prepare_transpose(
+        config, std::forward<Input>(input), std::forward<Output>(output));
+    prepared(scope);
+  }
+
+  template <tensor::InputOperand Input, tensor::OutputOperand Output>
+  VECOPS_INLINE void operator()(
+      kernel::WorkspaceView& workspace,
+      Input&& input, Output&& output) const {
+    ExecutionSession execution{workspace};
+    (*this)(execution, std::forward<Input>(input),
+            std::forward<Output>(output));
+  }
+};
+
+template <typename Config = TransposeConfig<>>
+VECOPS_INLINE constexpr auto transpose(Config config = {}) {
+  return Transpose<Config>{std::move(config)};
 }
 
 } // namespace vecops::ops

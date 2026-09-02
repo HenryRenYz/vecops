@@ -60,7 +60,8 @@ using resource_requirements_t = typename transpose2d_details::
  */
 template <int SrcRow, int SrcCol, int DstRow, int DstCol,
           execution::ExecutionScope Scope,
-          typename M, typename N, typename Source, typename Destination,
+          meta::ValueType M, meta::ValueType N,
+          typename Source, typename Destination,
           typename Policy = transpose2d_policy::Automatic,
           typename Implementation = transpose2d_implementation::Vector>
   requires transpose2d_details::generic::

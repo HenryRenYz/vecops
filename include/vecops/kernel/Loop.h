@@ -160,16 +160,6 @@ enum class TailCarryPolicy {
 
 namespace details {
 
-// ======================== Value Normalization ========================
-
-template <typename T>
-using HopValue = ::vecops::meta::to_value_t<std::remove_cvref_t<T>>;
-
-template <typename T>
-VECOPS_ALWAYS_INLINE constexpr HopValue<T> to_hop_value(T&& value) {
-  return HopValue<T>{static_cast<nint_t>(value)};
-}
-
 template <typename T>
 struct ConstValue : std::false_type {
   static constexpr nint_t value = 0;
@@ -907,7 +897,7 @@ VECOPS_ALWAYS_INLINE auto invariant(const T& value) {
 template <
     int FullFactor = 1, int TailFactor = 1,
     TailCarryPolicy Policy = TailCarryPolicy::independent,
-    ::vecops::vec::VectorTag Tag, typename N, typename Fn,
+    ::vecops::vec::VectorTag Tag, meta::ValueInput N, typename Fn,
     typename... Definitions>
 VECOPS_ALWAYS_INLINE void fold(
     Tag base_tag, N n, Fn&& block, Definitions&&... definitions) {
@@ -925,7 +915,7 @@ VECOPS_ALWAYS_INLINE void fold(
 
   using FullTag = details::suggested_factor_tag_t<Tag, FullFactor>;
   using TailTag = details::suggested_factor_tag_t<Tag, TailFactor>;
-  auto n_value = details::to_hop_value(n);
+  auto n_value = meta::to_value(n);
   if constexpr (details::is_const_value_v<decltype(n_value)>) {
     static_assert(
         details::ConstValue<std::remove_cvref_t<decltype(n_value)>>::value >= 0,

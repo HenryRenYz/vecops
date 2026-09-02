@@ -80,13 +80,13 @@ concept RawNoTransformAccess = is_raw_no_transform_access_v<Access>;
 template <typename Access>
 concept RawDirectAccess = is_raw_direct_access_v<Access>;
 
-template <typename T>
-using MetaValue = meta::to_value_t<std::remove_cvref_t<T>>;
-
-template <typename T>
-/** Convert a meta extent to a value preserving all compile-time bounds. */
-VECOPS_ALWAYS_INLINE constexpr MetaValue<T> as_meta(T value) {
-  return MetaValue<T>{static_cast<nint_t>(value)};
+template <nint_t Upper, Tile2DMaskMode Mask>
+VECOPS_ALWAYS_INLINE constexpr auto active_extent(nint_t value) {
+  if constexpr (Mask == Tile2DMaskMode::unmasked) {
+    return meta::cint<Upper>;
+  } else {
+    return meta::dyn<1, 1, Upper>(value);
+  }
 }
 
 template <std::size_t Bytes>
@@ -179,7 +179,8 @@ VECOPS_ALWAYS_INLINE auto transpose_square(
 template <nint_t Rows, nint_t Columns,
           typename Source, typename Destination,
           int SrcRow, int SrcCol, int DstRow, int DstCol,
-          Tile2DMaskMode MMask, Tile2DMaskMode NMask>
+          Tile2DMaskMode MMask, Tile2DMaskMode NMask,
+          meta::ValueType ActiveM, meta::ValueType ActiveN>
 /**
  * @brief Execute one compile-time fixed register tile.
  * @param source Bound readable DataAccess.
@@ -196,17 +197,19 @@ VECOPS_ALWAYS_INLINE void fixed_kernel(
     Destination& destination,
     tensor::Coord<std::remove_cvref_t<Destination>::Rank> dst_origin,
     nint_t m_offset, nint_t n_offset,
-    nint_t active_m, nint_t active_n) {
+    ActiveM active_m, ActiveN active_n) {
   using T = ComputeOf<Source>;
   using LoadTag = vec::FixedTag<T, Columns>;
   using StoreTag = vec::FixedTag<T, Rows>;
+  const nint_t active_m_value = static_cast<nint_t>(active_m);
+  const nint_t active_n_value = static_cast<nint_t>(active_n);
   static_assert(Columns == Rows || Columns == 2 * Rows);
   std::array<vec::Vec<LoadTag>, static_cast<std::size_t>(Rows)> row_vectors{};
 
   VECOPS_UNROLL
   for (nint_t r = 0; r < Rows; ++r) {
     if constexpr (MMask == Tile2DMaskMode::masked) {
-      if (r >= active_m) {
+      if (r >= active_m_value) {
         row_vectors[static_cast<std::size_t>(r)] = vec::zeros(LoadTag{});
         continue;
       }
@@ -220,7 +223,7 @@ VECOPS_ALWAYS_INLINE void fixed_kernel(
     } else {
       row_vectors[static_cast<std::size_t>(r)] = source.load(
           LoadTag{}, position, tensor::axis<SrcCol>,
-          vec::opt::first(active_n), vec::opt::zero);
+          vec::opt::first(active_n_value), vec::opt::zero);
     }
   }
 
@@ -229,7 +232,7 @@ VECOPS_ALWAYS_INLINE void fixed_kernel(
     VECOPS_UNROLL
     for (nint_t c = 0; c < Rows; ++c) {
       if constexpr (NMask == Tile2DMaskMode::masked) {
-        if (column_base + c >= active_n) break;
+        if (column_base + c >= active_n_value) break;
       }
       auto position = dst_origin;
       position[DstRow] += n_offset + column_base + c;
@@ -242,7 +245,7 @@ VECOPS_ALWAYS_INLINE void fixed_kernel(
         destination.store(
             StoreTag{}, position, tensor::axis<DstCol>,
             column_vectors[static_cast<std::size_t>(c)],
-            vec::opt::first(active_m));
+            vec::opt::first(active_m_value));
       }
     }
   };
@@ -317,12 +320,16 @@ VECOPS_ALWAYS_INLINE void fixed_transpose(
             Case::n_mask == Tile2DMaskMode::unmasked &&
             is_raw_direct_access_v<Source> &&
             is_raw_direct_access_v<Destination>;
+        const auto active_m_value =
+            active_extent<Rows, Case::m_mask>(active_m);
+        const auto active_n_value =
+            active_extent<Columns, Case::n_mask>(active_n);
         if constexpr (FullTile || ContiguousBottomEdge) {
           fixed_kernel<Rows, Columns, Source, Destination,
                        SrcRow, SrcCol, DstRow, DstCol,
                        Case::m_mask, Case::n_mask>(
               source, src_origin, destination, dst_origin,
-              mi, ni, active_m, active_n);
+              mi, ni, active_m_value, active_n_value);
         } else {
           auto tail_source = src_origin;
           tail_source[SrcRow] += mi;
@@ -331,9 +338,9 @@ VECOPS_ALWAYS_INLINE void fixed_transpose(
           tail_destination[DstRow] += ni;
           tail_destination[DstCol] += mi;
           gather_transpose<
-              decltype(as_meta(active_m)), decltype(as_meta(active_n)),
+              decltype(active_m_value), decltype(active_n_value),
               Source, Destination, SrcRow, SrcCol, DstRow, DstCol>(
-              as_meta(active_m), as_meta(active_n),
+              active_m_value, active_n_value,
               source, tail_source, destination, tail_destination);
         }
       });

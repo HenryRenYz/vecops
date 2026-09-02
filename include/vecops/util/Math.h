@@ -118,15 +118,33 @@ VECOPS_ALWAYS_INLINE constexpr T min(T a, T b) noexcept {
   return (b < a) ? b : a;
 }
 
+/// Reference-returning form for code paths where matching std::min's exact
+/// ABI materially affects compiler lowering. The result has the same lifetime
+/// requirements as std::min's result.
+template <std::totally_ordered T>
+VECOPS_ALWAYS_INLINE constexpr const T& min_reference(
+    const T& a, const T& b) noexcept {
+  return (b < a) ? b : a;
+}
+
 /// @see min(T, T)
 template <std::totally_ordered T>
 VECOPS_ALWAYS_INLINE constexpr T max(T a, T b) noexcept {
   return (a < b) ? b : a;
 }
 
-/// @see min(T, T)
 template <std::totally_ordered T>
-VECOPS_ALWAYS_INLINE constexpr T clamp(T v, T lo, T hi) noexcept {
+VECOPS_ALWAYS_INLINE constexpr T clamp(
+    const T& v, const T& lo, const T& hi) noexcept {
+  return (v < lo) ? lo : (hi < v) ? hi : v;
+}
+
+/// Reference-returning form for code paths where matching std::clamp's exact
+/// ABI materially affects compiler lowering. The result has the same lifetime
+/// requirements as std::clamp's result.
+template <std::totally_ordered T>
+VECOPS_ALWAYS_INLINE constexpr const T& clamp_reference(
+    const T& v, const T& lo, const T& hi) noexcept {
   return (v < lo) ? lo : (hi < v) ? hi : v;
 }
 

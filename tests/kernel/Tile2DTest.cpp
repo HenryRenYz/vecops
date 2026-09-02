@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <limits>
 #include <tuple>
 #include <type_traits>
 #include <vector>
@@ -15,6 +16,11 @@ using vecops::nint_t;
 using namespace vecops::meta;
 namespace hop = vecops::kernel::loop;
 
+static_assert(is_singleton_v<Const<7>>);
+static_assert(is_singleton_v<Dynamic<1, 7, 7>>);
+static_assert(singleton_value_v<Dynamic<1, 7, 7>> == 7);
+static_assert(!is_singleton_v<Dynamic<1, 7, 8>>);
+
 using F11 = hop::Tile2DKernelFamily<1, 1, 1, 1, 1, 4>;
 using F12 = hop::Tile2DKernelFamily<1, 2, 2, 3, 8, 4>;
 using F21 = hop::Tile2DKernelFamily<2, 1, 2, 8, 3, 4>;
@@ -22,6 +28,9 @@ using F22 = hop::Tile2DKernelFamily<2, 2, 10, 10, 10, 4>;
 using Catalog = hop::Tile2DKernelCatalog<F11, F12, F21, F22>;
 
 struct Area4Provider {
+  static constexpr bool four_regions_exact_constraints = true;
+  static constexpr nint_t exact_meta_block_limit = 8;
+
   template <int A, int B, hop::Tile2DMaskMode, hop::Tile2DMaskMode>
   static consteval int power() {
     if constexpr (A * B <= 4) {
@@ -35,8 +44,42 @@ struct Area4Provider {
 
 using Area4Catalog = hop::Tile2DGeneratedCatalog<
     Area4Provider, hop::Tile2DSearchSpace<4, 4, 4>>;
+
+struct Area4Max3Provider : Area4Provider {
+  static constexpr hop::Tile2DExactGridMode exact_grid_mode =
+      hop::Tile2DExactGridMode::unmasked;
+  static constexpr nint_t exact_meta_block_limit =
+      std::numeric_limits<nint_t>::max();
+};
+
 using Area4Max3Catalog = hop::Tile2DGeneratedCatalog<
-    Area4Provider, hop::Tile2DSearchSpace<3, 3, 4>>;
+    Area4Max3Provider, hop::Tile2DSearchSpace<3, 3, 4>>;
+
+struct Area8Provider {
+  template <int A, int B, hop::Tile2DMaskMode, hop::Tile2DMaskMode>
+  static consteval int power() {
+    return A * B <= 8 ? 100 * A * B + A + B : -1;
+  }
+};
+
+using Area8Catalog = hop::Tile2DGeneratedCatalog<
+    Area8Provider, hop::Tile2DSearchSpace<4, 4, 8>>;
+
+struct IrregularProvider {
+  template <int A, int B, hop::Tile2DMaskMode, hop::Tile2DMaskMode>
+  static consteval int power() {
+    return A * B <= 10 ? 100 * A * B + A + B : -1;
+  }
+};
+
+using IrregularCatalog = hop::Tile2DGeneratedCatalog<
+    IrregularProvider, hop::Tile2DSearchSpace<5, 5, 10>>;
+using ExactCover = hop::tile2d_policy::ExactCover;
+
+static_assert(hop::tile2d_details::meta_exact_candidate_v<
+              Area4Catalog, Const<35>, Const<53>, Const<16>, Const<16>>);
+static_assert(!hop::tile2d_details::meta_exact_candidate_v<
+              Area4Catalog, Const<256>, Const<256>, Const<16>, Const<16>>);
 
 struct Visit {
   int a;
@@ -110,28 +153,28 @@ void check_exhaustive_dynamic_cover() {
   }
 }
 
-TEST(Tile2DTest, NaturalExhaustivelyCoversDynamicSmallShapes) {
-  check_exhaustive_dynamic_cover<hop::tile2d_policy::Natural>();
+TEST(Tile2DTest, RowMajorExhaustivelyCoversDynamicSmallShapes) {
+  check_exhaustive_dynamic_cover<hop::tile2d_policy::RowMajor>();
 }
 
 TEST(Tile2DTest, FourRegionsExhaustivelyCoversDynamicSmallShapes) {
   check_exhaustive_dynamic_cover<hop::tile2d_policy::FourRegions>();
 }
 
-TEST(Tile2DTest, SingleKernelExhaustivelyCoversDynamicSmallShapes) {
-  check_exhaustive_dynamic_cover<hop::tile2d_policy::SingleKernel>();
+TEST(Tile2DTest, UniformExhaustivelyCoversDynamicSmallShapes) {
+  check_exhaustive_dynamic_cover<hop::tile2d_policy::Uniform>();
 }
 
-TEST(Tile2DTest, BulkAndTailExhaustivelyCoversDynamicSmallShapes) {
-  check_exhaustive_dynamic_cover<hop::tile2d_policy::BulkAndTail>();
+TEST(Tile2DTest, BulkTailExhaustivelyCoversDynamicSmallShapes) {
+  check_exhaustive_dynamic_cover<hop::tile2d_policy::BulkTail>();
 }
 
-TEST(Tile2DTest, RuntimeExactArea4ExhaustivelyCoversDynamicSmallShapes) {
+TEST(Tile2DTest, ExactCoverArea4ExhaustivelyCoversDynamicSmallShapes) {
   for (nint_t tm = 1; tm <= 3; ++tm) {
     for (nint_t tn = 1; tn <= 3; ++tn) {
       for (nint_t m = 0; m <= 13; ++m) {
         for (nint_t n = 0; n <= 13; ++n) {
-          run_and_check_cover<hop::tile2d_policy::RuntimeExactArea4>(
+          run_and_check_cover<ExactCover>(
               Any{m}, Any{n}, Any{tm}, Any{tn}, Area4Catalog{});
         }
       }
@@ -139,13 +182,13 @@ TEST(Tile2DTest, RuntimeExactArea4ExhaustivelyCoversDynamicSmallShapes) {
   }
 }
 
-TEST(Tile2DTest, RuntimeExactArea4Max3ExhaustivelyCoversDynamicSmallShapes) {
+TEST(Tile2DTest, ExactCoverArea4Max3ExhaustivelyCoversDynamicSmallShapes) {
   for (nint_t tm = 1; tm <= 3; ++tm) {
     for (nint_t tn = 1; tn <= 3; ++tn) {
       for (nint_t m = 0; m <= 13; ++m) {
         for (nint_t n = 0; n <= 13; ++n) {
           const auto visits = run_and_check_cover<
-              hop::tile2d_policy::RuntimeExactArea4Max3>(
+              ExactCover>(
               Any{m}, Any{n}, Any{tm}, Any{tn}, Area4Max3Catalog{});
           for (const auto& visit : visits) {
             EXPECT_LE(visit.a, 3);
@@ -158,8 +201,92 @@ TEST(Tile2DTest, RuntimeExactArea4Max3ExhaustivelyCoversDynamicSmallShapes) {
   }
 }
 
-TEST(Tile2DTest, RuntimeExactArea4UsesOnlyExistingLogicalBlocks) {
-  hop::tile2d<hop::tile2d_policy::RuntimeExactArea4>(
+TEST(Tile2DTest, ExactCoverArea8ExhaustivelyCoversDynamicSmallShapes) {
+  for (nint_t tm = 1; tm <= 3; ++tm) {
+    for (nint_t tn = 1; tn <= 3; ++tn) {
+      for (nint_t m = 0; m <= 13; ++m) {
+        for (nint_t n = 0; n <= 13; ++n) {
+          const auto visits =
+              run_and_check_cover<ExactCover>(
+                  Any{m}, Any{n}, Any{tm}, Any{tn}, Area8Catalog{});
+          for (const auto& visit : visits) {
+            EXPECT_LE(visit.a * visit.b, 8);
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(Tile2DTest, ExactCoverUsesArbitraryCatalogBounds) {
+  bool used_five_by_two = false;
+  for (nint_t tm = 1; tm <= 3; ++tm) {
+    for (nint_t tn = 1; tn <= 3; ++tn) {
+      for (nint_t m = 0; m <= 13; ++m) {
+        for (nint_t n = 0; n <= 13; ++n) {
+          const auto visits = run_and_check_cover<ExactCover>(
+              Any{m}, Any{n}, Any{tm}, Any{tn}, IrregularCatalog{});
+          for (const auto& visit : visits) {
+            EXPECT_LE(visit.a, 5);
+            EXPECT_LE(visit.b, 5);
+            EXPECT_LE(visit.a * visit.b, 10);
+            used_five_by_two |= visit.a == 5 && visit.b == 2;
+          }
+        }
+      }
+    }
+  }
+  EXPECT_TRUE(used_five_by_two);
+}
+
+struct UnmaskedTwoByTwoOnly {
+  template <typename Case>
+    requires (Case::a == 2 && Case::b == 2 && !Case::exact_blocks &&
+              Case::m_mask == hop::Tile2DMaskMode::unmasked &&
+              Case::n_mask == hop::Tile2DMaskMode::unmasked)
+  void operator()(Case, nint_t, nint_t, nint_t, nint_t) const {}
+
+  template <typename Case>
+  void operator()(Case, nint_t, nint_t, nint_t, nint_t) const = delete;
+};
+
+struct ExactFourByTwoOnly {
+  template <typename Case>
+    requires (Case::a == 4 && Case::b == 2 && Case::exact_blocks)
+  void operator()(Case, nint_t, nint_t, nint_t, nint_t) const {}
+
+  template <typename Case>
+  void operator()(Case, nint_t, nint_t, nint_t, nint_t) const = delete;
+};
+
+TEST(Tile2DTest, ExactCoverArea4Max3PrunesFixedAndAlignedFamilies) {
+  hop::tile2d<ExactCover>(
+      cint<64>, cint<96>, cint<16>, cint<16>, Area4Max3Catalog{},
+      UnmaskedTwoByTwoOnly{});
+  hop::tile2d<ExactCover>(
+      dyn<32>(64), dyn<32>(96), cint<16>, cint<16>, Area4Max3Catalog{},
+      UnmaskedTwoByTwoOnly{});
+}
+
+TEST(Tile2DTest, ExactCoverArea4Max3FixedRaggedExtentsStayMasked) {
+  const auto visits = run_and_check_cover<
+      ExactCover>(
+          cint<35>, cint<53>, cint<16>, cint<16>, Area4Max3Catalog{});
+  ASSERT_EQ(visits.size(), 4u);
+  EXPECT_TRUE(std::all_of(visits.begin(), visits.end(), [](const Visit& v) {
+    return v.m_mask == hop::Tile2DMaskMode::masked &&
+        v.n_mask == hop::Tile2DMaskMode::masked;
+  }));
+}
+
+TEST(Tile2DTest, ExactCoverArea8PrunesFixedFamilies) {
+  hop::tile2d<ExactCover>(
+      cint<8>, cint<12>, cint<2>, cint<3>, Area8Catalog{},
+      ExactFourByTwoOnly{});
+}
+
+TEST(Tile2DTest, ExactCoverArea4UsesOnlyExistingLogicalBlocks) {
+  hop::tile2d<ExactCover>(
       Any{5}, Any{7}, Any{2}, Any{3}, Area4Catalog{},
       []<typename Case>(Case, auto, auto, auto, auto) {
         static_assert(Case::exact_blocks);
@@ -167,7 +294,7 @@ TEST(Tile2DTest, RuntimeExactArea4UsesOnlyExistingLogicalBlocks) {
         static_assert(Case::n_mask == hop::Tile2DMaskMode::masked);
       });
   const auto broad =
-      run_and_check_cover<hop::tile2d_policy::RuntimeExactArea4>(
+      run_and_check_cover<ExactCover>(
           Any{5}, Any{7}, Any{2}, Any{3}, Area4Catalog{});
   ASSERT_EQ(broad.size(), 3u);
   EXPECT_EQ(std::tie(broad[0].a, broad[0].b), (std::tuple{2, 2}));
@@ -175,7 +302,7 @@ TEST(Tile2DTest, RuntimeExactArea4UsesOnlyExistingLogicalBlocks) {
   EXPECT_EQ(std::tie(broad[2].a, broad[2].b), (std::tuple{1, 3}));
 
   const auto narrow =
-      run_and_check_cover<hop::tile2d_policy::RuntimeExactArea4>(
+      run_and_check_cover<ExactCover>(
           Any{11}, Any{2}, Any{2}, Any{3}, Area4Catalog{});
   ASSERT_EQ(narrow.size(), 2u);
   EXPECT_EQ(std::tie(narrow[0].a, narrow[0].b), (std::tuple{4, 1}));
@@ -265,6 +392,15 @@ TEST(Tile2DTest, FourRegionsPrunesFamiliesFromOneConstrainedAxis) {
       Area4Catalog{}, AtMostThreeColumnsOnly{});
 }
 
+TEST(Tile2DTest, ExactCoverArea4PrunesFamiliesFromMetaConstraints) {
+  hop::tile2d<ExactCover>(
+      Dynamic<1, 0, 16>{16}, Any{1152}, cint<16>, cint<16>,
+      Area4Catalog{}, OneLogicalRowOnly{});
+  hop::tile2d<ExactCover>(
+      Any{1152}, Dynamic<1, 0, 16>{16}, cint<16>, cint<16>,
+      Area4Catalog{}, OneLogicalColumnOnly{});
+}
+
 TEST(Tile2DTest, FourRegionsFixedArea4PrunesRuntimeRemainderFamilies) {
   const auto visits = run_and_check_cover<hop::tile2d_policy::FourRegions>(
       cint<10>, cint<14>, cint<2>, cint<3>, Area4Catalog{});
@@ -291,8 +427,8 @@ TEST(Tile2DTest, Area4ScorePrefersSquareBulk) {
             (std::tuple{2, 2}));
 }
 
-TEST(Tile2DTest, NaturalPreservesClassicInterleavedOrder) {
-  const auto visits = run_and_check_cover<hop::tile2d_policy::Natural>(
+TEST(Tile2DTest, RowMajorPreservesClassicInterleavedOrder) {
+  const auto visits = run_and_check_cover<hop::tile2d_policy::RowMajor>(
       cint<10>, cint<14>, cint<2>, cint<3>);
   const std::vector<std::pair<nint_t, nint_t>> actual = [&] {
     std::vector<std::pair<nint_t, nint_t>> result;
@@ -462,7 +598,7 @@ using GeneratedCatalog = hop::Tile2DGeneratedCatalog<
 
 TEST(Tile2DTest, GeneratedCatalogUsesSameSchedulingCore) {
   const auto visits =
-      run_and_check_cover<hop::tile2d_policy::Natural>(
+      run_and_check_cover<hop::tile2d_policy::RowMajor>(
           cint<10>, cint<14>, cint<2>, cint<3>, GeneratedCatalog{});
   ASSERT_EQ(visits.size(), 9u);
   EXPECT_EQ(std::tie(visits[0].a, visits[0].b), (std::tuple{2, 2}));

@@ -54,11 +54,19 @@ Factories: `cint<N>` (variable template for `Const<N>{}`) and
 `dyn<A, Lo, Hi>(v)` / `dyn<A>(v)` (function templates for `Dynamic`), so the
 common cases never spell out the template arguments.
 
-The `ValueType<T>` concept recognizes any `Value` subclass, and
-`to_value_t<T>` normalizes user input: raw integer types (including
-`nint_t`) promote to `Any`; Value types pass through unchanged. This is what
-lets APIs accept `make_strides(1, 128, cint<64>)` with mixed bare and typed
-arguments.
+The `ValueType<T>` concept recognizes any `Value` subclass. `ValueInput<T>`
+recognizes the broader API-input vocabulary: either a Value subtype or one of
+vecops' fixed-width integer types. `to_value_t<T>` performs the corresponding
+type normalization, while `to_value(value)` performs value normalization: raw
+integers (including `nint_t`) become `Any`, and existing Value types preserve
+their metadata. These helpers let APIs accept mixed bare and typed arguments
+without defining local conversion concepts or overload sets:
+
+```cpp
+auto runtime = to_value(nint_t{17}); // Any{17}
+auto fixed = to_value(cint<4>);      // Const<4>{}
+auto strides = make_strides(1, 128, cint<64>);
+```
 
 ### Type guarantees vs. instance observations
 

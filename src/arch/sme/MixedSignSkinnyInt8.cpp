@@ -5,10 +5,10 @@
 // targets. This source is intentionally excluded from generic libvecops.a and
 // compiled in the ISA-specific SME matmul archive.
 
-#include <algorithm>
 #include <type_traits>
 
 #include "vecops/CoreTypes.h"
+#include "vecops/util/Math.h"
 #include "vecops/vec/Vec.h"
 #include "vecops/vec/details/sve/Basic.h"
 
@@ -76,7 +76,7 @@ VECOPS_ALWAYS_INLINE void mixed_sign_skinny_block(
   nint_t kk = 0;
   nint_t remaining = logical_k;
   VECOPS_LOOP_ALIGN(64) while (remaining > 0) {
-    const nint_t active = std::min(vec::size(ATag{}), remaining);
+    const nint_t active = vecops::min(vec::size(ATag{}), remaining);
     const auto load_a = [&](nint_t row) VECOPS_INLINE_LAMBDA {
       return load_mixed_sign_input(a + row * a_stride + kk, active);
     };

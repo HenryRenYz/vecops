@@ -566,7 +566,8 @@ TEST(SoftmaxOnlineOptionTest, MetadataSelectsOnlineConservatively) {
 
 TEST(SoftmaxOnlineOptionTest, LegacyConfigWithoutOptionRemainsCompatible) {
   constexpr LegacySoftmaxConfig config{};
-  static_assert(vecops::ops::details::softmax_online_allowed(config));
+  static_assert(
+      vecops::ops::softmax_details::softmax_online_allowed(config));
   run_large_row_reference_case(config, false, "legacy-default-allowed");
 }
 

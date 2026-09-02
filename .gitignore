@@ -15,6 +15,7 @@ __pycache__/
 # ============= WIP =============
 /docs/*
 !/docs/TemplateStyle.md
+!/docs/Architecture.md
 !/docs/opt/
 /docs/opt/*
-!/docs/opt/matmul.md
+/benchmarks/**/*AB.md

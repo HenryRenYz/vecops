@@ -5,7 +5,6 @@
 #ifndef VECOPS_KERNEL_DETAILS_TRANSPOSE_SME_TRANSPOSE2D_H
 #define VECOPS_KERNEL_DETAILS_TRANSPOSE_SME_TRANSPOSE2D_H
 
-#include <algorithm>
 #include <cstdint>
 #include <type_traits>
 
@@ -91,6 +90,8 @@ VECOPS_ALWAYS_INLINE void store_compute_bits(
 
 template <typename SourceMemory, typename DestinationMemory, typename Compute,
           typename M, typename N,
+          meta::ValueType SrcRowStride, meta::ValueType SrcColStride,
+          meta::ValueType DstRowStride, meta::ValueType DstColStride,
           int SrcRank, int DstRank,
           int SrcRow, int SrcCol, int DstRow, int DstCol>
 /**
@@ -117,9 +118,11 @@ VECOPS_ALWAYS_INLINE void transpose(
     M m, N n,
     const SourceMemory* source_data,
     tensor::Coord<SrcRank> src_strides,
+    SrcRowStride src_row_stride, SrcColStride src_col_stride,
     tensor::Coord<SrcRank> src_origin,
     DestinationMemory* destination_data,
     tensor::Coord<DstRank> dst_strides,
+    DstRowStride dst_row_stride, DstColStride dst_col_stride,
     tensor::Coord<DstRank> dst_origin) noexcept {
   using U = UnsignedBits<Compute>;
   using BitsTag = vec::ScalableTag<U, 0>;
@@ -154,6 +157,10 @@ VECOPS_ALWAYS_INLINE void transpose(
   const nint_t lanes = vec::size(BitsTag{});
   const nint_t m_extent = static_cast<nint_t>(m);
   const nint_t n_extent = static_cast<nint_t>(n);
+  const nint_t src_row_step = static_cast<nint_t>(src_row_stride);
+  const nint_t src_col_step = static_cast<nint_t>(src_col_stride);
+  const nint_t dst_row_step = static_cast<nint_t>(dst_row_stride);
+  const nint_t dst_col_step = static_cast<nint_t>(dst_col_stride);
   nint_t src_base = 0;
   VECOPS_UNROLL
   for (int d = 0; d < SrcRank; ++d) {
@@ -175,9 +182,8 @@ VECOPS_ALWAYS_INLINE void transpose(
         nint_t r = 0;
         for (; r + 1 < active_m; r += 2) {
           const nint_t offset0 =
-              src_base + (mi + r) * src_strides[SrcRow] +
-              ni * src_strides[SrcCol];
-          const nint_t offset1 = offset0 + src_strides[SrcRow];
+              src_base + (mi + r) * src_row_step + ni * src_col_step;
+          const nint_t offset1 = offset0 + src_row_step;
           const auto value0 = load_compute_bits<Compute>(
               n_pg, active_n, source_data + offset0);
           const auto value1 = load_compute_bits<Compute>(
@@ -189,8 +195,7 @@ VECOPS_ALWAYS_INLINE void transpose(
         }
         if (r < active_m) {
           const nint_t offset =
-              src_base + (mi + r) * src_strides[SrcRow] +
-              ni * src_strides[SrcCol];
+              src_base + (mi + r) * src_row_step + ni * src_col_step;
           vec::details::sme::write_hor<0>(
               static_cast<uint32_t>(r), n_pg,
               load_compute_bits<Compute>(
@@ -199,8 +204,7 @@ VECOPS_ALWAYS_INLINE void transpose(
       } else {
         for (nint_t r = 0; r < active_m; ++r) {
           const nint_t offset =
-              src_base + (mi + r) * src_strides[SrcRow] +
-              ni * src_strides[SrcCol];
+              src_base + (mi + r) * src_row_step + ni * src_col_step;
           vec::details::sme::write_hor<0>(
               static_cast<uint32_t>(r), n_pg,
               load_compute_bits<Compute>(
@@ -216,9 +220,8 @@ VECOPS_ALWAYS_INLINE void transpose(
           const auto raw1 = vec::details::sme::read_ver<0>(
               BitsTag{}, static_cast<uint32_t>(c + 1), m_pg);
           const nint_t offset0 =
-              dst_base + (ni + c) * dst_strides[DstRow] +
-              mi * dst_strides[DstCol];
-          const nint_t offset1 = offset0 + dst_strides[DstRow];
+              dst_base + (ni + c) * dst_row_step + mi * dst_col_step;
+          const nint_t offset1 = offset0 + dst_row_step;
           store_compute_bits<Compute>(
               m_pg, active_m, destination_data + offset0, raw0);
           store_compute_bits<Compute>(
@@ -228,8 +231,7 @@ VECOPS_ALWAYS_INLINE void transpose(
           const auto raw = vec::details::sme::read_ver<0>(
               BitsTag{}, static_cast<uint32_t>(c), m_pg);
           const nint_t offset =
-              dst_base + (ni + c) * dst_strides[DstRow] +
-              mi * dst_strides[DstCol];
+              dst_base + (ni + c) * dst_row_step + mi * dst_col_step;
           store_compute_bits<Compute>(
               m_pg, active_m, destination_data + offset, raw);
         }
@@ -238,8 +240,7 @@ VECOPS_ALWAYS_INLINE void transpose(
           const auto raw = vec::details::sme::read_ver<0>(
               BitsTag{}, static_cast<uint32_t>(c), m_pg);
           const nint_t offset =
-              dst_base + (ni + c) * dst_strides[DstRow] +
-              mi * dst_strides[DstCol];
+              dst_base + (ni + c) * dst_row_step + mi * dst_col_step;
           store_compute_bits<Compute>(
               m_pg, active_m, destination_data + offset, raw);
         }
@@ -305,18 +306,31 @@ struct SMEBackend {
         typename std::remove_cvref_t<Destination>::MemoryElement;
     const auto* source_data = source.raw_data();
     const auto source_strides = source.raw_strides();
+    const auto source_row_stride = tensor::stride_value<SrcRow>(
+        source.spec().input_layout());
+    const auto source_col_stride = tensor::stride_value<SrcCol>(
+        source.spec().input_layout());
     auto* destination_data = destination.raw_data();
     const auto destination_strides = destination.raw_strides();
+    const auto destination_row_stride = tensor::stride_value<DstRow>(
+        destination.spec().output_layout());
+    const auto destination_col_stride = tensor::stride_value<DstCol>(
+        destination.spec().output_layout());
     scope.with_resources(
         execution::details::arm::StreamingZARegion{},
         [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
           sme::transpose<
               SourceMemory, DestinationMemory, Compute, M, N,
+              decltype(source_row_stride), decltype(source_col_stride),
+              decltype(destination_row_stride),
+              decltype(destination_col_stride),
               std::remove_cvref_t<Source>::Rank,
               std::remove_cvref_t<Destination>::Rank,
               SrcRow, SrcCol, DstRow, DstCol>(
-              m, n, source_data, source_strides, src_origin,
-              destination_data, destination_strides, dst_origin);
+              m, n, source_data, source_strides,
+              source_row_stride, source_col_stride, src_origin,
+              destination_data, destination_strides,
+              destination_row_stride, destination_col_stride, dst_origin);
         });
   }
 };

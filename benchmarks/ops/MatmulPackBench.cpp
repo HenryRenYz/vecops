@@ -7,7 +7,7 @@
 
 #include "MatmulPackBenchCommon.h"
 
-#include "vecops/gemm/Atoms.h"
+#include "vecops/matmul/Atom.h"
 
 namespace vecops::bench::matmul_pack {
 template <int Shard>
@@ -19,19 +19,19 @@ void register_matmul_pack_shard();
 namespace vecops::bench::matmul_pack {
 
 template <>
-struct AtomName<gemm::AMX_BF16F32> {
+struct AtomName<::vecops::matmul::AMX_BF16F32> {
   static constexpr const char* value = "AMX_BF16F32";
 };
 
 template <>
-struct AtomName<gemm::AMX_F16F32> {
+struct AtomName<::vecops::matmul::AMX_F16F32> {
   static constexpr const char* value = "AMX_F16F32";
 };
 
-using AMXI8S8S8 = gemm::AMX_I8I32<int8_t, int8_t>;
-using AMXI8S8U8 = gemm::AMX_I8I32<int8_t, uint8_t>;
-using AMXI8U8S8 = gemm::AMX_I8I32<uint8_t, int8_t>;
-using AMXI8U8U8 = gemm::AMX_I8I32<uint8_t, uint8_t>;
+using AMXI8S8S8 = ::vecops::matmul::AMX_I8I32<int8_t, int8_t>;
+using AMXI8S8U8 = ::vecops::matmul::AMX_I8I32<int8_t, uint8_t>;
+using AMXI8U8S8 = ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>;
+using AMXI8U8U8 = ::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>;
 
 template <>
 struct AtomName<AMXI8S8S8> {
@@ -63,7 +63,7 @@ struct FusedPipelineTraits;
 
 template <>
 struct FusedPipelineTraits<FusedPipeline::FP32ToBF16> {
-  using Atom = gemm::AMX_BF16F32;
+  using Atom = ::vecops::matmul::AMX_BF16F32;
   using Memory = float32_t;
   using T = bfloat16_t;
   static constexpr const char* name = "fp32_to_bf16";
@@ -72,7 +72,7 @@ struct FusedPipelineTraits<FusedPipeline::FP32ToBF16> {
 
 template <>
 struct FusedPipelineTraits<FusedPipeline::FP32ToFP16> {
-  using Atom = gemm::AMX_F16F32;
+  using Atom = ::vecops::matmul::AMX_F16F32;
   using Memory = float32_t;
   using T = float16_t;
   static constexpr const char* name = "fp32_to_fp16";
@@ -81,7 +81,7 @@ struct FusedPipelineTraits<FusedPipeline::FP32ToFP16> {
 
 template <>
 struct FusedPipelineTraits<FusedPipeline::BF16Transform> {
-  using Atom = gemm::AMX_BF16F32;
+  using Atom = ::vecops::matmul::AMX_BF16F32;
   using Memory = bfloat16_t;
   using T = bfloat16_t;
   static constexpr const char* name = "bf16_transform";
@@ -106,7 +106,7 @@ struct FusedPipelineTraits<FusedPipeline::FP32ToU8> {
   static constexpr bool transform = true;
 };
 
-template <typename Atom, gemm::Operand Side,
+template <typename Atom, ::vecops::matmul::Operand Side,
           typename InputSpec, typename OutputSpec>
 VECOPS_ALWAYS_INLINE void run_forced_vector_pack(
     ExecutionSession& execution,
@@ -120,7 +120,7 @@ VECOPS_ALWAYS_INLINE void run_forced_vector_pack(
   execution.with_resources(
       requirement,
       [&](auto& active) VECOPS_INLINE_LAMBDA {
-        using Packing = gemm::packing_t<Atom, Side>;
+        using Packing = ::vecops::matmul::packing_t<Atom, Side>;
         using InputPolicy = tensor::InputAccessPolicy<
             Packing::VectorAxis, 1, tensor::AccessPlan::direct>;
         using OutputPolicy = tensor::OutputAccessPolicy<
@@ -139,7 +139,7 @@ VECOPS_ALWAYS_INLINE void run_forced_vector_pack(
       });
 }
 
-template <FusedPipeline Pipeline, gemm::Operand Side,
+template <FusedPipeline Pipeline, ::vecops::matmul::Operand Side,
           nint_t Spatial, nint_t K, bool ConstShape>
 void run_fused_case(benchmark::State& state) {
   using Traits = FusedPipelineTraits<Pipeline>;
@@ -175,7 +175,7 @@ void run_fused_case(benchmark::State& state) {
       return tensor::input<T>(input_tensor);
     }
   }();
-  auto output_layout = ops::matmul_packed_layout<
+  auto output_layout = ::vecops::matmul::packed_layout<
       Atom, Side>(input_layout);
   const nint_t output_elements = numel(output_layout);
   const nint_t output_bytes = output_elements * nint_t{sizeof(T)};
@@ -199,11 +199,11 @@ void run_fused_case(benchmark::State& state) {
       state.iterations() * (input_bytes + output_bytes));
 }
 
-template <FusedPipeline Pipeline, gemm::Operand Side,
+template <FusedPipeline Pipeline, ::vecops::matmul::Operand Side,
           nint_t Spatial, nint_t K, bool ConstShape>
 void register_fused_shape_meta() {
   using Traits = FusedPipelineTraits<Pipeline>;
-  const char* operand = Side == gemm::Operand::A ? "A" : "B";
+  const char* operand = Side == ::vecops::matmul::Operand::A ? "A" : "B";
   const char* shape_meta = ConstShape ? "Const" : "Dynamic";
   const std::string name =
       "MatmulPack/fused/pipeline:" + std::string(Traits::name) +
@@ -219,7 +219,7 @@ void register_fused_shape_meta() {
       registered, 0.02, 3)->ReportAggregatesOnly(true);
 }
 
-template <FusedPipeline Pipeline, gemm::Operand Side,
+template <FusedPipeline Pipeline, ::vecops::matmul::Operand Side,
           nint_t Spatial, nint_t K>
 void register_fused_case() {
   register_fused_shape_meta<Pipeline, Side, Spatial, K, true>();
@@ -248,7 +248,7 @@ constexpr const char* compensation_mode_name() {
 template <CompensationMode Mode, CompensationInput Input,
           nint_t N, nint_t K, bool ConstShape>
 void run_compensation_case(benchmark::State& state) {
-  using Atom = gemm::AMX_I8I32<uint8_t, int8_t>;
+  using Atom = ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>;
   using Memory = std::conditional_t<
       Input == CompensationInput::DirectS8, int8_t, float32_t>;
   constexpr int32_t ZeroPointA = 3;
@@ -282,8 +282,8 @@ void run_compensation_case(benchmark::State& state) {
       return tensor::input<int8_t>(input_tensor, transform);
     }
   }();
-  auto output_layout = ops::matmul_packed_layout<
-      Atom, gemm::Operand::B>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<
+      Atom, ::vecops::matmul::Operand::B>(input_layout);
   const nint_t output_bytes =
       numel(output_layout) * static_cast<nint_t>(sizeof(int8_t));
   kernel::Workspace storage(output_bytes + 64);
@@ -296,7 +296,7 @@ void run_compensation_case(benchmark::State& state) {
   ExecutionSession execution{};
 
   auto run_separate_sum = [&] VECOPS_INLINE_LAMBDA {
-    ops::matmul_pack<Atom, gemm::Operand::B>(
+    ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
         execution, input_spec, output_tensor);
     for (nint_t row = 0; row < N; ++row) {
       int32_t sum = 0;
@@ -312,12 +312,12 @@ void run_compensation_case(benchmark::State& state) {
   };
   auto run_once = [&] VECOPS_INLINE_LAMBDA {
     if constexpr (Mode == CompensationMode::PackOnly) {
-      ops::matmul_pack<Atom, gemm::Operand::B>(
+      ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
           execution, input_spec, output_tensor);
     } else if constexpr (Mode == CompensationMode::SeparateSum) {
       run_separate_sum();
     } else {
-      ops::matmul_pack_b_compensated<Atom>(
+      ::vecops::matmul::details::run_matmul_pack_b_compensated<Atom>(
           execution, input_spec, output_tensor,
           compensation_tensor, ZeroPointA);
     }
@@ -397,9 +397,9 @@ template <int Shard>
 void register_matmul_pack_shard() {
   static_assert(0 <= Shard && Shard < 8);
   if constexpr (Shard == 0) {
-    register_cases<gemm::AMX_BF16F32>(RepresentativeCases{});
+    register_cases<::vecops::matmul::AMX_BF16F32>(RepresentativeCases{});
   } else if constexpr (Shard == 1) {
-    register_cases<gemm::AMX_F16F32>(SecondaryCases{});
+    register_cases<::vecops::matmul::AMX_F16F32>(SecondaryCases{});
   } else if constexpr (Shard == 2) {
     register_cases<AMXI8S8S8>(SecondaryCases{});
   } else if constexpr (Shard == 3) {
@@ -410,23 +410,23 @@ void register_matmul_pack_shard() {
     register_cases<AMXI8U8U8>(SecondaryCases{});
   } else if constexpr (Shard == 6) {
     register_fused_case<
-        FusedPipeline::FP32ToBF16, gemm::Operand::A, 128, 3584>();
+        FusedPipeline::FP32ToBF16, ::vecops::matmul::Operand::A, 128, 3584>();
     register_fused_case<
-        FusedPipeline::FP32ToBF16, gemm::Operand::B, 4608, 3584>();
+        FusedPipeline::FP32ToBF16, ::vecops::matmul::Operand::B, 4608, 3584>();
     register_fused_case<
-        FusedPipeline::FP32ToFP16, gemm::Operand::A, 128, 3584>();
+        FusedPipeline::FP32ToFP16, ::vecops::matmul::Operand::A, 128, 3584>();
     register_fused_case<
-        FusedPipeline::FP32ToFP16, gemm::Operand::B, 513, 1000>();
+        FusedPipeline::FP32ToFP16, ::vecops::matmul::Operand::B, 513, 1000>();
     register_fused_case<
-        FusedPipeline::BF16Transform, gemm::Operand::A, 513, 1000>();
+        FusedPipeline::BF16Transform, ::vecops::matmul::Operand::A, 513, 1000>();
     register_fused_case<
-        FusedPipeline::BF16Transform, gemm::Operand::B, 513, 1000>();
-    register_fused_case<FusedPipeline::FP32ToS8, gemm::Operand::A, 64, 256>();
-    register_fused_case<FusedPipeline::FP32ToS8, gemm::Operand::B, 64, 256>();
+        FusedPipeline::BF16Transform, ::vecops::matmul::Operand::B, 513, 1000>();
+    register_fused_case<FusedPipeline::FP32ToS8, ::vecops::matmul::Operand::A, 64, 256>();
+    register_fused_case<FusedPipeline::FP32ToS8, ::vecops::matmul::Operand::B, 64, 256>();
     register_fused_case<
-        FusedPipeline::FP32ToU8, gemm::Operand::A, 513, 1000>();
+        FusedPipeline::FP32ToU8, ::vecops::matmul::Operand::A, 513, 1000>();
     register_fused_case<
-        FusedPipeline::FP32ToU8, gemm::Operand::B, 513, 1000>();
+        FusedPipeline::FP32ToU8, ::vecops::matmul::Operand::B, 513, 1000>();
   } else {
     register_all_compensation_modes<
         CompensationInput::TransformedFP32, 513, 1000>();
@@ -465,7 +465,7 @@ int main(int argc, char** argv) {
 
 #include "MatmulPackBenchCommon.h"
 
-#include "vecops/gemm/Atoms.h"
+#include "vecops/matmul/Atom.h"
 
 namespace vecops::bench::matmul_pack {
 template <int Shard>
@@ -477,31 +477,31 @@ void register_matmul_pack_shard();
 namespace vecops::bench::matmul_pack {
 
 template <>
-struct AtomName<gemm::SME_BF16F32> {
+struct AtomName<::vecops::matmul::SME_BF16F32> {
   static constexpr const char* value = "SME_BF16F32";
 };
 
 template <>
-struct AtomName<gemm::SME_F16F32> {
+struct AtomName<::vecops::matmul::SME_F16F32> {
   static constexpr const char* value = "SME_F16F32";
 };
 
 template <>
-struct AtomName<gemm::SME_F32F32> {
+struct AtomName<::vecops::matmul::SME_F32F32> {
   static constexpr const char* value = "SME_F32F32";
 };
 
 #if defined(HAS_SME_F64F64)
 template <>
-struct AtomName<gemm::SME_F64F64> {
+struct AtomName<::vecops::matmul::SME_F64F64> {
   static constexpr const char* value = "SME_F64F64";
 };
 #endif
 
-using SMEI8S8S8 = gemm::SME_I8I32<int8_t, int8_t>;
-using SMEI8S8U8 = gemm::SME_I8I32<int8_t, uint8_t>;
-using SMEI8U8S8 = gemm::SME_I8I32<uint8_t, int8_t>;
-using SMEI8U8U8 = gemm::SME_I8I32<uint8_t, uint8_t>;
+using SMEI8S8S8 = ::vecops::matmul::SME_I8I32<int8_t, int8_t>;
+using SMEI8S8U8 = ::vecops::matmul::SME_I8I32<int8_t, uint8_t>;
+using SMEI8U8S8 = ::vecops::matmul::SME_I8I32<uint8_t, int8_t>;
+using SMEI8U8U8 = ::vecops::matmul::SME_I8I32<uint8_t, uint8_t>;
 
 template <>
 struct AtomName<SMEI8S8S8> {
@@ -539,7 +539,7 @@ struct FusedPipelineTraits;
 
 template <>
 struct FusedPipelineTraits<FusedPipeline::FP16ToFP32> {
-  using Atom = gemm::SME_F32F32;
+  using Atom = ::vecops::matmul::SME_F32F32;
   using Memory = float16_t;
   using T = float32_t;
   static constexpr const char* name = "fp16_to_fp32";
@@ -548,7 +548,7 @@ struct FusedPipelineTraits<FusedPipeline::FP16ToFP32> {
 
 template <>
 struct FusedPipelineTraits<FusedPipeline::BF16ToFP32> {
-  using Atom = gemm::SME_F32F32;
+  using Atom = ::vecops::matmul::SME_F32F32;
   using Memory = bfloat16_t;
   using T = float32_t;
   static constexpr const char* name = "bf16_to_fp32";
@@ -557,7 +557,7 @@ struct FusedPipelineTraits<FusedPipeline::BF16ToFP32> {
 
 template <>
 struct FusedPipelineTraits<FusedPipeline::FP32ToBF16> {
-  using Atom = gemm::SME_BF16F32;
+  using Atom = ::vecops::matmul::SME_BF16F32;
   using Memory = float32_t;
   using T = bfloat16_t;
   static constexpr const char* name = "fp32_to_bf16";
@@ -566,7 +566,7 @@ struct FusedPipelineTraits<FusedPipeline::FP32ToBF16> {
 
 template <>
 struct FusedPipelineTraits<FusedPipeline::FP32ToFP16> {
-  using Atom = gemm::SME_F16F32;
+  using Atom = ::vecops::matmul::SME_F16F32;
   using Memory = float32_t;
   using T = float16_t;
   static constexpr const char* name = "fp32_to_fp16";
@@ -594,7 +594,7 @@ struct FusedPipelineTraits<FusedPipeline::FP32ToU8> {
 #if defined(HAS_SME_F64F64)
 template <>
 struct FusedPipelineTraits<FusedPipeline::FP32ToFP64> {
-  using Atom = gemm::SME_F64F64;
+  using Atom = ::vecops::matmul::SME_F64F64;
   using Memory = float32_t;
   using T = float64_t;
   static constexpr const char* name = "fp32_to_fp64";
@@ -604,7 +604,7 @@ struct FusedPipelineTraits<FusedPipeline::FP32ToFP64> {
 
 template <>
 struct FusedPipelineTraits<FusedPipeline::FP32Transform> {
-  using Atom = gemm::SME_F32F32;
+  using Atom = ::vecops::matmul::SME_F32F32;
   using Memory = float32_t;
   using T = float32_t;
   static constexpr const char* name = "fp32_transform";
@@ -613,7 +613,7 @@ struct FusedPipelineTraits<FusedPipeline::FP32Transform> {
 
 template <>
 struct FusedPipelineTraits<FusedPipeline::BF16Transform> {
-  using Atom = gemm::SME_BF16F32;
+  using Atom = ::vecops::matmul::SME_BF16F32;
   using Memory = bfloat16_t;
   using T = bfloat16_t;
   static constexpr const char* name = "bf16_transform";
@@ -650,7 +650,7 @@ const char* implementation_name() {
   }
 }
 
-template <typename Atom, gemm::Operand Side, typename Implementation,
+template <typename Atom, ::vecops::matmul::Operand Side, typename Implementation,
           typename InputSpec, typename OutputSpec>
 VECOPS_ALWAYS_INLINE void run_forced_pack(
     ExecutionSession& execution,
@@ -663,7 +663,7 @@ VECOPS_ALWAYS_INLINE void run_forced_pack(
   execution.with_resources(
       requirement,
       [&](auto& active) VECOPS_INLINE_LAMBDA {
-        using Packing = gemm::packing_t<Atom, Side>;
+        using Packing = ::vecops::matmul::packing_t<Atom, Side>;
         using InputPolicy = tensor::InputAccessPolicy<
             Packing::VectorAxis, 1, tensor::AccessPlan::direct>;
         using OutputPolicy = tensor::OutputAccessPolicy<
@@ -682,7 +682,7 @@ VECOPS_ALWAYS_INLINE void run_forced_pack(
       });
 }
 
-template <FusedPipeline Pipeline, gemm::Operand Side,
+template <FusedPipeline Pipeline, ::vecops::matmul::Operand Side,
           nint_t Spatial, nint_t K, bool ConstShape,
           typename Implementation>
 void run_fused_case(benchmark::State& state) {
@@ -719,7 +719,7 @@ void run_fused_case(benchmark::State& state) {
       return tensor::input<T>(input_tensor);
     }
   }();
-  auto output_layout = ops::matmul_packed_layout<Atom, Side>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
   const nint_t output_elements = numel(output_layout);
   const nint_t output_bytes = output_elements * nint_t{sizeof(T)};
   kernel::Workspace storage(output_bytes + 64);
@@ -745,12 +745,12 @@ void run_fused_case(benchmark::State& state) {
       state.iterations() * (input_bytes + output_bytes));
 }
 
-template <FusedPipeline Pipeline, gemm::Operand Side,
+template <FusedPipeline Pipeline, ::vecops::matmul::Operand Side,
           nint_t Spatial, nint_t K, bool ConstShape,
           typename Implementation>
 void register_fused_implementation() {
   using Traits = FusedPipelineTraits<Pipeline>;
-  const char* operand = Side == gemm::Operand::A ? "A" : "B";
+  const char* operand = Side == ::vecops::matmul::Operand::A ? "A" : "B";
   const char* shape_meta = ConstShape ? "Const" : "Dynamic";
   const std::string name =
       "MatmulPack/fused/pipeline:" + std::string(Traits::name) +
@@ -768,7 +768,7 @@ void register_fused_implementation() {
       registered, 0.02, 3)->ReportAggregatesOnly(true);
 }
 
-template <FusedPipeline Pipeline, gemm::Operand Side,
+template <FusedPipeline Pipeline, ::vecops::matmul::Operand Side,
           nint_t Spatial, nint_t K, bool ConstShape>
 void register_fused_shape_meta() {
   register_fused_implementation<
@@ -796,7 +796,7 @@ void register_fused_shape_meta() {
   }
 }
 
-template <FusedPipeline Pipeline, gemm::Operand Side,
+template <FusedPipeline Pipeline, ::vecops::matmul::Operand Side,
           nint_t Spatial, nint_t K>
 void register_fused_case() {
   register_fused_shape_meta<Pipeline, Side, Spatial, K, true>();
@@ -807,11 +807,11 @@ template <int Shard>
 void register_matmul_pack_shard() {
   static_assert(0 <= Shard && Shard < 10);
   if constexpr (Shard == 0) {
-    register_cases<gemm::SME_BF16F32>(RepresentativeCases{});
+    register_cases<::vecops::matmul::SME_BF16F32>(RepresentativeCases{});
   } else if constexpr (Shard == 1) {
-    register_cases<gemm::SME_F16F32>(SecondaryCases{});
+    register_cases<::vecops::matmul::SME_F16F32>(SecondaryCases{});
   } else if constexpr (Shard == 2) {
-    register_cases<gemm::SME_F32F32>(SecondaryCases{});
+    register_cases<::vecops::matmul::SME_F32F32>(SecondaryCases{});
   } else if constexpr (Shard == 3) {
     register_cases<SMEI8S8S8>(SecondaryCases{});
   } else if constexpr (Shard == 4) {
@@ -822,46 +822,46 @@ void register_matmul_pack_shard() {
     register_cases<SMEI8U8U8>(SecondaryCases{});
   } else if constexpr (Shard == 7) {
 #if defined(HAS_SME_F64F64)
-    register_cases<gemm::SME_F64F64>(SecondaryCases{});
+    register_cases<::vecops::matmul::SME_F64F64>(SecondaryCases{});
     register_fused_case<
-        FusedPipeline::FP32ToFP64, gemm::Operand::A, 35, 17>();
+        FusedPipeline::FP32ToFP64, ::vecops::matmul::Operand::A, 35, 17>();
     register_fused_case<
-        FusedPipeline::FP32ToFP64, gemm::Operand::B, 35, 17>();
+        FusedPipeline::FP32ToFP64, ::vecops::matmul::Operand::B, 35, 17>();
     register_fused_case<
-        FusedPipeline::FP32ToFP64, gemm::Operand::A, 64, 256>();
+        FusedPipeline::FP32ToFP64, ::vecops::matmul::Operand::A, 64, 256>();
     register_fused_case<
-        FusedPipeline::FP32ToFP64, gemm::Operand::B, 256, 256>();
+        FusedPipeline::FP32ToFP64, ::vecops::matmul::Operand::B, 256, 256>();
 #endif
   } else if constexpr (Shard == 8) {
     register_fused_case<
-        FusedPipeline::FP16ToFP32, gemm::Operand::A, 128, 3584>();
+        FusedPipeline::FP16ToFP32, ::vecops::matmul::Operand::A, 128, 3584>();
     register_fused_case<
-        FusedPipeline::FP16ToFP32, gemm::Operand::B, 513, 1000>();
+        FusedPipeline::FP16ToFP32, ::vecops::matmul::Operand::B, 513, 1000>();
     register_fused_case<
-        FusedPipeline::BF16ToFP32, gemm::Operand::A, 128, 3584>();
+        FusedPipeline::BF16ToFP32, ::vecops::matmul::Operand::A, 128, 3584>();
     register_fused_case<
-        FusedPipeline::BF16ToFP32, gemm::Operand::B, 513, 1000>();
+        FusedPipeline::BF16ToFP32, ::vecops::matmul::Operand::B, 513, 1000>();
     register_fused_case<
-        FusedPipeline::FP32ToBF16, gemm::Operand::A, 128, 3584>();
+        FusedPipeline::FP32ToBF16, ::vecops::matmul::Operand::A, 128, 3584>();
     register_fused_case<
-        FusedPipeline::FP32ToBF16, gemm::Operand::B, 4608, 3584>();
+        FusedPipeline::FP32ToBF16, ::vecops::matmul::Operand::B, 4608, 3584>();
     register_fused_case<
-        FusedPipeline::FP32ToFP16, gemm::Operand::A, 128, 3584>();
+        FusedPipeline::FP32ToFP16, ::vecops::matmul::Operand::A, 128, 3584>();
     register_fused_case<
-        FusedPipeline::FP32ToFP16, gemm::Operand::B, 513, 1000>();
+        FusedPipeline::FP32ToFP16, ::vecops::matmul::Operand::B, 513, 1000>();
   } else {
-    register_fused_case<FusedPipeline::FP32ToS8, gemm::Operand::A, 35, 67>();
-    register_fused_case<FusedPipeline::FP32ToS8, gemm::Operand::B, 35, 67>();
-    register_fused_case<FusedPipeline::FP32ToU8, gemm::Operand::A, 35, 67>();
-    register_fused_case<FusedPipeline::FP32ToU8, gemm::Operand::B, 35, 67>();
+    register_fused_case<FusedPipeline::FP32ToS8, ::vecops::matmul::Operand::A, 35, 67>();
+    register_fused_case<FusedPipeline::FP32ToS8, ::vecops::matmul::Operand::B, 35, 67>();
+    register_fused_case<FusedPipeline::FP32ToU8, ::vecops::matmul::Operand::A, 35, 67>();
+    register_fused_case<FusedPipeline::FP32ToU8, ::vecops::matmul::Operand::B, 35, 67>();
     register_fused_case<
-        FusedPipeline::FP32Transform, gemm::Operand::A, 513, 1000>();
+        FusedPipeline::FP32Transform, ::vecops::matmul::Operand::A, 513, 1000>();
     register_fused_case<
-        FusedPipeline::FP32Transform, gemm::Operand::B, 513, 1000>();
+        FusedPipeline::FP32Transform, ::vecops::matmul::Operand::B, 513, 1000>();
     register_fused_case<
-        FusedPipeline::BF16Transform, gemm::Operand::A, 513, 1000>();
+        FusedPipeline::BF16Transform, ::vecops::matmul::Operand::A, 513, 1000>();
     register_fused_case<
-        FusedPipeline::BF16Transform, gemm::Operand::B, 513, 1000>();
+        FusedPipeline::BF16Transform, ::vecops::matmul::Operand::B, 513, 1000>();
   }
 }
 

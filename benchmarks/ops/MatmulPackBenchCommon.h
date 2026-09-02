@@ -16,7 +16,7 @@
 #include <vector>
 
 #include "BenchmarkUtils.h"
-#include "vecops/gemm/Packing.h"
+#include "vecops/matmul/Packing.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/ops/MatmulPack.h"
 
@@ -165,9 +165,9 @@ const char* dtype_name() {
   return "unknown";
 }
 
-template <gemm::Operand Side>
+template <::vecops::matmul::Operand Side>
 const char* operand_name() {
-  if constexpr (Side == gemm::Operand::A) return "A";
+  if constexpr (Side == ::vecops::matmul::Operand::A) return "A";
   return "B";
 }
 
@@ -203,31 +203,30 @@ void fill_input(std::vector<T>& input) {
   }
 }
 
-template <typename Atom, gemm::Operand Side,
+template <typename Atom, ::vecops::matmul::Operand Side,
           typename Case, bool ConstShape>
 void run_case(benchmark::State& state) {
-  using Packing = gemm::packing_t<Atom, Side>;
+  using Packing = ::vecops::matmul::packing_t<Atom, Side>;
   using T = typename Packing::Element;
   std::vector<T> input(static_cast<std::size_t>(Case::elements));
   fill_input(input);
   auto input_shape = Case::template shape<ConstShape>();
   auto input_layout = make_layout(input_shape);
   auto input_tensor = make_tensor(input.data(), input_layout);
-  auto output_layout = ops::matmul_packed_layout<Atom, Side>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
   const nint_t output_elements = numel(output_layout);
   const nint_t output_bytes = output_elements * static_cast<nint_t>(sizeof(T));
   kernel::Workspace output_storage(output_bytes + 64);
   auto output_view = output_storage.view();
   auto* output_data = static_cast<T*>(output_view.allocate(output_bytes, 64));
   auto output_tensor = make_tensor(output_data, output_layout);
-  auto operation = ops::make_matmul_pack<Atom, Side>(
-      input_tensor, output_tensor);
+  auto operation = ops::matmul_pack(ops::MatmulPackConfig<Atom, Side>{});
   ExecutionSession execution{};
 
-  operation(execution);
+  operation(execution, input_tensor, output_tensor);
   for (auto _ : state) {
     benchmark::DoNotOptimize(input.data());
-    operation(execution);
+    operation(execution, input_tensor, output_tensor);
     benchmark::DoNotOptimize(output_data);
     benchmark::ClobberMemory();
   }
@@ -246,10 +245,10 @@ void run_case(benchmark::State& state) {
       double(output_elements) / double(Case::elements));
 }
 
-template <typename Atom, gemm::Operand Side,
+template <typename Atom, ::vecops::matmul::Operand Side,
           typename Case, bool ConstShape>
 std::string benchmark_name() {
-  using T = typename gemm::packing_t<Atom, Side>::Element;
+  using T = typename ::vecops::matmul::packing_t<Atom, Side>::Element;
   return
       "MatmulPack/" + std::string(Case::GroupType::name) +
       "/case:" + Case::NameType::name +
@@ -261,7 +260,7 @@ std::string benchmark_name() {
       "/arch:" + VECOPS_BENCH_ARCH_CODE;
 }
 
-template <typename Atom, gemm::Operand Side,
+template <typename Atom, ::vecops::matmul::Operand Side,
           typename Case, bool ConstShape>
 void register_shape_metadata() {
   const auto name = benchmark_name<Atom, Side, Case, ConstShape>();
@@ -272,7 +271,7 @@ void register_shape_metadata() {
       registered, 0.02, 3)->ReportAggregatesOnly(true);
 }
 
-template <typename Atom, gemm::Operand Side, typename Case>
+template <typename Atom, ::vecops::matmul::Operand Side, typename Case>
 void register_operand() {
   register_shape_metadata<Atom, Side, Case, true>();
   register_shape_metadata<Atom, Side, Case, false>();
@@ -281,10 +280,10 @@ void register_operand() {
 template <typename Atom, typename Case>
 void register_case() {
   if constexpr (Case::pack_a) {
-    register_operand<Atom, gemm::Operand::A, Case>();
+    register_operand<Atom, ::vecops::matmul::Operand::A, Case>();
   }
   if constexpr (Case::pack_b) {
-    register_operand<Atom, gemm::Operand::B, Case>();
+    register_operand<Atom, ::vecops::matmul::Operand::B, Case>();
   }
 }
 

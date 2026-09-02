@@ -92,12 +92,14 @@ template <std::size_t OriginalRank, std::size_t LocalRank>
 struct CoordinateProjection {
   Coord<OriginalRank> fixed{};
   ::vecops::details::InlineArray<int, LocalRank> local_to_original{};
+  Coord<LocalRank> local_offsets{};
 
   VECOPS_ALWAYS_INLINE constexpr Coord<OriginalRank> project(
       const Coord<LocalRank>& local) const {
     auto result = fixed;
     for (std::size_t d = 0; d < LocalRank; ++d) {
-      result[static_cast<std::size_t>(local_to_original[d])] = local[d];
+      result[static_cast<std::size_t>(local_to_original[d])] =
+          local[d] + local_offsets[d];
     }
     return result;
   }
@@ -107,11 +109,21 @@ struct CoordinateProjection {
     static_assert(0 <= Dim && Dim < static_cast<int>(LocalRank));
     CoordinateProjection<OriginalRank, LocalRank - 1> result{};
     result.fixed = fixed;
-    result.fixed[static_cast<std::size_t>(local_to_original[Dim])] = index;
+    result.fixed[static_cast<std::size_t>(local_to_original[Dim])] =
+        index + local_offsets[Dim];
     for (std::size_t src = 0, dst = 0; src < LocalRank; ++src) {
       if (src == static_cast<std::size_t>(Dim)) continue;
-      result.local_to_original[dst++] = local_to_original[src];
+      result.local_to_original[dst] = local_to_original[src];
+      result.local_offsets[dst++] = local_offsets[src];
     }
+    return result;
+  }
+
+  template <int Dim>
+  VECOPS_ALWAYS_INLINE constexpr auto narrowed(nint_t offset) const {
+    static_assert(0 <= Dim && Dim < static_cast<int>(LocalRank));
+    auto result = *this;
+    result.local_offsets[Dim] += offset;
     return result;
   }
 
@@ -124,6 +136,9 @@ struct CoordinateProjection {
     const int temporary = result.local_to_original[I];
     result.local_to_original[I] = result.local_to_original[J];
     result.local_to_original[J] = temporary;
+    const nint_t offset = result.local_offsets[I];
+    result.local_offsets[I] = result.local_offsets[J];
+    result.local_offsets[J] = offset;
     return result;
   }
 };

@@ -2359,6 +2359,30 @@ VECOPS_INLINE auto transpose_view(
       transposed_tensor, spec.transform(), projection};
 }
 
+/** Preserve rank while selecting a contiguous logical interval on one axis. */
+template <int Dim, typename Compute, typename Tensor, typename Transform,
+          typename Projection, typename... Facts, meta::ValueType Extent>
+VECOPS_INLINE auto narrow_view(
+    const InputSpec<Compute, Tensor, Transform, Projection, Facts...>& spec,
+    nint_t offset, Extent extent) {
+  static_assert(0 <= Dim && Dim < Tensor::Ndim);
+  const nint_t count = static_cast<nint_t>(extent);
+  VECOPS_ASSERT(offset >= 0 && count >= 0 &&
+                offset + count <= spec.input_layout().shape()[Dim],
+                "input narrow interval is out of bounds");
+  auto layout = tensor::set<Dim>(
+      spec.input_layout(), extent,
+      tensor::stride_value<Dim>(spec.input_layout()));
+  auto tensor_view = tensor::make_tensor(
+      spec.tensor().data() + offset * static_cast<nint_t>(
+          tensor::get<Dim>(spec.input_layout().strides())),
+      layout);
+  auto projection = spec.projection().template narrowed<Dim>(offset);
+  return InputSpec<Compute, decltype(tensor_view), Transform,
+                   decltype(projection)>{
+      tensor_view, spec.transform(), projection};
+}
+
 /**
  * @brief Slice one output Spec dimension while preserving original coordinates.
  * @return A new OutputSpec with sliced Tensor and composed projection.
@@ -2388,6 +2412,29 @@ VECOPS_INLINE auto transpose_view(
   return OutputSpec<Compute, decltype(transposed_tensor), Transform,
                     decltype(projection)>{
       transposed_tensor, spec.transform(), projection};
+}
+
+template <int Dim, typename Compute, typename Tensor, typename Transform,
+          typename Projection, typename... Facts, meta::ValueType Extent>
+VECOPS_INLINE auto narrow_view(
+    const OutputSpec<Compute, Tensor, Transform, Projection, Facts...>& spec,
+    nint_t offset, Extent extent) {
+  static_assert(0 <= Dim && Dim < Tensor::Ndim);
+  const nint_t count = static_cast<nint_t>(extent);
+  VECOPS_ASSERT(offset >= 0 && count >= 0 &&
+                offset + count <= spec.output_layout().shape()[Dim],
+                "output narrow interval is out of bounds");
+  auto layout = tensor::set<Dim>(
+      spec.output_layout(), extent,
+      tensor::stride_value<Dim>(spec.output_layout()));
+  auto tensor_view = tensor::make_tensor(
+      spec.tensor().data() + offset * static_cast<nint_t>(
+          tensor::get<Dim>(spec.output_layout().strides())),
+      layout);
+  auto projection = spec.projection().template narrowed<Dim>(offset);
+  return OutputSpec<Compute, decltype(tensor_view), Transform,
+                    decltype(projection)>{
+      tensor_view, spec.transform(), projection};
 }
 
 /** @brief Keep the first N Spec dimensions at zero on trailing axes. */

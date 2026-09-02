@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #include "vecops/tensor/Layout.h"
 
@@ -31,6 +32,18 @@ static_assert(std::same_as<
 static_assert(std::same_as<stride_type_t<2, TypedLayout>, Const<1>>);
 static_assert(std::same_as<
               numel_type_t<TypedLayout>, Dynamic<128, 256, 1024>>);
+static_assert(std::same_as<
+              decltype(tensor::size_value<0>(
+                  std::declval<const TypedLayout&>())),
+              Const<2>>);
+static_assert(std::same_as<
+              decltype(tensor::size_value<1>(
+                  std::declval<const TypedLayout&>())),
+              Dynamic<4, 8, 32>>);
+static_assert(std::same_as<
+              decltype(tensor::stride_value<2>(
+                  std::declval<const TypedLayout&>())),
+              Const<1>>);
 
 // ======================================================================
 // Helper: capture operator<< output to std::string
@@ -681,6 +694,28 @@ TEST_F(ValueTest, ToValuePreservesValueType) {
   EXPECT_TRUE((std::is_same_v<to_value_t<Any>, Any>));
 }
 
+TEST_F(ValueTest, ValueInputAcceptsValuesAndFixedWidthIntegers) {
+  static_assert(ValueInput<int32_t>);
+  static_assert(ValueInput<uint64_t>);
+  static_assert(ValueInput<Const<5>>);
+  static_assert(ValueInput<Dynamic<16>>);
+  static_assert(!ValueInput<float>);
+  static_assert(!ValueInput<bool>);
+}
+
+TEST_F(ValueTest, ToValueNormalizesAndPreservesMetadata) {
+  auto runtime = to_value(int32_t{17});
+  auto fixed = to_value(cint<5>);
+  auto constrained = to_value(Dynamic<16, 0, 128>{32});
+  EXPECT_TRUE((std::is_same_v<decltype(runtime), Any>));
+  EXPECT_TRUE((std::is_same_v<decltype(fixed), Const<5>>));
+  EXPECT_TRUE((std::is_same_v<
+      decltype(constrained), Dynamic<16, 0, 128>>));
+  EXPECT_EQ(nint_t(runtime), 17);
+  EXPECT_EQ(nint_t(fixed), 5);
+  EXPECT_EQ(nint_t(constrained), 32);
+}
+
 // --- Value-aware min/max ---
 
 TEST_F(ValueTest, MinMaxConstConstFold) {
@@ -860,6 +895,28 @@ TEST_F(ValueTest, CeilDivUnboundedDyn) {
   EXPECT_TRUE((std::is_same_v<decltype(r), Any>));
 }
 
+TEST_F(ValueTest, DivFamilyPreservesOneSidedBounds) {
+  auto lower_bounded = Dynamic<8, 16>{104};
+  auto ceil_lower = ceil_div(lower_bounded, cint<4>);
+  auto floor_lower = floor_div(lower_bounded, cint<4>);
+  EXPECT_EQ(nint_t(ceil_lower), 26);
+  EXPECT_EQ(nint_t(floor_lower), 26);
+  EXPECT_TRUE((std::is_same_v<
+      decltype(ceil_lower), Dynamic<2, 4, kHiInf>>));
+  EXPECT_TRUE((std::is_same_v<
+      decltype(floor_lower), Dynamic<2, 4, kHiInf>>));
+
+  auto upper_bounded = Dynamic<8, kLoInf, 128>{104};
+  auto ceil_upper = ceil_div(upper_bounded, cint<4>);
+  auto floor_upper = floor_div(upper_bounded, cint<4>);
+  EXPECT_EQ(nint_t(ceil_upper), 26);
+  EXPECT_EQ(nint_t(floor_upper), 26);
+  EXPECT_TRUE((std::is_same_v<
+      decltype(ceil_upper), Dynamic<2, kLoInf, 32>>));
+  EXPECT_TRUE((std::is_same_v<
+      decltype(floor_upper), Dynamic<2, kLoInf, 32>>));
+}
+
 TEST_F(ValueTest, AlignUpDynConstIdentityWhenAligned) {
   auto d = Dynamic<8, 16, 128>{100};
   auto r = align_up(d, cint<8>);
@@ -907,7 +964,7 @@ TEST_F(ValueTest, DivFamilyValueWithRawIntWrapAsAny) {
 }
 
 TEST_F(ValueTest, DivFamilyWorksWithLayoutAccessPattern) {
-  // The EmuAMX-style call pattern: ceil_div(nint_t extent, Const tile size).
+  // Layout code commonly divides a runtime extent by a constant tile size.
   auto tile = cint<16>;
   nint_t extent = 33;
   auto r = ceil_div(extent, tile);

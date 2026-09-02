@@ -40,9 +40,9 @@
  * | Component      | Purpose                                                   |
  * |----------------|-----------------------------------------------------------|
  * | Value hierarchy| Compile-time/run-time typed integers with constraints     |
- * | PackedStorage  | Space-efficient storage eliding compile-time constants    |
- * | PackedStorage  | Stores only runtime members of a heterogeneous Value pack |
- * | to_value_t        | Promotes raw integral types to unconstrained `Any`         |
+ * | ValueInput     | Accepts Value subtypes and fixed-width integer inputs      |
+ * | to_value(_t)   | Normalizes raw integer inputs to unconstrained `Any`        |
+ * | PackedStorage  | Stores only runtime members of a heterogeneous Value pack  |
  *
  * ## Usage overview
  *
@@ -1162,6 +1162,30 @@ private:
 template <typename T>
 using to_value_t = details::ValuePromote<std::remove_cvref_t<T>>::type;
 
+/**
+ * @brief Input accepted by APIs that normalize arguments to a Value.
+ *
+ * A ValueInput is either an existing `Value` subtype or one of vecops' fixed
+ * width integer types. Integer inputs normalize to `Any` (`Dynamic<1>`), while
+ * existing Value types retain their compile-time alignment and bound metadata.
+ */
+template <typename T>
+concept ValueInput = ValueType<to_value_t<T>>;
+
+/**
+ * @brief Normalize an integer or existing Value to its canonical Value type.
+ *
+ * @code
+ * auto runtime = to_value(int32_t{17}); // Any{17}
+ * auto fixed = to_value(cint<4>);       // Const<4>{}
+ * @endcode
+ */
+template <ValueInput T>
+VECOPS_ALWAYS_INLINE constexpr to_value_t<T> to_value(T&& value) {
+  using V = to_value_t<T>;
+  return V{static_cast<nint_t>(value)};
+}
+
 template <ValueType T>
 inline constexpr bool has_lower_bound_v = [] {
   using V = std::remove_cvref_t<T>;
@@ -1193,6 +1217,15 @@ inline constexpr nint_t upper_bound_v = [] {
 template <ValueType T>
 inline constexpr bool is_bounded_v =
     has_lower_bound_v<T> && has_upper_bound_v<T>;
+
+/** True when a Value type denotes exactly one runtime value. */
+template <ValueType T>
+inline constexpr bool is_singleton_v =
+    is_bounded_v<T> && lower_bound_v<T> == upper_bound_v<T>;
+
+/** The unique value denoted by a singleton Value type. */
+template <ValueType T>
+inline constexpr nint_t singleton_value_v = lower_bound_v<T>;
 
 template <ValueType T, nint_t Lo, nint_t Hi>
 inline constexpr bool range_within_v =
@@ -1428,12 +1461,11 @@ template <nint_t A, nint_t L, nint_t H, nint_t N>
 constexpr auto ceil_div(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
   static_assert(N > 0, "ceil_div divisor must be positive");
   constexpr nint_t g = (A % N == 0) ? A / N : 1;
-  if constexpr (L == meta::kLoInf || H == meta::kHiInf) {
-    return meta::Dynamic<g>(::vecops::ceil_div(lhs.value, N));
-  } else {
-    return meta::Dynamic<g, ::vecops::ceil_div(L, N), ::vecops::ceil_div(H, N)>(
-        ::vecops::ceil_div(lhs.value, N));
-  }
+  constexpr nint_t rl = L == meta::kLoInf
+      ? meta::kLoInf : ::vecops::ceil_div(L, N);
+  constexpr nint_t rh = H == meta::kHiInf
+      ? meta::kHiInf : ::vecops::ceil_div(H, N);
+  return meta::Dynamic<g, rl, rh>(::vecops::ceil_div(lhs.value, N));
 }
 
 /// @brief ceil_div by a runtime divisor: no constraint survives.
@@ -1481,12 +1513,11 @@ template <nint_t A, nint_t L, nint_t H, nint_t N>
 constexpr auto floor_div(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
   static_assert(N > 0, "floor_div divisor must be positive");
   constexpr nint_t g = (A % N == 0) ? A / N : 1;
-  if constexpr (L == meta::kLoInf || H == meta::kHiInf) {
-    return meta::Dynamic<g>(::vecops::floor_div(lhs.value, N));
-  } else {
-    return meta::Dynamic<g, ::vecops::floor_div(L, N), ::vecops::floor_div(H, N)>(
-        ::vecops::floor_div(lhs.value, N));
-  }
+  constexpr nint_t rl = L == meta::kLoInf
+      ? meta::kLoInf : ::vecops::floor_div(L, N);
+  constexpr nint_t rh = H == meta::kHiInf
+      ? meta::kHiInf : ::vecops::floor_div(H, N);
+  return meta::Dynamic<g, rl, rh>(::vecops::floor_div(lhs.value, N));
 }
 
 /// @brief floor_div by a runtime divisor: no constraint survives.
