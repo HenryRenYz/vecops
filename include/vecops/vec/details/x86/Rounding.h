@@ -7,8 +7,6 @@
  * small-float fallbacks.
  */
 
-#include <cstring>
-
 #include "vecops/vec/details/Rounding.h"
 #include "vecops/vec/details/x86/Arithmetic.h"
 
@@ -30,18 +28,6 @@ consteval int x86_rounding_control() {
     return _MM_FROUND_CUR_DIRECTION;
   else
     static_assert(dispatch_dependent_false<Op>);
-}
-
-template <typename Op, Element T, typename Raw>
-VECOPS_ALWAYS_INLINE Raw x86_emulated_rounding(Raw value) {
-  constexpr std::size_t lanes = sizeof(Raw) / sizeof(T);
-  alignas(64) T input[lanes];
-  alignas(64) T result[lanes];
-  std::memcpy(input, &value, sizeof(Raw));
-  for (std::size_t lane = 0; lane < lanes; ++lane)
-    result[lane] = scalar_rounding_value<Op>(input[lane]);
-  std::memcpy(&value, result, sizeof(Raw));
-  return value;
 }
 
 template <typename Op, Element T, typename Raw>
@@ -179,11 +165,6 @@ VECOPS_ALWAYS_INLINE Raw x86_round_away_native(Raw value) {
 
 template <typename Op, Element T, typename Raw>
 VECOPS_ALWAYS_INLINE Raw x86_round_float(Raw value) {
-  if constexpr (sizeof(Raw) == 16) {
-#if !defined(HAS_SSE4_1)
-    return x86_emulated_rounding<Op, T>(value);
-#endif
-  }
   if constexpr (std::same_as<Op, RoundOp>)
     return x86_round_away_native<T>(value);
   else
@@ -212,11 +193,6 @@ template <typename Op, Element T, typename Raw>
 VECOPS_ALWAYS_INLINE Raw x86_round_small_float(Raw value) {
   static_assert(
       std::same_as<T, float16_t> || std::same_as<T, bfloat16_t>);
-  if constexpr (sizeof(Raw) == 16) {
-#if !defined(HAS_SSE4_1)
-    return x86_emulated_rounding<Op, T>(value);
-#endif
-  }
   const auto expand = []<typename Float>(
                           Raw input, Float& low, Float& high) {
     if constexpr (std::same_as<T, bfloat16_t>)

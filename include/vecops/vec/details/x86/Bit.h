@@ -291,7 +291,126 @@ template <typename Op, typename T, typename Raw>
 VECOPS_ALWAYS_INLINE Raw x86_bit_shift_variable_raw(
     Raw value, Raw counts) {
 #if defined(HAS_AVX2)
-  if constexpr (sizeof(T) == 4) {
+  if constexpr (sizeof(T) == 1) {
+    // AVX2 has no byte-granularity variable shift. Widen four bytes at a
+    // time to dwords, shift there, then pack the low byte of every lane.
+    const auto shift128 = [](__m128i bytes, __m128i byte_counts) {
+      const auto shift_quad = [&]<int Offset>() {
+        const auto source = _mm_srli_si128(bytes, Offset);
+        const auto source_counts = _mm_srli_si128(byte_counts, Offset);
+        const auto lanes =
+            std::is_signed_v<T> && !std::same_as<Op, BitShiftLeftOp>
+            ? _mm_cvtepi8_epi32(source)
+            : _mm_cvtepu8_epi32(source);
+        const auto counts32 = _mm_min_epu32(
+            _mm_cvtepu8_epi32(source_counts), _mm_set1_epi32(8));
+        const auto shifted = [&] {
+          if constexpr (std::same_as<Op, BitShiftLeftOp>)
+            return _mm_sllv_epi32(lanes, counts32);
+          else if constexpr (std::is_signed_v<T>)
+            return _mm_srav_epi32(lanes, counts32);
+          else
+            return _mm_srlv_epi32(lanes, counts32);
+        }();
+        return _mm_and_si128(shifted, _mm_set1_epi32(0xff));
+      };
+      const auto lanes0 = shift_quad.template operator()<0>();
+      const auto lanes1 = shift_quad.template operator()<4>();
+      const auto lanes2 = shift_quad.template operator()<8>();
+      const auto lanes3 = shift_quad.template operator()<12>();
+      return _mm_packus_epi16(
+          _mm_packus_epi32(lanes0, lanes1),
+          _mm_packus_epi32(lanes2, lanes3));
+    };
+    if constexpr (sizeof(Raw) == 16) {
+      return shift128(value, counts);
+    } else if constexpr (sizeof(Raw) == 32) {
+      return _mm256_set_m128i(
+          shift128(
+              _mm256_extracti128_si256(value, 1),
+              _mm256_extracti128_si256(counts, 1)),
+          shift128(
+              _mm256_castsi256_si128(value),
+              _mm256_castsi256_si128(counts)));
+    }
+#if VEC_WIDTH >= 512
+    else {
+      auto result = _mm512_castsi128_si512(shift128(
+          _mm512_castsi512_si128(value),
+          _mm512_castsi512_si128(counts)));
+      result = _mm512_inserti32x4(result, shift128(
+          _mm512_extracti32x4_epi32(value, 1),
+          _mm512_extracti32x4_epi32(counts, 1)), 1);
+      result = _mm512_inserti32x4(result, shift128(
+          _mm512_extracti32x4_epi32(value, 2),
+          _mm512_extracti32x4_epi32(counts, 2)), 2);
+      return _mm512_inserti32x4(result, shift128(
+          _mm512_extracti32x4_epi32(value, 3),
+          _mm512_extracti32x4_epi32(counts, 3)), 3);
+    }
+#endif
+  } else if constexpr (sizeof(T) == 2) {
+    const auto shift_part = []<typename Wide>(Wide lanes, Wide lane_counts) {
+      if constexpr (std::same_as<Op, BitShiftLeftOp>)
+        return x86_bit_shift_variable_raw<BitShiftLeftOp, std::uint32_t>(
+            lanes, lane_counts);
+      else if constexpr (std::is_signed_v<T>)
+        return x86_bit_shift_variable_raw<BitShiftRightOp, std::int32_t>(
+            lanes, lane_counts);
+      else
+        return x86_bit_shift_variable_raw<BitShiftRightOp, std::uint32_t>(
+            lanes, lane_counts);
+    };
+    if constexpr (sizeof(Raw) == 16) {
+      const auto low_counts = _mm_cvtepu16_epi32(counts);
+      const auto high_counts =
+          _mm_cvtepu16_epi32(_mm_srli_si128(counts, 8));
+      const auto low = shift_part(
+          std::is_signed_v<T> && !std::same_as<Op, BitShiftLeftOp>
+              ? _mm_cvtepi16_epi32(value) : _mm_cvtepu16_epi32(value),
+          low_counts);
+      const auto high = shift_part(
+          std::is_signed_v<T> && !std::same_as<Op, BitShiftLeftOp>
+              ? _mm_cvtepi16_epi32(_mm_srli_si128(value, 8))
+              : _mm_cvtepu16_epi32(_mm_srli_si128(value, 8)),
+          high_counts);
+      if constexpr (
+          std::is_signed_v<T> && !std::same_as<Op, BitShiftLeftOp>) {
+        return _mm_packs_epi32(low, high);
+      } else {
+        const auto low16 = _mm_set1_epi32(0xffff);
+        return _mm_packus_epi32(
+            _mm_and_si128(low, low16), _mm_and_si128(high, low16));
+      }
+    } else if constexpr (sizeof(Raw) == 32) {
+      const auto low_value = _mm256_castsi256_si128(value);
+      const auto high_value = _mm256_extracti128_si256(value, 1);
+      const auto low_counts = _mm256_castsi256_si128(counts);
+      const auto high_counts = _mm256_extracti128_si256(counts, 1);
+      const auto low = shift_part(
+          std::is_signed_v<T> && !std::same_as<Op, BitShiftLeftOp>
+              ? _mm256_cvtepi16_epi32(low_value)
+              : _mm256_cvtepu16_epi32(low_value),
+          _mm256_cvtepu16_epi32(low_counts));
+      const auto high = shift_part(
+          std::is_signed_v<T> && !std::same_as<Op, BitShiftLeftOp>
+              ? _mm256_cvtepi16_epi32(high_value)
+              : _mm256_cvtepu16_epi32(high_value),
+          _mm256_cvtepu16_epi32(high_counts));
+      const auto packed = [&] {
+        if constexpr (
+            std::is_signed_v<T> && !std::same_as<Op, BitShiftLeftOp>) {
+          return _mm256_packs_epi32(low, high);
+        } else {
+          const auto low16 = _mm256_set1_epi32(0xffff);
+          return _mm256_packus_epi32(
+              _mm256_and_si256(low, low16),
+              _mm256_and_si256(high, low16));
+        }
+      }();
+      return _mm256_permute4x64_epi64(packed, 0xd8);
+    }
+  } else if constexpr (sizeof(T) == 4) {
     if constexpr (sizeof(Raw) == 16) {
       if constexpr (std::same_as<Op, BitShiftLeftOp>)
         return _mm_sllv_epi32(value, counts);
@@ -313,15 +432,43 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_shift_variable_raw(
         return _mm_sllv_epi64(value, counts);
       else if constexpr (std::is_unsigned_v<T>)
         return _mm_srlv_epi64(value, counts);
+      else {
+        const auto sign = x86_bit_negative_mask<T>(value);
+        return x86_bit_xor_raw(
+            _mm_srlv_epi64(x86_bit_xor_raw(value, sign), counts), sign);
+      }
     } else if constexpr (sizeof(Raw) == 32) {
       if constexpr (std::same_as<Op, BitShiftLeftOp>)
         return _mm256_sllv_epi64(value, counts);
       else if constexpr (std::is_unsigned_v<T>)
         return _mm256_srlv_epi64(value, counts);
+      else {
+        const auto sign = x86_bit_negative_mask<T>(value);
+        return x86_bit_xor_raw(
+            _mm256_srlv_epi64(
+                x86_bit_xor_raw(value, sign), counts), sign);
+      }
     }
   }
 #endif
 #if defined(CPU_CAPABILITY_AVX512)
+#if defined(HAS_AVX512BW) && defined(HAS_AVX512VL)
+  if constexpr (sizeof(Raw) == 16 && sizeof(T) == 2) {
+    if constexpr (std::same_as<Op, BitShiftLeftOp>)
+      return _mm_sllv_epi16(value, counts);
+    else if constexpr (std::is_signed_v<T>)
+      return _mm_srav_epi16(value, counts);
+    else
+      return _mm_srlv_epi16(value, counts);
+  } else if constexpr (sizeof(Raw) == 32 && sizeof(T) == 2) {
+    if constexpr (std::same_as<Op, BitShiftLeftOp>)
+      return _mm256_sllv_epi16(value, counts);
+    else if constexpr (std::is_signed_v<T>)
+      return _mm256_srav_epi16(value, counts);
+    else
+      return _mm256_srlv_epi16(value, counts);
+  } else
+#endif
   if constexpr (sizeof(Raw) == 64 && sizeof(T) == 2) {
     if constexpr (std::same_as<Op, BitShiftLeftOp>)
       return _mm512_sllv_epi16(value, counts);
@@ -708,8 +855,8 @@ VECOPS_ALWAYS_INLINE Raw x86_bit_rotate_variable_raw(
 #endif
   if constexpr (
       sizeof(T) >= 4
-#if VEC_WIDTH >= 512 && defined(HAS_AVX512BW)
-      || (sizeof(Raw) == 64 && sizeof(T) == 2)
+#if defined(HAS_AVX2)
+      || sizeof(T) <= 2
 #endif
   ) {
     constexpr U lane_mask = std::numeric_limits<U>::digits - 1;
