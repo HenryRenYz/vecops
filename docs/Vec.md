@@ -693,6 +693,53 @@ exponents cannot borrow into the exponent field). Only the scalar
 backend still evaluates the IEEE libm logarithm per lane (through a
 float intermediate for the narrow formats).
 
+The trigonometric family provides `sin`, `cos`, `tan`, the C23
+half-revolution forms `sinpi`, `cospi`, `tanpi`, and the fused
+`sincos`/`sincospi` calls. Every canonical name has the usual
+`*_strict`, `*_fast`, and `*_est` fixed-tier spellings. The fused API uses
+two output references because scalable SVE values cannot be members of a
+normal C++ pair:
+
+```cpp
+auto s = vec::zeros(tag);
+auto c = vec::zeros(tag);
+vec::sincos(tag, x, s, c, vec::opt::math::fast);
+vec::sincospi(x, s, c);  // tag-inferred, Strict by default
+```
+
+Each fused component obeys the matching unary contract. For Fast and
+Estimate, “mixed error” means
+`abs(result-reference) <= eps * max(1, abs(reference))`; unlike pure
+relative or ULP error this remains meaningful around roots and tangent
+poles.
+
+| Accuracy | f32 | f64 | f16 | bf16 |
+|---|---|---|---|---|
+| `Strict` (default) | <= 4 ULP | <= 4 ULP | <= 1 ULP | <= 1 ULP |
+| `Fast` mixed error | <= 2^-12 | <= 2^-26 | <= 2^-5 | <= 2^-4 |
+| `Estimate` mixed error | <= 2^-7 | <= 2^-13 | <= 2^-4 | <= 2^-3 |
+
+All tiers cover the complete finite radian domain. Common magnitudes take a
+vector Cody-Waite path; large arguments take a cold high-precision reduction
+or per-lane libm repair path. Pi-scaled operations never multiply the input by
+an approximate pi: they reduce the dyadic input around integers/half-integers,
+so `sinpi` integer zeros, `cospi` integer/half-integer values, and `tanpi`
+integer zeros/half-integer infinities have the C23-prescribed exact values and
+signs. Infinities map to NaN and NaNs propagate in every tier.
+
+The SVE hot path follows Arm optimized-routines and uses the base-SVE
+`FTSSEL`/`FTSMUL`/`FTMAD` trigonometric-assist instructions for f32/f64. x86
+uses FMA polynomial kernels and ISA-native masks/conversions; there is no x86
+trigonometric instruction (Intel SVML entries are compiler/runtime functions,
+not opcodes). f16 Strict and every bf16 tier widen through f32. SVE f16 Fast
+and Estimate use the native half-precision `FTMAD`/`FTSMUL`/`FTSSEL` forms on
+the hot domain and fall back to paired f32 only for large inputs and sensitive
+tangent poles. AVX512-FP16 likewise uses native half arithmetic for every f16
+Fast/Estimate operation; large arguments and sensitive tangent poles retain a
+paired-f32 fallback. `sincos` and `sincospi` share one reduction and evaluate
+both components together. The f16 Fast/Estimate contracts are exhaustively
+checked over all 65536 input bit patterns.
+
 ### Reductions (`vec/Reduction.h`)
 
 | Call | Semantics | Notes |

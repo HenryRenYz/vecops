@@ -122,6 +122,47 @@ CHECK_UNARY_CPO(log10, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(log10_strict, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(log10_fast, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(log10_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sin, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sin_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sin_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sin_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cos, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cos_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cos_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cos_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tan, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tan_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tan_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tan_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sinpi, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sinpi_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sinpi_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sinpi_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cospi, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cospi_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cospi_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cospi_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tanpi, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tanpi_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tanpi_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tanpi_est, FTag, FV, MaskedF);
+
+static_assert(accepts<decltype(vec::sincos), FTag, FV, FV, FV>);
+static_assert(accepts<decltype(vec::sincos), FV, FV, FV>);
+static_assert(accepts<decltype(vec::sincos_strict), FTag, FV, FV, FV>);
+static_assert(accepts<decltype(vec::sincos_fast), FV, FV, FV, MaskedF>);
+static_assert(accepts<decltype(vec::sincos_est), FV, FV, FV>);
+static_assert(accepts<
+              decltype(vec::sincospi), FTag, FV, FV, FV,
+              MaskedF, vec::opt::Zero, MathFast>);
+static_assert(accepts<decltype(vec::sincospi_strict), FTag, FV, FV, FV>);
+static_assert(accepts<decltype(vec::sincospi_fast), FV, FV, FV, MaskedF>);
+static_assert(accepts<decltype(vec::sincospi_est), FV, FV, FV>);
+static_assert(!accepts<
+              decltype(vec::sincos), FTag, FV, FV, FV,
+              MathStrict, MathFast>);
+static_assert(!accepts<
+              decltype(vec::sincos_fast), FV, FV, FV, MathEstimate>);
 
 static_assert(accepts<decltype(vec::rsqrt), FTag, FV, MathStrict>);
 static_assert(accepts<decltype(vec::rsqrt), FV, MathFast>);
@@ -146,6 +187,11 @@ static_assert(!accepts<decltype(vec::exp_est), FV, MathStrict>);
 static_assert(!accepts<
               decltype(vec::exp_neg_strict), FTag, FV, MathEstimate>);
 static_assert(!accepts<decltype(vec::exp_neg_fast), FV, MathFast>);
+static_assert(accepts<decltype(vec::sin), FTag, FV, MathStrict>);
+static_assert(accepts<decltype(vec::tanpi), FV, MathEstimate>);
+static_assert(!accepts<
+              decltype(vec::cos), FTag, FV, MathStrict, MathFast>);
+static_assert(!accepts<decltype(vec::sin_fast), FV, MathEstimate>);
 CHECK_BINARY_CPO(bit_and, ITag, IV, MaskedI);
 CHECK_BINARY_CPO(bit_or, ITag, IV, MaskedI);
 CHECK_BINARY_CPO(bit_xor, ITag, IV, MaskedI);

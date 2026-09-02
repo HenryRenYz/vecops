@@ -45,6 +45,49 @@ template <typename Backend, LogBase Base, Accuracy A, VectorTag Tag>
 struct GenericImpl<Backend, LogOp<Base, A>, Tag>
     : UnaryArithmeticGenericImpl<Backend, LogOp<Base, A>, Tag> {};
 
+template <TrigKind Kind, TrigUnit Unit, Accuracy A>
+struct EnableElementwiseWordBatching<TrigOp<Kind, Unit, A>>
+    : std::true_type {};
+
+template <
+    typename Backend, TrigKind Kind, TrigUnit Unit,
+    Accuracy A, VectorTag Tag>
+struct GenericImpl<Backend, TrigOp<Kind, Unit, A>, Tag>
+    : UnaryArithmeticGenericImpl<
+          Backend, TrigOp<Kind, Unit, A>, Tag> {};
+
+template <nint_t Index, nint_t Count, typename Backend,
+          TrigUnit Unit, Accuracy A, FloatingTag Tag>
+VECOPS_ALWAYS_INLINE void execute_sincos_words(
+    SinCosOp<Unit, A> op, Tag tag, Vec<Tag> value,
+    Vec<Tag>& sin_out, Vec<Tag>& cos_out) {
+  NativeWordVec<Tag> sin_word;
+  NativeWordVec<Tag> cos_word;
+  execute_word<Index, Backend>(
+      op, tag, ::vecops::vec::get_word<Index>(tag, value),
+      sin_word, cos_word);
+  sin_out = ::vecops::vec::set_word<Index>(tag, sin_out, sin_word);
+  cos_out = ::vecops::vec::set_word<Index>(tag, cos_out, cos_word);
+  if constexpr (Index + 1 < Count)
+    execute_sincos_words<Index + 1, Count, Backend>(
+        op, tag, value, sin_out, cos_out);
+}
+
+/** Multi-word fused batching while keeping the two sizeless outputs separate. */
+template <typename Backend, TrigUnit Unit, Accuracy A, FloatingTag Tag>
+struct GenericImpl<Backend, SinCosOp<Unit, A>, Tag> {
+  static VECOPS_ALWAYS_INLINE void call(
+      SinCosOp<Unit, A> op, Tag tag, Vec<Tag> value,
+      Vec<Tag>& sin_out, Vec<Tag>& cos_out) {
+    constexpr nint_t count =
+        RepresentationTraits<Backend, Tag>::word_count;
+    sin_out = zeros(tag);
+    cos_out = zeros(tag);
+    execute_sincos_words<0, count, Backend>(
+        op, tag, value, sin_out, cos_out);
+  }
+};
+
 /** Invokes f with every option except the compile-time math-accuracy option. */
 template <typename F>
 VECOPS_ALWAYS_INLINE decltype(auto) invoke_without_math_accuracy(F&& f) {
@@ -237,6 +280,114 @@ VECOPS_ALWAYS_INLINE Vec<Tag> execute_log_options(
     }
   };
   return invoke_without_math_accuracy(
+      dispatch, std::forward<Options>(options)...);
+}
+
+/** Accuracy selection and unary population dispatch for trig operations. */
+template <TrigKind Kind, TrigUnit Unit, FloatingTag Tag, typename... Options>
+VECOPS_ALWAYS_INLINE Vec<Tag> execute_trig_options(
+    Tag tag, Vec<Tag> value, Options&&... options) {
+  static_assert(valid_trig_options_for<Tag, Options...>());
+  constexpr Accuracy accuracy = selected_math_accuracy<Options...>();
+  const auto dispatch = [&]<typename... ArithmeticOptions>(
+                            ArithmeticOptions&&... arithmetic_options)
+      -> Vec<Tag> {
+    if constexpr (sizeof...(ArithmeticOptions) == 0) {
+      return trig<Kind, Unit, accuracy>(tag, value);
+    } else if constexpr (
+        option_count_v<IsFirstOption, ArithmeticOptions...> == 1) {
+      const auto count = find_option<IsFirstOption>(
+          arithmetic_options...).count;
+      const auto mask = mwhilelt(tag, 0, count);
+      constexpr std::size_t zero_count =
+          option_count_v<IsZeroOption, ArithmeticOptions...>;
+      constexpr std::size_t vector_merge_count =
+          option_count_v<IsVectorMergeOption, ArithmeticOptions...>;
+      constexpr std::size_t scalar_merge_count =
+          option_count_v<IsScalarMergeOption, ArithmeticOptions...>;
+      constexpr TrigOp<Kind, Unit, accuracy> op{};
+      if constexpr (zero_count == 1) {
+        return op(tag, value, mask, zeros(tag), ZeroArithmeticInactive{});
+      } else if constexpr (vector_merge_count == 1) {
+        const auto& inactive = find_option<IsVectorMergeOption>(
+            arithmetic_options...).value;
+        return op(
+            tag, value, mask, inactive, MergeArithmeticInactive{});
+      } else if constexpr (scalar_merge_count == 1) {
+        const auto inactive = fill(
+            tag, find_option<IsScalarMergeOption>(
+                     arithmetic_options...).value);
+        return op(
+            tag, value, mask, inactive, MergeArithmeticInactive{});
+      } else {
+        return op(
+            tag, value, mask, value, PreserveArithmeticInactive{});
+      }
+    } else {
+      return execute_unary_arithmetic_options(
+          TrigOp<Kind, Unit, accuracy>{}, tag, value,
+          std::forward<ArithmeticOptions>(arithmetic_options)...);
+    }
+  };
+  return invoke_without_math_accuracy(
+      dispatch, std::forward<Options>(options)...);
+}
+
+/**
+ * Fused sin/cos dispatch. A masked call sanitizes inactive inputs before the
+ * shared kernel, then applies the unary inactive policy to both outputs.
+ */
+template <TrigUnit Unit, FloatingTag Tag, typename... Options>
+VECOPS_ALWAYS_INLINE void execute_sincos_options(
+    Tag tag, Vec<Tag> value, Vec<Tag>& sin_out,
+    Vec<Tag>& cos_out, Options&&... options) {
+  static_assert(valid_trig_options_for<Tag, Options...>());
+  constexpr Accuracy accuracy = selected_math_accuracy<Options...>();
+  const auto dispatch = [&]<typename... ArithmeticOptions>(
+                            ArithmeticOptions&&... arithmetic_options) {
+    if constexpr (sizeof...(ArithmeticOptions) == 0 ||
+                  option_count_v<IsUnmaskedOption,
+                                 ArithmeticOptions...> == 1) {
+      execute(
+          SinCosOp<Unit, accuracy>{}, tag, value, sin_out, cos_out);
+    } else {
+      const auto mask = [&]() -> Mask<Tag> {
+        if constexpr (option_count_v<IsFirstOption,
+                                     ArithmeticOptions...> == 1) {
+          return mwhilelt(
+              tag, 0, find_option<IsFirstOption>(
+                          arithmetic_options...).count);
+        } else {
+          return find_option<IsMaskedOption>(
+              arithmetic_options...).value;
+        }
+      }();
+      const auto safe = blend(tag, zeros(tag), mask, value);
+      execute(
+          SinCosOp<Unit, accuracy>{}, tag, safe, sin_out, cos_out);
+
+      const auto inactive = [&]() -> Vec<Tag> {
+        if constexpr (option_count_v<IsZeroOption,
+                                     ArithmeticOptions...> == 1) {
+          return zeros(tag);
+        } else if constexpr (option_count_v<IsVectorMergeOption,
+                                            ArithmeticOptions...> == 1) {
+          return find_option<IsVectorMergeOption>(
+              arithmetic_options...).value;
+        } else if constexpr (option_count_v<IsScalarMergeOption,
+                                            ArithmeticOptions...> == 1) {
+          return fill(
+              tag, find_option<IsScalarMergeOption>(
+                       arithmetic_options...).value);
+        } else {
+          return value;
+        }
+      }();
+      sin_out = blend(tag, inactive, mask, sin_out);
+      cos_out = blend(tag, inactive, mask, cos_out);
+    }
+  };
+  invoke_without_math_accuracy(
       dispatch, std::forward<Options>(options)...);
 }
 

@@ -3,8 +3,8 @@
 
 /**
  * @file Math.h
- * @brief The math module: exp, reciprocal, and logarithm operations with
- * compile-time accuracy options.
+ * @brief The math module: exponential, reciprocal, logarithm, and
+ * trigonometric operations with compile-time accuracy options.
  *
  * `exp`, `exp2`, and `exp10` (plus their `*_neg` counterparts) are the
  * canonical exponential entry points.  With no math option they use `Accuracy::Strict`;
@@ -110,6 +110,45 @@
  * *inputs* are handled exactly in every tier. Accuracy options apply
  * exactly as for the exponential family, including combination with masking
  * options.
+ *
+ * ***
+ *
+ * `sin`, `cos`, `tan`, and their half-revolution counterparts `sinpi`,
+ * `cospi`, and `tanpi` use the same three accuracy tiers. `sincos` and
+ * `sincospi` share argument reduction and write both results through output
+ * references (a pair containing scalable SVE vectors is not a legal C++
+ * object). Each component obeys the corresponding unary contract.
+ *
+ * | Accuracy | f32 / f64 | f16 / bf16 |
+ * |----------|-----------|-------------|
+ * | Strict   | ULP error <= 4 | ULP error <= 1 |
+ * | Fast     | mixed error <= 2^-12 / 2^-26 | 2^-5 / 2^-4 |
+ * | Estimate | mixed error <= 2^-7 / 2^-13 | 2^-4 / 2^-3 |
+ *
+ * Here mixed error means `abs(result-reference) <= eps *
+ * max(1, abs(reference))`; this remains meaningful at trigonometric roots
+ * and tangent poles, where a purely relative or purely ULP contract does
+ * not. Strict is the production vector-libm class used by Arm optimized
+ * routines and SLEEF u35 (the full-range Arm kernels measure below 3.5 ULP).
+ * Fast retains about half of the target significand and Estimate is the
+ * lower-cost graphics/ML tier. Every tier covers the complete finite input
+ * domain; large radian arguments take a cold high-precision reduction path.
+ *
+ * Special results are tier-independent and follow C23 Annex F. In
+ * particular, radian functions preserve the required signed zero and map
+ * infinities to NaN. The pi-scaled family does not form `pi*x`: integer and
+ * half-integer values are reduced exactly, including the prescribed signs
+ * of zero and infinity. The fused calls accept the usual unary masking
+ * options; inactive lanes use the input for both outputs by default, or the
+ * same zero/merge value for both outputs when requested.
+ *
+ * Narrow execution is target- and operation-dependent. On SVE, f16 Fast and
+ * Estimate use the native f16 FTMAD/FTSMUL/FTSSEL forms on their hot domain,
+ * with a paired-f32 fallback for large arguments and sensitive tangent poles.
+ * On AVX512-FP16, every f16 Fast and Estimate operation likewise uses a
+ * native-half hot path. Large arguments and sensitive tangent poles retain a
+ * paired-f32 fallback. f16 Strict and every bf16 tier widen to f32 on both
+ * backends.
  */
 
 #include <cstdint>
@@ -117,6 +156,7 @@
 #include "vecops/vec/Arithmetic.h"
 #include "vecops/vec/Bit.h"
 #include "vecops/vec/Comparison.h"
+#include "vecops/vec/Rounding.h"
 
 namespace vecops::vec {
 
@@ -133,6 +173,12 @@ enum class LogBase : std::uint8_t {
   Base2,  //< log_2
   Base10, //< log_10
 };
+
+/** Trigonometric function selected by a related implementation token. */
+enum class TrigKind : std::uint8_t { Sin, Cos, Tan };
+
+/** Input unit selected by a trigonometric implementation token. */
+enum class TrigUnit : std::uint8_t { Radians, Pi };
 
 namespace details {
 
@@ -535,6 +581,164 @@ struct FixedAccuracyLogCpo {
   }
 };
 
+/* **************************************************************************** */
+//    Trigonometric operations                                                  //
+/* **************************************************************************** */
+
+namespace details {
+
+/** One unary implementation token for every function/unit/accuracy tuple. */
+template <TrigKind Kind, TrigUnit Unit, Accuracy A>
+struct TrigOp {
+  template <FloatingTag Tag>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(Tag tag, Vec<Tag> value) const {
+    return details::execute(*this, tag, value);
+  }
+
+  template <FloatingTag Tag, typename Policy>
+    requires (details::arithmetic_inactive_policy<Policy>)
+  inline Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Mask<Tag> mask,
+      Vec<Tag> inactive, Policy policy) const {
+    return details::execute(
+        *this, tag, value, mask, inactive, policy);
+  }
+
+  template <FloatingTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordVec<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> value) const {
+    return details::execute_word<0, details::CurrentBackend>(
+        *this, tag, value);
+  }
+};
+
+/** Fused sin/cos token; output references also support sizeless SVE values. */
+template <TrigUnit Unit, Accuracy A>
+struct SinCosOp {
+  template <FloatingTag Tag>
+  VECOPS_ALWAYS_INLINE void operator()(
+      Tag tag, Vec<Tag> value, Vec<Tag>& sin_out,
+      Vec<Tag>& cos_out) const {
+    details::execute(*this, tag, value, sin_out, cos_out);
+  }
+};
+
+template <TrigKind Kind, TrigUnit Unit, Accuracy A>
+inline constexpr TrigOp<Kind, Unit, A> trig{};
+
+template <TrigUnit Unit, Accuracy A>
+inline constexpr SinCosOp<Unit, A> sincos{};
+
+template <FloatingTag Tag, typename... Options>
+consteval bool valid_trig_options_for() {
+  return valid_exp_options_for<Tag, Options...>();
+}
+
+} // namespace details
+
+/** Canonical unary trigonometric CPO. */
+template <TrigKind Kind, TrigUnit Unit>
+struct TrigCpo {
+  template <FloatingTag Tag>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value) const;
+
+  template <Accuracy A, FloatingTag Tag, typename... ArithmeticOptions>
+    requires ((!details::is_math_accuracy_option_v<ArithmeticOptions>) && ... &&
+              details::valid_trig_options_for<
+                  Tag, opt::math::AccuracyOption<A>,
+                  ArithmeticOptions...>())
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, opt::math::AccuracyOption<A>,
+      ArithmeticOptions&&... arithmetic_options) const;
+
+  template <FloatingTag Tag, typename... Options>
+    requires (sizeof...(Options) > 0 &&
+              details::valid_trig_options_for<Tag, Options...>())
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Options&&... options) const;
+
+  template <FloatingVectorValue V, typename... Options>
+    requires (details::valid_trig_options_for<VecToTag<V>, Options...>())
+  VECOPS_ALWAYS_INLINE V operator()(
+      V value, Options&&... options) const {
+    return (*this)(
+        VecToTag<V>{}, value, std::forward<Options>(options)...);
+  }
+};
+
+/** Fixed-accuracy unary trigonometric forwarding CPO. */
+template <TrigKind Kind, TrigUnit Unit, Accuracy A>
+struct FixedAccuracyTrigCpo {
+  template <FloatingTag Tag, typename... Options>
+    requires (!details::has_math_accuracy_option_v<Options...> &&
+              details::valid_trig_options_for<
+                  Tag, Options..., decltype(opt::math::accuracy<A>)>())
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Options&&... options) const {
+    return TrigCpo<Kind, Unit>{}(
+        tag, value, opt::math::accuracy<A>,
+        std::forward<Options>(options)...);
+  }
+
+  template <FloatingVectorValue V, typename... Options>
+    requires (!details::has_math_accuracy_option_v<Options...> &&
+              details::valid_trig_options_for<
+                  VecToTag<V>, Options...,
+                  decltype(opt::math::accuracy<A>)>())
+  VECOPS_ALWAYS_INLINE V operator()(
+      V value, Options&&... options) const {
+    return (*this)(
+        VecToTag<V>{}, value, std::forward<Options>(options)...);
+  }
+};
+
+/** Canonical fused sin/cos CPO using two output references. */
+template <TrigUnit Unit>
+struct SinCosCpo {
+  template <FloatingTag Tag, typename... Options>
+    requires (details::valid_trig_options_for<Tag, Options...>())
+  VECOPS_ALWAYS_INLINE void operator()(
+      Tag tag, Vec<Tag> value, Vec<Tag>& sin_out,
+      Vec<Tag>& cos_out, Options&&... options) const;
+
+  template <FloatingVectorValue V, typename... Options>
+    requires (details::valid_trig_options_for<VecToTag<V>, Options...>())
+  VECOPS_ALWAYS_INLINE void operator()(
+      V value, V& sin_out, V& cos_out, Options&&... options) const {
+    (*this)(VecToTag<V>{}, value, sin_out, cos_out,
+            std::forward<Options>(options)...);
+  }
+};
+
+/** Fixed-accuracy fused sin/cos forwarding CPO. */
+template <TrigUnit Unit, Accuracy A>
+struct FixedAccuracySinCosCpo {
+  template <FloatingTag Tag, typename... Options>
+    requires (!details::has_math_accuracy_option_v<Options...> &&
+              details::valid_trig_options_for<
+                  Tag, Options..., decltype(opt::math::accuracy<A>)>())
+  VECOPS_ALWAYS_INLINE void operator()(
+      Tag tag, Vec<Tag> value, Vec<Tag>& sin_out,
+      Vec<Tag>& cos_out, Options&&... options) const {
+    SinCosCpo<Unit>{}(
+        tag, value, sin_out, cos_out, opt::math::accuracy<A>,
+        std::forward<Options>(options)...);
+  }
+
+  template <FloatingVectorValue V, typename... Options>
+    requires (!details::has_math_accuracy_option_v<Options...> &&
+              details::valid_trig_options_for<
+                  VecToTag<V>, Options...,
+                  decltype(opt::math::accuracy<A>)>())
+  VECOPS_ALWAYS_INLINE void operator()(
+      V value, V& sin_out, V& cos_out, Options&&... options) const {
+    (*this)(VecToTag<V>{}, value, sin_out, cos_out,
+            std::forward<Options>(options)...);
+  }
+};
+
 /**
  * Public entry-point variables, declared before the backend includes so
  * that details-layer implementations can call them by short names (same
@@ -699,6 +903,46 @@ inline constexpr FixedAccuracyLogCpo<LogBase::Base10, Accuracy::Fast>
 /** Fixed Estimate forwarding entry point for log10. */
 inline constexpr FixedAccuracyLogCpo<LogBase::Base10, Accuracy::Estimate>
     log10_est{};
+
+#define VECOPS_VEC_DECLARE_TRIG_CPOS(Name, Kind, Unit)                         \
+  /** Canonical Name; defaults to Accuracy::Strict. */                         \
+  inline constexpr TrigCpo<TrigKind::Kind, TrigUnit::Unit> Name{};             \
+  /** Fixed Strict forwarding entry point for Name. */                        \
+  inline constexpr FixedAccuracyTrigCpo<                                      \
+      TrigKind::Kind, TrigUnit::Unit, Accuracy::Strict> Name##_strict{};       \
+  /** Fixed Fast forwarding entry point for Name. */                          \
+  inline constexpr FixedAccuracyTrigCpo<                                      \
+      TrigKind::Kind, TrigUnit::Unit, Accuracy::Fast> Name##_fast{};           \
+  /** Fixed Estimate forwarding entry point for Name. */                      \
+  inline constexpr FixedAccuracyTrigCpo<                                      \
+      TrigKind::Kind, TrigUnit::Unit, Accuracy::Estimate> Name##_est{}
+
+VECOPS_VEC_DECLARE_TRIG_CPOS(sin, Sin, Radians);
+VECOPS_VEC_DECLARE_TRIG_CPOS(cos, Cos, Radians);
+VECOPS_VEC_DECLARE_TRIG_CPOS(tan, Tan, Radians);
+VECOPS_VEC_DECLARE_TRIG_CPOS(sinpi, Sin, Pi);
+VECOPS_VEC_DECLARE_TRIG_CPOS(cospi, Cos, Pi);
+VECOPS_VEC_DECLARE_TRIG_CPOS(tanpi, Tan, Pi);
+
+#undef VECOPS_VEC_DECLARE_TRIG_CPOS
+
+#define VECOPS_VEC_DECLARE_SINCOS_CPOS(Name, Unit)                            \
+  /** Canonical fused Name; defaults to Accuracy::Strict. */                  \
+  inline constexpr SinCosCpo<TrigUnit::Unit> Name{};                          \
+  /** Fixed Strict forwarding entry point for Name. */                       \
+  inline constexpr FixedAccuracySinCosCpo<                                   \
+      TrigUnit::Unit, Accuracy::Strict> Name##_strict{};                      \
+  /** Fixed Fast forwarding entry point for Name. */                         \
+  inline constexpr FixedAccuracySinCosCpo<                                   \
+      TrigUnit::Unit, Accuracy::Fast> Name##_fast{};                          \
+  /** Fixed Estimate forwarding entry point for Name. */                     \
+  inline constexpr FixedAccuracySinCosCpo<                                   \
+      TrigUnit::Unit, Accuracy::Estimate> Name##_est{}
+
+VECOPS_VEC_DECLARE_SINCOS_CPOS(sincos, Radians);
+VECOPS_VEC_DECLARE_SINCOS_CPOS(sincospi, Pi);
+
+#undef VECOPS_VEC_DECLARE_SINCOS_CPOS
 
 } // namespace vecops::vec
 
@@ -909,6 +1153,58 @@ VECOPS_ALWAYS_INLINE Vec<Tag> LogCpo<Base>::operator()(
     Tag tag, Vec<Tag> value, Options&&... options) const {
   return details::execute_log_options<Base>(
       tag, value, std::forward<Options>(options)...);
+}
+
+/* **************************************************************************** */
+//    Trigonometric definitions                                                 //
+/* **************************************************************************** */
+
+template <TrigKind Kind, TrigUnit Unit>
+template <FloatingTag Tag>
+VECOPS_ALWAYS_INLINE Vec<Tag> TrigCpo<Kind, Unit>::operator()(
+    Tag tag, Vec<Tag> value) const {
+  return details::execute(
+      details::TrigOp<Kind, Unit, Accuracy::Strict>{}, tag, value);
+}
+
+template <TrigKind Kind, TrigUnit Unit>
+template <Accuracy A, FloatingTag Tag, typename... ArithmeticOptions>
+  requires ((!details::is_math_accuracy_option_v<ArithmeticOptions>) && ... &&
+            details::valid_trig_options_for<
+                Tag, opt::math::AccuracyOption<A>,
+                ArithmeticOptions...>())
+VECOPS_ALWAYS_INLINE Vec<Tag> TrigCpo<Kind, Unit>::operator()(
+    Tag tag, Vec<Tag> value, opt::math::AccuracyOption<A>,
+    ArithmeticOptions&&... arithmetic_options) const {
+  if constexpr (sizeof...(ArithmeticOptions) == 0) {
+    return details::execute(
+        details::TrigOp<Kind, Unit, A>{}, tag, value);
+  } else {
+    return details::execute_trig_options<Kind, Unit>(
+        tag, value, opt::math::accuracy<A>,
+        std::forward<ArithmeticOptions>(arithmetic_options)...);
+  }
+}
+
+template <TrigKind Kind, TrigUnit Unit>
+template <FloatingTag Tag, typename... Options>
+  requires (sizeof...(Options) > 0 &&
+            details::valid_trig_options_for<Tag, Options...>())
+VECOPS_ALWAYS_INLINE Vec<Tag> TrigCpo<Kind, Unit>::operator()(
+    Tag tag, Vec<Tag> value, Options&&... options) const {
+  return details::execute_trig_options<Kind, Unit>(
+      tag, value, std::forward<Options>(options)...);
+}
+
+template <TrigUnit Unit>
+template <FloatingTag Tag, typename... Options>
+  requires (details::valid_trig_options_for<Tag, Options...>())
+VECOPS_ALWAYS_INLINE void SinCosCpo<Unit>::operator()(
+    Tag tag, Vec<Tag> value, Vec<Tag>& sin_out,
+    Vec<Tag>& cos_out, Options&&... options) const {
+  details::execute_sincos_options<Unit>(
+      tag, value, sin_out, cos_out,
+      std::forward<Options>(options)...);
 }
 
 

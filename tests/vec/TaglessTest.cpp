@@ -101,6 +101,25 @@ void verify_float_tagless() {
   expect_same(
       tag, vec::exp_neg_est(tag, negative), vec::exp_neg_est(negative));
 
+  expect_same(tag, vec::sin(tag, a), vec::sin(a));
+  expect_same(tag, vec::cos(tag, a), vec::cos(a));
+  expect_same(tag, vec::tan(tag, a), vec::tan(a));
+  expect_same(tag, vec::sinpi(tag, a), vec::sinpi(a));
+  expect_same(tag, vec::cospi(tag, a), vec::cospi(a));
+  expect_same(tag, vec::tanpi(tag, a), vec::tanpi(a));
+  auto tagged_sin = vec::zeros(tag);
+  auto tagged_cos = vec::zeros(tag);
+  auto inferred_sin = vec::zeros(tag);
+  auto inferred_cos = vec::zeros(tag);
+  vec::sincos(tag, a, tagged_sin, tagged_cos);
+  vec::sincos(a, inferred_sin, inferred_cos);
+  expect_same(tag, tagged_sin, inferred_sin);
+  expect_same(tag, tagged_cos, inferred_cos);
+  vec::sincospi(tag, a, tagged_sin, tagged_cos, vec::opt::math::fast);
+  vec::sincospi(a, inferred_sin, inferred_cos, vec::opt::math::fast);
+  expect_same(tag, tagged_sin, inferred_sin);
+  expect_same(tag, tagged_cos, inferred_cos);
+
   expect_same(tag, vec::blend(tag, a, mask, b), vec::blend(a, mask, b));
   expect_same(
       tag, vec::interleave_even(tag, a, b), vec::interleave_even(a, b));
