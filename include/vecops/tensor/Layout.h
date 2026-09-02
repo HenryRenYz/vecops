@@ -215,7 +215,7 @@ struct Shape : public ArrayMeta<Is...> {
  * auto s = make_shape(cint<3>, 128);  // Shape<Const<3>, Any>
  * @endcode
  */
-template <typename... Ints>
+template <meta::ValueInput... Ints>
 constexpr auto make_shape(Ints&& ... is) -> Shape<to_value_t<std::remove_cvref_t<Ints>>...> {
   return {std::forward<Ints>(is)...};
 }
@@ -240,7 +240,7 @@ struct Strides : public ArrayMeta<Is...> {
 /**
  * @brief Create Strides, automatically wrapping bare integers as Any.
  */
-template <typename... Ints>
+template <meta::ValueInput... Ints>
 constexpr auto make_strides(Ints&& ... is) -> Strides<to_value_t<std::remove_cvref_t<Ints>>...> {
   return {std::forward<Ints>(is)...};
 }

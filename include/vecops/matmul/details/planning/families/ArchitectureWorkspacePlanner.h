@@ -5,9 +5,9 @@
 #ifndef VECOPS_MATMUL_DETAILS_FAMILIES_ARCHITECTURE_WORKSPACE_PLANNER_H
 #define VECOPS_MATMUL_DETAILS_FAMILIES_ARCHITECTURE_WORKSPACE_PLANNER_H
 
-#include "vecops/matmul/details/Kernel.h"
+#include "vecops/matmul/details/kernel/Kernel.h"
 
-namespace vecops::ops::matmul_details {
+namespace vecops::matmul::details {
 
 /** Workspace accounting for packing, backend scratch, and batch materialization. */
 template <typename Invocation>
@@ -36,6 +36,6 @@ struct ArchitectureWorkspacePlanner {
   }
 };
 
-} // namespace vecops::ops::matmul_details
+} // namespace vecops::matmul::details
 
 #endif // VECOPS_MATMUL_DETAILS_FAMILIES_ARCHITECTURE_WORKSPACE_PLANNER_H

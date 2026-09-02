@@ -9,11 +9,11 @@
 #include "vecops/kernel/Loop.h"
 #include "vecops/matmul/Config.h"
 #include "vecops/matmul/Packing.h"
-#include "vecops/matmul/details/OperationCommon.h"
-#include "vecops/matmul/details/Tiler.h"
+#include "vecops/matmul/details/planning/Implementation.h"
+#include "vecops/matmul/details/tiled/Tiler.h"
 #include "vecops/tensor/DataAccess.h"
 
-namespace vecops::ops::matmul_details {
+namespace vecops::matmul::details {
 
 template <typename Spec>
 struct BroadcastPackedOperand {
@@ -169,6 +169,6 @@ VECOPS_INLINE void run_generic_tiler(
   }
 }
 
-} // namespace matmul_details
+} // namespace vecops::matmul::details
 
 #endif // VECOPS_MATMUL_DETAILS_FAMILIES_GENERIC_TILED_H

@@ -157,17 +157,6 @@ struct Tile2DExactKernelCase
 
 namespace tile2d_details {
 
-template <typename T>
-using TileValue = ::vecops::meta::to_value_t<std::remove_cvref_t<T>>;
-
-template <typename T>
-concept TileValueInput = meta::ValueType<TileValue<T>>;
-
-template <typename T>
-VECOPS_ALWAYS_INLINE constexpr TileValue<T> to_tile_value(T&& value) {
-  return TileValue<T>{static_cast<nint_t>(value)};
-}
-
 template <meta::ValueType Extent, meta::ValueType Step>
 inline constexpr bool has_no_tail_v = [] {
   using E = std::remove_cvref_t<Extent>;
@@ -1253,16 +1242,14 @@ consteval void validate_positive_tile() {
 template <typename Policy = tile2d_policy::RowMajor,
           typename M, typename N, typename TM, typename TN,
           typename Catalog, typename Fn>
-  requires (tile2d_details::TileValueInput<M> &&
-            tile2d_details::TileValueInput<N> &&
-            tile2d_details::TileValueInput<TM> &&
-            tile2d_details::TileValueInput<TN>)
+  requires (meta::ValueInput<M> && meta::ValueInput<N> &&
+            meta::ValueInput<TM> && meta::ValueInput<TN>)
 VECOPS_ALWAYS_INLINE void tile2d(
     M m, N n, TM tm, TN tn, Catalog, Fn&& fn) {
-  using MV = tile2d_details::TileValue<M>;
-  using NV = tile2d_details::TileValue<N>;
-  using TMV = tile2d_details::TileValue<TM>;
-  using TNV = tile2d_details::TileValue<TN>;
+  using MV = meta::to_value_t<M>;
+  using NV = meta::to_value_t<N>;
+  using TMV = meta::to_value_t<TM>;
+  using TNV = meta::to_value_t<TN>;
   static_assert(tile2d_details::valid_catalog<Catalog>(),
                 "tile2d catalog must be a complete downward-closed set "
                 "containing the 1x1 family");
@@ -1271,10 +1258,10 @@ VECOPS_ALWAYS_INLINE void tile2d(
   tile2d_details::validate_positive_tile<TMV>();
   tile2d_details::validate_positive_tile<TNV>();
 
-  auto m_value = tile2d_details::to_tile_value(m);
-  auto n_value = tile2d_details::to_tile_value(n);
-  auto tm_value = tile2d_details::to_tile_value(tm);
-  auto tn_value = tile2d_details::to_tile_value(tn);
+  auto m_value = meta::to_value(m);
+  auto n_value = meta::to_value(n);
+  auto tm_value = meta::to_value(tm);
+  auto tn_value = meta::to_value(tn);
   const nint_t m_int = static_cast<nint_t>(m_value);
   const nint_t n_int = static_cast<nint_t>(n_value);
   const nint_t tm_int = static_cast<nint_t>(tm_value);
@@ -1351,10 +1338,8 @@ template <typename SearchSpace,
           typename Policy = tile2d_policy::RowMajor,
           typename M, typename N, typename TM, typename TN,
           typename Provider, typename Fn>
-  requires (tile2d_details::TileValueInput<M> &&
-            tile2d_details::TileValueInput<N> &&
-            tile2d_details::TileValueInput<TM> &&
-            tile2d_details::TileValueInput<TN>)
+  requires (meta::ValueInput<M> && meta::ValueInput<N> &&
+            meta::ValueInput<TM> && meta::ValueInput<TN>)
 VECOPS_ALWAYS_INLINE void tile2d_generate(
     M m, N n, TM tm, TN tn, Provider, Fn&& fn) {
   using Catalog = Tile2DGeneratedCatalog<

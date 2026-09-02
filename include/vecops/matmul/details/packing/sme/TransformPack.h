@@ -7,7 +7,7 @@
 
 #include <type_traits>
 
-#include "vecops/matmul/details/pack/sme/Pack.h"
+#include "vecops/matmul/details/packing/sme/Pack.h"
 #include "vecops/tensor/DataAccess.h"
 #include "vecops/vec/Vec.h"
 

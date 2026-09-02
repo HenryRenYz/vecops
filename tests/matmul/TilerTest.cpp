@@ -7,10 +7,11 @@
 #include <array>
 #include <vector>
 
-#include "vecops/matmul/details/LoopNest.h"
-#include "vecops/matmul/details/FamilySelector.h"
-#include "vecops/matmul/details/PolicyTraits.h"
+#include "vecops/matmul/details/tiled/LoopNest.h"
+#include "vecops/matmul/details/planning/FamilySelector.h"
+#include "vecops/matmul/details/tiled/PolicyTraits.h"
 #include "vecops/matmul/Tiling.h"
+#include "vecops/ops/Matmul.h"
 #include "vecops/platform/CacheInfo.h"
 
 namespace {

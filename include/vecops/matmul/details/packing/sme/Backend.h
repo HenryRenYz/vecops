@@ -6,11 +6,11 @@
 #define VECOPS_MATMUL_DETAILS_PACK_SME_BACKEND_H
 
 #include "vecops/execution/details/arm/Resources.h"
-#include "vecops/matmul/details/sme/Atoms.h"
-#include "vecops/matmul/details/sme/Packing.h"
-#include "vecops/matmul/details/pack/generic/Pack.h"
-#include "vecops/matmul/details/pack/sme/Pack.h"
-#include "vecops/matmul/details/pack/sme/TransformPack.h"
+#include "vecops/matmul/details/kernel/sme/Atoms.h"
+#include "vecops/matmul/details/packing/sme/Format.h"
+#include "vecops/matmul/details/packing/generic/Pack.h"
+#include "vecops/matmul/details/packing/sme/Pack.h"
+#include "vecops/matmul/details/packing/sme/TransformPack.h"
 
 namespace vecops::kernel::matmul_pack_details {
 

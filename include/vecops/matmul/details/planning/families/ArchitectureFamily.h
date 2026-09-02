@@ -15,16 +15,16 @@
 #include "vecops/kernel/Loop.h"
 #include "vecops/matmul/Config.h"
 #include "vecops/matmul/Packing.h"
-#include "vecops/matmul/details/FamilySelector.h"
-#include "vecops/matmul/details/Kernel.h"
-#include "vecops/matmul/details/OperationCommon.h"
-#include "vecops/matmul/details/PackOperation.h"
-#include "vecops/matmul/details/families/ArchitectureBatchPlanner.h"
-#include "vecops/matmul/details/families/ArchitecturePackingPlanner.h"
-#include "vecops/matmul/details/families/ArchitectureWorkspacePlanner.h"
+#include "vecops/matmul/details/planning/FamilySelector.h"
+#include "vecops/matmul/details/kernel/Kernel.h"
+#include "vecops/matmul/details/planning/Implementation.h"
+#include "vecops/matmul/details/packing/Plan.h"
+#include "vecops/matmul/details/planning/families/ArchitectureBatchPlanner.h"
+#include "vecops/matmul/details/planning/families/ArchitecturePackingPlanner.h"
+#include "vecops/matmul/details/planning/families/ArchitectureWorkspacePlanner.h"
 #include "vecops/tensor/DataAccess.h"
 
-namespace vecops::ops::matmul_details {
+namespace vecops::matmul::details {
 
 template <::vecops::matmul::Atom Atom,
           typename TilePolicy,
@@ -41,7 +41,7 @@ public:
   using MExtentType = MExtent;
   using NExtentType = NExtent;
   using KExtentType = KExtent;
-  using Implementation = matmul_details::SelectedImplementation<Atom>;
+  using Implementation = SelectedImplementation<Atom>;
   using ResourceRequirements =
       kernel::matmul_implementation::resource_requirements_t<Implementation>;
   static constexpr int ProblemRank =
@@ -89,12 +89,12 @@ public:
 
 private:
   using BatchPlanner =
-      matmul_details::ArchitectureBatchPlanner<ArchitectureFamilyInvocation>;
+      ArchitectureBatchPlanner<ArchitectureFamilyInvocation>;
   friend BatchPlanner;
-  using WorkspacePlanner = matmul_details::ArchitectureWorkspacePlanner<
+  using WorkspacePlanner = ArchitectureWorkspacePlanner<
       ArchitectureFamilyInvocation>;
   friend WorkspacePlanner;
-  using PackingPlanner = matmul_details::ArchitecturePackingPlanner<
+  using PackingPlanner = ArchitecturePackingPlanner<
       ArchitectureFamilyInvocation>;
   friend PackingPlanner;
   template <::vecops::matmul::Operand Side, typename Spec>
@@ -715,7 +715,7 @@ private:
         return;
       }
     }
-    matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
+    run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
         scope, input, output);
   }
 
@@ -742,7 +742,7 @@ private:
       if constexpr (SMEBatchRowsFullPackCandidate) {
         if (VECOPS_LIKELY(batch_rows_flatten_enabled())) {
           const auto b = tensor::slice_view<0>(b_, 0);
-          matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(scope, b, b_tensor);
+          run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(scope, b, b_tensor);
           const auto a_layout = batch_rows_packed_a_layout();
           using TA = typename Atom::TA;
           auto* a_data = static_cast<TA*>(workspace.allocate(
@@ -780,7 +780,7 @@ private:
               a_ready = true;
             }
             if (!reuse_b || !b_ready) {
-              matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
+              run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
                   scope, b, b_tensor);
               b_ready = true;
             }
@@ -798,7 +798,7 @@ private:
       const bool reuse = static_cast<nint_t>(tensor::stride_value<0>(
           a_.input_layout())) == 0;
       bool ready = false;
-      const auto b_loop = matmul_details::batch_loop_operand<
+      const auto b_loop = batch_loop_operand<
           Atom, ::vecops::matmul::Operand::B>(b_);
       kernel::loop::for_each_dims<1>(
           [&](const auto& a, const auto& b,
@@ -810,7 +810,7 @@ private:
             }
             execute_problem(
                 scope, tensor::input<TA>(packed_tensor),
-                matmul_details::batch_loop_leaf(b),
+                batch_loop_leaf(b),
                 c_input, c_output, scratch);
           },
           a_, b_loop, c_input_, c_output_);
@@ -826,7 +826,7 @@ private:
       if constexpr (BatchRowsFlattenCandidate) {
         if (VECOPS_LIKELY(batch_rows_flatten_enabled())) {
           const auto b = tensor::slice_view<0>(b_, 0);
-          matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
+          run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
               scope, b, packed_tensor);
           if constexpr (BatchRowsPackACandidate) {
             if (VECOPS_UNLIKELY(batch_rows_pack_a_enabled())) {
@@ -842,7 +842,7 @@ private:
               const auto flat_m = batch * m_;
               const auto a = flatten_batch_rows_input(
                   a_, flat_m, k_, k_);
-              matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(scope, a, a_tensor);
+              run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(scope, a, a_tensor);
               execute_flattened_batch_rows_operands(
                   scope, tensor::input<TA>(a_tensor),
                   tensor::input<TB>(packed_tensor), scratch);
@@ -856,7 +856,7 @@ private:
           return;
         }
       }
-      const auto a_loop = matmul_details::batch_loop_operand<
+      const auto a_loop = batch_loop_operand<
           Atom, ::vecops::matmul::Operand::A>(a_);
       auto run_loop = [&]<bool Configured>(auto& active_scope)
           VECOPS_KERNEL_LAMBDA {
@@ -865,12 +865,12 @@ private:
                 const auto& c_input, const auto& c_output)
                 VECOPS_KERNEL_LAMBDA {
               if (!reuse || !ready) {
-                matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
+                run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
                     active_scope, b, packed_tensor);
                 ready = true;
               }
               execute_problem<Configured>(
-                  active_scope, matmul_details::batch_loop_leaf(a),
+                  active_scope, batch_loop_leaf(a),
                   tensor::input<TB>(packed_tensor),
                   c_input, c_output, scratch);
             },
@@ -908,9 +908,9 @@ private:
       }
 
       if constexpr (AutoPackA && AutoPackB) {
-        const auto a_layout = matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(
+        const auto a_layout = ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::A>(
             a_.input_layout());
-        const auto b_layout = matmul_packed_layout<Atom, ::vecops::matmul::Operand::B>(
+        const auto b_layout = ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::B>(
             b_.input_layout());
         using TA = typename Atom::TA;
         using TB = typename Atom::TB;
@@ -922,32 +922,32 @@ private:
         auto* b_data = static_cast<TB*>(workspace.allocate(b_bytes, 64));
         auto a_tensor = tensor::make_tensor(a_data, a_layout);
         auto b_tensor = tensor::make_tensor(b_data, b_layout);
-        matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(scope, a_, a_tensor);
-        matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(scope, b_, b_tensor);
+        run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(scope, a_, a_tensor);
+        run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(scope, b_, b_tensor);
         execute_problem(
             scope, tensor::input<TA>(a_tensor), tensor::input<TB>(b_tensor),
             c_input_, c_output_, scratch);
       } else if constexpr (AutoPackA) {
-        const auto layout = matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(
+        const auto layout = ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::A>(
             a_.input_layout());
         using TA = typename Atom::TA;
         const nint_t bytes =
             tensor::numel(layout) * static_cast<nint_t>(sizeof(TA));
         auto* data = static_cast<TA*>(workspace.allocate(bytes, 64));
         auto packed_tensor = tensor::make_tensor(data, layout);
-        matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(scope, a_, packed_tensor);
+        run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(scope, a_, packed_tensor);
         execute_problem(
             scope, tensor::input<TA>(packed_tensor), b_,
             c_input_, c_output_, scratch);
       } else {
-        const auto layout = matmul_packed_layout<Atom, ::vecops::matmul::Operand::B>(
+        const auto layout = ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::B>(
             b_.input_layout());
         using TB = typename Atom::TB;
         const nint_t bytes =
             tensor::numel(layout) * static_cast<nint_t>(sizeof(TB));
         auto* data = static_cast<TB*>(workspace.allocate(bytes, 64));
         auto packed_tensor = tensor::make_tensor(data, layout);
-        matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(scope, b_, packed_tensor);
+        run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(scope, b_, packed_tensor);
         execute_problem(
             scope, a_, tensor::input<TB>(packed_tensor),
             c_input_, c_output_, scratch);
@@ -973,10 +973,10 @@ private:
     const nint_t k = static_cast<nint_t>(k_);
     VECOPS_ASSERT(m >= 0 && n >= 0 && k >= 0,
                   "matmul extents must be non-negative");
-    matmul_details::validate_input<
+    validate_input<
         Atom, ::vecops::matmul::Operand::A, Rank>(
             a_, c_output_.output_layout(), m, k);
-    matmul_details::validate_input<
+    validate_input<
         Atom, ::vecops::matmul::Operand::B, Rank>(
             b_, c_output_.output_layout(), n, k);
     for (int d = 0; d < Rank; ++d) {
@@ -1104,7 +1104,7 @@ private:
     const auto batch = tensor::size_value<0>(c_output_.output_layout());
     const auto flat_m = batch * m_;
     const auto a = flatten_batch_rows_input(a_, flat_m, k_, k_);
-    matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(scope, a, a_tensor);
+    run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(scope, a, a_tensor);
     const auto b = shared_b_leaf();
     execute_flattened_batch_rows_operands(
         scope, tensor::input<TA>(a_tensor), b, scratch);
@@ -1179,9 +1179,9 @@ private:
       }
     }
     constexpr int PrefixRank = Rank - ProblemRank;
-    const auto a_loop = matmul_details::batch_loop_operand<
+    const auto a_loop = batch_loop_operand<
         Atom, ::vecops::matmul::Operand::A>(a_);
-    const auto b_loop = matmul_details::batch_loop_operand<
+    const auto b_loop = batch_loop_operand<
         Atom, ::vecops::matmul::Operand::B>(b_);
     auto run_loop = [&]<bool Configured>(
                         auto& active_scope, void* scratch)
@@ -1192,8 +1192,8 @@ private:
               const auto& c_input, const auto& c_output)
               VECOPS_KERNEL_LAMBDA {
             execute_problem<Configured>(
-                active_scope, matmul_details::batch_loop_leaf(a),
-                matmul_details::batch_loop_leaf(b),
+                active_scope, batch_loop_leaf(a),
+                batch_loop_leaf(b),
                 c_input, c_output, scratch);
           },
           a_loop, b_loop, c_input_, c_output_);
@@ -1271,52 +1271,14 @@ private:
   [[no_unique_address]] BatchRowsPackAState batch_rows_pack_a_{};
 };
 
-/** Prepare C = A*B^T with a hardware-zero accumulator prologue. */
+/** Build COutput = CInput + A*B^T with explicit prologue and epilogue operands. */
 template <typename Config,
-          matmul_details::Extent M,
-          matmul_details::Extent N,
-          matmul_details::Extent K,
-          tensor::InputOperand A, tensor::InputOperand B,
-          tensor::OutputOperand C>
-VECOPS_INLINE auto make_matmul_invocation(
-    const Config&,
-    M&& m, N&& n, K&& k, A&& a, B&& b, C&& c) {
-  using Atom = typename Config::Atom;
-  using TilePolicy = typename Config::SchedulerPolicy;
-  using Family = ::vecops::matmul::details::selected_family_t<Config>;
-  static_assert(::vecops::matmul::kernel_family::ArchitectureFamily<Family>,
-                "make_matmul_invocation requires an architecture kernel family");
-  using FamilyDispatch = ::vecops::matmul::details::FamilyDispatch<
-      Family, ::vecops::matmul::details::family_selection_mode_v<Config>>;
-  auto m_value = matmul_details::extent_value(std::forward<M>(m));
-  auto n_value = matmul_details::extent_value(std::forward<N>(n));
-  auto k_value = matmul_details::extent_value(std::forward<K>(k));
-  auto a_spec = tensor::as_input_spec<typename Atom::TA>(std::forward<A>(a));
-  auto b_spec = tensor::as_input_spec<typename Atom::TB>(std::forward<B>(b));
-  auto c_output = tensor::as_output_spec<typename Atom::TAcc>(
-      std::forward<C>(c));
-  using Memory = typename decltype(c_output)::MemoryElement;
-  auto c_input = tensor::input<typename Atom::TAcc>(
-      c_output.tensor(),
-      tensor::zeros_transform<typename Atom::TAcc, Memory>);
-  return ArchitectureFamilyInvocation<
-      Atom, TilePolicy, FamilyDispatch,
-      decltype(m_value), decltype(n_value), decltype(k_value),
-      decltype(a_spec), decltype(b_spec),
-      decltype(c_input), decltype(c_output)>{
-          m_value, n_value, k_value,
-          std::move(a_spec), std::move(b_spec),
-          std::move(c_input), std::move(c_output)};
-}
-
-/** Prepare C = C-prologue + A*B^T with explicit C input and output. */
-template <typename Config,
-          matmul_details::Extent M,
-          matmul_details::Extent N,
-          matmul_details::Extent K,
+          meta::ValueInput M,
+          meta::ValueInput N,
+          meta::ValueInput K,
           tensor::InputOperand A, tensor::InputOperand B,
           tensor::InputOperand CInput, tensor::OutputOperand COutput>
-VECOPS_INLINE auto make_matmul_accumulate_invocation(
+VECOPS_INLINE auto make_matmul_invocation(
     const Config&,
     M&& m, N&& n, K&& k,
     A&& a, B&& b, CInput&& c_input, COutput&& c_output) {
@@ -1324,12 +1286,12 @@ VECOPS_INLINE auto make_matmul_accumulate_invocation(
   using TilePolicy = typename Config::SchedulerPolicy;
   using Family = ::vecops::matmul::details::selected_family_t<Config>;
   static_assert(::vecops::matmul::kernel_family::ArchitectureFamily<Family>,
-                "make_matmul_accumulate_invocation requires an architecture family");
+                "make_matmul_invocation requires an architecture family");
   using FamilyDispatch = ::vecops::matmul::details::FamilyDispatch<
       Family, ::vecops::matmul::details::family_selection_mode_v<Config>>;
-  auto m_value = matmul_details::extent_value(std::forward<M>(m));
-  auto n_value = matmul_details::extent_value(std::forward<N>(n));
-  auto k_value = matmul_details::extent_value(std::forward<K>(k));
+  auto m_value = meta::to_value(std::forward<M>(m));
+  auto n_value = meta::to_value(std::forward<N>(n));
+  auto k_value = meta::to_value(std::forward<K>(k));
   auto a_spec = tensor::as_input_spec<typename Atom::TA>(std::forward<A>(a));
   auto b_spec = tensor::as_input_spec<typename Atom::TB>(std::forward<B>(b));
   auto c_input_spec = tensor::as_input_spec<typename Atom::TAcc>(
@@ -1346,6 +1308,6 @@ VECOPS_INLINE auto make_matmul_accumulate_invocation(
           std::move(c_input_spec), std::move(c_output_spec)};
 }
 
-} // namespace vecops::ops::matmul_details
+} // namespace vecops::matmul::details
 
 #endif // VECOPS_MATMUL_DETAILS_FAMILIES_ARCHITECTURE_FAMILY_H

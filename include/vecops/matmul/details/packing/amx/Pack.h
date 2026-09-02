@@ -11,7 +11,7 @@
 
 #include "vecops/CoreDefs.h"
 #include "vecops/CoreTypes.h"
-#include "vecops/matmul/details/pack/generic/Pack.h"
+#include "vecops/matmul/details/packing/generic/Pack.h"
 #include "vecops/util/Math.h"
 #include "vecops/vec/Vec.h"
 

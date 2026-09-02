@@ -40,9 +40,9 @@
  * | Component      | Purpose                                                   |
  * |----------------|-----------------------------------------------------------|
  * | Value hierarchy| Compile-time/run-time typed integers with constraints     |
- * | PackedStorage  | Space-efficient storage eliding compile-time constants    |
- * | PackedStorage  | Stores only runtime members of a heterogeneous Value pack |
- * | to_value_t        | Promotes raw integral types to unconstrained `Any`         |
+ * | ValueInput     | Accepts Value subtypes and fixed-width integer inputs      |
+ * | to_value(_t)   | Normalizes raw integer inputs to unconstrained `Any`        |
+ * | PackedStorage  | Stores only runtime members of a heterogeneous Value pack  |
  *
  * ## Usage overview
  *
@@ -1161,6 +1161,30 @@ private:
  */
 template <typename T>
 using to_value_t = details::ValuePromote<std::remove_cvref_t<T>>::type;
+
+/**
+ * @brief Input accepted by APIs that normalize arguments to a Value.
+ *
+ * A ValueInput is either an existing `Value` subtype or one of vecops' fixed
+ * width integer types. Integer inputs normalize to `Any` (`Dynamic<1>`), while
+ * existing Value types retain their compile-time alignment and bound metadata.
+ */
+template <typename T>
+concept ValueInput = ValueType<to_value_t<T>>;
+
+/**
+ * @brief Normalize an integer or existing Value to its canonical Value type.
+ *
+ * @code
+ * auto runtime = to_value(int32_t{17}); // Any{17}
+ * auto fixed = to_value(cint<4>);       // Const<4>{}
+ * @endcode
+ */
+template <ValueInput T>
+VECOPS_ALWAYS_INLINE constexpr to_value_t<T> to_value(T&& value) {
+  using V = to_value_t<T>;
+  return V{static_cast<nint_t>(value)};
+}
 
 template <ValueType T>
 inline constexpr bool has_lower_bound_v = [] {

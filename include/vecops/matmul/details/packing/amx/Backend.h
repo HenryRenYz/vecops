@@ -6,9 +6,9 @@
 #define VECOPS_MATMUL_DETAILS_PACK_AMX_BACKEND_H
 
 #include "vecops/execution/ExecutionSession.h"
-#include "vecops/matmul/details/amx/Packing.h"
-#include "vecops/matmul/details/pack/amx/Pack.h"
-#include "vecops/matmul/details/pack/generic/Pack.h"
+#include "vecops/matmul/details/packing/amx/Format.h"
+#include "vecops/matmul/details/packing/amx/Pack.h"
+#include "vecops/matmul/details/packing/generic/Pack.h"
 #include "vecops/vec/Capabilities.h"
 
 namespace vecops::kernel::matmul_pack_details {

@@ -6,7 +6,7 @@
 #define VECOPS_MATMUL_DETAILS_SCHEDULER_H
 
 #include "vecops/matmul/Packing.h"
-#include "vecops/matmul/details/Kernel.h"
+#include "vecops/matmul/details/kernel/Kernel.h"
 #include "vecops/tensor/DataAccess.h"
 
 namespace vecops::matmul::details {

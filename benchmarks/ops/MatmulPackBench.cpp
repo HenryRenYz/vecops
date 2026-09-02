@@ -175,7 +175,7 @@ void run_fused_case(benchmark::State& state) {
       return tensor::input<T>(input_tensor);
     }
   }();
-  auto output_layout = ops::matmul_packed_layout<
+  auto output_layout = ::vecops::matmul::packed_layout<
       Atom, Side>(input_layout);
   const nint_t output_elements = numel(output_layout);
   const nint_t output_bytes = output_elements * nint_t{sizeof(T)};
@@ -282,7 +282,7 @@ void run_compensation_case(benchmark::State& state) {
       return tensor::input<int8_t>(input_tensor, transform);
     }
   }();
-  auto output_layout = ops::matmul_packed_layout<
+  auto output_layout = ::vecops::matmul::packed_layout<
       Atom, ::vecops::matmul::Operand::B>(input_layout);
   const nint_t output_bytes =
       numel(output_layout) * static_cast<nint_t>(sizeof(int8_t));
@@ -296,7 +296,7 @@ void run_compensation_case(benchmark::State& state) {
   ExecutionSession execution{};
 
   auto run_separate_sum = [&] VECOPS_INLINE_LAMBDA {
-    ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
+    ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
         execution, input_spec, output_tensor);
     for (nint_t row = 0; row < N; ++row) {
       int32_t sum = 0;
@@ -312,12 +312,12 @@ void run_compensation_case(benchmark::State& state) {
   };
   auto run_once = [&] VECOPS_INLINE_LAMBDA {
     if constexpr (Mode == CompensationMode::PackOnly) {
-      ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
+      ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
           execution, input_spec, output_tensor);
     } else if constexpr (Mode == CompensationMode::SeparateSum) {
       run_separate_sum();
     } else {
-      ops::matmul_pack_details::run_matmul_pack_b_compensated<Atom>(
+      ::vecops::matmul::details::run_matmul_pack_b_compensated<Atom>(
           execution, input_spec, output_tensor,
           compensation_tensor, ZeroPointA);
     }
@@ -719,7 +719,7 @@ void run_fused_case(benchmark::State& state) {
       return tensor::input<T>(input_tensor);
     }
   }();
-  auto output_layout = ops::matmul_packed_layout<Atom, Side>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
   const nint_t output_elements = numel(output_layout);
   const nint_t output_bytes = output_elements * nint_t{sizeof(T)};
   kernel::Workspace storage(output_bytes + 64);

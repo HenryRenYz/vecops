@@ -213,7 +213,7 @@ void run_case(benchmark::State& state) {
   auto input_shape = Case::template shape<ConstShape>();
   auto input_layout = make_layout(input_shape);
   auto input_tensor = make_tensor(input.data(), input_layout);
-  auto output_layout = ops::matmul_packed_layout<Atom, Side>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
   const nint_t output_elements = numel(output_layout);
   const nint_t output_bytes = output_elements * static_cast<nint_t>(sizeof(T));
   kernel::Workspace output_storage(output_bytes + 64);

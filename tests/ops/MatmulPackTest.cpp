@@ -59,16 +59,16 @@ void check_direct_pack(nint_t spatial, nint_t k, nint_t padding) {
       make_shape(Any{spatial}, Any{k}),
       make_strides(Any{stride_spatial}, cint<stride_k>));
   auto input_tensor = make_tensor(input.data(), input_layout);
-  auto output_layout = ops::matmul_packed_layout<Atom, Side>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
   PackedStorage<T> storage(numel(output_layout));
   std::fill_n(storage.data, numel(output_layout),
               test_utils::get_test_value<T>(77));
   auto output_tensor = make_tensor(storage.data, output_layout);
-  using Prepared = decltype(
-      ops::matmul_pack_details::prepare_matmul_pack<Atom, Side>(
+  using Plan = decltype(
+      ::vecops::matmul::details::select_matmul_pack_plan<Atom, Side>(
           input_tensor, output_tensor));
   static_assert(std::same_as<
-      typename Prepared::ResourceRequirements,
+      typename Plan::ResourceRequirements,
       typename execution::details::current_backend_t::DefaultRequirements>);
   ExecutionSession execution{};
   auto operation = ops::matmul_pack(
@@ -126,7 +126,7 @@ void check_compensated_b_pack(
     nint_t n, nint_t k, int32_t a_zero_point) {
   using Atom = ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>;
   using Packing = ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::B>;
-  auto output_layout = ops::matmul_packed_layout<
+  auto output_layout = ::vecops::matmul::packed_layout<
       Atom, ::vecops::matmul::Operand::B>(input_layout);
   PackedStorage<int8_t> storage(numel(output_layout));
   auto output_tensor = make_tensor(storage.data, output_layout);
@@ -136,14 +136,20 @@ void check_compensated_b_pack(
   auto compensation_tensor = make_tensor(
       compensation.data(),
       make_layout(make_shape(Any{n})));
-  auto operation = ops::matmul_pack_details::prepare_matmul_pack_b_compensated<Atom>(
-      input_operand, output_tensor, compensation_tensor, a_zero_point);
+  auto operation =
+      ::vecops::matmul::details::select_matmul_pack_b_compensated_plan<Atom>(
+          input_operand, output_tensor, compensation_tensor);
   static_assert(std::same_as<
       typename decltype(operation)::ResourceRequirements,
       typename execution::details::current_backend_t::DefaultRequirements>);
-  EXPECT_EQ(operation.required_workspace(), 0);
+  EXPECT_EQ(
+      ::vecops::matmul::details::matmul_pack_b_compensated_workspace_bytes<
+          Atom>(input_operand, output_tensor, compensation_tensor),
+      0);
   ExecutionSession execution{};
-  operation(execution);
+  ::vecops::matmul::details::run_matmul_pack_b_compensated<Atom>(
+      execution, input_operand, output_tensor, compensation_tensor,
+      a_zero_point);
 
   const int8_t* packed = storage.data;
   for (nint_t sp = 0; sp < ceil_div(n, Packing::Panel); ++sp) {
@@ -200,11 +206,11 @@ void check_strided_conversion_and_transform() {
         return vec::add(tag, value, vec::fill(tag, 1.0f));
       });
   auto input_spec = tensor::input<T>(input_tensor, transform);
-  auto output_layout = ops::matmul_packed_layout<Atom, Side>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
   PackedStorage<T> storage(numel(output_layout));
   auto output_tensor = make_tensor(storage.data, output_layout);
   ExecutionSession execution{};
-  ops::matmul_pack_details::run_matmul_pack<Atom, Side>(
+  ::vecops::matmul::details::run_matmul_pack<Atom, Side>(
       execution, input_spec, output_tensor);
 
   using Packing = ::vecops::matmul::packing_t<Atom, Side>;
@@ -364,13 +370,13 @@ TEST(MatmulPackTest, CompensatedBPackHandlesZeroExtents) {
   {
     constexpr nint_t N = 17;
     auto input_layout = make_layout(make_shape(cint<N>, cint<0>));
-    auto output_layout = ops::matmul_packed_layout<
+    auto output_layout = ::vecops::matmul::packed_layout<
         Atom, ::vecops::matmul::Operand::B>(input_layout);
     int8_t* pointer = nullptr;
     std::vector<int32_t> compensation(N, 7);
     auto compensation_tensor = make_tensor(
         compensation.data(), make_layout(make_shape(cint<N>)));
-    ops::matmul_pack_details::run_matmul_pack_b_compensated<Atom>(
+    ::vecops::matmul::details::run_matmul_pack_b_compensated<Atom>(
         execution, make_tensor(pointer, input_layout),
         make_tensor(pointer, output_layout), compensation_tensor, 3);
     EXPECT_TRUE(std::all_of(
@@ -379,13 +385,13 @@ TEST(MatmulPackTest, CompensatedBPackHandlesZeroExtents) {
   }
   {
     auto input_layout = make_layout(make_shape(cint<0>, cint<67>));
-    auto output_layout = ops::matmul_packed_layout<
+    auto output_layout = ::vecops::matmul::packed_layout<
         Atom, ::vecops::matmul::Operand::B>(input_layout);
     int8_t* pointer = nullptr;
     int32_t compensation = 11;
     auto compensation_tensor = make_tensor(
         &compensation, make_layout(make_shape(cint<0>)));
-    ops::matmul_pack_details::run_matmul_pack_b_compensated<Atom>(
+    ::vecops::matmul::details::run_matmul_pack_b_compensated<Atom>(
         execution, make_tensor(pointer, input_layout),
         make_tensor(pointer, output_layout), compensation_tensor, 3);
     EXPECT_EQ(compensation, 11);
@@ -395,23 +401,23 @@ TEST(MatmulPackTest, CompensatedBPackHandlesZeroExtents) {
 #elif VECOPS_TARGET_SHARD_INDEX == 7
 TEST(MatmulPackTest, ZeroExtentDoesNotAccessStorage) {
   auto input_layout = make_layout(make_shape(cint<0>, cint<7>));
-  auto output_layout = ops::matmul_packed_layout<
+  auto output_layout = ::vecops::matmul::packed_layout<
       ::vecops::matmul::AMX_BF16F32, ::vecops::matmul::Operand::A>(input_layout);
   EXPECT_EQ(numel(output_layout), 0);
   bfloat16_t* pointer = nullptr;
   auto input = make_tensor(pointer, input_layout);
   auto output = make_tensor(pointer, output_layout);
   ExecutionSession execution{};
-  ops::matmul_pack_details::run_matmul_pack<::vecops::matmul::AMX_BF16F32, ::vecops::matmul::Operand::A>(
+  ::vecops::matmul::details::run_matmul_pack<::vecops::matmul::AMX_BF16F32, ::vecops::matmul::Operand::A>(
       execution, input, output);
 
   auto zero_k_layout = make_layout(make_shape(cint<7>, cint<0>));
-  auto zero_k_packed_layout = ops::matmul_packed_layout<
+  auto zero_k_packed_layout = ::vecops::matmul::packed_layout<
       ::vecops::matmul::AMX_BF16F32, ::vecops::matmul::Operand::B>(zero_k_layout);
   EXPECT_EQ(numel(zero_k_packed_layout), 0);
   auto zero_k_input = make_tensor(pointer, zero_k_layout);
   auto zero_k_output = make_tensor(pointer, zero_k_packed_layout);
-  ops::matmul_pack_details::run_matmul_pack<::vecops::matmul::AMX_BF16F32, ::vecops::matmul::Operand::B>(
+  ::vecops::matmul::details::run_matmul_pack<::vecops::matmul::AMX_BF16F32, ::vecops::matmul::Operand::B>(
       execution, zero_k_input, zero_k_output);
 }
 
@@ -421,7 +427,7 @@ TEST(MatmulPackTest, ZeroExtentDoesNotAccessStorage) {
 TEST(MatmulPackDeathTest, RejectsInvalidOutputAndAliasing) {
   using Atom = ::vecops::matmul::AMX_BF16F32;
   auto input_layout = make_layout(make_shape(cint<3>, cint<5>));
-  auto output_layout = ops::matmul_packed_layout<
+  auto output_layout = ::vecops::matmul::packed_layout<
       Atom, ::vecops::matmul::Operand::A>(input_layout);
   PackedStorage<bfloat16_t> storage(numel(output_layout) + 1);
   auto input = make_tensor(storage.data, input_layout);
@@ -429,19 +435,19 @@ TEST(MatmulPackDeathTest, RejectsInvalidOutputAndAliasing) {
   auto wrong_layout = make_layout(make_shape(cint<1>));
   auto wrong_output = make_tensor(storage.data, wrong_layout);
   EXPECT_DEATH(
-      (ops::matmul_pack_details::prepare_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
+      (::vecops::matmul::details::matmul_pack_workspace_bytes<Atom, ::vecops::matmul::Operand::A>(
           input, wrong_output)),
       "packed output layout");
 
   auto misaligned_output = make_tensor(storage.data + 1, output_layout);
   EXPECT_DEATH(
-      (ops::matmul_pack_details::prepare_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
+      (::vecops::matmul::details::matmul_pack_workspace_bytes<Atom, ::vecops::matmul::Operand::A>(
           input, misaligned_output)),
       "64-byte aligned");
 
   auto aliased_output = make_tensor(storage.data, output_layout);
   EXPECT_DEATH(
-      (ops::matmul_pack_details::prepare_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
+      (::vecops::matmul::details::matmul_pack_workspace_bytes<Atom, ::vecops::matmul::Operand::A>(
           input, aliased_output)),
       "in-place");
 }
@@ -449,7 +455,7 @@ TEST(MatmulPackDeathTest, RejectsInvalidOutputAndAliasing) {
 TEST(MatmulPackDeathTest, RejectsInvalidCompensationOutput) {
   using Atom = ::vecops::matmul::AMX_I8I32<uint8_t, int8_t>;
   auto input_layout = make_layout(make_shape(cint<3>, cint<5>));
-  auto output_layout = ops::matmul_packed_layout<
+  auto output_layout = ::vecops::matmul::packed_layout<
       Atom, ::vecops::matmul::Operand::B>(input_layout);
   std::vector<int8_t> input(15);
   PackedStorage<int8_t> storage(numel(output_layout));
@@ -460,24 +466,24 @@ TEST(MatmulPackDeathTest, RejectsInvalidCompensationOutput) {
   auto wrong_extent = make_tensor(
       compensation.data(), make_layout(make_shape(cint<2>)));
   EXPECT_DEATH(
-      (ops::matmul_pack_details::prepare_matmul_pack_b_compensated<Atom>(
-          input_tensor, output_tensor, wrong_extent, 3)),
+      (::vecops::matmul::details::matmul_pack_b_compensated_workspace_bytes<Atom>(
+          input_tensor, output_tensor, wrong_extent)),
       "extent must equal N");
 
   auto strided = make_tensor(
       compensation.data(),
       make_layout(make_shape(cint<3>), make_strides(cint<2>)));
   EXPECT_DEATH(
-      (ops::matmul_pack_details::prepare_matmul_pack_b_compensated<Atom>(
-          input_tensor, output_tensor, strided, 3)),
+      (::vecops::matmul::details::matmul_pack_b_compensated_workspace_bytes<Atom>(
+          input_tensor, output_tensor, strided)),
       "must be contiguous");
 
   auto aliased = make_tensor(
       reinterpret_cast<int32_t*>(storage.data),
       make_layout(make_shape(cint<3>)));
   EXPECT_DEATH(
-      (ops::matmul_pack_details::prepare_matmul_pack_b_compensated<Atom>(
-          input_tensor, output_tensor, aliased, 3)),
+      (::vecops::matmul::details::matmul_pack_b_compensated_workspace_bytes<Atom>(
+          input_tensor, output_tensor, aliased)),
       "must not alias");
 }
 
@@ -485,7 +491,7 @@ TEST(MatmulPackDeathTest, RejectsNegativeExtents) {
   EXPECT_DEATH(
       ({
         auto input_layout = make_layout(make_shape(Any{-1}, Any{7}));
-        (void)ops::matmul_packed_layout<
+        (void)::vecops::matmul::packed_layout<
             ::vecops::matmul::AMX_BF16F32, ::vecops::matmul::Operand::A>(input_layout);
       }),
       "non-negative");
@@ -494,7 +500,7 @@ TEST(MatmulPackDeathTest, RejectsNegativeExtents) {
       ({
         constexpr nint_t Limit = std::numeric_limits<nint_t>::max();
         auto input_layout = make_layout(make_shape(Any{Limit}, Any{Limit}));
-        (void)ops::matmul_packed_layout<
+        (void)::vecops::matmul::packed_layout<
             ::vecops::matmul::AMX_BF16F32, ::vecops::matmul::Operand::A>(input_layout);
       }),
       "overflows");
@@ -538,7 +544,7 @@ TEST(MatmulPackTest, PackedLayoutPreservesStreamingMetadata) {
   using Atom = ::vecops::matmul::SME_F32F32;
   using Packing = ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::A>;
   const auto input = make_layout(make_shape(cint<33>, cint<70>));
-  const auto packed = ops::matmul_packed_layout<
+  const auto packed = ::vecops::matmul::packed_layout<
       Atom, ::vecops::matmul::Operand::A>(input);
   using Layout = decltype(packed);
 
@@ -585,16 +591,17 @@ void check_direct_pack(nint_t spatial, nint_t k) {
   }
   auto input_layout = make_layout(make_shape(Any{spatial}, Any{k}));
   auto input_tensor = make_tensor(input.data(), input_layout);
-  auto output_layout = ops::matmul_packed_layout<Atom, Side>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
   PackedStorage<T> storage(numel(output_layout));
   auto output_tensor = make_tensor(storage.data, output_layout);
-  auto operation = ops::matmul_pack_details::prepare_matmul_pack<Atom, Side>(
+  auto operation = ::vecops::matmul::details::select_matmul_pack_plan<Atom, Side>(
       input_tensor, output_tensor);
   static_assert(!execution::details::has_resource_v<
       execution::details::arm::StreamingZA,
       typename decltype(operation)::ResourceRequirements>);
   ExecutionSession execution{};
-  operation(execution);
+  ::vecops::matmul::details::run_matmul_pack<Atom, Side>(
+      execution, input_tensor, output_tensor);
 
   const nint_t panel = output_layout.shape()[2];
   const T* packed = storage.data;
@@ -642,16 +649,17 @@ void check_vector_fallback() {
         return vec::add(tag, value, vec::fill(tag, 1.0f));
       });
   auto input_spec = tensor::input<T>(input_tensor, transform);
-  auto output_layout = ops::matmul_packed_layout<Atom, Side>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
   PackedStorage<T> storage(numel(output_layout));
   auto output_tensor = make_tensor(storage.data, output_layout);
-  auto operation = ops::matmul_pack_details::prepare_matmul_pack<Atom, Side>(
+  auto operation = ::vecops::matmul::details::select_matmul_pack_plan<Atom, Side>(
       input_spec, output_tensor);
   static_assert(std::same_as<
       typename decltype(operation)::ResourceRequirements,
       typename execution::details::current_backend_t::DefaultRequirements>);
   ExecutionSession execution{};
-  operation(execution);
+  ::vecops::matmul::details::run_matmul_pack<Atom, Side>(
+      execution, input_spec, output_tensor);
 
   using Packing = ::vecops::matmul::packing_t<Atom, Side>;
   const nint_t panel = output_layout.shape()[2];
@@ -706,10 +714,11 @@ void check_unit_stride_optimized_input() {
       return tensor::input<T>(input_tensor);
     }
   }();
-  auto output_layout = ops::matmul_packed_layout<Atom, Side>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
   PackedStorage<T> storage(numel(output_layout));
-  auto operation = ops::matmul_pack_details::prepare_matmul_pack<Atom, Side>(
-      input_operand, make_tensor(storage.data, output_layout));
+  auto output_tensor = make_tensor(storage.data, output_layout);
+  auto operation = ::vecops::matmul::details::select_matmul_pack_plan<Atom, Side>(
+      input_operand, output_tensor);
   using Expected = std::conditional_t<
       Transform,
       kernel::matmul_pack_implementation::SMEStagedTransform,
@@ -720,7 +729,8 @@ void check_unit_stride_optimized_input() {
       typename decltype(operation)::ResourceRequirements,
       typename execution::details::current_backend_t::DefaultRequirements>);
   ExecutionSession execution{};
-  operation(execution);
+  ::vecops::matmul::details::run_matmul_pack<Atom, Side>(
+      execution, input_operand, output_tensor);
 
   using Packing = ::vecops::matmul::packing_t<Atom, Side>;
   const nint_t panel = output_layout.shape()[2];
@@ -758,11 +768,13 @@ void check_postprocess_conversion() {
     }
   }
   auto input_layout = make_layout(make_shape(cint<Spatial>, cint<K>));
-  auto output_layout = ops::matmul_packed_layout<Atom, Side>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
   PackedStorage<T> storage(numel(output_layout));
-  auto operation = ops::matmul_pack_details::prepare_matmul_pack<Atom, Side>(
-      tensor::input<T>(make_tensor(input.data(), input_layout)),
-      make_tensor(storage.data, output_layout));
+  auto input_operand = tensor::input<T>(
+      make_tensor(input.data(), input_layout));
+  auto output_tensor = make_tensor(storage.data, output_layout);
+  auto operation = ::vecops::matmul::details::select_matmul_pack_plan<Atom, Side>(
+      input_operand, output_tensor);
   static_assert(std::same_as<
       typename decltype(operation)::Implementation,
       kernel::matmul_pack_implementation::SMEPostprocess>);
@@ -770,7 +782,8 @@ void check_postprocess_conversion() {
       execution::details::arm::StreamingZA,
       typename decltype(operation)::ResourceRequirements>);
   ExecutionSession execution{};
-  operation(execution);
+  ::vecops::matmul::details::run_matmul_pack<Atom, Side>(
+      execution, input_operand, output_tensor);
 
   using Packing = ::vecops::matmul::packing_t<Atom, Side>;
   const nint_t panel = output_layout.shape()[2];
@@ -809,16 +822,18 @@ void check_fp32_to_int8_postprocess() {
       [](auto tag, auto value) VECOPS_KERNEL_LAMBDA {
         return vec::mul(tag, value, vec::fill(tag, 4.0f));
       });
-  auto output_layout = ops::matmul_packed_layout<Atom, Side>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
   PackedStorage<T> storage(numel(output_layout));
-  auto operation = ops::matmul_pack_details::prepare_matmul_pack<Atom, Side>(
-      tensor::input<T>(input_tensor, quantize),
-      make_tensor(storage.data, output_layout));
+  auto input_operand = tensor::input<T>(input_tensor, quantize);
+  auto output_tensor = make_tensor(storage.data, output_layout);
+  auto operation = ::vecops::matmul::details::select_matmul_pack_plan<Atom, Side>(
+      input_operand, output_tensor);
   static_assert(std::same_as<
       typename decltype(operation)::Implementation,
       kernel::matmul_pack_implementation::SMEPostprocess>);
   ExecutionSession execution{};
-  operation(execution);
+  ::vecops::matmul::details::run_matmul_pack<Atom, Side>(
+      execution, input_operand, output_tensor);
 
   using Packing = ::vecops::matmul::packing_t<Atom, Side>;
   const nint_t panel = output_layout.shape()[2];
@@ -859,16 +874,19 @@ void check_bf16_staged_transform() {
           VECOPS_KERNEL_LAMBDA {
         return vec::add(tag, value, vec::fill(tag, T{1.0f}));
       });
-  auto output_layout = ops::matmul_packed_layout<Atom, Side>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
   PackedStorage<T> storage(numel(output_layout));
-  auto operation = ops::matmul_pack_details::prepare_matmul_pack<Atom, Side>(
-      tensor::input<T>(make_tensor(input.data(), input_layout), transform),
-      make_tensor(storage.data, output_layout));
+  auto input_operand = tensor::input<T>(
+      make_tensor(input.data(), input_layout), transform);
+  auto output_tensor = make_tensor(storage.data, output_layout);
+  auto operation = ::vecops::matmul::details::select_matmul_pack_plan<Atom, Side>(
+      input_operand, output_tensor);
   static_assert(std::same_as<
       typename decltype(operation)::Implementation,
       kernel::matmul_pack_implementation::SMEStagedTransform>);
   ExecutionSession execution{};
-  operation(execution);
+  ::vecops::matmul::details::run_matmul_pack<Atom, Side>(
+      execution, input_operand, output_tensor);
 
   using Packing = ::vecops::matmul::packing_t<Atom, Side>;
   const nint_t panel = output_layout.shape()[2];
@@ -923,11 +941,13 @@ void check_fp32_to_f64_pack() {
           make_strides(Any{RowStride}, cint<InnerStride>));
     }
   }();
-  auto output_layout = ops::matmul_packed_layout<Atom, Side>(input_layout);
+  auto output_layout = ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
   PackedStorage<T> storage(numel(output_layout));
-  auto operation = ops::matmul_pack_details::prepare_matmul_pack<Atom, Side>(
-      tensor::input<T>(make_tensor(input.data(), input_layout)),
-      make_tensor(storage.data, output_layout));
+  auto input_operand = tensor::input<T>(
+      make_tensor(input.data(), input_layout));
+  auto output_tensor = make_tensor(storage.data, output_layout);
+  auto operation = ::vecops::matmul::details::select_matmul_pack_plan<Atom, Side>(
+      input_operand, output_tensor);
   using Expected = std::conditional_t<
       InnerStride == 1,
       kernel::matmul_pack_implementation::SMEFP32ToFP64,
@@ -935,7 +955,8 @@ void check_fp32_to_f64_pack() {
   static_assert(std::same_as<
       typename decltype(operation)::Implementation, Expected>);
   ExecutionSession execution{};
-  operation(execution);
+  ::vecops::matmul::details::run_matmul_pack<Atom, Side>(
+      execution, input_operand, output_tensor);
 
   using Packing = ::vecops::matmul::packing_t<Atom, Side>;
   const nint_t panel = output_layout.shape()[2];
@@ -1075,14 +1096,14 @@ TEST(MatmulPackTest, UnitStrideConversionAndTransformUseOptimizedPaths) {
 #elif VECOPS_TARGET_SHARD_INDEX == 5
 TEST(MatmulPackTest, ZeroExtentDoesNotAccessStorage) {
   auto input_layout = make_layout(make_shape(cint<7>, cint<0>));
-  auto output_layout = ops::matmul_packed_layout<
+  auto output_layout = ::vecops::matmul::packed_layout<
       ::vecops::matmul::SME_F32F32, ::vecops::matmul::Operand::B>(input_layout);
   EXPECT_EQ(numel(output_layout), 0);
   float32_t* pointer = nullptr;
   auto input = make_tensor(pointer, input_layout);
   auto output = make_tensor(pointer, output_layout);
   ExecutionSession execution{};
-  ops::matmul_pack_details::run_matmul_pack<::vecops::matmul::SME_F32F32, ::vecops::matmul::Operand::B>(
+  ::vecops::matmul::details::run_matmul_pack<::vecops::matmul::SME_F32F32, ::vecops::matmul::Operand::B>(
       execution, input, output);
 }
 

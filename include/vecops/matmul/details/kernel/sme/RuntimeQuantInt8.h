@@ -9,7 +9,7 @@
 #include <utility>
 
 #include "vecops/matmul/Packing.h"
-#include "vecops/matmul/details/sme/Atoms.h"
+#include "vecops/matmul/details/kernel/sme/Atoms.h"
 #include "vecops/matmul/Quantization.h"
 #include "vecops/tensor/DataAccess.h"
 

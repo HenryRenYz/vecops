@@ -694,6 +694,28 @@ TEST_F(ValueTest, ToValuePreservesValueType) {
   EXPECT_TRUE((std::is_same_v<to_value_t<Any>, Any>));
 }
 
+TEST_F(ValueTest, ValueInputAcceptsValuesAndFixedWidthIntegers) {
+  static_assert(ValueInput<int32_t>);
+  static_assert(ValueInput<uint64_t>);
+  static_assert(ValueInput<Const<5>>);
+  static_assert(ValueInput<Dynamic<16>>);
+  static_assert(!ValueInput<float>);
+  static_assert(!ValueInput<bool>);
+}
+
+TEST_F(ValueTest, ToValueNormalizesAndPreservesMetadata) {
+  auto runtime = to_value(int32_t{17});
+  auto fixed = to_value(cint<5>);
+  auto constrained = to_value(Dynamic<16, 0, 128>{32});
+  EXPECT_TRUE((std::is_same_v<decltype(runtime), Any>));
+  EXPECT_TRUE((std::is_same_v<decltype(fixed), Const<5>>));
+  EXPECT_TRUE((std::is_same_v<
+      decltype(constrained), Dynamic<16, 0, 128>>));
+  EXPECT_EQ(nint_t(runtime), 17);
+  EXPECT_EQ(nint_t(fixed), 5);
+  EXPECT_EQ(nint_t(constrained), 32);
+}
+
 // --- Value-aware min/max ---
 
 TEST_F(ValueTest, MinMaxConstConstFold) {

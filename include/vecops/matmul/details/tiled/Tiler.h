@@ -9,14 +9,14 @@
 #include <utility>
 
 #include "vecops/matmul/Tiling.h"
-#include "vecops/matmul/details/Accumulator.h"
-#include "vecops/matmul/details/FamilySelector.h"
-#include "vecops/matmul/details/Kernel.h"
-#include "vecops/matmul/details/LoopNest.h"
-#include "vecops/matmul/details/OperandController.h"
-#include "vecops/matmul/details/PolicyTraits.h"
-#include "vecops/matmul/details/ProblemMapper.h"
-#include "vecops/matmul/details/Scheduler.h"
+#include "vecops/matmul/details/tiled/Accumulator.h"
+#include "vecops/matmul/details/planning/FamilySelector.h"
+#include "vecops/matmul/details/kernel/Kernel.h"
+#include "vecops/matmul/details/tiled/LoopNest.h"
+#include "vecops/matmul/details/tiled/OperandController.h"
+#include "vecops/matmul/details/tiled/PolicyTraits.h"
+#include "vecops/matmul/details/tiled/ProblemMapper.h"
+#include "vecops/matmul/details/tiled/Scheduler.h"
 #include "vecops/tensor/DataAccess.h"
 
 namespace vecops::matmul::details {

@@ -8,7 +8,7 @@
 #include "vecops/Features.h"
 #include "vecops/execution/ExecutionSession.h"
 #include "vecops/matmul/Family.h"
-#include "vecops/matmul/details/Types.h"
+#include "vecops/matmul/details/kernel/Types.h"
 
 namespace vecops::kernel::matmul_details {
 
@@ -30,11 +30,11 @@ struct Backend {
 } // namespace vecops::kernel::matmul_details
 
 #if defined(HAS_AMX_TILE)
-#include "vecops/matmul/details/amx/Backend.h"
+#include "vecops/matmul/details/kernel/amx/Backend.h"
 #endif
 
 #if defined(HAS_SME)
-#include "vecops/matmul/details/sme/Backend.h"
+#include "vecops/matmul/details/kernel/sme/Backend.h"
 #endif
 
 #endif // VECOPS_MATMUL_DETAILS_BACKEND_H

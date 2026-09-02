@@ -7,7 +7,7 @@
 
 #include "vecops/Features.h"
 #include "vecops/execution/ExecutionSession.h"
-#include "vecops/matmul/details/pack/Types.h"
+#include "vecops/matmul/details/packing/Types.h"
 
 namespace vecops::kernel::matmul_pack_details {
 
@@ -30,11 +30,11 @@ struct Backend {
 } // namespace vecops::kernel::matmul_pack_details
 
 #if defined(ARCH_X86_FAMILY)
-#include "vecops/matmul/details/pack/amx/Backend.h"
+#include "vecops/matmul/details/packing/amx/Backend.h"
 #endif
 
 #if defined(HAS_SME)
-#include "vecops/matmul/details/pack/sme/Backend.h"
+#include "vecops/matmul/details/packing/sme/Backend.h"
 #endif
 
 #endif // VECOPS_MATMUL_DETAILS_PACK_BACKEND_H

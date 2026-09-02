@@ -54,11 +54,11 @@ concept Atom = requires {
 } // namespace vecops::matmul
 
 #if defined(ARCH_X86_FAMILY)
-#include "vecops/matmul/details/amx/Atoms.h"
+#include "vecops/matmul/details/kernel/amx/Atoms.h"
 #endif
 
 #if defined(HAS_SME)
-#include "vecops/matmul/details/sme/Atoms.h"
+#include "vecops/matmul/details/kernel/sme/Atoms.h"
 #endif
 
 #endif // VECOPS_MATMUL_ATOM_H

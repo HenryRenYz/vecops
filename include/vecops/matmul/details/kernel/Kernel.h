@@ -8,8 +8,8 @@
 #include <utility>
 
 #include "vecops/matmul/Atom.h"
-#include "vecops/matmul/details/Backend.h"
-#include "vecops/matmul/details/TileScheduler.h"
+#include "vecops/matmul/details/kernel/Backend.h"
+#include "vecops/matmul/details/kernel/TileScheduler.h"
 
 namespace vecops::kernel {
 

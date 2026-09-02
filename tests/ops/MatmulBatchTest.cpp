@@ -114,11 +114,11 @@ void check_shared_a_batch_columns() {
             bias.data(), make_layout(
                 make_shape(Any{Batch}, Any{M}, Any{N}),
                 make_strides(cint<0>, cint<0>, cint<1>)));
-        return ops::matmul_details::make_matmul_accumulate_invocation(ops::MatmulConfig<Atom>{},
+        return test::matmul::make_test_matmul_invocation(ops::MatmulConfig<Atom>{},
             M, N, K, a_input, bt,
             input<Acc>(bias_tensor), output<Acc>(ct));
       } else {
-        return ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{}, M, N, K, a_input, bt, ct);
+        return test::matmul::make_test_matmul_invocation(ops::MatmulConfig<Atom>{}, M, N, K, a_input, bt, ct);
       }
     }();
     if constexpr (Bias) {
@@ -134,7 +134,7 @@ void check_shared_a_batch_columns() {
     auto a2 = make_tensor(
         a.data(), make_layout(make_shape(Any{M}, Any{K})));
     const auto packed_layout =
-        ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(a2.layout());
+        ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::A>(a2.layout());
     std::vector<TA> packed_storage(
         static_cast<std::size_t>(numel(packed_layout) + 64));
     auto* packed_data = reinterpret_cast<TA*>(
@@ -142,7 +142,7 @@ void check_shared_a_batch_columns() {
         ~std::uintptr_t{63u});
     auto packed_a = make_tensor(packed_data, packed_layout);
     ExecutionSession execution{};
-    ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
+    ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
         execution, input<TA>(a2), packed_a);
     run(input<TA>(packed_a));
   } else {
@@ -191,7 +191,7 @@ TEST(MatmulBatchTest, TraversesBatchAndExposesTilePolicy) {
       b.data(), make_layout(make_shape(Any{Batch}, Any{N}, Any{K})));
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(Any{Batch}, Any{M}, Any{N})));
-  auto operation = ops::matmul_details::make_matmul_invocation(
+  auto operation = test::matmul::make_test_matmul_invocation(
       ops::MatmulSchedulerConfig<Atom, Policy>{}, M, N, K, at, bt, ct);
   kernel::Workspace storage(operation.required_workspace());
   auto workspace = storage.view();
@@ -454,11 +454,11 @@ void check_shared_a_batch_columns() {
             bias.data(), make_layout(
                 make_shape(Any{Batch}, Any{M}, Any{N}),
                 make_strides(cint<0>, cint<0>, cint<1>)));
-        return ops::matmul_details::make_matmul_accumulate_invocation(ops::MatmulConfig<Atom>{},
+        return test::matmul::make_test_matmul_invocation(ops::MatmulConfig<Atom>{},
             M, N, K, a_input, bt,
             input<Acc>(bias_tensor), output<Acc>(ct));
       } else {
-        return ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{}, M, N, K, a_input, bt, ct);
+        return test::matmul::make_test_matmul_invocation(ops::MatmulConfig<Atom>{}, M, N, K, a_input, bt, ct);
       }
     }();
     const nint_t expected_workspace = Bias
@@ -480,7 +480,7 @@ void check_shared_a_batch_columns() {
     auto a2 = make_tensor(
         a.data(), make_layout(make_shape(Any{M}, Any{K})));
     const auto packed_layout =
-        ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(a2.layout());
+        ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::A>(a2.layout());
     kernel::Workspace packed_owner(
         numel(packed_layout) * static_cast<nint_t>(sizeof(TA)) + 64);
     auto packed_workspace = packed_owner.view();
@@ -488,7 +488,7 @@ void check_shared_a_batch_columns() {
         numel(packed_layout) * static_cast<nint_t>(sizeof(TA)), 64));
     auto packed_a = make_tensor(packed_data, packed_layout);
     ExecutionSession execution{};
-    ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
+    ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
         execution, input<TA>(a2), packed_a);
     run(input<TA>(packed_a));
   } else {
@@ -539,7 +539,7 @@ TEST(MatmulBatchTest, TraversesBatchAndExposesTilePolicy) {
       b.data(), make_layout(make_shape(Any{Batch}, Any{N}, Any{K})));
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(Any{Batch}, Any{M}, Any{N})));
-  auto operation = ops::matmul_details::make_matmul_invocation(
+  auto operation = test::matmul::make_test_matmul_invocation(
       ops::MatmulSchedulerConfig<Atom, Policy>{}, M, N, K, at, bt, ct);
   ExecutionSession execution{};
   operation(execution);

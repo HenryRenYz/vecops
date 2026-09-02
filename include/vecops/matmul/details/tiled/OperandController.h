@@ -9,8 +9,8 @@
 #include <utility>
 
 #include "vecops/matmul/Packing.h"
-#include "vecops/matmul/details/PackOperation.h"
-#include "vecops/matmul/details/PolicyTraits.h"
+#include "vecops/matmul/details/packing/Plan.h"
+#include "vecops/matmul/details/tiled/PolicyTraits.h"
 #include "vecops/tensor/DataAccess.h"
 
 namespace vecops::matmul::details {
@@ -87,7 +87,7 @@ VECOPS_ALWAYS_INLINE decltype(auto) with_operand_panel(
         static_cast<nint_t>(sizeof(Element));
     auto* data = static_cast<Element*>(workspace.allocate(bytes, 64));
     auto packed = tensor::make_tensor(data, layout);
-    ops::matmul_pack_details::run_matmul_pack<AtomT, Side>(
+    run_matmul_pack<AtomT, Side>(
         scope, spec, packed);
     auto packed_spec = tensor::input<Element>(packed);
     if constexpr (std::is_void_v<decltype(std::forward<Fn>(fn)(packed_spec))>) {

@@ -49,14 +49,30 @@ include/vecops/
 |       `-- transpose/Selection.h
 |-- matmul/
 |   |-- Atom.h
+|   |-- Config.h
+|   |-- Family.h
 |   |-- Packing.h
 |   |-- Quantization.h
 |   `-- details/
-|       |-- Operation.h
-|       |-- PackOperation.h
-|       |-- amx/
-|       |-- sme/
-|       `-- pack/
+|       |-- planning/
+|       |   |-- FamilyPlan.h
+|       |   |-- FamilySelector.h
+|       |   |-- Implementation.h
+|       |   `-- families/
+|       |-- tiled/
+|       |   |-- LoopNest.h
+|       |   |-- OperandController.h
+|       |   `-- Tiler.h
+|       |-- kernel/
+|       |   |-- Kernel.h
+|       |   |-- amx/
+|       |   `-- sme/
+|       `-- packing/
+|           |-- Plan.h
+|           |-- Kernel.h
+|           |-- amx/
+|           |-- sme/
+|           `-- generic/
 `-- kernel/
     |-- Loop.h
     |-- Tile2D.h
@@ -66,9 +82,15 @@ include/vecops/
 
 Matmul is large enough to own a domain subtree containing atom, packing, and
 quantization contracts. Its complete operator still has the same public entry
-point convention as every other operator: `vecops/ops/Matmul.h`.
-`vecops/matmul/Matmul.h` and `vecops/matmul/MatmulPack.h` remain compatibility
-includes for code written during the earlier directory migration.
+point convention as every other operator: `vecops/ops/Matmul.h`. Packing is
+exposed through `vecops/ops/MatmulPack.h`; the `matmul/details` tree contains
+only private implementation machinery. `planning/` owns family selection and
+whole-operation invocation construction, `tiled/` owns generic cache blocking,
+`kernel/` owns bound matrix-multiply leaves, and `packing/` owns packed-format
+contracts plus the plans and kernels that produce them. Packing plans are
+stateless typed policies: operand-dependent implementation and resource
+selection remain compile-time decisions without storing a prepared operand
+invocation.
 
 Transpose intentionally has both an operator and a shared kernel. The operator
 normalizes operands, chooses resources, and binds DataAccess sessions.

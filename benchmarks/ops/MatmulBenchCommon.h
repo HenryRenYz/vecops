@@ -284,9 +284,9 @@ void run_case_with_extents(
   auto c_tensor = make_tensor(c.data(), c_layout);
 
   auto packed_a_layout =
-      ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(a_layout);
+      ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::A>(a_layout);
   auto packed_b_layout =
-      ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::B>(b_layout);
+      ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::B>(b_layout);
   const nint_t packed_a_elements = numel(packed_a_layout);
   const nint_t packed_b_elements = numel(packed_b_layout);
   const nint_t packed_a_bytes = packed_a_elements * nint_t{sizeof(TA)};

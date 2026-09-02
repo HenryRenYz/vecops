@@ -9,11 +9,11 @@
 #include "vecops/tensor/Layout.h"
 
 #if defined(ARCH_X86_FAMILY)
-#include "vecops/matmul/details/amx/Packing.h"
+#include "vecops/matmul/details/packing/amx/Format.h"
 #endif
 
 #if defined(HAS_SME)
-#include "vecops/matmul/details/sme/Packing.h"
+#include "vecops/matmul/details/packing/sme/Format.h"
 #endif
 
 namespace vecops::matmul {

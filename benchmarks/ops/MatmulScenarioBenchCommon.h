@@ -21,6 +21,39 @@
 
 namespace vecops::bench::matmul {
 
+template <typename Config,
+          meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
+          tensor::InputOperand A, tensor::InputOperand B,
+          tensor::OutputOperand C>
+VECOPS_INLINE auto make_benchmark_matmul_invocation(
+    const Config& config, M&& m, N&& n, K&& k,
+    A&& a, B&& b, C&& c) {
+  using Atom = typename Config::Atom;
+  auto c_output = tensor::as_output_spec<typename Atom::TAcc>(
+      std::forward<C>(c));
+  using Memory = typename decltype(c_output)::MemoryElement;
+  auto c_input = tensor::input<typename Atom::TAcc>(
+      c_output.tensor(),
+      tensor::zeros_transform<typename Atom::TAcc, Memory>);
+  return ::vecops::matmul::details::make_matmul_invocation(
+      config, std::forward<M>(m), std::forward<N>(n),
+      std::forward<K>(k), std::forward<A>(a), std::forward<B>(b),
+      std::move(c_input), std::move(c_output));
+}
+
+template <typename Config,
+          meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
+          tensor::InputOperand A, tensor::InputOperand B,
+          tensor::InputOperand CInput, tensor::OutputOperand COutput>
+VECOPS_INLINE auto make_benchmark_matmul_invocation(
+    const Config& config, M&& m, N&& n, K&& k,
+    A&& a, B&& b, CInput&& c_input, COutput&& c_output) {
+  return ::vecops::matmul::details::make_matmul_invocation(
+      config, std::forward<M>(m), std::forward<N>(n),
+      std::forward<K>(k), std::forward<A>(a), std::forward<B>(b),
+      std::forward<CInput>(c_input), std::forward<COutput>(c_output));
+}
+
 #if !defined(VECOPS_SCENARIO_CATALOG_CASE_SHARDS)
 #define VECOPS_SCENARIO_CATALOG_CASE_SHARDS 1
 #endif
@@ -917,7 +950,7 @@ void run_batched_scenario_with_extents(
       make_scenario_input<::vecops::matmul::Operand::B, TB, InPipelineB>(b_matrix_tensor);
   const auto c_output = make_scenario_output<Acc, OutPipeline>(
       c_tensor, output_parameters);
-  const auto packed_b_layout = ops::matmul_packed_layout<
+  const auto packed_b_layout = ::vecops::matmul::packed_layout<
       Atom, ::vecops::matmul::Operand::B>(b_matrix_tensor.layout());
   const nint_t packed_b_elements = tensor::numel(packed_b_layout);
   const nint_t packed_b_bytes = scenario_packs_b_v<Mode>
@@ -937,18 +970,18 @@ void run_batched_scenario_with_extents(
     if constexpr (scenario_packs_b_v<Mode>) {
       if constexpr (uses_single_asymmetric_correction_v<InPipeline>) {
 #if defined(ARCH_X86_FAMILY)
-        ops::matmul_pack_details::run_matmul_pack_b_compensated<Atom>(
+        ::vecops::matmul::details::run_matmul_pack_b_compensated<Atom>(
             execution, b_matrix_operand, packed_b_tensor,
             packed_b_compensation_tensor,
             uses_runtime_per_row_quantization_v<InPipeline>
                 ? input_zero_point
                 : int32_t{3});
 #else
-        ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
+        ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
             execution, b_matrix_operand, packed_b_tensor);
 #endif
       } else {
-        ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
+        ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
             execution, b_matrix_operand, packed_b_tensor);
       }
     }
@@ -977,15 +1010,15 @@ void run_batched_scenario_with_extents(
       }();
       const auto correction_tensor = tensor::make_tensor(
           asymmetric_correction.data(), correction_layout);
-      return ops::matmul_details::make_matmul_accumulate_invocation(ops::MatmulConfig<Atom>{},
+      return make_benchmark_matmul_invocation(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, a_operand, selected_b,
           tensor::input<Acc>(correction_tensor), c_output);
     } else if constexpr (uses_c_prologue_v<OutPipeline>) {
-      return ops::matmul_details::make_matmul_accumulate_invocation(ops::MatmulConfig<Atom>{},
+      return make_benchmark_matmul_invocation(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, a_operand, selected_b,
           tensor::input<Acc>(c_input_tensor), c_output);
     } else {
-      return ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{},
+      return make_benchmark_matmul_invocation(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, a_operand, selected_b, c_output);
     }
   };
@@ -2046,9 +2079,9 @@ void run_scenario_with_extents(
   const auto c_output = make_scenario_output<Acc, OutPipeline>(
       c_tensor, output_parameters);
 
-  const auto packed_a_layout = ops::matmul_packed_layout<
+  const auto packed_a_layout = ::vecops::matmul::packed_layout<
       Atom, ::vecops::matmul::Operand::A>(a_tensor.layout());
-  const auto packed_b_layout = ops::matmul_packed_layout<
+  const auto packed_b_layout = ::vecops::matmul::packed_layout<
       Atom, ::vecops::matmul::Operand::B>(b_tensor.layout());
   const nint_t packed_a_elements = tensor::numel(packed_a_layout);
   const nint_t packed_b_elements = tensor::numel(packed_b_layout);
@@ -2078,7 +2111,7 @@ void run_scenario_with_extents(
 
   auto pack_a_once = [&](auto& execution) VECOPS_INLINE_LAMBDA {
     if constexpr (scenario_packs_a_v<Mode>) {
-      ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
+      ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
           execution, a_operand, packed_a_tensor);
     }
   };
@@ -2086,18 +2119,18 @@ void run_scenario_with_extents(
     if constexpr (scenario_packs_b_v<Mode>) {
       if constexpr (uses_single_asymmetric_correction_v<InPipeline>) {
 #if defined(ARCH_X86_FAMILY)
-        ops::matmul_pack_details::run_matmul_pack_b_compensated<Atom>(
+        ::vecops::matmul::details::run_matmul_pack_b_compensated<Atom>(
             execution, b_operand, packed_b_tensor,
             packed_b_compensation_tensor,
             uses_runtime_per_row_quantization_v<InPipeline>
                 ? input_zero_point
                 : int32_t{3});
 #else
-        ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
+        ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
             execution, b_operand, packed_b_tensor);
 #endif
       } else {
-        ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
+        ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
             execution, b_operand, packed_b_tensor);
       }
     }
@@ -2123,15 +2156,15 @@ void run_scenario_with_extents(
                   tensor::make_strides(cint<0>, cint<1>));
             }
           }());
-      return ops::matmul_details::make_matmul_accumulate_invocation(ops::MatmulConfig<Atom>{},
+      return make_benchmark_matmul_invocation(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, selected_a, selected_b,
           tensor::input<Acc>(correction_tensor), c_output);
     } else if constexpr (uses_c_prologue_v<OutPipeline>) {
-      return ops::matmul_details::make_matmul_accumulate_invocation(ops::MatmulConfig<Atom>{},
+      return make_benchmark_matmul_invocation(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, selected_a, selected_b,
           tensor::input<Acc>(c_input_tensor), c_output);
     } else {
-      return ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{},
+      return make_benchmark_matmul_invocation(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, selected_a, selected_b, c_output);
     }
   };

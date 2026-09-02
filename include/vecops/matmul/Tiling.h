@@ -9,6 +9,7 @@
 #include <type_traits>
 
 #include "vecops/matmul/Config.h"
+#include "vecops/platform/CacheInfo.h"
 #include "vecops/util/Math.h"
 
 namespace vecops::matmul {

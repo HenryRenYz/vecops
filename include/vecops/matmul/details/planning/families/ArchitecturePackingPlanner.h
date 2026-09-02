@@ -8,7 +8,7 @@
 #include "vecops/execution/details/arm/Resources.h"
 #include "vecops/matmul/Packing.h"
 
-namespace vecops::ops::matmul_details {
+namespace vecops::matmul::details {
 
 /** Packed-layout, byte-accounting, and packing-region ownership. */
 template <typename Invocation>
@@ -17,12 +17,12 @@ struct ArchitecturePackingPlanner {
   VECOPS_ALWAYS_INLINE static auto packed_layout(const Spec& spec) {
     constexpr int Rank = Spec::InputTensor::Ndim;
     if constexpr (Rank == 2) {
-      return matmul_packed_layout<typename Invocation::AtomType, Side>(
+      return ::vecops::matmul::packed_layout<typename Invocation::AtomType, Side>(
           spec.input_layout());
     } else {
       static_assert(Rank == 3);
       const auto& layout = spec.input_layout();
-      return matmul_packed_layout<typename Invocation::AtomType, Side>(
+      return ::vecops::matmul::packed_layout<typename Invocation::AtomType, Side>(
           tensor::make_layout(tensor::make_shape(
               tensor::size_value<Rank - 2>(layout),
               tensor::size_value<Rank - 1>(layout))));
@@ -50,7 +50,7 @@ struct ArchitecturePackingPlanner {
     const auto flat_m = batch * op.m_;
     const auto flat_layout = tensor::make_layout(
         tensor::make_shape(flat_m, op.k_));
-    return matmul_packed_layout<
+    return ::vecops::matmul::packed_layout<
         typename Invocation::AtomType, ::vecops::matmul::Operand::A>(
             flat_layout);
   }
@@ -83,6 +83,6 @@ struct ArchitecturePackingPlanner {
   }
 };
 
-} // namespace vecops::ops::matmul_details
+} // namespace vecops::matmul::details
 
 #endif // VECOPS_MATMUL_DETAILS_FAMILIES_ARCHITECTURE_PACKING_PLANNER_H

@@ -15,7 +15,7 @@
 #include <type_traits>
 #include <utility>
 
-#include "vecops/matmul/details/sme/Atoms.h"
+#include "vecops/matmul/details/kernel/sme/Atoms.h"
 
 #if !defined(__ARM_FEATURE_SVE_BF16)
 #error "MatmulMMLAExperimentBench requires SVE BF16 matrix multiply"
@@ -291,9 +291,9 @@ void run_mmla_with_extents(
   const auto a_layout = make_layout(make_shape(m, k));
   const auto b_layout = make_layout(make_shape(n, k));
   const auto packed_a_layout =
-      ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(a_layout);
+      ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::A>(a_layout);
   const auto packed_b_layout =
-      ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::B>(b_layout);
+      ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::B>(b_layout);
   const nint_t packed_a_elements = numel(packed_a_layout);
   const nint_t packed_b_elements = numel(packed_b_layout);
   const nint_t packed_a_bytes = packed_a_elements * nint_t{sizeof(TA)};
@@ -311,9 +311,9 @@ void run_mmla_with_extents(
   auto packed_a_tensor = make_tensor(packed_a, packed_a_layout);
   auto packed_b_tensor = make_tensor(packed_b, packed_b_layout);
   ExecutionSession execution{};
-  ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
+  ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(
       execution, a_tensor, packed_a_tensor);
-  ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
+  ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
       execution, b_tensor, packed_b_tensor);
 
   const nint_t panel = packed_a_layout.shape()[2];

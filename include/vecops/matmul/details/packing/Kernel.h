@@ -6,7 +6,7 @@
 #define VECOPS_MATMUL_DETAILS_PACK_KERNEL_H
 
 #include "vecops/matmul/Packing.h"
-#include "vecops/matmul/details/pack/Backend.h"
+#include "vecops/matmul/details/packing/Backend.h"
 
 namespace vecops::kernel {
 

@@ -49,8 +49,8 @@ void check_both_packed(
       tensor::make_shape(meta::Any{n}, k_extent));
   auto at = tensor::make_tensor(a.data(), al);
   auto bt = tensor::make_tensor(b.data(), bl);
-  auto apl = ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(al);
-  auto bpl = ops::matmul_packed_layout<Atom, ::vecops::matmul::Operand::B>(bl);
+  auto apl = ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::A>(al);
+  auto bpl = ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::B>(bl);
   static_assert(::vecops::matmul::is_packed_layout<
       Atom, ::vecops::matmul::Operand::A, decltype(apl)>());
   static_assert(::vecops::matmul::is_packed_layout<
@@ -69,13 +69,13 @@ void check_both_packed(
   auto apt = tensor::make_tensor(ap, apl);
   auto bpt = tensor::make_tensor(bp, bpl);
   ExecutionSession pack_execution{};
-  ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(pack_execution, at, apt);
-  ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(pack_execution, bt, bpt);
+  ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(pack_execution, at, apt);
+  ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(pack_execution, bt, bpt);
 
   auto ct = tensor::make_tensor(
       c.data(), tensor::make_layout(
                     tensor::make_shape(meta::Any{m}, meta::Any{n})));
-  auto operation = ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{},
+  auto operation = test::matmul::make_test_matmul_invocation(ops::MatmulConfig<Atom>{},
       meta::Any{m}, meta::Any{n}, k_extent, apt, bpt, ct);
   static_assert(std::same_as<
       typename decltype(operation)::KExtentType, KExtent>);

@@ -12,8 +12,7 @@
 #include "vecops/kernel/Tile2D.h"
 #include "vecops/matmul/Atom.h"
 #include "vecops/matmul/Family.h"
-#include "vecops/matmul/details/Types.h"
-#include "vecops/platform/CacheInfo.h"
+#include "vecops/matmul/details/kernel/Types.h"
 
 namespace vecops::matmul {
 
@@ -125,33 +124,5 @@ concept LoopOrderType = requires {
 };
 
 } // namespace vecops::matmul
-
-namespace vecops::ops {
-
-template <
-    ::vecops::matmul::Atom AtomT,
-    typename FamilySelectionT =
-        ::vecops::matmul::family_selection::Automatic,
-    typename SchedulerPolicyT = kernel::matmul_policy::Automatic,
-    typename GenericTiledTuningT = ::vecops::matmul::GenericTiledTuning<>,
-    typename CacheInfoProviderT = platform::SystemCacheInfoProvider>
-struct MatmulConfig {
-  using Atom = AtomT;
-  using FamilySelection = FamilySelectionT;
-  using SchedulerPolicy = SchedulerPolicyT;
-  using GenericTuning = GenericTiledTuningT;
-  using CacheInfoProvider = CacheInfoProviderT;
-
-  [[no_unique_address]] GenericTiledTuningT generic_tiled{};
-  [[no_unique_address]] CacheInfoProviderT cache_info_provider{};
-};
-
-template <::vecops::matmul::Atom AtomT,
-          typename SchedulerPolicyT = kernel::matmul_policy::Automatic>
-using MatmulSchedulerConfig = MatmulConfig<
-    AtomT, ::vecops::matmul::family_selection::Automatic,
-    SchedulerPolicyT>;
-
-} // namespace vecops::ops
 
 #endif // VECOPS_MATMUL_CONFIG_H
