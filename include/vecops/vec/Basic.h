@@ -145,6 +145,31 @@ struct MaskNotOp {
 };
 
 /* **************************************************************************** */
+//    Mask queries: mask_all/any/none/count/first/last                   //
+/* **************************************************************************** */
+
+#define VECOPS_VEC_DECLARE_MASK_QUERY(OpType, ResultType)                \
+  struct OpType {                                                        \
+    template <VectorTag Tag>                                             \
+    VECOPS_ALWAYS_INLINE ResultType operator()(                          \
+        Tag tag, Mask<Tag> value) const;                                 \
+  }
+
+VECOPS_VEC_DECLARE_MASK_QUERY(MaskAllOp, bool);
+VECOPS_VEC_DECLARE_MASK_QUERY(MaskAnyOp, bool);
+VECOPS_VEC_DECLARE_MASK_QUERY(MaskCountOp, nint_t);
+VECOPS_VEC_DECLARE_MASK_QUERY(MaskFirstOp, nint_t);
+VECOPS_VEC_DECLARE_MASK_QUERY(MaskLastOp, nint_t);
+
+#undef VECOPS_VEC_DECLARE_MASK_QUERY
+
+struct MaskNoneOp {
+  template <VectorTag Tag>
+  VECOPS_ALWAYS_INLINE bool operator()(
+      Tag tag, Mask<Tag> value) const;
+};
+
+/* **************************************************************************** */
 //    Lane access: get, set, bitcast                                      //
 /* **************************************************************************** */
 
@@ -385,6 +410,12 @@ inline constexpr MaskOrOp mask_or{};
 inline constexpr MaskXorOp mask_xor{};
 inline constexpr MaskAndNotOp mask_andnot{};
 inline constexpr MaskNotOp mask_not{};
+inline constexpr MaskAllOp mask_all{};
+inline constexpr MaskAnyOp mask_any{};
+inline constexpr MaskNoneOp mask_none{};
+inline constexpr MaskCountOp mask_count{};
+inline constexpr MaskFirstOp mask_first{};
+inline constexpr MaskLastOp mask_last{};
 inline constexpr GetOp get{};
 inline constexpr SetOp set{};
 inline constexpr BitCastOp bitcast{};
@@ -665,6 +696,48 @@ VECOPS_VEC_DEFINE_MASK_BINARY_CALL(MaskAndNotOp)
 /** Returns result[i] = !value[i]. */
 template <VectorTag Tag>
 VECOPS_ALWAYS_INLINE Mask<Tag> MaskNotOp::operator()(
+    Tag tag, Mask<Tag> value) const {
+  return details::execute(*this, tag, value);
+}
+
+/** Returns true exactly when every logical mask lane is true. */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE bool MaskAllOp::operator()(
+    Tag tag, Mask<Tag> value) const {
+  return details::execute(*this, tag, value);
+}
+
+/** Returns true exactly when at least one logical mask lane is true. */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE bool MaskAnyOp::operator()(
+    Tag tag, Mask<Tag> value) const {
+  return details::execute(*this, tag, value);
+}
+
+/** Returns true exactly when every logical mask lane is false. */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE bool MaskNoneOp::operator()(
+    Tag tag, Mask<Tag> value) const {
+  return !mask_any(tag, value);
+}
+
+/** Returns the number of true logical mask lanes. */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE nint_t MaskCountOp::operator()(
+    Tag tag, Mask<Tag> value) const {
+  return details::execute(*this, tag, value);
+}
+
+/** Returns the lowest true lane index, or -1 when the mask is empty. */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE nint_t MaskFirstOp::operator()(
+    Tag tag, Mask<Tag> value) const {
+  return details::execute(*this, tag, value);
+}
+
+/** Returns the highest true lane index, or -1 when the mask is empty. */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE nint_t MaskLastOp::operator()(
     Tag tag, Mask<Tag> value) const {
   return details::execute(*this, tag, value);
 }

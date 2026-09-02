@@ -6,6 +6,14 @@
 
 namespace vecops::vec {
 
+namespace details {
+
+/** Internal dispatch tokens selected by opt::saturate. */
+struct SaturatedAddOp {};
+struct SaturatedSubOp {};
+
+} // namespace details
+
 /* **************************************************************************** */
 //    Binary arithmetic: add, sub, mul, div                               //
 /* **************************************************************************** */
@@ -187,6 +195,50 @@ struct DivOp {
   }
 };
 
+/** Copies only the IEEE sign bit of sign into magnitude. */
+struct CopySignOp {
+  template <FloatingTag Tag>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> magnitude, Vec<Tag> sign) const;
+
+  template <FloatingTag Tag, typename... Options>
+    requires (sizeof...(Options) > 0)
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> magnitude, Vec<Tag> sign,
+      Options&&... options) const;
+
+  template <FloatingTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> magnitude, Vec<Tag> sign,
+      const OpRequest<Tag, A, I>& request) const;
+
+  template <FloatingVectorValue V, typename... Options>
+  VECOPS_ALWAYS_INLINE V operator()(
+      V magnitude, V sign, Options&&... options) const {
+    return (*this)(
+        VecToTag<V>{}, magnitude, sign,
+        std::forward<Options>(options)...);
+  }
+
+  template <FloatingTag Tag, typename Policy>
+    requires (details::arithmetic_inactive_policy<Policy>)
+  inline Vec<Tag> operator()(
+      Tag tag, Vec<Tag> magnitude, Vec<Tag> sign, Mask<Tag> mask,
+      Vec<Tag> inactive, Policy policy) const {
+    return details::execute(
+        *this, tag, magnitude, sign, mask, inactive, policy);
+  }
+
+  template <FloatingTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordVec<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> magnitude,
+      NativeWordVec<Tag> sign) const {
+    return details::execute_word<0, details::CurrentBackend>(
+        *this, tag, magnitude, sign);
+  }
+};
+
 /* **************************************************************************** */
 //    Extrema: min, max                                                   //
 /* **************************************************************************** */
@@ -231,6 +283,53 @@ VECOPS_VEC_DECLARE_EXTREMA_OP(MinOp);
 VECOPS_VEC_DECLARE_EXTREMA_OP(MaxOp);
 
 #undef VECOPS_VEC_DECLARE_EXTREMA_OP
+
+/* **************************************************************************** */
+//    Clamp                                                                     //
+/* **************************************************************************** */
+
+struct ClampOp {
+  template <VectorTag Tag>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper) const;
+
+  template <VectorTag Tag, typename... Options>
+    requires (sizeof...(Options) > 0)
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper,
+      Options&&... options) const;
+
+  template <VectorTag Tag, Active A, Inactive I>
+  VECOPS_ALWAYS_INLINE Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper,
+      const OpRequest<Tag, A, I>& request) const;
+
+  template <TagInferableVector V, typename... Options>
+  VECOPS_ALWAYS_INLINE V operator()(
+      V value, V lower, V upper, Options&&... options) const {
+    return (*this)(
+        VecToTag<V>{}, value, lower, upper,
+        std::forward<Options>(options)...);
+  }
+
+  template <VectorTag Tag, typename Policy>
+    requires (details::arithmetic_inactive_policy<Policy>)
+  inline Vec<Tag> operator()(
+      Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper,
+      Mask<Tag> mask, Vec<Tag> inactive, Policy policy) const {
+    return details::execute(
+        *this, tag, value, lower, upper, mask, inactive, policy);
+  }
+
+  template <VectorTag Tag>
+    requires (details::multi_word_tag_v<Tag>)
+  inline NativeWordVec<Tag> operator()(
+      Tag tag, NativeWordVec<Tag> value, NativeWordVec<Tag> lower,
+      NativeWordVec<Tag> upper) const {
+    return details::execute_word<0, details::CurrentBackend>(
+        *this, tag, value, lower, upper);
+  }
+};
 
 /* **************************************************************************** */
 //    Unary arithmetic: neg, abs                                          //
@@ -380,8 +479,10 @@ inline constexpr AddOp add{};
 inline constexpr SubOp sub{};
 inline constexpr MulOp mul{};
 inline constexpr DivOp div{};
+inline constexpr CopySignOp copysign{};
 inline constexpr MinOp min{};
 inline constexpr MaxOp max{};
+inline constexpr ClampOp clamp{};
 inline constexpr NegOp neg{};
 inline constexpr AbsOp abs{};
 inline constexpr SqrtOp sqrt{};
@@ -407,9 +508,12 @@ namespace vecops::vec {
 /**
  * Computes r[i] = a[i] + b[i] for every logical lane 0 <= i < size(tag).
  *
- * Integer addition wraps modulo 2^bits. float16_t and bfloat16_t results are
- * rounded back to their respective element formats. Multi-word Tags are
- * automatically batched unless a backend supplies a whole-Tag NativeImpl.
+ * Integer addition wraps modulo 2^bits by default. opt::saturate instead
+ * evaluates the mathematical sum and clamps it to the integer element type's
+ * range; opt::wrap explicitly selects the default. The overflow options are
+ * invalid for floating Tags. float16_t and bfloat16_t results are rounded back
+ * to their respective element formats. Multi-word Tags are automatically
+ * batched unless a backend supplies a whole-Tag NativeImpl.
  *
  * @see sub, mul, div for other arithmetic operations.
  * @see opt::masked, opt::zero, opt::merge for masking options.
@@ -427,28 +531,33 @@ VECOPS_ALWAYS_INLINE Vec<Tag> AddOp::operator()(
  * ElementOf<Tag>{} with opt::zero, or the scalar/vector supplied by one
  * opt::merge(value). opt::zero and opt::merge are mutually exclusive.
  *
- * Integer addition wraps modulo 2^bits. Floating-point arithmetic follows the
- * backend's native format and rounding behavior; float16_t and bfloat16_t are
- * rounded back to their element formats.
+ * Integer addition wraps modulo 2^bits unless opt::saturate is present.
+ * opt::wrap and opt::saturate are mutually exclusive; either can be the only
+ * option, in which case the call is unmasked. Floating-point arithmetic
+ * follows the backend's native format and rounding behavior; float16_t and
+ * bfloat16_t are rounded back to their element formats.
  */
 template <VectorTag Tag, typename... Options>
   requires (sizeof...(Options) > 0)
 VECOPS_ALWAYS_INLINE Vec<Tag> AddOp::operator()(
     Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const {
-  return details::execute_arithmetic_options(
-      *this, tag, a, b, std::forward<Options>(options)...);
+  return details::execute_add_sub_options(
+      *this, details::SaturatedAddOp{}, tag, a, b,
+      std::forward<Options>(options)...);
 }
-  template <VectorTag Tag, Active A, Inactive I>
-  VECOPS_ALWAYS_INLINE Vec<Tag> AddOp::operator()(
-      Tag tag, Vec<Tag> a, Vec<Tag> b,
-      const OpRequest<Tag, A, I>& request) const {
-    return details::execute_arithmetic_request(*this, tag, a, b, request);
-  }
+template <VectorTag Tag, Active A, Inactive I>
+VECOPS_ALWAYS_INLINE Vec<Tag> AddOp::operator()(
+    Tag tag, Vec<Tag> a, Vec<Tag> b,
+    const OpRequest<Tag, A, I>& request) const {
+  return details::execute_arithmetic_request(*this, tag, a, b, request);
+}
 
 /**
  * Computes r[i] = a[i] - b[i] for every logical lane 0 <= i < size(tag).
  *
- * Integer subtraction wraps modulo 2^bits. Floating-point arithmetic follows
+ * Integer subtraction wraps modulo 2^bits by default. opt::saturate clamps the
+ * mathematical difference to the integer element type's range, while
+ * opt::wrap explicitly selects the default. Floating-point arithmetic follows
  * the backend's native format and rounding behavior; float16_t and bfloat16_t
  * are rounded back to their element formats.
  */
@@ -462,23 +571,24 @@ VECOPS_ALWAYS_INLINE Vec<Tag> SubOp::operator()(
  * Computes r[i] = a[i] - b[i] in lanes selected by exactly one
  * opt::masked(mask) option. Inactive lanes come from a by default, zero with
  * opt::zero, or one scalar/vector opt::merge(value). The population options
- * are mutually exclusive. Integer subtraction wraps modulo 2^bits; floating
+ * are mutually exclusive. Integer subtraction wraps modulo 2^bits unless
+ * opt::saturate is present; an overflow-policy-only call is unmasked. Floating
  * results use the same format and rounding behavior as unmasked subtraction.
  */
 template <VectorTag Tag, typename... Options>
   requires (sizeof...(Options) > 0)
 VECOPS_ALWAYS_INLINE Vec<Tag> SubOp::operator()(
     Tag tag, Vec<Tag> a, Vec<Tag> b, Options&&... options) const {
-  return details::execute_arithmetic_options(
-      *this, tag, a, b, std::forward<Options>(options)...);
+  return details::execute_add_sub_options(
+      *this, details::SaturatedSubOp{}, tag, a, b,
+      std::forward<Options>(options)...);
 }
-  template <VectorTag Tag, Active A, Inactive I>
-  VECOPS_ALWAYS_INLINE Vec<Tag> SubOp::operator()(
-      Tag tag, Vec<Tag> a, Vec<Tag> b,
-      const OpRequest<Tag, A, I>& request) const {
-    return details::execute_arithmetic_request(*this, tag, a, b, request);
-  }
-
+template <VectorTag Tag, Active A, Inactive I>
+VECOPS_ALWAYS_INLINE Vec<Tag> SubOp::operator()(
+    Tag tag, Vec<Tag> a, Vec<Tag> b,
+    const OpRequest<Tag, A, I>& request) const {
+  return details::execute_arithmetic_request(*this, tag, a, b, request);
+}
 
 /**
  * Computes r[i] = a[i] * b[i] for every logical lane 0 <= i < size(tag).
@@ -507,20 +617,19 @@ VECOPS_ALWAYS_INLINE Vec<Tag> MulOp::operator()(
   return details::execute_arithmetic_options(
       *this, tag, a, b, std::forward<Options>(options)...);
 }
-  template <VectorTag Tag, Active A, Inactive I>
-  VECOPS_ALWAYS_INLINE Vec<Tag> MulOp::operator()(
-      Tag tag, Vec<Tag> a, Vec<Tag> b,
-      const OpRequest<Tag, A, I>& request) const {
-    return details::execute_arithmetic_request(*this, tag, a, b, request);
-  }
-
+template <VectorTag Tag, Active A, Inactive I>
+VECOPS_ALWAYS_INLINE Vec<Tag> MulOp::operator()(
+    Tag tag, Vec<Tag> a, Vec<Tag> b,
+    const OpRequest<Tag, A, I>& request) const {
+  return details::execute_arithmetic_request(*this, tag, a, b, request);
+}
 
 /**
  * Computes floating-point r[i] = a[i] / b[i] in every logical lane.
  *
  * Only floating-point Tags are supported (FloatingTag constraint). Division
  * by zero produces a backend-dependent result (typically infinity or NaN).
- * Integer division is not available; use bit_shr for power-of-two division.
+ * Integer division is not available; use shr for power-of-two division.
  *
  * @see Math.h rcp for a reciprocal with selectable accuracy.
  */
@@ -542,12 +651,41 @@ VECOPS_ALWAYS_INLINE Vec<Tag> DivOp::operator()(
   return details::execute_arithmetic_options(
       *this, tag, a, b, std::forward<Options>(options)...);
 }
-  template <FloatingTag Tag, Active A, Inactive I>
-  VECOPS_ALWAYS_INLINE Vec<Tag> DivOp::operator()(
-      Tag tag, Vec<Tag> a, Vec<Tag> b,
-      const OpRequest<Tag, A, I>& request) const {
-    return details::execute_arithmetic_request(*this, tag, a, b, request);
-  }
+template <FloatingTag Tag, Active A, Inactive I>
+VECOPS_ALWAYS_INLINE Vec<Tag> DivOp::operator()(
+    Tag tag, Vec<Tag> a, Vec<Tag> b,
+    const OpRequest<Tag, A, I>& request) const {
+  return details::execute_arithmetic_request(*this, tag, a, b, request);
+}
+
+/**
+ * Returns magnitude with its sign bit replaced by sign's sign bit. The
+ * remaining exponent and significand bits are copied unchanged, including
+ * NaN payloads and signed-zero magnitude bits.
+ */
+template <FloatingTag Tag>
+VECOPS_ALWAYS_INLINE Vec<Tag> CopySignOp::operator()(
+    Tag tag, Vec<Tag> magnitude, Vec<Tag> sign) const {
+  return details::execute(*this, tag, magnitude, sign);
+}
+
+template <FloatingTag Tag, typename... Options>
+  requires (sizeof...(Options) > 0)
+VECOPS_ALWAYS_INLINE Vec<Tag> CopySignOp::operator()(
+    Tag tag, Vec<Tag> magnitude, Vec<Tag> sign,
+    Options&&... options) const {
+  return details::execute_arithmetic_options(
+      *this, tag, magnitude, sign,
+      std::forward<Options>(options)...);
+}
+
+template <FloatingTag Tag, Active A, Inactive I>
+VECOPS_ALWAYS_INLINE Vec<Tag> CopySignOp::operator()(
+    Tag tag, Vec<Tag> magnitude, Vec<Tag> sign,
+    const OpRequest<Tag, A, I>& request) const {
+  return details::execute_arithmetic_request(
+      *this, tag, magnitude, sign, request);
+}
 
 
 #define VECOPS_VEC_DEFINE_EXTREMA_OP(OpType, Name)                     \
@@ -587,6 +725,40 @@ VECOPS_VEC_DEFINE_EXTREMA_OP(MinOp, min);
 VECOPS_VEC_DEFINE_EXTREMA_OP(MaxOp, max);
 
 #undef VECOPS_VEC_DEFINE_EXTREMA_OP
+
+/**
+ * Computes `r[i] = min(max(value[i], lower[i]), upper[i])` lane-wise.
+ * Bounds are not required to be ordered; the expression above defines the
+ * result when `lower[i] > upper[i]`. Floating NaN and signed-zero selection
+ * follows the active backend's `max` followed by `min` semantics.
+ *
+ * Filtered calls require exactly one `opt::masked(mask)`. Inactive lanes
+ * preserve `value` by default, or use `opt::zero` or one scalar/vector
+ * `opt::merge` value.
+ */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE Vec<Tag> ClampOp::operator()(
+    Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper) const {
+  return details::execute(*this, tag, value, lower, upper);
+}
+
+template <VectorTag Tag, typename... Options>
+  requires (sizeof...(Options) > 0)
+VECOPS_ALWAYS_INLINE Vec<Tag> ClampOp::operator()(
+    Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper,
+    Options&&... options) const {
+  return details::execute_ternary_arithmetic_options(
+      *this, tag, value, lower, upper,
+      std::forward<Options>(options)...);
+}
+
+template <VectorTag Tag, Active A, Inactive I>
+VECOPS_ALWAYS_INLINE Vec<Tag> ClampOp::operator()(
+    Tag tag, Vec<Tag> value, Vec<Tag> lower, Vec<Tag> upper,
+    const OpRequest<Tag, A, I>& request) const {
+  return details::execute_ternary_arithmetic_request(
+      *this, tag, value, lower, upper, request);
+}
 
 #define VECOPS_VEC_DEFINE_UNARY_ARITHMETIC_OP(OpType, Name)            \
   template <VectorTag Tag>                                             \

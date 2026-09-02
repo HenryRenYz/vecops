@@ -28,6 +28,34 @@ using MaskedI = vec::opt::Masked<IM>;
 using MathStrict = decltype(vec::opt::math::strict);
 using MathFast = decltype(vec::opt::math::fast);
 using MathEstimate = decltype(vec::opt::math::estimate);
+using Saturate = decltype(vec::opt::saturate);
+using Wrap = decltype(vec::opt::wrap);
+
+using DotToTag = vec::ScalableTag<vecops::float32_t>;
+using DotF16Tag = vec::ViewAs<vecops::float16_t, DotToTag>;
+using DotBF16Tag = vec::ViewAs<vecops::bfloat16_t, DotToTag>;
+using DotF16V = vec::Vec<DotF16Tag>;
+using DotBF16V = vec::Vec<DotBF16Tag>;
+using DotToV = vec::Vec<DotToTag>;
+
+static_assert(accepts<
+              decltype(vec::widening_dot), DotToTag,
+              DotF16Tag, DotBF16Tag, DotF16V, DotBF16V>);
+static_assert(accepts<
+              decltype(vec::widening_dot), DotToTag,
+              DotF16Tag, DotBF16Tag, DotF16V, DotBF16V, DotToV>);
+static_assert(accepts<
+              decltype(vec::widening_dot), DotToTag,
+              DotF16V, DotBF16V>);
+static_assert(accepts<
+              decltype(vec::widening_dot), DotToTag,
+              DotF16V, DotBF16V, DotToV>);
+static_assert(!accepts<
+              decltype(vec::widening_dot), DotToTag,
+              DotToTag, DotF16Tag, DotToV, DotF16V>);
+static_assert(!accepts<
+              decltype(vec::widening_dot), DotF16Tag,
+              DotF16Tag, DotBF16Tag, DotF16V, DotBF16V>);
 
 #define CHECK_BINARY_CPO(Name, Tag, Value, Masked)                    \
   static_assert(accepts<decltype(vec::Name), Tag, Value, Value>);     \
@@ -55,9 +83,23 @@ CHECK_BINARY_CPO(mul, FTag, FV, MaskedF);
 CHECK_BINARY_CPO(div, FTag, FV, MaskedF);
 CHECK_BINARY_CPO(min, FTag, FV, MaskedF);
 CHECK_BINARY_CPO(max, FTag, FV, MaskedF);
+CHECK_BINARY_CPO(copysign, FTag, FV, MaskedF);
+static_assert(accepts<decltype(vec::add), ITag, IV, IV, Saturate>);
+static_assert(accepts<decltype(vec::add), IV, IV, Saturate>);
+static_assert(accepts<decltype(vec::sub), ITag, IV, IV, Wrap>);
+static_assert(accepts<
+              decltype(vec::sub), ITag, IV, IV,
+              Saturate, MaskedI, vec::opt::Zero>);
 CHECK_UNARY_CPO(neg, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(abs, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(sqrt, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(floor, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(ceil, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(trunc, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(round, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(round_even, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(nearbyint, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(rint, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(rcp, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(rsqrt, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(exp, FTag, FV, MaskedF);
@@ -80,6 +122,47 @@ CHECK_UNARY_CPO(log10, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(log10_strict, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(log10_fast, FTag, FV, MaskedF);
 CHECK_UNARY_CPO(log10_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sin, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sin_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sin_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sin_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cos, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cos_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cos_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cos_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tan, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tan_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tan_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tan_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sinpi, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sinpi_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sinpi_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(sinpi_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cospi, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cospi_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cospi_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(cospi_est, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tanpi, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tanpi_strict, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tanpi_fast, FTag, FV, MaskedF);
+CHECK_UNARY_CPO(tanpi_est, FTag, FV, MaskedF);
+
+static_assert(accepts<decltype(vec::sincos), FTag, FV, FV, FV>);
+static_assert(accepts<decltype(vec::sincos), FV, FV, FV>);
+static_assert(accepts<decltype(vec::sincos_strict), FTag, FV, FV, FV>);
+static_assert(accepts<decltype(vec::sincos_fast), FV, FV, FV, MaskedF>);
+static_assert(accepts<decltype(vec::sincos_est), FV, FV, FV>);
+static_assert(accepts<
+              decltype(vec::sincospi), FTag, FV, FV, FV,
+              MaskedF, vec::opt::Zero, MathFast>);
+static_assert(accepts<decltype(vec::sincospi_strict), FTag, FV, FV, FV>);
+static_assert(accepts<decltype(vec::sincospi_fast), FV, FV, FV, MaskedF>);
+static_assert(accepts<decltype(vec::sincospi_est), FV, FV, FV>);
+static_assert(!accepts<
+              decltype(vec::sincos), FTag, FV, FV, FV,
+              MathStrict, MathFast>);
+static_assert(!accepts<
+              decltype(vec::sincos_fast), FV, FV, FV, MathEstimate>);
 
 static_assert(accepts<decltype(vec::rsqrt), FTag, FV, MathStrict>);
 static_assert(accepts<decltype(vec::rsqrt), FV, MathFast>);
@@ -104,6 +187,11 @@ static_assert(!accepts<decltype(vec::exp_est), FV, MathStrict>);
 static_assert(!accepts<
               decltype(vec::exp_neg_strict), FTag, FV, MathEstimate>);
 static_assert(!accepts<decltype(vec::exp_neg_fast), FV, MathFast>);
+static_assert(accepts<decltype(vec::sin), FTag, FV, MathStrict>);
+static_assert(accepts<decltype(vec::tanpi), FV, MathEstimate>);
+static_assert(!accepts<
+              decltype(vec::cos), FTag, FV, MathStrict, MathFast>);
+static_assert(!accepts<decltype(vec::sin_fast), FV, MathEstimate>);
 CHECK_BINARY_CPO(bit_and, ITag, IV, MaskedI);
 CHECK_BINARY_CPO(bit_or, ITag, IV, MaskedI);
 CHECK_BINARY_CPO(bit_xor, ITag, IV, MaskedI);
@@ -124,6 +212,10 @@ CHECK_FMA_CPO(fmadd);
 CHECK_FMA_CPO(fmsub);
 CHECK_FMA_CPO(fnmadd);
 CHECK_FMA_CPO(fnmsub);
+CHECK_FMA_CPO(clamp);
+
+static_assert(!accepts<decltype(vec::clamp), FTag, FV, FV, IV>);
+static_assert(!accepts<decltype(vec::clamp), FV, FV, IV>);
 
 #undef CHECK_FMA_CPO
 
@@ -154,6 +246,9 @@ CHECK_CLASSIFICATION_CPO(isnan);
 CHECK_CLASSIFICATION_CPO(isposinf);
 CHECK_CLASSIFICATION_CPO(isneginf);
 CHECK_CLASSIFICATION_CPO(isinf);
+CHECK_CLASSIFICATION_CPO(isfinite);
+CHECK_CLASSIFICATION_CPO(isnormal);
+CHECK_CLASSIFICATION_CPO(signbit);
 
 #undef CHECK_CLASSIFICATION_CPO
 
@@ -180,6 +275,14 @@ static_assert(accepts<decltype(vec::mask_or), FTag, FM, FM>);
 static_assert(accepts<decltype(vec::mask_xor), FTag, FM, FM>);
 static_assert(accepts<decltype(vec::mask_andnot), FTag, FM, FM>);
 static_assert(accepts<decltype(vec::mask_not), FTag, FM>);
+static_assert(accepts<decltype(vec::mask_all), FTag, FM>);
+static_assert(accepts<decltype(vec::mask_any), FTag, FM>);
+static_assert(accepts<decltype(vec::mask_none), FTag, FM>);
+static_assert(accepts<decltype(vec::mask_count), FTag, FM>);
+static_assert(accepts<decltype(vec::mask_first), FTag, FM>);
+static_assert(accepts<decltype(vec::mask_last), FTag, FM>);
+static_assert(accepts<decltype(vec::iota), FTag, float>);
+static_assert(accepts<decltype(vec::iota), FTag, float, float>);
 static_assert(!accepts<decltype(vec::mask_and), FM, FM>);
 static_assert(accepts<decltype(vec::get), FTag, FV, vecops::nint_t>);
 static_assert(accepts<decltype(vec::get), FTag, FM, vecops::nint_t>);
@@ -210,20 +313,44 @@ static_assert(accepts<decltype(vec::shuf), FV, IV>);
 static_assert(accepts<decltype(vec::local_shuf), FTag, FV, IV>);
 static_assert(accepts<decltype(vec::local_shuf), FV, IV>);
 
-static_assert(accepts<decltype(vec::bit_shl), ITag, IV, int>);
-static_assert(accepts<decltype(vec::bit_shl), ITag, IV,
+static_assert(accepts<decltype(vec::shl), ITag, IV, int>);
+static_assert(accepts<decltype(vec::shl), ITag, IV,
                       vecops::meta::Const<3>>);
-static_assert(accepts<decltype(vec::bit_shl), ITag, IV,
-                      vecops::meta::Dynamic<1>>);
-static_assert(accepts<decltype(vec::bit_shl), ITag, IV, IV>);
-static_assert(accepts<decltype(vec::bit_shl), IV, int>);
-static_assert(accepts<decltype(vec::bit_shr), ITag, IV, int>);
-static_assert(accepts<decltype(vec::bit_shr), ITag, IV,
+static_assert(!accepts<decltype(vec::shl), ITag, IV,
+                       vecops::meta::Const<-1>>);
+static_assert(!accepts<decltype(vec::shl), ITag, IV,
+                       vecops::meta::Dynamic<1>>);
+static_assert(accepts<decltype(vec::shl), ITag, IV, IV>);
+static_assert(accepts<decltype(vec::shl), IV, int>);
+static_assert(accepts<decltype(vec::shr), ITag, IV, int>);
+static_assert(accepts<decltype(vec::shr), ITag, IV,
                       vecops::meta::Const<3>>);
-static_assert(accepts<decltype(vec::bit_shr), ITag, IV,
-                      vecops::meta::Dynamic<1>>);
-static_assert(accepts<decltype(vec::bit_shr), ITag, IV, IV>);
-static_assert(accepts<decltype(vec::bit_shr), IV, int>);
+static_assert(!accepts<decltype(vec::shr), ITag, IV,
+                       vecops::meta::Const<-1>>);
+static_assert(!accepts<decltype(vec::shr), ITag, IV,
+                       vecops::meta::Dynamic<1>>);
+static_assert(accepts<decltype(vec::shr), ITag, IV, IV>);
+static_assert(accepts<decltype(vec::shr), IV, int>);
+static_assert(accepts<decltype(vec::popcount), ITag, IV>);
+static_assert(accepts<decltype(vec::popcount), IV>);
+static_assert(accepts<decltype(vec::countl_zero), ITag, IV>);
+static_assert(accepts<decltype(vec::countl_one), IV>);
+static_assert(accepts<decltype(vec::countr_zero), ITag, IV>);
+static_assert(accepts<decltype(vec::countr_one), IV>);
+static_assert(!accepts<decltype(vec::popcount), FTag, FV>);
+static_assert(accepts<decltype(vec::rotl), ITag, IV, int>);
+static_assert(accepts<decltype(vec::rotl), ITag, IV,
+                      vecops::meta::Const<-1>>);
+static_assert(accepts<decltype(vec::rotl), ITag, IV, IV>);
+static_assert(accepts<decltype(vec::rotl), IV, int>);
+static_assert(accepts<decltype(vec::rotr), ITag, IV, int>);
+static_assert(accepts<decltype(vec::rotr), ITag, IV,
+                      vecops::meta::Const<-1>>);
+static_assert(accepts<decltype(vec::rotr), ITag, IV, IV>);
+static_assert(accepts<decltype(vec::rotr), IV, int>);
+static_assert(!accepts<decltype(vec::rotl), FTag, FV, int>);
+static_assert(!accepts<decltype(vec::rotl), ITag, IV,
+                       vecops::meta::Dynamic<1>>);
 
 static_assert(accepts<decltype(vec::reduce_add), FTag, FV>);
 static_assert(accepts<decltype(vec::reduce_add), FTag, FV, MaskedF>);

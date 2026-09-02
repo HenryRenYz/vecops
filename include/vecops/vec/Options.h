@@ -16,9 +16,10 @@
  * Options are organized in three namespaces:
  *
  * - **opt**: computation-level options for masking (masked/unmasked),
- *   inactive-lane population (zero/merge), math accuracy (opt::math), lane
- *   selection (first), lane ordering (LaneOrder), scale (Scale), and memory
- *   addressing (indexed, strided).
+ *   inactive-lane population (zero/merge), integer overflow behavior
+ *   (wrap/saturate), math accuracy (opt::math), lane selection (first), lane
+ *   ordering (LaneOrder), scale (Scale), and memory addressing (indexed,
+ *   strided).
  *
  * - **cvt**: conversion-policy options controlling lane order
  *   (ordered/unordered/lane), value behavior (saturate/wrap), and narrowing
@@ -49,9 +50,24 @@ namespace vecops::vec {
  */
 enum class Accuracy { Strict, Fast, Estimate };
 
+/** Overflow behavior selected by integer arithmetic options. */
+enum class OverflowMode { Wrap, Saturate };
+
 } // namespace vecops::vec
 
 namespace vecops::vec::opt {
+
+/** Selects one compile-time integer overflow behavior. */
+template <OverflowMode Mode>
+struct OverflowPolicy {
+  static constexpr OverflowMode mode = Mode;
+};
+
+/** Explicitly selects the default modulo-2^N integer arithmetic behavior. */
+inline constexpr OverflowPolicy<OverflowMode::Wrap> wrap{};
+
+/** Clamps an integer arithmetic result to the element type's range. */
+inline constexpr OverflowPolicy<OverflowMode::Saturate> saturate{};
 
 /** Compile-time proof of the execution resources active at a memory access. */
 template <typename Set>
@@ -498,6 +514,20 @@ struct IsMathAccuracyOption<opt::math::AccuracyOption<A>>
 template <typename T>
 inline constexpr bool is_math_accuracy_option_v =
     IsMathAccuracyOption<std::remove_cvref_t<T>>::value;
+
+/** Detects opt::OverflowPolicy<Mode> and exposes its overflow mode. */
+template <typename>
+struct IsArithmeticOverflowOption : std::false_type {};
+
+template <OverflowMode Mode>
+struct IsArithmeticOverflowOption<opt::OverflowPolicy<Mode>>
+    : std::true_type {
+  static constexpr OverflowMode mode = Mode;
+};
+
+template <typename T>
+inline constexpr bool is_arithmetic_overflow_option_v =
+    IsArithmeticOverflowOption<std::remove_cvref_t<T>>::value;
 
 /** Detects opt::Masked<M> wrappers; the Value alias extracts the mask type. */
 template <typename>

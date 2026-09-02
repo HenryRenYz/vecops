@@ -327,29 +327,7 @@ VECOPS_ALWAYS_INLINE auto skinny_convert(ToTag to, FromTag from, V value) {
   else return vec::convert(to, from, value);
 }
 
-// TODO: Generalize this into a public vec operation only after the portable
-// semantics and additional backend use cases have stabilized.
-template <typename InputTag>
-VECOPS_ALWAYS_INLINE auto skinny_widening_dot_add(
-    InputTag, vec::Vec<vec::ViewAs<float32_t, InputTag>> acc,
-    vec::Vec<InputTag> a, vec::Vec<InputTag> b) {
-  using AccTag = vec::ViewAs<float32_t, InputTag>;
-#if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE_BF16)
-  const auto raw_acc = vec::details::sve_basic_raw_word(acc);
-  const auto raw_a = vec::details::sve_basic_raw_word(a);
-  const auto raw_b = vec::details::sve_basic_raw_word(b);
-  return vec::details::sve_basic_wrap_word<AccTag>(
-      svbfdot_f32(raw_acc, raw_a, raw_b));
-#else
-  const auto a0 = vec::convert(AccTag{}, InputTag{}, a, vec::cvt::lane<0>);
-  const auto a1 = vec::convert(AccTag{}, InputTag{}, a, vec::cvt::lane<1>);
-  const auto b0 = vec::convert(AccTag{}, InputTag{}, b, vec::cvt::lane<0>);
-  const auto b1 = vec::convert(AccTag{}, InputTag{}, b, vec::cvt::lane<1>);
-  return vec::fmadd(a1, b1, vec::fmadd(a0, b0, acc));
-#endif
-}
-
-// TODO: Generalize together with skinny_widening_dot_add after the FP16
+// TODO: Generalize after the FP16
 // FMLAL path has passed all performance and numerical gates.
 template <typename InputTag>
 VECOPS_ALWAYS_INLINE auto skinny_widening_fmadd(
@@ -378,31 +356,6 @@ VECOPS_ALWAYS_INLINE auto skinny_widening_fmadd(
       AccTag{}, vec::convert(AccTag{}, InputTag{}, a),
       vec::convert(AccTag{}, InputTag{}, b), acc);
 #endif
-}
-
-// TODO: Generalize only after signed, unsigned, and mixed-sign dot semantics
-// have a stable cross-backend API. The first SME-local use covers same-sign
-// raw skinny matmuls, whose contiguous K layout maps directly to SVE DOT.
-// BFMMLA/I8MM MMLA need different 2x4x2/2x8x2 segment layouts and therefore
-// belong in a separate tiny-kernel packing experiment, not in this raw GEMV.
-template <typename InputTag>
-VECOPS_ALWAYS_INLINE auto skinny_integer_dot_add(
-    InputTag, vec::Vec<vec::ViewAs<int32_t, InputTag>> acc,
-    vec::Vec<InputTag> a, vec::Vec<InputTag> b) {
-  using T = vec::ElementOf<InputTag>;
-  using AccTag = vec::ViewAs<int32_t, InputTag>;
-  const auto raw_acc = vec::details::sve_basic_raw_word(acc);
-  const auto raw_a = vec::details::sve_basic_raw_word(a);
-  const auto raw_b = vec::details::sve_basic_raw_word(b);
-  if constexpr (std::same_as<T, int8_t>) {
-    return vec::details::sve_basic_wrap_word<AccTag>(
-        svdot_s32(raw_acc, raw_a, raw_b));
-  } else {
-    static_assert(std::same_as<T, uint8_t>);
-    return vec::details::sve_basic_wrap_word<AccTag>(
-        svreinterpret_s32_u32(svdot_u32(
-            svreinterpret_u32_s32(raw_acc), raw_a, raw_b)));
-  }
 }
 
 template <bool VaryRows, int Block,
@@ -445,11 +398,11 @@ VECOPS_ALWAYS_INLINE void sve_skinny_block(
     };
     const auto madd = [&](auto lhs, auto rhs, auto sum) {
       if constexpr (std::same_as<TA, bfloat16_t>) {
-        return skinny_widening_dot_add(InputTag{}, sum, lhs, rhs);
+        return vec::widening_dot(AccTag{}, lhs, rhs, sum);
       } else if constexpr (std::same_as<TA, float16_t>) {
         return skinny_widening_fmadd(InputTag{}, sum, lhs, rhs);
       } else if constexpr (std::is_integral_v<TA>) {
-        return skinny_integer_dot_add(InputTag{}, sum, lhs, rhs);
+        return vec::widening_dot(AccTag{}, lhs, rhs, sum);
       } else {
         return vec::fmadd(
             skinny_convert(AccTag{}, InputTag{}, lhs),
@@ -687,11 +640,11 @@ VECOPS_ALWAYS_INLINE void sve_skinny_fused_compute_block(
     const auto madd = [&](auto lhs, auto rhs, auto sum)
         VECOPS_INLINE_LAMBDA {
       if constexpr (std::same_as<T, bfloat16_t>) {
-        return skinny_widening_dot_add(InputTag{}, sum, lhs, rhs);
+        return vec::widening_dot(AccTag{}, lhs, rhs, sum);
       } else if constexpr (std::same_as<T, float16_t>) {
         return skinny_widening_fmadd(InputTag{}, sum, lhs, rhs);
       } else if constexpr (std::is_integral_v<T>) {
-        return skinny_integer_dot_add(InputTag{}, sum, lhs, rhs);
+        return vec::widening_dot(AccTag{}, lhs, rhs, sum);
       } else {
         return vec::fmadd(
             skinny_convert(AccTag{}, InputTag{}, lhs),

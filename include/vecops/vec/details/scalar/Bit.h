@@ -1,6 +1,7 @@
 #ifndef VECOPS_VEC_DETAILS_SCALAR_BIT_H
 #define VECOPS_VEC_DETAILS_SCALAR_BIT_H
 
+#include <bit>
 #include <limits>
 #include <type_traits>
 
@@ -91,6 +92,56 @@ struct NativeWordImpl<ScalarBackend, BitNotOp> {
   }
 };
 
+template <typename Op, typename T>
+VECOPS_ALWAYS_INLINE T scalar_bit_count(T value) {
+  using U = std::make_unsigned_t<T>;
+  const U bits = scalar_bit_bits(value);
+  int count;
+  if constexpr (std::same_as<Op, PopCountOp>)
+    count = std::popcount(bits);
+  else if constexpr (std::same_as<Op, CountLeadingZeroOp>)
+    count = std::countl_zero(bits);
+  else if constexpr (std::same_as<Op, CountLeadingOneOp>)
+    count = std::countl_one(bits);
+  else if constexpr (std::same_as<Op, CountTrailingZeroOp>)
+    count = std::countr_zero(bits);
+  else if constexpr (std::same_as<Op, CountTrailingOneOp>)
+    count = std::countr_one(bits);
+  else
+    static_assert(dispatch_dependent_false<Op>, "unknown bit-count op");
+  return scalar_bit_value<T>(static_cast<U>(count));
+}
+
+#define VECOPS_VEC_DEFINE_SCALAR_BIT_COUNT(OpType)                      \
+  template <>                                                           \
+  struct NativeWordImpl<ScalarBackend, OpType> {                        \
+    template <nint_t Index, IntegerTag Tag>                             \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType, Tag, NativeWordVec<Tag> value) {                        \
+      using Traits = RepresentationTraits<ScalarBackend, Tag>;         \
+      using T = ElementOf<Tag>;                                         \
+      static_assert(Index >= 0 && Index < Traits::word_count);          \
+      for (nint_t lane = 0; lane < Traits::word_lanes; ++lane)         \
+        value[lane] = scalar_bit_count<OpType>(value[lane]);            \
+      return value;                                                      \
+    }                                                                   \
+    template <nint_t Index, IntegerTag Tag, typename Policy>            \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType op, Tag tag, NativeWordVec<Tag> value,                   \
+        NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {\
+      return scalar_masked_merge<Index>(                                \
+          tag, call<Index>(op, tag, value), mask, inactive);            \
+    }                                                                   \
+  }
+
+VECOPS_VEC_DEFINE_SCALAR_BIT_COUNT(PopCountOp);
+VECOPS_VEC_DEFINE_SCALAR_BIT_COUNT(CountLeadingZeroOp);
+VECOPS_VEC_DEFINE_SCALAR_BIT_COUNT(CountLeadingOneOp);
+VECOPS_VEC_DEFINE_SCALAR_BIT_COUNT(CountTrailingZeroOp);
+VECOPS_VEC_DEFINE_SCALAR_BIT_COUNT(CountTrailingOneOp);
+
+#undef VECOPS_VEC_DEFINE_SCALAR_BIT_COUNT
+
 template <typename T>
 VECOPS_ALWAYS_INLINE T scalar_shift_left(T value, int count) {
   using U = std::make_unsigned_t<T>;
@@ -121,6 +172,22 @@ VECOPS_ALWAYS_INLINE T scalar_shift_right(T value, int count) {
 #define VECOPS_VEC_DEFINE_SCALAR_SHIFT(OpType, Helper)                   \
   template <>                                                            \
   struct NativeWordImpl<ScalarBackend, OpType> {                         \
+    template <nint_t Index, IntegerTag Tag, nint_t Count>                \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                 \
+        OpType, Tag, NativeWordVec<Tag> value, meta::Const<Count>) {     \
+      using Traits = RepresentationTraits<ScalarBackend, Tag>;          \
+      using T = ElementOf<Tag>;                                          \
+      using U = std::make_unsigned_t<T>;                                 \
+      constexpr int width = std::numeric_limits<U>::digits;             \
+      static_assert(Count >= 0);                                         \
+      static_assert(Index >= 0 && Index < Traits::word_count);           \
+      constexpr int effective_count = Count >= width                    \
+          ? width                                                        \
+          : static_cast<int>(Count);                                     \
+      for (nint_t lane = 0; lane < Traits::word_lanes; ++lane)          \
+        value[lane] = Helper(value[lane], effective_count);              \
+      return value;                                                       \
+    }                                                                    \
     template <nint_t Index, IntegerTag Tag>                              \
     static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                 \
         OpType, Tag, NativeWordVec<Tag> value, int count) {              \
@@ -135,12 +202,25 @@ VECOPS_ALWAYS_INLINE T scalar_shift_right(T value, int count) {
         OpType, Tag, NativeWordVec<Tag> value,                           \
         NativeWordVec<Tag> counts) {                                    \
       using Traits = RepresentationTraits<ScalarBackend, Tag>;          \
+      using T = ElementOf<Tag>;                                          \
+      using U = std::make_unsigned_t<T>;                                 \
+      constexpr U width = std::numeric_limits<U>::digits;               \
       static_assert(Index >= 0 && Index < Traits::word_count);           \
       for (nint_t lane = 0; lane < Traits::word_lanes; ++lane) {        \
-        const auto count = static_cast<int>(counts[lane]);               \
-        if (count >= 0) value[lane] = Helper(value[lane], count);       \
+        const U count = static_cast<U>(counts[lane]);                    \
+        value[lane] = Helper(                                            \
+            value[lane], count >= width ? static_cast<int>(width)       \
+                                        : static_cast<int>(count));      \
       }                                                                  \
       return value;                                                       \
+    }                                                                    \
+    template <nint_t Index, IntegerTag Tag, nint_t Count, typename Policy>\
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                 \
+        OpType op, Tag tag, NativeWordVec<Tag> value,                   \
+        meta::Const<Count> count, NativeWordMask<Tag> mask,             \
+        NativeWordVec<Tag> inactive, Policy) {                           \
+      return scalar_masked_merge<Index>(                                 \
+          tag, call<Index>(op, tag, value, count), mask, inactive);      \
     }                                                                    \
     template <nint_t Index, IntegerTag Tag, typename Policy>             \
     static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                 \
@@ -163,6 +243,92 @@ VECOPS_VEC_DEFINE_SCALAR_SHIFT(BitShiftLeftOp, scalar_shift_left);
 VECOPS_VEC_DEFINE_SCALAR_SHIFT(BitShiftRightOp, scalar_shift_right);
 
 #undef VECOPS_VEC_DEFINE_SCALAR_SHIFT
+
+template <typename Op, typename T>
+VECOPS_ALWAYS_INLINE T scalar_rotate(T value, int count) {
+  using U = std::make_unsigned_t<T>;
+  const U bits = scalar_bit_bits(value);
+  const U rotated = [&] {
+    if constexpr (std::same_as<Op, RotateLeftOp>)
+      return std::rotl(bits, count);
+    else
+      return std::rotr(bits, count);
+  }();
+  return scalar_bit_value<T>(rotated);
+}
+
+#define VECOPS_VEC_DEFINE_SCALAR_ROTATE(OpType)                         \
+  template <>                                                           \
+  struct NativeWordImpl<ScalarBackend, OpType> {                        \
+    template <nint_t Index, IntegerTag Tag, nint_t Count>               \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType, Tag, NativeWordVec<Tag> value, meta::Const<Count>) {    \
+      using Traits = RepresentationTraits<ScalarBackend, Tag>;         \
+      using T = ElementOf<Tag>;                                         \
+      using U = std::make_unsigned_t<T>;                                \
+      constexpr nint_t width = std::numeric_limits<U>::digits;         \
+      constexpr nint_t remainder = Count % width;                       \
+      constexpr int normalized = static_cast<int>(                     \
+          remainder < 0 ? remainder + width : remainder);              \
+      static_assert(Index >= 0 && Index < Traits::word_count);          \
+      for (nint_t lane = 0; lane < Traits::word_lanes; ++lane)         \
+        value[lane] = scalar_rotate<OpType>(value[lane], normalized);   \
+      return value;                                                      \
+    }                                                                   \
+    template <nint_t Index, IntegerTag Tag>                             \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType, Tag, NativeWordVec<Tag> value, int count) {             \
+      using Traits = RepresentationTraits<ScalarBackend, Tag>;         \
+      static_assert(Index >= 0 && Index < Traits::word_count);          \
+      for (nint_t lane = 0; lane < Traits::word_lanes; ++lane)         \
+        value[lane] = scalar_rotate<OpType>(value[lane], count);        \
+      return value;                                                      \
+    }                                                                   \
+    template <nint_t Index, IntegerTag Tag>                             \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType, Tag, NativeWordVec<Tag> value,                          \
+        NativeWordVec<Tag> counts) {                                   \
+      using Traits = RepresentationTraits<ScalarBackend, Tag>;         \
+      using T = ElementOf<Tag>;                                         \
+      using U = std::make_unsigned_t<T>;                                \
+      constexpr U mask = std::numeric_limits<U>::digits - 1;           \
+      static_assert(Index >= 0 && Index < Traits::word_count);          \
+      for (nint_t lane = 0; lane < Traits::word_lanes; ++lane) {       \
+        const int count = static_cast<int>(                             \
+            scalar_bit_bits(counts[lane]) & mask);                     \
+        value[lane] = scalar_rotate<OpType>(value[lane], count);        \
+      }                                                                 \
+      return value;                                                      \
+    }                                                                   \
+    template <nint_t Index, IntegerTag Tag, nint_t Count, typename Policy>\
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType op, Tag tag, NativeWordVec<Tag> value,                   \
+        meta::Const<Count> count, NativeWordMask<Tag> mask,             \
+        NativeWordVec<Tag> inactive, Policy) {                          \
+      return scalar_masked_merge<Index>(                                \
+          tag, call<Index>(op, tag, value, count), mask, inactive);     \
+    }                                                                   \
+    template <nint_t Index, IntegerTag Tag, typename Policy>            \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType op, Tag tag, NativeWordVec<Tag> value, int count,        \
+        NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {\
+      return scalar_masked_merge<Index>(                                \
+          tag, call<Index>(op, tag, value, count), mask, inactive);     \
+    }                                                                   \
+    template <nint_t Index, IntegerTag Tag, typename Policy>            \
+    static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(                \
+        OpType op, Tag tag, NativeWordVec<Tag> value,                   \
+        NativeWordVec<Tag> counts, NativeWordMask<Tag> mask,            \
+        NativeWordVec<Tag> inactive, Policy) {                          \
+      return scalar_masked_merge<Index>(                                \
+          tag, call<Index>(op, tag, value, counts), mask, inactive);    \
+    }                                                                   \
+  }
+
+VECOPS_VEC_DEFINE_SCALAR_ROTATE(RotateLeftOp);
+VECOPS_VEC_DEFINE_SCALAR_ROTATE(RotateRightOp);
+
+#undef VECOPS_VEC_DEFINE_SCALAR_ROTATE
 
 } // namespace vecops::vec::details
 

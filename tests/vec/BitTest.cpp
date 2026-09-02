@@ -57,7 +57,6 @@ template <typename T>
 T expected_shift_left(T value, int count) {
   using U = UnsignedBits<T>;
   constexpr int width = std::numeric_limits<U>::digits;
-  if (count < 0) return value;
   if (count >= width) return T{};
   return from_bits<T>(static_cast<U>(bits_of(value) << count));
 }
@@ -66,7 +65,6 @@ template <typename T>
 T expected_shift_right(T value, int count) {
   using U = UnsignedBits<T>;
   constexpr int width = std::numeric_limits<U>::digits;
-  if (count < 0) return value;
   const U bits = bits_of(value);
   if constexpr (std::is_unsigned_v<T>) {
     return count >= width ? T{} : static_cast<T>(bits >> count);
@@ -81,6 +79,33 @@ T expected_shift_right(T value, int count) {
           std::numeric_limits<U>::max() << (width - count));
     return from_bits<T>(result);
   }
+}
+
+template <typename Op, typename T>
+T expected_bit_count(T value) {
+  using U = UnsignedBits<T>;
+  const U bits = bits_of(value);
+  int count;
+  if constexpr (std::same_as<Op, vec::PopCountOp>)
+    count = std::popcount(bits);
+  else if constexpr (std::same_as<Op, vec::CountLeadingZeroOp>)
+    count = std::countl_zero(bits);
+  else if constexpr (std::same_as<Op, vec::CountLeadingOneOp>)
+    count = std::countl_one(bits);
+  else if constexpr (std::same_as<Op, vec::CountTrailingZeroOp>)
+    count = std::countr_zero(bits);
+  else
+    count = std::countr_one(bits);
+  return from_bits<T>(static_cast<U>(count));
+}
+
+template <typename Op, typename T>
+T expected_rotate(T value, int count) {
+  using U = UnsignedBits<T>;
+  if constexpr (std::same_as<Op, vec::RotateLeftOp>)
+    return from_bits<T>(std::rotl(bits_of(value), count));
+  else
+    return from_bits<T>(std::rotr(bits_of(value), count));
 }
 
 template <vec::IntegerTag Tag>
@@ -168,20 +193,20 @@ void verify_bit_operations(Tag tag) {
   }
 
   constexpr int width = std::numeric_limits<U>::digits;
-  for (const int count : {-3, 0, 1, width - 1, width, width + 5}) {
-    const auto left = vec::bit_shl(a, count);
-    const auto right = vec::bit_shr(a, count);
+  for (const int count : {0, 1, width - 1, width, width + 5}) {
+    const auto left = vec::shl(a, count);
+    const auto right = vec::shr(a, count);
     const auto unmasked_left =
-        vec::bit_shl(a, count, vec::opt::unmasked);
+        vec::shl(a, count, vec::opt::unmasked);
     const auto unmasked_right =
-        vec::bit_shr(a, count, vec::opt::unmasked);
-    const auto masked_left = vec::bit_shl(
+        vec::shr(a, count, vec::opt::unmasked);
+    const auto masked_left = vec::shl(
         a, count, vec::opt::masked(mask));
-    const auto zero_right = vec::bit_shr(
+    const auto zero_right = vec::shr(
         a, count, vec::opt::masked(mask), vec::opt::zero);
-    const auto scalar_left = vec::bit_shl(
+    const auto scalar_left = vec::shl(
         a, count, vec::opt::masked(mask), vec::opt::merge(scalar_merge));
-    const auto vector_right = vec::bit_shr(
+    const auto vector_right = vec::shr(
         a, count, vec::opt::masked(mask), vec::opt::merge(defaults));
     for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
       const T av = bit_operand<T>(lane, false);
@@ -198,11 +223,11 @@ void verify_bit_operations(Tag tag) {
                 vec::get(tag, unmasked_right, lane));
       EXPECT_EQ(active ? expected_left : av,
                 vec::get(tag, masked_left, lane));
-      EXPECT_EQ(active ? expected_right : (count < 0 ? av : T{}),
+      EXPECT_EQ(active ? expected_right : T{},
                 vec::get(tag, zero_right, lane));
-      EXPECT_EQ(active ? expected_left : (count < 0 ? av : scalar_merge),
+      EXPECT_EQ(active ? expected_left : scalar_merge,
                 vec::get(tag, scalar_left, lane));
-      EXPECT_EQ(active ? expected_right : (count < 0 ? av : bit_operand<T>(lane + 11, true)),
+      EXPECT_EQ(active ? expected_right : bit_operand<T>(lane + 11, true),
                 vec::get(tag, vector_right, lane));
     }
   }
@@ -211,19 +236,24 @@ void verify_bit_operations(Tag tag) {
   for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane)
     counts = vec::set(
         tag, counts, lane, static_cast<T>(lane % (width + 2)));
-  const auto const_left = vec::bit_shl(a, vecops::meta::cint<3>);
-  const auto const_right = vec::bit_shr(
+  const auto const_left = vec::shl(a, vecops::meta::cint<3>);
+  const auto const_right = vec::shr(
       a, vecops::meta::cint<3>,
       vec::opt::masked(mask), vec::opt::zero);
-  const auto dynamic_left = vec::bit_shl(
-      a, vecops::meta::dyn<1>(2));
-  const auto dynamic_right = vec::bit_shr(
-      a, vecops::meta::dyn<1>(2), vec::opt::unmasked);
-  const auto lane_left = vec::bit_shl(a, counts);
-  const auto lane_right = vec::bit_shr(a, counts);
-  const auto masked_lane_left = vec::bit_shl(
+  const auto const_zero_left = vec::shl(a, vecops::meta::cint<0>);
+  const auto const_oversized_left =
+      vec::shl(a, vecops::meta::cint<width + 5>);
+  const auto const_oversized_right =
+      vec::shr(a, vecops::meta::cint<width + 5>);
+  const int runtime_count = 2;
+  const auto scalar_runtime_left = vec::shl(a, runtime_count);
+  const auto scalar_runtime_right = vec::shr(
+      a, runtime_count, vec::opt::unmasked);
+  const auto lane_left = vec::shl(a, counts);
+  const auto lane_right = vec::shr(a, counts);
+  const auto masked_lane_left = vec::shl(
       a, counts, vec::opt::masked(mask), vec::opt::merge(defaults));
-  const auto masked_lane_right = vec::bit_shr(
+  const auto masked_lane_right = vec::shr(
       a, counts, vec::opt::masked(mask), vec::opt::zero);
   for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
     const T av = bit_operand<T>(lane, false);
@@ -233,9 +263,15 @@ void verify_bit_operations(Tag tag) {
     EXPECT_EQ(expected_shift_left(av, 3), vec::get(tag, const_left, lane));
     EXPECT_EQ(active ? expected_shift_right(av, 3) : T{},
               vec::get(tag, const_right, lane));
-    EXPECT_EQ(expected_shift_left(av, 2), vec::get(tag, dynamic_left, lane));
+    EXPECT_EQ(av, vec::get(tag, const_zero_left, lane));
+    EXPECT_EQ(T{}, vec::get(tag, const_oversized_left, lane));
+    EXPECT_EQ(expected_shift_right(av, width + 5),
+              vec::get(tag, const_oversized_right, lane));
+    EXPECT_EQ(
+        expected_shift_left(av, 2),
+        vec::get(tag, scalar_runtime_left, lane));
     EXPECT_EQ(expected_shift_right(av, 2),
-              vec::get(tag, dynamic_right, lane));
+              vec::get(tag, scalar_runtime_right, lane));
     EXPECT_EQ(expected_shift_left(av, count),
               vec::get(tag, lane_left, lane));
     EXPECT_EQ(expected_shift_right(av, count),
@@ -244,6 +280,128 @@ void verify_bit_operations(Tag tag) {
               vec::get(tag, masked_lane_left, lane));
     EXPECT_EQ(active ? expected_shift_right(av, count) : T{},
               vec::get(tag, masked_lane_right, lane));
+  }
+
+  const auto zero_counts = vec::countl_zero(vec::zeros(tag));
+  const auto zero_trailing = vec::countr_zero(vec::zeros(tag));
+  const auto all_ones = vec::fill(tag, from_bits<T>(std::numeric_limits<U>::max()));
+  const auto one_leading = vec::countl_one(all_ones);
+  const auto one_trailing = vec::countr_one(all_ones);
+  for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
+    const T expected_width = from_bits<T>(static_cast<U>(width));
+    EXPECT_EQ(expected_width, vec::get(tag, zero_counts, lane));
+    EXPECT_EQ(expected_width, vec::get(tag, zero_trailing, lane));
+    EXPECT_EQ(expected_width, vec::get(tag, one_leading, lane));
+    EXPECT_EQ(expected_width, vec::get(tag, one_trailing, lane));
+  }
+
+  const auto pop = vec::popcount(a);
+  const auto leading_zero = vec::countl_zero(tag, a);
+  const auto leading_one = vec::countl_one(a);
+  const auto trailing_zero = vec::countr_zero(a);
+  const auto trailing_one = vec::countr_one(a);
+  const auto masked_pop = vec::popcount(a, vec::opt::masked(mask));
+  const auto zero_leading = vec::countl_zero(
+      a, vec::opt::masked(mask), vec::opt::zero);
+  const auto scalar_trailing = vec::countr_zero(
+      a, vec::opt::masked(mask), vec::opt::merge(scalar_merge));
+  const auto vector_leading_one = vec::countl_one(
+      a, vec::opt::masked(mask), vec::opt::merge(defaults));
+  const auto unmasked_trailing_one =
+      vec::countr_one(a, vec::opt::unmasked);
+
+  for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
+    const T av = bit_operand<T>(lane, false);
+    const T dv = bit_operand<T>(lane + 11, true);
+    const bool active = lane % 3 != 1;
+    EXPECT_EQ(
+        expected_bit_count<vec::PopCountOp>(av),
+        vec::get(tag, pop, lane));
+    EXPECT_EQ(
+        expected_bit_count<vec::CountLeadingZeroOp>(av),
+        vec::get(tag, leading_zero, lane));
+    EXPECT_EQ(
+        expected_bit_count<vec::CountLeadingOneOp>(av),
+        vec::get(tag, leading_one, lane));
+    EXPECT_EQ(
+        expected_bit_count<vec::CountTrailingZeroOp>(av),
+        vec::get(tag, trailing_zero, lane));
+    EXPECT_EQ(
+        expected_bit_count<vec::CountTrailingOneOp>(av),
+        vec::get(tag, trailing_one, lane));
+    EXPECT_EQ(
+        active ? expected_bit_count<vec::PopCountOp>(av) : av,
+        vec::get(tag, masked_pop, lane));
+    EXPECT_EQ(
+        active ? expected_bit_count<vec::CountLeadingZeroOp>(av) : T{},
+        vec::get(tag, zero_leading, lane));
+    EXPECT_EQ(
+        active ? expected_bit_count<vec::CountTrailingZeroOp>(av)
+               : scalar_merge,
+        vec::get(tag, scalar_trailing, lane));
+    EXPECT_EQ(
+        active ? expected_bit_count<vec::CountLeadingOneOp>(av) : dv,
+        vec::get(tag, vector_leading_one, lane));
+    EXPECT_EQ(
+        expected_bit_count<vec::CountTrailingOneOp>(av),
+        vec::get(tag, unmasked_trailing_one, lane));
+  }
+
+  auto rotate_counts = vec::zeros(tag);
+  for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
+    const int pattern[] = {-width - 1, -1, 0, 1, width - 1,
+                           width, width + 1, 2 * width + 3};
+    rotate_counts = vec::set(
+        tag, rotate_counts, lane,
+        static_cast<T>(pattern[lane % 8]));
+  }
+  const auto left_negative = vec::rotl(a, -1);
+  const auto right_oversized = vec::rotr(a, width + 3);
+  const auto immediate_left = vec::rotl(a, vecops::meta::cint<-1>);
+  const auto immediate_right =
+      vec::rotr(a, vecops::meta::Const<width + 1>{});
+  const auto rotate_lane_left = vec::rotl(a, rotate_counts);
+  const auto rotate_lane_right = vec::rotr(a, rotate_counts);
+  const auto masked_rotate = vec::rotl(
+      a, rotate_counts, vec::opt::masked(mask));
+  const auto zero_rotate = vec::rotr(
+      a, -width - 1, vec::opt::masked(mask), vec::opt::zero);
+  const auto merged_rotate = vec::rotl(
+      a, width + 1, vec::opt::masked(mask), vec::opt::merge(defaults));
+
+  for (vecops::nint_t lane = 0; lane < vec::size(tag); ++lane) {
+    const T av = bit_operand<T>(lane, false);
+    const T dv = bit_operand<T>(lane + 11, true);
+    const bool active = lane % 3 != 1;
+    const int lane_count = static_cast<int>(
+        bits_of(vec::get(tag, rotate_counts, lane)) & (width - 1));
+    EXPECT_EQ(
+        expected_rotate<vec::RotateLeftOp>(av, -1),
+        vec::get(tag, left_negative, lane));
+    EXPECT_EQ(
+        expected_rotate<vec::RotateRightOp>(av, width + 3),
+        vec::get(tag, right_oversized, lane));
+    EXPECT_EQ(
+        expected_rotate<vec::RotateLeftOp>(av, -1),
+        vec::get(tag, immediate_left, lane));
+    EXPECT_EQ(
+        expected_rotate<vec::RotateRightOp>(av, width + 1),
+        vec::get(tag, immediate_right, lane));
+    EXPECT_EQ(
+        expected_rotate<vec::RotateLeftOp>(av, lane_count),
+        vec::get(tag, rotate_lane_left, lane));
+    EXPECT_EQ(
+        expected_rotate<vec::RotateRightOp>(av, lane_count),
+        vec::get(tag, rotate_lane_right, lane));
+    EXPECT_EQ(
+        active ? expected_rotate<vec::RotateLeftOp>(av, lane_count) : av,
+        vec::get(tag, masked_rotate, lane));
+    EXPECT_EQ(
+        active ? expected_rotate<vec::RotateRightOp>(av, -width - 1) : T{},
+        vec::get(tag, zero_rotate, lane));
+    EXPECT_EQ(
+        active ? expected_rotate<vec::RotateLeftOp>(av, width + 1) : dv,
+        vec::get(tag, merged_rotate, lane));
   }
 }
 

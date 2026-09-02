@@ -13,5 +13,6 @@
 #include "vecops/vec/details/scalar/math/Exp.h"
 #include "vecops/vec/details/scalar/math/Reciprocal.h"
 #include "vecops/vec/details/scalar/math/Log.h"
+#include "vecops/vec/details/scalar/math/Trig.h"
 
 #endif // VECOPS_VEC_DETAILS_SCALAR_MATH_H

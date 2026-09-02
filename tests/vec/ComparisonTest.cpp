@@ -128,18 +128,18 @@ void run_comparisons_test() {
 
 template <typename T>
 T classification_value(vecops::nint_t lane) {
-  switch (lane % 7) {
+  switch (lane % 11) {
     case 0: return std::numeric_limits<T>::quiet_NaN();
     case 1: return std::numeric_limits<T>::infinity();
     case 2: return -std::numeric_limits<T>::infinity();
-    case 3:
-      if constexpr (std::same_as<T, vecops::float64_t>)
-        return std::numeric_limits<T>::max();
-      else
-        return std::numeric_limits<T>::max();
+    case 3: return std::numeric_limits<T>::max();
     case 4: return static_cast<T>(-17.25);
-    case 5: return static_cast<T>(0.0);
-    default: return static_cast<T>(42.5);
+    case 5: return static_cast<T>(-0.0);
+    case 6: return static_cast<T>(0.0);
+    case 7: return std::numeric_limits<T>::denorm_min();
+    case 8: return static_cast<T>(-std::numeric_limits<T>::denorm_min());
+    case 9: return std::numeric_limits<T>::min();
+    default: return -std::numeric_limits<T>::quiet_NaN();
   }
 }
 
@@ -159,10 +159,16 @@ void verify_classification(Tag tag) {
   const auto pos = vec::isposinf(value);
   const auto neg = vec::isneginf(value);
   const auto inf = vec::isinf(value);
+  const auto finite = vec::isfinite(value);
+  const auto normal = vec::isnormal(value);
+  const auto sign = vec::signbit(value);
   const auto unmasked_nan = vec::isnan(value, vec::opt::unmasked);
   const auto unmasked_pos = vec::isposinf(value, vec::opt::unmasked);
   const auto unmasked_neg = vec::isneginf(value, vec::opt::unmasked);
   const auto unmasked_inf = vec::isinf(value, vec::opt::unmasked);
+  const auto unmasked_finite = vec::isfinite(value, vec::opt::unmasked);
+  const auto unmasked_normal = vec::isnormal(value, vec::opt::unmasked);
+  const auto unmasked_sign = vec::signbit(value, vec::opt::unmasked);
   const auto masked_nan = vec::isnan(
       value, vec::opt::masked(input_mask));
   const auto masked_pos = vec::isposinf(
@@ -171,6 +177,12 @@ void verify_classification(Tag tag) {
       value, vec::opt::masked(input_mask));
   const auto masked_inf = vec::isinf(
       value, vec::opt::masked(input_mask), vec::opt::zero);
+  const auto masked_finite = vec::isfinite(
+      value, vec::opt::masked(input_mask));
+  const auto masked_normal = vec::isnormal(
+      value, vec::opt::masked(input_mask), vec::opt::zero);
+  const auto masked_sign = vec::signbit(
+      value, vec::opt::masked(input_mask));
   const auto merged_nan = vec::isnan(
       value,
       vec::opt::masked(input_mask),
@@ -183,19 +195,37 @@ void verify_classification(Tag tag) {
     const bool expected_pos = std::isinf(widened) && !std::signbit(widened);
     const bool expected_neg = std::isinf(widened) && std::signbit(widened);
     const bool expected_inf = std::isinf(widened);
+    const bool expected_finite = std::isfinite(widened);
+    const bool expected_normal = expected_finite && x != static_cast<T>(0) &&
+        static_cast<T>(std::abs(static_cast<double>(x))) >=
+            std::numeric_limits<T>::min();
+    const bool expected_sign = std::signbit(widened);
     const bool active = (lane % 2) == 0;
     EXPECT_EQ(expected_nan, vec::get(tag, nan, lane)) << "lane=" << lane;
     EXPECT_EQ(expected_pos, vec::get(tag, pos, lane)) << "lane=" << lane;
     EXPECT_EQ(expected_neg, vec::get(tag, neg, lane)) << "lane=" << lane;
     EXPECT_EQ(expected_inf, vec::get(tag, inf, lane)) << "lane=" << lane;
+    EXPECT_EQ(expected_finite, vec::get(tag, finite, lane)) << "lane=" << lane;
+    EXPECT_EQ(expected_normal, vec::get(tag, normal, lane)) << "lane=" << lane;
+    EXPECT_EQ(expected_sign, vec::get(tag, sign, lane)) << "lane=" << lane;
     EXPECT_EQ(vec::get(tag, nan, lane), vec::get(tag, unmasked_nan, lane));
     EXPECT_EQ(vec::get(tag, pos, lane), vec::get(tag, unmasked_pos, lane));
     EXPECT_EQ(vec::get(tag, neg, lane), vec::get(tag, unmasked_neg, lane));
     EXPECT_EQ(vec::get(tag, inf, lane), vec::get(tag, unmasked_inf, lane));
+    EXPECT_EQ(
+        vec::get(tag, finite, lane), vec::get(tag, unmasked_finite, lane));
+    EXPECT_EQ(
+        vec::get(tag, normal, lane), vec::get(tag, unmasked_normal, lane));
+    EXPECT_EQ(vec::get(tag, sign, lane), vec::get(tag, unmasked_sign, lane));
     EXPECT_EQ(active && expected_nan, vec::get(tag, masked_nan, lane));
     EXPECT_EQ(active && expected_pos, vec::get(tag, masked_pos, lane));
     EXPECT_EQ(active && expected_neg, vec::get(tag, masked_neg, lane));
     EXPECT_EQ(active && expected_inf, vec::get(tag, masked_inf, lane));
+    EXPECT_EQ(
+        active && expected_finite, vec::get(tag, masked_finite, lane));
+    EXPECT_EQ(
+        active && expected_normal, vec::get(tag, masked_normal, lane));
+    EXPECT_EQ(active && expected_sign, vec::get(tag, masked_sign, lane));
     EXPECT_EQ(
         active ? expected_nan : (lane % 3) == 0,
         vec::get(tag, merged_nan, lane));

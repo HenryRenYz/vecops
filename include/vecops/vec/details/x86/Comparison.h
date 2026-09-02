@@ -512,6 +512,24 @@ VECOPS_ALWAYS_INLINE RawMask x86_classify_small_float(Op, Raw value) {
       else if constexpr (std::same_as<Op, IsInfOp>)
         return x86_compare_float16_native<CmpEqOp, RawMask>(
             x86_vec_and(value, x86_set1_epi16<Raw>(0x7fffu)), positive);
+      else if constexpr (std::same_as<Op, IsFiniteOp>)
+        return x86_vector_mask_to_native<T, RawMask>(
+            x86_cmpgt_epu16_vector(
+                positive,
+                x86_vec_and(value, x86_set1_epi16<Raw>(0x7fffu))));
+      else if constexpr (std::same_as<Op, IsNormalOp>) {
+        const auto absolute =
+            x86_vec_and(value, x86_set1_epi16<Raw>(0x7fffu));
+        const auto below_inf = x86_cmpgt_epu16_vector(positive, absolute);
+        const auto below_min = x86_cmpgt_epu16_vector(
+            x86_set1_epi16<Raw>(0x0400u), absolute);
+        return x86_vector_mask_to_native<T, RawMask>(x86_vec_and(
+            below_inf,
+            x86_vec_xor(below_min, x86_vec_all_ones<Raw>())));
+      } else if constexpr (std::same_as<Op, SignBitOp>)
+        return x86_vector_mask_to_native<T, RawMask>(x86_cmpeq_epi16_vector(
+            x86_vec_and(value, x86_set1_epi16<Raw>(0x8000u)),
+            x86_set1_epi16<Raw>(0x8000u)));
       else static_assert(dispatch_dependent_false<Op>, "unsupported classification");
     }
   } else {
@@ -528,6 +546,22 @@ VECOPS_ALWAYS_INLINE RawMask x86_classify_small_float(Op, Raw value) {
         value, x86_set1_epi16<Raw>(static_cast<uint16_t>(exponent | 0x8000u)));
   else if constexpr (std::same_as<Op, IsInfOp>)
     result = x86_cmpeq_epi16_vector(absolute, x86_set1_epi16<Raw>(exponent));
+  else if constexpr (std::same_as<Op, IsFiniteOp>)
+    result = x86_cmpgt_epu16_vector(
+        x86_set1_epi16<Raw>(exponent), absolute);
+  else if constexpr (std::same_as<Op, IsNormalOp>) {
+    constexpr uint16_t minimum_normal =
+        std::same_as<T, float16_t> ? 0x0400u : 0x0080u;
+    const auto below_inf = x86_cmpgt_epu16_vector(
+        x86_set1_epi16<Raw>(exponent), absolute);
+    const auto below_min = x86_cmpgt_epu16_vector(
+        x86_set1_epi16<Raw>(minimum_normal), absolute);
+    result = x86_vec_and(
+        below_inf, x86_vec_xor(below_min, x86_vec_all_ones<Raw>()));
+  } else if constexpr (std::same_as<Op, SignBitOp>)
+    result = x86_cmpeq_epi16_vector(
+        x86_vec_and(value, x86_set1_epi16<Raw>(0x8000u)),
+        x86_set1_epi16<Raw>(0x8000u));
   else static_assert(dispatch_dependent_false<Op>, "unsupported x86 classification");
   return x86_vector_mask_to_native<T, RawMask>(result);
 #if defined(HAS_AVX512_FP16)
@@ -624,6 +658,118 @@ VECOPS_ALWAYS_INLINE RawMask x86_classify_raw(Op op, Raw value) {
 #else
       return x86_vec_or(positive, negative);
 #endif
+    } else if constexpr (
+        std::same_as<Op, IsFiniteOp> ||
+        std::same_as<Op, IsNormalOp> ||
+        std::same_as<Op, SignBitOp>) {
+      const auto bits = [&] {
+        if constexpr (std::same_as<T, float32_t>) {
+          if constexpr (sizeof(Raw) == 16) return _mm_castps_si128(value);
+#if VEC_WIDTH >= 256
+          else if constexpr (sizeof(Raw) == 32)
+            return _mm256_castps_si256(value);
+#endif
+#if VEC_WIDTH >= 512
+          else return _mm512_castps_si512(value);
+#endif
+        } else {
+          if constexpr (sizeof(Raw) == 16) return _mm_castpd_si128(value);
+#if VEC_WIDTH >= 256
+          else if constexpr (sizeof(Raw) == 32)
+            return _mm256_castpd_si256(value);
+#endif
+#if VEC_WIDTH >= 512
+          else return _mm512_castpd_si512(value);
+#endif
+        }
+      }();
+      if constexpr (std::same_as<Op, SignBitOp>) {
+#if defined(CPU_CAPABILITY_AVX512)
+        if constexpr (std::same_as<T, float32_t>) {
+          if constexpr (sizeof(Raw) == 16) return _mm_movepi32_mask(bits);
+          else if constexpr (sizeof(Raw) == 32)
+            return _mm256_movepi32_mask(bits);
+          else return _mm512_movepi32_mask(bits);
+        } else {
+          if constexpr (sizeof(Raw) == 16) return _mm_movepi64_mask(bits);
+          else if constexpr (sizeof(Raw) == 32)
+            return _mm256_movepi64_mask(bits);
+          else return _mm512_movepi64_mask(bits);
+        }
+#else
+        using S = std::conditional_t<
+            std::same_as<T, float32_t>, int32_t, int64_t>;
+        return x86_vector_mask_to_native<T, RawMask>(
+            x86_signed_gt_vector<S>(
+                x86_bit_zero_raw<decltype(bits)>(), bits));
+#endif
+      } else {
+        const auto absolute = [&] {
+          if constexpr (std::same_as<T, float32_t>) {
+            if constexpr (sizeof(Raw) == 16)
+              return _mm_andnot_ps(_mm_set1_ps(-0.0F), value);
+#if VEC_WIDTH >= 256
+            else if constexpr (sizeof(Raw) == 32)
+              return _mm256_andnot_ps(_mm256_set1_ps(-0.0F), value);
+#endif
+#if VEC_WIDTH >= 512
+            else return _mm512_castsi512_ps(_mm512_andnot_si512(
+                _mm512_set1_epi32(static_cast<int32_t>(0x80000000u)),
+                _mm512_castps_si512(value)));
+#endif
+          } else {
+            if constexpr (sizeof(Raw) == 16)
+              return _mm_andnot_pd(_mm_set1_pd(-0.0), value);
+#if VEC_WIDTH >= 256
+            else if constexpr (sizeof(Raw) == 32)
+              return _mm256_andnot_pd(_mm256_set1_pd(-0.0), value);
+#endif
+#if VEC_WIDTH >= 512
+            else return _mm512_castsi512_pd(_mm512_andnot_si512(
+                _mm512_set1_epi64(
+                    static_cast<int64_t>(0x8000000000000000ull)),
+                _mm512_castpd_si512(value)));
+#endif
+          }
+        }();
+        const auto minimum_normal = [&] {
+          if constexpr (std::same_as<T, float32_t>) {
+            if constexpr (sizeof(Raw) == 16)
+              return _mm_set1_ps(std::numeric_limits<float32_t>::min());
+#if VEC_WIDTH >= 256
+            else if constexpr (sizeof(Raw) == 32)
+              return _mm256_set1_ps(std::numeric_limits<float32_t>::min());
+#endif
+#if VEC_WIDTH >= 512
+            else return _mm512_set1_ps(
+                std::numeric_limits<float32_t>::min());
+#endif
+          } else {
+            if constexpr (sizeof(Raw) == 16)
+              return _mm_set1_pd(std::numeric_limits<float64_t>::min());
+#if VEC_WIDTH >= 256
+            else if constexpr (sizeof(Raw) == 32)
+              return _mm256_set1_pd(std::numeric_limits<float64_t>::min());
+#endif
+#if VEC_WIDTH >= 512
+            else return _mm512_set1_pd(
+                std::numeric_limits<float64_t>::min());
+#endif
+          }
+        }();
+        const auto below_inf = x86_compare_standard_float<
+            CmpLtOp, T, RawMask>(
+                CmpLtOp{}, absolute, x86_float_infinity<T, Raw>(false));
+        if constexpr (std::same_as<Op, IsFiniteOp>) return below_inf;
+        const auto normal = x86_compare_standard_float<
+            CmpGeOp, T, RawMask>(
+                CmpGeOp{}, absolute, minimum_normal);
+#if defined(CPU_CAPABILITY_AVX512)
+        return static_cast<RawMask>(below_inf & normal);
+#else
+        return x86_vec_and(below_inf, normal);
+#endif
+      }
     } else static_assert(dispatch_dependent_false<Op>, "unsupported x86 classification");
   } else static_assert(
       dispatch_dependent_false<T>,
@@ -670,7 +816,12 @@ struct X86ClassificationImpl {
 #if defined(HAS_AVX512_FP16)
     using Traits = RepresentationTraits<X86Backend, Tag>;
     using T = ElementOf<Tag>;
-    if constexpr (std::same_as<T, float16_t>) {
+    if constexpr (
+        std::same_as<T, float16_t> &&
+        (std::same_as<Op, IsNanOp> ||
+         std::same_as<Op, IsPosInfOp> ||
+         std::same_as<Op, IsNegInfOp> ||
+         std::same_as<Op, IsInfOp>)) {
       static_assert(Index >= 0 && Index < Traits::word_count);
       return NativeWordMask<Tag>{
           x86_classify_float16_native_masked<Op>(mask.value, value.value)};
@@ -705,6 +856,9 @@ VECOPS_VEC_X86_CLASSIFICATION(IsNanOp);
 VECOPS_VEC_X86_CLASSIFICATION(IsPosInfOp);
 VECOPS_VEC_X86_CLASSIFICATION(IsNegInfOp);
 VECOPS_VEC_X86_CLASSIFICATION(IsInfOp);
+VECOPS_VEC_X86_CLASSIFICATION(IsFiniteOp);
+VECOPS_VEC_X86_CLASSIFICATION(IsNormalOp);
+VECOPS_VEC_X86_CLASSIFICATION(SignBitOp);
 #undef VECOPS_VEC_X86_CLASSIFICATION
 
 } // namespace vecops::vec::details

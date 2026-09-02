@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <limits>
 #include <type_traits>
 
 #include "vecops/vec/details/Dispatch.h"
@@ -123,6 +124,77 @@ template <>
 struct NativeWordImpl<ScalarBackend, SubOp>
     : ScalarArithmeticWordImpl<SubOp> {};
 
+template <typename Op, std::integral T>
+VECOPS_ALWAYS_INLINE T scalar_saturating_add_sub(T a, T b) {
+  using U = std::make_unsigned_t<T>;
+  const U ua = [&] {
+    if constexpr (std::is_signed_v<T>) return ::vecops::bitcast<U>(a);
+    else return a;
+  }();
+  const U ub = [&] {
+    if constexpr (std::is_signed_v<T>) return ::vecops::bitcast<U>(b);
+    else return b;
+  }();
+  const U wrapped = [&] {
+    if constexpr (std::same_as<Op, SaturatedAddOp>)
+      return static_cast<U>(ua + ub);
+    else
+      return static_cast<U>(ua - ub);
+  }();
+
+  if constexpr (std::is_unsigned_v<T>) {
+    if constexpr (std::same_as<Op, SaturatedAddOp>)
+      return wrapped < ua ? std::numeric_limits<T>::max() : wrapped;
+    else
+      return ua < ub ? T{0} : wrapped;
+  } else {
+    constexpr U sign = U{1} << (sizeof(T) * 8 - 1);
+    const bool overflow = [&] {
+      if constexpr (std::same_as<Op, SaturatedAddOp>)
+        return (((ua ^ wrapped) & (ub ^ wrapped)) & sign) != 0;
+      else
+        return (((ua ^ ub) & (ua ^ wrapped)) & sign) != 0;
+    }();
+    if (overflow)
+      return (ua & sign) != 0
+          ? std::numeric_limits<T>::min()
+          : std::numeric_limits<T>::max();
+    return ::vecops::bitcast<T>(wrapped);
+  }
+}
+
+template <typename Op>
+struct ScalarSaturatingArithmeticWordImpl {
+  template <nint_t Index, VectorTag Tag>
+    requires std::integral<ElementOf<Tag>>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      Op, Tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b) {
+    using Traits = RepresentationTraits<ScalarBackend, Tag>;
+    using T = ElementOf<Tag>;
+    static_assert(Index >= 0 && Index < Traits::word_count);
+    for (nint_t lane = 0; lane < Traits::word_lanes; ++lane)
+      a[lane] = scalar_saturating_add_sub<Op>(a[lane], b[lane]);
+    return a;
+  }
+
+  template <nint_t Index, VectorTag Tag, typename Policy>
+    requires std::integral<ElementOf<Tag>>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      Op op, Tag tag, NativeWordVec<Tag> a, NativeWordVec<Tag> b,
+      NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive, Policy) {
+    return scalar_masked_merge<Index>(
+        tag, call<Index>(op, tag, a, b), mask, inactive);
+  }
+};
+
+template <>
+struct NativeWordImpl<ScalarBackend, SaturatedAddOp>
+    : ScalarSaturatingArithmeticWordImpl<SaturatedAddOp> {};
+
+template <>
+struct NativeWordImpl<ScalarBackend, SaturatedSubOp>
+    : ScalarSaturatingArithmeticWordImpl<SaturatedSubOp> {};
+
 template <>
 struct NativeWordImpl<ScalarBackend, MulOp>
     : ScalarArithmeticWordImpl<MulOp> {};
@@ -138,6 +210,83 @@ struct NativeWordImpl<ScalarBackend, MinOp>
 template <>
 struct NativeWordImpl<ScalarBackend, MaxOp>
     : ScalarArithmeticWordImpl<MaxOp> {};
+
+template <Element T>
+  requires (::vecops::is_float_v<T>)
+VECOPS_ALWAYS_INLINE T scalar_copy_sign(T magnitude, T sign) {
+  if constexpr (std::same_as<T, bfloat16_t> ||
+                std::same_as<T, float16_t>) {
+    return T::from_bits(static_cast<uint16_t>(
+        (magnitude.to_bits() & 0x7fffu) | (sign.to_bits() & 0x8000u)));
+  } else if constexpr (std::same_as<T, float32_t>) {
+    const auto magnitude_bits = ::vecops::bitcast<uint32_t>(magnitude);
+    const auto sign_bits = ::vecops::bitcast<uint32_t>(sign);
+    return ::vecops::bitcast<T>(
+        (magnitude_bits & 0x7fffffffu) | (sign_bits & 0x80000000u));
+  } else {
+    const auto magnitude_bits = ::vecops::bitcast<uint64_t>(magnitude);
+    const auto sign_bits = ::vecops::bitcast<uint64_t>(sign);
+    return ::vecops::bitcast<T>(
+        (magnitude_bits & 0x7fffffffffffffffull) |
+        (sign_bits & 0x8000000000000000ull));
+  }
+}
+
+template <>
+struct NativeWordImpl<ScalarBackend, CopySignOp> {
+  template <nint_t Index, FloatingTag Tag>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      CopySignOp, Tag, NativeWordVec<Tag> magnitude,
+      NativeWordVec<Tag> sign) {
+    using Traits = RepresentationTraits<ScalarBackend, Tag>;
+    using T = ElementOf<Tag>;
+    for (nint_t lane = 0; lane < Traits::word_lanes; ++lane)
+      magnitude[lane] = scalar_copy_sign<T>(magnitude[lane], sign[lane]);
+    return magnitude;
+  }
+
+  template <nint_t Index, FloatingTag Tag, typename Policy>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      CopySignOp op, Tag tag, NativeWordVec<Tag> magnitude,
+      NativeWordVec<Tag> sign, NativeWordMask<Tag> mask,
+      NativeWordVec<Tag> inactive, Policy) {
+    return scalar_masked_merge<Index>(
+        tag, call<Index>(op, tag, magnitude, sign), mask, inactive);
+  }
+};
+
+/* **************************************************************************** */
+//    ScalarClampWordImpl                                                      //
+/* **************************************************************************** */
+
+struct ScalarClampWordImpl {
+  template <nint_t Index, VectorTag Tag>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      ClampOp, Tag tag, NativeWordVec<Tag> value,
+      NativeWordVec<Tag> lower, NativeWordVec<Tag> upper) {
+    const auto bounded_low =
+        ScalarArithmeticWordImpl<MaxOp>::template call<Index>(
+            MaxOp{}, tag, value, lower);
+    return ScalarArithmeticWordImpl<MinOp>::template call<Index>(
+        MinOp{}, tag, bounded_low, upper);
+  }
+
+  template <nint_t Index, VectorTag Tag, typename Policy>
+  static VECOPS_ALWAYS_INLINE NativeWordVec<Tag> call(
+      ClampOp, Tag tag, NativeWordVec<Tag> value,
+      NativeWordVec<Tag> lower, NativeWordVec<Tag> upper,
+      NativeWordMask<Tag> mask, NativeWordVec<Tag> inactive,
+      Policy policy) {
+    const auto bounded_low =
+        ScalarArithmeticWordImpl<MaxOp>::template call<Index>(
+            MaxOp{}, tag, value, lower);
+    return ScalarArithmeticWordImpl<MinOp>::template call<Index>(
+        MinOp{}, tag, bounded_low, upper, mask, inactive, policy);
+  }
+};
+
+template <>
+struct NativeWordImpl<ScalarBackend, ClampOp> : ScalarClampWordImpl {};
 
 /* **************************************************************************** */
 //    ScalarFmaWordImpl and registrations                                      //

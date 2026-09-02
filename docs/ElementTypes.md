@@ -74,6 +74,12 @@ back**:
 | SVE | native `..._f16` arithmetic where the width is covered; otherwise f32-widened | f32-widened as the norm: a bf16 word is split into lo/hi f32 pairs, computed, re-packed (`sve/Bf16.h`) |
 | scalar | per-element, via the float round-trip above | same |
 
+The rounding family follows the same rule. SVE uses native `FRINT*` for fp16,
+fp32, and fp64, and AVX512-FP16 uses `VRNDSCALEPH`; other fp16 configurations
+and every bf16 configuration widen each word to an f32 pair, round both halves,
+and pack once. The rounded value is exactly representable in the source format,
+so this final pack does not introduce a second rounding decision.
+
 Narrowing back uses round-to-nearest-even (that is what F16C's
 `_cvtss_sh` and the software bf16 rounding do), and the bf16 constructor
 canonicalizes NaN inputs to `0x7fc0`.
@@ -110,6 +116,12 @@ mantissa loses fraction fast — accumulate in f32, store in bf16).
 canonicalization. They are the honest way to move bits (I/O, hashing,
 reinterpretation); arithmetic on arbitrary bit patterns then follows IEEE
 rules via the f32 round-trip.
+
+The vector classification and sign operations inspect these native 16-bit
+encodings directly. In particular, `isnormal` distinguishes bf16/fp16
+subnormals before any widening (a small-float subnormal can become a normal
+f32 value), while `signbit` and `copysign` preserve NaN payloads and signed
+zero without a float round trip.
 
 **Conversions need hardware to be fast.** Without F16C / NEON / AVX512-BF16,
 scalar conversion falls back to a software implementation (the fp16 one is

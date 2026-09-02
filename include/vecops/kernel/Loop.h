@@ -33,8 +33,6 @@
  * | `loop::for_each_with_index<Is...>` | Traverse and pass current indices to `fn` |
  * | `loop::for_each_dims_with_index<N>`| Traverse `0..N - 1` and pass indices      |
  * | `loop::*_with_index_tuple`         | Pass indices as one tuple before slices   |
- * | `loop::scan`                       | Chunked 1D scan with scalar-sized chunks  |
- * | `loop::map`                        | Chunked or vector-block map               |
  * | `loop::fold`                       | Vector-block fold with typed carries      |
  *
  * ## Logical dimensions and alignment
@@ -95,24 +93,12 @@
  * materialized output. The parent session retains commit responsibility and
  * must outlive the traversal.
  *
- * ## Chunked scan and map
+ * ## Vector-block fold
  *
- * `scan` and `map` partition `[0, n)` into full chunks of `step` plus at most
- * one tail. The type of `n` and `step` matters: `Const` or aligned `Dynamic`
- * metadata can prove that no tail exists and remove its branch, while raw
- * integers are promoted to `Any`.
- *
- * The callback receives the chunk start as `nint_t` and the chunk length as a
- * typed metadata value. The generalized scan overload constructs each
- * unrolled carry as a separate automatic variable rather than placing carries
- * in an array/tuple; this permits SVE sizeless vector carries. Its combine
- * function must describe an associative reduction with the supplied identity.
- *
- * The vector-Tag overloads of `map` and `fold` instead grow one base Tag into
- * full and tail multi-word Tags. A callback therefore sees one wide block,
- * rather than repeated calls produced by a source-level unroll. `fold` creates
- * reduction and invariant carries as independent automatic variables so it
- * also supports sizeless SVE vectors.
+ * `fold` grows one base Tag into full and tail multi-word Tags. A callback
+ * therefore sees one wide block. Reduction and invariant carries are created
+ * as independent automatic variables, so the helper also supports sizeless
+ * SVE vectors.
  *
  * ## Usage overview
  *
@@ -152,9 +138,6 @@
  * - Broadcast is type-based (`Const<1>`), not value-based (`Any{1}`).
  * - Use the `_with_index` variants when the callable needs current traversal
  *   indices. The indices are passed before the sliced inputs.
- * - `scan` and `map` are one-dimensional chunk helpers. They accept
- *   `Const`/`Dynamic` Value objects for `n` and `step`; raw integers are
- *   promoted to `Any`.
  * - The helpers preserve `Tensor`'s non-owning view semantics. The underlying
  *   storage must outlive the traversal and must be mutable if the callable
  *   writes through the passed objects.
@@ -163,8 +146,6 @@
  * - Traversal order follows `Is...`, and each selected dimension is removed
  *   before the next one is interpreted. Use the documented logical trailing
  *   alignment rather than assuming indices refer to the original local rank.
- * - For unrolled `scan`, update/combine must not depend on a particular merge
- *   order beyond their associative reduction contract.
  */
 
 namespace vecops::kernel::loop {
@@ -201,160 +182,6 @@ struct ConstValue<Const<N>> : std::true_type {
 
 template <typename T>
 inline constexpr bool is_const_value_v = ConstValue<std::remove_cvref_t<T>>::value;
-
-template <typename N, typename Step>
-struct HasNoTail : std::false_type {};
-
-template <nint_t N, nint_t Step>
-struct HasNoTail<Const<N>, Const<Step>>
-    : std::bool_constant<(Step > 0) && (N % Step) == 0> {};
-
-template <nint_t A, nint_t Lo, nint_t Hi, nint_t Step>
-struct HasNoTail<Dynamic<A, Lo, Hi>, Const<Step>>
-    : std::bool_constant<(Step > 0) && Dynamic<A, Lo, Hi>::aligns(Step)> {};
-
-template <>
-struct HasNoTail<Const<0>, Any> : std::true_type {};
-
-template <nint_t A, nint_t Lo, nint_t Hi>
-struct HasNoTail<Const<0>, Dynamic<A, Lo, Hi>> : std::true_type {};
-
-template <typename N, typename Step>
-inline constexpr bool has_no_tail_v =
-    HasNoTail<std::remove_cvref_t<N>, std::remove_cvref_t<Step>>::value;
-
-template <typename N, typename Step>
-struct HasConstTail : std::false_type {};
-
-template <nint_t N, nint_t Step>
-struct HasConstTail<Const<N>, Const<Step>>
-    : std::bool_constant<(Step > 0) && (N % Step) != 0> {};
-
-template <nint_t N>
-struct HasConstTail<Const<N>, Const<0>> : std::false_type {};
-
-template <typename N, typename Step>
-inline constexpr bool has_const_tail_v =
-    HasConstTail<std::remove_cvref_t<N>, std::remove_cvref_t<Step>>::value;
-
-template <typename N, typename Step>
-VECOPS_ALWAYS_INLINE constexpr void validate_scan_args(const N& n, const Step& step) {
-  if constexpr (is_const_value_v<N>) {
-    static_assert(ConstValue<std::remove_cvref_t<N>>::value >= 0,
-                  "scan n must be non-negative");
-  }
-  if constexpr (is_const_value_v<Step>) {
-    static_assert(ConstValue<std::remove_cvref_t<Step>>::value > 0,
-                  "scan step must be positive");
-  }
-  VECOPS_ASSERT(static_cast<nint_t>(n) >= 0, "scan n must be non-negative");
-  VECOPS_ASSERT(static_cast<nint_t>(step) > 0, "scan step must be positive");
-}
-
-// Builds one independently initialized carry set per unrolled lane. Each set
-// lives in a separate recursive call frame, so scalable vector types are never
-// placed in an array or class object.
-template <int Lane, int Unroll, typename MakeCarry, typename Body>
-VECOPS_ALWAYS_INLINE decltype(auto) with_scan_carries(
-    MakeCarry& make_carry,
-    Body& body) {
-  return make_carry([&](auto&... carries) VECOPS_INLINE_LAMBDA -> decltype(auto) {
-    auto dispatch = [&]<int Wanted>(auto&& fn) VECOPS_INLINE_LAMBDA -> decltype(auto) {
-      static_assert(Wanted == Lane);
-      return std::forward<decltype(fn)>(fn)(carries...);
-    };
-
-    if constexpr (Lane + 1 == Unroll) {
-      return body(dispatch);
-    } else {
-      auto next_body = [&](auto& next_dispatch) -> decltype(auto) VECOPS_INLINE_LAMBDA {
-        auto combined_dispatch = [&]<int Wanted>(auto&& fn) VECOPS_INLINE_LAMBDA -> decltype(auto) {
-          if constexpr (Wanted == Lane) {
-            return dispatch.template operator()<Wanted>(
-                std::forward<decltype(fn)>(fn));
-          } else {
-            return next_dispatch.template operator()<Wanted>(
-                std::forward<decltype(fn)>(fn));
-          }
-        };
-        return body(combined_dispatch);
-      };
-      return with_scan_carries<Lane + 1, Unroll>(make_carry, next_body);
-    }
-  });
-}
-
-template <int Lane, int Unroll, typename Dispatch, typename Step, typename Fn>
-VECOPS_ALWAYS_INLINE void invoke_full_scan_block(
-    Dispatch& dispatch,
-    nint_t base,
-    const Step& step,
-    Fn& fn) {
-  dispatch.template operator()<Lane>([&](auto&... carries) VECOPS_INLINE_LAMBDA {
-    fn(base + Lane * static_cast<nint_t>(step), step, carries...);
-  });
-  if constexpr (Lane + 1 < Unroll) {
-    invoke_full_scan_block<Lane + 1, Unroll>(dispatch, base, step, fn);
-  }
-}
-
-template <int Lane, int Unroll, typename Dispatch, typename Step, typename Fn>
-VECOPS_ALWAYS_INLINE void invoke_remaining_scan_chunks(
-    Dispatch& dispatch,
-    nint_t base,
-    nint_t remaining,
-    const Step& step,
-    Fn& fn) {
-  if (Lane < remaining) {
-    dispatch.template operator()<Lane>([&](auto&... carries) VECOPS_INLINE_LAMBDA {
-      fn(base + Lane * static_cast<nint_t>(step), step, carries...);
-    });
-  }
-  if constexpr (Lane + 1 < Unroll) {
-    invoke_remaining_scan_chunks<Lane + 1, Unroll>(
-        dispatch, base, remaining, step, fn);
-  }
-}
-
-template <int Lane, int Unroll, typename Dispatch, typename Combine>
-VECOPS_ALWAYS_INLINE void combine_scan_carries(
-    Dispatch& dispatch,
-    Combine& combine) {
-  dispatch.template operator()<0>([&](auto&... dst) VECOPS_INLINE_LAMBDA {
-    dispatch.template operator()<Lane>([&](auto&... src) VECOPS_INLINE_LAMBDA {
-      combine(dst..., src...);
-    });
-  });
-  if constexpr (Lane + 1 < Unroll) {
-    combine_scan_carries<Lane + 1, Unroll>(dispatch, combine);
-  }
-}
-
-template <int Lane, int Unroll, typename Step, typename Fn>
-VECOPS_ALWAYS_INLINE void invoke_full_map_block(
-    nint_t base,
-    const Step& step,
-    Fn& fn) {
-  fn(base + Lane * static_cast<nint_t>(step), step);
-  if constexpr (Lane + 1 < Unroll) {
-    invoke_full_map_block<Lane + 1, Unroll>(base, step, fn);
-  }
-}
-
-template <int Lane, int Unroll, typename Step, typename Fn>
-VECOPS_ALWAYS_INLINE void invoke_remaining_map_chunks(
-    nint_t base,
-    nint_t remaining,
-    const Step& step,
-    Fn& fn) {
-  if (Lane < remaining) {
-    fn(base + Lane * static_cast<nint_t>(step), step);
-  }
-  if constexpr (Lane + 1 < Unroll) {
-    invoke_remaining_map_chunks<Lane + 1, Unroll>(
-        base, remaining, step, fn);
-  }
-}
 
 // ======================== Vector Block Traversal ========================
 
@@ -1034,265 +861,6 @@ struct LeadingDimsWithIndexTuple<N, std::integer_sequence<int, Is...>> {
 
 } // namespace details
 
-/**
- * @brief Run a chunked one-dimensional scan and return the final carry.
- *
- * `scan` walks the half-open range `[0, n)` in chunks of `step`. For each full
- * chunk it invokes:
- *
- * @code
- * carry = fn(carry, i, step);
- * @endcode
- *
- * where `i` is the chunk start. If the compiler cannot prove that the range
- * length is always divisible by `step`, `scan` emits one runtime tail branch:
- *
- * @code
- * if (i < n) carry = fn(carry, i, tail_n);
- * @endcode
- *
- * For a compile-time `Const` tail, `tail_n` preserves its `Const` type.
- * Otherwise `tail_n` is an `Any` value. The tail branch is removed only when
- * the type-level metadata proves that no non-empty tail can exist, for example
- * `Const<16>` with `Const<4>` or `Dynamic<4>` with `Const<4>`.
- *
- * `n` and `step` may be `Const`, `Dynamic`, or raw integer values. Raw integers
- * are promoted to `Any`, so their exact values are available at runtime and
- * their tail length is passed as `Any` when needed.
- *
- * @tparam Fn     Callable type. It must be invocable as
- *                `fn(Carry, nint_t, auto&&)` and return the next carry.
- * @tparam N      Range length type (`Const`, `Dynamic`, or integer).
- * @tparam Step   Chunk step type (`Const`, `Dynamic`, or integer).
- * @tparam Carry  Carry type.
- *
- * @param init  Initial carry value.
- * @param n     Number of elements in the logical range. Must be non-negative.
- * @param step  Full chunk length. Must be positive.
- * @param fn    Iteration function.
- *
- * @return The final carry value after all emitted chunks.
- *
- * @note Runtime validity checks use `VECOPS_ASSERT`. Compile-time `Const`
- *       invalid arguments are rejected with `static_assert`.
- */
-template <int Unroll = 1, typename Fn, typename N, typename Step, typename Carry>
-VECOPS_ALWAYS_INLINE auto scan(Carry&& init, N n, Step step, Fn&& fn)
-    -> std::remove_cvref_t<Carry> {
-  static_assert(Unroll == 1,
-                "unrolled scan requires make_carry, combine, and finish callbacks");
-  auto n_value = details::to_hop_value(n);
-  auto step_value = details::to_hop_value(step);
-  details::validate_scan_args(n_value, step_value);
-
-  using NValue = std::remove_cvref_t<decltype(n_value)>;
-  using StepValue = std::remove_cvref_t<decltype(step_value)>;
-  using CarryT = std::remove_cvref_t<Carry>;
-
-  CarryT carry = std::forward<Carry>(init);
-  nint_t i = 0;
-  const nint_t full_end = static_cast<nint_t>(n_value - step_value + cint<1>);
-  const nint_t step_int = static_cast<nint_t>(step_value);
-  for (; i < full_end; i += step_int) {
-    carry = fn(carry, i, step_value);
-  }
-
-  if constexpr (!details::has_no_tail_v<NValue, StepValue>) {
-    if (i < static_cast<nint_t>(n_value)) {
-      if constexpr (details::has_const_tail_v<NValue, StepValue>) {
-        carry = fn(carry, i, n_value % step_value);
-      } else {
-        carry = fn(carry, i, Any{static_cast<nint_t>(n_value) - i});
-      }
-    }
-  }
-
-  return carry;
-}
-
-/**
- * @brief Run an unrolled reduction with one or more independent carry values.
- *
- * `make_carry(use)` must create a fresh identity-valued carry set as automatic
- * variables and call `use(carry...)` synchronously. `update` is invoked as
- * `update(i, chunk_n, carry...)`. After traversal, `combine(dst..., src...)`
- * merges lanes 1..Unroll-1 into lane 0, and `finish(carry...)` produces the
- * result. Carry values are passed only by reference and are never aggregated,
- * so they may be SVE sizeless types.
- *
- * @tparam Unroll Number of independent carry sets. Must be positive.
- */
-template <
-    int Unroll = 1,
-    typename N,
-    typename Step,
-    typename MakeCarry,
-    typename Update,
-    typename Combine,
-    typename Finish>
-VECOPS_ALWAYS_INLINE decltype(auto) scan(
-    N n,
-    Step step,
-    MakeCarry&& make_carry,
-    Update&& update,
-    Combine&& combine,
-    Finish&& finish) {
-  static_assert(Unroll > 0, "scan unroll must be positive");
-
-  auto n_value = details::to_hop_value(n);
-  auto step_value = details::to_hop_value(step);
-  details::validate_scan_args(n_value, step_value);
-
-  using NValue = std::remove_cvref_t<decltype(n_value)>;
-  using StepValue = std::remove_cvref_t<decltype(step_value)>;
-
-  auto&& make_carry_ref = make_carry;
-  auto&& update_ref = update;
-  auto&& combine_ref = combine;
-  auto&& finish_ref = finish;
-
-  auto body = [&](auto& dispatch) -> decltype(auto) VECOPS_INLINE_LAMBDA {
-    const nint_t n_int = static_cast<nint_t>(n_value);
-    const nint_t step_int = static_cast<nint_t>(step_value);
-    const nint_t full_chunks = n_int / step_int;
-    const nint_t full_groups = full_chunks / Unroll;
-    nint_t i = 0;
-
-    for (nint_t group = 0; group < full_groups; ++group) {
-      details::invoke_full_scan_block<0, Unroll>(
-          dispatch, i, step_value, update_ref);
-      i += Unroll * step_int;
-    }
-
-    const nint_t remaining = full_chunks - full_groups * Unroll;
-    details::invoke_remaining_scan_chunks<0, Unroll>(
-        dispatch, i, remaining, step_value, update_ref);
-    i += remaining * step_int;
-
-    if constexpr (!details::has_no_tail_v<NValue, StepValue>) {
-      if (i < n_int) {
-        dispatch.template operator()<0>([&](auto&... carries) VECOPS_INLINE_LAMBDA {
-          if constexpr (details::has_const_tail_v<NValue, StepValue>) {
-            update_ref(i, n_value % step_value, carries...);
-          } else {
-            update_ref(i, Any{n_int - i}, carries...);
-          }
-        });
-      }
-    }
-
-    if constexpr (Unroll > 1) {
-      details::combine_scan_carries<1, Unroll>(dispatch, combine_ref);
-    }
-    return dispatch.template operator()<0>(finish_ref);
-  };
-
-  return details::with_scan_carries<0, Unroll>(make_carry_ref, body);
-}
-
-/**
- * @brief Convenience overload for an unrolled reduction with one carry.
- *
- * `identity` is copied into every unrolled lane. `combine(lhs, rhs)` must
- * return the merged carry, and both callbacks must describe an associative
- * reduction with `identity` as its identity element.
- */
-template <
-    int Unroll = 1,
-    typename Carry,
-    typename N,
-    typename Step,
-    typename Fn,
-    typename Combine>
-VECOPS_ALWAYS_INLINE auto scan(
-    Carry&& identity,
-    N n,
-    Step step,
-    Fn&& fn,
-    Combine&& combine) -> std::remove_cvref_t<Carry> {
-  using CarryT = std::remove_cvref_t<Carry>;
-  auto&& identity_ref = identity;
-  auto&& fn_ref = fn;
-  auto&& combine_ref = combine;
-
-  return scan<Unroll>(
-      n,
-      step,
-      [&](auto&& use) -> decltype(auto) VECOPS_INLINE_LAMBDA {
-        CarryT carry = identity_ref;
-        return use(carry);
-      },
-      [&](nint_t i, auto&& chunk_n, auto& carry) VECOPS_INLINE_LAMBDA {
-        carry = fn_ref(carry, i, std::forward<decltype(chunk_n)>(chunk_n));
-      },
-      [&](auto& dst, auto& src) VECOPS_INLINE_LAMBDA {
-        dst = combine_ref(dst, src);
-      },
-      [](auto& carry) VECOPS_INLINE_LAMBDA -> CarryT {
-        return carry;
-      });
-}
-
-/**
- * @brief Run a chunked one-dimensional map with no carry.
- *
- * This is the non-iterative form of `scan`. It uses the same chunk emission
- * rules, but invokes the user callable as:
- *
- * @code
- * fn(i, chunk_n);
- * @endcode
- *
- * @tparam Fn    Callable type. It must be invocable as `fn(nint_t, auto&&)`.
- * @tparam N     Range length type (`Const`, `Dynamic`, or integer).
- * @tparam Step  Chunk step type (`Const`, `Dynamic`, or integer).
- * @tparam Unroll Number of chunks emitted per loop iteration. Must be positive.
- *
- * @param n     Number of elements in the logical range. Must be non-negative.
- * @param step  Full chunk length. Must be positive.
- * @param fn    Mapping function.
- *
- * @see scan
- */
-template <int Unroll = 1, typename Fn, typename N, typename Step>
-  requires (!::vecops::vec::VectorTag<std::remove_cvref_t<N>>)
-VECOPS_ALWAYS_INLINE void map(N n, Step step, Fn&& fn) {
-  static_assert(Unroll > 0, "map unroll must be positive");
-  auto n_value = details::to_hop_value(n);
-  auto step_value = details::to_hop_value(step);
-  details::validate_scan_args(n_value, step_value);
-
-  using NValue = std::remove_cvref_t<decltype(n_value)>;
-  using StepValue = std::remove_cvref_t<decltype(step_value)>;
-
-  const nint_t n_int = static_cast<nint_t>(n_value);
-  const nint_t step_int = static_cast<nint_t>(step_value);
-  const nint_t full_chunks = n_int / step_int;
-  const nint_t full_groups = full_chunks / Unroll;
-  nint_t i = 0;
-
-  auto&& fn_ref = fn;
-  for (nint_t group = 0; group < full_groups; ++group) {
-    details::invoke_full_map_block<0, Unroll>(i, step_value, fn_ref);
-    i += Unroll * step_int;
-  }
-
-  const nint_t remaining = full_chunks - full_groups * Unroll;
-  details::invoke_remaining_map_chunks<0, Unroll>(
-      i, remaining, step_value, fn_ref);
-  i += remaining * step_int;
-
-  if constexpr (!details::has_no_tail_v<NValue, StepValue>) {
-    if (i < n_int) {
-      if constexpr (details::has_const_tail_v<NValue, StepValue>) {
-        fn_ref(i, n_value % step_value);
-      } else {
-        fn_ref(i, Any{n_int - i});
-      }
-    }
-  }
-}
-
 /** Defines an additive vector carry and overwrites `result` on completion. */
 template <typename T>
 VECOPS_ALWAYS_INLINE auto reduce_add(T& result) {
@@ -1321,52 +889,6 @@ VECOPS_ALWAYS_INLINE auto reduce_min(T& result) {
 template <typename T>
 VECOPS_ALWAYS_INLINE auto invariant(const T& value) {
   return details::VectorInvariantDefinition<T>{value};
-}
-
-/**
- * @brief Traverse `[0, n)` with full and tail multi-word vector Tags.
- *
- * The factors are compile-time suggestions relative to `base_tag`. They are
- * rounded down to powers of two and capped before an unsupported backend Tag
- * is instantiated. The callback receives `(tag, i, active)` where `active` is
- * `vec::opt::unmasked` for full blocks and `vec::opt::first(n - i)` for tail
- * blocks.
- */
-template <int FullFactor = 1, int TailFactor = 1,
-          ::vecops::vec::VectorTag Tag, typename N, typename Fn>
-VECOPS_ALWAYS_INLINE void map(Tag base_tag, N n, Fn&& block) {
-  static_assert(FullFactor > 0, "map full factor must be positive");
-  static_assert(TailFactor > 0, "map tail factor must be positive");
-  static_assert(
-      TailFactor <= FullFactor,
-      "map tail factor cannot exceed full factor");
-
-  using FullTag = details::suggested_factor_tag_t<Tag, FullFactor>;
-  using TailTag = details::suggested_factor_tag_t<Tag, TailFactor>;
-  auto n_value = details::to_hop_value(n);
-  if constexpr (details::is_const_value_v<decltype(n_value)>) {
-    static_assert(
-        details::ConstValue<std::remove_cvref_t<decltype(n_value)>>::value >= 0,
-        "map n must be non-negative");
-  }
-  const nint_t n_int = static_cast<nint_t>(n_value);
-  VECOPS_ASSERT(n_int >= 0, "map n must be non-negative");
-
-  FullTag full_tag{};
-  TailTag tail_tag{};
-  const nint_t full_lanes = ::vecops::vec::size(full_tag);
-  const nint_t tail_lanes = ::vecops::vec::size(tail_tag);
-  auto&& block_ref = block;
-  nint_t i = 0;
-  for (; i + full_lanes <= n_int; i += full_lanes) {
-    block_ref(full_tag, i, ::vecops::vec::opt::unmasked);
-  }
-  VECOPS_NOUNROLL
-  while (i < n_int) {
-    block_ref(tail_tag, i, ::vecops::vec::opt::first(n_int - i));
-    i += tail_lanes;
-  }
-  (void)base_tag;
 }
 
 /**
