@@ -35,14 +35,14 @@ struct PackedMMLA {};
 struct PackedTail {};
 
 template <typename T>
-concept WholeProblemFamily =
+concept ArchitectureFamily =
     std::same_as<T, WholeProblem> || std::same_as<T, General> ||
     std::same_as<T, SmallVector> ||
     std::same_as<T, RuntimeQuantInt8> ||
     std::same_as<T, PackedMMLA> || std::same_as<T, PackedTail>;
 
 template <typename T>
-concept Family = WholeProblemFamily<T> || std::same_as<T, GenericTiled>;
+concept Family = ArchitectureFamily<T> || std::same_as<T, GenericTiled>;
 
 template <Family FamilyT>
 struct Info;
@@ -127,7 +127,7 @@ struct Require {
 namespace details {
 
 /** Compile-time contract carried from the operation plan into a backend leaf. */
-template <kernel_family::WholeProblemFamily FamilyT,
+template <kernel_family::ArchitectureFamily FamilyT,
           family_selection::Mode ModeV>
 struct FamilyDispatch {
   using Family = FamilyT;

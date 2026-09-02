@@ -2,8 +2,8 @@
 // Copyright (c) vecops contributors.
 //
 
-#ifndef VECOPS_MATMUL_DETAILS_FAMILIES_WHOLE_PROBLEM_H
-#define VECOPS_MATMUL_DETAILS_FAMILIES_WHOLE_PROBLEM_H
+#ifndef VECOPS_MATMUL_DETAILS_FAMILIES_ARCHITECTURE_FAMILY_H
+#define VECOPS_MATMUL_DETAILS_FAMILIES_ARCHITECTURE_FAMILY_H
 
 #include <limits>
 #include <type_traits>
@@ -19,9 +19,12 @@
 #include "vecops/matmul/details/Kernel.h"
 #include "vecops/matmul/details/OperationCommon.h"
 #include "vecops/matmul/details/PackOperation.h"
+#include "vecops/matmul/details/families/ArchitectureBatchPlanner.h"
+#include "vecops/matmul/details/families/ArchitecturePackingPlanner.h"
+#include "vecops/matmul/details/families/ArchitectureWorkspacePlanner.h"
 #include "vecops/tensor/DataAccess.h"
 
-namespace vecops::ops {
+namespace vecops::ops::matmul_details {
 
 template <::vecops::matmul::Atom Atom,
           typename TilePolicy,
@@ -31,8 +34,10 @@ template <::vecops::matmul::Atom Atom,
           meta::ValueType KExtent,
           typename ASpec, typename BSpec,
           typename CInputSpec, typename COutputSpec>
-class WholeProblemPlan {
+class ArchitectureFamilyInvocation {
 public:
+  using AtomType = Atom;
+  using TilePolicyType = TilePolicy;
   using MExtentType = MExtent;
   using NExtentType = NExtent;
   using KExtentType = KExtent;
@@ -55,7 +60,7 @@ public:
       FamilyDispatch,
       ::vecops::matmul::details::AutomaticFamilyDispatch>;
 
-  VECOPS_INLINE WholeProblemPlan(
+  VECOPS_INLINE ArchitectureFamilyInvocation(
       MExtent m, NExtent n, KExtent k,
       ASpec a, BSpec b, CInputSpec c_input, COutputSpec c_output)
       : m_(m), n_(n), k_(k),
@@ -66,23 +71,7 @@ public:
   }
 
   VECOPS_INLINE nint_t required_workspace() const {
-    nint_t bytes =
-        kernel::matmul_implementation::scratch_bytes<Implementation>();
-    if constexpr (CompileTimeAutoPacking) {
-      if constexpr (SMEBatchRowsFullPackCandidate) {
-        bytes += batch_rows_flatten_enabled()
-            ? batch_rows_packed_a_bytes()
-            : auto_packed_bytes<::vecops::matmul::Operand::A>(a_);
-      } else {
-        bytes += auto_packed_bytes<::vecops::matmul::Operand::A>(a_);
-      }
-      bytes += auto_packed_bytes<::vecops::matmul::Operand::B>(b_);
-    }
-    if (batch_rows_pack_a_enabled())
-      bytes += this->batch_rows_packed_a_bytes();
-    if (batch_columns_periodic_c_input_enabled())
-      bytes += batch_columns_periodic_c_input_bytes();
-    return bytes;
+    return WorkspacePlanner::required(*this);
   }
 
   template <execution::ExecutionScope Scope>
@@ -99,6 +88,15 @@ public:
   }
 
 private:
+  using BatchPlanner =
+      matmul_details::ArchitectureBatchPlanner<ArchitectureFamilyInvocation>;
+  friend BatchPlanner;
+  using WorkspacePlanner = matmul_details::ArchitectureWorkspacePlanner<
+      ArchitectureFamilyInvocation>;
+  friend WorkspacePlanner;
+  using PackingPlanner = matmul_details::ArchitecturePackingPlanner<
+      ArchitectureFamilyInvocation>;
+  friend PackingPlanner;
   template <::vecops::matmul::Operand Side, typename Spec>
   static constexpr bool AutoPackOperand = [] {
     using Layout = typename Spec::InputLayout;
@@ -259,120 +257,19 @@ private:
           typename CInputSpec::TransformType, tensor::NoTransform>;
 
   VECOPS_INLINE bool batch_rows_flatten_enabled() const {
-    if constexpr (!BatchRowsFlattenCandidate) {
-      return false;
-    } else {
-      const auto& a_layout = a_.input_layout();
-      const auto& ci_layout = c_input_.input_layout();
-      const auto& co_layout = c_output_.output_layout();
-      const nint_t batch = static_cast<nint_t>(
-          tensor::size_value<0>(co_layout));
-      const nint_t m = static_cast<nint_t>(m_);
-      const nint_t n = static_cast<nint_t>(n_);
-      const nint_t k = static_cast<nint_t>(k_);
-      if (batch <= 1 || m <= 0 || n <= 0 || k <= 0 || m > 16)
-        return false;
-      if (batch > 64 / m) return false;
-      const nint_t flat_m = batch * m;
-      // This first implementation intentionally targets products that need no
-      // cache/K tiling.  Larger flattened M values should be handled by the
-      // future parallel macro-block path rather than cloned here.
-      if (flat_m > 64) return false;
-
-      const bool dense_a =
-          static_cast<nint_t>(tensor::stride_value<2>(a_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<1>(a_layout)) == k &&
-          static_cast<nint_t>(tensor::stride_value<0>(a_layout)) == m * k;
-      const bool dense_co =
-          static_cast<nint_t>(tensor::stride_value<2>(co_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<1>(co_layout)) == n &&
-          static_cast<nint_t>(tensor::stride_value<0>(co_layout)) == m * n;
-      const bool dense_ci =
-          static_cast<nint_t>(tensor::stride_value<2>(ci_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<1>(ci_layout)) == n &&
-          static_cast<nint_t>(tensor::stride_value<0>(ci_layout)) == m * n;
-      const bool broadcast_ci =
-          static_cast<nint_t>(tensor::stride_value<2>(ci_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<1>(ci_layout)) == 0 &&
-          static_cast<nint_t>(tensor::stride_value<0>(ci_layout)) == 0;
-      return dense_a && dense_co && (dense_ci || broadcast_ci);
-    }
+    return BatchPlanner::rows_flatten_enabled(*this);
   }
 
   VECOPS_INLINE bool batch_columns_flatten_enabled() const {
-    if constexpr (!BatchColumnsFlattenCandidate) {
-      return false;
-    } else {
-      const auto& a_layout = a_.input_layout();
-      const auto& b_layout = b_.input_layout();
-      const auto& ci_layout = c_input_.input_layout();
-      const auto& co_layout = c_output_.output_layout();
-      const nint_t batch = static_cast<nint_t>(
-          tensor::size_value<0>(co_layout));
-      const nint_t m = static_cast<nint_t>(m_);
-      const nint_t n = static_cast<nint_t>(n_);
-      const nint_t k = static_cast<nint_t>(k_);
-      if (batch < 4 || m != 1 || n <= 0 || k <= 0) return false;
-      if (n > 64 / batch) return false;
-
-      const bool shared_a = [&] {
-        if constexpr (PackedAInput) {
-          return true;
-        } else {
-          return static_cast<nint_t>(
-                     tensor::stride_value<2>(a_layout)) == 1 &&
-              static_cast<nint_t>(
-                  tensor::stride_value<1>(a_layout)) == k &&
-              static_cast<nint_t>(
-                  tensor::stride_value<0>(a_layout)) == 0;
-        }
-      }();
-      const nint_t b_row_stride = static_cast<nint_t>(
-          tensor::stride_value<1>(b_layout));
-      const bool mergeable_b =
-          static_cast<nint_t>(tensor::stride_value<2>(b_layout)) == 1 &&
-          b_row_stride >= k &&
-          static_cast<nint_t>(tensor::stride_value<0>(b_layout)) ==
-              n * b_row_stride;
-      const bool dense_co =
-          static_cast<nint_t>(tensor::stride_value<2>(co_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<0>(co_layout)) == n;
-      // A shared per-N bias has strides {0,0,1}; flattening would require a
-      // periodic modulo-N mapping and is therefore deliberately rejected.
-      const bool dense_ci =
-          static_cast<nint_t>(tensor::stride_value<2>(ci_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<0>(ci_layout)) == n;
-      const bool periodic_ci =
-          BatchColumnsPeriodicCInputCandidate &&
-          static_cast<nint_t>(tensor::stride_value<2>(ci_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<1>(ci_layout)) == 0 &&
-          static_cast<nint_t>(tensor::stride_value<0>(ci_layout)) == 0;
-      return shared_a && mergeable_b && dense_co &&
-          (dense_ci || periodic_ci);
-    }
+    return BatchPlanner::columns_flatten_enabled(*this);
   }
 
   VECOPS_INLINE bool batch_columns_periodic_c_input_enabled() const {
-    if constexpr (!BatchColumnsPeriodicCInputCandidate) {
-      return false;
-    } else {
-      if (!batch_columns_flatten_enabled()) return false;
-      const auto& layout = c_input_.input_layout();
-      return static_cast<nint_t>(tensor::stride_value<2>(layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<1>(layout)) == 0 &&
-          static_cast<nint_t>(tensor::stride_value<0>(layout)) == 0;
-    }
+    return BatchPlanner::periodic_c_input_enabled(*this);
   }
 
   VECOPS_INLINE nint_t batch_columns_periodic_c_input_bytes() const {
-    if constexpr (!BatchColumnsPeriodicCInputCandidate) {
-      return 0;
-    } else {
-      const nint_t batch = static_cast<nint_t>(tensor::size_value<0>(
-          c_output_.output_layout()));
-      return batch * static_cast<nint_t>(n_) *
-          static_cast<nint_t>(sizeof(typename Atom::TAcc)) + 63;
-    }
+    return BatchPlanner::periodic_c_input_bytes(*this);
   }
 
   template <typename Spec,
@@ -381,13 +278,8 @@ private:
   VECOPS_INLINE auto flatten_batch_rows_input(
       const Spec& spec, Rows flat_rows, Columns columns,
       RowStride row_stride) const {
-    auto tensor = tensor::make_tensor(
-        spec.tensor().data(), tensor::make_layout(
-            tensor::make_shape(flat_rows, columns),
-            tensor::make_strides(row_stride, meta::cint<1>)));
-    return tensor::InputSpec<
-        typename Spec::ComputeType, decltype(tensor),
-        typename Spec::TransformType>{tensor, spec.transform()};
+    return BatchPlanner::flatten_input(
+        spec, flat_rows, columns, row_stride);
   }
 
   template <typename Spec,
@@ -396,23 +288,16 @@ private:
   VECOPS_INLINE auto flatten_batch_rows_output(
       const Spec& spec, Rows flat_rows, Columns columns,
       RowStride row_stride) const {
-    auto tensor = tensor::make_tensor(
-        spec.tensor().data(), tensor::make_layout(
-            tensor::make_shape(flat_rows, columns),
-            tensor::make_strides(row_stride, meta::cint<1>)));
-    return tensor::OutputSpec<
-        typename Spec::ComputeType, decltype(tensor),
-        typename Spec::TransformType>{tensor, spec.transform()};
+    return BatchPlanner::flatten_output(
+        spec, flat_rows, columns, row_stride);
   }
 
   VECOPS_INLINE auto shared_b_leaf() const {
-    if constexpr (PackedBInput) return b_;
-    else return tensor::slice_view<0>(b_, 0);
+    return BatchPlanner::shared_b_leaf(*this);
   }
 
   VECOPS_INLINE auto shared_a_leaf() const {
-    if constexpr (PackedAInput) return a_;
-    else return tensor::slice_view<0>(a_, 0);
+    return BatchPlanner::shared_a_leaf(*this);
   }
 
   // Keep the ordinary rank-three traversal byte-for-byte compact.  Enabling
@@ -771,50 +656,20 @@ private:
 
   template <::vecops::matmul::Operand Side, typename Spec>
   VECOPS_INLINE auto auto_packed_layout(const Spec& spec) const {
-    constexpr int Rank = Spec::InputTensor::Ndim;
-    if constexpr (Rank == 2) {
-      return matmul_packed_layout<Atom, Side>(spec.input_layout());
-    } else {
-      static_assert(Rank == 3);
-      const auto& layout = spec.input_layout();
-      return matmul_packed_layout<Atom, Side>(tensor::make_layout(
-          tensor::make_shape(
-              tensor::size_value<Rank - 2>(layout),
-              tensor::size_value<Rank - 1>(layout))));
-    }
+    return PackingPlanner::template packed_layout<Side>(spec);
   }
 
   template <::vecops::matmul::Operand Side, typename Spec>
   VECOPS_INLINE nint_t auto_packed_bytes(const Spec& spec) const {
-    if constexpr (AutoPackOperand<Side, Spec>) {
-      using Element = typename ::vecops::matmul::packing_t<Atom, Side>::Element;
-      const auto layout = auto_packed_layout<Side>(spec);
-      // WorkspaceView may need up to 63 bytes to establish 64B alignment.
-      return tensor::numel(layout) * static_cast<nint_t>(sizeof(Element)) + 63;
-    } else {
-      return 0;
-    }
+    return PackingPlanner::template packed_bytes<Side>(spec);
   }
 
   VECOPS_INLINE auto batch_rows_packed_a_layout() const {
-    static_assert(
-        BatchRowsPackACandidate || SMEBatchRowsFullPackCandidate);
-    const auto batch = tensor::size_value<0>(c_output_.output_layout());
-    const auto flat_m = batch * m_;
-    const auto flat_layout = tensor::make_layout(tensor::make_shape(
-        flat_m, k_));
-    return matmul_packed_layout<Atom, ::vecops::matmul::Operand::A>(flat_layout);
+    return PackingPlanner::batch_rows_packed_a_layout(*this);
   }
 
   VECOPS_INLINE nint_t batch_rows_packed_a_bytes() const {
-    if constexpr (
-        !BatchRowsPackACandidate && !SMEBatchRowsFullPackCandidate) {
-      return 0;
-    } else {
-      const auto layout = batch_rows_packed_a_layout();
-      return tensor::numel(layout) *
-          static_cast<nint_t>(sizeof(typename Atom::TA)) + 63;
-    }
+    return PackingPlanner::batch_rows_packed_a_bytes(*this);
   }
 
   template <typename PackImplementation,
@@ -1103,15 +958,7 @@ private:
 
   template <execution::ExecutionScope Scope>
   VECOPS_NOINLINE void execute_auto_packed(Scope& scope) const {
-    if constexpr (SingleStreamingAutoPackRegion) {
-      scope.with_resources(
-          execution::details::arm::StreamingZARegion{},
-          [&](auto& active) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-            execute_auto_packed_in_scope(active);
-          });
-    } else {
-      execute_auto_packed_in_scope(scope);
-    }
+    PackingPlanner::execute(scope, *this);
   }
 
   VECOPS_INLINE void validate() const {
@@ -1331,7 +1178,6 @@ private:
         return;
       }
     }
-    constexpr int Rank = COutputSpec::OutputTensor::Ndim;
     constexpr int PrefixRank = Rank - ProblemRank;
     const auto a_loop = matmul_details::batch_loop_operand<
         Atom, ::vecops::matmul::Operand::A>(a_);
@@ -1354,7 +1200,6 @@ private:
     };
     auto run = [&](void* scratch) VECOPS_KERNEL_LAMBDA {
       if constexpr (PrefixRank > 0) {
-        // Preserve the zero-batch behavior: no leaf means no TILECFG load.
         for (int d = 0; d < PrefixRank; ++d)
           if (c_output_.output_layout().shape()[d] == 0) return;
       }
@@ -1426,8 +1271,6 @@ private:
   [[no_unique_address]] BatchRowsPackAState batch_rows_pack_a_{};
 };
 
-namespace matmul_details {
-
 /** Prepare C = A*B^T with a hardware-zero accumulator prologue. */
 template <typename Config,
           matmul_details::Extent M,
@@ -1435,14 +1278,14 @@ template <typename Config,
           matmul_details::Extent K,
           tensor::InputOperand A, tensor::InputOperand B,
           tensor::OutputOperand C>
-VECOPS_INLINE auto prepare_matmul(
+VECOPS_INLINE auto make_matmul_invocation(
     const Config&,
     M&& m, N&& n, K&& k, A&& a, B&& b, C&& c) {
   using Atom = typename Config::Atom;
   using TilePolicy = typename Config::SchedulerPolicy;
   using Family = ::vecops::matmul::details::selected_family_t<Config>;
-  static_assert(::vecops::matmul::kernel_family::WholeProblemFamily<Family>,
-                "prepare_matmul requires a whole-problem kernel family");
+  static_assert(::vecops::matmul::kernel_family::ArchitectureFamily<Family>,
+                "make_matmul_invocation requires an architecture kernel family");
   using FamilyDispatch = ::vecops::matmul::details::FamilyDispatch<
       Family, ::vecops::matmul::details::family_selection_mode_v<Config>>;
   auto m_value = matmul_details::extent_value(std::forward<M>(m));
@@ -1456,7 +1299,7 @@ VECOPS_INLINE auto prepare_matmul(
   auto c_input = tensor::input<typename Atom::TAcc>(
       c_output.tensor(),
       tensor::zeros_transform<typename Atom::TAcc, Memory>);
-  return WholeProblemPlan<
+  return ArchitectureFamilyInvocation<
       Atom, TilePolicy, FamilyDispatch,
       decltype(m_value), decltype(n_value), decltype(k_value),
       decltype(a_spec), decltype(b_spec),
@@ -1473,15 +1316,15 @@ template <typename Config,
           matmul_details::Extent K,
           tensor::InputOperand A, tensor::InputOperand B,
           tensor::InputOperand CInput, tensor::OutputOperand COutput>
-VECOPS_INLINE auto prepare_matmul_accumulate(
+VECOPS_INLINE auto make_matmul_accumulate_invocation(
     const Config&,
     M&& m, N&& n, K&& k,
     A&& a, B&& b, CInput&& c_input, COutput&& c_output) {
   using Atom = typename Config::Atom;
   using TilePolicy = typename Config::SchedulerPolicy;
   using Family = ::vecops::matmul::details::selected_family_t<Config>;
-  static_assert(::vecops::matmul::kernel_family::WholeProblemFamily<Family>,
-                "prepare_matmul_accumulate requires a whole-problem family");
+  static_assert(::vecops::matmul::kernel_family::ArchitectureFamily<Family>,
+                "make_matmul_accumulate_invocation requires an architecture family");
   using FamilyDispatch = ::vecops::matmul::details::FamilyDispatch<
       Family, ::vecops::matmul::details::family_selection_mode_v<Config>>;
   auto m_value = matmul_details::extent_value(std::forward<M>(m));
@@ -1493,7 +1336,7 @@ VECOPS_INLINE auto prepare_matmul_accumulate(
       std::forward<CInput>(c_input));
   auto c_output_spec = tensor::as_output_spec<typename Atom::TAcc>(
       std::forward<COutput>(c_output));
-  return WholeProblemPlan<
+  return ArchitectureFamilyInvocation<
       Atom, TilePolicy, FamilyDispatch,
       decltype(m_value), decltype(n_value), decltype(k_value),
       decltype(a_spec), decltype(b_spec),
@@ -1503,9 +1346,6 @@ VECOPS_INLINE auto prepare_matmul_accumulate(
           std::move(c_input_spec), std::move(c_output_spec)};
 }
 
-} // namespace matmul_details
+} // namespace vecops::ops::matmul_details
 
-
-} // namespace vecops::ops
-
-#endif // VECOPS_MATMUL_DETAILS_FAMILIES_WHOLE_PROBLEM_H
+#endif // VECOPS_MATMUL_DETAILS_FAMILIES_ARCHITECTURE_FAMILY_H

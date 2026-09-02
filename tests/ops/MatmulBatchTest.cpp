@@ -114,11 +114,11 @@ void check_shared_a_batch_columns() {
             bias.data(), make_layout(
                 make_shape(Any{Batch}, Any{M}, Any{N}),
                 make_strides(cint<0>, cint<0>, cint<1>)));
-        return ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
+        return ops::matmul_details::make_matmul_accumulate_invocation(ops::MatmulConfig<Atom>{},
             M, N, K, a_input, bt,
             input<Acc>(bias_tensor), output<Acc>(ct));
       } else {
-        return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, M, N, K, a_input, bt, ct);
+        return ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{}, M, N, K, a_input, bt, ct);
       }
     }();
     if constexpr (Bias) {
@@ -191,7 +191,7 @@ TEST(MatmulBatchTest, TraversesBatchAndExposesTilePolicy) {
       b.data(), make_layout(make_shape(Any{Batch}, Any{N}, Any{K})));
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(Any{Batch}, Any{M}, Any{N})));
-  auto operation = ops::matmul_details::prepare_matmul(
+  auto operation = ops::matmul_details::make_matmul_invocation(
       ops::MatmulSchedulerConfig<Atom, Policy>{}, M, N, K, at, bt, ct);
   kernel::Workspace storage(operation.required_workspace());
   auto workspace = storage.view();
@@ -454,11 +454,11 @@ void check_shared_a_batch_columns() {
             bias.data(), make_layout(
                 make_shape(Any{Batch}, Any{M}, Any{N}),
                 make_strides(cint<0>, cint<0>, cint<1>)));
-        return ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
+        return ops::matmul_details::make_matmul_accumulate_invocation(ops::MatmulConfig<Atom>{},
             M, N, K, a_input, bt,
             input<Acc>(bias_tensor), output<Acc>(ct));
       } else {
-        return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, M, N, K, a_input, bt, ct);
+        return ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{}, M, N, K, a_input, bt, ct);
       }
     }();
     const nint_t expected_workspace = Bias
@@ -539,7 +539,7 @@ TEST(MatmulBatchTest, TraversesBatchAndExposesTilePolicy) {
       b.data(), make_layout(make_shape(Any{Batch}, Any{N}, Any{K})));
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(Any{Batch}, Any{M}, Any{N})));
-  auto operation = ops::matmul_details::prepare_matmul(
+  auto operation = ops::matmul_details::make_matmul_invocation(
       ops::MatmulSchedulerConfig<Atom, Policy>{}, M, N, K, at, bt, ct);
   ExecutionSession execution{};
   operation(execution);

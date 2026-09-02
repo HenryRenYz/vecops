@@ -75,7 +75,7 @@ void check_both_packed(
   auto ct = tensor::make_tensor(
       c.data(), tensor::make_layout(
                     tensor::make_shape(meta::Any{m}, meta::Any{n})));
-  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
+  auto operation = ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{},
       meta::Any{m}, meta::Any{n}, k_extent, apt, bpt, ct);
   static_assert(std::same_as<
       typename decltype(operation)::KExtentType, KExtent>);

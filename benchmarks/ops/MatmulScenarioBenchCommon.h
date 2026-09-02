@@ -977,15 +977,15 @@ void run_batched_scenario_with_extents(
       }();
       const auto correction_tensor = tensor::make_tensor(
           asymmetric_correction.data(), correction_layout);
-      return ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
+      return ops::matmul_details::make_matmul_accumulate_invocation(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, a_operand, selected_b,
           tensor::input<Acc>(correction_tensor), c_output);
     } else if constexpr (uses_c_prologue_v<OutPipeline>) {
-      return ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
+      return ops::matmul_details::make_matmul_accumulate_invocation(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, a_operand, selected_b,
           tensor::input<Acc>(c_input_tensor), c_output);
     } else {
-      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
+      return ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, a_operand, selected_b, c_output);
     }
   };
@@ -2123,15 +2123,15 @@ void run_scenario_with_extents(
                   tensor::make_strides(cint<0>, cint<1>));
             }
           }());
-      return ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
+      return ops::matmul_details::make_matmul_accumulate_invocation(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, selected_a, selected_b,
           tensor::input<Acc>(correction_tensor), c_output);
     } else if constexpr (uses_c_prologue_v<OutPipeline>) {
-      return ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
+      return ops::matmul_details::make_matmul_accumulate_invocation(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, selected_a, selected_b,
           tensor::input<Acc>(c_input_tensor), c_output);
     } else {
-      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
+      return ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{},
           m_extent, n_extent, k_extent, selected_a, selected_b, c_output);
     }
   };

@@ -10,23 +10,23 @@
 #include "vecops/matmul/details/FamilySelector.h"
 #include "vecops/matmul/details/OperationCommon.h"
 #include "vecops/matmul/details/families/GenericTiled.h"
-#include "vecops/matmul/details/families/WholeProblem.h"
+#include "vecops/matmul/details/families/ArchitectureFamily.h"
 
 namespace vecops::ops::matmul_details {
 
 template <typename Family, typename Config>
 struct FamilyPlan;
 
-/** Shared adapter for whole-problem families and their selected backend leaf. */
+/** Shared adapter for architecture families and their selected backend leaf. */
 template <typename Family, typename Config>
-struct WholeProblemFamilyPlan {
+struct ArchitectureFamilyPlan {
   template <Extent M, Extent N, Extent K,
             tensor::InputOperand A, tensor::InputOperand B,
             tensor::OutputOperand C>
   VECOPS_INLINE static nint_t required_workspace(
       const Config& config, M&& m, N&& n, K&& k,
       A&& a, B&& b, C&& c) {
-    auto plan = prepare_matmul(
+    auto plan = make_matmul_invocation(
         config, std::forward<M>(m), std::forward<N>(n),
         std::forward<K>(k), std::forward<A>(a), std::forward<B>(b),
         std::forward<C>(c));
@@ -39,7 +39,7 @@ struct WholeProblemFamilyPlan {
   VECOPS_INLINE static nint_t required_workspace(
       const Config& config, M&& m, N&& n, K&& k,
       A&& a, B&& b, CInput&& c_input, COutput&& c_output) {
-    auto plan = prepare_matmul_accumulate(
+    auto plan = make_matmul_accumulate_invocation(
         config, std::forward<M>(m), std::forward<N>(n),
         std::forward<K>(k), std::forward<A>(a), std::forward<B>(b),
         std::forward<CInput>(c_input), std::forward<COutput>(c_output));
@@ -53,7 +53,7 @@ struct WholeProblemFamilyPlan {
   VECOPS_INLINE static void run(
       Scope& scope, const Config& config, M&& m, N&& n, K&& k,
       A&& a, B&& b, C&& c) {
-    auto plan = prepare_matmul(
+    auto plan = make_matmul_invocation(
         config, std::forward<M>(m), std::forward<N>(n),
         std::forward<K>(k), std::forward<A>(a), std::forward<B>(b),
         std::forward<C>(c));
@@ -67,7 +67,7 @@ struct WholeProblemFamilyPlan {
   VECOPS_INLINE static void run(
       Scope& scope, const Config& config, M&& m, N&& n, K&& k,
       A&& a, B&& b, CInput&& c_input, COutput&& c_output) {
-    auto plan = prepare_matmul_accumulate(
+    auto plan = make_matmul_accumulate_invocation(
         config, std::forward<M>(m), std::forward<N>(n),
         std::forward<K>(k), std::forward<A>(a), std::forward<B>(b),
         std::forward<CInput>(c_input), std::forward<COutput>(c_output));
@@ -76,8 +76,8 @@ struct WholeProblemFamilyPlan {
 };
 
 template <typename Family, typename Config>
-  requires ::vecops::matmul::kernel_family::WholeProblemFamily<Family>
-struct FamilyPlan<Family, Config> : WholeProblemFamilyPlan<Family, Config> {};
+  requires ::vecops::matmul::kernel_family::ArchitectureFamily<Family>
+struct FamilyPlan<Family, Config> : ArchitectureFamilyPlan<Family, Config> {};
 
 /** Adapter for the explicitly selected generic cache-tiled family. */
 template <typename Config>

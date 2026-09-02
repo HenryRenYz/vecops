@@ -16,7 +16,6 @@ __pycache__/
 /docs/*
 !/docs/TemplateStyle.md
 !/docs/Architecture.md
-!/docs/matmul-design.md
 !/docs/opt/
 /docs/opt/*
 /benchmarks/**/*AB.md

@@ -197,9 +197,9 @@ void check_mixed_packing(
       c.data(), make_layout(make_shape(Any{m}, Any{n})));
   auto operation = [&] {
     if constexpr (Side == ::vecops::matmul::Operand::A)
-      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k, packed_tensor, bt, ct);
+      return ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{}, m, n, k, packed_tensor, bt, ct);
     else
-      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k, at, packed_tensor, ct);
+      return ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{}, m, n, k, at, packed_tensor, ct);
   }();
   kernel::Workspace owner(operation.required_workspace());
   auto workspace = owner.view();
@@ -259,7 +259,7 @@ void check_both_packed(
   ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(pack_execution, bt, bpt);
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(Any{m}, Any{n})));
-  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
+  auto operation = ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{},
       Any{m}, Any{n}, k_extent, apt, bpt, ct);
   EXPECT_EQ(
       operation.required_workspace(),
@@ -298,7 +298,7 @@ void check_transformed_inputs(KExtent k_extent) {
       c.data(), make_layout(make_shape(cint<M>, cint<N>)));
   auto identity = make_elementwise_vec_transform<bfloat16_t, bfloat16_t>(
       [](auto, auto x) VECOPS_KERNEL_LAMBDA { return x; });
-  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
+  auto operation = ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{},
       cint<M>, cint<N>, k_extent,
       input<bfloat16_t>(at, identity), input<bfloat16_t>(bt, identity), ct);
   kernel::Workspace owner(operation.required_workspace());
@@ -644,7 +644,7 @@ TEST(MatmulTest, SameSignSmallVectorPreservesWrapAndTail) {
         b.data(), make_layout(make_shape(cint<1>, Any{K})));
     auto ct = make_tensor(
         &c, make_layout(make_shape(cint<1>, cint<1>)));
-    auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, 1, 1, K, at, bt, ct);
+    auto operation = ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{}, 1, 1, K, at, bt, ct);
     kernel::Workspace owner(operation.required_workspace());
     auto workspace = owner.view();
     operation(workspace);
@@ -705,7 +705,7 @@ TEST(MatmulTest, CPrologueAndEpilogueUseDataAccess) {
       [](auto tag, auto x) VECOPS_KERNEL_LAMBDA {
         return vec::mul(x, vec::fill(tag, 2.0f));
       });
-  auto operation = ops::matmul_details::prepare_matmul_accumulate(
+  auto operation = ops::matmul_details::make_matmul_accumulate_invocation(
       ops::MatmulConfig<::vecops::matmul::AMX_BF16F32>{},
       M, N, K, at, bt, input<float32_t>(ct), output<float32_t>(ct, epilogue));
   kernel::Workspace owner(operation.required_workspace());
@@ -741,7 +741,7 @@ TEST(MatmulTest, FullCDataAccessUsesCompileTimeExtents) {
       [](auto tag, auto x) VECOPS_KERNEL_LAMBDA {
         return vec::mul(x, vec::fill(tag, 2.0f));
       });
-  auto operation = ops::matmul_details::prepare_matmul_accumulate(
+  auto operation = ops::matmul_details::make_matmul_accumulate_invocation(
       ops::MatmulConfig<::vecops::matmul::AMX_BF16F32>{},
       cint<M>, cint<N>, cint<K>, at, bt,
       input<float32_t>(ct, identity), output<float32_t>(ct, scale));
@@ -818,7 +818,7 @@ TEST(MatmulTest, CompensatedPackedBFeedsAsymmetricCPrologue) {
           make_strides(cint<0>, cint<1>)));
   auto c_tensor = make_tensor(
       c.data(), make_layout(make_shape(cint<M>, cint<N>)));
-  auto operation = ops::matmul_details::prepare_matmul_accumulate(ops::MatmulConfig<Atom>{},
+  auto operation = ops::matmul_details::make_matmul_accumulate_invocation(ops::MatmulConfig<Atom>{},
       cint<M>, cint<N>, cint<K>, a_tensor, packed_tensor,
       tensor::input<int32_t>(correction_tensor), c_tensor);
   kernel::Workspace owner(operation.required_workspace());
@@ -960,7 +960,7 @@ void check_raw(M m_value, N n_value, K k_value) {
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(m_value, n_value)));
   using Config = ops::MatmulConfig<Atom, FamilySelection, TilePolicy>;
-  auto operation = ops::matmul_details::prepare_matmul(
+  auto operation = ops::matmul_details::make_matmul_invocation(
       Config{},
       m_value, n_value, k_value, at, bt, ct);
   using Operation = decltype(operation);
@@ -1023,7 +1023,7 @@ VECOPS_NOINLINE void check_dynamic_inner_stride(nint_t inner_stride) {
   auto at = make_tensor(a.data(), al);
   auto bt = make_tensor(b.data(), bl);
   auto ct = make_tensor(c.data(), make_layout(make_shape(m, n)));
-  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k, at, bt, ct);
+  auto operation = ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{}, m, n, k, at, bt, ct);
   ExecutionSession execution{};
   operation(execution);
   for (nint_t i = 0; i < m; ++i) {
@@ -1070,9 +1070,9 @@ void check_mixed_packing() {
   auto ct = make_tensor(c.data(), make_layout(make_shape(Any{m}, Any{n})));
   auto operation = [&] {
     if constexpr (Side == ::vecops::matmul::Operand::A)
-      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k, packed_tensor, bt, ct);
+      return ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{}, m, n, k, packed_tensor, bt, ct);
     else
-      return ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k, at, packed_tensor, ct);
+      return ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{}, m, n, k, at, packed_tensor, ct);
   }();
   operation(execution);
   for (nint_t i = 0; i < m; ++i) {
@@ -1118,7 +1118,7 @@ void check_fast_packed_path(KExtent k_value) {
   ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(execution, at, apt);
   ops::matmul_pack_details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(execution, bt, bpt);
   auto ct = make_tensor(c.data(), make_layout(make_shape(Any{m}, Any{n})));
-  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, m, n, k_value, apt, bpt, ct);
+  auto operation = ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{}, m, n, k_value, apt, bpt, ct);
   operation(execution);
   for (nint_t i = 0; i < m; ++i) {
     for (nint_t j = 0; j < n; ++j) {
@@ -1283,10 +1283,10 @@ TEST(MatmulTest, LargeRawProblemUsesOnTheFlyPackingWorkspace) {
       b.data(), make_layout(make_shape(cint<N>, cint<K>)));
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(cint<M>, cint<N>)));
-  auto operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{},
+  auto operation = ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{},
       cint<M>, cint<N>, cint<K>, at, bt, ct);
   EXPECT_GT(operation.required_workspace(), 0);
-  auto dynamic_operation = ops::matmul_details::prepare_matmul(ops::MatmulConfig<Atom>{}, M, N, K, at, bt, ct);
+  auto dynamic_operation = ops::matmul_details::make_matmul_invocation(ops::MatmulConfig<Atom>{}, M, N, K, at, bt, ct);
   EXPECT_EQ(dynamic_operation.required_workspace(), 0);
   check_raw<Atom>(cint<M>, cint<N>, cint<K>);
   check_raw<Atom>(M, N, K);
@@ -1357,7 +1357,7 @@ TEST(MatmulTest, CPrologueAndEpilogueUseDataAccess) {
       [](auto tag, auto x) VECOPS_KERNEL_LAMBDA {
         return vec::mul(x, vec::fill(tag, 2.0f));
       });
-  auto operation = ops::matmul_details::prepare_matmul_accumulate(
+  auto operation = ops::matmul_details::make_matmul_accumulate_invocation(
       ops::MatmulConfig<::vecops::matmul::SME_F32F32>{},
       M, N, K, at, bt, input<float32_t>(ct), output<float32_t>(ct, epilogue));
   ExecutionSession execution{};
