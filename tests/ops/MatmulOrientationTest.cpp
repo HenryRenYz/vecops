@@ -98,12 +98,14 @@ TEST(MatmulOrientationTest, ArchitecturePolicyClassifiesEightLayouts) {
   static_assert(!orientation_decision<false, true, false, Enabled>());
   static_assert(!orientation_decision<false, false, true, Enabled>());
   static_assert(orientation_decision<true, true, false, Enabled>());
-  static_assert(orientation_decision<true, false, true, Enabled>());
+  static_assert(!orientation_decision<true, false, true, Enabled>());
+  static_assert(!orientation_decision<
+      true, false, true, Enabled, 128, 64, 256>());
   static_assert(orientation_decision<false, true, true, Enabled>());
   static_assert(orientation_decision<true, true, true, Enabled>());
   static_assert(orientation_decision<
       true, true, true, Enabled, 64, 128, 256, float32_t, float32_t>());
-  static_assert(!orientation_decision<
+  static_assert(orientation_decision<
       true, true, false, Enabled, 64, 128, 16>());
   static_assert(orientation_decision<
       true, true, false, Enabled, 64, 128, 32>());
@@ -113,11 +115,13 @@ TEST(MatmulOrientationTest, ArchitecturePolicyClassifiesEightLayouts) {
       true, true, false, Enabled, 4, 32, 32>());
 #else
   static_assert(!orientation_decision<false, true, false, Enabled>());
-  static_assert(orientation_decision<false, false, true, Enabled>());
+  static_assert(!orientation_decision<false, false, true, Enabled>());
   static_assert(!orientation_decision<true, true, false, Enabled>());
-  static_assert(orientation_decision<true, false, true, Enabled>());
-  static_assert(orientation_decision<false, true, true, Enabled>());
-  static_assert(orientation_decision<true, true, true, Enabled>());
+  static_assert(!orientation_decision<true, false, true, Enabled>());
+  static_assert(!orientation_decision<false, true, true, Enabled>());
+  static_assert(!orientation_decision<true, true, true, Enabled>());
+  static_assert(!orientation_decision<
+      true, true, true, Enabled, 64, 128, 256, float32_t, float32_t>());
 #endif
   static_assert(!orientation_decision<false, false, false, Disabled>());
   static_assert(!orientation_decision<true, true, true, Disabled>());
@@ -151,11 +155,9 @@ T input_value(nint_t value, nint_t modulus) {
   }
 }
 
-template <typename Atom, bool AT, bool BT, bool CT, bool EnableSwap>
+template <typename Atom, bool AT, bool BT, bool CT, bool EnableSwap,
+          nint_t M = 17, nint_t N = 23, nint_t K = 128>
 void check_product() {
-  constexpr nint_t M = 17;
-  constexpr nint_t N = 23;
-  constexpr nint_t K = 128;
   using TA = typename Atom::TA;
   using TB = typename Atom::TB;
   using Acc = typename Atom::TAcc;
@@ -197,10 +199,27 @@ void check_product() {
   }
 }
 
-TEST(MatmulOrientationTest, EnabledAndDisabledProduceTheSameResult) {
+TEST(MatmulOrientationTest, AllLayoutsProduceTheReferenceResult) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  check_product<PrimaryAtom, true, true, true, true>();
-  check_product<PrimaryAtom, true, true, true, false>();
+  check_product<PrimaryAtom, false, false, false, true>();
+  check_product<PrimaryAtom, true,  false, false, true>();
+  check_product<PrimaryAtom, false, true,  false, true>();
+  check_product<PrimaryAtom, false, false, true,  true>();
+  check_product<PrimaryAtom, true,  true,  false, true>();
+  check_product<PrimaryAtom, true,  false, true,  true>();
+  check_product<PrimaryAtom, false, true,  true,  true>();
+  check_product<PrimaryAtom, true,  true,  true,  true>();
+
+  // Exercise the unswapped vertical-C implementation for every input layout.
+  check_product<PrimaryAtom, false, false, true, false>();
+  check_product<PrimaryAtom, true,  false, true, false>();
+  check_product<PrimaryAtom, false, true,  true, false>();
+  check_product<PrimaryAtom, true,  true,  true, false>();
+
+  // Attention-oriented tails: short K and N smaller than one accumulator tile.
+  check_product<PrimaryAtom, false, false, true, false, 19, 4, 16>();
+  check_product<PrimaryAtom, false, false, true, false, 19, 8, 16>();
+  check_product<PrimaryAtom, true, true, true, true, 32, 32, 16>();
 #if !defined(ARCH_X86_FAMILY) || defined(HAS_AMX_INT8)
   check_product<MixedAtom, true, true, true, true>();
   check_product<MixedAtom, true, true, true, false>();
@@ -255,7 +274,13 @@ TEST(MatmulOrientationTest, SwappedProblemPreservesFusedCTransforms) {
           std::declval<decltype(tensor::input<TB>(b_tensor))>(),
           std::declval<decltype(c_input)>(),
           std::declval<decltype(c_output)>()));
+#if defined(ARCH_X86_FAMILY)
   static_assert(Invocation::swaps_ab);
+#else
+  // SME keeps non-zero CInput in its original orientation so broadcast and
+  // vertical initialization retain their dedicated paths.
+  static_assert(!Invocation::swaps_ab);
+#endif
 
   auto operation = ops::matmul(Config{});
   kernel::Workspace storage(operation.required_workspace(
@@ -268,6 +293,63 @@ TEST(MatmulOrientationTest, SwappedProblemPreservesFusedCTransforms) {
     for (nint_t j = 0; j < N; ++j) {
       Acc expected = static_cast<Acc>(
           static_cast<float>((i + j) % 7 - 3) / 8.0f);
+      for (nint_t kk = 0; kk < K; ++kk) {
+        expected += static_cast<Acc>(a_tensor(i, kk)) *
+            static_cast<Acc>(conventional_b(kk, j));
+      }
+      EXPECT_NEAR(c_tensor(i, j), Acc{2} * expected, 8.0e-4f);
+    }
+  }
+}
+
+TEST(MatmulOrientationTest, VerticalOutputPreservesBiasAndOutputTransform) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  constexpr nint_t M = 19;
+  constexpr nint_t N = 7;
+  constexpr nint_t K = 16;
+  using Atom = PrimaryAtom;
+  using TA = typename Atom::TA;
+  using TB = typename Atom::TB;
+  using Acc = typename Atom::TAcc;
+  std::vector<TA> a(static_cast<std::size_t>(M * K));
+  std::vector<TB> b(static_cast<std::size_t>(K * N));
+  std::vector<Acc> bias(static_cast<std::size_t>(N));
+  std::vector<Acc> c(static_cast<std::size_t>(M * N));
+  auto a_tensor = matrix<false, TA, M, K>(a.data());
+  auto conventional_b = matrix<false, TB, K, N>(b.data());
+  auto b_tensor = tensor::transpose_view<0, 1>(conventional_b);
+  auto bias_tensor = tensor::make_tensor(
+      bias.data(), tensor::make_layout(
+                       tensor::make_shape(cint<M>, cint<N>),
+                       tensor::make_strides(cint<0>, cint<1>)));
+  auto c_tensor = matrix<true, Acc, M, N>(c.data());
+  for (nint_t i = 0; i < M; ++i)
+    for (nint_t kk = 0; kk < K; ++kk)
+      a_tensor(i, kk) = input_value<TA>(i * 3 + kk * 5, 13);
+  for (nint_t kk = 0; kk < K; ++kk)
+    for (nint_t j = 0; j < N; ++j)
+      conventional_b(kk, j) = input_value<TB>(kk * 7 + j * 3, 11);
+  for (nint_t j = 0; j < N; ++j)
+    bias[j] = static_cast<Acc>(static_cast<float>(j - 3) / 8.0f);
+
+  auto scale = tensor::make_elementwise_vec_transform<Acc, Acc>(
+      [](auto tag, auto value) VECOPS_KERNEL_LAMBDA {
+        return vec::mul(value, vec::fill(tag, Acc{2}));
+      });
+  auto c_input = tensor::input<Acc>(bias_tensor);
+  auto c_output = tensor::output<Acc>(c_tensor, scale);
+  using Config = SwapDisabledConfig<Atom>;
+  auto operation = ops::matmul(Config{});
+  kernel::Workspace storage(operation.required_workspace(
+      cint<M>, cint<N>, cint<K>, a_tensor, b_tensor, c_input, c_output));
+  auto workspace = storage.view();
+  operation(
+      workspace, cint<M>, cint<N>, cint<K>,
+      a_tensor, b_tensor, c_input, c_output);
+
+  for (nint_t i = 0; i < M; ++i) {
+    for (nint_t j = 0; j < N; ++j) {
+      Acc expected = bias[j];
       for (nint_t kk = 0; kk < K; ++kk) {
         expected += static_cast<Acc>(a_tensor(i, kk)) *
             static_cast<Acc>(conventional_b(kk, j));

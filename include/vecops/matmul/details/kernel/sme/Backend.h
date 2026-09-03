@@ -60,6 +60,20 @@ inline constexpr bool direct_row_major_output_v =
     std::same_as<
         tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
 
+template <typename Access>
+inline constexpr bool column_contiguous_input_v =
+    Access::Rank == 2 && std::same_as<
+        tensor::stride_type_t<0, InputLayoutOf<Access>>, meta::Const<1>>;
+
+template <typename Access>
+inline constexpr bool column_contiguous_output_v =
+    Access::Rank == 2 && std::same_as<
+        tensor::stride_type_t<0, OutputLayoutOf<Access>>, meta::Const<1>>;
+
+template <typename Access>
+inline constexpr bool direct_column_major_output_v =
+    generic::RawDirectAccess<Access> && column_contiguous_output_v<Access>;
+
 template <bool ExpandedCatalog>
 struct KernelProvider {
   static constexpr bool four_regions_exact_constraints = true;
@@ -1757,6 +1771,23 @@ VECOPS_ALWAYS_INLINE auto read_row(
       Tag{}, row, static_cast<vec::Mask<Tag>>(pg));
 }
 
+template <int Tile, typename T, vec::VectorValue V, typename Mask>
+VECOPS_ALWAYS_INLINE void write_column(
+    uint32_t column, Mask pg, V value) noexcept {
+  using Tag = vec::ScalableTag<T, 0>;
+  vec::details::sme::write_ver<Tile>(
+      column, static_cast<vec::Mask<Tag>>(pg),
+      static_cast<vec::Vec<Tag>>(value));
+}
+
+template <int Tile, typename T, typename Mask>
+VECOPS_ALWAYS_INLINE auto read_column(
+    uint32_t column, Mask pg) noexcept {
+  using Tag = vec::ScalableTag<T, 0>;
+  return vec::details::sme::read_ver<Tile>(
+      Tag{}, column, static_cast<vec::Mask<Tag>>(pg));
+}
+
 template <::vecops::matmul::Atom Atom, bool Full, bool NonEmpty, int Block>
 VECOPS_ALWAYS_INLINE auto tile_active_extent(nint_t active) {
   using Tile = std::remove_cvref_t<decltype(Atom::M_R)>;
@@ -1843,6 +1874,18 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
             reinterpret_cast<const U*>(base + row * strides[0]));
       }
     }
+  } else if constexpr (column_contiguous_input_v<CInput>) {
+    const auto pg_rows = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (FullM) return vec::mtrue(Tag{});
+      else return vec::mwhilelt(Tag{}, nint_t{0}, active_m_value);
+    }();
+    for (nint_t column = 0; column < active_n_value; ++column) {
+      const auto value = input.load(
+          Tag{}, tensor::coord(m, n + column), tensor::axis<0>,
+          vec::opt::first(active_m_value), vec::opt::zero);
+      write_column<Tile, T>(
+          static_cast<uint32_t>(column), pg_rows, value);
+    }
   } else {
     for (nint_t row = 0; row < active_m_value; ++row) {
       const auto value = input.load(
@@ -1877,6 +1920,34 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
           static_cast<uint32_t>(row),
           static_cast<vec::Mask<BitsTag>>(pg),
           reinterpret_cast<U*>(base + row * strides[0]));
+    }
+  } else if constexpr (direct_column_major_output_v<COutput>) {
+    const auto strides = output.raw_strides();
+    auto* base = reinterpret_cast<T*>(output.raw_data()) +
+        m * strides[0] + n * strides[1];
+    const auto pg_rows = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (FullM) return vec::mtrue(Tag{});
+      else return vec::mwhilelt(Tag{}, nint_t{0}, active_m_value);
+    }();
+    for (nint_t column = 0; column < active_n_value; ++column) {
+      using U = std::conditional_t<sizeof(T) == 8, uint64_t, uint32_t>;
+      using BitsTag = vec::ScalableTag<U, 0>;
+      vec::details::sme::store_ver<Tile>(
+          static_cast<uint32_t>(column),
+          static_cast<vec::Mask<BitsTag>>(pg_rows),
+          reinterpret_cast<U*>(base + column * strides[1]));
+    }
+  } else if constexpr (column_contiguous_output_v<COutput>) {
+    const auto pg_rows = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (FullM) return vec::mtrue(Tag{});
+      else return vec::mwhilelt(Tag{}, nint_t{0}, active_m_value);
+    }();
+    for (nint_t column = 0; column < active_n_value; ++column) {
+      const auto value = static_cast<vec::Vec<Tag>>(
+          read_column<Tile, T>(static_cast<uint32_t>(column), pg_rows));
+      output.store(
+          Tag{}, tensor::coord(m, n + column), tensor::axis<0>, value,
+          vec::opt::first(active_m_value));
     }
   } else {
     for (nint_t row = 0; row < active_m_value; ++row) {

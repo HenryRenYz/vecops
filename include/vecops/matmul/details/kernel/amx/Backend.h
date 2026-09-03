@@ -20,6 +20,7 @@
 #include "vecops/matmul/details/kernel/RuntimeDispatch.h"
 #include "vecops/matmul/details/kernel/amx/Atoms.h"
 #include "vecops/kernel/Tile2D.h"
+#include "vecops/kernel/details/transpose/generic/Transpose2D.h"
 #include "vecops/matmul/details/kernel/TileScheduler.h"
 #include "vecops/matmul/details/packing/amx/Pack.h"
 #include "vecops/matmul/details/packing/generic/Pack.h"
@@ -65,6 +66,11 @@ inline constexpr bool direct_row_major_output_v =
     generic::RawDirectAccess<Access> && Access::Rank == 2 &&
     std::same_as<
         tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
+
+template <typename Access>
+inline constexpr bool column_contiguous_output_v =
+    Access::Rank == 2 && std::same_as<
+        tensor::stride_type_t<0, OutputLayoutOf<Access>>, meta::Const<1>>;
 
 template <typename Access>
 using TransformOf = typename std::remove_cvref_t<Access>::Transform;
@@ -1173,6 +1179,61 @@ VECOPS_ALWAYS_INLINE void multiply_k_tile(
   }
 }
 
+template <typename COutput>
+VECOPS_NOINLINE void store_c_tile_column_block(
+    COutput& output, nint_t m, nint_t n,
+    nint_t active_m, nint_t active_n,
+    typename COutput::ComputeType* buffer, nint_t column_offset) {
+  using T = typename COutput::ComputeType;
+  static_assert(sizeof(T) == 4, "AMX accumulators must have 32-bit lanes");
+  using HalfTag = vec::FixedTag<T, 8>;
+  using FullTag = vec::ScalableTag<T, 0>;
+  constexpr std::size_t Half = 8;
+  std::array<vec::Vec<HalfTag>, Half> top_rows{};
+  VECOPS_UNROLL
+  for (std::size_t row = 0; row < Half; ++row) {
+    top_rows[row] = vec::load(
+        HalfTag{}, buffer + row * 16 + column_offset);
+  }
+  const auto top_columns =
+      kernel::transpose2d_details::generic::transpose_square<HalfTag>(
+          top_rows);
+  const nint_t active_m_value = active_m;
+  const nint_t active_n_value = active_n;
+  const nint_t columns = vecops::min(
+      active_n_value - column_offset, nint_t{8});
+  if (active_m_value <= 8) {
+    const auto zero = vec::zeros(HalfTag{});
+    for (nint_t column = 0; column < columns; ++column) {
+      const auto value = vec::concat(
+          FullTag{}, top_columns[static_cast<std::size_t>(column)], zero);
+      output.store(
+          FullTag{}, tensor::coord(m, n + column_offset + column),
+          tensor::axis<0>, value,
+          vec::opt::first(active_m_value));
+    }
+    return;
+  }
+
+  std::array<vec::Vec<HalfTag>, Half> bottom_rows{};
+  VECOPS_UNROLL
+  for (std::size_t row = 0; row < Half; ++row) {
+    bottom_rows[row] = vec::load(
+        HalfTag{}, buffer + (row + Half) * 16 + column_offset);
+  }
+  const auto bottom_columns =
+      kernel::transpose2d_details::generic::transpose_square<HalfTag>(
+          bottom_rows);
+  for (nint_t column = 0; column < columns; ++column) {
+    const auto value = vec::concat(
+        FullTag{}, top_columns[static_cast<std::size_t>(column)],
+        bottom_columns[static_cast<std::size_t>(column)]);
+    output.store(
+        FullTag{}, tensor::coord(m, n + column_offset + column),
+        tensor::axis<0>, value, vec::opt::first(active_m_value));
+  }
+}
+
 template <int Tile, meta::ValueType ActiveM, meta::ValueType ActiveN,
           typename COutput>
 VECOPS_ALWAYS_INLINE void store_c_tile(
@@ -1209,6 +1270,15 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
     }
   }
   amx_intrinsics::store<Tile>(buffer, 16 * sizeof(T));
+  if constexpr (column_contiguous_output_v<COutput>) {
+    store_c_tile_column_block(
+        output, m, n, active_m_value, active_n_value, buffer, 0);
+    if (active_n_value > 8) {
+      store_c_tile_column_block(
+          output, m, n, active_m_value, active_n_value, buffer, 8);
+    }
+    return;
+  }
   using Tag = vec::ScalableTag<T, 0>;
   auto store_row = [&](nint_t row) VECOPS_INLINE_LAMBDA {
     const auto value = vec::load(Tag{}, buffer + row * 16);
