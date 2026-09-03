@@ -5,6 +5,60 @@
 #ifndef VECOPS_MATMUL_FAMILY_H
 #define VECOPS_MATMUL_FAMILY_H
 
+/**
+ * @file vecops/matmul/Family.h
+ * @brief Matmul kernel family tags, their metadata, and the user-facing
+ *        family selection policy.
+ *
+ * A "family" names one implementation strategy for the matmul product:
+ * either an architecture backend leaf (the `kernel_family::ArchitectureFamily`
+ * tags) or the backend-independent generic cache tiler (`GenericTiled`).
+ * `WholeProblem` is special: it is the composite automatic planner that
+ * decomposes a problem into the backend's specialized leaves.
+ *
+ * Users rarely spell family tags directly; they select one through the
+ * `family_selection` policy (`Automatic`, `Prefer<F>`, `Require<F>`) passed
+ * to `ops::MatmulConfig`, and read back which family served a call through
+ * `kernel_family::Info<F>::name`.
+ *
+ * ## Key components
+ *
+ * | Component                          | Purpose                           |
+ * |------------------------------------|-----------------------------------|
+ * | `kernel_family::*` tags            | One tag per implementation strategy |
+ * | `kernel_family::ArchitectureFamily`| Concept for backend leaf families |
+ * | `kernel_family::Family`            | Architecture families + `GenericTiled` |
+ * | `kernel_family::Info<F>`           | Per-family metadata (`name`, `composite`) |
+ * | `family_selection::*`              | Automatic / Prefer / Require policy |
+ * | `details::FamilyDispatch`          | Internal plan-to-leaf contract    |
+ *
+ * ## Usage overview
+ *
+ * @code
+ * #include "vecops/matmul/Family.h"
+ *
+ * using vecops::matmul::kernel_family;
+ * using vecops::matmul::family_selection;
+ *
+ * // Prefer the packed-input dot kernels, but keep the automatic planner
+ * // as a fallback for shapes it cannot serve:
+ * using Selection = family_selection::Prefer<kernel_family::PackedDot>;
+ * // ops::MatmulConfig<Atom, Selection, ...> config;
+ *
+ * static_assert(kernel_family::Family<Selection::Family>);
+ * @endcode
+ *
+ * ## Pitfalls
+ *
+ * - Family availability is backend- and shape-dependent; whether a given
+ *   leaf can serve a call is decided by the planner, not by this header.
+ * - `Require<F>` turns an inapplicable family into a hard configuration
+ *   error (compile-time static_assert or an always-on runtime check in the
+ *   backend leaf); use `Prefer<F>` when a fallback is acceptable.
+ * - `GenericTiled` is deliberately **not** an `ArchitectureFamily`: it is a
+ *   portable composite tiler, not a backend leaf. Both are `Family`s.
+ */
+
 #include <concepts>
 #include <string_view>
 #include <type_traits>
@@ -12,6 +66,13 @@
 namespace vecops::matmul {
 
 namespace kernel_family {
+
+/**
+ * @brief Tags naming each matmul implementation strategy.
+ *
+ * See the file header for the selection flow; the tags themselves are empty
+ * marker types.
+ */
 
 /**
  * Automatic whole-problem planner, including architecture-specialized leaves.
@@ -40,6 +101,15 @@ struct PackedDot {};
 /** Backend-independent bulk/residual decomposition. */
 struct ResidualSplit {};
 
+/**
+ * @brief A matmul family provided by the architecture backend.
+ *
+ * This covers the backend's executable leaf kernels (e.g. `PackedDot`,
+ * `RuntimeQuantInt8`) as well as its own `WholeProblem` planner. The
+ * portable `GenericTiled` tiler is deliberately excluded: it composes the
+ * backend's tile kernels from outside and is not a backend itself, so it is
+ * only a `Family`.
+ */
 template <typename T>
 concept ArchitectureFamily =
     std::same_as<T, WholeProblem> || std::same_as<T, General> ||
@@ -47,11 +117,32 @@ concept ArchitectureFamily =
     std::same_as<T, RuntimeQuantInt8> ||
     std::same_as<T, PackedDot> || std::same_as<T, ResidualSplit>;
 
+/**
+ * @brief Any selectable matmul family: an architecture leaf or the generic
+ *        cache tiler.
+ */
 template <typename T>
 concept Family = ArchitectureFamily<T> || std::same_as<T, GenericTiled>;
 
+/**
+ * @brief Static metadata for one kernel family.
+ *
+ * The primary template is never instantiated; one specialization exists per
+ * family tag, filling in:
+ *
+ * - `name`: a stable, human-readable identifier (e.g. `"whole_problem"`),
+ *   used for diagnostics and reported by the public ops layer; and
+ * - `composite`: `true` when the family is a planner that decomposes the
+ *   problem into other families rather than executing a leaf kernel itself
+ *   (only `WholeProblem` today), `false` for directly executable leaves.
+ *
+ * @tparam FamilyT  The family tag to describe.
+ */
 template <Family FamilyT>
 struct Info;
+
+// One specialization per family tag; each only fills in `name` and
+// `composite` as documented on the primary template.
 
 template <>
 struct Info<WholeProblem> {
@@ -97,8 +188,23 @@ struct Info<ResidualSplit> {
 
 } // namespace kernel_family
 
+/**
+ * @brief User-facing policy for which kernel family serves a matmul.
+ *
+ * The selected policy is the second template argument of
+ * `ops::MatmulConfig` and resolves to one `kernel_family` tag.
+ */
 namespace family_selection {
 
+/**
+ * @brief How strictly a family selection is enforced.
+ *
+ * - `automatic`: let the planner choose (resolves to `WholeProblem`).
+ * - `prefer`: use the requested family throughout its correctness-supported
+ *   domain; fall back to the automatic planner otherwise.
+ * - `require`: the requested family must serve the call; inapplicable
+ *   families become configuration errors instead of falling back.
+ */
 enum class Mode {
   automatic,
   prefer,
@@ -179,9 +285,13 @@ struct FamilyDispatch {
   static constexpr family_selection::Mode mode = ModeV;
   static constexpr bool automatic = mode == family_selection::Mode::automatic;
   static constexpr bool preferred = mode == family_selection::Mode::prefer;
+  // Backends static_assert against `required` to reject an inapplicable
+  // family outright instead of silently falling back to another leaf.
   static constexpr bool required = mode == family_selection::Mode::require;
 };
 
+/// The dispatch used when the user left family selection automatic:
+/// the whole-problem planner with fallback allowed.
 using AutomaticFamilyDispatch = FamilyDispatch<
     kernel_family::WholeProblem, family_selection::Mode::automatic>;
 

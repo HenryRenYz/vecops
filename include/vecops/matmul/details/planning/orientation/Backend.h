@@ -5,6 +5,25 @@
 #ifndef VECOPS_MATMUL_DETAILS_ORIENTATION_BACKEND_H
 #define VECOPS_MATMUL_DETAILS_ORIENTATION_BACKEND_H
 
+/**
+ * @file vecops/matmul/details/planning/orientation/Backend.h
+ * @brief Compile-time A/B orientation (problem-transposition) planning.
+ *
+ * Every matmul problem has a free algebraic identity: C = A*B^T equals
+ * C^T = B*A^T. Evaluating the transposed form exchanges the two
+ * `[spatial, K]` operands and transposes the C specs, which can turn an
+ * awkward layout (e.g. a column-contiguous C that the backend must store
+ * through strided accesses) into the backend's fast path.
+ *
+ * This layer decides **at compile time** whether to apply that exchange:
+ * `swap_ab_v` guards on the user's `MatmulConfig::enable_swap_ab` opt-out,
+ * the atom's `SwappedAtom` alias, and fully-automatic family/scheduler
+ * selection, then asks the KernelKind-specific `Backend` specialization
+ * (amx/ or sme/Backend.h) for its layout-and-shape verdict. The decision
+ * happens before any packing or family planning, so downstream packing
+ * costs are computed for the selected orientation with no runtime branch.
+ */
+
 #include <type_traits>
 
 #include "vecops/matmul/Config.h"
@@ -13,8 +32,13 @@
 
 namespace vecops::matmul::details::orientation {
 
+/// Primary template: the generic fallback never swaps. Each architecture
+/// KernelKind specializes this with its own layout/shape rules (see
+/// amx/Backend.h and sme/Backend.h).
 template <typename KernelKind>
 struct Backend {
+  /// Whether to evaluate the problem as C^T = B*A^T for this leaf's
+  /// operand specs and Meta extents.
   template <typename, typename, typename, typename, typename,
             typename, typename, typename>
   static consteval bool swap_ab() {
@@ -22,6 +46,9 @@ struct Backend {
   }
 };
 
+/// An A/B operand spec that survives a role exchange: rank two with a
+/// lane-local transform. Swapping only exchanges the roles -- each operand
+/// keeps its own [spatial, K] coordinates.
 template <typename Spec>
 inline constexpr bool swappable_rank2_input_v =
     Spec::InputTensor::Ndim == 2 && Spec::TransformType::is_lane_local;
@@ -37,14 +64,19 @@ template <typename Spec>
 inline constexpr bool swappable_rank2_c_output_v =
     Spec::OutputTensor::Ndim == 2 && Spec::TransformType::is_elementwise;
 
+/// Last axis (the K axis of [spatial, K]) has compile-time unit stride.
 template <typename Layout>
 inline constexpr bool row_contiguous_v = std::same_as<
     tensor::stride_type_t<Layout::Ndim - 1, Layout>, meta::Const<1>>;
 
+/// Rank-two layout whose leading (spatial) axis has unit stride, i.e. a
+/// transposed operand.
 template <typename Layout>
 inline constexpr bool column_contiguous_v = Layout::Ndim == 2 && std::same_as<
     tensor::stride_type_t<0, Layout>, meta::Const<1>>;
 
+/// LHS provably >= RHS: compares LHS's lower bound against RHS's upper
+/// bound, so an unknown bound answers false (conservative).
 template <meta::ValueType LHS, meta::ValueType RHS>
 inline constexpr bool provably_at_least_v = [] {
   using L = std::remove_cvref_t<LHS>;
@@ -55,11 +87,15 @@ inline constexpr bool provably_at_least_v = [] {
     return false;
 }();
 
+/// Value provably >= the constant Minimum (unknown bounds answer false).
 template <meta::ValueType Value, nint_t Minimum>
 inline constexpr bool provably_at_least_value_v =
     meta::has_lower_bound_v<std::remove_cvref_t<Value>> &&
     meta::lower_bound_v<std::remove_cvref_t<Value>> >= Minimum;
 
+/// LHS provably >= ceil(RHS / RHSScale): the scaled comparison used by the
+/// "not disproportionately smaller" shape rules (bound-based, so the
+/// ceiling is computed from RHS's upper bound).
 template <meta::ValueType LHS, meta::ValueType RHS, nint_t RHSScale>
   requires (RHSScale > 0)
 inline constexpr bool provably_scaled_at_least_v = [] {
@@ -75,6 +111,8 @@ inline constexpr bool provably_scaled_at_least_v = [] {
   }
 }();
 
+/// Whether the Config opted into orientation planning (configs predating
+/// the flag are treated as opted out).
 template <typename Config>
 inline constexpr bool config_enables_swap_ab_v = [] {
   if constexpr (requires { Config::enable_swap_ab; })
@@ -83,6 +121,11 @@ inline constexpr bool config_enables_swap_ab_v = [] {
     return false;
 }();
 
+/// The combined swap verdict for one leaf. Besides the user opt-out, the
+/// atom must provide a SwappedAtom (mixed-signedness atoms transpose
+/// their type slots), and the family/scheduler selections must be
+/// Automatic: explicit selections keep their requested orientation, so
+/// their semantics cannot be silently rotated.
 template <typename Config, meta::ValueType M, meta::ValueType N,
           meta::ValueType K, typename ASpec, typename BSpec,
           typename CInputSpec, typename COutputSpec>

@@ -13,6 +13,32 @@
 #include "vecops/matmul/Quantization.h"
 #include "vecops/tensor/DataAccess.h"
 
+/**
+ * @file vecops/matmul/details/kernel/sme/RuntimeQuantInt8.h
+ * @brief Fused runtime-quantization INT8 GEMV leaf for the SME backend.
+ *
+ * Fusion chain (all stages inside one leaf, no intermediate tensors):
+ *
+ * 1. each A row (fp32 memory) is quantized with the runtime per-row
+ *    asymmetric transform `q = a * multiplier[row] + zero_point`
+ *    (uint8 output domain);
+ * 2. the quantized row drives an INT8/UINT8 widening-dot GEMV against a
+ *    packed INT8 B;
+ * 3. a precomputed per-column `correction` (carried by the C-input tensor,
+ *    int32, untransformed) repairs the zero-point bias term
+ *    `zero_point * sum(b[, k])` introduced by step 1;
+ * 4. the int32 result is dequantized on the way out with the runtime
+ *    per-row/per-column transform `c *= row_scale[row] * column_scale[col]`.
+ *
+ * The vector core lives in the .cpp (`fused_runtime_quant_int8_packed_b_
+ * gemv`, declared here) and handles arbitrary N/K tails with masked loads;
+ * this header adds the row driver, the compile-time candidate predicate,
+ * and the run-time shape/stride gate `try_fused_...`, which selects the
+ * family when compile-time facts already prove the leaf applies (see
+ * `select_automatic_dispatch_owner` in kernel/sme/Backend.h). Only the SVE
+ * INT8 dot feature is required -- the kernel needs neither ZA nor FA64.
+ */
+
 namespace vecops::kernel::matmul_details::sme {
 
 #if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
@@ -32,6 +58,20 @@ inline constexpr bool is_packed_access_v =
 
 } // namespace runtime_quant_int8_details
 
+/**
+ * @brief One fused quantize -> GEMV -> correct -> dequantize pass over one
+ *        output row of an N x K problem against a packed INT8 B.
+ *
+ * Called once per output row by `try_fused_runtime_quant_int8_packed_b_gemv`,
+ * which supplies the per-row quant/dequant scale table entries. Parameters
+ * map onto the packed B 4-D layout `[panel][k-group][row(panel)][k(KPack)]`
+ * (see packing/sme/Format.h): `b_outer_stride` steps panels (dim 0),
+ * `b_group_stride` steps K groups (dim 1), `b_spatial_stride` steps rows
+ * within the panel's group (dim 2), and `packed_panel` is the panel height
+ * (bounds dims 2..3). `correction` is the int32 zero-point-bias row;
+ * `column_scales` the dequantize column factors. Defined out of line in the
+ * SME backend TU.
+ */
 void fused_runtime_quant_int8_packed_b_gemv(
     const float32_t* a, const int8_t* packed_b,
     nint_t b_outer_stride, nint_t b_group_stride,
@@ -42,6 +82,15 @@ void fused_runtime_quant_int8_packed_b_gemv(
     float32_t quant_multiplier, int32_t input_zero_point,
     float32_t row_dequant_scale);
 
+/**
+ * @brief Compile-time candidate predicate for the fused runtime-quant leaf.
+ *
+ * Pins the exact fusion shape: SME_I8I32<uint8, int8> atom, rank-2 A whose
+ * memory is fp32 behind a runtime per-row asymmetric quantize transform,
+ * rank-4 packed B (int8), an int32 untransformed C input (the correction),
+ * and an fp32-memory output behind a runtime per-row/column dequantize
+ * transform. Anything else is rejected at compile time.
+ */
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 inline constexpr bool fused_runtime_quant_int8_candidate_v =
@@ -63,6 +112,16 @@ inline constexpr bool fused_runtime_quant_int8_candidate_v =
     is_runtime_per_row_column_dequantize_transform_v<
         typename COutput::Transform>;
 
+/**
+ * @brief Run-time shape/stride gate and row driver for the fused
+ *        runtime-quant leaf.
+ *
+ * Returns false (and lets the caller fall back) when the leaf cannot serve
+ * this problem. Since the vector core masks its tails, the remaining
+ * run-time checks are only positivity and unit inner-dimension strides on
+ * the row-addressed operands. On success every output row is computed by
+ * one `fused_runtime_quant_int8_packed_b_gemv` call.
+ */
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) bool
@@ -92,6 +151,12 @@ try_fused_runtime_quant_int8_packed_b_gemv(
 
     const auto& quant = a.spec().transform().parameters();
     const auto& dequant = c_output.spec().transform().parameters();
+    // The quantize/dequantize scale tables are indexed in the *original*
+    // (pre-narrow) coordinate space. This leaf receives already-narrowed
+    // access objects, so project each row's local origin (row, 0) back
+    // through the spec's projection to recover the row/column this block
+    // actually occupies, and read the scale indices from those original
+    // coordinates.
     for (nint_t row = 0; row < logical_m; ++row) {
       const auto local_origin = tensor::coord(row, nint_t{0});
       const auto a_original = a.spec().projection().project(local_origin);

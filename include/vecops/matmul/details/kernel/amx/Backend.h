@@ -5,6 +5,65 @@
 #ifndef VECOPS_MATMUL_DETAILS_AMX_BACKEND_H
 #define VECOPS_MATMUL_DETAILS_AMX_BACKEND_H
 
+/**
+ * @file vecops/matmul/details/kernel/amx/Backend.h
+ * @brief Intel AMX (TMUL) matmul backend: tile microkernels plus AVX-512
+ *        small-problem leaves, behind Backend<matmul_implementation::AMX>.
+ *
+ * Design intent — dispatch paths. run() picks one of four DispatchOwner
+ * values from the Atom, the Meta extents, and the access shapes:
+ *
+ *  - General: the TMUL tile path. with_configuration() installs one
+ *    TILECFG image for the whole traversal, then TileScheduler drives
+ *    the Catalog microkernels below.
+ *  - SmallVector: plain AVX-512 leaves (AVX512BF16 dot / VNNI dpbusd)
+ *    for tiny problems where the tile-configuration and -load overheads
+ *    would dominate; these do not need the Tiles resource at all.
+ *  - FusedSmallBF16: like SmallVector but computed into a small values
+ *    buffer so the elementwise C-input/C-output transforms stay fused
+ *    in the epilogue (C input need not be zero).
+ *  - PackedABTailSplit: a packed-A/packed-B BF16 shape with a short M
+ *    tail; run() splits it into one exact 16-row bulk region plus one
+ *    tail region, each under its own shortened TILECFG image.
+ *
+ * Design intent — two-tier owner selection. The *shape facts* decide in
+ * two tiers. The compile-time tier (select_automatic_dispatch_owner /
+ * select_dispatch_owner) fires a special owner only when the Meta
+ * contracts prove every admitted shape is eligible. The run-time tier
+ * covers what the types cannot decide: each leaf has an applicability
+ * probe returning Applicability {always, never, runtime}; on `runtime`,
+ * run() consults the measured thresholds in RuntimeDispatch.h
+ * (runtime_amx_small_vector_profitable, ...) with the concrete m/n/k.
+ * Family requests (Prefer/Require, SmallVector/ResidualSplit) ride on
+ * the same probes: prefer falls back to the automatic route when the
+ * family cannot serve the shape, require raises a check failure.
+ *
+ * Design intent — tile register map. The eight AMX tile registers are
+ * assigned statically per Case (NM x NN output blocks):
+ *
+ *   t0 .. t(NM*NN-1)              C accumulator tiles (block row-major)
+ *   t(NM*NN) .. t(NM*NN+NM-1)     A operand tiles
+ *   t(NM*NN+NM) .. t(+NM+NN-1)    B operand tiles
+ *
+ * The budget NM*NN + NM + NN <= 8 is exactly what KernelProvider::power()
+ * enforces; compute_tiles_impl()/compute_tile() spell the same mapping
+ * into dot() indices, and Configuration::set_horizontal_rows() shortens
+ * the C/A rows of the horizontal (1xN) families.
+ *
+ * Design intent — scratch layout. scratch_bytes() = 8 KiB + 63 sizes the
+ * microkernel staging area, carved up by microkernel() as
+ *
+ *   [ a_buffers: NM x 1024 B ]  one 16-row x 64 B register image each
+ *   [ b_buffers: NN x 1024 B ]
+ *   [ c_buffers: Outputs x (16 x 16 TAcc elements) ]
+ *
+ * 8 KiB covers the largest Catalog family for 4-byte accumulators
+ * (2x2: 4x1024 + 4x1024); the extra 63 bytes pad the caller's
+ * allocation out to the 64 B alignment the tileload paths rely on.
+ * Tail loads that cannot read straight from memory (transformed or
+ * strided inputs) pack into these buffers first.
+ */
+
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -34,11 +93,17 @@ namespace generic = matmul_pack_details::generic;
 namespace tile = kernel::loop;
 namespace amx_intrinsics = vec::details::amx;
 
+/// True when a C-input transform is the zero initializer, i.e. the
+/// microkernel may skip loading C entirely and start from zero tiles.
 template <typename T>
 struct IsZeroTransform : std::false_type {};
 
 template <typename Out, typename In>
 struct IsZeroTransform<tensor::ZeroVecTransform<Out, In>> : std::true_type {};
+
+// ---- Access-shape vocabulary shared by the candidate predicates and the
+// tile loaders: spec/layout extraction, packed-panel detection, and the
+// "rank two with unit-stride last axis" fast-path checks.
 
 template <typename Access>
 using SpecOf = std::remove_cvref_t<decltype(
@@ -50,16 +115,20 @@ using InputLayoutOf = typename SpecOf<Access>::InputLayout;
 template <typename Access>
 using OutputLayoutOf = typename SpecOf<Access>::OutputLayout;
 
+/// True when the access already holds an AMX-packed panel for Side.
 template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side, typename Access>
 inline constexpr bool is_packed_access_v =
     ::vecops::matmul::is_packed_layout<Atom, Side, InputLayoutOf<Access>>();
 
+/// Rank-two raw access whose last axis is contiguous: eligible for direct
+/// tileload / direct pack without a DataAccess gather.
 template <typename Access>
 inline constexpr bool direct_row_major_input_v =
     generic::RawDirectAccess<Access> && Access::Rank == 2 &&
     std::same_as<
         tensor::stride_type_t<1, InputLayoutOf<Access>>, meta::Const<1>>;
 
+/// Output-side twin of direct_row_major_input_v.
 template <typename Access>
 inline constexpr bool direct_row_major_output_v =
     generic::RawDirectAccess<Access> && Access::Rank == 2 &&
@@ -80,6 +149,10 @@ inline constexpr bool SmallVectorI8Available = true;
 inline constexpr bool SmallVectorI8Available = false;
 #endif
 
+/// Static preconditions of the plain AVX-512 small-problem leaf: direct
+/// row-major A/B/C, zero C input, and an AVX-512 dot instruction for the
+/// Atom's types. Whether it actually wins over AMX is decided separately
+/// by small_vector_guaranteed() / the runtime rules.
 template <::vecops::matmul::Atom Atom, typename A, typename B,
           typename CInput, typename COutput>
 inline constexpr bool small_vector_candidate_v =
@@ -98,6 +171,9 @@ inline constexpr bool small_vector_candidate_v =
        std::same_as<typename Atom::TB, uint8_t>)));
 #endif
 
+/// Static preconditions of the fused BF16 small leaf: like
+/// small_vector_candidate_v but the C transforms only need to be
+/// elementwise (fused into the epilogue) and A may arrive packed.
 template <::vecops::matmul::Atom Atom, typename A, typename B,
           typename CInput, typename COutput>
 inline constexpr bool fused_small_bf16_candidate_v =
@@ -124,6 +200,10 @@ inline constexpr bool fused_small_bf16_candidate_v =
     ;
 #endif
 
+/// Static preconditions of the packed-A/packed-B residual-split leaf:
+/// both operands already packed, zero C input, direct row-major output.
+/// The concrete shapes it fires for are pinned in
+/// select_automatic_dispatch_owner() and residual_split_shape_applicability().
 template <::vecops::matmul::Atom Atom, typename A, typename B,
           typename CInput, typename COutput>
 inline constexpr bool packed_ab_tail_split_candidate_v =
@@ -133,6 +213,10 @@ inline constexpr bool packed_ab_tail_split_candidate_v =
     IsZeroTransform<TransformOf<CInput>>::value &&
     direct_row_major_output_v<COutput>;
 
+/// Which implementation owns this leaf in run(). One value is chosen
+/// statically when the Meta contracts suffice, otherwise at run time
+/// from the same shape rules; see the file header for what each path
+/// does.
 enum class DispatchOwner {
   General,
   SmallVector,
@@ -140,10 +224,16 @@ enum class DispatchOwner {
   PackedABTailSplit,
 };
 
+// ---- Meta-extent probes used by the owner selection below. All of them
+// are conservative: unknown bounds answer false, never "probably fine".
+
+/// Extent is statically pinned to exactly Value.
 template <meta::ValueType E, nint_t Value>
 inline constexpr bool extent_is_v =
     meta::range_within_v<std::remove_cvref_t<E>, Value, Value>;
 
+/// Every (m, n) admitted by the contracts has m*n <= Limit; false when
+/// either upper bound is unknown (assume the worst, not the best).
 template <meta::ValueType M, meta::ValueType N, nint_t Limit>
 inline constexpr bool max_area_at_most_v = [] {
   using MV = std::remove_cvref_t<M>;
@@ -159,6 +249,8 @@ inline constexpr bool max_area_at_most_v = [] {
   }
 }();
 
+/// E % Alignment is statically known to be 0 or 1 (aligned or singleton
+/// extents only; anything wider is conservatively rejected).
 template <meta::ValueType E, nint_t Alignment>
 inline constexpr bool remainder_at_most_one_v = [] {
   using EV = std::remove_cvref_t<E>;
@@ -172,6 +264,8 @@ inline constexpr bool remainder_at_most_one_v = [] {
   }
 }();
 
+/// Value is outside E's admitted range entirely (constant extents compare
+/// by value; Dynamic extents by their conform() contract).
 template <meta::ValueType E, nint_t Value>
 inline constexpr bool extent_excludes_v = [] {
   using EV = std::remove_cvref_t<E>;
@@ -179,6 +273,22 @@ inline constexpr bool extent_excludes_v = [] {
   else return !EV::conforms(Value);
 }();
 
+/// Decide, purely from the Meta contracts, that every problem the caller
+/// can pose is better served by the AVX-512 small-problem leaf than by
+/// the AMX tile path (TILECFG/LDTILECFG plus tile-load latency dominate
+/// once the whole result fits a few vector accumulators).
+///
+/// The shape classes considered, per Atom family:
+///  - tiny blocks whose whole M*N area fits one/few vector accumulators
+///    (area <= 16 / 32 / 64 with a matching K ceiling);
+///  - Skinny: rank-one problems (1 x <=64) routed as GEMV/GEMh;
+///  - LargeM1/LargeN1 + LargeSkinny: long rank-one strips (1 x 128..4096)
+///    with a long, alignment-friendly K, where one row of A or B stays
+///    resident and TMUL setup never pays off.
+///
+/// All numeric cutoffs are routing constants chosen by measurement, not
+/// architectural limits of either instruction set — moving them only
+/// changes which owner wins, never correctness.
 template <::vecops::matmul::Atom Atom,
           meta::ValueType M, meta::ValueType N, meta::ValueType K>
 consteval bool small_vector_guaranteed() {
@@ -232,6 +342,9 @@ consteval bool small_vector_guaranteed() {
   }
 }
 
+/// Runtime-rules shape class for this Atom's plain vector leaf (see
+/// RuntimeDispatch.h): the measured thresholds differ per instruction
+/// mix, so the same m/n/k can be profitable for bf16 but not for i8.
 template <::vecops::matmul::Atom Atom>
 inline constexpr SmallVectorShape small_vector_shape_v = [] {
   if constexpr (std::same_as<Atom, ::vecops::matmul::AMX_BF16F32>)
@@ -242,6 +355,10 @@ inline constexpr SmallVectorShape small_vector_shape_v = [] {
     return SmallVectorShape::amx_i8_mixed_sign;
 }();
 
+/// Tri-state verdict on the plain vector leaf for the shape contracts
+/// M/N/K: always (small_vector_guaranteed proved it), never (a singleton
+/// problem the runtime rules reject), or runtime (decide with the
+/// concrete m/n/k in run()).
 template <::vecops::matmul::Atom Atom,
           meta::ValueType M, meta::ValueType N, meta::ValueType K>
 consteval ::vecops::matmul::details::Applicability
@@ -267,6 +384,9 @@ small_vector_shape_applicability() {
   }
 }
 
+/// Tri-state verdict for area-bounded leaves (fused small BF16): always
+/// when the contracts cap M*N at Limit, never for singleton problems
+/// above it, runtime otherwise.
 template <meta::ValueType M, meta::ValueType N, meta::ValueType K,
           nint_t Limit>
 consteval ::vecops::matmul::details::Applicability
@@ -294,6 +414,10 @@ small_area_applicability() {
   }
 }
 
+/// Tri-state verdict on whether the contracts admit any solvable problem
+/// at all (positive M/N, non-negative K): never when an upper bound rules
+/// out every valid shape, always when the lower bounds already guarantee
+/// validity, runtime when only the actual extents know.
 template <meta::ValueType M, meta::ValueType N, meta::ValueType K>
 consteval ::vecops::matmul::details::Applicability
 valid_problem_applicability() {
@@ -317,6 +441,10 @@ valid_problem_applicability() {
   }
 }
 
+/// Support gate for area-bounded leaves: like small_area_applicability
+/// but composed with problem validity — an invalid contract family is
+/// never "supported" even when its area fits (so a required family
+/// rejects early instead of running a degenerate problem).
 template <meta::ValueType M, meta::ValueType N, meta::ValueType K,
           nint_t Limit>
 consteval ::vecops::matmul::details::Applicability
@@ -339,6 +467,9 @@ bounded_area_support_applicability() {
   }
 }
 
+/// Support gate for the residual split: the split needs an M beyond one
+/// 16-row bulk block (upper bound <= 16 leaves no tail; lower bound >= 17
+/// guarantees one), everything in between decides at run time.
 template <meta::ValueType M, meta::ValueType N, meta::ValueType K>
 consteval ::vecops::matmul::details::Applicability
 residual_split_support_applicability() {
@@ -356,6 +487,9 @@ residual_split_support_applicability() {
   }
 }
 
+/// Shape verdict for the residual split's measured shapes: singleton
+/// problems consult the runtime rules; contracts that exclude every
+/// pinned (M, N, K) combination are never; the rest decide at run time.
 template <meta::ValueType M, meta::ValueType N, meta::ValueType K>
 consteval ::vecops::matmul::details::Applicability
 residual_split_shape_applicability() {
@@ -386,6 +520,10 @@ residual_split_shape_applicability() {
   }
 }
 
+/// Compile-time owner selection (the automatic half; family requests are
+/// resolved on top of it in select_dispatch_owner). Order matters:
+/// SmallVector first, then the fused BF16 leaf, then the residual split
+/// — each with its own static shape gate.
 template <::vecops::matmul::Atom Atom, bool AllowTailSplit,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
           typename A, typename B, typename CInput, typename COutput>
@@ -413,6 +551,9 @@ consteval DispatchOwner select_automatic_dispatch_owner() {
       (extent_is_v<NV, 33> || extent_is_v<NV, 47> ||
        extent_is_v<NV, 48>) &&
       extent_is_v<KV, 1024>) {
+    // One exact 16-row bulk region plus a 1..4-row tail, with an N that
+    // is a whole number of 16-wide B panels (2/3 minus a sliver). The
+    // pinned shapes are the ones the bulk+tail split was measured on.
     return DispatchOwner::PackedABTailSplit;
   } else {
     // Unconstrained Dynamic extents intentionally own only the general AMX
@@ -422,6 +563,9 @@ consteval DispatchOwner select_automatic_dispatch_owner() {
   }
 }
 
+/// Membership table: which DispatchOwner values belong to which public
+/// kernel_family. Used to validate requested (as opposed to automatic)
+/// family dispatch.
 template <typename Family, DispatchOwner Owner>
 inline constexpr bool dispatch_owner_in_family_v =
     (std::same_as<Family, ::vecops::matmul::kernel_family::General> &&
@@ -432,6 +576,13 @@ inline constexpr bool dispatch_owner_in_family_v =
     (std::same_as<Family, ::vecops::matmul::kernel_family::ResidualSplit> &&
      Owner == DispatchOwner::PackedABTailSplit);
 
+/// Tri-state support verdict for a public family on this leaf's static
+/// facts: General/WholeProblem always apply; SmallVector applies when a
+/// raw or fused vector candidate matches and the shape probes admit it;
+/// ResidualSplit applies when tail splitting is allowed, the packed
+/// candidate matches, and M can exceed one bulk block. Used by run() to
+/// honour Prefer/Require requests that the automatic owner does not
+/// already satisfy.
 template <typename Family,
           ::vecops::matmul::Atom Atom, bool AllowTailSplit,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
@@ -469,6 +620,11 @@ family_applicability() {
   }
 }
 
+/// Whether the runtime-dispatch tier may route into CandidateFamily
+/// under this request: WholeProblem always permits it, General never
+/// (the tile path is already the owner), Require permits only the exact
+/// required family, and Prefer permits everything so it can fall back to
+/// the complete automatic route.
 template <typename FamilyDispatch, typename CandidateFamily>
 inline constexpr bool permits_runtime_family_v = [] {
   using Requested = typename FamilyDispatch::Family;
@@ -488,6 +644,11 @@ inline constexpr bool permits_runtime_family_v = [] {
   }
 }();
 
+/// Resolve a family request over the automatic owner: WholeProblem takes
+/// the automatic pick verbatim, General forces the tile path, and any
+/// other family may only confirm the automatic owner (asserting when a
+/// required family is not applicable; run() additionally serves runtime-
+/// decidable requests through the tiered probes above).
 template <typename FamilyDispatch,
           ::vecops::matmul::Atom Atom, bool AllowTailSplit,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
@@ -654,6 +815,11 @@ small_vector_dense_matmul(
   }
 }
 
+/// Fused twin of small_vector_dense_matmul for BF16: computes into a
+/// row-major values buffer (max 16x16, the fused leaf's whole problem)
+/// so the caller can apply the C transforms afterwards. PackedA switches
+/// the A addressing to the AMX packed-panel layout; masked loads handle
+/// the K remainder, so arbitrary k is accepted.
 template <bool PackedA>
 inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64)
 #if defined(COMPILER_GCC)
@@ -674,6 +840,9 @@ void small_bf16_fused_compute(
       for (; kk + k_tile <= k; kk += k_tile) {
         const auto* a_pointer = [&] {
           if constexpr (PackedA) {
+            // Packed panel layout: [panel][k-tile][16 rows x k_tile
+            // elems]; row i lives at (panel * k_tiles + kk/k_tile) *
+            // (16 * k_tile) + (i % 16) * k_tile.
             const nint_t panel = i / 16;
             const nint_t lane = i % 16;
             return a +
@@ -715,6 +884,9 @@ void small_bf16_fused_compute(
   }
 }
 
+/// Dispatch the SmallVector owner to the dense vector leaf; strides come
+/// straight from the (already direct) accesses and the element types
+/// from the Atom.
 template <::vecops::matmul::Atom Atom, typename A, typename B, typename COutput>
 VECOPS_ALWAYS_INLINE void run_small_vector(
     const A& a, const B& b, COutput& c_output,
@@ -731,6 +903,10 @@ VECOPS_ALWAYS_INLINE void run_small_vector(
       c_strides[0], m, n, k);
 }
 
+/// Run the FusedSmallBF16 owner: compute into the 16-element values
+/// buffer, then add the (elementwise-transformed) C input and store
+/// through the output transform — all through the vec layer so the
+/// transforms stay fused instead of forcing a zero C input.
 template <::vecops::matmul::Atom Atom, typename A, typename B,
           typename CInput, typename COutput>
 VECOPS_ALWAYS_INLINE void run_fused_small_bf16(
@@ -786,6 +962,11 @@ struct Configuration : execution::details::x86::TileConfiguration {
   }
 };
 
+/// Catalog input for Tile2D. Families are scored by tile count: area
+/// (A*B) dominates, register pressure (A+B) breaks ties; a family that
+/// does not fit the eight tile registers (A*B + A + B > 8) scores -1
+/// and is excluded. exact_grid_mode::unmasked declares that AMX tail
+/// handling never needs per-lane masking.
 struct KernelProvider {
   static constexpr tile::Tile2DExactGridMode exact_grid_mode =
       tile::Tile2DExactGridMode::unmasked;
@@ -800,6 +981,9 @@ struct KernelProvider {
   }
 };
 
+/// Compile-time kernel plan: KGuaranteed (K is a whole multiple of the
+/// Atom K step, so every tile load can skip tail clamping) and StreamB
+/// (packed B is large enough that non-temporal loads pay off).
 template <bool KGuaranteed, bool StreamB>
 struct KernelPlan : std::bool_constant<KGuaranteed> {
   static constexpr bool stream_b = StreamB;
@@ -808,6 +992,10 @@ struct KernelPlan : std::bool_constant<KGuaranteed> {
 using Catalog = tile::Tile2DGeneratedCatalog<
     KernelProvider, tile::Tile2DSearchSpace<3, 3, 4>>;
 
+/// Vector power for a "16 lanes of T" register relative to the native
+/// vector width: negative when 16*T is narrower than native (fractional
+/// power of two), positive when wider. Used to pick the ScalableTag whose
+/// lane count matches a 16-row panel pack.
 template <typename T>
 consteval int sixteen_lane_power() {
   nint_t bytes = 16 * static_cast<nint_t>(sizeof(T));
@@ -824,6 +1012,10 @@ consteval int sixteen_lane_power() {
   return power;
 }
 
+/// Resolve the source pointer for one A tile: packed panels hand back a
+/// pointer straight into the panel (block indices divide cleanly by the
+/// panel/block sizes), everything else packs through DataAccess into the
+/// caller's staging buffer.
 template <::vecops::matmul::Atom Atom, bool SpatialGuaranteed, bool KGuaranteed,
           typename Source>
 VECOPS_ALWAYS_INLINE const typename Atom::TA* prepare_a(
@@ -835,6 +1027,8 @@ VECOPS_ALWAYS_INLINE const typename Atom::TA* prepare_a(
     static_assert(generic::RawDirectAccess<Source>,
                   "packed AMX A must be direct and untransformed");
     const auto& layout = source.spec().input_layout();
+    // Packed-A rank four: [16-row panel][K block][row][K pack]; advance
+    // only the first two coordinates, the tileload consumes the rest.
     const nint_t offset = tensor::offset_at(layout, m / 16, k / KR, 0, 0);
     return reinterpret_cast<const T*>(source.raw_data()) + offset;
   } else {
@@ -847,6 +1041,9 @@ VECOPS_ALWAYS_INLINE const typename Atom::TA* prepare_a(
   }
 }
 
+/// Resolve the source pointer for one B tile; same three-tier structure
+/// as prepare_a (packed panel / direct row-major pack / generic pack),
+/// with a fast full-panel pack whenever both extents are guaranteed.
 template <::vecops::matmul::Atom Atom, bool SpatialGuaranteed, bool KGuaranteed,
           typename Source>
 VECOPS_ALWAYS_INLINE const typename Atom::TB* prepare_b(
@@ -907,6 +1104,13 @@ VECOPS_ALWAYS_INLINE const typename Atom::TB* prepare_b(
   }
 }
 
+/// Per-sub-tile active extent for a Case with multiple 16-row blocks:
+/// Offset is the sub-tile's start within the Case (block index * 16), so
+/// the clamp of (active - Offset) into [0, 16] yields this block's own
+/// share of the Case-wide active row/column count. Full collapses to
+/// the constant 16; NonEmpty strengthens the lower bound to 1 for blocks
+/// an exact traversal proves exist. ReferenceClamp only changes the
+/// clamp helper's ABI (see microkernel).
 template <bool Full, bool NonEmpty, nint_t Offset,
           bool ReferenceClamp = false>
 VECOPS_ALWAYS_INLINE auto tile_active_extent(nint_t active) {
@@ -927,6 +1131,7 @@ VECOPS_ALWAYS_INLINE auto tile_active_extent(nint_t active) {
   }
 }
 
+/// Extent type is statically the full 16.
 template <typename Extent>
 inline constexpr bool full_tile_extent_v = [] {
   using E = std::remove_cvref_t<Extent>;
@@ -934,11 +1139,15 @@ inline constexpr bool full_tile_extent_v = [] {
   else return false;
 }();
 
+/// Extent type is statically nonzero, so a zero check can be skipped.
 template <typename Extent>
 inline constexpr bool nonempty_tile_extent_v =
     meta::has_lower_bound_v<std::remove_cvref_t<Extent>> &&
     meta::lower_bound_v<std::remove_cvref_t<Extent>> > 0;
 
+/// Initialize one C accumulator tile from the C input: zero tiles for a
+/// zero transform, a direct tileload when the memory layout allows one,
+/// otherwise a staged pack through a 16x16 scratch row buffer.
 template <int Tile, meta::ValueType ActiveM, meta::ValueType ActiveN,
           typename CInput>
 VECOPS_ALWAYS_INLINE void initialize_c_tile(
@@ -1015,6 +1224,10 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
   }
 }
 
+/// Load one A operand tile: direct tileload when the block provably fits
+/// in memory, inactive-tile zeroing when DirectInactiveZero allows it,
+/// otherwise a staged tail pack (which itself requires k < logical_k,
+/// hence the fallback ordering).
 template <::vecops::matmul::Atom Atom, int Tile, bool SpatialGuaranteed, bool NonEmpty,
           bool DirectInactiveZero, bool KGuaranteed, typename Source>
 VECOPS_ALWAYS_INLINE void load_a_tile(
@@ -1072,6 +1285,10 @@ VECOPS_ALWAYS_INLINE void load_a_tile(
       64);
 }
 
+/// Load one B operand tile: reject inactive N tiles with a zeroed
+/// register, then load via prepare_b (non-temporal when StreamB and B
+/// is already packed — the stream hint is only safe for panel memory
+/// that will not be re-read soon).
 template <::vecops::matmul::Atom Atom, int Tile, bool SpatialGuaranteed, bool NonEmpty,
           bool KGuaranteed, bool StreamB, typename Source>
 VECOPS_ALWAYS_INLINE void load_b_tile(
@@ -1094,6 +1311,11 @@ VECOPS_ALWAYS_INLINE void load_b_tile(
   }
 }
 
+// Tile-register mapping for one dot step (see the file header for the
+// full map): output (i, j) accumulates in register I, reading A tile
+// Outputs + I/NN (block row) and B tile Outputs + NM + I%NN (block
+// column). Outputs = NM*NN keeps the C block set contiguous in the low
+// registers, A and B stacked after it.
 template <::vecops::matmul::Atom Atom, int NM, int NN, std::size_t... I>
 VECOPS_ALWAYS_INLINE void compute_tiles_impl(std::index_sequence<I...>) {
   constexpr int Outputs = NM * NN;
@@ -1103,11 +1325,14 @@ VECOPS_ALWAYS_INLINE void compute_tiles_impl(std::index_sequence<I...>) {
        Outputs + NM + static_cast<int>(I % NN)>(), ...);
 }
 
+/// Issue all NM*NN dots of one K step at once (the default schedule).
 template <::vecops::matmul::Atom Atom, int NM, int NN>
 VECOPS_ALWAYS_INLINE void compute_tiles() {
   compute_tiles_impl<Atom, NM, NN>(std::make_index_sequence<NM * NN>{});
 }
 
+/// Issue the single dot for output block (Row, Column) — used by the
+/// interleaved load/compute schedule in multiply_k_tile.
 template <::vecops::matmul::Atom Atom, int NM, int NN, int Row, int Column>
 VECOPS_ALWAYS_INLINE void compute_tile() {
   constexpr int Outputs = NM * NN;
@@ -1116,6 +1341,8 @@ VECOPS_ALWAYS_INLINE void compute_tile() {
       Row * NN + Column, Outputs + Row, Outputs + NM + Column>();
 }
 
+/// Load one Case's A/B tile sets and run the K step. Staging buffers are
+/// addressed in elements: each tile image is 1024 bytes (16 rows x 64 B).
 template <::vecops::matmul::Atom Atom, typename Case, bool KGuaranteed, bool StreamB,
           bool DirectInactiveZeroA, typename A, typename B>
 VECOPS_ALWAYS_INLINE void multiply_k_tile(
@@ -1173,6 +1400,9 @@ VECOPS_ALWAYS_INLINE void multiply_k_tile(
   }
 }
 
+/// Store one C accumulator tile: direct tilestore when the layout allows
+/// it, otherwise a staged store through the 16x16 scratch row buffer
+/// with masked tail rows/columns.
 template <int Tile, meta::ValueType ActiveM, meta::ValueType ActiveN,
           typename COutput>
 VECOPS_ALWAYS_INLINE void store_c_tile(
@@ -1228,6 +1458,9 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
   }
 }
 
+/// The AMX microkernel for one Case: initialize the C tiles, loop the K
+/// axis in Atom K steps, store the C tiles. Tail handling is resolved
+/// per sub-tile through the *Guaranteed / NonEmpty template flags.
 template <::vecops::matmul::Atom Atom, typename Case, typename Plan,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_ALWAYS_INLINE void microkernel(
@@ -1335,6 +1568,9 @@ VECOPS_ALWAYS_INLINE void microkernel(
   }(std::make_index_sequence<Outputs>{});
 }
 
+/// Out-of-line wrapper that pins a microkernel to an exact-blocks Case,
+/// so the TileScheduler's exact traversal gets its own call target and
+/// the common path stays inlinable.
 template <::vecops::matmul::Atom Atom, typename Case, typename Plan,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_NOINLINE void exact_microkernel(
@@ -1353,6 +1589,10 @@ VECOPS_NOINLINE void exact_microkernel(
 
 namespace vecops::kernel::matmul_details {
 
+/// AMX implementation of the kernel Backend contract: the resource set
+/// (one x86 Tiles image), the Tile2D catalog, and the run entry points
+/// that fold the DispatchOwner selection of this header into the
+/// configured tile traversal.
 template <>
 struct Backend<matmul_implementation::AMX> {
   using ResourceRequirements = execution::details::ResourceSet<
@@ -1361,6 +1601,8 @@ struct Backend<matmul_implementation::AMX> {
   using Catalog = amx::Catalog;
   static constexpr int ProblemRank = 2;
 
+  /// Scratch size for one microkernel staging area (see the file header
+  /// for the layout); includes 63 bytes of caller-side alignment pad.
   static nint_t scratch_bytes() { return 8 * 1024 + 63; }
 
   template <::vecops::matmul::Atom, typename Policy,
@@ -1446,6 +1688,19 @@ struct Backend<matmul_implementation::AMX> {
         origin_m, 0, a, b, c_input, c_output, scratch);
   }
 
+  /// Entry point, resolving the leaf in four tiers (first match wins):
+  ///
+  /// 1. Explicit family requests the automatic owner does not already
+  ///    satisfy: if the family's applicability probe (and, for `runtime`
+  ///    verdicts, the concrete extents) supports the shape, run that
+  ///    family's leaf; a `required` request that fails here reports a
+  ///    check failure instead of silently falling back.
+  /// 2. The statically selected DispatchOwner (SmallVector /
+  ///    FusedSmallBF16 / PackedABTailSplit / General).
+  /// 3. The runtime tier: leaves whose applicability is `runtime`
+  ///    consult the measured thresholds in RuntimeDispatch.h with the
+  ///    actual m/n/k (raw small, fused small, residual split).
+  /// 4. General: the configured TMUL tile traversal.
   template <::vecops::matmul::Atom Atom, typename Policy,
             bool AllowTailSplit = false,
             typename FamilyDispatch =
@@ -1562,6 +1817,10 @@ struct Backend<matmul_implementation::AMX> {
       return;
     }
 
+    // Tier 3 gates: each leaf enters the runtime tier only when its
+    // applicability verdict is `runtime` and the family request permits
+    // routing there (permits_runtime_family_v keeps `require` from being
+    // silently served by a different family's leaf).
     constexpr bool RuntimeRawSmall = [] {
       if constexpr (!amx::small_vector_candidate_v<
                         Atom, A, B, CInput, COutput> ||
@@ -1625,6 +1884,9 @@ struct Backend<matmul_implementation::AMX> {
       }
     }
 
+    // Nothing special served this shape and a specific family was
+    // required: report the rejection rather than silently running the
+    // general tile path.
     if constexpr (FamilyDispatch::required &&
                   !std::same_as<
                       RequestedFamily,
@@ -1646,6 +1908,10 @@ struct Backend<matmul_implementation::AMX> {
         });
   }
 
+  /// Resolve the compile-time kernel plan for a leaf: KGuaranteed from
+  /// the K contract's alignment, StreamB from the packed-B working-set
+  /// estimate (a 48 KiB L1 budget — packed B larger than that pays for
+  /// non-temporal loads).
   template <::vecops::matmul::Atom Atom, typename A, typename B,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename Fn>

@@ -8,6 +8,37 @@
 /**
  * @file Matmul.h
  * @brief Public entry point for reusable Config-only Matmul operators.
+ *
+ * `ops::Matmul` computes the semantic product
+ * `C[M,N] = A[M,K] * B[N,K]^T` -- note the **transposed B**: both operands
+ * are addressed through `[spatial, K]` layouts, and the explicit transpose
+ * in the formula is the only place B is "rotated"; nothing is physically
+ * transposed at the memory level.
+ *
+ * ## Usage overview
+ *
+ * @code
+ * #include "vecops/ops/Matmul.h"
+ *
+ * using vecops::ops::Matmul;
+ * using vecops::ops::MatmulConfig;
+ *
+ * MatmulConfig<AMX_BF16F32> config;
+ * auto op = vecops::ops::matmul(config);
+ *
+ * nint_t bytes = op.required_workspace(m, n, k, a, b, c);
+ * kernel::Workspace workspace(bytes);
+ * kernel::WorkspaceView view = workspace.reserve(bytes);
+ * op(view, m, n, k, a, b, c);          // or op(execution_scope, ...)
+ * @endcode
+ *
+ * ## Pitfalls
+ *
+ * - B is consumed as `[N, K]` (B-transposed semantics, see above).
+ * - m/n/k are Meta `ValueInput`s: each may be a `Const<N>`, a
+ *   `Dynamic<...>`, or a plain runtime integer.
+ * - The workspace returned by `required_workspace` must stay alive (and
+ *   unmodified) across the matching `operator()` call.
  */
 
 #include <string_view>
@@ -23,6 +54,17 @@ namespace vecops::ops {
 /**
  * Compile-time configuration for `ops::Matmul`.
  *
+ * @tparam AtomT               The hardware atom selecting the kernel family
+ *                             (e.g. `AMX_BF16F32`, `SME_I8I32<...>`).
+ * @tparam FamilySelectionT    Which kernel family serves the product:
+ *                             `family_selection::Automatic` / `Prefer<F>` /
+ *                             `Require<F>` (see matmul/Family.h).
+ * @tparam SchedulerPolicyT    Tile2D traversal policy override.
+ * @tparam GenericTiledTuningT Tuning knobs of the generic cache-tiled
+ *                             family (see matmul/Config.h); only consulted
+ *                             when that family is selected.
+ * @tparam CacheInfoProviderT  Where cache sizes come from for automatic
+ *                             cache tiling.
  * @tparam EnableSwapAB Allow an architecture policy to replace the problem
  * with its transposed identity `C^T = B*A^T`. The default is `true`; `false`
  * is a hard opt-out and leaves operand roles and M/N unchanged.
@@ -48,10 +90,14 @@ struct MatmulConfig {
   using CacheInfoProvider = CacheInfoProviderT;
   static constexpr bool enable_swap_ab = EnableSwapAB;
 
+  // no_unique_address: both members are stateless in the default
+  // configuration, so a MatmulConfig object stays empty.
   [[no_unique_address]] GenericTiledTuningT generic_tiled{};
   [[no_unique_address]] CacheInfoProviderT cache_info_provider{};
 };
 
+/// Convenience alias: a MatmulConfig that only overrides the scheduler
+/// policy (family stays automatic).
 template <::vecops::matmul::Atom AtomT,
           typename SchedulerPolicyT = kernel::matmul_policy::Automatic>
 using MatmulSchedulerConfig = MatmulConfig<
@@ -84,20 +130,26 @@ public:
       ::vecops::matmul::details::selected_family_t<Config>;
   using Plan = ::vecops::matmul::details::SelectedFamilyPlan<Config>;
 
+  /// Stable name of the selected kernel family (diagnostics/tests).
   static constexpr std::string_view kernel_family_name() {
     return ::vecops::matmul::kernel_family::Info<KernelFamily>::name;
   }
 
+  /// The stored configuration (by value; config objects are empty or tiny).
   const Config config;
 
   VECOPS_INLINE constexpr explicit Matmul(Config cfg)
       : config(std::move(cfg)) {}
 
+  /// Workspace bytes for the single-C form; the C operand is adapted into
+  /// the explicit-C form through a zero-valued accumulator input.
   template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
             tensor::InputOperand A, tensor::InputOperand B,
             tensor::OutputOperand C>
   VECOPS_INLINE nint_t required_workspace(
       M&& m, N&& n, K&& k, A&& a, B&& b, C&& c) const {
+    // Adapt C = A*B^T to COut = CIn + A*B^T by dressing the output as a
+    // zero-valued C input; the plan then sees the unified accumulate form.
     auto c_output = tensor::as_output_spec<typename Atom::TAcc>(
         std::forward<C>(c));
     using Memory = typename decltype(c_output)::MemoryElement;
@@ -110,6 +162,8 @@ public:
         std::move(c_input), std::move(c_output));
   }
 
+  /// Workspace bytes for the explicit accumulate form
+  /// `COutput = CInput + A*B^T`.
   template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
             tensor::InputOperand A, tensor::InputOperand B,
             tensor::InputOperand CInput, tensor::OutputOperand COutput>
@@ -122,6 +176,8 @@ public:
         std::forward<CInput>(c_input), std::forward<COutput>(c_output));
   }
 
+  /// Run `C = A*B^T` on an execution scope (see required_workspace for the
+  /// C-to-accumulator adaptation).
   template <execution::ExecutionScope Scope,
             meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
             tensor::InputOperand A, tensor::InputOperand B,
@@ -129,6 +185,7 @@ public:
   VECOPS_INLINE void operator()(
       Scope& scope, M&& m, N&& n, K&& k,
       A&& a, B&& b, C&& c) const {
+    // Same zeros-transform adaptation as required_workspace above.
     auto c_output = tensor::as_output_spec<typename Atom::TAcc>(
         std::forward<C>(c));
     using Memory = typename decltype(c_output)::MemoryElement;
@@ -141,6 +198,7 @@ public:
         std::move(c_input), std::move(c_output));
   }
 
+  /// Run `COutput = CInput + A*B^T` on an execution scope.
   template <execution::ExecutionScope Scope,
             meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
             tensor::InputOperand A, tensor::InputOperand B,
@@ -154,6 +212,8 @@ public:
         std::forward<CInput>(c_input), std::forward<COutput>(c_output));
   }
 
+  /// Single-C form on a raw workspace: wraps it in a temporary
+  /// ExecutionSession and forwards.
   template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
             tensor::InputOperand A, tensor::InputOperand B,
             tensor::OutputOperand C>
@@ -166,6 +226,8 @@ public:
             std::forward<C>(c));
   }
 
+  /// Explicit-C form on a raw workspace: wraps it in a temporary
+  /// ExecutionSession and forwards.
   template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
             tensor::InputOperand A, tensor::InputOperand B,
             tensor::InputOperand CInput, tensor::OutputOperand COutput>
@@ -181,6 +243,7 @@ public:
 
 };
 
+/// Factory: wrap a MatmulConfig into a Matmul operator object.
 template <typename Config>
 VECOPS_INLINE constexpr auto matmul(Config config) {
   return Matmul<Config>{std::move(config)};

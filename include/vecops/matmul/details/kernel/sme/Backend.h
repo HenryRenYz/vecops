@@ -5,6 +5,61 @@
 #ifndef VECOPS_MATMUL_DETAILS_SME_BACKEND_H
 #define VECOPS_MATMUL_DETAILS_SME_BACKEND_H
 
+/**
+ * @file vecops/matmul/details/kernel/sme/Backend.h
+ * @brief SME matmul backend: ZA outer-product tile kernels plus a ladder of
+ *        ordinary-SVE fast-path leaves.
+ *
+ * ## Dispatch structure (DispatchOwner)
+ *
+ * `Backend<SME>::run` first resolves a `DispatchOwner` at compile time
+ * (`select_automatic_dispatch_owner`). The owners form two classes:
+ *
+ * - `General` -- the catch-all ZA microkernel. It enters a Streaming+ZA
+ *   region and traverses the problem with the Tile2D layer over ZA tiles
+ *   (`microkernel` below), consuming either packed or direct operands.
+ * - the others -- ordinary-SVE leaves that never touch ZA: mixed-sign
+ *   int8 skinny (row/column), raw skinny (row/column), fused
+ *   (transform-carrying) skinny (row/column), the fused runtime-quant INT8
+ *   GEMV, and the packed-input dot kernels (primary/tiny shapes). They are
+ *   selectable only when the scope does not already own StreamingZA: their
+ *   bodies are compiled against the ordinary SVE vector length.
+ *
+ * When the Meta contracts cannot decide a leaf's applicability
+ * (`Applicability::runtime`), run() consults the measured thresholds in
+ * RuntimeDispatch.h with the concrete m/n/k (see the applicability probes
+ * next to `select_automatic_dispatch_owner`).
+ *
+ * The leaves map onto the `kernel_family` tags (General, SmallVector,
+ * RuntimeQuantInt8, PackedDot) via `dispatch_owner_in_family_v`; a
+ * `required` family selection that resolves to a different owner fails a
+ * static_assert instead of silently re-routing.
+ *
+ * ## StreamingZARegion lifecycle
+ *
+ * All ZA state is owned by `run`/`run_configured`: one
+ * `scope.with_resources(StreamingZARegion{})` wraps the entire Tile2D
+ * traversal, so a whole problem -- not one tile -- forms a single
+ * SMSTART..SMSTOP interval. Inside the region:
+ *
+ * - operands that are already packed are forwarded untouched: packed access
+ *   is statically direct and untransformed and consumed through raw
+ *   pointers, so the region's resource set cannot change how they load;
+ * - direct (unpacked) operands and the output are *rebound* to the region's
+ *   active resource set, so their memory ops run with streaming-appropriate
+ *   resources; the output session is explicitly committed before the region
+ *   closes (`active_c_output.commit()`).
+ *
+ * ## FastPacked plan
+ *
+ * `dispatch_plan` picks a `KernelPlan<FastPacked, PrefetchLargeWorkingSet>`
+ * from the K-group count: for packed inputs with `k_groups >= 32` (or an
+ * unconstrained K), the microkernel switches from per-group operand loads
+ * (`load_operand`) to the direct packed-pointer loop
+ * (`compute_packed_groups`), optionally with L2 look-ahead prefetching for
+ * large BF16 working sets (`large_packed_prefetch_v`).
+ */
+
 #include <cstdint>
 #include <limits>
 #include <type_traits>
@@ -28,12 +83,16 @@ namespace vecops::kernel::matmul_details::sme {
 namespace generic = matmul_pack_details::generic;
 namespace tile = ::vecops::kernel::loop;
 
+/// Detects the zero-value C-input transform (`zeros_transform`): a C input
+/// behind it needs no ZA seeding at all (the tile stays zeroed).
 template <typename T>
 struct IsZeroTransform : std::false_type {};
 
 template <typename Out, typename In>
 struct IsZeroTransform<tensor::ZeroVecTransform<Out, In>> : std::true_type {};
 
+// Access-object introspection: spec and layout aliases shared by the
+// candidate predicates and the operand loaders below.
 template <typename Access>
 using SpecOf = std::remove_cvref_t<decltype(
     std::declval<const std::remove_cvref_t<Access>&>().spec())>;
@@ -44,22 +103,36 @@ using InputLayoutOf = typename SpecOf<Access>::InputLayout;
 template <typename Access>
 using OutputLayoutOf = typename SpecOf<Access>::OutputLayout;
 
+/// Whether an access object carries the atom's packed layout for one side.
 template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side, typename Access>
 inline constexpr bool is_packed_access_v =
     ::vecops::matmul::is_packed_layout<Atom, Side, InputLayoutOf<Access>>();
 
+/// Raw-pointer, rank-2 input whose innermost (K) stride is compile-time 1 --
+/// the shape the direct fast loads below are written against.
 template <typename Access>
 inline constexpr bool direct_row_major_input_v =
     generic::RawDirectAccess<Access> && Access::Rank == 2 &&
     std::same_as<
         tensor::stride_type_t<1, InputLayoutOf<Access>>, meta::Const<1>>;
 
+/// Output counterpart of direct_row_major_input_v.
 template <typename Access>
 inline constexpr bool direct_row_major_output_v =
     generic::RawDirectAccess<Access> && Access::Rank == 2 &&
     std::same_as<
         tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
 
+/**
+ * @brief Tile2D kernel provider: search-space limits and per-family score.
+ *
+ * `power()` scores one tile family (A x B atomic blocks) for the Tile2D
+ * catalog search. The two-stage formula both rewards throughput (A*B atomic
+ * outer products per case) and prefers square-ish shapes (the `imbalance`
+ * penalty); the second tier (ZA64/expanded-catalog families) starts at a
+ * 300 baseline so it scores below every compact-catalog family and only
+ * ExactCover -- which detects their presence directly -- ever picks them.
+ */
 template <bool ExpandedCatalog>
 struct KernelProvider {
   static constexpr bool four_regions_exact_constraints = true;
@@ -69,6 +142,14 @@ struct KernelProvider {
   static constexpr nint_t exact_meta_block_limit = ExpandedCatalog
       ? std::numeric_limits<nint_t>::max() : nint_t{8};
 
+  /**
+   * @brief Score of the A x B family, or -1 when the family is excluded.
+   *
+   * Tier 1 (A*B <= 4): `100*A*B + 4*(A+B) - 8*|A-B|` -- throughput dominates
+   * (100 per atomic product), with a small shape-balance term.
+   * Tier 2 (expanded catalog, A*B <= 8): `300 + 4*A*B + (A+B) - 2*|A-B|` --
+   * see the class comment for why it must stay below tier 1.
+   */
   template <int A, int B, tile::Tile2DMaskMode, tile::Tile2DMaskMode>
   static consteval int power() {
     if constexpr (A * B <= 4) {
@@ -86,11 +167,21 @@ struct KernelProvider {
   }
 };
 
+/// Tile2D generated catalog over KernelProvider; the expanded variant also
+/// searches the larger (up to 8 meta blocks) ZA64 families.
 template <bool ExpandedCatalog>
 using Catalog = tile::Tile2DGeneratedCatalog<
     KernelProvider<ExpandedCatalog>,
     tile::Tile2DSearchSpace<4, 4, ExpandedCatalog ? 8 : 4>>;
 
+/**
+ * @brief Whether to search the expanded ZA64 catalog for this problem.
+ *
+ * True only for the F64 atom with *both* operands unpacked: the fp64 ZA
+ * tiles are SVL/8-sized, so the compact (4x4-block) catalog wastes most of
+ * each tile and the wider meta blocks pay for themselves. Packed F64
+ * inputs keep the compact catalog.
+ */
 template <::vecops::matmul::Atom Atom, typename A, typename B>
 inline constexpr bool use_expanded_catalog_v = [] {
 #if defined(HAS_SME_F64F64)
@@ -102,12 +193,26 @@ inline constexpr bool use_expanded_catalog_v = [] {
 #endif
 }();
 
+/// Compile-time microkernel plan handed from `dispatch_plan` to `run_case`:
+/// `value` selects the fast packed-pointer loop (see the file header,
+/// FastPacked plan), `prefetch_large_working_set` enables look-ahead L2
+/// prefetching for large packed working sets.
 template <bool FastPacked, bool PrefetchLargeWorkingSet>
 struct KernelPlan : std::bool_constant<FastPacked> {
   static constexpr bool prefetch_large_working_set =
       PrefetchLargeWorkingSet;
 };
 
+/**
+ * @brief Whether a packed BF16 problem's working set is large enough that
+ *        the packed-pointer loop should prefetch.
+ *
+ * Heuristic: estimate the bytes touched per K element
+ * (`M*sizeof(TA) + N*sizeof(TB)`, packed blocks are consumed row-wise) and
+ * require the total footprint to reach ~2 MiB (MinPackedBytes) -- the size
+ * beyond which plain demand loads no longer keep L2 warm on their own.
+ * Computed from compile-time lower bounds, so it costs nothing at run time.
+ */
 template <::vecops::matmul::Atom Atom,
           meta::ValueType M, meta::ValueType N, meta::ValueType K>
 inline constexpr bool large_packed_prefetch_v = [] {
@@ -135,6 +240,8 @@ inline constexpr bool large_packed_prefetch_v = [] {
   return false;
 }();
 
+/// Whether Meta bounds can already bound the number of M_R/N_R tile blocks
+/// on at least one axis -- the precondition for constraint pruning below.
 template <::vecops::matmul::Atom Atom, meta::ValueType M, meta::ValueType N>
 inline constexpr bool has_bounded_tile_axis_v =
     tile::tile2d_details::has_max_block_count_v<
@@ -142,6 +249,14 @@ inline constexpr bool has_bounded_tile_axis_v =
     tile::tile2d_details::has_max_block_count_v<
         N, decltype(Atom::N_R)>;
 
+/**
+ * @brief Whether the Automatic policy should resolve to the statically
+ *        constraint-pruned FourRegions plan instead of the runtime
+ *        ExactCover search.
+ *
+ * Requires a provably bounded tile axis, then keeps the proven winners on
+ * the compact runtime path (see the tuning comment inside).
+ */
 template <::vecops::matmul::Atom Atom,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
           typename A, typename B>
@@ -171,15 +286,30 @@ inline constexpr bool prefer_constraint_pruning_v = [] {
   }
 }();
 
+/// log2 of a KPack value (4 -> 2, 2 -> 1, else 0); used to shrink a scalar
+/// tag so its vector holds whole K groups per lane.
 consteval int log2_kpack(nint_t kpack) {
   return kpack == 4 ? 2 : (kpack == 2 ? 1 : 0);
 }
 
+/// Rows (== columns) of one ZA accumulator tile for this atom:
+/// SVL / sizeof(TAcc), i.e. the atom's M_R.
 template <::vecops::matmul::Atom Atom>
 VECOPS_ALWAYS_INLINE nint_t accumulator_lanes() {
   return static_cast<nint_t>(Atom::M_R);
 }
 
+/**
+ * @brief Row-invariant facts of one direct operand, computed once per
+ *        microkernel.
+ *
+ * `row_bytes` is the byte distance between consecutive rows; whether it
+ * fits an int32 decides `gather_offsets_fit`: the gather fast path in
+ * `load_operand` issues one strided u32 gather per column block with the
+ * row stride as the (signed 32-bit) gather offset scale, so a stride
+ * outside int32 range would silently corrupt addressing -- this pre-check
+ * rejects that case up front instead.
+ */
 template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side, typename Source>
 struct OperandInvariants {
   nint_t row_bytes = 0;
@@ -198,12 +328,38 @@ struct OperandInvariants {
   }
 };
 
+/// Reinterpret a K-grouped scalar-lane vector as a native (full-lane)
+/// vector of the same element type.
 template <typename T, vec::VectorValue V>
 VECOPS_ALWAYS_INLINE auto as_native(V value) {
   using Tag = vec::ScalableTag<T, 0>;
   return static_cast<vec::Vec<Tag>>(value);
 }
 
+/**
+ * @brief Load one operand vector (one K group of one spatial block).
+ *
+ * Packed inputs index the 4-D packed layout directly (panel, k-group, row,
+ * k) and load one native vector at the block's row slice. Direct inputs
+ * try the whole-group fast path first and fall back to per-k masked loads:
+ *
+ * - fast path (direct row-major, element <= 32 bits, whole K group within
+ *   the logical K, gather offsets in range): load the column block as one
+ *   strided `uint32` gather -- one row-strided instruction per whole K
+ *   group instead of KPack per-element loads -- then bitcast back to the
+ *   narrow element vector. This is the counterpart of the int32-range
+ *   pre-check in `OperandInvariants`.
+ * - fallback: per-k `source.load` along the spatial axis, masked and
+ *   zero-filled for tail lanes/groups, then interleaved into the packed
+ *   K-group lane order (`interleave_pair`/`interleave_quad` from the
+ *   generic packing layer -- the same lane order the packers produce).
+ *
+ * @tparam Block  Spatial block index; the loaded rows are
+ *                `origin + Block*lanes .. +lanes`.
+ * @tparam FullSpatial / FullK  Compile-time guarantees that the full
+ *                spatial block / whole K group is active; they select the
+ *                unmasked, unchecked load forms.
+ */
 template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side, int Block,
           bool FullSpatial, bool FullK, typename Source>
 VECOPS_ALWAYS_INLINE auto load_operand(
@@ -238,6 +394,11 @@ VECOPS_ALWAYS_INLINE auto load_operand(
       const nint_t k = kg * KP;
       if ((FullK || k + KP <= logical_k) &&
           invariants.gather_offsets_fit) {
+        // Whole-group gather fast path: one strided uint32 load fetches the
+        // entire spatial column block (row_bytes apart) in a single
+        // instruction; each fetched 32-bit word is KPack narrow elements of
+        // one row, so bitcasting back yields the interleaved K-group lane
+        // order directly.
         using WordTag = vec::ScalableTag<uint32_t, 0>;
         using Resources = typename std::remove_cvref_t<
             decltype(source.policy())>::ActiveResources;
@@ -293,6 +454,14 @@ VECOPS_ALWAYS_INLINE auto load_operand(
   }
 }
 
+/**
+ * @brief One fully-predicated SME outer product into ZA tile `Tile`.
+ *
+ * Thin wrapper over the ZA intrinsic layer (vec/details/sme/ZA.h): selects
+ * the FMOPA/BFMOPA/SMOPA/UMOPA/... instruction from the atom's types and
+ * issues it with all-true predicates. The tile number is relative to the
+ * accumulator width (validated in ZA.h).
+ */
 template <::vecops::matmul::Atom Atom, int Tile, typename VA, typename VB>
 VECOPS_ALWAYS_INLINE void mopa(VA a, VB b) {
   using TA = typename Atom::TA;
@@ -307,6 +476,13 @@ VECOPS_ALWAYS_INLINE void mopa(VA a, VB b) {
       static_cast<vec::Vec<BTag>>(b));
 }
 
+/**
+ * @brief Base pointer of one spatial block's packed rows at k-group 0.
+ *
+ * The fast packed loop (`compute_packed_groups`) walks K groups by stepping
+ * this pointer with the packed group stride, avoiding per-group offset
+ * recomputation. Same 4-D indexing as the packed branch of `load_operand`.
+ */
 template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side, int Block, typename Source>
 VECOPS_ALWAYS_INLINE auto packed_block_pointer(
     const Source& source, nint_t origin) {
@@ -323,6 +499,8 @@ VECOPS_ALWAYS_INLINE auto packed_block_pointer(
 }
 
 #if !defined(VECOPS_DISABLE_SME_SVE_SKINNY)
+/// Widen-only helper for the skinny kernels: identity when tags already
+/// match, otherwise a plain convert (never narrowing).
 template <typename ToTag, typename FromTag, vec::VectorValue V>
 VECOPS_ALWAYS_INLINE auto skinny_convert(ToTag to, FromTag from, V value) {
   if constexpr (std::same_as<ToTag, FromTag>) return value;
@@ -331,6 +509,9 @@ VECOPS_ALWAYS_INLINE auto skinny_convert(ToTag to, FromTag from, V value) {
 
 // TODO: Generalize after the FP16
 // FMLAL path has passed all performance and numerical gates.
+/// fp16 widening multiply-add for the skinny kernels: prefers the SVE
+/// FMLALB/FMLALT pair (widening fma on half-lane halves, no separate
+/// convert) when the architecture has it, otherwise converts then fma.
 template <typename InputTag>
 VECOPS_ALWAYS_INLINE auto skinny_widening_fmadd(
     InputTag, vec::Vec<vec::Rebind<float32_t, InputTag>> acc,
@@ -360,6 +541,20 @@ VECOPS_ALWAYS_INLINE auto skinny_widening_fmadd(
 #endif
 }
 
+/**
+ * @brief Ordinary-SVE skinny block: `Block` outputs of a GEMV-like product.
+ *
+ * Computes `Block` dot products (one output per accumulating vector) over
+ * the shared operand -- B's row 0 when `VaryRows` (M==1, outputs are
+ * columns), A's row 0 otherwise (N==1, outputs are rows) -- and reduces each
+ * vector to one scalar stored through the output access. Loads are
+ * masked/zero-filled per K chunk, so any K tail is handled without a
+ * special-cased loop.
+ *
+ * @tparam VaryRows  Orientation: true = the varying index is M (outputs
+ *                   stride along the output's leading axis), false = N.
+ * @tparam Block     Outputs computed by this instantiation (1..8).
+ */
 template <bool VaryRows, int Block,
           typename A, typename B, typename COutput>
 VECOPS_ALWAYS_INLINE void sve_skinny_block(
@@ -489,6 +684,13 @@ VECOPS_ALWAYS_INLINE void sve_skinny_block(
     store(output_origin + 7, vec::reduce_add(AccTag{}, sum7));
 }
 
+/**
+ * @brief Outer loop over a skinny problem: pick Block sizes left to right.
+ *
+ * bf16 and integer types get an 8-wide tier (their widening dot products
+ * make the wide block profitable); everything else starts at 4. The 3/2/1
+ * tail is switch-dispatched so no masked partial block is needed.
+ */
 template <bool VaryRows, typename A, typename B, typename COutput>
 inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void sve_skinny_matmul(
     const A& a, const B& b, COutput& c_output,
@@ -516,6 +718,9 @@ inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void sve_skinny_matmul(
   }
 }
 
+/// Candidate for the raw skinny leaf: direct row-major inputs and output,
+/// zero-value C input, same-type operands, and a float or (i8/u8 -> i32)
+/// accumulator. No output transform (that is the fused variant below).
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 inline constexpr bool sve_skinny_candidate_v =
@@ -531,6 +736,8 @@ inline constexpr bool sve_skinny_candidate_v =
       std::same_as<typename Atom::TAcc, int32_t>));
 
 #if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+/// Mixed-sign int8 GEMV leaves (s8 x u8 / u8 x s8, SUMOPA-style algebra),
+/// implemented out of line in the backend TU.
 bool try_raw_mixed_sign_skinny_s8u8(
     nint_t logical_m, nint_t logical_n, nint_t logical_k,
     const int8_t* a, nint_t a_stride,
@@ -543,6 +750,9 @@ bool try_raw_mixed_sign_skinny_u8s8(
     const int8_t* b, nint_t b_stride,
     int32_t* output, nint_t output_stride);
 
+/// Candidate for the mixed-sign skinny leaves: like sve_skinny_candidate_v
+/// but with deliberately *different* operand signedness (the same-sign
+/// cases stay on the regular skinny path).
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 inline constexpr bool mixed_sign_sve_skinny_candidate_v =
@@ -558,6 +768,9 @@ inline constexpr bool mixed_sign_sve_skinny_candidate_v =
       std::same_as<typename Atom::TB, int8_t>)) &&
     std::same_as<typename Atom::TAcc, int32_t>;
 
+/// Run-time gate + forwarder for the mixed-sign skinny leaves (raw pointer
+/// variants live in the backend TU; section attribute keeps them out of the
+/// hot kernel text).
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64)
@@ -596,6 +809,8 @@ try_mixed_sign_sve_skinny(
 
 #if !defined(VECOPS_DISABLE_SME_FUSED_SKINNY)
 #if defined(HAS_SME_F64F64)
+/// fp64 fused-skinny compute cores (out of line): the ZA-less fp64 dot
+/// products for the column- and row-varying orientations.
 void sve_skinny_fused_compute_f64_row(
     const float64_t* a_data, nint_t a_stride,
     const float64_t* b_data, nint_t b_stride,
@@ -607,6 +822,17 @@ void sve_skinny_fused_compute_f64_col(
     float64_t* values, nint_t outputs, nint_t logical_k);
 #endif
 
+/**
+ * @brief Compute core of the fused skinny kernels over raw pointers.
+ *
+ * Same dot-product structure as `sve_skinny_block`, but decoupled from the
+ * tensor access layer: results land in a scalar `values` scratch array so
+ * the epilogue (`sve_skinny_fused_matmul`) can write them through the
+ * output access with its transform attached.
+ *
+ * @tparam VaryRows  Orientation, as in sve_skinny_block.
+ * @tparam Block     Outputs per instantiation (1..8).
+ */
 template <bool VaryRows, int Block, typename T, typename Acc>
 VECOPS_ALWAYS_INLINE void sve_skinny_fused_compute_block(
     const T* a_data, nint_t a_stride,
@@ -723,6 +949,8 @@ VECOPS_ALWAYS_INLINE void sve_skinny_fused_compute_block(
     values[output_origin + 7] = vec::reduce_add(AccTag{}, sum7);
 }
 
+/// Block-size ladder over the fused compute core (8/4 tiers + switch tail),
+/// mirroring sve_skinny_matmul.
 template <bool VaryRows, typename T, typename Acc>
 VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void sve_skinny_fused_compute(
     const T* a_data, nint_t a_stride,
@@ -762,6 +990,14 @@ VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void sve_skinny_fused_compute(
   }
 }
 
+/**
+ * @brief Fused (transform-carrying) skinny matmul: compute then epilogue.
+ *
+ * Runs the raw-pointer compute core into a stack `values` array, then
+ * stores through `c_output`'s access so the output transform -- the reason
+ * this leaf exists, e.g. a dequantize -- is applied by the tensor layer
+ * instead of forcing the ZA kernel.
+ */
 template <bool VaryRows, typename A, typename B, typename COutput>
 VECOPS_ALWAYS_INLINE void sve_skinny_fused_matmul(
     const A& a, const B& b, COutput& c_output,
@@ -800,9 +1036,13 @@ VECOPS_ALWAYS_INLINE void sve_skinny_fused_matmul(
   }
 }
 
-// Keep coordinate-aware epilogues out of the already layout-sensitive fused
-// dispatch bodies. Their transform type remains open-ended, so the wrapper
-// stays in the header, but one noinline COMDAT per actual transform is enough.
+/**
+ * @brief Lane-local (non-elementwise) fused skinny wrapper.
+ *
+ * Keep coordinate-aware epilogues out of the already layout-sensitive fused
+ * dispatch bodies. Their transform type remains open-ended, so the wrapper
+ * stays in the header, but one noinline COMDAT per actual transform is enough.
+ */
 template <bool VaryRows, typename A, typename B, typename COutput>
 VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void
 sve_skinny_fused_lane_local_matmul(
@@ -815,6 +1055,9 @@ sve_skinny_fused_lane_local_matmul(
 }
 
 #if defined(HAS_SME_F64F64)
+/// fp64 entry of the fused skinny family: delegates to the out-of-line
+/// compute cores (which the header cannot inline cheaply) and reuses the
+/// same stack-values epilogue.
 template <bool VaryRows, typename A, typename B, typename COutput>
 VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void
 sve_skinny_fused_matmul_f64_external(
@@ -860,12 +1103,23 @@ sve_skinny_fused_matmul_f64_external(
 }
 #endif
 
+/// Whether an output transform is applicable to the fused skinny epilogue:
+/// elementwise transforms map lane-by-lane, lane-local transforms see whole
+/// vectors (wrapper above); anything coordinate-aware is out of scope.
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 inline constexpr bool sve_skinny_fused_output_supported_v =
     COutput::Transform::is_elementwise ||
     COutput::Transform::is_lane_local;
 
+/**
+ * @brief Candidate for the fused skinny leaf.
+ *
+ * Direct row-major inputs whose output is *not* direct row-major (the
+ * output access must apply a supported transform -- that is what makes this
+ * "fused"), with the same type constraints as the raw skinny candidate.
+ * See the in-place TODO below for the FP64 gating.
+ */
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 inline constexpr bool sve_skinny_fused_candidate_v =
@@ -895,10 +1149,26 @@ inline constexpr bool sve_skinny_fused_candidate_v =
 #endif
 
 #if defined(CPU_CAPABILITY_SVE)
+/**
+ * @brief Per-atom operations for the ordinary-SVE packed-dot kernels.
+ *
+ * One specialization per supported atom, each providing the SVE ACLE types
+ * and the small vector helpers the dot loop needs. Two layout contracts
+ * matter for every specialization (see `packed_ab_mmla` for their use):
+ *
+ * - `zip_groups(a, b)` interleaves two adjacent K-group vectors into the
+ *   MMLA segment layout: after the zip, each 128-bit segment of the vector
+ *   holds two spatial rows x two K groups (KPack elements each).
+ * - `broadcast_segment<S>(v)` (svdupq_lane) replicates the S-th 128-bit
+ *   segment, i.e. one row pair, across the whole vector.
+ * - `store_row_pair` de-interleaves the MMLA accumulator into the two
+ *   result rows (commented per specialization).
+ */
 template <typename Atom>
 struct PackedDotTraits;
 
 #if defined(__ARM_FEATURE_SVE_BF16)
+/// bf16 x bf16 -> fp32 (svbfmmla_f32) traits.
 template <>
 struct PackedDotTraits<::vecops::matmul::SME_BF16F32> {
   using Element = bfloat16_t;
@@ -943,6 +1213,11 @@ struct PackedDotTraits<::vecops::matmul::SME_BF16F32> {
 
   static VECOPS_ALWAYS_INLINE void store_row_pair(
       AccVec value, Acc* row0, Acc* row1, nint_t columns) {
+    // MMLA accumulator lane layout: svbfmmla places each 2x2 product block
+    // with row 0 in the low 64 bits and row 1 in the high 64 bits of every
+    // 128-bit segment. Reading the vector as 64-bit lanes, row 0 therefore
+    // occupies the even and row 1 the odd 64-bit lanes, so a 64-bit
+    // uzp1/uzp2 pair extracts the two rows as contiguous column vectors.
     const auto bits = svreinterpret_u64_f32(value);
     const auto first = svreinterpret_f32_u64(svuzp1_u64(bits, bits));
     const auto second = svreinterpret_f32_u64(svuzp2_u64(bits, bits));
@@ -955,6 +1230,7 @@ struct PackedDotTraits<::vecops::matmul::SME_BF16F32> {
 #endif
 
 #if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+/// int8 x int8 -> int32 (svmmla_s32) traits.
 template <>
 struct PackedDotTraits<::vecops::matmul::SME_I8I32<int8_t, int8_t>> {
   using Element = int8_t;
@@ -997,6 +1273,9 @@ struct PackedDotTraits<::vecops::matmul::SME_I8I32<int8_t, int8_t>> {
 
   static VECOPS_ALWAYS_INLINE void store_row_pair(
       AccVec value, Acc* row0, Acc* row1, nint_t columns) {
+    // Same 64-bit row de-interleave as the BF16 traits: svmmla also
+    // delivers each 2x2 block with row 0 in even and row 1 in odd 64-bit
+    // lanes of every 128-bit segment.
     const auto bits = svreinterpret_u64_s32(value);
     const auto first = svreinterpret_s32_u64(svuzp1_u64(bits, bits));
     const auto second = svreinterpret_s32_u64(svuzp2_u64(bits, bits));
@@ -1007,6 +1286,8 @@ struct PackedDotTraits<::vecops::matmul::SME_I8I32<int8_t, int8_t>> {
   }
 };
 
+/// uint8 x uint8 -> uint32 (svmmla_u32) traits; the u32 accumulator is
+/// reinterpreted to int32 only at the memory boundary.
 template <>
 struct PackedDotTraits<::vecops::matmul::SME_I8I32<uint8_t, uint8_t>> {
   using Element = uint8_t;
@@ -1049,6 +1330,8 @@ struct PackedDotTraits<::vecops::matmul::SME_I8I32<uint8_t, uint8_t>> {
 
   static VECOPS_ALWAYS_INLINE void store_row_pair(
       AccVec value, Acc* row0, Acc* row1, nint_t columns) {
+    // Same 64-bit row de-interleave as the other traits (svmmla 2x2 block
+    // layout: row 0 even, row 1 odd 64-bit lanes per segment).
     const auto bits = svreinterpret_u64_u32(value);
     const auto first = svreinterpret_s32_u64(svuzp1_u64(bits, bits));
     const auto second = svreinterpret_s32_u64(svuzp2_u64(bits, bits));
@@ -1060,6 +1343,8 @@ struct PackedDotTraits<::vecops::matmul::SME_I8I32<uint8_t, uint8_t>> {
 };
 #endif
 
+/// Atoms with a PackedDotTraits specialization (guarded by the SVE
+/// feature macros that provide the underlying MMLA instructions).
 template <::vecops::matmul::Atom Atom>
 inline constexpr bool packed_dot_supported_atom_v =
 #if defined(__ARM_FEATURE_SVE_BF16)
@@ -1075,6 +1360,31 @@ inline constexpr bool packed_dot_supported_atom_v =
 // segment layout, mixed-sign behavior, and VL/SVL contract have another user.
 // It intentionally consumes the existing MOPA PackedAB ABI by joining two
 // adjacent 32-bit K groups; no second public packing format is introduced.
+/**
+ * @brief Ordinary-SVE MMLA microkernel over MOPA-packed A and B operands.
+ *
+ * Walks K in pairs of groups. Per pair, `zip_groups` joins the two adjacent
+ * K-group vectors of each operand into the MMLA segment layout -- each
+ * 128-bit segment then holds two spatial rows x two K groups -- and
+ * `broadcast_segment` pins one operand to a chosen row pair (segment) while
+ * the other walks segments, matching how svmmla/svbfmmla consume their
+ * operands. Shape-specific schedules:
+ *
+ * - m == 8 (n == 2): one accumulator. A walks its four row-pair segments
+ *   (8 rows), B is pinned to segment 0 (its only two columns); the result
+ *   segments are already contiguous row-major, so one `store_contiguous`
+ *   writes all m*n values.
+ * - m == 4: two accumulators, A pinned per accumulator (segments 0 and 1 =
+ *   rows 0..1 / 2..3), B walking its segments (all columns); each
+ *   accumulator is de-interleaved into one row pair.
+ * - m == 2 (fall-through): one accumulator, A pinned to segment 0 -- its
+ *   only row pair -- B walking; a single store_row_pair finishes.
+ *
+ * An odd final group is zero-filled (`zero_input`) so the pairing loop
+ * always reads two groups.
+ *
+ * @tparam Atom  Must satisfy packed_dot_supported_atom_v.
+ */
 template <::vecops::matmul::Atom Atom>
 VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void packed_ab_mmla(
     const typename Atom::TA* packed_a, nint_t a_group_stride,
@@ -1098,14 +1408,15 @@ VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void packed_ab_mmla(
       const auto b1 = group + 1 < groups
           ? Op::load(packed_b + (group + 1) * b_group_stride)
           : Op::zero_input();
-      const auto a = Op::zip_groups(a0, a1);
-      const auto b = Op::zip_groups(b0, b1);
+    const auto a = Op::zip_groups(a0, a1);
+    const auto b = Op::zip_groups(b0, b1);
+      // A walks its row-pair segments; B pinned to segment 0 (columns 0,1).
       acc = Op::mmla(
           acc, a, Op::template broadcast_segment<0>(b));
-    }
-    Op::store_contiguous(acc, output, logical_m * logical_n);
-    return;
   }
+  Op::store_contiguous(acc, output, logical_m * logical_n);
+  return;
+}
 
   auto acc0 = Op::zero_acc();
   auto acc1 = Op::zero_acc();
@@ -1121,6 +1432,9 @@ VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void packed_ab_mmla(
         : Op::zero_input();
     const auto a = Op::zip_groups(a0, a1);
     const auto b = Op::zip_groups(b0, b1);
+    // A pinned to one row pair per accumulator (segment 0 = rows 0..1,
+    // segment 1 = rows 2..3); B walks its column segments. For m == 2 only
+    // segment 0 of A exists, so acc1 stays unused.
     acc0 = Op::mmla(
         acc0, Op::template broadcast_segment<0>(a), b);
     if (logical_m == 4) {
@@ -1137,6 +1451,9 @@ VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void packed_ab_mmla(
   }
 }
 
+/// Candidate for both packed-dot leaves: both operands in the packed
+/// layout and raw-direct, zero-value C input, direct row-major output of
+/// the accumulator type.
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 inline constexpr bool packed_dot_candidate_v =
@@ -1148,6 +1465,13 @@ inline constexpr bool packed_dot_candidate_v =
     direct_row_major_output_v<COutput> &&
     std::same_as<typename COutput::ComputeType, typename Atom::TAcc>;
 
+/**
+ * @brief Primary packed-dot leaf (2x8 / 8x2 / 4x4 shapes).
+ *
+ * Returns false (caller falls through to the ZA kernel) when the runtime
+ * shape, K bound, panel/vector-length geometry, or output stride does not
+ * match what `packed_ab_mmla` was tuned for.
+ */
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_ALWAYS_INLINE bool try_packed_dot(
@@ -1163,6 +1487,9 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot(
     const bool square = logical_m == 4 && logical_n == 4;
     if ((!elongated && !square) || logical_k < 0) return false;
 
+    // K dispatch bounds (tuning, not architecture): the dot leaf covers K
+    // up to 256 (+1) for the square shape, 1024 (+1) for BF16, 512 (+1)
+    // for the byte atoms; longer K amortizes better on the ZA kernel.
     const nint_t max_k = square
         ? 257
         : (std::same_as<Atom, ::vecops::matmul::SME_BF16F32> ? 1025 : 513);
@@ -1174,6 +1501,9 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot(
         ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::B>::panel());
     const nint_t ordinary_vl_bytes =
         vec::size(vec::ScalableTag<uint8_t, 0>{});
+    // Panel/VL geometry: the packed panel is SVL/2 rows, so
+    // ordinary_vl_bytes == 2*panel pins ordinary VL == streaming SVL -- the
+    // one geometry the fixed vector loads were written for.
     if (a_panel != b_panel || ordinary_vl_bytes != 2 * a_panel) {
       return false;
     }
@@ -1196,6 +1526,12 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot(
   }
 }
 
+/**
+ * @brief Tiny packed-dot leaf (2x2 / 2x4 / 4x2 shapes).
+ *
+ * Same gate structure and geometry checks as `try_packed_dot`; only the
+ * served shapes and their K bound differ (see the tuning comment above).
+ */
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_ALWAYS_INLINE bool try_packed_dot_tiny(
@@ -1210,6 +1546,7 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot_tiny(
     const bool tall_narrow = logical_m == 4 && logical_n == 2;
     if ((!short_wide && !tall_narrow) || logical_k < 0) return false;
 
+    // K dispatch bounds, as in try_packed_dot (tuning-derived).
     const nint_t max_k = tall_narrow
         ? 257
         : (std::same_as<Atom, ::vecops::matmul::SME_BF16F32> ? 1025 : 513);
@@ -1221,6 +1558,7 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot_tiny(
         ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::B>::panel());
     const nint_t ordinary_vl_bytes =
         vec::size(vec::ScalableTag<uint8_t, 0>{});
+    // Panel/VL geometry: ordinary VL == 2*panel == SVL, as above.
     if (a_panel != b_panel || ordinary_vl_bytes != 2 * a_panel) {
       return false;
     }
@@ -1241,6 +1579,14 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot_tiny(
 }
 #endif
 
+/**
+ * @brief Which concrete kernel family serves one SME leaf.
+ *
+ * `General` is the ZA outer-product microkernel (the fallback); the other
+ * nine are the ordinary-SVE, ZA-less leaves (see the file header). Row vs
+ * Column suffixes on the skinny owners record the orientation: which of
+ * M/N is the single extent.
+ */
 enum class DispatchOwner {
   General,
   MixedSignSkinnyRow,
@@ -1254,10 +1600,13 @@ enum class DispatchOwner {
   PackedDotTiny,
 };
 
+/// Whether Meta bounds pin one axis extent to exactly `Value`.
 template <meta::ValueType E, nint_t Value>
 inline constexpr bool extent_is_v =
     meta::range_within_v<std::remove_cvref_t<E>, Value, Value>;
 
+/// Whether `Value` is outside the extent's admitted range entirely
+/// (constant extents compare by value; Dynamic extents by conform()).
 template <meta::ValueType E, nint_t Value>
 inline constexpr bool extent_excludes_v = [] {
   using EV = std::remove_cvref_t<E>;
@@ -1265,12 +1614,19 @@ inline constexpr bool extent_excludes_v = [] {
   else return !EV::conforms(Value);
 }();
 
+/// Runtime-rules shape class for this Atom's skinny leaves (see
+/// RuntimeDispatch.h): fp16's block ladder tops out at 16 outputs, the
+/// other types at 64.
 template <::vecops::matmul::Atom Atom>
 inline constexpr SmallVectorShape small_vector_shape_v =
     std::same_as<Atom, ::vecops::matmul::SME_F16F32>
     ? SmallVectorShape::sme_f16
     : SmallVectorShape::sme_other;
 
+/// Tri-state verdict on the skinny (SmallVector) leaves for the shape
+/// contracts M/N/K: always when one axis is provably 1 and the other
+/// provably within the block ladder, never when the runtime rules reject
+/// a singleton problem or neither axis can be 1, runtime otherwise.
 template <::vecops::matmul::Atom Atom,
           meta::ValueType M, meta::ValueType N, meta::ValueType K>
 consteval ::vecops::matmul::details::Applicability
@@ -1304,6 +1660,10 @@ small_vector_shape_applicability() {
   }
 }
 
+/// Tri-state verdict for the fused runtime-quant leaf: only a contract
+/// family with no valid problem at all is `never`; strides and the packed
+/// panel geometry are run-time facts, so everything else stays `runtime`
+/// (the leaf re-checks them itself before running).
 template <meta::ValueType M, meta::ValueType N, meta::ValueType K>
 consteval ::vecops::matmul::details::Applicability
 runtime_quant_shape_applicability() {
@@ -1328,6 +1688,10 @@ runtime_quant_shape_applicability() {
   }
 }
 
+/// Tri-state verdict for the packed-dot leaves: `never` when the contracts
+/// exclude every served (M, N) pair or K exceeds every leaf's bound,
+/// `always` for singleton problems inside them, `runtime` otherwise (the
+/// sparse five-shape table is one shared probe per instantiation).
 template <::vecops::matmul::Atom Atom,
           meta::ValueType M, meta::ValueType N, meta::ValueType K>
 consteval ::vecops::matmul::details::Applicability
@@ -1388,6 +1752,18 @@ packed_dot_shape_applicability() {
   }
 }
 
+/**
+ * @brief Compile-time selection of the dispatch owner for `Automatic`
+ *        policies.
+ *
+ * Each candidate leaf is gated by its compile-time candidate predicate plus
+ * Meta shape bounds; the first match wins, checked most specific
+ * (mixed-sign, then raw/fused skinny, runtime-quant, packed dot) before
+ * the `General` fallback. The whole chain is consteval, so `run` compiles
+ * straight-line code for the selected owner. Note the enclosing guard in
+ * the caller: the non-General owners are only considered when the scope
+ * does not already own StreamingZA.
+ */
 template <::vecops::matmul::Atom Atom,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
           typename A, typename B, typename CInput, typename COutput,
@@ -1488,6 +1864,9 @@ consteval DispatchOwner select_automatic_dispatch_owner() {
   return DispatchOwner::General;
 }
 
+/// Maps a dispatch owner to its selectable `kernel_family` tag (General,
+/// SmallVector, RuntimeQuantInt8, PackedDot). Used to validate a family
+/// selection against the owner the automatic policy would pick.
 template <typename Family, DispatchOwner Owner>
 inline constexpr bool dispatch_owner_in_family_v =
     (std::same_as<Family, ::vecops::matmul::kernel_family::General> &&
@@ -1506,6 +1885,11 @@ inline constexpr bool dispatch_owner_in_family_v =
      (Owner == DispatchOwner::PackedDotPrimary ||
       Owner == DispatchOwner::PackedDotTiny));
 
+/// Tri-state support verdict for a public family on this leaf's static
+/// facts: General/WholeProblem always apply; every special family needs
+/// its candidate predicate, a scope that does not already own
+/// StreamingZA, and its shape probe. run() uses it to honour Prefer/
+/// Require requests the automatic owner does not already satisfy.
 template <typename Family,
           ::vecops::matmul::Atom Atom,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
@@ -1578,6 +1962,11 @@ family_applicability() {
   }
 }
 
+/// Whether the runtime-dispatch tier may route into CandidateFamily
+/// under this request: WholeProblem always permits it, General never
+/// (the ZA path is already the owner), Require permits only the exact
+/// required family, and Prefer permits everything so it can fall back to
+/// the complete automatic route.
 template <typename FamilyDispatch, typename CandidateFamily>
 inline constexpr bool permits_runtime_family_v = [] {
   using Requested = typename FamilyDispatch::Family;
@@ -1596,6 +1985,17 @@ inline constexpr bool permits_runtime_family_v = [] {
   }
 }();
 
+/**
+ * @brief Final owner selection honoring a `FamilyDispatch` selection.
+ *
+ * `WholeProblem` (the automatic planner) keeps the automatic owner;
+ * `General` pins the ZA kernel outright; any other selected family must
+ * agree with the automatic owner (`dispatch_owner_in_family_v`) or be
+ * applicable through its shape probe (`family_applicability`) -- a
+ * `required` mismatch fails a static_assert, while a prefer/automatic
+ * mismatch silently runs the automatic owner instead (the preferred leaf
+ * only wins when the shapes also match its gates).
+ */
 template <typename FamilyDispatch,
           ::vecops::matmul::Atom Atom,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
@@ -1625,6 +2025,23 @@ consteval DispatchOwner select_dispatch_owner() {
   }
 }
 
+/**
+ * @brief FastPacked compute loop: direct packed-pointer outer products.
+ *
+ * Walks K groups stepping raw pointers into the packed 4-D layout (no
+ * per-group offset arithmetic), issuing one `mopa` per output tile. Three
+ * schedules by block shape, all with the same tile-numbering rule as
+ * `compute_group` (tile = MI*NN + NI):
+ *
+ * - `NN == 1`: B's single block loaded once per group; each of the NM A
+ *   blocks gets its own ZA tile.
+ * - `NM == 1`: symmetric, A shared, NN B blocks in tiles 0..NN-1.
+ * - `NM == 2 && NN == 2`: full 2x2 tile grid from four pointers; this is
+ *   the shape the optional look-ahead prefetch below is tuned for.
+ *
+ * @tparam PrefetchLargeWorkingSet  Emit the L2 look-ahead loop (see
+ *         `large_packed_prefetch_v`); only compiled for the 2x2 schedule.
+ */
 template <::vecops::matmul::Atom Atom, int NM, int NN,
           bool PrefetchLargeWorkingSet,
           typename A, typename B>
@@ -1695,6 +2112,11 @@ VECOPS_ALWAYS_INLINE void compute_packed_groups(
       nint_t kg = 0;
       if constexpr (PrefetchLargeWorkingSet) {
         if (groups > PrefetchDistance) {
+          // Look-ahead prologue: the first (groups - PrefetchDistance)
+          // iterations prefetch the K groups that are PrefetchDistance
+          // ahead, so the steady state finds its loads in L2. The final
+          // PrefetchDistance iterations (the drain loop below) stop
+          // prefetching -- there is nothing left ahead to fetch.
           const nint_t prefetch_groups = groups - PrefetchDistance;
           VECOPS_LOOP_ALIGN(64) for (; kg < prefetch_groups; ++kg) {
             vec::prefetch(
@@ -1740,6 +2162,8 @@ VECOPS_ALWAYS_INLINE void compute_packed_groups(
   }
 }
 
+/// Horizontal ZA slice write/read through the ZA move intrinsics (used by
+/// the non-direct C init/store fallbacks).
 template <int Tile, typename T, vec::VectorValue V, typename Mask>
 VECOPS_ALWAYS_INLINE void write_row(
     uint32_t row, Mask pg, V value) noexcept {
@@ -1757,6 +2181,16 @@ VECOPS_ALWAYS_INLINE auto read_row(
       Tag{}, row, static_cast<vec::Mask<Tag>>(pg));
 }
 
+/**
+ * @brief Compile-time extent of one spatial block within its ZA tile.
+ *
+ * Full blocks return the tile extent `M_R` unchanged (keeping every
+ * compile-time guarantee it carries). Partial blocks clamp
+ * `active - Block*lanes` into [0, lanes]; when the tile extent has an
+ * upper bound the result is spelled as a `Dynamic<1, Lo, Hi>` that
+ * preserves the tile's bounds -- `NonEmpty` raises the lower bound to 1 for
+ * blocks whose existence is already guaranteed.
+ */
 template <::vecops::matmul::Atom Atom, bool Full, bool NonEmpty, int Block>
 VECOPS_ALWAYS_INLINE auto tile_active_extent(nint_t active) {
   using Tile = std::remove_cvref_t<decltype(Atom::M_R)>;
@@ -1779,6 +2213,27 @@ VECOPS_ALWAYS_INLINE auto tile_active_extent(nint_t active) {
   }
 }
 
+/**
+ * @brief Seed one ZA output tile with the C input before accumulation.
+ *
+ * A zero-valued C input needs nothing (ZA was just zeroed). Otherwise the
+ * goal is to place the C block into the tile, and how depends on the C
+ * layout, taking the cheapest instruction that covers the active rows:
+ *
+ * - broadcast row (`stride<0> == Const<0>`) + fp: one `mopa` of an
+ *   all-ones vector with the C row -- an outer product that *multiplies by
+ *   1*, adding `value` into every selected row of the zeroed tile.
+ * - broadcast row + 32-bit integer: one `addha` -- SME's horizontal
+ *   accumulate-add adds the vector into every selected row; a single row
+ *   (M==1) is cheaper as one direct `load_hor` into row 0.
+ * - non-broadcast direct row-major: per-row ZA memory loads (`load_hor`
+ *   of the 32/64-bit container width).
+ * - anything else: per-row vector loads through the access layer plus
+ *   `write_row`.
+ *
+ * @tparam FullM/FullN  Whether the whole spatial block is active (selects
+ *                      all-true row/column predicates).
+ */
 template <int Tile, bool FullM, bool FullN,
           meta::ValueType ActiveM, meta::ValueType ActiveN,
           typename CInput>
@@ -1804,6 +2259,9 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
         std::same_as<
             tensor::stride_type_t<0, InputLayoutOf<CInput>>,
             meta::Const<0>>) {
+      // ZA pre-seed trick (fp): outer product with all-ones multiplies the
+      // broadcast C row by 1 into every active row -- see the function
+      // comment; there is no fp horizontal-add into ZA.
       const auto value = vec::load(
           Tag{}, base, vec::opt::masked(pg), vec::opt::zero);
       const auto pg_rows = [&]() VECOPS_INLINE_LAMBDA {
@@ -1825,6 +2283,8 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
             0, static_cast<vec::Mask<BitsTag>>(pg),
             reinterpret_cast<const U*>(base));
       } else {
+        // ZA pre-seed trick (integer): ADDHA adds the broadcast row into
+        // every active row of the tile in one instruction.
         const auto value = vec::load(
             Tag{}, base, vec::opt::masked(pg), vec::opt::zero);
         const auto pg_rows = [&]() VECOPS_INLINE_LAMBDA {
@@ -1853,6 +2313,14 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
   }
 }
 
+/**
+ * @brief Write one ZA output tile back through the C output access.
+ *
+ * Direct row-major outputs use per-row ZA memory stores (`store_hor` of
+ * the 32/64-bit container width); anything else reads each row back into a
+ * vector and stores through the access layer (applying the output
+ * transform, if any).
+ */
 template <int Tile, bool FullM, bool FullN,
           meta::ValueType ActiveM, meta::ValueType ActiveN,
           typename COutput>
@@ -1889,6 +2357,28 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
   }
 }
 
+/**
+ * @brief Generic per-K-group compute: NM x NN outer products into ZA.
+ *
+ * Loads one operand vector per spatial block (via `load_operand`) and
+ * issues one `mopa` per output tile. The five schedule branches all obey
+ * the same tile-numbering rule -- tile = MI*NN + NI for spatial blocks
+ * (MI, NI) -- which matches how `microkernel` maps linear tile I to output
+ * position (I/NN, I%NN):
+ *
+ * - `NN == 1` / `NM == 1`: degenerate one-dimensional schedules (tiles
+ *   0..NM-1 / 0..NN-1).
+ * - `NM == 2 && NN == 2`: the plain 2x2 grid, tiles 0..3.
+ * - `NN == 2` (NM > 2): tiles assigned per M block as `2*MI` and `2*MI+1`
+ *   -- consecutive tile numbers *row-interleave* across M blocks.
+ * - `NM == 2` (NN > 2): tiles assigned per N block as `NI` and `NN+NI` --
+ *   consecutive tile numbers *column-interleave* across N blocks.
+ *
+ * The `Full*` template flags reflect a dual existence proof: a block is
+ * provably full either by the case's `ExactBlocks` promise (all blocks
+ * except the last per axis exist fully) or by position within the logical
+ * extent (`load_operand`'s runtime clamp still guards the rest).
+ */
 template <::vecops::matmul::Atom Atom, int NM, int NN,
           bool FullM, bool FullN, bool ExactBlocks, bool FullK,
           typename A, typename B>
@@ -1957,6 +2447,8 @@ VECOPS_ALWAYS_INLINE void compute_group(
           Atom, ::vecops::matmul::Operand::A, MI,
           FullM || (ExactBlocks && MI + 1 < NM), FullK>(
           a, a_invariants, m, kg, logical_m, logical_k);
+      // Tile numbers 2*MI, 2*MI+1: row-interleaved across M blocks
+      // (tile = MI*NN + NI with NN == 2).
       mopa<Atom, 2 * MI>(av, b0);
       mopa<Atom, 2 * MI + 1>(av, b1);
     };
@@ -1977,6 +2469,8 @@ VECOPS_ALWAYS_INLINE void compute_group(
           Atom, ::vecops::matmul::Operand::B, NI,
           FullN || (ExactBlocks && NI + 1 < NN), FullK>(
           b, b_invariants, n, kg, logical_n, logical_k);
+      // Tile numbers NI and NN+NI: column-interleaved across the two A
+      // blocks (tile = MI*NN + NI with NM == 2).
       mopa<Atom, NI>(a0, bv);
       mopa<Atom, NN + NI>(a1, bv);
     };
@@ -1986,6 +2480,27 @@ VECOPS_ALWAYS_INLINE void compute_group(
   }
 }
 
+/**
+ * @brief One Tile2D case: NM x NN ZA output tiles over one (m, n) block.
+ *
+ * Structure: zero ZA, seed every output tile with the C input
+ * (`initialize_c_tile`), accumulate all K groups (fast packed-pointer loop
+ * or generic `compute_group`), store every tile back (`store_c_tile`).
+ * Linear tile `I` is output block (I/NN, I%NN) at
+ * `(m + (I/NN)*lanes, n + (I%NN)*lanes)`.
+ *
+ * The compute selection:
+ * - `FastPacked && ExactBlocks`: packed inputs with all blocks guaranteed --
+ *   straight into `compute_packed_groups`.
+ * - `FastPacked` without `ExactBlocks`: same fast loop only when the
+ *   runtime extents prove every logical block exists
+ *   (`all_logical_blocks_exist`); otherwise the generic path with its
+ *   per-block masking.
+ * - everything else (direct inputs, short-K packed, > 4 outputs):
+ *   `compute_generic`.
+ *
+ * @tparam Plan  KernelPlan selecting FastPacked and prefetch flags.
+ */
 template <::vecops::matmul::Atom Atom, typename Plan, int NM, int NN,
           bool FullM, bool FullN, bool ExactBlocks,
           typename A, typename B, typename CInput, typename COutput>
@@ -2025,6 +2540,13 @@ VECOPS_ALWAYS_INLINE void microkernel(
 
   auto compute_generic = [&]() VECOPS_INLINE_LAMBDA {
     constexpr nint_t KP = ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::A>::KPack;
+    // K-group dispatch: KP==1 and the 16-bit atoms split the K walk into a
+    // provably-full body (FullK=true unlocks the unchecked whole-group
+    // loads in load_operand, including the u32 gather) plus one masked
+    // tail group when logical_k % KP != 0. The 4x-byte atom instead runs
+    // every group through the guarded partial instantiation
+    // (FullK=false), relying on load_operand's per-group k < logical_k
+    // masking rather than a split loop.
     if constexpr (KP == 1 || std::same_as<Atom, ::vecops::matmul::SME_BF16F32> ||
                   std::same_as<Atom, ::vecops::matmul::SME_F16F32>) {
       const nint_t full_groups = logical_k / KP;
@@ -2102,15 +2624,32 @@ VECOPS_ALWAYS_INLINE void microkernel(
 
 namespace vecops::kernel::matmul_details {
 
+/**
+ * @brief SME matmul backend: the matmul_details::Backend contract for the
+ *        `SME` implementation tag.
+ *
+ * Owns the whole-problem dispatch described in the file header: the
+ * compile-time owner selection plus the runtime applicability tier in
+ * `run`, one Streaming+ZA region around the Tile2D traversal for the
+ * General path, and the FastPacked plan resolution in `dispatch_plan`.
+ * Scratch is always zero -- everything the ZA microkernel needs lives in
+ * the architectural ZA storage.
+ */
 template <>
 struct Backend<matmul_implementation::SME> {
   using ResourceRequirements = execution::details::ResourceSet<>;
+  /// Tile2D catalog: expanded (ZA64, up to 8 meta blocks) for unpacked F64
+  /// problems, compact otherwise.
   template <::vecops::matmul::Atom Atom, typename, typename A, typename B>
   using Catalog = sme::Catalog<sme::use_expanded_catalog_v<Atom, A, B>>;
   static constexpr int ProblemRank = 2;
 
   static nint_t scratch_bytes() { return 0; }
 
+  /// Resolution of an `Automatic` Tile2D policy: ExactCover over the
+  /// expanded catalog for unpacked F64; otherwise FourRegions when Meta
+  /// bounds favor static constraint pruning (see
+  /// `prefer_constraint_pruning_v`), ExactCover otherwise.
   template <::vecops::matmul::Atom Atom, typename Policy,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename A, typename B>
@@ -2125,6 +2664,25 @@ struct Backend<matmul_implementation::SME> {
               kernel::loop::tile2d_policy::ExactCover>>,
       Policy>;
 
+  /**
+   * @brief Whole-problem entry: resolve the dispatch owner at compile time
+   *        and run it, with a runtime tier for `runtime` applicability.
+   *
+   * The nine no-ZA leaves run directly when statically selected (their
+   * gates re-checked at run time where shapes are only bounded; a
+   * `required` family that still rejects raises a check failure). Before
+   * that, each family whose applicability probe returned `runtime` is
+   * probed with the concrete m/n/k (RuntimeDispatch.h); this serves both
+   * explicit family requests the static owner does not satisfy and
+   * Automatic dispatch whose shapes the types alone cannot decide.
+   * Everything else -- including every owner selected while the scope
+   * already owns StreamingZA -- falls through to the General path: one
+   * `StreamingZARegion` around the whole tile traversal. Packed operands
+   * are forwarded as-is; direct operands and the output are rebound to the
+   * region's active resource set (streaming-appropriate memory ops), and
+   * the output session is committed inside the region so a transformed
+   * output never defers its write-back past SMSTOP.
+   */
   template <::vecops::matmul::Atom Atom, typename Policy,
             bool = false,
             typename FamilyDispatch =
@@ -2392,6 +2950,12 @@ struct Backend<matmul_implementation::SME> {
     scope.with_resources(
         execution::details::arm::StreamingZARegion{},
         [&](auto& active) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          // Packed operands skip the rebind: packed access is statically
+          // direct and untransformed and consumed through raw pointers, so
+          // the region's resource set cannot influence their loads. Direct
+          // operands (and both C sides, which may carry transforms) are
+          // re-expressed under the active resource set so their gathers
+          // and stores issue streaming-appropriate instructions.
           if constexpr (
               sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
               sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>) {
@@ -2409,6 +2973,9 @@ struct Backend<matmul_implementation::SME> {
             matmul_details::run_tiles<Backend, Atom, Policy>(
                 m, n, k, active_a, active_b,
                 active_c_input, active_c_output, scratch);
+            // Commit while still inside the region: a materialized
+            // (transformed) output session must not carry deferred state
+            // across SMSTOP.
             active_c_output.commit();
           }
         });
@@ -2428,6 +2995,12 @@ struct Backend<matmul_implementation::SME> {
     scope.with_resources(
         execution::details::arm::StreamingZARegion{},
         [&](auto& active) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          // Packed operands skip the rebind: packed access is statically
+          // direct and untransformed and consumed through raw pointers, so
+          // the region's resource set cannot influence their loads. Direct
+          // operands (and both C sides, which may carry transforms) are
+          // re-expressed under the active resource set so their gathers
+          // and stores issue streaming-appropriate instructions.
           if constexpr (
               sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
               sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>) {
@@ -2445,11 +3018,28 @@ struct Backend<matmul_implementation::SME> {
             matmul_details::run_tiles<Backend, Atom, Policy>(
                 m, n, k, active_a, active_b,
                 active_c_input, active_c_output, scratch);
+            // Commit while still inside the region: a materialized
+            // (transformed) output session must not carry deferred state
+            // across SMSTOP.
             active_c_output.commit();
           }
         });
   }
 
+  /**
+   * @brief Resolve the compile-time kernel plan for one traversal.
+   *
+   * Unpacked operands always plan the generic path. Packed operands decide
+   * FastPacked from the K-group count (`ceil_div(k, KPack)`, kept as a
+   * Meta value so provenance survives):
+   *
+   * - constant group count: FastPacked iff `k_groups >= 32` -- the
+   *   threshold below which the direct-pointer loop no longer pays for its
+   *   instantiation;
+   * - upper bound < 32: provably slow-K, generic;
+   * - lower bound >= 32: provably long-K, fast;
+   * - unconstrained: fast (see the tuning comment in place).
+   */
   template <::vecops::matmul::Atom Atom, typename A, typename B,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename Fn>
@@ -2491,6 +3081,8 @@ struct Backend<matmul_implementation::SME> {
     }
   }
 
+  /// One Tile2D Case instantiation: forward to the ZA microkernel with the
+  /// case's block shape and mask/exactness guarantees as template flags.
   template <::vecops::matmul::Atom Atom, typename Case, typename Plan,
             typename A, typename B, typename CInput, typename COutput>
   VECOPS_ALWAYS_INLINE static void run_case(
