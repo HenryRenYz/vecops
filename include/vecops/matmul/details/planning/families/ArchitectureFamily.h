@@ -61,6 +61,7 @@
 #include "vecops/matmul/details/planning/FamilySelector.h"
 #include "vecops/matmul/details/kernel/Kernel.h"
 #include "vecops/matmul/details/planning/Implementation.h"
+#include "vecops/matmul/details/planning/orientation/Backend.h"
 #include "vecops/matmul/details/packing/Plan.h"
 #include "vecops/matmul/details/planning/families/ArchitectureBatchPlanner.h"
 #include "vecops/matmul/details/planning/families/ArchitecturePackingPlanner.h"
@@ -72,6 +73,7 @@ namespace vecops::matmul::details {
 template <::vecops::matmul::Atom Atom,
           typename TilePolicy,
           typename FamilyDispatch,
+          bool SwapsAB,
           meta::ValueType MExtent,
           meta::ValueType NExtent,
           meta::ValueType KExtent,
@@ -102,6 +104,7 @@ public:
                        ::vecops::matmul::kernel_family::General>,
       FamilyDispatch,
       ::vecops::matmul::details::AutomaticFamilyDispatch>;
+  static constexpr bool swaps_ab = SwapsAB;
 
   VECOPS_INLINE ArchitectureFamilyInvocation(
       MExtent m, NExtent n, KExtent k,
@@ -1341,14 +1344,32 @@ VECOPS_INLINE auto make_matmul_invocation(
       std::forward<CInput>(c_input));
   auto c_output_spec = tensor::as_output_spec<typename Atom::TAcc>(
       std::forward<COutput>(c_output));
-  return ArchitectureFamilyInvocation<
-      Atom, TilePolicy, FamilyDispatch,
-      decltype(m_value), decltype(n_value), decltype(k_value),
+  constexpr bool SwapAB = orientation::swap_ab_v<
+      Config, decltype(m_value), decltype(n_value), decltype(k_value),
       decltype(a_spec), decltype(b_spec),
-      decltype(c_input_spec), decltype(c_output_spec)>{
-          m_value, n_value, k_value,
-          std::move(a_spec), std::move(b_spec),
-          std::move(c_input_spec), std::move(c_output_spec)};
+      decltype(c_input_spec), decltype(c_output_spec)>;
+  if constexpr (SwapAB) {
+    using SwappedAtom = typename Atom::SwappedAtom;
+    auto transposed_c_input = tensor::transpose_view<0, 1>(c_input_spec);
+    auto transposed_c_output = tensor::transpose_view<0, 1>(c_output_spec);
+    return ArchitectureFamilyInvocation<
+        SwappedAtom, TilePolicy, FamilyDispatch, true,
+        decltype(n_value), decltype(m_value), decltype(k_value),
+        decltype(b_spec), decltype(a_spec),
+        decltype(transposed_c_input), decltype(transposed_c_output)>{
+            n_value, m_value, k_value,
+            std::move(b_spec), std::move(a_spec),
+            std::move(transposed_c_input), std::move(transposed_c_output)};
+  } else {
+    return ArchitectureFamilyInvocation<
+        Atom, TilePolicy, FamilyDispatch, false,
+        decltype(m_value), decltype(n_value), decltype(k_value),
+        decltype(a_spec), decltype(b_spec),
+        decltype(c_input_spec), decltype(c_output_spec)>{
+            m_value, n_value, k_value,
+            std::move(a_spec), std::move(b_spec),
+            std::move(c_input_spec), std::move(c_output_spec)};
+  }
 }
 
 } // namespace vecops::matmul::details

@@ -2,6 +2,9 @@ include("${CMAKE_CURRENT_LIST_DIR}/../cmake/VecopsMultiarchTargets.cmake")
 
 add_compile_definitions(VECOPS_MATH_ASSUME_VALID_INPUTS)
 
+option(VECOPS_ENABLE_MATMUL_ORIENTATION_BENCHMARK
+       "Build the focused compile-time matmul orientation benchmark" OFF)
+
 # Benchmark wrapper around the common sharding and architecture primitive.
 function(vecops_add_benchmark)
     set(options FIXED_SVE FIXED_STREAMING_SVE)
@@ -68,6 +71,18 @@ if(VECOPS_ARCH_FAMILY STREQUAL "x86")
         ARCH Native
     )
     vecops_add_benchmark(
+        NAME MatmulFamilyBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulFamilyBench.cpp
+        ARCH Native
+    )
+    if(VECOPS_ENABLE_MATMUL_ORIENTATION_BENCHMARK)
+        vecops_add_benchmark(
+            NAME MatmulOrientationBench
+            FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulOrientationBench.cpp
+            ARCH Native
+        )
+    endif()
+    vecops_add_benchmark(
         NAME MatmulScenarioBench
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulScenarioBench.cpp
         ARCH Native
@@ -100,6 +115,18 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulBench.cpp
         ARCH ${VECOPS_SME_BENCH_ARCH}
     )
+    vecops_add_benchmark(
+        NAME MatmulFamilyBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulFamilyBench.cpp
+        ARCH ${VECOPS_SME_BENCH_ARCH}
+    )
+    if(VECOPS_ENABLE_MATMUL_ORIENTATION_BENCHMARK)
+        vecops_add_benchmark(
+            NAME MatmulOrientationBench
+            FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulOrientationBench.cpp
+            ARCH ${VECOPS_SME_BENCH_ARCH}
+        )
+    endif()
     if(VECOPS_ENABLE_SME_MMLA_EXPERIMENT_BENCHMARK)
         vecops_add_benchmark(
             NAME MatmulMMLAExperimentBench

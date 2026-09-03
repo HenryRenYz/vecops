@@ -406,10 +406,6 @@ function(_vecops_get_sme_matmul_leaf_library
             "${CMAKE_SOURCE_DIR}/include/vecops")
         target_compile_definitions(${_LEAF_TARGET} PRIVATE
             "$<$<CONFIG:Debug>:VECOPS_DEBUG>")
-        if(USE_RUNTIME_QUANT_INT8)
-            target_compile_definitions(${_LEAF_TARGET} PRIVATE
-                VECOPS_TARGET_SME_FA64=1)
-        endif()
         if(VECOPS_PRESERVE_SUBNORMALS)
             target_compile_definitions(${_LEAF_TARGET} PRIVATE
                 VECOPS_PRESERVE_SUBNORMALS=1)
@@ -556,7 +552,6 @@ function(vecops_add_multiarch_executable)
 
         set(_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF OFF)
         if(_VECOPS_TARGET_HAS_SME AND
-           _VECOPS_TARGET_HAS_SME_FA64 AND
            _VECOPS_TARGET_HAS_I8MM)
             set(_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF ON)
         endif()

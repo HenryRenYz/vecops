@@ -1435,6 +1435,109 @@ void check_batched_runtime_per_row_column_quantization(
   }
 }
 
+/** Explicit RuntimeQuantInt8 coverage for generalized M and N/K tails. */
+template <typename Atom, typename FamilySelection>
+void check_runtime_per_row_column_quantization_family(
+    nint_t m, nint_t n, nint_t k) {
+  using TA = typename Atom::TA;
+  using TB = typename Atom::TB;
+  using Acc = typename Atom::TAcc;
+  static_assert(std::same_as<TA, uint8_t>);
+  static_assert(std::same_as<TB, int8_t>);
+  static_assert(std::same_as<Acc, int32_t>);
+  std::vector<float32_t> a(static_cast<std::size_t>(m * k));
+  std::vector<TB> b(static_cast<std::size_t>(n * k));
+  std::vector<Acc> correction(static_cast<std::size_t>(n));
+  std::vector<float32_t> multipliers(static_cast<std::size_t>(m));
+  std::vector<float32_t> row_scales(static_cast<std::size_t>(m));
+  std::vector<float32_t> column_scales(static_cast<std::size_t>(n));
+  std::vector<float32_t> c(static_cast<std::size_t>(m * n));
+  int32_t input_zero_point = 7;
+
+  for (nint_t row = 0; row < m; ++row) {
+    const float32_t multiplier = static_cast<float32_t>(4 << (row % 2));
+    multipliers[static_cast<std::size_t>(row)] = multiplier;
+    row_scales[static_cast<std::size_t>(row)] = 1.0f / multiplier;
+    for (nint_t kk = 0; kk < k; ++kk) {
+      const int logical = static_cast<int>((row * k + kk) % 7) - 3;
+      a[static_cast<std::size_t>(row * k + kk)] =
+          static_cast<float32_t>(logical) / multiplier;
+    }
+  }
+  for (nint_t i = 0; i < n * k; ++i)
+    b[static_cast<std::size_t>(i)] = conversion_value<TB>(i, 11);
+  for (nint_t col = 0; col < n; ++col) {
+    Acc sum_b{};
+    for (nint_t kk = 0; kk < k; ++kk)
+      sum_b += static_cast<Acc>(b[static_cast<std::size_t>(col * k + kk)]);
+    correction[static_cast<std::size_t>(col)] =
+        -static_cast<Acc>(input_zero_point) * sum_b;
+    column_scales[static_cast<std::size_t>(col)] =
+        0.03125f + static_cast<float32_t>(col % 5) * 0.0078125f;
+  }
+
+  auto a_layout = tensor::make_layout(tensor::make_shape(
+      meta::Any{m}, meta::Any{k}));
+  auto b_layout = tensor::make_layout(tensor::make_shape(
+      meta::Any{n}, meta::Any{k}));
+  auto c_layout = tensor::make_layout(tensor::make_shape(
+      meta::Any{m}, meta::Any{n}));
+  auto packed_b_layout = ::vecops::matmul::packed_layout<
+      Atom, ::vecops::matmul::Operand::B>(b_layout);
+  kernel::Workspace packed_storage(
+      tensor::numel(packed_b_layout) * static_cast<nint_t>(sizeof(TB)) + 64);
+  auto packed_workspace = packed_storage.view();
+  auto* packed_b = static_cast<TB*>(packed_workspace.allocate(
+      tensor::numel(packed_b_layout) * static_cast<nint_t>(sizeof(TB)), 64));
+  auto raw_b_tensor = tensor::make_tensor(b.data(), b_layout);
+  auto packed_b_tensor = tensor::make_tensor(packed_b, packed_b_layout);
+  ExecutionSession pack_execution{};
+  ops::matmul_pack(ops::MatmulPackConfig<
+      Atom, ::vecops::matmul::Operand::B>{})(
+          pack_execution, raw_b_tensor, packed_b_tensor);
+
+  auto quantize = ::vecops::matmul::
+      make_runtime_per_row_asymmetric_quantize_transform({
+          multipliers.data(), &input_zero_point, 0});
+  auto dequantize = ::vecops::matmul::
+      make_runtime_per_row_column_dequantize_transform({
+          row_scales.data(), column_scales.data(), 0});
+  auto correction_layout = tensor::make_layout(
+      tensor::make_shape(meta::Any{m}, meta::Any{n}),
+      tensor::make_strides(meta::cint<0>, meta::cint<1>));
+  auto operation = make_test_matmul_invocation(
+      ops::MatmulConfig<Atom, FamilySelection>{},
+      meta::Any{m}, meta::Any{n}, meta::Any{k},
+      tensor::input<TA>(tensor::make_tensor(a.data(), a_layout), quantize),
+      tensor::input<TB>(packed_b_tensor),
+      tensor::input<Acc>(tensor::make_tensor(
+          correction.data(), correction_layout)),
+      tensor::output<Acc>(tensor::make_tensor(c.data(), c_layout), dequantize));
+  kernel::Workspace storage(operation.required_workspace());
+  auto workspace = storage.view();
+  operation(workspace);
+
+  for (nint_t row = 0; row < m; ++row) {
+    for (nint_t col = 0; col < n; ++col) {
+      Acc expected = correction[static_cast<std::size_t>(col)];
+      for (nint_t kk = 0; kk < k; ++kk) {
+        const TA qa = static_cast<TA>(
+            a[static_cast<std::size_t>(row * k + kk)] *
+                multipliers[static_cast<std::size_t>(row)] +
+            input_zero_point);
+        expected += static_cast<Acc>(qa) * static_cast<Acc>(
+            b[static_cast<std::size_t>(col * k + kk)]);
+      }
+      const float32_t reference = static_cast<float32_t>(expected) *
+          row_scales[static_cast<std::size_t>(row)] *
+          column_scales[static_cast<std::size_t>(col)];
+      EXPECT_TRUE(conversion_values_equal(
+          reference, c[static_cast<std::size_t>(row * n + col)]))
+          << "row=" << row << " col=" << col;
+    }
+  }
+}
+
 template <typename Atom, ExtentMode Mode,
           nint_t M, nint_t N, nint_t K>
 std::vector<typename Atom::TAcc> run_native_extent_case() {

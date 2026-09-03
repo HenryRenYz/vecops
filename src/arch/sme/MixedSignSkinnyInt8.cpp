@@ -10,29 +10,10 @@
 #include "vecops/CoreTypes.h"
 #include "vecops/util/Math.h"
 #include "vecops/vec/Vec.h"
-#include "vecops/vec/details/sve/Basic.h"
 
 namespace vecops::kernel::matmul_details::sme {
 
 #if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
-
-// TODO: Keep mixed-sign widening DOT SME-backend-local until signedness,
-// operand ordering, and accumulator semantics have a second backend consumer.
-// This uses only ordinary SVE data instructions; SME state remains owned by
-// the existing vec SME resource wrapper.
-template <typename TA, typename TB>
-VECOPS_ALWAYS_INLINE svint32_t mixed_sign_dot_add(
-    svint32_t accumulator, svint8_t signed_value,
-    svuint8_t unsigned_value) {
-  static_assert(
-      (std::same_as<TA, int8_t> && std::same_as<TB, uint8_t>) ||
-      (std::same_as<TA, uint8_t> && std::same_as<TB, int8_t>));
-  if constexpr (std::same_as<TA, int8_t>) {
-    return svsudot_s32(accumulator, signed_value, unsigned_value);
-  } else {
-    return svusdot_s32(accumulator, unsigned_value, signed_value);
-  }
-}
 
 template <typename T>
 VECOPS_ALWAYS_INLINE auto load_mixed_sign_input(
@@ -43,16 +24,15 @@ VECOPS_ALWAYS_INLINE auto load_mixed_sign_input(
 }
 
 template <typename TA, typename TB>
-VECOPS_ALWAYS_INLINE svint32_t mixed_sign_dot_values(
-    svint32_t accumulator, vec::Vec<vec::ScalableTag<TA, 0>> a,
+VECOPS_ALWAYS_INLINE auto mixed_sign_dot_values(
+    vec::Vec<vec::ViewAs<int32_t, vec::ScalableTag<TA, 0>>> accumulator,
+    vec::Vec<vec::ScalableTag<TA, 0>> a,
     vec::Vec<vec::ScalableTag<TB, 0>> b) {
-  const auto raw_a = vec::details::sve_basic_raw_word(a);
-  const auto raw_b = vec::details::sve_basic_raw_word(b);
-  if constexpr (std::same_as<TA, int8_t>) {
-    return mixed_sign_dot_add<TA, TB>(accumulator, raw_a, raw_b);
-  } else {
-    return mixed_sign_dot_add<TA, TB>(accumulator, raw_b, raw_a);
-  }
+  using ATag = vec::ScalableTag<TA, 0>;
+  using BTag = vec::ScalableTag<TB, 0>;
+  using AccTag = vec::ViewAs<int32_t, ATag>;
+  return vec::widening_dot(
+      AccTag{}, ATag{}, BTag{}, a, b, accumulator);
 }
 
 template <bool VaryRows, int Block, typename TA, typename TB>
@@ -62,16 +42,16 @@ VECOPS_ALWAYS_INLINE void mixed_sign_skinny_block(
     nint_t logical_k) {
   static_assert(1 <= Block && Block <= 8);
   using ATag = vec::ScalableTag<TA, 0>;
-  using AccTag = vec::ScalableTag<int32_t, 0>;
+  using AccTag = vec::ViewAs<int32_t, ATag>;
 
-  auto sum0 = svdup_s32(0);
-  auto sum1 = svdup_s32(0);
-  auto sum2 = svdup_s32(0);
-  auto sum3 = svdup_s32(0);
-  auto sum4 = svdup_s32(0);
-  auto sum5 = svdup_s32(0);
-  auto sum6 = svdup_s32(0);
-  auto sum7 = svdup_s32(0);
+  auto sum0 = vec::zeros(AccTag{});
+  auto sum1 = vec::zeros(AccTag{});
+  auto sum2 = vec::zeros(AccTag{});
+  auto sum3 = vec::zeros(AccTag{});
+  auto sum4 = vec::zeros(AccTag{});
+  auto sum5 = vec::zeros(AccTag{});
+  auto sum6 = vec::zeros(AccTag{});
+  auto sum7 = vec::zeros(AccTag{});
 
   nint_t kk = 0;
   nint_t remaining = logical_k;
@@ -138,9 +118,8 @@ VECOPS_ALWAYS_INLINE void mixed_sign_skinny_block(
     remaining -= active;
   }
 
-  const auto reduce = [&](svint32_t value) VECOPS_INLINE_LAMBDA {
-    return vec::reduce_add(
-        AccTag{}, vec::details::sve_basic_wrap_word<AccTag>(value));
+  const auto reduce = [&](vec::Vec<AccTag> value) VECOPS_INLINE_LAMBDA {
+    return vec::reduce_add(AccTag{}, value);
   };
   const auto store = [&](nint_t logical, int32_t value)
       VECOPS_INLINE_LAMBDA {

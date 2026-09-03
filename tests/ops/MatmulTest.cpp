@@ -223,7 +223,9 @@ void check_mixed_packing(
   }
 }
 
-template <meta::ValueType KExtent>
+template <meta::ValueType KExtent,
+          typename FamilySelection =
+              ::vecops::matmul::family_selection::Automatic>
 void check_both_packed(
     KExtent k_extent, nint_t m = 37, nint_t n = 16) {
   using Atom = ::vecops::matmul::AMX_BF16F32;
@@ -259,7 +261,8 @@ void check_both_packed(
   ::vecops::matmul::details::run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(pack_execution, bt, bpt);
   auto ct = make_tensor(
       c.data(), make_layout(make_shape(Any{m}, Any{n})));
-  auto operation = test::matmul::make_test_matmul_invocation(ops::MatmulConfig<Atom>{},
+  auto operation = test::matmul::make_test_matmul_invocation(
+      ops::MatmulConfig<Atom, FamilySelection>{},
       Any{m}, Any{n}, k_extent, apt, bpt, ct);
   EXPECT_EQ(
       operation.required_workspace(),
@@ -666,6 +669,13 @@ TEST(MatmulTest, ExplicitKernelFamiliesSelectSmallVectorOrGeneral) {
       ::vecops::matmul::family_selection::Require<
           ::vecops::matmul::kernel_family::SmallVector>>(
               cint<1>, cint<16>, cint<65>);
+  // Runtime extents retain the same family when their actual shape is within
+  // the shared profitability rule.
+  check_raw_family<
+      Atom,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::SmallVector>>(
+              Any{1}, Any{16}, Any{65});
   check_raw_family<
       Atom,
       ::vecops::matmul::family_selection::Require<
@@ -675,7 +685,26 @@ TEST(MatmulTest, ExplicitKernelFamiliesSelectSmallVectorOrGeneral) {
       Atom,
       ::vecops::matmul::family_selection::Prefer<
           ::vecops::matmul::kernel_family::SmallVector>>(
-              cint<19>, cint<21>, cint<65>);
+      cint<19>, cint<21>, cint<65>);
+#if defined(HAS_AMX_INT8)
+  using RequireSmall = ::vecops::matmul::family_selection::Require<
+      ::vecops::matmul::kernel_family::SmallVector>;
+  check_raw_family<::vecops::matmul::AMX_I8I32<int8_t, int8_t>, RequireSmall>(
+      Any{1}, Any{16}, Any{129});
+  check_raw_family<::vecops::matmul::AMX_I8I32<int8_t, uint8_t>, RequireSmall>(
+      Any{16}, Any{1}, Any{129});
+  check_raw_family<::vecops::matmul::AMX_I8I32<uint8_t, int8_t>, RequireSmall>(
+      cint<1>, cint<16>, cint<129>);
+  check_raw_family<::vecops::matmul::AMX_I8I32<uint8_t, uint8_t>, RequireSmall>(
+      cint<16>, cint<1>, cint<129>);
+#endif
+}
+
+TEST(MatmulTest, ResidualSplitCoversProfitableAndGeneralizedShapes) {
+  using RequireResidual = ::vecops::matmul::family_selection::Require<
+      ::vecops::matmul::kernel_family::ResidualSplit>;
+  check_both_packed<Any, RequireResidual>(Any{1024}, 17, 33);
+  check_both_packed<Any, RequireResidual>(Any{257}, 35, 53);
 }
 
 TEST(MatmulTest, OperandAMayBePrepacked) {
@@ -1132,6 +1161,66 @@ void check_fast_packed_path(KExtent k_value) {
   }
 }
 
+template <typename Atom,
+          meta::ValueType MExtent, meta::ValueType NExtent,
+          meta::ValueType KExtent>
+void check_required_packed_dot(
+    MExtent m_value, NExtent n_value, KExtent k_value) {
+  using T = typename Atom::TA;
+  using Acc = typename Atom::TAcc;
+  const nint_t m = static_cast<nint_t>(m_value);
+  const nint_t n = static_cast<nint_t>(n_value);
+  const nint_t k = static_cast<nint_t>(k_value);
+  std::vector<T> a(static_cast<std::size_t>(m * k));
+  std::vector<T> b(static_cast<std::size_t>(n * k));
+  std::vector<Acc> c(static_cast<std::size_t>(m * n), Acc{});
+  for (nint_t i = 0; i < m * k; ++i) a[i] = value<T>(i, 13);
+  for (nint_t i = 0; i < n * k; ++i) b[i] = value<T>(i, 11);
+  auto al = make_layout(make_shape(m_value, k_value));
+  auto bl = make_layout(make_shape(n_value, k_value));
+  auto at = make_tensor(a.data(), al);
+  auto bt = make_tensor(b.data(), bl);
+  auto apl = ::vecops::matmul::packed_layout<
+      Atom, ::vecops::matmul::Operand::A>(al);
+  auto bpl = ::vecops::matmul::packed_layout<
+      Atom, ::vecops::matmul::Operand::B>(bl);
+  kernel::Workspace packed_owner(
+      (numel(apl) + numel(bpl)) * static_cast<nint_t>(sizeof(T)) + 128);
+  auto packed_workspace = packed_owner.view();
+  auto* ap = static_cast<T*>(packed_workspace.allocate(
+      numel(apl) * static_cast<nint_t>(sizeof(T)), 64));
+  auto* bp = static_cast<T*>(packed_workspace.allocate(
+      numel(bpl) * static_cast<nint_t>(sizeof(T)), 64));
+  auto apt = make_tensor(ap, apl);
+  auto bpt = make_tensor(bp, bpl);
+  ExecutionSession execution{};
+  ::vecops::matmul::details::run_matmul_pack<
+      Atom, ::vecops::matmul::Operand::A>(execution, at, apt);
+  ::vecops::matmul::details::run_matmul_pack<
+      Atom, ::vecops::matmul::Operand::B>(execution, bt, bpt);
+  auto ct = make_tensor(c.data(), make_layout(make_shape(m_value, n_value)));
+  using Config = ops::MatmulConfig<
+      Atom,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::PackedDot>>;
+  auto operation = test::matmul::make_test_matmul_invocation(
+      Config{}, m_value, n_value, k_value, apt, bpt, ct);
+  operation(execution);
+  for (nint_t i = 0; i < m; ++i) {
+    for (nint_t j = 0; j < n; ++j) {
+      Acc expected{};
+      for (nint_t kk = 0; kk < k; ++kk)
+        expected += static_cast<Acc>(a[i * k + kk]) *
+                    static_cast<Acc>(b[j * k + kk]);
+      if constexpr (std::is_floating_point_v<Acc>) {
+        EXPECT_NEAR(c[i * n + j], expected, 5.0e-4f);
+      } else {
+        EXPECT_EQ(c[i * n + j], expected);
+      }
+    }
+  }
+}
+
 #if VECOPS_TARGET_SHARD_INDEX == 0
 
 TEST(MatmulTest, AllZA32MicrokernelShapesAndKTails) {
@@ -1316,13 +1405,57 @@ TEST(MatmulTest, ExplicitKernelFamiliesSelectSmallVectorOrGeneral) {
   check_raw<
       Atom, kernel::matmul_policy::Automatic,
       ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::SmallVector>>(
+              Any{1}, Any{16}, Any{17});
+  check_raw<
+      Atom, kernel::matmul_policy::Automatic,
+      ::vecops::matmul::family_selection::Require<
           ::vecops::matmul::kernel_family::General>>(
               cint<1>, cint<16>, cint<17>);
   check_raw<
       Atom, kernel::matmul_policy::Automatic,
       ::vecops::matmul::family_selection::Prefer<
           ::vecops::matmul::kernel_family::SmallVector>>(
-              cint<19>, cint<21>, cint<17>);
+      cint<19>, cint<21>, cint<17>);
+
+  using RequireSmall = ::vecops::matmul::family_selection::Require<
+      ::vecops::matmul::kernel_family::SmallVector>;
+  check_raw<::vecops::matmul::SME_BF16F32,
+            kernel::matmul_policy::Automatic, RequireSmall>(
+      Any{1}, Any{8}, Any{65});
+  check_raw<::vecops::matmul::SME_F16F32,
+            kernel::matmul_policy::Automatic, RequireSmall>(
+      cint<16>, cint<1>, cint<65>);
+  check_raw<::vecops::matmul::SME_I8I32<int8_t, int8_t>,
+            kernel::matmul_policy::Automatic, RequireSmall>(
+      Any{1}, Any{64}, Any{257});
+  check_raw<::vecops::matmul::SME_I8I32<uint8_t, uint8_t>,
+            kernel::matmul_policy::Automatic, RequireSmall>(
+      cint<64>, cint<1>, cint<257>);
+  check_raw<::vecops::matmul::SME_I8I32<int8_t, uint8_t>,
+            kernel::matmul_policy::Automatic, RequireSmall>(
+      Any{1}, Any{64}, Any{257});
+  check_raw<::vecops::matmul::SME_I8I32<uint8_t, int8_t>,
+            kernel::matmul_policy::Automatic, RequireSmall>(
+      cint<64>, cint<1>, cint<257>);
+#if defined(HAS_SME_F64F64)
+  check_raw<::vecops::matmul::SME_F64F64,
+            kernel::matmul_policy::Automatic, RequireSmall>(
+      Any{1}, Any{64}, Any{257});
+#endif
+}
+
+TEST(MatmulTest, PackedDotCoversPrimaryTinyStaticAndDynamicShapes) {
+  check_required_packed_dot<::vecops::matmul::SME_BF16F32>(
+      Any{2}, Any{8}, Any{1025});
+  check_required_packed_dot<::vecops::matmul::SME_BF16F32>(
+      cint<4>, cint<2>, cint<257>);
+  check_required_packed_dot<
+      ::vecops::matmul::SME_I8I32<int8_t, int8_t>>(
+          Any{2}, Any{4}, Any{513});
+  check_required_packed_dot<
+      ::vecops::matmul::SME_I8I32<uint8_t, uint8_t>>(
+          cint<4>, cint<4>, cint<257>);
 }
 
 TEST(MatmulTest, EitherOperandMayBePrepacked) {

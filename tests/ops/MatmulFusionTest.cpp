@@ -228,6 +228,17 @@ TEST(MatmulFusionTest, IndependentQuantizationAndNativeI8Accumulate) {
       ::vecops::matmul::SME_I8I32<int8_t, int8_t>>(1, 8, 129);
 }
 
+TEST(MatmulFusionTest, RuntimeQuantFamilySupportsMultipleRowsAndTails) {
+  using Atom = ::vecops::matmul::SME_I8I32<uint8_t, int8_t>;
+  using RequireRuntimeQuant =
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::RuntimeQuantInt8>;
+  vecops::test::matmul::check_runtime_per_row_column_quantization_family<
+      Atom, RequireRuntimeQuant>(5, 19, 67);
+  vecops::test::matmul::check_runtime_per_row_column_quantization_family<
+      Atom, RequireRuntimeQuant>(3, 17, 66);
+}
+
 #elif VECOPS_TARGET_SHARD_INDEX == 4
 
 // F64 runtime fusion and the heavy auto-packing conversion stay isolated from

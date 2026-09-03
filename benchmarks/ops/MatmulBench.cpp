@@ -175,7 +175,7 @@ void register_matmul_bench_shard() {
   } else if constexpr (CatalogShard == 2) {
     register_dispatch_extent_pairs<::vecops::matmul::SME_BF16F32, 16, TargetShard>();
   } else if constexpr (CatalogShard == 3) {
-    register_packed_mmla_extent_pairs<
+    register_packed_dot_extent_pairs<
         ::vecops::matmul::SME_BF16F32, 0, TargetShard>();
   } else if constexpr (CatalogShard == 4) {
     register_dtype_probe_extent_pairs<
@@ -192,11 +192,11 @@ void register_matmul_bench_shard() {
   } else if constexpr (CatalogShard == 6) {
     register_extended_integer_skinny_extent_pairs<
         NativeI8S8S8, 0, TargetShard>();
-    register_packed_mmla_extent_pairs<NativeI8S8S8, 8, TargetShard>();
+    register_packed_dot_extent_pairs<NativeI8S8S8, 8, TargetShard>();
   } else if constexpr (CatalogShard == 7) {
     register_extended_integer_skinny_extent_pairs<
         NativeI8U8U8, 0, TargetShard>();
-    register_packed_mmla_extent_pairs<NativeI8U8U8, 8, TargetShard>();
+    register_packed_dot_extent_pairs<NativeI8U8U8, 8, TargetShard>();
   } else if constexpr (CatalogShard == 8) {
 #if defined(HAS_SME_F64F64)
     register_dtype_probe_extent_pairs<

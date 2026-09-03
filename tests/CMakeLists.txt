@@ -163,6 +163,11 @@ if(VECOPS_ARCH_FAMILY STREQUAL "x86")
         FILES ops/MatmulBatchTest.cpp
         FOLDER ops/matmul
         ARCH Native)
+    vecops_add_test(
+        NAME MatmulOrientationTest
+        FILES ops/MatmulOrientationTest.cpp
+        FOLDER ops/matmul
+        ARCH Native)
 elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
     set(VECOPS_SME_TEST_ARCH Native)
     if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
@@ -215,6 +220,11 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
     vecops_add_test(
         NAME MatmulBatchTest
         FILES ops/MatmulBatchTest.cpp
+        FOLDER ops/matmul
+        ARCH ${VECOPS_SME_TEST_ARCH})
+    vecops_add_test(
+        NAME MatmulOrientationTest
+        FILES ops/MatmulOrientationTest.cpp
         FOLDER ops/matmul
         ARCH ${VECOPS_SME_TEST_ARCH})
     if(VECOPS_NATIVE_HAS_SME AND CMAKE_OBJDUMP)
