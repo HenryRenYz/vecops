@@ -11,7 +11,8 @@
 #include "vecops/execution/details/x86/Resources.h"
 #include "vecops/platform/Target.h"
 
-/** @file Backend.h @brief x86 AMX execution-state backend. */
+/** @file vecops/execution/details/x86/Backend.h
+ *  @brief x86 AMX execution-state backend. */
 
 namespace vecops::execution::details {
 

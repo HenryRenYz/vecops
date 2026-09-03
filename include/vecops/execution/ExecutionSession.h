@@ -15,7 +15,7 @@
 #include "vecops/kernel/Workspace.h"
 
 /**
- * @file ExecutionSession.h
+ * @file vecops/execution/ExecutionSession.h
  * @brief Lexically scoped, compile-time CPU resource and configuration model.
  *
  * Operators declare a nested `ResourceRequirements` type. `with_region()` and
@@ -27,13 +27,51 @@
  * The model deliberately performs no runtime capability or current-state
  * detection. Missing compile-time information selects the conservative backend
  * contract or fails compilation; it never creates a runtime fast-path test.
+ *
+ * ## Usage
+ *
+ * @code
+ * #include "vecops/execution/ExecutionSession.h"
+ *
+ * kernel::Workspace storage(bytes);
+ * auto view = storage.view();
+ * ExecutionSession session{view};
+ *
+ * session.with_region(op0, op1, [&](auto& scope) {
+ *   // Inside the region the scope type proves op0/op1 resources are active;
+ *   // operator calls taking a scope add no further hardware transition.
+ *   op0(scope, a, b);
+ *   op1(scope, c, d);
+ *   // Scratch allocations share the worker workspace via mark/rewind.
+ *   auto mark = scope.workspace_view().mark();
+ *   ...
+ *   scope.workspace_view().rewind(mark);
+ * });
+ * @endcode
+ *
+ * ## Pitfalls
+ *
+ * - Scope values must not escape their callback: the active-resource proof
+ *   is lexical, and the underlying hardware mode (e.g. SME Streaming+ZA)
+ *   is released when the region ends.
+ * - `workspace_view()` asserts unless the session/scope was created with a
+ *   workspace.
+ * - `with_configuration()` is only valid when the configuration's coarse
+ *   resource is already active (`@pre` on the method).
+ * - Backends may require the region callback to be `noexcept` (ARM
+ *   Streaming+ZA restores processor state in an unwind path that cannot
+ *   tolerate exceptions); this is enforced by static_assert, not caught
+ *   at runtime.
  */
 
 namespace vecops::execution {
 
 namespace details {
 
-/** Extract an operator's requirements, defaulting to the backend contract. */
+/** Extract an operator's requirements, defaulting to the backend contract.
+ *  The void_t probe below only engages when the operator declares a nested
+ *  `ResourceRequirements`; operators without one run under the backend's
+ *  default requirements instead of failing to compile. */
 template <typename T, typename = void>
 struct RequirementsOf {
   using type = typename current_backend_t::DefaultRequirements;
@@ -57,6 +95,8 @@ template <typename ActiveResources, typename ActiveConfiguration = void>
 class Scope;
 
 template <typename Current, typename Required, typename Fn>
+/** Forward declaration; the backend-neutral lexical transition defined
+ *  below combines Current+Required, validates, and enters via the backend. */
 VECOPS_ALWAYS_INLINE decltype(auto) enter_resources(
     kernel::WorkspaceView* workspace, Fn&& fn);
 
@@ -75,6 +115,8 @@ inline constexpr bool is_execution_scope_v = requires(T& scope) {
   { scope.workspace_view() } -> std::same_as<kernel::WorkspaceView&>;
 };
 
+/** @brief Constraint-facing form of `is_execution_scope_v`: any type that
+ *  exposes active resource/configuration types and a worker workspace. */
 template <typename T>
 concept ExecutionScope = is_execution_scope_v<T>;
 

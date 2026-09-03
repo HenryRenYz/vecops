@@ -2,6 +2,25 @@
 // Copyright (c) vecops contributors.
 //
 
+/**
+ * @file vecops/matmul/details/packing/Plan.h
+ * @brief Plan layer of the matmul packing sublayer.
+ *
+ * A "plan" types one packing call: it binds the Atom/Side packing format to
+ * the concrete input/output specs, statically selects the implementation,
+ * and is executed through an execution scope that acquires the
+ * implementation's resources.  The layer follows the library's two-phase
+ * protocol: `required_workspace()` queries without executing (the Workspace
+ * operator() builds a plain ExecutionSession from an externally owned
+ * workspace), and the Scope operator() runs under resources supplied by the
+ * caller's scope via `with_resources`.
+ *
+ * MatmulPackPlan is the ordinary A/B pack; MatmulPackBCompensatedPlan adds
+ * the asymmetric-quantization column sidecar for signed-byte B.  The
+ * `run_matmul_pack*` free functions are the entry points the public matmul
+ * API calls; they deduce the specs and drive the plan.
+ */
+
 #ifndef VECOPS_MATMUL_DETAILS_PACK_PLAN_H
 #define VECOPS_MATMUL_DETAILS_PACK_PLAN_H
 
@@ -18,6 +37,32 @@
 
 namespace vecops::matmul::details {
 
+/**
+ * @brief Implementation tag chosen for one packing call, as a fallback chain.
+ *
+ * Implementations are probed in priority order via each Backend's
+ * `eligible<InputSpec, OutputSpec>` (see packing/Backend.h); the first
+ * eligible one wins:
+ *
+ * 1. `SME` — native ZA-transpose pack of raw memory (fastest, strictest
+ *    eligibility: K-contiguous, no transform, same memory/compute type).
+ * 2. `SMEFP32ToFP64` — fp32 memory packed into the fp64 format through a
+ *    ZA transpose + widening.
+ * 3. `SMEStagedTransform` — native pack first, then apply an elementwise
+ *    transform in place outside the streaming region.
+ * 4. `SMEStagedFP16ToFP32` — pack fp16 memory first, then expand in place
+ *    to the fp32 format.
+ * 5. `SMEPostprocess` — pack the memory type and fuse conversion/transform
+ *    into the ZA read-out (fp32<->bf16/fp16, fp32 quantization).
+ * 6. `Vector` — the format's base implementation: generic vector loops on
+ *    the AMX side, the generic interleaved pack on the SME side.
+ *
+ * On x86 the SME-family tags have no Backend specialization (the sentinel
+ * primary template answers `eligible = false`), so the chain always ends at
+ * `Vector`.  Note `SMEFP32ToFP64Single` is intentionally not in this chain;
+ * the runtime architecture-family planner probes it separately
+ * (matmul/details/planning/families/ArchitectureFamily.h).
+ */
 template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           typename InputSpec, typename OutputSpec>
 using SelectedPackImplementation = std::conditional_t<
@@ -52,7 +97,16 @@ using SelectedPackImplementation = std::conditional_t<
                     kernel::matmul_pack_implementation::SMEPostprocess,
                     kernel::matmul_pack_implementation::Vector>>>>>;
 
-/** Stateless typed plan for one ordinary A/B packing call. */
+/**
+ * @brief Stateless typed plan for one ordinary A/B packing call.
+ *
+ * Binds the Atom/Side packing format to InputSpec/OutputSpec, selects the
+ * implementation via SelectedPackImplementation, validates types statically
+ * (rank two, output element == operand type, no output transform) and
+ * shapes at runtime (non-negative extents, corresponding packed layout,
+ * 64-byte aligned output base, no in-place aliasing), then executes
+ * through the kernel layer.  Workspace need is always zero.
+ */
 template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           typename InputSpec, typename OutputSpec>
 class MatmulPackPlan {
@@ -99,6 +153,9 @@ public:
         });
   }
 
+  /// Two-phase entry: run from an externally owned workspace.  Wrapping the
+  /// workspace in a bare ExecutionSession delegates resource acquisition to
+  /// the session's default handling instead of the caller's scope.
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace, const InputSpec& input,
       const OutputSpec& output) const {
@@ -131,6 +188,10 @@ private:
   template <execution::ExecutionScope Scope>
   VECOPS_ALWAYS_INLINE static void execute(
       Scope& scope, const InputSpec& input, const OutputSpec& output) {
+    // The input policy vectorizes along the format's packing axis
+    // (A: K runs, B: spatial runs — see amx/sme Format.h VectorAxis); the
+    // output policy addresses the innermost packed dims directly since the
+    // packers write raw linear block streams.
     using InputPolicy = tensor::InputAccessPolicy<
         Packing::VectorAxis, 1, tensor::AccessPlan::direct>;
     using OutputPolicy = tensor::OutputAccessPolicy<
@@ -149,15 +210,15 @@ private:
 };
 
 /**
- * Pack signed-byte B and generate the asymmetric-A column correction.
+ * @brief Stateless typed plan for B packing with an asymmetric-A correction.
  *
+ * Pack signed-byte B and generate the asymmetric-A column correction.
  * The packed ABI is identical to MatmulPack.  The independent int32[N]
  * sidecar stores -a_zero_point * sum_k(B[n,k]) and can be broadcast directly
  * as the C input of an unsigned-A x signed-B matmul.  This is deliberately a
  * parallel operation instead of a nullable option on MatmulPack, so ordinary
  * packing keeps exactly the same template path and generated instructions.
  */
-/** Stateless typed plan for B packing with an asymmetric-A correction. */
 template <::vecops::matmul::Atom Atom,
           typename InputSpec, typename OutputSpec,
           typename CompensationOutputSpec>
@@ -296,6 +357,8 @@ private:
 
 };
 
+/// Deduce InputSpec/OutputSpec from the operands and build the ordinary
+/// A/B pack plan (see MatmulPackPlan).
 template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           tensor::InputOperand Input, tensor::OutputOperand Output>
 VECOPS_INLINE auto select_matmul_pack_plan(
@@ -309,6 +372,7 @@ VECOPS_INLINE auto select_matmul_pack_plan(
       Atom, Side, InputSpec, OutputSpec>{};
 }
 
+/// Workspace-query phase for the ordinary A/B pack: always returns zero.
 template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           tensor::InputOperand Input, tensor::OutputOperand Output>
 VECOPS_INLINE nint_t matmul_pack_workspace_bytes(
@@ -322,6 +386,8 @@ VECOPS_INLINE nint_t matmul_pack_workspace_bytes(
   return plan.required_workspace(input_spec, output_spec);
 }
 
+/// Execute-phase entry for the ordinary A/B pack: deduce the specs, build
+/// the plan, and run it under `scope`.
 template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           execution::ExecutionScope Scope,
           tensor::InputOperand Input, tensor::OutputOperand Output>
@@ -336,6 +402,8 @@ VECOPS_INLINE void run_matmul_pack(
   plan(scope, input_spec, output_spec);
 }
 
+/// Deduce the three specs and build the compensated B-pack plan (see
+/// MatmulPackBCompensatedPlan).
 template <::vecops::matmul::Atom Atom,
           tensor::InputOperand Input,
           tensor::OutputOperand Output,
@@ -355,6 +423,7 @@ VECOPS_INLINE auto select_matmul_pack_b_compensated_plan(
       Atom, InputSpec, OutputSpec, CompensationSpec>{};
 }
 
+/// Workspace-query phase for the compensated B pack: always returns zero.
 template <::vecops::matmul::Atom Atom,
           tensor::InputOperand Input,
           tensor::OutputOperand Output,
@@ -375,6 +444,8 @@ VECOPS_INLINE nint_t matmul_pack_b_compensated_workspace_bytes(
       input_spec, output_spec, compensation_spec);
 }
 
+/// Execute-phase entry for the compensated B pack: deduce the specs, build
+/// the plan, and run it under `scope`.
 template <::vecops::matmul::Atom Atom,
           execution::ExecutionScope Scope,
           tensor::InputOperand Input,

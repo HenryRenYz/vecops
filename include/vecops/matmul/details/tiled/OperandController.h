@@ -13,12 +13,40 @@
 #include "vecops/matmul/details/tiled/PolicyTraits.h"
 #include "vecops/tensor/DataAccess.h"
 
+/**
+ * @file vecops/matmul/details/tiled/OperandController.h
+ * @brief Per-operand packing decisions for the generic tiled matmul: packed
+ *        block narrowing, whether to pack at all, and how long one packed
+ *        copy lives (per KC block vs the whole operand).
+ *
+ * A and B are controlled independently -- one side packing never forces the
+ * other (no Cartesian branch) -- and each side is either consumed as a plain
+ * narrowed view of the user's tensor or repacked into workspace through the
+ * matmul packing Plan layer. The `PackingExtent` resolved in PolicyTraits.h
+ * decides whether the packed copy is created inside the K loop (per panel) or
+ * hoisted around the whole loop nest (whole operand).
+ */
+
 namespace vecops::matmul::details {
 
+/// Whether this input spec already carries the atom's packed layout for one
+/// side (never re-packed, under any PackingMode).
 template <typename AtomT, Operand Side, typename Spec>
 inline constexpr bool is_packed_spec_v = is_packed_layout<
     AtomT, Side, typename Spec::InputLayout>();
 
+/**
+ * @brief Narrow one operand to the current spatial x K block.
+ *
+ * Packed inputs cannot be sliced row by row: the packed layout is
+ * `[panel, k-group, row(panel), k(KPack)]` and a block boundary only ever
+ * lands on whole panels and whole K groups. The narrowing therefore advances
+ * only the two outermost dimensions -- `(spatial_origin / panel)` steps in
+ * dim 0 and `(k_origin / KStep)` steps in dim 1 -- and re-bases the data
+ * pointer, keeping dims 2..3 (row within panel, k within group) restarting
+ * at zero for the new block. Unpacked inputs take two ordinary narrow
+ * views.
+ */
 template <typename AtomT, Operand Side, tensor::InputSpecLike Spec,
           meta::ValueType Spatial, meta::ValueType Reduction>
 VECOPS_INLINE auto narrow_input(
@@ -26,6 +54,9 @@ VECOPS_INLINE auto narrow_input(
     nint_t k_origin, Reduction reduction) {
   if constexpr (is_packed_spec_v<AtomT, Side, Spec>) {
     using Packing = packing_t<AtomT, Side>;
+    // The two packing formats expose their constants differently (AMX has
+    // static Panel/KTile members, SME a panel() function and KPack only);
+    // probe for the richer spelling and fall back to the common one.
     const nint_t panel = [&] {
       if constexpr (requires { Packing::Panel; }) return Packing::Panel;
       else return static_cast<nint_t>(Packing::panel());
@@ -42,6 +73,8 @@ VECOPS_INLINE auto narrow_input(
         typename Spec::TransformType, tensor::NoTransform>,
         "packed matmul panels must be direct and untransformed");
     const auto& layout = spec.input_layout();
+    // Re-base only: the first two packed dims advance (panel index via
+    // strides[0], k-group index via strides[1]); the row/k dims restart at 0.
     const nint_t offset = (spatial_origin / panel) * layout.strides()[0] +
         (k_origin / KStep) * layout.strides()[1];
     auto panel_view = tensor::make_tensor(
@@ -55,6 +88,14 @@ VECOPS_INLINE auto narrow_input(
   }
 }
 
+/**
+ * @brief Whether one operand should be repacked into workspace.
+ *
+ * Already-packed inputs are never re-packed; `always`/`never` are honored
+ * literally; `automatic` packs only when the operand's innermost (K) stride
+ * is not a compile-time 1 -- i.e. the input is not known K-contiguous and
+ * packing is what makes it consumable by the packed-input kernel paths.
+ */
 template <typename Policy, typename AtomT, Operand Side, typename Spec>
 inline constexpr bool should_pack_v = [] {
   if constexpr (is_packed_spec_v<AtomT, Side, Spec>) {
@@ -65,12 +106,23 @@ inline constexpr bool should_pack_v = [] {
     return false;
   } else {
     constexpr int Rank = Spec::InputTensor::Ndim;
+    // Automatic: pack exactly when the K axis is not unit-stride at compile
+    // time. A K-contiguous operand already matches the friendly layout.
     return !std::same_as<
         tensor::stride_type_t<Rank - 1, typename Spec::InputLayout>,
         meta::Const<1>>;
   }
 }();
 
+/**
+ * @brief Run `fn` with one operand made panel-friendly for the current
+ *        cache block.
+ *
+ * If packing is not warranted, `fn` receives the spec unchanged. Otherwise
+ * the operand is packed into execution workspace (mark/rewind scoped: the
+ * packed copy lives exactly for `fn`'s duration) and `fn` receives the
+ * packed input spec.
+ */
 template <typename Policy, typename AtomT, Operand Side,
           execution::ExecutionScope Scope,
           tensor::InputSpecLike Spec, typename Fn>
@@ -90,6 +142,8 @@ VECOPS_ALWAYS_INLINE decltype(auto) with_operand_panel(
     run_matmul_pack<AtomT, Side>(
         scope, spec, packed);
     auto packed_spec = tensor::input<Element>(packed);
+    // Rewind inside both return paths so the packed copy is released even
+    // when fn returns a value.
     if constexpr (std::is_void_v<decltype(std::forward<Fn>(fn)(packed_spec))>) {
       std::forward<Fn>(fn)(packed_spec);
       workspace.rewind(mark);
@@ -101,6 +155,17 @@ VECOPS_ALWAYS_INLINE decltype(auto) with_operand_panel(
   }
 }
 
+/**
+ * @brief Hoist packing of a `full_k` operand out of the whole loop nest --
+ *        when allowed.
+ *
+ * Elevation requires all three: the resolved extent is `full_k`, the operand
+ * is packable at all, and the caller passed `allow_full_k` (the Tiler grants
+ * it when an explicitly-requested full_k policy overrides the budget, or the
+ * operand's whole-K packed size fits the L3 working-set budget). Without it,
+ * the plain spec flows through and packing happens per panel inside the
+ * nest instead.
+ */
 template <typename Policy, typename Order, typename AtomT, Operand Side,
           execution::ExecutionScope Scope,
           tensor::InputSpecLike Spec, typename Fn>
@@ -118,7 +183,14 @@ VECOPS_ALWAYS_INLINE decltype(auto) with_full_k_operand(
   }
 }
 
-/** One-side packing adapter; A and B never form a Cartesian branch. */
+/**
+ * @brief One-side packing adapter; A and B never form a Cartesian branch.
+ *
+ * Exposes the two packing lifetimes as one type: `with_whole_operand` is the
+ * hoisted full-K entry (called once around the whole loop nest, honoring the
+ * L3 budget flag), `with_panel` is the per-KC-block entry (called inside the
+ * nest for cache_k packing).
+ */
 template <Operand Side, typename Policy, typename Order, typename AtomT>
 struct OperandController {
   static constexpr PackingExtent extent =

@@ -68,6 +68,12 @@ public:
 
   WorkspaceView() = default;
 
+  /** @brief Adopt `data` as the backing buffer without taking ownership.
+   *
+   * @param data      Buffer start; may be null only for a zero-capacity view.
+   * @param capacity  Buffer size in bytes (non-negative, asserted).
+   * @note The buffer must outlive every allocation made through this view.
+   */
   WorkspaceView(void* data, nint_t capacity)
       : _base(static_cast<std::byte*>(data)), _capacity(capacity) {
     VECOPS_ASSERT(capacity >= 0, "workspace capacity must be non-negative");
@@ -102,6 +108,8 @@ public:
     VECOPS_ASSERT(alignment > 0 && (alignment & (alignment - 1)) == 0,
                   "workspace alignment must be a positive power of two");
 
+    // Round the cursor up to the requested alignment; the skipped padding
+    // bytes are never zeroed (the storage is raw).
     const auto raw = reinterpret_cast<std::uintptr_t>(_base + _offset);
     const auto aligned = (raw + static_cast<std::uintptr_t>(alignment - 1)) &
                          ~static_cast<std::uintptr_t>(alignment - 1);
@@ -126,8 +134,11 @@ public:
     return static_cast<T*>(allocate(count * static_cast<nint_t>(sizeof(T)), alignof(T)));
   }
 
+  /** @brief Bytes currently bump-allocated (the cursor position). */
   nint_t used() const { return _offset; }
+  /** @brief Total bytes this view may hand out. */
   nint_t capacity() const { return _capacity; }
+  /** @brief Historical peak of `used()`; not reduced by rewind()/reset(). */
   nint_t high_watermark() const { return _high_watermark; }
 
 private:
@@ -147,19 +158,31 @@ private:
 class Workspace {
 public:
   Workspace() = default;
+
+  /** @brief Construct and reserve exactly `bytes` (see reserve()). */
   explicit Workspace(nint_t bytes) { reserve(bytes); }
 
+  /**
+   * @brief Set the requested payload size exactly (may shrink).
+   *
+   * The backing vector is resized to `bytes` plus one DEFAULT_ALIGNMENT of
+   * slack so views can satisfy their first aligned allocation. Resizing
+   * invalidates every previously returned view and pointer.
+   */
   void reserve(nint_t bytes) {
     VECOPS_ASSERT(bytes >= 0, "workspace reserve size must be non-negative");
     _requested = bytes;
     _storage.resize(static_cast<size_t>(bytes + vec::DEFAULT_ALIGNMENT));
   }
 
+  /** @brief Borrow a view over the (padded) storage; not synchronized. */
   WorkspaceView view() {
     return WorkspaceView(_storage.data(), static_cast<nint_t>(_storage.size()));
   }
 
+  /** @brief Caller-requested payload, without the alignment padding. */
   nint_t requested_capacity() const { return _requested; }
+  /** @brief Actual storage size including padding (what view() exposes). */
   nint_t storage_size() const { return static_cast<nint_t>(_storage.size()); }
 
 private:
@@ -178,10 +201,19 @@ class ParallelWorkspace {
 public:
   ParallelWorkspace() = default;
 
+  /** @brief Construct and reserve `num_threads` views of `per_thread_bytes`. */
   ParallelWorkspace(nint_t num_threads, nint_t per_thread_bytes) {
     reserve(num_threads, per_thread_bytes);
   }
 
+  /**
+   * @brief (Re)allocate per-thread regions; invalidates all previous views.
+   *
+   * Each thread region gets one extra DEFAULT_ALIGNMENT of slack so its
+   * usable payload survives the view's internal alignment rounding
+   * (including any misalignment inherited from the vector's base pointer),
+   * and the region stride keeps adjacent payloads separated.
+   */
   void reserve(nint_t num_threads, nint_t per_thread_bytes) {
     VECOPS_ASSERT(num_threads >= 0, "thread count must be non-negative");
     VECOPS_ASSERT(per_thread_bytes >= 0, "per-thread workspace size must be non-negative");
@@ -193,14 +225,25 @@ public:
     _storage.resize(static_cast<size_t>(_stride * num_threads + vec::DEFAULT_ALIGNMENT));
   }
 
+  /**
+   * @brief Borrow thread `tid`'s independent region as a view.
+   *
+   * @param tid  Thread index in [0, num_threads()) (asserted).
+   * @note Views are unsynchronized; independence holds only when each thread
+   *       uses its own tid exclusively.
+   */
   WorkspaceView thread_view(nint_t tid) {
     VECOPS_ASSERT(0 <= tid && tid < _num_threads, "thread id is out of range");
     return WorkspaceView(_storage.data() + tid * _stride, _stride);
   }
 
+  /** @brief Number of per-thread regions reserved. */
   nint_t num_threads() const { return _num_threads; }
+  /** @brief Caller-requested payload per thread, without alignment slack. */
   nint_t per_thread_bytes() const { return _per_thread_bytes; }
+  /** @brief Region stride in bytes: payload plus alignment slack. */
   nint_t stride() const { return _stride; }
+  /** @brief Total storage size including all padding. */
   nint_t storage_size() const { return static_cast<nint_t>(_storage.size()); }
 
 private:

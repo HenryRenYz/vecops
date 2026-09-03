@@ -8,7 +8,7 @@
 #include "vecops/platform/Target.h"
 
 /**
- * @file Backend.h
+ * @file vecops/execution/details/Backend.h
  * @brief Select the execution-state backend for the current platform target.
  *
  * Execution backends manage coarse hardware state such as ARM streaming mode
@@ -17,10 +17,16 @@
  */
 
 namespace vecops::execution::details {
+/** Primary template is deliberately left undefined: each platform header
+ *  below provides the `Backend` specialization for its target, so an
+ *  unsupported target fails at instantiation rather than silently falling
+ *  back at runtime. */
 template <typename Target>
 struct Backend;
 } // namespace vecops::execution::details
 
+// An explicitly generic target overrides any architecture family the rest
+// of the feature macros would otherwise select.
 #if defined(CPU_CAPABILITY_GENERIC)
 #include "vecops/execution/details/scalar/Backend.h"
 #elif defined(ARCH_X86_FAMILY)

@@ -16,13 +16,34 @@
 #include "vecops/vec/Vec.h"
 
 /**
- * @file LayerNorm.h
- * @brief Last-dimension LayerNorm with optional affine parameters.
+ * @file vecops/ops/details/layernorm/Operation.h
+ * @brief Last-dimension LayerNorm implementation with optional affine
+ *        parameters.
  *
  * Every prefix coordinate defines one independently normalized row. Input,
  * gamma, beta, and output use DataAccess so dtype conversion and transforms
  * remain composable. The operator accepts an ExecutionSession/active scope,
  * caller-owned workspace, or a self-allocating convenience call.
+ *
+ * ## Row algorithm
+ *
+ * One row is processed in two sweeps:
+ *
+ * 1. **Reduction sweep**: a single `kernel::loop::fold` with two accumulators
+ *    (sum, sum-of-squares) computes both moments in one pass over x.
+ * 2. **Write sweep**: a fold over x re-loads the values, applies
+ *    `(x - mean) * rstd` (fused into one FMA when the recipe has
+ *    `FusedShift`), multiplies by gamma / adds beta when present, and stores.
+ *
+ * Variance comes from the single-pass `E[x^2] - E[x]^2` estimator, clamped
+ * at zero because floating-point rounding can push it slightly negative.
+ *
+ * ## Recipes
+ *
+ * `RowRecipe` tunes the fold unrolling, the tail blocking, the shift
+ * fusion, and the tail carry policy. `SVE16RowRecipe` is the SVE2 16-bit
+ * fast path for fp16/bf16 inputs computed in fp32 (see its comment); it can
+ * be disabled with `VECOPS_DISABLE_SVE_16BIT_LAYERNORM_FAST_PATH`.
  */
 
 namespace vecops::ops {
@@ -34,6 +55,8 @@ template <typename ComputeT = float32_t>
  */
 struct LayerNormConfig {
   using ComputeType = ComputeT;
+  /// Variance stabilizer added before the reciprocal-sqrt; guards rows
+  /// with zero variance (constant rows) from dividing by zero.
   ComputeT eps = ComputeT(1e-5f);
 };
 
@@ -79,6 +102,8 @@ template <typename Param>
 concept LayerNormParamOperand = is_layernorm_param_operand_v<Param>;
 
 template <typename Param>
+/** True when the parameter is already a rank-1 input Spec (or nullopt), so
+ *  the public entry points can skip Tensor-to-Spec normalization for it. */
 inline constexpr bool is_normalized_layernorm_param_v =
     tensor::is_input_spec_v<Param> || tensor::is_nullopt_v<Param>;
 
@@ -140,7 +165,14 @@ VECOPS_ALWAYS_INLINE decltype(auto) with_layernorm_accesses(
   }
 }
 
-/** @brief Per-row loop tuning. */
+/** @brief Per-row loop tuning.
+ *  @tparam Full  Fold unroll factor for both row sweeps.
+ *  @tparam Tail  Vector blocking of the (unmasked) tail block.
+ *  @tparam Fused When true, the write sweep evaluates `(x - mean) * rstd`
+ *                as `fma(x, rstd, -mean * rstd)` — one rounding instead of
+ *                two, at the cost of a per-recipe center meaning (see
+ *                `run_row`).
+ *  @tparam Carry Tail carry policy of the reduction fold. */
 template <int Full, int Tail, bool Fused,
           kernel::loop::TailCarryPolicy Carry>
 struct RowRecipe {
@@ -150,11 +182,16 @@ struct RowRecipe {
   static constexpr kernel::loop::TailCarryPolicy TailPolicy = Carry;
 };
 
+/// Default recipe for all inputs except the SVE2 16-bit fast path.
 using GenericRowRecipe = RowRecipe<
     4, 1, false, kernel::loop::TailCarryPolicy::independent>;
 
 #if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE2) && \
     !defined(VECOPS_DISABLE_SVE_16BIT_LAYERNORM_FAST_PATH)
+/// SVE2 fast path for fp16/bf16 rows computed in fp32: the fused shift
+/// shortens the conversion-dominated dependency chain, and reusing the
+/// full-width carry in the tail avoids materializing a separate narrow
+/// tail accumulator.
 using SVE16RowRecipe = RowRecipe<
     4, 2, true, kernel::loop::TailCarryPolicy::reuse_prefix>;
 #endif
@@ -168,9 +205,17 @@ using SVE16RowRecipe = RowRecipe<
  * Input/output shapes must match. Gamma and beta, when present, are rank-one
  * operands whose length equals the final dimension. Variance is computed as
  * `E[x^2] - E[x]^2`, clamped to zero before applying `eps`.
+ *
+ * @warning The single-pass variance estimator loses precision through
+ *          catastrophic cancellation when `E[x]^2` dominates `E[x^2]`
+ *          (large mean, tiny variance). Switch to a two-pass estimator
+ *          before relying on results for such data distributions.
  */
 template <typename Config = LayerNormConfig<>>
 class LayerNorm {
+  // Row-level access planning, vector axis 0 = normalized dimension.
+  // x needs two passes (moments sweep, then write sweep) with deferred
+  // materialization; gamma/beta/y are direct unit-stride rank-1 accesses.
   using XPolicy = tensor::InputAccessPolicy<
       0, 2, tensor::AccessPlan::automatic_deferred>;
   using ParamPolicy = tensor::InputAccessPolicy<
@@ -383,6 +428,8 @@ public:
       static_assert(Beta::Rank == 1);
     }
     const nint_t n = tensor::logical_layout(x).shape()[0];
+    // Recipe selection for already-bound rows. Keep in sync with the
+    // identical #if block in execute_specs().
 #if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE2) && \
     !defined(VECOPS_DISABLE_SVE_16BIT_LAYERNORM_FAST_PATH)
     using InElement = std::remove_const_t<typename X::MemoryElement>;
@@ -422,6 +469,8 @@ private:
         in.input_layout(), out.output_layout());
     layernorm_details::validate_layernorm_param(n, scale);
     layernorm_details::validate_layernorm_param(n, bias);
+    // Recipe selection for Spec-driven rows. Keep in sync with the
+    // identical #if block in run_bound().
 #if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE2) && \
     !defined(VECOPS_DISABLE_SVE_16BIT_LAYERNORM_FAST_PATH)
     using InElement = std::remove_const_t<typename InSpec::MemoryElement>;
@@ -481,6 +530,15 @@ private:
         });
   }
 
+  /**
+   * @brief Core row kernel: single-pass moments, then a transforming write
+   *        sweep.
+   *
+   * The reduction is one `fold` with two accumulators (sum and sum-of-
+   * squares), wrapped in `with_unordered_access(x, ...)` because only the
+   * moment sweep needs unordered (lane-agnostic) loads; the write sweep
+   * re-combines x with gamma/beta/y in one combined unordered region.
+   */
   template <typename Recipe, typename X, typename Gamma,
             typename Beta, typename Y>
   VECOPS_ALWAYS_INLINE void run_row(
@@ -507,10 +565,17 @@ private:
     const ComputeType inv_n =
         ComputeType(1) / static_cast<ComputeType>(n);
     const ComputeType mean = sum_value * inv_n;
+    // Single-pass variance can round to slightly negative; clamp before
+    // the sqrt argument would go NaN on constant rows (where eps alone
+    // must carry the denominator).
     const ComputeType variance =
         std::max(sum_sq_value * inv_n - mean * mean, ComputeType(0));
     const ComputeType rstd =
         ComputeType(1) / std::sqrt(variance + config.eps);
+    // `center` is dual-purpose: with FusedShift it is the FMA bias
+    // -mean*rstd (so `fma(x, rstd, center)` = (x-mean)*rstd); without it,
+    // it is the plain mean for the subtract form in the write sweep.
+    // Both branches below rely on exactly this meaning.
     const ComputeType center = Recipe::FusedShift ? -mean * rstd : mean;
 
     constexpr bool HasGamma = !tensor::is_nullopt_v<Gamma>;
@@ -524,6 +589,10 @@ private:
                      const auto& rstd_v) VECOPS_INLINE_LAMBDA {
                 const auto position = tensor::coord(col);
                 auto value = ux.load(block_tag, position, active);
+                // FusedShift form: fma(x, rstd, -mean*rstd) equals
+                // (x-mean)*rstd mathematically, with one fewer op and one
+                // rounding — results are NOT bit-identical to the
+                // subtract form used by GenericRowRecipe.
                 if constexpr (Recipe::FusedShift) {
                   value = vec::fmadd(value, rstd_v, center_v);
                 } else {
@@ -550,6 +619,10 @@ private:
               kernel::loop::invariant(rstd));
           uy.commit();
         };
+    // When both affine parameters exist, enter the combined unordered
+    // region directly with all four accesses (no lambda re-packing);
+    // otherwise the helper re-inserts the missing nullopt slots so the
+    // write lambda keeps its uniform four-argument signature.
     if constexpr (HasGamma && HasBeta) {
       tensor::with_unordered_access(
           x, gamma, beta, y, std::move(write));

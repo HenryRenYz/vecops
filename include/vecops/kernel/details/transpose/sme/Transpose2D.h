@@ -18,7 +18,7 @@
 #include "vecops/vec/details/sme/ZA.h"
 
 /**
- * @file Transpose2D.h
+ * @file vecops/kernel/details/transpose/sme/Transpose2D.h
  * @brief SME/ZA transpose leaf and its execution-resource backend wrapper.
  *
  * Rows are written horizontally into ZA and read vertically to obtain the
@@ -161,6 +161,8 @@ VECOPS_ALWAYS_INLINE void transpose(
   const nint_t src_col_step = static_cast<nint_t>(src_col_stride);
   const nint_t dst_row_step = static_cast<nint_t>(dst_row_stride);
   const nint_t dst_col_step = static_cast<nint_t>(dst_col_stride);
+  // Linearize each origin into a byte offset via the origin·strides dot
+  // product; inner loops then advance with the two plane strides only.
   nint_t src_base = 0;
   VECOPS_UNROLL
   for (int d = 0; d < SrcRank; ++d) {
@@ -178,6 +180,11 @@ VECOPS_ALWAYS_INLINE void transpose(
       const nint_t active_n = vec::details::sme::min_value(lanes, n_extent - ni);
       const auto n_pg = vec::mwhilelt(BitsTag{}, nint_t{0}, active_n);
 
+      // The two predicates intentionally cross: writing a row horizontally
+      // covers active_n columns (write_hor uses n_pg), while reading a
+      // column vertically covers active_m rows (read_ver uses m_pg). Both
+      // refer to the same ZA tile, which is lanes x lanes and shared by
+      // the write and read phases below.
       if constexpr (PipelinePairs) {
         nint_t r = 0;
         for (; r + 1 < active_m; r += 2) {
@@ -293,6 +300,9 @@ struct SMEBackend {
         "SME transpose requires raw no-transform DataAccess");
     using SourceSpec = generic::SpecOf<Source>;
     using DestinationSpec = generic::SpecOf<Destination>;
+    // ZA vertical column reads/writes require unit column strides: there
+    // is no strided or gathered ZA access form, so a non-unit column stride
+    // on either side has no SME lowering and must use another backend.
     static_assert(std::same_as<
         tensor::stride_type_t<SrcCol, typename SourceSpec::InputLayout>,
         meta::Const<1>>);

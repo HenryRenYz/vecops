@@ -11,7 +11,8 @@
 #include "vecops/execution/details/ResourceSet.h"
 #include "vecops/platform/Target.h"
 
-/** @file Backend.h @brief Stateless generic execution backend. */
+/** @file vecops/execution/details/scalar/Backend.h
+ *  @brief Stateless generic execution backend. */
 
 namespace vecops::execution::details {
 

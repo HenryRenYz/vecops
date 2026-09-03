@@ -1,7 +1,7 @@
 // @vecops-target-shards-x86: 7
 // @vecops-target-shards-ARM: 9
 
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 #include "MatmulTestArch.h"
 
 #if defined(ARCH_X86_FAMILY)

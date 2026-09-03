@@ -10,7 +10,7 @@
 #define VECOPS_SCENARIO_CATALOG_CASE_SHARDS 12
 #include "MatmulScenarioBenchCommon.h"
 
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 #include "vecops/matmul/Atom.h"
 
 namespace vecops::bench::matmul {

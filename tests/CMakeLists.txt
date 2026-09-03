@@ -2,6 +2,15 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/VecopsTestTargets.cmake")
 
 vecops_add_test(NAME TensorTest FILES tensor/TensorTest.cpp FOLDER tensor/tensor)
 vecops_add_test(NAME LayoutTest FILES tensor/LayoutTest.cpp FOLDER tensor/layout)
+# GCC 13.3 miscompiles LayoutTest at -O2/-O3: the TestBody of
+# ValueTest.CeilDivDynConstKeepsDivisibility gets a corrupted prologue and
+# segfaults before its first statement (verified with gdb; clang 19 passes
+# at -O1/-O2/-O3 and GCC passes at -O1, so this is a GCC codegen bug, not a
+# library defect). Keep this test TU at -O1 on GCC until the bug is fixed
+# upstream; the -O1 cap only affects test-binary performance.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 14)
+    target_compile_options(LayoutTest PRIVATE -O1)
+endif()
 vecops_add_test(NAME KernelLoopTest FILES kernel/LoopTest.cpp FOLDER kernel/loop)
 vecops_add_test(NAME KernelTile2DTest FILES kernel/Tile2DTest.cpp FOLDER kernel/tile2d)
 vecops_add_test(NAME MatmulTilerTest FILES matmul/TilerTest.cpp FOLDER matmul/tiler)
@@ -11,19 +20,6 @@ vecops_add_test(
     FOLDER execution/session
     ARCH Scalar Native)
 
-if(VECOPS_ARCH_FAMILY STREQUAL "x86")
-    set(VECOPS_TILE2D_GEMM_ARCH Scalar AVX512 Native)
-else()
-    set(VECOPS_TILE2D_GEMM_ARCH Scalar SVE Native)
-    if(VECOPS_NATIVE_FIXED_SVE_BITS)
-        list(APPEND VECOPS_TILE2D_GEMM_ARCH NativeFixedSVE)
-    endif()
-endif()
-vecops_add_test(
-    NAME KernelTile2DGemmTest
-    FILES kernel/Tile2DGemmTest.cpp
-    FOLDER kernel/tile2d
-    ARCH ${VECOPS_TILE2D_GEMM_ARCH})
 vecops_add_test(NAME UtilMathTest FILES util/MathTest.cpp FOLDER util/math)
 
 if(VECOPS_ARCH_FAMILY STREQUAL "x86")

@@ -2,6 +2,25 @@
 // Copyright (c) vecops contributors.
 //
 
+/**
+ * @file vecops/matmul/details/packing/generic/Pack.h
+ * @brief Backend-independent packing loops built on the portable vec layer.
+ *
+ * Two block emitters cover both block-format families without any ISA
+ * intrinsics:
+ *
+ * - pack_blocked_rows emits the *A-style* layout ([spatial panel][k tile]
+ *   [row][k], rows contiguous) by loading K runs (axis 1);
+ * - pack_interleaved_panels emits the *B/SME-style* interleaved layout
+ *   ([spatial panel][k group][row][k within KPack]) by loading spatial
+ *   runs (axis 0) and interleaving KPack of them per group.
+ *
+ * They serve as the fallback packers for the AMX backend below AVX-512 and
+ * as the SME format's base (Vector) implementation.  The interleave_pair /
+ * interleave_quad helpers are the shared KPack primitives; the AMX
+ * intrinsic packers reuse them for their byte paths.
+ */
+
 #ifndef VECOPS_MATMUL_DETAILS_PACK_GENERIC_PACK_H
 #define VECOPS_MATMUL_DETAILS_PACK_GENERIC_PACK_H
 
@@ -16,13 +35,23 @@
 
 namespace vecops::kernel::matmul_pack_details::generic {
 
+/// Element type an access computes in.
 template <typename Access>
 using ComputeOf = typename std::remove_cvref_t<Access>::ComputeType;
 
+/// The InputSpec/OutputSpec an access was bound from.
 template <typename Access>
 using SpecOf = std::remove_cvref_t<decltype(
     std::declval<const std::remove_cvref_t<Access>&>().spec())>;
 
+/**
+ * @brief True when an access is a raw pointer over its own compute type.
+ *
+ * I.e. it exposes raw_data()/raw_strides(), carries no transform, and its
+ * memory element equals its compute type — the precondition for the
+ * intrinsic packers to reinterpret the raw pointer instead of going
+ * through the generic load/store paths.
+ */
 template <typename Access>
 inline constexpr bool is_raw_direct_access_v = requires(Access& access) {
   typename std::remove_cvref_t<Access>::MemoryElement;
@@ -36,9 +65,19 @@ inline constexpr bool is_raw_direct_access_v = requires(Access& access) {
             typename std::remove_cvref_t<Access>::MemoryElement>,
         ComputeOf<Access>>;
 
+/// Concept form of is_raw_direct_access_v.
 template <typename Access>
 concept RawDirectAccess = is_raw_direct_access_v<Access>;
 
+/**
+ * @brief Emit the A-style blocked-row layout ([panel][k tile][row][k]).
+ *
+ * For each spatial panel and K tile, writes `panel` rows of `k_tile`
+ * contiguous elements.  Loads vectorize along K (axis 1).  Tail rows
+ * beyond `spatial` and tail K beyond `k` are zero-filled so every emitted
+ * block is dense; the stored chunk shrinks to the vector granularity
+ * (`first(chunk)`), never past k_tile.
+ */
 template <vec::VectorTag Tag, typename Source, typename T>
 VECOPS_NOINLINE void pack_blocked_rows(
     const Source& source, T* destination,

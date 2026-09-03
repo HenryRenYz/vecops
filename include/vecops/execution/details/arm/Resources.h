@@ -8,7 +8,7 @@
 #include "vecops/execution/details/ResourceSet.h"
 
 /**
- * @file Resources.h
+ * @file vecops/execution/details/arm/Resources.h
  * @brief ARM manually-owned Streaming SVE and ZA resource tag.
  */
 

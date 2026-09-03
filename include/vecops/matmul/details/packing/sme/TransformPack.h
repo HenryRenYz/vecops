@@ -2,6 +2,27 @@
 // Copyright (c) vecops contributors.
 //
 
+/**
+ * @file vecops/matmul/details/packing/sme/TransformPack.h
+ * @brief Streaming and staged packing stages for transformed SME operands.
+ *
+ * Three entries, one per SME Backend specialization that goes beyond the
+ * plain ZA transpose (packing/sme/Backend.h):
+ *
+ * - pack_postprocess (SMEPostprocess) — still inside the streaming
+ *   region: stage rows into ZA, read K columns back, and apply conversion
+ *   or an elementwise transform on the columns before storing by KPack
+ *   group;
+ * - transform_packed_inplace (SMEStagedTransform) — after a plain pack,
+ *   apply an elementwise same-type transform over the whole packed buffer
+ *   with ordinary vector code, then repair the format's zero padding;
+ * - expand_fp16_packed_to_fp32 (SMEStagedFP16ToFP32) — after packing fp16
+ *   memory, widen the packed buffer in place to the fp32 format.
+ *
+ * Only pack_postprocess touches ZA (its caller must be inside a
+ * Streaming+ZA region); the other two run as ordinary non-streaming code.
+ */
+
 #ifndef VECOPS_MATMUL_DETAILS_PACK_SME_TRANSFORM_PACK_H
 #define VECOPS_MATMUL_DETAILS_PACK_SME_TRANSFORM_PACK_H
 
@@ -13,16 +34,24 @@
 
 namespace vecops::kernel::matmul_pack_details::sme {
 
+/// ScalableTag scale whose vector spans one packed panel column at width
+/// T: 2 words for 4-byte elements, one word for 2-byte (SVL/2 == panel),
+/// half a word for bytes.
 template <typename T>
 inline constexpr int panel_scale_power =
     sizeof(T) == 4 ? 1 : (sizeof(T) == 2 ? 0 : -1);
 
+/// Vector covering a full packed panel (2 * SVL/4 rows) at width T.
 template <typename T>
 using PanelTag = vec::ScalableTag<T, panel_scale_power<T>>;
 
+/// Native streaming word at width T.
 template <typename T>
 using WordTag = vec::ScalableTag<T, 0>;
 
+/// Read one K slice back as a panel-wide vector.  4-byte elements must
+/// read both ZA tiles — the panel spans two — and concatenate the halves;
+/// narrower widths read a single tile that already holds the whole panel.
 template <typename T, typename Mask0, typename Mask1>
 VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> read_panel(
     uint32_t slice, Mask0 pg0, Mask1 pg1) noexcept {
@@ -42,6 +71,9 @@ VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> read_panel(
   }
 }
 
+/// Apply the memory -> compute mapping to one panel vector: identity,
+/// plain conversion, or (for transforms) an optional pre-convert, the
+/// elementwise transform, and an optional post-convert.
 template <typename T, typename Source>
 VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> postprocess_panel(
     const Source& source,
@@ -70,6 +102,10 @@ VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> postprocess_panel(
   }
 }
 
+/// Re-zero the rows of a *processed* panel vector beyond active_spatial.
+/// Needed even though the ZA read already masks inactive rows: transforms
+/// do not preserve zero (a quantized zero maps to a non-zero value), yet
+/// the packed format demands zero padding.
 template <typename T>
 VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> zero_inactive_spatial(
     vec::Vec<PanelTag<T>> value, nint_t active_spatial) noexcept {
@@ -82,6 +118,9 @@ VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> zero_inactive_spatial(
       vec::mwhilelt(Tag{}, 0, active_spatial), value);
 }
 
+/// Store one processed K column as a KPack == 1 group: split the panel
+/// vector into its two native words (lower rows, upper rows) and store
+/// them contiguously.
 template <typename T>
 VECOPS_ALWAYS_INLINE void store_single_panel(
     T*& output, vec::Vec<PanelTag<T>> value) noexcept {
@@ -99,6 +138,7 @@ VECOPS_ALWAYS_INLINE void store_single_panel(
   output += vec::size(BitsWordTag{});
 }
 
+/// Store two adjacent processed K columns as one KPack == 2 group.
 template <typename T>
 VECOPS_ALWAYS_INLINE void store_pair_panel(
     T*& output,
@@ -114,6 +154,7 @@ VECOPS_ALWAYS_INLINE void store_pair_panel(
   output += 2 * vec::size(WordTag<U>{});
 }
 
+/// Store four adjacent processed K columns as one KPack == 4 group.
 template <typename T>
 VECOPS_ALWAYS_INLINE void store_quad_panel(
     T*& output,
@@ -136,6 +177,17 @@ VECOPS_ALWAYS_INLINE void store_quad_panel(
   output += 4 * panel;
 }
 
+/**
+ * @brief Pack with the memory -> compute conversion or transform fused
+ *        into the ZA read-out (SMEPostprocess backend).
+ *
+ * Data flow per spatial panel: source rows are loaded as raw memory
+ * vectors and written into ZA horizontally (tile 0, plus tile 1 when the
+ * memory width needs it); each K slice is then read back vertically — the
+ * transpose — postprocessed as a panel vector, and KPack consecutive
+ * columns are stored as packed groups.  Must run inside the caller's
+ * Streaming+ZA region.
+ */
 template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           typename Source,
           meta::ValueType Spatial, meta::ValueType K,
@@ -165,6 +217,10 @@ VECOPS_ALWAYS_INLINE void pack_postprocess(
     const nint_t active_spatial = vec::details::sme::clamp_value(
         spatial - panel_base, nint_t{0}, panel);
     const nint_t active0 = vec::details::sme::min_value(active_spatial, lanes);
+    // Tile 1 is only populated for 4-byte memory elements: the panel is
+    // 2 * (SVL/4) rows while a ZA tile at width w holds SVL/w slices —
+    // the whole panel fits tile 0 at 2 bytes (SVL/2 slices) and even half
+    // a tile at 1 byte, but only half the panel at 4 bytes.
     const nint_t active1 = sizeof(Memory) == 4
         ? vec::details::sme::max_value(nint_t{0}, active_spatial - lanes)
         : 0;
@@ -200,6 +256,8 @@ VECOPS_ALWAYS_INLINE void pack_postprocess(
           VECOPS_INLINE_LAMBDA_NOEXCEPT {
         using OutputTag = PanelTag<T>;
         if constexpr (!FullK) {
+          // Tail K slices beyond active_k never enter ZA; the format
+          // still requires their group slots as zeros.
           if (slice >= active_k) return vec::zeros(OutputTag{});
         }
         const auto memory = read_panel<Memory>(
@@ -247,6 +305,7 @@ VECOPS_ALWAYS_INLINE void pack_postprocess(
   }
 }
 
+/// Zero a contiguous run of `count` elements (vectorized, tail-masked).
 template <typename T>
 VECOPS_ALWAYS_INLINE void zero_contiguous(
     T* pointer, nint_t count) {
@@ -260,6 +319,8 @@ VECOPS_ALWAYS_INLINE void zero_contiguous(
   }
 }
 
+/// Zero `count` elements spaced `stride` apart (one lane of several rows
+/// or group slots at a time).
 template <typename T>
 VECOPS_ALWAYS_INLINE void zero_strided(
     T* pointer, nint_t count, nint_t stride) {
@@ -274,6 +335,22 @@ VECOPS_ALWAYS_INLINE void zero_strided(
   }
 }
 
+/**
+ * @brief Apply an elementwise same-type transform over a packed buffer
+ *        (SMEStagedTransform backend's post-region stage).
+ *
+ * Two stages:
+ *
+ * 1. Transform every element of the packed block as one flat contiguous
+ *    vector range — the packed layout is dense, so the block geometry
+ *    never matters for this pass.
+ * 2. Repair the zero padding the transform may have corrupted (again:
+ *    transforms need not preserve zero).  Tail spatial rows are zeroed
+ *    contiguously inside each K group; the tail K slots of the last group
+ *    are zeroed with a KPack-strided pass.
+ *
+ * Ordinary vector code — runs outside any streaming region.
+ */
 template <nint_t KPack, typename T, typename Transform,
           meta::ValueType Spatial, meta::ValueType K,
           meta::ValueType Panel>
@@ -308,6 +385,9 @@ VECOPS_NOINLINE void transform_packed_inplace(
   for (nint_t sp = 0; sp < spatial_panels; ++sp) {
     const nint_t active_spatial = vec::details::sme::min_value(panel, spatial - sp * panel);
     if (active_spatial < panel) {
+      // Tail spatial rows: [row][k(KPack)] is row-major inside a group,
+      // so the inactive rows of each group form one contiguous run
+      // (groups themselves sit panel*KPack apart).
       for (nint_t kg = 0; kg < k_groups; ++kg) {
         auto* group = output + (sp * k_groups + kg) * panel * KPack;
         zero_contiguous(
@@ -317,6 +397,10 @@ VECOPS_NOINLINE void transform_packed_inplace(
     }
     const nint_t active_k_pack = k - (k_groups - 1) * KPack;
     if (k_groups > 0 && active_k_pack < KPack) {
+      // Tail K slots: only the last group is short.  Its dead slots sit at
+      // a fixed intra-group offset of every row, KPack elements apart
+      // within the group — a strided zero, unlike the contiguous one
+      // above.
       auto* group = output +
           (sp * k_groups + k_groups - 1) * panel * KPack;
       for (nint_t ki = active_k_pack; ki < KPack; ++ki) {
@@ -326,6 +410,22 @@ VECOPS_NOINLINE void transform_packed_inplace(
   }
 }
 
+/**
+ * @brief Widen an fp16-packed buffer to the fp32 format in place
+ *        (SMEStagedFP16ToFP32 backend's post-region stage).
+ *
+ * The fp16 packed block occupies exactly the first half of the fp32
+ * destination, so source and output alias.  Each group holds one packed
+ * pair of K columns (panel * 2 fp16); even/odd deinterleave recovers the
+ * two columns, each widened to a panel vector.
+ *
+ * The iteration order is the subtle part: the fp32 output writes 4 bytes
+ * per element over an fp16 source of 2 bytes per element, so any forward
+ * write would land on not-yet-read source data halfway through.  Walking
+ * panels and groups in reverse — and storing the odd K column before the
+ * even one — keeps every write at or above the source position of the
+ * group being read, and strictly above all unread groups.
+ */
 template <typename T,
           meta::ValueType Spatial, meta::ValueType K,
           meta::ValueType Panel>

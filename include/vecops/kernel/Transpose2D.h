@@ -13,13 +13,23 @@
 #include "vecops/kernel/details/transpose/Types.h"
 
 /**
- * @file Transpose2D.h
+ * @file vecops/kernel/Transpose2D.h
  * @brief Backend-dispatched transpose between already-bound DataAccess views.
  *
  * This public layer owns validation and dispatch only. Platform kernels,
  * register-network algorithms, and hardware-resource requirements live below
  * kernel/details/transpose. No operand binding or cache blocking happens here,
  * so DataAccess materialization can call it without recursive binding.
+ *
+ * @code
+ * // Inside a DataAccess materialization with bound accesses x (read) and
+ * // y (write), transposing the logical MxN plane at (src_origin, dst_origin):
+ * kernel::transpose2d_bound<1, 0, 0, 1>(
+ *     scope, m, n, x, src_origin, y, dst_origin,
+ *     kernel::transpose2d_policy::Automatic{});
+ * // SrcRow=1, SrcCol=0: source rows run along access axis 1; the
+ * // destination receives them on axis 0 (DstRow=0, DstCol=1).
+ * @endcode
  */
 namespace vecops::kernel {
 

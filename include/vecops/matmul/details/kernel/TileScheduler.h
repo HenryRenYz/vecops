@@ -5,6 +5,27 @@
 #ifndef VECOPS_MATMUL_DETAILS_TILE_SCHEDULER_H
 #define VECOPS_MATMUL_DETAILS_TILE_SCHEDULER_H
 
+/**
+ * @file vecops/matmul/details/kernel/TileScheduler.h
+ * @brief Backend-neutral traversal of one bound rank-two matrix product.
+ *
+ * Design intent: this header glues the generic kernel::loop::tile2d
+ * traversal to four Backend hooks and nothing else: EffectivePolicy
+ * (traversal policy after Automatic resolution), Catalog (per-Case kernel
+ * selection), dispatch_plan (compile-time kernel plan, e.g. K guarantees),
+ * and run_case (one Case instantiation). Keeping it backend-free lets the
+ * AMX and SME backends share one traversal body; hardware-state ownership
+ * (TILECFG image, streaming-ZA region) stays with the caller so a whole
+ * traversal forms one lexical hardware-state interval.
+ *
+ * The two entry points differ in coordinate space: run_tiles() traverses
+ * the whole logical problem (origin 0,0), while run_tiles_region()
+ * traverses a sub-region of a larger problem and therefore carries both
+ * the traversal extents and the logical/origin coordinates separately —
+ * this is what lets a backend re-enter a shortened traversal (e.g. the
+ * AMX packed-A/B tail split) under the same configuration.
+ */
+
 #include "vecops/matmul/Atom.h"
 #include "vecops/kernel/Tile2D.h"
 
@@ -51,6 +72,12 @@ VECOPS_KERNEL_FUNCTION(void run_tiles_region(
       });
 }
 
+/**
+ * Whole-problem form of the traversal above: origin is (0, 0) and the
+ * traversal extents are the logical extents. Prefer run_tiles_region()
+ * when re-entering a sub-region under an already-established
+ * configuration.
+ */
 template <typename Backend, ::vecops::matmul::Atom Atom, typename Policy,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
           typename A, typename B, typename CInput, typename COutput>

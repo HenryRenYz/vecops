@@ -12,7 +12,7 @@
 
 #include "Assertion.h"
 #include "CoreTypes.h"
-#include "Features.h"
+#include "vecops/platform/Features.h"
 
 #ifdef ARCH_X86_FAMILY
   #include <immintrin.h>

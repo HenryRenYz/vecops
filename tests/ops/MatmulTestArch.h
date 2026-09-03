@@ -5,7 +5,7 @@
 #ifndef VECOPS_TESTS_OPS_MATMUL_TEST_ARCH_H
 #define VECOPS_TESTS_OPS_MATMUL_TEST_ARCH_H
 
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 
 #if defined(ARCH_X86_FAMILY)
 #include <sys/syscall.h>

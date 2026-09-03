@@ -15,7 +15,7 @@
 #endif
 
 /**
- * @file Resources.h
+ * @file vecops/execution/details/x86/Resources.h
  * @brief Type-level AMX ownership tag, TILECFG image, and release guard.
  */
 
@@ -34,7 +34,9 @@ struct Tiles {};
 struct alignas(64) TileConfiguration {
   using RequiredResource = Tiles;
 
+  /// Palette 1 selects the TMUL-enabled AMX tile set.
   uint8_t palette = 1;
+  /// First row each tile starts fetching from; 0 for full tiles.
   uint8_t start_row = 0;
   uint8_t reserved0[14]{};
   // The architectural image reserves descriptors for 16 tiles even though
@@ -48,6 +50,8 @@ struct alignas(64) TileConfiguration {
     vec::details::amx::load_configuration(this);
   }
 #else
+  // Deleted instead of undefined: compiling a TILECFG load on a non-AMX
+  // target is a programming error and must not link.
   void load() const = delete;
 #endif
 };
