@@ -149,7 +149,8 @@ void register_pair(const char* label) {
           AT, BT, CT, false, M, N, K>);
 }
 
-template <nint_t M, nint_t N, nint_t K>
+template <typename MemoryA, typename MemoryB,
+          nint_t M, nint_t N, nint_t K>
 void register_conversion_pair(const char* label) {
   const std::string stem = std::string("orientation/") + label +
       "/m" + std::to_string(M) + "/n" + std::to_string(N) +
@@ -157,12 +158,12 @@ void register_conversion_pair(const char* label) {
   benchmark::RegisterBenchmark(
       (stem + "/swap_on").c_str(),
       &run_orientation<
-          PrimaryAtom, float32_t, float32_t,
+          PrimaryAtom, MemoryA, MemoryB,
           true, true, true, true, M, N, K>);
   benchmark::RegisterBenchmark(
       (stem + "/swap_off").c_str(),
       &run_orientation<
-          PrimaryAtom, float32_t, float32_t,
+          PrimaryAtom, MemoryA, MemoryB,
           true, true, true, false, M, N, K>);
 }
 
@@ -175,13 +176,22 @@ void register_orientation_benchmarks() {
   register_pair<true,  false, true,  64, 128, 256>("case6_trt");
   register_pair<false, true,  true,  64, 128, 256>("case7_rtt");
   register_pair<true,  true,  true,  64, 128, 256>("case8_ttt");
+  register_pair<true,  false, true, 128, 64, 256>("case6_trt_tall");
+  register_pair<false, true,  true, 128, 64, 256>("case7_rtt_tall");
 
   // Attention-oriented probes: exact 2x2 tiles, K=16, and N=4/8.
   register_pair<true, true, true, 32, 32, 64>("case8_2x2_tiles");
   register_pair<true, true, true, 32, 32, 16>("case8_k16");
   register_pair<false, false, true, 128, 4, 64>("case4_n4");
   register_pair<false, false, true, 128, 8, 64>("case4_n8");
-  register_conversion_pair<64, 128, 256>("case8_fp32_to_bf16");
+  register_pair<false, false, true, 128, 4, 256>("case4_n4_longk");
+  register_pair<false, false, true, 128, 8, 256>("case4_n8_longk");
+  register_conversion_pair<float32_t, float32_t, 64, 128, 256>(
+      "case8_fp32_to_bf16");
+  register_conversion_pair<float32_t, typename PrimaryAtom::TB, 64, 128, 256>(
+      "case8_convert_a");
+  register_conversion_pair<typename PrimaryAtom::TA, float32_t, 64, 128, 256>(
+      "case8_convert_b");
 
   // AMX's case-5 gate deliberately spans the current long-K boundary.
   register_pair<true, true, false, 64, 128, 16>("case5_gate");

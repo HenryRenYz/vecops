@@ -30,8 +30,6 @@ struct Backend<::vecops::matmul::AMXKernelKind> {
       constexpr bool AColumn =
           column_contiguous_v<typename ASpec::InputLayout>;
       constexpr bool BRow = row_contiguous_v<typename BSpec::InputLayout>;
-      constexpr bool BColumn =
-          column_contiguous_v<typename BSpec::InputLayout>;
       constexpr bool CColumn =
           column_contiguous_v<typename COutputSpec::OutputLayout> &&
           !row_contiguous_v<typename COutputSpec::OutputLayout>;
@@ -42,11 +40,6 @@ struct Backend<::vecops::matmul::AMXKernelKind> {
       // With transposed C this dominates on all three operands.
       if constexpr (AColumn && BRow && CColumn) return true;
 
-      // Swapping preserves the two input layout classes while making C
-      // contiguous.  The equal-layout forms also preserve native element
-      // types; mixed-sign atoms are transposed by SwappedAtom.
-      if constexpr (CColumn && AColumn && BColumn) return true;
-
       // When both inputs are K-contiguous, online packing makes the B side
       // more expensive.  Swap only when metadata proves that it places the
       // smaller spatial extent on B while also making C contiguous.
@@ -55,12 +48,11 @@ struct Backend<::vecops::matmul::AMXKernelKind> {
         return true;
 
       // For the opposite raw layout, swapping fixes both AMX input roles but
-      // turns a contiguous C into a transposed store.  One complete AMX K
-      // step is the measured break-even point once M is large enough and not
-      // disproportionately smaller than N.  Tiny-M/wide-N shapes retain the
-      // vector-friendly direct path because its store advantage dominates.
-      constexpr nint_t KThreshold =
-          std::remove_cvref_t<decltype(Atom::K_R)>::value;
+      // turns a contiguous C into a transposed store.  The register-transpose
+      // epilogue lowers that penalty enough for the attention K=16 boundary
+      // once M is large enough and not disproportionately smaller than N.
+      // Tiny-M/wide-N shapes retain the vector-friendly direct path.
+      constexpr nint_t KThreshold = 16;
       if constexpr (CRow && AColumn && BRow &&
                     provably_at_least_value_v<M, 4> &&
                     provably_scaled_at_least_v<M, N, 2> &&

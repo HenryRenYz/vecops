@@ -29,11 +29,12 @@ struct Backend<::vecops::matmul::SMEKernelKind> {
                       typename BSpec::InputLayout>()) {
       return false;
     } else {
-      // SME's raw loaders and packed formats are symmetric in A/B.  Until a
-      // direct vertical C epilogue exists, transposing the problem converts a
-      // statically column-contiguous output into the horizontal fast path.
-      return column_contiguous_v<typename COutputSpec::OutputLayout> &&
-          !row_contiguous_v<typename COutputSpec::OutputLayout>;
+      // Direct vertical ZA stores remove the former C-layout asymmetry.  Raw,
+      // converted and online-packed probes are now neutral within noise, so
+      // preserve the caller's orientation and avoid an extra specialization.
+      // A future asymmetric narrow-N leaf can re-enable swap from its own
+      // capability profile rather than from output layout alone.
+      return false;
     }
   }
 };

@@ -123,6 +123,26 @@ inline constexpr bool direct_row_major_output_v =
     std::same_as<
         tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
 
+/// Rank-two input whose leading (spatial) axis is contiguous: a
+/// transposed operand as fed to orientation-swapped problems.
+template <typename Access>
+inline constexpr bool column_contiguous_input_v =
+    Access::Rank == 2 && std::same_as<
+        tensor::stride_type_t<0, InputLayoutOf<Access>>, meta::Const<1>>;
+
+/// Rank-two output whose leading (spatial) axis is contiguous (transposed
+/// C); the store shape produced by orientation-swapped problems.
+template <typename Access>
+inline constexpr bool column_contiguous_output_v =
+    Access::Rank == 2 && std::same_as<
+        tensor::stride_type_t<0, OutputLayoutOf<Access>>, meta::Const<1>>;
+
+/// Raw-pointer, rank-two, column-contiguous output: eligible for the
+/// direct vertical ZA store path (write/read_column below).
+template <typename Access>
+inline constexpr bool direct_column_major_output_v =
+    generic::RawDirectAccess<Access> && column_contiguous_output_v<Access>;
+
 /**
  * @brief Tile2D kernel provider: search-space limits and per-family score.
  *
@@ -2181,6 +2201,26 @@ VECOPS_ALWAYS_INLINE auto read_row(
       Tag{}, row, static_cast<vec::Mask<Tag>>(pg));
 }
 
+/// Vertical ZA slice write/read through the ZA move intrinsics: the
+/// column-major twins of write_row/read_row, serving direct
+/// column-contiguous (transposed) C epilogues.
+template <int Tile, typename T, vec::VectorValue V, typename Mask>
+VECOPS_ALWAYS_INLINE void write_column(
+    uint32_t column, Mask pg, V value) noexcept {
+  using Tag = vec::ScalableTag<T, 0>;
+  vec::details::sme::write_ver<Tile>(
+      column, static_cast<vec::Mask<Tag>>(pg),
+      static_cast<vec::Vec<Tag>>(value));
+}
+
+template <int Tile, typename T, typename Mask>
+VECOPS_ALWAYS_INLINE auto read_column(
+    uint32_t column, Mask pg) noexcept {
+  using Tag = vec::ScalableTag<T, 0>;
+  return vec::details::sme::read_ver<Tile>(
+      Tag{}, column, static_cast<vec::Mask<Tag>>(pg));
+}
+
 /**
  * @brief Compile-time extent of one spatial block within its ZA tile.
  *
@@ -2228,6 +2268,9 @@ VECOPS_ALWAYS_INLINE auto tile_active_extent(nint_t active) {
  *   (M==1) is cheaper as one direct `load_hor` into row 0.
  * - non-broadcast direct row-major: per-row ZA memory loads (`load_hor`
  *   of the 32/64-bit container width).
+ * - column-contiguous (transposed) input: the column twin of the last
+ *   case -- per-column vector loads through the access layer plus
+ *   `write_column`.
  * - anything else: per-row vector loads through the access layer plus
  *   `write_row`.
  *
@@ -2303,6 +2346,18 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
             reinterpret_cast<const U*>(base + row * strides[0]));
       }
     }
+  } else if constexpr (column_contiguous_input_v<CInput>) {
+    const auto pg_rows = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (FullM) return vec::mtrue(Tag{});
+      else return vec::mwhilelt(Tag{}, nint_t{0}, active_m_value);
+    }();
+    for (nint_t column = 0; column < active_n_value; ++column) {
+      const auto value = input.load(
+          Tag{}, tensor::coord(m, n + column), tensor::axis<0>,
+          vec::opt::first(active_m_value), vec::opt::zero);
+      write_column<Tile, T>(
+          static_cast<uint32_t>(column), pg_rows, value);
+    }
   } else {
     for (nint_t row = 0; row < active_m_value; ++row) {
       const auto value = input.load(
@@ -2317,9 +2372,12 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
  * @brief Write one ZA output tile back through the C output access.
  *
  * Direct row-major outputs use per-row ZA memory stores (`store_hor` of
- * the 32/64-bit container width); anything else reads each row back into a
- * vector and stores through the access layer (applying the output
- * transform, if any).
+ * the 32/64-bit container width); direct column-major (transposed)
+ * outputs use the vertical twin (`store_ver`, per column); a
+ * column-contiguous non-direct output reads each column back into a
+ * vector and stores through the access layer along axis<0>; anything
+ * else reads each row back into a vector and stores through the access
+ * layer (applying the output transform, if any).
  */
 template <int Tile, bool FullM, bool FullN,
           meta::ValueType ActiveM, meta::ValueType ActiveN,
@@ -2345,6 +2403,34 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
           static_cast<uint32_t>(row),
           static_cast<vec::Mask<BitsTag>>(pg),
           reinterpret_cast<U*>(base + row * strides[0]));
+    }
+  } else if constexpr (direct_column_major_output_v<COutput>) {
+    const auto strides = output.raw_strides();
+    auto* base = reinterpret_cast<T*>(output.raw_data()) +
+        m * strides[0] + n * strides[1];
+    const auto pg_rows = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (FullM) return vec::mtrue(Tag{});
+      else return vec::mwhilelt(Tag{}, nint_t{0}, active_m_value);
+    }();
+    for (nint_t column = 0; column < active_n_value; ++column) {
+      using U = std::conditional_t<sizeof(T) == 8, uint64_t, uint32_t>;
+      using BitsTag = vec::ScalableTag<U, 0>;
+      vec::details::sme::store_ver<Tile>(
+          static_cast<uint32_t>(column),
+          static_cast<vec::Mask<BitsTag>>(pg_rows),
+          reinterpret_cast<U*>(base + column * strides[1]));
+    }
+  } else if constexpr (column_contiguous_output_v<COutput>) {
+    const auto pg_rows = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (FullM) return vec::mtrue(Tag{});
+      else return vec::mwhilelt(Tag{}, nint_t{0}, active_m_value);
+    }();
+    for (nint_t column = 0; column < active_n_value; ++column) {
+      const auto value = static_cast<vec::Vec<Tag>>(
+          read_column<Tile, T>(static_cast<uint32_t>(column), pg_rows));
+      output.store(
+          Tag{}, tensor::coord(m, n + column), tensor::axis<0>, value,
+          vec::opt::first(active_m_value));
     }
   } else {
     for (nint_t row = 0; row < active_m_value; ++row) {
