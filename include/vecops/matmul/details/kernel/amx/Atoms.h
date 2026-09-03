@@ -43,13 +43,19 @@ struct AMXAtomBase {
       std::conditional_t<Side == Operand::A, TA, TB>, Side>;
 };
 
-struct AMX_BF16F32 : AMXAtomBase<bfloat16_t, bfloat16_t, float32_t> {};
-struct AMX_F16F32 : AMXAtomBase<float16_t, float16_t, float32_t> {};
+struct AMX_BF16F32 : AMXAtomBase<bfloat16_t, bfloat16_t, float32_t> {
+  using SwappedAtom = AMX_BF16F32;
+};
+struct AMX_F16F32 : AMXAtomBase<float16_t, float16_t, float32_t> {
+  using SwappedAtom = AMX_F16F32;
+};
 
 template <typename A, typename B>
   requires ((std::same_as<A, int8_t> || std::same_as<A, uint8_t>) &&
             (std::same_as<B, int8_t> || std::same_as<B, uint8_t>))
-struct AMX_I8I32 : AMXAtomBase<A, B, int32_t> {};
+struct AMX_I8I32 : AMXAtomBase<A, B, int32_t> {
+  using SwappedAtom = AMX_I8I32<B, A>;
+};
 
 static_assert(Atom<AMX_BF16F32>);
 

@@ -33,6 +33,10 @@ enum class Operand { A, B };
  * - `M_R`, `N_R`, and `K_R` native instruction extents; and
  * - an operand-specific `Packing` format for A and B.
  *
+ * An atom may additionally provide `SwappedAtom`. Orientation-aware planning
+ * uses it when exchanging A and B; mixed-signedness atoms map this alias to the
+ * corresponding atom with TA/TB exchanged.
+ *
  * Atom types are concrete, unqualified types.  Parameterized instruction
  * families may use a class template to produce such a concrete type, as done
  * by the signedness variants of the integer atoms.

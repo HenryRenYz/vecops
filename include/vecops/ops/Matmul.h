@@ -20,19 +20,33 @@
 
 namespace vecops::ops {
 
+/**
+ * Compile-time configuration for `ops::Matmul`.
+ *
+ * @tparam EnableSwapAB Allow an architecture policy to replace the problem
+ * with its transposed identity `C^T = B*A^T`. The default is `true`; `false`
+ * is a hard opt-out and leaves operand roles and M/N unchanged.
+ *
+ * Orientation selection runs before architecture-family online-packing
+ * planning. Consequently, packing costs and packed operand roles are computed
+ * for the selected orientation, with no runtime branch. Explicit family or
+ * scheduler selections currently retain their requested orientation.
+ */
 template <
     ::vecops::matmul::Atom AtomT,
     typename FamilySelectionT =
         ::vecops::matmul::family_selection::Automatic,
     typename SchedulerPolicyT = kernel::matmul_policy::Automatic,
     typename GenericTiledTuningT = ::vecops::matmul::GenericTiledTuning<>,
-    typename CacheInfoProviderT = platform::SystemCacheInfoProvider>
+    typename CacheInfoProviderT = platform::SystemCacheInfoProvider,
+    bool EnableSwapAB = true>
 struct MatmulConfig {
   using Atom = AtomT;
   using FamilySelection = FamilySelectionT;
   using SchedulerPolicy = SchedulerPolicyT;
   using GenericTuning = GenericTiledTuningT;
   using CacheInfoProvider = CacheInfoProviderT;
+  static constexpr bool enable_swap_ab = EnableSwapAB;
 
   [[no_unique_address]] GenericTiledTuningT generic_tiled{};
   [[no_unique_address]] CacheInfoProviderT cache_info_provider{};
@@ -49,6 +63,11 @@ using MatmulSchedulerConfig = MatmulConfig<
  *
  * The object stores configuration only. Family selection is resolved without
  * allowing family-local tuning parameters to change the selected family.
+ * `Config::enable_swap_ab` controls compile-time problem transposition. When
+ * enabled, an architecture policy may evaluate
+ * `C^T = B*A^T` by exchanging the two internal `[spatial,K]` operands and
+ * transposing the C specs. Disabling it guarantees that the supplied M/N and
+ * operand orientation reach the selected family unchanged.
  * The single-C overload computes `C = A*B^T` through a zero-valued accumulator
  * input. The explicit-C overload computes
  * `COutput = CInput + A*B^T`; CInput and COutput may be different operands.

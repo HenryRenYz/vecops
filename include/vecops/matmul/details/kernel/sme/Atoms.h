@@ -55,18 +55,28 @@ struct SMEAtomBase {
       std::conditional_t<Side == Operand::A, TA, TB>, Side>;
 };
 
-struct SME_F32F32 : SMEAtomBase<float32_t, float32_t, float32_t> {};
-struct SME_BF16F32 : SMEAtomBase<bfloat16_t, bfloat16_t, float32_t> {};
-struct SME_F16F32 : SMEAtomBase<float16_t, float16_t, float32_t> {};
+struct SME_F32F32 : SMEAtomBase<float32_t, float32_t, float32_t> {
+  using SwappedAtom = SME_F32F32;
+};
+struct SME_BF16F32 : SMEAtomBase<bfloat16_t, bfloat16_t, float32_t> {
+  using SwappedAtom = SME_BF16F32;
+};
+struct SME_F16F32 : SMEAtomBase<float16_t, float16_t, float32_t> {
+  using SwappedAtom = SME_F16F32;
+};
 
 #if defined(HAS_SME_F64F64)
-struct SME_F64F64 : SMEAtomBase<float64_t, float64_t, float64_t> {};
+struct SME_F64F64 : SMEAtomBase<float64_t, float64_t, float64_t> {
+  using SwappedAtom = SME_F64F64;
+};
 #endif
 
 template <typename A, typename B>
   requires ((std::same_as<A, int8_t> || std::same_as<A, uint8_t>) &&
             (std::same_as<B, int8_t> || std::same_as<B, uint8_t>))
-struct SME_I8I32 : SMEAtomBase<A, B, int32_t> {};
+struct SME_I8I32 : SMEAtomBase<A, B, int32_t> {
+  using SwappedAtom = SME_I8I32<B, A>;
+};
 
 static_assert(Atom<SME_F32F32>);
 
