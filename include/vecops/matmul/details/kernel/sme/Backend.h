@@ -10,8 +10,10 @@
 #include <type_traits>
 #include <utility>
 
+#include "vecops/Assertion.h"
 #include "vecops/execution/details/arm/Resources.h"
 #include "vecops/matmul/Packing.h"
+#include "vecops/matmul/details/kernel/RuntimeDispatch.h"
 #include "vecops/matmul/details/kernel/sme/Atoms.h"
 #include "vecops/kernel/Tile2D.h"
 #include "vecops/matmul/details/kernel/TileScheduler.h"
@@ -894,11 +896,11 @@ inline constexpr bool sve_skinny_fused_candidate_v =
 
 #if defined(CPU_CAPABILITY_SVE)
 template <typename Atom>
-struct PackedMMLATraits;
+struct PackedDotTraits;
 
 #if defined(__ARM_FEATURE_SVE_BF16)
 template <>
-struct PackedMMLATraits<::vecops::matmul::SME_BF16F32> {
+struct PackedDotTraits<::vecops::matmul::SME_BF16F32> {
   using Element = bfloat16_t;
   using Acc = float32_t;
   using InputVec = svbfloat16_t;
@@ -954,7 +956,7 @@ struct PackedMMLATraits<::vecops::matmul::SME_BF16F32> {
 
 #if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
 template <>
-struct PackedMMLATraits<::vecops::matmul::SME_I8I32<int8_t, int8_t>> {
+struct PackedDotTraits<::vecops::matmul::SME_I8I32<int8_t, int8_t>> {
   using Element = int8_t;
   using Acc = int32_t;
   using InputVec = svint8_t;
@@ -1006,7 +1008,7 @@ struct PackedMMLATraits<::vecops::matmul::SME_I8I32<int8_t, int8_t>> {
 };
 
 template <>
-struct PackedMMLATraits<::vecops::matmul::SME_I8I32<uint8_t, uint8_t>> {
+struct PackedDotTraits<::vecops::matmul::SME_I8I32<uint8_t, uint8_t>> {
   using Element = uint8_t;
   using Acc = int32_t;
   using InputVec = svuint8_t;
@@ -1059,7 +1061,7 @@ struct PackedMMLATraits<::vecops::matmul::SME_I8I32<uint8_t, uint8_t>> {
 #endif
 
 template <::vecops::matmul::Atom Atom>
-inline constexpr bool packed_mmla_supported_atom_v =
+inline constexpr bool packed_dot_supported_atom_v =
 #if defined(__ARM_FEATURE_SVE_BF16)
     std::same_as<Atom, ::vecops::matmul::SME_BF16F32> ||
 #endif
@@ -1079,7 +1081,7 @@ VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void packed_ab_mmla(
     const typename Atom::TB* packed_b, nint_t b_group_stride,
     typename Atom::TAcc* output,
     nint_t logical_m, nint_t logical_n, nint_t logical_k) {
-  using Op = PackedMMLATraits<Atom>;
+  using Op = PackedDotTraits<Atom>;
   constexpr nint_t KPack =
       ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::A>::KPack;
   const nint_t groups = ceil_div(logical_k, KPack);
@@ -1137,8 +1139,8 @@ VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void packed_ab_mmla(
 
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
-inline constexpr bool packed_mmla_candidate_v =
-    packed_mmla_supported_atom_v<Atom> &&
+inline constexpr bool packed_dot_candidate_v =
+    packed_dot_supported_atom_v<Atom> &&
     is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
     is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B> &&
     generic::RawDirectAccess<A> && generic::RawDirectAccess<B> &&
@@ -1148,10 +1150,10 @@ inline constexpr bool packed_mmla_candidate_v =
 
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
-VECOPS_ALWAYS_INLINE bool try_packed_mmla(
+VECOPS_ALWAYS_INLINE bool try_packed_dot(
     nint_t logical_m, nint_t logical_n, nint_t logical_k,
     const A& a, const B& b, const CInput&, COutput& c_output) {
-  if constexpr (!packed_mmla_candidate_v<
+  if constexpr (!packed_dot_candidate_v<
                     Atom, A, B, CInput, COutput>) {
     return false;
   } else {
@@ -1196,10 +1198,10 @@ VECOPS_ALWAYS_INLINE bool try_packed_mmla(
 
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
-VECOPS_ALWAYS_INLINE bool try_packed_mmla_tiny(
+VECOPS_ALWAYS_INLINE bool try_packed_dot_tiny(
     nint_t logical_m, nint_t logical_n, nint_t logical_k,
     const A& a, const B& b, const CInput&, COutput& c_output) {
-  if constexpr (!packed_mmla_candidate_v<
+  if constexpr (!packed_dot_candidate_v<
                     Atom, A, B, CInput, COutput>) {
     return false;
   } else {
@@ -1248,13 +1250,143 @@ enum class DispatchOwner {
   FusedSkinnyRow,
   FusedSkinnyColumn,
   RuntimeQuantINT8,
-  PackedMMLAPrimary,
-  PackedMMLATiny,
+  PackedDotPrimary,
+  PackedDotTiny,
 };
 
 template <meta::ValueType E, nint_t Value>
 inline constexpr bool extent_is_v =
     meta::range_within_v<std::remove_cvref_t<E>, Value, Value>;
+
+template <meta::ValueType E, nint_t Value>
+inline constexpr bool extent_excludes_v = [] {
+  using EV = std::remove_cvref_t<E>;
+  if constexpr (EV::is_const) return EV::value != Value;
+  else return !EV::conforms(Value);
+}();
+
+template <::vecops::matmul::Atom Atom>
+inline constexpr SmallVectorShape small_vector_shape_v =
+    std::same_as<Atom, ::vecops::matmul::SME_F16F32>
+    ? SmallVectorShape::sme_f16
+    : SmallVectorShape::sme_other;
+
+template <::vecops::matmul::Atom Atom,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K>
+consteval ::vecops::matmul::details::Applicability
+small_vector_shape_applicability() {
+  using Applicability = ::vecops::matmul::details::Applicability;
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  using KV = std::remove_cvref_t<K>;
+  constexpr nint_t MaxOutputs =
+      std::same_as<Atom, ::vecops::matmul::SME_F16F32> ? 16 : 64;
+  if constexpr (meta::lower_bound_at_least_v<KV, 0> &&
+                ((extent_is_v<MV, 1> &&
+                  meta::range_within_v<NV, 0, MaxOutputs>) ||
+                 (extent_is_v<NV, 1> &&
+                  meta::range_within_v<MV, 0, MaxOutputs>))) {
+    return Applicability::always;
+  } else if constexpr (meta::is_singleton_v<MV> &&
+                       meta::is_singleton_v<NV> &&
+                       meta::is_singleton_v<KV>) {
+    constexpr bool Applicable =
+        runtime_dispatch_rules::sme_small_vector_profitable(
+            small_vector_shape_v<Atom>,
+            meta::singleton_value_v<MV>, meta::singleton_value_v<NV>,
+            meta::singleton_value_v<KV>);
+    return Applicable ? Applicability::always : Applicability::never;
+  } else if constexpr (extent_excludes_v<MV, 1> &&
+                       extent_excludes_v<NV, 1>) {
+    return Applicability::never;
+  } else {
+    return Applicability::runtime;
+  }
+}
+
+template <meta::ValueType M, meta::ValueType N, meta::ValueType K>
+consteval ::vecops::matmul::details::Applicability
+runtime_quant_shape_applicability() {
+  using Applicability = ::vecops::matmul::details::Applicability;
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  using KV = std::remove_cvref_t<K>;
+  if constexpr ((meta::has_upper_bound_v<MV> &&
+                 meta::upper_bound_v<MV> < 1) ||
+                (meta::has_upper_bound_v<NV> &&
+                 meta::upper_bound_v<NV> < 1) ||
+                (meta::has_upper_bound_v<KV> &&
+                 meta::upper_bound_v<KV> < 0)) {
+    return Applicability::never;
+  } else if constexpr (meta::lower_bound_at_least_v<MV, 1> &&
+                       meta::lower_bound_at_least_v<NV, 1> &&
+                       meta::lower_bound_at_least_v<KV, 0>) {
+    // Strides and the runtime packing panel can still reject the leaf.
+    return Applicability::runtime;
+  } else {
+    return Applicability::runtime;
+  }
+}
+
+template <::vecops::matmul::Atom Atom,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K>
+consteval ::vecops::matmul::details::Applicability
+packed_dot_shape_applicability() {
+  using Applicability = ::vecops::matmul::details::Applicability;
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  using KV = std::remove_cvref_t<K>;
+  constexpr bool MayContainSupportedPair =
+      (!extent_excludes_v<MV, 2> &&
+       (!extent_excludes_v<NV, 2> ||
+        !extent_excludes_v<NV, 4> ||
+        !extent_excludes_v<NV, 8>)) ||
+      (!extent_excludes_v<MV, 4> &&
+       (!extent_excludes_v<NV, 2> ||
+        !extent_excludes_v<NV, 4>)) ||
+      (!extent_excludes_v<MV, 8> &&
+       !extent_excludes_v<NV, 2>);
+  constexpr nint_t GlobalMaxK =
+      std::same_as<Atom, ::vecops::matmul::SME_BF16F32> ? 1025 : 513;
+  if constexpr (!MayContainSupportedPair ||
+                (meta::has_upper_bound_v<KV> &&
+                 meta::upper_bound_v<KV> < 0) ||
+                (meta::has_lower_bound_v<KV> &&
+                 meta::lower_bound_v<KV> > GlobalMaxK)) {
+    return Applicability::never;
+  } else if constexpr (meta::is_singleton_v<MV> &&
+                meta::is_singleton_v<NV> &&
+                meta::is_singleton_v<KV>) {
+    constexpr nint_t MValue = meta::singleton_value_v<MV>;
+    constexpr nint_t NValue = meta::singleton_value_v<NV>;
+    constexpr nint_t KValue = meta::singleton_value_v<KV>;
+    constexpr bool PrimaryShape =
+        (MValue == 2 && NValue == 8) ||
+        (MValue == 8 && NValue == 2) ||
+        (MValue == 4 && NValue == 4);
+    constexpr bool TinyShape =
+        (MValue == 2 && (NValue == 2 || NValue == 4)) ||
+        (MValue == 4 && NValue == 2);
+    constexpr nint_t PrimaryMaxK = MValue == 4 && NValue == 4
+        ? 257
+        : (std::same_as<Atom, ::vecops::matmul::SME_BF16F32>
+               ? 1025
+               : 513);
+    constexpr nint_t TinyMaxK = MValue == 4 && NValue == 2
+        ? 257
+        : (std::same_as<Atom, ::vecops::matmul::SME_BF16F32>
+               ? 1025
+               : 513);
+    constexpr bool Supported = KValue >= 0 &&
+        ((PrimaryShape && KValue <= PrimaryMaxK) ||
+         (TinyShape && KValue <= TinyMaxK));
+    return Supported ? Applicability::always : Applicability::never;
+  } else {
+    // The five admitted (M,N) pairs are sparse. Keeping one shared runtime
+    // probe avoids cloning the shape tree into every dynamic instantiation.
+    return Applicability::runtime;
+  }
+}
 
 template <::vecops::matmul::Atom Atom,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
@@ -1314,17 +1446,17 @@ consteval DispatchOwner select_automatic_dispatch_owner() {
       }
     }
 #endif
-#if defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+#if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
     if constexpr (fused_runtime_quant_int8_candidate_v<
                       Atom, A, B, CInput, COutput> &&
-                  extent_is_v<MV, 1> &&
-                  meta::lower_bound_at_least_v<NV, 1> && NV::aligns(64) &&
-                  meta::lower_bound_at_least_v<KV, 0> && KV::aligns(64)) {
+                  meta::lower_bound_at_least_v<MV, 1> &&
+                  meta::lower_bound_at_least_v<NV, 1> &&
+                  meta::lower_bound_at_least_v<KV, 0>) {
       return DispatchOwner::RuntimeQuantINT8;
     }
 #endif
 #if defined(CPU_CAPABILITY_SVE)
-    if constexpr (packed_mmla_candidate_v<
+    if constexpr (packed_dot_candidate_v<
                       Atom, A, B, CInput, COutput>) {
       constexpr bool Elongated =
           (extent_is_v<MV, 2> && extent_is_v<NV, 8>) ||
@@ -1336,7 +1468,7 @@ consteval DispatchOwner select_automatic_dispatch_owner() {
           : (std::same_as<Atom, ::vecops::matmul::SME_BF16F32> ? 1025 : 513);
       if constexpr ((Elongated || Square) &&
                     meta::range_within_v<KV, 0, PrimaryMaxK>) {
-        return DispatchOwner::PackedMMLAPrimary;
+        return DispatchOwner::PackedDotPrimary;
       }
       constexpr bool ShortWide =
           extent_is_v<MV, 2> &&
@@ -1348,7 +1480,7 @@ consteval DispatchOwner select_automatic_dispatch_owner() {
           : (std::same_as<Atom, ::vecops::matmul::SME_BF16F32> ? 1025 : 513);
       if constexpr ((ShortWide || TallNarrow) &&
                     meta::range_within_v<KV, 0, TinyMaxK>) {
-        return DispatchOwner::PackedMMLATiny;
+        return DispatchOwner::PackedDotTiny;
       }
     }
 #endif
@@ -1370,9 +1502,99 @@ inline constexpr bool dispatch_owner_in_family_v =
     (std::same_as<
          Family, ::vecops::matmul::kernel_family::RuntimeQuantInt8> &&
      Owner == DispatchOwner::RuntimeQuantINT8) ||
-    (std::same_as<Family, ::vecops::matmul::kernel_family::PackedMMLA> &&
-     (Owner == DispatchOwner::PackedMMLAPrimary ||
-      Owner == DispatchOwner::PackedMMLATiny));
+    (std::same_as<Family, ::vecops::matmul::kernel_family::PackedDot> &&
+     (Owner == DispatchOwner::PackedDotPrimary ||
+      Owner == DispatchOwner::PackedDotTiny));
+
+template <typename Family,
+          ::vecops::matmul::Atom Atom,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K,
+          typename A, typename B, typename CInput, typename COutput,
+          typename Scope>
+consteval ::vecops::matmul::details::Applicability
+family_applicability() {
+  using Applicability = ::vecops::matmul::details::Applicability;
+  constexpr bool MixedSignCandidate =
+#if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+      mixed_sign_sve_skinny_candidate_v<Atom, A, B, CInput, COutput>;
+#else
+      false;
+#endif
+  constexpr bool RawCandidate =
+#if !defined(VECOPS_DISABLE_SME_SVE_SKINNY)
+      sve_skinny_candidate_v<Atom, A, B, CInput, COutput>;
+#else
+      false;
+#endif
+  constexpr bool FusedCandidate =
+#if !defined(VECOPS_DISABLE_SME_SVE_SKINNY) && \
+    !defined(VECOPS_DISABLE_SME_FUSED_SKINNY)
+      sve_skinny_fused_candidate_v<Atom, A, B, CInput, COutput>;
+#else
+      false;
+#endif
+  constexpr bool RuntimeQuantCandidate =
+#if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+      fused_runtime_quant_int8_candidate_v<
+          Atom, A, B, CInput, COutput>;
+#else
+      false;
+#endif
+  constexpr bool PackedDotCandidate =
+#if defined(CPU_CAPABILITY_SVE)
+      packed_dot_candidate_v<Atom, A, B, CInput, COutput>;
+#else
+      false;
+#endif
+  if constexpr (std::same_as<
+                    Family, ::vecops::matmul::kernel_family::General> ||
+                std::same_as<
+                    Family, ::vecops::matmul::kernel_family::WholeProblem>) {
+    return Applicability::always;
+  } else if constexpr (!execution::has_resource_v<
+                           execution::details::arm::StreamingZA, Scope> &&
+                       std::same_as<
+                           Family,
+                           ::vecops::matmul::kernel_family::SmallVector> &&
+                       (MixedSignCandidate || RawCandidate ||
+                        FusedCandidate)) {
+    return small_vector_shape_applicability<Atom, M, N, K>();
+  } else if constexpr (!execution::has_resource_v<
+                           execution::details::arm::StreamingZA, Scope> &&
+                       std::same_as<
+                           Family,
+                           ::vecops::matmul::kernel_family::RuntimeQuantInt8> &&
+                       RuntimeQuantCandidate) {
+    return runtime_quant_shape_applicability<M, N, K>();
+  } else if constexpr (!execution::has_resource_v<
+                           execution::details::arm::StreamingZA, Scope> &&
+                       std::same_as<
+                           Family,
+                           ::vecops::matmul::kernel_family::PackedDot> &&
+                       PackedDotCandidate) {
+    return packed_dot_shape_applicability<Atom, M, N, K>();
+  } else {
+    return Applicability::never;
+  }
+}
+
+template <typename FamilyDispatch, typename CandidateFamily>
+inline constexpr bool permits_runtime_family_v = [] {
+  using Requested = typename FamilyDispatch::Family;
+  if constexpr (std::same_as<
+                    Requested,
+                    ::vecops::matmul::kernel_family::WholeProblem>) {
+    return true;
+  } else if constexpr (std::same_as<
+                           Requested,
+                           ::vecops::matmul::kernel_family::General>) {
+    return false;
+  } else if constexpr (FamilyDispatch::required) {
+    return std::same_as<Requested, CandidateFamily>;
+  } else {
+    return true;
+  }
+}();
 
 template <typename FamilyDispatch,
           ::vecops::matmul::Atom Atom,
@@ -1391,8 +1613,11 @@ consteval DispatchOwner select_dispatch_owner() {
                            ::vecops::matmul::kernel_family::General>) {
     return DispatchOwner::General;
   } else {
-    constexpr bool Applicable =
-        dispatch_owner_in_family_v<Family, AutomaticOwner>;
+    constexpr bool Applicable = dispatch_owner_in_family_v<
+        Family, AutomaticOwner> ||
+        family_applicability<
+            Family, Atom, M, N, K, A, B, CInput, COutput, Scope>() !=
+            ::vecops::matmul::details::Applicability::never;
     static_assert(
         !FamilyDispatch::required || Applicable,
         "required matmul kernel family is not applicable to this SME leaf");
@@ -1914,6 +2139,163 @@ struct Backend<matmul_implementation::SME> {
     static_assert(std::same_as<typename Atom::KernelKind, ::vecops::matmul::SMEKernelKind>);
     constexpr auto Owner = sme::select_dispatch_owner<
         FamilyDispatch, Atom, M, N, K, A, B, CInput, COutput, Scope>();
+    using Applicability = ::vecops::matmul::details::Applicability;
+    using RequestedFamily = typename FamilyDispatch::Family;
+    constexpr bool AutomaticNeedsRuntimeProbe =
+        std::same_as<RequestedFamily,
+                     ::vecops::matmul::kernel_family::WholeProblem> &&
+        Owner == sme::DispatchOwner::General;
+    constexpr bool RuntimeSmallVector = [] {
+      if constexpr (!sme::permits_runtime_family_v<
+                        FamilyDispatch,
+                        ::vecops::matmul::kernel_family::SmallVector>) {
+        return false;
+      } else {
+        constexpr bool Requested = std::same_as<
+            RequestedFamily,
+            ::vecops::matmul::kernel_family::SmallVector>;
+        return (Requested || AutomaticNeedsRuntimeProbe) &&
+            sme::family_applicability<
+                ::vecops::matmul::kernel_family::SmallVector,
+                Atom, M, N, K, A, B, CInput, COutput, Scope>() ==
+                Applicability::runtime;
+      }
+    }();
+    if constexpr (RuntimeSmallVector) {
+      const nint_t logical_m = static_cast<nint_t>(m);
+      const nint_t logical_n = static_cast<nint_t>(n);
+      const nint_t logical_k = static_cast<nint_t>(k);
+      if (runtime_sme_small_vector_profitable(
+              sme::small_vector_shape_v<Atom>,
+              logical_m, logical_n, logical_k)) {
+#if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+        if constexpr (sme::mixed_sign_sve_skinny_candidate_v<
+                          Atom, A, B, CInput, COutput>) {
+          const bool handled = sme::try_mixed_sign_sve_skinny<Atom>(
+              logical_m, logical_n, logical_k,
+              a, b, c_input, c_output);
+          VECOPS_ASSERT(handled, "runtime mixed-sign skinny plan rejected");
+          return;
+        }
+#endif
+#if !defined(VECOPS_DISABLE_SME_SVE_SKINNY)
+        if constexpr (sme::sve_skinny_candidate_v<
+                          Atom, A, B, CInput, COutput>) {
+          if (logical_m == 1)
+            sme::sve_skinny_matmul<false>(
+                a, b, c_output, logical_n, logical_k);
+          else
+            sme::sve_skinny_matmul<true>(
+                a, b, c_output, logical_m, logical_k);
+          return;
+        }
+#endif
+#if !defined(VECOPS_DISABLE_SME_SVE_SKINNY) && \
+    !defined(VECOPS_DISABLE_SME_FUSED_SKINNY)
+        if constexpr (sme::sve_skinny_fused_candidate_v<
+                          Atom, A, B, CInput, COutput>) {
+          const bool vary_rows = logical_m != 1;
+#if defined(HAS_SME_F64F64)
+          if constexpr (std::same_as<
+                            Atom, ::vecops::matmul::SME_F64F64>) {
+            if (vary_rows)
+              sme::sve_skinny_fused_matmul_f64_external<true>(
+                  a, b, c_output, logical_m, logical_k);
+            else
+              sme::sve_skinny_fused_matmul_f64_external<false>(
+                  a, b, c_output, logical_n, logical_k);
+          } else
+#endif
+          if constexpr (COutput::Transform::is_elementwise) {
+            if (vary_rows)
+              sme::sve_skinny_fused_matmul<true>(
+                  a, b, c_output, logical_m, logical_k);
+            else
+              sme::sve_skinny_fused_matmul<false>(
+                  a, b, c_output, logical_n, logical_k);
+          } else {
+            if (vary_rows)
+              sme::sve_skinny_fused_lane_local_matmul<true>(
+                  a, b, c_output, logical_m, logical_k);
+            else
+              sme::sve_skinny_fused_lane_local_matmul<false>(
+                  a, b, c_output, logical_n, logical_k);
+          }
+          return;
+        }
+#endif
+      }
+      if constexpr (FamilyDispatch::required &&
+                    std::same_as<
+                        RequestedFamily,
+                        ::vecops::matmul::kernel_family::SmallVector>) {
+        VECOPS_CHECK(false, "required SmallVector family rejected at runtime");
+      }
+    }
+
+#if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+    constexpr bool RuntimeQuant = [] {
+      constexpr bool Requested = std::same_as<
+          RequestedFamily,
+          ::vecops::matmul::kernel_family::RuntimeQuantInt8>;
+      return (Requested || AutomaticNeedsRuntimeProbe) &&
+          sme::permits_runtime_family_v<
+              FamilyDispatch,
+              ::vecops::matmul::kernel_family::RuntimeQuantInt8> &&
+          sme::family_applicability<
+              ::vecops::matmul::kernel_family::RuntimeQuantInt8,
+              Atom, M, N, K, A, B, CInput, COutput, Scope>() ==
+              Applicability::runtime;
+    }();
+    if constexpr (RuntimeQuant) {
+      const bool handled =
+          sme::try_fused_runtime_quant_int8_packed_b_gemv<Atom>(
+              static_cast<nint_t>(m), static_cast<nint_t>(n),
+              static_cast<nint_t>(k), a, b, c_input, c_output);
+      if (handled) return;
+      if constexpr (FamilyDispatch::required &&
+                    std::same_as<
+                        RequestedFamily,
+                        ::vecops::matmul::kernel_family::RuntimeQuantInt8>) {
+        VECOPS_CHECK(false,
+                     "required RuntimeQuantInt8 family rejected at runtime");
+      }
+    }
+#endif
+
+#if defined(CPU_CAPABILITY_SVE)
+    constexpr bool RuntimePackedDot = [] {
+      constexpr bool Requested = std::same_as<
+          RequestedFamily,
+          ::vecops::matmul::kernel_family::PackedDot>;
+      return (Requested || AutomaticNeedsRuntimeProbe) &&
+          sme::permits_runtime_family_v<
+              FamilyDispatch,
+              ::vecops::matmul::kernel_family::PackedDot> &&
+          sme::family_applicability<
+              ::vecops::matmul::kernel_family::PackedDot,
+              Atom, M, N, K, A, B, CInput, COutput, Scope>() ==
+              Applicability::runtime;
+    }();
+    if constexpr (RuntimePackedDot) {
+      const nint_t logical_m = static_cast<nint_t>(m);
+      const nint_t logical_n = static_cast<nint_t>(n);
+      const nint_t logical_k = static_cast<nint_t>(k);
+      const bool handled = sme::try_packed_dot<Atom>(
+          logical_m, logical_n, logical_k,
+          a, b, c_input, c_output) ||
+          sme::try_packed_dot_tiny<Atom>(
+              logical_m, logical_n, logical_k,
+              a, b, c_input, c_output);
+      if (handled) return;
+      if constexpr (FamilyDispatch::required &&
+                    std::same_as<
+                        RequestedFamily,
+                        ::vecops::matmul::kernel_family::PackedDot>) {
+        VECOPS_CHECK(false, "required PackedDot family rejected at runtime");
+      }
+    }
+#endif
 #if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
     if constexpr (Owner == sme::DispatchOwner::MixedSignSkinnyRow ||
                   Owner == sme::DispatchOwner::MixedSignSkinnyColumn) {
@@ -1973,35 +2355,35 @@ struct Backend<matmul_implementation::SME> {
       return;
     }
 #endif
-#if defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+#if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
     if constexpr (Owner == sme::DispatchOwner::RuntimeQuantINT8) {
       const bool handled =
           sme::try_fused_runtime_quant_int8_packed_b_gemv<Atom>(
               static_cast<nint_t>(m), static_cast<nint_t>(n),
               static_cast<nint_t>(k), a, b, c_input, c_output);
       if constexpr (FamilyDispatch::required)
-        VECOPS_ASSERT(handled, "required runtime-quant INT8 family rejected");
+        VECOPS_CHECK(handled, "required runtime-quant INT8 family rejected");
       if (handled) {
         return;
       }
     }
 #endif
 #if defined(CPU_CAPABILITY_SVE)
-    if constexpr (Owner == sme::DispatchOwner::PackedMMLAPrimary) {
-      const bool handled = sme::try_packed_mmla<Atom>(
+    if constexpr (Owner == sme::DispatchOwner::PackedDotPrimary) {
+      const bool handled = sme::try_packed_dot<Atom>(
               static_cast<nint_t>(m), static_cast<nint_t>(n),
               static_cast<nint_t>(k), a, b, c_input, c_output);
       if constexpr (FamilyDispatch::required)
-        VECOPS_ASSERT(handled, "required packed-MMLA family rejected");
+        VECOPS_CHECK(handled, "required PackedDot family rejected");
       if (handled) {
         return;
       }
-    } else if constexpr (Owner == sme::DispatchOwner::PackedMMLATiny) {
-      const bool handled = sme::try_packed_mmla_tiny<Atom>(
+    } else if constexpr (Owner == sme::DispatchOwner::PackedDotTiny) {
+      const bool handled = sme::try_packed_dot_tiny<Atom>(
               static_cast<nint_t>(m), static_cast<nint_t>(n),
               static_cast<nint_t>(k), a, b, c_input, c_output);
       if constexpr (FamilyDispatch::required)
-        VECOPS_ASSERT(handled, "required packed-MMLA family rejected");
+        VECOPS_CHECK(handled, "required PackedDot family rejected");
       if (handled) {
         return;
       }

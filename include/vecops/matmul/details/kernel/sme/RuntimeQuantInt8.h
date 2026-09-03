@@ -15,7 +15,7 @@
 
 namespace vecops::kernel::matmul_details::sme {
 
-#if defined(HAS_SME_FA64) && defined(__ARM_FEATURE_SVE_MATMUL_INT8)
+#if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
 
 namespace runtime_quant_int8_details {
 
@@ -32,7 +32,7 @@ inline constexpr bool is_packed_access_v =
 
 } // namespace runtime_quant_int8_details
 
-void fused_runtime_quant_int8_packed_b_gemv_1x4vl(
+void fused_runtime_quant_int8_packed_b_gemv(
     const float32_t* a, const int8_t* packed_b,
     nint_t b_outer_stride, nint_t b_group_stride,
     nint_t b_spatial_stride, nint_t packed_panel,
@@ -74,17 +74,10 @@ try_fused_runtime_quant_int8_packed_b_gemv(
                     Atom, A, B, CInput, COutput>) {
     return false;
   } else {
-    using ATag = vec::ScalableTag<uint8_t, 0>;
-    using AccTag = vec::ScalableTag<int32_t, 0>;
-    constexpr nint_t KChunk = 64;
-    const nint_t output_block = 4 * vec::size(AccTag{});
-    const nint_t ordinary_vl_bytes = vec::size(ATag{});
     const nint_t packed_panel = static_cast<nint_t>(
         ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::B>::panel());
-    if (logical_m != 1 || logical_n <= 0 || logical_k < 0 ||
-        logical_n % output_block != 0 || logical_k % KChunk != 0 ||
-        ordinary_vl_bytes != KChunk ||
-        ordinary_vl_bytes != 2 * packed_panel) {
+    if (logical_m <= 0 || logical_n <= 0 || logical_k < 0 ||
+        packed_panel <= 0) {
       return false;
     }
 
@@ -97,26 +90,31 @@ try_fused_runtime_quant_int8_packed_b_gemv(
       return false;
     }
 
-    const auto local_origin = tensor::coord(nint_t{0}, nint_t{0});
-    const auto a_original = a.spec().projection().project(local_origin);
-    const auto output_original =
-        c_output.spec().projection().project(local_origin);
     const auto& quant = a.spec().transform().parameters();
     const auto& dequant = c_output.spec().transform().parameters();
-    const nint_t quant_row = quant.row_scale_index(a_original);
-    const nint_t dequant_row = dequant.row_scale_index(output_original);
-    const nint_t column = output_original[output_original.size() - 1];
+    for (nint_t row = 0; row < logical_m; ++row) {
+      const auto local_origin = tensor::coord(row, nint_t{0});
+      const auto a_original = a.spec().projection().project(local_origin);
+      const auto output_original =
+          c_output.spec().projection().project(local_origin);
+      const nint_t quant_row = quant.row_scale_index(a_original);
+      const nint_t dequant_row = dequant.row_scale_index(output_original);
+      const nint_t column = output_original[output_original.size() - 1];
 
-    fused_runtime_quant_int8_packed_b_gemv_1x4vl(
-        reinterpret_cast<const float32_t*>(a.raw_data()),
-        reinterpret_cast<const int8_t*>(b.raw_data()),
-        b_strides[0], b_strides[1], b_strides[2], packed_panel,
-        reinterpret_cast<const int32_t*>(c_input.raw_data()),
-        reinterpret_cast<float32_t*>(c_output.raw_data()),
-        dequant.column_scales + column,
-        logical_n, logical_k,
-        quant.multipliers[quant_row], *quant.zero_point,
-        dequant.row_scales[dequant_row]);
+      fused_runtime_quant_int8_packed_b_gemv(
+          reinterpret_cast<const float32_t*>(a.raw_data()) +
+              row * a_strides[0],
+          reinterpret_cast<const int8_t*>(b.raw_data()),
+          b_strides[0], b_strides[1], b_strides[2], packed_panel,
+          reinterpret_cast<const int32_t*>(c_input.raw_data()) +
+              row * correction_strides[0],
+          reinterpret_cast<float32_t*>(c_output.raw_data()) +
+              row * output_strides[0],
+          dequant.column_scales + column,
+          logical_n, logical_k,
+          quant.multipliers[quant_row], *quant.zero_point,
+          dequant.row_scales[dequant_row]);
+    }
     return true;
   }
 }

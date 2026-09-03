@@ -64,6 +64,18 @@ constexpr const char* extent_mode_name() {
   return "Const";
 }
 
+template <typename Selection>
+constexpr const char* family_selection_name() {
+  if constexpr (std::same_as<
+                    Selection,
+                    ::vecops::matmul::family_selection::Automatic>) {
+    return "automatic";
+  } else {
+    return ::vecops::matmul::kernel_family::Info<
+        typename Selection::Family>::name.data();
+  }
+}
+
 inline constexpr uint32_t mode_bit(InputMode mode) {
   return static_cast<uint32_t>(mode);
 }
@@ -178,6 +190,8 @@ bool verify_samples(
 
 template <typename Atom, InputMode Mode,
           typename TilePolicy = kernel::matmul_policy::Automatic,
+          typename FamilySelection =
+              ::vecops::matmul::family_selection::Automatic,
           typename ATensor, typename BTensor,
           typename CTensor, typename M, typename N, typename K>
 void run_operation(
@@ -189,7 +203,7 @@ void run_operation(
     std::vector<typename Atom::TAcc>& c,
     nint_t packed_a_elements, nint_t packed_b_elements) {
   using Config = ops::MatmulConfig<
-      Atom, ::vecops::matmul::family_selection::Automatic, TilePolicy>;
+      Atom, FamilySelection, TilePolicy>;
   auto operation = ops::matmul(Config{});
   kernel::Workspace operation_storage(
       operation.required_workspace(m, n, k, a_input, b_input, c_output));
@@ -259,6 +273,8 @@ void run_operation(
 
 template <typename Atom, InputMode Mode,
           typename TilePolicy = kernel::matmul_policy::Automatic,
+          typename FamilySelection =
+              ::vecops::matmul::family_selection::Automatic,
           typename M, typename N, typename K>
 void run_case_with_extents(
     benchmark::State& state, const MatmulCase& test_case,
@@ -315,22 +331,22 @@ void run_case_with_extents(
   }
 
   if constexpr (Mode == InputMode::Raw) {
-    run_operation<Atom, Mode, TilePolicy>(
+    run_operation<Atom, Mode, TilePolicy, FamilySelection>(
         state, test_case, m, n, k,
         a_tensor, b_tensor, c_tensor, a, b, c,
         packed_a_elements, packed_b_elements);
   } else if constexpr (Mode == InputMode::PackedA) {
-    run_operation<Atom, Mode, TilePolicy>(
+    run_operation<Atom, Mode, TilePolicy, FamilySelection>(
         state, test_case, m, n, k,
         packed_a_tensor, b_tensor, c_tensor, a, b, c,
         packed_a_elements, packed_b_elements);
   } else if constexpr (Mode == InputMode::PackedB) {
-    run_operation<Atom, Mode, TilePolicy>(
+    run_operation<Atom, Mode, TilePolicy, FamilySelection>(
         state, test_case, m, n, k,
         a_tensor, packed_b_tensor, c_tensor, a, b, c,
         packed_a_elements, packed_b_elements);
   } else {
-    run_operation<Atom, Mode, TilePolicy>(
+    run_operation<Atom, Mode, TilePolicy, FamilySelection>(
         state, test_case, m, n, k,
         packed_a_tensor, packed_b_tensor, c_tensor,
         a, b, c, packed_a_elements, packed_b_elements);
@@ -338,18 +354,22 @@ void run_case_with_extents(
 }
 
 template <typename Atom, InputMode Mode,
-          typename TilePolicy = kernel::matmul_policy::Automatic>
+          typename TilePolicy = kernel::matmul_policy::Automatic,
+          typename FamilySelection =
+              ::vecops::matmul::family_selection::Automatic>
 void run_case(benchmark::State& state, const MatmulCase& test_case) {
-  run_case_with_extents<Atom, Mode, TilePolicy>(
+  run_case_with_extents<Atom, Mode, TilePolicy, FamilySelection>(
       state, test_case,
       Any{test_case.m}, Any{test_case.n}, Any{test_case.k});
 }
 
 template <typename Atom, InputMode Mode,
           nint_t M, nint_t N, nint_t K,
-          typename TilePolicy = kernel::matmul_policy::Automatic>
+          typename TilePolicy = kernel::matmul_policy::Automatic,
+          typename FamilySelection =
+              ::vecops::matmul::family_selection::Automatic>
 void run_fixed_case(benchmark::State& state, const MatmulCase& test_case) {
-  run_case_with_extents<Atom, Mode, TilePolicy>(
+  run_case_with_extents<Atom, Mode, TilePolicy, FamilySelection>(
       state, test_case, cint<M>, cint<N>, cint<K>);
 }
 
@@ -414,6 +434,45 @@ void register_extent_pair_mode(const char* group, const char* name) {
   register_extent_mode<
       Atom, Mode, ExtentMode::Const, M, N, K, TilePolicy>(group, name);
 #endif
+}
+
+/** Register an explicitly selected family without changing the default catalog. */
+template <typename Atom, InputMode Mode, typename FamilySelection,
+          ExtentMode Extents, nint_t M, nint_t N, nint_t K>
+void register_family_extent_mode(const char* group, const char* name) {
+  constexpr uint32_t ModeMask = mode_bit(Mode);
+  const MatmulCase test_case{group, name, M, N, K, ModeMask};
+  const auto full_name = benchmark_name<Atom, Mode>(
+      test_case, extent_mode_name<Extents>()) +
+      "/family:" + family_selection_name<FamilySelection>();
+  auto* registered = benchmark::RegisterBenchmark(
+      full_name.c_str(),
+      [test_case](benchmark::State& state) {
+        if constexpr (Extents == ExtentMode::Dynamic) {
+          run_case<
+              Atom, Mode, kernel::matmul_policy::Automatic,
+              FamilySelection>(state, test_case);
+        } else {
+          run_fixed_case<
+              Atom, Mode, M, N, K,
+              kernel::matmul_policy::Automatic,
+              FamilySelection>(state, test_case);
+        }
+      })
+      ->Unit(benchmark::kMicrosecond);
+  ::vecops::bench::configure_registered_benchmark(
+      registered, 0.02, 3)->ReportAggregatesOnly(true);
+}
+
+template <typename Atom, InputMode Mode, typename Family,
+          nint_t M, nint_t N, nint_t K>
+void register_required_family_extent_pair(
+    const char* group, const char* name) {
+  using Selection = ::vecops::matmul::family_selection::Require<Family>;
+  register_family_extent_mode<
+      Atom, Mode, Selection, ExtentMode::Dynamic, M, N, K>(group, name);
+  register_family_extent_mode<
+      Atom, Mode, Selection, ExtentMode::Const, M, N, K>(group, name);
 }
 
 template <typename Atom, nint_t M, nint_t N, nint_t K,
@@ -746,33 +805,33 @@ inline std::vector<MatmulCase> integer_skinny_probe_cases() {
 }
 
 /** PackedAB tiny shapes used to gate ordinary-SVE MMLA against SME MOPA. */
-inline std::vector<MatmulCase> packed_mmla_probe_cases() {
+inline std::vector<MatmulCase> packed_dot_probe_cases() {
   constexpr uint32_t PackedAB = mode_bit(InputMode::PackedAB);
   return {
-      {"dispatch_packed_mmla", "m2_n2_k65", 2, 2, 65, PackedAB},
-      {"dispatch_packed_mmla", "m2_n2_k257", 2, 2, 257, PackedAB},
-      {"dispatch_packed_mmla", "m2_n2_k513", 2, 2, 513, PackedAB},
-      {"dispatch_packed_mmla", "m2_n2_k1025", 2, 2, 1025, PackedAB},
-      {"dispatch_packed_mmla", "m2_n4_k65", 2, 4, 65, PackedAB},
-      {"dispatch_packed_mmla", "m2_n4_k257", 2, 4, 257, PackedAB},
-      {"dispatch_packed_mmla", "m2_n4_k513", 2, 4, 513, PackedAB},
-      {"dispatch_packed_mmla", "m2_n4_k1025", 2, 4, 1025, PackedAB},
-      {"dispatch_packed_mmla", "m4_n2_k65", 4, 2, 65, PackedAB},
-      {"dispatch_packed_mmla", "m4_n2_k257", 4, 2, 257, PackedAB},
-      {"dispatch_packed_mmla", "m4_n2_k513", 4, 2, 513, PackedAB},
-      {"dispatch_packed_mmla", "m4_n2_k1025", 4, 2, 1025, PackedAB},
-      {"dispatch_packed_mmla", "m2_n8_k65", 2, 8, 65, PackedAB},
-      {"dispatch_packed_mmla", "m2_n8_k257", 2, 8, 257, PackedAB},
-      {"dispatch_packed_mmla", "m2_n8_k513", 2, 8, 513, PackedAB},
-      {"dispatch_packed_mmla", "m2_n8_k1025", 2, 8, 1025, PackedAB},
-      {"dispatch_packed_mmla", "m8_n2_k65", 8, 2, 65, PackedAB},
-      {"dispatch_packed_mmla", "m8_n2_k257", 8, 2, 257, PackedAB},
-      {"dispatch_packed_mmla", "m8_n2_k513", 8, 2, 513, PackedAB},
-      {"dispatch_packed_mmla", "m8_n2_k1025", 8, 2, 1025, PackedAB},
-      {"dispatch_packed_mmla", "m4_n4_k65", 4, 4, 65, PackedAB},
-      {"dispatch_packed_mmla", "m4_n4_k257", 4, 4, 257, PackedAB},
-      {"dispatch_packed_mmla", "m4_n4_k513", 4, 4, 513, PackedAB},
-      {"dispatch_packed_mmla", "m4_n4_k1025", 4, 4, 1025, PackedAB},
+      {"dispatch_packed_dot", "m2_n2_k65", 2, 2, 65, PackedAB},
+      {"dispatch_packed_dot", "m2_n2_k257", 2, 2, 257, PackedAB},
+      {"dispatch_packed_dot", "m2_n2_k513", 2, 2, 513, PackedAB},
+      {"dispatch_packed_dot", "m2_n2_k1025", 2, 2, 1025, PackedAB},
+      {"dispatch_packed_dot", "m2_n4_k65", 2, 4, 65, PackedAB},
+      {"dispatch_packed_dot", "m2_n4_k257", 2, 4, 257, PackedAB},
+      {"dispatch_packed_dot", "m2_n4_k513", 2, 4, 513, PackedAB},
+      {"dispatch_packed_dot", "m2_n4_k1025", 2, 4, 1025, PackedAB},
+      {"dispatch_packed_dot", "m4_n2_k65", 4, 2, 65, PackedAB},
+      {"dispatch_packed_dot", "m4_n2_k257", 4, 2, 257, PackedAB},
+      {"dispatch_packed_dot", "m4_n2_k513", 4, 2, 513, PackedAB},
+      {"dispatch_packed_dot", "m4_n2_k1025", 4, 2, 1025, PackedAB},
+      {"dispatch_packed_dot", "m2_n8_k65", 2, 8, 65, PackedAB},
+      {"dispatch_packed_dot", "m2_n8_k257", 2, 8, 257, PackedAB},
+      {"dispatch_packed_dot", "m2_n8_k513", 2, 8, 513, PackedAB},
+      {"dispatch_packed_dot", "m2_n8_k1025", 2, 8, 1025, PackedAB},
+      {"dispatch_packed_dot", "m8_n2_k65", 8, 2, 65, PackedAB},
+      {"dispatch_packed_dot", "m8_n2_k257", 8, 2, 257, PackedAB},
+      {"dispatch_packed_dot", "m8_n2_k513", 8, 2, 513, PackedAB},
+      {"dispatch_packed_dot", "m8_n2_k1025", 8, 2, 1025, PackedAB},
+      {"dispatch_packed_dot", "m4_n4_k65", 4, 4, 65, PackedAB},
+      {"dispatch_packed_dot", "m4_n4_k257", 4, 4, 257, PackedAB},
+      {"dispatch_packed_dot", "m4_n4_k513", 4, 4, 513, PackedAB},
+      {"dispatch_packed_dot", "m4_n4_k1025", 4, 4, 1025, PackedAB},
   };
 }
 
@@ -1009,36 +1068,36 @@ void register_extended_integer_skinny_extent_pairs() {
 }
 
 template <typename Atom, int CaseBase = 0, int ShardTag = 0>
-void register_packed_mmla_extent_pairs() {
-#define VECOPS_REGISTER_MMLA_PAIR(M, N, K, CASE_OFFSET) \
+void register_packed_dot_extent_pairs() {
+#define VECOPS_REGISTER_PACKED_DOT_PAIR(M, N, K, CASE_OFFSET) \
   register_extent_pair<Atom, M, N, K, mode_bit(InputMode::PackedAB), \
                        CaseBase + CASE_OFFSET, ShardTag>( \
-      "dispatch_packed_mmla", "m" #M "_n" #N "_k" #K)
-  VECOPS_REGISTER_MMLA_PAIR(2, 2, 65, 0);
-  VECOPS_REGISTER_MMLA_PAIR(2, 2, 257, 1);
-  VECOPS_REGISTER_MMLA_PAIR(2, 2, 513, 2);
-  VECOPS_REGISTER_MMLA_PAIR(2, 2, 1025, 3);
-  VECOPS_REGISTER_MMLA_PAIR(2, 4, 65, 4);
-  VECOPS_REGISTER_MMLA_PAIR(2, 4, 257, 5);
-  VECOPS_REGISTER_MMLA_PAIR(2, 4, 513, 6);
-  VECOPS_REGISTER_MMLA_PAIR(2, 4, 1025, 7);
-  VECOPS_REGISTER_MMLA_PAIR(4, 2, 65, 8);
-  VECOPS_REGISTER_MMLA_PAIR(4, 2, 257, 9);
-  VECOPS_REGISTER_MMLA_PAIR(4, 2, 513, 10);
-  VECOPS_REGISTER_MMLA_PAIR(4, 2, 1025, 11);
-  VECOPS_REGISTER_MMLA_PAIR(2, 8, 65, 12);
-  VECOPS_REGISTER_MMLA_PAIR(2, 8, 257, 13);
-  VECOPS_REGISTER_MMLA_PAIR(2, 8, 513, 14);
-  VECOPS_REGISTER_MMLA_PAIR(2, 8, 1025, 15);
-  VECOPS_REGISTER_MMLA_PAIR(8, 2, 65, 16);
-  VECOPS_REGISTER_MMLA_PAIR(8, 2, 257, 17);
-  VECOPS_REGISTER_MMLA_PAIR(8, 2, 513, 18);
-  VECOPS_REGISTER_MMLA_PAIR(8, 2, 1025, 19);
-  VECOPS_REGISTER_MMLA_PAIR(4, 4, 65, 20);
-  VECOPS_REGISTER_MMLA_PAIR(4, 4, 257, 21);
-  VECOPS_REGISTER_MMLA_PAIR(4, 4, 513, 22);
-  VECOPS_REGISTER_MMLA_PAIR(4, 4, 1025, 23);
-#undef VECOPS_REGISTER_MMLA_PAIR
+      "dispatch_packed_dot", "m" #M "_n" #N "_k" #K)
+  VECOPS_REGISTER_PACKED_DOT_PAIR(2, 2, 65, 0);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(2, 2, 257, 1);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(2, 2, 513, 2);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(2, 2, 1025, 3);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(2, 4, 65, 4);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(2, 4, 257, 5);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(2, 4, 513, 6);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(2, 4, 1025, 7);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(4, 2, 65, 8);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(4, 2, 257, 9);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(4, 2, 513, 10);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(4, 2, 1025, 11);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(2, 8, 65, 12);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(2, 8, 257, 13);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(2, 8, 513, 14);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(2, 8, 1025, 15);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(8, 2, 65, 16);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(8, 2, 257, 17);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(8, 2, 513, 18);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(8, 2, 1025, 19);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(4, 4, 65, 20);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(4, 4, 257, 21);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(4, 4, 513, 22);
+  VECOPS_REGISTER_PACKED_DOT_PAIR(4, 4, 1025, 23);
+#undef VECOPS_REGISTER_PACKED_DOT_PAIR
 }
 
 inline int run_benchmarks(

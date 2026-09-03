@@ -14,8 +14,10 @@
 
 #include <immintrin.h>
 
+#include "vecops/Assertion.h"
 #include "vecops/execution/details/x86/Resources.h"
 #include "vecops/matmul/Packing.h"
+#include "vecops/matmul/details/kernel/RuntimeDispatch.h"
 #include "vecops/matmul/details/kernel/amx/Atoms.h"
 #include "vecops/kernel/Tile2D.h"
 #include "vecops/matmul/details/kernel/TileScheduler.h"
@@ -23,6 +25,7 @@
 #include "vecops/matmul/details/packing/generic/Pack.h"
 #include "vecops/tensor/DataAccess.h"
 #include "vecops/util/Math.h"
+#include "vecops/vec/Vec.h"
 #include "vecops/vec/details/amx/AMX.h"
 
 namespace vecops::kernel::matmul_details::amx {
@@ -172,10 +175,8 @@ inline constexpr bool remainder_at_most_one_v = [] {
 template <meta::ValueType E, nint_t Value>
 inline constexpr bool extent_excludes_v = [] {
   using EV = std::remove_cvref_t<E>;
-  return (meta::has_upper_bound_v<EV> &&
-          meta::upper_bound_v<EV> < Value) ||
-      (meta::has_lower_bound_v<EV> &&
-       meta::lower_bound_v<EV> > Value);
+  if constexpr (EV::is_const) return EV::value != Value;
+  else return !EV::conforms(Value);
 }();
 
 template <::vecops::matmul::Atom Atom,
@@ -231,6 +232,160 @@ consteval bool small_vector_guaranteed() {
   }
 }
 
+template <::vecops::matmul::Atom Atom>
+inline constexpr SmallVectorShape small_vector_shape_v = [] {
+  if constexpr (std::same_as<Atom, ::vecops::matmul::AMX_BF16F32>)
+    return SmallVectorShape::amx_bf16;
+  else if constexpr (std::same_as<typename Atom::TA, typename Atom::TB>)
+    return SmallVectorShape::amx_i8_same_sign;
+  else
+    return SmallVectorShape::amx_i8_mixed_sign;
+}();
+
+template <::vecops::matmul::Atom Atom,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K>
+consteval ::vecops::matmul::details::Applicability
+small_vector_shape_applicability() {
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  using KV = std::remove_cvref_t<K>;
+  if constexpr (small_vector_guaranteed<Atom, MV, NV, KV>()) {
+    return ::vecops::matmul::details::Applicability::always;
+  } else if constexpr (meta::is_singleton_v<MV> &&
+                       meta::is_singleton_v<NV> &&
+                       meta::is_singleton_v<KV>) {
+    constexpr bool Applicable =
+        runtime_dispatch_rules::amx_small_vector_profitable(
+            small_vector_shape_v<Atom>,
+            meta::singleton_value_v<MV>, meta::singleton_value_v<NV>,
+            meta::singleton_value_v<KV>);
+    return Applicable
+        ? ::vecops::matmul::details::Applicability::always
+        : ::vecops::matmul::details::Applicability::never;
+  } else {
+    return ::vecops::matmul::details::Applicability::runtime;
+  }
+}
+
+template <meta::ValueType M, meta::ValueType N, meta::ValueType K,
+          nint_t Limit>
+consteval ::vecops::matmul::details::Applicability
+small_area_applicability() {
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  using KV = std::remove_cvref_t<K>;
+  if constexpr (meta::lower_bound_at_least_v<MV, 1> &&
+                meta::lower_bound_at_least_v<NV, 1> &&
+                meta::lower_bound_at_least_v<KV, 1> &&
+                max_area_at_most_v<MV, NV, Limit>) {
+    return ::vecops::matmul::details::Applicability::always;
+  } else if constexpr (meta::is_singleton_v<MV> &&
+                       meta::is_singleton_v<NV> &&
+                       meta::is_singleton_v<KV>) {
+    constexpr bool Applicable =
+        runtime_dispatch_rules::area_at_most(
+            meta::singleton_value_v<MV>, meta::singleton_value_v<NV>, Limit) &&
+        meta::singleton_value_v<KV> > 0;
+    return Applicable
+        ? ::vecops::matmul::details::Applicability::always
+        : ::vecops::matmul::details::Applicability::never;
+  } else {
+    return ::vecops::matmul::details::Applicability::runtime;
+  }
+}
+
+template <meta::ValueType M, meta::ValueType N, meta::ValueType K>
+consteval ::vecops::matmul::details::Applicability
+valid_problem_applicability() {
+  using Applicability = ::vecops::matmul::details::Applicability;
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  using KV = std::remove_cvref_t<K>;
+  if constexpr ((meta::has_upper_bound_v<MV> &&
+                 meta::upper_bound_v<MV> < 1) ||
+                (meta::has_upper_bound_v<NV> &&
+                 meta::upper_bound_v<NV> < 1) ||
+                (meta::has_upper_bound_v<KV> &&
+                 meta::upper_bound_v<KV> < 0)) {
+    return Applicability::never;
+  } else if constexpr (meta::lower_bound_at_least_v<MV, 1> &&
+                       meta::lower_bound_at_least_v<NV, 1> &&
+                       meta::lower_bound_at_least_v<KV, 0>) {
+    return Applicability::always;
+  } else {
+    return Applicability::runtime;
+  }
+}
+
+template <meta::ValueType M, meta::ValueType N, meta::ValueType K,
+          nint_t Limit>
+consteval ::vecops::matmul::details::Applicability
+bounded_area_support_applicability() {
+  using Applicability = ::vecops::matmul::details::Applicability;
+  constexpr auto Valid = valid_problem_applicability<M, N, K>();
+  if constexpr (Valid == Applicability::never) {
+    return Applicability::never;
+  } else if constexpr (meta::lower_bound_at_least_v<M, 1> &&
+                       meta::lower_bound_at_least_v<N, 1> &&
+                       max_area_at_most_v<M, N, Limit>) {
+    return Valid;
+  } else if constexpr (meta::is_singleton_v<M> &&
+                       meta::is_singleton_v<N>) {
+    constexpr bool Fits = runtime_dispatch_rules::area_at_most(
+        meta::singleton_value_v<M>, meta::singleton_value_v<N>, Limit);
+    return Fits ? Valid : Applicability::never;
+  } else {
+    return Applicability::runtime;
+  }
+}
+
+template <meta::ValueType M, meta::ValueType N, meta::ValueType K>
+consteval ::vecops::matmul::details::Applicability
+residual_split_support_applicability() {
+  using Applicability = ::vecops::matmul::details::Applicability;
+  using MV = std::remove_cvref_t<M>;
+  constexpr auto Valid = valid_problem_applicability<M, N, K>();
+  if constexpr (Valid == Applicability::never ||
+                (meta::has_upper_bound_v<MV> &&
+                 meta::upper_bound_v<MV> <= 16)) {
+    return Applicability::never;
+  } else if constexpr (meta::lower_bound_at_least_v<MV, 17>) {
+    return Valid;
+  } else {
+    return Applicability::runtime;
+  }
+}
+
+template <meta::ValueType M, meta::ValueType N, meta::ValueType K>
+consteval ::vecops::matmul::details::Applicability
+residual_split_shape_applicability() {
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  using KV = std::remove_cvref_t<K>;
+  if constexpr (meta::is_singleton_v<MV> &&
+                meta::is_singleton_v<NV> &&
+                meta::is_singleton_v<KV>) {
+    constexpr bool Applicable =
+        runtime_dispatch_rules::amx_residual_split_profitable(
+            meta::singleton_value_v<MV>, meta::singleton_value_v<NV>,
+            meta::singleton_value_v<KV>);
+    return Applicable
+        ? ::vecops::matmul::details::Applicability::always
+        : ::vecops::matmul::details::Applicability::never;
+  } else if constexpr (
+      (extent_excludes_v<MV, 17> &&
+       extent_excludes_v<MV, 18> &&
+       extent_excludes_v<MV, 20>) ||
+      (extent_excludes_v<NV, 33> &&
+       extent_excludes_v<NV, 47> &&
+       extent_excludes_v<NV, 48>) ||
+      extent_excludes_v<KV, 1024>) {
+    return ::vecops::matmul::details::Applicability::never;
+  } else {
+    return ::vecops::matmul::details::Applicability::runtime;
+  }
+}
+
 template <::vecops::matmul::Atom Atom, bool AllowTailSplit,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
           typename A, typename B, typename CInput, typename COutput>
@@ -274,8 +429,64 @@ inline constexpr bool dispatch_owner_in_family_v =
     (std::same_as<Family, ::vecops::matmul::kernel_family::SmallVector> &&
      (Owner == DispatchOwner::SmallVector ||
       Owner == DispatchOwner::FusedSmallBF16)) ||
-    (std::same_as<Family, ::vecops::matmul::kernel_family::PackedTail> &&
+    (std::same_as<Family, ::vecops::matmul::kernel_family::ResidualSplit> &&
      Owner == DispatchOwner::PackedABTailSplit);
+
+template <typename Family,
+          ::vecops::matmul::Atom Atom, bool AllowTailSplit,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K,
+          typename A, typename B, typename CInput, typename COutput>
+consteval ::vecops::matmul::details::Applicability
+family_applicability() {
+  using Applicability = ::vecops::matmul::details::Applicability;
+  if constexpr (std::same_as<
+                    Family, ::vecops::matmul::kernel_family::General> ||
+                std::same_as<
+                    Family, ::vecops::matmul::kernel_family::WholeProblem>) {
+    return Applicability::always;
+  } else if constexpr (std::same_as<
+                           Family,
+                           ::vecops::matmul::kernel_family::SmallVector>) {
+    constexpr auto Raw = small_vector_candidate_v<
+        Atom, A, B, CInput, COutput>
+        ? valid_problem_applicability<M, N, K>()
+        : Applicability::never;
+    constexpr auto Fused = fused_small_bf16_candidate_v<
+        Atom, A, B, CInput, COutput>
+        ? bounded_area_support_applicability<M, N, K, 16>()
+        : Applicability::never;
+    return Raw || Fused;
+  } else if constexpr (std::same_as<
+                           Family,
+                           ::vecops::matmul::kernel_family::ResidualSplit>) {
+    if constexpr (AllowTailSplit && packed_ab_tail_split_candidate_v<
+                      Atom, A, B, CInput, COutput>)
+      return residual_split_support_applicability<M, N, K>();
+    else
+      return Applicability::never;
+  } else {
+    return Applicability::never;
+  }
+}
+
+template <typename FamilyDispatch, typename CandidateFamily>
+inline constexpr bool permits_runtime_family_v = [] {
+  using Requested = typename FamilyDispatch::Family;
+  if constexpr (std::same_as<
+                    Requested,
+                    ::vecops::matmul::kernel_family::WholeProblem>) {
+    return true;
+  } else if constexpr (std::same_as<
+                           Requested,
+                           ::vecops::matmul::kernel_family::General>) {
+    return false;
+  } else if constexpr (FamilyDispatch::required) {
+    return std::same_as<Requested, CandidateFamily>;
+  } else {
+    // Prefer falls back to the complete automatic route.
+    return true;
+  }
+}();
 
 template <typename FamilyDispatch,
           ::vecops::matmul::Atom Atom, bool AllowTailSplit,
@@ -293,8 +504,12 @@ consteval DispatchOwner select_dispatch_owner() {
                            ::vecops::matmul::kernel_family::General>) {
     return DispatchOwner::General;
   } else {
-    constexpr bool Applicable =
-        dispatch_owner_in_family_v<Family, AutomaticOwner>;
+    constexpr bool Applicable = dispatch_owner_in_family_v<
+        Family, AutomaticOwner> ||
+        family_applicability<
+            Family, Atom, AllowTailSplit, M, N, K,
+            A, B, CInput, COutput>() !=
+            ::vecops::matmul::details::Applicability::never;
     static_assert(
         !FamilyDispatch::required || Applicable,
         "required matmul kernel family is not applicable to this AMX leaf");
@@ -304,229 +519,201 @@ consteval DispatchOwner select_dispatch_owner() {
   }
 }
 
-#if defined(__AVX512BF16__)
-inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void small_bf16_matmul(
-    const bfloat16_t* a, nint_t a_stride,
-    const bfloat16_t* b, nint_t b_stride,
-    float32_t* c, nint_t c_stride,
+/**
+ * Dense vector-dot leaf shared by every AMX-side SmallVector dtype.
+ *
+ * All ISA selection, signedness compensation, and grouped accumulation live
+ * in vec::widening_dot. Keeping the matrix traversal here makes one function
+ * body usable by every runtime shape admitted by the family selector.
+ */
+template <typename TA, typename TB, typename Acc>
+inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64)
+#if defined(COMPILER_GCC)
+__attribute__((noclone))
+#endif
+void
+small_vector_dense_matmul(
+    const TA* a, nint_t a_stride,
+    const TB* b, nint_t b_stride,
+    Acc* c, nint_t c_stride,
     nint_t m, nint_t n, nint_t k) {
+  using ATag = vec::ScalableTag<TA, 0>;
+  using BTag = vec::ScalableTag<TB, 0>;
+  using AccTag = std::conditional_t<
+      std::same_as<TA, Acc>, ATag, vec::ViewAs<Acc, ATag>>;
   for (nint_t i = 0; i < m; ++i) {
-    for (nint_t j = 0; j < n; ++j) {
-      __m512 acc = _mm512_setzero_ps();
+    nint_t j = 0;
+    for (; j + 4 <= n; j += 4) {
+      auto accumulator0 = vec::zeros(AccTag{});
+      auto accumulator1 = accumulator0;
+      auto accumulator2 = accumulator0;
+      auto accumulator3 = accumulator0;
       nint_t kk = 0;
-      for (; kk + 32 <= k; kk += 32) {
-        const __m512i av = _mm512_loadu_si512(a + i * a_stride + kk);
-        const __m512i bv = _mm512_loadu_si512(b + j * b_stride + kk);
-        acc = _mm512_dpbf16_ps(acc, (__m512bh)av, (__m512bh)bv);
+      constexpr nint_t VectorK = vec::size(ATag{});
+      for (; kk + VectorK <= k; kk += VectorK) {
+        const auto av = vec::load(ATag{}, a + i * a_stride + kk);
+        const auto bv0 = vec::load(BTag{}, b + (j + 0) * b_stride + kk);
+        const auto bv1 = vec::load(BTag{}, b + (j + 1) * b_stride + kk);
+        const auto bv2 = vec::load(BTag{}, b + (j + 2) * b_stride + kk);
+        const auto bv3 = vec::load(BTag{}, b + (j + 3) * b_stride + kk);
+        accumulator0 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av, bv0, accumulator0);
+        accumulator1 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av, bv1, accumulator1);
+        accumulator2 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av, bv2, accumulator2);
+        accumulator3 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av, bv3, accumulator3);
       }
-      float32_t sum = _mm512_reduce_add_ps(acc);
-      for (; kk < k; ++kk) {
-        sum += static_cast<float32_t>(a[i * a_stride + kk]) *
-            static_cast<float32_t>(b[j * b_stride + kk]);
+      if (kk < k) {
+        const nint_t active = k - kk;
+        const auto av = vec::load(
+            ATag{}, a + i * a_stride + kk,
+            vec::opt::first(active), vec::opt::zero);
+        const auto bv0 = vec::load(
+            BTag{}, b + (j + 0) * b_stride + kk,
+            vec::opt::first(active), vec::opt::zero);
+        const auto bv1 = vec::load(
+            BTag{}, b + (j + 1) * b_stride + kk,
+            vec::opt::first(active), vec::opt::zero);
+        const auto bv2 = vec::load(
+            BTag{}, b + (j + 2) * b_stride + kk,
+            vec::opt::first(active), vec::opt::zero);
+        const auto bv3 = vec::load(
+            BTag{}, b + (j + 3) * b_stride + kk,
+            vec::opt::first(active), vec::opt::zero);
+        accumulator0 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av, bv0, accumulator0);
+        accumulator1 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av, bv1, accumulator1);
+        accumulator2 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av, bv2, accumulator2);
+        accumulator3 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av, bv3, accumulator3);
       }
-      c[i * c_stride + j] = sum;
+      c[i * c_stride + j + 0] = vec::reduce_add(AccTag{}, accumulator0);
+      c[i * c_stride + j + 1] = vec::reduce_add(AccTag{}, accumulator1);
+      c[i * c_stride + j + 2] = vec::reduce_add(AccTag{}, accumulator2);
+      c[i * c_stride + j + 3] = vec::reduce_add(AccTag{}, accumulator3);
+    }
+    for (; j < n; ++j) {
+      auto accumulator0 = vec::zeros(AccTag{});
+      auto accumulator1 = accumulator0;
+      auto accumulator2 = accumulator0;
+      auto accumulator3 = accumulator0;
+      nint_t kk = 0;
+      constexpr nint_t VectorK = vec::size(ATag{});
+      constexpr nint_t UnrolledK = 4 * VectorK;
+      for (; kk + UnrolledK <= k; kk += UnrolledK) {
+        const auto av0 = vec::load(ATag{}, a + i * a_stride + kk);
+        const auto bv0 = vec::load(BTag{}, b + j * b_stride + kk);
+        const auto av1 = vec::load(ATag{}, a + i * a_stride + kk + VectorK);
+        const auto bv1 = vec::load(BTag{}, b + j * b_stride + kk + VectorK);
+        const auto av2 = vec::load(
+            ATag{}, a + i * a_stride + kk + 2 * VectorK);
+        const auto bv2 = vec::load(
+            BTag{}, b + j * b_stride + kk + 2 * VectorK);
+        const auto av3 = vec::load(
+            ATag{}, a + i * a_stride + kk + 3 * VectorK);
+        const auto bv3 = vec::load(
+            BTag{}, b + j * b_stride + kk + 3 * VectorK);
+        accumulator0 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av0, bv0, accumulator0);
+        accumulator1 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av1, bv1, accumulator1);
+        accumulator2 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av2, bv2, accumulator2);
+        accumulator3 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av3, bv3, accumulator3);
+      }
+      for (; kk + VectorK <= k; kk += VectorK) {
+        const auto av = vec::load(ATag{}, a + i * a_stride + kk);
+        const auto bv = vec::load(BTag{}, b + j * b_stride + kk);
+        accumulator0 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av, bv, accumulator0);
+      }
+      if (kk < k) {
+        const nint_t active = k - kk;
+        const auto av = vec::load(
+            ATag{}, a + i * a_stride + kk,
+            vec::opt::first(active), vec::opt::zero);
+        const auto bv = vec::load(
+            BTag{}, b + j * b_stride + kk,
+            vec::opt::first(active), vec::opt::zero);
+        accumulator0 = vec::widening_dot(
+            AccTag{}, ATag{}, BTag{}, av, bv, accumulator0);
+      }
+      const auto accumulator01 = vec::add(
+          AccTag{}, accumulator0, accumulator1);
+      const auto accumulator23 = vec::add(
+          AccTag{}, accumulator2, accumulator3);
+      const auto accumulator = vec::add(
+          AccTag{}, accumulator01, accumulator23);
+      c[i * c_stride + j] = vec::reduce_add(AccTag{}, accumulator);
     }
   }
 }
 
 template <bool PackedA>
-inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void small_bf16_fused_compute(
+inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64)
+#if defined(COMPILER_GCC)
+__attribute__((noclone))
+#endif
+void small_bf16_fused_compute(
     const bfloat16_t* a, nint_t a_stride,
     const bfloat16_t* b, nint_t b_stride,
     float32_t* values, nint_t m, nint_t n, nint_t k) {
-  const nint_t k_tiles = ceil_div(k, nint_t{32});
+  using InputTag = vec::ScalableTag<bfloat16_t, 0>;
+  using AccTag = vec::ViewAs<float32_t, InputTag>;
+  const nint_t k_tile = vec::size(InputTag{});
+  const nint_t k_tiles = ceil_div(k, k_tile);
   for (nint_t i = 0; i < m; ++i) {
     for (nint_t j = 0; j < n; ++j) {
-      __m512 acc = _mm512_setzero_ps();
+      auto accumulator = vec::zeros(AccTag{});
       nint_t kk = 0;
-      for (; kk + 32 <= k; kk += 32) {
-        const __m512i av = [&] {
+      for (; kk + k_tile <= k; kk += k_tile) {
+        const auto* a_pointer = [&] {
           if constexpr (PackedA) {
             const nint_t panel = i / 16;
             const nint_t lane = i % 16;
-            return _mm512_loadu_si512(
-                a + (panel * k_tiles + kk / 32) * 512 + lane * 32);
+            return a +
+                (panel * k_tiles + kk / k_tile) * 16 * k_tile +
+                lane * k_tile;
           } else {
-            return _mm512_loadu_si512(a + i * a_stride + kk);
+            return a + i * a_stride + kk;
           }
         }();
-        const __m512i bv = _mm512_loadu_si512(b + j * b_stride + kk);
-        acc = _mm512_dpbf16_ps(acc, (__m512bh)av, (__m512bh)bv);
+        const auto av = vec::load(InputTag{}, a_pointer);
+        const auto bv = vec::load(InputTag{}, b + j * b_stride + kk);
+        accumulator = vec::widening_dot(
+            AccTag{}, InputTag{}, InputTag{}, av, bv, accumulator);
       }
-      float32_t sum = _mm512_reduce_add_ps(acc);
-      for (; kk < k; ++kk) {
-        const bfloat16_t av = [&] {
+      if (kk < k) {
+        const nint_t active = k - kk;
+        const auto* a_pointer = [&] {
           if constexpr (PackedA) {
             const nint_t panel = i / 16;
             const nint_t lane = i % 16;
-            return a[(panel * k_tiles + kk / 32) * 512 +
-                lane * 32 + kk % 32];
+            return a +
+                (panel * k_tiles + kk / k_tile) * 16 * k_tile +
+                lane * k_tile;
           } else {
-            return a[i * a_stride + kk];
+            return a + i * a_stride + kk;
           }
         }();
-        sum += static_cast<float32_t>(av) *
-            static_cast<float32_t>(b[j * b_stride + kk]);
+        const auto av = vec::load(
+            InputTag{}, a_pointer,
+            vec::opt::first(active), vec::opt::zero);
+        const auto bv = vec::load(
+            InputTag{}, b + j * b_stride + kk,
+            vec::opt::first(active), vec::opt::zero);
+        accumulator = vec::widening_dot(
+            AccTag{}, InputTag{}, InputTag{}, av, bv, accumulator);
       }
-      values[i * n + j] = sum;
+      values[i * n + j] = vec::reduce_add(AccTag{}, accumulator);
     }
   }
 }
-#endif
-
-#if defined(__AVX512VNNI__)
-template <typename TA, typename TB>
-inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void small_i8_matmul(
-    const TA* a, nint_t a_stride,
-    const TB* b, nint_t b_stride,
-    int32_t* c, nint_t c_stride,
-    nint_t m, nint_t n, nint_t k) {
-  static_assert(
-      (std::same_as<TA, int8_t> && std::same_as<TB, uint8_t>) ||
-      (std::same_as<TA, uint8_t> && std::same_as<TB, int8_t>));
-  for (nint_t i = 0; i < m; ++i) {
-    for (nint_t j = 0; j < n; ++j) {
-      __m512i acc = _mm512_setzero_si512();
-      nint_t kk = 0;
-      for (; kk + 64 <= k; kk += 64) {
-        const __m512i av = _mm512_loadu_si512(a + i * a_stride + kk);
-        const __m512i bv = _mm512_loadu_si512(b + j * b_stride + kk);
-        if constexpr (std::same_as<TA, int8_t>)
-          acc = _mm512_dpbusd_epi32(acc, bv, av);
-        else
-          acc = _mm512_dpbusd_epi32(acc, av, bv);
-      }
-      uint32_t sum = static_cast<uint32_t>(_mm512_reduce_add_epi32(acc));
-      for (; kk < k; ++kk) {
-        const int32_t product =
-            static_cast<int32_t>(a[i * a_stride + kk]) *
-            static_cast<int32_t>(b[j * b_stride + kk]);
-        sum += static_cast<uint32_t>(product);
-      }
-      c[i * c_stride + j] = std::bit_cast<int32_t>(sum);
-    }
-  }
-}
-
-template <typename T>
-inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void small_same_sign_i8_matmul(
-    const T* a, nint_t a_stride,
-    const T* b, nint_t b_stride,
-    int32_t* c, nint_t c_stride,
-    nint_t m, nint_t n, nint_t k) {
-  static_assert(std::same_as<T, int8_t> || std::same_as<T, uint8_t>);
-  const __m512i flip = _mm512_set1_epi8(static_cast<char>(0x80));
-  const __m512i ones = _mm512_set1_epi8(1);
-  auto finish = [&](uint32_t main_sum, int32_t correction,
-                    nint_t i, nint_t j) VECOPS_INLINE_LAMBDA {
-    const uint32_t compensation =
-        static_cast<uint32_t>(correction) * uint32_t{128};
-    if constexpr (std::same_as<T, int8_t>) main_sum -= compensation;
-    else main_sum += compensation;
-    c[i * c_stride + j] = std::bit_cast<int32_t>(main_sum);
-  };
-  if (m <= n) {
-    for (nint_t i = 0; i < m; ++i) {
-      __m512i main_acc = _mm512_setzero_si512();
-      __m512i correction_acc = _mm512_setzero_si512();
-      nint_t kk = 0;
-      for (; kk + 64 <= k; kk += 64) {
-        const __m512i av = _mm512_loadu_si512(a + i * a_stride + kk);
-        const __m512i bv = _mm512_loadu_si512(b + kk);
-        const __m512i bx = _mm512_xor_si512(bv, flip);
-        if constexpr (std::same_as<T, int8_t>) {
-          main_acc = _mm512_dpbusd_epi32(main_acc, bx, av);
-          correction_acc = _mm512_dpbusd_epi32(correction_acc, ones, av);
-        } else {
-          main_acc = _mm512_dpbusd_epi32(main_acc, av, bx);
-          correction_acc = _mm512_dpbusd_epi32(correction_acc, av, ones);
-        }
-      }
-      uint32_t main_sum =
-          static_cast<uint32_t>(_mm512_reduce_add_epi32(main_acc));
-      for (; kk < k; ++kk) {
-        const int32_t product =
-            static_cast<int32_t>(a[i * a_stride + kk]) *
-            static_cast<int32_t>(b[kk]);
-        main_sum += static_cast<uint32_t>(product);
-      }
-      const int32_t correction =
-          _mm512_reduce_add_epi32(correction_acc);
-      finish(main_sum, correction, i, 0);
-      for (nint_t j = 1; j < n; ++j) {
-        __m512i acc = _mm512_setzero_si512();
-        kk = 0;
-        for (; kk + 64 <= k; kk += 64) {
-          const __m512i av = _mm512_loadu_si512(a + i * a_stride + kk);
-          const __m512i bv = _mm512_loadu_si512(b + j * b_stride + kk);
-          const __m512i bx = _mm512_xor_si512(bv, flip);
-          if constexpr (std::same_as<T, int8_t>)
-            acc = _mm512_dpbusd_epi32(acc, bx, av);
-          else
-            acc = _mm512_dpbusd_epi32(acc, av, bx);
-        }
-        main_sum = static_cast<uint32_t>(_mm512_reduce_add_epi32(acc));
-        for (; kk < k; ++kk) {
-          const int32_t product =
-              static_cast<int32_t>(a[i * a_stride + kk]) *
-              static_cast<int32_t>(b[j * b_stride + kk]);
-          main_sum += static_cast<uint32_t>(product);
-        }
-        finish(main_sum, correction, i, j);
-      }
-    }
-  } else {
-    for (nint_t j = 0; j < n; ++j) {
-      __m512i main_acc = _mm512_setzero_si512();
-      __m512i correction_acc = _mm512_setzero_si512();
-      nint_t kk = 0;
-      for (; kk + 64 <= k; kk += 64) {
-        const __m512i av = _mm512_loadu_si512(a + kk);
-        const __m512i bv = _mm512_loadu_si512(b + j * b_stride + kk);
-        const __m512i ax = _mm512_xor_si512(av, flip);
-        if constexpr (std::same_as<T, int8_t>) {
-          main_acc = _mm512_dpbusd_epi32(main_acc, ax, bv);
-          correction_acc = _mm512_dpbusd_epi32(correction_acc, ones, bv);
-        } else {
-          main_acc = _mm512_dpbusd_epi32(main_acc, bv, ax);
-          correction_acc = _mm512_dpbusd_epi32(correction_acc, bv, ones);
-        }
-      }
-      uint32_t main_sum =
-          static_cast<uint32_t>(_mm512_reduce_add_epi32(main_acc));
-      for (; kk < k; ++kk) {
-        const int32_t product = static_cast<int32_t>(a[kk]) *
-            static_cast<int32_t>(b[j * b_stride + kk]);
-        main_sum += static_cast<uint32_t>(product);
-      }
-      const int32_t correction =
-          _mm512_reduce_add_epi32(correction_acc);
-      finish(main_sum, correction, 0, j);
-      for (nint_t i = 1; i < m; ++i) {
-        __m512i acc = _mm512_setzero_si512();
-        kk = 0;
-        for (; kk + 64 <= k; kk += 64) {
-          const __m512i av = _mm512_loadu_si512(a + i * a_stride + kk);
-          const __m512i bv = _mm512_loadu_si512(b + j * b_stride + kk);
-          const __m512i ax = _mm512_xor_si512(av, flip);
-          if constexpr (std::same_as<T, int8_t>)
-            acc = _mm512_dpbusd_epi32(acc, ax, bv);
-          else
-            acc = _mm512_dpbusd_epi32(acc, bv, ax);
-        }
-        main_sum = static_cast<uint32_t>(_mm512_reduce_add_epi32(acc));
-        for (; kk < k; ++kk) {
-          const int32_t product =
-              static_cast<int32_t>(a[i * a_stride + kk]) *
-              static_cast<int32_t>(b[j * b_stride + kk]);
-          main_sum += static_cast<uint32_t>(product);
-        }
-        finish(main_sum, correction, i, j);
-      }
-    }
-  }
-}
-#endif
 
 template <::vecops::matmul::Atom Atom, typename A, typename B, typename COutput>
 VECOPS_ALWAYS_INLINE void run_small_vector(
@@ -535,35 +722,13 @@ VECOPS_ALWAYS_INLINE void run_small_vector(
   const auto a_strides = a.raw_strides();
   const auto b_strides = b.raw_strides();
   const auto c_strides = c_output.raw_strides();
-  if constexpr (std::same_as<Atom, ::vecops::matmul::AMX_BF16F32>) {
-#if defined(__AVX512BF16__)
-    small_bf16_matmul(
-        reinterpret_cast<const bfloat16_t*>(a.raw_data()), a_strides[0],
-        reinterpret_cast<const bfloat16_t*>(b.raw_data()), b_strides[0],
-        reinterpret_cast<float32_t*>(c_output.raw_data()), c_strides[0],
-        m, n, k);
-#endif
-  } else {
-#if defined(__AVX512VNNI__)
-    if constexpr (std::same_as<typename Atom::TA, typename Atom::TB>) {
-      small_same_sign_i8_matmul(
-          reinterpret_cast<const typename Atom::TA*>(a.raw_data()),
-          a_strides[0],
-          reinterpret_cast<const typename Atom::TB*>(b.raw_data()),
-          b_strides[0],
-          reinterpret_cast<int32_t*>(c_output.raw_data()), c_strides[0],
-          m, n, k);
-    } else {
-      small_i8_matmul(
-          reinterpret_cast<const typename Atom::TA*>(a.raw_data()),
-          a_strides[0],
-          reinterpret_cast<const typename Atom::TB*>(b.raw_data()),
-          b_strides[0],
-          reinterpret_cast<int32_t*>(c_output.raw_data()), c_strides[0],
-          m, n, k);
-    }
-#endif
-  }
+  small_vector_dense_matmul(
+      reinterpret_cast<const typename Atom::TA*>(a.raw_data()),
+      a_strides[0],
+      reinterpret_cast<const typename Atom::TB*>(b.raw_data()),
+      b_strides[0],
+      reinterpret_cast<typename Atom::TAcc*>(c_output.raw_data()),
+      c_strides[0], m, n, k);
 }
 
 template <::vecops::matmul::Atom Atom, typename A, typename B,
@@ -579,13 +744,11 @@ VECOPS_ALWAYS_INLINE void run_fused_small_bf16(
       is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A>;
   const auto a_strides = a.raw_strides();
   const auto b_strides = b.raw_strides();
-#if defined(__AVX512BF16__)
   small_bf16_fused_compute<PackedA>(
       reinterpret_cast<const bfloat16_t*>(a.raw_data()),
       PackedA ? nint_t{0} : a_strides[0],
       reinterpret_cast<const bfloat16_t*>(b.raw_data()), b_strides[0],
       values, m, n, k);
-#endif
   using Tag = vec::ScalableTag<float32_t, 0>;
   for (nint_t i = 0; i < m; ++i) {
     auto value = vec::load(
@@ -1294,24 +1457,15 @@ struct Backend<matmul_implementation::AMX> {
       Scope& scope, M m, N n, K k,
       const A& a, const B& b, const CInput& c_input, COutput& c_output,
       void* scratch) {
+    using Applicability = ::vecops::matmul::details::Applicability;
+    using RequestedFamily = typename FamilyDispatch::Family;
     constexpr auto Owner = amx::select_dispatch_owner<
         FamilyDispatch, Atom, AllowTailSplit,
         M, N, K, A, B, CInput, COutput>();
-    if constexpr (Owner == amx::DispatchOwner::SmallVector) {
-      const nint_t logical_m = static_cast<nint_t>(m);
-      const nint_t logical_n = static_cast<nint_t>(n);
-      const nint_t logical_k = static_cast<nint_t>(k);
-      amx::run_small_vector<Atom>(
-          a, b, c_output, logical_m, logical_n, logical_k);
-    } else if constexpr (Owner == amx::DispatchOwner::FusedSmallBF16) {
-      const nint_t logical_m = static_cast<nint_t>(m);
-      const nint_t logical_n = static_cast<nint_t>(n);
-      const nint_t logical_k = static_cast<nint_t>(k);
-      amx::run_fused_small_bf16<Atom>(
-          a, b, c_input, c_output,
-          logical_m, logical_n, logical_k);
-    } else if constexpr (Owner == amx::DispatchOwner::PackedABTailSplit) {
-      const nint_t logical_m = static_cast<nint_t>(m);
+    const nint_t logical_m = static_cast<nint_t>(m);
+    const nint_t logical_n = static_cast<nint_t>(n);
+    const nint_t logical_k = static_cast<nint_t>(k);
+    auto run_residual_split = [&]() VECOPS_INLINE_LAMBDA {
       constexpr nint_t BulkM = 16;
       const meta::Any tail_m{logical_m - BulkM};
       with_configuration<Atom, Policy, true>(
@@ -1328,17 +1482,168 @@ struct Backend<matmul_implementation::AMX> {
                 configured, tail_m, n, k,
                 logical_m, BulkM, a, b, c_input, c_output, scratch);
           });
-    } else {
-      constexpr bool PackedB =
-          amx::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>;
-      with_configuration<Atom, Policy, PackedB>(
-          scope, m, n, [&](auto& configured)
-              VECOPS_INLINE_LAMBDA_NOEXCEPT {
-            run_configured<Atom, Policy>(
-                configured, m, n, k, a, b,
-                c_input, c_output, scratch);
-          });
+    };
+    constexpr bool RequestsSmallVector = std::same_as<
+        RequestedFamily,
+        ::vecops::matmul::kernel_family::SmallVector>;
+    constexpr bool AutomaticOwnerIsSmallVector =
+        Owner == amx::DispatchOwner::SmallVector ||
+        Owner == amx::DispatchOwner::FusedSmallBF16;
+    if constexpr (RequestsSmallVector && !AutomaticOwnerIsSmallVector) {
+      constexpr auto Support = amx::family_applicability<
+          ::vecops::matmul::kernel_family::SmallVector,
+          Atom, AllowTailSplit, M, N, K,
+          A, B, CInput, COutput>();
+      const bool supported = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (Support == Applicability::never) {
+          return false;
+        } else if constexpr (Support == Applicability::always) {
+          return true;
+        } else {
+          return logical_m > 0 && logical_n > 0 && logical_k >= 0 &&
+              (!amx::fused_small_bf16_candidate_v<
+                   Atom, A, B, CInput, COutput> ||
+               runtime_dispatch_rules::area_at_most(
+                   logical_m, logical_n, 16));
+        }
+      }();
+      if (supported) {
+        if constexpr (amx::small_vector_candidate_v<
+                          Atom, A, B, CInput, COutput>) {
+          amx::run_small_vector<Atom>(
+              a, b, c_output, logical_m, logical_n, logical_k);
+        } else if constexpr (amx::fused_small_bf16_candidate_v<
+                                 Atom, A, B, CInput, COutput>) {
+          amx::run_fused_small_bf16<Atom>(
+              a, b, c_input, c_output,
+              logical_m, logical_n, logical_k);
+        }
+        return;
+      }
+      if constexpr (FamilyDispatch::required) {
+        VECOPS_CHECK(false,
+                     "required SmallVector family rejected at runtime");
+      }
     }
+    constexpr bool RequestsResidualSplit = std::same_as<
+        RequestedFamily,
+        ::vecops::matmul::kernel_family::ResidualSplit>;
+    if constexpr (RequestsResidualSplit &&
+                  Owner != amx::DispatchOwner::PackedABTailSplit) {
+      constexpr auto Support = amx::family_applicability<
+          ::vecops::matmul::kernel_family::ResidualSplit,
+          Atom, AllowTailSplit, M, N, K,
+          A, B, CInput, COutput>();
+      const bool supported = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (Support == Applicability::never) return false;
+        else if constexpr (Support == Applicability::always) return true;
+        else return logical_m > 16 && logical_n > 0 && logical_k >= 0;
+      }();
+      if (supported) {
+        run_residual_split();
+        return;
+      }
+      if constexpr (FamilyDispatch::required) {
+        VECOPS_CHECK(false,
+                     "required ResidualSplit family rejected at runtime");
+      }
+    }
+    if constexpr (Owner == amx::DispatchOwner::SmallVector) {
+      amx::run_small_vector<Atom>(
+          a, b, c_output, logical_m, logical_n, logical_k);
+      return;
+    } else if constexpr (Owner == amx::DispatchOwner::FusedSmallBF16) {
+      amx::run_fused_small_bf16<Atom>(
+          a, b, c_input, c_output,
+          logical_m, logical_n, logical_k);
+      return;
+    } else if constexpr (Owner == amx::DispatchOwner::PackedABTailSplit) {
+      run_residual_split();
+      return;
+    }
+
+    constexpr bool RuntimeRawSmall = [] {
+      if constexpr (!amx::small_vector_candidate_v<
+                        Atom, A, B, CInput, COutput> ||
+                    !amx::permits_runtime_family_v<
+                        FamilyDispatch,
+                        ::vecops::matmul::kernel_family::SmallVector>) {
+        return false;
+      } else {
+        return amx::small_vector_shape_applicability<Atom, M, N, K>() ==
+            Applicability::runtime;
+      }
+    }();
+    constexpr bool RuntimeFusedSmall = [] {
+      if constexpr (!amx::fused_small_bf16_candidate_v<
+                        Atom, A, B, CInput, COutput> ||
+                    !amx::permits_runtime_family_v<
+                        FamilyDispatch,
+                        ::vecops::matmul::kernel_family::SmallVector>) {
+        return false;
+      } else {
+        return amx::small_area_applicability<M, N, K, 16>() ==
+            Applicability::runtime;
+      }
+    }();
+    constexpr bool RuntimeResidualSplit = [] {
+      if constexpr (!AllowTailSplit ||
+                    !amx::packed_ab_tail_split_candidate_v<
+                        Atom, A, B, CInput, COutput> ||
+                    !amx::permits_runtime_family_v<
+                        FamilyDispatch,
+                        ::vecops::matmul::kernel_family::ResidualSplit>) {
+        return false;
+      } else {
+        return amx::residual_split_shape_applicability<M, N, K>() ==
+            Applicability::runtime;
+      }
+    }();
+
+    if constexpr (RuntimeRawSmall) {
+      if (runtime_amx_small_vector_profitable(
+              amx::small_vector_shape_v<Atom>,
+              logical_m, logical_n, logical_k)) {
+        amx::run_small_vector<Atom>(
+            a, b, c_output, logical_m, logical_n, logical_k);
+        return;
+      }
+    } else if constexpr (RuntimeFusedSmall) {
+      if (runtime_small_area_profitable(
+              logical_m, logical_n, logical_k, 16)) {
+        amx::run_fused_small_bf16<Atom>(
+            a, b, c_input, c_output,
+            logical_m, logical_n, logical_k);
+        return;
+      }
+    }
+    if constexpr (RuntimeResidualSplit) {
+      if (runtime_amx_residual_split_profitable(
+              logical_m, logical_n, logical_k)) {
+        run_residual_split();
+        return;
+      }
+    }
+
+    if constexpr (FamilyDispatch::required &&
+                  !std::same_as<
+                      RequestedFamily,
+                      ::vecops::matmul::kernel_family::General> &&
+                  !std::same_as<
+                      RequestedFamily,
+                      ::vecops::matmul::kernel_family::WholeProblem>) {
+      VECOPS_CHECK(false, "required AMX matmul family rejected at runtime");
+    }
+
+    constexpr bool PackedB =
+        amx::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>;
+    with_configuration<Atom, Policy, PackedB>(
+        scope, m, n, [&](auto& configured)
+            VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          run_configured<Atom, Policy>(
+              configured, m, n, k, a, b,
+              c_input, c_output, scratch);
+        });
   }
 
   template <::vecops::matmul::Atom Atom, typename A, typename B,

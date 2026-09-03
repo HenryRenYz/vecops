@@ -9,6 +9,7 @@
 
 #include "vecops/matmul/details/tiled/LoopNest.h"
 #include "vecops/matmul/details/planning/FamilySelector.h"
+#include "vecops/matmul/details/kernel/RuntimeDispatch.h"
 #include "vecops/matmul/details/tiled/PolicyTraits.h"
 #include "vecops/matmul/Tiling.h"
 #include "vecops/ops/Matmul.h"
@@ -71,9 +72,46 @@ static_assert(matmul::kernel_family::Info<
                   matmul::kernel_family::RuntimeQuantInt8>::name ==
               "runtime_quant_int8");
 static_assert(matmul::kernel_family::Info<
-                  matmul::kernel_family::PackedMMLA>::name == "packed_mmla");
+                  matmul::kernel_family::PackedDot>::name == "packed_dot");
 static_assert(matmul::kernel_family::Info<
-                  matmul::kernel_family::PackedTail>::name == "packed_tail");
+                  matmul::kernel_family::ResidualSplit>::name == "residual_split");
+
+using RuntimeShape = kernel::matmul_details::SmallVectorShape;
+using namespace kernel::matmul_details::runtime_dispatch_rules;
+
+static_assert(amx_small_vector_profitable(
+    RuntimeShape::amx_bf16, 1, 16, 65));
+static_assert(!amx_small_vector_profitable(
+    RuntimeShape::amx_bf16, 19, 21, 65));
+static_assert(amx_small_vector_profitable(
+    RuntimeShape::amx_i8_mixed_sign, 8, 8, 128));
+static_assert(sme_small_vector_profitable(
+    RuntimeShape::sme_f16, 1, 16, 17));
+static_assert(!sme_small_vector_profitable(
+    RuntimeShape::sme_f16, 1, 17, 17));
+static_assert(amx_residual_split_profitable(17, 33, 1024));
+static_assert(!amx_residual_split_profitable(19, 33, 1024));
+
+TEST(MatmulRuntimeDispatchTest, SharedRuntimeRulesMatchConstexprRules) {
+  using namespace kernel::matmul_details;
+  for (const auto shape : {
+           RuntimeShape::amx_bf16,
+           RuntimeShape::amx_i8_same_sign,
+           RuntimeShape::amx_i8_mixed_sign}) {
+    for (const nint_t m : {nint_t{1}, nint_t{8}, nint_t{19}, nint_t{128}})
+      for (const nint_t n : {nint_t{1}, nint_t{16}, nint_t{64}, nint_t{129}})
+        for (const nint_t k : {nint_t{1}, nint_t{64}, nint_t{65}, nint_t{256}})
+          EXPECT_EQ(
+              runtime_amx_small_vector_profitable(shape, m, n, k),
+              amx_small_vector_profitable(shape, m, n, k));
+  }
+  for (const nint_t m : {nint_t{17}, nint_t{19}, nint_t{20}})
+    for (const nint_t n : {nint_t{33}, nint_t{47}, nint_t{49}})
+      EXPECT_EQ(
+          kernel::matmul_details::runtime_amx_residual_split_profitable(
+              m, n, 1024),
+          amx_residual_split_profitable(m, n, 1024));
+}
 
 #if defined(ARCH_X86_FAMILY)
 using ExplicitGenericTuning = matmul::GenericTiledTuning<

@@ -13,7 +13,10 @@ namespace vecops::matmul {
 
 namespace kernel_family {
 
-/** Automatic whole-problem planner, including architecture-specialized leaves. */
+/**
+ * Automatic whole-problem planner, including architecture-specialized leaves.
+ * Only profitability-proven leaves are selected automatically.
+ */
 struct WholeProblem {};
 
 /** General MC/NC/KC cache tiler feeding the backend Tile2D scheduler. */
@@ -22,24 +25,27 @@ struct GenericTiled {};
 /** The architecture backend's general whole-problem tile kernel. */
 struct General {};
 
-/** Small or skinny vector kernels that bypass matrix-tile setup. */
+/**
+ * Small or skinny vector kernels that bypass matrix-tile setup. The supported
+ * shape domain can be wider than the subset selected by WholeProblem.
+ */
 struct SmallVector {};
 
 /** Fused FP32-to-INT8 activation quantization with a packed INT8 weight. */
 struct RuntimeQuantInt8 {};
 
-/** Ordinary-vector packed-input MMLA kernels. */
-struct PackedMMLA {};
+/** Packed-input vector dot kernels, including ISA-specific MMLA leaves. */
+struct PackedDot {};
 
-/** Architecture-specific packed tail decomposition. */
-struct PackedTail {};
+/** Backend-independent bulk/residual decomposition. */
+struct ResidualSplit {};
 
 template <typename T>
 concept ArchitectureFamily =
     std::same_as<T, WholeProblem> || std::same_as<T, General> ||
     std::same_as<T, SmallVector> ||
     std::same_as<T, RuntimeQuantInt8> ||
-    std::same_as<T, PackedMMLA> || std::same_as<T, PackedTail>;
+    std::same_as<T, PackedDot> || std::same_as<T, ResidualSplit>;
 
 template <typename T>
 concept Family = ArchitectureFamily<T> || std::same_as<T, GenericTiled>;
@@ -78,14 +84,14 @@ struct Info<RuntimeQuantInt8> {
 };
 
 template <>
-struct Info<PackedMMLA> {
-  static constexpr std::string_view name = "packed_mmla";
+struct Info<PackedDot> {
+  static constexpr std::string_view name = "packed_dot";
   static constexpr bool composite = false;
 };
 
 template <>
-struct Info<PackedTail> {
-  static constexpr std::string_view name = "packed_tail";
+struct Info<ResidualSplit> {
+  static constexpr std::string_view name = "residual_split";
   static constexpr bool composite = false;
 };
 
@@ -104,7 +110,11 @@ struct Automatic {
   static constexpr Mode mode = Mode::automatic;
 };
 
-/** Prefer one family and retain the automatic planner as its fallback. */
+/**
+ * Try one family throughout its correctness-supported domain, then retain the
+ * automatic planner as the fallback. Profitability thresholds do not reject a
+ * supported preferred family.
+ */
 template <typename FamilyT>
 struct Prefer {
   static_assert(kernel_family::Family<FamilyT>,
@@ -113,7 +123,11 @@ struct Prefer {
   static constexpr Mode mode = Mode::prefer;
 };
 
-/** Require one family; an inapplicable family is a configuration error. */
+/**
+ * Require one family throughout its correctness-supported domain. A family
+ * proven unsupported from static metadata is a compile-time error; a dynamic
+ * layout/shape rejection hits an always-on runtime check in every build.
+ */
 template <typename FamilyT>
 struct Require {
   static_assert(kernel_family::Family<FamilyT>,
@@ -126,12 +140,45 @@ struct Require {
 
 namespace details {
 
+/**
+ * Result of proving a family predicate from compile-time metadata.
+ *
+ * `always` and `never` must emit no runtime test. `runtime` is reserved for
+ * predicates whose truth varies within the admitted Meta extent or layout
+ * contract.
+ */
+enum class Applicability {
+  never,
+  runtime,
+  always,
+};
+
+inline constexpr Applicability operator&&(
+    Applicability lhs, Applicability rhs) {
+  if (lhs == Applicability::never || rhs == Applicability::never)
+    return Applicability::never;
+  if (lhs == Applicability::always && rhs == Applicability::always)
+    return Applicability::always;
+  return Applicability::runtime;
+}
+
+inline constexpr Applicability operator||(
+    Applicability lhs, Applicability rhs) {
+  if (lhs == Applicability::always || rhs == Applicability::always)
+    return Applicability::always;
+  if (lhs == Applicability::never && rhs == Applicability::never)
+    return Applicability::never;
+  return Applicability::runtime;
+}
+
 /** Compile-time contract carried from the operation plan into a backend leaf. */
 template <kernel_family::ArchitectureFamily FamilyT,
           family_selection::Mode ModeV>
 struct FamilyDispatch {
   using Family = FamilyT;
   static constexpr family_selection::Mode mode = ModeV;
+  static constexpr bool automatic = mode == family_selection::Mode::automatic;
+  static constexpr bool preferred = mode == family_selection::Mode::prefer;
   static constexpr bool required = mode == family_selection::Mode::require;
 };
 

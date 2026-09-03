@@ -68,6 +68,11 @@ if(VECOPS_ARCH_FAMILY STREQUAL "x86")
         ARCH Native
     )
     vecops_add_benchmark(
+        NAME MatmulFamilyBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulFamilyBench.cpp
+        ARCH Native
+    )
+    vecops_add_benchmark(
         NAME MatmulScenarioBench
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulScenarioBench.cpp
         ARCH Native
@@ -98,6 +103,11 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
     vecops_add_benchmark(
         NAME MatmulBench
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulBench.cpp
+        ARCH ${VECOPS_SME_BENCH_ARCH}
+    )
+    vecops_add_benchmark(
+        NAME MatmulFamilyBench
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/MatmulFamilyBench.cpp
         ARCH ${VECOPS_SME_BENCH_ARCH}
     )
     if(VECOPS_ENABLE_SME_MMLA_EXPERIMENT_BENCHMARK)

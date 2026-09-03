@@ -16,9 +16,12 @@ struct SelectedFamily;
 
 template <>
 struct SelectedFamily<family_selection::Automatic> {
-  // Preserve the proven default machine code while WholeProblem is split into
-  // individually enumerable architecture families.  Crucially, generic-tiled
-  // tuning no longer changes this choice.
+  // Preserve the architecture route while WholeProblem is split into
+  // individually enumerable leaves. Instantiating ArchitectureFamily and
+  // GenericTiled side by side at every call site nearly doubles matmul text;
+  // a future cross-family runtime selector must call a backend/atom-specific,
+  // type-erased GenericTiled ABI leaf instead. Generic-tiled tuning therefore
+  // does not implicitly change this choice.
   using type = kernel_family::WholeProblem;
 };
 
