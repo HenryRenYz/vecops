@@ -21,7 +21,7 @@
 #undef VECOPS_WEIGHT_REUSE_TARGET_SHARD_ACTIVE
 #endif
 
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 #include "vecops/matmul/Atom.h"
 
 #ifndef VECOPS_WEIGHT_REUSE_RESULT_STEM

@@ -10,7 +10,7 @@
  * shard and obscure its long-lived code-size baseline.
  */
 
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 
 #define VECOPS_MATMUL_CATALOG_CASE_SHARDS 1
 #include "MatmulBenchCommon.h"

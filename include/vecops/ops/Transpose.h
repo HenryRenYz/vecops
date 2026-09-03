@@ -14,17 +14,60 @@
 #include "vecops/tensor/DataAccess.h"
 
 /**
- * @file Transpose.h
+ * @file vecops/ops/Transpose.h
  * @brief Reusable Config-only rank-two transpose operator.
  *
  * Operand/layout types are normalized before execution, making SME eligibility
  * and resource requirements part of the operation type. Calling an operation
  * with an `ExecutionScope` opens only missing resources. Data conversion and
  * transforms remain DataAccess responsibilities around the selected kernel.
+ *
+ * The operator copies an `M×N` input into an `N×M` output (`out(j,i) =
+ * in(i,j)`). Two granularity levels are exposed: the `Transpose` class is the
+ * stateless entry point (normalize operands, select a backend, run), while
+ * `transpose_details::prepare_transpose` returns a `PreparedTranspose` that
+ * bakes operand types and the SME decision into one reusable value.
+ *
+ * ## Usage
+ *
+ * @code
+ * #include "vecops/ops/Transpose.h"
+ * using namespace vecops;
+ *
+ * auto op = ops::transpose();                    // float32, automatic policy
+ * op(scope, input_tensor, output_tensor);        // out is (N, M)
+ *
+ * // Or prepare once, run many times with identical operand types:
+ * auto prepared = ops::transpose_details::prepare_transpose(
+ *     config, input_tensor, output_tensor);
+ * prepared(scope);
+ * @endcode
+ *
+ * ## Pitfalls
+ *
+ * - Only rank-two operands are accepted (static_assert); higher-rank
+ *   transposes go through tensor/DataAccess materialization.
+ * - The output shape must be `(N, M)` — dimension 0 holds the input's column
+ *   count. A mismatch is caught by assertion at execution.
+ * - The config object carries only compile-time values; each call re-selects
+ *   the implementation from the operand types at hand, so one `Transpose`
+ *   value can serve inputs with different element types or extents.
+ * - Element-type conversion is performed through DataAccess (the
+ *   `ComputeType` of the config), not by the transpose kernel itself.
  */
 
 namespace vecops::ops {
 
+/**
+ * @brief Configuration bundle for the rank-two transpose operator.
+ *
+ * @tparam ComputeT Logical compute element type the transpose runs in;
+ *                  memory-side conversions to/from this type are fused into
+ *                  the DataAccess loads/stores around the kernel.
+ * @tparam PolicyT  Backend policy; `Automatic` picks the register kernel
+ *                  (or SME when eligible), `Gather` forces the generic
+ *                  gather/store implementation.
+ */
 template <vec::Element ComputeT = float32_t,
           typename PolicyT = kernel::transpose2d_policy::Automatic>
 struct TransposeConfig {
@@ -99,6 +142,10 @@ private:
             output_.output_layout())) == static_cast<nint_t>(m),
         "transpose output shape must be (N, M)");
 
+    // Unit-stride vector lines along each operand's dim 1 (asserted by the
+    // SME selection), one read pass, and a direct (non-materializing) access
+    // plan on both sides: the transpose kernel consumes the operands as-is
+    // and never needs a DataAccess staging buffer.
     using InputPolicy = tensor::InputAccessPolicy<
         1, 1, tensor::AccessPlan::direct>;
     using OutputPolicy = tensor::OutputAccessPolicy<
@@ -109,6 +156,10 @@ private:
         tensor::operand(output_, OutputPolicy{}),
         [&](auto& source, auto& destination) VECOPS_INLINE_LAMBDA {
           tensor::Coord<2> origin{};
+          // Axis roles <0, 1, 0, 1>: input dim 0 is the logical row axis
+          // and dim 1 the column axis; output dim 0 receives the source
+          // column index and dim 1 the source row index — the plain
+          // out(j,i) = in(i,j) mapping for this rank-2 pair.
           kernel::transpose2d_bound<0, 1, 0, 1>(
               scope, m, n, source, origin, destination, origin, policy_,
               Implementation{});
@@ -121,6 +172,24 @@ private:
   [[no_unique_address]] Policy policy_;
 };
 
+/**
+ * @brief Normalize operands and bake the implementation decision into a
+ * reusable `PreparedTranspose`.
+ *
+ * This is where SME eligibility is actually decided: `use_sme_v` inspects
+ * the normalized specs (rank, policy, raw-tensor operands, no transforms,
+ * unit-stride dim 1 on both sides) and the element/extent types. The
+ * returned object carries that decision as a template parameter, so its
+ * `ResourceRequirements` are known before any execution region is entered.
+ *
+ * @tparam Config  A `TransposeConfig` bundle.
+ * @tparam Input   Readable rank-2 operand.
+ * @tparam Output  Writable rank-2 operand.
+ * @param config   Configuration supplying compute type and policy.
+ * @param input    The M×N source operand.
+ * @param output   The N×M destination operand.
+ * @return A `PreparedTranspose` bound to the normalized operand specs.
+ */
 template <typename Config,
           tensor::InputOperand Input,
           tensor::OutputOperand Output>

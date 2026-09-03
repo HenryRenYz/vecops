@@ -15,12 +15,36 @@
 #include "vecops/vec/Vec.h"
 
 /**
- * @file Softmax.h
- * @brief Last-dimension Softmax with DataAccess and ExecutionSession support.
+ * @file vecops/ops/details/softmax/Operation.h
+ * @brief Last-dimension Softmax implementation (DataAccess + ExecutionSession).
  *
  * Every prefix coordinate defines an independently normalized row. Tensor and
  * Spec operands share the same typed DataAccess plan, while algorithm and
  * resource selection use compile-time layout/shape information only.
+ *
+ * ## Row algorithms
+ *
+ * Two row strategies exist behind one numerical contract:
+ *
+ * - **Offline (three passes over x)**: global max pass, exp+sum pass with the
+ *   exponentials cached, then a normalized store pass reading the cache.
+ *   Always applicable; used by `run_bound` and as the online fallback.
+ * - **Online (tiled, single pass over x)**: rows are processed in
+ *   `4 * vector_lanes` tiles; each tile's max and (locally centered) exp-sum
+ *   are computed in one read pass, then reconciled to the global max, and the
+ *   store pass re-uses the cached exponentials. Wins when the row is long
+ *   enough that the second x read misses cache but the tile caches fit.
+ *
+ * `should_use_online<InSpec, OutSpec>()` gates online selection on measured
+ * shape windows (see its comment); non-finite intermediate results (all
+ * -inf/NaN rows, underflowed sums) fall back to the offline path at runtime.
+ *
+ * ## Recipes
+ *
+ * Row loops are `kernel::loop::fold` instances parameterized by
+ * `SoftmaxRowRecipe<Fold, Store>`: the fold unroll factor and the store-pass
+ * vector blocking. See the recipe aliases below for the tuned combinations
+ * and the platform-specific selection logic in `operator()`.
  */
 
 namespace vecops::ops {
@@ -70,14 +94,25 @@ VECOPS_INLINE void validate_softmax_layouts(
 }
 
 template <int Fold, int Store>
+/**
+ * @brief Fold unrolling and store blocking for one softmax row loop family.
+ * @tparam Fold  `kernel::loop::fold` unroll factor for the reduction passes.
+ * @tparam Store Vector blocking of the normalized store pass; also controls
+ *               whether the store re-loads exponentials one or two vectors at
+ *               a time (paired stores benefit some conversion widths).
+ */
 struct SoftmaxRowRecipe {
   static constexpr int FoldFactor = Fold;
   static constexpr int StoreFactor = Store;
 };
 
+/// Default recipe: no unrolling, two-vector store blocks.
 using GenericSoftmaxRecipe = SoftmaxRowRecipe<1, 2>;
+/// SVE packed-BF16 output recipe (see the packed-output path in operator()).
 using PackedSoftmaxRecipe = SoftmaxRowRecipe<1, 2>;
+/// Throughput recipe for large AVX-512 rows: 4x-unrolled folds and stores.
 using UnrolledSoftmaxRecipe = SoftmaxRowRecipe<4, 4>;
+/// Single-vector stores; avoids GCC's slower paired-conversion lowering.
 using SingleStoreSoftmaxRecipe = SoftmaxRowRecipe<1, 1>;
 
 } // namespace softmax_details
@@ -92,8 +127,13 @@ template <typename Config = SoftmaxConfig<>>
  * modes at compile time without introducing runtime capability tests.
  */
 class Softmax {
+  // Row-level access planning: vector axis 0 is the normalized dimension.
+  // XPolicy declares two read passes (max pass, then exp/sum pass) with a
+  // deferred-materialization plan: the max pass populates the materialized
+  // buffer, so the second pass re-reads the already-converted values.
   using XPolicy = tensor::InputAccessPolicy<
       0, 2, tensor::AccessPlan::automatic_deferred>;
+  // One streaming write pass along the normalized dimension.
   using YPolicy = tensor::OutputAccessPolicy<0>;
 
 public:
@@ -201,6 +241,12 @@ public:
     };
 #if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE_BF16) && \
     !defined(VECOPS_PRESERVE_SUBNORMALS)
+    // SVE-only fast path: keep output in packed BF16 when the operator is
+    // computing in FP32 anyway. Packing exponentials into BF16 registers
+    // halves the store bandwidth, but only pays off once the problem is
+    // large enough to be bandwidth-bound: element counts of 64 KiB and
+    // below stay on the converting store path. (lower_bound_at_least_v with
+    // 64*1024 + 1 expresses "> 64 KiB" — meta bounds are inclusive.)
     constexpr bool CanPackBf16Output =
         std::same_as<ComputeType, float32_t> &&
         std::same_as<typename OutSpec::MemoryElement, bfloat16_t> &&
@@ -243,13 +289,17 @@ public:
       using GenericRecipe = softmax_details::GenericSoftmaxRecipe;
 #endif
 #if defined(CPU_CAPABILITY_AVX512)
-      using NormalizedSize = tensor::size_type_t<
-          PrefixRank, typename InSpec::InputLayout>;
-      constexpr nint_t lanes = vec::size(Tag{});
-      constexpr nint_t max_unrolled_n =
-          sizeof(typename InSpec::MemoryElement) < sizeof(ComputeType)
-          ? 4096
-          : 1024;
+    using NormalizedSize = tensor::size_type_t<
+        PrefixRank, typename InSpec::InputLayout>;
+    constexpr nint_t lanes = vec::size(Tag{});
+    // Rows wider than these bounds keep the generic recipe: the unrolled
+    // variant's extra live registers outweigh the unrolling once stores
+    // dominate. Narrow (sub-compute-width) inputs allow a larger window
+    // because their loads are proportionally cheaper.
+    constexpr nint_t max_unrolled_n =
+        sizeof(typename InSpec::MemoryElement) < sizeof(ComputeType)
+        ? 4096
+        : 1024;
       // For an unconstrained caller, prefer the throughput recipe used by
       // common neural-network widths. Explicit bounds outside the tuned range
       // select the smaller generic recipe without a runtime branch.
@@ -326,6 +376,30 @@ public:
   }
 
 private:
+  /**
+   * @brief Compile-time gate for the online (single-pass) row algorithm.
+   *
+   * Online tiling only wins in measured windows: the row must be long enough
+   * that the offline path's second read of x no longer hits cache, while the
+   * total element count must be large enough for the difference to matter
+   * (the store pass re-reads cached exponentials either way). Outside the
+   * tuned windows — or without compile-time last-dim contiguity, which the
+   * tile loop's addressing relies on — the offline three-pass path is used.
+   * Unknown shape metadata conservatively disables online selection.
+   *
+   * Decision table (all bounds inclusive; tuned in SoftmaxAB.md):
+   *
+   * | Backend | Compute/Input | Accuracy | Normalized size | Element count |
+   * |---|---|---|---|---|
+   * | SVE | f32/f32 | != Estimate | [8192, 16384] | [512K, 8M] |
+   * | AVX-512 | f32/f32 | Strict | [2048, 4096] | >= 512K |
+   * | AVX-512 | f32/f32 | other | [2048, 32768] | >= 512K |
+   * | AVX-512 | f64/f64 | Estimate | >= 2048 | >= 512K |
+   * | AVX-512 | f64/f64 | other | >= 2048 | >= 16M |
+   * | AVX-512 | f32/f16 | Estimate | exactly 2048 | >= 16M |
+   *
+   * Every other combination (including all other backends) returns false.
+   */
   template <tensor::InputSpecLike InSpec, tensor::OutputSpecLike OutSpec>
   static consteval bool should_use_online() {
 #if defined(CPU_CAPABILITY_SVE) || defined(CPU_CAPABILITY_AVX512)
@@ -391,6 +465,25 @@ private:
 #endif
   }
 
+  /**
+   * @brief Online (tiled, single-read-pass) softmax for one row.
+   *
+   * Three phases, reading x exactly once:
+   * 1. **Tile pass**: per `4 * vector_lanes` tile, compute the tile max,
+   *    cache the exponentials of `x - tile_max`, and record both the tile
+   *    max and the tile's exp-sum.
+   * 2. **Reconciliation**: reduce tile maxima to `global_max`, then convert
+   *    every tile's sum to the global baseline (see the rescaling comment
+   *    below) and accumulate `global_sum`.
+   * 3. **Store pass**: for each tile, multiply the cached exponentials by
+   *    `rescale(tile) / global_sum` and store.
+   *
+   * Numerical fallback: a non-finite `global_max` (a row that is entirely
+   * -inf/NaN) or a non-finite/non-positive `global_sum` (underflow) cannot
+   * be normalized this way; the workspace is rewound before delegating to
+   * the offline `run_row`, which handles those rows through the same
+   * exp-cache mechanism.
+   */
   template <typename Recipe, typename InSpec, typename OutSpec>
   VECOPS_NOINLINE void run_row_online(
       kernel::WorkspaceView& workspace, const InSpec& in,
@@ -419,6 +512,9 @@ private:
           const ComputeType negative_infinity =
               -std::numeric_limits<ComputeType>::infinity();
           nint_t tile = 0;
+          // Phase 1. Loads merge -inf into inactive lanes: the tile max is
+          // unaffected (no real element can be smaller), and the exp cache
+          // stores exp(-inf)=0 there, keeping the tile sum untouched.
           kernel::loop::fold<4, 4>(
               tag, n,
               [&](auto block_tag, nint_t col, auto active,
@@ -449,12 +545,19 @@ private:
                 maximum = vec::max(maximum, tile_max);
               },
               kernel::loop::reduce_max(global_max));
+          // An all--inf/NaN row has no finite maximum: the offline path (via
+          // its own isfinite-free arithmetic) produces the reference output
+          // for such rows, so bail out before dividing by a broken baseline.
           if (!std::isfinite(static_cast<double>(global_max))) {
             fallback = true;
             return;
           }
 
           ComputeType global_sum{};
+          // Phase 2. Rescale tile sums to the global baseline and reuse
+          // tile_max_cache in a second role: each slot is overwritten in
+          // place with exp(tile_max - global_max), the per-tile correction
+          // factor the store pass will need. This avoids a fourth array.
           kernel::loop::fold(
               tag, tile_count,
               [&](auto block_tag, nint_t i, auto active, auto& sum) VECOPS_INLINE_LAMBDA {
@@ -472,9 +575,15 @@ private:
                 auto tile_sum = vec::load(
                     block_tag, tile_sum_cache + i, active,
                     vec::opt::merge(ComputeType(0)));
+                // sum += exp(tile_max - global_max) * tile_sum: each tile's
+                // sum was centered on its own tile_max, so it must be
+                // rebased onto global_max before the tiles can be added.
                 sum = vec::fmadd(scale, tile_sum, sum);
               },
               kernel::loop::reduce_add(global_sum));
+          // A denormal/underflowed sum (or a NaN produced by the rescale)
+          // would divide the row by garbage; fall back instead. The check
+          // `> 0` also rejects a zero sum, whose rows are constant -inf.
           if (!std::isfinite(static_cast<double>(global_sum)) ||
               !(global_sum > ComputeType(0))) {
             fallback = true;
@@ -483,6 +592,9 @@ private:
 
           nint_t col = 0;
           const ComputeType inverse_sum = ComputeType(1) / global_sum;
+          // Phase 3. tile_max_cache[tile] now holds exp(tile_max -
+          // global_max), so the store scale folds both the tile rebase and
+          // the row normalization into one multiply per tile.
           for (tile = 0; tile < tile_count; ++tile) {
             const nint_t count = std::min(tile_step, n - col);
             const ComputeType scale = tile_max_cache[tile] * inverse_sum;
@@ -528,6 +640,11 @@ private:
           kernel::loop::reduce_max(max_value));
     };
     if constexpr (sizeof(typename X::MemoryElement) == sizeof(ComputeType)) {
+      // Equal-width elements need no conversion, so the max reduction can
+      // read x directly (with_unordered_access would only add overhead);
+      // lane provenance stays ordered. The by-value copy of the direct
+      // access session is a codegen aid kept for GCC (see SoftmaxAB.md);
+      // it is only needed when the resolved plan is `direct`.
       if constexpr (CopyDirectInput) {
         auto direct_x = x;
         fold_max(direct_x);
@@ -535,6 +652,9 @@ private:
         fold_max(x);
       }
     } else {
+      // Narrow inputs (e.g. fp16 into fp32 compute) reduce through an
+      // unordered (gathered-lane) access session for lane-provenance
+      // correctness during the conversion.
       tensor::with_unordered_access(x, fold_max);
     }
 

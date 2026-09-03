@@ -5,6 +5,27 @@
 #ifndef VECOPS_MATMUL_DETAILS_KERNEL_H
 #define VECOPS_MATMUL_DETAILS_KERNEL_H
 
+/**
+ * @file vecops/matmul/details/kernel/Kernel.h
+ * @brief Kernel-layer entry points that bind a leaf matmul to a backend.
+ *
+ * Design intent: these are the only functions outside the backends that
+ * talk to matmul_details::Backend directly. There are two entry styles:
+ *
+ *  - with_matmul_configuration() + matmul_bound_configured(): the leaf is
+ *    entered inside an implementation-specific configuration scope, and
+ *    nested calls must reuse the outer scope instead of opening a second
+ *    one. The explicit "configured" spelling prevents an ordinary nested
+ *    call from assuming that an equal configuration type also carries
+ *    equal runtime row counts.
+ *  - matmul_bound(): the self-contained whole-problem entry; it opens the
+ *    configuration itself when the backend defines one.
+ *
+ * The matmul_implementation namespace re-exports backend metadata
+ * (resource requirements, scratch size, problem rank) so the tiled layer
+ * can size its workspace without naming a concrete backend type.
+ */
+
 #include <utility>
 
 #include "vecops/matmul/Atom.h"
@@ -15,15 +36,18 @@ namespace vecops::kernel {
 
 namespace matmul_implementation {
 
+/// Resources an Implementation claims from its execution scope.
 template <typename Implementation>
 using resource_requirements_t =
     typename matmul_details::Backend<Implementation>::ResourceRequirements;
 
+/// Scratch bytes the backend's microkernels require; the caller allocates.
 template <typename Implementation>
 VECOPS_INLINE nint_t scratch_bytes() {
   return matmul_details::Backend<Implementation>::scratch_bytes();
 }
 
+/// Rank of one leaf problem the backend consumes.
 template <typename Implementation>
 inline constexpr int problem_rank_v =
     matmul_details::Backend<Implementation>::ProblemRank;
@@ -89,6 +113,9 @@ VECOPS_KERNEL_FUNCTION(void matmul_bound(
   static_assert(
       std::same_as<typename COutput::ComputeType, typename Atom::TAcc>);
   using Backend = matmul_details::Backend<Implementation>;
+  // Probe the extended run<> signature (family dispatch, tail-split
+  // control) first and fall back to the older run<Atom, Policy> form, so
+  // backends that predate FamilyDispatch keep compiling unchanged.
   if constexpr (requires {
                   Backend::template run<
                       Atom, Policy, AllowTailSplit, FamilyDispatch>(

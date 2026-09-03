@@ -153,6 +153,22 @@ namespace vecops::kernel::loop {
 using namespace ::vecops::meta;
 using namespace ::vecops::tensor;
 
+/**
+ * @brief How `fold` seeds the tail-block reduction carries.
+ *
+ * `independent` starts the tail blocks from the reduction identity and, only
+ * after they finish, merges the tail lanes with the matching low lanes of the
+ * full-width carry (one final combine, e.g. a single add for reduce_add).
+ * `reuse_prefix` instead seeds the tail carry from the full carry's low
+ * lanes, so the tail continues the accumulation in place and no merge step
+ * exists.
+ *
+ * @note Both produce the same mathematical result for associative
+ *       reductions; they differ in floating-point association order and in
+ *       the extra combine operation that `independent` performs.
+ * @note Invariant carries ignore this policy: they are read-only prefixes
+ *       either way.
+ */
 enum class TailCarryPolicy {
   independent,
   reuse_prefix,
@@ -175,6 +191,8 @@ inline constexpr bool is_const_value_v = ConstValue<std::remove_cvref_t<T>>::val
 
 // ======================== Vector Block Traversal ========================
 
+// GrowVectorTag<Tag, Power>: the tag obtained by applying Twice exactly
+// Power times.
 template <::vecops::vec::VectorTag Tag, int Power>
 struct GrowVectorTag {
   using type = typename GrowVectorTag<
@@ -190,6 +208,9 @@ template <::vecops::vec::VectorTag Tag, int Factor,
           bool Scalable = ::vecops::vec::is_scalable_tag_v<Tag>>
 struct SuggestedFactorTag;
 
+// Widest tag reachable from Tag at the requested factor. Scalable tags are
+// clamped by the backend multi-word budget: the requested power is capped at
+// VEC_MAX_POW minus the base tag's own scale power.
 template <::vecops::vec::VectorTag Tag, int Factor>
 struct SuggestedFactorTag<Tag, Factor, true> {
   static_assert(Factor > 0, "vector loop factor must be positive");
@@ -204,6 +225,9 @@ struct SuggestedFactorTag<Tag, Factor, true> {
   using type = typename GrowVectorTag<Tag, actual_power>::type;
 };
 
+// Fixed-width tags are clamped by total lane byte width: the tag keeps
+// doubling while the doubled lane count still fits MAX_VEC_WIDTH bytes once
+// the VEC_MAX_POW multi-word budget is applied.
 template <::vecops::vec::VectorTag Tag, int Factor>
 struct SuggestedFactorTag<Tag, Factor, false> {
   static_assert(Factor > 0, "vector loop factor must be positive");
@@ -227,6 +251,8 @@ struct SuggestedFactorTag<Tag, Factor, false> {
 template <::vecops::vec::VectorTag Tag, int Factor>
 using suggested_factor_tag_t = typename SuggestedFactorTag<Tag, Factor>::type;
 
+// The low |ChildTag| lanes of a ParentTag vector, obtained by recursive
+// halving.
 template <::vecops::vec::VectorTag ParentTag,
           ::vecops::vec::VectorTag ChildTag>
 VECOPS_ALWAYS_INLINE auto vector_prefix(
@@ -242,6 +268,8 @@ VECOPS_ALWAYS_INLINE auto vector_prefix(
   }
 }
 
+// Inverse of vector_prefix: write a child-width prefix back into a parent
+// vector, keeping the parent's upper lanes unchanged.
 template <::vecops::vec::VectorTag ParentTag,
           ::vecops::vec::VectorTag ChildTag>
 VECOPS_ALWAYS_INLINE ::vecops::vec::Vec<ParentTag> replace_vector_prefix(
@@ -259,6 +287,8 @@ VECOPS_ALWAYS_INLINE ::vecops::vec::Vec<ParentTag> replace_vector_prefix(
   }
 }
 
+// Carry descriptors returned by reduce_*/invariant. They travel through
+// fold's parameter pack and are recognized by the traits below.
 template <typename T, typename Reduction>
 struct VectorReductionDefinition {
   T& result;
@@ -297,6 +327,7 @@ inline constexpr bool is_vector_carry_definition_v =
     is_vector_reduction_definition_v<T> ||
     is_vector_invariant_definition_v<T>;
 
+// Lane-wise combine of two same-tag reduction carries.
 template <typename Reduction, ::vecops::vec::VectorTag Tag>
 VECOPS_ALWAYS_INLINE ::vecops::vec::Vec<Tag> combine_reduction_carries(
     Tag, ::vecops::vec::Vec<Tag> lhs,
@@ -314,6 +345,8 @@ VECOPS_ALWAYS_INLINE ::vecops::vec::Vec<Tag> combine_reduction_carries(
   }
 }
 
+// Repeat a narrower invariant vector until it fills a wider tag: both
+// halves are identical, so two recursive halves are concatenated.
 template <::vecops::vec::VectorTag ToTag,
           ::vecops::vec::VectorTag FromTag>
 VECOPS_ALWAYS_INLINE ::vecops::vec::Vec<ToTag> repeat_invariant_vector(
@@ -352,6 +385,8 @@ VECOPS_ALWAYS_INLINE auto make_full_invariant(
 #pragma GCC diagnostic ignored "-Wattributes"
 #endif
 
+// Select the Wanted-th element of a variadic pack at compile time; the
+// static_assert fires only when the index exceeds this pack.
 template <std::size_t Wanted, std::size_t Current = 0,
           typename Fn, typename First, typename... Rest>
 VECOPS_ALWAYS_INLINE decltype(auto) invoke_vector_carry(
@@ -365,6 +400,12 @@ VECOPS_ALWAYS_INLINE decltype(auto) invoke_vector_carry(
   }
 }
 
+// Build one independent automatic variable per carry definition at FullTag
+// width, then run use(full_carries...). Note the ordering for reductions:
+// the loop inside `use` mutates the carry, and only after it returns is the
+// final carry reduced lane-wise into definition.result. The carries stay
+// independent automatics (never aggregate members) so sizeless SVE vectors
+// remain legal.
 template <std::size_t I, typename DefinitionTuple,
           ::vecops::vec::VectorTag BaseTag,
           ::vecops::vec::VectorTag FullTag,
@@ -402,6 +443,18 @@ VECOPS_ALWAYS_INLINE void with_vector_full_carries(
   }
 }
 
+// Tail twin of with_vector_full_carries at TailTag width, run inside the
+// full-block loop's remainder. For each definition it fetches the matching
+// full carry by index through full_dispatch, then:
+//  - reductions: seed the tail carry (identity under independent, the full
+//    carry's low lanes under reuse_prefix), let the tail loop run, and only
+//    afterwards merge the tail result into the full carry — under
+//    independent the tail lanes are combined with the untouched full
+//    prefix, then replace_vector_prefix writes the merged tail back into
+//    the full carry so the final full-width reduction sees it;
+//  - invariants: the tail carry is simply the full carry's low prefix.
+// The post-loop order is load-bearing: the tail loop must finish before
+// tail_carry is combined or written back.
 template <std::size_t I, TailCarryPolicy Policy,
           typename DefinitionTuple,
           ::vecops::vec::VectorTag FullTag,
@@ -537,6 +590,8 @@ struct SliceTraits<
   }
 };
 
+// The tensor type a Spec exposes on its bound side: InputSpec keeps its
+// InputTensor, everything else (OutputSpec) its OutputTensor.
 template <typename Spec, bool IsInput = Spec::is_input>
 struct SpecTensorType {
   using type = typename Spec::OutputTensor;
@@ -624,6 +679,10 @@ template <int I, int... Is>
 struct UniqueDims<I, Is...>
     : std::bool_constant<!ContainsDim<I, Is...>::value && UniqueDims<Is...>::value> {};
 
+// After slicing one dimension away, dimensions above it shift down by one.
+// A negative I is the "no such dimension" sentinel: it stays negative and is
+// re-detected as out of range at the next recursion level. The I == 0
+// rejection is the duplicate-dimension check for the last remaining index.
 template <int I>
 constexpr int adjust_dim_after_slice() {
   static_assert(I != 0, "duplicate traversal dimension");
@@ -634,6 +693,8 @@ constexpr int adjust_dim_after_slice() {
   }
 }
 
+// Remaining-index variant: dimensions below the sliced one keep their
+// number, dimensions above shift down; I == SlicedDim is a duplicate.
 template <int SlicedDim, int I>
 constexpr int adjust_dim_after_slice() {
   static_assert(I != SlicedDim, "duplicate traversal dimension");
@@ -655,6 +716,10 @@ inline constexpr bool has_actual_dim_v =
     is_sliceable_v<T> && (0 <= actual_dim_v<LogicalRank, LogicalDim, T>) &&
     (actual_dim_v<LogicalRank, LogicalDim, T> < slice_rank_v<T>);
 
+// Default true, deliberately: an input with no actual dimension at this
+// logical axis (rank too small, or not sliceable at all) is forwarded
+// unchanged, which broadcasts by construction. Only a real dimension is
+// tested for the Const<1> broadcast shape.
 template <bool HasActualDim, int ActualDim, typename T>
 struct IsBroadcastDim : std::true_type {};
 
@@ -671,6 +736,9 @@ inline constexpr bool is_broadcast_dim_v =
 
 // ======================== Extent Resolution and Slicing ========================
 
+// Fold the runtime extent of the first input that actually has a
+// non-broadcast dimension at this logical axis into `extent`; every later
+// such input must agree (assertion).
 template <int LogicalRank, int LogicalDim, typename T>
 VECOPS_ALWAYS_INLINE void update_extent(nint_t& extent, bool& has_extent, const T& input) {
   if constexpr (has_actual_dim_v<LogicalRank, LogicalDim, T> &&
@@ -720,6 +788,9 @@ VECOPS_ALWAYS_INLINE constexpr decltype(auto) slice_at_actual_dim(T&& input, nin
       index);
 }
 
+// Slice one input at the current logical dimension: no actual dimension —
+// forward unchanged; broadcast dimension — always index 0; otherwise the
+// current loop index.
 template <int LogicalRank, int LogicalDim, typename T>
 VECOPS_ALWAYS_INLINE constexpr decltype(auto) slice_one(T&& input, nint_t index) {
   if constexpr (!has_actual_dim_v<LogicalRank, LogicalDim, T>) {
@@ -783,6 +854,11 @@ VECOPS_ALWAYS_INLINE void for_each_impl(
 
 // Recursive overload: one dimension at a time. A single traversal serves all
 // three index modes; only the leaf differs.
+//
+// `extent = 1, has_extent = false` is the "nothing constrains this axis"
+// sentinel: the loop then runs exactly once. Inputs without an actual
+// dimension here, and broadcast dimensions, never update the extent, so the
+// extent comes from the first non-broadcast input that has this axis.
 template <
     int LogicalRank,
     for_each_index_mode Mode,
@@ -810,6 +886,9 @@ VECOPS_ALWAYS_INLINE void for_each_impl(
   }
 }
 
+// for_each_dims<N> expands to for_each<0, ..., N-1> with the logical rank
+// raised to cover every input rank; the two siblings below follow the same
+// pattern for the expand/tuple index modes.
 template <int N, typename Seq = std::make_integer_sequence<int, N>>
 struct LeadingDims;
 
@@ -851,21 +930,36 @@ struct LeadingDimsWithIndexTuple<N, std::integer_sequence<int, Is...>> {
 
 } // namespace details
 
-/** Defines an additive vector carry and overwrites `result` on completion. */
+/**
+ * Defines an additive vector carry and overwrites `result` on completion.
+ *
+ * @param result  Reduction destination; must be an `ElementOf<Tag>` of the
+ *                fold's base tag and is overwritten when the fold finishes.
+ */
 template <typename T>
 VECOPS_ALWAYS_INLINE auto reduce_add(T& result) {
   return details::VectorReductionDefinition<
       T, ::vecops::vec::ReduceAddOp>{result};
 }
 
-/** Defines a maximum vector carry and overwrites `result` on completion. */
+/**
+ * Defines a maximum vector carry and overwrites `result` on completion.
+ *
+ * @param result  Reduction destination; must be an `ElementOf<Tag>` of the
+ *                fold's base tag and is overwritten when the fold finishes.
+ */
 template <typename T>
 VECOPS_ALWAYS_INLINE auto reduce_max(T& result) {
   return details::VectorReductionDefinition<
       T, ::vecops::vec::ReduceMaxOp>{result};
 }
 
-/** Defines a minimum vector carry and overwrites `result` on completion. */
+/**
+ * Defines a minimum vector carry and overwrites `result` on completion.
+ *
+ * @param result  Reduction destination; must be an `ElementOf<Tag>` of the
+ *                fold's base tag and is overwritten when the fold finishes.
+ */
 template <typename T>
 VECOPS_ALWAYS_INLINE auto reduce_min(T& result) {
   return details::VectorReductionDefinition<
@@ -888,6 +982,44 @@ VECOPS_ALWAYS_INLINE auto invariant(const T& value) {
  * Reduction carries are independent automatic variables and are never stored
  * in an aggregate, so this overload supports sizeless SVE vectors. Definitions
  * are passed to the callback in declaration order after `(tag, i, active)`.
+ *
+ * The extent `n` is traversed in blocks: full blocks use the widest tag the
+ * backend allows for `FullFactor` base vectors, then a tail phase over the
+ * remaining elements uses the `TailFactor` tag, ending with one masked
+ * partial block. The callback receives the block tag, the element offset, a
+ * mask option (`vec::opt::unmasked` for full blocks, `vec::opt::first`
+ * for the partial tail), and one reference per carry definition — mutable
+ * for reductions, const for invariants:
+ *
+ * @code
+ * float total = 0.f;
+ * loop::fold(vec::ScalableTag<float, 0>{}, n,
+ *            [](auto tag, nint_t i, auto active, auto& acc) {
+ *              acc = vec::add(tag, acc, compute(tag, i, active));
+ *            },
+ *            loop::reduce_add(total));
+ * @endcode
+ *
+ * @tparam FullFactor   Requested number of base vectors per full block; the
+ *                      actual full tag is clamped to the backend limits.
+ * @tparam TailFactor   Requested number of base vectors per tail block; must
+ *                      not exceed FullFactor.
+ * @tparam Policy       TailCarryPolicy governing tail carry seeding.
+ * @tparam Tag          Base vector tag; full and tail tags grow from it.
+ * @tparam N            Element count type (meta ValueInput).
+ * @tparam Fn           Block callable, invoked as
+ *                      `block(tag, i, active, carries...)`.
+ * @tparam Definitions  One or more reduce_* or invariant definitions
+ *                      (static_assert enforces both the minimum count and
+ *                      the accepted kinds).
+ *
+ * @param base_tag     Tag value naming the base vector type.
+ * @param n            Element count (non-negative, asserted).
+ * @param block        Callable invoked once per block.
+ * @param definitions  Carry definitions, forwarded by reference.
+ *
+ * @note Reduction results are lane-wise reduced into `result` only after the
+ *       traversal completes.
  */
 #if defined(COMPILER_GCC) && defined(CPU_CAPABILITY_SVE)
 #pragma GCC diagnostic push

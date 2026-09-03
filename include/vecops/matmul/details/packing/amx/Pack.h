@@ -2,6 +2,39 @@
 // Copyright (c) vecops contributors.
 //
 
+/**
+ * @file vecops/matmul/details/packing/amx/Pack.h
+ * @brief AVX-512 intrinsic packers producing the AMX block format.
+ *
+ * Two pipelines write the layouts defined in packing/amx/Format.h:
+ *
+ * - the *direct* pipeline (pack_a_direct / pack_b_direct family) consumes a
+ *   raw pointer plus row stride: A rows move as whole 64-byte vectors, B
+ *   rows go through the 16x16 dword transpose network;
+ * - the *access* pipeline (pack_a_access / pack_b_access and the row-major
+ *   staging variant) drives a DataAccess source, so transforms and element
+ *   conversions stay on its vector load path.
+ *
+ * B packing is a transpose because the tile dot products read K in 32-bit
+ * VNNI groups (four bytes, two fp16/bf16, or one fp32 per group — hence
+ * KPack = 4 / sizeof(T)): the 16 source rows of a panel (one AMX tile,
+ * 16 rows x 64 bytes) are transposed so each dword ends up holding one
+ * row's KPack consecutive K values.
+ *
+ * The observer pattern layers the asymmetric-quantization sidecar on top of
+ * the shared store loop: store_packed_b_groups reports every packed group
+ * through begin_panel / observe / end_panel, and the enabled observer
+ * (S8ColumnCompensation) folds the column sums out of the very registers
+ * the store is about to consume.
+ *
+ * Two entries are shared beyond this file: the noinline panel wrappers
+ * pack_b_full_panel_direct / pack_b_partial_panel_direct (and the transpose
+ * network they wrap) are called by the AMX micro-kernel backend
+ * (kernel/amx/Backend.h) to pack B on the fly inside generated kernel
+ * families, and compensate_packed_s8_b is the packing Backend's post-pass
+ * fallback for compensation.
+ */
+
 #ifndef VECOPS_MATMUL_DETAILS_PACK_AMX_PACK_H
 #define VECOPS_MATMUL_DETAILS_PACK_AMX_PACK_H
 
@@ -17,6 +50,10 @@
 
 namespace vecops::kernel::matmul_pack_details::amx {
 
+/// Store one 16-row x KTile A tile from an access source, zero-padding tail
+/// rows and tail K lanes so every emitted block stays dense.  The
+/// SpatialGuaranteed / KGuaranteed bools drop the tail predicates whenever
+/// the Meta shape types prove the panel/tile is fully covered.
 template <nint_t KTile, vec::VectorTag Tag, bool SpatialGuaranteed,
           bool KGuaranteed = false,
           typename Source, typename T>
@@ -57,6 +94,9 @@ VECOPS_ALWAYS_INLINE void pack_a_tile(
   }
 }
 
+/// Access-pipeline A pack: walk [panel][k-tile] blocks, each emitted as 16
+/// contiguous KTile-wide rows (the 4-D A layout).  Loads run along K
+/// (axis 1, the A packing axis), keeping any transform on contiguous data.
 template <nint_t KTile, vec::VectorTag Tag,
           typename Source, typename T,
           meta::ValueType Spatial, meta::ValueType K>
@@ -81,6 +121,10 @@ VECOPS_NOINLINE void pack_a_access(
   }
 }
 
+/// Store one 16-row B tile from an access source.  Loads run along spatial
+/// (axis 0, the B packing axis): load_k fetches the 16 panel rows of one K
+/// value, and KPack consecutive K columns are then interleaved into the
+/// dword groups of the 5-D B layout.
 template <nint_t KPack, nint_t KTile, vec::VectorTag Tag,
           bool SpatialGuaranteed, bool KGuaranteed = false,
           typename Source, typename T>
@@ -114,6 +158,9 @@ VECOPS_ALWAYS_INLINE void pack_b_tile(
             vec::opt::first(active_spatial), vec::opt::zero);
       }
     };
+    // Group kg of this k-tile owns a [row(16)][k(KPack)] block inside the
+    // 5-D layout, hence the kg * 16 * KPack store offset; the interleave
+    // packs the KPack freshly loaded K columns into that block's dwords.
     if constexpr (KPack == 2) {
       using PackedTag = vec::Twice<Tag>;
       const auto packed = generic::interleave_pair<Tag>(load_k(0), load_k(1));
@@ -127,6 +174,9 @@ VECOPS_ALWAYS_INLINE void pack_b_tile(
   }
 }
 
+/// Access-pipeline B pack over [panel][k-tile] blocks: spatial column loads
+/// plus the KPack interleave above.  Used when neither the direct pointer
+/// path nor the row-major staging path applies (see packing/amx/Backend.h).
 template <nint_t KPack, nint_t KTile, vec::VectorTag Tag,
           typename Source, typename T,
           meta::ValueType Spatial, meta::ValueType K>
@@ -228,6 +278,10 @@ VECOPS_ALWAYS_INLINE void transpose_16x16_dwords(__m512i (&rows)[16]) {
   rows[15] = _mm512_shuffle_i32x4(tmp[7], tmp[15], 0xdd);
 }
 
+/// Reduce sixteen packed dword groups into per-row int32 column sums with
+/// VPDPBUSD (each dword lane holds four K bytes of one logical row, so the
+/// ones-vector dot product is exactly the row sum).  Used by the post-pass
+/// compensation path on groups read back from an already-packed stream.
 VECOPS_ALWAYS_INLINE __m512i accumulate_s8_column_sums(
     __m512i sums, const __m512i (&packed_groups)[16]) {
   const auto ones = _mm512_set1_epi8(1);
@@ -242,6 +296,10 @@ VECOPS_ALWAYS_INLINE __m512i accumulate_s8_column_sums(
   return sums;
 }
 
+/// Publish one panel's sidecar entry: for asymmetric-quantized A
+/// (a = a_q - a_zero_point) the kernel computes sum(a_q * b), so the missing
+/// term -a_zero_point * sum(b) is emitted per B row, masked to the active
+/// rows of a possibly-short tail panel.
 VECOPS_ALWAYS_INLINE void store_s8_column_compensation(
     __m512i sums, int32_t* destination,
     nint_t active_rows, int32_t a_zero_point) {
@@ -257,6 +315,9 @@ VECOPS_ALWAYS_INLINE void store_s8_column_compensation(
   _mm512_mask_storeu_epi32(destination, mask, correction);
 }
 
+/// Disabled observer: satisfies the packing observer protocol
+/// (begin_panel / observe / end_panel) with no-ops, so compensated and plain
+/// packs share one store loop and one transpose network.
 struct NoColumnCompensation {
   static constexpr bool enabled = false;
 
@@ -265,6 +326,15 @@ struct NoColumnCompensation {
   VECOPS_ALWAYS_INLINE void end_panel(nint_t, nint_t) {}
 };
 
+/**
+ * @brief Fused asymmetric-A sidecar observer.
+ *
+ * Protocol: begin_panel(row_base) zeroes the accumulators; observe(group,
+ * packed_group) receives every 512-bit group right after the transpose —
+ * the exact dwords about to be stored, so the sums ride along with data
+ * the store needs anyway; end_panel(row_base, active_rows) emits the
+ * masked correction for the panel.
+ */
 class S8ColumnCompensation {
 public:
   static constexpr bool enabled = true;
@@ -281,6 +351,12 @@ public:
 
   VECOPS_ALWAYS_INLINE void observe(
       nint_t group, __m512i packed_group) {
+    // Split the groups across two accumulators.  A single accumulator
+    // would serialize all 16 VPDPBUSD of the store loop into one
+    // loop-carried dependency chain (each dot product is ~10 cycles of
+    // latency); the parity split forms two independent chains that
+    // interleave naturally in the unrolled loop, roughly halving the
+    // critical path.  end_panel folds the two halves together.
     if (group & 1) {
       sums_odd_ = _mm512_dpbusd_epi32(
           sums_odd_, ones_, packed_group);
@@ -305,6 +381,9 @@ private:
   __m512i ones_;
 };
 
+/// Store one transposed panel as 16 dword groups and drive the observer
+/// protocol: each group is observed while still in registers, right before
+/// its store.
 template <typename T, typename Observer>
 VECOPS_ALWAYS_INLINE void store_packed_b_groups(
     const __m512i (&rows)[16], T* destination, Observer& observer) {
@@ -330,6 +409,10 @@ VECOPS_ALWAYS_INLINE void pack_b_row_major_access_impl(
     const Source& source, T* destination,
     Spatial spatial, K k, Observer& observer) {
   static_assert(KPack == 2 || KPack == 4);
+  // Hardware-derived shape contract, checked where it is relied on:
+  // sizeof(T) * KPack == 4 keeps one packed group inside a single 32-bit
+  // VNNI dword, and KTile * sizeof(T) == 64 makes one K tile exactly the
+  // AMX tile row width.
   static_assert(sizeof(T) * KPack == sizeof(uint32_t));
   static_assert(KTile * static_cast<nint_t>(sizeof(T)) == 64);
   using RowTag = vec::ScalableTag<T, 0>;
@@ -366,6 +449,8 @@ VECOPS_ALWAYS_INLINE void pack_b_row_major_access_impl(
   }
 }
 
+/// Row-major access B pack without compensation: the impl above with a
+/// disabled observer.
 template <nint_t KPack, nint_t KTile, typename Source, typename T,
           meta::ValueType Spatial, meta::ValueType K>
 VECOPS_NOINLINE void pack_b_row_major_access(
@@ -389,6 +474,10 @@ VECOPS_NOINLINE void pack_b_row_major_access_compensated(
       source, destination, spatial, k, observer);
 }
 
+/// Load one 64-byte K row, zeroing lanes beyond active_k; the width-
+/// appropriate maskz form handles the per-size tail masking.  Shared by the
+/// A partial-tile and B partial-panel direct paths (the "b_row" name is
+/// historical: any masked 64-byte row goes through here).
 template <typename T>
 VECOPS_ALWAYS_INLINE __m512i load_b_row_direct(
     const T* source, nint_t active_k) {
@@ -406,6 +495,9 @@ VECOPS_ALWAYS_INLINE __m512i load_b_row_direct(
   }
 }
 
+/// Direct A pack of one 16 x KTile tile with short rows and/or short K:
+/// inactive rows and tail K lanes are stored as zeros to keep the block
+/// dense.
 template <typename T>
 VECOPS_NOINLINE void pack_a_partial_tile_direct(
     const T* source, nint_t row_stride, T* destination,
@@ -424,6 +516,9 @@ VECOPS_NOINLINE void pack_a_partial_tile_direct(
   }
 }
 
+/// Transpose one full 16-row x 64-byte panel from a raw row-major source,
+/// driving the observer (observer-carrying form, always inlined into the
+/// panel loops).
 template <nint_t KPack, typename T, typename Observer>
 VECOPS_ALWAYS_INLINE void pack_b_full_panel_direct_impl(
     const T* source, nint_t row_stride, T* destination,
@@ -439,6 +534,9 @@ VECOPS_ALWAYS_INLINE void pack_b_full_panel_direct_impl(
   store_packed_b_groups(rows, destination, observer);
 }
 
+/// Transpose one partial panel (short rows / short K) from a raw source,
+/// zero-filling inactive rows and tail K lanes before the transpose
+/// (observer-carrying form).
 template <nint_t KPack, typename T, typename Observer>
 VECOPS_ALWAYS_INLINE void pack_b_partial_panel_direct_impl(
     const T* source, nint_t row_stride, T* destination,
@@ -456,6 +554,7 @@ VECOPS_ALWAYS_INLINE void pack_b_partial_panel_direct_impl(
   store_packed_b_groups(rows, destination, observer);
 }
 
+/// Observer-free overloads used by the offline pack loop below.
 template <nint_t KPack, typename T>
 VECOPS_ALWAYS_INLINE void pack_b_full_panel_direct_impl(
     const T* source, nint_t row_stride, T* destination) {
@@ -476,6 +575,8 @@ VECOPS_ALWAYS_INLINE void pack_b_partial_panel_direct_impl(
 // Matmul calls these wrappers from several generated micro-kernel families.
 // Keeping one copy per dtype avoids cloning the complete transpose network into
 // every caller. The offline pack loop uses the inline implementations directly.
+// The AMX micro-kernel backend (kernel/amx/Backend.h) is the external caller:
+// it packs B on the fly inside its fused kernel families.
 template <nint_t KPack, typename T>
 VECOPS_NOINLINE void pack_b_full_panel_direct(
     const T* source, nint_t row_stride, T* destination) {
@@ -491,6 +592,9 @@ VECOPS_NOINLINE void pack_b_partial_panel_direct(
       source, row_stride, destination, active_rows, active_k);
 }
 
+/// Direct raw-pointer A pack: [panel][k-tile] blocks of 16 contiguous
+/// 64-byte row vectors, zero-padding tails.  The template bools select the
+/// cheapest load form the Meta shape types prove safe.
 template <bool SpatialGuaranteed, bool KGuaranteed, typename T>
 VECOPS_NOINLINE void pack_a_direct(
     const T* source, nint_t row_stride, T* destination,
@@ -574,6 +678,11 @@ VECOPS_NOINLINE void pack_a_direct_dynamic(
   }
 }
 
+/// Direct raw-pointer B pack: per k-tile, load the 16 panel rows and run
+/// the dword transpose — the full variant when Meta proves the panel and
+/// tile complete, otherwise the runtime-tail partial variant — driving the
+/// observer.  See the note inside for why the two variants stay separate
+/// instantiations.
 template <nint_t KPack, bool SpatialGuaranteed, bool KGuaranteed,
           typename T, typename Observer>
 VECOPS_ALWAYS_INLINE void pack_b_direct_impl(
@@ -628,6 +737,7 @@ VECOPS_ALWAYS_INLINE void pack_b_direct_impl(
   }
 }
 
+/// Observer-free direct B pack used by the ordinary (uncompensated) path.
 template <nint_t KPack, bool SpatialGuaranteed, bool KGuaranteed,
           typename T>
 VECOPS_NOINLINE void pack_b_direct(
@@ -638,6 +748,9 @@ VECOPS_NOINLINE void pack_b_direct(
       source, row_stride, destination, spatial, k, observer);
 }
 
+/// Direct B pack with the s8 column sidecar fused into the transpose
+/// (int8 / KPack == 4 only: the sidecar reduces dword groups of four
+/// bytes).
 template <nint_t KPack, bool SpatialGuaranteed, bool KGuaranteed>
 VECOPS_NOINLINE void pack_b_direct_compensated(
     const int8_t* source, nint_t row_stride, int8_t* destination,
@@ -648,6 +761,11 @@ VECOPS_NOINLINE void pack_b_direct_compensated(
       source, row_stride, destination, spatial, k, observer);
 }
 
+/// Post-pass compensation over an already-packed s8 B stream: re-reads each
+/// panel sequentially and reduces its dword groups.  The packing Backend
+/// falls back to this when neither fused path (direct pointer or row-major
+/// access) applies, so the need for a sidecar never forces a slower pack.
+#if defined(HAS_AVX512_VNNI)
 VECOPS_NOINLINE inline void compensate_packed_s8_b(
     const int8_t* source, int32_t* compensation,
     nint_t spatial, nint_t k,
@@ -673,6 +791,42 @@ VECOPS_NOINLINE inline void compensate_packed_s8_b(
         vecops::min(Panel, spatial - row_base), a_zero_point);
   }
 }
+#else
+// Scalar mirror of the VPDPBUSD path above for sub-AVX-512 translation
+// units (the packing Backend instantiates this fallback even in Scalar
+// capability builds).  Layout equivalence: within one panel each 64-byte
+// group holds one K chunk, and its dword lane r carries four K bytes of
+// logical row r, so the row sum is the plain byte sum over
+// (k_tile, group, 4 * r).
+VECOPS_NOINLINE inline void compensate_packed_s8_b(
+    const int8_t* source, int32_t* compensation,
+    nint_t spatial, nint_t k,
+    int32_t a_zero_point) {
+  constexpr nint_t Panel = 16;
+  constexpr nint_t KTile = 64;
+  const nint_t panels = ceil_div(spatial, Panel);
+  const nint_t k_tiles = ceil_div(k, KTile);
+  for (nint_t sp = 0; sp < panels; ++sp) {
+    int32_t sums[Panel] = {};
+    for (nint_t kt = 0; kt < k_tiles; ++kt) {
+      for (nint_t group = 0; group < 16; ++group) {
+        for (nint_t r = 0; r < Panel; ++r) {
+          sums[r] += static_cast<int32_t>(source[4 * r + 0]);
+          sums[r] += static_cast<int32_t>(source[4 * r + 1]);
+          sums[r] += static_cast<int32_t>(source[4 * r + 2]);
+          sums[r] += static_cast<int32_t>(source[4 * r + 3]);
+        }
+        source += 64;
+      }
+    }
+    const nint_t row_base = sp * Panel;
+    const nint_t active_rows = vecops::min(Panel, spatial - row_base);
+    for (nint_t r = 0; r < active_rows; ++r) {
+      compensation[row_base + r] = -a_zero_point * sums[r];
+    }
+  }
+}
+#endif
 
 } // namespace vecops::kernel::matmul_pack_details::amx
 

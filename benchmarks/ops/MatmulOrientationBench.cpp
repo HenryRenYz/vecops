@@ -10,7 +10,7 @@
  * decisions used by attention kernels without adding variants to MatmulBench.
  */
 
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 
 #include <benchmark/benchmark.h>
 

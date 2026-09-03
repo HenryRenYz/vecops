@@ -5,6 +5,29 @@
 #ifndef VECOPS_MATMUL_DETAILS_FAMILIES_GENERIC_TILED_H
 #define VECOPS_MATMUL_DETAILS_FAMILIES_GENERIC_TILED_H
 
+/**
+ * @file vecops/matmul/details/planning/families/GenericTiled.h
+ * @brief Execution entries for the generic cache-tiled family, plus the
+ *        batch-loop primitives and operand validation shared with the
+ *        architecture-family paths.
+ *
+ * This header deliberately serves two roles:
+ *
+ * 1. The explicitly selected GenericTiled family.  generic_tiler_
+ *    workspace_bytes() and run_generic_tiler() are the plan entries invoked
+ *    from planning/FamilyPlan.h: they validate the operands, then either run
+ *    the rank-two cache tiler directly or walk the leading batch dimensions
+ *    and run one tiler call per leaf problem.
+ *
+ * 2. Shared traversal vocabulary.  validate_input() and the
+ *    batch_loop_operand()/batch_loop_leaf() pair encode the operand
+ *    contract both families rely on — a packed operand carries no batch
+ *    dimension and must be broadcast to every batch item by the loop.  The
+ *    architecture-family invocation reuses them for its own batch
+ *    traversal, which is why they live here rather than in a
+ *    GenericTiled-only header.
+ */
+
 #include "vecops/Assertion.h"
 #include "vecops/kernel/Loop.h"
 #include "vecops/matmul/Config.h"
@@ -15,11 +38,16 @@
 
 namespace vecops::matmul::details {
 
+/// Wraps a packed operand for batch traversal: packed layouts have no batch
+/// dimension, so the loop must hand the same leaf to every batch item
+/// instead of indexing into it.
 template <typename Spec>
 struct BroadcastPackedOperand {
   const Spec* spec;
 };
 
+/// Mark a spec as broadcast when its layout is already a packed format for
+/// this atom/side; otherwise pass it through for normal per-batch iteration.
 template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side, typename Spec>
 VECOPS_INLINE auto batch_loop_operand(const Spec& spec) {
   if constexpr (::vecops::matmul::is_packed_layout<
@@ -30,17 +58,30 @@ VECOPS_INLINE auto batch_loop_operand(const Spec& spec) {
   }
 }
 
+/// Recover the wrapped spec (BroadcastPackedOperand overload).
 template <typename Spec>
 VECOPS_INLINE const Spec& batch_loop_leaf(
     const BroadcastPackedOperand<Spec>& operand) {
   return *operand.spec;
 }
 
+/// Identity overload for ordinary per-batch leaves.
 template <typename Leaf>
 VECOPS_INLINE const Leaf& batch_loop_leaf(const Leaf& leaf) {
   return leaf;
 }
 
+/**
+ * Validate one A/B operand against the logical problem.  @p spatial is the
+ * operand's row count (M for the A side, N for the B side) and @p k is the
+ * shared reduction extent.
+ *
+ * Packed operands must already be in the packing's native element type with
+ * no transform, and their grouped layout (panel rows x K groups) only needs
+ * to cover the requested extents — the trailing extents are padding-aware
+ * upper bounds, not exact matches.  Unpacked operands must match C's rank
+ * and the leading batch shapes exactly.
+ */
 template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
           int LogicalRank, typename Spec, typename CLayout>
 VECOPS_INLINE void validate_input(
@@ -55,6 +96,9 @@ VECOPS_INLINE void validate_input(
                      typename Packing::Element> &&
         std::same_as<typename Spec::TransformType, tensor::NoTransform>,
         "packed matmul operands must have their native dtype and no transform");
+    // Packed formats expose their geometry either as static members (AMX) or
+    // as static functions (SME, where tile lanes depend on the runtime SVL);
+    // probe both spellings.
     const nint_t panel = [&] {
       if constexpr (requires { Packing::Panel; }) {
         return static_cast<nint_t>(Packing::Panel);
@@ -94,6 +138,8 @@ VECOPS_INLINE void validate_input(
   }
 }
 
+/// Workspace bound for the generic tiler: computed from the trailing
+/// rank-two leaf layouts, so leading batch dimensions never enlarge it.
 template <typename Config, typename Implementation,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
           tensor::InputSpecLike ASpec, tensor::InputSpecLike BSpec,
@@ -111,6 +157,13 @@ VECOPS_INLINE nint_t generic_tiler_workspace_bytes(
           config, m, n, k, a_leaf, b_leaf, c_leaf);
 }
 
+/**
+ * Execute the whole operation through the generic cache tiler.  Rank-two
+ * problems enter run_tiled_rank2 directly; higher-rank problems first
+ * verify that the batch dimensions are non-empty, then walk them,
+ * broadcasting packed operands (see batch_loop_operand) and running one
+ * tiler call per leaf problem.
+ */
 template <typename Config, typename Implementation,
           execution::ExecutionScope Scope,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,

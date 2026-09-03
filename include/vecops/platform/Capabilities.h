@@ -5,7 +5,7 @@
 #ifndef VECOPS_PLATFORM_CAPABILITIES_H
 #define VECOPS_PLATFORM_CAPABILITIES_H
 
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 
 /**
  * @file Capabilities.h

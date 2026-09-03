@@ -10,7 +10,7 @@
 #include "vecops/platform/Capabilities.h"
 
 /**
- * @file Backend.h
+ * @file vecops/kernel/details/transpose/Backend.h
  * @brief Compile-time Transpose2D backend selection and implementation mapping.
  *
  * The vector backend is chosen from target capability macros and may delegate
@@ -42,8 +42,10 @@ struct ImplementationBackend;
 /** Vector transpose backend selected for the current translation unit. */
 using CurrentVectorBackend = SVEBackend;
 #elif defined(ARCH_X86_FAMILY) && !defined(CPU_CAPABILITY_GENERIC)
+/** x86 vector backend (AVX-512 register network when available). */
 using CurrentVectorBackend = X86Backend;
 #else
+/** Fallback vector backend used on generic/scalar targets. */
 using CurrentVectorBackend = ScalarBackend;
 #endif
 

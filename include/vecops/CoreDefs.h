@@ -17,7 +17,7 @@
 
 #include <csignal>
 
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 
 /**
  * Debug & release flags

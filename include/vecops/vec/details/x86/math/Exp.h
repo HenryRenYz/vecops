@@ -39,7 +39,6 @@
  */
 
 #include <cmath>
-#include <cstring>
 #include <limits>
 
 #include "vecops/vec/details/Dispatch.h"
@@ -123,15 +122,24 @@ VECOPS_ALWAYS_INLINE NativeWordVec<IndexTag<Tag>> x86_exp_to_index(
     else return Result{_mm512_cvttpd_epi64(value.value)};
 #endif
 #else
-    constexpr std::size_t lanes = sizeof(Raw) / sizeof(double);
-    alignas(64) double input[lanes];
-    alignas(64) int64_t output[lanes];
-    std::memcpy(input, &value.value, sizeof(Raw));
-    for (std::size_t lane = 0; lane < lanes; ++lane)
-      output[lane] = static_cast<int64_t>(input[lane]);
-    decltype(Result{}.value) raw;
-    std::memcpy(&raw, output, sizeof(Raw));
-    return Result{raw};
+    // Range reduction clamps the exponent to roughly +/- 1024, so the
+    // intermediate always fits in i32. Convert all lanes together and widen
+    // the small integer result instead of spilling the f64 word lane by lane.
+    if constexpr (sizeof(Raw) == 16) {
+      return Result{_mm_cvtepi32_epi64(_mm_cvttpd_epi32(value.value))};
+    }
+#if VEC_WIDTH >= 256
+    else if constexpr (sizeof(Raw) == 32) {
+      return Result{
+          _mm256_cvtepi32_epi64(_mm256_cvttpd_epi32(value.value))};
+    }
+#endif
+#if VEC_WIDTH >= 512
+    else {
+      return Result{
+          _mm512_cvtepi32_epi64(_mm512_cvttpd_epi32(value.value))};
+    }
+#endif
 #endif
   }
 }

@@ -13,52 +13,15 @@
  */
 
 #include <cmath>
-#include <cstring>
 #include <limits>
 
 #include "vecops/vec/details/Dispatch.h"
 
 namespace vecops::vec::details {
 
-template <Element T, typename Raw, typename Operation>
-
 /* **************************************************************************** */
 //                 Small-float and integer arithmetic helpers                 //
 /* **************************************************************************** */
-
-VECOPS_ALWAYS_INLINE Raw x86_emulated_small_float_binary(
-    Raw a, Raw b, Operation operation) {
-  static_assert(
-      std::same_as<T, float16_t> || std::same_as<T, bfloat16_t>);
-  constexpr std::size_t lanes = sizeof(Raw) / sizeof(T);
-  alignas(64) T a_lanes[lanes];
-  alignas(64) T b_lanes[lanes];
-  alignas(64) T result_lanes[lanes];
-  std::memcpy(a_lanes, &a, sizeof(Raw));
-  std::memcpy(b_lanes, &b, sizeof(Raw));
-  for (std::size_t lane = 0; lane < lanes; ++lane) {
-    result_lanes[lane] = operation(a_lanes[lane], b_lanes[lane]);
-  }
-  Raw result;
-  std::memcpy(&result, result_lanes, sizeof(Raw));
-  return result;
-}
-
-template <Element T, typename Raw, typename Operation>
-VECOPS_ALWAYS_INLINE Raw x86_emulated_small_float_unary(
-    Raw value, Operation operation) {
-  static_assert(
-      std::same_as<T, float16_t> || std::same_as<T, bfloat16_t>);
-  constexpr std::size_t lanes = sizeof(Raw) / sizeof(T);
-  alignas(64) T input[lanes];
-  alignas(64) T result_lanes[lanes];
-  std::memcpy(input, &value, sizeof(Raw));
-  for (std::size_t lane = 0; lane < lanes; ++lane)
-    result_lanes[lane] = operation(input[lane]);
-  Raw result;
-  std::memcpy(&result, result_lanes, sizeof(Raw));
-  return result;
-}
 
 #if defined(HAS_AVX512_BF16)
 VECOPS_ALWAYS_INLINE __m128bh x86_cast_si128_to_bfloat16(__m128i value) {
@@ -282,34 +245,78 @@ VECOPS_ALWAYS_INLINE __m512i x86_float32_pair_to_float16(
 #endif
 
 #if !defined(HAS_F16C)
+// Vector lift of the PyTorch-derived bit algorithms in util/Float16.h. Keeping
+// the same constants and operation order preserves its subnormal, RNE, and
+// canonical-NaN behavior on x86 targets that have no F16C conversion.
+VECOPS_ALWAYS_INLINE __m128 x86_float16_to_float32_quad(
+    __m128i value) {
+  const auto w = _mm_slli_epi32(value, 16);
+  const auto sign = _mm_and_si128(w, _mm_set1_epi32(0x80000000u));
+  const auto two_w = _mm_add_epi32(w, w);
+
+  const auto normalized_bits = _mm_add_epi32(
+      _mm_srli_epi32(two_w, 4), _mm_set1_epi32(0x70000000));
+  const auto normalized = _mm_mul_ps(
+      _mm_castsi128_ps(normalized_bits),
+      _mm_castsi128_ps(_mm_set1_epi32(0x07800000)));
+
+  const auto denormal_bits = _mm_or_si128(
+      _mm_srli_epi32(two_w, 17), _mm_set1_epi32(0x3f000000));
+  const auto denormal = _mm_sub_ps(
+      _mm_castsi128_ps(denormal_bits), _mm_set1_ps(0.5f));
+  const auto denormal_mask = _mm_cmpeq_epi32(
+      _mm_and_si128(two_w, _mm_set1_epi32(0xf8000000u)),
+      _mm_setzero_si128());
+  const auto magnitude = _mm_blendv_ps(
+      normalized, denormal, _mm_castsi128_ps(denormal_mask));
+  return _mm_castsi128_ps(_mm_or_si128(
+      _mm_castps_si128(magnitude), sign));
+}
+
+VECOPS_ALWAYS_INLINE __m128i x86_float32_quad_to_float16(
+    __m128 value) {
+  const auto bits = _mm_castps_si128(value);
+  const auto absolute_bits =
+      _mm_and_si128(bits, _mm_set1_epi32(0x7fffffff));
+  auto base = _mm_and_ps(
+      value, _mm_castsi128_ps(_mm_set1_epi32(0x7fffffff)));
+  base = _mm_mul_ps(
+      base, _mm_castsi128_ps(_mm_set1_epi32(0x77800000)));
+  base = _mm_mul_ps(
+      base, _mm_castsi128_ps(_mm_set1_epi32(0x08800000)));
+
+  const auto shl1 = _mm_add_epi32(bits, bits);
+  auto bias = _mm_and_si128(shl1, _mm_set1_epi32(0xff000000u));
+  bias = _mm_max_epu32(bias, _mm_set1_epi32(0x71000000));
+  const auto bias_float = _mm_castsi128_ps(_mm_add_epi32(
+      _mm_srli_epi32(bias, 1), _mm_set1_epi32(0x07800000)));
+  const auto rounded_bits = _mm_castps_si128(_mm_add_ps(bias_float, base));
+  const auto nonsign = _mm_add_epi32(
+      _mm_and_si128(_mm_srli_epi32(rounded_bits, 13),
+                    _mm_set1_epi32(0x00007c00)),
+      _mm_and_si128(rounded_bits, _mm_set1_epi32(0x00000fff)));
+  const auto nan = _mm_cmpgt_epi32(
+      absolute_bits, _mm_set1_epi32(0x7f800000));
+  const auto magnitude = _mm_blendv_epi8(
+      nonsign, _mm_set1_epi32(0x00007e00), nan);
+  return _mm_or_si128(
+      _mm_srli_epi32(_mm_and_si128(
+          bits, _mm_set1_epi32(0x80000000u)), 16),
+      magnitude);
+}
+
 VECOPS_ALWAYS_INLINE void x86_float16_to_float32_pair(
     __m128i value, __m128& low, __m128& high) {
-  alignas(16) float16_t input[8];
-  alignas(16) float low_values[4];
-  alignas(16) float high_values[4];
-  std::memcpy(input, &value, sizeof(value));
-  for (int lane = 0; lane < 4; ++lane) {
-    low_values[lane] = static_cast<float>(input[lane]);
-    high_values[lane] = static_cast<float>(input[lane + 4]);
-  }
-  std::memcpy(&low, low_values, sizeof(low));
-  std::memcpy(&high, high_values, sizeof(high));
+  low = x86_float16_to_float32_quad(_mm_cvtepu16_epi32(value));
+  high = x86_float16_to_float32_quad(
+      _mm_cvtepu16_epi32(_mm_srli_si128(value, 8)));
 }
 
 VECOPS_ALWAYS_INLINE __m128i x86_float32_pair_to_float16(
     __m128 low, __m128 high) {
-  alignas(16) float low_values[4];
-  alignas(16) float high_values[4];
-  alignas(16) float16_t output[8];
-  std::memcpy(low_values, &low, sizeof(low));
-  std::memcpy(high_values, &high, sizeof(high));
-  for (int lane = 0; lane < 4; ++lane) {
-    output[lane] = float16_t(low_values[lane]);
-    output[lane + 4] = float16_t(high_values[lane]);
-  }
-  __m128i result;
-  std::memcpy(&result, output, sizeof(result));
-  return result;
+  return _mm_packus_epi32(
+      x86_float32_quad_to_float16(low),
+      x86_float32_quad_to_float16(high));
 }
 #endif
 
@@ -593,14 +600,7 @@ struct X86ArithmeticWordImpl {
 #elif defined(HAS_F16C)
         return x86_small_float_binary_simd<T, Op>(a.value, b.value);
 #else
-        return x86_emulated_small_float_binary<T>(
-            a.value, b.value, [](T x, T y) {
-              if constexpr (std::same_as<Op, AddOp>) return x + y;
-              else if constexpr (std::same_as<Op, SubOp>) return x - y;
-              else if constexpr (std::same_as<Op, MulOp>) return x * y;
-              else if constexpr (std::same_as<Op, DivOp>) return x / y;
-              else static_assert(dispatch_dependent_false<Op>, "unsupported x86 arithmetic operation");
-            });
+        return x86_small_float_binary_simd<T, Op>(a.value, b.value);
 #endif
       } else if constexpr (std::same_as<T, float32_t>) {
 #define VECOPS_VEC_X86_FLOAT_BINARY(Width, Suffix)                       \
@@ -1168,29 +1168,6 @@ struct NativeWordImpl<X86Backend, CopySignOp> {
 /* **************************************************************************** */
 
 template <Element T, typename Raw, typename Op>
-VECOPS_ALWAYS_INLINE Raw x86_emulated_extrema(Raw a, Raw b, Op) {
-  constexpr std::size_t lanes = sizeof(Raw) / sizeof(T);
-  alignas(64) T a_lanes[lanes];
-  alignas(64) T b_lanes[lanes];
-  alignas(64) T result_lanes[lanes];
-  std::memcpy(a_lanes, &a, sizeof(Raw));
-  std::memcpy(b_lanes, &b, sizeof(Raw));
-  for (std::size_t lane = 0; lane < lanes; ++lane) {
-    if constexpr (std::same_as<Op, MinOp>)
-      result_lanes[lane] = a_lanes[lane] < b_lanes[lane]
-          ? a_lanes[lane] : b_lanes[lane];
-    else if constexpr (std::same_as<Op, MaxOp>)
-      result_lanes[lane] = a_lanes[lane] > b_lanes[lane]
-          ? a_lanes[lane] : b_lanes[lane];
-    else
-      static_assert(dispatch_dependent_false<Op>);
-  }
-  Raw result;
-  std::memcpy(&result, result_lanes, sizeof(Raw));
-  return result;
-}
-
-template <Element T, typename Raw, typename Op>
 VECOPS_ALWAYS_INLINE Raw x86_extrema_epi64_fallback(Raw a, Raw b, Op) {
   static_assert(std::same_as<T, int64_t> || std::same_as<T, uint64_t>);
   if constexpr (sizeof(Raw) == 16) {
@@ -1283,7 +1260,7 @@ struct X86ExtremaWordImpl {
 #elif defined(HAS_F16C)
         return x86_small_float_binary_simd<T, Op>(a.value, b.value);
 #else
-        return x86_emulated_extrema<T>(a.value, b.value, Op{});
+        return x86_small_float_binary_simd<T, Op>(a.value, b.value);
 #endif
       } else if constexpr (std::same_as<T, float32_t>) {
         if constexpr (sizeof(Raw) == 16) VECOPS_VEC_X86_EXTREMA(, ps);
@@ -1814,14 +1791,11 @@ struct X86FloatingUnaryWordImpl {
         }
 #endif
 #else
-        return x86_emulated_small_float_unary<T>(
-            value.value, [](T input) {
-              const auto widened = static_cast<float>(input);
-              if constexpr (std::same_as<Op, SqrtOp>)
-                return static_cast<T>(std::sqrt(widened));
-              else
-                static_assert(dispatch_dependent_false<Op>);
-            });
+        __m128 low;
+        __m128 high;
+        x86_float16_to_float32_pair(value.value, low, high);
+        return x86_float32_pair_to_float16(
+            compute_float32(low), compute_float32(high));
 #endif
       } else if constexpr (std::same_as<T, float32_t>) {
         return compute_float32(value.value);

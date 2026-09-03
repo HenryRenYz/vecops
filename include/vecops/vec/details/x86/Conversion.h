@@ -312,6 +312,55 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_scalar_word(
 }
 
 template <VectorTag ToTag, VectorTag FromTag>
+VECOPS_ALWAYS_INLINE Vec<ToTag> x86_narrow_integer_wrap_step(
+    ToTag, FromTag, Vec<FromTag> value) {
+  using To = ElementOf<ToTag>;
+  using From = ElementOf<FromTag>;
+  using ToRaw = typename RepresentationTraits<X86Backend, ToTag>::RawVec;
+  using FromRaw = typename RepresentationTraits<X86Backend, FromTag>::RawVec;
+  static_assert(std::integral<To> && std::integral<From>);
+  static_assert(sizeof(From) == 2 * sizeof(To));
+
+  const auto narrow128 = [](__m128i input) {
+    if constexpr (sizeof(From) == 2) {
+      return _mm_packus_epi16(
+          _mm_and_si128(input, _mm_set1_epi16(0x00ff)),
+          _mm_setzero_si128());
+    } else if constexpr (sizeof(From) == 4) {
+      return _mm_packus_epi32(
+          _mm_and_si128(input, _mm_set1_epi32(0x0000ffff)),
+          _mm_setzero_si128());
+    } else {
+      return _mm_shuffle_epi32(input, _MM_SHUFFLE(0, 0, 2, 0));
+    }
+  };
+
+  if constexpr (sizeof(FromRaw) == 16) {
+    static_assert(sizeof(ToRaw) == 16);
+    return Vec<ToTag>{narrow128(value.value)};
+  }
+#if VEC_WIDTH >= 256
+  else if constexpr (sizeof(FromRaw) == 32) {
+    static_assert(sizeof(ToRaw) == 16);
+    const auto lower = narrow128(_mm256_castsi256_si128(value.value));
+    const auto upper = narrow128(_mm256_extracti128_si256(value.value, 1));
+    return Vec<ToTag>{_mm_unpacklo_epi64(lower, upper)};
+  }
+#endif
+#if VEC_WIDTH >= 512
+  else {
+    static_assert(sizeof(FromRaw) == 64 && sizeof(ToRaw) == 32);
+    if constexpr (sizeof(From) == 2)
+      return Vec<ToTag>{_mm512_cvtepi16_epi8(value.value)};
+    else if constexpr (sizeof(From) == 4)
+      return Vec<ToTag>{_mm512_cvtepi32_epi16(value.value)};
+    else
+      return Vec<ToTag>{_mm512_cvtepi64_epi32(value.value)};
+  }
+#endif
+}
+
+template <VectorTag ToTag, VectorTag FromTag>
 VECOPS_ALWAYS_INLINE Vec<ToTag> x86_narrow_integer_vec_native(
     ToTag to, FromTag from, Vec<FromTag> value) {
   using To = ElementOf<ToTag>;
@@ -331,9 +380,34 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_narrow_integer_vec_native(
         to, MidTag{},
         x86_narrow_integer_vec_native(MidTag{}, from, value));
   } else if constexpr (sizeof(From) == 8) {
-    // SSE/AVX have no saturating 64-to-32 pack; the legacy backend also uses
-    // a scalar conversion for this base case when AVX-512 narrowing is absent.
-    return x86_convert_vec_scalar_word(to, from, value);
+    // Clamp in the source width, then use a truncating one-step pack. This is
+    // the same policy used by conversion stores, but keeps the result in a
+    // register for ordinary ConvertOp calls as well.
+#if defined(CPU_CAPABILITY_AVX512)
+    if constexpr (std::is_signed_v<From> && std::is_signed_v<To>) {
+      if constexpr (sizeof(typename FromTraits::RawVec) == 16) {
+        return Vec<ToTag>{_mm_cvtsepi64_epi32(value.value)};
+      } else if constexpr (sizeof(typename FromTraits::RawVec) == 32) {
+        return Vec<ToTag>{_mm256_cvtsepi64_epi32(value.value)};
+      } else {
+        return Vec<ToTag>{_mm512_cvtsepi64_epi32(value.value)};
+      }
+    }
+#endif
+    auto limited = value;
+    if constexpr (std::is_signed_v<From>) {
+      const auto low = fill(from, static_cast<From>(
+          std::is_signed_v<To> ? std::numeric_limits<To>::min() : To{0}));
+      const auto high = fill(
+          from, static_cast<From>(std::numeric_limits<To>::max()));
+      limited = ::vecops::vec::min(
+          from, ::vecops::vec::max(from, limited, low), high);
+    } else {
+      const auto high = fill(
+          from, static_cast<From>(std::numeric_limits<To>::max()));
+      limited = ::vecops::vec::min(from, limited, high);
+    }
+    return x86_narrow_integer_wrap_step(to, from, limited);
   } else if constexpr (
       FromTraits::logical_lanes > 16 / static_cast<nint_t>(sizeof(From))) {
     using ToHalf = Half<ToTag>;
@@ -389,10 +463,21 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_wrap_native(
       std::integral<ElementOf<ToTag>> && std::integral<ElementOf<FromTag>> &&
       sizeof(ElementOf<ToTag>) < sizeof(ElementOf<FromTag>));
   if constexpr (ToTraits::word_count == 1 && FromTraits::word_count == 1) {
-    // The x86 pack instructions saturate, so modulo narrowing cannot use
-    // them without first rearranging low bytes. Keep this base case explicit
-    // and scalar-correct; wider logical vectors still split in registers.
-    return x86_convert_vec_scalar_word<true>(to, from, value);
+    if constexpr (sizeof(ElementOf<FromTag>) >
+                  2 * sizeof(ElementOf<ToTag>)) {
+      using Mid = std::conditional_t<
+          std::is_signed_v<ElementOf<ToTag>>,
+          std::conditional_t<sizeof(ElementOf<FromTag>) == 8,
+                             int32_t, int16_t>,
+          std::conditional_t<sizeof(ElementOf<FromTag>) == 8,
+                             uint32_t, uint16_t>>;
+      using MidTag = Rebind<Mid, ToTag>;
+      return x86_convert_vec_wrap_native(
+          to, MidTag{}, x86_convert_vec_wrap_native(
+              MidTag{}, from, value));
+    } else {
+      return x86_narrow_integer_wrap_step(to, from, value);
+    }
   } else {
     using ToHalf = Half<ToTag>;
     using FromHalf = Half<FromTag>;
@@ -521,7 +606,41 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_single_word(
     }
 #undef VECOPS_VEC_X86_I64_TO_PD
 #else
-    return x86_convert_vec_scalar_word(to, from, value);
+    const auto convert_u32_pair = [](__m128i lanes) {
+      const auto signed_value = _mm_cvtepi32_pd(lanes);
+      const auto negative32 = _mm_srai_epi32(lanes, 31);
+      const auto negative64 = _mm_unpacklo_epi32(negative32, negative32);
+      return _mm_add_pd(
+          signed_value,
+          _mm_and_pd(
+              _mm_castsi128_pd(negative64),
+              _mm_set1_pd(4294967296.0)));
+    };
+    const auto convert_i64_pair = [&](const __m128i lanes) {
+      const auto low32 = _mm_shuffle_epi32(
+          lanes, _MM_SHUFFLE(2, 0, 2, 0));
+      const auto high32 = _mm_shuffle_epi32(
+          lanes, _MM_SHUFFLE(3, 1, 3, 1));
+      const auto low = convert_u32_pair(low32);
+      const auto high = [&] {
+        if constexpr (std::same_as<From, int64_t>)
+          return _mm_cvtepi32_pd(high32);
+        else
+          return convert_u32_pair(high32);
+      }();
+      return _mm_add_pd(
+          _mm_mul_pd(high, _mm_set1_pd(4294967296.0)), low);
+    };
+    if constexpr (sizeof(ToRaw) == 16) {
+      return Vec<ToTag>{convert_i64_pair(value.value)};
+    }
+#if VEC_WIDTH >= 256
+    else {
+      return Vec<ToTag>{_mm256_set_m128d(
+          convert_i64_pair(_mm256_extractf128_si256(value.value, 1)),
+          convert_i64_pair(_mm256_castsi256_si128(value.value)))};
+    }
+#endif
 #endif
   } else if constexpr (
       (std::same_as<To, int64_t> || std::same_as<To, uint64_t>) &&
@@ -601,7 +720,8 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_single_word(
     else return Vec<ToTag>{_mm512_cvtps_ph(value.value, rounding)};
 #endif
 #else
-    return x86_convert_vec_scalar_word(to, from, value);
+    return Vec<ToTag>{x86_float32_pair_to_float16(
+        value.value, _mm_setzero_ps())};
 #endif
   } else if constexpr (std::same_as<To, float32_t> &&
                        std::same_as<From, float16_t>) {
@@ -616,7 +736,10 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_single_word(
     else return Vec<ToTag>{_mm512_cvtph_ps(value.value)};
 #endif
 #else
-    return x86_convert_vec_scalar_word(to, from, value);
+    __m128 low;
+    __m128 high;
+    x86_float16_to_float32_pair(value.value, low, high);
+    return Vec<ToTag>{low};
 #endif
   } else if constexpr (std::same_as<To, bfloat16_t> &&
                        std::same_as<From, float32_t>) {
@@ -721,6 +844,20 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_single_word(
               value.value, _mm512_set1_epi32(std::numeric_limits<To>::max()))};
       }
 #endif
+    }
+  } else if constexpr (
+      std::integral<To> && std::integral<From> &&
+      sizeof(To) == sizeof(From) && sizeof(To) == 8 &&
+      std::is_signed_v<To> != std::is_signed_v<From>) {
+    if constexpr (std::is_unsigned_v<To>) {
+      const auto limited = ::vecops::vec::max(
+          from, value, fill(from, From{0}));
+      return Vec<ToTag>{limited.value};
+    } else {
+      const auto limited = ::vecops::vec::min(
+          from, value,
+          fill(from, static_cast<From>(std::numeric_limits<To>::max())));
+      return Vec<ToTag>{limited.value};
     }
   } else if constexpr (
       std::integral<To> && std::integral<From> && sizeof(To) < sizeof(From)) {

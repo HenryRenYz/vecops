@@ -2,7 +2,7 @@
 // Copyright (c) vecops contributors.
 //
 
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 
 #include <gtest/gtest.h>
 

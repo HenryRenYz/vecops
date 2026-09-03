@@ -15,7 +15,7 @@
 #include "vecops/Meta.h"
 
 /**
- * @file Tile2D.h
+ * @file include/vecops/kernel/Tile2D.h
  * @brief Compile-time kernel selection and two-dimensional tiled traversal.
  *
  * `tile2d` covers `[0, m) x [0, n)` exactly once.  A kernel family has a
@@ -34,17 +34,97 @@
  * integers.  Raw integers are normalized to `meta::Any`.  When metadata proves
  * an extent divisible by the selected kernel capacity, the corresponding tail
  * path is removed with `if constexpr`.
+ *
+ * ## Key components
+ *
+ * | Component                | Purpose                                          |
+ * |--------------------------|--------------------------------------------------|
+ * | Tile2DMaskMode           | Per-axis mask promise/capability tag             |
+ * | tile2d_policy::*         | Traversal-region strategies                      |
+ * | Tile2DKernelFamily       | Manual family descriptor: shape + four powers    |
+ * | Tile2DKernelCatalog      | Explicit family list (must be downward-closed)   |
+ * | Tile2DGeneratedCatalog   | Families enumerated from a Provider + bounds     |
+ * | Tile2DSearchSpace        | Enumeration bounds for generated catalogs        |
+ * | Tile2DKernelCase         | Case tag passed to the callback                  |
+ * | tile2d / tile2d_generate | Public traversal entry points                    |
+ *
+ * ## Usage overview
+ *
+ * @code
+ * #include "vecops/kernel/Tile2D.h"
+ * using namespace vecops::kernel::loop;
+ *
+ * // Downward-closed set: (2,2) requires (1,2), (2,1); those require (1,1).
+ * using Catalog = Tile2DKernelCatalog<
+ *     Tile2DKernelFamily<2, 2, 4>,   // 2x2 unmasked bulk
+ *     Tile2DKernelFamily<1, 2, 3>,   // bottom edge: 1 x 2
+ *     Tile2DKernelFamily<2, 1, 3>,   // right edge: 2 x 1
+ *     Tile2DKernelFamily<1, 1, 1>>;  // doubly-masked corner
+ *
+ * tile2d(cint<128>, cint<128>, 16, 16, Catalog{},
+ *        [](auto kernel_case, nint_t m, nint_t n,
+ *           nint_t active_m, nint_t active_n) {
+ *          using Case = decltype(kernel_case);
+ *          if constexpr (Case::m_mask == Tile2DMaskMode::unmasked &&
+ *                        Case::n_mask == Tile2DMaskMode::unmasked) {
+ *            // fast unmasked micro-kernel covering active_m x active_n
+ *          } else {
+ *            // masked path; active extents may still equal full capacity
+ *          }
+ *        });
+ * @endcode
+ *
+ * ## Pitfalls
+ *
+ * - The catalog must be a complete downward-closed set containing the 1x1
+ *   family: every family (a, b) with a > 1 requires (a-1, b) to be listed,
+ *   and every family with b > 1 requires (a, b-1). `tile2d` enforces this
+ *   with a static_assert before traversing.
+ * - Family selection maximizes `power / denominator` ratios (cross
+ *   multiplication), not raw `power` values; an edge family competes against
+ *   the bulk family's footprint, not in isolation.
+ * - Extents must be non-negative and base tile sizes positive; singleton
+ *   violations are compile-time errors and runtime values are checked with
+ *   `VECOPS_ASSERT`.
+ * - Kernel capacity is `a * tm` by `b * tn`; `tm`/`tn` must not overflow
+ *   `nint_t` when multiplied by the largest family extents (asserted).
+ * - A masked invocation may still carry a full active extent; only the
+ *   unmasked tag promises full capacity.
  */
 
 namespace vecops::kernel::loop {
 
 using namespace ::vecops::meta;
 
+/**
+ * @brief Mask variant of one tile axis: promise versus capability.
+ *
+ * `unmasked` is a strict promise that the active extent on this axis equals
+ * the kernel capacity, so the callback must not mask. `masked` is a
+ * capability: the callback must honor the active extent, which may still be
+ * equal to the full capacity.
+ *
+ * @note A family participates in selection only when all four
+ *       `(MMask, NMask)` combinations report a non-negative power.
+ */
 enum class Tile2DMaskMode {
   unmasked,
   masked,
 };
 
+/**
+ * @brief How a generated catalog may pre-commit the exact-cover bulk grid.
+ *
+ * `runtime` (default) keeps the exact-cover block loop runtime-driven.
+ * `exact` and `unmasked` take effect only when metadata proves both extents
+ * divide the bulk capacity exactly: `exact` then traverses a compile-time
+ * grid whose invocations carry `Tile2DExactKernelCase` (doubly masked,
+ * `exact_blocks = true`), while `unmasked` emits plain unmasked
+ * `Tile2DKernelCase` invocations over the same grid.
+ *
+ * @note The option is probed from the Provider of a `Tile2DGeneratedCatalog`
+ *       and defaults to `runtime` when the Provider does not define it.
+ */
 enum class Tile2DExactGridMode {
   runtime,
   exact,
@@ -86,6 +166,13 @@ struct ExactCover {};
  * Powers are relative positive throughput scores.  A custom family may expose
  * the same `a`, `b`, and `power<MM, MN>()` interface and additionally attach
  * the actual kernel type or other compile-time metadata.
+ *
+ * @tparam A        Family height in base tiles (positive).
+ * @tparam B        Family width in base tiles (positive).
+ * @tparam PowerUU  Throughput score for the unmasked/unmasked variant.
+ * @tparam PowerUM  Score for unmasked rows with masked columns.
+ * @tparam PowerMU  Score for masked rows with unmasked columns.
+ * @tparam PowerMM  Score for the doubly-masked variant.
  */
 template <
     int A, int B,
@@ -113,9 +200,28 @@ struct Tile2DKernelFamily {
   }
 };
 
+/**
+ * @brief Explicit list of kernel families.
+ *
+ * The set must be downward-closed and contain the 1x1 family: family (a, b)
+ * with a > 1 requires (a-1, b) to be listed, and b > 1 requires (a, b-1).
+ * `tile2d` verifies this with a static_assert before traversing, because the
+ * edge and corner selectors shrink any family by one tile in either axis.
+ */
 template <typename... Families>
 struct Tile2DKernelCatalog {};
 
+/**
+ * @brief Enumeration bounds for a Tile2DGeneratedCatalog.
+ *
+ * The generated catalog enumerates every shape (a, b) with
+ * 1 <= a <= max_a, 1 <= b <= max_b, and a * b <= max_tiles; the Provider's
+ * power() decides which of those shapes actually exist.
+ *
+ * @tparam MaxA      Largest family height in base tiles.
+ * @tparam MaxB      Largest family width in base tiles.
+ * @tparam MaxTiles  Cap on base tiles per family (defaults to MaxA * MaxB).
+ */
 template <int MaxA, int MaxB, int MaxTiles = MaxA * MaxB>
 struct Tile2DSearchSpace {
   static_assert(MaxA > 0 && MaxB > 0 && MaxTiles > 0,
@@ -126,6 +232,8 @@ struct Tile2DSearchSpace {
 };
 
 /**
+ * @brief Catalog whose families are enumerated from a Provider.
+ *
  * A generated catalog queries:
  *
  * @code
@@ -134,10 +242,27 @@ struct Tile2DSearchSpace {
  *
  * A negative result means the case does not exist.  A shape participates only
  * when all four mask variants exist.
+ *
+ * @tparam Provider     Static power source as described above; may also
+ *                      define the optional options probed by CatalogOptions
+ *                      (exact_grid_mode, exact_meta_block_limit,
+ *                      four_regions_exact_constraints).
+ * @tparam SearchSpace  Tile2DSearchSpace bounding the enumerated shapes.
  */
 template <typename Provider, typename SearchSpace>
 struct Tile2DGeneratedCatalog {};
 
+/**
+ * @brief Case tag passed as the first callback argument of `tile2d`.
+ *
+ * It reports which family and mask variant was selected for the current
+ * invocation: the kernel capacity is `a * tm` by `b * tn` elements, and
+ * `m_mask`/`n_mask` say whether the `active_m`/`active_n` extents must be
+ * honored by masking. `exact_blocks` is false here: offsets are arbitrary
+ * element positions produced by the region policies.
+ *
+ * @see Tile2DExactKernelCase
+ */
 template <typename Family, Tile2DMaskMode MMask, Tile2DMaskMode NMask>
 struct Tile2DKernelCase {
   using family_type = Family;
@@ -148,6 +273,15 @@ struct Tile2DKernelCase {
   static constexpr bool exact_blocks = false;
 };
 
+/**
+ * @brief Case tag for invocations from an exact-logical-block traversal.
+ *
+ * The ExactCover policy (and exact-grid mode) move over whole base-tile
+ * blocks, so the offset passed to the callback is always a multiple of the
+ * base tile size. The case is always doubly masked — an edge block may still
+ * be partially active — and family selection guarantees that no emitted
+ * family contains a completely inactive base tile.
+ */
 template <typename Family>
 struct Tile2DExactKernelCase
     : Tile2DKernelCase<
@@ -157,6 +291,11 @@ struct Tile2DExactKernelCase
 
 namespace tile2d_details {
 
+// True when an extent provably needs no tail loop at the given block step.
+// A zero extent is trivially tail-free; a singleton extent needs the step to
+// divide it; a range extent with a singleton step needs the extent type to
+// prove alignment (Dynamic::aligns). Mixed runtime/runtime combinations are
+// conservatively false.
 template <meta::ValueType Extent, meta::ValueType Step>
 inline constexpr bool has_no_tail_v = [] {
   using E = std::remove_cvref_t<Extent>;
@@ -178,6 +317,8 @@ inline constexpr bool has_no_tail_v = [] {
   }
 }();
 
+// The block count is a compile-time constant only when both extent and tile
+// are singletons; fixed_block_count_n is their ceil division.
 template <meta::ValueType Extent, meta::ValueType Tile>
 inline constexpr bool fixed_block_count_v =
     meta::is_singleton_v<Extent> && meta::is_singleton_v<Tile> &&
@@ -189,6 +330,9 @@ inline constexpr nint_t fixed_block_count_n =
     meta::singleton_value_v<Extent> / meta::singleton_value_v<Tile> +
     (meta::singleton_value_v<Extent> % meta::singleton_value_v<Tile> != 0);
 
+// Provable from metadata alone: an extent upper bound no larger than a tile
+// lower bound means at most one (possibly partial) block for any runtime
+// values, so the traversal needs no block loop.
 template <meta::ValueType Extent, meta::ValueType Tile>
 inline constexpr bool at_most_one_block_v = [] {
   using E = std::remove_cvref_t<Extent>;
@@ -202,6 +346,9 @@ inline constexpr bool at_most_one_block_v = [] {
   }
 }();
 
+// Upper bound on the number of blocks provable from extent/tile metadata.
+// max_block_count_n falls back to numeric_limits max to encode "no bound
+// known"; callers must gate on has_max_block_count_v before comparing.
 template <meta::ValueType Extent, meta::ValueType Tile>
 inline constexpr bool has_max_block_count_v = [] {
   using E = std::remove_cvref_t<Extent>;
@@ -223,6 +370,8 @@ inline constexpr nint_t max_block_count_n = [] {
   }
 }();
 
+// Kernel capacity in elements: family extent (in base tiles) times base tile
+// size, tracked as a meta value so divisibility stays a compile-time fact.
 template <int Factor, meta::ValueType Tile>
 VECOPS_ALWAYS_INLINE constexpr auto capacity(Tile tile) {
   return tile * cint<Factor>;
@@ -242,6 +391,12 @@ consteval nint_t effective_lower_bound() {
   }
 }
 
+// Upper bound on `extent % step`, or a negative value when no bound can be
+// proven. Zero means the division is exact, so no remainder exists at all.
+// When both sides are singletons the remainder is computed exactly;
+// otherwise the bound is the tighter of the extent upper bound and
+// `step_upper - 1` (the largest remainder any positive step can leave),
+// with missing bounds ignored.
 template <meta::ValueType Extent, meta::ValueType Step>
 consteval nint_t remainder_upper_bound() {
   using E = std::remove_cvref_t<Extent>;
@@ -266,6 +421,11 @@ consteval nint_t remainder_upper_bound() {
   }
 }
 
+// Can a candidate family cover the main family's remainder region? Yes when
+// the remainder is provably empty (0), when both capacities scale with the
+// same positive runtime tile value (the candidate then never falls short of
+// the main capacity for a factor >= the main factor), or when the candidate's
+// guaranteed capacity lower bound reaches the remainder upper bound.
 template <meta::ValueType CandidateTile, int CandidateFactor,
           meta::ValueType MainTile, int MainFactor,
           meta::ValueType Extent>
@@ -289,6 +449,8 @@ consteval bool covers_main_remainder() {
   }
 }
 
+// A family participates in selection only with a positive shape and all four
+// mask variants present (non-negative power).
 template <typename Family>
 consteval bool complete_family() {
   return Family::a > 0 && Family::b > 0 &&
@@ -326,6 +488,8 @@ consteval void for_each_family(Tile2DKernelCatalog<Families...>, Fn& fn) {
   (fn.template operator()<Families>(), ...);
 }
 
+// Enumerate the search rectangle of a generated catalog, skipping shapes
+// over the tile budget.
 template <typename Provider, typename Search, typename Fn>
 consteval void for_each_family(
     Tile2DGeneratedCatalog<Provider, Search>, Fn& fn) {
@@ -391,6 +555,11 @@ consteval int max_family_b_for_a() {
       []<typename Family>() consteval { return Family::a == A; });
 }
 
+// Widest family usable as an exact bulk row. Exact rows emit whole rows of
+// one family, so a row height is preferred only when some family with b >= 2
+// exists at that height (b == 1 would tile the row one base tile at a time).
+// If no multi-column family exists at all, fall back to the tallest family
+// so the grid degenerates gracefully instead of failing.
 template <typename Catalog>
 consteval int max_exact_row_a() {
   constexpr int result = max_family_extent<TileAxis::m, Catalog>(
@@ -398,6 +567,9 @@ consteval int max_exact_row_a() {
   return result == 0 ? max_family_a<Catalog>() : result;
 }
 
+// Options read from the catalog. A plain list catalog keeps the defaults; a
+// generated catalog forwards the Provider's optional static members when
+// present (probed with `requires`).
 template <typename Catalog>
 struct CatalogOptions {
   static constexpr Tile2DExactGridMode exact_grid_mode =
@@ -439,6 +611,9 @@ template <typename Catalog>
 inline constexpr auto four_regions_exact_constraints_v =
     CatalogOptions<Catalog>::four_regions_exact_constraints;
 
+// Catalog invariant: the family set is downward-closed (every (a, b) has
+// (a-1, b) and (a, b-1) when applicable) and contains (1,1). Edge and corner
+// selection relies on shrinking any family by one tile in either axis.
 template <typename Catalog>
 consteval bool valid_catalog() {
   bool valid = true;
@@ -458,6 +633,7 @@ consteval bool valid_catalog() {
   return valid && has_any && has_family<Catalog, 1, 1>();
 }
 
+// Selection result; power < 0 means "no candidate".
 struct Choice {
   int a = 0;
   int b = 0;
@@ -465,6 +641,8 @@ struct Choice {
   int denominator = 1;
 };
 
+// Compare power/denominator ratios with cross multiplication instead of
+// division; wide intermediates keep plausible scores from overflowing.
 constexpr bool better_choice(
     int power, int denominator, const Choice& best) {
   if (power < 0 || denominator <= 0) return false;
@@ -474,6 +652,8 @@ constexpr bool better_choice(
          static_cast<Wide>(best.power) * denominator;
 }
 
+// Pick the family with the best power-per-denominator ratio among complete
+// families satisfying the predicate.
 template <Tile2DMaskMode MMask, Tile2DMaskMode NMask,
           typename Catalog, typename Predicate, typename Denominator>
 consteval Choice select_family(Predicate predicate, Denominator denominator) {
@@ -491,6 +671,9 @@ consteval Choice select_family(Predicate predicate, Denominator denominator) {
   return best;
 }
 
+// Linear search through an explicit catalog. The final `return Head` arm is
+// unreachable — the static_assert rejects a missing family before it — and
+// exists only so the function returns a value on every path.
 template <int A, int B, typename Head, typename... Tail>
 consteval auto find_explicit_family(
     Tile2DKernelCatalog<Head, Tail...>) {
@@ -523,6 +706,9 @@ struct FamilyFor<Tile2DGeneratedCatalog<Provider, Search>, A, B> {
 template <typename Catalog, int A, int B>
 using family_for_t = typename FamilyFor<Catalog, A, B>::type;
 
+// Best unmasked/unmasked family (any shape) — the bulk tile — and best
+// doubly-masked family (any shape), used by the Uniform and BulkTail
+// policies as their single fallback family.
 template <typename Catalog>
 consteval Choice select_bulk() {
   return select_family<
@@ -543,6 +729,10 @@ template <TileAxis Axis>
 inline constexpr TileAxis other_axis_v =
     Axis == TileAxis::m ? TileAxis::n : TileAxis::m;
 
+// Row-major edge family: it must exactly match the bulk width on the other
+// axis so tile emission stays column-contiguous along the bulk rows, and its
+// extent along the masked axis must provably cover the bulk remainder.
+// Maximizes power per masked-axis element (denominator = that extent).
 template <TileAxis Axis, typename Catalog, typename Bulk,
           meta::ValueType Extent, meta::ValueType Tile>
 consteval Choice select_natural_edge() {
@@ -564,6 +754,8 @@ consteval Choice select_natural_edge() {
       });
 }
 
+// Corner family: must provably cover both bulk remainders; maximizes power
+// per element (denominator = a * b).
 template <typename Catalog, typename Bulk,
           meta::ValueType ExtentM, meta::ValueType ExtentN,
           meta::ValueType TileM, meta::ValueType TileN>
@@ -579,6 +771,10 @@ consteval Choice select_corner() {
       []<typename Family>() consteval { return Family::a * Family::b; });
 }
 
+// Four-regions edge family: unlike the row-major variant, its width on the
+// other axis only has to divide the bulk width (the region is emitted as one
+// band along the whole bulk extent), and its extent along the masked axis
+// must still provably cover the bulk remainder.
 template <TileAxis Axis, typename Catalog, typename Bulk,
           meta::ValueType Extent, meta::ValueType Tile>
 consteval Choice select_region_edge() {
@@ -608,6 +804,8 @@ VECOPS_ALWAYS_INLINE void invoke(
      m, n, active_m, active_n);
 }
 
+// Unmasked grid over [m_begin, m_end) x [n_begin, n_end); the caller
+// guarantees that both ranges divide the tile capacity exactly.
 template <typename Family, typename Fn>
 VECOPS_ALWAYS_INLINE void emit_full_grid(
     nint_t m_begin, nint_t m_end,
@@ -623,6 +821,10 @@ VECOPS_ALWAYS_INLINE void emit_full_grid(
   }
 }
 
+// Decide whether metadata constraints (upper extent bounds, or fixed block
+// counts under the catalog's meta block limit) allow the constrained exact
+// traversal, which prunes runtime dispatch with `if constexpr`. Unbounded
+// extents never qualify: the compile-time enumeration would not terminate.
 template <typename Catalog,
           meta::ValueType ExtentM, meta::ValueType ExtentN,
           meta::ValueType TileM, meta::ValueType TileN>
@@ -644,6 +846,10 @@ inline constexpr bool meta_exact_candidate_v = [] {
   }
 }();
 
+// Runtime state shared by the exact-grid emitters: extents, base tile
+// sizes, and the callback. invoke_exact translates a logical block
+// coordinate (block_m, block_n) into an element offset and a possibly
+// partial active extent, then dispatches through Tile2DExactKernelCase.
 template <typename Catalog,
           meta::ValueType ExtentM, meta::ValueType ExtentN,
           meta::ValueType TileM, meta::ValueType TileN, typename Fn>
@@ -686,6 +892,8 @@ VECOPS_ALWAYS_INLINE auto make_exact_context(
       static_cast<nint_t>(tm), static_cast<nint_t>(tn), fn};
 }
 
+// Under Constrained = false the extent/tile types are erased to Any, so the
+// emit_* helpers skip the compile-time pruning instead of asserting on it.
 template <bool Constrained, typename Context>
 using context_extent_m_t = std::conditional_t<
     Constrained, typename Context::extent_m_type, meta::Any>;
@@ -699,6 +907,9 @@ template <bool Constrained, typename Context>
 using context_tile_n_t = std::conditional_t<
     Constrained, typename Context::tile_n_type, meta::Any>;
 
+// Find a family matching the exact remainder block count by trying
+// B, B-1, ..., 0 in turn; the metadata bound prunes heights that cannot
+// occur at this extent before the runtime `remaining` comparison.
 template <int A, int B, bool Constrained, typename Context>
 VECOPS_ALWAYS_INLINE void dispatch_exact_remainder(
     Context& ctx, nint_t block_m, nint_t block_n, nint_t remaining) {
@@ -717,6 +928,10 @@ VECOPS_ALWAYS_INLINE void dispatch_exact_remainder(
   }
 }
 
+// Emit one row of height A: as many BMax-wide tiles as fit, then the
+// remainder via dispatch_exact_remainder. A compile-time block count unrolls
+// the loop and sizes the remainder tile statically; a runtime count keeps a
+// plain loop.
 template <int A, int BMax, bool Constrained, typename Context>
 VECOPS_ALWAYS_INLINE void emit_exact_row(
     Context& ctx, nint_t n_blocks, nint_t block_m) {
@@ -745,6 +960,8 @@ VECOPS_ALWAYS_INLINE void emit_exact_row(
   }
 }
 
+// Cover a compile-time-known MBlocks with rows of decreasing height: as many
+// A-tall rows as fit, then recurse on the leftover rows with A - 1.
 template <int A, nint_t RemainingM, bool Constrained, typename Context>
 VECOPS_ALWAYS_INLINE void emit_fixed_exact_rows(
     Context& ctx, nint_t n_blocks, nint_t& block_m) {
@@ -765,6 +982,8 @@ VECOPS_ALWAYS_INLINE void emit_fixed_exact_rows(
   }
 }
 
+// Same as emit_fixed_exact_rows for a runtime m_blocks; the metadata bound
+// prunes row heights that cannot occur at this extent.
 template <int A, bool Constrained, typename Context>
 VECOPS_ALWAYS_INLINE void emit_runtime_exact_rows(
     Context& ctx, nint_t m_blocks, nint_t n_blocks, nint_t& block_m) {
@@ -785,6 +1004,9 @@ VECOPS_ALWAYS_INLINE void emit_runtime_exact_rows(
   }
 }
 
+// Cover the rows of a single n-block column with the tallest available
+// (A, 1) families: as many A-tall blocks as fit, then recurse with A - 1.
+// Fixed variant for a compile-time-known row count.
 template <int A, nint_t RemainingM, typename Context>
 VECOPS_ALWAYS_INLINE void emit_fixed_exact_column(
     Context& ctx, nint_t& block_m) {
@@ -802,6 +1024,8 @@ VECOPS_ALWAYS_INLINE void emit_fixed_exact_column(
   }
 }
 
+// Column variant for a runtime m_blocks; the metadata bound prunes heights
+// that cannot occur at this extent.
 template <int A, bool Constrained, typename Context>
 VECOPS_ALWAYS_INLINE void emit_runtime_exact_column(
     Context& ctx, nint_t m_blocks, nint_t& block_m) {
@@ -821,6 +1045,9 @@ VECOPS_ALWAYS_INLINE void emit_runtime_exact_column(
   }
 }
 
+// Compile-time grid strides A and B over runtime extents; every invocation
+// goes through invoke_exact (Tile2DExactKernelCase) and clips the active
+// extents at the plane boundary.
 template <int A, int B, typename Context>
 VECOPS_ALWAYS_INLINE void run_context_exact_grid(Context& ctx) {
   VECOPS_NOUNROLL
@@ -831,6 +1058,13 @@ VECOPS_ALWAYS_INLINE void run_context_exact_grid(Context& ctx) {
   }
 }
 
+// Exact-cover driver. The four branches, most constrained first:
+// 1. both block counts compile-time — an unmasked full grid when divisibility
+//    and the catalog's grid mode allow it, otherwise fixed rows (or a single
+//    fixed column when there is only one n-block);
+// 2. n provably has at most one block — column mode over runtime rows;
+// 3. only m fixed — fixed rows over runtime n-blocks;
+// 4. fully runtime — column mode when n_blocks == 1 at run time, else rows.
 template <bool Constrained, typename Context>
 VECOPS_ALWAYS_INLINE void run_context_exact_cover(Context& ctx) {
   using Catalog = typename Context::catalog_type;
@@ -892,6 +1126,8 @@ VECOPS_ALWAYS_INLINE void run_context_exact_cover(Context& ctx) {
   }
 }
 
+// Reorder a (major, minor) invocation back to (m, n) so a single emitter
+// serves both loop nestings.
 enum class GridOrder { row_major, column_major };
 
 template <typename Family, GridOrder Order,
@@ -908,6 +1144,10 @@ VECOPS_ALWAYS_INLINE void invoke_ordered(
   }
 }
 
+// Four-quadrant masked grid over an arbitrary rectangle: unmasked interior
+// strips, then a masked minor-axis tail row, a masked major-axis tail
+// column, and the doubly-masked corner. GridOrder selects which axis is the
+// loop's major axis so the caller can steer prefetch locality.
 template <typename Family, GridOrder Order, typename Fn>
 VECOPS_ALWAYS_INLINE void emit_adaptive_grid(
     nint_t m_begin, nint_t m_extent,
@@ -960,6 +1200,8 @@ VECOPS_ALWAYS_INLINE void emit_adaptive_grid(
   }
 }
 
+// Doubly-masked row emission over one tile row; NoTailN drops the tail
+// handling when n-divisibility is already proven.
 template <typename Family, bool NoTailN, typename Fn>
 VECOPS_ALWAYS_INLINE void emit_masked_row(
     nint_t m, nint_t active_m,
@@ -983,6 +1225,8 @@ VECOPS_ALWAYS_INLINE void emit_masked_row(
   }
 }
 
+// Doubly-masked grid emission for the Uniform policy; NoTail flags drop the
+// corresponding tail handling when divisibility is already proven.
 template <typename Family, bool NoTailM, bool NoTailN, typename Fn>
 VECOPS_ALWAYS_INLINE void emit_all_masked(
     nint_t m_extent, nint_t n_extent,
@@ -1020,7 +1264,10 @@ VECOPS_ALWAYS_INLINE void run(
   const nint_t m_extent = static_cast<nint_t>(m_value);
   const nint_t n_extent = static_cast<nint_t>(n_value);
 
+  // Policy dispatch. Uniform branches off first; the remaining three
+  // policies share the unmasked bulk grid machinery below.
   if constexpr (std::same_as<Policy, tile2d_policy::Uniform>) {
+    // Uniform: one doubly-masked family covers the whole extent.
     constexpr Choice single_choice = select_single<Catalog>();
     using Single = family_for_t<Catalog, single_choice.a, single_choice.b>;
     using SingleCapM = Capacity<TM, Single::a>;
@@ -1033,9 +1280,14 @@ VECOPS_ALWAYS_INLINE void run(
         m_extent, n_extent, cap_m, cap_n, fn);
   } else {
 
+  // RowMajor / BulkTail / FourRegions all start from the same unmasked bulk
+  // grid; they differ only in how they cover the remainder frame.
   const nint_t bulk_cap_m = static_cast<nint_t>(capacity<Bulk::a>(tm));
   const nint_t bulk_cap_n = static_cast<nint_t>(capacity<Bulk::b>(tn));
 
+  // RowMajor: dedicated right/bottom/corner families whose extent on the
+  // other axis matches the bulk family, so the classic row-major traversal
+  // order is preserved across the boundary.
   if constexpr (std::same_as<Policy, tile2d_policy::RowMajor>) {
     constexpr Choice right_choice = no_tail_n
         ? bulk_choice
@@ -1120,6 +1372,8 @@ VECOPS_ALWAYS_INLINE void run(
     }
   } else {
 
+  // Round the extent down to whole bulk tiles; the policies below cover the
+  // remainder frame [m_bulk, m_extent) x [n_bulk, n_extent).
   nint_t m_bulk = m_extent;
   nint_t n_bulk = n_extent;
   if constexpr (!no_tail_m) m_bulk -= m_bulk % bulk_cap_m;
@@ -1127,6 +1381,8 @@ VECOPS_ALWAYS_INLINE void run(
   emit_full_grid<Bulk>(0, m_bulk, 0, n_bulk,
                        bulk_cap_m, bulk_cap_n, fn);
 
+  // BulkTail: one adaptive doubly-masked family sweeps the remainder frame
+  // band by band — bottom band, right band, then the corner rectangle.
   if constexpr (std::same_as<Policy, tile2d_policy::BulkTail>) {
     constexpr Choice tail_choice = select_single<Catalog>();
     using Tail = family_for_t<Catalog, tail_choice.a, tail_choice.b>;
@@ -1158,6 +1414,10 @@ VECOPS_ALWAYS_INLINE void run(
     }
   } else {
 
+  // FourRegions: grouped lower/right/corner bands over the bulk-aligned
+  // frame. Unlike RowMajor, a band family only has to divide (not match)
+  // the bulk width on the other axis, so an entire band is one family
+  // invocation wide.
   static_assert(
       std::same_as<Policy, tile2d_policy::RowMajor> ||
       std::same_as<Policy, tile2d_policy::FourRegions> ||
@@ -1236,8 +1496,45 @@ consteval void validate_positive_tile() {
 } // namespace tile2d_details
 
 /**
- * Cover a two-dimensional extent using an explicit or generated kernel
- * catalog.  The default policy preserves classic row-major traversal order.
+ * @brief Cover a two-dimensional extent exactly once using a kernel catalog.
+ *
+ * The `[0, m) x [0, n)` rectangle is partitioned into kernel invocations
+ * according to `Policy`; see the file header for the callback shape and the
+ * policy descriptions. Kernel families are selected at compile time from
+ * `Catalog`, and tail regions are removed with `if constexpr` whenever the
+ * extent metadata proves divisibility.
+ *
+ * @code
+ * using Catalog = Tile2DKernelCatalog<
+ *     Tile2DKernelFamily<2, 2, 4>, Tile2DKernelFamily<1, 2, 3>,
+ *     Tile2DKernelFamily<2, 1, 3>, Tile2DKernelFamily<1, 1, 1>>;
+ * tile2d(cint<64>, cint<64>, 16, 16, Catalog{},
+ *        [](auto k, nint_t m, nint_t n, nint_t am, nint_t an) {
+ *          // dispatch on decltype(k)::m_mask / decltype(k)::n_mask
+ *        });
+ * @endcode
+ *
+ * @tparam Policy  Traversal strategy; defaults to tile2d_policy::RowMajor.
+ * @tparam M       Row extent type (meta ValueInput).
+ * @tparam N       Column extent type (meta ValueInput).
+ * @tparam TM      Base tile height type (meta ValueInput).
+ * @tparam TN      Base tile width type (meta ValueInput).
+ * @tparam Catalog Explicit or generated kernel catalog.
+ * @tparam Fn      Callback type, invoked as
+ *                 `fn(case_tag, m, n, active_m, active_n)`.
+ *
+ * @param m   Row extent in elements (non-negative).
+ * @param n   Column extent in elements (non-negative).
+ * @param tm  Base tile height in elements (positive).
+ * @param tn  Base tile width in elements (positive).
+ * @param fn  Callback invoked once per emitted kernel tile.
+ *
+ * @note The catalog must be a complete downward-closed set containing the
+ *       1x1 family (static_assert).
+ * @note Kernel capacities `a * tm` and `b * tn` must not overflow `nint_t`
+ *       (VECOPS_ASSERT against the largest selected family extents).
+ * @note A masked invocation may still carry a full active extent; only the
+ *       unmasked tag promises full capacity.
  */
 template <typename Policy = tile2d_policy::RowMajor,
           typename M, typename N, typename TM, typename TN,
@@ -1330,9 +1627,19 @@ VECOPS_ALWAYS_INLINE void tile2d(
 }
 
 /**
- * Convenience entry point for a generated catalog.  Provider is used only as
- * a type-level source of `power<A, B, MMask, NMask>()`; no runtime provider
- * dispatch or fallback is introduced.
+ * @brief Convenience entry point for a generated catalog.
+ *
+ * Provider is used only as a type-level source of
+ * `power<A, B, MMask, NMask>()`; no runtime provider dispatch or fallback is
+ * introduced. The catalog enumerates the shapes bounded by `SearchSpace`
+ * once at compile time, so `SearchSpace` bounds directly control
+ * instantiation cost.
+ *
+ * @tparam SearchSpace  Tile2DSearchSpace bounding the enumerated shapes.
+ * @tparam Policy       Traversal strategy; defaults to RowMajor.
+ * @tparam Provider     Static power source (type-only use).
+ *
+ * @param provider  Provider tag value; only its type participates.
  */
 template <typename SearchSpace,
           typename Policy = tile2d_policy::RowMajor,

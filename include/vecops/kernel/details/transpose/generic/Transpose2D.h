@@ -18,7 +18,7 @@
 #include "vecops/vec/Vec.h"
 
 /**
- * @file Transpose2D.h
+ * @file vecops/kernel/details/transpose/generic/Transpose2D.h
  * @brief Shared DataAccess-aware vector algorithms for platform transpose backends.
  *
  * This file contains no platform selection. Backends choose tile dimensions or
@@ -39,6 +39,7 @@ template <typename Access>
 using ComputeOf = typename std::remove_cvref_t<Access>::ComputeType;
 
 template <typename Access>
+/** Spec type a bound DataAccess session was created from. */
 using SpecOf = std::remove_cvref_t<decltype(
     std::declval<const std::remove_cvref_t<Access>&>().spec())>;
 
@@ -81,6 +82,10 @@ template <typename Access>
 concept RawDirectAccess = is_raw_direct_access_v<Access>;
 
 template <nint_t Upper, Tile2DMaskMode Mask>
+/** Meta-value degradation: an unmasked axis replaces the runtime extent with
+ *  the compile-time tile bound `cint<Upper>`, letting downstream loads/stores
+ *  drop their masks entirely; a masked axis keeps a `Dynamic` bounded by the
+ *  tile size with the runtime active count. */
 VECOPS_ALWAYS_INLINE constexpr auto active_extent(nint_t value) {
   if constexpr (Mask == Tile2DMaskMode::unmasked) {
     return meta::cint<Upper>;
@@ -90,6 +95,7 @@ VECOPS_ALWAYS_INLINE constexpr auto active_extent(nint_t value) {
 }
 
 template <std::size_t Bytes>
+/** Unsigned integer type of exactly `Bytes` bytes, for bitcast staging. */
 using UIntOfSize = std::conditional_t<
     Bytes == 1, uint8_t,
     std::conditional_t<Bytes == 2, uint16_t,
@@ -109,6 +115,11 @@ VECOPS_ALWAYS_INLINE auto transpose_16byte_stage(
   if constexpr ((std::size_t{1} << Stage) == N) {
     return input;
   } else {
+    // One butterfly stage: interpret each register as 2x wider elements
+    // (bitcast to StageElement), then interleave the lower/upper halves of
+    // vertically adjacent registers. Doubling the logical lane width at
+    // every stage swaps stride-2 neighbors for stride-1 neighbors, which
+    // is exactly a transpose of the 16-byte tile's lane matrix.
     constexpr std::size_t Span = std::size_t{1} << Stage;
     using StageElement = UIntOfSize<sizeof(vec::ElementOf<Tag>) * Span>;
     using StageTag = vec::ViewAs<StageElement, Tag>;
@@ -203,6 +214,10 @@ VECOPS_ALWAYS_INLINE void fixed_kernel(
   using StoreTag = vec::FixedTag<T, Rows>;
   const nint_t active_m_value = static_cast<nint_t>(active_m);
   const nint_t active_n_value = static_cast<nint_t>(active_n);
+  // Wide rectangular tiles (Columns == 2*Rows) are allowed because each
+  // loaded row vector splits into two half-width square tiles (lower and
+  // upper halves), each transposed independently below — this halves the
+  // store-side vector width while keeping loads full-width.
   static_assert(Columns == Rows || Columns == 2 * Rows);
   std::array<vec::Vec<LoadTag>, static_cast<std::size_t>(Rows)> row_vectors{};
 
@@ -315,6 +330,11 @@ VECOPS_ALWAYS_INLINE void fixed_transpose(
         constexpr bool FullTile =
             Case::m_mask == Tile2DMaskMode::unmasked &&
             Case::n_mask == Tile2DMaskMode::unmasked;
+        // Bottom-edge tiles (rows masked, columns full) can stay on the
+        // fixed network when both sides are raw same-dtype accesses: every
+        // output row store then spans complete source columns, so masking
+        // the store suffices. Right/corner tails must gather instead —
+        // their loads would be partial columns.
         constexpr bool ContiguousBottomEdge =
             Case::m_mask == Tile2DMaskMode::masked &&
             Case::n_mask == Tile2DMaskMode::unmasked &&

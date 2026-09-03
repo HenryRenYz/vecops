@@ -1,7 +1,7 @@
 // @vecops-target-shards-x86: 2
 // @vecops-target-shards-ARM: 8
 
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 #include "MatmulTestArch.h"
 
 #if defined(ARCH_X86_FAMILY)
@@ -13,7 +13,7 @@
 
 #include "MatmulConversionTestCommon.h"
 
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 #include "vecops/matmul/Atom.h"
 
 namespace {

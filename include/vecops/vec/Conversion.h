@@ -3,7 +3,7 @@
 
 #include <utility>
 
-#include "vecops/vec/Basic.h"
+#include "vecops/vec/Arithmetic.h"
 
 namespace vecops::vec {
 

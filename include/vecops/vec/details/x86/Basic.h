@@ -630,10 +630,9 @@ struct NativeWordImpl<X86Backend, GetMaskLaneOp> {
 #if defined(CPU_CAPABILITY_AVX512)
     return ((static_cast<uint64_t>(value.value) >> lane) & 1U) != 0;
 #else
-    alignas(64) std::byte bytes[sizeof(typename Traits::RawMask)];
-    std::memcpy(bytes, &value.value, sizeof(value.value));
-    return bytes[static_cast<std::size_t>(lane * sizeof(ElementOf<Tag>))]
-        != std::byte{};
+    const auto bits = x86_mask_msb_bits(value.value);
+    return ((bits >> (lane * static_cast<nint_t>(sizeof(ElementOf<Tag>))))
+            & uint64_t{1}) != 0;
 #endif
   }
 };
@@ -775,33 +774,68 @@ VECOPS_ALWAYS_INLINE Mask<Tag> x86_set_mask_logical_lane(
 
 template <bool Upper, VectorTag Tag>
 VECOPS_ALWAYS_INLINE Mask<Half<Tag>> x86_extract_mask_half(
-    Tag tag, Mask<Tag> value) {
+    Tag, Mask<Tag> value) {
+  using InTraits = RepresentationTraits<X86Backend, Tag>;
   using OutTag = Half<Tag>;
-  Mask<OutTag> result{};
-  constexpr nint_t half = RepresentationTraits<X86Backend, OutTag>::logical_lanes;
-  for (nint_t lane = 0; lane < half; ++lane) {
-    result = x86_set_mask_logical_lane(
-        OutTag{}, result, lane,
-        x86_get_mask_logical_lane(tag, value, lane + (Upper ? half : 0)));
+  using OutTraits = RepresentationTraits<X86Backend, OutTag>;
+  using InRaw = typename InTraits::RawMask;
+  using OutRaw = typename OutTraits::RawMask;
+  static_assert(InTraits::word_count == 1);
+  constexpr int half_lanes = static_cast<int>(OutTraits::logical_lanes);
+#if defined(CPU_CAPABILITY_AVX512)
+  const auto bits = static_cast<std::uint64_t>(value.value);
+  if constexpr (Upper)
+    return Mask<OutTag>{static_cast<OutRaw>(bits >> half_lanes)};
+  else
+    return Mask<OutTag>{static_cast<OutRaw>(bits)};
+#else
+  constexpr int half_bytes =
+      half_lanes * static_cast<int>(sizeof(ElementOf<Tag>));
+  if constexpr (sizeof(InRaw) == sizeof(OutRaw)) {
+    if constexpr (Upper)
+      return Mask<OutTag>{_mm_srli_si128(value.value, half_bytes)};
+    else
+      return Mask<OutTag>{value.value};
+  } else {
+    static_assert(sizeof(InRaw) == 32 && sizeof(OutRaw) == 16);
+    if constexpr (Upper)
+      return Mask<OutTag>{_mm256_extracti128_si256(value.value, 1)};
+    else
+      return Mask<OutTag>{_mm256_castsi256_si128(value.value)};
   }
-  return result;
+#endif
 }
 
 template <VectorTag Tag>
 VECOPS_ALWAYS_INLINE Mask<Tag> x86_concat_mask_halves(
-    Tag tag, Mask<Half<Tag>> lower_value, Mask<Half<Tag>> upper_value) {
+    Tag, Mask<Half<Tag>> lower_value, Mask<Half<Tag>> upper_value) {
+  using OutTraits = RepresentationTraits<X86Backend, Tag>;
   using HalfTag = Half<Tag>;
-  Mask<Tag> result{};
-  constexpr nint_t half = RepresentationTraits<X86Backend, HalfTag>::logical_lanes;
-  for (nint_t lane = 0; lane < half; ++lane) {
-    result = x86_set_mask_logical_lane(
-        tag, result, lane,
-        x86_get_mask_logical_lane(HalfTag{}, lower_value, lane));
-    result = x86_set_mask_logical_lane(
-        tag, result, half + lane,
-        x86_get_mask_logical_lane(HalfTag{}, upper_value, lane));
+  using InTraits = RepresentationTraits<X86Backend, HalfTag>;
+  using OutRaw = typename OutTraits::RawMask;
+  using InRaw = typename InTraits::RawMask;
+  static_assert(OutTraits::word_count == 1);
+  constexpr int half_lanes = static_cast<int>(InTraits::logical_lanes);
+#if defined(CPU_CAPABILITY_AVX512)
+  const std::uint64_t bits =
+      static_cast<std::uint64_t>(lower_value.value) |
+      (static_cast<std::uint64_t>(upper_value.value) << half_lanes);
+  return Mask<Tag>{static_cast<OutRaw>(bits)};
+#else
+  if constexpr (sizeof(OutRaw) == sizeof(InRaw)) {
+    constexpr int half_bytes =
+        half_lanes * static_cast<int>(sizeof(ElementOf<Tag>));
+    const auto kept_lower = _mm_srli_si128(
+        _mm_slli_si128(lower_value.value, 16 - half_bytes),
+        16 - half_bytes);
+    return Mask<Tag>{_mm_or_si128(
+        kept_lower, _mm_slli_si128(upper_value.value, half_bytes))};
+  } else {
+    static_assert(sizeof(OutRaw) == 32 && sizeof(InRaw) == 16);
+    return Mask<Tag>{_mm256_inserti128_si256(
+        _mm256_castsi128_si256(lower_value.value), upper_value.value, 1)};
   }
-  return result;
+#endif
 }
 
 #define VECOPS_VEC_X86_EXACT_REARRANGE_DISPATCH(Expression, Message)     \

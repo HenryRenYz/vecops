@@ -15,12 +15,19 @@
 #include "vecops/vec/details/sme/State.h"
 #endif
 
-/** @file Backend.h @brief AArch64 execution-state backend. */
+/** @file vecops/execution/details/arm/Backend.h
+ *  @brief AArch64 execution-state backend. */
 
 namespace vecops::execution::details {
 
 /**
  * @brief AArch64 execution backend for manual Streaming+ZA ownership.
+ *
+ * "Manual" means this backend owns the PSTATE.SM/ZA lifecycle itself: it
+ * emits SMSTART/SMSTOP around the callback through
+ * `vec::details::sme::with_streaming_za` (a lexical region), rather than
+ * relying on compiler-generated streaming functions. A nested region whose
+ * requirements are already active compiles to a plain callback invocation.
  */
 template <>
 struct Backend<platform::AArch64Target> {
@@ -34,6 +41,10 @@ struct Backend<platform::AArch64Target> {
   /**
    * @brief Enter Streaming+ZA only when newly required, then invoke `fn`.
    * @return The callback result.
+   * @pre `fn` must be `noexcept` when a Streaming+ZA transition is needed:
+   *      an exception unwinding through the SMSTOP epilogue would leave the
+   *      processor in streaming mode with ZA storage still enabled. This is
+   *      enforced by static_assert, not caught at runtime.
    */
   VECOPS_ALWAYS_INLINE static decltype(auto) enter(Fn&& fn) {
     constexpr bool EnterStreamingZA =

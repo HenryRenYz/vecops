@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "TestHelpers.h"
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 #if defined(HAS_SME)
 #include "vecops/execution/details/arm/Resources.h"
 #endif

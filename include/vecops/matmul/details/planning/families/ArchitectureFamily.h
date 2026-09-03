@@ -5,6 +5,49 @@
 #ifndef VECOPS_MATMUL_DETAILS_FAMILIES_ARCHITECTURE_FAMILY_H
 #define VECOPS_MATMUL_DETAILS_FAMILIES_ARCHITECTURE_FAMILY_H
 
+/**
+ * @file vecops/matmul/details/planning/families/ArchitectureFamily.h
+ * @brief The architecture-family invocation: one matmul call's complete
+ *        static plan, runtime gates, and execution paths.
+ *
+ * An ArchitectureFamilyInvocation owns the operand specs of one
+ * `C[M,N] = C_in + A[M,K] * B[N,K]^T` call (optionally batched by leading
+ * dimensions) and answers two kinds of questions:
+ *
+ * - Statically, which transformations are legal for these types.  The
+ *   constexpr variables on the class decide, per instantiation, whether
+ *   online packing may apply (AutoPackOperand, an AMX and an SME capability
+ *   matrix), which batch-dimension flatten shapes are candidates
+ *   (BatchRows/BatchColumns*Candidate), and whether packing and multiply
+ *   can fuse into one streaming region (SingleStreamingAutoPackRegion).
+ * - Dynamically, whether a candidate actually pays off for the runtime
+ *   extents and layouts.  use_auto_packing_for() is the online-packing cost
+ *   model; the ArchitectureBatchPlanner gates re-check the flatten
+ *   candidates against the real strides before any flatten runs.
+ *
+ * Execution paths, in the order execute() tries them:
+ *
+ * 1. Packed-A flattened batch rows: a raw batched problem whose B was
+ *    prepacked (explicitly, or online by a compile-time decision) may pack
+ *    the flattened [batch*M, K] A once and run a single packed problem.
+ * 2. Online packing (only when CompileTimeAutoPacking held): pack A/B into
+ *    workspace copies, then run the packed problem — including flattened
+ *    single-problem variants for shared-B batches.
+ * 3. Batch-columns flatten: a shared A with M == 1 collapses to
+ *    [1, batch*N].
+ * 4. Batch-rows flatten: a shared B collapses to one [batch*M, K] product.
+ * 5. The ordinary traversal: loop the leading batch dimensions and run one
+ *    leaf problem per item (under with_matmul_configuration for AMX).
+ *
+ * Three sibling planners collaborate as friends and read the private member
+ * specs directly, each owning one concern: ArchitectureBatchPlanner
+ * (rank-three analysis and rank-two views), ArchitecturePackingPlanner
+ * (packed layouts, byte accounting, streaming ownership), and
+ * ArchitectureWorkspacePlanner (the required_workspace total).
+ * make_matmul_invocation() is the construction entry used by
+ * planning/FamilyPlan.h.
+ */
+
 #include <limits>
 #include <type_traits>
 #include <utility>

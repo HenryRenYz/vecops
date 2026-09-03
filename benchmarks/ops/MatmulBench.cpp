@@ -1,7 +1,7 @@
 // @vecops-target-shards-x86: 5
 // @vecops-target-shards-ARM: 176
 
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 
 #if defined(ARCH_X86_FAMILY)
 #define VECOPS_MATMUL_CATALOG_CASE_SHARDS 1

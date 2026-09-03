@@ -8,7 +8,7 @@
 #include <cstddef>
 #include <cstdint>  // for standard int defs
 
-#include "vecops/Features.h"
+#include "vecops/platform/Features.h"
 #include "vecops/CoreDefs.h"
 #include "vecops/util/BFloat16.h"
 #include "vecops/util/Float16.h"
