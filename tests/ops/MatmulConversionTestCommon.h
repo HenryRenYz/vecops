@@ -1505,17 +1505,20 @@ void check_runtime_per_row_column_quantization_family(
   auto correction_layout = tensor::make_layout(
       tensor::make_shape(meta::Any{m}, meta::Any{n}),
       tensor::make_strides(meta::cint<0>, meta::cint<1>));
-  auto operation = make_test_matmul_invocation(
-      ops::MatmulConfig<Atom, FamilySelection>{},
+  auto a_input = tensor::input<TA>(
+      tensor::make_tensor(a.data(), a_layout), quantize);
+  auto b_input = tensor::input<TB>(packed_b_tensor);
+  auto c_input = tensor::input<Acc>(tensor::make_tensor(
+      correction.data(), correction_layout));
+  auto c_output = tensor::output<Acc>(
+      tensor::make_tensor(c.data(), c_layout), dequantize);
+  auto operation = ops::matmul(ops::MatmulConfig<Atom, FamilySelection>{});
+  kernel::Workspace storage(operation.required_workspace(
       meta::Any{m}, meta::Any{n}, meta::Any{k},
-      tensor::input<TA>(tensor::make_tensor(a.data(), a_layout), quantize),
-      tensor::input<TB>(packed_b_tensor),
-      tensor::input<Acc>(tensor::make_tensor(
-          correction.data(), correction_layout)),
-      tensor::output<Acc>(tensor::make_tensor(c.data(), c_layout), dequantize));
-  kernel::Workspace storage(operation.required_workspace());
+      a_input, b_input, c_input, c_output));
   auto workspace = storage.view();
-  operation(workspace);
+  operation(workspace, meta::Any{m}, meta::Any{n}, meta::Any{k},
+            a_input, b_input, c_input, c_output);
 
   for (nint_t row = 0; row < m; ++row) {
     for (nint_t col = 0; col < n; ++col) {

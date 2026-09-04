@@ -17,12 +17,12 @@ namespace vecops::kernel::matmul_details::sme {
 
 #if defined(__ARM_FEATURE_SVE_MATMUL_INT8)
 
-VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void
-fused_runtime_quant_int8_packed_b_gemv(
+template <bool Dequantize>
+VECOPS_ALWAYS_INLINE void runtime_quant_int8_packed_b_gemv_core(
     const float32_t* a, const int8_t* packed_b,
     nint_t b_outer_stride, nint_t b_group_stride,
     nint_t b_spatial_stride, nint_t packed_panel,
-    const int32_t* correction, float32_t* output,
+    const int32_t* correction, void* output,
     const float32_t* column_scales,
     nint_t logical_n, nint_t logical_k,
     float32_t quant_multiplier, int32_t input_zero_point,
@@ -76,20 +76,57 @@ fused_runtime_quant_int8_packed_b_gemv(
           packed_values, repeated_group, sum);
     }
 
-    auto value = vec::convert(OutputTag{}, AccTag{}, sum);
-    value = vec::mul(
-        OutputTag{}, value,
-        vec::fill(OutputTag{}, row_dequant_scale));
-    value = vec::mul(
-        OutputTag{}, value,
-        vec::load(
-            OutputTag{}, column_scales + output_origin,
-            vec::opt::first(active), vec::opt::zero));
-    vec::store(
-        OutputTag{}, output + output_origin, value,
-        vec::opt::first(active));
+    if constexpr (Dequantize) {
+      auto value = vec::convert(OutputTag{}, AccTag{}, sum);
+      value = vec::mul(
+          OutputTag{}, value,
+          vec::fill(OutputTag{}, row_dequant_scale));
+      value = vec::mul(
+          OutputTag{}, value,
+          vec::load(
+              OutputTag{}, column_scales + output_origin,
+              vec::opt::first(active), vec::opt::zero));
+      vec::store(
+          OutputTag{}, static_cast<float32_t*>(output) + output_origin, value,
+          vec::opt::first(active));
+    } else {
+      vec::store(
+          AccTag{}, static_cast<int32_t*>(output) + output_origin, sum,
+          vec::opt::first(active));
+    }
     output_origin += active;
   }
+}
+
+VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void
+fused_runtime_quant_int8_packed_b_gemv(
+    const float32_t* a, const int8_t* packed_b,
+    nint_t b_outer_stride, nint_t b_group_stride,
+    nint_t b_spatial_stride, nint_t packed_panel,
+    const int32_t* correction, float32_t* output,
+    const float32_t* column_scales,
+    nint_t logical_n, nint_t logical_k,
+    float32_t quant_multiplier, int32_t input_zero_point,
+    float32_t row_dequant_scale) {
+  runtime_quant_int8_packed_b_gemv_core<true>(
+      a, packed_b, b_outer_stride, b_group_stride,
+      b_spatial_stride, packed_panel, correction, output, column_scales,
+      logical_n, logical_k, quant_multiplier, input_zero_point,
+      row_dequant_scale);
+}
+
+VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void
+runtime_quant_int8_packed_b_gemv_accumulate(
+    const float32_t* a, const int8_t* packed_b,
+    nint_t b_outer_stride, nint_t b_group_stride,
+    nint_t b_spatial_stride, nint_t packed_panel,
+    const int32_t* prior, int32_t* output,
+    nint_t logical_n, nint_t logical_k,
+    float32_t quant_multiplier, int32_t input_zero_point) {
+  runtime_quant_int8_packed_b_gemv_core<false>(
+      a, packed_b, b_outer_stride, b_group_stride,
+      b_spatial_stride, packed_panel, prior, output, nullptr,
+      logical_n, logical_k, quant_multiplier, input_zero_point, 1.0f);
 }
 
 #endif

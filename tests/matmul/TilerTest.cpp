@@ -90,6 +90,7 @@ static_assert(sme_small_vector_profitable(
 static_assert(!sme_small_vector_profitable(
     RuntimeShape::sme_f16, 1, 17, 17));
 static_assert(amx_residual_split_profitable(17, 33, 1024));
+static_assert(amx_residual_split_profitable(33, 17, 1024));
 static_assert(!amx_residual_split_profitable(19, 33, 1024));
 
 TEST(MatmulRuntimeDispatchTest, SharedRuntimeRulesMatchConstexprRules) {

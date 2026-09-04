@@ -96,17 +96,19 @@ struct ArchitecturePackingPlanner {
   /// region when SingleStreamingAutoPackRegion holds: the pack kernels and
   /// the matrix multiply then share one streaming interval instead of
   /// crossing region boundaries between packing and computing.
-  template <execution::ExecutionScope Scope>
+  template <bool PackA, bool PackB, execution::ExecutionScope Scope>
   VECOPS_ALWAYS_INLINE static void execute(
       Scope& scope, const Invocation& op) {
-    if constexpr (Invocation::SingleStreamingAutoPackRegion) {
+    static_assert(PackA || PackB);
+    if constexpr (Invocation::template SingleStreamingAutoPackRegion<
+                      PackA, PackB>) {
       scope.with_resources(
           execution::details::arm::StreamingZARegion{},
           [&](auto& active) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-            op.execute_auto_packed_in_scope(active);
+            op.template execute_auto_packed_in_scope<PackA, PackB>(active);
           });
     } else {
-      op.execute_auto_packed_in_scope(scope);
+      op.template execute_auto_packed_in_scope<PackA, PackB>(scope);
     }
   }
 };

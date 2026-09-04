@@ -88,9 +88,9 @@ VECOPS_ALWAYS_INLINE decltype(auto) with_matmul_configuration(
  * backend contract so a future batched microkernel can retain another leading
  * dimension without changing the operator traversal. A and B can be direct
  * DataAccess objects or matching packed layouts produced by matmul_pack.
- * AllowTailSplit is intentionally supplied by the operation from the user's
- * original operand types, so an internal online-pack instantiation cannot
- * duplicate the narrow explicit-packed tail specialization.
+ * AllowTailSplit is supplied by the caller from the actual leaf plan.  Both
+ * explicit and online/cache-packed operands may therefore reuse packed-only
+ * residual kernels; candidate predicates still verify the bound access types.
  */
 template <::vecops::matmul::Atom Atom,
           typename Policy = matmul_policy::Automatic,

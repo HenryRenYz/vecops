@@ -29,11 +29,14 @@ struct ArchitectureWorkspacePlanner {
   VECOPS_ALWAYS_INLINE static nint_t required(const Invocation& op) {
     nint_t bytes = kernel::matmul_implementation::scratch_bytes<
         typename Invocation::Implementation>();
-    if constexpr (Invocation::CompileTimeAutoPacking) {
+    // Reserve the union of the independently admissible A/B variants.  This
+    // covers both dynamic rank-two calls and rank-three calls where either
+    // side may be broadcast or repacked per batch item.
+    if constexpr (Invocation::MayAutoPackA) {
       if constexpr (Invocation::SMEBatchRowsFullPackCandidate) {
-        // The full-pack variant swaps the ordinary packed-A bytes for the
-        // flattened [batch*M, K] packed A when flattening will actually run.
-        bytes += op.batch_rows_flatten_enabled()
+        // The two-sided flattened SME branch needs a complete [batch*M,K]
+        // packed A rather than the ordinary one-leaf staging buffer.
+        bytes += op.batch_rows_flatten_enabled() && op.online_packs_b()
             ? op.batch_rows_packed_a_bytes()
             : op.template auto_packed_bytes<
                   ::vecops::matmul::Operand::A>(op.a_);
@@ -41,9 +44,10 @@ struct ArchitectureWorkspacePlanner {
         bytes += op.template auto_packed_bytes<
             ::vecops::matmul::Operand::A>(op.a_);
       }
+    }
+    if constexpr (Invocation::MayAutoPackB)
       bytes += op.template auto_packed_bytes<
           ::vecops::matmul::Operand::B>(op.b_);
-    }
     // The two additions below are runtime-gated but their gates were cached
     // by the constructor, keeping this a deterministic pure query.
     if (op.batch_rows_pack_a_enabled())

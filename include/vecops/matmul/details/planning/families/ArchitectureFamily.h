@@ -30,9 +30,12 @@
  * 1. Packed-A flattened batch rows: a raw batched problem whose B was
  *    prepacked (explicitly, or online by a compile-time decision) may pack
  *    the flattened [batch*M, K] A once and run a single packed problem.
- * 2. Online packing (only when CompileTimeAutoPacking held): pack A/B into
- *    workspace copies, then run the packed problem — including flattened
- *    single-problem variants for shared-B batches.
+ * 2. Online packing: A and B are costed independently.  Constant rank-two
+ *    problems fold each decision at compile time; dynamic rank-two problems
+ *    retain only the applicable packing variants and select among them from
+ *    the concrete extents.  Rank-three operands use the same four-way choice;
+ *    a shared A or B is packed once while an independent side reuses one
+ *    leaf-sized staging buffer across batches.
  * 3. Batch-columns flatten: a shared A with M == 1 collapses to
  *    [1, batch*N].
  * 4. Batch-rows flatten: a shared B collapses to one [batch*M, K] product.
@@ -120,6 +123,15 @@ public:
     return WorkspacePlanner::required(*this);
   }
 
+  /// Runtime-visible decisions used by diagnostics/tests.  They report the
+  /// actual per-side plan after evaluating dynamic extents and batch reuse.
+  VECOPS_INLINE bool online_packs_a() const {
+    return selected_auto_pack<::vecops::matmul::Operand::A>();
+  }
+  VECOPS_INLINE bool online_packs_b() const {
+    return selected_auto_pack<::vecops::matmul::Operand::B>();
+  }
+
   template <execution::ExecutionScope Scope>
   VECOPS_INLINE void operator()(Scope& scope) const {
     scope.with_resources(
@@ -160,12 +172,11 @@ private:
         // AMX raw B needs a 16x16 AVX-512 transpose for every resident M
         // family.  For reused rank-two operands, packing once avoids repeating
         // that transpose and also makes the K loop a direct 1 KiB panel walk.
-        // A shared rank-three B is logically one rank-two matrix reused by
-        // every batch item.  Packing it once can therefore remove the raw-B
-        // transpose from every batch traversal.  Keep rank-three A disabled:
-        // it is normally independent and would have to be repacked per item.
-        constexpr bool ReusableRank = Rank == 2 ||
-            (Rank == 3 && Side == ::vecops::matmul::Operand::B);
+        // Rank-three operands use one leaf-sized staging buffer.  Broadcast
+        // operands are packed once; independent operands may still profit
+        // when packing also performs conversion or a transform, and are then
+        // repacked for each batch item.
+        constexpr bool ReusableRank = Rank == 2 || Rank == 3;
         constexpr bool NativeMemory = std::same_as<Memory, Element>;
         constexpr bool SupportedConversion =
             std::same_as<Element, bfloat16_t> &&
@@ -346,15 +357,20 @@ private:
     return BatchPlanner::shared_a_leaf(*this);
   }
 
-  // Keep the ordinary rank-three traversal byte-for-byte compact.  Enabling
-  // the auto-pack branch for a runtime-unknown batch stride adds a large typed
-  // fallback to every tiny independent-batch operation.  A statically
-  // broadcast B has unambiguous reuse and receives a separate specialization.
-  static constexpr bool RankAllowsAutoPack =
-      COutputSpec::OutputTensor::Ndim == 2 || Rank3SharedB;
+  // Both rank-two and rank-three calls retain independent A/B variants.  A
+  // rank-three broadcast only changes that side's amortization; it does not
+  // force the opposite operand to pack.
+  static constexpr bool RankAllowsAutoPack = Rank == 2 || Rank == 3;
+  static constexpr bool RequestedFamilyNeedsRawOperands =
+      std::same_as<typename EffectiveFamilyDispatch::Family,
+                   ::vecops::matmul::kernel_family::SmallVector> ||
+      std::same_as<typename EffectiveFamilyDispatch::Family,
+                   ::vecops::matmul::kernel_family::RuntimeQuantInt8>;
   static constexpr bool AutoPackA = RankAllowsAutoPack &&
+      !RequestedFamilyNeedsRawOperands &&
       AutoPackOperand<::vecops::matmul::Operand::A, ASpec>;
   static constexpr bool AutoPackB = RankAllowsAutoPack &&
+      !RequestedFamilyNeedsRawOperands &&
       AutoPackOperand<::vecops::matmul::Operand::B, BSpec>;
   static constexpr bool Rank3CompletesPackedPair = Rank3SharedB &&
       ((AutoPackA && PackedBInput) || (AutoPackB && PackedAInput));
@@ -433,12 +449,14 @@ private:
       // but the distinct shared-B specialization crosses up to 17 SME region
       // boundaries per call and can amortize one inlined traversal over all
       // batches.
-      Rank3SharedB || std::same_as<Atom, ::vecops::matmul::SME_BF16F32> ||
+      Rank3SharedA || Rank3SharedB ||
+      std::same_as<Atom, ::vecops::matmul::SME_BF16F32> ||
       std::same_as<Atom, ::vecops::matmul::SME_F32F32>;
 #else
       false;
 #endif
 
+  template <bool PackA, bool PackB>
   static constexpr bool SingleStreamingAutoPackRegion =
       std::same_as<Implementation, kernel::matmul_implementation::SME> &&
       SingleStreamingAutoPackCandidate &&
@@ -446,7 +464,9 @@ private:
       // rank-three shared operand is already a distinct specialization and
       // amortizes its one remaining pack over the full batch, so completing a
       // packed pair there also merits one region.
-      ((AutoPackA && AutoPackB) || Rank3CompletesPackedPair) &&
+      ((PackA && PackB) ||
+       (Rank == 3 && (Rank3SharedA || Rank3SharedB) &&
+        (PackA || PackedAInput) && (PackB || PackedBInput))) &&
       StreamingCompatibleAutoPack<::vecops::matmul::Operand::A, ASpec> &&
       StreamingCompatibleAutoPack<::vecops::matmul::Operand::B, BSpec>;
 
@@ -502,7 +522,10 @@ private:
       if (!batch_rows_flatten_enabled()) return false;
       // A raw shared-B operation can only consume packed A through the branch
       // that also packed B.  Explicit packed-B inputs enter directly.
-      if constexpr (!PackedBInput && !CompileTimeAutoPacking) return false;
+      if constexpr (!PackedBInput) {
+        if constexpr (!MayAutoPackB) return false;
+        if (!online_packs_b()) return false;
+      }
       const nint_t batch = static_cast<nint_t>(tensor::size_value<0>(
           c_output_.output_layout()));
       const nint_t m = static_cast<nint_t>(m_);
@@ -517,36 +540,38 @@ private:
     }
   }
 
+  template <::vecops::matmul::Operand Side>
   VECOPS_INLINE static constexpr bool use_auto_packing_for(
-      nint_t m, nint_t n, nint_t k, nint_t effective_m) {
-    if constexpr (!AutoPackA && !AutoPackB) {
+      nint_t m, nint_t n, nint_t k,
+      nint_t effective_m, nint_t effective_n,
+      bool opposite_side_will_pack = false) {
+    constexpr bool CanPack = Side == ::vecops::matmul::Operand::A
+        ? AutoPackA : AutoPackB;
+    if constexpr (!CanPack) {
       return false;
     } else {
-      if (m <= 0 || n <= 0 || k <= 0) return false;
+      if (m <= 0 || n <= 0 || k <= 0 ||
+          effective_m <= 0 || effective_n <= 0)
+        return false;
       if constexpr (std::same_as<
                         Implementation, kernel::matmul_implementation::AMX>) {
-        // Online AMX packing is most valuable for B, whose raw path repeats a
-        // 16x16 transpose for each resident M family.  Requiring at least four
-        // M tiles avoids paying a full matrix copy for decode, tails, and the
-        // 33x35 long-K probe.  When just A is raw, a wide prepacked-B product
-        // can amortize making A's tile panels contiguous; the symmetric
-        // B-only path retains the M-reuse requirement.
-        if constexpr (AutoPackA && AutoPackB) {
-          // Native decode/tail products do not reuse a copied B often enough,
-          // but conversion/quantization changes the trade-off completely:
-          // packing B also removes the strided transform from the resident
-          // kernel.  Enhanced scenario measurements show 4--20x wins for
-          // transformed small-M shapes, so retain only the N-panel guard for
-          // those types and let the work/reuse tests below decide.
-          if constexpr (!AutoPackElidesInputWork<
-                            ::vecops::matmul::Operand::B, BSpec>) {
-            if (m < 64) return false;
-          }
-          if (n < 16) return false;
-        } else if constexpr (AutoPackA) {
-          if (n < 256) return false;
+        // Cost the two operands independently.  Packing A is a contiguous-panel
+        // optimization and needs wide N reuse.  Packing B additionally removes
+        // AMX's repeated 16x16 raw-B transpose, so its native threshold follows
+        // M reuse instead.  A conversion/transform performed by packing is useful
+        // at smaller reuse and is admitted to the generic work test below.
+        if constexpr (Side == ::vecops::matmul::Operand::A) {
+          constexpr bool Elides = AutoPackElidesInputWork<
+              ::vecops::matmul::Operand::A, ASpec>;
+          // A-only native packing was previously reachable only when B was
+          // already packed.  Keep that invariant: padding a skinny raw A can
+          // disable the vector leaf without removing raw-B transpose work.
+          if constexpr (!Elides && !PackedBInput)
+            if (!opposite_side_will_pack) return false;
+          if (effective_n < (Elides ? 16 : 256)) return false;
         } else {
-          static_assert(AutoPackB);
+          constexpr bool Elides = AutoPackElidesInputWork<
+              ::vecops::matmul::Operand::B, BSpec>;
           if constexpr (Rank3SharedB) {
             // Eight decode rows already reuse each packed B panel enough to
             // amortize one copy; the generic work threshold below filters the
@@ -556,7 +581,7 @@ private:
             // rereading and rewriting the full matrix.  Conversion-aware
             // packing has a different gate because it also removes repeated
             // conversion/transform work.
-            if (effective_m < 8 || n < 16) return false;
+            if (effective_m < (Elides ? 1 : 8) || n < 16) return false;
             using Memory = typename BSpec::MemoryElement;
             using Element =
                 typename ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::B>::Element;
@@ -566,15 +591,27 @@ private:
               if (n > MaxPackedElements / k) return false;
             }
           } else {
-            // If A is already packed but B still performs conversion or
-            // quantization, packing B also removes that transform from the
-            // resident kernel. Mirror the two-raw exception above; native
-            // and prequantized B retain the M-reuse guard.
-            if constexpr (!AutoPackElidesInputWork<
-                              ::vecops::matmul::Operand::B, BSpec>) {
-              if (m < 64) return false;
-            }
+            // Native B packing crosses over only once at least eight AMX
+            // row tiles reuse every packed panel.  At M=64 the copy made
+            // 64x64x{128,256} slower; M>=128 retained the packed-panel win.
+            if (m < (Elides ? 1 : 128)) return false;
             if (n < 16) return false;
+            if constexpr (!Elides) {
+              // At the marginal M=128 reuse point, streaming a very large B
+              // through a complete online copy loses to the raw per-panel
+              // transpose.  Keep the measured 128x4096x4096 win (32 MiB B),
+              // but reject the 128x11008x4096 case (86 MiB B).  M>=256 has
+              // twice the reuse and is intentionally left uncapped.
+              constexpr nint_t MaxMarginalBBytes = 64 * 1024 * 1024;
+              using PackedElement = typename ::vecops::matmul::packing_t<
+                  Atom, ::vecops::matmul::Operand::B>::Element;
+              constexpr nint_t MaxMarginalBElements =
+                  MaxMarginalBBytes / static_cast<nint_t>(
+                      sizeof(PackedElement));
+              if (m < 256 && k > 0 &&
+                  n > MaxMarginalBElements / k)
+                return false;
+            }
           }
         }
       }
@@ -585,40 +622,46 @@ private:
       // shapes amortize it well.  FP16->FP32 has a dedicated staged pack and
       // remains profitable at M=1, so it intentionally has no such guard.
       constexpr nint_t WidenReuseThreshold = 4;
-      if constexpr (AutoPackWidensBF16<::vecops::matmul::Operand::A, ASpec>)
-        if (n < WidenReuseThreshold) return false;
-      if constexpr (AutoPackWidensBF16<::vecops::matmul::Operand::B, BSpec>)
+      if constexpr (Side == ::vecops::matmul::Operand::A &&
+                    AutoPackWidensBF16<
+                        ::vecops::matmul::Operand::A, ASpec>)
+        if (effective_n < WidenReuseThreshold) return false;
+      if constexpr (Side == ::vecops::matmul::Operand::B &&
+                    AutoPackWidensBF16<
+                        ::vecops::matmul::Operand::B, BSpec>)
         if (effective_m < WidenReuseThreshold) return false;
       if constexpr (
+          Side == ::vecops::matmul::Operand::A &&
           Rank3CompletesPackedPair && AutoPackA &&
           AutoPackQuantizes<::vecops::matmul::Operand::A, ASpec>) {
         // A is different for every batch, so shared B does not amortize its
         // FP32->I8/U8 transform.  The 64x128 boundary regressed, while either
         // twice the N reuse or twice the K work remained profitable.
-        if (n < 128 && k < 256) return false;
+        if (effective_n < 128 && k < 256) return false;
       }
       // Packing pays for itself once enough output dot products reuse it.
       // Require both aggregate work and spatial reuse; a 1x1 product with a
       // very long K has high work but cannot amortize copying either operand.
       // Express both tests with divisions to avoid overflowing M*N*K.
+      constexpr bool PackElidesInputWork = Side == ::vecops::matmul::Operand::A
+          ? AutoPackElidesInputWork<::vecops::matmul::Operand::A, ASpec>
+          : AutoPackElidesInputWork<::vecops::matmul::Operand::B, BSpec>;
       constexpr bool AMXBPackElidesInputWork =
           std::same_as<
               Implementation, kernel::matmul_implementation::AMX> &&
-          AutoPackB &&
+          Side == ::vecops::matmul::Operand::B &&
           AutoPackElidesInputWork<::vecops::matmul::Operand::B, BSpec>;
       constexpr bool AMXRank3BOnly =
           std::same_as<
               Implementation, kernel::matmul_implementation::AMX> &&
-          Rank3SharedB && !AutoPackA && AutoPackB;
+          Side == ::vecops::matmul::Operand::B && Rank3SharedB;
       constexpr bool SMERank3QuantizedPair =
 #if defined(VECOPS_DISABLE_SME_RANK3_QUANT_FULL_PACKING)
           false;
 #else
           std::same_as<
               Implementation, kernel::matmul_implementation::SME> &&
-          Rank3SharedB && AutoPackA && AutoPackB &&
-          AutoPackQuantizes<::vecops::matmul::Operand::A, ASpec> &&
-          AutoPackQuantizes<::vecops::matmul::Operand::B, BSpec>;
+          Rank3SharedB && PackElidesInputWork;
 #endif
       constexpr bool LowWorkTransformPair =
           AMXBPackElidesInputWork || SMERank3QuantizedPair;
@@ -643,32 +686,59 @@ private:
               ? 16 * 1024
           : SMEF64ConversionPair && !Rank3SharedB
               ? 256 * 1024
-          : (AutoPackA && AutoPackB) || Rank3CompletesPackedPair
-              ? 64 * 1024
-              : 128 * 1024;
-      if (effective_m < 1 + (ReuseThreshold - 1) / n) return false;
+          : 128 * 1024;
+      const nint_t reuse = Side == ::vecops::matmul::Operand::A
+          ? effective_n : effective_m;
+      if (reuse < 1 + (ReuseThreshold - 1) /
+                       (Side == ::vecops::matmul::Operand::A
+                            ? effective_m : effective_n))
+        return false;
       nint_t remaining = 1 + (WorkThreshold - 1) / effective_m;
-      remaining = 1 + (remaining - 1) / n;
+      remaining = 1 + (remaining - 1) / effective_n;
       return k >= remaining;
     }
   }
 
-  static constexpr bool CompileTimeAutoPacking = [] {
+  static constexpr bool Rank2StaticExtents = [] {
     using MV = std::remove_cvref_t<MExtent>;
     using NV = std::remove_cvref_t<NExtent>;
     using KV = std::remove_cvref_t<KExtent>;
-    if constexpr ((AutoPackA || AutoPackB) &&
-                  COutputSpec::OutputTensor::Ndim == 2 &&
-                  MV::is_const && NV::is_const && KV::is_const) {
-      constexpr nint_t MValue =
-          meta::singleton_value_v<MV>;
-      constexpr nint_t NValue =
-          meta::singleton_value_v<NV>;
-      constexpr nint_t KValue =
-          meta::singleton_value_v<KV>;
-      return use_auto_packing_for(
-          MValue, NValue, KValue, MValue);
-    } else if constexpr ((AutoPackA || AutoPackB) && Rank3SharedB &&
+    return COutputSpec::OutputTensor::Ndim == 2 &&
+        MV::is_const && NV::is_const && KV::is_const;
+  }();
+
+  template <::vecops::matmul::Operand Side>
+  static constexpr bool CompileTimeAutoPack = [] {
+    if constexpr (!Rank2StaticExtents) {
+      return false;
+    } else {
+      using MV = std::remove_cvref_t<MExtent>;
+      using NV = std::remove_cvref_t<NExtent>;
+      using KV = std::remove_cvref_t<KExtent>;
+      constexpr bool PackB = [] {
+        if constexpr (Side == ::vecops::matmul::Operand::A)
+          return use_auto_packing_for<::vecops::matmul::Operand::B>(
+              meta::singleton_value_v<MV>, meta::singleton_value_v<NV>,
+              meta::singleton_value_v<KV>, meta::singleton_value_v<MV>,
+              meta::singleton_value_v<NV>);
+        else
+          return false;
+      }();
+      return use_auto_packing_for<Side>(
+          meta::singleton_value_v<MV>, meta::singleton_value_v<NV>,
+          meta::singleton_value_v<KV>, meta::singleton_value_v<MV>,
+          meta::singleton_value_v<NV>, PackB);
+    }
+  }();
+
+  template <::vecops::matmul::Operand Side>
+  static constexpr bool CompileTimeRank3AutoPack = [] {
+    using MV = std::remove_cvref_t<MExtent>;
+    using NV = std::remove_cvref_t<NExtent>;
+    using KV = std::remove_cvref_t<KExtent>;
+    constexpr bool CanPack = Side == ::vecops::matmul::Operand::A
+        ? AutoPackA : AutoPackB;
+    if constexpr (CanPack &&
                          COutputSpec::OutputTensor::Ndim == 3 &&
                          MV::is_const && NV::is_const && KV::is_const) {
       using Batch = tensor::size_type_t<
@@ -686,11 +756,21 @@ private:
           return false;
         } else {
           constexpr nint_t Limit = std::numeric_limits<nint_t>::max();
-          constexpr nint_t EffectiveM = BatchValue > Limit / MValue
-              ? Limit
-              : MValue * BatchValue;
-          return use_auto_packing_for(
-              MValue, NValue, KValue, EffectiveM);
+          constexpr nint_t EffectiveM = Rank3SharedB
+              ? (BatchValue > Limit / MValue ? Limit : MValue * BatchValue)
+              : MValue;
+          constexpr nint_t EffectiveN = Rank3SharedA
+              ? (BatchValue > Limit / NValue ? Limit : NValue * BatchValue)
+              : NValue;
+          constexpr bool PackB = [] {
+            if constexpr (Side == ::vecops::matmul::Operand::A)
+              return use_auto_packing_for<::vecops::matmul::Operand::B>(
+                  MValue, NValue, KValue, EffectiveM, EffectiveN);
+            else
+              return false;
+          }();
+          return use_auto_packing_for<Side>(
+              MValue, NValue, KValue, EffectiveM, EffectiveN, PackB);
         }
       } else {
         return false;
@@ -699,6 +779,79 @@ private:
       return false;
     }
   }();
+
+  static constexpr bool CompileTimeRank3AutoPacking =
+      CompileTimeRank3AutoPack<::vecops::matmul::Operand::A> ||
+      CompileTimeRank3AutoPack<::vecops::matmul::Operand::B>;
+
+  static constexpr bool Rank3StaticExtents = [] {
+    using MV = std::remove_cvref_t<MExtent>;
+    using NV = std::remove_cvref_t<NExtent>;
+    using KV = std::remove_cvref_t<KExtent>;
+    if constexpr (Rank != 3 || !MV::is_const || !NV::is_const ||
+                  !KV::is_const) {
+      return false;
+    } else {
+      using Batch = tensor::size_type_t<
+          0, typename COutputSpec::OutputLayout>;
+      return Batch::is_const;
+    }
+  }();
+
+  static constexpr bool RuntimeAutoPackA = AutoPackA &&
+      ((Rank == 2 && !Rank2StaticExtents) ||
+       (Rank == 3 && !Rank3StaticExtents));
+  static constexpr bool RuntimeAutoPackB = AutoPackB &&
+      ((Rank == 2 && !Rank2StaticExtents) ||
+       (Rank == 3 && !Rank3StaticExtents));
+  static constexpr bool MayAutoPackA =
+      CompileTimeAutoPack<::vecops::matmul::Operand::A> ||
+      CompileTimeRank3AutoPack<::vecops::matmul::Operand::A> ||
+      RuntimeAutoPackA;
+  static constexpr bool MayAutoPackB =
+      CompileTimeAutoPack<::vecops::matmul::Operand::B> ||
+      CompileTimeRank3AutoPack<::vecops::matmul::Operand::B> ||
+      RuntimeAutoPackB;
+
+  // Compatibility spelling used by batch-only helpers.  Rank-two execution
+  // now consumes the independent per-side decisions above.
+  static constexpr bool CompileTimeAutoPacking =
+      CompileTimeAutoPack<::vecops::matmul::Operand::A> ||
+      CompileTimeAutoPack<::vecops::matmul::Operand::B> ||
+      CompileTimeRank3AutoPacking;
+
+  template <::vecops::matmul::Operand Side>
+  VECOPS_INLINE bool selected_auto_pack() const {
+    constexpr bool CompileTime =
+        CompileTimeAutoPack<Side> || CompileTimeRank3AutoPack<Side>;
+    constexpr bool Runtime = Side == ::vecops::matmul::Operand::A
+        ? RuntimeAutoPackA : RuntimeAutoPackB;
+    if constexpr (CompileTime) {
+      return true;
+    } else if constexpr (!Runtime) {
+      return false;
+    } else {
+      const nint_t m = static_cast<nint_t>(m_);
+      const nint_t n = static_cast<nint_t>(n_);
+      const nint_t batch = [&] {
+        if constexpr (Rank == 3)
+          return static_cast<nint_t>(tensor::size_value<0>(
+              c_output_.output_layout()));
+        else
+          return nint_t{1};
+      }();
+      constexpr nint_t Limit = std::numeric_limits<nint_t>::max();
+      const nint_t effective_m = Rank3SharedB && m > 0 &&
+              batch > Limit / m
+          ? Limit : (Rank3SharedB ? m * batch : m);
+      const nint_t effective_n = Rank3SharedA && n > 0 &&
+              batch > Limit / n
+          ? Limit : (Rank3SharedA ? n * batch : n);
+      return use_auto_packing_for<Side>(
+          m, n, static_cast<nint_t>(k_), effective_m, effective_n,
+          Side == ::vecops::matmul::Operand::A ? online_packs_b() : false);
+    }
+  }
 
   template <::vecops::matmul::Operand Side, typename Spec>
   VECOPS_INLINE auto auto_packed_layout(const Spec& spec) const {
@@ -765,11 +918,13 @@ private:
         scope, input, output);
   }
 
-  template <execution::ExecutionScope Scope>
+  template <bool PackA, bool PackB, execution::ExecutionScope Scope>
   VECOPS_ALWAYS_INLINE void execute_auto_packed_batched_in_scope(
       Scope& scope) const {
     static_assert(COutputSpec::OutputTensor::Ndim == 3);
-    static_assert(AutoPackA || AutoPackB);
+    static_assert(PackA || PackB);
+    static_assert(!PackA || AutoPackA);
+    static_assert(!PackB || AutoPackB);
     auto& workspace = scope.workspace_view();
     const auto mark = workspace.mark();
     void* scratch = nullptr;
@@ -779,7 +934,7 @@ private:
           kernel::matmul_implementation::scratch_bytes<Implementation>(), 64);
     }
 
-    if constexpr (AutoPackA && AutoPackB) {
+    if constexpr (PackA && PackB) {
       const auto b_layout = auto_packed_layout<::vecops::matmul::Operand::B>(b_);
       using TB = typename Atom::TB;
       auto* b_data = static_cast<TB*>(workspace.allocate(
@@ -835,7 +990,7 @@ private:
                 tensor::input<TB>(b_tensor), c_input, c_output, scratch);
           },
           a_, b_, c_input_, c_output_);
-    } else if constexpr (AutoPackA) {
+    } else if constexpr (PackA) {
       const auto layout = auto_packed_layout<::vecops::matmul::Operand::A>(a_);
       using TA = typename Atom::TA;
       auto* data = static_cast<TA*>(workspace.allocate(
@@ -928,7 +1083,7 @@ private:
         kernel::with_matmul_configuration<Atom, TilePolicy, true>(
             scope, m_, n_, Implementation{},
             [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-              run_loop.template operator()<true>(configured);
+              run_loop.template operator()<false>(configured);
             });
       } else {
         run_loop.template operator()<false>(scope);
@@ -937,11 +1092,14 @@ private:
     workspace.rewind(mark);
   }
 
-  template <execution::ExecutionScope Scope>
+  template <bool PackA = AutoPackA, bool PackB = AutoPackB,
+            execution::ExecutionScope Scope>
   VECOPS_ALWAYS_INLINE void execute_auto_packed_in_scope(Scope& scope) const {
-    static_assert(AutoPackA || AutoPackB);
+    static_assert(PackA || PackB);
+    static_assert(!PackA || AutoPackA);
+    static_assert(!PackB || AutoPackB);
     if constexpr (COutputSpec::OutputTensor::Ndim == 3) {
-      execute_auto_packed_batched_in_scope(scope);
+      execute_auto_packed_batched_in_scope<PackA, PackB>(scope);
     } else {
       auto& workspace = scope.workspace_view();
       const auto mark = workspace.mark();
@@ -953,7 +1111,7 @@ private:
             64);
       }
 
-      if constexpr (AutoPackA && AutoPackB) {
+      if constexpr (PackA && PackB) {
         const auto a_layout = ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::A>(
             a_.input_layout());
         const auto b_layout = ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::B>(
@@ -973,7 +1131,7 @@ private:
         execute_problem(
             scope, tensor::input<TA>(a_tensor), tensor::input<TB>(b_tensor),
             c_input_, c_output_, scratch);
-      } else if constexpr (AutoPackA) {
+      } else if constexpr (PackA) {
         const auto layout = ::vecops::matmul::packed_layout<Atom, ::vecops::matmul::Operand::A>(
             a_.input_layout());
         using TA = typename Atom::TA;
@@ -1002,9 +1160,10 @@ private:
     }
   }
 
-  template <execution::ExecutionScope Scope>
+  template <bool PackA = AutoPackA, bool PackB = AutoPackB,
+            execution::ExecutionScope Scope>
   VECOPS_NOINLINE void execute_auto_packed(Scope& scope) const {
-    PackingPlanner::execute(scope, *this);
+    PackingPlanner::template execute<PackA, PackB>(scope, *this);
   }
 
   VECOPS_INLINE void validate() const {
@@ -1072,7 +1231,7 @@ private:
                 c_input_access, c_output_access, scratch, Implementation{});
           } else {
             kernel::matmul_bound<
-                Atom, TilePolicy, PackedAInput && PackedBInput,
+                Atom, TilePolicy, true,
                 EffectiveFamilyDispatch>(
                 scope, m, n, k, a_access, b_access,
                 c_input_access, c_output_access, scratch, Implementation{});
@@ -1113,7 +1272,7 @@ private:
       kernel::with_matmul_configuration<Atom, TilePolicy, FlatPackedB>(
           scope, flat_m, n_, Implementation{},
           [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-            execute_problem_extents<true>(
+            execute_problem_extents<false>(
                 configured, flat_m, n_, k_, a, b,
                 c_input, c_output, scratch);
           });
@@ -1176,7 +1335,7 @@ private:
         kernel::with_matmul_configuration<Atom, TilePolicy, false>(
             scope, m_, flat_n, Implementation{},
             [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-              execute_problem_extents<true>(
+              execute_problem_extents<false>(
                   configured, m_, flat_n, k_, a, b,
                   c_input, c_output, scratch);
             });
@@ -1213,6 +1372,23 @@ private:
           c_input_, meta::cint<1>, flat_n, flat_n));
     }
     workspace.rewind(workspace_mark);
+  }
+
+  /// Execute the ordinary un-packed branch, owning AMX scratch for exactly
+  /// the duration of the traversal.  SME needs no software scratch.
+  template <execution::ExecutionScope Scope, typename Fn>
+  VECOPS_ALWAYS_INLINE static void run_without_auto_packing(
+      Scope& scope, Fn&& fn) {
+    if constexpr (std::same_as<
+                      Implementation, kernel::matmul_implementation::AMX>) {
+      auto& workspace = scope.workspace_view();
+      const auto mark = workspace.mark();
+      std::forward<Fn>(fn)(workspace.allocate(
+          kernel::matmul_implementation::scratch_bytes<Implementation>(), 64));
+      workspace.rewind(mark);
+    } else {
+      std::forward<Fn>(fn)(nullptr);
+    }
   }
 
   template <execution::ExecutionScope Scope>
@@ -1271,28 +1447,37 @@ private:
             Atom, TilePolicy, PackedBInput>(
                 scope, m_, n_, Implementation{},
                 [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-                  run_loop.template operator()<true>(configured, scratch);
+                  run_loop.template operator()<false>(configured, scratch);
                 });
       } else {
         run_loop.template operator()<false>(scope, scratch);
       }
     };
-    if constexpr (AutoPackA || AutoPackB) {
-      if constexpr (CompileTimeAutoPacking) {
-        execute_auto_packed(scope);
-      } else {
-        if constexpr (std::same_as<
-                          Implementation,
-                          kernel::matmul_implementation::AMX>) {
-          auto& workspace = scope.workspace_view();
-          const auto mark = workspace.mark();
-          run(workspace.allocate(
-              kernel::matmul_implementation::scratch_bytes<Implementation>(),
-              64));
-          workspace.rewind(mark);
+    if constexpr (MayAutoPackA || MayAutoPackB) {
+      const bool pack_a = online_packs_a();
+      const bool pack_b = online_packs_b();
+      if constexpr (MayAutoPackA && MayAutoPackB) {
+        if (pack_a) {
+          if (pack_b)
+            execute_auto_packed<true, true>(scope);
+          else
+            execute_auto_packed<true, false>(scope);
+        } else if (pack_b) {
+          execute_auto_packed<false, true>(scope);
         } else {
-          run(nullptr);
+          run_without_auto_packing(scope, run);
         }
+      } else if constexpr (MayAutoPackA) {
+        if (pack_a)
+          execute_auto_packed<true, false>(scope);
+        else
+          run_without_auto_packing(scope, run);
+      } else {
+        static_assert(MayAutoPackB);
+        if (pack_b)
+          execute_auto_packed<false, true>(scope);
+        else
+          run_without_auto_packing(scope, run);
       }
     } else if constexpr (std::same_as<
                              Implementation,

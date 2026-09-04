@@ -180,6 +180,30 @@ inline constexpr bool small_vector_candidate_v =
        std::same_as<typename Atom::TB, uint8_t>)));
 #endif
 
+/// Accumulating form used by split-K middle/last phases: direct native
+/// accumulator input/output with no transforms.  The vector dot core adds the
+/// prior value after reduction, so it remains ZA/TILECFG-free.
+template <::vecops::matmul::Atom Atom, typename A, typename B,
+          typename CInput, typename COutput>
+inline constexpr bool small_vector_accumulate_candidate_v =
+#if defined(VECOPS_DISABLE_AMX_SMALL_VECTOR)
+    false;
+#else
+    direct_row_major_input_v<A> && direct_row_major_input_v<B> &&
+    direct_row_major_input_v<CInput> && direct_row_major_output_v<COutput> &&
+    std::same_as<TransformOf<CInput>, tensor::NoTransform> &&
+    std::same_as<TransformOf<COutput>, tensor::NoTransform> &&
+    std::same_as<typename CInput::MemoryElement, typename Atom::TAcc> &&
+    std::same_as<typename COutput::MemoryElement, typename Atom::TAcc> &&
+    ((SmallVectorBF16Available &&
+      std::same_as<Atom, ::vecops::matmul::AMX_BF16F32>) ||
+     (SmallVectorI8Available &&
+      (std::same_as<typename Atom::TA, int8_t> ||
+       std::same_as<typename Atom::TA, uint8_t>) &&
+      (std::same_as<typename Atom::TB, int8_t> ||
+       std::same_as<typename Atom::TB, uint8_t>)));
+#endif
+
 /// Static preconditions of the fused BF16 small leaf: like
 /// small_vector_candidate_v but the C transforms only need to be
 /// elementwise (fused into the epilogue) and A may arrive packed.
@@ -209,18 +233,16 @@ inline constexpr bool fused_small_bf16_candidate_v =
     ;
 #endif
 
-/// Static preconditions of the packed-A/packed-B residual-split leaf:
-/// both operands already packed, zero C input, direct row-major output.
+/// Static preconditions of the residual-split traversal.  Operand packing,
+/// dtypes, and C prologue/epilogue remain properties of the ordinary tile
+/// access layer, so raw/packed inputs, transforms, and split-K phases all use
+/// the same region splitter.
 /// The concrete shapes it fires for are pinned in
 /// select_automatic_dispatch_owner() and residual_split_shape_applicability().
 template <::vecops::matmul::Atom Atom, typename A, typename B,
           typename CInput, typename COutput>
 inline constexpr bool packed_ab_tail_split_candidate_v =
-    std::same_as<Atom, ::vecops::matmul::AMX_BF16F32> &&
-    is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
-    is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B> &&
-    IsZeroTransform<TransformOf<CInput>>::value &&
-    direct_row_major_output_v<COutput>;
+    CInput::Rank == 2 && COutput::Rank == 2;
 
 /// Which implementation owns this leaf in run(). One value is chosen
 /// statically when the Meta contracts suffice, otherwise at run time
@@ -476,20 +498,36 @@ bounded_area_support_applicability() {
   }
 }
 
-/// Support gate for the residual split: the split needs an M beyond one
-/// 16-row bulk block (upper bound <= 16 leaves no tail; lower bound >= 17
-/// guarantees one), everything in between decides at run time.
+/// Support gate for the residual split: either spatial axis may contain a
+/// non-empty residual beyond an aligned 16-element bulk region.
 template <meta::ValueType M, meta::ValueType N, meta::ValueType K>
 consteval ::vecops::matmul::details::Applicability
 residual_split_support_applicability() {
   using Applicability = ::vecops::matmul::details::Applicability;
   using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
   constexpr auto Valid = valid_problem_applicability<M, N, K>();
+  constexpr bool MHasKnownTail = [] {
+    if constexpr (meta::is_singleton_v<MV>)
+      return meta::singleton_value_v<MV> > 16 &&
+          meta::singleton_value_v<MV> % 16 != 0;
+    else
+      return false;
+  }();
+  constexpr bool NHasKnownTail = [] {
+    if constexpr (meta::is_singleton_v<NV>)
+      return meta::singleton_value_v<NV> > 16 &&
+          meta::singleton_value_v<NV> % 16 != 0;
+    else
+      return false;
+  }();
   if constexpr (Valid == Applicability::never ||
-                (meta::has_upper_bound_v<MV> &&
-                 meta::upper_bound_v<MV> <= 16)) {
+                ((meta::has_upper_bound_v<MV> &&
+                  meta::upper_bound_v<MV> <= 16) &&
+                 (meta::has_upper_bound_v<NV> &&
+                  meta::upper_bound_v<NV> <= 16))) {
     return Applicability::never;
-  } else if constexpr (meta::lower_bound_at_least_v<MV, 17>) {
+  } else if constexpr (MHasKnownTail || NHasKnownTail) {
     return Valid;
   } else {
     return Applicability::runtime;
@@ -515,14 +553,7 @@ residual_split_shape_applicability() {
     return Applicable
         ? ::vecops::matmul::details::Applicability::always
         : ::vecops::matmul::details::Applicability::never;
-  } else if constexpr (
-      (extent_excludes_v<MV, 17> &&
-       extent_excludes_v<MV, 18> &&
-       extent_excludes_v<MV, 20>) ||
-      (extent_excludes_v<NV, 33> &&
-       extent_excludes_v<NV, 47> &&
-       extent_excludes_v<NV, 48>) ||
-      extent_excludes_v<KV, 1024>) {
+  } else if constexpr (extent_excludes_v<KV, 1024>) {
     return ::vecops::matmul::details::Applicability::never;
   } else {
     return ::vecops::matmul::details::Applicability::runtime;
@@ -540,8 +571,10 @@ consteval DispatchOwner select_automatic_dispatch_owner() {
   using MV = std::remove_cvref_t<M>;
   using NV = std::remove_cvref_t<N>;
   using KV = std::remove_cvref_t<K>;
-  if constexpr (small_vector_candidate_v<
-                    Atom, A, B, CInput, COutput> &&
+  if constexpr ((small_vector_candidate_v<
+                     Atom, A, B, CInput, COutput> ||
+                 small_vector_accumulate_candidate_v<
+                     Atom, A, B, CInput, COutput>) &&
                 small_vector_guaranteed<Atom, MV, NV, KV>()) {
     return DispatchOwner::SmallVector;
   } else if constexpr (fused_small_bf16_candidate_v<
@@ -553,16 +586,23 @@ consteval DispatchOwner select_automatic_dispatch_owner() {
     return DispatchOwner::FusedSmallBF16;
   } else if constexpr (
       AllowTailSplit &&
+      std::same_as<Atom, ::vecops::matmul::AMX_BF16F32> &&
+      is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
+      is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B> &&
       packed_ab_tail_split_candidate_v<
           Atom, A, B, CInput, COutput> &&
-      (extent_is_v<MV, 17> || extent_is_v<MV, 18> ||
-       extent_is_v<MV, 20>) &&
-      (extent_is_v<NV, 33> || extent_is_v<NV, 47> ||
-       extent_is_v<NV, 48>) &&
+      (((extent_is_v<MV, 17> || extent_is_v<MV, 18> ||
+         extent_is_v<MV, 20>) &&
+        (extent_is_v<NV, 33> || extent_is_v<NV, 47> ||
+         extent_is_v<NV, 48>)) ||
+       ((extent_is_v<NV, 17> || extent_is_v<NV, 18> ||
+         extent_is_v<NV, 20>) &&
+        (extent_is_v<MV, 33> || extent_is_v<MV, 47> ||
+         extent_is_v<MV, 48>))) &&
       extent_is_v<KV, 1024>) {
-    // One exact 16-row bulk region plus a 1..4-row tail, with an N that
-    // is a whole number of 16-wide B panels (2/3 minus a sliver). The
-    // pinned shapes are the ones the bulk+tail split was measured on.
+    // One aligned bulk region plus a short residual on whichever spatial
+    // axis wastes fewer tile lanes.  The measured catalog and its exact
+    // transpose share this owner.
     return DispatchOwner::PackedABTailSplit;
   } else {
     // Unconstrained Dynamic extents intentionally own only the general AMX
@@ -589,7 +629,7 @@ inline constexpr bool dispatch_owner_in_family_v =
 /// facts: General/WholeProblem always apply; SmallVector applies when a
 /// raw or fused vector candidate matches and the shape probes admit it;
 /// ResidualSplit applies when tail splitting is allowed, the packed
-/// candidate matches, and M can exceed one bulk block. Used by run() to
+/// candidate matches, and either spatial axis has a residual. Used by run() to
 /// honour Prefer/Require requests that the automatic owner does not
 /// already satisfy.
 template <typename Family,
@@ -607,8 +647,10 @@ family_applicability() {
   } else if constexpr (std::same_as<
                            Family,
                            ::vecops::matmul::kernel_family::SmallVector>) {
-    constexpr auto Raw = small_vector_candidate_v<
-        Atom, A, B, CInput, COutput>
+    constexpr auto Raw = (small_vector_candidate_v<
+        Atom, A, B, CInput, COutput> ||
+        small_vector_accumulate_candidate_v<
+            Atom, A, B, CInput, COutput>)
         ? valid_problem_applicability<M, N, K>()
         : Applicability::never;
     constexpr auto Fused = fused_small_bf16_candidate_v<
@@ -696,7 +738,7 @@ consteval DispatchOwner select_dispatch_owner() {
  * in vec::widening_dot. Keeping the matrix traversal here makes one function
  * body usable by every runtime shape admitted by the family selector.
  */
-template <typename TA, typename TB, typename Acc>
+template <bool Accumulate = false, typename TA, typename TB, typename Acc>
 inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64)
 #if defined(COMPILER_GCC)
 __attribute__((noclone))
@@ -706,7 +748,8 @@ small_vector_dense_matmul(
     const TA* a, nint_t a_stride,
     const TB* b, nint_t b_stride,
     Acc* c, nint_t c_stride,
-    nint_t m, nint_t n, nint_t k) {
+    nint_t m, nint_t n, nint_t k,
+    const Acc* prior = nullptr, nint_t prior_stride = 0) {
   using ATag = vec::ScalableTag<TA, 0>;
   using BTag = vec::ScalableTag<TB, 0>;
   using AccTag = std::conditional_t<
@@ -761,10 +804,15 @@ small_vector_dense_matmul(
         accumulator3 = vec::widening_dot(
             AccTag{}, ATag{}, BTag{}, av, bv3, accumulator3);
       }
-      c[i * c_stride + j + 0] = vec::reduce_add(AccTag{}, accumulator0);
-      c[i * c_stride + j + 1] = vec::reduce_add(AccTag{}, accumulator1);
-      c[i * c_stride + j + 2] = vec::reduce_add(AccTag{}, accumulator2);
-      c[i * c_stride + j + 3] = vec::reduce_add(AccTag{}, accumulator3);
+      auto store = [&](nint_t column, Acc value) VECOPS_INLINE_LAMBDA {
+        if constexpr (Accumulate)
+          value += prior[i * prior_stride + column];
+        c[i * c_stride + column] = value;
+      };
+      store(j + 0, vec::reduce_add(AccTag{}, accumulator0));
+      store(j + 1, vec::reduce_add(AccTag{}, accumulator1));
+      store(j + 2, vec::reduce_add(AccTag{}, accumulator2));
+      store(j + 3, vec::reduce_add(AccTag{}, accumulator3));
     }
     for (; j < n; ++j) {
       auto accumulator0 = vec::zeros(AccTag{});
@@ -819,8 +867,101 @@ small_vector_dense_matmul(
           AccTag{}, accumulator2, accumulator3);
       const auto accumulator = vec::add(
           AccTag{}, accumulator01, accumulator23);
-      c[i * c_stride + j] = vec::reduce_add(AccTag{}, accumulator);
+      Acc value = vec::reduce_add(AccTag{}, accumulator);
+      if constexpr (Accumulate) value += prior[i * prior_stride + j];
+      c[i * c_stride + j] = value;
     }
+  }
+}
+
+/**
+ * Tall-skinny twin of small_vector_dense_matmul for N == 1.
+ *
+ * The ordinary traversal groups four adjacent N outputs and shares one A
+ * vector.  Applying the exact transposed schedule here groups four M outputs
+ * and shares one B vector; this avoids loading the same B row once per output
+ * row on GEMV-column shapes.  The scalar remainder reuses the dense kernel so
+ * both paths keep identical tail and signedness behavior.
+ */
+template <bool Accumulate = false, typename TA, typename TB, typename Acc>
+inline VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64)
+#if defined(COMPILER_GCC)
+__attribute__((noclone))
+#endif
+void
+small_vector_tall_matmul(
+    const TA* a, nint_t a_stride,
+    const TB* b, nint_t b_stride,
+    Acc* c, nint_t c_stride,
+    nint_t m, nint_t k,
+    const Acc* prior = nullptr, nint_t prior_stride = 0) {
+  using ATag = vec::ScalableTag<TA, 0>;
+  using BTag = vec::ScalableTag<TB, 0>;
+  using AccTag = std::conditional_t<
+      std::same_as<TA, Acc>, ATag, vec::ViewAs<Acc, ATag>>;
+  constexpr nint_t VectorK = vec::size(ATag{});
+  nint_t i = 0;
+  for (; i + 4 <= m; i += 4) {
+    auto accumulator0 = vec::zeros(AccTag{});
+    auto accumulator1 = accumulator0;
+    auto accumulator2 = accumulator0;
+    auto accumulator3 = accumulator0;
+    nint_t kk = 0;
+    for (; kk + VectorK <= k; kk += VectorK) {
+      const auto bv = vec::load(BTag{}, b + kk);
+      const auto av0 = vec::load(ATag{}, a + (i + 0) * a_stride + kk);
+      const auto av1 = vec::load(ATag{}, a + (i + 1) * a_stride + kk);
+      const auto av2 = vec::load(ATag{}, a + (i + 2) * a_stride + kk);
+      const auto av3 = vec::load(ATag{}, a + (i + 3) * a_stride + kk);
+      accumulator0 = vec::widening_dot(
+          AccTag{}, ATag{}, BTag{}, av0, bv, accumulator0);
+      accumulator1 = vec::widening_dot(
+          AccTag{}, ATag{}, BTag{}, av1, bv, accumulator1);
+      accumulator2 = vec::widening_dot(
+          AccTag{}, ATag{}, BTag{}, av2, bv, accumulator2);
+      accumulator3 = vec::widening_dot(
+          AccTag{}, ATag{}, BTag{}, av3, bv, accumulator3);
+    }
+    if (kk < k) {
+      const nint_t active = k - kk;
+      const auto bv = vec::load(
+          BTag{}, b + kk, vec::opt::first(active), vec::opt::zero);
+      const auto av0 = vec::load(
+          ATag{}, a + (i + 0) * a_stride + kk,
+          vec::opt::first(active), vec::opt::zero);
+      const auto av1 = vec::load(
+          ATag{}, a + (i + 1) * a_stride + kk,
+          vec::opt::first(active), vec::opt::zero);
+      const auto av2 = vec::load(
+          ATag{}, a + (i + 2) * a_stride + kk,
+          vec::opt::first(active), vec::opt::zero);
+      const auto av3 = vec::load(
+          ATag{}, a + (i + 3) * a_stride + kk,
+          vec::opt::first(active), vec::opt::zero);
+      accumulator0 = vec::widening_dot(
+          AccTag{}, ATag{}, BTag{}, av0, bv, accumulator0);
+      accumulator1 = vec::widening_dot(
+          AccTag{}, ATag{}, BTag{}, av1, bv, accumulator1);
+      accumulator2 = vec::widening_dot(
+          AccTag{}, ATag{}, BTag{}, av2, bv, accumulator2);
+      accumulator3 = vec::widening_dot(
+          AccTag{}, ATag{}, BTag{}, av3, bv, accumulator3);
+    }
+    auto store = [&](nint_t row, Acc value) VECOPS_INLINE_LAMBDA {
+      if constexpr (Accumulate) value += prior[row * prior_stride];
+      c[row * c_stride] = value;
+    };
+    store(i + 0, vec::reduce_add(AccTag{}, accumulator0));
+    store(i + 1, vec::reduce_add(AccTag{}, accumulator1));
+    store(i + 2, vec::reduce_add(AccTag{}, accumulator2));
+    store(i + 3, vec::reduce_add(AccTag{}, accumulator3));
+  }
+  if (i < m) {
+    small_vector_dense_matmul<Accumulate>(
+        a + i * a_stride, a_stride, b, b_stride,
+        c + i * c_stride, c_stride, m - i, nint_t{1}, k,
+        prior == nullptr ? nullptr : prior + i * prior_stride,
+        prior_stride);
   }
 }
 
@@ -903,13 +1044,46 @@ VECOPS_ALWAYS_INLINE void run_small_vector(
   const auto a_strides = a.raw_strides();
   const auto b_strides = b.raw_strides();
   const auto c_strides = c_output.raw_strides();
-  small_vector_dense_matmul(
-      reinterpret_cast<const typename Atom::TA*>(a.raw_data()),
-      a_strides[0],
-      reinterpret_cast<const typename Atom::TB*>(b.raw_data()),
-      b_strides[0],
-      reinterpret_cast<typename Atom::TAcc*>(c_output.raw_data()),
-      c_strides[0], m, n, k);
+  const auto* a_data = reinterpret_cast<const typename Atom::TA*>(a.raw_data());
+  const auto* b_data = reinterpret_cast<const typename Atom::TB*>(b.raw_data());
+  auto* c_data = reinterpret_cast<typename Atom::TAcc*>(c_output.raw_data());
+  if (n == 1 && m >= 4) {
+    small_vector_tall_matmul(
+        a_data, a_strides[0], b_data, b_strides[0],
+        c_data, c_strides[0], m, k);
+  } else {
+    small_vector_dense_matmul(
+        a_data, a_strides[0], b_data, b_strides[0],
+        c_data, c_strides[0], m, n, k);
+  }
+}
+
+/// Split-K accumulating entry for the native direct accumulator form.
+template <::vecops::matmul::Atom Atom, typename A, typename B,
+          typename CInput, typename COutput>
+VECOPS_ALWAYS_INLINE void run_small_vector_accumulating(
+    const A& a, const B& b, const CInput& c_input, COutput& c_output,
+    nint_t m, nint_t n, nint_t k) {
+  static_assert(small_vector_accumulate_candidate_v<
+      Atom, A, B, CInput, COutput>);
+  const auto a_strides = a.raw_strides();
+  const auto b_strides = b.raw_strides();
+  const auto ci_strides = c_input.raw_strides();
+  const auto co_strides = c_output.raw_strides();
+  const auto* a_data = reinterpret_cast<const typename Atom::TA*>(a.raw_data());
+  const auto* b_data = reinterpret_cast<const typename Atom::TB*>(b.raw_data());
+  const auto* prior = reinterpret_cast<const typename Atom::TAcc*>(
+      c_input.raw_data());
+  auto* output = reinterpret_cast<typename Atom::TAcc*>(c_output.raw_data());
+  if (n == 1 && m >= 4) {
+    small_vector_tall_matmul<true>(
+        a_data, a_strides[0], b_data, b_strides[0],
+        output, co_strides[0], m, k, prior, ci_strides[0]);
+  } else {
+    small_vector_dense_matmul<true>(
+        a_data, a_strides[0], b_data, b_strides[0],
+        output, co_strides[0], m, n, k, prior, ci_strides[0]);
+  }
 }
 
 /// Run the FusedSmallBF16 owner: compute into the 16-element values
@@ -969,6 +1143,7 @@ struct Configuration : execution::details::x86::TileConfiguration {
     // B0..B(N-1) remain sixteen rows.
     for (nint_t i = 0; i <= output_tiles; ++i) rows[i] = tile_rows;
   }
+
 };
 
 /// Catalog input for Tile2D. Families are scored by tile count: area
@@ -1747,12 +1922,13 @@ struct Backend<matmul_implementation::AMX> {
 
   template <::vecops::matmul::Atom Atom, typename Policy,
             execution::ExecutionScope Scope,
-            meta::ValueType TraversalM, meta::ValueType N,
+            meta::ValueType TraversalM, meta::ValueType TraversalN,
             meta::ValueType K,
             typename A, typename B, typename CInput, typename COutput>
   VECOPS_ALWAYS_INLINE static void run_configured_region(
-      Scope&, TraversalM traversal_m, N n, K k,
-      nint_t logical_m, nint_t origin_m,
+      Scope&, TraversalM traversal_m, TraversalN traversal_n, K k,
+      nint_t logical_m, nint_t logical_n,
+      nint_t origin_m, nint_t origin_n,
       const A& a, const B& b,
       const CInput& c_input, COutput& c_output,
       void* scratch) {
@@ -1764,8 +1940,8 @@ struct Backend<matmul_implementation::AMX> {
         amx::Configuration>);
     VECOPS_ASSERT(scratch != nullptr, "AMX matmul scratch is null");
     matmul_details::run_tiles_region<Backend, Atom, Policy>(
-        traversal_m, n, k, logical_m, static_cast<nint_t>(n),
-        origin_m, 0, a, b, c_input, c_output, scratch);
+        traversal_m, traversal_n, k, logical_m, logical_n,
+        origin_m, origin_n, a, b, c_input, c_output, scratch);
   }
 
   /// Entry point, resolving the leaf in four tiers (first match wins):
@@ -1801,22 +1977,89 @@ struct Backend<matmul_implementation::AMX> {
     const nint_t logical_n = static_cast<nint_t>(n);
     const nint_t logical_k = static_cast<nint_t>(k);
     auto run_residual_split = [&]() VECOPS_INLINE_LAMBDA {
-      constexpr nint_t BulkM = 16;
-      const meta::Any tail_m{logical_m - BulkM};
-      with_configuration<Atom, Policy, true>(
-          scope, meta::cint<BulkM>, n,
-          [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-            run_configured_region<Atom, Policy>(
-                configured, meta::cint<BulkM>, n, k,
-                logical_m, 0, a, b, c_input, c_output, scratch);
-          });
-      with_configuration<Atom, Policy, true>(
-          scope, tail_m, n,
-          [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-            run_configured_region<Atom, Policy>(
-                configured, tail_m, n, k,
-                logical_m, BulkM, a, b, c_input, c_output, scratch);
-          });
+      constexpr bool PackedAB =
+          amx::is_packed_access_v<
+              Atom, ::vecops::matmul::Operand::A, A> &&
+          amx::is_packed_access_v<
+              Atom, ::vecops::matmul::Operand::B, B>;
+      constexpr bool PackedB = amx::is_packed_access_v<
+          Atom, ::vecops::matmul::Operand::B, B>;
+      constexpr bool AlreadyConfigured = [] {
+        if constexpr (requires {
+                        typename std::remove_cvref_t<Scope>::ActiveConfiguration;
+                      }) {
+          return std::same_as<
+              typename std::remove_cvref_t<Scope>::ActiveConfiguration,
+              amx::Configuration>;
+        } else {
+          return false;
+        }
+      }();
+      const nint_t residual_m = logical_m % 16;
+      const nint_t residual_n = logical_n % 16;
+      const bool split_m = residual_m != 0 && logical_m > 16 &&
+          (residual_n == 0 || logical_n <= 16 || residual_m <= residual_n);
+      if (split_m) {
+        const meta::Any bulk_m{logical_m - residual_m};
+        const meta::Any tail_m{residual_m};
+        auto run_bulk = [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          run_configured_region<Atom, Policy>(
+              configured, bulk_m, n, k,
+              logical_m, logical_n, 0, 0,
+              a, b, c_input, c_output, scratch);
+        };
+        auto run_tail = [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          run_configured_region<Atom, Policy>(
+              configured, tail_m, n, k,
+              logical_m, logical_n, logical_m - residual_m, 0,
+              a, b, c_input, c_output, scratch);
+        };
+        if constexpr (PackedAB) {
+          with_configuration<Atom, Policy, true>(scope, bulk_m, n, run_bulk);
+          with_configuration<Atom, Policy, true>(scope, tail_m, n, run_tail);
+        } else if constexpr (AlreadyConfigured) {
+          run_bulk(scope);
+          run_tail(scope);
+        } else {
+          with_configuration<Atom, Policy, PackedB>(
+              scope, m, n,
+              [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+                run_bulk(configured);
+                run_tail(configured);
+              });
+        }
+      } else {
+        VECOPS_ASSERT(residual_n != 0 && logical_n > 16,
+                      "AMX residual split requires a spatial tail");
+        const meta::Any bulk_n{logical_n - residual_n};
+        const meta::Any tail_n{residual_n};
+        auto run_bulk = [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          run_configured_region<Atom, Policy>(
+              configured, m, bulk_n, k,
+              logical_m, logical_n, 0, 0,
+              a, b, c_input, c_output, scratch);
+        };
+        auto run_tail = [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          run_configured_region<Atom, Policy>(
+              configured, m, tail_n, k,
+              logical_m, logical_n, 0, logical_n - residual_n,
+              a, b, c_input, c_output, scratch);
+        };
+        if constexpr (PackedAB) {
+          with_configuration<Atom, Policy, true>(scope, m, bulk_n, run_bulk);
+          with_configuration<Atom, Policy, true>(scope, m, tail_n, run_tail);
+        } else if constexpr (AlreadyConfigured) {
+          run_bulk(scope);
+          run_tail(scope);
+        } else {
+          with_configuration<Atom, Policy, PackedB>(
+              scope, m, n,
+              [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+                run_bulk(configured);
+                run_tail(configured);
+              });
+        }
+      }
     };
     constexpr bool RequestsSmallVector = std::same_as<
         RequestedFamily,
@@ -1847,6 +2090,11 @@ struct Backend<matmul_implementation::AMX> {
                           Atom, A, B, CInput, COutput>) {
           amx::run_small_vector<Atom>(
               a, b, c_output, logical_m, logical_n, logical_k);
+        } else if constexpr (amx::small_vector_accumulate_candidate_v<
+                                 Atom, A, B, CInput, COutput>) {
+          amx::run_small_vector_accumulating<Atom>(
+              a, b, c_input, c_output,
+              logical_m, logical_n, logical_k);
         } else if constexpr (amx::fused_small_bf16_candidate_v<
                                  Atom, A, B, CInput, COutput>) {
           amx::run_fused_small_bf16<Atom>(
@@ -1872,7 +2120,9 @@ struct Backend<matmul_implementation::AMX> {
       const bool supported = [&]() VECOPS_INLINE_LAMBDA {
         if constexpr (Support == Applicability::never) return false;
         else if constexpr (Support == Applicability::always) return true;
-        else return logical_m > 16 && logical_n > 0 && logical_k >= 0;
+        else return logical_m > 0 && logical_n > 0 && logical_k >= 0 &&
+            ((logical_m > 16 && logical_m % 16 != 0) ||
+             (logical_n > 16 && logical_n % 16 != 0));
       }();
       if (supported) {
         run_residual_split();
@@ -1884,8 +2134,17 @@ struct Backend<matmul_implementation::AMX> {
       }
     }
     if constexpr (Owner == amx::DispatchOwner::SmallVector) {
-      amx::run_small_vector<Atom>(
-          a, b, c_output, logical_m, logical_n, logical_k);
+      if constexpr (amx::small_vector_candidate_v<
+                        Atom, A, B, CInput, COutput>) {
+        amx::run_small_vector<Atom>(
+            a, b, c_output, logical_m, logical_n, logical_k);
+      } else {
+        static_assert(amx::small_vector_accumulate_candidate_v<
+            Atom, A, B, CInput, COutput>);
+        amx::run_small_vector_accumulating<Atom>(
+            a, b, c_input, c_output,
+            logical_m, logical_n, logical_k);
+      }
       return;
     } else if constexpr (Owner == amx::DispatchOwner::FusedSmallBF16) {
       amx::run_fused_small_bf16<Atom>(
@@ -1902,8 +2161,10 @@ struct Backend<matmul_implementation::AMX> {
     // routing there (permits_runtime_family_v keeps `require` from being
     // silently served by a different family's leaf).
     constexpr bool RuntimeRawSmall = [] {
-      if constexpr (!amx::small_vector_candidate_v<
-                        Atom, A, B, CInput, COutput> ||
+      if constexpr (!(amx::small_vector_candidate_v<
+                          Atom, A, B, CInput, COutput> ||
+                      amx::small_vector_accumulate_candidate_v<
+                          Atom, A, B, CInput, COutput>) ||
                     !amx::permits_runtime_family_v<
                         FamilyDispatch,
                         ::vecops::matmul::kernel_family::SmallVector>) {
@@ -1927,6 +2188,12 @@ struct Backend<matmul_implementation::AMX> {
     }();
     constexpr bool RuntimeResidualSplit = [] {
       if constexpr (!AllowTailSplit ||
+                    !std::same_as<
+                        Atom, ::vecops::matmul::AMX_BF16F32> ||
+                    !amx::is_packed_access_v<
+                        Atom, ::vecops::matmul::Operand::A, A> ||
+                    !amx::is_packed_access_v<
+                        Atom, ::vecops::matmul::Operand::B, B> ||
                     !amx::packed_ab_tail_split_candidate_v<
                         Atom, A, B, CInput, COutput> ||
                     !amx::permits_runtime_family_v<
@@ -1943,8 +2210,15 @@ struct Backend<matmul_implementation::AMX> {
       if (runtime_amx_small_vector_profitable(
               amx::small_vector_shape_v<Atom>,
               logical_m, logical_n, logical_k)) {
-        amx::run_small_vector<Atom>(
-            a, b, c_output, logical_m, logical_n, logical_k);
+        if constexpr (amx::small_vector_candidate_v<
+                          Atom, A, B, CInput, COutput>) {
+          amx::run_small_vector<Atom>(
+              a, b, c_output, logical_m, logical_n, logical_k);
+        } else {
+          amx::run_small_vector_accumulating<Atom>(
+              a, b, c_input, c_output,
+              logical_m, logical_n, logical_k);
+        }
         return;
       }
     } else if constexpr (RuntimeFusedSmall) {
@@ -1979,13 +2253,32 @@ struct Backend<matmul_implementation::AMX> {
 
     constexpr bool PackedB =
         amx::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>;
-    with_configuration<Atom, Policy, PackedB>(
-        scope, m, n, [&](auto& configured)
-            VECOPS_INLINE_LAMBDA_NOEXCEPT {
-          run_configured<Atom, Policy>(
-              configured, m, n, k, a, b,
-              c_input, c_output, scratch);
-        });
+    constexpr bool HasActiveConfiguration = [] {
+      if constexpr (requires {
+                      typename std::remove_cvref_t<Scope>::ActiveConfiguration;
+                    }) {
+        return std::same_as<
+            typename std::remove_cvref_t<Scope>::ActiveConfiguration,
+            amx::Configuration>;
+      } else {
+        return false;
+      }
+    }();
+    if constexpr (HasActiveConfiguration) {
+      // Batch/flatten planners may own one compatible TILECFG around many
+      // leaves.  Family selection above still runs for every leaf; only the
+      // General fallback reuses the active image here.
+      run_configured<Atom, Policy>(
+          scope, m, n, k, a, b, c_input, c_output, scratch);
+    } else {
+      with_configuration<Atom, Policy, PackedB>(
+          scope, m, n, [&](auto& configured)
+              VECOPS_INLINE_LAMBDA_NOEXCEPT {
+            run_configured<Atom, Policy>(
+                configured, m, n, k, a, b,
+                c_input, c_output, scratch);
+          });
+    }
   }
 
   /// Resolve the compile-time kernel plan for a leaf: KGuaranteed from

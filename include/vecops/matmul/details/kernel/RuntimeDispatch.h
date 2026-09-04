@@ -73,7 +73,12 @@ constexpr bool amx_residual_split_profitable(
     nint_t m, nint_t n, nint_t k) {
   const bool selected_m = m == 17 || m == 18 || m == 20;
   const bool selected_n = n == 33 || n == 47 || n == 48;
-  return selected_m && selected_n && k == 1024;
+  // The packed ABI and tile scheduler are symmetric in the two spatial
+  // dimensions.  Keep the measured catalog but admit its transpose too.
+  return ((selected_m && selected_n) ||
+          ((n == 17 || n == 18 || n == 20) &&
+           (m == 33 || m == 47 || m == 48))) &&
+      k == 1024;
 }
 
 } // namespace runtime_dispatch_rules

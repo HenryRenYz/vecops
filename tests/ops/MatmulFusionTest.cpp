@@ -237,6 +237,13 @@ TEST(MatmulFusionTest, RuntimeQuantFamilySupportsMultipleRowsAndTails) {
       Atom, RequireRuntimeQuant>(5, 19, 67);
   vecops::test::matmul::check_runtime_per_row_column_quantization_family<
       Atom, RequireRuntimeQuant>(3, 17, 66);
+  using RequireGenericTiled =
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::GenericTiled>;
+  // 4097 exceeds the cache-derived KC on the target, so this covers the int32
+  // running-accumulator phases and applies dequantization only at the end.
+  vecops::test::matmul::check_runtime_per_row_column_quantization_family<
+      Atom, RequireGenericTiled>(3, 17, 4097);
 }
 
 #elif VECOPS_TARGET_SHARD_INDEX == 4

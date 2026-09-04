@@ -98,8 +98,12 @@ VECOPS_INLINE void run_tiled_rank2(
       Operand::A, APacking, Order, AtomT>;
   using BController = OperandController<
       Operand::B, BPacking, Order, AtomT>;
-  static_assert(ASpec::InputTensor::Ndim == 2 &&
-                BSpec::InputTensor::Ndim == 2 &&
+  static_assert((ASpec::InputTensor::Ndim == 2 ||
+                 ::vecops::matmul::is_packed_layout<
+                     AtomT, Operand::A, typename ASpec::InputLayout>()) &&
+                (BSpec::InputTensor::Ndim == 2 ||
+                 ::vecops::matmul::is_packed_layout<
+                     AtomT, Operand::B, typename BSpec::InputLayout>()) &&
                 CInputSpec::InputTensor::Ndim == 2 &&
                 COutputSpec::OutputTensor::Ndim == 2,
                 "generic matmul Tiler currently consumes rank-two leaves");

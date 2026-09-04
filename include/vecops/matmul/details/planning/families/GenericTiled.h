@@ -71,6 +71,20 @@ VECOPS_INLINE const Leaf& batch_loop_leaf(const Leaf& leaf) {
   return leaf;
 }
 
+
+/// Extract one logical rank-two leaf for workspace accounting while keeping
+/// a packed operand's full format rank (panel/group dimensions are part of
+/// its ABI and must not be stripped as if they were batch dimensions).
+template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
+          typename Spec>
+VECOPS_INLINE auto workspace_leaf(const Spec& spec) {
+  if constexpr (::vecops::matmul::is_packed_layout<
+                    Atom, Side, typename Spec::InputLayout>())
+    return spec;
+  else
+    return tensor::take_trailing<2>(spec);
+}
+
 /**
  * Validate one A/B operand against the logical problem.  @p spatial is the
  * operand's row count (M for the A side, N for the B side) and @p k is the
@@ -138,8 +152,9 @@ VECOPS_INLINE void validate_input(
   }
 }
 
-/// Workspace bound for the generic tiler: computed from the trailing
-/// rank-two leaf layouts, so leading batch dimensions never enlarge it.
+/// Workspace bound for the generic tiler: raw operands use trailing rank-two
+/// leaf layouts so batch dimensions never enlarge it; packed operands retain
+/// their complete panel/group layout ABI.
 template <typename Config, typename Implementation,
           meta::ValueType M, meta::ValueType N, meta::ValueType K,
           tensor::InputSpecLike ASpec, tensor::InputSpecLike BSpec,
@@ -149,8 +164,9 @@ VECOPS_INLINE nint_t generic_tiler_workspace_bytes(
     const ASpec& a, const BSpec& b, const COutputSpec& c_output) {
   static_assert(COutputSpec::OutputTensor::Ndim >= 2,
                 "matmul output must have at least two dimensions");
-  auto a_leaf = tensor::take_trailing<2>(a);
-  auto b_leaf = tensor::take_trailing<2>(b);
+  using Atom = typename Config::Atom;
+  auto a_leaf = workspace_leaf<Atom, ::vecops::matmul::Operand::A>(a);
+  auto b_leaf = workspace_leaf<Atom, ::vecops::matmul::Operand::B>(b);
   auto c_leaf = tensor::take_trailing<2>(c_output);
   return ::vecops::matmul::details::tiled_workspace_bytes<
       Config, Implementation>(

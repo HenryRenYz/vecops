@@ -1018,9 +1018,10 @@ VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void sve_skinny_fused_compute(
  * this leaf exists, e.g. a dequantize -- is applied by the tensor layer
  * instead of forcing the ZA kernel.
  */
-template <bool VaryRows, typename A, typename B, typename COutput>
+template <bool VaryRows, typename A, typename B,
+          typename CInput, typename COutput>
 VECOPS_ALWAYS_INLINE void sve_skinny_fused_matmul(
-    const A& a, const B& b, COutput& c_output,
+    const A& a, const B& b, const CInput& c_input, COutput& c_output,
     nint_t outputs, nint_t logical_k) {
   using T = typename A::ComputeType;
   using Acc = typename COutput::ComputeType;
@@ -1038,17 +1039,32 @@ VECOPS_ALWAYS_INLINE void sve_skinny_fused_matmul(
   using OutputTag = vec::ScalableTag<Acc, 0>;
   if constexpr (VaryRows) {
     for (nint_t output = 0; output < outputs; ++output) {
+      auto value = vec::fill(OutputTag{}, values[output]);
+      if constexpr (!IsZeroTransform<typename CInput::Transform>::value) {
+        value = vec::add(
+            OutputTag{}, value,
+            c_input.load(
+                OutputTag{}, tensor::coord(output, nint_t{0}),
+                tensor::axis<1>, vec::opt::first(1), vec::opt::zero));
+      }
       c_output.store(
           OutputTag{}, tensor::coord(output, nint_t{0}), tensor::axis<1>,
-          vec::fill(OutputTag{}, values[output]), vec::opt::first(1));
+          value, vec::opt::first(1));
     }
   } else {
     const nint_t lanes = vec::size(OutputTag{});
     for (nint_t output = 0; output < outputs; output += lanes) {
       const nint_t active = vecops::min(lanes, outputs - output);
-      const auto value = vec::load(
+      auto value = vec::load(
           OutputTag{}, values + output,
           vec::opt::first(active), vec::opt::zero);
+      if constexpr (!IsZeroTransform<typename CInput::Transform>::value) {
+        value = vec::add(
+            OutputTag{}, value,
+            c_input.load(
+                OutputTag{}, tensor::coord(nint_t{0}, output),
+                tensor::axis<1>, vec::opt::first(active), vec::opt::zero));
+      }
       c_output.store(
           OutputTag{}, tensor::coord(nint_t{0}, output), tensor::axis<1>,
           value, vec::opt::first(active));
@@ -1063,25 +1079,27 @@ VECOPS_ALWAYS_INLINE void sve_skinny_fused_matmul(
  * dispatch bodies. Their transform type remains open-ended, so the wrapper
  * stays in the header, but one noinline COMDAT per actual transform is enough.
  */
-template <bool VaryRows, typename A, typename B, typename COutput>
+template <bool VaryRows, typename A, typename B,
+          typename CInput, typename COutput>
 VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void
 sve_skinny_fused_lane_local_matmul(
-    const A& a, const B& b, COutput& c_output,
+    const A& a, const B& b, const CInput& c_input, COutput& c_output,
     nint_t outputs, nint_t logical_k) {
   static_assert(!COutput::Transform::is_elementwise);
   static_assert(COutput::Transform::is_lane_local);
   sve_skinny_fused_matmul<VaryRows>(
-      a, b, c_output, outputs, logical_k);
+      a, b, c_input, c_output, outputs, logical_k);
 }
 
 #if defined(HAS_SME_F64F64)
 /// fp64 entry of the fused skinny family: delegates to the out-of-line
 /// compute cores (which the header cannot inline cheaply) and reuses the
 /// same stack-values epilogue.
-template <bool VaryRows, typename A, typename B, typename COutput>
+template <bool VaryRows, typename A, typename B,
+          typename CInput, typename COutput>
 VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void
 sve_skinny_fused_matmul_f64_external(
-    const A& a, const B& b, COutput& c_output,
+    const A& a, const B& b, const CInput& c_input, COutput& c_output,
     nint_t outputs, nint_t logical_k) {
   static_assert(std::same_as<typename A::ComputeType, float64_t>);
   static_assert(std::same_as<typename B::ComputeType, float64_t>);
@@ -1104,17 +1122,32 @@ sve_skinny_fused_matmul_f64_external(
   using OutputTag = vec::ScalableTag<float64_t, 0>;
   if constexpr (VaryRows) {
     for (nint_t output = 0; output < outputs; ++output) {
+      auto value = vec::fill(OutputTag{}, values[output]);
+      if constexpr (!IsZeroTransform<typename CInput::Transform>::value) {
+        value = vec::add(
+            OutputTag{}, value,
+            c_input.load(
+                OutputTag{}, tensor::coord(output, nint_t{0}),
+                tensor::axis<1>, vec::opt::first(1), vec::opt::zero));
+      }
       c_output.store(
           OutputTag{}, tensor::coord(output, nint_t{0}), tensor::axis<1>,
-          vec::fill(OutputTag{}, values[output]), vec::opt::first(1));
+          value, vec::opt::first(1));
     }
   } else {
     const nint_t lanes = vec::size(OutputTag{});
     for (nint_t output = 0; output < outputs; output += lanes) {
       const nint_t active = vecops::min(lanes, outputs - output);
-      const auto value = vec::load(
+      auto value = vec::load(
           OutputTag{}, values + output,
           vec::opt::first(active), vec::opt::zero);
+      if constexpr (!IsZeroTransform<typename CInput::Transform>::value) {
+        value = vec::add(
+            OutputTag{}, value,
+            c_input.load(
+                OutputTag{}, tensor::coord(nint_t{0}, output),
+                tensor::axis<1>, vec::opt::first(active), vec::opt::zero));
+      }
       c_output.store(
           OutputTag{}, tensor::coord(nint_t{0}, output), tensor::axis<1>,
           value, vec::opt::first(active));
@@ -1123,31 +1156,30 @@ sve_skinny_fused_matmul_f64_external(
 }
 #endif
 
-/// Whether an output transform is applicable to the fused skinny epilogue:
-/// elementwise transforms map lane-by-lane, lane-local transforms see whole
-/// vectors (wrapper above); anything coordinate-aware is out of scope.
+/// Whether the C prologue/epilogue transforms are applicable to the fused
+/// skinny wrapper: lane-local transforms see each complete active vector;
+/// anything coordinate-aware is out of scope.
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 inline constexpr bool sve_skinny_fused_output_supported_v =
-    COutput::Transform::is_elementwise ||
-    COutput::Transform::is_lane_local;
+    CInput::Transform::is_lane_local && COutput::Transform::is_lane_local;
 
 /**
  * @brief Candidate for the fused skinny leaf.
  *
- * Direct row-major inputs whose output is *not* direct row-major (the
- * output access must apply a supported transform -- that is what makes this
- * "fused"), with the same type constraints as the raw skinny candidate.
- * See the in-place TODO below for the FP64 gating.
+ * Direct row-major A/B with either a non-zero C prologue or a transformed C
+ * output, and the same type constraints as the raw skinny candidate.  This
+ * includes split-K middle/last phases whose C input is the running
+ * accumulator.  See the in-place TODO below for the FP64 gating.
  */
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 inline constexpr bool sve_skinny_fused_candidate_v =
     direct_row_major_input_v<A> && direct_row_major_input_v<B> &&
-    !direct_row_major_output_v<COutput> &&
-    COutput::Rank == 2 &&
+    CInput::Rank == 2 && COutput::Rank == 2 &&
+    (!IsZeroTransform<typename CInput::Transform>::value ||
+     !direct_row_major_output_v<COutput>) &&
     sve_skinny_fused_output_supported_v<Atom, A, B, CInput, COutput> &&
-    IsZeroTransform<typename CInput::Transform>::value &&
     std::same_as<typename A::ComputeType, typename Atom::TA> &&
     std::same_as<typename B::ComputeType, typename Atom::TB> &&
     std::same_as<typename COutput::ComputeType, typename Atom::TAcc> &&
@@ -1471,9 +1503,10 @@ VECOPS_NOINLINE VECOPS_FUNCTION_ALIGN(64) void packed_ab_mmla(
   }
 }
 
-/// Candidate for both packed-dot leaves: both operands in the packed
-/// layout and raw-direct, zero-value C input, direct row-major output of
-/// the accumulator type.
+/// Candidate for both packed-dot leaves.  Packed A/B remain raw-direct; C
+/// may carry any lane-local prologue/epilogue.  The original zero/direct case
+/// writes from MMLA straight to C, while split-K and transformed phases use a
+/// tiny stack accumulator followed by the ordinary tensor access layer.
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 inline constexpr bool packed_dot_candidate_v =
@@ -1481,9 +1514,39 @@ inline constexpr bool packed_dot_candidate_v =
     is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
     is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B> &&
     generic::RawDirectAccess<A> && generic::RawDirectAccess<B> &&
-    IsZeroTransform<typename CInput::Transform>::value &&
-    direct_row_major_output_v<COutput> &&
+    CInput::Rank == 2 && COutput::Rank == 2 &&
+    CInput::Transform::is_lane_local && COutput::Transform::is_lane_local &&
+    std::same_as<typename CInput::ComputeType, typename Atom::TAcc> &&
     std::same_as<typename COutput::ComputeType, typename Atom::TAcc>;
+
+template <::vecops::matmul::Atom Atom,
+          typename CInput, typename COutput>
+VECOPS_ALWAYS_INLINE void packed_dot_epilogue(
+    const typename Atom::TAcc* values,
+    nint_t logical_m, nint_t logical_n,
+    const CInput& c_input, COutput& c_output) {
+  using Acc = typename Atom::TAcc;
+  using Tag = vec::ScalableTag<Acc, 0>;
+  const nint_t lanes = vec::size(Tag{});
+  for (nint_t row = 0; row < logical_m; ++row) {
+    for (nint_t column = 0; column < logical_n; column += lanes) {
+      const nint_t active = vecops::min(lanes, logical_n - column);
+      auto value = vec::load(
+          Tag{}, values + row * logical_n + column,
+          vec::opt::first(active), vec::opt::zero);
+      if constexpr (!IsZeroTransform<typename CInput::Transform>::value) {
+        value = vec::add(
+            Tag{}, value,
+            c_input.load(
+                Tag{}, tensor::coord(row, column), tensor::axis<1>,
+                vec::opt::first(active), vec::opt::zero));
+      }
+      c_output.store(
+          Tag{}, tensor::coord(row, column), tensor::axis<1>, value,
+          vec::opt::first(active));
+    }
+  }
+}
 
 /**
  * @brief Primary packed-dot leaf (2x8 / 8x2 / 4x4 shapes).
@@ -1496,7 +1559,7 @@ template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_ALWAYS_INLINE bool try_packed_dot(
     nint_t logical_m, nint_t logical_n, nint_t logical_k,
-    const A& a, const B& b, const CInput&, COutput& c_output) {
+    const A& a, const B& b, const CInput& c_input, COutput& c_output) {
   if constexpr (!packed_dot_candidate_v<
                     Atom, A, B, CInput, COutput>) {
     return false;
@@ -1527,11 +1590,23 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot(
     if (a_panel != b_panel || ordinary_vl_bytes != 2 * a_panel) {
       return false;
     }
-    // Preserve the exact X24 store sequence. Padded output rows need a
-    // separate vertical store strategy and were not part of its performance
-    // or correctness evidence.
-    if (static_cast<nint_t>(tensor::stride_value<0>(
-            c_output.spec().output_layout())) != logical_n) return false;
+    constexpr bool DirectZeroOutput =
+        IsZeroTransform<typename CInput::Transform>::value &&
+        direct_row_major_output_v<COutput>;
+    if constexpr (DirectZeroOutput) {
+      // Preserve the exact X24 store sequence on the original fast path.
+      if (static_cast<nint_t>(tensor::stride_value<0>(
+              c_output.spec().output_layout())) != logical_n) return false;
+    }
+
+    alignas(64) typename Atom::TAcc values[64];
+    auto* output = [&] {
+      if constexpr (DirectZeroOutput) {
+        return reinterpret_cast<typename Atom::TAcc*>(c_output.raw_data());
+      } else {
+        return values;
+      }
+    }();
 
     packed_ab_mmla<Atom>(
         reinterpret_cast<const typename Atom::TA*>(a.raw_data()),
@@ -1540,8 +1615,11 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot(
         reinterpret_cast<const typename Atom::TB*>(b.raw_data()),
         static_cast<nint_t>(tensor::stride_value<1>(
             b.spec().input_layout())),
-        reinterpret_cast<typename Atom::TAcc*>(c_output.raw_data()),
+        output,
         logical_m, logical_n, logical_k);
+    if constexpr (!DirectZeroOutput)
+      packed_dot_epilogue<Atom>(
+          values, logical_m, logical_n, c_input, c_output);
     return true;
   }
 }
@@ -1556,7 +1634,7 @@ template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
 VECOPS_ALWAYS_INLINE bool try_packed_dot_tiny(
     nint_t logical_m, nint_t logical_n, nint_t logical_k,
-    const A& a, const B& b, const CInput&, COutput& c_output) {
+    const A& a, const B& b, const CInput& c_input, COutput& c_output) {
   if constexpr (!packed_dot_candidate_v<
                     Atom, A, B, CInput, COutput>) {
     return false;
@@ -1582,8 +1660,22 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot_tiny(
     if (a_panel != b_panel || ordinary_vl_bytes != 2 * a_panel) {
       return false;
     }
-    if (static_cast<nint_t>(tensor::stride_value<0>(
-            c_output.spec().output_layout())) != logical_n) return false;
+    constexpr bool DirectZeroOutput =
+        IsZeroTransform<typename CInput::Transform>::value &&
+        direct_row_major_output_v<COutput>;
+    if constexpr (DirectZeroOutput) {
+      if (static_cast<nint_t>(tensor::stride_value<0>(
+              c_output.spec().output_layout())) != logical_n) return false;
+    }
+
+    alignas(64) typename Atom::TAcc values[64];
+    auto* output = [&] {
+      if constexpr (DirectZeroOutput) {
+        return reinterpret_cast<typename Atom::TAcc*>(c_output.raw_data());
+      } else {
+        return values;
+      }
+    }();
 
     packed_ab_mmla<Atom>(
         reinterpret_cast<const typename Atom::TA*>(a.raw_data()),
@@ -1592,8 +1684,11 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot_tiny(
         reinterpret_cast<const typename Atom::TB*>(b.raw_data()),
         static_cast<nint_t>(tensor::stride_value<1>(
             b.spec().input_layout())),
-        reinterpret_cast<typename Atom::TAcc*>(c_output.raw_data()),
+        output,
         logical_m, logical_n, logical_k);
+    if constexpr (!DirectZeroOutput)
+      packed_dot_epilogue<Atom>(
+          values, logical_m, logical_n, c_input, c_output);
     return true;
   }
 }
@@ -2844,26 +2939,26 @@ struct Backend<matmul_implementation::SME> {
                             Atom, ::vecops::matmul::SME_F64F64>) {
             if (vary_rows)
               sme::sve_skinny_fused_matmul_f64_external<true>(
-                  a, b, c_output, logical_m, logical_k);
+                  a, b, c_input, c_output, logical_m, logical_k);
             else
               sme::sve_skinny_fused_matmul_f64_external<false>(
-                  a, b, c_output, logical_n, logical_k);
+                  a, b, c_input, c_output, logical_n, logical_k);
           } else
 #endif
           if constexpr (COutput::Transform::is_elementwise) {
             if (vary_rows)
               sme::sve_skinny_fused_matmul<true>(
-                  a, b, c_output, logical_m, logical_k);
+                  a, b, c_input, c_output, logical_m, logical_k);
             else
               sme::sve_skinny_fused_matmul<false>(
-                  a, b, c_output, logical_n, logical_k);
+                  a, b, c_input, c_output, logical_n, logical_k);
           } else {
             if (vary_rows)
               sme::sve_skinny_fused_lane_local_matmul<true>(
-                  a, b, c_output, logical_m, logical_k);
+                  a, b, c_input, c_output, logical_m, logical_k);
             else
               sme::sve_skinny_fused_lane_local_matmul<false>(
-                  a, b, c_output, logical_n, logical_k);
+                  a, b, c_input, c_output, logical_n, logical_k);
           }
           return;
         }
@@ -2967,16 +3062,19 @@ struct Backend<matmul_implementation::SME> {
 #if defined(HAS_SME_F64F64)
       if constexpr (std::same_as<Atom, ::vecops::matmul::SME_F64F64>) {
         sme::sve_skinny_fused_matmul_f64_external<false>(
-            a, b, c_output, static_cast<nint_t>(n), static_cast<nint_t>(k));
+            a, b, c_input, c_output,
+            static_cast<nint_t>(n), static_cast<nint_t>(k));
       } else
 #endif
       {
         if constexpr (COutput::Transform::is_elementwise) {
           sme::sve_skinny_fused_matmul<false>(
-              a, b, c_output, static_cast<nint_t>(n), static_cast<nint_t>(k));
+              a, b, c_input, c_output,
+              static_cast<nint_t>(n), static_cast<nint_t>(k));
         } else {
           sme::sve_skinny_fused_lane_local_matmul<false>(
-              a, b, c_output, static_cast<nint_t>(n), static_cast<nint_t>(k));
+              a, b, c_input, c_output,
+              static_cast<nint_t>(n), static_cast<nint_t>(k));
         }
       }
       return;
@@ -2984,16 +3082,19 @@ struct Backend<matmul_implementation::SME> {
 #if defined(HAS_SME_F64F64)
       if constexpr (std::same_as<Atom, ::vecops::matmul::SME_F64F64>) {
         sme::sve_skinny_fused_matmul_f64_external<true>(
-            a, b, c_output, static_cast<nint_t>(m), static_cast<nint_t>(k));
+            a, b, c_input, c_output,
+            static_cast<nint_t>(m), static_cast<nint_t>(k));
       } else
 #endif
       {
         if constexpr (COutput::Transform::is_elementwise) {
           sme::sve_skinny_fused_matmul<true>(
-              a, b, c_output, static_cast<nint_t>(m), static_cast<nint_t>(k));
+              a, b, c_input, c_output,
+              static_cast<nint_t>(m), static_cast<nint_t>(k));
         } else {
           sme::sve_skinny_fused_lane_local_matmul<true>(
-              a, b, c_output, static_cast<nint_t>(m), static_cast<nint_t>(k));
+              a, b, c_input, c_output,
+              static_cast<nint_t>(m), static_cast<nint_t>(k));
         }
       }
       return;

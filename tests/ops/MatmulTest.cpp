@@ -106,6 +106,25 @@ void check_raw(
           expect_auto_packing, expect_no_auto_packing);
 }
 
+template <typename MemoryA, typename MemoryB>
+void check_online_pack_decision(
+    nint_t m, nint_t n, nint_t k, bool pack_a, bool pack_b) {
+  using Atom = ::vecops::matmul::AMX_BF16F32;
+  std::vector<MemoryA> a(static_cast<std::size_t>(m * k));
+  std::vector<MemoryB> b(static_cast<std::size_t>(n * k));
+  std::vector<float32_t> c(static_cast<std::size_t>(m * n));
+  auto at = make_tensor(
+      a.data(), make_layout(make_shape(Any{m}, Any{k})));
+  auto bt = make_tensor(
+      b.data(), make_layout(make_shape(Any{n}, Any{k})));
+  auto ct = make_tensor(
+      c.data(), make_layout(make_shape(Any{m}, Any{n})));
+  auto invocation = test::matmul::make_test_matmul_invocation(
+      ops::MatmulConfig<Atom>{}, Any{m}, Any{n}, Any{k}, at, bt, ct);
+  EXPECT_EQ(invocation.online_packs_a(), pack_a);
+  EXPECT_EQ(invocation.online_packs_b(), pack_b);
+}
+
 VECOPS_NOINLINE void check_dynamic_inner_stride(nint_t inner_stride) {
   using Atom = ::vecops::matmul::AMX_BF16F32;
   using T = typename Atom::TA;
@@ -367,16 +386,48 @@ TEST(MatmulTest, CompileTimeExtentsAndFullKPlan) {
 
 TEST(MatmulTest, LargeNativeInputsUseAutoPacking) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  check_raw<::vecops::matmul::AMX_BF16F32>(cint<64>, cint<64>, cint<64>, true);
+  check_raw<::vecops::matmul::AMX_BF16F32>(cint<128>, cint<64>, cint<64>, true);
   check_raw<::vecops::matmul::AMX_I8I32<int8_t, uint8_t>>(
-      cint<64>, cint<64>, cint<128>, true);
+      cint<128>, cint<64>, cint<128>, true);
 }
 
-TEST(MatmulTest, DynamicExtentsDoNotSelectAutoPacking) {
+TEST(MatmulTest, DynamicExtentsReserveAndSelectAutoPackingAtRuntime) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  check_raw<::vecops::matmul::AMX_BF16F32>(64, 64, 64, false, true);
+  check_raw<::vecops::matmul::AMX_BF16F32>(128, 64, 64, true);
   check_raw<::vecops::matmul::AMX_I8I32<int8_t, uint8_t>>(
-      64, 64, 128, false, true);
+      64, 64, 128, true);
+  // A and B are costed independently, including conversion-eliding packs.
+  check_online_pack_decision<float32_t, bfloat16_t>(16, 128, 128, true, false);
+  check_online_pack_decision<bfloat16_t, float32_t>(64, 16, 128, false, true);
+  check_online_pack_decision<bfloat16_t, bfloat16_t>(128, 64, 64, false, true);
+  check_online_pack_decision<bfloat16_t, bfloat16_t>(64, 64, 128, false, false);
+  check_online_pack_decision<bfloat16_t, bfloat16_t>(8, 8, 32, false, false);
+}
+
+TEST(MatmulTest, SharedADynamicBatchAmortizesOnlyAPacking) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  using Atom = ::vecops::matmul::AMX_BF16F32;
+  constexpr nint_t Batch = 16, M = 1, N = 8, K = 2048;
+  std::vector<float32_t> a(M * K, 0.25f);
+  std::vector<bfloat16_t> b(Batch * N * K, bfloat16_t{0.5f});
+  std::vector<float32_t> c(Batch * M * N);
+  auto at = make_tensor(
+      a.data(), make_layout(
+          make_shape(Any{Batch}, Any{M}, Any{K}),
+          make_strides(cint<0>, Any{K}, cint<1>)));
+  auto bt = make_tensor(
+      b.data(), make_layout(make_shape(Any{Batch}, Any{N}, Any{K})));
+  auto ct = make_tensor(
+      c.data(), make_layout(make_shape(Any{Batch}, Any{M}, Any{N})));
+  auto invocation = test::matmul::make_test_matmul_invocation(
+      ops::MatmulConfig<Atom>{}, Any{M}, Any{N}, Any{K}, at, bt, ct);
+  EXPECT_TRUE(invocation.online_packs_a());
+  EXPECT_FALSE(invocation.online_packs_b());
+  kernel::Workspace storage(invocation.required_workspace());
+  auto workspace = storage.view();
+  invocation(workspace);
+  for (float32_t value : c)
+    EXPECT_NEAR(value, 256.0f, 1.0e-3f);
 }
 
 TEST(MatmulTest, ConfigOnlyGenericTilerKBlocks) {
@@ -439,6 +490,45 @@ TEST(MatmulTest, ConfigOnlyGenericTilerKBlocks) {
       EXPECT_NEAR(c[i * N + j], expected, 3.0e-3f);
       EXPECT_NEAR(c_second[i * N + j], expected, 3.0e-3f);
     }
+  }
+}
+
+TEST(MatmulTest, GenericTilerSplitKReusesSmallVectorPhases) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  using Atom = ::vecops::matmul::AMX_BF16F32;
+  using Tiles = ::vecops::matmul::CacheTiling<
+      meta::Const<1>, meta::Const<16>, meta::Const<32>>;
+  using Never = ::vecops::matmul::PackingPolicy<
+      ::vecops::matmul::PackingMode::never>;
+  using Tuning = ::vecops::matmul::GenericTiledTuning<
+      Tiles, ::vecops::matmul::loop_order::MNK, Never, Never,
+      ::vecops::matmul::AccBufferMode::workspace>;
+  using Config = ops::MatmulConfig<
+      Atom,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::GenericTiled>,
+      kernel::matmul_policy::Automatic, Tuning>;
+  constexpr nint_t M = 1, N = 16, K = 65;
+  std::vector<bfloat16_t> a(M * K), b(N * K);
+  std::vector<float32_t> c(M * N);
+  for (nint_t i = 0; i < M * K; ++i) a[i] = value<bfloat16_t>(i, 13);
+  for (nint_t i = 0; i < N * K; ++i) b[i] = value<bfloat16_t>(i, 11);
+  auto at = make_tensor(a.data(), make_layout(make_shape(cint<M>, cint<K>)));
+  auto bt = make_tensor(b.data(), make_layout(make_shape(cint<N>, cint<K>)));
+  auto ct = make_tensor(c.data(), make_layout(make_shape(cint<M>, cint<N>)));
+  Config config{.generic_tiled = Tuning{
+      .cache_tiling = Tiles{cint<M>, cint<N>, cint<32>}}};
+  auto operation = ops::matmul(config);
+  kernel::Workspace storage(operation.required_workspace(
+      cint<M>, cint<N>, cint<K>, at, bt, ct));
+  auto workspace = storage.view();
+  operation(workspace, cint<M>, cint<N>, cint<K>, at, bt, ct);
+  for (nint_t column = 0; column < N; ++column) {
+    float32_t expected = 0;
+    for (nint_t kk = 0; kk < K; ++kk)
+      expected += static_cast<float32_t>(a[kk]) *
+          static_cast<float32_t>(b[column * K + kk]);
+    EXPECT_NEAR(c[column], expected, 3.0e-4f);
   }
 }
 
@@ -572,6 +662,8 @@ TEST(MatmulTest, BothPackedInputsUseFullTailAndRuntimeKPlans) {
   check_both_packed(Any{65});
   check_both_packed(Any{1024}, 17, 47);
   check_both_packed(Any{1024}, 20, 33);
+  // Exercise the vertical packed-B N=1 traversal.
+  check_both_packed(Any{65}, 32, 1);
 }
 
 #elif VECOPS_TARGET_SHARD_INDEX == 1
@@ -704,7 +796,16 @@ TEST(MatmulTest, ResidualSplitCoversProfitableAndGeneralizedShapes) {
   using RequireResidual = ::vecops::matmul::family_selection::Require<
       ::vecops::matmul::kernel_family::ResidualSplit>;
   check_both_packed<Any, RequireResidual>(Any{1024}, 17, 33);
+  check_both_packed<Any, RequireResidual>(Any{1024}, 33, 17);
   check_both_packed<Any, RequireResidual>(Any{257}, 35, 53);
+  check_both_packed<Any, RequireResidual>(Any{257}, 53, 35);
+  check_raw_family<::vecops::matmul::AMX_BF16F32, RequireResidual>(
+      Any{35}, Any{53}, Any{257});
+#if defined(HAS_AMX_INT8)
+  check_raw_family<
+      ::vecops::matmul::AMX_I8I32<int8_t, int8_t>, RequireResidual>(
+          Any{53}, Any{35}, Any{257});
+#endif
 }
 
 TEST(MatmulTest, OperandAMayBePrepacked) {
@@ -1350,20 +1451,20 @@ TEST(MatmulTest, EndToEndMemoryComputeOutputConversions) {
 TEST(MatmulTest, LargeConversionsUseOnTheFlyPacking) {
   test::matmul::check_conversion<
       ::vecops::matmul::SME_BF16F32, float32_t, float32_t, float32_t>(
-          cint<32>, cint<32>, cint<64>, true);
+          cint<64>, cint<64>, cint<64>, true);
   test::matmul::check_conversion<
       ::vecops::matmul::SME_F32F32,
       vecops::bfloat16_t, vecops::bfloat16_t, vecops::bfloat16_t>(
-          cint<32>, cint<32>, cint<64>, true);
+          cint<64>, cint<64>, cint<64>, true);
   test::matmul::check_conversion<
       ::vecops::matmul::SME_F32F32,
       vecops::float16_t, vecops::float16_t, vecops::float16_t>(
-          cint<32>, cint<32>, cint<64>, true);
+          cint<64>, cint<64>, cint<64>, true);
 }
 
 TEST(MatmulTest, LargeRawProblemUsesOnTheFlyPackingWorkspace) {
   using Atom = ::vecops::matmul::SME_BF16F32;
-  constexpr nint_t M = 32, N = 32, K = 64;
+  constexpr nint_t M = 64, N = 64, K = 64;
   std::vector<typename Atom::TA> a(M * K), b(N * K);
   std::vector<typename Atom::TAcc> c(M * N);
   auto at = make_tensor(
@@ -1376,7 +1477,9 @@ TEST(MatmulTest, LargeRawProblemUsesOnTheFlyPackingWorkspace) {
       cint<M>, cint<N>, cint<K>, at, bt, ct);
   EXPECT_GT(operation.required_workspace(), 0);
   auto dynamic_operation = test::matmul::make_test_matmul_invocation(ops::MatmulConfig<Atom>{}, M, N, K, at, bt, ct);
-  EXPECT_EQ(dynamic_operation.required_workspace(), 0);
+  // Unconstrained Dynamic extents retain both independently selectable
+  // online-pack variants and therefore reserve their union.
+  EXPECT_GT(dynamic_operation.required_workspace(), 0);
   check_raw<Atom>(cint<M>, cint<N>, cint<K>);
   check_raw<Atom>(M, N, K);
 }
@@ -1456,6 +1559,48 @@ TEST(MatmulTest, PackedDotCoversPrimaryTinyStaticAndDynamicShapes) {
   check_required_packed_dot<
       ::vecops::matmul::SME_I8I32<uint8_t, uint8_t>>(
           cint<4>, cint<4>, cint<257>);
+}
+
+TEST(MatmulTest, GenericTilerSplitKReusesPackedDotPhases) {
+  using Atom = ::vecops::matmul::SME_BF16F32;
+  using T = typename Atom::TA;
+  using Tiles = ::vecops::matmul::CacheTiling<
+      meta::Const<2>, meta::Const<8>, meta::Const<64>>;
+  using Always = ::vecops::matmul::PackingPolicy<
+      ::vecops::matmul::PackingMode::always,
+      ::vecops::matmul::PackingExtent::cache_k>;
+  using Tuning = ::vecops::matmul::GenericTiledTuning<
+      Tiles, ::vecops::matmul::loop_order::MNK, Always, Always,
+      ::vecops::matmul::AccBufferMode::workspace>;
+  using Config = ops::MatmulConfig<
+      Atom,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::GenericTiled>,
+      kernel::matmul_policy::Automatic, Tuning>;
+  constexpr nint_t M = 2, N = 8, K = 129;
+  std::vector<T> a(M * K), b(N * K);
+  std::vector<float32_t> c(M * N);
+  for (nint_t i = 0; i < M * K; ++i) a[i] = value<T>(i, 13);
+  for (nint_t i = 0; i < N * K; ++i) b[i] = value<T>(i, 11);
+  auto at = make_tensor(a.data(), make_layout(make_shape(cint<M>, cint<K>)));
+  auto bt = make_tensor(b.data(), make_layout(make_shape(cint<N>, cint<K>)));
+  auto ct = make_tensor(c.data(), make_layout(make_shape(cint<M>, cint<N>)));
+  Config config{.generic_tiled = Tuning{
+      .cache_tiling = Tiles{cint<M>, cint<N>, cint<64>}}};
+  auto operation = ops::matmul(config);
+  kernel::Workspace storage(operation.required_workspace(
+      cint<M>, cint<N>, cint<K>, at, bt, ct));
+  auto workspace = storage.view();
+  operation(workspace, cint<M>, cint<N>, cint<K>, at, bt, ct);
+  for (nint_t row = 0; row < M; ++row) {
+    for (nint_t column = 0; column < N; ++column) {
+      float32_t expected = 0;
+      for (nint_t kk = 0; kk < K; ++kk)
+        expected += static_cast<float32_t>(a[row * K + kk]) *
+            static_cast<float32_t>(b[column * K + kk]);
+      EXPECT_NEAR(c[row * N + column], expected, 5.0e-4f);
+    }
+  }
 }
 
 TEST(MatmulTest, EitherOperandMayBePrepacked) {

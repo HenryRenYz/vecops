@@ -40,7 +40,9 @@ void run_native_batch_case() {
   } else {
     test::matmul::check_batched_native_extent_pair<
         Atom, BroadcastB, 3, 7, 9, K>();
-    test::matmul::check_batched_native<Atom, BroadcastB>(3, 7, 9, K);
+    // Dynamic rank-three operands reserve one leaf-sized A/B staging union;
+    // the runtime decision may still decline both sides for this tiny shape.
+    test::matmul::check_batched_native<Atom, BroadcastB>(3, 7, 9, K, true);
   }
 }
 
@@ -297,7 +299,7 @@ TEST(MatmulBatchTest, AllNativeAtomsAndSharedWeights) {
 TEST(MatmulBatchTest, ConfiguredBatchHandlesZeroAndShortenedRows) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   using Atom = ::vecops::matmul::AMX_BF16F32;
-  test::matmul::check_batched_native<Atom, true>(0, 1, 48, 64);
+  test::matmul::check_batched_native<Atom, true>(0, 1, 48, 64, true);
   test::matmul::check_batched_packed_b<Atom>(8, 1, 32, 64);
   test::matmul::check_batched_native<Atom, true>(
       cint<8>, cint<1>, cint<47>, cint<65>, true);

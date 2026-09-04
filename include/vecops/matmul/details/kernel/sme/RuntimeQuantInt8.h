@@ -27,8 +27,9 @@
  * 3. a precomputed per-column `correction` (carried by the C-input tensor,
  *    int32, untransformed) repairs the zero-point bias term
  *    `zero_point * sum(b[, k])` introduced by step 1;
- * 4. the int32 result is dequantized on the way out with the runtime
- *    per-row/per-column transform `c *= row_scale[row] * column_scale[col]`.
+ * 4. the final int32 result is dequantized on the way out with the runtime
+ *    per-row/per-column transform `c *= row_scale[row] * column_scale[col]`;
+ *    split-K first/middle phases instead keep the corrected int32 sum.
  *
  * The vector core lives in the .cpp (`fused_runtime_quant_int8_packed_b_
  * gemv`, declared here) and handles arbitrary N/K tails with masked loads;
@@ -82,14 +83,25 @@ void fused_runtime_quant_int8_packed_b_gemv(
     float32_t quant_multiplier, int32_t input_zero_point,
     float32_t row_dequant_scale);
 
+/// Split-K phase twin: retain the corrected running sum as native int32
+/// instead of applying the final dequantization transform.
+void runtime_quant_int8_packed_b_gemv_accumulate(
+    const float32_t* a, const int8_t* packed_b,
+    nint_t b_outer_stride, nint_t b_group_stride,
+    nint_t b_spatial_stride, nint_t packed_panel,
+    const int32_t* prior, int32_t* output,
+    nint_t logical_n, nint_t logical_k,
+    float32_t quant_multiplier, int32_t input_zero_point);
+
 /**
  * @brief Compile-time candidate predicate for the fused runtime-quant leaf.
  *
  * Pins the exact fusion shape: SME_I8I32<uint8, int8> atom, rank-2 A whose
  * memory is fp32 behind a runtime per-row asymmetric quantize transform,
  * rank-4 packed B (int8), an int32 untransformed C input (the correction),
- * and an fp32-memory output behind a runtime per-row/column dequantize
- * transform. Anything else is rejected at compile time.
+ * and either an fp32-memory output behind a runtime per-row/column
+ * dequantize transform or a native int32 split-K accumulator output.
+ * Anything else is rejected at compile time.
  */
 template <::vecops::matmul::Atom Atom,
           typename A, typename B, typename CInput, typename COutput>
@@ -107,10 +119,12 @@ inline constexpr bool fused_runtime_quant_int8_candidate_v =
     std::same_as<typename CInput::MemoryElement, int32_t> &&
     std::same_as<typename CInput::ComputeType, int32_t> &&
     std::same_as<typename CInput::Transform, tensor::NoTransform> &&
-    std::same_as<typename COutput::MemoryElement, float32_t> &&
     std::same_as<typename COutput::ComputeType, int32_t> &&
-    is_runtime_per_row_column_dequantize_transform_v<
-        typename COutput::Transform>;
+    ((std::same_as<typename COutput::MemoryElement, float32_t> &&
+      is_runtime_per_row_column_dequantize_transform_v<
+          typename COutput::Transform>) ||
+     (std::same_as<typename COutput::MemoryElement, int32_t> &&
+      std::same_as<typename COutput::Transform, tensor::NoTransform>));
 
 /**
  * @brief Run-time shape/stride gate and row driver for the fused
@@ -150,7 +164,9 @@ try_fused_runtime_quant_int8_packed_b_gemv(
     }
 
     const auto& quant = a.spec().transform().parameters();
-    const auto& dequant = c_output.spec().transform().parameters();
+    constexpr bool FinalDequantize =
+        is_runtime_per_row_column_dequantize_transform_v<
+            typename COutput::Transform>;
     // The quantize/dequantize scale tables are indexed in the *original*
     // (pre-narrow) coordinate space. This leaf receives already-narrowed
     // access objects, so project each row's local origin (row, 0) back
@@ -160,25 +176,37 @@ try_fused_runtime_quant_int8_packed_b_gemv(
     for (nint_t row = 0; row < logical_m; ++row) {
       const auto local_origin = tensor::coord(row, nint_t{0});
       const auto a_original = a.spec().projection().project(local_origin);
-      const auto output_original =
-          c_output.spec().projection().project(local_origin);
       const nint_t quant_row = quant.row_scale_index(a_original);
-      const nint_t dequant_row = dequant.row_scale_index(output_original);
-      const nint_t column = output_original[output_original.size() - 1];
-
-      fused_runtime_quant_int8_packed_b_gemv(
-          reinterpret_cast<const float32_t*>(a.raw_data()) +
-              row * a_strides[0],
-          reinterpret_cast<const int8_t*>(b.raw_data()),
-          b_strides[0], b_strides[1], b_strides[2], packed_panel,
-          reinterpret_cast<const int32_t*>(c_input.raw_data()) +
-              row * correction_strides[0],
-          reinterpret_cast<float32_t*>(c_output.raw_data()) +
-              row * output_strides[0],
-          dequant.column_scales + column,
-          logical_n, logical_k,
-          quant.multipliers[quant_row], *quant.zero_point,
-          dequant.row_scales[dequant_row]);
+      const auto* a_row = reinterpret_cast<const float32_t*>(a.raw_data()) +
+          row * a_strides[0];
+      const auto* prior = reinterpret_cast<const int32_t*>(
+          c_input.raw_data()) + row * correction_strides[0];
+      if constexpr (FinalDequantize) {
+        const auto& dequant = c_output.spec().transform().parameters();
+        const auto output_original =
+            c_output.spec().projection().project(local_origin);
+        const nint_t dequant_row = dequant.row_scale_index(output_original);
+        const nint_t column = output_original[output_original.size() - 1];
+        fused_runtime_quant_int8_packed_b_gemv(
+            a_row, reinterpret_cast<const int8_t*>(b.raw_data()),
+            b_strides[0], b_strides[1], b_strides[2], packed_panel,
+            prior,
+            reinterpret_cast<float32_t*>(c_output.raw_data()) +
+                row * output_strides[0],
+            dequant.column_scales + column,
+            logical_n, logical_k,
+            quant.multipliers[quant_row], *quant.zero_point,
+            dequant.row_scales[dequant_row]);
+      } else {
+        runtime_quant_int8_packed_b_gemv_accumulate(
+            a_row, reinterpret_cast<const int8_t*>(b.raw_data()),
+            b_strides[0], b_strides[1], b_strides[2], packed_panel,
+            prior,
+            reinterpret_cast<int32_t*>(c_output.raw_data()) +
+                row * output_strides[0],
+            logical_n, logical_k,
+            quant.multipliers[quant_row], *quant.zero_point);
+      }
     }
     return true;
   }
