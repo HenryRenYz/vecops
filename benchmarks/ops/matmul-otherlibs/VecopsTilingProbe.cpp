@@ -2,8 +2,10 @@
 
 #include <array>
 #include <cerrno>
+#include <concepts>
 #include <cstring>
 #include <iostream>
+#include <type_traits>
 
 #if defined(ARCH_X86_FAMILY)
 #include <sys/syscall.h>
@@ -52,17 +54,26 @@ inline constexpr std::array ProbeProfiles{
     TileProfile{672, 1360, 384},
 };
 
-template <bool PreparedB>
+template <bool PreparedB,
+          typename PackingTuning = ::vecops::matmul::MatmulPackingTuning<>>
 void run_tiling_probe(
     benchmark::State& state, const Case& c, TileProfile profile) {
   using namespace ::vecops;
   using Tiles = matmul::CacheTiling<meta::Any, meta::Any, meta::Any>;
   using Tuning = matmul::GenericTiledTuning<
       Tiles, matmul::loop_order::NKM>;
-  using Config = ops::MatmulConfig<
-      ProbeAtom,
-      matmul::family_selection::Require<matmul::kernel_family::GenericTiled>,
+  using Family = matmul::family_selection::Require<
+      matmul::kernel_family::GenericTiled>;
+  using LegacyConfig = ops::MatmulConfig<
+      ProbeAtom, Family, kernel::matmul_policy::Automatic, Tuning>;
+  using PlacementConfig = ops::MatmulConfigWithPacking<
+      ProbeAtom, PackingTuning, Family,
       kernel::matmul_policy::Automatic, Tuning>;
+  // Preserve historical probe identities for the default rows; only the
+  // explicit lifetime diagnostics opt into the new config carrier.
+  using Config = std::conditional_t<
+      std::same_as<PackingTuning, matmul::MatmulPackingTuning<>>,
+      LegacyConfig, PlacementConfig>;
 
   Buffers buffers(c);
   buffers.prepare_output(Operation::Gemm);
@@ -143,6 +154,24 @@ void run_tiling_probe(
   state.counters["configured_kc"] = benchmark::Counter(profile.kc);
 }
 
+template <typename BPacking>
+void register_packing_lifetime_case(
+    const Case& c, TileProfile profile, const char* tuning_name) {
+  using Placement = ::vecops::matmul::MatmulPackingTuning<
+      ::vecops::matmul::packing_policy::Disabled, BPacking>;
+  const auto name = benchmark_name(
+      "vecops", c, Operation::Gemm, "PackingLifetime", "tiling_probe",
+      "native", tuning_name,
+      std::to_string(profile.mc), std::to_string(profile.nc),
+      std::to_string(profile.kc));
+  auto* registered = benchmark::RegisterBenchmark(
+      name.c_str(), [c, profile](benchmark::State& state) {
+        run_tiling_probe<false, Placement>(state, c, profile);
+      });
+  registered->Unit(benchmark::kMicrosecond);
+  configure_comparison_benchmark(registered, 0.05, 5);
+}
+
 template <bool PreparedB = false>
 void register_probe_case(const Case& c) {
   for (const auto profile : ProbeProfiles) {
@@ -175,6 +204,19 @@ void register_probe_cases() {
   register_probe_case(AF3Cases[6]);   // A07
   register_probe_case(AF3Cases[9]);   // A10
   register_probe_case(AF3Cases[17]);  // A18
+
+  // NKM makes M the innermost reuse axis for B. MC=16 guarantees multiple
+  // M blocks for both probes, directly exposing whether one NCxKC B panel is
+  // rebuilt inside each block or retained across the complete M loop.
+  constexpr TileProfile LifetimeProfile{16, 512, 256};
+  register_packing_lifetime_case<matmul::packing_policy::RequireInside>(
+      CoreCases[4], LifetimeProfile, "b_inside_only");
+  register_packing_lifetime_case<matmul::packing_policy::RequireOutside>(
+      CoreCases[4], LifetimeProfile, "b_outside_only");
+  register_packing_lifetime_case<matmul::packing_policy::RequireInside>(
+      CoreCases[9], LifetimeProfile, "b_inside_only");
+  register_packing_lifetime_case<matmul::packing_policy::RequireOutside>(
+      CoreCases[9], LifetimeProfile, "b_outside_only");
 }
 
 bool enable_probe_atom() {

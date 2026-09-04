@@ -91,10 +91,40 @@ struct MatmulConfig {
   using SchedulerPolicy = SchedulerPolicyT;
   using GenericTuning = GenericTiledTuningT;
   using CacheInfoProvider = CacheInfoProviderT;
+  using PackingTuning = ::vecops::matmul::MatmulPackingTuning<>;
   static constexpr bool enable_swap_ab = EnableSwapAB;
 
   // no_unique_address: both members are stateless in the default
   // configuration, so a MatmulConfig object stays empty.
+  [[no_unique_address]] GenericTiledTuningT generic_tiled{};
+  [[no_unique_address]] CacheInfoProviderT cache_info_provider{};
+};
+
+/**
+ * Matmul configuration with an explicit top-level A/B packing placement.
+ * Kept as a separate opt-in type so the historical six-parameter
+ * `MatmulConfig` specialization identity, mangling, and hot-code layout remain
+ * unchanged for default users. Orientation selection exchanges the logical
+ * A/B policies together with the operands.
+ */
+template <
+    ::vecops::matmul::Atom AtomT,
+    ::vecops::matmul::MatmulPackingTuningType PackingTuningT,
+    typename FamilySelectionT =
+        ::vecops::matmul::family_selection::Automatic,
+    typename SchedulerPolicyT = kernel::matmul_policy::Automatic,
+    typename GenericTiledTuningT = ::vecops::matmul::GenericTiledTuning<>,
+    typename CacheInfoProviderT = platform::SystemCacheInfoProvider,
+    bool EnableSwapAB = true>
+struct MatmulConfigWithPacking {
+  using Atom = AtomT;
+  using FamilySelection = FamilySelectionT;
+  using SchedulerPolicy = SchedulerPolicyT;
+  using GenericTuning = GenericTiledTuningT;
+  using CacheInfoProvider = CacheInfoProviderT;
+  using PackingTuning = PackingTuningT;
+  static constexpr bool enable_swap_ab = EnableSwapAB;
+
   [[no_unique_address]] GenericTiledTuningT generic_tiled{};
   [[no_unique_address]] CacheInfoProviderT cache_info_provider{};
 };

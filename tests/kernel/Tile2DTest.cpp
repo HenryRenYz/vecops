@@ -27,6 +27,41 @@ using F21 = hop::Tile2DKernelFamily<2, 1, 2, 8, 3, 4>;
 using F22 = hop::Tile2DKernelFamily<2, 2, 10, 10, 10, 4>;
 using Catalog = hop::Tile2DKernelCatalog<F11, F12, F21, F22>;
 
+// Compile-time audit of the axis adapter used by N-major traversal. Keep the
+// powers deliberately asymmetric so swapping the family shape without also
+// swapping mask arguments cannot accidentally pass.
+using DirectionalFamily = hop::Tile2DKernelFamily<2, 3, 101, 102, 103, 104>;
+using TransposedDirectional =
+    hop::tile2d_details::TransposedFamily<DirectionalFamily>;
+static_assert(TransposedDirectional::a == 3);
+static_assert(TransposedDirectional::b == 2);
+static_assert(TransposedDirectional::template power<
+                  hop::Tile2DMaskMode::unmasked,
+                  hop::Tile2DMaskMode::masked>() == 103);
+static_assert(TransposedDirectional::template power<
+                  hop::Tile2DMaskMode::masked,
+                  hop::Tile2DMaskMode::unmasked>() == 102);
+using DirectionalCase = hop::Tile2DKernelCase<
+    TransposedDirectional, hop::Tile2DMaskMode::unmasked,
+    hop::Tile2DMaskMode::masked>;
+using UntransposedDirectionalCase = decltype(
+    hop::tile2d_details::untranspose_case<DirectionalCase>());
+static_assert(UntransposedDirectionalCase::a == 2);
+static_assert(UntransposedDirectionalCase::b == 3);
+static_assert(UntransposedDirectionalCase::m_mask ==
+              hop::Tile2DMaskMode::masked);
+static_assert(UntransposedDirectionalCase::n_mask ==
+              hop::Tile2DMaskMode::unmasked);
+static_assert(!UntransposedDirectionalCase::exact_blocks);
+using TransposedExactCase = hop::Tile2DExactKernelCase<TransposedDirectional>;
+using UntransposedExactCase = decltype(
+    hop::tile2d_details::untranspose_case<TransposedExactCase>());
+static_assert(UntransposedExactCase::a == 2);
+static_assert(UntransposedExactCase::b == 3);
+static_assert(UntransposedExactCase::m_mask == hop::Tile2DMaskMode::masked);
+static_assert(UntransposedExactCase::n_mask == hop::Tile2DMaskMode::masked);
+static_assert(UntransposedExactCase::exact_blocks);
+
 struct Area4Provider {
   static constexpr bool four_regions_exact_constraints = true;
   static constexpr nint_t exact_meta_block_limit = 8;
@@ -96,7 +131,10 @@ struct Visit {
   auto operator<=>(const Visit&) const = default;
 };
 
-template <typename Policy, typename M, typename N, typename TM, typename TN,
+template <typename Policy,
+          hop::Tile2DTraversalOrder Traversal =
+              hop::Tile2DTraversalOrder::m_major,
+          typename M, typename N, typename TM, typename TN,
           typename CatalogT = Catalog>
 std::vector<Visit> run_and_check_cover(
     M m, N n, TM tm, TN tn, CatalogT catalog = {}) {
@@ -108,9 +146,8 @@ std::vector<Visit> run_and_check_cover(
       static_cast<std::size_t>(m_int * n_int), 0);
   std::vector<Visit> visits;
 
-  hop::tile2d<Policy>(m, n, tm, tn, catalog,
-      [&]<typename Case>(Case, nint_t off_m, nint_t off_n,
-                         nint_t active_m, nint_t active_n) {
+  auto visit = [&]<typename Case>(Case, nint_t off_m, nint_t off_n,
+                                  nint_t active_m, nint_t active_n) {
         const nint_t capacity_m = Case::a * tm_int;
         const nint_t capacity_n = Case::b * tn_int;
         EXPECT_GT(active_m, 0);
@@ -135,20 +172,27 @@ std::vector<Visit> run_and_check_cover(
             ++cover[static_cast<std::size_t>(i * n_int + j)];
           }
         }
-      });
+      };
+  if constexpr (Traversal == hop::Tile2DTraversalOrder::m_major)
+    hop::tile2d<Policy>(m, n, tm, tn, catalog, visit);
+  else
+    hop::tile2d_n_major<Policy>(m, n, tm, tn, catalog, visit);
 
   EXPECT_TRUE(std::all_of(
       cover.begin(), cover.end(), [](int count) { return count == 1; }));
   return visits;
 }
 
-template <typename Policy>
+template <typename Policy,
+          hop::Tile2DTraversalOrder Traversal =
+              hop::Tile2DTraversalOrder::m_major>
 void check_exhaustive_dynamic_cover() {
   for (nint_t tm = 1; tm <= 3; ++tm) {
     for (nint_t tn = 1; tn <= 3; ++tn) {
       for (nint_t m = 0; m <= 13; ++m) {
         for (nint_t n = 0; n <= 13; ++n) {
-          run_and_check_cover<Policy>(Any{m}, Any{n}, Any{tm}, Any{tn});
+          run_and_check_cover<Policy, Traversal>(
+              Any{m}, Any{n}, Any{tm}, Any{tn});
         }
       }
     }
@@ -171,12 +215,34 @@ TEST(Tile2DTest, BulkTailExhaustivelyCoversDynamicSmallShapes) {
   check_exhaustive_dynamic_cover<hop::tile2d_policy::BulkTail>();
 }
 
+TEST(Tile2DTest, NMajorExhaustivelyCoversEveryRegionPolicy) {
+  constexpr auto NMajor = hop::Tile2DTraversalOrder::n_major;
+  check_exhaustive_dynamic_cover<hop::tile2d_policy::RowMajor, NMajor>();
+  check_exhaustive_dynamic_cover<hop::tile2d_policy::FourRegions, NMajor>();
+  check_exhaustive_dynamic_cover<hop::tile2d_policy::Uniform, NMajor>();
+  check_exhaustive_dynamic_cover<hop::tile2d_policy::BulkTail, NMajor>();
+}
+
 TEST(Tile2DTest, ExactCoverArea4ExhaustivelyCoversDynamicSmallShapes) {
   for (nint_t tm = 1; tm <= 3; ++tm) {
     for (nint_t tn = 1; tn <= 3; ++tn) {
       for (nint_t m = 0; m <= 13; ++m) {
         for (nint_t n = 0; n <= 13; ++n) {
           run_and_check_cover<ExactCover>(
+              Any{m}, Any{n}, Any{tm}, Any{tn}, Area4Catalog{});
+        }
+      }
+    }
+  }
+}
+
+TEST(Tile2DTest, NMajorExactCoverExhaustivelyCoversDynamicSmallShapes) {
+  constexpr auto NMajor = hop::Tile2DTraversalOrder::n_major;
+  for (nint_t tm = 1; tm <= 3; ++tm) {
+    for (nint_t tn = 1; tn <= 3; ++tn) {
+      for (nint_t m = 0; m <= 13; ++m) {
+        for (nint_t n = 0; n <= 13; ++n) {
+          run_and_check_cover<ExactCover, NMajor>(
               Any{m}, Any{n}, Any{tm}, Any{tn}, Area4Catalog{});
         }
       }
@@ -216,6 +282,29 @@ TEST(Tile2DTest, ExactCoverRuntimeUnmaskedPromotesOnlyAlignedGrid) {
   EXPECT_TRUE(std::any_of(ragged.begin(), ragged.end(), [](const Visit& v) {
     return v.m_mask == hop::Tile2DMaskMode::masked ||
         v.n_mask == hop::Tile2DMaskMode::masked;
+  }));
+}
+
+TEST(Tile2DTest, NMajorExactCoverRuntimeUnmaskedCoversAlignedAndRagged) {
+  constexpr auto NMajor = hop::Tile2DTraversalOrder::n_major;
+  const auto aligned = run_and_check_cover<
+      ExactCoverRuntimeUnmasked, NMajor>(
+          dyn<4>(12), dyn<4>(8), cint<1>, cint<1>, Area4Max3Catalog{});
+  ASSERT_FALSE(aligned.empty());
+  EXPECT_TRUE(std::all_of(aligned.begin(), aligned.end(), [](const Visit& v) {
+    return v.m_mask == hop::Tile2DMaskMode::unmasked &&
+        v.n_mask == hop::Tile2DMaskMode::unmasked;
+  }));
+  const auto ragged = run_and_check_cover<
+      ExactCoverRuntimeUnmasked, NMajor>(
+          Any{7}, Any{5}, cint<2>, cint<3>, Area4Max3Catalog{});
+  ASSERT_FALSE(ragged.empty());
+  EXPECT_TRUE(std::any_of(ragged.begin(), ragged.end(), [](const Visit& v) {
+    return v.m_mask == hop::Tile2DMaskMode::masked ||
+        v.n_mask == hop::Tile2DMaskMode::masked;
+  }));
+  EXPECT_TRUE(std::all_of(ragged.begin(), ragged.end(), [](const Visit& v) {
+    return v.a > 0 && v.b > 0;
   }));
 }
 
@@ -466,6 +555,22 @@ TEST(Tile2DTest, RowMajorPreservesClassicInterleavedOrder) {
   EXPECT_EQ(visits[8].b, 1);
 }
 
+TEST(Tile2DTest, NMajorVisitsColumnsBeforeRows) {
+  const auto visits = run_and_check_cover<
+      hop::tile2d_policy::RowMajor,
+      hop::Tile2DTraversalOrder::n_major>(
+          cint<10>, cint<14>, cint<2>, cint<3>);
+  std::vector<std::pair<nint_t, nint_t>> actual;
+  for (const auto& visit : visits) actual.emplace_back(visit.m, visit.n);
+  EXPECT_EQ(actual, (std::vector<std::pair<nint_t, nint_t>>{
+      {0, 0}, {4, 0}, {8, 0},
+      {0, 6}, {4, 6}, {8, 6},
+      {0, 12}, {4, 12}, {8, 12}}));
+  EXPECT_EQ(std::tie(visits[2].a, visits[2].b), (std::tuple{1, 2}));
+  EXPECT_EQ(std::tie(visits[6].a, visits[6].b), (std::tuple{2, 1}));
+  EXPECT_EQ(std::tie(visits[8].a, visits[8].b), (std::tuple{1, 1}));
+}
+
 TEST(Tile2DTest, FourRegionsGroupsBulkLowerRightAndCorner) {
   const auto visits = run_and_check_cover<hop::tile2d_policy::FourRegions>(
       cint<10>, cint<14>, cint<2>, cint<3>);
@@ -614,6 +719,35 @@ struct GeneratedProvider {
 using GeneratedCatalog = hop::Tile2DGeneratedCatalog<
     GeneratedProvider, hop::Tile2DSearchSpace<4, 4, 4>>;
 
+struct DirectionalGeneratedProvider {
+  template <int A, int B, hop::Tile2DMaskMode MMask,
+            hop::Tile2DMaskMode NMask>
+  static consteval int power() {
+    if constexpr (A > 2 || B > 2) {
+      return -1;
+    } else {
+      return 1000 * A + 100 * B +
+          (MMask == hop::Tile2DMaskMode::masked ? 20 : 0) +
+          (NMask == hop::Tile2DMaskMode::masked ? 3 : 0);
+    }
+  }
+};
+using DirectionalGeneratedCatalog = hop::Tile2DGeneratedCatalog<
+    DirectionalGeneratedProvider, hop::Tile2DSearchSpace<2, 2, 4>>;
+using TransposedGeneratedCatalog =
+    hop::tile2d_details::TransposedCatalog<DirectionalGeneratedCatalog>;
+using TransposedGeneratedF21 = hop::tile2d_details::family_for_t<
+    TransposedGeneratedCatalog, 2, 1>;
+static_assert(TransposedGeneratedF21::a == 2);
+static_assert(TransposedGeneratedF21::b == 1);
+static_assert(std::same_as<
+              typename TransposedGeneratedF21::original_family,
+              hop::tile2d_details::GeneratedFamily<
+                  DirectionalGeneratedProvider, 1, 2>>);
+static_assert(TransposedGeneratedF21::template power<
+                  hop::Tile2DMaskMode::unmasked,
+                  hop::Tile2DMaskMode::masked>() == 1220);
+
 TEST(Tile2DTest, GeneratedCatalogUsesSameSchedulingCore) {
   const auto visits =
       run_and_check_cover<hop::tile2d_policy::RowMajor>(
@@ -623,6 +757,37 @@ TEST(Tile2DTest, GeneratedCatalogUsesSameSchedulingCore) {
   EXPECT_EQ(std::tie(visits[2].a, visits[2].b), (std::tuple{2, 1}));
   EXPECT_EQ(std::tie(visits[6].a, visits[6].b), (std::tuple{1, 2}));
   EXPECT_EQ(std::tie(visits[8].a, visits[8].b), (std::tuple{1, 1}));
+}
+
+TEST(Tile2DTest, NMajorGeneratedCatalogPreservesLogicalPowerAndCoordinates) {
+  const auto visits = run_and_check_cover<
+      hop::tile2d_policy::RowMajor,
+      hop::Tile2DTraversalOrder::n_major>(
+          cint<5>, cint<7>, cint<1>, cint<1>,
+          DirectionalGeneratedCatalog{});
+  ASSERT_FALSE(visits.empty());
+  EXPECT_EQ(std::tie(visits.front().a, visits.front().b),
+            (std::tuple{2, 2}));
+  for (std::size_t i = 1; i < visits.size(); ++i) {
+    if (visits[i].n == visits[i - 1].n)
+      EXPECT_GE(visits[i].m, visits[i - 1].m);
+  }
+}
+
+TEST(Tile2DTest, NMajorGeneratedCatalogCoversEveryPolicyWithConstMetadata) {
+  constexpr auto NMajor = hop::Tile2DTraversalOrder::n_major;
+  run_and_check_cover<hop::tile2d_policy::RowMajor, NMajor>(
+      cint<5>, cint<7>, cint<2>, cint<3>, DirectionalGeneratedCatalog{});
+  run_and_check_cover<hop::tile2d_policy::FourRegions, NMajor>(
+      cint<5>, cint<7>, cint<2>, cint<3>, DirectionalGeneratedCatalog{});
+  run_and_check_cover<hop::tile2d_policy::Uniform, NMajor>(
+      cint<5>, cint<7>, cint<2>, cint<3>, DirectionalGeneratedCatalog{});
+  run_and_check_cover<hop::tile2d_policy::BulkTail, NMajor>(
+      cint<5>, cint<7>, cint<2>, cint<3>, DirectionalGeneratedCatalog{});
+  run_and_check_cover<ExactCover, NMajor>(
+      cint<5>, cint<7>, cint<2>, cint<3>, DirectionalGeneratedCatalog{});
+  run_and_check_cover<ExactCoverRuntimeUnmasked, NMajor>(
+      cint<5>, cint<7>, cint<2>, cint<3>, DirectionalGeneratedCatalog{});
 }
 
 TEST(Tile2DTest, GeneratedConvenienceEntryPointNeedsNoExplicitCatalog) {

@@ -167,6 +167,63 @@ VECOPS_KERNEL_FUNCTION(void matmul_bound_phased(
       c_input, c_output, acc_input, acc_output, route, scratch);
 }
 
+/** N-major GenericTiled leaf; separate from matmul_bound() to preserve the
+ * historical M-major template ABI and code layout. */
+template <::vecops::matmul::Atom Atom,
+          typename Policy = matmul_policy::Automatic,
+          bool AllowTailSplit = false,
+          typename FamilyDispatch =
+              ::vecops::matmul::details::AutomaticFamilyDispatch,
+          typename Scope,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K,
+          typename A, typename B, typename CInput, typename COutput,
+          typename Implementation>
+VECOPS_KERNEL_FUNCTION(void matmul_bound_n_major(
+    Scope& scope, M m, N n, K k,
+    const A& a, const B& b, const CInput& c_input, COutput& c_output,
+    void* scratch, Implementation = {})) {
+  static_assert(execution::ExecutionScope<Scope>);
+  static_assert(std::same_as<typename A::ComputeType, typename Atom::TA>);
+  static_assert(std::same_as<typename B::ComputeType, typename Atom::TB>);
+  static_assert(std::same_as<
+      typename CInput::ComputeType, typename Atom::TAcc>);
+  static_assert(std::same_as<
+      typename COutput::ComputeType, typename Atom::TAcc>);
+  using Backend = matmul_details::Backend<Implementation>;
+  Backend::template run_n_major<
+      Atom, Policy, AllowTailSplit, FamilyDispatch>(
+          scope, m, n, k, a, b, c_input, c_output, scratch);
+}
+
+template <::vecops::matmul::Atom Atom,
+          typename Policy = matmul_policy::Automatic,
+          typename Scope,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K,
+          typename A, typename B, typename CInput, typename COutput,
+          typename AccInput, typename AccOutput,
+          typename Route, typename Implementation>
+VECOPS_KERNEL_FUNCTION(void matmul_bound_phased_n_major(
+    Scope& scope, M m, N n, K k, const A& a, const B& b,
+    const CInput& c_input, COutput& c_output,
+    const AccInput& acc_input, AccOutput& acc_output,
+    Route route, void* scratch, Implementation = {})) {
+  static_assert(execution::ExecutionScope<Scope>);
+  static_assert(std::same_as<typename A::ComputeType, typename Atom::TA>);
+  static_assert(std::same_as<typename B::ComputeType, typename Atom::TB>);
+  static_assert(std::same_as<
+      typename CInput::ComputeType, typename Atom::TAcc>);
+  static_assert(std::same_as<
+      typename COutput::ComputeType, typename Atom::TAcc>);
+  static_assert(std::same_as<
+      typename AccInput::ComputeType, typename Atom::TAcc>);
+  static_assert(std::same_as<
+      typename AccOutput::ComputeType, typename Atom::TAcc>);
+  using Backend = matmul_details::Backend<Implementation>;
+  Backend::template run_phased_n_major<Atom, Policy>(
+      scope, m, n, k, a, b, c_input, c_output,
+      acc_input, acc_output, route, scratch);
+}
+
 /**
  * Execute a leaf under a configuration established by
  * with_matmul_configuration().  This explicit entry point prevents ordinary

@@ -18,7 +18,9 @@
 namespace vecops::matmul::details {
 
 /** Schedule exactly one MC x NC x KC block on the backend Tile2D layer. */
-template <typename AtomT, typename SchedulerPolicy, typename Implementation>
+template <typename AtomT, typename SchedulerPolicy, typename Implementation,
+          kernel::loop::Tile2DTraversalOrder Traversal =
+              kernel::loop::Tile2DTraversalOrder::m_major>
 struct Scheduler {
   template <execution::ExecutionScope Scope,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
@@ -56,12 +58,22 @@ struct Scheduler {
         [&](auto& a_access, auto& b_access,
             auto& c_input_access, auto& c_output_access)
             VECOPS_KERNEL_LAMBDA {
-          kernel::matmul_bound<
-              AtomT, SchedulerPolicy, true,
-              ::vecops::matmul::details::AutomaticFamilyDispatch>(
-                  scope, m, n, k, a_access, b_access,
-                  c_input_access, c_output_access, scratch,
-                  Implementation{});
+          if constexpr (Traversal ==
+                        kernel::loop::Tile2DTraversalOrder::m_major) {
+            kernel::matmul_bound<
+                AtomT, SchedulerPolicy, true,
+                ::vecops::matmul::details::AutomaticFamilyDispatch>(
+                    scope, m, n, k, a_access, b_access,
+                    c_input_access, c_output_access, scratch,
+                    Implementation{});
+          } else {
+            kernel::matmul_bound_n_major<
+                AtomT, SchedulerPolicy, true,
+                ::vecops::matmul::details::AutomaticFamilyDispatch>(
+                    scope, m, n, k, a_access, b_access,
+                    c_input_access, c_output_access, scratch,
+                    Implementation{});
+          }
           // Flush transformed/materialized outputs before their access session
           // goes out of scope. Direct storage commits as a no-op.
           c_output_access.commit();
@@ -117,11 +129,21 @@ struct Scheduler {
               [&](auto& c_input_access, auto& c_output_access,
                   auto& acc_input_access, auto& acc_output_access)
                   VECOPS_KERNEL_LAMBDA {
-                kernel::matmul_bound_phased<AtomT, SchedulerPolicy>(
-                    scope, m, n, k, a_access, b_access,
-                    c_input_access, c_output_access,
-                    acc_input_access, acc_output_access,
-                    route, scratch, Implementation{});
+                if constexpr (Traversal ==
+                              kernel::loop::Tile2DTraversalOrder::m_major) {
+                  kernel::matmul_bound_phased<AtomT, SchedulerPolicy>(
+                      scope, m, n, k, a_access, b_access,
+                      c_input_access, c_output_access,
+                      acc_input_access, acc_output_access,
+                      route, scratch, Implementation{});
+                } else {
+                  kernel::matmul_bound_phased_n_major<
+                      AtomT, SchedulerPolicy>(
+                          scope, m, n, k, a_access, b_access,
+                          c_input_access, c_output_access,
+                          acc_input_access, acc_output_access,
+                          route, scratch, Implementation{});
+                }
                 // Both are direct sessions today; marking both complete keeps
                 // ownership correct while Route decides which one was written.
                 c_output_access.commit();

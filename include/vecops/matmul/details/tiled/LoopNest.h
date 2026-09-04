@@ -228,12 +228,43 @@ struct LoopNest {
         context, tiling, logical_k, fn_ref, UnselectedKPhase{});
   }
 
+  /**
+   * @brief Phase-carrying entry with a state-transform hook at every axis.
+   *
+   * After the current axis block has been selected, `hook` is invoked as
+   * `hook.template operator()<Depth, Axis>(block, phase, state, next)`.
+   * Calling `next(new_state)` continues the remaining loop nest and may
+   * change the state type. This lets callers establish resources at their
+   * exact loop lifetime (for example a packed B panel after N/K but before
+   * M) without cloning the six loop-order implementations. The hook and all
+   * placement choices are template-resolved; the default pass-through path
+   * adds no run-time branch.
+   */
+  template <typename M, typename N, typename K, typename State,
+            typename Hook, typename Fn>
+  VECOPS_ALWAYS_INLINE static void run_phased_with_state(
+      M m, N n, K k, const Tiling& tiling, const State& initial_state,
+      Hook&& hook, Fn&& fn) {
+    static_assert(meta::ValueType<M> && meta::ValueType<N> &&
+                  meta::ValueType<K>);
+    const nint_t logical_m = static_cast<nint_t>(m);
+    const nint_t logical_n = static_cast<nint_t>(n);
+    const nint_t logical_k = static_cast<nint_t>(k);
+    VECOPS_ASSERT(logical_m >= 0 && logical_n >= 0 && logical_k >= 0,
+                  "matmul extents must be non-negative");
+    if (logical_m == 0 || logical_n == 0) return;
+    BlockContext<M, N, K> context{0, 0, 0, m, n, k};
+    auto&& hook_ref = hook;
+    auto&& fn_ref = fn;
+    run_depth_stateful<0>(
+        context, tiling, logical_k, initial_state, hook_ref, fn_ref,
+        UnselectedKPhase{});
+  }
+
 private:
-  /// One recursion level per axis. Depth == 3 is the leaf, where an
-  /// unselected phase (no K loop was ever generated) converges to
-  /// KernelPhase<true, true>: the K axis, if elided entirely, is a single
-  /// block by construction. Otherwise this level emits the loop for
-  /// `order_axis_v<Depth, Order>` and recurses with narrowed blocks.
+  // Historical stateless recursion. Keep it separate from the hook-bearing
+  // recursion so existing callers retain the same optimizer input and hot
+  // code; only panel-lifetime users instantiate the stateful variant.
   template <int Depth, typename Phase, typename Context, typename Fn>
   VECOPS_ALWAYS_INLINE static void run_depth(
       const Context& context, const Tiling& tiling,
@@ -250,20 +281,14 @@ private:
       using Tile = std::remove_cvref_t<decltype(axis_tile<Target>(tiling))>;
       constexpr CacheLoopMode Mode = axis_mode_v<Target, Tiling>;
       if constexpr (!generates_loop_v<Extent, Tile, Mode>) {
-        // Loop provably (or by request) unnecessary: the whole axis is one
-        // block; recurse with the context unchanged.
-        run_depth<Depth + 1>(context, tiling, logical_k, fn, phase);
+        run_depth<Depth + 1>(
+            context, tiling, logical_k, fn, phase);
       } else {
         const nint_t extent = static_cast<nint_t>(
             axis_extent<Target>(context));
         const nint_t tile = static_cast<nint_t>(axis_tile<Target>(tiling));
         VECOPS_ASSERT(tile > 0, "matmul cache tile must be positive");
         if constexpr (Target == Axis::K) {
-          // K is the only axis needing a phase split: it is the only axis
-          // whose blocks accumulate into the same output. Blocks are split
-          // into first / middle(s) / last rather than a uniform loop so the
-          // first block carries a compile-time full-tile extent (Any{tile})
-          // and only the last block is dynamically sized.
           if (extent <= tile) {
             const meta::Any active{extent};
             auto block = replace_axis<Target>(context, 0, active);
@@ -276,10 +301,6 @@ private:
             run_depth<Depth + 1>(
                 first, tiling, logical_k, fn,
                 DynamicKernelPhase{true, false});
-            // Align the last block's origin down to a tile boundary
-            // (((extent-1)/tile)*tile) so the last block is at most one tile.
-            // Exact multiples retain one full final block instead of
-            // producing a zero-sized tail.
             const nint_t last_origin = ((extent - 1) / tile) * tile;
             for (nint_t origin = tile; origin < last_origin;
                  origin += tile) {
@@ -297,13 +318,110 @@ private:
                 DynamicKernelPhase{false, true});
           }
         } else {
-          // M/N blocks are independent: uniform stepping with an inline
-          // min(tile, remainder) tail, no phase.
           for (nint_t origin = 0; origin < extent; origin += tile) {
             const meta::Any active{std::min(tile, extent - origin)};
             auto block = replace_axis<Target>(context, origin, active);
             run_depth<Depth + 1>(
                 block, tiling, logical_k, fn, phase);
+          }
+        }
+      }
+    }
+  }
+
+  /// Invoke the caller hook after one axis has been selected, then recurse.
+  /// The generic continuation is what permits a hook to replace the state
+  /// with another type (e.g. raw input spec -> packed input spec).
+  template <int Depth, Axis Target, typename Phase, typename Context,
+            typename State, typename Hook, typename Fn>
+  VECOPS_ALWAYS_INLINE static void continue_after_axis(
+      const Context& context, const Tiling& tiling, nint_t logical_k,
+      const State& state, Hook& hook, Fn& fn, Phase phase) {
+    auto continuation = [&](const auto& next_state) VECOPS_INLINE_LAMBDA {
+      run_depth_stateful<Depth + 1>(
+          context, tiling, logical_k, next_state, hook, fn, phase);
+    };
+    hook.template operator()<Depth, Target>(
+        context, phase, state, continuation);
+  }
+
+  /// One recursion level per axis. Depth == 3 is the leaf, where an
+  /// unselected phase (no K loop was ever generated) converges to
+  /// KernelPhase<true, true>: the K axis, if elided entirely, is a single
+  /// block by construction. Otherwise this level emits the loop for
+  /// `order_axis_v<Depth, Order>` and recurses with narrowed blocks.
+  template <int Depth, typename Phase, typename Context, typename State,
+            typename Hook, typename Fn>
+  VECOPS_ALWAYS_INLINE static void run_depth_stateful(
+      const Context& context, const Tiling& tiling,
+      nint_t logical_k, const State& state, Hook& hook, Fn& fn, Phase phase) {
+    if constexpr (Depth == 3) {
+      if constexpr (std::same_as<Phase, UnselectedKPhase>)
+        fn(context, KernelPhase<true, true>{}, state);
+      else
+        fn(context, phase, state);
+    } else {
+      constexpr Axis Target = order_axis_v<Depth, Order>;
+      using Extent = std::remove_cvref_t<decltype(axis_extent<Target>(
+          context))>;
+      using Tile = std::remove_cvref_t<decltype(axis_tile<Target>(tiling))>;
+      constexpr CacheLoopMode Mode = axis_mode_v<Target, Tiling>;
+      if constexpr (!generates_loop_v<Extent, Tile, Mode>) {
+        // Loop provably (or by request) unnecessary: the whole axis is one
+        // block; recurse with the context unchanged.
+        continue_after_axis<Depth, Target>(
+            context, tiling, logical_k, state, hook, fn, phase);
+      } else {
+        const nint_t extent = static_cast<nint_t>(
+            axis_extent<Target>(context));
+        const nint_t tile = static_cast<nint_t>(axis_tile<Target>(tiling));
+        VECOPS_ASSERT(tile > 0, "matmul cache tile must be positive");
+        if constexpr (Target == Axis::K) {
+          // K is the only axis needing a phase split: it is the only axis
+          // whose blocks accumulate into the same output. Blocks are split
+          // into first / middle(s) / last rather than a uniform loop so the
+          // first block carries a compile-time full-tile extent (Any{tile})
+          // and only the last block is dynamically sized.
+          if (extent <= tile) {
+            const meta::Any active{extent};
+            auto block = replace_axis<Target>(context, 0, active);
+            continue_after_axis<Depth, Target>(
+                block, tiling, logical_k, state, hook, fn,
+                KernelPhase<true, true>{});
+          } else {
+            auto first = replace_axis<Target>(
+                context, 0, meta::Any{tile});
+            continue_after_axis<Depth, Target>(
+                first, tiling, logical_k, state, hook, fn,
+                DynamicKernelPhase{true, false});
+            // Align the last block's origin down to a tile boundary
+            // (((extent-1)/tile)*tile) so the last block is at most one tile.
+            // Exact multiples retain one full final block instead of
+            // producing a zero-sized tail.
+            const nint_t last_origin = ((extent - 1) / tile) * tile;
+            for (nint_t origin = tile; origin < last_origin;
+                 origin += tile) {
+              auto middle = replace_axis<Target>(
+                  context, origin, meta::Any{tile});
+              continue_after_axis<Depth, Target>(
+                  middle, tiling, logical_k, state, hook, fn,
+                  DynamicKernelPhase{false, false});
+            }
+            auto last = replace_axis<Target>(
+                context, last_origin,
+                meta::Any{extent - last_origin});
+            continue_after_axis<Depth, Target>(
+                last, tiling, logical_k, state, hook, fn,
+                DynamicKernelPhase{false, true});
+          }
+        } else {
+          // M/N blocks are independent: uniform stepping with an inline
+          // min(tile, remainder) tail, no phase.
+          for (nint_t origin = 0; origin < extent; origin += tile) {
+            const meta::Any active{std::min(tile, extent - origin)};
+            auto block = replace_axis<Target>(context, origin, active);
+            continue_after_axis<Depth, Target>(
+                block, tiling, logical_k, state, hook, fn, phase);
           }
         }
       }

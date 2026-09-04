@@ -3042,6 +3042,8 @@ struct Backend<matmul_implementation::SME> {
         FamilyDispatch, Atom, M, N, K, A, B, CInput, COutput, Scope>();
     using Applicability = ::vecops::matmul::details::Applicability;
     using RequestedFamily = typename FamilyDispatch::Family;
+    constexpr bool NMajor =
+        matmul_details::n_major_family_dispatch_v<FamilyDispatch>;
     constexpr bool AutomaticNeedsRuntimeProbe =
         std::same_as<RequestedFamily,
                      ::vecops::matmul::kernel_family::WholeProblem> &&
@@ -3308,8 +3310,12 @@ struct Backend<matmul_implementation::SME> {
           if constexpr (
               sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
               sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>) {
-            matmul_details::run_tiles<Backend, Atom, Policy>(
-                m, n, k, a, b, c_input, c_output, scratch);
+            if constexpr (NMajor)
+              matmul_details::run_tiles_n_major<Backend, Atom, Policy>(
+                  m, n, k, a, b, c_input, c_output, scratch);
+            else
+              matmul_details::run_tiles<Backend, Atom, Policy>(
+                  m, n, k, a, b, c_input, c_output, scratch);
           } else {
             using Resources = typename std::remove_cvref_t<
                 decltype(active)>::ActiveResources;
@@ -3319,15 +3325,36 @@ struct Backend<matmul_implementation::SME> {
                 tensor::rebind_active_resources<Resources>(c_input);
             auto active_c_output =
                 tensor::rebind_active_resources<Resources>(c_output);
-            matmul_details::run_tiles<Backend, Atom, Policy>(
-                m, n, k, active_a, active_b,
-                active_c_input, active_c_output, scratch);
+            if constexpr (NMajor)
+              matmul_details::run_tiles_n_major<Backend, Atom, Policy>(
+                  m, n, k, active_a, active_b,
+                  active_c_input, active_c_output, scratch);
+            else
+              matmul_details::run_tiles<Backend, Atom, Policy>(
+                  m, n, k, active_a, active_b,
+                  active_c_input, active_c_output, scratch);
             // Commit while still inside the region: a materialized
             // (transformed) output session must not carry deferred state
             // across SMSTOP.
             active_c_output.commit();
           }
         });
+  }
+
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            bool AllowTailSplit = false,
+            typename FamilyDispatch =
+                ::vecops::matmul::details::AutomaticFamilyDispatch,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B, typename CInput, typename COutput>
+  VECOPS_ALWAYS_INLINE static void run_n_major(
+      Scope& scope, M m, N n, K k,
+      const A& a, const B& b, const CInput& c_input, COutput& c_output,
+      void* scratch) {
+    using Dispatch = matmul_details::NMajorFamilyDispatch<FamilyDispatch>;
+    run<Atom, Policy, AllowTailSplit, Dispatch>(
+        scope, m, n, k, a, b, c_input, c_output, scratch);
   }
 
   /** Generic-Tiler leaf entry: skip all whole-problem SME selectors. */
@@ -3375,6 +3402,39 @@ struct Backend<matmul_implementation::SME> {
         });
   }
 
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B, typename CInput, typename COutput>
+  VECOPS_ALWAYS_INLINE static void run_configured_n_major(
+      Scope& scope, M m, N n, K k,
+      const A& a, const B& b, const CInput& c_input, COutput& c_output,
+      void* scratch) {
+    scope.with_resources(
+        execution::details::arm::StreamingZARegion{},
+        [&](auto& active) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          if constexpr (
+              sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
+              sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>) {
+            matmul_details::run_tiles_n_major<Backend, Atom, Policy>(
+                m, n, k, a, b, c_input, c_output, scratch);
+          } else {
+            using Resources = typename std::remove_cvref_t<
+                decltype(active)>::ActiveResources;
+            auto active_a = tensor::rebind_active_resources<Resources>(a);
+            auto active_b = tensor::rebind_active_resources<Resources>(b);
+            auto active_c_input =
+                tensor::rebind_active_resources<Resources>(c_input);
+            auto active_c_output =
+                tensor::rebind_active_resources<Resources>(c_output);
+            matmul_details::run_tiles_n_major<Backend, Atom, Policy>(
+                m, n, k, active_a, active_b,
+                active_c_input, active_c_output, scratch);
+            active_c_output.commit();
+          }
+        });
+  }
+
   /** Generic-Tiler split-K entry with one runtime C route type. */
   template <::vecops::matmul::Atom Atom, typename Policy,
             execution::ExecutionScope Scope,
@@ -3413,6 +3473,48 @@ struct Backend<matmul_implementation::SME> {
             auto active_acc_output =
                 tensor::rebind_active_resources<Resources>(acc_output);
             run_tiles_phased_shared<Atom, Policy>(
+                m, n, k, active_a, active_b,
+                active_c_input, active_c_output,
+                active_acc_input, active_acc_output, route, scratch);
+            active_c_output.commit();
+            active_acc_output.commit();
+          }
+        });
+  }
+
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B, typename CInput, typename COutput,
+            typename AccInput, typename AccOutput, typename Route>
+  VECOPS_ALWAYS_INLINE static void run_phased_n_major(
+      Scope& scope, M m, N n, K k, const A& a, const B& b,
+      const CInput& c_input, COutput& c_output,
+      const AccInput& acc_input, AccOutput& acc_output,
+      Route route, void* scratch) {
+    scope.with_resources(
+        execution::details::arm::StreamingZARegion{},
+        [&](auto& active) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          if constexpr (
+              sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
+              sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>) {
+            run_tiles_phased_shared_n_major<Atom, Policy>(
+                m, n, k, a, b, c_input, c_output,
+                acc_input, acc_output, route, scratch);
+          } else {
+            using Resources = typename std::remove_cvref_t<
+                decltype(active)>::ActiveResources;
+            auto active_a = tensor::rebind_active_resources<Resources>(a);
+            auto active_b = tensor::rebind_active_resources<Resources>(b);
+            auto active_c_input =
+                tensor::rebind_active_resources<Resources>(c_input);
+            auto active_c_output =
+                tensor::rebind_active_resources<Resources>(c_output);
+            auto active_acc_input =
+                tensor::rebind_active_resources<Resources>(acc_input);
+            auto active_acc_output =
+                tensor::rebind_active_resources<Resources>(acc_output);
+            run_tiles_phased_shared_n_major<Atom, Policy>(
                 m, n, k, active_a, active_b,
                 active_c_input, active_c_output,
                 active_acc_input, active_acc_output, route, scratch);
@@ -3485,6 +3587,14 @@ struct Backend<matmul_implementation::SME> {
     }
   }
 
+  template <::vecops::matmul::Atom Atom, typename A, typename B,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename Fn>
+  VECOPS_ALWAYS_INLINE static void dispatch_plan_n_major(
+      M m, N n, K k, Fn&& fn) {
+    dispatch_plan<Atom, A, B>(m, n, k, std::forward<Fn>(fn));
+  }
+
   /// One Tile2D Case instantiation: forward to the ZA microkernel with the
   /// case's block shape and mask/exactness guarantees as template flags.
   template <::vecops::matmul::Atom Atom, typename Case, typename Plan,
@@ -3523,6 +3633,21 @@ struct Backend<matmul_implementation::SME> {
       Route route, void* scratch) {
     static_assert(!matmul_details::static_accumulator_route_v<Route>);
     matmul_details::run_tiles_phased<Backend, Atom, Policy>(
+        m, n, k, a, b, c_input, c_output,
+        acc_input, acc_output, route, scratch);
+  }
+
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B, typename CInput, typename COutput,
+            typename AccInput, typename AccOutput, typename Route>
+  VECOPS_NOINLINE static void run_tiles_phased_shared_n_major(
+      M m, N n, K k, const A& a, const B& b,
+      const CInput& c_input, COutput& c_output,
+      const AccInput& acc_input, AccOutput& acc_output,
+      Route route, void* scratch) {
+    static_assert(!matmul_details::static_accumulator_route_v<Route>);
+    matmul_details::run_tiles_phased_n_major<Backend, Atom, Policy>(
         m, n, k, a, b, c_input, c_output,
         acc_input, acc_output, route, scratch);
   }

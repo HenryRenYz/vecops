@@ -89,6 +89,52 @@ consteval bool orientation_decision() {
   return Invocation::swaps_ab;
 }
 
+using DirectionalPacking = ::vecops::matmul::MatmulPackingTuning<
+    ::vecops::matmul::packing_policy::InsideOnly,
+    ::vecops::matmul::packing_policy::OutsideOnly>;
+using DirectionalPackingConfig = ops::MatmulConfigWithPacking<
+    PrimaryAtom, DirectionalPacking>;
+
+using UnswappedDirectionalInvocation = typename OrientationProblem<
+    false, false, false, DirectionalPackingConfig>::Invocation;
+static_assert(!UnswappedDirectionalInvocation::swaps_ab);
+static_assert(std::same_as<
+    typename UnswappedDirectionalInvocation::APackingPolicy,
+    ::vecops::matmul::packing_policy::InsideOnly>);
+static_assert(std::same_as<
+    typename UnswappedDirectionalInvocation::BPackingPolicy,
+    ::vecops::matmul::packing_policy::OutsideOnly>);
+
+#if defined(ARCH_X86_FAMILY)
+// Policies name logical operands and therefore follow them through the AMX
+// orientation exchange: physical A receives logical B's policy and vice
+// versa.
+using SwappedDirectionalInvocation = typename OrientationProblem<
+    true, true, false, DirectionalPackingConfig>::Invocation;
+static_assert(SwappedDirectionalInvocation::swaps_ab);
+static_assert(std::same_as<
+    typename SwappedDirectionalInvocation::APackingPolicy,
+    ::vecops::matmul::packing_policy::OutsideOnly>);
+static_assert(std::same_as<
+    typename SwappedDirectionalInvocation::BPackingPolicy,
+    ::vecops::matmul::packing_policy::InsideOnly>);
+
+using SwappedRequiredPacking = ::vecops::matmul::MatmulPackingTuning<
+    ::vecops::matmul::packing_policy::InsideOnly,
+    ::vecops::matmul::packing_policy::RequireOutside>;
+using SwappedRequiredConfig = ops::MatmulConfigWithPacking<
+    PrimaryAtom, SwappedRequiredPacking>;
+using SwappedRequiredInvocation = typename OrientationProblem<
+    true, true, false, SwappedRequiredConfig>::Invocation;
+static_assert(SwappedRequiredInvocation::swaps_ab);
+static_assert(std::same_as<
+    typename SwappedRequiredInvocation::APackingPolicy,
+    ::vecops::matmul::packing_policy::RequireOutside>);
+static_assert(std::same_as<
+    typename SwappedRequiredInvocation::BPackingPolicy,
+    ::vecops::matmul::packing_policy::InsideOnly>);
+#endif
+
 TEST(MatmulOrientationTest, ArchitecturePolicyClassifiesEightLayouts) {
   using Enabled = ops::MatmulConfig<PrimaryAtom>;
   using Disabled = SwapDisabledConfig<PrimaryAtom>;

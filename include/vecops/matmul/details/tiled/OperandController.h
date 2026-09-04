@@ -29,6 +29,22 @@
 
 namespace vecops::matmul::details {
 
+template <typename AtomT, Operand Side>
+VECOPS_INLINE nint_t packed_spatial_panel() {
+  using Packing = packing_t<AtomT, Side>;
+  if constexpr (requires { Packing::Panel; })
+    return Packing::Panel;
+  else
+    return static_cast<nint_t>(Packing::panel());
+}
+
+template <typename AtomT, Operand Side>
+inline constexpr nint_t packed_k_step_v = [] {
+  using Packing = packing_t<AtomT, Side>;
+  if constexpr (requires { Packing::KTile; }) return Packing::KTile;
+  else return Packing::KPack;
+}();
+
 /// Whether this input spec already carries the atom's packed layout for one
 /// side (never re-packed, under any PackingMode).
 template <typename AtomT, Operand Side, typename Spec>
@@ -40,11 +56,11 @@ inline constexpr bool is_packed_spec_v = is_packed_layout<
  *
  * Packed inputs cannot be sliced row by row: the packed layout is
  * `[panel, k-group, row(panel), k(KPack)]` and a block boundary only ever
- * lands on whole panels and whole K groups. The narrowing therefore advances
- * only the two outermost dimensions -- `(spatial_origin / panel)` steps in
- * dim 0 and `(k_origin / KStep)` steps in dim 1 -- and re-bases the data
- * pointer, keeping dims 2..3 (row within panel, k within group) restarting
- * at zero for the new block. Unpacked inputs take two ordinary narrow
+ * must land on whole panels and K groups. Re-basing into the middle of a
+ * panel is not safe even when the logical tail fits: AMX packed loaders still
+ * fetch a complete tile and would cross into the next K group (and can read
+ * beyond the final allocation). The structural alignment checks therefore
+ * remain enabled in release builds. Unpacked inputs take two ordinary narrow
  * views.
  */
 template <typename AtomT, Operand Side, tensor::InputSpecLike Spec,
@@ -57,24 +73,20 @@ VECOPS_INLINE auto narrow_input(
     // The two packing formats expose their constants differently (AMX has
     // static Panel/KTile members, SME a panel() function and KPack only);
     // probe for the richer spelling and fall back to the common one.
-    const nint_t panel = [&] {
-      if constexpr (requires { Packing::Panel; }) return Packing::Panel;
-      else return static_cast<nint_t>(Packing::panel());
-    }();
-    constexpr nint_t KStep = [] {
-      if constexpr (requires { Packing::KTile; }) return Packing::KTile;
-      else return Packing::KPack;
-    }();
-    VECOPS_ASSERT(spatial_origin % panel == 0,
-                  "packed matmul spatial block is misaligned");
-    VECOPS_ASSERT(k_origin % KStep == 0,
-                  "packed matmul K block is misaligned");
+    const nint_t panel = packed_spatial_panel<AtomT, Side>();
+    constexpr nint_t KStep = packed_k_step_v<AtomT, Side>;
+    VECOPS_CHECK(spatial_origin >= 0 && k_origin >= 0,
+                 "packed matmul block origin must be non-negative");
+    VECOPS_CHECK(spatial_origin % panel == 0,
+                 "packed matmul spatial block is misaligned");
+    VECOPS_CHECK(k_origin % KStep == 0,
+                 "packed matmul K block is misaligned");
     static_assert(std::same_as<
         typename Spec::TransformType, tensor::NoTransform>,
         "packed matmul panels must be direct and untransformed");
     const auto& layout = spec.input_layout();
-    // Re-base only: the first two packed dims advance (panel index via
-    // strides[0], k-group index via strides[1]); the row/k dims restart at 0.
+    // Re-base only the panel and K group/tile. The hardware loader owns the
+    // complete trailing packed tile and therefore requires row zero.
     const nint_t offset = (spatial_origin / panel) * layout.strides()[0] +
         (k_origin / KStep) * layout.strides()[1];
     auto panel_view = tensor::make_tensor(
@@ -160,24 +172,22 @@ VECOPS_ALWAYS_INLINE decltype(auto) with_operand_panel(
  *        when allowed.
  *
  * Elevation requires all three: the resolved extent is `full_k`, the operand
- * is packable at all, and the caller passed `allow_full_k` (the Tiler grants
- * it when an explicitly-requested full_k policy overrides the budget, or the
- * operand's whole-K packed size fits the L3 working-set budget). Without it,
- * the plain spec flows through and packing happens per panel inside the
- * nest instead.
+ * is packable at all, and `Enabled` is true. The Tiler supplies that
+ * compile-time permission (explicit full-K, legacy
+ * `always`, or required outside placement), preventing a runtime raw/packed
+ * representation split. Without it, the plain spec flows through and an
+ * allowed bounded-panel site handles packing instead.
  */
-template <typename Policy, typename Order, typename AtomT, Operand Side,
+template <bool Enabled, typename Policy, typename Order,
+          typename AtomT, Operand Side,
           execution::ExecutionScope Scope,
           tensor::InputSpecLike Spec, typename Fn>
 VECOPS_ALWAYS_INLINE decltype(auto) with_full_k_operand(
-    Scope& scope, const Spec& spec, bool allow_full_k, Fn&& fn) {
-  if constexpr (full_k_packing_v<Policy, Side, Order> &&
+    Scope& scope, const Spec& spec, Fn&& fn) {
+  if constexpr (Enabled && full_k_packing_v<Policy, Side, Order> &&
                 should_pack_v<Policy, AtomT, Side, Spec>) {
-    if (allow_full_k) {
-      return with_operand_panel<Policy, AtomT, Side>(
-          scope, spec, std::forward<Fn>(fn));
-    }
-    return std::forward<Fn>(fn)(spec);
+    return with_operand_panel<Policy, AtomT, Side>(
+        scope, spec, std::forward<Fn>(fn));
   } else {
     return std::forward<Fn>(fn)(spec);
   }
@@ -187,29 +197,32 @@ VECOPS_ALWAYS_INLINE decltype(auto) with_full_k_operand(
  * @brief One-side packing adapter; A and B never form a Cartesian branch.
  *
  * Exposes the two packing lifetimes as one type: `with_whole_operand` is the
- * hoisted full-K entry (called once around the whole loop nest, honoring the
- * L3 budget flag), `with_panel` is the per-KC-block entry (called inside the
- * nest for cache_k packing).
+ * hoisted full-K entry (called once around the whole loop nest), `with_panel`
+ * is the bounded per-KC-block entry placed at the chosen loop depth.
  */
 template <Operand Side, typename Policy, typename Order, typename AtomT>
 struct OperandController {
   static constexpr PackingExtent extent =
       resolved_packing_extent_v<Policy, Side, Order>;
 
-  template <execution::ExecutionScope Scope,
+  template <bool Enabled = true, execution::ExecutionScope Scope,
             tensor::InputSpecLike Spec, typename Fn>
   VECOPS_ALWAYS_INLINE static decltype(auto) with_whole_operand(
-      Scope& scope, const Spec& spec, bool allow_full_k, Fn&& fn) {
-    return with_full_k_operand<Policy, Order, AtomT, Side>(
-        scope, spec, allow_full_k, std::forward<Fn>(fn));
+      Scope& scope, const Spec& spec, Fn&& fn) {
+    return with_full_k_operand<Enabled, Policy, Order, AtomT, Side>(
+        scope, spec, std::forward<Fn>(fn));
   }
 
-  template <execution::ExecutionScope Scope,
+  template <bool Enabled = true, execution::ExecutionScope Scope,
             tensor::InputSpecLike Spec, typename Fn>
   VECOPS_ALWAYS_INLINE static decltype(auto) with_panel(
       Scope& scope, const Spec& spec, Fn&& fn) {
-    return with_operand_panel<Policy, AtomT, Side>(
-        scope, spec, std::forward<Fn>(fn));
+    if constexpr (Enabled) {
+      return with_operand_panel<Policy, AtomT, Side>(
+          scope, spec, std::forward<Fn>(fn));
+    } else {
+      return std::forward<Fn>(fn)(spec);
+    }
   }
 };
 

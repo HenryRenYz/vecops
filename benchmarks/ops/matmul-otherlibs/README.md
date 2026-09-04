@@ -214,6 +214,14 @@ This separates cache-loop/accumulator round trips from the one-time weight
 packing cost and guards against replacing the faster whole-problem prepared
 path with an apparently more sophisticated but slower split-K plan.
 
+The same executable has four `extent:PackingLifetime` diagnostic rows for
+G05/L05. With NKM and MC/NC/KC=16/512/256, `b_inside_only` rebuilds the B
+panel inside every M block while `b_outside_only` retains one NCxKC panel
+across that innermost loop. Both use the top-level `MatmulPackingTuning` API,
+include online packing in the timed region, and verify sampled output before
+measurement. They are diagnostic rows and are not part of the formal provider
+aggregate.
+
 On Arm, `MatmulOtherlibsVecopsBatchPhaseProbe-Native` decomposes A08 into a
 native rank-3 call, four explicit rank-2 calls, prepared-B/prepared-AB calls,
 and matching variants whose whole batch is wrapped by one Streaming+ZA

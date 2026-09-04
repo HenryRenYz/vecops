@@ -73,6 +73,50 @@
 
 namespace vecops::matmul::details {
 
+/** Carry opt-in packing policy through the existing dispatch type.
+ *
+ * Keeping the policy off InputSpec is important: tensor access and packing
+ * APIs deliberately recognize their exact spec types.  The default Any/Any
+ * case also keeps the historical FamilyDispatch type exactly unchanged, so
+ * existing call sites retain the same template identity and generated code.
+ */
+template <typename Dispatch,
+          ::vecops::matmul::OperandPackingPolicyType APacking,
+          ::vecops::matmul::OperandPackingPolicyType BPacking>
+struct PackingPolicyFamilyDispatch : Dispatch {
+  using APackingPlacement = APacking;
+  using BPackingPlacement = BPacking;
+};
+
+template <typename Dispatch, typename = void>
+struct DispatchPackingPlacement {
+  using A = ::vecops::matmul::packing_policy::Any;
+  using B = ::vecops::matmul::packing_policy::Any;
+};
+
+template <typename Dispatch>
+struct DispatchPackingPlacement<
+    Dispatch,
+    std::void_t<typename Dispatch::APackingPlacement,
+                typename Dispatch::BPackingPlacement>> {
+  using A = typename Dispatch::APackingPlacement;
+  using B = typename Dispatch::BPackingPlacement;
+};
+
+template <typename Dispatch>
+using dispatch_a_packing_placement_t =
+    typename DispatchPackingPlacement<Dispatch>::A;
+
+template <typename Dispatch>
+using dispatch_b_packing_placement_t =
+    typename DispatchPackingPlacement<Dispatch>::B;
+
+template <typename Dispatch, typename APacking, typename BPacking>
+using attach_packing_policy_t = std::conditional_t<
+    std::same_as<APacking, ::vecops::matmul::packing_policy::Any> &&
+        std::same_as<BPacking, ::vecops::matmul::packing_policy::Any>,
+    Dispatch, PackingPolicyFamilyDispatch<Dispatch, APacking, BPacking>>;
+
 template <::vecops::matmul::Atom Atom,
           typename TilePolicy,
           typename FamilyDispatch,
@@ -84,11 +128,15 @@ template <::vecops::matmul::Atom Atom,
           typename CInputSpec, typename COutputSpec>
 class ArchitectureFamilyInvocation {
 public:
+  using APackingPlacement = dispatch_a_packing_placement_t<FamilyDispatch>;
+  using BPackingPlacement = dispatch_b_packing_placement_t<FamilyDispatch>;
   using AtomType = Atom;
   using TilePolicyType = TilePolicy;
   using MExtentType = MExtent;
   using NExtentType = NExtent;
   using KExtentType = KExtent;
+  using APackingPolicy = APackingPlacement;
+  using BPackingPolicy = BPackingPlacement;
   using Implementation = SelectedImplementation<Atom>;
   using ResourceRequirements =
       kernel::matmul_implementation::resource_requirements_t<Implementation>;
@@ -106,7 +154,9 @@ public:
           std::same_as<typename FamilyDispatch::Family,
                        ::vecops::matmul::kernel_family::General>,
       FamilyDispatch,
-      ::vecops::matmul::details::AutomaticFamilyDispatch>;
+      attach_packing_policy_t<
+          ::vecops::matmul::details::AutomaticFamilyDispatch,
+          APackingPlacement, BPackingPlacement>>;
   static constexpr bool swaps_ab = SwapsAB;
 
   VECOPS_INLINE ArchitectureFamilyInvocation(
@@ -155,6 +205,21 @@ private:
   using PackingPlanner = ArchitecturePackingPlanner<
       ArchitectureFamilyInvocation>;
   friend PackingPlanner;
+  template <::vecops::matmul::Operand Side>
+  using PackingPlacement = std::conditional_t<
+      Side == ::vecops::matmul::Operand::A,
+      APackingPlacement, BPackingPlacement>;
+
+  template <::vecops::matmul::Operand Side>
+  static constexpr bool AllowsOutsidePacking = allows_packing_site(
+      PackingPlacement<Side>::allowed_sites,
+      ::vecops::matmul::PackingSite::outside_reuse_loop);
+
+  template <::vecops::matmul::Operand Side>
+  static constexpr bool RequiresOutsidePacking =
+      AllowsOutsidePacking<Side> &&
+      PackingPlacement<Side>::requirement ==
+          ::vecops::matmul::PackingRequirement::required;
   template <::vecops::matmul::Operand Side, typename Spec>
   static constexpr bool AutoPackOperand = [] {
     using Layout = typename Spec::InputLayout;
@@ -368,9 +433,11 @@ private:
                    ::vecops::matmul::kernel_family::RuntimeQuantInt8>;
   static constexpr bool AutoPackA = RankAllowsAutoPack &&
       !RequestedFamilyNeedsRawOperands &&
+      AllowsOutsidePacking<::vecops::matmul::Operand::A> &&
       AutoPackOperand<::vecops::matmul::Operand::A, ASpec>;
   static constexpr bool AutoPackB = RankAllowsAutoPack &&
       !RequestedFamilyNeedsRawOperands &&
+      AllowsOutsidePacking<::vecops::matmul::Operand::B> &&
       AutoPackOperand<::vecops::matmul::Operand::B, BSpec>;
   static constexpr bool Rank3CompletesPackedPair = Rank3SharedB &&
       ((AutoPackA && PackedBInput) || (AutoPackB && PackedAInput));
@@ -407,6 +474,7 @@ private:
       false;
 #else
       std::same_as<Implementation, kernel::matmul_implementation::AMX> &&
+      AllowsOutsidePacking<::vecops::matmul::Operand::A> &&
       BatchRowsFlattenCandidate && NativeAInput &&
       (std::same_as<typename Atom::TA, bfloat16_t> ||
        std::is_integral_v<typename Atom::TA>);
@@ -859,6 +927,8 @@ private:
         ? AutoPackA : AutoPackB;
     if constexpr (!CanPack) {
       return false;
+    } else if constexpr (RequiresOutsidePacking<Side>) {
+      return true;
     } else if constexpr (SingletonProblem) {
       return auto_pack_at_bound<Side, true>();
     } else {
@@ -1305,6 +1375,38 @@ private:
                   "matmul rank is smaller than the backend problem rank");
     static_assert(CInputSpec::InputTensor::Ndim == Rank,
                   "matmul C input/output ranks must match");
+    static_assert(
+        APackingPlacement::prepared_input !=
+                ::vecops::matmul::PreparedInputRequirement::required ||
+            PackedAInput,
+        "matmul A packing policy requires caller-prepared packed input");
+    static_assert(
+        BPackingPlacement::prepared_input !=
+                ::vecops::matmul::PreparedInputRequirement::required ||
+            PackedBInput,
+        "matmul B packing policy requires caller-prepared packed input");
+    static_assert(
+        APackingPlacement::requirement !=
+                ::vecops::matmul::PackingRequirement::required ||
+            AllowsOutsidePacking<::vecops::matmul::Operand::A> ||
+            PackedAInput,
+        "architecture matmul cannot force an inside-only A pack; select "
+        "GenericTiled or allow outside packing");
+    static_assert(
+        BPackingPlacement::requirement !=
+                ::vecops::matmul::PackingRequirement::required ||
+            AllowsOutsidePacking<::vecops::matmul::Operand::B> ||
+            PackedBInput,
+        "architecture matmul cannot force an inside-only B pack; select "
+        "GenericTiled or allow outside packing");
+    static_assert(
+        !RequiresOutsidePacking<::vecops::matmul::Operand::A> ||
+            PackedAInput || AutoPackA,
+        "required outside A packing is unsupported for this operand/family");
+    static_assert(
+        !RequiresOutsidePacking<::vecops::matmul::Operand::B> ||
+            PackedBInput || AutoPackB,
+        "required outside B packing is unsupported for this operand/family");
     const nint_t m = static_cast<nint_t>(m_);
     const nint_t n = static_cast<nint_t>(n_);
     const nint_t k = static_cast<nint_t>(k_);
@@ -1637,6 +1739,9 @@ VECOPS_INLINE auto make_matmul_invocation(
                 "make_matmul_invocation requires an architecture family");
   using FamilyDispatch = ::vecops::matmul::details::FamilyDispatch<
       Family, ::vecops::matmul::details::family_selection_mode_v<Config>>;
+  using PackingTuning = config_packing_tuning_t<Config>;
+  using LogicalAPacking = typename PackingTuning::APacking;
+  using LogicalBPacking = typename PackingTuning::BPacking;
   auto m_value = meta::to_value(std::forward<M>(m));
   auto n_value = meta::to_value(std::forward<N>(n));
   auto k_value = meta::to_value(std::forward<K>(k));
@@ -1652,10 +1757,12 @@ VECOPS_INLINE auto make_matmul_invocation(
       decltype(c_input_spec), decltype(c_output_spec)>;
   if constexpr (SwapAB) {
     using SwappedAtom = typename Atom::SwappedAtom;
+    using PhysicalFamilyDispatch = attach_packing_policy_t<
+        FamilyDispatch, LogicalBPacking, LogicalAPacking>;
     auto transposed_c_input = tensor::transpose_view<0, 1>(c_input_spec);
     auto transposed_c_output = tensor::transpose_view<0, 1>(c_output_spec);
     return ArchitectureFamilyInvocation<
-        SwappedAtom, TilePolicy, FamilyDispatch, true,
+        SwappedAtom, TilePolicy, PhysicalFamilyDispatch, true,
         decltype(n_value), decltype(m_value), decltype(k_value),
         decltype(b_spec), decltype(a_spec),
         decltype(transposed_c_input), decltype(transposed_c_output)>{
@@ -1663,8 +1770,10 @@ VECOPS_INLINE auto make_matmul_invocation(
             std::move(b_spec), std::move(a_spec),
             std::move(transposed_c_input), std::move(transposed_c_output)};
   } else {
+    using PhysicalFamilyDispatch = attach_packing_policy_t<
+        FamilyDispatch, LogicalAPacking, LogicalBPacking>;
     return ArchitectureFamilyInvocation<
-        Atom, TilePolicy, FamilyDispatch, false,
+        Atom, TilePolicy, PhysicalFamilyDispatch, false,
         decltype(m_value), decltype(n_value), decltype(k_value),
         decltype(a_spec), decltype(b_spec),
         decltype(c_input_spec), decltype(c_output_spec)>{

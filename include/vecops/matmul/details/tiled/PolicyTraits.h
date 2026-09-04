@@ -34,6 +34,97 @@ template <Axis Target, typename Order>
 inline constexpr bool axis_precedes_k_v =
     axis_position_v<Target, Order> < axis_position_v<Axis::K, Order>;
 
+/** Spatial Tile2D visitation follows the relative M/N cache-loop order. */
+template <typename Order>
+inline constexpr auto spatial_traversal_order_v =
+    axis_position_v<Axis::M, Order> < axis_position_v<Axis::N, Order>
+        ? kernel::loop::Tile2DTraversalOrder::m_major
+        : kernel::loop::Tile2DTraversalOrder::n_major;
+
+/** Axis along which an operand is reused: A across N, B across M. */
+template <Operand Side>
+inline constexpr Axis reuse_axis_v =
+    Side == Operand::A ? Axis::N : Axis::M;
+
+/**
+ * Whether a bounded spatial x KC copy can be placed immediately outside the
+ * reuse loop. This is possible exactly when that reuse loop is innermost:
+ * the other two axes have then selected all coordinates the operand needs.
+ */
+template <Operand Side, typename Order>
+inline constexpr bool has_panel_lifetime_site_v =
+    axis_position_v<reuse_axis_v<Side>, Order> == 2;
+
+template <typename Placement>
+inline constexpr bool internal_packing_disabled_v =
+    Placement::allowed_sites == PackingSite::none ||
+    Placement::prepared_input == PreparedInputRequirement::required;
+
+template <typename Placement>
+inline constexpr bool allows_inside_packing_v =
+    !internal_packing_disabled_v<Placement> && allows_packing_site(
+        Placement::allowed_sites, PackingSite::inside_reuse_loop);
+
+template <typename Placement>
+inline constexpr bool allows_outside_packing_v =
+    !internal_packing_disabled_v<Placement> && allows_packing_site(
+        Placement::allowed_sites, PackingSite::outside_reuse_loop);
+
+/**
+ * Bridge the legacy GenericTiled packing choice into the top-level placement
+ * contract. The old mode remains the profitability heuristic for optional
+ * packing; `required` upgrades it to `always`, while disabled/prepared-only
+ * policies force `never`.
+ */
+template <typename LegacyPolicy, typename Placement>
+inline constexpr PackingMode resolved_internal_packing_mode_v = [] {
+  if constexpr (internal_packing_disabled_v<Placement>)
+    return PackingMode::never;
+  else if constexpr (
+      Placement::requirement == PackingRequirement::required)
+    return PackingMode::always;
+  else
+    return LegacyPolicy::mode;
+}();
+
+/**
+ * Resolve the copy extent while respecting placement restrictions.
+ * Explicit legacy extents remain source-compatible unless they name an
+ * impossible site. For an automatic extent, an outside copy uses the bounded
+ * panel lifetime when the reuse axis is innermost and otherwise becomes a
+ * whole-operand copy; inside-only always remains a cache panel.
+ */
+template <typename LegacyPolicy, typename Placement,
+          Operand Side, typename Order>
+inline constexpr PackingExtent resolved_internal_packing_extent_v = [] {
+  if constexpr (internal_packing_disabled_v<Placement>) {
+    return PackingExtent::cache_k;
+  } else if constexpr (!allows_outside_packing_v<Placement>) {
+    return PackingExtent::cache_k;
+  } else if constexpr (
+      !allows_inside_packing_v<Placement> &&
+      !has_panel_lifetime_site_v<Side, Order>) {
+    // Outside-only has no bounded panel site unless the reuse axis is
+    // innermost. Promote even an explicit cache_k spelling to the only
+    // realizable outside representation: one whole-operand copy.
+    return PackingExtent::full_k;
+  } else if constexpr (LegacyPolicy::extent != PackingExtent::automatic) {
+    return LegacyPolicy::extent;
+  } else if constexpr (has_panel_lifetime_site_v<Side, Order>) {
+    return PackingExtent::cache_k;
+  } else {
+    return PackingExtent::full_k;
+  }
+}();
+
+/** Concrete legacy-shaped policy consumed by OperandController. */
+template <typename LegacyPolicy, typename Placement,
+          Operand Side, typename Order>
+using ResolvedInternalPackingPolicy = PackingPolicy<
+    resolved_internal_packing_mode_v<LegacyPolicy, Placement>,
+    resolved_internal_packing_extent_v<
+        LegacyPolicy, Placement, Side, Order>>;
+
 /**
  * @brief Map a logical M/N block origin into split-K accumulator storage.
  *
@@ -83,6 +174,28 @@ inline constexpr PackingExtent resolved_packing_extent_v = [] {
 template <typename Policy, Operand Side, typename Order>
 inline constexpr bool full_k_packing_v =
     resolved_packing_extent_v<Policy, Side, Order> == PackingExtent::full_k;
+
+template <typename Policy, typename Placement,
+          Operand Side, typename Order>
+inline constexpr bool uses_panel_lifetime_packing_v =
+    allows_outside_packing_v<Placement> &&
+    has_panel_lifetime_site_v<Side, Order> &&
+    resolved_packing_extent_v<Policy, Side, Order> == PackingExtent::cache_k;
+
+/**
+ * A whole-operand representation must be selected statically: explicit
+ * full-K, legacy `always`, or a mandatory outside placement. Optional
+ * automatic cases fall back to an allowed bounded panel rather than
+ * generating raw/packed representations behind a runtime cache-size branch.
+ */
+template <typename LegacyPolicy, typename Placement,
+          typename Policy, Operand Side, typename Order>
+inline constexpr bool uses_whole_operand_packing_v =
+    allows_outside_packing_v<Placement> &&
+    full_k_packing_v<Policy, Side, Order> &&
+    (LegacyPolicy::extent == PackingExtent::full_k ||
+     LegacyPolicy::mode == PackingMode::always ||
+     Placement::requirement == PackingRequirement::required);
 
 } // namespace vecops::matmul::details
 

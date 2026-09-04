@@ -6,6 +6,7 @@
 
 #include <array>
 #include <map>
+#include <set>
 #include <vector>
 
 #include "vecops/matmul/details/tiled/LoopNest.h"
@@ -209,6 +210,129 @@ static_assert(!matmul::details::LoopNest<
 
 using AlwaysAutomatic = matmul::PackingPolicy<
     matmul::PackingMode::always, matmul::PackingExtent::automatic>;
+
+struct CustomPackingTuning {
+  using APacking = matmul::packing_policy::RequireOutside;
+  using BPacking = matmul::packing_policy::InsideOnly;
+};
+
+struct UnknownSitePackingPolicy {
+  static constexpr auto allowed_sites =
+      static_cast<matmul::PackingSite>(1u << 7);
+  static constexpr auto requirement =
+      matmul::PackingRequirement::profitable;
+  static constexpr auto prepared_input =
+      matmul::PreparedInputRequirement::optional;
+};
+
+struct InvalidPackingTuning {
+  using APacking = UnknownSitePackingPolicy;
+  using BPacking = matmul::packing_policy::Any;
+};
+
+#if defined(ARCH_X86_FAMILY)
+using PackingConfigTestAtom = matmul::AMX_BF16F32;
+#elif defined(HAS_SME)
+using PackingConfigTestAtom = matmul::SME_F32F32;
+#endif
+
+#if defined(ARCH_X86_FAMILY) || defined(HAS_SME)
+using CustomPackingConfig = ops::MatmulConfigWithPacking<
+    PackingConfigTestAtom, CustomPackingTuning,
+    matmul::family_selection::Automatic,
+    kernel::matmul_policy::Automatic,
+    matmul::GenericTiledTuning<>,
+    platform::SystemCacheInfoProvider,
+    false>;
+using LegacySixParameterConfig = ops::MatmulConfig<
+    PackingConfigTestAtom,
+    matmul::family_selection::Automatic,
+    kernel::matmul_policy::Automatic,
+    matmul::GenericTiledTuning<>,
+    platform::SystemCacheInfoProvider,
+    false>;
+#endif
+
+static_assert(matmul::allows_packing_site(
+    matmul::packing_policy::Any::allowed_sites,
+    matmul::PackingSite::inside_reuse_loop));
+static_assert(matmul::allows_packing_site(
+    matmul::packing_policy::Any::allowed_sites,
+    matmul::PackingSite::outside_reuse_loop));
+static_assert(!matmul::allows_packing_site(
+    matmul::packing_policy::Any::allowed_sites,
+    matmul::PackingSite::none));
+static_assert(!matmul::allows_packing_site(
+    matmul::packing_policy::InsideOnly::allowed_sites,
+    matmul::PackingSite::outside_reuse_loop));
+static_assert(matmul::allows_packing_site(
+    matmul::packing_policy::OutsideOnly::allowed_sites,
+    matmul::PackingSite::outside_reuse_loop));
+static_assert(
+    matmul::packing_policy::Disabled::allowed_sites ==
+    matmul::PackingSite::none);
+static_assert(
+    matmul::packing_policy::RequireInside::requirement ==
+    matmul::PackingRequirement::required);
+static_assert(
+    matmul::packing_policy::RequireOutside::requirement ==
+    matmul::PackingRequirement::required);
+static_assert(
+    matmul::packing_policy::CallerPreparedOnly::prepared_input ==
+    matmul::PreparedInputRequirement::required);
+static_assert(matmul::OperandPackingPolicyType<
+              matmul::packing_policy::Any>);
+static_assert(matmul::OperandPackingPolicyType<
+              matmul::packing_policy::InsideOnly>);
+static_assert(matmul::OperandPackingPolicyType<
+              matmul::packing_policy::OutsideOnly>);
+static_assert(matmul::OperandPackingPolicyType<
+              matmul::packing_policy::Disabled>);
+static_assert(matmul::OperandPackingPolicyType<
+              matmul::packing_policy::RequireInside>);
+static_assert(matmul::OperandPackingPolicyType<
+              matmul::packing_policy::RequireOutside>);
+static_assert(matmul::OperandPackingPolicyType<
+              matmul::packing_policy::CallerPreparedOnly>);
+static_assert(matmul::MatmulPackingTuningType<CustomPackingTuning>);
+static_assert(!matmul::OperandPackingPolicyType<UnknownSitePackingPolicy>);
+static_assert(!matmul::MatmulPackingTuningType<InvalidPackingTuning>);
+static_assert(std::same_as<
+    matmul::details::config_packing_tuning_t<AutomaticFamilyConfig>,
+    matmul::MatmulPackingTuning<>>);
+#if defined(ARCH_X86_FAMILY) || defined(HAS_SME)
+static_assert(std::same_as<
+    typename ops::MatmulConfig<PackingConfigTestAtom>::PackingTuning,
+    matmul::MatmulPackingTuning<>>);
+static_assert(std::same_as<
+    typename CustomPackingConfig::PackingTuning,
+    CustomPackingTuning>);
+static_assert(!CustomPackingConfig::enable_swap_ab);
+static_assert(!LegacySixParameterConfig::enable_swap_ab);
+static_assert(std::same_as<
+    typename LegacySixParameterConfig::PackingTuning,
+    matmul::MatmulPackingTuning<>>);
+static_assert(std::is_empty_v<
+              ops::MatmulConfig<PackingConfigTestAtom>>);
+#endif
+static_assert(matmul::details::spatial_traversal_order_v<
+                  matmul::loop_order::MNK> ==
+              kernel::loop::Tile2DTraversalOrder::m_major);
+static_assert(matmul::details::spatial_traversal_order_v<
+                  matmul::loop_order::MKN> ==
+              kernel::loop::Tile2DTraversalOrder::m_major);
+static_assert(matmul::details::spatial_traversal_order_v<
+                  matmul::loop_order::NMK> ==
+              kernel::loop::Tile2DTraversalOrder::n_major);
+static_assert(matmul::details::spatial_traversal_order_v<
+                  matmul::loop_order::NKM> ==
+              kernel::loop::Tile2DTraversalOrder::n_major);
+static_assert(matmul::details::spatial_traversal_order_v<
+                  matmul::loop_order::KMN> ==
+              kernel::loop::Tile2DTraversalOrder::m_major);
+static_assert(matmul::details::spatial_traversal_order_v<
+                  matmul::loop_order::KNM> ==
+              kernel::loop::Tile2DTraversalOrder::n_major);
 static_assert(matmul::details::resolved_packing_extent_v<
                   AlwaysAutomatic, matmul::Operand::A,
                   matmul::loop_order::MNK> ==
@@ -221,6 +345,39 @@ static_assert(matmul::details::resolved_packing_extent_v<
                   AlwaysAutomatic, matmul::Operand::B,
                   matmul::loop_order::NKM> ==
               matmul::PackingExtent::cache_k);
+static_assert(matmul::details::has_panel_lifetime_site_v<
+              matmul::Operand::A, matmul::loop_order::MKN>);
+static_assert(matmul::details::has_panel_lifetime_site_v<
+              matmul::Operand::A, matmul::loop_order::KMN>);
+static_assert(matmul::details::has_panel_lifetime_site_v<
+              matmul::Operand::B, matmul::loop_order::NKM>);
+static_assert(matmul::details::has_panel_lifetime_site_v<
+              matmul::Operand::B, matmul::loop_order::KNM>);
+static_assert(!matmul::details::has_panel_lifetime_site_v<
+              matmul::Operand::A, matmul::loop_order::NKM>);
+using LegacyCachePacking = matmul::PackingPolicy<
+    matmul::PackingMode::automatic, matmul::PackingExtent::cache_k>;
+using ForcedOutsideWithoutPanel = matmul::details::ResolvedInternalPackingPolicy<
+    LegacyCachePacking, matmul::packing_policy::OutsideOnly,
+    matmul::Operand::B, matmul::loop_order::MNK>;
+using ForcedInsideFromFull = matmul::details::ResolvedInternalPackingPolicy<
+    matmul::PackingPolicy<matmul::PackingMode::always,
+                          matmul::PackingExtent::full_k>,
+    matmul::packing_policy::InsideOnly,
+    matmul::Operand::A, matmul::loop_order::MNK>;
+using RequiredOutsidePolicy = matmul::details::ResolvedInternalPackingPolicy<
+    matmul::PackingPolicy<>, matmul::packing_policy::RequireOutside,
+    matmul::Operand::B, matmul::loop_order::NKM>;
+using DisabledInternalPolicy = matmul::details::ResolvedInternalPackingPolicy<
+    matmul::PackingPolicy<matmul::PackingMode::always>,
+    matmul::packing_policy::Disabled,
+    matmul::Operand::B, matmul::loop_order::NKM>;
+static_assert(ForcedOutsideWithoutPanel::extent ==
+              matmul::PackingExtent::full_k);
+static_assert(ForcedInsideFromFull::extent ==
+              matmul::PackingExtent::cache_k);
+static_assert(RequiredOutsidePolicy::mode == matmul::PackingMode::always);
+static_assert(DisabledInternalPolicy::mode == matmul::PackingMode::never);
 
 template <typename Order>
 constexpr bool output_accumulator_keeps_logical_origins() {
@@ -264,6 +421,51 @@ TEST(MatmulLoopNestTest, DisabledAxisDoesNotGenerateBlocks) {
             EXPECT_TRUE(last_k);
           });
   EXPECT_EQ(calls, 1);
+}
+
+struct HookedLoopState {
+  int generation;
+};
+
+struct MiddleAxisLifetimeHook {
+  int* hook_calls;
+  int* active_lifetimes;
+
+  template <int Depth, matmul::Axis Target, typename Context,
+            typename Phase, typename State, typename Continue>
+  void operator()(const Context&, const Phase&, const State& state,
+                  Continue&& continuation) const {
+    if constexpr (Depth == 1) {
+      static_assert(Target == matmul::Axis::K);
+      ++*hook_calls;
+      ++*active_lifetimes;
+      continuation(HookedLoopState{*hook_calls});
+      --*active_lifetimes;
+    } else {
+      continuation(state);
+    }
+  }
+};
+
+TEST(MatmulLoopNestTest, StatefulHookOwnsMiddleToInnerLoopLifetime) {
+  using Tiling = matmul::CacheTiling<
+      meta::Const<2>, meta::Const<2>, meta::Const<2>>;
+  int hook_calls = 0;
+  int active_lifetimes = 0;
+  int leaves = 0;
+  MiddleAxisLifetimeHook hook{&hook_calls, &active_lifetimes};
+  matmul::details::LoopNest<matmul::loop_order::NKM, Tiling>::
+      run_phased_with_state(
+          meta::cint<4>, meta::cint<6>, meta::cint<4>, Tiling{}, 0, hook,
+          [&](const auto&, const auto&, const HookedLoopState& state) {
+            ++leaves;
+            EXPECT_EQ(active_lifetimes, 1);
+            EXPECT_GT(state.generation, 0);
+          });
+  // N x K establishes six lifetimes; each encloses both M blocks.
+  EXPECT_EQ(hook_calls, 6);
+  EXPECT_EQ(leaves, 12);
+  EXPECT_EQ(active_lifetimes, 0);
 }
 
 TEST(MatmulLoopNestTest, ReportsKBlockPhases) {
@@ -468,5 +670,77 @@ TEST(CacheInfoTest, AutomaticTilingUsesDocumentedBudgets) {
   EXPECT_EQ(static_cast<nint_t>(tiling.kc) % 32, 0);
 }
 #endif
+
+template <matmul::Operand Side, typename Order>
+struct ExhaustivePanelLifetimeHook {
+  int* open_count;
+  int* active_count;
+  std::set<std::pair<nint_t, nint_t>>* dependency_blocks;
+
+  template <int Depth, matmul::Axis, typename Context, typename Phase,
+            typename State, typename Continue>
+  void operator()(const Context& block, const Phase&, const State& state,
+                  Continue&& continuation) const {
+    if constexpr (
+        Depth == 1 &&
+        matmul::details::has_panel_lifetime_site_v<Side, Order>) {
+      ++*open_count;
+      ++*active_count;
+      if constexpr (Side == matmul::Operand::A)
+        dependency_blocks->emplace(block.m_origin, block.k_origin);
+      else
+        dependency_blocks->emplace(block.n_origin, block.k_origin);
+      continuation(state + 1);
+      --*active_count;
+    } else {
+      continuation(state);
+    }
+  }
+};
+
+template <matmul::Operand Side, typename Order>
+void expect_exhaustive_panel_lifetime_hook() {
+  using Tiling = matmul::CacheTiling<
+      meta::Const<2>, meta::Const<3>, meta::Const<4>,
+      matmul::CacheLoopMode::enabled,
+      matmul::CacheLoopMode::enabled,
+      matmul::CacheLoopMode::enabled>;
+  constexpr bool HasPanelSite =
+      matmul::details::has_panel_lifetime_site_v<Side, Order>;
+  int open_count = 0;
+  int active_count = 0;
+  int leaves = 0;
+  std::set<std::pair<nint_t, nint_t>> dependency_blocks;
+  ExhaustivePanelLifetimeHook<Side, Order> hook{
+      &open_count, &active_count, &dependency_blocks};
+  matmul::details::LoopNest<Order, Tiling>::run_phased_with_state(
+      meta::Any{5}, meta::Any{10}, meta::Any{17}, Tiling{}, 0, hook,
+      [&](const auto&, auto, int state) {
+        ++leaves;
+        EXPECT_EQ(active_count, HasPanelSite ? 1 : 0);
+        EXPECT_EQ(state, HasPanelSite ? 1 : 0);
+      });
+
+  EXPECT_EQ(leaves, 3 * 4 * 5);
+  const int expected_opens = HasPanelSite
+      ? (Side == matmul::Operand::A ? 3 * 5 : 4 * 5)
+      : 0;
+  EXPECT_EQ(open_count, expected_opens);
+  EXPECT_EQ(static_cast<int>(dependency_blocks.size()), expected_opens);
+  EXPECT_EQ(active_count, 0);
+}
+
+TEST(MatmulLoopNestTest, PanelLifetimeHookIsSymmetricForEveryLoopOrder) {
+#define VECOPS_TEST_PANEL_LIFETIME_FOR_ORDER(Order)                    \
+  expect_exhaustive_panel_lifetime_hook<matmul::Operand::A, Order>(); \
+  expect_exhaustive_panel_lifetime_hook<matmul::Operand::B, Order>()
+  VECOPS_TEST_PANEL_LIFETIME_FOR_ORDER(matmul::loop_order::MNK);
+  VECOPS_TEST_PANEL_LIFETIME_FOR_ORDER(matmul::loop_order::MKN);
+  VECOPS_TEST_PANEL_LIFETIME_FOR_ORDER(matmul::loop_order::NMK);
+  VECOPS_TEST_PANEL_LIFETIME_FOR_ORDER(matmul::loop_order::NKM);
+  VECOPS_TEST_PANEL_LIFETIME_FOR_ORDER(matmul::loop_order::KMN);
+  VECOPS_TEST_PANEL_LIFETIME_FOR_ORDER(matmul::loop_order::KNM);
+#undef VECOPS_TEST_PANEL_LIFETIME_FOR_ORDER
+}
 
 } // namespace

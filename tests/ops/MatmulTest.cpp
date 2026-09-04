@@ -148,6 +148,73 @@ void check_bounded_online_pack_decision(
   EXPECT_EQ(invocation.online_packs_b(), pack_b);
 }
 
+#if VECOPS_TARGET_SHARD_INDEX == 0
+TEST(MatmulTest, WholeProblemHonorsTopLevelPackingPlacement) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  using Atom = ::vecops::matmul::AMX_BF16F32;
+  using RequiredB = ::vecops::matmul::MatmulPackingTuning<
+      ::vecops::matmul::packing_policy::Disabled,
+      ::vecops::matmul::packing_policy::RequireOutside>;
+  using DisabledBoth = ::vecops::matmul::MatmulPackingTuning<
+      ::vecops::matmul::packing_policy::Disabled,
+      ::vecops::matmul::packing_policy::Disabled>;
+  using RequiredConfig = ops::MatmulConfigWithPacking<
+      Atom, RequiredB, ::vecops::matmul::family_selection::Automatic,
+      kernel::matmul_policy::Automatic,
+      ::vecops::matmul::GenericTiledTuning<>,
+      platform::SystemCacheInfoProvider, false>;
+  using DisabledConfig = ops::MatmulConfigWithPacking<
+      Atom, DisabledBoth, ::vecops::matmul::family_selection::Automatic,
+      kernel::matmul_policy::Automatic,
+      ::vecops::matmul::GenericTiledTuning<>,
+      platform::SystemCacheInfoProvider, false>;
+
+  constexpr nint_t M = 16, N = 16, K = 32;
+  std::vector<bfloat16_t> a(M * K), b(N * K);
+  std::vector<float32_t> c(M * N);
+  for (nint_t i = 0; i < M * K; ++i) a[i] = value<bfloat16_t>(i, 13);
+  for (nint_t i = 0; i < N * K; ++i) b[i] = value<bfloat16_t>(i, 11);
+  auto at = make_tensor(a.data(), make_layout(make_shape(cint<M>, cint<K>)));
+  auto bt = make_tensor(b.data(), make_layout(make_shape(cint<N>, cint<K>)));
+  auto ct = make_tensor(c.data(), make_layout(make_shape(cint<M>, cint<N>)));
+
+  auto required = test::matmul::make_test_matmul_invocation(
+      RequiredConfig{}, cint<M>, cint<N>, cint<K>, at, bt, ct);
+  EXPECT_FALSE(required.online_packs_a());
+  EXPECT_TRUE(required.online_packs_b());
+  kernel::Workspace required_storage(required.required_workspace());
+  auto required_workspace = required_storage.view();
+  required(required_workspace);
+  for (nint_t i = 0; i < M; ++i) {
+    for (nint_t j = 0; j < N; ++j) {
+      float32_t expected{};
+      for (nint_t kk = 0; kk < K; ++kk)
+        expected += static_cast<float32_t>(a[i * K + kk]) *
+            static_cast<float32_t>(b[j * K + kk]);
+      EXPECT_NEAR(c[i * N + j], expected, 2.0e-4f);
+    }
+  }
+
+  constexpr nint_t LargeM = 128, LargeN = 64, LargeK = 128;
+  std::vector<bfloat16_t> large_a(LargeM * LargeK);
+  std::vector<bfloat16_t> large_b(LargeN * LargeK);
+  std::vector<float32_t> large_c(LargeM * LargeN);
+  auto large_at = make_tensor(large_a.data(), make_layout(
+      make_shape(cint<LargeM>, cint<LargeK>)));
+  auto large_bt = make_tensor(large_b.data(), make_layout(
+      make_shape(cint<LargeN>, cint<LargeK>)));
+  auto large_ct = make_tensor(large_c.data(), make_layout(
+      make_shape(cint<LargeM>, cint<LargeN>)));
+  auto disabled = test::matmul::make_test_matmul_invocation(
+      DisabledConfig{}, cint<LargeM>, cint<LargeN>, cint<LargeK>,
+      large_at, large_bt, large_ct);
+  // The legacy model chooses online B packing for this shape; the top-level
+  // disabled policy must gate that choice before it reaches execution.
+  EXPECT_FALSE(disabled.online_packs_a());
+  EXPECT_FALSE(disabled.online_packs_b());
+}
+#endif
+
 VECOPS_NOINLINE void check_dynamic_inner_stride(nint_t inner_stride) {
   using Atom = ::vecops::matmul::AMX_BF16F32;
   using T = typename Atom::TA;
@@ -818,6 +885,60 @@ TEST(MatmulTest, GenericTilerPacksOperandsIndependentlyAtFullK) {
   check_generic_full_k_packing<true, false>();
   check_generic_full_k_packing<false, true>();
   check_generic_full_k_packing<true, true>();
+}
+
+template <typename Order>
+void check_generic_tiler_loop_order() {
+  using Atom = ::vecops::matmul::AMX_BF16F32;
+  using Tiles = ::vecops::matmul::CacheTiling<
+      meta::Const<16>, meta::Const<16>, meta::Const<32>>;
+  using Never = ::vecops::matmul::PackingPolicy<
+      ::vecops::matmul::PackingMode::never>;
+  using Tuning = ::vecops::matmul::GenericTiledTuning<
+      Tiles, Order, Never, Never,
+      ::vecops::matmul::AccBufferMode::workspace>;
+  using Config = ops::MatmulConfig<
+      Atom,
+      ::vecops::matmul::family_selection::Require<
+          ::vecops::matmul::kernel_family::GenericTiled>,
+      kernel::matmul_policy::Automatic, Tuning>;
+  constexpr nint_t M = 17, N = 19, K = 65;
+  std::vector<bfloat16_t> a(M * K), b(N * K);
+  std::vector<float32_t> c(M * N, -9.0f);
+  for (nint_t i = 0; i < M * K; ++i) a[i] = value<bfloat16_t>(i, 13);
+  for (nint_t i = 0; i < N * K; ++i) b[i] = value<bfloat16_t>(i, 11);
+  auto at = make_tensor(a.data(), make_layout(make_shape(cint<M>, cint<K>)));
+  auto bt = make_tensor(b.data(), make_layout(make_shape(cint<N>, cint<K>)));
+  auto ct = make_tensor(c.data(), make_layout(make_shape(cint<M>, cint<N>)));
+  auto operation = ops::matmul(Config{.generic_tiled = Tuning{
+      .cache_tiling = Tiles{cint<16>, cint<16>, cint<32>}}});
+  kernel::Workspace storage(operation.required_workspace(
+      cint<M>, cint<N>, cint<K>, at, bt, ct));
+  auto workspace = storage.view();
+  operation(workspace, cint<M>, cint<N>, cint<K>, at, bt, ct);
+  for (nint_t i = 0; i < M; ++i) {
+    for (nint_t j = 0; j < N; ++j) {
+      float32_t expected = 0;
+      for (nint_t kk = 0; kk < K; ++kk)
+        expected += static_cast<float32_t>(a[i * K + kk]) *
+                    static_cast<float32_t>(b[j * K + kk]);
+      EXPECT_NEAR(c[i * N + j], expected, 3.0e-3f)
+          << "order=" << static_cast<int>(Order::first)
+          << static_cast<int>(Order::second)
+          << static_cast<int>(Order::third)
+          << " m=" << i << " n=" << j;
+    }
+  }
+}
+
+TEST(MatmulTest, GenericTilerEveryLoopOrderIsCorrect) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  check_generic_tiler_loop_order<::vecops::matmul::loop_order::MNK>();
+  check_generic_tiler_loop_order<::vecops::matmul::loop_order::MKN>();
+  check_generic_tiler_loop_order<::vecops::matmul::loop_order::NMK>();
+  check_generic_tiler_loop_order<::vecops::matmul::loop_order::NKM>();
+  check_generic_tiler_loop_order<::vecops::matmul::loop_order::KMN>();
+  check_generic_tiler_loop_order<::vecops::matmul::loop_order::KNM>();
 }
 
 TEST(MatmulTest, TransformedInputsUseFullAndTailKPlans) {

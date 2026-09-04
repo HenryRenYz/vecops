@@ -164,6 +164,19 @@ struct ExactCoverRuntimeUnmasked {};
 } // namespace tile2d_policy
 
 /**
+ * Spatial visitation order of a Tile2D grid.
+ *
+ * `m_major` preserves the historical M-outer/N-inner order. `n_major`
+ * transposes the traversal problem and its catalog internally, then maps each
+ * selected case back to the original M/N coordinates; family shapes, mask
+ * promises, and callback coordinates therefore retain their original meaning.
+ */
+enum class Tile2DTraversalOrder {
+  m_major,
+  n_major,
+};
+
+/**
  * Convenience kernel-family descriptor.
  *
  * Powers are relative positive throughput scores.  A custom family may expose
@@ -478,6 +491,22 @@ struct GeneratedFamily {
   }
 };
 
+/** Family/catalog views used to reuse every row-oriented policy for N-major. */
+template <typename Family>
+struct TransposedFamily {
+  using original_family = Family;
+  static constexpr int a = Family::b;
+  static constexpr int b = Family::a;
+
+  template <Tile2DMaskMode MMask, Tile2DMaskMode NMask>
+  static consteval int power() {
+    return Family::template power<NMask, MMask>();
+  }
+};
+
+template <typename Catalog>
+struct TransposedCatalog {};
+
 template <int I, int End, typename Fn>
 consteval void static_for(Fn& fn) {
   if constexpr (I <= End) {
@@ -505,6 +534,14 @@ consteval void for_each_family(
     static_for<1, Search::max_b>(visit_b);
   };
   static_for<1, Search::max_a>(visit_a);
+}
+
+template <typename Catalog, typename Fn>
+consteval void for_each_family(TransposedCatalog<Catalog>, Fn& fn) {
+  auto visit = [&]<typename Family>() consteval {
+    fn.template operator()<TransposedFamily<Family>>();
+  };
+  for_each_family(Catalog{}, visit);
 }
 
 template <typename Catalog, int A, int B>
@@ -603,6 +640,9 @@ struct CatalogOptions<Tile2DGeneratedCatalog<Provider, Search>> {
       return false;
   }();
 };
+
+template <typename Catalog>
+struct CatalogOptions<TransposedCatalog<Catalog>> : CatalogOptions<Catalog> {};
 
 template <typename Catalog>
 inline constexpr auto exact_grid_mode_v =
@@ -707,7 +747,25 @@ struct FamilyFor<Tile2DGeneratedCatalog<Provider, Search>, A, B> {
 };
 
 template <typename Catalog, int A, int B>
+struct FamilyFor<TransposedCatalog<Catalog>, A, B> {
+  using type = TransposedFamily<typename FamilyFor<Catalog, B, A>::type>;
+};
+
+template <typename Catalog, int A, int B>
 using family_for_t = typename FamilyFor<Catalog, A, B>::type;
+
+/** Map a case emitted from a transposed catalog back to the original axes. */
+template <typename Case>
+VECOPS_ALWAYS_INLINE constexpr auto untranspose_case() {
+  using Transposed = typename Case::family_type;
+  using Original = typename Transposed::original_family;
+  if constexpr (Case::exact_blocks) {
+    return Tile2DExactKernelCase<Original>{};
+  } else {
+    return Tile2DKernelCase<
+        Original, Case::n_mask, Case::m_mask>{};
+  }
+}
 
 // Best unmasked/unmasked family (any shape) — the bulk tile — and best
 // doubly-masked family (any shape), used by the Uniform and BulkTail
@@ -1517,7 +1575,7 @@ consteval void validate_positive_tile() {
  *        });
  * @endcode
  *
- * @tparam Policy  Traversal strategy; defaults to tile2d_policy::RowMajor.
+ * @tparam Policy  Region strategy; defaults to tile2d_policy::RowMajor.
  * @tparam M       Row extent type (meta ValueInput).
  * @tparam N       Column extent type (meta ValueInput).
  * @tparam TM      Base tile height type (meta ValueInput).
@@ -1646,6 +1704,28 @@ VECOPS_ALWAYS_INLINE void tile2d(
   }
 }
 
+/** N-major counterpart kept separate so the historical M-major template
+ * signature, mangling, and hot-code layout remain unchanged. */
+template <typename Policy = tile2d_policy::RowMajor,
+          typename M, typename N, typename TM, typename TN,
+          typename Catalog, typename Fn>
+  requires (meta::ValueInput<M> && meta::ValueInput<N> &&
+            meta::ValueInput<TM> && meta::ValueInput<TN>)
+VECOPS_ALWAYS_INLINE void tile2d_n_major(
+    M m, N n, TM tm, TN tn, Catalog, Fn&& fn) {
+  auto&& original_fn = fn;
+  auto transposed_fn = [&](auto transposed_case,
+                           nint_t n_offset, nint_t m_offset,
+                           nint_t active_n, nint_t active_m)
+      VECOPS_INLINE_LAMBDA {
+    original_fn(
+        tile2d_details::untranspose_case<decltype(transposed_case)>(),
+        m_offset, n_offset, active_m, active_n);
+  };
+  using TransposedCatalog = tile2d_details::TransposedCatalog<Catalog>;
+  tile2d<Policy>(n, m, tn, tm, TransposedCatalog{}, transposed_fn);
+}
+
 /**
  * @brief Convenience entry point for a generated catalog.
  *
@@ -1672,6 +1752,21 @@ VECOPS_ALWAYS_INLINE void tile2d_generate(
   using Catalog = Tile2DGeneratedCatalog<
       std::remove_cvref_t<Provider>, SearchSpace>;
   tile2d<Policy>(m, n, tm, tn, Catalog{}, std::forward<Fn>(fn));
+}
+
+/** Generated-catalog N-major entry; see tile2d_n_major(). */
+template <typename SearchSpace,
+          typename Policy = tile2d_policy::RowMajor,
+          typename M, typename N, typename TM, typename TN,
+          typename Provider, typename Fn>
+  requires (meta::ValueInput<M> && meta::ValueInput<N> &&
+            meta::ValueInput<TM> && meta::ValueInput<TN>)
+VECOPS_ALWAYS_INLINE void tile2d_generate_n_major(
+    M m, N n, TM tm, TN tn, Provider, Fn&& fn) {
+  using Catalog = Tile2DGeneratedCatalog<
+      std::remove_cvref_t<Provider>, SearchSpace>;
+  tile2d_n_major<Policy>(
+      m, n, tm, tn, Catalog{}, std::forward<Fn>(fn));
 }
 
 } // namespace vecops::kernel::loop

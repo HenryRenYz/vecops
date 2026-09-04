@@ -21,15 +21,20 @@
  *
  * This header collects the user-facing knobs with which a matmul
  * configuration is shaped. Everything here is a plain type or enum spelled
- * as template arguments; none of it executes code on its own. The knobs are
- * consumed through `GenericTiledTuning`, which the public entry point
- * `ops::MatmulConfig` accepts as its tuning argument.
+ * as template arguments; none of it executes code on its own. Family-local
+ * cache-loop knobs are consumed through `GenericTiledTuning`; the symmetric
+ * A/B packing placement contract is consumed through `MatmulPackingTuning`
+ * by every family. The historical `ops::MatmulConfig` keeps the default;
+ * `ops::MatmulConfigWithPacking` carries an explicit policy.
  *
  * The vocabulary deliberately splits along two axes of control:
  *
  * - **What the generic cache-tiled tiler does**: `CacheTiling`,
- *   `LoopOrder`/`loop_order::*`, `PackingPolicy` (per operand), and
- *   `AccBufferMode` all parameterize the generic MC/NC/KC loop nest.
+ *   `LoopOrder`/`loop_order::*`, legacy `PackingPolicy` profitability/extent
+ *   hints, and `AccBufferMode` parameterize the generic MC/NC/KC loop nest.
+ * - **Where either family may pack**: `MatmulPackingTuning` constrains A and
+ *   B independently to copies inside/outside their reuse loop, both, or
+ *   neither. It also expresses mandatory packing and caller-prepared input.
  * - **How each knob's `automatic` default resolves**: at compile time from
  *   surrounding context (loop order, Meta bounds) or at run time from
  *   platform cache information (see `Tiling.h`).
@@ -40,8 +45,10 @@
  * |--------------------|------------------------------------------------------|
  * | `Axis`             | M/N/K of the logical product `C[M,N]=A[M,K]*B[N,K]^T`|
  * | `CacheLoopMode`    | Whether a cache-blocking loop is emitted per axis    |
- * | `PackingMode`      | Whether an operand is repacked into workspace        |
- * | `PackingExtent`    | K range covered by one packed copy (per cache block vs whole K) |
+ * | `PackingMode` / `PackingExtent` | Legacy GenericTiled packing controls |
+ * | `PackingSite`      | Allowed side-relative lifetime of an internal pack   |
+ * | `OperandPackingPolicy` | Placement, profitability, and prepared-input contract |
+ * | `MatmulPackingTuning` | Top-level A/B-symmetric packing configuration      |
  * | `AccBufferMode`    | Where accumulators live (workspace vs output tensor) |
  * | `PackingPolicy`    | Bundles `PackingMode` + `PackingExtent` for one operand |
  * | `LoopOrder` + `loop_order::*` | The M/N/K traversal order               |
@@ -69,15 +76,20 @@
  *
  * ## Pitfalls
  *
- * - These are **generic-tiled-family-local** parameters: setting any of them
- *   never disables the whole-problem architecture kernels (see the warning
- *   on `GenericTiledTuning`).
+ * - `GenericTiledTuning` remains **generic-tiled-family-local** and never
+ *   disables whole-problem kernels. `MatmulPackingTuning` is deliberately
+ *   top-level and follows logical A/B through orientation exchange.
  * - `CacheTiling` dimensions are Meta `ValueType`s. `Const<N>` fixes a tile
  *   at compile time; `Dynamic<A>` keeps the value at runtime while promising
  *   alignment `A`. Mixing them up only degrades (never breaks) the loop nest.
  * - `AutomaticCacheTiling` is resolved at **run time** from the platform
  *   cache hierarchy (`matmul::DefaultTilingPolicy` in `Tiling.h`), not from
  *   the problem shape.
+ * - A caller-prepared or whole-operand packed view cannot start in the middle
+ *   of a hardware panel/K group. Explicit cache tiles used with such inputs
+ *   must keep generated spatial/K origins aligned; violations throw in every
+ *   build mode. Online cache-panel packing is locally rebased and is not
+ *   subject to a global panel-origin restriction.
  * - A `LoopOrder` must contain M, N, and K exactly once (static_assert).
  */
 
@@ -192,6 +204,177 @@ struct PackingPolicy {
   static constexpr PackingMode mode = Mode;
   static constexpr PackingExtent extent = Extent;
 };
+
+/**
+ * @brief Where a reusable packed copy may be created relative to the
+ *        operand's reuse-axis loop.
+ *
+ * A depends on M/K and is reused along N; B depends on N/K and is reused
+ * along M. `inside_reuse_loop` therefore permits a bounded online copy that
+ * may be rebuilt for each reuse-axis block, while `outside_reuse_loop`
+ * permits a larger copy hoisted before that loop and reused across it.
+ * These are library-internal lifetimes. A caller-owned tensor produced by
+ * `ops::matmul_pack` is represented separately by `PreparedInputRequirement`.
+ */
+enum class PackingSite : unsigned {
+  none = 0,
+  inside_reuse_loop = 1u << 0,
+  outside_reuse_loop = 1u << 1,
+  any = (1u << 0) | (1u << 1),
+};
+
+VECOPS_INLINE constexpr PackingSite operator|(
+    PackingSite lhs, PackingSite rhs) {
+  return static_cast<PackingSite>(
+      static_cast<unsigned>(lhs) | static_cast<unsigned>(rhs));
+}
+
+VECOPS_INLINE constexpr bool allows_packing_site(
+    PackingSite allowed, PackingSite site) {
+  return site != PackingSite::none &&
+      (static_cast<unsigned>(allowed) & static_cast<unsigned>(site)) ==
+      static_cast<unsigned>(site);
+}
+
+/** Whether packing is merely permitted when profitable or is mandatory. */
+enum class PackingRequirement {
+  profitable,
+  required,
+};
+
+/** Whether a raw operand is accepted or the caller must pass packed input. */
+enum class PreparedInputRequirement {
+  optional,
+  required,
+};
+
+/**
+ * @brief Placement and input-representation contract for one logical operand.
+ *
+ * `AllowedSites` constrains only packed copies created by matmul itself.
+ * `none` disables internal packing but still accepts an already-packed input.
+ * Set `Prepared=required` to reject raw input and require a caller-owned
+ * prepared tensor. `Requirement=required` forces the planner to choose one of
+ * the allowed internal sites; it is intentionally incompatible with `none`.
+ *
+ * “Inside” and “outside” are relative to the operand's reuse axis, not to the
+ * public matmul call. A is reused across N and B across M. For example, NKM
+ * can pack one B `[NC,KC]` panel after N/K selection and retain it across the
+ * innermost M loop (`outside_reuse_loop`); `inside_reuse_loop` permits the
+ * bounded online form that may be rebuilt for each M block. When packing is
+ * selected and no bounded outside position exists, an outside-only request
+ * uses a whole-operand copy; a merely profitable request may still stay raw.
+ * All choices are template-resolved from policy, loop order, Meta bounds, and
+ * input representation; the policy does not add a run-time site switch.
+ * WholeProblem can force its reusable outside copy, but cannot promise a
+ * packed-format copy at a particular inner cache depth; use GenericTiled for
+ * `RequireInside`. Permission-only `InsideOnly` remains valid for either
+ * family and simply disables WholeProblem's outside online pack.
+ */
+template <
+    PackingSite AllowedSites = PackingSite::any,
+    PackingRequirement Requirement = PackingRequirement::profitable,
+    PreparedInputRequirement Prepared = PreparedInputRequirement::optional>
+struct OperandPackingPolicy {
+  static_assert(
+      (static_cast<unsigned>(AllowedSites) &
+       ~static_cast<unsigned>(PackingSite::any)) == 0,
+      "packing policy contains an unknown packing site");
+  static_assert(
+      AllowedSites != PackingSite::none ||
+          Requirement != PackingRequirement::required,
+      "required internal packing needs at least one allowed site");
+  static_assert(
+      Prepared != PreparedInputRequirement::required ||
+          AllowedSites == PackingSite::none,
+      "caller-prepared-only input cannot also permit internal packing");
+
+  static constexpr PackingSite allowed_sites = AllowedSites;
+  static constexpr PackingRequirement requirement = Requirement;
+  static constexpr PreparedInputRequirement prepared_input = Prepared;
+};
+
+/** A structurally valid per-operand packing policy. */
+template <typename T>
+concept OperandPackingPolicyType = requires {
+  { T::allowed_sites } -> std::convertible_to<PackingSite>;
+  { T::requirement } -> std::convertible_to<PackingRequirement>;
+  { T::prepared_input } -> std::convertible_to<PreparedInputRequirement>;
+} && ((static_cast<unsigned>(T::allowed_sites) &
+       ~static_cast<unsigned>(PackingSite::any)) == 0) &&
+    (T::requirement == PackingRequirement::profitable ||
+     T::requirement == PackingRequirement::required) &&
+    (T::prepared_input == PreparedInputRequirement::optional ||
+     T::prepared_input == PreparedInputRequirement::required) &&
+    (T::allowed_sites != PackingSite::none ||
+     T::requirement != PackingRequirement::required) &&
+    (T::prepared_input != PreparedInputRequirement::required ||
+     T::allowed_sites == PackingSite::none);
+
+namespace packing_policy {
+
+using Any = OperandPackingPolicy<>;
+using InsideOnly = OperandPackingPolicy<PackingSite::inside_reuse_loop>;
+using OutsideOnly = OperandPackingPolicy<PackingSite::outside_reuse_loop>;
+using Disabled = OperandPackingPolicy<PackingSite::none>;
+using RequireInside = OperandPackingPolicy<
+    PackingSite::inside_reuse_loop, PackingRequirement::required>;
+using RequireOutside = OperandPackingPolicy<
+    PackingSite::outside_reuse_loop, PackingRequirement::required>;
+using CallerPreparedOnly = OperandPackingPolicy<
+    PackingSite::none, PackingRequirement::profitable,
+    PreparedInputRequirement::required>;
+
+} // namespace packing_policy
+
+/**
+ * @brief Top-level, logical-A/logical-B symmetric packing configuration.
+ *
+ * @code
+ * // Let matmul choose either lifetime for A, but permit B packing only once
+ * // outside its M reuse loop. Existing prepared B tensors remain accepted.
+ * using Placement = MatmulPackingTuning<
+ *     packing_policy::Any, packing_policy::OutsideOnly>;
+ * using Config = ops::MatmulConfigWithPacking<Atom, Placement>;
+ * @endcode
+ *
+ * Policies name logical operands. If orientation planning evaluates
+ * `C^T=B*A^T`, their types exchange roles together with the operands.
+ */
+template <
+    OperandPackingPolicyType APackingT = packing_policy::Any,
+    OperandPackingPolicyType BPackingT = packing_policy::Any>
+struct MatmulPackingTuning {
+  using APacking = APackingT;
+  using BPacking = BPackingT;
+};
+
+/** A structurally valid logical-A/logical-B packing configuration. */
+template <typename T>
+concept MatmulPackingTuningType = requires {
+  typename T::APacking;
+  typename T::BPacking;
+} && OperandPackingPolicyType<typename T::APacking> &&
+    OperandPackingPolicyType<typename T::BPacking>;
+
+namespace details {
+
+/** Backward-compatible policy lookup for structurally supplied Configs. */
+template <typename Config, typename = void>
+struct ConfigPackingTuning {
+  using type = MatmulPackingTuning<>;
+};
+
+template <typename Config>
+struct ConfigPackingTuning<
+    Config, std::void_t<typename Config::PackingTuning>> {
+  using type = typename Config::PackingTuning;
+};
+
+template <typename Config>
+using config_packing_tuning_t = typename ConfigPackingTuning<Config>::type;
+
+} // namespace details
 
 /**
  * @brief The M/N/K traversal order of the generic cache-tiled loop nest.

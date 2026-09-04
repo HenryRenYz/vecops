@@ -141,6 +141,11 @@ vecops_add_test(
     ARCH ${VECOPS_TRANSPOSE_ARCH})
 if(VECOPS_ARCH_FAMILY STREQUAL "x86")
     vecops_add_test(
+        NAME MatmulPanelLifetimeTest
+        FILES ops/MatmulPanelLifetimeTest.cpp
+        FOLDER ops/matmul
+        ARCH Native)
+    vecops_add_test(
         NAME MatmulPackTest
         FILES ops/MatmulPackTest.cpp TestUtils.cpp
         FOLDER ops/matmul_pack
@@ -174,6 +179,11 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
         list(APPEND VECOPS_SME_TEST_ARCH NativeFixedStreamingSVE)
     endif()
     if(VECOPS_NATIVE_HAS_SME)
+        vecops_add_test(
+            NAME MatmulPanelLifetimeTest
+            FILES ops/MatmulPanelLifetimeTest.cpp
+            FOLDER ops/matmul
+            ARCH Native)
         vecops_add_test(
             NAME VecSMETest
             FILES vec/SMETest.cpp

@@ -2116,6 +2116,93 @@ struct Backend<matmul_implementation::AMX> {
     }
   }
 
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B, typename CInput, typename COutput>
+  VECOPS_ALWAYS_INLINE static void run_configured_n_major(
+      Scope&, M m, N n, K k, const A& a, const B& b,
+      const CInput& c_input, COutput& c_output, void* scratch) {
+    static_assert(execution::has_resource_v<
+        execution::details::x86::Tiles, Scope>);
+    VECOPS_ASSERT(scratch != nullptr, "AMX matmul scratch is null");
+    matmul_details::run_tiles_n_major<Backend, Atom, Policy>(
+        m, n, k, a, b, c_input, c_output, scratch);
+  }
+
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            execution::ExecutionScope Scope,
+            meta::ValueType TraversalM, meta::ValueType TraversalN,
+            meta::ValueType K,
+            typename A, typename B, typename CInput, typename COutput>
+  VECOPS_ALWAYS_INLINE static void run_configured_region_n_major(
+      Scope&, TraversalM traversal_m, TraversalN traversal_n, K k,
+      nint_t logical_m, nint_t logical_n,
+      nint_t origin_m, nint_t origin_n,
+      const A& a, const B& b, const CInput& c_input, COutput& c_output,
+      void* scratch) {
+    static_assert(execution::has_resource_v<
+        execution::details::x86::Tiles, Scope>);
+    VECOPS_ASSERT(scratch != nullptr, "AMX matmul scratch is null");
+    matmul_details::run_tiles_region_n_major<Backend, Atom, Policy>(
+        traversal_m, traversal_n, k, logical_m, logical_n,
+        origin_m, origin_n, a, b, c_input, c_output, scratch);
+  }
+
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B, typename CInput, typename COutput,
+            typename AccInput, typename AccOutput, typename Route>
+  VECOPS_ALWAYS_INLINE static void run_configured_phased_n_major(
+      Scope&, M m, N n, K k, const A& a, const B& b,
+      const CInput& c_input, COutput& c_output,
+      const AccInput& acc_input, AccOutput& acc_output,
+      Route route, void* scratch) {
+    static_assert(execution::has_resource_v<
+        execution::details::x86::Tiles, Scope>);
+    VECOPS_ASSERT(scratch != nullptr, "AMX matmul scratch is null");
+    matmul_details::run_tiles_phased_n_major<Backend, Atom, Policy>(
+        m, n, k, a, b, c_input, c_output,
+        acc_input, acc_output, route, scratch);
+  }
+
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B, typename CInput, typename COutput,
+            typename AccInput, typename AccOutput, typename Route>
+  VECOPS_ALWAYS_INLINE static void run_phased_n_major(
+      Scope& scope, M m, N n, K k, const A& a, const B& b,
+      const CInput& c_input, COutput& c_output,
+      const AccInput& acc_input, AccOutput& acc_output,
+      Route route, void* scratch) {
+    constexpr bool PackedB = amx::is_packed_access_v<
+        Atom, ::vecops::matmul::Operand::B, B>;
+    constexpr bool HasActiveConfiguration = [] {
+      if constexpr (requires {
+                      typename std::remove_cvref_t<Scope>::ActiveConfiguration;
+                    })
+        return std::same_as<
+            typename std::remove_cvref_t<Scope>::ActiveConfiguration,
+            amx::Configuration>;
+      else
+        return false;
+    }();
+    if constexpr (HasActiveConfiguration) {
+      run_configured_phased_n_major<Atom, Policy>(
+          scope, m, n, k, a, b, c_input, c_output,
+          acc_input, acc_output, route, scratch);
+    } else {
+      with_configuration<Atom, Policy, PackedB>(
+          scope, m, n, [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+            run_configured_phased_n_major<Atom, Policy>(
+                configured, m, n, k, a, b, c_input, c_output,
+                acc_input, acc_output, route, scratch);
+          });
+    }
+  }
+
   /// Entry point, resolving the leaf in four tiers (first match wins):
   ///
   /// 1. Explicit family requests the automatic owner does not already
@@ -2142,6 +2229,8 @@ struct Backend<matmul_implementation::AMX> {
       void* scratch) {
     using Applicability = ::vecops::matmul::details::Applicability;
     using RequestedFamily = typename FamilyDispatch::Family;
+    constexpr bool NMajor =
+        matmul_details::n_major_family_dispatch_v<FamilyDispatch>;
     constexpr auto Owner = amx::select_dispatch_owner<
         FamilyDispatch, Atom, AllowTailSplit,
         M, N, K, A, B, CInput, COutput>();
@@ -2175,16 +2264,26 @@ struct Backend<matmul_implementation::AMX> {
         const meta::Any bulk_m{logical_m - residual_m};
         const meta::Any tail_m{residual_m};
         auto run_bulk = [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-          run_configured_region<Atom, Policy>(
-              configured, bulk_m, n, k,
-              logical_m, logical_n, 0, 0,
-              a, b, c_input, c_output, scratch);
+          if constexpr (NMajor)
+            run_configured_region_n_major<Atom, Policy>(
+                configured, bulk_m, n, k, logical_m, logical_n, 0, 0,
+                a, b, c_input, c_output, scratch);
+          else
+            run_configured_region<Atom, Policy>(
+                configured, bulk_m, n, k, logical_m, logical_n, 0, 0,
+                a, b, c_input, c_output, scratch);
         };
         auto run_tail = [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-          run_configured_region<Atom, Policy>(
-              configured, tail_m, n, k,
-              logical_m, logical_n, logical_m - residual_m, 0,
-              a, b, c_input, c_output, scratch);
+          if constexpr (NMajor)
+            run_configured_region_n_major<Atom, Policy>(
+                configured, tail_m, n, k, logical_m, logical_n,
+                logical_m - residual_m, 0,
+                a, b, c_input, c_output, scratch);
+          else
+            run_configured_region<Atom, Policy>(
+                configured, tail_m, n, k, logical_m, logical_n,
+                logical_m - residual_m, 0,
+                a, b, c_input, c_output, scratch);
         };
         if constexpr (PackedAB) {
           with_configuration<Atom, Policy, true>(scope, bulk_m, n, run_bulk);
@@ -2206,16 +2305,26 @@ struct Backend<matmul_implementation::AMX> {
         const meta::Any bulk_n{logical_n - residual_n};
         const meta::Any tail_n{residual_n};
         auto run_bulk = [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-          run_configured_region<Atom, Policy>(
-              configured, m, bulk_n, k,
-              logical_m, logical_n, 0, 0,
-              a, b, c_input, c_output, scratch);
+          if constexpr (NMajor)
+            run_configured_region_n_major<Atom, Policy>(
+                configured, m, bulk_n, k, logical_m, logical_n, 0, 0,
+                a, b, c_input, c_output, scratch);
+          else
+            run_configured_region<Atom, Policy>(
+                configured, m, bulk_n, k, logical_m, logical_n, 0, 0,
+                a, b, c_input, c_output, scratch);
         };
         auto run_tail = [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
-          run_configured_region<Atom, Policy>(
-              configured, m, tail_n, k,
-              logical_m, logical_n, 0, logical_n - residual_n,
-              a, b, c_input, c_output, scratch);
+          if constexpr (NMajor)
+            run_configured_region_n_major<Atom, Policy>(
+                configured, m, tail_n, k, logical_m, logical_n,
+                0, logical_n - residual_n,
+                a, b, c_input, c_output, scratch);
+          else
+            run_configured_region<Atom, Policy>(
+                configured, m, tail_n, k, logical_m, logical_n,
+                0, logical_n - residual_n,
+                a, b, c_input, c_output, scratch);
         };
         if constexpr (PackedAB) {
           with_configuration<Atom, Policy, true>(scope, m, bulk_n, run_bulk);
@@ -2440,17 +2549,42 @@ struct Backend<matmul_implementation::AMX> {
       // Batch/flatten planners may own one compatible TILECFG around many
       // leaves.  Family selection above still runs for every leaf; only the
       // General fallback reuses the active image here.
-      run_configured<Atom, Policy>(
-          scope, m, n, k, a, b, c_input, c_output, scratch);
+      if constexpr (NMajor)
+        run_configured_n_major<Atom, Policy>(
+            scope, m, n, k, a, b, c_input, c_output, scratch);
+      else
+        run_configured<Atom, Policy>(
+            scope, m, n, k, a, b, c_input, c_output, scratch);
     } else {
       with_configuration<Atom, Policy, PackedB>(
           scope, m, n, [&](auto& configured)
               VECOPS_INLINE_LAMBDA_NOEXCEPT {
-            run_configured<Atom, Policy>(
-                configured, m, n, k, a, b,
-                c_input, c_output, scratch);
+            if constexpr (NMajor)
+              run_configured_n_major<Atom, Policy>(
+                  configured, m, n, k, a, b,
+                  c_input, c_output, scratch);
+            else
+              run_configured<Atom, Policy>(
+                  configured, m, n, k, a, b,
+                  c_input, c_output, scratch);
           });
     }
+  }
+
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            bool AllowTailSplit = false,
+            typename FamilyDispatch =
+                ::vecops::matmul::details::AutomaticFamilyDispatch,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B, typename CInput, typename COutput>
+  VECOPS_ALWAYS_INLINE static void run_n_major(
+      Scope& scope, M m, N n, K k,
+      const A& a, const B& b, const CInput& c_input, COutput& c_output,
+      void* scratch) {
+    using Dispatch = matmul_details::NMajorFamilyDispatch<FamilyDispatch>;
+    run<Atom, Policy, AllowTailSplit, Dispatch>(
+        scope, m, n, k, a, b, c_input, c_output, scratch);
   }
 
   /// Resolve the compile-time kernel plan for a leaf: KGuaranteed from
@@ -2480,6 +2614,18 @@ struct Backend<matmul_implementation::AMX> {
       }
     }();
     using Plan = amx::KernelPlan<KV::aligns(KR), StreamB>;
+    std::forward<Fn>(fn).template operator()<Plan>();
+  }
+
+  template <::vecops::matmul::Atom Atom, typename A, typename B,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename Fn>
+  VECOPS_ALWAYS_INLINE static void dispatch_plan_n_major(M, N, K, Fn&& fn) {
+    constexpr nint_t KR = decltype(Atom::K_R)::value;
+    using KV = std::remove_cvref_t<K>;
+    // N-major immediately reuses one B tile across M. Non-temporal packed-B
+    // loads would evict exactly that hot panel, so disable StreamB here.
+    using Plan = amx::KernelPlan<KV::aligns(KR), false>;
     std::forward<Fn>(fn).template operator()<Plan>();
   }
 
