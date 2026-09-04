@@ -58,6 +58,12 @@ concept CanMakeOutputSpec = requires(Tensor tensor) {
 template <typename Access>
 concept HasCommit = requires(Access& access) { access.commit(); };
 
+template <typename Access>
+concept HasScalarLoad = requires(
+    const Access& access, const Coord<Access::Rank>& position) {
+  { access.load_scalar(position) } -> std::same_as<typename Access::ComputeType>;
+};
+
 template <typename T>
 concept CanNormalizeInput = requires(T value) {
   as_input_spec<float32_t>(value);
@@ -129,6 +135,121 @@ TEST(TensorDataAccessTest, LoadsAlongAnyLogicalAxis) {
         vec::get(tag, column, lane),
         values[static_cast<std::size_t>(lane * 64 + 3)]);
   }
+}
+
+TEST(TensorDataAccessTest, ScalarAccessUsesLayoutAndConversionPolicy) {
+  std::array<int16_t, 12> input_values{};
+  input_values[7] = 300;
+  auto input_tensor = make_tensor<2>(input_values.data(), {3, 4});
+  auto input_spec = input<int8_t>(input_tensor);
+
+  std::array<int8_t, 12> output_values{};
+  auto output_tensor = make_tensor<2>(output_values.data(), {3, 4});
+  auto output_spec = output<int16_t>(output_tensor);
+
+  kernel::Workspace storage(0);
+  auto workspace = storage.view();
+  auto x = bind(input_spec, InPolicy{}, workspace);
+  auto y = bind(output_spec, OutPolicy{}, workspace);
+
+  EXPECT_EQ(x.load_scalar(coord(1, 3)), std::numeric_limits<int8_t>::max());
+  EXPECT_EQ(x.load_scalar(coord(1, 3), vec::cvt::wrap), int8_t{44});
+  auto x_row = slice_view<0>(x, 1);
+  EXPECT_EQ(x_row.load_scalar(coord(3), vec::cvt::wrap), int8_t{44});
+
+  auto y_row = slice_view<0>(y, 2);
+  y_row.store_scalar(coord(1), int16_t{300});
+  y_row.store_scalar(coord(2), int16_t{300}, vec::cvt::wrap);
+  with_unordered_access(x, y, [&](auto ordered_x, auto ordered_y) {
+    ordered_y.store_scalar(
+        coord(2, 3), int16_t{ordered_x.load_scalar(coord(1, 3))});
+  });
+  y.commit();
+  EXPECT_EQ(output_values[9], std::numeric_limits<int8_t>::max());
+  EXPECT_EQ(output_values[10], int8_t{44});
+  EXPECT_EQ(output_values[11], int8_t{127});
+}
+
+TEST(TensorDataAccessTest, ScalarAccessSupportsIdentityAndZeroTransforms) {
+  std::array<int16_t, 4> input_values{300, 301, 302, 303};
+  auto input_tensor = make_tensor<1>(input_values.data(), {4});
+  auto identity_input = input<int32_t>(
+      input_tensor, identity_transform<int8_t>);
+  auto zero_input = input<int32_t>(
+      input_tensor, zeros_transform<int32_t, int16_t>);
+
+  std::array<int16_t, 4> identity_output_values{};
+  auto identity_output = output<int32_t>(
+      make_tensor<1>(identity_output_values.data(), {4}),
+      identity_transform<int8_t>);
+  std::array<int16_t, 4> zero_output_values{1, 1, 1, 1};
+  auto zero_output = output<int32_t>(
+      make_tensor<1>(zero_output_values.data(), {4}),
+      zeros_transform<int8_t, int32_t>);
+
+  kernel::Workspace storage(0);
+  auto workspace = storage.view();
+  auto identity_x = bind(identity_input, InputAccessPolicy<0>{}, workspace);
+  auto zero_x = bind(zero_input, InputAccessPolicy<0>{}, workspace);
+  auto identity_y = bind(identity_output, OutputAccessPolicy<0>{}, workspace);
+  auto zero_y = bind(zero_output, OutputAccessPolicy<0>{}, workspace);
+
+  EXPECT_EQ(identity_x.load_scalar(coord(0)), int32_t{127});
+  EXPECT_EQ(zero_x.load_scalar(coord(2)), int32_t{0});
+  identity_y.store_scalar(coord(1), int32_t{300});
+  zero_y.store_scalar(coord(2), int32_t{300});
+  identity_y.commit();
+  zero_y.commit();
+  EXPECT_EQ(identity_output_values[1], int16_t{127});
+  EXPECT_EQ(zero_output_values[2], int16_t{0});
+}
+
+TEST(TensorDataAccessTest, ScalarAccessRejectsCustomVectorTransforms) {
+  std::array<float64_t, 64> values{};
+  auto spec = input<float32_t>(
+      make_tensor<1>(values.data(), {64}),
+      DoubleP2CoordinateTransform{});
+  kernel::Workspace storage(0);
+  auto workspace = storage.view();
+  auto access = bind(spec, InputAccessPolicy<0>{}, workspace);
+  static_assert(!HasScalarLoad<decltype(access)>);
+}
+
+TEST(TensorDataAccessTest, ScalarAccessPreservesMaterializationState) {
+  std::array<int16_t, 8> source{10, -1, 20, -1, 30, -1, 40, -1};
+  auto input_spec = input<int32_t>(
+      make_tensor<1>(source.data(), {4}, {2}));
+  using InputPolicy = InputAccessPolicy<
+      0, 2, AccessPlan::automatic_deferred>;
+
+  std::array<int16_t, 4> destination{};
+  auto output_spec = output<int32_t>(
+      make_tensor<1>(destination.data(), {4}));
+  using OutputPolicy = OutputAccessPolicy<
+      0, AccessPlan::materialize_before_transform>;
+
+  const nint_t bytes = required_workspace(input_spec, InputPolicy{}) +
+      required_workspace(output_spec, OutputPolicy{});
+  kernel::Workspace storage(bytes);
+  auto workspace = storage.view();
+  kernel::with_operands(
+      workspace,
+      operand(input_spec, InputPolicy{}),
+      operand(output_spec, OutputPolicy{}),
+      [&](auto& x, auto& y) {
+        for (nint_t i = 0; i < 4; ++i) {
+          const auto value = x.load_scalar(
+              coord(i), materialize::populate);
+          y.store_scalar(coord(i), value + 1);
+        }
+        for (nint_t i = 0; i < 4; ++i) {
+          EXPECT_EQ(
+              x.load_scalar(coord(i)), static_cast<int32_t>(10 * (i + 1)));
+        }
+        y.commit();
+      });
+
+  EXPECT_EQ(destination, (std::array<int16_t, 4>{11, 21, 31, 41}));
 }
 
 TEST(TensorDataAccessTest, MixedWidthZeroTransformDoesNotReadOrSplitInput) {

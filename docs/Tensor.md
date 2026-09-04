@@ -304,6 +304,25 @@ vector axis defaults to `Rank - 1`. Options (all compile-time validated):
   temporality, packing (stores only), alignment — merged over the binding's
   `access_defaults` rather than passed down raw.
 
+For exact point access, `x.load_scalar(coord[, conversion-options...])`
+returns one `ComputeType`, while
+`y.store_scalar(coord, value[, conversion-options...])` stores one. These
+operations use Layout to compute the address and then issue direct scalar
+pointer traffic; they do not construct a vector. Only conversion order/value
+options are accepted (`materialize::populate` is additionally accepted by
+scalar input loads). Lane masks, strided/indexed addressing, inactive
+population, alignment, packing, and temporality are vector-only call options.
+Operand-level memory defaults may still be shared with vector calls but have no
+effect on scalar traffic. Conversion order likewise cannot reorder one value.
+
+Scalar access is available only when the active boundary transform is
+`NoTransform`, `IdentityVecTransform`, or `ZeroVecTransform`; a custom vector
+transform makes the scalar member unavailable at compile time. `NoTransform`
+performs one MemoryType↔ComputeType conversion. Identity retains its explicit
+intermediate type and therefore performs both boundary conversions. A zero
+input returns `ComputeType{}` without reading Tensor memory, and a zero output
+stores a converted zero regardless of the supplied value.
+
 Direct sessions expose `raw_data()`, `raw_strides()`, `spec()`, `policy()`.
 
 ### Materialization: plans, populate, and commit

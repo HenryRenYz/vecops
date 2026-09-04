@@ -130,6 +130,11 @@ vecops_add_test(
     FILES ops/SoftmaxTest.cpp TestUtils.cpp
     FOLDER ops/softmax
     ARCH ${VECOPS_TENSOR_KERNEL_ARCH})
+vecops_add_test(
+    NAME AttentionTest
+    FILES ops/AttentionTest.cpp TestUtils.cpp
+    FOLDER ops/attention
+    ARCH Native)
 set(VECOPS_TRANSPOSE_ARCH ${VECOPS_TENSOR_KERNEL_ARCH})
 if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND VECOPS_NATIVE_FIXED_SVE_BITS)
     list(APPEND VECOPS_TRANSPOSE_ARCH NativeFixedSVE)
