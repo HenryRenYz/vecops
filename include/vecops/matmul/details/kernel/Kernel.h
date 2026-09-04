@@ -29,6 +29,7 @@
 #include <utility>
 
 #include "vecops/matmul/Atom.h"
+#include "vecops/matmul/details/kernel/AccumulatorRoute.h"
 #include "vecops/matmul/details/kernel/Backend.h"
 #include "vecops/matmul/details/kernel/TileScheduler.h"
 
@@ -128,6 +129,42 @@ VECOPS_KERNEL_FUNCTION(void matmul_bound(
     Backend::template run<Atom, Policy>(
         scope, m, n, k, a, b, c_input, c_output, scratch);
   }
+}
+
+/**
+ * Execute one split-K leaf while carrying both the semantic C operands and
+ * the native accumulator operands. Route is intentionally a runtime value for
+ * a real K loop, allowing first/middle/last to share one backend instantiation.
+ */
+template <::vecops::matmul::Atom Atom,
+          typename Policy = matmul_policy::Automatic,
+          typename Scope,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K,
+          typename A, typename B,
+          typename CInput, typename COutput,
+          typename AccInput, typename AccOutput,
+          typename Route, typename Implementation>
+VECOPS_KERNEL_FUNCTION(void matmul_bound_phased(
+    Scope& scope, M m, N n, K k,
+    const A& a, const B& b,
+    const CInput& c_input, COutput& c_output,
+    const AccInput& acc_input, AccOutput& acc_output,
+    Route route, void* scratch, Implementation = {})) {
+  static_assert(execution::ExecutionScope<Scope>);
+  static_assert(std::same_as<typename A::ComputeType, typename Atom::TA>);
+  static_assert(std::same_as<typename B::ComputeType, typename Atom::TB>);
+  static_assert(std::same_as<
+      typename CInput::ComputeType, typename Atom::TAcc>);
+  static_assert(std::same_as<
+      typename COutput::ComputeType, typename Atom::TAcc>);
+  static_assert(std::same_as<
+      typename AccInput::ComputeType, typename Atom::TAcc>);
+  static_assert(std::same_as<
+      typename AccOutput::ComputeType, typename Atom::TAcc>);
+  using Backend = matmul_details::Backend<Implementation>;
+  Backend::template run_phased<Atom, Policy>(
+      scope, m, n, k, a, b,
+      c_input, c_output, acc_input, acc_output, route, scratch);
 }
 
 /**

@@ -37,6 +37,9 @@
  * - B is consumed as `[N, K]` (B-transposed semantics, see above).
  * - m/n/k are Meta `ValueInput`s: each may be a `Const<N>`, a
  *   `Dynamic<...>`, or a plain runtime integer.
+ * - A zero K is an empty reduction, not a no-op: the explicit-C form copies
+ *   `CInput` through the output conversion/transform, while the single-C
+ *   form materializes zero. Zero M or N has no output elements.
  * - The workspace returned by `required_workspace` must stay alive (and
  *   unmodified) across the matching `operator()` call.
  */

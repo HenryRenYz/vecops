@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <map>
 #include <vector>
 
 #include "vecops/matmul/details/tiled/LoopNest.h"
@@ -221,6 +222,36 @@ static_assert(matmul::details::resolved_packing_extent_v<
                   matmul::loop_order::NKM> ==
               matmul::PackingExtent::cache_k);
 
+template <typename Order>
+constexpr bool output_accumulator_keeps_logical_origins() {
+  return matmul::details::accumulator_block_origin<
+             true, matmul::Axis::M, Order>(17) == 17 &&
+         matmul::details::accumulator_block_origin<
+             true, matmul::Axis::N, Order>(19) == 19;
+}
+
+static_assert(output_accumulator_keeps_logical_origins<
+              matmul::loop_order::MNK>());
+static_assert(output_accumulator_keeps_logical_origins<
+              matmul::loop_order::MKN>());
+static_assert(output_accumulator_keeps_logical_origins<
+              matmul::loop_order::NMK>());
+static_assert(output_accumulator_keeps_logical_origins<
+              matmul::loop_order::NKM>());
+static_assert(output_accumulator_keeps_logical_origins<
+              matmul::loop_order::KMN>());
+static_assert(output_accumulator_keeps_logical_origins<
+              matmul::loop_order::KNM>());
+
+static_assert(matmul::details::accumulator_block_origin<
+              false, matmul::Axis::M, matmul::loop_order::MKN>(17) == 0);
+static_assert(matmul::details::accumulator_block_origin<
+              false, matmul::Axis::N, matmul::loop_order::MKN>(19) == 19);
+static_assert(matmul::details::accumulator_block_origin<
+              false, matmul::Axis::M, matmul::loop_order::NKM>(17) == 17);
+static_assert(matmul::details::accumulator_block_origin<
+              false, matmul::Axis::N, matmul::loop_order::NKM>(19) == 0);
+
 TEST(MatmulLoopNestTest, DisabledAxisDoesNotGenerateBlocks) {
   int calls = 0;
   matmul::details::LoopNest<
@@ -251,27 +282,140 @@ TEST(MatmulLoopNestTest, ReportsKBlockPhases) {
   EXPECT_EQ(active, (std::vector<nint_t>{2, 2, 1}));
 }
 
-TEST(MatmulLoopNestTest, ExposesKPhasesAsCompileTimeTypes) {
+TEST(MatmulLoopNestTest, ZeroKStillEmitsSemanticOutputPhase) {
+  using Tiling = matmul::CacheTiling<
+      meta::Const<8>, meta::Const<8>, meta::Const<2>>;
+  int calls = 0;
+  matmul::details::LoopNest<matmul::loop_order::NKM, Tiling>::run_phased(
+      meta::cint<3>, meta::cint<5>, meta::cint<0>, Tiling{},
+      [&](const auto& block, auto phase) {
+        ++calls;
+        EXPECT_EQ(static_cast<nint_t>(block.k), 0);
+        static_assert(matmul::details::static_kernel_phase_v<
+                      decltype(phase)>);
+        EXPECT_TRUE(matmul::details::phase_first_k(phase));
+        EXPECT_TRUE(matmul::details::phase_last_k(phase));
+      });
+  EXPECT_EQ(calls, 1);
+}
+
+TEST(MatmulLoopNestTest, SharesOneRuntimeTypeAcrossSplitKPhases) {
   using Tiling = matmul::CacheTiling<
       meta::Const<8>, meta::Const<8>, meta::Const<2>>;
   std::vector<int> phases;
   matmul::details::LoopNest<matmul::loop_order::KMN, Tiling>::run_phased(
       meta::cint<1>, meta::cint<1>, meta::cint<5>, Tiling{},
       [&](const auto&, auto phase) {
-        if constexpr (decltype(phase)::first_k &&
-                      !decltype(phase)::last_k) {
-          phases.push_back(0);
-        } else if constexpr (!decltype(phase)::first_k &&
-                             !decltype(phase)::last_k) {
-          phases.push_back(1);
-        } else if constexpr (!decltype(phase)::first_k &&
-                             decltype(phase)::last_k) {
-          phases.push_back(2);
-        } else {
+        if constexpr (matmul::details::static_kernel_phase_v<
+                          decltype(phase)>) {
+          static_assert(decltype(phase)::first_k &&
+                        decltype(phase)::last_k);
           phases.push_back(3);
+        } else {
+          static_assert(std::same_as<
+                        decltype(phase),
+                        matmul::details::DynamicKernelPhase>);
+          if (phase.first_k && !phase.last_k) {
+            phases.push_back(0);
+          } else if (!phase.first_k && !phase.last_k) {
+            phases.push_back(1);
+          } else if (!phase.first_k && phase.last_k) {
+            phases.push_back(2);
+          } else {
+            phases.push_back(3);
+          }
         }
       });
   EXPECT_EQ(phases, (std::vector<int>{0, 1, 2}));
+}
+
+struct KPhaseRecord {
+  nint_t origin;
+  nint_t extent;
+  bool first;
+  bool last;
+  bool is_static;
+
+  auto operator<=>(const KPhaseRecord&) const = default;
+};
+
+template <typename Order>
+void expect_k_phase_boundaries_for_order(nint_t logical_k) {
+  using Tiling = matmul::CacheTiling<
+      meta::Const<2>, meta::Const<2>, meta::Const<2>,
+      matmul::CacheLoopMode::enabled,
+      matmul::CacheLoopMode::enabled,
+      matmul::CacheLoopMode::enabled>;
+  std::map<std::pair<nint_t, nint_t>, std::vector<KPhaseRecord>> records;
+  matmul::details::LoopNest<Order, Tiling>::run_phased(
+      meta::Any{3}, meta::Any{3}, meta::Any{logical_k}, Tiling{},
+      [&](const auto& block, auto phase) {
+        records[{block.m_origin, block.n_origin}].push_back(KPhaseRecord{
+            block.k_origin, static_cast<nint_t>(block.k),
+            matmul::details::phase_first_k(phase),
+            matmul::details::phase_last_k(phase),
+            matmul::details::static_kernel_phase_v<decltype(phase)>});
+      });
+
+  std::vector<KPhaseRecord> expected;
+  if (logical_k <= 2) {
+    expected.push_back({0, logical_k, true, true, true});
+  } else {
+    for (nint_t origin = 0; origin < logical_k; origin += 2) {
+      expected.push_back({
+          origin, std::min<nint_t>(2, logical_k - origin),
+          origin == 0, origin + 2 >= logical_k, false});
+    }
+  }
+  ASSERT_EQ(records.size(), 4u);
+  for (nint_t m_origin : {nint_t{0}, nint_t{2}}) {
+    for (nint_t n_origin : {nint_t{0}, nint_t{2}}) {
+      const auto key = std::pair{m_origin, n_origin};
+      EXPECT_EQ(records.at(key), expected)
+          << "m_origin=" << m_origin << " n_origin=" << n_origin
+          << " logical_k=" << logical_k;
+    }
+  }
+}
+
+template <typename Order>
+void expect_zero_output_extent_skips_order() {
+  using Tiling = matmul::CacheTiling<
+      meta::Const<2>, meta::Const<2>, meta::Const<2>,
+      matmul::CacheLoopMode::enabled,
+      matmul::CacheLoopMode::enabled,
+      matmul::CacheLoopMode::enabled>;
+  for (const auto [m, n] : {
+           std::pair<nint_t, nint_t>{0, 3},
+           std::pair<nint_t, nint_t>{3, 0},
+           std::pair<nint_t, nint_t>{0, 0}}) {
+    int calls = 0;
+    matmul::details::LoopNest<Order, Tiling>::run_phased(
+        meta::Any{m}, meta::Any{n}, meta::Any{5}, Tiling{},
+        [&](const auto&, auto) { ++calls; });
+    EXPECT_EQ(calls, 0) << "m=" << m << " n=" << n;
+  }
+}
+
+TEST(MatmulLoopNestTest, KPhaseBoundariesAreCorrectForEveryLoopOrder) {
+  for (nint_t logical_k : {nint_t{0}, nint_t{1}, nint_t{2}, nint_t{3},
+                           nint_t{4}, nint_t{5}, nint_t{6}}) {
+    expect_k_phase_boundaries_for_order<matmul::loop_order::MNK>(logical_k);
+    expect_k_phase_boundaries_for_order<matmul::loop_order::MKN>(logical_k);
+    expect_k_phase_boundaries_for_order<matmul::loop_order::NMK>(logical_k);
+    expect_k_phase_boundaries_for_order<matmul::loop_order::NKM>(logical_k);
+    expect_k_phase_boundaries_for_order<matmul::loop_order::KMN>(logical_k);
+    expect_k_phase_boundaries_for_order<matmul::loop_order::KNM>(logical_k);
+  }
+}
+
+TEST(MatmulLoopNestTest, ZeroOutputExtentSkipsEveryLoopOrder) {
+  expect_zero_output_extent_skips_order<matmul::loop_order::MNK>();
+  expect_zero_output_extent_skips_order<matmul::loop_order::MKN>();
+  expect_zero_output_extent_skips_order<matmul::loop_order::NMK>();
+  expect_zero_output_extent_skips_order<matmul::loop_order::NKM>();
+  expect_zero_output_extent_skips_order<matmul::loop_order::KMN>();
+  expect_zero_output_extent_skips_order<matmul::loop_order::KNM>();
 }
 
 TEST(CacheInfoTest, ReportsUsableHierarchy) {

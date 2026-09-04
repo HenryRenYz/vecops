@@ -643,9 +643,25 @@ TEST(TensorDataAccessTest, TransposesCanonicalInputAndMaterializedOutputViews) {
   kernel::with_operands(
       workspace, operand(in_spec, InMaterialize{}),
       operand(out_spec, OutMaterialize{}), [&](auto& x, auto& y) {
+        static_assert(requires {
+          x.raw_data();
+          x.raw_strides();
+          y.raw_data();
+          y.raw_strides();
+        });
+        EXPECT_EQ(x.raw_data(), x.spec().tensor().data());
+        EXPECT_EQ(y.raw_data(), y.auxiliary_spec().tensor().data());
+        EXPECT_EQ(x.raw_strides()[1], 1);
+        EXPECT_EQ(y.raw_strides()[1], 1);
         auto tx = transpose_view<0, 1>(x);
         auto ty = transpose_view<0, 1>(y);
         static_assert(!HasCommit<decltype(ty)>);
+        static_assert(requires {
+          tx.raw_data();
+          tx.raw_strides();
+          ty.raw_data();
+          ty.raw_strides();
+        });
         static_assert(
             std::remove_cvref_t<decltype(tx.policy())>::vector_axis == 0);
         Tag tag{};

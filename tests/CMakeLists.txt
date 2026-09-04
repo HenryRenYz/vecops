@@ -256,6 +256,13 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
         endforeach()
         set(_VECOPS_SME_MATMUL_TARGETS
             MatmulTest-Native MatmulBatchTest-Native)
+        # A real split-K loop intentionally outlines one routed tile traversal
+        # so first/middle/last share the same matrix-compute body.  The call is
+        # made while StreamingZA is active and the callee contains the SME
+        # leaves; keep this exact symbol alongside the predicate-tuple helpers
+        # rather than weakening the interval-wide call audit.
+        set(_VECOPS_SME_MATMUL_CALL_REGEX
+            "(${_VECOPS_SME_PREDICATE_TUPLE_CALL_REGEX}|run_tiles_phased_shared)")
         if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
             list(APPEND _VECOPS_SME_MATMUL_TARGETS
                 MatmulTest-NativeFixedStreamingSVE
@@ -265,7 +272,7 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
             set(_VECOPS_SME_MATMUL_CALL_ARGS "")
             if(_TARGET MATCHES "^MatmulTest-")
                 list(APPEND _VECOPS_SME_MATMUL_CALL_ARGS
-                    "-DALLOWED_CALL_REGEX=${_VECOPS_SME_PREDICATE_TUPLE_CALL_REGEX}")
+                    "-DALLOWED_CALL_REGEX=${_VECOPS_SME_MATMUL_CALL_REGEX}")
             endif()
             add_test(
                 NAME ${_TARGET}-Disassembly

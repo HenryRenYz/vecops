@@ -189,8 +189,10 @@ VECOPS_INLINE void run_tiled_rank2(
             scope, a_block, [&](const auto& active_a) {
           BController::with_panel(
               scope, b_block, [&](const auto& active_b) {
-            if constexpr (decltype(phase)::first_k &&
-                          decltype(phase)::last_k) {
+            if constexpr (static_kernel_phase_v<decltype(phase)>) {
+              static_assert(decltype(phase)::first_k &&
+                            decltype(phase)::last_k,
+                            "only an unsplit K block has a static phase");
               // Single K block: no accumulator round trip, C in -> C out.
               Scheduler<
                   AtomT, typename Config::SchedulerPolicy, Implementation>::run(
@@ -199,45 +201,36 @@ VECOPS_INLINE void run_tiled_rank2(
                       c_input_block, c_output_block, scratch);
               return;
             }
-            // Accumulator coordinates: stripe-shaped accumators (axis
-            // precedes K -- see acc_m/acc_n above) are indexed from 0 for
-            // every block of that axis; whole-axis accumators are indexed by
-            // the block's logical origin.
+            // Output-backed accumulators are a full logical M x N view and
+            // therefore always use the real block coordinates.  Only a
+            // dedicated workspace accumulator may be stripe-shaped: an axis
+            // preceding K is then rebased to zero while a whole-axis
+            // dimension retains the logical block origin.
             const nint_t acc_m_origin =
-                axis_precedes_k_v<Axis::M, Order> ? 0 : block.m_origin;
+                accumulator_block_origin<OutputAcc, Axis::M, Order>(
+                    block.m_origin);
             const nint_t acc_n_origin =
-                axis_precedes_k_v<Axis::N, Order> ? 0 : block.n_origin;
+                accumulator_block_origin<OutputAcc, Axis::N, Order>(
+                    block.n_origin);
             auto acc_input_block = narrow_c_input(
                 acc_input, acc_m_origin, block.m,
                 acc_n_origin, block.n);
             auto acc_output_block = narrow_c_output(
                 acc_output, acc_m_origin, block.m,
                 acc_n_origin, block.n);
-            // K-phase dispatch table:
-            //   first K block   : C input  -> accumulator (initialize)
-            //   middle K blocks : acc      -> accumulator (accumulate)
-            //   last K block    : accumulator -> C output (write back, with
-            //                                  the kernel's += semantics
-            //                                  adding the final partial)
-            if constexpr (decltype(phase)::first_k) {
-              Scheduler<
-                  AtomT, typename Config::SchedulerPolicy, Implementation>::run(
-                      scope, block.m, block.n, block.k,
-                      active_a, active_b,
-                      c_input_block, acc_output_block, scratch);
-            } else if constexpr (decltype(phase)::last_k) {
-              Scheduler<
-                  AtomT, typename Config::SchedulerPolicy, Implementation>::run(
-                      scope, block.m, block.n, block.k,
-                      active_a, active_b,
-                      acc_input_block, c_output_block, scratch);
-            } else {
-              Scheduler<
-                  AtomT, typename Config::SchedulerPolicy, Implementation>::run(
-                      scope, block.m, block.n, block.k,
-                      active_a, active_b,
-                      acc_input_block, acc_output_block, scratch);
-            }
+            // A real K loop uses one runtime route type for every phase. Both
+            // C endpoint pairs cross the backend boundary, so first/middle/
+            // last share the same A/B compute instantiation.
+            const kernel::matmul_details::DynamicAccumulatorRoute route{
+                !phase.first_k, !phase.last_k};
+            Scheduler<
+                AtomT, typename Config::SchedulerPolicy,
+                Implementation>::run_phased(
+                    scope, block.m, block.n, block.k,
+                    active_a, active_b,
+                    c_input_block, c_output_block,
+                    acc_input_block, acc_output_block,
+                    route, scratch);
           });
         });
       });

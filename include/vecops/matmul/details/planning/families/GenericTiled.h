@@ -227,7 +227,7 @@ VECOPS_INLINE void run_generic_tiler(
     kernel::loop::for_each_dims<PrefixRank>(
         [&](const auto& a_leaf, const auto& b_leaf,
             const auto& c_input_leaf, const auto& c_output_leaf)
-            VECOPS_INLINE_LAMBDA_NOEXCEPT {
+            VECOPS_INLINE_LAMBDA {
           ::vecops::matmul::details::run_tiled_rank2<
               Config, Implementation>(
                   scope, config, m, n, k,

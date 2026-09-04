@@ -158,6 +158,9 @@ struct BulkTail {};
  */
 struct ExactCover {};
 
+/** ExactCover that promotes a runtime-divisible grid to unmasked kernels. */
+struct ExactCoverRuntimeUnmasked {};
+
 } // namespace tile2d_policy
 
 /**
@@ -1575,7 +1578,11 @@ VECOPS_ALWAYS_INLINE void tile2d(
       "tile2d kernel capacity overflows nint_t");
 
   auto&& fn_ref = fn;
-  if constexpr (std::same_as<Policy, tile2d_policy::ExactCover>) {
+  if constexpr (std::same_as<Policy, tile2d_policy::ExactCover> ||
+                std::same_as<Policy,
+                             tile2d_policy::ExactCoverRuntimeUnmasked>) {
+    constexpr bool RuntimeUnmasked = std::same_as<
+        Policy, tile2d_policy::ExactCoverRuntimeUnmasked>;
     constexpr int MaxA = tile2d_details::max_family_a<Catalog>();
     constexpr int MaxB = tile2d_details::max_family_b<Catalog>();
     constexpr int BulkA = tile2d_details::max_exact_row_a<Catalog>();
@@ -1609,6 +1616,19 @@ VECOPS_ALWAYS_INLINE void tile2d(
         tile2d_details::exact_grid_mode_v<Catalog> ==
             Tile2DExactGridMode::exact) {
       tile2d_details::run_context_exact_grid<BulkA, BulkB>(exact);
+    } else if constexpr (
+        RuntimeUnmasked &&
+        tile2d_details::exact_grid_mode_v<Catalog> ==
+            Tile2DExactGridMode::unmasked) {
+      const nint_t cap_m = BulkA * tm_int;
+      const nint_t cap_n = BulkB * tn_int;
+      if (m_int % cap_m == 0 && n_int % cap_n == 0) {
+        using Bulk = tile2d_details::family_for_t<Catalog, BulkA, BulkB>;
+        tile2d_details::emit_full_grid<Bulk>(
+            0, m_int, 0, n_int, cap_m, cap_n, fn_ref);
+        return;
+      }
+      tile2d_details::run_context_exact_cover<false>(exact);
     } else {
       tile2d_details::run_context_exact_cover<false>(exact);
     }

@@ -35,6 +35,23 @@ inline constexpr bool axis_precedes_k_v =
     axis_position_v<Target, Order> < axis_position_v<Axis::K, Order>;
 
 /**
+ * @brief Map a logical M/N block origin into split-K accumulator storage.
+ *
+ * An output-backed accumulator is a full logical M x N view and always keeps
+ * the real origin. A workspace accumulator may collapse an axis that precedes
+ * K to one reusable stripe; only that representation rebases the origin to
+ * zero. Keeping this rule in one helper prevents accumulator placement and
+ * Tiler block narrowing from independently interpreting the loop order.
+ */
+template <bool OutputAcc, Axis Target, typename Order>
+VECOPS_INLINE constexpr nint_t accumulator_block_origin(
+    nint_t logical_origin) {
+  if constexpr (OutputAcc) return logical_origin;
+  else if constexpr (axis_precedes_k_v<Target, Order>) return 0;
+  else return logical_origin;
+}
+
+/**
  * @brief Resolve a `PackingExtent` (honoring an explicit choice) for one
  *        operand under the given loop order.
  *

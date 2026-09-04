@@ -123,7 +123,7 @@ struct FamilyPlan<::vecops::matmul::kernel_family::GenericTiled, Config> {
     auto c_output_spec = tensor::as_output_spec<typename Atom::TAcc>(
         std::forward<COutput>(c_output));
     scope.with_resources(
-        ResourceToken{}, [&](auto& active) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+        ResourceToken{}, [&](auto& active) VECOPS_INLINE_LAMBDA {
           // The token's ResourceRequirements type drives activation; `active`
           // is the scope carrying the activated resources.
           run_generic_tiler<Config, Implementation>(

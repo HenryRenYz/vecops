@@ -10,8 +10,8 @@
  * @brief Total workspace bound for one architecture-family invocation.
  *
  * The bound must cover every allocation the invocation can make at run time:
- * backend scratch, compile-time online packing, the optional flattened
- * batch-rows packed-A variant, and the periodic C-input materialization.
+ * backend scratch, the bounded online-packing alternatives, the optional
+ * flattened batch-rows packed-A variant, and periodic C-input materialization.
  * The runtime gates (batch_rows_pack_a_enabled and friends) are evaluated
  * once when the invocation is constructed, so a later required_workspace()
  * query and the actual run always see the same decisions.
@@ -29,9 +29,9 @@ struct ArchitectureWorkspacePlanner {
   VECOPS_ALWAYS_INLINE static nint_t required(const Invocation& op) {
     nint_t bytes = kernel::matmul_implementation::scratch_bytes<
         typename Invocation::Implementation>();
-    // Reserve the union of the independently admissible A/B variants.  This
-    // covers both dynamic rank-two calls and rank-three calls where either
-    // side may be broadcast or repacked per batch item.
+    // Reserve only the operand types selected from Meta bounds, plus the one
+    // possible native-AMX B alternative.  Dynamic extents no longer retain a
+    // runtime union of raw/A/B/AB variants.
     if constexpr (Invocation::MayAutoPackA) {
       if constexpr (Invocation::SMEBatchRowsFullPackCandidate) {
         // The two-sided flattened SME branch needs a complete [batch*M,K]

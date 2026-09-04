@@ -331,6 +331,15 @@ makes every kernel load a cheap contiguous read. The planner picks
 automatically from type-level facts (multi-pass + non-contiguous →
 after-transform, etc.); force a plan only with measured reason.
 
+Canonical ComputeType storage also exposes `raw_data()`/`raw_strides()` when
+its hot representation is `NoTransform` and memory type equals ComputeType.
+This includes eager after-transform inputs, before-transform output auxiliary
+storage, and their borrowed structural views. Matrix backends may therefore
+load/store that already-prepared storage directly instead of copying it into a
+second tile scratch buffer. Deferred inputs deliberately do not expose this
+surface until their populate/reuse protocol has completed; original output
+conversion and commit ownership remain on the materialized parent session.
+
 **`materialize::populate`** is what makes `automatic_deferred` interesting:
 instead of a separate preparation pass, the *kernel's own first traversal*
 fills the canonical Compute buffer. Mark the loads of that first visit with

@@ -28,6 +28,7 @@
 
 #include "vecops/matmul/Atom.h"
 #include "vecops/kernel/Tile2D.h"
+#include "vecops/matmul/details/kernel/AccumulatorRoute.h"
 
 namespace vecops::kernel::matmul_details {
 
@@ -50,9 +51,10 @@ VECOPS_KERNEL_FUNCTION(void run_tiles_region(
     const A& a, const B& b, const CInput& c_input, COutput& c_output,
     void* scratch)) {
   using EffectivePolicy = typename Backend::template EffectivePolicy<
-      Atom, Policy, TraversalM, TraversalN, K, A, B>;
+      Atom, Policy, TraversalM, TraversalN, K, A, B, CInput, COutput>;
   using Catalog = typename Backend::template Catalog<
-      Atom, EffectivePolicy, A, B>;
+      Atom, EffectivePolicy, TraversalM, TraversalN, K,
+      A, B, CInput, COutput>;
   const nint_t logical_k = static_cast<nint_t>(k);
   Backend::template dispatch_plan<Atom, A, B>(
       traversal_m, traversal_n, k,
@@ -86,9 +88,9 @@ VECOPS_KERNEL_FUNCTION(void run_tiles(
     const A& a, const B& b, const CInput& c_input, COutput& c_output,
     void* scratch)) {
   using EffectivePolicy = typename Backend::template EffectivePolicy<
-      Atom, Policy, M, N, K, A, B>;
+      Atom, Policy, M, N, K, A, B, CInput, COutput>;
   using Catalog = typename Backend::template Catalog<
-      Atom, EffectivePolicy, A, B>;
+      Atom, EffectivePolicy, M, N, K, A, B, CInput, COutput>;
   const nint_t logical_m = static_cast<nint_t>(m);
   const nint_t logical_n = static_cast<nint_t>(n);
   const nint_t logical_k = static_cast<nint_t>(k);
@@ -101,6 +103,49 @@ VECOPS_KERNEL_FUNCTION(void run_tiles(
                 VECOPS_INLINE_LAMBDA_NOEXCEPT {
               Backend::template run_case<Atom, Case, Plan>(
                   a, b, c_input, c_output,
+                  logical_m, logical_n, logical_k, mi, ni,
+                  active_m, active_n, scratch);
+            });
+      });
+}
+
+/**
+ * Split-K traversal carrying both semantic C endpoints and the native
+ * accumulator endpoints. First/middle/last blocks share one Route type; the
+ * backend selects only the prologue source and epilogue destination around a
+ * single Case compute body.
+ */
+template <typename Backend, ::vecops::matmul::Atom Atom, typename Policy,
+          meta::ValueType M, meta::ValueType N, meta::ValueType K,
+          typename A, typename B,
+          typename CInput, typename COutput,
+          typename AccInput, typename AccOutput,
+          typename Route>
+VECOPS_KERNEL_FUNCTION(void run_tiles_phased(
+    M m, N n, K k,
+    const A& a, const B& b,
+    const CInput& c_input, COutput& c_output,
+    const AccInput& acc_input, AccOutput& acc_output,
+    Route route, void* scratch)) {
+  // The accumulator is always native TAcc storage. Resolve the traversal from
+  // that stable shape so all split phases choose one catalog/policy type even
+  // when the original C carries a transform or a non-direct layout.
+  using EffectivePolicy = typename Backend::template EffectivePolicy<
+      Atom, Policy, M, N, K, A, B, AccInput, AccOutput>;
+  using Catalog = typename Backend::template Catalog<
+      Atom, EffectivePolicy, M, N, K, A, B, AccInput, AccOutput>;
+  const nint_t logical_m = static_cast<nint_t>(m);
+  const nint_t logical_n = static_cast<nint_t>(n);
+  const nint_t logical_k = static_cast<nint_t>(k);
+  Backend::template dispatch_plan<Atom, A, B>(
+      m, n, k, [&]<typename Plan>() VECOPS_INLINE_LAMBDA_NOEXCEPT {
+        kernel::loop::tile2d<EffectivePolicy>(
+            m, n, Atom::M_R, Atom::N_R, Catalog{},
+            [&]<typename Case>(Case, nint_t mi, nint_t ni,
+                               nint_t active_m, nint_t active_n)
+                VECOPS_INLINE_LAMBDA_NOEXCEPT {
+              Backend::template run_case_phased<Atom, Case, Plan>(
+                  a, b, c_input, c_output, acc_input, acc_output, route,
                   logical_m, logical_n, logical_k, mi, ni,
                   active_m, active_n, scratch);
             });

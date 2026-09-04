@@ -158,7 +158,7 @@ enum class PackingExtent {
  * - `output`: reuse the output tensor's own storage as accumulator storage.
  *   Requires the output element to be at least as large as the atom's
  *   `TAcc`, and the output data alignment and strides must be able to
- *   represent `TAcc` elements (asserted).
+ *   represent `TAcc` elements (checked in every build mode).
  * - `automatic` (default): reuse the output only when it is a perfect
  *   stand-in — output element type equals `TAcc` and no output transform is
  *   attached; otherwise fall back to workspace.

@@ -1713,13 +1713,69 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
   }
 }
 
+/** Select the semantic C input or the running split-K accumulator. */
+template <int Tile, meta::ValueType ActiveM, meta::ValueType ActiveN,
+          typename CInput, typename AccInput, typename Route>
+VECOPS_ALWAYS_INLINE void initialize_c_tile_routed(
+    const CInput& c_input, const AccInput& acc_input, const Route& route,
+    nint_t m, nint_t n, ActiveM active_m, ActiveN active_n,
+    typename CInput::ComputeType* buffer) {
+  static_assert(std::same_as<
+      typename CInput::ComputeType, typename AccInput::ComputeType>);
+  if constexpr (matmul_details::static_accumulator_route_v<Route>) {
+    if constexpr (Route::use_accumulator_input)
+      initialize_c_tile<Tile>(
+          acc_input, m, n, active_m, active_n, buffer);
+    else
+      initialize_c_tile<Tile>(
+          c_input, m, n, active_m, active_n, buffer);
+  } else {
+    if (route.use_accumulator_input)
+      initialize_c_tile<Tile>(
+          acc_input, m, n, active_m, active_n, buffer);
+    else
+      initialize_c_tile<Tile>(
+          c_input, m, n, active_m, active_n, buffer);
+  }
+}
+
+/** Select the running split-K accumulator or the semantic C output. */
+template <int Tile, meta::ValueType ActiveM, meta::ValueType ActiveN,
+          typename COutput, typename AccOutput, typename Route>
+VECOPS_ALWAYS_INLINE void store_c_tile_routed(
+    COutput& c_output, AccOutput& acc_output, const Route& route,
+    nint_t m, nint_t n, ActiveM active_m, ActiveN active_n,
+    typename COutput::ComputeType* buffer) {
+  static_assert(std::same_as<
+      typename COutput::ComputeType, typename AccOutput::ComputeType>);
+  if constexpr (matmul_details::static_accumulator_route_v<Route>) {
+    if constexpr (Route::write_accumulator_output)
+      store_c_tile<Tile>(
+          acc_output, m, n, active_m, active_n, buffer);
+    else
+      store_c_tile<Tile>(
+          c_output, m, n, active_m, active_n, buffer);
+  } else {
+    if (route.write_accumulator_output)
+      store_c_tile<Tile>(
+          acc_output, m, n, active_m, active_n, buffer);
+    else
+      store_c_tile<Tile>(
+          c_output, m, n, active_m, active_n, buffer);
+  }
+}
+
 /// The AMX microkernel for one Case: initialize the C tiles, loop the K
 /// axis in Atom K steps, store the C tiles. Tail handling is resolved
 /// per sub-tile through the *Guaranteed / NonEmpty template flags.
 template <::vecops::matmul::Atom Atom, typename Case, typename Plan,
-          typename A, typename B, typename CInput, typename COutput>
-VECOPS_ALWAYS_INLINE void microkernel(
-    const A& a, const B& b, const CInput& c_input, COutput& c_output,
+          typename A, typename B,
+          typename CInput, typename COutput,
+          typename AccInput, typename AccOutput, typename Route>
+VECOPS_ALWAYS_INLINE void microkernel_routed(
+    const A& a, const B& b,
+    const CInput& c_input, COutput& c_output,
+    const AccInput& acc_input, AccOutput& acc_output, Route route,
     nint_t logical_m, nint_t logical_n, nint_t logical_k,
     nint_t m, nint_t n, nint_t active_m, nint_t active_n,
     void* scratch) {
@@ -1749,8 +1805,8 @@ VECOPS_ALWAYS_INLINE void microkernel(
       bytes + (NM + NN) * 1024);
 
   [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
-    (initialize_c_tile<static_cast<int>(I)>(
-         c_input,
+    (initialize_c_tile_routed<static_cast<int>(I)>(
+         c_input, acc_input, route,
          m + static_cast<nint_t>(I / NN) * 16,
          n + static_cast<nint_t>(I % NN) * 16,
          tile_active_extent<
@@ -1805,8 +1861,8 @@ VECOPS_ALWAYS_INLINE void microkernel(
   }
 
   [&]<std::size_t... I>(std::index_sequence<I...>) VECOPS_INLINE_LAMBDA {
-    (store_c_tile<static_cast<int>(I)>(
-         c_output,
+    (store_c_tile_routed<static_cast<int>(I)>(
+         c_output, acc_output, route,
          m + static_cast<nint_t>(I / NN) * 16,
          n + static_cast<nint_t>(I % NN) * 16,
          tile_active_extent<
@@ -1821,6 +1877,21 @@ VECOPS_ALWAYS_INLINE void microkernel(
              ReferenceActiveClamp>(active_n),
          c_buffers + I * 256), ...);
   }(std::make_index_sequence<Outputs>{});
+}
+
+/** Static unsplit adapter: semantic C input is written to semantic output. */
+template <::vecops::matmul::Atom Atom, typename Case, typename Plan,
+          typename A, typename B, typename CInput, typename COutput>
+VECOPS_ALWAYS_INLINE void microkernel(
+    const A& a, const B& b, const CInput& c_input, COutput& c_output,
+    nint_t logical_m, nint_t logical_n, nint_t logical_k,
+    nint_t m, nint_t n, nint_t active_m, nint_t active_n,
+    void* scratch) {
+  microkernel_routed<Atom, Case, Plan>(
+      a, b, c_input, c_output, c_input, c_output,
+      matmul_details::UnsplitAccumulatorRoute{},
+      logical_m, logical_n, logical_k,
+      m, n, active_m, active_n, scratch);
 }
 
 /// Out-of-line wrapper that pins a microkernel to an exact-blocks Case,
@@ -1840,6 +1911,30 @@ VECOPS_NOINLINE void exact_microkernel(
       m, n, active_m, active_n, scratch);
 }
 
+/** Shared first/middle/last split-K wrapper; prevent GCC IPA phase clones. */
+template <::vecops::matmul::Atom Atom, typename Case, typename Plan,
+          typename A, typename B,
+          typename CInput, typename COutput,
+          typename AccInput, typename AccOutput, typename Route>
+VECOPS_NOINLINE
+#if defined(COMPILER_GCC)
+__attribute__((noclone))
+#endif
+void exact_microkernel_phased(
+    const A& a, const B& b,
+    const CInput& c_input, COutput& c_output,
+    const AccInput& acc_input, AccOutput& acc_output, Route route,
+    nint_t logical_m, nint_t logical_n, nint_t logical_k,
+    nint_t m, nint_t n, nint_t active_m, nint_t active_n,
+    void* scratch) {
+  static_assert(Case::exact_blocks);
+  static_assert(!matmul_details::static_accumulator_route_v<Route>);
+  microkernel_routed<Atom, Case, Plan>(
+      a, b, c_input, c_output, acc_input, acc_output, route,
+      logical_m, logical_n, logical_k,
+      m, n, active_m, active_n, scratch);
+}
+
 } // namespace vecops::kernel::matmul_details::amx
 
 namespace vecops::kernel::matmul_details {
@@ -1852,7 +1947,9 @@ template <>
 struct Backend<matmul_implementation::AMX> {
   using ResourceRequirements = execution::details::ResourceSet<
       execution::details::x86::Tiles>;
-  template <::vecops::matmul::Atom, typename, typename, typename>
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B, typename CInput, typename COutput>
   using Catalog = amx::Catalog;
   static constexpr int ProblemRank = 2;
 
@@ -1860,12 +1957,17 @@ struct Backend<matmul_implementation::AMX> {
   /// for the layout); includes 63 bytes of caller-side alignment pad.
   static nint_t scratch_bytes() { return 8 * 1024 + 63; }
 
-  template <::vecops::matmul::Atom, typename Policy,
+  template <::vecops::matmul::Atom Atom, typename Policy,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
-            typename A, typename B>
+            typename A, typename B, typename CInput, typename COutput>
   using EffectivePolicy = std::conditional_t<
       std::same_as<Policy, matmul_policy::Automatic>,
-      kernel::loop::tile2d_policy::ExactCover, Policy>;
+      std::conditional_t<
+          amx::direct_row_major_input_v<CInput> &&
+              !amx::IsZeroTransform<typename CInput::Transform>::value,
+          kernel::loop::tile2d_policy::ExactCoverRuntimeUnmasked,
+          kernel::loop::tile2d_policy::ExactCover>,
+      Policy>;
 
   template <::vecops::matmul::Atom Atom, typename Policy, bool PackedB,
             execution::ExecutionScope Scope,
@@ -1942,6 +2044,76 @@ struct Backend<matmul_implementation::AMX> {
     matmul_details::run_tiles_region<Backend, Atom, Policy>(
         traversal_m, traversal_n, k, logical_m, logical_n,
         origin_m, origin_n, a, b, c_input, c_output, scratch);
+  }
+
+  /** Configured split-K leaf with runtime C endpoint routing. */
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B,
+            typename CInput, typename COutput,
+            typename AccInput, typename AccOutput, typename Route>
+  VECOPS_ALWAYS_INLINE static void run_configured_phased(
+      Scope&, M m, N n, K k,
+      const A& a, const B& b,
+      const CInput& c_input, COutput& c_output,
+      const AccInput& acc_input, AccOutput& acc_output,
+      Route route, void* scratch) {
+    static_assert(std::same_as<
+        typename Atom::KernelKind, ::vecops::matmul::AMXKernelKind>);
+    static_assert(execution::has_resource_v<
+        execution::details::x86::Tiles, Scope>);
+    static_assert(std::same_as<
+        typename std::remove_cvref_t<Scope>::ActiveConfiguration,
+        amx::Configuration>);
+    VECOPS_ASSERT(scratch != nullptr, "AMX matmul scratch is null");
+    matmul_details::run_tiles_phased<Backend, Atom, Policy>(
+        m, n, k, a, b, c_input, c_output,
+        acc_input, acc_output, route, scratch);
+  }
+
+  /**
+   * General split-K entry. Whole-problem special owners remain on the static
+   * unsplit API; a real cache-K loop shares this configured AMX traversal.
+   */
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B,
+            typename CInput, typename COutput,
+            typename AccInput, typename AccOutput, typename Route>
+  VECOPS_ALWAYS_INLINE static void run_phased(
+      Scope& scope, M m, N n, K k,
+      const A& a, const B& b,
+      const CInput& c_input, COutput& c_output,
+      const AccInput& acc_input, AccOutput& acc_output,
+      Route route, void* scratch) {
+    constexpr bool PackedB = amx::is_packed_access_v<
+        Atom, ::vecops::matmul::Operand::B, B>;
+    constexpr bool HasActiveConfiguration = [] {
+      if constexpr (requires {
+                      typename std::remove_cvref_t<Scope>::ActiveConfiguration;
+                    }) {
+        return std::same_as<
+            typename std::remove_cvref_t<Scope>::ActiveConfiguration,
+            amx::Configuration>;
+      } else {
+        return false;
+      }
+    }();
+    if constexpr (HasActiveConfiguration) {
+      run_configured_phased<Atom, Policy>(
+          scope, m, n, k, a, b, c_input, c_output,
+          acc_input, acc_output, route, scratch);
+    } else {
+      with_configuration<Atom, Policy, PackedB>(
+          scope, m, n, [&](auto& configured)
+              VECOPS_INLINE_LAMBDA_NOEXCEPT {
+            run_configured_phased<Atom, Policy>(
+                configured, m, n, k, a, b, c_input, c_output,
+                acc_input, acc_output, route, scratch);
+          });
+    }
   }
 
   /// Entry point, resolving the leaf in four tiers (first match wins):
@@ -2326,6 +2498,30 @@ struct Backend<matmul_implementation::AMX> {
     } else {
       amx::microkernel<Atom, Case, Plan>(
           a, b, c_input, c_output,
+          logical_m, logical_n, logical_k,
+          m, n, active_m, active_n, scratch);
+    }
+  }
+
+  template <::vecops::matmul::Atom Atom, typename Case, typename Plan,
+            typename A, typename B,
+            typename CInput, typename COutput,
+            typename AccInput, typename AccOutput, typename Route>
+  VECOPS_ALWAYS_INLINE static void run_case_phased(
+      const A& a, const B& b,
+      const CInput& c_input, COutput& c_output,
+      const AccInput& acc_input, AccOutput& acc_output, Route route,
+      nint_t logical_m, nint_t logical_n, nint_t logical_k,
+      nint_t m, nint_t n, nint_t active_m, nint_t active_n,
+      void* scratch) {
+    if constexpr (Case::exact_blocks) {
+      amx::exact_microkernel_phased<Atom, Case, Plan>(
+          a, b, c_input, c_output, acc_input, acc_output, route,
+          logical_m, logical_n, logical_k,
+          m, n, active_m, active_n, scratch);
+    } else {
+      amx::microkernel_routed<Atom, Case, Plan>(
+          a, b, c_input, c_output, acc_input, acc_output, route,
           logical_m, logical_n, logical_k,
           m, n, active_m, active_n, scratch);
     }

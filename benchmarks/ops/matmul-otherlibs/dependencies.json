@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "libraries": {
+    "OpenBLAS": {
+      "repository": "https://github.com/OpenMathLib/OpenBLAS.git",
+      "revision": "e0166008be8e466242aa76b2ff75ce3f0fbf574a",
+      "tag": "v0.3.34",
+      "required_options": ["BUILD_BFLOAT16=ON", "USE_THREAD=OFF"]
+    },
+    "oneDNN": {
+      "repository": "https://github.com/uxlfoundation/oneDNN.git",
+      "revision": "0e2a5bfeef1bfbffc3137464606540233086ce9b",
+      "tag": "v3.13",
+      "required_options": ["ONEDNN_CPU_RUNTIME=SEQ"]
+    },
+    "LIBXSMM": {
+      "repository": "https://github.com/libxsmm/libxsmm.git",
+      "revision": "3668d249637792dcc988414eb3d2a374033743df"
+    },
+    "Arm Compute Library": {
+      "repository": "https://github.com/ARM-software/ComputeLibrary.git",
+      "revision": "2a8ca9840a3112d12d6cc68e49e6c833f9759fd6"
+    },
+    "KUPL": {
+      "repository": "https://atomgit.com/kunpengcompute/kupl.git",
+      "revision": "bd7059eae348f1d77f73a9fbb1cadfe7a6405fb8"
+    }
+  },
+  "shape_sources": {
+    "vecops_matmul_bench": "benchmarks/ops/MatmulBenchCommon.h",
+    "alphafold3": {
+      "repository": "https://github.com/google-deepmind/alphafold3.git",
+      "revision": "c0f97eda2f1f482fd94d3a38bece18c7069b4a5c"
+    }
+  }
+}

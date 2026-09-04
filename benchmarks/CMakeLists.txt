@@ -4,6 +4,8 @@ add_compile_definitions(VECOPS_MATH_ASSUME_VALID_INPUTS)
 
 option(VECOPS_ENABLE_MATMUL_ORIENTATION_BENCHMARK
        "Build the focused compile-time matmul orientation benchmark" OFF)
+option(VECOPS_ENABLE_MATMUL_OTHERLIBS_BENCHMARKS
+       "Build the cross-library BF16 matmul comparison benchmarks" OFF)
 
 # Benchmark wrapper around the common sharding and architecture primitive.
 function(vecops_add_benchmark)
@@ -192,6 +194,10 @@ if(VECOPS_MATMUL_WEIGHT_REUSE_ARCH)
             VECOPS_WEIGHT_REUSE_PIPELINE=2
             VECOPS_WEIGHT_REUSE_RESULT_STEM="matmul_weight_reuse_quant"
     )
+endif()
+
+if(VECOPS_ENABLE_MATMUL_OTHERLIBS_BENCHMARKS)
+    add_subdirectory(ops/matmul-otherlibs)
 endif()
 
 vecops_add_benchmark(

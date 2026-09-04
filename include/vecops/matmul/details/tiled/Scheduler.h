@@ -67,6 +67,68 @@ struct Scheduler {
           c_output_access.commit();
         });
   }
+
+  /**
+   * Split-K form. Both original C and accumulator endpoints are bound once;
+   * Route selects which pair the backend uses without changing its template
+   * identity across first/middle/last K blocks.
+   */
+  template <execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            tensor::InputSpecLike ASpec, tensor::InputSpecLike BSpec,
+            tensor::InputSpecLike CInputSpec,
+            tensor::OutputSpecLike COutputSpec,
+            tensor::InputSpecLike AccInputSpec,
+            tensor::OutputSpecLike AccOutputSpec,
+            typename Route>
+  VECOPS_ALWAYS_INLINE static void run_phased(
+      Scope& scope, M m, N n, K k,
+      const ASpec& a, const BSpec& b,
+      const CInputSpec& c_input, const COutputSpec& c_output,
+      const AccInputSpec& acc_input, const AccOutputSpec& acc_output,
+      Route route, void* scratch) {
+    using APolicy = tensor::InputAccessPolicy<
+        ASpec::InputTensor::Ndim - 1, 1, tensor::AccessPlan::direct>;
+    using BPolicy = tensor::InputAccessPolicy<
+        BSpec::InputTensor::Ndim - 1, 1, tensor::AccessPlan::direct>;
+    using CInputPolicy = tensor::InputAccessPolicy<
+        CInputSpec::InputTensor::Ndim - 1, 1,
+        tensor::AccessPlan::direct>;
+    using COutputPolicy = tensor::OutputAccessPolicy<
+        COutputSpec::OutputTensor::Ndim - 1,
+        tensor::AccessPlan::direct>;
+    using AccInputPolicy = tensor::InputAccessPolicy<
+        AccInputSpec::InputTensor::Ndim - 1, 1,
+        tensor::AccessPlan::direct>;
+    using AccOutputPolicy = tensor::OutputAccessPolicy<
+        AccOutputSpec::OutputTensor::Ndim - 1,
+        tensor::AccessPlan::direct>;
+    kernel::with_operands(
+        scope,
+        tensor::operand(a, APolicy{}),
+        tensor::operand(b, BPolicy{}),
+        [&](auto& a_access, auto& b_access) VECOPS_KERNEL_LAMBDA {
+          kernel::with_operands(
+              scope,
+              tensor::operand(c_input, CInputPolicy{}),
+              tensor::operand(c_output, COutputPolicy{}),
+              tensor::operand(acc_input, AccInputPolicy{}),
+              tensor::operand(acc_output, AccOutputPolicy{}),
+              [&](auto& c_input_access, auto& c_output_access,
+                  auto& acc_input_access, auto& acc_output_access)
+                  VECOPS_KERNEL_LAMBDA {
+                kernel::matmul_bound_phased<AtomT, SchedulerPolicy>(
+                    scope, m, n, k, a_access, b_access,
+                    c_input_access, c_output_access,
+                    acc_input_access, acc_output_access,
+                    route, scratch, Implementation{});
+                // Both are direct sessions today; marking both complete keeps
+                // ownership correct while Route decides which one was written.
+                c_output_access.commit();
+                acc_output_access.commit();
+              });
+        });
+  }
 };
 
 } // namespace vecops::matmul::details

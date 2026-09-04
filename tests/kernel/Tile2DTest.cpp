@@ -75,6 +75,8 @@ struct IrregularProvider {
 using IrregularCatalog = hop::Tile2DGeneratedCatalog<
     IrregularProvider, hop::Tile2DSearchSpace<5, 5, 10>>;
 using ExactCover = hop::tile2d_policy::ExactCover;
+using ExactCoverRuntimeUnmasked =
+    hop::tile2d_policy::ExactCoverRuntimeUnmasked;
 
 static_assert(hop::tile2d_details::meta_exact_candidate_v<
               Area4Catalog, Const<35>, Const<53>, Const<16>, Const<16>>);
@@ -199,6 +201,22 @@ TEST(Tile2DTest, ExactCoverArea4Max3ExhaustivelyCoversDynamicSmallShapes) {
       }
     }
   }
+}
+
+TEST(Tile2DTest, ExactCoverRuntimeUnmaskedPromotesOnlyAlignedGrid) {
+  const auto aligned = run_and_check_cover<ExactCoverRuntimeUnmasked>(
+      Any{8}, Any{8}, cint<1>, cint<1>, Area4Max3Catalog{});
+  ASSERT_EQ(aligned.size(), 16u);
+  EXPECT_TRUE(std::all_of(aligned.begin(), aligned.end(), [](const Visit& v) {
+    return v.m_mask == hop::Tile2DMaskMode::unmasked &&
+        v.n_mask == hop::Tile2DMaskMode::unmasked;
+  }));
+  const auto ragged = run_and_check_cover<ExactCoverRuntimeUnmasked>(
+      Any{7}, Any{5}, cint<1>, cint<1>, Area4Max3Catalog{});
+  EXPECT_TRUE(std::any_of(ragged.begin(), ragged.end(), [](const Visit& v) {
+    return v.m_mask == hop::Tile2DMaskMode::masked ||
+        v.n_mask == hop::Tile2DMaskMode::masked;
+  }));
 }
 
 TEST(Tile2DTest, ExactCoverArea8ExhaustivelyCoversDynamicSmallShapes) {

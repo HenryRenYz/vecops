@@ -53,8 +53,11 @@
  * ## FastPacked plan
  *
  * `dispatch_plan` picks a `KernelPlan<FastPacked, PrefetchLargeWorkingSet>`
- * from the K-group count: for packed inputs with `k_groups >= 32` (or an
- * unconstrained K), the microkernel switches from per-group operand loads
+ * from the K-group count: BF16 problems whose N contract is at most 128 and
+ * whose K contract is in [32, 64) use a tuned 16-group crossover, while
+ * wider/longer BF16 and the other atoms retain 32 groups; an unconstrained K
+ * also selects the fast plan. Above that crossover
+ * the microkernel switches from per-group operand loads
  * (`load_operand`) to the direct packed-pointer loop
  * (`compute_packed_groups`), optionally with L2 look-ahead prefetching for
  * large BF16 working sets (`large_packed_prefetch_v`).
@@ -216,11 +219,15 @@ inline constexpr bool use_expanded_catalog_v = [] {
 /// Compile-time microkernel plan handed from `dispatch_plan` to `run_case`:
 /// `value` selects the fast packed-pointer loop (see the file header,
 /// FastPacked plan), `prefetch_large_working_set` enables look-ahead L2
-/// prefetching for large packed working sets.
-template <bool FastPacked, bool PrefetchLargeWorkingSet>
+/// prefetching for large packed working sets, and `share_tile_body` limits
+/// out-of-line sharing to the shallow-K specialization that otherwise causes
+/// pathological compiler expansion.
+template <bool FastPacked, bool PrefetchLargeWorkingSet,
+          bool ShareTileBody = false>
 struct KernelPlan : std::bool_constant<FastPacked> {
   static constexpr bool prefetch_large_working_set =
       PrefetchLargeWorkingSet;
+  static constexpr bool share_tile_body = ShareTileBody;
 };
 
 /**
@@ -2158,35 +2165,19 @@ consteval DispatchOwner select_dispatch_owner() {
  *         `large_packed_prefetch_v`); only compiled for the 2x2 schedule.
  */
 template <::vecops::matmul::Atom Atom, int NM, int NN,
-          bool PrefetchLargeWorkingSet,
-          typename A, typename B>
-VECOPS_ALWAYS_INLINE void compute_packed_groups(
-    const A& a, const B& b, nint_t m, nint_t n, nint_t logical_k) {
-  static_assert(is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A>);
-  static_assert(is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>);
+          bool PrefetchLargeWorkingSet>
+VECOPS_ALWAYS_INLINE void compute_packed_pointer_groups(
+    const typename Atom::TA* a0, const typename Atom::TA* a1,
+    const typename Atom::TA* a2, const typename Atom::TA* a3,
+    const typename Atom::TB* b0, const typename Atom::TB* b1,
+    const typename Atom::TB* b2, const typename Atom::TB* b3,
+    nint_t a_step, nint_t b_step, nint_t groups) {
   using TA = typename Atom::TA;
   using TB = typename Atom::TB;
   using ATag = vec::ScalableTag<TA, 0>;
   using BTag = vec::ScalableTag<TB, 0>;
-  constexpr nint_t KP = ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::A>::KPack;
-  const nint_t groups = ceil_div(logical_k, KP);
-  const nint_t a_step = static_cast<nint_t>(tensor::stride_value<1>(
-      a.spec().input_layout()));
-  const nint_t b_step = static_cast<nint_t>(tensor::stride_value<1>(
-      b.spec().input_layout()));
 
   if constexpr (NN == 1) {
-    const auto* b0 = packed_block_pointer<Atom, ::vecops::matmul::Operand::B, 0>(b, n);
-    const auto* a0 = packed_block_pointer<Atom, ::vecops::matmul::Operand::A, 0>(a, m);
-    auto* a1 = a0;
-    auto* a2 = a0;
-    auto* a3 = a0;
-    if constexpr (NM >= 2)
-      a1 = packed_block_pointer<Atom, ::vecops::matmul::Operand::A, 1>(a, m);
-    if constexpr (NM >= 3)
-      a2 = packed_block_pointer<Atom, ::vecops::matmul::Operand::A, 2>(a, m);
-    if constexpr (NM >= 4)
-      a3 = packed_block_pointer<Atom, ::vecops::matmul::Operand::A, 3>(a, m);
     for (nint_t kg = 0; kg < groups; ++kg) {
       const auto bv = vec::load(BTag{}, b0 + kg * b_step);
       mopa<Atom, 0>(vec::load(ATag{}, a0 + kg * a_step), bv);
@@ -2198,15 +2189,6 @@ VECOPS_ALWAYS_INLINE void compute_packed_groups(
         mopa<Atom, 3>(vec::load(ATag{}, a3 + kg * a_step), bv);
     }
   } else if constexpr (NM == 1) {
-    const auto* a0 = packed_block_pointer<Atom, ::vecops::matmul::Operand::A, 0>(a, m);
-    const auto* b0 = packed_block_pointer<Atom, ::vecops::matmul::Operand::B, 0>(b, n);
-    const auto* b1 = packed_block_pointer<Atom, ::vecops::matmul::Operand::B, 1>(b, n);
-    auto* b2 = b0;
-    auto* b3 = b0;
-    if constexpr (NN >= 3)
-      b2 = packed_block_pointer<Atom, ::vecops::matmul::Operand::B, 2>(b, n);
-    if constexpr (NN >= 4)
-      b3 = packed_block_pointer<Atom, ::vecops::matmul::Operand::B, 3>(b, n);
     for (nint_t kg = 0; kg < groups; ++kg) {
       const auto av = vec::load(ATag{}, a0 + kg * a_step);
       mopa<Atom, 0>(av, vec::load(BTag{}, b0 + kg * b_step));
@@ -2218,10 +2200,6 @@ VECOPS_ALWAYS_INLINE void compute_packed_groups(
     }
   } else {
     static_assert(NM == 2 && NN == 2);
-    const auto* a0 = packed_block_pointer<Atom, ::vecops::matmul::Operand::A, 0>(a, m);
-    const auto* a1 = packed_block_pointer<Atom, ::vecops::matmul::Operand::A, 1>(a, m);
-    const auto* b0 = packed_block_pointer<Atom, ::vecops::matmul::Operand::B, 0>(b, n);
-    const auto* b1 = packed_block_pointer<Atom, ::vecops::matmul::Operand::B, 1>(b, n);
 #if !defined(VECOPS_DISABLE_SME_LARGE_PACKED_PREFETCH)
       constexpr nint_t PrefetchDistance = 48;
       nint_t kg = 0;
@@ -2275,6 +2253,61 @@ VECOPS_ALWAYS_INLINE void compute_packed_groups(
         mopa<Atom, 3>(av1, bv1);
       }
   }
+}
+
+/**
+ * @brief Meta/layout adapter for the packed-pointer compute loop.
+ *
+ * Pointer discovery remains inline because it benefits from the packed
+ * layout's compile-time strides.  The K loop also remains inline for
+ * established long-K plans; the enclosing tile body controls selective
+ * out-of-line sharing for the additional shallow-K plan.
+ */
+template <::vecops::matmul::Atom Atom, int NM, int NN,
+          bool PrefetchLargeWorkingSet,
+          typename A, typename B>
+VECOPS_ALWAYS_INLINE void compute_packed_groups(
+    const A& a, const B& b, nint_t m, nint_t n, nint_t logical_k) {
+  static_assert(is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A>);
+  static_assert(is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>);
+  constexpr nint_t KP = ::vecops::matmul::packing_t<
+      Atom, ::vecops::matmul::Operand::A>::KPack;
+  const nint_t groups = ceil_div(logical_k, KP);
+  const nint_t a_step = static_cast<nint_t>(tensor::stride_value<1>(
+      a.spec().input_layout()));
+  const nint_t b_step = static_cast<nint_t>(tensor::stride_value<1>(
+      b.spec().input_layout()));
+
+  const auto* a0 = packed_block_pointer<
+      Atom, ::vecops::matmul::Operand::A, 0>(a, m);
+  const auto* b0 = packed_block_pointer<
+      Atom, ::vecops::matmul::Operand::B, 0>(b, n);
+  auto* a1 = a0;
+  auto* a2 = a0;
+  auto* a3 = a0;
+  auto* b1 = b0;
+  auto* b2 = b0;
+  auto* b3 = b0;
+  if constexpr (NM >= 2)
+    a1 = packed_block_pointer<
+        Atom, ::vecops::matmul::Operand::A, 1>(a, m);
+  if constexpr (NM >= 3)
+    a2 = packed_block_pointer<
+        Atom, ::vecops::matmul::Operand::A, 2>(a, m);
+  if constexpr (NM >= 4)
+    a3 = packed_block_pointer<
+        Atom, ::vecops::matmul::Operand::A, 3>(a, m);
+  if constexpr (NN >= 2)
+    b1 = packed_block_pointer<
+        Atom, ::vecops::matmul::Operand::B, 1>(b, n);
+  if constexpr (NN >= 3)
+    b2 = packed_block_pointer<
+        Atom, ::vecops::matmul::Operand::B, 2>(b, n);
+  if constexpr (NN >= 4)
+    b3 = packed_block_pointer<
+        Atom, ::vecops::matmul::Operand::B, 3>(b, n);
+  compute_packed_pointer_groups<Atom, NM, NN, PrefetchLargeWorkingSet>(
+      a0, a1, a2, a3, b0, b1, b2, b3, a_step, b_step, groups);
 }
 
 /// Horizontal ZA slice write/read through the ZA move intrinsics (used by
@@ -2538,6 +2571,56 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
   }
 }
 
+template <int Tile, bool FullM, bool FullN,
+          meta::ValueType ActiveM, meta::ValueType ActiveN,
+          typename CInput, typename AccInput, typename Route>
+VECOPS_ALWAYS_INLINE void initialize_c_tile_routed(
+    const CInput& c_input, const AccInput& acc_input, const Route& route,
+    nint_t m, nint_t n, ActiveM active_m, ActiveN active_n) {
+  static_assert(std::same_as<
+      typename CInput::ComputeType, typename AccInput::ComputeType>);
+  if constexpr (matmul_details::static_accumulator_route_v<Route>) {
+    if constexpr (Route::use_accumulator_input)
+      initialize_c_tile<Tile, FullM, FullN>(
+          acc_input, m, n, active_m, active_n);
+    else
+      initialize_c_tile<Tile, FullM, FullN>(
+          c_input, m, n, active_m, active_n);
+  } else {
+    if (route.use_accumulator_input)
+      initialize_c_tile<Tile, FullM, FullN>(
+          acc_input, m, n, active_m, active_n);
+    else
+      initialize_c_tile<Tile, FullM, FullN>(
+          c_input, m, n, active_m, active_n);
+  }
+}
+
+template <int Tile, bool FullM, bool FullN,
+          meta::ValueType ActiveM, meta::ValueType ActiveN,
+          typename COutput, typename AccOutput, typename Route>
+VECOPS_ALWAYS_INLINE void store_c_tile_routed(
+    COutput& c_output, AccOutput& acc_output, const Route& route,
+    nint_t m, nint_t n, ActiveM active_m, ActiveN active_n) {
+  static_assert(std::same_as<
+      typename COutput::ComputeType, typename AccOutput::ComputeType>);
+  if constexpr (matmul_details::static_accumulator_route_v<Route>) {
+    if constexpr (Route::write_accumulator_output)
+      store_c_tile<Tile, FullM, FullN>(
+          acc_output, m, n, active_m, active_n);
+    else
+      store_c_tile<Tile, FullM, FullN>(
+          c_output, m, n, active_m, active_n);
+  } else {
+    if (route.write_accumulator_output)
+      store_c_tile<Tile, FullM, FullN>(
+          acc_output, m, n, active_m, active_n);
+    else
+      store_c_tile<Tile, FullM, FullN>(
+          c_output, m, n, active_m, active_n);
+  }
+}
+
 /**
  * @brief Generic per-K-group compute: NM x NN outer products into ZA.
  *
@@ -2680,13 +2763,22 @@ VECOPS_ALWAYS_INLINE void compute_group(
  * - everything else (direct inputs, short-K packed, > 4 outputs):
  *   `compute_generic`.
  *
+ * The body is normally inlined.  `microkernel` below moves only the shallow-K
+ * specialization out of line: that additional plan otherwise clones the
+ * complete init/compute/store body into every scheduler, Meta, and epilogue
+ * variant, while established long-K paths measurably benefit from inlining.
+ *
  * @tparam Plan  KernelPlan selecting FastPacked and prefetch flags.
  */
 template <::vecops::matmul::Atom Atom, typename Plan, int NM, int NN,
           bool FullM, bool FullN, bool ExactBlocks,
-          typename A, typename B, typename CInput, typename COutput>
-VECOPS_ALWAYS_INLINE void microkernel(
-    const A& a, const B& b, const CInput& c_input, COutput& c_output,
+          typename A, typename B,
+          typename CInput, typename COutput,
+          typename AccInput, typename AccOutput, typename Route>
+VECOPS_ALWAYS_INLINE void microkernel_body_routed(
+    const A& a, const B& b,
+    const CInput& c_input, COutput& c_output,
+    const AccInput& acc_input, AccOutput& acc_output, Route route,
     nint_t logical_m, nint_t logical_n, nint_t logical_k,
     nint_t m, nint_t n, nint_t active_m, nint_t active_n) {
   constexpr int Outputs = NM * NN;
@@ -2700,11 +2792,11 @@ VECOPS_ALWAYS_INLINE void microkernel(
   const OperandInvariants<Atom, ::vecops::matmul::Operand::B, B> b_invariants(b);
   [&]<std::size_t... I>(std::index_sequence<I...>)
       VECOPS_INLINE_LAMBDA {
-    (initialize_c_tile<
+    (initialize_c_tile_routed<
          static_cast<int>(I),
          FullM || (ExactBlocks && I / NN + 1 < NM),
          FullN || (ExactBlocks && I % NN + 1 < NN)>(
-         c_input,
+         c_input, acc_input, route,
          m + static_cast<nint_t>(I / NN) * lanes,
          n + static_cast<nint_t>(I % NN) * lanes,
          tile_active_extent<
@@ -2781,11 +2873,11 @@ VECOPS_ALWAYS_INLINE void microkernel(
 
   [&]<std::size_t... I>(std::index_sequence<I...>)
       VECOPS_INLINE_LAMBDA {
-    (store_c_tile<
+    (store_c_tile_routed<
          static_cast<int>(I),
          FullM || (ExactBlocks && I / NN + 1 < NM),
          FullN || (ExactBlocks && I % NN + 1 < NN)>(
-         c_output,
+         c_output, acc_output, route,
          m + static_cast<nint_t>(I / NN) * lanes,
          n + static_cast<nint_t>(I % NN) * lanes,
          tile_active_extent<
@@ -2799,6 +2891,74 @@ VECOPS_ALWAYS_INLINE void microkernel(
              FullN || ExactBlocks,
              static_cast<int>(I % NN)>(active_n)), ...);
   }(std::make_index_sequence<Outputs>{});
+}
+
+template <::vecops::matmul::Atom Atom, typename Plan, int NM, int NN,
+          bool FullM, bool FullN, bool ExactBlocks,
+          typename A, typename B, typename CInput, typename COutput>
+VECOPS_ALWAYS_INLINE void microkernel_body(
+    const A& a, const B& b, const CInput& c_input, COutput& c_output,
+    nint_t logical_m, nint_t logical_n, nint_t logical_k,
+    nint_t m, nint_t n, nint_t active_m, nint_t active_n) {
+  microkernel_body_routed<
+      Atom, Plan, NM, NN, FullM, FullN, ExactBlocks>(
+      a, b, c_input, c_output, c_input, c_output,
+      matmul_details::UnsplitAccumulatorRoute{},
+      logical_m, logical_n, logical_k,
+      m, n, active_m, active_n);
+}
+
+template <::vecops::matmul::Atom Atom, typename Plan, int NM, int NN,
+          bool FullM, bool FullN, bool ExactBlocks,
+          typename A, typename B, typename CInput, typename COutput>
+VECOPS_NOINLINE void microkernel_shared(
+    const A& a, const B& b, const CInput& c_input, COutput& c_output,
+    nint_t logical_m, nint_t logical_n, nint_t logical_k,
+    nint_t m, nint_t n, nint_t active_m, nint_t active_n) {
+  microkernel_body<
+      Atom, Plan, NM, NN, FullM, FullN, ExactBlocks>(
+      a, b, c_input, c_output, logical_m, logical_n, logical_k,
+      m, n, active_m, active_n);
+}
+
+template <::vecops::matmul::Atom Atom, typename Plan, int NM, int NN,
+          bool FullM, bool FullN, bool ExactBlocks,
+          typename A, typename B, typename CInput, typename COutput>
+VECOPS_ALWAYS_INLINE void microkernel(
+    const A& a, const B& b, const CInput& c_input, COutput& c_output,
+    nint_t logical_m, nint_t logical_n, nint_t logical_k,
+    nint_t m, nint_t n, nint_t active_m, nint_t active_n) {
+  if constexpr (Plan::share_tile_body) {
+    microkernel_shared<
+        Atom, Plan, NM, NN, FullM, FullN, ExactBlocks>(
+        a, b, c_input, c_output, logical_m, logical_n, logical_k,
+        m, n, active_m, active_n);
+  } else {
+    microkernel_body<
+        Atom, Plan, NM, NN, FullM, FullN, ExactBlocks>(
+        a, b, c_input, c_output, logical_m, logical_n, logical_k,
+        m, n, active_m, active_n);
+  }
+}
+
+/** One ZA body shared by first/middle/last split-K phases. */
+template <::vecops::matmul::Atom Atom, typename Plan, int NM, int NN,
+          bool FullM, bool FullN, bool ExactBlocks,
+          typename A, typename B,
+          typename CInput, typename COutput,
+          typename AccInput, typename AccOutput, typename Route>
+VECOPS_ALWAYS_INLINE void microkernel_phased(
+    const A& a, const B& b,
+    const CInput& c_input, COutput& c_output,
+    const AccInput& acc_input, AccOutput& acc_output, Route route,
+    nint_t logical_m, nint_t logical_n, nint_t logical_k,
+    nint_t m, nint_t n, nint_t active_m, nint_t active_n) {
+  static_assert(!matmul_details::static_accumulator_route_v<Route>);
+  microkernel_body_routed<
+      Atom, Plan, NM, NN, FullM, FullN, ExactBlocks>(
+      a, b, c_input, c_output, acc_input, acc_output, route,
+      logical_m, logical_n, logical_k,
+      m, n, active_m, active_n);
 }
 
 } // namespace vecops::kernel::matmul_details::sme
@@ -2821,7 +2981,9 @@ struct Backend<matmul_implementation::SME> {
   using ResourceRequirements = execution::details::ResourceSet<>;
   /// Tile2D catalog: expanded (ZA64, up to 8 meta blocks) for unpacked F64
   /// problems, compact otherwise.
-  template <::vecops::matmul::Atom Atom, typename, typename A, typename B>
+  template <::vecops::matmul::Atom Atom, typename,
+            meta::ValueType, meta::ValueType, meta::ValueType,
+            typename A, typename B, typename, typename>
   using Catalog = sme::Catalog<sme::use_expanded_catalog_v<Atom, A, B>>;
   static constexpr int ProblemRank = 2;
 
@@ -2833,7 +2995,7 @@ struct Backend<matmul_implementation::SME> {
   /// `prefer_constraint_pruning_v`), ExactCover otherwise.
   template <::vecops::matmul::Atom Atom, typename Policy,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
-            typename A, typename B>
+            typename A, typename B, typename, typename>
   using EffectivePolicy = std::conditional_t<
       std::same_as<Policy, matmul_policy::Automatic>,
       std::conditional_t<
@@ -3213,6 +3375,53 @@ struct Backend<matmul_implementation::SME> {
         });
   }
 
+  /** Generic-Tiler split-K entry with one runtime C route type. */
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            execution::ExecutionScope Scope,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B,
+            typename CInput, typename COutput,
+            typename AccInput, typename AccOutput, typename Route>
+  VECOPS_ALWAYS_INLINE static void run_phased(
+      Scope& scope, M m, N n, K k,
+      const A& a, const B& b,
+      const CInput& c_input, COutput& c_output,
+      const AccInput& acc_input, AccOutput& acc_output,
+      Route route, void* scratch) {
+    static_assert(std::same_as<typename Atom::KernelKind,
+                               ::vecops::matmul::SMEKernelKind>);
+    scope.with_resources(
+        execution::details::arm::StreamingZARegion{},
+        [&](auto& active) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          if constexpr (
+              sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
+              sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>) {
+            run_tiles_phased_shared<Atom, Policy>(
+                m, n, k, a, b, c_input, c_output,
+                acc_input, acc_output, route, scratch);
+          } else {
+            using Resources = typename std::remove_cvref_t<
+                decltype(active)>::ActiveResources;
+            auto active_a = tensor::rebind_active_resources<Resources>(a);
+            auto active_b = tensor::rebind_active_resources<Resources>(b);
+            auto active_c_input =
+                tensor::rebind_active_resources<Resources>(c_input);
+            auto active_c_output =
+                tensor::rebind_active_resources<Resources>(c_output);
+            auto active_acc_input =
+                tensor::rebind_active_resources<Resources>(acc_input);
+            auto active_acc_output =
+                tensor::rebind_active_resources<Resources>(acc_output);
+            run_tiles_phased_shared<Atom, Policy>(
+                m, n, k, active_a, active_b,
+                active_c_input, active_c_output,
+                active_acc_input, active_acc_output, route, scratch);
+            active_c_output.commit();
+            active_acc_output.commit();
+          }
+        });
+  }
+
   /**
    * @brief Resolve the compile-time kernel plan for one traversal.
    *
@@ -3220,11 +3429,10 @@ struct Backend<matmul_implementation::SME> {
    * FastPacked from the K-group count (`ceil_div(k, KPack)`, kept as a
    * Meta value so provenance survives):
    *
-   * - constant group count: FastPacked iff `k_groups >= 32` -- the
-   *   threshold below which the direct-pointer loop no longer pays for its
-   *   instantiation;
-   * - upper bound < 32: provably slow-K, generic;
-   * - lower bound >= 32: provably long-K, fast;
+ * - BF16 with N <= 128 and 32 <= K < 64 uses 16 groups, calibrated by the
+ *   A08 shallow-K batch probe without changing established long-K paths;
+   * - wider BF16 and other atoms retain the conservative 32-group crossover;
+   * - a constant/bounded group count is compared with that atom threshold;
    * - unconstrained: fast (see the tuning comment in place).
    */
   template <::vecops::matmul::Atom Atom, typename A, typename B,
@@ -3238,25 +3446,34 @@ struct Backend<matmul_implementation::SME> {
         sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
         sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B> &&
         sme::large_packed_prefetch_v<Atom, MV, NV, KV>;
+    constexpr bool ShallowBF16 = std::same_as<
+        Atom, ::vecops::matmul::SME_BF16F32> &&
+        meta::upper_bound_at_most_v<NV, 128> &&
+        meta::lower_bound_at_least_v<KV, 32> &&
+        meta::upper_bound_at_most_v<KV, 63>;
     auto invoke = [&]<bool FastPacked>() VECOPS_INLINE_LAMBDA_NOEXCEPT {
       std::forward<Fn>(fn).template operator()<
-          sme::KernelPlan<FastPacked, PrefetchLargeWorkingSet>>();
+          sme::KernelPlan<
+              FastPacked, PrefetchLargeWorkingSet,
+              FastPacked && ShallowBF16>>();
     };
     if constexpr (
         sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
         sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>) {
+      constexpr nint_t FastPackedKGroups = ShallowBF16 ? 16 : 32;
       constexpr nint_t KP = ::vecops::matmul::packing_t<
           Atom, ::vecops::matmul::Operand::A>::KPack;
       const auto k_groups = ceil_div(k, meta::cint<KP>);
       if constexpr (decltype(k_groups)::is_const) {
-        invoke.template operator()<decltype(k_groups)::value >= 32>();
+        invoke.template operator()<
+            decltype(k_groups)::value >= FastPackedKGroups>();
       } else if constexpr (
           meta::has_upper_bound_v<decltype(k_groups)> &&
-          meta::upper_bound_v<decltype(k_groups)> < 32) {
+          meta::upper_bound_v<decltype(k_groups)> < FastPackedKGroups) {
         invoke.template operator()<false>();
       } else if constexpr (
           meta::has_lower_bound_v<decltype(k_groups)> &&
-          meta::lower_bound_v<decltype(k_groups)> >= 32) {
+          meta::lower_bound_v<decltype(k_groups)> >= FastPackedKGroups) {
         invoke.template operator()<true>();
       } else {
         // A single direct packed-pointer loop is faster overall for an
@@ -3283,6 +3500,50 @@ struct Backend<matmul_implementation::SME> {
         Case::n_mask == kernel::loop::Tile2DMaskMode::unmasked,
         Case::exact_blocks>(
             a, b, c_input, c_output,
+            logical_m, logical_n, logical_k,
+            m, n, active_m, active_n);
+  }
+
+  /**
+   * One outlined split-K traversal per MC x NC x KC block.  The dynamic route
+   * keeps first/middle/last in one function body, while outlining here rather
+   * than at every ZA microkernel call lets the scheduler inline its selected
+   * cases and avoids a call/return for every register tile.
+   */
+  template <::vecops::matmul::Atom Atom, typename Policy,
+            meta::ValueType M, meta::ValueType N, meta::ValueType K,
+            typename A, typename B,
+            typename CInput, typename COutput,
+            typename AccInput, typename AccOutput, typename Route>
+  VECOPS_NOINLINE static void run_tiles_phased_shared(
+      M m, N n, K k,
+      const A& a, const B& b,
+      const CInput& c_input, COutput& c_output,
+      const AccInput& acc_input, AccOutput& acc_output,
+      Route route, void* scratch) {
+    static_assert(!matmul_details::static_accumulator_route_v<Route>);
+    matmul_details::run_tiles_phased<Backend, Atom, Policy>(
+        m, n, k, a, b, c_input, c_output,
+        acc_input, acc_output, route, scratch);
+  }
+
+  template <::vecops::matmul::Atom Atom, typename Case, typename Plan,
+            typename A, typename B,
+            typename CInput, typename COutput,
+            typename AccInput, typename AccOutput, typename Route>
+  VECOPS_ALWAYS_INLINE static void run_case_phased(
+      const A& a, const B& b,
+      const CInput& c_input, COutput& c_output,
+      const AccInput& acc_input, AccOutput& acc_output, Route route,
+      nint_t logical_m, nint_t logical_n, nint_t logical_k,
+      nint_t m, nint_t n, nint_t active_m, nint_t active_n,
+      void*) {
+    sme::microkernel_phased<
+        Atom, Plan, Case::a, Case::b,
+        Case::m_mask == kernel::loop::Tile2DMaskMode::unmasked,
+        Case::n_mask == kernel::loop::Tile2DMaskMode::unmasked,
+        Case::exact_blocks>(
+            a, b, c_input, c_output, acc_input, acc_output, route,
             logical_m, logical_n, logical_k,
             m, n, active_m, active_n);
   }

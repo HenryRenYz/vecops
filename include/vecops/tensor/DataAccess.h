@@ -3141,7 +3141,13 @@ private:
 #endif
 };
 
-/** Fully prepared canonical ComputeType input materialization. */
+/**
+ * Fully prepared canonical ComputeType input materialization.
+ *
+ * Its auxiliary tensor is native NoTransform storage, so raw_data() and
+ * raw_strides() deliberately expose it to matrix/tile instructions without a
+ * second materialization pass.
+ */
 template <typename AuxSpec, typename CachePolicy>
 class CanonicalMaterializedInputDataAccess {
 public:
@@ -3181,6 +3187,16 @@ public:
 
   const AuxSpec& spec() const { return auxiliary_; }
   const CachePolicy& policy() const { return policy_; }
+  VECOPS_ALWAYS_INLINE const MemoryElement* raw_data() const {
+    return auxiliary_.tensor().data();
+  }
+  VECOPS_ALWAYS_INLINE Coord<Rank> raw_strides() const {
+    Coord<Rank> result{};
+    VECOPS_UNROLL
+    for (int d = 0; d < Rank; ++d)
+      result[d] = auxiliary_.input_layout().strides()[d];
+    return result;
+  }
 
 private:
   AuxSpec auxiliary_;
@@ -3424,13 +3440,17 @@ private:
  *
  * It intentionally has no `commit()`: slicing must not duplicate or transfer
  * write-back responsibility. The owning materialized output session must
- * outlive all borrowed views and remains the sole commit authority.
+ * outlive all borrowed views and remains the sole commit authority. Raw
+ * pointer/stride access describes the borrowed Spec itself; consumers must
+ * still require NoTransform and matching memory/compute types before bypassing
+ * load/store.
  */
 template <typename Spec, typename Policy>
 class BorrowedDataAccess {
 public:
   using ComputeType = typename Spec::ComputeType;
   using MemoryElement = typename Spec::MemoryElement;
+  using Transform = typename Spec::TransformType;
   static constexpr bool IsInput = Spec::is_input;
   static constexpr int Rank = [] {
     if constexpr (IsInput) return Spec::InputTensor::Ndim;
@@ -3521,6 +3541,20 @@ public:
 
   const Spec& spec() const { return spec_; }
   const Policy& policy() const { return policy_; }
+  VECOPS_ALWAYS_INLINE decltype(auto) raw_data() const {
+    return spec_.tensor().data();
+  }
+  VECOPS_ALWAYS_INLINE Coord<Rank> raw_strides() const {
+    Coord<Rank> result{};
+    VECOPS_UNROLL
+    for (int d = 0; d < Rank; ++d) {
+      if constexpr (IsInput)
+        result[d] = spec_.input_layout().strides()[d];
+      else
+        result[d] = spec_.output_layout().strides()[d];
+    }
+    return result;
+  }
 
 private:
   Spec spec_;
@@ -3692,6 +3726,10 @@ concept CommittableBoundOutputAccess =
  * The session is move-only. Moving transfers commit responsibility. `commit()`
  * is idempotent, but destruction of an uncommitted owning session triggers a
  * debug assertion and never performs implicit write-back.
+ * The raw pointer/stride surface addresses the auxiliary hot storage, never
+ * the original Tensor. It is a native ComputeType/NoTransform target only for
+ * `materialize_before_transform`; `commit()` still owns the original
+ * epilogue/conversion.
  *
  * @tparam Scope Execution scope copied from operand binding. It allows commit
  *         to reuse an enclosing hardware mode when layout write-back invokes
@@ -3706,7 +3744,12 @@ class MaterializedOutputDataAccess {
 
 public:
   using ComputeType = typename OriginalSpec::ComputeType;
-  using MemoryElement = typename OriginalSpec::MemoryElement;
+  // The hot session addresses auxiliary storage. For before-transform
+  // materialization this is native ComputeType/NoTransform storage and may be
+  // consumed directly by matrix instructions; the original conversion stays
+  // owned by commit().
+  using MemoryElement = typename AuxSpec::MemoryElement;
+  using Transform = typename AuxSpec::TransformType;
   static constexpr int Rank = OriginalSpec::OutputTensor::Ndim;
 
   VECOPS_ALWAYS_INLINE MaterializedOutputDataAccess(
@@ -3816,6 +3859,16 @@ public:
   const AuxSpec& auxiliary_spec() const { return auxiliary_; }
   const AuxSpec& spec() const { return auxiliary_; }
   const Policy& policy() const { return policy_; }
+  VECOPS_ALWAYS_INLINE MemoryElement* raw_data() const {
+    return auxiliary_.tensor().data();
+  }
+  VECOPS_ALWAYS_INLINE Coord<Rank> raw_strides() const {
+    Coord<Rank> result{};
+    VECOPS_UNROLL
+    for (int d = 0; d < Rank; ++d)
+      result[d] = auxiliary_.output_layout().strides()[d];
+    return result;
+  }
 
 private:
   void commit_before() {
