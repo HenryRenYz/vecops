@@ -41,6 +41,10 @@ def main() -> int:
 
     for row in rows:
         identity = f"{row['host']}/{row['library']}/{row['case']}/{row['op']}"
+        if row["status"] not in ("ok", "timeout", "unsupported_arch"):
+            errors.append(
+                f"unexpected terminal status {row['status']!r}: {identity}: "
+                f"{row['error']}")
         if row["status"] == "ok":
             if row["phase"] != "raw_e2e":
                 errors.append(f"non-raw formal row: {identity}")

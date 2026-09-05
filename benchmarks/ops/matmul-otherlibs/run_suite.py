@@ -89,6 +89,13 @@ def wrapped_command(
     return command
 
 
+def regex_literal(text: str) -> str:
+    # Google Benchmark uses std::regex. Python's re.escape() also escapes '-'
+    # and several punctuation characters which are invalid escapes in that
+    # grammar outside a character class.
+    return re.sub(r"([.\\^$*+?{}\[\]|()])", r"\\\1", text)
+
+
 def run_isolated_cases(
     executable: Path, destination: Path, benchmark_filter: str,
     environment: dict[str, str], cpu: int | None, disable_aslr: bool,
@@ -117,7 +124,7 @@ def run_isolated_cases(
                   flush=True)
         else:
             command = wrapped_command(
-                executable, f"^{re.escape(name)}$", case_json,
+                executable, f"^{regex_literal(name)}$", case_json,
                 cpu, disable_aslr)
             print(f"RUN {executable.name} case {index + 1}/{len(names)}",
                   flush=True)
