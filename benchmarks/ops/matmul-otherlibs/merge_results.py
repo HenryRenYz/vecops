@@ -104,8 +104,12 @@ def load_rows(path: Path, args: argparse.Namespace) -> list[dict[str, Any]]:
             f"version_{row['library'].lower().replace('-', '_')}", "")
         row["source_json"] = str(path)
         row["implementation"] = str(sample.get("label", ""))
-        row["status"] = "skipped" if sample.get("error_occurred") else "ok"
         row["error"] = str(sample.get("error_message", ""))
+        if row["error"].startswith("timeout after "):
+            row["status"] = "timeout"
+        else:
+            row["status"] = (
+                "skipped" if sample.get("error_occurred") else "ok")
         for counter in (
             "native_batch", "packing_included", "weights_prepacked",
             "call_multiplicity", "selected_kc", "selected_outer_block",

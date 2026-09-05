@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -40,6 +41,124 @@ def output(command: list[str], cwd: Path | None = None) -> str:
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout.strip()
 
 
+def reusable_json(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        return bool(document.get("benchmarks"))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
+
+
+def error_document(name: str, message: str) -> dict[str, object]:
+    return {
+        "context": {},
+        "benchmarks": [{
+            "name": name,
+            "run_name": name,
+            "run_type": "iteration",
+            "repetitions": 1,
+            "repetition_index": 0,
+            "threads": 1,
+            "iterations": 0,
+            "real_time": 0.0,
+            "cpu_time": 0.0,
+            "time_unit": "ns",
+            "error_occurred": True,
+            "error_message": message,
+        }],
+    }
+
+
+def wrapped_command(
+    executable: Path, benchmark_filter: str, destination: Path,
+    cpu: int | None, disable_aslr: bool,
+) -> list[str]:
+    command = [str(executable), f"--benchmark_filter={benchmark_filter}",
+               f"--benchmark_out={destination}",
+               "--benchmark_out_format=json", "--benchmark_color=false"]
+    if cpu is not None:
+        if shutil.which("taskset") is None:
+            raise SystemExit("--cpu requires taskset")
+        command = ["taskset", "-c", str(cpu), *command]
+    if disable_aslr:
+        if shutil.which("setarch") is None:
+            raise SystemExit("--disable-aslr requires setarch")
+        command = ["setarch", platform.machine(), "-R", *command]
+    return command
+
+
+def run_isolated_cases(
+    executable: Path, destination: Path, benchmark_filter: str,
+    environment: dict[str, str], cpu: int | None, disable_aslr: bool,
+    timeout_seconds: float, resume: bool,
+) -> None:
+    listed = subprocess.run(
+        [str(executable), "--benchmark_list_tests"], env=environment,
+        check=True, text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT).stdout.splitlines()
+    selector = re.compile(benchmark_filter)
+    names = [name.strip() for name in listed
+             if name.strip().startswith("MatmulOtherlibs/")
+             and selector.search(name.strip())]
+    if not names:
+        raise SystemExit(
+            f"filter {benchmark_filter!r} selects no cases in {executable}")
+
+    case_dir = destination.parent / f"{destination.stem}.cases"
+    case_dir.mkdir(parents=True, exist_ok=True)
+    documents: list[dict[str, object]] = []
+    for index, name in enumerate(names):
+        case_json = case_dir / f"{index:04d}.json"
+        case_log = case_dir / f"{index:04d}.log"
+        if resume and reusable_json(case_json):
+            print(f"REUSE {executable.name} case {index + 1}/{len(names)}",
+                  flush=True)
+        else:
+            command = wrapped_command(
+                executable, f"^{re.escape(name)}$", case_json,
+                cpu, disable_aslr)
+            print(f"RUN {executable.name} case {index + 1}/{len(names)}",
+                  flush=True)
+            with case_log.open("w", encoding="utf-8") as log:
+                try:
+                    result = subprocess.run(
+                        command, env=environment, text=True, stdout=log,
+                        stderr=subprocess.STDOUT, timeout=timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    message = f"timeout after {timeout_seconds:g} seconds"
+                    log.write(f"\n{message}\n")
+                    case_json.write_text(
+                        json.dumps(error_document(name, message), indent=2) +
+                        "\n", encoding="utf-8")
+                    print(f"TIMEOUT {executable.name} case "
+                          f"{index + 1}/{len(names)}", flush=True)
+                else:
+                    if result.returncode != 0 or not reusable_json(case_json):
+                        message = (f"benchmark process failed with exit code "
+                                   f"{result.returncode}")
+                        case_json.write_text(
+                            json.dumps(error_document(name, message), indent=2) +
+                            "\n", encoding="utf-8")
+                        print(f"ERROR {executable.name} case "
+                              f"{index + 1}/{len(names)}: {message}",
+                              flush=True)
+                    else:
+                        print(f"DONE {executable.name} case "
+                              f"{index + 1}/{len(names)}", flush=True)
+        documents.append(json.loads(case_json.read_text(encoding="utf-8")))
+
+    context = next((document.get("context", {}) for document in documents
+                    if document.get("context")), {})
+    benchmarks = [entry for document in documents
+                  for entry in document.get("benchmarks", [])]
+    destination.write_text(json.dumps({
+        "context": context,
+        "benchmarks": benchmarks,
+    }, indent=2) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", required=True, type=Path)
@@ -59,6 +178,10 @@ def main() -> int:
     parser.add_argument(
         "--resume", action="store_true",
         help="reuse an existing non-empty benchmark JSON for this run ID")
+    parser.add_argument(
+        "--case-timeout-seconds", type=float, default=0.0,
+        help="isolate each registered row and terminate it after this many "
+             "wall-clock seconds; zero disables isolation")
     args = parser.parse_args()
 
     args.build_dir = args.build_dir.resolve()
@@ -79,29 +202,26 @@ def main() -> int:
                 raise SystemExit(f"missing benchmark executable: {executable}")
             stem = binary_name.removesuffix("-Native")
             destination = args.output_dir / f"{args.host}_{stem}_{run_id}.json"
-            if args.resume and destination.is_file():
-                try:
-                    previous = json.loads(destination.read_text(encoding="utf-8"))
-                    reusable = bool(previous.get("benchmarks"))
-                except (OSError, json.JSONDecodeError, AttributeError):
-                    reusable = False
-                if reusable:
-                    print(f"REUSE {binary_name}", flush=True)
-                    json_files.append(destination)
-                    continue
-            command = [str(executable), f"--benchmark_filter={args.filter}",
-                       f"--benchmark_out={destination}",
-                       "--benchmark_out_format=json", "--benchmark_color=false"]
-            if args.cpu is not None:
-                if shutil.which("taskset") is None:
-                    raise SystemExit("--cpu requires taskset")
-                command = ["taskset", "-c", str(args.cpu), *command]
-            if args.disable_aslr:
-                if shutil.which("setarch") is None:
-                    raise SystemExit("--disable-aslr requires setarch")
-                command = ["setarch", platform.machine(), "-R", *command]
-            print("RUN", " ".join(command), flush=True)
-            if not args.dry_run:
+            if args.resume and reusable_json(destination):
+                print(f"REUSE {binary_name}", flush=True)
+                json_files.append(destination)
+                continue
+            if args.dry_run:
+                command = wrapped_command(
+                    executable, args.filter, destination,
+                    args.cpu, args.disable_aslr)
+                print("RUN", " ".join(command), flush=True)
+            elif args.case_timeout_seconds > 0:
+                run_isolated_cases(
+                    executable, destination, args.filter, environment,
+                    args.cpu, args.disable_aslr,
+                    args.case_timeout_seconds, args.resume)
+                json_files.append(destination)
+            else:
+                command = wrapped_command(
+                    executable, args.filter, destination,
+                    args.cpu, args.disable_aslr)
+                print("RUN", " ".join(command), flush=True)
                 log_path = destination.with_suffix(".log")
                 with log_path.open("w", encoding="utf-8") as log:
                     result = subprocess.run(

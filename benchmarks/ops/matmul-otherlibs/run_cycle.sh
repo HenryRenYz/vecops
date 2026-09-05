@@ -19,7 +19,7 @@ remote_root="${VECOPS_ARM_ROOT:-vecops-neo-matmul-otherlibs}"
 remote_build="${VECOPS_ARM_BUILD:-cmake-build-matmul-otherlibs-arm}"
 x86_cpu="${VECOPS_X86_CPU:-4}"
 arm_cpu="${VECOPS_ARM_CPU:-4}"
-arm_openblas_repetitions="${VECOPS_ARM_OPENBLAS_REPETITIONS:-1}"
+case_timeout_seconds="${VECOPS_BENCH_CASE_TIMEOUT_SECONDS:-30}"
 disable_aslr="${VECOPS_DISABLE_ASLR:-0}"
 output_root="${VECOPS_CYCLE_OUTPUT:-${script_dir}/results/raw/cycles/${run_id}}"
 baseline="${VECOPS_BENCH_BASELINE:-${script_dir}/results/benchmark-results-current-measured-20260904.csv}"
@@ -69,6 +69,7 @@ else
     --build-dir "${x86_build}" --output-dir "${output_root}/x86" \
     --host local-x86 --cpu "${x86_cpu}" --run-id "${run_id}" \
     --filter "${x86_filter}" --providers vecops openblas onednn libxsmm \
+    --case-timeout-seconds "${case_timeout_seconds}" \
     "${aslr_args[@]}" \
     --compiler "gcc" --backend-isa "AVX-512+AMX-BF16"
 fi
@@ -87,7 +88,7 @@ else
   printf -v remote_command 'bash -s -- %q %q %q %q %q %q %q %q' \
     "${remote_root}" "${remote_build}" "${arm_cpu}" "${run_id}" \
     "${arm_vecops_filter}" "${arm_peer_filter}" "${disable_aslr}" \
-    "${arm_openblas_repetitions}"
+    "${case_timeout_seconds}"
   for target in "${arm_targets[@]}"; do
     printf -v quoted_target '%q' "${target}"
     remote_command+=" ${quoted_target}"
@@ -102,7 +103,7 @@ run_id="$1"; shift
 vecops_filter="$1"; shift
 peer_filter="$1"; shift
 disable_aslr="$1"; shift
-openblas_repetitions="$1"; shift
+case_timeout_seconds="$1"; shift
 aslr_args=()
 if [[ "${disable_aslr}" == "1" ]]; then
   aslr_args+=(--disable-aslr)
@@ -121,15 +122,16 @@ python3 benchmarks/ops/matmul-otherlibs/run_suite.py \
   --output-dir "benchmarks/ops/matmul-otherlibs/results/raw/cycles/${run_id}/arm-vecops" \
   --host 920f-4 --cpu "${arm_cpu}" --run-id "${run_id}-vecops" \
   --filter "${vecops_filter}" --providers vecops --resume \
+  --case-timeout-seconds "${case_timeout_seconds}" \
   "${aslr_args[@]}" \
   --compiler "BiSheng clang" --backend-isa "SVE/SVE2/SME; VL=SVL=512b"
-export VECOPS_OPENBLAS_REPETITIONS="${openblas_repetitions}"
 python3 benchmarks/ops/matmul-otherlibs/run_suite.py \
   --build-dir "${remote_build}" \
   --output-dir "benchmarks/ops/matmul-otherlibs/results/raw/cycles/${run_id}/arm-peers" \
   --host 920f-4 --cpu "${arm_cpu}" --run-id "${run_id}-peers" \
   --filter "${peer_filter}" \
   --providers openblas onednn libxsmm acl kupl --resume \
+  --case-timeout-seconds "${case_timeout_seconds}" \
   "${aslr_args[@]}" \
   --compiler "BiSheng clang" --backend-isa "SVE/SVE2/SME; VL=SVL=512b"
 python3 benchmarks/ops/matmul-otherlibs/combine_csv.py \
