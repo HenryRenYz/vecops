@@ -2,13 +2,33 @@
 
 #include <cblas.h>
 
+#include <charconv>
+#include <cstdlib>
 #include <cstdint>
+#include <stdexcept>
+#include <string_view>
 #include <type_traits>
 
 namespace vecops::bench::matmul_otherlibs {
 
 static_assert(sizeof(bfloat16_t) == sizeof(bfloat16));
 static_assert(std::is_trivially_copyable_v<bfloat16_t>);
+
+int openblas_repetitions() {
+  constexpr int DefaultRepetitions = 7;
+  const char* text = std::getenv("VECOPS_OPENBLAS_REPETITIONS");
+  if (text == nullptr || *text == '\0') return DefaultRepetitions;
+  int repetitions = 0;
+  const std::string_view value{text};
+  const auto [end, error] =
+      std::from_chars(value.data(), value.data() + value.size(), repetitions);
+  if (error != std::errc{} || end != value.data() + value.size() ||
+      repetitions <= 0) {
+    throw std::runtime_error(
+        "VECOPS_OPENBLAS_REPETITIONS must be a positive integer");
+  }
+  return repetitions;
+}
 
 void run_openblas(const Case& c, Buffers& buffers, Operation op) {
   const float beta = op == Operation::GemmAdd ? 1.0f : 0.0f;
@@ -99,6 +119,6 @@ int main(int argc, char** argv) {
             static_cast<double>(c.k + c.k % 2) / static_cast<double>(c.k));
 #endif
         state.SetLabel(VECOPS_OPENBLAS_BUILD_TARGET);
-      });
+      }, 0.1, openblas_repetitions());
   return run_registered_benchmarks(argc, argv, "matmul_otherlibs_openblas");
 }

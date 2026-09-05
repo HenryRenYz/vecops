@@ -19,6 +19,7 @@ remote_root="${VECOPS_ARM_ROOT:-vecops-neo-matmul-otherlibs}"
 remote_build="${VECOPS_ARM_BUILD:-cmake-build-matmul-otherlibs-arm}"
 x86_cpu="${VECOPS_X86_CPU:-4}"
 arm_cpu="${VECOPS_ARM_CPU:-4}"
+arm_openblas_repetitions="${VECOPS_ARM_OPENBLAS_REPETITIONS:-1}"
 disable_aslr="${VECOPS_DISABLE_ASLR:-0}"
 output_root="${VECOPS_CYCLE_OUTPUT:-${script_dir}/results/raw/cycles/${run_id}}"
 baseline="${VECOPS_BENCH_BASELINE:-${script_dir}/results/benchmark-results-current-measured-20260904.csv}"
@@ -83,9 +84,10 @@ else
 
   # OpenSSH joins its command arguments into one remote-shell string. Build
   # that string with %q so regex metacharacters remain one positional arg.
-  printf -v remote_command 'bash -s -- %q %q %q %q %q %q %q' \
+  printf -v remote_command 'bash -s -- %q %q %q %q %q %q %q %q' \
     "${remote_root}" "${remote_build}" "${arm_cpu}" "${run_id}" \
-    "${arm_vecops_filter}" "${arm_peer_filter}" "${disable_aslr}"
+    "${arm_vecops_filter}" "${arm_peer_filter}" "${disable_aslr}" \
+    "${arm_openblas_repetitions}"
   for target in "${arm_targets[@]}"; do
     printf -v quoted_target '%q' "${target}"
     remote_command+=" ${quoted_target}"
@@ -100,6 +102,7 @@ run_id="$1"; shift
 vecops_filter="$1"; shift
 peer_filter="$1"; shift
 disable_aslr="$1"; shift
+openblas_repetitions="$1"; shift
 aslr_args=()
 if [[ "${disable_aslr}" == "1" ]]; then
   aslr_args+=(--disable-aslr)
@@ -120,6 +123,7 @@ python3 benchmarks/ops/matmul-otherlibs/run_suite.py \
   --filter "${vecops_filter}" --providers vecops --resume \
   "${aslr_args[@]}" \
   --compiler "BiSheng clang" --backend-isa "SVE/SVE2/SME; VL=SVL=512b"
+export VECOPS_OPENBLAS_REPETITIONS="${openblas_repetitions}"
 python3 benchmarks/ops/matmul-otherlibs/run_suite.py \
   --build-dir "${remote_build}" \
   --output-dir "benchmarks/ops/matmul-otherlibs/results/raw/cycles/${run_id}/arm-peers" \

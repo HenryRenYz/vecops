@@ -67,10 +67,18 @@ separate diagnostic probes and is never mixed into formal speedups.
 columns.
 
 Every benchmark uses one OS thread, is pinned to one core by `run_suite.py`,
-warms up once for correctness, then defaults to seven repetitions (the recorded
-ARM snapshot uses three).  The CSV
+warms up once for correctness, then defaults to seven repetitions. The CSV
 contains median, p10, p90, CV, logical GFLOP/s, and a same-phase speedup against
 OpenBLAS when such a baseline exists.
+
+The exhaustive ARM OpenBLAS pass is the deliberate exception to the default
+repetition count. Its BF16 path needs roughly six hours for seven timed passes
+over this catalog, so `run_cycle.sh` defaults it to one timed repetition via
+`VECOPS_OPENBLAS_REPETITIONS=1`, while retaining the separate correctness
+warm-up for every semantic case. Override `VECOPS_ARM_OPENBLAS_REPETITIONS` to
+request more samples. The repetition count is embedded in every benchmark name
+and raw JSON; a one-sample row has lower statistical confidence but uses the
+same raw/e2e data-preparation boundary.
 
 Thread limiting is redundant by design: the runner sets `OMP_NUM_THREADS=1`,
 `OPENBLAS_NUM_THREADS=1`, and `MKL_NUM_THREADS=1`; OpenBLAS additionally calls
