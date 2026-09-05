@@ -34,6 +34,92 @@ struct TileProfile {
   nint_t kc;
 };
 
+#if defined(ARCH_X86_FAMILY)
+template <nint_t PanelN>
+void run_whole_b_panel_probe(benchmark::State& state, const Case& c) {
+  using namespace ::vecops;
+  using TB = typename ProbeAtom::TB;
+  static_assert(PanelN > 0 && PanelN % 16 == 0);
+  Buffers buffers(c);
+  buffers.prepare_output(Operation::Gemm);
+  const meta::Any m{c.n};
+  const meta::Any n{c.m};
+  const meta::Any k{c.k};
+  auto a = tensor::make_tensor(
+      buffers.x.data(), tensor::make_layout(tensor::make_shape(m, k)));
+  auto b = tensor::make_tensor(
+      buffers.weight.data(), tensor::make_layout(tensor::make_shape(n, k)));
+  auto out = tensor::make_tensor(
+      buffers.output.data(), tensor::make_layout(tensor::make_shape(m, n)));
+  auto b_input = tensor::input<TB>(b);
+  auto out_output = tensor::output<float>(out);
+
+  const meta::Any max_panel_n{std::min<nint_t>(PanelN, c.m)};
+  auto max_b_panel = tensor::narrow_view<0>(b_input, 0, max_panel_n);
+  const auto max_packed_layout = matmul::packed_layout<
+      ProbeAtom, matmul::Operand::B>(max_b_panel.input_layout());
+  const nint_t packed_bytes = tensor::numel(max_packed_layout) *
+      static_cast<nint_t>(sizeof(TB));
+  kernel::Workspace packed_owner(packed_bytes + 63);
+  auto packed_storage = packed_owner.view();
+  auto* packed_data = static_cast<TB*>(
+      packed_storage.allocate(packed_bytes, 64));
+
+  auto packer = ops::matmul_pack(ops::MatmulPackConfig<
+      ProbeAtom, matmul::Operand::B>{});
+  auto operation = ops::matmul(ops::MatmulConfig<ProbeAtom>{});
+  auto max_packed_b = tensor::make_tensor(packed_data, max_packed_layout);
+  auto max_out_panel = tensor::narrow_view<1>(out_output, 0, max_panel_n);
+  kernel::Workspace operation_owner(operation.required_workspace(
+      m, max_panel_n, k, a, max_packed_b, max_out_panel));
+  auto operation_workspace = operation_owner.view();
+  execution::ExecutionSession packing_execution{};
+
+  const auto run = [&] {
+    for (nint_t origin = 0; origin < c.m; origin += PanelN) {
+      const meta::Any active_n{std::min<nint_t>(PanelN, c.m - origin)};
+      auto b_panel = tensor::narrow_view<0>(b_input, origin, active_n);
+      const auto packed_layout = matmul::packed_layout<
+          ProbeAtom, matmul::Operand::B>(b_panel.input_layout());
+      auto packed_b = tensor::make_tensor(packed_data, packed_layout);
+      auto out_panel = tensor::narrow_view<1>(out_output, origin, active_n);
+      packer(packing_execution, b_panel, packed_b);
+      operation_workspace.reset();
+      operation(operation_workspace, m, active_n, k,
+                a, packed_b, out_panel);
+    }
+  };
+  run();
+  std::string error;
+  if (!verify_samples(c, Operation::Gemm, buffers, &error)) {
+    state.SkipWithError(error);
+    return;
+  }
+  buffers.prepare_output(Operation::Gemm);
+  for (auto _ : state) {
+    run();
+    benchmark::DoNotOptimize(buffers.output.data());
+    benchmark::ClobberMemory();
+  }
+  set_counters(state, c, false, true, false);
+  state.counters["panel_n"] = benchmark::Counter(PanelN);
+}
+
+template <nint_t PanelN>
+void register_whole_b_panel_case(const Case& c) {
+  const auto panel = std::to_string(PanelN);
+  const auto name = benchmark_name(
+      "vecops", c, Operation::Gemm, "WholeBPanel", "panel_probe",
+      "native", "whole_b_panel", "full", panel, "full");
+  auto* registered = benchmark::RegisterBenchmark(
+      name.c_str(), [c](benchmark::State& state) {
+        run_whole_b_panel_probe<PanelN>(state, c);
+      });
+  registered->Unit(benchmark::kMicrosecond);
+  configure_comparison_benchmark(registered, 0.05, 5);
+}
+#endif
+
 inline constexpr std::array ProbeProfiles{
     TileProfile{128, 512, 128},
     TileProfile{128, 512, 256},
@@ -217,6 +303,18 @@ void register_probe_cases() {
       CoreCases[9], LifetimeProfile, "b_inside_only");
   register_packing_lifetime_case<matmul::packing_policy::RequireOutside>(
       CoreCases[9], LifetimeProfile, "b_outside_only");
+
+#if defined(ARCH_X86_FAMILY)
+  for (const Case& c : {
+           CoreCases[7], CoreCases[9], CoreCases[11], AF3Cases[17]}) {
+    register_whole_b_panel_case<16>(c);
+    register_whole_b_panel_case<32>(c);
+    register_whole_b_panel_case<64>(c);
+    register_whole_b_panel_case<128>(c);
+    register_whole_b_panel_case<256>(c);
+    register_whole_b_panel_case<512>(c);
+  }
+#endif
 }
 
 bool enable_probe_atom() {

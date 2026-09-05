@@ -34,6 +34,11 @@ Operations are plain GEMM, `C + GEMM`, bias, bias+ReLU, and bias+SiLU.  The
 catalog only enables semantically relevant epilogues.  `epilogue` in the result
 states whether the provider fused it or ran a separate pass.
 
+The formal `C + GEMM` operation has BLAS `beta=1` in-place semantics: the same
+row-major C storage is both the accumulator input and the destination for every
+provider.  A separate input-C/output-C experiment has a different C-memory
+footprint and belongs only in diagnostic probes, never in formal speedups.
+
 ## Meta.h requirement
 
 vecops registrations are deliberately compile-time separate:
@@ -209,16 +214,45 @@ The checked-in result snapshots are:
   the accepted baseline rows.
 
 `MatmulOtherlibsVecopsPhaseProbe-Native` is a diagnostic-only executable for
-rank-two cases.  It reports `pack_a`, `pack_b`, `prepared_b_execute`, and
-`prepared_ab_compute` separately, using the public `ops::matmul_pack` API.
+rank-two cases.  It reports `pack_a`, `pack_b`, `prepared_b_execute`,
+`prepared_b_direct_a_execute`, `prepared_b_direct_a_n_major_execute`,
+`prepared_ab_compute`, and `prepared_ab_n_major_compute` separately, using
+the public `ops::matmul_pack` API.
 The actual phase name is `prepared_b_execute`: B preparation is excluded but
-the planner may still pack the changing A inside the timed execution.  Only
-`prepared_ab_compute` excludes packing on both sides.
+the planner may still pack the changing A inside the timed execution.
+`prepared_ab_compute` supplies both sides already packed, while the direct-A
+variants prohibit A packing and consume its public layout as-is.
+`prepared_b_direct_a_execute` additionally disables internal A packing, so it
+matches a prepared-weight primitive that still tile-loads the public
+row-major activation directly.
+`prepared_b_direct_a_n_major_execute` combines that raw-A contract with an
+explicit N-major WholeProblem traversal, matching a prepared-weight BRGEMM
+without conflating the result with A preparation.
+`prepared_ab_n_major_compute` holds both packed operands fixed and changes
+only WholeProblem's spatial traversal, isolating B-panel reuse across M from
+online packing and split-K accumulator traffic.
 General cases are emitted as AllDynamic and AllConst; LLM/AF3 cases are
 emitted as TokenDynamic and AllConst, matching the Meta contract of the
 formal suite.  The last phase is the closest estimate of the architecture
 microkernel/traversal cost with packing removed; none of these rows belongs
 in the formal raw-E2E provider aggregate.
+
+All formal `gemm_add` rows implement the same BLAS beta=1 contract on every
+timed invocation: `C = A * B + C0`.  The harness restores `C0` while timing
+is paused, so Google Benchmark iterations cannot silently turn into repeated
+accumulation (`C = A * B + C_previous`); this setup copy is not attributed to
+any provider.
+
+When oneDNN is enabled, `MatmulOtherlibsOneDNNPhaseProbe-Native` reports
+`pack_weights` (the public-BF16-to-opaque reorder) and
+`prepared_weights_compute` separately for the main long-K and AF3 diagnostic
+cases.  The latter is comparable only with vecops `prepared_b_execute` or
+`prepared_ab_compute` after accounting for whether A packing remains timed;
+neither phase is mixed into the raw-E2E CSV aggregate.  Its
+`weight_reorder_required` and `prepared_weight_bytes` counters distinguish a
+real opaque-layout transform from a submitted but descriptor-identical no-op
+reorder, and show the physical B size independently of the N/token axis; the
+formal oneDNN rows expose the same counters.
 
 `MatmulOtherlibsVecopsTilingProbe-Native` also registers `probe_prepared_b`
 rows for L03/L05/L07. They prepack B before timing, then sweep the same
@@ -235,6 +269,14 @@ include online packing in the timed region, and verify sampled output before
 measurement. They are diagnostic rows and are not part of the formal provider
 aggregate.
 
+It also contains `phase:panel_probe` rows for L03/L05/L07 and A18. These
+implement a lightweight WholeProblem-style experiment: a
+16/32/64/128/256/512-row B panel is packed for the full K extent, consumed
+across all M blocks, and then released before the next N panel. Unlike
+GenericTiled, this probe does not split K or round-trip an accumulator. It is
+the evidence source for the bounded automatic AMX B-panel route; the formal
+table itself continues to report `raw_e2e`.
+
 On Arm, `MatmulOtherlibsVecopsBatchPhaseProbe-Native` decomposes A08 into a
 native rank-3 call, four explicit rank-2 calls, prepared-B/prepared-AB calls,
 and matching variants whose whole batch is wrapped by one Streaming+ZA
@@ -245,6 +287,10 @@ On x86, `MatmulOtherlibsVecopsSpecialCaseProbe-Native` compares the existing
 AVX-512 small-N leaf with the default AMX path for A05--A07 and sweeps aligned,
 M-tail, N-tail, K-tail, and all-tail shapes against OpenBLAS.  These are
 diagnostic rows and are not mixed into the formal provider aggregate.
+It additionally emits paired `spatial_order_probe` rows for explicit M-major
+and N-major WholeProblem traversal. These use the public `LoopOrder` setting;
+automatic selection is admitted only when Meta bounds prove the same spatial
+skew and working-set limit, so the probe does not become a case-name allowlist.
 
 ## Repeated optimization cycles
 

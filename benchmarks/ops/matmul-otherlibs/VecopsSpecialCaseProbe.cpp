@@ -19,9 +19,15 @@ namespace vecops::bench::matmul_otherlibs {
 
 using NativeAtom = ::vecops::matmul::AMX_BF16F32;
 
-template <Operation Op>
+template <Operation Op,
+          typename Order = ::vecops::matmul::loop_order::Automatic>
 void run_default_vecops(benchmark::State& state, const Case& c) {
   using namespace ::vecops;
+  using Tuning = matmul::GenericTiledTuning<
+      matmul::AutomaticCacheTiling, Order>;
+  using Config = ops::MatmulConfig<
+      NativeAtom, matmul::family_selection::Automatic,
+      kernel::matmul_policy::Automatic, Tuning>;
   Buffers buffers(c);
   buffers.prepare_output(Op);
   const meta::Any m{c.n};
@@ -33,10 +39,8 @@ void run_default_vecops(benchmark::State& state, const Case& c) {
       buffers.weight.data(), tensor::make_layout(tensor::make_shape(n, k)));
   auto out = tensor::make_tensor(
       buffers.output.data(), tensor::make_layout(tensor::make_shape(m, n)));
-  auto operation = ops::matmul(ops::MatmulConfig<NativeAtom>{});
-  auto prior_tensor = tensor::make_tensor(
-      buffers.initial.data(), tensor::make_layout(tensor::make_shape(m, n)));
-  auto prior = tensor::input<float>(prior_tensor);
+  auto operation = ops::matmul(Config{});
+  auto prior = tensor::input<float>(out);
   auto output = tensor::output<float>(out);
   const nint_t workspace_bytes = [&] {
     if constexpr (Op == Operation::Gemm)
@@ -77,7 +81,7 @@ void run_small_n_vector(benchmark::State& state, const Case& c) {
     small_vector_dense_matmul<Op == Operation::GemmAdd>(
         buffers.x.data(), c.k, buffers.weight.data(), c.k,
         buffers.output.data(), c.m, c.n, c.m, c.k,
-        Op == Operation::GemmAdd ? buffers.initial.data() : nullptr, c.m);
+        Op == Operation::GemmAdd ? buffers.output.data() : nullptr, c.m);
   };
   run();
   std::string error;
@@ -173,6 +177,27 @@ void register_cases() {
   for (const Case& c : ragged_cases) {
     register_ragged_case<Operation::Gemm>(c);
     register_ragged_case<Operation::GemmAdd>(c);
+  }
+
+  // WholeProblem ignores cache-loop depths but honors the explicitly chosen
+  // relative M/N order. Keep both directions in one diagnostic binary so an
+  // automatic crossover can be derived from general shapes rather than a
+  // workload-name allowlist.
+  for (const Case& c : {
+           CoreCases[2],  // G03 tall/narrow
+           CoreCases[3],  // G04 tall/narrow, large K
+           CoreCases[4],  // G05 short/wide
+           CoreCases[7],  // L03 QKV prefill
+           CoreCases[9],  // L05 MLP up prefill
+           CoreCases[11], // L07 MLP down prefill
+           AF3Cases[17],  // A18 square and cache-sensitive
+       }) {
+    register_probe<Operation::Gemm>(
+        "vecops", c, "spatial_order_probe", "whole_m_major",
+        run_default_vecops<Operation::Gemm, matmul::loop_order::MKN>);
+    register_probe<Operation::Gemm>(
+        "vecops", c, "spatial_order_probe", "whole_n_major",
+        run_default_vecops<Operation::Gemm, matmul::loop_order::NKM>);
   }
 }
 

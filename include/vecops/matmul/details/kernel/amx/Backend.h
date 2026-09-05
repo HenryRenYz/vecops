@@ -1151,6 +1151,9 @@ struct Configuration : execution::details::x86::TileConfiguration {
 /// does not fit the eight tile registers (A*B + A + B > 8) scores -1
 /// and is excluded. exact_grid_mode::unmasked declares that AMX tail
 /// handling never needs per-lane masking.
+enum class KernelAspect { balanced, tall, wide };
+
+template <KernelAspect Aspect = KernelAspect::balanced>
 struct KernelProvider {
   static constexpr tile::Tile2DExactGridMode exact_grid_mode =
       tile::Tile2DExactGridMode::unmasked;
@@ -1158,7 +1161,14 @@ struct KernelProvider {
   template <int A, int B, tile::Tile2DMaskMode, tile::Tile2DMaskMode>
   static consteval int power() {
     if constexpr (A * B + A + B <= 8) {
-      return 100 * A * B + 4 * (A + B);
+      constexpr int AspectBonus = [] {
+        if constexpr (Aspect == KernelAspect::tall && A == 3 && B == 1)
+          return 128;
+        if constexpr (Aspect == KernelAspect::wide && A == 1 && B == 3)
+          return 128;
+        return 0;
+      }();
+      return 100 * A * B + 4 * (A + B) + AspectBonus;
     } else {
       return -1;
     }
@@ -1173,8 +1183,38 @@ struct KernelPlan : std::bool_constant<KGuaranteed> {
   static constexpr bool stream_b = StreamB;
 };
 
+template <KernelAspect Aspect = KernelAspect::balanced>
 using Catalog = tile::Tile2DGeneratedCatalog<
-    KernelProvider, tile::Tile2DSearchSpace<3, 3, 4>>;
+    KernelProvider<Aspect>, tile::Tile2DSearchSpace<3, 3, 4>>;
+
+/** Select a register-block aspect only when Meta bounds prove a persistent
+ * 4:1 spatial skew and enough K work to amortize the lower output-tile count.
+ * Unbounded dynamic and shallow-K shapes keep the balanced 2x2 family; no
+ * runtime catalog fan-out is introduced. */
+template <meta::ValueType M, meta::ValueType N, meta::ValueType K>
+inline constexpr KernelAspect kernel_aspect_v = [] {
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  using KV = std::remove_cvref_t<K>;
+  if constexpr (!meta::has_lower_bound_v<KV> ||
+                meta::lower_bound_v<KV> < 256)
+    return KernelAspect::balanced;
+  if constexpr (meta::has_lower_bound_v<MV> &&
+                meta::has_upper_bound_v<NV>) {
+    constexpr nint_t MinM = meta::lower_bound_v<MV>;
+    constexpr nint_t MaxN = meta::upper_bound_v<NV>;
+    if constexpr (MinM > 0 && MaxN > 0 && MinM / 4 >= MaxN)
+      return KernelAspect::tall;
+  }
+  if constexpr (meta::has_lower_bound_v<NV> &&
+                meta::has_upper_bound_v<MV>) {
+    constexpr nint_t MinN = meta::lower_bound_v<NV>;
+    constexpr nint_t MaxM = meta::upper_bound_v<MV>;
+    if constexpr (MinN > 0 && MaxM > 0 && MinN / 4 >= MaxM)
+      return KernelAspect::wide;
+  }
+  return KernelAspect::balanced;
+}();
 
 /// Vector power for a "16 lanes of T" register relative to the native
 /// vector width: negative when 16*T is narrower than native (fractional
@@ -1527,7 +1567,8 @@ VECOPS_ALWAYS_INLINE void compute_tile() {
 
 /// Load one Case's A/B tile sets and run the K step. Staging buffers are
 /// addressed in elements: each tile image is 1024 bytes (16 rows x 64 B).
-template <::vecops::matmul::Atom Atom, typename Case, bool KGuaranteed, bool StreamB,
+template <::vecops::matmul::Atom Atom, typename Case, bool KGuaranteed,
+          bool StreamB,
           bool DirectInactiveZeroA, typename A, typename B>
 VECOPS_ALWAYS_INLINE void multiply_k_tile(
     const A& a, const B& b,
@@ -1581,6 +1622,79 @@ VECOPS_ALWAYS_INLINE void multiply_k_tile(
       (load_b.template operator()<I>(), ...);
     }(std::make_index_sequence<NN>{});
     compute_tiles<Atom, NM, NN>();
+  }
+}
+
+/// Linear-cursor K loop for caller/online prepared A and B.  Packed-format
+/// recognition proves that one K block is exactly one 16-row AMX tile image,
+/// so advancing both cursors by Panel*KR elements is equivalent to repeatedly
+/// evaluating offset_at(..., k / KR, ...).  Keeping the two block bases and
+/// panel strides live removes the divide/shift and layout-address rebuild from
+/// every K step while preserving the same register family and dot schedule.
+template <::vecops::matmul::Atom Atom, typename Case, bool StreamB,
+          typename A, typename B>
+VECOPS_ALWAYS_INLINE void multiply_packed_k_loop(
+    const A& a, const B& b, nint_t logical_k, nint_t m, nint_t n) {
+  static_assert(is_packed_access_v<
+      Atom, ::vecops::matmul::Operand::A, A>);
+  static_assert(is_packed_access_v<
+      Atom, ::vecops::matmul::Operand::B, B>);
+  constexpr int NM = Case::a;
+  constexpr int NN = Case::b;
+  constexpr int Outputs = NM * NN;
+  constexpr nint_t Panel = 16;
+  constexpr nint_t KR = decltype(Atom::K_R)::value;
+  constexpr nint_t KBlockElements = Panel * KR;
+  const auto a_strides = a.raw_strides();
+  const auto b_strides = b.raw_strides();
+  const nint_t a_panel_stride = a_strides[0];
+  const nint_t b_panel_stride = b_strides[0];
+  const auto* a_cursor = reinterpret_cast<const typename Atom::TA*>(
+      a.raw_data()) + (m / Panel) * a_panel_stride;
+  const auto* b_cursor = reinterpret_cast<const typename Atom::TB*>(
+      b.raw_data()) + (n / Panel) * b_panel_stride;
+
+  auto run_step = [&]<nint_t Offset>() VECOPS_INLINE_LAMBDA {
+    auto load_a = [&]<std::size_t I>() VECOPS_INLINE_LAMBDA {
+      const auto* pointer =
+          a_cursor + Offset + static_cast<nint_t>(I) * a_panel_stride;
+      amx_intrinsics::load<Outputs + static_cast<int>(I)>(pointer, 64);
+    };
+    auto load_b = [&]<std::size_t I>() VECOPS_INLINE_LAMBDA {
+      const auto* pointer =
+          b_cursor + Offset + static_cast<nint_t>(I) * b_panel_stride;
+      if constexpr (StreamB) {
+        amx_intrinsics::stream_load<
+            Outputs + NM + static_cast<int>(I)>(pointer, 64);
+      } else {
+        amx_intrinsics::load<
+            Outputs + NM + static_cast<int>(I)>(pointer, 64);
+      }
+    };
+    if constexpr (NN == 1) {
+      load_b.template operator()<0>();
+      [&]<std::size_t... I>(std::index_sequence<I...>)
+          VECOPS_INLINE_LAMBDA {
+        ((load_a.template operator()<I>(),
+          compute_tile<Atom, NM, NN, static_cast<int>(I), 0>()), ...);
+      }(std::make_index_sequence<NM>{});
+    } else {
+      [&]<std::size_t... I>(std::index_sequence<I...>)
+          VECOPS_INLINE_LAMBDA {
+        (load_a.template operator()<I>(), ...);
+      }(std::make_index_sequence<NM>{});
+      [&]<std::size_t... I>(std::index_sequence<I...>)
+          VECOPS_INLINE_LAMBDA {
+        (load_b.template operator()<I>(), ...);
+      }(std::make_index_sequence<NN>{});
+      compute_tiles<Atom, NM, NN>();
+    }
+  };
+
+  for (nint_t k = 0; k < logical_k; k += KR) {
+    run_step.template operator()<0>();
+    a_cursor += KBlockElements;
+    b_cursor += KBlockElements;
   }
 }
 
@@ -1827,7 +1941,13 @@ VECOPS_ALWAYS_INLINE void microkernel_routed(
        !direct_row_major_input_v<A>) ||
       (!is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B> &&
        !direct_row_major_input_v<B>);
-  if constexpr (Plan::value) {
+  if constexpr (
+      Plan::value &&
+      is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
+      is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>) {
+    multiply_packed_k_loop<Atom, Case, Plan::stream_b>(
+        a, b, logical_k, m, n);
+  } else if constexpr (Plan::value) {
     for (nint_t k = 0; k < logical_k; k += KR) {
       multiply_k_tile<
           Atom, Case, true, Plan::stream_b, DirectInactiveZeroA>(
@@ -1950,7 +2070,14 @@ struct Backend<matmul_implementation::AMX> {
   template <::vecops::matmul::Atom Atom, typename Policy,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
             typename A, typename B, typename CInput, typename COutput>
-  using Catalog = amx::Catalog;
+  using Catalog = amx::Catalog<amx::kernel_aspect_v<M, N, K>>;
+  // N-major already changes the A/B reuse trade-off. Keep its finite leaf
+  // set balanced until vertical/horizontal families have independently
+  // measured N-major crossover rules.
+  template <::vecops::matmul::Atom, typename,
+            meta::ValueType, meta::ValueType, meta::ValueType,
+            typename, typename, typename, typename>
+  using NMajorCatalog = amx::Catalog<>;
   static constexpr int ProblemRank = 2;
 
   /// Scratch size for one microkernel staging area (see the file header
@@ -2534,6 +2661,40 @@ struct Backend<matmul_implementation::AMX> {
 
     constexpr bool PackedB =
         amx::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>;
+    constexpr bool RuntimePreparedNMajor = [] {
+      using MV = std::remove_cvref_t<M>;
+      using NV = std::remove_cvref_t<N>;
+      using KV = std::remove_cvref_t<K>;
+      if constexpr (
+          !matmul_details::automatic_traversal_family_dispatch_v<
+              FamilyDispatch> ||
+          !std::same_as<Atom, ::vecops::matmul::AMX_BF16F32> ||
+          !amx::is_packed_access_v<
+              Atom, ::vecops::matmul::Operand::A, A> ||
+          !amx::is_packed_access_v<
+              Atom, ::vecops::matmul::Operand::B, B> ||
+          !NV::is_const || !KV::is_const || MV::is_const) {
+        return false;
+      } else {
+        // Restrict the dual traversal to the measured L2-resident-K class.
+        // Long K needs real KC blocking (L07), while constant M was already
+        // decided by automatic_physical_n_major_v before reaching this tier.
+        return KV::value >= 256 && KV::value <= 4096 &&
+            NV::value >= 4 * 16;
+      }
+    }();
+    const bool runtime_prepared_n_major = [&] {
+      if constexpr (!RuntimePreparedNMajor) {
+        return false;
+      } else {
+        constexpr nint_t MaxAElements = (1024 * 1024) /
+            static_cast<nint_t>(sizeof(typename Atom::TA));
+        return logical_m > 0 && logical_n > 0 && logical_k > 0 &&
+            logical_m <= logical_n / 4 &&
+            logical_k <= MaxAElements &&
+            logical_m <= MaxAElements / logical_k;
+      }
+    }();
     constexpr bool HasActiveConfiguration = [] {
       if constexpr (requires {
                       typename std::remove_cvref_t<Scope>::ActiveConfiguration;
@@ -2545,28 +2706,38 @@ struct Backend<matmul_implementation::AMX> {
         return false;
       }
     }();
+    auto run_general = [&](auto& configured)
+        VECOPS_INLINE_LAMBDA_NOEXCEPT {
+      if constexpr (NMajor) {
+        run_configured_n_major<Atom, Policy>(
+            configured, m, n, k, a, b,
+            c_input, c_output, scratch);
+      } else if constexpr (RuntimePreparedNMajor) {
+        if (runtime_prepared_n_major) {
+          run_configured_n_major<Atom, Policy>(
+              configured, m, n, k, a, b,
+              c_input, c_output, scratch);
+        } else {
+          run_configured<Atom, Policy>(
+              configured, m, n, k, a, b,
+              c_input, c_output, scratch);
+        }
+      } else {
+        run_configured<Atom, Policy>(
+            configured, m, n, k, a, b,
+            c_input, c_output, scratch);
+      }
+    };
     if constexpr (HasActiveConfiguration) {
       // Batch/flatten planners may own one compatible TILECFG around many
       // leaves.  Family selection above still runs for every leaf; only the
       // General fallback reuses the active image here.
-      if constexpr (NMajor)
-        run_configured_n_major<Atom, Policy>(
-            scope, m, n, k, a, b, c_input, c_output, scratch);
-      else
-        run_configured<Atom, Policy>(
-            scope, m, n, k, a, b, c_input, c_output, scratch);
+      run_general(scope);
     } else {
       with_configuration<Atom, Policy, PackedB>(
           scope, m, n, [&](auto& configured)
               VECOPS_INLINE_LAMBDA_NOEXCEPT {
-            if constexpr (NMajor)
-              run_configured_n_major<Atom, Policy>(
-                  configured, m, n, k, a, b,
-                  c_input, c_output, scratch);
-            else
-              run_configured<Atom, Policy>(
-                  configured, m, n, k, a, b,
-                  c_input, c_output, scratch);
+            run_general(configured);
           });
     }
   }

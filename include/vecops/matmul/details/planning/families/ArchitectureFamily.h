@@ -33,13 +33,18 @@
  * 2. Online packing: A and B are costed independently at compile time.  Exact
  *    metadata uses the concrete cost model; bounded Dynamic metadata uses its
  *    safe corner; unconstrained native AMX may choose raw vs packed-B, while
- *    SME and conversion-eliding packs default packed.  A shared rank-three A
- *    or B is packed once while an independent side reuses one leaf-sized
- *    staging buffer across batches.
- * 3. Batch-columns flatten: a shared A with M == 1 collapses to
+ *    SME and conversion-eliding packs default packed. Caller-prepared AMX B
+ *    makes native A packing monotone in N reuse, so a sufficient N/K lower
+ *    corner fixes A to the packed path even when M is unbounded. A shared
+ *    rank-three A or B is packed once while an independent side reuses one
+ *    leaf-sized staging buffer across batches.
+ * 3. Bounded WholeProblem B panel: large rank-two native-B products may pack
+ *    one full-K N panel and consume it across M before advancing N. This fills
+ *    the lifetime gap between whole-B packing and per-microkernel packing.
+ * 4. Batch-columns flatten: a shared A with M == 1 collapses to
  *    [1, batch*N].
- * 4. Batch-rows flatten: a shared B collapses to one [batch*M, K] product.
- * 5. The ordinary traversal: loop the leading batch dimensions and run one
+ * 5. Batch-rows flatten: a shared B collapses to one [batch*M, K] product.
+ * 6. The ordinary traversal: loop the leading batch dimensions and run one
  *    leaf problem per item (under with_matmul_configuration for AMX).
  *
  * Three sibling planners collaborate as friends and read the private member
@@ -51,6 +56,7 @@
  * planning/FamilyPlan.h.
  */
 
+#include <algorithm>
 #include <limits>
 #include <type_traits>
 #include <utility>
@@ -117,6 +123,65 @@ using attach_packing_policy_t = std::conditional_t<
         std::same_as<BPacking, ::vecops::matmul::packing_policy::Any>,
     Dispatch, PackingPolicyFamilyDispatch<Dispatch, APacking, BPacking>>;
 
+/** Whether an explicitly configured logical loop order visits N before M.
+ * WholeProblem has no cache-K loop, so this relative spatial order is the
+ * only part of GenericTuning::LoopOrder that reaches its leaf traversal.
+ * Automatic deliberately stays false here: backend automatic selection is a
+ * separate profitability decision and must not silently inherit the generic
+ * tiler's architecture default. */
+template <typename Config>
+inline constexpr bool explicit_logical_n_major_v = [] {
+  using Order = typename Config::GenericTuning::LoopOrder;
+  if constexpr (::vecops::matmul::LoopOrderType<Order>) {
+    if constexpr (Order::first == ::vecops::matmul::Axis::N) return true;
+    if constexpr (Order::first == ::vecops::matmul::Axis::M) return false;
+    return Order::second == ::vecops::matmul::Axis::N;
+  } else {
+    return false;
+  }
+}();
+
+template <typename Config, meta::ValueType M, meta::ValueType N,
+          meta::ValueType K>
+inline constexpr bool automatic_physical_n_major_v = [] {
+  using MV = std::remove_cvref_t<M>;
+  using NV = std::remove_cvref_t<N>;
+  using KV = std::remove_cvref_t<K>;
+  if constexpr (!std::same_as<
+                    SelectedImplementation<typename Config::Atom>,
+                    kernel::matmul_implementation::AMX>) {
+    return false;
+  } else if constexpr (!meta::has_upper_bound_v<MV> ||
+                !meta::has_lower_bound_v<NV> ||
+                !meta::has_upper_bound_v<KV>) {
+    return false;
+  } else {
+    constexpr nint_t MaxM = meta::upper_bound_v<MV>;
+    constexpr nint_t MinN = meta::lower_bound_v<NV>;
+    constexpr nint_t MaxK = meta::upper_bound_v<KV>;
+    constexpr nint_t MaxAElements = (1024 * 1024) /
+        static_cast<nint_t>(sizeof(typename Config::Atom::TA));
+    return MaxM > 0 && MinN > 0 && MaxK >= 256 &&
+        MaxK <= MaxAElements && MaxM <= MinN / 4 &&
+        MaxM <= MaxAElements / MaxK;
+  }
+}();
+
+template <typename Config, bool Swapped, typename Dispatch,
+          meta::ValueType PhysicalM, meta::ValueType PhysicalN,
+          meta::ValueType PhysicalK>
+using attach_spatial_traversal_t = std::conditional_t<
+    ::vecops::matmul::LoopOrderType<
+        typename Config::GenericTuning::LoopOrder>,
+    std::conditional_t<
+        explicit_logical_n_major_v<Config> != Swapped,
+        kernel::matmul_details::NMajorFamilyDispatch<Dispatch>, Dispatch>,
+    std::conditional_t<
+        automatic_physical_n_major_v<
+            Config, PhysicalM, PhysicalN, PhysicalK>,
+        kernel::matmul_details::NMajorFamilyDispatch<Dispatch>,
+        kernel::matmul_details::AutomaticTraversalFamilyDispatch<Dispatch>>>;
+
 template <::vecops::matmul::Atom Atom,
           typename TilePolicy,
           typename FamilyDispatch,
@@ -180,6 +245,20 @@ public:
   }
   VECOPS_INLINE bool online_packs_b() const {
     return selected_auto_pack<::vecops::matmul::Operand::B>();
+  }
+
+  VECOPS_INLINE bool whole_b_panel_enabled() const {
+    return use_whole_b_panel();
+  }
+
+  VECOPS_INLINE nint_t whole_b_panel_bytes() const {
+    if constexpr (!WholeBPanelCandidate) {
+      return 0;
+    } else {
+      const auto layout = whole_b_panel_layout();
+      return tensor::numel(layout) * static_cast<nint_t>(
+          sizeof(typename Atom::TB)) + 63;
+    }
   }
 
   template <execution::ExecutionScope Scope>
@@ -439,6 +518,64 @@ private:
       !RequestedFamilyNeedsRawOperands &&
       AllowsOutsidePacking<::vecops::matmul::Operand::B> &&
       AutoPackOperand<::vecops::matmul::Operand::B, BSpec>;
+  static constexpr nint_t WholeBPanelMinN = 64;
+  static constexpr nint_t WholeBPanelMaxN = 256;
+  static constexpr nint_t WholeBPanelMaxBytes = 1024 * 1024;
+  static constexpr nint_t WholeBPanelMinOperandBytes = 16 * 1024 * 1024;
+  static constexpr nint_t WholeBPanelMinSpatialOperandBytes = 2 * 1024 * 1024;
+  static constexpr bool WholeBPanelMetaMayRun = [] {
+    using MV = std::remove_cvref_t<MExtent>;
+    using NV = std::remove_cvref_t<NExtent>;
+    using KV = std::remove_cvref_t<KExtent>;
+    constexpr nint_t ElementBytes = sizeof(typename Atom::TB);
+    constexpr nint_t MaxK = WholeBPanelMaxBytes /
+        (WholeBPanelMinN * ElementBytes);
+    if constexpr (meta::has_upper_bound_v<MV> &&
+                  meta::upper_bound_v<MV> < 32)
+      return false;
+    if constexpr (meta::has_upper_bound_v<NV> &&
+                  meta::upper_bound_v<NV> <= WholeBPanelMinN)
+      return false;
+    if constexpr (meta::has_lower_bound_v<KV> &&
+                  meta::lower_bound_v<KV> > MaxK)
+      return false;
+    if constexpr (meta::has_upper_bound_v<NV> &&
+                  meta::has_upper_bound_v<KV>) {
+      constexpr nint_t N = meta::upper_bound_v<NV>;
+      constexpr nint_t K = meta::upper_bound_v<KV>;
+      if constexpr (N <= 0 || K <= 0) return false;
+      constexpr nint_t MinNForLargeB =
+          1 + (WholeBPanelMinOperandBytes - 1) / (K * ElementBytes);
+      constexpr bool BMayBeLarge = N >= MinNForLargeB;
+      constexpr nint_t MinNForSpatialReuse =
+          1 + (WholeBPanelMinSpatialOperandBytes - 1) /
+                  (K * ElementBytes);
+      constexpr bool SpatialReuseMayBeLarge =
+          (!meta::has_upper_bound_v<MV> ||
+           meta::upper_bound_v<MV> >= 512) && N >= MinNForSpatialReuse;
+      if constexpr (!BMayBeLarge && !SpatialReuseMayBeLarge) return false;
+    }
+    return true;
+  }();
+  static constexpr bool WholeBPanelCandidate =
+      Rank == 2 && WholeBPanelMetaMayRun &&
+      std::same_as<Implementation, kernel::matmul_implementation::AMX> &&
+      std::same_as<typename EffectiveFamilyDispatch::Family,
+                   ::vecops::matmul::kernel_family::WholeProblem> &&
+      (kernel::matmul_details::n_major_family_dispatch_v<
+           EffectiveFamilyDispatch> ||
+       kernel::matmul_details::automatic_traversal_family_dispatch_v<
+           EffectiveFamilyDispatch>) &&
+      AllowsOutsidePacking<::vecops::matmul::Operand::B> &&
+      !PackedBInput && AutoPackB &&
+      std::same_as<typename Atom::TA, bfloat16_t> &&
+      std::same_as<typename Atom::TB, bfloat16_t> &&
+      std::same_as<typename Atom::TAcc, float32_t> &&
+      std::same_as<typename BSpec::MemoryElement, bfloat16_t> &&
+      std::same_as<typename BSpec::TransformType, tensor::NoTransform> &&
+      std::same_as<
+          tensor::stride_type_t<Rank - 1, typename BSpec::InputLayout>,
+          meta::Const<1>>;
   static constexpr bool Rank3CompletesPackedPair = Rank3SharedB &&
       ((AutoPackA && PackedBInput) || (AutoPackB && PackedAInput));
   // AMX avoids cloning a raw-B flatten leaf when conversion-aware auto-pack
@@ -817,6 +954,55 @@ private:
     return rhs > Limit / lhs ? Limit : lhs * rhs;
   }
 
+  VECOPS_INLINE bool use_whole_b_panel() const {
+    if constexpr (!WholeBPanelCandidate) {
+      return false;
+    } else {
+      const nint_t m = static_cast<nint_t>(m_);
+      const nint_t n = static_cast<nint_t>(n_);
+      const nint_t k = static_cast<nint_t>(k_);
+      const nint_t panel_n = whole_b_panel_n();
+      if (m < 32 || n <= panel_n || k <= 0)
+        return false;
+      constexpr nint_t PanelElements = WholeBPanelMaxBytes /
+          static_cast<nint_t>(sizeof(typename Atom::TB));
+      if (k > PanelElements / panel_n) return false;
+      // A large B operand benefits even at modest M (LLM projections). A
+      // large two-dimensional spatial traversal can instead amortize a
+      // bounded panel despite a smaller complete B (square/near-square
+      // attention and triangle products).
+      constexpr nint_t ElementBytes = sizeof(typename Atom::TB);
+      const nint_t min_n = 1 +
+          (WholeBPanelMinOperandBytes - 1) / (k * ElementBytes);
+      const nint_t min_spatial_n = 1 +
+          (WholeBPanelMinSpatialOperandBytes - 1) / (k * ElementBytes);
+      const bool large_b = n >= min_n;
+      const bool large_spatial_reuse =
+          m >= 512 && n >= std::max<nint_t>(512, min_spatial_n) && k >= 256;
+      return large_b || large_spatial_reuse;
+    }
+  }
+
+  VECOPS_INLINE nint_t whole_b_panel_n() const {
+    // One packed panel is reused by every M tile. Scale its N span with that
+    // reuse depth, in tile multiples, while keeping small-M LLM projections
+    // at the empirically robust 64-column lifetime.
+    const nint_t m = static_cast<nint_t>(m_);
+    const nint_t reuse_scaled = std::max<nint_t>(
+        WholeBPanelMinN, (m / 4) & ~nint_t{15});
+    return std::min<nint_t>(WholeBPanelMaxN, reuse_scaled);
+  }
+
+  VECOPS_INLINE auto whole_b_panel_layout() const {
+    static_assert(WholeBPanelCandidate);
+    const meta::Any panel_n{std::min<nint_t>(
+        whole_b_panel_n(), static_cast<nint_t>(n_))};
+    const auto raw_layout = tensor::make_layout(
+        tensor::make_shape(panel_n, k_));
+    return ::vecops::matmul::packed_layout<
+        Atom, ::vecops::matmul::Operand::B>(raw_layout);
+  }
+
   template <bool Lower>
   static constexpr nint_t batch_bound() {
     if constexpr (Rank == 3) {
@@ -909,6 +1095,28 @@ private:
     }
   }();
 
+  /** A native AMX A-pack is monotone once B is caller-prepared: its copy
+   * cost is amortized only by N reuse and there is no B-footprint gate left
+   * to prove.  Evaluate the known N/K lower corner with the most conservative
+   * nonempty M=1, so an unbounded token axis still selects one static packed
+   * path when every possible nonempty call is profitable. */
+  static constexpr bool NativeAMXPreparedBRangeProvesPackedA = [] {
+    if constexpr (!AutoPackA || !PackedBInput ||
+                  !std::same_as<
+                      Implementation, kernel::matmul_implementation::AMX> ||
+                  !meta::has_lower_bound_v<NV> ||
+                  !meta::has_lower_bound_v<KV>) {
+      return false;
+    } else {
+      constexpr nint_t MinN = meta::lower_bound_v<NV>;
+      constexpr nint_t MinK = meta::lower_bound_v<KV>;
+      if constexpr (MinN <= 0 || MinK <= 0) return false;
+      else return use_auto_packing_for<
+          ::vecops::matmul::Operand::A>(
+              1, MinN, MinK, 1, MinN, true);
+    }
+  }();
+
   /**
    * Resolve online packing to exactly one compile-time path.
    *
@@ -928,6 +1136,10 @@ private:
     if constexpr (!CanPack) {
       return false;
     } else if constexpr (RequiresOutsidePacking<Side>) {
+      return true;
+    } else if constexpr (
+        Side == ::vecops::matmul::Operand::A &&
+        NativeAMXPreparedBRangeProvesPackedA) {
       return true;
     } else if constexpr (SingletonProblem) {
       return auto_pack_at_bound<Side, true>();
@@ -1625,9 +1837,63 @@ private:
     }
   }
 
+  /** Pack one bounded full-K B panel and consume it across the complete M
+   * traversal before advancing N. This is the WholeProblem counterpart of
+   * GenericTiled's outside-reuse-loop lifetime, without split-K accumulator
+   * traffic or a second family instantiation at the public call site. */
+  template <execution::ExecutionScope Scope>
+  VECOPS_NOINLINE void execute_whole_b_panel(Scope& scope) const {
+    static_assert(WholeBPanelCandidate);
+    auto& workspace = scope.workspace_view();
+    const auto mark = workspace.mark();
+    void* scratch = workspace.allocate(
+        kernel::matmul_implementation::scratch_bytes<Implementation>(), 64);
+    const auto max_layout = whole_b_panel_layout();
+    using TB = typename Atom::TB;
+    auto* packed_data = static_cast<TB*>(workspace.allocate(
+        tensor::numel(max_layout) * static_cast<nint_t>(sizeof(TB)), 64));
+
+    const nint_t panel_n = whole_b_panel_n();
+    const meta::Any configured_n{
+        std::min<nint_t>(panel_n, static_cast<nint_t>(n_))};
+    kernel::with_matmul_configuration<Atom, TilePolicy, true>(
+        scope, m_, configured_n, Implementation{},
+        [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+          const nint_t logical_n = static_cast<nint_t>(n_);
+          for (nint_t origin = 0; origin < logical_n;
+               origin += panel_n) {
+            const meta::Any active_n{
+                std::min<nint_t>(panel_n, logical_n - origin)};
+            auto b_panel = tensor::narrow_view<0>(b_, origin, active_n);
+            const auto panel_layout = ::vecops::matmul::packed_layout<
+                Atom, ::vecops::matmul::Operand::B>(
+                    b_panel.input_layout());
+            auto packed_tensor = tensor::make_tensor(
+                packed_data, panel_layout);
+            run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(
+                configured, b_panel, packed_tensor);
+            auto c_input_panel = tensor::narrow_view<1>(
+                c_input_, origin, active_n);
+            auto c_output_panel = tensor::narrow_view<1>(
+                c_output_, origin, active_n);
+            execute_problem_extents<true>(
+                configured, m_, active_n, k_, a_,
+                tensor::input<TB>(packed_tensor),
+                c_input_panel, c_output_panel, scratch);
+          }
+        });
+    workspace.rewind(mark);
+  }
+
   template <execution::ExecutionScope Scope>
   VECOPS_KERNEL_FUNCTION(void execute(Scope& scope) const) {
     validate();
+    if constexpr (WholeBPanelCandidate) {
+      if (VECOPS_UNLIKELY(whole_b_panel_enabled())) {
+        execute_whole_b_panel(scope);
+        return;
+      }
+    }
     if constexpr (BatchRowsPackACandidate && PackedBInput) {
       if (VECOPS_UNLIKELY(batch_rows_pack_a_enabled())) {
         execute_packed_a_flattened_batch_rows(scope);
@@ -1757,8 +2023,11 @@ VECOPS_INLINE auto make_matmul_invocation(
       decltype(c_input_spec), decltype(c_output_spec)>;
   if constexpr (SwapAB) {
     using SwappedAtom = typename Atom::SwappedAtom;
-    using PhysicalFamilyDispatch = attach_packing_policy_t<
+    using PackingFamilyDispatch = attach_packing_policy_t<
         FamilyDispatch, LogicalBPacking, LogicalAPacking>;
+    using PhysicalFamilyDispatch = attach_spatial_traversal_t<
+        Config, true, PackingFamilyDispatch,
+        decltype(n_value), decltype(m_value), decltype(k_value)>;
     auto transposed_c_input = tensor::transpose_view<0, 1>(c_input_spec);
     auto transposed_c_output = tensor::transpose_view<0, 1>(c_output_spec);
     return ArchitectureFamilyInvocation<
@@ -1770,8 +2039,11 @@ VECOPS_INLINE auto make_matmul_invocation(
             std::move(b_spec), std::move(a_spec),
             std::move(transposed_c_input), std::move(transposed_c_output)};
   } else {
-    using PhysicalFamilyDispatch = attach_packing_policy_t<
+    using PackingFamilyDispatch = attach_packing_policy_t<
         FamilyDispatch, LogicalAPacking, LogicalBPacking>;
+    using PhysicalFamilyDispatch = attach_spatial_traversal_t<
+        Config, false, PackingFamilyDispatch,
+        decltype(m_value), decltype(n_value), decltype(k_value)>;
     return ArchitectureFamilyInvocation<
         Atom, TilePolicy, PhysicalFamilyDispatch, false,
         decltype(m_value), decltype(n_value), decltype(k_value),

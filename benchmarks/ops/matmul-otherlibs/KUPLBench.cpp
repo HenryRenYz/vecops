@@ -121,7 +121,10 @@ private:
         if (logical_col >= c_.m) continue;
         float value = 0.0f;
         if (op_ == Operation::GemmAdd) {
-          value = buffers_.initial[
+          // Match BLAS beta=1 and the other providers: the destination is the
+          // accumulator input.  The tile is staged before it is overwritten,
+          // so this is safe for partial edge tiles as well.
+          value = buffers_.output[
               checked_elements(batch, c_.n, c_.m) +
               static_cast<std::size_t>(logical_row * c_.m + logical_col)];
         } else if (op_ == Operation::Bias ||
@@ -217,6 +220,11 @@ void register_kupl_case(const Case& c) {
           }
           buffers.prepare_output(op);
           for (auto _ : state) {
+            if (op == Operation::GemmAdd) {
+              state.PauseTiming();
+              buffers.prepare_output(op);
+              state.ResumeTiming();
+            }
             runner();
             benchmark::DoNotOptimize(buffers.output.data());
             benchmark::ClobberMemory();

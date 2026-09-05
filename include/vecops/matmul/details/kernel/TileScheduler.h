@@ -38,9 +38,22 @@ struct NMajorFamilyDispatch : Dispatch {
 };
 
 template <typename Dispatch>
+struct AutomaticTraversalFamilyDispatch : Dispatch {
+  static constexpr bool automatic_traversal_policy = true;
+};
+
+template <typename Dispatch>
 inline constexpr bool n_major_family_dispatch_v = [] {
   if constexpr (requires { Dispatch::n_major_traversal; })
     return static_cast<bool>(Dispatch::n_major_traversal);
+  else
+    return false;
+}();
+
+template <typename Dispatch>
+inline constexpr bool automatic_traversal_family_dispatch_v = [] {
+  if constexpr (requires { Dispatch::automatic_traversal_policy; })
+    return static_cast<bool>(Dispatch::automatic_traversal_policy);
   else
     return false;
 }();
@@ -180,7 +193,7 @@ VECOPS_KERNEL_FUNCTION(void run_tiles_region_n_major(
     void* scratch)) {
   using EffectivePolicy = typename Backend::template EffectivePolicy<
       Atom, Policy, TraversalM, TraversalN, K, A, B, CInput, COutput>;
-  using Catalog = typename Backend::template Catalog<
+  using Catalog = typename Backend::template NMajorCatalog<
       Atom, EffectivePolicy, TraversalM, TraversalN, K,
       A, B, CInput, COutput>;
   const nint_t logical_k = static_cast<nint_t>(k);
@@ -210,7 +223,7 @@ VECOPS_KERNEL_FUNCTION(void run_tiles_n_major(
     void* scratch)) {
   using EffectivePolicy = typename Backend::template EffectivePolicy<
       Atom, Policy, M, N, K, A, B, CInput, COutput>;
-  using Catalog = typename Backend::template Catalog<
+  using Catalog = typename Backend::template NMajorCatalog<
       Atom, EffectivePolicy, M, N, K, A, B, CInput, COutput>;
   const nint_t logical_m = static_cast<nint_t>(m);
   const nint_t logical_n = static_cast<nint_t>(n);
@@ -241,7 +254,7 @@ VECOPS_KERNEL_FUNCTION(void run_tiles_phased_n_major(
     Route route, void* scratch)) {
   using EffectivePolicy = typename Backend::template EffectivePolicy<
       Atom, Policy, M, N, K, A, B, AccInput, AccOutput>;
-  using Catalog = typename Backend::template Catalog<
+  using Catalog = typename Backend::template NMajorCatalog<
       Atom, EffectivePolicy, M, N, K, A, B, AccInput, AccOutput>;
   const nint_t logical_m = static_cast<nint_t>(m);
   const nint_t logical_n = static_cast<nint_t>(n);

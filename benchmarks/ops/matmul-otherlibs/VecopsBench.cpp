@@ -90,8 +90,11 @@ void run_vecops_with_extents(
         }
       }
     } else if constexpr (Op == Operation::GemmAdd) {
-      auto c_input_tensor = make_tensor(buffers.initial.data(), c_layout);
-      auto c_input = input<float>(c_input_tensor);
+      // Keep the comparison contract identical to BLAS beta=1: C is both the
+      // accumulator input and the destination.  A separate-C-input variant is
+      // useful as a diagnostic, but it has a different memory footprint and
+      // must not be mixed into the cross-library result table.
+      auto c_input = input<float>(out);
       auto c_output = output<float>(out);
       ::vecops::kernel::Workspace storage(operation.required_workspace(
           internal_m, internal_n, k, a, b, c_input, c_output));
@@ -102,6 +105,9 @@ void run_vecops_with_extents(
             workspace, internal_m, internal_n, k, a, b, c_input, c_output);
       } else {
         for (auto _ : state_or_null) {
+          state_or_null.PauseTiming();
+          buffers.prepare_output(Op);
+          state_or_null.ResumeTiming();
           benchmark::DoNotOptimize(buffers.x.data());
           operation(
               workspace, internal_m, internal_n, k, a, b, c_input, c_output);
@@ -136,8 +142,7 @@ void run_vecops_with_extents(
         }
       }
     } else {
-      auto c_input_tensor = make_tensor(buffers.initial.data(), c_layout);
-      auto c_input = input<float>(c_input_tensor);
+      auto c_input = input<float>(out);
       auto c_output = output<float>(out);
       ::vecops::kernel::Workspace storage(operation.required_workspace(
           internal_m, internal_n, k, a, b, c_input, c_output));
@@ -148,6 +153,9 @@ void run_vecops_with_extents(
             workspace, internal_m, internal_n, k, a, b, c_input, c_output);
       } else {
         for (auto _ : state_or_null) {
+          state_or_null.PauseTiming();
+          buffers.prepare_output(Op);
+          state_or_null.ResumeTiming();
           benchmark::DoNotOptimize(buffers.x.data());
           operation(
               workspace, internal_m, internal_n, k, a, b, c_input, c_output);

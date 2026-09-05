@@ -1204,6 +1204,31 @@ TEST(MatmulTest, SplitKGemmAddRoutesTransformedCThroughWorkspace) {
           << "m=" << i << " n=" << j;
     }
   }
+
+  // The formal GEMMAdd benchmark contract aliases C input and output.  Keep
+  // this ragged, split-K and transformed-output combination covered because
+  // it exercises the hardest lifetime: every logical C value must be read
+  // before its destination is committed, and the output transform runs once.
+  std::vector<float32_t> in_place = initial;
+  auto in_place_t = make_tensor(
+      in_place.data(), make_layout(make_shape(cint<M>, cint<N>)));
+  auto in_place_input = input<float32_t>(in_place_t, identity);
+  auto in_place_output = output<float32_t>(in_place_t, scale);
+  kernel::Workspace in_place_owner(operation.required_workspace(
+      cint<M>, cint<N>, cint<K>, at, bt, in_place_input, in_place_output));
+  auto in_place_workspace = in_place_owner.view();
+  operation(in_place_workspace, cint<M>, cint<N>, cint<K>,
+            at, bt, in_place_input, in_place_output);
+  for (nint_t i = 0; i < M; ++i) {
+    for (nint_t j = 0; j < N; ++j) {
+      float expected = initial[i * N + j];
+      for (nint_t kk = 0; kk < K; ++kk)
+        expected += static_cast<float>(a[i * K + kk]) *
+                    static_cast<float>(b[j * K + kk]);
+      EXPECT_NEAR(in_place[i * N + j], 2.0f * expected, 3.0e-3f)
+          << "in-place m=" << i << " n=" << j;
+    }
+  }
 }
 
 TEST(MatmulTest, FullCDataAccessUsesCompileTimeExtents) {

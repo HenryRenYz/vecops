@@ -22,6 +22,7 @@ FIELDS = [
     "tokens", "chunk", "op", "dtype", "extent", "phase", "epilogue",
     "orientation", "tuning", "mc", "nc", "kc", "native_batch",
     "packing_included", "weights_prepacked", "call_multiplicity",
+    "weight_reorder_required", "prepared_weight_bytes",
     "selected_kc", "selected_outer_block", "padding_ratio", "isa_fallback",
     "median_us", "p10_us", "p90_us", "cv", "logical_gflops",
     "openblas_raw_e2e_us", "speedup_vs_openblas",
@@ -112,7 +113,8 @@ def load_rows(path: Path, args: argparse.Namespace) -> list[dict[str, Any]]:
                 "skipped" if sample.get("error_occurred") else "ok")
         for counter in (
             "native_batch", "packing_included", "weights_prepacked",
-            "call_multiplicity", "selected_kc", "selected_outer_block",
+            "call_multiplicity", "weight_reorder_required",
+            "prepared_weight_bytes", "selected_kc", "selected_outer_block",
             "padding_ratio", "isa_fallback",
         ):
             if counter in sample:

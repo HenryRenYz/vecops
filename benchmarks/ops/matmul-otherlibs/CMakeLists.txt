@@ -133,6 +133,13 @@ if(VECOPS_MATMUL_OTHERLIBS_ONEDNN)
         LIBRARIES dnnl
         DEFINITIONS VECOPS_MATMUL_OTHERLIBS_PROVIDER="oneDNN"
     )
+    vecops_add_benchmark(
+        NAME MatmulOtherlibsOneDNNPhaseProbe
+        FILES ${VECOPS_MATMUL_OTHERLIBS_DIR}/OneDNNPhaseProbe.cpp
+        ARCH Native
+        LIBRARIES dnnl
+        DEFINITIONS VECOPS_MATMUL_OTHERLIBS_PROVIDER="oneDNN"
+    )
 endif()
 
 if(VECOPS_MATMUL_OTHERLIBS_LIBXSMM)

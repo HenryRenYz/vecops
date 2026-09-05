@@ -29,6 +29,7 @@ struct ArchitectureWorkspacePlanner {
   VECOPS_ALWAYS_INLINE static nint_t required(const Invocation& op) {
     nint_t bytes = kernel::matmul_implementation::scratch_bytes<
         typename Invocation::Implementation>();
+    nint_t whole_packing_bytes = 0;
     // Reserve only the operand types selected from Meta bounds, plus the one
     // possible native-AMX B alternative.  Dynamic extents no longer retain a
     // runtime union of raw/A/B/AB variants.
@@ -36,18 +37,26 @@ struct ArchitectureWorkspacePlanner {
       if constexpr (Invocation::SMEBatchRowsFullPackCandidate) {
         // The two-sided flattened SME branch needs a complete [batch*M,K]
         // packed A rather than the ordinary one-leaf staging buffer.
-        bytes += op.batch_rows_flatten_enabled() && op.online_packs_b()
+        whole_packing_bytes +=
+            op.batch_rows_flatten_enabled() && op.online_packs_b()
             ? op.batch_rows_packed_a_bytes()
             : op.template auto_packed_bytes<
                   ::vecops::matmul::Operand::A>(op.a_);
       } else {
-        bytes += op.template auto_packed_bytes<
+        whole_packing_bytes += op.template auto_packed_bytes<
             ::vecops::matmul::Operand::A>(op.a_);
       }
     }
     if constexpr (Invocation::MayAutoPackB)
-      bytes += op.template auto_packed_bytes<
+      whole_packing_bytes += op.template auto_packed_bytes<
           ::vecops::matmul::Operand::B>(op.b_);
+    // The bounded WholeProblem panel route and complete online packing are
+    // mutually exclusive. Reserve the larger alternative instead of adding
+    // both lifetimes; scratch above is shared by either branch.
+    if (op.whole_b_panel_enabled())
+      bytes += op.whole_b_panel_bytes();
+    else
+      bytes += whole_packing_bytes;
     // The two additions below are runtime-gated but their gates were cached
     // by the constructor, keeping this a deterministic pure query.
     if (op.batch_rows_pack_a_enabled())

@@ -29,9 +29,10 @@
  *
  * The vocabulary deliberately splits along two axes of control:
  *
- * - **What the generic cache-tiled tiler does**: `CacheTiling`,
- *   `LoopOrder`/`loop_order::*`, legacy `PackingPolicy` profitability/extent
- *   hints, and `AccBufferMode` parameterize the generic MC/NC/KC loop nest.
+ * - **What the generic cache-tiled tiler does**: `CacheTiling`, legacy
+ *   `PackingPolicy` profitability/extent hints, and `AccBufferMode`
+ *   parameterize the generic MC/NC/KC loop nest. `LoopOrder` also supplies
+ *   the spatial M/N preference to WholeProblem when explicitly specified.
  * - **Where either family may pack**: `MatmulPackingTuning` constrains A and
  *   B independently to copies inside/outside their reuse loop, both, or
  *   neither. It also expresses mandatory packing and caller-prepared input.
@@ -76,9 +77,12 @@
  *
  * ## Pitfalls
  *
- * - `GenericTiledTuning` remains **generic-tiled-family-local** and never
- *   disables whole-problem kernels. `MatmulPackingTuning` is deliberately
- *   top-level and follows logical A/B through orientation exchange.
+ * - `GenericTiledTuning` never disables whole-problem kernels. Its cache
+ *   tiling, legacy packing, and accumulator fields remain family-local; an
+ *   explicitly selected `LoopOrder` additionally controls whether a
+ *   WholeProblem leaf walks M-major or N-major. `loop_order::Automatic`
+ *   preserves the architecture planner's own default. `MatmulPackingTuning`
+ *   is top-level and follows logical A/B through orientation exchange.
  * - `CacheTiling` dimensions are Meta `ValueType`s. `Const<N>` fixes a tile
  *   at compile time; `Dynamic<A>` keeps the value at runtime while promising
  *   alignment `A`. Mixing them up only degrades (never breaks) the loop nest.
@@ -377,9 +381,13 @@ using config_packing_tuning_t = typename ConfigPackingTuning<Config>::type;
 } // namespace details
 
 /**
- * @brief The M/N/K traversal order of the generic cache-tiled loop nest.
+ * @brief The M/N/K traversal order and whole-problem spatial preference.
  *
- * `first` is the outermost axis and `third` the innermost. The order
+ * `first` is the outermost axis and `third` the innermost. The complete order
+ * controls GenericTiled. WholeProblem has no outer cache-K loop, so an
+ * explicit order contributes only the relative order of M and N: N before M
+ * selects N-major traversal, otherwise M-major. This keeps traversal and the
+ * A/B reuse-axis packing vocabulary symmetric across families. The order also
  * interacts with `PackingExtent` (operands whose spatial axis precedes K
  * default to per-K-block packing) and with how many times each operand is
  * re-read from memory.

@@ -2985,6 +2985,10 @@ struct Backend<matmul_implementation::SME> {
             meta::ValueType, meta::ValueType, meta::ValueType,
             typename A, typename B, typename, typename>
   using Catalog = sme::Catalog<sme::use_expanded_catalog_v<Atom, A, B>>;
+  template <::vecops::matmul::Atom Atom, typename,
+            meta::ValueType, meta::ValueType, meta::ValueType,
+            typename A, typename B, typename, typename>
+  using NMajorCatalog = sme::Catalog<sme::use_expanded_catalog_v<Atom, A, B>>;
   static constexpr int ProblemRank = 2;
 
   static nint_t scratch_bytes() { return 0; }

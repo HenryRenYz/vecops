@@ -63,9 +63,10 @@ namespace vecops::ops {
  *                             `family_selection::Automatic` / `Prefer<F>` /
  *                             `Require<F>` (see matmul/Family.h).
  * @tparam SchedulerPolicyT    Tile2D traversal policy override.
- * @tparam GenericTiledTuningT Tuning knobs of the generic cache-tiled
- *                             family (see matmul/Config.h); only consulted
- *                             when that family is selected.
+ * @tparam GenericTiledTuningT Cache/packing knobs of the generic cache-tiled
+ *                             family plus an optional explicit spatial
+ *                             traversal preference shared by WholeProblem
+ *                             (see matmul/Config.h).
  * @tparam CacheInfoProviderT  Where cache sizes come from for automatic
  *                             cache tiling.
  * @tparam EnableSwapAB Allow an architecture policy to replace the problem

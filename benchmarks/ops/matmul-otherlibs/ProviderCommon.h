@@ -240,6 +240,14 @@ void run_external_benchmark(
   }
   buffers.prepare_output(op);
   for (auto _ : state) {
+    // beta=1 consumes C0 rather than the preceding benchmark output.
+    // Restoring C0 is harness setup, not GEMM work, so all providers do it
+    // with timing paused.
+    if (op == Operation::GemmAdd) {
+      state.PauseTiming();
+      buffers.prepare_output(op);
+      state.ResumeTiming();
+    }
     benchmark::DoNotOptimize(buffers.x.data());
     benchmark::DoNotOptimize(buffers.weight.data());
     run(buffers, op);
@@ -266,6 +274,13 @@ void run_external_benchmark_factory(
   }
   buffers.prepare_output(op);
   for (auto _ : state) {
+    // Keep every beta=1 invocation independent of Google Benchmark's prior
+    // iteration and warm-up state; see run_external_benchmark above.
+    if (op == Operation::GemmAdd) {
+      state.PauseTiming();
+      buffers.prepare_output(op);
+      state.ResumeTiming();
+    }
     benchmark::DoNotOptimize(buffers.x.data());
     benchmark::DoNotOptimize(buffers.weight.data());
     run();

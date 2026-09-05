@@ -31,7 +31,10 @@ enum class ProbePhase : std::uint8_t {
   PackA,
   PackB,
   PreparedBExecute,
+  PreparedBDirectAExecute,
+  PreparedBDirectANMajorExecute,
   PreparedABCompute,
+  PreparedABNMajorCompute,
 };
 
 enum class ProbeExtent : std::uint8_t {
@@ -54,7 +57,13 @@ constexpr const char* phase_name(ProbePhase phase) {
     case ProbePhase::PackA: return "pack_a";
     case ProbePhase::PackB: return "pack_b";
     case ProbePhase::PreparedBExecute: return "prepared_b_execute";
+    case ProbePhase::PreparedBDirectAExecute:
+      return "prepared_b_direct_a_execute";
+    case ProbePhase::PreparedBDirectANMajorExecute:
+      return "prepared_b_direct_a_n_major_execute";
     case ProbePhase::PreparedABCompute: return "prepared_ab_compute";
+    case ProbePhase::PreparedABNMajorCompute:
+      return "prepared_ab_n_major_compute";
   }
   return "unknown";
 }
@@ -69,7 +78,10 @@ void run_phase_probe(
   using namespace ::vecops::tensor;
   static_assert(Phase == ProbePhase::PackA || Phase == ProbePhase::PackB ||
                 Phase == ProbePhase::PreparedBExecute ||
-                Phase == ProbePhase::PreparedABCompute);
+                Phase == ProbePhase::PreparedBDirectAExecute ||
+                Phase == ProbePhase::PreparedBDirectANMajorExecute ||
+                Phase == ProbePhase::PreparedABCompute ||
+                Phase == ProbePhase::PreparedABNMajorCompute);
   if (c.batch != 1) {
     state.SkipWithError("phase probe currently requires a rank-two case");
     return;
@@ -113,7 +125,26 @@ void run_phase_probe(
   pack_a();
   pack_b();
 
-  auto operation = ops::matmul(ops::MatmulConfig<ProbeAtom>{});
+  using DirectAPacking = matmul::MatmulPackingTuning<
+      matmul::packing_policy::Disabled, matmul::packing_policy::Any>;
+  using DirectAConfig = ops::MatmulConfigWithPacking<
+      ProbeAtom, DirectAPacking>;
+  using NMajorTuning = matmul::GenericTiledTuning<
+      matmul::AutomaticCacheTiling, matmul::loop_order::NKM>;
+  using NMajorConfig = ops::MatmulConfig<
+      ProbeAtom, matmul::family_selection::Automatic,
+      kernel::matmul_policy::Automatic, NMajorTuning>;
+  using DirectANMajorConfig = ops::MatmulConfigWithPacking<
+      ProbeAtom, DirectAPacking, matmul::family_selection::Automatic,
+      kernel::matmul_policy::Automatic, NMajorTuning>;
+  using OperationConfig = std::conditional_t<
+      Phase == ProbePhase::PreparedBDirectAExecute,
+      DirectAConfig, std::conditional_t<
+          Phase == ProbePhase::PreparedBDirectANMajorExecute,
+          DirectANMajorConfig, std::conditional_t<
+              Phase == ProbePhase::PreparedABNMajorCompute,
+              NMajorConfig, ops::MatmulConfig<ProbeAtom>>>>;
+  auto operation = ops::matmul(OperationConfig{});
   const auto verify_prepared_ab = [&] {
     kernel::Workspace storage(operation.required_workspace(
         m, n, k, packed_a, packed_b, out));
@@ -153,7 +184,8 @@ void run_phase_probe(
         benchmark::ClobberMemory();
       }
     };
-    if constexpr (Phase == ProbePhase::PreparedABCompute)
+    if constexpr (Phase == ProbePhase::PreparedABCompute ||
+                  Phase == ProbePhase::PreparedABNMajorCompute)
       run_compute(packed_a);
     else
       run_compute(a);
@@ -163,7 +195,10 @@ void run_phase_probe(
   const bool packs_a = Phase == ProbePhase::PackA;
   constexpr bool PreparedB =
       Phase == ProbePhase::PreparedBExecute ||
-      Phase == ProbePhase::PreparedABCompute;
+      Phase == ProbePhase::PreparedBDirectAExecute ||
+      Phase == ProbePhase::PreparedBDirectANMajorExecute ||
+      Phase == ProbePhase::PreparedABCompute ||
+      Phase == ProbePhase::PreparedABNMajorCompute;
   constexpr bool PackingIncluded =
       Phase == ProbePhase::PackA || Phase == ProbePhase::PackB ||
       Phase == ProbePhase::PreparedBExecute;
@@ -200,7 +235,13 @@ void register_extent(const Case& c) {
   register_phase<ProbePhase::PackA, Extent, M, N, K>(c);
   register_phase<ProbePhase::PackB, Extent, M, N, K>(c);
   register_phase<ProbePhase::PreparedBExecute, Extent, M, N, K>(c);
+  register_phase<
+      ProbePhase::PreparedBDirectAExecute, Extent, M, N, K>(c);
+  register_phase<
+      ProbePhase::PreparedBDirectANMajorExecute, Extent, M, N, K>(c);
   register_phase<ProbePhase::PreparedABCompute, Extent, M, N, K>(c);
+  register_phase<
+      ProbePhase::PreparedABNMajorCompute, Extent, M, N, K>(c);
 }
 
 template <nint_t M, nint_t N, nint_t K>
@@ -222,6 +263,7 @@ void register_cases() {
   register_model_case<11008, 128, 4096>(CoreCases[9]);
   register_model_case<4096, 128, 11008>(CoreCases[11]);
   register_model_case<128, 16384, 128>(AF3Cases[0]);
+  register_model_case<128, 65536, 128>(AF3Cases[3]);
   register_model_case<1536, 1536, 1536>(AF3Cases[17]);
 #else
   register_general_case<64, 3136, 576>(CoreCases[2]);
