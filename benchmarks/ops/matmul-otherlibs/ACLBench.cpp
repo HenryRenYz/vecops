@@ -56,30 +56,16 @@ public:
     static_assert(sizeof(arm_gemm::bfloat16) == sizeof(bfloat16_t));
     static_assert(alignof(arm_gemm::bfloat16) <= alignof(bfloat16_t));
     if (!gemm_) throw std::runtime_error("ACL arm_gemm found no BF16 kernel");
-    for (nint_t batch = 0; batch < c.batch; ++batch) {
-      const auto base = checked_elements(batch, c.m, c.k);
-      for (nint_t col = 0; col < c.m; ++col) {
-        for (nint_t kk = 0; kk < c.k; ++kk) {
-          transposed_weight_[base + static_cast<std::size_t>(kk * c.m + col)] =
-              buffers.weight[base + static_cast<std::size_t>(col * c.k + kk)];
-        }
-      }
-    }
     if (gemm_->get_working_size() != 0) {
       gemm_->set_working_space(workspace_.data());
     }
     gemm_->set_nthreads(1);
-    if (gemm_->B_is_pretransposed()) {
-      gemm_->pretranspose_B_array(
-          prepacked_b_.data(), weights(), static_cast<int>(c.m),
-          static_cast<int>(c.m * c.k), false);
-      gemm_->set_pretransposed_B_data(prepacked_b_.data());
-    }
     set_arrays();
     config_ = gemm_->get_config();
   }
 
   void operator()() {
+    prepare_weights();
     set_arrays();
     const auto window = gemm_->get_window_size();
     const arm_gemm::ndcoord_t work{
@@ -99,6 +85,28 @@ public:
   const arm_gemm::GemmConfig& selected_config() const { return config_; }
 
 private:
+  void prepare_weights() {
+    // arm_gemm's public B view is KxM and its selected kernel may require a
+    // second opaque pretranspose. Both data transformations are timed in the
+    // common raw_e2e track; kernel/configuration selection remains setup.
+    for (nint_t batch = 0; batch < c_.batch; ++batch) {
+      const auto base = checked_elements(batch, c_.m, c_.k);
+      for (nint_t col = 0; col < c_.m; ++col) {
+        for (nint_t kk = 0; kk < c_.k; ++kk) {
+          transposed_weight_[base + static_cast<std::size_t>(kk * c_.m + col)] =
+              buffers_.weight[
+                  base + static_cast<std::size_t>(col * c_.k + kk)];
+        }
+      }
+    }
+    if (gemm_->B_is_pretransposed()) {
+      gemm_->pretranspose_B_array(
+          prepacked_b_.data(), weights(), static_cast<int>(c_.m),
+          static_cast<int>(c_.m * c_.k), false);
+      gemm_->set_pretransposed_B_data(prepacked_b_.data());
+    }
+  }
+
   const arm_gemm::bfloat16* activations() const {
     return reinterpret_cast<const arm_gemm::bfloat16*>(buffers_.x.data());
   }
@@ -150,12 +158,12 @@ void register_acl_cases() {
                     static_cast<double>(config.outer_block_size));
                 return [runner = std::move(runner)]() mutable { (*runner)(); };
               },
-              true, false, true);
+              true, true, false);
         } catch (const std::exception& error) {
           state.SkipWithError(error.what());
         }
       },
-      0.1, 7, "prepared_execute", true);
+      0.1, 7, "raw_e2e", true, true, false);
 }
 
 } // namespace vecops::bench::matmul_otherlibs

@@ -9,10 +9,10 @@ run_id="${1:-$(date +%Y%m%dT%H%M%S)}"
 filter="${VECOPS_BENCH_FILTER:-.*}"
 x86_filter="${VECOPS_X86_FILTER:-${filter}}"
 arm_vecops_filter="${VECOPS_ARM_VECOPS_FILTER:-${filter}}"
-# The peer subset defaults to the cases that are practical and supported on
-# every ARM provider.  Vecops still runs the complete catalog, so missing peer
-# measurements remain genuinely missing instead of suppressing whole shapes.
-arm_peer_filter="${VECOPS_ARM_PEER_FILTER:-case:(G01_square|G03_conv1x1|L01_qkv_decode|L02_qkv_batch4|L04_mlp_up_decode|L08_attention|A01_gsa_proj_r128|A05_pair_bias_r128|A08_gsa_qk_r128|A12_gsa_pv_r128|A16_tri_mul_r128)/}"
+# Full coverage is the default. A reduced peer filter is diagnostic-only and
+# must be requested explicitly; otherwise it creates misleading vecops-only
+# shapes in the completed matrix.
+arm_peer_filter="${VECOPS_ARM_PEER_FILTER:-${filter}}"
 x86_build="${VECOPS_X86_BUILD:-${source_root}/cmake-build-matmul-otherlibs-x86}"
 remote_host="${VECOPS_ARM_HOST:-920f-4}"
 remote_root="${VECOPS_ARM_ROOT:-vecops-neo-matmul-otherlibs}"
@@ -142,12 +142,24 @@ fi
 combined="${output_root}/combined.csv"
 python3 "${script_dir}/combine_csv.py" "${x86_csv}" "${arm_csv}" \
   --output "${combined}"
+complete="${output_root}/benchmark-results-complete.csv"
+python3 "${script_dir}/complete_results.py" "${combined}" \
+  --catalog "${combined}" --output "${complete}"
+python3 "${script_dir}/validate_results.py" "${complete}"
+python3 "${script_dir}/combine_csv.py" "${complete}" \
+  --common-cases-across-hosts \
+  --output "${output_root}/cross-arch-common.csv"
+python3 "${script_dir}/summarize_vecops.py" "${complete}" \
+  --output "${output_root}/vecops-performance-summary.csv"
 analysis_args=(
-  --current "${combined}"
+  --current "${complete}"
   --output-dir "${output_root}/analysis"
 )
 if [[ -f "${baseline}" ]]; then
-  analysis_args+=(--peers "${baseline}" --baseline "${baseline}")
+  # The current complete run already contains every peer. The old snapshot is
+  # regression-only; importing its prepared rows as fallback peers would mix
+  # measurement phases in the new comparison tables.
+  analysis_args+=(--baseline "${baseline}")
 fi
 python3 "${script_dir}/analyze_cycle.py" "${analysis_args[@]}"
 

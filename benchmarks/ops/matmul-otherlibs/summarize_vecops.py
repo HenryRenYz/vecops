@@ -45,7 +45,9 @@ def main() -> int:
 
     with args.input.open(encoding="utf-8", newline="") as stream:
         rows = list(csv.DictReader(stream))
-    ok = [row for row in rows if row["status"] == "ok" and row["median_us"]]
+    ok = [row for row in rows
+          if row["status"] == "ok" and row["median_us"]
+          and row["phase"] == "raw_e2e"]
     providers = {
         (row["host"], row["case"], row["op"], row["library"]):
             float(row["median_us"])

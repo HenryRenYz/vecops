@@ -43,6 +43,8 @@ def main() -> int:
 
     failures: list[str] = []
     reference = [fields(name) for name in list_names(args.reference)]
+    if any(item.get("phase") != "raw_e2e" for item in reference):
+        failures.append("reference provider contains a non-raw formal row")
     expected = {semantic_key(item) for item in reference}
     if len(expected) != len(reference):
         failures.append("reference provider contains duplicate semantic cases")
@@ -51,6 +53,10 @@ def main() -> int:
               for name in list_names(executable)]
     extent_sets: dict[tuple[str, ...], set[str]] = defaultdict(set)
     for item in vecops:
+        if item.get("phase") != "raw_e2e":
+            failures.append(
+                f"vecops formal row is not raw_e2e: {item.get('case')}/"
+                f"{item.get('op')}")
         extent_sets[semantic_key(item)].add(item["extent"])
     if set(extent_sets) != expected:
         failures.append(
@@ -67,6 +73,8 @@ def main() -> int:
 
     for executable in args.provider:
         records = [fields(name) for name in list_names(executable)]
+        if any(item.get("phase") != "raw_e2e" for item in records):
+            failures.append(f"{executable.name} contains a non-raw formal row")
         actual = {semantic_key(item) for item in records}
         label = executable.name
         if actual != expected:

@@ -17,37 +17,6 @@ public:
                       ? checked_elements(c.batch, c.n, physical_k_)
                       : 0),
         uses_odd_k_fallback_(c.k % 2 != 0) {
-    // LIBXSMM's GEMM interface is column-major. Pack W[M,K] as a
-    // column-major MxK matrix; X[N,K] is already a column-major KxN matrix,
-    // and row-major Y[N,M] is a column-major MxN matrix.
-    for (nint_t batch = 0; batch < c.batch; ++batch) {
-      const auto source_base = checked_elements(batch, c.m, c.k);
-      const auto packed_base = checked_elements(batch, c.m, physical_k_);
-      for (nint_t row = 0; row < c.m; ++row) {
-        for (nint_t kk = 0; kk < physical_k_; ++kk) {
-          packed_weight_[packed_base +
-                         static_cast<std::size_t>(row + kk * c.m)] =
-              kk < c.k
-                  ? buffers.weight[source_base +
-                                   static_cast<std::size_t>(row * c.k + kk)]
-                  : bfloat16_t{0.0f};
-        }
-      }
-      if (uses_odd_k_fallback_) {
-        const auto x_source_base = checked_elements(batch, c.n, c.k);
-        const auto x_packed_base = checked_elements(batch, c.n, physical_k_);
-        for (nint_t row = 0; row < c.n; ++row) {
-          for (nint_t kk = 0; kk < physical_k_; ++kk) {
-            packed_x_[x_packed_base +
-                      static_cast<std::size_t>(row * physical_k_ + kk)] =
-                kk < c.k
-                    ? buffers.x[x_source_base +
-                                static_cast<std::size_t>(row * c.k + kk)]
-                    : bfloat16_t{0.0f};
-          }
-        }
-      }
-    }
     const auto shape = libxsmm_create_gemm_shape(
         static_cast<libxsmm_blasint>(c.m),
         static_cast<libxsmm_blasint>(c.n),
@@ -84,6 +53,7 @@ public:
   }
 
   void operator()() {
+    pack_inputs();
     for (nint_t batch = 0; batch < c_.batch; ++batch) {
       libxsmm_gemm_param params{};
       const auto x_offset = uses_odd_k_fallback_
@@ -116,6 +86,39 @@ public:
   }
 
 private:
+  void pack_inputs() {
+    // LIBXSMM consumes column-major A. Convert the public row-major W[M,K]
+    // for every raw_e2e invocation; odd K also needs a zero-padded X copy.
+    for (nint_t batch = 0; batch < c_.batch; ++batch) {
+      const auto source_base = checked_elements(batch, c_.m, c_.k);
+      const auto packed_base = checked_elements(batch, c_.m, physical_k_);
+      for (nint_t row = 0; row < c_.m; ++row) {
+        for (nint_t kk = 0; kk < physical_k_; ++kk) {
+          packed_weight_[packed_base +
+                         static_cast<std::size_t>(row + kk * c_.m)] =
+              kk < c_.k
+                  ? buffers_.weight[source_base +
+                                    static_cast<std::size_t>(row * c_.k + kk)]
+                  : bfloat16_t{0.0f};
+        }
+      }
+      if (uses_odd_k_fallback_) {
+        const auto x_source_base = checked_elements(batch, c_.n, c_.k);
+        const auto x_packed_base = checked_elements(batch, c_.n, physical_k_);
+        for (nint_t row = 0; row < c_.n; ++row) {
+          for (nint_t kk = 0; kk < physical_k_; ++kk) {
+            packed_x_[x_packed_base +
+                      static_cast<std::size_t>(row * physical_k_ + kk)] =
+                kk < c_.k
+                    ? buffers_.x[x_source_base +
+                                 static_cast<std::size_t>(row * c_.k + kk)]
+                    : bfloat16_t{0.0f};
+          }
+        }
+      }
+    }
+  }
+
   const Case& c_;
   Buffers& buffers_;
   Operation op_;
@@ -154,12 +157,12 @@ int main(int argc, char** argv) {
                     runner->padding_ratio());
                 return [runner = std::move(runner)]() mutable { (*runner)(); };
               },
-              false, false, true);
+              false, true, false);
         } catch (const std::exception& error) {
           state.SkipWithError(error.what());
         }
       },
-      0.1, 7, "prepared_execute", false);
+      0.1, 7, "raw_e2e", false, false, false);
   const int result =
       run_registered_benchmarks(argc, argv, "matmul_otherlibs_libxsmm");
   libxsmm_finalize();

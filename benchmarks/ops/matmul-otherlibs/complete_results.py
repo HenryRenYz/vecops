@@ -7,16 +7,16 @@ import argparse
 import csv
 from pathlib import Path
 
-from merge_results import FIELDS
+from merge_results import FIELDS, add_reference_speedups
 
 
 PROVIDERS = ("vecops", "OpenBLAS", "oneDNN", "LIBXSMM", "ACL", "KUPL-MMA")
 PHASE = {
     "vecops": "raw_e2e",
     "OpenBLAS": "raw_e2e",
-    "oneDNN": "prepared_execute",
-    "LIBXSMM": "prepared_execute",
-    "ACL": "prepared_execute",
+    "oneDNN": "raw_e2e",
+    "LIBXSMM": "raw_e2e",
+    "ACL": "raw_e2e",
     "KUPL-MMA": "raw_e2e",
 }
 
@@ -32,7 +32,11 @@ def read_rows(path: Path) -> list[dict[str, str]]:
 def epilogue(provider: str, operation: str) -> str:
     if operation in ("gemm", "gemm_add"):
         return "native"
-    if provider in ("vecops", "oneDNN", "ACL"):
+    if provider == "vecops":
+        return "native_fused"
+    if provider == "oneDNN" and operation == "bias":
+        return "native_fused"
+    if provider == "ACL" and operation in ("bias", "bias_relu"):
         return "native_fused"
     if provider == "KUPL-MMA" and operation == "bias":
         return "native_accumulate"
@@ -105,6 +109,10 @@ def main() -> int:
                         row["status"] = "not_measured"
                     completed.append(row)
 
+    # Recompute after expansion so every successful same-phase row receives
+    # all available OpenBLAS and vecops dynamic/const references, regardless
+    # of how many partial provider CSVs were combined above.
+    add_reference_speedups(completed)
     completed.sort(key=lambda row: tuple(row[field] for field in (
         "host", "case", "op", "phase", "library", "extent", "tuning")))
     args.output.parent.mkdir(parents=True, exist_ok=True)

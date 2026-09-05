@@ -53,14 +53,18 @@ to keep ARM template compilation memory bounded; all shards still report
 |---|---|---|---|
 | vecops | `raw_e2e` | raw X/W; any online packing performed by the selected plan is timed | native input/output transforms |
 | OpenBLAS | `raw_e2e` | raw X/W and `Trans` flag; no external packing | epilogues are separate |
-| oneDNN | `prepared_execute` | rank-2 where possible; oneDNN-selected blocked-W reorder is outside timing | sum/bias native; ReLU and SiLU separate because optimized Arm BRGEMM rejects those post-ops |
-| LIBXSMM | `prepared_execute` | W layout conversion and JIT dispatch are outside timing | epilogues are separate |
-| ACL arm_gemm | `prepared_execute` | ACL pretransposed W is outside timing | bias/ReLU native; SiLU separate |
+| oneDNN | `raw_e2e` | primitive/JIT setup is outside timing; oneDNN-selected blocked-W reorder runs from raw W inside every timed call | sum/bias native; ReLU and SiLU separate because optimized Arm BRGEMM rejects those post-ops |
+| LIBXSMM | `raw_e2e` | JIT dispatch is outside timing; row-major W conversion and odd-K X padding run inside every timed call | epilogues are separate |
+| ACL arm_gemm | `raw_e2e` | kernel selection is outside timing; public KxM conversion and selected opaque B pretranspose run inside every timed call | bias/ReLU native; SiLU separate |
 | KUPL MMA | `raw_e2e` | KUPL only supplies a 16×64×2 microkernel; vecops transpose kernels produce its A16/B64 layouts online, and tails/macro traversal remain timed | accumulation/bias seed native; activations separate |
 
-Do not compare `raw_e2e` and `prepared_execute` as if they were the same
-contract.  `packing_included`, `weights_prepacked`, and `native_batch` are
-explicit CSV columns.
+Every formal provider row now uses the same `raw_e2e` input contract. Any
+data-dependent conversion, padding, packing, or blocked-weight reorder needed
+to consume public row-major X/W is timed. Primitive/JIT/kernel selection and
+memory allocation remain setup. Prepared execution remains available only in
+separate diagnostic probes and is never mixed into formal speedups.
+`packing_included`, `weights_prepacked`, and `native_batch` are explicit CSV
+columns.
 
 Every benchmark uses one OS thread, is pinned to one core by `run_suite.py`,
 warms up once for correctness, then defaults to seven repetitions (the recorded
@@ -75,7 +79,9 @@ ACL calls `set_nthreads(1)`, and vecops/LIBXSMM/KUPL adapters execute serially.
 Google Benchmark itself registers no threaded benchmark, and the process is
 affinity-pinned to one logical CPU.
 
-The normalized CSV also contains two deliberately distinct OpenBLAS columns:
+The normalized CSV contains two OpenBLAS columns. They are equal for the
+formal all-raw table; the distinction remains useful for diagnostic prepared
+inputs:
 
 - `speedup_vs_openblas` is populated only when the row and OpenBLAS have the
   same measurement phase.
@@ -264,11 +270,9 @@ switch between two cache/address modes even at a stable CPU frequency. It does
 not replace an interleaved A/B order or an address-skew sweep, but prevents
 unrelated executable relocation from dominating the comparison.
 
-The ARM vecops pass covers the full catalog by default.  Its peer pass uses
-the practical cross-library subset by default; override
-`VECOPS_ARM_PEER_FILTER='.*'` for a deliberately exhaustive (and potentially
-very slow) external-library sweep.  The two passes are merged before analysis,
-so shapes with no peer datum are retained.
+Both ARM vecops and every ARM peer cover the full catalog by default. Set
+`VECOPS_ARM_PEER_FILTER` only for a deliberately reduced diagnostic run; such
+a run is not suitable for publishing the complete matrix.
 
 Re-running the same run ID reuses a completed per-platform CSV and resumes at
 the missing platform, while the remote `run_suite.py --resume` pass reuses

@@ -280,17 +280,22 @@ template <typename Callback>
 void register_external_cases(
     std::string_view provider, Callback&& callback,
     double min_time = 0.1, int repetitions = 7,
-    std::string_view phase = "raw_e2e", bool native_fusion = false) {
+    std::string_view phase = "raw_e2e", bool native_bias = false,
+    bool native_relu = false, bool native_silu = false) {
   const auto register_catalog = [&](const auto& catalog) {
     for (const Case& c : catalog) {
       for (Operation op : {Operation::Gemm, Operation::GemmAdd,
                            Operation::Bias, Operation::BiasRelu,
                            Operation::BiasSilu}) {
         if ((c.operations & op_bit(op)) == 0) continue;
+        const bool fused =
+            (op == Operation::Bias && native_bias) ||
+            (op == Operation::BiasRelu && native_relu) ||
+            (op == Operation::BiasSilu && native_silu);
         const std::string epilogue =
             op == Operation::Gemm || op == Operation::GemmAdd
                 ? "native"
-                : native_fusion ? "native_fused" : "separate";
+                : fused ? "native_fused" : "separate";
         const auto name = benchmark_name(provider, c, op, "NA", phase, epilogue);
         auto* registered = benchmark::RegisterBenchmark(
             name.c_str(), [c, op, callback](benchmark::State& state) mutable {

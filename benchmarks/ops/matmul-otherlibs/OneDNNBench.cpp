@@ -72,9 +72,6 @@ public:
     user_weights_mem_ = dnnl::memory(
         user_weights_md, engine_, buffers.weight.data());
     weights_mem_ = dnnl::memory(pd_.weights_desc(), engine_);
-    dnnl::reorder(user_weights_mem_, weights_mem_).execute(
-        stream_, user_weights_mem_, weights_mem_);
-    stream_.wait();
     dst_mem_ = dnnl::memory(dst_md, engine_, buffers.output.data());
     if (pd_.scratchpad_desc().get_size() != 0) {
       scratchpad_mem_ = dnnl::memory(pd_.scratchpad_desc(), engine_);
@@ -82,6 +79,12 @@ public:
   }
 
   void operator()() {
+    // The formal cross-library track starts from the public row-major BF16
+    // weights on every invocation. Primitive/JIT construction is setup, but
+    // the data-dependent blocked-weight reorder is part of raw_e2e time.
+    dnnl::reorder(user_weights_mem_, weights_mem_).execute(
+        stream_, user_weights_mem_, weights_mem_);
+    stream_.wait();
     std::unordered_map<int, dnnl::memory> args{
         {DNNL_ARG_SRC, src_mem_},
         {DNNL_ARG_WEIGHTS, weights_mem_},
@@ -137,7 +140,7 @@ int main(int argc, char** argv) {
               state.SetLabel(runner->implementation());
               return [runner = std::move(runner)]() mutable { (*runner)(); };
             },
-            c.batch > 1, false, true);
-      }, 0.1, 7, "prepared_execute", false);
+            c.batch > 1, true, false);
+      }, 0.1, 7, "raw_e2e", true, false, false);
   return run_registered_benchmarks(argc, argv, "matmul_otherlibs_onednn");
 }
