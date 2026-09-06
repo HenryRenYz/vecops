@@ -86,6 +86,22 @@ read-only forever (no `const_cast` anywhere); output Specs reject const
 elements at compile time. `Array<T, N>` is the fully-dynamic spelling
 (all dimensions `Any`).
 
+For fixed axes, prefer `tensor::size<I>(tensor_or_layout)` and
+`tensor::stride<I>(tensor_or_layout)` over indexing `shape()[I]` or
+`strides()[I]`. They return the corresponding `meta::Value` (rather than a
+degraded `nint_t`), so `auto` preserves the layout's `meta::Const`/
+`meta::Dynamic` metadata through adjacent shape-building and operator calls.
+The resulting Value also converts implicitly to `nint_t` at runtime-only
+boundaries such as pointer arithmetic, workspace byte counts, or a loop trip
+count; retain it in an `auto` variable until such a boundary.
+
+`TensorOf<Element, Rank>` and `WritableTensorOf<Element, Rank>` express exact
+rank/element requirements without introducing operator-local Tensor wrappers.
+For Specs, `InputOperand`/`OutputOperand` describe only readability or
+writability; `InputOperandOf<Rank>`/`OutputOperandOf<Rank>` add an exact rank.
+`OptionalInputOperand` accepts an omitted input at any rank, while
+`OptionalInputOperandOf<Rank>` makes the non-omitted branch rank-specific.
+
 ### Slicing
 
 `operator()` / `operator[]` accept, per dimension:
@@ -303,6 +319,25 @@ vector axis defaults to `Rank - 1`. Options (all compile-time validated):
 - **default-class overrides (≤1 each)**: conversion order/value,
   temporality, packing (stores only), alignment — merged over the binding's
   `access_defaults` rather than passed down raw.
+
+For exact point access, `x.load_scalar(coord[, conversion-options...])`
+returns one `ComputeType`, while
+`y.store_scalar(coord, value[, conversion-options...])` stores one. These
+operations use Layout to compute the address and then issue direct scalar
+pointer traffic; they do not construct a vector. Only conversion order/value
+options are accepted (`materialize::populate` is additionally accepted by
+scalar input loads). Lane masks, strided/indexed addressing, inactive
+population, alignment, packing, and temporality are vector-only call options.
+Operand-level memory defaults may still be shared with vector calls but have no
+effect on scalar traffic. Conversion order likewise cannot reorder one value.
+
+Scalar access is available only when the active boundary transform is
+`NoTransform`, `IdentityVecTransform`, or `ZeroVecTransform`; a custom vector
+transform makes the scalar member unavailable at compile time. `NoTransform`
+performs one MemoryType↔ComputeType conversion. Identity retains its explicit
+intermediate type and therefore performs both boundary conversions. A zero
+input returns `ComputeType{}` without reading Tensor memory, and a zero output
+stores a converted zero regardless of the supplied value.
 
 Direct sessions expose `raw_data()`, `raw_strides()`, `spec()`, `policy()`.
 

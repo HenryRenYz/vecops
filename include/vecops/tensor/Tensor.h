@@ -5,6 +5,7 @@
 #ifndef VECOPS_TENSOR_H
 #define VECOPS_TENSOR_H
 
+#include <concepts>
 #include <cstdint>
 #include <type_traits>
 #include <array>
@@ -14,6 +15,7 @@
 #include "vecops/CoreTypes.h"
 #include "vecops/Assertion.h"
 #include "vecops/tensor/Layout.h"
+#include "vecops/tensor/OptionalOperand.h"
 
 /**
  * @file Tensor.h
@@ -574,24 +576,24 @@ public:
   // -------- Dimension access --------
 
   /**
-   * Get the size of dimension I (compile-time index).
-   * Returns `constexpr` if the dimension is `Const<N>`.
+   * Get the typed meta::Value size of dimension I (compile-time index).
+   * Returns `Const<N>` or `Dynamic<...>` to preserve static metadata.
    *
    * @tparam I  Dimension index (0 <= I < Ndim).
    */
   template <int I>
-  VECOPS_ALWAYS_INLINE constexpr nint_t size() const {
+  VECOPS_ALWAYS_INLINE constexpr tensor::size_type_t<I, Layout> size() const {
     return tensor::size<I>(_layout);
   }
 
   /**
-   * Get the stride of dimension I (compile-time index).
-   * Returns `constexpr` if the dimension is `Const<N>`.
+   * Get the typed meta::Value stride of dimension I (compile-time index).
+   * Returns `Const<N>` or `Dynamic<...>` to preserve static metadata.
    *
    * @tparam I  Dimension index (0 <= I < Ndim).
    */
   template <int I>
-  VECOPS_ALWAYS_INLINE constexpr nint_t stride() const {
+  VECOPS_ALWAYS_INLINE constexpr tensor::stride_type_t<I, Layout> stride() const {
     return tensor::stride<I>(_layout);
   }
 
@@ -956,6 +958,50 @@ inline constexpr bool is_tensor_v = is_specialization_of_v<Tensor, T>;
 /** Constraint-facing wrapper for is_tensor_v. */
 template <typename T>
 concept TensorLike = is_tensor_v<std::remove_cvref_t<T>>;
+
+/** A Tensor with an exact logical rank and memory element type.
+ *
+ * Element cv-qualification is ignored so the same constraint accepts both
+ * `Tensor<T, ...>` and `Tensor<const T, ...>`.  Use
+ * `WritableTensorOf` where mutation is required.
+ */
+template <typename Tensor, typename Element, int Rank>
+inline constexpr bool is_tensor_of_v = [] {
+  using T = std::remove_cvref_t<Tensor>;
+  if constexpr (!is_tensor_v<T>) {
+    return false;
+  } else {
+    return T::Ndim == Rank &&
+        std::same_as<std::remove_const_t<typename T::ElementType>, Element>;
+  }
+}();
+
+template <typename Tensor, typename Element, int Rank>
+concept TensorOf = is_tensor_of_v<Tensor, Element, Rank>;
+
+/** A mutable Tensor with an exact logical rank and memory element type. */
+template <typename Tensor, typename Element, int Rank>
+concept WritableTensorOf =
+    TensorOf<Tensor, Element, Rank> &&
+    !std::is_const_v<
+        typename std::remove_cvref_t<Tensor>::ElementType>;
+
+/** Omitted or exact-rank Tensor with the requested memory element type. */
+template <typename Tensor, typename Element, int Rank>
+concept OptionalTensorOf =
+    is_nullopt_v<Tensor> || TensorOf<Tensor, Element, Rank>;
+
+/** Compile-time-axis Tensor size accessor mirroring Layout's `size<I>()`. */
+template <int I, TensorLike T>
+VECOPS_ALWAYS_INLINE constexpr decltype(auto) size(const T& tensor) {
+  return tensor.template size<I>();
+}
+
+/** Compile-time-axis Tensor stride accessor mirroring Layout's `stride<I>()`. */
+template <int I, TensorLike T>
+VECOPS_ALWAYS_INLINE constexpr decltype(auto) stride(const T& tensor) {
+  return tensor.template stride<I>();
+}
 
 // ======================== Array alias ========================
 

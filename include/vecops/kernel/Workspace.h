@@ -7,9 +7,11 @@
 
 #include "vecops/Assertion.h"
 #include "vecops/CoreTypes.h"
+#include "vecops/tensor/Tensor.h"
 #include "vecops/util/Math.h"
 #include "vecops/vec/Vec.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -27,7 +29,7 @@
  * kernel::Workspace storage(required_bytes);
  * auto ws = storage.view();
  * auto mark = ws.mark();
- * float* tmp = ws.allocate<float>(count);
+ * auto tmp = ws.allocate_tensor<float>(tensor::make_shape(meta::Any{count}));
  * // use tmp; destroy objects that refer to it
  * ws.rewind(mark);
  * @endcode
@@ -67,6 +69,27 @@ public:
   };
 
   WorkspaceView() = default;
+
+  /** Minimum alignment used by typed workspace allocations. */
+  template <typename T>
+  static constexpr nint_t typed_alignment() {
+    return std::max(
+        vec::DEFAULT_ALIGNMENT, static_cast<nint_t>(alignof(T)));
+  }
+
+  /** Conservative byte budget for one typed allocation from this view. */
+  template <typename T>
+  static constexpr nint_t allocation_bytes(nint_t count) {
+    return align_up(
+        count * static_cast<nint_t>(sizeof(T)), typed_alignment<T>());
+  }
+
+  /** Conservative byte budget for `allocate_tensor<T>(shape)`. */
+  template <typename T, typename Shape>
+    requires tensor::is_shape_v<std::remove_cvref_t<Shape>>
+  static nint_t tensor_bytes(const Shape& shape) {
+    return allocation_bytes<T>(tensor::numel(tensor::make_layout(shape)));
+  }
 
   /** @brief Adopt `data` as the backing buffer without taking ownership.
    *
@@ -126,12 +149,32 @@ public:
 
   /**
    * @brief Allocate raw storage for `count` T objects.
-   * @note This does not initialize T and is primarily intended for trivial
-   * Tensor element buffers.
+   *
+   * The returned pointer is aligned to at least `vec::DEFAULT_ALIGNMENT`;
+   * over-aligned element types retain their stronger `alignof(T)` guarantee.
+   * This does not initialize T and is primarily intended for trivial Tensor
+   * element buffers.
    */
   template <typename T>
   T* allocate(nint_t count) {
-    return static_cast<T*>(allocate(count * static_cast<nint_t>(sizeof(T)), alignof(T)));
+    return static_cast<T*>(
+        allocate(count * static_cast<nint_t>(sizeof(T)), typed_alignment<T>()));
+  }
+
+  /**
+   * @brief Allocate one row-major contiguous Tensor with the supplied Shape.
+   *
+   * The returned view is non-owning: it remains valid until a covering
+   * `rewind()`/`reset()` or the backing Workspace owner is destroyed.  Shape
+   * metadata is preserved, including `meta::Const` and `meta::Dynamic`
+   * constraints.  Storage is raw and uninitialized.
+   */
+  template <typename T, typename Shape>
+    requires tensor::is_shape_v<std::remove_cvref_t<Shape>>
+  auto allocate_tensor(Shape shape) {
+    auto layout = tensor::make_layout(std::move(shape));
+    T* data = allocate<T>(tensor::numel(layout));
+    return tensor::make_tensor(data, std::move(layout));
   }
 
   /** @brief Bytes currently bump-allocated (the cursor position). */

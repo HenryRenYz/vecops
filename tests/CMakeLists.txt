@@ -13,6 +13,8 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
 endif()
 vecops_add_test(NAME KernelLoopTest FILES kernel/LoopTest.cpp FOLDER kernel/loop)
 vecops_add_test(NAME KernelTile2DTest FILES kernel/Tile2DTest.cpp FOLDER kernel/tile2d)
+vecops_add_test(NAME WorkspaceTest FILES kernel/WorkspaceTest.cpp
+    FOLDER kernel/workspace ARCH Scalar)
 vecops_add_test(NAME MatmulTilerTest FILES matmul/TilerTest.cpp FOLDER matmul/tiler)
 vecops_add_test(
     NAME ExecutionSessionTest
@@ -130,6 +132,11 @@ vecops_add_test(
     FILES ops/SoftmaxTest.cpp TestUtils.cpp
     FOLDER ops/softmax
     ARCH ${VECOPS_TENSOR_KERNEL_ARCH})
+vecops_add_test(
+    NAME AttentionTest
+    FILES ops/AttentionTest.cpp TestUtils.cpp
+    FOLDER ops/attention
+    ARCH Native)
 set(VECOPS_TRANSPOSE_ARCH ${VECOPS_TENSOR_KERNEL_ARCH})
 if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND VECOPS_NATIVE_FIXED_SVE_BITS)
     list(APPEND VECOPS_TRANSPOSE_ARCH NativeFixedSVE)

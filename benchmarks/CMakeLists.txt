@@ -61,6 +61,12 @@ vecops_add_benchmark(
     ARCH Native Scalar
 )
 
+vecops_add_benchmark(
+    NAME AttentionBench
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/AttentionBench.cpp
+    ARCH Native
+)
+
 if(VECOPS_ARCH_FAMILY STREQUAL "x86")
     vecops_add_benchmark(
         NAME MatmulPackBench

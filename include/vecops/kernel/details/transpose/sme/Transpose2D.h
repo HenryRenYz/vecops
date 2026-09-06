@@ -316,15 +316,15 @@ struct SMEBackend {
         typename std::remove_cvref_t<Destination>::MemoryElement;
     const auto* source_data = source.raw_data();
     const auto source_strides = source.raw_strides();
-    const auto source_row_stride = tensor::stride_value<SrcRow>(
+    const auto source_row_stride = tensor::stride<SrcRow>(
         source.spec().input_layout());
-    const auto source_col_stride = tensor::stride_value<SrcCol>(
+    const auto source_col_stride = tensor::stride<SrcCol>(
         source.spec().input_layout());
     auto* destination_data = destination.raw_data();
     const auto destination_strides = destination.raw_strides();
-    const auto destination_row_stride = tensor::stride_value<DstRow>(
+    const auto destination_row_stride = tensor::stride<DstRow>(
         destination.spec().output_layout());
-    const auto destination_col_stride = tensor::stride_value<DstCol>(
+    const auto destination_col_stride = tensor::stride<DstCol>(
         destination.spec().output_layout());
     scope.with_resources(
         execution::details::arm::StreamingZARegion{},

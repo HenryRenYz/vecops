@@ -14,6 +14,7 @@
 #include "vecops/kernel/Transpose2D.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/tensor/AccessPolicy.h"
+#include "vecops/tensor/OptionalOperand.h"
 #include "vecops/tensor/Tensor.h"
 #include "vecops/tensor/Transform.h"
 #include "vecops/util/ScalarConvert.h"
@@ -22,7 +23,7 @@
 
 /**
  * @file DataAccess.h
- * @brief Policy-driven vector access to logical N-dimensional Tensors.
+ * @brief Policy-driven vector and scalar access to logical N-dimensional Tensors.
  *
  * DataAccess is the boundary between an operator's vector computation and the
  * caller's Tensor representation. A kernel requests a vector of ComputeType at
@@ -93,6 +94,18 @@
  * may point outside the shape and are not accessed. Bounds are asserted in
  * debug builds; an out-of-range unmasked request is a caller error, not an
  * implicit tail operation.
+ *
+ * ## Scalar point access
+ *
+ * `load_scalar(position)` and `store_scalar(position, value)` address exactly
+ * one logical element through Layout and perform direct scalar pointer traffic.
+ * They apply the same saturating or wrapping dtype policy as vector conversion,
+ * but accept no lane, addressing, inactive-population, or vector-memory
+ * options. Scalar access is available only for `NoTransform`,
+ * `IdentityVecTransform`, and `ZeroVecTransform`; arbitrary vector transforms
+ * remain vector-only. Identity preserves both of its boundary conversions,
+ * while a zero input does not read Tensor memory. Conversion order is accepted
+ * for API uniformity but cannot permute a single value.
  *
  * ## Conversion and transform pipelines
  *
@@ -378,9 +391,50 @@ VECOPS_ALWAYS_INLINE constexpr void validate_access_options() {
                 "tensor strided addressing accepts only element strides");
 }
 
+/** Validate the deliberately small option surface of a scalar point access. */
+template <bool Load, typename... Options>
+VECOPS_ALWAYS_INLINE constexpr void validate_scalar_access_options() {
+  constexpr auto allowed = []<typename T>() {
+    return IsConversionOrderOption<T>::value ||
+        IsConversionValueOption<T>::value ||
+        (Load && IsMaterializePopulate<T>::value);
+  };
+  static_assert(
+      (allowed.template operator()<std::remove_cvref_t<Options>>() && ...),
+      "tensor scalar access accepts only conversion options and, for loads, "
+      "materialize::populate");
+  static_assert(
+      vec::details::option_count_v<IsConversionOrderOption, Options...> <= 1,
+      "at most one scalar conversion-order option is allowed");
+  static_assert(
+      vec::details::option_count_v<IsConversionValueOption, Options...> <= 1,
+      "at most one scalar conversion-value option is allowed");
+  static_assert(
+      vec::details::option_count_v<IsMaterializePopulate, Options...> <=
+          (Load ? 1 : 0),
+      "materialize::populate is only valid for scalar loads");
+}
+
 template <typename T>
 inline constexpr bool is_no_transform_v =
     std::same_as<std::remove_cvref_t<T>, NoTransform>;
+
+template <typename T>
+struct IsIdentityVecTransform : std::false_type {};
+
+template <typename EOut, typename EIn>
+struct IsIdentityVecTransform<IdentityVecTransform<EOut, EIn>>
+    : std::true_type {};
+
+template <typename T>
+inline constexpr bool is_identity_vec_transform_v =
+    IsIdentityVecTransform<std::remove_cvref_t<T>>::value;
+
+/** Scalar access supports only transforms with an exact scalar definition. */
+template <typename T>
+inline constexpr bool scalar_access_transform_v =
+    is_no_transform_v<T> || is_identity_vec_transform_v<T> ||
+    is_zero_vec_transform_v<std::remove_cvref_t<T>>;
 
 template <typename Transform>
 inline constexpr bool transform_permutation_equivariant_v = [] {
@@ -637,6 +691,18 @@ VECOPS_ALWAYS_INLINE To scalar_policy_convert(From value) {
     }
   } else {
     return vecops::convert<To>(value);
+  }
+}
+
+template <std::size_t Rank, typename Layout>
+VECOPS_ALWAYS_INLINE void validate_scalar_position(
+    const Coord<Rank>& position, const Layout& layout) {
+  static_assert(Rank == static_cast<std::size_t>(Layout::Ndim));
+  VECOPS_UNROLL
+  for (std::size_t d = 0; d < Rank; ++d) {
+    VECOPS_ASSERT(
+        position[d] >= 0 && position[d] < layout.shape()[d],
+        "tensor scalar coordinate is out of bounds");
   }
 }
 
@@ -2254,6 +2320,39 @@ inline constexpr bool is_input_operand_v =
 template <typename T>
 concept InputOperand = is_input_operand_v<T>;
 
+/** Readable Tensor or InputSpec of one exact logical rank. */
+template <typename Operand, int Rank>
+inline constexpr bool is_input_operand_of_v = [] {
+  using O = std::remove_cvref_t<Operand>;
+  if constexpr (is_tensor_v<O>) {
+    return O::Ndim == Rank;
+  } else if constexpr (is_input_spec_v<O>) {
+    return O::InputTensor::Ndim == Rank;
+  } else {
+    return false;
+  }
+}();
+
+template <typename Operand, int Rank>
+concept InputOperandOf = is_input_operand_of_v<Operand, Rank>;
+
+/** Omitted or readable Tensor/InputSpec of any logical rank. */
+template <typename Operand>
+inline constexpr bool is_optional_input_operand_v =
+    is_nullopt_v<Operand> || is_input_operand_v<Operand>;
+
+template <typename Operand>
+concept OptionalInputOperand = is_optional_input_operand_v<Operand>;
+
+/** Omitted or readable Tensor/InputSpec of one exact logical rank. */
+template <typename Operand, int Rank>
+inline constexpr bool is_optional_input_operand_of_v =
+    is_nullopt_v<Operand> || is_input_operand_of_v<Operand, Rank>;
+
+template <typename Operand, int Rank>
+concept OptionalInputOperandOf =
+    is_optional_input_operand_of_v<Operand, Rank>;
+
 template <typename T>
 inline constexpr bool is_output_operand_v = [] {
   using O = std::remove_cvref_t<T>;
@@ -2265,6 +2364,25 @@ inline constexpr bool is_output_operand_v = [] {
 
 template <typename T>
 concept OutputOperand = is_output_operand_v<T>;
+
+/** Writable Tensor or OutputSpec of one exact logical rank. */
+template <typename Operand, int Rank>
+inline constexpr bool is_output_operand_of_v = [] {
+  if constexpr (!is_output_operand_v<Operand>) {
+    return false;
+  } else {
+    using O = std::remove_cvref_t<Operand>;
+    if constexpr (is_tensor_v<O>) {
+      return O::Ndim == Rank;
+    } else {
+      static_assert(is_output_spec_v<O>);
+      return O::OutputTensor::Ndim == Rank;
+    }
+  }
+}();
+
+template <typename Operand, int Rank>
+concept OutputOperandOf = is_output_operand_of_v<Operand, Rank>;
 
 /** @brief Concept form of is_input_spec_v. */
 template <typename T>
@@ -2285,6 +2403,12 @@ template <typename Compute, InputSpecLike Spec>
       typename std::remove_cvref_t<Spec>::ComputeType, Compute>
 VECOPS_INLINE auto as_input_spec(Spec&& spec) {
   return std::forward<Spec>(spec);
+}
+
+/** Preserve compile-time optionality while normalizing a readable operand. */
+template <typename Compute>
+VECOPS_INLINE constexpr nullopt_t as_input_spec(nullopt_t) {
+  return nullopt;
 }
 
 /** Normalize a mutable Tensor or an existing output Spec. */
@@ -2372,7 +2496,7 @@ VECOPS_INLINE auto narrow_view(
                 "input narrow interval is out of bounds");
   auto layout = tensor::set<Dim>(
       spec.input_layout(), extent,
-      tensor::stride_value<Dim>(spec.input_layout()));
+      tensor::stride<Dim>(spec.input_layout()));
   auto tensor_view = tensor::make_tensor(
       spec.tensor().data() + offset * static_cast<nint_t>(
           tensor::get<Dim>(spec.input_layout().strides())),
@@ -2426,7 +2550,7 @@ VECOPS_INLINE auto narrow_view(
                 "output narrow interval is out of bounds");
   auto layout = tensor::set<Dim>(
       spec.output_layout(), extent,
-      tensor::stride_value<Dim>(spec.output_layout()));
+      tensor::stride<Dim>(spec.output_layout()));
   auto tensor_view = tensor::make_tensor(
       spec.tensor().data() + offset * static_cast<nint_t>(
           tensor::get<Dim>(spec.output_layout().strides())),
@@ -2516,6 +2640,61 @@ public:
             (Policy::permutation_safe &&
              details::transform_permutation_equivariant_v<Transform>),
         "unordered input conversion requires a permutation-safe kernel and transform");
+  }
+
+  /**
+   * @brief Load one ComputeType value at an exact logical coordinate.
+   *
+   * Scalar access performs direct pointer traffic and supports only
+   * NoTransform, IdentityVecTransform, and ZeroVecTransform. Conversion order
+   * and value options may override operand defaults; lane, addressing,
+   * population, and vector-memory options are intentionally unavailable.
+   * `materialize::populate` remains valid for deferred input sessions and is a
+   * no-op on this direct session.
+   */
+  template <typename... Options>
+    requires details::scalar_access_transform_v<Transform>
+  VECOPS_ALWAYS_INLINE ComputeType load_scalar(
+      const Coord<Rank>& position, Options&&... options) const {
+    details::validate_scalar_access_options<true, Options...>();
+    constexpr bool HasAccessDefaults =
+        details::has_access_default_option_v<Options...>;
+    if constexpr (HasAccessDefaults) {
+      using Planning = typename Policy::PlanningPolicyType;
+      using Defaults = details::OverrideAccessDefaults<
+          typename Policy::AccessDefaultsType, Options...>;
+      using CallPolicy = details::AccessLoweringPolicy<
+          Planning, Defaults, typename Policy::ActiveResources>;
+      InputDataAccess<Spec, CallPolicy> access{
+          *spec_, CallPolicy{static_cast<const Planning&>(policy_)}};
+      auto retained = details::non_access_default_options(
+          std::forward<Options>(options)...);
+      auto invoke = [&](auto&&... retained_options)
+          VECOPS_INLINE_LAMBDA -> ComputeType {
+        return access.load_scalar(
+            position,
+            std::forward<decltype(retained_options)>(retained_options)...);
+      };
+      return details::apply_inline(invoke, retained);
+    } else {
+      details::validate_scalar_position(position, spec_->input_layout());
+      if constexpr (is_zero_vec_transform_v<Transform>) {
+        return ComputeType{};
+      } else {
+        const nint_t base = offset_at(spec_->input_layout(), position);
+        if constexpr (details::is_no_transform_v<Transform>) {
+          return details::scalar_policy_convert<Policy, ComputeType>(
+              data_[base]);
+        } else {
+          using Intermediate = typename Transform::TIn;
+          const Intermediate transformed =
+              details::scalar_policy_convert<Policy, Intermediate>(
+                  data_[base]);
+          return details::scalar_policy_convert<Policy, ComputeType>(
+              transformed);
+        }
+      }
+    }
   }
 
   /**
@@ -2793,6 +2972,58 @@ public:
   OutputDataAccess(OutputDataAccess&&) = default;
   OutputDataAccess& operator=(OutputDataAccess&&) = default;
 
+  /**
+   * @brief Store one ComputeType value at an exact logical coordinate.
+   *
+   * Scalar access performs direct pointer traffic and supports only
+   * NoTransform, IdentityVecTransform, and ZeroVecTransform. Conversion order
+   * and value options may override operand defaults; vector-only access and
+   * memory options are rejected.
+   */
+  template <typename... Options>
+    requires details::scalar_access_transform_v<Transform>
+  VECOPS_ALWAYS_INLINE void store_scalar(
+      const Coord<Rank>& position,
+      ComputeType value,
+      Options&&... options) const {
+    details::validate_scalar_access_options<false, Options...>();
+    constexpr bool HasAccessDefaults =
+        details::has_access_default_option_v<Options...>;
+    if constexpr (HasAccessDefaults) {
+      using Planning = typename Policy::PlanningPolicyType;
+      using Defaults = details::OverrideAccessDefaults<
+          typename Policy::AccessDefaultsType, Options...>;
+      using CallPolicy = details::AccessLoweringPolicy<
+          Planning, Defaults, typename Policy::ActiveResources>;
+      OutputDataAccess<Spec, CallPolicy> access{
+          *spec_, CallPolicy{static_cast<const Planning&>(policy_)}};
+      auto retained = details::non_access_default_options(
+          std::forward<Options>(options)...);
+      auto invoke = [&](auto&&... retained_options) VECOPS_INLINE_LAMBDA {
+        access.store_scalar(
+            position, value,
+            std::forward<decltype(retained_options)>(retained_options)...);
+      };
+      details::apply_inline(invoke, retained);
+    } else {
+      details::validate_scalar_position(position, spec_->output_layout());
+      const nint_t base = offset_at(spec_->output_layout(), position);
+      if constexpr (details::is_no_transform_v<Transform>) {
+        data_[base] =
+            details::scalar_policy_convert<Policy, MemoryElement>(value);
+      } else if constexpr (is_zero_vec_transform_v<Transform>) {
+        data_[base] = details::scalar_policy_convert<
+            Policy, MemoryElement>(typename Transform::TOut{});
+      } else {
+        using Intermediate = typename Transform::TIn;
+        const Intermediate transformed =
+            details::scalar_policy_convert<Policy, Intermediate>(value);
+        data_[base] = details::scalar_policy_convert<Policy, MemoryElement>(
+            transformed);
+      }
+    }
+  }
+
   /** @brief Store a Compute vector along the final Tensor axis. */
   template <vec::VectorTag Tag, typename... Options>
     requires std::same_as<vec::ElementOf<Tag>, ComputeType>
@@ -3037,6 +3268,60 @@ public:
       : original_(std::move(original)), auxiliary_(std::move(auxiliary)),
         source_policy_(policy) {}
 
+  template <typename... Options>
+    requires details::scalar_access_transform_v<Transform>
+  VECOPS_ALWAYS_INLINE ComputeType load_scalar(
+      const Coord<Rank>& position, Options&&... options) const {
+    details::validate_scalar_access_options<true, Options...>();
+    constexpr bool Populate =
+        vec::details::option_count_v<
+            details::IsMaterializePopulate, Options...> != 0;
+    auto retained = details::non_materialize_options(
+        std::forward<Options>(options)...);
+    auto invoke = [&](auto&&... access_options)
+        VECOPS_INLINE_LAMBDA -> ComputeType {
+      if constexpr (Populate) {
+#if defined(VECOPS_DEBUG)
+        VECOPS_ASSERT(!reuse_started_,
+                      "deferred materialization populated after reuse began");
+        populate_started_ = true;
+#endif
+        InputDataAccess<OriginalSpec, SourcePolicy> source{
+            original_, source_policy_};
+        const ComputeType value = source.load_scalar(
+            position, access_options...);
+        auto cache_output_spec = output<ComputeType>(auxiliary_.tensor());
+        OutputDataAccess<decltype(cache_output_spec), CachePolicy> cache{
+            cache_output_spec, CachePolicy{CachePlanningPolicy{}}};
+        auto store_options = details::cache_store_options(access_options...);
+        auto store = [&](auto&&... cache_options) VECOPS_INLINE_LAMBDA {
+          cache.store_scalar(position, value, cache_options...);
+        };
+        details::apply_inline(store, store_options);
+        cache.commit();
+        return value;
+      } else {
+        static_assert(
+            vec::details::option_count_v<
+                details::IsConversionOrderOption,
+                decltype(access_options)...> == 0 &&
+            vec::details::option_count_v<
+                details::IsConversionValueOption,
+                decltype(access_options)...> == 0,
+            "canonical Compute materialization cannot be reinterpreted");
+#if defined(VECOPS_DEBUG)
+        VECOPS_ASSERT(populate_started_,
+                      "deferred materialization reused before population");
+        reuse_started_ = true;
+#endif
+        InputDataAccess<AuxSpec, CachePolicy> cache{
+            auxiliary_, CachePolicy{CachePlanningPolicy{}}};
+        return cache.load_scalar(position, access_options...);
+      }
+    };
+    return details::apply_inline(invoke, retained);
+  }
+
   template <vec::VectorTag Tag, typename... Options>
   VECOPS_ALWAYS_INLINE vec::Vec<Tag> load(
       Tag tag, const Coord<Rank>& position, Options&&... options) const {
@@ -3161,6 +3446,21 @@ public:
   VECOPS_ALWAYS_INLINE CanonicalMaterializedInputDataAccess(
       AuxSpec auxiliary, CachePolicy policy)
       : auxiliary_(std::move(auxiliary)), policy_(policy) {}
+
+  template <typename... Options>
+    requires details::scalar_access_transform_v<Transform>
+  VECOPS_ALWAYS_INLINE ComputeType load_scalar(
+      const Coord<Rank>& position, Options&&... options) const {
+    static_assert(
+        vec::details::option_count_v<
+            details::IsConversionOrderOption, Options...> == 0 &&
+        vec::details::option_count_v<
+            details::IsConversionValueOption, Options...> == 0,
+        "canonical Compute materialization cannot be reinterpreted");
+    InputDataAccess<AuxSpec, CachePolicy> cache{auxiliary_, policy_};
+    return cache.load_scalar(
+        position, std::forward<Options>(options)...);
+  }
 
   template <vec::VectorTag Tag, typename... Options>
   VECOPS_ALWAYS_INLINE auto load(
@@ -3459,6 +3759,26 @@ public:
 
   BorrowedDataAccess(Spec spec, Policy policy)
       : spec_(std::move(spec)), policy_(policy) {}
+
+  template <typename... Options>
+    requires (IsInput && details::scalar_access_transform_v<Transform>)
+  VECOPS_ALWAYS_INLINE ComputeType load_scalar(
+      const Coord<Rank>& position, Options&&... options) const {
+    InputDataAccess<Spec, Policy> access{spec_, policy_};
+    return access.load_scalar(
+        position, std::forward<Options>(options)...);
+  }
+
+  template <typename... Options>
+    requires (!IsInput && details::scalar_access_transform_v<Transform>)
+  VECOPS_ALWAYS_INLINE void store_scalar(
+      const Coord<Rank>& position,
+      ComputeType value,
+      Options&&... options) const {
+    OutputDataAccess<Spec, Policy> access{spec_, policy_};
+    access.store_scalar(
+        position, value, std::forward<Options>(options)...);
+  }
 
   template <vec::VectorTag Tag, typename... Options>
     requires IsInput
@@ -3774,6 +4094,25 @@ public:
   ~MaterializedOutputDataAccess() {
     VECOPS_ASSERT(!owning_ || committed_,
                   "materialized output session was destroyed without commit()");
+  }
+
+  template <typename... Options>
+    requires details::scalar_access_transform_v<typename AuxSpec::TransformType>
+  VECOPS_ALWAYS_INLINE void store_scalar(
+      const Coord<Rank>& position,
+      ComputeType value,
+      Options&&... options) const {
+    if constexpr (Plan == AccessPlan::materialize_before_transform) {
+      static_assert(
+          vec::details::option_count_v<
+              details::IsConversionOrderOption, Options...> == 0 &&
+          vec::details::option_count_v<
+              details::IsConversionValueOption, Options...> == 0,
+          "before-transform output conversion is selected at operand binding");
+    }
+    OutputDataAccess<AuxSpec, Policy> hot{auxiliary_, policy_};
+    hot.store_scalar(
+        position, value, std::forward<Options>(options)...);
   }
 
   template <vec::VectorTag Tag, typename... Options>
@@ -4230,6 +4569,35 @@ public:
 
   explicit AccessOrderView(Access& access) : access_(&access) {}
 
+  template <typename... Options>
+    requires requires(
+        Access& access, const Coord<Rank>& position, Options&&... options) {
+      access.load_scalar(
+          position, std::forward<Options>(options)...);
+    }
+  VECOPS_ALWAYS_INLINE auto load_scalar(
+      const Coord<Rank>& position, Options&&... options) const {
+    // A single value has no lane permutation, so the group order does not
+    // need to be injected into the underlying scalar conversion.
+    return access_->load_scalar(
+        position, std::forward<Options>(options)...);
+  }
+
+  template <typename... Options>
+    requires requires(
+        Access& access, const Coord<Rank>& position, ComputeType value,
+        Options&&... options) {
+      access.store_scalar(
+          position, value, std::forward<Options>(options)...);
+    }
+  VECOPS_ALWAYS_INLINE void store_scalar(
+      const Coord<Rank>& position,
+      ComputeType value,
+      Options&&... options) const {
+    access_->store_scalar(
+        position, value, std::forward<Options>(options)...);
+  }
+
   template <vec::VectorTag Tag, typename... Options>
   VECOPS_ALWAYS_INLINE auto load(
       Tag tag, const Coord<Rank>& position, Options&&... options) const {
@@ -4322,6 +4690,40 @@ VECOPS_INLINE decltype(auto) with_unordered_access(
       std::tie(a0, a1, a2, a3), std::forward<Fn>(fn));
 }
 
+/** Invoke @p fn with unordered views for concrete optional accesses.
+ *
+ * `nullopt` arguments are forwarded unchanged. This retains optionality in
+ * the type system while placing all concrete accesses in the same unordered
+ * conversion-order region.
+ */
+template <typename Fn>
+VECOPS_ALWAYS_INLINE decltype(auto) with_optional_unordered_access(Fn&& fn) {
+  return std::forward<Fn>(fn)();
+}
+
+template <typename Fn, typename Access, typename... Rest>
+VECOPS_ALWAYS_INLINE decltype(auto) with_optional_unordered_access(
+    Fn&& fn, Access& access, Rest&... rest) {
+  if constexpr (is_nullopt_v<Access>) {
+    return with_optional_unordered_access(
+        [&](auto&&... tail) -> decltype(auto) {
+          return std::forward<Fn>(fn)(
+              nullopt, std::forward<decltype(tail)>(tail)...);
+        },
+        rest...);
+  } else {
+    return with_unordered_access(
+        access, [&](auto unordered) -> decltype(auto) {
+          return with_optional_unordered_access(
+              [&](auto&&... tail) -> decltype(auto) {
+                return std::forward<Fn>(fn)(
+                    unordered, std::forward<decltype(tail)>(tail)...);
+              },
+              rest...);
+        });
+  }
+}
+
 /**
  * @brief Return workspace bytes required by the resolved Spec/Policy plan.
  *
@@ -4366,6 +4768,12 @@ VECOPS_INLINE nint_t required_workspace(const Spec& spec, Policy policy) {
       vec::DEFAULT_ALIGNMENT);
 }
 
+/** An omitted optional operand never consumes workspace. */
+template <typename Policy>
+VECOPS_INLINE constexpr nint_t required_workspace(nullopt_t, Policy) {
+  return 0;
+}
+
 /**
  * @brief Bind a statically direct operand without materialization dispatch.
  *
@@ -4390,6 +4798,13 @@ VECOPS_INLINE auto bind(
     return OutputDataAccess<Spec, LoweringPolicy>{
         spec, LoweringPolicy{policy}};
   }
+}
+
+/** Bind an omitted optional operand without allocating or creating an access. */
+template <typename Policy, typename Defaults = DefaultAccessDefaults>
+VECOPS_INLINE constexpr nullopt_t bind(
+    nullopt_t, Policy, kernel::WorkspaceView&, Defaults = {}) {
+  return nullopt;
 }
 
 /** @brief Pair a caller-owned Spec reference with a kernel-owned Policy. */

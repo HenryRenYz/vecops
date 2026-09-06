@@ -164,8 +164,8 @@ public:
                   "matrix packing accepts a rank-two input layout");
     using Spatial = tensor::size_type_t<0, InputLayout>;
     using K = tensor::size_type_t<1, InputLayout>;
-    const Spatial spatial{tensor::size_value<0>(input)};
-    const K k{tensor::size_value<1>(input)};
+    const Spatial spatial{tensor::size<0>(input)};
+    const K k{tensor::size<1>(input)};
     const auto panel = Packing::panel();
     validate_extents(static_cast<nint_t>(spatial),
                      static_cast<nint_t>(k),

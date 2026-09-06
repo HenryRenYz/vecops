@@ -189,7 +189,7 @@ struct AlignMulDyn {
  * - `conforms(v)` – does compile-time value `v` satisfy this type's constraints?
  * - `aligns(v)` – does **every** possible runtime value of this type align to `v`?
  * - `is_aligned(v)` – does **this** specific runtime instance align to `v`?
- * - `explicit operator nint_t()` – conversion to raw integer
+ * - `operator nint_t()` – conversion to raw integer
  *
  * ## Pitfalls
  *
@@ -238,7 +238,7 @@ struct Value {
   bool is_aligned(nint_t v) { return false; }
 
   /// Convert to raw `nint_t`. Default implementation returns an invalid sentinel.
-  constexpr explicit operator nint_t() const { return -100; }
+  constexpr operator nint_t() const { return -100; }
 }; // struct Value
 
 template <typename T>
@@ -293,7 +293,7 @@ struct Const : public Value {
     return N % v == 0;
   }
 
-  VECOPS_ALWAYS_INLINE constexpr explicit operator nint_t() const {
+  VECOPS_ALWAYS_INLINE constexpr operator nint_t() const {
     return N;
   }
 }; // struct Const
@@ -402,7 +402,7 @@ struct Dynamic : public Value {
     return value % v == 0;
   }
 
-  VECOPS_ALWAYS_INLINE constexpr explicit operator nint_t() const {
+  VECOPS_ALWAYS_INLINE constexpr operator nint_t() const {
     // Spell the constraint out here: some Clang versions conservatively
     // treat even this constexpr helper call as potentially side-effecting and
     // consequently discard __builtin_assume(conforms(value)).
@@ -429,6 +429,13 @@ struct Dynamic : public Value {
  * @endcode
  */
 using Any = Dynamic<1>;
+
+/** A non-nint_t integer accepted by Value arithmetic through Any. */
+template <typename T>
+concept OtherInteger =
+    std::integral<std::remove_cvref_t<T>> &&
+    !std::same_as<std::remove_cvref_t<T>, bool> &&
+    !std::same_as<std::remove_cvref_t<T>, nint_t>;
 
 /**
  * @brief Wildcard type for compile-time metadata pattern matching.
@@ -481,7 +488,7 @@ constexpr Dynamic<A> dyn(nint_t v) { return Dynamic<A>{v}; }
 // ======================== Arithmetic operators ========================
 //
 // Operator semantics: Const and Dynamic arithmetic propagates constraint
-// information (alignment, bounds) at compile time. Raw nint_t operands
+// information (alignment, bounds) at compile time. Raw integral operands
 // are automatically wrapped as Any (Dynamic<1>, unconstrained).
 //
 // Constraint propagation rules summary:
@@ -541,6 +548,16 @@ constexpr auto operator+(nint_t lhs, T rhs) {
   return Any{lhs} + rhs;
 }
 
+template <ValueType T, OtherInteger I>
+constexpr auto operator+(T lhs, I rhs) {
+  return lhs + static_cast<nint_t>(rhs);
+}
+
+template <OtherInteger I, ValueType T>
+constexpr auto operator+(I lhs, T rhs) {
+  return static_cast<nint_t>(lhs) + rhs;
+}
+
 // ---- Subtraction ----
 
 template <nint_t N, nint_t M>
@@ -582,6 +599,16 @@ template <typename T>
   requires (std::derived_from<T, Value> && !is_int_v<T>)
 constexpr auto operator-(nint_t lhs, T rhs) {
   return Any{lhs} - rhs;
+}
+
+template <ValueType T, OtherInteger I>
+constexpr auto operator-(T lhs, I rhs) {
+  return lhs - static_cast<nint_t>(rhs);
+}
+
+template <OtherInteger I, ValueType T>
+constexpr auto operator-(I lhs, T rhs) {
+  return static_cast<nint_t>(lhs) - rhs;
 }
 
 // ---- Unary negation ----
@@ -646,6 +673,16 @@ template <typename T>
   requires (std::derived_from<T, Value> && !is_int_v<T>)
 constexpr auto operator*(nint_t lhs, T rhs) {
   return Any{lhs} * rhs;
+}
+
+template <ValueType T, OtherInteger I>
+constexpr auto operator*(T lhs, I rhs) {
+  return lhs * static_cast<nint_t>(rhs);
+}
+
+template <OtherInteger I, ValueType T>
+constexpr auto operator*(I lhs, T rhs) {
+  return static_cast<nint_t>(lhs) * rhs;
 }
 
 // ---- Division ----
@@ -762,6 +799,16 @@ constexpr auto operator/(nint_t lhs, T rhs) {
   return Any{lhs} / rhs;
 }
 
+template <ValueType T, OtherInteger I>
+constexpr auto operator/(T lhs, I rhs) {
+  return lhs / static_cast<nint_t>(rhs);
+}
+
+template <OtherInteger I, ValueType T>
+constexpr auto operator/(I lhs, T rhs) {
+  return static_cast<nint_t>(lhs) / rhs;
+}
+
 // ---- Remainder ----
 
 template <nint_t N, nint_t M>
@@ -858,6 +905,16 @@ template <typename T>
   requires (std::derived_from<T, Value> && !is_int_v<T>)
 constexpr auto operator%(nint_t lhs, T rhs) {
   return Any{lhs} % rhs;
+}
+
+template <ValueType T, OtherInteger I>
+constexpr auto operator%(T lhs, I rhs) {
+  return lhs % static_cast<nint_t>(rhs);
+}
+
+template <OtherInteger I, ValueType T>
+constexpr auto operator%(I lhs, T rhs) {
+  return static_cast<nint_t>(lhs) % rhs;
 }
 
 namespace details {
@@ -1186,6 +1243,116 @@ VECOPS_ALWAYS_INLINE constexpr to_value_t<T> to_value(T&& value) {
   return V{static_cast<nint_t>(value)};
 }
 
+/** Compare two Value objects without discarding their metadata beforehand. */
+template <ValueType Lhs, ValueType Rhs>
+VECOPS_ALWAYS_INLINE constexpr bool operator==(Lhs lhs, Rhs rhs) {
+  return static_cast<nint_t>(lhs) == static_cast<nint_t>(rhs);
+}
+
+template <ValueType Lhs, ValueType Rhs>
+VECOPS_ALWAYS_INLINE constexpr bool operator!=(Lhs lhs, Rhs rhs) {
+  return !(lhs == rhs);
+}
+
+template <ValueType Lhs, ValueType Rhs>
+VECOPS_ALWAYS_INLINE constexpr bool operator<(Lhs lhs, Rhs rhs) {
+  return static_cast<nint_t>(lhs) < static_cast<nint_t>(rhs);
+}
+
+template <ValueType Lhs, ValueType Rhs>
+VECOPS_ALWAYS_INLINE constexpr bool operator<=(Lhs lhs, Rhs rhs) {
+  return !(rhs < lhs);
+}
+
+template <ValueType Lhs, ValueType Rhs>
+VECOPS_ALWAYS_INLINE constexpr bool operator>(Lhs lhs, Rhs rhs) {
+  return rhs < lhs;
+}
+
+template <ValueType Lhs, ValueType Rhs>
+VECOPS_ALWAYS_INLINE constexpr bool operator>=(Lhs lhs, Rhs rhs) {
+  return !(lhs < rhs);
+}
+
+template <ValueType Value>
+VECOPS_ALWAYS_INLINE constexpr bool operator==(Value lhs, nint_t rhs) {
+  return static_cast<nint_t>(lhs) == rhs;
+}
+
+template <ValueType Value>
+VECOPS_ALWAYS_INLINE constexpr bool operator==(nint_t lhs, Value rhs) {
+  return rhs == lhs;
+}
+
+template <ValueType Value>
+VECOPS_ALWAYS_INLINE constexpr bool operator!=(Value lhs, nint_t rhs) {
+  return !(lhs == rhs);
+}
+
+template <ValueType Value>
+VECOPS_ALWAYS_INLINE constexpr bool operator!=(nint_t lhs, Value rhs) {
+  return !(lhs == rhs);
+}
+
+template <ValueType Value>
+VECOPS_ALWAYS_INLINE constexpr bool operator<(Value lhs, nint_t rhs) {
+  return static_cast<nint_t>(lhs) < rhs;
+}
+
+template <ValueType Value>
+VECOPS_ALWAYS_INLINE constexpr bool operator<(nint_t lhs, Value rhs) {
+  return lhs < static_cast<nint_t>(rhs);
+}
+
+template <ValueType Value>
+VECOPS_ALWAYS_INLINE constexpr bool operator<=(Value lhs, nint_t rhs) {
+  return !(rhs < lhs);
+}
+
+template <ValueType Value>
+VECOPS_ALWAYS_INLINE constexpr bool operator<=(nint_t lhs, Value rhs) {
+  return !(rhs < lhs);
+}
+
+template <ValueType Value>
+VECOPS_ALWAYS_INLINE constexpr bool operator>(Value lhs, nint_t rhs) {
+  return rhs < lhs;
+}
+
+template <ValueType Value>
+VECOPS_ALWAYS_INLINE constexpr bool operator>(nint_t lhs, Value rhs) {
+  return rhs < lhs;
+}
+
+template <ValueType Value>
+VECOPS_ALWAYS_INLINE constexpr bool operator>=(Value lhs, nint_t rhs) {
+  return !(lhs < rhs);
+}
+
+template <ValueType Value>
+VECOPS_ALWAYS_INLINE constexpr bool operator>=(nint_t lhs, Value rhs) {
+  return !(lhs < rhs);
+}
+
+#define VECOPS_META_DEFINE_INTEGER_COMPARISON(Op)                           \
+  template <ValueType Value, OtherInteger I>                                \
+  VECOPS_ALWAYS_INLINE constexpr bool operator Op(Value lhs, I rhs) {       \
+    return lhs Op static_cast<nint_t>(rhs);                                 \
+  }                                                                          \
+  template <OtherInteger I, ValueType Value>                                \
+  VECOPS_ALWAYS_INLINE constexpr bool operator Op(I lhs, Value rhs) {       \
+    return static_cast<nint_t>(lhs) Op rhs;                                 \
+  }
+
+VECOPS_META_DEFINE_INTEGER_COMPARISON(==)
+VECOPS_META_DEFINE_INTEGER_COMPARISON(!=)
+VECOPS_META_DEFINE_INTEGER_COMPARISON(<)
+VECOPS_META_DEFINE_INTEGER_COMPARISON(<=)
+VECOPS_META_DEFINE_INTEGER_COMPARISON(>)
+VECOPS_META_DEFINE_INTEGER_COMPARISON(>=)
+
+#undef VECOPS_META_DEFINE_INTEGER_COMPARISON
+
 template <ValueType T>
 inline constexpr bool has_lower_bound_v = [] {
   using V = std::remove_cvref_t<T>;
@@ -1251,8 +1418,8 @@ namespace vecops {
 //   Const  op  Const  → Const (folded at compile time)
 //   Const  op  Dyn    → tighter bounds, alignment degrades to gcd
 //   Dyn    op  Dyn    → merged bounds (min/max) or degraded (division)
-//   nint_t op  Value  → Any{nint_t} op Value, matching the arithmetic
-//                       operators: constraints on the raw integer side are
+//   integer op Value   → Any{integer} op Value, matching the arithmetic
+//                        operators: constraints on the raw integer side are
 //                       lost.
 //
 // Alignment notes (A, A1, A2 are positive powers of two, so every gcd below
@@ -1654,6 +1821,28 @@ template <typename T>
 constexpr auto align_down(nint_t lhs, T rhs) {
   return align_down(meta::Any{lhs}, rhs);
 }
+
+// Preserve Value-aware overload resolution when the ordinary integer operand
+// is narrower or wider than nint_t. The raw side is still intentionally
+// normalized to Any: only a Value operand carries compile-time constraints.
+#define VECOPS_DEFINE_VALUE_INTEGER_OVERLOADS(Function)                     \
+  template <meta::ValueType Value, meta::OtherInteger I>                    \
+  constexpr auto Function(Value lhs, I rhs) {                               \
+    return Function(lhs, static_cast<nint_t>(rhs));                          \
+  }                                                                           \
+  template <meta::OtherInteger I, meta::ValueType Value>                    \
+  constexpr auto Function(I lhs, Value rhs) {                               \
+    return Function(static_cast<nint_t>(lhs), rhs);                          \
+  }
+
+VECOPS_DEFINE_VALUE_INTEGER_OVERLOADS(min)
+VECOPS_DEFINE_VALUE_INTEGER_OVERLOADS(max)
+VECOPS_DEFINE_VALUE_INTEGER_OVERLOADS(ceil_div)
+VECOPS_DEFINE_VALUE_INTEGER_OVERLOADS(floor_div)
+VECOPS_DEFINE_VALUE_INTEGER_OVERLOADS(align_up)
+VECOPS_DEFINE_VALUE_INTEGER_OVERLOADS(align_down)
+
+#undef VECOPS_DEFINE_VALUE_INTEGER_OVERLOADS
 
 } // namespace vecops
 

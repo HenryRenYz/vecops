@@ -731,7 +731,7 @@ private:
         if constexpr (!MayAutoPackB) return false;
         if (!online_packs_b()) return false;
       }
-      const nint_t batch = static_cast<nint_t>(tensor::size_value<0>(
+      const nint_t batch = static_cast<nint_t>(tensor::size<0>(
           c_output_.output_layout()));
       const nint_t m = static_cast<nint_t>(m_);
       const nint_t n = static_cast<nint_t>(n_);
@@ -1253,7 +1253,7 @@ private:
       const nint_t k = static_cast<nint_t>(k_);
       const nint_t batch = [&] {
         if constexpr (Rank == 3)
-          return static_cast<nint_t>(tensor::size_value<0>(
+          return static_cast<nint_t>(tensor::size<0>(
               c_output_.output_layout()));
         else
           return nint_t{1};
@@ -1320,7 +1320,7 @@ private:
       const auto input_spec = tensor::as_input_spec<
           typename Atom::TA>(input);
       constexpr int Rank = decltype(input_spec)::InputTensor::Ndim;
-      if (static_cast<nint_t>(tensor::size_value<Rank - 2>(
+      if (static_cast<nint_t>(tensor::size<Rank - 2>(
               input_spec.input_layout())) < panel) {
         matmul_pack_forced<
             kernel::matmul_pack_implementation::SMEFP32ToFP64Single>(
@@ -1363,7 +1363,7 @@ private:
           auto* a_data = static_cast<TA*>(workspace.allocate(
               tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA)), 64));
           auto a_tensor = tensor::make_tensor(a_data, a_layout);
-          const auto batch = tensor::size_value<0>(
+          const auto batch = tensor::size<0>(
               c_output_.output_layout());
           const auto flat_m = batch * m_;
           const auto a = flatten_batch_rows_input(a_, flat_m, k_, k_);
@@ -1375,7 +1375,7 @@ private:
           return;
         }
       }
-      const bool reuse_b = static_cast<nint_t>(tensor::stride_value<0>(
+      const bool reuse_b = static_cast<nint_t>(tensor::stride<0>(
           b_.input_layout())) == 0;
       bool b_ready = false;
       const auto a_layout = auto_packed_layout<::vecops::matmul::Operand::A>(a_);
@@ -1383,7 +1383,7 @@ private:
       auto* a_data = static_cast<TA*>(workspace.allocate(
           tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA)), 64));
       auto a_tensor = tensor::make_tensor(a_data, a_layout);
-      const bool reuse_a = static_cast<nint_t>(tensor::stride_value<0>(
+      const bool reuse_a = static_cast<nint_t>(tensor::stride<0>(
           a_.input_layout())) == 0;
       bool a_ready = false;
       kernel::loop::for_each_dims<1>(
@@ -1410,7 +1410,7 @@ private:
       auto* data = static_cast<TA*>(workspace.allocate(
           tensor::numel(layout) * static_cast<nint_t>(sizeof(TA)), 64));
       auto packed_tensor = tensor::make_tensor(data, layout);
-      const bool reuse = static_cast<nint_t>(tensor::stride_value<0>(
+      const bool reuse = static_cast<nint_t>(tensor::stride<0>(
           a_.input_layout())) == 0;
       bool ready = false;
       const auto b_loop = batch_loop_operand<
@@ -1435,7 +1435,7 @@ private:
       auto* data = static_cast<TB*>(workspace.allocate(
           tensor::numel(layout) * static_cast<nint_t>(sizeof(TB)), 64));
       auto packed_tensor = tensor::make_tensor(data, layout);
-      const bool reuse = static_cast<nint_t>(tensor::stride_value<0>(
+      const bool reuse = static_cast<nint_t>(tensor::stride<0>(
           b_.input_layout())) == 0;
       bool ready = false;
       if constexpr (BatchRowsFlattenCandidate) {
@@ -1452,7 +1452,7 @@ private:
                       static_cast<nint_t>(sizeof(TA)),
                   64));
               auto a_tensor = tensor::make_tensor(a_data, a_layout);
-              const auto batch = tensor::size_value<0>(
+              const auto batch = tensor::size<0>(
                   c_output_.output_layout());
               const auto flat_m = batch * m_;
               const auto a = flatten_batch_rows_input(
@@ -1637,9 +1637,9 @@ private:
           "matmul C input/output shape mismatch");
     }
     VECOPS_ASSERT(
-        static_cast<nint_t>(tensor::size_value<Rank - 2>(
+        static_cast<nint_t>(tensor::size<Rank - 2>(
             c_output_.output_layout())) == m &&
-        static_cast<nint_t>(tensor::size_value<Rank - 1>(
+        static_cast<nint_t>(tensor::size<Rank - 1>(
             c_output_.output_layout())) == n,
         "matmul C shape mismatch");
   }
@@ -1703,9 +1703,9 @@ private:
   VECOPS_ALWAYS_INLINE void execute_flattened_batch_rows_operands(
       Scope& scope, const ALeaf& a, const BLeaf& b, void* scratch) const {
     static_assert(BatchRowsFlattenCandidate);
-    const auto batch = tensor::size_value<0>(c_output_.output_layout());
+    const auto batch = tensor::size<0>(c_output_.output_layout());
     const auto flat_m = batch * m_;
-    const auto ci_stride = tensor::stride_value<1>(
+    const auto ci_stride = tensor::stride<1>(
         c_input_.input_layout());
     const auto c_input = flatten_batch_rows_input(
         c_input_, flat_m, n_, ci_stride);
@@ -1733,7 +1733,7 @@ private:
   VECOPS_ALWAYS_INLINE void execute_flattened_batch_rows(
       Scope& scope, const BLeaf& b, void* scratch) const {
     static_assert(BatchRowsFlattenCandidate);
-    const auto batch = tensor::size_value<0>(c_output_.output_layout());
+    const auto batch = tensor::size<0>(c_output_.output_layout());
     const auto flat_m = batch * m_;
     const auto a = flatten_batch_rows_input(a_, flat_m, k_, k_);
     execute_flattened_batch_rows_operands(scope, a, b, scratch);
@@ -1752,7 +1752,7 @@ private:
     auto* a_data = static_cast<TA*>(workspace.allocate(
         tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA)), 64));
     auto a_tensor = tensor::make_tensor(a_data, a_layout);
-    const auto batch = tensor::size_value<0>(c_output_.output_layout());
+    const auto batch = tensor::size<0>(c_output_.output_layout());
     const auto flat_m = batch * m_;
     const auto a = flatten_batch_rows_input(a_, flat_m, k_, k_);
     run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(scope, a, a_tensor);
@@ -1768,9 +1768,9 @@ private:
     static_assert(BatchColumnsFlattenCandidate);
     auto& workspace = scope.workspace_view();
     const auto workspace_mark = workspace.mark();
-    const auto batch = tensor::size_value<0>(c_output_.output_layout());
+    const auto batch = tensor::size<0>(c_output_.output_layout());
     const auto flat_n = batch * n_;
-    const auto b_row_stride = tensor::stride_value<1>(b_.input_layout());
+    const auto b_row_stride = tensor::stride<1>(b_.input_layout());
     const auto b = flatten_batch_rows_input(
         b_, flat_n, k_, b_row_stride);
     const auto c_output = flatten_batch_rows_output(

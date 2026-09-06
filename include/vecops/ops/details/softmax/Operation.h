@@ -190,7 +190,8 @@ public:
     constexpr int PrefixRank = InSpec::InputTensor::Ndim - 1;
     const auto in_row = tensor::take_trailing<1>(in);
     const auto out_row = tensor::take_trailing<1>(out);
-    const nint_t n = tensor::size<PrefixRank>(in.input_layout());
+    const nint_t n = static_cast<nint_t>(
+        tensor::size<PrefixRank>(in.input_layout()));
     nint_t cache_elements = n;
     if constexpr (should_use_online<InSpec, OutSpec>()) {
       const nint_t tile_step = 4 * vec::size(Tag{});
@@ -490,7 +491,7 @@ private:
       const OutSpec& out) const {
     static_assert(InSpec::InputTensor::Ndim == 1);
     Tag tag{};
-    const nint_t n = tensor::size<0>(in.input_layout());
+    const nint_t n = static_cast<nint_t>(tensor::size<0>(in.input_layout()));
     const nint_t tile_step = 4 * vec::size(tag);
     const nint_t tile_count = ceil_div(n, tile_step);
     const auto mark = workspace.mark();
@@ -691,7 +692,7 @@ private:
       kernel::WorkspaceView& workspace, const InSpec& in,
       const OutSpec& out) const {
     static_assert(InSpec::InputTensor::Ndim == 1);
-    nint_t n = tensor::size<0>(in.input_layout());
+    nint_t n = static_cast<nint_t>(tensor::size<0>(in.input_layout()));
 #if defined(CPU_CAPABILITY_SVE) && defined(__GNUC__) && !defined(__clang__)
     if constexpr (std::same_as<typename InSpec::MemoryElement, float16_t>) {
       // WORKAROUND: GCC 15 otherwise propagates large Const-shaped FP16 row

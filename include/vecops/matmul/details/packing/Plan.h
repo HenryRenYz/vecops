@@ -166,9 +166,9 @@ public:
 private:
   VECOPS_INLINE static void validate(
       const InputSpec& input, const OutputSpec& output) {
-    VECOPS_ASSERT(static_cast<nint_t>(tensor::size_value<0>(
+    VECOPS_ASSERT(static_cast<nint_t>(tensor::size<0>(
                       input.input_layout())) >= 0 &&
-                      static_cast<nint_t>(tensor::size_value<1>(
+                      static_cast<nint_t>(tensor::size<1>(
                           input.input_layout())) >= 0,
                   "matrix packing extents must be non-negative");
     VECOPS_ASSERT(
@@ -295,20 +295,20 @@ private:
       const CompensationOutputSpec& compensation) {
     const auto& input_layout = input.input_layout();
     VECOPS_ASSERT(static_cast<nint_t>(
-                      tensor::size_value<0>(input_layout)) >= 0 &&
+                      tensor::size<0>(input_layout)) >= 0 &&
                       static_cast<nint_t>(
-                          tensor::size_value<1>(input_layout)) >= 0,
+                          tensor::size<1>(input_layout)) >= 0,
                   "matrix packing extents must be non-negative");
     VECOPS_ASSERT(
         (::vecops::matmul::is_corresponding_packed_layout<
             Atom, ::vecops::matmul::Operand::B>(input_layout, output.output_layout())),
         "packed B layout does not correspond to the input layout");
     VECOPS_ASSERT(
-        static_cast<nint_t>(tensor::size_value<0>(
+        static_cast<nint_t>(tensor::size<0>(
             compensation.output_layout())) ==
-            static_cast<nint_t>(tensor::size_value<0>(input_layout)),
+            static_cast<nint_t>(tensor::size<0>(input_layout)),
         "B compensation extent must equal N");
-    VECOPS_ASSERT(static_cast<nint_t>(tensor::stride_value<0>(
+    VECOPS_ASSERT(static_cast<nint_t>(tensor::stride<0>(
                       compensation.output_layout())) == 1,
                   "B compensation output must be contiguous");
     const auto* input_data =

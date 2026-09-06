@@ -159,8 +159,8 @@ public:
       const InputLayout& input) {
     static_assert(InputLayout::Ndim == 2,
                   "matrix packing accepts a rank-two input layout");
-    const auto spatial = tensor::size_value<0>(input);
-    const auto k = tensor::size_value<1>(input);
+    const auto spatial = tensor::size<0>(input);
+    const auto k = tensor::size<1>(input);
     validate_extents(static_cast<nint_t>(spatial),
                      static_cast<nint_t>(k));
     if constexpr (Side == Operand::A) {

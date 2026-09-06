@@ -121,15 +121,15 @@ VECOPS_INLINE void validate_input(
       }
     }();
     VECOPS_ASSERT(
-        static_cast<nint_t>(tensor::size_value<0>(
+        static_cast<nint_t>(tensor::size<0>(
             spec.input_layout())) * panel >= spatial,
         "packed matmul spatial extent is too small");
     const nint_t padded_k = [&] {
       if constexpr (requires { Packing::KTile; }) {
-        return static_cast<nint_t>(tensor::size_value<1>(
+        return static_cast<nint_t>(tensor::size<1>(
             spec.input_layout())) * Packing::KTile;
       } else {
-        return static_cast<nint_t>(tensor::size_value<1>(
+        return static_cast<nint_t>(tensor::size<1>(
             spec.input_layout())) * Packing::KPack;
       }
     }();
@@ -144,9 +144,9 @@ VECOPS_INLINE void validate_input(
           "matmul batch extent mismatch");
     }
     VECOPS_ASSERT(
-        static_cast<nint_t>(tensor::size_value<LogicalRank - 2>(
+        static_cast<nint_t>(tensor::size<LogicalRank - 2>(
             spec.input_layout())) == spatial &&
-        static_cast<nint_t>(tensor::size_value<LogicalRank - 1>(
+        static_cast<nint_t>(tensor::size<LogicalRank - 1>(
             spec.input_layout())) == k,
         "unpacked matmul operand shape mismatch");
   }
@@ -207,9 +207,9 @@ VECOPS_INLINE void run_generic_tiler(
         "matmul C input and output shapes must match");
   }
   VECOPS_ASSERT(
-      static_cast<nint_t>(tensor::size_value<Rank - 2>(
+      static_cast<nint_t>(tensor::size<Rank - 2>(
           c_output.output_layout())) == static_cast<nint_t>(m) &&
-          static_cast<nint_t>(tensor::size_value<Rank - 1>(
+          static_cast<nint_t>(tensor::size<Rank - 1>(
               c_output.output_layout())) == static_cast<nint_t>(n),
       "matmul output shape does not match M and N");
 

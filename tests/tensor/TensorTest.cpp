@@ -1362,8 +1362,10 @@ TEST_F(TensorConstexprTest, Constexpr_Size) {
     static float d[24]{};
     constexpr auto t = make_tensor(d, make_shape(cint<4>, cint<6>),
                                    make_strides(cint<6>, cint<1>));
-    constexpr nint_t sz0 = t.size<0>();
-    constexpr nint_t sz1 = t.size<1>();
+    constexpr auto sz0 = t.size<0>();
+    constexpr auto sz1 = t.size<1>();
+    static_assert(std::same_as<decltype(sz0), const meta::Const<4>>);
+    static_assert(std::same_as<decltype(sz1), const meta::Const<6>>);
     EXPECT_EQ(sz0, 4);
     EXPECT_EQ(sz1, 6);
 }
@@ -1372,8 +1374,10 @@ TEST_F(TensorConstexprTest, Constexpr_Stride) {
     static float d[24]{};
     constexpr auto t = make_tensor(d, make_shape(cint<4>, cint<6>),
                                    make_strides(cint<6>, cint<1>));
-    constexpr nint_t st0 = t.stride<0>();
-    constexpr nint_t st1 = t.stride<1>();
+    constexpr auto st0 = t.stride<0>();
+    constexpr auto st1 = t.stride<1>();
+    static_assert(std::same_as<decltype(st0), const meta::Const<6>>);
+    static_assert(std::same_as<decltype(st1), const meta::Const<1>>);
     EXPECT_EQ(st0, 6);
     EXPECT_EQ(st1, 1);
 }
@@ -1403,8 +1407,8 @@ TEST_F(TensorConstexprTest, Constexpr_TransposeCT) {
     constexpr auto t1 = make_tensor((float*)nullptr, make_shape(cint<4>, cint<6>),
                                     make_strides(cint<6>, cint<1>));
     constexpr auto t2 = transpose<0, 1>(t1);
-    constexpr nint_t sz0 = t2.size<0>();
-    constexpr nint_t sz1 = t2.size<1>();
+    constexpr auto sz0 = t2.size<0>();
+    constexpr auto sz1 = t2.size<1>();
     EXPECT_EQ(sz0, 6);
     EXPECT_EQ(sz1, 4);
 }
@@ -1412,8 +1416,10 @@ TEST_F(TensorConstexprTest, Constexpr_TransposeCT) {
 TEST_F(TensorConstexprTest, Constexpr_Layout_Size) {
     constexpr auto layout = make_layout(make_shape(cint<4>, cint<6>),
                                         make_strides(cint<6>, cint<1>));
-    constexpr nint_t s0 = size<0>(layout);
-    constexpr nint_t s1 = size<1>(layout);
+    constexpr auto s0 = size<0>(layout);
+    constexpr auto s1 = size<1>(layout);
+    static_assert(std::same_as<decltype(s0), const meta::Const<4>>);
+    static_assert(std::same_as<decltype(s1), const meta::Const<6>>);
     EXPECT_EQ(s0, 4);
     EXPECT_EQ(s1, 6);
 }
