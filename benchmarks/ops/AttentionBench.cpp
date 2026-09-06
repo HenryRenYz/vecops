@@ -33,7 +33,7 @@ using BenchAtom = matmul::SME_BF16F32;
 
 #if defined(ARCH_X86_FAMILY) || defined(HAS_SME)
 
-template <ops::AttentionStrategy Strategy>
+template <ops::SDPAStrategy Strategy>
 using Config = ops::AttentionConfig<
     ops::MatmulConfig<BenchAtom>, 32, 32,
     ops::AttentionCausalMode::none, Strategy>;
@@ -90,13 +90,15 @@ constexpr Case SparseCases[] = {
     {"af3_diffusion", "token_tail", 33, 257, 48, 48, false, false},
 };
 
-template <ops::AttentionStrategy Strategy,
+template <ops::SDPAStrategy Strategy,
           typename QK = bfloat16_t, typename Value = bfloat16_t,
           typename Output = float32_t,
-          typename LqExtent = meta::Any, typename LkvExtent = meta::Any>
+          typename LqExtent = meta::Any, typename LkvExtent = meta::Any,
+          typename DqkExtent = meta::Any, typename DvExtent = meta::Any>
 void run_attention(
     benchmark::State& state, Case test_case,
-    LqExtent lq_extent = {}, LkvExtent lkv_extent = {}) {
+    LqExtent lq_extent, LkvExtent lkv_extent,
+    DqkExtent dqk_extent, DvExtent dv_extent) {
   const nint_t q_elements = test_case.lq * test_case.dqk;
   const nint_t k_elements = test_case.lkv * test_case.dqk;
   const nint_t v_elements = test_case.lkv * test_case.dv;
@@ -112,14 +114,14 @@ void run_attention(
   for (nint_t i = 0; i < v_elements; ++i)
     v[static_cast<std::size_t>(i)] = Value(float(i % 23 - 11) / 32);
   auto qt = tensor::make_tensor(q.data(), tensor::make_shape(
-      lq_extent, meta::Any{test_case.dqk}));
+      lq_extent, dqk_extent));
   auto kt = tensor::make_tensor(k.data(), tensor::make_shape(
-      lkv_extent, meta::Any{test_case.dqk}));
+      lkv_extent, dqk_extent));
   auto vt = tensor::make_tensor(v.data(), tensor::make_shape(
-      lkv_extent, meta::Any{test_case.dv}));
+      lkv_extent, dv_extent));
   auto ot = tensor::make_tensor(out.data(), tensor::make_shape(
-      lq_extent, meta::Any{test_case.dv}));
-  auto op = ops::dense_attention(Config<Strategy>{});
+      lq_extent, dv_extent));
+  auto op = ops::scaled_dot_product_attention(Config<Strategy>{});
   const nint_t workspace_bytes = op.required_workspace(qt, kt, vt, ot);
   kernel::Workspace storage(workspace_bytes);
   auto workspace = storage.view();
@@ -140,36 +142,39 @@ void run_attention(
   state.counters["workspace_bytes"] = static_cast<double>(workspace_bytes);
 }
 
-template <ops::AttentionStrategy Strategy>
+template <ops::SDPAStrategy Strategy>
 void run_attention_metadata(benchmark::State& state, Case test_case) {
   if (test_case.lq_aligned32 && test_case.lkv_aligned32) {
     run_attention<Strategy>(
         state, test_case, meta::dyn<32>(test_case.lq),
-        meta::dyn<32>(test_case.lkv));
+        meta::dyn<32>(test_case.lkv), meta::Any{test_case.dqk},
+        meta::Any{test_case.dv});
   } else if (test_case.lq_aligned32) {
     run_attention<Strategy>(
         state, test_case, meta::dyn<32>(test_case.lq),
-        meta::Any{test_case.lkv});
+        meta::Any{test_case.lkv}, meta::Any{test_case.dqk},
+        meta::Any{test_case.dv});
   } else if (test_case.lkv_aligned32) {
     run_attention<Strategy>(
         state, test_case, meta::Any{test_case.lq},
-        meta::dyn<32>(test_case.lkv));
+        meta::dyn<32>(test_case.lkv), meta::Any{test_case.dqk},
+        meta::Any{test_case.dv});
   } else {
     run_attention<Strategy>(
         state, test_case, meta::Any{test_case.lq},
-        meta::Any{test_case.lkv});
+        meta::Any{test_case.lkv}, meta::Any{test_case.dqk},
+        meta::Any{test_case.dv});
   }
 }
 
-enum class SparseMode {
-  materialized,
-  direct,
-  mask,
-  dynamic,
+enum class IndexedMode {
+  sparse_flash,
+  ibs_indexer,
+  ibs,
 };
 
-template <SparseMode Mode>
-void run_sparse_attention(
+template <IndexedMode Mode>
+void run_indexed_attention(
     benchmark::State& state, Case test_case, nint_t selected) {
   const nint_t tq = ceil_div(test_case.lq, nint_t{32});
   const nint_t tkv = ceil_div(test_case.lkv, nint_t{32});
@@ -203,24 +208,22 @@ void run_sparse_attention(
       meta::Any{tq}, meta::Any{selected}));
   auto wt = tensor::make_tensor(weight.data(), tensor::make_shape(
       meta::Any{tq}, meta::Any{selected}));
-  Config<ops::AttentionStrategy::automatic> config{};
+  Config<ops::SDPAStrategy::automatic> config{};
   config.selected_blocks = selected;
   config.static_probability = 1.0f;
   config.random_probability = 1.0f;
   auto op = [&] {
-    if constexpr (Mode == SparseMode::dynamic)
-      return ops::dynamic_attention(config);
-    else if constexpr (Mode == SparseMode::mask)
-      return ops::dynamic_attention_mask(config);
-    else if constexpr (Mode == SparseMode::materialized)
-      return ops::sparse_attention(config);
+    if constexpr (Mode == IndexedMode::ibs)
+      return ops::ibs_attention(config);
+    else if constexpr (Mode == IndexedMode::ibs_indexer)
+      return ops::ibs_attention_indexer(config);
     else
       return ops::sparse_flash_attention(config);
   }();
   const nint_t workspace_bytes = [&] {
-    if constexpr (Mode == SparseMode::dynamic)
+    if constexpr (Mode == IndexedMode::ibs)
       return op.required_workspace(qt, kt, vt, ot);
-    else if constexpr (Mode == SparseMode::mask)
+    else if constexpr (Mode == IndexedMode::ibs_indexer)
       return op.required_workspace(qt, kt, it, wt);
     else
       return op.required_workspace(qt, kt, vt, it, ot);
@@ -230,13 +233,13 @@ void run_sparse_attention(
   std::mt19937 rng(17);
   const float scale = 1.0f / std::sqrt(float(test_case.dqk));
   for (auto _ : state) {
-    if constexpr (Mode == SparseMode::dynamic)
+    if constexpr (Mode == IndexedMode::ibs)
       op(workspace, qt, kt, vt, ot, scale, rng);
-    else if constexpr (Mode == SparseMode::mask)
+    else if constexpr (Mode == IndexedMode::ibs_indexer)
       op(workspace, qt, kt, it, wt, scale);
     else
       op(workspace, qt, kt, vt, it, ot, scale);
-    if constexpr (Mode == SparseMode::mask) {
+    if constexpr (Mode == IndexedMode::ibs_indexer) {
       benchmark::DoNotOptimize(index.data());
       benchmark::DoNotOptimize(weight.data());
     } else {
@@ -244,7 +247,7 @@ void run_sparse_attention(
     }
     benchmark::ClobberMemory();
   }
-  if constexpr (Mode != SparseMode::mask) {
+  if constexpr (Mode != IndexedMode::ibs_indexer) {
     const double selected_keys = selected * 32.0;
     state.counters["effective_gflops"] = benchmark::Counter(
         2.0 * test_case.lq * selected_keys *
@@ -276,7 +279,7 @@ void register_benchmarks() {
         benchmark::RegisterBenchmark(                                      \
             (base + "/" Label).c_str(),                                   \
             [test_case](benchmark::State& state) {                          \
-              run_attention_metadata<ops::AttentionStrategy::Strategy>(     \
+              run_attention_metadata<ops::SDPAStrategy::Strategy>(     \
                   state, test_case);                                         \
             }),                                                             \
         0.2, 3)
@@ -292,26 +295,38 @@ void register_benchmarks() {
       benchmark::RegisterBenchmark(
           "Attention/coverage/fixed_n/fp32_bf16_fp32",
           [MetaCase](benchmark::State& state) {
-            run_attention<ops::AttentionStrategy::automatic,
+            run_attention<ops::SDPAStrategy::automatic,
                           float32_t, bfloat16_t, float32_t>(
-                state, MetaCase, meta::cint<32>, meta::cint<64>);
+                state, MetaCase, meta::cint<32>, meta::cint<64>,
+                meta::Any{MetaCase.dqk}, meta::Any{MetaCase.dv});
+          }), 0.2, 3);
+  vecops::bench::configure_registered_benchmark(
+      benchmark::RegisterBenchmark(
+          "Attention/coverage/fixed_all_dims/fp32_bf16_fp32",
+          [MetaCase](benchmark::State& state) {
+            run_attention<ops::SDPAStrategy::automatic,
+                          float32_t, bfloat16_t, float32_t>(
+                state, MetaCase, meta::cint<32>, meta::cint<64>,
+                meta::cint<48>, meta::cint<32>);
           }), 0.2, 3);
   vecops::bench::configure_registered_benchmark(
       benchmark::RegisterBenchmark(
           "Attention/coverage/aligned32_n/fp16_fp32_fp16",
           [MetaCase](benchmark::State& state) {
-            run_attention<ops::AttentionStrategy::automatic,
+            run_attention<ops::SDPAStrategy::automatic,
                           float16_t, float32_t, float16_t>(
                 state, MetaCase, meta::dyn<32, 32, 128>(32),
-                meta::dyn<32, 32, 128>(64));
+                meta::dyn<32, 32, 128>(64), meta::Any{MetaCase.dqk},
+                meta::Any{MetaCase.dv});
           }), 0.2, 3);
   vecops::bench::configure_registered_benchmark(
       benchmark::RegisterBenchmark(
           "Attention/coverage/any_n/bf16_fp16_bf16",
           [MetaCase](benchmark::State& state) {
-            run_attention<ops::AttentionStrategy::automatic,
+            run_attention<ops::SDPAStrategy::automatic,
                           bfloat16_t, float16_t, bfloat16_t>(
-                state, MetaCase, meta::Any{32}, meta::Any{64});
+                state, MetaCase, meta::Any{32}, meta::Any{64},
+                meta::Any{MetaCase.dqk}, meta::Any{MetaCase.dv});
           }), 0.2, 3);
   for (const auto& test_case : SparseCases) {
     const nint_t selected = test_case.lkv >= 1024 ? 8 : 4;
@@ -327,14 +342,13 @@ void register_benchmarks() {
         benchmark::RegisterBenchmark(                                      \
             (base + "/" Label).c_str(),                                   \
             [test_case, selected](benchmark::State& state) {                \
-              run_sparse_attention<SparseMode::Mode>(                      \
+              run_indexed_attention<IndexedMode::Mode>(                      \
                   state, test_case, selected);                              \
             }),                                                             \
         0.2, 3)
-    VECOPS_REGISTER_SPARSE_MODE(materialized, "sparse_materialized");
-    VECOPS_REGISTER_SPARSE_MODE(direct, "sparse_flash");
-    VECOPS_REGISTER_SPARSE_MODE(mask, "dynamic_mask");
-    VECOPS_REGISTER_SPARSE_MODE(dynamic, "dynamic");
+    VECOPS_REGISTER_SPARSE_MODE(sparse_flash, "sparse_flash");
+    VECOPS_REGISTER_SPARSE_MODE(ibs_indexer, "ibs_indexer");
+    VECOPS_REGISTER_SPARSE_MODE(ibs, "ibs_attention");
 #undef VECOPS_REGISTER_SPARSE_MODE
   }
 }

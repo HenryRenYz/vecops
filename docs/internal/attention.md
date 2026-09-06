@@ -36,9 +36,8 @@ The expanded matrix is based on:
   used independently for each guaranteed-aligned Q or K/V axis; arbitrary
   axes use `meta::Any`.
 
-The benchmark now measures dense automatic/materialized/streaming strategies,
-direct sparse attention, dynamic-mask construction alone, and complete dynamic
-attention.
+The benchmark now measures SDPA automatic/materialized/streaming strategies,
+Sparse FlashAttention, IBS base indexing alone, and complete IBS Attention.
 
 ## Baseline before this iteration
 
@@ -321,3 +320,122 @@ No new Matmul-specific missing branch was isolated in this iteration. The
 observed bottlenecks were Attention orchestration, strict/scalar exponential
 work, strategy selection, and repeated sparse Matmul setup, so
 `docs/internal/matmul-issues.md` did not need a new entry.
+
+## Iteration 8: public API and IBS algorithm boundaries
+
+The initial API mixed mathematical semantics (`dense`/`sparse`), internal
+strategies (`materialized`/`flash`), and the IBS routing stage (`dynamic
+mask`). It was replaced with four non-aliasing public factories:
+
+- `scaled_dot_product_attention`: exact SDPA with internal automatic,
+  materialized, or streaming strategy;
+- `sparse_flash_attention`: online attention over an already-final selected
+  index sequence `J`;
+- `ibs_attention_indexer`: the SparseFold paper's reusable base index
+  computation, producing index/weight maps `I/W`;
+- `ibs_attention`: optional base indexing, weighted sampling `I/W -> J`, and
+  Sparse FlashAttention execution.
+
+The materialized SDPA class moved to `attention_details::MaterializedSDPA` and
+its public factory was removed. Benchmarks continue to force it through
+`SDPAStrategy::materialized`. Weighted sampling and its scratch/validation
+were moved out of `SparseFlashAttention` into `IBSAttention`, matching the
+paper's separation between base index computation, index sampling, and
+attention computation.
+
+The experimental compact materialized `SparseAttention` and its factory were
+removed by API design despite the speedups recorded in Iteration 7. This
+intentionally leaves `SparseFlashAttention` as the single general
+caller-indexed sparse primitive; the Iteration 7 measurements remain above as
+historical data rather than a currently shipped path.
+
+The post-refactor x86 benchmark is stored in
+`benchmarks/results/attention_ibs_api_x86.json`. Moving weighted sampling did
+not regress complete IBS Attention: the three medians are 33.99, 95.51, and
+3.35 us versus the preceding 33.85, 95.67, and 3.46 us. Base indexing is
+1.94, 6.31, and 1.06 us. The current suite registers 78 benchmarks after
+removing the three compact-materialized sparse cases.
+
+The ARM result is stored in
+`benchmarks/results/attention_ibs_api_arm.json`. Complete IBS Attention is
+42.89, 118.25, and 8.05 us, matching the pre-refactor 42.98, 118.44, and
+7.95 us within normal run variation. Base indexing is 20.28, 59.97, and
+4.64 us. The final API passed 11/11 Release tests on both x86 and ARM and
+12/12 x86 ASan tests with leak detection enabled.
+
+## Iteration 9: filename alignment and scalar-loop audit
+
+The internal files now match the public algorithm names:
+
+- `Operation.h` became `SDPA.h`;
+- `Sparse.h` became `SparseFlashAttention.h`;
+- `Dynamic.h` became `IBSAttention.h`.
+
+Every remaining `for`/`while` loop in these files was reviewed by iteration
+axis and dependency structure. The useful changes are:
+
+- query/key mask rows are loaded and counted in vector batches once per block,
+  replacing repeated `DataAccess::load_scalar` calls in SDPA, Sparse
+  FlashAttention, and both IBS block-mean/coarse-score stages;
+- the no-key-mask/no-attention-mask/no-bias/non-causal IBS coarse row uses one
+  vector scale/store/max traversal. It removes both the key-block scalar score
+  loop and the nested query-row pair-count loop from the common inference path;
+- block-mean reduction remains vectorized across features, but its row
+  reduction now uses four independent vector accumulators. This shortens the
+  dependency chain without requiring a row/feature transpose or gather.
+
+The loops deliberately left scalar fall into three groups:
+
+| loop | reason |
+|---|---|
+| SDPA/Sparse Flash query rows | each row invokes an already-vectorized contiguous key/feature traversal; vectorizing rows would require strided gather or a layout transpose |
+| selected K/V block traversal and online-softmax recurrence | the next block consumes the preceding row maximum, normalizer, and output accumulator |
+| IBS Top-S insertion and CDF/RNG sampling | ordered tie-breaking, prefix state, and sampling-without-replacement are loop-carried; typical capacities are only 4 or 8 |
+
+An explicit vector-iota replacement for SDPA streaming's dense index-map
+initialization was also tested. Alternating builds produced no stable gain:
+the two representative scalar medians were 301.86 us (`1x8192` decode) and
+97.42 us (`128x512` prefill), while explicit-vector runs varied between
+298.12--305.47 us and 97.12--97.60 us. The scalar spelling was retained; this
+loop is tiny relative to QK/PV and is a normal compiler auto-vectorization
+candidate.
+
+Same-binary x86 medians before and after the retained changes:
+
+| case | before | after | result |
+|---|---:|---:|---:|
+| IBS indexer, AF3 pair `128x512`, S=4 | 1.937 us | 1.363 us | -29.6% |
+| IBS indexer, AF3 pair `128x1536`, S=8 | 6.316 us | 4.301 us | -31.9% |
+| IBS indexer, AF3 diffusion `33x257`, S=4 | 1.058 us | 0.939 us | -11.2% |
+| complete IBS, AF3 pair `128x512`, S=4 | 34.006 us | 33.684 us | -0.9% |
+| complete IBS, AF3 pair `128x1536`, S=8 | 95.529 us | 93.738 us | -1.9% |
+| complete IBS, AF3 diffusion `33x257`, S=4 | 3.353 us | 3.301 us | -1.5% |
+
+Sparse Flash medians changed by -0.6%, -0.6%, and -1.4%, respectively, so
+the shared activity preload introduced no measured regression. `perf stat` on
+the `128x1536` IBS indexer reports 2.51 instructions/cycle and a 0.04% branch
+miss rate. The retained vector hot path emits AVX-512 masked loads/stores and
+vector FP32 arithmetic in the benchmark object; tail lanes are explicitly
+blended to negative infinity after scaling, so zero or negative user scales
+cannot turn inactive lanes into NaNs or positive infinity.
+
+The same fast path is substantially more important on SVE, where it removes
+the scalar nested query/key traversal that dominated the small coarse map:
+
+| ARM case | before | after | result |
+|---|---:|---:|---:|
+| IBS indexer, AF3 pair `128x512`, S=4 | 20.298 us | 3.479 us | -82.9% |
+| IBS indexer, AF3 pair `128x1536`, S=8 | 60.031 us | 9.414 us | -84.3% |
+| IBS indexer, AF3 diffusion `33x257`, S=4 | 4.642 us | 2.230 us | -52.0% |
+| complete IBS, AF3 pair `128x512`, S=4 | 42.949 us | 25.780 us | -40.0% |
+| complete IBS, AF3 pair `128x1536`, S=8 | 118.366 us | 66.862 us | -43.5% |
+| complete IBS, AF3 diffusion `33x257`, S=4 | 8.059 us | 5.735 us | -28.8% |
+
+ARM Sparse Flash changed by -1.8%, -2.9%, and -2.0%. Release validation is
+11/11 on both x86 and ARM; x86 Debug ASan is 12/12 with leak detection.
+
+The x86 and ARM results are stored in
+`benchmarks/results/attention_vectorized_x86.json` and
+`benchmarks/results/attention_vectorized_arm.json`. No missing Matmul special
+case was isolated during this audit, so `docs/internal/matmul-issues.md` did
+not need a new entry.

@@ -338,7 +338,7 @@ struct OperandInvariants {
   VECOPS_ALWAYS_INLINE explicit OperandInvariants(const Source& source) {
     using T = typename ::vecops::matmul::packing_t<Atom, Side>::Element;
     if constexpr (direct_row_major_input_v<Source> && sizeof(T) <= 4) {
-      row_bytes = static_cast<nint_t>(tensor::stride_value<0>(
+      row_bytes = static_cast<nint_t>(tensor::stride<0>(
           source.spec().input_layout())) *
           static_cast<nint_t>(sizeof(T));
       gather_offsets_fit =
@@ -683,7 +683,7 @@ VECOPS_ALWAYS_INLINE void sve_skinny_block(
 
   auto* output = reinterpret_cast<Acc*>(c_output.raw_data());
   const nint_t output_stride = static_cast<nint_t>(
-      tensor::stride_value<0>(c_output.spec().output_layout()));
+      tensor::stride<0>(c_output.spec().output_layout()));
   const auto store = [&](nint_t logical, Acc value) {
     output[VaryRows ? logical * output_stride : logical] = value;
   };
@@ -1595,7 +1595,7 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot(
         direct_row_major_output_v<COutput>;
     if constexpr (DirectZeroOutput) {
       // Preserve the exact X24 store sequence on the original fast path.
-      if (static_cast<nint_t>(tensor::stride_value<0>(
+      if (static_cast<nint_t>(tensor::stride<0>(
               c_output.spec().output_layout())) != logical_n) return false;
     }
 
@@ -1610,10 +1610,10 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot(
 
     packed_ab_mmla<Atom>(
         reinterpret_cast<const typename Atom::TA*>(a.raw_data()),
-        static_cast<nint_t>(tensor::stride_value<1>(
+        static_cast<nint_t>(tensor::stride<1>(
             a.spec().input_layout())),
         reinterpret_cast<const typename Atom::TB*>(b.raw_data()),
-        static_cast<nint_t>(tensor::stride_value<1>(
+        static_cast<nint_t>(tensor::stride<1>(
             b.spec().input_layout())),
         output,
         logical_m, logical_n, logical_k);
@@ -1664,7 +1664,7 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot_tiny(
         IsZeroTransform<typename CInput::Transform>::value &&
         direct_row_major_output_v<COutput>;
     if constexpr (DirectZeroOutput) {
-      if (static_cast<nint_t>(tensor::stride_value<0>(
+      if (static_cast<nint_t>(tensor::stride<0>(
               c_output.spec().output_layout())) != logical_n) return false;
     }
 
@@ -1679,10 +1679,10 @@ VECOPS_ALWAYS_INLINE bool try_packed_dot_tiny(
 
     packed_ab_mmla<Atom>(
         reinterpret_cast<const typename Atom::TA*>(a.raw_data()),
-        static_cast<nint_t>(tensor::stride_value<1>(
+        static_cast<nint_t>(tensor::stride<1>(
             a.spec().input_layout())),
         reinterpret_cast<const typename Atom::TB*>(b.raw_data()),
-        static_cast<nint_t>(tensor::stride_value<1>(
+        static_cast<nint_t>(tensor::stride<1>(
             b.spec().input_layout())),
         output,
         logical_m, logical_n, logical_k);
@@ -2170,9 +2170,9 @@ VECOPS_ALWAYS_INLINE void compute_packed_groups(
   using BTag = vec::ScalableTag<TB, 0>;
   constexpr nint_t KP = ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::A>::KPack;
   const nint_t groups = ceil_div(logical_k, KP);
-  const nint_t a_step = static_cast<nint_t>(tensor::stride_value<1>(
+  const nint_t a_step = static_cast<nint_t>(tensor::stride<1>(
       a.spec().input_layout()));
-  const nint_t b_step = static_cast<nint_t>(tensor::stride_value<1>(
+  const nint_t b_step = static_cast<nint_t>(tensor::stride<1>(
       b.spec().input_layout()));
 
   if constexpr (NN == 1) {

@@ -30,15 +30,15 @@ using TestAtom = matmul::SME_BF16F32;
 using Config = ops::AttentionConfig<ops::MatmulConfig<TestAtom>, 4, 4>;
 using StrictConfig = ops::AttentionConfig<
     ops::MatmulConfig<TestAtom>, 4, 4,
-    ops::AttentionCausalMode::none, ops::AttentionStrategy::automatic,
+    ops::AttentionCausalMode::none, ops::SDPAStrategy::automatic,
     vec::Accuracy::Strict>;
 using ModelConfig = ops::AttentionConfig<ops::MatmulConfig<TestAtom>, 32, 32>;
 using StreamingModelConfig = ops::AttentionConfig<
     ops::MatmulConfig<TestAtom>, 32, 32,
-    ops::AttentionCausalMode::none, ops::AttentionStrategy::streaming>;
+    ops::AttentionCausalMode::none, ops::SDPAStrategy::streaming>;
 using MaterializedModelConfig = ops::AttentionConfig<
     ops::MatmulConfig<TestAtom>, 32, 32,
-    ops::AttentionCausalMode::none, ops::AttentionStrategy::materialized>;
+    ops::AttentionCausalMode::none, ops::SDPAStrategy::materialized>;
 using CausalConfig = ops::AttentionConfig<
     ops::MatmulConfig<TestAtom>, 4, 4,
     ops::AttentionCausalMode::bottom_right>;
@@ -46,22 +46,29 @@ using TopLeftCausalConfig = ops::AttentionConfig<
     ops::MatmulConfig<TestAtom>, 4, 4,
     ops::AttentionCausalMode::top_left>;
 
-using DynamicMapTensor = decltype(tensor::make_tensor(
+using IBSMapTensor = decltype(tensor::make_tensor(
     static_cast<int32_t*>(nullptr),
     tensor::make_shape(meta::cint<2>, meta::cint<3>)));
-using ConstDynamicMapTensor = decltype(tensor::make_tensor(
+using ConstIBSMapTensor = decltype(tensor::make_tensor(
     static_cast<const int32_t*>(nullptr),
     tensor::make_shape(meta::cint<2>, meta::cint<3>)));
-using DynamicMapSpec = decltype(tensor::input<int32_t>(
-    std::declval<DynamicMapTensor>()));
-static_assert(ops::attention_details::AttentionBufferTensor<
-              DynamicMapTensor, int32_t, 2>);
-static_assert(ops::attention_details::WritableAttentionBufferTensor<
-              DynamicMapTensor, int32_t, 2>);
-static_assert(!ops::attention_details::WritableAttentionBufferTensor<
-              ConstDynamicMapTensor, int32_t, 2>);
-static_assert(!ops::attention_details::AttentionBufferTensor<
-              DynamicMapSpec, int32_t, 2>);
+using IBSMapSpec = decltype(tensor::input<int32_t>(
+    std::declval<IBSMapTensor>()));
+using IBSMapOutputSpec = decltype(tensor::output<int32_t>(
+    std::declval<IBSMapTensor>()));
+static_assert(tensor::TensorOf<IBSMapTensor, int32_t, 2>);
+static_assert(tensor::WritableTensorOf<IBSMapTensor, int32_t, 2>);
+static_assert(!tensor::WritableTensorOf<ConstIBSMapTensor, int32_t, 2>);
+static_assert(!tensor::TensorOf<IBSMapSpec, int32_t, 2>);
+static_assert(tensor::InputOperandOf<IBSMapTensor, 2>);
+static_assert(tensor::InputOperandOf<IBSMapSpec, 2>);
+static_assert(!tensor::InputOperandOf<IBSMapTensor, 1>);
+static_assert(tensor::OutputOperandOf<IBSMapTensor, 2>);
+static_assert(tensor::OutputOperandOf<IBSMapOutputSpec, 2>);
+static_assert(!tensor::OutputOperandOf<ConstIBSMapTensor, 2>);
+static_assert(tensor::OptionalInputOperand<tensor::nullopt_t>);
+static_assert(tensor::OptionalInputOperandOf<tensor::nullopt_t, 1>);
+static_assert(tensor::OptionalInputOperandOf<IBSMapSpec, 2>);
 
 template <typename TQK, typename TV>
 std::vector<float> reference_attention(
@@ -118,7 +125,7 @@ std::vector<float> reference_attention(
 
 template <typename QK, typename Value, typename Output,
           typename LqExtent, typename LkvExtent>
-void run_dense_dtype_meta_case(
+void run_sdpa_dtype_meta_case(
     LqExtent lq_extent, LkvExtent lkv_extent,
     nint_t dqk, nint_t dv) {
   const nint_t lq = static_cast<nint_t>(lq_extent);
@@ -144,7 +151,7 @@ void run_dense_dtype_meta_case(
       lkv_extent, meta::Any{dv}));
   auto ot = tensor::make_tensor(out.data(), tensor::make_shape(
       lq_extent, meta::Any{dv}));
-  auto op = ops::dense_attention(ModelConfig{});
+  auto op = ops::scaled_dot_product_attention(ModelConfig{});
   kernel::Workspace storage(op.required_workspace(qt, kt, vt, ot));
   auto workspace = storage.view();
   op(workspace, qt, kt, vt, ot, 0.125f);
@@ -157,7 +164,7 @@ void run_dense_dtype_meta_case(
   }
 }
 
-TEST(AttentionTest, DenseUnmaskedHandlesQueryTailAndDistinctValueWidth) {
+TEST(AttentionTest, SDPAHandlesQueryTailAndDistinctValueWidth) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   constexpr nint_t Lq = 5;
   constexpr nint_t Lkv = 7;
@@ -183,7 +190,7 @@ TEST(AttentionTest, DenseUnmaskedHandlesQueryTailAndDistinctValueWidth) {
   auto ot = tensor::make_tensor(
       out.data(), tensor::make_shape(meta::Any{Lq}, meta::Any{Dv}));
   const float scale = 0.375f;
-  auto op = ops::dense_attention(StrictConfig{});
+  auto op = ops::scaled_dot_product_attention(StrictConfig{});
   kernel::Workspace storage(op.required_workspace(qt, kt, vt, ot));
   auto workspace = storage.view();
   op(workspace, qt, kt, vt, ot, scale);
@@ -195,7 +202,7 @@ TEST(AttentionTest, DenseUnmaskedHandlesQueryTailAndDistinctValueWidth) {
   }
 }
 
-TEST(AttentionTest, DenseCompileTimeOptionalMasksBiasAndAllMaskedRow) {
+TEST(AttentionTest, SDPACompileTimeOptionalMasksBiasAndAllMaskedRow) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   constexpr nint_t Lq = 3;
   constexpr nint_t Lkv = 5;
@@ -230,7 +237,7 @@ TEST(AttentionTest, DenseCompileTimeOptionalMasksBiasAndAllMaskedRow) {
   auto ot = tensor::make_tensor(out.data(), tensor::make_shape(
       meta::cint<Lq>, meta::cint<D>));
 
-  auto op = ops::dense_attention(Config{});
+  auto op = ops::scaled_dot_product_attention(Config{});
   kernel::Workspace storage(op.required_workspace(
       qt, kt, vt, qmt, kmt, amt, bt, ot));
   auto workspace = storage.view();
@@ -266,7 +273,7 @@ TEST(AttentionTest, DenseCompileTimeOptionalMasksBiasAndAllMaskedRow) {
     EXPECT_NEAR(sparse_out[i], expected[i], 2.5e-2f) << "index=" << i;
 }
 
-TEST(AttentionTest, SparseAttentionSupportsDifferentBlocksAndTailBlocks) {
+TEST(AttentionTest, SparseFlashSupportsDifferentBlocksAndTailBlocks) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   constexpr nint_t Lq = 5;
   constexpr nint_t Lkv = 9;
@@ -295,7 +302,7 @@ TEST(AttentionTest, SparseAttentionSupportsDifferentBlocksAndTailBlocks) {
       index.data(), tensor::make_shape(meta::Any{2}, meta::Any{S}));
   auto ot = tensor::make_tensor(
       out.data(), tensor::make_shape(meta::Any{Lq}, meta::Any{Dv}));
-  auto op = ops::sparse_attention(Config{});
+  auto op = ops::sparse_flash_attention(Config{});
   kernel::Workspace storage(op.required_workspace(qt, kt, vt, it, ot));
   auto workspace = storage.view();
   op(workspace, qt, kt, vt, it, ot, 0.25f);
@@ -317,7 +324,7 @@ TEST(AttentionTest, SparseAttentionSupportsDifferentBlocksAndTailBlocks) {
     EXPECT_NEAR(out[i], expected[i], 3.0e-2f) << "index=" << i;
 }
 
-TEST(AttentionTest, MaterializedSparsePreservesDuplicateBlockMultiplicity) {
+TEST(AttentionTest, SparseFlashPreservesDuplicateBlockMultiplicity) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   constexpr nint_t Lq = 4;
   constexpr nint_t Lkv = 8;
@@ -348,7 +355,7 @@ TEST(AttentionTest, MaterializedSparsePreservesDuplicateBlockMultiplicity) {
       index.data(), tensor::make_shape(meta::cint<1>, meta::cint<3>));
   auto ot = tensor::make_tensor(
       out.data(), tensor::make_shape(meta::Any{Lq}, meta::Any{D}));
-  auto op = ops::sparse_attention(Config{});
+  auto op = ops::sparse_flash_attention(Config{});
   kernel::Workspace storage(op.required_workspace(qt, kt, vt, it, ot));
   auto workspace = storage.view();
   op(workspace, qt, kt, vt, it, ot, 0.25f);
@@ -372,7 +379,7 @@ TEST(AttentionTest, MaterializedSparsePreservesDuplicateBlockMultiplicity) {
     EXPECT_NEAR(out[i], expected[i], 3.0e-2f) << "index=" << i;
 }
 
-TEST(AttentionTest, DynamicMaskRanksTailBlocksAndUsesStableTieBreak) {
+TEST(AttentionTest, IBSIndexerRanksTailBlocksAndUsesStableTieBreak) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   constexpr nint_t Lq = 5;
   constexpr nint_t Lkv = 9;
@@ -399,7 +406,7 @@ TEST(AttentionTest, DynamicMaskRanksTailBlocksAndUsesStableTieBreak) {
   Config config{};
   config.static_probability = 1.0f;
   config.random_probability = 1.0f;
-  auto op = ops::dynamic_attention_mask(config);
+  auto op = ops::ibs_attention_indexer(config);
   kernel::Workspace storage(op.required_workspace(qt, kt, it, wt));
   auto workspace = storage.view();
   op(workspace, qt, kt, it, wt, 1.0f);
@@ -415,7 +422,7 @@ TEST(AttentionTest, DynamicMaskRanksTailBlocksAndUsesStableTieBreak) {
 }
 
 #ifdef VECOPS_DEBUG
-TEST(AttentionTest, DynamicMapBuffersRejectNonContiguousTensor) {
+TEST(AttentionTest, IBSMapBuffersRejectNonContiguousTensor) {
   std::array<int32_t, 8> storage{};
   auto map = tensor::make_tensor(
       storage.data(), tensor::make_shape(meta::cint<2>, meta::cint<3>),
@@ -423,12 +430,12 @@ TEST(AttentionTest, DynamicMapBuffersRejectNonContiguousTensor) {
   ASSERT_FALSE(map.is_contiguous());
   EXPECT_DEATH(
       (ops::attention_details::validate_contiguous_buffer<int32_t, 2>(
-          map, "dynamic map must be contiguous")),
+          map, "IBS map must be contiguous")),
       "contiguous");
 }
 #endif
 
-TEST(AttentionTest, SampledSparseIsReproducibleForFixedRngSeed) {
+TEST(AttentionTest, IBSAttentionSamplingIsReproducibleForFixedRngSeed) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   constexpr nint_t Lq = 4;
   constexpr nint_t Lkv = 12;
@@ -462,7 +469,7 @@ TEST(AttentionTest, SampledSparseIsReproducibleForFixedRngSeed) {
   config.random_blocks = 1;
   config.static_probability = 0.5f;
   config.random_probability = 1.0f;
-  auto op = ops::sparse_flash_attention(config);
+  auto op = ops::ibs_attention(config);
   const nint_t bytes = op.required_workspace(
       qt, kt, vt, it, wt, tensor::nullopt, tensor::nullopt,
       tensor::nullopt, tensor::nullopt, out_at);
@@ -484,7 +491,7 @@ TEST(AttentionTest, SampledSparseIsReproducibleForFixedRngSeed) {
   }));
 }
 
-TEST(AttentionTest, DynamicCompositionMatchesDenseWhenAllBlocksSelected) {
+TEST(AttentionTest, IBSAttentionMatchesSDPAWhenAllBlocksSelected) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   constexpr nint_t Lq = 5;
   constexpr nint_t Lkv = 9;
@@ -514,13 +521,13 @@ TEST(AttentionTest, DynamicCompositionMatchesDenseWhenAllBlocksSelected) {
   config.selected_blocks = 3;
   config.static_probability = 1.0f;
   config.random_probability = 1.0f;
-  auto dense = ops::dense_attention(config);
+  auto dense = ops::scaled_dot_product_attention(config);
   kernel::Workspace dense_storage(
       dense.required_workspace(qt, kt, vt, dense_ot));
   auto dense_workspace = dense_storage.view();
   dense(dense_workspace, qt, kt, vt, dense_ot, 0.5f);
 
-  auto dynamic = ops::dynamic_attention(config);
+  auto dynamic = ops::ibs_attention(config);
   kernel::Workspace dynamic_storage(
       dynamic.required_workspace(qt, kt, vt, dynamic_ot));
   auto dynamic_workspace = dynamic_storage.view();
@@ -532,15 +539,15 @@ TEST(AttentionTest, DynamicCompositionMatchesDenseWhenAllBlocksSelected) {
 
 TEST(AttentionTest, CoversFixedAlignedAndArbitrarySequenceMetadataAndDtypes) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
-  run_dense_dtype_meta_case<float32_t, bfloat16_t, float32_t>(
+  run_sdpa_dtype_meta_case<float32_t, bfloat16_t, float32_t>(
       meta::cint<32>, meta::cint<64>, 128, 128);
-  run_dense_dtype_meta_case<float16_t, float32_t, float16_t>(
+  run_sdpa_dtype_meta_case<float16_t, float32_t, float16_t>(
       meta::dyn<32, 32, 128>(32), meta::dyn<32, 32, 128>(96), 48, 32);
-  run_dense_dtype_meta_case<bfloat16_t, float16_t, bfloat16_t>(
+  run_sdpa_dtype_meta_case<bfloat16_t, float16_t, bfloat16_t>(
       meta::Any{33}, meta::Any{65}, 24, 48);
 }
 
-TEST(AttentionTest, OnlineDenseMatchesMaterializedDense) {
+TEST(AttentionTest, StreamingSDPAMatchesMaterializedSDPA) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   constexpr nint_t Lq = 33;
   constexpr nint_t Lkv = 65;
@@ -566,8 +573,9 @@ TEST(AttentionTest, OnlineDenseMatchesMaterializedDense) {
       meta::Any{Lq}, meta::Any{D}));
   auto mot = tensor::make_tensor(materialized_out.data(), tensor::make_shape(
       meta::Any{Lq}, meta::Any{D}));
-  auto online = ops::dense_attention(StreamingModelConfig{});
-  auto materialized = ops::dense_materialized_attention(ModelConfig{});
+  auto online = ops::scaled_dot_product_attention(StreamingModelConfig{});
+  auto materialized =
+      ops::scaled_dot_product_attention(MaterializedModelConfig{});
   kernel::Workspace online_storage(
       online.required_workspace(qt, kt, vt, oot));
   kernel::Workspace materialized_storage(
@@ -597,13 +605,13 @@ TEST(AttentionTest, AutomaticStrategyUsesShapeAppropriateWorkspace) {
         meta::Any{lkv}, meta::Any{d}));
     auto ot = tensor::make_tensor(out.data(), tensor::make_shape(
         meta::Any{lq}, meta::Any{d}));
-    auto automatic = ops::dense_attention(ModelConfig{});
+    auto automatic = ops::scaled_dot_product_attention(ModelConfig{});
     const nint_t automatic_bytes =
         automatic.required_workspace(qt, kt, vt, ot);
     const nint_t expected_bytes = expect_materialized
-        ? ops::dense_attention(MaterializedModelConfig{})
+        ? ops::scaled_dot_product_attention(MaterializedModelConfig{})
               .required_workspace(qt, kt, vt, ot)
-        : ops::dense_attention(StreamingModelConfig{})
+        : ops::scaled_dot_product_attention(StreamingModelConfig{})
               .required_workspace(qt, kt, vt, ot);
     EXPECT_EQ(automatic_bytes, expected_bytes);
   };
@@ -640,7 +648,7 @@ TEST(AttentionTest, BottomRightCausalModeSupportsKvCacheAlignment) {
       meta::cint<Lkv>, meta::cint<D>));
   auto ot = tensor::make_tensor(out.data(), tensor::make_shape(
       meta::cint<Lq>, meta::cint<D>));
-  auto op = ops::dense_attention(CausalConfig{});
+  auto op = ops::scaled_dot_product_attention(CausalConfig{});
   kernel::Workspace storage(op.required_workspace(qt, kt, vt, ot));
   auto workspace = storage.view();
   op(workspace, qt, kt, vt, ot, 0.5f);
@@ -661,7 +669,7 @@ TEST(AttentionTest, BottomRightCausalModeSupportsKvCacheAlignment) {
       all_blocks.data(), tensor::make_shape(meta::cint<1>, meta::cint<2>));
   auto sparse_ot = tensor::make_tensor(
       sparse_out.data(), tensor::make_shape(meta::cint<Lq>, meta::cint<D>));
-  auto sparse = ops::sparse_attention(CausalConfig{});
+  auto sparse = ops::sparse_flash_attention(CausalConfig{});
   kernel::Workspace sparse_storage(
       sparse.required_workspace(qt, kt, vt, index, sparse_ot));
   auto sparse_workspace = sparse_storage.view();
@@ -672,7 +680,7 @@ TEST(AttentionTest, BottomRightCausalModeSupportsKvCacheAlignment) {
   std::vector<float> top_left_out(Lq * D);
   auto top_left_ot = tensor::make_tensor(
       top_left_out.data(), tensor::make_shape(meta::cint<Lq>, meta::cint<D>));
-  auto top_left = ops::dense_attention(TopLeftCausalConfig{});
+  auto top_left = ops::scaled_dot_product_attention(TopLeftCausalConfig{});
   kernel::Workspace top_left_storage(
       top_left.required_workspace(qt, kt, vt, top_left_ot));
   auto top_left_workspace = top_left_storage.view();

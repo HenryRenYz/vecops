@@ -133,12 +133,12 @@ private:
   VECOPS_INLINE void execute(Scope& scope) const {
     using M = tensor::size_type_t<0, typename InputSpec::InputLayout>;
     using N = tensor::size_type_t<1, typename InputSpec::InputLayout>;
-    const M m{tensor::size_value<0>(input_.input_layout())};
-    const N n{tensor::size_value<1>(input_.input_layout())};
+    const M m{tensor::size<0>(input_.input_layout())};
+    const N n{tensor::size<1>(input_.input_layout())};
     VECOPS_ASSERT(
-        static_cast<nint_t>(tensor::size_value<0>(
+        static_cast<nint_t>(tensor::size<0>(
             output_.output_layout())) == static_cast<nint_t>(n) &&
-        static_cast<nint_t>(tensor::size_value<1>(
+        static_cast<nint_t>(tensor::size<1>(
             output_.output_layout())) == static_cast<nint_t>(m),
         "transpose output shape must be (N, M)");
 

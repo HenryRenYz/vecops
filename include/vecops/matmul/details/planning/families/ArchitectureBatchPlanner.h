@@ -37,7 +37,7 @@ struct ArchitectureBatchPlanner {
       const auto& ci_layout = op.c_input_.input_layout();
       const auto& co_layout = op.c_output_.output_layout();
       const nint_t batch = static_cast<nint_t>(
-          tensor::size_value<0>(co_layout));
+          tensor::size<0>(co_layout));
       const nint_t m = static_cast<nint_t>(op.m_);
       const nint_t n = static_cast<nint_t>(op.n_);
       const nint_t k = static_cast<nint_t>(op.k_);
@@ -59,21 +59,21 @@ struct ArchitectureBatchPlanner {
       // repeated over the whole batch/row space; it stays correct under the
       // flatten because every flat row maps to that same vector.
       const bool dense_a =
-          static_cast<nint_t>(tensor::stride_value<2>(a_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<1>(a_layout)) == k &&
-          static_cast<nint_t>(tensor::stride_value<0>(a_layout)) == m * k;
+          static_cast<nint_t>(tensor::stride<2>(a_layout)) == 1 &&
+          static_cast<nint_t>(tensor::stride<1>(a_layout)) == k &&
+          static_cast<nint_t>(tensor::stride<0>(a_layout)) == m * k;
       const bool dense_co =
-          static_cast<nint_t>(tensor::stride_value<2>(co_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<1>(co_layout)) == n &&
-          static_cast<nint_t>(tensor::stride_value<0>(co_layout)) == m * n;
+          static_cast<nint_t>(tensor::stride<2>(co_layout)) == 1 &&
+          static_cast<nint_t>(tensor::stride<1>(co_layout)) == n &&
+          static_cast<nint_t>(tensor::stride<0>(co_layout)) == m * n;
       const bool dense_ci =
-          static_cast<nint_t>(tensor::stride_value<2>(ci_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<1>(ci_layout)) == n &&
-          static_cast<nint_t>(tensor::stride_value<0>(ci_layout)) == m * n;
+          static_cast<nint_t>(tensor::stride<2>(ci_layout)) == 1 &&
+          static_cast<nint_t>(tensor::stride<1>(ci_layout)) == n &&
+          static_cast<nint_t>(tensor::stride<0>(ci_layout)) == m * n;
       const bool broadcast_ci =
-          static_cast<nint_t>(tensor::stride_value<2>(ci_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<1>(ci_layout)) == 0 &&
-          static_cast<nint_t>(tensor::stride_value<0>(ci_layout)) == 0;
+          static_cast<nint_t>(tensor::stride<2>(ci_layout)) == 1 &&
+          static_cast<nint_t>(tensor::stride<1>(ci_layout)) == 0 &&
+          static_cast<nint_t>(tensor::stride<0>(ci_layout)) == 0;
       return dense_a && dense_co && (dense_ci || broadcast_ci);
     }
   }
@@ -89,7 +89,7 @@ struct ArchitectureBatchPlanner {
       const auto& ci_layout = op.c_input_.input_layout();
       const auto& co_layout = op.c_output_.output_layout();
       const nint_t batch = static_cast<nint_t>(
-          tensor::size_value<0>(co_layout));
+          tensor::size<0>(co_layout));
       const nint_t m = static_cast<nint_t>(op.m_);
       const nint_t n = static_cast<nint_t>(op.n_);
       const nint_t k = static_cast<nint_t>(op.k_);
@@ -109,35 +109,35 @@ struct ArchitectureBatchPlanner {
           return true;
         } else {
           return static_cast<nint_t>(
-                     tensor::stride_value<2>(a_layout)) == 1 &&
+                     tensor::stride<2>(a_layout)) == 1 &&
               static_cast<nint_t>(
-                  tensor::stride_value<1>(a_layout)) == k &&
+                  tensor::stride<1>(a_layout)) == k &&
               static_cast<nint_t>(
-                  tensor::stride_value<0>(a_layout)) == 0;
+                  tensor::stride<0>(a_layout)) == 0;
         }
       }();
       const nint_t b_row_stride = static_cast<nint_t>(
-          tensor::stride_value<1>(b_layout));
+          tensor::stride<1>(b_layout));
       const bool mergeable_b =
-          static_cast<nint_t>(tensor::stride_value<2>(b_layout)) == 1 &&
+          static_cast<nint_t>(tensor::stride<2>(b_layout)) == 1 &&
           b_row_stride >= k &&
-          static_cast<nint_t>(tensor::stride_value<0>(b_layout)) ==
+          static_cast<nint_t>(tensor::stride<0>(b_layout)) ==
               n * b_row_stride;
       // dense_co/dense_ci: C's batch stride must equal n so flat columns of
       // different batches are contiguous ({1, ?, n}).  periodic_ci: a
       // per-column C input broadcast over batch and row ({1, 0, 0}), which
       // the flattened run materializes instead (see periodic_c_input_*).
       const bool dense_co =
-          static_cast<nint_t>(tensor::stride_value<2>(co_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<0>(co_layout)) == n;
+          static_cast<nint_t>(tensor::stride<2>(co_layout)) == 1 &&
+          static_cast<nint_t>(tensor::stride<0>(co_layout)) == n;
       const bool dense_ci =
-          static_cast<nint_t>(tensor::stride_value<2>(ci_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<0>(ci_layout)) == n;
+          static_cast<nint_t>(tensor::stride<2>(ci_layout)) == 1 &&
+          static_cast<nint_t>(tensor::stride<0>(ci_layout)) == n;
       const bool periodic_ci =
           Invocation::BatchColumnsPeriodicCInputCandidate &&
-          static_cast<nint_t>(tensor::stride_value<2>(ci_layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<1>(ci_layout)) == 0 &&
-          static_cast<nint_t>(tensor::stride_value<0>(ci_layout)) == 0;
+          static_cast<nint_t>(tensor::stride<2>(ci_layout)) == 1 &&
+          static_cast<nint_t>(tensor::stride<1>(ci_layout)) == 0 &&
+          static_cast<nint_t>(tensor::stride<0>(ci_layout)) == 0;
       return shared_a && mergeable_b && dense_co &&
           (dense_ci || periodic_ci);
     }
@@ -152,9 +152,9 @@ struct ArchitectureBatchPlanner {
     } else {
       if (!columns_flatten_enabled(op)) return false;
       const auto& layout = op.c_input_.input_layout();
-      return static_cast<nint_t>(tensor::stride_value<2>(layout)) == 1 &&
-          static_cast<nint_t>(tensor::stride_value<1>(layout)) == 0 &&
-          static_cast<nint_t>(tensor::stride_value<0>(layout)) == 0;
+      return static_cast<nint_t>(tensor::stride<2>(layout)) == 1 &&
+          static_cast<nint_t>(tensor::stride<1>(layout)) == 0 &&
+          static_cast<nint_t>(tensor::stride<0>(layout)) == 0;
     }
   }
 
@@ -164,7 +164,7 @@ struct ArchitectureBatchPlanner {
     if constexpr (!Invocation::BatchColumnsPeriodicCInputCandidate) {
       return 0;
     } else {
-      const nint_t batch = static_cast<nint_t>(tensor::size_value<0>(
+      const nint_t batch = static_cast<nint_t>(tensor::size<0>(
           op.c_output_.output_layout()));
       return batch * static_cast<nint_t>(op.n_) *
           static_cast<nint_t>(sizeof(typename Invocation::AtomType::TAcc)) +

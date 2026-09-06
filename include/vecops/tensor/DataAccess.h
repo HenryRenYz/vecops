@@ -14,6 +14,7 @@
 #include "vecops/kernel/Transpose2D.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/tensor/AccessPolicy.h"
+#include "vecops/tensor/OptionalOperand.h"
 #include "vecops/tensor/Tensor.h"
 #include "vecops/tensor/Transform.h"
 #include "vecops/util/ScalarConvert.h"
@@ -2319,6 +2320,39 @@ inline constexpr bool is_input_operand_v =
 template <typename T>
 concept InputOperand = is_input_operand_v<T>;
 
+/** Readable Tensor or InputSpec of one exact logical rank. */
+template <typename Operand, int Rank>
+inline constexpr bool is_input_operand_of_v = [] {
+  using O = std::remove_cvref_t<Operand>;
+  if constexpr (is_tensor_v<O>) {
+    return O::Ndim == Rank;
+  } else if constexpr (is_input_spec_v<O>) {
+    return O::InputTensor::Ndim == Rank;
+  } else {
+    return false;
+  }
+}();
+
+template <typename Operand, int Rank>
+concept InputOperandOf = is_input_operand_of_v<Operand, Rank>;
+
+/** Omitted or readable Tensor/InputSpec of any logical rank. */
+template <typename Operand>
+inline constexpr bool is_optional_input_operand_v =
+    is_nullopt_v<Operand> || is_input_operand_v<Operand>;
+
+template <typename Operand>
+concept OptionalInputOperand = is_optional_input_operand_v<Operand>;
+
+/** Omitted or readable Tensor/InputSpec of one exact logical rank. */
+template <typename Operand, int Rank>
+inline constexpr bool is_optional_input_operand_of_v =
+    is_nullopt_v<Operand> || is_input_operand_of_v<Operand, Rank>;
+
+template <typename Operand, int Rank>
+concept OptionalInputOperandOf =
+    is_optional_input_operand_of_v<Operand, Rank>;
+
 template <typename T>
 inline constexpr bool is_output_operand_v = [] {
   using O = std::remove_cvref_t<T>;
@@ -2330,6 +2364,25 @@ inline constexpr bool is_output_operand_v = [] {
 
 template <typename T>
 concept OutputOperand = is_output_operand_v<T>;
+
+/** Writable Tensor or OutputSpec of one exact logical rank. */
+template <typename Operand, int Rank>
+inline constexpr bool is_output_operand_of_v = [] {
+  if constexpr (!is_output_operand_v<Operand>) {
+    return false;
+  } else {
+    using O = std::remove_cvref_t<Operand>;
+    if constexpr (is_tensor_v<O>) {
+      return O::Ndim == Rank;
+    } else {
+      static_assert(is_output_spec_v<O>);
+      return O::OutputTensor::Ndim == Rank;
+    }
+  }
+}();
+
+template <typename Operand, int Rank>
+concept OutputOperandOf = is_output_operand_of_v<Operand, Rank>;
 
 /** @brief Concept form of is_input_spec_v. */
 template <typename T>
@@ -2350,6 +2403,12 @@ template <typename Compute, InputSpecLike Spec>
       typename std::remove_cvref_t<Spec>::ComputeType, Compute>
 VECOPS_INLINE auto as_input_spec(Spec&& spec) {
   return std::forward<Spec>(spec);
+}
+
+/** Preserve compile-time optionality while normalizing a readable operand. */
+template <typename Compute>
+VECOPS_INLINE constexpr nullopt_t as_input_spec(nullopt_t) {
+  return nullopt;
 }
 
 /** Normalize a mutable Tensor or an existing output Spec. */
@@ -2437,7 +2496,7 @@ VECOPS_INLINE auto narrow_view(
                 "input narrow interval is out of bounds");
   auto layout = tensor::set<Dim>(
       spec.input_layout(), extent,
-      tensor::stride_value<Dim>(spec.input_layout()));
+      tensor::stride<Dim>(spec.input_layout()));
   auto tensor_view = tensor::make_tensor(
       spec.tensor().data() + offset * static_cast<nint_t>(
           tensor::get<Dim>(spec.input_layout().strides())),
@@ -2491,7 +2550,7 @@ VECOPS_INLINE auto narrow_view(
                 "output narrow interval is out of bounds");
   auto layout = tensor::set<Dim>(
       spec.output_layout(), extent,
-      tensor::stride_value<Dim>(spec.output_layout()));
+      tensor::stride<Dim>(spec.output_layout()));
   auto tensor_view = tensor::make_tensor(
       spec.tensor().data() + offset * static_cast<nint_t>(
           tensor::get<Dim>(spec.output_layout().strides())),
@@ -4579,6 +4638,40 @@ VECOPS_INLINE decltype(auto) with_unordered_access(
       std::tie(a0, a1, a2, a3), std::forward<Fn>(fn));
 }
 
+/** Invoke @p fn with unordered views for concrete optional accesses.
+ *
+ * `nullopt` arguments are forwarded unchanged. This retains optionality in
+ * the type system while placing all concrete accesses in the same unordered
+ * conversion-order region.
+ */
+template <typename Fn>
+VECOPS_ALWAYS_INLINE decltype(auto) with_optional_unordered_access(Fn&& fn) {
+  return std::forward<Fn>(fn)();
+}
+
+template <typename Fn, typename Access, typename... Rest>
+VECOPS_ALWAYS_INLINE decltype(auto) with_optional_unordered_access(
+    Fn&& fn, Access& access, Rest&... rest) {
+  if constexpr (is_nullopt_v<Access>) {
+    return with_optional_unordered_access(
+        [&](auto&&... tail) -> decltype(auto) {
+          return std::forward<Fn>(fn)(
+              nullopt, std::forward<decltype(tail)>(tail)...);
+        },
+        rest...);
+  } else {
+    return with_unordered_access(
+        access, [&](auto unordered) -> decltype(auto) {
+          return with_optional_unordered_access(
+              [&](auto&&... tail) -> decltype(auto) {
+                return std::forward<Fn>(fn)(
+                    unordered, std::forward<decltype(tail)>(tail)...);
+              },
+              rest...);
+        });
+  }
+}
+
 /**
  * @brief Return workspace bytes required by the resolved Spec/Policy plan.
  *
@@ -4623,6 +4716,12 @@ VECOPS_INLINE nint_t required_workspace(const Spec& spec, Policy policy) {
       vec::DEFAULT_ALIGNMENT);
 }
 
+/** An omitted optional operand never consumes workspace. */
+template <typename Policy>
+VECOPS_INLINE constexpr nint_t required_workspace(nullopt_t, Policy) {
+  return 0;
+}
+
 /**
  * @brief Bind a statically direct operand without materialization dispatch.
  *
@@ -4647,6 +4746,13 @@ VECOPS_INLINE auto bind(
     return OutputDataAccess<Spec, LoweringPolicy>{
         spec, LoweringPolicy{policy}};
   }
+}
+
+/** Bind an omitted optional operand without allocating or creating an access. */
+template <typename Policy, typename Defaults = DefaultAccessDefaults>
+VECOPS_INLINE constexpr nullopt_t bind(
+    nullopt_t, Policy, kernel::WorkspaceView&, Defaults = {}) {
+  return nullopt;
 }
 
 /** @brief Pair a caller-owned Spec reference with a kernel-owned Policy. */

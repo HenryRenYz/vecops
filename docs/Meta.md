@@ -68,6 +68,13 @@ auto fixed = to_value(cint<4>);      // Const<4>{}
 auto strides = make_strides(1, 128, cint<64>);
 ```
 
+Values also implicitly convert to `nint_t`, so they can cross into ordinary
+runtime APIs, loop bounds, and pointer arithmetic without local casts. This
+does not change the preferred propagation rule: retain a Value in an `auto`
+variable while constructing shapes or calling Value-aware operators. When a
+Value mixes with an ordinary integer type, the integer side is normalized to
+`Any`; use `cint<N>` when that operand is itself a compile-time fact.
+
 ### Type guarantees vs. instance observations
 
 Two related but distinct questions, deliberately separate APIs:

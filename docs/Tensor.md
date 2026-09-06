@@ -86,6 +86,22 @@ read-only forever (no `const_cast` anywhere); output Specs reject const
 elements at compile time. `Array<T, N>` is the fully-dynamic spelling
 (all dimensions `Any`).
 
+For fixed axes, prefer `tensor::size<I>(tensor_or_layout)` and
+`tensor::stride<I>(tensor_or_layout)` over indexing `shape()[I]` or
+`strides()[I]`. They return the corresponding `meta::Value` (rather than a
+degraded `nint_t`), so `auto` preserves the layout's `meta::Const`/
+`meta::Dynamic` metadata through adjacent shape-building and operator calls.
+The resulting Value also converts implicitly to `nint_t` at runtime-only
+boundaries such as pointer arithmetic, workspace byte counts, or a loop trip
+count; retain it in an `auto` variable until such a boundary.
+
+`TensorOf<Element, Rank>` and `WritableTensorOf<Element, Rank>` express exact
+rank/element requirements without introducing operator-local Tensor wrappers.
+For Specs, `InputOperand`/`OutputOperand` describe only readability or
+writability; `InputOperandOf<Rank>`/`OutputOperandOf<Rank>` add an exact rank.
+`OptionalInputOperand` accepts an omitted input at any rank, while
+`OptionalInputOperandOf<Rank>` makes the non-omitted branch rank-specific.
+
 ### Slicing
 
 `operator()` / `operator[]` accept, per dimension:

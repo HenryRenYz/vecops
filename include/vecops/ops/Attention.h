@@ -3,11 +3,11 @@
 
 /**
  * @file Attention.h
- * @brief Public entry point for dense and block-sparse attention operators.
+ * @brief Public entry point for SDPA, Sparse FlashAttention, and IBS Attention.
  */
 
-#include "vecops/ops/details/attention/Operation.h"
-#include "vecops/ops/details/attention/Sparse.h"
-#include "vecops/ops/details/attention/Dynamic.h"
+#include "vecops/ops/details/attention/SDPA.h"
+#include "vecops/ops/details/attention/SparseFlashAttention.h"
+#include "vecops/ops/details/attention/IBSAttention.h"
 
 #endif // VECOPS_OPS_ATTENTION_H

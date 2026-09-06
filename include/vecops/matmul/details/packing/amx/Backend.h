@@ -92,8 +92,8 @@ struct Backend<
     using T = typename Packing::Element;
     static_assert(std::same_as<typename Source::ComputeType, T>);
     const auto& layout = source.spec().input_layout();
-    const auto spatial = tensor::size_value<0>(layout);
-    const auto k = tensor::size_value<1>(layout);
+    const auto spatial = tensor::size<0>(layout);
+    const auto k = tensor::size<1>(layout);
     using Spatial = std::remove_cvref_t<decltype(spatial)>;
     using K = std::remove_cvref_t<decltype(k)>;
     constexpr bool SpatialGuaranteed = Spatial::aligns(Packing::Panel);
@@ -114,7 +114,7 @@ struct Backend<
     if constexpr (Direct) {
       const auto* input = reinterpret_cast<const T*>(source.raw_data());
       const nint_t row_stride = static_cast<nint_t>(
-          tensor::stride_value<0>(layout));
+          tensor::stride<0>(layout));
       if constexpr (Side == ::vecops::matmul::Operand::A) {
         // Fully dynamic shapes keep the separate dynamic-ABI entry so GCC
         // retains its const-propagated clones (see the note in Pack.h).
@@ -218,8 +218,8 @@ struct Backend<
     static_assert(std::same_as<
                   typename CompensationDestination::ComputeType, int32_t>);
     const auto& layout = source.spec().input_layout();
-    const auto spatial = tensor::size_value<0>(layout);
-    const auto k = tensor::size_value<1>(layout);
+    const auto spatial = tensor::size<0>(layout);
+    const auto k = tensor::size<1>(layout);
     using Spatial = std::remove_cvref_t<decltype(spatial)>;
     using K = std::remove_cvref_t<decltype(k)>;
     constexpr bool SpatialGuaranteed = Spatial::aligns(Packing::Panel);
@@ -248,7 +248,7 @@ struct Backend<
           reinterpret_cast<const int8_t*>(source.raw_data());
       amx::pack_b_direct_compensated<
           Packing::KPack, SpatialGuaranteed, KGuaranteed>(
-          input, static_cast<nint_t>(tensor::stride_value<0>(layout)),
+          input, static_cast<nint_t>(tensor::stride<0>(layout)),
           output, correction,
           static_cast<nint_t>(spatial), static_cast<nint_t>(k),
           a_zero_point);

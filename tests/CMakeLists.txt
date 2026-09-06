@@ -13,6 +13,8 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
 endif()
 vecops_add_test(NAME KernelLoopTest FILES kernel/LoopTest.cpp FOLDER kernel/loop)
 vecops_add_test(NAME KernelTile2DTest FILES kernel/Tile2DTest.cpp FOLDER kernel/tile2d)
+vecops_add_test(NAME WorkspaceTest FILES kernel/WorkspaceTest.cpp
+    FOLDER kernel/workspace ARCH Scalar)
 vecops_add_test(NAME MatmulTilerTest FILES matmul/TilerTest.cpp FOLDER matmul/tiler)
 vecops_add_test(
     NAME ExecutionSessionTest

@@ -33,15 +33,15 @@ static_assert(std::same_as<stride_type_t<2, TypedLayout>, Const<1>>);
 static_assert(std::same_as<
               numel_type_t<TypedLayout>, Dynamic<128, 256, 1024>>);
 static_assert(std::same_as<
-              decltype(tensor::size_value<0>(
+              decltype(tensor::size<0>(
                   std::declval<const TypedLayout&>())),
               Const<2>>);
 static_assert(std::same_as<
-              decltype(tensor::size_value<1>(
+              decltype(tensor::size<1>(
                   std::declval<const TypedLayout&>())),
               Dynamic<4, 8, 32>>);
 static_assert(std::same_as<
-              decltype(tensor::stride_value<2>(
+              decltype(tensor::stride<2>(
                   std::declval<const TypedLayout&>())),
               Const<1>>);
 
@@ -128,6 +128,23 @@ TEST_F(ValueTest, DynamicIsAligned) {
 TEST_F(ValueTest, DynamicOperatorNint) {
   Dynamic<16> a(64);
   EXPECT_EQ(nint_t(a), 64);
+}
+
+TEST_F(ValueTest, ImplicitNintConversionAndOrdinaryIntegerOperators) {
+  const nint_t constant = cint<64>;
+  const nint_t dynamic = dyn<8>(40);
+  EXPECT_EQ(constant, 64);
+  EXPECT_EQ(dynamic, 40);
+
+  const int two = 2;
+  EXPECT_EQ(nint_t(cint<4> + two), 6);
+  EXPECT_EQ(nint_t(two + cint<4>), 6);
+  EXPECT_EQ(nint_t(cint<8> * two), 16);
+  EXPECT_EQ(nint_t(two * cint<8>), 16);
+  EXPECT_TRUE(cint<8> > two);
+  EXPECT_TRUE(two < cint<8>);
+  EXPECT_EQ(nint_t(vecops::min(cint<8>, two)), 2);
+  EXPECT_EQ(nint_t(vecops::ceil_div(cint<8>, two)), 4);
 }
 
 TEST_F(ValueTest, AnyIsAligned1) {
@@ -1698,8 +1715,10 @@ TEST_F(CompileTimeTest, ConstexprToArray) {
 TEST_F(CompileTimeTest, ConstexprLayout) {
   constexpr auto layout = make_layout(make_shape(cint<128>, cint<64>),
                                       make_strides(cint<64>, cint<1>));
-  constexpr nint_t sz = size<0>(layout);
-  constexpr nint_t st = stride<1>(layout);
+  constexpr auto sz = size<0>(layout);
+  constexpr auto st = stride<1>(layout);
+  static_assert(std::same_as<decltype(sz), const meta::Const<128>>);
+  static_assert(std::same_as<decltype(st), const meta::Const<1>>);
   EXPECT_EQ(sz, 128);
   EXPECT_EQ(st, 1);
 }

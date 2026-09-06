@@ -40,8 +40,8 @@ struct ArchitecturePackingPlanner {
       const auto& layout = spec.input_layout();
       return ::vecops::matmul::packed_layout<typename Invocation::AtomType, Side>(
           tensor::make_layout(tensor::make_shape(
-              tensor::size_value<Rank - 2>(layout),
-              tensor::size_value<Rank - 1>(layout))));
+              tensor::size<Rank - 2>(layout),
+              tensor::size<Rank - 1>(layout))));
     }
   }
 
@@ -67,7 +67,7 @@ struct ArchitecturePackingPlanner {
     static_assert(
         Invocation::BatchRowsPackACandidate ||
         Invocation::SMEBatchRowsFullPackCandidate);
-    const auto batch = tensor::size_value<0>(op.c_output_.output_layout());
+    const auto batch = tensor::size<0>(op.c_output_.output_layout());
     const auto flat_m = batch * op.m_;
     const auto flat_layout = tensor::make_layout(
         tensor::make_shape(flat_m, op.k_));

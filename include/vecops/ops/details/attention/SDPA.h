@@ -1,7 +1,8 @@
-#ifndef VECOPS_OPS_DETAILS_ATTENTION_OPERATION_H
-#define VECOPS_OPS_DETAILS_ATTENTION_OPERATION_H
+#ifndef VECOPS_OPS_DETAILS_ATTENTION_SDPA_H
+#define VECOPS_OPS_DETAILS_ATTENTION_SDPA_H
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <type_traits>
 #include <utility>
@@ -15,24 +16,24 @@ namespace vecops::ops {
 
 using AttentionCausalMode = attention_details::CausalMode;
 
-enum class AttentionStrategy {
+enum class SDPAStrategy {
   automatic,
   materialized,
   streaming,
 };
 
 /**
- * @brief Configuration shared by the dense and block-sparse attention family.
+ * @brief Configuration shared by SDPA, Sparse FlashAttention, and IBS Attention.
  *
  * The Matmul configuration fixes the hardware atom and its input/accumulator
  * types. Tensor memory element types remain independent and are converted by
  * DataAccess. QueryBlock and KeyValueBlock are semantic sparse-block extents;
- * the dense materialized path also uses QueryBlock as its score-panel height.
+ * materialized SDPA also uses QueryBlock as its score-panel height.
  */
 template <typename MatmulConfigT, int QueryBlock = 32,
           int KeyValueBlock = 32,
           AttentionCausalMode Causal = AttentionCausalMode::none,
-          AttentionStrategy Strategy = AttentionStrategy::automatic,
+          SDPAStrategy Strategy = SDPAStrategy::automatic,
           vec::Accuracy ExpAccuracy = vec::Accuracy::Fast>
 struct AttentionConfig {
   static_assert(QueryBlock > 0 && KeyValueBlock > 0);
@@ -47,8 +48,12 @@ struct AttentionConfig {
 
   static constexpr int query_block = QueryBlock;
   static constexpr int key_value_block = KeyValueBlock;
+  using QueryBlockExtent = meta::Const<QueryBlock>;
+  using KeyValueBlockExtent = meta::Const<KeyValueBlock>;
+  inline static constexpr QueryBlockExtent query_block_extent{};
+  inline static constexpr KeyValueBlockExtent key_value_block_extent{};
   static constexpr AttentionCausalMode causal_mode = Causal;
-  static constexpr AttentionStrategy strategy = Strategy;
+  static constexpr SDPAStrategy strategy = Strategy;
   static constexpr vec::Accuracy exp_accuracy = ExpAccuracy;
 
   [[no_unique_address]] MatmulConfig matmul{};
@@ -58,6 +63,8 @@ struct AttentionConfig {
   ScoreType random_probability = ScoreType{1};
   ScoreType minimum_probability = ScoreType{};
 };
+
+namespace attention_details {
 
 /**
  * @brief Exact scaled dot-product attention for one logical head.
@@ -71,10 +78,10 @@ struct AttentionConfig {
  * This materialized implementation is the correctness baseline and the small
  * problem path. It materializes at most `QueryBlock * Lkv` scores rather than
  * the full `Lq * Lkv` matrix. The streaming implementation shares this public
- * contract and is selected by the higher-level sparse/automatic operators.
+ * contract and is selected internally by ScaledDotProductAttention.
  */
 template <typename Config>
-class DenseMaterializedAttention {
+class MaterializedSDPA {
   using MatmulOp = Matmul<typename Config::MatmulConfig>;
   using Atom = typename Config::Atom;
   using Score = typename Config::ScoreType;
@@ -89,16 +96,16 @@ public:
 
   const Config config;
 
-  VECOPS_INLINE constexpr explicit DenseMaterializedAttention(Config cfg)
+  VECOPS_INLINE constexpr explicit MaterializedSDPA(Config cfg)
       : config(std::move(cfg)) {}
 
-  template <tensor::InputOperand Q, tensor::InputOperand K,
-            tensor::InputOperand V,
-            attention_details::OptionalInputOperand<1> QueryMask,
-            attention_details::OptionalInputOperand<1> KeyMask,
-            attention_details::OptionalInputOperand<2> AttentionMask,
-            attention_details::OptionalInputOperand<2> Bias,
-            tensor::OutputOperand Output>
+  template <tensor::InputOperandOf<2> Q, tensor::InputOperandOf<2> K,
+            tensor::InputOperandOf<2> V,
+            tensor::OptionalInputOperandOf<1> QueryMask,
+            tensor::OptionalInputOperandOf<1> KeyMask,
+            tensor::OptionalInputOperandOf<2> AttentionMask,
+            tensor::OptionalInputOperandOf<2> Bias,
+            tensor::OutputOperandOf<2> Output>
   VECOPS_INLINE nint_t required_workspace(
       const Q& q, const K& k, const V& v,
       const QueryMask& query_mask, const KeyMask& key_mask,
@@ -110,15 +117,15 @@ public:
     auto qm_spec = attention_details::as_mask_input<Score>(query_mask);
     auto km_spec = attention_details::as_mask_input<Score>(key_mask);
     auto am_spec = attention_details::as_mask_input<Score>(attention_mask);
-    auto bias_spec = attention_details::as_optional_input<Score>(bias);
+    auto bias_spec = tensor::as_input_spec<Score>(bias);
     auto out_spec = tensor::as_output_spec<Score>(out);
     return required_workspace_specs(
         q_spec, k_spec, v_spec, qm_spec, km_spec, am_spec, bias_spec,
         out_spec);
   }
 
-  template <tensor::InputOperand Q, tensor::InputOperand K,
-            tensor::InputOperand V, tensor::OutputOperand Output>
+  template <tensor::InputOperandOf<2> Q, tensor::InputOperandOf<2> K,
+            tensor::InputOperandOf<2> V, tensor::OutputOperandOf<2> Output>
   VECOPS_INLINE nint_t required_workspace(
       const Q& q, const K& k, const V& v, const Output& out) const {
     return required_workspace(
@@ -127,13 +134,13 @@ public:
   }
 
   template <execution::ExecutionScope Scope,
-            tensor::InputOperand Q, tensor::InputOperand K,
-            tensor::InputOperand V,
-            attention_details::OptionalInputOperand<1> QueryMask,
-            attention_details::OptionalInputOperand<1> KeyMask,
-            attention_details::OptionalInputOperand<2> AttentionMask,
-            attention_details::OptionalInputOperand<2> Bias,
-            tensor::OutputOperand Output>
+            tensor::InputOperandOf<2> Q, tensor::InputOperandOf<2> K,
+            tensor::InputOperandOf<2> V,
+            tensor::OptionalInputOperandOf<1> QueryMask,
+            tensor::OptionalInputOperandOf<1> KeyMask,
+            tensor::OptionalInputOperandOf<2> AttentionMask,
+            tensor::OptionalInputOperandOf<2> Bias,
+            tensor::OutputOperandOf<2> Output>
   VECOPS_INLINE void operator()(
       Scope& scope, const Q& q, const K& k, const V& v,
       const QueryMask& query_mask, const KeyMask& key_mask,
@@ -145,7 +152,7 @@ public:
     auto qm_spec = attention_details::as_mask_input<Score>(query_mask);
     auto km_spec = attention_details::as_mask_input<Score>(key_mask);
     auto am_spec = attention_details::as_mask_input<Score>(attention_mask);
-    auto bias_spec = attention_details::as_optional_input<Score>(bias);
+    auto bias_spec = tensor::as_input_spec<Score>(bias);
     auto out_spec = tensor::as_output_spec<Score>(out);
     scope.with_resources(
         *this, [&](auto& active) VECOPS_INLINE_LAMBDA {
@@ -156,8 +163,8 @@ public:
   }
 
   template <execution::ExecutionScope Scope,
-            tensor::InputOperand Q, tensor::InputOperand K,
-            tensor::InputOperand V, tensor::OutputOperand Output>
+            tensor::InputOperandOf<2> Q, tensor::InputOperandOf<2> K,
+            tensor::InputOperandOf<2> V, tensor::OutputOperandOf<2> Output>
   VECOPS_INLINE void operator()(
       Scope& scope, const Q& q, const K& k, const V& v,
       const Output& out, Score scale) const {
@@ -165,13 +172,13 @@ public:
             tensor::nullopt, tensor::nullopt, out, scale);
   }
 
-  template <tensor::InputOperand Q, tensor::InputOperand K,
-            tensor::InputOperand V,
-            attention_details::OptionalInputOperand<1> QueryMask,
-            attention_details::OptionalInputOperand<1> KeyMask,
-            attention_details::OptionalInputOperand<2> AttentionMask,
-            attention_details::OptionalInputOperand<2> Bias,
-            tensor::OutputOperand Output>
+  template <tensor::InputOperandOf<2> Q, tensor::InputOperandOf<2> K,
+            tensor::InputOperandOf<2> V,
+            tensor::OptionalInputOperandOf<1> QueryMask,
+            tensor::OptionalInputOperandOf<1> KeyMask,
+            tensor::OptionalInputOperandOf<2> AttentionMask,
+            tensor::OptionalInputOperandOf<2> Bias,
+            tensor::OutputOperandOf<2> Output>
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace,
       const Q& q, const K& k, const V& v,
@@ -183,8 +190,8 @@ public:
             attention_mask, bias, out, scale);
   }
 
-  template <tensor::InputOperand Q, tensor::InputOperand K,
-            tensor::InputOperand V, tensor::OutputOperand Output>
+  template <tensor::InputOperandOf<2> Q, tensor::InputOperandOf<2> K,
+            tensor::InputOperandOf<2> V, tensor::OutputOperandOf<2> Output>
   VECOPS_INLINE void operator()(
       kernel::WorkspaceView& workspace,
       const Q& q, const K& k, const V& v,
@@ -193,13 +200,13 @@ public:
             tensor::nullopt, tensor::nullopt, out, scale);
   }
 
-  template <tensor::InputOperand Q, tensor::InputOperand K,
-            tensor::InputOperand V,
-            attention_details::OptionalInputOperand<1> QueryMask,
-            attention_details::OptionalInputOperand<1> KeyMask,
-            attention_details::OptionalInputOperand<2> AttentionMask,
-            attention_details::OptionalInputOperand<2> Bias,
-            tensor::OutputOperand Output>
+  template <tensor::InputOperandOf<2> Q, tensor::InputOperandOf<2> K,
+            tensor::InputOperandOf<2> V,
+            tensor::OptionalInputOperandOf<1> QueryMask,
+            tensor::OptionalInputOperandOf<1> KeyMask,
+            tensor::OptionalInputOperandOf<2> AttentionMask,
+            tensor::OptionalInputOperandOf<2> Bias,
+            tensor::OutputOperandOf<2> Output>
   VECOPS_INLINE void operator()(
       const Q& q, const K& k, const V& v,
       const QueryMask& query_mask, const KeyMask& key_mask,
@@ -212,8 +219,8 @@ public:
             attention_mask, bias, out, scale);
   }
 
-  template <tensor::InputOperand Q, tensor::InputOperand K,
-            tensor::InputOperand V, tensor::OutputOperand Output>
+  template <tensor::InputOperandOf<2> Q, tensor::InputOperandOf<2> K,
+            tensor::InputOperandOf<2> V, tensor::OutputOperandOf<2> Output>
   VECOPS_INLINE void operator()(
       const Q& q, const K& k, const V& v,
       const Output& out, Score scale) const {
@@ -232,13 +239,13 @@ private:
       const OutSpec& out) const {
     validate_specs(
         q, k, v, query_mask, key_mask, attention_mask, bias, out);
-    const nint_t lq = q.input_layout().shape()[0];
-    const nint_t lkv = k.input_layout().shape()[0];
+    const auto lq = tensor::size<0>(q.input_layout());
+    const auto lkv = tensor::size<0>(k.input_layout());
     const nint_t block = std::min<nint_t>(Config::query_block, lq);
     const auto block_extent = meta::dyn<1, 1, Config::query_block>(block);
-    const auto lkv_extent = tensor::size_value<0>(k.input_layout());
-    const auto dqk_extent = tensor::size_value<1>(q.input_layout());
-    const auto dv_extent = tensor::size_value<1>(v.input_layout());
+    const auto lkv_extent = tensor::size<0>(k.input_layout());
+    const auto dqk_extent = tensor::size<1>(q.input_layout());
+    const auto dv_extent = tensor::size<1>(v.input_layout());
     auto q_block = tensor::narrow_view<0>(q, 0, block_extent);
     auto out_block = tensor::narrow_view<0>(out, 0, block_extent);
     auto* score_ptr = static_cast<Score*>(nullptr);
@@ -256,17 +263,17 @@ private:
         block_extent, dv_extent, lkv_extent,
         probability_tensor, v_transposed, out_block);
     const nint_t persistent =
-        attention_details::aligned_bytes<Score>(
+        kernel::WorkspaceView::allocation_bytes<Score>(
             Config::query_block * lkv) +
-        attention_details::aligned_bytes<Probability>(
+        kernel::WorkspaceView::allocation_bytes<Probability>(
             Config::query_block * lkv) +
-        attention_details::optional_required_workspace(
+        tensor::required_workspace(
             query_mask, MaskPolicy{}) +
-        attention_details::optional_required_workspace(
+        tensor::required_workspace(
             key_mask, MaskPolicy{}) +
-        attention_details::optional_required_workspace(
+        tensor::required_workspace(
             attention_mask, MatrixPolicy{}) +
-        attention_details::optional_required_workspace(
+        tensor::required_workspace(
             bias, MatrixPolicy{});
     return persistent + std::max(qk_bytes, pv_bytes);
   }
@@ -282,8 +289,8 @@ private:
     attention_details::validate_dense_layouts(
         q.input_layout(), k.input_layout(), v.input_layout(),
         out.output_layout());
-    const nint_t lq = q.input_layout().shape()[0];
-    const nint_t lkv = k.input_layout().shape()[0];
+    const auto lq = tensor::size<0>(q.input_layout());
+    const auto lkv = tensor::size<0>(k.input_layout());
     attention_details::validate_vector_optional(
         query_mask, lq, "attention query-mask shape mismatch");
     attention_details::validate_vector_optional(
@@ -308,28 +315,29 @@ private:
         q, k, v, query_mask, key_mask, attention_mask, bias, out);
     auto& workspace = scope.workspace_view();
     const auto mark = workspace.mark();
-    const nint_t lq = q.input_layout().shape()[0];
-    const nint_t lkv = k.input_layout().shape()[0];
-    const nint_t dv = v.input_layout().shape()[1];
-    const auto lkv_extent = tensor::size_value<0>(k.input_layout());
-    const auto dqk_extent = tensor::size_value<1>(q.input_layout());
-    const auto dv_extent = tensor::size_value<1>(v.input_layout());
-    Score* scores = attention_details::allocate_aligned<Score>(
-        workspace, Config::query_block * lkv);
-    Probability* probabilities =
-        attention_details::allocate_aligned<Probability>(
-            workspace, Config::query_block * lkv);
+    const auto lq = tensor::size<0>(q.input_layout());
+    const auto lkv = tensor::size<0>(k.input_layout());
+    const auto dv = tensor::size<1>(v.input_layout());
+    const auto lkv_extent = tensor::size<0>(k.input_layout());
+    const auto dqk_extent = tensor::size<1>(q.input_layout());
+    const auto dv_extent = tensor::size<1>(v.input_layout());
+    auto score_buffer = workspace.template allocate_tensor<Score>(
+        tensor::make_shape(Config::query_block_extent, lkv_extent));
+    auto probability_buffer = workspace.template allocate_tensor<Probability>(
+        tensor::make_shape(Config::query_block_extent, lkv_extent));
+    Score* scores = score_buffer.data();
+    Probability* probabilities = probability_buffer.data();
 
-    auto qm = attention_details::bind_optional_input(
+    auto qm = tensor::bind(
         query_mask, MaskPolicy{}, workspace);
-    auto km = attention_details::bind_optional_input(
+    auto km = tensor::bind(
         key_mask, MaskPolicy{}, workspace);
-    auto am = attention_details::bind_optional_input(
+    auto am = tensor::bind(
         attention_mask, MatrixPolicy{}, workspace);
-    auto b = attention_details::bind_optional_input(
+    auto b = tensor::bind(
         bias, MatrixPolicy{}, workspace);
 
-    attention_details::with_optional_access(
+    tensor::with_optional_unordered_access(
         [&](auto uqm, auto ukm, auto uam, auto ubias) {
             MatmulOp matmul_op{config.matmul};
             auto v_transposed = tensor::transpose_view<0, 1>(v);
@@ -352,13 +360,17 @@ private:
                   scope, row_extent, lkv_extent, dqk_extent,
                   q_block, k, score_tensor);
 
+              std::array<
+                  Score,
+                  static_cast<std::size_t>(Config::query_block)>
+                  query_activity{};
+              attention_details::load_activity_segment<Score>(
+                  uqm, begin, rows, query_activity.data());
               for (nint_t row = 0; row < rows; ++row) {
                 const nint_t q_index = begin + row;
-                bool query_active = true;
-                if constexpr (!tensor::is_nullopt_v<decltype(uqm)>) {
-                  query_active =
-                      uqm.load_scalar(tensor::coord(q_index)) != Score{};
-                }
+                const bool query_active =
+                    tensor::is_nullopt_v<decltype(uqm)> ||
+                    query_activity[static_cast<std::size_t>(row)] != Score{};
                 const auto stats = attention_details::decorate_score_row<
                     Config::causal_mode>(
                     scores + row * lkv, lkv, query_active,
@@ -381,11 +393,8 @@ private:
   }
 };
 
-template <typename Config>
-VECOPS_INLINE constexpr auto dense_materialized_attention(Config config) {
-  return DenseMaterializedAttention<Config>{std::move(config)};
-}
+} // namespace attention_details
 
 } // namespace vecops::ops
 
-#endif // VECOPS_OPS_DETAILS_ATTENTION_OPERATION_H
+#endif // VECOPS_OPS_DETAILS_ATTENTION_SDPA_H

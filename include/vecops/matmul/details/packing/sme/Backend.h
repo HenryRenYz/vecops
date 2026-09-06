@@ -65,9 +65,9 @@ struct Backend<
     using T = typename Packing::Element;
     using Tag = vec::ScalableTag<T, 0>;
     const auto& layout = source.spec().input_layout();
-    const auto spatial = tensor::size_value<0>(layout);
-    const auto k = tensor::size_value<1>(layout);
-    const auto panel = tensor::size_value<2>(
+    const auto spatial = tensor::size<0>(layout);
+    const auto k = tensor::size<1>(layout);
+    const auto panel = tensor::size<2>(
         destination.spec().output_layout());
     generic::pack_interleaved_panels<Packing::KPack, Tag>(
         source, reinterpret_cast<T*>(destination.raw_data()),
@@ -110,9 +110,9 @@ struct Backend<
     const auto& layout = source.spec().input_layout();
     static_assert(generic::RawDirectAccess<Source>);
     const auto* input = reinterpret_cast<const T*>(source.raw_data());
-    const auto spatial = tensor::size_value<0>(layout);
-    const auto k = tensor::size_value<1>(layout);
-    const auto row_stride = tensor::stride_value<0>(layout);
+    const auto spatial = tensor::size<0>(layout);
+    const auto k = tensor::size<1>(layout);
+    const auto row_stride = tensor::stride<0>(layout);
     auto* output = reinterpret_cast<T*>(destination.raw_data());
     // All ZA work happens inside a manually-owned region opened here —
     // the ResourceSet<> requirement above reflects that the caller needs
@@ -187,9 +187,9 @@ struct Backend<
         std::same_as<T, bfloat16_t> || std::same_as<T, int8_t> ||
         std::same_as<T, uint8_t>);
     const auto& layout = source.spec().input_layout();
-    const auto spatial = tensor::size_value<0>(layout);
-    const auto k = tensor::size_value<1>(layout);
-    const auto row_stride = tensor::stride_value<0>(layout);
+    const auto spatial = tensor::size<0>(layout);
+    const auto k = tensor::size<1>(layout);
+    const auto row_stride = tensor::stride<0>(layout);
     auto* output = reinterpret_cast<T*>(destination.raw_data());
     scope.with_resources(
         execution::details::arm::StreamingZARegion{},
@@ -251,9 +251,9 @@ struct Backend<
     static_assert(std::same_as<typename Transform::TOut, T>);
     const auto& layout = source.spec().input_layout();
     const auto* input = reinterpret_cast<const T*>(source.raw_data());
-    const auto spatial = tensor::size_value<0>(layout);
-    const auto k = tensor::size_value<1>(layout);
-    const auto row_stride = tensor::stride_value<0>(layout);
+    const auto spatial = tensor::size<0>(layout);
+    const auto k = tensor::size<1>(layout);
+    const auto row_stride = tensor::stride<0>(layout);
     auto* output = reinterpret_cast<T*>(destination.raw_data());
     scope.with_resources(
         execution::details::arm::StreamingZARegion{},
@@ -261,7 +261,7 @@ struct Backend<
           sme::pack<Atom, Side>(
               input, spatial, k, row_stride, output);
         });
-    const auto panel = tensor::size_value<2>(
+    const auto panel = tensor::size<2>(
         destination.spec().output_layout());
     sme::transform_packed_inplace<Packing::KPack>(
         output, spatial, k, panel,
@@ -303,9 +303,9 @@ struct Backend<
     static_assert(std::same_as<typename Source::Transform, tensor::NoTransform>);
     const auto& layout = source.spec().input_layout();
     const auto* input = source.raw_data();
-    const auto spatial = tensor::size_value<0>(layout);
-    const auto k = tensor::size_value<1>(layout);
-    const auto row_stride = tensor::stride_value<0>(layout);
+    const auto spatial = tensor::size<0>(layout);
+    const auto k = tensor::size<1>(layout);
+    const auto row_stride = tensor::stride<0>(layout);
     auto* output = reinterpret_cast<T*>(destination.raw_data());
     // The fp16 packed block is exactly half the fp32 one, so the pack runs
     // inside the output buffer itself and the expansion widens in place —
@@ -318,7 +318,7 @@ struct Backend<
           sme::pack<::vecops::matmul::SME_F16F32, Side>(
               input, spatial, k, row_stride, temporary);
         });
-    const auto panel = tensor::size_value<2>(
+    const auto panel = tensor::size<2>(
         destination.spec().output_layout());
     sme::expand_fp16_packed_to_fp32(
         temporary, output, spatial, k, panel);
@@ -353,9 +353,9 @@ struct Backend<
     static_assert(std::same_as<typename Packing::Element, float64_t>);
     const auto& layout = source.spec().input_layout();
     const auto* input = source.raw_data();
-    const auto spatial = tensor::size_value<0>(layout);
-    const auto k = tensor::size_value<1>(layout);
-    const auto row_stride = tensor::stride_value<0>(layout);
+    const auto spatial = tensor::size<0>(layout);
+    const auto k = tensor::size<1>(layout);
+    const auto row_stride = tensor::stride<0>(layout);
     auto* output = reinterpret_cast<float64_t*>(destination.raw_data());
     scope.with_resources(
         execution::details::arm::StreamingZARegion{},
@@ -396,9 +396,9 @@ struct Backend<
     static_assert(std::same_as<typename Packing::Element, float64_t>);
     const auto& layout = source.spec().input_layout();
     const auto* input = source.raw_data();
-    const auto spatial = tensor::size_value<0>(layout);
-    const auto k = tensor::size_value<1>(layout);
-    const auto row_stride = tensor::stride_value<0>(layout);
+    const auto spatial = tensor::size<0>(layout);
+    const auto k = tensor::size<1>(layout);
+    const auto row_stride = tensor::stride<0>(layout);
     auto* output = reinterpret_cast<float64_t*>(destination.raw_data());
     scope.with_resources(
         execution::details::arm::StreamingZARegion{},
