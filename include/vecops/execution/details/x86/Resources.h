@@ -8,10 +8,16 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "vecops/Assertion.h"
 #include "vecops/CoreDefs.h"
 
+#if defined(__linux__) && defined(__x86_64__)
+#  include <sys/syscall.h>
+#  include <unistd.h>
+#endif
+
 #if defined(HAS_AMX_TILE)
-#include "vecops/vec/details/amx/AMX.h"
+#  include "vecops/vec/details/amx/AMX.h"
 #endif
 
 /**
@@ -23,6 +29,24 @@ namespace vecops::execution::details::x86 {
 
 /** Resource tag proving that the scope owns live Intel AMX tile state. */
 struct Tiles {};
+
+/**
+ * @brief Ensure the current Linux thread may use AMX tile state.
+ *
+ * Linux grants XTILEDATA permission per thread. Requesting it lazily when a
+ * Tiles resource is first entered keeps standalone JIT kernels safe even when
+ * no framework library has initialized AMX on their behalf.
+ */
+VECOPS_ALWAYS_INLINE void ensure_tile_permission() {
+#if defined(HAS_AMX_TILE) && defined(__linux__) && defined(__x86_64__)
+  static thread_local const bool granted = [] {
+    constexpr unsigned long ArchRequestXcompPerm = 0x1023;
+    constexpr unsigned long XfeatureTileData = 18;
+    return syscall(SYS_arch_prctl, ArchRequestXcompPerm, XfeatureTileData) == 0;
+  }();
+  VECOPS_ASSERT(granted, "unable to request AMX XTILEDATA permission");
+#endif
+}
 
 /**
  * @brief Architectural 64-byte Intel AMX TILECFG image.
@@ -65,7 +89,9 @@ struct TileReleaseGuard {
   TileReleaseGuard() = default;
   TileReleaseGuard(const TileReleaseGuard&) = delete;
   TileReleaseGuard& operator=(const TileReleaseGuard&) = delete;
-  VECOPS_ALWAYS_INLINE ~TileReleaseGuard() { vec::details::amx::release(); }
+  VECOPS_ALWAYS_INLINE ~TileReleaseGuard() {
+    vec::details::amx::release();
+  }
 };
 #endif
 

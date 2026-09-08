@@ -140,6 +140,9 @@ When changing code, update its documentation in the same change:
    | `docs/Layout.md` | `vecops/tensor/Layout.h` (Shape/Strides/Layout, continuity, transforms) |
    | `docs/Tensor.md` | `vecops/tensor/{Tensor,DataAccess,AccessPolicy,AccessOptions,Transform,OptionalOperand}.h` |
    | `docs/ElementTypes.md` | the 12 element types, `util/{Float16,BFloat16,SmallFloat}.h`, small-float compute paths |
+   | `docs/Runtime.md` | `runtime/{CallAbi,KernelAbi,OperatorBridgeAbi,Argument,Schema,KernelDefinition,Executable,Operator,Provider}.h` |
+   | `docs/Compiler.md` | `compiler/Compiler.h` and generated source-kernel artifact behavior |
+   | `docs/Python.md` | public `python/vecops` JIT, schema, cache, dtype, and framework-registration API |
 
    If a change alters a documented API, semantic, or pitfall, update the
    matching guide; if no guide exists for the area, none needs creating.

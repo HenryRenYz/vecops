@@ -29,7 +29,8 @@ struct Backend<platform::X86Target> {
 
   template <typename>
   /** x86 resource tags currently have no mutually exclusive combination. */
-  static consteval void validate() {}
+  static consteval void validate() {
+  }
 
   template <typename Current, typename Required, typename Fn>
   /**
@@ -37,11 +38,10 @@ struct Backend<platform::X86Target> {
    * @return The callback result; TILERELEASE runs after normal callback return.
    */
   VECOPS_ALWAYS_INLINE static decltype(auto) enter(Fn&& fn) {
-    constexpr bool EnterTiles =
-        has_resource_v<x86::Tiles, Required> &&
-        !has_resource_v<x86::Tiles, Current>;
+    constexpr bool EnterTiles = has_resource_v<x86::Tiles, Required> && !has_resource_v<x86::Tiles, Current>;
     if constexpr (EnterTiles) {
 #if defined(HAS_AMX_TILE)
+      x86::ensure_tile_permission();
       x86::TileReleaseGuard release;
       return std::forward<Fn>(fn)();
 #else
@@ -63,12 +63,9 @@ struct Backend<platform::X86Target> {
    * @param fn Callback invoked once after the load.
    * @return The callback result.
    */
-  VECOPS_ALWAYS_INLINE static decltype(auto) configure(
-      const Configuration& configuration, Fn&& fn) {
+  VECOPS_ALWAYS_INLINE static decltype(auto) configure(const Configuration& configuration, Fn&& fn) {
     using Resource = typename Configuration::RequiredResource;
-    static_assert(
-        has_resource_v<Resource, Resources>,
-        "configuration resource is not active in this execution scope");
+    static_assert(has_resource_v<Resource, Resources>, "configuration resource is not active in this execution scope");
     configuration.load();
     return std::forward<Fn>(fn)();
   }

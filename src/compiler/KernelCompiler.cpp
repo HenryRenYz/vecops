@@ -1,0 +1,525 @@
+/**
+ * @file KernelCompiler.cpp
+ * @brief Generate `vecops::spec` headers and stable ABI adapters for source kernels.
+ *
+ * This translation unit turns a fully bound KernelDef into a self-contained
+ * C++ adapter project. It intentionally consumes `BoundKernel`, never raw
+ * user metadata: named and anonymous compile-time values have already been
+ * inferred and checked before code generation begins. Generated source owns
+ * only its adapter objects; user `__kernel__` controls workspace allocation.
+ */
+
+#include "vecops/compiler/Compiler.h"
+#include "vecops/runtime/Operator.h"
+
+#include <atomic>
+#include <fstream>
+#include <iomanip>
+#include <map>
+#include <set>
+#include <sstream>
+#include <system_error>
+
+namespace vecops::compiler {
+namespace {
+
+namespace fs = std::filesystem;
+using runtime::BoundKernel;
+using runtime::ConstExpr;
+using runtime::DType;
+using runtime::DimensionDef;
+using runtime::KernelDef;
+using runtime::SpecializationType;
+using runtime::TensorDef;
+using runtime::TensorView;
+using runtime::ValueDef;
+
+std::atomic<std::uint64_t> next_attempt{0};
+
+runtime::Status invalid(std::string message) {
+  return runtime::Status(runtime::StatusCode::InvalidArgument, std::move(message));
+}
+
+std::string cpp_string(std::string_view value) {
+  std::ostringstream output;
+  output << '"';
+  for (const unsigned char character : value) {
+    switch (character) {
+    case '\\':
+      output << "\\\\";
+      break;
+    case '"':
+      output << "\\\"";
+      break;
+    case '\n':
+      output << "\\n";
+      break;
+    case '\r':
+      output << "\\r";
+      break;
+    case '\t':
+      output << "\\t";
+      break;
+    default:
+      if (character < 0x20 || character >= 0x7f)
+        output << "\\x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned>(character)
+               << std::dec;
+      else
+        output << static_cast<char>(character);
+    }
+  }
+  output << '"';
+  return output.str();
+}
+
+std::string cpp_type(DType dtype) {
+  switch (dtype) {
+  case DType::Bool:
+    return "bool";
+  case DType::Int8:
+    return "::vecops::int8_t";
+  case DType::UInt8:
+    return "::vecops::uint8_t";
+  case DType::Int16:
+    return "::vecops::int16_t";
+  case DType::UInt16:
+    return "::vecops::uint16_t";
+  case DType::Int32:
+    return "::vecops::int32_t";
+  case DType::UInt32:
+    return "::vecops::uint32_t";
+  case DType::Int64:
+    return "::vecops::int64_t";
+  case DType::UInt64:
+    return "::vecops::uint64_t";
+  case DType::Float16:
+    return "::vecops::float16_t";
+  case DType::BFloat16:
+    return "::vecops::bfloat16_t";
+  case DType::Float32:
+    return "::vecops::float32_t";
+  case DType::Float64:
+    return "::vecops::float64_t";
+  case DType::Invalid:
+    return "void";
+  }
+  return "void";
+}
+
+std::string read_file(const fs::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input)
+    return {};
+  return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+std::uint64_t hash_text(std::uint64_t hash, std::string_view text) {
+  for (const unsigned char byte : text) {
+    hash ^= byte;
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+std::string hex_hash(std::uint64_t value) {
+  std::ostringstream output;
+  output << std::hex << std::setw(16) << std::setfill('0') << value;
+  return output.str();
+}
+
+std::int64_t resolve(const ConstExpr& expression, const BoundKernel& binding) {
+  if (!expression.is_symbol())
+    return expression.fixed_value();
+  return std::get<std::int64_t>(binding.values.find(expression.symbol())->second);
+}
+
+std::int64_t resolved_dimension(const DimensionDef& definition, std::int64_t observed, const BoundKernel& binding) {
+  if (definition.kind() == DimensionDef::Kind::Fixed)
+    return definition.fixed_value();
+  if (definition.kind() == DimensionDef::Kind::Symbol)
+    return std::get<std::int64_t>(binding.values.find(definition.symbol())->second);
+  return observed;
+}
+
+DType resolved_dtype(const TensorDef& definition, const TensorView& tensor, const BoundKernel& binding) {
+  if (definition.dtype.dtype())
+    return *definition.dtype.dtype();
+  if (!definition.dtype.symbol().empty())
+    return std::get<DType>(binding.values.find(definition.dtype.symbol())->second);
+  return tensor.dtype;
+}
+
+std::string meta_value(const DimensionDef& definition, std::int64_t observed, const BoundKernel& binding,
+                       std::string_view runtime_value) {
+  if (definition.kind() != DimensionDef::Kind::Dynamic)
+    return "::vecops::meta::cint<" + std::to_string(resolved_dimension(definition, observed, binding)) + ">";
+  const auto alignment = resolve(definition.alignment(), binding);
+  const auto lower = resolve(definition.lower_bound(), binding);
+  const auto upper = resolve(definition.upper_bound(), binding);
+  if (alignment == 1 && lower == INT64_MIN && upper == INT64_MAX)
+    return "::vecops::meta::Any{" + std::to_string(observed) + "}";
+  const auto lower_text = lower == INT64_MIN ? "::vecops::meta::kLoInf" : std::to_string(lower);
+  const auto upper_text = upper == INT64_MAX ? "::vecops::meta::kHiInf" : std::to_string(upper);
+  return "::vecops::meta::Dynamic<" + std::to_string(alignment) + ", " + lower_text + ", " + upper_text + ">{" +
+         std::string(runtime_value) + "}";
+}
+
+std::string dynamic_meta_type(const DimensionDef& definition, const BoundKernel& binding) {
+  const auto alignment = resolve(definition.alignment(), binding);
+  const auto lower = resolve(definition.lower_bound(), binding);
+  const auto upper = resolve(definition.upper_bound(), binding);
+  if (alignment == 1 && lower == INT64_MIN && upper == INT64_MAX)
+    return "::vecops::meta::Any";
+  const auto lower_text = lower == INT64_MIN ? "::vecops::meta::kLoInf" : std::to_string(lower);
+  const auto upper_text = upper == INT64_MAX ? "::vecops::meta::kHiInf" : std::to_string(upper);
+  return "::vecops::meta::Dynamic<" + std::to_string(alignment) + ", " + lower_text + ", " + upper_text + ">";
+}
+
+std::string generate_spec(const KernelDef& definition, const BoundKernel& binding) {
+  std::ostringstream output;
+  output << "#pragma once\n#include \"vecops/CoreTypes.h\"\n#include \"vecops/Meta.h\"\n\n"
+            "namespace vecops::spec {\n";
+  for (const auto& [name, type] : definition.values()) {
+    const auto& value = binding.values.at(name);
+    if (type == SpecializationType::ConstInt)
+      output << "inline constexpr auto " << name << " = ::vecops::meta::cint<" << std::get<std::int64_t>(value)
+             << ">;\n";
+    else
+      output << "using " << name << " = " << cpp_type(std::get<DType>(value)) << ";\n";
+  }
+  std::set<std::string, std::less<>> emitted_dynamic_symbols;
+  for (const auto& parameter : definition.parameters()) {
+    const auto* tensor = std::get_if<TensorDef>(&parameter);
+    if (tensor == nullptr)
+      continue;
+    for (const auto& dimension : tensor->shape) {
+      if (dimension.kind() == DimensionDef::Kind::Dynamic && !dimension.symbol().empty() &&
+          emitted_dynamic_symbols.insert(std::string(dimension.symbol())).second)
+        output << "using " << dimension.symbol() << " = " << dynamic_meta_type(dimension, binding) << ";\n";
+    }
+    for (const auto& dimension : tensor->strides) {
+      if (dimension.kind() == DimensionDef::Kind::Dynamic && !dimension.symbol().empty() &&
+          emitted_dynamic_symbols.insert(std::string(dimension.symbol())).second)
+        output << "using " << dimension.symbol() << " = " << dynamic_meta_type(dimension, binding) << ";\n";
+    }
+  }
+  output << "} // namespace vecops::spec\n";
+  return output.str();
+}
+
+std::string scalar_value(const ValueDef& definition, std::size_t index) {
+  const auto value = "call->values[" + std::to_string(index) + "].value.scalar.value.";
+  switch (definition.dtype) {
+  case DType::Bool:
+    return "(" + value + "u64 != 0)";
+  case DType::Int8:
+  case DType::Int16:
+  case DType::Int32:
+  case DType::Int64:
+    return "static_cast<" + cpp_type(definition.dtype) + ">(" + value + "i64)";
+  case DType::UInt8:
+  case DType::UInt16:
+  case DType::UInt32:
+  case DType::UInt64:
+    return "static_cast<" + cpp_type(definition.dtype) + ">(" + value + "u64)";
+  case DType::Float16:
+  case DType::BFloat16:
+  case DType::Float32:
+  case DType::Float64:
+    return "static_cast<" + cpp_type(definition.dtype) + ">(" + value + "f64)";
+  case DType::Invalid:
+    return "{}";
+  }
+  return "{}";
+}
+
+void emit_constraints(std::ostringstream& output, std::string_view name, std::span<const DimensionDef> definitions,
+                      std::span<const std::int64_t> observed, const BoundKernel& binding) {
+  if (definitions.empty())
+    return;
+  output << "static constexpr VecopsDimensionConstraint " << name << "[] = {\n";
+  for (std::size_t axis = 0; axis < definitions.size(); ++axis) {
+    const auto& definition = definitions[axis];
+    if (definition.kind() == DimensionDef::Kind::Dynamic)
+      output << "  {sizeof(VecopsDimensionConstraint), VECOPS_DIM_DYNAMIC, 0, "
+             << resolve(definition.lower_bound(), binding) << ", " << resolve(definition.upper_bound(), binding) << ", "
+             << resolve(definition.alignment(), binding) << "},\n";
+    else
+      output << "  {sizeof(VecopsDimensionConstraint), VECOPS_DIM_CONST, "
+             << resolved_dimension(definition, observed[axis], binding) << ", 0, 0, 1},\n";
+  }
+  output << "};\n";
+}
+
+std::string generate_adapter(const fs::path& kernel_file, const KernelDef& definition, const BoundKernel& binding) {
+  std::ostringstream output;
+  output << "#include \"vecops_spec.h\"\n"
+            "#include \"vecops/runtime/KernelAbi.h\"\n"
+            "#include \"vecops/tensor/Tensor.h\"\n"
+            "#include <algorithm>\n#include <cstddef>\n#include <cstring>\n#include <exception>\n\n"
+         << "#include " << cpp_string(fs::absolute(kernel_file).lexically_normal().string())
+         << "\n\n"
+            "namespace {\n"
+            "void set_error(VecopsError* error, int code, const char* message) {\n"
+            "  if (!error || error->struct_size < sizeof(VecopsError)) return;\n"
+            "  error->code = code; const auto size = std::strlen(message); error->message_required = size + 1;\n"
+            "  if (!error->message || error->message_capacity == 0) return;\n"
+            "  const auto copied = std::min(size, error->message_capacity - 1);\n"
+            "  std::memcpy(error->message, message, copied); error->message[copied] = '\\0';\n"
+            "}\n";
+
+  std::size_t tensor_ordinal = 0;
+  for (std::size_t index = 0; index < definition.parameters().size(); ++index) {
+    const auto* tensor_def = std::get_if<TensorDef>(&definition.parameters()[index]);
+    if (tensor_def == nullptr)
+      continue;
+    if (const auto* tensor = std::get_if<TensorView>(&binding.arguments[index])) {
+      emit_constraints(output, "sizes_" + std::to_string(tensor_ordinal), tensor_def->shape, tensor->sizes, binding);
+      emit_constraints(output, "strides_" + std::to_string(tensor_ordinal), tensor_def->strides, tensor->strides,
+                       binding);
+    }
+    ++tensor_ordinal;
+  }
+
+  output << "static const VecopsParameterDescriptor parameters[] = {\n";
+  tensor_ordinal = 0;
+  for (std::size_t index = 0; index < definition.parameters().size(); ++index) {
+    if (const auto* tensor_def = std::get_if<TensorDef>(&definition.parameters()[index])) {
+      const auto* tensor = std::get_if<TensorView>(&binding.arguments[index]);
+      if (tensor == nullptr) {
+        output << "  {sizeof(VecopsParameterDescriptor), VECOPS_VALUE_TENSOR, " << cpp_string(tensor_def->name)
+               << ", {.tensor={sizeof(VecopsTensorParameter), 0, " << tensor_def->device_type << ", "
+               << tensor_def->device_index << ", -1, 1, sizeof(VecopsDimensionConstraint), nullptr, nullptr, "
+               << (tensor_def->readable() && tensor_def->writable() ? "VECOPS_TENSOR_READ | VECOPS_TENSOR_WRITE"
+                   : tensor_def->writable()                         ? "VECOPS_TENSOR_WRITE"
+                                                                    : "VECOPS_TENSOR_READ")
+               << "}}},\n";
+      } else {
+        const auto dtype_mask = runtime::dtype_bit(resolved_dtype(*tensor_def, *tensor, binding));
+        const auto rank = tensor_def->shape.size();
+        const auto size_pointer = rank == 0 ? "nullptr" : "sizes_" + std::to_string(tensor_ordinal);
+        const auto stride_pointer = rank == 0 ? "nullptr" : "strides_" + std::to_string(tensor_ordinal);
+        output << "  {sizeof(VecopsParameterDescriptor), VECOPS_VALUE_TENSOR, " << cpp_string(tensor_def->name)
+               << ", {.tensor={sizeof(VecopsTensorParameter), " << dtype_mask << "ULL, " << tensor_def->device_type
+               << ", " << tensor_def->device_index << ", " << rank << ", 0, sizeof(VecopsDimensionConstraint), "
+               << size_pointer << ", " << stride_pointer << ", "
+               << (tensor_def->readable() && tensor_def->writable() ? "VECOPS_TENSOR_READ | VECOPS_TENSOR_WRITE"
+                   : tensor_def->writable()                         ? "VECOPS_TENSOR_WRITE"
+                                                                    : "VECOPS_TENSOR_READ")
+               << "}}},\n";
+      }
+      ++tensor_ordinal;
+    } else {
+      const auto& scalar = std::get<ValueDef>(definition.parameters()[index]);
+      output << "  {sizeof(VecopsParameterDescriptor), VECOPS_VALUE_SCALAR, " << cpp_string(scalar.name)
+             << ", {.scalar={sizeof(VecopsScalarParameter), " << runtime::dtype_bit(scalar.dtype) << "ULL}}},\n";
+    }
+  }
+  output << "};\n\n"
+            "int32_t workspace(const VecopsCall*, uint64_t* size, VecopsError*) {\n"
+            "  if (!size) return VECOPS_STATUS_INVALID_ARGUMENT; *size = 0; return VECOPS_STATUS_OK;\n"
+            "}\n"
+            "int32_t run(const VecopsCall* call, VecopsError* error) {\n"
+            "  if (!call || call->struct_size < sizeof(VecopsCall) || call->num_values != "
+         << definition.parameters().size()
+         << " || !call->values) { set_error(error, VECOPS_STATUS_INVALID_ARGUMENT, \"invalid call frame\"); return "
+            "VECOPS_STATUS_INVALID_ARGUMENT; }\n"
+            "  try {\n";
+
+  std::map<std::string, std::string, std::less<>> runtime_dimensions;
+  for (std::size_t index = 0; index < definition.parameters().size(); ++index) {
+    const auto* tensor_def = std::get_if<TensorDef>(&definition.parameters()[index]);
+    if (tensor_def == nullptr || !std::holds_alternative<TensorView>(binding.arguments[index]))
+      continue;
+    auto emit_relations = [&](std::span<const DimensionDef> dimensions, std::string_view member) {
+      for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+        const auto& dimension = dimensions[axis];
+        if (dimension.kind() != DimensionDef::Kind::Dynamic || dimension.symbol().empty())
+          continue;
+        const auto expression = "call->values[" + std::to_string(index) + "].value.tensor." + std::string(member) +
+                                "[" + std::to_string(axis) + "]";
+        const auto [position, inserted] = runtime_dimensions.emplace(std::string(dimension.symbol()), expression);
+        if (!inserted)
+          output << "    if (" << expression << " != " << position->second
+                 << ") { set_error(error, VECOPS_STATUS_INVALID_ARGUMENT, "
+                 << cpp_string("runtime dimension '" + std::string(dimension.symbol()) + "' mismatch")
+                 << "); return VECOPS_STATUS_INVALID_ARGUMENT; }\n";
+      }
+    };
+    emit_relations(tensor_def->shape, "sizes");
+    emit_relations(tensor_def->strides, "strides");
+  }
+
+  std::vector<std::string> arguments;
+  for (std::size_t index = 0; index < definition.parameters().size(); ++index) {
+    if (const auto* tensor_def = std::get_if<TensorDef>(&definition.parameters()[index])) {
+      const auto* tensor = std::get_if<TensorView>(&binding.arguments[index]);
+      if (tensor == nullptr) {
+        arguments.emplace_back("::vecops::tensor::nullopt");
+        continue;
+      }
+      const auto local = "arg_" + std::to_string(index);
+      const auto view = "view_" + std::to_string(index);
+      output << "    const auto& " << view << " = call->values[" << index << "].value.tensor;\n"
+             << "    auto " << local << " = ::vecops::tensor::make_tensor(reinterpret_cast<"
+             << (tensor_def->writable() ? "" : "const ") << cpp_type(resolved_dtype(*tensor_def, *tensor, binding))
+             << "*>(static_cast<std::byte*>(" << view << ".data) + " << view << ".byte_offset),\n"
+             << "      ::vecops::tensor::make_shape(";
+      for (std::size_t axis = 0; axis < tensor_def->shape.size(); ++axis) {
+        if (axis != 0)
+          output << ", ";
+        output << meta_value(tensor_def->shape[axis], tensor->sizes[axis], binding,
+                             view + ".sizes[" + std::to_string(axis) + "]");
+      }
+      output << "), ::vecops::tensor::make_strides(";
+      for (std::size_t axis = 0; axis < tensor_def->strides.size(); ++axis) {
+        if (axis != 0)
+          output << ", ";
+        output << meta_value(tensor_def->strides[axis], tensor->strides[axis], binding,
+                             view + ".strides[" + std::to_string(axis) + "]");
+      }
+      output << "));\n";
+      arguments.push_back(local);
+    } else {
+      arguments.push_back(scalar_value(std::get<ValueDef>(definition.parameters()[index]), index));
+    }
+  }
+  output << "    __kernel__(";
+  for (std::size_t index = 0; index < arguments.size(); ++index) {
+    if (index != 0)
+      output << ", ";
+    output << arguments[index];
+  }
+  output
+    << ");\n    return VECOPS_STATUS_OK;\n"
+       "  } catch (const std::exception& exception) {\n"
+       "    set_error(error, VECOPS_STATUS_EXECUTION_ERROR, exception.what()); return VECOPS_STATUS_EXECUTION_ERROR;\n"
+       "  } catch (...) {\n"
+       "    set_error(error, VECOPS_STATUS_EXECUTION_ERROR, \"kernel threw an unknown exception\"); return "
+       "VECOPS_STATUS_EXECUTION_ERROR;\n"
+       "  }\n"
+       "}\n"
+       "const VecopsKernelDescriptorV1 descriptor = {\n"
+       "  sizeof(VecopsKernelDescriptorV1), VECOPS_KERNEL_ABI_VERSION_MAJOR, VECOPS_KERNEL_ABI_VERSION_MINOR,\n  "
+    << cpp_string(definition.name()) << ", " << cpp_string(binding.specialization_key) << ", "
+    << definition.parameters().size()
+    << ", sizeof(VecopsParameterDescriptor), parameters, workspace, run, 0\n};\n"
+       "} // namespace\n\n"
+       "extern \"C\" VECOPS_RUNTIME_EXPORT const VecopsKernelDescriptorV1* vecops_kernel_query_v1() {\n"
+       "  return &descriptor;\n"
+       "}\n";
+  return output.str();
+}
+
+runtime::Status write_file(const fs::path& path, const std::string& contents) {
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output)
+    return invalid("cannot write generated file: " + path.string());
+  output << contents;
+  output.close();
+  if (!output)
+    return invalid("failed while writing generated file: " + path.string());
+  return runtime::Status::success();
+}
+
+} // namespace
+
+runtime::Result<std::shared_ptr<runtime::Executable>> Compiler::compile_kernel(const fs::path& kernel_file,
+                                                                               const runtime::KernelDef& definition,
+                                                                               const runtime::KernelCall& call) const {
+  if (!kernel_config_)
+    return invalid("compile_kernel requires Compiler(KernelCompilerConfig)");
+  if (!fs::is_regular_file(kernel_file))
+    return invalid("kernel source does not exist: " + kernel_file.string());
+  if (kernel_config_->work_directory.empty())
+    return invalid("KernelCompilerConfig.work_directory is required");
+
+  auto binding = runtime::bind_kernel_call(definition, call);
+  if (!binding)
+    return binding.status();
+  const auto source = read_file(kernel_file);
+  std::uint64_t fingerprint = UINT64_C(14695981039346656037);
+  fingerprint = hash_text(fingerprint, binding.value().specialization_key);
+  fingerprint = hash_text(fingerprint, definition.canonical());
+  fingerprint = hash_text(fingerprint, source);
+  const auto identity = hex_hash(fingerprint);
+
+  std::error_code error;
+  fs::create_directories(kernel_config_->work_directory, error);
+  if (error)
+    return invalid("cannot create compiler work directory: " + error.message());
+  fs::path attempt;
+  for (std::size_t retry = 0; retry < 1024; ++retry) {
+    error.clear();
+    const auto candidate =
+      kernel_config_->work_directory /
+      ("kernel-" + identity + "-" + std::to_string(next_attempt.fetch_add(1, std::memory_order_relaxed)));
+    if (fs::create_directory(candidate, error)) {
+      attempt = candidate;
+      break;
+    }
+    if (error && error != std::errc::file_exists)
+      return invalid("cannot create compiler attempt directory: " + error.message());
+  }
+  if (attempt.empty())
+    return invalid("cannot allocate a unique compiler attempt directory");
+
+  const auto input_directory = attempt / "input";
+  fs::create_directory(input_directory, error);
+  if (error)
+    return invalid("cannot create generated input directory: " + error.message());
+  auto status = write_file(input_directory / "vecops_spec.h", generate_spec(definition, binding.value()));
+  if (!status.ok())
+    return status;
+  status =
+    write_file(input_directory / "vecops_adapter.cpp", generate_adapter(kernel_file, definition, binding.value()));
+  if (!status.ok())
+    return status;
+
+  KernelBuildRequest request;
+  request.target_name = "vecops_kernel_" + identity;
+  request.output_name = request.target_name;
+  request.target_arch = kernel_config_->target_arch;
+  request.sdk = kernel_config_->sdk;
+  request.toolchain = kernel_config_->toolchain;
+  request.sources = {input_directory / "vecops_adapter.cpp"};
+  request.include_directories = kernel_config_->include_directories;
+  request.include_directories.push_back(input_directory);
+  request.compile_definitions = kernel_config_->compile_definitions;
+  request.compile_options = kernel_config_->compile_options;
+  request.link_directories = kernel_config_->link_directories;
+  request.link_libraries = kernel_config_->link_libraries;
+  request.link_options = kernel_config_->link_options;
+  request.generated_source_directory = attempt / "project";
+  request.build_directory = attempt / "build";
+  request.artifact_directory = attempt / "artifact";
+
+  auto result = compile(request);
+  if (!result.success || !result.kernel_library) {
+    std::string message = "kernel compilation failed";
+    if (!result.error.empty())
+      message += ": " + result.error;
+    if (result.configure && !result.configure->output.empty())
+      message += "\n[configure]\n" + result.configure->output;
+    if (result.build_and_install && !result.build_and_install->output.empty())
+      message += "\n[build]\n" + result.build_and_install->output;
+    return runtime::Status(runtime::StatusCode::ExecutionError, std::move(message));
+  }
+  auto executable = runtime::Executable::load(*result.kernel_library);
+  if (!executable)
+    return executable.status();
+  if (executable.value()->operator_name() != definition.name() ||
+      executable.value()->specialization_key() != binding.value().specialization_key)
+    return runtime::Status(runtime::StatusCode::AbiMismatch, "generated kernel identity does not match its binding");
+  return std::move(executable).value();
+}
+
+runtime::Result<std::shared_ptr<runtime::Executable>>
+Compiler::compile_kernel(const runtime::BoundKernelRecipe& recipe) const {
+  if (recipe.source == nullptr || recipe.source->definition == nullptr)
+    return invalid("bound recipe does not carry a source kernel instantiation");
+  return compile_kernel(recipe.source->kernel_file, *recipe.source->definition,
+                        runtime::KernelCall(recipe.source->binding.arguments, recipe.source->binding.values));
+}
+
+} // namespace vecops::compiler

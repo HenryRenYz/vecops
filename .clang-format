@@ -2,6 +2,7 @@
 Language: Cpp
 BasedOnStyle: None
 Standard: c++20
+DisableFormat: false
 
 AccessModifierOffset: -2
 AlignAfterOpenBracket: Align

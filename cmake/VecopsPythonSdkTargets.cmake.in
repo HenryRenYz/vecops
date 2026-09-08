@@ -1,0 +1,20 @@
+# Relocatable imported targets installed inside a Python wheel at vecops/_sdk.
+# This file deliberately does not include the normal exported target file: the
+# wheel ships only the core static library needed to compile user kernels, and
+# every path is derived from PACKAGE_PREFIX_DIR after package configuration.
+include_guard(GLOBAL)
+
+add_library(vecops::vecops STATIC IMPORTED)
+set_target_properties(vecops::vecops PROPERTIES
+    IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/@CMAKE_STATIC_LIBRARY_PREFIX@vecops@CMAKE_STATIC_LIBRARY_SUFFIX@"
+    INTERFACE_COMPILE_FEATURES "cxx_std_20"
+    INTERFACE_COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wno-ignored-attributes>"
+    INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include;${PACKAGE_PREFIX_DIR}/include/vecops"
+    INTERFACE_LINK_LIBRARIES "${CMAKE_DL_LIBS}"
+)
+
+add_library(vecops::optimize_for_kernels INTERFACE IMPORTED)
+set_target_properties(vecops::optimize_for_kernels PROPERTIES
+    INTERFACE_COMPILE_OPTIONS
+        "$<$<COMPILE_LANGUAGE:CXX>:-falign-functions=64>;$<$<COMPILE_LANGUAGE:CXX>:-falign-loops=64>;$<$<COMPILE_LANGUAGE:CXX>:-fno-math-errno>"
+)

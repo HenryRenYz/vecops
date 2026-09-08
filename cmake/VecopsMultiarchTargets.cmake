@@ -1,6 +1,7 @@
 include_guard(GLOBAL)
 
 include(CheckCXXCompilerFlag)
+include("${CMAKE_CURRENT_LIST_DIR}/VecopsTargetArch.cmake")
 
 # Architecture metadata shared by tests, benchmarks, and any future
 # multi-architecture executable targets.
@@ -330,7 +331,7 @@ function(_vecops_expand_target_source OUT_VAR TARGET_NAME SOURCE)
             "maximum is 512")
     endif()
 
-    file(RELATIVE_PATH _SOURCE_KEY "${CMAKE_SOURCE_DIR}" "${_SOURCE}")
+    file(RELATIVE_PATH _SOURCE_KEY "${VECOPS_SOURCE_DIR}" "${_SOURCE}")
     if(_SOURCE_KEY MATCHES "^\\.\\.")
         string(SHA1 _SOURCE_KEY "${_SOURCE}")
     else()
@@ -385,15 +386,15 @@ function(_vecops_get_sme_matmul_leaf_library
         set(_LEAF_SOURCES "")
         if(USE_F64)
             list(APPEND _LEAF_SOURCES
-                "${CMAKE_SOURCE_DIR}/src/arch/sme/FusedSkinnyF64.cpp")
+                "${VECOPS_SOURCE_DIR}/src/arch/sme/FusedSkinnyF64.cpp")
         endif()
         if(USE_RUNTIME_QUANT_INT8)
             list(APPEND _LEAF_SOURCES
-                "${CMAKE_SOURCE_DIR}/src/arch/sme/RuntimeQuantInt8.cpp")
+                "${VECOPS_SOURCE_DIR}/src/arch/sme/RuntimeQuantInt8.cpp")
         endif()
         if(USE_MIXED_SIGN_SKINNY)
             list(APPEND _LEAF_SOURCES
-                "${CMAKE_SOURCE_DIR}/src/arch/sme/MixedSignSkinnyInt8.cpp")
+                "${VECOPS_SOURCE_DIR}/src/arch/sme/MixedSignSkinnyInt8.cpp")
         endif()
         if(NOT _LEAF_SOURCES)
             message(FATAL_ERROR
@@ -402,8 +403,8 @@ function(_vecops_get_sme_matmul_leaf_library
         add_library(${_LEAF_TARGET} STATIC ${_LEAF_SOURCES})
         target_compile_features(${_LEAF_TARGET} PRIVATE cxx_std_20)
         target_include_directories(${_LEAF_TARGET} PRIVATE
-            "${CMAKE_SOURCE_DIR}/include"
-            "${CMAKE_SOURCE_DIR}/include/vecops")
+            "${VECOPS_SOURCE_DIR}/include"
+            "${VECOPS_SOURCE_DIR}/include/vecops")
         target_compile_definitions(${_LEAF_TARGET} PRIVATE
             "$<$<CONFIG:Debug>:VECOPS_DEBUG>")
         if(VECOPS_PRESERVE_SUBNORMALS)
@@ -490,6 +491,12 @@ function(vecops_add_multiarch_executable)
         add_executable(${_TARGET_NAME} ${_SOURCES})
         list(APPEND _CREATED_TARGETS ${_TARGET_NAME})
         set_property(TARGET ${_TARGET_NAME} PROPERTY FOLDER "${_FOLDER}")
+        if(NOT _ARCH STREQUAL "NONE")
+            vecops_configure_target_arch(
+                TARGET ${_TARGET_NAME}
+                ARCH ${_ARCH}
+                OUT_MARCH _MARCH)
+        endif()
         if(ARG_INCLUDE_DIRECTORIES)
             target_include_directories(${_TARGET_NAME} PRIVATE
                 ${ARG_INCLUDE_DIRECTORIES})
@@ -505,9 +512,6 @@ function(vecops_add_multiarch_executable)
             target_link_options(${_TARGET_NAME} PRIVATE ${ARG_LINK_OPTIONS})
         endif()
 
-        if(_MARCH)
-            target_compile_options(${_TARGET_NAME} PRIVATE "-march=${_MARCH}")
-        endif()
         # ACLE currently has no portable FEAT_SME_FA64 feature-test macro.
         # Propagate the CMake target guarantee so streaming kernels can select
         # ordinary SVE gather/scatter only when Full A64 is available.
@@ -603,11 +607,6 @@ function(vecops_add_multiarch_executable)
         if(ARG_ARCH_DEFINITION)
             target_compile_definitions(${_TARGET_NAME} PRIVATE
                 "${ARG_ARCH_DEFINITION}=\"${_ARCH}\"")
-        endif()
-        if(_ARCH STREQUAL "Scalar")
-            target_compile_definitions(${_TARGET_NAME} PRIVATE
-                CPU_CAPABILITY=GENERIC
-                CPU_CAPABILITY_GENERIC=1)
         endif()
     endforeach()
 

@@ -1,0 +1,39 @@
+[build-system]
+requires = [
+  "scikit-build-core>=0.11",
+  "pybind11>=2.13",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "vecops"
+version = "0.1.0"
+description = "Framework-neutral Python bindings for vecops kernel artifacts"
+readme = "README.md"
+requires-python = ">=3.9"
+
+[project.optional-dependencies]
+numpy = ["numpy>=1.23"]
+torch = ["torch>=2.9"]
+test = [
+  "numpy>=1.23",
+  "pytest>=7",
+]
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+cmake.define.VECOPS_BUILD_COMPILER = "ON"
+cmake.define.VECOPS_BUILD_PYTHON = "ON"
+cmake.define.VECOPS_BUILD_TESTING = "OFF"
+install.components = ["python"]
+wheel.packages = ["python/vecops"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+
+[tool.ruff]
+line-length = 120
+indent-width = 2
+
+[tool.ruff.format]
+indent-style = "space"

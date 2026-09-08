@@ -6,6 +6,9 @@ include(CheckCXXCompilerFlag)
 # CPU kernels.  Keep this separate from vecops so ordinary users and tests do
 # not silently inherit benchmark-oriented code-layout and math-library rules.
 add_library(vecops_optimize_for_kernels INTERFACE)
+add_library(vecops::optimize_for_kernels ALIAS vecops_optimize_for_kernels)
+set_target_properties(vecops_optimize_for_kernels PROPERTIES
+    EXPORT_NAME optimize_for_kernels)
 
 function(_vecops_add_kernel_compile_option OPTION)
     string(MAKE_C_IDENTIFIER "${OPTION}" _OPTION_ID)

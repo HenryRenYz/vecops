@@ -2,7 +2,7 @@ include_guard(GLOBAL)
 
 include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/VecopsMultiarchTargets.cmake")
 
-file(GLOB _GDB_SCRIPTS "${CMAKE_SOURCE_DIR}/scripts/*.py")
+file(GLOB _GDB_SCRIPTS "${VECOPS_SOURCE_DIR}/scripts/*.py")
 
 function(vecops_add_test)
     set(options "")
@@ -53,7 +53,7 @@ function(vecops_add_test)
             set(_LOADER "${CMAKE_CURRENT_BINARY_DIR}/${_TARGET_NAME}-gdb.py")
             _vecops_write_if_different("${_LOADER}"
 "import sys
-sys.path.insert(0, '${CMAKE_SOURCE_DIR}/scripts')
+sys.path.insert(0, '${VECOPS_SOURCE_DIR}/scripts')
 
 ${_IMPORTS}")
             add_custom_command(TARGET ${_TARGET_NAME} POST_BUILD

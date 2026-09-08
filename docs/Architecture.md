@@ -15,6 +15,8 @@ between declarations in headers and implementations in source files.
 | `include/vecops/tensor` | Tensor descriptions, layouts, access planning, and bound access sessions. |
 | `include/vecops/execution` | Execution scopes and hardware-resource lifetime management. |
 | `include/vecops/vec` | SIMD abstraction and architecture backends. |
+| `include/vecops/runtime` | Framework-neutral logical schemas, recipe dispatch, artifact ABI, DSO loading, and guarded execution. |
+| `include/vecops/compiler` | Optional native CMake compiler API; it creates artifacts but owns neither dispatch nor caching. |
 
 ## Ownership rules
 
@@ -32,6 +34,84 @@ between declarations in headers and implementations in source files.
 5. `details` headers are private implementation headers. Tests may exercise
    them when validating backend contracts, but application code must not rely
    on them as stable API.
+
+## Runtime and compilation boundaries
+
+The C ABI is split by protocol:
+
+- `CallAbi.h` owns the tensor, scalar, call-frame, error, dtype, device, and
+  status records shared by every ABI boundary.
+- `KernelAbi.h` owns the independently-built kernel DSO descriptor and
+  `vecops_kernel_query_v1`; it has its own kernel ABI version.
+- `OperatorBridgeAbi.h` owns the process-local handle protocol used by
+  generated framework adapters to call an `Operator`; it is versioned
+  independently from kernel artifacts.
+
+There is deliberately no umbrella ABI header.  Code must include the header
+for the protocol it implements, which keeps an artifact DSO from accidentally
+depending on the process-local operator bridge.
+
+The runtime represents two distinct things instead of registering every
+specialization as a separate operator:
+
+- `Operator` is the stable logical operation. Its `OperatorSchema` may accept
+  dynamic rank, dtype, shape, and stride metadata.
+- `Executable` is one concrete specialization. Its DSO descriptor records the
+  exact subset of calls that it accepts and every invocation is checked
+  against that descriptor.
+
+Between them, a `DispatchPolicy` orders `KernelRecipe` candidates and each
+recipe binds invocation metadata to a specialization key. Matching and binding
+must be free of filesystem, compiler, and build-system side effects. An
+`ExecutableProvider` is the only policy boundary allowed to decide whether to
+load AOT code, consult an application cache, or invoke the optional compiler.
+Consequently a runtime-only deployment can omit `vecops::compiler` and cannot
+accidentally start CMake.
+
+Compiler-managed sources add a `KernelDef`/`KernelCall` binding step before
+recipe resolution. A binding owns normalized positional arguments, the fully
+inferred symbol environment, anonymous compile-time choices, and one
+specialization key. Dynamic dimension constraints may use fixed integers or
+named `ConstInt` values for alignment and bounds; all symbols are inferred
+before those constraints are checked. Validation, generated `vecops::spec`,
+descriptor constraints, and dispatch keys therefore consume one binding.
+
+The standard `ArtifactExecutableProvider` has `CacheOnly`, `ReadWrite`, and
+`CompileOnly` modes. Cache-only resolution never calls a compiler callback and
+never creates locks, directories, staging files, or indexes. Read-write
+publication uses a staging directory followed by rename. Its key includes the
+recipe/source identity, canonical KernelDef, specialization, and an
+application-supplied target/toolchain/SDK namespace.
+
+The ownership chain uses shared lifetime at the load boundary:
+
+```text
+Operator -> Schema + Recipes + DispatchPolicy + ExecutableProvider
+                                      |
+                                      v
+                              shared Executable
+                                      |
+                                      v
+                                LoadedModule (DSO)
+```
+
+Destroying an `Operator` releases what it owns, but an explicitly retained
+`shared_ptr<Executable>` remains callable and keeps its DSO loaded. This is the
+intended fast path for callers that have already resolved and cached a concrete
+specialization.
+
+Framework integrations belong above this boundary. A Torch adapter can own
+operator registration and `at::Tensor` conversion, while a NumPy adapter can
+own Python-buffer conversion; neither type appears in the core ABI. Generated
+adapter C++ may still be compiled into a framework-specific extension DSO so
+that execution does not round-trip through Python.
+
+Generated Torch bridges register each logical operator exactly once and call a
+narrow framework C ABI exported by the Python runtime module. Per-shape kernel
+DSOs continue to export only `vecops_kernel_query_v1`. Output tensors are
+caller-allocated mutable arguments; internal Torch schemas use distinct alias
+sets and return no tensor aliases, while the public Python wrapper returns the
+original outputs for ergonomics.
 
 ## Current operator layout
 

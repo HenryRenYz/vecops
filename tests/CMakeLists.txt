@@ -1,5 +1,36 @@
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/VecopsTestTargets.cmake")
 
+# This is an explicitly-invoked correctness/performance CLI rather than a
+# GoogleTest binary, so it is intentionally not registered with CTest.
+if(TARGET vecops::compiler)
+    vecops_add_multiarch_executable(
+        NAME NormOperatorCli
+        FILES ops/NormOperatorCli.cpp
+        FOLDER ops/norm_cli
+        ARCH Native
+        LIBRARIES vecops::compiler vecops
+        DEFINITIONS
+            "VECOPS_NORM_SDK_SOURCE_DIR=\"${VECOPS_SOURCE_DIR}\""
+            "VECOPS_NORM_KERNEL_SOURCE=\"${VECOPS_SOURCE_DIR}/tests/runtime/NormOperatorKernel.cpp\"")
+else()
+    message(STATUS
+        "Skipping NormOperatorCli because VECOPS_BUILD_COMPILER is disabled")
+endif()
+
+if(TARGET vecops::compiler)
+    add_executable(VecopsRuntimeTest runtime/RuntimeTest.cpp)
+    target_compile_features(VecopsRuntimeTest PRIVATE cxx_std_20)
+    target_compile_definitions(VecopsRuntimeTest PRIVATE
+        "VECOPS_TEST_KERNEL=\"${VECOPS_SOURCE_DIR}/tests/runtime/TestKernel.cpp\""
+        "VECOPS_SOURCE_ROOT=\"${VECOPS_SOURCE_DIR}\"")
+    target_link_libraries(VecopsRuntimeTest PRIVATE vecops::compiler)
+    set_target_properties(VecopsRuntimeTest PROPERTIES CXX_EXTENSIONS OFF FOLDER runtime)
+    add_test(NAME VecopsRuntimeTest
+        COMMAND VecopsRuntimeTest "${CMAKE_CURRENT_BINARY_DIR}/runtime-work")
+else()
+    message(STATUS "Skipping VecopsRuntimeTest because VECOPS_BUILD_COMPILER is disabled")
+endif()
+
 vecops_add_test(NAME TensorTest FILES tensor/TensorTest.cpp FOLDER tensor/tensor)
 vecops_add_test(NAME LayoutTest FILES tensor/LayoutTest.cpp FOLDER tensor/layout)
 # GCC 13.3 miscompiles LayoutTest at -O2/-O3: the TestBody of
@@ -21,6 +52,11 @@ vecops_add_test(
     FILES execution/ExecutionSessionTest.cpp
     FOLDER execution/session
     ARCH Scalar Native)
+vecops_add_test(
+    NAME ParallelTest
+    FILES execution/ParallelTest.cpp
+    FOLDER execution/parallel
+    ARCH Scalar)
 
 vecops_add_test(NAME UtilMathTest FILES util/MathTest.cpp FOLDER util/math)
 

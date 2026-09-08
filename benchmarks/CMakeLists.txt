@@ -40,7 +40,7 @@ function(vecops_add_benchmark)
         FOLDER ${ARG_FOLDER}
         ARCH ${ARG_ARCH}
         ARCH_DEFINITION VECOPS_BENCH_ARCH_CODE
-        DEFINITIONS VECOPS_SOURCE_DIR="${CMAKE_SOURCE_DIR}" ${ARG_DEFINITIONS}
+        DEFINITIONS VECOPS_SOURCE_DIR="${VECOPS_SOURCE_DIR}" ${ARG_DEFINITIONS}
         LIBRARIES
             vecops
             vecops_optimize_for_kernels
@@ -291,7 +291,7 @@ if(VECOPS_ENABLE_ONEDNN_BENCHMARKS)
             VECOPS_BENCH_ARCH_CODE="${VECOPS_ONEDNN_BENCH_ARCH}"
             VECOPS_BENCH_USE_ONEDNN=1
             VECOPS_BENCH_ONEDNN_IMPL_TOKEN="${VECOPS_ONEDNN_IMPL_TOKEN}"
-            VECOPS_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+            VECOPS_SOURCE_DIR="${VECOPS_SOURCE_DIR}"
         )
         target_link_libraries(${TARGET_NAME} PRIVATE
             vecops vecops_optimize_for_kernels benchmark::benchmark dnnl)
