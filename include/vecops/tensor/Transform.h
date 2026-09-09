@@ -102,7 +102,14 @@ namespace vecops::tensor {
 
 /** @brief Active-lane descriptor in which every logical lane is active. */
 struct AllActiveLanes {
-  VECOPS_ALWAYS_INLINE constexpr bool is_active(nint_t) const { return true; }
+  VECOPS_ALWAYS_INLINE constexpr bool is_active(nint_t) const {
+    return true;
+  }
+
+  template <vec::VectorTag Tag>
+  VECOPS_ALWAYS_INLINE constexpr auto active_option(Tag, nint_t) const {
+    return vec::opt::unmasked;
+  }
 };
 
 /** @brief Active-lane descriptor for the half-open range `[0, count)`. */
@@ -110,6 +117,11 @@ struct FirstActiveLanes {
   nint_t count;
   VECOPS_ALWAYS_INLINE constexpr bool is_active(nint_t lane) const {
     return 0 <= lane && lane < count;
+  }
+
+  template <vec::VectorTag Tag>
+  VECOPS_ALWAYS_INLINE constexpr auto active_option(Tag, nint_t lane_base) const {
+    return vec::opt::first(count - lane_base);
   }
 };
 
@@ -152,7 +164,12 @@ struct IndexedLaneMapping {
  *
  * `lane_base` is maintained internally when one DataAccess request is split
  * into several transform calls. Transform code should normally call
- * `lane_coord(i)` and `is_active(i)` rather than inspect `lane_base` directly.
+ * `lane_coord(i)`, `is_active(i)`, or `active_option(tag)` rather than inspect
+ * `lane_base` directly. `active_option(tag)` is available for the common
+ * unmasked/first-active cases and preserves the active option's compile-time
+ * kind, so a transform can forward it to an auxiliary vector memory access
+ * without reconstructing a tail count. Arbitrary masked activity deliberately
+ * has no prefix option; use `is_active(i)` when a transform truly needs it.
  *
  * @code
  * auto bias = tensor::make_vec_transform<float, float>(
@@ -190,8 +207,13 @@ struct TransformContext {
     return active.is_active(lane_base + lane);
   }
 
-  VECOPS_ALWAYS_INLINE TransformContext subspan(
-      nint_t begin, nint_t) const {
+  /** Return the caller's prefix-active option adjusted to this subspan. */
+  template <vec::VectorTag Tag>
+    requires requires(const Active& value, Tag tag, nint_t base) { value.active_option(tag, base); }
+  VECOPS_ALWAYS_INLINE constexpr auto active_option(Tag tag) const {
+    return active.active_option(tag, lane_base);
+  }
+  VECOPS_ALWAYS_INLINE TransformContext subspan(nint_t begin, nint_t) const {
     auto result = *this;
     result.lane_base += begin;
     return result;
@@ -221,11 +243,22 @@ struct NoTransform {
   static constexpr bool reads_input = true;
 };
 
+/** Backend-selectable relationship between transform calls and memory stores. */
+enum class TransformStoreMode { automatic, narrow, wide_transform, coalesced };
+
+template <typename Transform>
+inline constexpr TransformStoreMode transform_store_mode_v = [] {
+  if constexpr (requires { std::remove_cvref_t<Transform>::transform_store_mode; }) {
+    return std::remove_cvref_t<Transform>::transform_store_mode;
+  } else {
+    return TransformStoreMode::automatic;
+  }
+}();
+
 namespace details {
 
 template <typename T>
-VECOPS_ALWAYS_INLINE decltype(auto) subspan_transform_argument(
-    T&& value, nint_t begin, nint_t count) {
+VECOPS_ALWAYS_INLINE decltype(auto) subspan_transform_argument(T&& value, nint_t begin, nint_t count) {
   if constexpr (TransformContextLike<std::remove_cvref_t<T>>) {
     return value.subspan(begin, count);
   } else {
@@ -566,6 +599,48 @@ struct IdentityVecTransform : public VecTransform<EOut, EIn, true> {
     return v_in;
   }
 };
+
+/**
+ * Explicitly override a backend's automatic transform/store batching policy.
+ * The wrapper preserves every semantic transform trait and only adds the
+ * requested lowering mode; operator code does not need to mention vector
+ * widths or backend tags.
+ */
+template <TransformStoreMode Mode, typename Inner>
+  requires is_vec_transform_like_v<Inner>
+class TransformStoreOverride {
+public:
+  using TIn = typename Inner::TIn;
+  using TOut = typename Inner::TOut;
+  static constexpr bool is_elementwise = Inner::is_elementwise;
+  static constexpr bool is_lane_local = Inner::is_lane_local;
+  static constexpr bool permutation_equivariant = Inner::permutation_equivariant;
+  static constexpr bool reads_input = Inner::reads_input;
+  static constexpr TransformStoreMode transform_store_mode = Mode;
+
+  constexpr explicit TransformStoreOverride(Inner inner)
+    : inner_(std::move(inner)) {
+  }
+
+  template <vec::VectorTag To, typename... Coords>
+  VECOPS_KERNEL_FUNCTION(decltype(auto) operator()(To tag, vec::Vec<vec::Rebind<TIn, To>> value, Coords... coordinates)
+                           const) {
+    return inner_(tag, value, coordinates...);
+  }
+
+private:
+  Inner inner_;
+};
+
+template <TransformStoreMode Mode, typename Inner>
+struct IsZeroVecTransform<TransformStoreOverride<Mode, Inner>> : IsZeroVecTransform<Inner> {};
+
+template <TransformStoreMode Mode, typename Transform>
+  requires is_vec_transform_like_v<std::remove_cvref_t<Transform>>
+constexpr auto with_transform_store_mode(Transform&& transform) {
+  using Inner = std::remove_cvref_t<Transform>;
+  return TransformStoreOverride<Mode, Inner>{Inner(std::forward<Transform>(transform))};
+}
 
 /**
  * @brief Wrap a coordinate-aware callable as a typed vector transform.

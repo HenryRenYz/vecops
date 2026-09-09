@@ -888,19 +888,16 @@ void check_mixed_bias_relu(nint_t m, nint_t n, nint_t k) {
       tensor::make_shape(meta::Any{n}, meta::Any{k}));
   auto cl = tensor::make_layout(
       tensor::make_shape(meta::Any{m}, meta::Any{n}));
-  auto bias_layout = tensor::make_layout(
-      tensor::make_shape(meta::Any{m}, meta::Any{n}),
-      tensor::make_strides(meta::cint<0>, meta::cint<1>));
-  auto relu = tensor::make_elementwise_vec_transform<Acc, Acc>(
-      [](auto tag, auto value) VECOPS_KERNEL_LAMBDA {
-        return vec::max(tag, value, vec::zeros(tag));
-      });
-  auto operation = make_test_matmul_invocation(ops::MatmulConfig<Atom>{},
-      m, n, k,
-      tensor::input<TA>(tensor::make_tensor(a.data(), al)),
-      tensor::input<TB>(tensor::make_tensor(b.data(), bl)),
-      tensor::input<Acc>(tensor::make_tensor(bias.data(), bias_layout)),
-      tensor::output<Acc>(tensor::make_tensor(c.data(), cl), relu));
+  auto bias_layout = tensor::make_layout(tensor::make_shape(meta::Any{m}, meta::Any{n}),
+                                         tensor::make_strides(meta::cint<0>, meta::cint<1>));
+  auto relu = tensor::with_transform_store_mode<tensor::TransformStoreMode::coalesced>(
+    tensor::make_elementwise_vec_transform<Acc, Acc>(
+      [](auto tag, auto value) VECOPS_KERNEL_LAMBDA { return vec::max(tag, value, vec::zeros(tag)); }));
+  auto operation = make_test_matmul_invocation(ops::MatmulConfig<Atom>{}, m, n, k,
+                                               tensor::input<TA>(tensor::make_tensor(a.data(), al)),
+                                               tensor::input<TB>(tensor::make_tensor(b.data(), bl)),
+                                               tensor::input<Acc>(tensor::make_tensor(bias.data(), bias_layout)),
+                                               tensor::output<Acc>(tensor::make_tensor(c.data(), cl), relu));
   kernel::Workspace storage(operation.required_workspace());
   auto workspace = storage.view();
   operation(workspace);

@@ -341,6 +341,43 @@ stores a converted zero regardless of the supplied value.
 
 Direct sessions expose `raw_data()`, `raw_strides()`, `spec()`, `policy()`.
 
+A coordinate-aware `VecTransform` receives the same activity in its
+`TransformContext`. For unmasked and prefix-active accesses,
+`context.active_option(tag)` returns `opt::unmasked` or the subspan-adjusted
+`opt::first(n)` respectively. Forward this option to auxiliary vector loads in
+an epilogue instead of recomputing a tail from tensor extents. Arbitrary masked
+contexts expose `is_active(lane)` but intentionally do not pretend to be a
+contiguous prefix.
+
+Matrix/tile kernels can query
+`preferred_memory_access_power_v<Access>`. It is the number of `Twice<Tag>`
+steps needed for a native-word `ComputeType` vector to cover at least one full
+word of the actual `MemoryElement`; a wider memory element returns zero because
+the compute input is already a complete word. The transform's declared output
+type is deliberately irrelevant—the final boundary is always MemoryElement.
+The AMX C path consumes this hint when adjacent accumulator tiles and a
+physically contiguous row/column axis exist. Its automatic policy concatenates
+the value and active predicate before invoking one wide transform. SME's
+automatic policy currently keeps transforms and stores narrow on the tested
+64-byte target: both the P1-transform path and the two-P0-transform/one-store
+path lost to the smaller narrow loop with BiSheng 5.1. The coalesced primitive
+still exists for backends or future compilers that benefit: it gives each P0
+transform its own context and then concatenates only the results for one packed
+converting store. A partial second tile becomes one combined prefix store.
+
+Operator code normally leaves this automatic. An expert can override the
+backend decision by wrapping only the transform, without naming a vector tag:
+
+```cpp
+auto epilogue = tensor::with_transform_store_mode<
+    tensor::TransformStoreMode::coalesced>(my_epilogue);
+```
+
+The other explicit modes are `narrow` and `wide_transform`; an explicit mode
+takes priority over the AMX/SME default. A kernel must still cap the requested
+power by its resident tile shape and must not group across a non-contiguous
+physical axis merely to obtain a wider access.
+
 ### Materialization: plans, populate, and commit
 
 The plans differ in *what the workspace buffer holds* and *when it is
@@ -358,6 +395,10 @@ filled/written back*:
 | `direct` | — | no-op |
 | `materialize_before_transform` | **ComputeType** results | replays epilogue + conversion from the buffer into the Tensor (Transpose2D-accelerated when a provably unit-stride axis exists) |
 | `materialize_after_transform` | **MemoryElement** results (epilogue already ran in the loop) | only remaps/copies the buffer into the Tensor |
+
+Materialized output auxiliaries are zero-initialized because `commit()` writes
+their complete extent and masked stores may intentionally leave elements
+untouched. Other Workspace allocations remain raw and uninitialized.
 
 So "before/after" names the transform stage the buffer sits at: an input
 cached *before* the transform re-pays the transform per read but saves raw

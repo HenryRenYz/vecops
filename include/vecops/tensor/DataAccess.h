@@ -178,6 +178,39 @@
  */
 namespace vecops::tensor {
 
+/**
+ * Number of tag doublings preferred by an access in order to make its memory
+ * element side occupy at least one complete native vector word.
+ *
+ * A kernel normally owns one native word of ComputeType.  Rebinding that tag
+ * to a narrower MemoryElement preserves the logical lane count and therefore
+ * describes only a subword memory access.  When the surrounding accumulator
+ * or packing shape owns adjacent vectors, grouping 2^power of them restores a
+ * complete memory access.  Wider memory elements already consume one or more
+ * complete words for a single compute vector, so they do not request growth.
+ *
+ * This trait deliberately ignores a transform's declared output type: the
+ * actual memory boundary is always MemoryElement.
+ */
+template <typename Access>
+inline constexpr int preferred_memory_access_power_v = []() consteval {
+  using Compute = typename std::remove_cvref_t<Access>::ComputeType;
+  using Memory = typename std::remove_cvref_t<Access>::MemoryElement;
+  if constexpr (sizeof(Compute) <= sizeof(Memory)) {
+    return 0;
+  } else {
+    static_assert(sizeof(Compute) % sizeof(Memory) == 0);
+    std::size_t ratio = sizeof(Compute) / sizeof(Memory);
+    int power = 0;
+    while (ratio > 1) {
+      static_assert((sizeof(Compute) / sizeof(Memory) & (sizeof(Compute) / sizeof(Memory) - 1)) == 0,
+                    "vector element-size ratio must be a power of two");
+      ratio /= 2;
+      ++power;
+    }
+    return power;
+  }
+}();
 namespace materialize {
 
 /**
@@ -423,12 +456,13 @@ template <typename T>
 struct IsIdentityVecTransform : std::false_type {};
 
 template <typename EOut, typename EIn>
-struct IsIdentityVecTransform<IdentityVecTransform<EOut, EIn>>
-    : std::true_type {};
+struct IsIdentityVecTransform<IdentityVecTransform<EOut, EIn>> : std::true_type {};
+
+template <TransformStoreMode Mode, typename Inner>
+struct IsIdentityVecTransform<TransformStoreOverride<Mode, Inner>> : IsIdentityVecTransform<Inner> {};
 
 template <typename T>
-inline constexpr bool is_identity_vec_transform_v =
-    IsIdentityVecTransform<std::remove_cvref_t<T>>::value;
+inline constexpr bool is_identity_vec_transform_v = IsIdentityVecTransform<std::remove_cvref_t<T>>::value;
 
 /** Scalar access supports only transforms with an exact scalar definition. */
 template <typename T>
@@ -2863,7 +2897,7 @@ public:
                 tag, result, std::forward<Options>(options)...);
           },
           options...);
-    }
+      }
     }
   }
 
@@ -3152,18 +3186,80 @@ public:
     }
   }
 
-  template <vec::VectorTag Tag, int Dim,
-            typename Mapping = ContiguousLaneMapping>
-    requires (std::same_as<Mapping, ContiguousLaneMapping> ||
-              std::same_as<Mapping, AffineLaneMapping>)
-  VECOPS_INLINE auto scan(
-      Tag tag,
-      Coord<Rank> origin,
-      Axis<Dim>,
-      nint_t count,
-      Mapping mapping = {}) {
-    return ScanCursor<OutputDataAccess, Tag, Dim, Mapping>{
-        *this, tag, origin, count, mapping};
+  /**
+   * Apply a lane-local transform independently to two adjacent compute
+   * vectors, then concatenate only the transformed results for one packed
+   * converting store.  This separates transform width from physical memory
+   * width: backends such as VLA SVE can avoid a P1 transform tuple while still
+   * filling one complete BF16 memory word.
+   *
+   * The two logical vector intervals must be physically adjacent along a
+   * compile-time unit-stride axis.  Fullness is a template property so the
+   * common full/full path retains unmasked transform contexts and store code.
+   */
+  template <bool FirstFull, bool SecondFull, vec::VectorTag Tag, int Dim, typename FirstActive, typename SecondActive>
+    requires std::same_as<vec::ElementOf<Tag>, ComputeType> && (!details::is_no_transform_v<Transform>)
+  VECOPS_ALWAYS_INLINE
+    void store_transform_pair_coalesced(Tag tag, const Coord<Rank>& first_position, const Coord<Rank>& second_position,
+                                        Axis<Dim>, vec::Vec<Tag> first_value, vec::Vec<Tag> second_value,
+                                        FirstActive first_active, SecondActive second_active) const {
+    static_assert(0 <= Dim && Dim < Rank);
+    using StrideMeta = stride_type_t<Dim, typename Spec::OutputLayout>;
+    static_assert(details::is_definitely_one_meta_v<StrideMeta>,
+                  "coalesced transform stores require a unit-stride physical axis");
+    using TransformInTag = vec::Rebind<typename Transform::TIn, Tag>;
+    using TransformOutTag = vec::Rebind<typename Transform::TOut, Tag>;
+    using WideTransformOutTag = vec::Twice<TransformOutTag>;
+
+    const auto apply_one = [&]<typename ActiveOption>(const Coord<Rank>& position, vec::Vec<Tag> value,
+                                                      ActiveOption active) VECOPS_INLINE_LAMBDA {
+      return details::with_transform_context(
+        tag, position, Dim, spec_->projection(),
+        [&](const auto& context) VECOPS_INLINE_LAMBDA {
+          static_assert(details::can_transform_chunk<Transform, Tag, decltype(context)>());
+          const auto transform_input =
+            vec::convert(TransformInTag{}, tag, value, typename Policy::ConversionOrderOption{},
+                         typename Policy::ConversionValueOption{});
+          return spec_->transform()(TransformOutTag{}, transform_input, context);
+        },
+        active);
+    };
+
+    const auto first_transformed = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (FirstFull) {
+        return apply_one(first_position, first_value, vec::opt::unmasked);
+      } else {
+        return apply_one(first_position, first_value, vec::opt::first(static_cast<nint_t>(first_active)));
+      }
+    }();
+    const auto second_transformed = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (SecondFull) {
+        return apply_one(second_position, second_value, vec::opt::unmasked);
+      } else {
+        return apply_one(second_position, second_value, vec::opt::first(static_cast<nint_t>(second_active)));
+      }
+    }();
+    const auto transformed = vec::concat(WideTransformOutTag{}, first_transformed, second_transformed);
+
+    const auto& tensor = spec_->tensor();
+    const nint_t first_base = offset_at(tensor.layout(), first_position);
+    VECOPS_ASSERT(offset_at(tensor.layout(), second_position) - first_base == vec::size(tag),
+                  "coalesced transform vectors must be physically adjacent");
+    const StrideMeta axis_stride{stride<Dim>(tensor.layout())};
+    if constexpr (FirstFull && SecondFull) {
+      details::store_memory<WideTransformOutTag, MemoryElement*, Policy>(WideTransformOutTag{}, data_ + first_base,
+                                                                         transformed, axis_stride, vec::opt::unmasked);
+    } else {
+      details::store_memory<WideTransformOutTag, MemoryElement*, Policy>(
+        WideTransformOutTag{}, data_ + first_base, transformed, axis_stride,
+        vec::opt::first(static_cast<nint_t>(first_active) + static_cast<nint_t>(second_active)));
+    }
+  }
+
+  template <vec::VectorTag Tag, int Dim, typename Mapping = ContiguousLaneMapping>
+    requires(std::same_as<Mapping, ContiguousLaneMapping> || std::same_as<Mapping, AffineLaneMapping>)
+  VECOPS_INLINE auto scan(Tag tag, Coord<Rank> origin, Axis<Dim>, nint_t count, Mapping mapping = {}) {
+    return ScanCursor<OutputDataAccess, Tag, Dim, Mapping>{*this, tag, origin, count, mapping};
   }
 
   template <vec::VectorTag Tag, int Dim, typename Stride>
@@ -5026,11 +5122,16 @@ VECOPS_INLINE decltype(auto) with_bound_output(
   if constexpr (plan == AccessPlan::materialize_before_transform) {
     using Compute = typename Spec::ComputeType;
     Compute* buffer = workspace.template allocate<Compute>(count);
+
+    // A materialized output commits its complete auxiliary extent even when a
+    // caller performs only masked/partial stores.  Keep untouched elements at
+    // the historical zero value without forcing every unrelated scratch
+    // Workspace allocation to be value-initialized.
+    std::fill_n(buffer, static_cast<std::size_t>(count), Compute{});
     auto auxiliary_tensor = make_tensor(buffer, aux_layout);
     auto aux_spec = output<Compute>(auxiliary_tensor);
-    using Access = MaterializedOutputDataAccess<
-        AccessPlan::materialize_before_transform, Spec,
-        decltype(aux_spec), LoweringPolicy, Context>;
+    using Access = MaterializedOutputDataAccess<AccessPlan::materialize_before_transform, Spec, decltype(aux_spec),
+                                                LoweringPolicy, Context>;
     Access access{
         spec, std::move(aux_spec), LoweringPolicy{policy}, context};
     return std::forward<Fn>(fn)(access);
@@ -5038,11 +5139,11 @@ VECOPS_INLINE decltype(auto) with_bound_output(
 
   using Memory = typename Spec::MemoryElement;
   Memory* buffer = workspace.template allocate<Memory>(count);
+  std::fill_n(buffer, static_cast<std::size_t>(count), Memory{});
   auto auxiliary_tensor = make_tensor(buffer, aux_layout);
   using AuxTensor = decltype(auxiliary_tensor);
-  using AuxSpec = OutputSpec<
-      typename Spec::ComputeType, AuxTensor, typename Spec::TransformType,
-      typename Spec::ProjectionType>;
+  using AuxSpec =
+    OutputSpec<typename Spec::ComputeType, AuxTensor, typename Spec::TransformType, typename Spec::ProjectionType>;
   AuxSpec aux_spec{
       auxiliary_tensor, spec.transform(), spec.projection()};
   using Access = MaterializedOutputDataAccess<

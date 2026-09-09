@@ -34,19 +34,24 @@ def default_cache_dir() -> Path:
 
 
 def _tool(explicit: str | os.PathLike[str] | None, environment: str, candidates: tuple[str, ...]) -> Path:
-  """Resolve one executable from an argument, environment variable, or PATH."""
+  """Locate one executable without dereferencing its driver-name symlink.
+
+  Compiler drivers use ``argv[0]`` semantics: resolving ``clang++`` to the
+  underlying ``clang`` binary can suppress automatic C++ runtime linkage.
+  Return an absolute path, but deliberately preserve the selected basename.
+  """
   requested = str(explicit) if explicit is not None else os.environ.get(environment)
   if requested:
     resolved = shutil.which(requested)
     if resolved:
-      return Path(resolved).resolve()
+      return Path(resolved).absolute()
     path = Path(requested).expanduser()
     if path.is_file():
-      return path.resolve()
+      return path.absolute()
     raise FileNotFoundError(f"cannot find {environment} compiler {requested!r}")
   for candidate in candidates:
     if resolved := shutil.which(candidate):
-      return Path(resolved).resolve()
+      return Path(resolved).absolute()
   raise FileNotFoundError(f"cannot find any of {', '.join(candidates)}; pass {environment.lower()}= explicitly")
 
 

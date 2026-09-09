@@ -97,6 +97,22 @@ if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND EXISTS "/proc/cpuinfo")
             "falling back to -march=native")
         set(VECOPS_MAP_ARM_Native "native")
     endif()
+    # This file is normally evaluated in the Vecops subdirectory, while a
+    # generated kernel target is added by its parent project. Preserve the
+    # detected mapping and feature facts in the CMake cache so
+    # VecopsTargetArch.cmake sees the same Native contract across that
+    # directory-scope boundary. Without this, BiSheng clang falls back to bare
+    # -march=native and omits SME even when Linux advertises it.
+    set(VECOPS_MAP_ARM_Native "${VECOPS_MAP_ARM_Native}" CACHE INTERNAL
+        "Detected native ARM architecture spelling" FORCE)
+    set(VECOPS_NATIVE_HAS_SME "${VECOPS_NATIVE_HAS_SME}" CACHE INTERNAL
+        "Native ARM target has SME" FORCE)
+    set(VECOPS_NATIVE_HAS_SME_FA64 "${VECOPS_NATIVE_HAS_SME_FA64}"
+        CACHE INTERNAL "Native ARM target has SME FA64" FORCE)
+    set(VECOPS_NATIVE_HAS_SME_F64F64 "${VECOPS_NATIVE_HAS_SME_F64F64}"
+        CACHE INTERNAL "Native ARM target has SME F64F64" FORCE)
+    set(VECOPS_NATIVE_HAS_I8MM "${VECOPS_NATIVE_HAS_I8MM}" CACHE INTERNAL
+        "Native ARM target has I8MM" FORCE)
     unset(_VECOPS_CPUINFO)
     unset(_VECOPS_FEAT_LINE)
 endif()

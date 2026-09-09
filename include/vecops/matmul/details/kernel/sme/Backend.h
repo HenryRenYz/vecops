@@ -115,16 +115,23 @@ inline constexpr bool is_packed_access_v =
 /// the shape the direct fast loads below are written against.
 template <typename Access>
 inline constexpr bool direct_row_major_input_v =
-    generic::RawDirectAccess<Access> && Access::Rank == 2 &&
-    std::same_as<
-        tensor::stride_type_t<1, InputLayoutOf<Access>>, meta::Const<1>>;
+  generic::RawDirectAccess<Access> && Access::Rank == 2 &&
+  std::same_as<tensor::stride_type_t<1, InputLayoutOf<Access>>, meta::Const<1>>;
+
+template <typename Access>
+inline constexpr bool row_contiguous_input_v =
+  Access::Rank == 2 && std::same_as<tensor::stride_type_t<1, InputLayoutOf<Access>>,
+                                    meta::Const<1>>;
 
 /// Output counterpart of direct_row_major_input_v.
 template <typename Access>
 inline constexpr bool direct_row_major_output_v =
-    generic::RawDirectAccess<Access> && Access::Rank == 2 &&
-    std::same_as<
-        tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
+  generic::RawDirectAccess<Access> && Access::Rank == 2 &&
+  std::same_as<tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
+
+template <typename Access>
+inline constexpr bool row_contiguous_output_v =
+  Access::Rank == 2 && std::same_as<tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
 
 /// Rank-two input whose leading (spatial) axis is contiguous: a
 /// transposed operand as fed to orientation-swapped problems.
@@ -137,8 +144,26 @@ inline constexpr bool column_contiguous_input_v =
 /// C); the store shape produced by orientation-swapped problems.
 template <typename Access>
 inline constexpr bool column_contiguous_output_v =
-    Access::Rank == 2 && std::same_as<
-        tensor::stride_type_t<0, OutputLayoutOf<Access>>, meta::Const<1>>;
+  Access::Rank == 2 && std::same_as<tensor::stride_type_t<0, OutputLayoutOf<Access>>, meta::Const<1>>;
+
+/**
+ * SME's backend-local automatic transform/store policy.  BiSheng 5.1 on the
+ * tested 64-byte target currently favors narrow stores; explicit transform
+ * wrappers can still force a wide transform or split-transform coalescing.
+ */
+template <typename Access>
+inline constexpr tensor::TransformStoreMode transform_store_mode_v = [] {
+  constexpr auto requested = tensor::transform_store_mode_v<typename Access::Transform>;
+  if constexpr (requested == tensor::TransformStoreMode::automatic)
+    return tensor::TransformStoreMode::narrow;
+  else
+    return requested;
+}();
+
+template <typename Access>
+inline constexpr bool transform_store_groups_tiles_v =
+  transform_store_mode_v<Access> == tensor::TransformStoreMode::wide_transform ||
+  transform_store_mode_v<Access> == tensor::TransformStoreMode::coalesced;
 
 /// Raw-pointer, rank-two, column-contiguous output: eligible for the
 /// direct vertical ZA store path (write/read_column below).
@@ -2571,12 +2596,146 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
   }
 }
 
-template <int Tile, bool FullM, bool FullN,
-          meta::ValueType ActiveM, meta::ValueType ActiveN,
-          typename CInput, typename AccInput, typename Route>
-VECOPS_ALWAYS_INLINE void initialize_c_tile_routed(
-    const CInput& c_input, const AccInput& acc_input, const Route& route,
-    nint_t m, nint_t n, ActiveM active_m, ActiveN active_n) {
+template <int LeftTile, int RightTile, bool FullM, bool FullLeftN, bool FullRightN, meta::ValueType ActiveM,
+          meta::ValueType LeftActiveN, meta::ValueType RightActiveN, typename CInput>
+VECOPS_ALWAYS_INLINE void initialize_c_tile_row_pair(const CInput& input, nint_t m, nint_t n, ActiveM active_m,
+                                                     LeftActiveN left_active_n, RightActiveN right_active_n) {
+  using T = typename CInput::ComputeType;
+  if constexpr (IsZeroTransform<typename CInput::Transform>::value)
+    return;
+  using Tag = vec::ScalableTag<T, 0>;
+  using WideTag = vec::Twice<Tag>;
+  static_assert(tensor::preferred_memory_access_power_v<CInput> > 0);
+  const nint_t active_m_value = static_cast<nint_t>(active_m);
+  const nint_t left_n = static_cast<nint_t>(left_active_n);
+  const nint_t right_n = static_cast<nint_t>(right_active_n);
+  const nint_t active_n = left_n + right_n;
+  const auto left_pg = FullLeftN ? vec::mtrue(Tag{}) : vec::mwhilelt(Tag{}, nint_t{0}, left_n);
+  const auto right_pg = FullRightN ? vec::mtrue(Tag{}) : vec::mwhilelt(Tag{}, nint_t{0}, right_n);
+  for (nint_t row = 0; row < active_m_value; ++row) {
+    const auto value = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (FullLeftN && FullRightN) {
+        return input.load(WideTag{}, tensor::coord(m + row, n), tensor::axis<1>);
+      } else {
+        return input.load(WideTag{}, tensor::coord(m + row, n), tensor::axis<1>, vec::opt::first(active_n),
+                          vec::opt::zero);
+      }
+    }();
+    write_row<LeftTile, T>(static_cast<uint32_t>(row), left_pg, vec::lower(WideTag{}, value));
+    write_row<RightTile, T>(static_cast<uint32_t>(row), right_pg, vec::upper(WideTag{}, value));
+  }
+}
+
+template <int TopTile, int BottomTile, bool FullTopM, bool FullBottomM, bool FullN, meta::ValueType TopActiveM,
+          meta::ValueType BottomActiveM, meta::ValueType ActiveN, typename CInput>
+VECOPS_ALWAYS_INLINE void initialize_c_tile_column_pair(const CInput& input, nint_t m, nint_t n,
+                                                        TopActiveM top_active_m, BottomActiveM bottom_active_m,
+                                                        ActiveN active_n) {
+  using T = typename CInput::ComputeType;
+  if constexpr (IsZeroTransform<typename CInput::Transform>::value)
+    return;
+  using Tag = vec::ScalableTag<T, 0>;
+  using WideTag = vec::Twice<Tag>;
+  static_assert(tensor::preferred_memory_access_power_v<CInput> > 0);
+  const nint_t top_m = static_cast<nint_t>(top_active_m);
+  const nint_t bottom_m = static_cast<nint_t>(bottom_active_m);
+  const nint_t active_m = top_m + bottom_m;
+  const nint_t active_n_value = static_cast<nint_t>(active_n);
+  const auto top_pg = FullTopM ? vec::mtrue(Tag{}) : vec::mwhilelt(Tag{}, nint_t{0}, top_m);
+  const auto bottom_pg = FullBottomM ? vec::mtrue(Tag{}) : vec::mwhilelt(Tag{}, nint_t{0}, bottom_m);
+  for (nint_t column = 0; column < active_n_value; ++column) {
+    const auto value = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (FullTopM && FullBottomM) {
+        return input.load(WideTag{}, tensor::coord(m, n + column), tensor::axis<0>);
+      } else {
+        return input.load(WideTag{}, tensor::coord(m, n + column), tensor::axis<0>, vec::opt::first(active_m),
+                          vec::opt::zero);
+      }
+    }();
+    write_column<TopTile, T>(static_cast<uint32_t>(column), top_pg, vec::lower(WideTag{}, value));
+    write_column<BottomTile, T>(static_cast<uint32_t>(column), bottom_pg, vec::upper(WideTag{}, value));
+  }
+}
+
+template <int LeftTile, int RightTile, bool FullM, bool FullLeftN, bool FullRightN, meta::ValueType ActiveM,
+          meta::ValueType LeftActiveN, meta::ValueType RightActiveN, typename COutput>
+VECOPS_ALWAYS_INLINE void store_c_tile_row_pair(COutput& output, nint_t m, nint_t n, ActiveM active_m,
+                                                LeftActiveN left_active_n, RightActiveN right_active_n) {
+  using T = typename COutput::ComputeType;
+  using Tag = vec::ScalableTag<T, 0>;
+  using WideTag = vec::Twice<Tag>;
+  static_assert(tensor::preferred_memory_access_power_v<COutput> > 0);
+  const nint_t active_m_value = static_cast<nint_t>(active_m);
+  const nint_t left_n = static_cast<nint_t>(left_active_n);
+  const nint_t right_n = static_cast<nint_t>(right_active_n);
+  const nint_t active_n = left_n + right_n;
+  const auto left_pg = FullLeftN ? vec::mtrue(Tag{}) : vec::mwhilelt(Tag{}, nint_t{0}, left_n);
+  const auto right_pg = FullRightN ? vec::mtrue(Tag{}) : vec::mwhilelt(Tag{}, nint_t{0}, right_n);
+  for (nint_t row = 0; row < active_m_value; ++row) {
+    const auto left = static_cast<vec::Vec<Tag>>(read_row<LeftTile, T>(static_cast<uint32_t>(row), left_pg));
+    const auto right = static_cast<vec::Vec<Tag>>(read_row<RightTile, T>(static_cast<uint32_t>(row), right_pg));
+    if constexpr (transform_store_mode_v<COutput> == tensor::TransformStoreMode::coalesced) {
+      static_assert(requires {
+        output.template store_transform_pair_coalesced<FullLeftN, FullRightN>(
+          Tag{}, tensor::coord(m + row, n), tensor::coord(m + row, n + vec::size(Tag{})), tensor::axis<1>, left, right,
+          left_active_n, right_active_n);
+      });
+      output.template store_transform_pair_coalesced<FullLeftN, FullRightN>(
+        Tag{}, tensor::coord(m + row, n), tensor::coord(m + row, n + vec::size(Tag{})), tensor::axis<1>, left, right,
+        left_active_n, right_active_n);
+    } else {
+      const auto value = vec::concat(WideTag{}, left, right);
+      if constexpr (FullLeftN && FullRightN) {
+        output.store(WideTag{}, tensor::coord(m + row, n), tensor::axis<1>, value);
+      } else {
+        output.store(WideTag{}, tensor::coord(m + row, n), tensor::axis<1>, value, vec::opt::first(active_n));
+      }
+    }
+  }
+}
+
+template <int TopTile, int BottomTile, bool FullTopM, bool FullBottomM, bool FullN, meta::ValueType TopActiveM,
+          meta::ValueType BottomActiveM, meta::ValueType ActiveN, typename COutput>
+VECOPS_ALWAYS_INLINE void store_c_tile_column_pair(COutput& output, nint_t m, nint_t n, TopActiveM top_active_m,
+                                                   BottomActiveM bottom_active_m, ActiveN active_n) {
+  using T = typename COutput::ComputeType;
+  using Tag = vec::ScalableTag<T, 0>;
+  using WideTag = vec::Twice<Tag>;
+  static_assert(tensor::preferred_memory_access_power_v<COutput> > 0);
+  const nint_t top_m = static_cast<nint_t>(top_active_m);
+  const nint_t bottom_m = static_cast<nint_t>(bottom_active_m);
+  const nint_t active_m = top_m + bottom_m;
+  const nint_t active_n_value = static_cast<nint_t>(active_n);
+  const auto top_pg = FullTopM ? vec::mtrue(Tag{}) : vec::mwhilelt(Tag{}, nint_t{0}, top_m);
+  const auto bottom_pg = FullBottomM ? vec::mtrue(Tag{}) : vec::mwhilelt(Tag{}, nint_t{0}, bottom_m);
+  for (nint_t column = 0; column < active_n_value; ++column) {
+    const auto top = static_cast<vec::Vec<Tag>>(read_column<TopTile, T>(static_cast<uint32_t>(column), top_pg));
+    const auto bottom =
+      static_cast<vec::Vec<Tag>>(read_column<BottomTile, T>(static_cast<uint32_t>(column), bottom_pg));
+    if constexpr (transform_store_mode_v<COutput> == tensor::TransformStoreMode::coalesced) {
+      static_assert(requires {
+        output.template store_transform_pair_coalesced<FullTopM, FullBottomM>(
+          Tag{}, tensor::coord(m, n + column), tensor::coord(m + vec::size(Tag{}), n + column), tensor::axis<0>, top,
+          bottom, top_active_m, bottom_active_m);
+      });
+      output.template store_transform_pair_coalesced<FullTopM, FullBottomM>(
+        Tag{}, tensor::coord(m, n + column), tensor::coord(m + vec::size(Tag{}), n + column), tensor::axis<0>, top,
+        bottom, top_active_m, bottom_active_m);
+    } else {
+      const auto value = vec::concat(WideTag{}, top, bottom);
+      if constexpr (FullTopM && FullBottomM) {
+        output.store(WideTag{}, tensor::coord(m, n + column), tensor::axis<0>, value);
+      } else {
+        output.store(WideTag{}, tensor::coord(m, n + column), tensor::axis<0>, value, vec::opt::first(active_m));
+      }
+    }
+  }
+}
+
+template <int Tile, bool FullM, bool FullN, meta::ValueType ActiveM, meta::ValueType ActiveN, typename CInput,
+          typename AccInput, typename Route>
+VECOPS_ALWAYS_INLINE void initialize_c_tile_routed(const CInput& c_input, const AccInput& acc_input, const Route& route,
+                                                   nint_t m, nint_t n, ActiveM active_m, ActiveN active_n) {
   static_assert(std::same_as<
       typename CInput::ComputeType, typename AccInput::ComputeType>);
   if constexpr (matmul_details::static_accumulator_route_v<Route>) {
@@ -2613,11 +2772,121 @@ VECOPS_ALWAYS_INLINE void store_c_tile_routed(
           c_output, m, n, active_m, active_n);
   } else {
     if (route.write_accumulator_output)
-      store_c_tile<Tile, FullM, FullN>(
-          acc_output, m, n, active_m, active_n);
+      store_c_tile<Tile, FullM, FullN>(acc_output, m, n, active_m, active_n);
     else
-      store_c_tile<Tile, FullM, FullN>(
-          c_output, m, n, active_m, active_n);
+      store_c_tile<Tile, FullM, FullN>(c_output, m, n, active_m, active_n);
+  }
+}
+
+template <int LeftTile, int RightTile, bool FullM, bool FullLeftN, bool FullRightN, meta::ValueType ActiveM,
+          meta::ValueType LeftActiveN, meta::ValueType RightActiveN, typename CInput, typename AccInput, typename Route>
+VECOPS_ALWAYS_INLINE void initialize_c_tile_row_pair_routed(const CInput& c_input, const AccInput& acc_input,
+                                                            const Route& route, nint_t m, nint_t n, ActiveM active_m,
+                                                            LeftActiveN left_active_n, RightActiveN right_active_n,
+                                                            nint_t lanes) {
+  auto initialize = [&]<typename Input>(const Input& input) VECOPS_INLINE_LAMBDA {
+    if constexpr (tensor::preferred_memory_access_power_v<Input> > 0) {
+      initialize_c_tile_row_pair<LeftTile, RightTile, FullM, FullLeftN, FullRightN>(input, m, n, active_m,
+                                                                                    left_active_n, right_active_n);
+    } else {
+      initialize_c_tile<LeftTile, FullM, FullLeftN>(input, m, n, active_m, left_active_n);
+      initialize_c_tile<RightTile, FullM, FullRightN>(input, m, n + lanes, active_m, right_active_n);
+    }
+  };
+  if constexpr (matmul_details::static_accumulator_route_v<Route>) {
+    if constexpr (Route::use_accumulator_input)
+      initialize(acc_input);
+    else
+      initialize(c_input);
+  } else {
+    if (route.use_accumulator_input)
+      initialize(acc_input);
+    else
+      initialize(c_input);
+  }
+}
+
+template <int TopTile, int BottomTile, bool FullTopM, bool FullBottomM, bool FullN, meta::ValueType TopActiveM,
+          meta::ValueType BottomActiveM, meta::ValueType ActiveN, typename CInput, typename AccInput, typename Route>
+VECOPS_ALWAYS_INLINE void initialize_c_tile_column_pair_routed(const CInput& c_input, const AccInput& acc_input,
+                                                               const Route& route, nint_t m, nint_t n,
+                                                               TopActiveM top_active_m, BottomActiveM bottom_active_m,
+                                                               ActiveN active_n, nint_t lanes) {
+  auto initialize = [&]<typename Input>(const Input& input) VECOPS_INLINE_LAMBDA {
+    if constexpr (tensor::preferred_memory_access_power_v<Input> > 0) {
+      initialize_c_tile_column_pair<TopTile, BottomTile, FullTopM, FullBottomM, FullN>(input, m, n, top_active_m,
+                                                                                       bottom_active_m, active_n);
+    } else {
+      initialize_c_tile<TopTile, FullTopM, FullN>(input, m, n, top_active_m, active_n);
+      initialize_c_tile<BottomTile, FullBottomM, FullN>(input, m + lanes, n, bottom_active_m, active_n);
+    }
+  };
+  if constexpr (matmul_details::static_accumulator_route_v<Route>) {
+    if constexpr (Route::use_accumulator_input)
+      initialize(acc_input);
+    else
+      initialize(c_input);
+  } else {
+    if (route.use_accumulator_input)
+      initialize(acc_input);
+    else
+      initialize(c_input);
+  }
+}
+
+template <int LeftTile, int RightTile, bool FullM, bool FullLeftN, bool FullRightN, meta::ValueType ActiveM,
+          meta::ValueType LeftActiveN, meta::ValueType RightActiveN, typename COutput, typename AccOutput,
+          typename Route>
+VECOPS_ALWAYS_INLINE void store_c_tile_row_pair_routed(COutput& c_output, AccOutput& acc_output, const Route& route,
+                                                       nint_t m, nint_t n, ActiveM active_m, LeftActiveN left_active_n,
+                                                       RightActiveN right_active_n, nint_t lanes) {
+  auto store = [&]<typename Output>(Output& output) VECOPS_INLINE_LAMBDA {
+    if constexpr (tensor::preferred_memory_access_power_v<Output> > 0 && transform_store_groups_tiles_v<Output>) {
+      store_c_tile_row_pair<LeftTile, RightTile, FullM, FullLeftN, FullRightN>(output, m, n, active_m, left_active_n,
+                                                                               right_active_n);
+    } else {
+      store_c_tile<LeftTile, FullM, FullLeftN>(output, m, n, active_m, left_active_n);
+      store_c_tile<RightTile, FullM, FullRightN>(output, m, n + lanes, active_m, right_active_n);
+    }
+  };
+  if constexpr (matmul_details::static_accumulator_route_v<Route>) {
+    if constexpr (Route::write_accumulator_output)
+      store(acc_output);
+    else
+      store(c_output);
+  } else {
+    if (route.write_accumulator_output)
+      store(acc_output);
+    else
+      store(c_output);
+  }
+}
+
+template <int TopTile, int BottomTile, bool FullTopM, bool FullBottomM, bool FullN, meta::ValueType TopActiveM,
+          meta::ValueType BottomActiveM, meta::ValueType ActiveN, typename COutput, typename AccOutput, typename Route>
+VECOPS_ALWAYS_INLINE void store_c_tile_column_pair_routed(COutput& c_output, AccOutput& acc_output, const Route& route,
+                                                          nint_t m, nint_t n, TopActiveM top_active_m,
+                                                          BottomActiveM bottom_active_m, ActiveN active_n,
+                                                          nint_t lanes) {
+  auto store = [&]<typename Output>(Output& output) VECOPS_INLINE_LAMBDA {
+    if constexpr (tensor::preferred_memory_access_power_v<Output> > 0 && transform_store_groups_tiles_v<Output>) {
+      store_c_tile_column_pair<TopTile, BottomTile, FullTopM, FullBottomM, FullN>(output, m, n, top_active_m,
+                                                                                  bottom_active_m, active_n);
+    } else {
+      store_c_tile<TopTile, FullTopM, FullN>(output, m, n, top_active_m, active_n);
+      store_c_tile<BottomTile, FullBottomM, FullN>(output, m + lanes, n, bottom_active_m, active_n);
+    }
+  };
+  if constexpr (matmul_details::static_accumulator_route_v<Route>) {
+    if constexpr (Route::write_accumulator_output)
+      store(acc_output);
+    else
+      store(c_output);
+  } else {
+    if (route.write_accumulator_output)
+      store(acc_output);
+    else
+      store(c_output);
   }
 }
 
@@ -2784,33 +3053,95 @@ VECOPS_ALWAYS_INLINE void microkernel_body_routed(
   constexpr int Outputs = NM * NN;
   constexpr bool FastPacked = Plan::value;
   constexpr bool PrefetchLargeWorkingSet =
-      Plan::prefetch_large_working_set &&
-      std::same_as<Atom, ::vecops::matmul::SME_BF16F32> && NM == 2 && NN == 2;
+    Plan::prefetch_large_working_set && std::same_as<Atom, ::vecops::matmul::SME_BF16F32> && NM == 2 && NN == 2;
+
+  // VLA SVE input/prologue transforms still pay for P1 tuple splitting, so
+  // keep that side narrow. The output pair machinery can use either one P1
+  // transform or two independent P0 calls followed by one coalesced store,
+  // but the backend default remains narrow until either is profitable. An
+  // explicit transform-store override still takes priority.
+  constexpr bool EnableWideCInputGrouping = false;
   const nint_t lanes = static_cast<nint_t>(Atom::M_R);
   vec::details::sme::zero_za();
   const OperandInvariants<Atom, ::vecops::matmul::Operand::A, A> a_invariants(a);
   const OperandInvariants<Atom, ::vecops::matmul::Operand::B, B> b_invariants(b);
-  [&]<std::size_t... I>(std::index_sequence<I...>)
-      VECOPS_INLINE_LAMBDA {
-    (initialize_c_tile_routed<
-         static_cast<int>(I),
-         FullM || (ExactBlocks && I / NN + 1 < NM),
-         FullN || (ExactBlocks && I % NN + 1 < NN)>(
-         c_input, acc_input, route,
-         m + static_cast<nint_t>(I / NN) * lanes,
-         n + static_cast<nint_t>(I % NN) * lanes,
-         tile_active_extent<
-             Atom,
-             FullM || (ExactBlocks && I / NN + 1 < NM),
-             FullM || ExactBlocks,
-             static_cast<int>(I / NN)>(active_m),
-         tile_active_extent<
-             Atom,
-             FullN || (ExactBlocks && I % NN + 1 < NN),
-             FullN || ExactBlocks,
-             static_cast<int>(I % NN)>(active_n)), ...);
-  }(std::make_index_sequence<Outputs>{});
 
+  auto initialize_tile = [&]<std::size_t I>() VECOPS_INLINE_LAMBDA {
+    initialize_c_tile_routed<static_cast<int>(I), FullM || (ExactBlocks && I / NN + 1 < NM),
+                             FullN || (ExactBlocks && I % NN + 1 < NN)>(
+      c_input, acc_input, route, m + static_cast<nint_t>(I / NN) * lanes, n + static_cast<nint_t>(I % NN) * lanes,
+      tile_active_extent < Atom, FullM || (ExactBlocks && I / NN + 1 < NM), FullM || ExactBlocks,
+      static_cast<int>(I / NN) > (active_m), tile_active_extent < Atom, FullN || (ExactBlocks && I % NN + 1 < NN),
+      FullN || ExactBlocks, static_cast<int>(I % NN) > (active_n));
+  };
+  constexpr bool GroupCInputRows =
+    EnableWideCInputGrouping && NN >= 2 && row_contiguous_input_v<CInput> && row_contiguous_input_v<AccInput> &&
+    ((!IsZeroTransform<typename CInput::Transform>::value && tensor::preferred_memory_access_power_v<CInput> > 0) ||
+     (!IsZeroTransform<typename AccInput::Transform>::value && tensor::preferred_memory_access_power_v<AccInput> > 0));
+  constexpr bool GroupCInputColumns =
+    EnableWideCInputGrouping && NM >= 2 && column_contiguous_input_v<CInput> && column_contiguous_input_v<AccInput> &&
+    ((!IsZeroTransform<typename CInput::Transform>::value && tensor::preferred_memory_access_power_v<CInput> > 0) ||
+     (!IsZeroTransform<typename AccInput::Transform>::value && tensor::preferred_memory_access_power_v<AccInput> > 0));
+  if constexpr (GroupCInputColumns) {
+    auto initialize_column_pair = [&]<std::size_t Pair, std::size_t Column>() VECOPS_INLINE_LAMBDA {
+      constexpr std::size_t TopRow = 2 * Pair;
+      constexpr std::size_t BottomRow = TopRow + 1;
+      constexpr std::size_t Top = TopRow * NN + Column;
+      constexpr std::size_t Bottom = BottomRow * NN + Column;
+      initialize_c_tile_column_pair_routed<
+        static_cast<int>(Top), static_cast<int>(Bottom), FullM || (ExactBlocks && TopRow + 1 < NM),
+        FullM || (ExactBlocks && BottomRow + 1 < NM), FullN || (ExactBlocks && Column + 1 < NN)>(
+        c_input, acc_input, route, m + static_cast<nint_t>(TopRow) * lanes, n + static_cast<nint_t>(Column) * lanes,
+        tile_active_extent < Atom, FullM || (ExactBlocks && TopRow + 1 < NM), FullM || ExactBlocks,
+        static_cast<int>(TopRow) > (active_m), tile_active_extent < Atom, FullM || (ExactBlocks && BottomRow + 1 < NM),
+        FullM || ExactBlocks, static_cast<int>(BottomRow) > (active_m), tile_active_extent < Atom,
+        FullN || (ExactBlocks && Column + 1 < NN), FullN || ExactBlocks, static_cast<int>(Column) > (active_n), lanes);
+    };
+    auto initialize_pair_columns = [&]<std::size_t Pair>() VECOPS_INLINE_LAMBDA {
+      [&]<std::size_t... Column>(std::index_sequence<Column...>) VECOPS_INLINE_LAMBDA {
+        (initialize_column_pair.template operator()<Pair, Column>(), ...);
+      }(std::make_index_sequence<NN>{});
+    };
+    [&]<std::size_t... Pair>(std::index_sequence<Pair...>) VECOPS_INLINE_LAMBDA {
+      (initialize_pair_columns.template operator()<Pair>(), ...);
+    }(std::make_index_sequence<NM / 2>{});
+    if constexpr (NM % 2 != 0) {
+      [&]<std::size_t... Column>(std::index_sequence<Column...>) VECOPS_INLINE_LAMBDA {
+        (initialize_tile.template operator()<(NM - 1) * NN + Column>(), ...);
+      }(std::make_index_sequence<NN>{});
+    }
+  } else if constexpr (GroupCInputRows) {
+    auto initialize_row_pair = [&]<std::size_t Row, std::size_t Pair>() VECOPS_INLINE_LAMBDA {
+      constexpr std::size_t LeftColumn = 2 * Pair;
+      constexpr std::size_t RightColumn = LeftColumn + 1;
+      constexpr std::size_t Left = Row * NN + LeftColumn;
+      constexpr std::size_t Right = Left + 1;
+      initialize_c_tile_row_pair_routed<
+        static_cast<int>(Left), static_cast<int>(Right), FullM || (ExactBlocks && Row + 1 < NM),
+        FullN || (ExactBlocks && LeftColumn + 1 < NN), FullN || (ExactBlocks && RightColumn + 1 < NN)>(
+        c_input, acc_input, route, m + static_cast<nint_t>(Row) * lanes, n + static_cast<nint_t>(LeftColumn) * lanes,
+        tile_active_extent < Atom, FullM || (ExactBlocks && Row + 1 < NM), FullM || ExactBlocks,
+        static_cast<int>(Row) > (active_m), tile_active_extent < Atom, FullN || (ExactBlocks && LeftColumn + 1 < NN),
+        FullN || ExactBlocks, static_cast<int>(LeftColumn) > (active_n), tile_active_extent < Atom,
+        FullN || (ExactBlocks && RightColumn + 1 < NN), FullN || ExactBlocks,
+        static_cast<int>(RightColumn) > (active_n), lanes);
+    };
+    auto initialize_row_pairs = [&]<std::size_t Row>() VECOPS_INLINE_LAMBDA {
+      [&]<std::size_t... Pair>(std::index_sequence<Pair...>) VECOPS_INLINE_LAMBDA {
+        (initialize_row_pair.template operator()<Row, Pair>(), ...);
+      }(std::make_index_sequence<NN / 2>{});
+    };
+    [&]<std::size_t... Row>(std::index_sequence<Row...>)
+      VECOPS_INLINE_LAMBDA { (initialize_row_pairs.template operator()<Row>(), ...); }(std::make_index_sequence<NM>{});
+    if constexpr (NN % 2 != 0) {
+      [&]<std::size_t... Row>(std::index_sequence<Row...>) VECOPS_INLINE_LAMBDA {
+        (initialize_tile.template operator()<Row * NN + NN - 1>(), ...);
+      }(std::make_index_sequence<NM>{});
+    }
+  } else {
+    [&]<std::size_t... I>(std::index_sequence<I...>)
+      VECOPS_INLINE_LAMBDA { (initialize_tile.template operator()<I>(), ...); }(std::make_index_sequence<Outputs>{});
+  }
   auto compute_generic = [&]() VECOPS_INLINE_LAMBDA {
     constexpr nint_t KP = ::vecops::matmul::packing_t<Atom, ::vecops::matmul::Operand::A>::KPack;
     // K-group dispatch: KP==1 and the 16-bit atoms split the K walk into a
@@ -2871,35 +3202,89 @@ VECOPS_ALWAYS_INLINE void microkernel_body_routed(
     compute_generic();
   }
 
-  [&]<std::size_t... I>(std::index_sequence<I...>)
-      VECOPS_INLINE_LAMBDA {
-    (store_c_tile_routed<
-         static_cast<int>(I),
-         FullM || (ExactBlocks && I / NN + 1 < NM),
-         FullN || (ExactBlocks && I % NN + 1 < NN)>(
-         c_output, acc_output, route,
-         m + static_cast<nint_t>(I / NN) * lanes,
-         n + static_cast<nint_t>(I % NN) * lanes,
-         tile_active_extent<
-             Atom,
-             FullM || (ExactBlocks && I / NN + 1 < NM),
-             FullM || ExactBlocks,
-             static_cast<int>(I / NN)>(active_m),
-         tile_active_extent<
-             Atom,
-             FullN || (ExactBlocks && I % NN + 1 < NN),
-             FullN || ExactBlocks,
-             static_cast<int>(I % NN)>(active_n)), ...);
-  }(std::make_index_sequence<Outputs>{});
+  auto store_tile = [&]<std::size_t I>() VECOPS_INLINE_LAMBDA {
+    store_c_tile_routed<static_cast<int>(I), FullM || (ExactBlocks && I / NN + 1 < NM),
+                        FullN || (ExactBlocks && I % NN + 1 < NN)>(
+      c_output, acc_output, route, m + static_cast<nint_t>(I / NN) * lanes, n + static_cast<nint_t>(I % NN) * lanes,
+      tile_active_extent < Atom, FullM || (ExactBlocks && I / NN + 1 < NM), FullM || ExactBlocks,
+      static_cast<int>(I / NN) > (active_m), tile_active_extent < Atom, FullN || (ExactBlocks && I % NN + 1 < NN),
+      FullN || ExactBlocks, static_cast<int>(I % NN) > (active_n));
+  };
+  constexpr bool GroupCOutputRows =
+    NN >= 2 && row_contiguous_output_v<COutput> && row_contiguous_output_v<AccOutput> &&
+    ((tensor::preferred_memory_access_power_v<COutput> > 0 && transform_store_groups_tiles_v<COutput>) ||
+     (tensor::preferred_memory_access_power_v<AccOutput> > 0 && transform_store_groups_tiles_v<AccOutput>));
+  constexpr bool GroupCOutputColumns =
+    NM >= 2 && column_contiguous_output_v<COutput> && column_contiguous_output_v<AccOutput> &&
+    ((tensor::preferred_memory_access_power_v<COutput> > 0 && transform_store_groups_tiles_v<COutput>) ||
+     (tensor::preferred_memory_access_power_v<AccOutput> > 0 && transform_store_groups_tiles_v<AccOutput>));
+  if constexpr (GroupCOutputColumns) {
+    auto store_column_pair = [&]<std::size_t Pair, std::size_t Column>() VECOPS_INLINE_LAMBDA {
+      constexpr std::size_t TopRow = 2 * Pair;
+      constexpr std::size_t BottomRow = TopRow + 1;
+      constexpr std::size_t Top = TopRow * NN + Column;
+      constexpr std::size_t Bottom = BottomRow * NN + Column;
+      store_c_tile_column_pair_routed<
+        static_cast<int>(Top), static_cast<int>(Bottom), FullM || (ExactBlocks && TopRow + 1 < NM),
+        FullM || (ExactBlocks && BottomRow + 1 < NM), FullN || (ExactBlocks && Column + 1 < NN)>(
+        c_output, acc_output, route, m + static_cast<nint_t>(TopRow) * lanes, n + static_cast<nint_t>(Column) * lanes,
+        tile_active_extent < Atom, FullM || (ExactBlocks && TopRow + 1 < NM), FullM || ExactBlocks,
+        static_cast<int>(TopRow) > (active_m), tile_active_extent < Atom, FullM || (ExactBlocks && BottomRow + 1 < NM),
+        FullM || ExactBlocks, static_cast<int>(BottomRow) > (active_m), tile_active_extent < Atom,
+        FullN || (ExactBlocks && Column + 1 < NN), FullN || ExactBlocks, static_cast<int>(Column) > (active_n), lanes);
+    };
+    auto store_pair_columns = [&]<std::size_t Pair>() VECOPS_INLINE_LAMBDA {
+      [&]<std::size_t... Column>(std::index_sequence<Column...>) VECOPS_INLINE_LAMBDA {
+        (store_column_pair.template operator()<Pair, Column>(), ...);
+      }(std::make_index_sequence<NN>{});
+    };
+    [&]<std::size_t... Pair>(std::index_sequence<Pair...>) VECOPS_INLINE_LAMBDA {
+      (store_pair_columns.template operator()<Pair>(), ...);
+    }(std::make_index_sequence<NM / 2>{});
+    if constexpr (NM % 2 != 0) {
+      [&]<std::size_t... Column>(std::index_sequence<Column...>) VECOPS_INLINE_LAMBDA {
+        (store_tile.template operator()<(NM - 1) * NN + Column>(), ...);
+      }(std::make_index_sequence<NN>{});
+    }
+  } else if constexpr (GroupCOutputRows) {
+    auto store_row_pair = [&]<std::size_t Row, std::size_t Pair>() VECOPS_INLINE_LAMBDA {
+      constexpr std::size_t LeftColumn = 2 * Pair;
+      constexpr std::size_t RightColumn = LeftColumn + 1;
+      constexpr std::size_t Left = Row * NN + LeftColumn;
+      constexpr std::size_t Right = Left + 1;
+      store_c_tile_row_pair_routed<
+        static_cast<int>(Left), static_cast<int>(Right), FullM || (ExactBlocks && Row + 1 < NM),
+        FullN || (ExactBlocks && LeftColumn + 1 < NN), FullN || (ExactBlocks && RightColumn + 1 < NN)>(
+        c_output, acc_output, route, m + static_cast<nint_t>(Row) * lanes, n + static_cast<nint_t>(LeftColumn) * lanes,
+        tile_active_extent < Atom, FullM || (ExactBlocks && Row + 1 < NM), FullM || ExactBlocks,
+        static_cast<int>(Row) > (active_m), tile_active_extent < Atom, FullN || (ExactBlocks && LeftColumn + 1 < NN),
+        FullN || ExactBlocks, static_cast<int>(LeftColumn) > (active_n), tile_active_extent < Atom,
+        FullN || (ExactBlocks && RightColumn + 1 < NN), FullN || ExactBlocks,
+        static_cast<int>(RightColumn) > (active_n), lanes);
+    };
+    auto store_row_pairs = [&]<std::size_t Row>() VECOPS_INLINE_LAMBDA {
+      [&]<std::size_t... Pair>(std::index_sequence<Pair...>) VECOPS_INLINE_LAMBDA {
+        (store_row_pair.template operator()<Row, Pair>(), ...);
+      }(std::make_index_sequence<NN / 2>{});
+    };
+    [&]<std::size_t... Row>(std::index_sequence<Row...>)
+      VECOPS_INLINE_LAMBDA { (store_row_pairs.template operator()<Row>(), ...); }(std::make_index_sequence<NM>{});
+    if constexpr (NN % 2 != 0) {
+      [&]<std::size_t... Row>(std::index_sequence<Row...>) VECOPS_INLINE_LAMBDA {
+        (store_tile.template operator()<Row * NN + NN - 1>(), ...);
+      }(std::make_index_sequence<NM>{});
+    }
+  } else {
+    [&]<std::size_t... I>(std::index_sequence<I...>)
+      VECOPS_INLINE_LAMBDA { (store_tile.template operator()<I>(), ...); }(std::make_index_sequence<Outputs>{});
+  }
 }
 
-template <::vecops::matmul::Atom Atom, typename Plan, int NM, int NN,
-          bool FullM, bool FullN, bool ExactBlocks,
+template <::vecops::matmul::Atom Atom, typename Plan, int NM, int NN, bool FullM, bool FullN, bool ExactBlocks,
           typename A, typename B, typename CInput, typename COutput>
-VECOPS_ALWAYS_INLINE void microkernel_body(
-    const A& a, const B& b, const CInput& c_input, COutput& c_output,
-    nint_t logical_m, nint_t logical_n, nint_t logical_k,
-    nint_t m, nint_t n, nint_t active_m, nint_t active_n) {
+VECOPS_ALWAYS_INLINE void microkernel_body(const A& a, const B& b, const CInput& c_input, COutput& c_output,
+                                           nint_t logical_m, nint_t logical_n, nint_t logical_k, nint_t m, nint_t n,
+                                           nint_t active_m, nint_t active_n) {
   microkernel_body_routed<
       Atom, Plan, NM, NN, FullM, FullN, ExactBlocks>(
       a, b, c_input, c_output, c_input, c_output,

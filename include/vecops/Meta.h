@@ -217,7 +217,9 @@ struct Value {
    * Check whether a compile-time value `v` satisfies this type's constraints
    * (e.g., alignment, bounds).
    */
-  static constexpr bool conforms(nint_t v) { return false; }
+  static constexpr bool conforms(nint_t v) {
+    return false;
+  }
 
   /**
    * Check whether **every** possible runtime value of this type is guaranteed
@@ -227,7 +229,9 @@ struct Value {
    * @note `false` does **not** mean a specific instance is misaligned
    *       (use `is_aligned()` for that).
    */
-  static constexpr bool aligns(nint_t v) { return false; }
+  static constexpr bool aligns(nint_t v) {
+    return false;
+  }
 
   /**
    * Check whether **this specific instance's** runtime value is divisible by `v`.
@@ -235,10 +239,14 @@ struct Value {
    * @note `aligns(v)` may return `false` while `is_aligned(v)` returns `true`
    *       (e.g., `Any{4}.is_aligned(4) == true` whereas `Any::aligns(4) == false`).
    */
-  bool is_aligned(nint_t v) { return false; }
+  bool is_aligned(nint_t v) {
+    return false;
+  }
 
   /// Convert to raw `nint_t`. Default implementation returns an invalid sentinel.
-  constexpr operator nint_t() const { return -100; }
+  constexpr operator nint_t() const {
+    return -100;
+  }
 }; // struct Value
 
 template <typename T>
@@ -275,9 +283,13 @@ struct Const : public Value {
   static constexpr bool is_runtime = false;
   static constexpr nint_t value = N;
 
-  static constexpr bool conforms(nint_t v) { return v == N; }
+  static constexpr bool conforms(nint_t v) {
+    return v == N;
+  }
 
-  static constexpr bool aligns(nint_t v) { return N % v == 0; }
+  static constexpr bool aligns(nint_t v) {
+    return N % v == 0;
+  }
 
   /**
    * Construct a `Const<N>`. The value `v` must equal `N`, otherwise a runtime
@@ -355,9 +367,7 @@ inline constexpr Const<N> cint{N};
  */
 template <nint_t Alignment, nint_t Lo = kLoInf, nint_t Hi = kHiInf>
 struct Dynamic : public Value {
-  static_assert((Alignment & (Alignment - 1)) == 0 && Alignment > 0,
-                "Alignment must be positive and power of 2"
-  );
+  static_assert((Alignment & (Alignment - 1)) == 0 && Alignment > 0, "Alignment must be positive and power of 2");
   static constexpr bool is_const = false;
   static constexpr bool is_runtime = true;
   static constexpr nint_t alignment = Alignment;
@@ -371,9 +381,7 @@ struct Dynamic : public Value {
    * this Dynamic type: alignment, lower bound (if active), upper bound (if active).
    */
   static constexpr bool conforms(nint_t v) {
-    return (v & (Alignment - 1)) == 0
-           && (!has_lower || v >= Lo)
-           && (!has_upper || v <= Hi);
+    return (v & (Alignment - 1)) == 0 && (!has_lower || v >= Lo) && (!has_upper || v <= Hi);
   }
 
   /**
@@ -384,15 +392,17 @@ struct Dynamic : public Value {
    * @note Conservative: returns `false` when uncertain, even if some
    *       specific values may still align.
    */
-  static constexpr bool aligns(nint_t v) { return Alignment % v == 0; }
+  static constexpr bool aligns(nint_t v) {
+    return Alignment % v == 0;
+  }
 
   /**
    * Construct a `Dynamic` with the given runtime value.
    * Asserts that `v` satisfies all compile-time constraints (alignment, bounds).
    */
-  VECOPS_ALWAYS_INLINE constexpr explicit Dynamic(nint_t v) : value(v) {
-    VECOPS_ASSERT(conforms(v),
-                  "value %td fails Dynamic<A=%td, Lo=%td, Hi=%td> constraints", v, Alignment, Lo, Hi);
+  VECOPS_ALWAYS_INLINE constexpr explicit Dynamic(nint_t v)
+    : value(v) {
+    VECOPS_ASSERT(conforms(v), "value %td fails Dynamic<A=%td, Lo=%td, Hi=%td> constraints", v, Alignment, Lo, Hi);
   }
 
   /**
@@ -406,10 +416,7 @@ struct Dynamic : public Value {
     // Spell the constraint out here: some Clang versions conservatively
     // treat even this constexpr helper call as potentially side-effecting and
     // consequently discard __builtin_assume(conforms(value)).
-    VECOPS_ASSUME(
-        (value & (Alignment - 1)) == 0 &&
-        (!has_lower || value >= Lo) &&
-        (!has_upper || value <= Hi));
+    VECOPS_ASSUME((value & (Alignment - 1)) == 0 && (!has_lower || value >= Lo) && (!has_upper || value <= Hi));
     return value;
   }
 
@@ -430,12 +437,9 @@ struct Dynamic : public Value {
  */
 using Any = Dynamic<1>;
 
-/** A non-nint_t integer accepted by Value arithmetic through Any. */
+/** An ordinary integer accepted by Value arithmetic through Any. */
 template <typename T>
-concept OtherInteger =
-    std::integral<std::remove_cvref_t<T>> &&
-    !std::same_as<std::remove_cvref_t<T>, bool> &&
-    !std::same_as<std::remove_cvref_t<T>, nint_t>;
+concept IntegerInput = std::integral<std::remove_cvref_t<T>> && !std::same_as<std::remove_cvref_t<T>, bool>;
 
 /**
  * @brief Wildcard type for compile-time metadata pattern matching.
@@ -469,7 +473,9 @@ struct any {};
  * @return Dynamic<A, L, H>{v}
  */
 template <nint_t A, nint_t L, nint_t H>
-constexpr Dynamic<A, L, H> dyn(nint_t v) { return Dynamic<A, L, H>{v}; }
+constexpr Dynamic<A, L, H> dyn(nint_t v) {
+  return Dynamic<A, L, H>{v};
+}
 
 /**
  * @brief Create a `Dynamic<A>` with alignment only (no bounds).
@@ -483,7 +489,9 @@ constexpr Dynamic<A, L, H> dyn(nint_t v) { return Dynamic<A, L, H>{v}; }
  * @return Dynamic<A>{v}
  */
 template <nint_t A>
-constexpr Dynamic<A> dyn(nint_t v) { return Dynamic<A>{v}; }
+constexpr Dynamic<A> dyn(nint_t v) {
+  return Dynamic<A>{v};
+}
 
 // ======================== Arithmetic operators ========================
 //
@@ -508,7 +516,9 @@ constexpr Dynamic<A> dyn(nint_t v) { return Dynamic<A>{v}; }
 // ---- Addition ----
 
 template <nint_t N, nint_t M>
-constexpr Const<N + M> operator+(Const<N>, Const<M>) { return Const<N + M>(); }
+constexpr Const<N + M> operator+(Const<N>, Const<M>) {
+  return Const<N + M>();
+}
 
 template <nint_t N, nint_t A, nint_t L, nint_t H>
 constexpr auto operator+(Const<N>, Dynamic<A, L, H> rhs) {
@@ -534,34 +544,22 @@ constexpr auto operator+(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
   return Dynamic<g, rl, rh>{lhs.value + rhs.value};
 }
 
-/// Value + nint_t → Value + Any{nint_t}
-template <typename T>
-  requires (std::derived_from<T, Value> && !is_int_v<T>)
-constexpr auto operator+(T lhs, nint_t rhs) {
-  return lhs + Any{rhs};
-}
-
-/// nint_t + Value → Any{nint_t} + Value
-template <typename T>
-  requires (std::derived_from<T, Value> && !is_int_v<T>)
-constexpr auto operator+(nint_t lhs, T rhs) {
-  return Any{lhs} + rhs;
-}
-
-template <ValueType T, OtherInteger I>
+template <ValueType T, IntegerInput I>
 constexpr auto operator+(T lhs, I rhs) {
-  return lhs + static_cast<nint_t>(rhs);
+  return lhs + Any{static_cast<nint_t>(rhs)};
 }
 
-template <OtherInteger I, ValueType T>
+template <IntegerInput I, ValueType T>
 constexpr auto operator+(I lhs, T rhs) {
-  return static_cast<nint_t>(lhs) + rhs;
+  return Any{static_cast<nint_t>(lhs)} + rhs;
 }
 
 // ---- Subtraction ----
 
 template <nint_t N, nint_t M>
-constexpr Const<N - M> operator-(Const<N>, Const<M>) { return Const<N - M>(); }
+constexpr Const<N - M> operator-(Const<N>, Const<M>) {
+  return Const<N - M>();
+}
 
 template <nint_t N, nint_t A, nint_t L, nint_t H>
 constexpr auto operator-(Const<N>, Dynamic<A, L, H> rhs) {
@@ -587,34 +585,22 @@ constexpr auto operator-(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
   return Dynamic<g, rl, rh>{lhs.value - rhs.value};
 }
 
-/// Value - nint_t → Value - Any{nint_t}
-template <typename T>
-  requires (std::derived_from<T, Value> && !is_int_v<T>)
-constexpr auto operator-(T lhs, nint_t rhs) {
-  return lhs - Any{rhs};
-}
-
-/// nint_t - Value → Any{nint_t} - Value
-template <typename T>
-  requires (std::derived_from<T, Value> && !is_int_v<T>)
-constexpr auto operator-(nint_t lhs, T rhs) {
-  return Any{lhs} - rhs;
-}
-
-template <ValueType T, OtherInteger I>
+template <ValueType T, IntegerInput I>
 constexpr auto operator-(T lhs, I rhs) {
-  return lhs - static_cast<nint_t>(rhs);
+  return lhs - Any{static_cast<nint_t>(rhs)};
 }
 
-template <OtherInteger I, ValueType T>
+template <IntegerInput I, ValueType T>
 constexpr auto operator-(I lhs, T rhs) {
-  return static_cast<nint_t>(lhs) - rhs;
+  return Any{static_cast<nint_t>(lhs)} - rhs;
 }
 
 // ---- Unary negation ----
 
 template <nint_t N>
-constexpr Const<-N> operator-(Const<N>) { return Const<-N>(); }
+constexpr Const<-N> operator-(Const<N>) {
+  return Const<-N>();
+}
 
 template <nint_t A, nint_t L, nint_t H>
 constexpr auto operator-(Dynamic<A, L, H> x) {
@@ -626,7 +612,9 @@ constexpr auto operator-(Dynamic<A, L, H> x) {
 // ---- Multiplication ----
 
 template <nint_t N, nint_t M>
-constexpr Const<N * M> operator*(Const<N>, Const<M>) { return Const<N * M>(); }
+constexpr Const<N * M> operator*(Const<N>, Const<M>) {
+  return Const<N * M>();
+}
 
 template <nint_t N, nint_t A, nint_t L, nint_t H>
 constexpr auto operator*(Const<N>, Dynamic<A, L, H> rhs) {
@@ -661,34 +649,22 @@ constexpr auto operator*(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
   }
 }
 
-/// Value * nint_t → Value * Any{nint_t}
-template <typename T>
-  requires (std::derived_from<T, Value> && !is_int_v<T>)
-constexpr auto operator*(T lhs, nint_t rhs) {
-  return lhs * Any{rhs};
-}
-
-/// nint_t * Value → Any{nint_t} * Value
-template <typename T>
-  requires (std::derived_from<T, Value> && !is_int_v<T>)
-constexpr auto operator*(nint_t lhs, T rhs) {
-  return Any{lhs} * rhs;
-}
-
-template <ValueType T, OtherInteger I>
+template <ValueType T, IntegerInput I>
 constexpr auto operator*(T lhs, I rhs) {
-  return lhs * static_cast<nint_t>(rhs);
+  return lhs * Any{static_cast<nint_t>(rhs)};
 }
 
-template <OtherInteger I, ValueType T>
+template <IntegerInput I, ValueType T>
 constexpr auto operator*(I lhs, T rhs) {
-  return static_cast<nint_t>(lhs) * rhs;
+  return Any{static_cast<nint_t>(lhs)} * rhs;
 }
 
 // ---- Division ----
 
 template <nint_t N, nint_t M>
-constexpr Const<N / M> operator/(Const<N>, Const<M>) { return Const<N / M>(); }
+constexpr Const<N / M> operator/(Const<N>, Const<M>) {
+  return Const<N / M>();
+}
 
 /**
  * Dynamic<A,L,H> / Const<N>:
@@ -785,34 +761,22 @@ constexpr auto operator/(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
   }
 }
 
-/// Value / nint_t → Value / Any{nint_t}
-template <typename T>
-  requires (std::derived_from<T, Value> && !is_int_v<T>)
-constexpr auto operator/(T lhs, nint_t rhs) {
-  return lhs / Any{rhs};
-}
-
-/// nint_t / Value → Any{nint_t} / Value
-template <typename T>
-  requires (std::derived_from<T, Value> && !is_int_v<T>)
-constexpr auto operator/(nint_t lhs, T rhs) {
-  return Any{lhs} / rhs;
-}
-
-template <ValueType T, OtherInteger I>
+template <ValueType T, IntegerInput I>
 constexpr auto operator/(T lhs, I rhs) {
-  return lhs / static_cast<nint_t>(rhs);
+  return lhs / Any{static_cast<nint_t>(rhs)};
 }
 
-template <OtherInteger I, ValueType T>
+template <IntegerInput I, ValueType T>
 constexpr auto operator/(I lhs, T rhs) {
-  return static_cast<nint_t>(lhs) / rhs;
+  return Any{static_cast<nint_t>(lhs)} / rhs;
 }
 
 // ---- Remainder ----
 
 template <nint_t N, nint_t M>
-constexpr Const<N % M> operator%(Const<N>, Const<M>) { return Const<N % M>(); }
+constexpr Const<N % M> operator%(Const<N>, Const<M>) {
+  return Const<N % M>();
+}
 
 /**
  * Dynamic<A,L,H> % Const<N>:
@@ -893,28 +857,14 @@ constexpr auto operator%(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
   }
 }
 
-/// Value % nint_t → Value % Any{nint_t}
-template <typename T>
-  requires (std::derived_from<T, Value> && !is_int_v<T>)
-constexpr auto operator%(T lhs, nint_t rhs) {
-  return lhs % Any{rhs};
-}
-
-/// nint_t % Value → Any{nint_t} % Value
-template <typename T>
-  requires (std::derived_from<T, Value> && !is_int_v<T>)
-constexpr auto operator%(nint_t lhs, T rhs) {
-  return Any{lhs} % rhs;
-}
-
-template <ValueType T, OtherInteger I>
+template <ValueType T, IntegerInput I>
 constexpr auto operator%(T lhs, I rhs) {
-  return lhs % static_cast<nint_t>(rhs);
+  return lhs % Any{static_cast<nint_t>(rhs)};
 }
 
-template <OtherInteger I, ValueType T>
+template <IntegerInput I, ValueType T>
 constexpr auto operator%(I lhs, T rhs) {
-  return static_cast<nint_t>(lhs) % rhs;
+  return Any{static_cast<nint_t>(lhs)} % rhs;
 }
 
 namespace details {
@@ -928,8 +878,10 @@ namespace details {
  * Used by `to_value_t<T>` to normalize user-provided shape/stride parameters
  * so that bare integers are automatically wrapped as `Any{v}`.
  */
-template <typename T, typename = void/*SFINAE*/>
-struct ValuePromote { using type = T; };
+template <typename T, typename = void /*SFINAE*/>
+struct ValuePromote {
+  using type = T;
+};
 template <typename T>
   requires is_int_v<T>
 struct ValuePromote<T, void> {
@@ -968,9 +920,7 @@ struct IsMoreLenientValue<Any, Any> : std::true_type {};
 // Const<N> → Dynamic<A, L, H>: N must conform to alignment and bounds
 template <nint_t N, nint_t A, nint_t L, nint_t H>
 struct IsMoreLenientValue<Const<N>, Dynamic<A, L, H>>
-    : std::bool_constant<(N & (A - 1)) == 0
-                         && (L == kLoInf || N >= L)
-                         && (H == kHiInf || N <= H)> {};
+  : std::bool_constant<(N & (A - 1)) == 0 && (L == kLoInf || N >= L) && (H == kHiInf || N <= H)> {};
 
 // Const<N> → Any
 template <nint_t N>
@@ -979,9 +929,8 @@ struct IsMoreLenientValue<Const<N>, Any> : std::true_type {};
 // Dynamic<A1,L1,H1> → Dynamic<A2,L2,H2>: A1 % A2 == 0 and bounds are relaxed
 template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
 struct IsMoreLenientValue<Dynamic<A1, L1, H1>, Dynamic<A2, L2, H2>>
-    : std::bool_constant<(A1 % A2 == 0)
-                         && (L2 == kLoInf || (L1 != kLoInf && L1 >= L2))
-                         && (H2 == kHiInf || (H1 != kHiInf && H1 <= H2))> {};
+  : std::bool_constant<(A1 % A2 == 0) && (L2 == kLoInf || (L1 != kLoInf && L1 >= L2)) &&
+                       (H2 == kHiInf || (H1 != kHiInf && H1 <= H2))> {};
 
 // Dynamic<A, L, H> → Any
 template <nint_t A, nint_t L, nint_t H>
@@ -992,11 +941,13 @@ struct IsMoreLenientValue<Dynamic<A, L, H>, Any> : std::true_type {};
  * for non-Const types. Used by PackedStorage for the const_values array.
  */
 template <typename T>
-struct PickConstValue { static constexpr nint_t value = 0; };
+struct PickConstValue {
+  static constexpr nint_t value = 0;
+};
 
 template <nint_t N>
-struct PickConstValue<Const < N>> {
-static constexpr nint_t value = N;
+struct PickConstValue<Const<N>> {
+  static constexpr nint_t value = N;
 };
 
 /**
@@ -1007,13 +958,15 @@ static constexpr nint_t value = N;
  * @param v_in   Input values (mix of Const and Dynamic).
  */
 template <typename... Is>
-VECOPS_INLINE constexpr void zip_packed_values(nint_t* v_out, const Is& ... v_in) {
+VECOPS_INLINE constexpr void zip_packed_values(nint_t* v_out, const Is&... v_in) {
   int idx = 0;
-  ([&] {
-    if constexpr (!std::remove_cvref_t<Is>::is_const) {
-      v_out[idx++] = nint_t(v_in);
-    }
-  }(), ...);
+  (
+    [&] {
+      if constexpr (!std::remove_cvref_t<Is>::is_const) {
+        v_out[idx++] = nint_t(v_in);
+      }
+    }(),
+    ...);
 }
 
 /**
@@ -1025,13 +978,15 @@ template <typename... Is>
 VECOPS_INLINE constexpr void zip_packed_values(nint_t* v_out, const nint_t* v_in) {
   int out_idx = 0;
   int in_idx = 0;
-  ([&] {
-    if constexpr (std::remove_cvref_t<Is>::is_const) {
-      ++in_idx;
-    } else {
-      v_out[out_idx++] = v_in[in_idx++];
-    }
-  }(), ...);
+  (
+    [&] {
+      if constexpr (std::remove_cvref_t<Is>::is_const) {
+        ++in_idx;
+      } else {
+        v_out[out_idx++] = v_in[in_idx++];
+      }
+    }(),
+    ...);
 }
 
 /**
@@ -1042,13 +997,15 @@ template <typename... Is>
 VECOPS_INLINE constexpr void unzip_packed_values(nint_t* v_out, const nint_t* v_in) {
   int out_idx = 0;
   int in_idx = 0;
-  ([&] {
-    if constexpr (std::remove_cvref_t<Is>::is_const) {
-      v_out[out_idx++] = PickConstValue<std::remove_cvref_t<Is>>::value;
-    } else {
-      v_out[out_idx++] = v_in[in_idx++];
-    }
-  }(), ...);
+  (
+    [&] {
+      if constexpr (std::remove_cvref_t<Is>::is_const) {
+        v_out[out_idx++] = PickConstValue<std::remove_cvref_t<Is>>::value;
+      } else {
+        v_out[out_idx++] = v_in[in_idx++];
+      }
+    }(),
+    ...);
 }
 
 /**
@@ -1085,6 +1042,7 @@ template <typename... Is>
 struct PackedStorage {
   static constexpr bool is_runtime[] = {Is::is_runtime...};
   static constexpr int n_dim = sizeof...(Is);
+
 private:
   static constexpr nint_t const_values[] = {PickConstValue<Is>::value...};
 
@@ -1104,6 +1062,7 @@ private:
     return StorageData{arr, off};
   }
   static constexpr auto stor_data = _compute_offsets(std::index_sequence_for<Is...>{});
+
 public:
   /**
    * Offset mapping: `offsets[i]` gives the position in the compressed
@@ -1274,74 +1233,14 @@ VECOPS_ALWAYS_INLINE constexpr bool operator>=(Lhs lhs, Rhs rhs) {
   return !(lhs < rhs);
 }
 
-template <ValueType Value>
-VECOPS_ALWAYS_INLINE constexpr bool operator==(Value lhs, nint_t rhs) {
-  return static_cast<nint_t>(lhs) == rhs;
-}
-
-template <ValueType Value>
-VECOPS_ALWAYS_INLINE constexpr bool operator==(nint_t lhs, Value rhs) {
-  return rhs == lhs;
-}
-
-template <ValueType Value>
-VECOPS_ALWAYS_INLINE constexpr bool operator!=(Value lhs, nint_t rhs) {
-  return !(lhs == rhs);
-}
-
-template <ValueType Value>
-VECOPS_ALWAYS_INLINE constexpr bool operator!=(nint_t lhs, Value rhs) {
-  return !(lhs == rhs);
-}
-
-template <ValueType Value>
-VECOPS_ALWAYS_INLINE constexpr bool operator<(Value lhs, nint_t rhs) {
-  return static_cast<nint_t>(lhs) < rhs;
-}
-
-template <ValueType Value>
-VECOPS_ALWAYS_INLINE constexpr bool operator<(nint_t lhs, Value rhs) {
-  return lhs < static_cast<nint_t>(rhs);
-}
-
-template <ValueType Value>
-VECOPS_ALWAYS_INLINE constexpr bool operator<=(Value lhs, nint_t rhs) {
-  return !(rhs < lhs);
-}
-
-template <ValueType Value>
-VECOPS_ALWAYS_INLINE constexpr bool operator<=(nint_t lhs, Value rhs) {
-  return !(rhs < lhs);
-}
-
-template <ValueType Value>
-VECOPS_ALWAYS_INLINE constexpr bool operator>(Value lhs, nint_t rhs) {
-  return rhs < lhs;
-}
-
-template <ValueType Value>
-VECOPS_ALWAYS_INLINE constexpr bool operator>(nint_t lhs, Value rhs) {
-  return rhs < lhs;
-}
-
-template <ValueType Value>
-VECOPS_ALWAYS_INLINE constexpr bool operator>=(Value lhs, nint_t rhs) {
-  return !(lhs < rhs);
-}
-
-template <ValueType Value>
-VECOPS_ALWAYS_INLINE constexpr bool operator>=(nint_t lhs, Value rhs) {
-  return !(lhs < rhs);
-}
-
-#define VECOPS_META_DEFINE_INTEGER_COMPARISON(Op)                           \
-  template <ValueType Value, OtherInteger I>                                \
-  VECOPS_ALWAYS_INLINE constexpr bool operator Op(Value lhs, I rhs) {       \
-    return lhs Op static_cast<nint_t>(rhs);                                 \
-  }                                                                          \
-  template <OtherInteger I, ValueType Value>                                \
-  VECOPS_ALWAYS_INLINE constexpr bool operator Op(I lhs, Value rhs) {       \
-    return static_cast<nint_t>(lhs) Op rhs;                                 \
+#define VECOPS_META_DEFINE_INTEGER_COMPARISON(Op)                     \
+  template <ValueType Value, IntegerInput I>                          \
+  VECOPS_ALWAYS_INLINE constexpr bool operator Op(Value lhs, I rhs) { \
+    return static_cast<nint_t>(lhs) Op static_cast<nint_t>(rhs);      \
+  }                                                                   \
+  template <IntegerInput I, ValueType Value>                          \
+  VECOPS_ALWAYS_INLINE constexpr bool operator Op(I lhs, Value rhs) { \
+    return static_cast<nint_t>(lhs) Op static_cast<nint_t>(rhs);      \
   }
 
 VECOPS_META_DEFINE_INTEGER_COMPARISON(==)
@@ -1356,55 +1255,58 @@ VECOPS_META_DEFINE_INTEGER_COMPARISON(>=)
 template <ValueType T>
 inline constexpr bool has_lower_bound_v = [] {
   using V = std::remove_cvref_t<T>;
-  if constexpr (V::is_const) return true;
-  else return V::has_lower;
+  if constexpr (V::is_const)
+    return true;
+  else
+    return V::has_lower;
 }();
 
 template <ValueType T>
 inline constexpr bool has_upper_bound_v = [] {
   using V = std::remove_cvref_t<T>;
-  if constexpr (V::is_const) return true;
-  else return V::has_upper;
+  if constexpr (V::is_const)
+    return true;
+  else
+    return V::has_upper;
 }();
 
 template <ValueType T>
 inline constexpr nint_t lower_bound_v = [] {
   using V = std::remove_cvref_t<T>;
-  if constexpr (V::is_const) return V::value;
-  else return V::lo;
+  if constexpr (V::is_const)
+    return V::value;
+  else
+    return V::lo;
 }();
 
 template <ValueType T>
 inline constexpr nint_t upper_bound_v = [] {
   using V = std::remove_cvref_t<T>;
-  if constexpr (V::is_const) return V::value;
-  else return V::hi;
+  if constexpr (V::is_const)
+    return V::value;
+  else
+    return V::hi;
 }();
 
 template <ValueType T>
-inline constexpr bool is_bounded_v =
-    has_lower_bound_v<T> && has_upper_bound_v<T>;
+inline constexpr bool is_bounded_v = has_lower_bound_v<T> && has_upper_bound_v<T>;
 
 /** True when a Value type denotes exactly one runtime value. */
 template <ValueType T>
-inline constexpr bool is_singleton_v =
-    is_bounded_v<T> && lower_bound_v<T> == upper_bound_v<T>;
+inline constexpr bool is_singleton_v = is_bounded_v<T> && lower_bound_v<T> == upper_bound_v<T>;
 
 /** The unique value denoted by a singleton Value type. */
 template <ValueType T>
 inline constexpr nint_t singleton_value_v = lower_bound_v<T>;
 
 template <ValueType T, nint_t Lo, nint_t Hi>
-inline constexpr bool range_within_v =
-    is_bounded_v<T> && lower_bound_v<T> >= Lo && upper_bound_v<T> <= Hi;
+inline constexpr bool range_within_v = is_bounded_v<T> && lower_bound_v<T> >= Lo && upper_bound_v<T> <= Hi;
 
 template <ValueType T, nint_t Lo>
-inline constexpr bool lower_bound_at_least_v =
-    has_lower_bound_v<T> && lower_bound_v<T> >= Lo;
+inline constexpr bool lower_bound_at_least_v = has_lower_bound_v<T> && lower_bound_v<T> >= Lo;
 
 template <ValueType T, nint_t Hi>
-inline constexpr bool upper_bound_at_most_v =
-    has_upper_bound_v<T> && upper_bound_v<T> <= Hi;
+inline constexpr bool upper_bound_at_most_v = has_upper_bound_v<T> && upper_bound_v<T> <= Hi;
 
 } // namespace vecops::meta
 
@@ -1451,7 +1353,7 @@ namespace vecops {
  */
 template <nint_t N, nint_t M>
 constexpr meta::Const<(N < M) ? N : M> min(meta::Const<N>, meta::Const<M>) {
-  return meta::Const<(N < M) ? N : M>();
+  return meta::Const < (N < M) ? N : M > ();
 }
 
 /**
@@ -1488,22 +1390,7 @@ template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
 constexpr auto min(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
   constexpr nint_t lo = (L1 < L2) ? L1 : L2;
   constexpr nint_t hi = (H1 < H2) ? H1 : H2;
-  return meta::Dynamic<std::gcd(A1, A2), lo, hi>(
-      (rhs.value < lhs.value) ? rhs.value : lhs.value);
-}
-
-/// Value min nint_t → Value min Any{nint_t}
-template <typename T>
-  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
-constexpr auto min(T lhs, nint_t rhs) {
-  return min(lhs, meta::Any{rhs});
-}
-
-/// nint_t min Value → Any{nint_t} min Value
-template <typename T>
-  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
-constexpr auto min(nint_t lhs, T rhs) {
-  return min(meta::Any{lhs}, rhs);
+  return meta::Dynamic<std::gcd(A1, A2), lo, hi>((rhs.value < lhs.value) ? rhs.value : lhs.value);
 }
 
 /**
@@ -1514,7 +1401,7 @@ constexpr auto min(nint_t lhs, T rhs) {
  */
 template <nint_t N, nint_t M>
 constexpr meta::Const<(N > M) ? N : M> max(meta::Const<N>, meta::Const<M>) {
-  return meta::Const<(N > M) ? N : M>();
+  return meta::Const < (N > M) ? N : M > ();
 }
 
 /**
@@ -1552,29 +1439,16 @@ template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
 constexpr auto max(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
   constexpr nint_t lo = (L1 > L2) ? L1 : L2;
   constexpr nint_t hi = (H1 > H2) ? H1 : H2;
-  return meta::Dynamic<std::gcd(A1, A2), lo, hi>(
-      (lhs.value > rhs.value) ? lhs.value : rhs.value);
-}
-
-/// Value max nint_t → Value max Any{nint_t}
-template <typename T>
-  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
-constexpr auto max(T lhs, nint_t rhs) {
-  return max(lhs, meta::Any{rhs});
-}
-
-/// nint_t max Value → Any{nint_t} max Value
-template <typename T>
-  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
-constexpr auto max(nint_t lhs, T rhs) {
-  return max(meta::Any{lhs}, rhs);
+  return meta::Dynamic<std::gcd(A1, A2), lo, hi>((lhs.value > rhs.value) ? lhs.value : rhs.value);
 }
 
 /**
  * @brief Compile-time clamp of a Const into [Const<Lo>, Const<Hi>].
  */
 template <nint_t N, nint_t Lo, nint_t Hi>
-constexpr meta::Const<(N < Lo) ? Lo : (Hi < N) ? Hi : N>
+constexpr meta::Const<(N < Lo)   ? Lo
+                      : (Hi < N) ? Hi
+                                 : N>
 clamp(meta::Const<N>, meta::Const<Lo>, meta::Const<Hi>) {
   constexpr nint_t v = (N < Lo) ? Lo : (Hi < N) ? Hi : N;
   return meta::Const<v>();
@@ -1628,10 +1502,8 @@ template <nint_t A, nint_t L, nint_t H, nint_t N>
 constexpr auto ceil_div(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
   static_assert(N > 0, "ceil_div divisor must be positive");
   constexpr nint_t g = (A % N == 0) ? A / N : 1;
-  constexpr nint_t rl = L == meta::kLoInf
-      ? meta::kLoInf : ::vecops::ceil_div(L, N);
-  constexpr nint_t rh = H == meta::kHiInf
-      ? meta::kHiInf : ::vecops::ceil_div(H, N);
+  constexpr nint_t rl = L == meta::kLoInf ? meta::kLoInf : ::vecops::ceil_div(L, N);
+  constexpr nint_t rh = H == meta::kHiInf ? meta::kHiInf : ::vecops::ceil_div(H, N);
   return meta::Dynamic<g, rl, rh>(::vecops::ceil_div(lhs.value, N));
 }
 
@@ -1643,23 +1515,8 @@ constexpr meta::Any ceil_div(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
 
 /// @brief ceil_div with runtime dividend and divisor: no constraint survives.
 template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
-constexpr meta::Any
-ceil_div(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+constexpr meta::Any ceil_div(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
   return meta::Any(::vecops::ceil_div(lhs.value, rhs.value));
-}
-
-/// Value ceil_div nint_t → Value ceil_div Any{nint_t}
-template <typename T>
-  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
-constexpr auto ceil_div(T lhs, nint_t rhs) {
-  return ceil_div(lhs, meta::Any{rhs});
-}
-
-/// nint_t ceil_div Value → Any{nint_t} ceil_div Value
-template <typename T>
-  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
-constexpr auto ceil_div(nint_t lhs, T rhs) {
-  return ceil_div(meta::Any{lhs}, rhs);
 }
 
 /**
@@ -1680,10 +1537,8 @@ template <nint_t A, nint_t L, nint_t H, nint_t N>
 constexpr auto floor_div(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
   static_assert(N > 0, "floor_div divisor must be positive");
   constexpr nint_t g = (A % N == 0) ? A / N : 1;
-  constexpr nint_t rl = L == meta::kLoInf
-      ? meta::kLoInf : ::vecops::floor_div(L, N);
-  constexpr nint_t rh = H == meta::kHiInf
-      ? meta::kHiInf : ::vecops::floor_div(H, N);
+  constexpr nint_t rl = L == meta::kLoInf ? meta::kLoInf : ::vecops::floor_div(L, N);
+  constexpr nint_t rh = H == meta::kHiInf ? meta::kHiInf : ::vecops::floor_div(H, N);
   return meta::Dynamic<g, rl, rh>(::vecops::floor_div(lhs.value, N));
 }
 
@@ -1695,23 +1550,8 @@ constexpr meta::Any floor_div(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
 
 /// @brief floor_div with runtime dividend and divisor: no constraint survives.
 template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
-constexpr meta::Any
-floor_div(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+constexpr meta::Any floor_div(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
   return meta::Any(::vecops::floor_div(lhs.value, rhs.value));
-}
-
-/// Value floor_div nint_t → Value floor_div Any{nint_t}
-template <typename T>
-  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
-constexpr auto floor_div(T lhs, nint_t rhs) {
-  return floor_div(lhs, meta::Any{rhs});
-}
-
-/// nint_t floor_div Value → Any{nint_t} floor_div Value
-template <typename T>
-  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
-constexpr auto floor_div(nint_t lhs, T rhs) {
-  return floor_div(meta::Any{lhs}, rhs);
 }
 
 /**
@@ -1736,8 +1576,7 @@ constexpr auto align_up(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
   if constexpr (L == meta::kLoInf || H == meta::kHiInf) {
     return meta::Dynamic<g>(::vecops::align_up(lhs.value, N));
   } else {
-    return meta::Dynamic<g, ::vecops::align_up(L, N), ::vecops::align_up(H, N)>(
-        ::vecops::align_up(lhs.value, N));
+    return meta::Dynamic<g, ::vecops::align_up(L, N), ::vecops::align_up(H, N)>(::vecops::align_up(lhs.value, N));
   }
 }
 
@@ -1749,23 +1588,8 @@ constexpr meta::Any align_up(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
 
 /// @brief align_up with runtime value and alignment: no constraint survives.
 template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
-constexpr meta::Any
-align_up(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+constexpr meta::Any align_up(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
   return meta::Any(::vecops::align_up(lhs.value, rhs.value));
-}
-
-/// Value align_up nint_t → Value align_up Any{nint_t}
-template <typename T>
-  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
-constexpr auto align_up(T lhs, nint_t rhs) {
-  return align_up(lhs, meta::Any{rhs});
-}
-
-/// nint_t align_up Value → Any{nint_t} align_up Value
-template <typename T>
-  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
-constexpr auto align_up(nint_t lhs, T rhs) {
-  return align_up(meta::Any{lhs}, rhs);
 }
 
 /**
@@ -1790,8 +1614,7 @@ constexpr auto align_down(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
   if constexpr (L == meta::kLoInf || H == meta::kHiInf) {
     return meta::Dynamic<g>(::vecops::align_down(lhs.value, N));
   } else {
-    return meta::Dynamic<g, ::vecops::align_down(L, N), ::vecops::align_down(H, N)>(
-        ::vecops::align_down(lhs.value, N));
+    return meta::Dynamic<g, ::vecops::align_down(L, N), ::vecops::align_down(H, N)>(::vecops::align_down(lhs.value, N));
   }
 }
 
@@ -1803,36 +1626,21 @@ constexpr meta::Any align_down(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
 
 /// @brief align_down with runtime value and alignment: no constraint survives.
 template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
-constexpr meta::Any
-align_down(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+constexpr meta::Any align_down(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
   return meta::Any(::vecops::align_down(lhs.value, rhs.value));
 }
 
-/// Value align_down nint_t → Value align_down Any{nint_t}
-template <typename T>
-  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
-constexpr auto align_down(T lhs, nint_t rhs) {
-  return align_down(lhs, meta::Any{rhs});
-}
-
-/// nint_t align_down Value → Any{nint_t} align_down Value
-template <typename T>
-  requires (std::derived_from<T, meta::Value> && !is_int_v<T>)
-constexpr auto align_down(nint_t lhs, T rhs) {
-  return align_down(meta::Any{lhs}, rhs);
-}
-
-// Preserve Value-aware overload resolution when the ordinary integer operand
-// is narrower or wider than nint_t. The raw side is still intentionally
-// normalized to Any: only a Value operand carries compile-time constraints.
-#define VECOPS_DEFINE_VALUE_INTEGER_OVERLOADS(Function)                     \
-  template <meta::ValueType Value, meta::OtherInteger I>                    \
-  constexpr auto Function(Value lhs, I rhs) {                               \
-    return Function(lhs, static_cast<nint_t>(rhs));                          \
-  }                                                                           \
-  template <meta::OtherInteger I, meta::ValueType Value>                    \
-  constexpr auto Function(I lhs, Value rhs) {                               \
-    return Function(static_cast<nint_t>(lhs), rhs);                          \
+// Preserve Value-aware overload resolution for every ordinary integer. The
+// raw side is intentionally normalized to Any: only a Value operand carries
+// compile-time constraints.
+#define VECOPS_DEFINE_VALUE_INTEGER_OVERLOADS(Function)        \
+  template <meta::ValueType Value, meta::IntegerInput I>       \
+  constexpr auto Function(Value lhs, I rhs) {                  \
+    return Function(lhs, meta::Any{static_cast<nint_t>(rhs)}); \
+  }                                                            \
+  template <meta::IntegerInput I, meta::ValueType Value>       \
+  constexpr auto Function(I lhs, Value rhs) {                  \
+    return Function(meta::Any{static_cast<nint_t>(lhs)}, rhs); \
   }
 
 VECOPS_DEFINE_VALUE_INTEGER_OVERLOADS(min)

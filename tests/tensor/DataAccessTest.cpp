@@ -19,6 +19,22 @@ using Tag = vec::ScalableTag<float32_t, 0>;
 using InPolicy = InputAccessPolicy<1, 1, AccessPlan::direct>;
 using OutPolicy = OutputAccessPolicy<1, AccessPlan::direct>;
 
+struct F32Bf16AccessWidths {
+  using ComputeType = float32_t;
+  using MemoryElement = bfloat16_t;
+};
+struct F32I8AccessWidths {
+  using ComputeType = float32_t;
+  using MemoryElement = int8_t;
+};
+struct F16F32AccessWidths {
+  using ComputeType = float16_t;
+  using MemoryElement = float32_t;
+};
+static_assert(preferred_memory_access_power_v<F32Bf16AccessWidths> == 1);
+static_assert(preferred_memory_access_power_v<F32I8AccessWidths> == 2);
+static_assert(preferred_memory_access_power_v<F16F32AccessWidths> == 0);
+
 struct DoubleP2CoordinateTransform {
   using TIn = float64_t;
   using TOut = float64_t;
@@ -863,11 +879,11 @@ TEST(TensorDataAccessTest, OutputSplitsTransformBeyondInternalMaximumTag) {
 }
 
 TEST(TensorDataAccessTest, TransformRemapsRequestedMaskAcrossDtypes) {
-  Tag tag{};
+  using WideTag = vec::Twice<vec::Twice<Tag>>;
+  WideTag tag{};
   const nint_t lanes = vec::size(tag);
   std::vector<float64_t> input_values(static_cast<std::size_t>(lanes));
-  std::vector<float64_t> output_values(
-      static_cast<std::size_t>(lanes), -1.0);
+  std::vector<float64_t> output_values(static_cast<std::size_t>(lanes), -1.0);
   for (nint_t lane = 0; lane < lanes; ++lane) {
     input_values[static_cast<std::size_t>(lane)] = lane + 0.5;
   }
@@ -906,6 +922,32 @@ TEST(TensorDataAccessTest, TransformRemapsRequestedMaskAcrossDtypes) {
       EXPECT_DOUBLE_EQ(
           output_values[static_cast<std::size_t>(lane)], -1.0);
     }
+  }
+}
+
+TEST(TensorDataAccessTest, CoalescedPairRunsNarrowTransformsAndOnePackedStore) {
+  Tag tag{};
+  const nint_t lanes = vec::size(tag);
+  std::vector<bfloat16_t> values(static_cast<std::size_t>(2 * lanes), bfloat16_t{-1.0f});
+  auto tensor = make_tensor(values.data(),
+                            make_layout(make_shape(nint_t{1}, 2 * lanes), make_strides(meta::Any{2 * lanes}, cint<1>)));
+  auto transform = with_transform_store_mode<TransformStoreMode::coalesced>(
+    make_lane_local_vec_transform<float32_t, float32_t>([](auto transform_tag, auto value, const auto& context) {
+      return vec::add(transform_tag, value, vec::fill(transform_tag, static_cast<float32_t>(context.lane_coord(0)[1])));
+    }));
+  static_assert(decltype(transform)::transform_store_mode == TransformStoreMode::coalesced);
+  auto spec = output<float32_t>(tensor, transform);
+  kernel::Workspace storage(0);
+  auto workspace = storage.view();
+  auto access = bind(spec, OutPolicy{}, workspace);
+  const nint_t second_active = lanes - 3;
+  access.template store_transform_pair_coalesced<true, false>(
+    tag, coord(0, 0), coord(0, lanes), axis<1>, vec::fill(tag, 1.0f), vec::fill(tag, 2.0f), lanes, second_active);
+
+  for (nint_t lane = 0; lane < lanes; ++lane) {
+    EXPECT_FLOAT_EQ(static_cast<float32_t>(values[static_cast<std::size_t>(lane)]), 1.0f);
+    EXPECT_FLOAT_EQ(static_cast<float32_t>(values[static_cast<std::size_t>(lanes + lane)]),
+                    lane < second_active ? static_cast<float32_t>(lanes) + 2.0f : -1.0f);
   }
 }
 

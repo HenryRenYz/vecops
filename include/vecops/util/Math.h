@@ -15,22 +15,22 @@
 #include "vecops/platform/Features.h"
 
 #ifdef ARCH_X86_FAMILY
-  #include <immintrin.h>
+#  include <immintrin.h>
 #endif
 
 namespace vecops {
 
 template <typename T>
 VECOPS_ALWAYS_INLINE constexpr int log2_floor(T x) noexcept {
-  if (x == 0) return -1;
+  if (x == 0)
+    return -1;
   return std::bit_width(std::make_unsigned_t<T>(x)) - 1;
 }
 
-VECOPS_ALWAYS_INLINE constexpr bool is_aligned(int alignment, const void * p) {
+VECOPS_ALWAYS_INLINE constexpr bool is_aligned(int alignment, const void* p) {
   if (!std::is_constant_evaluated()) {
-    VECOPS_ASSERT(
-        alignment > 0 && (alignment & (alignment - 1)) == 0,
-        "Alignment must be positive and power of 2: %d", alignment);
+    VECOPS_ASSERT(alignment > 0 && (alignment & (alignment - 1)) == 0, "Alignment must be positive and power of 2: %d",
+                  alignment);
   }
   return (nuint_t(p) & (alignment - 1)) == 0;
 }
@@ -39,25 +39,25 @@ VECOPS_ALWAYS_INLINE constexpr uint32_t tailing_mask(int32_t n) {
   if (std::is_constant_evaluated()) {
     return n >= 32 ? uint32_t(-1) : ((1u << n) - 1);
   }
-  #ifdef HAS_BMI2
+#ifdef HAS_BMI2
   return _bzhi_u32(uint32_t(-1), n);
-  #else
+#else
   return n >= 32 ? uint32_t(-1) : ((1u << n) - 1);
-  #endif
+#endif
 }
 
 VECOPS_ALWAYS_INLINE constexpr uint64_t tailing_mask(int64_t n) {
   if (std::is_constant_evaluated()) {
     return n >= 64 ? uint64_t(-1) : ((1uLL << n) - 1);
   }
-  #ifdef HAS_BMI2
+#ifdef HAS_BMI2
   return _bzhi_u64(uint64_t(-1), n);
-  #else
+#else
   return n >= 64 ? uint64_t(-1) : ((1uLL << n) - 1);
-  #endif
+#endif
 }
 
-template <std::integral T, typename X>
+template <std::integral T, std::integral X>
   requires std::convertible_to<X, T>
 VECOPS_ALWAYS_INLINE constexpr T floor_div(T value, X divisor) {
   const T d = static_cast<T>(divisor);
@@ -71,7 +71,7 @@ VECOPS_ALWAYS_INLINE constexpr T floor_div(T value, X divisor) {
   }
 }
 
-template <std::integral T, typename X>
+template <std::integral T, std::integral X>
   requires std::convertible_to<X, T>
 VECOPS_ALWAYS_INLINE constexpr T ceil_div(T value, X divisor) {
   const T d = static_cast<T>(divisor);
@@ -81,7 +81,7 @@ VECOPS_ALWAYS_INLINE constexpr T ceil_div(T value, X divisor) {
   return quotient + static_cast<T>(remainder > 0);
 }
 
-template <std::integral T, typename X>
+template <std::integral T, std::integral X>
   requires std::convertible_to<X, T>
 VECOPS_ALWAYS_INLINE constexpr T align_down(T value, X alignment) {
   const T a = static_cast<T>(alignment);
@@ -91,7 +91,7 @@ VECOPS_ALWAYS_INLINE constexpr T align_down(T value, X alignment) {
   return floor_div(value, a) * a;
 }
 
-template <std::integral T, typename X>
+template <std::integral T, std::integral X>
   requires std::convertible_to<X, T>
 VECOPS_ALWAYS_INLINE constexpr T align_up(T value, X alignment) {
   const T a = static_cast<T>(alignment);
@@ -122,8 +122,7 @@ VECOPS_ALWAYS_INLINE constexpr T min(T a, T b) noexcept {
 /// ABI materially affects compiler lowering. The result has the same lifetime
 /// requirements as std::min's result.
 template <std::totally_ordered T>
-VECOPS_ALWAYS_INLINE constexpr const T& min_reference(
-    const T& a, const T& b) noexcept {
+VECOPS_ALWAYS_INLINE constexpr const T& min_reference(const T& a, const T& b) noexcept {
   return (b < a) ? b : a;
 }
 
@@ -134,8 +133,7 @@ VECOPS_ALWAYS_INLINE constexpr T max(T a, T b) noexcept {
 }
 
 template <std::totally_ordered T>
-VECOPS_ALWAYS_INLINE constexpr T clamp(
-    const T& v, const T& lo, const T& hi) noexcept {
+VECOPS_ALWAYS_INLINE constexpr T clamp(const T& v, const T& lo, const T& hi) noexcept {
   return (v < lo) ? lo : (hi < v) ? hi : v;
 }
 
@@ -143,8 +141,7 @@ VECOPS_ALWAYS_INLINE constexpr T clamp(
 /// ABI materially affects compiler lowering. The result has the same lifetime
 /// requirements as std::clamp's result.
 template <std::totally_ordered T>
-VECOPS_ALWAYS_INLINE constexpr const T& clamp_reference(
-    const T& v, const T& lo, const T& hi) noexcept {
+VECOPS_ALWAYS_INLINE constexpr const T& clamp_reference(const T& v, const T& lo, const T& hi) noexcept {
   return (v < lo) ? lo : (hi < v) ? hi : v;
 }
 
@@ -168,6 +165,6 @@ VECOPS_ALWAYS_INLINE constexpr T max(std::initializer_list<T> list) noexcept {
   return result;
 }
 
-} // vecops
+} // namespace vecops
 
 #endif //VECOPS_MATH_H

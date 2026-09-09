@@ -240,13 +240,17 @@ void emit_constraints(std::ostringstream& output, std::string_view name, std::sp
   output << "static constexpr VecopsDimensionConstraint " << name << "[] = {\n";
   for (std::size_t axis = 0; axis < definitions.size(); ++axis) {
     const auto& definition = definitions[axis];
-    if (definition.kind() == DimensionDef::Kind::Dynamic)
-      output << "  {sizeof(VecopsDimensionConstraint), VECOPS_DIM_DYNAMIC, 0, "
-             << resolve(definition.lower_bound(), binding) << ", " << resolve(definition.upper_bound(), binding) << ", "
-             << resolve(definition.alignment(), binding) << "},\n";
-    else
+    if (definition.kind() == DimensionDef::Kind::Dynamic) {
+      const auto lower = resolve(definition.lower_bound(), binding);
+      const auto upper = resolve(definition.upper_bound(), binding);
+      const auto lower_text = lower == INT64_MIN ? "INT64_MIN" : std::to_string(lower);
+      const auto upper_text = upper == INT64_MAX ? "INT64_MAX" : std::to_string(upper);
+      output << "  {sizeof(VecopsDimensionConstraint), VECOPS_DIM_DYNAMIC, 0, " << lower_text << ", " << upper_text
+             << ", " << resolve(definition.alignment(), binding) << "},\n";
+    } else {
       output << "  {sizeof(VecopsDimensionConstraint), VECOPS_DIM_CONST, "
              << resolved_dimension(definition, observed[axis], binding) << ", 0, 0, 1},\n";
+    }
   }
   output << "};\n";
 }
