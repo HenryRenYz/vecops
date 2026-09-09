@@ -197,10 +197,11 @@ typedef struct VecopsValue {
 /**
  * @brief Optional opaque execution context supplied by the embedding runtime.
  *
- * `stream` and `user_data` have no core-runtime interpretation.  Their
- * lifetime and the meaning of `flags` are agreed by the embedding runtime and
- * a particular kernel family; generic vecops code merely forwards them.
+ * `stream` and `user_data` normally have no core-runtime interpretation. The
+ * high flag bit below reserves one process-local vecops convention for source
+ * kernels that receive an externally managed C++ WorkspaceContext.
  */
+#define VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_CONTEXT (UINT64_C(1) << 63)
 typedef struct VecopsExecutionContext {
   /** Size of this record known to the caller. */
   uint32_t struct_size;
@@ -208,9 +209,9 @@ typedef struct VecopsExecutionContext {
   uint32_t requested_threads;
   /** Optional framework stream pointer forwarded without interpretation. */
   void* stream;
-  /** Optional embedding-defined opaque pointer forwarded without interpretation. */
+  /** Opaque pointer, or WorkspaceContext when its reserved flag is set. */
   void* user_data;
-  /** Embedding-defined context flags. */
+  /** Embedding-defined flags plus reserved vecops flags. */
   uint64_t flags;
 } VecopsExecutionContext;
 

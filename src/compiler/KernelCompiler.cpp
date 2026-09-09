@@ -260,9 +260,10 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
   output << "#include \"vecops_spec.h\"\n"
             "#include \"vecops/runtime/KernelAbi.h\"\n"
             "#include \"vecops/tensor/Tensor.h\"\n"
-            "#include <algorithm>\n#include <cstddef>\n#include <cstring>\n#include <exception>\n\n"
+            "#include <algorithm>\n#include <cstddef>\n#include <cstring>\n#include <exception>\n#include <limits>\n"
+            "#include <utility>\n\n"
          << "#include " << cpp_string(fs::absolute(kernel_file).lexically_normal().string())
-         << "\n\n"
+         << "\n#include \"vecops/execution/WorkspaceContext.h\"\n\n"
             "namespace {\n"
             "void set_error(VecopsError* error, int code, const char* message) {\n"
             "  if (!error || error->struct_size < sizeof(VecopsError)) return;\n"
@@ -270,6 +271,37 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
             "  if (!error->message || error->message_capacity == 0) return;\n"
             "  const auto copied = std::min(size, error->message_capacity - 1);\n"
             "  std::memcpy(error->message, message, copied); error->message[copied] = '\\0';\n"
+            "}\n"
+            "template <typename Setup, typename... Args>\n"
+            "void invoke_source_kernel(const VecopsCall* call, const char* recipe, Setup&& setup, Args&&... args) {\n"
+            "  if constexpr (requires(::vecops::execution::WorkspaceContext& workspace) {\n"
+            "                  __kernel__(workspace, std::forward<Args>(args)...); }) {\n"
+            "    if (call->context && call->context->struct_size >= sizeof(VecopsExecutionContext) &&\n"
+            "        (call->context->flags & VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_CONTEXT) != 0 &&\n"
+            "        call->context->user_data) {\n"
+            "      auto& workspace = *static_cast<::vecops::execution::WorkspaceContext*>(\n"
+            "        call->context->user_data);\n"
+            "      auto kernel_scope = workspace.serial_scope(recipe);\n"
+            "      std::forward<Setup>(setup)(workspace);\n"
+            "      __kernel__(workspace, std::forward<Args>(args)...);\n"
+            "      return;\n"
+            "    }\n"
+            "    if (call->workspace != nullptr || call->workspace_size != 0) {\n"
+            "      ::vecops::execution::WorkspaceContext workspace(\n"
+            "        recipe, call->workspace, static_cast<::vecops::nint_t>(call->workspace_size));\n"
+            "      std::forward<Setup>(setup)(workspace);\n"
+            "      __kernel__(workspace, std::forward<Args>(args)...);\n"
+            "      return;\n"
+            "    }\n"
+            "    static thread_local ::vecops::execution::WorkspaceReplayCache replay_cache;\n"
+            "    replay_cache.invoke(recipe, setup, [&](auto& prepared_workspace) {\n"
+            "      __kernel__(prepared_workspace, std::forward<Args>(args)...);\n"
+            "    });\n"
+            "  } else {\n"
+            "    static_assert(requires { __kernel__(std::forward<Args>(args)...); },\n"
+            "                  \"__kernel__ parameters do not match the KernelDef\");\n"
+            "    __kernel__(std::forward<Args>(args)...);\n"
+            "  }\n"
             "}\n";
 
   std::size_t tensor_ordinal = 0;
@@ -354,6 +386,40 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
     emit_relations(tensor_def->strides, "strides");
   }
 
+  std::vector<std::string> axis_observations;
+  std::set<std::string, std::less<>> observed_symbols;
+  auto integer_text = [](std::int64_t value) {
+    if (value == INT64_MIN)
+      return std::string{"INT64_MIN"};
+    if (value == INT64_MAX)
+      return std::string{"INT64_MAX"};
+    return std::to_string(value);
+  };
+  for (std::size_t index = 0; index < definition.parameters().size(); ++index) {
+    const auto* tensor_def = std::get_if<TensorDef>(&definition.parameters()[index]);
+    if (tensor_def == nullptr || !std::holds_alternative<TensorView>(binding.arguments[index]))
+      continue;
+    auto observe_dimensions = [&](std::span<const DimensionDef> dimensions, std::string_view member) {
+      for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+        const auto& dimension = dimensions[axis];
+        if (dimension.kind() != DimensionDef::Kind::Dynamic)
+          continue;
+        if (!dimension.symbol().empty() && !observed_symbols.emplace(dimension.symbol()).second)
+          continue;
+        const auto expression = "call->values[" + std::to_string(index) + "].value.tensor." + std::string(member) +
+                                "[" + std::to_string(axis) + "]";
+        axis_observations.push_back(
+          "      workspace.observe_axis({::vecops::execution::AxisContract::Kind::Dynamic, 0, " +
+          std::to_string(resolve(dimension.alignment(), binding)) + ", " +
+          integer_text(resolve(dimension.lower_bound(), binding)) + ", " +
+          integer_text(resolve(dimension.upper_bound(), binding)) + ", " + expression + ", " +
+          integer_text(resolve(dimension.upper_bound(), binding)) + "});\n");
+      }
+    };
+    observe_dimensions(tensor_def->shape, "sizes");
+    observe_dimensions(tensor_def->strides, "strides");
+  }
+
   std::vector<std::string> arguments;
   for (std::size_t index = 0; index < definition.parameters().size(); ++index) {
     if (const auto* tensor_def = std::get_if<TensorDef>(&definition.parameters()[index])) {
@@ -388,11 +454,16 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
       arguments.push_back(scalar_value(std::get<ValueDef>(definition.parameters()[index]), index));
     }
   }
-  output << "    __kernel__(";
+  output << "    if (call->workspace_size > static_cast<uint64_t>(std::numeric_limits<::vecops::nint_t>::max())) {\n"
+            "      set_error(error, VECOPS_STATUS_INVALID_ARGUMENT, \"workspace exceeds the host address space\");\n"
+            "      return VECOPS_STATUS_INVALID_ARGUMENT;\n"
+            "    }\n"
+         << "    invoke_source_kernel(call, " << cpp_string(definition.name()) << ", [&](auto& workspace) {\n";
+  for (const auto& observation : axis_observations)
+    output << observation;
+  output << "    }";
   for (std::size_t index = 0; index < arguments.size(); ++index) {
-    if (index != 0)
-      output << ", ";
-    output << arguments[index];
+    output << ", " << arguments[index];
   }
   output
     << ");\n    return VECOPS_STATUS_OK;\n"

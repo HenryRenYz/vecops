@@ -129,7 +129,10 @@ class Compiler:
     self.jobs = jobs
     self.verbose = verbose
     self.environment = dict(environment or {})
-    self.cache_namespace = cache_namespace or f"python-sdk-v2;target={self.target}"
+    # Bump when generated-adapter semantics or the packaged SDK ABI changes.
+    # Keeping this explicit prevents a new compiler from silently loading an
+    # artifact whose adapter was emitted by an older implementation.
+    self.cache_namespace = cache_namespace or f"python-sdk-v3;target={self.target}"
     self.include_dirs = tuple(Path(path).expanduser().resolve() for path in include_dirs)
     self.cflags = tuple(cflags)
     self.library_dirs = tuple(Path(path).expanduser().resolve() for path in library_dirs)

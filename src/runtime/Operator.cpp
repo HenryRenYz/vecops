@@ -225,14 +225,15 @@ Status Operator::invoke(const ArgumentMetadata& arguments, void* workspace, std:
   return executable.value()->invoke(normalized.value().arguments(), workspace, workspace_size, context);
 }
 
-Status Operator::invoke(const KernelCall& call, const VecopsExecutionContext* context) const {
+Status Operator::invoke(const KernelCall& call, const VecopsExecutionContext* context, void* workspace,
+                        std::uint64_t workspace_size) const {
   auto normalized = normalize(call);
   if (!normalized)
     return normalized.status();
   auto executable = resolve(normalized.value());
   if (!executable)
     return executable.status();
-  return executable.value()->invoke(normalized.value().arguments(), nullptr, 0, context);
+  return executable.value()->invoke(normalized.value().arguments(), workspace, workspace_size, context);
 }
 
 } // namespace vecops::runtime

@@ -32,7 +32,10 @@ target_compile_options(vecops PUBLIC
 target_link_libraries(vecops PUBLIC ${CMAKE_DL_LIBS})
 if(VECOPS_ENABLE_OPENMP)
     target_compile_definitions(vecops PRIVATE VECOPS_ENABLE_OPENMP=1)
-    target_link_libraries(vecops PRIVATE OpenMP::OpenMP_CXX)
+    # `vecops` is normally installed as a static archive. Parallel.cpp keeps
+    # OpenMP entry points unresolved until the final JIT module link, so this
+    # dependency must remain on the exported link interface.
+    target_link_libraries(vecops PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
 if(VECOPS_BUILD_COMPILER)

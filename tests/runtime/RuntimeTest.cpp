@@ -1,9 +1,12 @@
 /** @file RuntimeTest.cpp @brief Declarative binding, compilation, caching, and invocation tests. */
 
 #include "vecops/compiler/Compiler.h"
+#include "vecops/execution/WorkspaceContext.h"
 #include "vecops/runtime/Runtime.h"
+#include "WorkspaceContextFixture.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <concepts>
 #include <cstdlib>
@@ -18,6 +21,9 @@
 #endif
 #ifndef VECOPS_SOURCE_ROOT
 #  error "VECOPS_SOURCE_ROOT must identify the Vecops source root"
+#endif
+#ifndef VECOPS_WORKSPACE_CONTEXT_FIXTURE
+#  error "VECOPS_WORKSPACE_CONTEXT_FIXTURE must identify the ABI fixture"
 #endif
 
 using namespace vecops::runtime;
@@ -182,6 +188,91 @@ private:
   std::shared_ptr<Executable> executable_;
 };
 
+class WorkspaceFixtureRecipe final : public KernelRecipe {
+public:
+  [[nodiscard]] std::string_view id() const override {
+    return "workspace-context-fixture";
+  }
+
+  [[nodiscard]] Status match(const KernelCall& call) const override {
+    if (!call.arguments().values().empty())
+      return Status(StatusCode::NotApplicable, "workspace fixture accepts no arguments");
+    return Status::success();
+  }
+
+  [[nodiscard]] Result<BoundKernelRecipe> bind(const KernelCall& call) const override {
+    auto status = match(call);
+    if (!status.ok())
+      return status;
+    return BoundKernelRecipe{
+      .recipe_id = "workspace-context-fixture",
+      .specialization_key = "workspace-context-v1",
+      .artifact_key = "workspace-context-fixture-v1",
+    };
+  }
+};
+
+class WorkspaceFixtureProvider final : public ExecutableProvider {
+public:
+  explicit WorkspaceFixtureProvider(std::shared_ptr<Executable> executable)
+    : executable_(std::move(executable)) {
+  }
+
+  Result<std::shared_ptr<Executable>> resolve(const BoundKernelRecipe&) override {
+    return executable_;
+  }
+
+private:
+  std::shared_ptr<Executable> executable_;
+};
+
+void test_kernel_call_workspace_and_context_forwarding() {
+  auto executable = Executable::load(VECOPS_WORKSPACE_CONTEXT_FIXTURE);
+  require(executable.ok(), executable.status().message());
+
+  auto recipe = std::make_shared<WorkspaceFixtureRecipe>();
+  auto provider = std::make_shared<WorkspaceFixtureProvider>(executable.value());
+  Operator operation(OperatorSchema("test::workspace-context", {}), {std::move(recipe)},
+                     std::make_shared<OrderedDispatchPolicy>(), std::move(provider));
+
+  alignas(64) std::array<std::byte, vecops::test::WorkspaceContextFixtureBytes> workspace{};
+  vecops::test::WorkspaceContextObservation observation{};
+  auto* const stream = reinterpret_cast<void*>(std::uintptr_t{0x1234});
+  const VecopsExecutionContext context{
+    .struct_size = sizeof(VecopsExecutionContext),
+    .requested_threads = 7,
+    .stream = stream,
+    .user_data = &observation,
+    .flags = UINT64_C(0xabc),
+  };
+  const KernelCall call(ArgumentMetadata{});
+
+  const auto status = operation.invoke(call, &context, workspace.data(), workspace.size());
+  require(status.ok(), status.message());
+  require(observation.workspace_query_calls == 1, "workspace query must receive the forwarded context");
+  require(observation.run_calls == 1, "workspace fixture must execute exactly once");
+  require(observation.query_context == &context && observation.run_context == &context,
+          "query and run must receive the original context pointer");
+  require(observation.run_workspace == workspace.data() && observation.run_workspace_size == workspace.size(),
+          "run must receive the original workspace allocation");
+  require(observation.requested_threads == context.requested_threads && observation.stream == stream &&
+            observation.context_flags == context.flags,
+          "execution-context fields must survive Operator dispatch");
+  require(workspace.front() == std::byte{0x5a}, "fixture must be able to write the forwarded workspace");
+
+  vecops::test::WorkspaceContextObservation legacy_observation{};
+  const VecopsExecutionContext legacy_context{
+    .struct_size = sizeof(VecopsExecutionContext),
+    .requested_threads = 1,
+    .stream = nullptr,
+    .user_data = &legacy_observation,
+    .flags = 0,
+  };
+  const auto legacy = operation.invoke(call, &legacy_context);
+  require(!legacy.ok() && legacy_observation.workspace_query_calls == 1 && legacy_observation.run_calls == 0,
+          "legacy KernelCall overload must retain null-workspace behavior");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -198,6 +289,7 @@ int main(int argc, char** argv) {
   auto call = kernel_call(input.data(), output.data());
   test_binding(definition, input.data(), output.data());
   test_named_dynamic_binding(input.data(), output.data());
+  test_kernel_call_workspace_and_context_forwarding();
 
   vecops::compiler::KernelCompilerConfig compiler_config;
   compiler_config.sdk = {VECOPS_SOURCE_ROOT, vecops::compiler::SdkLayout::SourceTree};
@@ -217,6 +309,28 @@ int main(int argc, char** argv) {
   require(bytes.ok() && bytes.value() == 0, "kernel-owned workspace contract");
   require(executable.value()->invoke(call.arguments()).ok(), "direct executable invocation");
   require(output == std::vector<float>({4, 7, 10, 13, 16, 19, 22, 25}), "direct result");
+
+  std::fill(output.begin(), output.end(), 0);
+  vecops::execution::WorkspaceContext tracing{vecops::execution::trace_workspace, definition.name(), {19, 23}};
+  auto trace_context = vecops::execution::workspace_execution_context(tracing);
+  require(executable.value()->invoke(call.arguments(), nullptr, 0, &trace_context).ok(),
+          "source kernel trace-context invocation");
+  auto logical_workspace = tracing.finish_trace();
+  require(logical_workspace.allocations.size() == 1, "source kernel must record its allocation in the caller context");
+  require(logical_workspace.axes.size() == 1 && logical_workspace.axes.front().recorded == 4,
+          "generated adapter must preserve Dynamic axis contracts in the workspace trace");
+  auto placement = vecops::execution::place_workspace(logical_workspace);
+  vecops::kernel::Workspace replay_storage(placement.fast_bytes);
+  auto replay_view = replay_storage.view();
+  void* replay_base = replay_view.allocate(placement.fast_bytes, vecops::vec::DEFAULT_ALIGNMENT);
+  vecops::execution::BoundWorkspacePlan bound_workspace{placement, replay_base, placement.fast_bytes, nullptr, 0};
+  vecops::execution::WorkspaceContext replay{definition.name(), bound_workspace};
+  auto replay_context = vecops::execution::workspace_execution_context(replay);
+  std::fill(output.begin(), output.end(), 0);
+  require(executable.value()->invoke(call.arguments(), nullptr, 0, &replay_context).ok(),
+          "source kernel replay-context invocation");
+  replay.finish_replay();
+  require(output == std::vector<float>({4, 7, 10, 13, 16, 19, 22, 25}), "source kernel replay result");
 
   auto dynamic_definition = named_dynamic_kernel_definition();
   std::vector<float> dynamic_input(12);

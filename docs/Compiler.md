@@ -71,3 +71,11 @@ which form the path provides. The Python wheel ships a relocatable SDK under
 `vecops/_sdk` (headers, library, and CMake package), while editable Python
 installs resolve the checkout SDK and keep built shared/static libraries out of
 the Python source package.
+
+Package SDK configuration preserves the native ARM feature contract detected
+when vecops was built. In particular, `Native` JIT targets reuse the expanded
+`-march` mapping and feature facts such as SME FA64 rather than relying on a
+consumer compiler's interpretation of bare `-march=native`. This matters for
+compiler drivers that support SME but do not enable every optional extension
+from `native`. The exported static-library target also carries OpenMP as a
+transitive dependency when the SDK was built with OpenMP support.

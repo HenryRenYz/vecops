@@ -62,6 +62,16 @@ function(vecops_configure_target_arch)
     endif()
 
     target_compile_options(${ARG_TARGET} PRIVATE "-march=${_VECOPS_MARCH}")
+    if(_VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
+       ARG_ARCH MATCHES "^Native")
+        # ACLE does not expose portable macros for every optional SME feature.
+        # Reapply the facts detected when the SDK itself was configured so a
+        # generated kernel sees the same backend contract as ordinary targets.
+        if(VECOPS_NATIVE_HAS_SME_FA64)
+            target_compile_definitions(${ARG_TARGET} PRIVATE
+                VECOPS_TARGET_SME_FA64=1)
+        endif()
+    endif()
     if(ARG_ARCH STREQUAL "Scalar")
         target_compile_definitions(${ARG_TARGET} PRIVATE
             CPU_CAPABILITY=GENERIC CPU_CAPABILITY_GENERIC=1)

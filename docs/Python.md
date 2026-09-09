@@ -27,6 +27,12 @@ the same user cache. Use a local scratch/NVMe path explicitly when appropriate.
 `cache-only` does not discover build tools and creates neither cache nor build
 directories.
 
+The default cache namespace contains an explicit Python SDK generation. It is
+bumped whenever generated-adapter semantics or the packaged SDK ABI changes,
+so a new compiler cannot silently reuse an artifact emitted by an older
+adapter generator. An application-supplied `cache_namespace` takes ownership
+of that compatibility boundary.
+
 ```python
 compiler = vecops.Compiler(
   target="native",
@@ -44,7 +50,10 @@ A wheel contains a relocatable compiler SDK below `vecops/_sdk`, including
 headers, `libvecops`, and the CMake package. An editable installation maps
 Python modules and headers to the checkout while keeping `_C`, libraries, and
 generated CMake state in its isolated build/install directory; it does not
-place `.so` or `.a` files in `python/vecops`.
+place `.so` or `.a` files in `python/vecops`. The packaged CMake target also
+exports vecops' transitive runtime dependencies, including OpenMP when enabled;
+JIT modules that link the static archive therefore do not need to rediscover
+or spell those dependencies themselves.
 
 ## Signature-derived recipes
 
@@ -181,7 +190,10 @@ Torch's internal schema marks `Out`/`InOut` tensors mutable and returns `()`.
 The public wrapper returns the original output tensor objects. Generated
 bridges register CPU and Meta implementations, allowing the mutable wrapper to
 participate in `torch.compile`; the internal `torch.ops` name is not the public
-vecops calling convention.
+vecops calling convention. A bridge cache key includes the resolved native
+`vecops._C` path in addition to its generated source. This is intentional:
+schema-identical installations have independent operator-handle registries, so
+a bridge linked to one `_C` must never be reused with another installation.
 
 NumPy uses the same ordered registration model:
 

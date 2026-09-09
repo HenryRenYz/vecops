@@ -348,7 +348,13 @@ def register_torch_operator(
     from torch.utils.cpp_extension import load
 
     source = _generate_torch_source(library, name, kernel_def)
-    digest = hashlib.sha256(source.encode()).hexdigest()[:16]
+    native_library = Path(native.__file__).resolve()
+    # A bridge calls the handle registry exported by this exact extension.
+    # Schema-identical vecops installations must not share one cached bridge:
+    # doing so can leave DT_NEEDED pointing at another `_C`, while `_set_handle`
+    # registers the operator in the current module's independent registry.
+    bridge_identity = f"{source}\0{native_library}"
+    digest = hashlib.sha256(bridge_identity.encode()).hexdigest()[:16]
     if build_directory is None:
       bridge_root = Path.home() / ".cache" / "vecops" / "torch-bridges" / f"{library}_{name}_{digest}"
     else:
@@ -358,7 +364,6 @@ def register_torch_operator(
     if not source_path.exists() or source_path.read_text() != source:
       source_path.write_text(source)
 
-    native_library = Path(native.__file__).resolve()
     include_root = Path(__file__).resolve().parents[2] / "include"
     configured_root = os.environ.get("VECOPS_SOURCE_ROOT")
     if configured_root:

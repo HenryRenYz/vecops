@@ -67,6 +67,12 @@ vecops_add_benchmark(
     ARCH Native
 )
 
+vecops_add_benchmark(
+    NAME StatefulMatmulBench
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/ops/StatefulMatmulBench.cpp
+    ARCH Native
+)
+
 if(VECOPS_ARCH_FAMILY STREQUAL "x86")
     vecops_add_benchmark(
         NAME MatmulPackBench

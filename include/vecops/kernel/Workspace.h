@@ -149,6 +149,28 @@ public:
     return reinterpret_cast<void*>(aligned);
   }
 
+  /** Return whether the next allocation would fit without changing state. */
+  [[nodiscard]] bool can_allocate(
+      nint_t bytes,
+      nint_t alignment = vec::DEFAULT_ALIGNMENT) const {
+    if (bytes == 0)
+      return true;
+    if (_base == nullptr || bytes < 0 || alignment <= 0 ||
+        (alignment & (alignment - 1)) != 0) {
+      return false;
+    }
+    const auto base = reinterpret_cast<std::uintptr_t>(_base);
+    const auto raw = base + static_cast<std::uintptr_t>(_offset);
+    const auto aligned =
+      (raw + static_cast<std::uintptr_t>(alignment - 1)) &
+      ~static_cast<std::uintptr_t>(alignment - 1);
+    const auto aligned_offset = aligned - base;
+    if (aligned_offset > static_cast<std::uintptr_t>(_capacity))
+      return false;
+    return static_cast<std::uintptr_t>(bytes) <=
+      static_cast<std::uintptr_t>(_capacity) - aligned_offset;
+  }
+
   /**
    * @brief Allocate raw storage for `count` T objects.
    *

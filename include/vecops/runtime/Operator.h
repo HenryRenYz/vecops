@@ -239,12 +239,21 @@ public:
   [[nodiscard]] Status invoke(const ArgumentMetadata& arguments, void* workspace = nullptr,
                               std::uint64_t workspace_size = 0, const VecopsExecutionContext* context = nullptr) const;
   /**
-   * @brief Resolve and execute a KernelDef-aware call with no external workspace.
+   * @brief Resolve and execute a KernelDef-aware call.
+   * @param call Positional metadata plus explicit specialization values.
+   * @param context Optional non-owning execution context valid during execution.
+   * @param workspace Optional caller-owned external workspace allocation.
+   * @param workspace_size Available external workspace bytes.
    *
-   * Source kernels own all temporary allocation internally. The call is
-   * synchronous and may write `Output` and `InOut` tensor arguments.
+   * The trailing workspace arguments preserve the historical
+   * `invoke(call, context)` source API while allowing framework bridges to
+   * forward the complete `VecopsCall` frame. Source kernels that own all
+   * temporary allocation internally continue to use the default null/zero
+   * workspace. The call is synchronous and may write `Output` and `InOut`
+   * tensor arguments.
    */
-  [[nodiscard]] Status invoke(const KernelCall& call, const VecopsExecutionContext* context = nullptr) const;
+  [[nodiscard]] Status invoke(const KernelCall& call, const VecopsExecutionContext* context = nullptr,
+                              void* workspace = nullptr, std::uint64_t workspace_size = 0) const;
 
   /** @brief Shorthand for the allocation-free external-workspace kernel path. */
   [[nodiscard]] Status operator()(const KernelCall& call) const {

@@ -1,3 +1,4 @@
+#include <array>
 #include <cstdint>
 
 #include <gtest/gtest.h>
@@ -23,6 +24,16 @@ TEST(WorkspaceTest, TypedAllocationUsesDefaultVectorAlignment) {
   OverAligned* over_aligned = workspace.allocate<OverAligned>(1);
   EXPECT_EQ(reinterpret_cast<std::uintptr_t>(over_aligned) % alignof(OverAligned),
             0);
+}
+
+TEST(WorkspaceTest, CanAllocateAccountsForCurrentAddressAlignment) {
+  alignas(64) std::array<std::byte, 128> storage{};
+  kernel::WorkspaceView workspace(storage.data() + 1, 127);
+  EXPECT_TRUE(workspace.can_allocate(63, 64));
+  EXPECT_TRUE(workspace.can_allocate(64, 64));
+  EXPECT_FALSE(workspace.can_allocate(65, 64));
+  EXPECT_NE(workspace.allocate(64, 64), nullptr);
+  EXPECT_FALSE(workspace.can_allocate(1, 64));
 }
 
 TEST(WorkspaceTest, AllocatesContiguousTensorAndPreservesShapeMetadata) {

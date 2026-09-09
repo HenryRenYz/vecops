@@ -78,14 +78,10 @@ namespace vecops::ops {
  * for the selected orientation, with no runtime branch. Explicit family or
  * scheduler selections currently retain their requested orientation.
  */
-template <
-    ::vecops::matmul::Atom AtomT,
-    typename FamilySelectionT =
-        ::vecops::matmul::family_selection::Automatic,
-    typename SchedulerPolicyT = kernel::matmul_policy::Automatic,
-    typename GenericTiledTuningT = ::vecops::matmul::GenericTiledTuning<>,
-    typename CacheInfoProviderT = platform::SystemCacheInfoProvider,
-    bool EnableSwapAB = true>
+template <::vecops::matmul::Atom AtomT, typename FamilySelectionT = ::vecops::matmul::family_selection::Automatic,
+          typename SchedulerPolicyT = kernel::matmul_policy::Automatic,
+          typename GenericTiledTuningT = ::vecops::matmul::GenericTiledTuning<>,
+          typename CacheInfoProviderT = platform::SystemCacheInfoProvider, bool EnableSwapAB = true>
 struct MatmulConfig {
   using Atom = AtomT;
   using FamilySelection = FamilySelectionT;
@@ -108,15 +104,11 @@ struct MatmulConfig {
  * unchanged for default users. Orientation selection exchanges the logical
  * A/B policies together with the operands.
  */
-template <
-    ::vecops::matmul::Atom AtomT,
-    ::vecops::matmul::MatmulPackingTuningType PackingTuningT,
-    typename FamilySelectionT =
-        ::vecops::matmul::family_selection::Automatic,
-    typename SchedulerPolicyT = kernel::matmul_policy::Automatic,
-    typename GenericTiledTuningT = ::vecops::matmul::GenericTiledTuning<>,
-    typename CacheInfoProviderT = platform::SystemCacheInfoProvider,
-    bool EnableSwapAB = true>
+template <::vecops::matmul::Atom AtomT, ::vecops::matmul::MatmulPackingTuningType PackingTuningT,
+          typename FamilySelectionT = ::vecops::matmul::family_selection::Automatic,
+          typename SchedulerPolicyT = kernel::matmul_policy::Automatic,
+          typename GenericTiledTuningT = ::vecops::matmul::GenericTiledTuning<>,
+          typename CacheInfoProviderT = platform::SystemCacheInfoProvider, bool EnableSwapAB = true>
 struct MatmulConfigWithPacking {
   using Atom = AtomT;
   using FamilySelection = FamilySelectionT;
@@ -132,11 +124,8 @@ struct MatmulConfigWithPacking {
 
 /// Convenience alias: a MatmulConfig that only overrides the scheduler
 /// policy (family stays automatic).
-template <::vecops::matmul::Atom AtomT,
-          typename SchedulerPolicyT = kernel::matmul_policy::Automatic>
-using MatmulSchedulerConfig = MatmulConfig<
-    AtomT, ::vecops::matmul::family_selection::Automatic,
-    SchedulerPolicyT>;
+template <::vecops::matmul::Atom AtomT, typename SchedulerPolicyT = kernel::matmul_policy::Automatic>
+using MatmulSchedulerConfig = MatmulConfig<AtomT, ::vecops::matmul::family_selection::Automatic, SchedulerPolicyT>;
 
 /**
  * Reusable semantic matrix-multiply operator.
@@ -156,12 +145,9 @@ template <typename Config>
 class Matmul {
 public:
   using Atom = typename Config::Atom;
-  using Implementation =
-      ::vecops::matmul::details::SelectedImplementation<Atom>;
-  using ResourceRequirements =
-      kernel::matmul_implementation::resource_requirements_t<Implementation>;
-  using KernelFamily =
-      ::vecops::matmul::details::selected_family_t<Config>;
+  using Implementation = ::vecops::matmul::details::SelectedImplementation<Atom>;
+  using ResourceRequirements = kernel::matmul_implementation::resource_requirements_t<Implementation>;
+  using KernelFamily = ::vecops::matmul::details::selected_family_t<Config>;
   using Plan = ::vecops::matmul::details::SelectedFamilyPlan<Config>;
 
   /// Stable name of the selected kernel family (diagnostics/tests).
@@ -173,114 +159,214 @@ public:
   const Config config;
 
   VECOPS_INLINE constexpr explicit Matmul(Config cfg)
-      : config(std::move(cfg)) {}
+    : config(std::move(cfg)) {
+  }
+
+  /** Fully bound state retained by this public Matmul implementation. */
+  template <typename Invocation>
+  class Prepared {
+  public:
+    using ResourceRequirements = typename Invocation::ResourceRequirements;
+
+    VECOPS_INLINE Prepared(Invocation invocation, void* workspace, nint_t workspace_bytes)
+      : invocation_(std::move(invocation))
+      , workspace_(workspace)
+      , workspace_bytes_(workspace_bytes) {
+    }
+
+    [[nodiscard]] VECOPS_INLINE nint_t workspace_bytes() const {
+      return workspace_bytes_;
+    }
+
+    template <execution::ExecutionScope Scope>
+    VECOPS_INLINE void operator()(Scope& scope) const {
+      kernel::WorkspaceView workspace{workspace_, workspace_bytes_};
+      execution::with_workspace(scope, workspace,
+                                [&](auto& rebound) VECOPS_INLINE_LAMBDA { invocation_(rebound); });
+    }
+
+    VECOPS_INLINE void operator()() const {
+      kernel::WorkspaceView workspace{workspace_, workspace_bytes_};
+      ExecutionSession execution{workspace};
+      invocation_(execution);
+    }
+
+  private:
+    Invocation invocation_;
+    void* workspace_ = nullptr;
+    nint_t workspace_bytes_ = 0;
+  };
+
+  /**
+   * @brief Prepare and fully bind the single-C form into parent workspace.
+   *
+   * This stateful form is intended for repeated calls with identical operand
+   * addresses and metadata.  It allocates exactly one sub-slot from `parent`;
+   * execution itself performs no owning allocation or decision planning.
+   */
+  template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K, tensor::InputOperand A, tensor::InputOperand B,
+            tensor::OutputOperand C>
+  VECOPS_INLINE auto prepare(kernel::WorkspaceView& parent, M&& m, N&& n, K&& k, A&& a, B&& b, C&& c) const {
+    static_assert(
+      ::vecops::matmul::kernel_family::ArchitectureFamily<KernelFamily>,
+      "prepared Matmul currently requires an architecture kernel family");
+    auto c_output = tensor::as_output_spec<typename Atom::TAcc>(std::forward<C>(c));
+    using Memory = typename decltype(c_output)::MemoryElement;
+    auto c_input =
+      tensor::input<typename Atom::TAcc>(c_output.tensor(), tensor::zeros_transform<typename Atom::TAcc, Memory>);
+    auto invocation = Plan::prepare(config, std::forward<M>(m), std::forward<N>(n), std::forward<K>(k),
+                                    std::forward<A>(a), std::forward<B>(b), std::move(c_input), std::move(c_output));
+    const nint_t bytes = invocation.required_workspace();
+    void* workspace = parent.allocate(bytes);
+    return Prepared<decltype(invocation)>{std::move(invocation), workspace, bytes};
+  }
+
+  /**
+   * Prepare the single-C form through the kernel-call workspace authority.
+   * Enclosing operator scopes distinguish separate instances, so callers do
+   * not calculate offsets or pass workspace byte counts.
+   */
+  template <typename WorkspaceAuthority, meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
+            tensor::InputOperand A,
+            tensor::InputOperand B, tensor::OutputOperand C>
+    requires requires(WorkspaceAuthority& authority, nint_t bytes) {
+      authority.bind(std::string_view{}, bytes);
+    }
+  VECOPS_INLINE auto prepare(WorkspaceAuthority& parent, M&& m, N&& n, K&& k, A&& a, B&& b, C&& c) const {
+    static_assert(
+      ::vecops::matmul::kernel_family::ArchitectureFamily<KernelFamily>,
+      "prepared Matmul currently requires an architecture kernel family");
+    auto c_output = tensor::as_output_spec<typename Atom::TAcc>(std::forward<C>(c));
+    using Memory = typename decltype(c_output)::MemoryElement;
+    auto c_input =
+      tensor::input<typename Atom::TAcc>(c_output.tensor(), tensor::zeros_transform<typename Atom::TAcc, Memory>);
+    auto invocation = Plan::prepare(config, std::forward<M>(m), std::forward<N>(n), std::forward<K>(k),
+                                    std::forward<A>(a), std::forward<B>(b), std::move(c_input), std::move(c_output));
+    const nint_t bytes = invocation.required_workspace();
+    const auto slot = parent.bind("matmul_scratch", bytes);
+    return Prepared<decltype(invocation)>{std::move(invocation), slot.replica(), bytes};
+  }
+
+  /** Prepare and fully bind the explicit accumulate form. */
+  template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K, tensor::InputOperand A, tensor::InputOperand B,
+            tensor::InputOperand CInput, tensor::OutputOperand COutput>
+  VECOPS_INLINE auto prepare(kernel::WorkspaceView& parent, M&& m, N&& n, K&& k, A&& a, B&& b, CInput&& c_input,
+                             COutput&& c_output) const {
+    static_assert(
+      ::vecops::matmul::kernel_family::ArchitectureFamily<KernelFamily>,
+      "prepared Matmul currently requires an architecture kernel family");
+    auto invocation =
+      Plan::prepare(config, std::forward<M>(m), std::forward<N>(n), std::forward<K>(k), std::forward<A>(a),
+                    std::forward<B>(b), std::forward<CInput>(c_input), std::forward<COutput>(c_output));
+    const nint_t bytes = invocation.required_workspace();
+    void* workspace = parent.allocate(bytes);
+    return Prepared<decltype(invocation)>{std::move(invocation), workspace, bytes};
+  }
+
+  /** Prepare and bind the explicit accumulate form through WorkspaceContext. */
+  template <typename WorkspaceAuthority, meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
+            tensor::InputOperand A,
+            tensor::InputOperand B, tensor::InputOperand CInput, tensor::OutputOperand COutput>
+    requires requires(WorkspaceAuthority& authority, nint_t bytes) {
+      authority.bind(std::string_view{}, bytes);
+    }
+  VECOPS_INLINE auto prepare(WorkspaceAuthority& parent, M&& m, N&& n, K&& k, A&& a, B&& b,
+                             CInput&& c_input, COutput&& c_output) const {
+    static_assert(
+      ::vecops::matmul::kernel_family::ArchitectureFamily<KernelFamily>,
+      "prepared Matmul currently requires an architecture kernel family");
+    auto invocation =
+      Plan::prepare(config, std::forward<M>(m), std::forward<N>(n), std::forward<K>(k), std::forward<A>(a),
+                    std::forward<B>(b), std::forward<CInput>(c_input), std::forward<COutput>(c_output));
+    const nint_t bytes = invocation.required_workspace();
+    const auto slot = parent.bind("matmul_scratch", bytes);
+    return Prepared<decltype(invocation)>{std::move(invocation), slot.replica(), bytes};
+  }
 
   /// Workspace bytes for the single-C form; the C operand is adapted into
   /// the explicit-C form through a zero-valued accumulator input.
-  template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
-            tensor::InputOperand A, tensor::InputOperand B,
+  template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K, tensor::InputOperand A, tensor::InputOperand B,
             tensor::OutputOperand C>
-  VECOPS_INLINE nint_t required_workspace(
-      M&& m, N&& n, K&& k, A&& a, B&& b, C&& c) const {
+  VECOPS_INLINE nint_t required_workspace(M&& m, N&& n, K&& k, A&& a, B&& b, C&& c) const {
     // Adapt C = A*B^T to COut = CIn + A*B^T by dressing the output as a
     // zero-valued C input; the plan then sees the unified accumulate form.
-    auto c_output = tensor::as_output_spec<typename Atom::TAcc>(
-        std::forward<C>(c));
+    auto c_output = tensor::as_output_spec<typename Atom::TAcc>(std::forward<C>(c));
     using Memory = typename decltype(c_output)::MemoryElement;
-    auto c_input = tensor::input<typename Atom::TAcc>(
-        c_output.tensor(),
-        tensor::zeros_transform<typename Atom::TAcc, Memory>);
-    return Plan::required_workspace(
-        config, std::forward<M>(m), std::forward<N>(n),
-        std::forward<K>(k), std::forward<A>(a), std::forward<B>(b),
-        std::move(c_input), std::move(c_output));
+    auto c_input =
+      tensor::input<typename Atom::TAcc>(c_output.tensor(), tensor::zeros_transform<typename Atom::TAcc, Memory>);
+    return Plan::required_workspace(config, std::forward<M>(m), std::forward<N>(n), std::forward<K>(k),
+                                    std::forward<A>(a), std::forward<B>(b), std::move(c_input), std::move(c_output));
   }
 
   /// Workspace bytes for the explicit accumulate form
   /// `COutput = CInput + A*B^T`.
-  template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
-            tensor::InputOperand A, tensor::InputOperand B,
+  template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K, tensor::InputOperand A, tensor::InputOperand B,
             tensor::InputOperand CInput, tensor::OutputOperand COutput>
-  VECOPS_INLINE nint_t required_workspace(
-      M&& m, N&& n, K&& k, A&& a, B&& b,
-      CInput&& c_input, COutput&& c_output) const {
-    return Plan::required_workspace(
-        config, std::forward<M>(m), std::forward<N>(n),
-        std::forward<K>(k), std::forward<A>(a), std::forward<B>(b),
-        std::forward<CInput>(c_input), std::forward<COutput>(c_output));
+  VECOPS_INLINE nint_t required_workspace(M&& m, N&& n, K&& k, A&& a, B&& b, CInput&& c_input,
+                                          COutput&& c_output) const {
+    return Plan::required_workspace(config, std::forward<M>(m), std::forward<N>(n), std::forward<K>(k),
+                                    std::forward<A>(a), std::forward<B>(b), std::forward<CInput>(c_input),
+                                    std::forward<COutput>(c_output));
   }
 
   /// Run `C = A*B^T` on an execution scope (see required_workspace for the
   /// C-to-accumulator adaptation).
-  template <execution::ExecutionScope Scope,
-            meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
-            tensor::InputOperand A, tensor::InputOperand B,
-            tensor::OutputOperand C>
-  VECOPS_INLINE void operator()(
-      Scope& scope, M&& m, N&& n, K&& k,
-      A&& a, B&& b, C&& c) const {
+  template <execution::ExecutionScope Scope, meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
+            tensor::InputOperand A, tensor::InputOperand B, tensor::OutputOperand C>
+  VECOPS_INLINE void operator()(Scope& scope, M&& m, N&& n, K&& k, A&& a, B&& b, C&& c) const {
     // Same zeros-transform adaptation as required_workspace above.
-    auto c_output = tensor::as_output_spec<typename Atom::TAcc>(
-        std::forward<C>(c));
+    auto c_output = tensor::as_output_spec<typename Atom::TAcc>(std::forward<C>(c));
     using Memory = typename decltype(c_output)::MemoryElement;
-    auto c_input = tensor::input<typename Atom::TAcc>(
-        c_output.tensor(),
-        tensor::zeros_transform<typename Atom::TAcc, Memory>);
-    Plan::run(
-        scope, config, std::forward<M>(m), std::forward<N>(n),
-        std::forward<K>(k), std::forward<A>(a), std::forward<B>(b),
-        std::move(c_input), std::move(c_output));
+    auto c_input =
+      tensor::input<typename Atom::TAcc>(c_output.tensor(), tensor::zeros_transform<typename Atom::TAcc, Memory>);
+    Plan::run(scope, config, std::forward<M>(m), std::forward<N>(n), std::forward<K>(k), std::forward<A>(a),
+              std::forward<B>(b), std::move(c_input), std::move(c_output));
   }
 
   /// Run `COutput = CInput + A*B^T` on an execution scope.
-  template <execution::ExecutionScope Scope,
-            meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
-            tensor::InputOperand A, tensor::InputOperand B,
-            tensor::InputOperand CInput, tensor::OutputOperand COutput>
-  VECOPS_INLINE void operator()(
-      Scope& scope, M&& m, N&& n, K&& k,
-      A&& a, B&& b, CInput&& c_input, COutput&& c_output) const {
-    Plan::run(
-        scope, config, std::forward<M>(m), std::forward<N>(n),
-        std::forward<K>(k), std::forward<A>(a), std::forward<B>(b),
-        std::forward<CInput>(c_input), std::forward<COutput>(c_output));
+  template <execution::ExecutionScope Scope, meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
+            tensor::InputOperand A, tensor::InputOperand B, tensor::InputOperand CInput, tensor::OutputOperand COutput>
+  VECOPS_INLINE void operator()(Scope& scope, M&& m, N&& n, K&& k, A&& a, B&& b, CInput&& c_input,
+                                COutput&& c_output) const {
+    Plan::run(scope, config, std::forward<M>(m), std::forward<N>(n), std::forward<K>(k), std::forward<A>(a),
+              std::forward<B>(b), std::forward<CInput>(c_input), std::forward<COutput>(c_output));
   }
 
   /// Single-C form on a raw workspace: wraps it in a temporary
   /// ExecutionSession and forwards.
-  template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
-            tensor::InputOperand A, tensor::InputOperand B,
+  template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K, tensor::InputOperand A, tensor::InputOperand B,
             tensor::OutputOperand C>
-  VECOPS_INLINE void operator()(
-      kernel::WorkspaceView& workspace, M&& m, N&& n, K&& k,
-      A&& a, B&& b, C&& c) const {
+  VECOPS_INLINE void operator()(kernel::WorkspaceView& workspace, M&& m, N&& n, K&& k, A&& a, B&& b, C&& c) const {
     ExecutionSession execution{workspace};
-    (*this)(execution, std::forward<M>(m), std::forward<N>(n),
-            std::forward<K>(k), std::forward<A>(a), std::forward<B>(b),
-            std::forward<C>(c));
+    (*this)(execution, std::forward<M>(m), std::forward<N>(n), std::forward<K>(k), std::forward<A>(a),
+            std::forward<B>(b), std::forward<C>(c));
   }
 
   /// Explicit-C form on a raw workspace: wraps it in a temporary
   /// ExecutionSession and forwards.
-  template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K,
-            tensor::InputOperand A, tensor::InputOperand B,
+  template <meta::ValueInput M, meta::ValueInput N, meta::ValueInput K, tensor::InputOperand A, tensor::InputOperand B,
             tensor::InputOperand CInput, tensor::OutputOperand COutput>
-  VECOPS_INLINE void operator()(
-      kernel::WorkspaceView& workspace, M&& m, N&& n, K&& k,
-      A&& a, B&& b, CInput&& c_input, COutput&& c_output) const {
+  VECOPS_INLINE void operator()(kernel::WorkspaceView& workspace, M&& m, N&& n, K&& k, A&& a, B&& b, CInput&& c_input,
+                                COutput&& c_output) const {
     ExecutionSession execution{workspace};
-    (*this)(execution, std::forward<M>(m), std::forward<N>(n),
-            std::forward<K>(k), std::forward<A>(a), std::forward<B>(b),
-            std::forward<CInput>(c_input),
-            std::forward<COutput>(c_output));
+    (*this)(execution, std::forward<M>(m), std::forward<N>(n), std::forward<K>(k), std::forward<A>(a),
+            std::forward<B>(b), std::forward<CInput>(c_input), std::forward<COutput>(c_output));
   }
-
 };
 
 /// Factory: wrap a MatmulConfig into a Matmul operator object.
 template <typename Config>
 VECOPS_INLINE constexpr auto matmul(Config config) {
   return Matmul<Config>{std::move(config)};
+}
+
+/** Factory for a fully bound stateful single-C Matmul. */
+template <typename Config, meta::ValueInput M, meta::ValueInput N, meta::ValueInput K, tensor::InputOperand A,
+          tensor::InputOperand B, tensor::OutputOperand C>
+VECOPS_INLINE auto matmul(kernel::WorkspaceView& workspace, Config config, M&& m, N&& n, K&& k, A&& a, B&& b, C&& c) {
+  return Matmul<Config>{std::move(config)}.prepare(workspace, std::forward<M>(m), std::forward<N>(n),
+                                                   std::forward<K>(k), std::forward<A>(a), std::forward<B>(b),
+                                                   std::forward<C>(c));
 }
 
 } // namespace vecops::ops

@@ -26,6 +26,7 @@
 #include <pybind11/stl/filesystem.h>
 
 #include "vecops/compiler/Compiler.h"
+#include "vecops/kernel/Workspace.h"
 #include "vecops/runtime/Executable.h"
 #include "vecops/runtime/OperatorBridgeAbi.h"
 #include "vecops/runtime/Provider.h"
@@ -625,7 +626,8 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
     auto values = state->default_values[index];
     for (const auto& [name, value] : kernel_call.values())
       values.insert_or_assign(name, value);
-    auto result = state->operator_instances[index]->invoke(KernelCall(kernel_call.arguments(), std::move(values)));
+    auto result = state->operator_instances[index]->invoke(KernelCall(kernel_call.arguments(), std::move(values)),
+                                                           call->context, call->workspace, call->workspace_size);
     if (result.ok())
       return result;
     if (result.code() != StatusCode::InvalidArgument && result.code() != StatusCode::NotApplicable &&
@@ -641,12 +643,18 @@ Status invoke(const Executable& executable, const PyArgumentMetadata& arguments)
   const auto required = executable.workspace_size(arguments.metadata());
   if (!required)
     return required.status();
-  if (required.value() > std::numeric_limits<std::size_t>::max()) {
+  if (required.value() > std::numeric_limits<std::size_t>::max() ||
+      required.value() >
+        static_cast<std::uint64_t>(std::numeric_limits<vecops::nint_t>::max() - vecops::vec::DEFAULT_ALIGNMENT)) {
     return Status(StatusCode::InvalidArgument, "kernel workspace size exceeds the host address space");
   }
 
-  std::vector<std::byte> workspace(static_cast<std::size_t>(required.value()));
-  return executable.invoke(arguments.metadata(), workspace.empty() ? nullptr : workspace.data(), workspace.size());
+  vecops::kernel::Workspace storage(static_cast<vecops::nint_t>(required.value()));
+  auto view = storage.view();
+  void* workspace = required.value() == 0
+                      ? nullptr
+                      : view.allocate(static_cast<vecops::nint_t>(required.value()), vecops::vec::DEFAULT_ALIGNMENT);
+  return executable.invoke(arguments.metadata(), workspace, required.value());
 }
 
 /** Joins the configure and build logs while preserving their stage labels. */

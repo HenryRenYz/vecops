@@ -1,5 +1,8 @@
 # Code organization
 
+Workspace trace/replay, fast/slow placement, and prepared-operator lifetime
+rules are described in [Workspace planning and prepared operators](WorkspacePlanning.md).
+
 Vecops is a header-heavy operator library. Directory boundaries therefore
 describe ownership and dependency direction rather than the usual split
 between declarations in headers and implementations in source files.

@@ -282,8 +282,12 @@ using KernelParameterDef = std::variant<TensorDef, ValueDef>;
  * @brief Complete source-kernel interface and named specialization vocabulary.
  *
  * Kernel source must define `void __kernel__(...)` with parameters matching
- * this declaration.  Every name used from `vecops::spec`, including shape,
- * stride, Dynamic-bound, and dtype references, is declared in `values`.
+ * this declaration, optionally preceded by `WorkspaceContext&`. The generated
+ * adapter selects the signature at compile time. The context-aware form can
+ * allocate dynamically, trace a logical plan, or replay a bound plan without
+ * duplicating workspace-size arithmetic.
+ * Every name used from `vecops::spec`, including shape, stride, Dynamic-bound,
+ * and dtype references, is declared in `values`.
  * `validate()` reports declaration errors without touching an invocation.
  */
 class KernelDef {

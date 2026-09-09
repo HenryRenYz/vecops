@@ -18,12 +18,24 @@ else()
 endif()
 
 if(TARGET vecops::compiler)
+    add_library(VecopsWorkspaceContextFixture MODULE
+        runtime/WorkspaceContextFixture.cpp)
+    target_compile_features(VecopsWorkspaceContextFixture PRIVATE cxx_std_20)
+    target_include_directories(VecopsWorkspaceContextFixture PRIVATE
+        "${VECOPS_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/runtime")
+    set_target_properties(VecopsWorkspaceContextFixture PROPERTIES
+        CXX_EXTENSIONS OFF
+        FOLDER runtime)
+
     add_executable(VecopsRuntimeTest runtime/RuntimeTest.cpp)
     target_compile_features(VecopsRuntimeTest PRIVATE cxx_std_20)
     target_compile_definitions(VecopsRuntimeTest PRIVATE
         "VECOPS_TEST_KERNEL=\"${VECOPS_SOURCE_DIR}/tests/runtime/TestKernel.cpp\""
-        "VECOPS_SOURCE_ROOT=\"${VECOPS_SOURCE_DIR}\"")
+        "VECOPS_SOURCE_ROOT=\"${VECOPS_SOURCE_DIR}\""
+        "VECOPS_WORKSPACE_CONTEXT_FIXTURE=\"$<TARGET_FILE:VecopsWorkspaceContextFixture>\"")
     target_link_libraries(VecopsRuntimeTest PRIVATE vecops::compiler)
+    add_dependencies(VecopsRuntimeTest VecopsWorkspaceContextFixture)
     set_target_properties(VecopsRuntimeTest PROPERTIES CXX_EXTENSIONS OFF FOLDER runtime)
     add_test(NAME VecopsRuntimeTest
         COMMAND VecopsRuntimeTest "${CMAKE_CURRENT_BINARY_DIR}/runtime-work")
@@ -46,6 +58,10 @@ vecops_add_test(NAME KernelLoopTest FILES kernel/LoopTest.cpp FOLDER kernel/loop
 vecops_add_test(NAME KernelTile2DTest FILES kernel/Tile2DTest.cpp FOLDER kernel/tile2d)
 vecops_add_test(NAME WorkspaceTest FILES kernel/WorkspaceTest.cpp
     FOLDER kernel/workspace ARCH Scalar)
+vecops_add_test(NAME WorkspacePlanTest FILES execution/WorkspacePlanTest.cpp
+    FOLDER execution/workspace_plan ARCH Scalar)
+vecops_add_test(NAME WorkspaceContextTest FILES execution/WorkspaceContextTest.cpp
+    FOLDER execution/workspace_context ARCH Scalar)
 vecops_add_test(NAME MatmulTilerTest FILES matmul/TilerTest.cpp FOLDER matmul/tiler)
 vecops_add_test(
     NAME ExecutionSessionTest
@@ -363,5 +379,11 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
         endforeach()
     endif()
 endif()
+
+vecops_add_test(
+    NAME StatefulMatmulTest
+    FILES ops/StatefulMatmulTest.cpp
+    FOLDER ops/matmul
+    ARCH Native)
 vecops_add_test(NAME VecRequestTest FILES vec/RequestTest.cpp
     FOLDER vec/request ARCH ${VEC_BASE_ARCH} LABELS vec)

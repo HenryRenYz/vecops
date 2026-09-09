@@ -120,8 +120,9 @@ typedef struct VecopsParameterDescriptor {
  * @brief Callback that reports temporary external workspace in bytes.
  *
  * It receives validated metadata and must write `*workspace_size` on success.
- * It must not write tensor storage.  Compiler-generated source kernels always
- * return zero because their `Workspace` allocation is internal.
+ * It must not write tensor storage. Compiler-generated source kernels
+ * currently return zero: their `WorkspaceContext` uses the optional call-frame
+ * workspace as a fast arena and dynamically owns any preferred spill.
  */
 typedef int32_t (*VecopsWorkspaceFn)(const VecopsCall*, uint64_t*, VecopsError*);
 /** @brief Callback that synchronously executes a validated call frame. */
