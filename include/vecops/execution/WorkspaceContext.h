@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "vecops/Assertion.h"
+#include "vecops/execution/Parallel.h"
 #include "vecops/execution/WorkspacePlan.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/runtime/CallAbi.h"
@@ -325,6 +326,9 @@ private:
  * arenas, and uses replay for later identical calls. It is intentionally an
  * execution-thread object: callers that need cross-thread ownership, HBM
  * placement, or model-wide lifetime coloring should pass their own context.
+ * The ambient maximum parallelism is folded into every decision fingerprint
+ * so worker-local replica counts remain valid when a framework changes its
+ * thread setting between calls.
  *
  * `Setup` must accept an object exposing `observe_axis(AxisContract)` and
  * `Invoke` must synchronously accept `WorkspaceContext&`. Allocation topology
@@ -342,6 +346,11 @@ public:
 
   template <typename Setup, typename Invoke>
   void invoke(std::string_view recipe, DecisionFingerprint fingerprint, Setup&& setup, Invoke&& invoke) {
+    // Worker-local allocation counts commonly depend on the ambient OpenMP
+    // team size. Tensor metadata alone therefore cannot identify a safe
+    // replay plan when a framework changes its thread count between calls.
+    fingerprint.decision = workspace_plan_details::mix(
+      fingerprint.decision, static_cast<std::uint64_t>(max_parallelism()));
     AxisCollector observed;
     setup(observed);
     auto found = std::find_if(entries_.begin(), entries_.end(), [&](const Entry& entry) {

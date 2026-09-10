@@ -105,6 +105,13 @@ operator destruction invalidates the cached weak owner. Set
 `VECOPS_TORCH_PREPARED_CALL=0` before process startup to disable this hot path
 for diagnostics.
 
+Source kernels without an external workspace use a small thread-local
+workspace replay cache. Its identity includes both the observed Dynamic axes
+and the ambient vecops parallelism. This is required because worker-local
+scratch replication often depends on the current OpenMP team size; changing a
+framework's thread count therefore selects or traces a separate plan instead
+of reusing a plan with too few worker replicas.
+
 There is no `runtime/Abi.h` umbrella. Include the protocol header that a
 component actually implements, avoiding unintended bridge dependencies in an
 artifact DSO.

@@ -6,6 +6,10 @@
 
 #include "vecops/execution/WorkspaceContext.h"
 
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+
 namespace {
 
 using namespace vecops;
@@ -108,5 +112,43 @@ TEST(WorkspaceContextTest, DefaultReplayCacheTracesEachAxisShapeOnce) {
   EXPECT_EQ(traces, 2);
   EXPECT_EQ(replays, 2);
 }
+
+#if defined(_OPENMP)
+TEST(WorkspaceContextTest, ReplayCacheSeparatesAmbientParallelism) {
+  WorkspaceReplayCache cache{2};
+  int traces = 0;
+  int replays = 0;
+  const int previous_threads = omp_get_max_threads();
+  auto run = [&] {
+    cache.invoke(
+      "parallel-kernel", [](auto&) {},
+      [&](WorkspaceContext& workspace) {
+        if (workspace.is_tracing())
+          ++traces;
+        if (workspace.is_replaying())
+          ++replays;
+        const nint_t workers = max_parallelism();
+        auto phase = workspace.serial_scope("phase");
+        auto slot = workspace.request(
+          "scratch", {.bytes = 64,
+                      .domain = WorkspaceDomain::WorkerLocal,
+                      .replicas = workers});
+        for (nint_t worker = 0; worker < workers; ++worker)
+          EXPECT_NE(slot.replica(worker), nullptr);
+      });
+  };
+
+  omp_set_num_threads(1);
+  run();
+  run();
+  omp_set_num_threads(2);
+  run();
+  run();
+  omp_set_num_threads(previous_threads);
+
+  EXPECT_EQ(traces, 2);
+  EXPECT_EQ(replays, 2);
+}
+#endif
 
 } // namespace
