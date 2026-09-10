@@ -101,8 +101,6 @@ Status SourceKernelRecipe::match(const KernelCall& call) const {
 }
 
 Result<BoundKernelRecipe> SourceKernelRecipe::bind(const KernelCall& call) const {
-  if (auto status = match(call); !status.ok())
-    return status;
   auto values = default_values_;
   for (const auto& [name, value] : call.values())
     values.insert_or_assign(name, value);
@@ -166,9 +164,13 @@ Result<std::shared_ptr<Executable>> Operator::resolve(const KernelCall& call) co
   auto normalized = normalize(call);
   if (!normalized)
     return normalized.status();
+  return resolve_normalized(normalized.value());
+}
+
+Result<std::shared_ptr<Executable>> Operator::resolve_normalized(const KernelCall& call) const {
   if (dispatch_policy_ == nullptr || provider_ == nullptr)
     return Status(StatusCode::InternalError, "operator has no dispatch policy or executable provider");
-  auto candidates = dispatch_policy_->candidates(normalized.value(), recipes_);
+  auto candidates = dispatch_policy_->candidates(call, recipes_);
   if (!candidates)
     return candidates.status();
   Status last_status(StatusCode::NotFound, "no kernel recipe accepted this invocation");
@@ -176,7 +178,7 @@ Result<std::shared_ptr<Executable>> Operator::resolve(const KernelCall& call) co
     if (index >= recipes_.size() || recipes_[index] == nullptr)
       return Status(StatusCode::InternalError, "dispatch policy returned an invalid recipe index");
     const auto& recipe = recipes_[index];
-    auto status = recipe->match(normalized.value());
+    auto status = recipe->match(call);
     if (!status.ok()) {
       if (status.code() == StatusCode::NotApplicable) {
         last_status = status;
@@ -184,7 +186,7 @@ Result<std::shared_ptr<Executable>> Operator::resolve(const KernelCall& call) co
       }
       return status;
     }
-    auto bound = recipe->bind(normalized.value());
+    auto bound = recipe->bind(call);
     if (!bound) {
       if (bound.status().code() == StatusCode::NotApplicable) {
         last_status = bound.status();
@@ -215,11 +217,10 @@ Result<std::shared_ptr<Executable>> Operator::resolve(const KernelCall& call) co
 
 Status Operator::invoke(const ArgumentMetadata& arguments, void* workspace, std::uint64_t workspace_size,
                         const VecopsExecutionContext* context) const {
-  KernelCall call(arguments);
-  auto normalized = normalize(call);
+  auto normalized = normalize(KernelCall(arguments));
   if (!normalized)
     return normalized.status();
-  auto executable = resolve(normalized.value());
+  auto executable = resolve_normalized(normalized.value());
   if (!executable)
     return executable.status();
   return executable.value()->invoke(normalized.value().arguments(), workspace, workspace_size, context);
@@ -230,7 +231,7 @@ Status Operator::invoke(const KernelCall& call, const VecopsExecutionContext* co
   auto normalized = normalize(call);
   if (!normalized)
     return normalized.status();
-  auto executable = resolve(normalized.value());
+  auto executable = resolve_normalized(normalized.value());
   if (!executable)
     return executable.status();
   return executable.value()->invoke(normalized.value().arguments(), workspace, workspace_size, context);

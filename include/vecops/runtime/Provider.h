@@ -5,11 +5,13 @@
 #ifndef VECOPS_RUNTIME_PROVIDER_H
 #define VECOPS_RUNTIME_PROVIDER_H
 
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 #include "vecops/runtime/Operator.h"
@@ -64,7 +66,9 @@ struct ArtifactProviderConfig {
  *
  * CacheOnly performs only existence checks, directory enumeration, DSO reads,
  * and in-memory memoization. In particular it never calls `build` and never
- * creates or updates a filesystem object.
+ * creates or updates a filesystem object. Resolution is synchronized per
+ * artifact key: identical concurrent misses share one result, while distinct
+ * specializations may load or build concurrently.
  */
 class ArtifactExecutableProvider final : public ExecutableProvider {
 public:
@@ -74,6 +78,12 @@ public:
   [[nodiscard]] Result<std::shared_ptr<Executable>> resolve(const BoundKernelRecipe& recipe) override;
 
 private:
+  struct InFlight {
+    std::condition_variable ready;
+    bool complete = false;
+    std::optional<Result<std::shared_ptr<Executable>>> result;
+  };
+
   [[nodiscard]] std::string key(const BoundKernelRecipe& recipe) const;
   [[nodiscard]] Result<std::shared_ptr<Executable>> load_cached(const BoundKernelRecipe& recipe,
                                                                 std::string_view key) const;
@@ -83,6 +93,7 @@ private:
   ArtifactProviderConfig config_;
   std::mutex mutex_;
   std::map<std::string, std::shared_ptr<Executable>, std::less<>> memory_cache_;
+  std::map<std::string, std::shared_ptr<InFlight>, std::less<>> in_flight_;
 };
 
 } // namespace vecops::runtime

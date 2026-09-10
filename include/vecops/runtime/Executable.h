@@ -144,6 +144,22 @@ public:
   [[nodiscard]] Status invoke(const ArgumentMetadata& arguments, void* workspace = nullptr,
                               std::uint64_t workspace_size = 0, const VecopsExecutionContext* context = nullptr) const;
 
+  /**
+   * @brief Invoke an ABI frame already proven to match this specialization.
+   * @param call Complete call frame whose metadata was validated against this
+   * executable and has not changed except for tensor storage locations and
+   * runtime scalar payloads.
+   * @return Kernel status.
+   *
+   * This expert hot-path entry skips descriptor and workspace validation.  It
+   * is intended for framework bridges that retain this Executable and guard
+   * every invocation against the metadata of a previously successful call.
+   * Calling it with different tensor metadata, scalar dtype,
+   * optional-presence, specialization value, context, or workspace contract
+   * is invalid.
+   */
+  [[nodiscard]] Status invoke_prevalidated(const VecopsCall& call) const;
+
 private:
   [[nodiscard]] Status invoke_unchecked(const VecopsCall& call) const;
   std::shared_ptr<LoadedModule> module_;

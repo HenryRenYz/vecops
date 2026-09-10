@@ -309,4 +309,8 @@ Status Executable::invoke_unchecked(const VecopsCall& call) const {
   return kernel_status(result, error, "kernel execution failed");
 }
 
+Status Executable::invoke_prevalidated(const VecopsCall& call) const {
+  return invoke_unchecked(call);
+}
+
 } // namespace vecops::runtime

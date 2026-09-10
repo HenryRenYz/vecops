@@ -8,13 +8,17 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <cstdint>
 #include <limits>
 #include <atomic>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -346,6 +350,122 @@ vecops::runtime::SpecializationValues specialization_values(py::dict values) {
   return result;
 }
 
+/** Metadata identity used by the allocation-free framework hot path. */
+struct BridgeValueSignature {
+  std::uint32_t kind = VECOPS_VALUE_NONE;
+  std::uint32_t dtype = VECOPS_DTYPE_INVALID;
+  std::uint32_t device_type = 0;
+  std::int32_t device_index = 0;
+  std::uint64_t flags = 0;
+  std::vector<std::int64_t> sizes;
+  std::vector<std::int64_t> strides;
+};
+
+struct BridgeSpecializationSignature {
+  std::string name;
+  std::uint32_t kind = 0;
+  std::int64_t integer = 0;
+  std::uint32_t dtype = VECOPS_DTYPE_INVALID;
+};
+
+struct BridgeCallSignature {
+  std::vector<BridgeValueSignature> values;
+  std::vector<BridgeSpecializationSignature> specializations;
+
+  [[nodiscard]] static std::optional<BridgeCallSignature> capture(const VecopsCall& call, std::uint32_t num_specs,
+                                                                  const VecopsSpecializationArgument* specs) {
+    BridgeCallSignature result;
+    result.values.reserve(call.num_values);
+    for (std::uint32_t index = 0; index < call.num_values; ++index) {
+      const auto& value = call.values[index];
+      if (value.struct_size < sizeof(VecopsValue))
+        return std::nullopt;
+      BridgeValueSignature captured;
+      captured.kind = value.kind;
+      if (value.kind == VECOPS_VALUE_TENSOR) {
+        const auto& tensor = value.value.tensor;
+        if (tensor.struct_size < sizeof(VecopsTensorView) ||
+            (tensor.rank != 0 && (tensor.sizes == nullptr || tensor.strides == nullptr)))
+          return std::nullopt;
+        captured.dtype = tensor.dtype;
+        captured.device_type = tensor.device_type;
+        captured.device_index = tensor.device_index;
+        captured.flags = tensor.flags;
+        if (tensor.rank != 0) {
+          captured.sizes.assign(tensor.sizes, tensor.sizes + tensor.rank);
+          captured.strides.assign(tensor.strides, tensor.strides + tensor.rank);
+        }
+      } else if (value.kind == VECOPS_VALUE_SCALAR) {
+        if (value.value.scalar.struct_size < sizeof(VecopsScalar))
+          return std::nullopt;
+        captured.dtype = value.value.scalar.dtype;
+      } else if (value.kind != VECOPS_VALUE_NONE) {
+        return std::nullopt;
+      }
+      result.values.push_back(std::move(captured));
+    }
+    result.specializations.reserve(num_specs);
+    for (std::uint32_t index = 0; index < num_specs; ++index) {
+      const auto& spec = specs[index];
+      if (spec.struct_size < sizeof(VecopsSpecializationArgument) || spec.name == nullptr)
+        return std::nullopt;
+      BridgeSpecializationSignature captured;
+      captured.name = spec.name;
+      captured.kind = spec.kind;
+      if (spec.kind == VECOPS_SPECIALIZATION_CONST_INT)
+        captured.integer = spec.value.integer;
+      else if (spec.kind == VECOPS_SPECIALIZATION_DTYPE)
+        captured.dtype = spec.value.dtype;
+      else
+        return std::nullopt;
+      result.specializations.push_back(std::move(captured));
+    }
+    return result;
+  }
+
+  [[nodiscard]] bool matches(const VecopsCall& call, std::uint32_t num_specs,
+                             const VecopsSpecializationArgument* specs) const {
+    if (call.num_values != values.size() || num_specs != specializations.size())
+      return false;
+    for (std::uint32_t index = 0; index < call.num_values; ++index) {
+      const auto& value = call.values[index];
+      const auto& expected = values[index];
+      if (value.struct_size < sizeof(VecopsValue) || value.kind != expected.kind)
+        return false;
+      if (value.kind == VECOPS_VALUE_TENSOR) {
+        const auto& tensor = value.value.tensor;
+        if (tensor.struct_size < sizeof(VecopsTensorView) || tensor.dtype != expected.dtype ||
+            tensor.device_type != expected.device_type || tensor.device_index != expected.device_index ||
+            tensor.flags != expected.flags || tensor.rank != expected.sizes.size() ||
+            (tensor.rank != 0 && (tensor.sizes == nullptr || tensor.strides == nullptr)))
+          return false;
+        bool has_elements = true;
+        for (std::uint32_t axis = 0; axis < tensor.rank; ++axis) {
+          if (tensor.sizes[axis] != expected.sizes[axis] || tensor.strides[axis] != expected.strides[axis])
+            return false;
+          has_elements = has_elements && tensor.sizes[axis] != 0;
+        }
+        if (has_elements && tensor.data == nullptr)
+          return false;
+      } else if (value.kind == VECOPS_VALUE_SCALAR) {
+        if (value.value.scalar.struct_size < sizeof(VecopsScalar) || value.value.scalar.dtype != expected.dtype)
+          return false;
+      }
+    }
+    for (std::uint32_t index = 0; index < num_specs; ++index) {
+      const auto& spec = specs[index];
+      const auto& expected = specializations[index];
+      if (spec.struct_size < sizeof(VecopsSpecializationArgument) || spec.name == nullptr ||
+          spec.kind != expected.kind || expected.name != spec.name)
+        return false;
+      if ((spec.kind == VECOPS_SPECIALIZATION_CONST_INT && spec.value.integer != expected.integer) ||
+          (spec.kind == VECOPS_SPECIALIZATION_DTYPE && spec.value.dtype != expected.dtype))
+        return false;
+    }
+    return true;
+  }
+};
+
 class PyKernelCall {
 public:
   PyKernelCall(PyArgumentMetadata arguments, py::dict values)
@@ -560,6 +680,43 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
     return Status(StatusCode::InvalidArgument, "framework bridge received an invalid call");
   if (num_specs != 0 && specs == nullptr)
     return Status(StatusCode::InvalidArgument, "framework bridge received no specialization array");
+
+  // Generated Torch bridges use no external context or workspace.  Retain a
+  // small per-thread set of exact metadata specializations so alternating AF3
+  // operators can bypass registry locking, schema binding, provider lookup,
+  // and owning metadata conversion after one successful slow invocation.
+  struct HotEntry {
+    std::uint64_t handle = 0;
+    std::weak_ptr<PyOperator::State> state;
+    std::shared_ptr<Executable> executable;
+    BridgeCallSignature signature;
+    std::uint64_t last_use = 0;
+  };
+  constexpr std::size_t hot_capacity = 8;
+  static thread_local std::array<std::optional<HotEntry>, hot_capacity> hot_entries;
+  static thread_local std::uint64_t hot_clock = 0;
+  static const bool hot_path_enabled = [] {
+    const char* value = std::getenv("VECOPS_TORCH_PREPARED_CALL");
+    return value == nullptr || std::strcmp(value, "0") != 0;
+  }();
+  const bool cacheable =
+    hot_path_enabled && call->context == nullptr && call->workspace == nullptr && call->workspace_size == 0;
+  if (cacheable) {
+    for (auto& slot : hot_entries) {
+      if (!slot || slot->handle != handle)
+        continue;
+      auto owner = slot->state.lock();
+      if (!owner) {
+        slot.reset();
+        continue;
+      }
+      if (slot->signature.matches(*call, num_specs, specs)) {
+        slot->last_use = ++hot_clock;
+        return slot->executable->invoke_prevalidated(*call);
+      }
+    }
+  }
+
   std::shared_ptr<PyOperator::State> state;
   {
     std::lock_guard lock(PyOperator::operator_registry_mutex);
@@ -626,14 +783,33 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
     auto values = state->default_values[index];
     for (const auto& [name, value] : kernel_call.values())
       values.insert_or_assign(name, value);
-    auto result = state->operator_instances[index]->invoke(KernelCall(kernel_call.arguments(), std::move(values)),
-                                                           call->context, call->workspace, call->workspace_size);
-    if (result.ok())
+    auto executable = state->operator_instances[index]->resolve(KernelCall(kernel_call.arguments(), std::move(values)));
+    if (executable) {
+      auto result =
+        executable.value()->invoke(kernel_call.arguments(), call->workspace, call->workspace_size, call->context);
+      if (!result.ok())
+        return result;
+      if (cacheable) {
+        auto signature = BridgeCallSignature::capture(*call, num_specs, specs);
+        if (signature) {
+          std::size_t replace = 0;
+          for (std::size_t candidate = 0; candidate < hot_entries.size(); ++candidate) {
+            if (!hot_entries[candidate]) {
+              replace = candidate;
+              break;
+            }
+            if (hot_entries[candidate]->last_use < hot_entries[replace]->last_use)
+              replace = candidate;
+          }
+          hot_entries[replace].emplace(HotEntry{handle, state, executable.value(), std::move(*signature), ++hot_clock});
+        }
+      }
       return result;
-    if (result.code() != StatusCode::InvalidArgument && result.code() != StatusCode::NotApplicable &&
-        result.code() != StatusCode::NotFound)
-      return result;
-    last = std::move(result);
+    }
+    if (executable.status().code() != StatusCode::InvalidArgument &&
+        executable.status().code() != StatusCode::NotApplicable && executable.status().code() != StatusCode::NotFound)
+      return executable.status();
+    last = executable.status();
   }
   return last;
 }

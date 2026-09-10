@@ -33,7 +33,10 @@ def register(qualified_name, dispatch, *, compiler=None, **options):
   ``qualified_name`` must use ``"library::operator"`` form. ``dispatch`` may
   be one recipe, an ordered recipe sequence, or an existing public Operator.
   The returned callable accepts named specialization values unlike raw
-  ``torch.ops`` and leaves outputs caller-allocated/mutable.
+  ``torch.ops`` and leaves outputs caller-allocated/mutable. Pass
+  ``return_outputs=True`` when an older TorchInductor requires the internal
+  mutable operator to return Tensor values rather than ``()``; the public
+  callable returns the original output objects in either mode.
   """
   library, name = _name(qualified_name)
   if isinstance(dispatch, JitKernel):

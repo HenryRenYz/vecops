@@ -7,13 +7,18 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <concepts>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifndef VECOPS_TEST_KERNEL
@@ -397,6 +402,47 @@ int main(int argc, char** argv) {
                              std::make_shared<WrongProvider>(executable.value()));
   auto wrong = wrong_provider_op.resolve(wrong_call);
   require(!wrong.ok() && wrong.status().code() == StatusCode::AbiMismatch, "provider specialization guard");
+
+  auto first_bound = recipe->bind(call);
+  require(first_bound.ok(), "bind provider concurrency request");
+  auto second_bound = first_bound.value();
+  second_bound.artifact_key += ";independent-key";
+  std::mutex build_mutex;
+  std::condition_variable build_ready;
+  int concurrent_builds = 0;
+  bool concurrency_timeout = false;
+  ArtifactProviderConfig concurrent_config;
+  concurrent_config.mode = ArtifactCacheMode::CompileOnly;
+  concurrent_config.build = [&](const BoundKernelRecipe&) -> Result<std::shared_ptr<Executable>> {
+    std::unique_lock lock(build_mutex);
+    ++concurrent_builds;
+    build_ready.notify_all();
+    if (!build_ready.wait_for(lock, std::chrono::seconds(2), [&] { return concurrent_builds == 2; }))
+      concurrency_timeout = true;
+    return Status(StatusCode::NotFound, "intentional concurrent-build probe");
+  };
+  ArtifactExecutableProvider concurrent_provider(std::move(concurrent_config));
+  auto first_future = std::async(std::launch::async, [&] { return concurrent_provider.resolve(first_bound.value()); });
+  auto second_future = std::async(std::launch::async, [&] { return concurrent_provider.resolve(second_bound); });
+  require(!first_future.get().ok() && !second_future.get().ok(), "concurrent provider probe results");
+  require(concurrent_builds == 2 && !concurrency_timeout,
+          "different provider keys must enter the build callback concurrently");
+
+  std::atomic<int> coalesced_builds{0};
+  ArtifactProviderConfig coalesced_config;
+  coalesced_config.mode = ArtifactCacheMode::CompileOnly;
+  coalesced_config.build = [&](const BoundKernelRecipe&) -> Result<std::shared_ptr<Executable>> {
+    ++coalesced_builds;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    return executable.value();
+  };
+  ArtifactExecutableProvider coalesced_provider(std::move(coalesced_config));
+  auto coalesced_first =
+    std::async(std::launch::async, [&] { return coalesced_provider.resolve(first_bound.value()); });
+  auto coalesced_second =
+    std::async(std::launch::async, [&] { return coalesced_provider.resolve(first_bound.value()); });
+  require(coalesced_first.get().ok() && coalesced_second.get().ok(), "coalesced provider probe results");
+  require(coalesced_builds.load() == 1, "identical provider keys must share one in-flight build");
 
   const auto absent_cache = work_directory / "must-not-be-created";
   ArtifactExecutableProvider absent_provider(

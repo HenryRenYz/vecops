@@ -10,6 +10,7 @@
 #include "vecops/runtime/Provider.h"
 
 #include <atomic>
+#include <exception>
 #include <iomanip>
 #include <sstream>
 #include <system_error>
@@ -126,40 +127,66 @@ Result<std::shared_ptr<Executable>> ArtifactExecutableProvider::publish(const Bo
 }
 
 Result<std::shared_ptr<Executable>> ArtifactExecutableProvider::resolve(const BoundKernelRecipe& recipe) {
-  std::lock_guard lock(mutex_);
   const auto cache_key = key(recipe);
-  if (const auto found = memory_cache_.find(cache_key); found != memory_cache_.end())
-    return found->second;
-
-  if (config_.mode != ArtifactCacheMode::CompileOnly) {
-    auto cached = load_cached(recipe, cache_key);
-    if (cached) {
-      memory_cache_.emplace(cache_key, cached.value());
-      return cached;
+  std::shared_ptr<InFlight> in_flight;
+  {
+    std::unique_lock lock(mutex_);
+    if (const auto found = memory_cache_.find(cache_key); found != memory_cache_.end())
+      return found->second;
+    if (const auto found = in_flight_.find(cache_key); found != in_flight_.end()) {
+      in_flight = found->second;
+      in_flight->ready.wait(lock, [&] { return in_flight->complete; });
+      return *in_flight->result;
     }
-    if (cached.status().code() != StatusCode::NotFound)
-      return cached.status();
+    in_flight = std::make_shared<InFlight>();
+    in_flight_.emplace(cache_key, in_flight);
   }
-  if (config_.mode == ArtifactCacheMode::CacheOnly)
-    return status(StatusCode::NotFound, "kernel artifact is absent in cache-only mode");
-  if (!config_.build)
-    return status(StatusCode::NotFound, "kernel compilation is not configured");
 
-  auto compiled = config_.build(recipe);
-  if (!compiled)
-    return compiled.status();
-  if (compiled.value() == nullptr)
-    return status(StatusCode::InternalError, "kernel builder returned null");
-  if (compiled.value()->specialization_key() != recipe.specialization_key)
-    return status(StatusCode::AbiMismatch, "compiled artifact specialization key mismatch");
-  if (config_.mode == ArtifactCacheMode::ReadWrite) {
-    auto cached = publish(recipe, cache_key, compiled.value());
-    if (!cached)
-      return cached.status();
-    compiled = std::move(cached);
+  auto resolved = [&]() -> Result<std::shared_ptr<Executable>> {
+    try {
+      if (config_.mode != ArtifactCacheMode::CompileOnly) {
+        auto cached = load_cached(recipe, cache_key);
+        if (cached)
+          return cached;
+        if (cached.status().code() != StatusCode::NotFound)
+          return cached.status();
+      }
+      if (config_.mode == ArtifactCacheMode::CacheOnly)
+        return status(StatusCode::NotFound, "kernel artifact is absent in cache-only mode");
+      if (!config_.build)
+        return status(StatusCode::NotFound, "kernel compilation is not configured");
+
+      auto compiled = config_.build(recipe);
+      if (!compiled)
+        return compiled.status();
+      if (compiled.value() == nullptr)
+        return status(StatusCode::InternalError, "kernel builder returned null");
+      if (compiled.value()->specialization_key() != recipe.specialization_key)
+        return status(StatusCode::AbiMismatch, "compiled artifact specialization key mismatch");
+      if (config_.mode == ArtifactCacheMode::ReadWrite) {
+        auto cached = publish(recipe, cache_key, compiled.value());
+        if (!cached)
+          return cached.status();
+        compiled = std::move(cached);
+      }
+      return compiled;
+    } catch (const std::exception& error) {
+      return status(StatusCode::InternalError, "kernel resolution threw an exception: " + std::string(error.what()));
+    } catch (...) {
+      return status(StatusCode::InternalError, "kernel resolution threw an unknown exception");
+    }
+  }();
+
+  {
+    std::lock_guard lock(mutex_);
+    if (resolved)
+      memory_cache_.insert_or_assign(cache_key, resolved.value());
+    in_flight->result.emplace(resolved);
+    in_flight->complete = true;
+    in_flight_.erase(cache_key);
   }
-  memory_cache_.emplace(cache_key, compiled.value());
-  return compiled;
+  in_flight->ready.notify_all();
+  return resolved;
 }
 
 } // namespace vecops::runtime

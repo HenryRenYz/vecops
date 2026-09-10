@@ -172,6 +172,44 @@ scale.compile_for(
 Storage is deliberately not required during binding or `compile_for`; it is
 required and checked when an executable is actually invoked.
 
+For a Torch model containing several registered vecops operators, use the
+model-level collector instead of warming each operator serially:
+
+```python
+result = vecops.precompile(
+  model,
+  inputs,
+  parallelism=8,
+  use_real_tensors=False,
+)
+print(result.collected, result.elapsed_seconds)
+```
+
+The default trace runs inside `FakeTensorMode` and temporarily forces nested
+`torch.compile` callables to eager mode. Model parameters, inputs, and tensors
+created by Torch factory operations therefore carry metadata without backing
+storage. Every registered vecops wrapper records its tensor shape, element
+stride, dtype, optional presence, and explicit specialization values, then
+returns the caller-allocated output arguments without invoking native code.
+Exact duplicate requests are removed; runtime scalar payloads are deliberately
+not part of the deduplication key because they do not specialize artifacts.
+After tracing, `compile_batch()` submits the unique native `prepare()` calls to
+a bounded thread pool. Its `parallelism` argument limits simultaneous artifact
+requests; each request retains its compiler's own CMake job policy.
+
+Set `use_real_tensors=True` when fake execution is unsupported. Ordinary Torch
+operations then consume the supplied values, but vecops outputs remain
+uninitialized because native kernels are still skipped. Data-dependent model
+logic may consequently observe meaningless values. Models may query
+`vecops.is_precompiling()` to bypass such validation or stateful paths.
+
+`collect_compile_requests()` exposes the lower-level process-global collection
+context, and its collector's `requests` may be passed directly to
+`compile_batch()`. Nested or concurrent model collection is intentionally
+rejected; compilation itself is concurrent and starts only after collection
+has ended. A model that stores intermediate tensors in application-level
+caches should clear or restore those caches after the tracing pass.
+
 ## Framework registration
 
 A qualified framework name and ordered recipe sequence create one logical
@@ -186,14 +224,29 @@ run = vecops.ops.torch.register(
 )
 ```
 
-Torch's internal schema marks `Out`/`InOut` tensors mutable and returns `()`.
-The public wrapper returns the original output tensor objects. Generated
-bridges register CPU and Meta implementations, allowing the mutable wrapper to
-participate in `torch.compile`; the internal `torch.ops` name is not the public
-vecops calling convention. A bridge cache key includes the resolved native
-`vecops._C` path in addition to its generated source. This is intentional:
-schema-identical installations have independent operator-handle registries, so
-a bridge linked to one `_C` must never be reused with another installation.
+Torch's internal schema marks `Out`/`InOut` tensors mutable and returns `()` by
+default. `register(..., return_outputs=True)` additionally gives the internal
+op unannotated Tensor returns for older TorchInductor custom-op wrappers that
+reject void results. Mutation remains declared on the caller-owned arguments;
+the internal return is an implementation signal and the public wrapper always
+returns the original output tensor objects. Generated bridges register CPU and
+Meta implementations, allowing the mutable wrapper to participate in
+`torch.compile`; the internal `torch.ops` name is not the public vecops calling
+convention. A bridge cache key includes the resolved native `vecops._C` path in
+addition to its generated source. This is intentional: schema-identical
+installations have independent operator-handle registries, so a bridge linked
+to one `_C` must never be reused with another installation.
+`VECOPS_TORCH_BRIDGE_DIR` may place this stable registration cache separately
+from the kernel artifact root selected by `VECOPS_CACHE_DIR`.
+
+Generated Torch bridges build their `VecopsValue` and specialization arrays in
+fixed-size stack storage. Tensor size and stride pointers refer directly to
+the synchronous ATen arguments instead of being copied into temporary vectors.
+The native extension also caches exact, successfully resolved invocations per
+thread, so steady-state calls bypass handle-registry locking, schema binding,
+provider lookup, and workspace revalidation. Calls with different metadata or
+explicit specializations automatically take the slow path and populate a new
+entry. `VECOPS_TORCH_PREPARED_CALL=0` disables this optimization for A/B tests.
 
 NumPy uses the same ordered registration model:
 

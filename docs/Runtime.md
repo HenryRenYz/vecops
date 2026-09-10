@@ -54,7 +54,9 @@ positive power of two.
 
 ## Dispatch and cache policy
 
-`KernelRecipe::match` and `bind` are cheap metadata-only operations. An
+`KernelRecipe::match` and `bind` are cheap metadata-only operations. `bind`
+accepts a call that has already passed `match`; `Operator` performs that
+applicability check before binding instead of repeating it inside `bind`. An
 `OrderedDispatchPolicy` tries recipes in declaration order.  Only an
 `ExecutableProvider` may perform DSO loading, cache I/O, or compilation.
 
@@ -69,7 +71,10 @@ positive power of two.
 All modes may keep a successfully loaded executable in the provider's in-memory
 memoization.  The persistent key includes the bound recipe identity and the
 application namespace; applications must use distinct namespaces for
-incompatible target, compiler, or SDK populations.
+incompatible target, compiler, or SDK populations. Resolution is coordinated
+per persistent key: identical concurrent misses share one in-flight result,
+while different specializations may load or compile concurrently through the
+same provider.
 
 ## C ABI split
 
@@ -88,6 +93,17 @@ their `Workspace` is internal to `__kernel__`.
 extensions use an opaque handle to enter a Python-owned `Operator`; that
 handle must not be stored after the owner goes away. It is not part of an
 independently distributed kernel artifact's ABI.
+
+The Python extension keeps up to eight exact call signatures per thread for
+this process-local bridge. After a slow invocation has resolved and validated
+an `Executable`, a matching context-free, zero-external-workspace call may
+reuse that executable directly. The signature excludes tensor data addresses
+and runtime scalar payloads, but includes tensor kind, dtype, device, access,
+shape, stride, optional presence, and explicit specialization values. A shape
+or specialization change therefore returns to the normal bind/provider path;
+operator destruction invalidates the cached weak owner. Set
+`VECOPS_TORCH_PREPARED_CALL=0` before process startup to disable this hot path
+for diagnostics.
 
 There is no `runtime/Abi.h` umbrella. Include the protocol header that a
 component actually implements, avoiding unintended bridge dependencies in an

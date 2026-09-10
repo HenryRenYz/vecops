@@ -274,6 +274,8 @@ public:
 
 private:
   [[nodiscard]] Result<KernelCall> normalize(const KernelCall& call) const;
+  /** Resolve a call that has already passed this operator's normalization. */
+  [[nodiscard]] Result<std::shared_ptr<Executable>> resolve_normalized(const KernelCall& call) const;
   OperatorSchema schema_;
   std::shared_ptr<const KernelDef> kernel_definition_;
   std::vector<std::shared_ptr<const KernelRecipe>> recipes_;

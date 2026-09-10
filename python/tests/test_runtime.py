@@ -2,6 +2,7 @@
 
 import ctypes
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -379,3 +380,40 @@ def test_generated_torch_bridge_uses_mutable_out_schema() -> None:
   source = _generate_torch_source("vecops_test", "run", definition)
   assert "TORCH_LIBRARY_FRAGMENT(vecops_test" in source
   assert "vecops_operator_bridge_invoke_v1" in source
+  returning_schema = _torch_schema("run", definition, return_outputs=True)
+  assert returning_schema.endswith("-> Tensor")
+  returning_source = _generate_torch_source(
+    "vecops_test", "run", definition, return_outputs=True
+  )
+  assert "at::Tensor wrapper(" in returning_source
+  assert "return p1;" in returning_source
+
+
+def test_compile_batch_validates_parallelism() -> None:
+  assert vecops.compile_batch([], parallelism=3).parallelism == 0
+  with pytest.raises(ValueError, match="positive integer"):
+    vecops.compile_batch([], parallelism=0)
+  with pytest.raises(ValueError, match="positive integer"):
+    vecops.compile_batch([], parallelism=True)
+
+
+def test_compile_batch_submits_requests_concurrently() -> None:
+  rendezvous = threading.Barrier(2)
+
+  class PreparingOperator:
+    def prepare(self, call) -> None:
+      del call
+      rendezvous.wait(timeout=5)
+
+  requests = [
+    vecops.CompileRequest(
+      operator=PreparingOperator(),
+      call=vecops._C.KernelCall([]),
+      key=(index,),
+      name=f"request-{index}",
+    )
+    for index in range(2)
+  ]
+  result = vecops.compile_batch(requests, parallelism=2)
+  assert result.prepared == 2
+  assert result.parallelism == 2

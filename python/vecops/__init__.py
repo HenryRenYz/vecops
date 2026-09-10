@@ -22,23 +22,37 @@ from ._dtype import (
 )
 from ._jit import JitKernel, jit
 from ._operator import Operator
+from ._precompile import (
+  CompileRequest,
+  CompileRequestCollector,
+  PrecompileResult,
+  collect_compile_requests,
+  compile_batch,
+  is_precompiling,
+  precompile,
+)
 from ._schema import Dynamic, KernelDef, TensorAccess, TensorDef, TensorMeta, ValueDef
 
 __all__ = [
   "_C",
   "Compiler",
+  "CompileRequest",
+  "CompileRequestCollector",
   "Const",
   "DType",
   "Dynamic",
   "JitKernel",
   "KernelDef",
   "Operator",
+  "PrecompileResult",
   "TensorAccess",
   "TensorDef",
   "TensorMeta",
   "ValueDef",
   "bfloat16",
   "bool_",
+  "collect_compile_requests",
+  "compile_batch",
   "default_cache_dir",
   "float16",
   "float32",
@@ -47,9 +61,11 @@ __all__ = [
   "int16",
   "int32",
   "int64",
+  "is_precompiling",
   "jit",
   "normalize_dtype",
   "ops",
+  "precompile",
   "uint8",
   "uint16",
   "uint32",

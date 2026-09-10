@@ -232,13 +232,24 @@ values rather than runtime scalar arguments.
 filesystem state. `TensorMeta` plus `compile_for()` precompiles without tensor
 storage.
 
+`vecops.precompile(model, *inputs, parallelism=N)` performs a storage-free
+FakeTensor trace by default, collects and deduplicates registered JIT calls,
+and then prepares the resulting artifacts through a bounded compilation batch.
+During collection wrappers return their caller-owned output tensors without
+executing native code. `vecops.is_precompiling()` lets model code avoid
+data-dependent checks or persistent caching during that trace;
+`use_real_tensors=True` is available for models that cannot run with fake
+tensors.
+
 `vecops.ops.torch.register()` generates one C++ dispatcher bridge for the
 logical operator. Its internal schema marks outputs as distinct mutable
-`Tensor(a!)` arguments and returns `()`, while the public
-`vecops.ops.torch.<library>.<name>` wrapper returns the caller's output
-tensors. Per-shape kernel DSOs never use `TORCH_LIBRARY`, avoiding duplicate
-registration. Named specialization values are accepted as kwargs and omitted
-values are inferred by the same C++ binder.
+`Tensor(a!)` arguments and returns `()` by default. `return_outputs=True` adds
+internal Tensor returns for TorchInductor versions that reject void custom
+operators. The public `vecops.ops.torch.<library>.<name>` wrapper returns the
+caller's original output tensors in both modes. Per-shape kernel DSOs never
+use `TORCH_LIBRARY`, avoiding duplicate registration. Named specialization
+values are accepted as kwargs and omitted values are inferred by the same C++
+binder.
 
 ```sh
 python -m pip install '.[numpy,torch]'

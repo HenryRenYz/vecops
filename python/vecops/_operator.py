@@ -59,7 +59,23 @@ class Operator:
 
   def __call__(self, *args, **kwargs):
     """Bind, resolve, and synchronously invoke this operator."""
-    return self._native(*args, **self._specializations(kwargs))
+    specializations = self._specializations(kwargs)
+    from ._precompile import maybe_collect_call
+
+    if maybe_collect_call(
+      self._native,
+      self.kernel_def._native(),
+      args,
+      specializations,
+      name=self.kernel_def.name,
+    ):
+      outputs = tuple(
+        argument
+        for argument, parameter in zip(args, self.kernel_def.parameters)
+        if isinstance(parameter, TensorDef) and parameter.output
+      )
+      return outputs[0] if len(outputs) == 1 else outputs
+    return self._native(*args, **specializations)
 
   def compile_for(self, *args, **kwargs) -> None:
     """Prepare a matching executable without requiring tensor storage or executing it."""
@@ -154,6 +170,21 @@ class OperatorGroup:
     for symbol, kind in self.kernel_def.values.items():
       if symbol in kwargs and kind is DType:
         kwargs[symbol] = normalize_dtype(kwargs[symbol])
+    from ._precompile import maybe_collect_call
+
+    if maybe_collect_call(
+      self._native,
+      self.kernel_def._native(name=self.name),
+      args,
+      kwargs,
+      name=self.name,
+    ):
+      outputs = tuple(
+        argument
+        for argument, parameter in zip(args, self.kernel_def.parameters)
+        if isinstance(parameter, TensorDef) and parameter.output
+      )
+      return outputs[0] if len(outputs) == 1 else outputs
     return self._native(*args, **kwargs)
 
 

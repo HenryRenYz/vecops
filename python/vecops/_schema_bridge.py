@@ -76,9 +76,12 @@ def _schema_default(value: Any) -> str:
   return repr(value)
 
 
-def _torch_schema(name: str, definition: native.KernelDef) -> str:
+def _torch_schema(
+    name: str, definition: native.KernelDef, *, return_outputs: bool = False
+) -> str:
   """Lower a KernelDef to a mutable out-style Torch dispatcher schema."""
   arguments: list[str] = []
+  outputs: list[str] = []
   alias = ord("a")
   parameters = definition.inputs
   for index, parameter in enumerate(parameters):
@@ -88,6 +91,13 @@ def _torch_schema(name: str, definition: native.KernelDef) -> str:
         raise ValueError("Torch bridge output tensors must be present and caller-allocated")
       if parameter.output:
         tensor_type = f"Tensor({chr(alias)}!)"
+        # The public wrapper returns the caller-owned output argument.  The
+        # internal Torch op only needs a Tensor result so older Inductor
+        # custom-op wrappers do not reject a void return.  Keep the result
+        # unannotated: AOT functionalization cannot represent a custom-op
+        # output that aliases a mutable argument, while mutation tracking is
+        # already carried by the argument's (a!) annotation.
+        outputs.append("Tensor")
         alias += 1
       else:
         tensor_type = "Tensor"
@@ -103,7 +113,13 @@ def _torch_schema(name: str, definition: native.KernelDef) -> str:
     _require_identifier(symbol, "specialization value name")
     torch_type = "int?" if symbol_type == native.ConstInt else "ScalarType?"
     arguments.append(f"{torch_type} __spec_{symbol}=None")
-  return f"{name}({', '.join(arguments)}) -> ()"
+  returns = "()"
+  if return_outputs:
+    if len(outputs) == 1:
+      returns = outputs[0]
+    elif outputs:
+      returns = f"({', '.join(outputs)})"
+  return f"{name}({', '.join(arguments)}) -> {returns}"
 
 
 _TORCH_BRIDGE_TEMPLATE = Template(
@@ -118,6 +134,7 @@ _TORCH_BRIDGE_TEMPLATE = Template(
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <tuple>
 #include <vector>
 
 #include "vecops/runtime/OperatorBridgeAbi.h"
@@ -141,17 +158,14 @@ uint32_t dtype_to_abi(c10::ScalarType dtype) {
   }
 }
 
-void append_tensor(std::vector<VecopsValue>& values, std::vector<std::vector<int64_t>>& metadata,
-                   const at::Tensor* tensor, uint64_t flags) {
+VecopsValue make_tensor(const at::Tensor* tensor, uint64_t flags) {
   VecopsValue value{}; value.struct_size = sizeof(VecopsValue);
-  if (!tensor) { value.kind = VECOPS_VALUE_NONE; values.push_back(value); return; }
+  if (!tensor) { value.kind = VECOPS_VALUE_NONE; return value; }
   TORCH_CHECK(tensor->defined(), "vecops received an undefined tensor");
   TORCH_CHECK(tensor->device().is_cpu(), "vecops generated bridge currently accepts CPU tensors only");
   TORCH_CHECK(tensor->layout() == c10::Layout::Strided, "vecops requires strided Torch tensors");
-  metadata.emplace_back(tensor->sizes().begin(), tensor->sizes().end());
-  auto& sizes = metadata.back();
-  metadata.emplace_back(tensor->strides().begin(), tensor->strides().end());
-  auto& strides = metadata.back();
+  const auto sizes = tensor->sizes();
+  const auto strides = tensor->strides();
   value.kind = VECOPS_VALUE_TENSOR;
   value.value.tensor = VecopsTensorView{
     sizeof(VecopsTensorView),
@@ -161,20 +175,20 @@ void append_tensor(std::vector<VecopsValue>& values, std::vector<std::vector<int
     static_cast<uint32_t>(tensor->dim()), sizes.data(), strides.data(),
     flags
   };
-  values.push_back(value);
+  return value;
 }
 
-VecopsValue make_signed_scalar(int64_t input, uint32_t dtype) {
+VecopsValue make_signed_value(int64_t input, uint32_t dtype) {
   VecopsValue value{}; value.struct_size = sizeof(value); value.kind = VECOPS_VALUE_SCALAR;
   value.value.scalar.struct_size = sizeof(VecopsScalar); value.value.scalar.dtype = dtype;
   value.value.scalar.value.i64 = input; return value;
 }
-VecopsValue make_unsigned_scalar(uint64_t input, uint32_t dtype) {
+VecopsValue make_unsigned_value(uint64_t input, uint32_t dtype) {
   VecopsValue value{}; value.struct_size = sizeof(value); value.kind = VECOPS_VALUE_SCALAR;
   value.value.scalar.struct_size = sizeof(VecopsScalar); value.value.scalar.dtype = dtype;
   value.value.scalar.value.u64 = input; return value;
 }
-VecopsValue make_float_scalar(double input, uint32_t dtype) {
+VecopsValue make_float_value(double input, uint32_t dtype) {
   VecopsValue value{}; value.struct_size = sizeof(value); value.kind = VECOPS_VALUE_SCALAR;
   value.value.scalar.struct_size = sizeof(VecopsScalar); value.value.scalar.dtype = dtype;
   value.value.scalar.value.f64 = input; return value;
@@ -188,21 +202,24 @@ VecopsSpecializationArgument make_dtype_spec(const char* name, uint32_t input) {
   value.kind = VECOPS_SPECIALIZATION_DTYPE; value.name = name; value.value.dtype = input; return value;
 }
 
-void wrapper($cpp_parameters) {
-  std::vector<VecopsValue> values; values.reserve($parameter_count);
-  std::vector<std::vector<int64_t>> metadata; metadata.reserve($metadata_count);
+$cpp_return_type wrapper($cpp_parameters) {
+  std::array<VecopsValue, $parameter_count> values{};
 $append_arguments
-  std::vector<VecopsSpecializationArgument> specs; specs.reserve($specialization_count);
+  std::array<VecopsSpecializationArgument, $specialization_count> specs{};
+  uint32_t spec_count = 0;
 $append_specializations
   VecopsCall call{sizeof(VecopsCall), static_cast<uint32_t>(values.size()), values.data(), nullptr, 0, nullptr};
   std::array<char, 1024> message{};
   VecopsError error{sizeof(VecopsError), 0, message.data(), message.size(), 0};
   const auto result = vecops_operator_bridge_invoke_v1(
-    operator_handle.load(std::memory_order_acquire), &call, static_cast<uint32_t>(specs.size()), specs.data(), &error);
+    operator_handle.load(std::memory_order_acquire), &call, spec_count, specs.data(), &error);
   TORCH_CHECK(result == VECOPS_STATUS_OK, message.data());
+$return_outputs
 }
 
-void meta_wrapper($cpp_parameters) {}
+$cpp_return_type meta_wrapper($cpp_parameters) {
+$return_outputs
+}
 } // namespace
 
 TORCH_LIBRARY_FRAGMENT($library, library) {
@@ -222,9 +239,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
 )
 
 
-def _generate_torch_source(library: str, name: str, definition: native.KernelDef) -> str:
+def _generate_torch_source(
+    library: str,
+    name: str,
+    definition: native.KernelDef,
+    *,
+    return_outputs: bool = False,
+) -> str:
   """Generate the complete bridge translation unit without writing it to disk."""
-  schema = _torch_schema(name, definition).replace("\\", "\\\\").replace('"', '\\"')
+  schema = _torch_schema(
+      name, definition, return_outputs=return_outputs
+  ).replace("\\", "\\\\").replace('"', '\\"')
   parameters = definition.inputs
   cpp_parameters: list[str] = []
   call_append: list[str] = []
@@ -241,41 +266,58 @@ def _generate_torch_source(library: str, name: str, definition: native.KernelDef
       )
       if parameter.optional:
         cpp_parameters.append(f"std::optional<at::Tensor> {local}")
-        call_append.append(f"  append_tensor(values, metadata, {local}.has_value() ? &*{local} : nullptr, {flags});")
+        call_append.append(f"  values[{index}] = make_tensor({local}.has_value() ? &*{local} : nullptr, {flags});")
       else:
         tensor_type = "at::Tensor&" if parameter.output else "const at::Tensor&"
         cpp_parameters.append(f"{tensor_type} {local}")
-        call_append.append(f"  append_tensor(values, metadata, &{local}, {flags});")
+        call_append.append(f"  values[{index}] = make_tensor(&{local}, {flags});")
     else:
       cpp_parameters.append(f"{_scalar_cpp(parameter.dtype)} {local}")
       dtype = _dtype_abi[_dtype_name(parameter.dtype)]
       kind = _dtype_name(parameter.dtype)
       if kind == "bool_" or kind.startswith("uint"):
-        storage = f"make_unsigned_scalar({local}, {dtype})"
+        storage = f"make_unsigned_value({local}, {dtype})"
       elif kind.startswith("int"):
-        storage = f"make_signed_scalar({local}, {dtype})"
+        storage = f"make_signed_value({local}, {dtype})"
       else:
-        storage = f"make_float_scalar({local}, {dtype})"
-      call_append.append(f"  values.push_back({storage});")
+        storage = f"make_float_value({local}, {dtype})"
+      call_append.append(f"  values[{index}] = {storage};")
 
   spec_append: list[str] = []
   for index, (symbol, symbol_type) in enumerate(definition.values.items()):
     local = f"s{index}"
     if symbol_type == native.ConstInt:
       cpp_parameters.append(f"std::optional<int64_t> {local}")
-      spec_append.append(f'  if ({local}) specs.push_back(make_integer_spec("{symbol}", *{local}));')
+      spec_append.append(f'  if ({local}) specs[spec_count++] = make_integer_spec("{symbol}", *{local});')
     else:
       cpp_parameters.append(f"std::optional<c10::ScalarType> {local}")
-      spec_append.append(f'  if ({local}) specs.push_back(make_dtype_spec("{symbol}", dtype_to_abi(*{local})));')
+      spec_append.append(f'  if ({local}) specs[spec_count++] = make_dtype_spec("{symbol}", dtype_to_abi(*{local}));')
+
+  output_locals = [
+      f"p{index}"
+      for index, parameter in enumerate(parameters)
+      if isinstance(parameter, native.TensorDef) and parameter.output
+  ]
+  cpp_return_type = "void"
+  return_statement = ""
+  if return_outputs and len(output_locals) == 1:
+    cpp_return_type = "at::Tensor"
+    return_statement = f"  return {output_locals[0]};"
+  elif return_outputs and output_locals:
+    cpp_return_type = "std::tuple<" + ", ".join(
+        "at::Tensor" for _ in output_locals
+    ) + ">"
+    return_statement = f"  return std::make_tuple({', '.join(output_locals)});"
 
   return _TORCH_BRIDGE_TEMPLATE.substitute(
     schema=schema,
     cpp_parameters=", ".join(cpp_parameters),
     parameter_count=len(parameters),
-    metadata_count=2 * sum(isinstance(parameter, native.TensorDef) for parameter in parameters),
     append_arguments=os.linesep.join(call_append),
     specialization_count=len(definition.values),
     append_specializations=os.linesep.join(spec_append),
+    cpp_return_type=cpp_return_type,
+    return_outputs=return_statement,
     library=library,
     name=name,
   )
@@ -306,8 +348,18 @@ def _public_wrapper(library: str, name: str, definition: native.KernelDef, torch
     if kwargs:
       unexpected = next(iter(kwargs))
       raise TypeError(f"unexpected keyword argument: {unexpected}")
-    torch_op(*ordered, *spec_values)
     outputs = tuple(ordered[index] for index in output_indices)
+    from ._precompile import maybe_collect_call
+
+    collected = maybe_collect_call(
+      operator,
+      definition,
+      ordered,
+      dict(zip(symbols, spec_values)),
+      name=f"{library}::{name}",
+    )
+    if not collected:
+      torch_op(*ordered, *spec_values)
     if len(outputs) == 1:
       return outputs[0]
     return outputs
@@ -328,6 +380,7 @@ def register_torch_operator(
   build_directory: str | os.PathLike[str] | None = None,
   verbose: bool = False,
   extra_cflags: tuple[str, ...] = (),
+  return_outputs: bool = False,
 ):
   """Compile/register one mutable Torch bridge and return its public wrapper.
 
@@ -347,7 +400,9 @@ def register_torch_operator(
     import torch
     from torch.utils.cpp_extension import load
 
-    source = _generate_torch_source(library, name, kernel_def)
+    source = _generate_torch_source(
+      library, name, kernel_def, return_outputs=return_outputs
+    )
     native_library = Path(native.__file__).resolve()
     # A bridge calls the handle registry exported by this exact extension.
     # Schema-identical vecops installations must not share one cached bridge:
@@ -356,7 +411,15 @@ def register_torch_operator(
     bridge_identity = f"{source}\0{native_library}"
     digest = hashlib.sha256(bridge_identity.encode()).hexdigest()[:16]
     if build_directory is None:
-      bridge_root = Path.home() / ".cache" / "vecops" / "torch-bridges" / f"{library}_{name}_{digest}"
+      from ._compiler import default_cache_dir
+
+      bridge_cache = os.environ.get("VECOPS_TORCH_BRIDGE_DIR")
+      bridge_base = (
+          Path(bridge_cache).expanduser().resolve()
+          if bridge_cache
+          else default_cache_dir() / "torch-bridges"
+      )
+      bridge_root = bridge_base / f"{library}_{name}_{digest}"
     else:
       bridge_root = Path(build_directory).expanduser().resolve()
     bridge_root.mkdir(parents=True, exist_ok=True)
