@@ -8,15 +8,20 @@ into an artifact DSO. It is optional: runtime-only deployments build without
 
 `KernelCompilerConfig` is reusable compiler policy: SDK location, CMake and
 native tools, a disposable work root, target architecture, and user compile/
-link additions. `KernelBuildRequest` is one explicit CMake project build with
-caller-chosen generated-source, binary, and install directories. The compiler
-uses no shell and does not mutate the parent's environment; subprocess output
-is returned as `BuildResult` stage logs.
+link additions. `KernelBuildRequest` describes one independently-addressable
+target. `KernelBuildBatchRequest` combines targets under one top-level CMake
+project while retaining a generated fragment, binary subdirectory, and
+artifact directory per task. The compiler uses no shell and does not mutate
+the parent's environment; subprocess output is returned as batch-wide command
+logs plus ordered per-task `BuildResult` values.
 
-`compile()` is deliberately cache-independent. It validates the request,
-writes a minimal project, configures, builds, installs, and discovers one DSO.
-It creates its explicitly requested output paths. Callers must serialize or
-separate requests that reuse the same output directories.
+`compile_batch()` validates the common SDK/toolchain contract, imports Vecops
+once, adds every task fragment with `add_subdirectory`, and runs one configure
+and one build command. CMake's generated build system therefore sees all
+translation units and enforces one global parallel-job limit. Outputs are
+written directly to task artifact directories; no shared install step is
+required. `compile()` delegates to a one-task batch, so single and batch builds
+cannot diverge. Both entry points remain deliberately cache-independent.
 
 `compile_kernel(kernel_file, definition, call)` is the source-kernel adapter:
 
@@ -26,6 +31,10 @@ separate requests that reuse the same output directories.
 3. it generates an adapter that converts `VecopsCall` into typed Tensor views
    and scalar arguments, invokes `__kernel__`, and exports `KernelAbi.h` v1;
 4. it builds and loads the resulting artifact as an `Executable`.
+
+`compile_kernels()` performs the same operation for a span of already-bound
+source recipes. It generates one task per specialization and submits the whole
+set through `compile_batch()`.
 
 The compiler gets no persistent cache policy. `ArtifactExecutableProvider`
 owns cache lookup/publication and invokes a compiler callback only when its

@@ -13,7 +13,8 @@ those frameworks only when the application has already loaded them.
 `vecops.Compiler()` discovers CMake and matching C/C++ compilers lazily. The
 priority is an explicit argument, the corresponding environment variable, and
 finally a supported executable on `PATH`. Resolved absolute executable paths
-are passed to CMake.
+are passed to CMake. The generator defaults to `CMAKE_GENERATOR`, then Ninja
+when its executable is available, otherwise CMake's platform default.
 
 Persistent artifacts default to the platform user cache:
 
@@ -33,6 +34,12 @@ so a new compiler cannot silently reuse an artifact emitted by an older
 adapter generator. An application-supplied `cache_namespace` takes ownership
 of that compatibility boundary.
 
+The native module also exports a build-API version. Batch compilation checks
+that version and its required symbols before touching CMake. This catches an
+editable installation whose Python files come from a newer checkout while
+`vecops._C` still comes from an older build, and reports the exact editable
+reinstall command instead of failing later with a missing pybind attribute.
+
 ```python
 compiler = vecops.Compiler(
   target="native",
@@ -42,6 +49,7 @@ compiler = vecops.Compiler(
   cc=None,
   cxx=None,
   cmake=None,
+  generator=None,
   jobs=None,
 )
 ```
@@ -193,9 +201,15 @@ stride, dtype, optional presence, and explicit specialization values, then
 returns the caller-allocated output arguments without invoking native code.
 Exact duplicate requests are removed; runtime scalar payloads are deliberately
 not part of the deduplication key because they do not specialize artifacts.
-After tracing, `compile_batch()` submits the unique native `prepare()` calls to
-a bounded thread pool. Its `parallelism` argument limits simultaneous artifact
-requests; each request retains its compiler's own CMake job policy.
+After tracing, `compile_batch()` performs cache lookup and binding first, then
+places all misses sharing a toolchain into one generated CMake project. Each
+specialization remains a separate target/subdirectory, but one Ninja or Make
+jobserver schedules every translation unit. No Python compilation thread pool
+is used. `parallelism` is the job limit passed to that shared build graph; the
+default honors the process CPU affinity and is capped conservatively. Distinct
+`Compiler` objects with identical SDK, toolchain, work-root, target, and
+compile/link policy share a batch; incompatible configurations are submitted
+as separate build graphs.
 
 Set `use_real_tensors=True` when fake execution is unsupported. Ordinary Torch
 operations then consume the supplied values, but vecops outputs remain
@@ -224,6 +238,12 @@ run = vecops.ops.torch.register(
 )
 ```
 
+Registration only declares a content-addressed bridge task. Call
+`vecops.ops.torch.compile_pending(parallelism=N)` to build all pending bridges
+explicitly; otherwise the first real wrapper call materializes the current
+pending set. `vecops.precompile()` also materializes bridges after its
+storage-free model trace, before returning to ordinary execution.
+
 Torch's internal schema marks `Out`/`InOut` tensors mutable and returns `()` by
 default. `register(..., return_outputs=True)` additionally gives the internal
 op unannotated Tensor returns for older TorchInductor custom-op wrappers that
@@ -232,12 +252,21 @@ the internal return is an implementation signal and the public wrapper always
 returns the original output tensor objects. Generated bridges register CPU and
 Meta implementations, allowing the mutable wrapper to participate in
 `torch.compile`; the internal `torch.ops` name is not the public vecops calling
-convention. A bridge cache key includes the resolved native `vecops._C` path in
-addition to its generated source. This is intentional: schema-identical
-installations have independent operator-handle registries, so a bridge linked
-to one `_C` must never be reused with another installation.
+convention. At load time vecops supplies both the process-local operator handle
+and the current `_C` ABI entry-point address. The bridge therefore has no
+link-time dependency on a particular `_C` path and can be reused by compatible
+installations while still entering the correct process-local registry.
 `VECOPS_TORCH_BRIDGE_DIR` may place this stable registration cache separately
 from the kernel artifact root selected by `VECOPS_CACHE_DIR`.
+
+Generated bridges are ordinary shared libraries rather than Python extension
+modules. They expose a small C setter for the process-local operator handle, so
+compilation does not include `torch/extension.h`, pybind11, Python headers, or
+`torch_python`. CMake obtains Torch include/library paths and the libstdc++ ABI
+mode from the active Torch installation. Loading the DSO runs its
+`TORCH_LIBRARY_FRAGMENT` initializers before vecops supplies the handle. A
+cache-root file lock coalesces bridge writers across processes; the cache is
+rechecked after acquiring that lock.
 
 Generated Torch bridges build their `VecopsValue` and specialization arrays in
 fixed-size stack storage. Tensor size and stride pointers refer directly to

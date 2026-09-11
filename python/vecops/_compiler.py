@@ -16,6 +16,34 @@ from pathlib import Path
 
 from . import _C
 
+_BUILD_API_VERSION = 1
+
+
+def require_native_build_api() -> None:
+  """Reject an editable Python/native extension version mismatch clearly."""
+  actual = getattr(_C, "build_api_version", 0)
+  required_symbols = (
+      "KernelBuildBatchRequest",
+      "BuildBatchResult",
+      "prepare_batch",
+  )
+  missing = [name for name in required_symbols if not hasattr(_C, name)]
+  if actual == _BUILD_API_VERSION and not missing:
+    return
+  package = Path(__file__).resolve().parent
+  source = package.parents[1]
+  if (source / "CMakeLists.txt").is_file():
+    repair = f"python -m pip install -e {source} --no-build-isolation"
+  else:
+    repair = "reinstall vecops so its Python package and native extension come from the same build"
+  detail = f"build API {actual}, expected {_BUILD_API_VERSION}"
+  if missing:
+    detail += f"; missing {', '.join(missing)}"
+  raise RuntimeError(
+      "vecops Python sources and vecops._C are out of sync "
+      f"({_C.__file__}; {detail}). Repair with: {repair}"
+  )
+
 
 def default_cache_dir() -> Path:
   """Return the platform user-cache root used when no explicit path is given.
@@ -83,6 +111,8 @@ class Compiler:
     cache_mode: ``"cache-only"``, ``"read-write"``, or ``"compile-only"``.
     build_dir: Root for disposable CMake attempts, separate from artifacts.
     cc, cxx, cmake: Explicit native tools; otherwise environment then PATH wins.
+    generator: CMake generator. Defaults to ``CMAKE_GENERATOR``, then Ninja
+      when available, otherwise CMake's platform default.
     jobs: Maximum CMake parallel jobs, or a conservative host-derived default.
     verbose: Reserved presentation option retained on this public object.
     environment: Additional environment variables inherited by CMake children.
@@ -105,6 +135,7 @@ class Compiler:
     cc: str | os.PathLike[str] | None = None,
     cxx: str | os.PathLike[str] | None = None,
     cmake: str | os.PathLike[str] | None = None,
+    generator: str | None = None,
     jobs: int | None = None,
     verbose: bool = False,
     environment: Mapping[str, str] | None = None,
@@ -126,6 +157,7 @@ class Compiler:
     self.cc = cc
     self.cxx = cxx
     self.cmake = cmake
+    self.generator = generator
     self.jobs = jobs
     self.verbose = verbose
     self.environment = dict(environment or {})
@@ -140,6 +172,44 @@ class Compiler:
     self.ldflags = tuple(ldflags)
     self._native_compiler: _C.Compiler | None = None
 
+  def _native_config(self) -> _C.KernelCompilerConfig:
+    """Resolve and return the native build policy shared by all task kinds."""
+    sdk_path, sdk_layout = _sdk()
+    sdk = _C.SdkSpec()
+    sdk.path = sdk_path
+    sdk.layout = sdk_layout
+    toolchain = _C.ToolchainSpec()
+    toolchain.c_compiler = _tool(self.cc, "CC", ("clang", "gcc"))
+    toolchain.cxx_compiler = _tool(self.cxx, "CXX", ("clang++", "g++"))
+    toolchain.cmake_program = _tool(self.cmake, "CMAKE", ("cmake",))
+    selected_generator = self.generator or os.environ.get("CMAKE_GENERATOR")
+    if selected_generator is None and shutil.which("ninja"):
+      selected_generator = "Ninja"
+    toolchain.generator = selected_generator
+    affinity = getattr(os, "sched_getaffinity", None)
+    available = len(affinity(0)) if affinity is not None else (os.cpu_count() or 1)
+    toolchain.parallel_jobs = self.jobs or max(1, min(available, 8))
+    toolchain.environment = self.environment
+    config = _C.KernelCompilerConfig()
+    config.sdk = sdk
+    config.toolchain = toolchain
+    config.work_directory = self.build_dir
+    config.target_arch = self.target
+    config.include_directories = self.include_dirs
+    config.compile_options = self.cflags
+    config.link_directories = self.library_dirs
+    config.link_libraries = self.libraries
+    config.link_options = self.ldflags
+    return config
+
+  @property
+  def build_backend(self) -> _C.Compiler:
+    """Return the native batch builder even for cache-only kernel providers."""
+    require_native_build_api()
+    if self._native_compiler is None:
+      self._native_compiler = _C.Compiler(self._native_config())
+    return self._native_compiler
+
   @property
   def native(self) -> _C.Compiler | None:
     """Return the lazily-created raw compiler, or ``None`` for cache-only mode.
@@ -149,29 +219,7 @@ class Compiler:
     """
     if self.cache_mode == _C.ArtifactCacheMode.cache_only:
       return None
-    if self._native_compiler is None:
-      sdk_path, sdk_layout = _sdk()
-      sdk = _C.SdkSpec()
-      sdk.path = sdk_path
-      sdk.layout = sdk_layout
-      toolchain = _C.ToolchainSpec()
-      toolchain.c_compiler = _tool(self.cc, "CC", ("clang", "gcc"))
-      toolchain.cxx_compiler = _tool(self.cxx, "CXX", ("clang++", "g++"))
-      toolchain.cmake_program = _tool(self.cmake, "CMAKE", ("cmake",))
-      toolchain.parallel_jobs = self.jobs or max(1, min(os.cpu_count() or 1, 8))
-      toolchain.environment = self.environment
-      config = _C.KernelCompilerConfig()
-      config.sdk = sdk
-      config.toolchain = toolchain
-      config.work_directory = self.build_dir
-      config.target_arch = self.target
-      config.include_directories = self.include_dirs
-      config.compile_options = self.cflags
-      config.link_directories = self.library_dirs
-      config.link_libraries = self.libraries
-      config.link_options = self.ldflags
-      self._native_compiler = _C.Compiler(config)
-    return self._native_compiler
+    return self.build_backend
 
   def operator(self, source, kernel_def, *, recipe_id: str | None = None):
     """Create an :class:`~vecops.Operator` backed by one ``__kernel__`` source file."""

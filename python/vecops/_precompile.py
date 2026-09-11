@@ -6,7 +6,6 @@ import contextlib
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -226,37 +225,31 @@ def compile_batch(
     *,
     parallelism: int | None = None,
 ) -> PrecompileResult:
-  """Prepare requests concurrently with at most ``parallelism`` builds."""
+  """Prepare requests through shared CMake build graphs."""
+  from ._compiler import require_native_build_api
+
+  require_native_build_api()
   unique = {request.key: request for request in requests}
   pending = tuple(unique.values())
   if parallelism is None:
-    parallelism = min(8, os.cpu_count() or 1)
+    affinity = getattr(os, "sched_getaffinity", None)
+    available = len(affinity(0)) if affinity is not None else (os.cpu_count() or 1)
+    parallelism = min(8, available)
   if isinstance(parallelism, bool) or parallelism < 1:
     raise ValueError("parallelism must be a positive integer")
-  workers = min(parallelism, len(pending)) if pending else 0
+  workers = parallelism if pending else 0
   start = time.perf_counter()
-
-  if workers == 1:
-    for request in pending:
-      request.operator.prepare(request.call)
-  elif workers > 1:
-    with ThreadPoolExecutor(
-        max_workers=workers, thread_name_prefix="vecops-compile"
-    ) as executor:
-      futures = {
-          executor.submit(request.operator.prepare, request.call): request
-          for request in pending
-      }
-      for future in as_completed(futures):
-        request = futures[future]
-        try:
-          future.result()
-        except Exception as error:
-          if hasattr(error, "add_note"):
-            error.add_note(
-                f"while preparing vecops request {request.name!r}"
-            )
-          raise
+  if pending:
+    try:
+      _C.prepare_batch(
+          [(request.operator, request.call) for request in pending],
+          parallel_jobs=parallelism,
+      )
+    except Exception as error:
+      if hasattr(error, "add_note"):
+        names = ", ".join(repr(request.name) for request in pending)
+        error.add_note(f"while preparing vecops batch containing {names}")
+      raise
 
   return PrecompileResult(
       collected=len(pending),
@@ -316,7 +309,11 @@ def precompile(
             fake_kwargs = _fake_tree(kwargs, mode, torch)
             model(*fake_args, **fake_kwargs)
 
-  return compile_batch(collector.requests, parallelism=parallelism)
+  result = compile_batch(collector.requests, parallelism=parallelism)
+  from ._schema_bridge import compile_pending_torch_bridges
+
+  compile_pending_torch_bridges(parallelism=parallelism)
+  return result
 
 
 __all__ = [

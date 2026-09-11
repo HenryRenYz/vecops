@@ -76,6 +76,25 @@ public:
   explicit ArtifactExecutableProvider(ArtifactProviderConfig config);
   /** @copydoc ExecutableProvider::resolve */
   [[nodiscard]] Result<std::shared_ptr<Executable>> resolve(const BoundKernelRecipe& recipe) override;
+  /**
+   * @brief Resolve from memory or the persistent cache without compiling.
+   *
+   * CompileOnly always reports NotFound unless the specialization is already
+   * memoized. This is the side-effect-free planning half used by batch builds.
+   */
+  [[nodiscard]] Result<std::shared_ptr<Executable>> lookup(const BoundKernelRecipe& recipe);
+  /**
+   * @brief Validate and publish an executable produced by a batch compiler.
+   *
+   * ReadWrite atomically publishes through the normal artifact cache;
+   * CompileOnly memoizes the supplied executable without filesystem writes.
+   */
+  [[nodiscard]] Result<std::shared_ptr<Executable>> adopt(const BoundKernelRecipe& recipe,
+                                                          std::shared_ptr<Executable> executable);
+  /** @brief Return the immutable persistent-cache policy. */
+  [[nodiscard]] ArtifactCacheMode mode() const {
+    return config_.mode;
+  }
 
 private:
   struct InFlight {

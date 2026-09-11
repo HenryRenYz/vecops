@@ -126,6 +126,50 @@ Result<std::shared_ptr<Executable>> ArtifactExecutableProvider::publish(const Bo
   return load_cached(recipe, cache_key);
 }
 
+Result<std::shared_ptr<Executable>> ArtifactExecutableProvider::lookup(const BoundKernelRecipe& recipe) {
+  const auto cache_key = key(recipe);
+  {
+    std::lock_guard lock(mutex_);
+    if (const auto found = memory_cache_.find(cache_key); found != memory_cache_.end())
+      return found->second;
+  }
+  if (config_.mode == ArtifactCacheMode::CompileOnly)
+    return status(StatusCode::NotFound, "kernel artifact is not memoized in compile-only mode");
+  auto cached = load_cached(recipe, cache_key);
+  if (!cached)
+    return cached.status();
+  {
+    std::lock_guard lock(mutex_);
+    memory_cache_.insert_or_assign(cache_key, cached.value());
+  }
+  return std::move(cached).value();
+}
+
+Result<std::shared_ptr<Executable>> ArtifactExecutableProvider::adopt(const BoundKernelRecipe& recipe,
+                                                                      std::shared_ptr<Executable> executable) {
+  if (executable == nullptr)
+    return status(StatusCode::InternalError, "batch compiler returned null");
+  if (recipe.source != nullptr && recipe.source->definition != nullptr &&
+      executable->operator_name() != recipe.source->definition->name())
+    return status(StatusCode::AbiMismatch, "batch artifact operator name mismatch");
+  if (executable->specialization_key() != recipe.specialization_key)
+    return status(StatusCode::AbiMismatch, "batch artifact specialization key mismatch");
+  if (config_.mode == ArtifactCacheMode::CacheOnly)
+    return status(StatusCode::NotFound, "cache-only provider cannot adopt a compiled artifact");
+  const auto cache_key = key(recipe);
+  if (config_.mode == ArtifactCacheMode::ReadWrite) {
+    auto cached = publish(recipe, cache_key, std::move(executable));
+    if (!cached)
+      return cached.status();
+    executable = std::move(cached).value();
+  }
+  {
+    std::lock_guard lock(mutex_);
+    memory_cache_.insert_or_assign(cache_key, executable);
+  }
+  return executable;
+}
+
 Result<std::shared_ptr<Executable>> ArtifactExecutableProvider::resolve(const BoundKernelRecipe& recipe) {
   const auto cache_key = key(recipe);
   std::shared_ptr<InFlight> in_flight;

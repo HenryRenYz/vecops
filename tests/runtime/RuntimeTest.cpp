@@ -303,6 +303,14 @@ int main(int argc, char** argv) {
   compiler_config.toolchain.parallel_jobs = 2;
   compiler_config.work_directory = work_directory / "builds";
   compiler_config.target_arch = "Scalar";
+  vecops::compiler::Compiler equivalent_compiler(compiler_config);
+  vecops::compiler::Compiler other_equivalent_compiler(compiler_config);
+  require(equivalent_compiler.batch_key() == other_equivalent_compiler.batch_key(),
+          "equivalent compiler instances must share a batch key");
+  auto different_config = compiler_config;
+  different_config.work_directory = work_directory / "other-builds";
+  require(equivalent_compiler.batch_key() != vecops::compiler::Compiler(different_config).batch_key(),
+          "different compiler work roots must split batches");
   auto compiler = std::make_shared<vecops::compiler::Compiler>(std::move(compiler_config));
 
   auto executable = compiler->compile_kernel(VECOPS_TEST_KERNEL, definition, call);
@@ -443,6 +451,14 @@ int main(int argc, char** argv) {
     std::async(std::launch::async, [&] { return coalesced_provider.resolve(first_bound.value()); });
   require(coalesced_first.get().ok() && coalesced_second.get().ok(), "coalesced provider probe results");
   require(coalesced_builds.load() == 1, "identical provider keys must share one in-flight build");
+
+  ArtifactExecutableProvider batch_provider({.mode = ArtifactCacheMode::CompileOnly});
+  auto batch_miss = batch_provider.lookup(first_bound.value());
+  require(!batch_miss.ok() && batch_miss.status().code() == StatusCode::NotFound,
+          "batch lookup must not compile a miss");
+  auto batch_adopted = batch_provider.adopt(first_bound.value(), executable.value());
+  require(batch_adopted.ok(), "batch provider adopt");
+  require(batch_provider.lookup(first_bound.value()).ok(), "batch provider lookup after adopt");
 
   const auto absent_cache = work_directory / "must-not-be-created";
   ArtifactExecutableProvider absent_provider(

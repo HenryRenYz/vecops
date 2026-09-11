@@ -2,7 +2,6 @@
 
 import ctypes
 import sys
-import threading
 from pathlib import Path
 
 import numpy as np
@@ -380,6 +379,9 @@ def test_generated_torch_bridge_uses_mutable_out_schema() -> None:
   source = _generate_torch_source("vecops_test", "run", definition)
   assert "TORCH_LIBRARY_FRAGMENT(vecops_test" in source
   assert "vecops_operator_bridge_invoke_v1" in source
+  assert "vecops_torch_bridge_set_handle_v1" in source
+  assert "torch/extension.h" not in source
+  assert "PYBIND11_MODULE" not in source
   returning_schema = _torch_schema("run", definition, return_outputs=True)
   assert returning_schema.endswith("-> Tensor")
   returning_source = _generate_torch_source(
@@ -397,17 +399,25 @@ def test_compile_batch_validates_parallelism() -> None:
     vecops.compile_batch([], parallelism=True)
 
 
-def test_compile_batch_submits_requests_concurrently() -> None:
-  rendezvous = threading.Barrier(2)
+def test_native_build_api_mismatch_has_repair_command(monkeypatch) -> None:
+  from vecops._compiler import require_native_build_api
 
-  class PreparingOperator:
-    def prepare(self, call) -> None:
-      del call
-      rendezvous.wait(timeout=5)
+  monkeypatch.setattr(vecops._C, "build_api_version", 0)
+  with pytest.raises(RuntimeError, match=r"pip install -e .* --no-build-isolation"):
+    require_native_build_api()
+
+
+def test_compile_batch_delegates_one_native_build_graph(monkeypatch) -> None:
+  submitted = []
+
+  def prepare_batch(requests, *, parallel_jobs):
+    submitted.append((requests, parallel_jobs))
+
+  monkeypatch.setattr(vecops._C, "prepare_batch", prepare_batch)
 
   requests = [
     vecops.CompileRequest(
-      operator=PreparingOperator(),
+      operator=object(),
       call=vecops._C.KernelCall([]),
       key=(index,),
       name=f"request-{index}",
@@ -417,3 +427,6 @@ def test_compile_batch_submits_requests_concurrently() -> None:
   result = vecops.compile_batch(requests, parallelism=2)
   assert result.prepared == 2
   assert result.parallelism == 2
+  assert len(submitted) == 1
+  assert submitted[0][1] == 2
+  assert [item[0] for item in submitted[0][0]] == [request.operator for request in requests]

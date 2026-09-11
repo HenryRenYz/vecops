@@ -76,6 +76,13 @@ per persistent key: identical concurrent misses share one in-flight result,
 while different specializations may load or compile concurrently through the
 same provider.
 
+Batch preparation separates this boundary into `lookup()` and `adopt()`.
+`lookup()` performs only memory/persistent-cache resolution and never invokes
+the build callback. Cache misses are bound and compiled together; `adopt()`
+then validates, atomically publishes in ReadWrite mode, and memoizes the
+result. Ordinary `resolve()` retains its synchronous behavior for calls made
+outside a batch.
+
 ## C ABI split
 
 `CallAbi.h` owns the shared data records (`VecopsCall`, tensor/scalar values,

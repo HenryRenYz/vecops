@@ -491,6 +491,11 @@ private:
 
 class PyOperator {
 public:
+  struct BatchItem {
+    const PyOperator* operation = nullptr;
+    const PyKernelCall* call = nullptr;
+  };
+
   PyOperator(std::filesystem::path kernel_file, KernelDef definition,
              std::shared_ptr<compiler::Compiler> compiler_instance, vecops::runtime::ArtifactCacheMode cache_mode,
              std::filesystem::path cache_directory, std::string namespace_key, std::string recipe_id,
@@ -562,6 +567,9 @@ public:
   [[nodiscard]] std::uint64_t handle() const {
     return handle_;
   }
+
+  /** Prepare many cache misses through one CMake build per compiler. */
+  [[nodiscard]] static Status prepare_batch(std::span<const BatchItem> items, std::size_t parallel_jobs);
 
   py::object invoke_values(py::args arguments, py::kwargs values) const {
     if (arguments.size() > definition_->parameters().size())
@@ -637,15 +645,17 @@ private:
     if (cache_mode != vecops::runtime::ArtifactCacheMode::CacheOnly) {
       if (compiler_instance == nullptr)
         throw py::value_error("ReadWrite and CompileOnly operators require a Compiler");
-      provider_config.build = [compiler_instance =
-                                 std::move(compiler_instance)](const vecops::runtime::BoundKernelRecipe& bound) {
+      provider_config.build = [compiler_instance](const vecops::runtime::BoundKernelRecipe& bound) {
         return compiler_instance->compile_kernel(bound);
       };
     }
     auto provider = std::make_shared<vecops::runtime::ArtifactExecutableProvider>(std::move(provider_config));
     state_->operator_instances.push_back(std::make_unique<vecops::runtime::Operator>(
-      *definition, std::vector<std::shared_ptr<const vecops::runtime::KernelRecipe>>{std::move(recipe)},
-      std::make_shared<vecops::runtime::OrderedDispatchPolicy>(), std::move(provider)));
+      *definition, std::vector<std::shared_ptr<const vecops::runtime::KernelRecipe>>{recipe},
+      std::make_shared<vecops::runtime::OrderedDispatchPolicy>(), provider));
+    state_->recipes.push_back(std::move(recipe));
+    state_->providers.push_back(std::move(provider));
+    state_->compilers.push_back(std::move(compiler_instance));
     state_->default_values.push_back(std::move(default_values));
   }
 
@@ -657,6 +667,9 @@ private:
 
   struct State {
     std::vector<std::unique_ptr<vecops::runtime::Operator>> operator_instances;
+    std::vector<std::shared_ptr<const vecops::runtime::SourceKernelRecipe>> recipes;
+    std::vector<std::shared_ptr<vecops::runtime::ArtifactExecutableProvider>> providers;
+    std::vector<std::shared_ptr<compiler::Compiler>> compilers;
     std::vector<vecops::runtime::SpecializationValues> default_values;
   };
   static std::atomic<std::uint64_t> next_operator_handle;
@@ -673,6 +686,95 @@ private:
 std::atomic<std::uint64_t> PyOperator::next_operator_handle{1};
 std::mutex PyOperator::operator_registry_mutex;
 std::map<std::uint64_t, std::weak_ptr<PyOperator::State>> PyOperator::operator_registry;
+
+Status PyOperator::prepare_batch(std::span<const BatchItem> items, std::size_t parallel_jobs) {
+  struct Planned {
+    std::shared_ptr<compiler::Compiler> compiler_instance;
+    std::shared_ptr<vecops::runtime::ArtifactExecutableProvider> provider;
+    vecops::runtime::BoundKernelRecipe recipe;
+  };
+  std::vector<Planned> planned;
+  planned.reserve(items.size());
+
+  for (const auto& item : items) {
+    if (item.operation == nullptr || item.call == nullptr)
+      return Status(StatusCode::InvalidArgument, "batch preparation received a null request");
+    const auto& operation = *item.operation;
+    Status last(StatusCode::NotApplicable, "no registered recipe accepted the specialization");
+    bool satisfied = false;
+    for (std::size_t index = 0; index < operation.state_->recipes.size(); ++index) {
+      auto values = operation.state_->default_values[index];
+      for (const auto& [name, value] : item.call->call().values())
+        values.insert_or_assign(name, value);
+      KernelCall call(item.call->call().arguments(), std::move(values));
+      auto match = operation.state_->recipes[index]->match(call);
+      if (!match.ok()) {
+        if (match.code() == StatusCode::NotApplicable) {
+          last = std::move(match);
+          continue;
+        }
+        return match;
+      }
+      auto bound = operation.state_->recipes[index]->bind(call);
+      if (!bound) {
+        if (bound.status().code() == StatusCode::NotApplicable) {
+          last = bound.status();
+          continue;
+        }
+        return bound.status();
+      }
+      auto cached = operation.state_->providers[index]->lookup(bound.value());
+      if (cached) {
+        if (bound.value().source != nullptr && bound.value().source->definition != nullptr &&
+            cached.value()->operator_name() != bound.value().source->definition->name())
+          return Status(StatusCode::AbiMismatch, "cached batch artifact belongs to a different operator");
+        satisfied = true;
+        break;
+      }
+      if (cached.status().code() != StatusCode::NotFound)
+        return cached.status();
+      if (operation.state_->providers[index]->mode() == vecops::runtime::ArtifactCacheMode::CacheOnly) {
+        last = cached.status();
+        continue;
+      }
+      if (operation.state_->compilers[index] == nullptr)
+        return Status(StatusCode::InternalError, "batch kernel request has no compiler");
+      planned.push_back(
+        Planned{operation.state_->compilers[index], operation.state_->providers[index], std::move(bound).value()});
+      satisfied = true;
+      break;
+    }
+    if (!satisfied)
+      return last;
+  }
+
+  std::map<std::string, std::vector<std::size_t>, std::less<>> groups;
+  for (std::size_t index = 0; index < planned.size(); ++index) {
+    const auto key = planned[index].compiler_instance->batch_key();
+    if (key.empty())
+      return Status(StatusCode::InternalError, "kernel batch compiler has no source-kernel configuration");
+    groups[key].push_back(index);
+  }
+  for (const auto& [compiler_key, indices] : groups) {
+    (void)compiler_key;
+    std::vector<vecops::runtime::BoundKernelRecipe> recipes;
+    recipes.reserve(indices.size());
+    for (const auto index : indices)
+      recipes.push_back(planned[index].recipe);
+    auto compiled = planned[indices.front()].compiler_instance->compile_kernels(recipes, parallel_jobs);
+    if (compiled.size() != indices.size())
+      return Status(StatusCode::InternalError, "kernel batch compiler returned the wrong result count");
+    for (std::size_t offset = 0; offset < indices.size(); ++offset) {
+      if (!compiled[offset])
+        return compiled[offset].status();
+      auto& plan = planned[indices[offset]];
+      auto adopted = plan.provider->adopt(plan.recipe, std::move(compiled[offset]).value());
+      if (!adopted)
+        return adopted.status();
+    }
+  }
+  return Status::success();
+}
 
 Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, std::uint32_t num_specs,
                                   const VecopsSpecializationArgument* specs) {
@@ -876,6 +978,7 @@ Most applications should use :mod:`vecops`, whose Python wrappers normalize
 dtypes, derive schemas, and own framework integration. This module mirrors C++
 value types for diagnostics, explicit build control, and wrapper implementation;
 its constructor-level interfaces intentionally expose native concepts.)doc";
+  module.attr("build_api_version") = 1;
 
   py::enum_<DType>(module, "DType", "Element types understood by the vecops runtime.")
     .value("invalid", DType::Invalid)
@@ -1230,6 +1333,13 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
     .def_readwrite("reuse_build_directory", &compiler::KernelBuildRequest::reuse_build_directory)
     .def_readwrite("reuse_generated_source_directory", &compiler::KernelBuildRequest::reuse_generated_source_directory);
 
+  py::class_<compiler::KernelBuildBatchRequest>(module, "KernelBuildBatchRequest",
+                                                "Targets compiled by one generated CMake project.")
+    .def(py::init<>())
+    .def_readwrite("tasks", &compiler::KernelBuildBatchRequest::tasks)
+    .def_readwrite("generated_source_directory", &compiler::KernelBuildBatchRequest::generated_source_directory)
+    .def_readwrite("build_directory", &compiler::KernelBuildBatchRequest::build_directory);
+
   py::class_<compiler::CommandResult>(module, "CommandResult", "Captured result of one native build command.")
     .def_readonly("arguments", &compiler::CommandResult::arguments)
     .def_readonly("exit_code", &compiler::CommandResult::exit_code)
@@ -1248,6 +1358,14 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
     .def_property_readonly("log", &build_log)
     .def_property_readonly("artifact", [](const compiler::BuildResult& result) { return result.kernel_library; });
 
+  py::class_<compiler::BuildBatchResult>(module, "BuildBatchResult", "Structured result of one CMake build graph.")
+    .def_readonly("success", &compiler::BuildBatchResult::success)
+    .def_readonly("stage", &compiler::BuildBatchResult::stage)
+    .def_readonly("error", &compiler::BuildBatchResult::error)
+    .def_readonly("configure", &compiler::BuildBatchResult::configure)
+    .def_readonly("build", &compiler::BuildBatchResult::build)
+    .def_readonly("tasks", &compiler::BuildBatchResult::tasks);
+
   py::class_<compiler::Compiler, std::shared_ptr<compiler::Compiler>>(
     module, "Compiler", "C++ kernel compiler without Python subprocess callbacks.")
     .def(py::init<>())
@@ -1257,6 +1375,13 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
       [](const compiler::Compiler& self, const compiler::KernelBuildRequest& request) {
         py::gil_scoped_release release;
         return self.compile(request);
+      },
+      py::arg("request"))
+    .def(
+      "compile_batch",
+      [](const compiler::Compiler& self, const compiler::KernelBuildBatchRequest& request) {
+        py::gil_scoped_release release;
+        return self.compile_batch(request);
       },
       py::arg("request"))
     .def(
@@ -1325,4 +1450,25 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
       py::arg("call"))
     .def("__call__", &PyOperator::invoke_values,
          "Invoke with positional NumPy tensor/scalar arguments and specialization keyword arguments.");
+
+  module.def(
+    "prepare_batch",
+    [](py::iterable requests, std::size_t parallel_jobs) {
+      std::vector<PyOperator::BatchItem> items;
+      for (const auto request : requests) {
+        const auto tuple = py::cast<py::tuple>(request);
+        if (tuple.size() != 2)
+          throw py::value_error("prepare_batch entries must be (Operator, KernelCall) pairs");
+        items.push_back(
+          PyOperator::BatchItem{&py::cast<const PyOperator&>(tuple[0]), &py::cast<const PyKernelCall&>(tuple[1])});
+      }
+      const auto status = [&]() {
+        py::gil_scoped_release release;
+        return PyOperator::prepare_batch(items, parallel_jobs);
+      }();
+      if (!status.ok())
+        throw_status(status);
+    },
+    py::arg("requests"), py::arg("parallel_jobs") = 0,
+    "Prepare native operator cache misses through shared CMake batches.");
 }

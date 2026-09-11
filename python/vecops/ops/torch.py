@@ -12,7 +12,10 @@ from types import SimpleNamespace
 
 from .._jit import JitKernel
 from .._operator import Operator, OperatorGroup
-from .._schema_bridge import register_torch_operator as _register
+from .._schema_bridge import (
+  compile_pending_torch_bridges as _compile_pending,
+  register_torch_operator as _register,
+)
 
 _libraries: dict[str, SimpleNamespace] = {}
 
@@ -51,7 +54,14 @@ def register(qualified_name, dispatch, *, compiler=None, **options):
     operation = dispatch
   else:
     raise TypeError("dispatch must be an Operator, JitKernel, or ordered JitKernel sequence")
-  function = _register(library, name, operation.native, operation.kernel_def._native(), **options)
+  function = _register(
+      library,
+      name,
+      operation.native,
+      operation.kernel_def._native(),
+      compiler=operation.compiler,
+      **options,
+  )
   namespace = _libraries.setdefault(library, SimpleNamespace())
   setattr(namespace, name, function)
   return function
@@ -65,4 +75,9 @@ def __getattr__(name: str):
     raise AttributeError(name) from error
 
 
-__all__ = ["register"]
+def compile_pending(*, parallelism: int | None = None) -> int:
+  """Compile and register every pending Torch bridge in shared build graphs."""
+  return _compile_pending(parallelism=parallelism)
+
+
+__all__ = ["compile_pending", "register"]

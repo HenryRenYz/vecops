@@ -2,11 +2,12 @@
  * @file Compiler.h
  * @brief Isolated CMake-based compilation of vecops kernel artifact DSOs.
  *
- * `Compiler` generates a small project and launches CMake subprocesses without
- * a shell.  Requests describe caller-owned filesystem locations; compilation
- * creates or writes the requested generated-source, build, artifact, and log
- * paths.  It does not cache results or synchronize concurrent writers, so
- * callers must provide distinct directories or external locking.
+ * `Compiler` generates one top-level project containing one or more task
+ * fragments and launches CMake subprocesses without a shell. Requests describe
+ * caller-owned filesystem locations; compilation creates or writes the
+ * requested generated-source, build, artifact, and log paths. It does not
+ * cache results or synchronize concurrent writers, so callers must provide
+ * distinct directories or external locking.
  */
 #pragma once
 
@@ -14,6 +15,7 @@
 #include <filesystem>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -188,7 +190,7 @@ enum class BuildStage {
   Generate,
   /** @brief CMake configuration is running or failed. */
   Configure,
-  /** @brief CMake build and install are running or failed. */
+  /** @brief CMake build (and any legacy install target) is running or failed. */
   BuildAndInstall,
   /** @brief Artifact discovery completed successfully. */
   Complete,
@@ -219,7 +221,7 @@ struct CommandResult {
  * filesystem failure; subprocess details are populated when available.
  */
 struct BuildResult {
-  /** @brief True only after build, install, and artifact discovery succeed. */
+  /** @brief True only after build and artifact discovery succeed. */
   bool success = false;
   /** @brief Furthest phase reached. */
   BuildStage stage = BuildStage::None;
@@ -227,7 +229,7 @@ struct BuildResult {
   std::string error;
   /** @brief Configure subprocess result when configuration was attempted. */
   std::optional<CommandResult> configure;
-  /** @brief Build/install subprocess result when that phase was attempted. */
+  /** @brief Build subprocess result; name retained for source compatibility. */
   std::optional<CommandResult> build_and_install;
   /** @brief Requested artifact directory, whether or not build succeeded. */
   std::filesystem::path artifact_directory;
@@ -235,6 +237,39 @@ struct BuildResult {
   std::vector<std::filesystem::path> artifact_files;
   /** @brief Located kernel DSO when exactly one suitable artifact is found. */
   std::optional<std::filesystem::path> kernel_library;
+};
+
+/**
+ * @brief One CMake invocation containing independently-addressable kernel targets.
+ *
+ * Every task keeps its own generated CMake fragment, binary subdirectory, and
+ * artifact directory.  The batch owns the only top-level CMake project and
+ * therefore imports the Vecops SDK once and exposes every translation unit to
+ * one native build-system scheduler.
+ */
+struct KernelBuildBatchRequest {
+  /** @brief Non-empty task list built by one CMake project. */
+  std::vector<KernelBuildRequest> tasks;
+  /** @brief Directory receiving the top-level project and task fragments. */
+  std::filesystem::path generated_source_directory;
+  /** @brief Single CMake binary tree shared by every task. */
+  std::filesystem::path build_directory;
+};
+
+/** @brief Outcome of one configure/build command plus per-task discovery. */
+struct BuildBatchResult {
+  /** @brief True when every task completed and exposed its requested DSO. */
+  bool success = false;
+  /** @brief Furthest batch-wide phase reached. */
+  BuildStage stage = BuildStage::None;
+  /** @brief Batch-wide validation or subprocess error. */
+  std::string error;
+  /** @brief Shared configure subprocess result. */
+  std::optional<CommandResult> configure;
+  /** @brief Shared build subprocess result. */
+  std::optional<CommandResult> build;
+  /** @brief Results in the same order as `KernelBuildBatchRequest::tasks`. */
+  std::vector<BuildResult> tasks;
 };
 
 /**
@@ -254,7 +289,7 @@ public:
   }
 
   /**
-   * @brief Validate, generate, configure, build, install, and discover one kernel DSO.
+   * @brief Validate, generate, configure, build, and discover one kernel DSO.
    * @param request Complete source, SDK, toolchain, and output-path description.
    * @return Detailed build result; errors are represented in the result.
    *
@@ -263,6 +298,15 @@ public:
    * parent process environment.
    */
   [[nodiscard]] BuildResult compile(const KernelBuildRequest& request) const;
+
+  /**
+   * @brief Build many kernel module targets through one CMake/Ninja graph.
+   *
+   * Tasks must share one SDK and toolchain. Target-specific architecture,
+   * sources, compile/link options, and output directories remain independent.
+   * No per-task CMake subprocess is launched.
+   */
+  [[nodiscard]] BuildBatchResult compile_batch(const KernelBuildBatchRequest& request) const;
 
   /**
    * @brief Bind, generate, compile, and load a C++ file defining `__kernel__`.
@@ -281,6 +325,13 @@ public:
   compile_kernel(const runtime::BoundKernelRecipe& recipe) const;
 
   /**
+   * @brief Compile source-backed bound recipes through one generated project.
+   * @return One result per input recipe, preserving input order.
+   */
+  [[nodiscard]] std::vector<runtime::Result<std::shared_ptr<runtime::Executable>>>
+  compile_kernels(std::span<const runtime::BoundKernelRecipe> recipes, std::size_t parallel_jobs = 0) const;
+
+  /**
    * @brief Return the optional source-kernel policy retained by this compiler.
    *
    * An empty value means `compile(request)` remains available but
@@ -289,6 +340,14 @@ public:
   [[nodiscard]] const std::optional<KernelCompilerConfig>& kernel_config() const {
     return kernel_config_;
   }
+
+  /**
+   * @brief Canonical grouping key for one generated-project build domain.
+   *
+   * Compiler instances with equal non-empty keys can contribute source
+   * recipes to the same batch even when they are distinct C++ objects.
+   */
+  [[nodiscard]] std::string batch_key() const;
 
 private:
   std::optional<KernelCompilerConfig> kernel_config_;

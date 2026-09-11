@@ -38,13 +38,16 @@ including `Scalar`, `AVX512`, `Native`, `SVE`, and `SVE2`.
 
 ## C++ kernel compiler
 
-`vecops::compiler::Compiler` generates a small CMake project and launches
-CMake directly as an argv subprocess (never through a shell). A
+`vecops::compiler::Compiler` generates CMake projects and launches CMake
+directly as an argv subprocess (never through a shell). A
 `KernelBuildRequest` supplies the source files, optional include/link policy,
 explicit build and artifact directories, target ISA, SDK location, and a
 `ToolchainSpec`. Explicit `c_compiler`, `cxx_compiler`, and `toolchain_file`
 values are passed to CMake; when omitted, CMake uses its normal environment and
-platform selection.
+platform selection. `compile_batch()` gives every request its own generated
+fragment, binary subdirectory, and artifact directory beneath one top-level
+project. Vecops is imported once and one CMake-generated scheduler sees all
+translation units. `compile()` is implemented as a one-task batch.
 
 The SDK can be either a Vecops source checkout (`SdkLayout::SourceTree`) or an
 installed package (`SdkLayout::Package`). Compilation performs no artifact
@@ -234,15 +237,19 @@ storage.
 
 `vecops.precompile(model, *inputs, parallelism=N)` performs a storage-free
 FakeTensor trace by default, collects and deduplicates registered JIT calls,
-and then prepares the resulting artifacts through a bounded compilation batch.
+and then prepares the resulting artifacts through one CMake build graph.
 During collection wrappers return their caller-owned output tensors without
 executing native code. `vecops.is_precompiling()` lets model code avoid
 data-dependent checks or persistent caching during that trace;
 `use_real_tensors=True` is available for models that cannot run with fake
 tensors.
 
-`vecops.ops.torch.register()` generates one C++ dispatcher bridge for the
-logical operator. Its internal schema marks outputs as distinct mutable
+`vecops.ops.torch.register()` declares one C++ dispatcher bridge for the
+logical operator. `vecops.ops.torch.compile_pending()` compiles all pending
+bridges as separate targets in one CMake graph; the first real call also
+provides a lazy fallback. Bridges are ordinary DSOs with a C handle setter and
+do not require `torch/extension.h`, pybind11, or `torch_python`. Their internal
+schema marks outputs as distinct mutable
 `Tensor(a!)` arguments and returns `()` by default. `return_outputs=True` adds
 internal Tensor returns for TorchInductor versions that reject void custom
 operators. The public `vecops.ops.torch.<library>.<name>` wrapper returns the

@@ -514,87 +514,154 @@ runtime::Result<std::shared_ptr<runtime::Executable>> Compiler::compile_kernel(c
     return binding.status();
   const auto source = read_file(kernel_file);
   std::uint64_t fingerprint = UINT64_C(14695981039346656037);
-  fingerprint = hash_text(fingerprint, binding.value().specialization_key);
   fingerprint = hash_text(fingerprint, definition.canonical());
   fingerprint = hash_text(fingerprint, source);
-  const auto identity = hex_hash(fingerprint);
-
-  std::error_code error;
-  fs::create_directories(kernel_config_->work_directory, error);
-  if (error)
-    return invalid("cannot create compiler work directory: " + error.message());
-  fs::path attempt;
-  for (std::size_t retry = 0; retry < 1024; ++retry) {
-    error.clear();
-    const auto candidate =
-      kernel_config_->work_directory /
-      ("kernel-" + identity + "-" + std::to_string(next_attempt.fetch_add(1, std::memory_order_relaxed)));
-    if (fs::create_directory(candidate, error)) {
-      attempt = candidate;
-      break;
-    }
-    if (error && error != std::errc::file_exists)
-      return invalid("cannot create compiler attempt directory: " + error.message());
-  }
-  if (attempt.empty())
-    return invalid("cannot allocate a unique compiler attempt directory");
-
-  const auto input_directory = attempt / "input";
-  fs::create_directory(input_directory, error);
-  if (error)
-    return invalid("cannot create generated input directory: " + error.message());
-  auto status = write_file(input_directory / "vecops_spec.h", generate_spec(definition, binding.value()));
-  if (!status.ok())
-    return status;
-  status =
-    write_file(input_directory / "vecops_adapter.cpp", generate_adapter(kernel_file, definition, binding.value()));
-  if (!status.ok())
-    return status;
-
-  KernelBuildRequest request;
-  request.target_name = "vecops_kernel_" + identity;
-  request.output_name = request.target_name;
-  request.target_arch = kernel_config_->target_arch;
-  request.sdk = kernel_config_->sdk;
-  request.toolchain = kernel_config_->toolchain;
-  request.sources = {input_directory / "vecops_adapter.cpp"};
-  request.include_directories = kernel_config_->include_directories;
-  request.include_directories.push_back(input_directory);
-  request.compile_definitions = kernel_config_->compile_definitions;
-  request.compile_options = kernel_config_->compile_options;
-  request.link_directories = kernel_config_->link_directories;
-  request.link_libraries = kernel_config_->link_libraries;
-  request.link_options = kernel_config_->link_options;
-  request.generated_source_directory = attempt / "project";
-  request.build_directory = attempt / "build";
-  request.artifact_directory = attempt / "artifact";
-
-  auto result = compile(request);
-  if (!result.success || !result.kernel_library) {
-    std::string message = "kernel compilation failed";
-    if (!result.error.empty())
-      message += ": " + result.error;
-    if (result.configure && !result.configure->output.empty())
-      message += "\n[configure]\n" + result.configure->output;
-    if (result.build_and_install && !result.build_and_install->output.empty())
-      message += "\n[build]\n" + result.build_and_install->output;
-    return runtime::Status(runtime::StatusCode::ExecutionError, std::move(message));
-  }
-  auto executable = runtime::Executable::load(*result.kernel_library);
-  if (!executable)
-    return executable.status();
-  if (executable.value()->operator_name() != definition.name() ||
-      executable.value()->specialization_key() != binding.value().specialization_key)
-    return runtime::Status(runtime::StatusCode::AbiMismatch, "generated kernel identity does not match its binding");
-  return std::move(executable).value();
+  auto definition_owner = std::make_shared<runtime::KernelDef>(definition);
+  auto instantiation = std::make_shared<runtime::BoundKernelRecipe::SourceInstantiation>(
+    runtime::BoundKernelRecipe::SourceInstantiation{kernel_file, definition_owner, std::move(binding).value()});
+  runtime::BoundKernelRecipe recipe{"direct-source-kernel", instantiation->binding.specialization_key,
+                                    "direct-source-kernel;source=" + hex_hash(fingerprint) + ";" +
+                                      instantiation->binding.specialization_key,
+                                    std::move(instantiation)};
+  return compile_kernel(recipe);
 }
 
 runtime::Result<std::shared_ptr<runtime::Executable>>
 Compiler::compile_kernel(const runtime::BoundKernelRecipe& recipe) const {
   if (recipe.source == nullptr || recipe.source->definition == nullptr)
     return invalid("bound recipe does not carry a source kernel instantiation");
-  return compile_kernel(recipe.source->kernel_file, *recipe.source->definition,
-                        runtime::KernelCall(recipe.source->binding.arguments, recipe.source->binding.values));
+  const std::array recipes{recipe};
+  auto results = compile_kernels(recipes);
+  return std::move(results.front());
+}
+
+std::vector<runtime::Result<std::shared_ptr<runtime::Executable>>>
+Compiler::compile_kernels(std::span<const runtime::BoundKernelRecipe> recipes, std::size_t parallel_jobs) const {
+  using ExecutableResult = runtime::Result<std::shared_ptr<runtime::Executable>>;
+  std::vector<ExecutableResult> results;
+  if (recipes.empty())
+    return results;
+
+  auto fail_all = [&](runtime::Status status) {
+    results.clear();
+    results.reserve(recipes.size());
+    for (std::size_t index = 0; index < recipes.size(); ++index)
+      results.emplace_back(status);
+    return results;
+  };
+  if (!kernel_config_)
+    return fail_all(invalid("compile_kernels requires Compiler(KernelCompilerConfig)"));
+  if (kernel_config_->work_directory.empty())
+    return fail_all(invalid("KernelCompilerConfig.work_directory is required"));
+
+  std::uint64_t batch_fingerprint = UINT64_C(14695981039346656037);
+  for (const auto& recipe : recipes) {
+    if (recipe.source == nullptr || recipe.source->definition == nullptr)
+      return fail_all(invalid("bound recipe does not carry a source kernel instantiation"));
+    if (!fs::is_regular_file(recipe.source->kernel_file))
+      return fail_all(invalid("kernel source does not exist: " + recipe.source->kernel_file.string()));
+    batch_fingerprint = hash_text(batch_fingerprint, recipe.artifact_key);
+  }
+
+  std::error_code error;
+  fs::create_directories(kernel_config_->work_directory, error);
+  if (error)
+    return fail_all(invalid("cannot create compiler work directory: " + error.message()));
+  fs::path attempt;
+  const auto batch_identity = hex_hash(batch_fingerprint);
+  for (std::size_t retry = 0; retry < 1024; ++retry) {
+    error.clear();
+    const auto candidate =
+      kernel_config_->work_directory /
+      ("kernel-batch-" + batch_identity + "-" + std::to_string(next_attempt.fetch_add(1, std::memory_order_relaxed)));
+    if (fs::create_directory(candidate, error)) {
+      attempt = candidate;
+      break;
+    }
+    if (error && error != std::errc::file_exists)
+      return fail_all(invalid("cannot create compiler batch directory: " + error.message()));
+  }
+  if (attempt.empty())
+    return fail_all(invalid("cannot allocate a unique compiler batch directory"));
+
+  KernelBuildBatchRequest batch;
+  batch.generated_source_directory = attempt / "project";
+  batch.build_directory = attempt / "build";
+  batch.tasks.reserve(recipes.size());
+  for (std::size_t index = 0; index < recipes.size(); ++index) {
+    const auto& recipe = recipes[index];
+    const auto& source = *recipe.source;
+    std::uint64_t fingerprint = UINT64_C(14695981039346656037);
+    fingerprint = hash_text(fingerprint, source.binding.specialization_key);
+    fingerprint = hash_text(fingerprint, source.definition->canonical());
+    fingerprint = hash_text(fingerprint, read_file(source.kernel_file));
+    const auto identity = hex_hash(fingerprint);
+
+    const auto input_directory = attempt / "tasks" / std::to_string(index) / "input";
+    fs::create_directories(input_directory, error);
+    if (error)
+      return fail_all(invalid("cannot create generated input directory: " + error.message()));
+    auto status = write_file(input_directory / "vecops_spec.h", generate_spec(*source.definition, source.binding));
+    if (!status.ok())
+      return fail_all(std::move(status));
+    status = write_file(input_directory / "vecops_adapter.cpp",
+                        generate_adapter(source.kernel_file, *source.definition, source.binding));
+    if (!status.ok())
+      return fail_all(std::move(status));
+
+    KernelBuildRequest request;
+    request.target_name = "vecops_kernel_" + identity + "_" + std::to_string(index);
+    request.output_name = "vecops_kernel_" + identity;
+    request.target_arch = kernel_config_->target_arch;
+    request.sdk = kernel_config_->sdk;
+    request.toolchain = kernel_config_->toolchain;
+    if (parallel_jobs != 0)
+      request.toolchain.parallel_jobs = parallel_jobs;
+    request.sources = {input_directory / "vecops_adapter.cpp"};
+    request.include_directories = kernel_config_->include_directories;
+    request.include_directories.push_back(input_directory);
+    request.compile_definitions = kernel_config_->compile_definitions;
+    request.compile_options = kernel_config_->compile_options;
+    request.link_directories = kernel_config_->link_directories;
+    request.link_libraries = kernel_config_->link_libraries;
+    request.link_options = kernel_config_->link_options;
+    request.generated_source_directory = batch.generated_source_directory / "tasks" / std::to_string(index);
+    request.build_directory = batch.build_directory / "tasks" / std::to_string(index);
+    request.artifact_directory = attempt / "artifacts" / std::to_string(index);
+    batch.tasks.push_back(std::move(request));
+  }
+
+  auto built = compile_batch(batch);
+  results.reserve(recipes.size());
+  for (std::size_t index = 0; index < recipes.size(); ++index) {
+    if (index >= built.tasks.size() || !built.tasks[index].success || !built.tasks[index].kernel_library) {
+      std::string message = "kernel batch compilation failed";
+      if (index < built.tasks.size() && !built.tasks[index].error.empty())
+        message += ": " + built.tasks[index].error;
+      else if (!built.error.empty())
+        message += ": " + built.error;
+      if (built.configure && !built.configure->output.empty())
+        message += "\n[configure]\n" + built.configure->output;
+      if (built.build && !built.build->output.empty())
+        message += "\n[build]\n" + built.build->output;
+      results.emplace_back(runtime::Status(runtime::StatusCode::ExecutionError, std::move(message)));
+      continue;
+    }
+    auto executable = runtime::Executable::load(*built.tasks[index].kernel_library);
+    if (!executable) {
+      results.emplace_back(executable.status());
+      continue;
+    }
+    const auto& source = *recipes[index].source;
+    if (executable.value()->operator_name() != source.definition->name() ||
+        executable.value()->specialization_key() != source.binding.specialization_key) {
+      results.emplace_back(
+        runtime::Status(runtime::StatusCode::AbiMismatch, "generated kernel identity does not match its binding"));
+      continue;
+    }
+    results.emplace_back(std::move(executable).value());
+  }
+  return results;
 }
 
 } // namespace vecops::compiler
