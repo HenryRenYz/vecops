@@ -126,31 +126,35 @@ inline constexpr bool is_packed_access_v =
 template <typename Access>
 inline constexpr bool direct_row_major_input_v =
   generic::RawDirectAccess<Access> && Access::Rank == 2 &&
-  std::same_as<tensor::stride_type_t<1, InputLayoutOf<Access>>, meta::Const<1>>;
+  meta::range_within_v<
+      tensor::stride_type_t<1, InputLayoutOf<Access>>, 1, 1>;
 
 /// Rank-two logical row whose final axis is physically contiguous, including
 /// converted and transformed DataAccess objects.
 template <typename Access>
 inline constexpr bool row_contiguous_input_v =
-  Access::Rank == 2 && std::same_as<tensor::stride_type_t<1, InputLayoutOf<Access>>,
-                                    meta::Const<1>>;
+  Access::Rank == 2 && meta::range_within_v<
+      tensor::stride_type_t<1, InputLayoutOf<Access>>, 1, 1>;
 
 /// Output-side twin of direct_row_major_input_v.
 template <typename Access>
 inline constexpr bool direct_row_major_output_v =
   generic::RawDirectAccess<Access> && Access::Rank == 2 &&
-  std::same_as<tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
+  meta::range_within_v<
+      tensor::stride_type_t<1, OutputLayoutOf<Access>>, 1, 1>;
 
 template <typename Access>
 inline constexpr bool row_contiguous_output_v =
-  Access::Rank == 2 && std::same_as<tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
+  Access::Rank == 2 && meta::range_within_v<
+      tensor::stride_type_t<1, OutputLayoutOf<Access>>, 1, 1>;
 
 /// Rank-two output whose leading (spatial) axis is contiguous, i.e. a
 /// transposed C -- the store shape produced by orientation-swapped
 /// problems; served by the column-block store path in store_c_tile.
 template <typename Access>
 inline constexpr bool column_contiguous_output_v =
-  Access::Rank == 2 && std::same_as<tensor::stride_type_t<0, OutputLayoutOf<Access>>, meta::Const<1>>;
+  Access::Rank == 2 && meta::range_within_v<
+      tensor::stride_type_t<0, OutputLayoutOf<Access>>, 1, 1>;
 
 /** AMX defaults to one wide transform; an explicit wrapper takes priority. */
 template <typename Access>
@@ -310,9 +314,8 @@ inline constexpr bool remainder_at_most_one_v = [] {
   using EV = std::remove_cvref_t<E>;
   if constexpr (EV::aligns(Alignment)) {
     return true;
-  } else if constexpr (meta::is_bounded_v<EV> &&
-                       meta::lower_bound_v<EV> == meta::upper_bound_v<EV>) {
-    return meta::lower_bound_v<EV> % Alignment <= 1;
+  } else if constexpr (meta::is_singleton_v<EV>) {
+    return meta::singleton_value_v<EV> % Alignment <= 1;
   } else {
     return false;
   }
@@ -323,8 +326,7 @@ inline constexpr bool remainder_at_most_one_v = [] {
 template <meta::ValueType E, nint_t Value>
 inline constexpr bool extent_excludes_v = [] {
   using EV = std::remove_cvref_t<E>;
-  if constexpr (EV::is_const) return EV::value != Value;
-  else return !EV::conforms(Value);
+  return !EV::conforms(Value);
 }();
 
 /// Decide, purely from the Meta contracts, that every problem the caller
@@ -1382,8 +1384,7 @@ VECOPS_ALWAYS_INLINE auto tile_active_extent(nint_t active) {
 template <typename Extent>
 inline constexpr bool full_tile_extent_v = [] {
   using E = std::remove_cvref_t<Extent>;
-  if constexpr (E::is_const) return E::value == 16;
-  else return false;
+  return meta::is_singleton_v<E> && meta::singleton_value_v<E> == 16;
 }();
 
 /// Extent type is statically nonzero, so a zero check can be skipped.
@@ -3004,14 +3005,17 @@ struct Backend<matmul_implementation::AMX> {
               Atom, ::vecops::matmul::Operand::A, A> ||
           !amx::is_packed_access_v<
               Atom, ::vecops::matmul::Operand::B, B> ||
-          !NV::is_const || !KV::is_const || MV::is_const) {
+          !meta::is_singleton_v<NV> ||
+          !meta::is_singleton_v<KV> ||
+          meta::is_singleton_v<MV>) {
         return false;
       } else {
         // Restrict the dual traversal to the measured L2-resident-K class.
         // Long K needs real KC blocking (L07), while constant M was already
         // decided by automatic_physical_n_major_v before reaching this tier.
-        return KV::value >= 256 && KV::value <= 4096 &&
-            NV::value >= 4 * 16;
+        return meta::singleton_value_v<KV> >= 256 &&
+            meta::singleton_value_v<KV> <= 4096 &&
+            meta::singleton_value_v<NV> >= 4 * 16;
       }
     }();
     const bool runtime_prepared_n_major = [&] {

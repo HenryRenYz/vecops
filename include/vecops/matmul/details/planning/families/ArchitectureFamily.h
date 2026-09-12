@@ -338,13 +338,14 @@ private:
                 std::same_as<typename Transform::TOut, float32_t>;
           }
         }();
+        using KStride = tensor::stride_type_t<Rank - 1, Layout>;
         return ReusableRank &&
             std::same_as<typename Spec::ComputeType, Element> &&
             (std::same_as<Transform, tensor::NoTransform> ||
              SupportedQuantization) &&
             (NativeMemory || SupportedConversion || SupportedQuantization) &&
-            std::same_as<
-                tensor::stride_type_t<Rank - 1, Layout>, meta::Const<1>>;
+            meta::is_singleton_v<KStride> &&
+            meta::singleton_value_v<KStride> == 1;
       } else if constexpr (!std::same_as<
                                Implementation,
                                kernel::matmul_implementation::SME>) {
@@ -372,13 +373,14 @@ private:
               std::same_as<typename Transform::TOut, float32_t>;
         }
       }();
+      using KStride = tensor::stride_type_t<Rank - 1, Layout>;
       return sizeof(Element) <= 8 && Spec::InputTensor::Ndim == Rank &&
           std::same_as<typename Spec::ComputeType, Element> &&
           (std::same_as<Transform, tensor::NoTransform> ||
            SupportedQuantization) &&
           (NativeMemory || SupportedConversion || SupportedQuantization) &&
-          std::same_as<
-              tensor::stride_type_t<Rank - 1, Layout>, meta::Const<1>>;
+          meta::is_singleton_v<KStride> &&
+          meta::singleton_value_v<KStride> == 1;
     }
   }();
 
@@ -393,9 +395,10 @@ private:
     } else if constexpr (PackedBInput) {
       return true;
     } else {
-      return std::same_as<
-          tensor::stride_type_t<0, typename BSpec::InputLayout>,
-          meta::Const<0>>;
+      using BatchStride = tensor::stride_type_t<
+          0, typename BSpec::InputLayout>;
+      return meta::is_singleton_v<BatchStride> &&
+          meta::singleton_value_v<BatchStride> == 0;
     }
   }();
 
@@ -409,9 +412,10 @@ private:
     } else if constexpr (ASpec::InputTensor::Ndim != 3) {
       return false;
     } else {
-      return std::same_as<
-          tensor::stride_type_t<0, typename ASpec::InputLayout>,
-          meta::Const<0>>;
+      using BatchStride = tensor::stride_type_t<
+          0, typename ASpec::InputLayout>;
+      return meta::is_singleton_v<BatchStride> &&
+          meta::singleton_value_v<BatchStride> == 0;
     }
   }();
 
@@ -573,9 +577,10 @@ private:
       std::same_as<typename Atom::TAcc, float32_t> &&
       std::same_as<typename BSpec::MemoryElement, bfloat16_t> &&
       std::same_as<typename BSpec::TransformType, tensor::NoTransform> &&
-      std::same_as<
-          tensor::stride_type_t<Rank - 1, typename BSpec::InputLayout>,
-          meta::Const<1>>;
+      meta::is_singleton_v<tensor::stride_type_t<
+          Rank - 1, typename BSpec::InputLayout>> &&
+      meta::singleton_value_v<tensor::stride_type_t<
+          Rank - 1, typename BSpec::InputLayout>> == 1;
   static constexpr bool Rank3CompletesPackedPair = Rank3SharedB &&
       ((AutoPackA && PackedBInput) || (AutoPackB && PackedAInput));
   // AMX avoids cloning a raw-B flatten leaf when conversion-aware auto-pack

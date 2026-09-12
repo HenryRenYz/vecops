@@ -66,14 +66,24 @@ inline constexpr bool swappable_rank2_c_output_v =
 
 /// Last axis (the K axis of [spatial, K]) has compile-time unit stride.
 template <typename Layout>
-inline constexpr bool row_contiguous_v = std::same_as<
-    tensor::stride_type_t<Layout::Ndim - 1, Layout>, meta::Const<1>>;
+inline constexpr bool row_contiguous_v = [] {
+  using Stride = tensor::stride_type_t<Layout::Ndim - 1, Layout>;
+  return meta::is_singleton_v<Stride> &&
+      meta::singleton_value_v<Stride> == 1;
+}();
 
 /// Rank-two layout whose leading (spatial) axis has unit stride, i.e. a
 /// transposed operand.
 template <typename Layout>
-inline constexpr bool column_contiguous_v = Layout::Ndim == 2 && std::same_as<
-    tensor::stride_type_t<0, Layout>, meta::Const<1>>;
+inline constexpr bool column_contiguous_v = [] {
+  if constexpr (Layout::Ndim != 2) {
+    return false;
+  } else {
+    using Stride = tensor::stride_type_t<0, Layout>;
+    return meta::is_singleton_v<Stride> &&
+        meta::singleton_value_v<Stride> == 1;
+  }
+}();
 
 /// LHS provably >= RHS: compares LHS's lower bound against RHS's upper
 /// bound, so an unknown bound answers false (conservative).

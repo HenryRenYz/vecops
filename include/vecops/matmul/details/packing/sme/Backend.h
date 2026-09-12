@@ -95,9 +95,8 @@ struct Backend<
       std::same_as<typename OutputSpec::TransformType, tensor::NoTransform> &&
       std::same_as<typename OutputSpec::MemoryElement,
                    typename OutputSpec::ComputeType> &&
-      std::same_as<
-          tensor::stride_type_t<1, typename InputSpec::InputLayout>,
-          meta::Const<1>>;
+      meta::range_within_v<
+          tensor::stride_type_t<1, typename InputSpec::InputLayout>, 1, 1>;
 
   template <::vecops::matmul::Atom Atom, ::vecops::matmul::Operand Side,
             execution::ExecutionScope Scope,
@@ -134,9 +133,8 @@ inline constexpr bool sme_common_eligible_v =
     std::same_as<typename OutputSpec::TransformType, tensor::NoTransform> &&
     std::same_as<typename OutputSpec::MemoryElement,
                  typename OutputSpec::ComputeType> &&
-    std::same_as<
-        tensor::stride_type_t<1, typename InputSpec::InputLayout>,
-        meta::Const<1>>;
+    meta::range_within_v<
+        tensor::stride_type_t<1, typename InputSpec::InputLayout>, 1, 1>;
 
 /// SME format under the SMEPostprocess tag: fuse the memory -> compute
 /// conversion or transform into the ZA read-out while still streaming

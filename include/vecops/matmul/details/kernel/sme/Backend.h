@@ -116,35 +116,39 @@ inline constexpr bool is_packed_access_v =
 template <typename Access>
 inline constexpr bool direct_row_major_input_v =
   generic::RawDirectAccess<Access> && Access::Rank == 2 &&
-  std::same_as<tensor::stride_type_t<1, InputLayoutOf<Access>>, meta::Const<1>>;
+  meta::range_within_v<
+      tensor::stride_type_t<1, InputLayoutOf<Access>>, 1, 1>;
 
 template <typename Access>
 inline constexpr bool row_contiguous_input_v =
-  Access::Rank == 2 && std::same_as<tensor::stride_type_t<1, InputLayoutOf<Access>>,
-                                    meta::Const<1>>;
+  Access::Rank == 2 && meta::range_within_v<
+      tensor::stride_type_t<1, InputLayoutOf<Access>>, 1, 1>;
 
 /// Output counterpart of direct_row_major_input_v.
 template <typename Access>
 inline constexpr bool direct_row_major_output_v =
   generic::RawDirectAccess<Access> && Access::Rank == 2 &&
-  std::same_as<tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
+  meta::range_within_v<
+      tensor::stride_type_t<1, OutputLayoutOf<Access>>, 1, 1>;
 
 template <typename Access>
 inline constexpr bool row_contiguous_output_v =
-  Access::Rank == 2 && std::same_as<tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
+  Access::Rank == 2 && meta::range_within_v<
+      tensor::stride_type_t<1, OutputLayoutOf<Access>>, 1, 1>;
 
 /// Rank-two input whose leading (spatial) axis is contiguous: a
 /// transposed operand as fed to orientation-swapped problems.
 template <typename Access>
 inline constexpr bool column_contiguous_input_v =
-    Access::Rank == 2 && std::same_as<
-        tensor::stride_type_t<0, InputLayoutOf<Access>>, meta::Const<1>>;
+    Access::Rank == 2 && meta::range_within_v<
+        tensor::stride_type_t<0, InputLayoutOf<Access>>, 1, 1>;
 
 /// Rank-two output whose leading (spatial) axis is contiguous (transposed
 /// C); the store shape produced by orientation-swapped problems.
 template <typename Access>
 inline constexpr bool column_contiguous_output_v =
-  Access::Rank == 2 && std::same_as<tensor::stride_type_t<0, OutputLayoutOf<Access>>, meta::Const<1>>;
+  Access::Rank == 2 && meta::range_within_v<
+      tensor::stride_type_t<0, OutputLayoutOf<Access>>, 1, 1>;
 
 /**
  * SME's backend-local automatic transform/store policy.  BiSheng 5.1 on the
@@ -1757,8 +1761,7 @@ inline constexpr bool extent_is_v =
 template <meta::ValueType E, nint_t Value>
 inline constexpr bool extent_excludes_v = [] {
   using EV = std::remove_cvref_t<E>;
-  if constexpr (EV::is_const) return EV::value != Value;
-  else return !EV::conforms(Value);
+  return !EV::conforms(Value);
 }();
 
 /// Runtime-rules shape class for this Atom's skinny leaves (see
@@ -2452,9 +2455,8 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
     const auto* base = reinterpret_cast<const T*>(input.raw_data()) + m * strides[0] + n;
     if constexpr (
         std::is_floating_point_v<T> &&
-        std::same_as<
-            tensor::stride_type_t<0, InputLayoutOf<CInput>>,
-            meta::Const<0>>) {
+        meta::range_within_v<
+            tensor::stride_type_t<0, InputLayoutOf<CInput>>, 0, 0>) {
       // ZA pre-seed trick (fp): outer product with all-ones multiplies the
       // broadcast C row by 1 into every active row -- see the function
       // comment; there is no fp horizontal-add into ZA.
@@ -2468,9 +2470,8 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
           pg_rows, pg, vec::fill(Tag{}, T{1}), value);
     } else if constexpr (
         (std::same_as<T, int32_t> || std::same_as<T, uint32_t>) &&
-        std::same_as<
-            tensor::stride_type_t<0, InputLayoutOf<CInput>>,
-            meta::Const<0>>) {
+        meta::range_within_v<
+            tensor::stride_type_t<0, InputLayoutOf<CInput>>, 0, 0>) {
       if constexpr (meta::is_singleton_v<ActiveM> &&
                     meta::singleton_value_v<ActiveM> == 1) {
         using U = std::conditional_t<std::same_as<T, int32_t>, uint32_t, T>;
@@ -3955,9 +3956,10 @@ struct Backend<matmul_implementation::SME> {
       constexpr nint_t KP = ::vecops::matmul::packing_t<
           Atom, ::vecops::matmul::Operand::A>::KPack;
       const auto k_groups = ceil_div(k, meta::cint<KP>);
-      if constexpr (decltype(k_groups)::is_const) {
+      if constexpr (meta::is_singleton_v<decltype(k_groups)>) {
         invoke.template operator()<
-            decltype(k_groups)::value >= FastPackedKGroups>();
+            meta::singleton_value_v<decltype(k_groups)> >=
+                FastPackedKGroups>();
       } else if constexpr (
           meta::has_upper_bound_v<decltype(k_groups)> &&
           meta::upper_bound_v<decltype(k_groups)> < FastPackedKGroups) {

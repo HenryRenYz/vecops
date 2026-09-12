@@ -102,10 +102,17 @@ template <Axis Target, typename Order,
           meta::ValueType Extent, meta::ValueType Tile>
 VECOPS_ALWAYS_INLINE constexpr auto accumulator_axis_extent(
     Extent extent, Tile tile) {
-  if constexpr (axis_precedes_k_v<Target, Order>)
-    return vecops::min(extent, tile);
-  else
+  if constexpr (!axis_precedes_k_v<Target, Order>) {
     return extent;
+  } else if constexpr (std::same_as<
+                           std::remove_cvref_t<Extent>,
+                           std::remove_cvref_t<Tile>>) {
+    // Avoid the generic-scalar / Meta overload ambiguity for identical Value
+    // types while retaining that exact type (including Dynamic constraints).
+    return tile < extent ? tile : extent;
+  } else {
+    return vecops::min(extent, tile);
+  }
 }
 
 /** Establish a bounded packed panel after its M/K or N/K dependencies have

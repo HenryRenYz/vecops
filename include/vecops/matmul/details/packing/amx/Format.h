@@ -197,27 +197,37 @@ public:
     if constexpr (Side == Operand::A) {
       if constexpr (Layout::Ndim != 4) return false;
       else return
-          std::same_as<tensor::size_type_t<2, Layout>, meta::Const<Panel>> &&
-          std::same_as<tensor::size_type_t<3, Layout>, meta::Const<KTile>> &&
-          std::same_as<tensor::stride_type_t<1, Layout>,
-                       meta::Const<Panel * KTile>> &&
-          std::same_as<tensor::stride_type_t<2, Layout>,
-                       meta::Const<KTile>> &&
-          std::same_as<tensor::stride_type_t<3, Layout>, meta::Const<1>>;
+          meta::range_within_v<
+              tensor::size_type_t<2, Layout>, Panel, Panel> &&
+          meta::range_within_v<
+              tensor::size_type_t<3, Layout>, KTile, KTile> &&
+          meta::range_within_v<
+              tensor::stride_type_t<1, Layout>,
+              Panel * KTile, Panel * KTile> &&
+          meta::range_within_v<
+              tensor::stride_type_t<2, Layout>, KTile, KTile> &&
+          meta::range_within_v<
+              tensor::stride_type_t<3, Layout>, 1, 1>;
     } else {
       if constexpr (Layout::Ndim != 5) return false;
       else return
-          std::same_as<tensor::size_type_t<2, Layout>,
-                       meta::Const<KTile / KPack>> &&
-          std::same_as<tensor::size_type_t<3, Layout>, meta::Const<Panel>> &&
-          std::same_as<tensor::size_type_t<4, Layout>, meta::Const<KPack>> &&
-          std::same_as<tensor::stride_type_t<1, Layout>,
-                       meta::Const<Panel * KTile>> &&
-          std::same_as<tensor::stride_type_t<2, Layout>,
-                       meta::Const<Panel * KPack>> &&
-          std::same_as<tensor::stride_type_t<3, Layout>,
-                       meta::Const<KPack>> &&
-          std::same_as<tensor::stride_type_t<4, Layout>, meta::Const<1>>;
+          meta::range_within_v<
+              tensor::size_type_t<2, Layout>,
+              KTile / KPack, KTile / KPack> &&
+          meta::range_within_v<
+              tensor::size_type_t<3, Layout>, Panel, Panel> &&
+          meta::range_within_v<
+              tensor::size_type_t<4, Layout>, KPack, KPack> &&
+          meta::range_within_v<
+              tensor::stride_type_t<1, Layout>,
+              Panel * KTile, Panel * KTile> &&
+          meta::range_within_v<
+              tensor::stride_type_t<2, Layout>,
+              Panel * KPack, Panel * KPack> &&
+          meta::range_within_v<
+              tensor::stride_type_t<3, Layout>, KPack, KPack> &&
+          meta::range_within_v<
+              tensor::stride_type_t<4, Layout>, 1, 1>;
     }
   }
 };

@@ -131,6 +131,37 @@ static_assert(std::same_as<
 using UnitTiling = matmul::CacheTiling<
     meta::Const<1>, meta::Const<1>, meta::Const<1>>;
 
+using SingletonUnit = meta::Dynamic<1, 1, 1>;
+using SingletonRowLayout = tensor::Layout<
+    tensor::Shape<meta::Any, meta::Any>,
+    tensor::Strides<meta::Any, SingletonUnit>>;
+using SingletonColumnLayout = tensor::Layout<
+    tensor::Shape<meta::Any, meta::Any>,
+    tensor::Strides<SingletonUnit, meta::Any>>;
+static_assert(matmul::details::orientation::row_contiguous_v<
+              SingletonRowLayout>);
+static_assert(matmul::details::orientation::column_contiguous_v<
+              SingletonColumnLayout>);
+static_assert(matmul::details::atom_alignment_v<
+              meta::Dynamic<1, 16, 16>> == 16);
+
+#if defined(ARCH_X86_FAMILY)
+using SingletonStrideAtom = matmul::AMX_BF16F32;
+#elif defined(HAS_SME)
+using SingletonStrideAtom = matmul::SME_BF16F32;
+#endif
+
+#if defined(ARCH_X86_FAMILY) || defined(HAS_SME)
+using SingletonRowTensor = tensor::Tensor<
+    bfloat16_t, typename SingletonRowLayout::Shape,
+    typename SingletonRowLayout::Strides>;
+using SingletonRowSpec = decltype(tensor::input<bfloat16_t>(
+    std::declval<SingletonRowTensor>()));
+static_assert(!matmul::details::should_pack_v<
+              matmul::PackingPolicy<>, SingletonStrideAtom,
+              matmul::Operand::A, SingletonRowSpec>);
+#endif
+
 #if defined(HAS_SME)
 using SMEAutomaticTiling = matmul::AutomaticCacheTilingFor<
     matmul::SME_F32F32>;
