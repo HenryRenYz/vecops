@@ -669,20 +669,15 @@ public:
       const auto lq_extent = tensor::size<0>(q_spec.input_layout());
       const auto tq_extent = ceil_div(
           lq_extent, Config::query_block_extent);
-      VECOPS_ASSERT(config.selected_blocks > 0,
-                    "IBS Attention selected block count must be positive");
-      auto map_shape = tensor::make_shape(
-          tq_extent, meta::Any{config.selected_blocks});
+      const auto selected_blocks = selected_blocks_extent();
+      auto map_shape = tensor::make_shape(tq_extent, selected_blocks);
       auto index_tensor = tensor::make_tensor(
           static_cast<int32_t*>(nullptr), map_shape);
       auto weight_tensor = tensor::make_tensor(
           static_cast<Score*>(nullptr), map_shape);
       Indexer indexer{config};
-      const nint_t map_bytes =
-          kernel::WorkspaceView::allocation_bytes<int32_t>(
-              tq_extent * config.selected_blocks) +
-          kernel::WorkspaceView::allocation_bytes<Score>(
-              tq_extent * config.selected_blocks);
+      const nint_t map_bytes = kernel::WorkspaceView::allocation_bytes<int32_t>(tq_extent * selected_blocks) +
+                               kernel::WorkspaceView::allocation_bytes<Score>(tq_extent * selected_blocks);
       const nint_t indexer_bytes = indexer.required_workspace(
           q, k, query_mask, key_mask, attention_mask, bias,
           index_tensor, weight_tensor);
@@ -734,10 +729,8 @@ public:
       const auto tq_extent = ceil_div(
           tensor::size<0>(q_spec.input_layout()),
           Config::query_block_extent);
-      VECOPS_ASSERT(config.selected_blocks > 0,
-                    "IBS Attention selected block count must be positive");
-      auto map_shape = tensor::make_shape(
-          tq_extent, meta::Any{config.selected_blocks});
+      const auto selected_blocks = selected_blocks_extent();
+      auto map_shape = tensor::make_shape(tq_extent, selected_blocks);
       auto index_tensor = workspace.template allocate_tensor<int32_t>(map_shape);
       auto weight_tensor = workspace.template allocate_tensor<Score>(map_shape);
       Indexer indexer{config};
@@ -785,6 +778,11 @@ public:
   }
 
 private:
+  VECOPS_INLINE meta::Dynamic<1, 1> selected_blocks_extent() const {
+    VECOPS_ASSERT(config.selected_blocks > 0, "IBS Attention selected block count must be positive");
+    return meta::Dynamic<1, 1>{config.selected_blocks};
+  }
+
   template <tensor::TensorOf<int32_t, 2> Index,
             tensor::TensorOf<Score, 2> Weight>
   VECOPS_INLINE void validate_base_maps(
