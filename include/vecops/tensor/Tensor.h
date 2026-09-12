@@ -55,7 +55,7 @@
  * auto sub = t(0, reserve, range(0, 3, 2));  // Tensor<float, Shape<Const<3>, Any>, ...>
  *
  * // Insert a new dimension
- * auto batched = t(new_axis(), reserve, reserve, reserve);  // Shape<Any=1, Shape<...>>
+ * auto batched = t(new_axis(), reserve, reserve, reserve);  // Shape<Const<1>, ...>
  *
  * // Transpose
  * auto t_t = transpose<0, 2>(t);
@@ -190,7 +190,7 @@ static constexpr auto reserve = details::ReserveAxis{};
  * @endcode
  */
 static constexpr auto new_axis() {
-  return details::NewAxis<Any>{1};
+  return details::NewAxis<Const<1>>{1};
 }
 
 /**
@@ -241,21 +241,29 @@ static constexpr auto new_axis(nint_t repeat) {
  *
  * @tparam S  Value type for `start`.
  * @tparam E  Value type for `end`.
- * @tparam T  Value type for `step` (default: `Any` with value 1).
+ * @tparam T  Value type for `step` (default: `Const<1>`).
  * @param start  Inclusive start index.
  * @param end    Exclusive end index.
  * @param step   Step within the slice (default: 1). Must not be 0.
  */
-template <ValueType S, ValueType E, ValueType T = Any>
+template <ValueType S, ValueType E, ValueType T = Const<1>>
 static constexpr auto range(S start, E end, T step = T{1}) {
   return details::Range<std::decay_t<S>, std::decay_t<E>, std::decay_t<T>>{
       nint_t(start), nint_t(end), nint_t(step)};
 }
 
 /**
- * @brief Slicing marker: range with raw integers (all promoted to `Any`).
+ * @brief Unit-step range with raw bounds.
+ *
+ * Runtime bounds become `Any`, but the omitted step remains the compile-time
+ * constant one so slicing preserves an existing unit-stride guarantee.
  */
-static constexpr auto range(nint_t start, nint_t end, nint_t step = 1) {
+static constexpr auto range(nint_t start, nint_t end) {
+  return details::Range<Any, Any, Const<1>>{start, end, 1};
+}
+
+/** @brief Runtime-step range; all three values are promoted to `Any`. */
+static constexpr auto range(nint_t start, nint_t end, nint_t step) {
   return details::Range<Any, Any, Any>{start, end, step};
 }
 
@@ -310,7 +318,7 @@ struct PrependMeta<S0, Meta<Ss...>> { using type = Meta<S0, Ss...>; };
  * | integer          | Dimension consumed, removed from result           |
  * | `ReserveAxis`    | Dimension passes through unchanged                |
  * | `NewAxis<V>`     | Dimension inserted (source dim NOT consumed)      |
- * | `Range<S,E,T>`   | Dimension consumed, size becomes Any, stride scales by T |
+ * | `Range<S,E,T>`   | Dimension consumed; provable size/stride facts are preserved |
  *
  * @tparam TShape    Source Shape type.
  * @tparam TStrides  Source Strides type.
@@ -356,6 +364,31 @@ struct SlicedTraitsImpl<Shape<Ss...>, Strides<Ts...>, NewAxis<V>, Is...> {
   static constexpr int Ndim = NewShape::Ndim;
 };
 
+template <ValueType S, ValueType E, ValueType T>
+auto range_size_type() {
+  if constexpr (meta::is_singleton_v<T> && meta::singleton_value_v<T> > 0) {
+    constexpr nint_t Step = meta::singleton_value_v<T>;
+    return std::type_identity<decltype(ceil_div(
+        std::declval<E>() - std::declval<S>(), Const<Step>{}))>{};
+  } else if constexpr (meta::is_singleton_v<T> &&
+                       meta::singleton_value_v<T> < 0) {
+    constexpr nint_t Step = -meta::singleton_value_v<T>;
+    return std::type_identity<decltype(ceil_div(
+        std::declval<S>() - std::declval<E>(), Const<Step>{}))>{};
+  } else if constexpr (meta::lower_bound_at_least_v<T, 1>) {
+    return std::type_identity<decltype(ceil_div(
+        std::declval<E>() - std::declval<S>(), std::declval<T>()))>{};
+  } else if constexpr (meta::upper_bound_at_most_v<T, -1>) {
+    return std::type_identity<decltype(ceil_div(
+        std::declval<S>() - std::declval<E>(), -std::declval<T>()))>{};
+  } else {
+    return std::type_identity<Any>{};
+  }
+}
+
+template <ValueType S, ValueType E, ValueType T>
+using RangeSize = typename decltype(range_size_type<S, E, T>())::type;
+
 /// Range: modifies one dimension.
 template <
     typename S, typename E, typename T, typename S0, typename... Ss,
@@ -364,8 +397,8 @@ template <
 struct SlicedTraitsImpl<Shape<S0, Ss...>, Strides<T0, Ts...>, Range<S, E, T>, Is...> {
   using Next = SlicedTraitsImpl<Shape<Ss...>, Strides<Ts...>, Is...>;
 
-  /// Range slicing loses compile-time size information.
-  using new_sz = Any;
+  /// Preserve range-size constraints whenever the step sign is statically known.
+  using new_sz = RangeSize<S, E, T>;
 
   /// Stride is scaled by the Range step type T.
   using new_stride = decltype(std::declval<T0>() * std::declval<T>());

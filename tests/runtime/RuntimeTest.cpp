@@ -108,6 +108,17 @@ KernelDef named_dynamic_kernel_definition() {
     {{"D", SpecializationType::ConstInt}});
 }
 
+KernelDef any_metadata_kernel_definition() {
+  return KernelDef(
+    "test::any-metadata-kernel",
+    {
+      TensorDef{"input", {DimensionDef::any(), DimensionDef::any()}, {DimensionDef::any(), 1},
+                TensorDTypeDef(DType::Float32)},
+      TensorDef{"output", {DimensionDef::any(), DimensionDef::any()}, {DimensionDef::any(), 1},
+                TensorDTypeDef(DType::Float32), false, TensorAccess::Output},
+    });
+}
+
 void test_binding(const KernelDef& definition, float* input, float* output) {
   auto call = kernel_call(input, output);
   auto bound = bind_kernel_call(definition, call);
@@ -365,6 +376,36 @@ int main(int argc, char** argv) {
     make_arguments(matrix(dynamic_input.data(), 2, 4, 4, false), matrix(dynamic_output.data(), 3, 4, 4, true)));
   require(!dynamic_executable.value()->invoke(mismatched_batch_call.arguments()).ok(),
           "generated adapter must enforce named Dynamic relations");
+
+  auto any_definition = any_metadata_kernel_definition();
+  std::vector<float> any_input(21, -101.0f);
+  std::vector<float> any_output(21, -202.0f);
+  for (std::int64_t row = 0; row < 2; ++row)
+    for (std::int64_t column = 0; column < 4; ++column)
+      any_input[static_cast<std::size_t>(row * 5 + column)] = static_cast<float>(row * 10 + column);
+  auto any_compile_call = KernelCall(
+    make_arguments(matrix(any_input.data(), 2, 4, 5, false), matrix(any_output.data(), 2, 4, 5, true)));
+  const auto any_kernel = fs::path(VECOPS_TEST_KERNEL).parent_path() / "AnyMetadataKernel.cpp";
+  auto any_executable = compiler->compile_kernel(any_kernel, any_definition, any_compile_call);
+  require(any_executable.ok(), any_executable.status().message());
+
+  std::fill(any_output.begin(), any_output.end(), -202.0f);
+  for (std::int64_t row = 0; row < 3; ++row)
+    for (std::int64_t column = 0; column < 3; ++column)
+      any_input[static_cast<std::size_t>(row * 7 + column)] = static_cast<float>(row * 10 + column);
+  auto changed_any_call = KernelCall(
+    make_arguments(matrix(any_input.data(), 3, 3, 7, false), matrix(any_output.data(), 3, 3, 7, true)));
+  require(any_executable.value()->invoke(changed_any_call.arguments()).ok(),
+          "generated adapter must read unconstrained Any metadata from each call");
+  for (std::int64_t row = 0; row < 3; ++row) {
+    for (std::int64_t column = 0; column < 3; ++column)
+      require(any_output[static_cast<std::size_t>(row * 7 + column)] ==
+                any_input[static_cast<std::size_t>(row * 7 + column)] + 1.0f,
+              "unconstrained Any changed-layout result");
+    for (std::int64_t column = 3; column < 7; ++column)
+      require(any_output[static_cast<std::size_t>(row * 7 + column)] == -202.0f,
+              "unconstrained Any changed-layout padding");
+  }
 
   std::vector<float> wider_input(16);
   std::vector<float> wider_output(16);

@@ -116,8 +116,11 @@ writability; `InputOperandOf<Rank>`/`OutputOperandOf<Rank>` add an exact rank.
 
 **All-integer indexing returns an element reference, not a Tensor**; any
 mixed form returns a new Tensor whose Shape/Strides *types* are computed at
-compile time by `SlicedTraits` (a `range` drops the size type to `Any` but
-scales the stride type by the step type; `reserve` passes types through).
+compile time by `SlicedTraits`. A `range` preserves a statically provable
+length (including bounded `Dynamic` ranges when the step sign is known) and
+scales the stride type by the step type; `reserve` passes types through.
+The omitted `range` step is `Const<1>`, and parameterless `new_axis()` inserts
+`Const<1>`, so these common forms do not discard unit-size/unit-stride facts.
 
 ```cpp
 float data[24] = {};
@@ -140,7 +143,7 @@ Marker-by-marker equivalence with NumPy:
 |---|---|---|
 | `t(0, 1, 2)` | `t[0, 1, 2]` | returns `T&`, not a 0-d array |
 | `t(0, reserve, reserve)` | `t[0, :, :]` | dimension removed / kept |
-| `t(range(1, 3), ...)` | `t[1:3, ...]` | size type becomes `Any` |
+| `t(range(1, 3), ...)` | `t[1:3, ...]` | runtime bounds stay dynamic; the implicit step is `Const<1>` |
 | `t(range(0, 3, 2), ...)` | `t[0:3:2, ...]` | stride scales by step |
 | `t(range(3, 0, -1), ...)` | `t[3:0:-1, ...]` | negative step reverses (needs `start > end`) |
 | `t(new_axis(), ...)` | `t[None, ...]` / `np.newaxis` | stride-0 broadcast axis; `new_axis(cint<4>)` has no NumPy spelling (repeat) |

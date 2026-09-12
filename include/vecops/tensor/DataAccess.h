@@ -363,32 +363,11 @@ VECOPS_ALWAYS_INLINE void validate_operand_fact(
       "tensor base pointer does not satisfy its declared alignment");
 }
 
-template <typename T, bool = T::is_const>
-struct IsConstOneMeta : std::false_type {};
-
-template <typename T>
-struct IsConstOneMeta<T, true> : std::bool_constant<T::value == 1> {};
-
-template <typename T>
-inline constexpr bool is_const_one_meta_v = IsConstOneMeta<T>::value;
-
 /** True when the meta stride type is provably the value 1 at compile time. */
 template <typename T>
-struct IsDefinitelyOneMeta {
-  static constexpr bool value = [] {
-    if constexpr (IsConstOneMeta<T>::value) {
-      return true;
-    } else if constexpr (T::is_runtime) {
-      return T::has_lower && T::lo == 1 && T::has_upper && T::hi == 1;
-    } else {
-      return false;
-    }
-  }();
-};
-
-template <typename T>
 inline constexpr bool is_definitely_one_meta_v =
-    IsDefinitelyOneMeta<std::remove_cvref_t<T>>::value;
+    meta::is_singleton_v<std::remove_cvref_t<T>> &&
+    meta::singleton_value_v<std::remove_cvref_t<T>> == 1;
 
 template <bool Load, typename... Options>
 VECOPS_ALWAYS_INLINE constexpr void validate_access_options() {
@@ -2816,7 +2795,7 @@ public:
     const auto& tensor = spec_->tensor();
     using StrideMeta = stride_type_t<Dim, typename Spec::InputLayout>;
     constexpr bool UnitRankOne =
-        Rank == 1 && details::is_const_one_meta_v<StrideMeta>;
+        Rank == 1 && details::is_definitely_one_meta_v<StrideMeta>;
     const nint_t base = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (UnitRankOne) return position[0];
       else return offset_at(tensor.layout(), position);
@@ -3124,7 +3103,7 @@ public:
     const auto& tensor = spec_->tensor();
     using StrideMeta = stride_type_t<Dim, typename Spec::OutputLayout>;
     constexpr bool UnitRankOne =
-        Rank == 1 && details::is_const_one_meta_v<StrideMeta>;
+        Rank == 1 && details::is_definitely_one_meta_v<StrideMeta>;
     const nint_t base = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (UnitRankOne) return position[0];
       else return offset_at(tensor.layout(), position);

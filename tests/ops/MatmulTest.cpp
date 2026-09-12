@@ -2006,6 +2006,66 @@ TEST(MatmulTest, LargeRawProblemUsesOnTheFlyPackingWorkspace) {
   check_raw<Atom>(M, N, K);
 }
 
+TEST(MatmulTest, NarrowRuntimeSliceOutputStaysWithinLogicalColumns) {
+  using Atom = ::vecops::matmul::SME_BF16F32;
+  using MExtent = Dynamic<1, 1, 32>;
+  constexpr nint_t M = 32, N = 8, K = 256, Channels = 64;
+  constexpr nint_t Guard = 64;
+  const vecops::bfloat16_t canary{123.0F};
+  std::vector<vecops::bfloat16_t> a(M * K), value_storage(K * Channels);
+  std::vector<vecops::bfloat16_t> output_storage(
+      Guard + M * Channels + Guard, canary);
+  for (nint_t i = 0; i < M * K; ++i)
+    a[i] = value<vecops::bfloat16_t>(i, 13);
+  for (nint_t i = 0; i < K * Channels; ++i)
+    value_storage[i] = value<vecops::bfloat16_t>(i, 11);
+
+  auto at = make_tensor(
+      a.data(), make_layout(make_shape(MExtent{M}, cint<K>)));
+  auto values = make_tensor(
+      value_storage.data(),
+      make_layout(make_shape(cint<K>, cint<Channels>)));
+  auto bt = transpose_view<0, 1>(
+      values(reserve, range(nint_t{0}, nint_t{N})));
+  auto output_parent = make_tensor(
+      output_storage.data() + Guard,
+      make_layout(make_shape(MExtent{M}, cint<Channels>)));
+  auto ct = output_parent(reserve, range(nint_t{0}, nint_t{N}));
+  static_assert(std::same_as<
+      stride_type_t<1, typename decltype(ct)::Layout>, Const<1>>);
+
+  auto operation = ops::matmul(ops::MatmulConfig<Atom>{});
+  kernel::Workspace owner(operation.required_workspace(
+      MExtent{M}, cint<N>, cint<K>, at, bt, ct));
+  auto workspace = owner.view();
+  ExecutionSession session(workspace);
+  session.with_region(
+      operation, [&](auto& scope) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+        operation(scope, MExtent{M}, cint<N>, cint<K>, at, bt, ct);
+      });
+
+  for (nint_t row = 0; row < M; ++row) {
+    for (nint_t column = 0; column < N; ++column) {
+      float32_t expected = 0.0F;
+      for (nint_t kk = 0; kk < K; ++kk)
+        expected += static_cast<float32_t>(a[row * K + kk]) *
+            static_cast<float32_t>(value_storage[kk * Channels + column]);
+      EXPECT_TRUE(test::matmul::conversion_values_equal(
+          vecops::bfloat16_t{expected},
+          output_storage[Guard + row * Channels + column]))
+          << "row=" << row << " column=" << column;
+    }
+    for (nint_t column = N; column < Channels; ++column)
+      EXPECT_EQ(output_storage[Guard + row * Channels + column], canary)
+          << "row=" << row << " padding_column=" << column;
+  }
+  for (nint_t i = 0; i < Guard; ++i) {
+    EXPECT_EQ(output_storage[i], canary) << "prefix=" << i;
+    EXPECT_EQ(output_storage[Guard + M * Channels + i], canary)
+        << "suffix=" << i;
+  }
+}
+
 TEST(MatmulTest, DynamicInnerStrideAlwaysUsesGenericLoad) {
   check_dynamic_inner_stride(1);
   check_dynamic_inner_stride(2);

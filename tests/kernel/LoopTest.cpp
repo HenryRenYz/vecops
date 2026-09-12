@@ -102,6 +102,23 @@ TEST(HOPForEachTest, ConstOneDimBroadcasts) {
   EXPECT_EQ(seen, (std::vector<int64_t>{10, 21, 32, 13, 24, 35}));
 }
 
+TEST(HOPForEachTest, SingletonDynamicOneDimBroadcasts) {
+  std::vector<int64_t> row{10, 20, 30};
+  std::vector<int64_t> matrix{0, 1, 2, 3, 4, 5};
+  auto tr = make_tensor(row.data(),
+                        make_shape(Dynamic<1, 1, 1>{1}, cint<3>),
+                        make_strides(cint<3>, cint<1>));
+  auto tm = make_tensor(matrix.data(), make_shape(cint<2>, cint<3>),
+                        make_strides(cint<3>, cint<1>));
+
+  std::vector<int64_t> seen;
+  hop::for_each_dims<2>([&](auto&& x, auto&& y) {
+    seen.push_back(static_cast<int64_t>(x) + static_cast<int64_t>(y));
+  }, tr, tm);
+
+  EXPECT_EQ(seen, (std::vector<int64_t>{10, 21, 32, 13, 24, 35}));
+}
+
 TEST(HOPForEachTest, SubTensorShapesMayDiffer) {
   std::vector<int64_t> lhs(2 * 3 * 4);
   std::vector<int64_t> rhs(2 * 4);
@@ -655,7 +672,7 @@ TEST(HOPForEachDeathTest, NonBroadcastExtentMismatch) {
                "broadcast extent mismatch");
 }
 
-TEST(HOPForEachDeathTest, DynamicSizeOneDoesNotBroadcast) {
+TEST(HOPForEachDeathTest, UnconstrainedDynamicSizeOneDoesNotBroadcast) {
   std::vector<int64_t> a(1 * 3);
   std::vector<int64_t> b(2 * 3);
   auto ta = make_tensor(a.data(), make_shape(Any{1}, cint<3>),

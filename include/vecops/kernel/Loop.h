@@ -638,15 +638,10 @@ inline constexpr bool is_sliceable_v = SliceTraits<std::remove_cvref_t<T>>::is_s
 template <int I, typename T>
 using slice_shape_dim_t = typename SliceTraits<std::remove_cvref_t<T>>::template shape_dim<I>;
 
-template <typename T>
-struct IsConstOne : std::false_type {};
-
-template <>
-struct IsConstOne<Const<1>> : std::true_type {};
-
 template <int I, typename T>
-inline constexpr bool is_const_one_dim_v =
-    IsConstOne<slice_shape_dim_t<I, T>>::value;
+inline constexpr bool is_singleton_one_dim_v =
+    meta::is_singleton_v<slice_shape_dim_t<I, T>> &&
+    meta::singleton_value_v<slice_shape_dim_t<I, T>> == 1;
 
 constexpr int max2(int a, int b) {
   return a > b ? a : b;
@@ -719,13 +714,13 @@ inline constexpr bool has_actual_dim_v =
 // Default true, deliberately: an input with no actual dimension at this
 // logical axis (rank too small, or not sliceable at all) is forwarded
 // unchanged, which broadcasts by construction. Only a real dimension is
-// tested for the Const<1> broadcast shape.
+// tested for a shape type that is statically known to be exactly one.
 template <bool HasActualDim, int ActualDim, typename T>
 struct IsBroadcastDim : std::true_type {};
 
 template <int ActualDim, typename T>
 struct IsBroadcastDim<true, ActualDim, T>
-    : std::bool_constant<is_const_one_dim_v<ActualDim, T>> {};
+    : std::bool_constant<is_singleton_one_dim_v<ActualDim, T>> {};
 
 template <int LogicalRank, int LogicalDim, typename T>
 inline constexpr bool is_broadcast_dim_v =

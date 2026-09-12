@@ -120,7 +120,7 @@ layout shapes they are specialized for.
 
 | Call | Meaning |
 |---|---|
-| `is_ct_last_contiguous_v<L, N>` / `is_ct_contiguous_v<L>` | compile-time: are the last N (all) dimensions row-major contiguous, judged **only** from `Const` entries; `false` is conservative ("not provable") |
+| `is_ct_last_contiguous_v<L, N>` / `is_ct_contiguous_v<L>` | compile-time: are the last N (all) dimensions row-major contiguous, judged from exact singleton entries (`Const<N>` or `Dynamic<A,N,N>`); `false` is conservative ("not provable") |
 | `is_last_contiguous<N>(layout)` / `is_contiguous(layout)` | runtime check; folds to a compile-time `true` when the static trait already proves it |
 
 ### Printing

@@ -1278,9 +1278,8 @@ namespace details {
  *   stride[D] == shape[D+1] * stride[D+1]
  * and the last stride == 1.
  *
- * This trait performs the check at compile time using only `Const` dimension
- * information. If any involved dimension is non-Const, the check returns
- * `false` (conservative).
+ * This trait performs the check from dimension types that denote one exact
+ * value. This includes both `Const<N>` and singleton `Dynamic<A,N,N>`.
  *
  * @tparam TLayout  The Layout type.
  * @tparam N        How many trailing dimensions to check.
@@ -1301,23 +1300,25 @@ private:
       return true;
     } else if constexpr (D == ndim - 1) {
       using St = std::tuple_element_t<D, std::tuple<Ts...>>;
-      if constexpr (!St::is_const) {
+      if constexpr (!meta::is_singleton_v<St>) {
         return false;
       } else {
-        return St::value == 1;
+        return meta::singleton_value_v<St> == 1;
       }
     } else {
       using Sd = std::tuple_element_t<D, std::tuple<Ts...>>;
       using Sd1 = std::tuple_element_t<D + 1, std::tuple<Ts...>>;
       using Zd1 = std::tuple_element_t<D + 1, std::tuple<Ss...>>;
-      if constexpr (!Sd::is_const) {
+      if constexpr (!meta::is_singleton_v<Sd>) {
         return false;
-      } else if constexpr (!Sd1::is_const) {
+      } else if constexpr (!meta::is_singleton_v<Sd1>) {
         return false;
-      } else if constexpr (!Zd1::is_const) {
+      } else if constexpr (!meta::is_singleton_v<Zd1>) {
         return false;
       } else {
-        return Sd::value == Zd1::value * Sd1::value && _check_one<D + 1>();
+        return meta::singleton_value_v<Sd> ==
+            meta::singleton_value_v<Zd1> * meta::singleton_value_v<Sd1> &&
+            _check_one<D + 1>();
       }
     }
   }
@@ -1331,8 +1332,8 @@ public:
 /**
  * @brief Compile-time check: are the last N dimensions of TLayout contiguous?
  *
- * Evaluates at compile time. When all involved dimensions are `Const`,
- * can resolve to `true` without any runtime check.
+ * Evaluates at compile time. When all involved dimensions denote exact
+ * singleton values, it can resolve to `true` without a runtime check.
  *
  * @tparam TLayout  Layout type.
  * @tparam N        Number of trailing dimensions to check.

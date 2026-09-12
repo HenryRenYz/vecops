@@ -488,6 +488,109 @@ TEST(VecConversionMemoryTest, IndexedSubwordConversionsCoverWidthPairs) {
   verify_indexed_store_convert_pair<float, vecops::bfloat16_t>();
 }
 
+template <typename F16>
+void verify_filtered_indexed_f16_f32_round_trip() {
+  using Tag = vec::ScalableTag<float>;
+  using MemoryTag = vec::Rebind<F16, Tag>;
+  using IndexTag = vec::Rebind<int32_t, Tag>;
+  constexpr std::size_t capacity = 4096;
+  std::array<F16, capacity> input{};
+  std::array<F16, capacity> indexed_output{};
+  std::array<F16, capacity> strided_output{};
+  std::array<int32_t, capacity> index_values{};
+  const auto lanes = vec::size(Tag{});
+  const auto first = std::max<vecops::nint_t>(1, lanes / 2);
+  const F16 canary{-91.0F};
+  indexed_output.fill(canary);
+  strided_output.fill(canary);
+  for (std::size_t i = 0; i < capacity; ++i)
+    input[i] = F16(static_cast<float>(static_cast<int>(i % 31) - 15) / 8.0F);
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane)
+    index_values[static_cast<std::size_t>(lane)] =
+        static_cast<int32_t>(lane * 3 + 1);
+
+  const auto indices = vec::load(IndexTag{}, index_values.data());
+  auto mask = vec::mfalse(Tag{});
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane)
+    mask = vec::set(Tag{}, mask, lane, lane % 2 == 0);
+  const auto gathered = vec::load_convert(
+      Tag{}, input.data(), vec::indexed(indices), vec::opt::masked(mask),
+      vec::opt::merge(-77.0F), vec::mem::non_temporal);
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const float expected = lane % 2 == 0
+        ? static_cast<float>(input[static_cast<std::size_t>(index_values[lane])])
+        : -77.0F;
+    EXPECT_EQ(expected, vec::get(Tag{}, gathered, lane));
+  }
+
+  auto memory_mask = vec::mfalse(MemoryTag{});
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane)
+    memory_mask = vec::set(MemoryTag{}, memory_mask, lane, lane % 2 == 0);
+  const auto unordered = vec::load_convert(
+      Tag{}, input.data(), vec::cvt::unordered, vec::indexed(indices),
+      vec::opt::masked(memory_mask));
+  const auto unordered_all = vec::load_convert(
+      Tag{}, input.data(), vec::cvt::unordered, vec::indexed(indices));
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const float loaded =
+        static_cast<float>(input[static_cast<std::size_t>(index_values[lane])]);
+    const float expected = lane % 2 == 0
+        ? loaded : 0.0F;
+    EXPECT_EQ(expected, vec::get(Tag{}, unordered, lane));
+    EXPECT_EQ(loaded, vec::get(Tag{}, unordered_all, lane));
+  }
+
+  vec::store_convert(
+      Tag{}, indexed_output.data(), gathered, vec::indexed(indices),
+      vec::opt::masked(mask), vec::mem::non_temporal);
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const auto index = static_cast<std::size_t>(index_values[lane]);
+    const F16 expected = lane % 2 == 0
+        ? ::vecops::convert<F16>(vec::get(Tag{}, gathered, lane)) : canary;
+    EXPECT_TRUE(vec_test::values_identical(expected, indexed_output[index]))
+        << "lane=" << lane;
+  }
+
+  indexed_output.fill(canary);
+  vec::store_convert(
+      Tag{}, indexed_output.data(), gathered, vec::cvt::unordered,
+      vec::indexed(indices), vec::opt::masked(memory_mask));
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const auto index = static_cast<std::size_t>(index_values[lane]);
+    const F16 expected = lane % 2 == 0
+        ? ::vecops::convert<F16>(vec::get(Tag{}, gathered, lane)) : canary;
+    EXPECT_TRUE(vec_test::values_identical(expected, indexed_output[index]))
+        << "unordered lane=" << lane;
+  }
+
+  indexed_output.fill(canary);
+  vec::store_convert(
+      Tag{}, indexed_output.data(), unordered_all, vec::cvt::unordered,
+      vec::indexed(indices));
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const auto index = static_cast<std::size_t>(index_values[lane]);
+    EXPECT_TRUE(vec_test::values_identical(
+        ::vecops::convert<F16>(vec::get(Tag{}, unordered_all, lane)),
+        indexed_output[index])) << "unordered unmasked lane=" << lane;
+  }
+
+  auto source = vec::fill(Tag{}, 3.25F);
+  vec::store_convert(
+      Tag{}, strided_output.data(), source, vec::strided(1),
+      vec::opt::first(first));
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const F16 expected = lane < first ? F16{3.25F} : canary;
+    EXPECT_TRUE(vec_test::values_identical(
+        expected, strided_output[static_cast<std::size_t>(lane)]))
+        << "lane=" << lane;
+  }
+}
+
+TEST(VecConversionMemoryTest, FilteredIndexedF16F32ConversionsPreserveAddresses) {
+  verify_filtered_indexed_f16_f32_round_trip<vecops::float16_t>();
+  verify_filtered_indexed_f16_f32_round_trip<vecops::bfloat16_t>();
+}
+
 TEST(VecConversionMemoryTest, WideOrderedF32ToBf16StorePreservesLaneOrder) {
   using FromTag = vec::ScalableTag<float, 2>;
   const auto lanes = vec::size(FromTag{});
