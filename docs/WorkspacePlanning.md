@@ -98,6 +98,19 @@ operators should keep their legacy overloads, replace duplicated
 `required_workspace` arithmetic with the same prepare recipe in counting mode,
 and move allocations to stable sites incrementally.
 
+`WorkspaceReplayCache` accepts an optional `WorkspaceArenaProvider`. Its
+default aligned-heap provider preserves the original behavior. The optional
+`vecops::memory` component supplies `MemoryWorkspaceArenaProvider`, which maps
+Fast to HighBandwidth placement and Slow to Default placement without adding
+NUMA or allocator dependencies to logical planning. Provider failure for a
+preferred fast arena rebuilds the entire entry with zero fast capacity; a
+partially bound plan is never published. See `docs/Memory.md`.
+
+The cache's initial trace has no provider-owned fast arena because placement is
+not known until the logical trace finishes. A `FastRequired` site must therefore
+use an explicitly managed `WorkspaceContext` with fast storage during that
+trace. The default cache path is suitable for `FastPreferred`/`SlowAllowed`.
+
 ## Parallel source-kernel migration
 
 `WorkspaceContext` itself is deliberately not synchronized. A source kernel

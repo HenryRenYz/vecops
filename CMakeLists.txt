@@ -27,6 +27,13 @@ option(VECOPS_BUILD_COMPILER "Build the C++ kernel compiler" ON)
 option(VECOPS_BUILD_PYTHON "Build the optional Python extension" OFF)
 option(VECOPS_BUILD_TESTING "Build Vecops tests" OFF)
 option(VECOPS_BUILD_BENCHMARKS "Build Vecops benchmarks" OFF)
+set(VECOPS_BUILD_MEMORY "AUTO" CACHE STRING
+    "Build heterogeneous-memory support: AUTO, ON, or OFF")
+set_property(CACHE VECOPS_BUILD_MEMORY PROPERTY STRINGS AUTO ON OFF)
+option(VECOPS_BUILD_MEMORY_TOOLS "Build vecops-memory-info" ON)
+if(NOT VECOPS_BUILD_MEMORY MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR "VECOPS_BUILD_MEMORY must be AUTO, ON, or OFF")
+endif()
 set(VECOPS_FIXED_SVE_BITS "" CACHE STRING
     "SVE vector width in bits for fixed-SVE targets; empty detects the host maximum")
 set(VECOPS_FIXED_STREAMING_SVE_BITS "" CACHE STRING
@@ -44,12 +51,39 @@ include(cmake/VecopsKernelOptimizations.cmake)
 # -------------------------------- Dependencies --------------------------------
 include(FetchContent)
 
+set(VECOPS_MEMORY_HAVE_HWLOC OFF)
+if(NOT VECOPS_BUILD_MEMORY STREQUAL "OFF")
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(HWLOC QUIET IMPORTED_TARGET hwloc>=2.7)
+    endif()
+    if(TARGET PkgConfig::HWLOC)
+        set(VECOPS_MEMORY_HAVE_HWLOC ON)
+        message(STATUS "Building vecops::memory with hwloc ${HWLOC_VERSION}")
+    elseif(VECOPS_BUILD_MEMORY STREQUAL "ON")
+        message(FATAL_ERROR
+            "VECOPS_BUILD_MEMORY=ON requires hwloc >= 2.7 development files")
+    else()
+        message(STATUS
+            "Building vecops::memory with the portable single-target backend; "
+            "hwloc >= 2.7 was not found")
+    endif()
+endif()
+
 if(VECOPS_ENABLE_OPENMP)
     find_package(OpenMP REQUIRED COMPONENTS CXX)
 endif()
 
 # ------------------------------- Source Config --------------------------------
 add_subdirectory(src)
+
+if(TARGET vecops::memory AND VECOPS_BUILD_MEMORY_TOOLS)
+    add_executable(vecops-memory-info tools/memory/MemoryInfo.cpp)
+    target_compile_features(vecops-memory-info PRIVATE cxx_std_20)
+    target_link_libraries(vecops-memory-info PRIVATE vecops::memory)
+    install(TARGETS vecops-memory-info
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
 
 if(VECOPS_BUILD_PYTHON)
     set(PYBIND11_FINDPYTHON ON)
@@ -128,8 +162,12 @@ install(
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
 )
 
+set(_VECOPS_INSTALL_TARGETS vecops vecops_optimize_for_kernels)
+if(TARGET vecops_memory)
+    list(APPEND _VECOPS_INSTALL_TARGETS vecops_memory)
+endif()
 install(
-    TARGETS vecops vecops_optimize_for_kernels
+    TARGETS ${_VECOPS_INSTALL_TARGETS}
     EXPORT VecopsTargets
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"

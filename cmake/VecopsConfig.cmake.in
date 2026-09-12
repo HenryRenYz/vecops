@@ -4,6 +4,10 @@ include(CMakeFindDependencyMacro)
 if(@VECOPS_ENABLE_OPENMP@)
     find_dependency(OpenMP COMPONENTS CXX)
 endif()
+if(@VECOPS_MEMORY_HAVE_HWLOC@)
+    find_dependency(PkgConfig)
+    pkg_check_modules(HWLOC REQUIRED IMPORTED_TARGET hwloc>=2.7)
+endif()
 
 # Preserve the richer native ARM contract detected while building the SDK.
 # Some ARM compiler drivers (notably BiSheng) accept `-march=native` but omit
@@ -42,6 +46,11 @@ if(TARGET vecops::compiler)
     set(Vecops_compiler_FOUND TRUE)
 else()
     set(Vecops_compiler_FOUND FALSE)
+endif()
+if(TARGET vecops::memory)
+    set(Vecops_memory_FOUND TRUE)
+else()
+    set(Vecops_memory_FOUND FALSE)
 endif()
 
 check_required_components(Vecops)

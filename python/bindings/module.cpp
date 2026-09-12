@@ -34,6 +34,9 @@
 #include "vecops/runtime/Executable.h"
 #include "vecops/runtime/OperatorBridgeAbi.h"
 #include "vecops/runtime/Provider.h"
+#if defined(VECOPS_PYTHON_HAS_MEMORY)
+#include "vecops/memory/Memory.h"
+#endif
 
 namespace py = pybind11;
 
@@ -971,6 +974,164 @@ vecops_operator_bridge_invoke_v1(std::uint64_t handle, const VecopsCall* call, s
   return static_cast<std::int32_t>(result.code());
 }
 
+#if defined(VECOPS_PYTHON_HAS_MEMORY)
+namespace {
+
+void bind_memory(py::module_& module) {
+  namespace memory = vecops::memory;
+
+  py::enum_<memory::BackendPreference>(module, "MemoryBackend")
+    .value("auto", memory::BackendPreference::Auto)
+    .value("system", memory::BackendPreference::System)
+    .value("hwloc", memory::BackendPreference::Hwloc);
+  py::enum_<memory::MemoryKind>(module, "MemoryKind")
+    .value("unknown", memory::MemoryKind::Unknown)
+    .value("dram", memory::MemoryKind::DRAM)
+    .value("hbm", memory::MemoryKind::HBM)
+    .value("cxl", memory::MemoryKind::CXL)
+    .value("pmem", memory::MemoryKind::PMEM);
+  py::enum_<memory::PlacementIntent>(module, "MemoryPlacement")
+    .value("default", memory::PlacementIntent::Default)
+    .value("high_bandwidth", memory::PlacementIntent::HighBandwidth)
+    .value("low_latency", memory::PlacementIntent::LowLatency)
+    .value("exact_target", memory::PlacementIntent::ExactTarget);
+  py::enum_<memory::FallbackPolicy>(module, "MemoryFallback")
+    .value("none", memory::FallbackPolicy::None)
+    .value("to_default", memory::FallbackPolicy::ToDefault);
+  py::enum_<memory::RankingObjective>(module, "MemoryRanking")
+    .value("bandwidth", memory::RankingObjective::Bandwidth)
+    .value("latency", memory::RankingObjective::Latency);
+
+  py::class_<memory::TargetOverride>(module, "MemoryTargetOverride")
+    .def(py::init<>())
+    .def_readwrite("os_numa_id", &memory::TargetOverride::os_numa_id)
+    .def_readwrite("kind", &memory::TargetOverride::kind)
+    .def_readwrite("max_managed_bytes", &memory::TargetOverride::max_managed_bytes)
+    .def_readwrite("min_free_bytes", &memory::TargetOverride::min_free_bytes);
+  py::class_<memory::PathOverride>(module, "MemoryPathOverride")
+    .def(py::init<>())
+    .def_readwrite("initiator_os_numa_id", &memory::PathOverride::initiator_os_numa_id)
+    .def_readwrite("target_os_numa_id", &memory::PathOverride::target_os_numa_id)
+    .def_readwrite("bandwidth_mib_s", &memory::PathOverride::bandwidth_mib_s)
+    .def_readwrite("latency_ns", &memory::PathOverride::latency_ns);
+  py::class_<memory::MemoryConfig>(module, "MemoryConfig")
+    .def(py::init<>())
+    .def_readwrite("backend", &memory::MemoryConfig::backend)
+    .def_readwrite("target_overrides", &memory::MemoryConfig::target_overrides)
+    .def_readwrite("path_overrides", &memory::MemoryConfig::path_overrides);
+  py::class_<memory::AllocationRequest>(module, "MemoryAllocationRequest")
+    .def(py::init<>())
+    .def_readwrite("bytes", &memory::AllocationRequest::bytes)
+    .def_property(
+      "domain",
+      [](const memory::AllocationRequest& self) -> py::object {
+        if (self.domain.kind == memory::CpuDomainSelector::Kind::Current)
+          return py::none();
+        return py::int_(self.domain.id);
+      },
+      [](memory::AllocationRequest& self, py::object value) {
+        self.domain = value.is_none() ? memory::CpuDomainSelector::current()
+                                      : memory::CpuDomainSelector::specific(py::cast<memory::CpuDomainId>(value));
+      })
+    .def_readwrite("intent", &memory::AllocationRequest::intent)
+    .def_readwrite("objective_rank", &memory::AllocationRequest::objective_rank)
+    .def_readwrite("exact_os_numa_id", &memory::AllocationRequest::exact_os_numa_id)
+    .def_readwrite("fallback", &memory::AllocationRequest::fallback)
+    .def_readwrite("alignment", &memory::AllocationRequest::alignment);
+
+  py::class_<memory::Allocation>(module, "MemoryAllocation", py::buffer_protocol())
+    .def_buffer([](memory::Allocation& self) {
+      return py::buffer_info(self.data(), 1, py::format_descriptor<std::uint8_t>::format(), 1,
+                             {static_cast<py::ssize_t>(self.size())}, {1});
+    })
+    .def_property_readonly("size", &memory::Allocation::size)
+    .def_property_readonly("target",
+                           [](const memory::Allocation& self) -> py::object {
+                             return self.target().has_value() ? py::cast(self.target().value()) : py::none();
+                           });
+
+  py::class_<memory::MemorySystem>(module, "MemorySystem")
+    .def_static("discover", &memory::MemorySystem::discover, py::arg("config") = memory::MemoryConfig{})
+    .def("allocate", &memory::MemorySystem::allocate, py::arg("request"))
+    .def("current_cpu_domain", &memory::MemorySystem::current_cpu_domain)
+    .def("describe", &memory::MemorySystem::describe)
+    .def("topology",
+         [](const memory::MemorySystem& self) {
+           const auto& topology = self.topology();
+           py::dict result;
+           result["backend"] = topology.backend;
+           py::list domains;
+           for (const auto& domain : topology.cpu_domains) {
+             py::dict item;
+             item["id"] = domain.id;
+             item["os_numa_id"] = domain.os_numa_id.has_value() ? py::cast(domain.os_numa_id.value()) : py::none();
+             item["cpu_ids"] = domain.cpu_ids;
+             domains.append(std::move(item));
+           }
+           result["cpu_domains"] = std::move(domains);
+           py::list targets;
+           for (const auto& target : topology.memory_targets) {
+             py::dict item;
+             item["id"] = target.id;
+             item["os_numa_id"] = target.os_numa_id;
+             item["kind"] = memory::to_string(target.kind);
+             item["capacity_bytes"] = target.capacity_bytes;
+             item["allowed"] = target.allowed;
+             targets.append(std::move(item));
+           }
+           result["memory_targets"] = std::move(targets);
+           py::list paths;
+           for (const auto& path : topology.memory_paths) {
+             py::dict item;
+             item["initiator"] = path.initiator;
+             item["target"] = path.target;
+             item["bandwidth_mib_s"] =
+               path.bandwidth_mib_s.has_value() ? py::cast(path.bandwidth_mib_s.value()) : py::none();
+             item["latency_ns"] = path.latency_ns.has_value() ? py::cast(path.latency_ns.value()) : py::none();
+             item["exact_locality"] = path.exact_locality;
+             paths.append(std::move(item));
+           }
+           result["memory_paths"] = std::move(paths);
+           return result;
+         })
+    .def(
+      "tiers",
+      [](const memory::MemorySystem& self, memory::CpuDomainId domain, memory::RankingObjective objective) {
+        py::list result;
+        for (const auto& rank : self.tiers(domain, objective).ranks) {
+          py::dict item;
+          item["rank"] = rank.rank;
+          item["targets"] = rank.targets;
+          item["value"] =
+            rank.representative_value.has_value() ? py::cast(rank.representative_value.value()) : py::none();
+          result.append(std::move(item));
+        }
+        return result;
+      },
+      py::arg("domain"), py::arg("objective"))
+    .def("stats", [](const memory::MemorySystem& self) {
+      py::list result;
+      for (const auto& stats : self.stats()) {
+        py::dict item;
+        item["target"] = stats.target;
+        item["os_numa_id"] = stats.os_numa_id;
+        item["managed_bytes"] = stats.managed_bytes;
+        item["peak_managed_bytes"] = stats.peak_managed_bytes;
+        item["allocation_count"] = stats.allocation_count;
+        item["failed_allocation_count"] = stats.failed_allocation_count;
+        item["fallback_count"] = stats.fallback_count;
+        item["os_free_bytes"] = stats.os_free_bytes.has_value() ? py::cast(stats.os_free_bytes.value()) : py::none();
+        item["budget_remaining_bytes"] =
+          stats.budget_remaining_bytes.has_value() ? py::cast(stats.budget_remaining_bytes.value()) : py::none();
+        result.append(std::move(item));
+      }
+      return result;
+    });
+}
+
+} // namespace
+#endif
+
 PYBIND11_MODULE(_C, module) {
   module.doc() = R"doc(Expert-level bindings for the vecops C++ runtime.
 
@@ -979,6 +1140,9 @@ dtypes, derive schemas, and own framework integration. This module mirrors C++
 value types for diagnostics, explicit build control, and wrapper implementation;
 its constructor-level interfaces intentionally expose native concepts.)doc";
   module.attr("build_api_version") = 1;
+#if defined(VECOPS_PYTHON_HAS_MEMORY)
+  bind_memory(module);
+#endif
 
   py::enum_<DType>(module, "DType", "Element types understood by the vecops runtime.")
     .value("invalid", DType::Invalid)

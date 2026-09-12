@@ -6,6 +6,7 @@ file(GLOB_RECURSE _VECOPS_SRCS
 # VecopsMultiarchTargets.cmake.  They must not enter the generic libvecops.a.
 list(FILTER _VECOPS_SRCS EXCLUDE REGEX "/arch/")
 list(FILTER _VECOPS_SRCS EXCLUDE REGEX "/compiler/")
+list(FILTER _VECOPS_SRCS EXCLUDE REGEX "/memory/")
 
 add_library(vecops ${_VECOPS_SRCS})
 add_library(vecops::vecops ALIAS vecops)
@@ -36,6 +37,25 @@ if(VECOPS_ENABLE_OPENMP)
     # OpenMP entry points unresolved until the final JIT module link, so this
     # dependency must remain on the exported link interface.
     target_link_libraries(vecops PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
+if(NOT VECOPS_BUILD_MEMORY STREQUAL "OFF")
+    add_library(vecops_memory memory/MemorySystem.cpp)
+    add_library(vecops::memory ALIAS vecops_memory)
+    target_compile_features(vecops_memory PUBLIC cxx_std_20)
+    target_include_directories(vecops_memory
+        PUBLIC
+            "$<BUILD_INTERFACE:${VECOPS_SOURCE_DIR}/include>"
+            "$<INSTALL_INTERFACE:include>"
+    )
+    set_target_properties(vecops_memory PROPERTIES
+        EXPORT_NAME memory
+        POSITION_INDEPENDENT_CODE ON
+    )
+    if(VECOPS_MEMORY_HAVE_HWLOC)
+        target_compile_definitions(vecops_memory PRIVATE VECOPS_MEMORY_HAVE_HWLOC=1)
+        target_link_libraries(vecops_memory PUBLIC PkgConfig::HWLOC)
+    endif()
 endif()
 
 if(VECOPS_BUILD_COMPILER)

@@ -35,6 +35,7 @@
 
 #include "vecops/Assertion.h"
 #include "vecops/execution/Parallel.h"
+#include "vecops/execution/WorkspaceArena.h"
 #include "vecops/execution/WorkspacePlan.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/runtime/CallAbi.h"
@@ -336,9 +337,13 @@ private:
  */
 class WorkspaceReplayCache {
 public:
-  explicit WorkspaceReplayCache(std::size_t capacity = 4)
-    : capacity_(capacity) {
+  explicit WorkspaceReplayCache(
+      std::size_t capacity = 4,
+      std::shared_ptr<WorkspaceArenaProvider> arena_provider = default_workspace_arena_provider())
+    : capacity_(capacity)
+    , arena_provider_(std::move(arena_provider)) {
     VECOPS_ASSERT(capacity_ > 0, "workspace replay cache capacity must be positive");
+    VECOPS_ASSERT(arena_provider_ != nullptr, "workspace replay cache arena provider is null");
   }
 
   WorkspaceReplayCache(const WorkspaceReplayCache&) = delete;
@@ -377,7 +382,7 @@ public:
     auto logical = tracing.finish_trace();
     VECOPS_ASSERT(logical.fingerprint == fingerprint && same_axes(logical.axes, observed),
                   "workspace trace observations differ from the replay cache key");
-    entries_.emplace_front(recipe, std::move(logical));
+    entries_.emplace_front(recipe, std::move(logical), arena_provider_);
     if (entries_.size() > capacity_)
       entries_.pop_back();
   }
@@ -414,13 +419,19 @@ private:
   };
 
   struct Entry {
-    Entry(std::string_view recipe, LogicalWorkspacePlan logical)
+    Entry(std::string_view recipe, LogicalWorkspacePlan logical,
+          const std::shared_ptr<WorkspaceArenaProvider>& arena_provider)
       : fingerprint(logical.fingerprint)
       , axes(logical.axes)
-      , placement(place_workspace(logical)) {
-      void* fast_base = reserve(fast, placement.fast_bytes);
-      void* slow_base = reserve(slow, placement.slow_bytes);
-      bound.emplace(placement, fast_base, placement.fast_bytes, slow_base, placement.slow_bytes);
+      , placement(place_workspace(logical, arena_provider->capacity(WorkspaceTier::Fast),
+                                  arena_provider->capacity(WorkspaceTier::Slow))) {
+      try {
+        reserve(arena_provider);
+      } catch (const WorkspaceArenaUnavailable&) {
+        fallback_to_slow(logical, arena_provider);
+      } catch (const std::bad_alloc&) {
+        fallback_to_slow(logical, arena_provider);
+      }
       rebuild_replay(recipe);
     }
 
@@ -429,12 +440,36 @@ private:
     Entry(Entry&&) = delete;
     Entry& operator=(Entry&&) = delete;
 
-    static void* reserve(kernel::Workspace& owner, nint_t bytes) {
-      if (bytes == 0)
-        return nullptr;
-      owner.reserve(bytes);
-      auto arena = owner.view();
-      return arena.allocate(bytes, vec::DEFAULT_ALIGNMENT);
+    static nint_t tier_alignment(const WorkspacePlacement& placement, WorkspaceTier tier) {
+      nint_t result = vec::DEFAULT_ALIGNMENT;
+      for (const auto& entry : placement.entries) {
+        if (entry.tier == tier)
+          result = std::max(result, entry.alignment);
+      }
+      return result;
+    }
+
+    void fallback_to_slow(const LogicalWorkspacePlan& logical,
+                          const std::shared_ptr<WorkspaceArenaProvider>& arena_provider) {
+      const bool requires_fast = std::any_of(logical.allocations.begin(), logical.allocations.end(),
+                                             [](const auto& allocation) {
+                                               return allocation.request.placement ==
+                                                      WorkspacePlacementPolicy::FastRequired;
+                                             });
+      if (requires_fast)
+        throw;
+      placement = place_workspace(logical, 0, arena_provider->capacity(WorkspaceTier::Slow));
+      fast = {};
+      slow = {};
+      reserve(arena_provider);
+    }
+
+    void reserve(const std::shared_ptr<WorkspaceArenaProvider>& arena_provider) {
+      fast = arena_provider->allocate(WorkspaceTier::Fast, placement.fast_bytes,
+                                      tier_alignment(placement, WorkspaceTier::Fast));
+      slow = arena_provider->allocate(WorkspaceTier::Slow, placement.slow_bytes,
+                                      tier_alignment(placement, WorkspaceTier::Slow));
+      bound.emplace(placement, fast.data, fast.capacity, slow.data, slow.capacity);
     }
 
     void rebuild_replay(std::string_view recipe) {
@@ -444,8 +479,8 @@ private:
     DecisionFingerprint fingerprint;
     std::vector<AxisContract> axes;
     WorkspacePlacement placement;
-    kernel::Workspace fast;
-    kernel::Workspace slow;
+    WorkspaceArena fast;
+    WorkspaceArena slow;
     std::optional<BoundWorkspacePlan> bound;
     std::unique_ptr<WorkspaceContext> replay;
   };
@@ -465,6 +500,7 @@ private:
   }
 
   std::size_t capacity_;
+  std::shared_ptr<WorkspaceArenaProvider> arena_provider_;
   std::list<Entry> entries_;
 };
 

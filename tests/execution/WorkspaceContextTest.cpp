@@ -2,6 +2,9 @@
 
 #include <array>
 #include <cstddef>
+#include <limits>
+#include <memory>
+#include <new>
 #include <vector>
 
 #include "vecops/execution/WorkspaceContext.h"
@@ -14,6 +17,27 @@ namespace {
 
 using namespace vecops;
 using namespace vecops::execution;
+
+class FailingFastArenaProvider final : public WorkspaceArenaProvider {
+public:
+  [[nodiscard]] nint_t capacity(WorkspaceTier) const noexcept override {
+    return std::numeric_limits<nint_t>::max();
+  }
+
+  WorkspaceArena allocate(WorkspaceTier tier, nint_t bytes, nint_t alignment) override {
+    if (tier == WorkspaceTier::Fast && bytes != 0) {
+      ++fast_attempts;
+      throw std::bad_alloc();
+    }
+    if (tier == WorkspaceTier::Slow && bytes != 0)
+      ++slow_allocations;
+    return heap.allocate(tier, bytes, alignment);
+  }
+
+  int fast_attempts = 0;
+  int slow_allocations = 0;
+  HeapWorkspaceArenaProvider heap;
+};
 
 TEST(WorkspaceContextTest, DynamicModeUsesFastArenaAndRewindsScopes) {
   alignas(64) std::array<std::byte, 256> fast{};
@@ -111,6 +135,21 @@ TEST(WorkspaceContextTest, DefaultReplayCacheTracesEachAxisShapeOnce) {
   run(32);
   EXPECT_EQ(traces, 2);
   EXPECT_EQ(replays, 2);
+}
+
+TEST(WorkspaceContextTest, PreferredArenaFallsBackAsACompleteSlowPlan) {
+  auto provider = std::make_shared<FailingFastArenaProvider>();
+  WorkspaceReplayCache cache{1, provider};
+  cache.invoke(
+    "fallback", [](auto&) {},
+    [](WorkspaceContext& workspace) {
+      auto phase = workspace.serial_scope("phase");
+      auto slot = workspace.request("preferred", {.bytes = 128});
+      ASSERT_NE(slot.replica(), nullptr);
+    });
+
+  EXPECT_EQ(provider->fast_attempts, 1);
+  EXPECT_EQ(provider->slow_allocations, 1);
 }
 
 #if defined(_OPENMP)
