@@ -39,6 +39,41 @@ public:
   HeapWorkspaceArenaProvider heap;
 };
 
+class SharedArenaProvider final : public WorkspaceArenaProvider {
+public:
+  [[nodiscard]] nint_t capacity(WorkspaceTier) const noexcept override {
+    return 256;
+  }
+
+  [[nodiscard]] bool shares_arenas_between_plans() const noexcept override {
+    return true;
+  }
+
+  WorkspaceArena allocate(WorkspaceTier tier, nint_t bytes, nint_t) override {
+    if (bytes == 0)
+      return {};
+    auto& storage = tier == WorkspaceTier::Fast ? fast : slow;
+    std::shared_ptr<void> owner(storage.data(), [](void*) {});
+    return {storage.data(), nint_t(storage.size()), std::move(owner)};
+  }
+
+  alignas(64) std::array<std::byte, 256> fast{};
+  alignas(64) std::array<std::byte, 256> slow{};
+};
+
+class UnavailableArenaProvider final : public WorkspaceArenaProvider {
+public:
+  [[nodiscard]] nint_t capacity(WorkspaceTier) const noexcept override {
+    return 4096;
+  }
+
+  WorkspaceArena allocate(WorkspaceTier, nint_t bytes, nint_t) override {
+    if (bytes != 0)
+      throw WorkspaceArenaUnavailable("unavailable for cache retention");
+    return {};
+  }
+};
+
 struct AbiArenaProviderState {
   static std::uint64_t capacity(void*, std::uint32_t) {
     return 4096;
@@ -191,6 +226,36 @@ TEST(WorkspaceContextTest, PreferredArenaFallsBackAsACompleteSlowPlan) {
   EXPECT_EQ(provider->slow_allocations, 1);
 }
 
+TEST(WorkspaceContextTest, SharedSessionArenaServesFirstTraceAndMultiplePlans) {
+  auto provider = std::make_shared<SharedArenaProvider>();
+  WorkspaceReplayCache cache{2, provider};
+  std::array<void*, 2> observed{};
+  for (nint_t shape = 1; shape <= 2; ++shape) {
+    cache.invoke(
+      "shared", [&](auto& workspace) { workspace.observe_axis(AxisContract::from(shape)); },
+      [&](WorkspaceContext& workspace) {
+        auto phase = workspace.serial_scope("phase");
+        observed[static_cast<std::size_t>(shape - 1)] = workspace.request("buffer", {.bytes = 128}).replica();
+      });
+  }
+  EXPECT_EQ(observed[0], provider->fast.data());
+  EXPECT_EQ(observed[1], provider->fast.data());
+}
+
+TEST(WorkspaceContextTest, CacheRetentionFailureDoesNotFailCompletedInvocation) {
+  auto provider = std::make_shared<UnavailableArenaProvider>();
+  WorkspaceReplayCache cache{1, provider};
+  int completed = 0;
+  EXPECT_NO_THROW(cache.invoke(
+    "nonfatal-cache", [](auto&) {}, [&](WorkspaceContext& workspace) {
+      auto phase = workspace.serial_scope("phase");
+      auto slot = workspace.request("buffer", {.bytes = 128});
+      ASSERT_NE(slot.replica(), nullptr);
+      ++completed;
+    }));
+  EXPECT_EQ(completed, 1);
+}
+
 TEST(WorkspaceContextTest, CAbiProviderRetainsContextAndArenaOwnership) {
   AbiArenaProviderState state;
   VecopsWorkspaceArenaProvider abi{sizeof(VecopsWorkspaceArenaProvider),
@@ -201,7 +266,8 @@ TEST(WorkspaceContextTest, CAbiProviderRetainsContextAndArenaOwnership) {
                                    AbiArenaProviderState::allocate,
                                    AbiArenaProviderState::release_arena,
                                    AbiArenaProviderState::retain,
-                                   AbiArenaProviderState::release_context};
+                                   AbiArenaProviderState::release_context,
+                                   0};
   {
     WorkspaceReplayCache cache{1, workspace_arena_provider_from_abi(abi)};
     EXPECT_EQ(state.references, 2);

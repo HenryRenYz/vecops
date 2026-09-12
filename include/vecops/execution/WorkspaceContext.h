@@ -89,20 +89,24 @@ public:
     std::size_t depth_ = 0;
   };
 
-  /** Dynamic mode. Preferred allocations use `fast_base` while it fits. */
-  explicit WorkspaceContext(std::string recipe = "kernel", void* fast_base = nullptr, nint_t fast_capacity = 0)
+  /** Dynamic mode. Requests use the supplied fast/slow arenas while they fit. */
+  explicit WorkspaceContext(std::string recipe = "kernel", void* fast_base = nullptr, nint_t fast_capacity = 0,
+                            void* slow_base = nullptr, nint_t slow_capacity = 0)
     : mode_(Mode::Dynamic)
     , recipe_(std::move(recipe))
-    , fast_(fast_base, fast_capacity) {
+    , fast_(fast_base, fast_capacity)
+    , slow_(slow_base, slow_capacity) {
     initialize_root();
   }
 
   /** Trace mode: execute dynamically and retain a logical allocation plan. */
   WorkspaceContext(TraceWorkspaceTag, std::string recipe, DecisionFingerprint fingerprint = {},
-                   void* fast_base = nullptr, nint_t fast_capacity = 0)
+                   void* fast_base = nullptr, nint_t fast_capacity = 0, void* slow_base = nullptr,
+                   nint_t slow_capacity = 0)
     : mode_(Mode::Trace)
     , recipe_(std::move(recipe))
     , fast_(fast_base, fast_capacity)
+    , slow_(slow_base, slow_capacity)
     , trace_(std::make_unique<WorkspaceTrace>(recipe_, fingerprint)) {
     initialize_root();
   }
@@ -128,7 +132,7 @@ public:
     std::optional<WorkspaceTrace::Scope> trace_scope;
     if (trace_ != nullptr)
       trace_scope.emplace(trace_->serial_scope(name));
-    frames_.push_back(Frame{path_hash, fast_.mark(), owned_.size(), std::move(trace_scope)});
+    frames_.push_back(Frame{path_hash, fast_.mark(), slow_.mark(), owned_.size(), std::move(trace_scope)});
     return Scope{this, frames_.size() - 1};
   }
 
@@ -238,6 +242,10 @@ private:
     }
     VECOPS_ASSERT(request.placement != WorkspacePlacementPolicy::FastRequired,
                   "required-fast workspace request does not fit in the fast arena");
+    if (slow_.can_allocate(total, allocation_alignment)) {
+      auto* data = static_cast<std::byte*>(slow_.allocate(total, allocation_alignment));
+      return {data, request.bytes, stride, request.replicas};
+    }
     const nint_t heap_alignment = std::max(allocation_alignment, static_cast<nint_t>(alignof(std::max_align_t)));
     VECOPS_ASSERT(static_cast<std::uint64_t>(total) <=
                     static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()),
@@ -273,6 +281,7 @@ private:
   struct Frame {
     std::uint64_t path_hash;
     kernel::WorkspaceView::Mark fast_mark;
+    kernel::WorkspaceView::Mark slow_mark;
     std::size_t owned_mark;
     std::optional<WorkspaceTrace::Scope> trace_scope;
   };
@@ -280,7 +289,7 @@ private:
   void initialize_root() {
     VECOPS_ASSERT(!recipe_.empty(), "workspace recipe name must not be empty");
     VECOPS_ASSERT(mode_ != Mode::Replay || replay_ != nullptr, "workspace replay plan is null");
-    frames_.push_back(Frame{workspace_plan_details::hash(recipe_), fast_.mark(), 0, std::nullopt});
+    frames_.push_back(Frame{workspace_plan_details::hash(recipe_), fast_.mark(), slow_.mark(), 0, std::nullopt});
   }
 
   static void validate_request(std::string_view local_name, const WorkspaceAllocationRequest& request) {
@@ -289,6 +298,8 @@ private:
     VECOPS_ASSERT(request.alignment > 0 && (request.alignment & (request.alignment - 1)) == 0,
                   "workspace allocation alignment must be a positive power of two");
     VECOPS_ASSERT(request.replicas > 0, "workspace replica count must be positive");
+    VECOPS_ASSERT(request.estimated_traffic_bytes >= 0.0,
+                  "workspace estimated traffic must be non-negative");
     if (request.domain == WorkspaceDomain::Global) {
       VECOPS_ASSERT(request.replicas == 1, "global workspace request cannot have replicas");
     }
@@ -300,6 +311,7 @@ private:
     if (frame.trace_scope.has_value())
       frame.trace_scope->close();
     fast_.rewind(frame.fast_mark);
+    slow_.rewind(frame.slow_mark);
     while (owned_.size() > frame.owned_mark)
       owned_.pop_back();
     frames_.pop_back();
@@ -308,6 +320,7 @@ private:
   Mode mode_;
   std::string recipe_;
   kernel::WorkspaceView fast_;
+  kernel::WorkspaceView slow_;
   const BoundWorkspacePlan* replay_ = nullptr;
   std::unique_ptr<WorkspaceTrace> trace_;
   std::vector<OwnedBlock> owned_;
@@ -376,15 +389,35 @@ public:
       return;
     }
 
-    WorkspaceContext tracing{trace_workspace, std::string(recipe), fingerprint};
+    WorkspaceArena trace_fast;
+    WorkspaceArena trace_slow;
+    if (arena_provider_->shares_arenas_between_plans()) {
+      trace_fast = arena_provider_->allocate(WorkspaceTier::Fast, arena_provider_->capacity(WorkspaceTier::Fast),
+                                             vec::DEFAULT_ALIGNMENT);
+      trace_slow = arena_provider_->allocate(WorkspaceTier::Slow, arena_provider_->capacity(WorkspaceTier::Slow),
+                                             vec::DEFAULT_ALIGNMENT);
+    }
+    WorkspaceContext tracing{trace_workspace,
+                             std::string(recipe),
+                             fingerprint,
+                             trace_fast.data,
+                             trace_fast.capacity,
+                             trace_slow.data,
+                             trace_slow.capacity};
     setup(tracing);
     invoke(tracing);
     auto logical = tracing.finish_trace();
     VECOPS_ASSERT(logical.fingerprint == fingerprint && same_axes(logical.axes, observed),
                   "workspace trace observations differ from the replay cache key");
-    entries_.emplace_front(recipe, std::move(logical), arena_provider_);
-    if (entries_.size() > capacity_)
-      entries_.pop_back();
+    // Cache construction is an optimization performed after the real kernel
+    // has completed. Failure must not turn a successful, output-mutating call
+    // into an error. A later call may trace again and retry.
+    try {
+      entries_.emplace_front(recipe, std::move(logical), arena_provider_);
+      if (entries_.size() > capacity_)
+        entries_.pop_back();
+    } catch (...) {
+    }
   }
 
   template <typename Setup, typename Invoke>
@@ -503,21 +536,6 @@ private:
   std::shared_ptr<WorkspaceArenaProvider> arena_provider_;
   std::list<Entry> entries_;
 };
-
-/**
- * Build a non-owning ABI context that lets a generated source-kernel adapter
- * use this exact trace/replay/dynamic authority. The returned record and the
- * WorkspaceContext must both remain alive for the synchronous call.
- */
-inline VecopsExecutionContext workspace_execution_context(WorkspaceContext& workspace,
-                                                          std::uint32_t requested_threads = 0, void* stream = nullptr,
-                                                          std::uint64_t extra_flags = 0) {
-  constexpr auto reserved_flags = VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_CONTEXT |
-                                  VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_ARENA_PROVIDER;
-  VECOPS_ASSERT((extra_flags & reserved_flags) == 0, "workspace execution-context flags are managed by vecops");
-  return {sizeof(VecopsExecutionContext), requested_threads, stream, &workspace,
-          extra_flags | VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_CONTEXT};
-}
 
 } // namespace vecops::execution
 

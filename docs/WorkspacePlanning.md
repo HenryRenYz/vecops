@@ -87,8 +87,10 @@ addresses.
 ## Placement policy
 
 `FastRequired` must fit in the fast arena. `FastPreferred` is considered by
-benefit density and spills to slow memory when necessary. `SlowAllowed` starts
-in slow memory. Overlapping lifetimes are interval-colored; non-overlapping
+estimated-traffic density and spills to slow memory when necessary. An omitted
+traffic estimate defaults to the allocation byte size, avoiding a systematic
+bias toward tiny buffers. `SlowAllowed` starts in slow memory. Overlapping
+lifetimes are interval-colored; non-overlapping
 allocations may share an offset. Pointer binding aligns arbitrary arena bases,
 so owners must provide capacity for the requested placement plus possible
 leading alignment padding.
@@ -100,24 +102,20 @@ and move allocations to stable sites incrementally.
 
 `WorkspaceReplayCache` accepts an optional `WorkspaceArenaProvider`. Its
 default aligned-heap provider preserves the original behavior. The optional
-`vecops::memory` component supplies `MemoryWorkspaceArenaProvider`, which maps
-Fast to HighBandwidth placement and Slow to Default placement without adding
-NUMA or allocator dependencies to logical planning. Provider failure for a
-preferred fast arena rebuilds the entire entry with zero fast capacity; a
-partially bound plan is never published. See `docs/Memory.md`.
+integration header `execution/MemoryWorkspaceSession.h` maps Fast to
+HighBandwidth and Slow to Default without making the memory core depend on
+workspace types. One session owns one arena per tier and all cached plans bind
+views of those same total capacities. See `docs/Memory.md`.
 
-The cache's initial trace has no provider-owned fast arena because placement is
-not known until the logical trace finishes. A `FastRequired` site must therefore
-use an explicitly managed `WorkspaceContext` with fast storage during that
-trace. The default cache path is suitable for `FastPreferred`/`SlowAllowed`.
+Shared-arena providers make both bases available to the initial trace, so the
+first real call observes the requested physical placement. Default heap replay
+continues to trace without a preallocated arena.
 
-Generated source-kernel adapters also recognize
-`VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_ARENA_PROVIDER`. The associated
-`VecopsWorkspaceArenaProvider` is a retained C callback table, so framework
-bridges may inject physical placement without sharing C++ globals across JIT
-DSOs. Each calling thread keeps one provider-specific replay cache; a changed
-provider identity replaces it rather than reusing arenas from another domain or
-policy.
+Generated source-kernel adapters read the dedicated
+`VecopsExecutionContext::workspace_provider`. The associated retained C callback
+table lets framework bridges inject physical placement without sharing C++
+globals across JIT DSOs or consuming embedding `user_data`. Each calling thread
+keeps one replay cache; a changed provider identity replaces its plan metadata.
 
 ## Parallel source-kernel migration
 
@@ -134,13 +132,10 @@ placer to reuse their local and operator-scratch offsets. Data-dependent
 branches may change computation but must not change the request sequence; a
 choice that changes allocation topology belongs in the decision fingerprint.
 
-Generated adapters reserve the high execution-context flag
-`VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_CONTEXT`. With that flag set,
-`user_data` points to a process-local C++ `WorkspaceContext`, allowing an outer
-model trace/replay authority to span multiple JIT kernels. Without it, a raw
-call-frame workspace selects dynamic mode; a null/zero raw workspace selects
-the calling-thread trace/replay cache described above. The cache keys exact
-observed Dynamic axes and retains four shapes by default. Allocation decisions
-not represented by those axes must be included in the explicit decision
-fingerprint. Legacy kernels do not construct any context because signature
-selection is compile time.
+Raw call-frame workspace remains only as the legacy compatibility authority. A
+null/zero raw workspace selects the calling-thread replay cache, optionally
+backed by the execution context's provider. The cache keys exact observed
+Dynamic axes and retains four plan shapes by default; shared sessions prevent
+those entries from multiplying physical arena capacity. Allocation decisions
+not represented by axes must be included in the decision fingerprint. Legacy
+kernels do not construct a context because signature selection is compile time.

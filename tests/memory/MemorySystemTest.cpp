@@ -3,7 +3,7 @@
 //
 
 #include "vecops/memory/Memory.h"
-#include "vecops/memory/WorkspaceArena.h"
+#include "vecops/execution/MemoryWorkspaceSession.h"
 #include "vecops/execution/WorkspaceContext.h"
 
 #include <algorithm>
@@ -262,8 +262,9 @@ TEST(MemorySystemTest, ExplicitUnknownTargetIsTyped) {
 
 TEST(MemorySystemTest, WorkspaceReplayCacheUsesInjectedMemoryProvider) {
   const auto memory = test_backend();
-  auto provider = std::make_shared<MemoryWorkspaceArenaProvider>(memory, CpuDomainSelector::current(), 4096);
-  execution::WorkspaceReplayCache cache(1, std::move(provider));
+  auto provider = std::make_shared<execution::MemoryWorkspaceSession>(
+    memory, execution::MemoryWorkspaceSessionConfig{.fast_capacity = 4096, .slow_capacity = 4096});
+  execution::WorkspaceReplayCache cache(1, provider);
 
   auto invoke = [&] {
     cache.invoke(
@@ -285,13 +286,16 @@ TEST(MemorySystemTest, WorkspaceReplayCacheUsesInjectedMemoryProvider) {
     managed += item.managed_bytes;
     allocations += item.allocation_count;
   }
-  EXPECT_EQ(managed, 1024u);
-  EXPECT_EQ(allocations, 1u);
+  EXPECT_EQ(managed, 8192u);
+  EXPECT_EQ(allocations, 2u);
   const auto domain = memory.current_cpu_domain();
   const auto bandwidth = memory.tiers(domain, RankingObjective::Bandwidth);
   ASSERT_FALSE(bandwidth.ranks.empty());
   ASSERT_FALSE(bandwidth.ranks.front().targets.empty());
-  EXPECT_EQ(stats[bandwidth.ranks.front().targets.front()].managed_bytes, 1024u);
+  EXPECT_GE(stats[bandwidth.ranks.front().targets.front()].managed_bytes, 4096u);
+
+  provider->close();
+  EXPECT_EQ(total_managed(memory), 0u);
 }
 
 } // namespace

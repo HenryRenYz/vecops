@@ -288,7 +288,7 @@ std::shared_ptr<MemoryState> discover_hwloc() {
     }
     const auto id = static_cast<MemoryTargetId>(state->snapshot.memory_targets.size());
     state->snapshot.memory_targets.push_back(MemoryTargetInfo{id, object->os_index, kind_from_subtype(object->subtype),
-                                                              object->attr->numanode.local_memory, true});
+                                                              object->attr->numanode.local_memory});
     state->target_objects.push_back(object);
   }
   if (state->snapshot.memory_targets.empty())
@@ -374,7 +374,7 @@ std::shared_ptr<MemoryState> discover_system() {
   state->backend = BackendPreference::System;
   state->snapshot.backend = "system";
   state->snapshot.cpu_domains.push_back(CpuDomainInfo{0, std::nullopt, allowed_system_cpus()});
-  state->snapshot.memory_targets.push_back(MemoryTargetInfo{0, 0, MemoryKind::Unknown, system_capacity(), true});
+  state->snapshot.memory_targets.push_back(MemoryTargetInfo{0, 0, MemoryKind::Unknown, system_capacity()});
   state->snapshot.memory_paths.push_back(
     MemoryPathInfo{0, 0, std::nullopt, std::nullopt, AttributeSource::Unknown, AttributeSource::Unknown, true});
   return state;

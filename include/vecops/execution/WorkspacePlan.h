@@ -160,7 +160,8 @@ struct WorkspaceAllocationRequest {
   WorkspaceDomain domain = WorkspaceDomain::Global;
   nint_t replicas = 1;
   WorkspacePlacementPolicy placement = WorkspacePlacementPolicy::FastPreferred;
-  double benefit = 1.0;
+  /** Estimated bytes transferred through this buffer; zero defaults to bytes. */
+  double estimated_traffic_bytes = 0.0;
 };
 
 struct WorkspaceLifetime {
@@ -259,6 +260,8 @@ public:
     VECOPS_ASSERT(request.alignment > 0 && (request.alignment & (request.alignment - 1)) == 0,
                   "workspace allocation alignment must be a positive power of two");
     VECOPS_ASSERT(request.replicas > 0, "workspace replica count must be positive");
+    VECOPS_ASSERT(request.estimated_traffic_bytes >= 0.0,
+                  "workspace estimated traffic must be non-negative");
     if (request.domain == WorkspaceDomain::Global) {
       VECOPS_ASSERT(request.replicas == 1, "global workspace cannot have replicas");
     }
@@ -322,7 +325,7 @@ private:
 
   static bool compatible(const WorkspaceAllocationRequest& left, const WorkspaceAllocationRequest& right) {
     return left.alignment == right.alignment && left.domain == right.domain && left.placement == right.placement &&
-           left.benefit == right.benefit;
+           left.estimated_traffic_bytes == right.estimated_traffic_bytes;
   }
 
   void close_scope(std::size_t depth) {
@@ -560,8 +563,10 @@ inline WorkspacePlacement place_workspace(const LogicalWorkspacePlan& logical,
     const auto& r = logical.allocations[right.logical_index].request;
     if (l.placement != r.placement)
       return l.placement < r.placement;
-    const double ld = left.bytes == 0 ? l.benefit : l.benefit / double(left.bytes);
-    const double rd = right.bytes == 0 ? r.benefit : r.benefit / double(right.bytes);
+    const double l_traffic = l.estimated_traffic_bytes == 0.0 ? double(left.bytes) : l.estimated_traffic_bytes;
+    const double r_traffic = r.estimated_traffic_bytes == 0.0 ? double(right.bytes) : r.estimated_traffic_bytes;
+    const double ld = left.bytes == 0 ? l_traffic : l_traffic / double(left.bytes);
+    const double rd = right.bytes == 0 ? r_traffic : r_traffic / double(right.bytes);
     if (ld != rd)
       return ld > rd;
     return logical.allocations[left.logical_index].canonical_path <

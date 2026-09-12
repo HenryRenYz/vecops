@@ -242,6 +242,7 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
       ("stream", ctypes.c_void_p),
       ("user_data", ctypes.c_void_p),
       ("flags", ctypes.c_uint64),
+      ("workspace_provider", ctypes.c_void_p),
     ]
 
   class Call(ctypes.Structure):
@@ -292,6 +293,14 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
       access=vecops.TensorAccess.output,
     ),
   )
+
+  direct_memory = vecops.memory.System(backend="system")
+  with direct_memory.workspace_session(fast_capacity=4096, slow_capacity=4096):
+    kernel(input, output)
+    assert sum(item["managed_bytes"] for item in direct_memory.stats()) == 8192
+  np.testing.assert_array_equal(output, input * 2)
+  assert sum(item["managed_bytes"] for item in direct_memory.stats()) == 0
+  output.fill(0)
 
   sizes = (ctypes.c_int64 * 2)(2, 4)
   strides = (ctypes.c_int64 * 2)(4, 1)
@@ -356,7 +365,7 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
 
   memory_system = vecops.memory.System(backend="system")
   output.fill(0)
-  with memory_system.workspace_scope(fast_capacity=4096):
+  with memory_system.workspace_session(fast_capacity=4096, slow_capacity=4096):
     result = bridge(
       kernel.operator.native._handle,
       ctypes.byref(call),
@@ -368,15 +377,18 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
   assert memory_system.stats()[0]["managed_bytes"] == 0
 
   output.fill(0)
+  managed_context = ExecutionContext(
+    ctypes.sizeof(ExecutionContext), 3, None, ctypes.c_void_p(0x1234), 0x55, None,
+  )
   managed_call = Call(
     ctypes.sizeof(Call),
     len(values),
     values,
     None,
     0,
-    None,
+    ctypes.pointer(managed_context),
   )
-  with memory_system.workspace_scope(fast_capacity=4096):
+  with memory_system.workspace_session(fast_capacity=4096, slow_capacity=4096):
     result = bridge(
       kernel.operator.native._handle,
       ctypes.byref(managed_call),
@@ -384,9 +396,10 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
       specialization,
       ctypes.byref(error),
     )
+    assert sum(item["managed_bytes"] for item in memory_system.stats()) == 8192
   assert result == 0, message.value.decode()
   np.testing.assert_array_equal(output, input * 3 + 1)
-  assert memory_system.stats()[0]["managed_bytes"] == np.dtype(np.float32).itemsize
+  assert sum(item["managed_bytes"] for item in memory_system.stats()) == 0
 
 
 def test_cache_only_does_not_discover_tools_or_create_directories(tmp_path: Path) -> None:

@@ -56,11 +56,14 @@ def test_numpy_array_retains_allocation() -> None:
   assert system.stats()[0]["managed_bytes"] == 0
 
 
-def test_workspace_scope_is_reentrant_across_sequential_uses() -> None:
+def test_workspace_session_is_single_use_and_releases_arenas() -> None:
   system = memory.System(backend="system")
-  scope = system.workspace_scope(fast_capacity=4096)
+  session = system.workspace_session(fast_capacity=4096, slow_capacity=4096)
 
-  with scope:
+  assert sum(item["managed_bytes"] for item in system.stats()) == 8192
+  with session:
     pass
-  with scope:
+  assert session.closed
+  assert sum(item["managed_bytes"] for item in system.stats()) == 0
+  with pytest.raises(RuntimeError, match="cannot be re-entered"), session:
     pass

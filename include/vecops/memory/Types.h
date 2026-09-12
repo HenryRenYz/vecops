@@ -37,7 +37,6 @@ enum class MemoryErrc : std::uint8_t {
   InvalidRequest,
   UnknownCpuDomain,
   UnknownTarget,
-  TargetDisallowed,
   UnsupportedBinding,
   BudgetExceeded,
   OutOfMemory,
@@ -72,7 +71,6 @@ struct MemoryTargetInfo {
   unsigned os_numa_id = 0;
   MemoryKind kind = MemoryKind::Unknown;
   std::uint64_t capacity_bytes = 0;
-  bool allowed = true;
 };
 
 struct MemoryPathInfo {

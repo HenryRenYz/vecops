@@ -197,15 +197,13 @@ typedef struct VecopsValue {
 /**
  * @brief Optional opaque execution context supplied by the embedding runtime.
  *
- * `stream` and `user_data` normally have no core-runtime interpretation. The
- * The two high flag bits below reserve process-local vecops conventions for
- * source kernels that receive either an externally managed C++
- * WorkspaceContext or a versioned C workspace-arena provider.
+ * `stream` and `user_data` have no core-runtime interpretation. Workspace
+ * placement uses a separate extension pointer, so embedding state and memory
+ * policy can be supplied together.
  */
-#define VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_CONTEXT (UINT64_C(1) << 63)
-#define VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_ARENA_PROVIDER (UINT64_C(1) << 62)
-
 typedef enum VecopsWorkspaceTier { VECOPS_WORKSPACE_TIER_FAST = 0, VECOPS_WORKSPACE_TIER_SLOW = 1 } VecopsWorkspaceTier;
+
+#define VECOPS_WORKSPACE_ARENA_PROVIDER_FLAG_SHARED_ARENAS UINT64_C(1)
 
 /** One provider-owned workspace arena returned across the process-local ABI. */
 typedef struct VecopsWorkspaceArena {
@@ -241,6 +239,8 @@ typedef struct VecopsWorkspaceArenaProvider {
   VecopsWorkspaceArenaReleaseFn release;
   VecopsWorkspaceArenaContextFn retain;
   VecopsWorkspaceArenaContextFn release_context;
+  /** Provider capabilities; consumers ignore unknown bits. */
+  uint64_t flags;
 } VecopsWorkspaceArenaProvider;
 
 typedef struct VecopsExecutionContext {
@@ -250,10 +250,12 @@ typedef struct VecopsExecutionContext {
   uint32_t requested_threads;
   /** Optional framework stream pointer forwarded without interpretation. */
   void* stream;
-  /** Opaque pointer selected by the corresponding reserved flag. */
+  /** Opaque embedding-owned pointer. */
   void* user_data;
-  /** Embedding-defined flags plus reserved vecops flags. */
+  /** Embedding-defined flags. */
   uint64_t flags;
+  /** Optional physical workspace provider; absent from older short records. */
+  const VecopsWorkspaceArenaProvider* workspace_provider;
 } VecopsExecutionContext;
 
 /**

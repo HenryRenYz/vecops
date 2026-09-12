@@ -90,11 +90,10 @@ errors, dtype, and status codes). Every caller sets each record's `struct_size`
 and keeps pointers valid until its synchronous ABI call returns.
 
 It also defines `VecopsWorkspaceArenaProvider`, a process-local retained
-callback table selected by the corresponding high execution-context flag. A
-generated DSO copies the table, retains its context, pairs every successful
-arena with `release`, and keys its provider replay cache by `identity`. This is
-the physical-placement alternative to the existing process-local C++
-`WorkspaceContext` flag; selecting both authorities is invalid.
+callback table stored in the dedicated
+`VecopsExecutionContext::workspace_provider` field. A generated DSO copies the
+table, retains its context, pairs every successful arena token with `release`,
+and keys plan metadata by `identity`. Embedding `user_data` remains independent.
 
 `KernelAbi.h` is the artifact-DSO protocol. A DSO exports exactly
 `vecops_kernel_query_v1`, which returns a static `VecopsKernelDescriptorV1`.

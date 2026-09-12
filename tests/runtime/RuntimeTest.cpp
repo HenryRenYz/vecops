@@ -242,7 +242,8 @@ struct RuntimeArenaProvider {
            allocate,
            release_arena,
            retain,
-           release_context};
+           release_context,
+           0};
   }
 
   static std::uint64_t capacity(void*, std::uint32_t) {
@@ -382,8 +383,9 @@ int main(int argc, char** argv) {
     .struct_size = sizeof(VecopsExecutionContext),
     .requested_threads = 0,
     .stream = nullptr,
-    .user_data = &arena_provider->abi,
-    .flags = VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_ARENA_PROVIDER,
+    .user_data = nullptr,
+    .flags = 0,
+    .workspace_provider = &arena_provider->abi,
   };
   std::fill(output.begin(), output.end(), 0);
   require(executable.value()->invoke(call.arguments(), nullptr, 0, &arena_context).ok(),
@@ -392,28 +394,6 @@ int main(int argc, char** argv) {
           "source kernel arena-provider replay");
   require(arena_provider->allocations.load() == 1, "arena provider must allocate once and replay from its cache");
   RuntimeArenaProvider::release_context(arena_provider);
-
-  std::fill(output.begin(), output.end(), 0);
-  vecops::execution::WorkspaceContext tracing{vecops::execution::trace_workspace, definition.name(), {19, 23}};
-  auto trace_context = vecops::execution::workspace_execution_context(tracing);
-  require(executable.value()->invoke(call.arguments(), nullptr, 0, &trace_context).ok(),
-          "source kernel trace-context invocation");
-  auto logical_workspace = tracing.finish_trace();
-  require(logical_workspace.allocations.size() == 1, "source kernel must record its allocation in the caller context");
-  require(logical_workspace.axes.size() == 1 && logical_workspace.axes.front().recorded == 4,
-          "generated adapter must preserve Dynamic axis contracts in the workspace trace");
-  auto placement = vecops::execution::place_workspace(logical_workspace);
-  vecops::kernel::Workspace replay_storage(placement.fast_bytes);
-  auto replay_view = replay_storage.view();
-  void* replay_base = replay_view.allocate(placement.fast_bytes, vecops::vec::DEFAULT_ALIGNMENT);
-  vecops::execution::BoundWorkspacePlan bound_workspace{placement, replay_base, placement.fast_bytes, nullptr, 0};
-  vecops::execution::WorkspaceContext replay{definition.name(), bound_workspace};
-  auto replay_context = vecops::execution::workspace_execution_context(replay);
-  std::fill(output.begin(), output.end(), 0);
-  require(executable.value()->invoke(call.arguments(), nullptr, 0, &replay_context).ok(),
-          "source kernel replay-context invocation");
-  replay.finish_replay();
-  require(output == std::vector<float>({4, 7, 10, 13, 16, 19, 22, 25}), "source kernel replay result");
 
   auto dynamic_definition = named_dynamic_kernel_definition();
   std::vector<float> dynamic_input(12);

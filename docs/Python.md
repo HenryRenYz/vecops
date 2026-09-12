@@ -291,7 +291,7 @@ run = vecops.ops.numpy.register(
 
 When the optional `vecops::memory` component is built, Python exports
 `vecops.memory.System`, owning buffers, NumPy factories, topology/tiers/stats,
-and a framework-workspace scope. The memory module is absent when
+and a bounded workspace session. The memory module is absent when
 `VECOPS_BUILD_MEMORY=OFF`; importing ordinary vecops APIs remains unchanged.
 
 ```python
@@ -301,12 +301,11 @@ system = vecops.memory.System(
   ],
 )
 
-with system.workspace_scope(fast_capacity=3 << 30):
+with system.workspace_session(fast_capacity=3 << 30, slow_capacity=8 << 30):
   result = model(inputs)
 ```
 
-The scope affects registered framework bridges on the calling thread. It does
-not replace the process allocator and does not affect direct NumPy `Operator`
-calls. Generated source-kernel DSOs receive a retained C callback table through
-`VecopsExecutionContext`, then keep provider-specific replay caches. See
-`docs/Memory.md` for placement and lifetime semantics.
+The single-use session affects registered Python operators and framework
+bridges on the calling thread. It freezes the CPU domain, owns one shared arena
+per tier, and releases both on exit. It does not replace the process allocator.
+See `docs/Memory.md` for placement and lifetime semantics.

@@ -1,7 +1,7 @@
 """Ergonomic heterogeneous CPU-memory allocation.
 
 The default API uses placement intent names instead of exposing hwloc object
-indexes. ``target=`` remains available for diagnostics and expert control.
+indexes. ``os_numa_id=`` remains available for diagnostics and expert control.
 Allocations own their storage and implement the Python buffer protocol.
 """
 
@@ -95,7 +95,7 @@ class System:
     fallback: str | None = "default",
     alignment: int = 64,
     tier: int | None = None,
-    target: int | None = None,
+    os_numa_id: int | None = None,
   ) -> Buffer:
     """Allocate uninitialized bytes and return an owning buffer."""
     request = _C.MemoryAllocationRequest()
@@ -104,15 +104,15 @@ class System:
     request.alignment = int(alignment)
     request.fallback = _choice(_FALLBACKS, fallback, "fallback")
     request.objective_rank = tier
-    if target is None:
+    if os_numa_id is None:
       if tier is not None and placement not in {"high_bandwidth", "low_latency"}:
         raise ValueError("tier requires high_bandwidth or low_latency placement")
       request.intent = _choice(_PLACEMENTS, placement, "placement")
     else:
       if placement != "default" or tier is not None:
-        raise ValueError("target cannot be combined with placement or tier")
+        raise ValueError("os_numa_id cannot be combined with placement or tier")
       request.intent = _C.MemoryPlacement.exact_target
-      request.exact_os_numa_id = int(target)
+      request.exact_os_numa_id = int(os_numa_id)
     return self._native.allocate(request)
 
   def topology(self) -> dict[str, Any]:
@@ -132,18 +132,20 @@ class System:
   def describe(self) -> str:
     return self._native.describe()
 
-  def workspace_scope(
+  def workspace_session(
     self,
     *,
     fast_capacity: int,
     slow_capacity: int | None = None,
     domain: int | None = None,
+    allow_fast_fallback: bool = True,
   ):
-    """Route vecops JIT workspace arenas within this calling-thread scope."""
-    return self._native.workspace_scope(
+    """Create one single-use, bounded vecops workspace session."""
+    return self._native.workspace_session(
       int(fast_capacity),
       None if slow_capacity is None else int(slow_capacity),
       domain,
+      bool(allow_fast_fallback),
     )
 
 

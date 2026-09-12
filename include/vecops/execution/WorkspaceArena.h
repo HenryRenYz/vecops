@@ -51,6 +51,11 @@ public:
 
   [[nodiscard]] virtual nint_t capacity(WorkspaceTier tier) const noexcept = 0;
   virtual WorkspaceArena allocate(WorkspaceTier tier, nint_t bytes, nint_t alignment) = 0;
+
+  /** Whether every plan receives a view of the same session-owned arenas. */
+  [[nodiscard]] virtual bool shares_arenas_between_plans() const noexcept {
+    return false;
+  }
 };
 
 /** Heap-backed provider used when no physical placement authority is given. */
@@ -132,6 +137,10 @@ public:
 
   [[nodiscard]] std::uint64_t identity() const noexcept {
     return provider_.identity;
+  }
+
+  [[nodiscard]] bool shares_arenas_between_plans() const noexcept override {
+    return (provider_.flags & VECOPS_WORKSPACE_ARENA_PROVIDER_FLAG_SHARED_ARENAS) != 0;
   }
 
 private:

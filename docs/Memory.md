@@ -71,9 +71,9 @@ array = memory.numpy.zeros(
   placement="high_bandwidth",
 )
 
-with system.workspace_scope(fast_capacity=3 << 30):
-  # Registered framework bridges route generated-kernel workspace through
-  # this system on the calling thread.
+with system.workspace_session(fast_capacity=3 << 30, slow_capacity=8 << 30):
+  # Registered Python and framework operators share these bounded arenas on
+  # the calling thread.
   run_model()
 ```
 
@@ -81,43 +81,45 @@ with system.workspace_scope(fast_capacity=3 << 30):
 owner; no address-only Python object is exposed. `topology()`, `tiers()`, and
 `stats()` return dictionaries/lists suitable for logs and policy code.
 
-`workspace_scope()` installs no process-global allocator. It pushes a
-calling-thread provider and the process-local framework bridge adds its
-versioned callback table to `VecopsExecutionContext`. Generated JIT DSOs retain
-the provider while their replay cache owns arenas. The scope should cover the
-entire repeated execution region; creating a different scope changes provider
-identity and rebuilds that DSO's provider cache. Direct `Operator`/NumPy calls
-do not currently use the framework-bridge scope.
+`workspace_session()` constructs one fast and one slow physical arena, freezes
+the selected CPU domain, and installs the session on the calling thread for one
+non-overlapping execution region. The capacities are totals for the session,
+not allowances multiplied by JIT artifacts or cached shapes. `__exit__()` and
+`close()` release both physical allocations; a session is deliberately
+single-use so stale DSO plan metadata can never reuse released addresses.
 
 ## Workspace integration
 
-`MemoryWorkspaceArenaProvider` maps logical `WorkspaceTier::Fast` to
+`execution::MemoryWorkspaceSession` maps logical `WorkspaceTier::Fast` to
 `HighBandwidth` and `WorkspaceTier::Slow` to `Default`:
 
 ```cpp
-auto provider = std::make_shared<MemoryWorkspaceArenaProvider>(
-  memory,
-  CpuDomainSelector::current(),
-  fast_capacity);
+auto provider = std::make_shared<execution::MemoryWorkspaceSession>(
+  memory, execution::MemoryWorkspaceSessionConfig{
+    .fast_capacity = fast_capacity,
+    .slow_capacity = slow_capacity,
+  });
 WorkspaceReplayCache cache(4, provider);
 ```
 
-The capacity is a placement limit. A cache entry allocates only the exact arena
-sizes selected by `place_workspace()`. If allocation of a preferred fast arena
-fails, the cache discards the partial owners, recomputes the complete plan with
-zero fast capacity, and allocates it in slow/default memory.
+The session allocates its bounded arenas once and every cache entry binds a
+view of the same bases. Calls sharing a session must therefore be synchronous
+and non-overlapping. If initial fast allocation fails for a recoverable reason
+and fallback is enabled, its effective fast capacity becomes zero and plans are
+placed wholly in the slow/default arena.
 
-The default provider remains aligned heap memory, preserving existing behavior.
-The default replay cache also performs its first trace without a caller fast
-arena; a `FastRequired` request therefore needs an externally managed
-`WorkspaceContext` whose fast storage exists during the trace. It cannot use
-the default cache's preferred-only fallback path.
+The default provider remains aligned heap memory. A shared-arena session also
+supplies its bases to the initial trace, so the first real invocation uses the
+selected physical memory. Cache materialization happens after that invocation;
+failure to retain an optimization never changes an already-successful call
+into an error.
 
 Generated artifacts receive providers through `VecopsWorkspaceArenaProvider`,
 a C-only retain/allocate/release callback table. This avoids relying on a C++
-singleton across separately linked JIT DSOs. Provider identity selects a
-thread-local replay cache; arena ownership keeps both the provider context and
-the physical `Allocation` alive after the lexical Python scope exits.
+singleton across separately linked JIT DSOs. `VecopsExecutionContext` carries
+the provider in a dedicated field, independently of embedding `user_data`.
+Provider identity selects plan metadata in each DSO, while physical ownership
+stays in the explicit session and ends at `close()`.
 
 ## Lifetime and threading
 
