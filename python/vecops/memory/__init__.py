@@ -132,6 +132,20 @@ class System:
   def describe(self) -> str:
     return self._native.describe()
 
+  def workspace_scope(
+    self,
+    *,
+    fast_capacity: int,
+    slow_capacity: int | None = None,
+    domain: int | None = None,
+  ):
+    """Route vecops JIT workspace arenas within this calling-thread scope."""
+    return self._native.workspace_scope(
+      int(fast_capacity),
+      None if slow_capacity is None else int(slow_capacity),
+      domain,
+    )
+
 
 _default: System | None = None
 _default_lock = threading.Lock()

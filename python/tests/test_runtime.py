@@ -194,8 +194,8 @@ def test_compile_for_accepts_storage_free_tensor_meta(tmp_path: Path) -> None:
   )
 
 
-def test_framework_bridge_forwards_external_workspace(tmp_path: Path) -> None:
-  """The process-local C bridge must preserve the complete VecopsCall frame."""
+def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_path: Path) -> None:
+  """The process-local C bridge must preserve or enrich the complete call."""
 
   class TensorView(ctypes.Structure):
     _fields_ = [
@@ -353,6 +353,40 @@ def test_framework_bridge_forwards_external_workspace(tmp_path: Path) -> None:
   assert result == 0, message.value.decode()
   np.testing.assert_array_equal(output, input * 3 + 1)
   assert ctypes.c_float.from_address(workspace_address).value == 25.0
+
+  memory_system = vecops.memory.System(backend="system")
+  output.fill(0)
+  with memory_system.workspace_scope(fast_capacity=4096):
+    result = bridge(
+      kernel.operator.native._handle,
+      ctypes.byref(call),
+      len(specialization),
+      specialization,
+      ctypes.byref(error),
+    )
+  assert result == 0, message.value.decode()
+  assert memory_system.stats()[0]["managed_bytes"] == 0
+
+  output.fill(0)
+  managed_call = Call(
+    ctypes.sizeof(Call),
+    len(values),
+    values,
+    None,
+    0,
+    None,
+  )
+  with memory_system.workspace_scope(fast_capacity=4096):
+    result = bridge(
+      kernel.operator.native._handle,
+      ctypes.byref(managed_call),
+      len(specialization),
+      specialization,
+      ctypes.byref(error),
+    )
+  assert result == 0, message.value.decode()
+  np.testing.assert_array_equal(output, input * 3 + 1)
+  assert memory_system.stats()[0]["managed_bytes"] == np.dtype(np.float32).itemsize
 
 
 def test_cache_only_does_not_discover_tools_or_create_directories(tmp_path: Path) -> None:

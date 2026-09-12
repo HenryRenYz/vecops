@@ -39,6 +39,45 @@ public:
   HeapWorkspaceArenaProvider heap;
 };
 
+struct AbiArenaProviderState {
+  static std::uint64_t capacity(void*, std::uint32_t) {
+    return 4096;
+  }
+
+  static std::int32_t allocate(void* context, std::uint32_t tier, std::uint64_t bytes, std::uint64_t alignment,
+                               VecopsWorkspaceArena* result, VecopsError*) {
+    auto& self = *static_cast<AbiArenaProviderState*>(context);
+    if (bytes == 0) {
+      *result = {sizeof(VecopsWorkspaceArena), 0, nullptr, 0, nullptr};
+      return VECOPS_STATUS_OK;
+    }
+    const auto logical_tier = tier == VECOPS_WORKSPACE_TIER_FAST ? WorkspaceTier::Fast : WorkspaceTier::Slow;
+    auto* owner =
+      new WorkspaceArena(self.heap.allocate(logical_tier, static_cast<nint_t>(bytes), static_cast<nint_t>(alignment)));
+    *result = {sizeof(VecopsWorkspaceArena), 0, owner->data, static_cast<std::uint64_t>(owner->capacity), owner};
+    ++self.allocations;
+    return VECOPS_STATUS_OK;
+  }
+
+  static void release_arena(void* context, void* owner) {
+    ++static_cast<AbiArenaProviderState*>(context)->releases;
+    delete static_cast<WorkspaceArena*>(owner);
+  }
+
+  static void retain(void* context) {
+    ++static_cast<AbiArenaProviderState*>(context)->references;
+  }
+
+  static void release_context(void* context) {
+    --static_cast<AbiArenaProviderState*>(context)->references;
+  }
+
+  HeapWorkspaceArenaProvider heap;
+  int references = 1;
+  int allocations = 0;
+  int releases = 0;
+};
+
 TEST(WorkspaceContextTest, DynamicModeUsesFastArenaAndRewindsScopes) {
   alignas(64) std::array<std::byte, 256> fast{};
   WorkspaceContext workspace{"kernel", fast.data(), nint_t(fast.size())};
@@ -150,6 +189,34 @@ TEST(WorkspaceContextTest, PreferredArenaFallsBackAsACompleteSlowPlan) {
 
   EXPECT_EQ(provider->fast_attempts, 1);
   EXPECT_EQ(provider->slow_allocations, 1);
+}
+
+TEST(WorkspaceContextTest, CAbiProviderRetainsContextAndArenaOwnership) {
+  AbiArenaProviderState state;
+  VecopsWorkspaceArenaProvider abi{sizeof(VecopsWorkspaceArenaProvider),
+                                   0,
+                                   17,
+                                   &state,
+                                   AbiArenaProviderState::capacity,
+                                   AbiArenaProviderState::allocate,
+                                   AbiArenaProviderState::release_arena,
+                                   AbiArenaProviderState::retain,
+                                   AbiArenaProviderState::release_context};
+  {
+    WorkspaceReplayCache cache{1, workspace_arena_provider_from_abi(abi)};
+    EXPECT_EQ(state.references, 2);
+    cache.invoke(
+      "abi", [](auto&) {},
+      [](WorkspaceContext& workspace) {
+        auto phase = workspace.serial_scope("phase");
+        auto slot = workspace.request("preferred", {.bytes = 128});
+        ASSERT_NE(slot.replica(), nullptr);
+      });
+    EXPECT_EQ(state.allocations, 1);
+    EXPECT_EQ(state.releases, 0);
+  }
+  EXPECT_EQ(state.releases, 1);
+  EXPECT_EQ(state.references, 1);
 }
 
 #if defined(_OPENMP)

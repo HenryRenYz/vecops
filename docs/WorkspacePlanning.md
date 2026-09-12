@@ -111,6 +111,14 @@ not known until the logical trace finishes. A `FastRequired` site must therefore
 use an explicitly managed `WorkspaceContext` with fast storage during that
 trace. The default cache path is suitable for `FastPreferred`/`SlowAllowed`.
 
+Generated source-kernel adapters also recognize
+`VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_ARENA_PROVIDER`. The associated
+`VecopsWorkspaceArenaProvider` is a retained C callback table, so framework
+bridges may inject physical placement without sharing C++ globals across JIT
+DSOs. Each calling thread keeps one provider-specific replay cache; a changed
+provider identity replaces it rather than reusing arenas from another domain or
+policy.
+
 ## Parallel source-kernel migration
 
 `WorkspaceContext` itself is deliberately not synchronized. A source kernel

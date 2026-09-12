@@ -54,3 +54,13 @@ def test_numpy_array_retains_allocation() -> None:
 
   del array
   assert system.stats()[0]["managed_bytes"] == 0
+
+
+def test_workspace_scope_is_reentrant_across_sequential_uses() -> None:
+  system = memory.System(backend="system")
+  scope = system.workspace_scope(fast_capacity=4096)
+
+  with scope:
+    pass
+  with scope:
+    pass

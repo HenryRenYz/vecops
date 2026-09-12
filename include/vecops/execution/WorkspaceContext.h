@@ -512,8 +512,9 @@ private:
 inline VecopsExecutionContext workspace_execution_context(WorkspaceContext& workspace,
                                                           std::uint32_t requested_threads = 0, void* stream = nullptr,
                                                           std::uint64_t extra_flags = 0) {
-  VECOPS_ASSERT((extra_flags & VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_CONTEXT) == 0,
-                "workspace execution-context flag is managed by vecops");
+  constexpr auto reserved_flags = VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_CONTEXT |
+                                  VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_ARENA_PROVIDER;
+  VECOPS_ASSERT((extra_flags & reserved_flags) == 0, "workspace execution-context flags are managed by vecops");
   return {sizeof(VecopsExecutionContext), requested_threads, stream, &workspace,
           extra_flags | VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_CONTEXT};
 }

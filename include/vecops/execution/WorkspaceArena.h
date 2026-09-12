@@ -14,6 +14,7 @@
  * ordinary aligned heap storage and preserves the historical behavior.
  */
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -26,6 +27,7 @@
 #include "vecops/Assertion.h"
 #include "vecops/CoreTypes.h"
 #include "vecops/execution/WorkspacePlan.h"
+#include "vecops/runtime/CallAbi.h"
 
 namespace vecops::execution {
 
@@ -74,6 +76,76 @@ public:
     return {reinterpret_cast<void*>(aligned), bytes, std::move(owner)};
   }
 };
+
+/** Adapt the versioned process-local C ABI to WorkspaceArenaProvider. */
+class AbiWorkspaceArenaProvider final : public WorkspaceArenaProvider {
+public:
+  explicit AbiWorkspaceArenaProvider(const VecopsWorkspaceArenaProvider& provider)
+    : provider_(provider) {
+    if (provider_.struct_size < sizeof(VecopsWorkspaceArenaProvider) || provider_.identity == 0 ||
+        provider_.capacity == nullptr || provider_.allocate == nullptr || provider_.release == nullptr ||
+        provider_.retain == nullptr || provider_.release_context == nullptr) {
+      throw WorkspaceArenaUnavailable("workspace arena provider ABI is incomplete");
+    }
+    provider_.retain(provider_.context);
+  }
+
+  AbiWorkspaceArenaProvider(const AbiWorkspaceArenaProvider&) = delete;
+  AbiWorkspaceArenaProvider& operator=(const AbiWorkspaceArenaProvider&) = delete;
+
+  ~AbiWorkspaceArenaProvider() override {
+    provider_.release_context(provider_.context);
+  }
+
+  [[nodiscard]] nint_t capacity(WorkspaceTier tier) const noexcept override {
+    const auto value = provider_.capacity(provider_.context, abi_tier(tier));
+    return value > static_cast<std::uint64_t>(std::numeric_limits<nint_t>::max()) ? std::numeric_limits<nint_t>::max()
+                                                                                  : static_cast<nint_t>(value);
+  }
+
+  WorkspaceArena allocate(WorkspaceTier tier, nint_t bytes, nint_t alignment) override {
+    VecopsWorkspaceArena arena{sizeof(VecopsWorkspaceArena), 0, nullptr, 0, nullptr};
+    std::array<char, 512> message{};
+    VecopsError error{sizeof(VecopsError), VECOPS_STATUS_OK, message.data(), message.size(), 0};
+    const auto status = provider_.allocate(provider_.context, abi_tier(tier), static_cast<std::uint64_t>(bytes),
+                                           static_cast<std::uint64_t>(alignment), &arena, &error);
+    if (status != VECOPS_STATUS_OK) {
+      if (arena.owner != nullptr)
+        provider_.release(provider_.context, arena.owner);
+      throw WorkspaceArenaUnavailable(message.front() == '\0' ? "workspace arena provider allocation failed"
+                                                              : std::string(message.data()));
+    }
+    if (arena.struct_size < sizeof(VecopsWorkspaceArena) || arena.capacity < static_cast<std::uint64_t>(bytes) ||
+        (bytes != 0 && (arena.data == nullptr || arena.owner == nullptr))) {
+      if (arena.owner != nullptr)
+        provider_.release(provider_.context, arena.owner);
+      throw WorkspaceArenaUnavailable("workspace arena provider returned an invalid arena");
+    }
+    std::shared_ptr<void> owner;
+    if (arena.owner != nullptr) {
+      const auto provider = provider_;
+      owner =
+        std::shared_ptr<void>(arena.owner, [provider](void* value) { provider.release(provider.context, value); });
+    }
+    return {arena.data, static_cast<nint_t>(arena.capacity), std::move(owner)};
+  }
+
+  [[nodiscard]] std::uint64_t identity() const noexcept {
+    return provider_.identity;
+  }
+
+private:
+  static constexpr std::uint32_t abi_tier(WorkspaceTier tier) noexcept {
+    return tier == WorkspaceTier::Fast ? VECOPS_WORKSPACE_TIER_FAST : VECOPS_WORKSPACE_TIER_SLOW;
+  }
+
+  VecopsWorkspaceArenaProvider provider_;
+};
+
+inline std::shared_ptr<WorkspaceArenaProvider>
+workspace_arena_provider_from_abi(const VecopsWorkspaceArenaProvider& provider) {
+  return std::make_shared<AbiWorkspaceArenaProvider>(provider);
+}
 
 inline std::shared_ptr<WorkspaceArenaProvider> default_workspace_arena_provider() {
   static auto provider = std::make_shared<HeapWorkspaceArenaProvider>();

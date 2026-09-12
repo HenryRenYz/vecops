@@ -70,11 +70,24 @@ array = memory.numpy.zeros(
   system=system,
   placement="high_bandwidth",
 )
+
+with system.workspace_scope(fast_capacity=3 << 30):
+  # Registered framework bridges route generated-kernel workspace through
+  # this system on the calling thread.
+  run_model()
 ```
 
 `Buffer` implements the buffer protocol. NumPy arrays retain it as their base
 owner; no address-only Python object is exposed. `topology()`, `tiers()`, and
 `stats()` return dictionaries/lists suitable for logs and policy code.
+
+`workspace_scope()` installs no process-global allocator. It pushes a
+calling-thread provider and the process-local framework bridge adds its
+versioned callback table to `VecopsExecutionContext`. Generated JIT DSOs retain
+the provider while their replay cache owns arenas. The scope should cover the
+entire repeated execution region; creating a different scope changes provider
+identity and rebuilds that DSO's provider cache. Direct `Operator`/NumPy calls
+do not currently use the framework-bridge scope.
 
 ## Workspace integration
 
@@ -99,6 +112,12 @@ The default replay cache also performs its first trace without a caller fast
 arena; a `FastRequired` request therefore needs an externally managed
 `WorkspaceContext` whose fast storage exists during the trace. It cannot use
 the default cache's preferred-only fallback path.
+
+Generated artifacts receive providers through `VecopsWorkspaceArenaProvider`,
+a C-only retain/allocate/release callback table. This avoids relying on a C++
+singleton across separately linked JIT DSOs. Provider identity selects a
+thread-local replay cache; arena ownership keeps both the provider context and
+the physical `Allocation` alive after the lexical Python scope exits.
 
 ## Lifetime and threading
 

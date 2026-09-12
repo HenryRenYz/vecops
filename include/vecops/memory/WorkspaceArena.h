@@ -46,6 +46,8 @@ public:
   }
 
   execution::WorkspaceArena allocate(execution::WorkspaceTier tier, nint_t bytes, nint_t alignment) override {
+    if (bytes < 0 || alignment <= 0 || (alignment & (alignment - 1)) != 0)
+      throw MemoryError(MemoryErrc::InvalidRequest, "workspace arena request has invalid size or alignment");
     if (bytes == 0)
       return {};
     AllocationRequest request{

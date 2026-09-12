@@ -89,6 +89,13 @@ outside a batch.
 errors, dtype, and status codes). Every caller sets each record's `struct_size`
 and keeps pointers valid until its synchronous ABI call returns.
 
+It also defines `VecopsWorkspaceArenaProvider`, a process-local retained
+callback table selected by the corresponding high execution-context flag. A
+generated DSO copies the table, retains its context, pairs every successful
+arena with `release`, and keys its provider replay cache by `identity`. This is
+the physical-placement alternative to the existing process-local C++
+`WorkspaceContext` flag; selecting both authorities is invalid.
+
 `KernelAbi.h` is the artifact-DSO protocol. A DSO exports exactly
 `vecops_kernel_query_v1`, which returns a static `VecopsKernelDescriptorV1`.
 The descriptor's major version, record sizes, parameter requirements, and
@@ -103,8 +110,9 @@ independently distributed kernel artifact's ABI.
 
 The Python extension keeps up to eight exact call signatures per thread for
 this process-local bridge. After a slow invocation has resolved and validated
-an `Executable`, a matching context-free, zero-external-workspace call may
-reuse that executable directly. The signature excludes tensor data addresses
+an `Executable`, a matching context-free or arena-provider,
+zero-external-workspace call may reuse that executable directly. The signature
+excludes tensor data addresses
 and runtime scalar payloads, but includes tensor kind, dtype, device, access,
 shape, stride, optional presence, and explicit specialization values. A shape
 or specialization change therefore returns to the normal bind/provider path;

@@ -198,10 +198,51 @@ typedef struct VecopsValue {
  * @brief Optional opaque execution context supplied by the embedding runtime.
  *
  * `stream` and `user_data` normally have no core-runtime interpretation. The
- * high flag bit below reserves one process-local vecops convention for source
- * kernels that receive an externally managed C++ WorkspaceContext.
+ * The two high flag bits below reserve process-local vecops conventions for
+ * source kernels that receive either an externally managed C++
+ * WorkspaceContext or a versioned C workspace-arena provider.
  */
 #define VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_CONTEXT (UINT64_C(1) << 63)
+#define VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_ARENA_PROVIDER (UINT64_C(1) << 62)
+
+typedef enum VecopsWorkspaceTier { VECOPS_WORKSPACE_TIER_FAST = 0, VECOPS_WORKSPACE_TIER_SLOW = 1 } VecopsWorkspaceTier;
+
+/** One provider-owned workspace arena returned across the process-local ABI. */
+typedef struct VecopsWorkspaceArena {
+  uint32_t struct_size;
+  uint32_t reserved;
+  void* data;
+  uint64_t capacity;
+  /** Opaque handle passed to `release`; it need not equal `data`. */
+  void* owner;
+} VecopsWorkspaceArena;
+
+typedef uint64_t (*VecopsWorkspaceArenaCapacityFn)(void* context, uint32_t tier);
+typedef int32_t (*VecopsWorkspaceArenaAllocateFn)(void* context, uint32_t tier, uint64_t bytes, uint64_t alignment,
+                                                  VecopsWorkspaceArena* arena, VecopsError* error);
+typedef void (*VecopsWorkspaceArenaReleaseFn)(void* context, void* owner);
+typedef void (*VecopsWorkspaceArenaContextFn)(void* context);
+
+/**
+ * Versioned allocation callbacks passed to generated source-kernel DSOs.
+ *
+ * A consumer calls `retain(context)` before retaining this provider and pairs
+ * it with `release_context(context)`. Every successful non-empty `allocate`
+ * result is paired with `release(context, arena.owner)`. `identity` must be
+ * stable and unique for the provider's placement policy lifetime.
+ */
+typedef struct VecopsWorkspaceArenaProvider {
+  uint32_t struct_size;
+  uint32_t reserved;
+  uint64_t identity;
+  void* context;
+  VecopsWorkspaceArenaCapacityFn capacity;
+  VecopsWorkspaceArenaAllocateFn allocate;
+  VecopsWorkspaceArenaReleaseFn release;
+  VecopsWorkspaceArenaContextFn retain;
+  VecopsWorkspaceArenaContextFn release_context;
+} VecopsWorkspaceArenaProvider;
+
 typedef struct VecopsExecutionContext {
   /** Size of this record known to the caller. */
   uint32_t struct_size;
@@ -209,7 +250,7 @@ typedef struct VecopsExecutionContext {
   uint32_t requested_threads;
   /** Optional framework stream pointer forwarded without interpretation. */
   void* stream;
-  /** Opaque pointer, or WorkspaceContext when its reserved flag is set. */
+  /** Opaque pointer selected by the corresponding reserved flag. */
   void* user_data;
   /** Embedding-defined flags plus reserved vecops flags. */
   uint64_t flags;
