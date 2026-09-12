@@ -61,9 +61,12 @@ Layout transformations are **compile-time type-level operations**: the result
 type is computed from the input type, preserving per-dimension Const /
 Dynamic information. `remove<I>` erases a dimension from the type;
 `insert<I>(value)` adds one (with the Value type of the inserted argument);
-`set<I>(value)` replaces one; `transpose<I, J>` swaps two. The runtime
-transpose `transpose(layout, i, j)` is the exception — runtime indices
-cannot steer template parameters, so its result degrades to all-`Any`.
+`set<I>(value)` replaces one; `transpose<I, J>` swaps two. Runtime indices in
+`transpose(layout, i, j)` cannot steer template parameters, so exact per-axis
+types cannot survive. Its result instead preserves the guarantees shared by
+all possible source axes: gcd alignment and the union of bounds; Shape entries
+also retain non-negativity. If every axis denotes the same singleton value
+(`Const` or singleton `Dynamic`), the result stays `Const`.
 
 ### Lenient matching and conversions
 
@@ -114,7 +117,7 @@ layout shapes they are specialized for.
 | `insert<I>(meta, v)` / `insert<I>(layout, size, stride)` | insert before position `I` (`I == Ndim` appends) |
 | `take_leading<N>` / `take_trailing<N>` | keep the first/last N dimensions, discarding the others at coordinate 0 |
 | `transpose<I, J>(layout)` | compile-time swap, full type information preserved |
-| `transpose(layout, i, j)` | runtime swap, result all-`Any` — prefer the template form |
+| `transpose(layout, i, j)` | runtime swap; each axis retains constraints common to every source axis — prefer the template form for exact per-axis types |
 
 ### Continuity
 

@@ -1200,7 +1200,9 @@ constexpr auto transpose_view(const Tensor<T, TShape, TStrides>& tensor) {
 /**
  * @brief Runtime transpose: swap dimensions i and j.
  *
- * The return type degrades to all-`Any` Shape/Strides.
+ * Per-axis metadata is replaced by the constraints common to every source
+ * axis (gcd alignment and unioned bounds); shapes retain non-negativity. If
+ * every axis denotes the same singleton, the result remains `Const`.
  *
  * @note Prefer `transpose<I, J>(t)` when indices are compile-time constants.
  *
@@ -1210,7 +1212,8 @@ constexpr auto transpose_view(const Tensor<T, TShape, TStrides>& tensor) {
  * @param  t       The Tensor to transpose.
  * @param  i       First dimension index (runtime).
  * @param  j       Second dimension index (runtime).
- * @return A new Tensor with dimensions i and j swapped.
+ * @return A new Tensor with dimensions i and j swapped and common metadata
+ *         constraints retained.
  */
 template <typename T, typename TShape, typename TStrides>
 constexpr auto transpose(const Tensor<T, TShape, TStrides>& t, int i, int j) {

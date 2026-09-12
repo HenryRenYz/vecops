@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <numeric>
 #include <ostream>
 #include <tuple>
 #include <utility>
@@ -1198,6 +1199,67 @@ constexpr auto swap_dim(const TMeta<Is...>& m) {
   return ArrayMetaSwapDim<TMeta, I, J, Is...>::transform(m);
 }
 
+template <meta::ValueType V>
+inline constexpr nint_t runtime_permutation_alignment_v = [] {
+  using Value = std::remove_cvref_t<V>;
+  if constexpr (Value::is_const) {
+    constexpr nint_t alignment = meta::details::lsb(Value::value);
+    // The magnitude of the most-negative nint_t is not representable as a
+    // positive alignment. Conservatively retain divisibility by one there.
+    return alignment < 0 ? nint_t{1} : alignment;
+  } else if constexpr (requires { Value::alignment; }) {
+    return Value::alignment;
+  } else {
+    return nint_t{1};
+  }
+}();
+
+/** Common Value type for a runtime permutation of an ArrayMeta. Every output
+ * position may receive any input position, so it retains only guarantees
+ * shared by the complete pack: gcd alignment and the union of bounds. Shape
+ * callers additionally contribute their intrinsic non-negative invariant. */
+template <template <typename...> typename Meta, bool Nonnegative, meta::ValueType... Values>
+struct ArrayMetaRuntimePermutation {
+private:
+  using First = std::tuple_element_t<0, std::tuple<Values...>>;
+  static constexpr bool SameSingleton = [] {
+    if constexpr (!(meta::is_singleton_v<Values> && ...)) {
+      return false;
+    } else {
+      return ((meta::singleton_value_v<Values> == meta::singleton_value_v<First>) && ...);
+    }
+  }();
+  static constexpr nint_t RawAlignment = [] {
+    nint_t alignment = 0;
+    ((alignment = std::gcd(alignment, runtime_permutation_alignment_v<Values>)), ...);
+    return alignment;
+  }();
+  static constexpr nint_t Alignment = RawAlignment == 0 ? 1 : RawAlignment;
+  static constexpr nint_t RawLo = std::min({meta::lower_bound_v<Values>...});
+  static constexpr nint_t Lo = Nonnegative ? std::max<nint_t>(0, RawLo) : RawLo;
+  static constexpr nint_t Hi = std::max({meta::upper_bound_v<Values>...});
+  using CommonValue =
+    std::conditional_t<SameSingleton, meta::Const<meta::singleton_value_v<First>>, meta::Dynamic<Alignment, Lo, Hi>>;
+
+  template <std::size_t... Idx>
+  static auto
+    make_type(std::index_sequence<Idx...>) -> Meta<std::conditional_t<(Idx < sizeof...(Values)), CommonValue, void>...>;
+
+public:
+  using type = decltype(make_type(std::make_index_sequence<sizeof...(Values)>{}));
+
+  static constexpr type transform(const std::array<nint_t, sizeof...(Values)>& values) {
+    return [&]<std::size_t... Idx>(std::index_sequence<Idx...>) {
+      return type{values[Idx]...};
+    }(std::make_index_sequence<sizeof...(Values)>{});
+  }
+};
+
+template <bool Nonnegative, template <typename...> typename Meta, meta::ValueType... Values>
+constexpr auto runtime_permutation_meta(const Meta<Values...>&, const std::array<nint_t, sizeof...(Values)>& values) {
+  return ArrayMetaRuntimePermutation<Meta, Nonnegative, Values...>::transform(values);
+}
+
 } // namespace details
 
 /**
@@ -1235,8 +1297,11 @@ constexpr auto transpose(const TLayout& layout) {
 /**
  * @brief Runtime transpose: swap dimensions i and j in a Layout.
  *
- * The return type degrades to all-`Any` (all dimensions become `Any`)
- * because the swap targets are runtime values.
+ * Because the swap targets are runtime values, per-axis types cannot survive.
+ * Each result axis instead retains the constraints common to every source
+ * axis: gcd alignment and the union of lower/upper bounds. Shape extents also
+ * retain their intrinsic non-negative lower bound. If all axes denote the
+ * same singleton value (including singleton `Dynamic`), it remains `Const`.
  *
  * @note Prefer the compile-time overload `transpose<I, J>(layout)` when
  *       the swap indices are known at compile time.
@@ -1245,7 +1310,7 @@ constexpr auto transpose(const TLayout& layout) {
  * @param  layout  The layout to transpose.
  * @param  i       First dimension index (runtime).
  * @param  j       Second dimension index (runtime).
- * @return A new Layout with all-Any Shape and Strides.
+ * @return A new Layout with the common Shape/Strides constraints.
  */
 template <LayoutLike TLayout>
 constexpr auto transpose(const TLayout& layout, int i, int j) {
@@ -1258,12 +1323,9 @@ constexpr auto transpose(const TLayout& layout, int i, int j) {
   std::swap(shape_arr[i], shape_arr[j]);
   std::swap(stride_arr[i], stride_arr[j]);
 
-  return [&] <size_t... Idx>(std::index_sequence<Idx...>) {
-    return make_layout(
-        make_shape(Any{shape_arr[Idx]}...),
-        make_strides(Any{stride_arr[Idx]}...)
-    );
-  }(std::make_index_sequence<ndim>{});
+  auto shape = details::runtime_permutation_meta<true>(layout.shape(), shape_arr);
+  auto strides = details::runtime_permutation_meta<false>(layout.strides(), stride_arr);
+  return make_layout(shape, strides);
 }
 
 // ======================== Continuity Traits ========================

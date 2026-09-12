@@ -2255,6 +2255,8 @@ TEST_F(LayoutTransposeTest, TransposeCT_SameAxis) {
 TEST_F(LayoutTransposeTest, TransposeRT_Basic) {
   auto layout = make_layout(make_shape(4, 6), make_strides(6, 1));
   auto t = transpose(layout, 0, 1);
+  EXPECT_TRUE((std::same_as<size_type_t<0, decltype(t)>, meta::Dynamic<1, 0, meta::kHiInf>>));
+  EXPECT_TRUE((std::same_as<size_type_t<1, decltype(t)>, meta::Dynamic<1, 0, meta::kHiInf>>));
   EXPECT_EQ(t.ndim(), 2);
   EXPECT_EQ(size<0>(t), 6);
   EXPECT_EQ(size<1>(t), 4);
@@ -2262,13 +2264,27 @@ TEST_F(LayoutTransposeTest, TransposeRT_Basic) {
   EXPECT_EQ(stride<1>(t), 6);
 }
 
-TEST_F(LayoutTransposeTest, TransposeRT_DegradesToAny) {
+TEST_F(LayoutTransposeTest, TransposeRT_PreservesCommonConstraints) {
   auto layout = make_layout(make_shape(cint<4>, cint<6>), make_strides(cint<6>, cint<1>));
   auto t = transpose(layout, 0, 1);
+  EXPECT_TRUE((std::same_as<size_type_t<0, decltype(t)>, meta::Dynamic<2, 4, 6>>));
+  EXPECT_TRUE((std::same_as<size_type_t<1, decltype(t)>, meta::Dynamic<2, 4, 6>>));
+  EXPECT_TRUE((std::same_as<stride_type_t<0, decltype(t)>, meta::Dynamic<1, 1, 6>>));
+  EXPECT_TRUE((std::same_as<stride_type_t<1, decltype(t)>, meta::Dynamic<1, 1, 6>>));
   EXPECT_FALSE(t.shape().template is_const<0>());
   EXPECT_FALSE(t.shape().template is_const<1>());
   EXPECT_FALSE(t.strides().template is_const<0>());
   EXPECT_FALSE(t.strides().template is_const<1>());
+}
+
+TEST_F(LayoutTransposeTest, TransposeRT_RecognizesCommonSingleton) {
+  auto layout =
+    make_layout(make_shape(cint<1>, meta::Dynamic<1, 1, 1>{1}), make_strides(cint<0>, meta::Dynamic<1, 0, 0>{0}));
+  auto t = transpose(layout, 0, 1);
+  EXPECT_TRUE((std::same_as<size_type_t<0, decltype(t)>, meta::Const<1>>));
+  EXPECT_TRUE((std::same_as<size_type_t<1, decltype(t)>, meta::Const<1>>));
+  EXPECT_TRUE((std::same_as<stride_type_t<0, decltype(t)>, meta::Const<0>>));
+  EXPECT_TRUE((std::same_as<stride_type_t<1, decltype(t)>, meta::Const<0>>));
 }
 
 TEST_F(LayoutTransposeTest, TransposeRT_3D) {
