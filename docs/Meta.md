@@ -107,7 +107,7 @@ The operator set (`+`, `-`, unary `-`, `*`, `/`, `%`) is overloaded for
 | `Const<N> * Dynamic<A,...>` | `Const<0>` if `N == 0`; else `Dynamic<A * lsb(N), scaled bounds>`; available bounds propagate independently |
 | `Dynamic * Dynamic` | `Dynamic<A1*A2, four-corner bounds>`; sign-proven one-sided ranges retain the bounds that can be established |
 | `Dynamic<A,...> / Const<N>` | `Dynamic<A/abs(N),...>` if `A % N == 0`, else alignment degrades to 1; available bounds propagate independently and swap for negative `N` |
-| `Const / Dynamic`, `Dynamic / Dynamic` | alignment always degrades to 1; bounds exact only when the denominator range does not cross zero (otherwise unbounded) |
+| `Const / Dynamic`, `Dynamic / Dynamic` | alignment generally degrades to 1; singleton Dynamic divisors behave as Const, while positive/negative bounded divisors preserve each available quotient bound |
 | `Dynamic<A,...> % Const<N>` | **`Const<0>`** if `A % N == 0` (every value is a multiple of `N`); else `Dynamic<gcd(A,N), remainder range>` |
 | `Const<N> % Dynamic<A,...>` | common alignment and sign survive; magnitude is bounded by `abs(N)` and, for a bounded divisor, by its maximum magnitude minus one; `N == 0` folds to `Const<0>` |
 | `Dynamic % Dynamic` | common alignment survives; conservative one-sided remainder bounds survive even for otherwise unbounded operands |
@@ -138,8 +138,10 @@ propagate:
 | `max(Const, Dyn)` | dual of `min` | lower bound tightens to `max(L, N)` |
 | `min/max(Dyn, Dyn)` | `Dynamic<gcd(A1,A2), merged bounds>` | bound sentinels compare naturally, no special case |
 | `clamp(Dyn, Const<Lo>, Const<Hi>)` | intersection bounds; **folds to `Const`** when the intersection collapses or the Dynamic lies entirely outside `[Lo, Hi]` | alignment `gcd(gcd(A,Lo),Hi)`; **no `nint_t`-bound overload** — runtime bounds have nothing to propagate |
-| `ceil_div` / `floor_div(Dyn, Const<N>)` | `Dynamic<A/N,...>` if `A % N == 0`, else alignment 1 | `N > 0` required (static_assert); runtime-divisor forms return plain `Any` |
-| `align_up` / `align_down(Dyn, Const<N>)` | identity with alignment `A` preserved when `A % N == 0`; otherwise `Dynamic<lsb(N)>` because every result is an `N`-multiple | each available bound propagates independently; runtime-alignment forms return plain `Any` |
+| `ceil_div` / `floor_div(Dyn, Const<N>)` | `Dynamic<A/N,...>` if `A % N == 0`, else alignment 1 | `N > 0` required (static_assert) |
+| `ceil_div` / `floor_div(..., bounded positive Dyn)` | alignment 1 with independently propagated endpoint bounds | a singleton Dynamic divisor is treated exactly like Const |
+| `align_up` / `align_down(Dyn, Const<N>)` | identity with alignment `A` preserved when `A % N == 0`; otherwise `Dynamic<lsb(N)>` because every result is an `N`-multiple | each available bound propagates independently |
+| `align_up` / `align_down(..., Dynamic<A,...>)` | result alignment `A`, non-negative range, and bounds derived from the value/divisor maxima | a singleton Dynamic alignment is treated exactly like Const |
 
 As with the arithmetic operators, every `nint_t` operand participates as
 `Any`.
@@ -236,11 +238,12 @@ never use `is_aligned` to select code paths — it varies per call.
 tiles. It is not a C++ `alignof` and not tied to pointers.
 
 **Division and remainder are deliberately conservative.** Quotients lose
-alignment unless the divisor divides the operand alignment exactly;
-denominator ranges crossing zero lose quotient bounds. Remainders retain the
-common divisor alignment and any independently provable sign/magnitude bound.
-Inspect the *result type* (`decltype`) before relying on a constraint in a
-specialization.
+alignment unless a constant or singleton divisor divides the operand alignment
+exactly. Bounded same-sign runtime divisors retain independently provable
+quotient bounds; ranges that may contain both signs remain unbounded.
+Remainders retain the common divisor alignment and any independently provable
+sign/magnitude bound. Inspect the *result type* (`decltype`) before relying on
+a constraint in a specialization.
 
 **`clamp` has no runtime-bounds overload.** `clamp(d, lo_dyn, hi_dyn)` does
 not exist — runtime bounds carry no compile-time information, so there is

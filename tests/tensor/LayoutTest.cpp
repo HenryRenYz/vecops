@@ -642,6 +642,20 @@ TEST_F(ValueTest, DivByConstPreservesOneSidedBounds) {
   EXPECT_TRUE((std::is_same_v<decltype(swapped), Dynamic<2, -16, kHiInf>>));
 }
 
+TEST_F(ValueTest, RuntimeDivisorPreservesConstraints) {
+  auto singleton = Dynamic<8, 16>{32} / Dynamic<4, 4, 4>{4};
+  EXPECT_EQ(nint_t(singleton), 8);
+  EXPECT_TRUE((std::is_same_v<decltype(singleton), Dynamic<2, 4, kHiInf>>));
+
+  auto bounded = Dynamic<8, 16>{32} / Dynamic<4, 4, 16>{8};
+  EXPECT_EQ(nint_t(bounded), 4);
+  EXPECT_TRUE((std::is_same_v<decltype(bounded), Dynamic<1, 1, kHiInf>>));
+
+  auto one_sided = cint<100> / Dynamic<4, 4>{8};
+  EXPECT_EQ(nint_t(one_sided), 12);
+  EXPECT_TRUE((std::is_same_v<decltype(one_sided), Dynamic<1, 0, 25>>));
+}
+
 TEST_F(ValueTest, RemainderPreservesAlignmentAndOneSidedBounds) {
   auto by_const = Dynamic<4>{20} % cint<6>;
   EXPECT_EQ(nint_t(by_const), 2);
@@ -997,7 +1011,7 @@ TEST_F(ValueTest, AlignDownDynConst) {
   EXPECT_TRUE((std::is_same_v<decltype(r2), Dynamic<8, 24, 192>>));
 }
 
-TEST_F(ValueTest, DivFamilyRuntimeDivisorDegrades) {
+TEST_F(ValueTest, DivFamilyUnboundedRuntimeDivisor) {
   auto d = Dynamic<1>{9};
   EXPECT_EQ(nint_t(ceil_div(cint<100>, d)), 12);
   EXPECT_TRUE((std::is_same_v<decltype(ceil_div(cint<100>, d)), Any>));
@@ -1006,8 +1020,58 @@ TEST_F(ValueTest, DivFamilyRuntimeDivisorDegrades) {
   EXPECT_EQ(nint_t(ceil_div(e, f)), 12);
   EXPECT_TRUE((std::is_same_v<decltype(ceil_div(e, f)), Any>));
   EXPECT_TRUE((std::is_same_v<decltype(floor_div(e, f)), Any>));
-  EXPECT_TRUE((std::is_same_v<decltype(align_up(e, f)), Any>));
-  EXPECT_TRUE((std::is_same_v<decltype(align_down(e, f)), Any>));
+  EXPECT_TRUE((std::is_same_v<decltype(align_up(e, f)), Dynamic<1, 0, kHiInf>>));
+  EXPECT_TRUE((std::is_same_v<decltype(align_down(e, f)), Dynamic<1, 0, kHiInf>>));
+}
+
+TEST_F(ValueTest, DivFamilyBoundedRuntimeDivisorPreservesBounds) {
+  auto divisor = Dynamic<1, 4, 8>{5};
+  auto ceil_const = ceil_div(cint<100>, divisor);
+  auto floor_const = floor_div(cint<100>, divisor);
+  EXPECT_EQ(nint_t(ceil_const), 20);
+  EXPECT_EQ(nint_t(floor_const), 20);
+  EXPECT_TRUE((std::is_same_v<decltype(ceil_const), Dynamic<1, 13, 25>>));
+  EXPECT_TRUE((std::is_same_v<decltype(floor_const), Dynamic<1, 12, 25>>));
+
+  auto dividend = Dynamic<8, 16>{32};
+  auto ceil_dynamic = ceil_div(dividend, divisor);
+  auto floor_dynamic = floor_div(dividend, divisor);
+  EXPECT_EQ(nint_t(ceil_dynamic), 7);
+  EXPECT_EQ(nint_t(floor_dynamic), 6);
+  EXPECT_TRUE((std::is_same_v<decltype(ceil_dynamic), Dynamic<1, 2, kHiInf>>));
+  EXPECT_TRUE((std::is_same_v<decltype(floor_dynamic), Dynamic<1, 2, kHiInf>>));
+}
+
+TEST_F(ValueTest, DivFamilySingletonRuntimeDivisorActsAsConst) {
+  auto divisor = Dynamic<1, 4, 4>{4};
+  auto result = ceil_div(Dynamic<8, 16>{32}, divisor);
+  EXPECT_EQ(nint_t(result), 8);
+  EXPECT_TRUE((std::is_same_v<decltype(result), Dynamic<2, 4, kHiInf>>));
+}
+
+TEST_F(ValueTest, AlignRuntimeAlignmentPreservesConstraints) {
+  auto alignment = Dynamic<4, 8, 16>{12};
+  auto const_up = align_up(cint<100>, alignment);
+  auto const_down = align_down(cint<100>, alignment);
+  EXPECT_EQ(nint_t(const_up), 108);
+  EXPECT_EQ(nint_t(const_down), 96);
+  EXPECT_TRUE((std::is_same_v<decltype(const_up), Dynamic<4, 100, 112>>));
+  EXPECT_TRUE((std::is_same_v<decltype(const_down), Dynamic<4, 88, 100>>));
+
+  auto value = Dynamic<8, 16, 128>{104};
+  auto dynamic_up = align_up(value, alignment);
+  auto dynamic_down = align_down(value, alignment);
+  EXPECT_EQ(nint_t(dynamic_up), 108);
+  EXPECT_EQ(nint_t(dynamic_down), 96);
+  EXPECT_TRUE((std::is_same_v<decltype(dynamic_up), Dynamic<4, 16, 140>>));
+  EXPECT_TRUE((std::is_same_v<decltype(dynamic_down), Dynamic<4, 4, 128>>));
+}
+
+TEST_F(ValueTest, AlignSingletonRuntimeAlignmentActsAsConst) {
+  auto alignment = Dynamic<1, 16, 16>{16};
+  auto result = align_up(Dynamic<4, 0, 128>{100}, alignment);
+  EXPECT_EQ(nint_t(result), 112);
+  EXPECT_TRUE((std::is_same_v<decltype(result), Dynamic<16, 0, 128>>));
 }
 
 TEST_F(ValueTest, DivFamilyValueWithRawIntWrapAsAny) {

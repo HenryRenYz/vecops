@@ -717,18 +717,17 @@ constexpr auto operator/(Dynamic<A, L, H> lhs, Const<N>) {
 
 /**
  * Const<N> / Dynamic<A,L,H>:
- *   Alignment degrades to 1 (unless all possible results produce the same value → Const).
+ *   Alignment degrades to 1, except that a singleton Dynamic denominator is
+ *   equivalent to Const and folds normally.
  *   Bounds: f(k) = N/(k*A) is monotonic on k>0 and k<0 separately,
- *   so extreme values are at endpoints and ±1.
- *
- *   @note When the Dynamic denominator range crosses zero, the quotient
- *         is potentially unbounded (division by arbitrarily small values).
+ *   so bounded ranges use their attainable endpoints. A one-sided same-sign
+ *   denominator retains the finite endpoint and the limiting value zero.
  */
 template <nint_t N, nint_t A, nint_t L, nint_t H>
 constexpr auto operator/(Const<N>, Dynamic<A, L, H> rhs) {
-  if constexpr (L == kLoInf || H == kHiInf) {
-    return Dynamic<1>{N / rhs.value};
-  } else {
+  if constexpr (L != kLoInf && H != kHiInf && L == H) {
+    return Const<N>{} / Const<L>{};
+  } else if constexpr (L != kLoInf && H != kHiInf) {
     constexpr nint_t k_min = ceil_div(L, A);
     constexpr nint_t k_max = floor_div(H, A);
     constexpr bool has_pos = (k_max >= 1);
@@ -752,32 +751,47 @@ constexpr auto operator/(Const<N>, Dynamic<A, L, H> rhs) {
       constexpr nint_t rh = std::max(c3, c4);
       return Dynamic<1, rl, rh>{N / rhs.value};
     }
+  } else if constexpr (L != kLoInf && L > 0) {
+    constexpr nint_t first_denominator = ceil_div(L, A) * A;
+    constexpr nint_t endpoint = N / first_denominator;
+    constexpr nint_t rl = std::min<nint_t>(endpoint, 0);
+    constexpr nint_t rh = std::max<nint_t>(endpoint, 0);
+    return Dynamic<1, rl, rh>{N / rhs.value};
+  } else if constexpr (H != kHiInf && H < 0) {
+    constexpr nint_t last_denominator = floor_div(H, A) * A;
+    constexpr nint_t endpoint = N / last_denominator;
+    constexpr nint_t rl = std::min<nint_t>(endpoint, 0);
+    constexpr nint_t rh = std::max<nint_t>(endpoint, 0);
+    return Dynamic<1, rl, rh>{N / rhs.value};
+  } else {
+    return Dynamic<1>{N / rhs.value};
   }
 }
 
 /**
- * Dynamic / Dynamic: alignment always degrades to 1.
- *   Bounds: if the denominator range does not cross zero, division is
- *   monotonic in both variables (with sign conventions); extreme values
- *   are at the four corners. If denominator crosses zero, bounds become
- *   unbounded (quotient can be arbitrarily large as denominator → 0).
+ * Dynamic / Dynamic: alignment generally degrades to 1; a singleton Dynamic
+ * denominator follows the Dynamic/Const path. A bounded strictly positive or
+ * negative denominator preserves each available numerator bound
+ * independently through monotonic endpoint analysis. Mixed-sign or unbounded
+ * denominator ranges remain conservative.
  */
 template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
 constexpr auto operator/(Dynamic<A1, L1, H1> lhs, Dynamic<A2, L2, H2> rhs) {
-  if constexpr (L1 == kLoInf || H1 == kHiInf || L2 == kLoInf || H2 == kHiInf) {
-    return Dynamic<1>{lhs.value / rhs.value};
-  } else if constexpr (L2 > 0) {
-    // Denominator all positive: monotonic → four-corner is exact
-    constexpr nint_t rl = std::min({L1 / L2, L1 / H2, H1 / L2, H1 / H2});
-    constexpr nint_t rh = std::max({L1 / L2, L1 / H2, H1 / L2, H1 / H2});
+  if constexpr (L2 != kLoInf && H2 != kHiInf && L2 == H2) {
+    return lhs / Const<L2>{};
+  } else if constexpr (L2 != kLoInf && H2 != kHiInf && L2 > 0) {
+    constexpr nint_t first_denominator = ceil_div(L2, A2) * A2;
+    constexpr nint_t last_denominator = floor_div(H2, A2) * A2;
+    constexpr nint_t rl = (L1 == kLoInf) ? kLoInf : std::min(L1 / first_denominator, L1 / last_denominator);
+    constexpr nint_t rh = (H1 == kHiInf) ? kHiInf : std::max(H1 / first_denominator, H1 / last_denominator);
     return Dynamic<1, rl, rh>{lhs.value / rhs.value};
-  } else if constexpr (H2 < 0) {
-    // Denominator all negative: similar, monotonic
-    constexpr nint_t rl = std::min({L1 / L2, L1 / H2, H1 / L2, H1 / H2});
-    constexpr nint_t rh = std::max({L1 / L2, L1 / H2, H1 / L2, H1 / H2});
+  } else if constexpr (L2 != kLoInf && H2 != kHiInf && H2 < 0) {
+    constexpr nint_t first_denominator = ceil_div(L2, A2) * A2;
+    constexpr nint_t last_denominator = floor_div(H2, A2) * A2;
+    constexpr nint_t rl = (H1 == kHiInf) ? kLoInf : std::min(H1 / first_denominator, H1 / last_denominator);
+    constexpr nint_t rh = (L1 == kLoInf) ? kHiInf : std::max(L1 / first_denominator, L1 / last_denominator);
     return Dynamic<1, rl, rh>{lhs.value / rhs.value};
   } else {
-    // Denominator crosses zero: quotient potentially unbounded
     return Dynamic<1>{lhs.value / rhs.value};
   }
 }
@@ -1523,16 +1537,42 @@ constexpr auto ceil_div(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
   return meta::Dynamic<g, rl, rh>(::vecops::ceil_div(lhs.value, N));
 }
 
-/// @brief ceil_div by a runtime divisor: no constraint survives.
+/// @brief ceil_div by a bounded positive runtime divisor.
 template <nint_t N, nint_t A, nint_t L, nint_t H>
-constexpr meta::Any ceil_div(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
-  return meta::Any(::vecops::ceil_div(nint_t(lhs), rhs.value));
+constexpr auto ceil_div(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
+  if constexpr (L != meta::kLoInf && H != meta::kHiInf && L == H) {
+    return ceil_div(lhs, meta::Const<L>{});
+  } else if constexpr (L != meta::kLoInf && H != meta::kHiInf && L > 0) {
+    constexpr nint_t first_denominator = ::vecops::ceil_div(L, A) * A;
+    constexpr nint_t last_denominator = ::vecops::floor_div(H, A) * A;
+    constexpr nint_t first = ::vecops::ceil_div(N, first_denominator);
+    constexpr nint_t last = ::vecops::ceil_div(N, last_denominator);
+    constexpr nint_t rl = std::min(first, last);
+    constexpr nint_t rh = std::max(first, last);
+    return meta::Dynamic<1, rl, rh>(::vecops::ceil_div(nint_t(lhs), rhs.value));
+  } else {
+    return meta::Any(::vecops::ceil_div(nint_t(lhs), rhs.value));
+  }
 }
 
-/// @brief ceil_div with runtime dividend and divisor: no constraint survives.
+/// @brief ceil_div with a runtime dividend and bounded positive divisor.
 template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
-constexpr meta::Any ceil_div(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
-  return meta::Any(::vecops::ceil_div(lhs.value, rhs.value));
+constexpr auto ceil_div(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+  if constexpr (L2 != meta::kLoInf && H2 != meta::kHiInf && L2 == H2) {
+    return ceil_div(lhs, meta::Const<L2>{});
+  } else if constexpr (L2 != meta::kLoInf && H2 != meta::kHiInf && L2 > 0) {
+    constexpr nint_t first_denominator = ::vecops::ceil_div(L2, A2) * A2;
+    constexpr nint_t last_denominator = ::vecops::floor_div(H2, A2) * A2;
+    constexpr nint_t rl = L1 == meta::kLoInf ? meta::kLoInf
+                                             : std::min(::vecops::ceil_div(L1, first_denominator),
+                                                        ::vecops::ceil_div(L1, last_denominator));
+    constexpr nint_t rh = H1 == meta::kHiInf ? meta::kHiInf
+                                             : std::max(::vecops::ceil_div(H1, first_denominator),
+                                                        ::vecops::ceil_div(H1, last_denominator));
+    return meta::Dynamic<1, rl, rh>(::vecops::ceil_div(lhs.value, rhs.value));
+  } else {
+    return meta::Any(::vecops::ceil_div(lhs.value, rhs.value));
+  }
 }
 
 /**
@@ -1558,16 +1598,42 @@ constexpr auto floor_div(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
   return meta::Dynamic<g, rl, rh>(::vecops::floor_div(lhs.value, N));
 }
 
-/// @brief floor_div by a runtime divisor: no constraint survives.
+/// @brief floor_div by a bounded positive runtime divisor.
 template <nint_t N, nint_t A, nint_t L, nint_t H>
-constexpr meta::Any floor_div(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
-  return meta::Any(::vecops::floor_div(nint_t(lhs), rhs.value));
+constexpr auto floor_div(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
+  if constexpr (L != meta::kLoInf && H != meta::kHiInf && L == H) {
+    return floor_div(lhs, meta::Const<L>{});
+  } else if constexpr (L != meta::kLoInf && H != meta::kHiInf && L > 0) {
+    constexpr nint_t first_denominator = ::vecops::ceil_div(L, A) * A;
+    constexpr nint_t last_denominator = ::vecops::floor_div(H, A) * A;
+    constexpr nint_t first = ::vecops::floor_div(N, first_denominator);
+    constexpr nint_t last = ::vecops::floor_div(N, last_denominator);
+    constexpr nint_t rl = std::min(first, last);
+    constexpr nint_t rh = std::max(first, last);
+    return meta::Dynamic<1, rl, rh>(::vecops::floor_div(nint_t(lhs), rhs.value));
+  } else {
+    return meta::Any(::vecops::floor_div(nint_t(lhs), rhs.value));
+  }
 }
 
-/// @brief floor_div with runtime dividend and divisor: no constraint survives.
+/// @brief floor_div with a runtime dividend and bounded positive divisor.
 template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
-constexpr meta::Any floor_div(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
-  return meta::Any(::vecops::floor_div(lhs.value, rhs.value));
+constexpr auto floor_div(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+  if constexpr (L2 != meta::kLoInf && H2 != meta::kHiInf && L2 == H2) {
+    return floor_div(lhs, meta::Const<L2>{});
+  } else if constexpr (L2 != meta::kLoInf && H2 != meta::kHiInf && L2 > 0) {
+    constexpr nint_t first_denominator = ::vecops::ceil_div(L2, A2) * A2;
+    constexpr nint_t last_denominator = ::vecops::floor_div(H2, A2) * A2;
+    constexpr nint_t rl = L1 == meta::kLoInf ? meta::kLoInf
+                                             : std::min(::vecops::floor_div(L1, first_denominator),
+                                                        ::vecops::floor_div(L1, last_denominator));
+    constexpr nint_t rh = H1 == meta::kHiInf ? meta::kHiInf
+                                             : std::max(::vecops::floor_div(H1, first_denominator),
+                                                        ::vecops::floor_div(H1, last_denominator));
+    return meta::Dynamic<1, rl, rh>(::vecops::floor_div(lhs.value, rhs.value));
+  } else {
+    return meta::Any(::vecops::floor_div(lhs.value, rhs.value));
+  }
 }
 
 /**
@@ -1595,16 +1661,41 @@ constexpr auto align_up(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
   return meta::Dynamic<g, rl, rh>(::vecops::align_up(lhs.value, N));
 }
 
-/// @brief align_up to a runtime alignment: the result keeps only the gcd.
+/**
+ * @brief align_up of a Const to a runtime alignment.
+ *
+ * Every valid runtime alignment is an A-multiple, so the result is also an
+ * A-multiple. The non-negative result is bounded by N + H - 1 when the
+ * alignment has a finite upper bound.
+ */
 template <nint_t N, nint_t A, nint_t L, nint_t H>
-constexpr meta::Any align_up(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
-  return meta::Any(::vecops::align_up(nint_t(lhs), rhs.value));
+constexpr auto align_up(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
+  static_assert(N >= 0, "align_up value must be non-negative");
+  if constexpr (L != meta::kLoInf && H != meta::kHiInf && L == H) {
+    return align_up(lhs, meta::Const<L>{});
+  } else {
+    constexpr nint_t rl = ::vecops::align_up(N, A);
+    constexpr nint_t rh = (H == meta::kHiInf || H <= 0) ? meta::kHiInf : ::vecops::align_down(N + H - 1, A);
+    if constexpr (rl == rh) {
+      return meta::Const<rl>{};
+    } else {
+      return meta::Dynamic<A, rl, rh>(::vecops::align_up(nint_t(lhs), rhs.value));
+    }
+  }
 }
 
-/// @brief align_up with runtime value and alignment: no constraint survives.
+/// @brief align_up with runtime value and alignment.
 template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
-constexpr meta::Any align_up(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
-  return meta::Any(::vecops::align_up(lhs.value, rhs.value));
+constexpr auto align_up(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+  if constexpr (L2 != meta::kLoInf && H2 != meta::kHiInf && L2 == H2) {
+    return align_up(lhs, meta::Const<L2>{});
+  } else {
+    constexpr nint_t rl = L1 == meta::kLoInf ? 0 : ::vecops::align_up(std::max<nint_t>(L1, 0), A2);
+    constexpr nint_t rh = (H1 == meta::kHiInf || H1 < 0 || H2 == meta::kHiInf || H2 <= 0)
+                            ? meta::kHiInf
+                            : ::vecops::align_down(H1 + H2 - 1, A2);
+    return meta::Dynamic<A2, rl, rh>(::vecops::align_up(lhs.value, rhs.value));
+  }
 }
 
 /**
@@ -1632,16 +1723,40 @@ constexpr auto align_down(meta::Dynamic<A, L, H> lhs, meta::Const<N>) {
   return meta::Dynamic<g, rl, rh>(::vecops::align_down(lhs.value, N));
 }
 
-/// @brief align_down to a runtime alignment: the result keeps only the gcd.
+/**
+ * @brief align_down of a Const to a runtime alignment.
+ *
+ * Every result is an A-multiple in [0,N]. A finite alignment upper bound H
+ * additionally proves the result is at least N-H+1, rounded up to A.
+ */
 template <nint_t N, nint_t A, nint_t L, nint_t H>
-constexpr meta::Any align_down(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
-  return meta::Any(::vecops::align_down(nint_t(lhs), rhs.value));
+constexpr auto align_down(meta::Const<N> lhs, meta::Dynamic<A, L, H> rhs) {
+  static_assert(N >= 0, "align_down value must be non-negative");
+  if constexpr (L != meta::kLoInf && H != meta::kHiInf && L == H) {
+    return align_down(lhs, meta::Const<L>{});
+  } else {
+    constexpr nint_t rl = (H == meta::kHiInf || H <= 0) ? 0 : ::vecops::align_up(std::max<nint_t>(N - H + 1, 0), A);
+    constexpr nint_t rh = ::vecops::align_down(N, A);
+    if constexpr (rl == rh) {
+      return meta::Const<rl>{};
+    } else {
+      return meta::Dynamic<A, rl, rh>(::vecops::align_down(nint_t(lhs), rhs.value));
+    }
+  }
 }
 
-/// @brief align_down with runtime value and alignment: no constraint survives.
+/// @brief align_down with runtime value and alignment.
 template <nint_t A1, nint_t L1, nint_t H1, nint_t A2, nint_t L2, nint_t H2>
-constexpr meta::Any align_down(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
-  return meta::Any(::vecops::align_down(lhs.value, rhs.value));
+constexpr auto align_down(meta::Dynamic<A1, L1, H1> lhs, meta::Dynamic<A2, L2, H2> rhs) {
+  if constexpr (L2 != meta::kLoInf && H2 != meta::kHiInf && L2 == H2) {
+    return align_down(lhs, meta::Const<L2>{});
+  } else {
+    constexpr nint_t rl = (L1 == meta::kLoInf || H2 == meta::kHiInf || H2 <= 0)
+                            ? 0
+                            : ::vecops::align_up(std::max<nint_t>(L1 - H2 + 1, 0), A2);
+    constexpr nint_t rh = (H1 == meta::kHiInf || H1 < 0) ? meta::kHiInf : ::vecops::align_down(H1, A2);
+    return meta::Dynamic<A2, rl, rh>(::vecops::align_down(lhs.value, rhs.value));
+  }
 }
 
 // Preserve Value-aware overload resolution for every ordinary integer. The
