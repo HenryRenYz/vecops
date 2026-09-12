@@ -1000,8 +1000,9 @@ private:
 
   VECOPS_INLINE auto whole_b_panel_layout() const {
     static_assert(WholeBPanelCandidate);
-    const meta::Any panel_n{std::min<nint_t>(
-        whole_b_panel_n(), static_cast<nint_t>(n_))};
+    const meta::Dynamic<16, WholeBPanelMinN, WholeBPanelMaxN>
+        configured_panel_n{whole_b_panel_n()};
+    const auto panel_n = ::vecops::min(configured_panel_n, n_);
     const auto raw_layout = tensor::make_layout(
         tensor::make_shape(panel_n, k_));
     return ::vecops::matmul::packed_layout<
@@ -1859,6 +1860,10 @@ private:
         tensor::numel(max_layout) * static_cast<nint_t>(sizeof(TB)), 64));
 
     const nint_t panel_n = whole_b_panel_n();
+    // Keep the execution boundary type-erased on purpose: propagating the
+    // panel bounds into with_matmul_configuration creates a second complete
+    // leaf-kernel family for this cold path.  The allocation/layout path above
+    // retains the useful compile-time bounds without multiplying hot code.
     const meta::Any configured_n{
         std::min<nint_t>(panel_n, static_cast<nint_t>(n_))};
     kernel::with_matmul_configuration<Atom, TilePolicy, true>(
