@@ -1107,6 +1107,32 @@ TEST(MatmulTest, ResidualSplitCoversProfitableAndGeneralizedShapes) {
 #endif
 }
 
+TEST(MatmulTest, ResidualSplitPreservesExtentMetadata) {
+  namespace amx = ::vecops::kernel::matmul_details::amx;
+
+  auto dynamic_bulk = amx::residual_bulk_extent(
+      Dynamic<1, 17, 63>{35});
+  auto dynamic_tail = amx::residual_tail_extent(
+      Dynamic<1, 17, 63>{35});
+  EXPECT_EQ(nint_t(dynamic_bulk), 32);
+  EXPECT_EQ(nint_t(dynamic_tail), 3);
+  EXPECT_TRUE((std::same_as<
+      decltype(dynamic_bulk), Dynamic<16, 16, 48>>));
+  EXPECT_TRUE((std::same_as<
+      decltype(dynamic_tail), Dynamic<1, 1, 15>>));
+
+  auto aligned_tail = amx::residual_tail_extent(
+      Dynamic<8, 24, 72>{40});
+  EXPECT_EQ(nint_t(aligned_tail), 8);
+  EXPECT_TRUE((std::same_as<
+      decltype(aligned_tail), Dynamic<8, 8, 8>>));
+
+  EXPECT_TRUE((std::same_as<
+      decltype(amx::residual_bulk_extent(cint<35>)), Const<32>>));
+  EXPECT_TRUE((std::same_as<
+      decltype(amx::residual_tail_extent(cint<35>)), Const<3>>));
+}
+
 TEST(MatmulTest, OperandAMayBePrepacked) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   check_mixed_packing<::vecops::matmul::Operand::A>();

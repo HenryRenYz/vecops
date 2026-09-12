@@ -1380,6 +1380,64 @@ VECOPS_ALWAYS_INLINE auto tile_active_extent(nint_t active) {
   }
 }
 
+/**
+ * @brief Refine the aligned bulk produced by a 16-element residual split.
+ *
+ * The caller consumes this value only when the selected spatial extent is
+ * greater than 16 and has a non-zero remainder. Singleton extents therefore
+ * fold completely; runtime extents retain their 16-element alignment and any
+ * branch-refined lower/upper bounds.
+ */
+template <meta::ValueType Extent>
+VECOPS_ALWAYS_INLINE auto residual_bulk_extent(Extent extent) {
+  const nint_t value = static_cast<nint_t>(extent);
+  const nint_t bulk = value - value % 16;
+  if constexpr (meta::is_singleton_v<Extent>) {
+    constexpr nint_t Bulk =
+        meta::singleton_value_v<Extent> -
+        meta::singleton_value_v<Extent> % 16;
+    return meta::Const<Bulk>{bulk};
+  } else {
+    constexpr nint_t Lo = [] {
+      if constexpr (meta::has_lower_bound_v<Extent>)
+        return std::max<nint_t>(
+            16, ::vecops::align_down(
+                    meta::lower_bound_v<Extent>, 16));
+      else
+        return nint_t{16};
+    }();
+    constexpr nint_t Hi = [] {
+      if constexpr (meta::has_upper_bound_v<Extent>)
+        return ::vecops::align_down(meta::upper_bound_v<Extent> - 1, 16);
+      else
+        return meta::kHiInf;
+    }();
+    return meta::Dynamic<16, Lo, Hi>{bulk};
+  }
+}
+
+/**
+ * @brief Refine the non-empty tail produced by a 16-element residual split.
+ *
+ * A runtime tail keeps the common power-of-two divisor of the source extent
+ * and 16. Extents already guaranteed to be 16-aligned can only produce the
+ * compile-time zero remainder, making the residual branch unreachable.
+ */
+template <meta::ValueType Extent>
+VECOPS_ALWAYS_INLINE auto residual_tail_extent(Extent extent) {
+  const nint_t tail = static_cast<nint_t>(extent) % 16;
+  if constexpr (meta::is_singleton_v<Extent>) {
+    constexpr nint_t Tail = meta::singleton_value_v<Extent> % 16;
+    return meta::Const<Tail>{tail};
+  } else if constexpr (Extent::alignment >= 16) {
+    return meta::Const<0>{tail};
+  } else {
+    constexpr nint_t Alignment = Extent::alignment;
+    constexpr nint_t Hi = ::vecops::align_down(nint_t{15}, Alignment);
+    return meta::Dynamic<Alignment, Alignment, Hi>{tail};
+  }
+}
+
 /// Extent type is statically the full 16.
 template <typename Extent>
 inline constexpr bool full_tile_extent_v = [] {
@@ -2720,8 +2778,8 @@ struct Backend<matmul_implementation::AMX> {
       const bool split_m = residual_m != 0 && logical_m > 16 &&
           (residual_n == 0 || logical_n <= 16 || residual_m <= residual_n);
       if (split_m) {
-        const meta::Any bulk_m{logical_m - residual_m};
-        const meta::Any tail_m{residual_m};
+        const auto bulk_m = amx::residual_bulk_extent(m);
+        const auto tail_m = amx::residual_tail_extent(m);
         auto run_bulk = [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
           if constexpr (NMajor)
             run_configured_region_n_major<Atom, Policy>(
@@ -2761,8 +2819,8 @@ struct Backend<matmul_implementation::AMX> {
       } else {
         VECOPS_ASSERT(residual_n != 0 && logical_n > 16,
                       "AMX residual split requires a spatial tail");
-        const meta::Any bulk_n{logical_n - residual_n};
-        const meta::Any tail_n{residual_n};
+        const auto bulk_n = amx::residual_bulk_extent(n);
+        const auto tail_n = amx::residual_tail_extent(n);
         auto run_bulk = [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
           if constexpr (NMajor)
             run_configured_region_n_major<Atom, Policy>(
