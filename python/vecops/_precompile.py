@@ -7,7 +7,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from . import _C
 from ._dtype import normalize_dtype
@@ -278,6 +278,10 @@ def precompile(
     *args: Any,
     use_real_tensors: bool = False,
     parallelism: int | None = None,
+    prepare_owner: bool = True,
+    prepare_barrier: Callable[[], None] | None = None,
+    prepare_rank: int | None = None,
+    prepare_world_size: int | None = None,
     **kwargs: Any,
 ) -> PrecompileResult:
   """Trace a model's vecops calls, then prepare all unique artifacts in batch.
@@ -309,10 +313,37 @@ def precompile(
             fake_kwargs = _fake_tree(kwargs, mode, torch)
             model(*fake_args, **fake_kwargs)
 
-  result = compile_batch(collector.requests, parallelism=parallelism)
   from ._schema_bridge import compile_pending_torch_bridges
 
+  # A distributed trace must execute on every rank because model forward
+  # contains collectives. Compilation itself is host-global. Serialize cache
+  # preparation by rank so an uneven shard may add its shape variants without
+  # competing with another compiler batch. Later ranks normally only resolve
+  # artifacts already populated by an earlier rank.
+  if prepare_rank is not None or prepare_world_size is not None:
+    if prepare_barrier is None:
+      raise ValueError("prepare_barrier is required with prepare_rank")
+    if prepare_rank is None or prepare_world_size is None:
+      raise ValueError("prepare_rank and prepare_world_size must be set together")
+    if not 0 <= prepare_rank < prepare_world_size:
+      raise ValueError("prepare_rank must be in [0, prepare_world_size)")
+
+    result = None
+    for turn in range(prepare_world_size):
+      if prepare_rank == turn:
+        result = compile_batch(collector.requests, parallelism=parallelism)
+        compile_pending_torch_bridges(parallelism=parallelism)
+      prepare_barrier()
+    assert result is not None
+    return result
+
+  # Backward-compatible two-phase owner mode.
+  if prepare_barrier is not None and not prepare_owner:
+    prepare_barrier()
+  result = compile_batch(collector.requests, parallelism=parallelism)
   compile_pending_torch_bridges(parallelism=parallelism)
+  if prepare_barrier is not None and prepare_owner:
+    prepare_barrier()
   return result
 
 
