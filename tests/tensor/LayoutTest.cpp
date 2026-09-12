@@ -28,6 +28,7 @@ static_assert(std::same_as<size_type_t<0, TypedLayout>, Const<2>>);
 static_assert(std::same_as<size_type_t<1, TypedLayout>, Dynamic<4, 8, 32>>);
 static_assert(std::same_as<stride_type_t<2, TypedLayout>, Const<1>>);
 static_assert(std::same_as<numel_type_t<TypedLayout>, Dynamic<128, 256, 1024>>);
+static_assert(std::same_as<decltype(tensor::numel_value(std::declval<const TypedLayout&>())), Dynamic<128, 256, 1024>>);
 static_assert(std::same_as<decltype(tensor::size<0>(std::declval<const TypedLayout&>())), Const<2>>);
 static_assert(std::same_as<decltype(tensor::size<1>(std::declval<const TypedLayout&>())), Dynamic<4, 8, 32>>);
 static_assert(std::same_as<decltype(tensor::stride<2>(std::declval<const TypedLayout&>())), Const<1>>);

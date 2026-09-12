@@ -239,7 +239,9 @@ TEST_F(TensorConstructionTest, ConstructWithConstShape) {
     auto s = make_shape(cint<4>, cint<5>);
     auto st = make_strides(cint<5>, cint<1>);
     Tensor<int64_t, decltype(s), decltype(st)> t(data_2d_.data(), s, st);
+    static_assert(std::same_as<decltype(t.numel_value()), meta::Const<20>>);
     EXPECT_EQ(t.size<0>(), 4);
+    EXPECT_EQ(t.numel_value(), 20);
     EXPECT_TRUE((t.ct_is_contiguous));
 }
 

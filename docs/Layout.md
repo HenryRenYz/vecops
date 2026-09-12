@@ -103,7 +103,8 @@ layout shapes they are specialized for.
 | `is_const<I>` / `is_runtime<I>` | per-dimension staticness |
 | `size<I>(layout)` / `stride<I>(layout)` | fixed-axis typed accessors; return the corresponding `meta::Value` and preserve `Const`/`Dynamic` metadata |
 | `layout.shape()[i]` / `layout.strides()[i]` | runtime-axis accessors; return `nint_t` after metadata erasure |
-| `numel(layout)` | product of all dimension sizes |
+| `numel(layout)` | product of all dimension sizes as a raw `nint_t` compatibility boundary |
+| `numel_value(layout)` / `tensor.numel_value()` | typed shape product preserving `Const`/`Dynamic` alignment and bounds |
 | `offset_at(layout, i0, ..., iN)` | linear offset; **bounds-asserted** per dimension (debug) |
 | `size_type_t<I, L>` / `stride_type_t<I, L>` / `numel_type_t<L>` | the meta Value *type* of one dimension / of the element count — the inputs for compile-time decisions |
 | `is_array_meta_v` / `is_shape_v` / `is_strides_v` / `is_layout_v` (+ `...Like` concepts) | type classification |

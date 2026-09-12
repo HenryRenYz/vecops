@@ -651,10 +651,16 @@ public:
   /**
    * Compute the total number of elements: prod of all dimension sizes.
    *
-   * @note This is computed at runtime by iterating over all dimensions.
+   * @note This returns a raw integer for compatibility. Use `numel_value()`
+   *       to retain the shape product's compile-time metadata.
    */
   VECOPS_ALWAYS_INLINE nint_t numel() const {
     return tensor::numel(_layout);
+  }
+
+  /// Typed element count retaining the shape product's metadata.
+  VECOPS_ALWAYS_INLINE constexpr tensor::numel_type_t<Layout> numel_value() const {
+    return tensor::numel_value(_layout);
   }
 
   // -------- Continuity --------

@@ -772,6 +772,13 @@ struct Product<T0, T1, Ts...> {
   using type = decltype(std::declval<T0>() * std::declval<typename Product<T1, Ts...>::type>());
 };
 
+template <typename... Values>
+VECOPS_ALWAYS_INLINE constexpr typename Product<Values...>::type shape_product_value(const Shape<Values...>& shape) {
+  return [&]<std::size_t... Idx>(std::index_sequence<Idx...>) {
+    return (Values{shape[Idx]} * ...);
+  }(std::make_index_sequence<sizeof...(Values)>{});
+}
+
 /// Extract types from index I to end of pack.
 template <int I, typename... Ts> struct SuffixOf;
 template <int I, typename T0, typename... Ts>
@@ -955,14 +962,6 @@ inline constexpr bool is_layout_v = details::IsLayout<T>::value;
 template <typename T>
 concept LayoutLike = is_layout_v<std::remove_cvref_t<T>>;
 
-/// Total element count of a layout: the product of all dimension sizes.
-template <LayoutLike Layout>
-VECOPS_ALWAYS_INLINE nint_t numel(const Layout& layout) {
-  nint_t result = 1;
-  for (int d = 0; d < Layout::Ndim; ++d) result *= layout.shape()[d];
-  return result;
-}
-
 template <int I, typename TMeta>
 using meta_element_t = typename details::ArrayMetaElement<
     I, std::remove_cvref_t<TMeta>>::type;
@@ -978,6 +977,21 @@ using stride_type_t = meta_element_t<
 template <typename TLayout>
 using numel_type_t = typename details::ShapeProduct<
     typename std::remove_cvref_t<TLayout>::Shape>::type;
+
+/** Total element count as its propagated meta::Value type. */
+template <LayoutLike Layout>
+VECOPS_ALWAYS_INLINE constexpr numel_type_t<Layout> numel_value(const Layout& layout) {
+  return details::shape_product_value(layout.shape());
+}
+
+/** Total element count as a raw integer compatibility boundary.
+ * Prefer `numel_value()` when downstream code can retain metadata. */
+template <LayoutLike Layout>
+VECOPS_ALWAYS_INLINE constexpr nint_t numel(const Layout& layout) {
+  nint_t result = 1;
+  for (int d = 0; d < Layout::Ndim; ++d) result *= layout.shape()[d];
+  return result;
+}
 
 /**
  * @brief Get the size (shape value) of dimension I from a Layout.
