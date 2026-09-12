@@ -8,7 +8,7 @@ from vecops import memory
 
 def test_system_buffer_is_writable_and_accounted() -> None:
   system = memory.System()
-  owner = system.allocate(4097, alignment=4096)
+  owner = system.allocate(4097, alignment=4096, large_pages=False)
   view = memoryview(owner)
 
   assert len(view) == 4097
@@ -16,7 +16,10 @@ def test_system_buffer_is_writable_and_accounted() -> None:
   view[-1] = 29
   assert view[0] == 17
   assert view[-1] == 29
+  assert owner.large_page_bytes == 0
+  assert owner.regular_page_bytes == owner.size
   assert sum(item["managed_bytes"] for item in system.stats()) == 4097
+  assert sum(item["managed_large_page_bytes"] for item in system.stats()) == 0
 
   del view
   del owner

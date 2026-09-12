@@ -23,11 +23,13 @@ struct Options {
   PlacementIntent placement = PlacementIntent::Default;
   std::optional<unsigned> target;
   bool touch = false;
+  bool use_large_pages = true;
 };
 
 [[noreturn]] void usage(const char* program, int status) {
   std::cerr << "usage: " << program
-            << " [--allocate-mib N] [--placement default|high-bandwidth|low-latency] [--target OS_NODE] [--touch]\n";
+            << " [--allocate-mib N] [--placement default|high-bandwidth|low-latency] [--target OS_NODE]"
+               " [--touch] [--no-large-pages]\n";
   std::exit(status);
 }
 
@@ -49,6 +51,10 @@ Options parse_options(int argc, char** argv) {
       usage(argv[0], 0);
     if (option == "--touch") {
       result.touch = true;
+      continue;
+    }
+    if (option == "--no-large-pages") {
+      result.use_large_pages = false;
       continue;
     }
     if (index + 1 >= argc)
@@ -97,6 +103,7 @@ int main(int argc, char** argv) try {
     .exact_os_numa_id = options.target,
     .fallback = FallbackPolicy::None,
     .alignment = 4096,
+    .use_large_pages = options.use_large_pages,
   };
   auto allocation = memory.allocate(request);
   if (options.touch) {
@@ -106,8 +113,9 @@ int main(int argc, char** argv) try {
   }
   const auto target = allocation.target().value();
   std::cout << "allocated " << allocation.size() << " bytes on target " << target << " (OS node "
-            << memory.topology().memory_targets[target].os_numa_id << "), touched=" << (options.touch ? "yes" : "no")
-            << '\n';
+            << memory.topology().memory_targets[target].os_numa_id << "), large-page bytes "
+            << allocation.large_page_bytes() << ", regular bytes " << allocation.regular_page_bytes()
+            << ", touched=" << (options.touch ? "yes" : "no") << '\n';
   return 0;
 } catch (const std::exception& error) {
   std::cerr << "vecops-memory-info: " << error.what() << '\n';

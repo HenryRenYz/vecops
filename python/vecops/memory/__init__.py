@@ -96,12 +96,14 @@ class System:
     alignment: int = 64,
     tier: int | None = None,
     os_numa_id: int | None = None,
+    large_pages: bool = True,
   ) -> Buffer:
     """Allocate uninitialized bytes and return an owning buffer."""
     request = _C.MemoryAllocationRequest()
     request.bytes = int(size)
     request.domain = domain
     request.alignment = int(alignment)
+    request.use_large_pages = bool(large_pages)
     request.fallback = _choice(_FALLBACKS, fallback, "fallback")
     request.objective_rank = tier
     if os_numa_id is None:
@@ -139,6 +141,7 @@ class System:
     slow_capacity: int | None = None,
     domain: int | None = None,
     allow_fast_fallback: bool = True,
+    large_pages: bool = True,
   ):
     """Create one single-use, bounded vecops workspace session."""
     return self._native.workspace_session(
@@ -146,6 +149,7 @@ class System:
       None if slow_capacity is None else int(slow_capacity),
       domain,
       bool(allow_fast_fallback),
+      bool(large_pages),
     )
 
 

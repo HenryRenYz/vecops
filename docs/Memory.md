@@ -6,6 +6,14 @@ ranks initiator-to-target paths, performs explicit direct allocations, and
 reports process-local telemetry. V1 has no reserve, pool, caching allocator,
 compaction, page migration, or garbage collector.
 
+Large pages are preferred by default without exposing Linux backing mechanisms
+in the public policy API. A Linux allocation reserves one contiguous virtual
+range, maps as much of its aligned prefix as possible from target-local
+HugeTLB pools, and fills the remainder with an anonymous mapping carrying a
+THP hint. The result remains one pointer on one memory target even when its
+physical backing mixes large and ordinary pages. `use_large_pages=false`
+disables HugeTLB and applies `MADV_NOHUGEPAGE` to the ordinary mapping.
+
 The CMake target is `vecops::memory`. `VECOPS_BUILD_MEMORY=AUTO` builds with
 hwloc 2.7 or newer when its development files are available; otherwise it
 builds a portable single-target backend. The portable backend rejects a Linux
@@ -27,6 +35,7 @@ auto allocation = memory.allocate({
   .intent = PlacementIntent::HighBandwidth,
   .fallback = FallbackPolicy::ToDefault,
   .alignment = 64,
+  // .use_large_pages = false,  // optional; the default is true
 });
 ```
 
@@ -53,6 +62,11 @@ explicit configuration value takes precedence over a discovered hwloc value.
 The `max_managed_bytes` and `min_free_bytes` fields are admission budgets, not
 reservations and not guarantees that later page faults cannot fail.
 
+Admission accounts for both ordinary `MemFree` and free per-node HugeTLB
+capacity when large pages are enabled. `managed_large_page_bytes` reports the
+portion guaranteed to use explicit large pages. The remaining bytes are an
+ordinary mapping and may still be promoted to THP asynchronously.
+
 ## Python API
 
 ```python
@@ -75,6 +89,10 @@ with system.workspace_session(fast_capacity=3 << 30, slow_capacity=8 << 30):
   # Registered Python and framework operators share these bounded arenas on
   # the calling thread.
   run_model()
+
+# The only page-policy switch; both direct allocations and sessions default
+# to True.
+ordinary = system.allocate(64 << 20, large_pages=False)
 ```
 
 `Buffer` implements the buffer protocol. NumPy arrays retain it as their base

@@ -899,7 +899,7 @@ class PyMemoryWorkspaceSession {
 public:
   PyMemoryWorkspaceSession(vecops::memory::MemorySystem memory, std::optional<vecops::memory::CpuDomainId> domain,
                            std::uint64_t fast_capacity, std::optional<std::uint64_t> slow_capacity,
-                           bool allow_fast_fallback) {
+                           bool allow_fast_fallback, bool use_large_pages) {
     constexpr auto limit = static_cast<std::uint64_t>(std::numeric_limits<vecops::nint_t>::max());
     if (fast_capacity > limit || (slow_capacity.has_value() && slow_capacity.value() > limit))
       throw py::value_error("workspace capacity exceeds the host address space");
@@ -909,6 +909,7 @@ public:
       .fast_capacity = static_cast<vecops::nint_t>(fast_capacity),
       .slow_capacity = static_cast<vecops::nint_t>(slow_capacity.value_or(fast_capacity)),
       .allow_fast_fallback = allow_fast_fallback,
+      .use_large_pages = use_large_pages,
     };
     session_ = std::make_shared<vecops::execution::MemoryWorkspaceSession>(std::move(memory), config);
     state_ = new BridgeMemoryWorkspaceProvider(session_);
@@ -1268,7 +1269,8 @@ void bind_memory(py::module_& module) {
     .def_readwrite("objective_rank", &memory::AllocationRequest::objective_rank)
     .def_readwrite("exact_os_numa_id", &memory::AllocationRequest::exact_os_numa_id)
     .def_readwrite("fallback", &memory::AllocationRequest::fallback)
-    .def_readwrite("alignment", &memory::AllocationRequest::alignment);
+    .def_readwrite("alignment", &memory::AllocationRequest::alignment)
+    .def_readwrite("use_large_pages", &memory::AllocationRequest::use_large_pages);
 
   py::class_<memory::Allocation>(module, "MemoryAllocation", py::buffer_protocol())
     .def_buffer([](memory::Allocation& self) {
@@ -1276,6 +1278,8 @@ void bind_memory(py::module_& module) {
                              {static_cast<py::ssize_t>(self.size())}, {1});
     })
     .def_property_readonly("size", &memory::Allocation::size)
+    .def_property_readonly("large_page_bytes", &memory::Allocation::large_page_bytes)
+    .def_property_readonly("regular_page_bytes", &memory::Allocation::regular_page_bytes)
     .def_property_readonly("target_id", [](const memory::Allocation& self) -> py::object {
       return self.target().has_value() ? py::cast(self.target().value()) : py::none();
     });
@@ -1297,12 +1301,12 @@ void bind_memory(py::module_& module) {
     .def(
       "workspace_session",
       [](memory::MemorySystem self, std::uint64_t fast_capacity, std::optional<std::uint64_t> slow_capacity,
-         std::optional<memory::CpuDomainId> domain, bool allow_fast_fallback) {
+         std::optional<memory::CpuDomainId> domain, bool allow_fast_fallback, bool use_large_pages) {
         return std::make_unique<PyMemoryWorkspaceSession>(std::move(self), domain, fast_capacity, slow_capacity,
-                                                          allow_fast_fallback);
+                                                          allow_fast_fallback, use_large_pages);
       },
       py::arg("fast_capacity"), py::arg("slow_capacity") = py::none(), py::arg("domain") = py::none(),
-      py::arg("allow_fast_fallback") = true)
+      py::arg("allow_fast_fallback") = true, py::arg("use_large_pages") = true)
     .def("topology",
          [](const memory::MemorySystem& self) {
            const auto& topology = self.topology();
@@ -1367,7 +1371,12 @@ void bind_memory(py::module_& module) {
         item["allocation_count"] = stats.allocation_count;
         item["failed_allocation_count"] = stats.failed_allocation_count;
         item["fallback_count"] = stats.fallback_count;
+        item["managed_large_page_bytes"] = stats.managed_large_page_bytes;
+        item["peak_managed_large_page_bytes"] = stats.peak_managed_large_page_bytes;
         item["os_free_bytes"] = stats.os_free_bytes.has_value() ? py::cast(stats.os_free_bytes.value()) : py::none();
+        item["os_large_page_free_bytes"] = stats.os_large_page_free_bytes.has_value()
+                                                   ? py::cast(stats.os_large_page_free_bytes.value())
+                                                   : py::none();
         item["budget_remaining_bytes"] =
           stats.budget_remaining_bytes.has_value() ? py::cast(stats.budget_remaining_bytes.value()) : py::none();
         result.append(std::move(item));

@@ -27,6 +27,7 @@ struct MemoryWorkspaceSessionConfig {
   nint_t slow_capacity = 0;
   nint_t arena_alignment = 2 * 1024 * 1024;
   bool allow_fast_fallback = true;
+  bool use_large_pages = true;
 };
 
 /**
@@ -137,6 +138,7 @@ private:
       .intent = intent,
       .fallback = memory::FallbackPolicy::None,
       .alignment = static_cast<std::size_t>(config_.arena_alignment),
+      .use_large_pages = config_.use_large_pages,
     });
   }
 

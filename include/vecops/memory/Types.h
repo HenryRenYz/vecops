@@ -132,6 +132,7 @@ struct AllocationRequest {
   std::optional<unsigned> exact_os_numa_id;
   FallbackPolicy fallback = FallbackPolicy::ToDefault;
   std::size_t alignment = 64;
+  bool use_large_pages = true;
 };
 
 struct TargetRuntimeStats {
@@ -142,7 +143,10 @@ struct TargetRuntimeStats {
   std::uint64_t allocation_count = 0;
   std::uint64_t failed_allocation_count = 0;
   std::uint64_t fallback_count = 0;
+  std::uint64_t managed_large_page_bytes = 0;
+  std::uint64_t peak_managed_large_page_bytes = 0;
   std::optional<std::uint64_t> os_free_bytes;
+  std::optional<std::uint64_t> os_large_page_free_bytes;
   std::optional<std::uint64_t> budget_remaining_bytes;
 };
 

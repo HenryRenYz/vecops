@@ -25,7 +25,7 @@ namespace vecops::memory {
 
 namespace details {
 struct MemoryState;
-struct AllocationHeader;
+struct AllocationControl;
 struct AllocationAccess;
 } // namespace details
 
@@ -44,7 +44,7 @@ private:
 /** Move-only ownership of one direct backend allocation. */
 class Allocation {
 public:
-  Allocation() noexcept = default;
+  Allocation() noexcept;
   Allocation(const Allocation&) = delete;
   Allocation& operator=(const Allocation&) = delete;
   Allocation(Allocation&& other) noexcept;
@@ -63,6 +63,16 @@ public:
     return target_;
   }
 
+  /** Bytes guaranteed to be backed by explicit large pages. */
+  [[nodiscard]] std::size_t large_page_bytes() const noexcept {
+    return large_page_bytes_;
+  }
+
+  /** Bytes in the ordinary mapping, which remains eligible for THP. */
+  [[nodiscard]] std::size_t regular_page_bytes() const noexcept {
+    return size_ - large_page_bytes_;
+  }
+
   [[nodiscard]] explicit operator bool() const noexcept {
     return data_ != nullptr;
   }
@@ -72,11 +82,14 @@ public:
 private:
   friend class MemorySystem;
   friend struct details::AllocationAccess;
-  Allocation(void* data, std::size_t size, MemoryTargetId target) noexcept;
+  Allocation(void* data, std::size_t size, std::size_t large_page_bytes, MemoryTargetId target,
+             std::unique_ptr<details::AllocationControl> control) noexcept;
 
   void* data_ = nullptr;
   std::size_t size_ = 0;
+  std::size_t large_page_bytes_ = 0;
   std::optional<MemoryTargetId> target_;
+  std::unique_ptr<details::AllocationControl> control_;
 };
 
 /** Discover topology, resolve placement, and perform direct allocations. */

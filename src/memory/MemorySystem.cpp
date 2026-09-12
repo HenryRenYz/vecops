@@ -8,22 +8,30 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cctype>
+#include <charconv>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <limits>
-#include <new>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #if defined(__linux__)
 #  include <sched.h>
+#  include <sys/mman.h>
 #  include <unistd.h>
+#  if !defined(MAP_HUGE_SHIFT)
+#    define MAP_HUGE_SHIFT 26
+#  endif
 #endif
 
 #if defined(VECOPS_MEMORY_HAVE_HWLOC)
@@ -35,11 +43,11 @@ namespace vecops::memory {
 
 namespace details {
 
-constexpr std::uint64_t allocation_magic = UINT64_C(0x5645434f50534d45);
-
 struct TargetCounters {
   std::atomic<std::uint64_t> managed_bytes{0};
   std::atomic<std::uint64_t> peak_managed_bytes{0};
+  std::atomic<std::uint64_t> managed_large_page_bytes{0};
+  std::atomic<std::uint64_t> peak_managed_large_page_bytes{0};
   std::atomic<std::uint64_t> allocation_count{0};
   std::atomic<std::uint64_t> failed_allocation_count{0};
   std::atomic<std::uint64_t> fallback_count{0};
@@ -72,22 +80,97 @@ struct MemoryState {
   MemoryState() = default;
 };
 
-struct AllocationHeader {
-  std::uint64_t magic;
+struct AllocationControl {
   std::shared_ptr<MemoryState> state;
   void* backend_base;
   std::size_t backend_bytes;
   std::size_t requested_bytes;
+  std::size_t large_page_bytes;
   MemoryTargetId target;
+  bool mmap_backed;
 };
 
 struct AllocationAccess {
-  static Allocation make(void* data, std::size_t size, MemoryTargetId target) noexcept {
-    return Allocation(data, size, target);
+  static Allocation make(void* data, std::size_t size, std::size_t large_page_bytes, MemoryTargetId target,
+                         std::unique_ptr<AllocationControl> control) noexcept {
+    return Allocation(data, size, large_page_bytes, target, std::move(control));
   }
 };
 
-static_assert(sizeof(AllocationHeader) % alignof(AllocationHeader) == 0);
+struct HugePagePool {
+  std::size_t page_size = 0;
+  std::uint64_t free_pages = 0;
+};
+
+bool is_power_of_two(std::size_t value) {
+  return value != 0 && (value & (value - 1)) == 0;
+}
+
+std::optional<std::uint64_t> read_uint64(const std::filesystem::path& path) {
+  std::ifstream input(path);
+  std::uint64_t result = 0;
+  if (!(input >> result))
+    return std::nullopt;
+  return result;
+}
+
+std::vector<HugePagePool> os_huge_page_pools(unsigned os_numa_id) {
+  std::vector<HugePagePool> result;
+#if defined(__linux__)
+  const auto root =
+    std::filesystem::path("/sys/devices/system/node") / ("node" + std::to_string(os_numa_id)) / "hugepages";
+  std::error_code error;
+  for (std::filesystem::directory_iterator current(root, error), end; !error && current != end;
+       current.increment(error)) {
+    const auto name = current->path().filename().string();
+    constexpr std::string_view prefix = "hugepages-";
+    constexpr std::string_view suffix = "kB";
+    if (!name.starts_with(prefix) || !name.ends_with(suffix))
+      continue;
+    const auto digits = std::string_view(name).substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+    std::uint64_t kib = 0;
+    const auto* begin = digits.data();
+    const auto* finish = digits.data() + digits.size();
+    const auto parsed = std::from_chars(begin, finish, kib);
+    if (parsed.ec != std::errc{} || parsed.ptr != finish || kib == 0 ||
+        kib > std::numeric_limits<std::size_t>::max() / 1024)
+      continue;
+    const auto page_size = static_cast<std::size_t>(kib * 1024);
+    if (!is_power_of_two(page_size))
+      continue;
+    const auto free_pages = read_uint64(current->path() / "free_hugepages");
+    if (free_pages.has_value() && free_pages.value() != 0)
+      result.push_back({page_size, free_pages.value()});
+  }
+#else
+  (void)os_numa_id;
+#endif
+  std::sort(result.begin(), result.end(),
+            [](const auto& left, const auto& right) { return left.page_size > right.page_size; });
+  return result;
+}
+
+std::optional<std::uint64_t> os_large_page_free_bytes(unsigned os_numa_id) {
+#if defined(__linux__)
+  const auto root =
+    std::filesystem::path("/sys/devices/system/node") / ("node" + std::to_string(os_numa_id)) / "hugepages";
+  std::error_code error;
+  if (!std::filesystem::is_directory(root, error))
+    return std::nullopt;
+  std::uint64_t result = 0;
+  for (const auto& pool : os_huge_page_pools(os_numa_id)) {
+    const auto bytes = pool.free_pages > std::numeric_limits<std::uint64_t>::max() / pool.page_size
+                         ? std::numeric_limits<std::uint64_t>::max()
+                         : pool.free_pages * pool.page_size;
+    result = bytes > std::numeric_limits<std::uint64_t>::max() - result ? std::numeric_limits<std::uint64_t>::max()
+                                                                        : result + bytes;
+  }
+  return result;
+#else
+  (void)os_numa_id;
+  return std::nullopt;
+#endif
+}
 
 std::optional<std::uint64_t> os_free_bytes(unsigned os_numa_id) {
 #if defined(__linux__)
@@ -108,21 +191,24 @@ std::optional<std::uint64_t> os_free_bytes(unsigned os_numa_id) {
   return std::nullopt;
 }
 
-bool is_power_of_two(std::size_t value) {
-  return value != 0 && (value & (value - 1)) == 0;
-}
-
 void update_peak(std::atomic<std::uint64_t>& peak, std::uint64_t value) {
   auto current = peak.load(std::memory_order_relaxed);
   while (current < value && !peak.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
   }
 }
 
-void reserve_budget(TargetCounters& counters, const MemoryTargetInfo& target, std::size_t bytes) {
+void reserve_budget(TargetCounters& counters, const MemoryTargetInfo& target, std::size_t bytes, bool use_large_pages) {
   const auto free = os_free_bytes(target.os_numa_id);
-  if (free.has_value() && (free.value() <= counters.min_free_bytes || bytes > free.value() - counters.min_free_bytes)) {
-    throw MemoryError(MemoryErrc::BudgetExceeded, "memory target OS node " + std::to_string(target.os_numa_id) +
-                                                    " does not have the configured free-memory headroom");
+  if (free.has_value()) {
+    const auto regular_available = free.value() > counters.min_free_bytes ? free.value() - counters.min_free_bytes : 0;
+    const auto huge_available = use_large_pages ? os_large_page_free_bytes(target.os_numa_id).value_or(0) : 0;
+    const auto available = huge_available > std::numeric_limits<std::uint64_t>::max() - regular_available
+                             ? std::numeric_limits<std::uint64_t>::max()
+                             : huge_available + regular_available;
+    if (bytes > available) {
+      throw MemoryError(MemoryErrc::BudgetExceeded, "memory target OS node " + std::to_string(target.os_numa_id) +
+                                                      " does not have the configured free-memory headroom");
+    }
   }
 
   auto current = counters.managed_bytes.load(std::memory_order_relaxed);
@@ -138,22 +224,259 @@ void reserve_budget(TargetCounters& counters, const MemoryTargetInfo& target, st
   }
 }
 
-void* backend_allocate(MemoryState& state, MemoryTargetId target, std::size_t bytes) {
-#if defined(VECOPS_MEMORY_HAVE_HWLOC)
+struct BackendAllocation {
+  void* data = nullptr;
+  void* backend_base = nullptr;
+  std::size_t backend_bytes = 0;
+  std::size_t large_page_bytes = 0;
+  bool mmap_backed = false;
+};
+
+#if defined(__linux__)
+
+std::optional<std::size_t> round_up(std::size_t value, std::size_t alignment) {
+  if (value > std::numeric_limits<std::size_t>::max() - (alignment - 1))
+    return std::nullopt;
+  return (value + alignment - 1) & ~(alignment - 1);
+}
+
+void restore_placeholder(void* address, std::size_t bytes) noexcept {
+  if (bytes == 0)
+    return;
+  (void)mmap(address, bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0);
+}
+
+class ScopedTargetMembind {
+public:
+  ScopedTargetMembind(MemoryState& state, MemoryTargetId target)
+    : state_(state) {
+#  if defined(VECOPS_MEMORY_HAVE_HWLOC)
+    if (state.backend != BackendPreference::Hwloc) {
+      ready_ = true;
+      return;
+    }
+    previous_ = hwloc_bitmap_alloc();
+    target_ = hwloc_bitmap_alloc();
+    if (previous_ == nullptr || target_ == nullptr)
+      return;
+    constexpr int query_flags = HWLOC_MEMBIND_THREAD | HWLOC_MEMBIND_BYNODESET;
+    if (hwloc_get_membind(state.hwloc_topology, previous_, &previous_policy_, query_flags) != 0)
+      return;
+    hwloc_bitmap_only(target_, state.snapshot.memory_targets[target].os_numa_id);
+    constexpr int set_flags =
+      HWLOC_MEMBIND_THREAD | HWLOC_MEMBIND_BYNODESET | HWLOC_MEMBIND_STRICT | HWLOC_MEMBIND_NOCPUBIND;
+    if (hwloc_set_membind(state.hwloc_topology, target_, HWLOC_MEMBIND_BIND, set_flags) != 0)
+      return;
+    changed_ = true;
+    ready_ = true;
+#  else
+    (void)target;
+    ready_ = true;
+#  endif
+  }
+
+  ScopedTargetMembind(const ScopedTargetMembind&) = delete;
+  ScopedTargetMembind& operator=(const ScopedTargetMembind&) = delete;
+
+  ~ScopedTargetMembind() {
+#  if defined(VECOPS_MEMORY_HAVE_HWLOC)
+    if (changed_) {
+      constexpr int restore_flags = HWLOC_MEMBIND_THREAD | HWLOC_MEMBIND_BYNODESET | HWLOC_MEMBIND_NOCPUBIND;
+      (void)hwloc_set_membind(state_.hwloc_topology, previous_, previous_policy_, restore_flags);
+    }
+    if (target_ != nullptr)
+      hwloc_bitmap_free(target_);
+    if (previous_ != nullptr)
+      hwloc_bitmap_free(previous_);
+#  endif
+  }
+
+  [[nodiscard]] bool ready() const noexcept {
+    return ready_;
+  }
+
+private:
+  MemoryState& state_;
+  bool ready_ = false;
+#  if defined(VECOPS_MEMORY_HAVE_HWLOC)
+  hwloc_bitmap_t previous_ = nullptr;
+  hwloc_bitmap_t target_ = nullptr;
+  hwloc_membind_policy_t previous_policy_ = HWLOC_MEMBIND_DEFAULT;
+  bool changed_ = false;
+#  endif
+};
+
+bool bind_regular_area(MemoryState& state, MemoryTargetId target, void* address, std::size_t bytes) {
+#  if defined(VECOPS_MEMORY_HAVE_HWLOC)
+  if (state.backend == BackendPreference::Hwloc) {
+    auto* nodeset = hwloc_bitmap_alloc();
+    if (nodeset == nullptr) {
+      errno = ENOMEM;
+      return false;
+    }
+    hwloc_bitmap_only(nodeset, state.snapshot.memory_targets[target].os_numa_id);
+    const auto result =
+      hwloc_set_area_membind(state.hwloc_topology, address, bytes, nodeset, HWLOC_MEMBIND_BIND,
+                             HWLOC_MEMBIND_BYNODESET | HWLOC_MEMBIND_STRICT | HWLOC_MEMBIND_NOCPUBIND);
+    const auto saved_errno = errno;
+    hwloc_bitmap_free(nodeset);
+    errno = saved_errno;
+    return result == 0;
+  }
+#  else
+  (void)state;
+  (void)target;
+  (void)address;
+  (void)bytes;
+#  endif
+  return true;
+}
+
+void* map_huge_extent(void* address, std::size_t bytes, std::size_t page_size) {
+  const auto page_shift = std::bit_width(page_size) - 1;
+  const int huge_flags = static_cast<int>(page_shift << MAP_HUGE_SHIFT);
+  return mmap(address, bytes, PROT_READ | PROT_WRITE,
+              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_POPULATE | MAP_HUGETLB | huge_flags, -1, 0);
+}
+
+BackendAllocation mmap_allocate(MemoryState& state, MemoryTargetId target, const AllocationRequest& request) {
+  const auto system_page_value = sysconf(_SC_PAGESIZE);
+  if (system_page_value <= 0 || !is_power_of_two(static_cast<std::size_t>(system_page_value))) {
+    errno = EINVAL;
+    return {};
+  }
+  const auto system_page = static_cast<std::size_t>(system_page_value);
+  const auto mapped_bytes = round_up(request.bytes, system_page);
+  if (!mapped_bytes.has_value()) {
+    errno = ENOMEM;
+    return {};
+  }
+
+  auto pools = request.use_large_pages ? os_huge_page_pools(state.snapshot.memory_targets[target].os_numa_id)
+                                       : std::vector<HugePagePool>{};
+  std::size_t largest_usable_page = 0;
+  for (const auto& pool : pools) {
+    if (pool.page_size <= request.bytes) {
+      largest_usable_page = pool.page_size;
+      break;
+    }
+  }
+  const auto reservation_alignment = std::max({request.alignment, system_page, largest_usable_page});
+  if (mapped_bytes.value() > std::numeric_limits<std::size_t>::max() - (reservation_alignment - 1)) {
+    errno = ENOMEM;
+    return {};
+  }
+  const auto raw_bytes = mapped_bytes.value() + reservation_alignment - 1;
+  void* raw = mmap(nullptr, raw_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  if (raw == MAP_FAILED)
+    return {};
+
+  const auto raw_address = reinterpret_cast<std::uintptr_t>(raw);
+  const auto aligned_address = (raw_address + reservation_alignment - 1) & ~(reservation_alignment - 1);
+  auto* base = reinterpret_cast<void*>(aligned_address);
+  const auto prefix = aligned_address - raw_address;
+  const auto suffix = raw_bytes - prefix - mapped_bytes.value();
+  if (prefix != 0)
+    (void)munmap(raw, prefix);
+  if (suffix != 0)
+    (void)munmap(static_cast<std::byte*>(base) + mapped_bytes.value(), suffix);
+
+  std::size_t large_bytes = 0;
+  if (!pools.empty()) {
+    ScopedTargetMembind membind(state, target);
+    if (membind.ready()) {
+      for (const auto& pool : pools) {
+        auto pages_left = pool.free_pages;
+        while (pages_left != 0) {
+          const auto remaining = mapped_bytes.value() - large_bytes;
+          if (remaining < pool.page_size)
+            break;
+          const auto max_pages_by_request = remaining / pool.page_size;
+          const auto page_count = std::min<std::uint64_t>(pages_left, max_pages_by_request);
+          auto candidate = static_cast<std::size_t>(page_count) * pool.page_size;
+          bool mapped_any = false;
+          while (candidate >= pool.page_size) {
+            auto* address = static_cast<std::byte*>(base) + large_bytes;
+            void* mapped = map_huge_extent(address, candidate, pool.page_size);
+            if (mapped != MAP_FAILED) {
+              large_bytes += candidate;
+              pages_left -= candidate / pool.page_size;
+              mapped_any = true;
+              break;
+            }
+            const auto saved_errno = errno;
+            restore_placeholder(address, candidate);
+            errno = saved_errno;
+            candidate = (candidate / 2) / pool.page_size * pool.page_size;
+          }
+          if (!mapped_any)
+            break;
+        }
+      }
+    }
+  }
+
+  const auto regular_bytes = mapped_bytes.value() - large_bytes;
+  if (regular_bytes != 0) {
+    auto* regular_base = static_cast<std::byte*>(base) + large_bytes;
+    void* mapped =
+      mmap(regular_base, regular_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (mapped == MAP_FAILED) {
+      const auto saved_errno = errno;
+      (void)munmap(base, mapped_bytes.value());
+      errno = saved_errno;
+      return {};
+    }
+    if (!bind_regular_area(state, target, regular_base, regular_bytes)) {
+      const auto saved_errno = errno;
+      (void)munmap(base, mapped_bytes.value());
+      errno = saved_errno;
+      return {};
+    }
+    const int advice = request.use_large_pages ? MADV_HUGEPAGE : MADV_NOHUGEPAGE;
+    if (madvise(regular_base, regular_bytes, advice) != 0 && !request.use_large_pages) {
+      const auto saved_errno = errno;
+      (void)munmap(base, mapped_bytes.value());
+      errno = saved_errno;
+      return {};
+    }
+  }
+  return {base, base, mapped_bytes.value(), std::min(large_bytes, request.bytes), true};
+}
+
+#endif
+
+BackendAllocation backend_allocate(MemoryState& state, MemoryTargetId target, const AllocationRequest& request) {
+#if defined(__linux__)
+  return mmap_allocate(state, target, request);
+#else
+  const auto alignment = std::max(request.alignment, alignof(std::max_align_t));
+  if (request.bytes > std::numeric_limits<std::size_t>::max() - (alignment - 1)) {
+    errno = ENOMEM;
+    return {};
+  }
+  const auto backend_bytes = request.bytes + alignment - 1;
+  void* base = nullptr;
+#  if defined(VECOPS_MEMORY_HAVE_HWLOC)
   if (state.backend == BackendPreference::Hwloc) {
     auto* nodeset = hwloc_bitmap_alloc();
     if (nodeset == nullptr)
-      return nullptr;
+      return {};
     hwloc_bitmap_only(nodeset, state.snapshot.memory_targets[target].os_numa_id);
-    void* result = hwloc_alloc_membind(state.hwloc_topology, bytes, nodeset, HWLOC_MEMBIND_BIND,
-                                       HWLOC_MEMBIND_BYNODESET | HWLOC_MEMBIND_STRICT | HWLOC_MEMBIND_NOCPUBIND);
+    base = hwloc_alloc_membind(state.hwloc_topology, backend_bytes, nodeset, HWLOC_MEMBIND_BIND,
+                               HWLOC_MEMBIND_BYNODESET | HWLOC_MEMBIND_STRICT | HWLOC_MEMBIND_NOCPUBIND);
     hwloc_bitmap_free(nodeset);
-    return result;
+  } else
+#  endif
+  {
+    base = std::malloc(backend_bytes);
   }
-#else
-  (void)target;
+  if (base == nullptr)
+    return {};
+  const auto raw = reinterpret_cast<std::uintptr_t>(base);
+  const auto aligned = (raw + alignment - 1) & ~(static_cast<std::uintptr_t>(alignment) - 1);
+  return {reinterpret_cast<void*>(aligned), base, backend_bytes, 0, false};
 #endif
-  return std::malloc(bytes);
 }
 
 void backend_deallocate(MemoryState& state, void* base, std::size_t bytes) noexcept {
@@ -168,22 +491,26 @@ void backend_deallocate(MemoryState& state, void* base, std::size_t bytes) noexc
   std::free(base);
 }
 
-void release_allocation(void* data) noexcept {
-  if (data == nullptr)
+void discard_backend(MemoryState& state, void* base, std::size_t bytes, bool mmap_backed) noexcept {
+#if defined(__linux__)
+  if (mmap_backed) {
+    (void)munmap(base, bytes);
     return;
-  auto* header = reinterpret_cast<AllocationHeader*>(static_cast<std::byte*>(data) - sizeof(AllocationHeader));
-  if (header->magic != allocation_magic)
-    std::terminate();
+  }
+#else
+  (void)mmap_backed;
+#endif
+  backend_deallocate(state, base, bytes);
+}
 
-  auto state = std::move(header->state);
-  const void* const base = header->backend_base;
-  const auto backend_bytes = header->backend_bytes;
-  const auto requested_bytes = header->requested_bytes;
-  const auto target = header->target;
-  header->magic = 0;
-  header->~AllocationHeader();
-  state->counters[target]->managed_bytes.fetch_sub(requested_bytes, std::memory_order_relaxed);
-  backend_deallocate(*state, const_cast<void*>(base), backend_bytes);
+void release_allocation(std::unique_ptr<AllocationControl> control) noexcept {
+  if (!control)
+    return;
+  auto state = std::move(control->state);
+  auto& counters = *state->counters[control->target];
+  counters.managed_bytes.fetch_sub(control->requested_bytes, std::memory_order_relaxed);
+  counters.managed_large_page_bytes.fetch_sub(control->large_page_bytes, std::memory_order_relaxed);
+  discard_backend(*state, control->backend_base, control->backend_bytes, control->mmap_backed);
 }
 
 std::uint64_t system_capacity() {
@@ -287,8 +614,8 @@ std::shared_ptr<MemoryState> discover_hwloc() {
       continue;
     }
     const auto id = static_cast<MemoryTargetId>(state->snapshot.memory_targets.size());
-    state->snapshot.memory_targets.push_back(MemoryTargetInfo{id, object->os_index, kind_from_subtype(object->subtype),
-                                                              object->attr->numanode.local_memory});
+    state->snapshot.memory_targets.push_back(
+      MemoryTargetInfo{id, object->os_index, kind_from_subtype(object->subtype), object->attr->numanode.local_memory});
     state->target_objects.push_back(object);
   }
   if (state->snapshot.memory_targets.empty())
@@ -493,23 +820,15 @@ Allocation allocate_on_target(const std::shared_ptr<MemoryState>& state, MemoryT
   const auto& target_info = state->snapshot.memory_targets[target];
   auto& counters = *state->counters[target];
   try {
-    reserve_budget(counters, target_info, request.bytes);
+    reserve_budget(counters, target_info, request.bytes, request.use_large_pages);
   } catch (...) {
     counters.failed_allocation_count.fetch_add(1, std::memory_order_relaxed);
     throw;
   }
 
-  const auto alignment = std::max(request.alignment, alignof(AllocationHeader));
-  constexpr auto header_bytes = sizeof(AllocationHeader);
-  if (request.bytes > std::numeric_limits<std::size_t>::max() - header_bytes - (alignment - 1)) {
-    counters.managed_bytes.fetch_sub(request.bytes, std::memory_order_relaxed);
-    counters.failed_allocation_count.fetch_add(1, std::memory_order_relaxed);
-    throw MemoryError(MemoryErrc::InvalidRequest, "allocation size overflows the host address space");
-  }
-  const auto backend_bytes = request.bytes + header_bytes + alignment - 1;
   errno = 0;
-  void* base = backend_allocate(*state, target, backend_bytes);
-  if (base == nullptr) {
+  auto backend = backend_allocate(*state, target, request);
+  if (backend.data == nullptr) {
     counters.managed_bytes.fetch_sub(request.bytes, std::memory_order_relaxed);
     counters.failed_allocation_count.fetch_add(1, std::memory_order_relaxed);
     const auto code = errno == ENOMEM ? MemoryErrc::OutOfMemory : MemoryErrc::BindingFailed;
@@ -517,13 +836,28 @@ Allocation allocate_on_target(const std::shared_ptr<MemoryState>& state, MemoryT
                               " failed: " + std::strerror(errno));
   }
 
-  const auto raw = reinterpret_cast<std::uintptr_t>(base) + header_bytes;
-  const auto aligned = (raw + alignment - 1) & ~(static_cast<std::uintptr_t>(alignment) - 1);
-  auto* data = reinterpret_cast<void*>(aligned);
-  auto* header = reinterpret_cast<AllocationHeader*>(aligned - header_bytes);
-  new (header) AllocationHeader{allocation_magic, state, base, backend_bytes, request.bytes, target};
+  std::unique_ptr<AllocationControl> control;
+  try {
+    control = std::make_unique<AllocationControl>(AllocationControl{
+      state,
+      backend.backend_base,
+      backend.backend_bytes,
+      request.bytes,
+      backend.large_page_bytes,
+      target,
+      backend.mmap_backed,
+    });
+  } catch (...) {
+    discard_backend(*state, backend.backend_base, backend.backend_bytes, backend.mmap_backed);
+    counters.managed_bytes.fetch_sub(request.bytes, std::memory_order_relaxed);
+    counters.failed_allocation_count.fetch_add(1, std::memory_order_relaxed);
+    throw;
+  }
   counters.allocation_count.fetch_add(1, std::memory_order_relaxed);
-  return AllocationAccess::make(data, request.bytes, target);
+  const auto large = counters.managed_large_page_bytes.fetch_add(backend.large_page_bytes, std::memory_order_relaxed) +
+                     backend.large_page_bytes;
+  update_peak(counters.peak_managed_large_page_bytes, large);
+  return AllocationAccess::make(backend.data, request.bytes, backend.large_page_bytes, target, std::move(control));
 }
 
 } // namespace details
@@ -533,16 +867,23 @@ MemoryError::MemoryError(MemoryErrc code, std::string message)
   , code_(code) {
 }
 
-Allocation::Allocation(void* data, std::size_t size, MemoryTargetId target) noexcept
+Allocation::Allocation() noexcept = default;
+
+Allocation::Allocation(void* data, std::size_t size, std::size_t large_page_bytes, MemoryTargetId target,
+                       std::unique_ptr<details::AllocationControl> control) noexcept
   : data_(data)
   , size_(size)
-  , target_(target) {
+  , large_page_bytes_(large_page_bytes)
+  , target_(target)
+  , control_(std::move(control)) {
 }
 
 Allocation::Allocation(Allocation&& other) noexcept
   : data_(std::exchange(other.data_, nullptr))
   , size_(std::exchange(other.size_, 0))
-  , target_(std::exchange(other.target_, std::nullopt)) {
+  , large_page_bytes_(std::exchange(other.large_page_bytes_, 0))
+  , target_(std::exchange(other.target_, std::nullopt))
+  , control_(std::move(other.control_)) {
 }
 
 Allocation& Allocation::operator=(Allocation&& other) noexcept {
@@ -550,7 +891,9 @@ Allocation& Allocation::operator=(Allocation&& other) noexcept {
     reset();
     data_ = std::exchange(other.data_, nullptr);
     size_ = std::exchange(other.size_, 0);
+    large_page_bytes_ = std::exchange(other.large_page_bytes_, 0);
     target_ = std::exchange(other.target_, std::nullopt);
+    control_ = std::move(other.control_);
   }
   return *this;
 }
@@ -560,9 +903,11 @@ Allocation::~Allocation() {
 }
 
 void Allocation::reset() noexcept {
-  details::release_allocation(std::exchange(data_, nullptr));
+  data_ = nullptr;
   size_ = 0;
+  large_page_bytes_ = 0;
   target_.reset();
+  details::release_allocation(std::move(control_));
 }
 
 MemorySystem::MemorySystem(std::shared_ptr<details::MemoryState> state) noexcept
@@ -752,7 +1097,10 @@ std::vector<TargetRuntimeStats> MemorySystem::stats() const {
       counters.allocation_count.load(std::memory_order_relaxed),
       counters.failed_allocation_count.load(std::memory_order_relaxed),
       counters.fallback_count.load(std::memory_order_relaxed),
+      counters.managed_large_page_bytes.load(std::memory_order_relaxed),
+      counters.peak_managed_large_page_bytes.load(std::memory_order_relaxed),
       details::os_free_bytes(target.os_numa_id),
+      details::os_large_page_free_bytes(target.os_numa_id),
       remaining,
     });
   }

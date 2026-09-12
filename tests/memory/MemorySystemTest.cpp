@@ -68,6 +68,25 @@ std::map<unsigned, std::uint64_t> resident_nodes(const void* pointer) {
   }
   return result;
 }
+
+std::string mapping_vm_flags(const void* pointer) {
+  const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+  bool selected = false;
+  std::ifstream input("/proc/self/smaps");
+  for (std::string line; std::getline(input, line);) {
+    const auto dash = line.find('-');
+    const auto space = line.find(' ');
+    if (dash != std::string::npos && space != std::string::npos && dash < space) {
+      const auto begin = static_cast<std::uintptr_t>(std::stoull(line.substr(0, dash), nullptr, 16));
+      const auto end = static_cast<std::uintptr_t>(std::stoull(line.substr(dash + 1, space - dash - 1), nullptr, 16));
+      selected = begin <= address && address < end;
+      continue;
+    }
+    if (selected && line.starts_with("VmFlags:"))
+      return line;
+  }
+  return {};
+}
 #endif
 
 TEST(MemorySystemTest, SystemBackendHasOneUsableDomainAndTarget) {
@@ -138,6 +157,7 @@ TEST(MemorySystemTest, DirectAllocationIsAlignedAndUpdatesStats) {
     EXPECT_EQ(allocation.size(), 4097u);
     ASSERT_TRUE(allocation.target().has_value());
     EXPECT_EQ(reinterpret_cast<std::uintptr_t>(allocation.data()) % 4096, 0u);
+    EXPECT_EQ(allocation.large_page_bytes() + allocation.regular_page_bytes(), allocation.size());
 
     const auto stats = memory.stats();
     const auto& target_stats = stats[allocation.target().value()];
@@ -147,6 +167,66 @@ TEST(MemorySystemTest, DirectAllocationIsAlignedAndUpdatesStats) {
   }
   EXPECT_EQ(total_managed(memory), 0u);
 }
+
+#if defined(__linux__)
+TEST(MemorySystemTest, LargePagesCanBeStrictlyDisabled) {
+  const auto memory = test_backend();
+  constexpr std::size_t alignment = 2 * 1024 * 1024;
+  auto allocation = memory.allocate({
+    .bytes = alignment + 4096,
+    .alignment = alignment,
+    .use_large_pages = false,
+  });
+
+  ASSERT_TRUE(allocation);
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(allocation.data()) % alignment, 0u);
+  EXPECT_EQ(allocation.large_page_bytes(), 0u);
+  EXPECT_EQ(allocation.regular_page_bytes(), allocation.size());
+  const auto flags = mapping_vm_flags(allocation.data());
+  ASSERT_FALSE(flags.empty());
+  EXPECT_NE(flags.find(" nh"), std::string::npos);
+  const auto stats = memory.stats();
+  const auto& target_stats = stats[allocation.target().value()];
+  EXPECT_EQ(target_stats.managed_large_page_bytes, 0u);
+  EXPECT_EQ(target_stats.peak_managed_large_page_bytes, 0u);
+}
+
+TEST(MemorySystemTest, LargeAndRegularPagesCanShareOneAllocation) {
+  constexpr std::size_t large_page = 2 * 1024 * 1024;
+  const auto memory = MemorySystem::discover();
+  std::optional<unsigned> os_numa_id;
+  for (const auto& target : memory.topology().memory_targets) {
+    std::ifstream input("/sys/devices/system/node/node" + std::to_string(target.os_numa_id) +
+                        "/hugepages/hugepages-2048kB/free_hugepages");
+    std::uint64_t free_pages = 0;
+    if (input >> free_pages; free_pages != 0) {
+      os_numa_id = target.os_numa_id;
+      break;
+    }
+  }
+  if (!os_numa_id.has_value())
+    GTEST_SKIP() << "no free target-local 2 MiB large page";
+
+  auto allocation = memory.allocate({
+    .bytes = large_page + 4096,
+    .domain = CpuDomainSelector::specific(0),
+    .intent = PlacementIntent::ExactTarget,
+    .exact_os_numa_id = os_numa_id,
+    .fallback = FallbackPolicy::None,
+    .alignment = large_page,
+  });
+  if (allocation.large_page_bytes() == 0 && std::getenv("VECOPS_TEST_REQUIRE_LARGE_PAGES") == nullptr)
+    GTEST_SKIP() << "large-page pool exists but is not available to this process";
+
+  EXPECT_EQ(allocation.large_page_bytes(), large_page);
+  EXPECT_EQ(allocation.regular_page_bytes(), 4096u);
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(allocation.data()) % large_page, 0u);
+  auto* data = static_cast<std::byte*>(allocation.data());
+  data[0] = std::byte{1};
+  data[allocation.large_page_bytes()] = std::byte{2};
+  data[allocation.size() - 1] = std::byte{3};
+}
+#endif
 
 TEST(MemorySystemTest, AllocationMoveTransfersOwnership) {
   const auto memory = test_backend();
