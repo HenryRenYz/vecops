@@ -30,7 +30,11 @@
  * retains a static phase so downstream code can prune accumulator routing.
  * Once K really splits, first/middle/last share one runtime phase type; this
  * avoids cloning the remaining loop nest and backend compute body solely for
- * their different C endpoints.
+ * their different C endpoints. An axis that metadata proves fits in one block
+ * retains its original Extent type. A real loop uses one bounded runtime block
+ * type for both complete and partial blocks; keeping one type avoids a
+ * combinatorial M/N/K instantiation explosion while still preserving the
+ * strongest bounds shared by every block.
  *
  * Whether a given axis emits an actual loop at all is decided per axis by
  * `generates_loop_v` from the `CacheLoopMode` and Meta bounds.
@@ -172,6 +176,41 @@ inline constexpr Axis order_axis_v = [] {
   else return Order::third;
 }();
 
+/// Upper bound shared by every block of a real cache loop. Invalid or absent
+/// positive tile bounds are deliberately treated as unknown: the loop's
+/// runtime assertion remains the authority for positivity, while this alias
+/// must stay well-formed for every ValueType.
+template <meta::ValueType Tile>
+inline constexpr nint_t cache_block_upper_v = [] {
+  using T = std::remove_cvref_t<Tile>;
+  if constexpr (meta::has_upper_bound_v<T> &&
+                meta::upper_bound_v<T> >= 1)
+    return meta::upper_bound_v<T>;
+  else
+    return meta::kHiInf;
+}();
+
+/// A real loop deliberately presents one common block type to its continuation
+/// instead of cloning the remaining nest for full/tail combinations. A finite
+/// tile upper bound produces useful bounded metadata; without one, retaining
+/// only the trivial non-negative fact is not worth perturbing established
+/// unconstrained code generation, so the type remains Any. M/N blocks are
+/// non-empty; K additionally admits zero for the semantic empty-product leaf.
+template <Axis Target, meta::ValueType Tile>
+using CacheBlock = std::conditional_t<
+    meta::has_upper_bound_v<std::remove_cvref_t<Tile>>,
+    meta::Dynamic<
+        1, Target == Axis::K ? 0 : 1, cache_block_upper_v<Tile>>,
+    meta::Any>;
+
+/// Whether the metadata alone proves that an axis is a single cache block.
+template <meta::ValueType Extent, meta::ValueType Tile>
+inline constexpr bool axis_always_fits_v =
+    meta::has_upper_bound_v<std::remove_cvref_t<Extent>> &&
+    meta::has_lower_bound_v<std::remove_cvref_t<Tile>> &&
+    meta::upper_bound_v<std::remove_cvref_t<Extent>> <=
+        meta::lower_bound_v<std::remove_cvref_t<Tile>>;
+
 /// The cache-blocking loop nest for one traversal order and tiling.
 /// See the file header for the recursive expansion and K-phase contract.
 template <typename Order, typename Tiling>
@@ -289,40 +328,92 @@ private:
         const nint_t tile = static_cast<nint_t>(axis_tile<Target>(tiling));
         VECOPS_ASSERT(tile > 0, "matmul cache tile must be positive");
         if constexpr (Target == Axis::K) {
-          if (extent <= tile) {
-            const meta::Any active{extent};
-            auto block = replace_axis<Target>(context, 0, active);
+          if constexpr (!meta::has_upper_bound_v<Tile> &&
+                        !axis_always_fits_v<Extent, Tile>) {
+            // Preserve the established unconstrained hot path when no finite
+            // metadata can be added.
+            if (extent <= tile) {
+              const meta::Any active{extent};
+              auto block = replace_axis<Target>(context, 0, active);
+              run_depth<Depth + 1>(
+                  block, tiling, logical_k, fn,
+                  KernelPhase<true, true>{});
+            } else {
+              auto first = replace_axis<Target>(
+                  context, 0, meta::Any{tile});
+              run_depth<Depth + 1>(
+                  first, tiling, logical_k, fn,
+                  DynamicKernelPhase{true, false});
+              const nint_t last_origin = ((extent - 1) / tile) * tile;
+              for (nint_t origin = tile; origin < last_origin;
+                   origin += tile) {
+                auto middle = replace_axis<Target>(
+                    context, origin, meta::Any{tile});
+                run_depth<Depth + 1>(
+                    middle, tiling, logical_k, fn,
+                    DynamicKernelPhase{false, false});
+              }
+              auto last = replace_axis<Target>(
+                  context, last_origin,
+                  meta::Any{extent - last_origin});
+              run_depth<Depth + 1>(
+                  last, tiling, logical_k, fn,
+                  DynamicKernelPhase{false, true});
+            }
+          } else if constexpr (axis_always_fits_v<Extent, Tile>) {
             run_depth<Depth + 1>(
-                block, tiling, logical_k, fn,
+                context, tiling, logical_k, fn,
                 KernelPhase<true, true>{});
           } else {
-            auto first = replace_axis<Target>(
-                context, 0, meta::Any{tile});
-            run_depth<Depth + 1>(
-                first, tiling, logical_k, fn,
-                DynamicKernelPhase{true, false});
-            const nint_t last_origin = ((extent - 1) / tile) * tile;
-            for (nint_t origin = tile; origin < last_origin;
-                 origin += tile) {
-              auto middle = replace_axis<Target>(
-                  context, origin, meta::Any{tile});
+            if (extent <= tile) {
+              auto block = replace_axis<Target>(
+                  context, 0, CacheBlock<Target, Tile>{extent});
               run_depth<Depth + 1>(
-                  middle, tiling, logical_k, fn,
-                  DynamicKernelPhase{false, false});
+                  block, tiling, logical_k, fn,
+                  KernelPhase<true, true>{});
+            } else {
+              auto first = replace_axis<Target>(
+                  context, 0, CacheBlock<Target, Tile>{tile});
+              run_depth<Depth + 1>(
+                  first, tiling, logical_k, fn,
+                  DynamicKernelPhase{true, false});
+              const nint_t last_origin = ((extent - 1) / tile) * tile;
+              for (nint_t origin = tile; origin < last_origin;
+                   origin += tile) {
+                auto middle = replace_axis<Target>(
+                    context, origin, CacheBlock<Target, Tile>{tile});
+                run_depth<Depth + 1>(
+                    middle, tiling, logical_k, fn,
+                    DynamicKernelPhase{false, false});
+              }
+              auto last = replace_axis<Target>(
+                  context, last_origin,
+                  CacheBlock<Target, Tile>{extent - last_origin});
+              run_depth<Depth + 1>(
+                  last, tiling, logical_k, fn,
+                  DynamicKernelPhase{false, true});
             }
-            auto last = replace_axis<Target>(
-                context, last_origin,
-                meta::Any{extent - last_origin});
-            run_depth<Depth + 1>(
-                last, tiling, logical_k, fn,
-                DynamicKernelPhase{false, true});
           }
         } else {
-          for (nint_t origin = 0; origin < extent; origin += tile) {
-            const meta::Any active{std::min(tile, extent - origin)};
-            auto block = replace_axis<Target>(context, origin, active);
+          if constexpr (!meta::has_upper_bound_v<Tile> &&
+                        !axis_always_fits_v<Extent, Tile>) {
+            for (nint_t origin = 0; origin < extent; origin += tile) {
+              const meta::Any active{std::min(tile, extent - origin)};
+              auto block = replace_axis<Target>(context, origin, active);
+              run_depth<Depth + 1>(
+                  block, tiling, logical_k, fn, phase);
+            }
+          } else if constexpr (axis_always_fits_v<Extent, Tile>) {
             run_depth<Depth + 1>(
-                block, tiling, logical_k, fn, phase);
+                context, tiling, logical_k, fn, phase);
+          } else {
+            for (nint_t origin = 0; origin < extent; origin += tile) {
+              auto block = replace_axis<Target>(
+                  context, origin, CacheBlock<Target, Tile>{
+                      std::min(tile, extent - origin)});
+              run_depth<Depth + 1>(
+                  block, tiling, logical_k, fn, phase);
+            }
           }
         }
       }
@@ -380,48 +471,96 @@ private:
           // K is the only axis needing a phase split: it is the only axis
           // whose blocks accumulate into the same output. Blocks are split
           // into first / middle(s) / last rather than a uniform loop so the
-          // first block carries a compile-time full-tile extent (Any{tile})
-          // and only the last block is dynamically sized.
-          if (extent <= tile) {
-            const meta::Any active{extent};
-            auto block = replace_axis<Target>(context, 0, active);
+          // A real loop keeps one bounded active-extent type across first,
+          // middle, and last blocks so the remaining nest is not cloned.
+          if constexpr (!meta::has_upper_bound_v<Tile> &&
+                        !axis_always_fits_v<Extent, Tile>) {
+            // Keep the historical unconstrained recursion unchanged when
+            // neither a finite block bound nor a static single block exists.
+            if (extent <= tile) {
+              const meta::Any active{extent};
+              auto block = replace_axis<Target>(context, 0, active);
+              continue_after_axis<Depth, Target>(
+                  block, tiling, logical_k, state, hook, fn,
+                  KernelPhase<true, true>{});
+            } else {
+              auto first = replace_axis<Target>(
+                  context, 0, meta::Any{tile});
+              continue_after_axis<Depth, Target>(
+                  first, tiling, logical_k, state, hook, fn,
+                  DynamicKernelPhase{true, false});
+              const nint_t last_origin = ((extent - 1) / tile) * tile;
+              for (nint_t origin = tile; origin < last_origin;
+                   origin += tile) {
+                auto middle = replace_axis<Target>(
+                    context, origin, meta::Any{tile});
+                continue_after_axis<Depth, Target>(
+                    middle, tiling, logical_k, state, hook, fn,
+                    DynamicKernelPhase{false, false});
+              }
+              auto last = replace_axis<Target>(
+                  context, last_origin,
+                  meta::Any{extent - last_origin});
+              continue_after_axis<Depth, Target>(
+                  last, tiling, logical_k, state, hook, fn,
+                  DynamicKernelPhase{false, true});
+            }
+          } else if constexpr (axis_always_fits_v<Extent, Tile>) {
             continue_after_axis<Depth, Target>(
-                block, tiling, logical_k, state, hook, fn,
+                context, tiling, logical_k, state, hook, fn,
                 KernelPhase<true, true>{});
           } else {
-            auto first = replace_axis<Target>(
-                context, 0, meta::Any{tile});
-            continue_after_axis<Depth, Target>(
-                first, tiling, logical_k, state, hook, fn,
-                DynamicKernelPhase{true, false});
-            // Align the last block's origin down to a tile boundary
-            // (((extent-1)/tile)*tile) so the last block is at most one tile.
-            // Exact multiples retain one full final block instead of
-            // producing a zero-sized tail.
-            const nint_t last_origin = ((extent - 1) / tile) * tile;
-            for (nint_t origin = tile; origin < last_origin;
-                 origin += tile) {
-              auto middle = replace_axis<Target>(
-                  context, origin, meta::Any{tile});
+            if (extent <= tile) {
+              auto block = replace_axis<Target>(
+                  context, 0, CacheBlock<Target, Tile>{extent});
               continue_after_axis<Depth, Target>(
-                  middle, tiling, logical_k, state, hook, fn,
-                  DynamicKernelPhase{false, false});
+                  block, tiling, logical_k, state, hook, fn,
+                  KernelPhase<true, true>{});
+            } else {
+              auto first = replace_axis<Target>(
+                  context, 0, CacheBlock<Target, Tile>{tile});
+              continue_after_axis<Depth, Target>(
+                  first, tiling, logical_k, state, hook, fn,
+                  DynamicKernelPhase{true, false});
+              const nint_t last_origin = ((extent - 1) / tile) * tile;
+              for (nint_t origin = tile; origin < last_origin;
+                   origin += tile) {
+                auto middle = replace_axis<Target>(
+                    context, origin, CacheBlock<Target, Tile>{tile});
+                continue_after_axis<Depth, Target>(
+                    middle, tiling, logical_k, state, hook, fn,
+                    DynamicKernelPhase{false, false});
+              }
+              auto last = replace_axis<Target>(
+                  context, last_origin,
+                  CacheBlock<Target, Tile>{extent - last_origin});
+              continue_after_axis<Depth, Target>(
+                  last, tiling, logical_k, state, hook, fn,
+                  DynamicKernelPhase{false, true});
             }
-            auto last = replace_axis<Target>(
-                context, last_origin,
-                meta::Any{extent - last_origin});
-            continue_after_axis<Depth, Target>(
-                last, tiling, logical_k, state, hook, fn,
-                DynamicKernelPhase{false, true});
           }
         } else {
-          // M/N blocks are independent: uniform stepping with an inline
-          // min(tile, remainder) tail, no phase.
-          for (nint_t origin = 0; origin < extent; origin += tile) {
-            const meta::Any active{std::min(tile, extent - origin)};
-            auto block = replace_axis<Target>(context, origin, active);
+          // M/N blocks are independent and share one bounded type across full
+          // and partial blocks.
+          if constexpr (!meta::has_upper_bound_v<Tile> &&
+                        !axis_always_fits_v<Extent, Tile>) {
+            for (nint_t origin = 0; origin < extent; origin += tile) {
+              const meta::Any active{std::min(tile, extent - origin)};
+              auto block = replace_axis<Target>(context, origin, active);
+              continue_after_axis<Depth, Target>(
+                  block, tiling, logical_k, state, hook, fn, phase);
+            }
+          } else if constexpr (axis_always_fits_v<Extent, Tile>) {
             continue_after_axis<Depth, Target>(
-                block, tiling, logical_k, state, hook, fn, phase);
+                context, tiling, logical_k, state, hook, fn, phase);
+          } else {
+            for (nint_t origin = 0; origin < extent; origin += tile) {
+              auto block = replace_axis<Target>(
+                  context, origin, CacheBlock<Target, Tile>{
+                      std::min(tile, extent - origin)});
+              continue_after_axis<Depth, Target>(
+                  block, tiling, logical_k, state, hook, fn, phase);
+            }
           }
         }
       }

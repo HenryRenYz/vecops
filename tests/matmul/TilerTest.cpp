@@ -484,6 +484,79 @@ TEST(MatmulLoopNestTest, ReportsKBlockPhases) {
   EXPECT_EQ(active, (std::vector<nint_t>{2, 2, 1}));
 }
 
+TEST(MatmulLoopNestTest, PreservesSingletonExtentMetadata) {
+  using Tiling = matmul::CacheTiling<
+      meta::Const<2>, meta::Const<2>, meta::Const<2>,
+      matmul::CacheLoopMode::enabled,
+      matmul::CacheLoopMode::enabled,
+      matmul::CacheLoopMode::enabled>;
+  using Singleton = meta::Dynamic<1, 1, 1>;
+  int calls = 0;
+  matmul::details::LoopNest<matmul::loop_order::MNK, Tiling>::run_phased(
+      Singleton{1}, meta::cint<1>, meta::cint<1>, Tiling{},
+      [&](const auto& block, auto phase) {
+        ++calls;
+        static_assert(std::same_as<
+                      std::remove_cvref_t<decltype(block.m)>, Singleton>);
+        static_assert(std::same_as<
+                      std::remove_cvref_t<decltype(block.n)>, meta::Const<1>>);
+        static_assert(std::same_as<
+                      std::remove_cvref_t<decltype(block.k)>, meta::Const<1>>);
+        static_assert(matmul::details::static_kernel_phase_v<
+                      decltype(phase)>);
+      });
+  EXPECT_EQ(calls, 1);
+}
+
+TEST(MatmulLoopNestTest, PreservesBoundedKBlockMetadataWithoutTypeSplitting) {
+  using Tiling = matmul::CacheTiling<
+      meta::Const<8>, meta::Const<8>, meta::Const<2>>;
+  using KBlock = meta::Dynamic<1, 0, 2>;
+  int full_blocks = 0;
+  int tail_blocks = 0;
+  matmul::details::LoopNest<matmul::loop_order::MNK, Tiling>::run_phased(
+      meta::cint<1>, meta::cint<1>, meta::Any{5}, Tiling{},
+      [&](const auto& block, auto) {
+        using K = std::remove_cvref_t<decltype(block.k)>;
+        if constexpr (std::same_as<K, KBlock>) {
+          if (static_cast<nint_t>(block.k) == 2)
+            ++full_blocks;
+          else if (static_cast<nint_t>(block.k) == 1)
+            ++tail_blocks;
+        }
+      });
+  EXPECT_EQ(full_blocks, 2);
+  EXPECT_EQ(tail_blocks, 1);
+}
+
+TEST(MatmulLoopNestTest, StatefulTraversalPreservesSpatialBlockMetadata) {
+  using Tiling = matmul::CacheTiling<
+      meta::Const<2>, meta::Const<8>, meta::Const<8>>;
+  using MBlock = meta::Dynamic<1, 1, 2>;
+  int full_blocks = 0;
+  int tail_blocks = 0;
+  auto pass_through = []<int, matmul::Axis>(
+                          const auto&, const auto&, const auto& state,
+                          auto&& continuation) {
+    continuation(state);
+  };
+  matmul::details::LoopNest<matmul::loop_order::MNK, Tiling>::
+      run_phased_with_state(
+          meta::Any{5}, meta::cint<1>, meta::cint<1>, Tiling{}, 0,
+          pass_through,
+          [&](const auto& block, auto, int) {
+            using M = std::remove_cvref_t<decltype(block.m)>;
+            if constexpr (std::same_as<M, MBlock>) {
+              if (static_cast<nint_t>(block.m) == 2)
+                ++full_blocks;
+              else if (static_cast<nint_t>(block.m) == 1)
+                ++tail_blocks;
+            }
+          });
+  EXPECT_EQ(full_blocks, 2);
+  EXPECT_EQ(tail_blocks, 1);
+}
+
 TEST(MatmulLoopNestTest, ZeroKStillEmitsSemanticOutputPhase) {
   using Tiling = matmul::CacheTiling<
       meta::Const<8>, meta::Const<8>, meta::Const<2>>;
