@@ -409,6 +409,48 @@ static_assert(matmul::details::accumulator_block_origin<
 static_assert(matmul::details::accumulator_block_origin<
               false, matmul::Axis::N, matmul::loop_order::NKM>(19) == 0);
 
+using BoundedAccumulatorExtent = meta::Dynamic<8, 8, 64>;
+constexpr auto StripeAccumulatorExtent =
+    matmul::details::accumulator_axis_extent<
+        matmul::Axis::M, matmul::loop_order::MKN>(
+            BoundedAccumulatorExtent{32}, meta::cint<16>);
+constexpr auto WholeAccumulatorExtent =
+    matmul::details::accumulator_axis_extent<
+        matmul::Axis::N, matmul::loop_order::MKN>(
+            BoundedAccumulatorExtent{32}, meta::cint<16>);
+static_assert(std::same_as<
+              std::remove_cvref_t<decltype(StripeAccumulatorExtent)>,
+              meta::Dynamic<8, 8, 16>>);
+static_assert(static_cast<nint_t>(StripeAccumulatorExtent) == 16);
+static_assert(std::same_as<
+              std::remove_cvref_t<decltype(WholeAccumulatorExtent)>,
+              BoundedAccumulatorExtent>);
+static_assert(static_cast<nint_t>(WholeAccumulatorExtent) == 32);
+
+TEST(MatmulAccumulatorTest, OutputReusePreservesShapeAndStrideMetadata) {
+  alignas(double) std::array<float, 16> storage{};
+  auto output_tensor = tensor::make_tensor(
+      storage.data(),
+      tensor::make_layout(
+          tensor::make_shape(meta::cint<3>, meta::cint<4>),
+          tensor::make_strides(meta::cint<4>, meta::cint<2>)));
+  auto output = tensor::output<float>(output_tensor);
+  using RuntimeN = meta::Dynamic<1, 1, 4>;
+  auto accumulator = matmul::details::output_acc_storage<double>(
+      output, meta::cint<3>, RuntimeN{4});
+  using AccLayout = std::remove_cvref_t<decltype(accumulator.layout())>;
+  static_assert(std::same_as<
+                tensor::size_type_t<0, AccLayout>, meta::Const<3>>);
+  static_assert(std::same_as<
+                tensor::size_type_t<1, AccLayout>, RuntimeN>);
+  static_assert(std::same_as<
+                tensor::stride_type_t<0, AccLayout>, meta::Const<2>>);
+  static_assert(std::same_as<
+                tensor::stride_type_t<1, AccLayout>, meta::Const<1>>);
+  EXPECT_EQ(static_cast<nint_t>(tensor::size<1>(accumulator)), 4);
+  EXPECT_EQ(static_cast<nint_t>(tensor::stride<0>(accumulator)), 2);
+}
+
 TEST(MatmulLoopNestTest, DisabledAxisDoesNotGenerateBlocks) {
   int calls = 0;
   matmul::details::LoopNest<

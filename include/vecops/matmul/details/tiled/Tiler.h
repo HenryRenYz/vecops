@@ -95,6 +95,19 @@ VECOPS_INLINE auto narrow_c_output(
   return tensor::narrow_view<1>(rows, n_origin, n);
 }
 
+/** Split-K accumulator extent for one spatial axis. An axis outside K only
+ * needs one tile stripe; an axis inside K must keep its full logical extent.
+ * Value-aware min preserves constants, alignment, and finite bounds. */
+template <Axis Target, typename Order,
+          meta::ValueType Extent, meta::ValueType Tile>
+VECOPS_ALWAYS_INLINE constexpr auto accumulator_axis_extent(
+    Extent extent, Tile tile) {
+  if constexpr (axis_precedes_k_v<Target, Order>)
+    return vecops::min(extent, tile);
+  else
+    return extent;
+}
+
 /** Establish a bounded packed panel after its M/K or N/K dependencies have
  * been selected and immediately before the operand's innermost reuse loop. */
 template <typename AtomT, typename AController, typename BController,
@@ -279,8 +292,6 @@ VECOPS_INLINE void run_tiled_rank2(
       kernel::matmul_implementation::scratch_bytes<Implementation>();
   if (scratch_bytes != 0) scratch = workspace.allocate(scratch_bytes, 64);
 
-  const nint_t logical_m = static_cast<nint_t>(problem.m);
-  const nint_t logical_n = static_cast<nint_t>(problem.n);
   const nint_t logical_k = static_cast<nint_t>(problem.k);
   // Split-K accumulator shape inference:
   //
@@ -300,12 +311,10 @@ VECOPS_INLINE void run_tiled_rank2(
       logical_k > static_cast<nint_t>(tiling.kc);
   using Acc = typename AtomT::TAcc;
   constexpr bool OutputAcc = uses_output_accumulator_v<Config, COutputSpec>;
-  const nint_t acc_m = axis_precedes_k_v<Axis::M, Order>
-      ? std::min(logical_m, static_cast<nint_t>(tiling.mc))
-      : logical_m;
-  const nint_t acc_n = axis_precedes_k_v<Axis::N, Order>
-      ? std::min(logical_n, static_cast<nint_t>(tiling.nc))
-      : logical_n;
+  const auto acc_m = accumulator_axis_extent<Axis::M, Order>(
+      problem.m, tiling.mc);
+  const auto acc_n = accumulator_axis_extent<Axis::N, Order>(
+      problem.n, tiling.nc);
   // Three accumulator sources: (1) OutputAcc reuses the output tensor's own
   // storage (full logical extent, no allocation); (2) split_k without
   // output reuse allocates the workspace tensor sized above; (3) no split
@@ -313,15 +322,17 @@ VECOPS_INLINE void run_tiled_rank2(
   Acc* acc_data = nullptr;
   if (split_k && !OutputAcc) {
     acc_data = static_cast<Acc*>(workspace.allocate(
-        acc_m * acc_n * static_cast<nint_t>(sizeof(Acc)), 64));
+        static_cast<nint_t>(acc_m) * static_cast<nint_t>(acc_n) *
+            static_cast<nint_t>(sizeof(Acc)),
+        64));
   }
   auto acc_tensor = [&]() {
     if constexpr (OutputAcc) {
-      return output_acc_storage<Acc>(c_output, logical_m, logical_n);
+      return output_acc_storage<Acc>(c_output, problem.m, problem.n);
     } else {
       return tensor::make_tensor(
           acc_data, tensor::make_layout(
-              tensor::make_shape(meta::Any{acc_m}, meta::Any{acc_n})));
+              tensor::make_shape(acc_m, acc_n)));
     }
   }();
   auto acc_input = tensor::input<Acc>(acc_tensor);
@@ -475,15 +486,11 @@ VECOPS_INLINE nint_t tiled_workspace_bytes(
   if (GeneratesKLoop && logical_k > static_cast<nint_t>(tiling.kc) &&
       !uses_output_accumulator_v<Config, COutputSpec>) {
     // Same stripe-vs-whole-axis accumulator inference as run_tiled_rank2.
-    const nint_t acc_m = axis_precedes_k_v<Axis::M, Order>
-        ? std::min(logical_m, static_cast<nint_t>(tiling.mc))
-        : logical_m;
-    const nint_t acc_n = axis_precedes_k_v<Axis::N, Order>
-        ? std::min(logical_n, static_cast<nint_t>(tiling.nc))
-        : logical_n;
+    const auto acc_m = accumulator_axis_extent<Axis::M, Order>(m, tiling.mc);
+    const auto acc_n = accumulator_axis_extent<Axis::N, Order>(n, tiling.nc);
     // +63: 64-byte allocation-alignment slack (workspace.allocate rounds
     // the payload up to a 64-byte boundary).
-    bytes += acc_m * acc_n *
+    bytes += static_cast<nint_t>(acc_m) * static_cast<nint_t>(acc_n) *
         static_cast<nint_t>(sizeof(typename AtomT::TAcc)) + 63;
   }
   const nint_t panel_m = std::min(logical_m,
