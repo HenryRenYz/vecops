@@ -457,6 +457,18 @@ static_assert(matmul::details::accumulator_block_origin<
               false, matmul::Axis::N, matmul::loop_order::NKM>(19) == 0);
 
 using BoundedAccumulatorExtent = meta::Dynamic<8, 8, 64>;
+constexpr auto BoundedPanelExtent = matmul::details::bounded_extent(
+    BoundedAccumulatorExtent{32}, meta::cint<16>);
+constexpr auto SameTypePanelExtent = matmul::details::bounded_extent(
+    BoundedAccumulatorExtent{32}, BoundedAccumulatorExtent{16});
+static_assert(std::same_as<
+              std::remove_cvref_t<decltype(BoundedPanelExtent)>,
+              meta::Dynamic<8, 8, 16>>);
+static_assert(static_cast<nint_t>(BoundedPanelExtent) == 16);
+static_assert(std::same_as<
+              std::remove_cvref_t<decltype(SameTypePanelExtent)>,
+              BoundedAccumulatorExtent>);
+static_assert(static_cast<nint_t>(SameTypePanelExtent) == 16);
 constexpr auto StripeAccumulatorExtent =
     matmul::details::accumulator_axis_extent<
         matmul::Axis::M, matmul::loop_order::MKN>(
