@@ -104,17 +104,20 @@ The operator set (`+`, `-`, unary `-`, `*`, `/`, `%`) is overloaded for
 | `Const<N> ± Dynamic<A,L,H>` | `Dynamic<g, shifted bounds>` with `g = min(A, lsb(N))` (or `A` if `N == 0`); bounds shift by `±N` (swapped for `Const - Dyn`) |
 | `Dynamic ± Dynamic` | `Dynamic<min(A1,A2), merged bounds>` — the weaker alignment survives, bounds add/subtract corner-wise |
 | `Const<N> * Const<M>` | `Const<N*M>` |
-| `Const<N> * Dynamic<A,...>` | `Const<0>` if `N == 0`; else `Dynamic<A * lsb(N), scaled bounds>` |
-| `Dynamic * Dynamic` | `Dynamic<A1*A2, four-corner bounds>` |
-| `Dynamic<A,...> / Const<N>` | `Dynamic<A/N,...>` if `A % N == 0`, else alignment degrades to 1; bounds from endpoint analysis |
+| `Const<N> * Dynamic<A,...>` | `Const<0>` if `N == 0`; else `Dynamic<A * lsb(N), scaled bounds>`; available bounds propagate independently |
+| `Dynamic * Dynamic` | `Dynamic<A1*A2, four-corner bounds>`; sign-proven one-sided ranges retain the bounds that can be established |
+| `Dynamic<A,...> / Const<N>` | `Dynamic<A/abs(N),...>` if `A % N == 0`, else alignment degrades to 1; available bounds propagate independently and swap for negative `N` |
 | `Const / Dynamic`, `Dynamic / Dynamic` | alignment always degrades to 1; bounds exact only when the denominator range does not cross zero (otherwise unbounded) |
-| `Dynamic<A,...> % Const<N>` | **`Const<0>`** if `A % N == 0` (every value is a multiple of `N`); else `Dynamic<1, remainder range>` |
-| `Const % Dynamic`, `Dynamic % Dynamic` | alignment degrades to 1; conservative remainder bounds |
+| `Dynamic<A,...> % Const<N>` | **`Const<0>`** if `A % N == 0` (every value is a multiple of `N`); else `Dynamic<gcd(A,N), remainder range>` |
+| `Const<N> % Dynamic<A,...>` | common alignment and sign survive; magnitude is bounded by `abs(N)` and, for a bounded divisor, by its maximum magnitude minus one; `N == 0` folds to `Const<0>` |
+| `Dynamic % Dynamic` | common alignment survives; conservative one-sided remainder bounds survive even for otherwise unbounded operands |
 
-Any operand that is a raw `nint_t` is wrapped as `Any` first, so it
+Any operand that is a raw `nint_t` is wrapped as `Any` first, so that operand
 contributes nothing: `dyn<8>(64) + nint_t{3}` is an unconstrained `Any`
-result, not a `Dynamic<8>`. If the integer is actually known, say so with
-`cint<N>`.
+result, not a `Dynamic<8>`. Information implied by the other operand and the
+operation itself can still survive (for example, a remainder by a runtime
+integer still has a finite range when the dividend is `Const`). If the raw
+integer is actually known, say so with `cint<N>`.
 
 Two invariant notes behind the rules: alignments are always powers of two,
 and `min`/`gcd` of powers of two is again a power of two, so results stay
@@ -136,7 +139,7 @@ propagate:
 | `min/max(Dyn, Dyn)` | `Dynamic<gcd(A1,A2), merged bounds>` | bound sentinels compare naturally, no special case |
 | `clamp(Dyn, Const<Lo>, Const<Hi>)` | intersection bounds; **folds to `Const`** when the intersection collapses or the Dynamic lies entirely outside `[Lo, Hi]` | alignment `gcd(gcd(A,Lo),Hi)`; **no `nint_t`-bound overload** — runtime bounds have nothing to propagate |
 | `ceil_div` / `floor_div(Dyn, Const<N>)` | `Dynamic<A/N,...>` if `A % N == 0`, else alignment 1 | `N > 0` required (static_assert); runtime-divisor forms return plain `Any` |
-| `align_up` / `align_down(Dyn, Const<N>)` | identity with alignment `A` preserved when `A % N == 0`; otherwise `Dynamic<gcd(A,N)>` | runtime-alignment forms return plain `Any` |
+| `align_up` / `align_down(Dyn, Const<N>)` | identity with alignment `A` preserved when `A % N == 0`; otherwise `Dynamic<lsb(N)>` because every result is an `N`-multiple | each available bound propagates independently; runtime-alignment forms return plain `Any` |
 
 As with the arithmetic operators, every `nint_t` operand participates as
 `Any`.
@@ -194,9 +197,10 @@ instance:
   add/sub/mul with constants, `min` for add/sub of two Dynamics, products
   for mul — all keeping the power-of-two invariant;
 - bounds propagate by interval arithmetic: shifting for `±Const`, corner
-  merging for `*`, and endpoint analysis of (piecewise) monotone functions
-  for division/remainder, with explicit unbounded branches whenever a
-  sentinel would be destroyed by the arithmetic (e.g. `kLoInf / N`);
+  merging (plus sign-aware one-sided inference) for `*`, monotonic endpoint
+  propagation for division, and sign/magnitude bounds for remainder. Each
+  sentinel is handled independently so one missing side does not erase a
+  provable bound on the other side;
 - `PackedStorage` computes its compression offsets with a fold over the
   type pack at compile time (`offsets`, `num_stor`), so packing and
   unpacking are index remaps with no runtime dispatch.
@@ -233,8 +237,10 @@ tiles. It is not a C++ `alignof` and not tied to pointers.
 
 **Division and remainder are deliberately conservative.** Quotients lose
 alignment unless the divisor divides the operand alignment exactly;
-denominator ranges crossing zero lose bounds. Inspect the *result type*
-(`decltype`) before relying on a bound in a specialization.
+denominator ranges crossing zero lose quotient bounds. Remainders retain the
+common divisor alignment and any independently provable sign/magnitude bound.
+Inspect the *result type* (`decltype`) before relying on a constraint in a
+specialization.
 
 **`clamp` has no runtime-bounds overload.** `clamp(d, lo_dyn, hi_dyn)` does
 not exist — runtime bounds carry no compile-time information, so there is
