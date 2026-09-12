@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "vecops/matmul/details/tiled/LoopNest.h"
+#include "vecops/matmul/details/tiled/ProblemMapper.h"
 #include "vecops/matmul/details/planning/FamilySelector.h"
 #include "vecops/matmul/details/kernel/RuntimeDispatch.h"
 #include "vecops/matmul/details/tiled/PolicyTraits.h"
@@ -94,6 +95,21 @@ static_assert(!sme_small_vector_profitable(
 static_assert(amx_residual_split_profitable(17, 33, 1024));
 static_assert(amx_residual_split_profitable(33, 17, 1024));
 static_assert(!amx_residual_split_profitable(19, 33, 1024));
+
+TEST(MatmulProblemMapperTest, PreservesValidatedNonnegativeMetadata) {
+  const auto mapped = matmul::details::ProblemMapper::map(
+      meta::Any{17}, meta::Dynamic<8, -16, 128>{24},
+      meta::Dynamic<4, 16, 256>{32});
+  EXPECT_EQ(static_cast<nint_t>(mapped.m), 17);
+  EXPECT_EQ(static_cast<nint_t>(mapped.n), 24);
+  EXPECT_EQ(static_cast<nint_t>(mapped.k), 32);
+  EXPECT_TRUE((std::same_as<
+      decltype(mapped.m), meta::Dynamic<1, 0, meta::kHiInf>>));
+  EXPECT_TRUE((std::same_as<
+      decltype(mapped.n), meta::Dynamic<8, 0, 128>>));
+  EXPECT_TRUE((std::same_as<
+      decltype(mapped.k), meta::Dynamic<4, 16, 256>>));
+}
 
 TEST(MatmulRuntimeDispatchTest, SharedRuntimeRulesMatchConstexprRules) {
   using namespace kernel::matmul_details;

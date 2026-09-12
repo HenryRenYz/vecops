@@ -236,6 +236,9 @@ VECOPS_INLINE void run_tiled_rank2(
       BPacking, Operand::B, Order>;
 
   const auto problem = ProblemMapper::map(m, n, k);
+  using ProblemM = std::remove_cvref_t<decltype(problem.m)>;
+  using ProblemN = std::remove_cvref_t<decltype(problem.n)>;
+  using ProblemK = std::remove_cvref_t<decltype(problem.k)>;
 
   auto tiling = resolve_cache_tiling(config);
   using ResolvedTiling = std::remove_cvref_t<decltype(tiling)>;
@@ -252,9 +255,10 @@ VECOPS_INLINE void run_tiled_rank2(
       constexpr Axis SpatialAxis = Side == Operand::A ? Axis::M : Axis::N;
       constexpr bool GeneratesSpatialLoop = LoopNest<
           Order, ResolvedTiling>::template generates_loop<
-              SpatialAxis, M, N, K>;
+              SpatialAxis, ProblemM, ProblemN, ProblemK>;
       constexpr bool GeneratesKLoop = LoopNest<
-          Order, ResolvedTiling>::template generates_loop<Axis::K, M, N, K>;
+          Order, ResolvedTiling>::template generates_loop<
+              Axis::K, ProblemM, ProblemN, ProblemK>;
       VECOPS_CHECK(static_cast<nint_t>(spatial_tile) > 0 &&
                        static_cast<nint_t>(tiling.kc) > 0,
                    "packed matmul cache tiles must be positive");
@@ -313,7 +317,8 @@ VECOPS_INLINE void run_tiled_rank2(
   //   is revisited once per K block, so the whole axis's partial sums must
   //   stay resident simultaneously: full logical extent.
   constexpr bool GeneratesKLoop = LoopNest<
-      Order, decltype(tiling)>::template generates_loop<Axis::K, M, N, K>;
+      Order, decltype(tiling)>::template generates_loop<
+          Axis::K, ProblemM, ProblemN, ProblemK>;
   const bool split_k = GeneratesKLoop &&
       logical_k > static_cast<nint_t>(tiling.kc);
   using Acc = typename AtomT::TAcc;
@@ -421,7 +426,8 @@ VECOPS_INLINE void run_tiled_rank2(
       // paths. The stateful hook is instantiated only when it creates a new
       // panel at this call site.
       LoopNest<Order, decltype(tiling)>::run_phased(
-          m, n, k, tiling, [&](const auto& block, auto phase) {
+          problem.m, problem.n, problem.k, tiling,
+          [&](const auto& block, auto phase) {
             run_leaf(block, phase, initial_state);
           });
     } else {
@@ -429,7 +435,8 @@ VECOPS_INLINE void run_tiled_rank2(
           AtomT, AController, BController,
           PackAOutsidePanel, PackBOutsidePanel, Scope> packing_hook{&scope};
       LoopNest<Order, decltype(tiling)>::run_phased_with_state(
-          m, n, k, tiling, initial_state, packing_hook, run_leaf);
+          problem.m, problem.n, problem.k,
+          tiling, initial_state, packing_hook, run_leaf);
     }
   };
   // Whole-operand packing is a compile-time representation decision. This
