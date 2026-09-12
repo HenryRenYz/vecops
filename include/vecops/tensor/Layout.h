@@ -187,6 +187,10 @@ struct ArrayMeta {
  *
  * `Shape<Is...>` inherits from `ArrayMeta<Is...>` and adds the constraint
  * that every dimension size >= 0. Construction asserts this.
+ * Fixed-axis access through `shape_extent<I>` /
+ * `shape_extent_type_t<I, Layout>` reflects that invariant as a non-negative
+ * `Dynamic` lower bound when needed, while `size<I>` remains the exact stored
+ * metadata type for compatibility.
  *
  * ## Usage
  *
@@ -763,6 +767,35 @@ using repeat_t = typename RepeatImpl<N, Meta, V>::type;
 
 // ---- Inferred contiguous Strides from Shape ----
 
+template <meta::ValueType V>
+inline constexpr nint_t value_alignment_v = [] {
+  using Value = std::remove_cvref_t<V>;
+  if constexpr (Value::is_const) {
+    constexpr nint_t alignment = meta::details::lsb(Value::value);
+    // The magnitude of the most-negative nint_t is not representable as a
+    // positive alignment. Conservatively retain divisibility by one there.
+    return alignment < 0 ? nint_t{1} : alignment;
+  } else if constexpr (requires { Value::alignment; }) {
+    return Value::alignment;
+  } else {
+    return nint_t{1};
+  }
+}();
+
+template <meta::ValueType V,
+          bool NeedsNonnegative = std::remove_cvref_t<V>::is_runtime && !meta::lower_bound_at_least_v<V, 0>>
+struct NonnegativeShapeValue {
+  using type = std::remove_cvref_t<V>;
+};
+
+template <meta::ValueType V>
+struct NonnegativeShapeValue<V, true> {
+  using type = meta::Dynamic<value_alignment_v<V>, 0, meta::upper_bound_v<V>>;
+};
+
+template <meta::ValueType V>
+using nonnegative_shape_value_t = typename NonnegativeShapeValue<V>::type;
+
 /// Compute the product type of a pack of Value types (right-to-left accumulation).
 template <typename... Ts> struct Product;
 template <> struct Product<> { using type = Const<1>; };
@@ -773,9 +806,10 @@ struct Product<T0, T1, Ts...> {
 };
 
 template <typename... Values>
-VECOPS_ALWAYS_INLINE constexpr typename Product<Values...>::type shape_product_value(const Shape<Values...>& shape) {
+VECOPS_ALWAYS_INLINE constexpr typename Product<nonnegative_shape_value_t<Values>...>::type
+shape_product_value(const Shape<Values...>& shape) {
   return [&]<std::size_t... Idx>(std::index_sequence<Idx...>) {
-    return (Values{shape[Idx]} * ...);
+    return (nonnegative_shape_value_t<Values>{shape[Idx]} * ...);
   }(std::make_index_sequence<sizeof...(Values)>{});
 }
 
@@ -950,7 +984,7 @@ struct ShapeProduct;
 
 template <typename... Values>
 struct ShapeProduct<Shape<Values...>> {
-  using type = typename Product<Values...>::type;
+  using type = typename Product<nonnegative_shape_value_t<Values>...>::type;
 };
 
 } // namespace details
@@ -969,6 +1003,10 @@ using meta_element_t = typename details::ArrayMetaElement<
 template <int I, typename TLayout>
 using size_type_t = meta_element_t<
     I, typename std::remove_cvref_t<TLayout>::Shape>;
+
+/** Shape extent type with the Shape contract's non-negative bound reified. */
+template <int I, typename TLayout>
+using shape_extent_type_t = details::nonnegative_shape_value_t<size_type_t<I, TLayout>>;
 
 template <int I, typename TLayout>
 using stride_type_t = meta_element_t<
@@ -1008,6 +1046,13 @@ VECOPS_ALWAYS_INLINE constexpr size_type_t<I, TLayout> size(
     const TLayout& layout) {
   using Size = size_type_t<I, TLayout>;
   return Size{get<I>(layout.shape())};
+}
+
+/** Fixed-axis size with the Shape contract's non-negative bound reified. */
+template <int I, LayoutLike TLayout>
+VECOPS_ALWAYS_INLINE constexpr shape_extent_type_t<I, TLayout> shape_extent(const TLayout& layout) {
+  using Extent = shape_extent_type_t<I, TLayout>;
+  return Extent{get<I>(layout.shape())};
 }
 
 /**
@@ -1213,21 +1258,6 @@ constexpr auto swap_dim(const TMeta<Is...>& m) {
   return ArrayMetaSwapDim<TMeta, I, J, Is...>::transform(m);
 }
 
-template <meta::ValueType V>
-inline constexpr nint_t runtime_permutation_alignment_v = [] {
-  using Value = std::remove_cvref_t<V>;
-  if constexpr (Value::is_const) {
-    constexpr nint_t alignment = meta::details::lsb(Value::value);
-    // The magnitude of the most-negative nint_t is not representable as a
-    // positive alignment. Conservatively retain divisibility by one there.
-    return alignment < 0 ? nint_t{1} : alignment;
-  } else if constexpr (requires { Value::alignment; }) {
-    return Value::alignment;
-  } else {
-    return nint_t{1};
-  }
-}();
-
 /** Common Value type for a runtime permutation of an ArrayMeta. Every output
  * position may receive any input position, so it retains only guarantees
  * shared by the complete pack: gcd alignment and the union of bounds. Shape
@@ -1245,7 +1275,7 @@ private:
   }();
   static constexpr nint_t RawAlignment = [] {
     nint_t alignment = 0;
-    ((alignment = std::gcd(alignment, runtime_permutation_alignment_v<Values>)), ...);
+    ((alignment = std::gcd(alignment, value_alignment_v<Values>)), ...);
     return alignment;
   }();
   static constexpr nint_t Alignment = RawAlignment == 0 ? 1 : RawAlignment;

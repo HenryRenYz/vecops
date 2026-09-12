@@ -198,7 +198,9 @@ TEST_F(TensorConstructionTest, ConstructInitListBoth) {
 
 TEST_F(TensorConstructionTest, ConstructInitListSizesOnly) {
     Tensor<int64_t, Shape<Any, Any>, Strides<Any, Any>> t(data_2d_.data(), {4, 5});
+    static_assert(std::same_as<decltype(t.shape_extent<0>()), meta::Dynamic<1, 0, meta::kHiInf>>);
     EXPECT_EQ(t.size(0), 4);
+    EXPECT_EQ(t.shape_extent<0>(), 4);
     EXPECT_EQ(t.size(1), 5);
     EXPECT_EQ(t.stride(0), 5);
     EXPECT_EQ(t.stride(1), 1);

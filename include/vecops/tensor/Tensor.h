@@ -619,6 +619,12 @@ public:
     return tensor::size<I>(_layout);
   }
 
+  /// Typed size with the Shape contract's non-negative bound reified.
+  template <int I>
+  VECOPS_ALWAYS_INLINE constexpr tensor::shape_extent_type_t<I, Layout> shape_extent() const {
+    return tensor::shape_extent<I>(_layout);
+  }
+
   /**
    * Get the typed meta::Value stride of dimension I (compile-time index).
    * Returns `Const<N>` or `Dynamic<...>` to preserve static metadata.

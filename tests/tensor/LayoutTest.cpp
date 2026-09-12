@@ -23,6 +23,13 @@ static_assert(lower_bound_at_least_v<Dynamic<4, 8, 32>, 8>);
 static_assert(upper_bound_at_most_v<Dynamic<4, 8, 32>, 32>);
 static_assert(!is_bounded_v<Any>);
 
+using RuntimeShapeLayout = Layout<Shape<Any, Dynamic<8, -16, 64>>, Strides<Any, Any>>;
+static_assert(std::same_as<size_type_t<0, RuntimeShapeLayout>, Any>);
+static_assert(std::same_as<shape_extent_type_t<0, RuntimeShapeLayout>, Dynamic<1, 0, meta::kHiInf>>);
+static_assert(std::same_as<shape_extent_type_t<1, RuntimeShapeLayout>, Dynamic<8, 0, 64>>);
+static_assert(std::same_as<decltype(tensor::shape_extent<0>(std::declval<const RuntimeShapeLayout&>())),
+                           Dynamic<1, 0, meta::kHiInf>>);
+
 using TypedLayout = Layout<Shape<Const<2>, Dynamic<4, 8, 32>, Const<16>>, Strides<Dynamic<4>, Const<16>, Const<1>>>;
 static_assert(std::same_as<size_type_t<0, TypedLayout>, Const<2>>);
 static_assert(std::same_as<size_type_t<1, TypedLayout>, Dynamic<4, 8, 32>>);

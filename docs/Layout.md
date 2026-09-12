@@ -38,6 +38,11 @@ dimension, values stored in a compressed `meta::details::PackedStorage`
 (`Const` entries cost no storage). `Shape<Is...>` adds the constraint that
 every dimension is non-negative (asserted at construction); `Strides<Is...>`
 imposes no sign constraint — zero and negative strides are legal.
+Explicit shape-contract access (`shape_extent<I>` /
+`shape_extent_type_t<I,L>`) reifies that invariant: an otherwise unbounded
+runtime entry is exposed as `Dynamic<A,0,Hi>`. `size<I>` / `size_type_t<I,L>`
+keep the exact stored metadata type for source and code-generation
+compatibility.
 
 Factories `make_shape` / `make_strides` accept any mix of typed Values and
 bare integers (bare integers promote to `Any`, exactly like meta arithmetic).
@@ -102,11 +107,12 @@ layout shapes they are specialized for.
 | `get<I>(meta)` / `meta.get<I>()` / `meta[i]` | dimension value (compile-time for `Const` entries) |
 | `is_const<I>` / `is_runtime<I>` | per-dimension staticness |
 | `size<I>(layout)` / `stride<I>(layout)` | fixed-axis typed accessors; return the corresponding `meta::Value` and preserve `Const`/`Dynamic` metadata |
+| `shape_extent<I>(layout)` / `tensor.shape_extent<I>()` | fixed-axis size with Shape's non-negative contract reified in its `Dynamic` lower bound |
 | `layout.shape()[i]` / `layout.strides()[i]` | runtime-axis accessors; return `nint_t` after metadata erasure |
 | `numel(layout)` | product of all dimension sizes as a raw `nint_t` compatibility boundary |
 | `numel_value(layout)` / `tensor.numel_value()` | typed shape product preserving `Const`/`Dynamic` alignment and bounds |
 | `offset_at(layout, i0, ..., iN)` | linear offset; **bounds-asserted** per dimension (debug) |
-| `size_type_t<I, L>` / `stride_type_t<I, L>` / `numel_type_t<L>` | the meta Value *type* of one dimension / of the element count — the inputs for compile-time decisions |
+| `size_type_t<I, L>` / `shape_extent_type_t<I,L>` / `stride_type_t<I, L>` / `numel_type_t<L>` | stored size type / non-negative size type / stride type / typed element-count type |
 | `is_array_meta_v` / `is_shape_v` / `is_strides_v` / `is_layout_v` (+ `...Like` concepts) | type classification |
 
 ### Dimension transformations
