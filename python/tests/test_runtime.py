@@ -1,6 +1,7 @@
 """Tests for the Pythonic schema, JIT, and optional-framework surface."""
 
 import ctypes
+import os
 import sys
 from pathlib import Path
 
@@ -11,6 +12,8 @@ import vecops.typing as vt
 
 VECOPS_ROOT = Path(__file__).resolve().parents[2]
 _DYNAMIC_OUTPUT_STRIDES = "Dynamic<1,D,1048576> 1"
+_TEST_CC = os.environ.get("CC", "gcc")
+_TEST_CXX = os.environ.get("CXX", "g++")
 
 
 def test_dtype_normalization_has_no_required_torch_dependency() -> None:
@@ -146,8 +149,8 @@ def test_jit_derives_complete_kernel_def_and_resolves_source(tmp_path: Path) -> 
     cache_mode="compile-only",
     build_dir=tmp_path / "build",
     target="Scalar",
-    cc="/usr/bin/gcc",
-    cxx="/usr/bin/g++",
+    cc=_TEST_CC,
+    cxx=_TEST_CXX,
   )
   kernel = make_test_kernel(compiler)
   assert kernel.source == VECOPS_ROOT / "tests/runtime/TestKernel.cpp"
@@ -165,8 +168,8 @@ def test_jit_numpy_execution(tmp_path: Path) -> None:
       cache_mode="compile-only",
       build_dir=tmp_path / "build",
       target="Scalar",
-      cc="/usr/bin/gcc",
-      cxx="/usr/bin/g++",
+      cc=_TEST_CC,
+      cxx=_TEST_CXX,
       jobs=2,
     )
   )
@@ -183,8 +186,8 @@ def test_compile_for_accepts_storage_free_tensor_meta(tmp_path: Path) -> None:
       cache_mode="compile-only",
       build_dir=tmp_path / "build",
       target="Scalar",
-      cc="/usr/bin/gcc",
-      cxx="/usr/bin/g++",
+      cc=_TEST_CC,
+      cxx=_TEST_CXX,
       jobs=2,
     )
   )
@@ -279,8 +282,8 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
     cache_mode="compile-only",
     build_dir=tmp_path / "build",
     target="Scalar",
-    cc="/usr/bin/gcc",
-    cxx="/usr/bin/g++",
+    cc=_TEST_CC,
+    cxx=_TEST_CXX,
     jobs=2,
   )
   kernel = make_test_kernel(compiler)
@@ -294,7 +297,7 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
     ),
   )
 
-  direct_memory = vecops.memory.System(backend="system")
+  direct_memory = vecops.memory.System()
   with direct_memory.workspace_session(fast_capacity=4096, slow_capacity=4096):
     kernel(input, output)
     assert sum(item["managed_bytes"] for item in direct_memory.stats()) == 8192
@@ -363,7 +366,7 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
   np.testing.assert_array_equal(output, input * 3 + 1)
   assert ctypes.c_float.from_address(workspace_address).value == 25.0
 
-  memory_system = vecops.memory.System(backend="system")
+  memory_system = vecops.memory.System()
   output.fill(0)
   with memory_system.workspace_session(fast_capacity=4096, slow_capacity=4096):
     result = bridge(
@@ -374,7 +377,7 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
       ctypes.byref(error),
     )
   assert result == 0, message.value.decode()
-  assert memory_system.stats()[0]["managed_bytes"] == 0
+  assert sum(item["managed_bytes"] for item in memory_system.stats()) == 0
 
   output.fill(0)
   managed_context = ExecutionContext(

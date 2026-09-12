@@ -7,7 +7,7 @@ from vecops import memory
 
 
 def test_system_buffer_is_writable_and_accounted() -> None:
-  system = memory.System(backend="system")
+  system = memory.System()
   owner = system.allocate(4097, alignment=4096)
   view = memoryview(owner)
 
@@ -16,16 +16,21 @@ def test_system_buffer_is_writable_and_accounted() -> None:
   view[-1] = 29
   assert view[0] == 17
   assert view[-1] == 29
-  assert system.stats()[0]["managed_bytes"] == 4097
+  assert sum(item["managed_bytes"] for item in system.stats()) == 4097
 
   del view
   del owner
   gc.collect()
-  assert system.stats()[0]["managed_bytes"] == 0
+  assert sum(item["managed_bytes"] for item in system.stats()) == 0
 
 
 def test_topology_and_tiers_are_machine_readable() -> None:
-  system = memory.System(backend="system")
+  try:
+    system = memory.System(backend="system")
+  except RuntimeError as error:
+    if "cannot represent a multi-NUMA machine" in str(error):
+      pytest.skip("portable backend intentionally supports only one NUMA node")
+    raise
   topology = system.topology()
 
   assert topology["backend"] == "system"
@@ -35,7 +40,7 @@ def test_topology_and_tiers_are_machine_readable() -> None:
 
 
 def test_invalid_public_choice_is_clear() -> None:
-  system = memory.System(backend="system")
+  system = memory.System()
   with pytest.raises(ValueError, match="placement must be one of"):
     system.allocate(64, placement="quickish")
   with pytest.raises(ValueError, match="tier requires"):
@@ -44,20 +49,20 @@ def test_invalid_public_choice_is_clear() -> None:
 
 def test_numpy_array_retains_allocation() -> None:
   np = pytest.importorskip("numpy")
-  system = memory.System(backend="system")
+  system = memory.System()
   array = memory.numpy.zeros((7, 9), dtype=np.float32, system=system)
 
   assert array.shape == (7, 9)
   assert array.flags.c_contiguous
   assert np.count_nonzero(array) == 0
-  assert system.stats()[0]["managed_bytes"] == array.nbytes
+  assert sum(item["managed_bytes"] for item in system.stats()) == array.nbytes
 
   del array
-  assert system.stats()[0]["managed_bytes"] == 0
+  assert sum(item["managed_bytes"] for item in system.stats()) == 0
 
 
 def test_workspace_session_is_single_use_and_releases_arenas() -> None:
-  system = memory.System(backend="system")
+  system = memory.System()
   session = system.workspace_session(fast_capacity=4096, slow_capacity=4096)
 
   assert sum(item["managed_bytes"] for item in system.stats()) == 8192
