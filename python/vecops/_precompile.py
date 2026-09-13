@@ -6,7 +6,7 @@ import contextlib
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable
 
 from . import _C
@@ -32,6 +32,7 @@ class PrecompileResult:
   prepared: int
   parallelism: int
   elapsed_seconds: float
+  graph: Any | None = None
 
 
 class CompileRequestCollector:
@@ -217,6 +218,48 @@ def maybe_collect_call(
           name=request_name,
       )
   )
+  # Collection short-circuits the generated Torch dispatcher call, so a
+  # TorchDispatchMode cannot observe this operator.  Emit the semantic vecops
+  # call directly into an active execution-graph capture while retaining the
+  # caller-allocated output tensors and their explicit access contracts.
+  from .graph import AccessKind, current_capture
+
+  graph_capture = current_capture()
+  if graph_capture is not None:
+    from .graph.torch import is_tensor, register_tensor
+
+    graph_inputs = []
+    graph_outputs = []
+    for argument, parameter in zip(arguments, parameters):
+      if (
+        not isinstance(parameter, _C.TensorDef)
+        or argument is None
+        or not is_tensor(argument)
+      ):
+        continue
+      try:
+        graph_capture.tensor_id(argument)
+      except KeyError:
+        register_tensor(graph_capture, argument, kind="external", external=True)
+      access_name = str(parameter.access).lower()
+      if "inout" in access_name:
+        access = AccessKind.read_write
+      elif parameter.output:
+        access = AccessKind.write
+      else:
+        access = AccessKind.read
+      graph_inputs.append((argument, access, parameter.name))
+      if parameter.output:
+        graph_outputs.append(argument)
+    graph_capture.record_operator(
+      request_name,
+      inputs=graph_inputs,
+      outputs=graph_outputs,
+      attributes={
+        "framework": "vecops",
+        "specializations": dict(value_signature),
+      },
+    )
   return True
 
 
@@ -278,6 +321,9 @@ def precompile(
     *args: Any,
     use_real_tensors: bool = False,
     parallelism: int | None = None,
+    capture_graph: bool = False,
+    graph_name: str | None = None,
+    _graph_state_owner: Any | None = None,
     prepare_owner: bool = True,
     prepare_barrier: Callable[[], None] | None = None,
     prepare_rank: int | None = None,
@@ -290,13 +336,56 @@ def precompile(
   and intermediate factory results carry metadata only. Set
   ``use_real_tensors=True`` to run ordinary Torch operations on the supplied
   values while vecops calls still return their caller-allocated, uninitialized
-  outputs.
+  outputs. Set ``capture_graph=True`` to additionally return a framework-neutral
+  operator, storage, alias, loop, and semantic-lifetime trace in ``result.graph``.
   """
   import torch
   from torch._subclasses.fake_tensor import FakeTensorMode
 
   if not isinstance(use_real_tensors, bool):
     raise TypeError("use_real_tensors must be bool")
+
+  if not isinstance(capture_graph, bool):
+    raise TypeError("capture_graph must be bool")
+
+  graph_capture = None
+  captured_graph = None
+  if capture_graph:
+    from .graph import GraphCapture
+
+    graph_capture = GraphCapture(
+      graph_name or getattr(model, "__qualname__", model.__class__.__qualname__),
+      attributes={
+        "framework": "torch",
+        "trace_mode": "real" if use_real_tensors else "fake",
+        "torch_version": torch.__version__,
+      },
+    )
+
+  def run_model(model_args, model_kwargs, *, fake_mode=None):
+    if graph_capture is None:
+      return model(*model_args, **model_kwargs)
+    from .graph.torch import (
+      mark_graph_outputs,
+      record_torch,
+      register_inputs,
+      register_module_state,
+    )
+
+    with graph_capture:
+      state_owner = _graph_state_owner if _graph_state_owner is not None else model
+      if hasattr(state_owner, "named_parameters") and hasattr(
+        state_owner, "named_buffers"
+      ):
+        register_module_state(graph_capture, state_owner, fake_mode=fake_mode)
+      # ``model_args`` have already been converted by ``_fake_tree`` when a
+      # FakeTensorMode is supplied; converting those FakeTensors again is both
+      # unnecessary and rejected by some Torch releases.
+      register_inputs(graph_capture, (model_args, model_kwargs))
+      with record_torch(graph_capture):
+        result = model(*model_args, **model_kwargs)
+      mark_graph_outputs(graph_capture, result)
+      return result
 
   with collect_compile_requests() as collector:
     with torch.inference_mode():
@@ -305,13 +394,16 @@ def precompile(
       # Dynamo graphs used by ordinary inference.
       with torch.compiler.set_stance("force_eager"):
         if use_real_tensors:
-          model(*args, **kwargs)
+          run_model(args, kwargs)
         else:
           mode = FakeTensorMode(allow_non_fake_inputs=True)
           with mode:
             fake_args = _fake_tree(args, mode, torch)
             fake_kwargs = _fake_tree(kwargs, mode, torch)
-            model(*fake_args, **fake_kwargs)
+            run_model(fake_args, fake_kwargs, fake_mode=mode)
+
+  if graph_capture is not None:
+    captured_graph = graph_capture.finish()
 
   from ._schema_bridge import compile_pending_torch_bridges
 
@@ -335,7 +427,7 @@ def precompile(
         compile_pending_torch_bridges(parallelism=parallelism)
       prepare_barrier()
     assert result is not None
-    return result
+    return replace(result, graph=captured_graph)
 
   # Backward-compatible two-phase owner mode.
   if prepare_barrier is not None and not prepare_owner:
@@ -344,7 +436,7 @@ def precompile(
   compile_pending_torch_bridges(parallelism=parallelism)
   if prepare_barrier is not None and prepare_owner:
     prepare_barrier()
-  return result
+  return replace(result, graph=captured_graph)
 
 
 __all__ = [

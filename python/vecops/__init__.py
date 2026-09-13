@@ -1,6 +1,6 @@
 """Pythonic compiler/runtime API; low-level bindings live in :mod:`vecops._C`."""
 
-from . import _C, ops
+from . import _C, graph, ops, planner
 
 if hasattr(_C, "MemorySystem"):
   from . import memory as memory
@@ -67,7 +67,9 @@ __all__ = [  # noqa: RUF022 - retain the established public API grouping
   "is_precompiling",
   "jit",
   "normalize_dtype",
+  "graph",
   "ops",
+  "planner",
   "precompile",
   "uint8",
   "uint16",

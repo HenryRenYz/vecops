@@ -1,6 +1,7 @@
 """End-to-end ordered dispatch through a generated mutable Torch bridge."""
 
 from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 
 import numpy as np
@@ -39,8 +40,8 @@ def test_generated_mutable_out_operator_and_ordered_dispatch(tmp_path: Path) -> 
     cache_mode="compile-only",
     build_dir=tmp_path / "kernels",
     target="Scalar",
-    cc="/usr/bin/gcc",
-    cxx="/usr/bin/g++",
+    cc=os.environ.get("CC", "/usr/bin/gcc"),
+    cxx=os.environ.get("CXX", "/usr/bin/g++"),
     jobs=2,
   )
   function = vecops.ops.torch.register(
@@ -70,10 +71,25 @@ def test_generated_mutable_out_operator_and_ordered_dispatch(tmp_path: Path) -> 
       return destination
 
   traced_model = Model()
-  precompiled = vecops.precompile(traced_model, input, parallelism=2)
+  precompiled = vecops.precompile(
+    traced_model, input, parallelism=2, capture_graph=True
+  )
   assert traced_model.saw_precompile
   assert precompiled.collected == 1
   assert precompiled.prepared == 1
+  assert precompiled.graph is not None
+  precompiled.graph.validate()
+  vecops_events = [
+    event
+    for event in precompiled.graph.events
+    if event.name == "vecops_generated_test::run"
+  ]
+  assert len(vecops_events) == 2
+  assert all(
+    [use.access.value for use in event.uses if use.argument == "output"]
+    == ["write"]
+    for event in vecops_events
+  )
   assert not vecops.is_precompiling()
   real_trace = vecops.precompile(
       traced_model, input, use_real_tensors=True, parallelism=2
