@@ -91,31 +91,36 @@ public:
 
   /** Dynamic mode. Requests use the supplied fast/slow arenas while they fit. */
   explicit WorkspaceContext(std::string recipe = "kernel", void* fast_base = nullptr, nint_t fast_capacity = 0,
-                            void* slow_base = nullptr, nint_t slow_capacity = 0)
+                            void* slow_base = nullptr, nint_t slow_capacity = 0,
+                            const VecopsExecutionContext* execution_context = nullptr)
     : mode_(Mode::Dynamic)
     , recipe_(std::move(recipe))
     , fast_(fast_base, fast_capacity)
     , slow_(slow_base, slow_capacity) {
+    bind_execution_context(execution_context);
     initialize_root();
   }
 
   /** Trace mode: execute dynamically and retain a logical allocation plan. */
   WorkspaceContext(TraceWorkspaceTag, std::string recipe, DecisionFingerprint fingerprint = {},
                    void* fast_base = nullptr, nint_t fast_capacity = 0, void* slow_base = nullptr,
-                   nint_t slow_capacity = 0)
+                   nint_t slow_capacity = 0, const VecopsExecutionContext* execution_context = nullptr)
     : mode_(Mode::Trace)
     , recipe_(std::move(recipe))
     , fast_(fast_base, fast_capacity)
     , slow_(slow_base, slow_capacity)
     , trace_(std::make_unique<WorkspaceTrace>(recipe_, fingerprint)) {
+    bind_execution_context(execution_context);
     initialize_root();
   }
 
   /** Replay mode over an already placed and bound plan. */
-  WorkspaceContext(std::string recipe, const BoundWorkspacePlan& replay)
+  WorkspaceContext(std::string recipe, const BoundWorkspacePlan& replay,
+                   const VecopsExecutionContext* execution_context = nullptr)
     : mode_(Mode::Replay)
     , recipe_(std::move(recipe))
     , replay_(&replay) {
+    bind_execution_context(execution_context);
     initialize_root();
   }
 
@@ -123,6 +128,44 @@ public:
   WorkspaceContext& operator=(const WorkspaceContext&) = delete;
   WorkspaceContext(WorkspaceContext&&) = delete;
   WorkspaceContext& operator=(WorkspaceContext&&) = delete;
+
+  /** Rebind call-scoped execution services before a cached replay invocation. */
+  void bind_execution_context(const VecopsExecutionContext* context) noexcept {
+    requested_parallelism_ = 0;
+    thread_pool_ = nullptr;
+    if (context == nullptr)
+      return;
+    if (context->struct_size >= offsetof(VecopsExecutionContext, requested_threads) + sizeof(context->requested_threads))
+      requested_parallelism_ = static_cast<nint_t>(context->requested_threads);
+    if (context->struct_size >= offsetof(VecopsExecutionContext, thread_pool) + sizeof(context->thread_pool))
+      thread_pool_ = context->thread_pool;
+  }
+
+  /** Effective logical parallelism captured from this call's execution context. */
+  [[nodiscard]] nint_t parallelism() const noexcept {
+    const auto available = execution::max_parallelism(thread_pool_);
+    return requested_parallelism_ > 0 ? std::min(requested_parallelism_, available) : available;
+  }
+
+  /**
+   * Execute logical tasks through this call's embedding executor. Supplying a
+   * positive template argument makes the task count part of kernel codegen;
+   * omitting it uses the call's captured effective parallelism.
+   */
+  template <nint_t Parallelism = 0, typename Fn>
+  void parallel_tasks(Fn&& body) const {
+    if constexpr (Parallelism > 0) {
+      execution::parallel_tasks<Parallelism>(thread_pool_, std::forward<Fn>(body));
+    } else {
+      execution::parallel_tasks(thread_pool_, parallelism(), std::forward<Fn>(body));
+    }
+  }
+
+  /** Compatibility form for a phase whose logical task count is still runtime. */
+  template <typename Fn>
+  void parallel_tasks(nint_t task_count, Fn&& body) const {
+    execution::parallel_tasks(thread_pool_, task_count, std::forward<Fn>(body));
+  }
 
   Scope serial_scope(std::string_view name) {
     VECOPS_ASSERT(!finished_, "cannot enter a finished workspace context");
@@ -328,6 +371,8 @@ private:
   std::vector<Frame> frames_;
   std::size_t observed_axes_ = 0;
   bool finished_ = false;
+  const VecopsThreadPoolV1* thread_pool_ = nullptr;
+  nint_t requested_parallelism_ = 0;
 };
 
 /**
@@ -363,12 +408,13 @@ public:
   WorkspaceReplayCache& operator=(const WorkspaceReplayCache&) = delete;
 
   template <typename Setup, typename Invoke>
-  void invoke(std::string_view recipe, DecisionFingerprint fingerprint, Setup&& setup, Invoke&& invoke) {
+  void invoke(std::string_view recipe, DecisionFingerprint fingerprint, Setup&& setup, Invoke&& invoke,
+              const VecopsExecutionContext* execution_context = nullptr) {
     // Worker-local allocation counts commonly depend on the ambient OpenMP
     // team size. Tensor metadata alone therefore cannot identify a safe
     // replay plan when a framework changes its thread count between calls.
     fingerprint.decision = workspace_plan_details::mix(
-      fingerprint.decision, static_cast<std::uint64_t>(max_parallelism()));
+      fingerprint.decision, static_cast<std::uint64_t>(effective_parallelism(execution_context)));
     AxisCollector observed;
     setup(observed);
     auto found = std::find_if(entries_.begin(), entries_.end(), [&](const Entry& entry) {
@@ -377,6 +423,7 @@ public:
     if (found != entries_.end()) {
       entries_.splice(entries_.begin(), entries_, found);
       auto& entry = entries_.front();
+      entry.replay->bind_execution_context(execution_context);
       entry.replay->restart_replay();
       try {
         setup(*entry.replay);
@@ -403,7 +450,8 @@ public:
                              trace_fast.data,
                              trace_fast.capacity,
                              trace_slow.data,
-                             trace_slow.capacity};
+                             trace_slow.capacity,
+                             execution_context};
     setup(tracing);
     invoke(tracing);
     auto logical = tracing.finish_trace();
@@ -421,11 +469,26 @@ public:
   }
 
   template <typename Setup, typename Invoke>
-  void invoke(std::string_view recipe, Setup&& setup, Invoke&& invoke) {
-    this->invoke(recipe, {}, std::forward<Setup>(setup), std::forward<Invoke>(invoke));
+  void invoke(std::string_view recipe, Setup&& setup, Invoke&& invoke,
+              const VecopsExecutionContext* execution_context = nullptr) {
+    this->invoke(recipe, {}, std::forward<Setup>(setup), std::forward<Invoke>(invoke), execution_context);
   }
 
 private:
+  static nint_t effective_parallelism(const VecopsExecutionContext* context) noexcept {
+    const VecopsThreadPoolV1* pool = nullptr;
+    nint_t requested = 0;
+    if (context != nullptr) {
+      if (context->struct_size >=
+          offsetof(VecopsExecutionContext, requested_threads) + sizeof(context->requested_threads))
+        requested = static_cast<nint_t>(context->requested_threads);
+      if (context->struct_size >= offsetof(VecopsExecutionContext, thread_pool) + sizeof(context->thread_pool))
+        pool = context->thread_pool;
+    }
+    const auto available = execution::max_parallelism(pool);
+    return requested > 0 ? std::min(requested, available) : available;
+  }
+
   struct AxisCollector {
     static constexpr std::size_t InlineCapacity = 16;
 

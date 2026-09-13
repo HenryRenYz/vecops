@@ -383,7 +383,8 @@ int main(int argc, char** argv) {
   require(executable.ok(), executable.status().message());
   require(executable.value()->operator_name() == definition.name(), "generated operator name");
   auto bound = bind_kernel_call(definition, call);
-  require(executable.value()->specialization_key() == bound.value().specialization_key, "generated specialization");
+  require(executable.value()->specialization_key() == bound.value().specialization_key + ";$Parallelism=i:1",
+          "generated specialization");
   auto bytes = executable.value()->workspace_size(call.arguments());
   require(bytes.ok() && bytes.value() == 0, "kernel-owned workspace contract");
   require(executable.value()->invoke(call.arguments()).ok(), "direct executable invocation");

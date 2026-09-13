@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -267,6 +268,7 @@ def compile_batch(
     requests: Iterable[CompileRequest],
     *,
     parallelism: int | None = None,
+    execution_parallelism: int | None = None,
 ) -> PrecompileResult:
   """Prepare requests through shared CMake build graphs."""
   from ._compiler import require_native_build_api
@@ -280,6 +282,15 @@ def compile_batch(
     parallelism = min(8, available)
   if isinstance(parallelism, bool) or parallelism < 1:
     raise ValueError("parallelism must be a positive integer")
+  if execution_parallelism is None:
+    torch = sys.modules.get("torch")
+    execution_parallelism = (
+        int(torch.get_num_threads())
+        if torch is not None
+        else 1
+    )
+  if isinstance(execution_parallelism, bool) or execution_parallelism < 1:
+    raise ValueError("execution_parallelism must be a positive integer")
   workers = parallelism if pending else 0
   start = time.perf_counter()
   if pending:
@@ -287,6 +298,7 @@ def compile_batch(
       _C.prepare_batch(
           [(request.operator, request.call) for request in pending],
           parallel_jobs=parallelism,
+          execution_parallelism=execution_parallelism,
       )
     except Exception as error:
       if hasattr(error, "add_note"):

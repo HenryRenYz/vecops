@@ -10,6 +10,8 @@
 
 #include "vecops/runtime/Operator.h"
 
+#include "vecops/execution/Parallel.h"
+
 #include <fstream>
 #include <iomanip>
 #include <numeric>
@@ -76,7 +78,46 @@ std::string fingerprint_file(const std::filesystem::path& path) {
   return output.str();
 }
 
+nint_t effective_parallelism(const VecopsExecutionContext* context) noexcept {
+  const VecopsThreadPoolV1* pool = nullptr;
+  nint_t requested = 0;
+  if (context != nullptr) {
+    if (context->struct_size >=
+        offsetof(VecopsExecutionContext, requested_threads) + sizeof(context->requested_threads))
+      requested = static_cast<nint_t>(context->requested_threads);
+    if (context->struct_size >= offsetof(VecopsExecutionContext, thread_pool) + sizeof(context->thread_pool))
+      pool = context->thread_pool;
+  }
+  const auto available = execution::max_parallelism(pool);
+  return requested > 0 ? std::min(requested, available) : available;
+}
+
+void specialize_parallelism_in_place(BoundKernelRecipe& bound, nint_t parallelism) {
+  if (bound.source == nullptr)
+    return;
+  auto source = std::make_shared<BoundKernelRecipe::SourceInstantiation>(*bound.source);
+  const auto old_suffix = ";$Parallelism=i:" + std::to_string(source->parallelism);
+  auto remove_suffix = [&](std::string& value) {
+    if (value.ends_with(old_suffix))
+      value.resize(value.size() - old_suffix.size());
+  };
+  remove_suffix(source->binding.specialization_key);
+  remove_suffix(bound.specialization_key);
+  remove_suffix(bound.artifact_key);
+  source->parallelism = std::max<nint_t>(1, parallelism);
+  const auto suffix = ";$Parallelism=i:" + std::to_string(source->parallelism);
+  source->binding.specialization_key += suffix;
+  bound.specialization_key += suffix;
+  bound.artifact_key += suffix;
+  bound.source = std::move(source);
+}
+
 } // namespace
+
+BoundKernelRecipe specialize_parallelism(BoundKernelRecipe recipe, nint_t parallelism) {
+  specialize_parallelism_in_place(recipe, parallelism);
+  return recipe;
+}
 
 SourceKernelRecipe::SourceKernelRecipe(std::string id, std::filesystem::path kernel_file,
                                        std::shared_ptr<const KernelDef> definition, std::string source_fingerprint,
@@ -109,6 +150,7 @@ Result<BoundKernelRecipe> SourceKernelRecipe::bind(const KernelCall& call) const
     return binding.status();
   auto source = std::make_shared<BoundKernelRecipe::SourceInstantiation>(
     BoundKernelRecipe::SourceInstantiation{kernel_file_, definition_, std::move(binding).value()});
+  source->binding.specialization_key += ";$Parallelism=i:1";
   return BoundKernelRecipe{id_, source->binding.specialization_key,
                            id_ + ";source=" + source_fingerprint_ + ";" + definition_->canonical() + ";" +
                              source->binding.specialization_key,
@@ -157,17 +199,19 @@ Result<KernelCall> Operator::normalize(const KernelCall& call) const {
 }
 
 Result<std::shared_ptr<Executable>> Operator::resolve(const ArgumentMetadata& arguments) const {
-  return resolve(KernelCall(arguments));
+  return resolve(KernelCall(arguments), nullptr);
 }
 
-Result<std::shared_ptr<Executable>> Operator::resolve(const KernelCall& call) const {
+Result<std::shared_ptr<Executable>> Operator::resolve(const KernelCall& call,
+                                                     const VecopsExecutionContext* context) const {
   auto normalized = normalize(call);
   if (!normalized)
     return normalized.status();
-  return resolve_normalized(normalized.value());
+  return resolve_normalized(normalized.value(), context);
 }
 
-Result<std::shared_ptr<Executable>> Operator::resolve_normalized(const KernelCall& call) const {
+Result<std::shared_ptr<Executable>> Operator::resolve_normalized(
+  const KernelCall& call, const VecopsExecutionContext* context) const {
   if (dispatch_policy_ == nullptr || provider_ == nullptr)
     return Status(StatusCode::InternalError, "operator has no dispatch policy or executable provider");
   auto candidates = dispatch_policy_->candidates(call, recipes_);
@@ -196,6 +240,7 @@ Result<std::shared_ptr<Executable>> Operator::resolve_normalized(const KernelCal
     }
     if (bound.value().recipe_id.empty())
       bound.value().recipe_id = std::string(recipe->id());
+    bound.value() = specialize_parallelism(std::move(bound).value(), effective_parallelism(context));
     auto executable = provider_->resolve(bound.value());
     if (executable) {
       if (executable.value() == nullptr)
@@ -220,7 +265,7 @@ Status Operator::invoke(const ArgumentMetadata& arguments, void* workspace, std:
   auto normalized = normalize(KernelCall(arguments));
   if (!normalized)
     return normalized.status();
-  auto executable = resolve_normalized(normalized.value());
+  auto executable = resolve_normalized(normalized.value(), context);
   if (!executable)
     return executable.status();
   return executable.value()->invoke(normalized.value().arguments(), workspace, workspace_size, context);
@@ -231,7 +276,7 @@ Status Operator::invoke(const KernelCall& call, const VecopsExecutionContext* co
   auto normalized = normalize(call);
   if (!normalized)
     return normalized.status();
-  auto executable = resolve_normalized(normalized.value());
+  auto executable = resolve_normalized(normalized.value(), context);
   if (!executable)
     return executable.status();
   return executable.value()->invoke(normalized.value().arguments(), workspace, workspace_size, context);

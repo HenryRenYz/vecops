@@ -430,6 +430,9 @@ def test_generated_torch_bridge_uses_mutable_out_schema() -> None:
   assert "TORCH_LIBRARY_FRAGMENT(vecops_test" in source
   assert "vecops_operator_bridge_invoke_v1" in source
   assert "vecops_torch_bridge_set_handle_v1" in source
+  assert "VecopsThreadPoolV1 torch_thread_pool" in source
+  assert 'dlsym(RTLD_DEFAULT, "GOMP_parallel")' in source
+  assert "execution_context.thread_pool = &torch_thread_pool" in source
   assert "torch/extension.h" not in source
   assert "PYBIND11_MODULE" not in source
   returning_schema = _torch_schema("run", definition, return_outputs=True)
@@ -460,8 +463,8 @@ def test_native_build_api_mismatch_has_repair_command(monkeypatch) -> None:
 def test_compile_batch_delegates_one_native_build_graph(monkeypatch) -> None:
   submitted = []
 
-  def prepare_batch(requests, *, parallel_jobs):
-    submitted.append((requests, parallel_jobs))
+  def prepare_batch(requests, *, parallel_jobs, execution_parallelism):
+    submitted.append((requests, parallel_jobs, execution_parallelism))
 
   monkeypatch.setattr(vecops._C, "prepare_batch", prepare_batch)
 
@@ -474,9 +477,12 @@ def test_compile_batch_delegates_one_native_build_graph(monkeypatch) -> None:
     )
     for index in range(2)
   ]
-  result = vecops.compile_batch(requests, parallelism=2)
+  result = vecops.compile_batch(
+    requests, parallelism=2, execution_parallelism=7
+  )
   assert result.prepared == 2
   assert result.parallelism == 2
   assert len(submitted) == 1
   assert submitted[0][1] == 2
+  assert submitted[0][2] == 7
   assert [item[0] for item in submitted[0][0]] == [request.operator for request in requests]

@@ -243,6 +243,42 @@ typedef struct VecopsWorkspaceArenaProvider {
   uint64_t flags;
 } VecopsWorkspaceArenaProvider;
 
+/** One logical task in a synchronous embedding-owned parallel region. */
+typedef void (*VecopsParallelTaskFn)(void* body_context, uint32_t task_id, uint32_t task_count);
+typedef uint32_t (*VecopsThreadPoolQueryFn)(void* context);
+typedef int32_t (*VecopsThreadPoolParallelForFn)(void* context, uint32_t task_count, void* body_context,
+                                                 VecopsParallelTaskFn body, VecopsError* error);
+typedef void (*VecopsThreadPoolContextFn)(void* context);
+
+/**
+ * Versioned synchronous logical-task executor supplied by an embedding.
+ *
+ * `parallel_for` must invoke `body(body_context, task_id, task_count)` exactly
+ * once for every dense task id in `[0, task_count)`, and must not return until
+ * all callbacks have completed. It may execute several logical tasks on one
+ * physical worker, which keeps compile-time vecops sharding independent of
+ * the backend's scheduling policy.
+ */
+typedef struct VecopsThreadPoolV1 {
+  uint32_t struct_size;
+  uint16_t abi_major;
+  uint16_t abi_minor;
+  uint64_t identity;
+  void* context;
+  VecopsThreadPoolQueryFn max_parallelism;
+  VecopsThreadPoolQueryFn in_parallel_region;
+  VecopsThreadPoolParallelForFn parallel_for;
+  VecopsThreadPoolContextFn retain;
+  VecopsThreadPoolContextFn release;
+  uint64_t flags;
+} VecopsThreadPoolV1;
+
+#define VECOPS_THREAD_POOL_ABI_MAJOR 1
+#define VECOPS_THREAD_POOL_ABI_MINOR 0
+
+/** Factory exported by the optional vecops OpenMP provider library. */
+VECOPS_RUNTIME_EXPORT const VecopsThreadPoolV1* vecops_openmp_thread_pool_v1(void);
+
 typedef struct VecopsExecutionContext {
   /** Size of this record known to the caller. */
   uint32_t struct_size;
@@ -256,6 +292,8 @@ typedef struct VecopsExecutionContext {
   uint64_t flags;
   /** Optional physical workspace provider; absent from older short records. */
   const VecopsWorkspaceArenaProvider* workspace_provider;
+  /** Optional synchronous logical-task executor; absent from older records. */
+  const VecopsThreadPoolV1* thread_pool;
 } VecopsExecutionContext;
 
 /**

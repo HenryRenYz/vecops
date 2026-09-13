@@ -163,6 +163,9 @@ install(
 )
 
 set(_VECOPS_INSTALL_TARGETS vecops vecops_optimize_for_kernels)
+if(TARGET vecops_threadpool_openmp)
+    list(APPEND _VECOPS_INSTALL_TARGETS vecops_threadpool_openmp)
+endif()
 if(TARGET vecops_memory)
     list(APPEND _VECOPS_INSTALL_TARGETS vecops_memory)
 endif()

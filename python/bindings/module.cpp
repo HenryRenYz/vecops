@@ -32,6 +32,7 @@
 #include <pybind11/stl/filesystem.h>
 
 #include "vecops/compiler/Compiler.h"
+#include "vecops/execution/Parallel.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/runtime/Executable.h"
 #include "vecops/runtime/OperatorBridgeAbi.h"
@@ -377,10 +378,27 @@ struct BridgeSpecializationSignature {
 struct BridgeCallSignature {
   std::vector<BridgeValueSignature> values;
   std::vector<BridgeSpecializationSignature> specializations;
+  vecops::nint_t parallelism = 1;
+
+  [[nodiscard]] static vecops::nint_t call_parallelism(const VecopsCall& call) {
+    const VecopsThreadPoolV1* pool = nullptr;
+    vecops::nint_t requested = 0;
+    if (call.context != nullptr) {
+      if (call.context->struct_size >=
+          offsetof(VecopsExecutionContext, requested_threads) + sizeof(call.context->requested_threads))
+        requested = static_cast<vecops::nint_t>(call.context->requested_threads);
+      if (call.context->struct_size >=
+          offsetof(VecopsExecutionContext, thread_pool) + sizeof(call.context->thread_pool))
+        pool = call.context->thread_pool;
+    }
+    const auto available = vecops::execution::max_parallelism(pool);
+    return requested > 0 ? std::min(requested, available) : available;
+  }
 
   [[nodiscard]] static std::optional<BridgeCallSignature> capture(const VecopsCall& call, std::uint32_t num_specs,
                                                                   const VecopsSpecializationArgument* specs) {
     BridgeCallSignature result;
+    result.parallelism = call_parallelism(call);
     result.values.reserve(call.num_values);
     for (std::uint32_t index = 0; index < call.num_values; ++index) {
       const auto& value = call.values[index];
@@ -431,7 +449,8 @@ struct BridgeCallSignature {
 
   [[nodiscard]] bool matches(const VecopsCall& call, std::uint32_t num_specs,
                              const VecopsSpecializationArgument* specs) const {
-    if (call.num_values != values.size() || num_specs != specializations.size())
+    if (parallelism != call_parallelism(call) || call.num_values != values.size() ||
+        num_specs != specializations.size())
       return false;
     for (std::uint32_t index = 0; index < call.num_values; ++index) {
       const auto& value = call.values[index];
@@ -594,7 +613,8 @@ public:
   }
 
   /** Prepare many cache misses through one CMake build per compiler. */
-  [[nodiscard]] static Status prepare_batch(std::span<const BatchItem> items, std::size_t parallel_jobs);
+  [[nodiscard]] static Status prepare_batch(std::span<const BatchItem> items, std::size_t parallel_jobs,
+                                            vecops::nint_t execution_parallelism);
 
   py::object invoke_values(py::args arguments, py::kwargs values) const {
     if (arguments.size() > definition_->parameters().size())
@@ -712,7 +732,8 @@ std::atomic<std::uint64_t> PyOperator::next_operator_handle{1};
 std::mutex PyOperator::operator_registry_mutex;
 std::map<std::uint64_t, std::weak_ptr<PyOperator::State>> PyOperator::operator_registry;
 
-Status PyOperator::prepare_batch(std::span<const BatchItem> items, std::size_t parallel_jobs) {
+Status PyOperator::prepare_batch(std::span<const BatchItem> items, std::size_t parallel_jobs,
+                                 vecops::nint_t execution_parallelism) {
   struct Planned {
     std::shared_ptr<compiler::Compiler> compiler_instance;
     std::shared_ptr<vecops::runtime::ArtifactExecutableProvider> provider;
@@ -748,6 +769,8 @@ Status PyOperator::prepare_batch(std::span<const BatchItem> items, std::size_t p
         }
         return bound.status();
       }
+      bound.value() = vecops::runtime::specialize_parallelism(
+        std::move(bound).value(), execution_parallelism);
       auto cached = operation.state_->providers[index]->lookup(bound.value());
       if (cached) {
         if (bound.value().source != nullptr && bound.value().source->definition != nullptr &&
@@ -998,7 +1021,8 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
   VecopsCall routed_call{};
   VecopsExecutionContext routed_context{};
   const bool has_explicit_provider =
-    call->context != nullptr && call->context->struct_size >= sizeof(VecopsExecutionContext) &&
+    call->context != nullptr && call->context->struct_size >=
+      offsetof(VecopsExecutionContext, workspace_provider) + sizeof(call->context->workspace_provider) &&
     call->context->workspace_provider != nullptr;
   if (!has_explicit_provider && call->workspace == nullptr && call->workspace_size == 0) {
     if (const auto* provider = current_memory_workspace_provider(); provider != nullptr) {
@@ -1033,9 +1057,13 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
     const char* value = std::getenv("VECOPS_TORCH_PREPARED_CALL");
     return value == nullptr || std::strcmp(value, "0") != 0;
   }();
-  const bool provider_context =
-    call->context != nullptr && call->context->struct_size >= sizeof(VecopsExecutionContext) &&
-    call->context->workspace_provider != nullptr;
+  const bool provider_context = call->context != nullptr &&
+    ((call->context->struct_size >=
+        offsetof(VecopsExecutionContext, workspace_provider) + sizeof(call->context->workspace_provider) &&
+      call->context->workspace_provider != nullptr) ||
+     (call->context->struct_size >=
+        offsetof(VecopsExecutionContext, thread_pool) + sizeof(call->context->thread_pool) &&
+      call->context->thread_pool != nullptr));
   const bool cacheable = hot_path_enabled && (call->context == nullptr || provider_context) &&
                          call->workspace == nullptr && call->workspace_size == 0;
   if (cacheable) {
@@ -1120,7 +1148,8 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
     auto values = state->default_values[index];
     for (const auto& [name, value] : kernel_call.values())
       values.insert_or_assign(name, value);
-    auto executable = state->operator_instances[index]->resolve(KernelCall(kernel_call.arguments(), std::move(values)));
+    auto executable = state->operator_instances[index]->resolve(
+      KernelCall(kernel_call.arguments(), std::move(values)), call->context);
     if (executable) {
       auto result =
         executable.value()->invoke(kernel_call.arguments(), call->workspace, call->workspace_size, call->context);
@@ -1395,7 +1424,7 @@ Most applications should use :mod:`vecops`, whose Python wrappers normalize
 dtypes, derive schemas, and own framework integration. This module mirrors C++
 value types for diagnostics, explicit build control, and wrapper implementation;
 its constructor-level interfaces intentionally expose native concepts.)doc";
-  module.attr("build_api_version") = 3;
+  module.attr("build_api_version") = 4;
 #if defined(VECOPS_PYTHON_HAS_MEMORY)
   bind_memory(module);
 #endif
@@ -1873,7 +1902,9 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
 
   module.def(
     "prepare_batch",
-    [](py::iterable requests, std::size_t parallel_jobs) {
+    [](py::iterable requests, std::size_t parallel_jobs, vecops::nint_t execution_parallelism) {
+      if (execution_parallelism <= 0)
+        throw py::value_error("execution_parallelism must be positive");
       std::vector<PyOperator::BatchItem> items;
       for (const auto request : requests) {
         const auto tuple = py::cast<py::tuple>(request);
@@ -1884,11 +1915,11 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
       }
       const auto status = [&]() {
         py::gil_scoped_release release;
-        return PyOperator::prepare_batch(items, parallel_jobs);
+        return PyOperator::prepare_batch(items, parallel_jobs, execution_parallelism);
       }();
       if (!status.ok())
         throw_status(status);
     },
-    py::arg("requests"), py::arg("parallel_jobs") = 0,
+    py::arg("requests"), py::arg("parallel_jobs") = 0, py::arg("execution_parallelism") = 1,
     "Prepare native operator cache misses through shared CMake batches.");
 }

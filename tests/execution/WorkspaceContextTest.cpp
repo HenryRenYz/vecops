@@ -113,6 +113,30 @@ struct AbiArenaProviderState {
   int releases = 0;
 };
 
+struct AbiThreadPoolState {
+  static std::uint32_t maximum(void* context) {
+    return static_cast<AbiThreadPoolState*>(context)->maximum_threads;
+  }
+
+  static std::uint32_t in_parallel(void*) {
+    return 0;
+  }
+
+  static std::int32_t parallel_for(void* context, std::uint32_t count, void* body_context,
+                                   VecopsParallelTaskFn body, VecopsError*) {
+    auto& self = *static_cast<AbiThreadPoolState*>(context);
+    ++self.calls;
+    self.last_task_count = count;
+    for (std::uint32_t task = count; task-- > 0;)
+      body(body_context, task, count);
+    return VECOPS_STATUS_OK;
+  }
+
+  std::uint32_t maximum_threads = 8;
+  std::uint32_t calls = 0;
+  std::uint32_t last_task_count = 0;
+};
+
 TEST(WorkspaceContextTest, DynamicModeUsesFastArenaAndRewindsScopes) {
   alignas(64) std::array<std::byte, 256> fast{};
   WorkspaceContext workspace{"kernel", fast.data(), nint_t(fast.size())};
@@ -128,6 +152,43 @@ TEST(WorkspaceContextTest, DynamicModeUsesFastArenaAndRewindsScopes) {
     auto slot = workspace.request("scratch", {.bytes = 128, .placement = WorkspacePlacementPolicy::FastRequired});
     EXPECT_EQ(slot.replica(), first);
   }
+}
+
+TEST(WorkspaceContextTest, ParallelTasksUseCallPoolAndKeepStaticTaskCount) {
+  AbiThreadPoolState state;
+  const VecopsThreadPoolV1 pool{
+    sizeof(VecopsThreadPoolV1), VECOPS_THREAD_POOL_ABI_MAJOR, VECOPS_THREAD_POOL_ABI_MINOR,
+    17, &state, AbiThreadPoolState::maximum, AbiThreadPoolState::in_parallel,
+    AbiThreadPoolState::parallel_for, nullptr, nullptr, 0};
+  const VecopsExecutionContext execution{
+    .struct_size = sizeof(VecopsExecutionContext),
+    .requested_threads = 6,
+    .thread_pool = &pool,
+  };
+  WorkspaceContext workspace{"parallel", nullptr, 0, nullptr, 0, &execution};
+  EXPECT_EQ(workspace.parallelism(), 6);
+
+  std::array<int, 4> visits{};
+  workspace.parallel_tasks<4>([&](auto worker) {
+    static_assert(decltype(worker)::num_threads == 4);
+    ++visits[static_cast<std::size_t>(worker.thread_id)];
+  });
+  EXPECT_EQ(state.calls, 1);
+  EXPECT_EQ(state.last_task_count, 4);
+  EXPECT_EQ(visits, (std::array<int, 4>{1, 1, 1, 1}));
+}
+
+TEST(WorkspaceContextTest, BalancedShardHasCompileTimeMainAndTailExtents) {
+  WorkspaceContext workspace{"balanced"};
+  std::array<int, 10> visits{};
+  workspace.parallel_tasks<4>([&](auto worker) {
+    balanced_shard<10>(worker, [&](auto shard) {
+      static_assert(decltype(shard)::extent == 3 || decltype(shard)::extent == 2);
+      for (nint_t index = shard.begin; index < shard.end(); ++index)
+        ++visits[static_cast<std::size_t>(index)];
+    });
+  });
+  EXPECT_EQ(visits, (std::array<int, 10>{1, 1, 1, 1, 1, 1, 1, 1, 1, 1}));
 }
 
 TEST(WorkspaceContextTest, PreferredRequestSpillsWithoutMovingLiveFastData) {
