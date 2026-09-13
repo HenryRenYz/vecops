@@ -36,14 +36,15 @@ namespace vecops::matmul {
 namespace details {
 
 /** Native tile granularity of one Atom extent, in elements.
- *  Counter-intuitive split: a `Const` extent contributes its constant
- *  *value* (e.g. AMX's 16 rows) as the alignment, while a `Dynamic`
- *  extent (SME's VL-scaled extents) only contributes its alignment
- *  constraint — the runtime value may be anything satisfying it. */
+ *  A singleton extent contributes its unique value (e.g. AMX's 16 rows),
+ *  whether represented by `Const` or a singleton `Dynamic`. A genuinely
+ *  varying extent (such as SME's VL-scaled extents) contributes only its
+ *  alignment constraint. */
 template <typename T>
 inline constexpr nint_t atom_alignment_v = [] {
   using V = std::remove_cvref_t<T>;
-  if constexpr (V::is_const) return V::value;
+  if constexpr (meta::is_singleton_v<V>)
+    return meta::singleton_value_v<V>;
   else return V::alignment;
 }();
 

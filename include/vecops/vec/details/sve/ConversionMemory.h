@@ -806,8 +806,181 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
   }
 }
 
+/**
+ * Indexed widening load for the two native 16-bit floating storage formats.
+ *
+ * SVE gather loads zero-extend each selected halfword into the lane width of
+ * the index vector.  Rebuild the compact F32 result explicitly instead of
+ * routing through GenericImpl: the latter converts the value lanes but then
+ * applies an index vector whose physical lane spacing belongs to the wider
+ * compute tag.
+ */
+template <int Scale, VectorTag ToTag, Element From, VectorTag IndexTag,
+          typename Temporality>
+  requires (std::same_as<ElementOf<ToTag>, float32_t> &&
+            (std::same_as<From, float16_t> ||
+             std::same_as<From, bfloat16_t>))
+VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_indexed_f16_f32(
+    ToTag to, const From* pointer, Vec<IndexTag> indices,
+    Mask<ToTag> mask, Vec<ToTag> inactive, Temporality temporality) {
+  using I = ElementOf<IndexTag>;
+  static_assert(sizeof(I) == 4 || sizeof(I) == 8);
+  if constexpr (num_words(to) > 1 || num_words(IndexTag{}) > 1) {
+    using ToHalf = Half<ToTag>;
+    const auto lower_value = sve_load_convert_indexed_f16_f32<
+        Scale, ToHalf, From, Half<IndexTag>>(
+        ToHalf{}, pointer, lower(IndexTag{}, indices),
+        lower(to, mask), lower(to, inactive), temporality);
+    const auto upper_value = sve_load_convert_indexed_f16_f32<
+        Scale, ToHalf, From, Half<IndexTag>>(
+        ToHalf{}, pointer, upper(IndexTag{}, indices),
+        upper(to, mask), upper(to, inactive), temporality);
+    return concat(to, lower_value, upper_value);
+  } else {
+    const auto index_mask = sve_convert_mask(IndexTag{}, to, mask);
+    const auto active = ::vecops::vec::get_word<0>(IndexTag{}, index_mask);
+    const auto raw_indices = sve_basic_raw_word(indices);
+    const auto offsets = sve_scale_indexed_offsets<Scale>(active, raw_indices);
+    const auto loaded32 = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (sizeof(I) == 4) {
+        return sve_load_indexed_u32_bits(
+            active, pointer, offsets, temporality);
+      } else {
+        const auto loaded64 = sve_load_indexed_u64_bits(
+            active, pointer, offsets, temporality);
+        const auto words = svreinterpret_u32_u64(loaded64);
+        return svuzp1_u32(words, words);
+      }
+    }();
+    const auto converted = [&]() VECOPS_INLINE_LAMBDA {
+      if constexpr (std::same_as<From, bfloat16_t>) {
+        return svreinterpret_f32_u32(
+            svlsl_n_u32_x(svptrue_b32(), loaded32, 16));
+      } else {
+        const auto half = svreinterpret_f16_u32(loaded32);
+        return svcvt_f32_f16_x(svptrue_b32(), half);
+      }
+    }();
+    const auto result = sve_basic_wrap_word<ToTag>(converted);
+    return blend(to, inactive, mask, result);
+  }
+}
+
+/**
+ * Indexed narrowing store from F32 to FP16/BF16.
+ *
+ * Convert into compact 16-bit lanes, widen only the value bits to the index
+ * lane width, and issue a halfword scatter.  Keeping the predicate and offsets
+ * in the original F32 logical-lane domain prevents the every-other-address
+ * corruption produced by the generic convert-then-StoreOp fallback.
+ */
+template <int Scale, Element To, VectorTag FromTag, VectorTag IndexTag,
+          typename Temporality>
+  requires (std::same_as<ElementOf<FromTag>, float32_t> &&
+            (std::same_as<To, float16_t> ||
+             std::same_as<To, bfloat16_t>))
+VECOPS_ALWAYS_INLINE void sve_store_convert_indexed_f32_f16(
+    FromTag from, To* pointer, Vec<FromTag> value, Vec<IndexTag> indices,
+    Mask<FromTag> mask, Temporality temporality) {
+  using I = ElementOf<IndexTag>;
+  static_assert(sizeof(I) == 4 || sizeof(I) == 8);
+  if constexpr (num_words(from) > 1 || num_words(IndexTag{}) > 1) {
+    using FromHalf = Half<FromTag>;
+    sve_store_convert_indexed_f32_f16<
+        Scale, To, FromHalf, Half<IndexTag>>(
+        FromHalf{}, pointer, lower(from, value),
+        lower(IndexTag{}, indices), lower(from, mask), temporality);
+    sve_store_convert_indexed_f32_f16<
+        Scale, To, FromHalf, Half<IndexTag>>(
+        FromHalf{}, pointer, upper(from, value),
+        upper(IndexTag{}, indices), upper(from, mask), temporality);
+  } else {
+    using ToTag = Rebind<To, FromTag>;
+    const auto converted_raw = sve_convert_one_word_raw<To, float32_t>(
+        sve_basic_raw_word(value));
+    const auto converted = sve_basic_wrap_word<ToTag>(converted_raw);
+    const auto index_mask = sve_convert_mask(IndexTag{}, from, mask);
+    const auto active = ::vecops::vec::get_word<0>(IndexTag{}, index_mask);
+    const auto raw_indices = sve_basic_raw_word(indices);
+    const auto offsets = sve_scale_indexed_offsets<Scale>(active, raw_indices);
+    if constexpr (sizeof(I) == 4) {
+      sve_store_indexed_u32_bits(
+          active, pointer, offsets,
+          sve_expand_indexed_store_u32_bits<ToTag>(converted), temporality);
+    } else {
+      sve_store_indexed_u64_bits(
+          active, pointer, offsets,
+          sve_expand_indexed_store_u64_bits<ToTag>(converted), temporality);
+    }
+  }
+}
+
 template <VectorTag ToTag>
 struct NativeImpl<SVEBackend, LoadConvertOp, ToTag> {
+  template <Element From, VectorValue Indices, int Scale,
+            typename Temporality>
+    requires (std::same_as<ElementOf<ToTag>, float32_t> &&
+              (std::same_as<From, float16_t> ||
+               std::same_as<From, bfloat16_t>))
+  static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
+      LoadConvertOp, ToTag to, const From* pointer,
+      cvt::Ordered, cvt::Saturate,
+      opt::Indexed<Indices, Scale> addressing, Temporality temporality) {
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, ToTag>;
+    constexpr int scale = Scale == 0 ? sizeof(From) : Scale;
+    return sve_load_convert_indexed_f16_f32<scale, ToTag, From, IndexTag>(
+        to, pointer, addressing.indices, mfill(to, true), zeros(to),
+        temporality);
+  }
+
+  template <Element From, VectorValue Indices, int Scale,
+            typename Temporality>
+    requires (std::same_as<ElementOf<ToTag>, float32_t> &&
+              (std::same_as<From, float16_t> ||
+               std::same_as<From, bfloat16_t>))
+  static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
+      LoadConvertOp, ToTag to, const From* pointer,
+      cvt::Unordered, cvt::Saturate,
+      opt::Indexed<Indices, Scale> addressing, Temporality temporality) {
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, ToTag>;
+    constexpr int scale = Scale == 0 ? sizeof(From) : Scale;
+    return sve_load_convert_indexed_f16_f32<scale, ToTag, From, IndexTag>(
+        to, pointer, addressing.indices, mfill(to, true), zeros(to),
+        temporality);
+  }
+
+  template <Element From, VectorValue Indices, int Scale,
+            typename Temporality>
+    requires (std::same_as<ElementOf<ToTag>, float32_t> &&
+              (std::same_as<From, float16_t> ||
+               std::same_as<From, bfloat16_t>))
+  static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
+      LoadConvertOp, ToTag to, const From* pointer, Mask<ToTag> mask,
+      Vec<ToTag> inactive, cvt::Ordered, cvt::Saturate,
+      opt::Indexed<Indices, Scale> addressing, Temporality temporality) {
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, ToTag>;
+    constexpr int scale = Scale == 0 ? sizeof(From) : Scale;
+    return sve_load_convert_indexed_f16_f32<scale, ToTag, From, IndexTag>(
+        to, pointer, addressing.indices, mask, inactive, temporality);
+  }
+
+  template <Element From, VectorValue Indices, int Scale,
+            typename Temporality>
+    requires (std::same_as<ElementOf<ToTag>, float32_t> &&
+              (std::same_as<From, float16_t> ||
+               std::same_as<From, bfloat16_t>))
+  static VECOPS_ALWAYS_INLINE Vec<ToTag> call(
+      LoadConvertOp, ToTag to, const From* pointer,
+      Mask<Rebind<From, ToTag>> memory_mask, cvt::Unordered, cvt::Saturate,
+      opt::Indexed<Indices, Scale> addressing, Temporality temporality) {
+    using FromTag = Rebind<From, ToTag>;
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, ToTag>;
+    constexpr int scale = Scale == 0 ? sizeof(From) : Scale;
+    const auto output_mask = convert(to, FromTag{}, memory_mask);
+    return sve_load_convert_indexed_f16_f32<scale, ToTag, From, IndexTag>(
+        to, pointer, addressing.indices, output_mask, zeros(to), temporality);
+  }
+
   template <Element From, VectorValue Indices, int Scale,
             typename Temporality>
     requires (
@@ -865,6 +1038,74 @@ struct NativeImpl<SVEBackend, LoadConvertOp, ToTag> {
 
 template <VectorTag FromTag>
 struct NativeImpl<SVEBackend, StoreConvertOp, FromTag> {
+  template <Element To, VectorValue Indices, int Scale,
+            typename Temporality, typename Packing>
+    requires (std::same_as<ElementOf<FromTag>, float32_t> &&
+              (std::same_as<To, float16_t> ||
+               std::same_as<To, bfloat16_t>))
+  static VECOPS_ALWAYS_INLINE void call(
+      StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
+      cvt::Ordered, cvt::Saturate,
+      opt::Indexed<Indices, Scale> addressing, Temporality temporality,
+      Packing) {
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, FromTag>;
+    constexpr int scale = Scale == 0 ? sizeof(To) : Scale;
+    sve_store_convert_indexed_f32_f16<scale, To, FromTag, IndexTag>(
+        from, pointer, value, addressing.indices, mfill(from, true),
+        temporality);
+  }
+
+  template <Element To, VectorValue Indices, int Scale,
+            typename Temporality, typename Packing>
+    requires (std::same_as<ElementOf<FromTag>, float32_t> &&
+              (std::same_as<To, float16_t> ||
+               std::same_as<To, bfloat16_t>))
+  static VECOPS_ALWAYS_INLINE void call(
+      StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
+      cvt::Unordered, cvt::Saturate,
+      opt::Indexed<Indices, Scale> addressing, Temporality temporality,
+      Packing) {
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, FromTag>;
+    constexpr int scale = Scale == 0 ? sizeof(To) : Scale;
+    sve_store_convert_indexed_f32_f16<scale, To, FromTag, IndexTag>(
+        from, pointer, value, addressing.indices, mfill(from, true),
+        temporality);
+  }
+
+  template <Element To, VectorValue Indices, int Scale,
+            typename Temporality, typename Packing>
+    requires (std::same_as<ElementOf<FromTag>, float32_t> &&
+              (std::same_as<To, float16_t> ||
+               std::same_as<To, bfloat16_t>))
+  static VECOPS_ALWAYS_INLINE void call(
+      StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
+      Mask<FromTag> mask, cvt::Ordered, cvt::Saturate,
+      opt::Indexed<Indices, Scale> addressing, Temporality temporality,
+      Packing) {
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, FromTag>;
+    constexpr int scale = Scale == 0 ? sizeof(To) : Scale;
+    sve_store_convert_indexed_f32_f16<scale, To, FromTag, IndexTag>(
+        from, pointer, value, addressing.indices, mask, temporality);
+  }
+
+  template <Element To, VectorValue Indices, int Scale,
+            typename Temporality, typename Packing>
+    requires (std::same_as<ElementOf<FromTag>, float32_t> &&
+              (std::same_as<To, float16_t> ||
+               std::same_as<To, bfloat16_t>))
+  static VECOPS_ALWAYS_INLINE void call(
+      StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
+      Mask<Rebind<To, FromTag>> memory_mask, cvt::Unordered, cvt::Saturate,
+      opt::Indexed<Indices, Scale> addressing, Temporality temporality,
+      Packing) {
+    using ToTag = Rebind<To, FromTag>;
+    using IndexTag = Rebind<ElementOf<VecToTag<Indices>>, FromTag>;
+    constexpr int scale = Scale == 0 ? sizeof(To) : Scale;
+    const auto source_mask = convert(from, ToTag{}, memory_mask);
+    sve_store_convert_indexed_f32_f16<scale, To, FromTag, IndexTag>(
+        from, pointer, value, addressing.indices, source_mask, temporality);
+  }
+
   template <Element To, VectorValue Indices, int Scale,
             typename Temporality, typename Packing>
     requires (

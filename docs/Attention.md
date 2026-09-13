@@ -121,6 +121,8 @@ aligns the last query with the last key and supports KV-cache calls where
 
 IBS Attention uses `selected_blocks`, `random_blocks`,
 `static_probability`, `random_probability`, and `minimum_probability`.
+`selected_blocks` must be positive; after validation its positive lower bound
+is retained in the generated map layout rather than erased to `Any`.
 Negative weights identify statically retained blocks; positive weights are
 dynamic sampling candidates; `(-1, 0)` terminates a base-map row. Index and
 weight maps are an all-or-none compile-time pair.

@@ -23,27 +23,22 @@ static_assert(lower_bound_at_least_v<Dynamic<4, 8, 32>, 8>);
 static_assert(upper_bound_at_most_v<Dynamic<4, 8, 32>, 32>);
 static_assert(!is_bounded_v<Any>);
 
-using TypedLayout = Layout<
-    Shape<Const<2>, Dynamic<4, 8, 32>, Const<16>>,
-    Strides<Dynamic<4>, Const<16>, Const<1>>>;
+using RuntimeShapeLayout = Layout<Shape<Any, Dynamic<8, -16, 64>>, Strides<Any, Any>>;
+static_assert(std::same_as<size_type_t<0, RuntimeShapeLayout>, Any>);
+static_assert(std::same_as<shape_extent_type_t<0, RuntimeShapeLayout>, Dynamic<1, 0, meta::kHiInf>>);
+static_assert(std::same_as<shape_extent_type_t<1, RuntimeShapeLayout>, Dynamic<8, 0, 64>>);
+static_assert(std::same_as<decltype(tensor::shape_extent<0>(std::declval<const RuntimeShapeLayout&>())),
+                           Dynamic<1, 0, meta::kHiInf>>);
+
+using TypedLayout = Layout<Shape<Const<2>, Dynamic<4, 8, 32>, Const<16>>, Strides<Dynamic<4>, Const<16>, Const<1>>>;
 static_assert(std::same_as<size_type_t<0, TypedLayout>, Const<2>>);
-static_assert(std::same_as<
-              size_type_t<1, TypedLayout>, Dynamic<4, 8, 32>>);
+static_assert(std::same_as<size_type_t<1, TypedLayout>, Dynamic<4, 8, 32>>);
 static_assert(std::same_as<stride_type_t<2, TypedLayout>, Const<1>>);
-static_assert(std::same_as<
-              numel_type_t<TypedLayout>, Dynamic<128, 256, 1024>>);
-static_assert(std::same_as<
-              decltype(tensor::size<0>(
-                  std::declval<const TypedLayout&>())),
-              Const<2>>);
-static_assert(std::same_as<
-              decltype(tensor::size<1>(
-                  std::declval<const TypedLayout&>())),
-              Dynamic<4, 8, 32>>);
-static_assert(std::same_as<
-              decltype(tensor::stride<2>(
-                  std::declval<const TypedLayout&>())),
-              Const<1>>);
+static_assert(std::same_as<numel_type_t<TypedLayout>, Dynamic<128, 256, 1024>>);
+static_assert(std::same_as<decltype(tensor::numel_value(std::declval<const TypedLayout&>())), Dynamic<128, 256, 1024>>);
+static_assert(std::same_as<decltype(tensor::size<0>(std::declval<const TypedLayout&>())), Const<2>>);
+static_assert(std::same_as<decltype(tensor::size<1>(std::declval<const TypedLayout&>())), Dynamic<4, 8, 32>>);
+static_assert(std::same_as<decltype(tensor::stride<2>(std::declval<const TypedLayout&>())), Const<1>>);
 
 // ======================================================================
 // Helper: capture operator<< output to std::string
@@ -197,9 +192,9 @@ TEST_F(ValueTest, DynamicBoundsConforms) {
   EXPECT_TRUE(D::conforms(0));
   EXPECT_TRUE(D::conforms(8));
   EXPECT_TRUE(D::conforms(128));
-  EXPECT_FALSE(D::conforms(4));     // unaligned
-  EXPECT_FALSE(D::conforms(-8));    // below lower bound
-  EXPECT_FALSE(D::conforms(136));   // above upper bound
+  EXPECT_FALSE(D::conforms(4)); // unaligned
+  EXPECT_FALSE(D::conforms(-8)); // below lower bound
+  EXPECT_FALSE(D::conforms(136)); // above upper bound
 }
 
 TEST_F(ValueTest, DynamicLowerBoundOnly) {
@@ -208,7 +203,7 @@ TEST_F(ValueTest, DynamicLowerBoundOnly) {
   EXPECT_FALSE(D::has_upper);
   EXPECT_TRUE(D::conforms(32));
   EXPECT_TRUE(D::conforms(48));
-  EXPECT_FALSE(D::conforms(16));    // below lower bound
+  EXPECT_FALSE(D::conforms(16)); // below lower bound
 }
 
 TEST_F(ValueTest, DynamicNoBoundsIsAny) {
@@ -426,8 +421,9 @@ TEST_F(ValueTest, ConstModDyn) {
   auto d = Dynamic<4, 4, 16>{8};
   auto r = cint<100> % d;
   EXPECT_EQ(nint_t(r), 4);
-  // k=1:100%4=0, k=2:100%8=4, k=3:100%12=4, k=4:100%16=4
-  using RT = Dynamic<1, 0, 4>;
+  // The common factor 4 survives; max |divisor|-1 gives 15, rounded down
+  // to the greatest representable 4-multiple.
+  using RT = Dynamic<4, 0, 12>;
   EXPECT_TRUE((std::is_same_v<decltype(r), RT>));
 }
 
@@ -483,8 +479,8 @@ TEST_F(ValueTest, DynModDyn) {
   auto r = d1 % d2;
   EXPECT_EQ(nint_t(r), 0);
   // v1∈[0,16], v2∈[2,8], max_abs_v2=8
-  // L1≥0 → lo=0, H1≥0 → hi=7
-  using RT = Dynamic<1, 0, 7>;
+  // L1≥0 → lo=0; the raw hi=7 tightens to 6 because the result is even.
+  using RT = Dynamic<2, 0, 6>;
   EXPECT_TRUE((std::is_same_v<decltype(r), RT>));
 }
 
@@ -515,13 +511,13 @@ TEST_F(ValueTest, IntDivConst) {
 TEST_F(ValueTest, ConstModInt) {
   auto r = cint<17> % 5;
   EXPECT_EQ(nint_t(r), 2);
-  EXPECT_TRUE((std::is_same_v<decltype(r), Any>));
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<1, 0, 17>>));
 }
 
 TEST_F(ValueTest, IntModConst) {
   auto r = 20 % cint<7>;
   EXPECT_EQ(nint_t(r), 6);
-  EXPECT_TRUE((std::is_same_v<decltype(r), Any>));
+  EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<1, -6, 6>>));
 }
 
 TEST_F(ValueTest, DynMulInt) {
@@ -630,6 +626,58 @@ TEST_F(ValueTest, DynModConstCrossZero) {
   EXPECT_TRUE((std::is_same_v<decltype(r), RT>));
 }
 
+TEST_F(ValueTest, MulPreservesOneSidedBounds) {
+  auto positive = cint<3> * Dynamic<8, 16>{32};
+  EXPECT_EQ(nint_t(positive), 96);
+  EXPECT_TRUE((std::is_same_v<decltype(positive), Dynamic<8, 48, kHiInf>>));
+
+  auto negative = cint<-3> * Dynamic<8, kLoInf, 64>{32};
+  EXPECT_EQ(nint_t(negative), -96);
+  EXPECT_TRUE((std::is_same_v<decltype(negative), Dynamic<8, -192, kHiInf>>));
+
+  auto nonnegative_product = Dynamic<8, 0>{32} * Dynamic<4, 4, 64>{16};
+  EXPECT_EQ(nint_t(nonnegative_product), 512);
+  EXPECT_TRUE((std::is_same_v<decltype(nonnegative_product), Dynamic<32, 0, kHiInf>>));
+}
+
+TEST_F(ValueTest, DivByConstPreservesOneSidedBounds) {
+  auto lower = Dynamic<8, 16>{32} / cint<4>;
+  EXPECT_EQ(nint_t(lower), 8);
+  EXPECT_TRUE((std::is_same_v<decltype(lower), Dynamic<2, 4, kHiInf>>));
+
+  auto swapped = Dynamic<8, kLoInf, 64>{32} / cint<-4>;
+  EXPECT_EQ(nint_t(swapped), -8);
+  EXPECT_TRUE((std::is_same_v<decltype(swapped), Dynamic<2, -16, kHiInf>>));
+}
+
+TEST_F(ValueTest, RuntimeDivisorPreservesConstraints) {
+  auto singleton = Dynamic<8, 16>{32} / Dynamic<4, 4, 4>{4};
+  EXPECT_EQ(nint_t(singleton), 8);
+  EXPECT_TRUE((std::is_same_v<decltype(singleton), Dynamic<2, 4, kHiInf>>));
+
+  auto bounded = Dynamic<8, 16>{32} / Dynamic<4, 4, 16>{8};
+  EXPECT_EQ(nint_t(bounded), 4);
+  EXPECT_TRUE((std::is_same_v<decltype(bounded), Dynamic<1, 1, kHiInf>>));
+
+  auto one_sided = cint<100> / Dynamic<4, 4>{8};
+  EXPECT_EQ(nint_t(one_sided), 12);
+  EXPECT_TRUE((std::is_same_v<decltype(one_sided), Dynamic<1, 0, 25>>));
+}
+
+TEST_F(ValueTest, RemainderPreservesAlignmentAndOneSidedBounds) {
+  auto by_const = Dynamic<4>{20} % cint<6>;
+  EXPECT_EQ(nint_t(by_const), 2);
+  EXPECT_TRUE((std::is_same_v<decltype(by_const), Dynamic<2, -4, 4>>));
+
+  auto nonnegative = Dynamic<8, 0>{24} % Dynamic<4>{20};
+  EXPECT_EQ(nint_t(nonnegative), 4);
+  EXPECT_TRUE((std::is_same_v<decltype(nonnegative), Dynamic<4, 0, kHiInf>>));
+
+  auto constant = cint<10> % Dynamic<2>{6};
+  EXPECT_EQ(nint_t(constant), 4);
+  EXPECT_TRUE((std::is_same_v<decltype(constant), Dynamic<2, 0, 10>>));
+}
+
 TEST_F(ValueTest, ConstMulDynPowerOfTwo) {
   auto d = Dynamic<16, 0, 32>{16};
   auto r = cint<8> * d;
@@ -655,7 +703,7 @@ TEST_F(ValueTest, DynNegSentinelBounds) {
 TEST_F(ValueTest, ChainedAddMul) {
   auto d1 = Dynamic<8, 0, 128>{64};
   auto d2 = Dynamic<4, 0, 64>{32};
-  auto r = (d1 + cint<10>) * d2;
+  auto r = (d1 + cint<10>)*d2;
   EXPECT_EQ(nint_t(r), 2368);
   // Step1: Dyn<8,0,128>+Const<10> → Dyn<2,10,138>{74}
   // Step2: Dyn<2,10,138>*Dyn<4,0,64> → Dyn<8,0,8832>{2368}
@@ -676,7 +724,7 @@ TEST_F(ValueTest, ChainedSubAdd) {
 
 TEST_F(ValueTest, ChainedDivMul) {
   auto d = Dynamic<8, 0, 64>{32};
-  auto r = (d / cint<4>) * cint<3>;
+  auto r = (d / cint<4>)*cint<3>;
   EXPECT_EQ(nint_t(r), 24);
   // Step1: Dyn<8,0,64>/Const<4> → Dyn<2,0,16>{8}
   // Step2: Dyn<2,0,16>*Const<3> → Dyn<2,0,48>{24}
@@ -726,8 +774,7 @@ TEST_F(ValueTest, ToValueNormalizesAndPreservesMetadata) {
   auto constrained = to_value(Dynamic<16, 0, 128>{32});
   EXPECT_TRUE((std::is_same_v<decltype(runtime), Any>));
   EXPECT_TRUE((std::is_same_v<decltype(fixed), Const<5>>));
-  EXPECT_TRUE((std::is_same_v<
-      decltype(constrained), Dynamic<16, 0, 128>>));
+  EXPECT_TRUE((std::is_same_v<decltype(constrained), Dynamic<16, 0, 128>>));
   EXPECT_EQ(nint_t(runtime), 17);
   EXPECT_EQ(nint_t(fixed), 5);
   EXPECT_EQ(nint_t(constrained), 32);
@@ -875,7 +922,7 @@ TEST_F(ValueTest, DivFamilyConstConstFold) {
 }
 
 TEST_F(ValueTest, CeilDivDynConstExactAlignment) {
-  auto d = Dynamic<8, 16, 128>{100};
+  auto d = Dynamic<8, 16, 128>{104};
   auto r = ceil_div(d, cint<8>);
   EXPECT_EQ(nint_t(r), 13);
   // A=8 divides N=8: alignment A/N = 1, bounds [2, 16].
@@ -883,30 +930,30 @@ TEST_F(ValueTest, CeilDivDynConstExactAlignment) {
 }
 
 TEST_F(ValueTest, CeilDivDynConstKeepsDivisibility) {
-  auto d = Dynamic<8, 16, 128>{100};
+  auto d = Dynamic<8, 16, 128>{104};
   auto r = ceil_div(d, cint<4>);
-  EXPECT_EQ(nint_t(r), 25);
+  EXPECT_EQ(nint_t(r), 26);
   // A=8 divides N=4: alignment A/N = 2, bounds [4, 32].
   EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<2, 4, 32>>));
 }
 
 TEST_F(ValueTest, CeilDivDynConstDegradesAlignment) {
-  auto d = Dynamic<8, 16, 128>{100};
+  auto d = Dynamic<8, 16, 128>{104};
   auto r = ceil_div(d, cint<3>);
-  EXPECT_EQ(nint_t(r), 34);
+  EXPECT_EQ(nint_t(r), 35);
   // 8 % 3 != 0: alignment degrades to 1, bounds [ceil(16/3), ceil(128/3)].
   EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<1, 6, 43>>));
 }
 
 TEST_F(ValueTest, FloorDivDynConst) {
-  auto d = Dynamic<8, 16, 128>{100};
+  auto d = Dynamic<8, 16, 128>{96};
   auto r = floor_div(d, cint<8>);
   EXPECT_EQ(nint_t(r), 12);
   EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<1, 2, 16>>));
 }
 
 TEST_F(ValueTest, CeilDivUnboundedDyn) {
-  auto d = Dynamic<8>{100};
+  auto d = Dynamic<8>{104};
   auto r = ceil_div(d, cint<8>);
   EXPECT_EQ(nint_t(r), 13);
   EXPECT_TRUE((std::is_same_v<decltype(r), Any>));
@@ -918,65 +965,127 @@ TEST_F(ValueTest, DivFamilyPreservesOneSidedBounds) {
   auto floor_lower = floor_div(lower_bounded, cint<4>);
   EXPECT_EQ(nint_t(ceil_lower), 26);
   EXPECT_EQ(nint_t(floor_lower), 26);
-  EXPECT_TRUE((std::is_same_v<
-      decltype(ceil_lower), Dynamic<2, 4, kHiInf>>));
-  EXPECT_TRUE((std::is_same_v<
-      decltype(floor_lower), Dynamic<2, 4, kHiInf>>));
+  EXPECT_TRUE((std::is_same_v<decltype(ceil_lower), Dynamic<2, 4, kHiInf>>));
+  EXPECT_TRUE((std::is_same_v<decltype(floor_lower), Dynamic<2, 4, kHiInf>>));
 
   auto upper_bounded = Dynamic<8, kLoInf, 128>{104};
   auto ceil_upper = ceil_div(upper_bounded, cint<4>);
   auto floor_upper = floor_div(upper_bounded, cint<4>);
   EXPECT_EQ(nint_t(ceil_upper), 26);
   EXPECT_EQ(nint_t(floor_upper), 26);
-  EXPECT_TRUE((std::is_same_v<
-      decltype(ceil_upper), Dynamic<2, kLoInf, 32>>));
-  EXPECT_TRUE((std::is_same_v<
-      decltype(floor_upper), Dynamic<2, kLoInf, 32>>));
+  EXPECT_TRUE((std::is_same_v<decltype(ceil_upper), Dynamic<2, kLoInf, 32>>));
+  EXPECT_TRUE((std::is_same_v<decltype(floor_upper), Dynamic<2, kLoInf, 32>>));
 }
 
 TEST_F(ValueTest, AlignUpDynConstIdentityWhenAligned) {
-  auto d = Dynamic<8, 16, 128>{100};
+  auto d = Dynamic<8, 16, 128>{104};
   auto r = align_up(d, cint<8>);
   EXPECT_EQ(nint_t(r), 104);
   // Every value is already 8-aligned: alignment A survives untouched.
   EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<8, 16, 128>>));
 }
 
-TEST_F(ValueTest, AlignUpDynConstDegradesToGcd) {
-  auto d = Dynamic<16, 32, 192>{100};
+TEST_F(ValueTest, AlignUpDynConstKeepsAlignmentPowerOfTwoFactor) {
+  auto d = Dynamic<16, 32, 192>{112};
   auto r = align_up(d, cint<24>);
   EXPECT_EQ(nint_t(r), 120);
-  // gcd(16, 24) = 8, bounds [align_up(32,24), align_up(192,24)].
+  // lsb(24) = 8, bounds [align_up(32,24), align_up(192,24)].
   EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<8, 48, 192>>));
 }
 
+TEST_F(ValueTest, AlignDynConstStrengthensToConstAlignment) {
+  auto up = align_up(Dynamic<4, 0, 128>{100}, cint<16>);
+  auto down = align_down(Dynamic<4, 0, 128>{100}, cint<16>);
+  EXPECT_EQ(nint_t(up), 112);
+  EXPECT_EQ(nint_t(down), 96);
+  EXPECT_TRUE((std::is_same_v<decltype(up), Dynamic<16, 0, 128>>));
+  EXPECT_TRUE((std::is_same_v<decltype(down), Dynamic<16, 0, 128>>));
+}
+
+TEST_F(ValueTest, AlignDynConstPreservesOneSidedBounds) {
+  auto up = align_up(Dynamic<8, 16>{104}, cint<4>);
+  auto down = align_down(Dynamic<8, kLoInf, 128>{104}, cint<4>);
+  EXPECT_TRUE((std::is_same_v<decltype(up), Dynamic<8, 16, kHiInf>>));
+  EXPECT_TRUE((std::is_same_v<decltype(down), Dynamic<8, kLoInf, 128>>));
+}
+
 TEST_F(ValueTest, AlignDownDynConst) {
-  auto d = Dynamic<8, 16, 128>{100};
+  auto d = Dynamic<8, 16, 128>{96};
   auto r = align_down(d, cint<8>);
   EXPECT_EQ(nint_t(r), 96);
   EXPECT_TRUE((std::is_same_v<decltype(r), Dynamic<8, 16, 128>>));
-  auto r2 = align_down(Dynamic<16, 32, 192>{100}, cint<24>);
+  auto r2 = align_down(Dynamic<16, 32, 192>{112}, cint<24>);
   EXPECT_EQ(nint_t(r2), 96);
   EXPECT_TRUE((std::is_same_v<decltype(r2), Dynamic<8, 24, 192>>));
 }
 
-TEST_F(ValueTest, DivFamilyRuntimeDivisorDegrades) {
-  auto d = Dynamic<8>{9};
+TEST_F(ValueTest, DivFamilyUnboundedRuntimeDivisor) {
+  auto d = Dynamic<1>{9};
   EXPECT_EQ(nint_t(ceil_div(cint<100>, d)), 12);
   EXPECT_TRUE((std::is_same_v<decltype(ceil_div(cint<100>, d)), Any>));
-  auto e = Dynamic<8>{100};
-  auto f = Dynamic<4>{9};
+  auto e = Dynamic<4>{100};
+  auto f = Dynamic<1>{9};
   EXPECT_EQ(nint_t(ceil_div(e, f)), 12);
   EXPECT_TRUE((std::is_same_v<decltype(ceil_div(e, f)), Any>));
   EXPECT_TRUE((std::is_same_v<decltype(floor_div(e, f)), Any>));
-  EXPECT_TRUE((std::is_same_v<decltype(align_up(e, f)), Any>));
-  EXPECT_TRUE((std::is_same_v<decltype(align_down(e, f)), Any>));
+  EXPECT_TRUE((std::is_same_v<decltype(align_up(e, f)), Dynamic<1, 0, kHiInf>>));
+  EXPECT_TRUE((std::is_same_v<decltype(align_down(e, f)), Dynamic<1, 0, kHiInf>>));
+}
+
+TEST_F(ValueTest, DivFamilyBoundedRuntimeDivisorPreservesBounds) {
+  auto divisor = Dynamic<1, 4, 8>{5};
+  auto ceil_const = ceil_div(cint<100>, divisor);
+  auto floor_const = floor_div(cint<100>, divisor);
+  EXPECT_EQ(nint_t(ceil_const), 20);
+  EXPECT_EQ(nint_t(floor_const), 20);
+  EXPECT_TRUE((std::is_same_v<decltype(ceil_const), Dynamic<1, 13, 25>>));
+  EXPECT_TRUE((std::is_same_v<decltype(floor_const), Dynamic<1, 12, 25>>));
+
+  auto dividend = Dynamic<8, 16>{32};
+  auto ceil_dynamic = ceil_div(dividend, divisor);
+  auto floor_dynamic = floor_div(dividend, divisor);
+  EXPECT_EQ(nint_t(ceil_dynamic), 7);
+  EXPECT_EQ(nint_t(floor_dynamic), 6);
+  EXPECT_TRUE((std::is_same_v<decltype(ceil_dynamic), Dynamic<1, 2, kHiInf>>));
+  EXPECT_TRUE((std::is_same_v<decltype(floor_dynamic), Dynamic<1, 2, kHiInf>>));
+}
+
+TEST_F(ValueTest, DivFamilySingletonRuntimeDivisorActsAsConst) {
+  auto divisor = Dynamic<1, 4, 4>{4};
+  auto result = ceil_div(Dynamic<8, 16>{32}, divisor);
+  EXPECT_EQ(nint_t(result), 8);
+  EXPECT_TRUE((std::is_same_v<decltype(result), Dynamic<2, 4, kHiInf>>));
+}
+
+TEST_F(ValueTest, AlignRuntimeAlignmentPreservesConstraints) {
+  auto alignment = Dynamic<4, 8, 16>{12};
+  auto const_up = align_up(cint<100>, alignment);
+  auto const_down = align_down(cint<100>, alignment);
+  EXPECT_EQ(nint_t(const_up), 108);
+  EXPECT_EQ(nint_t(const_down), 96);
+  EXPECT_TRUE((std::is_same_v<decltype(const_up), Dynamic<4, 100, 112>>));
+  EXPECT_TRUE((std::is_same_v<decltype(const_down), Dynamic<4, 88, 100>>));
+
+  auto value = Dynamic<8, 16, 128>{104};
+  auto dynamic_up = align_up(value, alignment);
+  auto dynamic_down = align_down(value, alignment);
+  EXPECT_EQ(nint_t(dynamic_up), 108);
+  EXPECT_EQ(nint_t(dynamic_down), 96);
+  EXPECT_TRUE((std::is_same_v<decltype(dynamic_up), Dynamic<4, 16, 140>>));
+  EXPECT_TRUE((std::is_same_v<decltype(dynamic_down), Dynamic<4, 4, 128>>));
+}
+
+TEST_F(ValueTest, AlignSingletonRuntimeAlignmentActsAsConst) {
+  auto alignment = Dynamic<1, 16, 16>{16};
+  auto result = align_up(Dynamic<4, 0, 128>{100}, alignment);
+  EXPECT_EQ(nint_t(result), 112);
+  EXPECT_TRUE((std::is_same_v<decltype(result), Dynamic<16, 0, 128>>));
 }
 
 TEST_F(ValueTest, DivFamilyValueWithRawIntWrapAsAny) {
-  auto d = Dynamic<8, 16, 128>{100};
+  auto d = Dynamic<8, 16, 128>{104};
   auto r = ceil_div(d, nint_t{3});
-  EXPECT_EQ(nint_t(r), 34);
+  EXPECT_EQ(nint_t(r), 35);
   EXPECT_TRUE((std::is_same_v<decltype(r), Any>));
 }
 
@@ -1029,8 +1138,8 @@ TEST_F(PackedStorageTest, ConstructFromPtrMixed) {
   vecops::meta::details::PackedStorage<Const<128>, Any> ps(data);
   EXPECT_EQ(ps.template get<0>(), 128);
   EXPECT_EQ(ps.template get<1>(), 100);
-  EXPECT_EQ(ps[0], 128);  // const
-  EXPECT_EQ(ps[1], 100);  // runtime
+  EXPECT_EQ(ps[0], 128); // const
+  EXPECT_EQ(ps[1], 100); // runtime
 }
 
 TEST_F(PackedStorageTest, OperatorBracketConstDim) {
@@ -1053,7 +1162,7 @@ TEST_F(PackedStorageTest, ToArrayRoundtrip) {
 TEST_F(PackedStorageTest, ToPackedArray) {
   vecops::meta::details::PackedStorage<Const<3>, Any, Const<5>> ps(Const<3>{}, Any{7}, Const<5>{});
   auto& packed = ps.to_packed_array();
-  EXPECT_EQ(packed.size(), 1u);  // only Any dimension
+  EXPECT_EQ(packed.size(), 1u); // only Any dimension
   EXPECT_EQ(packed[0], 7);
 }
 
@@ -1308,8 +1417,7 @@ TEST_F(LayoutTest, MakeLayout) {
 }
 
 TEST_F(LayoutTest, MakeLayoutForward) {
-  auto layout = make_layout(make_shape(cint<128>, cint<64>),
-                            make_strides(cint<64>, cint<1>));
+  auto layout = make_layout(make_shape(cint<128>, cint<64>), make_strides(cint<64>, cint<1>));
   EXPECT_EQ(layout.ndim(), 2);
   EXPECT_TRUE(layout.shape().template is_const<0>());
 }
@@ -1357,15 +1465,13 @@ TEST_F(FreeFunctionTest, FreeIsRuntime) {
 }
 
 TEST_F(FreeFunctionTest, FreeSize) {
-  auto layout = make_layout(make_shape(cint<128>, cint<64>),
-                            make_strides(cint<64>, cint<1>));
+  auto layout = make_layout(make_shape(cint<128>, cint<64>), make_strides(cint<64>, cint<1>));
   EXPECT_EQ(size<0>(layout), 128);
   EXPECT_EQ(size<1>(layout), 64);
 }
 
 TEST_F(FreeFunctionTest, FreeStride) {
-  auto layout = make_layout(make_shape(cint<128>, cint<64>),
-                            make_strides(cint<64>, cint<1>));
+  auto layout = make_layout(make_shape(cint<128>, cint<64>), make_strides(cint<64>, cint<1>));
   EXPECT_EQ(stride<0>(layout), 64);
   EXPECT_EQ(stride<1>(layout), 1);
 }
@@ -1382,8 +1488,7 @@ TEST_F(FreeFunctionTest, OffsetAtFromArray) {
 }
 
 TEST_F(FreeFunctionTest, OffsetAtSupportsCompileTimeLayout) {
-  auto layout = make_layout(make_shape(cint<3>, cint<4>),
-                            make_strides(cint<7>, cint<1>));
+  auto layout = make_layout(make_shape(cint<3>, cint<4>), make_strides(cint<7>, cint<1>));
   EXPECT_EQ(offset_at(layout, 2, 3), 17);
 }
 
@@ -1425,8 +1530,7 @@ TEST_F(MetaOpsTest, RemoveDimStrides) {
 }
 
 TEST_F(MetaOpsTest, RemoveDimLayout) {
-  auto layout = make_layout(make_shape(cint<128>, cint<64>, 100),
-                            make_strides(cint<64>, cint<1>, 10));
+  auto layout = make_layout(make_shape(cint<128>, cint<64>, 100), make_strides(cint<64>, cint<1>, 10));
   auto r = remove<1>(layout);
   EXPECT_EQ(r.ndim(), 2);
   EXPECT_EQ(size<0>(r), 128);
@@ -1476,8 +1580,7 @@ TEST_F(MetaOpsTest, SetDimStrides) {
 }
 
 TEST_F(MetaOpsTest, SetDimLayout) {
-  auto layout = make_layout(make_shape(cint<128>, cint<64>),
-                            make_strides(cint<64>, cint<1>));
+  auto layout = make_layout(make_shape(cint<128>, cint<64>), make_strides(cint<64>, cint<1>));
   auto s = set<0>(layout, Any{256}, Any{128});
   EXPECT_EQ(size<0>(s), 256);
   EXPECT_EQ(stride<0>(s), 128);
@@ -1524,8 +1627,7 @@ TEST_F(MetaOpsTest, InsertAtEnd) {
 }
 
 TEST_F(MetaOpsTest, InsertDimLayout) {
-  auto layout = make_layout(make_shape(cint<128>, cint<64>),
-                            make_strides(cint<64>, cint<1>));
+  auto layout = make_layout(make_shape(cint<128>, cint<64>), make_strides(cint<64>, cint<1>));
   auto r = insert<1>(layout, cint<3>, cint<30>);
   EXPECT_EQ(r.ndim(), 3);
   EXPECT_EQ(size<0>(r), 128);
@@ -1599,14 +1701,12 @@ TEST_F(LayoutIOTest, PrintDynamicWithAny) {
 }
 
 TEST_F(LayoutIOTest, PrintLayoutBasic) {
-  auto layout = make_layout(make_shape(cint<128>, cint<64>),
-                            make_strides(cint<64>, cint<1>));
+  auto layout = make_layout(make_shape(cint<128>, cint<64>), make_strides(cint<64>, cint<1>));
   EXPECT_EQ(to_string(layout), "Layout(s=(128!, 64!), st=(64!, 1!))");
 }
 
 TEST_F(LayoutIOTest, PrintLayoutMixed) {
-  auto layout = make_layout(make_shape(128, 64),
-                            make_strides(cint<64>, 1));
+  auto layout = make_layout(make_shape(128, 64), make_strides(cint<64>, 1));
   EXPECT_EQ(to_string(layout), "Layout(s=(128, 64), st=(64!, 1))");
 }
 
@@ -1713,8 +1813,7 @@ TEST_F(CompileTimeTest, ConstexprToArray) {
 }
 
 TEST_F(CompileTimeTest, ConstexprLayout) {
-  constexpr auto layout = make_layout(make_shape(cint<128>, cint<64>),
-                                      make_strides(cint<64>, cint<1>));
+  constexpr auto layout = make_layout(make_shape(cint<128>, cint<64>), make_strides(cint<64>, cint<1>));
   constexpr auto sz = size<0>(layout);
   constexpr auto st = stride<1>(layout);
   static_assert(std::same_as<decltype(sz), const meta::Const<128>>);
@@ -1723,7 +1822,7 @@ TEST_F(CompileTimeTest, ConstexprLayout) {
   EXPECT_EQ(st, 1);
 }
 
-#endif  // VECOPS_DEBUG
+#endif // VECOPS_DEBUG
 
 // ======================================================================
 // Metaprogramming Details Suite
@@ -1808,7 +1907,7 @@ TEST_F(LayoutDeathTest, DynamicBoundsViolationUnaligned) {
   EXPECT_DEATH(D(4), "Dynamic<");
 }
 
-#endif  // VECOPS_DEBUG
+#endif // VECOPS_DEBUG
 
 // ======================================================================
 // Continuity Traits Suite
@@ -1829,24 +1928,17 @@ template <typename T>
 struct HasTypeMember<T, std::void_t<typename T::type>> : std::true_type {};
 
 TEST_F(TypeTraitSelectionTest, ChainIfSelectsFirstTrueOption) {
-  using T = chain_if_t<
-      chain_opt<false, int>,
-      chain_opt<true, float>,
-      chain_opt<true, double>>;
+  using T = chain_if_t<chain_opt<false, int>, chain_opt<true, float>, chain_opt<true, double>>;
   EXPECT_TRUE((std::is_same_v<T, float>));
 }
 
 TEST_F(TypeTraitSelectionTest, ChainIfHasNoTypeWhenNoOptionMatches) {
-  using T = chain_if<
-      chain_opt<false, int>,
-      chain_opt<false, float>>;
+  using T = chain_if<chain_opt<false, int>, chain_opt<false, float>>;
   EXPECT_FALSE((HasTypeMember<T>::value));
 }
 
 TEST_F(TypeTraitSelectionTest, ChainIfDuplicateTrueOptionsUseFirst) {
-  using T = chain_if_t<
-      chain_opt<true, int>,
-      chain_opt<true, float>>;
+  using T = chain_if_t<chain_opt<true, int>, chain_opt<true, float>>;
   EXPECT_TRUE((std::is_same_v<T, int>));
 }
 
@@ -1900,8 +1992,7 @@ TEST_F(LenientMetaTest, IsLenientRequiresMatchingRank) {
 class LayoutConversionTest : public ::testing::Test {};
 
 TEST_F(LayoutConversionTest, AsCastsToTargetMetaTypes) {
-  auto layout = make_layout(make_shape(Any{4}, Any{5}),
-                            make_strides(Any{5}, Any{1}));
+  auto layout = make_layout(make_shape(Any{4}, Any{5}), make_strides(Any{5}, Any{1}));
 
   auto typed = layout.as<Shape<Const<4>, Const<5>>, Strides<Const<5>, Const<1>>>();
 
@@ -1914,8 +2005,7 @@ TEST_F(LayoutConversionTest, AsCastsToTargetMetaTypes) {
 }
 
 TEST_F(LayoutConversionTest, ImplicitConversionToMoreLenientLayout) {
-  auto strict = make_layout(make_shape(cint<4>, cint<5>),
-                            make_strides(cint<5>, cint<1>));
+  auto strict = make_layout(make_shape(cint<4>, cint<5>), make_strides(cint<5>, cint<1>));
 
   Layout<Shape<Dynamic<4>, Any>, Strides<Any, Any>> lenient = strict;
 
@@ -1934,48 +2024,41 @@ TEST_F(LayoutConversionTest, ImplicitConversionRejectsMoreStrictLayout) {
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_FullConst) {
-  auto layout = make_layout(make_shape(cint<4>, cint<6>),
-                            make_strides(cint<6>, cint<1>));
+  auto layout = make_layout(make_shape(cint<4>, cint<6>), make_strides(cint<6>, cint<1>));
   EXPECT_TRUE((is_ct_last_contiguous_v<decltype(layout), 2>));
   EXPECT_TRUE((is_ct_last_contiguous_v<decltype(layout), 1>));
   EXPECT_TRUE((is_ct_contiguous_v<decltype(layout)>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_LastOneConst) {
-  auto layout = make_layout(make_shape(Any{4}, Any{6}),
-                            make_strides(Any{6}, cint<1>));
+  auto layout = make_layout(make_shape(Any{4}, Any{6}), make_strides(Any{6}, cint<1>));
   EXPECT_TRUE((is_ct_last_contiguous_v<decltype(layout), 1>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_ShapeNotConst) {
   // shape[1] must be non-const because the contiguity check at D=0
   // uses Zd1=shape[1]; shape[0] is not checked in that position.
-  auto layout = make_layout(make_shape(cint<4>, Any{6}),
-                            make_strides(cint<6>, cint<1>));
+  auto layout = make_layout(make_shape(cint<4>, Any{6}), make_strides(cint<6>, cint<1>));
   EXPECT_FALSE((is_ct_last_contiguous_v<decltype(layout), 2>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_StrideNotConst) {
-  auto layout = make_layout(make_shape(cint<4>, cint<6>),
-                            make_strides(Any{6}, cint<1>));
+  auto layout = make_layout(make_shape(cint<4>, cint<6>), make_strides(Any{6}, cint<1>));
   EXPECT_FALSE((is_ct_last_contiguous_v<decltype(layout), 2>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_N_Exceeds_Ndim) {
-  auto layout = make_layout(make_shape(cint<4>, cint<6>),
-                            make_strides(cint<6>, cint<1>));
+  auto layout = make_layout(make_shape(cint<4>, cint<6>), make_strides(cint<6>, cint<1>));
   EXPECT_FALSE((is_ct_last_contiguous_v<decltype(layout), 3>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_N_Zero) {
-  auto layout = make_layout(make_shape(cint<4>, cint<6>),
-                            make_strides(cint<6>, cint<1>));
+  auto layout = make_layout(make_shape(cint<4>, cint<6>), make_strides(cint<6>, cint<1>));
   EXPECT_TRUE((is_ct_last_contiguous_v<decltype(layout), 0>));
 }
 
 TEST_F(ContiguityTest, CtLastContiguous_NonUnitLastStride) {
-  auto layout = make_layout(make_shape(cint<4>, cint<6>),
-                            make_strides(cint<6>, cint<2>));
+  auto layout = make_layout(make_shape(cint<4>, cint<6>), make_strides(cint<6>, cint<2>));
   EXPECT_FALSE((is_ct_last_contiguous_v<decltype(layout), 1>));
 }
 
@@ -1996,8 +2079,7 @@ TEST_F(ContiguityTest, CtLastContiguous_4D_Last2) {
 }
 
 TEST_F(ContiguityTest, CtIsContiguous_NotContiguous) {
-  auto layout = make_layout(make_shape(cint<4>, cint<6>),
-                            make_strides(cint<5>, cint<1>));
+  auto layout = make_layout(make_shape(cint<4>, cint<6>), make_strides(cint<5>, cint<1>));
   EXPECT_FALSE((is_ct_contiguous_v<decltype(layout)>));
 }
 
@@ -2039,8 +2121,7 @@ TEST_F(RuntimeContiguityTest, IsLastContiguous_AllRuntimeNonContiguous) {
 }
 
 TEST_F(RuntimeContiguityTest, IsLastContiguous_CompileTimeShortcut) {
-  auto layout = make_layout(make_shape(cint<4>, cint<6>),
-                            make_strides(cint<6>, cint<1>));
+  auto layout = make_layout(make_shape(cint<4>, cint<6>), make_strides(cint<6>, cint<1>));
   EXPECT_TRUE(is_last_contiguous<2>(layout));
   EXPECT_TRUE(is_contiguous(layout));
 }
@@ -2102,9 +2183,9 @@ TEST_F(TransposeTraitTest, SwapDim_PreserveConst) {
   auto s = make_shape(cint<128>, Any{64}, cint<32>);
   auto r = tensor::details::swap_dim<0, 1>(s);
   // After swap: Shape<Any, Const<128>, Const<32>>
-  EXPECT_FALSE(r.template is_const<0>());  // Any moved to pos 0
-  EXPECT_TRUE(r.template is_const<1>());   // Const<128> moved to pos 1
-  EXPECT_TRUE(r.template is_const<2>());   // Const<32> unchanged
+  EXPECT_FALSE(r.template is_const<0>()); // Any moved to pos 0
+  EXPECT_TRUE(r.template is_const<1>()); // Const<128> moved to pos 1
+  EXPECT_TRUE(r.template is_const<2>()); // Const<32> unchanged
   EXPECT_EQ(get<0>(r), 64);
   EXPECT_EQ(get<1>(r), 128);
   EXPECT_EQ(get<2>(r), 32);
@@ -2143,8 +2224,7 @@ TEST_F(TransposeTraitTest, SwapDim_Strides) {
 class LayoutTransposeTest : public ::testing::Test {};
 
 TEST_F(LayoutTransposeTest, TransposeCT_Basic) {
-  auto layout = make_layout(make_shape(cint<4>, cint<6>),
-                            make_strides(cint<6>, cint<1>));
+  auto layout = make_layout(make_shape(cint<4>, cint<6>), make_strides(cint<6>, cint<1>));
   auto t = transpose<0, 1>(layout);
   EXPECT_EQ(t.ndim(), 2);
   EXPECT_EQ(size<0>(t), 6);
@@ -2154,8 +2234,7 @@ TEST_F(LayoutTransposeTest, TransposeCT_Basic) {
 }
 
 TEST_F(LayoutTransposeTest, TransposeCT_3D) {
-  auto layout = make_layout(make_shape(cint<2>, cint<3>, cint<4>),
-                            make_strides(cint<12>, cint<4>, cint<1>));
+  auto layout = make_layout(make_shape(cint<2>, cint<3>, cint<4>), make_strides(cint<12>, cint<4>, cint<1>));
   auto t = transpose<0, 2>(layout);
   EXPECT_EQ(t.ndim(), 3);
   EXPECT_EQ(size<0>(t), 4);
@@ -2167,8 +2246,7 @@ TEST_F(LayoutTransposeTest, TransposeCT_3D) {
 }
 
 TEST_F(LayoutTransposeTest, TransposeCT_ConstPreserved) {
-  auto layout = make_layout(make_shape(cint<128>, cint<64>, cint<32>),
-                            make_strides(cint<2048>, cint<32>, cint<1>));
+  auto layout = make_layout(make_shape(cint<128>, cint<64>, cint<32>), make_strides(cint<2048>, cint<32>, cint<1>));
   auto t = transpose<0, 1>(layout);
   EXPECT_TRUE(t.shape().template is_const<0>());
   EXPECT_TRUE(t.shape().template is_const<1>());
@@ -2185,6 +2263,8 @@ TEST_F(LayoutTransposeTest, TransposeCT_SameAxis) {
 TEST_F(LayoutTransposeTest, TransposeRT_Basic) {
   auto layout = make_layout(make_shape(4, 6), make_strides(6, 1));
   auto t = transpose(layout, 0, 1);
+  EXPECT_TRUE((std::same_as<size_type_t<0, decltype(t)>, meta::Dynamic<1, 0, meta::kHiInf>>));
+  EXPECT_TRUE((std::same_as<size_type_t<1, decltype(t)>, meta::Dynamic<1, 0, meta::kHiInf>>));
   EXPECT_EQ(t.ndim(), 2);
   EXPECT_EQ(size<0>(t), 6);
   EXPECT_EQ(size<1>(t), 4);
@@ -2192,14 +2272,27 @@ TEST_F(LayoutTransposeTest, TransposeRT_Basic) {
   EXPECT_EQ(stride<1>(t), 6);
 }
 
-TEST_F(LayoutTransposeTest, TransposeRT_DegradesToAny) {
-  auto layout = make_layout(make_shape(cint<4>, cint<6>),
-                            make_strides(cint<6>, cint<1>));
+TEST_F(LayoutTransposeTest, TransposeRT_PreservesCommonConstraints) {
+  auto layout = make_layout(make_shape(cint<4>, cint<6>), make_strides(cint<6>, cint<1>));
   auto t = transpose(layout, 0, 1);
+  EXPECT_TRUE((std::same_as<size_type_t<0, decltype(t)>, meta::Dynamic<2, 4, 6>>));
+  EXPECT_TRUE((std::same_as<size_type_t<1, decltype(t)>, meta::Dynamic<2, 4, 6>>));
+  EXPECT_TRUE((std::same_as<stride_type_t<0, decltype(t)>, meta::Dynamic<1, 1, 6>>));
+  EXPECT_TRUE((std::same_as<stride_type_t<1, decltype(t)>, meta::Dynamic<1, 1, 6>>));
   EXPECT_FALSE(t.shape().template is_const<0>());
   EXPECT_FALSE(t.shape().template is_const<1>());
   EXPECT_FALSE(t.strides().template is_const<0>());
   EXPECT_FALSE(t.strides().template is_const<1>());
+}
+
+TEST_F(LayoutTransposeTest, TransposeRT_RecognizesCommonSingleton) {
+  auto layout =
+    make_layout(make_shape(cint<1>, meta::Dynamic<1, 1, 1>{1}), make_strides(cint<0>, meta::Dynamic<1, 0, 0>{0}));
+  auto t = transpose(layout, 0, 1);
+  EXPECT_TRUE((std::same_as<size_type_t<0, decltype(t)>, meta::Const<1>>));
+  EXPECT_TRUE((std::same_as<size_type_t<1, decltype(t)>, meta::Const<1>>));
+  EXPECT_TRUE((std::same_as<stride_type_t<0, decltype(t)>, meta::Const<0>>));
+  EXPECT_TRUE((std::same_as<stride_type_t<1, decltype(t)>, meta::Const<0>>));
 }
 
 TEST_F(LayoutTransposeTest, TransposeRT_3D) {
@@ -2218,9 +2311,8 @@ TEST_F(LayoutTransposeTest, TransposeRT_SameAxis) {
 }
 
 TEST(LayoutDimensionTakeTest, KeepsLeadingAndTrailingMetadata) {
-  auto layout = make_layout(
-      make_shape(cint<2>, Any{3}, cint<4>, Any{5}),
-      make_strides(cint<60>, Any{20}, cint<5>, Any{1}));
+  auto layout =
+    make_layout(make_shape(cint<2>, Any{3}, cint<4>, Any{5}), make_strides(cint<60>, Any{20}, cint<5>, Any{1}));
   auto leading = take_leading<2>(layout);
   auto trailing = take_trailing<2>(layout);
 

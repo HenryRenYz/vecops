@@ -555,7 +555,8 @@ TEST(MatmulPackTest, PackedLayoutPreservesStreamingMetadata) {
                              Const<ceil_div(33, Panel)>>);
   static_assert(std::same_as<size_type_t<2, Layout>, Const<Panel>>);
 #else
-  static_assert(std::same_as<size_type_t<0, Layout>, Any>);
+  static_assert(std::same_as<size_type_t<0, Layout>,
+                             Dynamic<1, 1, 5>>);
   static_assert(std::same_as<size_type_t<2, Layout>,
                              Dynamic<8, 8, 128>>);
 #endif

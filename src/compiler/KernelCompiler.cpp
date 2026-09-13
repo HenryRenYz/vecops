@@ -157,7 +157,7 @@ std::string meta_value(const DimensionDef& definition, std::int64_t observed, co
   const auto lower = resolve(definition.lower_bound(), binding);
   const auto upper = resolve(definition.upper_bound(), binding);
   if (alignment == 1 && lower == INT64_MIN && upper == INT64_MAX)
-    return "::vecops::meta::Any{" + std::to_string(observed) + "}";
+    return "::vecops::meta::Any{" + std::string(runtime_value) + "}";
   const auto lower_text = lower == INT64_MIN ? "::vecops::meta::kLoInf" : std::to_string(lower);
   const auto upper_text = upper == INT64_MAX ? "::vecops::meta::kHiInf" : std::to_string(upper);
   return "::vecops::meta::Dynamic<" + std::to_string(alignment) + ", " + lower_text + ", " + upper_text + ">{" +

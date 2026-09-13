@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "vecops/matmul/details/tiled/LoopNest.h"
+#include "vecops/matmul/details/tiled/ProblemMapper.h"
 #include "vecops/matmul/details/planning/FamilySelector.h"
 #include "vecops/matmul/details/kernel/RuntimeDispatch.h"
 #include "vecops/matmul/details/tiled/PolicyTraits.h"
@@ -95,6 +96,21 @@ static_assert(amx_residual_split_profitable(17, 33, 1024));
 static_assert(amx_residual_split_profitable(33, 17, 1024));
 static_assert(!amx_residual_split_profitable(19, 33, 1024));
 
+TEST(MatmulProblemMapperTest, PreservesValidatedNonnegativeMetadata) {
+  const auto mapped = matmul::details::ProblemMapper::map(
+      meta::Any{17}, meta::Dynamic<8, -16, 128>{24},
+      meta::Dynamic<4, 16, 256>{32});
+  EXPECT_EQ(static_cast<nint_t>(mapped.m), 17);
+  EXPECT_EQ(static_cast<nint_t>(mapped.n), 24);
+  EXPECT_EQ(static_cast<nint_t>(mapped.k), 32);
+  EXPECT_TRUE((std::same_as<
+      decltype(mapped.m), meta::Dynamic<1, 0, meta::kHiInf>>));
+  EXPECT_TRUE((std::same_as<
+      decltype(mapped.n), meta::Dynamic<8, 0, 128>>));
+  EXPECT_TRUE((std::same_as<
+      decltype(mapped.k), meta::Dynamic<4, 16, 256>>));
+}
+
 TEST(MatmulRuntimeDispatchTest, SharedRuntimeRulesMatchConstexprRules) {
   using namespace kernel::matmul_details;
   for (const auto shape : {
@@ -130,6 +146,37 @@ static_assert(std::same_as<
 
 using UnitTiling = matmul::CacheTiling<
     meta::Const<1>, meta::Const<1>, meta::Const<1>>;
+
+using SingletonUnit = meta::Dynamic<1, 1, 1>;
+using SingletonRowLayout = tensor::Layout<
+    tensor::Shape<meta::Any, meta::Any>,
+    tensor::Strides<meta::Any, SingletonUnit>>;
+using SingletonColumnLayout = tensor::Layout<
+    tensor::Shape<meta::Any, meta::Any>,
+    tensor::Strides<SingletonUnit, meta::Any>>;
+static_assert(matmul::details::orientation::row_contiguous_v<
+              SingletonRowLayout>);
+static_assert(matmul::details::orientation::column_contiguous_v<
+              SingletonColumnLayout>);
+static_assert(matmul::details::atom_alignment_v<
+              meta::Dynamic<1, 16, 16>> == 16);
+
+#if defined(ARCH_X86_FAMILY)
+using SingletonStrideAtom = matmul::AMX_BF16F32;
+#elif defined(HAS_SME)
+using SingletonStrideAtom = matmul::SME_BF16F32;
+#endif
+
+#if defined(ARCH_X86_FAMILY) || defined(HAS_SME)
+using SingletonRowTensor = tensor::Tensor<
+    bfloat16_t, typename SingletonRowLayout::Shape,
+    typename SingletonRowLayout::Strides>;
+using SingletonRowSpec = decltype(tensor::input<bfloat16_t>(
+    std::declval<SingletonRowTensor>()));
+static_assert(!matmul::details::should_pack_v<
+              matmul::PackingPolicy<>, SingletonStrideAtom,
+              matmul::Operand::A, SingletonRowSpec>);
+#endif
 
 #if defined(HAS_SME)
 using SMEAutomaticTiling = matmul::AutomaticCacheTilingFor<
@@ -409,6 +456,60 @@ static_assert(matmul::details::accumulator_block_origin<
 static_assert(matmul::details::accumulator_block_origin<
               false, matmul::Axis::N, matmul::loop_order::NKM>(19) == 0);
 
+using BoundedAccumulatorExtent = meta::Dynamic<8, 8, 64>;
+constexpr auto BoundedPanelExtent = matmul::details::bounded_extent(
+    BoundedAccumulatorExtent{32}, meta::cint<16>);
+constexpr auto SameTypePanelExtent = matmul::details::bounded_extent(
+    BoundedAccumulatorExtent{32}, BoundedAccumulatorExtent{16});
+static_assert(std::same_as<
+              std::remove_cvref_t<decltype(BoundedPanelExtent)>,
+              meta::Dynamic<8, 8, 16>>);
+static_assert(static_cast<nint_t>(BoundedPanelExtent) == 16);
+static_assert(std::same_as<
+              std::remove_cvref_t<decltype(SameTypePanelExtent)>,
+              BoundedAccumulatorExtent>);
+static_assert(static_cast<nint_t>(SameTypePanelExtent) == 16);
+constexpr auto StripeAccumulatorExtent =
+    matmul::details::accumulator_axis_extent<
+        matmul::Axis::M, matmul::loop_order::MKN>(
+            BoundedAccumulatorExtent{32}, meta::cint<16>);
+constexpr auto WholeAccumulatorExtent =
+    matmul::details::accumulator_axis_extent<
+        matmul::Axis::N, matmul::loop_order::MKN>(
+            BoundedAccumulatorExtent{32}, meta::cint<16>);
+static_assert(std::same_as<
+              std::remove_cvref_t<decltype(StripeAccumulatorExtent)>,
+              meta::Dynamic<8, 8, 16>>);
+static_assert(static_cast<nint_t>(StripeAccumulatorExtent) == 16);
+static_assert(std::same_as<
+              std::remove_cvref_t<decltype(WholeAccumulatorExtent)>,
+              BoundedAccumulatorExtent>);
+static_assert(static_cast<nint_t>(WholeAccumulatorExtent) == 32);
+
+TEST(MatmulAccumulatorTest, OutputReusePreservesShapeAndStrideMetadata) {
+  alignas(double) std::array<float, 16> storage{};
+  auto output_tensor = tensor::make_tensor(
+      storage.data(),
+      tensor::make_layout(
+          tensor::make_shape(meta::cint<3>, meta::cint<4>),
+          tensor::make_strides(meta::cint<4>, meta::cint<2>)));
+  auto output = tensor::output<float>(output_tensor);
+  using RuntimeN = meta::Dynamic<1, 1, 4>;
+  auto accumulator = matmul::details::output_acc_storage<double>(
+      output, meta::cint<3>, RuntimeN{4});
+  using AccLayout = std::remove_cvref_t<decltype(accumulator.layout())>;
+  static_assert(std::same_as<
+                tensor::size_type_t<0, AccLayout>, meta::Const<3>>);
+  static_assert(std::same_as<
+                tensor::size_type_t<1, AccLayout>, RuntimeN>);
+  static_assert(std::same_as<
+                tensor::stride_type_t<0, AccLayout>, meta::Const<2>>);
+  static_assert(std::same_as<
+                tensor::stride_type_t<1, AccLayout>, meta::Const<1>>);
+  EXPECT_EQ(static_cast<nint_t>(tensor::size<1>(accumulator)), 4);
+  EXPECT_EQ(static_cast<nint_t>(tensor::stride<0>(accumulator)), 2);
+}
+
 TEST(MatmulLoopNestTest, DisabledAxisDoesNotGenerateBlocks) {
   int calls = 0;
   matmul::details::LoopNest<
@@ -482,6 +583,79 @@ TEST(MatmulLoopNestTest, ReportsKBlockPhases) {
   EXPECT_EQ(phases, (std::vector<std::pair<bool, bool>>{
                         {true, false}, {false, false}, {false, true}}));
   EXPECT_EQ(active, (std::vector<nint_t>{2, 2, 1}));
+}
+
+TEST(MatmulLoopNestTest, PreservesSingletonExtentMetadata) {
+  using Tiling = matmul::CacheTiling<
+      meta::Const<2>, meta::Const<2>, meta::Const<2>,
+      matmul::CacheLoopMode::enabled,
+      matmul::CacheLoopMode::enabled,
+      matmul::CacheLoopMode::enabled>;
+  using Singleton = meta::Dynamic<1, 1, 1>;
+  int calls = 0;
+  matmul::details::LoopNest<matmul::loop_order::MNK, Tiling>::run_phased(
+      Singleton{1}, meta::cint<1>, meta::cint<1>, Tiling{},
+      [&](const auto& block, auto phase) {
+        ++calls;
+        static_assert(std::same_as<
+                      std::remove_cvref_t<decltype(block.m)>, Singleton>);
+        static_assert(std::same_as<
+                      std::remove_cvref_t<decltype(block.n)>, meta::Const<1>>);
+        static_assert(std::same_as<
+                      std::remove_cvref_t<decltype(block.k)>, meta::Const<1>>);
+        static_assert(matmul::details::static_kernel_phase_v<
+                      decltype(phase)>);
+      });
+  EXPECT_EQ(calls, 1);
+}
+
+TEST(MatmulLoopNestTest, PreservesBoundedKBlockMetadataWithoutTypeSplitting) {
+  using Tiling = matmul::CacheTiling<
+      meta::Const<8>, meta::Const<8>, meta::Const<2>>;
+  using KBlock = meta::Dynamic<1, 0, 2>;
+  int full_blocks = 0;
+  int tail_blocks = 0;
+  matmul::details::LoopNest<matmul::loop_order::MNK, Tiling>::run_phased(
+      meta::cint<1>, meta::cint<1>, meta::Any{5}, Tiling{},
+      [&](const auto& block, auto) {
+        using K = std::remove_cvref_t<decltype(block.k)>;
+        if constexpr (std::same_as<K, KBlock>) {
+          if (static_cast<nint_t>(block.k) == 2)
+            ++full_blocks;
+          else if (static_cast<nint_t>(block.k) == 1)
+            ++tail_blocks;
+        }
+      });
+  EXPECT_EQ(full_blocks, 2);
+  EXPECT_EQ(tail_blocks, 1);
+}
+
+TEST(MatmulLoopNestTest, StatefulTraversalPreservesSpatialBlockMetadata) {
+  using Tiling = matmul::CacheTiling<
+      meta::Const<2>, meta::Const<8>, meta::Const<8>>;
+  using MBlock = meta::Dynamic<1, 1, 2>;
+  int full_blocks = 0;
+  int tail_blocks = 0;
+  auto pass_through = []<int, matmul::Axis>(
+                          const auto&, const auto&, const auto& state,
+                          auto&& continuation) {
+    continuation(state);
+  };
+  matmul::details::LoopNest<matmul::loop_order::MNK, Tiling>::
+      run_phased_with_state(
+          meta::Any{5}, meta::cint<1>, meta::cint<1>, Tiling{}, 0,
+          pass_through,
+          [&](const auto& block, auto, int) {
+            using M = std::remove_cvref_t<decltype(block.m)>;
+            if constexpr (std::same_as<M, MBlock>) {
+              if (static_cast<nint_t>(block.m) == 2)
+                ++full_blocks;
+              else if (static_cast<nint_t>(block.m) == 1)
+                ++tail_blocks;
+            }
+          });
+  EXPECT_EQ(full_blocks, 2);
+  EXPECT_EQ(tail_blocks, 1);
 }
 
 TEST(MatmulLoopNestTest, ZeroKStillEmitsSemanticOutputPhase) {

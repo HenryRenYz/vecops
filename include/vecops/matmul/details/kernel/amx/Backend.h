@@ -126,31 +126,35 @@ inline constexpr bool is_packed_access_v =
 template <typename Access>
 inline constexpr bool direct_row_major_input_v =
   generic::RawDirectAccess<Access> && Access::Rank == 2 &&
-  std::same_as<tensor::stride_type_t<1, InputLayoutOf<Access>>, meta::Const<1>>;
+  meta::range_within_v<
+      tensor::stride_type_t<1, InputLayoutOf<Access>>, 1, 1>;
 
 /// Rank-two logical row whose final axis is physically contiguous, including
 /// converted and transformed DataAccess objects.
 template <typename Access>
 inline constexpr bool row_contiguous_input_v =
-  Access::Rank == 2 && std::same_as<tensor::stride_type_t<1, InputLayoutOf<Access>>,
-                                    meta::Const<1>>;
+  Access::Rank == 2 && meta::range_within_v<
+      tensor::stride_type_t<1, InputLayoutOf<Access>>, 1, 1>;
 
 /// Output-side twin of direct_row_major_input_v.
 template <typename Access>
 inline constexpr bool direct_row_major_output_v =
   generic::RawDirectAccess<Access> && Access::Rank == 2 &&
-  std::same_as<tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
+  meta::range_within_v<
+      tensor::stride_type_t<1, OutputLayoutOf<Access>>, 1, 1>;
 
 template <typename Access>
 inline constexpr bool row_contiguous_output_v =
-  Access::Rank == 2 && std::same_as<tensor::stride_type_t<1, OutputLayoutOf<Access>>, meta::Const<1>>;
+  Access::Rank == 2 && meta::range_within_v<
+      tensor::stride_type_t<1, OutputLayoutOf<Access>>, 1, 1>;
 
 /// Rank-two output whose leading (spatial) axis is contiguous, i.e. a
 /// transposed C -- the store shape produced by orientation-swapped
 /// problems; served by the column-block store path in store_c_tile.
 template <typename Access>
 inline constexpr bool column_contiguous_output_v =
-  Access::Rank == 2 && std::same_as<tensor::stride_type_t<0, OutputLayoutOf<Access>>, meta::Const<1>>;
+  Access::Rank == 2 && meta::range_within_v<
+      tensor::stride_type_t<0, OutputLayoutOf<Access>>, 1, 1>;
 
 /** AMX defaults to one wide transform; an explicit wrapper takes priority. */
 template <typename Access>
@@ -310,9 +314,8 @@ inline constexpr bool remainder_at_most_one_v = [] {
   using EV = std::remove_cvref_t<E>;
   if constexpr (EV::aligns(Alignment)) {
     return true;
-  } else if constexpr (meta::is_bounded_v<EV> &&
-                       meta::lower_bound_v<EV> == meta::upper_bound_v<EV>) {
-    return meta::lower_bound_v<EV> % Alignment <= 1;
+  } else if constexpr (meta::is_singleton_v<EV>) {
+    return meta::singleton_value_v<EV> % Alignment <= 1;
   } else {
     return false;
   }
@@ -323,8 +326,7 @@ inline constexpr bool remainder_at_most_one_v = [] {
 template <meta::ValueType E, nint_t Value>
 inline constexpr bool extent_excludes_v = [] {
   using EV = std::remove_cvref_t<E>;
-  if constexpr (EV::is_const) return EV::value != Value;
-  else return !EV::conforms(Value);
+  return !EV::conforms(Value);
 }();
 
 /// Decide, purely from the Meta contracts, that every problem the caller
@@ -1378,12 +1380,69 @@ VECOPS_ALWAYS_INLINE auto tile_active_extent(nint_t active) {
   }
 }
 
+/**
+ * @brief Refine the aligned bulk produced by a 16-element residual split.
+ *
+ * The caller consumes this value only when the selected spatial extent is
+ * greater than 16 and has a non-zero remainder. Singleton extents therefore
+ * fold completely; runtime extents retain their 16-element alignment and any
+ * branch-refined lower/upper bounds.
+ */
+template <meta::ValueType Extent>
+VECOPS_ALWAYS_INLINE auto residual_bulk_extent(Extent extent) {
+  const nint_t value = static_cast<nint_t>(extent);
+  const nint_t bulk = value - value % 16;
+  if constexpr (meta::is_singleton_v<Extent>) {
+    constexpr nint_t Bulk =
+        meta::singleton_value_v<Extent> -
+        meta::singleton_value_v<Extent> % 16;
+    return meta::Const<Bulk>{bulk};
+  } else {
+    constexpr nint_t Lo = [] {
+      if constexpr (meta::has_lower_bound_v<Extent>)
+        return std::max<nint_t>(
+            16, ::vecops::align_down(
+                    meta::lower_bound_v<Extent>, 16));
+      else
+        return nint_t{16};
+    }();
+    constexpr nint_t Hi = [] {
+      if constexpr (meta::has_upper_bound_v<Extent>)
+        return ::vecops::align_down(meta::upper_bound_v<Extent> - 1, 16);
+      else
+        return meta::kHiInf;
+    }();
+    return meta::Dynamic<16, Lo, Hi>{bulk};
+  }
+}
+
+/**
+ * @brief Refine the non-empty tail produced by a 16-element residual split.
+ *
+ * A runtime tail keeps the common power-of-two divisor of the source extent
+ * and 16. Extents already guaranteed to be 16-aligned can only produce the
+ * compile-time zero remainder, making the residual branch unreachable.
+ */
+template <meta::ValueType Extent>
+VECOPS_ALWAYS_INLINE auto residual_tail_extent(Extent extent) {
+  const nint_t tail = static_cast<nint_t>(extent) % 16;
+  if constexpr (meta::is_singleton_v<Extent>) {
+    constexpr nint_t Tail = meta::singleton_value_v<Extent> % 16;
+    return meta::Const<Tail>{tail};
+  } else if constexpr (Extent::alignment >= 16) {
+    return meta::Const<0>{tail};
+  } else {
+    constexpr nint_t Alignment = Extent::alignment;
+    constexpr nint_t Hi = ::vecops::align_down(nint_t{15}, Alignment);
+    return meta::Dynamic<Alignment, Alignment, Hi>{tail};
+  }
+}
+
 /// Extent type is statically the full 16.
 template <typename Extent>
 inline constexpr bool full_tile_extent_v = [] {
   using E = std::remove_cvref_t<Extent>;
-  if constexpr (E::is_const) return E::value == 16;
-  else return false;
+  return meta::is_singleton_v<E> && meta::singleton_value_v<E> == 16;
 }();
 
 /// Extent type is statically nonzero, so a zero check can be skipped.
@@ -2719,8 +2778,8 @@ struct Backend<matmul_implementation::AMX> {
       const bool split_m = residual_m != 0 && logical_m > 16 &&
           (residual_n == 0 || logical_n <= 16 || residual_m <= residual_n);
       if (split_m) {
-        const meta::Any bulk_m{logical_m - residual_m};
-        const meta::Any tail_m{residual_m};
+        const auto bulk_m = amx::residual_bulk_extent(m);
+        const auto tail_m = amx::residual_tail_extent(m);
         auto run_bulk = [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
           if constexpr (NMajor)
             run_configured_region_n_major<Atom, Policy>(
@@ -2760,8 +2819,8 @@ struct Backend<matmul_implementation::AMX> {
       } else {
         VECOPS_ASSERT(residual_n != 0 && logical_n > 16,
                       "AMX residual split requires a spatial tail");
-        const meta::Any bulk_n{logical_n - residual_n};
-        const meta::Any tail_n{residual_n};
+        const auto bulk_n = amx::residual_bulk_extent(n);
+        const auto tail_n = amx::residual_tail_extent(n);
         auto run_bulk = [&](auto& configured) VECOPS_INLINE_LAMBDA_NOEXCEPT {
           if constexpr (NMajor)
             run_configured_region_n_major<Atom, Policy>(
@@ -3004,14 +3063,17 @@ struct Backend<matmul_implementation::AMX> {
               Atom, ::vecops::matmul::Operand::A, A> ||
           !amx::is_packed_access_v<
               Atom, ::vecops::matmul::Operand::B, B> ||
-          !NV::is_const || !KV::is_const || MV::is_const) {
+          !meta::is_singleton_v<NV> ||
+          !meta::is_singleton_v<KV> ||
+          meta::is_singleton_v<MV>) {
         return false;
       } else {
         // Restrict the dual traversal to the measured L2-resident-K class.
         // Long K needs real KC blocking (L07), while constant M was already
         // decided by automatic_physical_n_major_v before reaching this tier.
-        return KV::value >= 256 && KV::value <= 4096 &&
-            NV::value >= 4 * 16;
+        return meta::singleton_value_v<KV> >= 256 &&
+            meta::singleton_value_v<KV> <= 4096 &&
+            meta::singleton_value_v<NV> >= 4 * 16;
       }
     }();
     const bool runtime_prepared_n_major = [&] {

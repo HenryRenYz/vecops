@@ -39,14 +39,17 @@ namespace vecops::matmul::details {
  * The output layout's strides are in `MemoryElement` units; the returned
  * tensor's shape/strides are in `Acc` element units, so the conversion goes
  * through bytes: `row_bytes = strides[0] * sizeof(MemoryElement)` and the
- * accumulator stride is `row_bytes / sizeof(Acc)`. Always-on checks guard the
- * two requirements the reinterpretation silently relies on: the base address
- * is `Acc`-aligned, and both byte strides divide evenly by `sizeof(Acc)`
- * (otherwise some `Acc` elements would straddle two output elements).
+ * accumulator stride is `row_bytes / sizeof(Acc)`. Shape and stride arithmetic
+ * stays in the Meta value domain, preserving constants, alignment, and bounds.
+ * Always-on checks guard the two requirements the reinterpretation silently
+ * relies on: the base address is `Acc`-aligned, and both byte strides divide
+ * evenly by `sizeof(Acc)` (otherwise some `Acc` elements would straddle two
+ * output elements).
  */
-template <typename Acc, tensor::OutputSpecLike Spec>
+template <typename Acc, tensor::OutputSpecLike Spec,
+          meta::ValueType M, meta::ValueType N>
 VECOPS_INLINE auto output_acc_storage(
-    const Spec& output, nint_t m, nint_t n) {
+    const Spec& output, M m, N n) {
   using Memory = typename Spec::MemoryElement;
   const auto address = reinterpret_cast<std::uintptr_t>(
       output.tensor().data());
@@ -54,18 +57,23 @@ VECOPS_INLINE auto output_acc_storage(
                "output accumulator storage is insufficiently aligned");
   // Strides are in MemoryElement units here and in Acc units below; the
   // byte round trip is what makes the divisibility requirement explicit.
-  const nint_t row_bytes = output.output_layout().strides()[0] *
-      static_cast<nint_t>(sizeof(Memory));
-  const nint_t column_bytes = output.output_layout().strides()[1] *
-      static_cast<nint_t>(sizeof(Memory));
-  VECOPS_CHECK(row_bytes % static_cast<nint_t>(sizeof(Acc)) == 0 &&
-               column_bytes % static_cast<nint_t>(sizeof(Acc)) == 0,
+  constexpr auto MemoryBytes =
+      meta::cint<static_cast<nint_t>(sizeof(Memory))>;
+  constexpr auto AccBytes =
+      meta::cint<static_cast<nint_t>(sizeof(Acc))>;
+  const auto row_bytes =
+      tensor::stride<0>(output.output_layout()) * MemoryBytes;
+  const auto column_bytes =
+      tensor::stride<1>(output.output_layout()) * MemoryBytes;
+  VECOPS_CHECK(static_cast<nint_t>(row_bytes) %
+                       static_cast<nint_t>(sizeof(Acc)) == 0 &&
+                   static_cast<nint_t>(column_bytes) %
+                       static_cast<nint_t>(sizeof(Acc)) == 0,
                "output strides cannot represent accumulator storage");
   auto layout = tensor::make_layout(
-      tensor::make_shape(meta::Any{m}, meta::Any{n}),
+      tensor::make_shape(m, n),
       tensor::make_strides(
-          meta::Any{row_bytes / static_cast<nint_t>(sizeof(Acc))},
-          meta::Any{column_bytes / static_cast<nint_t>(sizeof(Acc))}));
+          row_bytes / AccBytes, column_bytes / AccBytes));
   return tensor::make_tensor(
       reinterpret_cast<Acc*>(output.tensor().data()), layout);
 }

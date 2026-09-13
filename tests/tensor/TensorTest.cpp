@@ -49,6 +49,7 @@ class TensorMarkerTest : public ::testing::Test {};
 TEST_F(TensorMarkerTest, NewAxisDefaultRepeat) {
     auto na = new_axis();
     EXPECT_EQ(na.repeat, 1);
+    EXPECT_TRUE((std::is_same_v<typename decltype(na)::value_type, Const<1>>));
 }
 
 TEST_F(TensorMarkerTest, NewAxisIntRepeat) {
@@ -86,7 +87,7 @@ TEST_F(TensorMarkerTest, RangeBasic) {
     EXPECT_EQ(r.step, 1);
     EXPECT_TRUE((std::is_same_v<typename decltype(r)::start_type, Any>));
     EXPECT_TRUE((std::is_same_v<typename decltype(r)::end_type, Any>));
-    EXPECT_TRUE((std::is_same_v<typename decltype(r)::step_type, Any>));
+    EXPECT_TRUE((std::is_same_v<typename decltype(r)::step_type, Const<1>>));
 }
 
 TEST_F(TensorMarkerTest, RangeWithStep) {
@@ -104,6 +105,49 @@ TEST_F(TensorMarkerTest, RangeConstArgs) {
     EXPECT_TRUE((std::is_same_v<StartT, Const<0>>));
     EXPECT_TRUE((std::is_same_v<EndT, Const<10>>));
     EXPECT_TRUE((std::is_same_v<StepT, Const<2>>));
+}
+
+TEST_F(TensorMarkerTest, RangeConstSlicePreservesShapeAndStride) {
+    std::array<int64_t, 10> data{};
+    auto tensor = make_tensor(data.data(), make_shape(cint<10>),
+                              make_strides(cint<1>));
+    auto sliced = tensor(range(cint<0>, cint<10>, cint<2>));
+    static_assert(std::same_as<size_type_t<0, typename decltype(sliced)::Layout>,
+                               Const<5>>);
+    static_assert(std::same_as<stride_type_t<0, typename decltype(sliced)::Layout>,
+                               Const<2>>);
+    EXPECT_EQ(sliced.size(0), 5);
+}
+
+TEST_F(TensorMarkerTest, RangeDynamicSlicePreservesBounds) {
+    std::array<int64_t, 12> data{};
+    auto tensor = make_tensor(data.data(), make_shape(cint<12>),
+                              make_strides(cint<1>));
+    auto sliced = tensor(range(Dynamic<1, 0, 2>{2}, Dynamic<1, 8, 10>{10},
+                               cint<2>));
+    using Size = size_type_t<0, typename decltype(sliced)::Layout>;
+    static_assert(std::same_as<Size, Dynamic<1, 3, 5>>);
+    EXPECT_EQ(sliced.size(0), 4);
+}
+
+TEST_F(TensorMarkerTest, RangeSingletonDynamicStepKeepsSizeBounds) {
+    std::array<int64_t, 12> data{};
+    auto tensor = make_tensor(data.data(), make_shape(cint<12>),
+                              make_strides(cint<1>));
+    auto sliced = tensor(range(Dynamic<1, 0, 2>{2}, Dynamic<1, 8, 10>{10},
+                               Dynamic<1, 1, 1>{1}));
+    using Size = size_type_t<0, typename decltype(sliced)::Layout>;
+    static_assert(std::same_as<Size, Dynamic<1, 6, 10>>);
+    EXPECT_EQ(sliced.size(0), 8);
+}
+
+TEST_F(TensorMarkerTest, RangeTypedBoundsKeepDefaultUnitStep) {
+    auto r = range(Dynamic<4, 0, 32>{4}, Dynamic<4, 4, 64>{20});
+    EXPECT_TRUE((std::is_same_v<typename decltype(r)::start_type,
+                                Dynamic<4, 0, 32>>));
+    EXPECT_TRUE((std::is_same_v<typename decltype(r)::end_type,
+                                Dynamic<4, 4, 64>>));
+    EXPECT_TRUE((std::is_same_v<typename decltype(r)::step_type, Const<1>>));
 }
 
 TEST_F(TensorMarkerTest, RangeNegativeStep) {
@@ -154,7 +198,9 @@ TEST_F(TensorConstructionTest, ConstructInitListBoth) {
 
 TEST_F(TensorConstructionTest, ConstructInitListSizesOnly) {
     Tensor<int64_t, Shape<Any, Any>, Strides<Any, Any>> t(data_2d_.data(), {4, 5});
+    static_assert(std::same_as<decltype(t.shape_extent<0>()), meta::Dynamic<1, 0, meta::kHiInf>>);
     EXPECT_EQ(t.size(0), 4);
+    EXPECT_EQ(t.shape_extent<0>(), 4);
     EXPECT_EQ(t.size(1), 5);
     EXPECT_EQ(t.stride(0), 5);
     EXPECT_EQ(t.stride(1), 1);
@@ -195,7 +241,9 @@ TEST_F(TensorConstructionTest, ConstructWithConstShape) {
     auto s = make_shape(cint<4>, cint<5>);
     auto st = make_strides(cint<5>, cint<1>);
     Tensor<int64_t, decltype(s), decltype(st)> t(data_2d_.data(), s, st);
+    static_assert(std::same_as<decltype(t.numel_value()), meta::Const<20>>);
     EXPECT_EQ(t.size<0>(), 4);
+    EXPECT_EQ(t.numel_value(), 20);
     EXPECT_TRUE((t.ct_is_contiguous));
 }
 
@@ -363,6 +411,15 @@ TEST_F(TensorContiguityTest, CT_Contiguous) {
     EXPECT_TRUE((t.ct_is_contiguous));
     EXPECT_TRUE((t.ct_is_last_contiguous<2>));
     EXPECT_TRUE((t.ct_is_last_contiguous<1>));
+}
+
+TEST_F(TensorContiguityTest, SingletonDynamicIsCompileTimeContiguous) {
+    auto t = make_tensor(
+        data_2d_.data(),
+        make_shape(Dynamic<1, 4, 4>{4}, Dynamic<1, 5, 5>{5}),
+        make_strides(Dynamic<1, 5, 5>{5}, Dynamic<1, 1, 1>{1}));
+    static_assert(decltype(t)::ct_is_contiguous);
+    EXPECT_TRUE(t.is_contiguous());
 }
 
 TEST_F(TensorContiguityTest, CT_LastContiguous) {
@@ -694,6 +751,12 @@ TEST_F(TensorRangeSliceTest, Range_2D_BothAxes) {
     EXPECT_EQ(s(0, 1), 8);   // arr(1,3)
     EXPECT_EQ(s(1, 0), 12);  // arr(2,2)
     EXPECT_EQ(s(1, 1), 13);  // arr(2,3)
+
+    auto typed = make_tensor(data_2d_.data(), make_shape(cint<4>, cint<5>),
+                             make_strides(cint<5>, cint<1>));
+    auto typed_slice = typed(range(1, 3), range(2, 4));
+    static_assert(std::same_as<
+        stride_type_t<1, typename decltype(typed_slice)::Layout>, Const<1>>);
 }
 
 TEST_F(TensorRangeSliceTest, Range_3D) {

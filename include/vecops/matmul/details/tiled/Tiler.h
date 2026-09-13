@@ -95,6 +95,37 @@ VECOPS_INLINE auto narrow_c_output(
   return tensor::narrow_view<1>(rows, n_origin, n);
 }
 
+/** Clamp an extent to a tile while preserving constants, alignment, and
+ * finite bounds. The identical-type branch avoids the generic-scalar / Meta
+ * overload ambiguity without erasing either operand's metadata. */
+template <meta::ValueType Extent, meta::ValueType Tile>
+VECOPS_ALWAYS_INLINE constexpr auto bounded_extent(
+    Extent extent, Tile tile) {
+  if constexpr (std::same_as<
+                    std::remove_cvref_t<Extent>,
+                    std::remove_cvref_t<Tile>>) {
+    // Avoid the generic-scalar / Meta overload ambiguity for identical Value
+    // types while retaining that exact type (including Dynamic constraints).
+    return tile < extent ? tile : extent;
+  } else {
+    return vecops::min(extent, tile);
+  }
+}
+
+/** Split-K accumulator extent for one spatial axis. An axis outside K only
+ * needs one tile stripe; an axis inside K must keep its full logical extent.
+ * Value-aware min preserves constants, alignment, and finite bounds. */
+template <Axis Target, typename Order,
+          meta::ValueType Extent, meta::ValueType Tile>
+VECOPS_ALWAYS_INLINE constexpr auto accumulator_axis_extent(
+    Extent extent, Tile tile) {
+  if constexpr (!axis_precedes_k_v<Target, Order>) {
+    return extent;
+  } else {
+    return bounded_extent(extent, tile);
+  }
+}
+
 /** Establish a bounded packed panel after its M/K or N/K dependencies have
  * been selected and immediately before the operand's innermost reuse loop. */
 template <typename AtomT, typename AController, typename BController,
@@ -216,6 +247,9 @@ VECOPS_INLINE void run_tiled_rank2(
       BPacking, Operand::B, Order>;
 
   const auto problem = ProblemMapper::map(m, n, k);
+  using ProblemM = std::remove_cvref_t<decltype(problem.m)>;
+  using ProblemN = std::remove_cvref_t<decltype(problem.n)>;
+  using ProblemK = std::remove_cvref_t<decltype(problem.k)>;
 
   auto tiling = resolve_cache_tiling(config);
   using ResolvedTiling = std::remove_cvref_t<decltype(tiling)>;
@@ -232,9 +266,10 @@ VECOPS_INLINE void run_tiled_rank2(
       constexpr Axis SpatialAxis = Side == Operand::A ? Axis::M : Axis::N;
       constexpr bool GeneratesSpatialLoop = LoopNest<
           Order, ResolvedTiling>::template generates_loop<
-              SpatialAxis, M, N, K>;
+              SpatialAxis, ProblemM, ProblemN, ProblemK>;
       constexpr bool GeneratesKLoop = LoopNest<
-          Order, ResolvedTiling>::template generates_loop<Axis::K, M, N, K>;
+          Order, ResolvedTiling>::template generates_loop<
+              Axis::K, ProblemM, ProblemN, ProblemK>;
       VECOPS_CHECK(static_cast<nint_t>(spatial_tile) > 0 &&
                        static_cast<nint_t>(tiling.kc) > 0,
                    "packed matmul cache tiles must be positive");
@@ -279,8 +314,6 @@ VECOPS_INLINE void run_tiled_rank2(
       kernel::matmul_implementation::scratch_bytes<Implementation>();
   if (scratch_bytes != 0) scratch = workspace.allocate(scratch_bytes, 64);
 
-  const nint_t logical_m = static_cast<nint_t>(problem.m);
-  const nint_t logical_n = static_cast<nint_t>(problem.n);
   const nint_t logical_k = static_cast<nint_t>(problem.k);
   // Split-K accumulator shape inference:
   //
@@ -295,17 +328,16 @@ VECOPS_INLINE void run_tiled_rank2(
   //   is revisited once per K block, so the whole axis's partial sums must
   //   stay resident simultaneously: full logical extent.
   constexpr bool GeneratesKLoop = LoopNest<
-      Order, decltype(tiling)>::template generates_loop<Axis::K, M, N, K>;
+      Order, decltype(tiling)>::template generates_loop<
+          Axis::K, ProblemM, ProblemN, ProblemK>;
   const bool split_k = GeneratesKLoop &&
       logical_k > static_cast<nint_t>(tiling.kc);
   using Acc = typename AtomT::TAcc;
   constexpr bool OutputAcc = uses_output_accumulator_v<Config, COutputSpec>;
-  const nint_t acc_m = axis_precedes_k_v<Axis::M, Order>
-      ? std::min(logical_m, static_cast<nint_t>(tiling.mc))
-      : logical_m;
-  const nint_t acc_n = axis_precedes_k_v<Axis::N, Order>
-      ? std::min(logical_n, static_cast<nint_t>(tiling.nc))
-      : logical_n;
+  const auto acc_m = accumulator_axis_extent<Axis::M, Order>(
+      problem.m, tiling.mc);
+  const auto acc_n = accumulator_axis_extent<Axis::N, Order>(
+      problem.n, tiling.nc);
   // Three accumulator sources: (1) OutputAcc reuses the output tensor's own
   // storage (full logical extent, no allocation); (2) split_k without
   // output reuse allocates the workspace tensor sized above; (3) no split
@@ -313,15 +345,17 @@ VECOPS_INLINE void run_tiled_rank2(
   Acc* acc_data = nullptr;
   if (split_k && !OutputAcc) {
     acc_data = static_cast<Acc*>(workspace.allocate(
-        acc_m * acc_n * static_cast<nint_t>(sizeof(Acc)), 64));
+        static_cast<nint_t>(acc_m) * static_cast<nint_t>(acc_n) *
+            static_cast<nint_t>(sizeof(Acc)),
+        64));
   }
   auto acc_tensor = [&]() {
     if constexpr (OutputAcc) {
-      return output_acc_storage<Acc>(c_output, logical_m, logical_n);
+      return output_acc_storage<Acc>(c_output, problem.m, problem.n);
     } else {
       return tensor::make_tensor(
           acc_data, tensor::make_layout(
-              tensor::make_shape(meta::Any{acc_m}, meta::Any{acc_n})));
+              tensor::make_shape(acc_m, acc_n)));
     }
   }();
   auto acc_input = tensor::input<Acc>(acc_tensor);
@@ -403,7 +437,8 @@ VECOPS_INLINE void run_tiled_rank2(
       // paths. The stateful hook is instantiated only when it creates a new
       // panel at this call site.
       LoopNest<Order, decltype(tiling)>::run_phased(
-          m, n, k, tiling, [&](const auto& block, auto phase) {
+          problem.m, problem.n, problem.k, tiling,
+          [&](const auto& block, auto phase) {
             run_leaf(block, phase, initial_state);
           });
     } else {
@@ -411,7 +446,8 @@ VECOPS_INLINE void run_tiled_rank2(
           AtomT, AController, BController,
           PackAOutsidePanel, PackBOutsidePanel, Scope> packing_hook{&scope};
       LoopNest<Order, decltype(tiling)>::run_phased_with_state(
-          m, n, k, tiling, initial_state, packing_hook, run_leaf);
+          problem.m, problem.n, problem.k,
+          tiling, initial_state, packing_hook, run_leaf);
     }
   };
   // Whole-operand packing is a compile-time representation decision. This
@@ -449,10 +485,12 @@ VECOPS_INLINE nint_t tiled_workspace_bytes(
     const ASpec& a, const BSpec& b, const COutputSpec&) {
   using AtomT = typename Config::Atom;
   auto tiling = resolve_cache_tiling(config);
+  const auto problem = ProblemMapper::map(m, n, k);
+  using ProblemM = std::remove_cvref_t<decltype(problem.m)>;
+  using ProblemN = std::remove_cvref_t<decltype(problem.n)>;
+  using ProblemK = std::remove_cvref_t<decltype(problem.k)>;
   nint_t bytes = kernel::matmul_implementation::scratch_bytes<Implementation>();
-  const nint_t logical_m = static_cast<nint_t>(m);
-  const nint_t logical_n = static_cast<nint_t>(n);
-  const nint_t logical_k = static_cast<nint_t>(k);
+  const nint_t logical_k = static_cast<nint_t>(problem.k);
   using Order = resolved_loop_order_t<Config>;
   using Tuning = typename Config::GenericTuning;
   using PackingTuning = config_packing_tuning_t<Config>;
@@ -471,27 +509,23 @@ VECOPS_INLINE nint_t tiled_workspace_bytes(
           is_packed_spec_v<AtomT, Operand::B, BSpec>,
       "matmul B packing policy requires caller-prepared packed input");
   constexpr bool GeneratesKLoop = LoopNest<
-      Order, decltype(tiling)>::template generates_loop<Axis::K, M, N, K>;
+      Order, decltype(tiling)>::template generates_loop<
+          Axis::K, ProblemM, ProblemN, ProblemK>;
   if (GeneratesKLoop && logical_k > static_cast<nint_t>(tiling.kc) &&
       !uses_output_accumulator_v<Config, COutputSpec>) {
     // Same stripe-vs-whole-axis accumulator inference as run_tiled_rank2.
-    const nint_t acc_m = axis_precedes_k_v<Axis::M, Order>
-        ? std::min(logical_m, static_cast<nint_t>(tiling.mc))
-        : logical_m;
-    const nint_t acc_n = axis_precedes_k_v<Axis::N, Order>
-        ? std::min(logical_n, static_cast<nint_t>(tiling.nc))
-        : logical_n;
+    const auto acc_m = accumulator_axis_extent<Axis::M, Order>(
+        problem.m, tiling.mc);
+    const auto acc_n = accumulator_axis_extent<Axis::N, Order>(
+        problem.n, tiling.nc);
     // +63: 64-byte allocation-alignment slack (workspace.allocate rounds
     // the payload up to a 64-byte boundary).
-    bytes += acc_m * acc_n *
+    bytes += static_cast<nint_t>(acc_m) * static_cast<nint_t>(acc_n) *
         static_cast<nint_t>(sizeof(typename AtomT::TAcc)) + 63;
   }
-  const nint_t panel_m = std::min(logical_m,
-      static_cast<nint_t>(tiling.mc));
-  const nint_t panel_n = std::min(logical_n,
-      static_cast<nint_t>(tiling.nc));
-  const nint_t panel_k = std::min(logical_k,
-      static_cast<nint_t>(tiling.kc));
+  const auto panel_m = bounded_extent(problem.m, tiling.mc);
+  const auto panel_n = bounded_extent(problem.n, tiling.nc);
+  const auto panel_k = bounded_extent(problem.k, tiling.kc);
   if constexpr ((allows_inside_packing_v<APlacement> ||
                  allows_outside_packing_v<APlacement>) &&
                 should_pack_v<APacking, AtomT, Operand::A, ASpec>) {
@@ -503,13 +537,16 @@ VECOPS_INLINE nint_t tiled_workspace_bytes(
     constexpr bool Panel = !Whole && (allows_inside_packing_v<APlacement> ||
         uses_panel_lifetime_packing_v<
             APacking, APlacement, Operand::A, Order>);
-    if constexpr (Whole || Panel) {
-      const nint_t packing_m = Whole ? logical_m : panel_m;
-      const nint_t packing_k = Whole ? logical_k : panel_k;
+    auto add_packing_bytes = [&](auto packing_m, auto packing_k) {
       auto layout = packed_layout<AtomT, Operand::A>(tensor::make_layout(
-          tensor::make_shape(meta::Any{packing_m}, meta::Any{packing_k})));
+          tensor::make_shape(packing_m, packing_k)));
       bytes += tensor::numel(layout) *
           static_cast<nint_t>(sizeof(typename AtomT::TA)) + 63;
+    };
+    if constexpr (Whole) {
+      add_packing_bytes(problem.m, problem.k);
+    } else if constexpr (Panel) {
+      add_packing_bytes(panel_m, panel_k);
     }
   }
   if constexpr ((allows_inside_packing_v<BPlacement> ||
@@ -523,13 +560,16 @@ VECOPS_INLINE nint_t tiled_workspace_bytes(
     constexpr bool Panel = !Whole && (allows_inside_packing_v<BPlacement> ||
         uses_panel_lifetime_packing_v<
             BPacking, BPlacement, Operand::B, Order>);
-    if constexpr (Whole || Panel) {
-      const nint_t packing_n = Whole ? logical_n : panel_n;
-      const nint_t packing_k = Whole ? logical_k : panel_k;
+    auto add_packing_bytes = [&](auto packing_n, auto packing_k) {
       auto layout = packed_layout<AtomT, Operand::B>(tensor::make_layout(
-          tensor::make_shape(meta::Any{packing_n}, meta::Any{packing_k})));
+          tensor::make_shape(packing_n, packing_k)));
       bytes += tensor::numel(layout) *
           static_cast<nint_t>(sizeof(typename AtomT::TB)) + 63;
+    };
+    if constexpr (Whole) {
+      add_packing_bytes(problem.n, problem.k);
+    } else if constexpr (Panel) {
+      add_packing_bytes(panel_n, panel_k);
     }
   }
   return bytes;

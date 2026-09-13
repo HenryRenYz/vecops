@@ -559,6 +559,9 @@ Special behavior worth knowing:
   `mem::split` stores each source word's narrowed result independently.
 - As with plain load/store: masked-off addresses are untouched, inactive
   load lanes are zero unless merged, and alignment/temporality are hints.
+- The SVE backend has native indexed FP16/BF16↔FP32 widening/narrowing paths;
+  masked gathers and scatters keep indices in the caller-logical F32 lane
+  domain and do not scalarize.
 
 ### Math (`vec/Math.h`)
 

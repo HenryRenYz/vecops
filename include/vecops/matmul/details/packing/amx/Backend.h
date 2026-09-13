@@ -105,12 +105,13 @@ struct Backend<
     // pointer over the compute type (no transform, memory element ==
     // compute element — generic::RawDirectAccess), and a unit-stride K
     // axis so source rows are truly contiguous in memory.
+    using InputKStride = tensor::stride_type_t<
+        1, typename generic::SpecOf<Source>::InputLayout>;
+    constexpr bool UnitKStride = meta::is_singleton_v<InputKStride> &&
+        meta::singleton_value_v<InputKStride> == 1;
     constexpr bool Direct = VEC_WIDTH >= 512 &&
         generic::RawDirectAccess<Source> &&
-        std::same_as<
-            tensor::stride_type_t<
-                1, typename generic::SpecOf<Source>::InputLayout>,
-            meta::Const<1>>;
+        UnitKStride;
     if constexpr (Direct) {
       const auto* input = reinterpret_cast<const T*>(source.raw_data());
       const nint_t row_stride = static_cast<nint_t>(
@@ -165,10 +166,8 @@ struct Backend<
                 Transform::permutation_equivariant;
           }
         }();
-        constexpr bool RowMajorInput = std::same_as<
-            tensor::stride_type_t<
-                1, typename generic::SpecOf<Source>::InputLayout>,
-            meta::Const<1>> && RowwiseCompatibleTransform;
+        constexpr bool RowMajorInput = UnitKStride &&
+            RowwiseCompatibleTransform;
         if constexpr (RowMajorInput) {
           amx::pack_b_row_major_access<
               Packing::KPack, Packing::KTile>(
@@ -237,12 +236,13 @@ struct Backend<
     constexpr bool CompensatedVectorPaths = false;
 #endif
     // Same three-condition probe as run()'s direct fast path.
+    using InputKStride = tensor::stride_type_t<
+        1, typename generic::SpecOf<Source>::InputLayout>;
+    constexpr bool UnitKStride = meta::is_singleton_v<InputKStride> &&
+        meta::singleton_value_v<InputKStride> == 1;
     constexpr bool Direct = CompensatedVectorPaths &&
         generic::RawDirectAccess<Source> &&
-        std::same_as<
-            tensor::stride_type_t<
-                1, typename generic::SpecOf<Source>::InputLayout>,
-            meta::Const<1>>;
+        UnitKStride;
     if constexpr (Direct) {
       const auto* input =
           reinterpret_cast<const int8_t*>(source.raw_data());
@@ -262,10 +262,8 @@ struct Backend<
               Transform::permutation_equivariant;
         }
       }();
-      constexpr bool RowMajorInput = std::same_as<
-          tensor::stride_type_t<
-              1, typename generic::SpecOf<Source>::InputLayout>,
-          meta::Const<1>> && RowwiseCompatibleTransform;
+      constexpr bool RowMajorInput = UnitKStride &&
+          RowwiseCompatibleTransform;
       if constexpr (RowMajorInput) {
         amx::pack_b_row_major_access_compensated<
             Packing::KPack, Packing::KTile>(

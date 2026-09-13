@@ -120,9 +120,10 @@ inline constexpr bool should_pack_v = [] {
     constexpr int Rank = Spec::InputTensor::Ndim;
     // Automatic: pack exactly when the K axis is not unit-stride at compile
     // time. A K-contiguous operand already matches the friendly layout.
-    return !std::same_as<
-        tensor::stride_type_t<Rank - 1, typename Spec::InputLayout>,
-        meta::Const<1>>;
+    using KStride = tensor::stride_type_t<
+        Rank - 1, typename Spec::InputLayout>;
+    return !(meta::is_singleton_v<KStride> &&
+             meta::singleton_value_v<KStride> == 1);
   }
 }();
 
