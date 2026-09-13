@@ -23,9 +23,25 @@ from .validate import validate_plan
 _active_session: contextvars.ContextVar[PlanSession | None] = contextvars.ContextVar(
   "vecops_memory_plan_session", default=None
 )
+_active_session_count = 0
+_torch_empty: Any | None = None
+_torch_empty_like: Any | None = None
+
+
+def _load_torch_factories() -> None:
+  """Resolve optional Torch factories once, outside later Dynamo traces."""
+  global _torch_empty, _torch_empty_like
+  torch = __import__("torch")
+  _torch_empty = torch.empty
+  _torch_empty_like = torch.empty_like
 
 
 def current_session() -> "PlanSession | None":
+  # Keep the overwhelmingly common no-session path visible as a plain global
+  # guard.  Dynamo can constant-fold it without attempting to trace
+  # ContextVar.get(), while real planner sessions retain context-local state.
+  if _active_session_count == 0:
+    return None
   return _active_session.get()
 
 
@@ -150,6 +166,7 @@ class PlanSession:
     )
 
   def __enter__(self) -> "PlanSession":
+    global _active_session_count
     if self._entered or self._closed:
       raise RuntimeError("memory plan sessions are single-use")
     if current_session() is not None:
@@ -181,6 +198,7 @@ class PlanSession:
             self.fast_owner, "large_page_bytes", 0
           )
       self._token = _active_session.set(self)
+      _active_session_count += 1
     except Exception:
       if self._token is not None:
         _active_session.reset(self._token)
@@ -197,6 +215,7 @@ class PlanSession:
     self.close()
 
   def close(self) -> None:
+    global _active_session_count
     if self._closed:
       return
     for _identity, (tensor, original) in reversed(tuple(self._original_data.items())):
@@ -212,6 +231,7 @@ class PlanSession:
     if self._token is not None:
       _active_session.reset(self._token)
       self._token = None
+      _active_session_count -= 1
     self.fast_owner = None
     self.slow_owner = None
     self._fast_owner_bytes = 0
@@ -590,7 +610,9 @@ def empty(*shape: Any, **kwargs: Any):
     )
     if replacement is not None:
       return replacement
-  return __import__("torch").empty(*shape, **kwargs)
+  if _torch_empty is None:
+    _load_torch_factories()
+  return _torch_empty(*shape, **kwargs)
 
 
 def empty_like(prototype: Any, **kwargs: Any):
@@ -605,7 +627,9 @@ def empty_like(prototype: Any, **kwargs: Any):
     )
     if replacement is not None:
       return replacement
-  return __import__("torch").empty_like(prototype, **kwargs)
+  if _torch_empty_like is None:
+    _load_torch_factories()
+  return _torch_empty_like(prototype, **kwargs)
 
 
 __all__ = ["PlanSession", "current_session", "empty", "empty_like"]
