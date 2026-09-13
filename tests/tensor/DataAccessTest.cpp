@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "vecops/kernel/Loop.h"
@@ -13,6 +14,10 @@ using namespace vecops;
 using namespace vecops::meta;
 using namespace vecops::tensor;
 
+struct AddressCarryingTransformMetadata {
+  const float* auxiliary;
+};
+
 namespace {
 
 using Tag = vec::ScalableTag<float32_t, 0>;
@@ -21,14 +26,14 @@ using OutPolicy = OutputAccessPolicy<1, AccessPlan::direct>;
 
 struct F32Bf16AccessWidths {
   using ComputeType = float32_t;
-  using MemoryElement = bfloat16_t;
+  using MemoryElement = vecops::bfloat16_t;
 };
 struct F32I8AccessWidths {
   using ComputeType = float32_t;
   using MemoryElement = int8_t;
 };
 struct F16F32AccessWidths {
-  using ComputeType = float16_t;
+  using ComputeType = vecops::float16_t;
   using MemoryElement = float32_t;
 };
 static_assert(preferred_memory_access_power_v<F32Bf16AccessWidths> == 1);
@@ -90,6 +95,22 @@ concept CanTransposeView = requires(const T& value) {
   transpose_view<0, 1>(value);
 };
 
+template <typename T>
+concept CanUnbindOperand = requires(const T& value) {
+  tensor::unbind(value);
+};
+
+template <typename T>
+concept HasTransformValue = requires(const T& value) {
+  value.transform();
+};
+
+template <typename T>
+concept CanExecuteDirectly = requires(
+    const T& value, kernel::WorkspaceView& workspace) {
+  tensor::bind(value, InputAccessPolicy<0>{}, workspace);
+};
+
 static_assert(CanMakeOutputSpec<decltype(make_tensor<1>(
     static_cast<float*>(nullptr), {1}))>);
 static_assert(!CanMakeOutputSpec<decltype(make_tensor<1>(
@@ -103,6 +124,164 @@ TEST(TensorDataAccessTest, OperandSpecsRetainValidatedExternalFacts) {
   static_assert(std::tuple_size_v<typename decltype(in)::ExternalFacts> == 1);
   static_assert(std::tuple_size_v<typename decltype(out)::ExternalFacts> == 1);
   EXPECT_EQ(std::tuple_size_v<typename decltype(in)::ExternalFacts>, 1u);
+}
+
+TEST(TensorDataAccessTest, UnboundSpecsPlanWithoutRetainingStorage) {
+  alignas(64) std::array<float, 32> values{};
+  auto bound_tensor = make_tensor(
+      values.data(), make_shape(cint<4>, cint<8>));
+  auto bound_input = input<float32_t>(
+      bound_tensor, assume_aligned<64>);
+  auto bound_output = output<float32_t>(
+      bound_tensor, assume_aligned<64>);
+
+  auto input_pattern = tensor::unbind(bound_input);
+  auto output_pattern = tensor::unbind(bound_output);
+
+  static_assert(BoundInputSpecLike<decltype(bound_input)>);
+  static_assert(BoundOutputSpecLike<decltype(bound_output)>);
+  static_assert(UnboundInputSpecLike<decltype(input_pattern)>);
+  static_assert(UnboundOutputSpecLike<decltype(output_pattern)>);
+  static_assert(UnboundTensorView<decltype(input_pattern)>);
+  static_assert(!BoundTensorView<decltype(input_pattern)>);
+  static_assert(!CanExecuteDirectly<decltype(input_pattern)>);
+
+  using InputPlanning = InputAccessPolicy<0, 2, AccessPlan::automatic>;
+  using OutputPlanning =
+      OutputAccessPolicy<0, AccessPlan::materialize_after_transform>;
+  EXPECT_EQ(
+      required_workspace(input_pattern, InputPlanning{}),
+      required_workspace(bound_input, InputPlanning{}));
+  EXPECT_EQ(
+      required_workspace(output_pattern, OutputPlanning{}),
+      required_workspace(bound_output, OutputPlanning{}));
+
+  auto rebound_input = tensor::rebind(input_pattern, bound_tensor);
+  auto rebound_output = tensor::rebind(output_pattern, bound_tensor);
+  static_assert(BoundInputSpecLike<decltype(rebound_input)>);
+  static_assert(BoundOutputSpecLike<decltype(rebound_output)>);
+  EXPECT_EQ(rebound_input.tensor().data(), values.data());
+  EXPECT_EQ(rebound_output.tensor().data(), values.data());
+  EXPECT_EQ(
+      std::tuple_size_v<typename decltype(rebound_input)::ExternalFacts>, 1u);
+}
+
+TEST(TensorDataAccessTest, PatternBindingPreservesSlicedBaseOffset) {
+  std::array<float, 4 * 8> values{};
+  auto whole = make_unbound_tensor<float32_t>(
+      make_shape(cint<4>, cint<8>));
+  auto row = whole(2, reserve);
+  auto row_pattern = input<float32_t>(row);
+  auto rebound = tensor::bind(row_pattern, values.data());
+
+  static_assert(UnboundInputSpecLike<decltype(row_pattern)>);
+  static_assert(BoundInputSpecLike<decltype(rebound)>);
+  EXPECT_EQ(row_pattern.tensor().element_offset(), 16);
+  EXPECT_EQ(rebound.tensor().data(), values.data() + 16);
+  EXPECT_EQ(rebound.input_layout().shape()[0], 8);
+}
+
+TEST(TensorDataAccessTest, DynamicPatternCapacityAcceptsConformingTail) {
+  std::array<float, 64 * 8> values{};
+  auto pattern_tensor = make_unbound_tensor<float32_t>(
+      make_shape(dyn<8, 0, 128>(64), cint<8>),
+      make_strides(cint<8>, cint<1>));
+  auto actual_tensor = make_tensor(
+      values.data(), make_shape(Any{32}, Any{8}),
+      make_strides(Any{8}, Any{1}));
+  auto pattern = input<float32_t>(pattern_tensor);
+
+  EXPECT_TRUE(tensor::details::operand_layout_conforms(
+      pattern.input_layout(), actual_tensor.layout()));
+  auto actual = tensor::rebind(pattern, actual_tensor);
+  static_assert(std::same_as<
+                typename std::remove_cvref_t<decltype(actual.tensor())>::Layout,
+                typename decltype(pattern_tensor)::Layout>);
+  EXPECT_EQ(actual.input_layout().shape()[0], 32);
+  EXPECT_EQ(actual.input_layout().shape()[1], 8);
+}
+
+TEST(TensorDataAccessTest, DynamicPatternRejectsInvalidActualLayout) {
+  std::array<float, 64 * 8> values{};
+  auto pattern = make_unbound_tensor<float32_t>(
+      make_shape(dyn<8, 0, 128>(64), cint<8>),
+      make_strides(cint<8>, cint<1>));
+  auto too_large = make_tensor(
+      values.data(), make_shape(Any{72}, Any{8}),
+      make_strides(Any{8}, Any{1}));
+  auto misaligned = make_tensor(
+      values.data(), make_shape(Any{34}, Any{8}),
+      make_strides(Any{8}, Any{1}));
+  auto wrong_stride = make_tensor(
+      values.data(), make_shape(Any{32}, Any{8}),
+      make_strides(Any{9}, Any{1}));
+  auto input_pattern = input<float32_t>(pattern);
+
+  EXPECT_FALSE(tensor::details::operand_layout_conforms(
+      pattern.layout(), too_large.layout()));
+  EXPECT_FALSE(tensor::details::operand_layout_conforms(
+      pattern.layout(), misaligned.layout()));
+  EXPECT_FALSE(tensor::details::operand_layout_conforms(
+      pattern.layout(), wrong_stride.layout()));
+  EXPECT_THROW(tensor::rebind(input_pattern, too_large), std::runtime_error);
+  EXPECT_THROW(tensor::rebind(input_pattern, misaligned), std::runtime_error);
+  EXPECT_THROW(tensor::rebind(input_pattern, wrong_stride), std::runtime_error);
+}
+
+TEST(TensorDataAccessTest, ConstPatternRejectsDifferentExtent) {
+  std::array<float, 64> values{};
+  auto pattern = make_unbound_tensor<float32_t>(
+      make_shape(cint<64>), make_strides(cint<1>));
+  auto actual = make_tensor(
+      values.data(), make_shape(Any{32}), make_strides(Any{1}));
+
+  EXPECT_FALSE(tensor::details::operand_layout_conforms(
+      pattern.layout(), actual.layout()));
+  EXPECT_THROW(
+      tensor::rebind(input<float32_t>(pattern), actual),
+      std::runtime_error);
+}
+
+TEST(TensorDataAccessTest, RebindToActualSpecKeepsRuntimeSpecState) {
+  std::array<float, 64 * 8> values{};
+  auto planning_tensor = make_tensor(
+      values.data(), make_shape(dyn<8, 0, 128>(64), cint<8>));
+  auto actual_tensor = make_tensor(
+      values.data(), make_shape(Any{32}, Any{8}),
+      make_strides(Any{8}, Any{1}));
+  using PlanningSpec = InputSpec<
+      float32_t, decltype(planning_tensor), AddressCarryingTransformMetadata>;
+  using ActualSpec = InputSpec<
+      float32_t, decltype(actual_tensor), AddressCarryingTransformMetadata>;
+  PlanningSpec planning{
+      planning_tensor, AddressCarryingTransformMetadata{values.data() + 3}};
+  ActualSpec bound{
+      actual_tensor, AddressCarryingTransformMetadata{values.data() + 5}};
+  auto pattern = tensor::unbind(planning);
+  static_assert(UnboundInputSpecLike<decltype(pattern)>);
+  static_assert(!HasTransformValue<decltype(pattern)>);
+  static_assert(std::same_as<
+                typename decltype(pattern)::TransformStorage,
+                TypeOnlyPatternMetadata<AddressCarryingTransformMetadata>>);
+
+  auto actual = tensor::rebind(pattern, bound);
+
+  static_assert(BoundInputSpecLike<decltype(actual)>);
+  EXPECT_EQ(actual.tensor().data(), values.data());
+  EXPECT_EQ(actual.transform().auxiliary, values.data() + 5);
+  EXPECT_EQ(actual.input_layout().shape()[0], 32);
+  static_assert(std::same_as<
+                typename decltype(actual)::InputLayout,
+                typename decltype(pattern)::InputLayout>);
+}
+
+TEST(TensorDataAccessTest, TypeOnlyPatternDoesNotRetainStatefulTransform) {
+  using TensorType = decltype(make_tensor(
+      static_cast<float*>(nullptr), make_shape(cint<8>)));
+  using StatefulSpec = InputSpec<
+      float32_t, TensorType, AddressCarryingTransformMetadata>;
+  static_assert(CanUnbindOperand<StatefulSpec>);
+  static_assert(HasTransformValue<StatefulSpec>);
 }
 
 TEST(TensorDataAccessTest, NormalizesTensorsAndSpecsWithoutAcceptingAccess) {
@@ -928,7 +1107,8 @@ TEST(TensorDataAccessTest, TransformRemapsRequestedMaskAcrossDtypes) {
 TEST(TensorDataAccessTest, CoalescedPairRunsNarrowTransformsAndOnePackedStore) {
   Tag tag{};
   const nint_t lanes = vec::size(tag);
-  std::vector<bfloat16_t> values(static_cast<std::size_t>(2 * lanes), bfloat16_t{-1.0f});
+  std::vector<vecops::bfloat16_t> values(
+      static_cast<std::size_t>(2 * lanes), vecops::bfloat16_t{-1.0f});
   auto tensor = make_tensor(values.data(),
                             make_layout(make_shape(nint_t{1}, 2 * lanes), make_strides(meta::Any{2 * lanes}, cint<1>)));
   auto transform = with_transform_store_mode<TransformStoreMode::coalesced>(

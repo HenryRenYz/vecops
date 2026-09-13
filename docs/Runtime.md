@@ -83,6 +83,68 @@ then validates, atomically publishes in ReadWrite mode, and memoizes the
 result. Ordinary `resolve()` retains its synchronous behavior for calls made
 outside a batch.
 
+## Execution parallelism and the Torch bridge
+
+`VecopsThreadPoolV1` is a synchronous executor for dense logical task IDs. An
+embedding supplies it through `VecopsExecutionContext::thread_pool`, together
+with an optional `requested_threads`. The effective execution parallelism is
+the requested value capped by the pool's reported capacity. Logical tasks are
+not physical-thread identities: a pool may run several task IDs sequentially
+on one physical worker.
+
+The generated Torch extension installs a bridge backed by Torch's intra-op
+runtime. It reports `at::get_num_threads()`, detects an existing
+`at::in_parallel_region()`, and executes the logical task set through the
+active Torch/GNU OpenMP team where that integration is available, with a Torch
+`at::parallel_for` fallback on other builds. Nested entry is serialized to
+avoid oversubscription. Consequently a Torch operator does not discover an
+unrelated "ambient vecops OpenMP maximum" or open a competing private vecops
+pool. A non-Torch embedding may provide another `VecopsThreadPoolV1`; the
+optional standalone OpenMP provider is one such implementation, not an
+implicit dependency of generated kernels.
+
+For source kernels, effective parallelism is part of compilation:
+
+```cpp
+constexpr nint_t P = static_cast<nint_t>(vecops::spec::Parallelism);
+
+workspace.parallel_lanes<P>(
+    [&](execution::TaskContext<P> task) {
+      // Exactly P stable logical lanes; task.lane_id() is a scratch identity.
+    });
+
+workspace.parallel_for<P>(nint_t{0}, end, cint<32>,
+    [&](execution::TaskContext<P> task, const auto& item) {
+      // item is [begin,end), clipped only for the final program.
+    });
+```
+
+`parallel_lanes<P>` submits exactly `P` logical lanes. `parallel_for<P>` first
+turns `[begin,end)` into fixed-size range programs, balances contiguous program
+ID intervals over those same lanes, and lets each lane execute zero or more
+programs sequentially. `RangeWorkItem` exposes `program_id/count`,
+`begin/end/extent`, the Meta-preserving `chunk()`, and `is_full()`. Full and
+tail items intentionally share one callback instantiation; this API does not
+silently duplicate a tile kernel for a specialized tail.
+
+The compile-time `P` is also the replica count expected by
+`worker_tensor<T,P>` and prepared operators. `TaskContext<P>::local()` selects
+that lane's stable replica. Do not substitute an OpenMP thread number: the ABI
+does not promise a one-to-one mapping between logical lanes and physical
+workers.
+
+Runtime operator resolution specializes a source recipe with effective `P`
+before artifact lookup/build. The suffix `$Parallelism=i:P` enters the binding,
+specialization, and artifact keys, and generated `vecops_spec.h` exposes the
+same value as `spec::Parallelism`. Changing Torch's intra-op thread count thus
+selects a distinct compiled artifact rather than reusing code whose task split
+and scratch replicas were compiled for another `P`.
+
+Batch precompile distinguishes build concurrency from execution parallelism:
+`parallelism` controls concurrent compiler jobs, while
+`execution_parallelism` chooses `P` (defaulting to `torch.get_num_threads()`
+when Torch is loaded). They are not interchangeable tuning knobs.
+
 ## C ABI split
 
 `CallAbi.h` owns the shared data records (`VecopsCall`, tensor/scalar values,
@@ -111,20 +173,20 @@ The Python extension keeps up to eight exact call signatures per thread for
 this process-local bridge. After a slow invocation has resolved and validated
 an `Executable`, a matching context-free or arena-provider,
 zero-external-workspace call may reuse that executable directly. The signature
-excludes tensor data addresses
-and runtime scalar payloads, but includes tensor kind, dtype, device, access,
-shape, stride, optional presence, and explicit specialization values. A shape
-or specialization change therefore returns to the normal bind/provider path;
-operator destruction invalidates the cached weak owner. Set
-`VECOPS_TORCH_PREPARED_CALL=0` before process startup to disable this hot path
-for diagnostics.
+excludes tensor data addresses and runtime scalar payloads, but includes tensor
+kind, dtype, device, access, shape, stride, optional presence, explicit
+specialization values, and effective execution parallelism. A shape,
+specialization, or Torch thread-count change therefore returns to normal
+operator resolution; operator destruction invalidates the cached weak owner.
+Set `VECOPS_TORCH_PREPARED_CALL=0` before process startup to disable this hot
+path for diagnostics.
 
-Source kernels without an external workspace use a small thread-local
-workspace replay cache. Its identity includes both the observed Dynamic axes
-and the ambient vecops parallelism. This is required because worker-local
-scratch replication often depends on the current OpenMP team size; changing a
-framework's thread count therefore selects or traces a separate plan instead
-of reusing a plan with too few worker replicas.
+Source kernels without an external workspace also use a small thread-local
+workspace replay cache. Its identity includes the observed Dynamic axes,
+decision fingerprint, and effective execution parallelism. This is a second,
+workspace-specific guard in addition to the artifact's compile-time `P`: a
+plan with `P` worker replicas cannot be replayed as though it had another lane
+count.
 
 There is no `runtime/Abi.h` umbrella. Include the protocol header that a
 component actually implements, avoiding unintended bridge dependencies in an

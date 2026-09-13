@@ -23,6 +23,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <list>
 #include <memory>
@@ -37,6 +38,7 @@
 #include "vecops/execution/Parallel.h"
 #include "vecops/execution/WorkspaceArena.h"
 #include "vecops/execution/WorkspacePlan.h"
+#include "vecops/execution/WorkspaceTensor.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/runtime/CallAbi.h"
 
@@ -89,6 +91,53 @@ public:
     std::size_t depth_ = 0;
   };
 
+  /**
+   * Typed persistent-binding authority passed only to `serial_use()`.
+   *
+   * Its worker tensors retain dynamic spill ownership after the construction
+   * scope closes. Arena-backed tensors remain non-owning views into the
+   * planned slot, whose lexical lifetime is still recorded by that scope.
+   */
+  class SerialUseAuthority {
+  public:
+    SerialUseAuthority(const SerialUseAuthority&) = delete;
+    SerialUseAuthority& operator=(const SerialUseAuthority&) = delete;
+
+    /** Bind a statically replicated worker tensor with an explicit layout. */
+    template <typename T, nint_t Replicas, ::vecops::tensor::LayoutLike Layout>
+      requires(Replicas > 0)
+    auto worker_tensor(std::string_view local_name, Layout&& layout, WorkspaceTensorOptions options = {}) {
+      return owner_->template worker_tensor_impl<T>(local_name, meta::cint<Replicas>, std::forward<Layout>(layout),
+                                                    options, true);
+    }
+
+    /** Bind a statically replicated contiguous worker tensor. */
+    template <typename T, nint_t Replicas, typename Shape>
+      requires(Replicas > 0 && ::vecops::tensor::is_shape_v<std::remove_cvref_t<Shape>>)
+    auto worker_tensor(std::string_view local_name, Shape&& shape, WorkspaceTensorOptions options = {}) {
+      return this->template worker_tensor<T, Replicas>(
+        local_name, ::vecops::tensor::make_layout(std::forward<Shape>(shape)), options);
+    }
+
+    /** Bind a statically replicated worker tensor with explicit strides. */
+    template <typename T, nint_t Replicas, typename Shape, typename Strides>
+      requires(Replicas > 0 && ::vecops::tensor::is_shape_v<std::remove_cvref_t<Shape>> &&
+               ::vecops::tensor::is_strides_v<std::remove_cvref_t<Strides>>)
+    auto worker_tensor(std::string_view local_name, Shape&& shape, Strides&& strides,
+                       WorkspaceTensorOptions options = {}) {
+      return this->template worker_tensor<T, Replicas>(
+        local_name, ::vecops::tensor::make_layout(std::forward<Shape>(shape), std::forward<Strides>(strides)), options);
+    }
+
+  private:
+    friend class WorkspaceContext;
+    explicit SerialUseAuthority(WorkspaceContext& owner)
+      : owner_(&owner) {
+    }
+
+    WorkspaceContext* owner_;
+  };
+
   /** Dynamic mode. Requests use the supplied fast/slow arenas while they fit. */
   explicit WorkspaceContext(std::string recipe = "kernel", void* fast_base = nullptr, nint_t fast_capacity = 0,
                             void* slow_base = nullptr, nint_t slow_capacity = 0,
@@ -135,7 +184,8 @@ public:
     thread_pool_ = nullptr;
     if (context == nullptr)
       return;
-    if (context->struct_size >= offsetof(VecopsExecutionContext, requested_threads) + sizeof(context->requested_threads))
+    if (context->struct_size >=
+        offsetof(VecopsExecutionContext, requested_threads) + sizeof(context->requested_threads))
       requested_parallelism_ = static_cast<nint_t>(context->requested_threads);
     if (context->struct_size >= offsetof(VecopsExecutionContext, thread_pool) + sizeof(context->thread_pool))
       thread_pool_ = context->thread_pool;
@@ -167,6 +217,30 @@ public:
     execution::parallel_tasks(thread_pool_, task_count, std::forward<Fn>(body));
   }
 
+  /**
+   * Execute exactly @p Parallelism logical lanes through this call's executor.
+   *
+   * A lane is a stable scratch-replica identity, not necessarily a physical
+   * thread. Prefer this API over `parallel_tasks` in new kernels whose work is
+   * naturally expressed as one invocation per logical lane.
+   */
+  template <nint_t Parallelism, typename Fn>
+  void parallel_lanes(Fn&& body) const {
+    execution::parallel_lanes<Parallelism>(thread_pool_, std::forward<Fn>(body));
+  }
+
+  /**
+   * Execute `[begin, end)` as fixed-size range programs on static logical
+   * lanes. The callback receives `(TaskContext<Parallelism>, RangeWorkItem)`;
+   * one lane may execute several range programs while retaining its worker
+   * tensor replica.
+   */
+  template <nint_t Parallelism, meta::ValueInput Begin, meta::ValueInput End, meta::ValueInput Chunk, typename Fn>
+  void parallel_for(Begin&& begin, End&& end, Chunk&& chunk, Fn&& body) const {
+    execution::parallel_for<Parallelism>(thread_pool_, std::forward<Begin>(begin), std::forward<End>(end),
+                                         std::forward<Chunk>(chunk), std::forward<Fn>(body));
+  }
+
   Scope serial_scope(std::string_view name) {
     VECOPS_ASSERT(!finished_, "cannot enter a finished workspace context");
     VECOPS_ASSERT(!name.empty(), "workspace scope name must not be empty");
@@ -179,9 +253,117 @@ public:
     return Scope{this, frames_.size() - 1};
   }
 
+  /**
+   * Construct one globally serial phase whose scratch may share placement.
+   *
+   * The factory receives a typed binding authority. Scratch allocated through
+   * it is persistent enough for the returned prepared object to execute after
+   * this construction scope closes, while trace/replay placement observes the
+   * short lexical lifetime and may color sequential phase sites together.
+   * Every logical lane must leave one such phase before any lane enters a
+   * sibling phase (normally by a team barrier). Per-lane pipelines must use
+   * ordinary independent `worker_tensor` sites because differently-sized
+   * colored sites can have different replica strides.
+   */
+  template <typename Factory>
+  VECOPS_INLINE auto serial_use(std::string_view name, Factory&& factory) {
+    auto scope = serial_scope(name);
+    SerialUseAuthority authority{*this};
+    return std::invoke(std::forward<Factory>(factory), authority);
+  }
+
   /** Allocate one stable semantic site in the active lexical scope. */
   BoundWorkspaceSlot request(std::string_view local_name, WorkspaceAllocationRequest request) {
     return allocate_site(local_name, request, false);
+  }
+
+  /** Allocate a typed writable tensor with an explicit layout. */
+  template <typename T, ::vecops::tensor::LayoutLike Layout>
+  auto tensor(std::string_view local_name, Layout&& layout, WorkspaceTensorOptions options = {}) {
+    using L = std::remove_cvref_t<Layout>;
+    L stable_layout = std::forward<Layout>(layout);
+    const nint_t bytes = workspace_tensor_details::storage_bytes<T>(stable_layout);
+    const nint_t alignment = workspace_tensor_details::allocation_alignment<T>(options);
+    const auto slot = request(local_name, WorkspaceAllocationRequest{
+                                            .bytes = bytes,
+                                            .alignment = alignment,
+                                            .domain = WorkspaceDomain::Global,
+                                            .replicas = 1,
+                                            .placement = options.placement,
+                                          });
+    return ::vecops::tensor::make_tensor(static_cast<T*>(slot.replica()), std::move(stable_layout));
+  }
+
+  /** Allocate a contiguous typed writable tensor. */
+  template <typename T, typename Shape>
+    requires(::vecops::tensor::is_shape_v<std::remove_cvref_t<Shape>>)
+  auto tensor(std::string_view local_name, Shape&& shape, WorkspaceTensorOptions options = {}) {
+    return this->template tensor<T>(local_name, ::vecops::tensor::make_layout(std::forward<Shape>(shape)), options);
+  }
+
+  /** Allocate a typed writable tensor with explicit element strides. */
+  template <typename T, typename Shape, typename Strides>
+    requires(::vecops::tensor::is_shape_v<std::remove_cvref_t<Shape>> &&
+             ::vecops::tensor::is_strides_v<std::remove_cvref_t<Strides>>)
+  auto tensor(std::string_view local_name, Shape&& shape, Strides&& strides, WorkspaceTensorOptions options = {}) {
+    return this->template tensor<T>(
+      local_name, ::vecops::tensor::make_layout(std::forward<Shape>(shape), std::forward<Strides>(strides)), options);
+  }
+
+  /**
+   * Allocate a worker-local tensor. The returned logical leading dimension is
+   * the replica axis; its element stride includes at least 64-byte padding.
+   */
+  template <typename T, meta::ValueInput Replicas, ::vecops::tensor::LayoutLike Layout>
+  auto worker_tensor(std::string_view local_name, Replicas&& replicas, Layout&& layout,
+                     WorkspaceTensorOptions options = {}) {
+    return this->template worker_tensor_impl<T>(local_name, std::forward<Replicas>(replicas),
+                                                std::forward<Layout>(layout), options, false);
+  }
+
+  /** Allocate a contiguous runtime-replicated worker tensor. */
+  template <typename T, meta::ValueInput Replicas, typename Shape>
+    requires(::vecops::tensor::is_shape_v<std::remove_cvref_t<Shape>>)
+  auto worker_tensor(std::string_view local_name, Replicas&& replicas, Shape&& shape,
+                     WorkspaceTensorOptions options = {}) {
+    return this->template worker_tensor<T>(local_name, std::forward<Replicas>(replicas),
+                                           ::vecops::tensor::make_layout(std::forward<Shape>(shape)), options);
+  }
+
+  /** Allocate a runtime-replicated worker tensor with explicit strides. */
+  template <typename T, meta::ValueInput Replicas, typename Shape, typename Strides>
+    requires(::vecops::tensor::is_shape_v<std::remove_cvref_t<Shape>> &&
+             ::vecops::tensor::is_strides_v<std::remove_cvref_t<Strides>>)
+  auto worker_tensor(std::string_view local_name, Replicas&& replicas, Shape&& shape, Strides&& strides,
+                     WorkspaceTensorOptions options = {}) {
+    return this->template worker_tensor<T>(
+      local_name, std::forward<Replicas>(replicas),
+      ::vecops::tensor::make_layout(std::forward<Shape>(shape), std::forward<Strides>(strides)), options);
+  }
+
+  /** Allocate a statically replicated worker tensor from an explicit layout. */
+  template <typename T, nint_t Replicas, ::vecops::tensor::LayoutLike Layout>
+    requires(Replicas > 0)
+  auto worker_tensor(std::string_view local_name, Layout&& layout, WorkspaceTensorOptions options = {}) {
+    return this->template worker_tensor<T>(local_name, meta::cint<Replicas>, std::forward<Layout>(layout), options);
+  }
+
+  /** Allocate a statically replicated contiguous worker tensor. */
+  template <typename T, nint_t Replicas, typename Shape>
+    requires(Replicas > 0 && ::vecops::tensor::is_shape_v<std::remove_cvref_t<Shape>>)
+  auto worker_tensor(std::string_view local_name, Shape&& shape, WorkspaceTensorOptions options = {}) {
+    return this->template worker_tensor<T, Replicas>(
+      local_name, ::vecops::tensor::make_layout(std::forward<Shape>(shape)), options);
+  }
+
+  /** Allocate a statically replicated worker tensor with explicit strides. */
+  template <typename T, nint_t Replicas, typename Shape, typename Strides>
+    requires(Replicas > 0 && ::vecops::tensor::is_shape_v<std::remove_cvref_t<Shape>> &&
+             ::vecops::tensor::is_strides_v<std::remove_cvref_t<Strides>>)
+  auto worker_tensor(std::string_view local_name, Shape&& shape, Strides&& strides,
+                     WorkspaceTensorOptions options = {}) {
+    return this->template worker_tensor<T, Replicas>(
+      local_name, ::vecops::tensor::make_layout(std::forward<Shape>(shape), std::forward<Strides>(strides)), options);
   }
 
   /**
@@ -255,6 +437,32 @@ public:
 
 private:
   enum class Mode : std::uint8_t { Dynamic, Trace, Replay };
+
+  template <typename T, meta::ValueInput Replicas, ::vecops::tensor::LayoutLike Layout>
+  auto worker_tensor_impl(std::string_view local_name, Replicas&& replicas, Layout&& layout,
+                          WorkspaceTensorOptions options, bool persistent) {
+    using L = std::remove_cvref_t<Layout>;
+    L stable_layout = std::forward<Layout>(layout);
+    auto replica_value = meta::to_value(std::forward<Replicas>(replicas));
+    const nint_t replica_count = static_cast<nint_t>(replica_value);
+    VECOPS_CHECK(replica_count > 0, "workspace tensor replica count must be positive");
+    const nint_t bytes = workspace_tensor_details::storage_bytes<T>(stable_layout);
+    const nint_t alignment = workspace_tensor_details::allocation_alignment<T>(options);
+    const auto slot = allocate_site(local_name,
+                                    WorkspaceAllocationRequest{
+                                      .bytes = bytes,
+                                      .alignment = alignment,
+                                      .domain = WorkspaceDomain::WorkerLocal,
+                                      .replicas = replica_count,
+                                      .placement = options.placement,
+                                    },
+                                    persistent);
+    VECOPS_CHECK(slot.replica_stride % static_cast<nint_t>(sizeof(T)) == 0,
+                 "workspace replica stride is not representable in tensor elements");
+    auto worker_layout = workspace_tensor_details::prepend_worker_layout(
+      replica_value, stable_layout, slot.replica_stride / static_cast<nint_t>(sizeof(T)));
+    return ::vecops::tensor::make_tensor(static_cast<T*>(slot.replica()), std::move(worker_layout));
+  }
 
   BoundWorkspaceSlot allocate_site(std::string_view local_name, WorkspaceAllocationRequest request, bool persistent) {
     VECOPS_ASSERT(!finished_, "cannot allocate from a finished workspace context");
@@ -341,8 +549,7 @@ private:
     VECOPS_ASSERT(request.alignment > 0 && (request.alignment & (request.alignment - 1)) == 0,
                   "workspace allocation alignment must be a positive power of two");
     VECOPS_ASSERT(request.replicas > 0, "workspace replica count must be positive");
-    VECOPS_ASSERT(request.estimated_traffic_bytes >= 0.0,
-                  "workspace estimated traffic must be non-negative");
+    VECOPS_ASSERT(request.estimated_traffic_bytes >= 0.0, "workspace estimated traffic must be non-negative");
     if (request.domain == WorkspaceDomain::Global) {
       VECOPS_ASSERT(request.replicas == 1, "global workspace request cannot have replicas");
     }
@@ -395,9 +602,8 @@ private:
  */
 class WorkspaceReplayCache {
 public:
-  explicit WorkspaceReplayCache(
-      std::size_t capacity = 4,
-      std::shared_ptr<WorkspaceArenaProvider> arena_provider = default_workspace_arena_provider())
+  explicit WorkspaceReplayCache(std::size_t capacity = 4, std::shared_ptr<WorkspaceArenaProvider> arena_provider =
+                                                            default_workspace_arena_provider())
     : capacity_(capacity)
     , arena_provider_(std::move(arena_provider)) {
     VECOPS_ASSERT(capacity_ > 0, "workspace replay cache capacity must be positive");
@@ -444,14 +650,8 @@ public:
       trace_slow = arena_provider_->allocate(WorkspaceTier::Slow, arena_provider_->capacity(WorkspaceTier::Slow),
                                              vec::DEFAULT_ALIGNMENT);
     }
-    WorkspaceContext tracing{trace_workspace,
-                             std::string(recipe),
-                             fingerprint,
-                             trace_fast.data,
-                             trace_fast.capacity,
-                             trace_slow.data,
-                             trace_slow.capacity,
-                             execution_context};
+    WorkspaceContext tracing{trace_workspace,     std::string(recipe), fingerprint,         trace_fast.data,
+                             trace_fast.capacity, trace_slow.data,     trace_slow.capacity, execution_context};
     setup(tracing);
     invoke(tracing);
     auto logical = tracing.finish_trace();
@@ -547,11 +747,10 @@ private:
 
     void fallback_to_slow(const LogicalWorkspacePlan& logical,
                           const std::shared_ptr<WorkspaceArenaProvider>& arena_provider) {
-      const bool requires_fast = std::any_of(logical.allocations.begin(), logical.allocations.end(),
-                                             [](const auto& allocation) {
-                                               return allocation.request.placement ==
-                                                      WorkspacePlacementPolicy::FastRequired;
-                                             });
+      const bool requires_fast =
+        std::any_of(logical.allocations.begin(), logical.allocations.end(), [](const auto& allocation) {
+          return allocation.request.placement == WorkspacePlacementPolicy::FastRequired;
+        });
       if (requires_fast)
         throw;
       placement = place_workspace(logical, 0, arena_provider->capacity(WorkspaceTier::Slow));

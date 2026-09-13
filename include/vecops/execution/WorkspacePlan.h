@@ -286,8 +286,12 @@ public:
       VECOPS_ASSERT(compatible(existing.request, request),
                     "workspace site was replayed with a different allocation contract");
       for (const auto& pending : pending_) {
-        VECOPS_ASSERT(pending.closed || pending.allocation_index != allocation_index,
-                      "the same workspace site is live more than once");
+        // A duplicate live site would make two prepared objects alias the
+        // same replay slot.  This is a caller contract violation rather than
+        // a debug-only internal invariant, so keep the check in release
+        // builds as well.
+        VECOPS_CHECK(pending.closed || pending.allocation_index != allocation_index,
+                     "the same workspace site is live more than once");
       }
       // A Dynamic axis may revisit the same semantic site with a different
       // extent during one trace. Retain the maximum capacity and worker count;

@@ -706,16 +706,35 @@ execute_load_convert_request(
       return execute(
           op, to, pointer, Layout{}, ValuePolicy{}, access, Temporality{});
     } else if constexpr (Unordered) {
-      const auto mask = [&]() VECOPS_INLINE_LAMBDA {
+      const auto memory_mask = [&]() VECOPS_INLINE_LAMBDA {
         if constexpr (A == Active::First) {
           return mwhilelt(FromTag{}, 0, request.first_count);
         } else {
           return *request.mask;
         }
       }();
-      return execute(
-          op, to, pointer, mask, Layout{}, ValuePolicy{}, access,
+      auto converted = execute(
+          op, to, pointer, memory_mask, Layout{}, ValuePolicy{}, access,
           Temporality{});
+      if constexpr (P == Populate::Zero) {
+        return converted;
+      } else {
+        // Public unordered load-convert deliberately has no population
+        // option, but DataAccess carries a logical output-domain population
+        // through its resolved request. Convert the memory mask back to that
+        // domain before blending; otherwise inactive widened lanes retain the
+        // backend's zero fill (which, for example, corrupts max reductions of
+        // entirely negative BF16 tails).
+        const auto output_mask = convert(to, FromTag{}, memory_mask);
+        if constexpr (P == Populate::MergeVector) {
+          return blend(
+              to, *request.merge_vector, output_mask, converted);
+        } else {
+          static_assert(P == Populate::MergeScalar);
+          return blend(
+              to, fill(to, request.merge_scalar), output_mask, converted);
+        }
+      }
     } else {
       const Mask<ToTag> mask = [&]() VECOPS_INLINE_LAMBDA {
         if constexpr (A == Active::First) {
@@ -724,18 +743,20 @@ execute_load_convert_request(
           return *request.mask;
         }
       }();
-      const Vec<ToTag> inactive = [&]() VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
-        if constexpr (P == Populate::MergeVector) {
-          return *request.merge_vector;
-        } else if constexpr (P == Populate::MergeScalar) {
-          return fill(to, request.merge_scalar);
-        } else {
-          return zeros(to);
-        }
-      }();
-      return execute(
-          op, to, pointer, mask, inactive, Layout{}, ValuePolicy{},
-          access, Temporality{});
+      if constexpr (P == Populate::MergeVector) {
+        return execute(
+            op, to, pointer, mask, *request.merge_vector, Layout{},
+            ValuePolicy{}, access, Temporality{});
+      } else if constexpr (P == Populate::MergeScalar) {
+        return execute(
+            op, to, pointer, mask, fill(to, request.merge_scalar), Layout{},
+            ValuePolicy{}, access, Temporality{});
+      } else {
+        static_assert(P == Populate::Zero);
+        return execute(
+            op, to, pointer, mask, zeros(to), Layout{}, ValuePolicy{},
+            access, Temporality{});
+      }
     }
   };
 

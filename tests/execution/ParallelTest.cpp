@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstdint>
 #include <stdexcept>
 #include <vector>
 
@@ -10,6 +12,37 @@
 namespace {
 
 using namespace vecops;
+
+struct RecordingThreadPool {
+  static std::uint32_t maximum(void*) {
+    return 16;
+  }
+
+  static std::uint32_t in_parallel(void*) {
+    return 0;
+  }
+
+  static std::int32_t run(void* opaque, std::uint32_t count, void* body_context,
+                          VecopsParallelTaskFn body, VecopsError*) {
+    auto& self = *static_cast<RecordingThreadPool*>(opaque);
+    ++self.calls;
+    self.submitted = count;
+    // Deliberately differ from lane order to ensure range assignment depends
+    // only on logical lane ids, not backend scheduling order.
+    for (std::uint32_t lane = count; lane-- > 0;)
+      body(body_context, lane, count);
+    return VECOPS_STATUS_OK;
+  }
+
+  [[nodiscard]] VecopsThreadPoolV1 abi() {
+    return VecopsThreadPoolV1{
+      sizeof(VecopsThreadPoolV1), VECOPS_THREAD_POOL_ABI_MAJOR, VECOPS_THREAD_POOL_ABI_MINOR,
+      91, this, maximum, in_parallel, run, nullptr, nullptr, 0};
+  }
+
+  std::uint32_t calls = 0;
+  std::uint32_t submitted = 0;
+};
 
 TEST(ParallelTest, MaximumIsPositiveAndRequestedWorkersHaveDenseIds) {
   const nint_t maximum = execution::max_parallelism();
@@ -65,6 +98,118 @@ TEST(ParallelTest, WorkerExceptionIsRethrownAfterJoin) {
                                            throw std::runtime_error("parallel worker failure");
                                        }),
                std::runtime_error);
+}
+
+TEST(ParallelTest, StaticLanesUseLogicalNamesAndSubmitExactlyTheSpecializedCount) {
+  RecordingThreadPool recording;
+  auto pool = recording.abi();
+  std::array<int, 5> visits{};
+
+  execution::parallel_lanes<5>(&pool, [&](execution::TaskContext<5> task) {
+    static_assert(decltype(task)::lane_count() == 5);
+    ASSERT_GE(task.lane_id(), 0);
+    ASSERT_LT(task.lane_id(), task.lane_count());
+    ++visits[static_cast<std::size_t>(task.lane_id())];
+  });
+
+  EXPECT_EQ(recording.calls, 1U);
+  EXPECT_EQ(recording.submitted, 5U);
+  EXPECT_EQ(visits, (std::array<int, 5>{1, 1, 1, 1, 1}));
+}
+
+TEST(ParallelTest, RangeProgramsAreBalancedAcrossLanesAndCoverClippedTailOnce) {
+  RecordingThreadPool recording;
+  auto pool = recording.abi();
+  std::array<int, 23> visits{};
+  std::array<int, 4> programs_per_lane{};
+  std::array<nint_t, 5> observed_begin{};
+  std::array<nint_t, 5> observed_end{};
+
+  execution::parallel_for<4>(&pool, 3, 26, 5, [&](auto task, execution::WorkItem item) {
+    ASSERT_EQ(item.program_count(), 5);
+    ASSERT_GE(item.program_id(), 0);
+    ASSERT_LT(item.program_id(), item.program_count());
+    ++programs_per_lane[static_cast<std::size_t>(task.lane_id())];
+    observed_begin[static_cast<std::size_t>(item.program_id())] = item.begin();
+    observed_end[static_cast<std::size_t>(item.program_id())] = item.end();
+    EXPECT_EQ(item.extent(), item.end() - item.begin());
+    for (nint_t index = item.begin(); index < item.end(); ++index)
+      ++visits[static_cast<std::size_t>(index - 3)];
+  });
+
+  EXPECT_EQ(recording.calls, 1U);
+  EXPECT_EQ(recording.submitted, 4U);
+  EXPECT_EQ(programs_per_lane, (std::array<int, 4>{2, 1, 1, 1}));
+  EXPECT_EQ(observed_begin, (std::array<nint_t, 5>{3, 8, 13, 18, 23}));
+  EXPECT_EQ(observed_end, (std::array<nint_t, 5>{8, 13, 18, 23, 26}));
+  EXPECT_EQ(visits, (std::array<int, 23>{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}));
+}
+
+TEST(ParallelTest, RangeWithFewerProgramsThanLanesStillSubmitsOnlyTheLanes) {
+  RecordingThreadPool recording;
+  auto pool = recording.abi();
+  std::array<int, 2> visits{};
+
+  execution::parallel_for<8>(&pool, 0, 2, 1, [&](auto task, auto item) {
+    EXPECT_LT(task.lane_id(), 2);
+    ++visits[static_cast<std::size_t>(item.begin())];
+  });
+
+  EXPECT_EQ(recording.calls, 1U);
+  EXPECT_EQ(recording.submitted, 8U);
+  EXPECT_EQ(visits, (std::array<int, 2>{1, 1}));
+}
+
+TEST(ParallelTest, MetaRangeRetainsConstChunkWithoutSplittingFullAndTailTypes) {
+  RecordingThreadPool recording;
+  auto pool = recording.abi();
+  std::array<int, 5> visits{};
+  int full = 0;
+  int tail = 0;
+
+  execution::parallel_for<3>(&pool, meta::cint<3>, meta::cint<26>, meta::cint<5>,
+                             [&](auto task, auto item) {
+    using Item = std::remove_cvref_t<decltype(item)>;
+    static_assert(std::same_as<typename Item::chunk_type, meta::Const<5>>);
+    static_assert(std::same_as<typename Item::program_count_type, meta::Const<5>>);
+    static_assert(decltype(item.chunk())::is_const);
+    static_assert(decltype(item.program_count_value())::is_const);
+    EXPECT_EQ(static_cast<nint_t>(item.chunk()), 5);
+    EXPECT_EQ(item.program_count(), 5);
+    EXPECT_GE(task.lane_id(), 0);
+    ++visits[static_cast<std::size_t>(item.program_id())];
+    if (item.is_full())
+      ++full;
+    else
+      ++tail;
+  });
+
+  EXPECT_EQ(recording.calls, 1U);
+  EXPECT_EQ(recording.submitted, 3U);
+  EXPECT_EQ(visits, (std::array<int, 5>{1, 1, 1, 1, 1}));
+  EXPECT_EQ(full, 4);
+  EXPECT_EQ(tail, 1);
+}
+
+TEST(ParallelTest, DynamicMetaBoundsRetainChunkContractAndCoverTheRange) {
+  std::array<int, 17> visits{};
+  auto begin = meta::dyn<1, 0, 64>(7);
+  auto end = meta::dyn<1, 0, 64>(24);
+
+  execution::parallel_for<4>(begin, end, meta::cint<4>, [&](auto, auto item) {
+    static_assert(std::same_as<typename decltype(item)::chunk_type, meta::Const<4>>);
+    for (nint_t index = item.begin(); index < item.end(); ++index)
+      ++visits[static_cast<std::size_t>(index - 7)];
+  });
+
+  EXPECT_EQ(visits, (std::array<int, 17>{1, 1, 1, 1, 1, 1, 1, 1, 1,
+                                          1, 1, 1, 1, 1, 1, 1, 1}));
+}
+
+TEST(ParallelTest, RangeRejectsInvalidBoundsAndChunk) {
+  EXPECT_THROW(execution::parallel_for<2>(nullptr, 0, 10, 0, [](auto, auto) {}), std::invalid_argument);
+  EXPECT_THROW(execution::parallel_for<2>(nullptr, 4, 3, 1, [](auto, auto) {}), std::invalid_argument);
 }
 
 } // namespace

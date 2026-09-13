@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "vecops/platform/Features.h"
+#include "vecops/execution/WorkspaceContext.h"
 #include "vecops/ops/Attention.h"
 
 #include "MatmulTestArch.h"
@@ -200,6 +201,285 @@ TEST(AttentionTest, SDPAHandlesQueryTailAndDistinctValueWidth) {
   for (std::size_t i = 0; i < out.size(); ++i) {
     EXPECT_NEAR(out[i], expected[i], 2.5e-2f) << "index=" << i;
   }
+}
+
+TEST(AttentionTest, PreparedSDPAUsesPerLaneScratchForDynamicFullAndTail) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  constexpr nint_t P = 2;
+  constexpr nint_t MaxLq = 7;
+  constexpr nint_t MaxLkv = 9;
+  constexpr nint_t TailLq = 5;
+  constexpr nint_t TailLkv = 6;
+  constexpr nint_t Dqk = 8;
+  constexpr nint_t Dv = 6;
+  using LqExtent = meta::Dynamic<1, 1, MaxLq>;
+  using LkvExtent = meta::Dynamic<1, 1, MaxLkv>;
+  std::vector<bfloat16_t> q(MaxLq * Dqk);
+  std::vector<bfloat16_t> k(MaxLkv * Dqk);
+  std::vector<bfloat16_t> v(MaxLkv * Dv);
+  std::vector<float> full(MaxLq * Dv, -99.0f);
+  std::vector<float> tail(MaxLq * Dv, -99.0f);
+  for (nint_t i = 0; i < MaxLq * Dqk; ++i)
+    q[static_cast<std::size_t>(i)] =
+        bfloat16_t(float((i * 3) % 11 - 5) / 8);
+  for (nint_t i = 0; i < MaxLkv * Dqk; ++i)
+    k[static_cast<std::size_t>(i)] =
+        bfloat16_t(float((i * 5) % 13 - 6) / 8);
+  for (nint_t i = 0; i < MaxLkv * Dv; ++i)
+    v[static_cast<std::size_t>(i)] =
+        bfloat16_t(float((i * 7) % 17 - 8) / 16);
+
+  auto make_q = [&](nint_t lq) {
+    return tensor::make_tensor(
+        q.data(), tensor::make_layout(
+            tensor::make_shape(LqExtent{lq}, meta::cint<Dqk>),
+            tensor::make_strides(meta::cint<Dqk>, meta::cint<1>)));
+  };
+  auto make_k = [&](nint_t lkv) {
+    return tensor::make_tensor(
+        k.data(), tensor::make_layout(
+            tensor::make_shape(LkvExtent{lkv}, meta::cint<Dqk>),
+            tensor::make_strides(meta::cint<Dqk>, meta::cint<1>)));
+  };
+  auto make_v = [&](nint_t lkv) {
+    return tensor::make_tensor(
+        v.data(), tensor::make_layout(
+            tensor::make_shape(LkvExtent{lkv}, meta::cint<Dv>),
+            tensor::make_strides(meta::cint<Dv>, meta::cint<1>)));
+  };
+  auto make_out = [&](float* data, nint_t lq) {
+    return tensor::make_tensor(
+        data, tensor::make_layout(
+            tensor::make_shape(LqExtent{lq}, meta::cint<Dv>),
+            tensor::make_strides(meta::cint<Dv>, meta::cint<1>)));
+  };
+
+  auto capacity_q = make_q(MaxLq);
+  auto capacity_k = make_k(MaxLkv);
+  auto capacity_v = make_v(MaxLkv);
+  auto capacity_out = make_out(full.data(), MaxLq);
+  execution::WorkspaceContext workspace{
+      execution::trace_workspace, "prepared_sdpa"};
+  auto operation = ops::scaled_dot_product_attention(
+      MaterializedModelConfig{})
+      .template prepare<P>(
+          workspace, "attention", tensor::unbind(capacity_q),
+          tensor::unbind(capacity_k), tensor::unbind(capacity_v),
+          tensor::unbind(capacity_out));
+  constexpr float Scale = 0.25f;
+  workspace.parallel_lanes<P>([&](execution::TaskContext<P> task) {
+    if (task.lane_id() == 0) {
+      operation(task, capacity_q, capacity_k, capacity_v, capacity_out,
+                Scale);
+    } else {
+      operation(task, make_q(TailLq), make_k(TailLkv), make_v(TailLkv),
+                make_out(tail.data(), TailLq), Scale);
+    }
+  });
+  auto plan = workspace.finish_trace();
+  ASSERT_EQ(plan.allocations.size(), 1u);
+  EXPECT_EQ(plan.allocations.front().request.domain,
+            execution::WorkspaceDomain::WorkerLocal);
+  EXPECT_EQ(plan.allocations.front().request.replicas, P);
+
+  const auto expected_full = reference_attention(
+      q, k, v, MaxLq, MaxLkv, Dqk, Dv, Scale);
+  const auto expected_tail = reference_attention(
+      q, k, v, TailLq, TailLkv, Dqk, Dv, Scale);
+  for (std::size_t index = 0; index < expected_full.size(); ++index)
+    EXPECT_NEAR(full[index], expected_full[index], 2.5e-2f)
+        << "full index=" << index;
+  for (std::size_t index = 0; index < expected_tail.size(); ++index)
+    EXPECT_NEAR(tail[index], expected_tail[index], 2.5e-2f)
+        << "tail index=" << index;
+  for (nint_t index = TailLq * Dv; index < MaxLq * Dv; ++index)
+    EXPECT_FLOAT_EQ(tail[static_cast<std::size_t>(index)], -99.0f);
+}
+
+TEST(AttentionTest, PreparedSDPARebindsRuntimeOutputTransformState) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  constexpr nint_t Lq = 4;
+  constexpr nint_t Lkv = 4;
+  constexpr nint_t D = 8;
+  std::vector<bfloat16_t> q(Lq * D, bfloat16_t{1});
+  std::vector<bfloat16_t> k(Lkv * D, bfloat16_t{1});
+  std::vector<bfloat16_t> v(Lkv * D);
+  std::vector<float> out(Lq * D, -99.0f);
+  for (nint_t row = 0; row < Lkv; ++row)
+    for (nint_t column = 0; column < D; ++column)
+      v[static_cast<std::size_t>(row * D + column)] =
+          bfloat16_t(float(row + 1));
+  auto qt = tensor::make_tensor(
+      q.data(), tensor::make_shape(meta::cint<Lq>, meta::cint<D>));
+  auto kt = tensor::make_tensor(
+      k.data(), tensor::make_shape(meta::cint<Lkv>, meta::cint<D>));
+  auto vt = tensor::make_tensor(
+      v.data(), tensor::make_shape(meta::cint<Lkv>, meta::cint<D>));
+  auto ot = tensor::make_tensor(
+      out.data(), tensor::make_shape(meta::cint<Lq>, meta::cint<D>));
+  float planning_scale = 2.0f;
+  float runtime_scale = 3.0f;
+  auto make_scale_transform = [](float* scale) {
+    return tensor::make_elementwise_vec_transform<float, float>(
+        [scale](auto tag, auto value) VECOPS_KERNEL_LAMBDA {
+          return vec::mul(tag, value, vec::fill(tag, *scale));
+        });
+  };
+  auto planning_output = tensor::output<float>(
+      ot, make_scale_transform(&planning_scale));
+  auto runtime_output = tensor::output<float>(
+      ot, make_scale_transform(&runtime_scale));
+
+  execution::WorkspaceContext workspace{"prepared_sdpa_transform"};
+  auto operation = ops::scaled_dot_product_attention(
+      MaterializedModelConfig{})
+      .template prepare<1>(
+          workspace, "attention", tensor::unbind(qt), tensor::unbind(kt),
+          tensor::unbind(vt), tensor::unbind(planning_output));
+  operation(execution::TaskContext<1>{0}, qt, kt, vt, runtime_output, 1.0f);
+
+  constexpr float AttentionValue = 2.5f;
+  for (float value : out)
+    EXPECT_NEAR(value, AttentionValue * runtime_scale, 1.0e-5f);
+}
+
+TEST(AttentionTest, PreparedSDPARebindsOptionalBoolMasksAndBias) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  constexpr nint_t Lq = 3;
+  constexpr nint_t Lkv = 5;
+  constexpr nint_t D = 8;
+  std::vector<bfloat16_t> q(Lq * D, bfloat16_t{0.25f});
+  std::vector<bfloat16_t> k(Lkv * D, bfloat16_t{0.5f});
+  std::vector<bfloat16_t> v(Lkv * D);
+  std::array<bool, Lq> qm{true, false, true};
+  std::array<bool, Lkv> km{true, true, false, true, true};
+  std::array<bool, Lq * Lkv> am{};
+  am.fill(true);
+  am[static_cast<std::size_t>(2 * Lkv + 3)] = false;
+  std::vector<float> bias(Lq * Lkv);
+  std::vector<float> out(Lq * D, -99.0f);
+  for (nint_t i = 0; i < Lkv * D; ++i)
+    v[static_cast<std::size_t>(i)] = bfloat16_t(float(i % 9 - 4) / 8);
+  for (nint_t i = 0; i < Lq * Lkv; ++i)
+    bias[static_cast<std::size_t>(i)] = float(i % Lkv) * 0.125f;
+  auto qt = tensor::make_tensor(
+      q.data(), tensor::make_shape(meta::cint<Lq>, meta::cint<D>));
+  auto kt = tensor::make_tensor(
+      k.data(), tensor::make_shape(meta::cint<Lkv>, meta::cint<D>));
+  auto vt = tensor::make_tensor(
+      v.data(), tensor::make_shape(meta::cint<Lkv>, meta::cint<D>));
+  auto qmt = tensor::make_tensor(
+      qm.data(), tensor::make_shape(meta::cint<Lq>));
+  auto kmt = tensor::make_tensor(
+      km.data(), tensor::make_shape(meta::cint<Lkv>));
+  auto amt = tensor::make_tensor(
+      am.data(), tensor::make_shape(meta::cint<Lq>, meta::cint<Lkv>));
+  auto bt = tensor::make_tensor(
+      bias.data(), tensor::make_shape(meta::cint<Lq>, meta::cint<Lkv>));
+  auto ot = tensor::make_tensor(
+      out.data(), tensor::make_shape(meta::cint<Lq>, meta::cint<D>));
+
+  execution::WorkspaceContext workspace{"prepared_sdpa_optional"};
+  auto operation = ops::scaled_dot_product_attention(Config{})
+      .template prepare<1>(
+          workspace, "attention", tensor::unbind(qt), tensor::unbind(kt),
+          tensor::unbind(vt), tensor::unbind(qmt), tensor::unbind(kmt),
+          tensor::unbind(amt), tensor::unbind(bt), tensor::unbind(ot));
+  operation(execution::TaskContext<1>{0}, qt, kt, vt, qmt, kmt, amt, bt,
+            ot, 0.5f);
+
+  std::vector<bool> ref_qm{true, false, true};
+  std::vector<bool> ref_km{true, true, false, true, true};
+  std::vector<bool> ref_am(Lq * Lkv, true);
+  ref_am[static_cast<std::size_t>(2 * Lkv + 3)] = false;
+  const auto expected = reference_attention(
+      q, k, v, Lq, Lkv, D, D, 0.5f,
+      &ref_qm, &ref_km, &ref_am, &bias);
+  for (std::size_t index = 0; index < out.size(); ++index)
+    EXPECT_NEAR(out[index], expected[index], 2.5e-2f)
+        << "index=" << index;
+}
+
+TEST(AttentionTest, PreparedSDPASupportsStreamingStrategy) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  constexpr nint_t Lq = 4;
+  constexpr nint_t Lkv = 8;
+  constexpr nint_t D = 8;
+  std::vector<bfloat16_t> q(Lq * D, bfloat16_t{0.25f});
+  std::vector<bfloat16_t> k(Lkv * D, bfloat16_t{0.5f});
+  std::vector<bfloat16_t> v(Lkv * D);
+  std::vector<float> out(Lq * D, -99.0f);
+  for (nint_t i = 0; i < Lkv * D; ++i)
+    v[static_cast<std::size_t>(i)] = bfloat16_t(float(i % 13 - 6) / 8);
+  auto qt = tensor::make_tensor(
+      q.data(), tensor::make_shape(meta::cint<Lq>, meta::cint<D>));
+  auto kt = tensor::make_tensor(
+      k.data(), tensor::make_shape(meta::cint<Lkv>, meta::cint<D>));
+  auto vt = tensor::make_tensor(
+      v.data(), tensor::make_shape(meta::cint<Lkv>, meta::cint<D>));
+  auto ot = tensor::make_tensor(
+      out.data(), tensor::make_shape(meta::cint<Lq>, meta::cint<D>));
+
+  execution::WorkspaceContext workspace{"prepared_sdpa_streaming"};
+  auto operation = ops::scaled_dot_product_attention(StreamingModelConfig{})
+      .template prepare<1>(
+          workspace, "attention", tensor::unbind(qt), tensor::unbind(kt),
+          tensor::unbind(vt), tensor::unbind(ot));
+  operation(execution::TaskContext<1>{0}, qt, kt, vt, ot, 0.5f);
+
+  const auto expected = reference_attention(
+      q, k, v, Lq, Lkv, D, D, 0.5f);
+  for (std::size_t index = 0; index < out.size(); ++index)
+    EXPECT_NEAR(out[index], expected[index], 3.0e-2f)
+        << "index=" << index;
+}
+
+TEST(AttentionTest, PreparedAutomaticStrategyStaysWithinPlannedFamily) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  constexpr nint_t Lq = 4;
+  constexpr nint_t CapacityLkv = 9000;
+  constexpr nint_t ActiveLkv = 8;
+  constexpr nint_t D = 8;
+  using LkvExtent = meta::Dynamic<1, 1, CapacityLkv>;
+  std::vector<bfloat16_t> q(Lq * D, bfloat16_t{0.25f});
+  std::vector<bfloat16_t> k(CapacityLkv * D, bfloat16_t{0.5f});
+  std::vector<bfloat16_t> v(CapacityLkv * D);
+  std::vector<float> out(Lq * D, -99.0f);
+  for (nint_t i = 0; i < CapacityLkv * D; ++i)
+    v[static_cast<std::size_t>(i)] = bfloat16_t(float(i % 13 - 6) / 8);
+  auto qt = tensor::make_tensor(
+      q.data(), tensor::make_shape(meta::cint<Lq>, meta::cint<D>));
+  auto make_k = [&](nint_t lkv) {
+    return tensor::make_tensor(
+        k.data(), tensor::make_layout(
+            tensor::make_shape(LkvExtent{lkv}, meta::cint<D>),
+            tensor::make_strides(meta::cint<D>, meta::cint<1>)));
+  };
+  auto make_v = [&](nint_t lkv) {
+    return tensor::make_tensor(
+        v.data(), tensor::make_layout(
+            tensor::make_shape(LkvExtent{lkv}, meta::cint<D>),
+            tensor::make_strides(meta::cint<D>, meta::cint<1>)));
+  };
+  auto ot = tensor::make_tensor(
+      out.data(), tensor::make_shape(meta::cint<Lq>, meta::cint<D>));
+  auto capacity_k = make_k(CapacityLkv);
+  auto capacity_v = make_v(CapacityLkv);
+
+  execution::WorkspaceContext workspace{"prepared_sdpa_automatic"};
+  auto operation = ops::scaled_dot_product_attention(ModelConfig{})
+      .template prepare<1>(
+          workspace, "attention", tensor::unbind(qt),
+          tensor::unbind(capacity_k), tensor::unbind(capacity_v),
+          tensor::unbind(ot));
+  operation(execution::TaskContext<1>{0}, qt, make_k(ActiveLkv),
+            make_v(ActiveLkv), ot, 0.5f);
+
+  const auto expected = reference_attention(
+      q, k, v, Lq, ActiveLkv, D, D, 0.5f);
+  for (std::size_t index = 0; index < out.size(); ++index)
+    EXPECT_NEAR(out[index], expected[index], 3.0e-2f)
+        << "index=" << index;
 }
 
 TEST(AttentionTest, SDPACompileTimeOptionalMasksBiasAndAllMaskedRow) {

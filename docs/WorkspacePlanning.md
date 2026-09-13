@@ -1,141 +1,214 @@
 # Workspace planning and prepared operators
 
-Vecops separates workspace handling into three layers:
+Vecops separates logical storage, physical placement, and execution binding:
 
-1. `LogicalWorkspacePlan` is pointer-free. It records semantic allocation
-   sites, Meta axis contracts, decision fingerprints, domains, and structured
-   lifetimes.
-2. `WorkspacePlacement` assigns those logical slots to fast or slow memory
-   and offsets. Placement can be recomputed when HBM availability changes
-   without retracing the operator.
-3. `BoundWorkspacePlan` attaches concrete arena bases. Prepared operators
-   resolve each site once and retain a direct `BoundWorkspaceSlot`; kernels do
-   not hash site names or search placement tables in their inner loops.
+1. `LogicalWorkspacePlan` is pointer-free. It records stable allocation sites,
+   Meta axis contracts, decision fingerprints, domains, and lexical lifetimes.
+2. `WorkspacePlacement` assigns those sites to fast or slow memory and chooses
+   offsets. Placement may be recomputed when HBM capacity changes without
+   retracing the kernel.
+3. `BoundWorkspacePlan` attaches concrete arena bases. Replay then resolves the
+   stable sites to direct views; no allocation or placement search belongs in a
+   tile loop.
 
-`WorkspaceContext` is the kernel-call authority joining these layers. In
-dynamic mode it serves fast-preferred requests from the caller's arena and
-spills to aligned host allocation. Trace mode performs real execution while
-recording the logical plan; replay mode resolves the same stable sites from a
-bound placement. Compiler-managed source kernels may take it as their first
-argument:
+`WorkspaceContext` is the source-kernel API joining these layers. Dynamic mode
+serves requests from caller arenas and spills to aligned host allocation. Trace
+mode performs the real call while recording its pointer-free plan. Replay mode
+executes the same request topology against a bound placement.
+
+## Typed workspace tensors
+
+Kernel authors normally allocate Tensors rather than count bytes:
 
 ```cpp
-void __kernel__(WorkspaceContext& workspace, TensorLike auto x) {
-  auto phase = workspace.serial_scope("projection");
-  auto scratch = workspace.request("temporary", {.bytes = bytes});
-  // use scratch.replica()
+void __kernel__(execution::WorkspaceContext& ctx, TensorLike auto input,
+                TensorLike auto output) {
+  constexpr nint_t P = static_cast<nint_t>(spec::Parallelism);
+  auto lifetime = ctx.serial_scope("projection");
+
+  auto global = ctx.tensor<bfloat16_t>(
+      "global", make_shape(B, N, C));
+  auto local = ctx.worker_tensor<bfloat16_t, P>(
+      "local", make_shape(TileRows, C));
+
+  ctx.parallel_for<P>(nint_t{0}, tasks, cint<1>,
+      [&](execution::TaskContext<P> task, const auto& item) {
+        auto tile = task.local(local);
+        // `tile` is this logical lane's rank-two [TileRows,C] Tensor.
+      });
 }
 ```
 
-The generated adapter also accepts legacy kernels without that first
-argument. A caller-provided ABI workspace becomes the context's fast arena.
-When neither an external context nor raw arena is supplied, the easy path uses
-a small calling-thread replay cache: the first call for a Meta-axis shape
-executes in trace mode, and later identical calls use owned placed arenas.
-This avoids turning migrated kernels into repeated heap allocation while
-keeping explicit HBM/model-wide authorities in control. Framework and Python
-operator bridges forward the original workspace and execution context instead
-of discarding them.
+`ctx.tensor<T>(name, shape)` infers a row-major contiguous layout.
+`ctx.tensor<T>(name, layout)` and
+`ctx.tensor<T>(name, shape, strides)` retain explicit element strides. The
+corresponding `worker_tensor` overloads prepend one logical lane/replica axis.
+`WorkspaceTensorOptions` controls base alignment and placement; the default is
+`FastPreferred` with vecops' default vector alignment.
 
-`WorkspaceTrace::serial_scope()` expresses lifetime, rather than attempting to
-infer last use from C++. Sibling scopes are ordered and may reuse storage;
-allocations in the same scope overlap. A worker-local request has an explicit
-logical replica count and receives at least 64-byte replica padding. Logical
-worker IDs, not operating-system thread IDs, select replicas.
+Typed workspace storage is writable. Its element type must be non-const,
+trivially copyable, and have a power-of-two size. Explicit layouts may be
+contiguous, padded, or permuted dense layouts, but must be non-negative and
+provably non-overlapping. Negative strides and writable broadcast/overlapping
+axes are rejected. Vecops computes the reachable storage span and converts it
+to bytes internally; it does not incorrectly use logical `numel` for a padded
+layout.
 
-Each allocation site is identified by its recipe/scope/local-name path plus a
-semantic hash. Names must therefore be stable parts of the operator recipe.
-Do not derive them from a global counter, scheduling order, or the order in
-which workers arrive. Hash collisions and an incompatible repeated contract
-are checked against the retained canonical path.
+A worker tensor's leading element stride is derived from the planner's replica
+stride. Every replica starts at a boundary aligned to at least 64 bytes, and the
+replica stride is rounded up to that alignment. It is therefore not generally
+equal to the inner Tensor's logical `numel`. Use `TaskContext<P>::local(worker)`
+to select a replica; do not index it with an operating-system or OpenMP thread
+number. A logical lane is the stable scratch identity even if an embedding runs
+several lanes sequentially on one physical worker.
 
-Use `request()` for temporary storage whose pointer does not escape its
-lexical scope. Use `bind()` when a prepared operator retains the pointer. In
-dynamic mode a spilled bound allocation is owned until the context is
-destroyed; in trace/replay it keeps the lexical lifetime used for placement.
-Prepared operations assigned the same replay offset must therefore execute in
-the same serial order expressed by their construction scopes.
+The low-level byte `request()`/`bind()` and `BoundWorkspaceSlot` APIs remain
+implementation and compatibility tools. Ordinary source kernels should prefer
+typed tensors and prepared operators.
+
+## Scopes and placement
+
+`serial_scope(name)` expresses lifetime explicitly. Requests in one scope are
+simultaneously live and therefore do not overlap in placement. Ordered sibling
+scopes have disjoint lifetimes and may reuse the same arena offsets. A
+long-lived Tensor belongs to an enclosing scope that remains open across every
+phase that consumes it.
+
+Each site identity includes the recipe, scope path, local name, and domain.
+Names must be stable parts of the kernel recipe; never derive them from worker
+arrival order or a process-global counter. Repeated sites are checked for a
+compatible contract.
+
+`FastRequired` must fit in the fast arena. `FastPreferred` is prioritized using
+estimated traffic density and spills when necessary. `SlowAllowed` begins in
+slow memory. The placer interval-colors non-overlapping lifetimes separately in
+each tier.
 
 Dynamic Meta axes retain alignment and bounds in `AxisContract`. Replay also
-requires an exact `DecisionFingerprint`, because compatible Dynamic types do
-not imply that matmul packing, attention strategy, or another allocation path
-stays unchanged. Binding additionally checks actual requested bytes against
-the slot capacity.
+checks the `DecisionFingerprint`, because compatible Dynamic types do not prove
+that a matmul packing or attention-strategy decision stayed unchanged.
 
-## Prepared Matmul
+## Address-free prepared operators
 
-`ops::Matmul<Config>` remains the compatibility/configuration form returned by
-`ops::matmul(config)`. For architecture-family matmuls its `prepare()` member
-binds one scratch sub-slot from either `WorkspaceView` or `WorkspaceContext`
-and returns the operator's nested `Prepared<Invocation>` state. This keeps the
-legacy Matmul type and generated hot path unchanged while placing preparation
-inside the public operator rather than adding a framework-level wrapper. The
-prepared state retains the selected invocation, operand bindings, and scratch
-address, so repeated calls do not
-repeat family, orientation, packing decisions, or workspace-size planning.
-The existing invocation still performs fixed-cost bump suballocations inside
-the bound slot; converting each of those sites to direct `BoundWorkspaceSlot`
-pointers is a later incremental migration.
+The preferred operator form separates a storage-free planning pattern from the
+actual tile addresses:
 
-That fully bound form is only valid while both its operand storage and parent
-workspace stay alive. It is intentionally not a general tile-rebinding cache:
-DataAccess bindings may contain concrete addresses and materialized-output
-commit state. Long-lived model plans must cache layout/backend decisions and
-scratch slots, then construct a fresh invocation for each new set of operand
-addresses.
+```cpp
+auto op = ops::matmul(ops::MatmulConfig<Atom>{});
+auto prepared = op.prepare<P>(
+    ctx, "projection_scratch", max_rows, N, K,
+    tensor::unbind(sample_a),
+    tensor::unbind(sample_b),
+    tensor::unbind(sample_output));
 
-## Placement policy
+ctx.parallel_for<P>(nint_t{0}, rows, cint<TileRows>,
+    [&](execution::TaskContext<P> task, const auto& item) {
+      prepared(task, item.extent(), N, K,
+               a(range(item.begin(), item.end()), reserve), b,
+               output(range(item.begin(), item.end()), reserve));
+    });
+```
 
-`FastRequired` must fit in the fast arena. `FastPreferred` is considered by
-estimated-traffic density and spills to slow memory when necessary. An omitted
-traffic estimate defaults to the allocation byte size, avoiding a systematic
-bias toward tiny buffers. `SlowAllowed` starts in slow memory. Overlapping
-lifetimes are interval-colored; non-overlapping
-allocations may share an offset. Pointer binding aligns arbitrary arena bases,
-so owners must provide capacity for the requested placement plus possible
-leading alignment padding.
+For an operation that needs scratch, `prepare<P>` registers one named
+worker-local scratch Tensor. It retains unbound operand contracts and returns
+an object invoked with `TaskContext<P>` plus the actual operands. Invocation
+selects the lane's scratch internally, reconstructs the lightweight bound
+operation, validates that active extents fit the planned capacity, and handles
+its execution-resource scope. Scratch-free prepared operations use the same
+surface without inventing storage. Kernel code does not call
+`required_workspace`, create `WorkspaceView`/`ExecutionSession`, or reset a
+byte cursor between prepared calls.
 
-The current API is the pointer-free planning foundation. Migration of existing
-operators should keep their legacy overloads, replace duplicated
-`required_workspace` arithmetic with the same prepare recipe in counting mode,
-and move allocations to stable sites incrementally.
+The stable address-free prepared surface is available for:
 
-`WorkspaceReplayCache` accepts an optional `WorkspaceArenaProvider`. Its
-default aligned-heap provider preserves the original behavior. The optional
-integration header `execution/MemoryWorkspaceSession.h` maps Fast to
-HighBandwidth and Slow to Default without making the memory core depend on
-workspace types. One session owns one arena per tier and all cached plans bind
-views of those same total capacities. See `docs/Memory.md`.
+- architecture-family `Matmul`, including single-C and explicit
+  accumulator-input forms;
+- `LayerNorm`, including optional affine parameters;
+- `Softmax`;
+- `ScaledDotProductAttention`/SDPA, including its optional mask and bias
+  operands;
+- `MatmulPack`;
+- `Transpose`.
 
-Shared-arena providers make both bases available to the initial trace, so the
-first real call observes the requested physical placement. Default heap replay
-continues to trace without a preallocated arena.
+Patterns and actual operands use the binding rules in [Tensor](Tensor.md).
+In particular, Dynamic pattern values are capacities, strides stay exact, and
+stateful transform values come from the actual Spec passed to the prepared
+call. Matmul's legacy fully-bound `Prepared<Invocation>` overloads remain for
+fixed addresses, but they are not the tile-rebinding surface described here.
 
-Generated source-kernel adapters read the dedicated
-`VecopsExecutionContext::workspace_provider`. The associated retained C callback
-table lets framework bridges inject physical placement without sharing C++
-globals across JIT DSOs or consuming embedding `user_data`. Each calling thread
-keeps one replay cache; a changed provider identity replaces its plan metadata.
+For Matmul, the short invocation form `prepared(task, a, b, c)` derives the
+active M/N extents from `c` but retains the logical K supplied to `prepare`.
+Packed A/B layouts contain padded tile extents and cannot recover a logical K
+tail. A caller whose active K changes within one prepared capacity must use the
+explicit `prepared(task, active_m, active_n, active_k, ...)` form.
 
-## Parallel source-kernel migration
+### Scratch accounting is explicit
 
-`WorkspaceContext` itself is deliberately not synchronized. A source kernel
-must issue allocation requests before entering `parallel_for`, using
-`WorkspaceDomain::WorkerLocal` and the actual logical worker count. Each worker
-then creates its private `WorkspaceView` from `slot.replica(thread_id)`. This
-keeps the trace independent of worker arrival order and gives every replica a
-64-byte-aligned, 64-byte-padded region.
+Each scratch-using ordinary `prepare<P>(ctx, distinct_name, ...)` creates an
+independent worker-tensor site. If several prepared objects are constructed in
+the same `serial_scope`, their scratch lifetimes overlap and placement accounts
+for their **sum**, even when calls happen sequentially inside each lane. No
+shared scratch group or automatic `max(requirement...)` union is currently
+implemented. Do not document or rely on such a group.
 
-Long-lived intermediates belong to an enclosing scope that remains open across
-all consuming phases. Sequential phases use sibling scopes, allowing the
-placer to reuse their local and operator-scratch offsets. Data-dependent
-branches may change computation but must not change the request sequence; a
-choice that changes allocation topology belongs in the decision fingerprint.
+This conservative rule makes differently sized replica strides safe. It can
+increase the arena peak relative to old code that manually reused one byte
+buffer, but it keeps the high-level API free of byte arithmetic and ambiguous
+aliasing.
 
-Raw call-frame workspace remains only as the legacy compatibility authority. A
-null/zero raw workspace selects the calling-thread replay cache, optionally
-backed by the execution context's provider. The cache keys exact observed
-Dynamic axes and retains four plan shapes by default; shared sessions prevent
-those entries from multiplying physical arena capacity. Allocation decisions
-not represented by axes must be included in the decision fingerprint. Legacy
-kernels do not construct a context because signature selection is compile time.
+## `serial_use`: barrier-separated whole-team phases only
+
+`ctx.serial_use(name, factory)` is the narrow opt-in for prepared scratch that
+may share placement with a sibling serial phase. The factory receives a typed
+binding authority and returns the prepared object:
+
+```cpp
+auto phase_a = ctx.serial_use("phase_a", [&](auto& serial) {
+  return op_a.prepare<P>(serial, "scratch", /* unbound patterns */);
+});
+auto phase_b = ctx.serial_use("phase_b", [&](auto& serial) {
+  return op_b.prepare<P>(serial, "scratch", /* unbound patterns */);
+});
+
+ctx.parallel_lanes<P>([&](execution::TaskContext<P> task) {
+  phase_a(task, /* actual operands */);
+}); // synchronous whole-team completion
+ctx.parallel_lanes<P>([&](execution::TaskContext<P> task) {
+  phase_b(task, /* actual operands */);
+}); // starts only after phase A has finished
+```
+
+The construction scopes are siblings, so placement may color their scratch at
+the same offsets even though the returned objects remain callable. This is safe
+only when every logical lane has left phase A before any lane enters phase B—an
+explicit whole-team barrier, normally supplied by the return of the first
+synchronous parallel region.
+
+Never use `serial_use` for two prepared operations in a per-lane pipeline such
+as `op_a(task); op_b(task);`. Lanes advance independently, so one lane may use
+phase-B scratch while another still uses phase A. If differently sized sites
+share an offset, their replica strides can map those lanes onto overlapping
+addresses. Per-lane pipelines must use ordinary same-scope prepared sites, and
+therefore pay the sum described above.
+
+## Replay and physical arenas
+
+When no external raw workspace is supplied, generated adapters use a small
+calling-thread `WorkspaceReplayCache`: the first compatible call executes in
+trace mode and subsequent calls replay a placed plan. A caller-provided ABI
+workspace becomes the fast arena. A `WorkspaceArenaProvider` can instead bind
+plans to explicit fast/slow storage; `MemoryWorkspaceSession` maps those tiers
+to HighBandwidth and Default memory without coupling the memory core to
+workspace types.
+
+Shared-arena providers expose the same session-owned fast/slow bases to each
+cached plan, so their capacities are session totals rather than per-entry
+budgets. A changed provider identity replaces cached plan metadata. See
+[Memory](Memory.md) and [Runtime](Runtime.md) for the provider and execution
+context ABI.
+
+`WorkspaceContext` itself is intentionally single-threaded. Allocate tensors
+and prepare operators before entering a parallel region. Parallel callbacks may
+use returned Tensor views, `TaskContext::local`, and prepared operations; they
+must not issue new context allocation requests whose order would depend on lane
+arrival.

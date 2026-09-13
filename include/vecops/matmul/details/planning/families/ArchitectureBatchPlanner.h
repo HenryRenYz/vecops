@@ -183,13 +183,18 @@ struct ArchitectureBatchPlanner {
   VECOPS_ALWAYS_INLINE static auto flatten_input(
       const Spec& spec, Rows flat_rows, Columns columns,
       RowStride row_stride) {
-    auto tensor = tensor::make_tensor(
-        spec.tensor().data(), tensor::make_layout(
-            tensor::make_shape(flat_rows, columns),
-            tensor::make_strides(row_stride, meta::cint<1>)));
-    return tensor::InputSpec<
-        typename Spec::ComputeType, decltype(tensor),
-        typename Spec::TransformType>{tensor, spec.transform()};
+    auto layout = tensor::make_layout(
+        tensor::make_shape(flat_rows, columns),
+        tensor::make_strides(row_stride, meta::cint<1>));
+    auto view = [&]() VECOPS_INLINE_LAMBDA {
+      using Element = typename Spec::InputTensor::ElementType;
+      if constexpr (Spec::is_bound)
+        return tensor::make_tensor(spec.tensor().data(), layout);
+      else
+        return tensor::make_unbound_tensor<Element>(layout);
+    }();
+    return spec.with_view_tensor_and_projection(
+        std::move(view), tensor::identity_projection<decltype(view)::Ndim>());
   }
 
   /// Output-side twin of flatten_input().
@@ -199,13 +204,18 @@ struct ArchitectureBatchPlanner {
   VECOPS_ALWAYS_INLINE static auto flatten_output(
       const Spec& spec, Rows flat_rows, Columns columns,
       RowStride row_stride) {
-    auto tensor = tensor::make_tensor(
-        spec.tensor().data(), tensor::make_layout(
-            tensor::make_shape(flat_rows, columns),
-            tensor::make_strides(row_stride, meta::cint<1>)));
-    return tensor::OutputSpec<
-        typename Spec::ComputeType, decltype(tensor),
-        typename Spec::TransformType>{tensor, spec.transform()};
+    auto layout = tensor::make_layout(
+        tensor::make_shape(flat_rows, columns),
+        tensor::make_strides(row_stride, meta::cint<1>));
+    auto view = [&]() VECOPS_INLINE_LAMBDA {
+      using Element = typename Spec::OutputTensor::ElementType;
+      if constexpr (Spec::is_bound)
+        return tensor::make_tensor(spec.tensor().data(), layout);
+      else
+        return tensor::make_unbound_tensor<Element>(layout);
+    }();
+    return spec.with_view_tensor_and_projection(
+        std::move(view), tensor::identity_projection<decltype(view)::Ndim>());
   }
 
   /// The rank-two B shared by every batch item: packed inputs are already

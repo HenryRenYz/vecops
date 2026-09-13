@@ -2024,6 +2024,97 @@ TEST_F(TensorEllipsisTest, TakeLeadingAndTrailingUseZeroDiscardedAxes) {
 }
 
 // ============================================================================
+// Storage-less Tensor patterns
+// ============================================================================
+
+template <typename T>
+concept HasTensorData = requires(const T& value) {
+    value.data();
+};
+
+template <typename T>
+concept HasThreeDimensionalScalarAccess = requires(const T& value) {
+    value(0, 0, 0);
+};
+
+TEST_F(TensorTest, UnbindPreservesLayoutButRemovesDataAccess) {
+    auto tensor = make_tensor(
+        data_3d_.data(),
+        make_shape(cint<3>, cint<4>, cint<5>),
+        make_strides(cint<20>, cint<5>, cint<1>));
+    auto pattern = unbind(tensor);
+
+    static_assert(BoundTensorLike<decltype(tensor)>);
+    static_assert(UnboundTensorLike<decltype(pattern)>);
+    static_assert(TensorLike<decltype(pattern)>);
+    static_assert(!HasTensorData<decltype(pattern)>);
+    static_assert(!HasThreeDimensionalScalarAccess<decltype(pattern)>);
+    static_assert(!WritableTensorOf<decltype(pattern), int64_t, 3>);
+    static_assert(std::same_as<
+                  typename decltype(pattern)::ElementType,
+                  int64_t>);
+
+    EXPECT_EQ(pattern.element_offset(), 0);
+    EXPECT_EQ(pattern.size<0>(), tensor.size<0>());
+    EXPECT_EQ(pattern.size<1>(), tensor.size<1>());
+    EXPECT_EQ(pattern.size<2>(), tensor.size<2>());
+    EXPECT_EQ(pattern.stride<0>(), tensor.stride<0>());
+    EXPECT_TRUE(pattern.is_contiguous());
+}
+
+TEST_F(TensorTest, UnboundSliceTracksOffsetAndCanBeRebound) {
+    auto tensor = make_tensor(
+        data_3d_.data(),
+        make_shape(cint<3>, cint<4>, cint<5>),
+        make_strides(cint<20>, cint<5>, cint<1>));
+    auto pattern = unbind(tensor);
+    auto sliced = pattern(1, range(cint<1>, cint<4>), reserve);
+
+    static_assert(UnboundTensorLike<decltype(sliced)>);
+    static_assert(decltype(sliced)::Ndim == 2);
+    EXPECT_EQ(sliced.element_offset(), 25);
+    EXPECT_EQ(sliced.size<0>(), 3);
+    EXPECT_EQ(sliced.size<1>(), 5);
+    EXPECT_EQ(sliced.stride<0>(), 5);
+    EXPECT_EQ(sliced.stride<1>(), 1);
+
+    auto rebound = bind(sliced, data_3d_.data());
+    static_assert(BoundTensorLike<decltype(rebound)>);
+    EXPECT_EQ(rebound.data(), data_3d_.data() + 25);
+    EXPECT_EQ(rebound(2, 4), tensor(1, 3, 4));
+}
+
+TEST_F(TensorTest, UnboundStructuralViewsPreserveBindingAndOffset) {
+    auto pattern = make_unbound_tensor<int64_t>(
+        make_shape(cint<3>, cint<4>, cint<5>));
+    auto sliced = pattern(1, reserve, reserve);
+    auto transposed = transpose<0, 1>(sliced);
+    auto relaxed = transposed.template as<
+        Shape<Any, Any>, Strides<Any, Any>>();
+
+    static_assert(UnboundTensorLike<decltype(transposed)>);
+    static_assert(UnboundTensorLike<decltype(relaxed)>);
+    EXPECT_EQ(transposed.element_offset(), 20);
+    EXPECT_EQ(transposed.size<0>(), 5);
+    EXPECT_EQ(transposed.size<1>(), 4);
+    EXPECT_EQ(transposed.stride<0>(), 1);
+    EXPECT_EQ(transposed.stride<1>(), 5);
+    EXPECT_EQ(relaxed.element_offset(), 20);
+}
+
+TEST_F(TensorTest, UnbindIsIdempotent) {
+    auto pattern = make_unbound_tensor<int64_t>(
+        make_shape(cint<4>, cint<5>),
+        make_strides(cint<8>, cint<1>));
+    auto same = unbind(pattern);
+
+    static_assert(std::same_as<decltype(pattern), decltype(same)>);
+    EXPECT_EQ(same.size<0>(), 4);
+    EXPECT_EQ(same.stride<0>(), 8);
+    EXPECT_EQ(same.element_offset(), 0);
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 

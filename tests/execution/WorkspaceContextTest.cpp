@@ -10,7 +10,7 @@
 #include "vecops/execution/WorkspaceContext.h"
 
 #if defined(_OPENMP)
-#include <omp.h>
+#  include <omp.h>
 #endif
 
 namespace {
@@ -122,8 +122,8 @@ struct AbiThreadPoolState {
     return 0;
   }
 
-  static std::int32_t parallel_for(void* context, std::uint32_t count, void* body_context,
-                                   VecopsParallelTaskFn body, VecopsError*) {
+  static std::int32_t parallel_for(void* context, std::uint32_t count, void* body_context, VecopsParallelTaskFn body,
+                                   VecopsError*) {
     auto& self = *static_cast<AbiThreadPoolState*>(context);
     ++self.calls;
     self.last_task_count = count;
@@ -156,10 +156,17 @@ TEST(WorkspaceContextTest, DynamicModeUsesFastArenaAndRewindsScopes) {
 
 TEST(WorkspaceContextTest, ParallelTasksUseCallPoolAndKeepStaticTaskCount) {
   AbiThreadPoolState state;
-  const VecopsThreadPoolV1 pool{
-    sizeof(VecopsThreadPoolV1), VECOPS_THREAD_POOL_ABI_MAJOR, VECOPS_THREAD_POOL_ABI_MINOR,
-    17, &state, AbiThreadPoolState::maximum, AbiThreadPoolState::in_parallel,
-    AbiThreadPoolState::parallel_for, nullptr, nullptr, 0};
+  const VecopsThreadPoolV1 pool{sizeof(VecopsThreadPoolV1),
+                                VECOPS_THREAD_POOL_ABI_MAJOR,
+                                VECOPS_THREAD_POOL_ABI_MINOR,
+                                17,
+                                &state,
+                                AbiThreadPoolState::maximum,
+                                AbiThreadPoolState::in_parallel,
+                                AbiThreadPoolState::parallel_for,
+                                nullptr,
+                                nullptr,
+                                0};
   const VecopsExecutionContext execution{
     .struct_size = sizeof(VecopsExecutionContext),
     .requested_threads = 6,
@@ -176,6 +183,47 @@ TEST(WorkspaceContextTest, ParallelTasksUseCallPoolAndKeepStaticTaskCount) {
   EXPECT_EQ(state.calls, 1);
   EXPECT_EQ(state.last_task_count, 4);
   EXPECT_EQ(visits, (std::array<int, 4>{1, 1, 1, 1}));
+}
+
+TEST(WorkspaceContextTest, ParallelLanesAndRangesUseTheBoundCallPool) {
+  AbiThreadPoolState state;
+  const VecopsThreadPoolV1 pool{sizeof(VecopsThreadPoolV1),
+                                VECOPS_THREAD_POOL_ABI_MAJOR,
+                                VECOPS_THREAD_POOL_ABI_MINOR,
+                                17,
+                                &state,
+                                AbiThreadPoolState::maximum,
+                                AbiThreadPoolState::in_parallel,
+                                AbiThreadPoolState::parallel_for,
+                                nullptr,
+                                nullptr,
+                                0};
+  const VecopsExecutionContext execution{
+    .struct_size = sizeof(VecopsExecutionContext),
+    .requested_threads = 6,
+    .thread_pool = &pool,
+  };
+  WorkspaceContext workspace{"parallel", nullptr, 0, nullptr, 0, &execution};
+
+  std::array<int, 3> lane_visits{};
+  workspace.parallel_lanes<3>([&](TaskContext<3> task) {
+    static_assert(TaskContext<3>::lane_count() == 3);
+    ++lane_visits[static_cast<std::size_t>(task.lane_id())];
+  });
+  EXPECT_EQ(state.calls, 1);
+  EXPECT_EQ(state.last_task_count, 3);
+  EXPECT_EQ(lane_visits, (std::array<int, 3>{1, 1, 1}));
+
+  std::array<int, 11> range_visits{};
+  workspace.parallel_for<3>(meta::cint<0>, meta::cint<11>, meta::cint<4>, [&](auto task, auto item) {
+    static_assert(decltype(task)::lane_count() == 3);
+    static_assert(std::remove_cvref_t<decltype(item.chunk())>::value == 4);
+    for (nint_t index = item.begin(); index < item.end(); ++index)
+      ++range_visits[static_cast<std::size_t>(index)];
+  });
+  EXPECT_EQ(state.calls, 2);
+  EXPECT_EQ(state.last_task_count, 3);
+  EXPECT_EQ(range_visits, (std::array<int, 11>{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}));
 }
 
 TEST(WorkspaceContextTest, BalancedShardHasCompileTimeMainAndTailExtents) {
@@ -217,6 +265,74 @@ TEST(WorkspaceContextTest, PreparedBindingOwnsSpilledStoragePastConstructionScop
   auto other = workspace.request("scratch", {.bytes = 4096, .alignment = 64});
   EXPECT_NE(other.replica(), bound);
   EXPECT_FLOAT_EQ(bound[0], 7.0f);
+}
+
+TEST(WorkspaceContextTest, SerialUsesColorSequentialWorkerScratchToMaximum) {
+  WorkspaceContext tracing{trace_workspace, "serial_operators"};
+  auto first = tracing.serial_use("first", [](auto& scratch) {
+    return scratch.template worker_tensor<std::byte, 2>("scratch", tensor::make_shape(meta::cint<80>));
+  });
+  auto second = tracing.serial_use("second", [](auto& scratch) {
+    return scratch.template worker_tensor<std::byte, 2>("scratch", tensor::make_shape(meta::cint<144>));
+  });
+  (void)first;
+  (void)second;
+
+  const auto logical = tracing.finish_trace();
+  ASSERT_EQ(logical.allocations.size(), 2u);
+  const auto placement = place_workspace(logical);
+  ASSERT_EQ(placement.entries.size(), 2u);
+  EXPECT_EQ(placement.fast_bytes, 384);
+  EXPECT_EQ(placement.entries[0].offset, placement.entries[1].offset);
+}
+
+TEST(WorkspaceContextTest, IndependentWorkerScratchInSameScopeAddsItsPeak) {
+  WorkspaceContext tracing{trace_workspace, "independent_operators"};
+  auto scope = tracing.serial_scope("pipeline");
+  auto first = tracing.worker_tensor<std::byte, 2>("first", tensor::make_shape(meta::cint<80>));
+  auto second = tracing.worker_tensor<std::byte, 2>("second", tensor::make_shape(meta::cint<144>));
+  (void)first;
+  (void)second;
+  scope.close();
+
+  const auto logical = tracing.finish_trace();
+  ASSERT_EQ(logical.allocations.size(), 2u);
+  const auto placement = place_workspace(logical);
+  ASSERT_EQ(placement.entries.size(), 2u);
+  EXPECT_EQ(placement.fast_bytes, 640);
+  EXPECT_NE(placement.entries[0].offset, placement.entries[1].offset);
+}
+
+TEST(WorkspaceContextTest, DifferentStrideWorkerSitesIsolateLaneSkew) {
+  alignas(64) std::array<std::byte, 1024> fast{};
+  WorkspaceContext workspace{"lane_skew", fast.data(), static_cast<nint_t>(fast.size())};
+  auto small = workspace.worker_tensor<std::byte, 2>("small", tensor::make_shape(meta::cint<80>));
+  auto large = workspace.worker_tensor<std::byte, 2>("large", tensor::make_shape(meta::cint<144>));
+
+  std::fill_n(small.data() + small.stride(0), 80, std::byte{0x35});
+  std::fill_n(large.data(), 144, std::byte{0x6a});
+  for (nint_t index = 0; index < 80; ++index)
+    EXPECT_EQ(small(1, index), std::byte{0x35});
+  for (nint_t index = 0; index < 144; ++index)
+    EXPECT_EQ(large(0, index), std::byte{0x6a});
+}
+
+TEST(WorkspaceContextTest, SerialUseOwnsDynamicSpillAfterConstructionScope) {
+  WorkspaceContext workspace{"dynamic_serial_operator"};
+  auto scratch = workspace.serial_use("prepared", [](auto& authority) {
+    return authority.template worker_tensor<float, 2>("scratch", tensor::make_shape(meta::cint<4>));
+  });
+  scratch(0, 0) = 3.0f;
+  scratch(1, 3) = 9.0f;
+
+  {
+    auto later = workspace.serial_scope("later");
+    auto transient = workspace.request("scratch", {.bytes = 4096});
+    ASSERT_NE(transient.replica(), nullptr);
+    EXPECT_NE(transient.replica(), scratch.data());
+  }
+  EXPECT_FLOAT_EQ(scratch(0, 0), 3.0f);
+  EXPECT_FLOAT_EQ(scratch(1, 3), 9.0f);
 }
 
 TEST(WorkspaceContextTest, TracePlacementAndReplayShareStableSites) {
@@ -308,7 +424,8 @@ TEST(WorkspaceContextTest, CacheRetentionFailureDoesNotFailCompletedInvocation) 
   WorkspaceReplayCache cache{1, provider};
   int completed = 0;
   EXPECT_NO_THROW(cache.invoke(
-    "nonfatal-cache", [](auto&) {}, [&](WorkspaceContext& workspace) {
+    "nonfatal-cache", [](auto&) {},
+    [&](WorkspaceContext& workspace) {
       auto phase = workspace.serial_scope("phase");
       auto slot = workspace.request("buffer", {.bytes = 128});
       ASSERT_NE(slot.replica(), nullptr);
@@ -362,10 +479,8 @@ TEST(WorkspaceContextTest, ReplayCacheSeparatesAmbientParallelism) {
           ++replays;
         const nint_t workers = max_parallelism();
         auto phase = workspace.serial_scope("phase");
-        auto slot = workspace.request(
-          "scratch", {.bytes = 64,
-                      .domain = WorkspaceDomain::WorkerLocal,
-                      .replicas = workers});
+        auto slot =
+          workspace.request("scratch", {.bytes = 64, .domain = WorkspaceDomain::WorkerLocal, .replicas = workers});
         for (nint_t worker = 0; worker < workers; ++worker)
           EXPECT_NE(slot.replica(worker), nullptr);
       });

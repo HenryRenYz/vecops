@@ -74,6 +74,7 @@
 #include <utility>
 
 #include "vecops/execution/ExecutionSession.h"
+#include "vecops/execution/WorkspaceContext.h"
 #include "vecops/matmul/details/packing/Plan.h"
 
 namespace vecops::ops {
@@ -137,6 +138,83 @@ public:
    */
   VECOPS_INLINE constexpr explicit MatmulPack(Config cfg = {})
       : config(std::move(cfg)) {}
+
+  /** Address-free packing plan with one private scratch tensor per lane. */
+  template <nint_t Parallelism, typename InputPattern,
+            typename OutputPattern, typename WorkerScratch>
+  class PatternPrepared {
+  public:
+    static_assert(Parallelism > 0,
+                  "prepared MatmulPack parallelism must be positive");
+
+    VECOPS_INLINE PatternPrepared(Config config, InputPattern input,
+                                  OutputPattern output,
+                                  WorkerScratch worker_scratch,
+                                  nint_t workspace_bytes)
+        : config_(std::move(config)), input_(std::move(input)),
+          output_(std::move(output)),
+          worker_scratch_(std::move(worker_scratch)),
+          workspace_bytes_(workspace_bytes) {}
+
+    template <tensor::InputOperand Input, tensor::OutputOperand Output>
+      requires(tensor::is_bound_tensor_view_v<Input> &&
+               tensor::is_bound_tensor_view_v<Output>)
+    VECOPS_INLINE void operator()(execution::TaskContext<Parallelism> task,
+                                  Input &&input, Output &&output) const {
+      auto active_input = tensor::rebind(input_, std::forward<Input>(input));
+      auto active_output =
+          tensor::rebind(output_, std::forward<Output>(output));
+      MatmulPack op{config_};
+      VECOPS_CHECK(op.required_workspace(active_input, active_output) <=
+                       workspace_bytes_,
+                   "active MatmulPack scratch exceeds its planning-pattern "
+                   "capacity");
+      if (workspace_bytes_ == 0) {
+        ExecutionSession execution{};
+        op(execution, std::move(active_input), std::move(active_output));
+      } else {
+        auto scratch = task.local(worker_scratch_);
+        kernel::WorkspaceView view{scratch.data(), workspace_bytes_};
+        ExecutionSession execution{view};
+        op(execution, std::move(active_input), std::move(active_output));
+      }
+    }
+
+  private:
+    Config config_;
+    InputPattern input_;
+    OutputPattern output_;
+    WorkerScratch worker_scratch_;
+    nint_t workspace_bytes_ = 0;
+  };
+
+  /** Prepare reusable packing from storage-less operand patterns. */
+  template <nint_t Parallelism, typename WorkspaceAuthority,
+            tensor::UnboundTensorView InputPattern,
+            tensor::UnboundTensorView OutputPattern>
+    requires requires(WorkspaceAuthority &authority, nint_t bytes) {
+      authority.template worker_tensor<std::byte, Parallelism>(
+          std::string_view{}, tensor::make_shape(meta::Any{bytes}));
+    }
+  VECOPS_INLINE auto prepare(WorkspaceAuthority &workspace,
+                             std::string_view site_name,
+                             InputPattern &&input,
+                             OutputPattern &&output) const {
+    using OperandCompute = std::conditional_t<
+        Config::side == ::vecops::matmul::Operand::A,
+        typename Config::Atom::TA, typename Config::Atom::TB>;
+    auto input_pattern = tensor::as_input_spec<OperandCompute>(
+        std::forward<InputPattern>(input));
+    auto output_pattern = tensor::as_output_spec<OperandCompute>(
+        std::forward<OutputPattern>(output));
+    const nint_t bytes = required_workspace(input_pattern, output_pattern);
+    auto scratch = workspace.template worker_tensor<std::byte, Parallelism>(
+        site_name, tensor::make_shape(meta::Any{bytes}));
+    return PatternPrepared<Parallelism, decltype(input_pattern),
+                           decltype(output_pattern), decltype(scratch)>{
+        config, std::move(input_pattern), std::move(output_pattern),
+        std::move(scratch), bytes};
+  }
 
   /**
    * @brief Workspace requirement for one packing call.

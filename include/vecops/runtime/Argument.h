@@ -28,7 +28,7 @@
 #include "vecops/runtime/CallAbi.h"
 
 namespace vecops::tensor {
-template <typename T, typename TShape, typename TStrides>
+template <typename T, typename TShape, typename TStrides, typename TBinding>
 class Tensor;
 }
 
@@ -422,8 +422,8 @@ inline Value erase_value(T value) {
  * returned `TensorView` and every invocation using it.  Const source elements
  * become read-only; non-const elements declare read/write access.
  */
-template <typename T, typename Shape, typename Strides>
-TensorView erase_tensor(const tensor::Tensor<T, Shape, Strides>& tensor) {
+template <typename T, typename Shape, typename Strides, typename Binding>
+TensorView erase_tensor(const tensor::Tensor<T, Shape, Strides, Binding>& tensor) {
   using Element = std::remove_cv_t<T>;
   static_assert(dtype_of<Element> != DType::Invalid, "Unsupported vecops runtime tensor element type");
   TensorView result;
@@ -449,8 +449,8 @@ TensorView erase_tensor(const tensor::Tensor<T, Shape, Strides>& tensor) {
  * @param tensor Source tensor view.
  * @return Tensor alternative containing copied metadata and a non-owning data pointer.
  */
-template <typename T, typename Shape, typename Strides>
-Value erase_value(const tensor::Tensor<T, Shape, Strides>& tensor) {
+template <typename T, typename Shape, typename Strides, typename Binding>
+Value erase_value(const tensor::Tensor<T, Shape, Strides, Binding>& tensor) {
   return erase_tensor(tensor);
 }
 

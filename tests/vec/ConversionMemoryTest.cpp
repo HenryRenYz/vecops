@@ -20,6 +20,67 @@ namespace vec = vecops::vec;
 
 namespace {
 
+template <vec::Populate Population>
+void verify_unordered_bfloat16_to_float_tail_population() {
+  using Tag = vec::ScalableTag<vecops::float32_t>;
+  using MemoryTag = vec::Rebind<vecops::bfloat16_t, Tag>;
+  using Request = vec::LoadConvertRequest<
+      Tag, vecops::bfloat16_t, vec::Active::First,
+      vec::Addressing::Contiguous, Population, vec::mem::Unaligned,
+      vec::mem::Temporal, 0, vec::Vec<vec::IndexTag<Tag>>,
+      vec::cvt::Unordered, vec::cvt::Saturate, vec::Mask<Tag>>;
+  const vecops::nint_t lanes = vec::size(Tag{});
+  const vecops::nint_t active = std::max<vecops::nint_t>(1, lanes - 1);
+  std::vector<vecops::bfloat16_t> input(static_cast<std::size_t>(lanes));
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane)
+    input[static_cast<std::size_t>(lane)] =
+        vecops::bfloat16_t{static_cast<float>(lane) - 17.0f};
+
+  Request request{};
+  request.first_count = active;
+  auto merge = vec::zeros(Tag{});
+  if constexpr (Population == vec::Populate::MergeScalar) {
+    request.merge_scalar = -123.0f;
+  } else if constexpr (Population == vec::Populate::MergeVector) {
+    for (vecops::nint_t lane = 0; lane < lanes; ++lane)
+      merge = vec::set(Tag{}, merge, lane, 100.0f + static_cast<float>(lane));
+    request.merge_vector = &merge;
+  }
+
+  const auto loaded = vec::details::execute_load_convert_request(
+      vec::LoadConvertOp{}, Tag{}, input.data(), request);
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    const float expected = lane < active
+        ? static_cast<float>(input[static_cast<std::size_t>(lane)])
+        : Population == vec::Populate::MergeScalar
+            ? -123.0f
+            : Population == vec::Populate::MergeVector
+                ? 100.0f + static_cast<float>(lane)
+                : 0.0f;
+    EXPECT_FLOAT_EQ(vec::get(Tag{}, loaded, lane), expected)
+        << "population=" << static_cast<int>(Population)
+        << " lane=" << lane;
+  }
+
+  const auto memory_mask = vec::mwhilelt(MemoryTag{}, 0, active);
+  const auto logical_mask = vec::convert(Tag{}, MemoryTag{}, memory_mask);
+  const auto round_trip = vec::convert(MemoryTag{}, Tag{}, logical_mask);
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+    EXPECT_EQ(vec::get(MemoryTag{}, memory_mask, lane), lane < active);
+    EXPECT_EQ(vec::get(Tag{}, logical_mask, lane), lane < active);
+    EXPECT_EQ(vec::get(MemoryTag{}, round_trip, lane), lane < active);
+  }
+}
+
+TEST(VecConversionMemoryTest,
+     ResolvedUnorderedBfloat16TailPreservesEveryPopulationMode) {
+  verify_unordered_bfloat16_to_float_tail_population<vec::Populate::Zero>();
+  verify_unordered_bfloat16_to_float_tail_population<
+      vec::Populate::MergeScalar>();
+  verify_unordered_bfloat16_to_float_tail_population<
+      vec::Populate::MergeVector>();
+}
+
 #if defined(CPU_CAPABILITY_SVE) && !defined(HAS_FIXED_SVE_BITS)
 TEST(VecConversionMemoryTest, OversizedRebindPrefersSVEOrderedLowering) {
   using Tag = vec::ScalableTag<int8_t, VEC_MAX_POW>;

@@ -37,9 +37,14 @@ function(vecops_add_test)
         if(ARG_LABELS)
             string(JOIN "+" _GTEST_LABELS ${ARG_LABELS})
             gtest_discover_tests(${_TARGET_NAME}
-                PROPERTIES LABELS "${_GTEST_LABELS}")
+                PROPERTIES LABELS "${_GTEST_LABELS}"
+                DISCOVERY_TIMEOUT 60)
         else()
-            gtest_discover_tests(${_TARGET_NAME})
+            # Large multi-ISA test binaries may be linked while dozens of
+            # compiler processes are under memory throttling.  Five seconds
+            # is too short for post-link discovery in that environment even
+            # though the executable itself is healthy.
+            gtest_discover_tests(${_TARGET_NAME} DISCOVERY_TIMEOUT 60)
         endif()
 
         list(LENGTH _GDB_SCRIPTS _NUM_GDB_SCRIPTS)

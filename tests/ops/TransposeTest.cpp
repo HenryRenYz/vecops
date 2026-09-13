@@ -6,6 +6,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "vecops/execution/WorkspaceContext.h"
 #include "vecops/ops/Transpose.h"
 
 namespace {
@@ -144,6 +145,42 @@ TEST(TransposeTest, ConfigOnlyOperatorCanBindDifferentOperands) {
             make_tensor(second_output.data(), transposed));
   EXPECT_EQ(first_output, (std::array<int32_t, 6>{1, 4, 2, 5, 3, 6}));
   EXPECT_EQ(second_output, (std::array<int32_t, 6>{7, 10, 8, 11, 9, 12}));
+}
+
+TEST(TransposeTest, PatternPreparedBindsRuntimeStorage) {
+  constexpr nint_t M = 5;
+  constexpr nint_t N = 7;
+  std::array<int32_t, M * N> first{};
+  std::array<int32_t, M * N> second{};
+  std::array<int32_t, M * N> first_output{};
+  std::array<int32_t, M * N> second_output{};
+  for (nint_t i = 0; i < M * N; ++i) {
+    first[static_cast<std::size_t>(i)] = static_cast<int32_t>(i + 1);
+    second[static_cast<std::size_t>(i)] = static_cast<int32_t>(101 + i);
+  }
+  const auto input_layout = make_layout(make_shape(cint<M>, cint<N>));
+  const auto output_layout = make_layout(make_shape(cint<N>, cint<M>));
+  auto first_input = make_tensor(first.data(), input_layout);
+  auto first_out = make_tensor(first_output.data(), output_layout);
+  auto second_input = make_tensor(second.data(), input_layout);
+  auto second_out = make_tensor(second_output.data(), output_layout);
+
+  execution::WorkspaceContext workspace{"prepared_transpose"};
+  auto prepared = ops::transpose(ops::TransposeConfig<int32_t>{})
+                      .template prepare<1>(
+                          workspace, "scratch", unbind(first_input),
+                          unbind(first_out));
+  prepared(execution::TaskContext<1>{0}, first_input, first_out);
+  prepared(execution::TaskContext<1>{0}, second_input, second_out);
+
+  for (nint_t i = 0; i < M; ++i) {
+    for (nint_t j = 0; j < N; ++j) {
+      EXPECT_EQ(first_output[static_cast<std::size_t>(j * M + i)],
+                first[static_cast<std::size_t>(i * N + j)]);
+      EXPECT_EQ(second_output[static_cast<std::size_t>(j * M + i)],
+                second[static_cast<std::size_t>(i * N + j)]);
+    }
+  }
 }
 
 extern "C" VECOPS_NOINLINE void transpose_i32_const_probe(
