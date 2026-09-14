@@ -9,27 +9,7 @@ if(@VECOPS_MEMORY_HAVE_HWLOC@)
     pkg_check_modules(HWLOC REQUIRED IMPORTED_TARGET hwloc>=2.7)
 endif()
 
-# A Python wheel relocates this config below vecops/_sdk. Keep sources used by
-# optional out-of-line JIT leaves relative to that SDK prefix.
-if(NOT DEFINED VECOPS_SOURCE_DIR)
-    set(VECOPS_SOURCE_DIR "${PACKAGE_PREFIX_DIR}")
-endif()
-
-if(@VECOPS_ENABLE_KUPL_MMA@)
-    set(VECOPS_ENABLE_KUPL_MMA ON)
-    if(NOT DEFINED VECOPS_KUPL_INCLUDE_DIR)
-        set(VECOPS_KUPL_INCLUDE_DIR "@VECOPS_KUPL_INCLUDE_DIR@")
-    endif()
-    if(NOT DEFINED VECOPS_KUPL_LIBRARY)
-        set(VECOPS_KUPL_LIBRARY "@VECOPS_KUPL_LIBRARY@")
-    endif()
-    if(NOT TARGET KUPL::MMA)
-        add_library(KUPL::MMA SHARED IMPORTED)
-        set_target_properties(KUPL::MMA PROPERTIES
-            IMPORTED_LOCATION "${VECOPS_KUPL_LIBRARY}"
-            INTERFACE_INCLUDE_DIRECTORIES "${VECOPS_KUPL_INCLUDE_DIR}")
-    endif()
-endif()
+set(VECOPS_ENABLE_KUPL_MMA @VECOPS_ENABLE_KUPL_MMA@)
 
 # Preserve the richer native ARM contract detected while building the SDK.
 # Some ARM compiler drivers (notably BiSheng) accept `-march=native` but omit

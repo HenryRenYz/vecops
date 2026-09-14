@@ -40,26 +40,11 @@ function(vecops_add_kernel_library)
             ARCH ${ARG_TARGET_ARCH})
     endif()
 
-    # KUPL is an out-of-line SME leaf. JIT consumers use this helper rather
-    # than the repository's multiarch target builders, so attach the adapter
-    # and feature contract directly to every KUPL-enabled kernel module.
+    # The KUPL-derived provider is header-only and deliberately has no KUPL or
+    # OpenMP runtime dependency. Selecting it is an explicit build decision.
     if(VECOPS_ENABLE_KUPL_MMA)
-        set(_VECOPS_KUPL_ADAPTER_SOURCE
-            "${VECOPS_SOURCE_DIR}/src/arch/sme/KuplMma.cpp")
-        if(NOT EXISTS "${_VECOPS_KUPL_ADAPTER_SOURCE}")
-            message(FATAL_ERROR
-                "KUPL adapter is missing from the Vecops SDK: "
-                "${_VECOPS_KUPL_ADAPTER_SOURCE}")
-        endif()
-        target_sources(${ARG_NAME} PRIVATE
-            "${_VECOPS_KUPL_ADAPTER_SOURCE}")
-        set_source_files_properties("${_VECOPS_KUPL_ADAPTER_SOURCE}"
-            PROPERTIES COMPILE_OPTIONS "-fno-access-control")
-        target_include_directories(${ARG_NAME} PRIVATE
-            "${VECOPS_KUPL_INCLUDE_DIR}")
         target_compile_definitions(${ARG_NAME} PRIVATE
             VECOPS_HAS_KUPL_MMA=1)
-        target_link_libraries(${ARG_NAME} PRIVATE KUPL::MMA)
     endif()
 
     if(TARGET vecops::vecops)

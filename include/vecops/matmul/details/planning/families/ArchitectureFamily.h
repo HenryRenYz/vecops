@@ -27,13 +27,10 @@
  *
  * Execution paths, in the order execute() tries them:
  *
- * 1. Optional KUPL MMA: eligible rank-two BF16 products online-pack both
- *    raw operands into KUPL's private A16/B64 layouts, execute zero-padded
- *    16x64 tiles, and store the logical region.
- * 2. Packed-A flattened batch rows: a raw batched problem whose B was
+ * 1. Packed-A flattened batch rows: a raw batched problem whose B was
  *    prepacked (explicitly, or online by a compile-time decision) may pack
  *    the flattened [batch*M, K] A once and run a single packed problem.
- * 3. Online packing: A and B are costed independently at compile time.  Exact
+ * 2. Online packing: A and B are costed independently at compile time.  Exact
  *    metadata uses the concrete cost model; bounded Dynamic metadata uses its
  *    safe corner; unconstrained native AMX may choose raw vs packed-B, while
  *    SME and conversion-eliding packs default packed. Caller-prepared AMX B
@@ -41,13 +38,13 @@
  *    corner fixes A to the packed path even when M is unbounded. A shared
  *    rank-three A or B is packed once while an independent side reuses one
  *    leaf-sized staging buffer across batches.
- * 4. Bounded WholeProblem B panel: large rank-two native-B products may pack
+ * 3. Bounded WholeProblem B panel: large rank-two native-B products may pack
  *    one full-K N panel and consume it across M before advancing N. This fills
  *    the lifetime gap between whole-B packing and per-microkernel packing.
- * 5. Batch-columns flatten: a shared A with M == 1 collapses to
+ * 4. Batch-columns flatten: a shared A with M == 1 collapses to
  *    [1, batch*N].
- * 6. Batch-rows flatten: a shared B collapses to one [batch*M, K] product.
- * 7. The ordinary traversal: loop the leading batch dimensions and run one
+ * 5. Batch-rows flatten: a shared B collapses to one [batch*M, K] product.
+ * 6. The ordinary traversal: loop the leading batch dimensions and run one
  *    leaf problem per item (under with_matmul_configuration for AMX).
  *
  * Three sibling planners collaborate as friends and read the private member
@@ -72,9 +69,6 @@
 #include "vecops/matmul/Packing.h"
 #include "vecops/matmul/details/planning/FamilySelector.h"
 #include "vecops/matmul/details/kernel/Kernel.h"
-#if defined(VECOPS_HAS_KUPL_MMA)
-#include "vecops/matmul/details/kernel/sme/KuplMma.h"
-#endif
 #include "vecops/matmul/details/planning/Implementation.h"
 #include "vecops/matmul/details/planning/orientation/Backend.h"
 #include "vecops/matmul/details/packing/Plan.h"
@@ -394,28 +388,6 @@ private:
       Atom, ::vecops::matmul::Operand::A, typename ASpec::InputLayout>();
   static constexpr bool PackedBInput = ::vecops::matmul::is_packed_layout<
       Atom, ::vecops::matmul::Operand::B, typename BSpec::InputLayout>();
-
-#if defined(VECOPS_HAS_KUPL_MMA)
-  /**
-   * KUPL is an optional provider for raw rank-two BF16 General-family input.
-   * Its A16/B64 format is private and both operands are always packed online.
-   * Caller-prepared SME layouts retain their ABI and native kernel paths.
-   */
-  static constexpr bool KuplMmaCandidate =
-      Rank == 2 &&
-      std::same_as<Atom, ::vecops::matmul::SME_BF16F32> &&
-      !PackedAInput && !PackedBInput &&
-      ASpec::InputTensor::Ndim == 2 && BSpec::InputTensor::Ndim == 2 &&
-      CInputSpec::InputTensor::Ndim == 2 &&
-      COutputSpec::OutputTensor::Ndim == 2 &&
-      (!EffectiveFamilyDispatch::required ||
-       std::same_as<typename EffectiveFamilyDispatch::Family,
-                    ::vecops::matmul::kernel_family::WholeProblem> ||
-       std::same_as<typename EffectiveFamilyDispatch::Family,
-                    ::vecops::matmul::kernel_family::General>);
-#else
-  static constexpr bool KuplMmaCandidate = false;
-#endif
 
   static constexpr bool Rank3SharedB = [] {
     if constexpr (COutputSpec::OutputTensor::Ndim != 3) {
@@ -1678,82 +1650,6 @@ private:
         "matmul C shape mismatch");
   }
 
-#if defined(VECOPS_HAS_KUPL_MMA)
-  VECOPS_INLINE bool kupl_mma_enabled() const {
-    if constexpr (!KuplMmaCandidate) {
-      return false;
-    } else {
-      return kernel::matmul_details::sme::kupl_mma::profitable(
-          static_cast<nint_t>(m_), static_cast<nint_t>(n_),
-          static_cast<nint_t>(k_));
-    }
-  }
-
-  VECOPS_INLINE nint_t kupl_mma_workspace_bytes() const {
-    if constexpr (!KuplMmaCandidate) {
-      return 0;
-    } else {
-      return kernel::matmul_details::sme::kupl_mma::workspace_bytes(
-          static_cast<nint_t>(m_), static_cast<nint_t>(n_),
-          static_cast<nint_t>(k_), !PackedAInput, !PackedBInput);
-    }
-  }
-
-  /** Execute KUPL over zero-padded tiles and store only logical output. */
-  template <execution::ExecutionScope Scope>
-  VECOPS_NOINLINE void execute_kupl_mma(Scope& scope) const {
-    static_assert(KuplMmaCandidate);
-    namespace kupl = kernel::matmul_details::sme::kupl_mma;
-    auto& workspace = scope.workspace_view();
-    const auto mark = workspace.mark();
-    const nint_t m = static_cast<nint_t>(m_);
-    const nint_t n = static_cast<nint_t>(n_);
-    const nint_t k = static_cast<nint_t>(k_);
-    const nint_t pk = kupl::padded_k(k);
-    bfloat16_t* packed_a = nullptr;
-    bfloat16_t* packed_b = nullptr;
-    if constexpr (!PackedAInput)
-      packed_a = static_cast<bfloat16_t*>(workspace.allocate(
-          kupl::checked_product(kupl::padded_m(m), pk) *
-              static_cast<nint_t>(sizeof(bfloat16_t)),
-          64));
-    if constexpr (!PackedBInput)
-      packed_b = static_cast<bfloat16_t*>(workspace.allocate(
-          kupl::checked_product(kupl::padded_n(n), pk) *
-              static_cast<nint_t>(sizeof(bfloat16_t)),
-          64));
-    auto* c_tile = static_cast<float32_t*>(workspace.allocate(
-        kupl::CTileElements * static_cast<nint_t>(sizeof(float32_t)), 64));
-
-    using APolicy = tensor::InputAccessPolicy<
-        ASpec::InputTensor::Ndim - 1, 1, tensor::AccessPlan::direct>;
-    using BPolicy = tensor::InputAccessPolicy<
-        BSpec::InputTensor::Ndim - 1, 1, tensor::AccessPlan::direct>;
-    using CInputPolicy = tensor::InputAccessPolicy<
-        1, 1, tensor::AccessPlan::direct>;
-    using COutputPolicy = tensor::OutputAccessPolicy<
-        1, tensor::AccessPlan::direct>;
-    kernel::with_operands(
-        scope,
-        tensor::operand(a_, APolicy{}),
-        tensor::operand(b_, BPolicy{}),
-        tensor::operand(c_input_, CInputPolicy{}),
-        tensor::operand(c_output_, COutputPolicy{}),
-        [&](auto& a_access, auto& b_access,
-            auto& c_input_access, auto& c_output_access)
-            VECOPS_KERNEL_LAMBDA {
-          kupl::run_bulk(
-              a_access, b_access, c_input_access, c_output_access,
-              packed_a, packed_b, c_tile, m, n, k);
-          c_output_access.commit();
-        });
-    workspace.rewind(mark);
-  }
-#else
-  VECOPS_INLINE bool kupl_mma_enabled() const { return false; }
-  VECOPS_INLINE nint_t kupl_mma_workspace_bytes() const { return 0; }
-#endif
-
   template <bool Configured = false,
             execution::ExecutionScope Scope,
             meta::ValueType M, meta::ValueType N, meta::ValueType K,
@@ -2002,14 +1898,6 @@ private:
   template <execution::ExecutionScope Scope>
   VECOPS_KERNEL_FUNCTION(void execute(Scope& scope) const) {
     validate();
-#if defined(VECOPS_HAS_KUPL_MMA)
-    if constexpr (KuplMmaCandidate) {
-      if (VECOPS_LIKELY(kupl_mma_enabled())) {
-        execute_kupl_mma(scope);
-        return;
-      }
-    }
-#endif
     if constexpr (WholeBPanelCandidate) {
       if (VECOPS_UNLIKELY(whole_b_panel_enabled())) {
         execute_whole_b_panel(scope);

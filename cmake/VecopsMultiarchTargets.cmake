@@ -392,10 +392,9 @@ endfunction()
 # features are the compile-time availability contract: every multiarch target
 # that can instantiate one of these paths is linked to the matching archive.
 function(_vecops_get_sme_matmul_leaf_library
-        OUT_VAR MARCH USE_F64 USE_RUNTIME_QUANT_INT8 USE_MIXED_SIGN_SKINNY
-        USE_KUPL_MMA)
+        OUT_VAR MARCH USE_F64 USE_RUNTIME_QUANT_INT8 USE_MIXED_SIGN_SKINNY)
     set(_LEAF_KEY
-        "${MARCH};f64=${USE_F64};runtime_i8=${USE_RUNTIME_QUANT_INT8};mixed_sign_skinny=${USE_MIXED_SIGN_SKINNY};kupl=${USE_KUPL_MMA}")
+        "${MARCH};f64=${USE_F64};runtime_i8=${USE_RUNTIME_QUANT_INT8};mixed_sign_skinny=${USE_MIXED_SIGN_SKINNY}")
     string(SHA1 _MARCH_HASH "${_LEAF_KEY}")
     string(SUBSTRING "${_MARCH_HASH}" 0 12 _MARCH_ID)
     set(_LEAF_TARGET "vecops_sme_matmul_leaves_${_MARCH_ID}")
@@ -413,13 +412,6 @@ function(_vecops_get_sme_matmul_leaf_library
             list(APPEND _LEAF_SOURCES
                 "${VECOPS_SOURCE_DIR}/src/arch/sme/MixedSignSkinnyInt8.cpp")
         endif()
-        if(USE_KUPL_MMA)
-            set(_VECOPS_KUPL_ADAPTER_SOURCE
-                "${VECOPS_SOURCE_DIR}/src/arch/sme/KuplMma.cpp")
-            list(APPEND _LEAF_SOURCES "${_VECOPS_KUPL_ADAPTER_SOURCE}")
-            set_source_files_properties("${_VECOPS_KUPL_ADAPTER_SOURCE}"
-                PROPERTIES COMPILE_OPTIONS "-fno-access-control")
-        endif()
         if(NOT _LEAF_SOURCES)
             message(FATAL_ERROR
                 "SME matmul leaf library requested without any leaves")
@@ -429,12 +421,6 @@ function(_vecops_get_sme_matmul_leaf_library
         target_include_directories(${_LEAF_TARGET} PRIVATE
             "${VECOPS_SOURCE_DIR}/include"
             "${VECOPS_SOURCE_DIR}/include/vecops")
-        if(USE_KUPL_MMA)
-            target_include_directories(${_LEAF_TARGET} PRIVATE
-                "${VECOPS_KUPL_INCLUDE_DIR}")
-            target_compile_definitions(${_LEAF_TARGET} PRIVATE
-                VECOPS_HAS_KUPL_MMA=1)
-        endif()
         target_compile_definitions(${_LEAF_TARGET} PRIVATE
             "$<$<CONFIG:Debug>:VECOPS_DEBUG>")
         if(VECOPS_PRESERVE_SUBNORMALS)
@@ -448,9 +434,6 @@ function(_vecops_get_sme_matmul_leaf_library
         endif()
         target_link_libraries(${_LEAF_TARGET} PRIVATE
             vecops_optimize_for_kernels)
-        if(USE_KUPL_MMA)
-            target_link_libraries(${_LEAF_TARGET} PRIVATE KUPL::MMA)
-        endif()
         set_property(TARGET ${_LEAF_TARGET} PROPERTY FOLDER
             "internal/sme_matmul")
     endif()
@@ -599,23 +582,19 @@ function(vecops_add_multiarch_executable)
             set(_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF ON)
         endif()
 
-        set(_VECOPS_USE_KUPL_MMA_LEAF OFF)
         if(_VECOPS_TARGET_HAS_SME AND VECOPS_ENABLE_KUPL_MMA)
-            set(_VECOPS_USE_KUPL_MMA_LEAF ON)
             target_compile_definitions(${_TARGET_NAME} PRIVATE
                 VECOPS_HAS_KUPL_MMA=1)
         endif()
 
         if(_VECOPS_USE_SME_F64_LEAF OR
            _VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF OR
-           _VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF OR
-           _VECOPS_USE_KUPL_MMA_LEAF)
+           _VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF)
             _vecops_get_sme_matmul_leaf_library(
                 _VECOPS_SME_MATMUL_LEAF_LIBRARY "${_MARCH}"
                 "${_VECOPS_USE_SME_F64_LEAF}"
                 "${_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF}"
-                "${_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF}"
-                "${_VECOPS_USE_KUPL_MMA_LEAF}")
+                "${_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF}")
             target_link_libraries(${_TARGET_NAME} PRIVATE
                 ${_VECOPS_SME_MATMUL_LEAF_LIBRARY})
         endif()

@@ -73,6 +73,9 @@
 #include "vecops/matmul/Packing.h"
 #include "vecops/matmul/details/kernel/RuntimeDispatch.h"
 #include "vecops/matmul/details/kernel/sme/Atoms.h"
+#if defined(VECOPS_HAS_KUPL_MMA)
+#include "vecops/matmul/details/kernel/sme/KuplMma.h"
+#endif
 #include "vecops/kernel/Tile2D.h"
 #include "vecops/matmul/details/kernel/TileScheduler.h"
 #include "vecops/matmul/details/kernel/sme/RuntimeQuantInt8.h"
@@ -2334,8 +2337,29 @@ VECOPS_ALWAYS_INLINE void compute_packed_groups(
   if constexpr (NN >= 4)
     b3 = packed_block_pointer<
         Atom, ::vecops::matmul::Operand::B, 3>(b, n);
-  compute_packed_pointer_groups<Atom, NM, NN, PrefetchLargeWorkingSet>(
-      a0, a1, a2, a3, b0, b1, b2, b3, a_step, b_step, groups);
+#if defined(VECOPS_HAS_KUPL_MMA)
+  if constexpr (std::same_as<Atom, ::vecops::matmul::SME_BF16F32> &&
+                NM == kupl_mma::MBlocks && NN == kupl_mma::NBlocks) {
+    // KUPL KP36_16x64x2_BF16BF16F32: one A vector is reused across four
+    // adjacent B vectors for every pair of K values. C initialization,
+    // epilogue, tails, thread scheduling, and the Streaming+ZA lifetime stay
+    // owned by vecops; only this packed compute microkernel is replaced.
+    using ATag = vec::ScalableTag<bfloat16_t, 0>;
+    using BTag = vec::ScalableTag<bfloat16_t, 0>;
+    for (nint_t kg = 0; kg < groups; ++kg) {
+      const auto av = vec::load(ATag{}, a0 + kg * a_step);
+      mopa<Atom, 0>(av, vec::load(BTag{}, b0 + kg * b_step));
+      mopa<Atom, 1>(av, vec::load(BTag{}, b1 + kg * b_step));
+      mopa<Atom, 2>(av, vec::load(BTag{}, b2 + kg * b_step));
+      mopa<Atom, 3>(av, vec::load(BTag{}, b3 + kg * b_step));
+    }
+  } else
+#endif
+  {
+    compute_packed_pointer_groups<Atom, NM, NN, PrefetchLargeWorkingSet>(
+        a0, a1, a2, a3, b0, b1, b2, b3,
+        a_step, b_step, groups);
+  }
 }
 
 /// Horizontal ZA slice write/read through the ZA move intrinsics (used by
@@ -3379,11 +3403,29 @@ struct Backend<matmul_implementation::SME> {
   template <::vecops::matmul::Atom Atom, typename,
             meta::ValueType, meta::ValueType, meta::ValueType,
             typename A, typename B, typename, typename>
+#if defined(VECOPS_HAS_KUPL_MMA)
+  using Catalog = std::conditional_t<
+      std::same_as<Atom, ::vecops::matmul::SME_BF16F32> &&
+          sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
+          sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>,
+      sme::kupl_mma::Catalog,
+      sme::Catalog<sme::use_expanded_catalog_v<Atom, A, B>>>;
+#else
   using Catalog = sme::Catalog<sme::use_expanded_catalog_v<Atom, A, B>>;
+#endif
   template <::vecops::matmul::Atom Atom, typename,
             meta::ValueType, meta::ValueType, meta::ValueType,
             typename A, typename B, typename, typename>
+#if defined(VECOPS_HAS_KUPL_MMA)
+  using NMajorCatalog = std::conditional_t<
+      std::same_as<Atom, ::vecops::matmul::SME_BF16F32> &&
+          sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::A, A> &&
+          sme::is_packed_access_v<Atom, ::vecops::matmul::Operand::B, B>,
+      sme::kupl_mma::Catalog,
+      sme::Catalog<sme::use_expanded_catalog_v<Atom, A, B>>>;
+#else
   using NMajorCatalog = sme::Catalog<sme::use_expanded_catalog_v<Atom, A, B>>;
+#endif
   static constexpr int ProblemRank = 2;
 
   static nint_t scratch_bytes() { return 0; }

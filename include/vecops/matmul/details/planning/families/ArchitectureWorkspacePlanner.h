@@ -17,8 +17,6 @@
  * query and the actual run always see the same decisions.
  */
 
-#include <algorithm>
-
 #include "vecops/matmul/details/kernel/Kernel.h"
 
 namespace vecops::matmul::details {
@@ -65,9 +63,7 @@ struct ArchitectureWorkspacePlanner {
       bytes += op.batch_rows_packed_a_bytes();
     if (op.batch_columns_periodic_c_input_enabled())
       bytes += op.batch_columns_periodic_c_input_bytes();
-    // KUPL's private A16/B64 packs replace the ordinary execution branch and
-    // therefore share, rather than extend, its workspace lifetime.
-    return std::max(bytes, op.kupl_mma_workspace_bytes());
+    return bytes;
   }
 };
 

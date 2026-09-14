@@ -139,6 +139,19 @@ public:
   /// Up to 32 bits that is `2 * SVL/4` fp32-sized rows; fp64 instead fills
   /// two tiles of fp64 rows (`2 * SVL/8`), keeping the two-tile rule.
   VECOPS_INLINE static auto panel() {
+#if defined(VECOPS_HAS_KUPL_MMA)
+    // KUPL's KP36 BF16 leaf consumes one 16-row A panel and one 64-row B
+    // panel at SVL=512. Express those extents in streaming fp32 lanes so the
+    // packed ABI remains scalable in the type system and becomes exact on
+    // the supported 920F configuration.
+    if constexpr (std::same_as<Element, bfloat16_t>) {
+      if constexpr (Side == Operand::A)
+        return vec::details::sme::streaming_lanes_value<float32_t>();
+      else
+        return meta::cint<4> *
+            vec::details::sme::streaming_lanes_value<float32_t>();
+    } else
+#endif
     if constexpr (sizeof(Element) == 8)
       return meta::cint<2> *
           vec::details::sme::streaming_lanes_value<float64_t>();
