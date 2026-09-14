@@ -1424,7 +1424,7 @@ Most applications should use :mod:`vecops`, whose Python wrappers normalize
 dtypes, derive schemas, and own framework integration. This module mirrors C++
 value types for diagnostics, explicit build control, and wrapper implementation;
 its constructor-level interfaces intentionally expose native concepts.)doc";
-  module.attr("build_api_version") = 4;
+  module.attr("build_api_version") = 5;
 #if defined(VECOPS_PYTHON_HAS_MEMORY)
   bind_memory(module);
 #endif
@@ -1768,6 +1768,7 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
     .def_readwrite("target_arch", &compiler::KernelBuildRequest::target_arch)
     .def_readwrite("sdk", &compiler::KernelBuildRequest::sdk)
     .def_readwrite("toolchain", &compiler::KernelBuildRequest::toolchain)
+    .def_readwrite("link_runtime", &compiler::KernelBuildRequest::link_runtime)
     .def_readwrite("sources", &compiler::KernelBuildRequest::sources)
     .def_readwrite("include_directories", &compiler::KernelBuildRequest::include_directories)
     .def_readwrite("compile_definitions", &compiler::KernelBuildRequest::compile_definitions)

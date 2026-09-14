@@ -681,7 +681,7 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
             return_outputs=registration.return_outputs,
         )
         bridge_identity = (
-            "torch-bridge-v3",
+            "torch-bridge-v4",
             str(bridge_toolchain.c_compiler),
             str(bridge_toolchain.cxx_compiler),
             tuple(bridge_openmp_flags),
@@ -700,7 +700,7 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
           bridge_base = (
               Path(override).expanduser().resolve()
               if override
-              else default_cache_dir() / "torch-bridges-v3"
+              else default_cache_dir() / "torch-bridges-v4"
           )
           artifact_directory = bridge_base / (
               f"{registration.library}_{registration.name}_{digest}"
@@ -721,6 +721,7 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
         request.output_name = output_name
         request.sdk = config.sdk
         request.toolchain = bridge_toolchain
+        request.link_runtime = False
         request.sources = [source_path]
         request.include_directories = [include_root, *torch_includes]
         request.compile_definitions = [
@@ -792,7 +793,7 @@ def compile_pending_torch_bridges(*, parallelism: int | None = None) -> int:
   lock_root = (
       Path(override).expanduser().resolve()
       if override
-      else default_cache_dir() / "torch-bridges-v3"
+      else default_cache_dir() / "torch-bridges-v4"
   )
   lock_root.mkdir(parents=True, exist_ok=True)
   with (lock_root / ".compile.lock").open("a+b") as lock:
