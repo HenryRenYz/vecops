@@ -89,6 +89,13 @@ struct Backend<
   template <typename InputSpec, typename OutputSpec>
   static constexpr bool eligible =
       sizeof(typename InputSpec::ComputeType) <= 8 &&
+      // A single scalar does not amortize SMSTART/SMSTOP.  Keeping it on the
+      // vector fallback also avoids asking compilers to optimize a complete
+      // scalable ZA region whose live work folds to one scalar.
+      !(meta::range_within_v<tensor::size_type_t<
+                                0, typename InputSpec::InputLayout>, 0, 1> &&
+        meta::range_within_v<tensor::size_type_t<
+                                1, typename InputSpec::InputLayout>, 0, 1>) &&
       std::same_as<typename InputSpec::TransformType, tensor::NoTransform> &&
       std::same_as<typename InputSpec::MemoryElement,
                    typename InputSpec::ComputeType> &&

@@ -354,17 +354,18 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
                 ${_TARGET}-Disassembly PROPERTIES LABELS "matmul;sme;disassembly")
         endforeach()
         # Clang emits out-of-line numeric_limits min/max/infinity calls in the
-        # runtime-VL gather path.  The fused sigmoid/SiLU epilogues deliberately
-        # call the shared SVE exp leaf instead of cloning that large polynomial
-        # into every SME microkernel.  Allow these exact calls when present,
-        # while accepting a fully inlined result as well.
+        # runtime-VL gather path and may share the common phased tile walker.
+        # The fused sigmoid/SiLU epilogues deliberately call the shared SVE exp
+        # leaf instead of cloning that large polynomial into every SME
+        # microkernel. Allow these exact calls when present, while accepting a
+        # fully inlined result as well.
         set(_VECOPS_SME_FUSION_TARGETS MatmulFusionTest-Native)
         if(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS)
             list(APPEND _VECOPS_SME_FUSION_TARGETS
                 MatmulFusionTest-NativeFixedStreamingSVE)
         endif()
         set(_VECOPS_SME_FUSION_CALL_REGEX
-            "(${_VECOPS_SME_PREDICATE_TUPLE_CALL_REGEX}|numeric_limitsI(i|f)E(3(min|max)|8infinity)Ev|sve_exp_f32_(special|core))")
+            "(${_VECOPS_SME_PREDICATE_TUPLE_CALL_REGEX}|run_tiles_phased_shared(_n_major)?|numeric_limitsI(i|f)E(3(min|max)|8infinity)Ev|sve_exp_f32_(special|core))")
         foreach(_TARGET IN LISTS _VECOPS_SME_FUSION_TARGETS)
             add_test(
                 NAME ${_TARGET}-Disassembly

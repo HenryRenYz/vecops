@@ -2424,9 +2424,11 @@ VECOPS_ALWAYS_INLINE auto tile_active_extent(nint_t active) {
  *   (M==1) is cheaper as one direct `load_hor` into row 0.
  * - non-broadcast direct row-major: per-row ZA memory loads (`load_hor`
  *   of the 32/64-bit container width).
- * - column-contiguous (transposed) input: the column twin of the last
- *   case -- per-column vector loads through the access layer plus
- *   `write_column`.
+ * - coordinate-independent column-contiguous (transposed) input: the column
+ *   twin of the last case -- per-column vector loads through the access layer
+ *   plus `write_column`. A lane-local transform stays on the row path because
+ *   a degenerate row-major layout (N == 1) is also column-contiguous, while
+ *   its logical vector axis remains N.
  * - anything else: per-row vector loads through the access layer plus
  *   `write_row`.
  *
@@ -2500,7 +2502,9 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
             reinterpret_cast<const U*>(base + row * strides[0]));
       }
     }
-  } else if constexpr (column_contiguous_input_v<CInput>) {
+  } else if constexpr (
+      column_contiguous_input_v<CInput> &&
+      CInput::Transform::is_elementwise) {
     const auto pg_rows = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (FullM) return vec::mtrue(Tag{});
       else return vec::mwhilelt(Tag{}, nint_t{0}, active_m_value);
@@ -2528,10 +2532,13 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
  * Direct row-major outputs use per-row ZA memory stores (`store_hor` of
  * the 32/64-bit container width); direct column-major (transposed)
  * outputs use the vertical twin (`store_ver`, per column); a
- * column-contiguous non-direct output reads each column back into a
- * vector and stores through the access layer along axis<0>; anything
- * else reads each row back into a vector and stores through the access
- * layer (applying the output transform, if any).
+ * coordinate-independent column-contiguous non-direct output reads each
+ * column back into a vector and stores through the access layer along axis<0>;
+ * anything else reads each row back into a vector and stores through the
+ * access layer (applying the output transform, if any). Restricting the
+ * column path to elementwise transforms also disambiguates an N == 1
+ * row-major output, whose leading stride is coincidentally one but whose
+ * lane-local transform still observes columns along axis<1>.
  */
 template <int Tile, bool FullM, bool FullN,
           meta::ValueType ActiveM, meta::ValueType ActiveN,
@@ -2574,7 +2581,9 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
           static_cast<vec::Mask<BitsTag>>(pg_rows),
           reinterpret_cast<U*>(base + column * strides[1]));
     }
-  } else if constexpr (column_contiguous_output_v<COutput>) {
+  } else if constexpr (
+      column_contiguous_output_v<COutput> &&
+      COutput::Transform::is_elementwise) {
     const auto pg_rows = [&]() VECOPS_INLINE_LAMBDA {
       if constexpr (FullM) return vec::mtrue(Tag{});
       else return vec::mwhilelt(Tag{}, nint_t{0}, active_m_value);

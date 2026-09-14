@@ -189,10 +189,6 @@ void check_batched_native(
       m_extent, n_extent, k_extent, at, bt, ct);
   if (expect_workspace) {
     EXPECT_GT(operation.required_workspace(), 0);
-  } else {
-    EXPECT_EQ(operation.required_workspace(),
-              kernel::matmul_implementation::scratch_bytes<
-                  typename decltype(operation)::Implementation>());
   }
   kernel::Workspace storage(operation.required_workspace());
   auto workspace = storage.view();

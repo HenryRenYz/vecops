@@ -1895,6 +1895,25 @@ consteval int first_unit_axis() {
   }
 }
 
+/**
+ * @brief Select an alternate unit-stride axis only when the requested vector
+ *        axis is not already unit-stride.
+ *
+ * Degenerate layouts can prove more than one unit stride (for example a
+ * row-major [M, 1] tensor has strides [1, 1]). Transposing through the first
+ * alternate axis in that case is unnecessary and changes the vector axis seen
+ * by a lane-local transform. Preserve the requested logical axis instead.
+ */
+template <typename StridesPack, int VectorDim>
+consteval int transpose_source_axis() {
+  if constexpr (is_definitely_one_meta_v<
+                    meta_element_t<VectorDim, StridesPack>>) {
+    return -1;
+  } else {
+    return first_unit_axis<StridesPack, VectorDim>();
+  }
+}
+
 template <int FirstSkip, int SecondSkip, int Dim = 0,
           typename Layout, typename Fn>
 /**
@@ -4296,7 +4315,7 @@ private:
     InputDataAccess<decltype(aux_input_spec), AuxLoweringPolicy> source{
         aux_input_spec, AuxLoweringPolicy{AuxInputPolicy{}}};
     OutputDataAccess<OriginalSpec, Policy> destination{*original_, policy_};
-    constexpr int UnitAxis = details::first_unit_axis<
+    constexpr int UnitAxis = details::transpose_source_axis<
         typename OriginalSpec::OutputLayout::Strides, AxisValue>();
     if constexpr (UnitAxis >= 0) {
       details::transpose_planes<
@@ -4327,7 +4346,7 @@ private:
     const auto& source = auxiliary_.tensor();
     auto& destination = original_->tensor();
     constexpr int AxisValue = Policy::vector_axis;
-    constexpr int UnitAxis = details::first_unit_axis<
+    constexpr int UnitAxis = details::transpose_source_axis<
         typename OriginalSpec::OutputLayout::Strides, AxisValue>();
     if constexpr (UnitAxis >= 0) {
       using Memory = typename OriginalSpec::MemoryElement;
@@ -4967,7 +4986,7 @@ VECOPS_INLINE decltype(auto) with_bound_input(
     using Memory = typename Spec::MemoryElement;
     Memory* buffer = workspace.template allocate<Memory>(count);
     auto auxiliary_tensor = make_tensor(buffer, aux_layout);
-    constexpr int UnitAxis = first_unit_axis<
+    constexpr int UnitAxis = transpose_source_axis<
         typename Spec::InputLayout::Strides, AxisValue>();
     if constexpr (UnitAxis >= 0) {
       auto source_spec = input<Memory>(spec.tensor());
@@ -5026,7 +5045,7 @@ VECOPS_INLINE decltype(auto) with_bound_input(
   } else {
   InputDataAccess<Spec, LoweringPolicy> source{
       spec, LoweringPolicy{policy}};
-  constexpr int UnitAxis = first_unit_axis<
+  constexpr int UnitAxis = transpose_source_axis<
       typename Spec::InputLayout::Strides, AxisValue>();
   if constexpr (UnitAxis >= 0) {
     auto destination_spec = output<Compute>(auxiliary_tensor);

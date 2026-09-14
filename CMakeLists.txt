@@ -27,6 +27,12 @@ option(VECOPS_BUILD_COMPILER "Build the C++ kernel compiler" ON)
 option(VECOPS_BUILD_PYTHON "Build the optional Python extension" OFF)
 option(VECOPS_BUILD_TESTING "Build Vecops tests" OFF)
 option(VECOPS_BUILD_BENCHMARKS "Build Vecops benchmarks" OFF)
+option(VECOPS_ENABLE_KUPL_MMA
+       "Enable KUPL MMA for eligible ARM SME matmul kernels" OFF)
+set(VECOPS_KUPL_ROOT "" CACHE PATH
+    "KUPL source or install root (must contain kupl_mma.h)")
+set(VECOPS_KUPL_LIBRARY "" CACHE FILEPATH
+    "KUPL shared library built with ENABLE_KUPL_MMA=ON")
 set(VECOPS_FIXED_SVE_BITS "" CACHE STRING
     "SVE vector width in bits for fixed-SVE targets; empty detects the host maximum")
 set(VECOPS_FIXED_STREAMING_SVE_BITS "" CACHE STRING
@@ -40,6 +46,33 @@ endif()
 
 include(cmake/VecopsMultiarchTargets.cmake)
 include(cmake/VecopsKernelOptimizations.cmake)
+
+if(VECOPS_ENABLE_KUPL_MMA)
+    if(NOT VECOPS_ARCH_FAMILY STREQUAL "ARM")
+        message(FATAL_ERROR "VECOPS_ENABLE_KUPL_MMA is available only for ARM targets")
+    endif()
+    find_path(VECOPS_KUPL_INCLUDE_DIR kupl_mma.h
+        HINTS
+            "${VECOPS_KUPL_ROOT}"
+            "${VECOPS_KUPL_ROOT}/include"
+            "${VECOPS_KUPL_ROOT}/src"
+        REQUIRED NO_DEFAULT_PATH)
+    if(NOT VECOPS_KUPL_LIBRARY)
+        find_library(VECOPS_KUPL_LIBRARY kupl
+            HINTS
+                "${VECOPS_KUPL_ROOT}/lib"
+                "${VECOPS_KUPL_ROOT}/lib64"
+                "${VECOPS_KUPL_ROOT}/build/src/src"
+            REQUIRED NO_DEFAULT_PATH)
+    elseif(NOT EXISTS "${VECOPS_KUPL_LIBRARY}")
+        message(FATAL_ERROR
+            "VECOPS_KUPL_LIBRARY does not exist: ${VECOPS_KUPL_LIBRARY}")
+    endif()
+    add_library(KUPL::MMA SHARED IMPORTED GLOBAL)
+    set_target_properties(KUPL::MMA PROPERTIES
+        IMPORTED_LOCATION "${VECOPS_KUPL_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${VECOPS_KUPL_INCLUDE_DIR}")
+endif()
 
 # -------------------------------- Dependencies --------------------------------
 include(FetchContent)

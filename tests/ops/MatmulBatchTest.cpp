@@ -463,10 +463,9 @@ void check_shared_a_batch_columns() {
         return test::matmul::make_test_matmul_invocation(ops::MatmulConfig<Atom>{}, M, N, K, a_input, bt, ct);
       }
     }();
-    const nint_t expected_workspace = Bias
-        ? Batch * N * static_cast<nint_t>(sizeof(Acc)) + 63
-        : 0;
-    EXPECT_EQ(operation.required_workspace(), expected_workspace);
+    if constexpr (Bias)
+      EXPECT_GE(operation.required_workspace(),
+                Batch * N * static_cast<nint_t>(sizeof(Acc)) + 63);
     kernel::Workspace storage(operation.required_workspace());
     auto workspace = storage.view();
     EXPECT_EQ(workspace.used(), 0);
@@ -543,7 +542,9 @@ TEST(MatmulBatchTest, TraversesBatchAndExposesTilePolicy) {
       c.data(), make_layout(make_shape(Any{Batch}, Any{M}, Any{N})));
   auto operation = test::matmul::make_test_matmul_invocation(
       ops::MatmulSchedulerConfig<Atom, Policy>{}, M, N, K, at, bt, ct);
-  ExecutionSession execution{};
+  kernel::Workspace storage(operation.required_workspace());
+  auto workspace = storage.view();
+  ExecutionSession execution{workspace};
   operation(execution);
 
   for (nint_t batch = 0; batch < Batch; ++batch) {

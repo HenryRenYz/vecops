@@ -396,7 +396,7 @@ filled/written back*:
 | Plan (output) | Buffer holds | `commit()` does |
 |---|---|---|
 | `direct` | — | no-op |
-| `materialize_before_transform` | **ComputeType** results | replays epilogue + conversion from the buffer into the Tensor (Transpose2D-accelerated when a provably unit-stride axis exists) |
+| `materialize_before_transform` | **ComputeType** results | replays epilogue + conversion from the buffer into the Tensor (Transpose2D-accelerated when the requested vector axis is not unit-stride and another provably unit-stride axis exists; degenerate layouts with multiple unit strides preserve the requested logical axis) |
 | `materialize_after_transform` | **MemoryElement** results (epilogue already ran in the loop) | only remaps/copies the buffer into the Tensor |
 
 Materialized output auxiliaries are zero-initialized because `commit()` writes
