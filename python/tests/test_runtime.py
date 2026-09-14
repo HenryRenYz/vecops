@@ -431,7 +431,10 @@ def test_generated_torch_bridge_uses_mutable_out_schema() -> None:
   assert "vecops_operator_bridge_invoke_v1" in source
   assert "vecops_torch_bridge_set_handle_v1" in source
   assert "VecopsThreadPoolV1 torch_thread_pool" in source
-  assert 'dlsym(RTLD_DEFAULT, "GOMP_parallel")' in source
+  assert "at::parallel_for(0, task_count, 1" in source
+  assert 'dlopen(\n        "libgomp.so.1", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD)' in source
+  assert 'torch_gomp_symbol<GompParallel>("GOMP_parallel")' in source
+  assert "RTLD_DEFAULT" not in source
   assert "execution_context.thread_pool = &torch_thread_pool" in source
   assert "torch/extension.h" not in source
   assert "PYBIND11_MODULE" not in source
@@ -442,6 +445,14 @@ def test_generated_torch_bridge_uses_mutable_out_schema() -> None:
   )
   assert "at::Tensor wrapper(" in returning_source
   assert "return p1;" in returning_source
+
+
+def test_python_sdk_core_target_does_not_propagate_openmp() -> None:
+  sdk_targets = (
+    VECOPS_ROOT / "cmake" / "VecopsPythonSdkTargets.cmake.in"
+  ).read_text()
+  assert "OpenMP::OpenMP_CXX" not in sdk_targets
+  assert 'INTERFACE_LINK_LIBRARIES "${CMAKE_DL_LIBS}"' in sdk_targets
 
 
 def test_compile_batch_validates_parallelism() -> None:

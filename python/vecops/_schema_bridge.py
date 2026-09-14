@@ -241,6 +241,28 @@ uint32_t torch_in_parallel_region(void*) {
   return at::in_parallel_region() ? 1u : 0u;
 }
 
+#if defined(__aarch64__)
+void* torch_gomp_handle() {
+  static void* handle = [] {
+    void* loaded = dlopen(
+        "libgomp.so.1", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+    TORCH_CHECK(
+        loaded != nullptr,
+        "Torch reports its OpenMP backend but its loaded libgomp.so.1 "
+        "could not be opened");
+    return loaded;
+  }();
+  return handle;
+}
+
+template <typename Fn>
+Fn torch_gomp_symbol(const char* name) {
+  auto symbol = reinterpret_cast<Fn>(dlsym(torch_gomp_handle(), name));
+  TORCH_CHECK(symbol != nullptr, "Torch libgomp is missing symbol ", name);
+  return symbol;
+}
+#endif
+
 int32_t torch_parallel_for(void*, uint32_t task_count, void* body_context,
                            VecopsParallelTaskFn body, VecopsError* error) {
   if (body == nullptr)
@@ -253,16 +275,12 @@ int32_t torch_parallel_for(void*, uint32_t task_count, void* body_context,
     } else {
       using GompParallel = void (*)(void (*)(void*), void*, unsigned, unsigned);
       using OmpQuery = int (*)();
-      static const auto gomp_parallel = reinterpret_cast<GompParallel>(
-          dlsym(RTLD_DEFAULT, "GOMP_parallel"));
-      static const auto omp_thread_num = reinterpret_cast<OmpQuery>(
-          dlsym(RTLD_DEFAULT, "omp_get_thread_num"));
-      static const auto omp_num_threads = reinterpret_cast<OmpQuery>(
-          dlsym(RTLD_DEFAULT, "omp_get_num_threads"));
-      TORCH_CHECK(gomp_parallel != nullptr && omp_thread_num != nullptr &&
-                      omp_num_threads != nullptr,
-                  "Torch reports its OpenMP backend but GNU OpenMP symbols "
-                  "are unavailable");
+      static const auto gomp_parallel =
+          torch_gomp_symbol<GompParallel>("GOMP_parallel");
+      static const auto omp_thread_num =
+          torch_gomp_symbol<OmpQuery>("omp_get_thread_num");
+      static const auto omp_num_threads =
+          torch_gomp_symbol<OmpQuery>("omp_get_num_threads");
       struct TeamCall {
         uint32_t task_count;
         void* body_context;
@@ -282,21 +300,10 @@ int32_t torch_parallel_for(void*, uint32_t task_count, void* body_context,
     }
 #else
     } else {
-#if defined(_OPENMP)
-      const int requested = std::min<int>(task_count, at::get_num_threads());
-#pragma omp parallel num_threads(requested)
-      {
-        const uint32_t worker = static_cast<uint32_t>(omp_get_thread_num());
-        const uint32_t workers = static_cast<uint32_t>(omp_get_num_threads());
-        for (uint32_t task = worker; task < task_count; task += workers)
-          body(body_context, task, task_count);
-      }
-#else
       at::parallel_for(0, task_count, 1, [=](int64_t begin, int64_t end) {
         for (int64_t task = begin; task < end; ++task)
           body(body_context, static_cast<uint32_t>(task), task_count);
       });
-#endif
     }
 #endif
     return VECOPS_STATUS_OK;
@@ -595,7 +602,6 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
     torch_includes = tuple(Path(path).resolve() for path in include_paths("cpu"))
     torch_libraries = tuple(Path(path).resolve() for path in library_paths("cpu"))
     torch_parallel_info = torch.__config__.parallel_info()
-    torch_uses_openmp = "ATen parallel backend: OpenMP" in torch_parallel_info
     native_library = Path(native.__file__).resolve()
     torch_identity = (
         torch.__version__,
@@ -632,12 +638,6 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
       resolved: dict[tuple[str, str], Path] = {}
 
       for index, (registration, config) in enumerate(group):
-        compiler_name = Path(config.toolchain.cxx_compiler).name.lower()
-        openmp_flag = (
-            "-fopenmp"
-            if torch_uses_openmp and "clang" not in compiler_name
-            else None
-        )
         source = _generate_torch_source(
             registration.library,
             registration.name,
@@ -684,13 +684,11 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
         ]
         request.compile_options = [
             "-O3", "-std=c++20",
-            *(() if openmp_flag is None else (openmp_flag,)),
             *registration.extra_cflags,
         ]
         request.link_directories = list(torch_libraries)
         request.link_libraries = ["torch", "torch_cpu", "c10"]
         request.link_options = [
-            *(() if openmp_flag is None else (openmp_flag,)),
             *(f"-Wl,-rpath,{path}" for path in torch_libraries),
         ]
         request.generated_source_directory = batch.generated_source_directory / "tasks" / str(index)
