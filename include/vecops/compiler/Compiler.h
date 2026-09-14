@@ -139,6 +139,8 @@ struct KernelBuildRequest {
   SdkSpec sdk;
   /** @brief Native tools and child-process environment. */
   ToolchainSpec toolchain;
+  /** @brief Link the generated module to the Vecops runtime target. */
+  bool link_runtime = true;
 
   /** @brief Kernel source files read during generation and compilation. */
   std::vector<std::filesystem::path> sources;

@@ -196,8 +196,10 @@ std::optional<std::string> validate(const KernelBuildRequest& request, SdkLayout
 std::string generated_task(const KernelBuildRequest& request) {
   std::ostringstream cmake;
   cmake << "vecops_add_kernel_library(\n"
-           "    NO_INSTALL\n"
-           "    NAME "
+           "    NO_INSTALL\n";
+  if (!request.link_runtime)
+    cmake << "    NO_RUNTIME\n";
+  cmake << "    NAME "
         << cmake_quote(request.target_name) << '\n';
   if (request.output_name) {
     cmake << "    OUTPUT_NAME " << cmake_quote(*request.output_name) << '\n';

@@ -6,7 +6,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/VecopsTargetArch.cmake")
 # target construction policy: schema generation, manifests, caching, and
 # runtime registration live above the CMake SDK boundary.
 function(vecops_add_kernel_library)
-    set(options NO_INSTALL)
+    set(options NO_INSTALL NO_RUNTIME)
     set(oneValueArgs NAME OUTPUT_NAME INSTALL_DESTINATION TARGET_ARCH)
     set(multiValueArgs
         SOURCES INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS
@@ -40,20 +40,22 @@ function(vecops_add_kernel_library)
             ARCH ${ARG_TARGET_ARCH})
     endif()
 
-    if(TARGET vecops::vecops)
-        target_link_libraries(${ARG_NAME} PRIVATE vecops::vecops)
-    elseif(TARGET vecops)
-        target_link_libraries(${ARG_NAME} PRIVATE vecops)
-    else()
-        message(FATAL_ERROR
-            "vecops_add_kernel_library requires the Vecops core target")
-    endif()
-    if(TARGET vecops::optimize_for_kernels)
-        target_link_libraries(${ARG_NAME} PRIVATE
-            vecops::optimize_for_kernels)
-    elseif(TARGET vecops_optimize_for_kernels)
-        target_link_libraries(${ARG_NAME} PRIVATE
-            vecops_optimize_for_kernels)
+    if(NOT ARG_NO_RUNTIME)
+        if(TARGET vecops::vecops)
+            target_link_libraries(${ARG_NAME} PRIVATE vecops::vecops)
+        elseif(TARGET vecops)
+            target_link_libraries(${ARG_NAME} PRIVATE vecops)
+        else()
+            message(FATAL_ERROR
+                "vecops_add_kernel_library requires the Vecops core target")
+        endif()
+        if(TARGET vecops::optimize_for_kernels)
+            target_link_libraries(${ARG_NAME} PRIVATE
+                vecops::optimize_for_kernels)
+        elseif(TARGET vecops_optimize_for_kernels)
+            target_link_libraries(${ARG_NAME} PRIVATE
+                vecops_optimize_for_kernels)
+        endif()
     endif()
 
     if(ARG_INCLUDE_DIRECTORIES)
