@@ -62,6 +62,12 @@ vecops_add_test(NAME WorkspacePlanTest FILES execution/WorkspacePlanTest.cpp
     FOLDER execution/workspace_plan ARCH Scalar)
 vecops_add_test(NAME WorkspaceContextTest FILES execution/WorkspaceContextTest.cpp
     FOLDER execution/workspace_context ARCH Scalar)
+vecops_add_test(NAME WorkspaceTensorTest FILES execution/WorkspaceTensorTest.cpp
+    FOLDER execution/workspace_tensor ARCH Scalar)
+if(TARGET vecops::memory)
+    vecops_add_test(NAME MemorySystemTest FILES memory/MemorySystemTest.cpp
+        FOLDER memory/system ARCH Scalar LIBRARIES vecops::memory)
+endif()
 vecops_add_test(NAME MatmulTilerTest FILES matmul/TilerTest.cpp FOLDER matmul/tiler)
 vecops_add_test(
     NAME ExecutionSessionTest

@@ -5,10 +5,12 @@
 #ifndef VECOPS_OPS_TRANSPOSE_H
 #define VECOPS_OPS_TRANSPOSE_H
 
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
 #include "vecops/execution/ExecutionSession.h"
+#include "vecops/execution/Parallel.h"
 #include "vecops/kernel/Transpose2D.h"
 #include "vecops/ops/details/transpose/Selection.h"
 #include "vecops/tensor/DataAccess.h"
@@ -221,6 +223,58 @@ public:
 
   VECOPS_INLINE constexpr explicit Transpose(Config cfg = {})
       : config(std::move(cfg)) {}
+
+  /** Address-free transpose plan; resource activation stays internal. */
+  template <nint_t Parallelism, typename InputPattern,
+            typename OutputPattern>
+  class PatternPrepared {
+  public:
+    static_assert(Parallelism > 0,
+                  "prepared Transpose parallelism must be positive");
+
+    VECOPS_INLINE PatternPrepared(Config config, InputPattern input,
+                                  OutputPattern output)
+        : config_(std::move(config)), input_(std::move(input)),
+          output_(std::move(output)) {}
+
+    template <tensor::InputOperand Input, tensor::OutputOperand Output>
+      requires(tensor::is_bound_tensor_view_v<Input> &&
+               tensor::is_bound_tensor_view_v<Output>)
+    VECOPS_INLINE void operator()(execution::TaskContext<Parallelism> task,
+                                  Input &&input, Output &&output) const {
+      auto active_input = tensor::rebind(input_, std::forward<Input>(input));
+      auto active_output =
+          tensor::rebind(output_, std::forward<Output>(output));
+      (void)task;
+      ExecutionSession execution{};
+      Transpose{config_}(execution, std::move(active_input),
+                         std::move(active_output));
+    }
+
+  private:
+    Config config_;
+    InputPattern input_;
+    OutputPattern output_;
+  };
+
+  /** Prepare a reusable transpose from storage-less operand patterns. */
+  template <nint_t Parallelism, typename WorkspaceAuthority,
+            tensor::UnboundTensorView InputPattern,
+            tensor::UnboundTensorView OutputPattern>
+  VECOPS_INLINE auto prepare(WorkspaceAuthority &workspace,
+                             std::string_view site_name,
+                             InputPattern &&input,
+                             OutputPattern &&output) const {
+    auto input_pattern = tensor::as_input_spec<typename Config::ComputeType>(
+        std::forward<InputPattern>(input));
+    auto output_pattern = tensor::as_output_spec<typename Config::ComputeType>(
+        std::forward<OutputPattern>(output));
+    (void)workspace;
+    (void)site_name;
+    return PatternPrepared<Parallelism, decltype(input_pattern),
+                           decltype(output_pattern)>{
+        config, std::move(input_pattern), std::move(output_pattern)};
+  }
 
   template <tensor::InputOperand Input, tensor::OutputOperand Output>
   VECOPS_INLINE nint_t required_workspace(

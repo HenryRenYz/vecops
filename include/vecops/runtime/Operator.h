@@ -44,10 +44,15 @@ struct BoundKernelRecipe {
     std::shared_ptr<const KernelDef> definition;
     /** @brief Fully inferred metadata and specialization consumed by the compiler. */
     BoundKernel binding;
+    /** @brief Logical task count compiled into `vecops::spec::Parallelism`. */
+    nint_t parallelism = 1;
   };
   /** @brief Present only when a provider can compile this recipe from source. */
   std::shared_ptr<const SourceInstantiation> source;
 };
+
+/** Return a source recipe rebound to one compile-time logical task count. */
+[[nodiscard]] BoundKernelRecipe specialize_parallelism(BoundKernelRecipe recipe, nint_t parallelism);
 
 /**
  * @brief Stateless description of how one implementation family is specialized.
@@ -225,7 +230,8 @@ public:
    * @param call Positional metadata plus values not inferred from tensor metadata.
    * @return Independently-owned executable or an explanatory failure status.
    */
-  [[nodiscard]] Result<std::shared_ptr<Executable>> resolve(const KernelCall& call) const;
+  [[nodiscard]] Result<std::shared_ptr<Executable>> resolve(
+    const KernelCall& call, const VecopsExecutionContext* context = nullptr) const;
   /**
    * @brief Resolve then synchronously execute an applicable specialization.
    * @param arguments Ordered metadata and externally-owned tensor storage.
@@ -275,7 +281,8 @@ public:
 private:
   [[nodiscard]] Result<KernelCall> normalize(const KernelCall& call) const;
   /** Resolve a call that has already passed this operator's normalization. */
-  [[nodiscard]] Result<std::shared_ptr<Executable>> resolve_normalized(const KernelCall& call) const;
+  [[nodiscard]] Result<std::shared_ptr<Executable>> resolve_normalized(
+    const KernelCall& call, const VecopsExecutionContext* context) const;
   OperatorSchema schema_;
   std::shared_ptr<const KernelDef> kernel_definition_;
   std::vector<std::shared_ptr<const KernelRecipe>> recipes_;

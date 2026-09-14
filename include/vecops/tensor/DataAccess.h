@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <concepts>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -38,6 +39,8 @@
  * @code
  * auto x_spec = tensor::input<float>(x_tensor, input_transform);
  * auto y_spec = tensor::output<float>(y_tensor, output_transform);
+ * auto x_pattern = tensor::unbind(x_spec); // same contract, no address
+ * auto x_tile = tensor::rebind(x_pattern, actual_x_tile);
  * @endcode
  *
  * A kernel-side **Policy** describes how the algorithm uses it. Binding both
@@ -160,7 +163,11 @@
  *
  * ## Lifetime and pitfalls
  *
- * - Specs and DataAccess are non-owning with respect to Tensor memory.
+ * - Bound Specs and DataAccess are non-owning with respect to Tensor memory.
+ *   Unbound Specs are address-free planning patterns. `required_workspace`
+ *   accepts either; DataAccess construction accepts only rebound Specs. An
+ *   unbound Spec retains a transform's type but not its value. Stateful
+ *   transforms therefore rebind through an actual bound Spec.
  * - Output Specs require a mutable Tensor. No `const_cast` is performed.
  * - Materialized output sessions are move-only and must be explicitly
  *   `commit()`ed. Destructors do not write back; they assert on an omitted
@@ -171,7 +178,8 @@
  *   offsets and are scaled by Layout exactly once.
  * - Unordered conversion is an operation-region lane-order contract, not a
  *   local speed flag. Use `with_unordered_access` for related operands.
- * - `required_workspace()` must use the same Spec and Policy as binding.
+ * - `required_workspace()` may use an unbound Spec. Execution must rebind an
+ *   actual Tensor/Spec with the same typed Layout and runtime shape/stride.
  * - Layout-transpose materialization uses `kernel::transpose2d_bound` only when
  *   a non-vector axis is provably unit-stride from its meta type. A runtime
  *   stride equal to one does not activate a hidden fast-path branch.
@@ -358,9 +366,11 @@ inline constexpr bool is_operand_fact_v =
 template <typename Tensor, nint_t Alignment>
 VECOPS_ALWAYS_INLINE void validate_operand_fact(
     const Tensor& tensor, BaseAlignment<Alignment>) {
-  VECOPS_ASSERT(
-      reinterpret_cast<std::uintptr_t>(tensor.data()) % Alignment == 0,
-      "tensor base pointer does not satisfy its declared alignment");
+  if constexpr (BoundTensorLike<Tensor>) {
+    VECOPS_ASSERT(
+        reinterpret_cast<std::uintptr_t>(tensor.data()) % Alignment == 0,
+        "tensor base pointer does not satisfy its declared alignment");
+  }
 }
 
 /** True when the meta stride type is provably the value 1 at compile time. */
@@ -2123,6 +2133,123 @@ struct TransposeAccessPolicy<
       transpose_access_policy_t<PlanningPolicy, I, J>, Defaults, Resources>;
 };
 
+/**
+ * @brief Opt-in contract for values retained by an unbound operand pattern.
+ *
+ * Planning may retain a projection or fact only when the value cannot own an
+ * execution-time Tensor/address. Empty policy objects are safe by default.
+ * Transforms use `TypeOnlyPatternMetadata` instead and are always stripped of
+ * values. Stateful projection/fact values deliberately require an explicit
+ * specialization; trivially-copyable is not sufficient because pointers and
+ * bound Tensor views are trivially copyable too.
+ */
+template <typename T>
+struct OperandPatternMetadata {
+  static constexpr bool storage_independent = std::is_empty_v<T>;
+
+  VECOPS_ALWAYS_INLINE static constexpr T make_pattern(const T& value)
+    requires (storage_independent) {
+    return value;
+  }
+};
+
+/** Coordinate projections contain coordinates, but no storage binding. */
+template <std::size_t OriginalRank, std::size_t LocalRank>
+struct OperandPatternMetadata<
+    CoordinateProjection<OriginalRank, LocalRank>> {
+  static constexpr bool storage_independent = true;
+
+  VECOPS_ALWAYS_INLINE static constexpr auto make_pattern(
+      const CoordinateProjection<OriginalRank, LocalRank>& value) {
+    return value;
+  }
+};
+
+template <typename T>
+inline constexpr bool is_operand_pattern_metadata_v =
+    OperandPatternMetadata<std::remove_cvref_t<T>>::storage_independent;
+
+template <typename T>
+concept OperandPatternMetadataLike = is_operand_pattern_metadata_v<T>;
+
+/** Type-only placeholder used instead of a Transform value by unbound Specs. */
+template <typename Transform>
+struct TypeOnlyPatternMetadata {
+  using Type = Transform;
+};
+
+namespace details {
+
+template <typename T>
+VECOPS_ALWAYS_INLINE constexpr auto make_operand_pattern_metadata(
+    const T& value) {
+  using Clean = std::remove_cvref_t<T>;
+  static_assert(
+      OperandPatternMetadata<Clean>::storage_independent,
+      "stateful operand metadata must specialize "
+      "tensor::OperandPatternMetadata before it can be retained by an "
+      "unbound planning pattern");
+  return OperandPatternMetadata<Clean>::make_pattern(value);
+}
+
+template <std::size_t Axis, typename PatternLayout, typename ActualLayout>
+VECOPS_ALWAYS_INLINE constexpr bool operand_shape_axis_conforms(
+    const PatternLayout& pattern, const ActualLayout& actual) {
+  using PatternExtent = shape_extent_type_t<
+      static_cast<int>(Axis), PatternLayout>;
+  const nint_t capacity = pattern.shape()[static_cast<int>(Axis)];
+  const nint_t extent = actual.shape()[static_cast<int>(Axis)];
+  if constexpr (meta::is_singleton_v<PatternExtent>) {
+    return extent == capacity;
+  } else {
+    static_assert(
+        PatternExtent::is_runtime,
+        "operand pattern shape axes must be Const or runtime Values");
+    return PatternExtent::conforms(extent) && extent <= capacity;
+  }
+}
+
+template <typename PatternLayout, typename ActualLayout, std::size_t... Axis>
+VECOPS_ALWAYS_INLINE constexpr bool operand_layout_conforms_impl(
+    const PatternLayout& pattern, const ActualLayout& actual,
+    std::index_sequence<Axis...>) {
+  return (operand_shape_axis_conforms<Axis>(pattern, actual) && ...) &&
+      ((pattern.strides()[static_cast<int>(Axis)] ==
+        actual.strides()[static_cast<int>(Axis)]) && ...);
+}
+
+/**
+ * Validate a runtime Layout against a planning Layout contract.
+ *
+ * A Const shape axis is exact. A Dynamic axis accepts any conforming extent
+ * no larger than the instance stored by the pattern; that instance is the
+ * planned capacity/bucket. Strides remain exact because changing them can
+ * alter DataAccess lowering and its workspace requirement.
+ */
+template <typename PatternLayout, typename ActualLayout>
+VECOPS_ALWAYS_INLINE constexpr bool operand_layout_conforms(
+    const PatternLayout& pattern, const ActualLayout& actual) {
+  static_assert(PatternLayout::Ndim == ActualLayout::Ndim);
+  return operand_layout_conforms_impl(
+      pattern, actual,
+      std::make_index_sequence<PatternLayout::Ndim>{});
+}
+
+template <UnboundTensorLike Pattern, BoundTensorLike Actual>
+  requires (Pattern::Ndim == Actual::Ndim)
+VECOPS_ALWAYS_INLINE auto bind_operand_pattern_tensor(
+    const Pattern& pattern, const Actual& actual) {
+  VECOPS_CHECK(
+      operand_layout_conforms(pattern.layout(), actual.layout()),
+      "actual Tensor exceeds or violates its planning layout contract");
+  using PatternLayout = typename Pattern::Layout;
+  auto execution_layout = actual.layout().template as<
+      typename PatternLayout::Shape, typename PatternLayout::Strides>();
+  return tensor::make_tensor(actual.data(), execution_layout);
+}
+
+} // namespace details
+
 template <
     typename Compute,
     typename Tensor,
@@ -2132,6 +2259,15 @@ template <
 class InputSpec {
 public:
   static constexpr bool is_input = true;
+  static constexpr bool is_bound = Tensor::is_bound;
+  static constexpr bool is_unbound = Tensor::is_unbound;
+  static constexpr bool pattern_metadata_safe =
+      is_operand_pattern_metadata_v<Projection> &&
+      (is_operand_pattern_metadata_v<Facts> && ...);
+  static_assert(
+      Tensor::is_bound || pattern_metadata_safe,
+      "an unbound input Spec cannot retain projection/fact state "
+      "unless OperandPatternMetadata explicitly sanitizes it");
   using ComputeType = Compute;
   using InputTensor = Tensor;
   using MemoryElement = std::remove_const_t<typename Tensor::ElementType>;
@@ -2139,12 +2275,21 @@ public:
   using ProjectionType = Projection;
   using ExternalFacts = std::tuple<Facts...>;
   using InputLayout = typename Tensor::Layout;
+  using TransformStorage = std::conditional_t<
+      Tensor::is_bound, Transform, TypeOnlyPatternMetadata<Transform>>;
 
   VECOPS_ALWAYS_INLINE InputSpec(
       Tensor tensor, Transform transform, Projection projection,
       Facts... facts)
-      : tensor_(tensor), transform_(std::move(transform)),
+      : tensor_(tensor), transform_(make_transform_storage(std::move(transform))),
         projection_(projection), facts_(std::move(facts)...) {}
+
+  VECOPS_ALWAYS_INLINE InputSpec(
+      Tensor tensor, TypeOnlyPatternMetadata<Transform>,
+      Projection projection, Facts... facts)
+    requires (Tensor::is_unbound)
+      : tensor_(tensor), transform_{}, projection_(projection),
+        facts_(std::move(facts)...) {}
 
   VECOPS_ALWAYS_INLINE InputSpec(Tensor tensor, Transform transform)
     requires (sizeof...(Facts) == 0)
@@ -2161,15 +2306,87 @@ public:
   VECOPS_ALWAYS_INLINE const InputLayout& input_layout() const {
     return tensor_.layout();
   }
-  VECOPS_ALWAYS_INLINE const Transform& transform() const { return transform_; }
+  VECOPS_ALWAYS_INLINE const Transform& transform() const
+    requires (Tensor::is_bound) {
+    return transform_;
+  }
   VECOPS_ALWAYS_INLINE const Projection& projection() const {
     return projection_;
   }
   VECOPS_ALWAYS_INLINE const ExternalFacts& facts() const { return facts_; }
 
+  /** Replace only the primary Tensor while preserving access semantics. */
+  template <TensorLike NewTensor>
+    requires (NewTensor::Ndim == Tensor::Ndim &&
+              std::same_as<
+                  std::remove_const_t<typename NewTensor::ElementType>,
+                  std::remove_const_t<typename Tensor::ElementType>>)
+  VECOPS_ALWAYS_INLINE auto with_tensor(NewTensor tensor) const {
+    return with_tensor_and_projection(tensor, projection_);
+  }
+
+  template <TensorLike NewTensor, typename NewProjection>
+    requires (NewTensor::Ndim == Tensor::Ndim &&
+              std::same_as<
+                  std::remove_const_t<typename NewTensor::ElementType>,
+                  std::remove_const_t<typename Tensor::ElementType>>)
+  VECOPS_ALWAYS_INLINE auto with_tensor_and_projection(
+      NewTensor tensor, NewProjection projection) const {
+    return std::apply(
+        [&](const auto&... facts) VECOPS_INLINE_LAMBDA {
+          (details::validate_operand_fact(tensor, facts), ...);
+          using Result = InputSpec<
+              Compute, NewTensor, Transform, NewProjection, Facts...>;
+          if constexpr (NewTensor::is_unbound) {
+            return Result{
+                tensor, TypeOnlyPatternMetadata<Transform>{}, projection,
+                facts...};
+          } else {
+            static_assert(
+                Tensor::is_bound ||
+                    (std::is_empty_v<Transform> &&
+                     std::default_initializable<Transform>),
+                "a stateful transform pattern must rebind to an actual Spec, "
+                "not directly to a Tensor");
+            if constexpr (Tensor::is_bound) {
+              return Result{tensor, transform_, projection, facts...};
+            } else {
+              return Result{tensor, Transform{}, projection, facts...};
+            }
+          }
+        },
+        facts_);
+  }
+
+  /** Structural view helper; pointer-relative facts are intentionally dropped. */
+  template <TensorLike NewTensor, typename NewProjection>
+  VECOPS_ALWAYS_INLINE auto with_view_tensor_and_projection(
+      NewTensor tensor, NewProjection projection) const {
+    using Result = InputSpec<
+        Compute, NewTensor, Transform, NewProjection>;
+    if constexpr (NewTensor::is_unbound) {
+      return Result{
+          tensor, TypeOnlyPatternMetadata<Transform>{}, projection};
+    } else if constexpr (Tensor::is_bound) {
+      return Result{tensor, transform_, projection};
+    } else {
+      static_assert(
+          std::is_empty_v<Transform> &&
+              std::default_initializable<Transform>,
+          "a stateful transform pattern must rebind to an actual Spec");
+      return Result{tensor, Transform{}, projection};
+    }
+  }
+
 private:
+  VECOPS_ALWAYS_INLINE static TransformStorage make_transform_storage(
+      Transform transform) {
+    if constexpr (Tensor::is_bound) return transform;
+    else return {};
+  }
+
   Tensor tensor_;
-  [[no_unique_address]] Transform transform_;
+  [[no_unique_address]] TransformStorage transform_;
   Projection projection_;
   [[no_unique_address]] ExternalFacts facts_;
 };
@@ -2190,6 +2407,15 @@ template <
 class OutputSpec {
 public:
   static constexpr bool is_input = false;
+  static constexpr bool is_bound = Tensor::is_bound;
+  static constexpr bool is_unbound = Tensor::is_unbound;
+  static constexpr bool pattern_metadata_safe =
+      is_operand_pattern_metadata_v<Projection> &&
+      (is_operand_pattern_metadata_v<Facts> && ...);
+  static_assert(
+      Tensor::is_bound || pattern_metadata_safe,
+      "an unbound output Spec cannot retain projection/fact state "
+      "unless OperandPatternMetadata explicitly sanitizes it");
   static_assert(!std::is_const_v<typename Tensor::ElementType>,
                 "tensor::output requires a mutable Tensor");
   using ComputeType = Compute;
@@ -2199,12 +2425,21 @@ public:
   using ProjectionType = Projection;
   using ExternalFacts = std::tuple<Facts...>;
   using OutputLayout = typename Tensor::Layout;
+  using TransformStorage = std::conditional_t<
+      Tensor::is_bound, Transform, TypeOnlyPatternMetadata<Transform>>;
 
   VECOPS_ALWAYS_INLINE OutputSpec(
       Tensor tensor, Transform transform, Projection projection,
       Facts... facts)
-      : tensor_(tensor), transform_(std::move(transform)),
+      : tensor_(tensor), transform_(make_transform_storage(std::move(transform))),
         projection_(projection), facts_(std::move(facts)...) {}
+
+  VECOPS_ALWAYS_INLINE OutputSpec(
+      Tensor tensor, TypeOnlyPatternMetadata<Transform>,
+      Projection projection, Facts... facts)
+    requires (Tensor::is_unbound)
+      : tensor_(tensor), transform_{}, projection_(projection),
+        facts_(std::move(facts)...) {}
 
   VECOPS_ALWAYS_INLINE OutputSpec(Tensor tensor, Transform transform)
     requires (sizeof...(Facts) == 0)
@@ -2221,15 +2456,89 @@ public:
   VECOPS_ALWAYS_INLINE const OutputLayout& output_layout() const {
     return tensor_.layout();
   }
-  VECOPS_ALWAYS_INLINE const Transform& transform() const { return transform_; }
+  VECOPS_ALWAYS_INLINE const Transform& transform() const
+    requires (Tensor::is_bound) {
+    return transform_;
+  }
   VECOPS_ALWAYS_INLINE const Projection& projection() const {
     return projection_;
   }
   VECOPS_ALWAYS_INLINE const ExternalFacts& facts() const { return facts_; }
 
+  /** Replace only the primary Tensor while preserving access semantics. */
+  template <TensorLike NewTensor>
+    requires (NewTensor::Ndim == Tensor::Ndim &&
+              !std::is_const_v<typename NewTensor::ElementType> &&
+              std::same_as<
+                  typename NewTensor::ElementType,
+                  typename Tensor::ElementType>)
+  VECOPS_ALWAYS_INLINE auto with_tensor(NewTensor tensor) const {
+    return with_tensor_and_projection(tensor, projection_);
+  }
+
+  template <TensorLike NewTensor, typename NewProjection>
+    requires (NewTensor::Ndim == Tensor::Ndim &&
+              !std::is_const_v<typename NewTensor::ElementType> &&
+              std::same_as<
+                  typename NewTensor::ElementType,
+                  typename Tensor::ElementType>)
+  VECOPS_ALWAYS_INLINE auto with_tensor_and_projection(
+      NewTensor tensor, NewProjection projection) const {
+    return std::apply(
+        [&](const auto&... facts) VECOPS_INLINE_LAMBDA {
+          (details::validate_operand_fact(tensor, facts), ...);
+          using Result = OutputSpec<
+              Compute, NewTensor, Transform, NewProjection, Facts...>;
+          if constexpr (NewTensor::is_unbound) {
+            return Result{
+                tensor, TypeOnlyPatternMetadata<Transform>{}, projection,
+                facts...};
+          } else {
+            static_assert(
+                Tensor::is_bound ||
+                    (std::is_empty_v<Transform> &&
+                     std::default_initializable<Transform>),
+                "a stateful transform pattern must rebind to an actual Spec, "
+                "not directly to a Tensor");
+            if constexpr (Tensor::is_bound) {
+              return Result{tensor, transform_, projection, facts...};
+            } else {
+              return Result{tensor, Transform{}, projection, facts...};
+            }
+          }
+        },
+        facts_);
+  }
+
+  /** Structural view helper; pointer-relative facts are intentionally dropped. */
+  template <TensorLike NewTensor, typename NewProjection>
+  VECOPS_ALWAYS_INLINE auto with_view_tensor_and_projection(
+      NewTensor tensor, NewProjection projection) const {
+    using Result = OutputSpec<
+        Compute, NewTensor, Transform, NewProjection>;
+    if constexpr (NewTensor::is_unbound) {
+      return Result{
+          tensor, TypeOnlyPatternMetadata<Transform>{}, projection};
+    } else if constexpr (Tensor::is_bound) {
+      return Result{tensor, transform_, projection};
+    } else {
+      static_assert(
+          std::is_empty_v<Transform> &&
+              std::default_initializable<Transform>,
+          "a stateful transform pattern must rebind to an actual Spec");
+      return Result{tensor, Transform{}, projection};
+    }
+  }
+
 private:
+  VECOPS_ALWAYS_INLINE static TransformStorage make_transform_storage(
+      Transform transform) {
+    if constexpr (Tensor::is_bound) return transform;
+    else return {};
+  }
+
   Tensor tensor_;
-  [[no_unique_address]] Transform transform_;
+  [[no_unique_address]] TransformStorage transform_;
   Projection projection_;
   [[no_unique_address]] ExternalFacts facts_;
 };
@@ -2336,14 +2645,219 @@ template <typename T>
 inline constexpr bool is_output_spec_v =
     IsOutputSpec<std::remove_cvref_t<T>>::value;
 
-/** True for unbound Tensor/Spec values accepted by high-level operators. */
 template <typename T>
-inline constexpr bool is_unbound_tensor_view_v =
-    is_tensor_v<std::remove_cvref_t<T>> || is_input_spec_v<T> ||
-    is_output_spec_v<T>;
+inline constexpr bool is_bound_input_spec_v = [] {
+  using Clean = std::remove_cvref_t<T>;
+  if constexpr (is_input_spec_v<Clean>) return Clean::is_bound;
+  else return false;
+}();
+
+template <typename T>
+inline constexpr bool is_unbound_input_spec_v = [] {
+  using Clean = std::remove_cvref_t<T>;
+  if constexpr (is_input_spec_v<Clean>) return Clean::is_unbound;
+  else return false;
+}();
+
+template <typename T>
+inline constexpr bool is_bound_output_spec_v = [] {
+  using Clean = std::remove_cvref_t<T>;
+  if constexpr (is_output_spec_v<Clean>) return Clean::is_bound;
+  else return false;
+}();
+
+template <typename T>
+inline constexpr bool is_unbound_output_spec_v = [] {
+  using Clean = std::remove_cvref_t<T>;
+  if constexpr (is_output_spec_v<Clean>) return Clean::is_unbound;
+  else return false;
+}();
+
+template <typename T>
+concept BoundInputSpecLike = is_bound_input_spec_v<T>;
+
+template <typename T>
+concept UnboundInputSpecLike = is_unbound_input_spec_v<T>;
+
+template <typename T>
+concept BoundOutputSpecLike = is_bound_output_spec_v<T>;
+
+template <typename T>
+concept UnboundOutputSpecLike = is_unbound_output_spec_v<T>;
+
+/** True only for storage-less Tensor/Spec planning patterns. */
+template <typename T>
+inline constexpr bool is_unbound_tensor_view_v = [] {
+  using Clean = std::remove_cvref_t<T>;
+  if constexpr (is_tensor_v<Clean>) return Clean::is_unbound;
+  else if constexpr (is_input_spec_v<Clean> || is_output_spec_v<Clean>) {
+    return Clean::is_unbound;
+  } else return false;
+}();
 
 template <typename T>
 concept UnboundTensorView = is_unbound_tensor_view_v<T>;
+
+/** True only for Tensor/Spec values carrying an execution-time address. */
+template <typename T>
+inline constexpr bool is_bound_tensor_view_v = [] {
+  using Clean = std::remove_cvref_t<T>;
+  if constexpr (is_tensor_v<Clean>) return Clean::is_bound;
+  else if constexpr (is_input_spec_v<Clean> || is_output_spec_v<Clean>) {
+    return Clean::is_bound;
+  } else return false;
+}();
+
+template <typename T>
+concept BoundTensorView = is_bound_tensor_view_v<T>;
+
+/**
+ * Drop the primary storage binding from an input Spec for planning.
+ *
+ * Transform state is replaced by `TypeOnlyPatternMetadata<Transform>` so even
+ * a transform containing auxiliary bound Tensors cannot leak execution
+ * addresses into the planning graph. Projection/fact values remain subject to
+ * `OperandPatternMetadata` because structural views use them during planning.
+ */
+template <typename Compute, typename Tensor, typename Transform,
+          typename Projection, typename... Facts>
+  requires (is_operand_pattern_metadata_v<Projection> &&
+            (is_operand_pattern_metadata_v<Facts> && ...))
+VECOPS_INLINE auto unbind(
+    const InputSpec<Compute, Tensor, Transform, Projection, Facts...>& spec) {
+  auto pattern_tensor = tensor::unbind(spec.tensor());
+  return std::apply(
+      [&](const auto&... facts) VECOPS_INLINE_LAMBDA {
+        return InputSpec<
+            Compute, decltype(pattern_tensor), Transform, Projection,
+            Facts...>{
+                pattern_tensor,
+                TypeOnlyPatternMetadata<Transform>{},
+                details::make_operand_pattern_metadata(spec.projection()),
+                details::make_operand_pattern_metadata(facts)...};
+      },
+      spec.facts());
+}
+
+/** Storage-less output counterpart of `unbind(InputSpec)`. */
+template <typename Compute, typename Tensor, typename Transform,
+          typename Projection, typename... Facts>
+  requires (is_operand_pattern_metadata_v<Projection> &&
+            (is_operand_pattern_metadata_v<Facts> && ...))
+VECOPS_INLINE auto unbind(
+    const OutputSpec<Compute, Tensor, Transform, Projection, Facts...>& spec) {
+  auto pattern_tensor = tensor::unbind(spec.tensor());
+  return std::apply(
+      [&](const auto&... facts) VECOPS_INLINE_LAMBDA {
+        return OutputSpec<
+            Compute, decltype(pattern_tensor), Transform, Projection,
+            Facts...>{
+                pattern_tensor,
+                TypeOnlyPatternMetadata<Transform>{},
+                details::make_operand_pattern_metadata(spec.projection()),
+                details::make_operand_pattern_metadata(facts)...};
+      },
+      spec.facts());
+}
+
+/**
+ * Rebind a safe input pattern to a corresponding bound Tensor view.
+ *
+ * `actual` denotes the complete view represented by the pattern, rather than
+ * the base of a previously sliced Tensor. Use the pointer overload of `bind`
+ * when the pattern's accumulated element offset must be applied.
+ */
+template <UnboundInputSpecLike Pattern, BoundTensorLike Actual>
+  requires (Pattern::InputTensor::Ndim == Actual::Ndim &&
+            std::same_as<
+                std::remove_const_t<typename Pattern::InputTensor::ElementType>,
+                std::remove_const_t<typename Actual::ElementType>> &&
+            Pattern::pattern_metadata_safe &&
+            std::is_empty_v<typename Pattern::TransformType> &&
+            std::default_initializable<typename Pattern::TransformType>)
+VECOPS_INLINE auto rebind(const Pattern& pattern, Actual actual) {
+  return pattern.with_tensor(
+      details::bind_operand_pattern_tensor(pattern.tensor(), actual));
+}
+
+/** Rebind a safe output pattern to a corresponding writable Tensor view. */
+template <UnboundOutputSpecLike Pattern, BoundTensorLike Actual>
+  requires (Pattern::OutputTensor::Ndim == Actual::Ndim &&
+            std::same_as<
+                typename Pattern::OutputTensor::ElementType,
+                typename Actual::ElementType> &&
+            !std::is_const_v<typename Actual::ElementType> &&
+            Pattern::pattern_metadata_safe &&
+            std::is_empty_v<typename Pattern::TransformType> &&
+            std::default_initializable<typename Pattern::TransformType>)
+VECOPS_INLINE auto rebind(const Pattern& pattern, Actual actual) {
+  return pattern.with_tensor(
+      details::bind_operand_pattern_tensor(pattern.tensor(), actual));
+}
+
+/** Bind an input pattern to the base address from which it was sliced. */
+template <UnboundInputSpecLike Pattern>
+  requires (Pattern::pattern_metadata_safe &&
+            std::is_empty_v<typename Pattern::TransformType> &&
+            std::default_initializable<typename Pattern::TransformType>)
+VECOPS_INLINE auto bind(
+    const Pattern& pattern,
+    typename Pattern::InputTensor::ElementType* base) {
+  return pattern.with_tensor(tensor::bind(pattern.tensor(), base));
+}
+
+/** Bind an output pattern to the base address from which it was sliced. */
+template <UnboundOutputSpecLike Pattern>
+  requires (Pattern::pattern_metadata_safe &&
+            std::is_empty_v<typename Pattern::TransformType> &&
+            std::default_initializable<typename Pattern::TransformType>)
+VECOPS_INLINE auto bind(
+    const Pattern& pattern,
+    typename Pattern::OutputTensor::ElementType* base) {
+  return pattern.with_tensor(tensor::bind(pattern.tensor(), base));
+}
+
+/**
+ * Validate an actual input Spec against a planning pattern and retain the
+ * actual Spec. This is the execution path for stateful transforms: runtime
+ * transform state comes from `actual`, never from the planning pattern.
+ */
+template <UnboundInputSpecLike Pattern, BoundInputSpecLike Actual>
+  requires (std::same_as<typename Pattern::ComputeType,
+                         typename Actual::ComputeType> &&
+            std::same_as<typename Pattern::MemoryElement,
+                         typename Actual::MemoryElement> &&
+            Pattern::InputTensor::Ndim == Actual::InputTensor::Ndim &&
+            std::same_as<typename Pattern::TransformType,
+                         typename Actual::TransformType> &&
+            std::same_as<typename Pattern::ProjectionType,
+                         typename Actual::ProjectionType> &&
+            std::same_as<typename Pattern::ExternalFacts,
+                         typename Actual::ExternalFacts>)
+VECOPS_INLINE auto rebind(const Pattern& pattern, Actual actual) {
+  auto tensor = details::bind_operand_pattern_tensor(
+      pattern.tensor(), actual.tensor());
+  return actual.with_tensor(tensor);
+}
+
+/** Output counterpart of `rebind(pattern, actual_input_spec)`. */
+template <UnboundOutputSpecLike Pattern, BoundOutputSpecLike Actual>
+  requires (std::same_as<typename Pattern::ComputeType,
+                         typename Actual::ComputeType> &&
+            std::same_as<typename Pattern::MemoryElement,
+                         typename Actual::MemoryElement> &&
+            Pattern::OutputTensor::Ndim == Actual::OutputTensor::Ndim &&
+            std::same_as<typename Pattern::TransformType,
+                         typename Actual::TransformType> &&
+            std::same_as<typename Pattern::ProjectionType,
+                         typename Actual::ProjectionType> &&
+            std::same_as<typename Pattern::ExternalFacts,
+                         typename Actual::ExternalFacts>)
+VECOPS_INLINE auto rebind(const Pattern& pattern, Actual actual) {
+  auto tensor = details::bind_operand_pattern_tensor(
+      pattern.tensor(), actual.tensor());
+  return actual.with_tensor(tensor);
+}
 
 template <typename T>
 inline constexpr bool is_input_operand_v =
@@ -2497,9 +3011,7 @@ VECOPS_INLINE auto slice_view(
   auto sliced_tensor = details::slice_tensor_impl<Dim>(
       spec.tensor(), index, std::make_index_sequence<Tensor::Ndim>{});
   auto projection = spec.projection().template sliced<Dim>(index);
-  return InputSpec<Compute, decltype(sliced_tensor), Transform,
-                   decltype(projection)>{
-      sliced_tensor, spec.transform(), projection};
+  return spec.with_view_tensor_and_projection(sliced_tensor, projection);
 }
 
 template <int I, int J, typename Compute, typename Tensor,
@@ -2510,9 +3022,7 @@ VECOPS_INLINE auto transpose_view(
   static_assert(0 <= J && J < Tensor::Ndim);
   auto transposed_tensor = tensor::transpose_view<I, J>(spec.tensor());
   auto projection = spec.projection().template transposed<I, J>();
-  return InputSpec<Compute, decltype(transposed_tensor), Transform,
-                   decltype(projection)>{
-      transposed_tensor, spec.transform(), projection};
+  return spec.with_view_tensor_and_projection(transposed_tensor, projection);
 }
 
 /** Preserve rank while selecting a contiguous logical interval on one axis. */
@@ -2529,14 +3039,26 @@ VECOPS_INLINE auto narrow_view(
   auto layout = tensor::set<Dim>(
       spec.input_layout(), extent,
       tensor::stride<Dim>(spec.input_layout()));
-  auto tensor_view = tensor::make_tensor(
-      spec.tensor().data() + offset * static_cast<nint_t>(
-          tensor::get<Dim>(spec.input_layout().strides())),
-      layout);
+  auto tensor_view = [&]() VECOPS_INLINE_LAMBDA {
+    const nint_t displacement = offset * static_cast<nint_t>(
+        tensor::get<Dim>(spec.input_layout().strides()));
+    if constexpr (Tensor::is_bound) {
+      return tensor::make_tensor(spec.tensor().data() + displacement, layout);
+    } else {
+      using Layout = decltype(layout);
+      using Pattern = tensor::Tensor<
+          typename Tensor::ElementType,
+          typename Layout::Shape,
+          typename Layout::Strides,
+          tensor::UnboundBinding>;
+      return Pattern{
+          tensor::UnboundBinding{
+              spec.tensor().element_offset() + displacement},
+          layout};
+    }
+  }();
   auto projection = spec.projection().template narrowed<Dim>(offset);
-  return InputSpec<Compute, decltype(tensor_view), Transform,
-                   decltype(projection)>{
-      tensor_view, spec.transform(), projection};
+  return spec.with_view_tensor_and_projection(tensor_view, projection);
 }
 
 /**
@@ -2552,9 +3074,7 @@ VECOPS_INLINE auto slice_view(
   auto sliced_tensor = details::slice_tensor_impl<Dim>(
       spec.tensor(), index, std::make_index_sequence<Tensor::Ndim>{});
   auto projection = spec.projection().template sliced<Dim>(index);
-  return OutputSpec<Compute, decltype(sliced_tensor), Transform,
-                    decltype(projection)>{
-      sliced_tensor, spec.transform(), projection};
+  return spec.with_view_tensor_and_projection(sliced_tensor, projection);
 }
 
 template <int I, int J, typename Compute, typename Tensor,
@@ -2565,9 +3085,7 @@ VECOPS_INLINE auto transpose_view(
   static_assert(0 <= J && J < Tensor::Ndim);
   auto transposed_tensor = tensor::transpose_view<I, J>(spec.tensor());
   auto projection = spec.projection().template transposed<I, J>();
-  return OutputSpec<Compute, decltype(transposed_tensor), Transform,
-                    decltype(projection)>{
-      transposed_tensor, spec.transform(), projection};
+  return spec.with_view_tensor_and_projection(transposed_tensor, projection);
 }
 
 template <int Dim, typename Compute, typename Tensor, typename Transform,
@@ -2583,14 +3101,26 @@ VECOPS_INLINE auto narrow_view(
   auto layout = tensor::set<Dim>(
       spec.output_layout(), extent,
       tensor::stride<Dim>(spec.output_layout()));
-  auto tensor_view = tensor::make_tensor(
-      spec.tensor().data() + offset * static_cast<nint_t>(
-          tensor::get<Dim>(spec.output_layout().strides())),
-      layout);
+  auto tensor_view = [&]() VECOPS_INLINE_LAMBDA {
+    const nint_t displacement = offset * static_cast<nint_t>(
+        tensor::get<Dim>(spec.output_layout().strides()));
+    if constexpr (Tensor::is_bound) {
+      return tensor::make_tensor(spec.tensor().data() + displacement, layout);
+    } else {
+      using Layout = decltype(layout);
+      using Pattern = tensor::Tensor<
+          typename Tensor::ElementType,
+          typename Layout::Shape,
+          typename Layout::Strides,
+          tensor::UnboundBinding>;
+      return Pattern{
+          tensor::UnboundBinding{
+              spec.tensor().element_offset() + displacement},
+          layout};
+    }
+  }();
   auto projection = spec.projection().template narrowed<Dim>(offset);
-  return OutputSpec<Compute, decltype(tensor_view), Transform,
-                    decltype(projection)>{
-      tensor_view, spec.transform(), projection};
+  return spec.with_view_tensor_and_projection(tensor_view, projection);
 }
 
 /** @brief Keep the first N Spec dimensions at zero on trailing axes. */
@@ -2658,6 +3188,10 @@ class ProjectCursor;
 template <typename Spec, typename Policy>
 class InputDataAccess {
 public:
+  static_assert(
+      is_bound_input_spec_v<Spec>,
+      "InputDataAccess requires a bound input Spec; rebind the planning "
+      "pattern before execution");
   using SpecType = Spec;
   using ComputeType = typename Spec::ComputeType;
   using MemoryElement = typename Spec::MemoryElement;
@@ -2983,6 +3517,10 @@ private:
 template <typename Spec, typename Policy>
 class OutputDataAccess {
 public:
+  static_assert(
+      is_bound_output_spec_v<Spec>,
+      "OutputDataAccess requires a bound output Spec; rebind the planning "
+      "pattern before execution");
   using SpecType = Spec;
   using ComputeType = typename Spec::ComputeType;
   using MemoryElement = typename Spec::MemoryElement;
@@ -4822,8 +5360,10 @@ VECOPS_ALWAYS_INLINE decltype(auto) with_optional_unordered_access(
  * @brief Return workspace bytes required by the resolved Spec/Policy plan.
  *
  * The result includes element-size choice and alignment padding. It is zero for
- * direct plans and readless inputs. The same Spec, runtime Layout, and Policy
- * must subsequently be passed to binding; a layout-only estimate is not valid.
+ * direct plans and readless inputs. An unbound Spec records planning capacity:
+ * each runtime Dynamic extent may shrink while retaining its Value constraints,
+ * Const extents and every stride remain exact. Rebinding enforces this contract
+ * with release-mode checks so execution cannot exceed planned workspace.
  */
 template <typename Spec, typename Policy>
 VECOPS_INLINE nint_t required_workspace(const Spec& spec, Policy policy) {
@@ -4877,6 +5417,7 @@ VECOPS_INLINE constexpr nint_t required_workspace(nullopt_t, Policy) {
  */
 template <typename Spec, typename Policy,
           typename Defaults = DefaultAccessDefaults>
+  requires (is_bound_input_spec_v<Spec> || is_bound_output_spec_v<Spec>)
 VECOPS_INLINE auto bind(
     const Spec& spec, Policy policy, kernel::WorkspaceView&,
     Defaults defaults = {}) {

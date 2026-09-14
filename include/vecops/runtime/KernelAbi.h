@@ -20,7 +20,7 @@ extern "C" {
 /** Major version accepted by this runtime; a mismatch is never compatible. */
 #define VECOPS_KERNEL_ABI_VERSION_MAJOR 1u
 /** Minor version implemented by this runtime; newer compatible minors may be accepted. */
-#define VECOPS_KERNEL_ABI_VERSION_MINOR 0u
+#define VECOPS_KERNEL_ABI_VERSION_MINOR 1u
 /** Exported v1 descriptor-query symbol name. */
 #define VECOPS_KERNEL_QUERY_SYMBOL_V1 "vecops_kernel_query_v1"
 

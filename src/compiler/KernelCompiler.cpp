@@ -10,6 +10,7 @@
  */
 
 #include "vecops/compiler/Compiler.h"
+#include "vecops/execution/Parallel.h"
 #include "vecops/runtime/Operator.h"
 
 #include <atomic>
@@ -175,10 +176,11 @@ std::string dynamic_meta_type(const DimensionDef& definition, const BoundKernel&
   return "::vecops::meta::Dynamic<" + std::to_string(alignment) + ", " + lower_text + ", " + upper_text + ">";
 }
 
-std::string generate_spec(const KernelDef& definition, const BoundKernel& binding) {
+std::string generate_spec(const KernelDef& definition, const BoundKernel& binding, nint_t parallelism) {
   std::ostringstream output;
   output << "#pragma once\n#include \"vecops/CoreTypes.h\"\n#include \"vecops/Meta.h\"\n\n"
             "namespace vecops::spec {\n";
+  output << "inline constexpr auto Parallelism = ::vecops::meta::cint<" << parallelism << ">;\n";
   for (const auto& [name, type] : definition.values()) {
     const auto& value = binding.values.at(name);
     if (type == SpecializationType::ConstInt)
@@ -261,7 +263,7 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
             "#include \"vecops/runtime/KernelAbi.h\"\n"
             "#include \"vecops/tensor/Tensor.h\"\n"
             "#include <algorithm>\n#include <cstddef>\n#include <cstring>\n#include <exception>\n#include <limits>\n"
-            "#include <utility>\n\n"
+            "#include <memory>\n#include <stdexcept>\n#include <utility>\n\n"
          << "#include " << cpp_string(fs::absolute(kernel_file).lexically_normal().string())
          << "\n#include \"vecops/execution/WorkspaceContext.h\"\n\n"
             "namespace {\n"
@@ -276,27 +278,37 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
             "void invoke_source_kernel(const VecopsCall* call, const char* recipe, Setup&& setup, Args&&... args) {\n"
             "  if constexpr (requires(::vecops::execution::WorkspaceContext& workspace) {\n"
             "                  __kernel__(workspace, std::forward<Args>(args)...); }) {\n"
-            "    if (call->context && call->context->struct_size >= sizeof(VecopsExecutionContext) &&\n"
-            "        (call->context->flags & VECOPS_EXECUTION_CONTEXT_FLAG_WORKSPACE_CONTEXT) != 0 &&\n"
-            "        call->context->user_data) {\n"
-            "      auto& workspace = *static_cast<::vecops::execution::WorkspaceContext*>(\n"
-            "        call->context->user_data);\n"
-            "      auto kernel_scope = workspace.serial_scope(recipe);\n"
-            "      std::forward<Setup>(setup)(workspace);\n"
-            "      __kernel__(workspace, std::forward<Args>(args)...);\n"
-            "      return;\n"
-            "    }\n"
             "    if (call->workspace != nullptr || call->workspace_size != 0) {\n"
             "      ::vecops::execution::WorkspaceContext workspace(\n"
-            "        recipe, call->workspace, static_cast<::vecops::nint_t>(call->workspace_size));\n"
+            "        recipe, call->workspace, static_cast<::vecops::nint_t>(call->workspace_size),\n"
+            "        nullptr, 0, call->context);\n"
             "      std::forward<Setup>(setup)(workspace);\n"
             "      __kernel__(workspace, std::forward<Args>(args)...);\n"
             "      return;\n"
             "    }\n"
-            "    static thread_local ::vecops::execution::WorkspaceReplayCache replay_cache;\n"
-            "    replay_cache.invoke(recipe, setup, [&](auto& prepared_workspace) {\n"
+            "    const VecopsWorkspaceArenaProvider* provider = nullptr;\n"
+            "    if (call->context && call->context->struct_size >=\n"
+            "          offsetof(VecopsExecutionContext, workspace_provider) + sizeof(call->context->workspace_provider))\n"
+            "      provider = call->context->workspace_provider;\n"
+            "    const uint64_t provider_identity = provider == nullptr ? 0 : provider->identity;\n"
+            "    static thread_local uint64_t cached_provider_identity = UINT64_MAX;\n"
+            "    static thread_local std::unique_ptr<::vecops::execution::WorkspaceReplayCache> replay_cache;\n"
+            "    if (!replay_cache || cached_provider_identity != provider_identity) {\n"
+            "      std::shared_ptr<::vecops::execution::WorkspaceArenaProvider> arena_provider;\n"
+            "      if (provider != nullptr) {\n"
+            "        if (provider->struct_size < sizeof(VecopsWorkspaceArenaProvider))\n"
+            "          throw std::runtime_error(\"workspace arena provider ABI is truncated\");\n"
+            "        arena_provider = ::vecops::execution::workspace_arena_provider_from_abi(*provider);\n"
+            "      } else {\n"
+            "        arena_provider = ::vecops::execution::default_workspace_arena_provider();\n"
+            "      }\n"
+            "      replay_cache = std::make_unique<::vecops::execution::WorkspaceReplayCache>(\n"
+            "        4, std::move(arena_provider));\n"
+            "      cached_provider_identity = provider_identity;\n"
+            "    }\n"
+            "    replay_cache->invoke(recipe, setup, [&](auto& prepared_workspace) {\n"
             "      __kernel__(prepared_workspace, std::forward<Args>(args)...);\n"
-            "    });\n"
+            "    }, call->context);\n"
             "  } else {\n"
             "    static_assert(requires { __kernel__(std::forward<Args>(args)...); },\n"
             "                  \"__kernel__ parameters do not match the KernelDef\");\n"
@@ -516,9 +528,12 @@ runtime::Result<std::shared_ptr<runtime::Executable>> Compiler::compile_kernel(c
   std::uint64_t fingerprint = UINT64_C(14695981039346656037);
   fingerprint = hash_text(fingerprint, definition.canonical());
   fingerprint = hash_text(fingerprint, source);
+  const auto parallelism = vecops::execution::max_parallelism();
+  auto bound = std::move(binding).value();
+  bound.specialization_key += ";$Parallelism=i:" + std::to_string(parallelism);
   auto definition_owner = std::make_shared<runtime::KernelDef>(definition);
   auto instantiation = std::make_shared<runtime::BoundKernelRecipe::SourceInstantiation>(
-    runtime::BoundKernelRecipe::SourceInstantiation{kernel_file, definition_owner, std::move(binding).value()});
+    runtime::BoundKernelRecipe::SourceInstantiation{kernel_file, definition_owner, std::move(bound), parallelism});
   runtime::BoundKernelRecipe recipe{"direct-source-kernel", instantiation->binding.specialization_key,
                                     "direct-source-kernel;source=" + hex_hash(fingerprint) + ";" +
                                       instantiation->binding.specialization_key,
@@ -601,7 +616,8 @@ Compiler::compile_kernels(std::span<const runtime::BoundKernelRecipe> recipes, s
     fs::create_directories(input_directory, error);
     if (error)
       return fail_all(invalid("cannot create generated input directory: " + error.message()));
-    auto status = write_file(input_directory / "vecops_spec.h", generate_spec(*source.definition, source.binding));
+    auto status = write_file(input_directory / "vecops_spec.h",
+                             generate_spec(*source.definition, source.binding, source.parallelism));
     if (!status.ok())
       return fail_all(std::move(status));
     status = write_file(input_directory / "vecops_adapter.cpp",

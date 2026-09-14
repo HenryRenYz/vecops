@@ -242,6 +242,61 @@ private:
   std::shared_ptr<Executable> executable_;
 };
 
+struct RuntimeArenaProvider {
+  RuntimeArenaProvider() {
+    static std::atomic<std::uint64_t> next_identity{1};
+    abi = {sizeof(VecopsWorkspaceArenaProvider),
+           0,
+           next_identity.fetch_add(1),
+           this,
+           capacity,
+           allocate,
+           release_arena,
+           retain,
+           release_context,
+           0};
+  }
+
+  static std::uint64_t capacity(void*, std::uint32_t) {
+    return 4096;
+  }
+
+  static std::int32_t allocate(void* context, std::uint32_t tier, std::uint64_t bytes, std::uint64_t alignment,
+                               VecopsWorkspaceArena* result, VecopsError*) {
+    if (bytes == 0) {
+      *result = {sizeof(VecopsWorkspaceArena), 0, nullptr, 0, nullptr};
+      return VECOPS_STATUS_OK;
+    }
+    auto& self = *static_cast<RuntimeArenaProvider*>(context);
+    const auto logical_tier = tier == VECOPS_WORKSPACE_TIER_FAST ? vecops::execution::WorkspaceTier::Fast
+                                                                 : vecops::execution::WorkspaceTier::Slow;
+    auto* owner = new vecops::execution::WorkspaceArena(
+      self.heap.allocate(logical_tier, static_cast<vecops::nint_t>(bytes), static_cast<vecops::nint_t>(alignment)));
+    *result = {sizeof(VecopsWorkspaceArena), 0, owner->data, static_cast<std::uint64_t>(owner->capacity), owner};
+    self.allocations.fetch_add(1);
+    return VECOPS_STATUS_OK;
+  }
+
+  static void release_arena(void*, void* owner) {
+    delete static_cast<vecops::execution::WorkspaceArena*>(owner);
+  }
+
+  static void retain(void* context) {
+    static_cast<RuntimeArenaProvider*>(context)->references.fetch_add(1);
+  }
+
+  static void release_context(void* context) {
+    auto* self = static_cast<RuntimeArenaProvider*>(context);
+    if (self->references.fetch_sub(1) == 1)
+      delete self;
+  }
+
+  std::atomic<unsigned> references{1};
+  std::atomic<unsigned> allocations{0};
+  vecops::execution::HeapWorkspaceArenaProvider heap;
+  VecopsWorkspaceArenaProvider abi{};
+};
+
 void test_kernel_call_workspace_and_context_forwarding() {
   auto executable = Executable::load(VECOPS_WORKSPACE_CONTEXT_FIXTURE);
   require(executable.ok(), executable.status().message());
@@ -328,33 +383,29 @@ int main(int argc, char** argv) {
   require(executable.ok(), executable.status().message());
   require(executable.value()->operator_name() == definition.name(), "generated operator name");
   auto bound = bind_kernel_call(definition, call);
-  require(executable.value()->specialization_key() == bound.value().specialization_key, "generated specialization");
+  require(executable.value()->specialization_key() == bound.value().specialization_key + ";$Parallelism=i:1",
+          "generated specialization");
   auto bytes = executable.value()->workspace_size(call.arguments());
   require(bytes.ok() && bytes.value() == 0, "kernel-owned workspace contract");
   require(executable.value()->invoke(call.arguments()).ok(), "direct executable invocation");
   require(output == std::vector<float>({4, 7, 10, 13, 16, 19, 22, 25}), "direct result");
 
+  auto* arena_provider = new RuntimeArenaProvider();
+  const VecopsExecutionContext arena_context{
+    .struct_size = sizeof(VecopsExecutionContext),
+    .requested_threads = 0,
+    .stream = nullptr,
+    .user_data = nullptr,
+    .flags = 0,
+    .workspace_provider = &arena_provider->abi,
+  };
   std::fill(output.begin(), output.end(), 0);
-  vecops::execution::WorkspaceContext tracing{vecops::execution::trace_workspace, definition.name(), {19, 23}};
-  auto trace_context = vecops::execution::workspace_execution_context(tracing);
-  require(executable.value()->invoke(call.arguments(), nullptr, 0, &trace_context).ok(),
-          "source kernel trace-context invocation");
-  auto logical_workspace = tracing.finish_trace();
-  require(logical_workspace.allocations.size() == 1, "source kernel must record its allocation in the caller context");
-  require(logical_workspace.axes.size() == 1 && logical_workspace.axes.front().recorded == 4,
-          "generated adapter must preserve Dynamic axis contracts in the workspace trace");
-  auto placement = vecops::execution::place_workspace(logical_workspace);
-  vecops::kernel::Workspace replay_storage(placement.fast_bytes);
-  auto replay_view = replay_storage.view();
-  void* replay_base = replay_view.allocate(placement.fast_bytes, vecops::vec::DEFAULT_ALIGNMENT);
-  vecops::execution::BoundWorkspacePlan bound_workspace{placement, replay_base, placement.fast_bytes, nullptr, 0};
-  vecops::execution::WorkspaceContext replay{definition.name(), bound_workspace};
-  auto replay_context = vecops::execution::workspace_execution_context(replay);
-  std::fill(output.begin(), output.end(), 0);
-  require(executable.value()->invoke(call.arguments(), nullptr, 0, &replay_context).ok(),
-          "source kernel replay-context invocation");
-  replay.finish_replay();
-  require(output == std::vector<float>({4, 7, 10, 13, 16, 19, 22, 25}), "source kernel replay result");
+  require(executable.value()->invoke(call.arguments(), nullptr, 0, &arena_context).ok(),
+          "source kernel arena-provider invocation");
+  require(executable.value()->invoke(call.arguments(), nullptr, 0, &arena_context).ok(),
+          "source kernel arena-provider replay");
+  require(arena_provider->allocations.load() == 1, "arena provider must allocate once and replay from its cache");
+  RuntimeArenaProvider::release_context(arena_provider);
 
   auto dynamic_definition = named_dynamic_kernel_definition();
   std::vector<float> dynamic_input(12);

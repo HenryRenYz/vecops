@@ -1,6 +1,7 @@
 """Tests for the Pythonic schema, JIT, and optional-framework surface."""
 
 import ctypes
+import os
 import sys
 from pathlib import Path
 
@@ -11,6 +12,8 @@ import vecops.typing as vt
 
 VECOPS_ROOT = Path(__file__).resolve().parents[2]
 _DYNAMIC_OUTPUT_STRIDES = "Dynamic<1,D,1048576> 1"
+_TEST_CC = os.environ.get("CC", "gcc")
+_TEST_CXX = os.environ.get("CXX", "g++")
 
 
 def test_dtype_normalization_has_no_required_torch_dependency() -> None:
@@ -146,8 +149,8 @@ def test_jit_derives_complete_kernel_def_and_resolves_source(tmp_path: Path) -> 
     cache_mode="compile-only",
     build_dir=tmp_path / "build",
     target="Scalar",
-    cc="/usr/bin/gcc",
-    cxx="/usr/bin/g++",
+    cc=_TEST_CC,
+    cxx=_TEST_CXX,
   )
   kernel = make_test_kernel(compiler)
   assert kernel.source == VECOPS_ROOT / "tests/runtime/TestKernel.cpp"
@@ -165,8 +168,8 @@ def test_jit_numpy_execution(tmp_path: Path) -> None:
       cache_mode="compile-only",
       build_dir=tmp_path / "build",
       target="Scalar",
-      cc="/usr/bin/gcc",
-      cxx="/usr/bin/g++",
+      cc=_TEST_CC,
+      cxx=_TEST_CXX,
       jobs=2,
     )
   )
@@ -183,8 +186,8 @@ def test_compile_for_accepts_storage_free_tensor_meta(tmp_path: Path) -> None:
       cache_mode="compile-only",
       build_dir=tmp_path / "build",
       target="Scalar",
-      cc="/usr/bin/gcc",
-      cxx="/usr/bin/g++",
+      cc=_TEST_CC,
+      cxx=_TEST_CXX,
       jobs=2,
     )
   )
@@ -194,8 +197,8 @@ def test_compile_for_accepts_storage_free_tensor_meta(tmp_path: Path) -> None:
   )
 
 
-def test_framework_bridge_forwards_external_workspace(tmp_path: Path) -> None:
-  """The process-local C bridge must preserve the complete VecopsCall frame."""
+def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_path: Path) -> None:
+  """The process-local C bridge must preserve or enrich the complete call."""
 
   class TensorView(ctypes.Structure):
     _fields_ = [
@@ -242,6 +245,7 @@ def test_framework_bridge_forwards_external_workspace(tmp_path: Path) -> None:
       ("stream", ctypes.c_void_p),
       ("user_data", ctypes.c_void_p),
       ("flags", ctypes.c_uint64),
+      ("workspace_provider", ctypes.c_void_p),
     ]
 
   class Call(ctypes.Structure):
@@ -278,8 +282,8 @@ def test_framework_bridge_forwards_external_workspace(tmp_path: Path) -> None:
     cache_mode="compile-only",
     build_dir=tmp_path / "build",
     target="Scalar",
-    cc="/usr/bin/gcc",
-    cxx="/usr/bin/g++",
+    cc=_TEST_CC,
+    cxx=_TEST_CXX,
     jobs=2,
   )
   kernel = make_test_kernel(compiler)
@@ -292,6 +296,14 @@ def test_framework_bridge_forwards_external_workspace(tmp_path: Path) -> None:
       access=vecops.TensorAccess.output,
     ),
   )
+
+  direct_memory = vecops.memory.System()
+  with direct_memory.workspace_session(fast_capacity=4096, slow_capacity=4096):
+    kernel(input, output)
+    assert sum(item["managed_bytes"] for item in direct_memory.stats()) == 8192
+  np.testing.assert_array_equal(output, input * 2)
+  assert sum(item["managed_bytes"] for item in direct_memory.stats()) == 0
+  output.fill(0)
 
   sizes = (ctypes.c_int64 * 2)(2, 4)
   strides = (ctypes.c_int64 * 2)(4, 1)
@@ -354,6 +366,44 @@ def test_framework_bridge_forwards_external_workspace(tmp_path: Path) -> None:
   np.testing.assert_array_equal(output, input * 3 + 1)
   assert ctypes.c_float.from_address(workspace_address).value == 25.0
 
+  memory_system = vecops.memory.System()
+  output.fill(0)
+  with memory_system.workspace_session(fast_capacity=4096, slow_capacity=4096):
+    result = bridge(
+      kernel.operator.native._handle,
+      ctypes.byref(call),
+      len(specialization),
+      specialization,
+      ctypes.byref(error),
+    )
+  assert result == 0, message.value.decode()
+  assert sum(item["managed_bytes"] for item in memory_system.stats()) == 0
+
+  output.fill(0)
+  managed_context = ExecutionContext(
+    ctypes.sizeof(ExecutionContext), 3, None, ctypes.c_void_p(0x1234), 0x55, None,
+  )
+  managed_call = Call(
+    ctypes.sizeof(Call),
+    len(values),
+    values,
+    None,
+    0,
+    ctypes.pointer(managed_context),
+  )
+  with memory_system.workspace_session(fast_capacity=4096, slow_capacity=4096):
+    result = bridge(
+      kernel.operator.native._handle,
+      ctypes.byref(managed_call),
+      len(specialization),
+      specialization,
+      ctypes.byref(error),
+    )
+    assert sum(item["managed_bytes"] for item in memory_system.stats()) == 8192
+  assert result == 0, message.value.decode()
+  np.testing.assert_array_equal(output, input * 3 + 1)
+  assert sum(item["managed_bytes"] for item in memory_system.stats()) == 0
+
 
 def test_cache_only_does_not_discover_tools_or_create_directories(tmp_path: Path) -> None:
   cache = tmp_path / "absent-cache"
@@ -380,6 +430,9 @@ def test_generated_torch_bridge_uses_mutable_out_schema() -> None:
   assert "TORCH_LIBRARY_FRAGMENT(vecops_test" in source
   assert "vecops_operator_bridge_invoke_v1" in source
   assert "vecops_torch_bridge_set_handle_v1" in source
+  assert "VecopsThreadPoolV1 torch_thread_pool" in source
+  assert 'dlsym(RTLD_DEFAULT, "GOMP_parallel")' in source
+  assert "execution_context.thread_pool = &torch_thread_pool" in source
   assert "torch/extension.h" not in source
   assert "PYBIND11_MODULE" not in source
   returning_schema = _torch_schema("run", definition, return_outputs=True)
@@ -410,8 +463,8 @@ def test_native_build_api_mismatch_has_repair_command(monkeypatch) -> None:
 def test_compile_batch_delegates_one_native_build_graph(monkeypatch) -> None:
   submitted = []
 
-  def prepare_batch(requests, *, parallel_jobs):
-    submitted.append((requests, parallel_jobs))
+  def prepare_batch(requests, *, parallel_jobs, execution_parallelism):
+    submitted.append((requests, parallel_jobs, execution_parallelism))
 
   monkeypatch.setattr(vecops._C, "prepare_batch", prepare_batch)
 
@@ -424,9 +477,12 @@ def test_compile_batch_delegates_one_native_build_graph(monkeypatch) -> None:
     )
     for index in range(2)
   ]
-  result = vecops.compile_batch(requests, parallelism=2)
+  result = vecops.compile_batch(
+    requests, parallelism=2, execution_parallelism=7
+  )
   assert result.prepared == 2
   assert result.parallelism == 2
   assert len(submitted) == 1
   assert submitted[0][1] == 2
+  assert submitted[0][2] == 7
   assert [item[0] for item in submitted[0][0]] == [request.operator for request in requests]

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "TestUtils.h"
+#include "vecops/execution/WorkspaceContext.h"
 #include "vecops/matmul/Atom.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/ops/MatmulPack.h"
@@ -117,6 +118,37 @@ void check_direct_pack(nint_t spatial, nint_t k, nint_t padding) {
     }
   }
   EXPECT_EQ(packed, storage.data + numel(output_layout));
+}
+
+TEST(MatmulPackTest, PatternPreparedBindsRuntimeStorage) {
+  using Atom = ::vecops::matmul::AMX_BF16F32;
+  constexpr auto Side = ::vecops::matmul::Operand::B;
+  constexpr nint_t N = 19;
+  constexpr nint_t K = 65;
+  std::vector<bfloat16_t> input(static_cast<std::size_t>(N * K));
+  for (nint_t i = 0; i < N * K; ++i)
+    input[static_cast<std::size_t>(i)] =
+        test_utils::get_test_value<bfloat16_t>(static_cast<int>(i));
+  const auto input_layout = make_layout(make_shape(cint<N>, cint<K>));
+  const auto output_layout =
+      ::vecops::matmul::packed_layout<Atom, Side>(input_layout);
+  PackedStorage<bfloat16_t> expected_storage(numel(output_layout));
+  PackedStorage<bfloat16_t> actual_storage(numel(output_layout));
+  auto input_tensor = make_tensor(input.data(), input_layout);
+  auto expected = make_tensor(expected_storage.data, output_layout);
+  auto actual = make_tensor(actual_storage.data, output_layout);
+  auto pack = ops::matmul_pack(ops::MatmulPackConfig<Atom, Side>{});
+  ExecutionSession execution{};
+  pack(execution, input_tensor, expected);
+
+  execution::WorkspaceContext workspace{"prepared_pack"};
+  auto prepared = pack.template prepare<1>(
+      workspace, "scratch", unbind(input_tensor), unbind(actual));
+  prepared(execution::TaskContext<1>{0}, input_tensor, actual);
+  for (nint_t i = 0; i < numel(output_layout); ++i) {
+    EXPECT_TRUE(test_utils::values_equal(expected_storage.data[i],
+                                         actual_storage.data[i]));
+  }
 }
 
 template <typename InputOperand, typename InputLayout>

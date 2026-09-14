@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <typeinfo>
 #include <utility>
@@ -10,6 +12,12 @@
 
 #include <gtest/gtest.h>
 
+#include "MatmulTestArch.h"
+#include "vecops/execution/WorkspaceContext.h"
+#if defined(HAS_AMX_BF16) || defined(HAS_SME)
+#include "vecops/execution/WorkspacePlan.h"
+#include "vecops/ops/MatmulPack.h"
+#endif
 #include "vecops/tensor/DataAccess.h"
 #include "vecops/ops/Softmax.h"
 
@@ -478,7 +486,368 @@ void run_shift_stability_case() {
   EXPECT_NEAR(sum, 1.0, 8e-3);
 }
 
+#if defined(HAS_AMX_BF16) || defined(HAS_SME)
+
+#if defined(ARCH_X86_FAMILY)
+using SoftmaxPackTestAtom = matmul::AMX_BF16F32;
+#else
+using SoftmaxPackTestAtom = matmul::SME_BF16F32;
+#endif
+
+constexpr nint_t SoftmaxPackSlices = 8;
+constexpr nint_t SoftmaxPackN = 5;
+
+using SoftmaxPackValue = vecops::bfloat16_t;
+
+auto softmax_pack_matrix_layout() {
+  return make_layout(
+      make_shape(cint<SoftmaxPackN>, cint<SoftmaxPackN>));
+}
+
+auto softmax_pack_output_layout() {
+  return matmul::packed_layout<SoftmaxPackTestAtom, matmul::Operand::A>(
+      softmax_pack_matrix_layout());
+}
+
+std::vector<SoftmaxPackValue> make_softmax_pack_logits() {
+  std::vector<SoftmaxPackValue> values(
+      static_cast<std::size_t>(SoftmaxPackSlices * SoftmaxPackN *
+                               SoftmaxPackN));
+  for (nint_t slice = 0; slice < SoftmaxPackSlices; ++slice) {
+    for (nint_t row = 0; row < SoftmaxPackN; ++row) {
+      for (nint_t column = 0; column < SoftmaxPackN; ++column) {
+        const auto index = static_cast<std::size_t>(
+            (slice * SoftmaxPackN + row) * SoftmaxPackN + column);
+        // Match MSAAttention's finite -1e9 mask, including an entirely
+        // masked row whose BF16 logits all collapse to the same value.
+        if ((slice == 0 && row == 0) ||
+            (column != row && (slice + row + column) % 4 == 0)) {
+          values[index] = SoftmaxPackValue{-1e9f};
+        } else {
+          values[index] = SoftmaxPackValue{
+              static_cast<float>((slice * 11 + row * 7 + column * 3) % 29 -
+                                 14) /
+              5.0f};
+        }
+      }
+    }
+  }
+  return values;
+}
+
+struct SoftmaxPackResult {
+  std::vector<SoftmaxPackValue> weights;
+  std::vector<SoftmaxPackValue> packed;
+};
+
+struct ConcurrentSoftmaxPackThreadPool {
+  static std::uint32_t maximum(void*) {
+    return 4;
+  }
+
+  static std::uint32_t in_parallel(void*) {
+    return 0;
+  }
+
+  static std::int32_t run(
+      void*, std::uint32_t count, void* body_context,
+      VecopsParallelTaskFn body, VecopsError*) {
+    std::vector<std::thread> workers;
+    workers.reserve(count);
+    std::atomic<std::uint32_t> ready{0};
+    std::atomic<bool> start{false};
+    for (std::uint32_t lane = 0; lane < count; ++lane) {
+      workers.emplace_back(
+          [=, &ready, &start] {
+            ready.fetch_add(1, std::memory_order_release);
+            while (!start.load(std::memory_order_acquire))
+              std::this_thread::yield();
+            body(body_context, lane, count);
+          });
+    }
+    while (ready.load(std::memory_order_acquire) != count)
+      std::this_thread::yield();
+    start.store(true, std::memory_order_release);
+    for (auto& worker : workers)
+      worker.join();
+    return VECOPS_STATUS_OK;
+  }
+
+  VecopsThreadPoolV1 abi() {
+    return VecopsThreadPoolV1{
+        sizeof(VecopsThreadPoolV1), VECOPS_THREAD_POOL_ABI_MAJOR,
+        VECOPS_THREAD_POOL_ABI_MINOR, 0x736f66746d6178ull,
+        this, maximum, in_parallel, run, nullptr, nullptr, 0};
+  }
+};
+
+SoftmaxPackResult run_legacy_softmax_pack(
+    const std::vector<SoftmaxPackValue>& logits) {
+  const auto matrix_layout = softmax_pack_matrix_layout();
+  const auto packed_layout = softmax_pack_output_layout();
+  const nint_t matrix_elements = SoftmaxPackN * SoftmaxPackN;
+  const nint_t packed_elements = numel(packed_layout);
+  SoftmaxPackResult result{
+      logits,
+      std::vector<SoftmaxPackValue>(
+          static_cast<std::size_t>(SoftmaxPackSlices * packed_elements))};
+  auto softmax_op = softmax();
+  auto pack_op = matmul_pack(MatmulPackConfig<
+      SoftmaxPackTestAtom, matmul::Operand::A>{});
+  ExecutionSession pack_execution{};
+  for (nint_t slice = 0; slice < SoftmaxPackSlices; ++slice) {
+    auto weight = make_tensor(
+        result.weights.data() + slice * matrix_elements, matrix_layout);
+    auto packed = make_tensor(
+        result.packed.data() + slice * packed_elements, packed_layout);
+    softmax_op(input<float32_t>(weight), output<float32_t>(weight));
+    pack_op(pack_execution, weight, packed);
+  }
+  return result;
+}
+
+template <nint_t Parallelism>
+SoftmaxPackResult run_prepared_softmax_pack_once(
+    execution::WorkspaceContext& workspace,
+    const std::vector<SoftmaxPackValue>& logits) {
+  const auto matrix_layout = softmax_pack_matrix_layout();
+  const auto packed_layout = softmax_pack_output_layout();
+  const nint_t matrix_elements = SoftmaxPackN * SoftmaxPackN;
+  const nint_t packed_elements = numel(packed_layout);
+  SoftmaxPackResult result{
+      logits,
+      std::vector<SoftmaxPackValue>(
+          static_cast<std::size_t>(SoftmaxPackSlices * packed_elements),
+          SoftmaxPackValue{-17.0f})};
+  auto sample_weight = make_tensor(result.weights.data(), matrix_layout);
+  auto sample_packed = make_tensor(result.packed.data(), packed_layout);
+  auto prepared_softmax = softmax().template prepare<Parallelism>(
+      workspace, "softmax",
+      unbind(input<float32_t>(sample_weight)),
+      unbind(output<float32_t>(sample_weight)));
+  auto prepared_pack = matmul_pack(MatmulPackConfig<
+      SoftmaxPackTestAtom, matmul::Operand::A>{})
+      .template prepare<Parallelism>(
+          workspace, "pack", unbind(sample_weight), unbind(sample_packed));
+
+  workspace.parallel_lanes<Parallelism>(
+      [&](execution::TaskContext<Parallelism> task) {
+        for (nint_t slice = task.lane_id(); slice < SoftmaxPackSlices;
+             slice += Parallelism) {
+          auto weight = make_tensor(
+              result.weights.data() + slice * matrix_elements,
+              matrix_layout);
+          auto packed = make_tensor(
+              result.packed.data() + slice * packed_elements,
+              packed_layout);
+          prepared_softmax(task, weight, weight);
+          prepared_pack(task, weight, packed);
+        }
+      });
+  return result;
+}
+
+template <nint_t Parallelism>
+std::pair<SoftmaxPackResult, SoftmaxPackResult>
+run_prepared_softmax_pack_trace_replay(
+    const std::vector<SoftmaxPackValue>& logits) {
+  constexpr std::string_view Recipe = "prepared_softmax_then_pack";
+  ConcurrentSoftmaxPackThreadPool test_pool;
+  auto pool = test_pool.abi();
+  const VecopsExecutionContext execution_context{
+      .struct_size = sizeof(VecopsExecutionContext),
+      .requested_threads = static_cast<std::uint32_t>(Parallelism),
+      .thread_pool = &pool,
+  };
+  execution::WorkspaceContext tracing{
+      execution::trace_workspace, std::string{Recipe}, {}, nullptr, 0,
+      nullptr, 0, &execution_context};
+  auto traced =
+      run_prepared_softmax_pack_once<Parallelism>(tracing, logits);
+  auto placement = execution::place_workspace(tracing.finish_trace());
+  kernel::Workspace arena(placement.fast_bytes);
+  auto arena_view = arena.view();
+  void* arena_base = arena_view.allocate(
+      placement.fast_bytes, vec::DEFAULT_ALIGNMENT);
+  execution::BoundWorkspacePlan bound{
+      placement, arena_base, placement.fast_bytes, nullptr, 0};
+  execution::WorkspaceContext replay{
+      std::string{Recipe}, bound, &execution_context};
+  auto replayed =
+      run_prepared_softmax_pack_once<Parallelism>(replay, logits);
+  replay.finish_replay();
+  return {std::move(traced), std::move(replayed)};
+}
+
+void expect_softmax_pack_result(
+    const SoftmaxPackResult& actual, const SoftmaxPackResult& expected,
+    const std::vector<SoftmaxPackValue>& logits, const char* label) {
+  const nint_t matrix_elements = SoftmaxPackN * SoftmaxPackN;
+  for (nint_t slice = 0; slice < SoftmaxPackSlices; ++slice) {
+    for (nint_t row = 0; row < SoftmaxPackN; ++row) {
+      std::vector<double> reference(static_cast<std::size_t>(SoftmaxPackN));
+      std::vector<double> input_row(static_cast<std::size_t>(SoftmaxPackN));
+      for (nint_t column = 0; column < SoftmaxPackN; ++column) {
+        const auto index = static_cast<std::size_t>(
+            slice * matrix_elements + row * SoftmaxPackN + column);
+        input_row[static_cast<std::size_t>(column)] =
+            static_cast<double>(logits[index]);
+      }
+      reference_softmax_rows(input_row, 1, SoftmaxPackN, reference);
+      for (nint_t column = 0; column < SoftmaxPackN; ++column) {
+        const auto index = static_cast<std::size_t>(
+            slice * matrix_elements + row * SoftmaxPackN + column);
+        const float value = static_cast<float>(actual.weights[index]);
+        EXPECT_TRUE(std::isfinite(value))
+            << label << " slice=" << slice << " row=" << row
+            << " column=" << column;
+        EXPECT_NEAR(value, reference[static_cast<std::size_t>(column)],
+                    2e-2f)
+            << label << " slice=" << slice << " row=" << row
+            << " column=" << column;
+        EXPECT_EQ(actual.weights[index], expected.weights[index])
+            << label << " slice=" << slice << " row=" << row
+            << " column=" << column;
+      }
+    }
+  }
+  ASSERT_EQ(actual.packed.size(), expected.packed.size());
+  for (std::size_t index = 0; index < actual.packed.size(); ++index) {
+    EXPECT_EQ(actual.packed[index], expected.packed[index])
+        << label << " packed index=" << index;
+  }
+}
+
+#endif
+
 } // namespace
+
+TEST(SoftmaxPreparedTest, RebindsDynamicTailWithPrivateLaneScratch) {
+  constexpr nint_t Parallelism = 2;
+  constexpr nint_t Capacity = 32;
+  const std::array<nint_t, Parallelism> extents{7, 19};
+  std::vector<float> input(Parallelism * Capacity, 0.0f);
+  std::vector<float> output(Parallelism * Capacity, -1.0f);
+  for (nint_t lane = 0; lane < Parallelism; ++lane) {
+    for (nint_t i = 0; i < extents[static_cast<std::size_t>(lane)]; ++i)
+      input[static_cast<std::size_t>(lane * Capacity + i)] =
+          static_cast<float>(i - 4 * lane) / 7.0f;
+  }
+
+  const auto capacity_shape = make_shape(meta::Dynamic<1, 1, Capacity>{Capacity});
+  auto input_pattern = tensor::unbind(tensor::input<float32_t>(
+      make_tensor(input.data(), capacity_shape)));
+  auto output_pattern = tensor::unbind(tensor::output<float32_t>(
+      make_tensor(output.data(), capacity_shape)));
+  execution::WorkspaceContext workspace{"prepared_softmax"};
+  auto operation = softmax().template prepare<Parallelism>(
+      workspace, "softmax_scratch", std::move(input_pattern),
+      std::move(output_pattern));
+
+  workspace.parallel_lanes<Parallelism>(
+      [&](execution::TaskContext<Parallelism> task) {
+        const nint_t lane = task.lane_id();
+        const nint_t n = extents[static_cast<std::size_t>(lane)];
+        const auto active_shape = make_shape(meta::Any{n});
+        operation(
+            task,
+            make_tensor(input.data() + lane * Capacity, active_shape),
+            make_tensor(output.data() + lane * Capacity, active_shape));
+      });
+
+  for (nint_t lane = 0; lane < Parallelism; ++lane) {
+    double sum = 0.0;
+    for (nint_t i = 0; i < extents[static_cast<std::size_t>(lane)]; ++i) {
+      const float value = output[static_cast<std::size_t>(
+          lane * Capacity + i)];
+      EXPECT_GT(value, 0.0f);
+      sum += value;
+    }
+    EXPECT_NEAR(sum, 1.0, 3e-5);
+  }
+}
+
+TEST(SoftmaxPreparedTest, SupportsRankTwoBfloat16InPlaceWithMaskedColumns) {
+  constexpr nint_t Parallelism = 1;
+  constexpr nint_t Rows = 5;
+  constexpr nint_t Columns = 5;
+  std::array<vecops::bfloat16_t, Rows * Columns> values{};
+  for (nint_t row = 0; row < Rows; ++row) {
+    for (nint_t column = 0; column < Columns; ++column) {
+      values[static_cast<std::size_t>(row * Columns + column)] =
+          column == 2
+              ? vecops::bfloat16_t{-std::numeric_limits<float>::infinity()}
+              : vecops::bfloat16_t{static_cast<float>(row + column) / 7.0f};
+    }
+  }
+
+  const auto shape = make_shape(meta::cint<Rows>, meta::cint<Columns>);
+  auto tensor = make_tensor(values.data(), shape);
+  execution::WorkspaceContext tracing{
+      execution::trace_workspace, "prepared_softmax_rank2_in_place"};
+  auto trace_operation = softmax().template prepare<Parallelism>(
+      tracing, "softmax_scratch",
+      tensor::unbind(tensor::input<float32_t>(tensor)),
+      tensor::unbind(tensor::output<float32_t>(tensor)));
+  trace_operation(execution::TaskContext<Parallelism>{0}, tensor, tensor);
+  auto placement = execution::place_workspace(tracing.finish_trace());
+  kernel::Workspace arena(placement.fast_bytes);
+  auto arena_view = arena.view();
+  void* arena_base = arena_view.allocate(
+      placement.fast_bytes, vec::DEFAULT_ALIGNMENT);
+  execution::BoundWorkspacePlan bound{
+      placement, arena_base, placement.fast_bytes, nullptr, 0};
+  execution::WorkspaceContext replay{
+      "prepared_softmax_rank2_in_place", bound};
+
+  for (nint_t row = 0; row < Rows; ++row) {
+    for (nint_t column = 0; column < Columns; ++column) {
+      values[static_cast<std::size_t>(row * Columns + column)] =
+          column == 2
+              ? vecops::bfloat16_t{-std::numeric_limits<float>::infinity()}
+              : vecops::bfloat16_t{static_cast<float>(row + column) / 7.0f};
+    }
+  }
+  auto replay_operation = softmax().template prepare<Parallelism>(
+      replay, "softmax_scratch",
+      tensor::unbind(tensor::input<float32_t>(tensor)),
+      tensor::unbind(tensor::output<float32_t>(tensor)));
+  replay_operation(execution::TaskContext<Parallelism>{0}, tensor, tensor);
+
+  for (nint_t row = 0; row < Rows; ++row) {
+    float sum = 0.0f;
+    for (nint_t column = 0; column < Columns; ++column) {
+      const float value = static_cast<float>(
+          values[static_cast<std::size_t>(row * Columns + column)]);
+      EXPECT_TRUE(std::isfinite(value));
+      EXPECT_GE(value, 0.0f);
+      sum += value;
+    }
+    EXPECT_NEAR(sum, 1.0f, 2e-2f);
+  }
+}
+
+#if defined(HAS_AMX_BF16) || defined(HAS_SME)
+TEST(SoftmaxPreparedTest,
+     InPlaceBfloat16ThenPackMatchesLegacyAcrossTraceReplayAndLaneCounts) {
+  ASSERT_TRUE(test::matmul::MatmulTestArchTraits::enable());
+  const auto logits = make_softmax_pack_logits();
+  const auto legacy = run_legacy_softmax_pack(logits);
+  auto [one_lane_trace, one_lane_replay] =
+      run_prepared_softmax_pack_trace_replay<1>(logits);
+  auto [four_lane_trace, four_lane_replay] =
+      run_prepared_softmax_pack_trace_replay<4>(logits);
+
+  expect_softmax_pack_result(one_lane_trace, legacy, logits,
+                             "one-lane trace");
+  expect_softmax_pack_result(one_lane_replay, legacy, logits,
+                             "one-lane replay");
+  expect_softmax_pack_result(four_lane_trace, legacy, logits,
+                             "four-lane trace");
+  expect_softmax_pack_result(four_lane_replay, legacy, logits,
+                             "four-lane replay");
+}
+#endif
 
 TEST(SoftmaxDTypeTest, CoversAllFloatInputOutputCombinationsAndModes) {
   run_all_dtype_combos<vec::Accuracy::Strict>(SoftmaxFloatTypes{});
@@ -638,6 +1007,18 @@ TEST(SoftmaxNumericsTest, HandlesNegativeInfinity) {
   softmax()(input<vecops::float32_t>(x_t), output<vecops::float32_t>(y_t));
   EXPECT_FLOAT_EQ(out[1], 0.0f);
   EXPECT_NEAR(out[0] + out[2], 1.0f, 3e-5f);
+}
+
+TEST(SoftmaxNumericsTest, HandlesEntireBfloat16RowAtFiniteMaskValue) {
+  constexpr nint_t n = 5;
+  std::array<vecops::bfloat16_t, n> values{};
+  values.fill(vecops::bfloat16_t{-1e9f});
+  auto tensor = make_tensor(values.data(), make_shape(cint<n>));
+  softmax()(input<float32_t>(tensor), output<float32_t>(tensor));
+  for (const auto value : values) {
+    EXPECT_TRUE(std::isfinite(static_cast<float>(value)));
+    EXPECT_NEAR(static_cast<float>(value), 0.2f, 2e-3f);
+  }
 }
 
 TEST(SoftmaxWorkspaceTest, SpecWorkspaceHandlesStridedRows) {

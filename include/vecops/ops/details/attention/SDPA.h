@@ -248,12 +248,10 @@ private:
     const auto dv_extent = tensor::size<1>(v.input_layout());
     auto q_block = tensor::narrow_view<0>(q, 0, block_extent);
     auto out_block = tensor::narrow_view<0>(out, 0, block_extent);
-    auto* score_ptr = static_cast<Score*>(nullptr);
-    auto* probability_ptr = static_cast<Probability*>(nullptr);
-    auto score_tensor = tensor::make_tensor(
-        score_ptr, tensor::make_shape(block_extent, lkv_extent));
-    auto probability_tensor = tensor::make_tensor(
-        probability_ptr, tensor::make_shape(block_extent, lkv_extent));
+    auto score_tensor = tensor::make_unbound_tensor<Score>(
+        tensor::make_shape(block_extent, lkv_extent));
+    auto probability_tensor = tensor::make_unbound_tensor<Probability>(
+        tensor::make_shape(block_extent, lkv_extent));
     auto v_transposed = tensor::transpose_view<0, 1>(v);
     MatmulOp matmul_op{config.matmul};
     const nint_t qk_bytes = matmul_op.required_workspace(

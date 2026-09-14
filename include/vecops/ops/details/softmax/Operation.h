@@ -4,11 +4,14 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string_view>
 #include <type_traits>
+#include <utility>
 
 #include "vecops/Assertion.h"
 #include "vecops/CoreTypes.h"
 #include "vecops/execution/ExecutionSession.h"
+#include "vecops/execution/Parallel.h"
 #include "vecops/kernel/Loop.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/tensor/DataAccess.h"
@@ -141,6 +144,86 @@ public:
 
   VECOPS_INLINE constexpr explicit Softmax(Config cfg = {})
     : config(cfg) {
+  }
+
+  /**
+   * Address-independent Softmax plan with one private scratch replica per
+   * logical lane. The planning Specs carry layout capacity only; every call
+   * rebinds them to an actual Tensor/Spec and validates that dynamic extents
+   * do not exceed that capacity.
+   */
+  template <nint_t Parallelism, typename InPattern, typename OutPattern,
+            typename WorkerScratch>
+  class PatternPrepared {
+  public:
+    static_assert(Parallelism > 0,
+                  "prepared Softmax parallelism must be positive");
+    using ResourceRequirements = typename Softmax::ResourceRequirements;
+
+    VECOPS_INLINE PatternPrepared(
+        Config config, InPattern in, OutPattern out,
+        WorkerScratch worker_scratch, nint_t workspace_bytes)
+      : config_(std::move(config))
+      , in_(std::move(in))
+      , out_(std::move(out))
+      , worker_scratch_(std::move(worker_scratch))
+      , workspace_bytes_(workspace_bytes) {
+    }
+
+    template <tensor::InputOperand In, tensor::OutputOperand Out>
+      requires (tensor::is_bound_tensor_view_v<In> &&
+                tensor::is_bound_tensor_view_v<Out>)
+    VECOPS_INLINE void operator()(
+        execution::TaskContext<Parallelism> task,
+        In&& in, Out&& out) const {
+      auto active_in = tensor::rebind(in_, std::forward<In>(in));
+      auto active_out = tensor::rebind(out_, std::forward<Out>(out));
+      const nint_t active_bytes = Softmax{config_}.required_workspace(
+          active_in, active_out);
+      VECOPS_CHECK(
+          active_bytes <= workspace_bytes_,
+          "active Softmax scratch exceeds its planning-pattern capacity");
+      auto scratch = task.local(worker_scratch_);
+      kernel::WorkspaceView workspace{scratch.data(), workspace_bytes_};
+      ExecutionSession execution{workspace};
+      Softmax{config_}(execution, active_in, active_out);
+    }
+
+  private:
+    Config config_;
+    InPattern in_;
+    OutPattern out_;
+    WorkerScratch worker_scratch_;
+    nint_t workspace_bytes_ = 0;
+  };
+
+  /** Prepare Softmax from storage-less operand patterns. */
+  template <nint_t Parallelism, typename WorkspaceAuthority,
+            tensor::UnboundInputSpecLike InPattern,
+            tensor::UnboundOutputSpecLike OutPattern>
+    requires requires(WorkspaceAuthority& authority, nint_t bytes) {
+      authority.template worker_tensor<std::byte, Parallelism>(
+          std::string_view{}, tensor::make_shape(meta::Any{bytes}));
+    }
+  VECOPS_INLINE auto prepare(
+      WorkspaceAuthority& parent, std::string_view site_name,
+      InPattern&& in, OutPattern&& out) const {
+    using In = std::remove_cvref_t<InPattern>;
+    using Out = std::remove_cvref_t<OutPattern>;
+    static_assert(std::same_as<typename In::ComputeType, ComputeType>,
+                  "Softmax input pattern compute type must match Config");
+    static_assert(std::same_as<typename Out::ComputeType, ComputeType>,
+                  "Softmax output pattern compute type must match Config");
+    auto in_pattern = std::forward<InPattern>(in);
+    auto out_pattern = std::forward<OutPattern>(out);
+    const nint_t bytes = required_workspace(in_pattern, out_pattern);
+    auto scratch = parent.template worker_tensor<std::byte, Parallelism>(
+        site_name, tensor::make_shape(meta::Any{bytes}));
+    return PatternPrepared<
+        Parallelism, decltype(in_pattern), decltype(out_pattern),
+        decltype(scratch)>{
+          config, std::move(in_pattern), std::move(out_pattern),
+          std::move(scratch), bytes};
   }
 
   /** Centers an already-loaded block, exponentiates it, and caches it.

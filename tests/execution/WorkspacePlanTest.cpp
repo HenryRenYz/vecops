@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include "vecops/execution/WorkspacePlan.h"
@@ -97,6 +98,13 @@ TEST(WorkspacePlanTest, RepeatedDynamicSiteWidensCapacityAndReplicas) {
     bound.find(site, {.bytes = 65, .alignment = 16, .domain = WorkspaceDomain::WorkerLocal, .replicas = 3});
   EXPECT_GE(smaller.bytes, 97);
   EXPECT_GE(smaller.replicas, 4);
+}
+
+TEST(WorkspacePlanTest, SimultaneouslyLiveDuplicateSiteIsRejectedInReleaseBuilds) {
+  WorkspaceTrace trace{"duplicate-live-site"};
+  auto phase = trace.serial_scope("phase");
+  trace.request("scratch", {.bytes = 64});
+  EXPECT_THROW(trace.request("scratch", {.bytes = 64}), std::runtime_error);
 }
 
 TEST(WorkspacePlanTest, DynamicAxisAndDecisionFingerprintGuardReplay) {

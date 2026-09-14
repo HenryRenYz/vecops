@@ -224,6 +224,144 @@ rejected; compilation itself is concurrent and starts only after collection
 has ended. A model that stores intermediate tensors in application-level
 caches should clear or restore those caches after the tracing pass.
 
+### Framework-neutral execution graph capture
+
+Pass `capture_graph=True` to reuse the same FakeTensor or real-tensor model
+trace for memory analysis:
+
+```python
+result = vecops.precompile(
+  model,
+  inputs,
+  capture_graph=True,
+  graph_name="encoder-bucket-512",
+)
+execution_graph = result.graph
+execution_graph.write("encoder-bucket-512.json")
+```
+
+`ExecutionGraph` contains only plain Python dataclasses and JSON-compatible
+values; it has no Torch dependency. Its ordered events record operator names,
+stable logical scopes, formal argument access (`read`, `write`, or
+`read_write`), and storage versions. A `TensorValue` represents one logical
+view while `StorageValue` groups every alias of the same allocation. Finalized
+logical lifetimes end at the last semantic access; storage lifetimes are the
+union of all alias lifetimes and extend to graph exit for persistent or escaped
+values.
+
+The optional Torch adapter observes dispatcher operations, so allocations
+implied by result-producing operations such as `add`, `mm`, `contiguous`, and
+custom operators are visible even when there is no explicit `aten::empty`.
+Real and FakeTensor storage identities provide the primary alias relation;
+operator schemas provide a fallback for declared view returns. Consequently,
+conditional cases such as `contiguous()` and `to()` are resolved against the
+concrete precompile shape, stride, dtype, and device: a no-op result retains the
+input identity, while an actual conversion records a new allocation. Graph input
+and output lists preserve pytree leaf order and repeated slots, even when several
+formal arguments or results refer to the same logical tensor. Named module
+parameters and buffers are registered as persistent state before execution; tied
+state retains every qualified name without duplicating its tensor or storage.
+Vecops calls short-circuited by precompilation are emitted directly with their
+KernelDef `In`/`Out`/`InOut` contracts.
+
+Frameworks and model libraries may add stable hierarchy and information that
+an operator dispatcher cannot infer:
+
+```python
+from vecops import graph
+
+@graph.wrap_region(name="transformer.block")
+def block(...):
+  ...
+
+loop = graph.declare_loop("transformer.layers", 48)
+with loop.iteration(0, role="prologue"):
+  ...
+loop.close()
+
+graph.mark_alias(view, base, kind="model-declared")
+graph.mark_tensor(weight, persistent=True, read_only=True)
+graph.mark_retained(cached_value, reason="decoder KV cache")
+```
+
+All annotations are no-ops outside an active capture. Loop declarations retain
+the full trip count separately from observed iterations, allowing a model's
+precompile path to sample cold and steady-state iterations without pretending
+that the shortened trace is the complete execution. The capture layer does not
+choose memory tiers or allocate physical arenas; those are consumers of the
+serialized IR.
+
+`mark_retained` is intended for Python-side caches that outlive a tensor's last
+observed operator access. It extends the tensor and its complete alias storage
+group to graph exit without classifying the value as a model output.
+
+### Offline HBM/DDR planning
+
+`vecops.planner` consumes a concrete `ExecutionGraph` without importing Torch.
+The production entry point accepts an explicit machine profile and returns a
+pointer-free, serializable plan:
+
+```python
+from vecops import planner
+
+machine = planner.profile_from_system(
+  memory_system,
+  fast_capacity=3 << 30,
+  slow_capacity=64 << 30,
+  fast_bandwidth_mib_s=295_578,
+  slow_bandwidth_mib_s=153_324,
+  transfer_bandwidth_mib_s=148_797,
+)
+plan = planner.plan_memory(execution_graph, machine)
+planner.validate_plan(execution_graph, plan)
+plan.write("model.memory-plan.json")
+```
+
+The planner collapses tensor aliases to storage groups, scales access benefit
+through sampled loop trip counts, selects HBM intervals under a hard capacity,
+colors non-overlapping lifetimes into reusable arena offsets, and emits ordered
+allocate/copy/free actions. Read-only external state has a DDR home and an HBM
+replica; graph outputs remain in DDR. A plan embeds the exact graph digest and
+is rejected if replayed with another trace.
+
+The equivalent CLI is:
+
+```sh
+python -m vecops.planner model.graph.json \
+  --output model.plan.json \
+  --report model.plan-summary.json \
+  --discover-system \
+  --fast-capacity 3GiB \
+  --slow-capacity 64GiB \
+  --fast-bandwidth-mib-s 295578 \
+  --slow-bandwidth-mib-s 153324 \
+  --transfer-bandwidth-mib-s 148797
+```
+
+The explicit bandwidth values above are an example of measured target data.
+When omitted, `profile_from_system()` retains topology-provided values. Use
+measured values for production scoring because rated topology bandwidth can
+substantially overstate the fast/slow ratio seen by the intended thread count.
+
+`planner.PlanSession` binds the plan to `vecops.memory` arenas. It can
+materialize strided Torch views with `tensor_view()` and temporarily replace
+selected read-only module parameters/buffers with HBM replicas through
+`bind_module_state()`. Session exit restores the original module state and
+releases both arenas, including exceptional exits.
+
+Framework wrappers may call `planner.empty()` and `planner.empty_like()` as
+drop-in factory functions. With factory replay enabled, `PlanSession` allocates
+the complete planned HBM peak once and returns prebuilt views at fixed offsets;
+without a session they directly forward to Torch. Sampled steady-state loops
+are replayed by runtime epochs, and temporaries whose aliases escape an
+iteration are excluded by `PlannerConfig(require_replayable_temporaries=True)`.
+
+`planner.audit_plan(graph, plan)` reports coverage for parameters, buffers, and
+packed buffers, including accessed bytes and DDR-to-HBM copy actions. Its
+`movement` section also reports duplicate copies, low-reuse copies, and
+HBM-to-DDR copy-backs. Read-only state remains a clean DDR-backed replica and
+never receives an unnecessary HBM-to-DDR writeback.
+
 ## Framework registration
 
 A qualified framework name and ordered recipe sequence create one logical
@@ -286,3 +424,26 @@ run = vecops.ops.numpy.register(
   compiler=compiler,
 )
 ```
+
+## Heterogeneous CPU memory
+
+When the optional `vecops::memory` component is built, Python exports
+`vecops.memory.System`, owning buffers, NumPy factories, topology/tiers/stats,
+and a bounded workspace session. The memory module is absent when
+`VECOPS_BUILD_MEMORY=OFF`; importing ordinary vecops APIs remains unchanged.
+
+```python
+system = vecops.memory.System(
+  target_overrides=[
+    {"os_numa_id": 16, "kind": "hbm", "max_managed_bytes": 3 << 30},
+  ],
+)
+
+with system.workspace_session(fast_capacity=3 << 30, slow_capacity=8 << 30):
+  result = model(inputs)
+```
+
+The single-use session affects registered Python operators and framework
+bridges on the calling thread. It freezes the CPU domain, owns one shared arena
+per tier, and releases both on exit. It does not replace the process allocator.
+See `docs/Memory.md` for placement and lifetime semantics.

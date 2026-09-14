@@ -450,6 +450,47 @@ struct FindIndexInPack<I, Target, T0, Ts...> {
 
 } // namespace details
 
+// ======================== Tensor bindings ========================
+
+/**
+ * @brief Storage-less binding used by tensor patterns.
+ *
+ * An unbound Tensor keeps the same element type and Layout as a normal Tensor,
+ * but cannot expose data or perform scalar element access.  The element offset
+ * is retained while slicing so a pattern can later be rebound to a base
+ * pointer without losing its structural origin.
+ */
+struct UnboundBinding {
+  nint_t element_offset = 0;
+
+  VECOPS_ALWAYS_INLINE constexpr UnboundBinding advanced(nint_t offset) const {
+    return UnboundBinding{element_offset + offset};
+  }
+};
+
+namespace details {
+
+template <typename T>
+struct PointerBinding {
+  T* pointer;
+
+  VECOPS_ALWAYS_INLINE constexpr PointerBinding advanced(nint_t offset) const {
+    return PointerBinding{pointer + offset};
+  }
+};
+
+template <typename T>
+struct IsPointerBinding : std::false_type {};
+
+template <typename T>
+struct IsPointerBinding<PointerBinding<T>> : std::true_type {};
+
+template <typename T>
+inline constexpr bool is_pointer_binding_v =
+    IsPointerBinding<std::remove_cvref_t<T>>::value;
+
+} // namespace details
+
 // ======================== Tensor ========================
 
 /**
@@ -525,7 +566,12 @@ struct FindIndexInPack<I, Target, T0, Ts...> {
  * @tparam TShape   Shape type (rank N).
  * @tparam TStrides Strides type (rank N).
  */
-template <typename T, typename TShape, typename TStrides>
+template <
+    typename T,
+    typename TShape,
+    typename TStrides,
+    typename TBinding = details::PointerBinding<T>
+>
 class Tensor {
   static_assert(is_shape_v<TShape>, "TShape must be Shape<...>");
   static_assert(is_strides_v<TStrides>, "TStrides must be Strides<...>");
@@ -537,6 +583,12 @@ public:
   using Stride = TStrides;
   using Layout = tensor::Layout<TShape, TStrides>;
   using ElementType = T;
+  using Binding = TBinding;
+  static constexpr bool is_bound = details::is_pointer_binding_v<Binding>;
+  static constexpr bool is_unbound = std::same_as<Binding, UnboundBinding>;
+
+  static_assert(is_bound || is_unbound,
+                "Tensor binding must be PointerBinding<T> or UnboundBinding");
 
   // -------- Construction --------
 
@@ -548,7 +600,8 @@ public:
    * @param strides Strides descriptor.
    */
   constexpr Tensor(T* data, TShape shape, TStrides strides)
-      : _data(data), _layout(Layout{shape, strides}) {}
+    requires std::same_as<Binding, details::PointerBinding<T>>
+      : _binding{data}, _layout(Layout{shape, strides}) {}
 
   /**
    * Construct from data pointer and a pre-built Layout.
@@ -557,7 +610,17 @@ public:
    * @param layout Layout descriptor.
    */
   constexpr Tensor(T* data, Layout layout)
-      : _data(data), _layout(layout) {}
+    requires std::same_as<Binding, details::PointerBinding<T>>
+      : _binding{data}, _layout(layout) {}
+
+  /** Internal/common construction path preserving a binding across views. */
+  constexpr Tensor(Binding binding, Layout layout)
+      : _binding(binding), _layout(layout) {}
+
+  /** Construct a storage-less tensor pattern from a Layout. */
+  constexpr explicit Tensor(Layout layout)
+    requires std::same_as<Binding, UnboundBinding>
+      : _binding{}, _layout(layout) {}
 
   /**
    * Construct from raw initializer_lists for shape and strides.
@@ -571,6 +634,7 @@ public:
       std::initializer_list<nint_t> shape_vals,
       std::initializer_list<nint_t> stride_vals
   )
+    requires std::same_as<Binding, details::PointerBinding<T>>
       : Tensor(data, make_layout<Ndim>(shape_vals, stride_vals)) {}
 
   /**
@@ -586,7 +650,8 @@ public:
       T* data,
       std::initializer_list<nint_t> shape_vals
   )
-      : _data(data),
+    requires std::same_as<Binding, details::PointerBinding<T>>
+      : _binding{data},
         _layout(
             [&] {
               VECOPS_ASSERT(shape_vals.size() == Ndim, "shape_vals.size() != Ndim");
@@ -604,7 +669,16 @@ public:
   // -------- Data access --------
 
   /// Get the raw pointer while preserving the Tensor element cv-qualification.
-  VECOPS_ALWAYS_INLINE constexpr T* data() const { return _data; }
+  VECOPS_ALWAYS_INLINE constexpr T* data() const
+    requires (is_bound) {
+    return _binding.pointer;
+  }
+
+  /// Element displacement from the base pointer retained by an unbound view.
+  VECOPS_ALWAYS_INLINE constexpr nint_t element_offset() const
+    requires (is_unbound) {
+    return _binding.element_offset;
+  }
 
   // -------- Dimension access --------
 
@@ -724,8 +798,9 @@ public:
    *          assertion failures.
    */
   template <typename TShape2, typename TStrides2>
-  constexpr Tensor<T, TShape2, TStrides2> as() const {
-    return make_tensor(_data, _layout.template as<TShape2, TStrides2>());
+  constexpr Tensor<T, TShape2, TStrides2, Binding> as() const {
+    return Tensor<T, TShape2, TStrides2, Binding>(
+        _binding, _layout.template as<TShape2, TStrides2>());
   }
 
   // -------- Implicit conversion --------
@@ -750,7 +825,7 @@ public:
    */
   template <typename TShape2, typename TStrides2>
   requires (!(std::same_as<Shape, TShape2> && std::same_as<Stride, TStrides2>) && details::IsMoreLenientMeta<Shape, TShape2>::value && details::IsMoreLenientMeta<Stride, TStrides2>::value)
-  constexpr operator Tensor<T, TShape2, TStrides2>() const {
+  constexpr operator Tensor<T, TShape2, TStrides2, Binding>() const {
     return as<TShape2, TStrides2>();
   }
 
@@ -779,8 +854,10 @@ public:
    * @tparam TIndices  Index types (int, ReserveAxis, NewAxis, Range, Ellipsis).
    * @param  indices   Per-dimension slicing indices.
    * @return Element reference (all-integer) or Tensor sub-view (mixed).
-   */
+  */
   template <typename... TIndices>
+    requires (is_bound ||
+              !(std::is_integral_v<std::decay_t<TIndices>> && ...))
   constexpr decltype(auto) operator()(TIndices... indices) const {
     if constexpr (details::has_ellipsis_v<TIndices...>) {
       static_assert(details::count_ellipsis_v<TIndices...> == 1,
@@ -793,7 +870,7 @@ public:
       }
     } else if constexpr ((std::is_integral_v<std::decay_t<TIndices>> && ...)) {
       nint_t offset = offset_at(_layout, indices...);
-      return _data[offset];
+      return _binding.pointer[offset];
     } else {
       using Traits = details::SlicedTraitsImpl<Shape, Stride, std::decay_t<TIndices>...>;
       using RetShape = typename Traits::NewShape;
@@ -801,15 +878,19 @@ public:
       constexpr int new_ndim = RetShape::Ndim;
 
       auto [ns, nt, offset] = _slice_make_meta<RetShape, RetStrides>(indices...);
-      return make_tensor(_data + offset, ns, nt);
+      return Tensor<T, RetShape, RetStrides, Binding>(
+          _binding.advanced(offset),
+          tensor::Layout<RetShape, RetStrides>{ns, nt});
     }
   }
 
   /**
    * @brief Non-const overload: for all-integer indices, returns a mutable
    *        element reference; otherwise delegates to the const version.
-   */
+  */
   template <typename... TIndices>
+    requires (is_bound ||
+              !(std::is_integral_v<std::decay_t<TIndices>> && ...))
   constexpr decltype(auto) operator()(TIndices... indices) {
     if constexpr ((std::is_integral_v<std::decay_t<TIndices>> && ...)) {
       nint_t offset = offset_at(_layout, indices...);
@@ -992,7 +1073,7 @@ private:
     };
   }
 
-  T* _data;
+  Binding _binding;
   Layout _layout;
 };
 
@@ -1003,6 +1084,16 @@ inline constexpr bool is_tensor_v = is_specialization_of_v<Tensor, T>;
 /** Constraint-facing wrapper for is_tensor_v. */
 template <typename T>
 concept TensorLike = is_tensor_v<std::remove_cvref_t<T>>;
+
+/** A Tensor backed by an address and therefore usable for data access. */
+template <typename T>
+concept BoundTensorLike =
+    TensorLike<T> && std::remove_cvref_t<T>::is_bound;
+
+/** A storage-less Tensor carrying only element/layout/access metadata. */
+template <typename T>
+concept UnboundTensorLike =
+    TensorLike<T> && std::remove_cvref_t<T>::is_unbound;
 
 /** A Tensor with an exact logical rank and memory element type.
  *
@@ -1028,6 +1119,7 @@ concept TensorOf = is_tensor_of_v<Tensor, Element, Rank>;
 template <typename Tensor, typename Element, int Rank>
 concept WritableTensorOf =
     TensorOf<Tensor, Element, Rank> &&
+    BoundTensorLike<Tensor> &&
     !std::is_const_v<
         typename std::remove_cvref_t<Tensor>::ElementType>;
 
@@ -1067,6 +1159,10 @@ template <typename T, int64_t N>
 using Array = Tensor<T,
     details::repeat_t<N, Shape, Any>,
     details::repeat_t<N, Strides, Any>>;
+
+/** Storage-less counterpart of Tensor, used to describe an operand pattern. */
+template <typename T, typename TShape, typename TStrides>
+using TensorPattern = Tensor<T, TShape, TStrides, UnboundBinding>;
 
 // ======================== make_tensor ========================
 
@@ -1172,16 +1268,79 @@ constexpr auto make_tensor(
   return make_tensor(data, make_layout<Ndim>(shape_vals));
 }
 
+// ======================== unbound tensor patterns ========================
+
+/** Create a storage-less Tensor from a Layout. */
+template <typename T, LayoutLike TLayout>
+constexpr auto make_unbound_tensor(TLayout&& layout) {
+  using L = std::remove_cvref_t<TLayout>;
+  return TensorPattern<T, typename L::Shape, typename L::Strides>(
+      std::forward<TLayout>(layout));
+}
+
+/** Create a storage-less Tensor from typed Shape and Strides. */
+template <typename T, typename TShape, typename TStrides>
+constexpr auto make_unbound_tensor(TShape&& shape, TStrides&& strides) {
+  return make_unbound_tensor<T>(
+      make_layout(std::forward<TShape>(shape),
+                  std::forward<TStrides>(strides)));
+}
+
+/** Create a contiguous storage-less Tensor from a typed Shape. */
+template <typename T, typename TShape>
+  requires (is_shape_v<std::remove_cvref_t<TShape>>)
+constexpr auto make_unbound_tensor(TShape&& shape) {
+  return make_unbound_tensor<T>(make_layout(std::forward<TShape>(shape)));
+}
+
+/**
+ * Drop the storage binding while preserving element type and Layout.
+ *
+ * The returned pattern starts at element offset zero.  Subsequent slicing
+ * records its displacement so `bind()` can recover the corresponding view.
+ */
+template <typename T, typename TShape, typename TStrides, typename TBinding>
+constexpr auto unbind(const Tensor<T, TShape, TStrides, TBinding>& tensor) {
+  if constexpr (std::same_as<TBinding, UnboundBinding>) {
+    return tensor;
+  } else {
+    return TensorPattern<T, TShape, TStrides>(tensor.layout());
+  }
+}
+
+/** Bind a tensor pattern, including any displacement accumulated by slicing. */
+template <typename T, typename TShape, typename TStrides>
+constexpr auto bind(
+    const TensorPattern<T, TShape, TStrides>& pattern,
+    T* base
+) {
+  return make_tensor(base + pattern.element_offset(), pattern.layout());
+}
+
 /** @brief Keep the first N dimensions at the zero coordinate of trailing axes. */
-template <int N, typename T, typename TShape, typename TStrides>
-constexpr auto take_leading(const Tensor<T, TShape, TStrides>& tensor) {
-  return make_tensor(tensor.data(), take_leading<N>(tensor.layout()));
+template <int N, typename T, typename TShape, typename TStrides, typename TBinding>
+constexpr auto take_leading(const Tensor<T, TShape, TStrides, TBinding>& tensor) {
+  auto new_layout = take_leading<N>(tensor.layout());
+  if constexpr (std::same_as<TBinding, UnboundBinding>) {
+    using L = decltype(new_layout);
+    return Tensor<T, typename L::Shape, typename L::Strides, TBinding>(
+        TBinding{tensor.element_offset()}, new_layout);
+  } else {
+    return make_tensor(tensor.data(), new_layout);
+  }
 }
 
 /** @brief Keep the last N dimensions at the zero coordinate of leading axes. */
-template <int N, typename T, typename TShape, typename TStrides>
-constexpr auto take_trailing(const Tensor<T, TShape, TStrides>& tensor) {
-  return make_tensor(tensor.data(), take_trailing<N>(tensor.layout()));
+template <int N, typename T, typename TShape, typename TStrides, typename TBinding>
+constexpr auto take_trailing(const Tensor<T, TShape, TStrides, TBinding>& tensor) {
+  auto new_layout = take_trailing<N>(tensor.layout());
+  if constexpr (std::same_as<TBinding, UnboundBinding>) {
+    using L = decltype(new_layout);
+    return Tensor<T, typename L::Shape, typename L::Strides, TBinding>(
+        TBinding{tensor.element_offset()}, new_layout);
+  } else {
+    return make_tensor(tensor.data(), new_layout);
+  }
 }
 
 // ======================== Transpose ========================
@@ -1197,15 +1356,21 @@ constexpr auto take_trailing(const Tensor<T, TShape, TStrides>& tensor) {
  * @param  t       The Tensor to transpose.
  * @return A new Tensor with dimensions I and J swapped.
  */
-template <int I, int J, typename T, typename TShape, typename TStrides>
-constexpr auto transpose(const Tensor<T, TShape, TStrides>& t) {
+template <int I, int J, typename T, typename TShape, typename TStrides, typename TBinding>
+constexpr auto transpose(const Tensor<T, TShape, TStrides, TBinding>& t) {
   auto new_layout = tensor::transpose<I, J>(t.layout());
-  return make_tensor(t.data(), new_layout);
+  if constexpr (std::same_as<TBinding, UnboundBinding>) {
+    using L = decltype(new_layout);
+    return Tensor<T, typename L::Shape, typename L::Strides, TBinding>(
+        TBinding{t.element_offset()}, new_layout);
+  } else {
+    return make_tensor(t.data(), new_layout);
+  }
 }
 
 /** Compile-time structural view spelling shared with Spec/DataAccess. */
-template <int I, int J, typename T, typename TShape, typename TStrides>
-constexpr auto transpose_view(const Tensor<T, TShape, TStrides>& tensor) {
+template <int I, int J, typename T, typename TShape, typename TStrides, typename TBinding>
+constexpr auto transpose_view(const Tensor<T, TShape, TStrides, TBinding>& tensor) {
   return transpose<I, J>(tensor);
 }
 
@@ -1227,10 +1392,16 @@ constexpr auto transpose_view(const Tensor<T, TShape, TStrides>& tensor) {
  * @return A new Tensor with dimensions i and j swapped and common metadata
  *         constraints retained.
  */
-template <typename T, typename TShape, typename TStrides>
-constexpr auto transpose(const Tensor<T, TShape, TStrides>& t, int i, int j) {
+template <typename T, typename TShape, typename TStrides, typename TBinding>
+constexpr auto transpose(const Tensor<T, TShape, TStrides, TBinding>& t, int i, int j) {
   auto new_layout = tensor::transpose(t.layout(), i, j);
-  return make_tensor(t.data(), new_layout);
+  if constexpr (std::same_as<TBinding, UnboundBinding>) {
+    using L = decltype(new_layout);
+    return Tensor<T, typename L::Shape, typename L::Strides, TBinding>(
+        TBinding{t.element_offset()}, new_layout);
+  } else {
+    return make_tensor(t.data(), new_layout);
+  }
 }
 
 // ======================== cast ========================
@@ -1251,8 +1422,8 @@ constexpr auto transpose(const Tensor<T, TShape, TStrides>& t, int i, int j) {
  * @param t          Source Tensor.
  * @return A new Tensor with the specified type parameters.
  */
-template <typename TShape2, typename TStrides2, typename T, typename TShape, typename TStrides>
-constexpr auto cast(const Tensor<T, TShape, TStrides>& t) {
+template <typename TShape2, typename TStrides2, typename T, typename TShape, typename TStrides, typename TBinding>
+constexpr auto cast(const Tensor<T, TShape, TStrides, TBinding>& t) {
   return t.template as<TShape2, TStrides2>();
 }
 
@@ -1271,8 +1442,8 @@ constexpr auto cast(const Tensor<T, TShape, TStrides>& t) {
  * @param  t       The Tensor.
  * @return `true` if the last N dimensions are row-major contiguous.
  */
-template <int N = 1, typename T, typename TShape, typename TStrides>
-bool is_last_contiguous(const Tensor<T, TShape, TStrides>& t) {
+template <int N = 1, typename T, typename TShape, typename TStrides, typename TBinding>
+bool is_last_contiguous(const Tensor<T, TShape, TStrides, TBinding>& t) {
   return t.template is_last_contiguous<N>();
 }
 
@@ -1285,8 +1456,8 @@ bool is_last_contiguous(const Tensor<T, TShape, TStrides>& t) {
  * @param  t       The Tensor.
  * @return `true` if the Tensor is fully row-major contiguous.
  */
-template <typename T, typename TShape, typename TStrides>
-bool is_contiguous(const Tensor<T, TShape, TStrides>& t) {
+template <typename T, typename TShape, typename TStrides, typename TBinding>
+bool is_contiguous(const Tensor<T, TShape, TStrides, TBinding>& t) {
   return t.is_contiguous();
 }
 

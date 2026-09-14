@@ -6,7 +6,7 @@ split:
 
 | File | Role |
 |---|---|
-| `Tensor.h` | `Tensor<T, Shape, Strides>` — a **non-owning** view over memory with typed layout and rich slicing |
+| `Tensor.h` | `Tensor<T, Shape, Strides, Binding>` — one typed layout/view abstraction with either a pointer or storage-free binding |
 | `AccessOptions.h` | shared vocabulary: coordinates, axis tags, lane mappings, operand facts |
 | `AccessPolicy.h` | kernel-owned compile-time policies (vector axis, read passes, access plan) and access defaults |
 | `Transform.h` | pure vector transforms (prologue/epilogue functions) with a coordinate context |
@@ -80,11 +80,11 @@ Two honest caveats on that "near-intrinsic" claim:
 
 ### Tensor: a typed, non-owning view
 
-`Tensor<T, TShape, TStrides>` pairs `T*` with a `Layout`. Pointer
-cv-qualification is part of the type: a view built from `const float*` is
-read-only forever (no `const_cast` anywhere); output Specs reject const
-elements at compile time. `Array<T, N>` is the fully-dynamic spelling
-(all dimensions `Any`).
+`Tensor<T, TShape, TStrides, Binding>` pairs one binding with a `Layout`.
+For pointer-bound views, pointer cv-qualification is part of the type: a view
+built from `const float*` is read-only forever (no `const_cast` anywhere), and
+output Specs reject const elements at compile time. `Array<T, N>` is the
+fully-dynamic bound spelling (all dimensions `Any`).
 
 For fixed axes, prefer `tensor::size<I>(tensor_or_layout)` and
 `tensor::stride<I>(tensor_or_layout)` over indexing `shape()[I]` or
@@ -94,6 +94,58 @@ degraded `nint_t`), so `auto` preserves the layout's `meta::Const`/
 The resulting Value also converts implicitly to `nint_t` at runtime-only
 boundaries such as pointer arithmetic, workspace byte counts, or a loop trip
 count; retain it in an `auto` variable until such a boundary.
+
+The fourth template argument is normally inferred. It selects the binding of
+the same `Tensor` abstraction; it does not select a second descriptor class. A
+bound tensor uses `PointerBinding<T>` and may access storage. An unbound tensor
+uses `UnboundBinding`: it retains the element type, `Shape`, `Strides`, slicing,
+transpose, and projection types, but contains only a logical element offset
+and has no `data()` or scalar-dereference API. Consequently planning does not
+need a separate `TensorDesc` hierarchy that duplicates Tensor and DataAccess
+metadata.
+
+```cpp
+auto actual = make_tensor(data, make_shape(Dynamic<1, 1, 128>{rows}, cint<64>));
+auto pattern = unbind(actual);              // no address
+auto tile_pattern = pattern(range(0, 32), reserve);
+auto bound_tile = bind(tile_pattern, data); // applies the retained slice offset
+```
+
+Use `make_unbound_tensor<T>(layout)` when no bound example exists. Calling
+`unbind(tensor)` starts a pattern at logical offset zero; slicing the pattern
+then accumulates an offset, and `bind(pattern, base_pointer)` reapplies it.
+
+Input/output Specs use the same model. `unbind(spec)` removes the primary
+Tensor address, preserves the transform *type* and safe structural metadata,
+and deliberately discards transform state such as captured pointers and
+scalars. There are then two execution-time paths:
+
+- `bind(pattern, base_pointer)` and `rebind(pattern, actual_tensor)` are for
+  stateless transforms whose type is empty and default-constructible.
+- `rebind(pattern, actual_spec)` is the stateful path. It validates the actual
+  Spec against the pattern, then retains the actual Spec—including its current
+  transform state. State never comes back from the unbound pattern.
+
+Both forms require matching element/compute, rank, transform, projection, and
+fact types. Const extents and strides match exactly. A Dynamic extent must
+satisfy its alignment/bounds and may not exceed the value stored in the pattern,
+which is the prepared capacity. Strides remain exact because they may change
+DataAccess lowering and scratch requirements. These are release-mode checks:
+accepting an incompatible actual operand would invalidate prepared planning.
+
+A stateful transform's C++ type can itself depend on the type of a captured
+Tensor. The pattern and actual call must therefore construct that transform
+from views with the same `Const`/`Dynamic` layout types. For a variable tail,
+build the planning view with the same bounded `Dynamic` row type and store its
+maximum value in the pattern; do not build a `Const<Max>` transform pattern and
+expect it to accept a Dynamic tail. `unbind` removes the captured address, not
+this type-level contract.
+
+Projection and fact values are retained only when
+`OperandPatternMetadata<T>` declares them storage-independent. Empty policy
+objects are safe by default; stateful metadata must opt in explicitly. This is
+separate from transforms, whose values are always replaced by
+`TypeOnlyPatternMetadata<Transform>`.
 
 `TensorOf<Element, Rank>` and `WritableTensorOf<Element, Rank>` express exact
 rank/element requirements without introducing operator-local Tensor wrappers.
@@ -297,6 +349,11 @@ DataAccess's job: the transform sees a full vector and uses
 
 | Entry | Purpose |
 |---|---|
+| `make_unbound_tensor<T>(layout_or_shape)` / `unbind(tensor_or_spec)` | create an address-free planning pattern using the same Tensor/Spec layout types |
+| `bind(tensor_pattern, base)` | restore a Tensor pointer and apply any element offset accumulated by slicing the pattern |
+| `bind(spec_pattern, base)` | pointer-bind a stateless Spec pattern; unavailable for stateful transforms |
+| `rebind(spec_pattern, actual_tensor)` | validate capacity/layout and recreate a stateless bound Spec over the actual Tensor |
+| `rebind(spec_pattern, actual_spec)` | validate the full typed contract while retaining the actual Spec's stateful transform value |
 | `tensor::operand(spec, policy[, defaults])` | deferred binding record; the referenced Spec must outlive the `with_operands` call |
 | `kernel::with_operands(workspace_or_scope, bindings..., fn)` (1–4 operands) / `kernel::with_operand_tuple(...)` | resolve dynamic choices, prepare inputs, hand **lvalue** sessions to `fn`; materializing groups run under a workspace mark that is rewound after the sessions die; all-direct groups never touch workspace state. The callback must not mutate the passed `WorkspaceView` |
 | `tensor::required_workspace(spec, policy)` | byte estimate for planning (must use the same Spec/Layout/Policy as the later binding; direct and readless inputs are 0) |

@@ -51,8 +51,19 @@ VECOPS_INLINE auto as_mask_input(Operand&& operand) {
     if constexpr (std::same_as<Memory, bool>) {
       using Byte = std::conditional_t<
           std::is_const_v<typename O::ElementType>, const uint8_t, uint8_t>;
-      auto bytes = tensor::make_tensor(
-          reinterpret_cast<Byte*>(operand.data()), operand.layout());
+      auto bytes = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (O::is_bound) {
+          return tensor::make_tensor(
+              reinterpret_cast<Byte*>(operand.data()), operand.layout());
+        } else {
+          using Layout = typename O::Layout;
+          return tensor::Tensor<
+              Byte, typename Layout::Shape, typename Layout::Strides,
+              tensor::UnboundBinding>{
+                tensor::UnboundBinding{operand.element_offset()},
+                operand.layout()};
+        }
+      }();
       return tensor::input<Compute>(bytes);
     } else {
       return tensor::as_input_spec<Compute>(std::forward<Operand>(operand));
@@ -66,9 +77,21 @@ VECOPS_INLINE auto as_mask_input(Operand&& operand) {
       using Byte = std::conditional_t<
           std::is_const_v<typename Tensor::ElementType>,
           const uint8_t, uint8_t>;
-      auto bytes = tensor::make_tensor(
-          reinterpret_cast<Byte*>(operand.tensor().data()),
-          operand.input_layout());
+      auto bytes = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (O::is_bound) {
+          return tensor::make_tensor(
+              reinterpret_cast<Byte*>(operand.tensor().data()),
+              operand.input_layout());
+        } else {
+          using Layout = typename Tensor::Layout;
+          return tensor::Tensor<
+              Byte, typename Layout::Shape, typename Layout::Strides,
+              tensor::UnboundBinding>{
+                tensor::UnboundBinding{
+                    operand.tensor().element_offset()},
+                operand.input_layout()};
+        }
+      }();
       return tensor::input<Compute>(bytes);
     } else {
       return tensor::as_input_spec<Compute>(std::forward<Operand>(operand));

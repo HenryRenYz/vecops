@@ -1,6 +1,9 @@
 """Pythonic compiler/runtime API; low-level bindings live in :mod:`vecops._C`."""
 
-from . import _C, ops
+from . import _C, graph, ops, planner
+
+if hasattr(_C, "MemorySystem"):
+  from . import memory as memory
 from ._compiler import Compiler, default_cache_dir
 from ._dtype import (
   Const,
@@ -33,7 +36,7 @@ from ._precompile import (
 )
 from ._schema import Dynamic, KernelDef, TensorAccess, TensorDef, TensorMeta, ValueDef
 
-__all__ = [
+__all__ = [  # noqa: RUF022 - retain the established public API grouping
   "_C",
   "Compiler",
   "CompileRequest",
@@ -64,10 +67,15 @@ __all__ = [
   "is_precompiling",
   "jit",
   "normalize_dtype",
+  "graph",
   "ops",
+  "planner",
   "precompile",
   "uint8",
   "uint16",
   "uint32",
   "uint64",
 ]
+
+if hasattr(_C, "MemorySystem"):
+  __all__.append("memory")

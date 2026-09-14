@@ -6,6 +6,8 @@ file(GLOB_RECURSE _VECOPS_SRCS
 # VecopsMultiarchTargets.cmake.  They must not enter the generic libvecops.a.
 list(FILTER _VECOPS_SRCS EXCLUDE REGEX "/arch/")
 list(FILTER _VECOPS_SRCS EXCLUDE REGEX "/compiler/")
+list(FILTER _VECOPS_SRCS EXCLUDE REGEX "/memory/")
+list(FILTER _VECOPS_SRCS EXCLUDE REGEX "/OpenMPThreadPool\\.cpp$")
 
 add_library(vecops ${_VECOPS_SRCS})
 add_library(vecops::vecops ALIAS vecops)
@@ -31,11 +33,35 @@ target_compile_options(vecops PUBLIC
     "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wno-ignored-attributes>")
 target_link_libraries(vecops PUBLIC ${CMAKE_DL_LIBS})
 if(VECOPS_ENABLE_OPENMP)
-    target_compile_definitions(vecops PRIVATE VECOPS_ENABLE_OPENMP=1)
-    # `vecops` is normally installed as a static archive. Parallel.cpp keeps
-    # OpenMP entry points unresolved until the final JIT module link, so this
-    # dependency must remain on the exported link interface.
-    target_link_libraries(vecops PUBLIC OpenMP::OpenMP_CXX)
+    add_library(vecops_threadpool_openmp SHARED OpenMPThreadPool.cpp)
+    add_library(vecops::threadpool_openmp ALIAS vecops_threadpool_openmp)
+    target_compile_features(vecops_threadpool_openmp PUBLIC cxx_std_20)
+    target_include_directories(vecops_threadpool_openmp PUBLIC
+        "$<BUILD_INTERFACE:${VECOPS_SOURCE_DIR}/include>"
+        "$<INSTALL_INTERFACE:include>")
+    target_link_libraries(vecops_threadpool_openmp PRIVATE OpenMP::OpenMP_CXX)
+    set_target_properties(vecops_threadpool_openmp PROPERTIES
+        EXPORT_NAME threadpool_openmp
+        POSITION_INDEPENDENT_CODE ON)
+endif()
+
+if(NOT VECOPS_BUILD_MEMORY STREQUAL "OFF")
+    add_library(vecops_memory memory/MemorySystem.cpp)
+    add_library(vecops::memory ALIAS vecops_memory)
+    target_compile_features(vecops_memory PUBLIC cxx_std_20)
+    target_include_directories(vecops_memory
+        PUBLIC
+            "$<BUILD_INTERFACE:${VECOPS_SOURCE_DIR}/include>"
+            "$<INSTALL_INTERFACE:include>"
+    )
+    set_target_properties(vecops_memory PROPERTIES
+        EXPORT_NAME memory
+        POSITION_INDEPENDENT_CODE ON
+    )
+    if(VECOPS_MEMORY_HAVE_HWLOC)
+        target_compile_definitions(vecops_memory PRIVATE VECOPS_MEMORY_HAVE_HWLOC=1)
+        target_link_libraries(vecops_memory PUBLIC PkgConfig::HWLOC)
+    endif()
 endif()
 
 if(VECOPS_BUILD_COMPILER)

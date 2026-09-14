@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -116,6 +118,41 @@ VECOPS_INLINE auto as_layernorm_param(Param&& param) {
 template <typename Compute>
 VECOPS_INLINE constexpr tensor::nullopt_t as_layernorm_param(
     tensor::nullopt_t) {
+  return tensor::nullopt;
+}
+
+/** Storage-less affine operand accepted by the prepared LayerNorm surface. */
+template <typename Param>
+inline constexpr bool is_unbound_layernorm_param_pattern_v = [] {
+  using P = std::remove_cvref_t<Param>;
+  return tensor::is_nullopt_v<P> || tensor::is_unbound_input_spec_v<P>;
+}();
+
+template <typename Param>
+concept UnboundLayerNormParamPattern =
+    is_unbound_layernorm_param_pattern_v<Param>;
+
+/** Execution-time affine operand accepted by the prepared LayerNorm surface. */
+template <typename Param>
+inline constexpr bool is_bound_layernorm_param_operand_v = [] {
+  using P = std::remove_cvref_t<Param>;
+  return tensor::is_nullopt_v<P> ||
+      (LayerNormParamOperand<P> && tensor::is_bound_tensor_view_v<P>);
+}();
+
+template <typename Param>
+concept BoundLayerNormParamOperand =
+    is_bound_layernorm_param_operand_v<Param>;
+
+template <tensor::UnboundInputSpecLike Pattern,
+          tensor::BoundTensorView Actual>
+VECOPS_INLINE auto rebind_layernorm_param(
+    const Pattern& pattern, Actual&& actual) {
+  return tensor::rebind(pattern, std::forward<Actual>(actual));
+}
+
+VECOPS_INLINE constexpr tensor::nullopt_t rebind_layernorm_param(
+    tensor::nullopt_t, tensor::nullopt_t) {
   return tensor::nullopt;
 }
 
@@ -233,6 +270,193 @@ public:
   const Config config;
 
   VECOPS_INLINE constexpr explicit LayerNorm(Config cfg = {}) : config(cfg) {}
+
+  /**
+   * LayerNorm whose operand contracts and private lane scratch were prepared
+   * outside the parallel region, while execution-time addresses remain free.
+   *
+   * The stored Specs are storage-less patterns. Each call validates and
+   * rebinds them to the current tile, then recreates the legacy scratch cursor
+   * and resource session internally over the calling lane's private tensor.
+   */
+  template <nint_t Parallelism, typename InPattern,
+            typename ScalePattern, typename BiasPattern,
+            typename OutPattern, typename WorkerScratch>
+  class PatternPrepared {
+  public:
+    static_assert(Parallelism > 0,
+                  "prepared LayerNorm parallelism must be positive");
+    using ResourceRequirements = typename LayerNorm::ResourceRequirements;
+
+    VECOPS_INLINE PatternPrepared(
+        Config config, InPattern in, ScalePattern scale,
+        BiasPattern bias, OutPattern out,
+        WorkerScratch worker_scratch, nint_t workspace_bytes)
+      : config_(std::move(config))
+      , in_(std::move(in))
+      , scale_(std::move(scale))
+      , bias_(std::move(bias))
+      , out_(std::move(out))
+      , worker_scratch_(std::move(worker_scratch))
+      , workspace_bytes_(workspace_bytes) {
+    }
+
+    /** Execute an affine LayerNorm on the scratch replica owned by `task`. */
+    template <tensor::InputOperand In,
+              layernorm_details::BoundLayerNormParamOperand Scale,
+              layernorm_details::BoundLayerNormParamOperand Bias,
+              tensor::OutputOperand Out>
+      requires (tensor::is_bound_tensor_view_v<In> &&
+                tensor::is_bound_tensor_view_v<Out> &&
+                (tensor::is_nullopt_v<ScalePattern> ==
+                 tensor::is_nullopt_v<Scale>) &&
+                (tensor::is_nullopt_v<BiasPattern> ==
+                 tensor::is_nullopt_v<Bias>))
+    VECOPS_INLINE void operator()(
+        execution::TaskContext<Parallelism> task,
+        In&& in, Scale&& scale, Bias&& bias, Out&& out) const {
+      run(task,
+          tensor::rebind(in_, std::forward<In>(in)),
+          layernorm_details::rebind_layernorm_param(
+              scale_, std::forward<Scale>(scale)),
+          layernorm_details::rebind_layernorm_param(
+              bias_, std::forward<Bias>(bias)),
+          tensor::rebind(out_, std::forward<Out>(out)));
+    }
+
+    /** Execute a prepared LayerNorm without affine parameters. */
+    template <tensor::InputOperand In, tensor::OutputOperand Out>
+      requires (tensor::is_nullopt_v<ScalePattern> &&
+                tensor::is_nullopt_v<BiasPattern> &&
+                tensor::is_bound_tensor_view_v<In> &&
+                tensor::is_bound_tensor_view_v<Out>)
+    VECOPS_INLINE void operator()(
+        execution::TaskContext<Parallelism> task,
+        In&& in, Out&& out) const {
+      (*this)(task, std::forward<In>(in), tensor::nullopt,
+              tensor::nullopt, std::forward<Out>(out));
+    }
+
+    /** Execute a prepared gamma-only LayerNorm. */
+    template <tensor::InputOperand In,
+              layernorm_details::BoundLayerNormParamOperand Scale,
+              tensor::OutputOperand Out>
+      requires (!tensor::is_nullopt_v<ScalePattern> &&
+                tensor::is_nullopt_v<BiasPattern> &&
+                !tensor::is_nullopt_v<Scale> &&
+                tensor::is_bound_tensor_view_v<In> &&
+                tensor::is_bound_tensor_view_v<Out>)
+    VECOPS_INLINE void operator()(
+        execution::TaskContext<Parallelism> task,
+        In&& in, Scale&& scale, Out&& out) const {
+      (*this)(task, std::forward<In>(in), std::forward<Scale>(scale),
+              tensor::nullopt, std::forward<Out>(out));
+    }
+
+  private:
+    template <typename In, typename Scale, typename Bias, typename Out>
+    VECOPS_INLINE void run(
+        execution::TaskContext<Parallelism> task,
+        In&& in, Scale&& scale, Bias&& bias, Out&& out) const {
+      auto scratch = task.local(worker_scratch_);
+      kernel::WorkspaceView workspace{scratch.data(), workspace_bytes_};
+      ExecutionSession execution{workspace};
+      LayerNorm{config_}(
+          execution, std::forward<In>(in), std::forward<Scale>(scale),
+          std::forward<Bias>(bias), std::forward<Out>(out));
+    }
+
+    Config config_;
+    InPattern in_;
+    ScalePattern scale_;
+    BiasPattern bias_;
+    OutPattern out_;
+    WorkerScratch worker_scratch_;
+    nint_t workspace_bytes_ = 0;
+  };
+
+  /**
+   * Prepare affine LayerNorm from storage-less input/output Specs.
+   *
+   * `site_name` is mandatory so independent operations in one lexical
+   * workspace scope receive distinct planner sites. Scratch is represented as
+   * one typed byte tensor per logical lane; byte arithmetic is private to the
+   * operator migration layer.
+   */
+  template <nint_t Parallelism, typename WorkspaceAuthority,
+            tensor::UnboundInputSpecLike InPattern,
+            layernorm_details::UnboundLayerNormParamPattern ScalePattern,
+            layernorm_details::UnboundLayerNormParamPattern BiasPattern,
+            tensor::UnboundOutputSpecLike OutPattern>
+    requires requires(WorkspaceAuthority& authority, nint_t bytes) {
+      authority.template worker_tensor<std::byte, Parallelism>(
+          std::string_view{}, tensor::make_shape(meta::Any{bytes}));
+    }
+  VECOPS_INLINE auto prepare(
+      WorkspaceAuthority& parent, std::string_view site_name,
+      InPattern&& in, ScalePattern&& scale,
+      BiasPattern&& bias, OutPattern&& out) const {
+    using In = std::remove_cvref_t<InPattern>;
+    using Out = std::remove_cvref_t<OutPattern>;
+    static_assert(std::same_as<typename In::ComputeType, ComputeType>,
+                  "LayerNorm input pattern compute type must match Config");
+    static_assert(std::same_as<typename Out::ComputeType, ComputeType>,
+                  "LayerNorm output pattern compute type must match Config");
+
+    auto in_pattern = std::forward<InPattern>(in);
+    auto scale_pattern = std::forward<ScalePattern>(scale);
+    auto bias_pattern = std::forward<BiasPattern>(bias);
+    auto out_pattern = std::forward<OutPattern>(out);
+    if constexpr (!tensor::is_nullopt_v<decltype(scale_pattern)>) {
+      static_assert(
+          std::same_as<typename decltype(scale_pattern)::ComputeType,
+                       ComputeType>,
+          "LayerNorm scale pattern compute type must match Config");
+    }
+    if constexpr (!tensor::is_nullopt_v<decltype(bias_pattern)>) {
+      static_assert(
+          std::same_as<typename decltype(bias_pattern)::ComputeType,
+                       ComputeType>,
+          "LayerNorm bias pattern compute type must match Config");
+    }
+
+    const nint_t bytes = required_workspace_specs(
+        in_pattern, scale_pattern, bias_pattern, out_pattern);
+    auto scratch = parent.template worker_tensor<std::byte, Parallelism>(
+        site_name, tensor::make_shape(meta::Any{bytes}));
+    return PatternPrepared<
+        Parallelism, decltype(in_pattern), decltype(scale_pattern),
+        decltype(bias_pattern), decltype(out_pattern), decltype(scratch)>{
+          config, std::move(in_pattern), std::move(scale_pattern),
+          std::move(bias_pattern), std::move(out_pattern),
+          std::move(scratch), bytes};
+  }
+
+  /** Prepare LayerNorm without affine parameters. */
+  template <nint_t Parallelism, typename WorkspaceAuthority,
+            tensor::UnboundInputSpecLike InPattern,
+            tensor::UnboundOutputSpecLike OutPattern>
+  VECOPS_INLINE auto prepare(
+      WorkspaceAuthority& parent, std::string_view site_name,
+      InPattern&& in, OutPattern&& out) const {
+    return this->template prepare<Parallelism>(
+        parent, site_name, std::forward<InPattern>(in), tensor::nullopt,
+        tensor::nullopt, std::forward<OutPattern>(out));
+  }
+
+  /** Prepare LayerNorm with gamma and no beta. */
+  template <nint_t Parallelism, typename WorkspaceAuthority,
+            tensor::UnboundInputSpecLike InPattern,
+            tensor::UnboundInputSpecLike ScalePattern,
+            tensor::UnboundOutputSpecLike OutPattern>
+  VECOPS_INLINE auto prepare(
+      WorkspaceAuthority& parent, std::string_view site_name,
+      InPattern&& in, ScalePattern&& scale, OutPattern&& out) const {
+    return this->template prepare<Parallelism>(
+        parent, site_name, std::forward<InPattern>(in),
+        std::forward<ScalePattern>(scale), tensor::nullopt,
+        std::forward<OutPattern>(out));
+  }
 
   template <tensor::InputOperand InOperand,
             layernorm_details::LayerNormParamOperand ScaleOperand,

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import _C
 
-_BUILD_API_VERSION = 1
+_BUILD_API_VERSION = 4
 
 
 def require_native_build_api() -> None:
@@ -164,7 +164,7 @@ class Compiler:
     # Bump when generated-adapter semantics or the packaged SDK ABI changes.
     # Keeping this explicit prevents a new compiler from silently loading an
     # artifact whose adapter was emitted by an older implementation.
-    self.cache_namespace = cache_namespace or f"python-sdk-v3;target={self.target}"
+    self.cache_namespace = cache_namespace or f"python-sdk-v8;target={self.target}"
     self.include_dirs = tuple(Path(path).expanduser().resolve() for path in include_dirs)
     self.cflags = tuple(cflags)
     self.library_dirs = tuple(Path(path).expanduser().resolve() for path in library_dirs)

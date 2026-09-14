@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include "vecops/execution/WorkspaceContext.h"
 #include "vecops/ops/LayerNorm.h"
 #include "vecops/tensor/DataAccess.h"
 #include "TestShard.h"
@@ -1001,6 +1002,203 @@ TEST(LayerNormCompositionTest,
   for (nint_t i = 0; i < n; ++i) {
     EXPECT_NEAR(direct_out[static_cast<size_t>(i)],
                 region_out[static_cast<size_t>(i)], 2e-6f);
+  }
+}
+
+TEST(LayerNormPreparedPatternTest,
+     AffineOperandsRebindPerLaneWithPrivateScratch) {
+  constexpr nint_t lanes = 2;
+  constexpr nint_t rows = 2;
+  constexpr nint_t n = 7;
+  constexpr nint_t input_stride = 2;
+  constexpr nint_t row_stride = 17;
+  constexpr nint_t input_storage = row_stride * rows;
+
+  using InputLayout = Layout<
+      Shape<Const<rows>, Const<n>>,
+      Strides<Const<row_stride>, Const<input_stride>>>;
+  using OutputLayout = Layout<
+      Shape<Const<rows>, Const<n>>,
+      Strides<Const<n>, Const<1>>>;
+  using ParamLayout = Layout<Shape<Const<n>>, Strides<Const<1>>>;
+
+  std::vector<float> input_data(lanes * input_storage, -99.0f);
+  std::vector<float> output_data(lanes * rows * n, -77.0f);
+  std::vector<float> gamma(n);
+  std::vector<float> beta(n);
+  for (nint_t column = 0; column < n; ++column) {
+    gamma[static_cast<std::size_t>(column)] =
+        0.75f + 0.05f * float(column);
+    beta[static_cast<std::size_t>(column)] =
+        -0.2f + 0.03f * float(column);
+  }
+  for (nint_t lane = 0; lane < lanes; ++lane) {
+    for (nint_t row = 0; row < rows; ++row) {
+      for (nint_t column = 0; column < n; ++column) {
+        input_data[static_cast<std::size_t>(
+            lane * input_storage + row * row_stride +
+            column * input_stride)] =
+            float((lane + 1) * 13 + row * 7 + column * 3) * 0.11f;
+      }
+    }
+  }
+
+  InputLayout input_layout{
+      Shape<Const<rows>, Const<n>>{},
+      Strides<Const<row_stride>, Const<input_stride>>{}};
+  OutputLayout output_layout{
+      Shape<Const<rows>, Const<n>>{},
+      Strides<Const<n>, Const<1>>{}};
+  ParamLayout param_layout{
+      Shape<Const<n>>{}, Strides<Const<1>>{}};
+  auto sample_input = make_tensor(input_data.data(), input_layout);
+  auto sample_output = make_tensor(output_data.data(), output_layout);
+  auto gamma_tensor = make_tensor(gamma.data(), param_layout);
+  auto beta_tensor = make_tensor(beta.data(), param_layout);
+
+  auto input_pattern = tensor::unbind(input<float32_t>(sample_input));
+  auto gamma_pattern = tensor::unbind(input<float32_t>(gamma_tensor));
+  auto beta_pattern = tensor::unbind(input<float32_t>(beta_tensor));
+  auto output_pattern = tensor::unbind(output<float32_t>(sample_output));
+  const auto factory = layer_norm(
+      LayerNormConfig<float32_t>{.eps = 1e-5f});
+  const nint_t expected_scratch = factory.required_workspace(
+      input_pattern, gamma_pattern, beta_pattern, output_pattern);
+  ASSERT_GT(expected_scratch, 0);
+
+  execution::WorkspaceContext workspace{
+      execution::trace_workspace, "prepared_layernorm"};
+  auto operation = factory.template prepare<lanes>(
+      workspace, "affine_scratch", input_pattern, gamma_pattern,
+      beta_pattern, output_pattern);
+  workspace.parallel_lanes<lanes>(
+      [&](execution::TaskContext<lanes> task) {
+        const nint_t lane = task.lane_id();
+        auto actual_input = make_tensor(
+            input_data.data() + lane * input_storage, input_layout);
+        auto actual_output = make_tensor(
+            output_data.data() + lane * rows * n, output_layout);
+        operation(
+            task, input<float32_t>(actual_input),
+            input<float32_t>(gamma_tensor), input<float32_t>(beta_tensor),
+            output<float32_t>(actual_output));
+      });
+
+  const auto plan = workspace.finish_trace();
+  ASSERT_EQ(plan.allocations.size(), 1u);
+  const auto& allocation = plan.allocations.front();
+  EXPECT_EQ(allocation.request.domain,
+            execution::WorkspaceDomain::WorkerLocal);
+  EXPECT_EQ(allocation.request.replicas, lanes);
+  EXPECT_EQ(allocation.request.bytes, expected_scratch);
+  const auto placement = execution::place_workspace(plan);
+  ASSERT_EQ(placement.entries.size(), 1u);
+  EXPECT_GE(placement.entries.front().replica_stride, expected_scratch);
+  EXPECT_EQ(placement.entries.front().replica_stride % 64, 0);
+
+  for (nint_t lane = 0; lane < lanes; ++lane) {
+    for (nint_t row = 0; row < rows; ++row) {
+      float sum = 0.0f;
+      float sum_sq = 0.0f;
+      for (nint_t column = 0; column < n; ++column) {
+        const float value = input_data[static_cast<std::size_t>(
+            lane * input_storage + row * row_stride +
+            column * input_stride)];
+        sum += value;
+        sum_sq += value * value;
+      }
+      const float mean = sum / float(n);
+      const float variance =
+          std::max(sum_sq / float(n) - mean * mean, 0.0f);
+      const float rstd = 1.0f / std::sqrt(variance + 1e-5f);
+      for (nint_t column = 0; column < n; ++column) {
+        const float value = input_data[static_cast<std::size_t>(
+            lane * input_storage + row * row_stride +
+            column * input_stride)];
+        const float expected =
+            (value - mean) * rstd *
+                gamma[static_cast<std::size_t>(column)] +
+            beta[static_cast<std::size_t>(column)];
+        EXPECT_NEAR(
+            output_data[static_cast<std::size_t>(
+                lane * rows * n + row * n + column)],
+            expected, 2e-5f)
+            << "lane=" << lane << " row=" << row
+            << " column=" << column;
+      }
+    }
+  }
+}
+
+TEST(LayerNormPreparedPatternTest,
+     NonAffineOperationReusesScratchWithoutPublicReset) {
+  constexpr nint_t rows = 2;
+  constexpr nint_t n = 7;
+  using InputLayout = Layout<
+      Shape<Const<rows>, Const<n>>,
+      Strides<Const<17>, Const<2>>>;
+  using OutputLayout = Layout<
+      Shape<Const<rows>, Const<n>>,
+      Strides<Const<n>, Const<1>>>;
+
+  std::vector<float> input_data(34, -99.0f);
+  std::vector<float> first_output(rows * n, -77.0f);
+  std::vector<float> second_output(rows * n, -77.0f);
+  InputLayout input_layout{
+      Shape<Const<rows>, Const<n>>{}, Strides<Const<17>, Const<2>>{}};
+  OutputLayout output_layout{
+      Shape<Const<rows>, Const<n>>{}, Strides<Const<n>, Const<1>>{}};
+  auto input_tensor = make_tensor(input_data.data(), input_layout);
+  auto first_tensor = make_tensor(first_output.data(), output_layout);
+  auto second_tensor = make_tensor(second_output.data(), output_layout);
+
+  auto input_pattern = tensor::unbind(input<float32_t>(input_tensor));
+  auto output_pattern = tensor::unbind(output<float32_t>(first_tensor));
+  execution::WorkspaceContext workspace{"prepared_layernorm_non_affine"};
+  auto operation = layer_norm().template prepare<1>(
+      workspace, "non_affine_scratch", input_pattern, output_pattern);
+
+  for (nint_t row = 0; row < rows; ++row) {
+    for (nint_t column = 0; column < n; ++column) {
+      input_data[static_cast<std::size_t>(row * 17 + column * 2)] =
+          float(row * n + column - 5) * 0.17f;
+    }
+  }
+  operation(
+      execution::TaskContext<1>{0}, input<float32_t>(input_tensor),
+      output<float32_t>(first_tensor));
+
+  for (nint_t row = 0; row < rows; ++row) {
+    for (nint_t column = 0; column < n; ++column) {
+      input_data[static_cast<std::size_t>(row * 17 + column * 2)] =
+          float(row * n + column + 2) * -0.13f;
+    }
+  }
+  operation(
+      execution::TaskContext<1>{0}, input<float32_t>(input_tensor),
+      output<float32_t>(second_tensor));
+
+  for (nint_t row = 0; row < rows; ++row) {
+    float sum = 0.0f;
+    float sum_sq = 0.0f;
+    for (nint_t column = 0; column < n; ++column) {
+      const float value = input_data[static_cast<std::size_t>(
+          row * 17 + column * 2)];
+      sum += value;
+      sum_sq += value * value;
+    }
+    const float mean = sum / float(n);
+    const float variance =
+        std::max(sum_sq / float(n) - mean * mean, 0.0f);
+    const float rstd = 1.0f / std::sqrt(variance + 1e-5f);
+    for (nint_t column = 0; column < n; ++column) {
+      const float expected =
+          (input_data[static_cast<std::size_t>(
+               row * 17 + column * 2)] - mean) * rstd;
+      EXPECT_NEAR(
+          second_output[static_cast<std::size_t>(row * n + column)],
+          expected, 2e-5f);
+    }
   }
 }
 
