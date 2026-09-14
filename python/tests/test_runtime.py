@@ -432,8 +432,9 @@ def test_generated_torch_bridge_uses_mutable_out_schema() -> None:
   assert "vecops_torch_bridge_set_handle_v1" in source
   assert "VecopsThreadPoolV1 torch_thread_pool" in source
   assert "at::parallel_for(0, task_count, 1" in source
-  assert 'dlopen(\n        "libgomp.so.1", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD)' in source
-  assert 'torch_gomp_symbol<GompParallel>("GOMP_parallel")' in source
+  assert "libgomp.so.1" not in source
+  assert "GOMP_parallel" not in source
+  assert "dlsym" not in source
   assert "RTLD_DEFAULT" not in source
   assert "execution_context.thread_pool = &torch_thread_pool" in source
   assert "torch/extension.h" not in source

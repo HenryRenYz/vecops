@@ -14,6 +14,7 @@ import hashlib
 import keyword
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -162,10 +163,6 @@ _TORCH_BRIDGE_TEMPLATE = Template(
 #include <tuple>
 #include <vector>
 
-#if defined(__aarch64__)
-#include <dlfcn.h>
-#endif
-
 #include "vecops/runtime/OperatorBridgeAbi.h"
 
 namespace {
@@ -241,28 +238,6 @@ uint32_t torch_in_parallel_region(void*) {
   return at::in_parallel_region() ? 1u : 0u;
 }
 
-#if defined(__aarch64__)
-void* torch_gomp_handle() {
-  static void* handle = [] {
-    void* loaded = dlopen(
-        "libgomp.so.1", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
-    TORCH_CHECK(
-        loaded != nullptr,
-        "Torch reports its OpenMP backend but its loaded libgomp.so.1 "
-        "could not be opened");
-    return loaded;
-  }();
-  return handle;
-}
-
-template <typename Fn>
-Fn torch_gomp_symbol(const char* name) {
-  auto symbol = reinterpret_cast<Fn>(dlsym(torch_gomp_handle(), name));
-  TORCH_CHECK(symbol != nullptr, "Torch libgomp is missing symbol ", name);
-  return symbol;
-}
-#endif
-
 int32_t torch_parallel_for(void*, uint32_t task_count, void* body_context,
                            VecopsParallelTaskFn body, VecopsError* error) {
   if (body == nullptr)
@@ -271,41 +246,12 @@ int32_t torch_parallel_for(void*, uint32_t task_count, void* body_context,
     if (task_count <= 1 || at::in_parallel_region()) {
       for (uint32_t task = 0; task < task_count; ++task)
         body(body_context, task, task_count);
-#if defined(__aarch64__)
-    } else {
-      using GompParallel = void (*)(void (*)(void*), void*, unsigned, unsigned);
-      using OmpQuery = int (*)();
-      static const auto gomp_parallel =
-          torch_gomp_symbol<GompParallel>("GOMP_parallel");
-      static const auto omp_thread_num =
-          torch_gomp_symbol<OmpQuery>("omp_get_thread_num");
-      static const auto omp_num_threads =
-          torch_gomp_symbol<OmpQuery>("omp_get_num_threads");
-      struct TeamCall {
-        uint32_t task_count;
-        void* body_context;
-        VecopsParallelTaskFn body;
-        OmpQuery thread_num;
-        OmpQuery num_threads;
-      } call{task_count, body_context, body, omp_thread_num, omp_num_threads};
-      gomp_parallel(
-          [](void* opaque) {
-            const auto& active = *static_cast<const TeamCall*>(opaque);
-            const uint32_t worker = static_cast<uint32_t>(active.thread_num());
-            const uint32_t workers = static_cast<uint32_t>(active.num_threads());
-            for (uint32_t task = worker; task < active.task_count; task += workers)
-              active.body(active.body_context, task, active.task_count);
-          },
-          &call, 0, 0);
-    }
-#else
     } else {
       at::parallel_for(0, task_count, 1, [=](int64_t begin, int64_t end) {
         for (int64_t task = begin; task < end; ++task)
           body(body_context, static_cast<uint32_t>(task), task_count);
       });
     }
-#endif
     return VECOPS_STATUS_OK;
   } catch (const std::exception& exception) {
     if (error != nullptr && error->struct_size >= sizeof(VecopsError)) {
@@ -560,6 +506,93 @@ def _toolchain_key(config: native.KernelCompilerConfig) -> tuple[Any, ...]:
   )
 
 
+def _copy_toolchain(toolchain: native.ToolchainSpec) -> native.ToolchainSpec:
+  copied = native.ToolchainSpec()
+  copied.cmake_program = toolchain.cmake_program
+  copied.c_compiler = toolchain.c_compiler
+  copied.cxx_compiler = toolchain.cxx_compiler
+  copied.toolchain_file = toolchain.toolchain_file
+  copied.generator = toolchain.generator
+  copied.build_type = toolchain.build_type
+  copied.parallel_jobs = toolchain.parallel_jobs
+  copied.environment = toolchain.environment
+  return copied
+
+
+def _torch_openmp_runtime(
+    torch_libraries: tuple[Path, ...], torch_parallel_info: str
+) -> str | None:
+  if "ATen parallel backend: OpenMP" not in torch_parallel_info:
+    return None
+  runtime_names = {
+      "gomp": ("libgomp.so*", "libgomp.dylib"),
+      "omp": ("libomp.so*", "libomp.dylib", "libiomp5.so*", "libiomp5.dylib"),
+  }
+  detected = {
+      runtime
+      for directory in torch_libraries
+      for runtime, patterns in runtime_names.items()
+      if any(any(directory.glob(pattern)) for pattern in patterns)
+  }
+  if len(detected) != 1:
+    detail = ", ".join(sorted(detected)) or "none"
+    raise RuntimeError(
+        "Torch reports its OpenMP backend, but its packaged OpenMP runtime "
+        f"could not be identified unambiguously (found: {detail})"
+    )
+  return detected.pop()
+
+
+def _torch_bridge_build_policy(
+    config: native.KernelCompilerConfig,
+    torch_libraries: tuple[Path, ...],
+    torch_parallel_info: str,
+) -> tuple[native.ToolchainSpec, tuple[str, ...]]:
+  """Enable the header-only ATen parallel backend with a matching runtime."""
+  toolchain = _copy_toolchain(config.toolchain)
+  runtime = _torch_openmp_runtime(torch_libraries, torch_parallel_info)
+  if runtime is None:
+    return toolchain, ()
+
+  compiler_name = Path(toolchain.cxx_compiler).name.lower()
+  compiler_is_clang = "clang" in compiler_name
+  compiler_is_gnu = not compiler_is_clang and (
+      "g++" in compiler_name or "gcc" in compiler_name
+  )
+  if runtime == "gomp" and not compiler_is_gnu:
+    requested_cxx = os.environ.get("VECOPS_TORCH_BRIDGE_CXX", "g++")
+    requested_cc = os.environ.get("VECOPS_TORCH_BRIDGE_CC", "gcc")
+    bridge_cxx = shutil.which(requested_cxx)
+    bridge_cc = shutil.which(requested_cc)
+    if bridge_cxx is None or bridge_cc is None:
+      raise RuntimeError(
+          "Torch uses GNU OpenMP, but the selected kernel compiler cannot "
+          "emit its ABI and a GNU bridge compiler was not found; install "
+          "gcc/g++ or set VECOPS_TORCH_BRIDGE_CC and VECOPS_TORCH_BRIDGE_CXX"
+      )
+    toolchain.c_compiler = Path(bridge_cc).absolute()
+    toolchain.cxx_compiler = Path(bridge_cxx).absolute()
+    return toolchain, ("-fopenmp",)
+  if runtime == "gomp":
+    return toolchain, ("-fopenmp",)
+  if runtime == "omp" and compiler_is_clang:
+    return toolchain, ("-fopenmp=libomp",)
+  requested_cxx = os.environ.get("VECOPS_TORCH_BRIDGE_CXX", "clang++")
+  requested_cc = os.environ.get("VECOPS_TORCH_BRIDGE_CC", "clang")
+  bridge_cxx = shutil.which(requested_cxx)
+  bridge_cc = shutil.which(requested_cc)
+  if bridge_cxx is None or bridge_cc is None:
+    raise RuntimeError(
+        "Torch uses LLVM/Intel OpenMP, but the selected kernel compiler "
+        "cannot emit its ABI and a Clang bridge compiler was not found; "
+        "install clang or set VECOPS_TORCH_BRIDGE_CC and "
+        "VECOPS_TORCH_BRIDGE_CXX"
+    )
+  toolchain.c_compiler = Path(bridge_cc).absolute()
+  toolchain.cxx_compiler = Path(bridge_cxx).absolute()
+  return toolchain, ("-fopenmp=libomp",)
+
+
 def _load_bridge(
     registration: _BridgeRegistration,
     library_path: Path,
@@ -622,7 +655,10 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
 
     built_count = 0
     for group in groups.values():
-      first_registration, _ = group[0]
+      first_registration, first_config = group[0]
+      bridge_toolchain, bridge_openmp_flags = _torch_bridge_build_policy(
+          first_config, torch_libraries, torch_parallel_info
+      )
       first_registration.compiler.build_dir.mkdir(parents=True, exist_ok=True)
       attempt = Path(
           tempfile.mkdtemp(
@@ -644,7 +680,15 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
             registration.kernel_def,
             return_outputs=registration.return_outputs,
         )
-        identity = repr((source, torch_identity, _toolchain_key(config)))
+        bridge_identity = (
+            "torch-bridge-v3",
+            str(bridge_toolchain.c_compiler),
+            str(bridge_toolchain.cxx_compiler),
+            tuple(bridge_openmp_flags),
+        )
+        identity = repr(
+            (source, torch_identity, _toolchain_key(config), bridge_identity)
+        )
         digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
         output_name = (
             f"vecops_bridge_{registration.library}_{registration.name}_{digest}"
@@ -656,7 +700,7 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
           bridge_base = (
               Path(override).expanduser().resolve()
               if override
-              else default_cache_dir() / "torch-bridges-v2"
+              else default_cache_dir() / "torch-bridges-v3"
           )
           artifact_directory = bridge_base / (
               f"{registration.library}_{registration.name}_{digest}"
@@ -676,7 +720,7 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
         request.target_name = output_name
         request.output_name = output_name
         request.sdk = config.sdk
-        request.toolchain = config.toolchain
+        request.toolchain = bridge_toolchain
         request.sources = [source_path]
         request.include_directories = [include_root, *torch_includes]
         request.compile_definitions = [
@@ -684,11 +728,13 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
         ]
         request.compile_options = [
             "-O3", "-std=c++20",
+            *bridge_openmp_flags,
             *registration.extra_cflags,
         ]
         request.link_directories = list(torch_libraries)
         request.link_libraries = ["torch", "torch_cpu", "c10"]
         request.link_options = [
+            *bridge_openmp_flags,
             *(f"-Wl,-rpath,{path}" for path in torch_libraries),
         ]
         request.generated_source_directory = batch.generated_source_directory / "tasks" / str(index)
@@ -746,7 +792,7 @@ def compile_pending_torch_bridges(*, parallelism: int | None = None) -> int:
   lock_root = (
       Path(override).expanduser().resolve()
       if override
-      else default_cache_dir() / "torch-bridges-v2"
+      else default_cache_dir() / "torch-bridges-v3"
   )
   lock_root.mkdir(parents=True, exist_ok=True)
   with (lock_root / ".compile.lock").open("a+b") as lock:
