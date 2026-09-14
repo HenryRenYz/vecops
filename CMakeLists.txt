@@ -138,6 +138,13 @@ if(VECOPS_BUILD_PYTHON)
         DESTINATION vecops/_sdk/include
         COMPONENT python
     )
+    if(VECOPS_ENABLE_KUPL_MMA)
+        install(
+            FILES src/arch/sme/KuplMma.cpp
+            DESTINATION vecops/_sdk/src/arch/sme
+            COMPONENT python
+        )
+    endif()
     install(
         FILES "$<TARGET_FILE:vecops>"
         DESTINATION vecops/_sdk/lib
