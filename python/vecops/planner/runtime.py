@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import os
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -291,15 +292,31 @@ class PlanSession:
   def _build_factory_sites(self) -> dict[tuple[Any, ...], list[_FactoryCandidate]]:
     result: dict[tuple[Any, ...], list[_FactoryCandidate]] = {}
     factories = {"aten.empty.memory_format", "aten.empty_like.default"}
+    # The same physical allocation can appear twice: once self-registered
+    # by the planner factory (explicit, direct-caller source) and once
+    # via the dispatch recorder (stack-walk source). The explicit event
+    # owns the runtime key, so it must win the dedupe regardless of the
+    # graph's event ordering.
     seen_tensors: set[tuple[tuple[Any, ...], str]] = set()
-    for event in self.graph.events:
+
+    def _factory_key(event, source, tensor_id):
+      metadata = self.graph.tensors[tensor_id].metadata
+      return (
+          tuple(event.scope),
+          _canonical_file(str(source["file"])),
+          str(source["function"]),
+          event.name,
+          tuple(metadata.shape),
+          metadata.dtype,
+      )
+
+    ordered = [e for e in self.graph.events
+               if e.name in factories
+               and isinstance(e.attributes.get("source"), dict)]
+    ordered.sort(key=lambda e: 0 if e.attributes.get("explicit_factory") is True else 1)
+    for event in ordered:
       source = event.attributes.get("source")
-      if event.name not in factories or not isinstance(source, dict):
-        continue
       if event.attributes.get("explicit_factory") is True:
-        # Self-registered by the planner factory: the output is the
-        # allocated tensor even when stack-walk attribution (and the
-        # storage allocation_event with it) went to a different event.
         candidate_ids = list(event.outputs)
       else:
         candidate_ids = [
@@ -318,31 +335,9 @@ class PlanSession:
           continue
         if placement.annotations.get("loop_replay_safe") is False:
           continue
-        metadata = self.graph.tensors[tensor_id].metadata
-        key = (
-          tuple(event.scope),
-          _canonical_file(str(source["file"])),
-          str(source["function"]),
-          event.name,
-          tuple(metadata.shape),
-          metadata.dtype,
-        )
+        key = _factory_key(event, source, tensor_id)
         result.setdefault(key, []).append(_FactoryCandidate(tensor_id))
     return result
-
-  def _debug_dump_sites(self, tag: str) -> None:
-    import os
-    if os.environ.get("AF3_DUMP_FACTORY_SITES") != "1":
-      return
-    with open(os.path.expanduser("~/tmp/factory_sites.txt"), "a") as fh:
-      fh.write(f"== {tag}: {len(self._factory_sites)} sites\n")
-      for i, key in enumerate(list(self._factory_sites)[:8]):
-        fh.write(f"  {key}\n")
-      target = [k for k in self._factory_sites
-                if "linear_packed" in str(k)]
-      fh.write(f"  linear_packed-keyed sites: {len(target)}\n")
-      for k in target[:4]:
-        fh.write(f"    {k}\n")
 
   def _factory_tensor(
     self,
@@ -385,7 +380,6 @@ class PlanSession:
     candidates = self._factory_sites.get(key)
     if not candidates:
       self._factory_fallback("unplanned_site", key)
-      self._debug_dump_sites(f"MISS {key[0]}")
       return None
     cursor_key = (key, tuple(self._loop_epochs))
     cursor = self._factory_cursors.get(cursor_key, 0)

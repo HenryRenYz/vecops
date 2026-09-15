@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import os
 import weakref
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -684,13 +685,33 @@ def wrap_region(
   @functools.wraps(function)
   def wrapped(*args, **kwargs):
     capture = current_capture()
-    if capture is None:
+    if capture is not None:
+      tensor_inputs = _tensor_leaves((args, kwargs), capture)
+      with capture.region(region_name, tensor_inputs, attributes=attributes) as state:
+        result = function(*args, **kwargs)
+        state["outputs"] = _tensor_leaves(result, capture)
+        return result
+    # Runtime (replay) path: optionally mirror the same lexical region into
+    # an active plan session so factory-site scopes match the captured
+    # graph exactly. Off by default: with scopes aligned the factory
+    # replay serves wrapper outputs, which exposed a latent slot-reuse
+    # crash (SIGSEGV via aliased views) that the epoch cursor logic must
+    # fix first. Enable with VECOPS_MIRROR_REGION_SCOPE=1.
+    if os.environ.get("VECOPS_MIRROR_REGION_SCOPE") != "1":
       return function(*args, **kwargs)
-    tensor_inputs = _tensor_leaves((args, kwargs), capture)
-    with capture.region(region_name, tensor_inputs, attributes=attributes) as state:
-      result = function(*args, **kwargs)
-      state["outputs"] = _tensor_leaves(result, capture)
-      return result
+    try:
+      from vecops.planner.runtime import current_session
+
+      session = current_session()
+    except ImportError:
+      session = None
+    if session is None:
+      return function(*args, **kwargs)
+    session.enter_scope(region_name)
+    try:
+      return function(*args, **kwargs)
+    finally:
+      session.leave_scope()
 
   return wrapped
 
