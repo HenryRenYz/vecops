@@ -413,8 +413,25 @@ class PlanSession:
     self._factory_allocated_bytes += storage.bytes
     # The plan proves that this physical slot is dead before its next replay.
     # Reusing the prebuilt Tensor view removes both allocator and view-building
-    # overhead from the hot path.
-    return self.tensor_view(candidate.tensor_id)
+    # overhead from the hot path. Mark the view so consumers that retain
+    # tensors across iterations (e.g. framework value caches) can clone
+    # before caching; the slot's memory is recycled at the next epoch.
+    tensor_entry = self.graph.tensors[candidate.tensor_id]
+    view = self.tensor_view(candidate.tensor_id)
+    if tensor_entry.escapes or tensor_entry.persistent:
+      # The plan expects this slot to live until graph exit; a factory
+      # replay would recycle it at the next loop epoch. Serve a private
+      # copy so retained tensors never observe recycled memory.
+      import torch as _torch
+
+      private = _torch.empty_like(view)
+      private.copy_(view)
+      return private
+    try:
+      object.__setattr__(view, "_vecops_arena_view", True)
+    except (AttributeError, TypeError):
+      pass
+    return view
 
   def enter_scope(self, name: str) -> None:
     """Mirror one framework scope, canonicalizing sampled loop indices."""
