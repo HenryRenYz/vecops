@@ -60,6 +60,7 @@ def register(qualified_name, dispatch, *, compiler=None, **options):
       operation.native,
       operation.kernel_def._native(),
       compiler=operation.compiler,
+      spec_order=tuple(operation.kernel_def.values),
       **options,
   )
   namespace = _libraries.setdefault(library, SimpleNamespace())

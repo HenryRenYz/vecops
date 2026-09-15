@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 from threading import Lock
-from typing import Any
+from typing import Any, Sequence
 
 from . import _C as native
 
@@ -35,6 +35,7 @@ class _BridgeRegistration:
   verbose: bool
   extra_cflags: tuple[str, ...]
   return_outputs: bool
+  spec_order: tuple[str, ...] | None = None
   wrapper: Any = None
   materialized: bool = False
   library_path: Path | None = None
@@ -100,10 +101,35 @@ def _schema_default(value: Any) -> str:
   return repr(value)
 
 
+def _ordered_values(
+    definition: native.KernelDef, spec_order: Sequence[str] | None
+) -> list[str]:
+  """Return spec names in declaration order, validating completeness."""
+  if spec_order is None:
+    return list(definition.values)
+  declared = dict(definition.values)
+  if set(spec_order) != set(declared) or len(spec_order) != len(declared):
+    raise ValueError(
+        "spec_order must be a permutation of the kernel definition values: "
+        f"{sorted(declared)}"
+    )
+  return list(spec_order)
+
+
 def _torch_schema(
-    name: str, definition: native.KernelDef, *, return_outputs: bool = False
+    name: str,
+    definition: native.KernelDef,
+    *,
+    return_outputs: bool = False,
+    spec_order: Sequence[str] | None = None,
 ) -> str:
-  """Lower a KernelDef to a mutable out-style Torch dispatcher schema."""
+  """Lower a KernelDef to a mutable out-style Torch dispatcher schema.
+
+  ``spec_order`` controls the positional order of the trailing
+  ``__spec_*`` arguments; the native KernelDef stores values in a
+  name-ordered map, so the declaration order must be threaded explicitly
+  to keep positional spec passing aligned with the kernel definition.
+  """
   arguments: list[str] = []
   outputs: list[str] = []
   alias = ord("a")
@@ -133,7 +159,8 @@ def _torch_schema(
       if parameter.default is not None:
         item += f"={_schema_default(parameter.default.value)}"
       arguments.append(item)
-  for symbol, symbol_type in definition.values.items():
+  for symbol in _ordered_values(definition, spec_order):
+    symbol_type = definition.values[symbol]
     _require_identifier(symbol, "specialization value name")
     torch_type = "int?" if symbol_type == native.ConstInt else "ScalarType?"
     arguments.append(f"{torch_type} __spec_{symbol}=None")
@@ -329,10 +356,11 @@ def _generate_torch_source(
     definition: native.KernelDef,
     *,
     return_outputs: bool = False,
+    spec_order: Sequence[str] | None = None,
 ) -> str:
   """Generate the complete bridge translation unit without writing it to disk."""
   schema = _torch_schema(
-      name, definition, return_outputs=return_outputs
+      name, definition, return_outputs=return_outputs, spec_order=spec_order
   ).replace("\\", "\\\\").replace('"', '\\"')
   parameters = definition.inputs
   cpp_parameters: list[str] = []
@@ -368,7 +396,8 @@ def _generate_torch_source(
       call_append.append(f"  values[{index}] = {storage};")
 
   spec_append: list[str] = []
-  for index, (symbol, symbol_type) in enumerate(definition.values.items()):
+  for index, symbol in enumerate(_ordered_values(definition, spec_order)):
+    symbol_type = definition.values[symbol]
     local = f"s{index}"
     if symbol_type == native.ConstInt:
       cpp_parameters.append(f"std::optional<int64_t> {local}")
@@ -414,24 +443,43 @@ def _public_wrapper(
     operator: native.Operator,
     ready: list[bool],
     torch_op_holder: list[Any],
+    spec_order: Sequence[str] | None = None,
 ):
-  """Wrap raw ``torch.ops`` positional specializations in the public call form."""
+  """Wrap raw ``torch.ops`` positional specializations in the public call form.
+
+  ``spec_order`` is the kernel-definition declaration order of the spec
+  values; it defines the positional order of the trailing spec arguments
+  of both the generated Torch op schema and this wrapper.
+  """
   from . import _precompile as _precompile_mod
 
   parameters = list(definition.inputs)
-  symbols = list(definition.values)
+  symbols = _ordered_values(definition, spec_order)
   output_indices = [
     index for index, parameter in enumerate(parameters) if isinstance(parameter, native.TensorDef) and parameter.output
   ]
   n_parameters = len(parameters)
+  n_specs = len(symbols)
   spec_names = frozenset(symbols)
   single_output_index = output_indices[0] if len(output_indices) == 1 else -1
 
   def invoke(*args, **kwargs):
-    # Hot inference path: all inputs positional, any keyword arguments are
-    # spec names, bridge ready and no collector or graph capture active.
-    # Skips the per-call import, dict build, string formatting and output
-    # generator of the general path below.
+    # Hot inference path: bridge ready and no collector or graph capture
+    # active. Two calling conventions avoid the per-call import, dict
+    # build, string formatting and output generator of the general path:
+    # inputs only, or inputs followed by every spec value positionally in
+    # declaration order.
+    if (
+        ready[0]
+        and _precompile_mod._active_collector is None
+        and not kwargs
+        and len(args) in (n_parameters, n_parameters + n_specs)
+    ):
+      torch_op_holder[0](*args)
+      if single_output_index >= 0:
+        return args[single_output_index]
+      return tuple(args[index] for index in output_indices)
+
     if (
         ready[0]
         and _precompile_mod._active_collector is None
@@ -699,6 +747,7 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
             registration.name,
             registration.kernel_def,
             return_outputs=registration.return_outputs,
+            spec_order=registration.spec_order,
         )
         bridge_identity = (
             "torch-bridge-v4",
@@ -835,6 +884,7 @@ def register_torch_operator(
   verbose: bool = False,
   extra_cflags: tuple[str, ...] = (),
   return_outputs: bool = False,
+  spec_order: Sequence[str] | None = None,
 ):
   """Declare one mutable Torch bridge and return its public wrapper.
 
@@ -859,6 +909,7 @@ def register_torch_operator(
       verbose=verbose,
       extra_cflags=tuple(extra_cflags),
       return_outputs=return_outputs,
+      spec_order=tuple(spec_order) if spec_order is not None else None,
     )
     registration.wrapper = _public_wrapper(
         library,
@@ -867,6 +918,7 @@ def register_torch_operator(
         operator,
         registration.ready,
         registration.torch_op,
+        spec_order=registration.spec_order,
     )
     _registrations[key] = registration
     return registration.wrapper
