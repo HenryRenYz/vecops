@@ -680,7 +680,12 @@ def _load_bridge(
   _loaded_bridge_modules.extend((module, native_module))
   registration.library_path = library_path
   registration.materialized = True
-  registration.torch_op[0] = getattr(getattr(torch.ops, registration.library), registration.name)
+  packet = getattr(getattr(torch.ops, registration.library), registration.name)
+  # Resolve the OverloadPacket to its concrete OpOverload once: packet
+  # __call__ re-runs python overload resolution (jit::
+  # _get_operation_for_overload_or_packet) on every invocation, which
+  # dominates the custom-op boundary cost on slow hosts.
+  registration.torch_op[0] = getattr(packet, "default", packet)
   registration.ready[0] = True
 
 
