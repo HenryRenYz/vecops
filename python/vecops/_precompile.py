@@ -406,15 +406,33 @@ def precompile(
       # Dynamo graphs used by ordinary inference.
       with torch.compiler.set_stance("force_eager"):
         if use_real_tensors:
-          run_model(args, kwargs)
+          # Real tensors execute the kernels, so the native workspace
+          # allocation observer can run; fake tensors short-circuit the
+          # dispatch and would record nothing.
+          try:
+            from .workspace_observer import drain, tracking
+          except ImportError:
+            tracking_cm = None
+          else:
+            tracking_cm = tracking()
+          if tracking_cm is not None:
+            with tracking_cm:
+              run_model(args, kwargs)
+              workspace_allocations = drain()
+          else:
+            run_model(args, kwargs)
+            workspace_allocations = None
         else:
           mode = FakeTensorMode(allow_non_fake_inputs=True)
           with mode:
             fake_args = _fake_tree(args, mode, torch)
             fake_kwargs = _fake_tree(kwargs, mode, torch)
             run_model(fake_args, fake_kwargs, fake_mode=mode)
+          workspace_allocations = None
 
   if graph_capture is not None:
+    if workspace_allocations:
+      graph_capture.attributes["workspace_allocations"] = workspace_allocations
     captured_graph = graph_capture.finish()
 
   from ._schema_bridge import compile_pending_torch_bridges

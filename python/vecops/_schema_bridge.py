@@ -47,6 +47,14 @@ _registrations: dict[tuple[str, str], _BridgeRegistration] = {}
 _registration_lock = Lock()
 _materialize_lock = Lock()
 _loaded_bridge_modules: list[Any] = []
+
+# Replaced by `vecops.workspace_observer` at import; returns a ctypes
+# c_void_p to the active VecopsAllocationObserverV1, or NULL.
+_workspace_observer_factory: Any = lambda: ctypes.c_void_p(None)
+
+
+def _workspace_observer_pointer() -> Any:
+  return _workspace_observer_factory()
 _identifier = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -304,6 +312,11 @@ const VecopsThreadPoolV1 torch_thread_pool{
   nullptr, nullptr, 0
 };
 
+// Optional allocation observer installed by the Python side through
+// `vecops_torch_bridge_set_allocation_observer_v1`. Relaxed loads are
+// sufficient: installation happens once, before steady-state execution.
+std::atomic<const VecopsAllocationObserverV1*> bridge_allocation_observer{nullptr};
+
 $cpp_return_type wrapper($cpp_parameters) {
   std::array<VecopsValue, $parameter_count> values{};
 $append_arguments
@@ -314,6 +327,7 @@ $append_specializations
   execution_context.struct_size = sizeof(VecopsExecutionContext);
   execution_context.requested_threads = torch_max_parallelism(nullptr);
   execution_context.thread_pool = &torch_thread_pool;
+  execution_context.allocation_observer = bridge_allocation_observer.load(std::memory_order_relaxed);
   VecopsCall call{sizeof(VecopsCall), static_cast<uint32_t>(values.size()), values.data(), nullptr, 0,
                   &execution_context};
   std::array<char, 1024> message{};
@@ -345,6 +359,11 @@ extern "C" VECOPS_RUNTIME_EXPORT void vecops_torch_bridge_set_handle_v1(
     uint64_t handle, OperatorInvoke invoke) {
   operator_invoke.store(invoke, std::memory_order_release);
   operator_handle.store(handle, std::memory_order_release);
+}
+
+extern "C" VECOPS_RUNTIME_EXPORT void vecops_torch_bridge_set_allocation_observer_v1(
+    const VecopsAllocationObserverV1* observer) {
+  bridge_allocation_observer.store(observer, std::memory_order_release);
 }
 """
 )
@@ -677,6 +696,11 @@ def _load_bridge(
   setter.argtypes = [ctypes.c_uint64, ctypes.c_void_p]
   setter.restype = None
   setter(registration.operator._handle, invoke)
+  observer_setter = getattr(module, "vecops_torch_bridge_set_allocation_observer_v1", None)
+  if observer_setter is not None:
+    observer_setter.argtypes = [ctypes.c_void_p]
+    observer_setter.restype = None
+    observer_setter(_workspace_observer_pointer())
   _loaded_bridge_modules.extend((module, native_module))
   registration.library_path = library_path
   registration.materialized = True

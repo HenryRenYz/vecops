@@ -182,6 +182,7 @@ public:
   void bind_execution_context(const VecopsExecutionContext* context) noexcept {
     requested_parallelism_ = 0;
     thread_pool_ = nullptr;
+    allocation_observer_ = nullptr;
     if (context == nullptr)
       return;
     if (context->struct_size >=
@@ -189,6 +190,9 @@ public:
       requested_parallelism_ = static_cast<nint_t>(context->requested_threads);
     if (context->struct_size >= offsetof(VecopsExecutionContext, thread_pool) + sizeof(context->thread_pool))
       thread_pool_ = context->thread_pool;
+    if (context->struct_size >=
+        offsetof(VecopsExecutionContext, allocation_observer) + sizeof(context->allocation_observer))
+      allocation_observer_ = context->allocation_observer;
   }
 
   /** Effective logical parallelism captured from this call's execution context. */
@@ -473,7 +477,9 @@ private:
       VECOPS_ASSERT(traced == site, "workspace trace and execution site IDs differ");
     }
     if (mode_ == Mode::Replay) {
-      return replay_->find(site, request);
+      const auto slot = replay_->find(site, request);
+      notify_allocation(local_name, request, 3);  // pre-placed replay site
+      return slot;
     }
 
     const nint_t allocation_alignment =
@@ -489,12 +495,14 @@ private:
 
     if (request.placement != WorkspacePlacementPolicy::SlowAllowed && fast_.can_allocate(total, allocation_alignment)) {
       auto* data = static_cast<std::byte*>(fast_.allocate(total, allocation_alignment));
+      notify_allocation(local_name, request, 0);
       return {data, request.bytes, stride, request.replicas};
     }
     VECOPS_ASSERT(request.placement != WorkspacePlacementPolicy::FastRequired,
                   "required-fast workspace request does not fit in the fast arena");
     if (slow_.can_allocate(total, allocation_alignment)) {
       auto* data = static_cast<std::byte*>(slow_.allocate(total, allocation_alignment));
+      notify_allocation(local_name, request, 1);
       return {data, request.bytes, stride, request.replicas};
     }
     const nint_t heap_alignment = std::max(allocation_alignment, static_cast<nint_t>(alignof(std::max_align_t)));
@@ -502,10 +510,36 @@ private:
                     static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()),
                   "workspace request exceeds the host address space");
     void* data =
-      ::operator new(static_cast<std::size_t>(total), std::align_val_t(static_cast<std::size_t>(heap_alignment)));
+        ::operator new(static_cast<std::size_t>(total), std::align_val_t(static_cast<std::size_t>(heap_alignment)));
     auto& owner = persistent ? persistent_owned_ : owned_;
     owner.emplace_back(data, heap_alignment);
+    notify_allocation(local_name, request, 2);
     return {static_cast<std::byte*>(data), request.bytes, stride, request.replicas};
+  }
+
+  /** Report one dynamic allocation to the attached observer, if any. */
+  void notify_allocation(std::string_view local_name, const WorkspaceAllocationRequest& request,
+                         std::int32_t tier) const noexcept {
+    if (allocation_observer_ == nullptr || allocation_observer_->on_workspace_allocation == nullptr)
+      return;
+    char site_buffer[64];
+    const std::size_t site_length =
+        std::min<std::size_t>(local_name.size(), sizeof(site_buffer) - 1);
+    std::memcpy(site_buffer, local_name.data(), site_length);
+    site_buffer[site_length] = '\0';
+    VecopsWorkspaceAllocationV1 record{};
+    record.struct_size = sizeof(record);
+    record.recipe = recipe_.c_str();
+    record.site = site_buffer;
+    record.scope_hash = frames_.back().path_hash;
+    record.bytes = static_cast<std::uint64_t>(request.bytes);
+    record.alignment = static_cast<std::uint64_t>(request.alignment);
+    record.replicas = static_cast<std::uint64_t>(request.replicas);
+    record.domain = static_cast<std::int32_t>(request.domain);
+    record.placement = static_cast<std::int32_t>(request.placement);
+    record.tier = tier;
+    record.estimated_traffic_bytes = request.estimated_traffic_bytes;
+    allocation_observer_->on_workspace_allocation(allocation_observer_->user_context, &record);
   }
 
   struct OwnedBlock {
@@ -580,6 +614,7 @@ private:
   bool finished_ = false;
   const VecopsThreadPoolV1* thread_pool_ = nullptr;
   nint_t requested_parallelism_ = 0;
+  const VecopsAllocationObserverV1* allocation_observer_ = nullptr;
 };
 
 /**

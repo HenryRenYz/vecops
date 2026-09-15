@@ -279,6 +279,58 @@ typedef struct VecopsThreadPoolV1 {
 /** Factory exported by the optional vecops OpenMP provider library. */
 VECOPS_RUNTIME_EXPORT const VecopsThreadPoolV1* vecops_openmp_thread_pool_v1(void);
 
+/**
+ * @brief One workspace allocation performed inside a kernel invocation.
+ *
+ * String members are owned by the reporting context and remain valid only
+ * for the duration of the observer callback; collectors must copy them.
+ * `tier` reports where the bytes actually came from: 0 = fast arena,
+ * 1 = slow arena, 2 = separately owned heap allocation.
+ */
+typedef struct VecopsWorkspaceAllocationV1 {
+  /** Size of this record known to the reporter. */
+  uint32_t struct_size;
+  /** Kernel recipe name; static storage for the reporting DSO. */
+  const char* recipe;
+  /** Workspace-local site name; static or scope-lifetime storage. */
+  const char* site;
+  /** Hash of the enclosing scope chain, stable within a recipe. */
+  uint64_t scope_hash;
+  /** Requested logical bytes (before replica multiplication). */
+  uint64_t bytes;
+  /** Effective allocation alignment in bytes. */
+  uint64_t alignment;
+  /** Replica count for worker-local sites, otherwise one. */
+  uint64_t replicas;
+  /** `WorkspaceDomain` value: 0 global, 1 worker-local. */
+  int32_t domain;
+  /** `WorkspacePlacementPolicy` value. */
+  int32_t placement;
+  /** Actual backing: 0 fast, 1 slow, 2 heap. */
+  int32_t tier;
+  /** Reserved; zero. */
+  int32_t reserved;
+  /** Estimated bytes transferred through this buffer. */
+  double estimated_traffic_bytes;
+} VecopsWorkspaceAllocationV1;
+
+/**
+ * @brief Optional allocation observer attached to an execution context.
+ *
+ * The callback may be invoked concurrently from multiple worker threads
+ * and must not acquire the Python GIL; push to a lock-free or mutex-held
+ * native buffer instead. `record` is only valid during the call.
+ */
+typedef struct VecopsAllocationObserverV1 {
+  /** Size of this record; must be `sizeof(VecopsAllocationObserverV1)`. */
+  uint32_t struct_size;
+  /** Opaque collector context passed back to the callback. */
+  void* user_context;
+  /** Allocation notification; never null when installed. */
+  void (*on_workspace_allocation)(void* user_context,
+                                  const VecopsWorkspaceAllocationV1* record);
+} VecopsAllocationObserverV1;
+
 typedef struct VecopsExecutionContext {
   /** Size of this record known to the caller. */
   uint32_t struct_size;
@@ -294,6 +346,8 @@ typedef struct VecopsExecutionContext {
   const VecopsWorkspaceArenaProvider* workspace_provider;
   /** Optional synchronous logical-task executor; absent from older records. */
   const VecopsThreadPoolV1* thread_pool;
+  /** Optional workspace allocation observer; absent from older records. */
+  const VecopsAllocationObserverV1* allocation_observer;
 } VecopsExecutionContext;
 
 /**

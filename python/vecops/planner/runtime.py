@@ -291,36 +291,43 @@ class PlanSession:
   def _build_factory_sites(self) -> dict[tuple[Any, ...], list[_FactoryCandidate]]:
     result: dict[tuple[Any, ...], list[_FactoryCandidate]] = {}
     factories = {"aten.empty.memory_format", "aten.empty_like.default"}
+    seen_tensors: set[tuple[tuple[Any, ...], str]] = set()
     for event in self.graph.events:
       source = event.attributes.get("source")
       if event.name not in factories or not isinstance(source, dict):
         continue
-      tensor_id = next(
-        (
+      if event.attributes.get("explicit_factory") is True:
+        # Self-registered by the planner factory: the output is the
+        # allocated tensor even when stack-walk attribution (and the
+        # storage allocation_event with it) went to a different event.
+        candidate_ids = list(event.outputs)
+      else:
+        candidate_ids = [
           tensor_id
           for tensor_id in event.outputs
           if self.graph.storages[self.graph.tensors[tensor_id].storage_id].allocation_event
           == event.id
-        ),
-        None,
-      )
-      if tensor_id is None:
-        continue
-      placement = self.plan.placements[self.graph.tensors[tensor_id].storage_id]
-      if placement.offset is None or placement.tier != MemoryTier.fast:
-        continue
-      if placement.annotations.get("loop_replay_safe") is False:
-        continue
-      metadata = self.graph.tensors[tensor_id].metadata
-      key = (
-        tuple(event.scope),
-        _canonical_file(str(source["file"])),
-        str(source["function"]),
-        event.name,
-        tuple(metadata.shape),
-        metadata.dtype,
-      )
-      result.setdefault(key, []).append(_FactoryCandidate(tensor_id))
+        ]
+      for tensor_id in candidate_ids:
+        dedupe = (tuple(event.scope), tensor_id)
+        if dedupe in seen_tensors:
+          continue
+        seen_tensors.add(dedupe)
+        placement = self.plan.placements[self.graph.tensors[tensor_id].storage_id]
+        if placement.offset is None or placement.tier != MemoryTier.fast:
+          continue
+        if placement.annotations.get("loop_replay_safe") is False:
+          continue
+        metadata = self.graph.tensors[tensor_id].metadata
+        key = (
+          tuple(event.scope),
+          _canonical_file(str(source["file"])),
+          str(source["function"]),
+          event.name,
+          tuple(metadata.shape),
+          metadata.dtype,
+        )
+        result.setdefault(key, []).append(_FactoryCandidate(tensor_id))
     return result
 
   def _factory_tensor(
@@ -598,38 +605,84 @@ class PlanSession:
     return dict(self._binding_stats)
 
 
+def _record_capture_allocation(name: str, tensor: Any, source: tuple[str, str]):
+  """Register one explicit factory event on the active graph capture.
+
+  Capture-time attribution otherwise walks the whole Python stack, which
+  attributes wrapper allocations to unrelated frames (e.g. the matmul
+  dispatch mode); the runtime factory key uses the direct caller of the
+  factory instead. Self-registering with the identical source keeps both
+  key constructions in lockstep, so planned factory sites exist for
+  wrapper-level outputs.
+  """
+  try:
+    from ..graph import current_capture
+    from ..graph.torch import register_tensor
+  except ImportError:
+    return
+  capture = current_capture()
+  if capture is None:
+    return
+  try:
+    register_tensor(capture, tensor, kind="temporary")
+    file_name, function = source
+    capture.record_operator(
+        name,
+        inputs=[],
+        outputs=[tensor],
+        attributes={
+            "source": {
+                "file": file_name,
+                "function": function,
+                "line": 0,
+            },
+            "explicit_factory": True,
+        },
+    )
+  except Exception:  # diagnostics must never break allocation
+    pass
+
+
 def empty(*shape: Any, **kwargs: Any):
   """Drop-in ``torch.empty`` that uses a planned arena when one is active."""
+  source = _caller_source(2)
   session = current_session()
   if session is not None:
     replacement = session._factory_tensor(
       "aten.empty.memory_format",
       shape,
       kwargs,
-      source=_caller_source(2),
+      source=source,
     )
     if replacement is not None:
       return replacement
   if _torch_empty is None:
     _load_torch_factories()
-  return _torch_empty(*shape, **kwargs)
+  result = _torch_empty(*shape, **kwargs)
+  if str(kwargs.get("device") or "cpu").startswith("cpu"):
+    _record_capture_allocation("aten.empty.memory_format", result, source)
+  return result
 
 
 def empty_like(prototype: Any, **kwargs: Any):
   """Drop-in ``torch.empty_like`` that uses a planned arena when active."""
+  source = _caller_source(2)
   session = current_session()
   if session is not None:
     replacement = session._factory_tensor(
       "aten.empty_like.default",
       (prototype,),
       kwargs,
-      source=_caller_source(2),
+      source=source,
     )
     if replacement is not None:
       return replacement
   if _torch_empty_like is None:
     _load_torch_factories()
-  return _torch_empty_like(prototype, **kwargs)
+  result = _torch_empty_like(prototype, **kwargs)
+  if str(kwargs.get("device") or prototype.device).startswith("cpu"):
+    _record_capture_allocation("aten.empty_like.default", result, source)
+  return result
 
 
 __all__ = ["PlanSession", "current_session", "empty", "empty_like"]

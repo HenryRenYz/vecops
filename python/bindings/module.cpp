@@ -1417,6 +1417,67 @@ void bind_memory(py::module_& module) {
 } // namespace
 #endif
 
+namespace {
+
+/** Native-side workspace allocation collector (no GIL in the callback). */
+struct WorkspaceAllocationCollector {
+  struct Record {
+    std::string recipe;
+    std::string site;
+    std::uint64_t scope_hash = 0;
+    std::uint64_t bytes = 0;
+    std::uint64_t alignment = 0;
+    std::uint64_t replicas = 0;
+    std::int32_t domain = 0;
+    std::int32_t placement = 0;
+    std::int32_t tier = 0;
+    double estimated_traffic_bytes = 0.0;
+  };
+
+  std::mutex mutex;
+  std::vector<Record> records;
+  std::size_t dropped = 0;  // records lost to the capacity cap
+  std::atomic<bool> enabled{false};
+  static constexpr std::size_t capacity = 1u << 20;
+
+  static void on_allocation(void* context, const VecopsWorkspaceAllocationV1* record) noexcept {
+    auto* self = static_cast<WorkspaceAllocationCollector*>(context);
+    if (self == nullptr || !self->enabled.load(std::memory_order_relaxed))
+      return;
+    if (record == nullptr || record->struct_size < sizeof(*record))
+      return;
+    std::lock_guard<std::mutex> guard(self->mutex);
+    if (self->records.size() >= capacity) {
+      ++self->dropped;
+      return;
+    }
+    self->records.push_back(Record{
+      record->recipe != nullptr ? record->recipe : "",
+      record->site != nullptr ? record->site : "",
+      record->scope_hash,
+      record->bytes,
+      record->alignment,
+      record->replicas,
+      record->domain,
+      record->placement,
+      record->tier,
+      record->estimated_traffic_bytes,
+    });
+  }
+
+  VecopsAllocationObserverV1 observer() noexcept {
+    VecopsAllocationObserverV1 observer{};
+    observer.struct_size = sizeof(observer);
+    observer.user_context = this;
+    observer.on_workspace_allocation = &WorkspaceAllocationCollector::on_allocation;
+    return observer;
+  }
+};
+
+WorkspaceAllocationCollector g_workspace_collector;
+
+} // namespace
+
 PYBIND11_MODULE(_C, module) {
   module.doc() = R"doc(Expert-level bindings for the vecops C++ runtime.
 
@@ -1923,4 +1984,58 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
     },
     py::arg("requests"), py::arg("parallel_jobs") = 0, py::arg("execution_parallelism") = 1,
     "Prepare native operator cache misses through shared CMake batches.");
+
+  module.def(
+    "set_workspace_allocation_tracking",
+    [](bool enabled) {
+      g_workspace_collector.enabled.store(enabled, std::memory_order_relaxed);
+      if (enabled) {
+        std::lock_guard<std::mutex> guard(g_workspace_collector.mutex);
+        g_workspace_collector.records.clear();
+        g_workspace_collector.dropped = 0;
+      }
+      const auto observer = g_workspace_collector.observer();
+      return py::make_tuple(reinterpret_cast<std::uintptr_t>(observer.on_workspace_allocation),
+                            reinterpret_cast<std::uintptr_t>(observer.user_context),
+                            static_cast<std::uintptr_t>(sizeof(VecopsAllocationObserverV1)));
+    },
+    py::arg("enabled") = true,
+    "Enable the native workspace allocation collector and return "
+    "(callback_address, user_context_address, observer_struct_size) for "
+    "installing into bridge DSOs via their exported setter.");
+
+  module.def(
+    "drain_workspace_allocations",
+    []() {
+      std::vector<WorkspaceAllocationCollector::Record> drained;
+      std::size_t dropped = 0;
+      {
+        std::lock_guard<std::mutex> guard(g_workspace_collector.mutex);
+        drained.swap(g_workspace_collector.records);
+        dropped = g_workspace_collector.dropped;
+        g_workspace_collector.dropped = 0;
+      }
+      py::list result;
+      for (const auto& record : drained) {
+        py::dict item;
+        item["recipe"] = record.recipe;
+        item["site"] = record.site;
+        item["scope_hash"] = record.scope_hash;
+        item["bytes"] = record.bytes;
+        item["alignment"] = record.alignment;
+        item["replicas"] = record.replicas;
+        item["domain"] = record.domain;
+        item["placement"] = record.placement;
+        item["tier"] = record.tier;
+        item["estimated_traffic_bytes"] = record.estimated_traffic_bytes;
+        result.append(std::move(item));
+      }
+      if (dropped != 0) {
+        py::dict item;
+        item["dropped"] = dropped;
+        result.append(std::move(item));
+      }
+      return result;
+    },
+    "Return and clear the collected workspace allocation records.");
 }
