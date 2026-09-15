@@ -416,13 +416,35 @@ def _public_wrapper(
     torch_op_holder: list[Any],
 ):
   """Wrap raw ``torch.ops`` positional specializations in the public call form."""
+  from . import _precompile as _precompile_mod
+
   parameters = list(definition.inputs)
   symbols = list(definition.values)
   output_indices = [
     index for index, parameter in enumerate(parameters) if isinstance(parameter, native.TensorDef) and parameter.output
   ]
+  n_parameters = len(parameters)
+  spec_names = frozenset(symbols)
+  single_output_index = output_indices[0] if len(output_indices) == 1 else -1
 
   def invoke(*args, **kwargs):
+    # Hot inference path: all inputs positional, any keyword arguments are
+    # spec names, bridge ready and no collector or graph capture active.
+    # Skips the per-call import, dict build, string formatting and output
+    # generator of the general path below.
+    if (
+        ready[0]
+        and _precompile_mod._active_collector is None
+        and len(args) == n_parameters
+        and all(keyword in spec_names for keyword in kwargs)
+    ):
+      torch_op_holder[0](
+          *args, *(kwargs[name] if name in kwargs else None for name in symbols)
+      )
+      if single_output_index >= 0:
+        return args[single_output_index]
+      return tuple(args[index] for index in output_indices)
+
     if len(args) > len(parameters):
       raise TypeError(f"{library}.{name} expected at most {len(parameters)} positional arguments")
     ordered = list(args)
@@ -440,9 +462,7 @@ def _public_wrapper(
       unexpected = next(iter(kwargs))
       raise TypeError(f"unexpected keyword argument: {unexpected}")
     outputs = tuple(ordered[index] for index in output_indices)
-    from ._precompile import maybe_collect_call
-
-    collected = maybe_collect_call(
+    collected = _precompile_mod.maybe_collect_call(
       operator,
       definition,
       ordered,
