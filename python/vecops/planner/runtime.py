@@ -330,6 +330,20 @@ class PlanSession:
         result.setdefault(key, []).append(_FactoryCandidate(tensor_id))
     return result
 
+  def _debug_dump_sites(self, tag: str) -> None:
+    import os
+    if os.environ.get("AF3_DUMP_FACTORY_SITES") != "1":
+      return
+    with open(os.path.expanduser("~/tmp/factory_sites.txt"), "a") as fh:
+      fh.write(f"== {tag}: {len(self._factory_sites)} sites\n")
+      for i, key in enumerate(list(self._factory_sites)[:8]):
+        fh.write(f"  {key}\n")
+      target = [k for k in self._factory_sites
+                if "linear_packed" in str(k)]
+      fh.write(f"  linear_packed-keyed sites: {len(target)}\n")
+      for k in target[:4]:
+        fh.write(f"    {k}\n")
+
   def _factory_tensor(
     self,
     name: str,
@@ -371,6 +385,7 @@ class PlanSession:
     candidates = self._factory_sites.get(key)
     if not candidates:
       self._factory_fallback("unplanned_site", key)
+      self._debug_dump_sites(f"MISS {key[0]}")
       return None
     cursor_key = (key, tuple(self._loop_epochs))
     cursor = self._factory_cursors.get(cursor_key, 0)
