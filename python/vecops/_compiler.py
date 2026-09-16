@@ -109,7 +109,8 @@ class Compiler:
   """Shared JIT toolchain, source-SDK, and artifact-cache policy.
 
   Args:
-    target: Vecops kernel target architecture; ``"native"`` selects ``Native``.
+    target: Vecops kernel target architecture; ``"native"`` selects ``Native``
+      unless ``VECOPS_TARGET_ARCH`` overrides the process default.
     cache_dir: Persistent artifact root. Defaults below :func:`default_cache_dir`.
     cache_mode: ``"cache-only"``, ``"read-write"``, or ``"compile-only"``.
     build_dir: Root for disposable CMake attempts, separate from artifacts.
@@ -156,7 +157,9 @@ class Compiler:
     self.cache_dir = Path(cache_dir).expanduser() if cache_dir is not None else default_cache_dir() / "artifacts"
     default_build = Path(os.environ.get("VECOPS_BUILD_DIR", default_cache_dir() / "builds"))
     self.build_dir = Path(build_dir).expanduser() if build_dir is not None else default_build
-    self.target = "Native" if target.lower() == "native" else target
+    target_override = os.environ.get("VECOPS_TARGET_ARCH")
+    selected_target = target_override if target.lower() == "native" and target_override else target
+    self.target = "Native" if selected_target.lower() == "native" else selected_target
     self.cc = cc
     self.cxx = cxx
     self.cmake = cmake

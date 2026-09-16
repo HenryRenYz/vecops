@@ -176,6 +176,9 @@ int main(void) {
                 "VECOPS_FIXED_SVE_BITS must be a multiple of 128 in [128, 2048]")
         endif()
         set(VECOPS_MAP_ARM_NativeFixedSVE "${VECOPS_MAP_ARM_Native}")
+        set(VECOPS_NATIVE_FIXED_SVE_BITS
+            "${VECOPS_NATIVE_FIXED_SVE_BITS}" CACHE INTERNAL
+            "Detected native fixed SVE width" FORCE)
     endif()
 endif()
 
@@ -261,6 +264,9 @@ int main(void) {
         endif()
         set(VECOPS_MAP_ARM_NativeFixedStreamingSVE
             "${VECOPS_MAP_ARM_Native}")
+        set(VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS
+            "${VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS}" CACHE INTERNAL
+            "Detected native fixed streaming SVE width" FORCE)
     endif()
 endif()
 

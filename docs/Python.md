@@ -71,6 +71,15 @@ compiler = vecops.Compiler(
 )
 ```
 
+When `target="native"`, `VECOPS_TARGET_ARCH` may select a more specific
+process-wide default without changing every recipe declaration. For example,
+`VECOPS_TARGET_ARCH=NativeFixedSVE` keeps the native ISA feature set while
+compiling ordinary SVE code for the width detected by the source SDK (or the
+explicit `VECOPS_FIXED_SVE_BITS` CMake setting). An explicitly non-native
+`target=` argument is never overridden. Fixed-width artifacts require the
+runtime threads to use the matching SVE vector length; use `Native` when that
+contract is not controlled by the embedding.
+
 A wheel contains a relocatable compiler SDK below `vecops/_sdk`, including
 headers, `libvecops`, and the CMake package. An editable installation maps
 Python modules and headers to the checkout while keeping `_C`, libraries, and

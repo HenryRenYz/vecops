@@ -25,6 +25,16 @@ def test_dtype_normalization_has_no_required_torch_dependency() -> None:
     vecops.normalize_dtype(object())
 
 
+def test_native_compiler_target_allows_process_override(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setenv("VECOPS_TARGET_ARCH", "NativeFixedSVE")
+  defaulted = vecops.Compiler(cache_mode="cache-only")
+  explicit = vecops.Compiler(cache_mode="cache-only", target="Scalar")
+  assert defaulted.target == "NativeFixedSVE"
+  assert explicit.target == "Scalar"
+
+
 def test_string_dimension_dsl_and_symbol_inference() -> None:
   annotation = vt.In(np.float32)["Dynamic<8,1,MaxB> N", "Const 1"]
   definition = vecops.KernelDef(

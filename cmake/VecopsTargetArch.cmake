@@ -82,21 +82,36 @@ function(vecops_configure_target_arch)
         target_compile_options(${ARG_TARGET} PRIVATE -Wno-psabi)
     endif()
     if(ARG_ARCH STREQUAL "NativeFixedSVE")
-        if(NOT VECOPS_FIXED_SVE_BITS)
+        if(VECOPS_FIXED_SVE_BITS)
+            set(_VECOPS_TARGET_FIXED_SVE_BITS
+                "${VECOPS_FIXED_SVE_BITS}")
+        else()
+            set(_VECOPS_TARGET_FIXED_SVE_BITS
+                "${VECOPS_NATIVE_FIXED_SVE_BITS}")
+        endif()
+        if(NOT _VECOPS_TARGET_FIXED_SVE_BITS)
             message(FATAL_ERROR
-                "NativeFixedSVE requires VECOPS_FIXED_SVE_BITS")
+                "NativeFixedSVE requires an explicit or natively detected "
+                "fixed SVE width")
         endif()
         target_compile_options(${ARG_TARGET} PRIVATE
-            "-msve-vector-bits=${VECOPS_FIXED_SVE_BITS}")
+            "-msve-vector-bits=${_VECOPS_TARGET_FIXED_SVE_BITS}")
     endif()
     if(ARG_ARCH STREQUAL "NativeFixedStreamingSVE")
-        if(NOT VECOPS_FIXED_STREAMING_SVE_BITS)
+        if(VECOPS_FIXED_STREAMING_SVE_BITS)
+            set(_VECOPS_TARGET_FIXED_STREAMING_SVE_BITS
+                "${VECOPS_FIXED_STREAMING_SVE_BITS}")
+        else()
+            set(_VECOPS_TARGET_FIXED_STREAMING_SVE_BITS
+                "${VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS}")
+        endif()
+        if(NOT _VECOPS_TARGET_FIXED_STREAMING_SVE_BITS)
             message(FATAL_ERROR
                 "NativeFixedStreamingSVE requires "
-                "VECOPS_FIXED_STREAMING_SVE_BITS")
+                "an explicit or natively detected fixed streaming SVE width")
         endif()
         target_compile_definitions(${ARG_TARGET} PRIVATE
-            "VECOPS_TARGET_FIXED_STREAMING_SVE_BITS=${VECOPS_FIXED_STREAMING_SVE_BITS}")
+            "VECOPS_TARGET_FIXED_STREAMING_SVE_BITS=${_VECOPS_TARGET_FIXED_STREAMING_SVE_BITS}")
     endif()
 
     if(ARG_OUT_MARCH)
