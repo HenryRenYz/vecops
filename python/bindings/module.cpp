@@ -1485,7 +1485,23 @@ Most applications should use :mod:`vecops`, whose Python wrappers normalize
 dtypes, derive schemas, and own framework integration. This module mirrors C++
 value types for diagnostics, explicit build control, and wrapper implementation;
 its constructor-level interfaces intentionally expose native concepts.)doc";
-  module.attr("build_api_version") = 5;
+  module.attr("build_api_version") = 6;
+  module.def(
+    "native_thread_pool_address",
+    [](std::uint32_t threads) {
+      return reinterpret_cast<std::uintptr_t>(vecops_native_thread_pool_v1(threads));
+    },
+    py::arg("threads"),
+    "Return the process-local persistent thread-pool ABI address.");
+  module.def(
+    "native_thread_pool_begin_active",
+    [](std::uint32_t threads) { vecops_native_thread_pool_begin_active(threads); },
+    py::arg("threads"),
+    "Keep native workers active across a bounded sequence of submissions.");
+  module.def(
+    "native_thread_pool_end_active",
+    [] { vecops_native_thread_pool_end_active(); },
+    "End one bounded native-worker active region.");
 #if defined(VECOPS_PYTHON_HAS_MEMORY)
   bind_memory(module);
 #endif

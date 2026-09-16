@@ -35,6 +35,7 @@ from ._precompile import (
   precompile,
 )
 from ._schema import Dynamic, KernelDef, TensorAccess, TensorDef, TensorMeta, ValueDef
+from ._thread_pool import native_thread_pool_region
 
 __all__ = [  # noqa: RUF022 - retain the established public API grouping
   "_C",
@@ -67,6 +68,7 @@ __all__ = [  # noqa: RUF022 - retain the established public API grouping
   "is_precompiling",
   "jit",
   "normalize_dtype",
+  "native_thread_pool_region",
   "graph",
   "ops",
   "planner",

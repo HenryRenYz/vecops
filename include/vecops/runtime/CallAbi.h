@@ -280,6 +280,30 @@ typedef struct VecopsThreadPoolV1 {
 VECOPS_RUNTIME_EXPORT const VecopsThreadPoolV1* vecops_openmp_thread_pool_v1(void);
 
 /**
+ * Factory for the process-local persistent native thread pool.
+ *
+ * The first call fixes the physical worker count for the lifetime of the
+ * process. Later calls return the same provider. Worker threads park between
+ * submissions so an embedding's own parallel runtime can use the same CPU set
+ * without competing with a permanently spinning vecops team.
+ */
+VECOPS_RUNTIME_EXPORT const VecopsThreadPoolV1* vecops_native_thread_pool_v1(uint32_t threads);
+
+/**
+ * Keep the process-local native workers active between submissions.
+ *
+ * Calls may be nested.  Every successful begin must be paired with an end.
+ * The first begin also creates the pool when necessary, using @p threads as
+ * the process-lifetime worker count.  This is intended for a bounded fused
+ * region containing many short parallel phases; leaving it active around
+ * work owned by another CPU runtime can cause oversubscription.
+ */
+VECOPS_RUNTIME_EXPORT void vecops_native_thread_pool_begin_active(uint32_t threads);
+
+/** End one active native-pool region begun by the calling process. */
+VECOPS_RUNTIME_EXPORT void vecops_native_thread_pool_end_active(void);
+
+/**
  * @brief One workspace allocation performed inside a kernel invocation.
  *
  * String members are owned by the reporting context and remain valid only

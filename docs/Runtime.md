@@ -92,16 +92,38 @@ the requested value capped by the pool's reported capacity. Logical tasks are
 not physical-thread identities: a pool may run several task IDs sequentially
 on one physical worker.
 
-The generated Torch extension installs a bridge backed by Torch's intra-op
-runtime. It reports `at::get_num_threads()`, detects an existing
+The generated Torch extension uses Torch's intra-op runtime by default. It
+reports `at::get_num_threads()`, detects an existing
 `at::in_parallel_region()`, and executes the logical task set through the
 active Torch/GNU OpenMP team where that integration is available, with a Torch
 `at::parallel_for` fallback on other builds. Nested entry is serialized to
-avoid oversubscription. Consequently a Torch operator does not discover an
-unrelated "ambient vecops OpenMP maximum" or open a competing private vecops
-pool. A non-Torch embedding may provide another `VecopsThreadPoolV1`; the
-optional standalone OpenMP provider is one such implementation, not an
-implicit dependency of generated kernels.
+avoid oversubscription.
+
+Set `VECOPS_THREAD_POOL=native` before importing vecops to inject the optional
+process-local persistent pool into every generated Torch bridge. The pool is
+created once in the `_C` module, uses `VECOPS_NUM_THREADS` when set (otherwise
+`torch.get_num_threads()`), and parks its worker threads after a short bounded
+spin so idle vecops workers do not compete with Torch OpenMP work. On Linux,
+workers 1..P-1 are pinned across the process's allowed CPU set; the submitting
+thread remains unpinned so later compiler subprocesses do not inherit a
+single-CPU mask. `VECOPS_THREAD_POOL_SPIN_COUNT` controls the bounded spin
+before parking and defaults to 256. This mode is opt-in because a workload
+with substantial interleaved ATen work can still prefer Torch's shared team.
+Set `VECOPS_NATIVE_THREAD_POOL_OPS` to comma-separated qualified-name glob
+patterns to opt in only selected bridges, for example
+`alphafold3_native::diffusion_*`; unmatched bridges retain the Torch pool.
+
+For a bounded model region containing many short native submissions,
+`vecops_native_thread_pool_begin_active(threads)` and
+`vecops_native_thread_pool_end_active()` keep that same worker team spinning
+between phases. Calls may be nested. This avoids repeated park/wakeup latency,
+but the region must not cover parallel Torch/OpenMP work on the same CPUs.
+Python callers should use `vecops.native_thread_pool_region(threads)`, whose
+`finally` path always balances the region.
+
+A non-Torch embedding may provide another `VecopsThreadPoolV1`; the optional
+standalone OpenMP provider is one such implementation, not an implicit
+dependency of generated kernels.
 
 For source kernels, effective parallelism is part of compilation:
 

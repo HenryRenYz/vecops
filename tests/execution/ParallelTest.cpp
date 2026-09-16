@@ -44,6 +44,86 @@ struct RecordingThreadPool {
   std::uint32_t submitted = 0;
 };
 
+struct NativePoolProbe {
+  static constexpr std::size_t task_count = 11;
+
+  static void visit(void* opaque, std::uint32_t task, std::uint32_t count) {
+    auto& self = *static_cast<NativePoolProbe*>(opaque);
+    if (count != task_count || task >= task_count) {
+      self.invalid.store(true, std::memory_order_relaxed);
+      return;
+    }
+    self.visits[task].fetch_add(1, std::memory_order_relaxed);
+  }
+
+  std::array<std::atomic<int>, task_count> visits{};
+  std::atomic<bool> invalid{false};
+};
+
+struct NestedNativePoolProbe {
+  static void inner(void* opaque, std::uint32_t, std::uint32_t) {
+    static_cast<NestedNativePoolProbe*>(opaque)->inner_visits.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  static void outer(void* opaque, std::uint32_t task, std::uint32_t) {
+    auto& self = *static_cast<NestedNativePoolProbe*>(opaque);
+    self.outer_visits.fetch_add(1, std::memory_order_relaxed);
+    if (self.pool->in_parallel_region(self.pool->context) != 1)
+      self.invalid.store(true, std::memory_order_relaxed);
+    if (task == 0) {
+      VecopsError error{sizeof(VecopsError)};
+      if (self.pool->parallel_for(self.pool->context, 3, &self, inner, &error) != VECOPS_STATUS_OK)
+        self.invalid.store(true, std::memory_order_relaxed);
+    }
+  }
+
+  const VecopsThreadPoolV1* pool = nullptr;
+  std::atomic<int> outer_visits{0};
+  std::atomic<int> inner_visits{0};
+  std::atomic<bool> invalid{false};
+};
+
+TEST(ParallelTest, PersistentNativePoolRunsEveryLogicalTaskExactlyOnce) {
+  const auto* pool = vecops_native_thread_pool_v1(4);
+  ASSERT_NE(pool, nullptr);
+  ASSERT_EQ(pool->max_parallelism(pool->context), 4U);
+  NativePoolProbe probe;
+  VecopsError error{sizeof(VecopsError)};
+  for (int iteration = 0; iteration < 100; ++iteration)
+    ASSERT_EQ(pool->parallel_for(pool->context, NativePoolProbe::task_count, &probe, NativePoolProbe::visit, &error),
+              VECOPS_STATUS_OK);
+  EXPECT_FALSE(probe.invalid.load(std::memory_order_relaxed));
+  for (const auto& visits : probe.visits)
+    EXPECT_EQ(visits.load(std::memory_order_relaxed), 100);
+}
+
+TEST(ParallelTest, PersistentNativePoolSerializesNestedSubmission) {
+  const auto* pool = vecops_native_thread_pool_v1(4);
+  NestedNativePoolProbe probe;
+  probe.pool = pool;
+  VecopsError error{sizeof(VecopsError)};
+  ASSERT_EQ(pool->parallel_for(pool->context, 4, &probe, NestedNativePoolProbe::outer, &error), VECOPS_STATUS_OK);
+  EXPECT_FALSE(probe.invalid.load(std::memory_order_relaxed));
+  EXPECT_EQ(probe.outer_visits.load(std::memory_order_relaxed), 4);
+  EXPECT_EQ(probe.inner_visits.load(std::memory_order_relaxed), 3);
+}
+
+TEST(ParallelTest, PersistentNativePoolSupportsNestedActiveRegions) {
+  vecops_native_thread_pool_begin_active(4);
+  vecops_native_thread_pool_begin_active(4);
+  const auto* pool = vecops_native_thread_pool_v1(4);
+  NativePoolProbe probe;
+  VecopsError error{sizeof(VecopsError)};
+  ASSERT_EQ(pool->parallel_for(pool->context, NativePoolProbe::task_count,
+                               &probe, NativePoolProbe::visit, &error),
+            VECOPS_STATUS_OK);
+  vecops_native_thread_pool_end_active();
+  vecops_native_thread_pool_end_active();
+  EXPECT_FALSE(probe.invalid.load(std::memory_order_relaxed));
+  for (const auto& visits : probe.visits)
+    EXPECT_EQ(visits.load(std::memory_order_relaxed), 1);
+}
+
 TEST(ParallelTest, MaximumIsPositiveAndRequestedWorkersHaveDenseIds) {
   const nint_t maximum = execution::max_parallelism();
   ASSERT_GE(maximum, 1);

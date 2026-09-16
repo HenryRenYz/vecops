@@ -27,6 +27,7 @@ from .ir import (
 _active_capture: contextvars.ContextVar[GraphCapture | None] = contextvars.ContextVar(
   "vecops_graph_capture", default=None
 )
+_active_capture_count = 0
 
 
 def _normalize_kind(value: TensorKind | str) -> TensorKind:
@@ -39,6 +40,11 @@ def _normalize_access(value: AccessKind | str) -> AccessKind:
 
 def current_capture() -> GraphCapture | None:
   """Return the active capture in this context, or ``None``."""
+  # Keep the normal execution path visible to Dynamo as a plain global guard.
+  # ContextVar.get() is neither traceable nor free, while graph capture is a
+  # short-lived precompile-only state.
+  if _active_capture_count == 0:
+    return None
   return _active_capture.get()
 
 
@@ -77,6 +83,7 @@ class GraphCapture:
     self._finished = False
 
   def __enter__(self) -> "GraphCapture":
+    global _active_capture_count
     if self._finished:
       raise RuntimeError("a finished graph capture cannot be re-entered")
     if self._active_token is not None:
@@ -84,12 +91,15 @@ class GraphCapture:
     if current_capture() is not None:
       raise RuntimeError("graph captures cannot be nested")
     self._active_token = _active_capture.set(self)
+    _active_capture_count += 1
     return self
 
   def __exit__(self, exc_type, exc, traceback) -> None:
+    global _active_capture_count
     assert self._active_token is not None
     _active_capture.reset(self._active_token)
     self._active_token = None
+    _active_capture_count -= 1
 
   @property
   def scope(self) -> tuple[str, ...]:

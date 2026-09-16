@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import _C
 
-_BUILD_API_VERSION = 5
+_BUILD_API_VERSION = 6
 
 
 def require_native_build_api() -> None:
@@ -26,6 +26,9 @@ def require_native_build_api() -> None:
       "KernelBuildBatchRequest",
       "BuildBatchResult",
       "prepare_batch",
+      "native_thread_pool_address",
+      "native_thread_pool_begin_active",
+      "native_thread_pool_end_active",
   )
   missing = [name for name in required_symbols if not hasattr(_C, name)]
   if actual == _BUILD_API_VERSION and not missing:

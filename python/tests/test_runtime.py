@@ -431,12 +431,14 @@ def test_generated_torch_bridge_uses_mutable_out_schema() -> None:
   assert "vecops_operator_bridge_invoke_v1" in source
   assert "vecops_torch_bridge_set_handle_v1" in source
   assert "VecopsThreadPoolV1 torch_thread_pool" in source
+  assert "bridge_thread_pool" in source
+  assert "vecops_torch_bridge_set_thread_pool_v1" in source
   assert "at::parallel_for(0, task_count, 1" in source
   assert "libgomp.so.1" not in source
   assert "GOMP_parallel" not in source
   assert "dlsym" not in source
   assert "RTLD_DEFAULT" not in source
-  assert "execution_context.thread_pool = &torch_thread_pool" in source
+  assert "configured_pool != nullptr ? configured_pool : &torch_thread_pool" in source
   assert "torch/extension.h" not in source
   assert "PYBIND11_MODULE" not in source
   returning_schema = _torch_schema("run", definition, return_outputs=True)
@@ -446,6 +448,72 @@ def test_generated_torch_bridge_uses_mutable_out_schema() -> None:
   )
   assert "at::Tensor wrapper(" in returning_source
   assert "return p1;" in returning_source
+
+
+def test_native_thread_pool_operator_filter(monkeypatch) -> None:
+  from vecops import _schema_bridge
+
+  class TorchStub:
+    @staticmethod
+    def get_num_threads():
+      return 7
+
+  monkeypatch.setattr(
+    _schema_bridge.native, "native_thread_pool_address", lambda threads: 1234,
+    raising=False,
+  )
+  monkeypatch.setattr(_schema_bridge, "_native_thread_pool", None)
+  monkeypatch.setenv("VECOPS_THREAD_POOL", "native")
+  monkeypatch.setenv(
+    "VECOPS_NATIVE_THREAD_POOL_OPS",
+    "alphafold3_native::diffusion_*,other::exact",
+  )
+  assert not _schema_bridge._thread_pool_pointer(
+    TorchStub(), "alphafold3_native::linear_packed"
+  ).value
+  assert _schema_bridge._thread_pool_pointer(
+    TorchStub(), "alphafold3_native::diffusion_self_attention"
+  ).value == 1234
+  assert _schema_bridge._thread_pool_pointer(
+    TorchStub(), "other::exact"
+  ).value == 1234
+
+
+def test_native_thread_pool_region_is_scoped_and_nestable(monkeypatch) -> None:
+  events = []
+  monkeypatch.setattr(
+    vecops._C,
+    "native_thread_pool_begin_active",
+    lambda threads: events.append(("begin", threads)),
+    raising=False,
+  )
+  monkeypatch.setattr(
+    vecops._C,
+    "native_thread_pool_end_active",
+    lambda: events.append(("end", None)),
+    raising=False,
+  )
+  with vecops.native_thread_pool_region(7):
+    with vecops.native_thread_pool_region(7):
+      events.append(("body", None))
+  assert events == [
+    ("begin", 7),
+    ("begin", 7),
+    ("body", None),
+    ("end", None),
+    ("end", None),
+  ]
+
+
+def test_native_thread_pool_region_can_be_disabled(monkeypatch) -> None:
+  monkeypatch.setattr(
+    vecops._C,
+    "native_thread_pool_begin_active",
+    lambda threads: pytest.fail(f"unexpected begin for {threads}"),
+    raising=False,
+  )
+  with vecops.native_thread_pool_region(0, enabled=False):
+    pass
 
 
 def test_python_sdk_core_target_does_not_propagate_openmp() -> None:

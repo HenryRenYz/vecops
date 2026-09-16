@@ -8,6 +8,23 @@ without Python convenience behavior.
 Importing `vecops` does not import NumPy or Torch. Dtype conversion recognizes
 those frameworks only when the application has already loaded them.
 
+## Native thread-pool regions
+
+`vecops.native_thread_pool_region(threads)` keeps the process-local native
+worker team active across a bounded series of vecops submissions:
+
+```python
+with vecops.native_thread_pool_region(torch.get_num_threads()):
+  state = native_attention(state)
+  state = native_transition(state)
+```
+
+The context manager is nestable and always releases the active region on an
+exception. Use it only when every parallel operation inside the region uses
+the native pool; an interleaved Torch/OpenMP operation would otherwise compete
+with the active workers for the same CPU set. Pass `enabled=False` to make the
+region a no-op when selecting the executor at runtime.
+
 ## Compiler and directories
 
 `vecops.Compiler()` discovers CMake and matching C/C++ compilers lazily. The
@@ -405,6 +422,15 @@ mode from the active Torch installation. Loading the DSO runs its
 `TORCH_LIBRARY_FRAGMENT` initializers before vecops supplies the handle. A
 cache-root file lock coalesces bridge writers across processes; the cache is
 rechecked after acquiring that lock.
+
+For workloads dominated by many short vecops parallel regions, set
+`VECOPS_THREAD_POOL=native` to route generated bridges through vecops' single
+process-local persistent pool instead of `at::parallel_for`. Its size defaults
+to `torch.get_num_threads()` and may be fixed with `VECOPS_NUM_THREADS`.
+`VECOPS_THREAD_POOL_SPIN_COUNT` sets the bounded worker spin before parking.
+`VECOPS_NATIVE_THREAD_POOL_OPS` optionally limits native-pool injection to
+comma-separated qualified operator globs. The default remains
+`VECOPS_THREAD_POOL=torch`.
 
 Generated Torch bridges build their `VecopsValue` and specialization arrays in
 fixed-size stack storage. Tensor size and stride pointers refer directly to

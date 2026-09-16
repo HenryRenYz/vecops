@@ -10,6 +10,7 @@ functions to make its ABI surface reviewable as ordinary source text.
 from __future__ import annotations
 
 import ctypes
+import fnmatch
 import hashlib
 import keyword
 import os
@@ -51,10 +52,40 @@ _loaded_bridge_modules: list[Any] = []
 # Replaced by `vecops.workspace_observer` at import; returns a ctypes
 # c_void_p to the active VecopsAllocationObserverV1, or NULL.
 _workspace_observer_factory: Any = lambda: ctypes.c_void_p(None)
+_native_thread_pool: Any = None
 
 
 def _workspace_observer_pointer() -> Any:
   return _workspace_observer_factory()
+
+
+def _thread_pool_pointer(torch: Any, qualified_name: str) -> ctypes.c_void_p:
+  """Resolve the opt-in process-local vecops pool once per interpreter."""
+  global _native_thread_pool
+  mode = os.environ.get("VECOPS_THREAD_POOL", "torch").strip().lower()
+  if mode in ("", "torch"):
+    return ctypes.c_void_p(None)
+  if mode != "native":
+    raise RuntimeError(
+      "VECOPS_THREAD_POOL must be 'torch' or 'native', "
+      f"got {mode!r}"
+    )
+  configured_ops = os.environ.get("VECOPS_NATIVE_THREAD_POOL_OPS")
+  if configured_ops:
+    patterns = [item.strip() for item in configured_ops.split(",") if item.strip()]
+    if not any(fnmatch.fnmatchcase(qualified_name, pattern) for pattern in patterns):
+      return ctypes.c_void_p(None)
+  if _native_thread_pool is None:
+    configured = os.environ.get("VECOPS_NUM_THREADS")
+    threads = int(configured) if configured else int(torch.get_num_threads())
+    if threads < 1:
+      raise RuntimeError("VECOPS_NUM_THREADS must be a positive integer")
+    _native_thread_pool = ctypes.c_void_p(
+      native.native_thread_pool_address(threads)
+    )
+  return _native_thread_pool
+
+
 _identifier = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -312,6 +343,8 @@ const VecopsThreadPoolV1 torch_thread_pool{
   nullptr, nullptr, 0
 };
 
+std::atomic<const VecopsThreadPoolV1*> bridge_thread_pool{nullptr};
+
 // Optional allocation observer installed by the Python side through
 // `vecops_torch_bridge_set_allocation_observer_v1`. Relaxed loads are
 // sufficient: installation happens once, before steady-state execution.
@@ -325,8 +358,10 @@ $append_arguments
 $append_specializations
   VecopsExecutionContext execution_context{};
   execution_context.struct_size = sizeof(VecopsExecutionContext);
-  execution_context.requested_threads = torch_max_parallelism(nullptr);
-  execution_context.thread_pool = &torch_thread_pool;
+  const auto* configured_pool = bridge_thread_pool.load(std::memory_order_acquire);
+  execution_context.thread_pool = configured_pool != nullptr ? configured_pool : &torch_thread_pool;
+  execution_context.requested_threads = execution_context.thread_pool->max_parallelism(
+    execution_context.thread_pool->context);
   execution_context.allocation_observer = bridge_allocation_observer.load(std::memory_order_relaxed);
   VecopsCall call{sizeof(VecopsCall), static_cast<uint32_t>(values.size()), values.data(), nullptr, 0,
                   &execution_context};
@@ -364,6 +399,11 @@ extern "C" VECOPS_RUNTIME_EXPORT void vecops_torch_bridge_set_handle_v1(
 extern "C" VECOPS_RUNTIME_EXPORT void vecops_torch_bridge_set_allocation_observer_v1(
     const VecopsAllocationObserverV1* observer) {
   bridge_allocation_observer.store(observer, std::memory_order_release);
+}
+
+extern "C" VECOPS_RUNTIME_EXPORT void vecops_torch_bridge_set_thread_pool_v1(
+    const VecopsThreadPoolV1* pool) {
+  bridge_thread_pool.store(pool, std::memory_order_release);
 }
 """
 )
@@ -701,6 +741,13 @@ def _load_bridge(
     observer_setter.argtypes = [ctypes.c_void_p]
     observer_setter.restype = None
     observer_setter(_workspace_observer_pointer())
+  pool_setter = getattr(module, "vecops_torch_bridge_set_thread_pool_v1", None)
+  if pool_setter is not None:
+    pool_setter.argtypes = [ctypes.c_void_p]
+    pool_setter.restype = None
+    pool_setter(_thread_pool_pointer(
+      torch, f"{registration.library}::{registration.name}"
+    ))
   _loaded_bridge_modules.extend((module, native_module))
   registration.library_path = library_path
   registration.materialized = True

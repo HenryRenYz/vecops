@@ -15,7 +15,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from vecops.graph import ExecutionGraph, TensorKind
+from vecops.graph import ExecutionGraph, TensorKind, current_capture
 
 from .ir import MemoryPlan, MemoryTier
 from .validate import validate_plan
@@ -631,7 +631,13 @@ class PlanSession:
     return dict(self._binding_stats)
 
 
-def _record_capture_allocation(name: str, tensor: Any, source: tuple[str, str]):
+def _record_capture_allocation(
+    name: str,
+    tensor: Any,
+    source: tuple[str, str],
+    *,
+    capture: Any | None = None,
+):
   """Register one explicit factory event on the active graph capture.
 
   Capture-time attribution otherwise walks the whole Python stack, which
@@ -641,13 +647,13 @@ def _record_capture_allocation(name: str, tensor: Any, source: tuple[str, str]):
   key constructions in lockstep, so planned factory sites exist for
   wrapper-level outputs.
   """
+  if capture is None:
+    capture = current_capture()
+  if capture is None:
+    return
   try:
-    from ..graph import current_capture
     from ..graph.torch import register_tensor
   except ImportError:
-    return
-  capture = current_capture()
-  if capture is None:
     return
   try:
     register_tensor(capture, tensor, kind="temporary")
@@ -671,8 +677,14 @@ def _record_capture_allocation(name: str, tensor: Any, source: tuple[str, str]):
 
 def empty(*shape: Any, **kwargs: Any):
   """Drop-in ``torch.empty`` that uses a planned arena when one is active."""
-  source = _caller_source(2)
   session = current_session()
+  capture = current_capture()
+  if (session is None or not session.enable_factory_replay) and capture is None:
+    if _torch_empty is None:
+      _load_torch_factories()
+    return _torch_empty(*shape, **kwargs)
+
+  source = _caller_source(2)
   if session is not None:
     replacement = session._factory_tensor(
       "aten.empty.memory_format",
@@ -686,14 +698,22 @@ def empty(*shape: Any, **kwargs: Any):
     _load_torch_factories()
   result = _torch_empty(*shape, **kwargs)
   if str(kwargs.get("device") or "cpu").startswith("cpu"):
-    _record_capture_allocation("aten.empty.memory_format", result, source)
+    _record_capture_allocation(
+        "aten.empty.memory_format", result, source, capture=capture
+    )
   return result
 
 
 def empty_like(prototype: Any, **kwargs: Any):
   """Drop-in ``torch.empty_like`` that uses a planned arena when active."""
-  source = _caller_source(2)
   session = current_session()
+  capture = current_capture()
+  if (session is None or not session.enable_factory_replay) and capture is None:
+    if _torch_empty_like is None:
+      _load_torch_factories()
+    return _torch_empty_like(prototype, **kwargs)
+
+  source = _caller_source(2)
   if session is not None:
     replacement = session._factory_tensor(
       "aten.empty_like.default",
@@ -707,7 +727,9 @@ def empty_like(prototype: Any, **kwargs: Any):
     _load_torch_factories()
   result = _torch_empty_like(prototype, **kwargs)
   if str(kwargs.get("device") or prototype.device).startswith("cpu"):
-    _record_capture_allocation("aten.empty_like.default", result, source)
+    _record_capture_allocation(
+        "aten.empty_like.default", result, source, capture=capture
+    )
   return result
 
 
