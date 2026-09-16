@@ -79,6 +79,11 @@ vecops_add_test(
     FILES execution/ParallelTest.cpp
     FOLDER execution/parallel
     ARCH Scalar)
+vecops_add_test(
+    NAME TaskPartitionTest
+    FILES execution/TaskPartitionTest.cpp
+    FOLDER execution/task_partition
+    ARCH Scalar)
 
 vecops_add_test(NAME UtilMathTest FILES util/MathTest.cpp FOLDER util/math)
 
