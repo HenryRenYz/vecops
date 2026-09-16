@@ -6,6 +6,7 @@
 #define VECOPS_EXECUTION_TASKPARTITION_H
 
 #include <cstddef>
+#include <concepts>
 #include <functional>
 #include <stdexcept>
 #include <tuple>
@@ -40,6 +41,47 @@
  */
 
 namespace vecops::execution {
+
+/** One contiguous logical-task shard assigned to a lane. */
+template <meta::ValueType Begin, meta::ValueType TaskCount>
+struct TaskPartitionShard {
+  using begin_type = Begin;
+  using task_count_type = TaskCount;
+
+  Begin begin;
+  TaskCount task_count;
+
+  /** End program id, retaining metadata from the origin and shard size. */
+  [[nodiscard]] constexpr auto end() const noexcept {
+    return begin + task_count;
+  }
+};
+
+/**
+ * Balanced contiguous decomposition of logical tasks across logical lanes.
+ *
+ * `small_task_count` and `large_task_count` are the only two possible shard
+ * sizes. The first `large_lane_count` lanes receive the larger size. Every
+ * field remains a Meta value, so fully static task/lane counts produce fully
+ * static shard sizes rather than being flattened to `nint_t`.
+ */
+template <meta::ValueType LaneCount, meta::ValueType TaskCount, meta::ValueType ActiveLaneCount,
+          meta::ValueType SmallTaskCount, meta::ValueType LargeLaneCount, meta::ValueType LargeTaskCount>
+struct BalancedTaskPartitionPlan {
+  using lane_count_type = LaneCount;
+  using task_count_type = TaskCount;
+  using active_lane_count_type = ActiveLaneCount;
+  using small_task_count_type = SmallTaskCount;
+  using large_lane_count_type = LargeLaneCount;
+  using large_task_count_type = LargeTaskCount;
+
+  LaneCount lane_count;
+  TaskCount task_count;
+  ActiveLaneCount active_lane_count;
+  SmallTaskCount small_task_count;
+  LargeLaneCount large_lane_count;
+  LargeTaskCount large_task_count;
+};
 
 /** One synchronous phase containing equal-cost, indivisible logical tasks. */
 template <meta::ValueType TaskCount, meta::ValueType WorkPerTask>
@@ -130,6 +172,9 @@ struct TaskPartitionPlan {
 template <meta::ValueInput LaneCount, TaskPartitionCandidateType Candidate>
 [[nodiscard]] constexpr auto analyze_task_partition(LaneCount&& lane_count, const Candidate& candidate);
 
+template <meta::ValueInput LaneCount, meta::ValueInput TaskCount>
+[[nodiscard]] constexpr auto plan_task_partition(LaneCount&& lane_count, TaskCount&& task_count);
+
 namespace task_partition_details {
 
 template <meta::ValueType Value>
@@ -196,6 +241,97 @@ struct StaticBestCandidate<LaneCount, Candidates, Best, std::tuple_size_v<Candid
 };
 
 } // namespace task_partition_details
+
+/**
+ * Plan the canonical balanced contiguous partition for one logical task axis.
+ *
+ * Static inputs produce static per-lane shard sizes. Dynamic inputs retain all
+ * bounds and divisibility that `Meta.h` can prove. The returned plan is the
+ * common scheduling primitive used by `parallel_for`, `parallel_lanes`, and
+ * kernels that need to inspect their expected lane utilization explicitly.
+ */
+template <meta::ValueInput LaneCount, meta::ValueInput TaskCount>
+[[nodiscard]] constexpr auto plan_task_partition(LaneCount&& lane_count, TaskCount&& task_count) {
+  auto lanes = meta::to_value(std::forward<LaneCount>(lane_count));
+  auto tasks = meta::to_value(std::forward<TaskCount>(task_count));
+  task_partition_details::validate_positive(lanes, "task partition lane count must be positive");
+  task_partition_details::validate_nonnegative(tasks, "task partition task count cannot be negative");
+
+  auto active_lanes = [&]() {
+    using Lanes = decltype(lanes);
+    using Tasks = decltype(tasks);
+    if constexpr (std::same_as<Lanes, Tasks>) {
+      if constexpr (Lanes::is_const)
+        return Lanes{};
+      else {
+        const nint_t lane_value = static_cast<nint_t>(lanes);
+        const nint_t task_value = static_cast<nint_t>(tasks);
+        return Lanes{task_value < lane_value ? task_value : lane_value};
+      }
+    } else {
+      return vecops::min(lanes, tasks);
+    }
+  }();
+  auto small_tasks = tasks / lanes;
+  auto large_lanes = tasks % lanes;
+  auto large_tasks = small_tasks + meta::cint<1>;
+  return BalancedTaskPartitionPlan<decltype(lanes), decltype(tasks), decltype(active_lanes), decltype(small_tasks),
+                                   decltype(large_lanes), decltype(large_tasks)>{lanes,       tasks,       active_lanes,
+                                                                                 small_tasks, large_lanes, large_tasks};
+}
+
+/**
+ * Visit the non-empty shard for one lane, if any.
+ *
+ * The callback is instantiated separately for the large and small shard
+ * types. Consequently, when task and lane counts are compile-time constants,
+ * the callback sees `TaskPartitionShard<..., Const<N>>` and downstream kernel
+ * loops can specialize for the exact per-lane size.
+ */
+template <typename Plan, meta::ValueInput LaneIndex, typename Fn>
+constexpr void visit_task_partition_shard(const Plan& plan, LaneIndex&& lane_index, Fn&& function) {
+  auto lane = meta::to_value(std::forward<LaneIndex>(lane_index));
+  using Lane = decltype(lane);
+  using LaneCount = typename Plan::lane_count_type;
+  constexpr bool statically_within_lane_count = [] {
+    if constexpr (LaneCount::is_const) {
+      return meta::lower_bound_at_least_v<Lane, 0> && meta::upper_bound_at_most_v<Lane, LaneCount::value - 1>;
+    } else {
+      return false;
+    }
+  }();
+  if constexpr (Lane::is_const && LaneCount::is_const) {
+    static_assert(Lane::value >= 0 && Lane::value < LaneCount::value,
+                  "task partition lane index is outside the lane count");
+  } else if constexpr (!statically_within_lane_count) {
+    if (static_cast<nint_t>(lane) < 0 || static_cast<nint_t>(lane) >= static_cast<nint_t>(plan.lane_count))
+      throw std::out_of_range("task partition lane index is outside the lane count");
+  }
+
+  using LargeLaneCount = typename Plan::large_lane_count_type;
+  using SmallTaskCount = typename Plan::small_task_count_type;
+  if constexpr (Lane::is_const && LargeLaneCount::is_const && SmallTaskCount::is_const) {
+    if constexpr (Lane::value < LargeLaneCount::value) {
+      auto begin = lane * plan.large_task_count;
+      std::invoke(function, TaskPartitionShard<decltype(begin), typename Plan::large_task_count_type>{
+                              begin, plan.large_task_count});
+    } else if constexpr (SmallTaskCount::value > 0) {
+      auto begin =
+        plan.large_lane_count * plan.large_task_count + (lane - plan.large_lane_count) * plan.small_task_count;
+      std::invoke(function, TaskPartitionShard<decltype(begin), SmallTaskCount>{begin, plan.small_task_count});
+    }
+  } else {
+    if (static_cast<nint_t>(lane) < static_cast<nint_t>(plan.large_lane_count)) {
+      auto begin = lane * plan.large_task_count;
+      std::invoke(function, TaskPartitionShard<decltype(begin), typename Plan::large_task_count_type>{
+                              begin, plan.large_task_count});
+    } else if (static_cast<nint_t>(plan.small_task_count) > 0) {
+      auto begin =
+        plan.large_lane_count * plan.large_task_count + (lane - plan.large_lane_count) * plan.small_task_count;
+      std::invoke(function, TaskPartitionShard<decltype(begin), SmallTaskCount>{begin, plan.small_task_count});
+    }
+  }
+}
 
 /**
  * Analyze one candidate without erasing metadata from lanes, tasks, or work.

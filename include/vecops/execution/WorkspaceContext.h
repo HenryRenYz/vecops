@@ -237,7 +237,8 @@ public:
    * Execute `[begin, end)` as fixed-size range programs on static logical
    * lanes. The callback receives `(TaskContext<Parallelism>, RangeWorkItem)`;
    * one lane may execute several range programs while retaining its worker
-   * tensor replica.
+   * tensor replica. The common task-partition planner balances programs and
+   * omits empty lanes while preserving Meta information from the range.
    */
   template <nint_t Parallelism, meta::ValueInput Begin, meta::ValueInput End, meta::ValueInput Chunk, typename Fn>
   void parallel_for(Begin&& begin, End&& end, Chunk&& chunk, Fn&& body) const {

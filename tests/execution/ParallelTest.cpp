@@ -226,7 +226,7 @@ TEST(ParallelTest, RangeProgramsAreBalancedAcrossLanesAndCoverClippedTailOnce) {
                                           1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}));
 }
 
-TEST(ParallelTest, RangeWithFewerProgramsThanLanesStillSubmitsOnlyTheLanes) {
+TEST(ParallelTest, RangeWithFewerProgramsOmitsEmptyLanes) {
   RecordingThreadPool recording;
   auto pool = recording.abi();
   std::array<int, 2> visits{};
@@ -237,8 +237,21 @@ TEST(ParallelTest, RangeWithFewerProgramsThanLanesStillSubmitsOnlyTheLanes) {
   });
 
   EXPECT_EQ(recording.calls, 1U);
-  EXPECT_EQ(recording.submitted, 8U);
+  EXPECT_EQ(recording.submitted, 2U);
   EXPECT_EQ(visits, (std::array<int, 2>{1, 1}));
+}
+
+TEST(ParallelTest, EmptyRangeDoesNotSubmitAThreadPoolCall) {
+  RecordingThreadPool recording;
+  auto pool = recording.abi();
+  bool visited = false;
+
+  execution::parallel_for<8>(&pool, meta::cint<0>, meta::cint<0>, meta::cint<1>,
+                             [&](auto, auto) { visited = true; });
+
+  EXPECT_EQ(recording.calls, 0U);
+  EXPECT_EQ(recording.submitted, 0U);
+  EXPECT_FALSE(visited);
 }
 
 TEST(ParallelTest, MetaRangeRetainsConstChunkWithoutSplittingFullAndTailTypes) {

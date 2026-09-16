@@ -33,6 +33,7 @@ def test_native_compiler_target_allows_process_override(
   explicit = vecops.Compiler(cache_mode="cache-only", target="Scalar")
   assert defaulted.target == "NativeFixedSVE"
   assert explicit.target == "Scalar"
+  assert defaulted.cache_namespace == "python-sdk-v9;target=NativeFixedSVE"
 
 
 def test_string_dimension_dsl_and_symbol_inference() -> None:

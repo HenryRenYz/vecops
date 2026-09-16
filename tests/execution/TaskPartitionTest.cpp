@@ -1,13 +1,83 @@
 #include <gtest/gtest.h>
 
+#include <concepts>
 #include <tuple>
 #include <type_traits>
+#include <vector>
 
 #include "vecops/execution/TaskPartition.h"
 
 namespace {
 
 using namespace vecops;
+
+TEST(TaskPartitionTest, BalancedPlanPreservesConstShardSizes) {
+  constexpr auto plan = execution::plan_task_partition(meta::cint<38>, meta::cint<40>);
+
+  static_assert(std::same_as<decltype(plan.lane_count), meta::Const<38>>);
+  static_assert(std::same_as<decltype(plan.task_count), meta::Const<40>>);
+  static_assert(std::same_as<decltype(plan.active_lane_count), meta::Const<38>>);
+  static_assert(std::same_as<decltype(plan.small_task_count), meta::Const<1>>);
+  static_assert(std::same_as<decltype(plan.large_lane_count), meta::Const<2>>);
+  static_assert(std::same_as<decltype(plan.large_task_count), meta::Const<2>>);
+}
+
+TEST(TaskPartitionTest, StaticLaneVisitsOneExactlySizedConstShard) {
+  constexpr auto plan = execution::plan_task_partition(meta::cint<38>, meta::cint<40>);
+  bool visited = false;
+  execution::visit_task_partition_shard(plan, meta::cint<0>, [&](const auto& shard) {
+    static_assert(std::same_as<typename std::remove_cvref_t<decltype(shard)>::begin_type, meta::Const<0>>);
+    static_assert(std::same_as<typename std::remove_cvref_t<decltype(shard)>::task_count_type, meta::Const<2>>);
+    visited = true;
+  });
+  EXPECT_TRUE(visited);
+}
+
+TEST(TaskPartitionTest, BalancedShardsCoverEveryTaskExactlyOnce) {
+  constexpr nint_t lane_count = 38;
+  constexpr nint_t task_count = 40;
+  constexpr auto plan = execution::plan_task_partition(meta::cint<lane_count>, meta::cint<task_count>);
+  std::vector<nint_t> visits(task_count);
+
+  for (nint_t lane = 0; lane < lane_count; ++lane) {
+    execution::visit_task_partition_shard(plan, meta::Dynamic<1, 0, lane_count - 1>{lane}, [&](const auto& shard) {
+      for (nint_t task = static_cast<nint_t>(shard.begin); task < static_cast<nint_t>(shard.end()); ++task)
+        ++visits[task];
+    });
+  }
+
+  EXPECT_EQ(visits, std::vector<nint_t>(task_count, 1));
+}
+
+TEST(TaskPartitionTest, FewerTasksThanLanesProduceOnlyActiveSingletonShards) {
+  constexpr auto plan = execution::plan_task_partition(meta::cint<38>, meta::cint<8>);
+  static_assert(std::same_as<decltype(plan.active_lane_count), meta::Const<8>>);
+  static_assert(std::same_as<decltype(plan.small_task_count), meta::Const<0>>);
+  static_assert(std::same_as<decltype(plan.large_lane_count), meta::Const<8>>);
+  static_assert(std::same_as<decltype(plan.large_task_count), meta::Const<1>>);
+
+  nint_t visited = 0;
+  for (nint_t lane = 0; lane < 38; ++lane) {
+    execution::visit_task_partition_shard(plan, meta::Dynamic<1, 0, 37>{lane}, [&](const auto& shard) {
+      EXPECT_EQ(static_cast<nint_t>(shard.task_count), 1);
+      ++visited;
+    });
+  }
+  EXPECT_EQ(visited, 8);
+}
+
+TEST(TaskPartitionTest, DynamicBalancedPlanRetainsRuntimeMetadata) {
+  const auto plan = execution::plan_task_partition(meta::cint<38>, meta::dyn<8, 0, 128>(40));
+
+  using TaskCount = std::remove_cvref_t<decltype(plan.task_count)>;
+  using SmallTaskCount = std::remove_cvref_t<decltype(plan.small_task_count)>;
+  using LargeLaneCount = std::remove_cvref_t<decltype(plan.large_lane_count)>;
+  static_assert(TaskCount::is_runtime);
+  static_assert(SmallTaskCount::is_runtime);
+  static_assert(LargeLaneCount::is_runtime);
+  EXPECT_EQ(static_cast<nint_t>(plan.small_task_count), 1);
+  EXPECT_EQ(static_cast<nint_t>(plan.large_lane_count), 2);
+}
 
 TEST(TaskPartitionTest, PreservesConstMetricsForOneWaveTail) {
   constexpr auto candidate =

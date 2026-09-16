@@ -14,6 +14,7 @@
 
 #include "vecops/CoreTypes.h"
 #include "vecops/Meta.h"
+#include "vecops/execution/TaskPartition.h"
 #include "vecops/execution/details/Parallel.h"
 
 /**
@@ -252,11 +253,17 @@ void parallel_tasks(const VecopsThreadPoolV1* pool, Fn&& body) {
 template <nint_t Parallelism, typename Fn>
 void parallel_lanes(const VecopsThreadPoolV1* pool, Fn&& body) {
   static_assert(Parallelism > 0, "static parallelism must be positive");
+  constexpr auto partition = plan_task_partition(meta::cint<Parallelism>, meta::cint<Parallelism>);
+  static_assert(decltype(partition.active_lane_count)::value == Parallelism);
+  static_assert(decltype(partition.small_task_count)::value == 1);
+  static_assert(decltype(partition.large_lane_count)::value == 0);
   using Body = std::remove_reference_t<Fn>;
   auto* object = const_cast<void*>(static_cast<const void*>(std::addressof(body)));
-  details::parallel_tasks_erased(pool, Parallelism, object, [](void* erased, ParallelContext context) {
-    std::invoke(*static_cast<Body*>(erased), TaskContext<Parallelism>{context.thread_id});
-  });
+  details::parallel_tasks_erased(pool, static_cast<nint_t>(partition.active_lane_count), object,
+                                 [](void* erased, ParallelContext context) {
+                                   std::invoke(*static_cast<Body*>(erased),
+                                               TaskContext<Parallelism>{context.thread_id});
+                                 });
 }
 
 /** Execute compile-time-fixed logical lanes using the built-in backend. */
@@ -268,8 +275,9 @@ void parallel_lanes(Fn&& body) {
 /**
  * Execute `[begin, end)` as dense fixed-size programs on static logical lanes.
  *
- * Exactly `Parallelism` logical tasks are submitted to the thread-pool ABI.
- * Each lane receives a balanced contiguous interval of program ids and runs
+ * At most `Parallelism` logical tasks are submitted to the thread-pool ABI;
+ * when the range contains fewer programs, empty lanes are omitted. Each
+ * active lane receives a balanced contiguous interval of program ids and runs
  * its programs sequentially. Consequently, per-lane scratch remains valid
  * even when an embedding maps several lanes onto one physical worker.
  *
@@ -279,24 +287,47 @@ void parallel_lanes(Fn&& body) {
  */
 namespace details {
 
+template <nint_t Parallelism, meta::ValueType ActiveLaneCount, typename Fn>
+void parallel_active_lanes(const VecopsThreadPoolV1* pool, ActiveLaneCount active_lane_count, Fn&& body) {
+  if constexpr (ActiveLaneCount::is_const) {
+    static_assert(ActiveLaneCount::value >= 0 && ActiveLaneCount::value <= Parallelism,
+                  "active lane count must fit the static parallelism");
+    if constexpr (ActiveLaneCount::value == 0)
+      return;
+  } else {
+    const nint_t active = static_cast<nint_t>(active_lane_count);
+    if (active < 0 || active > Parallelism)
+      throw std::invalid_argument("active lane count must fit the static parallelism");
+    if (active == 0)
+      return;
+  }
+
+  using Body = std::remove_reference_t<Fn>;
+  auto* object = const_cast<void*>(static_cast<const void*>(std::addressof(body)));
+  parallel_tasks_erased(pool, static_cast<nint_t>(active_lane_count), object,
+                        [](void* erased, ParallelContext context) {
+                          std::invoke(*static_cast<Body*>(erased), TaskContext<Parallelism>{context.thread_id});
+                        });
+}
+
 template <nint_t Parallelism, meta::ValueType Chunk, meta::ValueType ProgramCount, typename Fn>
 void parallel_range(const VecopsThreadPoolV1* pool, nint_t begin, nint_t end, Chunk chunk,
                     ProgramCount program_count, Fn&& body) {
-  const nint_t programs = static_cast<nint_t>(program_count);
   const nint_t chunk_size = static_cast<nint_t>(chunk);
-  parallel_lanes<Parallelism>(pool, [&](TaskContext<Parallelism> task) {
-    const nint_t smaller = programs / Parallelism;
-    const nint_t larger_lanes = programs % Parallelism;
-    const nint_t lane = task.lane_id();
-    const nint_t lane_programs = smaller + (lane < larger_lanes ? 1 : 0);
-    const nint_t first_program = lane * smaller + (lane < larger_lanes ? lane : larger_lanes);
-    const nint_t last_program = first_program + lane_programs;
-    for (nint_t program = first_program; program < last_program; ++program) {
-      const nint_t first = begin + program * chunk_size;
-      const nint_t last = std::min(first + chunk_size, end);
-      std::invoke(body, task,
-                  RangeWorkItem<Chunk, ProgramCount>{program, program_count, first, last, chunk});
-    }
+  const auto partition = plan_task_partition(meta::cint<Parallelism>, program_count);
+  parallel_active_lanes<Parallelism>(pool, partition.active_lane_count, [&](TaskContext<Parallelism> task) {
+    using LaneIndex = meta::Dynamic<1, 0, Parallelism - 1>;
+    visit_task_partition_shard(partition, LaneIndex{task.lane_id()}, [&](const auto& shard) {
+      const nint_t first_program = static_cast<nint_t>(shard.begin);
+      const nint_t lane_programs = static_cast<nint_t>(shard.task_count);
+      for (nint_t local_program = 0; local_program < lane_programs; ++local_program) {
+        const nint_t program = first_program + local_program;
+        const nint_t first = begin + program * chunk_size;
+        const nint_t last = std::min(first + chunk_size, end);
+        std::invoke(body, task,
+                    RangeWorkItem<Chunk, ProgramCount>{program, program_count, first, last, chunk});
+      }
+    });
   });
 }
 
@@ -380,19 +411,14 @@ struct StaticShard {
 template <nint_t Total, nint_t Parallelism, typename Fn>
 void balanced_shard(StaticParallelContext<Parallelism> worker, Fn&& body) {
   static_assert(Total >= 0, "static work extent must be non-negative");
-  constexpr nint_t smaller = Total / Parallelism;
-  constexpr nint_t larger_tasks = Total % Parallelism;
-  if constexpr (larger_tasks > 0) {
-    if (worker.thread_id < larger_tasks) {
-      constexpr nint_t extent = smaller + 1;
-      std::invoke(std::forward<Fn>(body), StaticShard<extent>{worker.thread_id * extent});
-      return;
-    }
-  }
-  if constexpr (smaller > 0) {
-    const nint_t begin = larger_tasks * (smaller + 1) + (worker.thread_id - larger_tasks) * smaller;
-    std::invoke(std::forward<Fn>(body), StaticShard<smaller>{begin});
-  }
+  constexpr auto partition = plan_task_partition(meta::cint<Parallelism>, meta::cint<Total>);
+  using LaneIndex = meta::Dynamic<1, 0, Parallelism - 1>;
+  visit_task_partition_shard(partition, LaneIndex{worker.thread_id}, [&](const auto& shard) {
+    using TaskCount = typename std::remove_cvref_t<decltype(shard)>::task_count_type;
+    static_assert(TaskCount::is_const);
+    std::invoke(std::forward<Fn>(body),
+                StaticShard<TaskCount::value>{static_cast<nint_t>(shard.begin)});
+  });
 }
 
 } // namespace vecops::execution
