@@ -5,6 +5,7 @@
 /** @file Parallel.cpp @brief Backend-neutral logical-task execution. */
 
 #include "vecops/execution/Parallel.h"
+#include "vecops/execution/FloatControl.h"
 
 #include <algorithm>
 #include <array>
@@ -42,6 +43,7 @@ void parallel_for_erased(nint_t requested_threads, void* object, ParallelBody bo
     return;
 
   (void)requested_threads;
+  apply_process_flush_subnormals();
   body(object, ParallelContext{0, 1});
 }
 
@@ -65,6 +67,7 @@ void parallel_tasks_erased(const VecopsThreadPoolV1* pool, nint_t task_count, vo
       [](void* opaque, std::uint32_t task_id, std::uint32_t count) {
         auto& callback = *static_cast<CallbackState*>(opaque);
         try {
+          apply_process_flush_subnormals();
           callback.body(callback.object,
                         ParallelContext{static_cast<nint_t>(task_id), static_cast<nint_t>(count)});
         } catch (...) {
@@ -81,6 +84,7 @@ void parallel_tasks_erased(const VecopsThreadPoolV1* pool, nint_t task_count, vo
     return;
   }
 
+  apply_process_flush_subnormals();
   for (nint_t task = 0; task < task_count; ++task)
     body(object, ParallelContext{task, task_count});
 }

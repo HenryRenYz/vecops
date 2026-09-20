@@ -426,8 +426,9 @@ private:
               [&](auto block_tag, nint_t kj, auto active, auto& normalizer_v, const auto& maximum_v,
                   const auto& negative_infinity) VECOPS_INLINE_LAMBDA {
                 auto value = vec::load(block_tag, coarse + qi * tkv + kj, active, vec::opt::merge(negative_infinity));
-                auto probability = vec::exp_neg(block_tag, vec::sub(block_tag, value, maximum_v),
-                                                vec::opt::math::accuracy<Config::exp_accuracy>, active, vec::opt::zero);
+                auto probability = softmax_details::exp_neg_estimate_safe<
+                    Score, Config::exp_accuracy>(
+                    block_tag, vec::sub(block_tag, value, maximum_v), active);
                 normalizer_v = vec::add(normalizer_v, probability);
                 vec::store(block_tag, coarse + qi * tkv + kj, probability, active);
               },

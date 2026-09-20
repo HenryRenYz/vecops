@@ -12,8 +12,15 @@ link additions. `KernelBuildRequest` describes one independently-addressable
 target. `KernelBuildBatchRequest` combines targets under one top-level CMake
 project while retaining a generated fragment, binary subdirectory, and
 artifact directory per task. The compiler uses no shell and does not mutate
-the parent's environment; subprocess output is returned as batch-wide command
-logs plus ordered per-task `BuildResult` values.
+the parent's environment. Configure/build output is streamed to the caller's
+stderr as it arrives, so Ninja's native `[completed/total]` target progress is
+visible during cold precompilation. The same bytes remain in batch-wide command
+logs and are returned with the ordered per-task `BuildResult` values.
+
+When `VECOPS_BUILD_CPU_LIST` is set to a Linux CPU-list expression, configure
+and build subprocess trees run through `taskset --cpu-list`. This restores the
+full intended build mask when an OpenMP-bound caller's master thread is pinned
+to one CPU; it does not alter the caller or model-worker affinity.
 
 `compile_batch()` validates the common SDK/toolchain contract, imports Vecops
 once, adds every task fragment with `add_subdirectory`, and runs one configure

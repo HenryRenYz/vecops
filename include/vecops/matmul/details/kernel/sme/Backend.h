@@ -2908,6 +2908,9 @@ VECOPS_ALWAYS_INLINE void store_c_tile_column_pair_routed(COutput& c_output, Acc
  * - `NM == 2` (NN > 2): tiles assigned per N block as `NI` and `NN+NI` --
  *   consecutive tile numbers *column-interleave* across N blocks.
  *
+ * `ExactBlocks` proves only the blocks before the last one are full. The
+ * final block on either axis still needs its tail predicate.
+ *
  * The `Full*` template flags reflect a dual existence proof: a block is
  * provably full either by the case's `ExactBlocks` promise (all blocks
  * except the last per axis exist fully) or by position within the logical
@@ -2955,14 +2958,14 @@ VECOPS_ALWAYS_INLINE void compute_group(
         a, a_invariants, m, kg, logical_m, logical_k);
     const auto a1 = load_operand<
         Atom, ::vecops::matmul::Operand::A, 1,
-        FullM || ExactBlocks, FullK>(
+        FullM, FullK>(
         a, a_invariants, m, kg, logical_m, logical_k);
     const auto b0 = load_operand<
         Atom, ::vecops::matmul::Operand::B, 0, FullN, FullK>(
         b, b_invariants, n, kg, logical_n, logical_k);
     const auto b1 = load_operand<
         Atom, ::vecops::matmul::Operand::B, 1,
-        FullN || ExactBlocks, FullK>(
+        FullN, FullK>(
         b, b_invariants, n, kg, logical_n, logical_k);
     mopa<Atom, 0>(a0, b0);
     mopa<Atom, 1>(a0, b1);
@@ -2974,7 +2977,7 @@ VECOPS_ALWAYS_INLINE void compute_group(
         b, b_invariants, n, kg, logical_n, logical_k);
     const auto b1 = load_operand<
         Atom, ::vecops::matmul::Operand::B, 1,
-        FullN || ExactBlocks, FullK>(
+        FullN, FullK>(
         b, b_invariants, n, kg, logical_n, logical_k);
     auto one_m = [&]<int MI>() VECOPS_INLINE_LAMBDA {
       const auto av = load_operand<
@@ -2996,7 +2999,7 @@ VECOPS_ALWAYS_INLINE void compute_group(
         a, a_invariants, m, kg, logical_m, logical_k);
     const auto a1 = load_operand<
         Atom, ::vecops::matmul::Operand::A, 1,
-        FullM || ExactBlocks, FullK>(
+        FullM, FullK>(
         a, a_invariants, m, kg, logical_m, logical_k);
     auto one_n = [&]<int NI>() VECOPS_INLINE_LAMBDA {
       const auto bv = load_operand<

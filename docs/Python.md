@@ -8,6 +8,21 @@ without Python convenience behavior.
 Importing `vecops` does not import NumPy or Torch. Dtype conversion recognizes
 those frameworks only when the application has already loaded them.
 
+## Floating-point subnormal mode
+
+`vecops.set_flush_subnormals(True)` enables hardware flush-to-zero for the
+calling thread and publishes `VECOPS_FLUSH_SUBNORMALS=1` for vecops worker
+tasks. On AArch64 this sets FPCR.FZ and FPCR.FZ16; on x86 it sets MXCSR.FTZ
+and MXCSR.DAZ. `False` clears those bits. Other FP control bits are preserved.
+Use `vecops.current_thread_flush_subnormals()` to inspect the calling thread.
+
+Call this before importing a framework that creates its own CPU worker pool:
+new threads inherit the caller's mode, while an already-running framework
+pool must be configured on its own threads. Existing vecops workers apply the
+process setting when entering a logical task. The mode changes treatment of
+tiny floating-point values and can change results near zero; applications
+should opt in after checking their numerical tolerance.
+
 ## Native thread-pool regions
 
 `vecops.native_thread_pool_region(threads)` keeps the process-local native
@@ -436,6 +451,9 @@ For workloads dominated by many short vecops parallel regions, set
 `VECOPS_THREAD_POOL=native` to route generated bridges through vecops' single
 process-local persistent pool instead of `at::parallel_for`. Its size defaults
 to `torch.get_num_threads()` and may be fixed with `VECOPS_NUM_THREADS`.
+On Linux, `VECOPS_THREAD_POOL_CPU_LIST` may provide an explicit comma/range CPU
+list for worker pinning; this is useful when the submitting OpenMP thread is
+already pinned to one CPU but the native pool should span the rank's full mask.
 `VECOPS_THREAD_POOL_SPIN_COUNT` sets the bounded worker spin before parking.
 `VECOPS_NATIVE_THREAD_POOL_OPS` optionally limits native-pool injection to
 comma-separated qualified operator globs. The default remains

@@ -5,7 +5,7 @@
  * Request validation and project generation happen in the caller process.
  * Configure and build/install commands are launched with `posix_spawnp`
  * without shell parsing; their combined output is retained in per-stage log
- * files and copied into `BuildResult`.
+ * files, streamed to the caller's stderr, and copied into `BuildResult`.
  */
 
 #include "vecops/compiler/Compiler.h"
@@ -260,6 +260,20 @@ std::string os_error(const std::string& prefix, int error) {
   return prefix + ": " + std::error_code(error, std::generic_category()).message();
 }
 
+void write_all(int fd, const char* data, std::size_t size) {
+  while (size != 0) {
+    const auto written = ::write(fd, data, size);
+    if (written > 0) {
+      data += written;
+      size -= static_cast<std::size_t>(written);
+      continue;
+    }
+    if (written < 0 && errno == EINTR)
+      continue;
+    return;
+  }
+}
+
 CommandResult run_command(const std::vector<std::string>& arguments, const fs::path& log_path,
                           const std::map<std::string, std::string>& environment) {
   CommandResult result;
@@ -272,14 +286,27 @@ CommandResult run_command(const std::vector<std::string>& arguments, const fs::p
     return result;
   }
 
+  int output_pipe[2] = {-1, -1};
+  if (::pipe(output_pipe) != 0) {
+    result.output = os_error("cannot create subprocess output pipe", errno);
+    ::close(log_fd);
+    return result;
+  }
+
   posix_spawn_file_actions_t actions;
   int spawn_error = ::posix_spawn_file_actions_init(&actions);
   const bool actions_initialized = spawn_error == 0;
   if (spawn_error == 0) {
-    spawn_error = ::posix_spawn_file_actions_adddup2(&actions, log_fd, STDOUT_FILENO);
+    spawn_error = ::posix_spawn_file_actions_adddup2(&actions, output_pipe[1], STDOUT_FILENO);
   }
   if (spawn_error == 0) {
-    spawn_error = ::posix_spawn_file_actions_adddup2(&actions, log_fd, STDERR_FILENO);
+    spawn_error = ::posix_spawn_file_actions_adddup2(&actions, output_pipe[1], STDERR_FILENO);
+  }
+  if (spawn_error == 0) {
+    spawn_error = ::posix_spawn_file_actions_addclose(&actions, output_pipe[0]);
+  }
+  if (spawn_error == 0) {
+    spawn_error = ::posix_spawn_file_actions_addclose(&actions, output_pipe[1]);
   }
   if (spawn_error == 0) {
     spawn_error = ::posix_spawn_file_actions_addclose(&actions, log_fd);
@@ -288,17 +315,12 @@ CommandResult run_command(const std::vector<std::string>& arguments, const fs::p
     if (actions_initialized) {
       ::posix_spawn_file_actions_destroy(&actions);
     }
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
     ::close(log_fd);
     result.output = os_error("cannot prepare subprocess", spawn_error);
     return result;
   }
-
-  std::vector<char*> argv;
-  argv.reserve(arguments.size() + 1);
-  for (const auto& argument : arguments) {
-    argv.push_back(const_cast<char*>(argument.c_str()));
-  }
-  argv.push_back(nullptr);
 
   std::map<std::string, std::string> merged_environment;
   for (char** entry = environ; entry != nullptr && *entry != nullptr; ++entry) {
@@ -311,6 +333,29 @@ CommandResult run_command(const std::vector<std::string>& arguments, const fs::p
   for (const auto& [name, value] : environment) {
     merged_environment[name] = value;
   }
+
+  // An OpenMP-bound caller may have narrowed its master thread to one CPU.
+  // CMake and Ninja inherit the calling thread's mask, which would otherwise
+  // serialize a nominally parallel cold build.  The launcher can provide the
+  // complete rank-local build mask explicitly; taskset applies it only to the
+  // subprocess tree, leaving model-thread placement unchanged.
+  std::vector<std::string> spawn_arguments;
+  if (const auto found = merged_environment.find("VECOPS_BUILD_CPU_LIST");
+      found != merged_environment.end() && !found->second.empty()) {
+    spawn_arguments = {"taskset", "--cpu-list", found->second};
+    spawn_arguments.insert(spawn_arguments.end(), arguments.begin(), arguments.end());
+  } else {
+    spawn_arguments = arguments;
+  }
+  result.arguments = spawn_arguments;
+
+  std::vector<char*> argv;
+  argv.reserve(spawn_arguments.size() + 1);
+  for (auto& argument : spawn_arguments) {
+    argv.push_back(argument.data());
+  }
+  argv.push_back(nullptr);
+
   std::vector<std::string> environment_storage;
   environment_storage.reserve(merged_environment.size());
   for (const auto& [name, value] : merged_environment) {
@@ -324,14 +369,35 @@ CommandResult run_command(const std::vector<std::string>& arguments, const fs::p
   envp.push_back(nullptr);
 
   pid_t child = -1;
-  spawn_error = ::posix_spawnp(&child, arguments.front().c_str(), &actions, nullptr, argv.data(), envp.data());
+  spawn_error =
+    ::posix_spawnp(&child, spawn_arguments.front().c_str(), &actions, nullptr, argv.data(), envp.data());
   ::posix_spawn_file_actions_destroy(&actions);
-  ::close(log_fd);
+  ::close(output_pipe[1]);
   if (spawn_error != 0) {
+    ::close(output_pipe[0]);
+    ::close(log_fd);
     result.output = os_error("failed to launch command", spawn_error);
     result.exit_code = spawn_error == ENOENT ? 127 : 126;
     return result;
   }
+
+  // CMake/Ninja already reports real target progress (for example [17/63]).
+  // Preserve that stream in the stage log and expose it immediately to the
+  // caller instead of making a cold precompile appear hung until waitpid.
+  char buffer[64 * 1024];
+  while (true) {
+    const auto count = ::read(output_pipe[0], buffer, sizeof(buffer));
+    if (count > 0) {
+      write_all(log_fd, buffer, static_cast<std::size_t>(count));
+      write_all(STDERR_FILENO, buffer, static_cast<std::size_t>(count));
+      continue;
+    }
+    if (count < 0 && errno == EINTR)
+      continue;
+    break;
+  }
+  ::close(output_pipe[0]);
+  ::close(log_fd);
 
   int status = 0;
   while (::waitpid(child, &status, 0) < 0) {

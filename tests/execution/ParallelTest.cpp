@@ -97,6 +97,24 @@ TEST(ParallelTest, PersistentNativePoolRunsEveryLogicalTaskExactlyOnce) {
     EXPECT_EQ(visits.load(std::memory_order_relaxed), 100);
 }
 
+TEST(ParallelTest, PersistentNativePoolKeepsSubmissionAliveForIdleWorkers) {
+  const auto* pool = vecops_native_thread_pool_v1(4);
+  std::atomic<int> visits{0};
+  auto visit = [](void* opaque, std::uint32_t task, std::uint32_t count) {
+    auto& value = *static_cast<std::atomic<int>*>(opaque);
+    if (task == 0 && count == 1)
+      value.fetch_add(1, std::memory_order_relaxed);
+  };
+  VecopsError error{sizeof(VecopsError)};
+  // A one-task submission leaves every native worker idle. Repetition makes
+  // late generation observers race with stack reuse in implementations that
+  // only wait for the participant count.
+  constexpr int iterations = 10000;
+  for (int iteration = 0; iteration < iterations; ++iteration)
+    ASSERT_EQ(pool->parallel_for(pool->context, 1, &visits, visit, &error), VECOPS_STATUS_OK);
+  EXPECT_EQ(visits.load(std::memory_order_relaxed), iterations);
+}
+
 TEST(ParallelTest, PersistentNativePoolSerializesNestedSubmission) {
   const auto* pool = vecops_native_thread_pool_v1(4);
   NestedNativePoolProbe probe;

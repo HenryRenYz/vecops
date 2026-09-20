@@ -157,15 +157,21 @@ VECOPS_NOINLINE inline svfloat32_t sve_exp_f32_special(
       svsel_f32(is_negative, svdup_n_f32(-23.0f), svdup_n_f32(23.0f));
   const auto adjust =
       svsel_s32(is_negative, svdup_n_s32(-23), svdup_n_s32(23));
+  const auto underflow = svcmplt_n_f32(pg, x, flush_bound);
   // NaN lanes must survive the clamp, so use the propagating FMIN/FMAX.
-  const auto xc = svmin_n_f32_x(
-      full, svmax_n_f32_x(full, x, C.zero_bound), C.inf_bound);
+  // When subnormals are disabled, clamp negative underflow lanes at the
+  // normal-domain boundary before SVSCALE.  Computing a subnormal only to
+  // replace it with zero below used to trigger an enormous floating-point
+  // assist penalty on 920F.
+  const auto clamped = svmin_n_f32_x(
+      full, svmax_n_f32_x(full, x, flush_bound), C.inf_bound);
+  const auto xc = svsel_f32(underflow, svdup_n_f32(0.0f), clamped);
   auto y = sve_exp_f32_core<C, Accuracy::Strict, true>(xc, full, offset);
   y = svscale_f32_x(full, y, adjust);
   y = svsel_f32(
       svcmpgt_n_f32(pg, x, C.inf_bound),
       svdup_n_f32(std::numeric_limits<float>::infinity()), y);
-  y = svsel_f32(svcmplt_n_f32(pg, x, flush_bound), svdup_n_f32(0.0f), y);
+  y = svsel_f32(underflow, svdup_n_f32(0.0f), y);
   return y;
 }
 
@@ -290,14 +296,16 @@ VECOPS_NOINLINE inline svfloat64_t sve_exp_f64_special(
       svsel_f64(is_negative, svdup_n_f64(-53.0), svdup_n_f64(53.0));
   const auto adjust =
       svsel_s64(is_negative, svdup_n_s64(-53), svdup_n_s64(53));
-  const auto xc = svmin_n_f64_x(
-      full, svmax_n_f64_x(full, x, C.zero_bound), C.inf_bound);
+  const auto underflow = svcmplt_n_f64(pg, x, flush_bound);
+  const auto clamped = svmin_n_f64_x(
+      full, svmax_n_f64_x(full, x, flush_bound), C.inf_bound);
+  const auto xc = svsel_f64(underflow, svdup_n_f64(0.0), clamped);
   auto y = sve_exp_f64_core<C, Accuracy::Strict, true>(xc, full, offset);
   y = svscale_f64_x(full, y, adjust);
   y = svsel_f64(
       svcmpgt_n_f64(pg, x, C.inf_bound),
       svdup_n_f64(std::numeric_limits<double>::infinity()), y);
-  y = svsel_f64(svcmplt_n_f64(pg, x, flush_bound), svdup_n_f64(0.0), y);
+  y = svsel_f64(underflow, svdup_n_f64(0.0), y);
   return y;
 }
 

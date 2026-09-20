@@ -14,6 +14,7 @@
 #include "vecops/execution/Parallel.h"
 #include "vecops/kernel/Loop.h"
 #include "vecops/kernel/Workspace.h"
+#include "vecops/ops/details/softmax/Exp.h"
 #include "vecops/tensor/DataAccess.h"
 #include "vecops/vec/Vec.h"
 
@@ -232,9 +233,8 @@ public:
   template <typename BlockTag, typename Active>
   VECOPS_ALWAYS_INLINE static auto exp_cache_block(BlockTag block_tag, nint_t col, Active active,
                                                    vec::Vec<BlockTag> centered, ComputeType* exp_cache) {
-    const auto zero = vec::zeros(block_tag);
-    auto exponential =
-      vec::exp_neg(block_tag, centered, vec::opt::math::accuracy<ExpAccuracy>, active, vec::opt::merge(zero));
+    auto exponential = softmax_details::exp_neg_estimate_safe<
+        ComputeType, ExpAccuracy>(block_tag, centered, active);
     vec::store(block_tag, exp_cache + col, exponential, active);
     return exponential;
   }
@@ -577,9 +577,8 @@ private:
             auto tile_max = vec::load(block_tag, tile_max_cache + i, active, vec::opt::merge(global_max));
             const auto maximum = vec::fill(block_tag, global_max);
             auto centered = vec::sub(tile_max, maximum);
-            const auto zero = vec::zeros(block_tag);
-            auto scale =
-              vec::exp_neg(block_tag, centered, vec::opt::math::accuracy<ExpAccuracy>, active, vec::opt::merge(zero));
+            auto scale = softmax_details::exp_neg_estimate_safe<
+                ComputeType, ExpAccuracy>(block_tag, centered, active);
             vec::store(block_tag, tile_max_cache + i, scale, active);
             auto tile_sum = vec::load(block_tag, tile_sum_cache + i, active, vec::opt::merge(ComputeType(0)));
             // sum += exp(tile_max - global_max) * tile_sum: each tile's

@@ -215,30 +215,26 @@ template <typename LaneCount, typename Candidates, std::size_t... Indices>
 }
 
 template <typename LaneCount, typename Candidates, std::size_t Best, std::size_t Index>
-struct StaticBestCandidate {
-private:
-  using BestMetrics = metrics_t<LaneCount, std::tuple_element_t<Best, Candidates>>;
-  using CurrentMetrics = metrics_t<LaneCount, std::tuple_element_t<Index, Candidates>>;
-  static constexpr nint_t best_critical = BestMetrics::critical_work_type::value;
-  static constexpr nint_t current_critical = CurrentMetrics::critical_work_type::value;
-  static constexpr nint_t best_idle = BestMetrics::idle_lane_work_type::value;
-  static constexpr nint_t current_idle = CurrentMetrics::idle_lane_work_type::value;
-  static constexpr nint_t best_phases = BestMetrics::phase_count_type::value;
-  static constexpr nint_t current_phases = CurrentMetrics::phase_count_type::value;
-  static constexpr bool better =
-    current_critical < best_critical ||
-    (current_critical == best_critical &&
-     (current_idle < best_idle || (current_idle == best_idle && current_phases < best_phases)));
-  static constexpr std::size_t next_best = better ? Index : Best;
-
-public:
-  static constexpr std::size_t value = StaticBestCandidate<LaneCount, Candidates, next_best, Index + 1>::value;
-};
-
-template <typename LaneCount, typename Candidates, std::size_t Best>
-struct StaticBestCandidate<LaneCount, Candidates, Best, std::tuple_size_v<Candidates>> {
-  static constexpr std::size_t value = Best;
-};
+[[nodiscard]] consteval std::size_t static_best_candidate() {
+  if constexpr (Index == std::tuple_size_v<Candidates>) {
+    return Best;
+  } else {
+    using BestMetrics = metrics_t<LaneCount, std::tuple_element_t<Best, Candidates>>;
+    using CurrentMetrics = metrics_t<LaneCount, std::tuple_element_t<Index, Candidates>>;
+    constexpr nint_t best_critical = BestMetrics::critical_work_type::value;
+    constexpr nint_t current_critical = CurrentMetrics::critical_work_type::value;
+    constexpr nint_t best_idle = BestMetrics::idle_lane_work_type::value;
+    constexpr nint_t current_idle = CurrentMetrics::idle_lane_work_type::value;
+    constexpr nint_t best_phases = BestMetrics::phase_count_type::value;
+    constexpr nint_t current_phases = CurrentMetrics::phase_count_type::value;
+    constexpr bool better =
+      current_critical < best_critical ||
+      (current_critical == best_critical &&
+       (current_idle < best_idle || (current_idle == best_idle && current_phases < best_phases)));
+    constexpr std::size_t next_best = better ? Index : Best;
+    return static_best_candidate<LaneCount, Candidates, next_best, Index + 1>();
+  }
+}
 
 } // namespace task_partition_details
 
@@ -387,7 +383,8 @@ template <meta::ValueInput LaneCount, TaskPartitionCandidateType... Candidates>
     task_partition_details::all_scores_const<LaneValue, CandidateTuple>(std::index_sequence_for<Candidates...>{});
 
   if constexpr (static_scores) {
-    constexpr std::size_t index = task_partition_details::StaticBestCandidate<LaneValue, CandidateTuple, 0, 1>::value;
+    constexpr std::size_t index =
+      task_partition_details::static_best_candidate<LaneValue, CandidateTuple, 0, 1>();
     return TaskPartitionPlan<meta::Const<static_cast<nint_t>(index)>>{meta::Const<static_cast<nint_t>(index)>{}};
   } else {
     std::size_t candidate_index = 0;

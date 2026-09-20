@@ -794,8 +794,15 @@ private:
     // must carry the denominator).
     const ComputeType variance =
         std::max(sum_sq_value * inv_n - mean * mean, ComputeType(0));
-    const ComputeType rstd =
-        ComputeType(1) / std::sqrt(variance + config.eps);
+    // Keep the reciprocal-square-root on the vec math dispatch.  The row
+    // statistics are scalar by definition, so broadcast the value into one
+    // vector and extract lane zero after the backend has selected its native
+    // rsqrt implementation; this avoids routing ARM builds through libm
+    // sqrt from the operator body.
+    const auto rstd_v = vec::rsqrt(
+        base_tag, vec::fill(base_tag, variance + config.eps),
+        vec::opt::math::strict);
+    const ComputeType rstd = vec::get(base_tag, rstd_v, 0);
     // `center` is dual-purpose: with FusedShift it is the FMA bias
     // -mean*rstd (so `fma(x, rstd, center)` = (x-mean)*rstd); without it,
     // it is the plain mean for the subtract form in the write sweep.

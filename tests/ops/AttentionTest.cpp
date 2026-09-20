@@ -7,9 +7,11 @@
 #include <random>
 #include <vector>
 
+
 #include "vecops/platform/Features.h"
 #include "vecops/execution/WorkspaceContext.h"
 #include "vecops/ops/Attention.h"
+#include "vecops/ops/Softmax.h"
 
 #include "MatmulTestArch.h"
 
@@ -46,6 +48,85 @@ using CausalConfig = ops::AttentionConfig<
 using TopLeftCausalConfig = ops::AttentionConfig<
     ops::MatmulConfig<TestAtom>, 4, 4,
     ops::AttentionCausalMode::top_left>;
+
+TEST(AttentionTest, EstimateSoftmaxExpHandlesLargeNegativeScores) {
+  using Tag = vec::ScalableTag<float32_t, 0>;
+  Tag tag{};
+  const auto lanes = vec::size(tag);
+  constexpr std::array<float32_t, 8> scores = {
+      0.0f, -1.0f, -10.0f, -20.0f, -40.0f, -80.0f,
+      -81.0f, -std::numeric_limits<float32_t>::infinity()};
+  std::vector<float32_t> input(static_cast<std::size_t>(lanes));
+  std::vector<float32_t> output(static_cast<std::size_t>(lanes));
+  for (nint_t lane = 0; lane < lanes; ++lane)
+    input[static_cast<std::size_t>(lane)] =
+        scores[static_cast<std::size_t>(lane) % scores.size()];
+  const auto active = vec::mwhilelt(tag, 0, lanes - 1);
+  const auto result = ops::softmax_details::exp_neg_estimate_safe<
+      float32_t, vec::Accuracy::Estimate>(
+      tag, vec::load(tag, input.data(), vec::opt::unmasked),
+      vec::opt::masked(active));
+  vec::store(tag, output.data(), result, vec::opt::unmasked);
+  for (nint_t lane = 0; lane < lanes; ++lane) {
+    const auto index = static_cast<std::size_t>(lane);
+    if (lane == lanes - 1 || input[index] < -80.0f) {
+      EXPECT_EQ(output[index], 0.0f);
+    } else {
+      const float32_t expected = std::exp(input[index]);
+      EXPECT_NEAR(output[index], expected, expected * 0.03f);
+    }
+  }
+}
+
+TEST(AttentionTest, EstimateSoftmaxHandlesExtremeMaskedScores) {
+  std::vector<float32_t> x{
+      0.0f, -1.0f, -10.0f, -20.0f, -80.0f,
+      -81.0f, -100.0f, -std::numeric_limits<float32_t>::infinity()};
+  std::vector<float32_t> out(x.size());
+  auto x_t = tensor::make_tensor<1>(
+      x.data(), {static_cast<nint_t>(x.size())});
+  auto y_t = tensor::make_tensor<1>(
+      out.data(), {static_cast<nint_t>(out.size())});
+  ops::softmax(ops::SoftmaxConfig<float32_t, vec::Accuracy::Estimate>{})(
+      tensor::input<float32_t>(x_t), tensor::output<float32_t>(y_t));
+  double reference_sum = 0.0;
+  for (float32_t value : x)
+    reference_sum += std::exp(static_cast<double>(value));
+  double output_sum = 0.0;
+  for (std::size_t i = 0; i < x.size(); ++i) {
+    output_sum += out[i];
+    if (x[i] < -80.0f) EXPECT_EQ(out[i], 0.0f);
+    else EXPECT_NEAR(out[i], std::exp(static_cast<double>(x[i])) /
+                               reference_sum, 0.008);
+  }
+  EXPECT_NEAR(output_sum, 1.0, 0.008);
+}
+
+TEST(AttentionTest, EstimateSoftmaxExpTracksNormalRange) {
+  using Tag = vec::ScalableTag<float32_t, 0>;
+  Tag tag{};
+  const auto lanes = vec::size(tag);
+  std::vector<float32_t> input(static_cast<std::size_t>(lanes));
+  std::vector<float32_t> output(static_cast<std::size_t>(lanes));
+  for (int batch = 0; batch < 51; ++batch) {
+    for (nint_t lane = 0; lane < lanes; ++lane) {
+      const auto sample = batch * lanes + lane;
+      input[static_cast<std::size_t>(lane)] =
+          -80.0f * static_cast<float32_t>(sample % 809) / 808.0f;
+    }
+    const auto result = ops::softmax_details::exp_neg_estimate_safe<
+        float32_t, vec::Accuracy::Estimate>(
+        tag, vec::load(tag, input.data(), vec::opt::unmasked),
+        vec::opt::unmasked);
+    vec::store(tag, output.data(), result, vec::opt::unmasked);
+    for (nint_t lane = 0; lane < lanes; ++lane) {
+      const auto expected =
+          std::exp(input[static_cast<std::size_t>(lane)]);
+      EXPECT_NEAR(output[static_cast<std::size_t>(lane)], expected,
+                  expected * 0.001f);
+    }
+  }
+}
 
 using IBSMapTensor = decltype(tensor::make_tensor(
     static_cast<int32_t*>(nullptr),

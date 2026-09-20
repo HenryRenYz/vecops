@@ -3,6 +3,7 @@
 import ctypes
 import os
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,31 @@ VECOPS_ROOT = Path(__file__).resolve().parents[2]
 _DYNAMIC_OUTPUT_STRIDES = "Dynamic<1,D,1048576> 1"
 _TEST_CC = os.environ.get("CC", "gcc")
 _TEST_CXX = os.environ.get("CXX", "g++")
+
+
+def test_flush_subnormals_sets_current_and_new_threads() -> None:
+  if not vecops._C.flush_subnormals_supported():
+    pytest.skip("hardware subnormal mode is unavailable")
+  original = vecops.current_thread_flush_subnormals()
+  old_env = os.environ.get("VECOPS_FLUSH_SUBNORMALS")
+  try:
+    vecops.set_flush_subnormals(True)
+    assert vecops.current_thread_flush_subnormals()
+    inherited: list[bool] = []
+    thread = threading.Thread(
+      target=lambda: inherited.append(vecops.current_thread_flush_subnormals())
+    )
+    thread.start()
+    thread.join()
+    assert inherited == [True]
+    vecops.set_flush_subnormals(False)
+    assert not vecops.current_thread_flush_subnormals()
+  finally:
+    vecops.set_flush_subnormals(original)
+    if old_env is None:
+      os.environ.pop("VECOPS_FLUSH_SUBNORMALS", None)
+    else:
+      os.environ["VECOPS_FLUSH_SUBNORMALS"] = old_env
 
 
 def test_dtype_normalization_has_no_required_torch_dependency() -> None:
@@ -33,7 +59,7 @@ def test_native_compiler_target_allows_process_override(
   explicit = vecops.Compiler(cache_mode="cache-only", target="Scalar")
   assert defaulted.target == "NativeFixedSVE"
   assert explicit.target == "Scalar"
-  assert defaulted.cache_namespace == "python-sdk-v9;target=NativeFixedSVE"
+  assert defaulted.cache_namespace == "python-sdk-v10;target=NativeFixedSVE"
 
 
 def test_string_dimension_dsl_and_symbol_inference() -> None:

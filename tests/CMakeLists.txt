@@ -250,6 +250,11 @@ elseif(VECOPS_ARCH_FAMILY STREQUAL "ARM")
     endif()
     if(VECOPS_NATIVE_HAS_SME)
         vecops_add_test(
+            NAME SMETailGuardTest
+            FILES ops/SMETailGuardTest.cpp
+            FOLDER ops/matmul
+            ARCH Native)
+        vecops_add_test(
             NAME MatmulPanelLifetimeTest
             FILES ops/MatmulPanelLifetimeTest.cpp
             FOLDER ops/matmul

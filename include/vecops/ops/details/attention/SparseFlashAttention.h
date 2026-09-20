@@ -5,13 +5,59 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <string_view>
 #include <utility>
 
 #include "vecops/ops/details/attention/SDPA.h"
+#include "vecops/util/Bitcast.h"
 
 namespace vecops::ops {
+
+// The online-softmax recurrence has one scalar rescale per query row.  Keep
+// that unavoidable recurrence, but do not route its exponential through 920F
+// libm: rare inputs can spend seconds in expf.  The reduced remainder is in
+// [-ln(2)/2, ln(2)/2], where a short minimax-like Taylor polynomial is safe.
+template <typename T>
+VECOPS_INLINE T sparse_attention_exp(T value) {
+  using Work = std::conditional_t<sizeof(T) <= sizeof(float), float, double>;
+  const Work x = static_cast<Work>(value);
+  constexpr Work Log2E = static_cast<Work>(1.4426950408889634073599L);
+  constexpr Work Ln2 = static_cast<Work>(0.6931471805599453094172L);
+  constexpr Work MinInput = sizeof(T) <= sizeof(float)
+      ? static_cast<Work>(-87.336544750553032L)
+      // The bit-built scale below intentionally flushes subnormals.  Keep
+      // the exponent in the normal range rather than shifting a negative
+      // unsigned exponent (which would be undefined for double).
+      : static_cast<Work>(-708.3964185322641062L);
+  if (!(x > MinInput)) return static_cast<T>(0);
+
+  const Work scaled = x * Log2E;
+  const int exponent = static_cast<int>(
+      scaled + (scaled >= Work(0) ? Work(0.5) : Work(-0.5)));
+  const Work remainder = x - static_cast<Work>(exponent) * Ln2;
+  // Degree 10 keeps the double path within a few ulps on the reduced interval
+  // while retaining the cheap degree-6 float path after Work narrowing.
+  Work polynomial = Work(1.0 / 3628800.0);
+  polynomial = Work(1.0 / 362880.0) + remainder * polynomial;
+  polynomial = Work(1.0 / 40320.0) + remainder * polynomial;
+  polynomial = Work(1.0 / 5040.0) + remainder * polynomial;
+  polynomial = Work(1.0 / 720.0) + remainder * polynomial;
+  polynomial = Work(1.0 / 120.0) + remainder * polynomial;
+  polynomial = Work(1.0 / 24.0) + remainder * polynomial;
+  polynomial = Work(1.0 / 6.0) + remainder * polynomial;
+  polynomial = Work(0.5) + remainder * polynomial;
+  polynomial = Work(1) + remainder * polynomial;
+  polynomial = Work(1) + remainder * polynomial;
+  if constexpr (sizeof(T) <= sizeof(float)) {
+    const auto power_bits = static_cast<std::uint32_t>(exponent + 127) << 23;
+    return static_cast<T>(polynomial * bitcast<float>(power_bits));
+  } else {
+    const auto power_bits = static_cast<std::uint64_t>(exponent + 1023) << 52;
+    return static_cast<T>(polynomial * bitcast<double>(power_bits));
+  }
+}
 
 /**
  * @brief Online block-sparse scaled dot-product attention for one head.
@@ -386,7 +432,8 @@ private:
                           -std::numeric_limits<Score>::infinity()) {
                         alpha = Score{};
                       } else if (block_max > row_max[row]) {
-                        alpha = std::exp(row_max[row] - block_max);
+                        alpha = sparse_attention_exp(
+                            row_max[row] - block_max);
                       }
                       row_scale[row] = alpha;
                       Score block_sum{};
@@ -402,12 +449,12 @@ private:
                                 block_tag,
                                 scores + row * columns + column, active,
                                 vec::opt::merge(negative_infinity));
-                            auto probability_v = vec::exp_neg(
-                                block_tag,
-                                vec::sub(block_tag, score_v, next_max_v),
-                                vec::opt::math::accuracy<
-                                    Config::exp_accuracy>,
-                                active, vec::opt::zero);
+                            auto probability_v =
+                                softmax_details::exp_neg_estimate_safe<
+                                    Score, Config::exp_accuracy>(
+                                    block_tag,
+                                    vec::sub(block_tag, score_v, next_max_v),
+                                    active);
                             block_sum_v = vec::add(
                                 block_sum_v, probability_v);
                             vec::store_convert(

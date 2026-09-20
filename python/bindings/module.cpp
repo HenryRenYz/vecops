@@ -33,6 +33,7 @@
 
 #include "vecops/compiler/Compiler.h"
 #include "vecops/execution/Parallel.h"
+#include "vecops/execution/FloatControl.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/runtime/Executable.h"
 #include "vecops/runtime/OperatorBridgeAbi.h"
@@ -1486,6 +1487,15 @@ dtypes, derive schemas, and own framework integration. This module mirrors C++
 value types for diagnostics, explicit build control, and wrapper implementation;
 its constructor-level interfaces intentionally expose native concepts.)doc";
   module.attr("build_api_version") = 6;
+  module.def("flush_subnormals_supported", &vecops::execution::flush_subnormals_supported,
+             "Whether this build can set hardware subnormal flushing.");
+  module.def("current_thread_flush_subnormals",
+             &vecops::execution::current_thread_flush_subnormals,
+             "Return the calling thread's hardware subnormal flush mode.");
+  module.def("set_current_thread_flush_subnormals",
+             &vecops::execution::set_current_thread_flush_subnormals,
+             py::arg("enabled"),
+             "Set the calling thread's hardware subnormal flush mode.");
   module.def(
     "native_thread_pool_address",
     [](std::uint32_t threads) {

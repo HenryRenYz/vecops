@@ -106,7 +106,9 @@ created once in the `_C` module, uses `VECOPS_NUM_THREADS` when set (otherwise
 spin so idle vecops workers do not compete with Torch OpenMP work. On Linux,
 workers 1..P-1 are pinned across the process's allowed CPU set; the submitting
 thread remains unpinned so later compiler subprocesses do not inherit a
-single-CPU mask. `VECOPS_THREAD_POOL_SPIN_COUNT` controls the bounded spin
+single-CPU mask. `VECOPS_THREAD_POOL_CPU_LIST` overrides the detected set with
+an explicit comma/range CPU list when the submitting thread was already pinned
+before the pool was created. `VECOPS_THREAD_POOL_SPIN_COUNT` controls the bounded spin
 before parking and defaults to 256. This mode is opt-in because a workload
 with substantial interleaved ATen work can still prefer Torch's shared team.
 Set `VECOPS_NATIVE_THREAD_POOL_OPS` to comma-separated qualified-name glob

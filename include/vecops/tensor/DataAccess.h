@@ -2186,6 +2186,12 @@ VECOPS_ALWAYS_INLINE constexpr bool operand_shape_axis_conforms(
     static_assert(
         PatternExtent::is_runtime,
         "operand pattern shape axes must be Const or runtime Values");
+    // An unbounded Dynamic is a shape contract, not a first-call capacity
+    // bucket.  Its runtime extent can legitimately change between denoising
+    // steps or rank-local views; only bounded Dynamic patterns retain the
+    // planning-capacity check.
+    if constexpr (!PatternExtent::has_upper)
+      return PatternExtent::conforms(extent);
     return PatternExtent::conforms(extent) && extent <= capacity;
   }
 }
@@ -2202,10 +2208,11 @@ VECOPS_ALWAYS_INLINE constexpr bool operand_layout_conforms_impl(
 /**
  * Validate a runtime Layout against a planning Layout contract.
  *
- * A Const shape axis is exact. A Dynamic axis accepts any conforming extent
- * no larger than the instance stored by the pattern; that instance is the
- * planned capacity/bucket. Strides remain exact because changing them can
- * alter DataAccess lowering and its workspace requirement.
+ * A Const shape axis is exact. A bounded Dynamic axis also respects the
+ * instance capacity used by planning. An unbounded Dynamic axis accepts any
+ * conforming runtime extent; it is a shape contract rather than a first-call
+ * capacity bucket. Strides remain exact because changing them can alter
+ * DataAccess lowering and its workspace requirement.
  */
 template <typename PatternLayout, typename ActualLayout>
 VECOPS_ALWAYS_INLINE constexpr bool operand_layout_conforms(
@@ -2216,13 +2223,70 @@ VECOPS_ALWAYS_INLINE constexpr bool operand_layout_conforms(
       std::make_index_sequence<PatternLayout::Ndim>{});
 }
 
+struct OperandLayoutContractDiagnostics {
+  bool conforms = true;
+  int axis = -1;
+  nint_t pattern_extent = 0;
+  nint_t actual_extent = 0;
+  nint_t pattern_stride = 0;
+  nint_t actual_stride = 0;
+};
+
+template <typename PatternLayout, typename ActualLayout, std::size_t... Axis>
+VECOPS_ALWAYS_INLINE auto operand_layout_contract_diagnostics_impl(
+    const PatternLayout& pattern, const ActualLayout& actual,
+    std::index_sequence<Axis...>) {
+  OperandLayoutContractDiagnostics result;
+  auto inspect = [&]<std::size_t I>() {
+    using PatternExtent = shape_extent_type_t<static_cast<int>(I), PatternLayout>;
+    const nint_t pattern_extent = pattern.shape()[static_cast<int>(I)];
+    const nint_t actual_extent = actual.shape()[static_cast<int>(I)];
+    const nint_t pattern_stride = pattern.strides()[static_cast<int>(I)];
+    const nint_t actual_stride = actual.strides()[static_cast<int>(I)];
+    const bool shape_ok = [&] {
+      if constexpr (meta::is_singleton_v<PatternExtent>)
+        return actual_extent == pattern_extent;
+      else if constexpr (!PatternExtent::has_upper)
+        return PatternExtent::conforms(actual_extent);
+      else
+        return PatternExtent::conforms(actual_extent) &&
+               actual_extent <= pattern_extent;
+    }();
+    if (result.conforms && (!shape_ok || pattern_stride != actual_stride)) {
+      result.conforms = false;
+      result.axis = static_cast<int>(I);
+      result.pattern_extent = pattern_extent;
+      result.actual_extent = actual_extent;
+      result.pattern_stride = pattern_stride;
+      result.actual_stride = actual_stride;
+    }
+  };
+  (inspect.template operator()<Axis>(), ...);
+  return result;
+}
+
+template <typename PatternLayout, typename ActualLayout>
+VECOPS_ALWAYS_INLINE auto operand_layout_contract_diagnostics(
+    const PatternLayout& pattern, const ActualLayout& actual) {
+  static_assert(PatternLayout::Ndim == ActualLayout::Ndim);
+  return operand_layout_contract_diagnostics_impl(
+      pattern, actual,
+      std::make_index_sequence<PatternLayout::Ndim>{});
+}
+
 template <UnboundTensorLike Pattern, BoundTensorLike Actual>
   requires (Pattern::Ndim == Actual::Ndim)
 VECOPS_ALWAYS_INLINE auto bind_operand_pattern_tensor(
     const Pattern& pattern, const Actual& actual) {
+  const auto diagnostics = operand_layout_contract_diagnostics(
+      pattern.layout(), actual.layout());
   VECOPS_CHECK(
-      operand_layout_conforms(pattern.layout(), actual.layout()),
-      "actual Tensor exceeds or violates its planning layout contract");
+      diagnostics.conforms,
+      "actual Tensor violates planning layout contract at axis %d: "
+      "pattern extent=%td actual extent=%td pattern stride=%td "
+      "actual stride=%td",
+      diagnostics.axis, diagnostics.pattern_extent, diagnostics.actual_extent,
+      diagnostics.pattern_stride, diagnostics.actual_stride);
   using PatternLayout = typename Pattern::Layout;
   auto execution_layout = actual.layout().template as<
       typename PatternLayout::Shape, typename PatternLayout::Strides>();

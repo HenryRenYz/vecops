@@ -12,6 +12,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -80,6 +81,53 @@ std::vector<int> allowed_cpus() {
   return result;
 }
 
+std::vector<int> parse_cpu_list(const char* text) {
+  std::vector<int> result;
+#if defined(__linux__)
+  if (text == nullptr || *text == '\0')
+    return result;
+  const char* cursor = text;
+  while (*cursor != '\0') {
+    char* end = nullptr;
+    errno = 0;
+    const auto first = std::strtol(cursor, &end, 10);
+    if (errno != 0 || end == cursor || first < 0 || first >= CPU_SETSIZE)
+      return {};
+    auto last = first;
+    if (*end == '-') {
+      cursor = end + 1;
+      errno = 0;
+      last = std::strtol(cursor, &end, 10);
+      if (errno != 0 || end == cursor || last < first || last >= CPU_SETSIZE)
+        return {};
+    }
+    for (auto cpu = first; cpu <= last; ++cpu) {
+      const auto value = static_cast<int>(cpu);
+      if (std::find(result.begin(), result.end(), value) == result.end())
+        result.push_back(value);
+    }
+    if (*end == '\0')
+      break;
+    if (*end != ',')
+      return {};
+    cursor = end + 1;
+  }
+#else
+  (void)text;
+#endif
+  return result;
+}
+
+std::vector<int> pool_cpus() {
+  const char* configured = std::getenv("VECOPS_THREAD_POOL_CPU_LIST");
+  if (configured == nullptr || *configured == '\0')
+    return allowed_cpus();
+  auto result = parse_cpu_list(configured);
+  if (result.empty())
+    throw std::runtime_error("invalid VECOPS_THREAD_POOL_CPU_LIST");
+  return result;
+}
+
 void pin_worker(const std::vector<int>& cpus, std::uint32_t ordinal) noexcept {
 #if defined(__linux__)
   if (cpus.empty())
@@ -99,7 +147,7 @@ public:
   explicit NativeThreadPool(std::uint32_t threads)
     : threads_(std::max<std::uint32_t>(1, threads))
     , spin_count_(configured_spin_count())
-    , cpus_(allowed_cpus()) {
+    , cpus_(pool_cpus()) {
     workers_.reserve(threads_ - 1);
     for (std::uint32_t ordinal = 1; ordinal < threads_; ++ordinal)
       workers_.emplace_back([this, ordinal] { worker_loop(ordinal); });
@@ -199,7 +247,12 @@ private:
   void run(std::uint32_t task_count, void* body_context, VecopsParallelTaskFn body) {
     std::lock_guard submission_lock(submission_mutex_);
     const auto participants = std::min(task_count, threads_);
-    Submission submission{task_count, participants, body_context, body, participants, {}, nullptr};
+    // Every worker observes each generation, including workers whose ordinal
+    // is outside this submission's participant set.  Keep the stack-backed
+    // Submission alive until the entire team has acknowledged the generation;
+    // otherwise a late non-participant can dereference a recycled stack slot
+    // and call a stale body function pointer.
+    Submission submission{task_count, participants, body_context, body, threads_, {}, nullptr};
     submission_.store(&submission, std::memory_order_release);
     {
       std::lock_guard lock(wake_mutex_);
@@ -271,8 +324,7 @@ private:
       if (submission == nullptr)
         continue;
       run_participant(*submission, ordinal);
-      if (ordinal < submission->participants)
-        submission->remaining.fetch_sub(1, std::memory_order_acq_rel);
+      submission->remaining.fetch_sub(1, std::memory_order_acq_rel);
     }
   }
 
