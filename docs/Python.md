@@ -104,6 +104,84 @@ exports vecops' transitive runtime dependencies, including OpenMP when enabled;
 JIT modules that link the static archive therefore do not need to rediscover
 or spell those dependencies themselves.
 
+## Expression-based language frontend
+
+`vecops.language` (`import vecops.language as T`) is the new Python
+metaprogramming frontend. It coexists with the signature-derived `vecops.jit`
+API below: existing declarations continue to work, while new source kernels
+should use `T.jit`, `T.template`, and Python dimension expressions. A future
+Python DSL backend can consume the same captured `TemplateFunction`; the
+current implementation requires `T.template(source=...)` and forwards to the
+source file's `__kernel__`.
+
+```python
+import vecops
+import vecops.language as T
+
+@T.jit(out_idx=[1])
+def scale(B, D, stride_D, ComputeType):
+  # These outer annotations, if present, are ordinary user hints. T.jit does
+  # not inspect them; the actual call values determine specialization kinds.
+  @T.template(source="kernels/scale.cpp")
+  def kernel(
+    input: T.Tensor((B, D), (stride_D, 1), vecops.float32),
+    output: T.Tensor((B, D), dtype=vecops.float32),
+    factor: float = 2.0,
+  ):
+    ComputeType  # capture a value used only by C++
+
+  return kernel
+```
+
+`T.jit` normalizes the actual bound call, including `*args`, `**kwargs`, and
+recursive tuple elements. Integers and booleans become named `T.Const`
+values, framework/native dtypes become `T.DType`, and `None` remains `None`.
+Lists, dictionaries passed as values, sets, bytearrays, and other mutable
+arguments are rejected. The normalized call is both the elaboration input and
+the decorator cache key. Forwarding a normalized value into another `T.jit`
+function rebinds its specialization name to the callee parameter.
+
+`T.Const` arithmetic builds exact integer expressions. `T.dynamic()` creates
+a bounded, aligned runtime value which does not specialize the artifact;
+expressions combining named dynamic and Const leaves validate shape/stride
+relations at runtime. A comparison involving an unresolved dynamic value is
+not proven and is false in Python control flow, while `T.is_value(x)` reports
+whether `x` is compile-time known. `T.any` is the unconstrained dynamic value.
+
+`T.Tensor(shape, strides, dtype)` accepts tuples or lists in the annotation.
+Omitted strides mean dense row-major for the current source backend; the IR
+retains the omission so a future backend may select a padded non-overlapping
+layout. Explicit strides may describe padding, overlap, zero strides, or
+negative NumPy strides. Automatic output allocation computes the complete
+reachable storage interval rather than multiplying shape extents, so aliases
+inside such layouts remain in bounds. Torch does not expose negative-stride
+tensors and rejects that automatic-allocation case.
+
+`out_idx` uses Python indices (including negative indices) over the template's
+positional parameters; keyword-only runtime scalars are excluded. It controls
+output order. A caller may provide those tensors explicitly or omit them. Omitted
+outputs are allocated in the framework/device of the first tensor argument;
+one output is returned directly, multiple outputs as a tuple, and no outputs
+as `None`. Dtype is taken from the annotation or inferred from the first tensor
+when the annotation omits it.
+
+Template annotations and external values referenced in the template body are
+captured as C++ specialization values. A bare reference in the ignored body is
+therefore the explicit way to capture a value which does not occur in an
+annotation. The body is never executed for a source template. `T.compile`
+caches the lowered operator by template IR, source/dependency content,
+`out_idx`, and compiler configuration. `T.jit` adds a higher-level elaboration
+cache and only calls `T.compile` when the elaborated result is a
+`TemplateFunction`; ordinary Python callables and forwarding wrappers are
+cached and returned unchanged.
+
+Calls made inside `vecops.collect_compile_requests()` allocate output metadata
+or framework tensors, record the source-kernel request, and skip execution.
+The resulting requests use the existing `vecops.compile_batch()` shared CMake
+build graph, so distinct captured configurations remain distinct targets while
+duplicates are removed. This is the supported batch-compilation boundary for
+the first migration stage.
+
 ## Signature-derived recipes
 
 `@vecops.jit` reads a declaration signature and returns a lazy `JitKernel`.
@@ -161,10 +239,10 @@ strides produces one anonymous `Const` stride per axis.
 "Dynamic<1,N,1048576> 1"           symbolic lower bound
 ```
 
-Every symbol referenced by a shape, stride, dtype, or Dynamic constraint is
+In this legacy annotation grammar, every symbol referenced by a shape, stride, dtype, or Dynamic constraint is
 automatically added to the `KernelDef` with the correct kind. Dynamic
 alignment and bound symbols must be Const values. Arithmetic expressions are
-not part of the grammar.
+not part of this string grammar; use `vecops.language` for Python expressions.
 
 The optional `symbols` mapping overrides the default interpretation of a
 dimension identifier. Mapping `"B"` to `vt.Dynamic(lower=0)` makes every `B`

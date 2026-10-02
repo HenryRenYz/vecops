@@ -152,6 +152,8 @@ DType resolved_dtype(const TensorDef& definition, const TensorView& tensor, cons
 
 std::string meta_value(const DimensionDef& definition, std::int64_t observed, const BoundKernel& binding,
                        std::string_view runtime_value) {
+  if (definition.kind() == DimensionDef::Kind::Expression)
+    return "::vecops::meta::Any{" + std::string(runtime_value) + "}";
   if (definition.kind() != DimensionDef::Kind::Dynamic)
     return "::vecops::meta::cint<" + std::to_string(resolved_dimension(definition, observed, binding)) + ">";
   const auto alignment = resolve(definition.alignment(), binding);
@@ -249,6 +251,8 @@ void emit_constraints(std::ostringstream& output, std::string_view name, std::sp
       const auto upper_text = upper == INT64_MAX ? "INT64_MAX" : std::to_string(upper);
       output << "  {sizeof(VecopsDimensionConstraint), VECOPS_DIM_DYNAMIC, 0, " << lower_text << ", " << upper_text
              << ", " << resolve(definition.alignment(), binding) << "},\n";
+    } else if (definition.kind() == DimensionDef::Kind::Expression) {
+      output << "  {sizeof(VecopsDimensionConstraint), VECOPS_DIM_DYNAMIC, 0, INT64_MIN, INT64_MAX, 1},\n";
     } else {
       output << "  {sizeof(VecopsDimensionConstraint), VECOPS_DIM_CONST, "
              << resolved_dimension(definition, observed[axis], binding) << ", 0, 0, 1},\n";

@@ -552,8 +552,14 @@ def _public_wrapper(
         return args[single_output_index]
       return tuple(args[index] for index in output_indices)
 
+    positional_specs = None
     if len(args) > len(parameters):
-      raise TypeError(f"{library}.{name} expected at most {len(parameters)} positional arguments")
+      if len(args) != n_parameters + n_specs:
+        raise TypeError(
+          f"{library}.{name} expected {n_parameters} kernel arguments "
+          f"with at most {n_specs} trailing specialization values"
+        )
+      args, positional_specs = args[:n_parameters], list(args[n_parameters:])
     ordered = list(args)
     for parameter in parameters[len(ordered) :]:
       if parameter.name in kwargs:
@@ -564,7 +570,12 @@ def _public_wrapper(
         ordered.append(parameter.default.value)
       else:
         raise TypeError(f"missing required argument: {parameter.name}")
-    spec_values = [kwargs.pop(symbol, None) for symbol in symbols]
+    if positional_specs is None:
+      spec_values = [kwargs.pop(symbol, None) for symbol in symbols]
+    else:
+      if any(symbol in kwargs for symbol in symbols):
+        raise TypeError("specialization values were passed both positionally and by keyword")
+      spec_values = positional_specs
     if kwargs:
       unexpected = next(iter(kwargs))
       raise TypeError(f"unexpected keyword argument: {unexpected}")
@@ -589,6 +600,8 @@ def _public_wrapper(
   invoke.__qualname__ = f"vecops.ops.torch.{library}.{name}"
   invoke.__doc__ = f"Generated mutable vecops wrapper for {library}::{name}."
   invoke._vecops_operator = operator
+  invoke._vecops_torch_op_holder = torch_op_holder
+  invoke._vecops_ready = ready
   return invoke
 
 

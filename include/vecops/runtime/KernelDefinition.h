@@ -42,6 +42,43 @@ enum class SpecializationType {
 };
 
 /**
+ * @brief Postfix integer expression used by exact tensor dimensions.
+ *
+ * Expressions may reference named ConstInt specializations or named runtime
+ * dimensions. Runtime references validate relations without entering the
+ * artifact specialization key.
+ */
+class DimensionExpr {
+public:
+  /** @brief One postfix instruction. */
+  enum class Op { Literal, ConstSymbol, RuntimeSymbol, Add, Sub, Mul, FloorDiv, Mod, Min, Max };
+
+  /** @brief Owned postfix instruction payload. */
+  struct Node {
+    Op op = Op::Literal;
+    std::int64_t value = 0;
+    std::string symbol;
+  };
+
+  DimensionExpr() = default;
+  explicit DimensionExpr(std::vector<Node> nodes)
+    : nodes_(std::move(nodes)) {
+  }
+
+  static DimensionExpr literal(std::int64_t value);
+  static DimensionExpr const_symbol(std::string symbol);
+  static DimensionExpr runtime_symbol(std::string symbol);
+  static DimensionExpr binary(Op op, DimensionExpr left, DimensionExpr right);
+
+  [[nodiscard]] std::span<const Node> nodes() const {
+    return nodes_;
+  }
+
+private:
+  std::vector<Node> nodes_;
+};
+
+/**
  * @brief Fixed integer or reference to a named `ConstInt` specialization value.
  *
  * Dynamic alignment and bounds accept this type so their declaration can be
@@ -90,7 +127,9 @@ private:
  * without becoming visible in `vecops::spec`; Dynamic values remain runtime
  * metadata subject to their fixed or symbolic constraint expressions. A
  * Dynamic may itself carry a name used to enforce equality across tensor
- * metadata without specializing on the observed runtime value.
+ * metadata without specializing on the observed runtime value. Expression
+ * dimensions validate exact arithmetic relations over named ConstInt and
+ * named Dynamic values without adding runtime values to the artifact key.
  */
 class DimensionDef {
 public:
@@ -104,6 +143,8 @@ public:
     Const,
     /** Keep a runtime coordinate constrained by alignment and bounds. */
     Dynamic,
+    /** Require equality with a symbolic integer expression. */
+    Expression,
   };
 
   template <std::integral Integer>
@@ -134,6 +175,8 @@ public:
                                     ConstExpr upper_bound = INT64_MAX);
   /** @brief Shorthand for an unconstrained Dynamic coordinate. */
   static DimensionDef any();
+  /** @brief Require equality with @p expression. */
+  static DimensionDef expression(DimensionExpr expression);
 
   /** @brief Return this declaration's interpretation. */
   [[nodiscard]] Kind kind() const {
@@ -156,6 +199,10 @@ public:
   [[nodiscard]] const ConstExpr& upper_bound() const {
     return upper_bound_;
   }
+  /** @brief Return the exact expression; meaningful for `Kind::Expression`. */
+  [[nodiscard]] const DimensionExpr& expression() const {
+    return expression_;
+  }
 
 private:
   explicit DimensionDef(Kind kind)
@@ -167,6 +214,7 @@ private:
   ConstExpr alignment_{1};
   ConstExpr lower_bound_{INT64_MIN};
   ConstExpr upper_bound_{INT64_MAX};
+  DimensionExpr expression_;
 };
 
 /**

@@ -11,9 +11,12 @@
 
 #include "vecops/runtime/KernelDefinition.h"
 
+#include <algorithm>
 #include <bit>
 #include <cctype>
 #include <iomanip>
+#include <iterator>
+#include <limits>
 #include <set>
 #include <sstream>
 
@@ -137,6 +140,147 @@ Result<std::int64_t> resolve_expr(const ConstExpr& expression, const Specializat
   return invalid(std::string(location) + " requires an integer symbol");
 }
 
+Status validate_dimension_expr(const KernelDef& definition, const DimensionExpr& expression,
+                               std::string_view location) {
+  std::size_t depth = 0;
+  for (const auto& node : expression.nodes()) {
+    switch (node.op) {
+    case DimensionExpr::Op::Literal:
+      ++depth;
+      break;
+    case DimensionExpr::Op::ConstSymbol: {
+      if (!identifier(node.symbol))
+        return invalid(std::string(location) + " has invalid ConstInt symbol '" + node.symbol + "'");
+      const auto found = definition.values().find(node.symbol);
+      if (found == definition.values().end() || found->second != SpecializationType::ConstInt)
+        return invalid(std::string(location) + " references undeclared or non-ConstInt symbol '" + node.symbol + "'");
+      ++depth;
+      break;
+    }
+    case DimensionExpr::Op::RuntimeSymbol:
+      if (!identifier(node.symbol))
+        return invalid(std::string(location) + " has invalid runtime symbol '" + node.symbol + "'");
+      ++depth;
+      break;
+    case DimensionExpr::Op::Add:
+    case DimensionExpr::Op::Sub:
+    case DimensionExpr::Op::Mul:
+    case DimensionExpr::Op::FloorDiv:
+    case DimensionExpr::Op::Mod:
+    case DimensionExpr::Op::Min:
+    case DimensionExpr::Op::Max:
+      if (depth < 2)
+        return invalid(std::string(location) + " has a malformed postfix expression");
+      --depth;
+      break;
+    }
+  }
+  if (depth != 1)
+    return invalid(std::string(location) + " has an empty or malformed postfix expression");
+  return Status::success();
+}
+
+Result<std::int64_t> evaluate_dimension_expr(const DimensionExpr& expression, const SpecializationValues& values,
+                                             const std::map<std::string, std::int64_t, std::less<>>& runtime_values,
+                                             std::string_view location) {
+  std::vector<std::int64_t> stack;
+  stack.reserve(expression.nodes().size());
+  constexpr auto minimum = std::numeric_limits<std::int64_t>::min();
+  constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+  auto checked_add = [&](const std::int64_t left, const std::int64_t right) -> Result<std::int64_t> {
+    if ((right > 0 && left > maximum - right) || (right < 0 && left < minimum - right))
+      return invalid(std::string(location) + " overflows int64");
+    return left + right;
+  };
+  auto checked_sub = [&](const std::int64_t left, const std::int64_t right) -> Result<std::int64_t> {
+    if ((right > 0 && left < minimum + right) || (right < 0 && left > maximum + right))
+      return invalid(std::string(location) + " overflows int64");
+    return left - right;
+  };
+  auto checked_mul = [&](const std::int64_t left, const std::int64_t right) -> Result<std::int64_t> {
+    const auto overflow =
+      (left > 0 && ((right > 0 && left > maximum / right) || (right < 0 && right < minimum / left))) ||
+      (left < 0 && ((right > 0 && left < minimum / right) || (right < 0 && left < maximum / right)));
+    if (overflow)
+      return invalid(std::string(location) + " overflows int64");
+    return left * right;
+  };
+  for (const auto& node : expression.nodes()) {
+    if (node.op == DimensionExpr::Op::Literal) {
+      stack.push_back(node.value);
+      continue;
+    }
+    if (node.op == DimensionExpr::Op::ConstSymbol) {
+      const auto found = values.find(node.symbol);
+      if (found == values.end() || !std::holds_alternative<std::int64_t>(found->second))
+        return invalid(std::string(location) + " requires unresolved ConstInt symbol '" + node.symbol + "'");
+      stack.push_back(std::get<std::int64_t>(found->second));
+      continue;
+    }
+    if (node.op == DimensionExpr::Op::RuntimeSymbol) {
+      const auto found = runtime_values.find(node.symbol);
+      if (found == runtime_values.end())
+        return invalid(std::string(location) + " requires unresolved runtime symbol '" + node.symbol + "'");
+      stack.push_back(found->second);
+      continue;
+    }
+    if (stack.size() < 2)
+      return invalid(std::string(location) + " has a malformed postfix expression");
+    const auto right = stack.back();
+    stack.pop_back();
+    const auto left = stack.back();
+    stack.pop_back();
+    Result<std::int64_t> result = invalid("invalid dimension expression operation");
+    switch (node.op) {
+    case DimensionExpr::Op::Add:
+      result = checked_add(left, right);
+      break;
+    case DimensionExpr::Op::Sub:
+      result = checked_sub(left, right);
+      break;
+    case DimensionExpr::Op::Mul:
+      result = checked_mul(left, right);
+      break;
+    case DimensionExpr::Op::FloorDiv:
+      if (right == 0)
+        return invalid(std::string(location) + " divides by zero");
+      if (left == minimum && right == -1)
+        return invalid(std::string(location) + " overflows int64");
+      result = left / right;
+      if (left % right != 0 && ((left < 0) != (right < 0)))
+        result = result.value() - 1;
+      break;
+    case DimensionExpr::Op::Mod:
+      if (right == 0)
+        return invalid(std::string(location) + " takes modulo zero");
+      if (left == minimum && right == -1) {
+        result = std::int64_t{0};
+        break;
+      }
+      result = left % right;
+      if (result.value() != 0 && ((result.value() < 0) != (right < 0)))
+        result = result.value() + right;
+      break;
+    case DimensionExpr::Op::Min:
+      result = std::min(left, right);
+      break;
+    case DimensionExpr::Op::Max:
+      result = std::max(left, right);
+      break;
+    case DimensionExpr::Op::Literal:
+    case DimensionExpr::Op::ConstSymbol:
+    case DimensionExpr::Op::RuntimeSymbol:
+      break;
+    }
+    if (!result)
+      return result.status();
+    stack.push_back(result.value());
+  }
+  if (stack.size() != 1)
+    return invalid(std::string(location) + " has a malformed postfix expression");
+  return stack.back();
+}
+
 Status observe_dimension(const KernelDef& definition, const DimensionDef& dimension, std::int64_t observed,
                          SpecializationValues& values, std::vector<SpecializationValue>& anonymous,
                          std::map<std::string, std::int64_t, std::less<>>& dynamic_values, std::string_view location) {
@@ -155,10 +299,19 @@ Status observe_dimension(const KernelDef& definition, const DimensionDef& dimens
 }
 
 Status validate_dimension(const DimensionDef& dimension, std::int64_t observed, const SpecializationValues& values,
+                          const std::map<std::string, std::int64_t, std::less<>>& runtime_values,
                           std::string_view location) {
   if (dimension.kind() == DimensionDef::Kind::Fixed) {
     if (observed != dimension.fixed_value())
       return invalid(std::string(location) + " must equal " + std::to_string(dimension.fixed_value()));
+    return Status::success();
+  }
+  if (dimension.kind() == DimensionDef::Kind::Expression) {
+    auto expected = evaluate_dimension_expr(dimension.expression(), values, runtime_values, location);
+    if (!expected)
+      return expected.status();
+    if (observed != expected.value())
+      return invalid(std::string(location) + " must equal " + std::to_string(expected.value()));
     return Status::success();
   }
   if (dimension.kind() != DimensionDef::Kind::Dynamic)
@@ -184,6 +337,27 @@ Status validate_dimension(const DimensionDef& dimension, std::int64_t observed, 
 }
 
 } // namespace
+
+DimensionExpr DimensionExpr::literal(std::int64_t value) {
+  return DimensionExpr({Node{.op = Op::Literal, .value = value}});
+}
+
+DimensionExpr DimensionExpr::const_symbol(std::string symbol) {
+  return DimensionExpr({Node{.op = Op::ConstSymbol, .symbol = std::move(symbol)}});
+}
+
+DimensionExpr DimensionExpr::runtime_symbol(std::string symbol) {
+  return DimensionExpr({Node{.op = Op::RuntimeSymbol, .symbol = std::move(symbol)}});
+}
+
+DimensionExpr DimensionExpr::binary(Op op, DimensionExpr left, DimensionExpr right) {
+  std::vector<Node> nodes;
+  nodes.reserve(left.nodes_.size() + right.nodes_.size() + 1);
+  nodes.insert(nodes.end(), std::make_move_iterator(left.nodes_.begin()), std::make_move_iterator(left.nodes_.end()));
+  nodes.insert(nodes.end(), std::make_move_iterator(right.nodes_.begin()), std::make_move_iterator(right.nodes_.end()));
+  nodes.push_back(Node{.op = op});
+  return DimensionExpr(std::move(nodes));
+}
 
 DimensionDef::DimensionDef(std::string symbol)
   : kind_(Kind::Symbol)
@@ -216,6 +390,12 @@ DimensionDef DimensionDef::any() {
   return dynamic();
 }
 
+DimensionDef DimensionDef::expression(DimensionExpr expression) {
+  DimensionDef result(Kind::Expression);
+  result.expression_ = std::move(expression);
+  return result;
+}
+
 KernelDef::KernelDef(std::string name, std::vector<KernelParameterDef> parameters,
                      std::map<std::string, SpecializationType, std::less<>> values)
   : name_(std::move(name))
@@ -228,6 +408,7 @@ Status KernelDef::validate() const {
     return invalid("kernel definition name must not be empty");
   std::set<std::string, std::less<>> parameter_names;
   std::map<std::string, std::string, std::less<>> dynamic_symbols;
+  std::set<std::string, std::less<>> referenced_runtime_symbols;
   for (const auto& parameter : parameters_) {
     const auto& parameter_name =
       std::visit([](const auto& item) -> const std::string& { return item.name; }, parameter);
@@ -291,6 +472,12 @@ Status KernelDef::validate() const {
                 return invalid("runtime dimension symbol '" + std::string(dimension.symbol()) +
                                "' has conflicting Dynamic declarations");
             }
+          } else if (dimension.kind() == DimensionDef::Kind::Expression) {
+            if (auto status = validate_dimension_expr(*this, dimension.expression(), location); !status.ok())
+              return status;
+            for (const auto& node : dimension.expression().nodes())
+              if (node.op == DimensionExpr::Op::RuntimeSymbol)
+                referenced_runtime_symbols.insert(node.symbol);
           }
         }
         return Status::success();
@@ -314,6 +501,9 @@ Status KernelDef::validate() const {
     if (!identifier(name))
       return invalid("specialization value '" + name + "' is not a valid C++ identifier");
   }
+  for (const auto& name : referenced_runtime_symbols)
+    if (!dynamic_symbols.contains(name))
+      return invalid("dimension expression references undeclared runtime symbol '" + name + "'");
   return Status::success();
 }
 
@@ -333,6 +523,18 @@ std::string KernelDef::canonical() const {
       return "D" + (value.symbol().empty() ? std::string{} : "@" + std::string(value.symbol())) + "(" +
              expression(value.alignment()) + "," + expression(value.lower_bound()) + "," +
              expression(value.upper_bound()) + ")";
+    case DimensionDef::Kind::Expression: {
+      std::string result = "E(";
+      for (const auto& node : value.expression().nodes()) {
+        result += std::to_string(static_cast<int>(node.op));
+        if (node.op == DimensionExpr::Op::Literal)
+          result += "#" + std::to_string(node.value);
+        else if (node.op == DimensionExpr::Op::ConstSymbol || node.op == DimensionExpr::Op::RuntimeSymbol)
+          result += "@" + node.symbol;
+        result += ',';
+      }
+      return result + ")";
+    }
     }
     return std::string("?");
   };
@@ -498,11 +700,11 @@ Result<BoundKernel> bind_kernel_call(const KernelDef& definition, const KernelCa
       if (tensor_def->dtype.dtype() && tensor.dtype != *tensor_def->dtype.dtype())
         return invalid("tensor '" + tensor_def->name + "' has the wrong dtype");
       for (std::size_t axis = 0; axis < tensor.sizes.size(); ++axis) {
-        auto status = validate_dimension(tensor_def->shape[axis], tensor.sizes[axis], values,
+        auto status = validate_dimension(tensor_def->shape[axis], tensor.sizes[axis], values, dynamic_values,
                                          "tensor '" + tensor_def->name + "' shape[" + std::to_string(axis) + "]");
         if (!status.ok())
           return status;
-        status = validate_dimension(tensor_def->strides[axis], tensor.strides[axis], values,
+        status = validate_dimension(tensor_def->strides[axis], tensor.strides[axis], values, dynamic_values,
                                     "tensor '" + tensor_def->name + "' stride[" + std::to_string(axis) + "]");
         if (!status.ok())
           return status;

@@ -143,6 +143,9 @@ std::size_t dtype_size(DType dtype) {
  *
  * Keeping the Python owner here guarantees that storage remains alive for every
  * workspace query and synchronous invocation made through PyArgumentMetadata.
+ * Element-aligned signed strides are preserved, including overlapping views;
+ * the ndarray remains responsible for proving that its reachable storage is
+ * valid.
  */
 class PyTensorView {
 public:
@@ -157,10 +160,6 @@ public:
     if (writable && !numpy_array.writeable()) {
       throw py::value_error("a writable vecops TensorView requires a writable NumPy ndarray");
     }
-    if (writable && (numpy_array.flags() & py::array::c_style) == 0) {
-      throw py::value_error("a writable vecops TensorView requires a C-contiguous NumPy ndarray");
-    }
-
     const auto info = numpy_array.request();
     if (info.itemsize <= 0) {
       throw py::value_error("NumPy ndarray has an invalid element size");
@@ -178,13 +177,10 @@ public:
     view_.strides.reserve(static_cast<std::size_t>(info.ndim));
     for (py::ssize_t axis = 0; axis < info.ndim; ++axis) {
       const auto byte_stride = info.strides[static_cast<std::size_t>(axis)];
-      if (byte_stride < 0 || byte_stride % info.itemsize != 0) {
-        throw py::value_error("vecops does not support negative or non-element-aligned NumPy strides");
+      if (byte_stride % info.itemsize != 0) {
+        throw py::value_error("vecops does not support non-element-aligned NumPy strides");
       }
       const auto element_stride = byte_stride / info.itemsize;
-      if (writable && info.shape[static_cast<std::size_t>(axis)] > 1 && element_stride == 0) {
-        throw py::value_error("a writable vecops TensorView cannot have overlapping broadcast strides");
-      }
       view_.sizes.push_back(info.shape[static_cast<std::size_t>(axis)]);
       view_.strides.push_back(element_stride);
     }
@@ -1486,7 +1482,7 @@ Most applications should use :mod:`vecops`, whose Python wrappers normalize
 dtypes, derive schemas, and own framework integration. This module mirrors C++
 value types for diagnostics, explicit build control, and wrapper implementation;
 its constructor-level interfaces intentionally expose native concepts.)doc";
-  module.attr("build_api_version") = 6;
+  module.attr("build_api_version") = 7;
   module.def("flush_subnormals_supported", &vecops::execution::flush_subnormals_supported,
              "Whether this build can set hardware subnormal flushing.");
   module.def("current_thread_flush_subnormals",
@@ -1600,6 +1596,39 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
   module.attr("ConstInt") = py::cast(vecops::runtime::SpecializationType::ConstInt);
   module.attr("DTypeValue") = py::cast(vecops::runtime::SpecializationType::DType);
 
+  using DimensionExpr = vecops::runtime::DimensionExpr;
+  py::class_<DimensionExpr>(module, "DimensionExpr", "Postfix integer expression for exact tensor dimensions.")
+    .def_static("literal", &DimensionExpr::literal, py::arg("value"))
+    .def_static("const_symbol", &DimensionExpr::const_symbol, py::arg("symbol"))
+    .def_static("runtime_symbol", &DimensionExpr::runtime_symbol, py::arg("symbol"))
+    .def_static("add",
+                [](DimensionExpr left, DimensionExpr right) {
+                  return DimensionExpr::binary(DimensionExpr::Op::Add, std::move(left), std::move(right));
+                })
+    .def_static("sub",
+                [](DimensionExpr left, DimensionExpr right) {
+                  return DimensionExpr::binary(DimensionExpr::Op::Sub, std::move(left), std::move(right));
+                })
+    .def_static("mul",
+                [](DimensionExpr left, DimensionExpr right) {
+                  return DimensionExpr::binary(DimensionExpr::Op::Mul, std::move(left), std::move(right));
+                })
+    .def_static("floordiv",
+                [](DimensionExpr left, DimensionExpr right) {
+                  return DimensionExpr::binary(DimensionExpr::Op::FloorDiv, std::move(left), std::move(right));
+                })
+    .def_static("mod",
+                [](DimensionExpr left, DimensionExpr right) {
+                  return DimensionExpr::binary(DimensionExpr::Op::Mod, std::move(left), std::move(right));
+                })
+    .def_static("minimum",
+                [](DimensionExpr left, DimensionExpr right) {
+                  return DimensionExpr::binary(DimensionExpr::Op::Min, std::move(left), std::move(right));
+                })
+    .def_static("maximum", [](DimensionExpr left, DimensionExpr right) {
+      return DimensionExpr::binary(DimensionExpr::Op::Max, std::move(left), std::move(right));
+    });
+
   py::class_<vecops::runtime::ConstExpr>(module, "ConstExpr",
                                          "Fixed integer or named ConstInt expression for Dynamic constraints.")
     .def(py::init<std::int64_t>())
@@ -1613,7 +1642,8 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
     .value("fixed", vecops::runtime::DimensionDef::Kind::Fixed)
     .value("symbol", vecops::runtime::DimensionDef::Kind::Symbol)
     .value("const", vecops::runtime::DimensionDef::Kind::Const)
-    .value("dynamic", vecops::runtime::DimensionDef::Kind::Dynamic);
+    .value("dynamic", vecops::runtime::DimensionDef::Kind::Dynamic)
+    .value("expression", vecops::runtime::DimensionDef::Kind::Expression);
 
   py::class_<vecops::runtime::DimensionDef>(module, "DimensionDef",
                                             "Raw C++ declarative dimension rule; prefer vecops.Dynamic publicly.")
@@ -1636,6 +1666,12 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
       py::arg("symbol"), py::arg("alignment") = 1, py::arg("lower_bound") = std::numeric_limits<std::int64_t>::min(),
       py::arg("upper_bound") = std::numeric_limits<std::int64_t>::max())
     .def_static("any", &vecops::runtime::DimensionDef::any)
+    .def_static(
+      "expression",
+      [](vecops::runtime::DimensionExpr expression) {
+        return vecops::runtime::DimensionDef::expression(std::move(expression));
+      },
+      py::arg("expression"))
     .def_property_readonly("kind", &vecops::runtime::DimensionDef::kind)
     .def_property_readonly("fixed_value", &vecops::runtime::DimensionDef::fixed_value)
     .def_property_readonly("symbol", &vecops::runtime::DimensionDef::symbol)

@@ -28,10 +28,13 @@ class Dynamic:
   upper: int | str = 2**63 - 1
 
 
-Dimension = int | str | type[Const] | Dynamic
+Dimension = int | str | type[Const] | Dynamic | Any
 
 
 def _dimension(value: Dimension, symbols: Mapping[str, Dynamic] | None = None) -> _C.DimensionDef:
+  lower = getattr(value, "_native_dimension", None)
+  if lower is not None:
+    return lower()
   if value is Const:
     return _C.DimensionDef.constant()
   if isinstance(value, Dynamic):
@@ -47,6 +50,10 @@ def _dimension(value: Dimension, symbols: Mapping[str, Dynamic] | None = None) -
 
 
 def _collect_dimension_symbols(value: Dimension, symbols: dict[str, type]) -> None:
+  collect = getattr(value, "_collect_symbols", None)
+  if collect is not None:
+    collect(symbols)
+    return
   if isinstance(value, str):
     symbols.setdefault(value, Const)
   elif isinstance(value, Dynamic):
@@ -275,6 +282,9 @@ class KernelDef:
             used_runtime_symbols.add(item)
           else:
             _collect_dimension_symbols(item, inferred)
+            runtime_symbols = getattr(item, "_runtime_symbols", None)
+            if runtime_symbols is not None:
+              used_runtime_symbols.update(runtime_symbols())
         if isinstance(parameter.dtype, str):
           if parameter.dtype in declared_symbols:
             raise TypeError(

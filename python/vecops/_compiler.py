@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import _C
 
-_BUILD_API_VERSION = 6
+_BUILD_API_VERSION = 7
 
 
 def require_native_build_api() -> None:
