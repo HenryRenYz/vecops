@@ -110,10 +110,9 @@ or spell those dependencies themselves.
 `vecops.language` (`import vecops.language as T`) is the Python
 metaprogramming frontend. Source kernels use `T.jit`, `T.template`, and Python
 dimension expressions. The old signature-derived decorator and string tensor
-annotation modules have been removed. A future
-Python DSL backend can consume the same captured `TemplateFunction`; the
-current implementation requires `T.template(source=...)` and forwards to the
-source file's `__kernel__`.
+annotation modules have been removed. `T.template(source=...)` forwards to the
+source file's `__kernel__`; omitting `source` parses the function body as a
+typed Python kernel DSL and emits CPU C++ using public vector APIs.
 
 ```python
 import vecops
@@ -182,6 +181,181 @@ The resulting requests use the existing `vecops.compile_batch()` shared CMake
 build graph, so distinct captured configurations remain distinct targets while
 duplicates are removed. This is the supported batch-compilation boundary for
 the first migration stage.
+
+### Source-less vector kernels
+
+```python
+@T.jit(out_idx=[1])
+def softmax(M, N, dtype):
+  @T.template
+  def kernel(A: T.Tensor((M, N), dtype=dtype),
+             C: T.Tensor((M, N), dtype=dtype)):
+    for row in T.serial(M):
+      x = T.load(A[row, :], dtype=T.float32)
+      T.store(C[row, :], T.softmax(x))
+  return kernel
+```
+
+The outer factory runs ordinary Python. The inner body is **parsed, not
+executed**: dynamic `if`/`while` become runtime control flow; constants are
+partially evaluated. `range`/`T.serial`, nested `T.grid`, constant `T.unroll`,
+scalar loop-carried variables, `break`/`continue`, assertions and source-located
+errors are supported. Branch-carried scalar variables must be initialized
+before a dynamic branch; tile/view rebinding across dynamic branches or loops
+requires explicit `T.alloc` storage. An unrolled region cannot use
+`break`/`continue`. Kernels return through output tensors.
+
+`T.func` helpers are source-parsed and inlined, including their immutable
+captures in cache identity. Arbitrary host calls, mutable captures, exception
+handling, generators and optional DSL tensor operands are rejected. A source
+template's body remains ignored as before. Source-less definitions require
+inspectable, file-backed Python source; they are not bytecode interpreters.
+DSL tensor annotations require an explicit dtype. Assertions remain checked in
+release builds; scalar indexing still requires valid caller-provided bounds.
+
+`T.tile(A)` and positive-step slices describe memory regions; negative physical
+strides are allowed. `T.transpose(A)`/`A.T` change address mappings and currently
+use strided gather/scatter (TODO: dedicated transpose kernels).
+`T.reshape` requires a dense view and preserves element count. Shapes broadcast
+statically where possible; unknown relations are checked at runtime. A source
+extent must equal the destination extent or be one; incompatible extents error.
+
+`T.Vector(dtype, N=...)` or `T.Vector(dtype, pow=...)` describes a tagged virtual
+vector. It is not limited by the C++ Vec maximum power. `T.load(A,
+vector=descriptor)` clips its logical extent to the region; `T.lanes(descriptor)`
+reports the target-relative extent. Large extents strip-mine into native
+legalized ScalableTag groups. Negative powers must yield an integral, positive lane count.
+Conversions retain the logical lane extent and its original scalable dtype
+basis, rather than recomputing the extent from the destination dtype.
+
+Loads and stores independently choose computation/storage dtype and fuse to
+`vec::load_convert`/`vec::store_convert`; fp16, bf16, fp32 and fp64 storage are
+supported. Use fp32/fp64 loads when wider accumulation is needed. `T.load(view,
+mask=predicate, other=0)` never reads masked-off lanes; `T.store(view, value,
+mask=predicate)` preserves masked-off output locations. Tail masks always
+filter memory accesses. Transpose/noncontiguous views do not force full buffers.
+Intermediate conversion rounding is preserved, even when the final dtype
+matches the input dtype.
+
+Arithmetic, comparison, predicate logic, `T.where`, `T.fma`, vector math and
+`T.reduce_add`, `T.reduce_min`, `T.reduce_max` reductions (all-region or one
+constant axis) pass through explicit Vector IR before lowering to public vec
+operations. Exponential, logarithm, reciprocal and reciprocal-square-root math
+accept `accuracy='strict'|'fast'|'estimate'` (not `sqrt`/`abs`); `T.exp_neg` and
+`T.exp2_neg` require nonpositive input (NaNs retain backend behavior). Reductions
+associate by native vector chunks and horizontal reductions, not Python scalar
+order. Results need not be bit-identical across targets.
+`T.min(a, b)` and `T.max(a, b)` are strictly elementwise; unary forms and the old
+`T.sum` spelling are not supported. Reductions and `T.serial` accept a positive,
+compile-time `unroll=` keyword (default 2, 1 disables expansion). `T.layernorm`
+and `T.softmax` forward their optional `unroll=` to their reductions.
+
+Unrolling copies each operation across iterations, not the complete body per
+iteration. Seven adjacent vector chunks group as 4+2+1, with powers P+2/P+1/P.
+Target `VEC_MAX_POW` and lane-preserving dtype rebind requirements limit merging;
+the C++ preprocessing alternatives keep generated sources portable to SVE.
+Oversized virtual vectors remain streamable, not forced into one native value.
+Nonadjacent reduction-axis copies retain distinct lane domains. Loop-carried
+scalar dependencies and break/continue retain ordered loops; alias-dependent
+serial iterations have a runtime ordered fallback. Tails are always guarded.
+
+Adjacent compatible, independent reductions with the same unroll count can
+share a traversal (currently up to two reductions). An independent elementwise
+side output can fuse into a reduction. A consumer needing the completed global
+reduction remains a later phase. Adjacent elementwise stores can share a vector
+traversal with runtime alias guards and a sequential fallback.
+
+`T.layernorm` and `T.softmax` are visible, rank-one DSL algorithms: centered
+variance and maximum-subtracted exponentials respectively. Affine/post-ops can
+be expressed directly before `T.store`. `T.layernorm(x, variance='moments')`
+explicitly selects the existing C++ operator's sum/sum-of-squares algorithm,
+allowing a fused reduction pass; it can suffer cancellation for large means and
+small variance. The default `variance='centered'` retains the more stable extra
+pass. Cheap expressions and nonescaping
+full-buffer scratch are forwarded; expensive expressions reused after a
+reduction may be cached based on native size. Inputs are not implicitly noalias:
+overlapping remaps and tile values retained across writes use conditional
+snapshots, while ordinary disjoint calls do not allocate snapshots. Writable
+region strides must pass a conservative non-overlap proof; repeated scatter
+locations are rejected, unlike source kernels which may define their own policy.
+
+The initial backend uses standard-library AST/IR and the existing compiler SDK,
+with no MLIR/TVM dependency. Generated sources are content-addressed below
+`cache_dir.parent / 'dsl-sources'`. `compiled.generated_source`,
+`compiled.kernel_ir`, and `compiled.source` expose diagnostics/artifacts.
+`cache-only` requires those pre-generated sources alongside the binary cache
+and never creates missing directories or discovers build tools.
+
+The architecture and explicitly deferred features are described in
+[new-dsl-design.md](internal/new-dsl-design.md). Reproducible single-thread norm
+comparisons are in `benchmarks/dsl_norm.py`.
+
+### Compiler passes
+
+`T.passes` exposes a named pass registry and `PassManager`. Kernel and vector
+stages have separate pipelines, deterministically ordered by `before`/`after`.
+Managers snapshot the registry; analyses and traces are local to a run.
+
+```python
+@T.passes.register_pass("my-analysis", before="fuse-reductions")
+def my_analysis(ir, context):
+  # context.analysis(name, compute, ir) caches a run-local analysis.
+  return T.passes.PassResult(ir, changed=False)
+
+compiled = T.compile(template, pass_options={"max_fused_reductions": 4})
+# Optional explicit selection: T.compile(template, pipeline=[...pass names...]).
+print(compiled.kernel_ir.pass_trace)
+print(compiled.vector_ir.regions)  # typed operations, copies, groupings, traces
+```
+
+The built-in kernel passes canonicalize converting memory, perform expression
+CSE, plan computation reuse, fuse reductions/reduction-side-outputs/elementwise
+stores, and expand independent serial operations. Vector passes create
+operation-major copies, coalesce groups and legalize dtype lane domains.
+Separate CPU passes split full chunks from masked tails, select wider automatic
+tile chunks for expensive math, and legalize multiword math into native-word
+calculations while preserving coalesced memory requests. Explicit Vector tags
+and logical unroll counts do not change. `pass_options` can override
+`cpu_full_chunks`/`cpu_wordwise_math` (bool), `cpu_math_chunk_pow` and
+`cpu_reduction_chunk_pow` (0/1/2, default 1; 0 disables the corresponding
+wider automatic chunk). Single-reduction regions can use a wider base to
+expose more accumulator chains; fused reductions already supply independent
+chains. These are tuning policies, not performance guarantees.
+Register plugins before factory elaboration, or call the existing factory
+`cache_clear()` when changing a pipeline after `T.jit` has cached a kernel.
+These passes do not reinterpret source-backed C++ kernels.
+
+### Internal organization
+
+Public imports remain under `vecops.language`: `compile.py` and `passes.py`
+are thin façades, while `jit.py`, `template.py`, `expr.py`, `types.py`,
+`dsl.py` and the small `library.py` retain their public roles.
+
+Compiler implementation lives in `language/_compiler/`: `frontend/` owns
+immutable AST/helper capture and parsing; `ir/` owns types, kernel/vector IR
+and traversal; `passes/` owns the registry and generic transforms;
+`lowering/` converts tile consumers to vector regions. `pipeline.py` is the
+single builtin-registration entry point and assembles registry snapshots.
+`driver.py` orchestrates compilation, with core-cache identity in `cache.py`.
+
+`backends/cpu/` owns CPU policy, schema adaptation, emission planning and
+`cpp/` source printing. Alias fallback, snapshot and axis-tail vector regions
+are prepared before emission: printing C++ never runs lowering or compiler
+passes. Unused alternatives are not included in the emitted-region diagnostics.
+Other backends may choose different IR/codegen/build adapters; they are not
+required to use the CPU vector-to-C++ pipeline. Only CPU is implemented today.
+`language/_runtime/` owns runtime binding, strided output allocation and lazy
+Torch bridge calls. These private package paths are not stable public APIs.
+
+The CPU emitter lowers reductions to result locals and ordinary lexical blocks,
+not capturing lambdas. This keeps invariant metadata/scalars visible to the C++
+optimizer. Scalar conditionals and short-circuit predicates keep reductions
+inside the selected branch; a reducing `while` condition is recomputed at the
+loop head, including after `continue`. Vector tails and conditional cache reads
+use explicitly typed Vec/Mask locals and `if`, including on sizeless SVE; common
+normalization kernels need no closures. An expression-only context such as a
+statement-producing `for` condition may still require a closure; every generated
+closure uses `VECOPS_INLINE_LAMBDA` from `CoreDefs.h`.
 
 
 ## Calls and precompilation

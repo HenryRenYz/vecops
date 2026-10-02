@@ -253,13 +253,14 @@ def test_template_compile_collection_preserves_distinct_captures(tmp_path: Path)
   assert result.prepared == 2
 
 
-def test_source_less_template_fails_only_at_compile() -> None:
+def test_source_less_template_compiles_a_scalar_body(tmp_path: Path) -> None:
   @T.template
   def kernel(value: int):
     pass
 
-  with pytest.raises(NotImplementedError, match="Python DSL"):
-    T.compile(kernel)
+  compiled = T.compile(kernel, compiler=_compiler(tmp_path))
+  assert "void __kernel__" in compiled.generated_source
+  compiled(3)
 
 
 def test_typing_optional_marks_a_template_tensor_optional(tmp_path: Path) -> None:

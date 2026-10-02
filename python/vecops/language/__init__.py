@@ -16,6 +16,12 @@ from .expr import (
 from .jit import jit
 from .template import TemplateFunction, template
 from .types import Tensor, TensorType
+from . import passes
+from ._compiler.pipeline import load_builtin_passes as _load_builtin_passes
+_load_builtin_passes()
+from .dsl import *
+from .dsl import __all__ as _dsl_exports
+from .._dtype import float16, bfloat16, float32, float64, int32, int64, bool_
 
 __all__ = [
   "Any",
@@ -37,3 +43,7 @@ __all__ = [
   "minimum",
   "template",
 ]
+__all__ += [*_dsl_exports, "float16", "bfloat16", "float32", "float64", "int32", "int64", "bool_"]
+from .library import layernorm, softmax
+__all__ += ["layernorm", "softmax"]
+__all__ += ["passes"]

@@ -13,6 +13,7 @@
 __pycache__/
 
 # ============= WIP =============
-/docs/internal
+/docs/internal/*
+!/docs/internal/new-dsl-design.md
 /benchmarks/**/*AB.md
 /benchmarks/**/MatmulCoverage.md

@@ -1,0 +1,239 @@
+"""C++ emission: memory."""
+from __future__ import annotations
+from .... import ir as I
+from ..capabilities import CPP_TYPES
+
+class MemoryEmitter:
+  def pointer(self, view, coordinates=()):
+    base = f"{view.storage}.data()"
+    offset = self.scalar(view.offset)
+    terms = [offset]
+    for coordinate, stride in zip(coordinates, view.strides):
+      terms.append(f"({coordinate}) * ({self.scalar(stride)})")
+    return f"({base} + ({' + '.join(terms)}))"
+
+
+  def coordinates(self, shape, root_shape, coords):
+    offset = len(root_shape) - len(shape)
+    if offset < 0:
+      raise TypeError("a higher-rank tile cannot broadcast to a lower-rank consumer")
+    result = []
+    for axis, extent in enumerate(shape):
+      coordinate = coords[offset + axis]
+      if I.constant(extent) == 1:
+        coordinate = "0"
+      elif not I.same_expr(extent, root_shape[offset + axis]) and I.constant(extent) is None:
+        coordinate = f"(({self.scalar(extent)}) == 1 ? 0 : ({coordinate}))"
+      result.append(coordinate)
+    return tuple(result)
+
+
+  def memory_options(self, mask, tag, root_shape, coords, active, axis):
+    if mask is None:
+      return f"vecops::vec::opt::first({active})", None
+    predicate = self.vector(mask, tag, root_shape, coords, active, axis)
+    name = self.unique("memory_mask")
+    self.line(f"auto {name} = vecops::vec::mask_and({tag}{{}}, vecops::vec::mwhilelt({tag}{{}}, 0, {active}), {predicate});")
+    return f"vecops::vec::opt::masked({name})", name
+
+
+  def store(self, statement, *, plan=None):
+    destination, value = statement.destination, statement.value
+    if not destination.shape:
+      if statement.mask is not None:
+        self.opening(f"if ({self.scalar(statement.mask)})")
+      self.line(f"*{self.pointer(destination)} = static_cast<{CPP_TYPES[destination.dtype]}>({self.scalar(value)});")
+      if statement.mask is not None:
+        self.close()
+      return
+    self.check_store(statement)
+    plan = plan or self.vector_ir.plans.get(id(statement))
+    if plan is None:
+      plan = self.prepared.store(statement)
+      self.emitted_regions.append(plan)
+    elif id(statement) not in self.vector_ir.plans:
+      self.emitted_regions.append(plan)
+    self.traverse_region(plan, lambda tags, coords, active, roots, state:
+                         self.write_effects(plan, tags, coords, active, roots))
+
+
+  def check_store(self, statement):
+    destination, value = statement.destination, statement.value
+    shape = ", ".join(self.scalar(v) for v in destination.shape)
+    strides = ", ".join(self.scalar(v) for v in destination.strides)
+    self.line(f'vecops_dsl::check_writable<{len(destination.shape)}>({{{shape}}}, {{{strides}}});')
+    for operand in (value, statement.mask):
+      if operand is None or not isinstance(operand.type, I.TileType):
+        continue
+      if len(operand.type.shape) > len(destination.shape):
+        raise TypeError("store source cannot have a higher rank than destination")
+      for source_extent, destination_extent in zip(reversed(operand.type.shape), reversed(destination.shape)):
+        if I.constant(source_extent) == 1 or I.same_expr(source_extent, destination_extent):
+          continue
+        if source_extent.op == destination_extent.op == "literal":
+          raise TypeError("store source does not broadcast to the destination shape")
+        self.line(f"vecops_dsl::check_broadcast({self.scalar(source_extent)}, {self.scalar(destination_extent)});")
+
+
+  def write_effects(self, region, tags, coordinates, active, roots):
+    effects = [effect for effect in region.effects if effect.kind == "store_convert"]
+    stores = tuple(effect.store for effect in effects)
+    values = [value for effect in effects for value in
+              ((roots[effect.value_root], roots[effect.mask_root]) if effect.mask_root >= 0 else (roots[effect.value_root],))]
+    self.write_roots(stores, tags, coordinates, active, values)
+
+
+  def write_roots(self, stores, tags, coordinates, active, roots):
+    index = 0
+    for statement in stores:
+      values = roots[index]
+      index += 1
+      masks = roots[index] if statement.mask is not None else None
+      if masks is not None:
+        index += 1
+      destination = statement.destination
+      value = statement.value
+      dtype = (value.args[0] if value.op == "cast" and value.type.dtype == statement.destination.dtype
+               else value).type.dtype
+      for slot, (base, coords, count) in enumerate(zip(tags, coordinates, active)):
+        tag = self.rebound_tag(dtype, base)
+        self.opening(f"if ({count} > 0)")
+        options = f"vecops::vec::opt::first({count})"
+        if masks is not None:
+          mask = I.Expr(statement.mask.type, "vector_ref", data=masks[slot]) if isinstance(statement.mask.type, I.TileType) else statement.mask
+          options, _ = self.memory_options(mask, tag, destination.shape, coords, count, len(destination.shape) - 1)
+        pointer = self.pointer(destination, coords)
+        if I.constant(destination.strides[-1]) == 1:
+          self.line(f"vecops::vec::store_convert({tag}{{}}, {pointer}, {values[slot]}, {options});")
+        else:
+          stride = self.scalar(destination.strides[-1])
+          self.opening(f"if (({stride}) == 1)")
+          self.line(f"vecops::vec::store_convert({tag}{{}}, {pointer}, {values[slot]}, {options});")
+          self.close()
+          self.opening("else")
+          self.line(f"vecops::vec::store_convert({tag}{{}}, {pointer}, {values[slot]}, {options}, vecops::vec::opt::strided({stride}));")
+          self.close()
+        self.close()
+
+
+  def expression_loads(self, block):
+    result = {}
+    for statement in block.statements:
+      if isinstance(statement, I.ReductionGroup):
+        result.update(self.expression_loads(I.Block([*statement.assignments, *statement.stores])))
+      if isinstance(statement, I.ElementwiseGroup):
+        result.update(self.expression_loads(I.Block(list(statement.stores))))
+      if isinstance(statement, I.UnrolledFor):
+        result.update(self.expression_loads(statement.copies))
+        result.update(self.expression_loads(statement.loop.body))
+      for value in (getattr(statement, "value", None), getattr(statement, "condition", None), getattr(statement, "mask", None)):
+        if isinstance(value, I.Expr):
+          for load in I.loads(value):
+            result[id(load)] = load
+      for name in ("body", "otherwise"):
+        child = getattr(statement, name, None)
+        if isinstance(child, I.Block):
+          result.update(self.expression_loads(child))
+    return result
+
+
+  def overlap(self, source, destination):
+    def span(view):
+      shape = ", ".join(self.scalar(v) for v in view.shape)
+      strides = ", ".join(self.scalar(v) for v in view.strides)
+      return f"vecops_dsl::span({self.pointer(view)}, {{{shape}}}, {{{strides}}}, sizeof({CPP_TYPES[view.dtype]}))"
+    return f"vecops_dsl::overlap({span(source)}, {span(destination)})"
+
+
+  def same_mapping(self, a, b):
+    if len(a.shape) != len(b.shape) or a.dtype != b.dtype:
+      return "false"
+    terms = [f"static_cast<const void*>({self.pointer(a)}) == static_cast<const void*>({self.pointer(b)})"]
+    terms += [f"({self.scalar(x)}) == ({self.scalar(y)})" for x, y in zip(a.shape, b.shape)]
+    terms += [f"({self.scalar(x)}) == ({self.scalar(y)})" for x, y in zip(a.strides, b.strides)]
+    return "(" + " && ".join(terms) + ")"
+
+
+  def snapshot(self, load, destination, must_preserve):
+    view = load.data
+    if not view.shape or (view.owned or destination.owned) and view.storage != destination.storage:
+      return
+    condition = self.unique("alias")
+    overlap = self.overlap(view, destination)
+    if not must_preserve:
+      overlap += f" && !{self.same_mapping(view, destination)}"
+    old = self.snapshots.get(id(load))
+    if old is not None:
+      overlap = f"({old[1]}) || ({overlap})"
+    nonempty = " && ".join(f"({self.scalar(n)}) > 0" for n in view.shape + destination.shape)
+    self.line(f"const bool {condition} = ({nonempty}) && ({overlap});")
+    name = self.unique("snapshot")
+    dtype = load.type.dtype
+    self.line(f"vecops_dsl::Buffer<{CPP_TYPES[dtype]}> {name};")
+    shape = view.shape
+    statement, plan = self.prepared.snapshot(load, name)
+    saved = statement.destination
+    self.opening(f"if ({condition})")
+    count = ", ".join(self.scalar(v) for v in shape)
+    self.line(f"{name}.resize(vecops_dsl::checked_shape({{{count}}}));")
+    self.store(statement, plan=plan)
+    self.close()
+    self.snapshots[id(load)] = (saved, condition)
+
+
+  def protect_store(self, statement, future):
+    current = {id(load): load for load in I.loads(statement.value)}
+    if statement.mask is not None:
+      current.update({id(load): load for load in I.loads(statement.mask)})
+    preserved = set(self.active_loads) & set(future)
+    for identity in preserved:
+      current[identity] = self.active_loads[identity]
+    for identity, load in current.items():
+      self.snapshot(load, statement.destination, identity in preserved)
+
+
+  def stores(self, block):
+    for statement in block.statements:
+      if isinstance(statement, I.Store):
+        yield statement
+      if isinstance(statement, (I.ReductionGroup, I.ElementwiseGroup)):
+        yield from statement.stores
+      if isinstance(statement, I.UnrolledFor):
+        yield from self.stores(statement.loop.body)
+      for name in ("body", "otherwise"):
+        child = getattr(statement, name, None)
+        if isinstance(child, I.Block):
+          yield from self.stores(child)
+
+
+  def protect_region(self, region, future):
+    dependencies = self.expression_loads(region)
+    dependencies.update(future)
+    destinations = {s.destination.storage for s in self.stores(region)}
+    for identity in set(self.active_loads) & set(dependencies):
+      for destination in destinations:
+        root = self.storage_views.get(destination)
+        if root is not None:
+          self.snapshot(self.active_loads[identity], root, True)
+
+
+  def used_storage(self, block):
+    result = set()
+    for statement in block.statements:
+      if isinstance(statement, I.ReductionGroup):
+        result.update(self.used_storage(I.Block([*statement.assignments, *statement.stores])))
+      if isinstance(statement, I.ElementwiseGroup):
+        result.update(self.used_storage(I.Block(list(statement.stores))))
+      if isinstance(statement, I.UnrolledFor):
+        result.update(self.used_storage(statement.copies))
+        result.update(self.used_storage(statement.loop.body))
+      for value in (getattr(statement, "value", None), getattr(statement, "condition", None), getattr(statement, "mask", None)):
+        if isinstance(value, I.Expr):
+          result.update(load.data.storage for load in I.loads(value))
+      if isinstance(statement, I.Store):
+        result.add(statement.destination.storage)
+      for name in ("body", "otherwise"):
+        child = getattr(statement, name, None)
+        if isinstance(child, I.Block):
+          result.update(self.used_storage(child))
+    return result

@@ -1,4 +1,4 @@
-"""Template declaration and capture for source-backed kernels."""
+"""Template declaration and independent source/DSL capture."""
 
 from __future__ import annotations
 
@@ -83,6 +83,7 @@ class TemplateIR:
   dependencies: tuple[Path, ...]
   recipe_id: str | None
   origin: str
+  body: Any = None
 
   def canonical(self):
     parameters = []
@@ -110,6 +111,7 @@ class TemplateIR:
       str(self.source) if self.source else None,
       tuple(map(str, self.dependencies)),
       self.recipe_id,
+      self.body.identity if self.body is not None else None,
     )
 
 
@@ -144,7 +146,7 @@ def template(
   recipe_id: str | None = None,
   dependencies=(),
 ):
-  """Capture a source-backed template function without executing its body."""
+  """Capture a kernel without executing it: C++ source or source-parsed DSL."""
   caller = inspect.currentframe().f_back
   local_scope = dict(caller.f_locals) if caller is not None else {}
 
@@ -205,6 +207,10 @@ def template(
     if missing:
       raise FileNotFoundError(f"template dependency does not exist: {missing[0]}")
     origin = inspect.getsourcefile(target) or target.__code__.co_filename
+    body = None
+    if resolved is None:
+      from ._compiler.frontend.capture import capture
+      body = capture(target, local_scope)
     ir = TemplateIR(
       f"{target.__module__}.{target.__qualname__}",
       signature,
@@ -214,6 +220,7 @@ def template(
       dependency_paths,
       recipe_id,
       origin,
+      body,
     )
     return TemplateFunction(target, ir, compiler)
 

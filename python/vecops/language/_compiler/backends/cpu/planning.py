@@ -1,0 +1,80 @@
+"""Prepare every CPU emission alternative before printing C++.
+
+Alias fallbacks, snapshots and axis-reduction tails used to run compiler passes
+inside the emitter. The catalog separates that work from source printing. Its
+unused alternatives are not reported as emitted regions; identifier binding
+for scratch buffers does not re-run lowering or optimization.
+"""
+from dataclasses import dataclass, fields, replace
+from types import MappingProxyType
+from ... import ir as I
+from ...lowering.tile_to_vector import lower_stores, lower_axis, lower_reduction
+
+
+@dataclass(frozen=True)
+class PreparedKernel:
+  vectors: object
+  stores: object
+  axes: object
+  snapshots: object
+  reductions: object
+
+  def store(self, statement):
+    return self.stores[id(statement)]
+
+  def axis(self, expression, unroll):
+    return self.axes[(id(expression), unroll)]
+
+  def reduction(self, expressions, stores=()):
+    return self.reductions[(tuple(map(id, expressions)), tuple(map(id, stores)))]
+
+  def snapshot(self, load, storage):
+    template = self.snapshots[id(load)]
+    original = template.effects[0].store
+    statement = replace(original, destination=replace(original.destination, storage=storage))
+    region = replace(template, effects=tuple(replace(effect, store=statement)
+                                             for effect in template.effects))
+    return statement, region
+
+
+def prepare(vectors):
+  """Lower all latent regions using the same per-compilation pass snapshot."""
+  manager = vectors.manager
+  stores, axes, snapshots, reductions = {}, {}, {}, {}
+  seen = set()
+
+  def visit(value):
+    if isinstance(value, (tuple, list)):
+      for item in value:
+        visit(item)
+      return
+    if not isinstance(value, I.Node) or id(value) in seen:
+      return
+    seen.add(id(value))
+    if isinstance(value, I.Store) and value.destination.shape and id(value) not in vectors.plans:
+      stores[id(value)] = lower_stores((value,), opaque=vectors.kernel.materializations, manager=manager)
+    if isinstance(value, I.Expr):
+      if value.op == "axis_reduce":
+        axis, operation, unroll = value.data
+        for count in dict.fromkeys((unroll, 1)):
+          axes[(id(value), count)] = lower_axis(value.args[0], value.type.dtype, axis,
+                                               operation, count, manager=manager)
+      elif value.op.startswith("reduce_") and id(value) not in vectors.plans:
+        reductions[((id(value),), ())] = lower_reduction((value,), manager=manager)
+      elif value.op == "load" and value.data.shape:
+        shape = value.data.shape
+        strides = [I.literal(1)] * len(shape)
+        for axis in reversed(range(len(shape) - 1)):
+          strides[axis] = I.binary("mul", strides[axis + 1], shape[axis + 1])
+        destination = I.View("snapshot", value.type.dtype, shape, tuple(strides),
+                             I.literal(0), owned=True)
+        snapshots[id(value)] = lower_stores((I.Store(destination, value),),
+                                             opaque=vectors.kernel.materializations, manager=manager)
+    for field in fields(value):
+      visit(getattr(value, field.name))
+
+  visit(vectors.kernel.body)
+  visit(tuple(vectors.kernel.bindings.values()))
+  # Registration changes after this point cannot change a source emission.
+  return PreparedKernel(vectors, *(MappingProxyType(plans) for plans in
+                                  (stores, axes, snapshots, reductions)))
