@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .._compiler import Compiler
-from .._dtype import Const as LegacyConst
-from .._dtype import DType as LegacyDType
+from .._dtype import Const as SchemaConst
+from .._dtype import DType as SchemaDType
 from .._dtype import normalize_dtype
 from .._operator import Operator
 from .._schema import KernelDef, TensorAccess, TensorDef, TensorMeta, ValueDef
@@ -86,10 +86,10 @@ def _specialization_environment(ir: TemplateIR):
     if not name:
       continue
     if isinstance(capture, Const):
-      kind = LegacyConst
+      kind = SchemaConst
       value = int(capture.value)
     elif isinstance(capture, DType):
-      kind = LegacyDType
+      kind = SchemaDType
       value = capture.value
     else:
       continue
@@ -334,7 +334,7 @@ class CompiledKernel:
       target = self._core.torch()
       specializations = tuple(
         _dtype_for_framework(self._core.specialization_values[name], "torch")
-        if self._core.definition.values[name] is LegacyDType
+        if self._core.definition.values[name] is SchemaDType
         else self._core.specialization_values[name]
         for name in self._core.specialization_order
       )
@@ -355,7 +355,7 @@ class CompiledKernel:
       )
     specializations = tuple(
       _dtype_for_framework(self._core.specialization_values[name], "torch")
-      if self._core.definition.values[name] is LegacyDType
+      if self._core.definition.values[name] is SchemaDType
       else self._core.specialization_values[name]
       for name in self._core.specialization_order
     )
@@ -444,7 +444,7 @@ class CompiledKernel:
     specializations = self._core.specialization_values
     if use_torch:
       specializations = {
-        name: _dtype_for_framework(value, "torch") if self._core.definition.values[name] is LegacyDType else value
+        name: _dtype_for_framework(value, "torch") if self._core.definition.values[name] is SchemaDType else value
         for name, value in specializations.items()
       }
     target(*ordered, **specializations)
@@ -487,4 +487,16 @@ def compile(
   return CompiledKernel(core, template_function)
 
 
-__all__ = ["CompiledKernel", "compile"]
+def compile_pending(*, parallelism: int | None = None) -> int:
+  """Build pending Torch template bridges together before model execution.
+
+  Template compilation declares bridges lazily. This hook materializes their
+  shared build graph; source-kernel specialization requests still use
+  :func:`vecops.compile_batch` or :func:`vecops.precompile`.
+  """
+  from .._schema_bridge import compile_pending_torch_bridges
+
+  return compile_pending_torch_bridges(parallelism=parallelism)
+
+
+__all__ = ["CompiledKernel", "compile", "compile_pending"]

@@ -1,41 +1,16 @@
-"""End-to-end ordered dispatch through a generated mutable Torch bridge."""
+"""End-to-end language templates through a generated mutable Torch bridge."""
 
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 
-import numpy as np
 import pytest
 import torch
 import vecops
-import vecops.typing as vt
-
-_DYNAMIC_OUTPUT_STRIDES = "Dynamic<1,D,1048576> 1"
+import vecops.language as T
 
 
-@vecops.jit(source="../runtime/TestKernel.cpp")
-def float32_recipe(
-  input: vt.In(torch.float32)["B D", "stride_D 1"],
-  output: vt.Out(torch.float32)["B D", _DYNAMIC_OUTPUT_STRIDES],
-  factor: float = 2.0,
-  add_one: bool = False,
-  *,
-  ComputeType: vt.DType = torch.float32,
-) -> None: ...
-
-
-@vecops.jit(source="../runtime/TestKernel.cpp")
-def float64_recipe(
-  input: vt.In(np.float64)["B D", "stride_D 1"],
-  output: vt.Out(np.float64)["B D", _DYNAMIC_OUTPUT_STRIDES],
-  factor: float = 2.0,
-  add_one: bool = False,
-  *,
-  ComputeType: vt.DType = np.float64,
-) -> None: ...
-
-
-def test_generated_mutable_out_operator_and_ordered_dispatch(tmp_path: Path) -> None:
+def test_generated_mutable_out_operator_and_dtype_specialization(tmp_path: Path) -> None:
   compiler = vecops.Compiler(
     cache_mode="compile-only",
     build_dir=tmp_path / "kernels",
@@ -44,13 +19,23 @@ def test_generated_mutable_out_operator_and_ordered_dispatch(tmp_path: Path) -> 
     cxx=os.environ.get("CXX", "/usr/bin/g++"),
     jobs=2,
   )
-  function = vecops.ops.torch.register(
-    "vecops_generated_test::run",
-    [float32_recipe, float64_recipe],
-    compiler=compiler,
-    build_directory=tmp_path / "bridge",
-    return_outputs=True,
-  )
+  @T.jit(out_idx=[1], compiler=compiler)
+  def scale(B, D, stride_D, ComputeType):
+    @T.template(source="../runtime/TestKernel.cpp")
+    def kernel(
+      input: T.Tensor((B, D), (stride_D, 1), ComputeType),
+      output: T.Tensor((B, D), (T.dynamic(1, D, 1048576), 1), ComputeType),
+      factor: float = 2.0,
+      add_one: bool = False,
+    ):
+      pass
+    return kernel
+
+  def selected(value):
+    return scale(*value.shape, value.stride(0), value.dtype)
+
+  def function(value, destination, factor=2.0, add_one=False):
+    return selected(value).explicit_torch_function()(value, destination, factor, add_one)
 
   input = torch.arange(1, 9, dtype=torch.float64).reshape(2, 4)
 
@@ -79,10 +64,12 @@ def test_generated_mutable_out_operator_and_ordered_dispatch(tmp_path: Path) -> 
   assert precompiled.prepared == 1
   assert precompiled.graph is not None
   precompiled.graph.validate()
+  operation, specializations = selected(input).explicit_torch_binding()
+  qualified_name = operation._schema.name
   vecops_events = [
     event
     for event in precompiled.graph.events
-    if event.name == "vecops_generated_test::run"
+    if event.name == qualified_name
   ]
   assert len(vecops_events) == 2
   assert all(
@@ -134,17 +121,22 @@ def test_generated_mutable_out_operator_and_ordered_dispatch(tmp_path: Path) -> 
   invalid_output = torch.zeros((4, 2), dtype=torch.float64).T
   with pytest.raises(RuntimeError, match="stride"):
     function(input, invalid_output, 3.0, True)
-  assert vecops.ops.torch.vecops_generated_test.run is function
-  schema = torch._C._dispatch_find_schema_or_throw("vecops_generated_test::run", "").schema()
+  schema = torch._C._dispatch_find_schema_or_throw(qualified_name, "").schema()
   assert "Tensor(a!) output" in str(schema)
-  assert "-> Tensor" in str(schema)
+  assert str(schema).endswith("-> ()")
   meta_input = torch.empty((2, 4), dtype=torch.float64, device="meta")
   meta_output = torch.empty_like(meta_input)
   assert function(meta_input, meta_output, 3.0, True) is meta_output
-  assert torch._C._dispatch_has_kernel_for_dispatch_key("vecops_generated_test::run", "Meta")
+  assert torch._C._dispatch_has_kernel_for_dispatch_key(qualified_name, "Meta")
+
+  float32_input = input.float()
+  float32_output = torch.zeros_like(float32_input)
+  assert function(float32_input, float32_output, 3.0, True) is float32_output
+  torch.testing.assert_close(float32_output, float32_input * 3 + 1)
 
   def compiled_call(value, destination):
-    return function(value, destination, 3.0, True)
+    operation(value, destination, 3.0, True, *specializations)
+    return destination
 
   compiled = torch.compile(compiled_call, backend="eager", fullgraph=True)
   compiled_output = torch.zeros_like(input)

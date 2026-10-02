@@ -1,6 +1,6 @@
 """Tile-style Python metaprogramming frontend for vecops kernels."""
 
-from .compile import CompiledKernel, compile
+from .compile import CompiledKernel, compile, compile_pending
 from .expr import (
   Any,
   Const,
@@ -29,6 +29,7 @@ __all__ = [
   "TensorType",
   "any",
   "compile",
+  "compile_pending",
   "dynamic",
   "is_value",
   "jit",

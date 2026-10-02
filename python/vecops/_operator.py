@@ -1,4 +1,4 @@
-"""Public lazy runtime operators and ordered source-recipe groups."""
+"""Public lazy runtime operators used by the language compiler."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from ._schema import KernelDef, TensorDef, TensorMeta
 class Operator:
   """One declarative source kernel with cache-aware lazy artifact resolution.
 
-  This is the lower-level public equivalent of a :class:`JitKernel`: callers
-  provide a C++ source path and :class:`KernelDef` directly.  Construction
+  The language compiler or expert callers provide a C++ source path and
+  :class:`KernelDef` directly. Construction
   fingerprints source and builds native dispatch state, but it does not invoke
   CMake or allocate tensor storage.
   """
@@ -91,101 +91,4 @@ class Operator:
     self._native.prepare(_C.KernelCall(native_arguments, specializations))
 
 
-def _parameter_surface(parameter):
-  from ._schema import TensorDef, ValueDef
-
-  if isinstance(parameter, TensorDef):
-    return ("tensor", parameter.name, parameter.optional, parameter.access, len(parameter.shape))
-  if isinstance(parameter, ValueDef):
-    return (
-      "value",
-      parameter.name,
-      parameter.dtype,
-      parameter.has_default,
-      parameter.default if parameter.has_default else None,
-    )
-  raise TypeError(f"unsupported parameter {parameter!r}")
-
-
-class OperatorGroup:
-  """Ordered, C++-dispatched group of structurally compatible JIT recipes.
-
-  The first applicable recipe wins. Matching, artifact resolution, and fallback
-  on ``NotApplicable``/``NotFound`` happen in C++; Python is not in the hot
-  dispatch path. All recipes must expose the same public runtime parameters
-  and named specialization vocabulary.
-  """
-
-  def __init__(self, name: str, kernels, compiler: Compiler | None = None) -> None:
-    kernels = tuple(kernels)
-    if not kernels:
-      raise ValueError("an operator group requires at least one JIT kernel")
-    first_surface = tuple(_parameter_surface(item) for item in kernels[0].kernel_def.parameters)
-    first_values = kernels[0].kernel_def.values
-    for kernel in kernels[1:]:
-      if tuple(_parameter_surface(item) for item in kernel.kernel_def.parameters) != first_surface:
-        raise ValueError("ordered JIT recipes must have compatible public parameter structures")
-      if kernel.kernel_def.values != first_values:
-        raise ValueError("ordered JIT recipes must declare the same specialization values")
-    configured = [kernel.compiler for kernel in kernels if kernel.compiler is not None]
-    self.compiler = compiler or (configured[0] if configured else Compiler())
-    if any(item is not self.compiler for item in configured):
-      raise ValueError("ordered JIT recipes must use one shared Compiler")
-    self.name = name
-    self.kernels = kernels
-    self.kernel_def = kernels[0].kernel_def
-    sources = [kernel.source for kernel in kernels]
-    fingerprints = [hashlib.sha256(source.read_bytes()).hexdigest()[:16] for source in sources]
-    definitions = [kernel.kernel_def._native(name=name) for kernel in kernels]
-    recipe_ids = [
-      kernel.recipe_id or f"{kernel.__module__}.{kernel.__name__}:{digest}"
-      for kernel, digest in zip(kernels, fingerprints)
-    ]
-    defaults = [
-      {
-        key: normalize_dtype(value) if kernel.kernel_def.values[key] is DType else value
-        for key, value in kernel.specialization_defaults.items()
-      }
-      for kernel in kernels
-    ]
-    self._native = _C.Operator._group(
-      sources,
-      definitions,
-      self.compiler.native,
-      self.compiler.cache_mode,
-      self.compiler.cache_dir,
-      self.compiler.cache_namespace,
-      recipe_ids,
-      fingerprints,
-      defaults,
-    )
-
-  @property
-  def native(self):
-    """Return the grouped raw native operator used by generated wrappers."""
-    return self._native
-
-  def __call__(self, *args, **kwargs):
-    """Invoke the first recipe that can serve the supplied metadata."""
-    for symbol, kind in self.kernel_def.values.items():
-      if symbol in kwargs and kind is DType:
-        kwargs[symbol] = normalize_dtype(kwargs[symbol])
-    from ._precompile import maybe_collect_call
-
-    if maybe_collect_call(
-      self._native,
-      self.kernel_def._native(name=self.name),
-      args,
-      kwargs,
-      name=self.name,
-    ):
-      outputs = tuple(
-        argument
-        for argument, parameter in zip(args, self.kernel_def.parameters)
-        if isinstance(parameter, TensorDef) and parameter.output
-      )
-      return outputs[0] if len(outputs) == 1 else outputs
-    return self._native(*args, **kwargs)
-
-
-__all__ = ["Operator", "OperatorGroup"]
+__all__ = ["Operator"]

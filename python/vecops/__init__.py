@@ -2,7 +2,7 @@
 
 import os
 
-from . import _C, graph, ops, planner
+from . import _C, graph, planner
 
 if hasattr(_C, "MemorySystem"):
   from . import memory as memory
@@ -25,7 +25,6 @@ from ._dtype import (
   uint32,
   uint64,
 )
-from ._jit import JitKernel, jit
 from ._operator import Operator
 from ._precompile import (
   CompileRequest,
@@ -68,7 +67,6 @@ __all__ = [  # noqa: RUF022 - retain the established public API grouping
   "Const",
   "DType",
   "Dynamic",
-  "JitKernel",
   "KernelDef",
   "Operator",
   "PrecompileResult",
@@ -90,11 +88,9 @@ __all__ = [  # noqa: RUF022 - retain the established public API grouping
   "int32",
   "int64",
   "is_precompiling",
-  "jit",
   "normalize_dtype",
   "native_thread_pool_region",
   "graph",
-  "ops",
   "planner",
   "precompile",
   "set_flush_subnormals",

@@ -533,25 +533,6 @@ public:
     register_handle();
   }
 
-  PyOperator(std::vector<std::filesystem::path> kernel_files, std::vector<KernelDef> definitions,
-             std::shared_ptr<compiler::Compiler> compiler_instance, vecops::runtime::ArtifactCacheMode cache_mode,
-             std::filesystem::path cache_directory, std::string namespace_key, std::vector<std::string> recipe_ids,
-             std::vector<std::string> source_fingerprints,
-             std::vector<vecops::runtime::SpecializationValues> default_values) {
-    if (kernel_files.empty() || kernel_files.size() != definitions.size() || kernel_files.size() != recipe_ids.size() ||
-        kernel_files.size() != source_fingerprints.size() || kernel_files.size() != default_values.size())
-      throw py::value_error("operator recipe lists must be non-empty and have equal lengths");
-    definition_ = std::make_shared<KernelDef>(definitions.front());
-    state_ = std::make_shared<State>();
-    for (std::size_t index = 0; index < kernel_files.size(); ++index) {
-      auto definition = std::make_shared<KernelDef>(std::move(definitions[index]));
-      add_operator(std::move(kernel_files[index]), std::move(definition), compiler_instance, cache_mode,
-                   cache_directory, namespace_key, std::move(recipe_ids[index]), std::move(source_fingerprints[index]),
-                   std::move(default_values[index]));
-    }
-    register_handle();
-  }
-
   ~PyOperator() {
     std::lock_guard lock(operator_registry_mutex);
     operator_registry.erase(handle_);
@@ -1979,25 +1960,6 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
          py::arg("cache_mode") = vecops::runtime::ArtifactCacheMode::CacheOnly,
          py::arg("cache_directory") = std::filesystem::path{}, py::arg("namespace_key") = std::string{},
          py::arg("recipe_id") = std::string("source-kernel-v1"), py::arg("source_fingerprint") = std::string{})
-    .def_static(
-      "_group",
-      [](std::vector<std::filesystem::path> kernel_files, std::vector<KernelDef> definitions,
-         std::shared_ptr<compiler::Compiler> compiler_instance, vecops::runtime::ArtifactCacheMode cache_mode,
-         std::filesystem::path cache_directory, std::string namespace_key, std::vector<std::string> recipe_ids,
-         std::vector<std::string> source_fingerprints, std::vector<py::dict> defaults) {
-        std::vector<vecops::runtime::SpecializationValues> default_values;
-        default_values.reserve(defaults.size());
-        for (auto& item : defaults)
-          default_values.push_back(specialization_values(std::move(item)));
-        return std::make_unique<PyOperator>(std::move(kernel_files), std::move(definitions),
-                                            std::move(compiler_instance), cache_mode, std::move(cache_directory),
-                                            std::move(namespace_key), std::move(recipe_ids),
-                                            std::move(source_fingerprints), std::move(default_values));
-      },
-      py::arg("kernel_files"), py::arg("kernel_defs"), py::arg("compiler"), py::arg("cache_mode"),
-      py::arg("cache_directory"), py::arg("namespace_key"), py::arg("recipe_ids"), py::arg("source_fingerprints"),
-      py::arg("default_values"),
-      "Create an ordered native group. This is an internal primitive for framework registration.")
     .def_property_readonly("_handle", &PyOperator::handle)
     .def(
       "invoke",

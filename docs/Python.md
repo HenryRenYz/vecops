@@ -1,8 +1,9 @@
 # Python JIT API
 
 The public Python API is implemented above the low-level `vecops._C` pybind11
-module. Applications should use the classes and functions exported by
-`vecops`; `_C` is an expert/debugging escape hatch and mirrors C++ types
+module. Applications use `vecops.language` for kernel templates and the
+classes and functions exported by `vecops` for runtime services; `_C` is an
+expert/debugging escape hatch and mirrors C++ types
 without Python convenience behavior.
 
 Importing `vecops` does not import NumPy or Torch. Dtype conversion recognizes
@@ -106,10 +107,10 @@ or spell those dependencies themselves.
 
 ## Expression-based language frontend
 
-`vecops.language` (`import vecops.language as T`) is the new Python
-metaprogramming frontend. It coexists with the signature-derived `vecops.jit`
-API below: existing declarations continue to work, while new source kernels
-should use `T.jit`, `T.template`, and Python dimension expressions. A future
+`vecops.language` (`import vecops.language as T`) is the Python
+metaprogramming frontend. Source kernels use `T.jit`, `T.template`, and Python
+dimension expressions. The old signature-derived decorator and string tensor
+annotation modules have been removed. A future
 Python DSL backend can consume the same captured `TemplateFunction`; the
 current implementation requires `T.template(source=...)` and forwards to the
 source file's `__kernel__`.
@@ -182,111 +183,21 @@ build graph, so distinct captured configurations remain distinct targets while
 duplicates are removed. This is the supported batch-compilation boundary for
 the first migration stage.
 
-## Signature-derived recipes
-
-`@vecops.jit` reads a declaration signature and returns a lazy `JitKernel`.
-Decoration validates the schema but does not run a compiler. A relative source
-path is resolved against the Python file defining the decorated function;
-interactive definitions must use an absolute path or `source_root`.
-
-```python
-import vecops
-import vecops.typing as vt
-
-@vecops.jit(
-  source="kernels/scale.cpp",
-  compiler=compiler,
-  symbols={"B": vt.Dynamic(lower=0)},
-)
-def scale(
-  input: vt.In(vecops.float32)["B D", "stride_D 1"],
-  output: vt.Out()["B D", "Dynamic<1,D,1048576> 1"],
-  factor: float = 2.0,
-  *,
-  ComputeType: vt.DType = vecops.float32,
-) -> None:
-  ...
-```
-
-Positional and positional-or-keyword parameters become ordered kernel
-parameters. `bool`, `int`, and `float` scalar annotations map to ABI bool,
-int64, and float64. Keyword-only parameters must use `vt.Const` or `vt.DType`
-and become specialization values instead of runtime scalar parameters.
-
-Tensor access is explicit:
-
-- `vt.In(dtype)` requires read access and gives `__kernel__` a const tensor;
-- `vt.Out(dtype)` requires write access and is caller-allocated;
-- `vt.InOut(dtype)` requires read/write access and is mutable;
-- omitting `dtype` creates an anonymous dtype specialization;
-- a string dtype names a dtype specialization symbol.
-
-Concrete dtype inputs accept `vecops.float32`, `np.float32`,
-`np.dtype("float32")`, and `torch.float32` without making either framework a
-base dependency.
-
-## Dimension strings
-
-Annotations accept a shape string and an optional stride string. Omitting
-strides produces one anonymous `Const` stride per axis.
-
-```text
-"B N"                              named Const dimensions by default
-"32 N"                             fixed and named dimensions
-"Const 1"                          anonymous Const and fixed stride
-"Dynamic N"                        unconstrained runtime dimension
-"Dynamic<8,1,MaxB> N"              aligned/bounded runtime dimension
-"Dynamic<1,N,1048576> 1"           symbolic lower bound
-```
-
-In this legacy annotation grammar, every symbol referenced by a shape, stride, dtype, or Dynamic constraint is
-automatically added to the `KernelDef` with the correct kind. Dynamic
-alignment and bound symbols must be Const values. Arithmetic expressions are
-not part of this string grammar; use `vecops.language` for Python expressions.
-
-The optional `symbols` mapping overrides the default interpretation of a
-dimension identifier. Mapping `"B"` to `vt.Dynamic(lower=0)` makes every `B`
-occurrence a named runtime dimension. Repeated occurrences must agree, but the
-observed B does not enter the specialization key. Generated C++ exposes
-`spec::B` as a Meta type alias rather than a constexpr value.
-
-## Runtime tensor signatures
-
-`vt.Tensor` reuses the dtype and dimension parser for framework-neutral eager
-validation. It accepts loaded Torch tensors, NumPy arrays, and
-`vecops.TensorMeta` without importing either framework. Omitting dtype or
-strides leaves that property unconstrained.
-
-```python
-@vt.check_tensors(symbols={"B": vt.Dynamic(lower=0)})
-def transition(
-  act: vt.Tensor(vecops.bfloat16)["*B N C"],
-  first_weight: vt.Tensor(vecops.bfloat16)["C 2*M"],
-  second_weight: vt.Tensor(vecops.bfloat16)["M C"],
-):
-  ...
-```
-
-The runtime-only `*B` token binds B to the product of zero or more leading
-dimensions, and `2*M`/`M*2` checks a positive integer multiple of an already
-inferable symbol. These forms deliberately do not lower into a JIT KernelDef;
-JIT annotations retain the non-arithmetic grammar above. Tensor validation is
-skipped while Torch Dynamo traces; the registered operator still validates
-its canonical KernelDef metadata when the graph executes.
 
 ## Calls and precompilation
 
-Calling a `JitKernel` binds metadata, resolves the ordered recipe, loads or
-compiles a cache miss, and invokes the caller-provided outputs:
+Calling a compiled template binds metadata, resolves its specialization,
+loads or compiles a cache miss, and invokes the source kernel:
 
 ```python
-scale(input, output, 3.0, ComputeType=vecops.float32)
+kernel = scale(32, 1024, 1024, vecops.float32)
+kernel(input, output, 3.0)
 ```
 
 Use `TensorMeta` to compile without allocating tensor storage:
 
 ```python
-scale.compile_for(
+kernel.compile_for(
   vecops.TensorMeta((32, 1024), dtype=vecops.float32),
   vecops.TensorMeta(
     (32, 1024),
@@ -483,38 +394,25 @@ never receives an unnecessary HBM-to-DDR writeback.
 
 ## Framework registration
 
-A qualified framework name and ordered recipe sequence create one logical
-operator. Candidate matching and invocation occur in C++, not through a Python
-dispatch callback.
+Compiled templates select NumPy execution or a generated Torch bridge from
+the runtime tensor arguments. Torch bridge tasks are content-addressed and
+compiled on the first real call or at the end of `vecops.precompile()`.
+Use `T.compile_pending(parallelism=N)` to materialize all declared bridges
+in a shared build graph before execution.
 
-```python
-run = vecops.ops.torch.register(
-  "my_library::scale",
-  [float32_recipe, float64_recipe],
-  compiler=compiler,
-)
-```
+The generated Torch schema marks output/inout tensors mutable and returns
+`()`. The Python callable returns the original output objects. CPU and Meta
+implementations support fake tracing and model compilation.
+`CompiledKernel.explicit_torch_function()`
+exposes an explicit-output callable with positional specialization values for
+hot paths. After an invocation or precompile has prepared its bridge,
+`explicit_torch_binding()` returns the raw Torch operator and immutable bound
+specialization tuple for graph capture.
 
-Registration only declares a content-addressed bridge task. Call
-`vecops.ops.torch.compile_pending(parallelism=N)` to build all pending bridges
-explicitly; otherwise the first real wrapper call materializes the current
-pending set. `vecops.precompile()` also materializes bridges after its
-storage-free model trace, before returning to ordinary execution.
-
-Torch's internal schema marks `Out`/`InOut` tensors mutable and returns `()` by
-default. `register(..., return_outputs=True)` additionally gives the internal
-op unannotated Tensor returns for older TorchInductor custom-op wrappers that
-reject void results. Mutation remains declared on the caller-owned arguments;
-the internal return is an implementation signal and the public wrapper always
-returns the original output tensor objects. Generated bridges register CPU and
-Meta implementations, allowing the mutable wrapper to participate in
-`torch.compile`; the internal `torch.ops` name is not the public vecops calling
-convention. At load time vecops supplies both the process-local operator handle
-and the current `_C` ABI entry-point address. The bridge therefore has no
-link-time dependency on a particular `_C` path and can be reused by compatible
-installations while still entering the correct process-local registry.
-`VECOPS_TORCH_BRIDGE_DIR` may place this stable registration cache separately
-from the kernel artifact root selected by `VECOPS_CACHE_DIR`.
+At load time vecops supplies the process-local operator handle and current
+`_C` ABI entry-point address. The bridge has no link-time dependency on a
+particular `_C` path. `VECOPS_TORCH_BRIDGE_DIR` may place its registration cache
+separately from the kernel artifact root selected by `VECOPS_CACHE_DIR`.
 
 Generated bridges are ordinary shared libraries rather than Python extension
 modules. They expose a small C setter for the process-local operator handle, so
@@ -546,15 +444,8 @@ provider lookup, and workspace revalidation. Calls with different metadata or
 explicit specializations automatically take the slow path and populate a new
 entry. `VECOPS_TORCH_PREPARED_CALL=0` disables this optimization for A/B tests.
 
-NumPy uses the same ordered registration model:
-
-```python
-run = vecops.ops.numpy.register(
-  "my_library::scale",
-  [float32_recipe, float64_recipe],
-  compiler=compiler,
-)
-```
+NumPy arrays use the compiled template directly, with caller-owned or
+automatically allocated outputs according to `out_idx`.
 
 ## Heterogeneous CPU memory
 

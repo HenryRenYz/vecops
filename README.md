@@ -197,37 +197,35 @@ runtime ABI is intentionally independent of CMake and Python frameworks.
 
 ## Python, NumPy, and Torch
 
-See [`docs/Python.md`](docs/Python.md) for the complete annotation grammar,
-cache/build directory policy, wheel/editable SDK layout, and registration API.
+See [`docs/Python.md`](docs/Python.md) for Python expressions, templates,
+cache/build directory policy, and wheel/editable SDK layout.
 
 The low-level pybind11 API lives under `vecops._C`. The public layer provides
-Python schema objects, automatic compiler/SDK discovery, dtype normalization,
-and signature-driven JIT recipes. Importing vecops does not import NumPy or
-Torch; their dtype values are recognized lazily when those frameworks are
-already loaded.
+Python schema objects, compiler/SDK discovery, dtype normalization, and
+source-backed templates. Importing vecops does not import NumPy or Torch;
+their dtype values are recognized lazily when already loaded.
 
 ```python
 import vecops
-import vecops.typing as vt
+import vecops.language as T
 
-@vecops.jit(source="kernels/scale.cpp")
-def scale(
-    input: vt.In(vecops.float32)["B D", "stride_D 1"],
-    output: vt.Out()["B D", "Dynamic<1,D,1048576> 1"],
-    factor: float = 2.0,
-    *,
-    ComputeType: vt.DType = vecops.float32,
-) -> None:
-    ...
+@T.jit(out_idx=[1])
+def scale(B, D, stride_D, ComputeType):
+    @T.template(source="kernels/scale.cpp")
+    def kernel(
+        input: T.Tensor((B, D), (stride_D, 1), vecops.float32),
+        output: T.Tensor((B, D), dtype=vecops.float32),
+        factor: float = 2.0,
+    ):
+        ComputeType
+    return kernel
 ```
 
-Bare identifiers in shape/stride strings become named Const values. `Const`
-means an anonymous compile-time value; `Dynamic` and
-`Dynamic<alignment,lower,upper>` retain runtime metadata. Omitting the stride
-string creates one anonymous Const stride per axis. Fixed dtypes accept vecops,
-NumPy, or Torch dtype values; an omitted dtype is anonymous and a string names
-a dtype symbol. Keyword-only `vt.Const`/`vt.DType` parameters are specialization
-values rather than runtime scalar arguments.
+Outer arguments are normalized from their actual values; annotations are
+ordinary hints. Dimensions and strides use Python expressions. Named
+`T.dynamic()` dimensions retain runtime metadata and constraints. Omitted
+strides currently use dense row-major layout. `out_idx` identifies output
+tensors, which callers may supply or let the compiled template allocate.
 
 `vecops.Compiler` defaults to a user cache directory, discovers explicit
 `CC`/`CXX` and CMake tools lazily, and uses the SDK bundled under
@@ -244,19 +242,13 @@ data-dependent checks or persistent caching during that trace;
 `use_real_tensors=True` is available for models that cannot run with fake
 tensors.
 
-`vecops.ops.torch.register()` declares one C++ dispatcher bridge for the
-logical operator. `vecops.ops.torch.compile_pending()` compiles all pending
-bridges as separate targets in one CMake graph; the first real call also
-provides a lazy fallback. Bridges are ordinary DSOs with a C handle setter and
-do not require `torch/extension.h`, pybind11, or `torch_python`. Their internal
-schema marks outputs as distinct mutable
-`Tensor(a!)` arguments and returns `()` by default. `return_outputs=True` adds
-internal Tensor returns for TorchInductor versions that reject void custom
-operators. The public `vecops.ops.torch.<library>.<name>` wrapper returns the
-caller's original output tensors in both modes. Per-shape kernel DSOs never
-use `TORCH_LIBRARY`, avoiding duplicate registration. Named specialization
-values are accepted as kwargs and omitted values are inferred by the same C++
-binder.
+Compiled templates declare their Torch bridge lazily.
+`T.compile_pending(parallelism=N)` builds all pending bridges in a shared
+CMake graph; the first real call and `vecops.precompile()` also materialize
+them. These bridges are ordinary DSOs with CPU/Meta implementations and mutable
+output arguments. The Python callable returns the original outputs. They do
+not require
+`torch/extension.h`, pybind11, or `torch_python`.
 
 ```sh
 python -m pip install '.[numpy,torch]'
@@ -267,21 +259,15 @@ their Python owners. Inputs may use positive element-aligned strides; writable
 outputs must be writable and C-contiguous. `Executable.invoke()` releases the
 GIL during the synchronous C++ execution path.
 
-Torch operators are registered from an `Operator` and its `KernelDef`; output
-storage is always supplied by the caller:
+Compiled templates accept Torch tensors directly:
 
 ```python
 import torch
-import vecops
 
-run = vecops.ops.torch.register("example::scale", [scale])
 x = torch.randn(4, 1024)
-out = torch.empty_like(x)
-run(x, out, ComputeType=torch.float32)
+kernel = scale(4, 1024, 1024, torch.float32)
+out = kernel(x)
 ```
 
-An ordered recipe list is dispatched inside `_C`, without a Python callback on
-the Torch execution path. Registration compiles one schema-specific CPU/Meta
-adapter against the installed Torch version. The internal `torch.ops` symbol is
-an implementation detail; public calls use the returned function or
-`vecops.ops.torch.<library>.<name>`.
+The generated bridge binds the specialization selected by `T.jit`; callers
+may pass explicit output tensors or omit them according to `out_idx`.

@@ -179,9 +179,9 @@ class Const(SymbolicInt):
 
   def _collect_symbols(self, symbols: dict[str, type]) -> None:
     if self.name:
-      from .._dtype import Const as LegacyConst
+      from .._dtype import Const as SchemaConst
 
-      symbols.setdefault(self.name, LegacyConst)
+      symbols.setdefault(self.name, SchemaConst)
 
   def _runtime_symbols(self) -> set[str]:
     return set()
@@ -257,11 +257,11 @@ class Dynamic(SymbolicInt):
     return _C.DimensionDef.dynamic(*arguments)
 
   def _collect_symbols(self, symbols: dict[str, type]) -> None:
-    from .._dtype import Const as LegacyConst
+    from .._dtype import Const as SchemaConst
 
     for value in (self.alignment, self.lower, self.upper):
       if isinstance(value, Const) and value.name:
-        symbols.setdefault(value.name, LegacyConst)
+        symbols.setdefault(value.name, SchemaConst)
 
   def _runtime_symbols(self) -> set[str]:
     return {self.name} if self.name else set()

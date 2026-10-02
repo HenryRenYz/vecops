@@ -597,7 +597,7 @@ def _public_wrapper(
     return outputs
 
   invoke.__name__ = name
-  invoke.__qualname__ = f"vecops.ops.torch.{library}.{name}"
+  invoke.__qualname__ = f"vecops._schema_bridge.{library}.{name}"
   invoke.__doc__ = f"Generated mutable vecops wrapper for {library}::{name}."
   invoke._vecops_operator = operator
   invoke._vecops_torch_op_holder = torch_op_holder

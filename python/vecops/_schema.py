@@ -170,7 +170,7 @@ class TensorMeta:
   """Storage-free tensor metadata used to bind or compile a specialization.
 
   When strides are omitted, this creates dense row-major element strides. It
-  is valid for :meth:`vecops.JitKernel.compile_for`, but cannot execute because
+  is valid for :meth:`vecops.Operator.compile_for`, but cannot execute because
   it intentionally contains no data pointer.
   """
 
