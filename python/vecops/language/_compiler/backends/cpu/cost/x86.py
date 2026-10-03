@@ -10,6 +10,11 @@ X86 = CostProfile(
   ),
   # Four independent output columns already hide the dot dependency. Extra
   # K banks add horizontal sums/register pressure on small raw GEMVs.
-  policies=(("gemv_k_unroll", 1),),
+  policies=(
+    ("gemv_k_unroll", 1),
+    ("amx_m_major_n_max", 128),
+    ("amx_m_major_ratio", 4),
+    ("amx_native_b_pack_min_m", 128),
+  ),
 )
 AVX512 = CostProfile("avx512")

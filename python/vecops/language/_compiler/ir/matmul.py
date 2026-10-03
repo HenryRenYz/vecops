@@ -46,6 +46,8 @@ class MatmulPlan:
   k_unroll: int = 2
   unblocked_bytes: int = 512 * 1024
   runtime_unblocked_bytes: int = 128 * 1024
+  amx_m_major: object | None = None
+  amx_native_b_pack_min_m: int = 0
   operands: tuple = ()
   amx_b_permutation: object | None = None
   dense_transposes: tuple = ()

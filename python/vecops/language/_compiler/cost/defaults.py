@@ -44,6 +44,9 @@ DEFAULT = CostProfile(
     ("gemv_k_unroll_long_min", 512),
     ("matmul_unblocked_bytes", 512 * 1024),
     ("matmul_runtime_unblocked_bytes", 128 * 1024),
+    ("amx_m_major_n_max", 0),
+    ("amx_m_major_ratio", 4),
+    ("amx_native_b_pack_min_m", 0),
     ("vector_register_budget", 24),
   ),
 )

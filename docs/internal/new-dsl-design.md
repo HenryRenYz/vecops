@@ -1195,3 +1195,159 @@ accumulate / bias-ReLU / SiLU / affine-input 的大组合补充验证各包含
 动态 family/full-tail/producer 分支造成的编译膨胀。后续应在保持
 强制内联和精简热路径的前提下，进一步提取/共用生成区域，并为
 动态融合冷编译时间建立独立回归预算。
+
+### 生成结果深审与第二轮优化（基线 4b3d738）
+
+这轮分开检查预打包 `T.dot`、预打包 library 和 raw library，避免将
+packing/cache wrapper 的差距全部归因于 AMX 指令调度。环境仍为本机
+Xeon w9-3495X、GCC 13、conda `af3`；保持用户的 800–1800 MHz 频率限制，
+计时锁定 CPU 2，编译排除该 CPU 及 SMT sibling 58。只比较同轮配对
+耗时；不同阶段的绝对耗时有显著波动，不能拼接成旧/新的加速比。
+
+#### 源码、汇编与采样证据
+
+对 Const 128×4096×4096 的 native repeat 做 `perf record`，再沿采样
+热符号定位 K 循环，而不是挑共享对象中最短的任意 AMX 分支。实际热
+路径的 C++ family 是 balanced 2×2，不能未经验证地假定它使用 1×3。
+该 case 的 raw A stride 在 C++ 汇编中是 8192 字节，不能将差距解释为
+“C++ 一定打包了 A”。
+
+旧 DSL cache-panel shape 变为普通 raw scalar，丢掉原 problem 的
+instruction-aligned 属性，循环内部因此还保留 A staging 判断、B 边界
+判断、packed offset 计算及重复 metadata 读取。当前完整路径对应的
+循环为 4 次 tile load、4 次 tdpbf16ps、4 次指针推进和一个 K 回边。
+
+| 采样对应的完整 2×2 K 循环 | 静态指令 | tile load | dot | 条件分支 | 栈引用 |
+|---|---:|---:|---:|---:|---:|
+| 当前 DSL，0x4000–0x4048 | 15 | 4 | 4 | 1 | 0 |
+| C++，0x3300–0x3370 | 25 | 4 | 4 | 1 | 0 |
+
+这些是静态区域计数，不是各指令的延迟测量。采样存在 skid，某条
+`tileloadd` 上的样本比例不能直接解释为它自身的耗时。也不能由 15/25
+直接推导端到端加速：packing、缓存复用和实际内存流量仍占相当比例。
+首次采样含冷编译，进程总样本比例不作为 kernel 独占耗时占比。
+
+可复查的对象分别是
+`build-dsl-matmul/cache/2d7b3e0ddb30cb7e/fcf06c5e2d7bab16/kernel.so`
+和 `.../06ee6e668466fc7a/kernel.so`；修改前 DSL 是
+`.../8227016173e49d26/kernel.so`。这些构建产物需保留；对象地址不是
+跨编译版本稳定的 API。新增 `benchmarks/dsl_matmul_inspect.py` 支持
+数值检查后 profile、打印本任务加载的 artifact 路径，以及静态 AMX
+回边审计；`asm --limit` 返回的短区域未必是采样热路径。
+
+```bash
+perf record -F 999 -o build-dsl-matmul/profile.data -- \
+  conda run --no-capture-output -n af3 python benchmarks/dsl_matmul_inspect.py \
+    profile --shape 128x4096x4096 --mode Const --kernel dsl --iterations 1000
+python benchmarks/dsl_matmul_inspect.py asm path/to/kernel.so --limit 5
+perf annotate --stdio -i build-dsl-matmul/profile.data --dsos kernel.so
+```
+
+#### 本轮实现
+
+1. **保留 full M/N/K 证明。** 按同一 register family 对齐的 cache panel
+   与其 remainder 继续满足原尺寸的整除关系，传递给叶内核。显式动态
+   family wrapper 不擅自传递不匹配跨度的证明；真正 partial 路径不消失。
+2. **循环不变量提取。** AMX packed A/B 与已证明完整空间组的 native
+   K-contiguous A 建立单独的 K cursor。地址、alias 选择和 stride 在
+   K 外准备；inactive packed tile 从有效 panel-zero 地址开始，不能
+   先形成 allocation 外指针。尾部仍使用合法的补零/staging 路径。
+3. **packed ABI 不混淆。** 只有 AMX/target-auto AMX packed A、B 均有
+   padded K 时才直接走完整指令跨度；dense packed 不保证 padding，必须
+   保留最后一个 K tail。新增 K=33 的 dense AB native 回归。
+4. **高瘦矩阵遍历。** x86 policy 在 N<=128 且 M>=4N 时使用 M-major，
+   尽量让小 B 留驻、减少大 A 的跨 N 组重访。Dynamic 只选择坐标顺序，
+   不复制整份 full/tail/fused kernel。其他 CPU policy 默认关闭。
+   直接 dot 保留整 tile 策略；已知尺寸的 library 保留 cache-driver
+   N-major。复测确认整问题高瘦不代表缩短后的 MC/NC panel 高瘦，将
+   原问题的静态 order 强加给 cache leaf 缺少 panel-level 盈利依据。
+   但改回 N-major 后 1024×64×4096 仍相对旧版慢约 12%，不能据此
+   认定 traversal 是该退化的根因。Dynamic 仍保留单独测量的坐标
+   选择路径；panel-local cost 还不是自动最优证明。
+5. **native B packing 复用门槛。** 已知原 M<128、完整空间 register group、
+   未转换/变换且 K 连续的 B 在 cache-panel 路径不自动增加面板副本。显式 packing、已有 packed、转换和变换
+   不受该门槛覆盖；未知 M 仍保留原保守策略。阈值集中在 cost policy，
+   不散落在 emitter 的 shape 常数判断里。
+   初次只按 M 阈值的全量对照在 33×35×8193 / 35×53×257 上分别
+   相对旧版退化 21.7% / 12.9%，因此加入完整空间组条件；不能将
+   64×1024×4096 的收益推广到 ragged tile 的反复 masked staging。
+   Small unblocked 多 M 组仍保留原 resident packed buffer：64×256×256
+   的实验说明，去掉这类小副本会增加重复 transpose 计算。已有单 M
+   组 bypass 不变；不能将 cache-panel 的收益推广到全部 footprint。
+6. **零 K 不形成无效 row cursor。** 已知 K=0 不创建 cursor；原 K
+   未知时，native A cursor 在 K>0 才形成 row-offset 地址，否则保留
+   storage base。这个判断在 K 外，不污染热循环。新增动态 K 的
+   0/33/64、非连续 A stride 的 native 回归；空 NumPy tensor 的
+   dense-stride ABI 归一化与 DSL 的独立 stride 绑定保持一致。
+
+未改变 MMA register family，没有转发到 opaque `ops::Matmul`，没有
+Vec 数组。资源管理闭包仍使用强制内联宏。宽 prefill 的差距仍需要在
+packing producer、cache panel 大小和遍历之间继续隔离，不能宣布全部
+达到 C++ 性能。Dynamic native B 的更多运行时 packing 派发尚未加入，
+避免为一个阈值再克隆大段编译区域。
+
+最终版本的完整三路性能对照命令（旧 manifest 来自独立 4b3d738
+worktree；生成时校验 package 来源与既有 focused source 的字节一致性）：
+
+```bash
+conda run --no-capture-output -n af3 python benchmarks/dsl_matmul.py \
+  --max-flops 0 --kind bf16 --mode Const Dynamic --level matmul \
+  --pipeline plain --rounds 21 --jobs 6 \
+  --baseline-manifest build-dsl-matmul/baseline-catalog-4b3d738.json \
+  --source-manifest build-dsl-matmul/audit-final-catalog-sources.json \
+  --output build-dsl-matmul/audit-final-catalog-paired.csv
+```
+
+#### 最终验证与保留的差距
+
+完整 BF16 raw catalog **172/172** 数值通过，21 轮三路同轮计时：
+
+| Shape / metadata | 当前 / 4b3d738 | 当前 / C++ |
+|---|---:|---:|
+| 64×1024×4096 / Const | 0.6701 | 0.8740 |
+| 256³ / Dynamic | 0.9125 | 0.9393 |
+| 3136×64×576 / Dynamic | 0.9525 | 0.9709 |
+| 128×4096×4096 / Const | 0.9907 | 1.2497 |
+| 128×4096×4096 / Dynamic | 0.9572 | 1.2725 |
+| 172 case 几何均值 | 0.9938 | 0.9113 |
+
+相对 C++ 超过 1.2 的 case 从同轮旧版的 5 个变为 3 个；超过 1.1
+从 12 个变为 10 个。相对旧版仍有一个超过 1.1：Const
+1024×64×4096 为 **1.1196**，另 Const 3136×64×576 为 1.0908。
+因此本轮是特定 shape 和生成路径的改进，不是全部 shape 无退化。
+同一源码的复测也出现该静态高瘦回归；不能将它全部解释为几十 ns
+噪声，不能宣称切换 cache order 已修复。宽 prefill 的 packing/cache
+策略和这两个静态 case 的地址/访存调度仍需后续定位。
+
+最终预打包隔离基准 **40/40** 数值通过（17 轮）：几何均值
+当前 / C++ 为 0.9429，最差 1.1924。Const 128×4096×4096 的 dot
+packed B / AB 为 1.0045 / 1.0089，但同 shape 的 library 为
+1.1518 / 1.1759；说明即使排除 online packing，cache wrapper /
+局部遍历仍有约 15%–18% 差距，不能仅归咎于 packing producer。
+Const 3136×64×576 的直接 dot packed B / AB 为 1.0472 / 1.0251；
+旧轮次为 1.3683 / 1.2509，但旧/新来自不同轮次，不能据这两组
+比值计算同轮旧/新的加速比。Dynamic ragged dot packed B 仍有
+约 19% 差距，全部预打包路径也没有宣称无差距。
+
+其他验证：
+
+- native codegen/别名/packed/融合/零 K 边界 cohort **20/20** 通过；
+  追加动态 K 与非连续 A stride cursor 回归 **1/1** 通过。
+- 最新 codegen 快速检查、cost、matmul policy、architecture **41/41**
+  通过；与 native cohort 有重叠，不累加为独立测试数量。
+- optimization pass 测试 **22/22** 通过。
+- Const 融合补充 **32/32** 数值通过（四类输入 dtype，accumulate /
+  bias-ReLU / SiLU / affine-input），9 轮最差当前 / C++ 为 1.0674。
+  这些 shape 的最终 cache-order/crossover 修订不改变其生成内核路径。
+- ARM **156/156 object + SME disassembly gate** 通过；最终 generator
+  重生成的 156 份源码逐字节匹配已验证对象的 source，包含 SVE/SME
+  VLA / 固定 VL/SVL。没有离线 ARM 机器上的运行或性能测试。
+- Ruff format（87 个文件）、未定义名称/语法检查、`git diff --check`
+  通过；没有宣称整个 Python 测试集或全量 lint 通过。
+
+当前报告：`build-dsl-matmul/audit-final-catalog-paired.csv`、
+`build-dsl-matmul-packed/audit-final.csv`。日志：
+`pytest-final-native.log`、`pytest-verified-zero-cursors.log`、
+`pytest-audit-final-fast.log`、`pytest-final-passes.log`、
+`matmul-cross-final-cursors.log`、`final-fusion-const.log`。
+中间实验的 `final-*` CSV 明确属于各自源码阶段，不与最终报告混用。

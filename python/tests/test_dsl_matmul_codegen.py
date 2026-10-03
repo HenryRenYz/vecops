@@ -1,12 +1,14 @@
 """Memory layout and dispatch contracts in generated matrix schedules."""
 
 import re
+from dataclasses import replace
 
 import numpy as np
 import vecops
 import vecops.language as T
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
+from vecops.language._compiler.backends.cpu.cpp.matmul import MatmulEmitter
 from vecops.language._compiler.backends.cpu.planning import prepare, snapshot_strides
 
 
@@ -91,6 +93,176 @@ def test_known_long_gemv_retains_two_banks_unless_overridden():
     artifact = CPUBackend().lower(kernel.ir, (), options=options, target="AVX512")
     (plan,) = prepare(artifact.lowered).matmuls.values()
     assert plan.k_unroll == expected
+
+
+def test_aligned_cache_panels_keep_a_branch_free_amx_k_body():
+  @T.template
+  def kernel(
+    A: T.Tensor((128, 768), dtype="bfloat16"),
+    B: T.Tensor((768, 1024), (1, 768), "bfloat16"),
+    C: T.Tensor((128, 1024), dtype="float32", access="output"),
+  ):
+    T.library.matmul((A, B), C)
+
+  source = CPUBackend().lower(kernel.ir, (), target="AVX512").source
+  match = re.search(r"for \(;[^\n]+/\* full K: unmasked load/convert \*/ \{(.*?)\n\s*\}", source, re.S)
+  assert match is not None
+  body = match[1]
+  assert body.count("vecops::vec::amx::dot<") == 4
+  assert body.count("vecops::vec::amx::load<") == 4
+  assert "amx_k_cursor" in body
+  assert "pack_offset" not in body
+  assert "if (" not in body
+
+
+def test_tall_traversal_policy_is_target_specific_without_kernel_cloning():
+  @T.template
+  def kernel(
+    A: T.Tensor((3136, 576), dtype="bfloat16"),
+    B: T.Tensor((576, 64), (1, 576), "bfloat16"),
+    C: T.Tensor((3136, 64), dtype="float32", access="output"),
+  ):
+    T.dot((A, B), C)
+
+  for target, expected in (("AVX512", True), ("SVE", False)):
+    artifact = CPUBackend().lower(kernel.ir, (), target=target)
+    (plan,) = prepare(artifact.lowered).matmuls.values()
+    assert I.constant(plan.amx_m_major) is expected
+
+  @T.template
+  def cached_kernel(
+    A: T.Tensor((3136, 576), dtype="bfloat16"),
+    B: T.Tensor((576, 64), (1, 576), "bfloat16"),
+    C: T.Tensor((3136, 64), dtype="float32", access="output"),
+  ):
+    T.library.matmul((A, B), C)
+
+  artifact = CPUBackend().lower(cached_kernel.ir, (), target="AVX512")
+  (plan,) = prepare(artifact.lowered).matmuls.values()
+  assert I.constant(plan.amx_m_major) is False
+
+  M, N, K = (T.dynamic(lower=0) for _ in range(3))
+
+  @T.template
+  def dynamic_kernel(
+    A: T.Tensor((M, K), (K, 1), "bfloat16"),
+    B: T.Tensor((K, N), (1, K), "bfloat16"),
+    C: T.Tensor((M, N), dtype="float32", access="output"),
+  ):
+    T.dot((A, B), C)
+
+  artifact = CPUBackend().lower(dynamic_kernel.ir, (), target="AVX512")
+  assert "tall strip traversal" in artifact.source
+  (plan,) = prepare(artifact.lowered).matmuls.values()
+  assert I.constant(plan.amx_m_major) is None
+
+
+def test_native_b_packing_crossover_preserves_transformed_and_dynamic_inputs():
+  @T.template
+  def kernel(
+    A: T.Tensor((64, 768), dtype="bfloat16"),
+    B: T.Tensor((768, 1024), (1, 768), "bfloat16"),
+    C: T.Tensor((64, 1024), dtype="float32", access="output"),
+  ):
+    T.library.matmul((A, B), C)
+
+  artifact = CPUBackend().lower(kernel.ir, (), target="AVX512")
+  (plan,) = prepare(artifact.lowered).matmuls.values()
+  emitter = MatmulEmitter()
+  emitter.active_matmul_plan = plan
+  b = plan.operands[1].expression
+  assert plan.amx_native_b_pack_min_m == 128
+  assert not emitter.amx_automatic_b_pack(b, False)
+  assert emitter.amx_automatic_b_pack(I.binary("mul", b, I.literal(2)), False)
+  assert emitter.amx_automatic_b_pack(replace(b, data=replace(b.data, dtype="float32")), False)
+  assert emitter.amx_automatic_b_pack(
+    replace(b, data=replace(b.data, strides=(I.literal(2), b.data.strides[1]))), False
+  )
+  for m in (
+    I.literal(33),
+    I.literal(35),
+    I.literal(127),
+    I.literal(128),
+    I.Expr(I.ScalarType("int64"), "raw", data="runtime_m"),
+  ):
+    product = replace(plan.expression, type=replace(plan.expression.type, shape=(m, plan.expression.type.shape[1])))
+    emitter.active_matmul_plan = replace(plan, expression=product)
+    assert emitter.amx_automatic_b_pack(b, False)
+    assert not emitter.amx_automatic_b_pack(b, True)
+  product = replace(plan.expression, type=replace(plan.expression.type, shape=(I.literal(64), I.literal(35))))
+  emitter.active_matmul_plan = replace(plan, expression=product)
+  assert emitter.amx_automatic_b_pack(b, False)
+
+  @T.template
+  def small_kernel(
+    A: T.Tensor((64, 256), dtype="bfloat16"),
+    B: T.Tensor((256, 256), (1, 256), "bfloat16"),
+    C: T.Tensor((64, 256), dtype="float32", access="output"),
+  ):
+    T.library.matmul((A, B), C, implementation="amx")
+
+  # Small, resident packed buffers avoid repeating the raw transpose network.
+  source = CPUBackend().lower(small_kernel.ir, (), target="AVX512").source
+  assert re.search(r"matmul_packed_\d+\.resize\(vecops_dsl::pack_size<vecops::bfloat16_t, 1>", source)
+
+
+def test_dense_packed_operands_do_not_assume_zero_padded_k(tmp_path):
+  import ml_dtypes
+
+  @T.template
+  def kernel(
+    A: T.Tensor((4, 33), dtype="bfloat16"),
+    B: T.Tensor((33, 5), (1, 33), "bfloat16"),
+    C: T.Tensor((4, 5), dtype="float32", access="output"),
+  ):
+    a = T.pack(A, side="A", format="dense")
+    b = T.pack(B, side="B", format="dense")
+    T.dot((a, b), C, implementation="amx")
+
+  compiler = vecops.Compiler(
+    target="Native",
+    cc="gcc",
+    cxx="g++",
+    jobs=4,
+    cache_dir=tmp_path / "cache",
+    build_dir=tmp_path / "build",
+  )
+  compiled = T.compile(kernel, compiler=compiler)
+  rng = np.random.default_rng(59)
+  a = (rng.integers(-3, 4, (4, 33)) / 8).astype(ml_dtypes.bfloat16)
+  b = (rng.integers(-3, 4, (5, 33)) / 8).astype(ml_dtypes.bfloat16).T
+  c = np.empty((4, 5), np.float32)
+  assert "one zero-padded K tail" in compiled.generated_source
+  compiled.operator.native(a, b, c)
+  np.testing.assert_array_equal(c, a.astype(np.float32) @ b.astype(np.float32))
+
+
+def test_dynamic_k_cursors_guard_zero_length_storage(tmp_path):
+  import ml_dtypes
+
+  K = T.dynamic(lower=0)
+  AS = T.dynamic(lower=0)
+
+  @T.template
+  def kernel(
+    A: T.Tensor((64, K), (AS, 1), "bfloat16"),
+    B: T.Tensor((K, 64), dtype="bfloat16"),
+    C: T.Tensor((64, 64), dtype="float32", access="output"),
+  ):
+    T.library.matmul((A, B), C, implementation="amx")
+
+  compiler = vecops.Compiler(
+    target="Native", cc="gcc", cxx="g++", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"
+  )
+  compiled = T.compile(kernel, compiler=compiler)
+  assert re.search(r"amx_k_cursor_\d+=\(\([^\n]+>0 \?[^\n]+: A.data\(\)\)", compiled.generated_source)
+  rng = np.random.default_rng(61)
+  for k in (0, 33, 64):
+    a = (rng.integers(-3, 4, (64, k + 1)) / 8).astype(ml_dtypes.bfloat16)[:, :k]
+    b = (rng.integers(-3, 4, (k, 64)) / 8).astype(ml_dtypes.bfloat16)
+    c = np.empty((64, 64), np.float32)
+    compiled.operator.native(a, b, c, **compiled._core.specialization_values)
+    np.testing.assert_array_equal(c, a.astype(np.float32) @ b.astype(np.float32))
 
 
 def test_matrix_alias_snapshots_preserve_column_major_inputs(tmp_path):

@@ -966,6 +966,18 @@ class MatmulEmitter:
     dtype = operand.type.dtype
     width = ELEMENT_BYTES[dtype]
     kr, kp = 64 // width, 4 // width
+    cursor = getattr(self, "matrix_amx_cursors", {}).get(tile)
+    if cursor is not None and (operand.op == "packed_load" or getattr(self, "matrix_k_full", False)):
+      pointer, stride, guaranteed = cursor
+      if not guaranteed:
+        self.opening(f"if (({origin}) < ({spatial}))")
+      self.line(f"vecops::vec::amx::load<{tile}>({pointer}, {stride});")
+      if not guaranteed:
+        self.close()
+        self.opening("else")
+        self.line(f"vecops::vec::amx::zero<{tile}>();")
+        self.close()
+      return
     if operand.op == "packed_load" and operand.data.format in {"amx", "auto"}:
       offset = self.packed_offset(operand.data, origin, ki)
       self.opening(f"if (({origin}) < ({spatial}))")
@@ -1050,7 +1062,16 @@ class MatmulEmitter:
     if direct:
       self.close()
 
-  def amx_matmul(self, statement, product, *, family=None, skip_cache=False, single_m_tile=False):
+  def amx_matmul(
+    self,
+    statement,
+    product,
+    *,
+    family=None,
+    skip_cache=False,
+    single_m_tile=False,
+    full_extents=(False, False, False),
+  ):
     a, b = self.matrix_operands(product)
     initial = product.args[2:]
     dtype = product.type.dtype
@@ -1110,6 +1131,11 @@ class MatmulEmitter:
       rows = min(rows, (cm + 15) // 16)
     if isinstance(cn, int) and cn > 0:
       columns = min(columns, (cn + 15) // 16)
+    known_k = I.constant(a.type.shape[1])
+    full_m, full_n, full_k = (
+      proven or isinstance(known, int) and known >= 0 and known % alignment == 0
+      for proven, known, alignment in zip(full_extents, (cm, cn, known_k), (rows * 16, columns * 16, kr))
+    )
     acc_count = rows * columns
     single_m_tile = single_m_tile or rows == 1 or isinstance(cm, int) and cm <= rows * 16
     automatic = product.data.tiled and all(
@@ -1138,6 +1164,7 @@ class MatmulEmitter:
         k_alignment=kr,
         amx_family=(rows, columns),
         single_m_tile=single_m_tile,
+        amx_full_extents=(full_m, full_n, full_k),
       )
       if bypass:
         self.close()
@@ -1184,8 +1211,26 @@ class MatmulEmitter:
     mi, ni, ki = (self.unique(v) for v in ("amx_m", "amx_n", "amx_k"))
     self.line(f"/* AMX {rows}x{columns} register-tile schedule; no cache packing in dot */")
     m, n, starts, cache_loops = self.matrix_cache_region(cache, m, n)
-    self.opening(f"for (vecops::nint_t {ni}={starts[1]}; {ni}<({n}); {ni}+={columns * 16})")
-    self.opening(f"for (vecops::nint_t {mi}={starts[0]}; {mi}<({m}); {mi}+={rows * 16})")
+    order = self.active_matmul_plan.amx_m_major or I.literal(False)
+    if I.constant(order) is not None:
+      loops = ((mi, m, starts[0], rows * 16), (ni, n, starts[1], columns * 16))
+      for index, extent, start, step in loops if I.constant(order) else loops[::-1]:
+        self.opening(f"for (vecops::nint_t {index}={start}; {index}<({extent}); {index}+={step})")
+    else:
+      # Select coordinate order once per product/panel, not a second copy of
+      # the complete full/tail/fused instruction body. Only the outer spatial
+      # loops contain these selects; the K hot loop remains unchanged.
+      selected, outer, inner = (self.unique(v) for v in ("amx_m_major", "amx_outer", "amx_inner"))
+      self.line(f"const bool {selected}={self.scalar(order)}; /* tall strip traversal */")
+      self.opening(
+        f"for (vecops::nint_t {outer}=0; {outer}<({selected}?({m}):({n})); "
+        f"{outer}+=({selected}?{rows * 16}:{columns * 16}))"
+      )
+      self.opening(
+        f"for (vecops::nint_t {inner}=0; {inner}<({selected}?({n}):({m})); "
+        f"{inner}+=({selected}?{columns * 16}:{rows * 16}))"
+      )
+      self.line(f"const auto {mi}={selected}?{outer}:{inner}, {ni}={selected}?{inner}:{outer};")
     tag = self.matrix_tag(dtype, lanes=16)
     direct_output = statement.value is product and statement.mask is None and statement.destination.dtype == dtype
     for r in range(rows):
@@ -1264,22 +1309,74 @@ class MatmulEmitter:
 
     def k_loop(spatial_full):
       previous_n = getattr(self, "matrix_n_full", False)
+      previous_cursors = getattr(self, "matrix_amx_cursors", {})
       self.matrix_n_full = spatial_full
+      cursors = {}
+      for operand, side, count, index, spatial, guaranteed in (
+        (a, "A", rows, mi, m, full_m),
+        (b, "B", columns, ni, n, spatial_full),
+      ):
+        if known_k == 0:
+          continue
+        packed = operand.op == "packed_load" and operand.data.format in {"amx", "auto"}
+        direct_a = (
+          side == "A"
+          and guaranteed
+          and operand.op == "load"
+          and not operand.args
+          and operand.data.dtype == operand.type.dtype
+          and I.constant(operand.data.strides[1]) == 1
+        )
+        if not packed and not direct_a:
+          continue
+        for group in range(count):
+          origin = f"({index}+{group * 16})"
+          pointer = self.unique("amx_k_cursor")
+          tile = acc_count + group + (rows if side == "B" else 0)
+          if packed:
+            offset = self.packed_offset(operand.data, origin, "0")
+            # An inactive tile's cursor starts in panel zero, not beyond the
+            # allocation. Its unused K walk remains valid C++ pointer arithmetic.
+            offset = offset if guaranteed else f"(({origin})<({spatial}) ? ({offset}) : 0)"
+            address = f"{self.pointer(operand.data.view)}+({offset})"
+            stride = "64"
+          else:
+            address = self.pointer(operand.data, (origin, "0"))
+            stride = self.scalar(operand.data.strides[0])
+            if id(operand) in self.snapshots:
+              saved, alias = self.snapshots[id(operand)]
+              address = f"({alias} ? {self.pointer(saved, (origin, '0'))} : {address})"
+              if not I.same_expr(saved.strides[0], operand.data.strides[0]):
+                stride = f"({alias} ? {self.scalar(saved.strides[0])} : {stride})"
+            if I.constant(self.active_matmul_plan.expression.args[0].type.shape[1]) is None:
+              # Zero-length tensors permit arbitrary spatial strides. Do not
+              # even form a row-offset pointer when the cursor will be unused.
+              address = f"(({k})>0 ? {address} : {operand.data.storage}.data())"
+            stride = f"({stride})*{ELEMENT_BYTES[operand.type.dtype]}"
+          self.line(f"auto* {pointer}={address}; /* invariant AMX K cursor */")
+          cursors[tile] = (pointer, stride, guaranteed)
+      self.matrix_amx_cursors = cursors
       self.line(f"vecops::nint_t {ki}=0;")
       # Extents are nonnegative and this loop never advances beyond K; a
       # subtraction comparison avoids signed-128 arithmetic in every step.
-      self.opening(f"for (;({k})-{ki}>={kr};{ki}+={kr}) /* full K: unmasked load/convert */")
+      padded_k = all(operand.op == "packed_load" and operand.data.format in {"amx", "auto"} for operand in (a, b))
+      end = f"{ki}<({k})" if full_k or padded_k else f"({k})-{ki}>={kr}"
+      self.opening(f"for (;{end};{ki}+={kr}) /* full K: unmasked load/convert */")
       multiply(True)
+      for tile, (pointer, _, _) in cursors.items():
+        step = 16 * kr if tile >= acc_count + rows or a.op == "packed_load" else kr
+        self.line(f"{pointer}+={step};")
       self.close()
-      if not (isinstance(I.constant(a.type.shape[1]), int) and I.constant(a.type.shape[1]) % kr == 0):
+      if not full_k and not padded_k:
         self.opening(f"if ({ki}<({k})) /* one zero-padded K tail */")
         multiply(False)
         self.close()
       self.matrix_n_full = previous_n
+      self.matrix_amx_cursors = previous_cursors
 
     # Unswitch N-tail checks before K. GCC otherwise keeps 16 predicates per
     # B tile load in the hot full-K loop of a dynamic small-M product.
-    if isinstance(cn, int) and cn % (columns * 16) == 0:
+    if full_n:
       k_loop(True)
     elif b.op != "packed_load" and self.amx_b_dense_condition(b) is not None:
       self.opening(f"if (({n})-{ni}>={columns * 16}) /* full AMX N group */")
@@ -1446,6 +1543,34 @@ class MatmulEmitter:
     )
     return I.Expr(operand.type, "packed_load", data=packed)
 
+  def amx_automatic_b_pack(self, operand, single_m_tile, spatial_alignment=(32, 32)):
+    """A native contiguous B needs enough M reuse to pay for a cache-panel copy.
+
+    Conversion/transform and non-K-contiguous operands keep packing. Use the
+    original problem extent, not the shortened cache panel's M; otherwise a
+    full-size product would repeatedly re-enter the marginal-reuse path.
+    Incomplete spatial groups retain packing to avoid repeating masked row
+    staging in each K iteration of a ragged product.
+    Small unblocked products keep their resident packed-buffer schedule;
+    this crossover applies only to the cache-panel driver.
+    """
+    if single_m_tile:
+      return False
+    known_m = I.constant(self.active_matmul_plan.expression.type.shape[0])
+    known_n = I.constant(self.active_matmul_plan.expression.type.shape[1])
+    direct = (
+      operand.op == "load"
+      and not operand.args
+      and operand.data.dtype == operand.type.dtype
+      and I.constant(operand.data.strides[0]) == 1
+    )
+    minimum = self.active_matmul_plan.amx_native_b_pack_min_m
+    full_groups = all(
+      isinstance(extent, int) and extent % alignment == 0
+      for extent, alignment in zip((known_m, known_n), spatial_alignment)
+    )
+    return not (direct and full_groups and known_m < minimum)
+
   def blocked_matrix_matmul(
     self,
     statement,
@@ -1457,6 +1582,7 @@ class MatmulEmitter:
     k_alignment=32,
     amx_family=None,
     single_m_tile=False,
+    amx_full_extents=(False, False, False),
   ):
     """NC/KC/MC traversal: bounded panels, native partial C, phased fusion."""
     a, b = self.matrix_operands(product)
@@ -1496,7 +1622,11 @@ class MatmulEmitter:
     self.opening(f"for (vecops::nint_t {kb}=0; {kb}<std::max<vecops::nint_t>(1,{self.scalar(k)}); {kb}+={bk})")
     self.line(f"const auto {kk}=std::min<vecops::nint_t>({bk},({self.scalar(k)})-{kb});")
     bv = self.slice_matrix_value(b, (raw(kb), raw(nb)), (ks, ns))
-    if not (single_m_tile and format_ == "amx" and product.data.packing == "auto"):
+    if not (
+      format_ == "amx"
+      and product.data.packing == "auto"
+      and not self.amx_automatic_b_pack(bv, single_m_tile, spatial_alignment)
+    ):
       bv = self.emit_matrix_pack(bv, "B", format_, product.data.packing)
     self.opening(f"for (vecops::nint_t {mb}=0; {mb}<({self.scalar(m)}); {mb}+={bm})")
     self.line(f"const auto {mm}=std::min<vecops::nint_t>({bm},({self.scalar(m)})-{mb});")
@@ -1522,6 +1652,7 @@ class MatmulEmitter:
         local,
         family=amx_family,
         single_m_tile=single_m_tile,
+        full_extents=amx_full_extents,
       )
     else:
       emit(replace(statement, destination=sink, value=value, mask=mask), local)
@@ -1581,17 +1712,14 @@ class MatmulEmitter:
       if operand.op == "packed_load":
         continue
       policy = product.data.packing
-      if (
-        policy == "auto"
-        and side == "B"
-        and (
-          single_m_tile
-          or isinstance(I.constant(product.type.shape[0]), int)
-          and I.constant(product.type.shape[0]) <= 32
-        )
-      ):
-        # No cross-M reuse: raw instruction staging is already the one pack
-        # needed by this tile; a second packed buffer only adds traffic.
+      skip_b = (
+        single_m_tile
+        if format_ == "amx"
+        else isinstance(I.constant(product.type.shape[0]), int) and I.constant(product.type.shape[0]) <= 32
+      )
+      if policy == "auto" and side == "B" and skip_b:
+        # Insufficient cross-M reuse: raw instruction staging already does
+        # the required pack; a second packed buffer adds marginal traffic.
         continue
       direct = operand.op == "load" and not operand.args and operand.data.dtype == operand.type.dtype
       need = (

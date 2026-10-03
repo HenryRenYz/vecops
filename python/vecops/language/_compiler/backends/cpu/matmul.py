@@ -39,6 +39,31 @@ def plan_matmul(prepared, context):
         return result
     return k_unroll
 
+  def amx_traversal(product):
+    # A tall product's small B remains resident across neighboring M tiles.
+    # N-major walks its much larger A again for every output-column group.
+    # Keep this target policy independent of cache blocking and packed ABI.
+    maximum = int(costs.policy("amx_m_major_n_max", 0))
+    ratio = int(costs.policy("amx_m_major_ratio", 4))
+    if maximum <= 0:
+      return I.literal(False)
+    if ratio <= 0:
+      raise ValueError("amx_m_major_ratio must be positive")
+    m, n = product.type.shape
+    selected = I.binary(
+      "and",
+      I.binary("le", n, I.literal(maximum)),
+      I.binary("ge", I.binary("floordiv", m, I.literal(ratio)), n),
+    )
+    if product.data.tiled and I.constant(selected) is True:
+      # A constant tall *problem* does not imply tall cache leaves: MC/NC
+      # shortening often makes these panels nearly square and resident in L2.
+      # Retain the cache driver's N-major order until a panel-level profitability
+      # proof is available. Runtime traversal keeps its separately measured
+      # coordinate-selection path; direct dot still gets whole-tile M-major.
+      return I.literal(False)
+    return selected
+
   def operand_policy(product, index):
     expression = product.args[index]
     summary = estimate(expression, costs, boundaries=prepared.vectors.kernel.materializations)
@@ -149,6 +174,8 @@ def plan_matmul(prepared, context):
           k_unroll=product_k_unroll(node),
           unblocked_bytes=int(costs.policy("matmul_unblocked_bytes", 512 * 1024)),
           runtime_unblocked_bytes=int(costs.policy("matmul_runtime_unblocked_bytes", 128 * 1024)),
+          amx_m_major=amx_traversal(node),
+          amx_native_b_pack_min_m=int(costs.policy("amx_native_b_pack_min_m", 0)),
           amx_b_permutation=register_transpose(16, 16, 4),
           dense_transposes=tuple(dense_transposes),
         )

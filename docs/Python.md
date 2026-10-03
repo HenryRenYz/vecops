@@ -304,9 +304,29 @@ evaluation. An explicit K-bank override bypasses the long-K policy.
 Automatic AMX cache panels align to the selected register family, not a
 universal 32-column boundary. A proven single M group does not automatically
 pack B a second time; explicit packing/block sizes remain authoritative.
+On x86, a native, untransformed, K-contiguous B also skips automatic cache-panel
+packing when the original constant M is below the `amx_native_b_pack_min_m`
+policy (128) and both spatial extents fill complete register groups. Unknown
+M and ragged groups remain conservative; conversions, transforms,
+non-K-contiguous B and explicitly requested packing retain their own paths.
+The original problem's M, not a shortened cache panel, determines this gate.
+Small unblocked multi-M-group products retain their resident packed buffer;
+repeating the raw transpose is not necessarily cheaper than that small copy.
 Explicit dynamic cache phases share one packing wrapper with runtime family
 alignment, rather than cloning transformed panel producers for every family;
 shortened leaves still select a suitable register family.
+Known instruction-aligned extents survive aligned cache-panel slicing. Full
+AMX K loops hoist compatible raw-A addresses/strides and packed-A/B offsets
+into individual pointer cursors; only unproven spatial/K tails retain staging
+and padding checks. A padded K walk is legal for AMX packing, not dense packing.
+The x86 `amx_m_major_n_max` (128) and `amx_m_major_ratio` (4) policies select
+M-major instruction traversal for tall small-N strips. Dynamic selection uses
+one coordinate body rather than duplicating the entire matrix kernel; other
+CPU profiles leave this AMX-specific policy disabled by default.
+Known-size library products retain the cache driver's N-major order: a tall
+whole problem does not prove that shortened MC/NC panels remain tall. Direct
+dot retains whole-tile M-major; dynamic traversal uses its separately measured
+coordinate-selection path. Panel-local profitability remains a tuning task.
 The cost policies `matmul_unblocked_bytes` (512 KiB for constant shapes) and
 `matmul_runtime_unblocked_bytes` (128 KiB for dynamic shapes) control the
 automatic small-footprint bypass. Dynamic matrices above the latter cutoff
