@@ -8,8 +8,9 @@
  *
  * In sizeless mode, SVEScalableVector<T, P> wraps sv<T>_t for single-word
  * Tags and sv<T>x2_t / sv<T>x4_t for multi-word Tags. Masks use svbool_t,
- * svboolx2_t, or svboolx4_t. In VLS mode, SVEFixedVector<T> wraps a sized
- * array of VLS SVE types.
+ * svboolx2_t, or svboolx4_t. VLA FixedTag blocks up to the architectural
+ * minimum 16 bytes occupy one sizeless register with an exact lane prefix.
+ * Larger fixed blocks require VLS. In VLS mode SVEFixedVector<T> is sized.
  */
 
 #if !defined(HAS_SVE)
@@ -425,8 +426,20 @@ struct RepresentationTraits<
     SVEBackend,
     VectorDescriptor<T, FixedExtent<N>>> {
   static_assert(
-      dependent_false<T>,
-      "FixedTag on SVE requires -msve-vector-bits=<N>; use ScalableTag in a vector-length-agnostic build");
+      N * sizeof(T) <= 16,
+      "VLA SVE FixedTag supports at most 16 bytes; larger blocks require -msve-vector-bits=<N> or ScalableTag");
+  using Element = T;
+  using WordVec = typename SVERawVector<T>::type;
+  using WordMask = svbool_t;
+  using VecType = WordVec;
+  using MaskType = WordMask;
+  static constexpr nint_t logical_lanes = N;
+  static constexpr nint_t word_count = 1;
+  static constexpr bool is_runtime_size_v = false;
+  static constexpr bool is_subword_v = true;
+  static VECOPS_ALWAYS_INLINE nint_t word_lanes() {
+    return sve_word_lanes<T>();
+  }
 };
 
 #endif

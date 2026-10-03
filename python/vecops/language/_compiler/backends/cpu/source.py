@@ -1,4 +1,5 @@
 """CPU source-kernel schema and constexpr specialization adaptation."""
+
 from __future__ import annotations
 import inspect
 from typing import Any
@@ -7,6 +8,7 @@ from ....._schema import KernelDef, TensorAccess, TensorDef, ValueDef
 from ....expr import Const, DType
 from ....template import TemplateIR
 from ....types import TensorType
+
 
 def _specialization_environment(ir: TemplateIR):
   values: dict[str, Any] = {}
@@ -40,6 +42,7 @@ def _lower_tensor_dtype(dtype: Any):
     return dtype.name
   if isinstance(dtype, str):
     from ....._dtype import _NAMES
+
     if dtype in _NAMES:
       return _NAMES[dtype]
     try:

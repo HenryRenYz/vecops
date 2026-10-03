@@ -1,10 +1,12 @@
 """Public template-compilation façade; lowering and runtime are separate packages."""
+
 from ._compiler.driver import compile
 from ._runtime.kernel import CompiledKernel
 
 # Preserve public import identities for introspection/pickling after relocation.
 compile.__module__ = __name__
 CompiledKernel.__module__ = __name__
+
 
 def compile_pending(*, parallelism: int | None = None) -> int:
   """Build pending Torch template bridges together before model execution.

@@ -1,4 +1,5 @@
 """Compiled kernel calls and lazy Torch bridge adaptation."""
+
 from __future__ import annotations
 import inspect
 from dataclasses import dataclass
@@ -8,8 +9,9 @@ from ..._operator import Operator
 from ..._schema import KernelDef
 from ..template import TemplateFunction
 from ..types import TensorType
-from .binding import (_AUTO, _metadata, _bind_runtime_symbol, _dtype_for_framework)
+from .binding import _AUTO, _metadata, _bind_runtime_symbol, _dtype_for_framework
 from .allocation import _allocate
+
 
 @dataclass
 class _CompiledCore:
@@ -80,8 +82,7 @@ class CompiledKernel:
     wrapper = self._core.torch()
     if not wrapper._vecops_ready[0]:
       raise RuntimeError(
-        "the Torch bridge must be compiled before graph capture; invoke or "
-        "precompile this kernel once first"
+        "the Torch bridge must be compiled before graph capture; invoke or precompile this kernel once first"
       )
     specializations = tuple(
       _dtype_for_framework(self._core.specialization_values[name], "torch")

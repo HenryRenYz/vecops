@@ -55,6 +55,9 @@ def jit(
     @functools.wraps(target)
     def wrapped(*args, **kwargs):
       bound, key = _normalized_binding(signature, args, kwargs)
+      from ._compiler.environment import registry_fingerprint
+
+      key = (key, registry_fingerprint())
       active = getattr(local, "active", set())
       if key in active:
         raise RuntimeError(f"recursive T.jit elaboration cycle in {target.__qualname__}")

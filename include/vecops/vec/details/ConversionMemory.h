@@ -22,7 +22,14 @@ template <VectorTag LogicalTag, Element Other>
 consteval bool memory_rebind_supported() {
   using MemoryTag = Rebind<Other, LogicalTag>;
   if constexpr (is_fixed_tag_v<LogicalTag>) {
+#if defined(CPU_CAPABILITY_SVE) && !defined(HAS_FIXED_SVE_BITS)
+    // Fixed VLA blocks must fit every architectural VL. Wider memory-side
+    // rebinds use the existing lane-preserving scalar boundary, not an invalid
+    // sizeless aggregate. The logical compute block still stays in registers.
+    return fixed_lanes_v<LogicalTag> * sizeof(Other) <= 16;
+#else
     return true;
+#endif
   } else {
     // A below-word memory-side Tag is already handled by the existing
     // predicate/subword lowering.  Recursive partitioning is needed only
@@ -689,99 +696,82 @@ execute_load_convert_request(
   constexpr Active A = Request::active_kind;
   constexpr Addressing Addr = Request::addressing_kind;
   constexpr Populate P = Request::populate_kind;
-  constexpr bool Unordered =
-      std::same_as<Layout, cvt::Unordered>;
+  constexpr bool Unordered = std::same_as<Layout, cvt::Unordered>;
 
-  if constexpr (
-      Addr != Addressing::Contiguous &&
-      scalarize_indexed_memory_v<
-          CurrentBackend, typename Request::ActiveResources>) {
+  if constexpr ((Addr == Addressing::Strided && !strided_indices_supported<ToTag>()) ||
+                (Addr != Addressing::Contiguous &&
+                 scalarize_indexed_memory_v<CurrentBackend, typename Request::ActiveResources>)) {
     return execute_scalar_load_convert_request(to, pointer, request);
-  }
-
-  // Addressing rides in the alignment slot (see LoadConvertRequest); only
-  // its construction differs between indexed, strided, and contiguous.
-  auto dispatch = [&](auto access) VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
-    if constexpr (A == Active::Unmasked) {
-      return execute(
-          op, to, pointer, Layout{}, ValuePolicy{}, access, Temporality{});
-    } else if constexpr (Unordered) {
-      const auto memory_mask = [&]() VECOPS_INLINE_LAMBDA {
-        if constexpr (A == Active::First) {
-          return mwhilelt(FromTag{}, 0, request.first_count);
-        } else {
-          return *request.mask;
-        }
-      }();
-      auto converted = execute(
-          op, to, pointer, memory_mask, Layout{}, ValuePolicy{}, access,
-          Temporality{});
-      if constexpr (P == Populate::Zero) {
-        return converted;
-      } else {
-        // Public unordered load-convert deliberately has no population
-        // option, but DataAccess carries a logical output-domain population
-        // through its resolved request. Convert the memory mask back to that
-        // domain before blending; otherwise inactive widened lanes retain the
-        // backend's zero fill (which, for example, corrupts max reductions of
-        // entirely negative BF16 tails).
-        const auto output_mask = convert(to, FromTag{}, memory_mask);
-        if constexpr (P == Populate::MergeVector) {
-          return blend(
-              to, *request.merge_vector, output_mask, converted);
-        } else {
-          static_assert(P == Populate::MergeScalar);
-          return blend(
-              to, fill(to, request.merge_scalar), output_mask, converted);
-        }
-      }
-    } else {
-      const Mask<ToTag> mask = [&]() VECOPS_INLINE_LAMBDA {
-        if constexpr (A == Active::First) {
-          return mwhilelt(to, 0, request.first_count);
-        } else {
-          return *request.mask;
-        }
-      }();
-      if constexpr (P == Populate::MergeVector) {
-        return execute(
-            op, to, pointer, mask, *request.merge_vector, Layout{},
-            ValuePolicy{}, access, Temporality{});
-      } else if constexpr (P == Populate::MergeScalar) {
-        return execute(
-            op, to, pointer, mask, fill(to, request.merge_scalar), Layout{},
-            ValuePolicy{}, access, Temporality{});
-      } else {
-        static_assert(P == Populate::Zero);
-        return execute(
-            op, to, pointer, mask, zeros(to), Layout{}, ValuePolicy{},
-            access, Temporality{});
-      }
-    }
-  };
-
-  if constexpr (Addr == Addressing::Indexed) {
-    opt::Indexed<
-        typename Request::IndexVectorType, Request::index_scale>
-        addressing{*request.indices};
-    return dispatch(addressing);
-  } else if constexpr (Addr == Addressing::Strided) {
-    const auto indices =
-        make_strided_indices<CurrentBackend>(to, request.stride);
-    opt::Indexed<
-        Vec<Rebind<int32_t, ToTag>>, Request::index_scale> addressing{indices};
-    return dispatch(addressing);
   } else {
-    return dispatch(Alignment{});
+    // Addressing rides in the alignment slot (see LoadConvertRequest); only
+    // its construction differs between indexed, strided, and contiguous.
+    auto dispatch = [&](auto access) VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
+      if constexpr (A == Active::Unmasked) {
+        return execute(op, to, pointer, Layout{}, ValuePolicy{}, access, Temporality{});
+      } else if constexpr (Unordered) {
+        const auto memory_mask = [&]() VECOPS_INLINE_LAMBDA {
+          if constexpr (A == Active::First) {
+            return mwhilelt(FromTag{}, 0, request.first_count);
+          } else {
+            return *request.mask;
+          }
+        }();
+        auto converted = execute(op, to, pointer, memory_mask, Layout{}, ValuePolicy{}, access, Temporality{});
+        if constexpr (P == Populate::Zero) {
+          return converted;
+        } else {
+          // Public unordered load-convert deliberately has no population
+          // option, but DataAccess carries a logical output-domain population
+          // through its resolved request. Convert the memory mask back to that
+          // domain before blending; otherwise inactive widened lanes retain the
+          // backend's zero fill (which, for example, corrupts max reductions of
+          // entirely negative BF16 tails).
+          const auto output_mask = convert(to, FromTag{}, memory_mask);
+          if constexpr (P == Populate::MergeVector) {
+            return blend(to, *request.merge_vector, output_mask, converted);
+          } else {
+            static_assert(P == Populate::MergeScalar);
+            return blend(to, fill(to, request.merge_scalar), output_mask, converted);
+          }
+        }
+      } else {
+        const Mask<ToTag> mask = [&]() VECOPS_INLINE_LAMBDA {
+          if constexpr (A == Active::First) {
+            return mwhilelt(to, 0, request.first_count);
+          } else {
+            return *request.mask;
+          }
+        }();
+        if constexpr (P == Populate::MergeVector) {
+          return execute(op, to, pointer, mask, *request.merge_vector, Layout{}, ValuePolicy{}, access, Temporality{});
+        } else if constexpr (P == Populate::MergeScalar) {
+          return execute(op, to, pointer, mask, fill(to, request.merge_scalar), Layout{}, ValuePolicy{}, access,
+                         Temporality{});
+        } else {
+          static_assert(P == Populate::Zero);
+          return execute(op, to, pointer, mask, zeros(to), Layout{}, ValuePolicy{}, access, Temporality{});
+        }
+      }
+    };
+
+    if constexpr (Addr == Addressing::Indexed) {
+      opt::Indexed<typename Request::IndexVectorType, Request::index_scale> addressing{*request.indices};
+      return dispatch(addressing);
+    } else if constexpr (Addr == Addressing::Strided) {
+      const auto indices = make_strided_indices<CurrentBackend>(to, request.stride);
+      opt::Indexed<Vec<Rebind<int32_t, ToTag>>, Request::index_scale> addressing{indices};
+      return dispatch(addressing);
+    } else {
+      return dispatch(Alignment{});
+    }
   }
 }
 
 /** Executes a converting store from a resolved StoreConvertRequest. */
 template <typename Request>
-VECOPS_ALWAYS_INLINE void execute_store_convert_request(
-    StoreConvertOp op, typename Request::TagType from,
-    typename Request::ToElement* pointer,
-    Vec<typename Request::TagType> value, const Request& request) {
+VECOPS_ALWAYS_INLINE void execute_store_convert_request(StoreConvertOp op, typename Request::TagType from,
+                                                        typename Request::ToElement* pointer,
+                                                        Vec<typename Request::TagType> value, const Request& request) {
   using FromTag = typename Request::TagType;
   using To = typename Request::ToElement;
   using ToTag = Rebind<To, FromTag>;
@@ -792,53 +782,42 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_request(
   using Packing = typename Request::PackingOption;
   constexpr Active A = Request::active_kind;
   constexpr Addressing Addr = Request::addressing_kind;
-  constexpr bool Unordered =
-      std::same_as<Layout, cvt::Unordered>;
+  constexpr bool Unordered = std::same_as<Layout, cvt::Unordered>;
 
-  if constexpr (
-      Addr != Addressing::Contiguous &&
-      scalarize_indexed_memory_v<
-          CurrentBackend, typename Request::ActiveResources>) {
+  if constexpr ((Addr == Addressing::Strided && !strided_indices_supported<FromTag>()) ||
+                (Addr != Addressing::Contiguous &&
+                 scalarize_indexed_memory_v<CurrentBackend, typename Request::ActiveResources>)) {
     execute_scalar_store_convert_request(from, pointer, value, request);
-    return;
-  }
-
-  auto dispatch = [&](auto access) VECOPS_INLINE_LAMBDA {
-    if constexpr (A == Active::Unmasked) {
-      execute(
-          op, from, pointer, value, Layout{}, ValuePolicy{}, access,
-          Temporality{}, Packing{});
-    } else {
-      const auto mask = [&]() VECOPS_INLINE_LAMBDA {
-        if constexpr (A == Active::First) {
-          if constexpr (Unordered) {
-            return mwhilelt(ToTag{}, 0, request.first_count);
-          } else {
-            return mwhilelt(from, 0, request.first_count);
-          }
-        } else {
-          return *request.mask;
-        }
-      }();
-      execute(
-          op, from, pointer, value, mask, Layout{}, ValuePolicy{},
-          access, Temporality{}, Packing{});
-    }
-  };
-
-  if constexpr (Addr == Addressing::Indexed) {
-    opt::Indexed<
-        typename Request::IndexVectorType, Request::index_scale>
-        addressing{*request.indices};
-    dispatch(addressing);
-  } else if constexpr (Addr == Addressing::Strided) {
-    const auto indices =
-        make_strided_indices<CurrentBackend>(from, request.stride);
-    opt::Indexed<
-        Vec<Rebind<int32_t, FromTag>>, Request::index_scale> addressing{indices};
-    dispatch(addressing);
   } else {
-    dispatch(Alignment{});
+    auto dispatch = [&](auto access) VECOPS_INLINE_LAMBDA {
+      if constexpr (A == Active::Unmasked) {
+        execute(op, from, pointer, value, Layout{}, ValuePolicy{}, access, Temporality{}, Packing{});
+      } else {
+        const auto mask = [&]() VECOPS_INLINE_LAMBDA {
+          if constexpr (A == Active::First) {
+            if constexpr (Unordered) {
+              return mwhilelt(ToTag{}, 0, request.first_count);
+            } else {
+              return mwhilelt(from, 0, request.first_count);
+            }
+          } else {
+            return *request.mask;
+          }
+        }();
+        execute(op, from, pointer, value, mask, Layout{}, ValuePolicy{}, access, Temporality{}, Packing{});
+      }
+    };
+
+    if constexpr (Addr == Addressing::Indexed) {
+      opt::Indexed<typename Request::IndexVectorType, Request::index_scale> addressing{*request.indices};
+      dispatch(addressing);
+    } else if constexpr (Addr == Addressing::Strided) {
+      const auto indices = make_strided_indices<CurrentBackend>(from, request.stride);
+      opt::Indexed<Vec<Rebind<int32_t, FromTag>>, Request::index_scale> addressing{indices};
+      dispatch(addressing);
+    } else {
+      dispatch(Alignment{});
+    }
   }
 }
 

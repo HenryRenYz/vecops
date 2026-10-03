@@ -84,9 +84,11 @@ positive power of two (enforced by `static_assert`); any other value,
 including negatives, is rejected at compile time. `N` need not fill a
 hardware word: a sub-word Tag (say 8 f32 lanes on a 16-lane AVX-512 word)
 still occupies one physical register but reports `size(tag) == N` and keeps
-its logical semantics. On sizeless (VLA) SVE builds, `FixedTag` cannot be
-materialized at all — the `static_assert` there points you to a
-vector-length-specific build or `ScalableTag`.
+its logical semantics. On sizeless (VLA) SVE builds, fixed logical blocks up
+to 16 bytes (the architectural minimum VL) occupy one sizeless register and
+use an exact lane prefix. Larger blocks require a vector-length-specific
+build or `ScalableTag`. Wider memory-side rebinds fall back to a lane-preserving
+conversion boundary rather than constructing an unsupported fixed aggregate.
 
 **`ScalableTag<T, P>` — `P` is the base-2 exponent of the native word
 count.** `P >= 0` gives `native_word_size << P` lanes; `P < 0` describes a
@@ -940,3 +942,47 @@ operation header is also self-sufficient (`Arithmetic.h` alone compiles).
 Include what you use; `details/` headers are internal — do not include them
 outside the module (shared option traits live at the end of the public
 `Options.h`).
+
+## Architecture-specific instruction and state APIs
+
+`vecops/vec/SME.h` publishes `vec::sme` ZA/vector primitives (horizontal and
+vertical load/store/read/write, zero, addha, mopa, and SVL queries).
+`vecops/vec/AMX.h` publishes `vec::amx` tile/configuration/memory/dot primitives.
+Headers may be included portably; using an unavailable instruction is a
+compile-time error. These primitives do not acquire state. Use the lexical
+requirements in `vecops/execution/Resources.h`: `execution::sme::Region`, or
+`execution::amx::Region` with `execution::amx::TileConfiguration`.
+`ExecutionSession` obtains Linux per-thread XTILEDATA permission (failure is a
+release-mode exception), configures AMX tiles, and releases owned state.
+Configuration is destructive and tile strides are in bytes.
+AMX loads/stream-loads include compiler ordering for freshly produced packing
+memory. GCC intrinsics with register-only inline asm otherwise permit producer
+stores to be deleted/reordered; this emits no hardware fence and does not add
+inter-thread synchronization.
+
+An SME owner must inline its noexcept callback and every helper between
+SMSTART/SMSTOP. Validate/allocate before entry; do not carry vectors or
+predicates across the VL/SVL boundary. Sized SVE Vec types require matching
+fixed VL/SVL guarantees in streaming mode; VLA is the general alternative.
+The existing manual-SME disassembly gate verifies no out-of-line calls remain.
+For vector math inside such an owner, define
+`VECOPS_SVE_INLINE_MATH_SPECIALS=1` before any vecops header, consistently
+across translation units sharing inline/template definitions. This forces
+the vector-only exp/log/rcp/rsqrt exceptional paths inline without changing
+their accuracy, NaN, saturation or subnormal behavior. Ordinary SVE builds
+leave these cold paths outlined. Generated SME DSL translation units select
+this policy automatically. It does not make scalar libm fallbacks (such as
+large-argument trigonometry) streaming-safe or replace the disassembly gate.
+Clang versions that accept `+sme-f64f64` but omit the ACLE feature-test macro
+can receive the matching target guarantee `VECOPS_TARGET_SME_F64F64=1`.
+Native/generated CMake targets propagate this only when the configured CPU
+or march string guarantees the optional instruction; it is not a runtime probe.
+Higher layers include these public headers rather than `vec/details/**`.
+
+VLA SVE fixed logical blocks up to 16 bytes fit the architectural minimum VL
+and are represented by one named sizeless register. A strided request whose
+rebinding to i32 indices exceeds that representation is scalarized *only at
+that boundary*, without instantiating an impossible index Vec. Larger fixed
+blocks still require VLS; scalable tuples retain their existing maximum POW.
+On x86, FP16/BF16→FP64 widening goes through FP32 entirely in registers; both
+stages are exact and preserve ordered lanes, including converting memory ops.

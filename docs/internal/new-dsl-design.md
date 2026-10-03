@@ -493,7 +493,7 @@ C++ moments 71.230 µs（1.100 倍）。其数值更稳，不能将不同算法�
 `PassResult`。名字唯一，支持 `before`/`after` 拓扑排序、循环约束诊断、
 显式 pass 名单与 per-run options。分析缓存属于本次运行，变换默认使分析
 失效；`PassResult` 可声明不变或保留部分分析。没有 current-kernel 全局状态。
-一次编译冻结 kernel 与 vector pipeline 的注册表快照，批量请求相互独立。
+一次编译冻结 kernel、vector 与 CPU memory pipeline 的注册表快照，批量请求相互独立。
 改变注册表后，已存在的 manager 不变化；已有 `T.jit` 工厂须 `cache_clear()`
 才能重新 elaboration。缓存继续使用生成源码内容 identity。
 
@@ -574,7 +574,8 @@ elementwise stores 合并必须验证跨 store 的读写和写写关系，否则
 
 本次没有声称所有优化都已迁成 pass：owned buffer 前端转发以及后端的
 尾部/别名保护仍在原模块，后续可通过更显式的 memory/effect IR 继续迁移。
-寄存器分配、parallel、MMA、任意 indexed-memory、专用 transpose 仍未实现。
+寄存器分配、parallel、MMA、任意 indexed-memory 仍未实现。
+专用 transpose 已在下述新阶段实现；上文旧阶段的验证记录保留历史语境。
 
 ### 本轮验证：pass、展开与显式 Vector IR
 
@@ -726,3 +727,343 @@ LayerNorm 显式使用与 C++ 一致的 moments 算法，单位 µs：
 改善约 19.3%，相对 C++ 快约 10.0%。所有结果与 C++ 比较通过
 （atol=5e-6、rtol=5e-5）。此处不将 centered 方差与 moments 的算法
 差异混入性能比较，也不宣称所有平台/布局已达最佳性能。
+
+## 专用 transpose 与架构状态（2026-10）
+
+`T.transpose` 仍是零拷贝 view；`T.func` 的 `T.transpose_copy` 提供 rank-2
+可见算法，编译期选择稠密单行/单列线性 copy，其余交给布局 lowering。
+对自动 `T.store(T.transpose(...))` 也适用，并支持前导 batch 轴和
+转置后的 elementwise DAG；不需要调用已有 C++ `ops::Transpose`。
+
+新增 `cpu-memory` 注册 pass 阶段（默认 `cpu-plan-transpose`），在 C++
+打印之前冻结并执行。该 pass 识别 memory permutation、证明连续目的布局，
+根据 dtype/ISA/常量 shape 选择寄存器网络和 SME alternatives，生成
+`TransposePlan`/`RegisterTranspose`/`PermutationOp`。通用 lowering 先构建
+split/interleave/concat 的显式 vector DAG，CPU emitter 仅打印已准备好的
+操作。数组只可用于标量 scratch/shape/configuration；Vec/Mask 操作均为
+独立命名变量，VLA/VLS SVE 都不使用向量数组。
+
+x86 采用 128-bit 蝶形基元及递归 split/concat；更宽 tile 和矩形 tile
+保留完整 load、控制 GCC 寄存器压力。VLS SVE 采用相同网络；VLA SVE
+利用不超过架构最小 VL（16B）的固定逻辑前缀构建 named sizeless network。
+窄类型 rebind 到 i32 索引超出表示上限时，仅在该访存边界 scalar fallback，
+不实例化非法索引 Vec。列尾部使用较小 FixedTag gather，而非无必要的大
+ScalableTag 索引组。完整 source row 明确无掩码，转换由 load/store 融合。
+仅有一个边界转换时，x86 可以先置换窄存储类型，再转换到目的类型；这是
+转换与 permutation 的合法交换，不会省略存在中间舍入的转换链。
+
+缺省采用 128-square cache block 和 input-major microtile 遍历，可通过
+`cpu_transpose_cache_block`、`cpu_transpose_loop_order` 调整。小单寄存器
+tile 有直接路径；已有输入输出重叠保护提升为区域级分流，alias fallback
+读取快照，而不是把每次 vector load 都混入 snapshot ternary。generic
+多 store fusion 不能绕过这些布局计划，暂时保留分别置换。
+`cpu_transpose_defer_conversion` 可覆盖边界转换移动；缺省 cost policy 对
+未知 shape/stride 的 byte→FP64 保留 compute-domain network，避免过多
+宽 store/address chains。常量布局仍保留 narrow-bit permutation。
+
+SME 简单加载转置使用 ZA horizontal write / vertical read，再执行边界
+转换。沿用原 C++ 已测量的常量 shape/dtype SME 选择及双行/双列流水阈值；
+没有 ARM 实机，不能将这些阈值声称为本轮的新性能优化结果。显式 SME
+要求目标 SME-FA64，automatic 在不满足条件时走 vector/gather。普通固定
+VL 和固定 SVL 不匹配时，automatic 不进入 SME；显式路径编译诊断拒绝。
+
+公开 C++ `vecops/vec/{SME,AMX}.h` 为原 details 中的指令封装提供稳定入口，
+`vecops/execution/Resources.h` 提供词法 state/configuration requirements。
+SME manual owner 内部禁止异常、分配和未内联调用；强制内联 noexcept
+callback，state entry 之前做全部验证。AMX 是 tile state/memory API，
+并非转置指令：Python `T.amx.region` 支持 configuration/zero/load/
+stream_load/store，Linux XTILEDATA permission 按线程取得，失败抛出明确异常，
+退出时 release。没有在本阶段加入 Python MMA。
+raw hardware memory effect 边界之前 materialize forwarded owned scratch，
+AMX store 对之后仍要使用的既有 load 做普通别名快照；显式 SME region
+中的多个 transpose 必须输入输出独立，跨操作依赖在 entry 前拒绝。
+
+测试/复现：`benchmarks/dsl_transpose.py` 自动读取
+`TransposeBenchCommon.h` 的 133 组 shape/输入/输出/compute dtype，分别
+Const/Any/Aligned，共 399 case；显式保持 C++ 等价 shape/stride 元数据，
+复用页对齐输入输出、native repeat + compiler fence、随机交错同轮计时，
+不计 JIT。本机 CPU 由用户限频，结果仅在该限频状态下解释，不能与旧轮
+绝对耗时直接比较。ARM 只做 Clang 19 AArch64 object 跨编译和手动 SME
+反汇编检查，不连接远程机器，也不声称实机正确性/性能已验证。
+最终配对测试：本机 Xeon w9-3495X、CPU 2 affinity、gcc/g++ 13、conda
+`af3`；intel_pstate/powersave，频率上下限 800/1800 MHz（未修改用户设置）。
+缓存单独放在 `build-dsl-transpose-final`，完整 399/399 case 与同轮 C++
+和 NumPy 参考逐元素一致。最终 DSL/C++ 耗时比几何平均 **0.8297**，
+即耗时平均降低约 **17.0%**。不是所有 shape 均无退化：26 个 case
+慢于 C++ 超过 10%，其中 10 个超过 20%；最大慢点是动态/Aligned
+17×19 FP64（0.456 vs 0.344 µs，约 +32.5%），其余显著慢点主要是
+3×5/32×64 小动态矩阵的边界和派发开销。对此保留后续优化空间，
+不以总体平均掩盖逐 case 退化。
+
+| Const case | 最终 DSL/C++ |
+|---|---:|
+| 1024² FP32→FP32 | 0.704 |
+| 4096² INT8→INT8 | 0.543 |
+| 4096² FP16→FP16 | 0.695 |
+| 256² FP16→FP64 | 0.595 |
+| 1024² FP16→FP64 | 0.826 |
+| 1024² INT8→FP64 | 0.700 |
+
+动态/Aligned 1024² INT8→FP64 的 compute-domain 策略在最终轮为
+0.885/0.887；全部逐 case 数据为 `build-dsl-transpose-final/final.csv`。
+基线使用本轮当前 C++，包括同样的 FP16/BF16→FP64 寄存器转换改进。
+
+```bash
+conda run --no-capture-output -n af3 python benchmarks/dsl_transpose.py \
+  --build-dir build-dsl-transpose-final --jobs 6 --rounds 13 \
+  --output build-dsl-transpose-final/final.csv
+conda run --no-capture-output -n af3 python benchmarks/dsl_transpose_cross.py \
+  --clang <clang19>/bin/clang++ --objdump <clang19>/bin/llvm-objdump \
+  --sysroot build-dsl-cross/sysroot/usr/aarch64-linux-gnu --jobs 4
+```
+
+## 矩阵乘与跨 helper 融合（实现阶段）
+
+公开入口为 `T.dot((A, B), output, acc=None)`；A 的逻辑形状是 M×K，B 是
+K×N。另提供无输出参数的纯表达式 `T.dot(A, B)`，方便连接下一个乘法。
+`T.library.matmul` 在 dot 上增加缓存分块、自动 packing、输出朝向派发；
+dot 自身只负责 tile 内核和必要的指令格式 staging，不自动进行缓存 packing。
+原有 C++ 算子没有成为 DSL 的黑盒实现，生成代码使用公开 vec/AMX/SME 原语。
+
+融合观察的是内联后的 DAG，而不是 Python helper 的名字或调用边界。
+rank-two layernorm/softmax 先拆成一次行统计和可重算的元素级 tail；例如
+`T.library.layernorm(act)` 的统计不进入 MMA 的重复加载循环，而其最终仿射
+可以进入 A 加载。CPU planning 记录输入操作成本、预计重用、物化条件和原因。
+少重用或廉价算术保留融合；昂贵重复计算则先物化；packing 路径把变换放在
+packing 的 load/convert 上。`cpu_matmul_fusion` 的 always/never 开关用于实测
+成本模型，不承诺一个固定经验阈值在所有 CPU 和频率条件下最优。
+动态 GEMV 会绕过 packing，因此按实际 M/N 选择 raw 或 packed 的重用
+模型，不因使用 library 包装就假定 B 只生产一次。转换型 load 同样计入
+操作成本，物化 buffer 在单次调用的循环中复用容量，而不是跨调用共享。
+
+K 分块的路由显式区分 first/middle/last：原始 acc/bias 只在 first 载入，
+middle 保持 native acc dtype，last 执行整个 epilogue（包括内联 helper），
+因此不会重复 bias 或在每一块重复量化。NC/KC/MC 循环限定 packed panel
+大小；B panel 在 MC 循环之外共享。可直接读取的 A 不做无意义的复制。
+Column-major 输出允许交换 A/B 并转置整个前后 DAG；架构 packed ABI 不允许
+仅改 shape 就解释成另一侧。
+
+CPU 内核包含 widening-dot/FMA GEMV、小 M/N AMX register families，以及
+一般 AMX/SME outer-product families。AMX B 的 K-contiguous 输入先按整行
+load/convert，再把 32-bit K groups 通过显式寄存器 permutation 转成 VNNI；
+不逐个 byte/half 做 gather。所有 vec/Mask 都是独立变量，staging/partial
+buffer 则是标量内存。输入元素变换之后再次清零 K/spatial padding，避免
+`0 * scale + bias` 在无效 lane 产生非零乘积。epilogue 转换使用实际结果
+tag，宽转换按命名 fragment 拆分，避免 SVE 多字 Vec 聚合。
+完整 AMX packing 面板与 K 块单独生成无 mask 的 load/convert，空间与 K
+尾部独立处理，避免每个完整块都付出边界检查。动态空输出在资源入口前
+短路，避免小矩阵 exact TILECFG 的 rows=0/cols!=0 非法组合；K=0 但
+输出非空仍执行 acc 与 epilogue。
+
+AVX-512 B packing 使用四阶段 dword 网络：完整 512-bit local unpack，
+然后两级 128-bit lane shuffle。每一个输入、stage、结果都是独立变量；
+SVE 和其他 x86 宽度仍使用公共 split/interleave/concat 网络。GCC 13
+AMX load intrinsic 的 asm 缺少内存读取声明，公开 load/stream_load 封装
+在其两侧加入编译器屏障，避免 freshly packed stores 被删除/重排；无
+硬件 fence，不改变线程同步语义。另保留生成器临时 Expr 的强引用和
+panel/ISA 分支的局部映射，避免 Python id 复用挂接错误的 C++ 局部地址。
+
+显式预打包输入在缓存切片时保存原始 ABI shape 和逻辑 origins，MC/NC/KC
+只改变计算区域，不重算物理 strides；acc 及 epilogue 的阶段语义与 raw
+输入相同。公开 dense pack 也通过注册 memory pass 生成自动 transpose
+计划，缓存分块的运行时 dense panel 绑定同一个预先准备的寄存器网络，
+printer 不重新运行优化或 lowering。SVE VLA 的窄 prefix 根据 memory、
+计算和输出三者的最大 lane 宽度限制，避免 f64→f32 等转换越过 128-bit
+最小 VL；不是只检查结果 dtype。rank-one bias/scale/arange 随矩阵朝向
+转置，并保留全局 panel 坐标。外部 AMX/SME packed buffer 绑定目标 ISA
+及 SVL ABI，不能通过仅改 shape 或跨平台重解释来转换格式。
+多个 sibling dot 和 dot→pack/reduction 通过产品边界物化，保留最终 dot
+的 epilogue 融合，不将多个独立 MMA 偷偷合并成一个累加器。
+
+寄存器 permutation 在 CPU-memory pass 准备，输入融合政策也是可注册
+`cpu-plan-matmul`；前端不把 ARM/x86 的 packing 格式写死到通用 Tensor。
+当前 instruction schedule 仍由 CPU C++ emitter 展开，不等同于完整的
+架构无关 MMA dialect；新平台应扩展自己的 planning/lowering，而不是复用
+CPU schedule。无需新增 MLIR 依赖。
+
+基准入口 `benchmarks/dsl_matmul.py` 从 MatmulBenchCommon/Scenario catalog
+读取 shape，独立覆盖 Const/Dynamic、bf16/浮点转换/整型、acc、bias+relu/clamp、
+scale、silu、输入仿射。同轮公共 C++ Matmul、native repeat、随机交错顺序，
+JIT 不进入计时。完整性能验收尚以实际报告为准，不能以正确性测试代替。
+独立 packing 基准 `benchmarks/dsl_matmul_pack.py` 读取 MatmulPackBench 的
+面板形状，覆盖 A/B、dtype 转换及输入仿射，逐字节检查 padding 与公开
+C++ packed ABI。`benchmarks/dsl_matmul_packed.py` 把预打包放在计时之外，
+区分叶内核代码生成差距与在线 packing/缓存策略差距。矩阵基准通过文件
+锁串行占用同一计时核心，并将自身编译子进程排除于该核心及 SMT sibling，
+不修改用户的频率限制或其他进程。
+`benchmarks/dsl_matmul_cross.py` 对 SVE VLA/VLS、SME VLA/SVL 生成对象并做
+SMSTART/SMSTOP no-call/mopa gate；此检查不等于离线 ARM 主机上的性能验证。
+
+缓存信息扩展 `llc_bytes/llc_level/l3_present`，区分没有物理 L3 与旧 API 的
+fallback `l3_bytes` 预算。SME f64 目标显式传递 `VECOPS_TARGET_SME_F64F64`，
+以兼容接受 `+sme-f64f64` 但不定义对应 ACLE 宏的 Clang 19。
+含数学 epilogue 的 GEMV 将数个完成的 horizontal sum 装入一个合法
+向量，再执行 exp 等操作，不逐个结果调用 scalar libm；行/列输出、宽
+seed/output、K 分块的阶段语义保持一致。简单 affine/relu 仍可走标量
+结果路径，避免没有收益的额外组装。
+GEMV 完整 K 边界在循环前计算，完整组与单个 masked K 尾块分开；
+完整输出列组也在 K 循环外判断，避免依赖 GCC 自动 loop unswitching。
+CPU planning 的 `cpu_gemv_columns` 调优参数控制独立列数（1–8，默认 4），
+不改变顶层 tile/API 的形状限制。
+SME DSL 编译单元自动选择
+`VECOPS_SVE_INLINE_MATH_SPECIALS=1`，强制内联 vector-only exp/log/rcp/rsqrt
+特殊值路径，保持精度与特殊值语义；普通 SVE 编译仍保留 cold outlining。
+没有解除 SMSTART/SMSTOP 的 no-call 验证，也没有将 scalar libm 标记为安全。
+
+### 矩阵阶段验证与性能记录（本机限频）
+
+本机 Xeon w9-3495X，conda `af3`，GCC 13，Native/AVX-512/AMX。
+用户设置的 800–1800 MHz 限频保持不变。CPU 2 上 native repeat，编译
+进程排除 CPU 2 及 SMT sibling 58；同一核心的计时通过文件锁串行执行。
+数字只比较同轮 DSL 与当前公共 C++ Matmul/MatmulPack，JIT、跨 shape
+编译时间不进入计时，不能和未限频的历史绝对时间直接比较。
+
+| 已完成范围 | case 数 | DSL/C++ 耗时几何均值 | 最慢比例 |
+|---|---:|---:|---:|
+| 完整 BF16 raw matmul catalog（86 shape，Const/Dynamic） | 172 | 0.9434 | 1.3080 |
+| BF16 预打包 AB，dot/library、plain/bias+ReLU | 32 | 0.8894 | 1.2095 |
+| 独立 A/B packing，BF16/FP32→BF16、plain/affine | 64 | 1.0258 | 1.6896 |
+| INT8 与 U8×S8，256³ 的七种前后融合 pipeline | 28 | 0.6478 | 1.0990 |
+| INT8 与 U8×S8，8×128×128、plain/bias+ReLU | 8 | 0.9124 | 1.0562 |
+| INT8 与 U8×S8，行/列 GEMV 和 small-M（完整 K/N 组优化后） | 24 | 0.8353 | 1.2645 |
+| 最新 BF16/FP32→BF16 行 GEMV，七种融合 pipeline | 28 | 0.5618 | 1.2453 |
+| 融合 metadata 合并对照（最新 GEMV 替换较早对应 case） | 112 | 0.6411 | 1.2453 |
+
+前三项分别为 `build-dsl-matmul/{catalog-latest,packed-latest,pack-latest}.csv`；
+整型报告为 `fusion-integer-final.csv` 与 `integer-slim-final.csv`。
+额外行/列整型报告为 `integer-groups-final.csv`，三个 shape 为
+1×257×257、131×1×1025、16×48×256，Const/Dynamic、plain/bias+ReLU。
+最新浮点 GEMV 为 `gemv-policy-final.csv`，shape 1×257×129；112-case 合并
+是 `fusion-float-final.csv` 的 84 case 加 `fusion-integer-final.csv` 的
+28 case，再以最新 GEMV 28 case 按完整 metadata key 替换，不是一次性
+重新运行全部 112 case。完整 catalog/packing 是相应阶段的记录，后续
+GEMV 微优化另有单独复测，不把历史记录冒充全部最新源码的一轮计时。
+融合均值包含输入仿射 pipeline 的大幅收益，不能理解为普通矩阵乘普遍
+快 35%；合并报告仍有 11 个 case 超过 1.1×、4 个超过 1.2×，动态
+FP32→BF16+SiLU GEMV 为 1.2453×，动态 BF16 plain/accumulate 也有差距。
+所有 case 先做 NumPy/当前 C++ 正确性检查；packing 比较整个物理 buffer，
+包括 padding。不能声称所有形状无性能退化：完整 catalog 有 17 个 case
+超过 1.1×、8 个超过 1.2×，最慢为 Const 64×1024×4096；预打包最大的
+Const 128×4096×4096 library case 为 1.2095×。packing 最慢是动态
+17×65 FP32→BF16 B，0.7442µs 对 0.4404µs；小尾部的检查/派发开销仍存在。
+缓存/packing 选择与叶指令调度都可能影响结果，不能仅凭整体耗时将差距
+全部归为算法，或据平均值宣称完成逐 case 的无退化验收。
+该最大预打包 shape 的 plain dot 为 0.9914×、bias+ReLU dot 为 1.0588×，
+而 library 分别为 1.2095×、1.1900×：此 case 的额外差距主要出现在缓存
+wrapper/切片调度，不能据 library 数字直接判定底层 MMA 指令整体慢 21%。
+
+矩阵正确性套件分批覆盖原矩阵/edge/layout/dispatch 44、空 shape 1、
+运行时 dense panel 1、GEMV 数学 epilogue 8、融合策略 10。
+额外动态 packing-bypass 数值测试 1 项覆盖昂贵的 A/B `T.func` tail、行/列
+GEMV、真实 packing 和显式 K 分块，合计 65 个独立矩阵 case 分批通过。
+最后一轮重新检查 GEMV/基本布局 12 项，以及 dense panel 与强制/禁止/自动
+LayerNorm tail 融合；另外布局/转置/架构 36 项、优化 pass 22 项通过。
+C++ ExecutionSession 3 项、MatmulTiler 16 项通过。
+ARM 离线检查共 156 个矩阵对象（132 基础/融合/packing/normalization/SiLU
+对象 + 24 exp2/log/rcp/rsqrt 对象），覆盖 FP16/BF16/FP32/FP64/S8/U8×S8，
+四种 SVE/SME VL/SVL 编译配置；另重跑 88 个转置对象。编译与 SME no-call
+gate 全部通过。这些不是 ARM 实机数值正确性或性能测试。
+最后一轮输入融合政策变更后的日志为
+`build-dsl-transpose/{pytest-matmul-policy,pytest-dynamic-fusion-final,matmul-cross-final-policy}.log`；
+GEMV 完整组的 17 项数值/政策回归为 `pytest-gemv-groups-final.log`。
+source-only checks：`git diff --check` 与 Python compileall 通过。
+当前动态 kernel 会生成多个 ISA/family/alias alternatives，冷编译可达
+数分钟；这仍是后续编译时长优化点，并未以剔除冷编译来声称它已经解决。
+这一阶段无需新增 MLIR 或其他编译框架依赖。
+
+### 集中操作语义与目标成本模型
+
+操作契约统一放在 `_compiler/operations`，保留字符串 opcode 和现有
+Scalar/Tile/Vector 类型；traits 与类型正交，不为每条操作引入类层级。
+目录集中维护 effects、规约种类、普通 intrinsic 参数/arity、常量折叠、
+CSE 合法性和 transpose/vector lowering 边界。未知操作默认 opaque，
+不能通过“未出现在排除列表”意外获得优化合法性。CPU implementation
+descriptor 单独维护 scalar/vector spelling、lane fallback 和 wordwise math
+能力；这些能力不能由 cost 或昂贵程度推断。
+
+`_compiler/cost` 定义 profile/rule/query 和融合 DAG 分析，CPU 的 ISA/处理器
+覆盖位于 `backends/cpu/cost`。覆盖顺序为 default → CPU → ISA → processor
+→ 显式用户 profile；规则按 priority、selector 数匹配，歧义报错。
+当前默认 compute 估计继承 1/4/16 的启发式基线；区分 reciprocal throughput
+和 dependency latency，保留 confidence/provenance。x86、SVE、SME 和 SPR
+表只是未校准估计，SME 当前继承 SVE，不宣称 ARM 实机周期数据。
+query 可区分 dtype、源 dtype、accuracy、scalar/vector、物理 word 数、mask
+和访问方式。未知操作非零估价；融合后的 load_convert 只收一次 conversion。
+
+region analysis 在 helper 内联/CSE 后按执行 DAG 累计，而不是检查是否出现
+exp/log。共享节点只计一次，已物化/规约/dot 是边界；scalar 条件按实际分支
+或最坏分支估计，vector select 两臂都计。输出包含 compute/memory work、
+critical path 和 postorder live-vector hint；后者只是调度预算，不是完整物理
+寄存器分配或端口/缓存模拟。CPU chunk 同时使用累计成本与 register budget，
+显式 Vector tag 不变，legalization 后重新估算物理 word group。
+
+重算预算与 temporary traffic 等策略集中在 profile policies，不再保留
+散落的 expensive 列表。matmul 重算阈值随整个 producer DAG 成本连续变化，
+仍保留 B packing 外置、A N-panel 重用、动态 GEMV 绕过 packing 的条件。
+目前 raw 访问的重用次数是粗粒度 output-span proxy，packing 使用 panel
+次数；精确到每个 kernel-family loop 的缓存/端口模型是后续校准工作。
+GEMV scalar/vector epilogue 由 planning pass 对比成本，emitter 只读取结果；
+切片后的临时 IR 继承原 store 的已选计划，不在 emitter 重新运行分析。
+
+每次编译开始冻结 operation/implementation/profile，以及全部 pass 阶段；
+ContextVar 保证 frontend、IR 构造和 pass 读取同一语义快照。快照带入生成
+source identity，registry 指纹带入 T.jit 装饰器 key。显式跨编译 target 不
+探测本机；只有 Native 允许本机探测，自定义 flags/toolchain 应明确指定
+`cpu_cost_target`。模板/源码批量捕获机制不变，编译中途注册仅影响后续编译。
+
+整个 `python/vecops/language` 使用项目 Ruff formatter（两空格、120 列）；
+`dev` extra 固定 Ruff 0.16.10，避免格式随工具升级漂移。不增加 MLIR 依赖。
+
+#### 本阶段验证（2026-10-03）
+
+本机 conda `af3`：cost/architecture/matmul policy 33 项、optimization pass
+22 项、GEMV/dynamic fusion/transpose native 36 项全部通过，合计 91 项
+相关测试。新测试覆盖累计 DAG 成本、共享节点/边界、精度与 dtype 覆盖、
+未知操作、快照/缓存失效和动态转置的不可变 shape 捕获。全量 Python
+套件因逐项冷编译耗时中断，不将其计为全量通过。
+
+ARM 仅离线检查：矩阵 156/156、转置 88/88 object 与 SME gate 通过；
+显式 SVE/SME target 选择自身 profile，不继承本机 x86 成本。使用 Clang
+19.1.3 与 `build-dsl-cross/sysroot/usr/aarch64-linux-gnu`；日志为
+`build-dsl-transpose/{matmul,transpose}-cross-cost-final.log`，没有 ARM
+实机正确性/性能结论。
+
+保留用户当前 x86 限频设置，paired 正确性/性能抽查：64 行、宽度
+512/4096 的 LayerNorm DSL/C++ 耗时比 0.664/0.901，Softmax 为
+0.725/0.904。bf16、256³ 和 1×257×129、Const/Dynamic、plain/SiLU
+组合的 8 个 matmul case 几何平均比 0.963；Dynamic plain GEMV 仍为
+1.215，保留先前该路径的性能差距，不宣称所有 case 与 C++ 持平，也
+不将这次抽查等同于严格同轮修改前后无退化证明。日志分别为
+`build-dsl-transpose/norm-cost-smoke.log`、
+`build-dsl-transpose/matmul-cost-smoke-final.log`，matmul CSV 位于
+`build-dsl-matmul/cost-model-smoke-final.csv`。
+
+复现完整 catalog 与独立 packing（保留上述隔离和限频条件）：
+
+```bash
+conda run --no-capture-output -n af3 python benchmarks/dsl_matmul.py \
+  --kind bf16 --level matmul --pipeline plain --max-flops 0 \
+  --rounds 9 --jobs 4 --output build-dsl-matmul/catalog.csv
+conda run --no-capture-output -n af3 python benchmarks/dsl_matmul_pack.py \
+  --shape 17x65 64x256 513x1000 1025x1027 --kind bf16 convert \
+  --rounds 9 --jobs 6 --output build-dsl-matmul/pack.csv
+conda run --no-capture-output -n af3 python benchmarks/dsl_matmul_cross.py \
+  --clang <clang19>/bin/clang++ --objdump <clang19>/bin/llvm-objdump \
+  --sysroot build-dsl-cross/sysroot/usr/aarch64-linux-gnu --jobs 8
+```
+
+### 前一阶段转置验证记录
+
+ARM 最终 **88/88 object + SME gate** 通过：四个目标 SVE VLA、512-bit
+VLS、SME VLA、固定 512-bit SVL；17 个 dtype 三元组的完整 source
+instantiation、动态/aligned 窄转换、自动/显式区域与双行/列流水。
+另对公开 API 迁移后的 C++ SME Matmul umbrella 做完整语法检查通过。
+仍没有 ARM 链接运行或性能数据。C++ x86 原有转置 8 项、公开 AMX
+状态/搬运 2 项、访存转换 65 项，以及当前源码的 focused 转换 29 项
+分别通过（focused 与原测试部分重叠，未累加为独立测试数量）。
+Python 新转置/架构边界 29 项、补充注册/NumPy/特殊值等测试继续通过；
+AMX scratch materialization 与写入前捕获 load 的保值回归也通过。
+现有 DSL/优化 pass 回归 **63/63** 通过，runtime 回归 **23/23** 通过；
+相关日志位于 `build-dsl-transpose/pytest-regression.log` 和
+`build-dsl-transpose/pytest-runtime.log`。这些 Python 测试均使用本机 conda
+`af3`，没有增加 MLIR 或其他编译框架依赖。

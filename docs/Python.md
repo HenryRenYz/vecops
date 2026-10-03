@@ -214,11 +214,91 @@ DSL tensor annotations require an explicit dtype. Assertions remain checked in
 release builds; scalar indexing still requires valid caller-provided bounds.
 
 `T.tile(A)` and positive-step slices describe memory regions; negative physical
-strides are allowed. `T.transpose(A)`/`A.T` change address mappings and currently
-use strided gather/scatter (TODO: dedicated transpose kernels).
+strides are allowed. `T.transpose(A)`/`A.T` change address mappings without
+copying. A store of a last-two-axis permutation automatically selects dense
+loads, an explicit named register butterfly and dense stores when legal,
+including leading batch planes and fused elementwise expressions. Masks,
+broadcasts and unusual layouts retain gather/scatter. `T.transpose_copy(A, C,
+compute_dtype=...)` is the rank-2 visible `T.func` algorithm, with a linear-copy
+specialization for dense single-row/column shapes. Conversions fuse into
+load/store boundaries; a sole widening conversion may move after the
+permutation on x86 without changing lane values or rounding.
 `T.reshape` requires a dense view and preserves element count. Shapes broadcast
 statically where possible; unknown relations are checked at runtime. A source
 extent must equal the destination extent or be one; incompatible extents error.
+
+### Matrix products and packing
+
+`T.dot((A, B), output, acc=None, acc_dtype=None, implementation="auto")`
+computes the rank-two tile product. A is `[M,K]`, B is **`[K,N]`** (unlike the
+C++ Matmul operator's `[N,K]` convention). Inputs may be views, elementwise
+tile DAGs or explicitly packed values. The result is also returned as a tile
+expression for a fused final store. `T.dot(A, B, acc=None)` is the pure
+returning form. Dot does not introduce cache blocking or persistent packing;
+instruction-format staging is still necessary for raw AMX/SME inputs.
+
+```python
+a = T.cast(T.library.layernorm(T.load(A)) * scale + bias, "bfloat16")
+b = T.load(B, dtype="bfloat16")
+value = T.library.matmul((a, b), C, acc=T.load(D), BK=256)
+T.store(C, T.max(value * 0.5, 0))
+```
+
+`T.library.matmul` adds cache traversal and automatic packing, with optional
+positive `BM`, `BN`, `BK`, `packing="auto"/"none"/"A"/"B"/"AB"` and `swap=True`.
+Unspecified blocks use target-side L1/L2 budgets and the discovered last-level
+cache, never the Python build host's cache. Known small working sets and GEMV
+may bypass the cache traversal. Block sizes are aligned to the instruction
+family. Column-contiguous output can swap/transposed A/B and the **whole fused
+epilogue**, not just the product. Already packed operands are not silently
+reinterpreted by this transformation.
+
+Row/column GEMV use vector widening-dot/FMA leaves; matrix leaves use public
+AMX or SME instructions when their dtype/target contract permits, otherwise
+vector FMA. Accumulation defaults to int32 for 8-bit integer inputs, float64
+if either input is float64, otherwise float32. Native accumulator loads can
+initialize hardware accumulators directly. K-block continuation uses native
+accumulator storage; the original acc/bias is applied only on the first block
+and the user epilogue only on the last. Intermediate output conversions are
+not inserted between blocks.
+
+`T.pack(source, output=None, side="A", format="auto", dtype=None)` creates
+or writes a padded physical buffer and returns a packed logical tile. Formats
+are `dense`, `amx`, `sme`, or target-selected `auto`. `T.packed(buffer,
+logical_shape, side=..., format=...)` wraps an external packed buffer. Its
+physical storage must be dense, large enough and independent of the output;
+shape/capacity/alias validation precedes hardware-state entry. A/B formats
+are distinct: AMX A is row/K-blocked, B is dword-group/VNNI interleaved; SME
+uses spatial panels and K groups parameterized by SVL. Dense B stores `[N,K]`.
+Explicit AMX packing supports bf16/fp16/int8/uint8 and requires an AMX target.
+Full AMX spatial/K panels use unmasked load/convert and a prepared dword
+permutation; only the final spatial panel or K block clears transformed padding.
+Prepacked cache panels retain the original physical layout and logical
+origins, including K-block continuation; block sizes do not reinterpret the
+buffer. Dense `T.pack` and runtime dense cache panels use the automatic
+transpose/vector memory planner. External packed buffers are tied to the
+target ISA and (for SME) SVL ABI; shape reinterpretation is not a format
+conversion.
+
+`T.func` is inlined **before** fusion analysis, including nested
+`T.library.*` calls in frozen capture identity. Rank-two layernorm/softmax
+hoist row statistics once; their final affine/exp tail stays in the operand
+DAG. The CPU fusion policy estimates operation cost and reloads to choose
+recomputation versus materialization, or puts the transform in packing loads.
+Dynamic row/column GEMV selects the non-packing reuse model when it bypasses
+packing; a tiled API alone does not imply that B is produced only once.
+`pass_options={"cpu_matmul_fusion": "auto"/"always"/"never"}` provides an
+explicit diagnostic override; `auto` is a heuristic, not an optimality proof.
+`cpu_gemv_columns` (integer 1–8, default 4) controls independent GEMV result
+columns per register group for CPU tuning; it is not a tile shape restriction.
+Nested products, sibling products and product-to-pack/reduction boundaries
+materialize only the necessary intermediate products. A trailing rank-one
+bias/scale follows the matrix orientation and cache-panel origin.
+GEMV mathematical epilogues group completed horizontal sums into a legal
+vector before evaluating exp/log/etc, including strided output and K-block
+continuation. SME source generation keeps vector-only math exceptional
+paths inline, preserving their numerical contract and the no-call gate.
+No generated kernel calls `vecops::ops::Matmul` or private kernel helpers.
 
 `T.Vector(dtype, N=...)` or `T.Vector(dtype, pow=...)` describes a tagged virtual
 vector. It is not limited by the C++ Vec maximum power. `T.load(A,
@@ -265,8 +345,9 @@ side output can fuse into a reduction. A consumer needing the completed global
 reduction remains a later phase. Adjacent elementwise stores can share a vector
 traversal with runtime alias guards and a sequential fallback.
 
-`T.layernorm` and `T.softmax` are visible, rank-one DSL algorithms: centered
-variance and maximum-subtracted exponentials respectively. Affine/post-ops can
+`T.layernorm` and `T.softmax` are visible rank-one/rank-two DSL algorithms:
+centered variance and maximum-subtracted exponentials respectively. Rank two
+normalizes each row, with statistics separated from the fusible tail. Affine/post-ops can
 be expressed directly before `T.store`. `T.layernorm(x, variance='moments')`
 explicitly selects the existing C++ operator's sum/sum-of-squares algorithm,
 allowing a fused reduction pass; it can suffer cancellation for large means and
@@ -292,8 +373,8 @@ comparisons are in `benchmarks/dsl_norm.py`.
 
 ### Compiler passes
 
-`T.passes` exposes a named pass registry and `PassManager`. Kernel and vector
-stages have separate pipelines, deterministically ordered by `before`/`after`.
+`T.passes` exposes a named pass registry and `PassManager`. Kernel, vector and
+CPU memory-planning stages have separate pipelines, ordered by `before`/`after`.
 Managers snapshot the registry; analyses and traces are local to a run.
 
 ```python
@@ -313,7 +394,7 @@ CSE, plan computation reuse, fuse reductions/reduction-side-outputs/elementwise
 stores, and expand independent serial operations. Vector passes create
 operation-major copies, coalesce groups and legalize dtype lane domains.
 Separate CPU passes split full chunks from masked tails, select wider automatic
-tile chunks for expensive math, and legalize multiword math into native-word
+tile chunks from accumulated region cost and a conservative live-vector budget, and legalize multiword math into native-word
 calculations while preserving coalesced memory requests. Explicit Vector tags
 and logical unroll counts do not change. `pass_options` can override
 `cpu_full_chunks`/`cpu_wordwise_math` (bool), `cpu_math_chunk_pow` and
@@ -324,6 +405,115 @@ chains. These are tuning policies, not performance guarantees.
 Register plugins before factory elaboration, or call the existing factory
 `cache_clear()` when changing a pipeline after `T.jit` has cached a kernel.
 These passes do not reinterpret source-backed C++ kernels.
+
+Operation semantics are registered centrally under `_compiler/operations`,
+separately from CPU implementation capabilities. Recompute decisions count the
+whole fused DAG after helper inlining/CSE, not membership in an expensive-op
+list. Shared producers count once; reductions, matrix products and materialized
+values are boundaries. `compiled.vector_ir.regions[*].cost` reports estimated
+compute throughput, memory throughput, critical path and live-vector hints.
+The hint is not a physical register allocator or an exact spill prediction.
+
+Cost profiles are immutable and layered: default, CPU, ISA, processor, explicit
+overrides. Cycles are estimates per native word (scalar queries per scalar
+operation); latency is separate from reciprocal throughput. Current profiles
+retain low-confidence heuristic values, not measured processor calibrations.
+Unknown operations receive a nonzero conservative fallback and are not implicitly
+CSE/transpose eligible. `Native` may inspect the local CPU; explicit SVE/SME or
+AVX targets never inherit the build host's ISA. `cpu_cost_target` and
+`cpu_cost_processor` override cost selection only, never compiler ISA legality.
+For custom compiler flags/cross toolchains, specify the cost target explicitly
+if it differs from `Compiler.target`.
+
+```python
+profile = T.cost.CostProfile(
+    "my-calibration", version="1",
+    rules=(T.cost.CostRule(
+        T.cost.OperationCost(throughput_cycles=4, latency_cycles=8,
+                             provenance="local microbenchmark"),
+        match=(("operation", "exp"), ("dtype", "float32")),
+    ),),
+    policies=(("reuse_compute_budget", 6),),
+)
+compiled = T.compile(template, pass_options={"cost_profiles": (profile,)})
+# Alternatively T.cost.register_profile(profile), then use its name.
+```
+
+Later profiles override earlier matching rules; within a profile priority and
+selector count determine precedence, with ambiguous ties rejected. Policy
+budgets for recomputation, temporary traffic and vector registers live alongside
+profiles, separately from operation costs. Matmul uses a continuous DAG-work
+versus temporary-traffic budget, retaining dynamic packing/GEMV predicates;
+this is a coarse model, not an exact cache/port simulator. All compiler stages
+share one frozen semantic/implementation/cost environment, whose fingerprint
+participates in generated-source identity. Registry changes also invalidate
+decorator caches, including profiles selected by a returned template's target.
+Pass-registry changes still require `cache_clear()` as described above.
+
+Development formatting is pinned in the `dev` extra. Run
+`python -m ruff format python/vecops/language` or append `--check` in CI;
+the project uses two-space indentation and a 120-column target.
+
+The `cpu-memory` stage runs `cpu-plan-transpose` and `cpu-plan-matmul` on the prepared emission
+catalog. All three managers are frozen before user passes execute. This pass
+recognizes layout conversions, proves dense destinations, selects dtype/ISA
+networks, and prepares SME state-owning alternatives. C++ printing runs no
+passes. `cpu_transpose_cache_block` (multiple of 16, default 128) and
+`cpu_transpose_loop_order` (`"input"`/`"output"`, default `"input"`) are CPU
+tuning overrides. Generic streaming multi-output fusion currently yields to
+layout-aware transpose plans rather than bypassing their permutation DAGs.
+`cpu_transpose_defer_conversion` (bool) overrides boundary-conversion motion;
+the default cost policy keeps byte→FP64 in the compute domain for unknown
+strides/extents and permutes narrow storage bits for constant layouts.
+Matrix planning records input fusion/materialization decisions and prepares
+packing permutations and dense-pack layout conversions. Empty matrix outputs
+skip hardware resource/configuration entry; zero K still applies acc/epilogue.
+
+### Architecture-specific state
+
+`T.store`/`T.copy`/`T.transpose_copy` accept `implementation="auto"`, `"vector"`,
+`"gather"`, or `"sme"`. Automatic SME selection requires SME-FA64, a simple
+unmasked load (possibly converted), legal strides, and nonoverlapping operands.
+Otherwise vector/gather paths preserve semantics, including alias snapshots.
+Explicit SME is a compile-time target requirement, not a CPU runtime probe.
+
+```python
+with T.sme.region():
+    T.sme.zero_za()
+    T.transpose_copy(A, C, compute_dtype="float32", implementation="sme")
+
+with T.amx.region(((16, 64),)):  # (rows, column bytes) per tile, immutable tuple
+    T.amx.load(0, A)
+    T.amx.store(0, C)
+```
+
+These are compiled lexical regions, not Python host context managers. Currently
+SME bodies admit simple whole-view rank-2 transposes and `zero_za`; AMX bodies
+admit tile zero/load/stream_load/store. Bare Python MMA instructions are not
+exposed yet; `T.dot` owns its typed instruction schedule and resource region. Views are
+validated before entry; allocation, throwing work, nested explicit regions and
+values escaping a region are rejected. Explicit SME rejects overlapping operands
+instead of allocating inside SM. AMX obtains per-thread Linux XTILEDATA permission
+and owns configuration/release through `ExecutionSession`. Generated state-owner
+callbacks always use `VECOPS_INLINE_LAMBDA_NOEXCEPT`.
+Owned forwarded scratch is materialized before raw hardware memory operations;
+pre-existing loads used after an AMX write receive the ordinary alias snapshot.
+Multiple transposes in an explicit SME region must have independent input/output
+storage; cross-operation alias dependencies are rejected before state entry.
+
+SVE vectors/predicates do not cross SM boundaries: VL and SVL may differ. Sized
+SVE Vec types can enter the SME path only with matching fixed VL/SVL guarantees;
+automatic selection otherwise retains the vector path. VLA uses named sizeless
+locals, never Vec/Mask arrays. Wide virtual vectors likewise emit individual
+legalized variables. The public C++ surfaces are `vecops/vec/{SME,AMX}.h` and
+`vecops/execution/Resources.h`; DSL sources include no backend `details` headers.
+
+NumPy `ml_dtypes.bfloat16` storage is accepted by the native ABI using ndarray
+metadata (it has no PEP-3118 buffer format). Endianness and writable output checks
+are unchanged. Contiguous empty NumPy arrays retain canonical dense ABI strides.
+See `benchmarks/dsl_transpose.py` for the exact 399-case TransposeBench catalog
+comparison and `benchmarks/dsl_transpose_cross.py` for ARM object/disassembly
+checks. Cross compilation does not establish ARM correctness or performance.
 
 ### Internal organization
 

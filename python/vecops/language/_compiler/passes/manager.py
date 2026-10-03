@@ -4,6 +4,7 @@ Pass callbacks receive (ir, context). Return the IR, None for an in-place
 transformation, or PassResult to explicitly preserve cached analyses. Registry
 snapshots isolate concurrent/batch compilations from later registrations.
 """
+
 from __future__ import annotations
 
 import threading
@@ -23,6 +24,12 @@ class PassContext:
   options: dict = field(default_factory=dict)
   analyses: dict = field(default_factory=dict)
   trace: list[str] = field(default_factory=list)
+
+  @property
+  def environment(self):
+    from ..environment import freeze
+
+    return freeze(self.options)
 
   def analysis(self, name, compute, ir):
     if name not in self.analyses:
@@ -46,19 +53,21 @@ _lock = threading.RLock()
 def register_pass(name, *, stage="kernel", before=(), after=()):
   """Register a named pass; ordering constraints are checked by PassManager.
 
-  The built-in stages are kernel and vector. A custom pass may use another
+  The built-in stages are kernel, vector and cpu-memory. A custom pass may use another
   stage and an explicitly selected manager; duplicate names are errors.
   """
   if not isinstance(name, str) or not name:
     raise ValueError("compiler pass name must be a nonempty string")
   before = (before,) if isinstance(before, str) else tuple(before)
   after = (after,) if isinstance(after, str) else tuple(after)
+
   def decorate(callback):
     with _lock:
       if name in _registry:
         raise ValueError(f"compiler pass {name!r} is already registered")
       _registry[name] = PassSpec(name, callback, stage, before, after)
     return callback
+
   return decorate
 
 
@@ -75,6 +84,7 @@ def registered_passes(*, stage=None):
 
 class PassManager:
   """Stable topological order, optional explicit pipeline, no current-kernel global."""
+
   def __init__(self, pipeline=None, *, stage="kernel", options=None):
     specs = {spec.name: spec for spec in registered_passes(stage=stage)}
     names = list(specs) if pipeline is None else list(pipeline)
@@ -108,8 +118,24 @@ class PassManager:
     self.specs = tuple(ordered)
     self.stage = stage
     self.options = dict(options or {})
+    from ..environment import freeze
+
+    self.options["_compiler_environment"] = freeze(self.options)
+
+  def with_options(self, options):
+    """Reuse registered-pass snapshots with a shared compilation environment."""
+    result = object.__new__(type(self))
+    result.specs, result.stage = self.specs, self.stage
+    result.options = {**self.options, **options}
+    return result
 
   def run(self, ir):
+    from ..operations import use_catalog
+
+    with use_catalog(self.options["_compiler_environment"].operations):
+      return self._run(ir)
+
+  def _run(self, ir):
     context = PassContext(self.stage, dict(self.options))
     for spec in self.specs:
       result = spec.callback(ir, context)

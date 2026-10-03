@@ -551,7 +551,8 @@
 #endif
 
 // SME F64F64 (f64 outer product, FEAT_SME_F64F64)
-#if defined(__ARM_FEATURE_SME_F64F64)
+#if defined(__ARM_FEATURE_SME_F64F64) || \
+    (defined(HAS_SME) && defined(VECOPS_TARGET_SME_F64F64))
   #define HAS_SME_F64F64 1
 #endif
 

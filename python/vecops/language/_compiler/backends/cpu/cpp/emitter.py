@@ -1,4 +1,5 @@
 """C++ emission: emitter."""
+
 from __future__ import annotations
 from .... import ir as I
 from .....types import TensorType
@@ -8,10 +9,19 @@ from .memory import MemoryEmitter
 from .vectors import VectorsEmitter
 from .control import ControlEmitter
 from .support import _PREAMBLE
+from .transpose import TransposeEmitter
+from .hardware import HardwareEmitter
+from .matmul import MatmulEmitter
+from .matmul_support import PREAMBLE as _MATMUL_PREAMBLE
+from ....operations import use_catalog
 
-class CPUEmitter(ExpressionsEmitter, MemoryEmitter, VectorsEmitter, ControlEmitter):
+
+class CPUEmitter(
+  ExpressionsEmitter, MemoryEmitter, VectorsEmitter, ControlEmitter, TransposeEmitter, HardwareEmitter, MatmulEmitter
+):
   def __init__(self, prepared):
     self.prepared = prepared
+    self.environment = prepared.vectors.manager.options["_compiler_environment"]
     vector_ir = prepared.vectors
     self.vector_ir = vector_ir
     self.emitted_regions = []
@@ -27,38 +37,55 @@ class CPUEmitter(ExpressionsEmitter, MemoryEmitter, VectorsEmitter, ControlEmitt
     self.storage_views = {}
     self.materialized = {}
     self.reduction_materialized = {}
+    self.hardware_scope = None
+    self.buffer_declarations = {}
+    # Identity-indexed emission caches also see transient panel/proxy Exprs.
+    # Hold strong references until emission ends: CPython can otherwise reuse
+    # an id and attach another ISA branch's out-of-scope scratch/coordinates.
+    self.expression_lifetimes = {}
 
+  def retain_expression(self, value):
+    self.expression_lifetimes[id(value)] = value
+    return value
+
+  def allocate_buffer(self, dtype, name, count):
+    # Invocation-local scratch reuse across serial loops, never process/global
+    # state. Each textual allocation site has its own independently sized slot.
+    self.buffer_declarations[name] = f"  vecops_dsl::Buffer<{CPP_TYPES[dtype]}> {name};"
+    self.line(f"{name}.resize({count});")
 
   def unique(self, prefix="v"):
     self.counter += 1
     return f"dsl_c_{prefix}_{self.counter}"
 
-
   def line(self, text):
     self.lines.append("  " * self.indent + text)
-
 
   def opening(self, text):
     self.line(text + " {")
     self.indent += 1
 
-
   def close(self):
     self.indent -= 1
     self.line("}")
-
 
   def generate(self):
     parameters = []
     for name, annotation in self.ir.parameters.items():
       if isinstance(annotation, TensorType):
         parameters.append(f"vecops::tensor::TensorLike auto {name}")
-        shape = tuple(I.Expr(I.ScalarType("int64"), "raw", data=f"{name}.size({axis})") for axis in range(len(annotation.shape)))
-        strides = tuple(I.Expr(I.ScalarType("int64"), "raw", data=f"{name}.stride({axis})") for axis in range(len(annotation.shape)))
+        shape = tuple(
+          I.Expr(I.ScalarType("int64"), "raw", data=f"{name}.size({axis})") for axis in range(len(annotation.shape))
+        )
+        strides = tuple(
+          I.Expr(I.ScalarType("int64"), "raw", data=f"{name}.stride({axis})") for axis in range(len(annotation.shape))
+        )
         from ....dtypes import dtype_name
+
         self.storage_views[name] = I.View(name, dtype_name(annotation.dtype), shape, strides, I.literal(0))
       else:
         from ....dtypes import dtype_name
+
         parameters.append(f"{CPP_TYPES[dtype_name(annotation)]} {name}")
     self.opening(f"void __kernel__({', '.join(parameters)})")
     for cached in self.ir.materializations.values():
@@ -67,11 +94,14 @@ class CPUEmitter(ExpressionsEmitter, MemoryEmitter, VectorsEmitter, ControlEmitt
       lanes = f"vecops::vec::size(vecops::vec::ScalableTag<{dtype}, 0>{{}})"
       self.line(f"const bool {cached.storage}_enabled = vecops_dsl::checked_shape({{{count}}}) >= 4 * {lanes};")
       self.line(f"vecops_dsl::Buffer<{dtype}> {cached.storage};")
+    insertion = len(self.lines)
     self.block(self.ir.body)
+    self.lines[insertion:insertion] = list(self.buffer_declarations.values())
     self.close()
-    return _PREAMBLE + "\n".join(self.lines) + "\n"
+    return _PREAMBLE + _MATMUL_PREAMBLE + "\n".join(self.lines) + "\n"
 
 
 def generate(prepared):
   emitter = CPUEmitter(prepared)
-  return emitter.generate(), emitter.emitted_regions
+  with use_catalog(emitter.environment.operations):
+    return emitter.generate(), emitter.emitted_regions

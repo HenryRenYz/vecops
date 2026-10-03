@@ -796,6 +796,12 @@ TEST(MatmulLoopNestTest, ZeroOutputExtentSkipsEveryLoopOrder) {
 
 TEST(CacheInfoTest, ReportsUsableHierarchy) {
   const auto info = platform::detect_cache_info();
+  EXPECT_GE(info.llc_bytes, 0);
+  if (info.llc_bytes > 0) {
+    EXPECT_GE(info.llc_level, 1U);
+    EXPECT_GE(info.llc_bytes, info.l1d_bytes);
+  }
+  if (info.l3_present) EXPECT_GE(info.llc_level, 3U);
   EXPECT_GT(info.line_bytes, 0);
   EXPECT_GE(info.l1d_bytes, info.line_bytes);
   EXPECT_GE(info.l2_bytes, info.l1d_bytes);

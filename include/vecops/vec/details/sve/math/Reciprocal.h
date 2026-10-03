@@ -8,7 +8,7 @@
  * The refinement ladder follows the Arm optimized-routines SVE rsqrt design
  * (math/aarch64/sve/{rsqrtf,rsqrt}.c upstream): a branch-free inline core
  * built from the hardware estimate plus FRSQRTS/FRECPS Newton steps, and one
- * NOINLINE special routine that owns every tail. The tails re-run the core on
+ * normally outlined special routine that owns every tail. The tails re-run the core on
  * an exactly-scaled input (svscale) so every intermediate stays normal and
  * gradual subnormal outputs fall out of a final exact power-of-two scaling.
  *
@@ -43,6 +43,7 @@
 #include "vecops/vec/details/Dispatch.h"
 #include "vecops/vec/details/sve/Basic.h"
 #include "vecops/vec/details/sve/Bf16.h"
+#include "vecops/vec/details/sve/math/Policy.h"
 
 namespace vecops::vec::details {
 
@@ -131,7 +132,7 @@ VECOPS_ALWAYS_INLINE svfloat64_t sve_rcp_f64_core(svfloat64_t x) {
  * square root of the same factor. rsqrt outputs never drop below the
  * smallest normal, so there is no output-side tail and no subnormal flush.
  */
-VECOPS_NOINLINE inline svfloat32_t sve_rsqrt_f32_special(
+VECOPS_SVE_MATH_SPECIAL svfloat32_t sve_rsqrt_f32_special(
     svbool_t pg, svfloat32_t x) {
   const auto full = svptrue_b32();
   // A partially-special word must not scale its normal lanes: x*2^64 can
@@ -157,7 +158,7 @@ VECOPS_NOINLINE inline svfloat32_t sve_rsqrt_f32_special(
   return y;
 }
 
-VECOPS_NOINLINE inline svfloat64_t sve_rsqrt_f64_special(
+VECOPS_SVE_MATH_SPECIAL svfloat64_t sve_rsqrt_f64_special(
     svbool_t pg, svfloat64_t x) {
   const auto full = svptrue_b64();
   // Same per-lane scaling discipline as the f32 routine above.
@@ -189,7 +190,7 @@ VECOPS_NOINLINE inline svfloat64_t sve_rsqrt_f64_special(
  * zero (subnormal * 0.0 rounds to a correctly signed zero).
  */
 template <Accuracy Tier>
-VECOPS_NOINLINE inline svfloat32_t sve_rcp_f32_special(
+VECOPS_SVE_MATH_SPECIAL svfloat32_t sve_rcp_f32_special(
     svbool_t pg, svfloat32_t x) {
   const auto full = svptrue_b32();
   const auto small =
@@ -216,7 +217,7 @@ VECOPS_NOINLINE inline svfloat32_t sve_rcp_f32_special(
 }
 
 template <Accuracy Tier>
-VECOPS_NOINLINE inline svfloat64_t sve_rcp_f64_special(
+VECOPS_SVE_MATH_SPECIAL svfloat64_t sve_rcp_f64_special(
     svbool_t pg, svfloat64_t x) {
   const auto full = svptrue_b64();
   const auto small =

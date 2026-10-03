@@ -594,3 +594,23 @@ and non-equivariant transforms force the whole region ordered.
 **Layout fast paths need type-level facts.** A `Dynamic` stride that happens
 to equal 1 at runtime keeps the general path — by design (no data-dependent
 branches); spell strides as `cint<1>` / `dyn<...>` when you can prove them.
+
+## Python DSL layout-conversion planning
+
+The Python DSL retains DataAccess's separation of memory dtype, compute dtype,
+logical tile layout and physical strides. Its `cpu-memory` planning pass now
+recognizes last-two-axis transposes and constructs an explicit vector
+split/interleave/concat DAG. Legal fast paths use dense converting memory
+operations; generic masks/broadcasts/strides retain gather/scatter. Leading
+batch axes are separate planes. A plain widening conversion can commute with
+the x86 permutation and fuse into the final store; intermediate rounding in
+more general elementwise chains is not discarded.
+
+The DSL may guard dynamic unit strides at runtime (unlike the type-only C++
+DataAccess policy described above). Overlap is handled before the fast path:
+snapshots preserve source values, and overlapping cases use the general
+streaming path rather than incorrectly densely reading a logical snapshot.
+SME alternatives own SM/ZA through the public execution API and only accept
+simple loads with legal layouts; throwing checks and scratch allocation stay
+outside streaming mode. Explicit regions reject unsupported alias layouts.
+No vector arrays or opaque `ops::Transpose` calls hide the DSL permutation.

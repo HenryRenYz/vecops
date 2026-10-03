@@ -1,4 +1,5 @@
 """Compilation-core cache and source/compiler identity; no runtime dispatch."""
+
 from __future__ import annotations
 import hashlib
 import threading
@@ -9,6 +10,7 @@ from ..template import TemplateIR
 
 _compile_cache = weakref.WeakValueDictionary()
 _compile_lock = threading.RLock()
+
 
 def _source_identity(ir: TemplateIR) -> str:
   digest = hashlib.sha256()
@@ -34,6 +36,9 @@ def _compiler_key(compiler: Compiler):
     tuple(map(str, compiler.library_dirs)),
     compiler.libraries,
     compiler.ldflags,
-    str(compiler.cc), str(compiler.cxx), str(compiler.cmake), compiler.generator,
+    str(compiler.cc),
+    str(compiler.cxx),
+    str(compiler.cmake),
+    compiler.generator,
     tuple(sorted(compiler.environment.items())),
   )

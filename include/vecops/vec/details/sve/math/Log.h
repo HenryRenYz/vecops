@@ -13,7 +13,7 @@
  * 128-entry invc/logc tables live in the shared vec/details/Math.h.
  *
  * Shared design, mirroring the exp/reciprocal families: a branch-free
- * inline core covers the normal domain and one NOINLINE special routine
+ * inline core covers the normal domain and one normally outlined special routine
  * owns every tail (subnormals, zero, negatives, +inf, NaN). The special
  * routine renormalizes subnormal lanes by an exact power of two (2^23 for
  * f32, 2^10 for f16, 2^52 for f64) and reruns the exact-tier core with
@@ -67,6 +67,7 @@
 #include "vecops/vec/details/Math.h"
 #include "vecops/vec/details/sve/Basic.h"
 #include "vecops/vec/details/sve/Bf16.h"
+#include "vecops/vec/details/sve/math/Policy.h"
 
 namespace vecops::vec::details {
 
@@ -142,7 +143,7 @@ VECOPS_ALWAYS_INLINE svfloat64_t sve_log_f64_poly_core(
 
 /** Tails: subnormals renormalized by 2^52, constants for 0/inf/NaN. */
 template <const LogF64Family& C>
-VECOPS_NOINLINE inline svfloat64_t sve_log_f64_special(
+VECOPS_SVE_MATH_SPECIAL svfloat64_t sve_log_f64_special(
     svbool_t pg, svbool_t special, svfloat64_t x) {
   const auto is_sub = svcmpgt_n_f64(pg, x, 0.0);
   const auto is_minf = svcmpeq_n_f64(pg, x, 0.0);
@@ -282,7 +283,7 @@ VECOPS_ALWAYS_INLINE svfloat32_t sve_log_f32_strict_core(
  * value is +0.
  */
 template <LogBase Base, Accuracy Tier>
-VECOPS_NOINLINE inline svfloat32_t sve_log_f32_special(
+VECOPS_SVE_MATH_SPECIAL svfloat32_t sve_log_f32_special(
     svbool_t pg, svbool_t special, svfloat32_t x) {
   const auto is_sub = svcmpgt_n_f32(pg, x, 0.0f);
   const auto is_minf = svcmpeq_n_f32(pg, x, 0.0f);
@@ -380,7 +381,7 @@ VECOPS_ALWAYS_INLINE svfloat16_t sve_log_f16_core(
  * zero/inf/NaN through the masked add. Mirrors sve_log_f32_special.
  */
 template <LogBase Base, Accuracy Tier>
-VECOPS_NOINLINE inline svfloat16_t sve_log_f16_special(
+VECOPS_SVE_MATH_SPECIAL svfloat16_t sve_log_f16_special(
     svbool_t pg, svbool_t special, svfloat16_t raw) {
   const auto is_sub = svcmpgt_n_f16(pg, raw, float16_t(0.0f));
   const auto is_minf = svcmpeq_n_f16(pg, raw, float16_t(0.0f));

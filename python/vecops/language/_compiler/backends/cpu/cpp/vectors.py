@@ -1,10 +1,13 @@
 """C++ emission: vectors."""
+
 from __future__ import annotations
 from .... import ir as I
 from ..capabilities import CPP_TYPES
 
+
 class VectorsEmitter:
   def vector(self, value, tag, root_shape, coords, active, axis=-1):
+    self.retain_expression(value)
     axis %= len(root_shape)
     key = (id(value), tag, tuple(coords), axis)
     if key in self.chunk_cache:
@@ -49,6 +52,16 @@ class VectorsEmitter:
     if value.op == "vector_ref":
       return value.data
     vcoords = self.coordinates(value.type.shape, root_shape, coords)
+    if value.op == "packed_load":
+      result = self.packed_vector(value, tag, root_shape, coords, active, axis)
+      self.chunk_cache[key] = result
+      return result
+    if value.op == "dot":
+      register = getattr(self, "dot_registers", {}).get(id(value))
+      if register is None:
+        raise TypeError("matrix result requires a fused rank-two store")
+      self.chunk_cache[key] = register[1]
+      return register[1]
     if value.op == "load":
       view = value.data
       own_coords = self.coordinates(view.shape, root_shape, coords)
@@ -59,9 +72,13 @@ class VectorsEmitter:
           if len(operand.type.shape) > len(value.type.shape):
             raise TypeError("load mask/inactive value cannot exceed the loaded region's rank")
           for a, b in zip(reversed(operand.type.shape), reversed(value.type.shape)):
-            if I.constant(a) != 1 and not I.same_expr(a, b):
+            if not getattr(self, "matrix_validated", False) and I.constant(a) != 1 and not I.same_expr(a, b):
               self.line(f"vecops_dsl::check_broadcast({self.scalar(a)}, {self.scalar(b)});")
-      broadcast = view_axis < 0 or I.constant(view.shape[view_axis]) == 1 and not I.same_expr(view.shape[view_axis], root_shape[axis])
+      broadcast = (
+        view_axis < 0
+        or I.constant(view.shape[view_axis]) == 1
+        and not I.same_expr(view.shape[view_axis], root_shape[axis])
+      )
       options, mask = self.memory_options(value.args[0] if value.args else None, tag, root_shape, coords, active, axis)
       other = None
       if value.args:
@@ -92,13 +109,25 @@ class VectorsEmitter:
         saved_pointer = self.pointer(saved, own_coords)
         snapshot_stride = self.scalar(saved.strides[view_axis]) if view_axis >= 0 else "0"
         # Snapshot already includes the original mask and inactive population.
-        saved_value = f"vecops::vec::load_convert({tag}{{}}, {saved_pointer}, vecops::vec::opt::first({active}), vecops::vec::opt::strided({snapshot_stride}))" if not broadcast else f"vecops::vec::fill({tag}{{}}, *{saved_pointer})"
+        saved_options = (
+          "vecops::vec::opt::unmasked" if getattr(self, "full_vector", False) else f"vecops::vec::opt::first({active})"
+        )
+        saved_value = (
+          f"vecops::vec::load_convert({tag}{{}}, {saved_pointer}, {saved_options}, vecops::vec::opt::strided({snapshot_stride}))"
+          if not broadcast
+          else f"vecops::vec::fill({tag}{{}}, *{saved_pointer})"
+        )
         expression = f"({condition} ? {saved_value} : {expression})"
     elif value.op == "fill":
-      expression = f"vecops::vec::fill({tag}{{}}, static_cast<vecops::vec::ElementOf<{tag}>>({self.scalar(value.args[0])}))"
+      expression = (
+        f"vecops::vec::fill({tag}{{}}, static_cast<vecops::vec::ElementOf<{tag}>>({self.scalar(value.args[0])}))"
+      )
     elif value.op == "arange":
       start = self.scalar(value.args[0])
-      expression = f"vecops::vec::iota({tag}{{}}, static_cast<vecops::vec::ElementOf<{tag}>>(({start}) + ({vcoords[-1]})))"
+      own_axis = value.data if value.data is not None else len(value.type.shape) - 1
+      vector_axis = axis - (len(root_shape) - len(value.type.shape))
+      operation = "iota" if own_axis == vector_axis else "fill"
+      expression = f"vecops::vec::{operation}({tag}{{}}, static_cast<vecops::vec::ElementOf<{tag}>>(({start}) + ({vcoords[own_axis]})))"
     elif value.op == "cast":
       source = value.args[0]
       if source.op == "load" and source.type.dtype == source.data.dtype:
@@ -136,8 +165,13 @@ class VectorsEmitter:
       self.emitted_regions.append(plan)
       extent = self.scalar(source.type.shape[reduction_axis])
       self.line(f"vecops::nint_t {reduction_index} = 0;")
-      self.opening(f"for (; vecops_dsl::full_group({reduction_index}, {extent}, 1, {unroll}); {reduction_index} += {unroll})")
-      coords = [vcoords[:reduction_axis] + (f"({reduction_index} + {slot})",) + vcoords[reduction_axis:] for slot in range(unroll)]
+      self.opening(
+        f"for (; vecops_dsl::full_group({reduction_index}, {extent}, 1, {unroll}); {reduction_index} += {unroll})"
+      )
+      coords = [
+        vcoords[:reduction_axis] + (f"({reduction_index} + {slot})",) + vcoords[reduction_axis:]
+        for slot in range(unroll)
+      ]
       roots = self.emit_operations(plan, [tag] * unroll, coords, [active] * unroll, axis=source_axis)
       for slot, accumulator in enumerate(banks):
         self.line(f"{accumulator} = vecops::vec::{operation}({tag}{{}}, {accumulator}, {roots[0][slot]});")
@@ -153,20 +187,25 @@ class VectorsEmitter:
         self.line(f"{accumulator} = vecops::vec::{operation}({tag}{{}}, {accumulator}, {other});")
       self.chunk_cache[key] = accumulator
       return accumulator
-    elif value.op in {"floordiv", "mod", "ceildiv"}:
+    elif self.environment.implementations.get(value.op).lane_fallback:
       args = [self.vector(a, tag, root_shape, coords, active, axis) for a in value.args]
       name, lane = self.unique("lane_fallback"), self.unique("scalar_lane")
       self.line(f"auto {name} = vecops::vec::fill({tag}{{}}, vecops::vec::ElementOf<{tag}>{{0}});")
       self.opening(f"for (vecops::nint_t {lane} = 0; {lane} < {active}; ++{lane})")
       arguments = ", ".join(f"vecops::vec::get({tag}{{}}, {a}, {lane})" for a in args)
-      self.line(f"{name} = vecops::vec::set({tag}{{}}, {name}, {lane}, static_cast<vecops::vec::ElementOf<{tag}>>(vecops_dsl::{value.op}({arguments})));")
+      self.line(
+        f"{name} = vecops::vec::set({tag}{{}}, {name}, {lane}, static_cast<vecops::vec::ElementOf<{tag}>>(vecops_dsl::{value.op}({arguments})));"
+      )
       self.close()
       self.chunk_cache[key] = name
       return name
     else:
       args = [self.vector(a, tag, root_shape, coords, active, axis) for a in value.args]
-      op = {"lt": "cmplt", "le": "cmple", "gt": "cmpgt", "ge": "cmpge", "eq": "cmpeq", "ne": "cmpne", "fma": "fmadd", "and": "mask_and", "or": "mask_or", "not": "mask_not"}.get(value.op, value.op)
-      if op in {"exp", "exp2", "exp_neg", "exp2_neg", "log", "log2", "rcp", "rsqrt"}:
+      implementation = self.environment.implementations.get(value.op)
+      op = implementation.vector_name
+      if op is None:
+        raise TypeError(f"no CPU vector implementation registered for {value.op}")
+      if implementation.wordwise_math:
         accuracy = {"strict": "strict", "fast": "fast", "estimate": "estimate"}[value.data or "strict"]
         args.append(f"vecops::vec::opt::math::{accuracy}")
       if op == "wordwise_math":
@@ -180,13 +219,16 @@ class VectorsEmitter:
         return args[0]
       if op in {"shl", "shr"} and isinstance(value.args[1].type, I.ScalarType):
         count = I.constant(value.args[1])
-        args[1] = f"vecops::meta::Const<{count}>{{}}" if isinstance(count, int) and count >= 0 else f"static_cast<int>({self.scalar(value.args[1])})"
+        args[1] = (
+          f"vecops::meta::Const<{count}>{{}}"
+          if isinstance(count, int) and count >= 0
+          else f"static_cast<int>({self.scalar(value.args[1])})"
+        )
       expression = f"vecops::vec::{op}({tag}{{}}, {', '.join(args)})"
     name = self.unique()
     self.line(f"auto {name} = {expression};")
     self.chunk_cache[key] = name
     return name
-
 
   def rebound_tag(self, dtype, base):
     if dtype == "bool" or dtype == self.tag_dtypes[base]:
@@ -194,7 +236,6 @@ class VectorsEmitter:
     tag = f"vecops::vec::Rebind<{CPP_TYPES[dtype]}, {base}>"
     self.tag_dtypes[tag] = dtype
     return tag
-
 
   def emit_operations(self, region, tags, coords, active, *, axis=-1, full=False):
     previous_cache, references = self.chunk_cache, {}
@@ -215,13 +256,17 @@ class VectorsEmitter:
         if operation.opaque:
           expression = operation.expression
         else:
-          args = tuple(I.Expr(region.operations[index].type, "vector_ref", data=references[(index, slot)])
-                       if index is not None else arg
-                       for arg, index in zip(operation.expression.args, operation.operands))
+          args = tuple(
+            I.Expr(region.operations[index].type, "vector_ref", data=references[(index, slot)])
+            if index is not None
+            else arg
+            for arg, index in zip(operation.expression.args, operation.operands)
+          )
           expression = I.Expr(operation.type, operation.expression.op, args, operation.expression.data)
           if operation.native_math_words:
-            expression = I.Expr(operation.type, "wordwise_math", args,
-                                (operation.expression.op, operation.expression.data))
+            expression = I.Expr(
+              operation.type, "wordwise_math", args, (operation.expression.op, operation.expression.data)
+            )
           if id(operation.expression) in self.snapshots:
             self.snapshots[id(expression)] = self.snapshots[id(operation.expression)]
         value = self.vector(expression, tag, region.shape, c, count, axis)
@@ -233,18 +278,23 @@ class VectorsEmitter:
         references[(operation.index, slot)] = name
     roots = []
     for expression, index in zip(region.roots, region.root_indices):
-      roots.append([references[(index, slot)] if index is not None else
-                    self.vector(expression, self.rebound_tag(expression.type.dtype, tag), region.shape, c, a, axis)
-                    for slot, (tag, c, a) in enumerate(zip(tags, coords, active))])
+      roots.append(
+        [
+          references[(index, slot)]
+          if index is not None
+          else self.vector(expression, self.rebound_tag(expression.type.dtype, tag), region.shape, c, a, axis)
+          for slot, (tag, c, a) in enumerate(zip(tags, coords, active))
+        ]
+      )
     self.chunk_cache = previous_cache
     return roots
-
 
   def traverse_region(self, region, callback, *, setup=None, finish=None):
     """Print explicit Vector IR schedules, not recursively lowered tile bodies."""
     variants = [(power, region.base_power, region.groupings[power]) for power in sorted(region.groupings, reverse=True)]
     if region.base_power > 0:
       from ....ir.vector import group_vectors
+
       variants.append((None, 0, group_vectors(region.unroll, 0, 0)))
     for variant, (power, base_power, groups) in enumerate(variants):
       conditional = power is not None and (power > 0 or region.base_power > 0)
@@ -269,13 +319,18 @@ class VectorsEmitter:
         coordinates.append(coordinate)
       coordinate = self.unique("lane")
       stop = self.scalar(region.shape[-1])
+
       def body(full):
         coords, active = [], []
         for group, tag in zip(groups, tags):
           chunk = coordinate if group.first == 0 else f"({coordinate} + {group.first} * vecops::vec::size({base}{{}}))"
           coords.append(tuple(coordinates) + (chunk,))
           count = self.unique("active")
-          value = f"vecops::vec::size({tag}{{}})" if full else f"std::clamp<vecops::nint_t>(({stop}) - {chunk}, 0, vecops::vec::size({tag}{{}}))"
+          value = (
+            f"vecops::vec::size({tag}{{}})"
+            if full
+            else f"std::clamp<vecops::nint_t>(({stop}) - {chunk}, 0, vecops::vec::size({tag}{{}}))"
+          )
           self.line(f"const auto {count} = {value};")
           active.append(count)
         previous_cache = self.chunk_cache
@@ -283,16 +338,21 @@ class VectorsEmitter:
         self.chunk_cache = {}
         callback(tags, coords, active, roots, state)
         self.chunk_cache = previous_cache
+
       if region.full_chunks:
         self.line(f"vecops::nint_t {coordinate} = 0;")
-        self.opening(f"for (; vecops_dsl::full_vectors({coordinate}, {stop}, vecops::vec::size({base}{{}}), {region.unroll}); {coordinate} += {region.unroll} * vecops::vec::size({base}{{}})) /* full vector groups */")
+        self.opening(
+          f"for (; vecops_dsl::full_vectors({coordinate}, {stop}, vecops::vec::size({base}{{}}), {region.unroll}); {coordinate} += {region.unroll} * vecops::vec::size({base}{{}})) /* full vector groups */"
+        )
         body(True)
         self.close()
         self.opening(f"if ({coordinate} < ({stop})) /* masked vector tail */")
         body(False)
         self.close()
       else:
-        self.opening(f"for (vecops::nint_t {coordinate} = 0; {coordinate} < ({stop}); {coordinate} += {region.unroll} * vecops::vec::size({base}{{}}))")
+        self.opening(
+          f"for (vecops::nint_t {coordinate} = 0; {coordinate} < ({stop}); {coordinate} += {region.unroll} * vecops::vec::size({base}{{}}))"
+        )
         body(False)
         self.close()
       for _ in region.shape[:-1]:
@@ -302,10 +362,8 @@ class VectorsEmitter:
     if len(variants) > 1:
       self.line("#endif")
 
-
   def reduction(self, expression):
     return self.reductions((expression,), plan=self.vector_ir.plans.get(id(expression)))
-
 
   def reductions(self, expressions, *, plan=None, stores=()):
     """Emit reductions in ordinary lexical scopes, preserving local invariants.
@@ -316,7 +374,7 @@ class VectorsEmitter:
     """
     sources = [expression.args[0] for expression in expressions]
     dtype = sources[0].type.dtype
-    operations = [expression.op[7:] for expression in expressions]
+    operations = [self.environment.operations.get(expression).reduction for expression in expressions]
     result = self.unique("reduction_result")
     types = [CPP_TYPES[expression.type.dtype] for expression in expressions]
     result_type = f"std::tuple<{', '.join(types)}>" if len(types) > 1 else types[0]
@@ -333,12 +391,14 @@ class VectorsEmitter:
     operations = [effect.operation for effect in plan.initializations]
     for store in stores:
       self.check_store(store)
+
     def setup(tags):
       banks = [[self.unique("acc") for _ in tags] for _ in expressions]
       for accumulators, op in zip(banks, operations):
         for accumulator, tag in zip(accumulators, tags):
           self.line(f"auto {accumulator} = vecops::vec::fill({tag}{{}}, {self.identity(dtype, op)});")
       return banks
+
     def update(tags, coordinates, active, roots, banks):
       for effect in plan.effects:
         if effect.kind != "accumulate":
@@ -351,13 +411,18 @@ class VectorsEmitter:
           if cached is not None and id(source) not in self.materialized:
             condition = f"{cached.storage}_enabled"
             self.opening(f"if ({condition} && {count} > 0)")
-            self.line(f"vecops::vec::store_convert({tag}{{}}, {self.pointer(cached, coords)}, {value}, vecops::vec::opt::first({count}));")
+            self.line(
+              f"vecops::vec::store_convert({tag}{{}}, {self.pointer(cached, coords)}, {value}, vecops::vec::opt::first({count}));"
+            )
             self.close()
             self.reduction_materialized[id(source)] = (cached, condition)
           masked = self.unique("masked")
-          self.line(f"auto {masked} = vecops::vec::blend({tag}{{}}, vecops::vec::fill({tag}{{}}, {self.identity(dtype, op)}), vecops::vec::mwhilelt({tag}{{}}, 0, {count}), {value});")
+          self.line(
+            f"auto {masked} = vecops::vec::blend({tag}{{}}, vecops::vec::fill({tag}{{}}, {self.identity(dtype, op)}), vecops::vec::mwhilelt({tag}{{}}, 0, {count}), {value});"
+          )
           self.line(f"{accumulators[slot]} = vecops::vec::{op}({tag}{{}}, {accumulators[slot]}, {masked});")
       self.write_effects(plan, tags, coordinates, active, roots)
+
     def finish(tags, banks):
       results = []
       for effect in plan.finalizations:
@@ -368,10 +433,10 @@ class VectorsEmitter:
           combined = f"({combined} + {part})" if op == "add" else f"std::{op}({combined}, {part})"
         results.append(combined)
       self.line(f"{result} = {'std::tuple{' + ', '.join(results) + '}' if len(results) > 1 else results[0]};")
+
     self.traverse_region(plan, update, setup=setup, finish=finish)
     self.close()
     return result
-
 
   def identity(self, dtype, op):
     cpp = CPP_TYPES[dtype]

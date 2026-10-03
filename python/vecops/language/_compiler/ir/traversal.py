@@ -1,6 +1,8 @@
 """Shared expression DAG and structured-control traversal."""
+
 from dataclasses import fields, is_dataclass, replace
 from . import kernel as I
+
 
 def walk(expression):
   yield expression
@@ -34,6 +36,7 @@ def values(block):
 
 def rewrite_expressions(ir, rewrite):
   memo = {}
+
   def visit(value):
     if isinstance(value, I.Expr):
       if id(value) not in memo:
@@ -51,5 +54,6 @@ def rewrite_expressions(ir, rewrite):
     if is_dataclass(value) and isinstance(value, I.Node):
       return replace(value, **{f.name: visit(getattr(value, f.name)) for f in fields(value)})
     return value
+
   visit(ir.body)
   return ir

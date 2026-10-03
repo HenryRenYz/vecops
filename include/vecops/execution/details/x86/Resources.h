@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 #include "vecops/Assertion.h"
 #include "vecops/CoreDefs.h"
@@ -17,7 +18,7 @@
 #endif
 
 #if defined(HAS_AMX_TILE)
-#  include "vecops/vec/details/amx/AMX.h"
+#  include "vecops/vec/AMX.h"
 #endif
 
 /**
@@ -44,7 +45,8 @@ VECOPS_ALWAYS_INLINE void ensure_tile_permission() {
     constexpr unsigned long XfeatureTileData = 18;
     return syscall(SYS_arch_prctl, ArchRequestXcompPerm, XfeatureTileData) == 0;
   }();
-  VECOPS_ASSERT(granted, "unable to request AMX XTILEDATA permission");
+  if (!granted)
+    throw std::runtime_error("unable to request AMX XTILEDATA permission");
 #endif
 }
 
@@ -71,7 +73,7 @@ struct alignas(64) TileConfiguration {
 #if defined(HAS_AMX_TILE)
   /** Load this configuration into the current thread's AMX tile state. */
   VECOPS_ALWAYS_INLINE void load() const {
-    vec::details::amx::load_configuration(this);
+    vec::amx::load_configuration(this);
   }
 #else
   // Deleted instead of undefined: compiling a TILECFG load on a non-AMX
@@ -90,7 +92,7 @@ struct TileReleaseGuard {
   TileReleaseGuard(const TileReleaseGuard&) = delete;
   TileReleaseGuard& operator=(const TileReleaseGuard&) = delete;
   VECOPS_ALWAYS_INLINE ~TileReleaseGuard() {
-    vec::details::amx::release();
+    vec::amx::release();
   }
 };
 #endif

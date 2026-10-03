@@ -58,7 +58,9 @@ def test_builtin_loading_is_idempotent_and_order_stable():
   assert T.passes.registered_passes() == before
   assert tuple(snapshot.specs) == T.passes.PassManager().specs
   assert [p.name for p in snapshot.specs] == [
-      "canonicalize-memory", "expression-cse", "plan-computation-reuse",
+      "normalize-reduction-layout", "decompose-row-normalization",
+      "canonicalize-memory", "expression-cse", "fuse-dot-epilogue",
+      "materialize-dependent-dots", "orient-matmul", "plan-computation-reuse",
       "fuse-reductions", "fuse-reduction-elementwise", "fuse-elementwise",
       "unroll-serial", "refresh-computation-reuse"]
 
@@ -133,3 +135,31 @@ def test_both_pipeline_snapshots_precede_user_pass_execution():
     P.unregister_pass(kernel_name)
     if any(spec.name == vector_name for spec in P.registered_passes(stage="vector")):
       P.unregister_pass(vector_name)
+
+
+def test_memory_pipeline_is_frozen_before_user_passes():
+  from vecops.language._compiler.backends.cpu.backend import CPUBackend
+  P = T.passes
+  @T.template
+  def kernel(A: T.Tensor((16, 16), dtype=T.float32),
+             C: T.Tensor((16, 16), dtype=T.float32, access="output")):
+    T.transpose_copy(A, C)
+  name, registrar = "unit-late-memory", "unit-register-memory-during-kernel-pass"
+  calls = []
+  @P.register_pass(registrar, before="canonicalize-memory")
+  def register_late(ir, context):
+    if not any(spec.name == name for spec in P.registered_passes(stage="cpu-memory")):
+      @P.register_pass(name, stage="cpu-memory", after="cpu-plan-transpose")
+      def late(prepared, context):
+        calls.append(len(prepared.transposes))
+        return prepared
+    return ir
+  try:
+    CPUBackend().lower(kernel.ir, ())
+    assert calls == []
+    CPUBackend().lower(kernel.ir, ())
+    assert calls == [1]
+  finally:
+    P.unregister_pass(registrar)
+    if any(spec.name == name for spec in P.registered_passes(stage="cpu-memory")):
+      P.unregister_pass(name)

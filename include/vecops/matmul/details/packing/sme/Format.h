@@ -61,7 +61,7 @@
 
 #include "vecops/matmul/Atom.h"
 #include "vecops/tensor/Layout.h"
-#include "vecops/vec/details/sme/State.h"
+#include "vecops/vec/SME.h"
 
 namespace vecops::matmul::details::sme {
 
@@ -83,7 +83,7 @@ inline constexpr bool supported_element_v =
 /// panel (see Packing::panel()).
 VECOPS_INLINE auto panel_lanes() {
   return meta::cint<2> *
-      vec::details::sme::streaming_lanes_value<float32_t>();
+      vec::sme::streaming_lanes_value<float32_t>();
 }
 
 /**
@@ -141,7 +141,7 @@ public:
   VECOPS_INLINE static auto panel() {
     if constexpr (sizeof(Element) == 8)
       return meta::cint<2> *
-          vec::details::sme::streaming_lanes_value<float64_t>();
+          vec::sme::streaming_lanes_value<float64_t>();
     else
       return panel_lanes();
   }

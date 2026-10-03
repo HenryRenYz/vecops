@@ -1,19 +1,21 @@
 """C++ emission: expressions."""
+
 from __future__ import annotations
 import math
 from ..capabilities import CPP_TYPES
+from ....operations import Trait
+
 
 class ExpressionsEmitter:
   def scalar_has_statements(self, value):
     """Whether a scalar expression needs structured statements, not just text."""
-    if value.op.startswith("reduce_"):
+    if self.environment.operations.has(value, Trait.SCALAR_REDUCTION):
       return True
     if value.op == "load":
       view = value.data
       if any(self.scalar_has_statements(v) for v in (view.offset, *view.shape, *view.strides)):
         return True
     return any(self.scalar_has_statements(a) for a in value.args)
-
 
   def scalar_inline(self, value):
     """Preserve repeated evaluation in a C++ for-condition expression.
@@ -32,7 +34,6 @@ class ExpressionsEmitter:
     self.lines, self.indent = previous_lines, previous_indent
     return "([&]() VECOPS_INLINE_LAMBDA {\n" + body + "\n" + "  " * self.indent + "}())"
 
-
   def scalar_select(self, condition, when_true, when_false, dtype):
     """Lower lazy scalar arms in their own scopes without capturing a closure."""
     predicate = self.scalar(condition)
@@ -50,8 +51,14 @@ class ExpressionsEmitter:
     self.reduction_materialized = previous_materialized
     return result
 
-
   def scalar(self, value):
+    if value.op == "packing_size":
+      from .matmul import FORMATS
+
+      dtype, format_ = value.data
+      return f"vecops_dsl::pack_size<{CPP_TYPES[dtype]}, {FORMATS[format_]}>({', '.join(self.scalar(v) for v in value.args)})"
+    if value.op == "streaming_lanes":
+      return f"vecops::vec::sme::streaming_lanes<{CPP_TYPES[value.data]}>()"
     if value.op == "literal":
       if isinstance(value.data, bool):
         return "true" if value.data else "false"
@@ -74,12 +81,14 @@ class ExpressionsEmitter:
       if not -62 <= power <= 62:
         raise TypeError("virtual vector extent exceeds the signed 64-bit extent domain")
       return f"vecops_dsl::lanes({base}, {power})"
-    if value.op.startswith("reduce_"):
+    if self.environment.operations.has(value, Trait.SCALAR_REDUCTION):
       return self.reduction(value)
     if value.op == "load":
       view = value.data
+
       def loaded():
         return f"static_cast<{CPP_TYPES[value.type.dtype]}>({self.pointer(view)}[0])"
+
       if value.args:
         condition, other = value.args
         address_values = (view.offset, *view.shape, *view.strides)
@@ -94,33 +103,38 @@ class ExpressionsEmitter:
     if value.op in {"and", "or"} and self.scalar_has_statements(value.args[1]):
       left, right = value.args
       selected = lambda: f"static_cast<bool>({self.scalar(right)})"
-      return (self.scalar_select(left, selected, lambda: "false", value.type.dtype) if value.op == "and"
-              else self.scalar_select(left, lambda: "true", selected, value.type.dtype))
+      return (
+        self.scalar_select(left, selected, lambda: "false", value.type.dtype)
+        if value.op == "and"
+        else self.scalar_select(left, lambda: "true", selected, value.type.dtype)
+      )
     arguments = [self.scalar(a) for a in value.args]
-    operators = {"add": "+", "sub": "-", "mul": "*", "div": "/", "lt": "<", "le": "<=", "gt": ">", "ge": ">=", "eq": "==", "ne": "!=", "and": "&&", "or": "||", "mask_xor": "!=", "bit_and": "&", "bit_or": "|", "bit_xor": "^", "shl": "<<", "shr": ">>"}
-    if value.op in operators:
-      expr = f"({arguments[0]} {operators[value.op]} {arguments[1]})"
+    implementation = self.environment.implementations.get(value.op)
+    if implementation.scalar_kind == "infix":
+      expr = f"({arguments[0]} {implementation.scalar_spelling} {arguments[1]})"
       if value.op == "div" and value.type.dtype.startswith("float"):
         expr = f"(static_cast<{CPP_TYPES[value.type.dtype]}>({arguments[0]}) / {arguments[1]})"
       return expr
-    if value.op in {"min", "max"}:
+    if implementation.scalar_kind == "std_binary":
       return f"std::{value.op}<{CPP_TYPES[value.type.dtype]}>({', '.join(arguments)})"
     if value.op == "broadcast_dim":
+      if getattr(self, "matrix_validated", False):
+        return f"std::max<std::int64_t>({', '.join(arguments)})"
       return f"vecops_dsl::broadcast_dim({', '.join(arguments)})"
-    if value.op in {"floordiv", "mod", "ceildiv"}:
+    if implementation.lane_fallback:
       cpp = CPP_TYPES[value.type.dtype]
       return f"static_cast<{cpp}>(vecops_dsl::{value.op}({', '.join(f'static_cast<{cpp}>({a})' for a in arguments)}))"
     if value.op == "cast":
       return f"static_cast<{CPP_TYPES[value.type.dtype]}>({arguments[0]})"
-    if value.op in {"neg", "not", "identity", "bit_not"}:
-      operator = {"neg": "-", "not": "!", "identity": "+", "bit_not": "~"}[value.op]
+    if implementation.scalar_kind == "prefix":
+      operator = implementation.scalar_spelling
       return f"({operator}({arguments[0]}))"
     if value.op == "where":
       return f"({arguments[0]} ? {arguments[1]} : {arguments[2]})"
     if value.op == "fma":
       return f"std::fma({', '.join(arguments)})"
-    if value.op in {"exp", "exp2", "exp_neg", "exp2_neg", "log", "log2", "sqrt", "abs"}:
-      return f"std::{value.op.removesuffix('_neg')}({arguments[0]})"
-    if value.op in {"rsqrt", "rcp"}:
+    if implementation.scalar_kind == "std_math":
+      return f"std::{implementation.scalar_spelling}({arguments[0]})"
+    if implementation.scalar_kind == "reciprocal":
       return f"(static_cast<{CPP_TYPES[value.type.dtype]}>(1) / {'std::sqrt(' + arguments[0] + ')' if value.op == 'rsqrt' else arguments[0]})"
     raise TypeError(f"no scalar lowering for {value.op}")

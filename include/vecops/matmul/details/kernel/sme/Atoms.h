@@ -11,7 +11,7 @@
 #include "vecops/execution/details/ResourceSet.h"
 #include "vecops/execution/details/arm/Resources.h"
 #include "vecops/matmul/Atom.h"
-#include "vecops/vec/details/sme/State.h"
+#include "vecops/vec/SME.h"
 
 /**
  * @file vecops/matmul/details/kernel/sme/Atoms.h
@@ -74,11 +74,11 @@ struct SMEAtomBase {
   // alignment and bounds through Meta arithmetic.
 #if defined(HAS_FIXED_STREAMING_SVE_BITS)
   static constexpr auto M_R =
-      vec::details::sme::streaming_lanes_value<Acc>();
+      vec::sme::streaming_lanes_value<Acc>();
   static constexpr auto N_R = M_R;
 #else
   inline static const auto M_R =
-      vec::details::sme::streaming_lanes_value<Acc>();
+      vec::sme::streaming_lanes_value<Acc>();
   inline static const auto N_R = M_R;
 #endif
   // 32-bit K groups for the SME outer products; 1 element per step for fp64.

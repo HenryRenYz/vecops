@@ -901,6 +901,15 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_single_word(
     else return x86_convert_vec_scalar_word(to, from, value);
 #undef VECOPS_VEC_X86_WIDEN_CASE
   } else if constexpr (
+      std::same_as<To, float64_t> &&
+      (std::same_as<From, float16_t> || std::same_as<From, bfloat16_t>)) {
+    // Both widenings are exact. Keep this boundary in registers rather than
+    // invoking the per-lane half/bfloat scalar conversion fallback. This is
+    // also used by load_convert/store_convert and remains lane-ordered.
+    using MidTag = Rebind<float32_t, FromTag>;
+    return x86_convert_vec_native(
+        to, MidTag{}, x86_convert_vec_native(MidTag{}, from, value));
+  } else if constexpr (
       std::same_as<From, float32_t> && std::integral<To> && sizeof(To) < 4) {
     using MidTag = Rebind<int32_t, ToTag>;
     return x86_convert_vec_native(

@@ -1,10 +1,12 @@
 """Strided output storage allocation, including overlap and signed spans."""
+
 from __future__ import annotations
 from typing import Any
 from ..._schema import TensorAccess, TensorMeta
 from ..expr import DType
 from ..types import TensorType
 from .binding import _evaluate, _metadata, _dtype_for_framework
+
 
 def _storage_plan(shape: tuple[int, ...], strides: tuple[int, ...]) -> tuple[int, int]:
   if len(shape) != len(strides):

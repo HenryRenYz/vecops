@@ -62,6 +62,12 @@ function(vecops_configure_target_arch)
     endif()
 
     target_compile_options(${ARG_TARGET} PRIVATE "-march=${_VECOPS_MARCH}")
+    # Clang 19 accepts the optional ISA but omits its ACLE feature macro.
+    if(_VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
+       ((_VECOPS_MARCH MATCHES "(^|\\+)sme-f64f64($|\\+)") OR
+        (ARG_ARCH MATCHES "^Native" AND VECOPS_NATIVE_HAS_SME_F64F64)))
+        target_compile_definitions(${ARG_TARGET} PRIVATE VECOPS_TARGET_SME_F64F64=1)
+    endif()
     if(_VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
        ARG_ARCH MATCHES "^Native")
         # ACLE does not expose portable macros for every optional SME feature.

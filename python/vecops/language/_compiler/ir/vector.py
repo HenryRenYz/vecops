@@ -4,6 +4,7 @@ Expressions describe logical math; VectorOp/OperationCopy make the operations
 and iteration identities explicit. A grouping is not a C++ type: target limits,
 dtype lane rebinding and memory effects still have to be legalized afterwards.
 """
+
 from dataclasses import dataclass, field
 from . import kernel as I
 
@@ -38,6 +39,7 @@ class VectorGroup:
 @dataclass(frozen=True)
 class VectorEffect:
   """Explicit loop prologue, accumulation, converting store, or epilogue."""
+
   kind: str
   operation: str = ""
   index: int = 0
@@ -78,6 +80,7 @@ class VectorRegion:
   rebind_headroom: int = 0
   full_chunks: bool = False
   pass_trace: list[str] = field(default_factory=list)
+  cost: object | None = None
 
 
 @dataclass

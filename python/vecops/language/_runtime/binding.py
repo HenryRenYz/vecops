@@ -1,4 +1,5 @@
 """Runtime tensor metadata and symbolic argument/output binding."""
+
 from __future__ import annotations
 import inspect
 from typing import Any
@@ -7,6 +8,7 @@ from ..._schema import TensorMeta
 from ..expr import Const, DType, Dynamic, IntExpr, SymbolicInt
 
 _AUTO = object()
+
 
 def _normalize_out_idx(
   out_idx: int | list[int] | tuple[int, ...] | None,

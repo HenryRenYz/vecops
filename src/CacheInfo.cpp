@@ -27,6 +27,7 @@ CacheInfo complete_detected_cache_info(
   result.l2_bytes = std::max(result.l2_bytes, result.l1d_bytes);
   result.l3_bytes = std::max(result.l3_bytes, result.l2_bytes);
   result.fallback = !(found_l1 && found_l2);
+  result.l3_present = found_l3;
   return result;
 }
 
@@ -55,6 +56,10 @@ CacheInfo detect_x86_cache_info() {
         static_cast<nint_t>(((ebx >> 22U) & 0x3ffU) + 1U);
     const nint_t sets = static_cast<nint_t>(ecx) + 1;
     const nint_t bytes = line * partitions * ways * sets;
+    if ((type == 1 || type == 3) && level >= result.llc_level) {
+      result.llc_bytes = level > result.llc_level ? bytes : std::max(result.llc_bytes,bytes);
+      result.llc_level = level;
+    }
     result.line_bytes = std::max(result.line_bytes, line);
     if (level == 1 && (type == 1 || type == 3)) {
       result.l1d_bytes = std::max(result.l1d_bytes, bytes);
@@ -119,6 +124,10 @@ CacheInfo detect_sysfs_cache_info() {
     const int level = level_text[0] - '0';
     const nint_t bytes = parse_cache_size(size_text);
     if (bytes <= 0) continue;
+    if ((type[0] == 'D' || type[0] == 'U') && level >= static_cast<int>(result.llc_level)) {
+      result.llc_bytes = level > static_cast<int>(result.llc_level) ? bytes : std::max(result.llc_bytes,bytes);
+      result.llc_level = static_cast<unsigned>(level);
+    }
     if (level == 1 &&
         (type[0] == 'D' || type[0] == 'U')) {
       result.l1d_bytes = std::max(result.l1d_bytes, bytes);

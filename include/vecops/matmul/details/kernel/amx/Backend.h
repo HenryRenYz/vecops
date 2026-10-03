@@ -86,13 +86,13 @@
 #include "vecops/tensor/DataAccess.h"
 #include "vecops/util/Math.h"
 #include "vecops/vec/Vec.h"
-#include "vecops/vec/details/amx/AMX.h"
+#include "vecops/vec/AMX.h"
 
 namespace vecops::kernel::matmul_details::amx {
 
 namespace generic = matmul_pack_details::generic;
 namespace tile = kernel::loop;
-namespace amx_intrinsics = vec::details::amx;
+namespace amx_intrinsics = vec::amx;
 
 /// True when a C-input transform is the zero initializer, i.e. the
 /// microkernel may skip loading C entirely and start from zero tiles.

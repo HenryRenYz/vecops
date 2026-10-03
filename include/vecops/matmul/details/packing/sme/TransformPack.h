@@ -111,7 +111,7 @@ VECOPS_ALWAYS_INLINE vec::Vec<PanelTag<T>> zero_inactive_spatial(
     vec::Vec<PanelTag<T>> value, nint_t active_spatial) noexcept {
   using Tag = PanelTag<T>;
   const nint_t panel =
-      2 * vec::details::sme::streaming_lanes<uint32_t>();
+      2 * vec::sme::streaming_lanes<uint32_t>();
   if (active_spatial >= panel) return value;
   return vec::blend(
       Tag{}, vec::zeros(Tag{}),
@@ -166,7 +166,7 @@ VECOPS_ALWAYS_INLINE void store_quad_panel(
   using U = Bits<T>;
   using BitsTag = PanelTag<U>;
   const nint_t panel =
-      2 * vec::details::sme::streaming_lanes<uint32_t>();
+      2 * vec::sme::streaming_lanes<uint32_t>();
   const auto pg = first<U>(panel);
   store_quad<U>(
       output, pg,
@@ -205,7 +205,7 @@ VECOPS_ALWAYS_INLINE void pack_postprocess(
   const nint_t row_stride = static_cast<nint_t>(row_stride_meta);
   constexpr nint_t KPack = Packing::KPack;
   const nint_t panel =
-      2 * vec::details::sme::streaming_lanes<uint32_t>();
+      2 * vec::sme::streaming_lanes<uint32_t>();
   const nint_t lanes = vec::size(WordTag<Memory>{});
   const nint_t k_chunk = lanes;
   const nint_t panels = ceil_div(spatial, panel);
@@ -214,15 +214,15 @@ VECOPS_ALWAYS_INLINE void pack_postprocess(
 
   for (nint_t sp = 0; sp < panels; ++sp) {
     const nint_t panel_base = sp * panel;
-    const nint_t active_spatial = vec::details::sme::clamp_value(
+    const nint_t active_spatial = vec::sme::clamp_value(
         spatial - panel_base, nint_t{0}, panel);
-    const nint_t active0 = vec::details::sme::min_value(active_spatial, lanes);
+    const nint_t active0 = vec::sme::min_value(active_spatial, lanes);
     // Tile 1 is only populated for 4-byte memory elements: the panel is
     // 2 * (SVL/4) rows while a ZA tile at width w holds SVL/w slices —
     // the whole panel fits tile 0 at 2 bytes (SVL/2 slices) and even half
     // a tile at 1 byte, but only half the panel at 4 bytes.
     const nint_t active1 = sizeof(Memory) == 4
-        ? vec::details::sme::max_value(nint_t{0}, active_spatial - lanes)
+        ? vec::sme::max_value(nint_t{0}, active_spatial - lanes)
         : 0;
     const auto pg0 = first<U>(active0);
     const auto pg1 = first<U>(active1);
@@ -315,7 +315,7 @@ VECOPS_ALWAYS_INLINE void zero_contiguous(
   for (nint_t offset = 0; offset < count; offset += lanes) {
     vec::store(
         Tag{}, pointer + offset, zero,
-        vec::opt::first(vec::details::sme::min_value(lanes, count - offset)));
+        vec::opt::first(vec::sme::min_value(lanes, count - offset)));
   }
 }
 
@@ -330,7 +330,7 @@ VECOPS_ALWAYS_INLINE void zero_strided(
   for (nint_t offset = 0; offset < count; offset += lanes) {
     vec::store(
         Tag{}, pointer + offset * stride, zero,
-        vec::opt::first(vec::details::sme::min_value(lanes, count - offset)),
+        vec::opt::first(vec::sme::min_value(lanes, count - offset)),
         vec::opt::strided(stride));
   }
 }
@@ -383,7 +383,7 @@ VECOPS_NOINLINE void transform_packed_inplace(
   }
 
   for (nint_t sp = 0; sp < spatial_panels; ++sp) {
-    const nint_t active_spatial = vec::details::sme::min_value(panel, spatial - sp * panel);
+    const nint_t active_spatial = vec::sme::min_value(panel, spatial - sp * panel);
     if (active_spatial < panel) {
       // Tail spatial rows: [row][k(KPack)] is row-major inside a group,
       // so the inactive rows of each group form one contiguous run

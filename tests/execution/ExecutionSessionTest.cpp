@@ -10,6 +10,8 @@
 #endif
 
 #include "vecops/execution/ExecutionSession.h"
+#include "vecops/execution/Resources.h"
+#include "vecops/vec/AMX.h"
 
 namespace {
 
@@ -115,6 +117,53 @@ TEST(ExecutionSessionTest, StatefulScalarGemmProducesExpectedValues) {
   EXPECT_FLOAT_EQ(c[2], 139.0f);
   EXPECT_FLOAT_EQ(c[3], 154.0f);
 }
+
+#if defined(HAS_AMX_TILE)
+TEST(ExecutionSessionTest, PublicAMXRegionConfiguresMovesAndReleases) {
+  std::array<std::int32_t, 64> input{}, output{};
+  for (int i = 0; i < 64; ++i) input[i] = i - 32;
+  execution::amx::TileConfiguration config{};
+  config.column_bytes[0] = 64;
+  config.rows[0] = 4;
+  ExecutionSession session{};
+  session.with_resources(execution::amx::Region{}, [&](auto& region) VECOPS_INLINE_LAMBDA {
+    region.with_configuration(config, [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+      vec::amx::load<0>(input.data(), 64);
+      vec::amx::store<0>(output.data(), 64);
+    });
+  });
+  EXPECT_EQ(input, output);
+  session.with_resources(execution::amx::Region{}, [&](auto& region) VECOPS_INLINE_LAMBDA {
+    region.with_configuration(config, [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+      vec::amx::zero<0>();
+      vec::amx::store<0>(output.data(), 64);
+    });
+  });
+  for (auto value : output) EXPECT_EQ(value, 0);
+}
+
+TEST(ExecutionSessionTest, PublicAMXLoadObservesFreshStackStores) {
+  std::array<std::int32_t,64> output{};
+  execution::amx::TileConfiguration config{};
+  config.column_bytes[0]=64;
+  config.rows[0]=4;
+  ExecutionSession session{};
+  session.with_resources(execution::amx::Region{},[&](auto& region) VECOPS_INLINE_LAMBDA {
+    region.with_configuration(config,[&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
+      alignas(64) std::int32_t fresh[64];
+      for (int i=0;i<64;++i) fresh[i]=7*i+41;
+      // fresh has no ordinary C++ reader: a GCC asm-only intrinsic lacking
+      // memory effects used to allow these producer stores to be deleted.
+      vec::amx::load<0>(fresh,64);
+      vec::amx::store<0>(output.data(),64);
+      for (int i=0;i<64;++i) fresh[i]=7*i+43;
+      vec::amx::stream_load<0>(fresh,64);
+      vec::amx::store<0>(output.data(),64);
+    });
+  });
+  for (int i=0;i<64;++i) EXPECT_EQ(output[i],7*i+43);
+}
+#endif
 
 extern "C" VECOPS_NOINLINE void fake_stateful_gemm_probe(
     const float* a, const float* b, float* c) {

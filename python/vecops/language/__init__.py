@@ -16,8 +16,9 @@ from .expr import (
 from .jit import jit
 from .template import TemplateFunction, template
 from .types import Tensor, TensorType
-from . import passes
+from . import passes, sme, amx, library, cost
 from ._compiler.pipeline import load_builtin_passes as _load_builtin_passes
+
 _load_builtin_passes()
 from .dsl import *
 from .dsl import __all__ as _dsl_exports
@@ -44,6 +45,7 @@ __all__ = [
   "template",
 ]
 __all__ += [*_dsl_exports, "float16", "bfloat16", "float32", "float64", "int32", "int64", "bool_"]
-from .library import layernorm, softmax
-__all__ += ["layernorm", "softmax"]
-__all__ += ["passes"]
+from .library import layernorm, softmax, transpose_copy, matmul
+
+__all__ += ["layernorm", "softmax", "transpose_copy", "matmul"]
+__all__ += ["passes", "sme", "amx", "library", "cost"]

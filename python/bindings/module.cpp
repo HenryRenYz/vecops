@@ -79,6 +79,10 @@ DType numpy_dtype(const py::dtype& dtype) {
 
   const auto kind = py::cast<std::string>(dtype.attr("kind"));
   const auto item_size = py::cast<py::ssize_t>(dtype.attr("itemsize"));
+  // NumPy extension dtypes (e.g. ml_dtypes) use kind V for bfloat16.
+  // Match the exact descriptor name, not arbitrary two-byte void records.
+  if (item_size == 2 && py::cast<std::string>(dtype.attr("name")) == "bfloat16")
+    return DType::BFloat16;
   if (kind == "b" && item_size == 1)
     return DType::Bool;
   if (kind == "i") {
@@ -160,29 +164,42 @@ public:
     if (writable && !numpy_array.writeable()) {
       throw py::value_error("a writable vecops TensorView requires a writable NumPy ndarray");
     }
-    const auto info = numpy_array.request();
-    if (info.itemsize <= 0) {
+    // Use ndarray metadata directly: bfloat16 has no PEP-3118 format and
+    // requesting a generic Python buffer would reject its valid storage.
+    const auto item_size = numpy_array.itemsize();
+    if (item_size <= 0) {
       throw py::value_error("NumPy ndarray has an invalid element size");
     }
 
-    view_.data = info.ptr;
+    view_.data = const_cast<void*>(numpy_array.data());
     view_.device_type = VECOPS_DEVICE_CPU;
     view_.device_index = 0;
     view_.dtype = numpy_dtype(numpy_array.dtype());
-    if (static_cast<std::size_t>(info.itemsize) != dtype_size(view_.dtype)) {
+    if (static_cast<std::size_t>(item_size) != dtype_size(view_.dtype)) {
       throw py::type_error("NumPy dtype item size does not match the vecops ABI dtype width");
     }
     view_.flags = VECOPS_TENSOR_READ | (writable ? VECOPS_TENSOR_WRITE : 0);
-    view_.sizes.reserve(static_cast<std::size_t>(info.ndim));
-    view_.strides.reserve(static_cast<std::size_t>(info.ndim));
-    for (py::ssize_t axis = 0; axis < info.ndim; ++axis) {
-      const auto byte_stride = info.strides[static_cast<std::size_t>(axis)];
-      if (byte_stride % info.itemsize != 0) {
+    view_.sizes.reserve(static_cast<std::size_t>(numpy_array.ndim()));
+    view_.strides.reserve(static_cast<std::size_t>(numpy_array.ndim()));
+    for (py::ssize_t axis = 0; axis < numpy_array.ndim(); ++axis) {
+      const auto byte_stride = numpy_array.strides(axis);
+      if (byte_stride % item_size != 0) {
         throw py::value_error("vecops does not support non-element-aligned NumPy strides");
       }
-      const auto element_stride = byte_stride / info.itemsize;
-      view_.sizes.push_back(info.shape[static_cast<std::size_t>(axis)]);
+      const auto element_stride = byte_stride / item_size;
+      view_.sizes.push_back(numpy_array.shape(axis));
       view_.strides.push_back(element_stride);
+    }
+    if (numpy_array.size() == 0 && (numpy_array.flags() & py::array::c_style)) {
+      // The old buffer adapter canonicalized contiguous empty arrays. NumPy
+      // reports zero byte strides for them; keep the dense ABI convention so
+      // a length-zero vector still satisfies its declared unit lane stride.
+      vecops::nint_t dense = 1;
+      for (py::ssize_t axis = numpy_array.ndim(); axis-- > 0;) {
+        view_.strides[static_cast<std::size_t>(axis)] = dense;
+        if (axis && __builtin_mul_overflow(dense, view_.sizes[static_cast<std::size_t>(axis)], &dense))
+          throw py::value_error("empty NumPy dense stride overflows int64");
+      }
     }
   }
 

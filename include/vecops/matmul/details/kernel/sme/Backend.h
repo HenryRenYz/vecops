@@ -79,7 +79,7 @@
 #include "vecops/matmul/details/packing/generic/Pack.h"
 #include "vecops/tensor/DataAccess.h"
 #include "vecops/util/Math.h"
-#include "vecops/vec/details/sme/ZA.h"
+#include "vecops/vec/SME.h"
 
 namespace vecops::kernel::matmul_details::sme {
 
@@ -527,7 +527,7 @@ VECOPS_ALWAYS_INLINE void mopa(VA a, VB b) {
   using BTag = vec::ScalableTag<TB, 0>;
   const auto pga = vec::mtrue(ATag{});
   const auto pgb = vec::mtrue(BTag{});
-  vec::details::sme::mopa<Tile, TAcc, TA, TB>(
+  vec::sme::mopa<Tile, TAcc, TA, TB>(
       pga, pgb, static_cast<vec::Vec<ATag>>(a),
       static_cast<vec::Vec<BTag>>(b));
 }
@@ -2344,7 +2344,7 @@ template <int Tile, typename T, vec::VectorValue V, typename Mask>
 VECOPS_ALWAYS_INLINE void write_row(
     uint32_t row, Mask pg, V value) noexcept {
   using Tag = vec::ScalableTag<T, 0>;
-  vec::details::sme::write_hor<Tile>(
+  vec::sme::write_hor<Tile>(
       row, static_cast<vec::Mask<Tag>>(pg),
       static_cast<vec::Vec<Tag>>(value));
 }
@@ -2353,7 +2353,7 @@ template <int Tile, typename T, typename Mask>
 VECOPS_ALWAYS_INLINE auto read_row(
     uint32_t row, Mask pg) noexcept {
   using Tag = vec::ScalableTag<T, 0>;
-  return vec::details::sme::read_hor<Tile>(
+  return vec::sme::read_hor<Tile>(
       Tag{}, row, static_cast<vec::Mask<Tag>>(pg));
 }
 
@@ -2364,7 +2364,7 @@ template <int Tile, typename T, vec::VectorValue V, typename Mask>
 VECOPS_ALWAYS_INLINE void write_column(
     uint32_t column, Mask pg, V value) noexcept {
   using Tag = vec::ScalableTag<T, 0>;
-  vec::details::sme::write_ver<Tile>(
+  vec::sme::write_ver<Tile>(
       column, static_cast<vec::Mask<Tag>>(pg),
       static_cast<vec::Vec<Tag>>(value));
 }
@@ -2373,7 +2373,7 @@ template <int Tile, typename T, typename Mask>
 VECOPS_ALWAYS_INLINE auto read_column(
     uint32_t column, Mask pg) noexcept {
   using Tag = vec::ScalableTag<T, 0>;
-  return vec::details::sme::read_ver<Tile>(
+  return vec::sme::read_ver<Tile>(
       Tag{}, column, static_cast<vec::Mask<Tag>>(pg));
 }
 
@@ -2466,7 +2466,7 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
         if constexpr (FullM) return vec::mtrue(Tag{});
         else return vec::mwhilelt(Tag{}, nint_t{0}, active_m_value);
       }();
-      vec::details::sme::mopa<Tile, T, T, T>(
+      vec::sme::mopa<Tile, T, T, T>(
           pg_rows, pg, vec::fill(Tag{}, T{1}), value);
     } else if constexpr (
         (std::same_as<T, int32_t> || std::same_as<T, uint32_t>) &&
@@ -2476,7 +2476,7 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
                     meta::singleton_value_v<ActiveM> == 1) {
         using U = std::conditional_t<std::same_as<T, int32_t>, uint32_t, T>;
         using BitsTag = vec::ScalableTag<U, 0>;
-        vec::details::sme::load_hor<Tile>(
+        vec::sme::load_hor<Tile>(
             0, static_cast<vec::Mask<BitsTag>>(pg),
             reinterpret_cast<const U*>(base));
       } else {
@@ -2488,13 +2488,13 @@ VECOPS_ALWAYS_INLINE void initialize_c_tile(
           if constexpr (FullM) return vec::mtrue(Tag{});
           else return vec::mwhilelt(Tag{}, nint_t{0}, active_m_value);
         }();
-        vec::details::sme::addha<Tile, T>(pg_rows, pg, value);
+        vec::sme::addha<Tile, T>(pg_rows, pg, value);
       }
     } else {
       for (nint_t row = 0; row < active_m_value; ++row) {
         using U = std::conditional_t<sizeof(T) == 8, uint64_t, uint32_t>;
         using BitsTag = vec::ScalableTag<U, 0>;
-        vec::details::sme::load_hor<Tile>(
+        vec::sme::load_hor<Tile>(
             static_cast<uint32_t>(row),
             static_cast<vec::Mask<BitsTag>>(pg),
             reinterpret_cast<const U*>(base + row * strides[0]));
@@ -2553,7 +2553,7 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
     for (nint_t row = 0; row < active_m_value; ++row) {
       using U = std::conditional_t<sizeof(T) == 8, uint64_t, uint32_t>;
       using BitsTag = vec::ScalableTag<U, 0>;
-      vec::details::sme::store_hor<Tile>(
+      vec::sme::store_hor<Tile>(
           static_cast<uint32_t>(row),
           static_cast<vec::Mask<BitsTag>>(pg),
           reinterpret_cast<U*>(base + row * strides[0]));
@@ -2569,7 +2569,7 @@ VECOPS_ALWAYS_INLINE void store_c_tile(
     for (nint_t column = 0; column < active_n_value; ++column) {
       using U = std::conditional_t<sizeof(T) == 8, uint64_t, uint32_t>;
       using BitsTag = vec::ScalableTag<U, 0>;
-      vec::details::sme::store_ver<Tile>(
+      vec::sme::store_ver<Tile>(
           static_cast<uint32_t>(column),
           static_cast<vec::Mask<BitsTag>>(pg_rows),
           reinterpret_cast<U*>(base + column * strides[1]));
@@ -3066,7 +3066,7 @@ VECOPS_ALWAYS_INLINE void microkernel_body_routed(
   // explicit transform-store override still takes priority.
   constexpr bool EnableWideCInputGrouping = false;
   const nint_t lanes = static_cast<nint_t>(Atom::M_R);
-  vec::details::sme::zero_za();
+  vec::sme::zero_za();
   const OperandInvariants<Atom, ::vecops::matmul::Operand::A, A> a_invariants(a);
   const OperandInvariants<Atom, ::vecops::matmul::Operand::B, B> b_invariants(b);
 

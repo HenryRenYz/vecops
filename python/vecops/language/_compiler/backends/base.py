@@ -1,4 +1,5 @@
 """Backend compilation boundary; other targets need not use Vector IR or C++."""
+
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -17,5 +18,5 @@ class Backend(Protocol):
   Additional targets may provide their own build/runtime adapter rather than
   pretending to have CPU vector tags or a C++ emitter.
   """
-  def lower(self, template, out_idx, *, pipeline=None, options=None) -> LoweredArtifact:
-    ...
+
+  def lower(self, template, out_idx, *, pipeline=None, options=None) -> LoweredArtifact: ...

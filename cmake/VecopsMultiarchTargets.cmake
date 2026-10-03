@@ -574,6 +574,7 @@ function(vecops_add_multiarch_executable)
               (_ARCH STREQUAL "NativeFixedSVE") OR
               (_ARCH STREQUAL "NativeFixedStreamingSVE")))))
             set(_VECOPS_USE_SME_F64_LEAF ON)
+            target_compile_definitions(${_TARGET_NAME} PRIVATE VECOPS_TARGET_SME_F64F64=1)
         endif()
 
         set(_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF OFF)

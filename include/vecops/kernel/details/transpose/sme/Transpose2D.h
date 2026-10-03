@@ -11,11 +11,11 @@
 #include "vecops/CoreDefs.h"
 #include "vecops/CoreTypes.h"
 #include "vecops/execution/ExecutionSession.h"
-#include "vecops/execution/details/arm/Resources.h"
+#include "vecops/execution/Resources.h"
 #include "vecops/kernel/details/transpose/generic/Transpose2D.h"
 #include "vecops/tensor/Layout.h"
 #include "vecops/vec/ConversionMemory.h"
-#include "vecops/vec/details/sme/ZA.h"
+#include "vecops/vec/SME.h"
 
 /**
  * @file vecops/kernel/details/transpose/sme/Transpose2D.h
@@ -174,10 +174,10 @@ VECOPS_ALWAYS_INLINE void transpose(
     dst_base += dst_origin[d] * dst_strides[d];
   }
   for (nint_t mi = 0; mi < m_extent; mi += lanes) {
-    const nint_t active_m = vec::details::sme::min_value(lanes, m_extent - mi);
+    const nint_t active_m = vec::sme::min_value(lanes, m_extent - mi);
     const auto m_pg = vec::mwhilelt(BitsTag{}, nint_t{0}, active_m);
     for (nint_t ni = 0; ni < n_extent; ni += lanes) {
-      const nint_t active_n = vec::details::sme::min_value(lanes, n_extent - ni);
+      const nint_t active_n = vec::sme::min_value(lanes, n_extent - ni);
       const auto n_pg = vec::mwhilelt(BitsTag{}, nint_t{0}, active_n);
 
       // The two predicates intentionally cross: writing a row horizontally
@@ -195,15 +195,15 @@ VECOPS_ALWAYS_INLINE void transpose(
               n_pg, active_n, source_data + offset0);
           const auto value1 = load_compute_bits<Compute>(
               n_pg, active_n, source_data + offset1);
-          vec::details::sme::write_hor<0>(
+          vec::sme::write_hor<0>(
               static_cast<uint32_t>(r), n_pg, value0);
-          vec::details::sme::write_hor<0>(
+          vec::sme::write_hor<0>(
               static_cast<uint32_t>(r + 1), n_pg, value1);
         }
         if (r < active_m) {
           const nint_t offset =
               src_base + (mi + r) * src_row_step + ni * src_col_step;
-          vec::details::sme::write_hor<0>(
+          vec::sme::write_hor<0>(
               static_cast<uint32_t>(r), n_pg,
               load_compute_bits<Compute>(
                   n_pg, active_n, source_data + offset));
@@ -212,7 +212,7 @@ VECOPS_ALWAYS_INLINE void transpose(
         for (nint_t r = 0; r < active_m; ++r) {
           const nint_t offset =
               src_base + (mi + r) * src_row_step + ni * src_col_step;
-          vec::details::sme::write_hor<0>(
+          vec::sme::write_hor<0>(
               static_cast<uint32_t>(r), n_pg,
               load_compute_bits<Compute>(
                   n_pg, active_n, source_data + offset));
@@ -222,9 +222,9 @@ VECOPS_ALWAYS_INLINE void transpose(
       if constexpr (PipelinePairs) {
         nint_t c = 0;
         for (; c + 1 < active_n; c += 2) {
-          const auto raw0 = vec::details::sme::read_ver<0>(
+          const auto raw0 = vec::sme::read_ver<0>(
               BitsTag{}, static_cast<uint32_t>(c), m_pg);
-          const auto raw1 = vec::details::sme::read_ver<0>(
+          const auto raw1 = vec::sme::read_ver<0>(
               BitsTag{}, static_cast<uint32_t>(c + 1), m_pg);
           const nint_t offset0 =
               dst_base + (ni + c) * dst_row_step + mi * dst_col_step;
@@ -235,7 +235,7 @@ VECOPS_ALWAYS_INLINE void transpose(
               m_pg, active_m, destination_data + offset1, raw1);
         }
         if (c < active_n) {
-          const auto raw = vec::details::sme::read_ver<0>(
+          const auto raw = vec::sme::read_ver<0>(
               BitsTag{}, static_cast<uint32_t>(c), m_pg);
           const nint_t offset =
               dst_base + (ni + c) * dst_row_step + mi * dst_col_step;
@@ -244,7 +244,7 @@ VECOPS_ALWAYS_INLINE void transpose(
         }
       } else {
         for (nint_t c = 0; c < active_n; ++c) {
-          const auto raw = vec::details::sme::read_ver<0>(
+          const auto raw = vec::sme::read_ver<0>(
               BitsTag{}, static_cast<uint32_t>(c), m_pg);
           const nint_t offset =
               dst_base + (ni + c) * dst_row_step + mi * dst_col_step;
@@ -277,7 +277,7 @@ struct SMEBackend {
             typename Policy>
   /**
    * @brief Validate a direct DataAccess pair and invoke the SME leaf.
-   * @param scope Active scope proving `arm::StreamingZA`.
+   * @param scope Active scope proving `execution::sme::StreamingZA`.
    * @param m Logical source rows.
    * @param n Logical source columns.
    * @param source Bound direct readable access.
@@ -327,7 +327,7 @@ struct SMEBackend {
     const auto destination_col_stride = tensor::stride<DstCol>(
         destination.spec().output_layout());
     scope.with_resources(
-        execution::details::arm::StreamingZARegion{},
+        execution::sme::Region{},
         [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT {
           sme::transpose<
               SourceMemory, DestinationMemory, Compute, M, N,

@@ -3,10 +3,12 @@
 They deliberately cannot execute tensor computation in the host interpreter.
 Source-backed templates remain declarations and never execute this vocabulary.
 """
+
 from __future__ import annotations
 
 import functools
 from dataclasses import dataclass
+from ._compiler.operations import Trait, snapshot as operation_snapshot
 
 
 @dataclass(frozen=True)
@@ -17,12 +19,14 @@ class Vector:
   target-relative scalable extent. Large extents are strip-mined, not spilled
   merely because the C++ tag cannot represent them as one value.
   """
+
   dtype: object = "float32"
   N: int | None = None
   pow: int = 0
 
   def __post_init__(self):
     from .expr import Const
+
     if isinstance(self.N, Const):
       object.__setattr__(self, "N", self.N.value)
     if isinstance(self.pow, Const):
@@ -58,9 +62,35 @@ def func(function):
 
 
 _OPERATIONS = (
-  "serial", "grid", "unroll", "tile", "transpose", "reshape", "load", "store", "copy",
-  "alloc", "zeros", "full", "cast", "where", "reduce_add", "reduce_max", "reduce_min", "max", "min", "exp", "exp2", "exp_neg", "exp2_neg", "log",
-  "log2", "sqrt", "rsqrt", "rcp", "abs", "fma", "ceildiv", "arange", "lanes", "static_assert",
+  "serial",
+  "grid",
+  "unroll",
+  "tile",
+  "transpose",
+  "reshape",
+  "load",
+  "store",
+  "copy",
+  "dot",
+  "pack",
+  "packed",
+  "_matmul",
+  "alloc",
+  "zeros",
+  "full",
+  "cast",
+  "where",
+  "as_value",
+  "_normalize",
+  "max",
+  "min",
+  "fma",
+  "ceildiv",
+  "arange",
+  "lanes",
+  "static_assert",
+  "compiler_fence",
 )
+_OPERATIONS += tuple(sorted(operation_snapshot().names(Trait.UNARY_MATH | Trait.SCALAR_REDUCTION)))
 globals().update({name: Intrinsic(name) for name in _OPERATIONS})
 __all__ = ["Vector", "func", *_OPERATIONS]

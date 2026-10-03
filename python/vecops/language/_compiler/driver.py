@@ -1,4 +1,5 @@
 """Template compilation orchestration, independent of runtime argument adaptation."""
+
 from __future__ import annotations
 import hashlib
 import os
@@ -13,6 +14,7 @@ from .._runtime.binding import _normalize_out_idx
 from .._runtime.kernel import _CompiledCore, CompiledKernel
 from .cache import _source_identity, _compiler_key, _compile_lock, _compile_cache
 from .backends.cpu.source import _build_definition
+
 
 def compile(
   template_function: TemplateFunction,
@@ -33,7 +35,8 @@ def compile(
   vector_ir = None
   if ir.source is None:
     from .backends.cpu.backend import CPUBackend
-    artifact = CPUBackend().lower(ir, indices, pipeline=pipeline, options=pass_options)
+
+    artifact = CPUBackend().lower(ir, indices, pipeline=pipeline, options=pass_options, target=selected.target)
     kernel_ir, vector_ir, generated_source = artifact.kernel, artifact.lowered, artifact.source
     identity = hashlib.sha256(generated_source.encode()).hexdigest()
     directory = selected.cache_dir.parent / "dsl-sources" / identity

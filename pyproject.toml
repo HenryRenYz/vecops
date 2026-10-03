@@ -19,6 +19,7 @@ test = [
   "numpy>=1.23",
   "pytest>=7",
 ]
+dev = ["ruff==0.16.10"]
 
 [tool.scikit-build]
 cmake.build-type = "Release"

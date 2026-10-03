@@ -5,10 +5,13 @@ inside the emitter. The catalog separates that work from source printing. Its
 unused alternatives are not reported as emitted regions; identifier binding
 for scratch buffers does not re-run lowering or optimization.
 """
-from dataclasses import dataclass, fields, replace
+
+from dataclasses import dataclass, field, fields, replace
 from types import MappingProxyType
 from ... import ir as I
 from ...lowering.tile_to_vector import lower_stores, lower_axis, lower_reduction
+from ...pipeline import cpu_memory_pipeline
+from ...operations import has, Trait
 
 
 @dataclass(frozen=True)
@@ -18,6 +21,13 @@ class PreparedKernel:
   axes: object
   snapshots: object
   reductions: object
+  transposes: object
+  matmuls: object
+  packing_permutation: object | None = None
+  packing_permutation_x86: object | None = None
+  dense_packs: object = field(default_factory=dict)
+  grouped_epilogues: frozenset = frozenset()
+  pass_trace: list = field(default_factory=list)
 
   def store(self, statement):
     return self.stores[id(statement)]
@@ -32,15 +42,14 @@ class PreparedKernel:
     template = self.snapshots[id(load)]
     original = template.effects[0].store
     statement = replace(original, destination=replace(original.destination, storage=storage))
-    region = replace(template, effects=tuple(replace(effect, store=statement)
-                                             for effect in template.effects))
+    region = replace(template, effects=tuple(replace(effect, store=statement) for effect in template.effects))
     return statement, region
 
 
-def prepare(vectors):
+def prepare(vectors, *, memory_manager=None):
   """Lower all latent regions using the same per-compilation pass snapshot."""
   manager = vectors.manager
-  stores, axes, snapshots, reductions = {}, {}, {}, {}
+  stores, axes, snapshots, reductions, transposes, matmuls = {}, {}, {}, {}, {}, {}
   seen = set()
 
   def visit(value):
@@ -57,24 +66,27 @@ def prepare(vectors):
       if value.op == "axis_reduce":
         axis, operation, unroll = value.data
         for count in dict.fromkeys((unroll, 1)):
-          axes[(id(value), count)] = lower_axis(value.args[0], value.type.dtype, axis,
-                                               operation, count, manager=manager)
-      elif value.op.startswith("reduce_") and id(value) not in vectors.plans:
+          axes[(id(value), count)] = lower_axis(
+            value.args[0], value.type.dtype, axis, operation, count, manager=manager
+          )
+      elif has(value, Trait.SCALAR_REDUCTION) and id(value) not in vectors.plans:
         reductions[((id(value),), ())] = lower_reduction((value,), manager=manager)
       elif value.op == "load" and value.data.shape:
         shape = value.data.shape
         strides = [I.literal(1)] * len(shape)
         for axis in reversed(range(len(shape) - 1)):
           strides[axis] = I.binary("mul", strides[axis + 1], shape[axis + 1])
-        destination = I.View("snapshot", value.type.dtype, shape, tuple(strides),
-                             I.literal(0), owned=True)
-        snapshots[id(value)] = lower_stores((I.Store(destination, value),),
-                                             opaque=vectors.kernel.materializations, manager=manager)
+        destination = I.View("snapshot", value.type.dtype, shape, tuple(strides), I.literal(0), owned=True)
+        snapshots[id(value)] = lower_stores(
+          (I.Store(destination, value),), opaque=vectors.kernel.materializations, manager=manager
+        )
     for field in fields(value):
       visit(getattr(value, field.name))
 
   visit(vectors.kernel.body)
   visit(tuple(vectors.kernel.bindings.values()))
   # Registration changes after this point cannot change a source emission.
-  return PreparedKernel(vectors, *(MappingProxyType(plans) for plans in
-                                  (stores, axes, snapshots, reductions)))
+  prepared = PreparedKernel(
+    vectors, *(MappingProxyType(plans) for plans in (stores, axes, snapshots, reductions, transposes, matmuls))
+  )
+  return (memory_manager or cpu_memory_pipeline(options=manager.options)).run(prepared)

@@ -12,7 +12,7 @@
  * dual-licensed under "MIT OR Apache-2.0 WITH LLVM-exception".
  *
  * Design, shared by every base and width: a branch-free inline core covers
- * the FEXPA-safe normal domain, and one NOINLINE special-case routine owns
+ * the FEXPA-safe normal domain, and one normally outlined special routine owns
  * every tail. The special routine repeats the core with the FEXPA exponent
  * biased by a fixed offset (23 for f32, 53 for f64) and undoes it with an
  * exact power-of-two scaling, which keeps the intermediate result normal
@@ -39,6 +39,7 @@
 #include "vecops/vec/details/Dispatch.h"
 #include "vecops/vec/details/sve/Basic.h"
 #include "vecops/vec/details/sve/Bf16.h"
+#include "vecops/vec/details/sve/math/Policy.h"
 
 namespace vecops::vec::details {
 
@@ -147,7 +148,7 @@ VECOPS_ALWAYS_INLINE svfloat32_t sve_exp_f32_core(
  * afterwards, so the intermediate stays normal however extreme the input is.
  */
 template <const SVEExpF32Family& C, Accuracy Tier>
-VECOPS_NOINLINE inline svfloat32_t sve_exp_f32_special(
+VECOPS_SVE_MATH_SPECIAL svfloat32_t sve_exp_f32_special(
     svbool_t pg, svfloat32_t x) {
   constexpr float flush_bound =
       sve_exp_gradual<Tier>() ? C.zero_bound : -C.special_bound;
@@ -286,7 +287,7 @@ VECOPS_ALWAYS_INLINE svfloat64_t sve_exp_f64_core(
  * sve_exp_f32_special with a +/−53 exponent bias.
  */
 template <const SVEExpF64Family& C, Accuracy Tier>
-VECOPS_NOINLINE inline svfloat64_t sve_exp_f64_special(
+VECOPS_SVE_MATH_SPECIAL svfloat64_t sve_exp_f64_special(
     svbool_t pg, svfloat64_t x) {
   constexpr double flush_bound =
       sve_exp_gradual<Tier>() ? C.zero_bound : -C.special_bound;
@@ -351,7 +352,7 @@ VECOPS_ALWAYS_INLINE svfloat16_t sve_exp_f16_core(
 }
 
 /** Tails for the f16 domain: underflow below ln(2^-14), saturation above. */
-VECOPS_NOINLINE inline svfloat16_t sve_exp_f16_special(
+VECOPS_SVE_MATH_SPECIAL svfloat16_t sve_exp_f16_special(
     svbool_t pg, svfloat16_t x) {
   const auto full = svptrue_b16();
   // exp(11.0859375) rounds to 65248; every larger finite input overflows.
@@ -473,7 +474,7 @@ VECOPS_ALWAYS_INLINE svfloat16_t sve_exp_f16_family_core(
 
 /** Tails: underflow below normal_limit and the pinned saturation edge. */
 template <const SVEExpF16Family& C>
-VECOPS_NOINLINE inline svfloat16_t sve_exp_f16_family_special(
+VECOPS_SVE_MATH_SPECIAL svfloat16_t sve_exp_f16_family_special(
     svbool_t pg, svfloat16_t x) {
   const auto full = svptrue_b16();
   // NaN lanes must survive the clamp, so use the propagating FMIN/FMAX.

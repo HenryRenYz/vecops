@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <type_traits>
@@ -1034,6 +1035,42 @@ TEST(VecConversionMemoryTest, ScalableFilteredRoundTrip) {
   for (vecops::nint_t lane = 0; lane < lanes; ++lane)
     EXPECT_EQ(lane < active ? input[static_cast<std::size_t>(lane)] : -77,
               output[static_cast<std::size_t>(lane)]);
+}
+#endif
+
+#if !defined(CPU_CAPABILITY_SVE) || defined(HAS_FIXED_SVE_BITS)
+template <typename Memory, int Lanes>
+void verify_exact_small_float_to_double() {
+  using Tag = vec::FixedTag<double, Lanes>;
+  using MemoryTag = vec::Rebind<Memory, Tag>;
+  std::array<Memory, Lanes> input{};
+  std::array<double, Lanes> output{};
+  for (int i = 0; i < Lanes; ++i)
+    input[i] = Memory{static_cast<float>(i - 5) / 4.0f};
+  input[0] = Memory{-0.0f};
+  const auto loaded = vec::load_convert(Tag{}, input.data());
+  vec::store(Tag{}, output.data(), loaded);
+  for (int i = 0; i < Lanes; ++i) {
+    const auto expected = static_cast<double>(static_cast<float>(input[i]));
+    EXPECT_EQ(output[i], expected);
+    EXPECT_EQ(std::signbit(output[i]), std::signbit(expected));
+  }
+  const auto narrow = vec::load(MemoryTag{}, input.data());
+  vec::store_convert(MemoryTag{}, output.data(), narrow);
+  for (int i = 0; i < Lanes; ++i)
+    EXPECT_EQ(output[i], static_cast<double>(static_cast<float>(input[i])));
+  const auto partial = vec::load_convert(Tag{}, input.data(), vec::opt::first(Lanes - 1), vec::opt::merge(123.0));
+  vec::store(Tag{}, output.data(), partial);
+  EXPECT_EQ(output[Lanes - 1], 123.0);
+}
+
+TEST(VecConversionMemoryTest, ExactHalfAndBfloatWideningUsesOrderedLanes) {
+  verify_exact_small_float_to_double<vecops::float16_t, 2>();
+  verify_exact_small_float_to_double<vecops::float16_t, 8>();
+  verify_exact_small_float_to_double<vecops::float16_t, 16>();
+  verify_exact_small_float_to_double<vecops::bfloat16_t, 2>();
+  verify_exact_small_float_to_double<vecops::bfloat16_t, 8>();
+  verify_exact_small_float_to_double<vecops::bfloat16_t, 16>();
 }
 #endif
 

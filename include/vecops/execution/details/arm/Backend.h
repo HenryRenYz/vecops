@@ -12,7 +12,7 @@
 #include "vecops/execution/details/arm/Resources.h"
 #include "vecops/platform/Target.h"
 #if defined(HAS_SME)
-#include "vecops/vec/details/sme/State.h"
+#include "vecops/vec/SME.h"
 #endif
 
 /** @file vecops/execution/details/arm/Backend.h
@@ -25,7 +25,7 @@ namespace vecops::execution::details {
  *
  * "Manual" means this backend owns the PSTATE.SM/ZA lifecycle itself: it
  * emits SMSTART/SMSTOP around the callback through
- * `vec::details::sme::with_streaming_za` (a lexical region), rather than
+ * `vec::sme::with_streaming_za` (a lexical region), rather than
  * relying on compiler-generated streaming functions. A nested region whose
  * requirements are already active compiles to a plain callback invocation.
  */
@@ -54,7 +54,7 @@ struct Backend<platform::AArch64Target> {
 #if defined(HAS_SME)
       static_assert(std::is_nothrow_invocable_v<Fn&&>,
                     "manual SME region callback must be noexcept");
-      return vec::details::sme::with_streaming_za(std::forward<Fn>(fn));
+      return vec::sme::with_streaming_za(std::forward<Fn>(fn));
 #else
       static_assert(!EnterStreamingZA,
                     "Arm StreamingZA requires an SME target");

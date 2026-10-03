@@ -43,7 +43,7 @@
 #include "vecops/CoreTypes.h"
 #include "vecops/matmul/Packing.h"
 #include "vecops/vec/Vec.h"
-#include "vecops/vec/details/sme/ZA.h"
+#include "vecops/vec/SME.h"
 
 namespace vecops::kernel::matmul_pack_details::sme {
 
@@ -88,7 +88,7 @@ template <int Tile, typename U, typename Raw>
 VECOPS_ALWAYS_INLINE void write_hor(
     uint32_t slice, vec::Mask<vec::ScalableTag<U, 0>> pg,
     Raw value) noexcept {
-  vec::details::sme::write_hor<Tile>(slice, pg, value);
+  vec::sme::write_hor<Tile>(slice, pg, value);
 }
 
 /// Read one K column out of a ZA tile — together with write_hor/load_hor,
@@ -97,7 +97,7 @@ template <int Tile, typename U>
 VECOPS_ALWAYS_INLINE auto read_ver(
     uint32_t slice, vec::Mask<vec::ScalableTag<U, 0>> pg) noexcept {
   using Tag = vec::ScalableTag<U, 0>;
-  return vec::details::sme::read_ver<Tile>(Tag{}, slice, pg);
+  return vec::sme::read_ver<Tile>(Tag{}, slice, pg);
 }
 
 /// Interleave two native words (the two K values of a 16-bit-element
@@ -189,16 +189,16 @@ VECOPS_ALWAYS_INLINE void transfer_full_word_panel(
       __builtin_prefetch(first_row + PrefetchChunks * k_chunk, 0, 3);
       __builtin_prefetch(second_row + PrefetchChunks * k_chunk, 0, 3);
     }
-    vec::details::sme::load_hor<LoadBase>(
+    vec::sme::load_hor<LoadBase>(
         static_cast<uint32_t>(row), pg,
         reinterpret_cast<const Word*>(first_row));
-    vec::details::sme::load_hor<LoadBase + 1>(
+    vec::sme::load_hor<LoadBase + 1>(
         static_cast<uint32_t>(row), pg,
         reinterpret_cast<const Word*>(second_row));
-    vec::details::sme::store_ver<StoreBase>(
+    vec::sme::store_ver<StoreBase>(
         static_cast<uint32_t>(row), pg, words);
     words += word_lanes;
-    vec::details::sme::store_ver<StoreBase + 1>(
+    vec::sme::store_ver<StoreBase + 1>(
         static_cast<uint32_t>(row), pg, words);
     words += word_lanes;
   }
@@ -225,10 +225,10 @@ VECOPS_ALWAYS_INLINE void load_full_word_panel(
       __builtin_prefetch(first_row + PrefetchChunks * k_chunk, 0, 3);
       __builtin_prefetch(second_row + PrefetchChunks * k_chunk, 0, 3);
     }
-    vec::details::sme::load_hor<TileBase>(
+    vec::sme::load_hor<TileBase>(
         static_cast<uint32_t>(row), pg,
         reinterpret_cast<const Word*>(first_row));
-    vec::details::sme::load_hor<TileBase + 1>(
+    vec::sme::load_hor<TileBase + 1>(
         static_cast<uint32_t>(row), pg,
         reinterpret_cast<const Word*>(second_row));
   }
@@ -246,10 +246,10 @@ VECOPS_ALWAYS_INLINE void store_full_word_panel(U*& output) noexcept {
   const auto pg = vec::mtrue(WordTag{});
   auto* words = reinterpret_cast<Word*>(output);
   for (nint_t group = 0; group < word_lanes; ++group) {
-    vec::details::sme::store_ver<TileBase>(
+    vec::sme::store_ver<TileBase>(
         static_cast<uint32_t>(group), pg, words);
     words += word_lanes;
-    vec::details::sme::store_ver<TileBase + 1>(
+    vec::sme::store_ver<TileBase + 1>(
         static_cast<uint32_t>(group), pg, words);
     words += word_lanes;
   }
@@ -341,7 +341,7 @@ VECOPS_ALWAYS_INLINE void pack(
   constexpr nint_t KPack = Packing::KPack;
   const auto panel_meta = Packing::panel();
   const auto lanes_meta =
-      vec::details::sme::streaming_lanes_value<U>();
+      vec::sme::streaming_lanes_value<U>();
   // Round the chunk length down to a whole number of KPack groups: a full
   // chunk must map whole K groups onto ZA slices so groups never straddle
   // the chunk boundary.
@@ -376,8 +376,8 @@ VECOPS_ALWAYS_INLINE void pack(
     // Rows actually staged into tile 0: a tail panel loads only its active
     // rows.  The reads below mask to the same rows, and read_ver zero-fills
     // masked-off lanes — which is exactly the format's zero padding.
-    const nint_t first_active = vec::details::sme::clamp_value(
-        spatial - panel_base, nint_t{0}, vec::details::sme::min_value(panel, lanes));
+    const nint_t first_active = vec::sme::clamp_value(
+        spatial - panel_base, nint_t{0}, vec::sme::min_value(panel, lanes));
     const auto first_pg = first<U>(first_active);
 
     auto pack_chunk = [&]<bool FullK, bool Prefetch>(
@@ -393,7 +393,7 @@ VECOPS_ALWAYS_INLINE void pack(
           __builtin_prefetch(
               row_input + PrefetchChunks * k_chunk, 0, 3);
         }
-        vec::details::sme::load_hor<0>(
+        vec::sme::load_hor<0>(
             static_cast<uint32_t>(r), load_pg,
             reinterpret_cast<const U*>(input + row * row_stride + kb));
       }
@@ -406,7 +406,7 @@ VECOPS_ALWAYS_INLINE void pack(
         // slices, half the panel here).  Group g is the single K value g
         // (KPack == 1); v0 / v1 are its upper / lower panel halves, stored
         // contiguously as the group.
-        const nint_t active1 = vec::details::sme::clamp_value(
+        const nint_t active1 = vec::sme::clamp_value(
             spatial - (panel_base + lanes), nint_t{0}, lanes);
         for (nint_t r = 0; r < active1; ++r) {
           const nint_t row = panel_base + lanes + r;
@@ -415,7 +415,7 @@ VECOPS_ALWAYS_INLINE void pack(
             __builtin_prefetch(
                 row_input + PrefetchChunks * k_chunk, 0, 3);
           }
-          vec::details::sme::load_hor<1>(
+          vec::sme::load_hor<1>(
               static_cast<uint32_t>(r), load_pg,
               reinterpret_cast<const U*>(input + row * row_stride + kb));
         }
@@ -501,7 +501,7 @@ VECOPS_ALWAYS_INLINE void load_fp32_to_fp64_tile(
     nint_t active_k) noexcept {
   const auto load_pg = first<uint32_t>(active_k);
   for (nint_t row = 0; row < active_spatial; ++row) {
-    vec::details::sme::load_hor<Tile>(
+    vec::sme::load_hor<Tile>(
         static_cast<uint32_t>(row), load_pg,
         reinterpret_cast<const uint32_t*>(
             input + (panel_base + row) * row_stride + kb));
@@ -519,7 +519,7 @@ VECOPS_ALWAYS_INLINE void store_fp32_to_fp64_column(
   using InputTag = vec::ScalableTag<float32_t, 0>;
   using BitsTag = vec::ScalableTag<uint32_t, 0>;
   using OutputTag = vec::Rebind<float64_t, InputTag>;
-  const auto bits = vec::details::sme::read_ver<Tile>(
+  const auto bits = vec::sme::read_ver<Tile>(
       BitsTag{}, static_cast<uint32_t>(column), store_pg);
   const auto input = vec::bitcast(InputTag{}, BitsTag{}, bits);
   vec::store(OutputTag{}, output,
@@ -554,17 +554,17 @@ VECOPS_ALWAYS_INLINE void transfer_fp32_to_fp64_tile(
   const auto load_pg = first<uint32_t>(load_active_k);
   const auto store_pg = first<uint32_t>(active_spatial);
   const nint_t overlap =
-      vec::details::sme::min_value(active_spatial, store_active_k);
+      vec::sme::min_value(active_spatial, store_active_k);
   nint_t index = 0;
   for (; index < overlap; ++index) {
-    vec::details::sme::load_hor<LoadTile>(
+    vec::sme::load_hor<LoadTile>(
         static_cast<uint32_t>(index), load_pg,
         reinterpret_cast<const uint32_t*>(
             input + (panel_base + index) * row_stride + kb));
     store_fp32_to_fp64_column<StoreTile>(output, index, store_pg);
   }
   for (; index < active_spatial; ++index) {
-    vec::details::sme::load_hor<LoadTile>(
+    vec::sme::load_hor<LoadTile>(
         static_cast<uint32_t>(index), load_pg,
         reinterpret_cast<const uint32_t*>(
             input + (panel_base + index) * row_stride + kb));
@@ -592,10 +592,10 @@ VECOPS_ALWAYS_INLINE void pack_fp32_to_fp64(
   for (nint_t sp = 0; sp < panels; ++sp) {
     if (chunks == 0) continue;
     const nint_t panel_base = sp * panel;
-    const nint_t active_spatial = vec::details::sme::clamp_value(
+    const nint_t active_spatial = vec::sme::clamp_value(
         spatial - panel_base, nint_t{0}, panel);
     const nint_t first_active_k =
-        vec::details::sme::min_value(k_chunk, k);
+        vec::sme::min_value(k_chunk, k);
     load_fp32_to_fp64_tile<0>(
         input, panel_base, 0, row_stride,
         active_spatial, first_active_k);
@@ -604,9 +604,9 @@ VECOPS_ALWAYS_INLINE void pack_fp32_to_fp64(
     // each transfer loads the next chunk into the tile the concurrent
     // store is not draining.
     for (nint_t chunk = 0; chunk + 1 < chunks; ++chunk) {
-      const nint_t current_k = vec::details::sme::min_value(
+      const nint_t current_k = vec::sme::min_value(
           k_chunk, k - chunk * k_chunk);
-      const nint_t next_k = vec::details::sme::min_value(
+      const nint_t next_k = vec::sme::min_value(
           k_chunk, k - (chunk + 1) * k_chunk);
       const nint_t next_kb = (chunk + 1) * k_chunk;
       if ((chunk & 1) == 0) {
@@ -619,7 +619,7 @@ VECOPS_ALWAYS_INLINE void pack_fp32_to_fp64(
             active_spatial, next_k, current_k, output);
       }
     }
-    const nint_t final_k = vec::details::sme::min_value(
+    const nint_t final_k = vec::sme::min_value(
         k_chunk, k - (chunks - 1) * k_chunk);
     if ((chunks & 1) != 0)
       store_fp32_to_fp64_tile<0>(output, active_spatial, final_k);
@@ -649,11 +649,11 @@ VECOPS_ALWAYS_INLINE void pack_fp32_to_fp64_single(
   const nint_t panels = ceil_div(spatial, panel);
   for (nint_t sp = 0; sp < panels; ++sp) {
     const nint_t panel_base = sp * panel;
-    const nint_t active_spatial = vec::details::sme::clamp_value(
+    const nint_t active_spatial = vec::sme::clamp_value(
         spatial - panel_base, nint_t{0}, panel);
     for (nint_t kb = 0; kb < k; kb += panel) {
       const nint_t active_k =
-          vec::details::sme::min_value(panel, k - kb);
+          vec::sme::min_value(panel, k - kb);
       load_fp32_to_fp64_tile<0>(
           input, panel_base, kb, row_stride, active_spatial, active_k);
       store_fp32_to_fp64_tile<0>(output, active_spatial, active_k);

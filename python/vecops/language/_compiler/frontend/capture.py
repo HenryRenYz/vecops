@@ -1,4 +1,5 @@
 """Immutable source/helper capture and semantic cache identity."""
+
 from __future__ import annotations
 import ast
 import hashlib
@@ -12,7 +13,16 @@ from .. import ir as I
 from ..dtypes import dtype_name
 from .diagnostics import DSLError
 
-VERSION = "vecops-dsl-2"
+VERSION = "vecops-dsl-6"
+DSL_MODULES = {
+  "vecops",
+  "vecops.language",
+  "vecops.language.dsl",
+  "vecops.language.sme",
+  "vecops.language.amx",
+  "vecops.language.library",
+}
+
 
 def symbol(value):
   if isinstance(value, Const):
@@ -55,8 +65,12 @@ def capture(function, local_scope=None, seen=None):
   environment = {}
   fingerprints = []
   # Python's closure/name inventory avoids capturing unrelated factory locals.
-  references = {node.id for statement in target.body for node in ast.walk(statement)
-                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+  references = {
+    node.id
+    for statement in target.body
+    for node in ast.walk(statement)
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+  }
   for name in sorted((set(function.__code__.co_freevars) | set(function.__code__.co_names)) & references):
     if name not in namespace:
       continue
@@ -73,12 +87,13 @@ def capture(function, local_scope=None, seen=None):
       value = dtype_name(value)
       key = ("dtype", value)
     elif isinstance(value, ModuleType):
-      if value.__name__ not in {"vecops", "vecops.language", "vecops.language.dsl"}:
+      if value.__name__ not in DSL_MODULES:
         raise DSLError(f"unsupported captured module {value.__name__}")
       key = value.__name__
     elif isinstance(value, (str, bool, int, float, type(None), Intrinsic, Vector)):
       key = repr(value)
     elif isinstance(value, tuple):
+
       def freeze_tuple(item):
         if isinstance(item, tuple):
           return tuple(freeze_tuple(v) for v in item)
@@ -92,6 +107,7 @@ def capture(function, local_scope=None, seen=None):
           return dtype_name(item)
         except (TypeError, ValueError) as error:
           raise DSLError(f"capture {name!r} must be immutable kernel data") from error
+
       value = freeze_tuple(value)
       key = repr(value)
     else:
@@ -105,12 +121,21 @@ def capture(function, local_scope=None, seen=None):
   # Exclude decorators and source locations from semantic identity.
   target.decorator_list = []
   for node in ast.walk(target):
-    if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
+    if not isinstance(node, ast.Attribute):
       continue
-    owner = environment.get(node.value.id)
-    if not isinstance(owner, ModuleType):
+    attributes = []
+    root = node
+    while isinstance(root, ast.Attribute):
+      attributes.append(root.attr)
+      root = root.value
+    if not isinstance(root, ast.Name):
       continue
-    value = getattr(owner, node.attr, None)
+    value = environment.get(root.id)
+    for attribute in reversed(attributes):
+      if not isinstance(value, ModuleType) or value.__name__ not in DSL_MODULES:
+        value = None
+        break
+      value = getattr(value, attribute, None)
     if isinstance(value, DSLFunction):
       value = capture(value.function, seen=seen)
       key = value.identity
@@ -118,8 +143,12 @@ def capture(function, local_scope=None, seen=None):
       key = value.name
     else:
       continue
-    name = f"{node.value.id}.{node.attr}"
+    name = ".".join((root.id, *reversed(attributes)))
     environment[name] = value
     fingerprints.append((name, key))
-  identity = hashlib.sha256((VERSION + ast.dump(target, include_attributes=False) + repr(fingerprints)).encode()).hexdigest()
-  return Body(target, MappingProxyType(environment), identity, inspect.getsourcefile(function) or "<kernel>", first_line)
+  identity = hashlib.sha256(
+    (VERSION + ast.dump(target, include_attributes=False) + repr(fingerprints)).encode()
+  ).hexdigest()
+  return Body(
+    target, MappingProxyType(environment), identity, inspect.getsourcefile(function) or "<kernel>", first_line
+  )

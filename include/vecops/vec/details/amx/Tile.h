@@ -54,6 +54,13 @@ VECOPS_ALWAYS_INLINE void zero() {
 template <int Tile>
 VECOPS_ALWAYS_INLINE void load(const void* pointer, std::intptr_t stride) {
   validate_tile<Tile>();
+#if defined(__GNUC__) && !defined(__clang__)
+  // GCC's AMX load intrinsics (including GCC 13) pass only pointer/stride
+  // registers to volatile asm, with no memory operand or clobber. A freshly
+  // produced packing buffer can otherwise have its stores deleted or moved
+  // across TILELOADD. These are compiler barriers, not hardware fences.
+  asm volatile("" ::: "memory");
+#endif
   if constexpr (Tile == 0) _tile_loadd(0, pointer, stride);
   else if constexpr (Tile == 1) _tile_loadd(1, pointer, stride);
   else if constexpr (Tile == 2) _tile_loadd(2, pointer, stride);
@@ -62,12 +69,18 @@ VECOPS_ALWAYS_INLINE void load(const void* pointer, std::intptr_t stride) {
   else if constexpr (Tile == 5) _tile_loadd(5, pointer, stride);
   else if constexpr (Tile == 6) _tile_loadd(6, pointer, stride);
   else _tile_loadd(7, pointer, stride);
+#if defined(__GNUC__) && !defined(__clang__)
+  asm volatile("" ::: "memory");
+#endif
 }
 
 template <int Tile>
 VECOPS_ALWAYS_INLINE void stream_load(
     const void* pointer, std::intptr_t stride) {
   validate_tile<Tile>();
+#if defined(__GNUC__) && !defined(__clang__)
+  asm volatile("" ::: "memory");
+#endif
   if constexpr (Tile == 0) _tile_stream_loadd(0, pointer, stride);
   else if constexpr (Tile == 1) _tile_stream_loadd(1, pointer, stride);
   else if constexpr (Tile == 2) _tile_stream_loadd(2, pointer, stride);
@@ -76,6 +89,9 @@ VECOPS_ALWAYS_INLINE void stream_load(
   else if constexpr (Tile == 5) _tile_stream_loadd(5, pointer, stride);
   else if constexpr (Tile == 6) _tile_stream_loadd(6, pointer, stride);
   else _tile_stream_loadd(7, pointer, stride);
+#if defined(__GNUC__) && !defined(__clang__)
+  asm volatile("" ::: "memory");
+#endif
 }
 
 template <int Tile>

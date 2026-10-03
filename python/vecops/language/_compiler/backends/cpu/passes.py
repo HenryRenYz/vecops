@@ -1,7 +1,9 @@
 """CPU-specific scheduling policies, separate from generic loop semantics."""
+
 from ...passes.manager import PassResult, register_pass
 from dataclasses import replace
 from ... import ir as I
+from ...cost import estimate
 
 
 @register_pass("cpu-plan-full-chunks", stage="vector", before="unroll-vector-operations")
@@ -31,17 +33,26 @@ def choose_vector_chunk(region, context):
     raise ValueError("cpu_reduction_chunk_pow must be 0, 1, or 2")
   explicit = any(isinstance(op.expression.type, I.VectorType) for op in region.operations)
   size = I.constant(region.shape[-1])
-  expensive = any(op.expression.op in {"exp", "exp2", "exp_neg", "exp2_neg", "log", "log2"}
-                  and not op.opaque for op in region.operations)
+  environment = context.environment
+  region.cost = estimate(
+    region.roots, environment.costs, boundaries=(id(op.expression) for op in region.operations if op.opaque)
+  )
+  compute_bound = region.cost.compute_cycles >= environment.costs.policy("math_chunk_compute_budget", 6)
   # Two logical copies of a single accumulator otherwise expose only two
   # native dependency chains. A multiword base supplies four without changing
   # the requested unroll. Multi-reduction regions already have more chains.
-  if not expensive:
+  if not compute_bound:
     power = reduction_power if len(region.initializations) == 1 else 0
-  elif not context.options.get("cpu_wordwise_math", True):
+  elif not context.options.get("cpu_wordwise_math", True) and any(
+    environment.implementations.get(op.expression.op).wordwise_math and not op.opaque for op in region.operations
+  ):
     power = 0
-  if (power and not explicit and region.iteration_axis is None and region.unroll == 2
-      and (size is None or size >= 256)):
+  if power and not explicit and region.iteration_axis is None and region.unroll == 2 and (size is None or size >= 256):
+    budget = environment.costs.policy("vector_register_budget", 24)
+    while (
+      power and (region.cost.live_vectors + region.cost.temporary_registers) * region.unroll * (1 << power) > budget
+    ):
+      power -= 1
     region.base_power = power
   return region
 
@@ -53,7 +64,22 @@ def legalize_math(region, context):
   enabled = context.options.get("cpu_wordwise_math", True)
   if not isinstance(enabled, bool):
     raise ValueError("cpu_wordwise_math must be bool")
-  operations = {"exp", "exp2", "exp_neg", "exp2_neg", "log", "log2", "rcp", "rsqrt"}
-  region.operations = [replace(op, native_math_words=enabled and not op.opaque
-                               and op.expression.op in operations) for op in region.operations]
+  region.operations = [
+    replace(
+      op,
+      native_math_words=enabled
+      and not op.opaque
+      and context.environment.implementations.get(op.expression.op).wordwise_math,
+    )
+    for op in region.operations
+  ]
+  # Estimate the legal physical word group, not an arbitrarily large virtual
+  # vector. Oversized virtual extents stream repeated legal pieces.
+  physical_words = 1 << min(5, max(0, region.base_power))
+  region.cost = estimate(
+    region.roots,
+    context.environment.costs,
+    boundaries=(id(op.expression) for op in region.operations if op.opaque),
+    words=physical_words,
+  )
   return region

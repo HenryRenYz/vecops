@@ -210,6 +210,7 @@ def template(
     body = None
     if resolved is None:
       from ._compiler.frontend.capture import capture
+
       body = capture(target, local_scope)
     ir = TemplateIR(
       f"{target.__module__}.{target.__qualname__}",
