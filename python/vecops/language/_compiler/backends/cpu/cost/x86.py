@@ -15,6 +15,14 @@ X86 = CostProfile(
     ("amx_m_major_n_max", 128),
     ("amx_m_major_ratio", 4),
     ("amx_native_b_pack_min_m", 128),
+    # B's original panel and its packed copy overlap in the cache during
+    # production. Reserving 2/3 of the leaf budget for packed B alone crowds
+    # out A/producer lines on long-K panels (e.g. Sapphire Rapids prefill).
+    # Runtime L2 bytes, not a host-specific hard-coded column count.
+    ("amx_cache_b_panel_divisor", 4),
+    # Deeper M reuse amortizes a larger B panel. The bounded small-M policy
+    # must not constrain square/tall products (measured on large K cases).
+    ("amx_cache_b_panel_max_m", 256),
   ),
 )
 AVX512 = CostProfile("avx512")

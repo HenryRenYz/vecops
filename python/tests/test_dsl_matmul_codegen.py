@@ -10,6 +10,65 @@ from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.cpp.matmul import MatmulEmitter
 from vecops.language._compiler.backends.cpu.planning import prepare, snapshot_strides
+from vecops.language._compiler.cost.model import CostProfile
+
+
+def test_amx_b_panel_budget_is_target_policy_and_keeps_explicit_bn():
+  @T.template
+  def kernel(
+    A: T.Tensor((128, 4096), dtype="bfloat16"),
+    B: T.Tensor((4096, 4096), (1, 4096), "bfloat16"),
+    C: T.Tensor((128, 4096), dtype="float32", access="output"),
+  ):
+    T.library.matmul((A, B), C)
+
+  for target, divisor in (("AVX512", 4), ("SVE", 0)):
+    artifact = CPUBackend().lower(kernel.ir, (), target=target)
+    (plan,) = prepare(artifact.lowered).matmuls.values()
+    assert plan.amx_cache_b_panel_divisor == divisor
+    assert plan.amx_cache_b_panel_max_m == (256 if target == "AVX512" else 0)
+    if target == "AVX512":
+      assert "matmul_blocks(32,32,32,2,2,4,std::int64_t{4096},4)" in artifact.source
+  disabled = CostProfile("unit-panel-disabled", policies=(("amx_cache_b_panel_divisor", 0),))
+  artifact = CPUBackend().lower(kernel.ir, (), target="AVX512", options={"cost_profiles": (disabled,)})
+  assert "matmul_blocks(32,32,32,2,2,4,std::int64_t{4096},0)" in artifact.source
+
+  @T.template
+  def explicit_kernel(
+    A: T.Tensor((128, 4096), dtype="bfloat16"),
+    B: T.Tensor((4096, 4096), (1, 4096), "bfloat16"),
+    C: T.Tensor((128, 4096), dtype="float32", access="output"),
+  ):
+    T.library.matmul((A, B), C, BN=256)
+
+  source = CPUBackend().lower(explicit_kernel.ir, (), target="AVX512").source
+  assert re.search(r"block_n_\d+\+=256\)", source)
+  assert "matmul_blocks(32,32,32,2,2,4,std::int64_t{4096},0)" in source
+
+  @T.template
+  def large_m_kernel(
+    A: T.Tensor((512, 4096), dtype="bfloat16"),
+    B: T.Tensor((4096, 512), (1, 4096), "bfloat16"),
+    C: T.Tensor((512, 512), dtype="float32", access="output"),
+  ):
+    T.library.matmul((A, B), C)
+
+  source = CPUBackend().lower(large_m_kernel.ir, (), target="AVX512").source
+  assert "matmul_blocks(32,32,32,2,2,4,std::int64_t{4096},0)" in source
+
+
+def test_amx_b_panel_budget_rejects_invalid_policy():
+  import pytest
+
+  @T.template
+  def kernel(A: T.Tensor((32, 32)), B: T.Tensor((32, 32)), C: T.Tensor((32, 32), access="output")):
+    T.library.matmul((A, B), C)
+
+  for setting in ("amx_cache_b_panel_divisor", "amx_cache_b_panel_max_m"):
+    for invalid in (-1, True, 2.5):
+      with pytest.raises(ValueError, match="policy settings|amx_cache_b_panel_"):
+        policy = CostProfile("unit-panel-invalid", policies=((setting, invalid),))
+        CPUBackend().lower(kernel.ir, (), target="AVX512", options={"cost_profiles": (policy,)})
 
 
 def test_snapshot_preserves_unit_stride_without_padding_or_overlap():

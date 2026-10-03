@@ -26,6 +26,12 @@ def plan_matmul(prepared, context):
   k_unroll = context.options.get("cpu_gemv_k_unroll", int(costs.policy("gemv_k_unroll", 2)))
   if type(k_unroll) is not int or k_unroll not in (1, 2, 4):
     raise ValueError("cpu_gemv_k_unroll must be 1, 2 or 4")
+  b_panel_divisor = costs.policy("amx_cache_b_panel_divisor", 0)
+  if type(b_panel_divisor) is not int or b_panel_divisor < 0:
+    raise ValueError("amx_cache_b_panel_divisor must be a nonnegative integer")
+  b_panel_max_m = costs.policy("amx_cache_b_panel_max_m", 0)
+  if type(b_panel_max_m) is not int or b_panel_max_m < 0:
+    raise ValueError("amx_cache_b_panel_max_m must be a nonnegative integer")
 
   def product_k_unroll(product):
     known_k = I.constant(product.args[0].type.shape[1])
@@ -176,6 +182,8 @@ def plan_matmul(prepared, context):
           runtime_unblocked_bytes=int(costs.policy("matmul_runtime_unblocked_bytes", 128 * 1024)),
           amx_m_major=amx_traversal(node),
           amx_native_b_pack_min_m=int(costs.policy("amx_native_b_pack_min_m", 0)),
+          amx_cache_b_panel_divisor=b_panel_divisor,
+          amx_cache_b_panel_max_m=b_panel_max_m,
           amx_b_permutation=register_transpose(16, 16, 4),
           dense_transposes=tuple(dense_transposes),
         )

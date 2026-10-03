@@ -47,6 +47,8 @@ DEFAULT = CostProfile(
     ("amx_m_major_n_max", 0),
     ("amx_m_major_ratio", 4),
     ("amx_native_b_pack_min_m", 0),
+    ("amx_cache_b_panel_divisor", 0),
+    ("amx_cache_b_panel_max_m", 0),
     ("vector_register_budget", 24),
   ),
 )

@@ -78,7 +78,8 @@ VECOPS_ALWAYS_INLINE bool matmul_fits(vecops::nint_t m, vecops::nint_t n, vecops
 }
 inline MatmulBlocks matmul_blocks(vecops::nint_t mr, vecops::nint_t nr, vecops::nint_t kr,
                                  vecops::nint_t a_bytes, vecops::nint_t b_bytes,
-                                 vecops::nint_t c_bytes,vecops::nint_t logical_k) {
+                                 vecops::nint_t c_bytes,vecops::nint_t logical_k,
+                                 vecops::nint_t b_panel_divisor=0) {
   const auto& cache = vecops::platform::cache_info();
   auto align = [](vecops::nint_t n, vecops::nint_t a) VECOPS_INLINE_LAMBDA {
     return std::max(a, n / a * a);
@@ -98,6 +99,12 @@ inline MatmulBlocks matmul_blocks(vecops::nint_t mr, vecops::nint_t nr, vecops::
   const auto budget = std::max<vecops::nint_t>(cache.l2_bytes * 3 / 4, cache.line_bytes);
   auto mc = align(budget / 3 / (kc*a_bytes), mr);
   auto nc = align((budget - budget/3) / (kc*b_bytes), nr);
+  // Architecture policy may reserve room for B's producer footprint as well
+  // as its packed panel and A. Also useful for external packed inputs: the
+  // smaller traversal panel improves operand residency across M groups.
+  // Explicit BN is applied by the caller after this automatic calculation.
+  if (b_panel_divisor > 0)
+    nc = std::min(nc, align(cache.l2_bytes / b_panel_divisor / (kc*b_bytes), nr));
   // L3 is optional. Cap the accumulator working set if a shared last-level
   // cache is present; leave L1/L2-derived values untouched otherwise.
   const auto outer_cache = cache.llc_bytes > 0 ? cache.llc_bytes :

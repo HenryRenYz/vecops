@@ -11,6 +11,8 @@ import json
 import os
 import re
 import subprocess
+from copy import copy
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +64,7 @@ def profile(args):
   import numpy as np
   import torch
   import vecops
+  import vecops.language as T
 
   from dsl_matmul import kernels
   from dsl_timing import isolate_compilation, reserve_cpu
@@ -92,6 +95,10 @@ def profile(args):
     args.level,
     {"cpu_matmul_fusion": "auto", "cpu_gemv_columns": 4},
   )
+  if args.baseline_source:
+    baseline = copy(pair[0].template)
+    baseline.ir = replace(baseline.ir, source=args.baseline_source.resolve())
+    pair = (T.compile(baseline, compiler=compiler), pair[1])
   ad, bd, _, _, acc, out, prologue = types
   a, b = aligned_empty((m, k), ad), aligned_empty((n, k), bd).T
   c = aligned_empty((m, n), out)
@@ -141,6 +148,7 @@ def main():
   sample.add_argument("--level", choices=("dot", "matmul"), default="matmul")
   sample.add_argument("--kernel", choices=("dsl", "cpp"), default="dsl")
   sample.add_argument("--iterations", type=int, default=500)
+  sample.add_argument("--baseline-source", type=Path, help="Profile saved DSL source with the same signature/buffers")
   sample.add_argument("--cpu", type=int, default=2)
   sample.add_argument("--build-dir", type=Path, default=ROOT / "build-dsl-matmul")
   args = parser.parse_args()

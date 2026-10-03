@@ -1093,7 +1093,7 @@ class MatmulEmitter:
           mr = f"std::min<vecops::nint_t>({mr},{((cm + 15) // 16) * 16})"
         if isinstance(cn, int) and cn > 0:
           nr = f"std::min<vecops::nint_t>({nr},{((cn + 15) // 16) * 16})"
-        cache = self.matrix_cache_blocks(product, mr, nr, kr)
+        cache = self.matrix_cache_blocks(product, mr, nr, kr, format_="amx")
         minimum_m = 32 if isinstance(cm, int) and cm > 16 else 16
         minimum_n = 32 if isinstance(cn, int) and cn > 16 else 16
         self.blocked_matrix_matmul(
@@ -1153,7 +1153,7 @@ class MatmulEmitter:
       self.amx_matmul(statement, product, family=(rows, columns), skip_cache=True, single_m_tile=single_m_tile)
       self.close()
       self.opening("else")
-    cache = None if skip_cache else self.matrix_cache_blocks(product, rows * 16, columns * 16, kr)
+    cache = None if skip_cache else self.matrix_cache_blocks(product, rows * 16, columns * 16, kr, format_="amx")
     if cache is not None:
       self.blocked_matrix_matmul(
         statement,
@@ -1662,7 +1662,7 @@ class MatmulEmitter:
     self.close()
     self.materialized, self.snapshots = old_materialized, old_snapshots
 
-  def matrix_cache_blocks(self, product, mr, nr, kr):
+  def matrix_cache_blocks(self, product, mr, nr, kr, *, format_=None):
     if not product.data.tiled:
       return None
     a, b = product.args[:2]
@@ -1678,8 +1678,17 @@ class MatmulEmitter:
     ):
       return None
     name = self.unique("matrix_cache")
+    divisor = self.active_matmul_plan.amx_cache_b_panel_divisor if format_ == "amx" and options.block_n is None else 0
+    maximum = self.active_matmul_plan.amx_cache_b_panel_max_m
+    if divisor and maximum:
+      known_m = I.constant(product.type.shape[0])
+      divisor = (
+        (divisor if known_m <= maximum else 0)
+        if isinstance(known_m, int)
+        else f"(({self.scalar(product.type.shape[0])})<={maximum} ? {divisor} : 0)"
+      )
     self.line(
-      f"const auto {name}=vecops_dsl::matmul_blocks({mr},{nr},{kr},{ELEMENT_BYTES[a.type.dtype]},{ELEMENT_BYTES[b.type.dtype]},{ELEMENT_BYTES[product.type.dtype]},{self.scalar(a.type.shape[1])});"
+      f"const auto {name}=vecops_dsl::matmul_blocks({mr},{nr},{kr},{ELEMENT_BYTES[a.type.dtype]},{ELEMENT_BYTES[b.type.dtype]},{ELEMENT_BYTES[product.type.dtype]},{self.scalar(a.type.shape[1])},{divisor});"
     )
     values = []
     for axis, value, alignment in (("m", options.block_m, mr), ("n", options.block_n, nr), ("k", options.block_k, kr)):

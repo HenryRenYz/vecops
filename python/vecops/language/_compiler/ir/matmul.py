@@ -48,6 +48,8 @@ class MatmulPlan:
   runtime_unblocked_bytes: int = 128 * 1024
   amx_m_major: object | None = None
   amx_native_b_pack_min_m: int = 0
+  amx_cache_b_panel_divisor: int = 0
+  amx_cache_b_panel_max_m: int = 0
   operands: tuple = ()
   amx_b_permutation: object | None = None
   dense_transposes: tuple = ()

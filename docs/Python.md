@@ -304,6 +304,15 @@ evaluation. An explicit K-bank override bypasses the long-K policy.
 Automatic AMX cache panels align to the selected register family, not a
 universal 32-column boundary. A proven single M group does not automatically
 pack B a second time; explicit packing/block sizes remain authoritative.
+The x86 `amx_cache_b_panel_divisor` (4) bounds automatic B panels by a quarter
+of the target's runtime L2, rounded to the selected register-family quantum.
+This reserves residency for A and the B producer/packed-copy footprint, rather
+than budgeting packed B alone. `amx_cache_b_panel_max_m` (256) limits the policy
+to shallower M reuse; larger M keeps the original budget. Dynamic M selects
+the budget once outside panel loops. These are measured scheduling heuristics,
+not guarantees about cache occupancy. Explicit BN always wins; a zero divisor
+disables the cap, and a zero max-M removes its M gate. Other target profiles
+leave the cap disabled. Both settings can be overridden with a cost profile.
 On x86, a native, untransformed, K-contiguous B also skips automatic cache-panel
 packing when the original constant M is below the `amx_native_b_pack_min_m`
 policy (128) and both spatial extents fill complete register groups. Unknown

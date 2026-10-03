@@ -1351,3 +1351,140 @@ Const 3136×64×576 的直接 dot packed B / AB 为 1.0472 / 1.0251；
 `pytest-audit-final-fast.log`、`pytest-final-passes.log`、
 `matmul-cross-final-cursors.log`、`final-fusion-const.log`。
 中间实验的 `final-*` CSV 明确属于各自源码阶段，不与最终报告混用。
+
+### 2026-10-03：解除限频后的大矩阵缓存驻留审计
+
+先将上一轮变更提交为 `75795c5`（`perf(dsl): hoist AMX loop
+invariants and refine packing schedules`），再重新测量。用户已解除
+CPU 限频，本机 w9-3495X 的 `scaling_max_freq` 为 4.8 GHz、governor
+仍为 powersave；本轮没有改动任何频率/电源设置。下述结果不与上一节
+限频时的绝对耗时混用。
+
+#### 证据与定位
+
+- 原始 metadata / BF16 / plain / library 基线，25 轮：
+  Const / Dynamic 的 128×4096×4096 为 C++ 的 1.2110 / 1.1674，
+  128×11008×4096 为 1.1620 / 1.1191。问题依然存在，并非解除限频
+  后自动消失。
+- 排除在线 packing 的原始隔离测试，32 case：Const 的
+  128×4096×4096，dot packed B / AB 为 1.0399 / 0.9988，library
+  则为 1.0937 / 1.1581。叶内核已经接近；不能只优化 packing producer，
+  也不能把全部差距归咎于 AMX 指令数。
+- 对相同生成物重新采样：DSL 热 K 区域 `4000–4048` 仍是 15 条
+  指令、4 tile loads、4 dots、1 个条件跳转、0 栈引用。C++ 实际
+  采样到的是 balanced 2×2 family，其完整热 K 区域为 25 条指令；
+  A 是原始 stride=8192B 的直接加载，不是预打包 A。更短的控制/地址
+  序列不等于更好的操作数驻留。
+- C++ 的 `execute_whole_b_panel` 对 M=128 使用 64 列 B panel；
+  DSL 原来的目标 cache 公式给出 MC=64、NC=128、KC=4096。
+  原公式只把 packed B 计入预算，未给生产该 panel 的源 B footprint
+  留余量。128 列 packed B 已是 1 MiB，源 panel 也是 1 MiB，
+  之后还要访问 A / C；这形成私有 2 MiB L2 的驻留压力。
+  该容量解释是模型，不能把采样落在 tileloadd 上直接解释成该指令
+  自身延迟；panel 扫描是支持该模型的独立性能证据。
+- 另采样 `l2_rqsts.demand_data_rd_miss`（固定 period=1000，
+  前后各 1500 次 native 重复），仅统计选定 DSL `.so` 的样本，
+  排除 Python / 编译器 / C++ 校验调用。估计需求数据读 L2 miss
+  从 13,971,000 降为 11,188,000，约减少 19.9%。无 lost samples。
+  这是 DSO 归属采样估计，不是所有 tile 内存事务的精确计数；
+  进程总事件数还包含启动/编译，不能直接用于比较两个内核。
+- `dsl_matmul_schedule.py` 在同一轮交错比较在线 packing / 各种
+  BM、BN、BK / raw dot / whole packed dot / 全尺寸 panel，记录
+  每种生成源码。128×4096×4096：默认 4.4746 ms，BM=64、BN=64、
+  BK=4096 为 3.6840 ms，C++ 3.7224 ms；BN=256 明显变慢。
+  128×11008×4096 的对应三者为 12.5481 / 10.2479 / 10.3064 ms。
+  把整个 B 先打包再 dot 并不好：分别是 C++ 的 1.666 / 2.079，
+  因而未采用 whole-operand packing 作为通用修复。
+
+#### 实现与适用边界
+
+在集中 x86 cost/policy profile 增加：
+
+- `amx_cache_b_panel_divisor=4`：自动 NC 同时受目标运行时 L2/4
+  限制，按当前 family 的 N quantum 向下对齐，至少一个 quantum。
+  不是把本机的 NC=64 写死在架构无关层。
+- `amx_cache_b_panel_max_m=256`：只约束较浅的 M 复用。
+  常量 M 在生成时折叠，动态 M 在 panel 循环外选择 divisor。
+  零 divisor 关闭上限；零 max-M 表示不加 M gate。
+
+原默认 profile 都为 0，SVE/SME/vector cache 路径传 divisor=0；
+显式 BN 覆盖自动预算。公开 DSL 签名、packed ABI、C++ Matmul
+实现和 AMX 指令 family 均未改变。没有新增向量数组或闭包。
+
+不能无条件缩小 panel：初版统一限制使 512×512×4096 从
+1.5786 ms 变为 1.8310 ms，1024×1024×4096 也回退。
+扩大 M 复用可摊销更宽的 B panel。加入 M gate 后的同轮复测为：
+
+| Shape | 新策略 / 原预算策略 | 新策略 / C++ |
+|---|---:|---:|
+| 256×4096×4096 | 0.9727 | 1.0065 |
+| 512×512×4096 | 0.9972 | 1.0280 |
+| 1024³ | 1.0021 | 1.1029 |
+| 1024×1024×4096 | 0.9973 | 0.6384 |
+
+这里的原预算策略是在同一个 generator 中关闭新 policy，不冒充
+逐字节的历史源码。完整 catalog 的 before/after 则使用保存的
+`75795c5` 源码与原 schema/compiler，是真正的三路同轮比较。
+
+#### 最终性能与验证
+
+最终带 M gate 的 BF16 plain / library catalog **172/172**
+数值通过，25 轮，CPU2 固定亲和性、native repeat、同 buffer、随机
+交错新 DSL / C++ / 保存的旧 DSL；编译不计时。各 benchmark 的 CPU2
+lease 串行化计时，编译排除 CPU2 及其 SMT sibling。
+
+| Shape / metadata | 新 DSL / 75795c5 | 新 DSL / C++ |
+|---|---:|---:|
+| 128×4096×4096 / Const | 0.7981 | 0.9950 |
+| 128×4096×4096 / Dynamic | 0.8322 | 0.9850 |
+| 128×11008×4096 / Const | 0.8278 | 0.9880 |
+| 128×11008×4096 / Dynamic | 0.8478 | 0.9586 |
+| 172 case 几何均值 | 0.9923 | 0.9089 |
+
+本轮没有相对历史源码超过 5% 的 case 回退；这是这组基准的观察，
+不是所有输入/机器/程序无回退的保证。几何均值按 case 等权，也不是
+AF3 应用整体加速比。绝对时间会随动态频率、package 状态变化，
+应使用同轮比值。
+
+仍保留的差距：1024³ 为 C++ 的约 1.103；对它进行更大 MC/NC 的
+扫描未获得收益，直接 raw/whole-pack dot 也明显更慢，未合入这些
+尝试。最终 Const prepacked 8 case 数值通过：128×4096×4096
+library packed B / AB 为 1.098 / 1.026；128×11008×4096 为
+1.053 / 1.032。预打包 B-only 仍需进一步审计局部访存顺序；不能
+宣称所有大矩阵或 packed 路径均已追平 C++。
+
+其他验证：
+
+- codegen / cost / architecture / matmul policy 快速 cohort **45/45**
+  通过（另 2 个 native codegen case 不在此 cohort）。
+- native 边界 cohort **11/11** 通过，包括动态 K=0/33/64 与
+  非连续 A stride、dense-packed 非对齐 K、别名与融合/尾部路径。
+  最终分为 edges 9 case 与 codegen 2 case 复测；日志分别为
+  `unrestricted-guarded-tests-native.log`（edges 的 9 项通过）与
+  `unrestricted-guarded-tests-cursors.log`（2 项通过）。前一批读取
+  codegen 测试时恰逢该文件行号变动，inspect 抓取了旧行号的源片段；
+  两项在停止修改源文件后重新通过，未修改 frontend 来掩盖该错误。
+- Const 大 prefill / ragged 融合补充 **40/40** 数值通过：bf16、
+  float32→bf16、s8、u8×s8，accumulate / bias-ReLU / SiLU /
+  affine-input；21 轮最差新 DSL / C++ 为 1.0795。
+  M gate 修订不改变这些 M≤128 常量内核的可执行源码。
+- ARM SVE/SME VLA / 固定 VL/SVL **156/156** 跨编译 + SME
+  disassembly gate 通过。最终 generator 再生成的 156 份源码与
+  这些对象对应的源码相同，仅 compiler-environment 指纹注释变化；
+  未进行离线 ARM 主机上的执行或性能测试。
+- Ruff format、F821/F822/F823/E9 检查与 `git diff --check` 通过；
+  没有宣称全部 Python 测试或全量 lint 通过。
+
+可复现报告位于 `build-dsl-matmul/`：
+`unrestricted-guarded-catalog-paired.csv`（最终三路）、
+`unrestricted-guarded-catalog-sources.json`、
+`unrestricted-schedule-sweep.csv`（BN 因果扫描）、
+`unrestricted-guarded-large-extra.csv`（M gate）、
+`unrestricted-square-sweep.csv`（未采用的方阵调参）、
+`unrestricted-fusion-large.csv`。预打包报告是
+`build-dsl-matmul-packed/unrestricted-guarded.csv`。
+L2 事件采样文件为 `unrestricted-l2-before.data` /
+`unrestricted-l2-after.data`；`dsl_matmul_inspect.py profile` 的
+`--baseline-source` 可以在同 schema/buffer 下重放保存的生成源码。
+中间 `unrestricted-candidate-*` / `unrestricted-final-catalog-*`
+属于未加 M gate 的实验阶段，不作为最终报告。
