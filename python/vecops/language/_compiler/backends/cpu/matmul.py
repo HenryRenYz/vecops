@@ -23,6 +23,21 @@ def plan_matmul(prepared, context):
   gemv_columns = context.options.get("cpu_gemv_columns", 4)
   if type(gemv_columns) is not int or not 1 <= gemv_columns <= 8:
     raise ValueError("cpu_gemv_columns must be an integer in [1,8]")
+  k_unroll = context.options.get("cpu_gemv_k_unroll", int(costs.policy("gemv_k_unroll", 2)))
+  if type(k_unroll) is not int or k_unroll not in (1, 2, 4):
+    raise ValueError("cpu_gemv_k_unroll must be 1, 2 or 4")
+
+  def product_k_unroll(product):
+    known_k = I.constant(product.args[0].type.shape[1])
+    if "cpu_gemv_k_unroll" not in context.options:
+      # Unbounded K can be long. Keep the conservative latency-hiding bank
+      # count instead of imposing the short, compile-time-specialized choice.
+      if known_k is None or known_k >= costs.policy("gemv_k_unroll_long_min", 512):
+        result = int(costs.policy("gemv_k_unroll_long", k_unroll))
+        if result not in (1, 2, 4):
+          raise ValueError("gemv_k_unroll_long must be 1, 2 or 4")
+        return result
+    return k_unroll
 
   def operand_policy(product, index):
     expression = product.args[index]
@@ -131,6 +146,9 @@ def plan_matmul(prepared, context):
           node.data,
           operands=operands,
           vector_columns=gemv_columns,
+          k_unroll=product_k_unroll(node),
+          unblocked_bytes=int(costs.policy("matmul_unblocked_bytes", 512 * 1024)),
+          runtime_unblocked_bytes=int(costs.policy("matmul_runtime_unblocked_bytes", 128 * 1024)),
           amx_b_permutation=register_transpose(16, 16, 4),
           dense_transposes=tuple(dense_transposes),
         )

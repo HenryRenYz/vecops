@@ -107,6 +107,36 @@ class VectorsEmitter:
       if snapshot is not None:
         saved, condition = snapshot
         saved_pointer = self.pointer(saved, own_coords)
+        if not value.args and saved.dtype == view.dtype:
+          # Select the address/layout, not between two complete load DAGs.
+          # Identical snapshot/source strides keep contiguous loads contiguous
+          # and let the C++ optimizer hoist invariant alias selection.
+          selected_pointer = f"({condition} ? {saved_pointer} : {pointer})"
+          if broadcast:
+            expression = (
+              f"vecops::vec::fill({tag}{{}}, static_cast<vecops::vec::ElementOf<{tag}>>(*{selected_pointer}))"
+            )
+          else:
+            source_stride, saved_stride = view.strides[view_axis], saved.strides[view_axis]
+            same_stride = I.same_expr(source_stride, saved_stride)
+            selected_stride = (
+              self.scalar(source_stride)
+              if same_stride
+              else f"({condition} ? {self.scalar(saved_stride)} : {self.scalar(source_stride)})"
+            )
+            extra = (
+              ""
+              if same_stride and I.constant(source_stride) == 1
+              else f", vecops::vec::opt::strided({selected_stride})"
+            )
+            expression = f"vecops::vec::load_convert({tag}{{}}, {selected_pointer}, {options}{extra})"
+            if I.constant(view.shape[view_axis]) is None and not I.same_expr(view.shape[view_axis], root_shape[axis]):
+              filled = f"vecops::vec::fill({tag}{{}}, static_cast<vecops::vec::ElementOf<{tag}>>(*{selected_pointer}))"
+              expression = f"(({self.scalar(view.shape[view_axis])}) == 1 ? {filled} : {expression})"
+          name = self.unique("v")
+          self.line(f"auto {name} = {expression};")
+          self.chunk_cache[key] = name
+          return name
         snapshot_stride = self.scalar(saved.strides[view_axis]) if view_axis >= 0 else "0"
         # Snapshot already includes the original mask and inactive population.
         saved_options = (

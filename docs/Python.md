@@ -291,6 +291,30 @@ packing; a tiled API alone does not imply that B is produced only once.
 explicit diagnostic override; `auto` is a heuristic, not an optimality proof.
 `cpu_gemv_columns` (integer 1–8, default 4) controls independent GEMV result
 columns per register group for CPU tuning; it is not a tile shape restriction.
+`cpu_gemv_k_unroll` (1, 2 or 4) overrides independent K accumulator banks.
+The target cost policy defaults to one bank on x86 and two on other CPU
+targets: four independent output columns already hide short x86 dot
+dependencies. Known K >= 512 retains two banks according to the
+`gemv_k_unroll_long` / `gemv_k_unroll_long_min` policies; unknown K also retains
+the conservative two-bank schedule. Simple epilogues use two-column then
+single-column remainders with at least four independent accumulators; known one/two
+column groups narrow to their real column count and retain at least four
+independent accumulators. Mathematical epilogues retain vector-grouped output
+evaluation. An explicit K-bank override bypasses the long-K policy.
+Automatic AMX cache panels align to the selected register family, not a
+universal 32-column boundary. A proven single M group does not automatically
+pack B a second time; explicit packing/block sizes remain authoritative.
+Explicit dynamic cache phases share one packing wrapper with runtime family
+alignment, rather than cloning transformed panel producers for every family;
+shortened leaves still select a suitable register family.
+The cost policies `matmul_unblocked_bytes` (512 KiB for constant shapes) and
+`matmul_runtime_unblocked_bytes` (128 KiB for dynamic shapes) control the
+automatic small-footprint bypass. Dynamic matrices above the latter cutoff
+retain cache-panel packing even when an equal-sized constant kernel can be
+simplified enough to profit from an unblocked schedule.
+Alias snapshots preserve a statically known unit-stride axis while removing
+padding and overlap; compatible unmasked loads select an address/layout before
+one load/convert instead of selecting between two complete load expressions.
 Nested products, sibling products and product-to-pack/reduction boundaries
 materialize only the necessary intermediate products. A trailing rank-one
 bias/scale follows the matrix orientation and cache-panel origin.

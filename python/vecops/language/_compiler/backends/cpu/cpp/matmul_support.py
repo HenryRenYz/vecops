@@ -62,6 +62,20 @@ VECOPS_ALWAYS_INLINE vecops::nint_t pack_offset(vecops::nint_t s, vecops::nint_t
   }
 }
 struct MatmulBlocks { vecops::nint_t m, n, k; };
+VECOPS_ALWAYS_INLINE bool matmul_budget_part(vecops::nint_t rows, vecops::nint_t cols,
+                                            vecops::nint_t bytes, vecops::nint_t& budget) noexcept {
+  if (rows == 0 || cols == 0) return true;
+  if (rows > budget / bytes / cols) return false;
+  budget -= rows * cols * bytes; // The quotient test proved this fits.
+  return true;
+}
+VECOPS_ALWAYS_INLINE bool matmul_fits(vecops::nint_t m, vecops::nint_t n, vecops::nint_t k,
+                                     vecops::nint_t a_bytes, vecops::nint_t b_bytes,
+                                     vecops::nint_t c_bytes, vecops::nint_t budget) noexcept {
+  return matmul_budget_part(m,n,c_bytes,budget)
+      && matmul_budget_part(m,k,a_bytes,budget)
+      && matmul_budget_part(n,k,b_bytes,budget);
+}
 inline MatmulBlocks matmul_blocks(vecops::nint_t mr, vecops::nint_t nr, vecops::nint_t kr,
                                  vecops::nint_t a_bytes, vecops::nint_t b_bytes,
                                  vecops::nint_t c_bytes,vecops::nint_t logical_k) {

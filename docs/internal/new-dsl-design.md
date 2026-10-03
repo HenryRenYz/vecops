@@ -1067,3 +1067,131 @@ AMX scratch materialization 与写入前捕获 load 的保值回归也通过。
 相关日志位于 `build-dsl-transpose/pytest-regression.log` 和
 `build-dsl-transpose/pytest-runtime.log`。这些 Python 测试均使用本机 conda
 `af3`，没有增加 MLIR 或其他编译框架依赖。
+
+### 矩阵性能审计：02a2edf 之后
+
+先以 `02a2edf` 提交此前全部修改，再针对生成代码和当前公共 C++ Matmul
+做三路同轮对照：旧 DSL 源码、新 DSL 源码、C++。旧源通过 benchmark 的
+`--source-manifest` 保存；`--baseline-manifest` 使用相同 schema、真实输入、
+编译器和 specialization values 重放，不更改 C++ baseline 的算法。
+动态 shape 复用同一个 Operator；所有构建在计时之前完成，每个 case 都
+先检查 NumPy/C++/旧 DSL 数值，再随机交错 native repeat。仍保持 CPU 2、
+SMT sibling 58 隔离，以及用户的 800–1800 MHz 限频。
+
+确认的生成/调度问题及修改：
+
+1. **别名保护破坏 K 连续性。** B 的原始 `[K,N]` 视图可能沿 K 连续，
+   旧快照却固定 row-major。每个 dot load 保留“连续原始加载 / gather
+   快照加载”两个完整表达式。快照现在保留一个已证明 unit-stride 的轴，
+   重新密集化，去除 padding、重叠、负 stride。兼容的无 mask 加载先选
+   地址/stride，再执行一个 load/convert。真正别名时仍复制数据，不能
+   将运行时 non-alias 当作未经证明的前提。
+2. **缓存边界先于 register family 决策。** 通用 32 列边界让动态 small-M
+   的 1×3 AMX 内核频繁遇到不完整的 48 列组。自动路径先选 family，再
+   按 16×48 / 48×16 / 32×32 等实际跨度分块。
+3. **无 M 复用却再次打包 B。** 证明只有一组 M instruction tile 时，
+   自动 B packing 省掉整面板临时 buffer，直接使用叶内核必需的 staging。
+   显式 packing、已有 packed 输入不被覆盖。
+4. **小动态问题总走缓存 wrapper。** 自动 AMX 路径按运行时 footprint
+   绕过缓存规划与面板循环；乘积比较以预算除法避免整数溢出。Const
+   cutoff 仍为 512 KiB；Dynamic 为 128 KiB，因为 256³ 的动态 unblocked
+   实测反而比保留 packing 更慢。阈值放在 cost policies 中，不能将
+   Const 的 C++ 常量传播收益直接假定给 Dynamic。
+5. **循环内重复边界处理。** raw K-contiguous B 的完整 N 组判断提到 K
+   循环外；完整 K 与一次补零尾部独立。已验证非负、有界的 packing/K
+   迭代改用 `extent-index >= width`，不在每一步重复 signed-128 加法。
+6. **GEMV 分组不是越宽越好。** x86 短且编译期已知 K 默认一个 bank；
+   长 K（默认 >=512）和未知 K 保留两个 bank。数学 epilogue 仍组向量
+   求值；简单 epilogue 的剩余输出采用双列组 + 单列组，不为两个剩余
+   输出分别重载 A。已知窄 N 收窄真实列数，并保持至少四个独立累加器。
+   显式 `cpu_gemv_k_unroll` 覆盖长 K 策略。
+7. **显式 cache phase 的代码膨胀。** 动态 BM/BN/BK 路径将 family
+   alignment 表示为运行时 quanta，共用一个 packing wrapper；缩短的
+   panel 在叶内选择 family。否则带 transform 的面板生产会被复制五次，
+   GCC 冷编译时间显著增加。此修改不把整个 dot 换成 opaque C++ 算子。
+
+这些修改没有新增 vector 数组，也没有直接调用 `ops::Matmul`。AMX 的
+staging 数组是矩阵数据内存，不是 Vec 寄存器容器；寄存器仍为单独变量。
+必要的资源管理闭包继续带 CoreDefs 中的强制内联宏。
+
+复现完整三路对照（baseline manifest 中的旧文件需要保留）：
+
+```bash
+conda run --no-capture-output -n af3 python benchmarks/dsl_matmul.py \
+  --max-flops 0 --kind bf16 --mode Const Dynamic --level matmul \
+  --pipeline plain --rounds 17 --jobs 8 \
+  --baseline-manifest build-dsl-matmul/baseline-catalog-02a2edf.json \
+  --output build-dsl-matmul/perf-catalog-validated-paired.csv
+```
+
+`--max-flops 0` 很重要；默认过滤会跳过 64×1024×4096 和大 prefill，
+不能把过滤后的 focused 结果称作完整 catalog。基准额外支持显式 `--cc`
+和 `--cxx`；GCC 性能对照与 Clang 数值补充检查分开记录。
+
+#### 当前源码的验证与性能结果
+
+本机 GCC 13、conda `af3`，完整 BF16 catalog 共 86 个 shape ×
+Const/Dynamic = **172 个 case**，17 轮同轮三路计时，数值检查全部通过。
+以下比值均为耗时比，越小越好；不是跨轮选择的最佳结果。
+
+| Shape / metadata | 新 DSL / 旧 DSL | 新 DSL / C++ |
+|---|---:|---:|
+| 4×4096×4096 / Const | 0.670 | 0.931 |
+| 4×4096×4096 / Dynamic | 0.608 | 0.918 |
+| 1×1152×896 / Const | 0.776 | 0.984 |
+| 16×48×128 / Dynamic | 0.755 | 0.958 |
+| 172 case 几何均值 | 0.952 | 0.915 |
+
+旧 DSL / C++ 超过 1.1 的 case 从 27 个降为 10 个，超过 1.2 从
+19 个降为 4 个。不过相对旧 DSL，仍有 9 个 case 超过 1.1、最差
+1.181；相对 C++ 最差为 Const 128×4096×4096 的 1.302。
+其中几组微小 Dynamic case 的绝对差值只有几十 ns，但 Dynamic
+256³ 和 3136×64×576 等并非只能归因于微小计时噪声，仍需继续优化。
+大型 case 在不同轮次有明显波动，不能混用不同源码阶段/轮次的比值。
+
+当前源码的独立验证：
+
+- native codegen、真实 A/C 和 B/C 别名、部分常量 AMX family、已有
+  edges 测试 **16/16** 通过；包含零 K、packed、融合、类型转换等边界。
+- codegen 快速检查、cost、matmul policy 和 architecture 测试
+  **38/38** 通过（与上述 native cohort 有 5 项重叠，不累加成独立总数）。
+- ARM SVE/SME 的 VLA / 固定 VL/SVL **156/156 object + SME gate**
+  通过；仅跨编译，不包含离线 ARM 机器上的链接运行和性能测试。
+- 另对当前源码完成 **32/32 Const 融合 benchmark case**：四种输入
+  dtype 组合，GEMV 尾部和 AMX 1×3 shape，四种前后处理。每个 case
+  先比较 NumPy 与 C++，9 轮 native 计时中最差 DSL / C++ 为 1.059。
+  此补充没有旧 DSL manifest，不用来证明相对旧 DSL 的融合性能不退化。
+- `vecops.language`、此 benchmark 和新测试的 Ruff 格式检查，以及
+  未定义名称/语法检查通过；没有宣称整个 Python 测试集或全量 lint 通过。
+
+报告与日志保留在 `build-dsl-matmul/`：
+`perf-catalog-validated-paired.csv`、`pytest-native-validated.log`、
+`pytest-policy-validated.log`、`matmul-cross-perf-validated.log`、
+`perf-fusion-const-validated.csv`。Const 融合补充复现命令：
+
+```bash
+conda run --no-capture-output -n af3 python benchmarks/dsl_matmul.py \
+  --shape 1x257x129 1x257x257 16x48x128 16x48x256 \
+  --kind bf16 convert i8 mixed \
+  --pipeline accumulate bias_relu silu affine_input \
+  --mode Const --level matmul --rounds 9 --jobs 6 \
+  --output build-dsl-matmul/perf-fusion-const-validated.csv
+```
+
+还不能据总体平均值宣称所有 shape 不退化。大型宽 prefill 的剩余差距
+需要隔离 cache wrapper / packing / traversal 与 leaf codegen 才能归因；
+动态 GEMV 仍保留 metadata/别名检查和调度。native repeat 基准不包含
+Python 调用，因此这些差距不是 Python 调用耗时。后续应单独比较
+prepacked dot 与 library、full/tail instruction 路径及配置区间，逐步验证
+traversal 和缓存面板选择，不能仅凭整体耗时归因于某一条 MMA 指令。
+
+**冷编译限制：** BF16、float32→BF16、int8、uint8×int8 与
+accumulate / bias-ReLU / SiLU / affine-input 的大组合补充验证各包含
+112 case。部分 Dynamic transform 对象的 GCC / Clang 优化阶段分别
+超过 50 / 30 分钟，单进程内存达数 GiB，因此停止了这两组任务，
+保留构建产物和日志，不能将它们记为通过。GCC 那组使用较早的调度
+源码，Clang 那组使用当前源码；两者也不合并成当前性能报告。
+共享显式 cache packing wrapper 减少了一处复制，但没有解决所有
+动态 family/full-tail/producer 分支造成的编译膨胀。后续应在保持
+强制内联和精简热路径的前提下，进一步提取/共用生成区域，并为
+动态融合冷编译时间建立独立回归预算。

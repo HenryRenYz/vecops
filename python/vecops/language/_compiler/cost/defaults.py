@@ -39,6 +39,11 @@ DEFAULT = CostProfile(
     ("packed_fusion_min_reloads", 2),
     ("fusion_safety_margin", 1.0),
     ("gemv_epilogue_group_overhead", 8),
+    ("gemv_k_unroll", 2),
+    ("gemv_k_unroll_long", 2),
+    ("gemv_k_unroll_long_min", 512),
+    ("matmul_unblocked_bytes", 512 * 1024),
+    ("matmul_runtime_unblocked_bytes", 128 * 1024),
     ("vector_register_budget", 24),
   ),
 )

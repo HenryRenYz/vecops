@@ -388,7 +388,7 @@ class MatmulEmitter:
 
     def panel(full_spatial):
       self.line(f"vecops::nint_t {k}=0;")
-      self.opening(f"for (;vecops_dsl::full_vectors({k},{logical_k},{kr},1);{k}+={kr})")
+      self.opening(f"for (;({logical_k})-{k}>={kr};{k}+={kr})")
       self.pack_amx_tile(source, packed, s, k, spatial, logical_k, full_spatial, True)
       self.close()
       known = I.constant(packed.shape[1 if side == "A" else 0])
@@ -397,7 +397,7 @@ class MatmulEmitter:
         self.pack_amx_tile(source, packed, s, k, spatial, logical_k, full_spatial, False)
         self.close()
 
-    self.opening(f"for (;vecops_dsl::full_vectors({s},{spatial},16,1);{s}+=16) /* full packing panels */")
+    self.opening(f"for (;({spatial})-{s}>=16;{s}+=16) /* full packing panels */")
     panel(True)
     self.close()
     known = I.constant(packed.shape[0 if side == "A" else 1])
@@ -745,7 +745,7 @@ class MatmulEmitter:
     self.vector_k_matmul(statement, product)
     self.close()
 
-  def vector_k_matmul(self, statement, product, *, transpose=False):
+  def vector_k_matmul(self, statement, product, *, transpose=False, remainder_columns=0):
     a, b = self.matrix_operands(product)
     if transpose:
       a, b = b, a
@@ -770,11 +770,30 @@ class MatmulEmitter:
     k = self.scalar(a.type.shape[0 if transpose else 1])
     mi, ni, ki = (self.unique(v) for v in ("gemv_m", "gemv_n", "gemv_k"))
     width = f"vecops::vec::size({atag}{{}})"
-    unroll = self.active_matmul_plan.k_unroll
-    column_count = self.active_matmul_plan.vector_columns
+    tail = remainder_columns > 0
+    column_count = remainder_columns or self.active_matmul_plan.vector_columns
+    unroll = (
+      max((4 + column_count - 1) // column_count, self.active_matmul_plan.k_unroll)
+      if tail
+      else self.active_matmul_plan.k_unroll
+    )
+    known_n = I.constant(b.type.shape[0 if transpose else 1])
+    if not self.matrix_grouped_epilogue and not tail and isinstance(known_n, int) and known_n > 0:
+      column_count = min(column_count, known_n)
+      # A two-column product needs two K banks, not two independent
+      # single-column remainder loops that redundantly load A.
+      unroll = max(unroll, (4 + column_count - 1) // column_count)
+    separate_tail = not self.matrix_grouped_epilogue
+    end = f"({n})-({n})%{column_count}" if separate_tail and not tail else n
+    start = "0"
+    if tail:
+      remainder = f"({n})%{self.active_matmul_plan.vector_columns}"
+      start = f"({n})-({remainder})" if column_count == 2 else f"({n})-({remainder})%2"
+      if column_count == 2:
+        end = f"({n})-({remainder})%2"
     self.line("/* row/column GEMV and small-M/N family, widening vector dot */")
     self.opening(f"for (vecops::nint_t {mi}=0; {mi}<({m}); ++{mi})")
-    self.opening(f"for (vecops::nint_t {ni}=0; {ni}<({n}); {ni} += {column_count})")
+    self.opening(f"for (vecops::nint_t {ni}={start}; {ni}<({end}); {ni} += {column_count})")
     accumulators = []
     for bank in range(unroll):
       columns = []
@@ -835,14 +854,26 @@ class MatmulEmitter:
       step(ki, f"({k})-{ki}", 0, False, full_columns)
       self.close()
 
-    # GCC does not reliably unswitch the per-column predicate in a sizable
-    # transformed dot body. Test it once per group, not on every K step.
-    self.opening(f"if (({n})-{ni}>={column_count}) /* full output group */")
-    k_loop(True)
-    self.close()
-    self.opening("else /* one partial output group */")
-    k_loop(False)
-    self.close()
+    if separate_tail:
+      # Complete output groups and one-column remainders have independent
+      # schedules: no per-column K predicates or unused accumulator banks.
+      self.line(
+        "/* full output group */"
+        if not tail
+        else "/* two-column output remainder */"
+        if column_count == 2
+        else "/* single-column output remainder */"
+      )
+      k_loop(True)
+    else:
+      # Group mathematical epilogues even for a partial group; computing one
+      # SIMD exp beats scalar libm for each of up to three remaining results.
+      self.opening(f"if (({n})-{ni}>={column_count}) /* full output group */")
+      k_loop(True)
+      self.close()
+      self.opening("else /* one partial output group */")
+      k_loop(False)
+      self.close()
     if self.matrix_grouped_epilogue:
       footprint = max(
         ELEMENT_BYTES[statement.destination.dtype],
@@ -884,6 +915,12 @@ class MatmulEmitter:
       self.close()
     self.close()
     self.close()
+    if separate_tail and not tail and column_count > 1:
+      # Known narrowed groups divide N exactly and need no remainder.
+      if column_count == self.active_matmul_plan.vector_columns:
+        if column_count > 2:
+          self.vector_k_matmul(statement, product, transpose=transpose, remainder_columns=2)
+        self.vector_k_matmul(statement, product, transpose=transpose, remainder_columns=1)
 
   def gemv_grouped_output(self, statement, product, tag, accumulators, mi, ni, n, transpose, lanes):
     """Group completed independent dots before math, never scalar exp per C."""
@@ -985,7 +1022,9 @@ class MatmulEmitter:
         def store_group(group, tag, value):
           self.line(f"vecops::vec::store({tag}{{}},reinterpret_cast<std::uint32_t*>({scratch})+{group * 16},{value});")
 
-        self.amx_b_register_pack(operand, origin, ki, spatial, k, store_group)
+        self.amx_b_register_pack(
+          operand, origin, ki, spatial, k, store_group, spatial_full=getattr(self, "matrix_n_full", False)
+        )
         self.close()
         self.opening("else")
       tag = self.matrix_tag(dtype, lanes=16)
@@ -1011,7 +1050,7 @@ class MatmulEmitter:
     if direct:
       self.close()
 
-  def amx_matmul(self, statement, product, *, family=None):
+  def amx_matmul(self, statement, product, *, family=None, skip_cache=False, single_m_tile=False):
     a, b = self.matrix_operands(product)
     initial = product.args[2:]
     dtype = product.type.dtype
@@ -1020,25 +1059,44 @@ class MatmulEmitter:
     kr = 64 // ELEMENT_BYTES[a.type.dtype]
     cm, cn = (I.constant(v) for v in product.type.shape)
     if family is None and (cm is None or cn is None):
-      # Budget the cache traversal once. The leaves retain a runtime shape
-      # dispatch instead of recursively rediscovering cache panels per family.
-      cache = self.matrix_cache_blocks(product, 32, 32, kr)
-      if cache is not None:
-        self.blocked_matrix_matmul(statement, product, cache, "amx", spatial_alignment=(32, 32), k_alignment=kr)
+      if product.data.tiled and any(
+        v is not None for v in (product.data.block_m, product.data.block_n, product.data.block_k)
+      ):
+        # Explicit cache phases share one packing wrapper. Duplicating a
+        # transformed pack for every family greatly inflates C++ optimization
+        # time; runtime quanta retain the requested family alignment without
+        # cloning the panel producer. Shortened leaves select their own family.
+        mr = f"(({m})<=16 ? 16 : ({n})<=16 ? 48 : 32)"
+        nr = f"(({m})<=16 ? (({n})<=16 ? 16 : 48) : ({n})<=16 ? 16 : 32)"
+        if isinstance(cm, int) and cm > 0:
+          mr = f"std::min<vecops::nint_t>({mr},{((cm + 15) // 16) * 16})"
+        if isinstance(cn, int) and cn > 0:
+          nr = f"std::min<vecops::nint_t>({nr},{((cn + 15) // 16) * 16})"
+        cache = self.matrix_cache_blocks(product, mr, nr, kr)
+        minimum_m = 32 if isinstance(cm, int) and cm > 16 else 16
+        minimum_n = 32 if isinstance(cn, int) and cn > 16 else 16
+        self.blocked_matrix_matmul(
+          statement, product, cache, "amx", spatial_alignment=(minimum_m, minimum_n), k_alignment=kr
+        )
         return
+      # Select the register family before its cache alignment. A universal
+      # 32x32 panel needlessly gives a 1x3 leaf partial 48-column groups.
       self.opening(f"if (({m})<=16) /* dynamic small-M family */")
       self.opening(f"if (({n})<=16)")
-      self.amx_matmul(statement, product, family=(1, 1))
+      self.amx_matmul(statement, product, family=(1, 1), skip_cache=skip_cache)
       self.close()
       self.opening("else")
-      self.amx_matmul(statement, product, family=(1, 3))
+      self.amx_matmul(statement, product, family=(1, 3), skip_cache=skip_cache)
       self.close()
       self.close()
       self.opening(f"else if (({n})<=16) /* dynamic small-N family */")
-      self.amx_matmul(statement, product, family=(3, 1))
+      self.amx_matmul(statement, product, family=(3, 1), skip_cache=skip_cache)
+      self.close()
+      self.opening(f"else if (({m})<=32) /* one primary M group */")
+      self.amx_matmul(statement, product, family=(2, 2), skip_cache=skip_cache, single_m_tile=True)
       self.close()
       self.opening("else")
-      self.amx_matmul(statement, product, family=(2, 2))
+      self.amx_matmul(statement, product, family=(2, 2), skip_cache=skip_cache)
       self.close()
       return
     rows, columns = 2, 2
@@ -1048,14 +1106,43 @@ class MatmulEmitter:
       rows, columns = 1, min(3, max(1, (cn + 15) // 16)) if isinstance(cn, int) else 3
     elif isinstance(cn, int) and cn <= 16:
       rows, columns = min(3, max(1, (cm + 15) // 16)) if isinstance(cm, int) else 3, 1
+    if isinstance(cm, int) and cm > 0:
+      rows = min(rows, (cm + 15) // 16)
+    if isinstance(cn, int) and cn > 0:
+      columns = min(columns, (cn + 15) // 16)
     acc_count = rows * columns
-    cache = self.matrix_cache_blocks(product, rows * 16, columns * 16, kr)
+    single_m_tile = single_m_tile or rows == 1 or isinstance(cm, int) and cm <= rows * 16
+    automatic = product.data.tiled and all(
+      v is None for v in (product.data.block_m, product.data.block_n, product.data.block_k)
+    )
+    bypass = not skip_cache and automatic and (cm is None or cn is None)
+    if bypass:
+      # Dynamic broad matrices still benefit from panel packing/runtime layout
+      # specialization where the same-size Const kernel can be simplified by
+      # the C++ compiler. Do not use the constant cutoff indiscriminately.
+      limit = self.active_matmul_plan.runtime_unblocked_bytes
+      self.opening(
+        f"if (vecops_dsl::matmul_fits({m},{n},{k},{ELEMENT_BYTES[a.type.dtype]},{ELEMENT_BYTES[b.type.dtype]},{ELEMENT_BYTES[dtype]},{limit})) /* bypass cache panels for small runtime products */"
+      )
+      self.amx_matmul(statement, product, family=(rows, columns), skip_cache=True, single_m_tile=single_m_tile)
+      self.close()
+      self.opening("else")
+    cache = None if skip_cache else self.matrix_cache_blocks(product, rows * 16, columns * 16, kr)
     if cache is not None:
       self.blocked_matrix_matmul(
-        statement, product, cache, "amx", spatial_alignment=(rows * 16, columns * 16), k_alignment=kr
+        statement,
+        product,
+        cache,
+        "amx",
+        spatial_alignment=(rows * 16, columns * 16),
+        k_alignment=kr,
+        amx_family=(rows, columns),
+        single_m_tile=single_m_tile,
       )
+      if bypass:
+        self.close()
       return
-    a, b = self.automatic_matrix_packing(product, "amx")
+    a, b = self.automatic_matrix_packing(product, "amx", single_m_tile=single_m_tile)
     cfg, session, scope = (self.unique(v) for v in ("dot_tilecfg", "dot_session", "dot_scope"))
     self.line(f"vecops::execution::amx::TileConfiguration {cfg};")
     native_m = min(16, cm) if isinstance(cm, int) and cm > 0 else 16
@@ -1175,14 +1262,34 @@ class MatmulEmitter:
           )
       self.matrix_k_full = previous
 
-    self.line(f"vecops::nint_t {ki}=0;")
-    self.opening(f"for (;vecops_dsl::full_vectors({ki},{k},{kr},1);{ki}+={kr}) /* full K: unmasked load/convert */")
-    multiply(True)
-    self.close()
-    if not (isinstance(I.constant(a.type.shape[1]), int) and I.constant(a.type.shape[1]) % kr == 0):
-      self.opening(f"if ({ki}<({k})) /* one zero-padded K tail */")
-      multiply(False)
+    def k_loop(spatial_full):
+      previous_n = getattr(self, "matrix_n_full", False)
+      self.matrix_n_full = spatial_full
+      self.line(f"vecops::nint_t {ki}=0;")
+      # Extents are nonnegative and this loop never advances beyond K; a
+      # subtraction comparison avoids signed-128 arithmetic in every step.
+      self.opening(f"for (;({k})-{ki}>={kr};{ki}+={kr}) /* full K: unmasked load/convert */")
+      multiply(True)
       self.close()
+      if not (isinstance(I.constant(a.type.shape[1]), int) and I.constant(a.type.shape[1]) % kr == 0):
+        self.opening(f"if ({ki}<({k})) /* one zero-padded K tail */")
+        multiply(False)
+        self.close()
+      self.matrix_n_full = previous_n
+
+    # Unswitch N-tail checks before K. GCC otherwise keeps 16 predicates per
+    # B tile load in the hot full-K loop of a dynamic small-M product.
+    if isinstance(cn, int) and cn % (columns * 16) == 0:
+      k_loop(True)
+    elif b.op != "packed_load" and self.amx_b_dense_condition(b) is not None:
+      self.opening(f"if (({n})-{ni}>={columns * 16}) /* full AMX N group */")
+      k_loop(True)
+      self.close()
+      self.opening("else /* partial AMX N group */")
+      k_loop(False)
+      self.close()
+    else:
+      k_loop(False)
     for r in range(rows):
       for c in range(columns):
         tile = r * columns + c
@@ -1339,7 +1446,18 @@ class MatmulEmitter:
     )
     return I.Expr(operand.type, "packed_load", data=packed)
 
-  def blocked_matrix_matmul(self, statement, product, cache, format_, *, spatial_alignment=(4, 16), k_alignment=32):
+  def blocked_matrix_matmul(
+    self,
+    statement,
+    product,
+    cache,
+    format_,
+    *,
+    spatial_alignment=(4, 16),
+    k_alignment=32,
+    amx_family=None,
+    single_m_tile=False,
+  ):
     """NC/KC/MC traversal: bounded panels, native partial C, phased fusion."""
     a, b = self.matrix_operands(product)
     old_materialized, old_snapshots = dict(self.materialized), dict(self.snapshots)
@@ -1378,7 +1496,8 @@ class MatmulEmitter:
     self.opening(f"for (vecops::nint_t {kb}=0; {kb}<std::max<vecops::nint_t>(1,{self.scalar(k)}); {kb}+={bk})")
     self.line(f"const auto {kk}=std::min<vecops::nint_t>({bk},({self.scalar(k)})-{kb});")
     bv = self.slice_matrix_value(b, (raw(kb), raw(nb)), (ks, ns))
-    bv = self.emit_matrix_pack(bv, "B", format_, product.data.packing)
+    if not (single_m_tile and format_ == "amx" and product.data.packing == "auto"):
+      bv = self.emit_matrix_pack(bv, "B", format_, product.data.packing)
     self.opening(f"for (vecops::nint_t {mb}=0; {mb}<({self.scalar(m)}); {mb}+={bm})")
     self.line(f"const auto {mm}=std::min<vecops::nint_t>({bm},({self.scalar(m)})-{mb});")
     av = self.slice_matrix_value(a, (raw(mb), raw(kb)), (ms, ks))
@@ -1397,7 +1516,15 @@ class MatmulEmitter:
     old_phase = getattr(self, "matrix_phase", None)
     self.matrix_phase = (f"{kb}==0", f"{kb}+{kk}==({self.scalar(k)})", partial_view)
     emit = self.amx_matmul if format_ == "amx" else self.sme_matmul if format_ == "sme" else self.vector_matrix_leaf
-    emit(replace(statement, destination=sink, value=value, mask=mask), local)
+    if format_ == "amx":
+      emit(
+        replace(statement, destination=sink, value=value, mask=mask),
+        local,
+        family=amx_family,
+        single_m_tile=single_m_tile,
+      )
+    else:
+      emit(replace(statement, destination=sink, value=value, mask=mask), local)
     self.matrix_phase = old_phase
     self.close()
     self.close()
@@ -1416,7 +1543,7 @@ class MatmulEmitter:
       and all(isinstance(v, int) for v in sizes)
       and sizes[0] * sizes[1] * ELEMENT_BYTES[product.type.dtype]
       + sizes[2] * (sizes[0] * ELEMENT_BYTES[a.type.dtype] + sizes[1] * ELEMENT_BYTES[b.type.dtype])
-      <= 512 * 1024
+      <= self.active_matmul_plan.unblocked_bytes
     ):
       return None
     name = self.unique("matrix_cache")
@@ -1445,7 +1572,7 @@ class MatmulEmitter:
     self.opening(f"for (vecops::nint_t {mi}=0; {mi}<({m}); {mi}+={bm})")
     return f"std::min<vecops::nint_t>({m},{mi}+{bm})", f"std::min<vecops::nint_t>({n},{ni}+{bn})", (mi, ni), 2
 
-  def automatic_matrix_packing(self, product, format_):
+  def automatic_matrix_packing(self, product, format_, *, single_m_tile=False):
     operands = list(self.matrix_operands(product))
     if not product.data.tiled or product.data.packing == "none":
       return tuple(operands)
@@ -1457,8 +1584,11 @@ class MatmulEmitter:
       if (
         policy == "auto"
         and side == "B"
-        and isinstance(I.constant(product.type.shape[0]), int)
-        and I.constant(product.type.shape[0]) <= 32
+        and (
+          single_m_tile
+          or isinstance(I.constant(product.type.shape[0]), int)
+          and I.constant(product.type.shape[0]) <= 32
+        )
       ):
         # No cross-M reuse: raw instruction staging is already the one pack
         # needed by this tile; a second packed buffer only adds traffic.

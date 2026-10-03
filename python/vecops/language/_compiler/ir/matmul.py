@@ -44,6 +44,8 @@ class MatmulPlan:
   vector_rows: int = 4
   vector_columns: int = 4
   k_unroll: int = 2
+  unblocked_bytes: int = 512 * 1024
+  runtime_unblocked_bytes: int = 128 * 1024
   operands: tuple = ()
   amx_b_permutation: object | None = None
   dense_transposes: tuple = ()

@@ -14,6 +14,24 @@ from ...pipeline import cpu_memory_pipeline
 from ...operations import has, Trait
 
 
+def snapshot_strides(view):
+  """Keep a proven unit-stride axis in dense snapshots.
+
+  Row-major snapshots of K-contiguous B introduce a gather alternative in
+  every otherwise contiguous dot load, even when the operands do not alias.
+  Preserve that axis without retaining source padding, negative strides or
+  overlapping/broadcast storage. Unknown layouts retain the row-major default.
+  """
+  rank = len(view.shape)
+  unit = next((axis for axis in reversed(range(rank)) if I.constant(view.strides[axis]) == 1), rank - 1)
+  order = tuple(axis for axis in range(rank) if axis != unit) + (unit,)
+  strides, extent = [None] * rank, I.literal(1)
+  for axis in reversed(order):
+    strides[axis] = extent
+    extent = I.binary("mul", extent, view.shape[axis])
+  return tuple(strides)
+
+
 @dataclass(frozen=True)
 class PreparedKernel:
   vectors: object
@@ -73,10 +91,9 @@ def prepare(vectors, *, memory_manager=None):
         reductions[((id(value),), ())] = lower_reduction((value,), manager=manager)
       elif value.op == "load" and value.data.shape:
         shape = value.data.shape
-        strides = [I.literal(1)] * len(shape)
-        for axis in reversed(range(len(shape) - 1)):
-          strides[axis] = I.binary("mul", strides[axis + 1], shape[axis + 1])
-        destination = I.View("snapshot", value.type.dtype, shape, tuple(strides), I.literal(0), owned=True)
+        destination = I.View(
+          "snapshot", value.type.dtype, shape, snapshot_strides(value.data), I.literal(0), owned=True
+        )
         snapshots[id(value)] = lower_stores(
           (I.Store(destination, value),), opaque=vectors.kernel.materializations, manager=manager
         )

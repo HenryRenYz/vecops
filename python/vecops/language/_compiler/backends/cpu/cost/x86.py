@@ -8,5 +8,8 @@ X86 = CostProfile(
     CostRule(OperationCost(4, 12, provenance="estimated x86 division"), (("operation", "div"),)),
     CostRule(OperationCost(4, 12, provenance="estimated x86 square root"), (("operation", "sqrt"),)),
   ),
+  # Four independent output columns already hide the dot dependency. Extra
+  # K banks add horizontal sums/register pressure on small raw GEMVs.
+  policies=(("gemv_k_unroll", 1),),
 )
 AVX512 = CostProfile("avx512")
