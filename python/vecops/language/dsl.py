@@ -47,6 +47,28 @@ class Intrinsic:
     raise TypeError(f"T.{self.name} is only available inside a source-less T.template or T.func")
 
 
+@dataclass(frozen=True)
+class ExecutionLayout:
+  """Logical iteration order and optional vector axis, not a memory layout.
+
+  order lists outer-to-inner axes. A vector axis must be the innermost axis;
+  its induction value is a vector of logical indices, including clipped tails.
+  Backend workers/warps are deliberately not encoded in this descriptor.
+  """
+
+  order: tuple[int, ...] = ()
+  vector_axis: int | None = None
+  vector: Vector = Vector()
+
+  def __post_init__(self):
+    if not isinstance(self.order, tuple) or any(type(i) is not int for i in self.order):
+      raise TypeError("execution order must be an immutable tuple of axes")
+    if self.vector_axis is not None and type(self.vector_axis) is not int:
+      raise TypeError("vector_axis must be an integer or None")
+    if not isinstance(self.vector, Vector):
+      raise TypeError("execution vector must be a Vector descriptor")
+
+
 class DSLFunction:
   def __init__(self, function):
     functools.update_wrapper(self, function)
@@ -59,6 +81,30 @@ class DSLFunction:
 def func(function):
   """Declare a source-parsed, specialized and inlined kernel helper."""
   return DSLFunction(function)
+
+
+@dataclass(frozen=True)
+class Reducer:
+  """A source-parsed binary combiner and immutable scalar/tuple identity.
+
+  associative is an explicit reassociation promise, not inferred for floats.
+  Generic combiners preserve left-fold order on the current CPU backend.
+  """
+
+  function: object
+  identity: object
+  associative: bool = False
+
+
+def reducer(*, identity, associative=False):
+  """Declare a pure binary scalar/tuple reduction helper."""
+
+  def immutable(value):
+    return isinstance(value, (bool, int, float)) or isinstance(value, tuple) and all(immutable(v) for v in value)
+
+  if not immutable(identity) or type(associative) is not bool:
+    raise TypeError("reducer requires an immutable numeric identity and boolean associative flag")
+  return lambda function: Reducer(function, identity, associative)
 
 
 _OPERATIONS = (
@@ -90,7 +136,38 @@ _OPERATIONS = (
   "lanes",
   "static_assert",
   "compiler_fence",
+  "broadcast_to",
+  "gather",
+  "scatter",
+  "shuf",
+  "local_shuf",
+  "element_at",
+  "expand_dims",
+  "squeeze",
+  "indices",
+  "workspace",
+  "worker_capacity",
+  "parallel",
+  "simd",
+  "reduce",
+  "scan",
+  "team",
+  "worker_id",
+  "worker_count",
+  "barrier",
+  "team_reduce",
+  "shared",
+  "atomic_add",
+  "atomic_min",
+  "atomic_max",
+  "atomic_exchange",
+  "atomic_compare_exchange",
+  "prefetch",
+  "pipelined",
+  "double_buffer",
 )
-_OPERATIONS += tuple(sorted(operation_snapshot().names(Trait.UNARY_MATH | Trait.SCALAR_REDUCTION)))
+_OPERATIONS += tuple(
+  sorted(operation_snapshot().names(Trait.UNARY_MATH | Trait.SCALAR_REDUCTION | Trait.MASK_REDUCTION))
+)
 globals().update({name: Intrinsic(name) for name in _OPERATIONS})
-__all__ = ["Vector", "func", *_OPERATIONS]
+__all__ = ["Vector", "ExecutionLayout", "Reducer", "reducer", "func", *_OPERATIONS]

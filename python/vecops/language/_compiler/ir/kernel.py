@@ -26,6 +26,23 @@ class Expr(Node):
 
 
 @dataclass(frozen=True)
+class ViewRegion(Node):
+  """Logical root coordinates retained for grid independence proofs only.
+
+  Address generation still uses offset/strides. Losing this provenance is
+  legal, but requires conservative scheduling rather than assumed no-alias.
+  """
+
+  root_shape: tuple[Expr, ...]
+  root_strides: tuple[Expr, ...]
+  starts: tuple[Expr, ...]
+  widths: tuple[Expr, ...]
+  steps: tuple[int, ...]
+  axes: tuple[int, ...]
+  clipped: tuple[bool, ...]
+
+
+@dataclass(frozen=True)
 class View(Node):
   storage: str
   dtype: str
@@ -34,6 +51,7 @@ class View(Node):
   offset: Expr
   writable: bool = True
   owned: bool = False
+  region: ViewRegion | None = None
 
 
 @dataclass
@@ -72,6 +90,18 @@ class For(Node):
   step: Expr
   body: Block
   unroll: int = 2
+  kind: str = "serial"
+  associative: bool = False
+
+
+@dataclass(frozen=True)
+class Grid(Node):
+  targets: tuple[str, ...]
+  extents: tuple[Expr, ...]
+  body: Block
+  schedule: str = "auto"
+  chunk: int = 1
+  parallel: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -103,6 +133,15 @@ class Store(Node):
 
 
 @dataclass(frozen=True)
+class IndexedStore(Node):
+  destination: View
+  indices: Expr
+  value: Expr
+  mask: Expr | None = None
+  unique: bool = False
+
+
+@dataclass(frozen=True)
 class Allocate(Node):
   view: View
 
@@ -130,6 +169,21 @@ class ArchitectureCall(Node):
   operation: str
   tile: int = 0
   view: View | None = None
+  operands: tuple = ()
+
+
+@dataclass(frozen=True)
+class AMXTile(Node):
+  index: int
+  dtype: str
+  region: int
+
+
+@dataclass(frozen=True)
+class SMEVector(Node):
+  name: str
+  view: View
+  region: int
 
 
 @dataclass
@@ -204,7 +258,7 @@ def binary(op, left, right):
     dtype = max(float_dtypes, key=lambda d: int(d[5:])) if float_dtypes else "float64" if op == "div" else typ.dtype
     typ = shaped_type(dtype, shape, typ, comparison)
   else:
-    floating = [v.type.dtype for v in (left, right) if v.type.dtype.startswith("float")]
+    floating = [v.type.dtype for v in (left, right) if v.type.dtype.startswith(("float", "bfloat"))]
     dtype = (
       "float64" if "float64" in floating or op == "div" and not floating else "float32" if floating else left.type.dtype
     )
@@ -253,7 +307,7 @@ def broadcast_shape(a, b):
 
 
 def loads(expr):
-  if expr.op == "load":
+  if operation_snapshot().has(expr, Trait.MEMORY_READ):
     yield expr
   for argument in expr.args:
     yield from loads(argument)

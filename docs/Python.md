@@ -199,14 +199,37 @@ def softmax(M, N, dtype):
 The outer factory runs ordinary Python. The inner body is **parsed, not
 executed**: dynamic `if`/`while` become runtime control flow; constants are
 partially evaluated. `range`/`T.serial`, nested `T.grid`, constant `T.unroll`,
-scalar loop-carried variables, `break`/`continue`, assertions and source-located
-errors are supported. Branch-carried scalar variables must be initialized
-before a dynamic branch; tile/view rebinding across dynamic branches or loops
-requires explicit `T.alloc` storage. An unrolled region cannot use
+typed scalar/tile/vector loop-carried variables, `break`/`continue`, assertions
+and source-located errors are supported. New scalar/tile values (including
+nested tuples) defined on both dynamic branches are joined automatically;
+names defined on only one branch cannot be used afterward. Tile/vector state
+keeps its dtype, predicate kind, logical shape and explicit vector tag.
+Dynamic shape equality is checked at runtime. Views cannot be rebound across
+loops; use explicit `T.alloc` storage instead. An unrolled region cannot use
 `break`/`continue`. Kernels return through output tensors.
 
+Literal scalar locals and pure constant `T.func` results retain compile-time
+identity, so they can feed `T.static_assert` and specialization branches.
+If a runtime loop or branch updates such a local, it is promoted to mutable
+scalar state before that region. Immutable tuples support compile-time
+slicing and starred tuple expansion; runtime tuple slice bounds and mutable
+iterable unpacking are not supported.
+
+Tile values retain snapshot semantics: `old = x; x = x + 1` leaves `old`
+unchanged, and `x, y = y, x` reads both old values before updating either.
+The CPU state-placement pass keeps small fixed tiles and bounded scalable
+vectors in independent Vec/Mask locals (also in sizeless SVE); large/dynamic
+tiles use private scalar scratch with staged simultaneous updates. No arrays
+of Vec/Mask objects are generated. This is a conservative placement policy,
+not a global register allocator or a universal no-spill guarantee.
+
 `T.func` helpers are source-parsed and inlined, including their immutable
-captures in cache identity. Arbitrary host calls, mutable captures, exception
+captures in cache identity. Conditional scalar/tile/tuple returns and early
+returns from nested loops are supported. A helper return exits only the
+helper, not its caller kernel. Loop returns lower to lexical exit regions
+without C++ closures; a value helper that reaches its end without returning
+raises a runtime error. Result shapes must be available before the result
+slot is declared. Arbitrary host calls, mutable captures, exception
 handling, generators and optional DSL tensor operands are rejected. A source
 template's body remains ignored as before. Source-less definitions require
 inspectable, file-backed Python source; they are not bytecode interpreters.
@@ -223,9 +246,262 @@ compute_dtype=...)` is the rank-2 visible `T.func` algorithm, with a linear-copy
 specialization for dense single-row/column shapes. Conversions fuse into
 load/store boundaries; a sole widening conversion may move after the
 permutation on x86 without changing lane values or rounding.
-`T.reshape` requires a dense view and preserves element count. Shapes broadcast
+`T.reshape` requires a dense memory view; for computation values it performs a
+logical reshape and preserves element count. Dense read/elementwise DAGs fold
+back to dense views; general value reshapes have a register-only lane fallback.
+`T.transpose(value, axes=...)` and `value.T` transform computation values too.
+`T.expand_dims(view_or_value, axis=-1)` inserts a singleton axis;
+`T.squeeze(view_or_value, axis=-1)` removes one, checking its extent at runtime
+when necessary. Memory transforms remain zero-copy and value transforms retain
+their logical coordinates when broadcast into higher-rank consumers.
+Shapes broadcast
 statically where possible; unknown relations are checked at runtime. A source
 extent must equal the destination extent or be one; incompatible extents error.
+
+### Register primitives and explicit indexing
+
+`T.shuf(value, indices)` follows the public vec API's **native-word-local**
+shuffle contract, not a global permutation of an arbitrarily large virtual
+vector. Indices must address lanes in their native word. `T.local_shuf(value,
+(...))` applies a compile-time lane order independently in each 16-byte block.
+The order contains one in-range entry per block lane; repetitions are legal.
+Neither primitive generates Vec/Mask arrays. `T.element_at(value, (i,...))`
+extracts a scalar using valid caller-provided logical coordinates; the current
+word-local shuffle DAGs are evaluated in their original layout before a scalar
+or differently laid-out consumer accesses them.
+
+`T.gather(view, indices, dtype=None, mask=None, other=0)` loads a rank-one
+memory view using an int32/int64 index tile (which may have multiple axes).
+For a higher-rank memory view, pass a tuple containing one logical coordinate
+per memory axis. Coordinates can be scalar or broadcastable index tiles;
+at least one must be a tile. `T.indices(shape, axis=-1)` produces an int64
+coordinate grid along one compile-time axis, without storing a dense grid:
+
+```python
+rows = T.expand_dims(T.load(Idx), 1)
+columns = T.indices((Idx.shape[0], A.shape[1]), axis=1)
+selected = T.gather(A, (rows, columns), dtype="float32", mask=rows >= 0)
+```
+
+Indices are in **logical elements**, including for negative/padded strides.
+Active indices are bounds checked; inactive indices may be invalid and never
+form load addresses. Conversion is fused into `load_convert`. Gather values
+retain the usual alias/snapshot protection.
+
+`T.scatter(view, indices, value, mask=None, unique=False)` writes through the
+same indexing convention to a rank-one view (coordinate-tuple scatter is not
+yet implemented). Default duplicate indices have ordered logical
+last-writer-wins semantics; `unique=True` is a caller promise permitting
+native indexed `store_convert`. A failed bounds check may leave earlier
+chunks written; neither operation promises transactional error handling.
+Arbitrary indexed grid writes cannot currently prove program ownership:
+automatic grids retain serial order and `parallel="require"` rejects them.
+
+`T.mask_all/any/none/count/first/last(predicate, unroll=2)` query all logical
+lanes, excluding physical tail padding. First/last are flattened logical
+indices, or -1 if absent; empty all/none are true, any is false, count is zero.
+These use native mask operations; numeric reductions keep separate semantics.
+
+### Local loops, general folds and resident collectives
+
+`T.parallel(*extents, layout=T.ExecutionLayout(...), unroll=2)` describes
+tile-local iteration, **not** a thread-pool grid. `order` is an outer-to-inner
+axis permutation. An optional `vector_axis` must be innermost and yields a
+tagged index vector. The current CPU fallback orders scalar axes and emits
+explicit SIMD for the vector axis. `T.simd(stop, vector=T.Vector(...))` or
+`T.simd(start, stop, ...)` yields clipped index vectors, including the tail:
+
+```python
+for index in T.simd(N, vector=T.Vector("float32", N=16)):
+  value = T.gather(A, index, dtype="float32")
+  T.scatter(C, index, value * scale + bias, unique=True)
+```
+
+Local parallel/SIMD loops do not support break/continue. `ExecutionLayout`
+does not alter memory strides, cache blocking or worker/warp placement.
+
+`T.reduce(value, reducer="add"/"min"/"max", axis=None, unroll=2)` retains
+the builtin vector reduction paths. A custom `@T.reducer(identity=...,
+associative=False)` is a pure binary scalar/tuple combiner, accepting two
+matching values and returning a matching scalar/tuple. Inputs may be tuples
+of equally shaped tiles, for example `(value, logical_index)` for argmax.
+Identities are cast to the corresponding input dtype. Custom folds currently
+preserve left-fold order; the associative flag is a promise for future
+reassociation, not a claim of current parallel lowering. `T.scan(value,
+reducer="add", axis=-1, exclusive=False, reverse=False)` supports builtin or
+custom scalar/tuple combiners and uses ordered CPU loops plus private scalar
+output storage. It is not yet a specialized SIMD prefix-scan kernel.
+
+```python
+shared = T.shared((workers,), dtype="float32")
+with T.team(workers=workers) as worker:
+  shared[worker] = local_value
+  T.barrier()
+  total = T.team_reduce(T.load(shared[worker]), op="add")
+  C[worker] = total
+```
+
+`T.team` invokes one callback per **resident** worker, respecting executor
+capacity and execution budgets. The requested count is a maximum: size shared
+storage for it, and partition work using `T.worker_count()`/`T.worker_id()`.
+`workers=0` selects the execution budget. Missing resident-team support errors
+for multiple workers; a single worker is synchronous. Teams cannot nest inside
+loops/grids/other teams. Barrier and team_reduce currently require team-top-level
+control (including inline helpers at that level); unproven branch/loop
+uniformity is rejected. Team bodies cannot return/break/continue or mutate an
+enclosing scalar/tile state. Ordinary owned allocations inside a team are
+worker-private; declare shared storage before entry. Overlapping non-atomic
+writes remain the caller's responsibility. Provider cancellation releases
+barrier waiters when a worker fails.
+
+`T.team_reduce(value, op="add"/"min"/"max")` returns the same scalar to every
+worker, in worker-id fold order. Shared scalar slots are protected by two
+barriers, not arrays of vector objects. `T.atomic_add/min/max/exchange` and
+`T.atomic_compare_exchange(view, expected, desired)` operate on writable scalar
+views of 32/64-bit integers or float32/float64 and return the observed old
+value. `order` is relaxed (default), acq_rel or seq_cst. Required alignment is
+checked; min/max use ordinary comparisons, preserving a stored NaN and
+ignoring a NaN candidate. Concurrent accesses to an atomic location must all
+be atomic or separated by a team barrier.
+
+### Replayable workspace and composable attention/math
+
+`T.workspace(shape, dtype="float32")` declares an owned, dense scratch site
+before conditional/loop/grid/team/ISA regions. The generated kernel takes the
+public C++ `WorkspaceContext&`; the existing source adapter plans and replays
+its allocation. Repeated calls can reuse allocation, **not tensor contents**.
+Initialize every element before reading it. Unlike `T.alloc`, workspace is
+not automatically forwarded into a delayed computation value.
+
+Workspace extents may use constants, tensor metadata and
+`T.worker_capacity()` (the call's effective executor/budget capacity). Arbitrary
+runtime scalar payloads or tensor data are rejected as extents: they are not
+part of the existing replay key. Allocation sites must be unconditional and
+serial. Metadata-derived locals must remain immutable; updates, including
+updates inside preceding branches/loops, invalidate the extent proof.
+Immutable shape tuples support compile-time slicing and starred tuple
+expansion (not arbitrary runtime iterable unpacking).
+Shape/stride specialization and effective parallelism changes select
+a different plan; no ABI version or new compiler dependency is needed.
+
+For manual persistent worker scratch, allocate
+`T.workspace((T.worker_capacity(), *tile_shape), dtype=...)` before `T.team`,
+then slice its leading axis by the resident worker id. This is dense storage;
+pad a worker's row explicitly if cache-line separation is needed. It does not
+automatically add the C++ prepared-operator scratch packing, phase-lifetime
+coloring or cache-line padding. Owned `T.alloc` inside a grid remains private
+per worker/invocation, not automatically persistent across calls.
+
+Visible `T.library` helpers now include:
+
+- `stable_sigmoid(x, accuracy="fast", algorithm="exp")` and `silu`: clamp
+  magnitude to 80; use reduced-argument exp plus squaring, or the explicit
+  `algorithm="polynomial"` AF3 SME evaluation schedule. Small-float inputs
+  compute in float32. Accuracy values are strict, fast or estimate.
+- `rmsnorm(x, eps=1e-5, axis=-1, unroll=2)`: float32 accumulation for fp16/bf16.
+- `masked_softmax(x, mask=None, axis=-1, accuracy="fast", unroll=2)`:
+  nonzero numeric/predicate masks; finite valid logits; fully masked/empty
+  rows give zero. Rank-two last-axis RMSNorm and masked softmax hoist row
+  statistics and preserve their elementwise tails for dot/packing/store
+  fusion rather than recomputing them inside microtiles.
+- `scaled_dot_product_attention(Q, K, V, output, block_k=64, ...)`: rank-two
+  memory views with K `[keys,head_dim]`, V `[keys,value_dim]`, optional scalar
+  `scale`, matrix `bias`, query/key masks and causal offsets. It streams K/V,
+  updates max/denominator/accumulator as typed loop state, stores output and
+  returns its value for a subsequent epilogue. The caller chooses query tiles,
+  heads/batch grids and scratch layouts.
+
+Attention uses finite valid logits and returns zero for fully masked or
+zero-key rows. Optional tensors are selected as `None` in the outer factory,
+not nullable runtime DSL parameters. `acc_dtype` defaults to float32;
+Q/K/V/output storage must be floating-point; the accumulator must be float32
+or float64. Default scaling requires a positive head dimension.
+`probability_dtype` defaults to V.dtype, allowing BF16/FP16 dot backends but
+rounding probabilities. Explicit float32 avoids that rounding (and can force
+a vector rather than matrix-instruction family). `accuracy` and
+`implementation` are forwarded to visible math/dot operations. One streamed
+QK block is materialized with scale/bias fused into its epilogue, not a full
+Q-by-K matrix. This is a portable composition implementation; it does not
+promise parity with C++ Attention's prepared packing/workspace/strategy
+scheduler, indexed/sparse fast paths or every possible state-fusion schedule.
+
+### CPU software pipeline and architecture operands
+
+`T.prefetch(view, level="L1"/"L2", intent="read"/"write", temporal=True)`
+is a synchronous CPU hint for the first address of a nonempty view, not an
+asynchronous copy. `T.pipelined(..., stages=2, distance=1, unroll=2)` uses
+serial range syntax and a registered planning pass: eligible straight-line
+reads generate guarded lookahead prefetches. Control-dependent reads are not
+speculated; with buffering disabled, runtime data is not moved across stores.
+The hint does not change numerical iteration order. The current pipeline
+keeps an ordered loop instead of operation-major unrolling.
+
+Opt-in `buffering=True` (with distance=1) automatically primes and rotates two
+banks for eligible straight-line, invariant-extent tile loads. A root-level
+runtime no-alias guard selects this schedule; aliased inputs/outputs retain
+the original ordered loop. Control/state/reduction-dependent loops and
+varying-width tails fall back to prefetch-only scheduling, with diagnostics.
+Buffering is off by default because extra scalar-storage traffic can cost
+more than it saves on inexpensive kernels.
+
+`T.double_buffer(shape, dtype=...)` allocates two scalar-storage banks, selected
+as `banks[i % 2, ...]`. Prime the first bank and explicitly load the next bank
+before consuming the current bank. The compiler does not yet infer arbitrary
+double-buffer schedules or asynchronous events; GPU/NPU async semantics are
+not advertised by these CPU operations.
+
+Inside `T.amx.region`, zero/load/stream_load return typed, region-local tile
+handles. `T.amx.tdp(acc, A, B)` validates dtype, distinct registers and tile
+configuration, then emits the public AMX dot instruction primitive. AMX
+memory inputs must already have the required packed instruction layout.
+Inside `T.sme.region`, `T.sme.load(view)` creates a clipped single streaming
+word, `T.sme.mopa(tile, A, B)` selects the instruction by operand dtype, and
+`T.sme.store_tile(tile, C)` stores one clipped accumulator tile. All checks
+occur before streaming entry; handles cannot escape the region. Inputs need
+unit stride and must fit SVL; low-dtype grouped-K packing is caller-managed.
+Architecture feature/state ownership remains in the architecture packages,
+not in portable T.dot or the top-level execution layout.
+
+### CPU grids and execution budgets
+
+`for i, j in T.grid(M, N, schedule="auto", chunk=1, parallel="auto")`
+preserves logical programs in IR. The CPU ownership pass proves separable,
+non-overlapping output partitions, retains root coordinates through ordinary
+slices/transposes, and checks actual writable layouts and parameter aliases
+at runtime. Unknown ownership, shared scalar state and explicit hardware effects
+retain ordered execution. `parallel="require"` rejects missing proofs or failed
+runtime guards; it requires safe parallel eligibility, not a minimum worker
+count. `parallel="serial"` retains lexicographic program order.
+
+The runtime selects active workers from task count, execution budget and the
+central target cost model. Scalar reduction epilogues are charged once per
+program, vector producers by native words, and dots include their MAC work.
+Small grids may remain serial. This is a heuristic, not an optimal scheduler
+or a guarantee that every bandwidth-bound shape scales. `schedule="auto"`
+currently uses contiguous, balanced static assignment. `"dynamic"` claims
+positive `chunk`-sized program batches from an overflow-safe atomic cursor;
+it helps uneven work but is not a work-stealing deque or an indivisible-task
+tail eliminator. Temporary allocations/materializations belong to the worker
+and are reused across its programs. Nested grids do not open nested teams.
+
+`pass_options={"cpu_grid_regions": ...}` accepts `"individual"`, `"adjacent"`,
+`"template"` and `"auto"` (currently the template-safe policy). The planner
+shares adjacent eligible grids, optionally spanning short pure scalar
+assignments executed by worker zero. Grid metadata must remain available at
+region entry. RAW/WAR/WAW root effects and runtime span aliases decide phase
+barriers; proven independent phases omit them. Same-root dependencies remain
+conservative, even when static same-owner reasoning could remove a barrier.
+Unknown effects/control boundaries end the region. V1 logical-task-only
+executors use individual synchronous submissions instead of team barriers.
+
+```python
+with vecops.cpu_thread_limit(8):  # direct CPU/NumPy calls; does not change Torch
+  kernel(a, out)
+```
+
+Use process affinity or explicit budgets for multiple independent processes,
+with multiprocessing spawn/forkserver. `T.grid` schedules programs on CPU
+threads; it does not spawn processes or coordinate their CPU ownership.
 
 ### Matrix products and packing
 
@@ -452,7 +728,10 @@ calculations while preserving coalesced memory requests. Explicit Vector tags
 and logical unroll counts do not change. `pass_options` can override
 `cpu_full_chunks`/`cpu_wordwise_math` (bool), `cpu_math_chunk_pow` and
 `cpu_reduction_chunk_pow` (0/1/2, default 1; 0 disables the corresponding
-wider automatic chunk). Single-reduction regions can use a wider base to
+wider automatic chunk). `cpu_state_register_budget` (integer 0–64, default
+12) limits standalone register pieces **per tile state**; 0 forces private
+scratch for comparison/debugging. It is not a whole-kernel liveness budget.
+Single-reduction regions can use a wider base to
 expose more accumulator chains; fused reductions already supply independent
 chains. These are tuning policies, not performance guarantees.
 Register plugins before factory elaboration, or call the existing factory

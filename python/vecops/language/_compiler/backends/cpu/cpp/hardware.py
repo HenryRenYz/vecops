@@ -2,9 +2,10 @@
 
 from .... import ir as I
 from ....dtypes import ELEMENT_BYTES
+from .hardware_sme import SMEInstructionEmitter
 
 
-class HardwareEmitter:
+class HardwareEmitter(SMEInstructionEmitter):
   def hardware_region(self, region, future):
     kind = region.kind
     # Generic fusion may group stores; restore instruction order for a region
@@ -15,6 +16,8 @@ class HardwareEmitter:
     if kind == "sme":
       destinations = [s.destination for s in statements if isinstance(s, I.Store)]
       for statement in statements:
+        if isinstance(statement, I.ArchitectureCall):
+          self.check_sme_instruction(statement)
         if isinstance(statement, I.Store):
           plan = self.prepared.transposes.get(id(statement))
           if plan is None or not plan.sme or len(statement.destination.shape) != 2:
@@ -73,8 +76,17 @@ class HardwareEmitter:
         self.emitted_regions.append(plan)
         self.sme_transpose(plan, ())
       elif isinstance(statement, I.ArchitectureCall):
-        if statement.operation == "sme.zero_za":
+        if self.emit_sme_instruction(statement):
+          pass
+        elif statement.operation == "sme.zero_za":
           self.line("vecops::vec::sme::zero_za();")
+        elif statement.operation == "amx.tdp":
+          from ..capabilities import CPP_TYPES
+
+          acc, a, b = statement.operands
+          self.line(
+            f"vecops::vec::amx::dot<{CPP_TYPES[acc.dtype]}, {CPP_TYPES[a.dtype]}, {CPP_TYPES[b.dtype]}, {acc.index}, {a.index}, {b.index}>();"
+          )
         else:
           op = statement.operation.split(".")[1]
           args = (

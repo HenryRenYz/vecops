@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import _C
 
-_BUILD_API_VERSION = 7
+_BUILD_API_VERSION = 8
 
 
 def require_native_build_api() -> None:
@@ -29,8 +29,12 @@ def require_native_build_api() -> None:
       "native_thread_pool_address",
       "native_thread_pool_begin_active",
       "native_thread_pool_end_active",
+      "cpu_thread_pool_capacity",
+      "cpu_thread_limit",
   )
   missing = [name for name in required_symbols if not hasattr(_C, name)]
+  if not hasattr(getattr(_C, "KernelDef", None), "runtime_parallelism"):
+    missing.append("KernelDef.runtime_parallelism")
   if actual == _BUILD_API_VERSION and not missing:
     return
   package = Path(__file__).resolve().parent

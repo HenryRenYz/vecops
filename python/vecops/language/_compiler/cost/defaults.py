@@ -20,6 +20,10 @@ DEFAULT = CostProfile(
     ),
     *(CostRule(OperationCost(0, 0), (("family", family),)) for family in ("structural", "reference", "shape")),
     CostRule(OperationCost(1, 4, resource="memory"), (("family", "memory"),)),
+    CostRule(OperationCost(4, 8, resource="memory"), (("family", "indexed_memory"),)),
+    CostRule(OperationCost(1, 3), (("family", "register"),)),
+    CostRule(OperationCost(2, 3), (("family", "mask_query"),)),
+    CostRule(OperationCost(12, 12, resource="memory"), (("family", "atomic"),)),
     CostRule(OperationCost(16, 16), (("family", "math"),)),
     CostRule(
       OperationCost(64, 64, provenance="estimated scalar math fallback"),
@@ -29,6 +33,10 @@ DEFAULT = CostProfile(
     operation_rule("abs", 1),
     CostRule(OperationCost(1, 1), (("operation", "abs"), ("implementation", "scalar")), priority=1),
     operation_rule("identity", 0),
+    CostRule(
+      OperationCost(1, 1, provenance="grid estimate: cycles per native vector-word MAC"),
+      (("operation", "dot"), ("implementation", "grid-word-mac")),
+    ),
   ),
   policies=(
     ("reuse_compute_budget", 6),
@@ -50,5 +58,7 @@ DEFAULT = CostProfile(
     ("amx_cache_b_panel_divisor", 0),
     ("amx_cache_b_panel_max_m", 0),
     ("vector_register_budget", 24),
+    ("grid_worker_cycles", 8000),
+    ("grid_single_cycles", 64),
   ),
 )

@@ -36,7 +36,7 @@ from ._precompile import (
   precompile,
 )
 from ._schema import Dynamic, KernelDef, TensorAccess, TensorDef, TensorMeta, ValueDef
-from ._thread_pool import native_thread_pool_region
+from ._thread_pool import native_thread_pool_region, cpu_thread_limit, cpu_thread_pool_capacity
 
 
 def set_flush_subnormals(enabled: bool) -> None:
@@ -90,6 +90,8 @@ __all__ = [  # noqa: RUF022 - retain the established public API grouping
   "is_precompiling",
   "normalize_dtype",
   "native_thread_pool_region",
+  "cpu_thread_limit",
+  "cpu_thread_pool_capacity",
   "graph",
   "planner",
   "precompile",

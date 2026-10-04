@@ -135,7 +135,7 @@ def materialize_dependent_dots(ir, context):
         if value.op == "dot" and (in_dot or force):
           materialize(value)
 
-      if isinstance(statement, I.Store):
+      if isinstance(statement, (I.Store, I.DeclareState, I.UpdateState)):
         nested(statement.value)
         products = {id(e): e for e in walk(rewrite(statement.value)) if e.op == "dot"}
         for product in tuple(products.values())[:-1]:

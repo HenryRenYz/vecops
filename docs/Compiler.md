@@ -49,6 +49,31 @@ configured mode allows a build.
 
 ## Kernel source contract
 
+Generated CPU-grid or explicit resident-team sources define `VECOPS_KERNEL_EXECUTION_CONTEXT` and take
+`const VecopsExecutionContext*` as the leading `__kernel__` argument. The source
+adapter forwards the size-versioned call context directly; it does not create
+a workspace replay session solely to obtain an executor. This is an explicit
+opt-in so unconstrained legacy workspace templates cannot accidentally bind
+an execution-context pointer. Sources without this macro retain the existing
+workspace-aware/ordinary invocation selection.
+When DSL workspace sites (or worker capacity queries) are present, generated
+sources instead take `execution::WorkspaceContext&`. The existing source
+adapter selects its allocation/replay path; `WorkspaceContext::thread_pool()`
+provides the borrowed call executor to grid/team lowering. Allocation sites
+remain serial and metadata-derived, so runtime-parallelism replay guards
+remain valid. Executor-only kernels keep their lightweight direct-context path.
+Pair it with `KernelDef.runtime_parallelism=true` for a runtime grid scheduler;
+otherwise execution parallelism retains legacy compile-time specialization.
+
+Primitive lowering is prepared before C++ emission. Value-transform folding,
+indexed/mask vector regions and guarded CPU software-pipeline planning use
+the same frozen operation/cost/pass environment as existing kernels. The
+emitter runs no compiler passes. Ordered custom reducers/scans expand to
+structured IR; arbitrary scans do not currently imply SIMD prefix lowering.
+CPU pipelining means prefetch, explicit double-buffer storage and opt-in
+two-bank scheduling under an invariant-extent/no-alias proof, not arbitrary
+alias-dependent code motion or an asynchronous event model.
+
 The source file contains a function named `__kernel__`. It can use values
 declared by the generated header:
 

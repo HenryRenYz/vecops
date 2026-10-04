@@ -248,7 +248,11 @@ class KernelDef:
     values: Mapping[str, Any] | None = None,
     *,
     symbols: Mapping[str, Dynamic] | None = None,
+    runtime_parallelism: bool = False,
   ) -> None:
+    if not isinstance(runtime_parallelism, bool):
+      raise TypeError("runtime_parallelism must be a bool")
+    self.runtime_parallelism = runtime_parallelism
     self.name = name
     self.parameters = tuple(parameters)
     declared_symbols = dict(symbols or {})
@@ -323,7 +327,9 @@ class KernelDef:
       for parameter in self.parameters
     ]
     values = {symbol: _specialization_kind(kind) for symbol, kind in self.values.items()}
-    return _C.KernelDef(name or self.name, parameters, values)
+    definition = _C.KernelDef(name or self.name, parameters, values)
+    definition.runtime_parallelism = self.runtime_parallelism
+    return definition
 
 
 __all__ = ["Dynamic", "KernelDef", "TensorAccess", "TensorDef", "TensorMeta", "ValueDef"]

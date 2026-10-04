@@ -62,7 +62,7 @@ def compile(
   with _compile_lock:
     core = _compile_cache.get(key)
     if core is None:
-      definition, values, order = _build_definition(ir, indices)
+      definition, values, order = _build_definition(ir, indices, runtime_parallelism=generated_source is not None)
       recipe = ir.recipe_id or f"{ir.name}:{source_identity[:16]}"
       recipe = f"language-v1:{recipe}:{source_identity[:16]}"
       operation = Operator(ir.source, definition, selected, recipe_id=recipe)

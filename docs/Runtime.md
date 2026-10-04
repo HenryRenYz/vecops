@@ -21,6 +21,15 @@ sizes use bytes.  A `TensorView` must grant `VECOPS_TENSOR_READ` for `Input`,
 declarations, not synchronization.  A caller must synchronize overlapping
 writable storage.
 
+Explicit DSL resident teams use the existing size-versioned team executor
+capability, not barriers on logical task callbacks. A worker failure cancels
+the native team's barriers. Team count respects current capacity/budgets;
+collective scalar slots belong to one invocation and cannot be reused until
+all readers finish. `execution/Atomic.h` exposes checked-alignment scalar
+atomic_ref operations for 32/64-bit integers and float/double, with old-value
+returns and documented NaN comparison semantics. These are thread-level
+primitives, not a cross-process coordination API.
+
 ## KernelDef binding
 
 A `TensorDef` coordinate is one of: fixed integer, named `ConstInt`, anonymous
@@ -92,6 +101,37 @@ the requested value capped by the pool's reported capacity. Logical tasks are
 not physical-thread identities: a pool may run several task IDs sequentially
 on one physical worker.
 
+V1 minor 1 appends an optional, size-checked `team_executor` pointer. A
+`VecopsTeamExecutorV1` supplies concurrently resident workers with dense stable
+ids and a cancellable, reusable happens-before barrier. Logical tasks alone
+do **not** provide this capability: putting a barrier inside several tasks
+that share one physical worker can deadlock. Old V1 providers stay valid.
+The native provider implements teams; current Torch/OpenMP providers keep
+their logical-task API and generated grids fall back to individual regions.
+
+Direct Python/NumPy calls receive the lazy `vecops_cpu_thread_pool_v1()` facade.
+Its capacity follows the calling thread's affinity, physical cores, cgroup v2
+CPU quota (cached for at most one second), and `VECOPS_NUM_THREADS`. An explicit
+budget may use SMT but cannot exceed the allowed CPU count/quota. A malformed
+environment budget conservatively reports one worker. Pools are created only
+for selected parallel work and cached by geometric capacity plus CPU set,
+so varying task counts under a fixed budget do not create a separate pool for
+every worker count. Only the requested prefix participates; default
+pinning uses distinct physical cores before SMT siblings. The caller is
+worker zero and may be temporarily pinned during a submission, with its
+original affinity restored on return, including exceptions. Worker mailboxes
+wake only selected participants. Inactive workers do not acknowledge each
+submission; team barriers briefly spin then use atomic wait/notify.
+
+`vecops_cpu_thread_limit(n)` returns the previous calling-thread budget;
+zero selects automatic capacity. Python exposes a nested, exception-safe
+`with vecops.cpu_thread_limit(n):` scope and the read-only
+`vecops.cpu_thread_pool_capacity()`. These do not mutate global environment,
+Torch's team, the legacy fixed native pool, or the caller's persistent affinity.
+Separate processes should use spawn/forkserver with disjoint CPU affinities
+or explicit per-process budgets. There is no cross-process work queue,
+automatic NUMA placement, or support for inheriting live workers across fork.
+
 The generated Torch extension uses Torch's intra-op runtime by default. It
 reports `at::get_num_threads()`, detects an existing
 `at::in_parallel_region()`, and executes the logical task set through the
@@ -105,10 +145,11 @@ created once in the `_C` module, uses `VECOPS_NUM_THREADS` when set (otherwise
 `torch.get_num_threads()`), and parks its worker threads after a short bounded
 spin so idle vecops workers do not compete with Torch OpenMP work. On Linux,
 workers 1..P-1 are pinned across the process's allowed CPU set; the submitting
-thread remains unpinned so later compiler subprocesses do not inherit a
-single-CPU mask. `VECOPS_THREAD_POOL_CPU_LIST` overrides the detected set with
+thread's affinity is restored after each submission so later compiler
+subprocesses do not inherit a single-CPU mask. `VECOPS_THREAD_POOL_CPU_LIST` overrides the detected set with
 an explicit comma/range CPU list when the submitting thread was already pinned
-before the pool was created. `VECOPS_THREAD_POOL_SPIN_COUNT` controls the bounded spin
+before the legacy pool was created; the adaptive direct-call facade instead
+requires that override to lie inside the caller's affinity. `VECOPS_THREAD_POOL_SPIN_COUNT` controls the bounded spin
 before parking and defaults to 256. This mode is opt-in because a workload
 with substantial interleaved ATen work can still prefer Torch's shared team.
 Set `VECOPS_NATIVE_THREAD_POOL_OPS` to comma-separated qualified-name glob
@@ -128,6 +169,14 @@ standalone OpenMP provider is one such implementation, not an implicit
 dependency of generated kernels.
 
 For source kernels, effective parallelism is part of compilation:
+
+This remains the default for existing C++ recipes. `KernelDef.runtime_parallelism`
+opts a runtime scheduler out of this specialization: its generated
+`spec::Parallelism` is one and artifact/hot-call identities do not vary with
+the execution budget. CPU DSL definitions opt in automatically. The actual
+size-versioned call context still reaches each invocation, so changing thread
+budgets or affinity does not trigger JIT compilation. Such a kernel must not
+use `spec::Parallelism` for compile-time workspace sharding.
 
 ```cpp
 constexpr nint_t P = static_cast<nint_t>(vecops::spec::Parallelism);
@@ -211,6 +260,15 @@ decision fingerprint, and effective execution parallelism. This is a second,
 workspace-specific guard in addition to the artifact's compile-time `P`: a
 plan with `P` worker replicas cannot be replayed as though it had another lane
 count.
+
+DSL `T.workspace` uses this existing replay mechanism, without another ABI.
+Sites are unconditional serial declarations; extents depend on tensor metadata,
+compile-time values or effective worker capacity, not arbitrary runtime scalar
+payloads or data. Replay retains allocation plans rather than tensor contents.
+The public `WorkspaceContext::thread_pool()` accessor borrows the executor for
+grid/team scheduling; it does not grant workers concurrent allocation authority.
+Dense manually replicated worker buffers need explicit cache-line padding when
+desired, and do not imply prepared-operator phase-lifetime storage reuse.
 
 There is no `runtime/Abi.h` umbrella. Include the protocol header that a
 component actually implements, avoiding unintended bridge dependencies in an

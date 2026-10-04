@@ -12,12 +12,27 @@ from .support import _PREAMBLE
 from .transpose import TransposeEmitter
 from .hardware import HardwareEmitter
 from .matmul import MatmulEmitter
+from .grid import GridEmitter
+from .state import StateEmitter
+from .primitives import PrimitivesEmitter
+from .collectives import CollectiveEmitter, team_statements
 from .matmul_support import PREAMBLE as _MATMUL_PREAMBLE
 from ....operations import use_catalog
+from ....ir.traversal import nodes
 
 
 class CPUEmitter(
-  ExpressionsEmitter, MemoryEmitter, VectorsEmitter, ControlEmitter, TransposeEmitter, HardwareEmitter, MatmulEmitter
+  ExpressionsEmitter,
+  MemoryEmitter,
+  VectorsEmitter,
+  ControlEmitter,
+  TransposeEmitter,
+  HardwareEmitter,
+  MatmulEmitter,
+  GridEmitter,
+  StateEmitter,
+  PrimitivesEmitter,
+  CollectiveEmitter,
 ):
   def __init__(self, prepared):
     self.prepared = prepared
@@ -32,6 +47,7 @@ class CPUEmitter(
     self.chunk_cache = {}
     self.allocated = set()
     self.tag_dtypes = {}
+    self.fixed_tag_lanes = {}
     self.active_loads = {}
     self.snapshots = {}
     self.storage_views = {}
@@ -39,10 +55,17 @@ class CPUEmitter(
     self.reduction_materialized = {}
     self.hardware_scope = None
     self.buffer_declarations = {}
+    self.parallel_depth = 0
+    self.verified_grid = None
     # Identity-indexed emission caches also see transient panel/proxy Exprs.
     # Hold strong references until emission ends: CPython can otherwise reuse
     # an id and attach another ISA branch's out-of-scope scratch/coordinates.
     self.expression_lifetimes = {}
+    self.uses_executor = bool(prepared.grids) or any(isinstance(s, I.Team) for s in team_statements(self.ir.body))
+    self.uses_workspace = any(
+      isinstance(s, I.WorkspaceAllocate) or isinstance(s, I.Expr) and s.op == "worker_capacity"
+      for s in nodes(self.ir.body)
+    )
 
   def retain_expression(self, value):
     self.expression_lifetimes[id(value)] = value
@@ -70,6 +93,8 @@ class CPUEmitter(
     self.line("}")
 
   def generate(self):
+    if self.uses_executor and not self.uses_workspace:
+      self.line("#define VECOPS_KERNEL_EXECUTION_CONTEXT 1")
     parameters = []
     for name, annotation in self.ir.parameters.items():
       if isinstance(annotation, TensorType):
@@ -87,7 +112,27 @@ class CPUEmitter(
         from ....dtypes import dtype_name
 
         parameters.append(f"{CPP_TYPES[dtype_name(annotation)]} {name}")
+    if self.uses_workspace:
+      parameters.insert(0, "vecops::execution::WorkspaceContext& dsl_workspace")
+    elif self.uses_executor:
+      parameters.insert(0, "const VecopsExecutionContext* dsl_grid_context")
     self.opening(f"void __kernel__({', '.join(parameters)})")
+    if self.uses_executor:
+      if self.uses_workspace:
+        self.line("const auto* dsl_grid_pool = dsl_workspace.thread_pool();")
+        self.line("const auto dsl_grid_requested = dsl_workspace.parallelism();")
+      else:
+        self.line(
+          "const auto* dsl_grid_pool = dsl_grid_context && dsl_grid_context->struct_size >= "
+          "offsetof(VecopsExecutionContext,thread_pool)+sizeof(dsl_grid_context->thread_pool) "
+          "? dsl_grid_context->thread_pool : nullptr;"
+        )
+        self.line(
+          "const auto dsl_grid_requested = dsl_grid_context && dsl_grid_context->struct_size >= "
+          "offsetof(VecopsExecutionContext,requested_threads)+sizeof(dsl_grid_context->requested_threads) "
+          "? dsl_grid_context->requested_threads : 0;"
+        )
+      self.line("const auto dsl_grid_capacity=vecops::execution::grid_capacity(dsl_grid_pool);")
     for cached in self.ir.materializations.values():
       dtype = CPP_TYPES[cached.dtype]
       count = ", ".join(self.scalar(v) for v in cached.shape)
@@ -98,7 +143,10 @@ class CPUEmitter(
     self.block(self.ir.body)
     self.lines[insertion:insertion] = list(self.buffer_declarations.values())
     self.close()
-    return _PREAMBLE + _MATMUL_PREAMBLE + "\n".join(self.lines) + "\n"
+    headers = '#include "vecops/execution/Atomic.h"\n'
+    if self.uses_workspace:
+      headers += '#include "vecops/execution/WorkspaceContext.h"\n'
+    return headers + _PREAMBLE + _MATMUL_PREAMBLE + "\n".join(self.lines) + "\n"
 
 
 def generate(prepared):

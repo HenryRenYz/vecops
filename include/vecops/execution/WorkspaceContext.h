@@ -201,6 +201,11 @@ public:
     return requested_parallelism_ > 0 ? std::min(requested_parallelism_, available) : available;
   }
 
+  /** Borrow the call's executor; allocation authority remains single-threaded. */
+  [[nodiscard]] const VecopsThreadPoolV1* thread_pool() const noexcept {
+    return thread_pool_;
+  }
+
   /**
    * Execute logical tasks through this call's embedding executor. Supplying a
    * positive template argument makes the task count part of kernel codegen;

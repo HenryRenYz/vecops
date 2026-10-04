@@ -79,11 +79,36 @@ class ControlEmitter:
   def block(self, block):
     before_active, before_snapshots = dict(self.active_loads), dict(self.snapshots)
     before_materialized = dict(self.materialized)
+    consumed = set()
     for index, statement in enumerate(block.statements):
-      if isinstance(statement, I.HardwareRegion):
+      if index in consumed:
+        continue
+      if isinstance(statement, I.Team):
+        self.emit_team(statement)
+      elif isinstance(statement, I.Barrier):
+        self.line(f"{statement.team}.barrier();")
+      elif isinstance(statement, I.TeamReduce):
+        self.team_reduce(statement)
+      elif isinstance(statement, I.Prefetch):
+        self.prefetch(statement)
+      elif isinstance(statement, I.Grid):
+        phases = self.prepared.grid_regions[id(statement)] if not self.parallel_depth else (statement,)
+        consumed.update(range(index + 1, index + len(phases)))
+        self.protect_region(I.Block(phases), self.expression_loads(I.Block(block.statements[index + len(phases) :])))
+        self.grid_region(phases)
+      elif isinstance(statement, I.HardwareRegion):
         future = self.expression_loads(I.Block(block.statements[index + 1 :]))
         self.protect_region(statement.body, future)
         self.hardware_region(statement, future)
+      elif isinstance(statement, (I.DeclareState, I.UpdateState)):
+        self.emit_state(statement)
+      elif isinstance(statement, I.ExitRegion):
+        self.opening("/* inlined helper exit region */")
+        self.block(statement.body)
+        self.close()
+        self.line(f"{statement.name}: ;")
+      elif isinstance(statement, I.Exit):
+        self.line(f"goto {statement.region};")
       elif isinstance(statement, I.Assign):
         value = self.scalar(statement.value)
         self.line(f"{'auto ' if statement.declare else ''}{statement.target} = {value};")
@@ -120,7 +145,7 @@ class ControlEmitter:
         self.unrolled_for(statement, self.expression_loads(I.Block(block.statements[index + 1 :])))
       elif isinstance(statement, I.For):
         self.protect_region(statement.body, self.expression_loads(I.Block(block.statements[index + 1 :])))
-        comparison = "<" if I.constant(statement.step) > 0 else ">"
+        comparison = "<" if I.constant(statement.step) is None or I.constant(statement.step) > 0 else ">"
         self.opening(
           f"for (vecops::nint_t {statement.target} = {self.scalar(statement.start)}; {statement.target} {comparison} ({self.scalar_inline(statement.stop)}); {statement.target} += {self.scalar(statement.step)})"
         )
@@ -145,6 +170,8 @@ class ControlEmitter:
           self.opening(f"while ({self.scalar(statement.condition)})")
         self.block(statement.body)
         self.close()
+      elif isinstance(statement, I.IndexedStore):
+        self.indexed_store(statement, self.expression_loads(I.Block(block.statements[index + 1 :])))
       elif isinstance(statement, I.Store):
         future = self.expression_loads(I.Block(block.statements[index + 1 :]))
         self.protect_store(statement, future)
@@ -156,6 +183,15 @@ class ControlEmitter:
           self.close()
       elif isinstance(statement, I.BindTile):
         self.active_loads.update({id(load): load for load in I.loads(statement.value)})
+      elif isinstance(statement, I.WorkspaceAllocate):
+        self.storage_views[statement.view.storage] = statement.view
+        shape = ", ".join(self.scalar(v) for v in statement.view.shape)
+        self.line(f"(void)vecops_dsl::checked_shape({{{shape}}});")
+        from ..capabilities import CPP_TYPES
+
+        self.line(
+          f'auto {statement.view.storage} = dsl_workspace.tensor<{CPP_TYPES[statement.view.dtype]}>("{statement.view.storage}", vecops::tensor::make_shape({shape}));'
+        )
       elif isinstance(statement, I.Allocate):
         self.storage_views[statement.view.storage] = statement.view
         # Promoted scratch sites have no Store/Load using their storage.

@@ -7,13 +7,13 @@ import inspect
 import textwrap
 from dataclasses import dataclass
 from types import MappingProxyType, ModuleType
-from ...dsl import DSLFunction, Intrinsic, Vector
+from ...dsl import DSLFunction, Intrinsic, Vector, ExecutionLayout, Reducer
 from ...expr import Const, DType, Dynamic, IntExpr
 from .. import ir as I
 from ..dtypes import dtype_name
 from .diagnostics import DSLError
 
-VERSION = "vecops-dsl-6"
+VERSION = "vecops-dsl-8"
 DSL_MODULES = {
   "vecops",
   "vecops.language",
@@ -43,6 +43,13 @@ class Body:
   identity: str
   filename: str
   first_line: int
+
+
+@dataclass(frozen=True)
+class CapturedReducer:
+  body: Body
+  identity: object
+  associative: bool
 
 
 def capture(function, local_scope=None, seen=None):
@@ -75,11 +82,15 @@ def capture(function, local_scope=None, seen=None):
     if name not in namespace:
       continue
     value = namespace[name]
-    if isinstance(value, DSLFunction):
+    if isinstance(value, Reducer):
+      body = capture(value.function, seen=seen)
+      key = (body.identity, value.identity, value.associative)
+      value = CapturedReducer(body, value.identity, value.associative)
+    elif isinstance(value, DSLFunction):
       value = capture(value.function, seen=seen)
       key = value.identity
-    elif value is Vector:
-      key = "Vector"
+    elif isinstance(value, type) and value in (Vector, ExecutionLayout):
+      key = value.__name__
     elif isinstance(value, (Const, Dynamic, IntExpr)):
       value = symbol(value)
       key = repr(value)
@@ -90,7 +101,7 @@ def capture(function, local_scope=None, seen=None):
       if value.__name__ not in DSL_MODULES:
         raise DSLError(f"unsupported captured module {value.__name__}")
       key = value.__name__
-    elif isinstance(value, (str, bool, int, float, type(None), Intrinsic, Vector)):
+    elif isinstance(value, (str, bool, int, float, type(None), Intrinsic, Vector, ExecutionLayout)):
       key = repr(value)
     elif isinstance(value, tuple):
 

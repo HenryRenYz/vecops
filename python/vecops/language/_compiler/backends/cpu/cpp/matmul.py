@@ -8,6 +8,7 @@ from dataclasses import replace
 from .... import ir as I
 from ....ir.traversal import walk
 from ....dtypes import ELEMENT_BYTES
+from ....operations import Trait
 from ..capabilities import CPP_TYPES
 
 FORMATS = {"auto": -1, "dense": 0, "amx": 1, "sme": 2}
@@ -546,21 +547,27 @@ class MatmulEmitter:
     old_validated = getattr(self, "matrix_validated", False)
 
     def operands(value):
-      yield value
+      yield value, None
       if value.op != "dot":
         for argument in value.args:
+          # Shape-changing operations are boundaries, not elementwise DAG
+          # edges. Validate children in their own coordinates (e.g. a row
+          # reduction expanded to [M,1] is not a [M] column broadcast).
+          if self.environment.operations.has(value, Trait.ELEMENTWISE | Trait.MEMORY_READ):
+            yield argument, value
           yield from operands(argument)
 
     for root in (*product.args, statement.value):
       if not isinstance(root.type, I.TileType):
         continue
-      for value in operands(root):
+      for value, parent in operands(root):
         if not isinstance(value.type, I.TileType):
           continue
-        for source, destination in zip(reversed(value.type.shape), reversed(root.type.shape)):
-          if I.constant(source) == 1 or I.same_expr(source, destination):
-            continue
-          self.line(f"vecops_dsl::check_broadcast({self.scalar(source)},{self.scalar(destination)});")
+        if parent is not None:
+          for source, destination in zip(reversed(value.type.shape), reversed(parent.type.shape)):
+            if I.constant(source) == 1 or I.same_expr(source, destination):
+              continue
+            self.line(f"vecops_dsl::check_broadcast({self.scalar(source)},{self.scalar(destination)});")
         if value.op == "packed_load":
           packed = value.data
           view = packed.view

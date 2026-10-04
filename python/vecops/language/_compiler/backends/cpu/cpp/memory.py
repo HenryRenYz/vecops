@@ -28,10 +28,20 @@ class MemoryEmitter:
       result.append(coordinate)
     return tuple(result)
 
+  def full_fixed_access(self, tag, active):
+    """A fixed piece is full only when its exact logical count is known.
+
+    Do not propagate a blanket full-vector flag into scalar reductions or
+    scalable/tail consumers nested in the same expression.
+    """
+    return tag in self.fixed_tag_lanes and str(self.fixed_tag_lanes[tag]) == str(active)
+
   def memory_options(self, mask, tag, root_shape, coords, active, axis):
     if mask is None:
       return (
-        "vecops::vec::opt::unmasked" if getattr(self, "full_vector", False) else f"vecops::vec::opt::first({active})"
+        "vecops::vec::opt::unmasked"
+        if getattr(self, "full_vector", False) or self.full_fixed_access(tag, active)
+        else f"vecops::vec::opt::first({active})"
       ), None
     predicate = self.vector(mask, tag, root_shape, coords, active, axis)
     name = self.unique("memory_mask")
@@ -120,7 +130,9 @@ class MemoryEmitter:
       for slot, (base, coords, count) in enumerate(zip(tags, coordinates, active)):
         tag = self.rebound_tag(dtype, base)
         self.opening(f"if ({count} > 0)")
-        options = f"vecops::vec::opt::first({count})"
+        options = (
+          "vecops::vec::opt::unmasked" if self.full_fixed_access(tag, count) else f"vecops::vec::opt::first({count})"
+        )
         if masks is not None:
           mask = (
             I.Expr(statement.mask.type, "vector_ref", data=masks[slot])
@@ -157,6 +169,7 @@ class MemoryEmitter:
         getattr(statement, "value", None),
         getattr(statement, "condition", None),
         getattr(statement, "mask", None),
+        getattr(statement, "indices", None),
       ):
         if isinstance(value, I.Expr):
           for load in I.loads(value):
@@ -185,6 +198,12 @@ class MemoryEmitter:
 
   def snapshot(self, load, destination, must_preserve):
     view = load.data
+    if self.verified_grid is not None and view.storage != destination.storage:
+      # The enclosing runtime guard proved disjoint parameter root spans.
+      # Worker-private allocations cannot alias a parameter or another slot.
+      known = self.verified_grid.reads | self.verified_grid.writes | self.verified_grid.private
+      if view.storage in known and destination.storage in known:
+        return
     if not view.shape or (view.owned or destination.owned) and view.storage != destination.storage:
       return
     condition = self.unique("alias")
@@ -199,7 +218,7 @@ class MemoryEmitter:
     name = self.unique("snapshot")
     dtype = load.type.dtype
     self.line(f"vecops_dsl::Buffer<{CPP_TYPES[dtype]}> {name};")
-    shape = view.shape
+    shape = load.type.shape
     statement, plan = self.prepared.snapshot(load, name)
     saved = statement.destination
     self.opening(f"if ({condition})")
@@ -225,14 +244,21 @@ class MemoryEmitter:
       for operand in value.args[:2]
       for load in I.loads(operand)
     }
+    transformed_inputs = {
+      id(load) for value in walk(statement.value) if value.op == "value_transform" for load in I.loads(value)
+    }
     for identity in preserved:
       current[identity] = self.active_loads[identity]
     for identity, load in current.items():
-      self.snapshot(load, statement.destination, identity in preserved or identity in matrix_inputs)
+      self.snapshot(
+        load,
+        statement.destination,
+        identity in preserved or identity in matrix_inputs or identity in transformed_inputs or load.op == "gather",
+      )
 
   def stores(self, block):
     for statement in block.statements:
-      if isinstance(statement, I.Store):
+      if isinstance(statement, (I.Store, I.IndexedStore)):
         yield statement
       if isinstance(statement, (I.ReductionGroup, I.ElementwiseGroup)):
         yield from statement.stores
@@ -270,10 +296,11 @@ class MemoryEmitter:
         getattr(statement, "value", None),
         getattr(statement, "condition", None),
         getattr(statement, "mask", None),
+        getattr(statement, "indices", None),
       ):
         if isinstance(value, I.Expr):
           result.update(load.data.storage for load in I.loads(value))
-      if isinstance(statement, I.Store):
+      if isinstance(statement, (I.Store, I.IndexedStore)):
         result.add(statement.destination.storage)
       if isinstance(statement, I.ArchitectureCall) and statement.view is not None:
         result.add(statement.view.storage)

@@ -52,7 +52,7 @@ def _lower_tensor_dtype(dtype: Any):
   return dtype
 
 
-def _build_definition(ir: TemplateIR, out_idx: tuple[int, ...]):
+def _build_definition(ir: TemplateIR, out_idx: tuple[int, ...], *, runtime_parallelism=False):
   parameters = []
   signature_parameters = tuple(ir.signature.parameters.values())
   for index, parameter in enumerate(signature_parameters):
@@ -97,5 +97,5 @@ def _build_definition(ir: TemplateIR, out_idx: tuple[int, ...]):
       raise TypeError(f"out_idx parameter {signature_parameters[index].name!r} cannot be optional")
 
   kinds, values, order = _specialization_environment(ir)
-  definition = KernelDef(ir.name, parameters, values=kinds)
+  definition = KernelDef(ir.name, parameters, values=kinds, runtime_parallelism=runtime_parallelism)
   return definition, values, order

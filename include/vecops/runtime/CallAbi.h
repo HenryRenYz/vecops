@@ -250,6 +250,26 @@ typedef int32_t (*VecopsThreadPoolParallelForFn)(void* context, uint32_t task_co
                                                  VecopsParallelTaskFn body, VecopsError* error);
 typedef void (*VecopsThreadPoolContextFn)(void* context);
 
+/** A concurrently resident worker team. This is NOT a set of logical tasks.
+ * All workers have stable dense ids until the synchronous run returns.
+ * barrier establishes a team-wide happens-before edge, or reports cancellation.
+ * Providers must unblock every barrier if any worker callback fails.
+ */
+typedef struct VecopsTeamContextV1 {
+  uint32_t struct_size;
+  uint32_t worker_id;
+  uint32_t worker_count;
+  void* context;
+  int32_t (*barrier)(void* context, VecopsError* error);
+} VecopsTeamContextV1;
+typedef void (*VecopsTeamBodyFn)(void* body_context, const VecopsTeamContextV1* team);
+typedef struct VecopsTeamExecutorV1 {
+  uint32_t struct_size;
+  uint32_t abi_major;
+  int32_t (*run)(void* context, uint32_t requested_workers, void* body_context, VecopsTeamBodyFn body,
+                 VecopsError* error);
+} VecopsTeamExecutorV1;
+
 /**
  * Versioned synchronous logical-task executor supplied by an embedding.
  *
@@ -271,10 +291,28 @@ typedef struct VecopsThreadPoolV1 {
   VecopsThreadPoolContextFn retain;
   VecopsThreadPoolContextFn release;
   uint64_t flags;
+  /** Optional resident-team extension. Check struct_size before reading it.
+   * Old V1 providers remain valid and need not implement this capability.
+   */
+  const VecopsTeamExecutorV1* team_executor;
 } VecopsThreadPoolV1;
 
 #define VECOPS_THREAD_POOL_ABI_MAJOR 1
-#define VECOPS_THREAD_POOL_ABI_MINOR 0
+#define VECOPS_THREAD_POOL_ABI_MINOR 1
+
+/** Lazy native executor for direct CPU calls. Capacity follows the caller's
+ * affinity, physical cores, cgroup quota and VECOPS_NUM_THREADS. Only selected
+ * worker pools are created lazily on parallel work. Separate processes need separate CPU
+ * affinities/budgets; this API does not coordinate processes or a NUMA policy.
+ * Distinct execution budgets never invalidate previously returned providers.
+ */
+VECOPS_RUNTIME_EXPORT const VecopsThreadPoolV1* vecops_cpu_thread_pool_v1(void);
+
+/** Set a calling-thread CPU executor budget, returning its previous value.
+ * Zero restores automatic selection. This does not modify process-global
+ * environment, affinity, a framework's own pool or the legacy fixed factory.
+ */
+VECOPS_RUNTIME_EXPORT uint32_t vecops_cpu_thread_limit(uint32_t limit);
 
 /** Factory exported by the optional vecops OpenMP provider library. */
 VECOPS_RUNTIME_EXPORT const VecopsThreadPoolV1* vecops_openmp_thread_pool_v1(void);
@@ -351,8 +389,7 @@ typedef struct VecopsAllocationObserverV1 {
   /** Opaque collector context passed back to the callback. */
   void* user_context;
   /** Allocation notification; never null when installed. */
-  void (*on_workspace_allocation)(void* user_context,
-                                  const VecopsWorkspaceAllocationV1* record);
+  void (*on_workspace_allocation)(void* user_context, const VecopsWorkspaceAllocationV1* record);
 } VecopsAllocationObserverV1;
 
 typedef struct VecopsExecutionContext {

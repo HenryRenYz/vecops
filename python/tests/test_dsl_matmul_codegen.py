@@ -61,7 +61,11 @@ def test_amx_b_panel_budget_rejects_invalid_policy():
   import pytest
 
   @T.template
-  def kernel(A: T.Tensor((32, 32)), B: T.Tensor((32, 32)), C: T.Tensor((32, 32), access="output")):
+  def kernel(
+    A: T.Tensor((32, 32), dtype="float32"),
+    B: T.Tensor((32, 32), dtype="float32"),
+    C: T.Tensor((32, 32), dtype="float32", access="output"),
+  ):
     T.library.matmul((A, B), C)
 
   for setting in ("amx_cache_b_panel_divisor", "amx_cache_b_panel_max_m"):

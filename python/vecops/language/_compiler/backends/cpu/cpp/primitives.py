@@ -1,0 +1,240 @@
+"""Register and indexed-memory terminal lowering; never arrays of Vec/Mask."""
+
+from .... import ir as I
+from ....dtypes import ELEMENT_BYTES
+from ..capabilities import CPP_TYPES
+
+
+class PrimitivesEmitter:
+  def prefetch(self, statement):
+    view = statement.view
+    condition = " && ".join(f"({self.scalar(n)})>0" for n in view.shape) or "true"
+    self.opening(f"if ({condition})")
+    self.line(
+      f"vecops::vec::prefetch(vecops::vec::FixedTag<{CPP_TYPES[view.dtype]}, 1>{{}}, {self.pointer(view)}, vecops::vec::mem::prefetch_{statement.level.lower()}, vecops::vec::mem::prefetch_{'read' if statement.intent == 'read' else 'write'}, vecops::vec::mem::prefetch_{'keep' if statement.temporal else 'stream'});"
+    )
+    self.close()
+
+  def element_at(self, value):
+    source, *indices = value.args
+    coords = tuple(self.scalar(v) for v in indices)
+    tag = self.unique("scalar_tag")
+    self.line(f"using {tag} = vecops::vec::FixedTag<{CPP_TYPES[source.type.dtype]}, 1>;")
+    self.tag_dtypes[tag] = source.type.dtype
+    self.fixed_tag_lanes[tag] = 1
+    result = self.vector(source, tag, source.type.shape, coords, "1")
+    return f"vecops::vec::get({tag}{{}}, {result}, 0)"
+
+  def primitive_vector(self, value, tag, shape, coords, active, axis):
+    if value.op == "gather":
+      saved = self.snapshots.get(id(value))
+      if saved is not None:
+        name = self.unique("indexed_saved")
+        self.line(f"vecops::vec::Vec<{tag}> {name};")
+        cache = dict(self.chunk_cache)
+        self.opening(f"if ({saved[1]})")
+        self.line(
+          f"{name} = {self.vector(I.Expr(value.type, 'load', data=saved[0]), tag, shape, coords, active, axis)};"
+        )
+        self.close()
+        self.chunk_cache = dict(cache)
+        self.opening("else")
+        del self.snapshots[id(value)]
+        self.line(f"{name} = {self.primitive_vector(value, tag, shape, coords, active, axis)};")
+        self.snapshots[id(value)] = saved
+        self.close()
+        self.chunk_cache = cache
+        return name
+      *coordinates, predicate, other = value.args
+      itag = self.rebound_tag("int64", tag)
+      indices_name = self.unique("indices")
+      for memory_axis, index in enumerate(coordinates):
+        indices = self.vector(index, itag, shape, coords, active, axis)
+        scaled = f"vecops::vec::mul({itag}{{}}, {indices}, vecops::vec::fill({itag}{{}}, {self.scalar(value.data.strides[memory_axis])}))"
+        self.line(
+          f"auto {indices_name} = {scaled};"
+          if memory_axis == 0
+          else f"{indices_name} = vecops::vec::add({itag}{{}}, {indices_name}, {scaled});"
+        )
+        # Per-axis logical checks precede the physical address calculation.
+        self.check_indices(index, predicate, itag, shape, coords, active, axis, value.data, memory_axis)
+      options, _ = self.memory_options(predicate, tag, shape, coords, active, axis)
+      # Inactive indices may be out of bounds: do not form their addresses.
+      inactive = self.unique("indexed_inactive")
+      self.line(f"auto {inactive} = {self.vector(other, tag, shape, coords, active, axis)};")
+      return f"vecops::vec::load_convert({tag}{{}}, {self.pointer(value.data)}, {options}, vecops::vec::opt::merge({inactive}), vecops::vec::opt::indexed({indices_name}))"
+    if value.op == "local_shuf":
+      source = self.vector(value.args[0], tag, shape, coords, active, axis)
+      order = ", ".join(map(str, value.data))
+      return f"vecops::vec::local_shuf({tag}{{}}, {source}, vecops::vec::opt::LaneOrder<{order}>{{}})"
+    if value.op == "shuf":
+      source = self.vector(value.args[0], tag, shape, coords, active, axis)
+      dtype = f"int{ELEMENT_BYTES[value.type.dtype] * 8}"
+      itag = self.rebound_tag(dtype, tag)
+      indices = self.vector(value.args[1], itag, shape, coords, active, axis)
+      return f"vecops::vec::shuf({tag}{{}}, {source}, {indices})"
+    if value.op == "value_transform":
+      source = value.args[0]
+      kind, axes = value.data
+      own = self.coordinates(value.type.shape, shape, coords)
+      own_axis = axis - (len(shape) - len(value.type.shape))
+      # Consumer axes are not value axes when a transform is broadcast into
+      # a higher-rank expression. Never vectorize an absent/singleton axis.
+      if own_axis < 0 or (
+        I.constant(value.type.shape[own_axis]) == 1 and not (self.fixed_tag_lanes.get(tag) == 1 and str(active) == "1")
+      ):
+        indices = tuple(I.Expr(I.ScalarType("int64"), "raw", data=c) for c in own)
+        scalar = self.element_at(I.Expr(I.ScalarType(value.type.dtype), "element_at", (value, *indices)))
+        fill = "mfill" if value.type.mask else "fill"
+        return f"vecops::vec::{fill}({tag}{{}}, {scalar})"
+
+      def transformed(source_coords, source_axis):
+        # Retain the consumer extent along the mapped axis so dynamic size-one
+        # sources still take the normal memory broadcast path.
+        source_shape = list(source.type.shape)
+        source_shape[source_axis] = shape[axis]
+        return self.vector(source, tag, tuple(source_shape), source_coords, active, source_axis)
+
+      if kind == "row":
+        return transformed((self.scalar(axes), *own), own_axis + 1)
+      if kind == "expand_dims":
+        mapped = own[:axes] + own[axes + 1 :]
+        if own_axis == axes:
+          indices = tuple(I.Expr(I.ScalarType("int64"), "raw", data=c) for c in mapped)
+          scalar = self.element_at(I.Expr(I.ScalarType(source.type.dtype), "element_at", (source, *indices)))
+          fill = "mfill" if value.type.mask else "fill"
+          return f"vecops::vec::{fill}({tag}{{}}, {scalar})"
+        return transformed(mapped, own_axis - (own_axis > axes))
+      if kind == "squeeze":
+        mapped = own[:axes] + ("0",) + own[axes:]
+        return transformed(mapped, own_axis + (own_axis >= axes))
+      if kind == "broadcast_to":
+        return self.vector(source, tag, value.type.shape, own, active, own_axis)
+      if kind == "transpose":
+        mapped = [None] * len(axes)
+        for i, a in enumerate(axes):
+          mapped[a] = own[i]
+        return transformed(tuple(mapped), axes[own_axis])
+      # General reshape can cross row boundaries within one physical vector.
+      # Lane-wise fallback remains register-only; contiguous reads are folded
+      # into a view by a separate pass rather than a hidden emitter optimizer.
+      result, lane = self.unique("reshape"), self.unique("reshape_lane")
+      fill = "mfill" if value.type.mask else "fill"
+      zero = "false" if value.type.mask else f"vecops::vec::ElementOf<{tag}>{{0}}"
+      self.line(f"auto {result} = vecops::vec::{fill}({tag}{{}}, {zero});")
+      self.opening(f"for (vecops::nint_t {lane}=0; {lane}<({active}); ++{lane})")
+      offset = "0"
+      for i, (c, extent) in enumerate(zip(own, value.type.shape)):
+        c = f"({c}+{lane})" if i == own_axis else c
+        offset = f"(({offset}) * ({self.scalar(extent)}) + ({c}))"
+      mapped = []
+      for i in range(len(source.type.shape)):
+        divisor = " * ".join(f"({self.scalar(n)})" for n in source.type.shape[i + 1 :]) or "1"
+        mapped.append(
+          I.Expr(
+            I.ScalarType("int64"), "raw", data=f"(({offset}) / ({divisor})) % ({self.scalar(source.type.shape[i])})"
+          )
+        )
+      scalar = self.element_at(I.Expr(I.ScalarType(source.type.dtype), "element_at", (source, *mapped)))
+      self.line(f"{result} = vecops::vec::set({tag}{{}}, {result}, {lane}, {scalar});")
+      self.close()
+      return result
+    return NotImplemented
+
+  def check_indices(self, index, predicate, tag, shape, coords, active, axis, view, memory_axis=0):
+    indices = self.vector(index, tag, shape, coords, active, axis)
+    valid = self.unique("valid_indices")
+    self.line(
+      f"auto {valid} = vecops::vec::mask_and({tag}{{}}, vecops::vec::cmpge({tag}{{}}, {indices}, vecops::vec::fill({tag}{{}}, 0)), vecops::vec::cmplt({tag}{{}}, {indices}, vecops::vec::fill({tag}{{}}, {self.scalar(view.shape[memory_axis])})));"
+    )
+    _, mask = self.memory_options(predicate, tag, shape, coords, active, axis)
+    self.line(
+      f'if (vecops::vec::mask_any({tag}{{}}, vecops::vec::mask_and({tag}{{}}, {mask}, vecops::vec::mask_not({tag}{{}}, {valid})))) throw std::out_of_range("indexed memory index out of bounds");'
+    )
+
+  def mask_query(self, expression):
+    source = expression.args[0]
+    result = self.unique("mask_result")
+    op = expression.op
+    init = (
+      "true"
+      if op in {"mask_all", "mask_none"}
+      else "false"
+      if op == "mask_any"
+      else "-1"
+      if op in {"mask_first", "mask_last"}
+      else "0"
+    )
+    self.line(f"{CPP_TYPES[expression.type.dtype]} {result} = {init};")
+    plan = self.prepared.primitives[id(expression)]
+    self.emitted_regions.append(plan)
+
+    def query(tags, coords, counts, roots, state):
+      for tag, c, count, mask in zip(tags, coords, counts, roots[0]):
+        active = self.unique("mask_active")
+        operation = "mask_or" if op == "mask_all" else "mask_and"
+        tail = f"vecops::vec::mwhilelt({tag}{{}}, 0, {count})"
+        if op == "mask_all":
+          tail = f"vecops::vec::mask_not({tag}{{}}, {tail})"
+        self.line(f"auto {active} = vecops::vec::{operation}({tag}{{}}, {mask}, {tail});")
+        value = f"vecops::vec::{op}({tag}{{}}, {active})"
+        if op in {"mask_first", "mask_last"}:
+          found = self.unique("mask_found")
+          self.line(f"auto {found} = {value};")
+          offset = "0"
+          for coordinate, extent in zip(c, source.type.shape):
+            offset = f"(({offset})*({self.scalar(extent)})+({coordinate}))"
+          condition = f"{found} >= 0" + (f" && {result} < 0" if op == "mask_first" else "")
+          self.line(f"if ({condition}) {result} = ({offset}) + {found};")
+        else:
+          operator = "+=" if op == "mask_count" else "|=" if op == "mask_any" else "&="
+          self.line(f"{result} {operator} {value};")
+
+    self.traverse_region(plan, query)
+    return result
+
+  def indexed_store(self, statement, future):
+    # A scatter is never pointwise-in-place safe, even for identical roots.
+    dependencies = {}
+    for value in (statement.indices, statement.value, statement.mask):
+      if value is not None:
+        dependencies.update((id(load), load) for load in I.loads(value))
+    for identity in set(self.active_loads) & set(future):
+      dependencies[identity] = self.active_loads[identity]
+    for load in dependencies.values():
+      self.snapshot(load, statement.destination, True)
+    plan = self.prepared.primitives[id(statement)]
+    self.emitted_regions.append(plan)
+    shape = statement.indices.type.shape
+
+    def write(tags, coords, counts, roots, state):
+      for slot, (base, c, count) in enumerate(zip(tags, coords, counts)):
+        tag = self.rebound_tag(statement.value.type.dtype, base)
+        itag = self.rebound_tag("int64", base)
+        index = I.Expr(I.VectorType("int64", shape), "vector_ref", data=roots[0][slot])
+        predicate = (
+          I.Expr(statement.mask.type, "vector_ref", data=roots[2][slot])
+          if statement.mask is not None
+          else I.literal(True)
+        )
+        self.check_indices(index, predicate, itag, shape, c, count, -1, statement.destination)
+        indices = self.unique("scatter_indices")
+        self.line(
+          f"auto {indices} = vecops::vec::mul({itag}{{}}, {roots[0][slot]}, vecops::vec::fill({itag}{{}}, {self.scalar(statement.destination.strides[0])}));"
+        )
+        options, mask = self.memory_options(predicate, tag, shape, c, count, -1)
+        if statement.unique:
+          self.line(
+            f"vecops::vec::store_convert({tag}{{}}, {self.pointer(statement.destination)}, {roots[1][slot]}, {options}, vecops::vec::opt::indexed({indices}));"
+          )
+        else:
+          lane = self.unique("scatter_lane")
+          self.opening(f"for (vecops::nint_t {lane}=0; {lane}<({count}); ++{lane})")
+          self.opening(f"if (vecops::vec::get({tag}{{}}, {mask}, {lane}))")
+          self.line(
+            f"{self.pointer(statement.destination)}[vecops::vec::get({itag}{{}}, {indices}, {lane})] = static_cast<{CPP_TYPES[statement.destination.dtype]}>(vecops::vec::get({tag}{{}}, {roots[1][slot]}, {lane}));"
+          )
+          self.close()
+          self.close()
+
+    self.traverse_region(plan, write)

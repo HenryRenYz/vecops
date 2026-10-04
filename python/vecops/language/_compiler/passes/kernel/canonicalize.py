@@ -1,7 +1,7 @@
 """Kernel passes: canonicalize."""
 
 from ... import ir as I
-from ...ir.traversal import rewrite_expressions
+from ...ir.traversal import rewrite_expressions, walk
 from ..manager import register_pass
 from ...operations import Trait
 
@@ -24,6 +24,8 @@ def expression_cse(ir, context):
 
   def intern(expression):
     if not context.environment.operations.has(expression, Trait.CSE):
+      return expression
+    if any(context.environment.operations.has(e, Trait.STATE_REFERENCE) for e in walk(expression)):
       return expression
     key = (repr(expression.type), expression.op, tuple(map(id, expression.args)), repr(expression.data))
     return table.setdefault(key, expression)

@@ -112,10 +112,14 @@ KernelDef any_metadata_kernel_definition() {
   return KernelDef(
     "test::any-metadata-kernel",
     {
-      TensorDef{"input", {DimensionDef::any(), DimensionDef::any()}, {DimensionDef::any(), 1},
-                TensorDTypeDef(DType::Float32)},
-      TensorDef{"output", {DimensionDef::any(), DimensionDef::any()}, {DimensionDef::any(), 1},
-                TensorDTypeDef(DType::Float32), false, TensorAccess::Output},
+      TensorDef{
+        "input", {DimensionDef::any(), DimensionDef::any()}, {DimensionDef::any(), 1}, TensorDTypeDef(DType::Float32)},
+      TensorDef{"output",
+                {DimensionDef::any(), DimensionDef::any()},
+                {DimensionDef::any(), 1},
+                TensorDTypeDef(DType::Float32),
+                false,
+                TensorAccess::Output},
     });
 }
 
@@ -434,8 +438,8 @@ int main(int argc, char** argv) {
   for (std::int64_t row = 0; row < 2; ++row)
     for (std::int64_t column = 0; column < 4; ++column)
       any_input[static_cast<std::size_t>(row * 5 + column)] = static_cast<float>(row * 10 + column);
-  auto any_compile_call = KernelCall(
-    make_arguments(matrix(any_input.data(), 2, 4, 5, false), matrix(any_output.data(), 2, 4, 5, true)));
+  auto any_compile_call =
+    KernelCall(make_arguments(matrix(any_input.data(), 2, 4, 5, false), matrix(any_output.data(), 2, 4, 5, true)));
   const auto any_kernel = fs::path(VECOPS_TEST_KERNEL).parent_path() / "AnyMetadataKernel.cpp";
   auto any_executable = compiler->compile_kernel(any_kernel, any_definition, any_compile_call);
   require(any_executable.ok(), any_executable.status().message());
@@ -444,8 +448,8 @@ int main(int argc, char** argv) {
   for (std::int64_t row = 0; row < 3; ++row)
     for (std::int64_t column = 0; column < 3; ++column)
       any_input[static_cast<std::size_t>(row * 7 + column)] = static_cast<float>(row * 10 + column);
-  auto changed_any_call = KernelCall(
-    make_arguments(matrix(any_input.data(), 3, 3, 7, false), matrix(any_output.data(), 3, 3, 7, true)));
+  auto changed_any_call =
+    KernelCall(make_arguments(matrix(any_input.data(), 3, 3, 7, false), matrix(any_output.data(), 3, 3, 7, true)));
   require(any_executable.value()->invoke(changed_any_call.arguments()).ok(),
           "generated adapter must read unconstrained Any metadata from each call");
   for (std::int64_t row = 0; row < 3; ++row) {
@@ -467,6 +471,21 @@ int main(int argc, char** argv) {
 
   auto shared_definition = std::make_shared<KernelDef>(definition);
   auto recipe = std::make_shared<SourceKernelRecipe>("test-kernel-v1", VECOPS_TEST_KERNEL, shared_definition);
+  auto static_bound = recipe->bind(call);
+  require(static_bound.ok(), "static parallelism recipe bind");
+  require(specialize_parallelism(static_bound.value(), 2).artifact_key !=
+            specialize_parallelism(static_bound.value(), 4).artifact_key,
+          "legacy source artifacts remain specialized by worker count");
+  auto runtime_definition = std::make_shared<KernelDef>(*shared_definition);
+  runtime_definition->set_runtime_parallelism(true);
+  require(runtime_definition->canonical() != shared_definition->canonical(),
+          "runtime scheduling enters schema identity");
+  SourceKernelRecipe runtime_recipe("runtime-workers", VECOPS_TEST_KERNEL, runtime_definition);
+  auto runtime_bound = runtime_recipe.bind(call);
+  require(runtime_bound.ok(), "runtime parallelism recipe bind");
+  require(specialize_parallelism(runtime_bound.value(), 2).artifact_key ==
+            specialize_parallelism(runtime_bound.value(), 4).artifact_key,
+          "runtime scheduler reuses artifacts across execution budgets");
   int builds = 0;
   ArtifactProviderConfig read_write;
   read_write.mode = ArtifactCacheMode::ReadWrite;

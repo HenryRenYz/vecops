@@ -59,10 +59,10 @@ def test_builtin_loading_is_idempotent_and_order_stable():
   assert tuple(snapshot.specs) == T.passes.PassManager().specs
   assert [p.name for p in snapshot.specs] == [
       "normalize-reduction-layout", "decompose-row-normalization",
-      "canonicalize-memory", "expression-cse", "fuse-dot-epilogue",
+      "fold-value-transforms", "canonicalize-memory", "expression-cse", "fuse-dot-epilogue",
       "materialize-dependent-dots", "orient-matmul", "plan-computation-reuse",
       "fuse-reductions", "fuse-reduction-elementwise", "fuse-elementwise",
-      "unroll-serial", "refresh-computation-reuse"]
+      "unroll-serial", "refresh-computation-reuse", "plan-software-pipeline"]
 
 
 def test_emission_runs_no_passes_or_lowering(monkeypatch):

@@ -68,7 +68,10 @@ define("sqrt abs", "math", ELEMENTWISE | T.UNARY_MATH, arity=1)
 # represented completely. A memory read is not pure across writes/aliasing.
 define("cast", "conversion", T.ELEMENTWISE | T.TRANSPOSE_STREAMABLE, arity=1, keywords=("dtype",))
 define(
-  "load", "memory", T.RUNTIME_SHAPE | T.CAPTURE_SCALAR | T.UNSTABLE_EXTENT | T.TRANSPOSE_STREAMABLE, effects="read"
+  "load",
+  "memory",
+  T.MEMORY_READ | T.RUNTIME_SHAPE | T.CAPTURE_SCALAR | T.UNSTABLE_EXTENT | T.TRANSPOSE_STREAMABLE,
+  effects="read",
 )
 define("packed_load", "memory", T.VECTOR_BOUNDARY, effects="read")
 define("local", "reference", T.REFERENCE | T.RUNTIME_SHAPE | T.CAPTURE_SCALAR | T.UNSTABLE_EXTENT)
@@ -78,6 +81,8 @@ define("literal fill", "structural", ELEMENTWISE)
 define("arange", "index", T.ELEMENTWISE | T.CSE)
 define("lanes streaming_lanes packing_size broadcast_dim", "shape", T.CSE)
 define("vector_ref", "reference", T.REFERENCE | T.TRANSPOSE_STREAMABLE)
+define("state_ref", "reference", T.STATE_REFERENCE | T.VECTOR_BOUNDARY, effects="read")
+define("grid", "control", T.NONE, effects="state", keywords=("schedule", "chunk", "parallel"))
 define("wordwise_math", "math", ELEMENTWISE)
 for name in ("add", "min", "max"):
   define(
@@ -89,4 +94,46 @@ for name in ("add", "min", "max"):
     reduction=name,
   )
 define("axis_reduce row_normalize", "reduction", T.REDUCTION | T.VECTOR_BOUNDARY)
+define("_normalize", "normalization", T.NONE, keywords=("kind", "eps", "variance", "unroll", "accuracy"))
 define("dot", "matrix", T.VECTOR_BOUNDARY)
+define(
+  "gather",
+  "indexed_memory",
+  T.MEMORY_READ | T.CAPTURE_SCALAR | T.UNSTABLE_EXTENT,
+  effects="read",
+  keywords=("dtype", "mask", "other"),
+)
+define("scatter", "indexed_memory", T.NONE, effects="write", keywords=("mask", "unique"))
+define("value_transform", "transform", T.VECTOR_BOUNDARY)
+define("shuf local_shuf", "register", T.REGISTER_TRANSFORM, keywords=())
+define("element_at", "index", T.VECTOR_BOUNDARY | T.CAPTURE_SCALAR)
+define("expand_dims squeeze", "transform", T.NONE, keywords=("axis",))
+define("indices", "index", T.NONE, keywords=("axis",))
+define("workspace", "allocation", T.NONE, keywords=("dtype",))
+define("worker_capacity", "execution", T.CSE)
+define(
+  "mask_all mask_any mask_none mask_count mask_first mask_last",
+  "mask_query",
+  T.MASK_REDUCTION | T.REDUCTION,
+  keywords=("unroll",),
+)
+define("parallel", "local_control", T.NONE, keywords=("layout", "unroll"))
+define("simd", "local_control", T.NONE, keywords=("vector", "unroll"))
+define("reduce", "generic_reduction", T.NONE, keywords=("reducer", "axis", "unroll"))
+define("scan", "generic_reduction", T.NONE, keywords=("reducer", "axis", "exclusive", "reverse"))
+define("team", "team", T.NONE, keywords=("workers",))
+define("worker_id worker_count barrier", "team", T.NONE)
+define("team_reduce", "team", T.NONE, keywords=("op",))
+define("shared", "allocation", T.NONE, keywords=("dtype",))
+define(
+  "atomic_add atomic_min atomic_max atomic_exchange atomic_compare_exchange",
+  "atomic",
+  T.NONE,
+  effects="state",
+  keywords=("order",),
+)
+define("prefetch", "pipeline", T.NONE, effects="read", keywords=("level", "intent", "temporal"))
+define("pipelined", "pipeline", T.NONE, keywords=("stages", "distance", "unroll", "buffering"))
+define("view_disjoint", "metadata", T.NONE)
+define("double_buffer", "allocation", T.NONE, keywords=("dtype",))
+define("amx.zero", "architecture", T.NONE, effects="state", keywords=("dtype",))

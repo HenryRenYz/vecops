@@ -31,6 +31,10 @@ class Trait(IntFlag):
   CSE = auto()
   CONDITIONAL = auto()
   TRANSPOSE_STREAMABLE = auto()
+  STATE_REFERENCE = auto()
+  MEMORY_READ = auto()
+  REGISTER_TRANSFORM = auto()
+  MASK_REDUCTION = auto()
 
 
 @dataclass(frozen=True)

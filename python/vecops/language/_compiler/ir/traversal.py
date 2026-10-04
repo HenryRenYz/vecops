@@ -10,7 +10,29 @@ def walk(expression):
     yield from walk(argument)
 
 
+def nodes(value, seen=None):
+  """Walk each owned IR node once, including data and shape metadata.
+
+  Expression/shape graphs share nodes heavily; recursive tree expansion would
+  make capability detection exponential for nested helper/reduction DAGs.
+  """
+  if seen is None:
+    seen = set()
+  if isinstance(value, (tuple, list)):
+    for item in value:
+      yield from nodes(item, seen)
+  elif isinstance(value, I.Node) and id(value) not in seen:
+    seen.add(id(value))
+    yield value
+    for field in fields(value):
+      yield from nodes(getattr(value, field.name), seen)
+
+
 def children(statement):
+  from .pipeline import PipelineFor
+
+  if isinstance(statement, PipelineFor):
+    yield statement.loop.body
   if isinstance(statement, I.UnrolledFor):
     yield statement.copies
     yield statement.loop.body
@@ -26,7 +48,7 @@ def values(block):
       yield from values(I.Block([*statement.assignments, *statement.stores]))
     if isinstance(statement, I.ElementwiseGroup):
       yield from values(I.Block(list(statement.stores)))
-    for name in ("value", "condition", "mask"):
+    for name in ("value", "condition", "mask", "indices"):
       value = getattr(statement, name, None)
       if isinstance(value, I.Expr):
         yield value

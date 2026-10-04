@@ -37,6 +37,10 @@ class VectorsEmitter:
       self.chunk_cache[key] = name
       return name
     dtype = value.type.dtype
+    if value.op == "state_ref":
+      result = self.state_vector(value, tag, root_shape, coords, active, axis)
+      self.chunk_cache[key] = result
+      return result
     if isinstance(value.type, I.ScalarType):
       if dtype == "bool":
         return f"vecops::vec::mfill({tag}{{}}, {self.scalar(value)})"
@@ -52,6 +56,12 @@ class VectorsEmitter:
     if value.op == "vector_ref":
       return value.data
     vcoords = self.coordinates(value.type.shape, root_shape, coords)
+    primitive = self.primitive_vector(value, tag, root_shape, coords, active, axis)
+    if primitive is not NotImplemented:
+      name = self.unique("primitive")
+      self.line(f"auto {name} = {primitive};")
+      self.chunk_cache[key] = name
+      return name
     if value.op == "packed_load":
       result = self.packed_vector(value, tag, root_shape, coords, active, axis)
       self.chunk_cache[key] = result
@@ -150,7 +160,9 @@ class VectorsEmitter:
         expression = f"({condition} ? {saved_value} : {expression})"
     elif value.op == "fill":
       expression = (
-        f"vecops::vec::fill({tag}{{}}, static_cast<vecops::vec::ElementOf<{tag}>>({self.scalar(value.args[0])}))"
+        f"vecops::vec::mfill({tag}{{}}, {self.scalar(value.args[0])})"
+        if value.type.mask
+        else (f"vecops::vec::fill({tag}{{}}, static_cast<vecops::vec::ElementOf<{tag}>>({self.scalar(value.args[0])}))")
       )
     elif value.op == "arange":
       start = self.scalar(value.args[0])
@@ -265,6 +277,8 @@ class VectorsEmitter:
       return base
     tag = f"vecops::vec::Rebind<{CPP_TYPES[dtype]}, {base}>"
     self.tag_dtypes[tag] = dtype
+    if base in self.fixed_tag_lanes:
+      self.fixed_tag_lanes[tag] = self.fixed_tag_lanes[base]
     return tag
 
   def emit_operations(self, region, tags, coords, active, *, axis=-1, full=False):
@@ -321,6 +335,10 @@ class VectorsEmitter:
 
   def traverse_region(self, region, callback, *, setup=None, finish=None):
     """Print explicit Vector IR schedules, not recursively lowered tile bodies."""
+    state_plan = self.state_region(region)
+    if state_plan is not None:
+      self.traverse_state_region(state_plan, region, callback, setup, finish)
+      return
     variants = [(power, region.base_power, region.groupings[power]) for power in sorted(region.groupings, reverse=True)]
     if region.base_power > 0:
       from ....ir.vector import group_vectors

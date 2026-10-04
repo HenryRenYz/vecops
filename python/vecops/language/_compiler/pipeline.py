@@ -9,15 +9,19 @@ _builtins_loaded = False
 _BUILTIN_MODULES = (
   "passes.kernel.canonicalize",
   "passes.kernel.normalization",
+  "passes.kernel.transforms",
   "passes.kernel.layout",
   "passes.kernel.matmul",
   "passes.kernel.reuse",
   "passes.kernel.fusion",
   "passes.kernel.unroll",
+  "passes.kernel.pipeline",
   "passes.vector",
   "backends.cpu.passes",
   "backends.cpu.transpose",
   "backends.cpu.matmul",
+  "backends.cpu.grid_pass",
+  "backends.cpu.state",
 )
 
 

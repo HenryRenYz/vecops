@@ -39,8 +39,8 @@
 #include "vecops/runtime/OperatorBridgeAbi.h"
 #include "vecops/runtime/Provider.h"
 #if defined(VECOPS_PYTHON_HAS_MEMORY)
-#include "vecops/execution/MemoryWorkspaceSession.h"
-#include "vecops/memory/Memory.h"
+#  include "vecops/execution/MemoryWorkspaceSession.h"
+#  include "vecops/memory/Memory.h"
 #endif
 
 namespace py = pybind11;
@@ -393,6 +393,7 @@ struct BridgeCallSignature {
   std::vector<BridgeValueSignature> values;
   std::vector<BridgeSpecializationSignature> specializations;
   vecops::nint_t parallelism = 1;
+  bool runtime_parallelism = false;
 
   [[nodiscard]] static vecops::nint_t call_parallelism(const VecopsCall& call) {
     const VecopsThreadPoolV1* pool = nullptr;
@@ -410,9 +411,11 @@ struct BridgeCallSignature {
   }
 
   [[nodiscard]] static std::optional<BridgeCallSignature> capture(const VecopsCall& call, std::uint32_t num_specs,
-                                                                  const VecopsSpecializationArgument* specs) {
+                                                                  const VecopsSpecializationArgument* specs,
+                                                                  bool runtime_parallelism = false) {
     BridgeCallSignature result;
-    result.parallelism = call_parallelism(call);
+    result.runtime_parallelism = runtime_parallelism;
+    result.parallelism = runtime_parallelism ? 1 : call_parallelism(call);
     result.values.reserve(call.num_values);
     for (std::uint32_t index = 0; index < call.num_values; ++index) {
       const auto& value = call.values[index];
@@ -463,7 +466,7 @@ struct BridgeCallSignature {
 
   [[nodiscard]] bool matches(const VecopsCall& call, std::uint32_t num_specs,
                              const VecopsSpecializationArgument* specs) const {
-    if (parallelism != call_parallelism(call) || call.num_values != values.size() ||
+    if ((!runtime_parallelism && parallelism != call_parallelism(call)) || call.num_values != values.size() ||
         num_specs != specializations.size())
       return false;
     for (std::uint32_t index = 0; index < call.num_values; ++index) {
@@ -556,13 +559,13 @@ public:
   }
 
   [[nodiscard]] Status invoke(const PyKernelCall& call) const {
-#if defined(VECOPS_PYTHON_HAS_MEMORY)
     VecopsExecutionContext memory_context{};
-    const VecopsExecutionContext* context = nullptr;
+    memory_context.struct_size = sizeof(VecopsExecutionContext);
+    memory_context.thread_pool = vecops_cpu_thread_pool_v1();
+#if defined(VECOPS_PYTHON_HAS_MEMORY)
     if (const auto* provider = current_memory_workspace_provider(); provider != nullptr) {
       memory_context.struct_size = sizeof(VecopsExecutionContext);
       memory_context.workspace_provider = provider;
-      context = &memory_context;
     }
 #endif
     Status last(StatusCode::NotApplicable, "no registered recipe accepted the invocation");
@@ -570,13 +573,8 @@ public:
       auto values = state_->default_values[index];
       for (const auto& [name, value] : call.call().values())
         values.insert_or_assign(name, value);
-#if defined(VECOPS_PYTHON_HAS_MEMORY)
-      auto status = state_->operator_instances[index]->invoke(
-        KernelCall(call.call().arguments(), std::move(values)), context);
-#else
-      auto status = state_->operator_instances[index]->invoke(
-        KernelCall(call.call().arguments(), std::move(values)));
-#endif
+      auto status = state_->operator_instances[index]->invoke(KernelCall(call.call().arguments(), std::move(values)),
+                                                              &memory_context);
       if (status.ok())
         return status;
       if (status.code() != StatusCode::InvalidArgument && status.code() != StatusCode::NotApplicable &&
@@ -764,8 +762,7 @@ Status PyOperator::prepare_batch(std::span<const BatchItem> items, std::size_t p
         }
         return bound.status();
       }
-      bound.value() = vecops::runtime::specialize_parallelism(
-        std::move(bound).value(), execution_parallelism);
+      bound.value() = vecops::runtime::specialize_parallelism(std::move(bound).value(), execution_parallelism);
       auto cached = operation.state_->providers[index]->lookup(bound.value());
       if (cached) {
         if (bound.value().source != nullptr && bound.value().source->definition != nullptr &&
@@ -1016,7 +1013,8 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
   VecopsCall routed_call{};
   VecopsExecutionContext routed_context{};
   const bool has_explicit_provider =
-    call->context != nullptr && call->context->struct_size >=
+    call->context != nullptr &&
+    call->context->struct_size >=
       offsetof(VecopsExecutionContext, workspace_provider) + sizeof(call->context->workspace_provider) &&
     call->context->workspace_provider != nullptr;
   if (!has_explicit_provider && call->workspace == nullptr && call->workspace_size == 0) {
@@ -1052,13 +1050,13 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
     const char* value = std::getenv("VECOPS_TORCH_PREPARED_CALL");
     return value == nullptr || std::strcmp(value, "0") != 0;
   }();
-  const bool provider_context = call->context != nullptr &&
-    ((call->context->struct_size >=
-        offsetof(VecopsExecutionContext, workspace_provider) + sizeof(call->context->workspace_provider) &&
-      call->context->workspace_provider != nullptr) ||
-     (call->context->struct_size >=
-        offsetof(VecopsExecutionContext, thread_pool) + sizeof(call->context->thread_pool) &&
-      call->context->thread_pool != nullptr));
+  const bool provider_context =
+    call->context != nullptr && ((call->context->struct_size >= offsetof(VecopsExecutionContext, workspace_provider) +
+                                                                  sizeof(call->context->workspace_provider) &&
+                                  call->context->workspace_provider != nullptr) ||
+                                 (call->context->struct_size >= offsetof(VecopsExecutionContext, thread_pool) +
+                                                                  sizeof(call->context->thread_pool) &&
+                                  call->context->thread_pool != nullptr));
   const bool cacheable = hot_path_enabled && (call->context == nullptr || provider_context) &&
                          call->workspace == nullptr && call->workspace_size == 0;
   if (cacheable) {
@@ -1143,15 +1141,16 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
     auto values = state->default_values[index];
     for (const auto& [name, value] : kernel_call.values())
       values.insert_or_assign(name, value);
-    auto executable = state->operator_instances[index]->resolve(
-      KernelCall(kernel_call.arguments(), std::move(values)), call->context);
+    auto executable =
+      state->operator_instances[index]->resolve(KernelCall(kernel_call.arguments(), std::move(values)), call->context);
     if (executable) {
       auto result =
         executable.value()->invoke(kernel_call.arguments(), call->workspace, call->workspace_size, call->context);
       if (!result.ok())
         return result;
       if (cacheable) {
-        auto signature = BridgeCallSignature::capture(*call, num_specs, specs);
+        auto signature = BridgeCallSignature::capture(*call, num_specs, specs,
+                                                      state->recipes[index]->definition().runtime_parallelism());
         if (signature) {
           std::size_t replace = 0;
           for (std::size_t candidate = 0; candidate < hot_entries.size(); ++candidate) {
@@ -1398,9 +1397,8 @@ void bind_memory(py::module_& module) {
         item["managed_large_page_bytes"] = stats.managed_large_page_bytes;
         item["peak_managed_large_page_bytes"] = stats.peak_managed_large_page_bytes;
         item["os_free_bytes"] = stats.os_free_bytes.has_value() ? py::cast(stats.os_free_bytes.value()) : py::none();
-        item["os_large_page_free_bytes"] = stats.os_large_page_free_bytes.has_value()
-                                                   ? py::cast(stats.os_large_page_free_bytes.value())
-                                                   : py::none();
+        item["os_large_page_free_bytes"] =
+          stats.os_large_page_free_bytes.has_value() ? py::cast(stats.os_large_page_free_bytes.value()) : py::none();
         item["budget_remaining_bytes"] =
           stats.budget_remaining_bytes.has_value() ? py::cast(stats.budget_remaining_bytes.value()) : py::none();
         result.append(std::move(item));
@@ -1431,7 +1429,7 @@ struct WorkspaceAllocationCollector {
 
   std::mutex mutex;
   std::vector<Record> records;
-  std::size_t dropped = 0;  // records lost to the capacity cap
+  std::size_t dropped = 0; // records lost to the capacity cap
   std::atomic<bool> enabled{false};
   static constexpr std::size_t capacity = 1u << 20;
 
@@ -1480,31 +1478,34 @@ Most applications should use :mod:`vecops`, whose Python wrappers normalize
 dtypes, derive schemas, and own framework integration. This module mirrors C++
 value types for diagnostics, explicit build control, and wrapper implementation;
 its constructor-level interfaces intentionally expose native concepts.)doc";
-  module.attr("build_api_version") = 7;
+  module.attr("build_api_version") = 8;
+  module.def("cpu_thread_limit", &vecops_cpu_thread_limit, py::arg("threads"),
+             "Set the calling thread's direct CPU executor budget and return its previous value.");
+  module.def(
+    "cpu_thread_pool_capacity",
+    [] {
+      const auto* pool = vecops_cpu_thread_pool_v1();
+      return pool->max_parallelism(pool->context);
+    },
+    "Return the direct CPU executor's current effective capacity without creating workers.");
+  module.def(
+    "cpu_thread_pool_address", [] { return reinterpret_cast<std::uintptr_t>(vecops_cpu_thread_pool_v1()); },
+    "Return the stable adaptive CPU executor ABI address.");
   module.def("flush_subnormals_supported", &vecops::execution::flush_subnormals_supported,
              "Whether this build can set hardware subnormal flushing.");
-  module.def("current_thread_flush_subnormals",
-             &vecops::execution::current_thread_flush_subnormals,
+  module.def("current_thread_flush_subnormals", &vecops::execution::current_thread_flush_subnormals,
              "Return the calling thread's hardware subnormal flush mode.");
-  module.def("set_current_thread_flush_subnormals",
-             &vecops::execution::set_current_thread_flush_subnormals,
-             py::arg("enabled"),
-             "Set the calling thread's hardware subnormal flush mode.");
+  module.def("set_current_thread_flush_subnormals", &vecops::execution::set_current_thread_flush_subnormals,
+             py::arg("enabled"), "Set the calling thread's hardware subnormal flush mode.");
   module.def(
     "native_thread_pool_address",
-    [](std::uint32_t threads) {
-      return reinterpret_cast<std::uintptr_t>(vecops_native_thread_pool_v1(threads));
-    },
-    py::arg("threads"),
-    "Return the process-local persistent thread-pool ABI address.");
+    [](std::uint32_t threads) { return reinterpret_cast<std::uintptr_t>(vecops_native_thread_pool_v1(threads)); },
+    py::arg("threads"), "Return the process-local persistent thread-pool ABI address.");
   module.def(
-    "native_thread_pool_begin_active",
-    [](std::uint32_t threads) { vecops_native_thread_pool_begin_active(threads); },
-    py::arg("threads"),
-    "Keep native workers active across a bounded sequence of submissions.");
+    "native_thread_pool_begin_active", [](std::uint32_t threads) { vecops_native_thread_pool_begin_active(threads); },
+    py::arg("threads"), "Keep native workers active across a bounded sequence of submissions.");
   module.def(
-    "native_thread_pool_end_active",
-    [] { vecops_native_thread_pool_end_active(); },
+    "native_thread_pool_end_active", [] { vecops_native_thread_pool_end_active(); },
     "End one bounded native-worker active region.");
 #if defined(VECOPS_PYTHON_HAS_MEMORY)
   bind_memory(module);
@@ -1756,6 +1757,7 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
          py::arg("name"), py::arg("inputs"),
          py::arg("values") = std::map<std::string, vecops::runtime::SpecializationType, std::less<>>{})
     .def_property_readonly("name", &KernelDef::name)
+    .def_property("runtime_parallelism", &KernelDef::runtime_parallelism, &KernelDef::set_runtime_parallelism)
     .def_property_readonly("inputs",
                            [](const KernelDef& self) {
                              return std::vector<vecops::runtime::KernelParameterDef>(self.parameters().begin(),

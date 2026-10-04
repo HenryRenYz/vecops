@@ -4,14 +4,75 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
+#include <string>
 #include <stdexcept>
 #include <vector>
 
 #include "vecops/execution/Parallel.h"
+#include "vecops/execution/Grid.h"
+#include <thread>
+#include <set>
+#include <mutex>
 
 namespace {
 
 using namespace vecops;
+
+TEST(GridTest, NativeTeamIsResidentAndBarriersPublishWrites) {
+  const auto* pool = vecops_native_thread_pool_v1(4);
+  ASSERT_TRUE(execution::supports_grid_team(pool));
+  std::array<int, 4> values{};
+  std::set<std::thread::id> workers;
+  std::mutex mutex;
+  execution::grid_team(pool, 4, [&](execution::GridTeam team) {
+    {
+      std::lock_guard lock(mutex);
+      workers.insert(std::this_thread::get_id());
+    }
+    for (int phase = 0; phase < 50; ++phase) {
+      values[team.worker_id()] = phase;
+      team.barrier();
+      for (auto value : values)
+        EXPECT_EQ(value, phase);
+      team.barrier();
+    }
+  });
+  EXPECT_EQ(workers.size(), 4);
+}
+
+TEST(GridTest, WorkerFailureCancelsBarrierAndPoolRemainsReusable) {
+  const auto* pool = vecops_native_thread_pool_v1(4);
+  EXPECT_THROW(execution::grid_team(pool, 4,
+                                    [&](execution::GridTeam team) {
+                                      if (team.worker_id() == 2)
+                                        throw std::runtime_error("worker probe");
+                                      team.barrier();
+                                    }),
+               std::runtime_error);
+  std::atomic<int> visits{0};
+  execution::grid_team(pool, 2, [&](execution::GridTeam team) {
+    ++visits;
+    team.barrier();
+  });
+  EXPECT_EQ(visits, 2);
+}
+
+TEST(GridTest, DynamicChunksAndStaticTailsCoverEveryProgram) {
+  const auto* pool = vecops_native_thread_pool_v1(4);
+  for (bool dynamic : {false, true}) {
+    for (nint_t count : {0, 1, 3, 4, 5, 7, 9, 37}) {
+      std::vector<std::atomic<int>> visits(count);
+      execution::grid_tasks(pool, count, std::min<nint_t>(4, count), dynamic, 3,
+                            [&](nint_t program) { ++visits[program]; });
+      for (const auto& visited : visits)
+        EXPECT_EQ(visited, 1);
+    }
+  }
+  EXPECT_EQ(execution::grid_workers(pool, 4, 0, 1000, 100), 0);
+  EXPECT_EQ(execution::grid_workers(pool, 4, 3, 1, 1000), 1);
+  EXPECT_EQ(execution::grid_workers(pool, 2, 100, 1000, 100), 2);
+}
 
 struct RecordingThreadPool {
   static std::uint32_t maximum(void*) {
@@ -22,8 +83,8 @@ struct RecordingThreadPool {
     return 0;
   }
 
-  static std::int32_t run(void* opaque, std::uint32_t count, void* body_context,
-                          VecopsParallelTaskFn body, VecopsError*) {
+  static std::int32_t run(void* opaque, std::uint32_t count, void* body_context, VecopsParallelTaskFn body,
+                          VecopsError*) {
     auto& self = *static_cast<RecordingThreadPool*>(opaque);
     ++self.calls;
     self.submitted = count;
@@ -35,9 +96,17 @@ struct RecordingThreadPool {
   }
 
   [[nodiscard]] VecopsThreadPoolV1 abi() {
-    return VecopsThreadPoolV1{
-      sizeof(VecopsThreadPoolV1), VECOPS_THREAD_POOL_ABI_MAJOR, VECOPS_THREAD_POOL_ABI_MINOR,
-      91, this, maximum, in_parallel, run, nullptr, nullptr, 0};
+    return VecopsThreadPoolV1{sizeof(VecopsThreadPoolV1),
+                              VECOPS_THREAD_POOL_ABI_MAJOR,
+                              VECOPS_THREAD_POOL_ABI_MINOR,
+                              91,
+                              this,
+                              maximum,
+                              in_parallel,
+                              run,
+                              nullptr,
+                              nullptr,
+                              0};
   }
 
   std::uint32_t calls = 0;
@@ -59,6 +128,96 @@ struct NativePoolProbe {
   std::array<std::atomic<int>, task_count> visits{};
   std::atomic<bool> invalid{false};
 };
+
+TEST(GridTest, LegacyLogicalProviderNeverClaimsBarrierCapability) {
+  RecordingThreadPool recording;
+  auto pool = recording.abi();
+  pool.struct_size = offsetof(VecopsThreadPoolV1, team_executor);
+  EXPECT_FALSE(execution::supports_grid_team(&pool));
+  std::vector<int> values(37, 0);
+  execution::grid_tasks(&pool, 37, 4, false, 1, [&](nint_t index) { ++values[index]; });
+  EXPECT_EQ(recording.submitted, 4);
+  for (auto value : values)
+    EXPECT_EQ(value, 1);
+  EXPECT_THROW(execution::grid_team(&pool, 4, [](execution::GridTeam) {}), std::invalid_argument);
+}
+
+TEST(GridTest, NestedLegacyProviderLimitsSelectionToOneWorker) {
+  RecordingThreadPool recording;
+  auto pool = recording.abi();
+  pool.struct_size = offsetof(VecopsThreadPoolV1, team_executor);
+  pool.in_parallel_region = [](void*) -> std::uint32_t { return 1; };
+  EXPECT_EQ(execution::grid_capacity(&pool), 1);
+  EXPECT_EQ(execution::grid_workers(&pool, 16, 1000, 10000, 100), 1);
+  execution::grid_tasks(&pool, 37, 1, true, 4, [](nint_t) {});
+  EXPECT_EQ(recording.calls, 0);
+}
+
+TEST(GridTest, DynamicCursorDoesNotOverflowAtIndexLimit) {
+  const auto maximum = std::numeric_limits<nint_t>::max();
+  std::atomic<nint_t> cursor{maximum - 2};
+  std::vector<nint_t> seen;
+  execution::grid_programs(maximum, 0, 2, true, 7, cursor, [&](nint_t index) { seen.push_back(index); });
+  EXPECT_EQ(seen, (std::vector<nint_t>{maximum - 2, maximum - 1}));
+  EXPECT_EQ(cursor.load(), maximum);
+}
+
+#if defined(__linux__)
+TEST(GridTest, SerialFastPathsApplyTheProcessFloatMode) {
+  if (!execution::flush_subnormals_supported())
+    GTEST_SKIP();
+  const auto mode = execution::current_thread_flush_subnormals();
+  const char* configured = std::getenv("VECOPS_FLUSH_SUBNORMALS");
+  const bool present = configured != nullptr;
+  const std::string previous = present ? configured : "";
+  ASSERT_EQ(setenv("VECOPS_FLUSH_SUBNORMALS", "1", 1), 0);
+  execution::set_current_thread_flush_subnormals(false);
+  execution::grid_lanes(nullptr, 1,
+                        [](execution::ParallelContext) { EXPECT_TRUE(execution::current_thread_flush_subnormals()); });
+  execution::set_current_thread_flush_subnormals(false);
+  execution::grid_tasks(nullptr, 3, 1, true, 2,
+                        [](nint_t) { EXPECT_TRUE(execution::current_thread_flush_subnormals()); });
+  if (present)
+    (void)setenv("VECOPS_FLUSH_SUBNORMALS", previous.c_str(), 1);
+  else
+    (void)unsetenv("VECOPS_FLUSH_SUBNORMALS");
+  execution::set_current_thread_flush_subnormals(mode);
+}
+#endif
+
+TEST(GridTest, AdaptiveBudgetIsScopedAndNestedTeamsSerialize) {
+  const auto previous = vecops_cpu_thread_limit(2);
+  const auto* pool = vecops_cpu_thread_pool_v1();
+  EXPECT_LE(pool->max_parallelism(pool->context), 2);
+  std::atomic<int> nested{0};
+  execution::grid_team(pool, 2, [&](execution::GridTeam team) {
+    execution::grid_team(pool, 4, [&](execution::GridTeam inner) {
+      EXPECT_EQ(inner.worker_count(), 1);
+      EXPECT_EQ(inner.worker_id(), 0);
+      ++nested;
+      inner.barrier();
+    });
+    team.barrier();
+  });
+  EXPECT_EQ(nested, std::min<std::uint32_t>(2, pool->max_parallelism(pool->context)));
+  EXPECT_EQ(vecops_cpu_thread_limit(previous), 2);
+}
+
+TEST(GridTest, AdaptiveCapacityRoundingNeverExceedsActiveBudget) {
+  const auto previous = vecops_cpu_thread_limit(3);
+  const auto* pool = vecops_cpu_thread_pool_v1();
+  const auto available = pool->max_parallelism(pool->context);
+  std::atomic<unsigned> visits{0};
+  for (nint_t requested : {2, 3, 8}) {
+    execution::grid_team(pool, requested, [&](execution::GridTeam team) {
+      EXPECT_EQ(team.worker_count(), std::min<nint_t>(requested, available));
+      ++visits;
+      team.barrier();
+    });
+  }
+  EXPECT_EQ(visits, std::min<std::uint32_t>(2, available) + 2 * available);
+  EXPECT_EQ(vecops_cpu_thread_limit(previous), 3);
+}
 
 struct NestedNativePoolProbe {
   static void inner(void* opaque, std::uint32_t, std::uint32_t) {
@@ -132,8 +291,7 @@ TEST(ParallelTest, PersistentNativePoolSupportsNestedActiveRegions) {
   const auto* pool = vecops_native_thread_pool_v1(4);
   NativePoolProbe probe;
   VecopsError error{sizeof(VecopsError)};
-  ASSERT_EQ(pool->parallel_for(pool->context, NativePoolProbe::task_count,
-                               &probe, NativePoolProbe::visit, &error),
+  ASSERT_EQ(pool->parallel_for(pool->context, NativePoolProbe::task_count, &probe, NativePoolProbe::visit, &error),
             VECOPS_STATUS_OK);
   vecops_native_thread_pool_end_active();
   vecops_native_thread_pool_end_active();
@@ -240,8 +398,7 @@ TEST(ParallelTest, RangeProgramsAreBalancedAcrossLanesAndCoverClippedTailOnce) {
   EXPECT_EQ(programs_per_lane, (std::array<int, 4>{2, 1, 1, 1}));
   EXPECT_EQ(observed_begin, (std::array<nint_t, 5>{3, 8, 13, 18, 23}));
   EXPECT_EQ(observed_end, (std::array<nint_t, 5>{8, 13, 18, 23, 26}));
-  EXPECT_EQ(visits, (std::array<int, 23>{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}));
+  EXPECT_EQ(visits, (std::array<int, 23>{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}));
 }
 
 TEST(ParallelTest, RangeWithFewerProgramsOmitsEmptyLanes) {
@@ -264,8 +421,7 @@ TEST(ParallelTest, EmptyRangeDoesNotSubmitAThreadPoolCall) {
   auto pool = recording.abi();
   bool visited = false;
 
-  execution::parallel_for<8>(&pool, meta::cint<0>, meta::cint<0>, meta::cint<1>,
-                             [&](auto, auto) { visited = true; });
+  execution::parallel_for<8>(&pool, meta::cint<0>, meta::cint<0>, meta::cint<1>, [&](auto, auto) { visited = true; });
 
   EXPECT_EQ(recording.calls, 0U);
   EXPECT_EQ(recording.submitted, 0U);
@@ -279,8 +435,7 @@ TEST(ParallelTest, MetaRangeRetainsConstChunkWithoutSplittingFullAndTailTypes) {
   int full = 0;
   int tail = 0;
 
-  execution::parallel_for<3>(&pool, meta::cint<3>, meta::cint<26>, meta::cint<5>,
-                             [&](auto task, auto item) {
+  execution::parallel_for<3>(&pool, meta::cint<3>, meta::cint<26>, meta::cint<5>, [&](auto task, auto item) {
     using Item = std::remove_cvref_t<decltype(item)>;
     static_assert(std::same_as<typename Item::chunk_type, meta::Const<5>>);
     static_assert(std::same_as<typename Item::program_count_type, meta::Const<5>>);
@@ -314,8 +469,7 @@ TEST(ParallelTest, DynamicMetaBoundsRetainChunkContractAndCoverTheRange) {
       ++visits[static_cast<std::size_t>(index - 7)];
   });
 
-  EXPECT_EQ(visits, (std::array<int, 17>{1, 1, 1, 1, 1, 1, 1, 1, 1,
-                                          1, 1, 1, 1, 1, 1, 1, 1}));
+  EXPECT_EQ(visits, (std::array<int, 17>{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}));
 }
 
 TEST(ParallelTest, RangeRejectsInvalidBoundsAndChunk) {

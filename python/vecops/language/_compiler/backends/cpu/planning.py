@@ -9,7 +9,7 @@ for scratch buffers does not re-run lowering or optimization.
 from dataclasses import dataclass, field, fields, replace
 from types import MappingProxyType
 from ... import ir as I
-from ...lowering.tile_to_vector import lower_stores, lower_axis, lower_reduction
+from ...lowering.tile_to_vector import lower_stores, lower_axis, lower_reduction, lower_region
 from ...pipeline import cpu_memory_pipeline
 from ...operations import has, Trait
 
@@ -45,6 +45,11 @@ class PreparedKernel:
   packing_permutation_x86: object | None = None
   dense_packs: object = field(default_factory=dict)
   grouped_epilogues: frozenset = frozenset()
+  grids: object = field(default_factory=dict)
+  grid_regions: object = field(default_factory=dict)
+  states: object = field(default_factory=dict)
+  state_regions: object = field(default_factory=dict)
+  primitives: object = field(default_factory=dict)
   pass_trace: list = field(default_factory=list)
 
   def store(self, statement):
@@ -69,6 +74,8 @@ def prepare(vectors, *, memory_manager=None):
   manager = vectors.manager
   stores, axes, snapshots, reductions, transposes, matmuls = {}, {}, {}, {}, {}, {}
   seen = set()
+  state_regions = {}
+  primitives = {}
 
   def visit(value):
     if isinstance(value, (tuple, list)):
@@ -78,9 +85,28 @@ def prepare(vectors, *, memory_manager=None):
     if not isinstance(value, I.Node) or id(value) in seen:
       return
     seen.add(id(value))
+    if isinstance(value, I.IndexedStore):
+      indices = I.Expr(I.shaped_type("int64", value.indices.type.shape, value.indices.type), "cast", (value.indices,))
+      roots = (indices, value.value) + ((value.mask,) if value.mask is not None else ())
+      primitives[id(value)] = lower_region(
+        value.indices.type.shape, value.value.type.dtype, roots, unroll=1, manager=manager
+      )
+    if isinstance(value, (I.DeclareState, I.UpdateState)):
+      from .state import state_view, stored_value
+
+      store = I.Store(state_view(value.state), stored_value(value.state, value.value))
+      state_regions[id(value)] = lower_stores((store,), manager=manager)
+      state_regions[(id(value), "register")] = lower_region(
+        value.state.type.shape, value.state.type.dtype, (value.value,), unroll=1, manager=manager
+      )
     if isinstance(value, I.Store) and value.destination.shape and id(value) not in vectors.plans:
       stores[id(value)] = lower_stores((value,), opaque=vectors.kernel.materializations, manager=manager)
     if isinstance(value, I.Expr):
+      if has(value, Trait.MASK_REDUCTION):
+        source = value.args[0]
+        primitives[id(value)] = lower_region(
+          source.type.shape, source.type.dtype, (source,), unroll=value.data, manager=manager
+        )
       if value.op == "axis_reduce":
         axis, operation, unroll = value.data
         for count in dict.fromkeys((unroll, 1)):
@@ -89,10 +115,17 @@ def prepare(vectors, *, memory_manager=None):
           )
       elif has(value, Trait.SCALAR_REDUCTION) and id(value) not in vectors.plans:
         reductions[((id(value),), ())] = lower_reduction((value,), manager=manager)
-      elif value.op == "load" and value.data.shape:
-        shape = value.data.shape
+      elif has(value, Trait.MEMORY_READ) and isinstance(value.type, I.TileType):
+        shape = value.type.shape
         destination = I.View(
-          "snapshot", value.type.dtype, shape, snapshot_strides(value.data), I.literal(0), owned=True
+          "snapshot",
+          value.type.dtype,
+          shape,
+          snapshot_strides(value.data)
+          if value.op == "load"
+          else snapshot_strides(I.View("", value.type.dtype, shape, (I.literal(1),) * len(shape), I.literal(0))),
+          I.literal(0),
+          owned=True,
         )
         snapshots[id(value)] = lower_stores(
           (I.Store(destination, value),), opaque=vectors.kernel.materializations, manager=manager
@@ -104,6 +137,10 @@ def prepare(vectors, *, memory_manager=None):
   visit(tuple(vectors.kernel.bindings.values()))
   # Registration changes after this point cannot change a source emission.
   prepared = PreparedKernel(
-    vectors, *(MappingProxyType(plans) for plans in (stores, axes, snapshots, reductions, transposes, matmuls))
+    vectors,
+    *(MappingProxyType(plans) for plans in (stores, axes, snapshots, reductions, transposes, matmuls)),
+    state_regions=MappingProxyType(state_regions),
+    primitives=MappingProxyType(primitives),
   )
-  return (memory_manager or cpu_memory_pipeline(options=manager.options)).run(prepared)
+  prepared = (memory_manager or cpu_memory_pipeline(options=manager.options)).run(prepared)
+  return prepared

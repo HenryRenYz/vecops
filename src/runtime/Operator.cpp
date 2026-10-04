@@ -104,7 +104,8 @@ void specialize_parallelism_in_place(BoundKernelRecipe& bound, nint_t parallelis
   remove_suffix(source->binding.specialization_key);
   remove_suffix(bound.specialization_key);
   remove_suffix(bound.artifact_key);
-  source->parallelism = std::max<nint_t>(1, parallelism);
+  source->parallelism =
+    source->definition && source->definition->runtime_parallelism() ? 1 : std::max<nint_t>(1, parallelism);
   const auto suffix = ";$Parallelism=i:" + std::to_string(source->parallelism);
   source->binding.specialization_key += suffix;
   bound.specialization_key += suffix;
@@ -203,15 +204,15 @@ Result<std::shared_ptr<Executable>> Operator::resolve(const ArgumentMetadata& ar
 }
 
 Result<std::shared_ptr<Executable>> Operator::resolve(const KernelCall& call,
-                                                     const VecopsExecutionContext* context) const {
+                                                      const VecopsExecutionContext* context) const {
   auto normalized = normalize(call);
   if (!normalized)
     return normalized.status();
   return resolve_normalized(normalized.value(), context);
 }
 
-Result<std::shared_ptr<Executable>> Operator::resolve_normalized(
-  const KernelCall& call, const VecopsExecutionContext* context) const {
+Result<std::shared_ptr<Executable>> Operator::resolve_normalized(const KernelCall& call,
+                                                                 const VecopsExecutionContext* context) const {
   if (dispatch_policy_ == nullptr || provider_ == nullptr)
     return Status(StatusCode::InternalError, "operator has no dispatch policy or executable provider");
   auto candidates = dispatch_policy_->candidates(call, recipes_);
@@ -240,7 +241,10 @@ Result<std::shared_ptr<Executable>> Operator::resolve_normalized(
     }
     if (bound.value().recipe_id.empty())
       bound.value().recipe_id = std::string(recipe->id());
-    bound.value() = specialize_parallelism(std::move(bound).value(), effective_parallelism(context));
+    const bool dynamic_workers = bound.value().source && bound.value().source->definition &&
+                                 bound.value().source->definition->runtime_parallelism();
+    bound.value() =
+      specialize_parallelism(std::move(bound).value(), dynamic_workers ? 1 : effective_parallelism(context));
     auto executable = provider_->resolve(bound.value());
     if (executable) {
       if (executable.value() == nullptr)

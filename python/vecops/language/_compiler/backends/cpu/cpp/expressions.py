@@ -9,7 +9,9 @@ from ....operations import Trait
 class ExpressionsEmitter:
   def scalar_has_statements(self, value):
     """Whether a scalar expression needs structured statements, not just text."""
-    if self.environment.operations.has(value, Trait.SCALAR_REDUCTION):
+    if (
+      self.environment.operations.has(value, Trait.SCALAR_REDUCTION | Trait.MASK_REDUCTION) or value.op == "element_at"
+    ):
       return True
     if value.op == "load":
       view = value.data
@@ -52,6 +54,16 @@ class ExpressionsEmitter:
     return result
 
   def scalar(self, value):
+    if value.op == "worker_capacity":
+      return "dsl_workspace.parallelism()"
+    if value.op == "view_disjoint":
+      return f"!({self.overlap(*value.data)})"
+    if self.environment.operations.get(value).family == "atomic":
+      return self.atomic_scalar(value)
+    if self.environment.operations.has(value, Trait.MASK_REDUCTION):
+      return self.mask_query(value)
+    if value.op == "element_at":
+      return self.element_at(value)
     if value.op == "packing_size":
       from .matmul import FORMATS
 
@@ -110,6 +122,14 @@ class ExpressionsEmitter:
       )
     arguments = [self.scalar(a) for a in value.args]
     implementation = self.environment.implementations.get(value.op)
+    if self.environment.operations.has(value, Trait.ELEMENTWISE) and value.op != "cast":
+      # Small-float scalar operators have competing conversion overloads.
+      # Computation uses float, matching the IR scalar promotion; explicit
+      # casts/stores are the rounding boundaries, not accidental C++ overloads.
+      arguments = [
+        f"static_cast<float>({text})" if arg.type.dtype in {"float16", "bfloat16"} else text
+        for arg, text in zip(value.args, arguments)
+      ]
     if implementation.scalar_kind == "infix":
       expr = f"({arguments[0]} {implementation.scalar_spelling} {arguments[1]})"
       if value.op == "div" and value.type.dtype.startswith("float"):

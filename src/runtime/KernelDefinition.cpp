@@ -539,6 +539,8 @@ std::string KernelDef::canonical() const {
     return std::string("?");
   };
   std::ostringstream output;
+  if (runtime_parallelism_)
+    output << "runtime-parallelism;";
   output << "name:" << name_;
   for (const auto& [name, type] : values_)
     output << ";value:" << name << ':' << (type == SpecializationType::ConstInt ? 'i' : 't');

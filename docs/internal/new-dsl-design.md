@@ -10,10 +10,12 @@ ordinary Python hints; actual values determine immutable normalized keys.
 The first implementation covers structured control flow, tensor/tile views,
 tagged virtual vectors, arithmetic/comparison/math/reductions, converting memory
 accesses, and CPU C++ code generation. Layer normalization and softmax are written
-in this DSL, not lowered to `vecops::ops`. MMA, hardware matrix accumulators,
-parallel scheduling, instruction scheduling and an exact register allocator are
-later milestones. Transposed/noncontiguous accesses use gather/scatter first;
-specialized transpose-kernel selection is explicitly TODO.
+in this DSL, not lowered to `vecops::ops`. Subsequent implementation sections
+below extend this initial boundary with specialized transpose, hardware matrix
+accumulators, matrix products/packing, dependency-aware CPU grid scheduling
+and typed loop/branch state with lexical helper exits;
+they supersede the corresponding phase-one TODOs. Instruction scheduling and an
+exact register allocator remain later milestones.
 
 ## Compiler dependency decision
 
@@ -80,7 +82,7 @@ computation. Reductions specify their numerical association contract. Dtypes
 include fp16, bf16, fp32 and fp64; computation dtype can differ from storage dtype.
 
 `T.serial`, `T.grid`, `T.unroll` and Python if/while express structured control
-flow. Logical grids are not synonymous with OS threads. A later `T.parallel`
+flow. Logical grids are not synonymous with OS threads. The CPU grid scheduler
 needs explicit task/effect verification and backend scheduling.
 
 High-level operations such as dot, norm and softmax are DSL library functions
@@ -128,9 +130,9 @@ execution-graph edges, not an assumed device-wide barrier inside a kernel.
 
 Phase one retains loops for large/dynamic tiles instead of mandatory vector
 expansion. Arithmetic chains and converting accesses are fused at the chunk
-consumer. Scalar loop-carried reductions are explicit. Dedicated fixed small
-vector expansion and cost-driven scratch/recompute choices can be added without
-changing language semantics.
+consumer. Typed loop-carried state now expands bounded small/fixed vectors to
+standalone locals and uses private scratch for general dynamic/large state.
+Cost-driven scratch/recompute choices remain independent of language semantics.
 
 ## Data access and safety
 
@@ -219,7 +221,7 @@ Triton 的逻辑 tensor、program、访存与归约词汇见其
 | Tile value | tile、逻辑 tensor block | 计算区域；可大于寄存器容量，不能等同于寄存器 fragment |
 | Tagged vector | fragment / 分布式逻辑向量的相关抽象 | 本阶段对应 `vec::Vec<Tag>`；一个逻辑值可以对应多个机器值 |
 | Mask | predicate / masked memory | AVX-512 mask、SVE predicate；掩码编码由后端决定 |
-| `serial/grid` | 结构化循环、逻辑 program 网格 | 本阶段是串行循环；不是线程数，也不引入 GPU barrier 假设 |
+| `serial/grid` | 结构化循环、逻辑 program 网格 | serial 保持顺序；grid 经 CPU ownership/pass 与运行时别名检查后调度，不等于线程数 |
 | 后续执行域 | block / warp / program | CPU logical task、OS worker、GPU block/warp、NPU core 分开建模 |
 | 后续 native matrix value | native MMA operand/accumulator | AMX tile、SME ZA、GPU fragments；不伪装成普通 SIMD Vec |
 
@@ -359,10 +361,13 @@ packed/swizzled layout、异步搬运和架构专用打包是后续扩展点。
 
 ### 数值与控制流边界
 
-当前标量有可变局部变量；tile/向量是不可变计算值。动态 if 的跨分支标量须
-提前初始化，动态循环跨迭代 tile/向量状态须写入显式 `T.alloc` buffer。
-尚未实现 native vector 的循环携带 SSA/phi 与寄存器驻留证明。非法 rebinding
-必须报错，不能悄悄采用最后一次编译遍历的表达式。`T.unroll` 仅支持常量界限，
+标量和 typed tile/vector 可跨迭代携带状态，动态 if 支持双方均定义的
+scalar/tile/tuple 结果合并。tile 的赋值保持旧值快照语义，不等于 view alias；
+循环状态保持 dtype、predicate kind、logical shape、显式 tag，动态 shape
+关系需运行时验证。CPU 后端选择独立寄存器变量或私有 scalar scratch，
+尚不是完整的全局物理寄存器分配/驻留证明。view 跨循环 rebinding 仍需
+显式 storage。非法 rebinding 必须报错，不能悄悄采用最后一次编译遍历
+的表达式。详见后续 typed-state 补全记录。`T.unroll` 仅支持常量界限，
 有 1024 次展开预算，暂不支持其中的 break/continue。
 
 归约按 native chunks 和水平归约结合，不保证与 Python 顺序或另一 ISA
@@ -1488,3 +1493,641 @@ L2 事件采样文件为 `unrestricted-l2-before.data` /
 `--baseline-source` 可以在同 schema/buffer 下重放保存的生成源码。
 中间 `unrestricted-candidate-*` / `unrestricted-final-catalog-*`
 属于未加 M gate 的实验阶段，不作为最终报告。
+
+## CPU grid 调度实现（2026-10-03）
+
+### 接口与编译器边界
+
+```python
+@T.template
+def rows(A: T.Tensor((M, N), dtype="float32"),
+         C: T.Tensor((M, N), dtype="float32", access="output")):
+    for row in T.grid(M, schedule="auto", chunk=1, parallel="auto"):
+        T.store(C[row, :], T.softmax(T.load(A[row, :])))
+
+with vecops.cpu_thread_limit(8):
+    kernel(a, out)
+```
+
+`grid` 仍然表示逻辑 program 集合，不表示线程数，更不创建进程。
+`auto/static` 使用连续、均衡的静态分配；`dynamic` 使用原子游标领取
+`chunk` 个 program。chunk 为编译期正整数。program 内部不被调度器
+拆分，尾波不能凭调度消失。`parallel="serial"` 保持字典序，
+`"require"` 要求并行安全证明/运行时 guard 成立，不要求至少两个线程；
+小任务和嵌套调用仍可以串行。
+
+| 模块 | 职责 |
+| --- | --- |
+| `frontend/parser.py`、`ir/kernel.py` | 独立 Grid IR；ViewRegion 保存逻辑根坐标，不改变地址生成 |
+| `backends/cpu/grid.py`、`grid_pass.py` | 注册的 ownership、cost、region planning；与 C++ 打印分离 |
+| `backends/cpu/cpp/grid.py` | 已规划 grid、worker-private scratch、运行时 guard 和条件屏障的生成 |
+| `execution/Grid.h` | 线程数选择、static/dynamic 分发、resident-team 与 logical-lane 接口 |
+| `runtime/CallAbi.h`、`NativeThreadPool.cpp` | 可选 team ABI、同步调用、异常取消、预算和持久 worker |
+
+调度代价来自集中的默认/处理器 cost profile，而不是在 printer 中新增
+expensive 操作列表。按 native word 估计向量吞吐、规约生产者/累加工作，
+标量 epilogue 每 program 只计一次，dot 计入 MAC 工作。选择 P 时比较
+`ceil(Q/P) * program_cost + P * worker_overhead`，并受 Q、调用预算、
+环境容量限制。依赖链启动成本不乘整个向量长度。该模型是启发式，
+尚不包含精确带宽饱和、NUMA、所有内层循环迭代数或动态分支概率。
+
+### 安全性、共享并行域和同步
+
+ownership pass 要求写入沿 program 坐标形成可分离、不重叠的分区；
+同一根 storage 的读必须限制在本 program 的分区中。普通 slice、
+transpose 和整数索引保留根坐标；无法表示的视图变换、共享可变标量、
+未知副作用或硬件裸指令导致串行回退。重复切割已裁剪的轴也保守丢弃
+证明。临时分配、packing 和规约 materialization 为 worker 私有，
+跨本 worker 的 programs 复用容量。
+
+不能凭不同参数名推断 no-alias：运行时检查根张量布局无重叠、跨参数
+span 不相交以及分区边界。转置/负 stride 输出可以通过布局检查。
+guard 失败回到有序路径，require 模式报错。ownership 的 base/width
+不能依赖 program 内存读取、规约或内层 loop 状态，以免 guard 在
+region 外引用未定义变量/旧数据。
+
+`cpu_grid_regions` 支持：
+
+- `individual`：每个 grid 独立同步提交，作为基线/调试模式。
+- `adjacent`：连续的安全 grid 共用一个 resident team。
+- `template`：还可跨越短的纯标量声明，由 worker 0 执行并发布。
+- `auto`：目前采用 template-safe 策略；不是无条件将整个内核并行化。
+
+无法安全搬移的控制流/副作用结束 region。后续 grid 的调度元数据不能
+依赖中间或更早 single-worker phase 新定义的标量，也不能提前读取内存
+或计算规约结果。尤其不能把后续 grid 中读取前一个 grid 输出的任务数
+提前到 region 入口。此类情况拆回独立 regions。
+
+region 内按 RAW/WAR/WAW 根效果和运行时跨参数 alias 决定屏障：独立
+阶段不插入屏障；确定发生的屏障清空已完成阶段的 pending effects；
+条件屏障仍保留未必已完成的 effects。scalar phase 前同步、后发布。
+同根但同 static owner 的依赖暂未消除屏障，以保留保守正确性。
+
+### C++ ABI 和运行时
+
+V1 minor 1 在 `VecopsThreadPoolV1` 尾部追加 size-gated `team_executor`。
+resident team 提供稳定 dense worker id、实际 worker count 和可取消的
+happens-before barrier。logical task 不能冒充 resident worker，否则
+多个 logical tasks 共用一个物理 worker 时可能屏障死锁。旧 V1 和当前
+Torch/OpenMP logical-only provider 保持有效，自动退回逐 grid 同步提交。
+native provider 提供真正的 resident team。
+
+生成的 grid 内核显式定义 `VECOPS_KERNEL_EXECUTION_CONTEXT`，adapter
+才转发 `const VecopsExecutionContext*`；不通过宽泛的 requires 探测来
+误匹配已有 WorkspaceContext 模板。KernelDef 的 `runtime_parallelism`
+策略将执行预算从 DSL artifact/hot-call key 中移出，预算/亲和性变化
+不会重编译相同 DSL。现有 source-backed kernel 默认仍按 Parallelism
+编译期特化。仅为拿 executor 不需要 workspace plan/replay。
+
+直接 Python/NumPy 调用获得稳定的 adaptive CPU provider；容量读取当前
+调用线程的 affinity、物理核心、cgroup v2 quota 和显式预算。quota 最多
+缓存一秒，affinity 不缓存。默认先使用不同物理核心；显式预算可以
+使用 SMT，但不突破允许 CPU/quota。预算 API 是调用线程局部、可嵌套
+和异常恢复的，不改变 Torch team 或旧固定 native pool。
+
+native worker 有独立 mailbox，仅通知本次参与者，不等待整个池中闲置
+worker 的确认。池按几何容量/CPU 集合复用，避免任务数变化创建 O(P²)
+个休眠线程；一次只执行选中的前缀。barrier 短暂自旋后 atomic wait，
+异常取消唤醒全部屏障、等待所有参与者结束，随后池仍可复用。提交时
+caller 临时 affinity 的修改会恢复，旧 native active-scope API 继续有效。
+嵌套 region 在 native 或报告 in_parallel_region 的 embedding 中串行。
+
+目前没有 work-stealing deque、跨进程共享任务队列或自动 NUMA 放置。
+多进程使用 spawn/forkserver、独立 CPU affinity/预算；不支持 fork
+继承已启动的 native workers。dynamic chunk 是 uneven-work 的可选方式，
+不作为所有任务的默认策略。本实现不增加 MLIR/LLVM 依赖，不生成 Vec
+数组，生成的调度闭包全部带 `VECOPS_INLINE_LAMBDA`。
+
+### 验证与性能
+
+本机 Intel Xeon w9-3495X / GCC 13.3，conda `af3`；不改动 CPU
+频率配置。最终验证记录：
+
+- `test_dsl_grid.py` **26/26**：动态/零维/tail、static/dynamic、私有
+  scratch、softmax、跨 phase RAW/WAR/WAW 和实际 alias、scalar phase、
+  错误取消/恢复、三种 region 策略、转置/负 stride 输出、线程预算和
+  affinity、预算变化不生成新 artifact、BF16/FP32 batched dot/packing、
+  Torch logical/native 两种 provider，以及 metadata 不安全 hoist。
+  shifted-alias 的有序语义补强后单项再次通过（使用会发生连锁读取的
+  输入，不能靠一次整张量 snapshot 得到相同结果）。
+- `ParallelTest-Scalar` **23/23**、`TaskPartitionTest-Scalar` **13/13**；
+  `VecopsRuntimeTest` PASS，包括 legacy/static 与 runtime-parallelism
+  artifact key 的区别；serial fast paths 的 process 浮点模式也有独立回归。
+- language/pass/cost **48/48**；runtime Python 独立进程 **23/23**。
+  最终 installed runtime 的 grid + 既有 DSL 快速 cohort **28/28**，
+  包含 layernorm moments、inline reduction/alias 和批量编译 capture。
+  本阶段另执行 norm/transpose/matmul 回归 **87/87**；这组完整回归在
+  runtime-parallelism 缓存策略变更之前，之后以 runtime 与上述 cohort
+  验证该策略，没有将其冒充又一次全量运行。
+- 生成的 FP32/BF16、Const/Dynamic、SVE VLA/VLS、SME VLA/fixed-SVL
+  **16/16** 跨编译；更新后的 native pool 也通过 AArch64 编译，C ABI
+  header 通过 C11 语法检查。未连接或运行离线 ARM 主机。
+- Ruff format（91 文件）、F821/F822/F823/E9 和 `git diff --check`
+  通过；不是宣称全量 lint/所有项目测试通过。
+
+可复现的本机命令：
+
+```bash
+CC=gcc CXX=g++ CMAKE_BUILD_PARALLEL_LEVEL=8 conda run --no-capture-output -n af3 \
+  python -m pip install -e . --no-build-isolation --no-deps
+cmake --build cmake-build-debug \
+  --target ParallelTest-Scalar TaskPartitionTest-Scalar VecopsRuntimeTest -j6
+conda run --no-capture-output -n af3 pytest -q python/tests/test_dsl_grid.py
+conda run --no-capture-output -n af3 python benchmarks/dsl_grid.py \
+  --threads 1 2 4 8 --rows 9 37 256 \
+  --operation softmax layernorm multigrid imbalance --repeat 80 --rounds 13 \
+  --cpus 2 3 4 5 6 7 8 9 \
+  --output build-dsl-grid/scheduling-budget-checked-final.json
+```
+
+CMake 配置使用 `/usr/bin/gcc`、`/usr/bin/g++`。ARM 跨编译脚本
+`benchmarks/dsl_grid_cross.py` 指定 clang 19.1.3 和
+`build-dsl-cross/sysroot/usr/aarch64-linux-gnu`；clang 路径为
+`/opt/spack/opt/spack/linux-ubuntu24.04-sapphirerapids/gcc-13.3.0/llvm-19.1.3-2tjty3xfpnxpvl3l2ghtirmts4fyekim/bin/clang++`。
+
+benchmark 使用同一 aligned buffers、native repeat、交错随机顺序的
+13 轮中位数，编译不计时且编译 affinity 排除 CPU2–9；每个线程预算
+下再次检查输出，包括 multigrid 的 B/C。**180/180** 配置通过。
+下表是最终一次测量，8 为预算上限，不承诺每个 shape 都启动 8 个
+worker；参考路径是显式 serial 的同一个 DSL，**不是 C++ 算子基线**。
+
+| 256×4096，8-worker budget | Serial μs | Static μs | Dynamic μs |
+| --- | ---: | ---: | ---: |
+| softmax | 384.73 | 80.20 | 88.95 |
+| layernorm moments | 221.85 | 53.50 | 61.81 |
+| 三阶段 multigrid + scalar | 775.72 | 124.99 | 261.62 |
+| 前 1/4 行 softmax，其余行 add | 263.03 | 77.56 | 63.40 |
+
+softmax / layernorm 分别约 **4.80× / 4.15×**。multigrid 的
+individual / adjacent / template 为 **144.64 / 131.68 / 123.95 μs**，
+template 相比 individual 少约 14.3% 时间；auto 与 template 的小差别
+属于同轮采样波动。uneven case dynamic 比 static 少约 **18.3%** 时间。
+这不意味着 dynamic 普遍更快：均匀的 multigrid 中小 chunk 原子领取
+明显更贵；小 shape 的启动/同步开销也可能超过并行收益。
+9×4096 layernorm serial / auto 为 3.54 / 3.66 μs（约 +3.6%）。
+启发式保留小任务串行，但运行时预算/guard 等入口仍有开销；没有
+宣称所有 shape 无退化。绝对时间和比值会随 package/频率
+状态波动，应使用同轮比较。
+
+两个 spawn 进程各占独立 4 CPU（10–13、14–17），256×4096 softmax
+均数值通过。记录为
+`build-dsl-grid/multiprocess-complete-final.json`；验证的是独立进程的
+CPU 隔离与调用能力，不是进程间 work stealing，也不据此宣称线性扩展。
+验证日志保存在 `cmake-build-debug/grid-*-final.log`，完整计时结果保存在
+`build-dsl-grid/scheduling-budget-checked-final.json`。
+
+## 语言能力补全：typed control-flow state（2026-10-03）
+
+补全顺序保持为以下五层。以下是第一层交付时的状态；后续第二至第五层
+的实现与剩余限制见文末「后续原语交付」，不将历史记录当成当前状态：
+
+1. **已实现**：typed tile/vector loop-carried state、动态分支结果合并、
+   helper 的条件/循环内提前返回。
+2. **待实现**：通用寄存器数据变换、任意 index 的 gather/scatter、
+   predicate reductions。已有 view transpose/reshape 和规则 stride
+   gather/scatter 不等于这些完整的值级原语。
+3. **待实现**：tile-local 独立循环、SIMD 循环和 execution layout，
+   与 task-level `T.grid` 保持不同层次。
+4. **待实现**：通用 reducer、scan、跨 worker collective/atomic，
+   必须明确数值顺序、同步域和共享存储契约。
+5. **待实现**：软件流水和架构专属裸指令扩展；沿用 CPU-first 后端模块，
+   不把 AMX/SME 的约束写进通用语言层。
+
+### 语义和前端
+
+`x = T.load(A); for ...: x = x + 1` 不再要求手工创建中间 buffer。
+IR 使用 `TileState` / `DeclareState` / `UpdateState` / `state_ref`
+描述逻辑值，不携带具体寄存器、Vec 数组或硬件 tile 数量。scalar
+继续使用 typed mutable locals。state 的 dtype、predicate kind、rank、
+logical extent 和显式 Vector tag 保持固定；静态不一致编译报错，
+尚不能证明相等的动态 extent 在 update 前检查。tile 的 shape 和地址
+表达式在值创建时捕获，不能随随后修改的标量悄悄变化。
+
+`old = x; x = x + 1` 保持 old 的快照；tuple 同时赋值先捕获各 RHS，
+因此 `x, y = y, x` 不会变成顺序覆盖。dynamic if 的两个分支均定义
+的 scalar/tile/nested tuple 通过 typed result slots 合并；只在一个
+路径定义的名字不导出。结果 shape 必须能在 if 前获得，不能将
+branch-local 的未知大小直接 hoist。view rebinding 仍需显式 storage，
+循环内才出现的新名字也不导出为循环后的结果。
+
+`T.func` 的 acyclic 条件 return 使用 continuation normalization。
+循环内 return 使用 `ExitRegion` / `Exit`，结果 slots 在 region 外声明，
+typed tuple 逐项写入；C++ 降级为向外跳转的 lexical label，不生成闭包，
+不跳入初始化作用域。value helper 的动态路径漏 return 会运行时报错，
+不是返回未初始化值或默认零；void return 仅退出 helper，不退出 kernel。
+递归深度、源文件定位、不可变 captures 的 cache identity 沿用已有规则。
+
+前端模块分工：`frontend/parser.py` 驱动 AST；`state.py` 管 typed
+状态和 branch joins；`helpers.py` 管参数绑定和 helper exit/result；
+`control.py` 仅管 AST store-name 和 continuation 变换。它们不决定
+CPU 存储布局。
+
+### CPU lowering 与优化边界
+
+注册的 `cpu-plan-state` pass 在 grid ownership 前执行，选择：
+
+- 小固定 tile：末轴拆成 native-register 范围内的 FixedTag pieces，
+  高维 row 坐标显式枚举；每个 piece 独立 C++ Vec/Mask local。
+- Scalable Vector：在预算内拆成多个 P=0 的 ScalableTag local，
+  runtime lane count 只决定每片 active count；不依赖 SVE VLS，
+  VLA sizeless 类型同样不进入数组/struct/tuple 存储。
+- 超出预算、一般动态 tile、矩阵累加的内存路径：private scalar Buffer，
+  update 使用独立 staging buffer 完成后 swap，保留同时更新语义。
+  暂存容量按 invocation/worker 私有复用，不共享到其他调用。
+
+`pass_options={"cpu_state_register_budget": n}` 支持 0–64，默认 12；
+这是 **每个 state** 的 piece 上限，不是全内核 liveness 或精确 spill
+预测。0 强制 scratch，便于验证两种降级语义。未实现全局物理寄存器
+分配，也不保证大量同时存活的 states 都不 spill。
+
+declare/update 和 state consumers 仍先生成 Vector IR 并运行已有
+vector passes，发射器读取已准备的 placement/regions，不自行跑 pass。
+同 extent/piece 的 consumer 和 reduction 直接遍历这些寄存器；不能
+匹配的轴/广播/布局通过显式 get/set 做正确性 fallback，未来由第二层
+的寄存器变换替代，不能称为已优化 shuffle。固定 piece 的完整访问
+省略额外 first mask；动态/scalable active counts 与显式 mask 保留。
+
+state reads 在中心 operation registry 中标为 read effect 和 state
+reference。CSE/reuse 不能跨 update 复用含 mutable state read 的 DAG；
+update 后清除发射阶段的物化缓存。worker-private state 可以在并行
+grid 内做独立递推，共享 mutable state 则阻止并行 ownership 证明，
+保守回退；require 模式报错。
+
+`T.dot(..., acc=acc)` 可以跨循环正确累加；当前不声称 AMX/SME
+矩阵寄存器能跨一般控制流持续驻留。保持正确性的内存路径与第五层
+ISA 状态/流水整合是不同工作。本阶段不增加 MLIR/LLVM 依赖。
+
+### 验证方式
+
+```bash
+conda run --no-capture-output -n af3 pytest -q \
+  python/tests/test_dsl_state.py python/tests/test_dsl_architecture.py
+conda run --no-capture-output -n af3 pytest -q \
+  python/tests/test_dsl.py python/tests/test_dsl_passes.py \
+  python/tests/test_dsl_grid.py python/tests/test_dsl_cost.py \
+  python/tests/test_language.py
+conda run --no-capture-output -n af3 python benchmarks/dsl_state.py \
+  --width 7 17 37 64 --count 32 --repeat 50000 --rounds 21 \
+  --output build-dsl-state/recurrence-final.json
+```
+
+`benchmarks/dsl_state_cross.py` 显式传入前文的 clang 19.1.3 路径和
+AArch64 sysroot，覆盖 fixed/dynamic tiles、scalable vector、loop/branch
+state 和 helper early exit，分别编译 SVE VLA/VLS、SME VLA/fixed SVL。
+这不是 ARM 运行或性能验证；没有连接离线主机。
+
+`benchmarks/dsl_state_reference.cpp` 的显式 C++ 对照同样将所有向量
+piece 保留在一个 recurrence loop 中，避免用逐片完整循环的较差
+调度夸大 DSL 的优势。计时共用 aligned buffers、native repeat、随机
+交错的轮次，编译不计时，CPU affinity 在结束时恢复。对照的是小
+tile state microbenchmark，不是 layernorm/matmul 全面性能结论；
+一般动态 tile 的 scratch 仍可能显著更慢，不能据此宣称无条件零开销。
+
+本机 GCC 13.3 / conda `af3` 验证记录：
+
+- 最终 `test_dsl_state.py` + `test_dsl_architecture.py` **37/37**（状态
+  29 项、既有架构约束 8 项）；覆盖 static/dynamic/zero/tail、快照和
+  simultaneous tuple update、typed branch/tuple joins、predicate state、
+  FP16/BF16/FP32/FP64 存储转换、Scalable Vector、while/reduction/
+  break/continue、helper 的嵌套循环 return/void return/missing return、
+  dot 累加、input-write snapshot、private/shared grid state 和非法变型。
+- 既有 DSL/architecture/pass/grid/cost/language cohort **123/123**。
+  此组执行在最后的模块拆分和 fixed-piece unmasked 优化之前；最终
+  版本由上述 37 项及 ARM 跨编译再次验证，不将前一组称为又一次
+  最终全量测试。
+- SVE/SME，VLA/VLS/fixed-SVL，fixed/dynamic/scalable **16/16** 跨编译。
+  没有 ARM 运行/性能数据。Ruff format 检查 language 和新增测试/脚本
+  **97 文件**，language 的 F821/F822/F823/E9 和 `git diff --check` 通过。
+
+最终 21 轮中位数（单次完整 32-step recurrence，单位 μs），同 CPU2、
+同缓冲区、同一次测量中的 C++ 对照：
+
+| Width | DSL register | 显式 C++ 同调度 | DSL forced scratch |
+| ---: | ---: | ---: | ---: |
+| 7 | 0.03166 | 0.03124 | 0.39216 |
+| 17 | 0.03205 | 0.03227 | 0.39892 |
+| 37 | 0.05017 | 0.04969 | 0.40964 |
+| 64 | 0.05029 | 0.05039 | 0.25464 |
+
+寄存器路径相对同调度 C++ 约 **−0.7% 至 +1.4%**，未观察到明显退化；
+forced scratch 约慢 **5–12.5×**。CPU 频率不设限时绝对时间在复测间
+有波动，因此不以不同轮次的最快值作比较。最终 JSON 保存在
+`build-dsl-state/recurrence-final.json`；反汇编检查 width=37 的 register
+版本，count 循环只有四组 add/FMA 和循环控制，没有 stack spill 或
+tile scratch 读写。它不是对其他 shape、更多存活 states 或其他 ISA
+的性能保证。所有修改仍在现有 `feat/new-dsl` 工作区，未自动提交。
+
+## 后续原语交付：第二至第五层
+
+第一层的 typed loop/branch/helper 状态仍然保留。本次按原顺序补齐
+后面四层的 CPU 基础实现，没有增加 MLIR/LLVM Python 依赖，也没有
+把 GPU/NPU 的 warp、异步事件或专用内存硬编码进顶层接口。
+
+| 层次 | 公共接口 | 当前 CPU 路径 |
+| --- | --- | --- |
+| 2：值变换与索引 | `transpose/reshape/broadcast_to`、`shuf/local_shuf/element_at`、`gather/scatter`、`mask_all/any/none/count/first/last` | 布局折叠、原有转置 fast path、native vec 原语和显式 lane fallback |
+| 3：局部执行 | `parallel`、`simd`、`ExecutionLayout` | ordered scalar axes + tagged SIMD induction，独立于任务级 `grid` |
+| 4：fold 与跨 worker 通信 | `reducer/reduce/scan`、`team/shared/barrier/team_reduce`、`atomic_*` | builtin vector reduction，custom ordered fold/scan，resident-team ABI，`atomic_ref` |
+| 5：流水与 ISA 包 | `prefetch/pipelined/double_buffer`、`amx.tdp`、`sme.load/mopa/store_tile` | 注册流水 pass、可选 guarded two-bank schedule、公开 AMX/SME 指令封装 |
+
+### 模块与降级职责
+
+- `frontend/{primitives,loops,reducers,collectives,pipeline,hardware}.py`
+  处理源语言合法性、dtype/shape 检查和结构化 IR。通用 reducer 在
+  这里展开为 typed scalar/tuple fold，保留 `kind/associative` 信息；
+  layout 描述逻辑遍历顺序，不代表内存 strides，也不代表 CPU worker。
+- `ir/{collective,pipeline}.py` 保留显式 team/barrier/collective 与
+  软件流水请求。索引存储是 `IndexedStore` effect，不能被当成普通
+  elementwise expression 重排。
+- `passes/kernel/transforms.py` 注册 `fold-value-transforms`，对可证明的
+  dense reshape 和 elementwise transpose 做表达式/布局折叠。一般
+  computation-value 的变换仍有正确性 lane fallback。
+- `passes/kernel/{pipeline,buffering}.py` 注册软件流水计划，在 Vector
+  lowering 前完成 lookahead/缓冲变换；C++ 发射器不运行优化 pass。
+- `backends/cpu/cpp/{primitives,collectives,hardware_sme}.py` 消费准备好的
+  Vector plans 和控制 IR。所有 Vec/Mask pieces 均是独立变量；标量
+  scratch/shared/buffer slots 可以使用 Buffer，不是向量数组。必要的
+  resident callback 与 ISA region callback 仍带强制内联宏。
+- 新增 C++ 公共 `execution/Atomic.h`，不从 DSL 引用 vec 的私有 details。
+  team 沿用 resident execution ABI；CPU `team`/atomic 是线程语义，
+  不承诺 Python 多进程之间的共享内存原子操作。
+
+op family、effects、traits 和基础 cost 仍集中在 operation/cost registry，
+本次新增的 indexed memory、register transform、mask reduction、atomic
+不在各优化函数里另造 expensive 列表。
+
+### 语义与保守边界
+
+`shuf` 是 public Vec API 的 native-word-local shuffle，不是任意大 tile
+上的全局置换；`local_shuf` 在每个 16B block 中应用常量 LaneOrder。
+当后续消费者抽取标量或改变布局时，先在原布局求值，避免因更换 tag
+改变 word-local 语义。尾部始终保留 logical active count。非 dense
+reshape 暂时使用逐 lane 读取/写入寄存器的 fallback，不宣称所有值变换
+都具有专用指令级实现。
+
+indexed gather/scatter 接受 rank-one memory view 和任意 rank 的 int32/
+int64 index tile；index 是逻辑元素下标，支持负物理 stride，active
+indices 做边界检查。gather 使用 load_convert；unique scatter 可以
+使用 native indexed store_convert。默认 duplicate scatter 保留逻辑顺序
+的 last-writer-wins；unique=True 是用户保证。任意 indexed grid writes
+尚无 ownership 证明，因此 auto 串行回退，require 报错。
+
+内建 add/min/max reduction 继续使用现有 Vector reduction 快路径；
+custom reducer 可以返回耦合 tuple（例如 value/index argmax），目前
+保持 left-fold 顺序，即使标注 associative=True 也不自动并行重关联。
+scan 支持 inclusive/exclusive、reverse、指定 axis 和 tuple reducer，
+但当前是 ordered CPU loop + private scalar output，尚无专门的 SIMD
+prefix scan。不能将这条正确性路径描述成与手写 SIMD scan 性能等价。
+
+`team` 每个 resident worker 执行一次，worker 数同时受到 provider
+capacity、调用预算和显式 requested workers 约束。shared 在进入 team
+前初始化；内部普通 allocation 是 worker-private。barrier/collective
+要求 team 顶层控制路径；目前不对一般条件/循环做 uniformity 推导。
+enclosing scalar/tile state mutation 和非本地退出被拒绝。collective
+通过共享 scalar slots 和两次 barrier 保证同步、避免提前复用；异常
+由 provider cancellation 释放等待者。普通共享写的 race 仍由调用者
+负责，编译器没有宣称提供完整的 race checker。
+
+`pipelined` 目前只支持 two-stage CPU 软件流水。默认插入有边界保护
+的预取 hint，不改变数值迭代顺序。`buffering=True` 仅适用于直线、
+固定逻辑 tile extent 的纯读取/存储循环：首轮 preload，next bank
+lookahead，current bank compute/store。输入与输出 root span 在运行时
+做不相交检查；别名、控制依赖、state/reduction 依赖或 varying-width
+tail 都保留 ordered fallback。它默认关闭，多出的标量 scratch 访存
+不一定划算。`double_buffer` 还可由用户显式排布两个 bank；尚不提供
+任意 stage 软件流水、GPU/NPU async copy/event 或自动依赖图调度。
+
+AMX tdp / SME mopa 根据 typed operands 选择指令，handle 只能在相应
+region 内使用。AMX 输入 packing、SME low-dtype grouped-K packing 是
+调用者责任，不能等同于 portable `T.dot` 的 scheduler/packing。
+所有可抛异常的尺寸/stride/feature 检查先于 ISA 状态切换；后端对
+不支持的组合报错。本轮 ARM 只做跨编译，不提供真实运行或性能数据。
+
+### 验证与性能记录
+
+CPU 再次由用户限频，当前 CPU2 governor 为 powersave，max 为 1.8GHz。
+不修改频率设置；性能只比较同一次运行中、同 buffer/affinity 的
+DSL 与 C++，不和上一节解除限频时的绝对计时作前后对比。结果仅用于
+已存在的 recurrence 路径回归，不能替代新 scan/流水/collective 的
+专项性能调优。
+
+本机 GCC 13.3、conda `af3` 的验证记录：
+
+- 既有 `test_dsl.py/state/grid/cost/passes/language` cohort **144/144**。
+  此轮发生在最后的 word-local state/two-bank 与接口边界修订之前，
+  不把它称为最后代码的再次全量运行。
+- 新增 primitives/local-loop/reducer/collective/pipeline 与既有架构
+  cohort **45/45**。随后修订的 positional execution layout、tuple
+  scan、empty fold/scan、非法输入、scalable SIMD、team 预算/初始化、
+  word-local state、indexed conversion/negative stride 重点复测
+  **15/15**；scalable widened-state 新增测试 **1/1**。
+- 最后的 scalable consumer 尾部保护后，既有 state + architecture
+  **37/37**；再补了前述 widened-state 测试。更宽 dtype 保持原 lane
+  extent，同时按 descriptor basis 修正 native pieces 的数量。
+- 状态 ARM 跨编译 **16/16**；新原语 ARM 跨编译 **30/30**，分别覆盖
+  SVE VLA/VLS、SME VLA/fixed SVL。后者包括 indexed conversion/masks、
+  local SIMD、scan/prefetch、自动双缓冲、widened state、team/atomic；
+  SME raw mopa/store 是 FP32 编译覆盖，不宣称所有 low-dtype 指令都已
+  实机验证。没有连接 ARM 主机或进行 ARM 性能测试。
+- Ruff format check **113 文件**，language F821/F822/F823/E9、新增
+  原语测试/跨编译脚本的 Ruff check 与 `git diff --check` 通过。生成
+  C++ 检查未出现 Vec/Mask arrays，必要 callbacks 均保留 inline 宏。
+
+复测命令：
+
+```bash
+conda run --no-capture-output -n af3 pytest -q \
+  python/tests/test_dsl_primitives.py python/tests/test_dsl_loops_reducers.py \
+  python/tests/test_dsl_collectives_pipeline.py python/tests/test_dsl_architecture.py
+conda run --no-capture-output -n af3 pytest -q \
+  python/tests/test_dsl_state.py python/tests/test_dsl_architecture.py
+conda run --no-capture-output -n af3 python benchmarks/dsl_state.py \
+  --width 7 37 --rounds 21 --repeat 50000 --cpu 2 \
+  --output build-dsl-state/recurrence-primitives-limited.json
+```
+
+`benchmarks/dsl_primitives_cross.py` 与已有 state cross 脚本一样，需要
+显式指定 clang 路径及 sysroot；本轮使用前文相同的 clang 19.1.3，
+产物在 `build-dsl-primitives-cross`，只做 compile-only 检查。
+
+当前限频下 21 轮中位数（单次完整 32-step recurrence，μs）：
+
+| Width | DSL register | 同调度 C++ | Forced scratch | Register 相对 C++ |
+| ---: | ---: | ---: | ---: | ---: |
+| 7 | 0.07417 | 0.07318 | 0.87388 | +1.35% |
+| 37 | 0.11217 | 0.11110 | 0.91214 | +0.96% |
+
+只比较同一行的同轮结果，寄存器路径没有明显退化，scalar scratch
+仍显著更慢；不可将它外推成所有新 primitive、任意 dtype/shape 或
+多 worker 调度均与手写 C++ 等速。原始记录在
+`build-dsl-state/recurrence-primitives-limited.json`。
+
+## 能力复核与 AF3 C++ 迁移准备
+
+本轮复核针对当前代码，而不是沿用早期 TODO：原先五层的 CPU 基础
+路径已经具备，但“有接口/正确性 fallback”和“所有算法均有最佳专用
+降级”不能混为一谈。本轮不修改 AF3 仓库，也不迁移其生产调用；先补
+会阻碍组合算法表达的能力，并保留源 C++ 路径作为之后的逐算子基线。
+
+### 五层的剩余边界
+
+| 层次 | 已有能力 | 尚未承诺的能力 |
+| --- | --- | --- |
+| 1：控制状态 | typed tile/vector loop state、if join、tuple/helper 返回、while/break/continue | 循环携带 memory view 的任意重绑定；一般控制流 uniformity 证明 |
+| 2：值与地址 | 寄存器变换、显式索引、mask 查询；本轮补 singleton 变换、多维坐标 gather | 全局大 vector 任意 shuffle 的专用指令网络；多维坐标 scatter；一般 reshape 的最优网络 |
+| 3：局部与任务执行 | ordered local axes、显式 SIMD/tag、grid static/dynamic/team-region | GPU fragment/thread/warp 布局；任意索引写入的 ownership 证明 |
+| 4：reducer/scan/collective | builtin SIMD reductions、ordered custom scalar/tuple fold/scan、CPU team/atomic | custom associative 并行重关联、SIMD prefix scan、分支同步证明、跨进程 collective |
+| 5：流水与 ISA | CPU prefetch、显式/可选自动双缓冲、AMX/SME operands | 任意 stage 依赖调度、GPU/NPU async copy/event/TMA、所有 ISA 的精细 cost/scheduling |
+
+第二至第五层剩余项多数是性能特化或后端能力，不能通过增加同名空 API
+算作完成。现有 CPU 双缓冲不会被标成 GPU 异步语义，CPU team/atomic
+也不被标成多进程/MPI 语义。
+
+### 与 TileLang / Triton 的对应
+
+对照官方 [TileLang language API](https://www.tilelang.com/autoapi/tilelang/language/index.html)、
+[loop API](https://www.tilelang.com/autoapi/tilelang/language/loop/index.html)、
+[reduction API](https://www.tilelang.com/autoapi/tilelang/language/reduce_op/index.html)
+以及 [Triton language API](https://triton-lang.org/main/python-api/triton.language.html)：
+
+| 组件 | 当前 DSL 对应/本轮补充 | 处理原则 |
+| --- | --- | --- |
+| shaped values / memory views | Tile/Vector、strides、load/store_convert、transpose、expand_dims/squeeze、indices、coordinate gather | 顶层保持逻辑值/布局语义，ISA 表示由后端合法化 |
+| fragment / execution layouts | ExecutionLayout + Vector tags；CPU grid/team 与 local SIMD 分层 | 不把 CPU scratch 冒充 GPU shared/fragment；未来布局属于 backend 模块 |
+| Parallel / serial / Pipelined | local loops、grid、two-stage CPU pipeline | 当前无 GPU warp layout、arbitrary-stage async 语义 |
+| reductions / scans / atomics | 已有基础实现；未重关联的 custom fold 保留顺序 | SIMD prefix、GPU warp/cluster collective 仍是专用 lowering 工作 |
+| allocation / composed algorithms | 本轮新增 replayable workspace、稳定 gate 数学、masked softmax/RMSNorm、在线分块 SDPA | 不通过 opaque ops::Attention/Matmul 调用隐藏算法 |
+| 其他通用算法原语 | sort/top-k/histogram、随机数、通用 bitcast、外部 intrinsic 扩展协议尚未全面覆盖 | 本次 AF3 C++ 加速内核清单不依赖它们，不为 API 数量盲目扩张 |
+
+这是一份针对 CPU/AF3 的取舍，不是 TileLang/Triton 全 API parity 声明。
+后端独立的 shape/address/状态语义可以继续扩展；异步资源、fragment、
+硬件精度/指令包应通过后端类型和模块加入，而非顶层硬编码 GPU 概念。
+不增加 MLIR/TVM/LLVM Python 依赖。
+
+### AF3 实际内核需求
+
+审查路径：
+`~/project/af3-torchneo/src/alphafold3/torch/acceleration/vecops/kernels/resources`。
+重点读取 indexed cross-attention、single/grid/MSA attention、transition、
+OuterProductMean、TriangleMultiplication 和 `StableMath.h`；没有更改这些
+文件。由源代码需求得到以下迁移分组：
+
+| 内核族 | DSL 所需组件 | 当前状态/下一步验收 |
+| --- | --- | --- |
+| Linear/Matmul/PackLinearB/PackMatmulB | cache-blocked matmul、packed operands、bias/residual epilogue、mixed dtype | 已有基础；迁移时保持 C++ packed ABI 和每种 shape/fusion benchmark |
+| Transition / DiffusionTransition / Conditioning | layernorm、adaptive affine、stable sigmoid/SiLU、连续 GEMM、private/replayed scratch | 本轮补可组合稳定数学与 workspace；校验 rounding、gate 算法和中间精度 |
+| Self/Cross/Grid/MSA attention、SingleActUpdate | 多头/批次 query grids、bias/mask、online max/sum/acc、QK/PV dots、gate epilogue | 本轮补 visible SDPA；功能表达具备，但 prepared C++ Attention 的策略/packing/acc 状态调度尚未性能等价 |
+| CrossAttentionIndexed / IBS / Indexer | 先 unique-atom projection，再按 row/feature 多维坐标 gather、局部 key/value tiles | 本轮补坐标 gather；sparse/indexed scheduler、窗口特化和 packing 复用仍需迁移期专项优化 |
+| OuterProductMean / TriangleMultiplication | 轴变换、transpose、mask/归约、分块 contraction、workspace 多阶段复用 | 基础原语可组合；具体调度与 scratch 生命周期/coloring 需要逐内核迁移及测量 |
+| Distributed* projections/updates | 本地计算 + 现有分布式通信边界 | 本地 DSL 可替换计算；MPI/跨 rank 通信保留框架/provider 层，不用 CPU team 模拟 |
+
+“表达所需基础能力齐备”不代表所有 AF3 C++ 内核已经转换，也不代表
+107aa TM-score/RMSD 和前后速度已验证。生产迁移仍需独立分组验收：先
+Linear/pack/transition，再 attention/indexed，最后 contraction/distributed
+本地算子；每组清空编译缓存、同轮 C++ 对照，并最终运行 107aa 和
+`compare_structures`。本轮没有 AF3 生产绑定修改，所以不声称这些验收
+已经完成。
+
+### 本轮实现与性能边界
+
+1. 新 `frontend/shapes.py` 提供 `indices/expand_dims/squeeze`；值变换在
+   广播到更高 rank 时正确转换 consumer axis，singleton 保持广播语义。
+   `indices` 降到 iota/fill，不生成坐标网格数组。
+2. `gather(view,(i0,...,in),...)` 对每个逻辑 axis 做 active bounds check，
+   合成物理 stride offset，然后 native indexed load_convert；支持负
+   stride、padding、mask 和 alias snapshot。scatter 仍限 rank-one view。
+3. 新 `ir/workspace.py` / `frontend/workspace.py` 保留 serial allocation
+   sites。C++ emitter 选 `WorkspaceContext&`，复用既有 replay adapter。
+   新公开 accessor `WorkspaceContext::thread_pool()` 借用 executor，不
+   赋予 worker 并发分配权限。元数据和当前执行预算确定 plan key；任意
+   scalar/data-dependent extent 被拒绝，避免错误 replay；被更新过的
+   metadata local（含前置 branch/loop）不能继续作为尺寸证明。不可变
+   shape tuple 还支持 constexpr slice 和 starred tuple expansion。
+4. `T.workspace((T.worker_capacity(),*tile_shape))` + `T.team` 可手工
+   复制持久 worker scratch，但默认 dense、无自动 cache-line padding。
+   这不等同于 AF3 C++ `worker_tensor` 的完整 prepared/lifetime 规划；
+   普通 grid 内 T.alloc 仍仅是 invocation/worker-private reuse。
+5. `_library/math.py` 提供 AF3 schedule 的 stable sigmoid/SiLU、RMSNorm、
+   finite-logit masked softmax。SME polynomial 显式选择，不把目标 cost
+   profile 误当成实际硬件 capability。rank-two last-axis 的后两者扩展
+   registered normalization pass，hoist row statistics，避免 consumer
+   微块中逐元素反复规约；其尾部仍能透明融合到 dot/packing/store。
+6. `_library/attention.py` 使用 visible dot、reduction、loop-state 实现
+   streamed SDPA，支持 bias、numeric masks、causal offsets、zero/all-masked
+   rows 和 epilogue。每块 QK scale/bias 在 product store 中融合，只存
+   当前 query-tile × key-block 分数，未创建完整 scores matrix。
+   概率默认按 V.dtype 舍入以便矩阵指令，float32 可显式关闭此舍入。
+7. 组合验证修正无 acc 的 dot 状态分析、state sink 的 dependent-dot
+   materialization，以及矩阵融合的 shape validation：只验证合法的
+   elementwise 边，不能把 reshape/expand/reduction 的子值误当作根
+   输出的直接广播。row slicing 保留 predicate 类型与变换坐标。
+8. literal locals / 纯常量 helper 返回保留 compile-time identity，支持
+   `static_assert(helper(...))`；进入会修改它们的 runtime loop/branch
+   才创建 mutable scalar slot。连续 grid 中的纯常量赋值无需 worker
+   publication/barrier；原调度测试改用真正的 runtime scalar 输入验证
+   single-worker phase，而非要求编译器同步一个无需运行时计算的常量。
+
+在线 SDPA 当前是功能与编译器组合基线。QK scores、部分 matrix state
+和 probability/统计仍可能走标量 scratch，packing/ISA resource setup
+未完全 hoist；与 C++ prepared Attention 的性能等价还不能承诺。这些
+是后续应深入生成结果优化的具体位置，而非声称所有 fusion 已完成。
+本轮继续遵守 Vec/Mask 拆成独立变量、必要 callback 强制内联；不更改
+用户的 CPU 限频，也不混用不同频率轮次的计时。
+
+### 本轮验证记录
+
+执行环境为本机 x86（conda `af3`），保留用户当前 CPU 限频设置。
+没有连接 ARM 主机；ARM 仅作 clang 19.1.3 跨编译检查。
+
+| 测试组 | 结果 | 覆盖范围 |
+| --- | --- | --- |
+| attention_library + memory_extensions + attention_edges | 23 passed | 多维负/padded stride gather、workspace replay/执行预算、worker replicas、masked softmax/RMSNorm/gate、在线 attention 的 causal/all-masked/empty/dynamic cases、BF16 概率和显式 AMX |
+| workspace_rules + attention_codegen | 9 passed | replay 尺寸不可混入 runtime scalar、tuple shape 语法、row-stat hoisting、visible dot、独立 Vec/Mask locals、inline callback、constexpr helper |
+| grid + loops_reducers + collectives_pipeline | 54 passed | 调度、循环/reducer/scan、team/atomic 与 CPU pipeline 回归 |
+| dsl + state + passes + cost + language | 133 passed | 既有基础 DSL、状态、pass、cost 和语言回归 |
+| matmul_codegen + matmul（下述筛选） | 25 passed, 16 deselected | dot/matmul 代码生成及针对性执行回归，不是完整 MatmulBench 性能扫测 |
+| state + dsl（constexpr 修改后的下述筛选） | 15 passed, 56 deselected | while/helper/tuple/control/状态 snapshot/reduction 条件 |
+| ARM primitive cross | 42/42 compile-only | SVE VLA/VLS 与 SME VLA/fixed SVL；包含新 coordinates/workspace/attention 组合 |
+
+133 项基础回归和 25 项矩阵回归先于最终 constexpr-local/helper 与
+tuple 语法调整运行；最后的 15 项控制流、9 项纯代码生成/规则和
+54 项调度/collective 回归验证了该调整。测试组存在重复，不能把表中
+数字相加作为独立测试总数。调度 fixture 最终改用 runtime `count_input`
+后，又运行相关筛选回归，5 passed、21 deselected。本轮不报告新旧 CPU
+频率间的性能比例，
+也没有运行 C++ prepared Attention 的等价性能验收或 AF3 107aa。
+
+主要复测命令：
+
+```bash
+conda run --no-capture-output -n af3 python -m pytest -q \
+  python/tests/test_dsl_attention_library.py \
+  python/tests/test_dsl_memory_extensions.py \
+  python/tests/test_dsl_attention_edges.py
+conda run --no-capture-output -n af3 python -m pytest -q \
+  python/tests/test_dsl_workspace_rules.py \
+  python/tests/test_dsl_attention_codegen.py
+conda run --no-capture-output -n af3 python -m pytest -q \
+  python/tests/test_dsl_grid.py python/tests/test_dsl_loops_reducers.py \
+  python/tests/test_dsl_collectives_pipeline.py
+conda run --no-capture-output -n af3 python -m pytest -q \
+  python/tests/test_dsl.py python/tests/test_dsl_state.py \
+  python/tests/test_dsl_passes.py python/tests/test_dsl_cost.py \
+  python/tests/test_language.py
+conda run --no-capture-output -n af3 python -m pytest -q \
+  python/tests/test_dsl_matmul_codegen.py python/tests/test_dsl_matmul.py \
+  -k 'not product_layouts and not tails_packed and not panel_phases and not packed_abi'
+conda run --no-capture-output -n af3 python -m pytest -q \
+  python/tests/test_dsl_state.py python/tests/test_dsl.py \
+  -k 'while or helper or tuple or predicate or control_flow or aliasing_snapshots or reduction_condition or axis_reductions'
+conda run --no-capture-output -n af3 python benchmarks/dsl_primitives_cross.py \
+  --clang /opt/spack/opt/spack/linux-ubuntu24.04-sapphirerapids/gcc-13.3.0/llvm-19.1.3-2tjty3xfpnxpvl3l2ghtirmts4fyekim/bin/clang++ \
+  --sysroot build-dsl-cross/sysroot/usr/aarch64-linux-gnu
+```
+
+跨编译产物位于 `build-dsl-primitives-cross`。Ruff format check（121 个
+文件）、language 的 F821/F822/F823/E9 检查和 `git diff --check` 通过。
+自动 worker scratch padding/lifetime coloring、SIMD prefix scan、prepared
+attention 的 packing/resource hoisting，以及 GPU/NPU async pipeline
+仍按前述边界保留为明确的后续工作，不以功能 fallback 冒充已完成的
+专用性能路径。

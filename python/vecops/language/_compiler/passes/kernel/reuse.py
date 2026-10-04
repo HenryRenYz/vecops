@@ -22,6 +22,7 @@ def plan_computation_reuse(ir, context):
           source = reduction.args[0]
           if (
             id(source) not in future
+            or any(catalog.has(e, Trait.STATE_REFERENCE) for e in walk(source))
             or source.type.dtype not in {"float32", "float64"}
             or estimate(source, costs, boundaries=ir.materializations).compute_cycles
             < costs.policy("reuse_compute_budget", 6)

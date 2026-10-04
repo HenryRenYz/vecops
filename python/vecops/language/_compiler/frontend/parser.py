@@ -1,19 +1,44 @@
 """Python AST partial evaluation into structured kernel IR."""
 
 from __future__ import annotations
+
 import ast
+from dataclasses import replace
 from types import ModuleType
-from ...dsl import DSLFunction, Intrinsic, Vector
+
+from ...dsl import DSLFunction, Intrinsic, Vector, ExecutionLayout
 from ...expr import Dynamic
 from ...types import TensorType
 from .. import ir as I
 from ..dtypes import dtype_name
-from .capture import Body, symbol, capture, DSL_MODULES
+from ..operations import Trait, use_catalog
+from ..operations import current as operation_snapshot
+from .capture import DSL_MODULES, Body, capture, symbol
 from .diagnostics import DSLError
-from ..operations import Trait, current as operation_snapshot, use_catalog
+from .helpers import HelperFrontend
+from .state import StateFrontend
+from .primitives import PrimitivesFrontend
+from .loops import LoopsFrontend
+from .reducers import ReducersFrontend
+from .collectives import CollectiveFrontend
+from .pipeline import PipelineFrontend
+from .hardware import HardwareFrontend
+from .shapes import ShapesFrontend
+from .workspace import WorkspaceFrontend
 
 
-class Frontend:
+class Frontend(
+  HelperFrontend,
+  StateFrontend,
+  PrimitivesFrontend,
+  LoopsFrontend,
+  ReducersFrontend,
+  CollectiveFrontend,
+  PipelineFrontend,
+  HardwareFrontend,
+  ShapesFrontend,
+  WorkspaceFrontend,
+):
   def __init__(self, ir, *, catalog=None):
     self.operations = catalog or operation_snapshot()
     self.body = ir.body
@@ -28,16 +53,34 @@ class Frontend:
     self.promoted = {}
     self.diagnostics = []
     self.hardware_regions = []
+    self.helper_exits = []
+    self.teams = []
     for name, parameter in ir.signature.parameters.items():
       annotation = ir.annotations[name]
       self.parameters[name] = annotation
       if isinstance(annotation, TensorType):
+        if annotation.dtype is None:
+          raise DSLError("DSL tensor annotations require an explicit dtype")
         if annotation.optional or parameter.default is None:
           raise DSLError("optional DSL tensors are not implemented; select a template in the outer factory")
         shape = tuple(symbol(v) for v in annotation.shape)
         strides = tuple(symbol(v) for v in annotation.concrete_strides)
         self.env[name] = I.View(
-          name, dtype_name(annotation.dtype), shape, strides, I.literal(0), annotation.access != "input"
+          name,
+          dtype_name(annotation.dtype),
+          shape,
+          strides,
+          I.literal(0),
+          annotation.access != "input",
+          region=I.ViewRegion(
+            shape,
+            strides,
+            tuple(I.literal(0) for _ in shape),
+            shape,
+            (1,) * len(shape),
+            tuple(range(len(shape))),
+            (False,) * len(shape),
+          ),
         )
         for axis, value in enumerate(annotation.shape):
           if isinstance(value, Dynamic):
@@ -81,12 +124,23 @@ class Frontend:
     if isinstance(node, (ast.Tuple, ast.List)):
       if isinstance(node, ast.List):
         self.error(node, "use immutable tuples in kernel code")
-      return tuple(self.expression(v) for v in node.elts)
+      values = []
+      for item in node.elts:
+        if isinstance(item, ast.Starred):
+          expanded = self.expression(item.value)
+          if not isinstance(expanded, tuple):
+            self.error(item, "tuple expansion requires an immutable tuple")
+          values.extend(expanded)
+        else:
+          values.append(self.expression(item))
+      return tuple(values)
     if isinstance(node, ast.Attribute):
       path = ast.unparse(node)
       if path in self.env:
         return self.env[path]
       obj = self.expression(node.value)
+      if node.attr == "T" and isinstance(obj, I.Expr) and isinstance(obj.type, I.TileType):
+        return self.primitive("transpose", [obj], {}, node)
       if isinstance(obj, ModuleType):
         value = getattr(obj, node.attr, None)
         if isinstance(value, ModuleType) and value.__name__ in DSL_MODULES:
@@ -111,7 +165,8 @@ class Frontend:
       if node.attr == "dtype" and isinstance(obj, (I.View, I.Expr)):
         return obj.dtype if isinstance(obj, I.View) else obj.type.dtype
       if node.attr == "T" and isinstance(obj, I.View):
-        return I.View(obj.storage, obj.dtype, obj.shape[::-1], obj.strides[::-1], obj.offset, obj.writable, obj.owned)
+        region = replace(obj.region, axes=obj.region.axes[::-1]) if obj.region is not None else None
+        return replace(obj, shape=obj.shape[::-1], strides=obj.strides[::-1], region=region)
       self.error(node, f"unsupported attribute {node.attr!r}")
     if isinstance(node, ast.BinOp):
       operators = {
@@ -206,6 +261,17 @@ class Frontend:
     if isinstance(node, ast.Subscript):
       obj = self.expression(node.value)
       if isinstance(obj, tuple):
+        if isinstance(node.slice, ast.Slice):
+          bounds = []
+          for part in (node.slice.lower, node.slice.upper, node.slice.step):
+            value = None if part is None else self.expression(part)
+            bound = None if value is None else I.constant(self.value(value, node))
+            if value is not None and type(bound) is not int:
+              self.error(node, "tuple slice bounds must be compile-time integers")
+            bounds.append(bound)
+          if bounds[2] == 0:
+            self.error(node, "tuple slice bounds/step must be compile-time integers with a nonzero step")
+          return obj[slice(*bounds)]
         index = I.constant(self.value(self.expression(node.slice), node))
         if not isinstance(index, int):
           self.error(node, "tuple indices must be compile-time integers")
@@ -214,21 +280,36 @@ class Frontend:
         self.error(node, "only tensor/tile views and tuples can be indexed")
       items = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
       shape, strides, offset = [], [], obj.offset
+      region = obj.region
+      starts, widths, steps, region_clipped, axes = (
+        (list(region.starts), list(region.widths), list(region.steps), list(region.clipped), [])
+        if region is not None
+        else ([], [], [], [], [])
+      )
       axis = 0
       for item in items:
         if isinstance(item, ast.Constant) and item.value is Ellipsis:
           remaining = len(obj.shape) - (len(items) - 1)
           shape.extend(obj.shape[axis : axis + remaining])
           strides.extend(obj.strides[axis : axis + remaining])
+          if region is not None:
+            axes.extend(region.axes[axis : axis + remaining])
           axis += remaining
           continue
         if axis >= len(obj.shape):
           self.error(node, "too many tensor indices")
         extent, stride = obj.shape[axis], obj.strides[axis]
+        full_slice = isinstance(item, ast.Slice) and item.lower is None and item.upper is None and item.step is None
+        if region is not None and region.clipped[region.axes[axis]] and not full_slice:
+          # A second clipped subregion is relative to the first clipped start,
+          # not its original affine start. Retain addresses, drop the proof.
+          region = None
         if isinstance(item, ast.Slice):
-          if item.lower is None and item.upper is None and item.step is None:
+          if full_slice:
             shape.append(extent)
             strides.append(stride)
+            if region is not None:
+              axes.append(region.axes[axis])
             axis += 1
             continue
           step = self.value(self.expression(item.step), node) if item.step else I.literal(1)
@@ -243,6 +324,13 @@ class Frontend:
             start = I.binary("add", extent, start)
           if I.constant(stop) is not None and I.constant(stop) < 0:
             stop = I.binary("add", extent, stop)
+          if region is not None:
+            root_axis = region.axes[axis]
+            starts[root_axis] = I.binary("add", starts[root_axis], I.binary("mul", start, I.literal(steps[root_axis])))
+            widths[root_axis] = I.binary("mul", I.binary("sub", stop, start), I.literal(steps[root_axis]))
+            steps[root_axis] *= step.data
+            region_clipped[root_axis] = True
+            axes.append(root_axis)
           start = I.binary("max", I.literal(0), I.binary("min", start, extent))
           clipped = I.binary("min", stop, extent)
           # Native lane extents are positive; preserve a canonical min for
@@ -263,11 +351,26 @@ class Frontend:
             self.error(node, "view indices must be scalar integers; use strided regions for vector access")
           if I.constant(index) is not None and I.constant(index) < 0:
             index = I.binary("add", extent, index)
+          if region is not None:
+            root_axis = region.axes[axis]
+            starts[root_axis] = I.binary("add", starts[root_axis], I.binary("mul", index, I.literal(steps[root_axis])))
+            widths[root_axis] = I.literal(1)
+            region_clipped[root_axis] = False
           offset = I.binary("add", offset, I.binary("mul", index, stride))
         axis += 1
       shape.extend(obj.shape[axis:])
       strides.extend(obj.strides[axis:])
-      return I.View(obj.storage, obj.dtype, tuple(shape), tuple(strides), offset, obj.writable, obj.owned)
+      if region is not None:
+        axes.extend(region.axes[axis:])
+        region = replace(
+          region,
+          starts=tuple(starts),
+          widths=tuple(widths),
+          steps=tuple(steps),
+          axes=tuple(axes),
+          clipped=tuple(region_clipped),
+        )
+      return replace(obj, shape=tuple(shape), strides=tuple(strides), offset=offset, region=region)
     if isinstance(node, ast.Call):
       return self.call(node)
     self.error(node, f"unsupported expression {type(node).__name__}")
@@ -288,12 +391,20 @@ class Frontend:
       function = self.expression(node.func)
       if isinstance(function, Body):
         return self.helper(function, node)
-      if function is Vector:
+      if function in (Vector, ExecutionLayout):
+
+        def descriptor_value(value):
+          if isinstance(value, I.Expr) and value.op == "literal":
+            return value.data
+          if isinstance(value, tuple):
+            return tuple(descriptor_value(v) for v in value)
+          return value
+
         args = [self.expression(a) for a in node.args]
         kwargs = {k.arg: self.expression(k.value) for k in node.keywords}
-        args = [v.data if isinstance(v, I.Expr) and v.op == "literal" else v for v in args]
-        kwargs = {k: v.data if isinstance(v, I.Expr) and v.op == "literal" else v for k, v in kwargs.items()}
-        return Vector(*args, **kwargs)
+        args = [descriptor_value(v) for v in args]
+        kwargs = {k: descriptor_value(v) for k, v in kwargs.items()}
+        return function(*args, **kwargs)
       if not isinstance(function, Intrinsic):
         self.error(node, "arbitrary Python calls are not allowed; use T.func or a DSL intrinsic")
       operation = function.name
@@ -315,7 +426,6 @@ class Frontend:
       "_matmul": {"acc", "acc_dtype", "implementation", "packing", "BM", "BN", "BK", "swap"},
       "pack": {"side", "format", "dtype"},
       "packed": {"side", "format"},
-      "_normalize": {"kind", "eps", "variance", "unroll"},
     }.get(operation, set(self.operations.get(operation).keywords))
     if set(kwargs) - allowed:
       self.error(node, f"unsupported {operation} keyword(s): {', '.join(sorted(set(kwargs) - allowed))}")
@@ -346,6 +456,30 @@ class Frontend:
       kind = operation[:3]
       if not self.hardware_regions or self.hardware_regions[-1][0] != kind:
         self.error(node, f"{operation} requires a matching lexical hardware region")
+      if kind == "sme":
+        result = self.sme_operation(operation, args, node)
+        if result is not NotImplemented:
+          return result
+      if operation == "amx.tdp":
+        if len(args) != 3 or any(
+          not isinstance(v, I.AMXTile) or v.region != id(self.hardware_regions[-1]) for v in args
+        ):
+          self.error(node, "amx.tdp expects accumulator, A, B tile handles from this region")
+        acc, a, b = args
+        integer = a.dtype in {"int8", "uint8"} and b.dtype in {"int8", "uint8"}
+        floating = a.dtype == b.dtype and a.dtype in {"float16", "bfloat16"}
+        if not (integer and acc.dtype == "int32" or floating and acc.dtype == "float32"):
+          self.error(node, "unsupported AMX tdp operand/accumulator dtype combination")
+        if len({v.index for v in args}) != 3:
+          self.error(node, "AMX tdp requires three distinct tile registers")
+        cfg = self.hardware_regions[-1][1]
+        m, nbytes = cfg[acc.index]
+        am, kbytes = cfg[a.index]
+        bk, bnbytes = cfg[b.index]
+        if am != m or bnbytes != nbytes or kbytes != bk * 4 or nbytes % 4:
+          self.error(node, "AMX tdp configuration dimensions are incompatible")
+        self.block.statements.append(I.ArchitectureCall(operation, operands=args))
+        return acc
       if operation == "sme.zero_za":
         if args:
           self.error(node, "zero_za takes no arguments")
@@ -356,7 +490,7 @@ class Frontend:
         count = 1 if operation == "amx.zero" else 2
         if len(args) != count:
           self.error(node, f"{operation} expects {count} arguments")
-        tile = I.constant(self.value(args[0], node))
+        tile = args[0].index if isinstance(args[0], I.AMXTile) else I.constant(self.value(args[0], node))
         if isinstance(tile, bool) or not isinstance(tile, int) or not 0 <= tile < len(self.hardware_regions[-1][1]):
           self.error(node, "AMX tile index must be a configured compile-time constant")
         view = args[1] if count == 2 else None
@@ -365,8 +499,40 @@ class Frontend:
         if operation == "amx.store" and not view.writable:
           self.error(node, "AMX store destination is input-only")
         self.block.statements.append(I.ArchitectureCall(operation, tile, view))
+        if operation in {"amx.zero", "amx.load", "amx.stream_load"}:
+          dtype = dtype_name(kwargs.get("dtype", "float32")) if view is None else view.dtype
+          return I.AMXTile(tile, dtype, id(self.hardware_regions[-1]))
       return None
+    workspace = self.workspace_operation(operation, args, kwargs, node)
+    if workspace is not NotImplemented:
+      return workspace
+    shaped = self.shape_operation(operation, args, kwargs, node)
+    if shaped is not NotImplemented:
+      return shaped
+    primitive = self.primitive(operation, args, kwargs, node)
+    if primitive is not NotImplemented:
+      return primitive
+    collective = self.collective(operation, args, kwargs, node)
+    if collective is not NotImplemented:
+      return collective
+    pipeline = self.pipeline_operation(operation, args, kwargs, node)
+    if pipeline is not NotImplemented:
+      return pipeline
+    if operation in {"reduce", "scan"}:
+      return self.fold(operation, args, kwargs, node)
+    if operation in {"parallel", "simd"}:
+      return (operation, args, kwargs)
     if operation in {"range", "serial", "grid", "unroll"}:
+      if operation == "grid":
+        if set(kwargs) - {"schedule", "chunk", "parallel"}:
+          self.error(node, "unknown grid option")
+        schedule, parallel = kwargs.get("schedule", "auto"), kwargs.get("parallel", "auto")
+        chunk = I.constant(self.value(kwargs.get("chunk", I.literal(1)), node))
+        if schedule not in {"auto", "static", "dynamic"} or parallel not in {"auto", "require", "serial"}:
+          self.error(node, "invalid grid schedule or parallel policy")
+        if type(chunk) is not int or not 1 <= chunk <= 1048576:
+          self.error(node, "grid chunk must be a positive compile-time integer <= 1048576")
+        return (operation, args, (schedule, chunk, parallel))
       if operation == "serial":
         return (operation, args, self.unroll_count(kwargs.get("unroll", I.literal(2)), node))
       return (operation, args)
@@ -384,11 +550,14 @@ class Frontend:
         value = I.Expr(I.TileType("float32", value.type.shape), "cast", (value,))
       kind = kwargs.get("kind", "layernorm")
       variance = kwargs.get("variance", "centered")
-      if kind not in {"layernorm", "softmax"} or variance not in {"centered", "moments"}:
+      if kind not in {"layernorm", "rmsnorm", "softmax", "masked_softmax"} or variance not in {"centered", "moments"}:
         self.error(node, "unsupported normalization algorithm")
+      accuracy = kwargs.get("accuracy", "strict")
+      if accuracy not in {"strict", "fast", "estimate"}:
+        self.error(node, "accuracy must be strict, fast or estimate")
       eps = self.value(kwargs.get("eps", I.literal(1e-5)), node)
       unroll = self.unroll_count(kwargs.get("unroll", I.literal(2)), node)
-      return I.Expr(value.type, "row_normalize", (value, eps), (kind, variance, unroll))
+      return I.Expr(value.type, "row_normalize", (value, eps), (kind, variance, unroll, accuracy))
     if operation in {"dot", "_matmul"}:
       pure = len(args) in (2, 3) and not isinstance(args[0], tuple)
       if len(args) not in (2, 3) or not pure and len(args[0]) != 2:
@@ -793,50 +962,14 @@ class Frontend:
       self.error(node, "unroll exceeds the 1024-copy code-size budget")
     return count
 
-  def helper(self, body, node):
-    if body.tree.args.vararg or body.tree.args.kwarg or body.tree.args.posonlyargs:
-      self.error(node, "DSL helpers currently require named positional/keyword-only parameters")
-    if self.helper_depth >= 32:
-      self.error(node, "DSL helper expansion depth exceeds 32")
-    positional = [a.arg for a in body.tree.args.args]
-    parameters = positional + [a.arg for a in body.tree.args.kwonlyargs]
-    args = [self.expression(a) for a in node.args]
-    kwargs = {k.arg: self.expression(k.value) for k in node.keywords}
-    if len(args) > len(positional):
-      self.error(node, "too many helper arguments")
-    bound = dict(zip(parameters, args))
-    for name, value in kwargs.items():
-      if name not in parameters or name in bound:
-        self.error(node, "invalid or duplicate helper argument")
-      bound[name] = value
-    defaults = dict(zip(positional[len(positional) - len(body.tree.args.defaults) :], body.tree.args.defaults))
-    defaults.update({a.arg: v for a, v in zip(body.tree.args.kwonlyargs, body.tree.args.kw_defaults) if v is not None})
-    previous_env, previous_body = self.env, self.body
-    self.env = dict(body.environment)
-    self.env.update(bound)
-    self.body = body
-    self.helper_depth += 1
-    try:
-      for name in parameters:
-        if name not in self.env:
-          if name not in defaults:
-            self.error(node, f"missing helper argument {name!r}")
-          self.env[name] = self.expression(defaults[name])
-      result = None
-      for statement in body.tree.body:
-        if isinstance(statement, ast.Return):
-          result = self.expression(statement.value) if statement.value else None
-          break
-        self.statement(statement)
-      return result
-    finally:
-      self.helper_depth -= 1
-      self.env, self.body = previous_env, previous_body
-
   def assign(self, target, value, node):
     if isinstance(target, ast.Tuple):
       if not isinstance(value, tuple) or len(value) != len(target.elts):
         self.error(node, "tuple assignment arity mismatch")
+      value = tuple(
+        self.freeze_tile(v) if isinstance(v, I.Expr) and isinstance(v.type, I.ScalarType) else self.snapshot_state(v)
+        for v in value
+      )
       for item, val in zip(target.elts, value):
         self.assign(item, val, node)
       return
@@ -849,8 +982,18 @@ class Frontend:
       return
     if not isinstance(target, ast.Name):
       self.error(node, "only names, tuples and writable views can be assigned")
+    existing = self.env.get(target.id)
+    if isinstance(existing, I.Expr) and existing.op == "state_ref":
+      self.check_state_type(existing.type, value, node)
+      self.block.statements.append(I.UpdateState(existing.data, self.freeze_tile(value)))
+      return
     if isinstance(value, I.Expr) and isinstance(value.type, I.ScalarType):
       existing = self.env.get(target.id)
+      if value.op == "literal" and not (isinstance(existing, I.Expr) and existing.op == "local"):
+        # Preserve compile-time helper results/locals. Structured control
+        # promotes an assigned constant to a runtime slot before entering it.
+        self.env[target.id] = value
+        return
       # Scalars assigned in control flow are loop-carried C++ locals.
       if isinstance(existing, I.Expr) and existing.op == "local":
         if existing.type.dtype != value.type.dtype:
@@ -863,6 +1006,7 @@ class Frontend:
     else:
       if isinstance(value, I.Expr) and isinstance(value.type, I.TileType):
         value = self.freeze_tile(value)
+        value = self.snapshot_state(value)
         self.block.statements.append(I.BindTile(value))
       self.env[target.id] = value
 
@@ -887,7 +1031,7 @@ class Frontend:
         return copies[id(expr)]
       arguments = tuple(freeze(a) for a in expr.args)
       data = expr.data
-      if expr.op == "load":
+      if self.operations.has(expr, Trait.MEMORY_READ):
         view = expr.data
         shape, strides, offset = (
           tuple(freeze(v) for v in view.shape),
@@ -895,12 +1039,14 @@ class Frontend:
           freeze(view.offset),
         )
         if shape != view.shape or strides != view.strides or offset is not view.offset:
-          data = I.View(view.storage, view.dtype, shape, strides, offset, view.writable, view.owned)
-      if arguments == expr.args and data is expr.data:
-        return expr
+          data = replace(view, shape=shape, strides=strides, offset=offset)
       typ = expr.type
       if isinstance(typ, I.TileType):
-        typ = I.shaped_type(typ.dtype, tuple(freeze(v) for v in typ.shape), typ, typ.mask, keep_tag=True)
+        shape = tuple(freeze(v) for v in typ.shape)
+        if any(a is not b for a, b in zip(shape, typ.shape)):
+          typ = I.shaped_type(typ.dtype, shape, typ, typ.mask, keep_tag=True)
+      if arguments == expr.args and data is expr.data and typ is expr.type:
+        return expr
       return I.Expr(typ, expr.op, arguments, data)
 
     return freeze(value)
@@ -908,6 +1054,8 @@ class Frontend:
   def statements(self, nodes):
     for node in nodes:
       self.statement(node)
+      if isinstance(node, ast.Return):
+        break
 
   def nested(self, nodes):
     previous = self.block
@@ -925,15 +1073,20 @@ class Frontend:
       if (
         name not in ignore
         and self.env.get(name) is not value
-        and not (isinstance(value, I.Expr) and value.op == "local")
+        and not (isinstance(value, I.Expr) and value.op in {"local", "state_ref"})
       ):
-        self.error(node, "loop-carried tile/view rebinding requires explicit T.alloc storage")
+        self.error(node, "loop-carried view rebinding requires explicit storage; tile/vector values may carry state")
 
   def statement(self, node):
     if isinstance(node, ast.With):
-      if len(node.items) != 1 or node.items[0].optional_vars is not None:
+      if len(node.items) != 1:
         self.error(node, "hardware regions cannot bind host context-manager values")
       region = self.expression(node.items[0].context_expr)
+      if isinstance(region, tuple) and region[0] == "team-region":
+        self.team_region(node, region)
+        return
+      if node.items[0].optional_vars is not None:
+        self.error(node, "hardware regions cannot bind host context-manager values")
       if not isinstance(region, tuple) or len(region) != 3 or region[0] != "hardware-region":
         self.error(node, "with requires T.sme.region or T.amx.region")
       _, kind, configuration = region
@@ -986,37 +1139,40 @@ class Frontend:
       if node.orelse:
         self.error(node, "for ... else is not supported")
       loop = self.expression(node.iter)
-      if not isinstance(loop, tuple) or len(loop) not in (2, 3) or loop[0] not in {"range", "serial", "unroll", "grid"}:
+      if isinstance(loop, tuple) and loop[0] in {"parallel", "simd"}:
+        self.local_loop(node, loop)
+        return
+      if (
+        not isinstance(loop, tuple)
+        or len(loop) not in (2, 3)
+        or loop[0] not in {"range", "serial", "unroll", "grid", "pipelined"}
+      ):
         self.error(node, "kernel loops require range/T.serial/T.grid/T.unroll")
       kind, values = loop[:2]
       unroll = loop[2] if len(loop) == 3 else 2
       if kind == "grid":
-        before = dict(self.env)
         targets = node.target.elts if isinstance(node.target, ast.Tuple) else [node.target]
         if len(targets) != len(values):
           self.error(node, "grid dimension/target mismatch")
         for target in targets:
           if not isinstance(target, ast.Name):
             self.error(node, "grid targets must be names")
+        self.promote_control_state(node.body, node, ignore=tuple(t.id for t in targets))
+        before = dict(self.env)
 
-        def build(axis):
-          if axis == len(targets):
-            return self.nested(node.body)
-          target, stop = targets[axis], self.value(values[axis], node)
+        names, extents = [], []
+        for target, value in zip(targets, values):
+          stop = self.value(value, node)
           if not isinstance(stop.type, I.ScalarType) or "int" not in stop.type.dtype:
             self.error(node, "grid bounds must be scalar integers")
           name = self.unique(target.id)
-          old = self.env.get(target.id)
           self.env[target.id] = I.Expr(I.ScalarType("int64"), "local", data=name)
-          body = I.Block([I.For(name, I.literal(0), stop, I.literal(1), build(axis + 1))])
-          if old is None:
-            self.env.pop(target.id, None)
-          else:
-            self.env[target.id] = old
-          return body
+          names.append(name)
+          extents.append(stop)
 
         self.loop_depth += 1
-        self.block.statements.extend(build(0).statements)
+        body = self.nested(node.body)
+        self.block.statements.append(I.Grid(tuple(names), tuple(extents), body, *unroll))
         self.loop_depth -= 1
         self.verify_loop_environment(before, node, tuple(t.id for t in targets))
         self.env = before
@@ -1048,6 +1204,7 @@ class Frontend:
           self.statements(node.body)
         self.loop_depth -= 1
       else:
+        self.promote_control_state(node.body, node, ignore=(node.target.id,))
         name = self.unique(node.target.id)
         before = dict(self.env)
         self.env[node.target.id] = I.Expr(I.ScalarType("int64"), "local", data=name)
@@ -1056,7 +1213,12 @@ class Frontend:
         self.loop_depth -= 1
         self.verify_loop_environment(before, node, (node.target.id,))
         self.env = before
-        self.block.statements.append(I.For(name, start, stop, step, body, unroll))
+        if kind == "pipelined":
+          self.block.statements.append(
+            I.PipelineFor(I.For(name, start, stop, step, body, unroll[2]), *unroll[:2], unroll[3])
+          )
+        else:
+          self.block.statements.append(I.For(name, start, stop, step, body, unroll))
     elif isinstance(node, ast.If):
       condition = self.value(self.expression(node.test), node)
       if not isinstance(condition.type, I.ScalarType):
@@ -1066,25 +1228,36 @@ class Frontend:
       else:
         for storage in tuple(self.promoted):
           self.materialize(storage)
+        self.promote_control_state(node.body + node.orelse, node)
         before = dict(self.env)
         body = self.nested(node.body)
         body_env = dict(self.env)
         self.env = dict(before)
         otherwise = self.nested(node.orelse)
-        for name in set(body_env) | set(self.env):
+        otherwise_env = dict(self.env)
+        merged = {}
+        for name in sorted(set(body_env) | set(otherwise_env)):
           if name not in before:
-            self.error(node, "initialize branch-carried variables before a dynamic if")
-          if body_env.get(name) is not before.get(name) or self.env.get(name) is not before.get(name):
+            a, b = body_env.get(name), otherwise_env.get(name)
+            if name not in body_env or name not in otherwise_env:
+              # A name defined on only one path is not exported from the
+              # branch. It remains usable locally, but a later read diagnoses
+              # an unbound name rather than emitting an uninitialized local.
+              continue
+            merged[name] = self.join_branch_values(a, b, body, otherwise, before, node)
+          elif body_env.get(name) is not before.get(name) or otherwise_env.get(name) is not before.get(name):
             value = before.get(name)
-            if not isinstance(value, I.Expr) or value.op != "local":
+            if not isinstance(value, I.Expr) or value.op not in {"local", "state_ref"}:
               self.error(node, "dynamic branches cannot rebind tile/view values; use T.where or explicit storage")
         self.env = before
+        self.env.update(merged)
         self.block.statements.append(I.If(condition, body, otherwise))
     elif isinstance(node, ast.While):
       for storage in tuple(self.promoted):
         self.materialize(storage)
       if node.orelse:
         self.error(node, "while ... else is not supported")
+      self.promote_control_state(node.body, node)
       condition = self.value(self.expression(node.test), node)
       if not isinstance(condition.type, I.ScalarType):
         self.error(node, "while condition must be scalar")
@@ -1109,6 +1282,9 @@ class Frontend:
         self.error(node, "break/continue outside loop")
       self.block.statements.append(I.Control("break" if isinstance(node, ast.Break) else "continue"))
     elif isinstance(node, ast.Return):
+      if self.helper_exits:
+        self.helper_return(self.expression(node.value) if node.value is not None else None, node)
+        return
       if node.value is not None:
         self.error(node, "kernels return through output tensors; only T.func helpers return values")
       self.block.statements.append(I.Control("return"))

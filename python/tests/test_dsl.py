@@ -433,14 +433,13 @@ def test_owned_scratch_inplace_transpose(compiler):
   np.testing.assert_array_equal(kernel(a), a.T)
 
 
-def test_loop_carried_tile_has_a_clear_diagnostic(compiler):
+def test_loop_carried_tile_compiles(compiler):
   @T.template
   def kernel(A: T.Tensor((3,), dtype=T.float32)):
     x = T.load(A)
     for i in range(2):
       x = x + 1
-  with pytest.raises(TypeError, match="explicit T.alloc storage"):
-    T.compile(kernel, compiler=compiler)
+  T.compile(kernel, compiler=compiler)
 
 
 def test_floor_modulo_and_true_division_vectors(compiler):

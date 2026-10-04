@@ -330,7 +330,10 @@ using KernelParameterDef = std::variant<TensorDef, ValueDef>;
  * @brief Complete source-kernel interface and named specialization vocabulary.
  *
  * Kernel source must define `void __kernel__(...)` with parameters matching
- * this declaration, optionally preceded by `WorkspaceContext&`. The generated
+ * this declaration, optionally preceded by `WorkspaceContext&`, or by
+ * `const VecopsExecutionContext*` with `VECOPS_KERNEL_EXECUTION_CONTEXT` opt-in.
+ * Runtime schedulers additionally select `set_runtime_parallelism(true)`.
+ * The generated
  * adapter selects the signature at compile time. The context-aware form can
  * allocate dynamically, trace a logical plan, or replay a bound plan without
  * duplicating workspace-size arithmetic.
@@ -340,6 +343,16 @@ using KernelParameterDef = std::variant<TensorDef, ValueDef>;
  */
 class KernelDef {
 public:
+  /** Runtime schedulers consume the call's execution context, not
+   * spec::Parallelism. Their artifacts must survive execution-budget changes.
+   * The default remains compile-time sharding for existing C++ source kernels.
+   */
+  void set_runtime_parallelism(bool enabled) {
+    runtime_parallelism_ = enabled;
+  }
+  [[nodiscard]] bool runtime_parallelism() const {
+    return runtime_parallelism_;
+  }
   /** @brief Take ownership of a name, ordered parameter definitions, and value vocabulary. */
   KernelDef(std::string name, std::vector<KernelParameterDef> parameters,
             std::map<std::string, SpecializationType, std::less<>> values = {});
@@ -365,6 +378,7 @@ private:
   std::string name_;
   std::vector<KernelParameterDef> parameters_;
   std::map<std::string, SpecializationType, std::less<>> values_;
+  bool runtime_parallelism_ = false;
 };
 
 using KernelDefinition = KernelDef;
