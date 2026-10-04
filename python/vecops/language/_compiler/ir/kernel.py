@@ -1,10 +1,13 @@
 """Structured kernel IR and target-independent expression construction."""
 
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any
+
+from ..operations import Trait
+from ..operations import current as operation_snapshot
 from .types import Node, ScalarType, TileType, VectorTag, VectorType
-from ..operations import Trait, current as operation_snapshot
 
 
 def shaped_type(dtype, shape, prototype=None, mask=False, keep_tag=False):
@@ -92,6 +95,8 @@ class For(Node):
   unroll: int = 2
   kind: str = "serial"
   associative: bool = False
+  # Reduction/scan legality metadata; the combiner remains executable body IR.
+  reducers: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -109,6 +114,7 @@ class UnrolledFor(Node):
   loop: For
   # Operation-major copies; cross-iteration dependencies are checked by a pass.
   copies: Block
+  full_vectors: bool = False
 
 
 @dataclass(frozen=True)
@@ -130,6 +136,8 @@ class Store(Node):
   value: Expr
   mask: Expr | None = None
   implementation: str = "auto"
+  # Proven clipped local-SIMD extent; not a promise about memory layout.
+  vector_extent: VectorTag | None = None
 
 
 @dataclass(frozen=True)
@@ -195,6 +203,8 @@ class KernelIR(Node):
   materializations: dict[int, View] = field(default_factory=dict)
   pass_trace: list[str] = field(default_factory=list)
   vector_regions: list[Any] = field(default_factory=list)
+  origins: dict[int, tuple] = field(default_factory=dict)
+  name: str = ""
 
 
 def literal(value, dtype=None):

@@ -1,9 +1,10 @@
 """CPU-specific scheduling policies, separate from generic loop semantics."""
 
-from ...passes.manager import PassResult, register_pass
 from dataclasses import replace
+
 from ... import ir as I
 from ...cost import estimate
+from ...passes.manager import PassResult, register_pass
 
 
 @register_pass("cpu-plan-full-chunks", stage="vector", before="unroll-vector-operations")

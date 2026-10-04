@@ -11,6 +11,8 @@
  */
 #pragma once
 
+#include <functional>
+
 #include <cstddef>
 #include <filesystem>
 #include <map>
@@ -59,6 +61,16 @@ struct SdkSpec {
  * configuration.  The environment map augments the current process
  * environment for child processes only; it does not mutate this process.
  */
+/** Compilation-only observation. Callbacks must not throw. Runtime invocation
+ * never enters this callback. Full subprocess output remains in log_path. */
+struct BuildEvent {
+  std::string phase;
+  std::string state;
+  std::filesystem::path log_path;
+  double elapsed_seconds = 0;
+  int exit_code = 0;
+};
+
 struct ToolchainSpec {
   /** @brief CMake executable to invoke. */
   std::filesystem::path cmake_program = "cmake";
@@ -82,6 +94,9 @@ struct ToolchainSpec {
    * above take precedence over inherited `CC` and `CXX` values.
    */
   std::map<std::string, std::string> environment;
+  /** quiet/progress/verbose; presentation does not change artifact identity. */
+  std::string output_mode = "progress";
+  std::function<void(const BuildEvent&)> observer;
 };
 
 /**

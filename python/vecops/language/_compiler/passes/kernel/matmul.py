@@ -1,8 +1,9 @@
 """Preserve matrix products as fusion boundaries, eliminate redundant sinks."""
 
-from ... import ir as I
 from dataclasses import replace
-from ...ir.traversal import walk, children
+
+from ... import ir as I
+from ...ir.traversal import children, walk
 from ..manager import register_pass
 
 

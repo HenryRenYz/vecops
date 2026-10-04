@@ -2,8 +2,8 @@
 
 from ... import ir as I
 from ...ir.traversal import rewrite_expressions, walk
-from ..manager import register_pass
 from ...operations import Trait
+from ..manager import register_pass
 
 
 @register_pass("canonicalize-memory")

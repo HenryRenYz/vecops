@@ -1,9 +1,10 @@
 """C++ emission: control."""
 
 from __future__ import annotations
+
 import json
+
 from .... import ir as I
-from ..capabilities import CPP_TYPES
 
 
 class ControlEmitter:
@@ -51,6 +52,14 @@ class ControlEmitter:
     self.protect_region(loop.body, future)
     dependencies = self.expression_loads(loop.body)
     guards = []
+    old_proofs = getattr(self, "disjoint_roots", {})
+    proofs = dict(old_proofs)
+
+    def root(view):
+      if view.region is None:
+        return view
+      return I.View(view.storage, view.dtype, view.region.root_shape, view.region.root_strides, I.literal(0))
+
     for store in self.stores(loop.body):
       output = self.storage_views.get(store.destination.storage)
       if output is None:
@@ -59,19 +68,33 @@ class ControlEmitter:
       for load in dependencies.values():
         source = self.storage_views.get(load.data.storage)
         guards.append(f"!({self.overlap(source, output)})" if source is not None else "false")
+        if source is not None:
+          proofs[tuple(sorted((load.data.storage, store.destination.storage)))] = (
+            root(load.data),
+            root(store.destination),
+          )
     self.opening("if (" + (" && ".join(dict.fromkeys(guards)) or "true") + ") /* operation-major serial unroll */")
+    self.disjoint_roots = proofs
     self.line(f"vecops::nint_t {loop.target} = {self.scalar(loop.start)};")
     step = I.constant(loop.step)
-    self.opening(
-      f"for (; vecops_dsl::full_group({loop.target}, {self.scalar_inline(loop.stop)}, {step}, {loop.unroll}); {loop.target} += {loop.unroll * step})"
+    rendered_step = str(step) if step is not None else self.scalar(loop.step)
+    increment = str(loop.unroll * step) if step is not None else f"{loop.unroll}*({rendered_step})"
+    condition = (
+      f"{loop.target}<({self.scalar_inline(loop.stop)}) && (({self.scalar_inline(loop.stop)})-{loop.target})/({rendered_step})>={loop.unroll}"
+      if statement.full_vectors
+      else f"vecops_dsl::full_group({loop.target}, {self.scalar_inline(loop.stop)}, {rendered_step}, {loop.unroll})"
     )
+    self.opening(f"for (; {condition}; {loop.target} += {increment})")
     self.block(statement.copies)
     self.close()
-    comparison = "<" if step > 0 else ">"
-    self.opening(f"for (; {loop.target} {comparison} ({self.scalar_inline(loop.stop)}); {loop.target} += {step})")
+    comparison = "<" if step is None or step > 0 else ">"
+    self.opening(
+      f"for (; {loop.target} {comparison} ({self.scalar_inline(loop.stop)}); {loop.target} += {rendered_step})"
+    )
     self.block(loop.body)
     self.close()
     self.close()
+    self.disjoint_roots = old_proofs
     self.opening("else /* alias-dependent iterations retain their original order */")
     self.block(I.Block([loop]))
     self.close()
@@ -85,6 +108,8 @@ class ControlEmitter:
         continue
       if isinstance(statement, I.Team):
         self.emit_team(statement)
+      elif isinstance(statement, I.Print):
+        self.emit_print(statement)
       elif isinstance(statement, I.Barrier):
         self.line(f"{statement.team}.barrier();")
       elif isinstance(statement, I.TeamReduce):
@@ -154,7 +179,21 @@ class ControlEmitter:
       elif isinstance(statement, I.If):
         self.protect_region(I.Block([statement]), self.expression_loads(I.Block(block.statements[index + 1 :])))
         self.opening(f"if ({self.scalar(statement.condition)})")
+        old_proofs = getattr(self, "disjoint_roots", {})
+        proofs = dict(old_proofs)
+
+        def collect(condition, proofs=proofs):
+          if condition.op == "and":
+            for operand in condition.args:
+              collect(operand)
+          elif condition.op == "view_disjoint":
+            a, b = condition.data
+            proofs[tuple(sorted((a.storage, b.storage)))] = (a, b)
+
+        collect(statement.condition)
+        self.disjoint_roots = proofs
         self.block(statement.body)
+        self.disjoint_roots = old_proofs
         self.close()
         if statement.otherwise.statements:
           self.opening("else")

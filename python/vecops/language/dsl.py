@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import functools
 from dataclasses import dataclass
-from ._compiler.operations import Trait, snapshot as operation_snapshot
+
+from ._compiler.operations import Trait
+from ._compiler.operations import snapshot as operation_snapshot
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,8 @@ def reducer(*, identity, associative=False):
 
 
 _OPERATIONS = (
+  "print",
+  "static_print",
   "serial",
   "grid",
   "unroll",

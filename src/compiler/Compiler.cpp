@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
 #include <fstream>
@@ -199,8 +201,7 @@ std::string generated_task(const KernelBuildRequest& request) {
            "    NO_INSTALL\n";
   if (!request.link_runtime)
     cmake << "    NO_RUNTIME\n";
-  cmake << "    NAME "
-        << cmake_quote(request.target_name) << '\n';
+  cmake << "    NAME " << cmake_quote(request.target_name) << '\n';
   if (request.output_name) {
     cmake << "    OUTPUT_NAME " << cmake_quote(*request.output_name) << '\n';
   }
@@ -275,10 +276,38 @@ void write_all(int fd, const char* data, std::size_t size) {
 }
 
 CommandResult run_command(const std::vector<std::string>& arguments, const fs::path& log_path,
-                          const std::map<std::string, std::string>& environment) {
+                          const ToolchainSpec& toolchain, std::string phase) {
   CommandResult result;
   result.arguments = arguments;
   result.log_path = log_path;
+  const auto started = std::chrono::steady_clock::now();
+  const auto notify = [&](const char* state) {
+    const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    if (toolchain.observer) {
+      try {
+        toolchain.observer(BuildEvent{phase, state, log_path, elapsed, result.exit_code});
+      } catch (...) { /* An observer cannot invalidate a completed native build. */
+      }
+    }
+    if (toolchain.output_mode != "quiet" || (std::string_view(state) == "finished" && result.exit_code != 0)) {
+      ::flockfile(stderr);
+      if (std::string_view(state) == "started")
+        std::fprintf(stderr, "[vecops] %s...\n", phase.c_str());
+      else
+        std::fprintf(stderr, "[vecops] %s %s (%.2fs)%s%s\n", phase.c_str(), result.exit_code == 0 ? "done" : "failed",
+                     elapsed, result.exit_code == 0 ? "" : "; log: ", result.exit_code == 0 ? "" : log_path.c_str());
+      ::funlockfile(stderr);
+    }
+  };
+  if (toolchain.output_mode != "quiet" && toolchain.output_mode != "progress" && toolchain.output_mode != "verbose")
+    throw std::invalid_argument("build output_mode must be quiet, progress or verbose");
+  notify("started");
+  struct Completion {
+    const decltype(notify)& callback;
+    ~Completion() {
+      callback("finished");
+    }
+  } completion{notify};
 
   const int log_fd = ::open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
   if (log_fd < 0) {
@@ -330,7 +359,7 @@ CommandResult run_command(const std::vector<std::string>& arguments, const fs::p
       merged_environment[value.substr(0, separator)] = value.substr(separator + 1);
     }
   }
-  for (const auto& [name, value] : environment) {
+  for (const auto& [name, value] : toolchain.environment) {
     merged_environment[name] = value;
   }
 
@@ -369,8 +398,7 @@ CommandResult run_command(const std::vector<std::string>& arguments, const fs::p
   envp.push_back(nullptr);
 
   pid_t child = -1;
-  spawn_error =
-    ::posix_spawnp(&child, spawn_arguments.front().c_str(), &actions, nullptr, argv.data(), envp.data());
+  spawn_error = ::posix_spawnp(&child, spawn_arguments.front().c_str(), &actions, nullptr, argv.data(), envp.data());
   ::posix_spawn_file_actions_destroy(&actions);
   ::close(output_pipe[1]);
   if (spawn_error != 0) {
@@ -389,7 +417,11 @@ CommandResult run_command(const std::vector<std::string>& arguments, const fs::p
     const auto count = ::read(output_pipe[0], buffer, sizeof(buffer));
     if (count > 0) {
       write_all(log_fd, buffer, static_cast<std::size_t>(count));
-      write_all(STDERR_FILENO, buffer, static_cast<std::size_t>(count));
+      if (toolchain.output_mode == "verbose") {
+        ::flockfile(stderr);
+        write_all(STDERR_FILENO, buffer, static_cast<std::size_t>(count));
+        ::funlockfile(stderr);
+      }
       continue;
     }
     if (count < 0 && errno == EINTR)
@@ -582,6 +614,7 @@ BuildBatchResult Compiler::compile_batch(const KernelBuildBatchRequest& request)
       configure.push_back(*common.toolchain.generator);
     }
     append_cache_argument(configure, "CMAKE_BUILD_TYPE", common.toolchain.build_type);
+    append_cache_argument(configure, "CMAKE_EXPORT_COMPILE_COMMANDS", "ON");
     if (common.toolchain.c_compiler)
       append_cache_argument(configure, "CMAKE_C_COMPILER", common.toolchain.c_compiler->string());
     if (common.toolchain.cxx_compiler)
@@ -594,8 +627,9 @@ BuildBatchResult Compiler::compile_batch(const KernelBuildBatchRequest& request)
       append_cache_argument(configure, name, value);
 
     result.stage = BuildStage::Configure;
-    result.configure =
-      run_command(configure, request.build_directory / "vecops-configure.log", common.toolchain.environment);
+    const std::string domain = common.target_name.starts_with("vecops_bridge_") ? "Torch bridges" : "kernels";
+    result.configure = run_command(configure, request.build_directory / "vecops-configure.log", common.toolchain,
+                                   domain + ": configure");
     if (result.configure->exit_code != 0) {
       result.error = "CMake batch configure failed";
       for (auto& task : result.tasks) {
@@ -618,7 +652,8 @@ BuildBatchResult Compiler::compile_batch(const KernelBuildBatchRequest& request)
       build.push_back(std::to_string(common.toolchain.parallel_jobs));
     }
     result.stage = BuildStage::BuildAndInstall;
-    result.build = run_command(build, request.build_directory / "vecops-build.log", common.toolchain.environment);
+    result.build = run_command(build, request.build_directory / "vecops-build.log", common.toolchain,
+                               domain + ": build " + std::to_string(request.tasks.size()) + " module(s)");
     if (result.build->exit_code != 0)
       result.error = "CMake batch build failed";
 

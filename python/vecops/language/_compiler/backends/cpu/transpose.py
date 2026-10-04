@@ -2,13 +2,14 @@
 
 from dataclasses import fields, replace
 from types import MappingProxyType
+
 from ... import ir as I
+from ...dtypes import ELEMENT_BYTES
 from ...ir.transpose import TransposePlan
 from ...ir.traversal import walk
-from ...dtypes import ELEMENT_BYTES
 from ...lowering.transpose import register_transpose
-from ...passes.manager import register_pass
 from ...operations import Trait, snapshot
+from ...passes.manager import register_pass
 
 
 @register_pass("cpu-plan-transpose", stage="cpu-memory")

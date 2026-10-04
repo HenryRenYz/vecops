@@ -7,8 +7,8 @@ from types import MappingProxyType
 
 from ... import ir as I
 from ...dtypes import ELEMENT_BYTES
-from ...passes.manager import register_pass
 from ...operations import Trait
+from ...passes.manager import register_pass
 
 
 @dataclass(frozen=True)

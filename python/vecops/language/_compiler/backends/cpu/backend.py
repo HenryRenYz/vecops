@@ -1,14 +1,15 @@
 """CPU compilation driver: frontend -> kernel passes -> vector lowering -> C++."""
 
 from dataclasses import replace
+
 from ....types import TensorType
+from ...environment import freeze
 from ...frontend.parser import lower
-from ...pipeline import kernel_pipeline, cpu_vector_pipeline, cpu_memory_pipeline
 from ...lowering.tile_to_vector import lower_kernel
+from ...pipeline import cpu_memory_pipeline, cpu_vector_pipeline, kernel_pipeline
 from ..base import LoweredArtifact
 from .cpp.emitter import generate
 from .planning import prepare
-from ...environment import freeze
 
 
 class CPUBackend:
@@ -28,10 +29,30 @@ class CPUBackend:
       annotation = annotations.get(name)
       if isinstance(annotation, TensorType) and annotation.access == "input":
         annotations[name] = replace(annotation, access="output")
-    kernel = kernel_manager.run(lower(replace(template, annotations=annotations), catalog=environment.operations))
+    frontend = lower(replace(template, annotations=annotations), catalog=environment.operations)
+    session = options.get("_debug_session")
+    if session is not None:
+      session.stage("frontend", frontend)
+    if not options.get("debug_prints", True):
+      from ... import ir as I
+      from ...ir.traversal import children
+
+      def strip(block):
+        block.statements = [s for s in block.statements if not isinstance(s, I.Print)]
+        for statement in block.statements:
+          for child in children(statement):
+            strip(child)
+
+      strip(frontend.body)
+    kernel = kernel_manager.run(frontend)
+    if session is not None:
+      session.stage("kernel", kernel)
     vectors = lower_kernel(kernel, manager=vector_manager)
     prepared = prepare(vectors, memory_manager=memory_manager)
     source, emitted_regions = generate(prepared)
     source = f"// compiler environment: {environment.fingerprint}\n" + source
     vectors.regions.extend(emitted_regions)
-    return LoweredArtifact(kernel, vectors, source)
+    if session is not None:
+      session.stage("vector", vectors)
+      session.stage("backend", prepared)
+    return LoweredArtifact(kernel, vectors, source, prepared)

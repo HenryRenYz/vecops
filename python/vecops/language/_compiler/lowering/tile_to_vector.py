@@ -1,11 +1,12 @@
 """Tile consumers lower to explicit vector regions before target emission."""
 
 import math
+
 from .. import ir as I
-from ..ir import vector as V
 from ..dtypes import ELEMENT_BYTES
-from ..passes.manager import PassManager
+from ..ir import vector as V
 from ..operations import Trait, snapshot
+from ..passes.manager import PassManager
 
 
 def lower_region(shape, dtype, roots, *, unroll=2, opaque=(), manager=None, run_passes=True):
@@ -105,8 +106,15 @@ def lower_stores(stores, *, opaque=(), manager=None):
   dtype = store_value(stores[0]).type.dtype
   dtype = stores[0].destination.dtype if dtype == "bool" else dtype
   region = lower_region(
-    stores[0].destination.shape, dtype, store_roots(stores), opaque=opaque, manager=manager, run_passes=False
+    stores[0].destination.shape,
+    dtype,
+    store_roots(stores),
+    unroll=1 if stores[0].vector_extent is not None else 2,
+    opaque=opaque,
+    manager=manager,
+    run_passes=False,
   )
+  region.single_chunk = stores[0].vector_extent is not None and stores[0].vector_extent.N is None
   attach_stores(region, stores)
   return (manager or PassManager(stage="vector")).run(region)
 
@@ -117,6 +125,19 @@ def lower_axis(source, dtype, axis, operation, unroll, *, manager=None):
   region.initializations = (V.VectorEffect("acc_init", operation, dtype=dtype),)
   region.effects = (V.VectorEffect("accumulate", operation, value_root=0, dtype=dtype),)
   region.finalizations = (V.VectorEffect("merge_vector_accumulators", operation, dtype=dtype),)
+  return (manager or PassManager(stage="vector")).run(region)
+
+
+def lower_axis_fold(fold, dtype, unroll, *, manager=None):
+  region = lower_region(
+    fold.sources[0].type.shape, dtype, fold.sources, unroll=unroll, manager=manager, run_passes=False
+  )
+  region.iteration_axis = fold.axis
+  region.initializations = tuple(V.VectorEffect("acc_init", op, i, dtype=dtype) for i, op in enumerate(fold.operations))
+  region.effects = tuple(V.VectorEffect("accumulate", op, i, i, dtype=dtype) for i, op in enumerate(fold.operations))
+  region.finalizations = tuple(
+    V.VectorEffect("merge_vector_accumulators", op, i, dtype=dtype) for i, op in enumerate(fold.operations)
+  )
   return (manager or PassManager(stage="vector")).run(region)
 
 

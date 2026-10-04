@@ -1,8 +1,9 @@
 """Call-scoped semantic allocation sites, supplied by an execution provider."""
 
 from dataclasses import dataclass
-from .types import Node
+
 from .kernel import View
+from .types import Node
 
 
 @dataclass(frozen=True)

@@ -7,7 +7,28 @@ expert/debugging escape hatch and mirrors C++ types
 without Python convenience behavior.
 
 Importing `vecops` does not import NumPy or Torch. Dtype conversion recognizes
-those frameworks only when the application has already loaded them.
+those frameworks only when the application has already loaded them. Canonical
+string names (e.g. `"float32"`, `"bfloat16"`, `"bool"`/`"bool_"`) are recognized
+without either framework and use the same normalization in compilation, JIT
+arguments and automatic output allocation. In particular, a BF16 string
+annotation does not require a NumPy BF16 dtype registration. Torch allocation is
+supported directly; NumPy automatic BF16 output allocation requires an extension
+dtype already registered by the application (e.g. `import ml_dtypes`). No optional
+extension is imported implicitly. `None` remains an unspecified schema dtype and
+is rejected as a concrete dtype, rather than being interpreted as NumPy's FP64
+default. Non-native-endian NumPy dtypes are rejected consistently by metadata
+normalization and native tensor views.
+
+Python dtype names, byte widths and allocation adapters are maintained centrally
+in `vecops._dtype`; DSL dtype wrappers use `__vecops_dtype__` to expose their native
+enum without a dependency from runtime normalization to the DSL frontend.
+Compilation, JIT argument keys, automatic outputs and debug metadata all use this
+normalization. Torch unsigned 16/32/64-bit tensors are supported when provided by
+the installed Torch version, including the generated Torch-to-runtime ABI bridge.
+C++ type spelling and ABI mappings remain backend/boundary-specific.
+The memory NumPy allocator and memory-plan Torch adapter use the same allocation
+adapter, explicitly allowing framework-only storage dtypes such as complex.
+Allocating that storage does not extend the supported kernel ABI dtype set.
 
 ## Floating-point subnormal mode
 
@@ -325,12 +346,36 @@ the builtin vector reduction paths. A custom `@T.reducer(identity=...,
 associative=False)` is a pure binary scalar/tuple combiner, accepting two
 matching values and returning a matching scalar/tuple. Inputs may be tuples
 of equally shaped tiles, for example `(value, logical_index)` for argmax.
-Identities are cast to the corresponding input dtype. Custom folds currently
-preserve left-fold order; the associative flag is a promise for future
-reassociation, not a claim of current parallel lowering. `T.scan(value,
+Identities are cast to the corresponding input dtype. Ordered custom folds
+preserve left-fold order. With `associative=True`, a pure combiner consisting
+of independent add/min/max components and their exact neutral identities
+uses the same logical FoldLoop and SIMD lowering as builtin reductions.
+Coupled tuple state (e.g. argmax), non-neutral initial values and unrecognized
+combiners retain ordered scalar loops. `T.scan(value,
 reducer="add", axis=-1, exclusive=False, reverse=False)` supports builtin or
 custom scalar/tuple combiners and uses ordered CPU loops plus private scalar
 output storage. It is not yet a specialized SIMD prefix-scan kernel.
+
+Builtin reductions, including reductions nested in scalar arithmetic, are
+normalized to explicit logical fold regions **without scalarizing SIMD**.
+Independent equal-domain folds and axis folds share source computation and
+iteration (`max_fused_reductions=2` by default). Dependent normalization phases
+remain separate; scalar epilogues can be safely deferred but not recomputed
+across writes. Adjacent local loops use a shared domain/state/effects analysis:
+only pointwise or independent accesses may fuse. Runtime root-span disjointness
+and physical non-overlap guards preserve the original program for aliases.
+Unknown effects, mutable bound dependencies, helper exits and synchronization
+remain barriers. Prefix consumers may fuse at the scan's actual write site,
+including exclusive scans, eliminating private intermediate storage on the
+non-alias path. `pass_options={"loop_fusion": False}` disables these generic
+loop/consumer transforms.
+
+`T.simd(..., unroll=2)` supports fixed and scalable extents. Proven clipped
+arange accesses become normal converting memory operations; arbitrary indices
+keep gather/scatter and their bounds checks. Full operation-major SIMD groups
+use unmasked constant-width chunks and a separately clipped tail. Lowering
+does not create another strip-mining loop around a proven single scalable
+chunk. Live vectors remain individually named, never C++ arrays.
 
 ```python
 shared = T.shared((workers,), dtype="float32")
@@ -461,6 +506,26 @@ occur before streaming entry; handles cannot escape the region. Inputs need
 unit stride and must fit SVL; low-dtype grouped-K packing is caller-managed.
 Architecture feature/state ownership remains in the architecture packages,
 not in portable T.dot or the top-level execution layout.
+
+Matmul uses a backend schedule IR before C++ emission: NC/KC/MC, native spatial
+loops, K recurrence, pack-A/pack-B and accumulator init/finalization are visible
+in `compiled.backend_ir.matmuls[id].schedule`. This inspection interface is
+internal and may evolve. It retains GEMV unrolling, traversal selection,
+packing provenance and first/last-KC fusion semantics.
+`pass_options={"cpu_matmul_pipeline": "off"/"prefetch"/"staged"/"auto"}`
+selects the CPU schedule. Prefetch guards future addresses before forming them;
+distance and hints per AMX operand are controlled by
+`cpu_matmul_prefetch_distance` (1..16) and `cpu_matmul_prefetch_lines` (1..16).
+Staged vector/SME kernels prime, rotate and drain two **register** operand banks
+without changing MAC order. AMX's common 2x2 kernel occupies all eight tile
+registers, so its staged path uses panel/cursor prefetch instead of a ninth
+tile or a new scratch copy. CPU staging is not asynchronous packing. `auto`
+currently selects `off` via the centralized target cost policy; small measured
+gains do not justify enabling it on every shape/processor.
+The option also adds bounded hints to the existing GEMV K-bank traversal;
+it does not change GEMV's numerical order or allocate additional AMX tiles.
+Logical custom fold/scan loops retain their reducer descriptors and carried
+state; an associative promise alone never removes scan's sequential ordering.
 
 ### CPU grids and execution budgets
 
@@ -1165,3 +1230,137 @@ The single-use session affects registered Python operators and framework
 bridges on the calling thread. It freezes the CPU domain, owns one shared arena
 per tier, and releases both on exit. It does not replace the process allocator.
 See `docs/Memory.md` for placement and lifetime semantics.
+
+## Kernel inspection, diagnostics and profiling
+
+`T.template`, `T.compile` and `T.jit` objects expose `get_kernel_source()`,
+`get_host_source()`, `get_ir(stage)`, `get_pass_report()`, `explain(topic)`,
+`get_cache_info()`, `get_build_report()`, `get_assembly(specialization)` and
+`export_debug(directory)`. `T.lower(template, target="AVX512")` elaborates and
+optimizes without native compilation. Template getters describe the latest
+lowering/compilation; factory getters describe its latest returned callable.
+Python forwarding functions retain their identity and expose child reports
+when they allow attributes. IR text and diagnostic schemas are visualization
+interfaces, **not cross-version-stable serialization**. Missing IR/artifacts
+return `T.debug.Unavailable(reason)` rather than silently substituting another
+kernel. Source-backed C++ templates do not acquire fictitious DSL IR.
+
+```python
+lowered = T.lower(kernel, debug=T.DebugOptions(trace="changed"))
+print(lowered.get_ir("vector"))
+compiled = T.compile(kernel, out_idx=-1, compiler=compiler,
+                     debug=T.DebugOptions(memory=True, timeline=True))
+compiled.compile_for(A)              # prepare; no execution
+print(compiled.get_kernel_source())
+print(compiled.analyze(A))           # metadata only; no output allocation
+print(compiled.get_layout(A))
+timings = compiled.profile(A, mode="native", warmup=10, repeat=100,
+                           trace=True, memory=True)
+timings.export_trace("trace.json")   # Chrome/Perfetto JSON
+compiled.export_debug("empty-debug-directory")
+```
+
+`DebugOptions(trace="off"|"changed"|"all", passes=(...))` controls immutable
+before/after pass snapshots and textual diffs. Pass durations exclude snapshot
+formatting. Source positions refer to captured Python expressions/statements;
+rewritten nodes may not retain an exact original location. Failed lowering or
+compilation attaches available evidence as `exception.debug_info`.
+
+`analyze()` reports affinity/quota/executor capacity, grid worker coverage and
+equal-cost wave efficiency, scratch/layout plans and IR vector/mask liveness.
+These are **CPU estimates, not GPU-style hardware occupancy**. Runtime guards,
+external/nested executors, data-dependent bounds, address registers and native
+compiler temporaries can change the answer. `analyze_assembly()` counts whole
+object call/stack sites, not exact hot-loop spills; optional `T.debug.llvm_mca`
+accepts caller-selected assembly and reports unavailability without that tool.
+
+Profiling explicitly executes and mutates outputs. Compilation/preparation is
+outside timed samples; `mode="python"` includes binding/output allocation and
+`mode="native"` prebinds NumPy ABI arguments (Torch uses its native bridge).
+Both retain provider dispatch, and neither claims pure instruction timing.
+Reports include frequency/governor/affinity without changing them. Memory
+instrumentation records DSL scratch allocation/release plus existing workspace
+sites; timeline instrumentation records kernel/grid-program regions. IDs are
+anonymous, contents and raw allocation addresses are not exported. This does
+not instrument all process allocations, packing phases or barrier waits.
+Instrumentation is opt-in at compilation, with no observer calls inside normal
+un-instrumented vector loops. Traces must not be interpreted as uninstrumented
+performance measurements.
+
+`compiled.interpret(...)` provides a checked sequential NumPy reference for
+the supported frontend subset. Unsupported hardware/atomic/collective
+operations raise `UnsupportedInterpretation`; this is not an ISA emulator or
+a promise of bitwise identity. `T.debug.compare(actual, expected)` reports
+absolute/relative errors, same-dtype floating ULPs, NaN/Inf counts and the first
+mismatch. `T.debug.minimize(candidates, fails, max_attempts=...)` performs bounded
+subsequence delta debugging using an explicit deterministic failure oracle;
+budget exhaustion never claims a proven minimal result. Neither helper rewrites
+source or runs arbitrary kernels without the caller requesting execution.
+Debug export requires an empty directory, omits full command arguments unless
+`include_commands=True`, and never dumps tensors or the complete environment.
+
+### Compile-time and runtime print
+
+`T.static_print` executes during elaboration. `T.print` emits a runtime effect;
+an unshadowed Python builtin `print` inside a template is its alias. Both accept
+`sep=" "`, `end="\n"`, `file=None`, `flush=False`, `buffer_size=1024` and
+`truncation=" ... (trunc)"`. `sep/end=None` select Python defaults, and `file`
+must be `None`, `T.stdout` or `T.stderr`, not a captured Python file object.
+Text/format specifications, buffer size and truncation marker are compile-time
+values; runtime `flush` may be a boolean scalar. F-strings accept scalar fields
+with constant C++20 format specifications and default/`!s` conversion; `!r` and
+`!a` are rejected. To keep the path allocation-free, precision is capped at 64,
+locale/debug-escape formats are rejected, and numeric fill characters must be
+ASCII. Float formatting uses a bounded `to_chars`-based custom formatter within
+the same `format_to` pipeline, avoiding libstdc++'s large-fixed-value temporary
+string fallback. Immutable tuples, scalars, masks, tiles and vectors can be
+printed. Tile/vector displays are bounded by `DebugOptions(max_print_elements=16)`.
+
+```python
+T.print(f"sum={total:.3f}", file=T.stderr, flush=True,
+        buffer_size=1024, truncation="[cut]")
+```
+
+Capacity is measured in **UTF-8 bytes**. Marker bytes are always reserved:
+`buffer_size=1024, truncation="[cut]"` permits 1019 body bytes, including
+separators and `end`. No terminating zero is required. If the body exceeds that
+capacity, a complete UTF-8 prefix followed by the marker is emitted; the final
+newline may therefore be truncated too. An empty marker reserves zero bytes;
+a marker equal to buffer capacity leaves no body room. `buffer_size` must be
+an integer in `[1, 1048576]`, and the marker must fit it.
+
+Runtime lowering always uses `std::format_to` directly into a fixed stack byte
+buffer, followed by one synchronized C-stream sink write. It never constructs
+an intermediate `std::string` and does not select a separate `<print>` path.
+The stream lock is shared across threads and generated DSOs. Each invocation
+is atomic relative to other users of that C stream, not across processes or
+separate file descriptors. Separate `end=""` invocations are separate records;
+there is no deterministic worker ordering or computation-memory barrier.
+`DebugOptions(prints=False)` strips runtime prints before optimization, but does
+not suppress explicitly requested compile-time `static_print` effects.
+
+### Content-addressed cache invalidation
+
+Artifact keys now include source/include/dependency content, generated C++,
+Python/DSL/SDK/native-extension implementation, registered pass/fold callbacks,
+target/cost environment, compiler tools, standard-library headers/runtime
+libraries and compile/link policy. Source-backed kernels use the same mechanism;
+manually incrementing `-v2/-v6` recipe labels is unnecessary. Explicit
+`T.template(..., dependencies=(...))` / `Operator(..., dependencies=(...))`
+cover external macro-generated includes outside declared include directories.
+Custom opaque native/plugin state must provide `__vecops_cache_token__` or its
+identity is deliberately non-cacheable. Directory inventories also detect new
+shadowing headers. Linux mutation notifications accelerate content hashing;
+the dnotify fallback uses an unused process signal when inotify quota is full,
+and unavailable/overflowed watches fall back to rehashing, never size/mtime-only
+identity. Toolchain attestations are atomically published under writer locks.
+
+Decorator lookup invalidates stale dependencies; **already returned/prepared
+kernel objects are immutable snapshots**, so hot execution does not read files
+or unexpectedly rebuild. Cold builds validate inputs before and after building
+and refuse publication if inputs changed concurrently. Disk artifacts validate
+the complete identity manifest, not merely a short directory hash. Torch bridge
+keys additionally attest Torch headers/libraries and publish staged artifacts
+atomically after validation. Cache-only mode uses an existing unambiguous
+attestation, executes no compiler/tool discovery and creates no build directory;
+absence/ambiguity is a diagnostic miss rather than loading an incompatible file.

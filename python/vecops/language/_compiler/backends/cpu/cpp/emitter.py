@@ -1,24 +1,26 @@
 """C++ emission: emitter."""
 
 from __future__ import annotations
-from .... import ir as I
+
 from .....types import TensorType
+from .... import ir as I
+from ....ir.traversal import nodes
+from ....operations import use_catalog
 from ..capabilities import CPP_TYPES
-from .expressions import ExpressionsEmitter
-from .memory import MemoryEmitter
-from .vectors import VectorsEmitter
+from .collectives import CollectiveEmitter, team_statements
 from .control import ControlEmitter
-from .support import _PREAMBLE
-from .transpose import TransposeEmitter
+from .expressions import ExpressionsEmitter
+from .grid import GridEmitter
 from .hardware import HardwareEmitter
 from .matmul import MatmulEmitter
-from .grid import GridEmitter
-from .state import StateEmitter
-from .primitives import PrimitivesEmitter
-from .collectives import CollectiveEmitter, team_statements
 from .matmul_support import PREAMBLE as _MATMUL_PREAMBLE
-from ....operations import use_catalog
-from ....ir.traversal import nodes
+from .memory import MemoryEmitter
+from .primitives import PrimitivesEmitter
+from .printing import PrintEmitter
+from .state import StateEmitter
+from .support import _PREAMBLE
+from .transpose import TransposeEmitter
+from .vectors import VectorsEmitter
 
 
 class CPUEmitter(
@@ -33,6 +35,7 @@ class CPUEmitter(
   StateEmitter,
   PrimitivesEmitter,
   CollectiveEmitter,
+  PrintEmitter,
 ):
   def __init__(self, prepared):
     self.prepared = prepared
@@ -66,6 +69,7 @@ class CPUEmitter(
       isinstance(s, I.WorkspaceAllocate) or isinstance(s, I.Expr) and s.op == "worker_capacity"
       for s in nodes(self.ir.body)
     )
+    self.traces_memory = vector_ir.manager.options.get("debug_memory", False)
 
   def retain_expression(self, value):
     self.expression_lifetimes[id(value)] = value
@@ -93,7 +97,7 @@ class CPUEmitter(
     self.line("}")
 
   def generate(self):
-    if self.uses_executor and not self.uses_workspace:
+    if (self.uses_executor or self.traces_memory) and not self.uses_workspace:
       self.line("#define VECOPS_KERNEL_EXECUTION_CONTEXT 1")
     parameters = []
     for name, annotation in self.ir.parameters.items():
@@ -114,9 +118,19 @@ class CPUEmitter(
         parameters.append(f"{CPP_TYPES[dtype_name(annotation)]} {name}")
     if self.uses_workspace:
       parameters.insert(0, "vecops::execution::WorkspaceContext& dsl_workspace")
-    elif self.uses_executor:
+    elif self.uses_executor or self.traces_memory:
       parameters.insert(0, "const VecopsExecutionContext* dsl_grid_context")
     self.opening(f"void __kernel__({', '.join(parameters)})")
+    if self.traces_memory:
+      self.line(
+        "const auto* dsl_allocation_observer = dsl_workspace.allocation_observer();"
+        if self.uses_workspace
+        else "const auto* dsl_allocation_observer = dsl_grid_context && dsl_grid_context->struct_size >= offsetof(VecopsExecutionContext,allocation_observer) + sizeof(dsl_grid_context->allocation_observer) ? dsl_grid_context->allocation_observer : nullptr;"
+      )
+    if self.vector_ir.manager.options.get("debug_timeline", False):
+      import json
+
+      self.line(f"vecops_dsl::TraceScope dsl_kernel_trace(dsl_allocation_observer,{json.dumps(self.ir.name)});")
     if self.uses_executor:
       if self.uses_workspace:
         self.line("const auto* dsl_grid_pool = dsl_workspace.thread_pool();")
@@ -143,7 +157,20 @@ class CPUEmitter(
     self.block(self.ir.body)
     self.lines[insertion:insertion] = list(self.buffer_declarations.values())
     self.close()
+    if self.traces_memory:
+      import re
+
+      self.lines = [
+        re.sub(r"(vecops_dsl::Buffer<[^;]+> )(\w+);", r'\1\2(dsl_allocation_observer,"\2");', line)
+        for line in self.lines
+      ]
     headers = '#include "vecops/execution/Atomic.h"\n'
+    if self.traces_memory:
+      headers = "#define VECOPS_DSL_MEMORY_TRACE 1\n" + headers
+    if any(isinstance(n, I.Print) for n in nodes(self.ir.body)) and self.vector_ir.manager.options.get(
+      "debug_prints", True
+    ):
+      headers += '#include "vecops/execution/Print.h"\n'
     if self.uses_workspace:
       headers += '#include "vecops/execution/WorkspaceContext.h"\n'
     return headers + _PREAMBLE + _MATMUL_PREAMBLE + "\n".join(self.lines) + "\n"

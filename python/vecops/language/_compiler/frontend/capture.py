@@ -1,19 +1,22 @@
 """Immutable source/helper capture and semantic cache identity."""
 
 from __future__ import annotations
+
 import ast
 import hashlib
 import inspect
 import textwrap
 from dataclasses import dataclass
 from types import MappingProxyType, ModuleType
-from ...dsl import DSLFunction, Intrinsic, Vector, ExecutionLayout, Reducer
+
+from ..._debug.options import PrintTarget
+from ...dsl import DSLFunction, ExecutionLayout, Intrinsic, Reducer, Vector
 from ...expr import Const, DType, Dynamic, IntExpr
 from .. import ir as I
 from ..dtypes import dtype_name
 from .diagnostics import DSLError
 
-VERSION = "vecops-dsl-8"
+VERSION = "vecops-dsl-9"
 DSL_MODULES = {
   "vecops",
   "vecops.language",
@@ -21,6 +24,7 @@ DSL_MODULES = {
   "vecops.language.sme",
   "vecops.language.amx",
   "vecops.language.library",
+  "vecops.language.debug",
 }
 
 
@@ -101,7 +105,10 @@ def capture(function, local_scope=None, seen=None):
       if value.__name__ not in DSL_MODULES:
         raise DSLError(f"unsupported captured module {value.__name__}")
       key = value.__name__
-    elif isinstance(value, (str, bool, int, float, type(None), Intrinsic, Vector, ExecutionLayout)):
+    elif value is __import__("builtins").print:
+      value = Intrinsic("print")
+      key = "builtin.print"
+    elif isinstance(value, (str, bool, int, float, type(None), Intrinsic, Vector, ExecutionLayout, PrintTarget)):
       key = repr(value)
     elif isinstance(value, tuple):
 

@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from types import MappingProxyType
+
 from ... import ir as I
 from ...ir.traversal import children
 from ...passes.manager import register_pass

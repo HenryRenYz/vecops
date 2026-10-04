@@ -6,10 +6,11 @@ can use the registered transpose plan once, rather than gather every row.
 """
 
 from dataclasses import fields, replace
+
 from ... import ir as I
-from ...ir.traversal import walk, children
-from ..manager import register_pass
+from ...ir.traversal import children, walk
 from ...operations import Trait
+from ..manager import register_pass
 
 
 @register_pass("normalize-reduction-layout", before=("decompose-row-normalization", "expression-cse"))

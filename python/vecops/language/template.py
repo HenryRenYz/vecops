@@ -10,6 +10,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable
 
+from ._debug.report import DebugInfo, InspectionMixin
 from .expr import Const, DType, Dynamic, IntExpr
 from .types import TensorType, normalize_tensor_annotation
 
@@ -123,7 +124,7 @@ def _canonical_value(value: Any):
   return (type(value).__module__, type(value).__qualname__, repr(value))
 
 
-class TemplateFunction:
+class TemplateFunction(InspectionMixin):
   """A captured kernel declaration consumed by :func:`vecops.language.compile`."""
 
   def __init__(self, function: Callable[..., Any], ir: TemplateIR, compiler: Any = None) -> None:
@@ -132,6 +133,19 @@ class TemplateFunction:
     self.ir = ir
     self.compiler = compiler
     self.__signature__ = ir.signature
+    self.debug = DebugInfo(name=ir.name)
+    self.debug.owner = self
+    try:
+      self.debug._session.sources["python"] = inspect.getsource(function)
+    except (OSError, TypeError):
+      pass
+    if ir.source is not None:
+      self.debug._session.sources["kernel"] = ir.source.read_text()
+
+  def lower(self, **kwargs):
+    from ._debug.report import lower
+
+    return lower(self, **kwargs)
 
   def __call__(self, *args, **kwargs):
     raise TypeError("TemplateFunction must be passed to T.compile or returned from a T.jit function")

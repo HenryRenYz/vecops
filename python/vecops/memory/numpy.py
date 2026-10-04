@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from .._dtype import framework_dtype
+
 if TYPE_CHECKING:
   from collections.abc import Sequence
 
@@ -20,13 +22,17 @@ def empty(
   system: System | None = None,
   **allocation_options,
 ) -> np.ndarray:
-  """Create a contiguous uninitialized ndarray in selected CPU memory."""
+  """Create a contiguous ndarray using a vecops/DSL dtype or any NumPy dtype.
+
+  Framework-only dtypes (e.g. complex) are valid storage allocations, but are
+  not necessarily supported by the vecops kernel ABI.
+  """
   import numpy as np
 
   from . import default_system
 
   normalized_shape = (shape,) if isinstance(shape, int) else tuple(shape)
-  normalized_dtype = np.dtype(dtype)
+  normalized_dtype = framework_dtype(dtype, "numpy", allow_framework_only=True)
   if any(dimension < 0 for dimension in normalized_shape):
     raise ValueError("shape dimensions must be non-negative")
   count = math.prod(normalized_shape)

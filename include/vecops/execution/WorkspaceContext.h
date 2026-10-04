@@ -195,6 +195,11 @@ public:
       allocation_observer_ = context->allocation_observer;
   }
 
+  /** Borrow the call-scoped allocation observer for instrumented scratch. */
+  [[nodiscard]] const VecopsAllocationObserverV1* allocation_observer() const noexcept {
+    return allocation_observer_;
+  }
+
   /** Effective logical parallelism captured from this call's execution context. */
   [[nodiscard]] nint_t parallelism() const noexcept {
     const auto available = execution::max_parallelism(thread_pool_);
@@ -484,7 +489,7 @@ private:
     }
     if (mode_ == Mode::Replay) {
       const auto slot = replay_->find(site, request);
-      notify_allocation(local_name, request, 3);  // pre-placed replay site
+      notify_allocation(local_name, request, 3); // pre-placed replay site
       return slot;
     }
 
@@ -516,7 +521,7 @@ private:
                     static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()),
                   "workspace request exceeds the host address space");
     void* data =
-        ::operator new(static_cast<std::size_t>(total), std::align_val_t(static_cast<std::size_t>(heap_alignment)));
+      ::operator new(static_cast<std::size_t>(total), std::align_val_t(static_cast<std::size_t>(heap_alignment)));
     auto& owner = persistent ? persistent_owned_ : owned_;
     owner.emplace_back(data, heap_alignment);
     notify_allocation(local_name, request, 2);
@@ -529,8 +534,7 @@ private:
     if (allocation_observer_ == nullptr || allocation_observer_->on_workspace_allocation == nullptr)
       return;
     char site_buffer[64];
-    const std::size_t site_length =
-        std::min<std::size_t>(local_name.size(), sizeof(site_buffer) - 1);
+    const std::size_t site_length = std::min<std::size_t>(local_name.size(), sizeof(site_buffer) - 1);
     std::memcpy(site_buffer, local_name.data(), site_length);
     site_buffer[site_length] = '\0';
     VecopsWorkspaceAllocationV1 record{};

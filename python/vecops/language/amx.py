@@ -18,4 +18,4 @@ load = Intrinsic("amx.load")
 stream_load = Intrinsic("amx.stream_load")
 store = Intrinsic("amx.store")
 tdp = Intrinsic("amx.tdp")
-__all__ = ["region", "zero", "load", "stream_load", "store", "tdp"]
+__all__ = ["load", "region", "store", "stream_load", "tdp", "zero"]

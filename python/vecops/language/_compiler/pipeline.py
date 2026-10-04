@@ -2,6 +2,7 @@
 
 import importlib
 import threading
+
 from .passes.manager import PassManager
 
 _builtin_lock = threading.RLock()
@@ -12,6 +13,9 @@ _BUILTIN_MODULES = (
   "passes.kernel.transforms",
   "passes.kernel.layout",
   "passes.kernel.matmul",
+  "passes.kernel.iteration",
+  "passes.kernel.indexed",
+  "passes.kernel.consumers",
   "passes.kernel.reuse",
   "passes.kernel.fusion",
   "passes.kernel.unroll",
@@ -20,6 +24,7 @@ _BUILTIN_MODULES = (
   "backends.cpu.passes",
   "backends.cpu.transpose",
   "backends.cpu.matmul",
+  "backends.cpu.schedule",
   "backends.cpu.grid_pass",
   "backends.cpu.state",
 )

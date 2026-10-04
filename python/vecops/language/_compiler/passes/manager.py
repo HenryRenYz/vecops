@@ -137,8 +137,16 @@ class PassManager:
 
   def _run(self, ir):
     context = PassContext(self.stage, dict(self.options))
+    session = self.options.get("_debug_session")
     for spec in self.specs:
-      result = spec.callback(ir, context)
+      begin = session.begin_pass(spec.name, ir) if session is not None else None
+      try:
+        result = spec.callback(ir, context)
+      except BaseException as error:
+        if session is not None:
+          session.end_pass(self.stage, spec.name, ir, begin, error)
+          error.debug_info = session
+        raise
       if isinstance(result, PassResult):
         ir = result.ir
         if result.changed:
@@ -148,9 +156,11 @@ class PassManager:
           ir = result
         context.analyses.clear()
       context.trace.append(spec.name)
+      if session is not None:
+        session.end_pass(self.stage, spec.name, ir, begin)
     if hasattr(ir, "pass_trace"):
       ir.pass_trace.extend(context.trace)
     return ir
 
 
-__all__ = ["PassManager", "PassContext", "PassResult", "register_pass", "unregister_pass", "registered_passes"]
+__all__ = ["PassContext", "PassManager", "PassResult", "register_pass", "registered_passes", "unregister_pass"]

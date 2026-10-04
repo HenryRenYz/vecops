@@ -273,3 +273,21 @@ desired, and do not imply prepared-operator phase-lifetime storage reuse.
 There is no `runtime/Abi.h` umbrella. Include the protocol header that a
 component actually implements, avoiding unintended bridge dependencies in an
 artifact DSO.
+
+## Optional memory and timeline observation
+
+`VecopsAllocationObserverV1` retains its legacy workspace-allocation callback
+prefix and appends optional `on_memory_event`. Consumers must check `struct_size`
+before reading the tail; old callers providing only the prefix remain valid.
+`VecopsMemoryEventV1` carries action (`0` allocate, `1` release, `2` region begin,
+`3` region end), allocation identity, byte count and site. Pointers are transient
+identities only, never permission to dereference or export tensor contents.
+Callbacks may run on worker threads, must not acquire the Python GIL and must
+not throw through the C ABI. `WorkspaceContext::allocation_observer()` borrows
+the observer for generated scratch and execution-region instrumentation.
+
+Python collectors anonymize allocation IDs and bound event storage; dropped
+events are reported. `vecops.workspace_observer.tracking()`, `drain()` and
+`drain_memory()` feed profiling/Chrome traces. DSL scratch lifetimes and
+workspace allocation sites are observed, not all allocator or process memory.
+Tracing is opt-in and does not imply output ordering or extra synchronization.

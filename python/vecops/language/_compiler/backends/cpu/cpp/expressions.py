@@ -1,9 +1,11 @@
 """C++ emission: expressions."""
 
 from __future__ import annotations
+
 import math
-from ..capabilities import CPP_TYPES
+
 from ....operations import Trait
+from ..capabilities import CPP_TYPES
 
 
 class ExpressionsEmitter:
@@ -58,6 +60,11 @@ class ExpressionsEmitter:
       return "dsl_workspace.parallelism()"
     if value.op == "view_disjoint":
       return f"!({self.overlap(*value.data)})"
+    if value.op == "view_nonoverlap":
+      view = value.data
+      shape = ", ".join(self.scalar(n) for n in view.shape)
+      strides = ", ".join(self.scalar(s) for s in view.strides)
+      return f"vecops_dsl::grid_layout_safe<{len(view.shape)}>({{{shape}}}, {{{strides}}})"
     if self.environment.operations.get(value).family == "atomic":
       return self.atomic_scalar(value)
     if self.environment.operations.has(value, Trait.MASK_REDUCTION):

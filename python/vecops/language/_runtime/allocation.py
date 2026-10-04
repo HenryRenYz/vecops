@@ -1,11 +1,13 @@
 """Strided output storage allocation, including overlap and signed spans."""
 
 from __future__ import annotations
+
 from typing import Any
+
+from ..._dtype import framework_dtype
 from ..._schema import TensorAccess, TensorMeta
-from ..expr import DType
 from ..types import TensorType
-from .binding import _evaluate, _metadata, _dtype_for_framework
+from .binding import _evaluate, _metadata
 
 
 def _storage_plan(shape: tuple[int, ...], strides: tuple[int, ...]) -> tuple[int, int]:
@@ -37,7 +39,7 @@ def _allocate(
   strides = tuple(_evaluate(item, environment) for item in annotation.concrete_strides)
   metadata = _metadata(reference) if reference is not None else None
   framework = metadata[3] if metadata is not None else "meta"
-  dtype = annotation.dtype.value if isinstance(annotation.dtype, DType) else annotation.dtype
+  dtype = annotation.dtype
   if dtype is None:
     if inferred_dtype is None:
       raise ValueError("cannot infer dtype for an automatically allocated output")
@@ -48,12 +50,12 @@ def _allocate(
       raise ValueError("Torch cannot automatically allocate a tensor with negative strides")
     import torch
 
-    base = torch.empty((elements,), dtype=_dtype_for_framework(dtype, "torch"), device=reference.device)
+    base = torch.empty((elements,), dtype=framework_dtype(dtype, "torch"), device=reference.device)
     return torch.as_strided(base, shape, strides, offset)
   if framework == "numpy":
     import numpy as np
 
-    np_dtype = _dtype_for_framework(dtype, "numpy")
+    np_dtype = framework_dtype(dtype, "numpy")
     base = np.empty((elements,), dtype=np_dtype)
     return np.ndarray(
       shape,

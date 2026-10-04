@@ -122,12 +122,13 @@ BoundKernelRecipe specialize_parallelism(BoundKernelRecipe recipe, nint_t parall
 
 SourceKernelRecipe::SourceKernelRecipe(std::string id, std::filesystem::path kernel_file,
                                        std::shared_ptr<const KernelDef> definition, std::string source_fingerprint,
-                                       SpecializationValues default_values)
+                                       SpecializationValues default_values, std::function<bool()> validate_inputs)
   : id_(std::move(id))
   , kernel_file_(std::move(kernel_file))
   , definition_(std::move(definition))
   , source_fingerprint_(source_fingerprint.empty() ? fingerprint_file(kernel_file_) : std::move(source_fingerprint))
-  , default_values_(std::move(default_values)) {
+  , default_values_(std::move(default_values))
+  , validate_inputs_(std::move(validate_inputs)) {
 }
 
 Status SourceKernelRecipe::match(const KernelCall& call) const {
@@ -151,6 +152,7 @@ Result<BoundKernelRecipe> SourceKernelRecipe::bind(const KernelCall& call) const
     return binding.status();
   auto source = std::make_shared<BoundKernelRecipe::SourceInstantiation>(
     BoundKernelRecipe::SourceInstantiation{kernel_file_, definition_, std::move(binding).value()});
+  source->validate_inputs = validate_inputs_;
   source->binding.specialization_key += ";$Parallelism=i:1";
   return BoundKernelRecipe{id_, source->binding.specialization_key,
                            id_ + ";source=" + source_fingerprint_ + ";" + definition_->canonical() + ";" +

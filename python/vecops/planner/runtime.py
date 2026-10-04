@@ -15,11 +15,11 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
+from vecops._dtype import framework_dtype
 from vecops.graph import ExecutionGraph, TensorKind, current_capture
 
 from .ir import MemoryPlan, MemoryTier
 from .validate import validate_plan
-
 
 _active_session: contextvars.ContextVar[PlanSession | None] = contextvars.ContextVar(
   "vecops_memory_plan_session", default=None
@@ -47,14 +47,8 @@ def current_session() -> "PlanSession | None":
 
 
 def _torch_dtype(name: str):
-  import torch
-
-  prefix = "torch."
-  value = name[len(prefix) :] if name.startswith(prefix) else name
-  dtype = getattr(torch, value, None)
-  if not isinstance(dtype, torch.dtype):
-    raise TypeError(f"unsupported Torch dtype in memory plan: {name!r}")
-  return dtype
+  # Memory plans may hold framework-only dtypes, not just kernel ABI types.
+  return framework_dtype(name, "torch", allow_framework_only=True)
 
 
 def _canonical_file(path: str) -> str:

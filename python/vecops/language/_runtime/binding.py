@@ -1,11 +1,13 @@
 """Runtime tensor metadata and symbolic argument/output binding."""
 
 from __future__ import annotations
+
 import inspect
 from typing import Any
+
 from ..._dtype import normalize_dtype
 from ..._schema import TensorMeta
-from ..expr import Const, DType, Dynamic, IntExpr, SymbolicInt
+from ..expr import Const, Dynamic, IntExpr, SymbolicInt
 
 _AUTO = object()
 
@@ -83,19 +85,3 @@ def _evaluate(value: SymbolicInt, environment: dict[str, int]) -> int:
       "max": lambda: max(left, right),
     }[value.op]()
   raise TypeError(f"unsupported output dimension {value!r}")
-
-
-def _dtype_for_framework(dtype: Any, framework: str):
-  normalized = normalize_dtype(dtype)
-  name = str(normalized).rsplit(".", 1)[-1]
-  if framework == "torch":
-    import torch
-
-    return getattr(torch, "bool" if name == "bool_" else name)
-  if framework == "numpy":
-    import numpy as np
-
-    if name == "bfloat16":
-      raise TypeError("NumPy output allocation does not support bfloat16")
-    return np.dtype("bool" if name == "bool_" else name)
-  return normalized

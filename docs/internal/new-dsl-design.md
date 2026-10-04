@@ -17,6 +17,106 @@ and typed loop/branch state with lexical helper exits;
 they supersede the corresponding phase-one TODOs. Instruction scheduling and an
 exact register allocator remain later milestones.
 
+### Common iterations and CPU matmul scheduling
+
+The implementation now uses common IterationDomain/IterationContract,
+ReductionSpec and LoopSchedule descriptors. Explicit For/Grid, logical
+FoldLoop/AxisFold and target ScheduleLoop retain their different legality
+contracts: prefix recurrences stay ordered, resident teams/barriers are
+synchronization boundaries, and independent domains are not evidence of
+non-aliasing. Shared effect/access analysis performs alpha-renaming, capture
+resolution and runtime root-span/physical-layout versioning for pointwise
+loop fusion. A generic loop-consumer transform removes private intermediates
+at the original write site, so inclusive/exclusive scan ordering is preserved.
+
+Builtin and independent neutral associative custom reductions share FoldLoop
+and the established SIMD prologue/accumulate/horizontal-finalizer lowering.
+Unrecognized coupled reducers remain ordered instead of requiring an unsafe
+blanket reassociation. Independent axis reductions also share one loop and
+source DAG. Dependent layernorm/softmax phases are not collapsed into a single
+one-pass loop without an algorithmic transformation.
+
+CPU matmul scheduling has moved before the C++ printer. The prepared IR owns
+cache NC/KC/MC and vector/GEMV/AMX/SME domains, pack producer actions, K state,
+init/store phases, and optional operand-pipeline prime/steady/drain. VL,
+register-family widths and runtime cache budgets are target-bound parameters.
+Vector/SME staging rotates named register banks; AMX respects its eight-tile
+budget and uses bounded cursor/panel hints. The target cost policy keeps auto
+off until a shape/processor policy is justified by same-round measurements.
+This is load/MAC overlap, not parallel or asynchronous panel packing.
+
+Validation includes `test_dsl_iteration.py`, `test_dsl_matmul_schedule.py`,
+`benchmarks/dsl_iteration.py` with an independently written force-inlined C++
+reference, paired MatmulBench metadata, and SVE/SME cross-compilation. Inspect
+both generated source and object code: outlined validation helpers can spill
+every live Vec even when there is no explicit DSL scratch allocation. Proven
+SIMD chunk bounds eliminate redundant rank-one size checks; hot required
+validation helpers are force-inlined. Full SIMD unroll groups replace clipped
+widths with their proven full extents, while aliases/tails retain safe fallbacks.
+
+#### 2026-10-04 validation and performance policy
+
+All five implementation parts are present: common domain/state/effect/reducer
+contracts; native fold normalization; guarded loop/consumer/axis-fold fusion;
+pre-emission CPU matmul schedules; bounded panel hints and operand staging.
+An associative custom scan still carries a sequential recurrence contract.
+This is not permission to fuse across worker collectives or to parallelize a
+prefix recurrence. General coupled custom reducers retain their ordered body.
+
+The local CPU is frequency-limited to 1.8 GHz. Use same-round native timings,
+not historical measurements at a different governor setting. With compilation
+excluded and a reserved timing core, `build-dsl-iteration/final.json` records:
+
+| workload | N=257 | N=4096 | N=65536 |
+|---|---:|---:|---:|
+| SIMD two-loop producer/consumer, DSL / hand-written C++ | 0.880 | 0.980 | 1.012 |
+| associative tuple moments, DSL / hand-written C++ | 1.184 | 1.055 | 0.996 |
+| ordered scan + affine consumer, DSL / scalar C++ | 0.537 | 0.448 | 0.445 |
+
+The small moments case retains about 4.5 ns overhead; it is not described as
+universally faster. The SIMD assembly contains two full chunks per iteration,
+unmasked loads/stores and no hot helper call or vector spill. Moments share
+the input loads and use named vector accumulators, with no hot helper call.
+Artifacts: `build-dsl-iteration/{simd-final,reducer-final}.asm`.
+
+FP32 row-B dot, three MatmulBench shapes (8x128x128, 64x256x256,
+32x1024x256), plain and bias-ReLU, reaches 0.935--1.005 of the hand-written
+four-row vector reference in `build-dsl-matmul/vector-final-off.csv`. x86 public
+Matmul has no FP32 matrix atom, so that FP32 reference is explicitly a Vec
+leaf, not the public AMX operator. BF16 comparisons use the public Matmul.
+One-lane Vec loads now use a scalar load/fill, allowing scalar broadcast to
+fold into memory FMA instead of masked-load/extract/broadcast sequences.
+
+Staged FP32 is 1.014--1.038 of off in the paired final sweep. AMX panel hints
+have small or shape-dependent gains (including regressions around 1%). Keep
+`auto=off`; calibrated target profiles or explicit pass options can opt in.
+No asynchronous or concurrent panel packing is claimed. SVE/SME validation
+is local cross-compilation only: 42 primitive cases, four tuple-fold/scan cases,
+and 24 staged fused matmul cases, including VLA/fixed VL and streaming-state
+inspection. No ARM hardware execution or ARM performance claim is made.
+
+Final local regression groups (conda `af3`; fresh build/cache directories):
+
+| test group | result |
+|---|---:|
+| iteration, primitives, collectives/pipeline, grid | 63 passed |
+| loops/reducers, state, passes, cost, attention codegen | 86 passed |
+| iteration legality, matmul codegen, matmul policy | 27 passed |
+| dynamic FP32/BF16 off/prefetch/staged and phased cache fusion | 8 passed (native Clang 19) |
+| explicit AMX fused K=0/1/3/31/32/33/65 tails | 2 passed (GCC 13) |
+| fixed one-lane converting/snapshot/masked loads | 3 passed (GCC 13) |
+
+After retaining explicit reducer descriptors, ordered/coupled tuple reducer
+and scan cases were also rerun (3 passed), along with IR/attention/workspace
+rules (13 passed). Required generated lambdas, including the constexpr packing
+selector, use the inline macro. Cache fusion was recompiled and executed with
+GCC after this final source-only macro adjustment (2 passed). Test groups
+overlap; these counts are not summed into a distinct-test total. Dynamic BF16
+auto-family artifacts also passed directed GCC checks, but the complete
+eight-mode matrix group above uses Clang because those large dynamic fused
+GCC translation units had excessive compile times. No runtime fallback or
+different numerical tolerance was used to make that group pass.
+
 ## Compiler dependency decision
 
 Phase one uses a small typed, structured Python IR and the existing C++ compiler
@@ -2131,3 +2231,81 @@ conda run --no-capture-output -n af3 python benchmarks/dsl_primitives_cross.py \
 attention 的 packing/resource hoisting，以及 GPU/NPU async pipeline
 仍按前述边界保留为明确的后续工作，不以功能 fallback 冒充已完成的
 专用性能路径。
+
+## DSL 调试与内存可观测性（2026-10）
+
+调试逻辑独立放在 `language/_debug`：session/options 管编译期快照，
+printer/report 管可读 IR 和导出，resources/evaluate 管纯 metadata 估算，
+machine/profile 管实际产物与显式计时，interpreter/minimize 管参考执行与
+有界缩例。各编译阶段仅接入 session；不会从调试模块反向修改编译策略。
+展示接口不承诺跨版本稳定，缺失信息明确返回 Unavailable。
+
+`T.lower` 不触发 native build；Template/CompiledKernel/JIT factory 可取
+源码、前端/kernel/vector/backend IR、pass trace/diff、cache/build 信息和
+实际 object 的反汇编。失败保留当时 debug_info；Python forwarding 函数
+不改变调用身份，调试报告聚合其可发现子 kernel。CPU analyze 的占用率
+定义为 worker coverage/wave efficiency 加寄存器/工作区估算，不冒充
+GPU occupancy 或精确 spill 计数。profile 分开 cold preparation 与 hot
+samples，记录当时 affinity/quota/frequency，不修改用户机器频率。
+
+打印统一为 `T.static_print` / `T.print`；runtime 使用 format_to→定长
+栈缓冲区→共享 C stream 锁→单次 fwrite。默认 1024 字节和
+`" ... (trunc)"`，新增独立 `truncation` 参数，标记无条件预留容量，
+sep/end 也算正文，溢出保留完整 UTF-8 前缀并附加标记。不生成中间
+std::string，不创建 Vec 数组，不另做 `<print>` 路径。线程/DSO 共用
+libc FILE 锁，原子性只覆盖一次调用，不覆盖多个 end="" 调用。
+浮点 formatter 内部使用定长 to_chars 缓冲，避免标准库在极大固定小数
+或高精度字段上的 std::string fallback；精度上限 64，locale/debug-escape
+格式拒绝，数值 fill 为 ASCII。这仍是同一 format_to pipeline，不新增
+独立打印路径。
+
+内存 ABI 只追加 observer 的可选 tail，经 struct_size 检查，execution
+context 布局不变。编译插桩可记录 scratch 分配/释放和 kernel/grid-program
+区间；默认无插桩。ID 匿名、collector 有上限、丢事件显式报告。当前不
+宣称捕获所有 malloc、packing 子阶段或 barrier wait。参考 interpreter
+对未支持的原语明确拒绝，缩例必须由调用者提供确定性的 failure oracle。
+
+缓存从手工版本 label 转为完整 content/build identity，包括 SDK/DSL、
+callback、C++ source/dependency、toolchain、Torch bridge 依赖；编译前后
+检查和原子发布防止并发编辑污染。热执行使用 immutable prepared snapshot。
+输出默认简洁 progress，另有 quiet/verbose；Torch bridge/native kernels
+仍保留不同 ABI/toolchain 的两个批量 CMake 阶段，不为了减少一个 configure
+将 Torch 依赖引入普通内核。完整 API、范围和限制见 docs/Python.md。
+
+### 调试系统验证记录
+
+验证在本机 x86、conda `af3` 下执行，保留用户的 1.8 GHz 限频。
+未连接 ARM 主机。最新打印路径通过 SVE-VLA、SVE-VLS、SME-VLA 和
+SME-fixed-SVL 四种 clang 19.1.3 跨编译检查，不代表 ARM 实机执行通过。
+
+- 调试/打印/缓存/单元素 lowering 回归：25 passed；覆盖自定义标记预留、UTF-8
+  边界、空标记、标记占满缓冲、NUL、浮点格式、零 `operator new` 分配、
+  多 worker 打印完整记录、scratch 生命周期/时间线、参考执行和导出。
+- runtime + language 回归：34 passed，覆盖 NumPy/Torch、自动输出和重叠
+  存储、批量编译与原有运行时 ABI。
+- 扩展 DSL 回归初次运行有 133 passed，另有 6 次并发编辑触发的输入
+  变更拒绝、1 处公共 constexpr helper 被误计为 reduction 闭包的断言、
+  1 次主动取消的矩阵编译。没有把这次运行计为全部通过。断言限定到
+  `__kernel__` 后，6 个非矩阵相关用例在冻结源码下复测通过。
+- 矩阵调度测试用本机 LLVM 19 Clang 再执行全部 8 个用例：FP32/BF16
+  的 off/prefetch/staged、动态零维和尾部、prologue/epilogue、缓存分块
+  phased fusion 均通过。Torch bridge 保持其 GNU OpenMP ABI 的 GCC
+  编译器；内核使用 Clang，未冒称整个矩阵组均在 GCC 下重新跑完。
+- 额外回归保护 Torch bridge 复制 toolchain 时继承 quiet/progress/verbose
+  和 build observer，避免只在 native kernels 阶段生效。
+
+源码 hash 的 fork 回归确认子进程不会消费父进程的通知队列；子进程
+重新建立 watcher，不能建立可靠 watcher 时回退为内容重算而非 mtime
+判定。没有把 immutable prepared execution 变成每次调用的目录扫描。
+
+同机、同频率、CPU2/单 worker 的新旧生成 DSL 配对测量（11 轮交替，
+每轮 10000 次 prepared native 调用）中，当前/旧版中位耗时比为 SIMD
+1.0141、moments/reducer 1.0003、scan 0.9999。scan 曾因单元素 load 被
+替换成 fill 出现额外广播，已恢复 x86 原生 load_convert；SVE 保留
+安全降级。这仅是这三个 4096 元素样例的无显著退化检查，不是完整
+算子性能或跨频率比较。原始结果在忽略的
+`build-dsl-debug-performance/paired.json`；未修改 CPU 频率。
+
+最终 25 项回归在输出模式/observer 转发和无效 file 参数校验修正后运行。
+Ruff format check（146 个文件）、新增调试文件的 Ruff check、language 的
+F821/F822/F823/E9、compileall 和 `git diff --check` 均通过。

@@ -38,6 +38,7 @@ def jit(
   *,
   out_idx: int | list[int] | tuple[int, ...] | None = None,
   compiler=None,
+  debug=None,
 ):
   """Cache a Python kernel factory and compile only returned TemplateFunctions.
 
@@ -46,6 +47,8 @@ def jit(
   """
 
   def decorate(target: Callable[..., Any]):
+    from ._debug.report import DebugInfo, InspectionMixin
+
     signature = inspect.signature(target)
     cache: dict[tuple[Any, ...], Any] = {}
     in_flight: dict[tuple[Any, ...], threading.Condition] = {}
@@ -55,16 +58,24 @@ def jit(
     @functools.wraps(target)
     def wrapped(*args, **kwargs):
       bound, key = _normalized_binding(signature, args, kwargs)
+      from .._identity import callable_identity, implementation_identity
       from ._compiler.environment import registry_fingerprint
 
-      key = (key, registry_fingerprint())
+      key = (key, registry_fingerprint(), implementation_identity(), callable_identity(target, include_state=False))
       active = getattr(local, "active", set())
       if key in active:
         raise RuntimeError(f"recursive T.jit elaboration cycle in {target.__qualname__}")
       with lock:
         while True:
           if key in cache:
-            return cache[key]
+            candidate = cache[key]
+            info = getattr(candidate, "debug", None)
+            if info is None or info._validate_cache():
+              if info is not None:
+                info._cache["decorator_hit"] = True
+                wrapped.debug = info
+              return candidate
+            del cache[key]
           condition = in_flight.get(key)
           if condition is None:
             in_flight[key] = threading.Condition(lock)
@@ -74,7 +85,13 @@ def jit(
       try:
         result = target(*bound.args, **bound.kwargs)
         if isinstance(result, TemplateFunction):
-          result = compile(result, out_idx=out_idx, compiler=compiler)
+          result = compile(result, out_idx=out_idx, compiler=compiler, debug=debug)
+        elif callable(result):
+          from ._debug.report import attach_composite
+
+          attach_composite(result)
+        if hasattr(result, "debug"):
+          wrapped.debug = result.debug
       except BaseException:
         with lock:
           in_flight.pop(key).notify_all()
@@ -89,6 +106,7 @@ def jit(
     def cache_clear():
       with lock:
         cache.clear()
+        wrapped.debug = DebugInfo(name=target.__qualname__)
 
     def cache_info():
       with lock:
@@ -97,6 +115,19 @@ def jit(
     wrapped.__signature__ = signature
     wrapped.cache_clear = cache_clear
     wrapped.cache_info = cache_info
+    wrapped.debug = DebugInfo(name=target.__qualname__)
+    for method in (
+      "get_kernel_source",
+      "get_host_source",
+      "get_ir",
+      "get_pass_report",
+      "get_cache_info",
+      "get_build_report",
+      "get_assembly",
+      "explain",
+      "export_debug",
+    ):
+      setattr(wrapped, method, getattr(InspectionMixin, method).__get__(wrapped))
     return wrapped
 
   if function is not None:

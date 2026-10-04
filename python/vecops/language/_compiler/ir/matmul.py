@@ -6,6 +6,7 @@ mistaken for a dense logical tensor.
 """
 
 from dataclasses import dataclass, replace
+
 from .types import Node
 
 
@@ -53,6 +54,7 @@ class MatmulPlan:
   operands: tuple = ()
   amx_b_permutation: object | None = None
   dense_transposes: tuple = ()
+  schedule: object | None = None
   pass_trace: tuple = ("cpu-plan-matmul",)
 
 

@@ -79,7 +79,7 @@ define("frozen", "reference", T.REFERENCE | T.RUNTIME_SHAPE | T.UNSTABLE_EXTENT)
 define("raw symbol", "reference", T.RUNTIME_SHAPE)
 define("literal fill", "structural", ELEMENTWISE)
 define("arange", "index", T.ELEMENTWISE | T.CSE)
-define("lanes streaming_lanes packing_size broadcast_dim", "shape", T.CSE)
+define("lanes streaming_lanes packing_size broadcast_dim schedule_parameter", "shape", T.CSE)
 define("vector_ref", "reference", T.REFERENCE | T.TRANSPOSE_STREAMABLE)
 define("state_ref", "reference", T.STATE_REFERENCE | T.VECTOR_BOUNDARY, effects="read")
 define("grid", "control", T.NONE, effects="state", keywords=("schedule", "chunk", "parallel"))
@@ -111,6 +111,7 @@ define("expand_dims squeeze", "transform", T.NONE, keywords=("axis",))
 define("indices", "index", T.NONE, keywords=("axis",))
 define("workspace", "allocation", T.NONE, keywords=("dtype",))
 define("worker_capacity", "execution", T.CSE)
+define("view_nonoverlap", "memory_proof", T.NONE)
 define(
   "mask_all mask_any mask_none mask_count mask_first mask_last",
   "mask_query",

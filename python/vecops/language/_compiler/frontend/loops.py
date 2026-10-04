@@ -79,7 +79,7 @@ class LoopsFrontend:
             stop,
             step,
             body,
-            unroll if I.constant(step) is not None else 1,
+            unroll,
             "simd" if I.constant(step) is None else kind,
           )
         ]

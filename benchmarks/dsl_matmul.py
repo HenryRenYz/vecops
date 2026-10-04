@@ -11,17 +11,16 @@ import copy
 import csv
 import json
 import os
-import random
 import re
-import statistics
-from pathlib import Path
 from dataclasses import replace
+from pathlib import Path
+
 import numpy as np
 import torch
 import vecops
 import vecops.language as T
-from dsl_transpose import aligned_empty, measure, numpy_dtype
 from dsl_timing import isolate_compilation, reserve_cpu
+from dsl_transpose import aligned_empty, measure, numpy_dtype
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -70,9 +69,10 @@ PIPELINES = {
 }
 
 
-def kernels(compiler, m, n, k, mode, kind, pipeline, level, pass_options=None):
+def kernels(compiler, m, n, k, mode, kind, pipeline, level, pass_options=None, b_layout="col"):
   M, N, K = (m, n, k) if mode == "Const" else (T.dynamic(lower=0) for _ in range(3))
   ad, bd, na, nb, acc = {
+    "fp32": ("float32", "float32", "float32", "float32", "float32"),
     "bf16": ("bfloat16", "bfloat16", "bfloat16", "bfloat16", "float32"),
     "convert": ("float32", "float32", "bfloat16", "bfloat16", "float32"),
     "i8": ("int8", "int8", "int8", "int8", "int32"),
@@ -81,16 +81,17 @@ def kernels(compiler, m, n, k, mode, kind, pipeline, level, pass_options=None):
   prologue, epilogue, input_scale = PIPELINES[pipeline]
   out = acc if epilogue == 0 else "float32"
   DM = 1 if prologue == 2 else M
+  b_strides = (N, 1) if b_layout == "row" else (1, K)
 
   @T.template
   def dsl(
     A: T.Tensor((M, K), (K, 1), ad),
-    B: T.Tensor((K, N), (1, K), bd),
+    B: T.Tensor((K, N), b_strides, bd),
     C: T.Tensor((M, N), (N, 1), out, access="output"),
     D: T.Tensor((DM, N), (N, 1), acc),
     repeat: int,
   ):
-    for iteration in T.serial(repeat, unroll=1):
+    for _iteration in T.serial(repeat, unroll=1):
       if input_scale == 2:
         a = T.cast(T.load(A, dtype="float32") * 2 + 1, na)
         b = T.cast(T.load(B, dtype="float32") * 2 + 1, nb)
@@ -117,16 +118,19 @@ def kernels(compiler, m, n, k, mode, kind, pipeline, level, pass_options=None):
 
   NativeA, NativeB = T.DType(getattr(vecops, na)), T.DType(getattr(vecops, nb))
   Prologue, Epilogue, InputScale = T.Const(prologue), T.Const(epilogue), T.Const(input_scale)
+  RowB = T.Const(b_layout == "row")
 
-  @T.template(source=ROOT / "benchmarks/dsl_matmul_reference.cpp")
+  reference = "dsl_matmul_vector_reference.cpp" if kind == "fp32" else "dsl_matmul_reference.cpp"
+
+  @T.template(source=ROOT / "benchmarks" / reference)
   def cpp(
     A: T.Tensor((M, K), (K, 1), ad),
-    B: T.Tensor((K, N), (1, K), bd),
+    B: T.Tensor((K, N), b_strides, bd),
     C: T.Tensor((M, N), (N, 1), out, access="output"),
     D: T.Tensor((DM, N), (N, 1), acc),
     repeat: int,
   ):
-    NativeA, NativeB, Prologue, Epilogue, InputScale
+    NativeA, NativeB, Prologue, Epilogue, InputScale, RowB  # noqa: B018 -- specialization captures
 
   return (T.compile(dsl, compiler=compiler, pass_options=pass_options), T.compile(cpp, compiler=compiler)), (
     ad,
@@ -150,7 +154,8 @@ def main():
     "--baseline-manifest", type=Path, help="Time saved baseline sources alongside current DSL and C++"
   )
   parser.add_argument("--shape", nargs="+")
-  parser.add_argument("--kind", nargs="+", default=["bf16"], choices=["bf16", "convert", "i8", "mixed"])
+  parser.add_argument("--kind", nargs="+", default=["bf16"], choices=["fp32", "bf16", "convert", "i8", "mixed"])
+  parser.add_argument("--b-layout", choices=["row", "col"], default="col")
   parser.add_argument("--pipeline", nargs="+", default=["plain"], choices=tuple(PIPELINES))
   parser.add_argument("--mode", nargs="+", default=["Const", "Dynamic"])
   parser.add_argument("--level", nargs="+", default=["dot", "matmul"])
@@ -161,6 +166,7 @@ def main():
   parser.add_argument("--cpu", type=int, default=2)
   parser.add_argument("--max-flops", type=int, default=300_000_000, help="Skip huge cases; set 0 for the full catalog")
   parser.add_argument("--fusion", choices=["auto", "always", "never"], default="auto")
+  parser.add_argument("--schedule-pipeline", choices=["auto", "off", "prefetch", "staged"], default="auto")
   parser.add_argument("--gemv-columns", type=int, default=4, choices=range(1, 9))
   args = parser.parse_args()
   isolate_compilation(args.cpu)
@@ -188,6 +194,8 @@ def main():
           for pipeline in args.pipeline:
             for level in args.level:
               key = "/".join(map(str, (m, n, k, mode, kind, pipeline, level)))
+              if args.b_layout != "col":
+                key += "/" + args.b_layout
               # One dynamic schema covers every runtime shape. Construct and
               # prepare it once rather than compiling identical schedules in
               # independent Operator instances for every catalog entry.
@@ -210,7 +218,12 @@ def main():
                   kind,
                   pipeline,
                   level,
-                  {"cpu_matmul_fusion": args.fusion, "cpu_gemv_columns": args.gemv_columns},
+                  {
+                    "cpu_matmul_fusion": args.fusion,
+                    "cpu_gemv_columns": args.gemv_columns,
+                    "cpu_matmul_pipeline": args.schedule_pipeline,
+                  },
+                  b_layout=args.b_layout,
                 )
                 if args.baseline_manifest:
                   # Keep the exact old C++ schedule with the same Python schema,
@@ -224,7 +237,9 @@ def main():
               ad, bd, na, nb, acc, out, prologue = types
               meta = (
                 vecops.TensorMeta((m, k), dtype=getattr(vecops, ad)),
-                vecops.TensorMeta((k, n), strides=(1, k), dtype=getattr(vecops, bd)),
+                vecops.TensorMeta(
+                  (k, n), strides=(n, 1) if args.b_layout == "row" else (1, k), dtype=getattr(vecops, bd)
+                ),
                 vecops.TensorMeta((m, n), dtype=getattr(vecops, out)),
                 vecops.TensorMeta((1 if prologue == 2 else m, n), dtype=getattr(vecops, acc)),
               )
@@ -248,16 +263,19 @@ def main():
   for group, name, m, n, k, mode, kind, pipeline, level, pair, types in cases:
     ad, bd, na, nb, acc, out, prologue = types
     a = aligned_empty((m, k), ad)
-    b = aligned_empty((n, k), bd).T
+    b = aligned_empty((k, n), bd) if args.b_layout == "row" else aligned_empty((n, k), bd).T
     c = aligned_empty((m, n), out)
     d = aligned_empty((1 if prologue == 2 else m, n), acc)
     a[:] = rng.integers(0 if ad == "uint8" else -3, 4, size=a.shape) / (8 if "float" in ad else 1)
     b[:] = rng.integers(-3, 4, size=b.shape) / (8 if "float" in bd else 1)
     d[:] = rng.integers(-3, 4, size=d.shape)
-    calls = lambda repeat: tuple(
-      lambda kernel=kernel: kernel.operator.native(a, b, c, d, repeat, **kernel._core.specialization_values)
-      for kernel in pair
-    )
+
+    def calls(repeat, pair=pair, a=a, b=b, c=c, d=d):
+      return tuple(
+        lambda kernel=kernel: kernel.operator.native(a, b, c, d, repeat, **kernel._core.specialization_values)
+        for kernel in pair
+      )
+
     ds, cp, *prior = calls(1)
     cp()
     reference = c.copy()

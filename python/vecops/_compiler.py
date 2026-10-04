@@ -16,21 +16,24 @@ from pathlib import Path
 
 from . import _C
 
-_BUILD_API_VERSION = 8
+_BUILD_API_VERSION = 10
 
 
 def require_native_build_api() -> None:
   """Reject an editable Python/native extension version mismatch clearly."""
   actual = getattr(_C, "build_api_version", 0)
   required_symbols = (
-      "KernelBuildBatchRequest",
-      "BuildBatchResult",
-      "prepare_batch",
-      "native_thread_pool_address",
-      "native_thread_pool_begin_active",
-      "native_thread_pool_end_active",
-      "cpu_thread_pool_capacity",
-      "cpu_thread_limit",
+    "KernelBuildBatchRequest",
+    "BuildBatchResult",
+    "prepare_batch",
+    "native_thread_pool_address",
+    "native_thread_pool_begin_active",
+    "native_thread_pool_end_active",
+    "cpu_thread_pool_capacity",
+    "cpu_thread_limit",
+    "grid_workers_available",
+    "memory_event_callback_address",
+    "content_watch_epoch",
   )
   missing = [name for name in required_symbols if not hasattr(_C, name)]
   if not hasattr(getattr(_C, "KernelDef", None), "runtime_parallelism"):
@@ -47,8 +50,7 @@ def require_native_build_api() -> None:
   if missing:
     detail += f"; missing {', '.join(missing)}"
   raise RuntimeError(
-      "vecops Python sources and vecops._C are out of sync "
-      f"({_C.__file__}; {detail}). Repair with: {repair}"
+    f"vecops Python sources and vecops._C are out of sync ({_C.__file__}; {detail}). Repair with: {repair}"
   )
 
 
@@ -122,7 +124,8 @@ class Compiler:
     generator: CMake generator. Defaults to ``CMAKE_GENERATOR``, then Ninja
       when available, otherwise CMake's platform default.
     jobs: Maximum CMake parallel jobs, or a conservative host-derived default.
-    verbose: Reserved presentation option retained on this public object.
+    verbose: Compatibility alias for output="verbose".
+    output: "quiet", concise "progress" (default), or full "verbose" logs.
     environment: Additional environment variables inherited by CMake children.
     cache_namespace: Separates incompatible target/toolchain/SDK cache populations.
     include_dirs, cflags: Extra compile inputs for user kernel source.
@@ -146,6 +149,7 @@ class Compiler:
     generator: str | None = None,
     jobs: int | None = None,
     verbose: bool = False,
+    output: str = "progress",
     environment: Mapping[str, str] | None = None,
     cache_namespace: str | None = None,
     include_dirs=(),
@@ -170,10 +174,13 @@ class Compiler:
     self.generator = generator
     self.jobs = jobs
     self.verbose = verbose
+    if output not in ("quiet", "progress", "verbose"):
+      raise ValueError("output must be quiet, progress or verbose")
+    self.output = "verbose" if verbose else output
+    self.build_events = []
     self.environment = dict(environment or {})
-    # Bump when generated-adapter semantics or the packaged SDK ABI changes.
-    # Keeping this explicit prevents a new compiler from silently loading an
-    # artifact whose adapter was emitted by an older implementation.
+    # Retain the legacy namespace as a user-visible population label. Artifact
+    # compatibility is now governed by full content/build identities, not bumps.
     self.cache_namespace = cache_namespace or f"python-sdk-v12;target={self.target}"
     self.include_dirs = tuple(Path(path).expanduser().resolve() for path in include_dirs)
     self.cflags = tuple(cflags)
@@ -200,6 +207,17 @@ class Compiler:
     available = len(affinity(0)) if affinity is not None else (os.cpu_count() or 1)
     toolchain.parallel_jobs = self.jobs or max(1, min(available, 8))
     toolchain.environment = self.environment
+    toolchain.output_mode = self.output
+    import weakref
+
+    reference = weakref.ref(self)
+
+    def observe(event):
+      selected = reference()
+      if selected is not None:
+        selected._observe_build(event)
+
+    toolchain.observer = observe
     config = _C.KernelCompilerConfig()
     config.sdk = sdk
     config.toolchain = toolchain
@@ -211,6 +229,20 @@ class Compiler:
     config.link_libraries = self.libraries
     config.link_options = self.ldflags
     return config
+
+  def _observe_build(self, event):
+    import time
+
+    self.build_events.append(
+      {
+        "phase": event.phase,
+        "state": event.state,
+        "log_path": str(event.log_path),
+        "elapsed_seconds": event.elapsed_seconds,
+        "exit_code": event.exit_code,
+        "timestamp_ns": time.time_ns(),
+      }
+    )
 
   @property
   def build_backend(self) -> _C.Compiler:

@@ -41,10 +41,11 @@ def test_flush_subnormals_sets_current_and_new_threads() -> None:
 
 
 def test_dtype_normalization_has_no_required_torch_dependency() -> None:
+  torch_loaded = "torch" in sys.modules
   assert vecops.normalize_dtype(np.float32) == vecops.float32
   assert vecops.normalize_dtype(np.dtype("float64")) == vecops.float64
   assert vecops.normalize_dtype(vecops.bfloat16) == vecops.bfloat16
-  assert "torch" not in sys.modules
+  assert ("torch" in sys.modules) == torch_loaded
   with pytest.raises(TypeError, match="unsupported dtype"):
     vecops.normalize_dtype(object())
 

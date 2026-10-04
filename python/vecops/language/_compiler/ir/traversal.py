@@ -1,6 +1,7 @@
 """Shared expression DAG and structured-control traversal."""
 
 from dataclasses import fields, is_dataclass, replace
+
 from . import kernel as I
 
 
@@ -44,6 +45,21 @@ def children(statement):
 
 def values(block):
   for statement in block.statements:
+    from .printing import FormattedText, Print
+
+    if isinstance(statement, Print):
+
+      def arguments(items):
+        for item in items:
+          if isinstance(item, I.Expr):
+            yield item
+          elif isinstance(item, FormattedText):
+            yield from arguments(item.arguments)
+          elif isinstance(item, tuple):
+            yield from arguments(item)
+
+      yield from arguments(statement.arguments)
+      yield statement.flush
     if isinstance(statement, I.ReductionGroup):
       yield from values(I.Block([*statement.assignments, *statement.stores]))
     if isinstance(statement, I.ElementwiseGroup):

@@ -5,7 +5,9 @@ pure combiners have an ordered fallback, including coupled argmax-like state.
 """
 
 from .. import ir as I
+from ..ir.iteration import ReductionSpec
 from ..ir.traversal import children, walk
+from ..operations import Trait
 from .capture import CapturedReducer, symbol
 
 
@@ -120,6 +122,7 @@ class ReducersFrontend:
       parent.statements.append(I.Allocate(view))
       return view
 
+    allocation_start = len(parent.statements)
     outputs = output(accumulators) if output_shape else None
     prefix = self.block
     self.block = I.Block()
@@ -164,6 +167,15 @@ class ReducersFrontend:
 
       pure(I.Block(self.block.statements[start:]))
 
+      if operation == "reduce" and reducer.associative:
+        native = self.native_combiner(value, accumulators, point(values), values, identity, axis, unroll)
+        if native is not None:
+          # Drop the ordered fallback's unused output sites. The recognized
+          # fold stays logical until common loop fusion and SIMD legalization.
+          del parent.statements[allocation_start:]
+          self.block = parent
+          return native
+
     def update(target, source):
       if isinstance(target, tuple):
         if not isinstance(source, tuple) or len(target) != len(source):
@@ -198,6 +210,15 @@ class ReducersFrontend:
         unroll,
         operation,
         isinstance(reducer, CapturedReducer) and reducer.associative,
+        tuple(
+          ReductionSpec(
+            reducer if isinstance(reducer, str) else "custom",
+            "bool" if leaf.type.mask else leaf.type.dtype,
+            ordering="sequential",
+            associative=isinstance(reducer, str) or reducer.associative,
+          )
+          for leaf in leaves
+        ),
       )
     )
     if operation == "reduce" and output_shape:
@@ -214,3 +235,65 @@ class ReducersFrontend:
       )
 
     return result(outputs) if outputs is not None else accumulators
+
+  def native_combiner(self, result, left, right, inputs, identity, axis, unroll):
+    """Recognize pure independent builtin folds without trusting op names alone.
+
+    An associative promise authorizes the established builtin SIMD order.
+    Coupled tuple state, non-neutral initial values, assertions and branches
+    retain their ordered implementation instead of silently changing meaning.
+    """
+    statements = self.block.statements
+    if any(not isinstance(s, I.Assign) or not s.declare for s in statements):
+      return None
+    definitions = {s.target: s.value for s in statements}
+
+    def expand(e, seen=frozenset()):
+      if e.op in {"local", "frozen"} and e.data in definitions and e.data not in seen:
+        return expand(definitions[e.data], seen | {e.data})
+      if e.op == "cast" and e.type.dtype == e.args[0].type.dtype:
+        return expand(e.args[0], seen)
+      from dataclasses import replace
+
+      return replace(e, args=tuple(expand(a, seen) for a in e.args))
+
+    def recognize(value, a, b, source, initial):
+      if isinstance(a, tuple):
+        if not isinstance(value, tuple) or len(value) != len(a):
+          return None
+        outputs = tuple(recognize(v, x, y, z, init) for v, x, y, z, init in zip(value, a, b, source, initial))
+        return None if any(v is None for v in outputs) else outputs
+      value = expand(value)
+      native = next(
+        (
+          name
+          for name in self.operations.names(Trait.SCALAR_REDUCTION)
+          if self.operations.get(name).reduction == value.op
+        ),
+        None,
+      )
+      if source.type.mask or source.type.dtype == "bool":
+        return None
+      if (
+        native is None
+        or len(value.args) != 2
+        or not (
+          I.same_expr(value.args[0], a)
+          and I.same_expr(value.args[1], b)
+          or I.same_expr(value.args[1], a)
+          and I.same_expr(value.args[0], b)
+        )
+      ):
+        return None
+      neutral = 0 if value.op == "add" else float("inf") if value.op == "min" else float("-inf")
+      if not source.type.dtype.startswith(("float", "bfloat")) and value.op != "add":
+        return None
+      if I.constant(symbol(initial)) != neutral:
+        return None
+      shape = source.type.shape
+      output = shape[:axis] + shape[axis + 1 :] if axis is not None else ()
+      if output:
+        return I.Expr(I.TileType(source.type.dtype, output), "axis_reduce", (source,), (axis, value.op, unroll))
+      return I.Expr(I.ScalarType(source.type.dtype), native, (source,), unroll)
+
+    return recognize(result, left, right, inputs, identity)

@@ -349,7 +349,9 @@ def test_reductions_are_scoped_and_scalar_control_remains_lazy(compiler):
   assert "/* reduction region: no capture boundary */" in source
   assert "while (true)" in source
   assert "dsl_c_scalar_select_" in source
-  assert not re.search(r"\[[^\]\n]*\]\(\)", source)
+  # Shared target helpers may use a forced-inline constexpr initializer;
+  # reduction/control-flow lowering itself must not introduce an IIFE.
+  assert not re.search(r"\[[^\]\n]*\]\(\)", source.split("void __kernel__(", 1)[1])
   assert all(tail.lstrip().startswith("VECOPS_INLINE_LAMBDA")
              for tail in re.split(r"\[[^\]\n]*\]\(\)", source)[1:])
 

@@ -5,7 +5,7 @@ PREAMBLE = r"""
 namespace vecops_dsl {
 // Codes: dense=0, AMX=1, SME=2, automatic=-1. The build host never selects
 // the packed ABI of an AArch64 artifact.
-template<class T, int Format> inline constexpr int packing_format = [] {
+template<class T, int Format> inline constexpr int packing_format = []() VECOPS_INLINE_LAMBDA {
   if constexpr (Format >= 0) return Format;
 #if defined(HAS_AMX_TILE)
   if constexpr (sizeof(T) <= 2) return 1;

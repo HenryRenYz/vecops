@@ -9,6 +9,7 @@ class LoweredArtifact:
   kernel: object
   lowered: object
   source: str
+  backend_ir: object | None = None
 
 
 class Backend(Protocol):

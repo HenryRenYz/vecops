@@ -1,40 +1,41 @@
 """Internal structured IR vocabulary."""
 
-from .types import Node, ScalarType, TileType, VectorTag, VectorType
-from .state import TileState, DeclareState, UpdateState, ExitRegion, Exit
-from .collective import Team, Barrier, TeamReduce
-from .pipeline import Prefetch, PipelineFor
-from .workspace import WorkspaceAllocate
-from .matmul import PackedView, Pack, DotOptions, MatmulPlan, OperandFusion, transpose_matrix
+from .collective import Barrier, Team, TeamReduce
 from .kernel import (
-  Expr,
-  View,
-  ViewRegion,
-  Block,
+  Allocate,
+  AMXTile,
+  ArchitectureCall,
+  Assert,
   Assign,
   BindTile,
-  ReductionGroup,
+  Block,
+  Control,
   ElementwiseGroup,
+  Expr,
   For,
   Grid,
-  UnrolledFor,
-  If,
-  While,
-  Store,
-  IndexedStore,
-  Allocate,
-  Assert,
-  Control,
-  KernelIR,
   HardwareRegion,
-  ArchitectureCall,
-  AMXTile,
+  If,
+  IndexedStore,
+  KernelIR,
+  ReductionGroup,
   SMEVector,
-  shaped_type,
-  literal,
-  constant,
+  Store,
+  UnrolledFor,
+  View,
+  ViewRegion,
+  While,
   binary,
-  same_expr,
   broadcast_shape,
+  constant,
+  literal,
   loads,
+  same_expr,
+  shaped_type,
 )
+from .matmul import DotOptions, MatmulPlan, OperandFusion, Pack, PackedView, transpose_matrix
+from .pipeline import PipelineFor, Prefetch
+from .printing import FormattedText, Print
+from .state import DeclareState, Exit, ExitRegion, TileState, UpdateState
+from .types import Node, ScalarType, TileType, VectorTag, VectorType
+from .workspace import WorkspaceAllocate

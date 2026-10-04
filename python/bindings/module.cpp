@@ -16,6 +16,8 @@
 #include <iterator>
 #include <limits>
 #include <atomic>
+#include <chrono>
+#include <thread>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -27,17 +29,20 @@
 #include <vector>
 
 #include <pybind11/numpy.h>
+#include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/stl/filesystem.h>
 
 #include "vecops/compiler/Compiler.h"
 #include "vecops/execution/Parallel.h"
+#include "vecops/execution/Grid.h"
 #include "vecops/execution/FloatControl.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/runtime/Executable.h"
 #include "vecops/runtime/OperatorBridgeAbi.h"
 #include "vecops/runtime/Provider.h"
+#include "ContentWatch.h"
 #if defined(VECOPS_PYTHON_HAS_MEMORY)
 #  include "vecops/execution/MemoryWorkspaceSession.h"
 #  include "vecops/memory/Memory.h"
@@ -511,6 +516,7 @@ struct BridgeCallSignature {
 #if defined(VECOPS_PYTHON_HAS_MEMORY)
 const VecopsWorkspaceArenaProvider* current_memory_workspace_provider();
 #endif
+const VecopsAllocationObserverV1* active_allocation_observer();
 
 class PyKernelCall {
 public:
@@ -545,11 +551,11 @@ public:
   PyOperator(std::filesystem::path kernel_file, KernelDef definition,
              std::shared_ptr<compiler::Compiler> compiler_instance, vecops::runtime::ArtifactCacheMode cache_mode,
              std::filesystem::path cache_directory, std::string namespace_key, std::string recipe_id,
-             std::string source_fingerprint)
+             std::string source_fingerprint, std::function<bool()> validate_inputs = {})
     : definition_(std::make_shared<KernelDef>(std::move(definition))) {
     add_operator(std::move(kernel_file), definition_, std::move(compiler_instance), cache_mode,
                  std::move(cache_directory), std::move(namespace_key), std::move(recipe_id),
-                 std::move(source_fingerprint), {});
+                 std::move(source_fingerprint), {}, std::move(validate_inputs));
     register_handle();
   }
 
@@ -562,6 +568,7 @@ public:
     VecopsExecutionContext memory_context{};
     memory_context.struct_size = sizeof(VecopsExecutionContext);
     memory_context.thread_pool = vecops_cpu_thread_pool_v1();
+    memory_context.allocation_observer = active_allocation_observer();
 #if defined(VECOPS_PYTHON_HAS_MEMORY)
     if (const auto* provider = current_memory_workspace_provider(); provider != nullptr) {
       memory_context.struct_size = sizeof(VecopsExecutionContext);
@@ -671,11 +678,12 @@ private:
                     std::shared_ptr<compiler::Compiler> compiler_instance,
                     vecops::runtime::ArtifactCacheMode cache_mode, std::filesystem::path cache_directory,
                     std::string namespace_key, std::string recipe_id, std::string source_fingerprint,
-                    vecops::runtime::SpecializationValues default_values) {
+                    vecops::runtime::SpecializationValues default_values, std::function<bool()> validate_inputs = {}) {
     if (state_ == nullptr)
       state_ = std::make_shared<State>();
-    auto recipe = std::make_shared<vecops::runtime::SourceKernelRecipe>(
-      std::move(recipe_id), std::move(kernel_file), definition, std::move(source_fingerprint), default_values);
+    auto recipe = std::make_shared<vecops::runtime::SourceKernelRecipe>(std::move(recipe_id), std::move(kernel_file),
+                                                                        definition, std::move(source_fingerprint),
+                                                                        default_values, std::move(validate_inputs));
     vecops::runtime::ArtifactProviderConfig provider_config;
     provider_config.mode = cache_mode;
     provider_config.cache_directory = std::move(cache_directory);
@@ -1429,9 +1437,48 @@ struct WorkspaceAllocationCollector {
 
   std::mutex mutex;
   std::vector<Record> records;
-  std::size_t dropped = 0; // records lost to the capacity cap
+  std::atomic<std::size_t> dropped{0}; // capacity and allocation failures
   std::atomic<bool> enabled{false};
   static constexpr std::size_t capacity = 1u << 20;
+  struct MemoryEvent {
+    std::uint64_t timestamp_ns, worker, allocation_id, bytes;
+    std::uint32_t action;
+    std::string site;
+  };
+  std::vector<MemoryEvent> memory_events;
+  std::map<const void*, std::uint64_t> allocation_ids;
+  std::uint64_t next_allocation_id = 1;
+
+  static void on_memory(void* context, const VecopsMemoryEventV1* record) noexcept {
+    auto* self = static_cast<WorkspaceAllocationCollector*>(context);
+    if (self == nullptr || !self->enabled.load(std::memory_order_relaxed) || record == nullptr ||
+        record->struct_size < sizeof(*record))
+      return;
+    try {
+      std::lock_guard guard(self->mutex);
+      if (self->memory_events.size() >= capacity) {
+        ++self->dropped;
+        return;
+      }
+      std::uint64_t id = 0;
+      if (record->action < 2) {
+        auto& stored = self->allocation_ids[record->allocation];
+        if (record->action == 0 || !stored)
+          stored = self->next_allocation_id++;
+        id = stored;
+      }
+      const auto timestamp =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+      self->memory_events.push_back(MemoryEvent{static_cast<std::uint64_t>(timestamp),
+                                                std::hash<std::thread::id>{}(std::this_thread::get_id()), id,
+                                                record->bytes, record->action, record->site ? record->site : ""});
+      if (record->action == 1)
+        self->allocation_ids.erase(record->allocation);
+    } catch (...) { /* Diagnostics cannot throw across the C ABI. */
+      ++self->dropped;
+    }
+  }
 
   static void on_allocation(void* context, const VecopsWorkspaceAllocationV1* record) noexcept {
     auto* self = static_cast<WorkspaceAllocationCollector*>(context);
@@ -1439,23 +1486,27 @@ struct WorkspaceAllocationCollector {
       return;
     if (record == nullptr || record->struct_size < sizeof(*record))
       return;
-    std::lock_guard<std::mutex> guard(self->mutex);
-    if (self->records.size() >= capacity) {
+    try {
+      std::lock_guard<std::mutex> guard(self->mutex);
+      if (self->records.size() >= capacity) {
+        ++self->dropped;
+        return;
+      }
+      self->records.push_back(Record{
+        record->recipe != nullptr ? record->recipe : "",
+        record->site != nullptr ? record->site : "",
+        record->scope_hash,
+        record->bytes,
+        record->alignment,
+        record->replicas,
+        record->domain,
+        record->placement,
+        record->tier,
+        record->estimated_traffic_bytes,
+      });
+    } catch (...) {
       ++self->dropped;
-      return;
     }
-    self->records.push_back(Record{
-      record->recipe != nullptr ? record->recipe : "",
-      record->site != nullptr ? record->site : "",
-      record->scope_hash,
-      record->bytes,
-      record->alignment,
-      record->replicas,
-      record->domain,
-      record->placement,
-      record->tier,
-      record->estimated_traffic_bytes,
-    });
   }
 
   VecopsAllocationObserverV1 observer() noexcept {
@@ -1463,11 +1514,16 @@ struct WorkspaceAllocationCollector {
     observer.struct_size = sizeof(observer);
     observer.user_context = this;
     observer.on_workspace_allocation = &WorkspaceAllocationCollector::on_allocation;
+    observer.on_memory_event = &WorkspaceAllocationCollector::on_memory;
     return observer;
   }
 };
 
 WorkspaceAllocationCollector g_workspace_collector;
+const VecopsAllocationObserverV1* active_allocation_observer() {
+  static const auto observer = g_workspace_collector.observer();
+  return g_workspace_collector.enabled.load(std::memory_order_relaxed) ? &observer : nullptr;
+}
 
 } // namespace
 
@@ -1478,9 +1534,16 @@ Most applications should use :mod:`vecops`, whose Python wrappers normalize
 dtypes, derive schemas, and own framework integration. This module mirrors C++
 value types for diagnostics, explicit build control, and wrapper implementation;
 its constructor-level interfaces intentionally expose native concepts.)doc";
-  module.attr("build_api_version") = 8;
+  module.attr("build_api_version") = 10;
+  module.def(
+    "content_watch_directory", [](const std::filesystem::path& path) { return content_watch.add(path); },
+    py::arg("path"));
+  module.def("content_watch_epoch", [] { return content_watch.epoch(); });
   module.def("cpu_thread_limit", &vecops_cpu_thread_limit, py::arg("threads"),
              "Set the calling thread's direct CPU executor budget and return its previous value.");
+  module.def("grid_workers_available", &vecops::execution::grid_workers_available, py::arg("capacity"),
+             py::arg("requested"), py::arg("programs"), py::arg("program_cycles"), py::arg("worker_cycles"),
+             "Metadata-only access to the actual native grid worker selector.");
   module.def(
     "cpu_thread_pool_capacity",
     [] {
@@ -1859,6 +1922,12 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
     .def_readwrite("path", &compiler::SdkSpec::path)
     .def_readwrite("layout", &compiler::SdkSpec::layout);
 
+  py::class_<compiler::BuildEvent>(module, "BuildEvent")
+    .def_readonly("phase", &compiler::BuildEvent::phase)
+    .def_readonly("state", &compiler::BuildEvent::state)
+    .def_readonly("log_path", &compiler::BuildEvent::log_path)
+    .def_readonly("elapsed_seconds", &compiler::BuildEvent::elapsed_seconds)
+    .def_readonly("exit_code", &compiler::BuildEvent::exit_code);
   py::class_<compiler::ToolchainSpec>(module, "ToolchainSpec", "Native tools and environment for a kernel build.")
     .def(py::init<>())
     .def_readwrite("cmake_program", &compiler::ToolchainSpec::cmake_program)
@@ -1868,7 +1937,9 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
     .def_readwrite("generator", &compiler::ToolchainSpec::generator)
     .def_readwrite("build_type", &compiler::ToolchainSpec::build_type)
     .def_readwrite("parallel_jobs", &compiler::ToolchainSpec::parallel_jobs)
-    .def_readwrite("environment", &compiler::ToolchainSpec::environment);
+    .def_readwrite("environment", &compiler::ToolchainSpec::environment)
+    .def_readwrite("output_mode", &compiler::ToolchainSpec::output_mode)
+    .def_readwrite("observer", &compiler::ToolchainSpec::observer);
 
   py::class_<compiler::KernelCompilerConfig>(module, "KernelCompilerConfig",
                                              "Reusable raw source-kernel compiler policy; prefer vecops.Compiler.")
@@ -1974,11 +2045,13 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
   py::class_<PyOperator>(module, "Operator",
                          "Raw native source operator; public vecops.Operator adds dtype and call conveniences.")
     .def(py::init<std::filesystem::path, KernelDef, std::shared_ptr<compiler::Compiler>,
-                  vecops::runtime::ArtifactCacheMode, std::filesystem::path, std::string, std::string, std::string>(),
+                  vecops::runtime::ArtifactCacheMode, std::filesystem::path, std::string, std::string, std::string,
+                  std::function<bool()>>(),
          py::arg("kernel_file"), py::arg("kernel_def"), py::arg("compiler") = nullptr,
          py::arg("cache_mode") = vecops::runtime::ArtifactCacheMode::CacheOnly,
          py::arg("cache_directory") = std::filesystem::path{}, py::arg("namespace_key") = std::string{},
-         py::arg("recipe_id") = std::string("source-kernel-v1"), py::arg("source_fingerprint") = std::string{})
+         py::arg("recipe_id") = std::string("source-kernel-v1"), py::arg("source_fingerprint") = std::string{},
+         py::arg("validate_inputs") = std::function<bool()>{})
     .def_property_readonly("_handle", &PyOperator::handle)
     .def(
       "invoke",
@@ -2036,6 +2109,9 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
         std::lock_guard<std::mutex> guard(g_workspace_collector.mutex);
         g_workspace_collector.records.clear();
         g_workspace_collector.dropped = 0;
+        g_workspace_collector.memory_events.clear();
+        g_workspace_collector.allocation_ids.clear();
+        g_workspace_collector.next_allocation_id = 1;
       }
       const auto observer = g_workspace_collector.observer();
       return py::make_tuple(reinterpret_cast<std::uintptr_t>(observer.on_workspace_allocation),
@@ -2055,8 +2131,7 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
       {
         std::lock_guard<std::mutex> guard(g_workspace_collector.mutex);
         drained.swap(g_workspace_collector.records);
-        dropped = g_workspace_collector.dropped;
-        g_workspace_collector.dropped = 0;
+        dropped = g_workspace_collector.dropped.exchange(0);
       }
       py::list result;
       for (const auto& record : drained) {
@@ -2081,4 +2156,26 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
       return result;
     },
     "Return and clear the collected workspace allocation records.");
+  module.def("memory_event_callback_address",
+             [] { return reinterpret_cast<std::uintptr_t>(&WorkspaceAllocationCollector::on_memory); });
+  module.def("drain_memory_events", [] {
+    std::vector<WorkspaceAllocationCollector::MemoryEvent> events;
+    {
+      std::lock_guard guard(g_workspace_collector.mutex);
+      events.swap(g_workspace_collector.memory_events);
+    }
+    py::list result;
+    for (const auto& event : events) {
+      py::dict item;
+      item["timestamp_ns"] = event.timestamp_ns;
+      item["worker"] = event.worker;
+      item["allocation_id"] = event.allocation_id;
+      item["bytes"] = event.bytes;
+      item["released"] = event.action == 1;
+      item["action"] = event.action;
+      item["site"] = event.site;
+      result.append(item);
+    }
+    return result;
+  });
 }

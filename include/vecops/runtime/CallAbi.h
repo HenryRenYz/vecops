@@ -383,13 +383,27 @@ typedef struct VecopsWorkspaceAllocationV1 {
  * and must not acquire the Python GIL; push to a lock-free or mutex-held
  * native buffer instead. `record` is only valid during the call.
  */
+/** Allocation/release event for instrumented scratch. The pointer is an
+ * identity only; observers must not dereference it or retain tensor contents.
+ * Unknown/non-instrumented allocators do not promise lifetime events. */
+typedef struct VecopsMemoryEventV1 {
+  uint32_t struct_size;
+  /** 0 allocate, 1 release, 2 region begin, 3 region end. */
+  uint32_t action;
+  const void* allocation;
+  uint64_t bytes;
+  const char* site;
+} VecopsMemoryEventV1;
+
 typedef struct VecopsAllocationObserverV1 {
-  /** Size of this record; must be `sizeof(VecopsAllocationObserverV1)`. */
+  /** Size supplied by the caller. The legacy prefix ends before on_memory_event. */
   uint32_t struct_size;
   /** Opaque collector context passed back to the callback. */
   void* user_context;
   /** Allocation notification; never null when installed. */
   void (*on_workspace_allocation)(void* user_context, const VecopsWorkspaceAllocationV1* record);
+  /** Optional tail extension; guard with struct_size before reading. */
+  void (*on_memory_event)(void* user_context, const VecopsMemoryEventV1* record);
 } VecopsAllocationObserverV1;
 
 typedef struct VecopsExecutionContext {

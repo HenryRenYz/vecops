@@ -585,6 +585,8 @@ Compiler::compile_kernels(std::span<const runtime::BoundKernelRecipe> recipes, s
       return fail_all(invalid("bound recipe does not carry a source kernel instantiation"));
     if (!fs::is_regular_file(recipe.source->kernel_file))
       return fail_all(invalid("kernel source does not exist: " + recipe.source->kernel_file.string()));
+    if (recipe.source->validate_inputs && !recipe.source->validate_inputs())
+      return fail_all(invalid("kernel build inputs changed after elaboration; recreate the kernel"));
     batch_fingerprint = hash_text(batch_fingerprint, recipe.artifact_key);
   }
 
@@ -658,6 +660,10 @@ Compiler::compile_kernels(std::span<const runtime::BoundKernelRecipe> recipes, s
   }
 
   auto built = compile_batch(batch);
+  // Validate before the provider can publish under the earlier identity.
+  for (const auto& recipe : recipes)
+    if (recipe.source->validate_inputs && !recipe.source->validate_inputs())
+      return fail_all(invalid("kernel build inputs changed during compilation; artifact was not published"));
   results.reserve(recipes.size());
   for (std::size_t index = 0; index < recipes.size(); ++index) {
     if (index >= built.tasks.size() || !built.tasks[index].success || !built.tasks[index].kernel_library) {
@@ -667,9 +673,13 @@ Compiler::compile_kernels(std::span<const runtime::BoundKernelRecipe> recipes, s
       else if (!built.error.empty())
         message += ": " + built.error;
       if (built.configure && !built.configure->output.empty())
-        message += "\n[configure]\n" + built.configure->output;
+        message += "\n[configure log: " + built.configure->log_path.string() + "]\n" +
+                   built.configure->output.substr(
+                     built.configure->output.size() > 6000 ? built.configure->output.size() - 6000 : 0);
       if (built.build && !built.build->output.empty())
-        message += "\n[build]\n" + built.build->output;
+        message +=
+          "\n[build log: " + built.build->log_path.string() + "]\n" +
+          built.build->output.substr(built.build->output.size() > 6000 ? built.build->output.size() - 6000 : 0);
       results.emplace_back(runtime::Status(runtime::StatusCode::ExecutionError, std::move(message)));
       continue;
     }

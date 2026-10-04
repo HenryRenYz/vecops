@@ -6,19 +6,19 @@ compiler may cache reused expensive expressions instead of recomputing them.
 """
 
 from . import dsl as T
-from ._library.math import stable_sigmoid, silu, rmsnorm, masked_softmax
 from ._library.attention import scaled_dot_product_attention
+from ._library.math import masked_softmax, rmsnorm, silu, stable_sigmoid
 
 __all__ = [
   "layernorm",
-  "softmax",
-  "transpose_copy",
-  "matmul",
-  "stable_sigmoid",
-  "silu",
-  "rmsnorm",
   "masked_softmax",
+  "matmul",
+  "rmsnorm",
   "scaled_dot_product_attention",
+  "silu",
+  "softmax",
+  "stable_sigmoid",
+  "transpose_copy",
 ]
 
 

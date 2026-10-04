@@ -1,9 +1,13 @@
 """CPU source-kernel schema and constexpr specialization adaptation."""
 
 from __future__ import annotations
+
 import inspect
 from typing import Any
-from ....._dtype import Const as SchemaConst, DType as SchemaDType, normalize_dtype
+
+from ....._dtype import Const as SchemaConst
+from ....._dtype import DType as SchemaDType
+from ....._dtype import normalize_dtype
 from ....._schema import KernelDef, TensorAccess, TensorDef, ValueDef
 from ....expr import Const, DType
 from ....template import TemplateIR
@@ -41,10 +45,6 @@ def _lower_tensor_dtype(dtype: Any):
       raise ValueError("a dtype captured by a template annotation must have a name")
     return dtype.name
   if isinstance(dtype, str):
-    from ....._dtype import _NAMES
-
-    if dtype in _NAMES:
-      return _NAMES[dtype]
     try:
       return normalize_dtype(dtype)
     except (TypeError, ValueError):

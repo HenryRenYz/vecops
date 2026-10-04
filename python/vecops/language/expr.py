@@ -7,26 +7,10 @@ import operator
 from typing import Any as TypingAny
 
 from .. import _C
-from .._dtype import normalize_dtype
+from .._dtype import is_dtype_name, normalize_dtype
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
-_DTYPE_NAMES = {
-  "bool",
-  "bool_",
-  "int8",
-  "uint8",
-  "int16",
-  "uint16",
-  "int32",
-  "uint32",
-  "int64",
-  "uint64",
-  "float16",
-  "bfloat16",
-  "float32",
-  "float64",
-}
 
 
 class Predicate:
@@ -384,6 +368,10 @@ class DType:
     if self.name is None:
       self.name = name
 
+  def __vecops_dtype__(self) -> _C.DType:
+    """Expose the concrete dtype without coupling normalizers to the DSL."""
+    return self.value
+
   def canonical(self):
     return ("dtype", self.name, str(self.value))
 
@@ -446,10 +434,10 @@ def normalize_value(value: TypingAny, *, name: str | None = None):
     raise TypeError(f"T.jit does not support mutable argument type {type(value).__name__}")
   if isinstance(value, _C.DType):
     return DType(value, name)
-  if isinstance(value, str) and value in _DTYPE_NAMES:
+  if is_dtype_name(value):
     return DType(value, name)
   module = getattr(value, "__module__", type(value).__module__).split(".", 1)[0]
-  if module in {"torch", "numpy"}:
+  if module in {"torch", "numpy", "ml_dtypes"}:
     try:
       return DType(value, name)
     except TypeError:

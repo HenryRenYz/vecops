@@ -2,9 +2,10 @@
 
 import math
 from dataclasses import replace
+
 from .. import ir as I
-from ..ir import vector as V
 from ..dtypes import ELEMENT_BYTES
+from ..ir import vector as V
 from .manager import register_pass
 
 

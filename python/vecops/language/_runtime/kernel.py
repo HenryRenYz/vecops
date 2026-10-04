@@ -1,16 +1,20 @@
 """Compiled kernel calls and lazy Torch bridge adaptation."""
 
 from __future__ import annotations
+
 import inspect
 from dataclasses import dataclass
 from typing import Any
+
 from ..._dtype import DType as SchemaDType
+from ..._dtype import framework_dtype
 from ..._operator import Operator
 from ..._schema import KernelDef
+from .._debug.report import InspectionMixin
 from ..template import TemplateFunction
 from ..types import TensorType
-from .binding import _AUTO, _metadata, _bind_runtime_symbol, _dtype_for_framework
 from .allocation import _allocate
+from .binding import _AUTO, _bind_runtime_symbol, _metadata
 
 
 @dataclass
@@ -38,7 +42,7 @@ class _CompiledCore:
     return self.torch_wrapper
 
 
-class CompiledKernel:
+class CompiledKernel(InspectionMixin):
   """A bound template instance backed by a cached source-kernel operator."""
 
   def __init__(self, core: _CompiledCore, template: TemplateFunction) -> None:
@@ -65,7 +69,7 @@ class CompiledKernel:
     if self._explicit_torch_function is None:
       target = self._core.torch()
       specializations = tuple(
-        _dtype_for_framework(self._core.specialization_values[name], "torch")
+        framework_dtype(self._core.specialization_values[name], "torch")
         if self._core.definition.values[name] is SchemaDType
         else self._core.specialization_values[name]
         for name in self._core.specialization_order
@@ -85,7 +89,7 @@ class CompiledKernel:
         "the Torch bridge must be compiled before graph capture; invoke or precompile this kernel once first"
       )
     specializations = tuple(
-      _dtype_for_framework(self._core.specialization_values[name], "torch")
+      framework_dtype(self._core.specialization_values[name], "torch")
       if self._core.definition.values[name] is SchemaDType
       else self._core.specialization_values[name]
       for name in self._core.specialization_order
@@ -175,10 +179,14 @@ class CompiledKernel:
     specializations = self._core.specialization_values
     if use_torch:
       specializations = {
-        name: _dtype_for_framework(value, "torch") if self._core.definition.values[name] is SchemaDType else value
+        name: framework_dtype(value, "torch") if self._core.definition.values[name] is SchemaDType else value
         for name, value in specializations.items()
       }
-    target(*ordered, **specializations)
+    try:
+      target(*ordered, **specializations)
+    except Exception as error:
+      error.debug_info = self.debug
+      raise
     outputs = tuple(ordered[index] for index in self.out_idx)
     if not outputs:
       return None
@@ -186,4 +194,8 @@ class CompiledKernel:
 
   def compile_for(self, *args, **kwargs) -> None:
     ordered = self._materialize_outputs(self._arguments(args, kwargs))
-    self._core.operator.compile_for(*ordered, **self._core.specialization_values)
+    try:
+      self._core.operator.compile_for(*ordered, **self._core.specialization_values)
+    except Exception as error:
+      error.debug_info = self.debug
+      raise

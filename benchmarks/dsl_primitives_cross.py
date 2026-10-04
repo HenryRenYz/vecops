@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def source(kind):
+  debug = None
   if kind == "indexed":
 
     @T.template
@@ -50,6 +51,25 @@ def source(kind):
       T.store(C, T.scan(T.load(A, dtype="float32")))
       for i in T.pipelined(37):
         C[i] = T.load(A[i]) + 1
+
+    wrapper = "__kernel__(tensor::make_tensor(a,l37),tensor::make_tensor(idx,l37),tensor::make_tensor(c,l37));"
+  elif kind == "moments":
+
+    @T.reducer(identity=(0.0, 0.0), associative=True)
+    def reducer(a, b):
+      return a[0] + b[0], a[1] + b[1]
+
+    @T.template
+    def kernel(
+      A: T.Tensor((37,), dtype="float16"),
+      Idx: T.Tensor((37,), dtype="int64"),
+      C: T.Tensor((37,), dtype="float32", access="output"),
+    ):
+      x = T.load(A, dtype="float32")
+      values = T.reduce((x, x * x), reducer=reducer, unroll=7)
+      C[0] = values[0]
+      C[1] = values[1]
+      T.store(C[2:], T.scan(T.load(A[2:], dtype="float32")) * 3 + 1)
 
     wrapper = "__kernel__(tensor::make_tensor(a,l37),tensor::make_tensor(idx,l37),tensor::make_tensor(c,l37));"
   elif kind == "scalable":
@@ -137,6 +157,17 @@ def source(kind):
           T.store(C, T.library.rmsnorm(scratch[worker, :]))
 
     wrapper = "__kernel__(context,tensor::make_tensor(a,l37),tensor::make_tensor(c,l37));"
+  elif kind == "printing":
+
+    @T.template
+    def kernel(A: T.Tensor((37,), dtype="float16"), C: T.Tensor((37,), dtype="float32", access="output")):
+      scratch = T.alloc((37,), dtype="float32")
+      T.store(scratch, T.load(A, dtype="float32"))
+      T.print(T.load(A), T.load(A) > 1, buffer_size=64, truncation="[cut]", flush=True)
+      T.store(C, T.load(scratch) + 1)
+
+    debug = T.DebugOptions(memory=True, timeline=True)
+    wrapper = "__kernel__(nullptr,tensor::make_tensor(a,l37),tensor::make_tensor(c,l37));"
   elif kind == "attention":
 
     @T.template
@@ -170,7 +201,11 @@ def source(kind):
 
     wrapper = "__kernel__(tensor::make_tensor(c,l4),tensor::make_tensor(c,l4),tensor::make_tensor(c,l44));"
   return (
-    CPUBackend().lower(kernel.ir, (), target="SVE").source
+    (
+      T.lower(kernel, target="SVE", debug=debug).get_kernel_source()
+      if debug
+      else CPUBackend().lower(kernel.ir, (), target="SVE").source
+    )
     + """
 #include "vecops/execution/WorkspaceContext.h"
 extern "C" void check(vecops::float16_t* a,std::int64_t* idx,float* c,vecops::execution::WorkspaceContext& context) {

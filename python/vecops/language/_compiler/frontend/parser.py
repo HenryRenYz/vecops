@@ -6,7 +6,7 @@ import ast
 from dataclasses import replace
 from types import ModuleType
 
-from ...dsl import DSLFunction, Intrinsic, Vector, ExecutionLayout
+from ...dsl import DSLFunction, ExecutionLayout, Intrinsic, Vector
 from ...expr import Dynamic
 from ...types import TensorType
 from .. import ir as I
@@ -14,16 +14,17 @@ from ..dtypes import dtype_name
 from ..operations import Trait, use_catalog
 from ..operations import current as operation_snapshot
 from .capture import DSL_MODULES, Body, capture, symbol
-from .diagnostics import DSLError
-from .helpers import HelperFrontend
-from .state import StateFrontend
-from .primitives import PrimitivesFrontend
-from .loops import LoopsFrontend
-from .reducers import ReducersFrontend
 from .collectives import CollectiveFrontend
-from .pipeline import PipelineFrontend
+from .diagnostics import DSLError
 from .hardware import HardwareFrontend
+from .helpers import HelperFrontend
+from .loops import LoopsFrontend
+from .pipeline import PipelineFrontend
+from .primitives import PrimitivesFrontend
+from .printing import PrintFrontend
+from .reducers import ReducersFrontend
 from .shapes import ShapesFrontend
+from .state import StateFrontend
 from .workspace import WorkspaceFrontend
 
 
@@ -38,10 +39,12 @@ class Frontend(
   HardwareFrontend,
   ShapesFrontend,
   WorkspaceFrontend,
+  PrintFrontend,
 ):
   def __init__(self, ir, *, catalog=None):
     self.operations = catalog or operation_snapshot()
     self.body = ir.body
+    self.name = ir.name
     self.parameters = {}
     self.bindings = {}
     self.env = dict(self.body.environment)
@@ -55,6 +58,7 @@ class Frontend(
     self.hardware_regions = []
     self.helper_exits = []
     self.teams = []
+    self.origins = {}
     for name, parameter in ir.signature.parameters.items():
       annotation = ir.annotations[name]
       self.parameters[name] = annotation
@@ -101,7 +105,14 @@ class Frontend(
   def compile(self):
     with use_catalog(self.operations):
       self.statements(self.body.tree.body)
-    return I.KernelIR(self.block, self.parameters, self.bindings, self.diagnostics)
+    from ..._debug.session import current_session
+
+    session = current_session.get()
+    if session is not None:
+      session.origins.update({f"node{index}": location for index, location in enumerate(self.origins.values())})
+    return I.KernelIR(
+      self.block, self.parameters, self.bindings, self.diagnostics, origins=self.origins, name=self.name
+    )
 
   def value(self, obj, node):
     obj = symbol(obj)
@@ -113,6 +124,14 @@ class Frontend(
     return tuple(self.value(v, node) for v in (obj if isinstance(obj, tuple) else (obj,)))
 
   def expression(self, node):
+    value = self._expression(node)
+    if isinstance(value, I.Node):
+      self.origins.setdefault(id(value), (self.body.filename, self.body.first_line + node.lineno - 1, node.col_offset))
+    return value
+
+  def _expression(self, node):
+    if isinstance(node, ast.JoinedStr):
+      return self.joined_string(node)
     if isinstance(node, ast.Constant):
       return symbol(node.value)
     if isinstance(node, ast.Name):
@@ -120,6 +139,8 @@ class Frontend(
         return self.env[node.id]
       if node.id in {"float", "int", "bool"}:
         return {"float": float, "int": int, "bool": bool}[node.id]
+      if node.id == "print":
+        return Intrinsic("print")
       self.error(node, f"unbound kernel name {node.id!r}")
     if isinstance(node, (ast.Tuple, ast.List)):
       if isinstance(node, ast.List):
@@ -147,7 +168,9 @@ class Frontend(
           return value
         if isinstance(value, DSLFunction):
           return capture(value.function)
-        if isinstance(value, (Intrinsic, type)) or node.attr in {
+        from ..._debug.options import PrintTarget
+
+        if isinstance(value, (Intrinsic, PrintTarget, type)) or node.attr in {
           "float16",
           "bfloat16",
           "float32",
@@ -190,7 +213,15 @@ class Frontend(
         self.error(node, "only squared expressions are supported by **; use explicit DSL math")
       if type(node.op) not in operators:
         self.error(node, "unsupported binary operation")
-      left, right = self.value(self.expression(node.left), node), self.value(self.expression(node.right), node)
+      raw_left, raw_right = self.expression(node.left), self.expression(node.right)
+      if isinstance(node.op, ast.Mult):
+        if isinstance(raw_left, (str, tuple)) and isinstance(I.constant(raw_right), int):
+          return raw_left * I.constant(raw_right)
+        if isinstance(raw_right, (str, tuple)) and isinstance(I.constant(raw_left), int):
+          return raw_right * I.constant(raw_left)
+      if isinstance(node.op, ast.Add) and isinstance(raw_left, (str, tuple)) and type(raw_right) is type(raw_left):
+        return raw_left + raw_right
+      left, right = self.value(raw_left, node), self.value(raw_right, node)
       op = operators[type(node.op)]
       if isinstance(node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)):
         predicate = lambda v: v.type.dtype == "bool" or isinstance(v.type, I.TileType) and v.type.mask
@@ -412,6 +443,8 @@ class Frontend(
     kwargs = {k.arg: self.expression(k.value) for k in node.keywords}
     if any(k.arg is None for k in node.keywords):
       self.error(node, "runtime keyword unpacking is not supported")
+    if operation in {"print", "static_print"}:
+      return self.print_call(operation, args, kwargs, node)
     allowed = {
       "load": {"dtype", "vector", "mask", "other"},
       "store": {"mask", "implementation"},
@@ -1078,6 +1111,16 @@ class Frontend(
         self.error(node, "loop-carried view rebinding requires explicit storage; tile/vector values may carry state")
 
   def statement(self, node):
+    block = self.block
+    count = len(block.statements)
+    result = self._statement(node)
+    for statement in block.statements[count:]:
+      self.origins.setdefault(
+        id(statement), (self.body.filename, self.body.first_line + node.lineno - 1, node.col_offset)
+      )
+    return result
+
+  def _statement(self, node):
     if isinstance(node, ast.With):
       if len(node.items) != 1:
         self.error(node, "hardware regions cannot bind host context-manager values")

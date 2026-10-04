@@ -6,6 +6,7 @@ dtype lane rebinding and memory effects still have to be legalized afterwards.
 """
 
 from dataclasses import dataclass, field
+
 from . import kernel as I
 
 
@@ -81,6 +82,7 @@ class VectorRegion:
   full_chunks: bool = False
   pass_trace: list[str] = field(default_factory=list)
   cost: object | None = None
+  single_chunk: bool = False
 
 
 @dataclass

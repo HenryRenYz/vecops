@@ -8,10 +8,12 @@ for scratch buffers does not re-run lowering or optimization.
 
 from dataclasses import dataclass, field, fields, replace
 from types import MappingProxyType
+
 from ... import ir as I
-from ...lowering.tile_to_vector import lower_stores, lower_axis, lower_reduction, lower_region
+from ...ir.iteration import AxisResult
+from ...lowering.tile_to_vector import lower_axis, lower_axis_fold, lower_reduction, lower_region, lower_stores
+from ...operations import Trait, has
 from ...pipeline import cpu_memory_pipeline
-from ...operations import has, Trait
 
 
 def snapshot_strides(view):
@@ -110,8 +112,10 @@ def prepare(vectors, *, memory_manager=None):
       if value.op == "axis_reduce":
         axis, operation, unroll = value.data
         for count in dict.fromkeys((unroll, 1)):
-          axes[(id(value), count)] = lower_axis(
-            value.args[0], value.type.dtype, axis, operation, count, manager=manager
+          axes[(id(value), count)] = (
+            lower_axis(value.args[0], value.type.dtype, axis, operation, count, manager=manager)
+            if not isinstance(value.data, AxisResult)
+            else lower_axis_fold(value.data.fold, value.type.dtype, count, manager=manager)
           )
       elif has(value, Trait.SCALAR_REDUCTION) and id(value) not in vectors.plans:
         reductions[((id(value),), ())] = lower_reduction((value,), manager=manager)

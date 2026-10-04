@@ -17,13 +17,16 @@ import os
 import re
 import shutil
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 from threading import Lock
-from typing import Any, Sequence
+from typing import Any
 
 from . import _C as native
+from ._dtype import dtype_name as _dtype_name
+
 
 @dataclass
 class _BridgeRegistration:
@@ -66,10 +69,7 @@ def _thread_pool_pointer(torch: Any, qualified_name: str) -> ctypes.c_void_p:
   if mode in ("", "torch"):
     return ctypes.c_void_p(None)
   if mode != "native":
-    raise RuntimeError(
-      "VECOPS_THREAD_POOL must be 'torch' or 'native', "
-      f"got {mode!r}"
-    )
+    raise RuntimeError(f"VECOPS_THREAD_POOL must be 'torch' or 'native', got {mode!r}")
   configured_ops = os.environ.get("VECOPS_NATIVE_THREAD_POOL_OPS")
   if configured_ops:
     patterns = [item.strip() for item in configured_ops.split(",") if item.strip()]
@@ -80,9 +80,7 @@ def _thread_pool_pointer(torch: Any, qualified_name: str) -> ctypes.c_void_p:
     threads = int(configured) if configured else int(torch.get_num_threads())
     if threads < 1:
       raise RuntimeError("VECOPS_NUM_THREADS must be a positive integer")
-    _native_thread_pool = ctypes.c_void_p(
-      native.native_thread_pool_address(threads)
-    )
+    _native_thread_pool = ctypes.c_void_p(native.native_thread_pool_address(threads))
   return _native_thread_pool
 
 
@@ -95,12 +93,8 @@ def _require_identifier(value: str, what: str) -> None:
     raise ValueError(f"{what} must be a C++ identifier, got {value!r}")
 
 
-def _dtype_name(dtype: native.DType) -> str:
-  return str(dtype).rsplit(".", 1)[-1]
-
-
 _dtype_abi = {
-  "bool_": "VECOPS_DTYPE_BOOL",
+  "bool": "VECOPS_DTYPE_BOOL",
   "int8": "VECOPS_DTYPE_I8",
   "uint8": "VECOPS_DTYPE_U8",
   "int16": "VECOPS_DTYPE_I16",
@@ -118,7 +112,7 @@ _dtype_abi = {
 
 def _scalar_cpp(dtype: native.DType) -> str:
   name = _dtype_name(dtype)
-  if name == "bool_":
+  if name == "bool":
     return "bool"
   if name.startswith("float") or name == "bfloat16":
     return "double"
@@ -127,7 +121,7 @@ def _scalar_cpp(dtype: native.DType) -> str:
 
 def _scalar_schema(dtype: native.DType) -> str:
   name = _dtype_name(dtype)
-  if name == "bool_":
+  if name == "bool":
     return "bool"
   if name.startswith("float") or name == "bfloat16":
     return "float"
@@ -140,27 +134,22 @@ def _schema_default(value: Any) -> str:
   return repr(value)
 
 
-def _ordered_values(
-    definition: native.KernelDef, spec_order: Sequence[str] | None
-) -> list[str]:
+def _ordered_values(definition: native.KernelDef, spec_order: Sequence[str] | None) -> list[str]:
   """Return spec names in declaration order, validating completeness."""
   if spec_order is None:
     return list(definition.values)
   declared = dict(definition.values)
   if set(spec_order) != set(declared) or len(spec_order) != len(declared):
-    raise ValueError(
-        "spec_order must be a permutation of the kernel definition values: "
-        f"{sorted(declared)}"
-    )
+    raise ValueError(f"spec_order must be a permutation of the kernel definition values: {sorted(declared)}")
   return list(spec_order)
 
 
 def _torch_schema(
-    name: str,
-    definition: native.KernelDef,
-    *,
-    return_outputs: bool = False,
-    spec_order: Sequence[str] | None = None,
+  name: str,
+  definition: native.KernelDef,
+  *,
+  return_outputs: bool = False,
+  spec_order: Sequence[str] | None = None,
 ) -> str:
   """Lower a KernelDef to a mutable out-style Torch dispatcher schema.
 
@@ -242,8 +231,11 @@ uint32_t dtype_to_abi(c10::ScalarType dtype) {
   case c10::ScalarType::Char: return VECOPS_DTYPE_I8;
   case c10::ScalarType::Byte: return VECOPS_DTYPE_U8;
   case c10::ScalarType::Short: return VECOPS_DTYPE_I16;
+  case c10::ScalarType::UInt16: return VECOPS_DTYPE_U16;
   case c10::ScalarType::Int: return VECOPS_DTYPE_I32;
+  case c10::ScalarType::UInt32: return VECOPS_DTYPE_U32;
   case c10::ScalarType::Long: return VECOPS_DTYPE_I64;
+  case c10::ScalarType::UInt64: return VECOPS_DTYPE_U64;
   case c10::ScalarType::Half: return VECOPS_DTYPE_F16;
   case c10::ScalarType::BFloat16: return VECOPS_DTYPE_BF16;
   case c10::ScalarType::Float: return VECOPS_DTYPE_F32;
@@ -410,17 +402,19 @@ extern "C" VECOPS_RUNTIME_EXPORT void vecops_torch_bridge_set_thread_pool_v1(
 
 
 def _generate_torch_source(
-    library: str,
-    name: str,
-    definition: native.KernelDef,
-    *,
-    return_outputs: bool = False,
-    spec_order: Sequence[str] | None = None,
+  library: str,
+  name: str,
+  definition: native.KernelDef,
+  *,
+  return_outputs: bool = False,
+  spec_order: Sequence[str] | None = None,
 ) -> str:
   """Generate the complete bridge translation unit without writing it to disk."""
-  schema = _torch_schema(
-      name, definition, return_outputs=return_outputs, spec_order=spec_order
-  ).replace("\\", "\\\\").replace('"', '\\"')
+  schema = (
+    _torch_schema(name, definition, return_outputs=return_outputs, spec_order=spec_order)
+    .replace("\\", "\\\\")
+    .replace('"', '\\"')
+  )
   parameters = definition.inputs
   cpp_parameters: list[str] = []
   call_append: list[str] = []
@@ -446,7 +440,7 @@ def _generate_torch_source(
       cpp_parameters.append(f"{_scalar_cpp(parameter.dtype)} {local}")
       dtype = _dtype_abi[_dtype_name(parameter.dtype)]
       kind = _dtype_name(parameter.dtype)
-      if kind == "bool_" or kind.startswith("uint"):
+      if kind == "bool" or kind.startswith("uint"):
         storage = f"make_unsigned_value({local}, {dtype})"
       elif kind.startswith("int"):
         storage = f"make_signed_value({local}, {dtype})"
@@ -466,9 +460,9 @@ def _generate_torch_source(
       spec_append.append(f'  if ({local}) specs[spec_count++] = make_dtype_spec("{symbol}", dtype_to_abi(*{local}));')
 
   output_locals = [
-      f"p{index}"
-      for index, parameter in enumerate(parameters)
-      if isinstance(parameter, native.TensorDef) and parameter.output
+    f"p{index}"
+    for index, parameter in enumerate(parameters)
+    if isinstance(parameter, native.TensorDef) and parameter.output
   ]
   cpp_return_type = "void"
   return_statement = ""
@@ -476,9 +470,7 @@ def _generate_torch_source(
     cpp_return_type = "at::Tensor"
     return_statement = f"  return {output_locals[0]};"
   elif return_outputs and output_locals:
-    cpp_return_type = "std::tuple<" + ", ".join(
-        "at::Tensor" for _ in output_locals
-    ) + ">"
+    cpp_return_type = "std::tuple<" + ", ".join("at::Tensor" for _ in output_locals) + ">"
     return_statement = f"  return std::make_tuple({', '.join(output_locals)});"
 
   return _TORCH_BRIDGE_TEMPLATE.substitute(
@@ -496,13 +488,13 @@ def _generate_torch_source(
 
 
 def _public_wrapper(
-    library: str,
-    name: str,
-    definition: native.KernelDef,
-    operator: native.Operator,
-    ready: list[bool],
-    torch_op_holder: list[Any],
-    spec_order: Sequence[str] | None = None,
+  library: str,
+  name: str,
+  definition: native.KernelDef,
+  operator: native.Operator,
+  ready: list[bool],
+  torch_op_holder: list[Any],
+  spec_order: Sequence[str] | None = None,
 ):
   """Wrap raw ``torch.ops`` positional specializations in the public call form.
 
@@ -529,10 +521,10 @@ def _public_wrapper(
     # inputs only, or inputs followed by every spec value positionally in
     # declaration order.
     if (
-        ready[0]
-        and _precompile_mod._active_collector is None
-        and not kwargs
-        and len(args) in (n_parameters, n_parameters + n_specs)
+      ready[0]
+      and _precompile_mod._active_collector is None
+      and not kwargs
+      and len(args) in (n_parameters, n_parameters + n_specs)
     ):
       torch_op_holder[0](*args)
       if single_output_index >= 0:
@@ -540,14 +532,12 @@ def _public_wrapper(
       return tuple(args[index] for index in output_indices)
 
     if (
-        ready[0]
-        and _precompile_mod._active_collector is None
-        and len(args) == n_parameters
-        and all(keyword in spec_names for keyword in kwargs)
+      ready[0]
+      and _precompile_mod._active_collector is None
+      and len(args) == n_parameters
+      and all(keyword in spec_names for keyword in kwargs)
     ):
-      torch_op_holder[0](
-          *args, *(kwargs[name] if name in kwargs else None for name in symbols)
-      )
+      torch_op_holder[0](*args, *(kwargs[name] if name in kwargs else None for name in symbols))
       if single_output_index >= 0:
         return args[single_output_index]
       return tuple(args[index] for index in output_indices)
@@ -618,15 +608,16 @@ def _bridge_include_root() -> Path:
   raise RuntimeError("vecops framework bridge headers were not found")
 
 
-def _cached_bridge(directory: Path, output_name: str) -> Path | None:
+def _cached_bridge(directory: Path, output_name: str, identity: str) -> Path | None:
   if not directory.is_dir():
     return None
+  manifest = directory / f"{output_name}.identity"
+  if not manifest.is_file() or manifest.read_text() != identity:
+    return None
   candidates = [
-      path
-      for path in directory.iterdir()
-      if path.is_file()
-      and path.suffix in {".so", ".dylib", ".dll"}
-      and output_name in path.name
+    path
+    for path in directory.iterdir()
+    if path.is_file() and path.suffix in {".so", ".dylib", ".dll"} and output_name in path.name
   ]
   return candidates[0] if len(candidates) == 1 else None
 
@@ -634,15 +625,15 @@ def _cached_bridge(directory: Path, output_name: str) -> Path | None:
 def _toolchain_key(config: native.KernelCompilerConfig) -> tuple[Any, ...]:
   toolchain = config.toolchain
   return (
-      str(config.sdk.path),
-      config.sdk.layout,
-      str(toolchain.cmake_program),
-      str(toolchain.c_compiler),
-      str(toolchain.cxx_compiler),
-      str(toolchain.toolchain_file),
-      toolchain.generator,
-      toolchain.build_type,
-      tuple(sorted(toolchain.environment.items())),
+    str(config.sdk.path),
+    config.sdk.layout,
+    str(toolchain.cmake_program),
+    str(toolchain.c_compiler),
+    str(toolchain.cxx_compiler),
+    str(toolchain.toolchain_file),
+    toolchain.generator,
+    toolchain.build_type,
+    tuple(sorted(toolchain.environment.items())),
   )
 
 
@@ -656,37 +647,37 @@ def _copy_toolchain(toolchain: native.ToolchainSpec) -> native.ToolchainSpec:
   copied.build_type = toolchain.build_type
   copied.parallel_jobs = toolchain.parallel_jobs
   copied.environment = toolchain.environment
+  copied.output_mode = toolchain.output_mode
+  copied.observer = toolchain.observer
   return copied
 
 
-def _torch_openmp_runtime(
-    torch_libraries: tuple[Path, ...], torch_parallel_info: str
-) -> str | None:
+def _torch_openmp_runtime(torch_libraries: tuple[Path, ...], torch_parallel_info: str) -> str | None:
   if "ATen parallel backend: OpenMP" not in torch_parallel_info:
     return None
   runtime_names = {
-      "gomp": ("libgomp.so*", "libgomp.dylib"),
-      "omp": ("libomp.so*", "libomp.dylib", "libiomp5.so*", "libiomp5.dylib"),
+    "gomp": ("libgomp.so*", "libgomp.dylib"),
+    "omp": ("libomp.so*", "libomp.dylib", "libiomp5.so*", "libiomp5.dylib"),
   }
   detected = {
-      runtime
-      for directory in torch_libraries
-      for runtime, patterns in runtime_names.items()
-      if any(any(directory.glob(pattern)) for pattern in patterns)
+    runtime
+    for directory in torch_libraries
+    for runtime, patterns in runtime_names.items()
+    if any(any(directory.glob(pattern)) for pattern in patterns)
   }
   if len(detected) != 1:
     detail = ", ".join(sorted(detected)) or "none"
     raise RuntimeError(
-        "Torch reports its OpenMP backend, but its packaged OpenMP runtime "
-        f"could not be identified unambiguously (found: {detail})"
+      "Torch reports its OpenMP backend, but its packaged OpenMP runtime "
+      f"could not be identified unambiguously (found: {detail})"
     )
   return detected.pop()
 
 
 def _torch_bridge_build_policy(
-    config: native.KernelCompilerConfig,
-    torch_libraries: tuple[Path, ...],
-    torch_parallel_info: str,
+  config: native.KernelCompilerConfig,
+  torch_libraries: tuple[Path, ...],
+  torch_parallel_info: str,
 ) -> tuple[native.ToolchainSpec, tuple[str, ...]]:
   """Enable the header-only ATen parallel backend with a matching runtime."""
   toolchain = _copy_toolchain(config.toolchain)
@@ -696,9 +687,7 @@ def _torch_bridge_build_policy(
 
   compiler_name = Path(toolchain.cxx_compiler).name.lower()
   compiler_is_clang = "clang" in compiler_name
-  compiler_is_gnu = not compiler_is_clang and (
-      "g++" in compiler_name or "gcc" in compiler_name
-  )
+  compiler_is_gnu = not compiler_is_clang and ("g++" in compiler_name or "gcc" in compiler_name)
   if runtime == "gomp" and not compiler_is_gnu:
     requested_cxx = os.environ.get("VECOPS_TORCH_BRIDGE_CXX", "g++")
     requested_cc = os.environ.get("VECOPS_TORCH_BRIDGE_CC", "gcc")
@@ -706,9 +695,9 @@ def _torch_bridge_build_policy(
     bridge_cc = shutil.which(requested_cc)
     if bridge_cxx is None or bridge_cc is None:
       raise RuntimeError(
-          "Torch uses GNU OpenMP, but the selected kernel compiler cannot "
-          "emit its ABI and a GNU bridge compiler was not found; install "
-          "gcc/g++ or set VECOPS_TORCH_BRIDGE_CC and VECOPS_TORCH_BRIDGE_CXX"
+        "Torch uses GNU OpenMP, but the selected kernel compiler cannot "
+        "emit its ABI and a GNU bridge compiler was not found; install "
+        "gcc/g++ or set VECOPS_TORCH_BRIDGE_CC and VECOPS_TORCH_BRIDGE_CXX"
       )
     toolchain.c_compiler = Path(bridge_cc).absolute()
     toolchain.cxx_compiler = Path(bridge_cxx).absolute()
@@ -723,10 +712,10 @@ def _torch_bridge_build_policy(
   bridge_cc = shutil.which(requested_cc)
   if bridge_cxx is None or bridge_cc is None:
     raise RuntimeError(
-        "Torch uses LLVM/Intel OpenMP, but the selected kernel compiler "
-        "cannot emit its ABI and a Clang bridge compiler was not found; "
-        "install clang or set VECOPS_TORCH_BRIDGE_CC and "
-        "VECOPS_TORCH_BRIDGE_CXX"
+      "Torch uses LLVM/Intel OpenMP, but the selected kernel compiler "
+      "cannot emit its ABI and a Clang bridge compiler was not found; "
+      "install clang or set VECOPS_TORCH_BRIDGE_CC and "
+      "VECOPS_TORCH_BRIDGE_CXX"
     )
   toolchain.c_compiler = Path(bridge_cc).absolute()
   toolchain.cxx_compiler = Path(bridge_cxx).absolute()
@@ -734,17 +723,15 @@ def _torch_bridge_build_policy(
 
 
 def _load_bridge(
-    registration: _BridgeRegistration,
-    library_path: Path,
-    native_library: Path,
-    torch: Any,
+  registration: _BridgeRegistration,
+  library_path: Path,
+  native_library: Path,
+  torch: Any,
 ) -> None:
   torch.ops.load_library(str(library_path))
   module = ctypes.CDLL(str(library_path))
   native_module = ctypes.CDLL(str(native_library))
-  invoke = ctypes.cast(
-      native_module.vecops_operator_bridge_invoke_v1, ctypes.c_void_p
-  )
+  invoke = ctypes.cast(native_module.vecops_operator_bridge_invoke_v1, ctypes.c_void_p)
   setter = module.vecops_torch_bridge_set_handle_v1
   setter.argtypes = [ctypes.c_uint64, ctypes.c_void_p]
   setter.restype = None
@@ -758,9 +745,7 @@ def _load_bridge(
   if pool_setter is not None:
     pool_setter.argtypes = [ctypes.c_void_p]
     pool_setter.restype = None
-    pool_setter(_thread_pool_pointer(
-      torch, f"{registration.library}::{registration.name}"
-    ))
+    pool_setter(_thread_pool_pointer(torch, f"{registration.library}::{registration.name}"))
   _loaded_bridge_modules.extend((module, native_module))
   registration.library_path = library_path
   registration.materialized = True
@@ -775,9 +760,7 @@ def _load_bridge(
 
 def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> int:
   """Build every pending Torch bridge through shared CMake batches."""
-  if parallelism is not None and (
-      isinstance(parallelism, bool) or parallelism < 1
-  ):
+  if parallelism is not None and (isinstance(parallelism, bool) or parallelism < 1):
     raise ValueError("parallelism must be a positive integer")
   with _materialize_lock:
     with _registration_lock:
@@ -794,11 +777,19 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
     torch_parallel_info = torch.__config__.parallel_info()
     native_library = Path(native.__file__).resolve()
     torch_identity = (
-        torch.__version__,
-        torch.compiled_with_cxx11_abi(),
-        tuple(map(str, torch_includes)),
-        tuple(map(str, torch_libraries)),
-        torch_parallel_info,
+      torch.__version__,
+      torch.compiled_with_cxx11_abi(),
+      tuple(map(str, torch_includes)),
+      tuple(map(str, torch_libraries)),
+      torch_parallel_info,
+    )
+    from ._identity import compiler_identity, file_identity, tree_identity
+
+    torch_identity += (
+      tree_identity(include_root),
+      tuple(tree_identity(path) for path in torch_includes),
+      tuple(tree_identity(path, {".so", ".a", ".dylib"}) for path in torch_libraries),
+      file_identity(native_library),
     )
 
     groups: dict[tuple[Any, ...], list[tuple[_BridgeRegistration, Any]]] = {}
@@ -814,58 +805,54 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
     for group in groups.values():
       first_registration, first_config = group[0]
       bridge_toolchain, bridge_openmp_flags = _torch_bridge_build_policy(
-          first_config, torch_libraries, torch_parallel_info
+        first_config, torch_libraries, torch_parallel_info
       )
       first_registration.compiler.build_dir.mkdir(parents=True, exist_ok=True)
       attempt = Path(
-          tempfile.mkdtemp(
-              prefix="torch-bridge-batch-",
-              dir=first_registration.compiler.build_dir,
-          )
+        tempfile.mkdtemp(
+          prefix="torch-bridge-batch-",
+          dir=first_registration.compiler.build_dir,
+        )
       )
       batch = native.KernelBuildBatchRequest()
       batch.generated_source_directory = attempt / "project"
       batch.build_directory = attempt / "build"
       tasks = []
       task_registrations = []
+      publications = []
+      validators = []
       resolved: dict[tuple[str, str], Path] = {}
 
       for index, (registration, config) in enumerate(group):
         source = _generate_torch_source(
-            registration.library,
-            registration.name,
-            registration.kernel_def,
-            return_outputs=registration.return_outputs,
-            spec_order=registration.spec_order,
+          registration.library,
+          registration.name,
+          registration.kernel_def,
+          return_outputs=registration.return_outputs,
+          spec_order=registration.spec_order,
         )
         bridge_identity = (
-            "torch-bridge-v4",
-            str(bridge_toolchain.c_compiler),
-            str(bridge_toolchain.cxx_compiler),
-            tuple(bridge_openmp_flags),
+          "torch-bridge-v4",
+          str(bridge_toolchain.c_compiler),
+          str(bridge_toolchain.cxx_compiler),
+          tuple(bridge_openmp_flags),
+          file_identity(bridge_toolchain.c_compiler),
+          file_identity(bridge_toolchain.cxx_compiler),
+          tuple(registration.extra_cflags),
+          compiler_identity(registration.compiler),
         )
-        identity = repr(
-            (source, torch_identity, _toolchain_key(config), bridge_identity)
-        )
+        identity = repr((source, torch_identity, _toolchain_key(config), bridge_identity))
         digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
-        output_name = (
-            f"vecops_bridge_{registration.library}_{registration.name}_{digest}"
-        )
+        output_name = f"vecops_bridge_{registration.library}_{registration.name}_{digest}"
         if registration.build_directory is None:
           from ._compiler import default_cache_dir
 
           override = os.environ.get("VECOPS_TORCH_BRIDGE_DIR")
-          bridge_base = (
-              Path(override).expanduser().resolve()
-              if override
-              else default_cache_dir() / "torch-bridges-v4"
-          )
-          artifact_directory = bridge_base / (
-              f"{registration.library}_{registration.name}_{digest}"
-          )
+          bridge_base = Path(override).expanduser().resolve() if override else default_cache_dir() / "torch-bridges-v4"
+          artifact_directory = bridge_base / (f"{registration.library}_{registration.name}_{digest}")
         else:
           artifact_directory = Path(registration.build_directory).expanduser().resolve()
-        cached = _cached_bridge(artifact_directory, output_name)
+        cached = _cached_bridge(artifact_directory, output_name, identity)
         if cached is not None:
           resolved[(registration.library, registration.name)] = cached
           continue
@@ -882,25 +869,40 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
         request.link_runtime = False
         request.sources = [source_path]
         request.include_directories = [include_root, *torch_includes]
-        request.compile_definitions = [
-            f"_GLIBCXX_USE_CXX11_ABI={int(torch.compiled_with_cxx11_abi())}"
-        ]
+        request.compile_definitions = [f"_GLIBCXX_USE_CXX11_ABI={int(torch.compiled_with_cxx11_abi())}"]
         request.compile_options = [
-            "-O3", "-std=c++20",
-            *bridge_openmp_flags,
-            *registration.extra_cflags,
+          "-O3",
+          "-std=c++20",
+          *bridge_openmp_flags,
+          *registration.extra_cflags,
         ]
         request.link_directories = list(torch_libraries)
         request.link_libraries = ["torch", "torch_cpu", "c10"]
         request.link_options = [
-            *bridge_openmp_flags,
-            *(f"-Wl,-rpath,{path}" for path in torch_libraries),
+          *bridge_openmp_flags,
+          *(f"-Wl,-rpath,{path}" for path in torch_libraries),
         ]
         request.generated_source_directory = batch.generated_source_directory / "tasks" / str(index)
         request.build_directory = batch.build_directory / "tasks" / str(index)
-        request.artifact_directory = artifact_directory
+        # Never let a partial/racing build overwrite the public cache artifact.
+        request.artifact_directory = attempt / "artifacts" / str(index)
         tasks.append(request)
         task_registrations.append(registration)
+        publications.append((artifact_directory, output_name, identity))
+
+        def validate(registration=registration, expected=bridge_identity):
+          return expected == (
+            "torch-bridge-v4",
+            str(bridge_toolchain.c_compiler),
+            str(bridge_toolchain.cxx_compiler),
+            tuple(bridge_openmp_flags),
+            file_identity(bridge_toolchain.c_compiler),
+            file_identity(bridge_toolchain.cxx_compiler),
+            tuple(registration.extra_cflags),
+            compiler_identity(registration.compiler),
+          )
+
+        validators.append(validate)
 
       if tasks:
         batch.tasks = tasks
@@ -908,19 +910,43 @@ def _compile_pending_torch_bridges_impl(*, parallelism: int | None = None) -> in
         if not result.success:
           detail = result.error
           if result.configure is not None and result.configure.output:
-            detail += "\n[configure]\n" + result.configure.output
+            detail += f"\n[configure log: {result.configure.log_path}]\n" + result.configure.output[-6000:]
           if result.build is not None and result.build.output:
-            detail += "\n[build]\n" + result.build.output
+            detail += f"\n[build log: {result.build.log_path}]\n" + result.build.output[-6000:]
           raise RuntimeError(f"Torch bridge batch compilation failed: {detail}")
-        for registration, task_result in zip(task_registrations, result.tasks):
+        if (
+          not all(validate() for validate in validators)
+          or (
+            tree_identity(include_root),
+            tuple(tree_identity(path) for path in torch_includes),
+            tuple(tree_identity(path, {".so", ".a", ".dylib"}) for path in torch_libraries),
+            file_identity(native_library),
+          )
+          != torch_identity[-4:]
+        ):
+          raise RuntimeError("Torch bridge build inputs changed during compilation; retry with stable inputs")
+        for registration, task_result, publication in zip(task_registrations, result.tasks, publications):
           if not task_result.success or task_result.kernel_library is None:
             raise RuntimeError(
-                f"Torch bridge {registration.library}::{registration.name} "
-                f"did not produce a shared library: {task_result.error}"
+              f"Torch bridge {registration.library}::{registration.name} "
+              f"did not produce a shared library: {task_result.error}"
             )
-          resolved[(registration.library, registration.name)] = Path(
-              task_result.kernel_library
-          )
+          artifact_directory, output_name, identity = publication
+          artifact_directory.mkdir(parents=True, exist_ok=True)
+          library = Path(task_result.kernel_library)
+          destination = artifact_directory / library.name
+          for target, content in ((destination, None), (artifact_directory / f"{output_name}.identity", identity)):
+            descriptor, temporary = tempfile.mkstemp(prefix="bridge-", dir=artifact_directory)
+            try:
+              os.close(descriptor)
+              if content is None:
+                shutil.copy2(library, temporary)
+              else:
+                Path(temporary).write_text(content)
+              os.replace(temporary, target)
+            finally:
+              Path(temporary).unlink(missing_ok=True)
+          resolved[(registration.library, registration.name)] = destination
           built_count += 1
 
       for registration, _ in group:
@@ -934,9 +960,7 @@ def compile_pending_torch_bridges(*, parallelism: int | None = None) -> int:
   from ._compiler import require_native_build_api
 
   require_native_build_api()
-  if parallelism is not None and (
-      isinstance(parallelism, bool) or parallelism < 1
-  ):
+  if parallelism is not None and (isinstance(parallelism, bool) or parallelism < 1):
     raise ValueError("parallelism must be a positive integer")
   with _registration_lock:
     if all(item.materialized for item in _registrations.values()):
@@ -948,11 +972,7 @@ def compile_pending_torch_bridges(*, parallelism: int | None = None) -> int:
   from ._compiler import default_cache_dir
 
   override = os.environ.get("VECOPS_TORCH_BRIDGE_DIR")
-  lock_root = (
-      Path(override).expanduser().resolve()
-      if override
-      else default_cache_dir() / "torch-bridges-v4"
-  )
+  lock_root = Path(override).expanduser().resolve() if override else default_cache_dir() / "torch-bridges-v4"
   lock_root.mkdir(parents=True, exist_ok=True)
   with (lock_root / ".compile.lock").open("a+b") as lock:
     fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -1001,13 +1021,13 @@ def register_torch_operator(
       spec_order=tuple(spec_order) if spec_order is not None else None,
     )
     registration.wrapper = _public_wrapper(
-        library,
-        name,
-        kernel_def,
-        operator,
-        registration.ready,
-        registration.torch_op,
-        spec_order=registration.spec_order,
+      library,
+      name,
+      kernel_def,
+      operator,
+      registration.ready,
+      registration.torch_op,
+      spec_order=registration.spec_order,
     )
     _registrations[key] = registration
     return registration.wrapper

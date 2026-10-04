@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <exception>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <system_error>
@@ -49,6 +50,12 @@ bool library_file(const fs::path& path) {
   return extension == ".so" || extension == ".dylib" || extension == ".dll";
 }
 
+std::string input_identity(const ArtifactProviderConfig& config, const BoundKernelRecipe& recipe) {
+  const auto identity =
+    recipe.artifact_key.empty() ? recipe.recipe_id + ";" + recipe.specialization_key : recipe.artifact_key;
+  return std::to_string(config.namespace_key.size()) + ":" + config.namespace_key + identity;
+}
+
 } // namespace
 
 ArtifactExecutableProvider::ArtifactExecutableProvider(ArtifactProviderConfig config)
@@ -70,6 +77,10 @@ Result<std::shared_ptr<Executable>> ArtifactExecutableProvider::load_cached(cons
   std::error_code error;
   if (!fs::is_directory(directory, error) || error)
     return status(StatusCode::NotFound, "kernel artifact is not cached");
+  std::ifstream manifest(directory / "vecops-cache-identity.txt", std::ios::binary);
+  const std::string identity{std::istreambuf_iterator<char>(manifest), std::istreambuf_iterator<char>()};
+  if (!manifest || identity != input_identity(config_, recipe))
+    return status(StatusCode::NotFound, "artifact input manifest is absent or mismatched");
   fs::path library;
   for (fs::directory_iterator iterator(directory, error), end; !error && iterator != end; iterator.increment(error)) {
     if (iterator->is_regular_file(error) && library_file(iterator->path())) {
@@ -109,6 +120,14 @@ Result<std::shared_ptr<Executable>> ArtifactExecutableProvider::publish(const Bo
     (std::string(cache_key) + ".tmp-" + std::to_string(temporary_counter.fetch_add(1, std::memory_order_relaxed)));
   if (!fs::create_directory(temporary, error) || error)
     return status(StatusCode::InternalError, "cannot create cache staging directory: " + error.message());
+  {
+    std::ofstream manifest(temporary / "vecops-cache-identity.txt", std::ios::binary);
+    manifest << input_identity(config_, recipe);
+    if (!manifest) {
+      fs::remove_all(temporary);
+      return status(StatusCode::InternalError, "cannot write artifact input manifest");
+    }
+  }
   const auto extension = executable->module()->path().extension();
   const auto staged_library = temporary / ("kernel" + extension.string());
   fs::copy_file(executable->module()->path(), staged_library, fs::copy_options::none, error);

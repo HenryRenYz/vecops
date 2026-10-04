@@ -2,14 +2,15 @@
 
 from dataclasses import fields, replace
 from types import MappingProxyType
+
 from ... import ir as I
-from ...passes.manager import register_pass
+from ...cost import estimate
 from ...ir.traversal import walk
 from ...lowering.tile_to_vector import lower_stores
-from .transpose import plan_transpose
 from ...lowering.transpose import register_transpose, x86_dword_transpose
-from ...cost import estimate
+from ...passes.manager import register_pass
 from .policies import recompute_limit
+from .transpose import plan_transpose
 
 
 @register_pass("cpu-plan-matmul", stage="cpu-memory", after=("cpu-plan-transpose",))

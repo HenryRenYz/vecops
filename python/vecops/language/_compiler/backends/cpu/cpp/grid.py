@@ -1,6 +1,7 @@
 """Emit planned grids, private buffers and dependency-aware resident teams."""
 
 from dataclasses import replace
+
 from .... import ir as I
 from ....ir.traversal import values, walk
 from ....operations import Trait
@@ -48,6 +49,8 @@ class GridEmitter:
       self.close()
 
   def grid_program(self, statement, program):
+    if self.vector_ir.manager.options.get("debug_timeline", False):
+      self.line(f'vecops_dsl::TraceScope {self.unique("program_trace")}(dsl_allocation_observer,"grid-program");')
     remainder = program
     for axis in reversed(range(len(statement.targets))):
       extent = self.scalar_inline(statement.extents[axis])

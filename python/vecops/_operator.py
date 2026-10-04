@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -28,12 +27,36 @@ class Operator:
     compiler: Compiler | None = None,
     *,
     recipe_id: str | None = None,
+    dependencies=(),
+    build_identity: str | None = None,
   ) -> None:
     self.source = Path(source).expanduser().resolve()
     self.kernel_def = kernel_def
     self.compiler = compiler or Compiler()
-    source_identity = hashlib.sha256(self.source.read_bytes()).hexdigest()[:16]
-    namespace = self.compiler.cache_namespace
+    from ._identity import compiler_identity, digest, include_roots, source_inputs
+
+    inputs = source_inputs(self.source, include_roots(self.compiler), dependencies)
+    source_identity = digest(inputs)
+    if build_identity is None:
+      try:
+        build_identity = compiler_identity(self.compiler)
+      except ImportError:
+        if self.compiler.cache_mode != _C.ArtifactCacheMode.cache_only:
+          raise
+        # Preserve lazy construction in runtime-only installations. This
+        # namespace cannot match any attested artifact, so invocation misses.
+        build_identity = "unattested-build-inputs"
+    namespace = f"{self.compiler.cache_namespace};inputs={build_identity}"
+    # Consulted only by the native compiler on a cache miss, never by a
+    # prepared invocation's execution path.
+    source_path, include_dirs, selected = self.source, include_roots(self.compiler), self.compiler
+
+    def validate_inputs():
+      return (
+        source_inputs(source_path, include_dirs, dependencies) == inputs
+        and compiler_identity(selected) == build_identity
+      )
+
     self._native = _C.Operator(
       self.source,
       kernel_def._native(),
@@ -43,6 +66,7 @@ class Operator:
       namespace,
       recipe_id or f"{kernel_def.name}:{source_identity}",
       source_identity,
+      validate_inputs,
     )
 
   @property

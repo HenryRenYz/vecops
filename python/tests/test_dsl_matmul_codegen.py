@@ -168,7 +168,7 @@ def test_aligned_cache_panels_keep_a_branch_free_amx_k_body():
     T.library.matmul((A, B), C)
 
   source = CPUBackend().lower(kernel.ir, (), target="AVX512").source
-  match = re.search(r"for \(;[^\n]+/\* full K: unmasked load/convert \*/ \{(.*?)\n\s*\}", source, re.S)
+  match = re.search(r"/\* full K: unmasked load/convert \*/\s*for \(;[^\n]+\{(.*?)\n\s*\}", source, re.S)
   assert match is not None
   body = match[1]
   assert body.count("vecops::vec::amx::dot<") == 4

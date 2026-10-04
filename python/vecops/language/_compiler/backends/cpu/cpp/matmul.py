@@ -5,9 +5,10 @@ or its private kernel. Registers are always independent C++ identifiers.
 """
 
 from dataclasses import replace
+
 from .... import ir as I
-from ....ir.traversal import walk
 from ....dtypes import ELEMENT_BYTES
+from ....ir.traversal import walk
 from ....operations import Trait
 from ..capabilities import CPP_TYPES
 
@@ -15,6 +16,62 @@ FORMATS = {"auto": -1, "dense": 0, "amx": 1, "sme": 2}
 
 
 class MatmulEmitter:
+  def matrix_loop(self, role, index, bindings, *, initialize=True, bound=None):
+    """Print a previously planned iteration domain with target bindings."""
+    loop = self.active_matmul_plan.schedule.loop(role)
+
+    def bind(expr):
+      return str(bindings[expr.data]) if expr.op == "schedule_parameter" else self.scalar(expr)
+
+    start, stop, step = (bind(v[0]) for v in (loop.domain.starts, loop.domain.extents, loop.domain.steps))
+    kind = loop.bound if bound is None else bound
+    stop = f"std::max<vecops::nint_t>(1,{stop})" if kind == "nonempty" else stop
+    condition = (
+      f"({stop})-{index}>({step})"
+      if kind == "lookahead"
+      else f"({stop})-{index}>=({step})"
+      if kind == "full-tiles"
+      else f"{index}<({stop})"
+    )
+    init = f"vecops::nint_t {index}={start}" if initialize else ""
+    self.opening(f"for ({init};{condition};{index}+={step})")
+
+  def matrix_prefetch(self, operand, coords, guard):
+    """Guard before forming a future address, including zero-sized operands."""
+    if self.active_matmul_plan.schedule.pipeline == "off":
+      return
+    self.opening(f"if ({guard}) /* bounded future panel hint */")
+    if operand.op == "packed_load":
+      spatial, ki = coords if operand.data.side == "A" else coords[::-1]
+      offset = self.packed_offset(operand.data, spatial, ki)
+      self.line(f"__builtin_prefetch({self.pointer(operand.data.view)}+({offset}),0,3);")
+    else:
+      for load in I.loads(operand):
+        own = self.coordinates(load.data.shape, operand.type.shape, coords)
+        self.line(f"__builtin_prefetch({self.pointer(load.data, own)},0,3);")
+    self.close()
+
+  def matrix_lookahead(self, role, index, bindings, load, compute):
+    """Peel prime/drain and rotate two named operand banks, no Vec arrays.
+
+    Loading the next K slice before issuing current MACs exposes load latency
+    to the compiler without changing MAC order or loading beyond the tail.
+    """
+    loop = self.active_matmul_plan.schedule.loop(role)
+    stop = str(bindings[loop.domain.extents[0].data])
+    step = str(bindings[loop.domain.steps[0].data])
+    self.opening(f"if (({stop})>0) /* operand pipeline prime */")
+    current = load("0")
+    self.line(f"vecops::nint_t {index}=0;")
+    self.matrix_loop(role, index, bindings, initialize=False, bound="lookahead")
+    future = load(f"({index})+({step})")
+    compute(current)
+    for (_, destination), (_, source) in zip(current, future):
+      self.line(f"{destination}={source};")
+    self.close()
+    compute(current)
+    self.close()
+
   def matrix_permutation(self, network, inputs):
     """Print the prepared dword permutation with individually named registers."""
     names, tags, ordinal = {}, {}, 0
@@ -104,6 +161,10 @@ class MatmulEmitter:
     if not hasattr(self, "matrix_tag_lanes"):
       self.matrix_tag_lanes = {}
     self.matrix_tag_lanes[tag] = lanes
+    if lanes is not None:
+      # Fixed one-lane A loads are full accesses. Keeping a synthetic tail
+      # predicate here prevents folding scalar load+broadcast into memory FMA.
+      self.fixed_tag_lanes[tag] = lanes
     if not hasattr(self, "matrix_tag_powers"):
       self.matrix_tag_powers = {}
     self.matrix_tag_powers[tag] = power
@@ -799,8 +860,8 @@ class MatmulEmitter:
       if column_count == 2:
         end = f"({n})-({remainder})%2"
     self.line("/* row/column GEMV and small-M/N family, widening vector dot */")
-    self.opening(f"for (vecops::nint_t {mi}=0; {mi}<({m}); ++{mi})")
-    self.opening(f"for (vecops::nint_t {ni}={start}; {ni}<({end}); {ni} += {column_count})")
+    self.matrix_loop("gemv.m", mi, {"M": m, "one": 1})
+    self.matrix_loop("gemv.n", ni, {"N": end, "columns": column_count, "n_start": start})
     accumulators = []
     for bank in range(unroll):
       columns = []
@@ -850,11 +911,17 @@ class MatmulEmitter:
     self.line(f"const vecops::nint_t {bulk}=({k})-({k})%({unroll}*({width}));")
 
     def k_loop(full_columns):
-      self.opening(f"for (; {ki}<{bulk}; {ki}+={unroll}*({width}))")
+      self.matrix_loop("gemv.k", ki, {"K": bulk, "k_group": f"{unroll}*({width})"}, initialize=False)
+      distance = self.active_matmul_plan.schedule.loop("gemv.k").schedule.distance
+      advance = f"{distance * unroll}*({width})"
+      future = f"({ki})+({advance})"
+      guard = f"({k})-({ki})>({advance})"
+      self.matrix_prefetch(a, (mi, future), guard)
+      self.matrix_prefetch(b, (future, ni), guard)
       for bank in range(unroll):
         step(f"({ki})+{bank}*({width})", width, bank, True, full_columns)
       self.close()
-      self.opening(f"for (; ({k})-{ki}>=({width}); {ki}+={width})")
+      self.matrix_loop("gemv.k", ki, {"K": k, "k_group": width}, initialize=False, bound="full-tiles")
       step(ki, width, 0, True, full_columns)
       self.close()
       self.opening(f"if ({ki}<({k})) /* one masked GEMV tail */")
@@ -1220,22 +1287,27 @@ class MatmulEmitter:
     m, n, starts, cache_loops = self.matrix_cache_region(cache, m, n)
     order = self.active_matmul_plan.amx_m_major or I.literal(False)
     if I.constant(order) is not None:
-      loops = ((mi, m, starts[0], rows * 16), (ni, n, starts[1], columns * 16))
-      for index, extent, start, step in loops if I.constant(order) else loops[::-1]:
-        self.opening(f"for (vecops::nint_t {index}={start}; {index}<({extent}); {index}+={step})")
+      loops = (
+        ("amx.m", mi, {"M": m, "m_start": starts[0], "AMR": rows * 16}),
+        ("amx.n", ni, {"N": n, "n_start": starts[1], "ANR": columns * 16}),
+      )
+      for role, index, bindings in loops if I.constant(order) else loops[::-1]:
+        self.matrix_loop(role, index, bindings)
     else:
       # Select coordinate order once per product/panel, not a second copy of
       # the complete full/tail/fused instruction body. Only the outer spatial
       # loops contain these selects; the K hot loop remains unchanged.
       selected, outer, inner = (self.unique(v) for v in ("amx_m_major", "amx_outer", "amx_inner"))
       self.line(f"const bool {selected}={self.scalar(order)}; /* tall strip traversal */")
-      self.opening(
-        f"for (vecops::nint_t {outer}=0; {outer}<({selected}?({m}):({n})); "
-        f"{outer}+=({selected}?{rows * 16}:{columns * 16}))"
+      self.matrix_loop(
+        "amx.outer",
+        outer,
+        {"outer_extent": f"{selected}?({m}):({n})", "outer_step": f"{selected}?{rows * 16}:{columns * 16}"},
       )
-      self.opening(
-        f"for (vecops::nint_t {inner}=0; {inner}<({selected}?({n}):({m})); "
-        f"{inner}+=({selected}?{columns * 16}:{rows * 16}))"
+      self.matrix_loop(
+        "amx.inner",
+        inner,
+        {"inner_extent": f"{selected}?({n}):({m})", "inner_step": f"{selected}?{columns * 16}:{rows * 16}"},
       )
       self.line(f"const auto {mi}={selected}?{outer}:{inner}, {ni}={selected}?{inner}:{outer};")
     tag = self.matrix_tag(dtype, lanes=16)
@@ -1367,8 +1439,21 @@ class MatmulEmitter:
       # Extents are nonnegative and this loop never advances beyond K; a
       # subtraction comparison avoids signed-128 arithmetic in every step.
       padded_k = all(operand.op == "packed_load" and operand.data.format in {"amx", "auto"} for operand in (a, b))
-      end = f"{ki}<({k})" if full_k or padded_k else f"({k})-{ki}>={kr}"
-      self.opening(f"for (;{end};{ki}+={kr}) /* full K: unmasked load/convert */")
+      self.line("/* full K: unmasked load/convert */")
+      self.matrix_loop(
+        "amx.k", ki, {"K": k, "AKR": kr}, initialize=False, bound="extent" if full_k or padded_k else "full-tiles"
+      )
+      if self.active_matmul_plan.schedule.pipeline != "off":
+        distance = self.active_matmul_plan.schedule.loop("amx.k").schedule.distance
+        self.opening(f"if (({k})-{ki}>{distance * kr}) /* AMX hints; no ninth tile register */")
+        for tile, (pointer, stride, guaranteed) in cursors.items():
+          advance = 16 * kr if tile >= acc_count + rows or a.op == "packed_load" else kr
+          count = self.active_matmul_plan.schedule.prefetch_lines if guaranteed else 1
+          for row in range(count):
+            self.line(
+              f"__builtin_prefetch(reinterpret_cast<const char*>({pointer}+{distance * advance})+({row})*({stride}),0,3);"
+            )
+        self.close()
       multiply(True)
       for tile, (pointer, _, _) in cursors.items():
         step = 16 * kr if tile >= acc_count + rows or a.op == "packed_load" else kr
@@ -1614,7 +1699,7 @@ class MatmulEmitter:
     ms = panel_extent(m, mm, spatial_alignment[0], product.data.block_m)
     ns = panel_extent(n, nn, spatial_alignment[1], product.data.block_n)
     ks = panel_extent(k, kk, k_alignment, product.data.block_k)
-    self.opening(f"for (vecops::nint_t {nb}=0; {nb}<({self.scalar(n)}); {nb}+={bn})")
+    self.matrix_loop("cache.n", nb, {"N": self.scalar(n), "BN": bn})
     self.line(f"const auto {nn}=std::min<vecops::nint_t>({bn},({self.scalar(n)})-{nb});")
     output_backed = statement.destination.dtype == product.type.dtype and statement.mask is None
     if output_backed:
@@ -1626,18 +1711,21 @@ class MatmulEmitter:
       partial_root = I.View(
         partial, product.type.dtype, (m, raw(nn)), (raw(nn), I.literal(1)), I.literal(0), owned=True
       )
-    self.opening(f"for (vecops::nint_t {kb}=0; {kb}<std::max<vecops::nint_t>(1,{self.scalar(k)}); {kb}+={bk})")
+    self.matrix_loop("cache.k", kb, {"K": self.scalar(k), "BK": bk})
     self.line(f"const auto {kk}=std::min<vecops::nint_t>({bk},({self.scalar(k)})-{kb});")
     bv = self.slice_matrix_value(b, (raw(kb), raw(nb)), (ks, ns))
+    future_k = f"({kb})+({bk})"
+    self.matrix_prefetch(b, (future_k, nb), f"({self.scalar(k)})-({kb})>({bk})")
     if not (
       format_ == "amx"
       and product.data.packing == "auto"
       and not self.amx_automatic_b_pack(bv, single_m_tile, spatial_alignment)
     ):
       bv = self.emit_matrix_pack(bv, "B", format_, product.data.packing)
-    self.opening(f"for (vecops::nint_t {mb}=0; {mb}<({self.scalar(m)}); {mb}+={bm})")
+    self.matrix_loop("cache.m", mb, {"M": self.scalar(m), "BM": bm})
     self.line(f"const auto {mm}=std::min<vecops::nint_t>({bm},({self.scalar(m)})-{mb});")
     av = self.slice_matrix_value(a, (raw(mb), raw(kb)), (ms, ks))
+    self.matrix_prefetch(a, (mb, future_k), f"({self.scalar(k)})-({kb})>({bk})")
     av = self.emit_matrix_pack(av, "A", format_, product.data.packing)
     initial = tuple(self.slice_matrix_value(seed, (raw(mb), raw(nb)), (ms, ns)) for seed in product.args[2:])
     local = replace(
@@ -1808,8 +1896,8 @@ class MatmulEmitter:
     self.line(f"const vecops::nint_t {lanes}=vecops::vec::size({tag}{{}});")
     mi, ni, ki = (self.unique(v) for v in ("sme_m", "sme_n", "sme_k"))
     self.line("/* SME 2x2 outer-product schedule; all vectors are born inside SM */")
-    self.opening(f"for (vecops::nint_t {mi}=0; {mi}<({m}); {mi}+=2*{lanes})")
-    self.opening(f"for (vecops::nint_t {ni}=0; {ni}<({n}); {ni}+=2*{lanes})")
+    self.matrix_loop("sme.m", mi, {"M": m, "SMR": f"2*{lanes}"})
+    self.matrix_loop("sme.n", ni, {"N": n, "SNR": f"2*{lanes}"})
     self.line("vecops::vec::sme::zero_za();")
     for r in range(2):
       for c in range(2):
@@ -1862,17 +1950,34 @@ class MatmulEmitter:
           )
           self.close()
           self.close()
-    self.opening(f"for (vecops::nint_t {ki}=0; {ki}<({k}); {ki}+={kp})")
-    av = [self.sme_operand_vector(a, "A", f"({mi}+{r}*{lanes})", ki, m, k) for r in range(2)]
-    bv = [self.sme_operand_vector(b, "B", f"({ni}+{c}*{lanes})", ki, n, k) for c in range(2)]
-    for r in range(2):
-      for c in range(2):
-        atag, aval = av[r]
-        btag, bval = bv[c]
-        self.line(
-          f"vecops::vec::sme::mopa<{r * 2 + c},{CPP_TYPES[dtype]},{CPP_TYPES[a.type.dtype]},{CPP_TYPES[b.type.dtype]}>(vecops::vec::mtrue({atag}{{}}),vecops::vec::mtrue({btag}{{}}),{aval},{bval});"
-        )
-    self.close()
+
+    def load_sme(index):
+      av = [self.sme_operand_vector(a, "A", f"({mi}+{r}*{lanes})", index, m, k) for r in range(2)]
+      bv = [self.sme_operand_vector(b, "B", f"({ni}+{c}*{lanes})", index, n, k) for c in range(2)]
+      return (*av, *bv)
+
+    def compute_sme(operands):
+      for r in range(2):
+        for c in range(2):
+          atag, aval = operands[r]
+          btag, bval = operands[2 + c]
+          self.line(
+            f"vecops::vec::sme::mopa<{r * 2 + c},{CPP_TYPES[dtype]},{CPP_TYPES[a.type.dtype]},{CPP_TYPES[b.type.dtype]}>(vecops::vec::mtrue({atag}{{}}),vecops::vec::mtrue({btag}{{}}),{aval},{bval});"
+          )
+
+    if self.active_matmul_plan.schedule.pipeline == "staged":
+      self.matrix_lookahead("sme.k", ki, {"K": k, "SKR": kp}, load_sme, compute_sme)
+    else:
+      self.matrix_loop("sme.k", ki, {"K": k, "SKR": kp})
+      future = f"({ki})+{kp * self.active_matmul_plan.schedule.loop('sme.k').schedule.distance}"
+      self.matrix_prefetch(
+        a, (mi, future), f"({k})-({ki})>{kp * self.active_matmul_plan.schedule.loop('sme.k').schedule.distance}"
+      )
+      self.matrix_prefetch(
+        b, (future, ni), f"({k})-({ki})>{kp * self.active_matmul_plan.schedule.loop('sme.k').schedule.distance}"
+      )
+      compute_sme(load_sme(ki))
+      self.close()
     for r in range(2):
       for c in range(2):
         tile = r * 2 + c
@@ -1911,8 +2016,8 @@ class MatmulEmitter:
     width = f"vecops::vec::size({tag}{{}})"
     mi, ni, ki = (self.unique(v) for v in ("matmul_m", "matmul_n", "matmul_k"))
     self.line("/* vector outer-product family: named accumulators, fused input/C transforms */")
-    self.opening(f"for (vecops::nint_t {mi}=0; {mi} < ({m}); {mi} += {mr})")
-    self.opening(f"for (vecops::nint_t {ni}=0; {ni} < ({n}); {ni} += {width})")
+    self.matrix_loop("vector.m", mi, {"M": m, "MR": mr})
+    self.matrix_loop("vector.n", ni, {"N": n, "VL": width})
     active = f"std::min<vecops::nint_t>({width}, ({n})-{ni})"
     accumulators = []
     for row in range(mr):
@@ -1935,23 +2040,48 @@ class MatmulEmitter:
         )
         self.close()
       accumulators.append(accumulator)
-    self.opening(f"for (vecops::nint_t {ki}=0; {ki} < ({k}); ++{ki})")
-    bv = self.matrix_value(b, tag, (ki, ni), active, 1)
     scalar_tag = self.matrix_tag(dtype, lanes=1)
-    for row, accumulator in enumerate(accumulators):
-      self.opening(f"if ({mi}+{row} < ({m}))")
-      av = self.matrix_value(a, scalar_tag, (f"({mi}+{row})", ki), "1", 1)
-      broadcast = self.unique("matrix_a")
-      self.line(f"auto {broadcast} = vecops::vec::fill({tag}{{}}, vecops::vec::get({scalar_tag}{{}}, {av}, 0));")
-      op = "fmadd" if dtype.startswith("float") else "mul"
-      if op == "fmadd":
-        self.line(f"{accumulator} = vecops::vec::fmadd({tag}{{}}, {broadcast}, {bv}, {accumulator});")
-      else:
-        self.line(
-          f"{accumulator} = vecops::vec::add({tag}{{}}, {accumulator}, vecops::vec::mul({tag}{{}}, {broadcast}, {bv}));"
-        )
+
+    def load_vector(index):
+      values = [(tag, self.matrix_value(b, tag, (index, ni), active, 1))]
+      for row in range(mr):
+        broadcast = self.unique("matrix_a")
+        self.line(f"auto {broadcast}=vecops::vec::zeros({tag}{{}});")
+        self.opening(f"if ({mi}+{row}<({m}))")
+        av = self.matrix_value(a, scalar_tag, (f"({mi}+{row})", index), "1", 1)
+        self.line(f"{broadcast}=vecops::vec::fill({tag}{{}},vecops::vec::get({scalar_tag}{{}},{av},0));")
+        self.close()
+        values.append((tag, broadcast))
+      return tuple(values)
+
+    def compute_vector(values):
+      bv = values[0][1]
+      for row, accumulator in enumerate(accumulators):
+        self.opening(f"if ({mi}+{row}<({m}))")
+        if len(values) == 1:
+          av = self.matrix_value(a, scalar_tag, (f"({mi}+{row})", ki), "1", 1)
+          broadcast = self.unique("matrix_a")
+          self.line(f"auto {broadcast}=vecops::vec::fill({tag}{{}},vecops::vec::get({scalar_tag}{{}},{av},0));")
+        else:
+          broadcast = values[row + 1][1]
+        if dtype.startswith("float"):
+          self.line(f"{accumulator}=vecops::vec::fmadd({tag}{{}},{broadcast},{bv},{accumulator});")
+        else:
+          self.line(
+            f"{accumulator}=vecops::vec::add({tag}{{}},{accumulator},vecops::vec::mul({tag}{{}},{broadcast},{bv}));"
+          )
+        self.close()
+
+    if self.active_matmul_plan.schedule.pipeline == "staged":
+      self.matrix_lookahead("vector.k", ki, {"K": k, "one": 1}, load_vector, compute_vector)
+    else:
+      self.matrix_loop("vector.k", ki, {"K": k, "one": 1})
+      distance = self.active_matmul_plan.schedule.loop("vector.k").schedule.distance
+      future = f"({ki})+{distance}"
+      self.matrix_prefetch(a, (mi, future), f"({k})-({ki})>{distance}")
+      self.matrix_prefetch(b, (future, ni), f"({k})-({ki})>{distance}")
+      compute_vector(((tag, self.matrix_value(b, tag, (ki, ni), active, 1)),))
       self.close()
-    self.close()
     for row, accumulator in enumerate(accumulators):
       self.opening(f"if ({mi}+{row} < ({m}))")
       self.vector_matrix_epilogue(statement, product, tag, (f"({mi}+{row})", ni), active, accumulator)

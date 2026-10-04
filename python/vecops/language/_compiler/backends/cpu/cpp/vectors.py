@@ -1,7 +1,9 @@
 """C++ emission: vectors."""
 
 from __future__ import annotations
+
 from .... import ir as I
+from ....dtypes import ELEMENT_BYTES
 from ..capabilities import CPP_TYPES
 
 
@@ -46,8 +48,7 @@ class VectorsEmitter:
         return f"vecops::vec::mfill({tag}{{}}, {self.scalar(value)})"
       return f"vecops::vec::fill({tag}{{}}, static_cast<vecops::vec::ElementOf<{tag}>>({self.scalar(value)}))"
     if dtype != self.tag_dtypes[tag]:
-      own_tag = f"vecops::vec::Rebind<{CPP_TYPES[dtype]}, {tag}>"
-      self.tag_dtypes[own_tag] = dtype
+      own_tag = self.rebound_tag(dtype, tag)
       original = self.vector(value, own_tag, root_shape, coords, active, axis)
       name = self.unique("convert")
       self.line(f"auto {name} = vecops::vec::convert({tag}{{}}, {own_tag}{{}}, {original});")
@@ -86,6 +87,9 @@ class VectorsEmitter:
               self.line(f"vecops_dsl::check_broadcast({self.scalar(a)}, {self.scalar(b)});")
       broadcast = (
         view_axis < 0
+        or self.fixed_tag_lanes.get(tag) == 1
+        and str(active) == "1"
+        and self.environment.target.architecture != "x86"
         or I.constant(view.shape[view_axis]) == 1
         and not I.same_expr(view.shape[view_axis], root_shape[axis])
       )
@@ -181,8 +185,7 @@ class VectorsEmitter:
       elif source.type.dtype == dtype:
         return self.vector(source, tag, root_shape, coords, active, axis)
       else:
-        source_tag = f"vecops::vec::Rebind<{CPP_TYPES[source.type.dtype]}, {tag}>"
-        self.tag_dtypes[source_tag] = source.type.dtype
+        source_tag = self.rebound_tag(source.type.dtype, tag)
         original = self.vector(source, source_tag, root_shape, coords, active, axis)
         expression = f"vecops::vec::convert({tag}{{}}, {source_tag}{{}}, {original})"
     elif value.op == "where":
@@ -192,6 +195,10 @@ class VectorsEmitter:
       y = self.vector(b, tag, root_shape, coords, active, axis)
       expression = f"vecops::vec::blend({tag}{{}}, {y}, {mask}, {x})"
     elif value.op == "axis_reduce":
+      from ....ir.iteration import AxisResult
+
+      if isinstance(value.data, AxisResult):
+        return self.axis_fold(value, tag, vcoords, active, axis, root_shape)
       reduction_axis, operation, unroll = value.data
       source = value.args[0]
       own_axis = axis - (len(root_shape) - len(value.type.shape))
@@ -368,7 +375,18 @@ class VectorsEmitter:
       coordinate = self.unique("lane")
       stop = self.scalar(region.shape[-1])
 
-      def body(full):
+      def body(
+        full,
+        groups=groups,
+        tags=tags,
+        coordinate=coordinate,
+        base=base,
+        coordinates=coordinates,
+        stop=stop,
+        state=state,
+      ):
+        old_full = getattr(self, "full_vector", False)
+        self.full_vector = full
         coords, active = [], []
         for group, tag in zip(groups, tags):
           chunk = coordinate if group.first == 0 else f"({coordinate} + {group.first} * vecops::vec::size({base}{{}}))"
@@ -386,8 +404,20 @@ class VectorsEmitter:
         self.chunk_cache = {}
         callback(tags, coords, active, roots, state)
         self.chunk_cache = previous_cache
+        self.full_vector = old_full
 
-      if region.full_chunks:
+      if region.single_chunk and base_power == region.base_power and len(groups) == 1:
+        # The surrounding SIMD loop already strip-mined this exact vector.
+        # Legal oversize fallbacks still use the ordinary streaming traversal.
+        self.line(f"const vecops::nint_t {coordinate}=0; /* proven local SIMD chunk */")
+        extent = region.shape[-1]
+        full = (
+          extent.op == "lanes"
+          and extent.data[1] + ELEMENT_BYTES[region.dtype].bit_length() - ELEMENT_BYTES[extent.data[0]].bit_length()
+          == base_power
+        )
+        body(full)
+      elif region.full_chunks:
         self.line(f"vecops::nint_t {coordinate} = 0;")
         self.opening(
           f"for (; vecops_dsl::full_vectors({coordinate}, {stop}, vecops::vec::size({base}{{}}), {region.unroll}); {coordinate} += {region.unroll} * vecops::vec::size({base}{{}})) /* full vector groups */"
@@ -412,6 +442,47 @@ class VectorsEmitter:
 
   def reduction(self, expression):
     return self.reductions((expression,), plan=self.vector_ir.plans.get(id(expression)))
+
+  def axis_fold(self, value, tag, vcoords, active, axis, root_shape):
+    fold = value.data.fold
+    key = ("axis_fold", id(fold), tag, tuple(vcoords), active, axis)
+    if key in self.chunk_cache:
+      return self.chunk_cache[key][value.data.index]
+    own_axis = axis - (len(root_shape) - len(value.type.shape))
+    if own_axis < 0:
+      raise TypeError("broadcast axis folds require an explicit row loop")
+    source_axis = own_axis + (fold.axis <= own_axis)
+    index = self.unique("fold_axis")
+    banks = [[self.unique("axis_acc") for _ in range(fold.unroll)] for _ in fold.sources]
+    for op, accumulators in zip(fold.operations, banks):
+      for accumulator in accumulators:
+        self.line(f"auto {accumulator}=vecops::vec::fill({tag}{{}}, {self.identity(value.type.dtype, op)});")
+    extent = self.scalar(fold.sources[0].type.shape[fold.axis])
+    self.line(f"vecops::nint_t {index}=0;")
+    self.opening(
+      f"for (;vecops_dsl::full_group({index},{extent},1,{fold.unroll});{index}+={fold.unroll}) /* fused axis fold */"
+    )
+    coords = [vcoords[: fold.axis] + (f"({index}+{slot})",) + vcoords[fold.axis :] for slot in range(fold.unroll)]
+    plan = self.prepared.axis(value, fold.unroll)
+    self.emitted_regions.append(plan)
+    roots = self.emit_operations(plan, [tag] * fold.unroll, coords, [active] * fold.unroll, axis=source_axis)
+    for r, op in enumerate(fold.operations):
+      for slot, accumulator in enumerate(banks[r]):
+        self.line(f"{accumulator}=vecops::vec::{op}({tag}{{}},{accumulator},{roots[r][slot]});")
+    self.close()
+    self.opening(f"for (;{index}<({extent});++{index})")
+    coords = vcoords[: fold.axis] + (index,) + vcoords[fold.axis :]
+    single = self.prepared.axis(value, 1)
+    roots = self.emit_operations(single, [tag], [coords], [active], axis=source_axis)
+    for r, op in enumerate(fold.operations):
+      self.line(f"{banks[r][0]}=vecops::vec::{op}({tag}{{}},{banks[r][0]},{roots[r][0]});")
+    self.close()
+    for op, accumulators in zip(fold.operations, banks):
+      for other in accumulators[1:]:
+        self.line(f"{accumulators[0]}=vecops::vec::{op}({tag}{{}},{accumulators[0]},{other});")
+    results = tuple(a[0] for a in banks)
+    self.chunk_cache[key] = results
+    return results[value.data.index]
 
   def reductions(self, expressions, *, plan=None, stores=()):
     """Emit reductions in ordinary lexical scopes, preserving local invariants.

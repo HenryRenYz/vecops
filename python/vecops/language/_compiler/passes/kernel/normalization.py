@@ -5,6 +5,7 @@ can fuse the tail, but never recompute its reductions for every microtile.
 """
 
 from dataclasses import fields, replace
+
 from ... import ir as I
 from ...operations import Trait
 from ..manager import register_pass

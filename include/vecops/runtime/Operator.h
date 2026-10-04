@@ -19,6 +19,7 @@
 #include "vecops/runtime/Executable.h"
 #include "vecops/runtime/KernelDefinition.h"
 #include "vecops/runtime/Schema.h"
+#include <functional>
 
 namespace vecops::runtime {
 
@@ -46,6 +47,9 @@ struct BoundKernelRecipe {
     BoundKernel binding;
     /** @brief Logical task count compiled into `vecops::spec::Parallelism`. */
     nint_t parallelism = 1;
+    /** Cold-build validation before compilation and before cache publication.
+     * Never invoked by match/bind or a prepared executable's execution path. */
+    std::function<bool()> validate_inputs;
   };
   /** @brief Present only when a provider can compile this recipe from source. */
   std::shared_ptr<const SourceInstantiation> source;
@@ -101,7 +105,8 @@ public:
    * should pass the fingerprint recorded when artifacts were produced.
    */
   SourceKernelRecipe(std::string id, std::filesystem::path kernel_file, std::shared_ptr<const KernelDef> definition,
-                     std::string source_fingerprint = {}, SpecializationValues default_values = {});
+                     std::string source_fingerprint = {}, SpecializationValues default_values = {},
+                     std::function<bool()> validate_inputs = {});
 
   /** @copydoc KernelRecipe::id */
   [[nodiscard]] std::string_view id() const override {
@@ -126,6 +131,7 @@ private:
   std::shared_ptr<const KernelDef> definition_;
   std::string source_fingerprint_;
   SpecializationValues default_values_;
+  std::function<bool()> validate_inputs_;
 };
 
 /**
@@ -230,8 +236,8 @@ public:
    * @param call Positional metadata plus values not inferred from tensor metadata.
    * @return Independently-owned executable or an explanatory failure status.
    */
-  [[nodiscard]] Result<std::shared_ptr<Executable>> resolve(
-    const KernelCall& call, const VecopsExecutionContext* context = nullptr) const;
+  [[nodiscard]] Result<std::shared_ptr<Executable>> resolve(const KernelCall& call,
+                                                            const VecopsExecutionContext* context = nullptr) const;
   /**
    * @brief Resolve then synchronously execute an applicable specialization.
    * @param arguments Ordered metadata and externally-owned tensor storage.
@@ -281,8 +287,8 @@ public:
 private:
   [[nodiscard]] Result<KernelCall> normalize(const KernelCall& call) const;
   /** Resolve a call that has already passed this operator's normalization. */
-  [[nodiscard]] Result<std::shared_ptr<Executable>> resolve_normalized(
-    const KernelCall& call, const VecopsExecutionContext* context) const;
+  [[nodiscard]] Result<std::shared_ptr<Executable>> resolve_normalized(const KernelCall& call,
+                                                                       const VecopsExecutionContext* context) const;
   OperatorSchema schema_;
   std::shared_ptr<const KernelDef> kernel_definition_;
   std::vector<std::shared_ptr<const KernelRecipe>> recipes_;

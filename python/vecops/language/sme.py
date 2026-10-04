@@ -16,4 +16,4 @@ streaming_lanes = Intrinsic("sme.streaming_lanes")
 load = Intrinsic("sme.load")
 mopa = Intrinsic("sme.mopa")
 store_tile = Intrinsic("sme.store_tile")
-__all__ = ["region", "zero_za", "streaming_lanes", "load", "mopa", "store_tile"]
+__all__ = ["load", "mopa", "region", "store_tile", "streaming_lanes", "zero_za"]

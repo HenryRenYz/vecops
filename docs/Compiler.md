@@ -74,6 +74,20 @@ CPU pipelining means prefetch, explicit double-buffer storage and opt-in
 two-bank scheduling under an invariant-extent/no-alias proof, not arbitrary
 alias-dependent code motion or an asynchronous event model.
 
+Logical iteration contracts are shared by explicit local loops, folds, axis
+folds, grids and backend ScheduleLoops. Contracts retain domain, carried state,
+reducer ordering and scheduling separately from ISA representation. Builtins
+and recognized independent associative custom reducers lower through FoldLoop
+to the existing vector accumulation/finalization regions; ordered or coupled
+custom folds do not silently change association. Generic fusion requires
+memory/state proofs and treats collective/barrier/helper exits as boundaries.
+CPU memory planning now emits a MatmulSchedule before source printing, with
+cache/native domains, explicit pack/load/MAC actions and pipeline prime/drain
+phases. Target bindings supply VL, native widths and runtime cache budgets;
+optimization IR contains no C++ identifier strings. `LoweredArtifact.backend_ir`
+exposes the prepared target IR, also available as `CompiledKernel.backend_ir`.
+The printer consumes these domains and does not run a scheduling pass.
+
 The source file contains a function named `__kernel__`. It can use values
 declared by the generated header:
 
@@ -120,3 +134,36 @@ consumer compiler's interpretation of bare `-march=native`. This matters for
 compiler drivers that support SME but do not enable every optional extension
 from `native`. The exported static-library target also carries OpenMP as a
 transitive dependency when the SDK was built with OpenMP support.
+
+## Build observability and publication
+
+`ToolchainSpec::output_mode` selects `quiet`, `progress` (default), or `verbose`.
+Commands always retain complete configure/build logs in their attempt directory.
+Progress output brackets each named stage, reports duration and points failures
+to their logs. Quiet suppresses successful chatter; failures retain labelled
+diagnostics and bounded log tails. Verbose adds raw tool output between stage
+messages. `ToolchainSpec::observer` receives `BuildEvent` phase/state/log-path,
+duration and exit status; Python exposes these via `Compiler.build_events` and
+kernel `get_build_report()`.
+
+Torch bridge compilation and native kernel compilation remain two separately
+batched CMake stages. They have distinct Torch ABI/link policies and may use
+different OpenMP/compiler choices. Within each compatible toolchain group,
+all pending tasks share a single configure/build. Keeping the two policies
+separate avoids coupling runtime-only kernels to a Torch installation. Progress
+labels distinguish `Torch bridges` from `kernels`, so the stages are visible
+instead of two unexplained CMake dumps. This change does not claim one combined
+configure across both stages.
+
+Python source recipes attest source/header inventories, implementation and
+toolchain contents, plus compile/link policy. Before and after a cold build,
+`SourceKernelRecipe::validate_inputs` rejects concurrent edits. Artifact cache
+publication uses staging and atomic rename, with a full identity manifest
+checked by the provider. Generated Torch bridges use the same staged/validated
+publication discipline. Prepared executables remain immutable snapshots; their
+execution path does not re-hash source. Cache-only readers consume existing
+attestations without running native tools or creating a build tree.
+
+`compile_commands.json` is retained for read-only adapter, specialization and
+object inspection. Source/IR getters never invoke a build to synthesize missing
+evidence, and optional disassembly tools report explicit unavailability.

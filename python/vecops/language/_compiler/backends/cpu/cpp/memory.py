@@ -1,6 +1,7 @@
 """C++ emission: memory."""
 
 from __future__ import annotations
+
 from .... import ir as I
 from ..capabilities import CPP_TYPES
 
@@ -86,7 +87,12 @@ class MemoryEmitter:
     for extent, stride in zip(reversed(destination.shape), reversed(destination.strides)):
       dense = dense and I.same_expr(stride, expected)
       expected = I.binary("mul", expected, extent)
-    if dense or transpose is not None and transpose.dense_destination:
+    if dense and statement.vector_extent is not None and len(destination.shape) == 1:
+      # A clipped SIMD induction is nonnegative and bounded by one virtual
+      # vector. Rechecking its rank-one element product in the hot loop can
+      # outline checked_shape and force every live Vec to spill across calls.
+      self.line("/* clipped SIMD extent: dense writable size already proven */")
+    elif dense or transpose is not None and transpose.dense_destination:
       self.line(f"vecops_dsl::checked_shape({{{shape}}}); /* proven dense writable layout */")
     else:
       self.line(f"vecops_dsl::check_writable<{len(destination.shape)}>({{{shape}}}, {{{strides}}});")
@@ -131,7 +137,9 @@ class MemoryEmitter:
         tag = self.rebound_tag(dtype, base)
         self.opening(f"if ({count} > 0)")
         options = (
-          "vecops::vec::opt::unmasked" if self.full_fixed_access(tag, count) else f"vecops::vec::opt::first({count})"
+          "vecops::vec::opt::unmasked"
+          if getattr(self, "full_vector", False) or self.full_fixed_access(tag, count)
+          else f"vecops::vec::opt::first({count})"
         )
         if masks is not None:
           mask = (
@@ -181,12 +189,38 @@ class MemoryEmitter:
     return result
 
   def overlap(self, source, destination):
+    if self.disjoint_proven(source, destination):
+      return "false"
+
     def span(view):
       shape = ", ".join(self.scalar(v) for v in view.shape)
       strides = ", ".join(self.scalar(v) for v in view.strides)
       return f"vecops_dsl::span({self.pointer(view)}, {{{shape}}}, {{{strides}}}, sizeof({CPP_TYPES[view.dtype]}))"
 
     return f"vecops_dsl::overlap({span(source)}, {span(destination)})"
+
+  def disjoint_proven(self, a, b):
+    proof = getattr(self, "disjoint_roots", {}).get(tuple(sorted((a.storage, b.storage))))
+    if proof is None:
+      return False
+
+    def covered(own):
+      root = next((p for p in proof if p.storage == own.storage), None)
+      if root is None:
+        return False
+      if own is self.storage_views.get(own.storage):
+        # This is the parameter root used by protect_region. Kernel views
+        # are bounded by its declared logical root, which the guard covers.
+        return True
+      shape = own.region.root_shape if own.region else own.shape
+      strides = own.region.root_strides if own.region else own.strides
+      return (
+        len(shape) == len(root.shape)
+        and all(I.same_expr(x, y) for x, y in zip((*shape, *strides), (*root.shape, *root.strides)))
+        and (own.region is not None or I.same_expr(own.offset, root.offset))
+      )
+
+    return covered(a) and covered(b)
 
   def same_mapping(self, a, b):
     if len(a.shape) != len(b.shape) or a.dtype != b.dtype:
@@ -198,6 +232,8 @@ class MemoryEmitter:
 
   def snapshot(self, load, destination, must_preserve):
     view = load.data
+    if self.disjoint_proven(view, destination):
+      return
     if self.verified_grid is not None and view.storage != destination.storage:
       # The enclosing runtime guard proved disjoint parameter root spans.
       # Worker-private allocations cannot alias a parameter or another slot.

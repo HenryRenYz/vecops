@@ -6,9 +6,10 @@ Lost view provenance, loop-carried state and unknown effects retain serial order
 """
 
 from dataclasses import dataclass, replace
+
 from ... import ir as I
+from ...cost import CostQuery, estimate
 from ...ir.traversal import children, values, walk
-from ...cost import estimate, CostQuery
 from ...operations import Trait
 
 

@@ -11,20 +11,21 @@ from __future__ import annotations
 
 import ctypes
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any
 
-from . import _C
-from . import _schema_bridge
+from . import _C, _schema_bridge
 
 
 class _ObserverV1(ctypes.Structure):
   """Mirror of ``VecopsAllocationObserverV1`` (native alignment)."""
 
   _fields_ = [
-      ("struct_size", ctypes.c_uint32),
-      ("user_context", ctypes.c_void_p),
-      ("on_workspace_allocation", ctypes.c_void_p),
+    ("struct_size", ctypes.c_uint32),
+    ("user_context", ctypes.c_void_p),
+    ("on_workspace_allocation", ctypes.c_void_p),
+    ("on_memory_event", ctypes.c_void_p),
   ]
 
 
@@ -84,12 +85,12 @@ def tracking() -> Iterator[None]:
     observer = _ObserverV1()
     if ctypes.sizeof(_ObserverV1) != struct_size:
       raise RuntimeError(
-          "workspace observer ABI mismatch: "
-          f"python {ctypes.sizeof(_ObserverV1)} != native {struct_size}"
+        f"workspace observer ABI mismatch: python {ctypes.sizeof(_ObserverV1)} != native {struct_size}"
       )
     observer.struct_size = struct_size
     observer.user_context = ctypes.c_void_p(user_context)
     observer.on_workspace_allocation = ctypes.c_void_p(callback)
+    observer.on_memory_event = ctypes.c_void_p(_C.memory_event_callback_address())
     _observer = observer
     _active = True
   _install_into_loaded_bridges()
@@ -102,4 +103,9 @@ def tracking() -> Iterator[None]:
     _C.set_workspace_allocation_tracking(False)
 
 
-__all__ = ["tracking", "drain"]
+def drain_memory() -> list[dict[str, Any]]:
+  """Instrumented scratch lifetimes, anonymized allocation IDs and worker IDs."""
+  return list(_C.drain_memory_events())
+
+
+__all__ = ["drain", "drain_memory", "tracking"]
