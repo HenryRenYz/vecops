@@ -175,7 +175,9 @@ guard anyway.
   source path/URL, full upstream commit, original notices, applicable license,
   and local changes in `THIRD_PARTY_NOTICES.md`; retain the required full texts
   in `LICENSES/`. A comparison reference is not proof of the original import
-  revision. Stop for review if rights or provenance are unresolved.
+  revision. Stop for review if applicable rights are unresolved; a missing
+  original import SHA alone is a provenance limitation, not a conclusion
+  that matched material with a demonstrated upstream grant is unusable.
 - The root MIT license does not relicense third-party portions. Keep upstream
   SPDX identifiers and scope them accurately; do not apply a project MIT
   header to an imported file or invent an `OR` choice between unrelated rights.

@@ -14,7 +14,10 @@ These are source references, not claims that the complete upstream libraries
 are vendored. A **comparison reference** is a fixed version used to verify
 the cited implementation and notices. Where the original import revision was
 not recorded, the reference does not establish that revision or a complete
-historical chain of ownership. Those gaps remain to be reviewed before release.
+historical chain of ownership. A missing original import SHA alone does not
+make matched, licensed material unusable. The content comparisons below
+support applying the retained upstream grants to the identified portions;
+they do not invent an original import revision.
 
 ## Half-precision conversion: PyTorch and FP16
 
@@ -32,8 +35,27 @@ historical chain of ownership. Those gaps remain to be reviewed before release.
   `782eea126dc5c755827be751a099eb01826175cf`,
   [include/fp16/fp16.h](https://github.com/Maratyszcza/FP16/blob/782eea126dc5c755827be751a099eb01826175cf/include/fp16/fp16.h).
   Similarity alone does not prove the original import chain. Both sets of
-  upstream notices are retained pending that review; they are not presented
+  upstream notices are retained for the identified overlapping material;
+  they are not presented
   as alternative permissions to discard either set.
+- The 24 selected core assignment expressions match both the fixed v2.9.0
+  source and PyTorch v2.0.0, commit
+  `c263bd43e8e8502d4726643bc6fd046f0130ac0e`,
+  [c10/util/Half.h](https://github.com/pytorch/pytorch/blob/c263bd43e8e8502d4726643bc6fd046f0130ac0e/c10/util/Half.h),
+  after input-variable, qualifier and bit-cast-helper normalization. This
+  is a source-expression comparison, not a runtime equivalence test. The
+  BSD redistribution conditions and disclaimer are identical in those
+  two root licenses; the retained v2.9.0 license also preserves the older
+  copyright lines. This supports the identified adaptations under those
+  upstream terms despite the unrecorded original import SHA.
+- FP16 LICENSE history contains three changes: initial MIT with Georgia
+  Institute of Technology copyright at
+  `7ae046d3c2f9baa9ef716bf1dc3518ff05929afb`; Facebook added at
+  `383cac22d1f65522f48907c4e5c67f3ec492f812`; Google added at
+  `ba1d31f5eed2eb4a69e4dea3870a68c7c95f998f`. The MIT grant and disclaimer
+  remain present in each. The last version is byte-identical to the
+  retained fixed-reference license. FP16 uses literal powers of two where
+  the PyTorch/local adaptation constructs the same float bit patterns.
 - PyTorch's original BSD-style terms and full contributor copyright list are
   reproduced unchanged in [LICENSES/PyTorch-BSD.txt](LICENSES/PyTorch-BSD.txt),
   from that fixed commit's `LICENSE`. This includes its source/binary notice
@@ -53,18 +75,36 @@ Local material:
 
 | Path under `include/vecops/vec/details/` | Material and local adaptation |
 |---|---|
-| `Math.h` | Shared logarithm tables and minimax coefficients; tables reorganized into vecops constants |
+| `Math.h` | Shared f64 logarithm tables and Strict polynomial sets; tables reorganized into vecops constants |
 | `sve/math/Exp.h` | Exponential coefficients and kernel structure; templated bases, accuracy tiers, and local special-case handling |
 | `sve/math/Log.h` | Logarithm coefficients, tables and reduction structure; vecops integration |
 | `sve/math/Trig.h` | Trigonometric reduction, SVE instruction choices and pi-scaled coefficients; templated families and local special cases |
 | `sve/math/Reciprocal.h` | Reciprocal-square-root refinement design reference; source comments describe vecops accuracy tiers, not a verbatim upstream file |
 | `x86/math/Log.h` | Arm-derived coefficients/tables adapted to x86 evaluation |
-| `x86/math/Exp.h` | Arm-derived f32 coefficient sets alongside the separately attributed SLEEF sets |
+| `x86/math/Exp.h` | f16 constant bit-pattern comparison with Arm; its source attributes the f32 fits to vecops, separate from SLEEF f64 sets |
 
 Fixed reference: commit `67126040cf80f956676fbf473c2d9bebdb475283` of
 [ARM-software/optimized-routines](https://github.com/ARM-software/optimized-routines/tree/67126040cf80f956676fbf473c2d9bebdb475283).
 `sve/math/Trig.h` already records this source commit. For the other families
 it is a comparison reference; their original import revision is not recorded.
+
+All three 128-entry f64 log tables (768 values) match that fixed source in
+order, as do the three complete f64 Strict polynomial sets (15 values).
+Selected f32/f64 exponential reduction and polynomial constants match at
+their declared widths; all 39 distinct pi-sine/pi-tangent coefficients
+also match the corresponding fixed Arm sources. Local evaluation and
+accuracy-tier structure remain adapted.
+
+An older comparison is optimized-routines v23.01, commit
+`56e3bf05c19c4e28e1f5edd9093c712f16c5c32a`: its
+[math/v_log_data.c](https://github.com/ARM-software/optimized-routines/blob/56e3bf05c19c4e28e1f5edd9093c712f16c5c32a/math/v_log_data.c)
+contains the same 256 natural-log table values and carries
+`Copyright (c) 2019, Arm Limited.` with the same dual-license identifier.
+Its root license is byte-identical to the retained fixed-reference text.
+These are demonstrated licensed content references, not guessed import
+commits. Ordinary Taylor sets and the native f32 Strict log fits documented
+with `scripts/log-native-design/` are local material; matching mathematical
+constants alone is not evidence that all such sets were copied from Arm.
 
 The referenced sources carry `MIT OR Apache-2.0 WITH LLVM-exception`.
 Their complete original dual-license text, including the Arm root copyright,
@@ -100,6 +140,15 @@ Paths are relative to its `math/aarch64/` directory.
   and [src/libm/sleefsimdsp.c](https://github.com/shibatch/sleef/blob/7623d6cfa2712462880fa63a4d0f0b5f775d1a83/src/libm/sleefsimdsp.c).
   The original import revision is not recorded. Local changes include
   extracting coefficient sets and expressing them in vecops templates.
+- The complete f64 exp2/exp10 sets (11 values each) and Strict unary
+  sine sets (4 f32 and 9 f64 values) also match SLEEF 3.6, commit
+  `a99491afee2bae0b11e9ffbf3211349f43a5fd10`, at their declared widths.
+  Its Boost license is byte-identical to the retained version. The older
+  compared source files carry
+  `Copyright Naoki Shibata and contributors 2010 - 2024.`; the newer
+  reference carries the 2010 - 2025 notice below. The content and grant
+  comparison supports the identified coefficient adaptations under
+  BSL-1.0 without claiming which release was originally used.
 - Original source copyright:
 
   ```text
@@ -117,7 +166,12 @@ functions or all local coefficients were copied. Comparison reference:
 commit `5215171a44273c2b24e6d6266f39ee8f5b04c30e`,
 [libc/src/__support/math](https://github.com/llvm/llvm-project/tree/5215171a44273c2b24e6d6266f39ee8f5b04c30e/libc/src/__support/math),
 including `sin.h`, `sinf.h`, `cos.h`, `cosf.h`, `tan.h`, and `tanf.h`.
-The original design-reference revision is not recorded.
+The original design-reference revision is not recorded. No verbatim LLVM
+function was identified in the reviewed local kernels: the local comments
+distinguish a design reference, ordinary Taylor coefficients, and the
+separately matched SLEEF unary sets. The missing historical reference SHA
+therefore does not by itself establish an unresolved LLVM authorization
+issue; the full LLVM license is retained conservatively.
 
 The referenced files carry this original notice and identifier:
 
