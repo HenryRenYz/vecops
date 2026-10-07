@@ -134,3 +134,30 @@ def test_native_value_window_keeps_read_before_write_and_output_alias(tmp_path):
   expected = (source * 2 + 1)[:, 3:15].copy()
   rectangle.operator.native(source, source[:, 3:15], **rectangle._core.specialization_values)
   np.testing.assert_array_equal(source[:, 3:15], expected)
+
+
+@pytest.mark.parametrize("scalar", [False, True])
+def test_native_window_created_after_write_projects_original_capture(scalar, tmp_path):
+  @T.template
+  def historical(
+    A: T.Tensor((13, 19), dtype="float32", access="inout"),
+    C: T.Tensor((1, 12), dtype="float32", access="output"),
+  ):
+    original = T.load(A)
+    T.store(A, T.full((13, 19), 99, dtype="float32"))
+    if scalar:
+      old = T.element_at(T.cast(T.expand_dims(original[3, 3:15], 0), "float16"), (0, 2))
+      T.store(C, T.full((1, 12), old, dtype="float32"))
+    else:
+      T.store(C, T.expand_dims(original[3, 3:15], 0))
+
+  compiler = make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  compiled = T.compile(historical, compiler=compiler)
+  data = np.arange(13 * 19, dtype=np.float32).reshape(13, 19) / 16
+  expected = data[3:4, 3:15].copy()
+  if scalar:
+    expected.fill(np.float16(data[3, 5]))
+  output = np.empty((1, 12), np.float32)
+  compiled.operator.native(data, output, **compiled._core.specialization_values)
+  np.testing.assert_array_equal(output, expected)
+  np.testing.assert_array_equal(data, np.full(data.shape, 99, np.float32))

@@ -95,6 +95,7 @@ def test_builtin_loading_is_idempotent_and_order_stable():
     "plan-computation-reuse",
     "fuse-reductions",
     "fuse-reduction-elementwise",
+    "cpu-expand-dot-recipes",
     "fuse-elementwise",
     "fuse-axis-folds",
     "fuse-loop-regions",

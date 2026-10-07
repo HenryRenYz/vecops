@@ -143,6 +143,7 @@ _OPERATIONS = (
   "static_log2",
   "where",
   "as_value",
+  "as_vector",
   "map_rows",
   "max",
   "min",

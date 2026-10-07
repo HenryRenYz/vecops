@@ -1,6 +1,7 @@
 """Register and indexed-memory terminal lowering; never arrays of Vec/Mask."""
 
 from .... import ir as I
+from ....analysis.projection import scalar_memory_projection
 from ....dtypes import ELEMENT_BYTES
 from ..capabilities import CPP_TYPES
 
@@ -17,6 +18,21 @@ class PrimitivesEmitter:
 
   def element_at(self, value):
     source, *indices = value.args
+    projected = scalar_memory_projection(
+      source, indices, blocked=self.materialized.keys() | self.reduction_materialized.keys()
+    )
+    if projected is not None:
+      load, coordinates, casts = projected
+      coords = tuple(self.scalar(v) for v in coordinates)
+      pointer = self.pointer(load.data, coords)
+      snapshot = self.snapshots.get(id(load))
+      if snapshot is not None:
+        saved, condition = snapshot
+        pointer = f"({condition} ? {self.pointer(saved, coords)} : {pointer})"
+      scalar = f"static_cast<{CPP_TYPES[load.type.dtype]}>(*{pointer})"
+      for dtype in casts:
+        scalar = f"static_cast<{CPP_TYPES[dtype]}>({scalar})"
+      return scalar
     coords = tuple(self.scalar(v) for v in indices)
     tag = self.unique("scalar_tag")
     self.line(f"using {tag} = vecops::vec::FixedTag<{CPP_TYPES[source.type.dtype]}, 1>;")

@@ -303,6 +303,18 @@ def binary(op, left, right):
     shape = typ.shape
     for tile in tiles[1:]:
       shape = broadcast_shape(shape, tile.type.shape)
+    # Explicit geometry is not lost merely because a Tile appeared first
+    # (including scalar * Tile + Vector when constructing FMA's result type).
+    # Keep it only when the result extent is exactly that vector's extent;
+    # broadcasting a size-one vector to a larger tile must remain a Tile.
+    typ = next(
+      (
+        tile.type
+        for tile in tiles
+        if isinstance(tile.type, VectorType) and all(same_expr(a, b) for a, b in zip(shape, tile.type.shape))
+      ),
+      typ,
+    )
     comparison = operation_snapshot().has(op, Trait.COMPARISON)
     dtype = promoted or ("float64" if op == "div" else typ.dtype)
     typ = shaped_type(dtype, shape, typ, comparison)

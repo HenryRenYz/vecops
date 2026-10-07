@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from .. import ir as I
 from ..dtypes import ELEMENT_BYTES, dtype_name
-from ..ir.traversal import walk
+from ..ir.traversal import walk, walk_unique
 from ..operations import Trait
 
 
@@ -19,9 +19,30 @@ class PrimitivesFrontend:
   def primitive(self, operation, args, kwargs, node):
     family = self.operations.get(operation).family
     if operation == "view_disjoint":
-      if len(args) != 2 or kwargs or any(not isinstance(v, I.View) for v in args):
-        self.error(node, "view_disjoint expects two memory views")
-      return I.Expr(I.ScalarType("bool"), operation, data=tuple(args))
+      if len(args) != 2 or kwargs:
+        self.error(node, "view_disjoint expects two views or captured values")
+
+      def memory_views(value):
+        if isinstance(value, I.View):
+          return (value,)
+        if not isinstance(value, I.Expr):
+          self.error(node, "view_disjoint expects memory views or captured values")
+        views = {}
+        for expression in walk_unique(value):
+          definition = self.operations.get(expression)
+          if self.operations.has(expression, Trait.MEMORY_READ):
+            if not isinstance(expression.data, I.View):
+              self.error(node, "view_disjoint cannot prove an opaque memory access")
+            views[id(expression.data)] = expression.data
+          elif definition.effects != "none" and not self.operations.has(expression, Trait.STATE_REFERENCE):
+            self.error(node, "view_disjoint cannot prove an opaque/effectful producer")
+        return tuple(views.values())
+
+      result = I.literal(True)
+      for first in memory_views(args[0]):
+        for second in memory_views(args[1]):
+          result = I.binary("and", result, I.Expr(I.ScalarType("bool"), operation, data=(first, second)))
+      return result
     if family == "register_geometry":
       return self.register_geometry(operation, args, node)
     if family == "mask_query":

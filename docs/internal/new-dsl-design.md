@@ -2703,3 +2703,93 @@ balanced rounds (3456 unfiltered samples); median new/old was 1.000176, range
 0.985058–1.016215. These small-problem cases do not exercise the experimental
 large dynamic cache branch. Source extraction into the indexing frontend is
 mechanical and keeps the same view/window semantics.
+
+### Vector matrix leaves through ordinary control/state IR
+
+`_library/matmul.py::vector_tile_dot` expresses an outer-product microtile
+using logical input windows, explicit casts, an ordered serial K loop, FMA
+and carried tile state. It does not emit C++, call `ops::Matmul`, or create
+an opaque `dot` node. Input and output helper/elementwise DAGs stay visible.
+The CPU recipe adapter only chooses legal geometry and expands this function
+before the ordinary loop, fusion, vector and state passes. The experimental
+`cpu_vector_dot_dsl` option remains off by default; it currently selects only
+explicit unblocked vector dots with known small output geometry and no packed
+inputs. Unknown/large shapes, matrix-instruction families and cache traversal
+retain their existing drivers. An unmeasured path is not enabled merely to
+make the old implementation disappear.
+
+Two generic lowering improvements support these algorithms:
+
+- Projection reuse shares a read/pure vector operation across complete
+  register pieces with identical projected coordinates, tag and active count.
+  The proof is local to one operation and traversal; it does not cross state
+  updates, writes or partial pieces. Full-piece proof also reaches the final
+  memory effects, so complete scalable register stores need no tail predicate.
+- A scalar projection through logical geometry and explicit cast boundaries
+  resolves the original load's historical snapshot directly. It avoids a
+  one-lane fill/get round trip without replacing vector math with scalar libm,
+  changing conversion rounding, or speculatively reading masked memory.
+  Layout folding must not create a new read for a captured load. Windows made
+  after a write still observe the earlier value; mutable starts remain frozen.
+
+The diagnostic options `cpu_state_vector_reuse` and
+`cpu_ordered_loop_unroll` are strict booleans, initially off. The former scopes
+complete-piece and projection proofs to register state; the latter requests
+native Clang/GCC unrolling when a state dependency prevents operation-major
+DSL unrolling, retaining whole-iteration order. Enabling the dot recipe sets
+their defaults to true without overriding explicit user settings.
+
+Fixed phase-twenty x86 tests passed all 34 primitive/window/vector checks,
+including a window created after overwriting its captured source. Phase
+twenty-one real SVE cross-codegen at VL 16/64/128 has one B vector load per K,
+four A broadcasts, register FMA, no call/spill in the hot loop, and no remaining
+CNTB query in the full microtile wrapper. This is not native ARM timing.
+The frozen x86 paired recipe/legacy-vector benchmark passed independent
+correctness checks before and after all 24 balanced rounds for 24 microtile
+cases (FP32/FP16, plain/seed/affine, several slim/full/fringe geometries).
+Median recipe/legacy time was 0.811766, range 0.471989–1.017553. These results
+do not compare hardware MMA or cache-sized matrix drivers with public C++
+Matmul; the small FP16 fringe case is not selected by the initial adapter.
+
+Explicit vector initialization accepts a `T.Vector` descriptor in `zeros`
+and `full`. It derives dtype/geometry from that descriptor, with a checked
+optional active logical prefix. This removes the need for dummy loads or
+implicit `lanes`-shaped tiles when a library algorithm needs register banks.
+Scalable carried values retain their tag basis/power at tails, while oversized
+virtual geometry still follows the ordinary placement/legalization budget.
+Initialization does not perform memory reads; tile-shaped fills are unchanged.
+
+The next experimental leaf, `vector_dot_into`, expresses four-row/one-word
+streaming traversal in DSL rather than printing its loops in C++. It supports
+dynamic M/N/K, both spatial tails, broadcast seeds, typed input transforms,
+and a source-parsed epilogue callback. It is not the default dispatcher and
+does not yet replace packed/GEMV/matrix-instruction or cache drivers.
+`as_vector` supplies a numeric clip/convert/retag boundary for logical rank-one
+producer values; unlike a dummy load, it composes with captured helper DAGs.
+Compatible mixed Tile/Vector arithmetic retains explicit geometry independent
+of operand order. Scalable carried-state pieces now account for the widest
+intermediate/consumer, and physical tag rebinds are canonical, so a widening
+conversion cannot silently produce a multiword state object or trigger a
+scalar get/set reconstruction solely because equivalent tag spellings differ.
+
+The streaming experiment uses the existing disjointness proof mechanism to
+version its whole producer/output region before entering nested loops.
+`view_disjoint` can expand captured producer values to their readable memory
+views; unknown/effectful memory producers remain rejected. The true branch
+can omit repeated loop-level snapshot checks, while overlap retains ordinary
+historical copies. The phase-thirty streaming timing run overlapped another
+sparsefold workload pinned to CPU 0 and is explicitly excluded as performance
+evidence; its unfiltered observations and independent correctness checks were
+retained. The new versioned driver needs an uncontested performance rerun.
+
+Fixed phase-twenty-nine tests passed all 28 streaming/vector-fill checks,
+including dynamic dimensions, empty shapes, broadcast seeds and source-level
+epilogues. Phase thirty passed 17 selected native/real-SVE-cross checks for
+tag retention, widening pieces, historical clip/conversion and instruction
+shape. The versioned phase-thirty-one driver passed its two pure-region tests
+and native A/C-overlap test on one low-priority CPU. The broader phase-twenty-
+six run had 125 passes and one outdated exact-pipeline expectation; that test
+was updated for the registered recipe pass and independently passed afterward.
+These scoped gates do not satisfy full catalog coverage, ARM native parity,
+or the final production-LOC decrease requirement. Old family/cache/packing
+drivers remain until those remaining acceptance gates are actually passed.

@@ -314,21 +314,19 @@ class VectorsEmitter:
     # State consumers reuse the same lane geometry across casts. Canonicalize
     # repeated rebinds so reading the original dtype resolves directly to its
     # named register, rather than a scalar get/set reconstruction loop.
-    origin = self.state_tag_origins.get(base)
-    if origin is not None:
-      tag = origin if dtype == self.tag_dtypes[origin] else f"vecops::vec::Rebind<{CPP_TYPES[dtype]}, {origin}>"
-      self.tag_dtypes[tag] = dtype
-      self.state_tag_origins[tag] = origin
-      if origin in self.fixed_tag_lanes:
-        self.fixed_tag_lanes[tag] = self.fixed_tag_lanes[origin]
-      return tag
+    geometry = self.state_tag_geometry.get(base)
+    if geometry is not None:
+      scalable, extent = geometry
+      if scalable:
+        extent += ELEMENT_BYTES[dtype].bit_length() - ELEMENT_BYTES[self.tag_dtypes[base]].bit_length()
+      return self.state_tag(dtype, scalable, extent)
     tag = f"vecops::vec::Rebind<{CPP_TYPES[dtype]}, {base}>"
     self.tag_dtypes[tag] = dtype
     if base in self.fixed_tag_lanes:
       self.fixed_tag_lanes[tag] = self.fixed_tag_lanes[base]
     return tag
 
-  def emit_operations(self, region, tags, coords, active, *, axis=-1, full=False):
+  def emit_operations(self, region, tags, coords, active, *, axis=-1, full=False, reuse_projected=False):
     previous_cache, references = self.chunk_cache, {}
     uses = {operation.index: 0 for operation in region.operations}
     for operation in region.operations:
@@ -339,8 +337,21 @@ class VectorsEmitter:
       if index is not None:
         uses[index] += 1
     for operation in region.operations:
+      shared = {}
       for slot, (base, c, count) in enumerate(zip(tags, coords, active)):
         tag = self.rebound_tag(operation.expression.type.dtype, base)
+        reuse_key = None
+        if (
+          reuse_projected
+          and full
+          and isinstance(operation.expression.type, I.TileType)
+          and self.environment.operations.get(operation.expression).effects in {"none", "read"}
+        ):
+          projected = self.coordinates(operation.expression.type.shape, region.shape, c)
+          reuse_key = tag, projected, count, axis
+          if reuse_key in shared:
+            references[(operation.index, slot)] = shared[reuse_key]
+            continue
         name = self.unique("vector_value")
         if not full:
           representation = "Mask" if operation.type.mask else "Vec"
@@ -401,6 +412,8 @@ class VectorsEmitter:
           self.line(f"{name} = {value};")
           self.close()
         references[(operation.index, slot)] = name
+        if reuse_key is not None:
+          shared[reuse_key] = name
     roots = []
     for expression, index in zip(region.roots, region.root_indices):
       roots.append(

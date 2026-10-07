@@ -17,6 +17,9 @@ class CPUBackend:
     # Freeze all stages before executing any user pass. Plugins cannot change
     # the vector or memory pipeline of an already-started compilation.
     options = dict(options or {})
+    if options.get("cpu_vector_dot_dsl") is True:
+      options.setdefault("cpu_ordered_loop_unroll", True)
+      options.setdefault("cpu_state_vector_reuse", True)
     environment = freeze(options, target=target)
     options["_compiler_environment"] = environment
     kernel_manager = kernel_pipeline(pipeline, options=options).with_options(options)

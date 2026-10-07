@@ -20,6 +20,7 @@ _BUILTIN_MODULES = (
   "passes.kernel.fusion",
   "passes.kernel.unroll",
   "passes.kernel.pipeline",
+  "backends.cpu.recipes",
   "passes.vector",
   "backends.cpu.passes",
   "backends.cpu.transpose",

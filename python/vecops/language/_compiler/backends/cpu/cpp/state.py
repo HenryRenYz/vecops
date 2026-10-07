@@ -4,31 +4,56 @@ All placement and vector regions were prepared before emission. Memory is a
 deliberate placement fallback, never an array of Vec or predicate objects.
 """
 
+from contextlib import contextmanager
 from dataclasses import replace
 
 from .... import ir as I
+from ....dtypes import ELEMENT_BYTES
 from ....ir.traversal import walk
 from ....operations import Trait
 from ..capabilities import CPP_TYPES
 
 
 class StateEmitter:
+  @contextmanager
+  def register_state_access(self, plan):
+    """Apply a complete-piece proof only inside this register traversal.
+
+    This includes its stores: a complete scalable piece must not reintroduce
+    a runtime first-lanes predicate while draining already complete state.
+    """
+    reuse = self.vector_ir.manager.options.get("cpu_state_vector_reuse", False)
+    if type(reuse) is not bool:
+      raise TypeError("cpu_state_vector_reuse must be bool")
+    full = all(not piece.scalable or piece.full for piece in plan.pieces)
+    previous = getattr(self, "full_vector", False)
+    if reuse:
+      self.full_vector = full
+    try:
+      yield reuse, full
+    finally:
+      self.full_vector = previous
+
+  def state_tag(self, dtype, scalable, extent):
+    kind = "ScalableTag" if scalable else "FixedTag"
+    tag = f"vecops::vec::{kind}<{CPP_TYPES[dtype]}, {extent}>"
+    self.tag_dtypes[tag] = dtype
+    self.state_tag_geometry[tag] = scalable, extent
+    if not scalable:
+      self.fixed_tag_lanes[tag] = extent
+    return tag
+
   def state_tags(self, plan, dtype):
-    tags = []
-    for piece in plan.pieces:
-      if piece.scalable:
-        origin = f"vecops::vec::ScalableTag<{CPP_TYPES[plan.state.type.dtype]}, {piece.power}>"
-        tag = f"vecops::vec::Rebind<{CPP_TYPES[dtype]}, {origin}>" if dtype != plan.state.type.dtype else origin
-      else:
-        origin = f"vecops::vec::FixedTag<{CPP_TYPES[plan.state.type.dtype]}, {piece.lanes}>"
-        tag = f"vecops::vec::FixedTag<{CPP_TYPES[dtype]}, {piece.lanes}>"
-        self.fixed_tag_lanes[tag] = piece.lanes
-        self.fixed_tag_lanes[origin] = piece.lanes
-      self.tag_dtypes[origin] = plan.state.type.dtype
-      self.state_tag_origins[tag] = origin
-      self.state_tag_origins[origin] = origin
-      tags.append(tag)
-    return tuple(tags)
+    return tuple(
+      self.state_tag(
+        dtype,
+        piece.scalable,
+        piece.power + ELEMENT_BYTES[dtype].bit_length() - ELEMENT_BYTES[plan.state.type.dtype].bit_length()
+        if piece.scalable
+        else piece.lanes,
+      )
+      for piece in plan.pieces
+    )
 
   def state_coordinates(self, plan):
     tags = self.state_tags(plan, plan.state.type.dtype)
@@ -69,9 +94,8 @@ class StateEmitter:
       # when an update consumes another lane/row of the old state.
       self.chunk_cache = {}
       register_region = self.prepared.state_regions[(id(statement), "register")]
-      roots = self.emit_operations(
-        register_region, tags, coords, counts, full=all(not p.scalable or p.full for p in plan.pieces)
-      )[0]
+      with self.register_state_access(plan) as (reuse, full):
+        roots = self.emit_operations(register_region, tags, coords, counts, full=full, reuse_projected=reuse)[0]
       for index, root in enumerate(roots):
         name = f"{state.name}_r{index}"
         self.line(f"{'auto ' if isinstance(statement, I.DeclareState) else ''}{name} = {root};")
@@ -124,11 +148,12 @@ class StateEmitter:
     for tag in tags:
       self.tag_dtypes[tag] = region.dtype
     coords, counts = self.state_coordinates(plan), self.state_counts(plan)
-    state = setup(tags) if setup else None
-    roots = self.emit_operations(region, tags, coords, counts, full=all(not p.scalable or p.full for p in plan.pieces))
-    callback(tags, coords, counts, roots, state)
-    if finish:
-      finish(tags, state)
+    with self.register_state_access(plan) as (reuse, full):
+      state = setup(tags) if setup else None
+      roots = self.emit_operations(region, tags, coords, counts, full=full, reuse_projected=reuse)
+      callback(tags, coords, counts, roots, state)
+      if finish:
+        finish(tags, state)
 
   def state_vector(self, value, tag, root_shape, coords, active, axis):
     plan = self.prepared.states[value.data.name]

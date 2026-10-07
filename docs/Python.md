@@ -1927,3 +1927,52 @@ Only the complete-word prefix is transferred; a fractional last word is
 untouched. Slice-index/capacity checks use the selected word geometry, and
 never round a tail up into an out-of-bounds access. This supports library
 grouped-K packing without embedding its algorithm in the instruction emitter.
+
+Experimental CPU recipe tuning: `cpu_vector_dot_dsl=True` expands eligible
+explicit unblocked vector dots into the source-parsed FMA/state library leaf.
+The current scope is known small output geometry without packed operands;
+all other dots retain their existing path. This is not a portable DSL promise
+or completion of matmul/cache-driver migration. It defaults to false and
+sets defaults for `cpu_state_vector_reuse` and `cpu_ordered_loop_unroll` to
+true unless explicitly overridden. All three options require exact booleans.
+Projection reuse is local to proven complete register pieces; ordered native
+unrolling preserves each iteration's full state update when operation-major
+unrolling cannot legally duplicate it. These diagnostics will be removed or
+consolidated after the complete migration is validated.
+
+Scalar extraction through a logical window/cast may use a direct memory read
+instead of a one-lane vector fill/get. It retains the original capture's
+snapshot and every explicit conversion boundary. Masked or nonlocal values
+keep normal vector legalization; geometry folding never authorizes a later
+read of a previously captured and overwritten input.
+
+`T.zeros(T.Vector(dtype, N=... or pow=...))` and
+`T.full(T.Vector(...), scalar)` create explicit register values without a
+dummy memory load. Their dtype comes from the descriptor; a conflicting
+explicit dtype is diagnosed. Numeric fixed/scalable geometry is supported.
+`active=integer` optionally restricts the logical value to a checked prefix
+without changing its physical descriptor, allowing zero-size/tail values and
+loop-carried scalable accumulators. The prefix must lie in `[0, lanes]` and
+remain shape-compatible across state updates. Ordinary tuple-shaped fills
+keep their tile semantics and do not accept `active`. Virtual powers exceeding
+the register budget retain normal strip-mining/private-scalar placement, not
+C++ arrays of Vec/Mask. No memory access is implied by vector initialization.
+
+`T.as_vector(rank_one_value_or_view, T.Vector(...))` clips to the descriptor's
+logical extent, converts to its numeric dtype and retains explicit vector
+geometry. It is a value conversion, not a packing/allocation operation or an
+invocation of a native operator; memory masks and historical captures remain
+attached to the producer. Mixed Tile/Vector arithmetic preserves a compatible
+explicit vector tag irrespective of which operand appears first. Broadcasting
+a short vector to a larger unrelated tile does not make that tile a vector.
+CPU state placement splits at the widest vector intermediate/consumer, and
+canonicalizes equivalent physical rebinds, avoiding multiword state objects
+and scalar get/set repacking across a widening/narrowing boundary.
+
+`T.view_disjoint(a, b)` also accepts captured scalar/tile/vector producer
+values. It expands to pairwise runtime disjointness checks for their memory
+read views, without evaluating arithmetic or creating another tensor. Values
+with no external reads need no checks; opaque/effectful producers that cannot
+expose their memory views are diagnosed. An enclosing true branch contributes
+the same bounded-view proof as the existing two-view form. This is a runtime
+guard, not an unchecked noalias annotation, and historical captures are kept.

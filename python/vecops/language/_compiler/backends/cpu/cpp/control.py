@@ -173,6 +173,18 @@ class ControlEmitter:
         self.unrolled_for(statement, self.expression_loads(I.Block(block.statements[index + 1 :])))
       elif isinstance(statement, I.For):
         self.protect_region(statement.body, self.expression_loads(I.Block(block.statements[index + 1 :])))
+        ordered_unroll = self.vector_ir.manager.options.get("cpu_ordered_loop_unroll", False)
+        if type(ordered_unroll) is not bool:
+          raise TypeError("cpu_ordered_loop_unroll must be bool")
+        if ordered_unroll and statement.unroll > 1:
+          # The operation-major pass kept this recurrence ordered. Native
+          # unrolling may still duplicate complete iterations without moving
+          # one iteration's state/effects ahead of another iteration's input.
+          self.line("#if defined(__clang__)")
+          self.line(f"#pragma clang loop unroll_count({statement.unroll})")
+          self.line("#elif defined(__GNUC__)")
+          self.line(f"#pragma GCC unroll {statement.unroll}")
+          self.line("#endif")
         comparison = "<" if I.constant(statement.step) is None or I.constant(statement.step) > 0 else ">"
         self.opening(
           f"for (vecops::nint_t {statement.target} = {self.scalar(statement.start)}; {statement.target} {comparison} ({self.scalar_inline(statement.stop)}); {statement.target} += {self.scalar(statement.step)})"

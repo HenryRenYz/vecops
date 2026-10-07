@@ -376,8 +376,9 @@ class Frontend(
       "store": {"mask", "implementation"},
       "copy": {"mask", "implementation"},
       "alloc": {"dtype"},
-      "zeros": {"dtype"},
-      "full": {"dtype"},
+      "zeros": {"dtype", "active"},
+      "full": {"dtype", "active"},
+      "as_vector": set(),
       "cast": {"dtype"},
       "transpose": {"axes"},
       "serial": {"unroll"},
@@ -725,12 +726,7 @@ class Frontend(
     if operation in {"alloc", "zeros", "full"}:
       if operation == "alloc":
         return self.call_allocation(args, kwargs, node)
-      shape = self.shape(args[0], node)
-      dtype = dtype_name(kwargs.get("dtype", args[1] if len(args) > 1 and operation != "full" else "float32"))
-      value = self.value(args[1] if operation == "full" else I.literal(0), node)
-      if operation == "full":
-        dtype = dtype_name(kwargs.get("dtype", args[2] if len(args) > 2 else "float32"))
-      return I.Expr(I.TileType(dtype, shape), "fill", (value,))
+      return self.fill_value(operation, args, kwargs, node)
     if operation in {"store", "copy"}:
       destination = args[0] if operation == "store" else args[1]
       if operation == "copy":

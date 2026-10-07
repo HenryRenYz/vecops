@@ -138,15 +138,16 @@ def plan_state(prepared, context):
         shape = tuple(I.constant(s) for s in state.type.shape)
         pieces = []
         typ = state.type
+        widest = max(word_bytes.get(state.name, 1), ELEMENT_BYTES[typ.dtype])
         if budget and state.name not in matrix_states and isinstance(typ, I.VectorType) and typ.tag.N is None:
           # The logical lane count retains the descriptor's basis after a
           # cast. Wider elements require more native words for the same lanes.
           basis = typ.tag.basis_dtype or typ.dtype
-          power = typ.tag.pow + ELEMENT_BYTES[typ.dtype].bit_length() - ELEMENT_BYTES[basis].bit_length()
-          count = 1 << max(0, power) if power <= budget.bit_length() else budget + 1
+          words = typ.tag.pow + widest.bit_length() - ELEMENT_BYTES[basis].bit_length()
+          count = 1 << max(0, words) if words <= budget.bit_length() else budget + 1
           if count <= budget:
-            pieces = [StatePiece((i,), 0, True) for i in range(count)]
-        widest = max(word_bytes.get(state.name, 1), ELEMENT_BYTES[typ.dtype])
+            power = ELEMENT_BYTES[typ.dtype].bit_length() - widest.bit_length()
+            pieces = [StatePiece((i,), 0, True, power) for i in range(count)]
         # Fixed pieces always fit every intermediate in a native register.
         largest = 1 if target.isa in {"scalar", "neon"} else max(1, fixed_bytes // widest)
         if state.name in word_states:
