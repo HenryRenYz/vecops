@@ -334,6 +334,8 @@ def main(argv=None):
       "sdk_layout": str(layout),
       "sdk_content": sdk_identity(root, installed=mode == "installed"),
       "source_implementation_identity": implementation_identity(),
+      "working_directory": str(Path.cwd()),
+      "test_selectors": args.selectors or test_paths(),
       "python_compiler": str(Path(compiler.__file__).resolve()),
       "native_extension": str(Path(compiler._C.__file__).resolve()),
       "cc": cc,

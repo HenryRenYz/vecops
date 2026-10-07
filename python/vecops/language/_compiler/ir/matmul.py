@@ -5,6 +5,8 @@ operands record that distinction explicitly; a physical buffer is never
 mistaken for a dense logical tensor.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, replace
 
 from .types import Node
@@ -36,39 +38,6 @@ class DotOptions(Node):
   block_n: int | None = None
   block_k: int | None = None
   swap: bool = True
-
-
-@dataclass(frozen=True)
-class MatmulPlan:
-  expression: object
-  options: DotOptions
-  vector_rows: int = 4
-  vector_columns: int = 4
-  k_unroll: int = 2
-  unblocked_bytes: int = 512 * 1024
-  runtime_unblocked_bytes: int = 128 * 1024
-  amx_m_major: object | None = None
-  amx_native_b_pack_min_m: int = 0
-  amx_cache_b_panel_divisor: int = 0
-  amx_cache_b_panel_max_m: int = 0
-  # Experimental ordinary-SVE quantize/packed-B row driver. Profitability
-  # remains opt-in until paired target measurements establish a crossover.
-  sve_runtime_quant: bool = False
-  # Backend-owned immutable native-A gather/packing cost policy. The leaf
-  # evaluates actual panel extents, not a guessed size for dynamic metadata.
-  sme_native_a_packing: object = None
-  # Profile-selected whole-problem traversal for prepacked BF16 AB. Eligibility
-  # uses captured SVL and runtime private L2; explicit blocks remain binding.
-  sme_packed_ab_cache_bypass: bool = False
-  sme_packed_ab_traversal: object = None
-  # Narrow memory/elementwise work on a statically singleton ZA slice or
-  # unpacked BF16 spatial K slot. ZA instructions retain native-word geometry.
-  sme_narrow_singleton_slices: bool = False
-  operands: tuple = ()
-  amx_b_permutation: object | None = None
-  dense_transposes: tuple = ()
-  schedule: object | None = None
-  pass_trace: tuple = ("cpu-plan-matmul",)
 
 
 @dataclass(frozen=True)

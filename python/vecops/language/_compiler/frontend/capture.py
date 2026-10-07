@@ -52,6 +52,13 @@ class Body:
 
 
 @dataclass(frozen=True)
+class SelfCall:
+  """A frozen lexical self-reference, never a live host-function lookup."""
+
+  name: str
+
+
+@dataclass(frozen=True)
 class CapturedReducer:
   body: Body
   identity: object
@@ -93,8 +100,12 @@ def capture(function, local_scope=None, seen=None):
       key = (body.identity, value.identity, value.associative)
       value = CapturedReducer(body, value.identity, value.associative)
     elif isinstance(value, DSLFunction):
-      value = capture(value.function, seen=seen)
-      key = value.identity
+      if value.function is function:
+        value = SelfCall(value.__qualname__)
+        key = ("self", value.name)
+      else:
+        value = capture(value.function, seen=seen)
+        key = value.identity
     elif isinstance(value, type) and value in (Vector, ExecutionLayout):
       key = value.__name__
     elif isinstance(value, (Const, Dynamic, IntExpr)):
@@ -157,8 +168,12 @@ def capture(function, local_scope=None, seen=None):
         break
       value = getattr(value, attribute, None)
     if isinstance(value, DSLFunction):
-      value = capture(value.function, seen=seen)
-      key = value.identity
+      if value.function is function:
+        value = SelfCall(value.__qualname__)
+        key = ("self", value.name)
+      else:
+        value = capture(value.function, seen=seen)
+        key = value.identity
     elif isinstance(value, Intrinsic):
       key = value.name
     else:

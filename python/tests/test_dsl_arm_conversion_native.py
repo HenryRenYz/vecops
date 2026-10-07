@@ -12,7 +12,7 @@ import pytest
 import vecops
 import vecops.language as T
 from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
-from vecops.language._compiler.ir.transpose import TransposePlan
+from vecops.language._compiler.backends.cpu.transpose import TransposePlan
 
 FLOAT_CONVERSIONS = (
   ("bfloat16", "float16"),

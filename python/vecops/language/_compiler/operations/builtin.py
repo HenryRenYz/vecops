@@ -10,7 +10,40 @@ ELEMENTWISE = T.ELEMENTWISE | T.CSE | T.TRANSPOSE_STREAMABLE
 
 def define(names, family, traits=ELEMENTWISE, **kwargs):
   for name in names.split():
-    register_operation(OpDef(name, family, traits, **kwargs))
+    own_traits = traits | T.HARDWARE_SCALAR if name in _HARDWARE_SCALARS else traits
+    register_operation(OpDef(name, family, own_traits, **kwargs))
+
+
+# Integer/boolean metadata operations that need no allocation, exceptions or
+# ordinary vector state. Backends still own their forced-inline spelling;
+# integer divide/remainder additionally require a positive constant divisor.
+_HARDWARE_SCALARS = frozenset(
+  (
+    "add",
+    "sub",
+    "mul",
+    "min",
+    "max",
+    "lt",
+    "le",
+    "gt",
+    "ge",
+    "eq",
+    "ne",
+    "and",
+    "or",
+    "not",
+    "neg",
+    "identity",
+    "cast",
+    "literal",
+    "local",
+    "frozen",
+    "raw",
+    "symbol",
+    "streaming_lanes",
+  )
+)
 
 
 _BINARY_FOLDS = {
@@ -30,6 +63,11 @@ _BINARY_FOLDS = {
   "or": lambda a, b: a or b,
   "min": min,
   "max": max,
+  "bit_and": operator.and_,
+  "bit_or": operator.or_,
+  "bit_xor": operator.xor,
+  "shl": operator.lshift,
+  "shr": operator.rshift,
 }
 for name in (
   "add",
@@ -79,7 +117,8 @@ define("frozen", "reference", T.REFERENCE | T.RUNTIME_SHAPE | T.UNSTABLE_EXTENT)
 define("raw symbol", "reference", T.RUNTIME_SHAPE)
 define("literal fill", "structural", ELEMENTWISE)
 define("arange", "index", T.ELEMENTWISE | T.CSE)
-define("lanes streaming_lanes packing_size broadcast_dim schedule_parameter", "shape", T.CSE)
+define("lanes packing_size broadcast_dim schedule_parameter", "shape", T.CSE)
+define("streaming_lanes", "shape", T.CSE | T.POSITIVE_EXTENT)
 define("vector_ref", "reference", T.REFERENCE | T.TRANSPOSE_STREAMABLE)
 define("state_ref", "reference", T.STATE_REFERENCE | T.VECTOR_BOUNDARY, effects="read")
 define("grid", "control", T.NONE, effects="state", keywords=("schedule", "chunk", "parallel"))
@@ -93,8 +132,10 @@ for name in ("add", "min", "max"):
     keywords=("axis", "unroll"),
     reduction=name,
   )
-define("axis_reduce row_normalize", "reduction", T.REDUCTION | T.VECTOR_BOUNDARY)
-define("_normalize", "normalization", T.NONE, keywords=("kind", "eps", "variance", "unroll", "accuracy"))
+define("axis_reduce map_rows", "reduction", T.REDUCTION | T.VECTOR_BOUNDARY)
+define("region_argument", "structural", T.NONE)
+define("register_input", "structural", T.VECTOR_BOUNDARY)
+define("dtype_name itemsize static_log2", "metadata", T.NONE)
 define("dot", "matrix", T.VECTOR_BOUNDARY)
 define(
   "gather",
@@ -106,6 +147,11 @@ define(
 define("scatter", "indexed_memory", T.NONE, effects="write", keywords=("mask", "unique"))
 define("value_transform", "transform", T.VECTOR_BOUNDARY)
 define("shuf local_shuf", "register", T.REGISTER_TRANSFORM, keywords=())
+define(
+  "bitcast lower upper lower_half upper_half concat interleave local_interleave_lower local_interleave_upper block_shuffle",
+  "register_geometry",
+  T.REGISTER_TRANSFORM | T.VECTOR_BOUNDARY,
+)
 define("element_at", "index", T.VECTOR_BOUNDARY | T.CAPTURE_SCALAR)
 define("expand_dims squeeze", "transform", T.NONE, keywords=("axis",))
 define("indices", "index", T.NONE, keywords=("axis",))
@@ -138,3 +184,12 @@ define("pipelined", "pipeline", T.NONE, keywords=("stages", "distance", "unroll"
 define("view_disjoint", "metadata", T.NONE)
 define("double_buffer", "allocation", T.NONE, keywords=("dtype",))
 define("amx.zero", "architecture", T.NONE, effects="state", keywords=("dtype",))
+define("sme.load sme.load_bits sme.read_hor sme.read_ver", "architecture", T.NONE, effects="state", keywords=("dtype",))
+define("sme.store sme.store_bits sme.write_hor sme.write_ver sme.zero_za", "architecture", T.NONE, effects="state")
+define(
+  "sme.load_hor sme.load_ver sme.store_hor sme.store_ver",
+  "architecture",
+  T.NONE,
+  effects="state",
+  keywords=("word_dtype",),
+)

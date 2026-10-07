@@ -965,7 +965,7 @@ This compiler transformation requires full-region read/write non-alias
 proofs and a non-overlapping full output layout. Overlapping/in-place
 calls retain the complete original schedule and its conditional snapshots;
 only checking aliases within the current row is not sufficient for shifted
-matrix views. The `row_normalization_streaming=False` pass option disables
+matrix views. The `row_map_streaming=False` pass option disables
 this fast path independently. Affine/post-ops can
 be expressed directly before `T.store`. `T.layernorm(x, variance='moments')`
 explicitly selects the existing C++ operator's sum/sum-of-squares algorithm,
@@ -981,6 +981,18 @@ locations are rejected, unlike source kernels which may define their own policy.
 The two-axis proof uses one compare/swap rather than a general-purpose sort;
 negative strides, empty/singleton axes and span-overflow diagnostics retain
 the same sorted-axis semantics.
+
+The algorithms above are ordinary `T.func` row programs: rank one calls the
+program directly, and rank two uses `T.map_rows(program, x, **options)`.
+`map_rows` accepts a source-parsed, pure straight-line helper returning one
+same-width numeric or predicate tile. Scalar options are specialized or
+captured before the region. The generic compiler may stream a sole consumer
+or save only row-varying scalar intermediates; it does not dispatch on helper
+names or reconstruct LayerNorm/Softmax formulae. Stateful callbacks,
+allocation and runtime control inside a row callback are currently rejected.
+The historical `row_normalization_streaming` and
+`row_normalization_release_captures` options remain aliases for
+`row_map_streaming` and `row_map_release_captures`, respectively.
 
 CPU lowering captures each ABI tensor parameter's data pointer, dimensions
 and strides into invocation-local const scalars at kernel entry. Those
@@ -1226,15 +1238,81 @@ with T.amx.region(((16, 64),)):  # (rows, column bytes) per tile, immutable tupl
     T.amx.store(0, C)
 ```
 
-These are compiled lexical regions, not Python host context managers. Currently
-SME bodies admit simple whole-view rank-2 transposes and `zero_za`; AMX bodies
-admit tile zero/load/stream_load/store. Bare Python MMA instructions are not
-exposed yet; `T.dot` owns its typed instruction schedule and resource region. Views are
+These are compiled lexical regions, not Python host context managers. SME
+bodies admit simple whole-view rank-2 transposes, `zero_za`, typed load/mopa and
+direct ZA slice moves; AMX admits typed tile zero/load/stream_load/store/tdp.
+Bounded `T.serial` instruction loops preserve one owner. Pure integer/boolean
+metadata branches must be invariant in enclosing instruction loops. Views are
 validated before entry; allocation, throwing work, nested explicit regions and
 values escaping a region are rejected. Explicit SME rejects overlapping operands
 instead of allocating inside SM. AMX obtains per-thread Linux XTILEDATA permission
 and owns configuration/release through `ExecutionSession`. Generated state-owner
 callbacks always use `VECOPS_INLINE_LAMBDA_NOEXCEPT`.
+The CPU preflight pass proves loop-wide view bounds before ownership rather
+than validating/replaying each iteration. Unknown nonlinear index intervals,
+lost root provenance, loop-varying store layouts, memory-dependent control,
+mutable scalar/tile state and ordinary SIMD computation are rejected. Region
+assertions are checked before entry and must be loop-invariant.
+`T.sme.load_hor/ver(tile, slice_index, rank_one_view)` and `store_hor/ver`
+transfer storage bits without conversion; the view and index must fit the
+actual streaming word and memory element stride must be one. Tile indices are
+constant and legal for the selected word width. An optional `word_dtype`
+reinterprets memory elements as complete unsigned ZA words; a fractional
+terminal word is untouched rather than overread. For zero-padded partial
+words, `T.sme.load_bits(view, dtype="uint32")` masks in storage-element units,
+then bitcasts to a region-local unsigned word vector. `T.sme.store_bits(v,
+view)` stores the requested storage prefix without numerical conversion,
+including zero inactive lanes from a masked ZA read. Its destination may be
+larger than the active prefix, but cannot exceed one physical streaming word.
+Numeric conversion remains `T.sme.load` / `store`, not the bit-memory path.
+`T.sme.transpose_tile(A, C)` is an
+inspectable DSL helper used inside an active region: all input rows load
+before any output column is written. It supports same-dtype word-sized
+matrices (including partial tiles and overlapping operands), not arbitrary
+large matrices. `T.transpose_copy` retains its existing selection.
+An optional `compute_dtype` enables numeric boundary conversion via
+`T.sme.load(view, dtype=...)`, `read_hor/ver(tile, index, active, dtype=...)`,
+`write_hor/ver(tile, index, vector)` and `T.sme.store(vector, view)`.
+Region-local vectors carry dtype/active extent independently of memory views;
+their shape and every ZA slice index are checked before ownership. Conversions
+fuse into the memory load/store; there are no temporary tensor allocations.
+Immutable scalar metadata declarations are legal within an instruction region;
+preflight expands those definitions before hoisting checks. They are not
+loop-carried mutable state.
+`T.prefetch` is legal in bounded instruction loops. Its address receives the
+same pre-owner root-bound validation even though the hint consumes no ZA
+capacity. Loop steps and integer divisors may use proven positive native
+extents/products; unknown runtime divisors remain rejected.
+`T.sme.transpose_matrix(A, C, compute_dtype=...)` composes native-length serial
+loops, clipped views and `transpose_tile` in one owner for larger matrices.
+Its operands must be disjoint. `T.view_disjoint(A, B)` is a conservative
+bounding-address-span predicate (not an exact arbitrary-stride alias oracle);
+it can be asserted before ownership, not used as throwing work within SM.
+Nested clipped views retain exact root coordinates separately from requested
+affine partitions. Losing an affine ownership proof still prevents grid/loop
+fusion, while exact bounds can remain usable for safe instruction traversal.
+`cpu_transpose_sme_dsl=True` experimentally stages the same source-parsed
+driver during CPU memory planning, including paired/static-conversion cases. Terminal
+printing only binds its virtual memory boundary; it never invokes the frontend.
+The default remains the measured existing driver until paired ARM acceptance.
+`cpu_sme_packing_dsl=True` similarly stages the K-contiguous raw packing
+algorithm (panel traversal, ping-pong ZA pairs, zero-padded K/spatial fringes).
+Both experimental switches remain off by default pending paired ARM acceptance;
+they are migration gates, not permanent duplicate implementations.
+Likewise `cpu_amx_shared_cache_dispatch=True` enables the experimental shared
+dynamic cache driver; its smaller source is not itself performance acceptance.
+The default retains the original family-dependent automatic packing policy.
+
+Logical tile expressions can be indexed with unit-step slices, including a
+scalar axis when at least one sliced axis remains: `value[mi:mi+BM, ki:ki+BK]`
+or `value[row, :]`. Windows retain the original producer/read identity and
+capture mutable starts when assigned; they do not silently reload an input
+after a later write. Slice bounds clip as for views. Scalar axes are checked;
+use `T.element_at` for entirely scalar extraction and `T.gather` for explicit
+stepped indices. An arbitrary window is a logical tile, not a new physical
+register geometry; use `lower_half`/`upper_half` for register splits. This is
+a foundation for source-level operator schedules, not a replacement of the
+current matmul driver.
 Owned forwarded scratch is materialized before raw hardware memory operations;
 pre-existing loads used after an AMX write receive the ordinary alias snapshot.
 Multiple transposes in an explicit SME region must have independent input/output
@@ -1799,3 +1877,53 @@ keys additionally attest Torch headers/libraries and publish staged artifacts
 atomically after validation. Cache-only mode uses an existing unambiguous
 attestation, executes no compiler/tool discovery and creates no build directory;
 absence/ambiguity is a diagnostic miss rather than loading an incompatible file.
+
+### Source-parsed register algorithms
+
+`T.bitcast(value, dtype)` reinterprets equal logical bytes, unlike numeric
+`T.cast`. `T.lower_half`/`T.upper_half` select halves of a logical vector and
+`T.concat` joins two equal-width vectors. Their names do not replace the
+existing debugging function `T.lower`. `T.local_interleave_lower` and
+`T.local_interleave_upper` interleave within complete 16-byte blocks;
+`T.block_shuffle(a, b, order)` selects whole 16-byte blocks from concatenated
+inputs. Fixed geometry requires a positive compile-time rank-one extent
+(even for half selection), not necessarily a power of two. Complete scalable
+register programs also preserve their original byte domain and power through
+bitcast, half/concat and `T.interleave(a, b)`. Interleave returns alternating
+elements from two complete same-dtype/same-extent registers, doubling length.
+Arbitrary clipped/dynamic geometry remains diagnosed, not silently retagged;
+block-shuffle orders still require fixed geometry.
+
+`T.itemsize(dtype)` and `T.static_log2(power_of_two)` provide compile-time
+geometry; the latter rejects nonconstant/nonpositive/non-power-of-two values.
+`T.library.transpose_registers(tuple_of_vectors)` is an inspectable `T.func`
+butterfly, returning one vector per output column. It accepts power-of-two
+square or double-width geometry and numeric storage types, with no floating
+point arithmetic or conversion hidden in its bit-level permutation.
+`T.library.pack_interleave(tuple_of_vectors)` forms grouped-K dwords from
+two 16-bit or four 8-bit streams using ordinary interleave/bitcast primitives.
+Both fixed and scalable inputs are supported; no native length is guessed.
+
+Automatic transpose and matrix-packing plans stage the same library helpers.
+The backend shares one typed instruction printer; small closed register DAGs
+use native instructions, while unsupported/large virtual geometries retain
+an exact scalar-lane fallback. Fixed SVE placement uses its guaranteed prefix,
+not a hardcoded 64-byte vector length. Every physical vector is individually
+named. Register-transform stores preserve aliased inputs before permuting;
+this also covers historical reads and in-place logical-vector fallbacks.
+
+Structured control can carry a fixed-arity immutable tuple of scalar,
+tile or vector values, including nested tuples. Assignment captures all
+source values before updating any destination slot, so bank rotation and
+swapping retain simultaneous semantics. Runtime arity/dtype/tag changes
+are errors; view rebinding still requires explicit storage. This is a DSL
+grouping only: native Vec/Mask values remain individually named variables,
+never C++ arrays or tuple aggregates.
+
+Raw SME memory/ZA slice moves accept `word_dtype=...` to select the ZA word
+width independently of memory element type. For example, a contiguous byte
+view can be transferred as packed `uint32` words without numeric conversion.
+Only the complete-word prefix is transferred; a fractional last word is
+untouched. Slice-index/capacity checks use the selected word geometry, and
+never round a tail up into an out-of-bounds access. This supports library
+grouped-K packing without embedding its algorithm in the instruction emitter.

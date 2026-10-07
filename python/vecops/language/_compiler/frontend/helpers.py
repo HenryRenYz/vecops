@@ -3,11 +3,12 @@
 import ast
 
 from .. import ir as I
+from ..operations import Trait
 from .control import helper_returns
 
 
 class HelperFrontend:
-  def helper(self, body, node, *, arguments=None):
+  def helper(self, body, node, *, arguments=None, keyword_arguments=None):
     if body.tree.args.vararg or body.tree.args.kwarg or body.tree.args.posonlyargs:
       self.error(node, "DSL helpers currently require named positional/keyword-only parameters")
     if self.helper_depth >= 32:
@@ -15,7 +16,9 @@ class HelperFrontend:
     positional = [a.arg for a in body.tree.args.args]
     parameters = positional + [a.arg for a in body.tree.args.kwonlyargs]
     args = [self.expression(a) for a in node.args] if arguments is None else list(arguments)
-    kwargs = {k.arg: self.expression(k.value) for k in node.keywords} if arguments is None else {}
+    kwargs = (
+      {k.arg: self.expression(k.value) for k in node.keywords} if arguments is None else dict(keyword_arguments or {})
+    )
     if len(args) > len(positional):
       self.error(node, "too many helper arguments")
     bound = dict(zip(parameters, args))
@@ -30,6 +33,7 @@ class HelperFrontend:
     self.env.update(bound)
     self.body = body
     self.helper_depth += 1
+    self.helper_scopes.append((body, self.control_depth))
     try:
       for name in parameters:
         if name not in self.env:
@@ -51,6 +55,7 @@ class HelperFrontend:
       self.statements(helper_returns(body.tree.body, None, self.error))
       return None
     finally:
+      self.helper_scopes.pop()
       self.helper_depth -= 1
       self.env, self.body = previous_env, previous_body
 
@@ -94,6 +99,54 @@ class HelperFrontend:
       I.Assert(I.Expr(I.ScalarType("bool"), "local", data=flag), "T.func reached end without returning")
     )
     return context["result"]
+
+  def map_rows(self, args, kwargs, node):
+    """Stage a pure rank-one helper over a rank-two logical input.
+
+    Scalar options are captured in the caller before staging. Reject effects
+    rather than permitting writes to escape an independently scheduled row.
+    The compiler never identifies a helper by its name or implementation.
+    """
+    from .capture import Body
+
+    if len(args) != 2 or not isinstance(args[0], Body):
+      self.error(node, "map_rows expects a T.func helper and a rank-two tile")
+    source = self.matrix_operand(args[1], node)
+    argument = I.Expr(I.TileType(source.type.dtype, (source.type.shape[1],), source.type.mask), "region_argument")
+    if any(
+      isinstance(v, I.View) or isinstance(v, I.Expr) and not isinstance(v.type, I.ScalarType) for v in kwargs.values()
+    ):
+      self.error(node, "map_rows options must be scalar values or immutable compile-time metadata")
+    options = {key: self.freeze_tile(value) if isinstance(value, I.Expr) else value for key, value in kwargs.items()}
+    parent, promoted = self.block, dict(self.promoted)
+    self.block = I.Block()
+    try:
+      result = self.helper(args[0], node, arguments=(argument,), keyword_arguments=options)
+      body = self.block
+    finally:
+      self.block, self.promoted = parent, promoted
+    if (
+      not isinstance(result, I.Expr)
+      or not isinstance(result.type, I.TileType)
+      or len(result.type.shape) != 1
+      or not I.same_expr(result.type.shape[0], argument.type.shape[0])
+      or any(
+        not isinstance(s, (I.Assign, I.BindTile)) or isinstance(s, I.Assign) and not s.declare for s in body.statements
+      )
+    ):
+      self.error(node, "map_rows helper must be a pure straight-line program returning one same-width tile")
+    from ..ir.traversal import nodes
+
+    if any(
+      isinstance(value, I.Expr)
+      and (
+        self.operations.get(value).effects not in {"none", "read"} or self.operations.has(value, Trait.STATE_REFERENCE)
+      )
+      for value in nodes((body, result))
+    ):
+      self.error(node, "map_rows helper cannot mutate or capture tile state")
+    typ = I.TileType(result.type.dtype, source.type.shape, result.type.mask)
+    return I.Expr(typ, "map_rows", (source,), I.RowMap(argument, body, result))
 
   def exit_blocks(self, block, name):
     from ..ir.traversal import children
@@ -155,3 +208,77 @@ class HelperFrontend:
 
     update(context["result"], value)
     self.block.statements.append(I.Exit(context["name"]))
+
+
+def expand_helper(function, arguments, *, catalog, prefix, keyword_arguments=None, hardware_kind=None):
+  """Expand a DSL helper into an executable region with a unique namespace.
+
+  Unlike an expression-only adapter, this entry preserves ordinary control,
+  effects and typed results. The caller must place the region at a legal
+  execution site; helper source/captures are still handled by the frontend.
+  """
+  import inspect
+
+  from ...template import TemplateIR
+  from ..operations import use_catalog
+  from .capture import capture
+  from .parser import Frontend
+
+  body = capture(function.function)
+  ir = TemplateIR(prefix, inspect.Signature(), {}, (), None, (), None, body.filename, body)
+  frontend = Frontend(ir, catalog=catalog)
+  if hardware_kind is not None:
+    frontend.hardware_regions.append((hardware_kind, ()))
+
+  def unique(name="v"):
+    frontend.counter += 1
+    return f"{prefix}_{name}_{frontend.counter}"
+
+  frontend.unique = unique
+  call = ast.Call(func=ast.Name(id=function.__name__, ctx=ast.Load()), args=[], keywords=[])
+  with use_catalog(catalog):
+    value = frontend.helper(body, call, arguments=arguments, keyword_arguments=keyword_arguments)
+  if hardware_kind is not None:
+    frontend.validate_hardware_body(frontend.block, hardware_kind, call)
+  return value, frontend.block.statements
+
+
+def expand_register_helper(function, descriptors, *, catalog, prefix="register_library"):
+  """Bind logical Vector inputs and stage a closed pure register program."""
+  from ..dtypes import dtype_name
+  from ..ir.vector import RegisterProgram
+
+  inputs = []
+  for ordinal, descriptor in enumerate(descriptors):
+    dtype = dtype_name(descriptor.dtype)
+    extent = (
+      I.literal(descriptor.N)
+      if descriptor.N is not None
+      else I.Expr(I.ScalarType("int64"), "lanes", data=(dtype, descriptor.pow))
+    )
+    typ = I.VectorType(dtype, (extent,), tag=I.VectorTag(N=descriptor.N, pow=descriptor.pow, basis_dtype=dtype))
+    inputs.append(I.Expr(typ, "register_input", data=ordinal))
+  inputs = tuple(inputs)
+  outputs, body = expand_helper(function, (inputs,), catalog=catalog, prefix=prefix)
+  if any(not isinstance(statement, I.BindTile) for statement in body):
+    raise TypeError("register helper must specialize to a pure expression tuple")
+  if not isinstance(outputs, tuple) or not outputs:
+    raise TypeError("register helper must return a nonempty expression tuple")
+  operations, seen = [], set()
+
+  def visit(expression):
+    if id(expression) in seen:
+      return
+    if expression.op != "register_input" and catalog.get(expression).family != "register_geometry":
+      raise TypeError("closed register helper requires register-geometry primitives")
+    for argument in expression.args:
+      visit(argument)
+    seen.add(id(expression))
+    operations.append(expression)
+
+  # Retain operation-major staging order from the source helper before any
+  # target scheduling. Output-only DFS can extend the lifetime of unconsumed
+  # butterfly intermediates across many later output columns.
+  for value in (*inputs, *(statement.value for statement in body), *outputs):
+    visit(value)
+  return RegisterProgram(inputs, tuple(operations), outputs)

@@ -7,7 +7,7 @@ import vecops.language as T
 from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
-from vecops.language._compiler.frontend.expression_helper import expand_expression_helper
+from vecops.language._compiler.frontend.helpers import expand_helper
 from vecops.language._compiler.ir.traversal import nodes
 from vecops.language._compiler.operations import snapshot
 from vecops.language._library.math import softmax_inverse
@@ -39,7 +39,7 @@ def template(dtype="float32", rank=2, *, masked=False, accuracy="strict", explic
 @pytest.mark.parametrize("accuracy", ("strict", "fast", "estimate"))
 def test_visible_inverse_helper_keeps_dtype_and_accuracy_contract(dtype, accuracy):
   denominator = I.Expr(I.ScalarType(dtype), "local", data="denominator")
-  result, prelude = expand_expression_helper(
+  result, prelude = expand_helper(
     softmax_inverse, (denominator, accuracy), catalog=snapshot(), prefix="inverse_test"
   )
   expressions = [node for node in nodes((result, I.Block(prelude))) if isinstance(node, I.Expr)]

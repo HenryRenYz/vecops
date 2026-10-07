@@ -5,7 +5,40 @@ from ..operations import Trait
 from .control import assigned_names
 
 
+class CarriedTuple(tuple):
+  """Frontend-only immutable slots; never a C++ tuple/register array."""
+
+
 class StateFrontend:
+  def capture_assignment(self, value):
+    """Capture every source before updating any nested tuple destination."""
+    if isinstance(value, tuple):
+      return tuple(self.capture_assignment(v) for v in value)
+    if isinstance(value, I.Expr) and isinstance(value.type, I.ScalarType):
+      return self.freeze_tile(value)
+    return self.snapshot_state(value)
+
+  def update_tuple(self, target, value, node):
+    """Update fixed-arity slots simultaneously, retaining their identities."""
+    if isinstance(target, tuple):
+      if not isinstance(value, tuple) or len(target) != len(value):
+        self.error(node, "loop-carried tuple arity changes")
+      for a, b in zip(target, value):
+        self.update_tuple(a, b, node)
+    elif isinstance(target, I.Expr) and target.op == "state_ref":
+      self.check_state_type(target.type, value, node)
+      self.block.statements.append(I.UpdateState(target.data, value))
+    elif isinstance(target, I.Expr) and target.op == "local":
+      if (
+        not isinstance(value, I.Expr)
+        or not isinstance(value.type, I.ScalarType)
+        or target.type.dtype != value.type.dtype
+      ):
+        self.error(node, "loop-carried tuple scalar dtype changes; use an explicit cast")
+      self.block.statements.append(I.Assign(target.data, value, False))
+    else:
+      self.error(node, "loop-carried tuples require scalar/tile/vector values")
+
   def declare_state(self, value):
     state = I.TileState(self.unique("state"), value.type)
     self.block.statements.append(I.DeclareState(state, value))
@@ -39,14 +72,24 @@ class StateFrontend:
       self.error(node, "vector state tag changes across control flow")
 
   def promote_control_state(self, nodes, node, *, ignore=()):
-    for name in sorted(assigned_names(nodes) - set(ignore)):
-      value = self.env.get(name)
+    def promote(value, name):
+      if isinstance(value, CarriedTuple):
+        return value
+      if isinstance(value, tuple):
+        if any(not isinstance(v, (tuple, I.Expr)) for v in value):
+          self.error(node, "loop-carried tuples require scalar/tile/vector values")
+        return CarriedTuple(promote(v, name) for v in value)
       if isinstance(value, I.Expr) and isinstance(value.type, I.TileType) and value.op != "state_ref":
-        self.env[name] = self.declare_state(value)
+        return self.declare_state(value)
       elif isinstance(value, I.Expr) and isinstance(value.type, I.ScalarType) and value.op == "literal":
         target = self.unique(name)
         self.block.statements.append(I.Assign(target, value))
-        self.env[name] = I.Expr(I.ScalarType(value.type.dtype), "local", data=target)
+        return I.Expr(I.ScalarType(value.type.dtype), "local", data=target)
+      return value
+
+    for name in sorted(assigned_names(nodes) - set(ignore)):
+      if name in self.env:
+        self.env[name] = promote(self.env[name], name)
 
   def available_scalar_names(self, environment):
     names, seen = set(), set()

@@ -14,7 +14,10 @@ class ControlEmitter:
     from ....ir.traversal import walk
 
     if any(
-      id(store) in self.prepared.transposes or any(e.op == "dot" for e in walk(store.value)) for store in group.stores
+      id(store) in self.prepared.transposes
+      or id(store) in self.prepared.register_programs
+      or any(e.op == "dot" for e in walk(store.value))
+      for store in group.stores
     ):
       # A generic streaming fusion would bypass the prepared permutation DAG.
       # Keep each register transpose intact until multi-output transpose

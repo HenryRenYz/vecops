@@ -84,6 +84,12 @@ class SMEPackingEmitter:
       + (" && !(" + " || ".join(guards) + ")" if guards else "")
       + f") /* {'raw' if raw else 'FP32 DAG'} K-contiguous SME ZA packing */"
     )
+    capacity = None
+    if raw and packed.view.dtype in self.prepared.sme_packing_programs:
+      # May contain pack_size validation: evaluate before the no-throw owner.
+      capacity = self.unique("sme_pack_capacity")
+      count = " * ".join(f"({self.scalar(extent)})" for extent in packed.view.shape) or "1"
+      self.line(f"const vecops::nint_t {capacity}={count};")
     session, scope = self.unique("sme_pack_session"), self.unique("sme_pack_scope")
     self.line(f"vecops::execution::ExecutionSession {session};")
     self.opening_hardware_owner("sme", session, f"[&](auto& {scope})")
@@ -99,7 +105,7 @@ class SMEPackingEmitter:
     self.line(f"const vecops::nint_t {held_stride}={row_step}, {held_m}={m}, {held_k}={k};")
     try:
       if raw:
-        self.sme_raw_pack_body(packed, held_base, held_stride, held_m, held_k)
+        self.sme_raw_pack_body(packed, held_base, held_stride, held_m, held_k, capacity=capacity)
       else:
         if inactive:
           # Only this branch proves every listed replacement absent. Keep all
@@ -305,7 +311,22 @@ class SMEPackingEmitter:
     self.close()
     self.line("#endif")
 
-  def sme_raw_pack_body(self, packed, base, stride, spatial, logical_k):
+  def sme_raw_pack_body(self, packed, base, stride, spatial, logical_k, *, capacity=None):
+    program = self.prepared.sme_packing_programs.get(packed.view.dtype)
+    if program is not None:
+      held_capacity = self.unique("sme_pack_capacity_value")
+      self.line(f"const vecops::nint_t {held_capacity}={capacity};")
+      self.hardware_program(
+        program,
+        metadata={
+          "sme_packing.m": spatial,
+          "sme_packing.k": logical_k,
+          "sme_packing.pitch": stride,
+          "sme_packing.capacity": held_capacity,
+        },
+        pointers={"sme_packing_input": base, "sme_packing_output": self.pointer(packed.view)},
+      )
+      return
     width = ELEMENT_BYTES[packed.view.dtype]
     bits = f"std::uint{width * 8}_t"
     tag = self.matrix_tag(f"uint{width * 8}")
@@ -330,7 +351,20 @@ class SMEPackingEmitter:
     self.sme_pack_fringe(base, stride, spatial, origin, kb, chunk, lanes, panel, tag, output, width, kp)
     self.close()
     self.opening(f"if ({kb}<({logical_k})) /* one masked K chunk */")
-    self.sme_pack_fringe(base, stride, spatial, origin, kb, f"({logical_k})-{kb}", lanes, panel, tag, output, width, kp)
+    self.sme_pack_fringe(
+      base,
+      stride,
+      spatial,
+      origin,
+      kb,
+      f"({logical_k})-{kb}",
+      lanes,
+      panel,
+      tag,
+      output,
+      width,
+      kp,
+    )
     self.close()
     self.close()
 

@@ -19,6 +19,9 @@ class CPUImplementation:
   scalar_spelling: str | None = None
   wordwise_math: bool = False
   lane_fallback: bool = False
+  # C++ entry points may instantiate Half<Tag> implicitly. -1 refers to
+  # the result domain; nonnegative entries refer to operand domains.
+  half_domains: tuple[int, ...] = ()
   version: str = "1"
 
 
@@ -96,6 +99,7 @@ _VECTOR = {
   "or": "mask_or",
   "not": "mask_not",
 }
+_HALF_DOMAINS = {"lower": (0,), "upper": (0,), "concat": (-1,), "interleave": (-1,)}
 for name, definition in operation_snapshot().definitions.items():
   kind, spelling = "special", None
   if name in _INFIX:
@@ -115,5 +119,6 @@ for name, definition in operation_snapshot().definitions.items():
       spelling,
       bool(definition.traits & Trait.ACCURACY),
       lane_fallback,
+      _HALF_DOMAINS.get(name, ()),
     )
   )

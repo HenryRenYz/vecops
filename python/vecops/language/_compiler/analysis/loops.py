@@ -155,7 +155,7 @@ def _partition(access, loop):
       and 0 <= I.constant(width) <= I.constant(loop.step)
     )
   region = access.view.region
-  if region is None:
+  if region is None or not region.affine_partition:
     return False
   for start, width in zip(region.starts, region.widths):
     bounded = (

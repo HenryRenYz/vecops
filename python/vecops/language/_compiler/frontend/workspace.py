@@ -23,7 +23,23 @@ class WorkspaceFrontend:
     strides = [I.literal(1)] * len(shape)
     for axis in reversed(range(len(shape) - 1)):
       strides[axis] = I.binary("mul", strides[axis + 1], shape[axis + 1])
-    view = I.View(self.unique("scratch"), dtype, shape, tuple(strides), I.literal(0), owned=True)
+    view = I.View(
+      self.unique("scratch"),
+      dtype,
+      shape,
+      tuple(strides),
+      I.literal(0),
+      owned=True,
+      region=I.ViewRegion(
+        shape,
+        tuple(strides),
+        (I.literal(0),) * len(shape),
+        shape,
+        (1,) * len(shape),
+        tuple(range(len(shape))),
+        (False,) * len(shape),
+      ),
+    )
     self.block.statements.append(I.Allocate(view))
     return view
 

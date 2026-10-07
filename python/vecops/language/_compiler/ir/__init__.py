@@ -19,6 +19,7 @@ from .kernel import (
   IndexedStore,
   KernelIR,
   ReductionGroup,
+  RowMap,
   SMEVector,
   Store,
   UnrolledFor,
@@ -34,7 +35,7 @@ from .kernel import (
   same_expr,
   shaped_type,
 )
-from .matmul import DotOptions, MatmulPlan, OperandFusion, Pack, PackedView, transpose_matrix
+from .matmul import DotOptions, OperandFusion, Pack, PackedView, transpose_matrix
 from .pipeline import PipelineFor, Prefetch
 from .printing import FormattedText, Print
 from .state import DeclareState, Exit, ExitRegion, TileState, UpdateState

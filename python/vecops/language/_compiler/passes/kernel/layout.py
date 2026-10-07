@@ -13,7 +13,7 @@ from ...operations import Trait
 from ..manager import register_pass
 
 
-@register_pass("normalize-reduction-layout", before=("decompose-row-normalization", "expression-cse"))
+@register_pass("normalize-reduction-layout", before=("decompose-row-maps", "expression-cse"))
 def normalize_reduction_layout(ir, context):
   serial = 0
 

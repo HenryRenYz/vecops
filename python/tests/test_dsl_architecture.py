@@ -82,8 +82,8 @@ def test_builtin_loading_is_idempotent_and_order_stable():
   assert tuple(snapshot.specs) == T.passes.PassManager().specs
   assert [p.name for p in snapshot.specs] == [
     "normalize-reduction-layout",
-    "stream-row-normalization",
-    "decompose-row-normalization",
+    "stream-row-maps",
+    "decompose-row-maps",
     "fold-value-transforms",
     "canonicalize-memory",
     "expression-cse",

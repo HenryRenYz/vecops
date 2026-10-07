@@ -76,40 +76,7 @@ class MatmulEmitter(SMEPackingEmitter):
     self.close()
 
   def matrix_permutation(self, network, inputs):
-    """Print the prepared dword permutation with individually named registers."""
-    names, tags, ordinal = {}, {}, 0
-
-    def tag(lanes):
-      if lanes not in tags:
-        tags[lanes] = self.matrix_tag("uint32", lanes=lanes)
-      return tags[lanes]
-
-    for index, operation in enumerate(network.operations):
-      own = tag(operation.lanes)
-      if operation.kind == "input":
-        names[index] = inputs[ordinal]
-        ordinal += 1
-        continue
-      name = self.unique("pack_permute")
-      args = [names[i] for i in operation.operands]
-      if operation.kind.startswith("interleave_"):
-        stage = f"vecops::vec::ViewAs<std::uint{operation.element_bytes * 8}_t,{own}>"
-        a, b = (f"vecops::vec::bitcast({stage}{{}},{own}{{}},{v})" for v in args)
-        self.line(
-          f"auto {name}=vecops::vec::bitcast({own}{{}},{stage}{{}},vecops::vec::local_{operation.kind}({stage}{{}},{a},{b}));"
-        )
-      elif operation.kind == "concat":
-        self.line(f"auto {name}=vecops::vec::concat({own}{{}},{','.join(args)});")
-      elif operation.kind.startswith("x86_shuffle_128_"):
-        immediate = "0x88" if operation.kind.endswith("lower") else "0xdd"
-        self.line(
-          f"auto {name}=vecops::vec::Vec<{own}>{{_mm512_shuffle_i32x4({args[0]}.value,{args[1]}.value,{immediate})}};"
-        )
-      else:
-        parent = tag(network.operations[operation.operands[0]].lanes)
-        self.line(f"auto {name}=vecops::vec::{operation.kind}({parent}{{}},{args[0]});")
-      names[index] = name
-    return tag(network.rows), tuple(names[i] for i in network.outputs)
+    return self.register_program(network, lambda row, tag: inputs[row], prefix="pack_permute")
 
   def amx_b_dense_condition(self, operand):
     loads = tuple(I.loads(operand))
@@ -434,24 +401,10 @@ class MatmulEmitter(SMEPackingEmitter):
   def interleave_group(self, tag, values, dtype):
     if len(values) == 1:
       return tag, values[0]
-    # Tags are named aliases. Use Twice rather than infer their declaration.
-    pair = self.unique("pack_pair_tag")
-    self.line(f"using {pair} = vecops::vec::Twice<{tag}>;")
-    self.tag_dtypes[pair] = dtype
-    v01 = self.unique("interleave_pair")
-    self.line(f"auto {v01} = vecops::vec::interleave({pair}{{}}, {values[0]}, {values[1]});")
-    if len(values) == 2:
-      return pair, v01
-    v23 = self.unique("interleave_pair")
-    self.line(f"auto {v23} = vecops::vec::interleave({pair}{{}}, {values[2]}, {values[3]});")
-    view = f"vecops::vec::ViewAs<std::uint16_t, {pair}>"
-    quadview, quad = f"vecops::vec::Twice<{view}>", f"vecops::vec::Twice<{pair}>"
-    result = self.unique("interleave_quad")
-    self.line(
-      f"auto {result} = vecops::vec::bitcast({quad}{{}}, {quadview}{{}}, vecops::vec::interleave({quadview}{{}}, vecops::vec::bitcast({view}{{}}, {pair}{{}}, {v01}), vecops::vec::bitcast({view}{{}}, {pair}{{}}, {v23}))); "
-    )
-    self.tag_dtypes[quad] = dtype
-    return quad, result
+    key = dtype, self.matrix_tag_lanes[tag], self.matrix_tag_powers[tag]
+    program = self.prepared.packing_groups[key]
+    output_tag, outputs = self.register_program(program, lambda index, own: values[index], prefix="pack_group")
+    return output_tag, outputs[0]
 
   def pack_amx_vectors(self, source, packed, spatial, logical_k):
     dtype, side = packed.view.dtype, packed.side
@@ -573,28 +526,6 @@ class MatmulEmitter(SMEPackingEmitter):
     self.line(
       f"vecops::vec::store({outtag}{{}}, {self.pointer(packed.view)}+({offset}), {value}, vecops::vec::opt::first(({chunk})*{kp}));"
     )
-    self.close()
-    self.close()
-    self.close()
-
-  def pack_scalar_fallback(self, source, packed, spatial, logical_k, panel, block):
-    cpp, side = CPP_TYPES[packed.view.dtype], packed.side
-    dtype = packed.view.dtype
-    # The architecture's packed loop is specialized below. This scalar
-    # spelling is the correctness fallback for non-native permutations.
-    s, k = self.unique("pack_s"), self.unique("pack_k")
-    self.opening(f"for (vecops::nint_t {s}=0; {s} < (({spatial}+{panel}-1)/{panel})*{panel}; ++{s})")
-    self.opening(f"for (vecops::nint_t {k}=0; {k} < (({logical_k}+{block}-1)/{block})*{block}; ++{k})")
-    offset = self.packed_offset(packed, s, k)
-    pointer = self.pointer(packed.view)
-    self.opening(f"if ({s} < ({spatial}) && {k} < ({logical_k}))")
-    tag = self.matrix_tag(dtype, lanes=1)
-    coords = (s, k) if side == "A" else (k, s)
-    value = self.matrix_value(source, tag, coords, "1", 1 if side == "A" else 0)
-    self.line(f"{pointer}[{offset}] = vecops::vec::get({tag}{{}}, {value}, 0);")
-    self.close()
-    self.opening("else")
-    self.line(f"{pointer}[{offset}] = {cpp}{{}};")
     self.close()
     self.close()
     self.close()
@@ -1618,9 +1549,28 @@ class MatmulEmitter(SMEPackingEmitter):
     kr = 64 // ELEMENT_BYTES[a.type.dtype]
     cm, cn = (I.constant(v) for v in product.type.shape)
     if family is None and (cm is None or cn is None):
-      if product.data.tiled and any(
+      explicit_cache = product.data.tiled and any(
         v is not None for v in (product.data.block_m, product.data.block_n, product.data.block_k)
-      ):
+      )
+      shared_cache = (
+        self.active_matmul_plan.amx_shared_cache_dispatch
+        and product.data.tiled
+        and cm is None
+        and cn is None
+        and not skip_cache
+      )
+      if explicit_cache or shared_cache:
+        if not explicit_cache:
+          # Every family used this identical whole-problem bypass decision.
+          # Unswitch once, then share NC/KC/MC packing outside family dispatch
+          # instead of cloning its producer and alias DAG five times.
+          limit = self.active_matmul_plan.runtime_unblocked_bytes
+          self.opening(
+            f"if (vecops_dsl::matmul_fits({m},{n},{k},{ELEMENT_BYTES[a.type.dtype]},{ELEMENT_BYTES[b.type.dtype]},{ELEMENT_BYTES[dtype]},{limit})) /* one runtime cache decision */"
+          )
+          self.amx_matmul(statement, product, skip_cache=True)
+          self.close()
+          self.opening("else /* shared cache packing before family dispatch */")
         # Explicit cache phases share one packing wrapper. Duplicating a
         # transformed pack for every family greatly inflates C++ optimization
         # time; runtime quanta retain the requested family alignment without
@@ -1637,6 +1587,8 @@ class MatmulEmitter(SMEPackingEmitter):
         self.blocked_matrix_matmul(
           statement, product, cache, "amx", spatial_alignment=(minimum_m, minimum_n), k_alignment=kr
         )
+        if not explicit_cache:
+          self.close()
         return
       # Select the register family before its cache alignment. A universal
       # 32x32 panel needlessly gives a 1x3 leaf partial 48-column groups.

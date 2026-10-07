@@ -1,4 +1,4 @@
-"""Normalize row statistics without hiding the elementwise consumer DAG.
+"""Schedule source-parsed pure row regions without recognizing algorithms.
 
 A sole row-separable store can stream statistics and its epilogue together.
 Other consumers retain materialized statistics outside matrix/packing loops.
@@ -8,7 +8,6 @@ Both paths share executable scalar and reduction IR construction.
 from dataclasses import fields, replace
 
 from ... import ir as I
-from ...frontend.expression_helper import expand_expression_helper
 from ...ir.traversal import children, nodes, walk_unique
 from ...operations import Trait
 from ..manager import register_pass
@@ -18,7 +17,7 @@ def _slice_row(value, row, catalog):
   if isinstance(value.type, I.ScalarType) or len(value.type.shape) == 1:
     return value
   if len(value.type.shape) != 2:
-    raise TypeError("row normalization requires scalar or rank-two elementwise operands")
+    raise TypeError("row projection requires scalar or rank-two elementwise operands")
   if value.op != "load" and not catalog.has(value, Trait.ELEMENTWISE):
     # Index/layout/state boundaries own their coordinates. Do not slice their
     # children as though an expanded row predicate were a column predicate.
@@ -42,50 +41,9 @@ def _slice_row(value, row, catalog):
   )
 
 
-def _exponent(value, accuracy, prefix, context, bindings):
-  if value.type.dtype != "float32" or accuracy != "estimate":
-    return I.Expr(value.type, "exp_neg", (value,), accuracy)
-  # Rank-one helpers and both rank-two schedules parse the same safe F32
-  # polynomial, not another implementation hidden in a pass.
-  from ...._library.math import softmax_exp_neg
-
-  result, prelude = expand_expression_helper(
-    softmax_exp_neg,
-    (value, accuracy),
-    catalog=context.environment.operations,
-    prefix=prefix,
-  )
-  bindings.extend(prelude)
-  return result
-
-
-def _inverse(value, accuracy, prefix, context, bindings):
-  # Keep rank-one and both rank-two schedules on one visible DSL algorithm.
-  # A strict softmax normalization factor is IEEE 1/sum, not a rewrite of
-  # the explicit rcp primitive's native estimate/refinement contract.
-  from ...._library.math import softmax_inverse
-
-  result, prelude = expand_expression_helper(
-    softmax_inverse,
-    (value, accuracy),
-    catalog=context.environment.operations,
-    prefix=prefix,
-  )
-  bindings.extend(prelude)
-  return result
-
-
-def _row_statistics(value, row, prefix, context, *, preserve_capture=False):
-  """Build statistics and an optional producer reusable within this row.
-
-  A helper expansion can introduce lexical frozen references that CSE must
-  not equate with references from another expansion. Preserve the producer's
-  identity for a same-row consumer instead; the generic cost/reuse planner
-  still decides whether it should be cached. A materialized-statistics
-  schedule must not use this row-local producer after the row loop exits.
-  """
-  source, eps = value.args
-  kind, variance, unroll, accuracy = value.data
+def _row_program(value, row, prefix, context, *, preserve_capture=False):
+  """Instantiate one hygienic program and hoist its row-invariant scalars."""
+  source = value.args[0]
   dtype, (_, width) = source.type.dtype, source.type.shape
   if preserve_capture:
     # A sliced load has another identity, so it cannot find a snapshot saved
@@ -96,89 +54,40 @@ def _row_statistics(value, row, prefix, context, *, preserve_capture=False):
     x = I.Expr(I.TileType(dtype, (width,), source.type.mask), "value_transform", (source,), ("row", index))
   else:
     x = _slice_row(source, row, context.environment.operations)
-  invariant, body, producer = [], [], None
+  recipe, memo = value.data, {}
+  names = {s.target: prefix + "_" + s.target for s in recipe.body.statements if isinstance(s, I.Assign)}
 
-  def reduce(operation, expression):
-    return I.Expr(I.ScalarType(dtype), "reduce_" + operation, (expression,), unroll)
+  def clone(node):
+    if node is recipe.argument:
+      return x
+    if isinstance(node, I.Expr):
+      if id(node) not in memo:
+        data = names.get(node.data, node.data) if node.op in {"local", "frozen"} else clone(node.data)
+        memo[id(node)] = replace(node, args=tuple(clone(a) for a in node.args), data=data)
+      return memo[id(node)]
+    if isinstance(node, tuple):
+      return tuple(clone(item) for item in node)
+    if isinstance(node, I.Node):
+      changes = {f.name: clone(getattr(node, f.name)) for f in fields(node)}
+      if isinstance(node, I.Assign):
+        changes["target"] = names[node.target]
+      return replace(node, **changes)
+    return node
 
-  def local(name):
-    return I.Expr(I.ScalarType(dtype), "local", data=prefix + "_" + name)
-
-  def scalar(expression):
-    return I.Expr(I.ScalarType(dtype), "cast", (expression,))
-
-  if kind == "rmsnorm":
-    var = I.binary("div", reduce("add", I.binary("mul", x, x)), scalar(width))
-    inv = local("invstd")
-    body.append(
-      I.Assign(inv.data, I.Expr(I.ScalarType(dtype), "rsqrt", (I.binary("add", var, scalar(eps)),), accuracy))
-    )
-    center, scale = scalar(I.literal(0)), inv
-  elif kind == "layernorm":
-    inverse_count = local("inv_count")
-    invariant.append(I.Assign(inverse_count.data, I.binary("div", scalar(I.literal(1)), scalar(width))))
-    mean = local("mean")
-    body.append(I.Assign(mean.data, I.binary("mul", reduce("add", x), inverse_count)))
-    centered = I.binary("sub", x, mean)
-    var = (
-      I.binary(
-        "max",
-        I.binary(
-          "sub",
-          I.binary("mul", reduce("add", I.binary("mul", x, x)), inverse_count),
-          I.binary("mul", mean, mean),
-        ),
-        scalar(I.literal(0)),
-      )
-      if variance == "moments"
-      else I.binary("mul", reduce("add", I.binary("mul", centered, centered)), inverse_count)
-    )
-    inv = local("invstd")
-    body.append(
-      I.Assign(inv.data, I.Expr(I.ScalarType(dtype), "rsqrt", (I.binary("add", var, scalar(eps)),), "strict"))
-    )
-    center, scale = mean, inv
-  else:
-    maximum = local("maximum")
-    body.append(I.Assign(maximum.data, reduce("max", x)))
-    if kind == "masked_softmax":
-      safe = local("safe_maximum")
-      body.append(
-        I.Assign(
-          safe.data,
-          I.Expr(
-            I.ScalarType(dtype),
-            "where",
-            (I.binary("eq", maximum, I.literal(float("-inf"), dtype)), scalar(I.literal(0)), maximum),
-          ),
-        )
-      )
-      maximum = safe
-    exponential = _exponent(I.binary("sub", x, maximum), accuracy, prefix + "_exp", context, body)
-    producer = exponential
-    total = reduce("add", exponential)
-    if kind == "masked_softmax":
-      denominator = local("denominator")
-      body.append(I.Assign(denominator.data, total))
-      total = I.Expr(
-        I.ScalarType(dtype),
-        "where",
-        (I.binary("gt", denominator, scalar(I.literal(0))), denominator, scalar(I.literal(1))),
-      )
-    inv = local("inverse")
-    inverse = _inverse(total, accuracy, prefix + "_reciprocal", context, body)
-    body.append(I.Assign(inv.data, inverse))
-    center, scale = maximum, inv
-  return invariant, body, center, scale, x, producer
-
-
-def _normalization_tail(source, center, scale, kind, accuracy, prefix, context, bindings, *, producer=None):
-  tail = producer
-  if tail is None:
-    tail = source if kind == "rmsnorm" else I.binary("sub", source, center)
-    if kind in {"softmax", "masked_softmax"}:
-      tail = _exponent(tail, accuracy, prefix + "_tail", context, bindings)
-  return I.binary("mul", tail, scale)
+  invariant, body, fixed = [], [], set()
+  for statement in recipe.body.statements:
+    statement = clone(statement)
+    if isinstance(statement, I.Assign) and all(
+      not isinstance(e.type, I.TileType)
+      and not context.environment.operations.has(e, Trait.REDUCTION | Trait.MEMORY_READ | Trait.STATE_REFERENCE)
+      and (e.op not in {"local", "frozen"} or e.data not in names.values() or e.data in fixed)
+      for e in walk_unique(statement.value)
+    ):
+      invariant.append(statement)
+      fixed.add(statement.target)
+    else:
+      body.append(statement)
+  return invariant, body, clone(recipe.result), x
 
 
 def _streamable(value, normalization, shape, catalog):
@@ -207,13 +116,13 @@ def _streamable(value, normalization, shape, catalog):
 
 
 @register_pass(
-  "stream-row-normalization",
+  "stream-row-maps",
   after=("normalize-reduction-layout",),
-  before=("decompose-row-normalization",),
+  before=("decompose-row-maps",),
 )
-def stream_row_normalization(ir, context):
+def stream_row_maps(ir, context):
   """Fuse a sole direct store, guarded by full-region read/write disjointness."""
-  if not context.options.get("row_normalization_streaming", True):
+  if not context.options.get("row_map_streaming", context.options.get("row_normalization_streaming", True)):
     return ir
   catalog, consumers, bindings, read_consumers, serial = context.environment.operations, {}, {}, {}, 0
 
@@ -227,7 +136,7 @@ def stream_row_normalization(ir, context):
         for field in fields(statement):
           if field.name not in {"body", "otherwise", "loop", "copies"}:
             for node in nodes(getattr(statement, field.name)):
-              if isinstance(node, I.Expr) and node.op == "row_normalize":
+              if isinstance(node, I.Expr) and node.op == "map_rows":
                 consumers.setdefault(id(node), set()).add(id(statement))
               if isinstance(node, I.Expr) and catalog.has(node, Trait.MEMORY_READ):
                 read_consumers.setdefault(id(node), set()).add(id(statement))
@@ -245,7 +154,7 @@ def stream_row_normalization(ir, context):
         visit(child)
       if not isinstance(statement, I.Store) or statement.mask is not None or len(statement.destination.shape) != 2:
         continue
-      normalizations = {id(e): e for e in walk_unique(statement.value) if e.op == "row_normalize"}
+      normalizations = {id(e): e for e in walk_unique(statement.value) if e.op == "map_rows"}
       if len(normalizations) != 1:
         continue
       identity, normalization = next(iter(normalizations.items()))
@@ -269,11 +178,9 @@ def stream_row_normalization(ir, context):
         # other effects between a lazy tile capture and its sole consumer.
         continue
       serial += 1
-      prefix = f"dsl_o_norm_stream_{serial}"
+      prefix = f"dsl_o_map_stream_{serial}"
       row = I.Expr(I.ScalarType("int64"), "local", data=prefix + "_row")
-      invariant, body, center, scale, source, producer = _row_statistics(normalization, row, prefix, context)
-      kind, _, _, accuracy = normalization.data
-      tail = _normalization_tail(source, center, scale, kind, accuracy, prefix, context, body, producer=producer)
+      invariant, body, tail, _ = _row_program(normalization, row, prefix, context)
       row_values = {}
 
       def substitute(value, normalization=normalization, tail=tail, row=row, row_values=row_values):
@@ -318,9 +225,9 @@ def stream_row_normalization(ir, context):
         guard = I.binary("and", guard, I.Expr(I.ScalarType("bool"), "view_disjoint", data=(view, destination)))
       fused = I.Block([*invariant, I.For(row.data, I.literal(0), shape[0], I.literal(1), I.Block(body), unroll=1)])
       candidates[id(statement)] = (normalization, I.If(guard, fused, I.Block([statement])))
-      if context.options.get("row_normalization_release_captures", True) and all(
-        read_consumers.get(id(load)) == {id(statement)} for load in loads
-      ):
+      if context.options.get(
+        "row_map_release_captures", context.options.get("row_normalization_release_captures", True)
+      ) and all(read_consumers.get(id(load)) == {id(statement)} for load in loads):
         # Only this sink consumes these reads, and the interval from their
         # earliest local capture contains no writes, scalar assignments or
         # other effects. The guard can therefore dominate their preservation:
@@ -337,7 +244,7 @@ def stream_row_normalization(ir, context):
             # Being backed by a private load alone does not make an unused
             # dot, state/collective or architecture boundary disposable.
             # Only captures in the validated, pure sink DAG are released.
-            # Its row_normalize boundary is the operation being rewritten;
+            # Its map_rows boundary is the operation being rewritten;
             # all other boundaries and mutable scalar references stay put.
             safe = True
             for value in walk_unique(previous.value):
@@ -356,7 +263,7 @@ def stream_row_normalization(ir, context):
               continue
             released_bindings.add(id(previous))
       ir.diagnostics.append(
-        "row normalization streaming: scalar statistics and sole epilogue fused under whole-region non-alias guard"
+        "row-map streaming: scalar intermediates and sole consumer fused under whole-region non-alias guard"
       )
     if not candidates:
       return
@@ -388,8 +295,8 @@ def stream_row_normalization(ir, context):
   return ir
 
 
-@register_pass("decompose-row-normalization", before=("canonicalize-memory",))
-def decompose_row_normalization(ir, context):
+@register_pass("decompose-row-maps", before=("canonicalize-memory",))
+def decompose_row_maps(ir, context):
   memo, counter = {}, 0
   captures = {}
 
@@ -413,7 +320,7 @@ def decompose_row_normalization(ir, context):
         if id(value) in memo:
           return memo[id(value)]
         args = tuple(rewrite(argument) for argument in value.args)
-        if value.op != "row_normalize":
+        if value.op != "map_rows":
           memo[id(value)] = replace(value, args=args)
           return memo[id(value)]
         captured = [captures[id(load)] for load in I.loads_unique(value.args[0]) if id(load) in captures]
@@ -423,31 +330,65 @@ def decompose_row_normalization(ir, context):
         )
         normalized = replace(value, args=args)
         source = args[0]
-        kind, _, _, accuracy = value.data
-        dtype, (height, _) = source.type.dtype, source.type.shape
+        height = source.type.shape[0]
         counter += 1
-        prefix = f"dsl_o_norm_{counter}"
+        prefix = f"dsl_o_map_{counter}"
         row = I.Expr(I.ScalarType("int64"), "local", data=prefix + "_row")
-        statistics = []
-        for name in ("scale",) if kind == "rmsnorm" else ("center", "scale"):
-          view = I.View(prefix + "_" + name, dtype, (height,), (I.literal(1),), I.literal(0), owned=True)
-          statistics.append(view)
-          result.append(I.Allocate(view))
-        # The statistics loop ends before this schedule's consumers run.
-        # Only stored center/scale values may escape, not its row producer.
-        invariant, body, center, scale, _, _ = _row_statistics(
+        invariant, body, tail, row_source = _row_program(
           normalized, row, prefix, context, preserve_capture=preserve_capture
         )
-        result.extend(invariant)
-        for view, expression in zip(statistics, ((scale,) if kind == "rmsnorm" else (center, scale))):
+        definitions = {s.target: s.value for s in body if isinstance(s, I.Assign)}
+
+        def reference(expression):
+          seen = set()
+          while expression.op in {"local", "frozen"} and expression.data in definitions:
+            if expression.data in seen:
+              raise TypeError("cyclic row scalar definition")
+            seen.add(expression.data)
+            alias = definitions[expression.data]
+            if alias.op not in {"local", "frozen"}:
+              break
+            expression = alias
+          return expression
+
+        statistics = {}
+        for expression in walk_unique(tail):
+          expression = reference(expression)
+          if expression.op in {"local", "frozen"} and expression.data in definitions:
+            statistics.setdefault(expression.data, expression)
+        broadcasts = {}
+        for name, expression in statistics.items():
+          view = I.View(name + "_rows", expression.type.dtype, (height,), (I.literal(1),), I.literal(0), owned=True)
+          result.append(I.Allocate(view))
           body.append(I.Store(replace(view, shape=(), strides=(), offset=row), expression))
-        result.append(I.For(row.data, I.literal(0), height, I.literal(1), I.Block(body), unroll=1))
-        loaded = []
-        for view in statistics:
           broadcast = replace(view, shape=(height, I.literal(1)), strides=(I.literal(1), I.literal(0)))
-          loaded.append(I.Expr(I.TileType(dtype, broadcast.shape), "load", data=broadcast))
-        center = I.literal(0, dtype) if kind == "rmsnorm" else loaded[0]
-        memo[id(value)] = _normalization_tail(source, center, loaded[-1], kind, accuracy, prefix, context, result)
+          broadcasts[name] = I.Expr(I.TileType(view.dtype, broadcast.shape), "load", data=broadcast)
+        result.extend(invariant)
+        result.append(I.For(row.data, I.literal(0), height, I.literal(1), I.Block(body), unroll=1))
+        lifted = {}
+
+        def lift(expression):
+          if expression is row_source:
+            return source
+          if id(expression) not in lifted:
+            ref = reference(expression)
+            if ref.op in {"local", "frozen"} and ref.data in broadcasts:
+              answer = broadcasts[ref.data]
+            else:
+              arguments = tuple(lift(a) for a in expression.args)
+              shaped = [a.type for a in arguments if isinstance(a.type, I.TileType)]
+              typ = expression.type
+              if shaped:
+                shape = shaped[0].shape
+                for own in shaped[1:]:
+                  shape = I.broadcast_shape(shape, own.shape)
+                mask = getattr(typ, "mask", False) or context.environment.operations.has(expression, Trait.COMPARISON)
+                typ = I.TileType(typ.dtype, shape, mask)
+              answer = replace(expression, type=typ, args=arguments)
+            lifted[id(expression)] = answer
+          return lifted[id(expression)]
+
+        memo[id(value)] = lift(tail)
         return memo[id(value)]
       if isinstance(value, I.Block):
         visit(value)

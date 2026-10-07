@@ -40,3 +40,31 @@ def test_snapshot_refuses_an_already_loaded_package(entry, tmp_path, monkeypatch
 def test_snapshot_requires_the_project_markers(entry, tmp_path):
   with pytest.raises(ValueError, match="snapshot needs"):
     entry.select_snapshot(tmp_path)
+
+
+def test_runner_uses_frozen_tests_not_the_callers_live_tree(entry, tmp_path, monkeypatch):
+  root = tmp_path / "frozen"
+  root.mkdir()
+  monkeypatch.chdir(tmp_path)
+  monkeypatch.setattr(entry, "select_snapshot", lambda _: root)
+  monkeypatch.setattr(sys, "argv", list(sys.argv))
+  monkeypatch.setitem(
+    sys.modules,
+    "vecops",
+    SimpleNamespace(__file__=str(root / "python/vecops/__init__.py"), _C=SimpleNamespace(__file__=str(root / "_C.so"))),
+  )
+  launched = []
+
+  def run(path, *, run_name):
+    launched.append((Path.cwd(), path, run_name, list(sys.argv)))
+
+  monkeypatch.setattr(entry.runpy, "run_path", run)
+  entry.main(["--root", str(root), "--", "python/tests/test_dsl_state.py", "--", "-q"])
+  assert launched == [
+    (
+      root,
+      str(root / "benchmarks/dsl_arm_validate.py"),
+      "__main__",
+      [str(root / "benchmarks/dsl_arm_validate.py"), "python/tests/test_dsl_state.py", "--", "-q"],
+    ),
+  ]

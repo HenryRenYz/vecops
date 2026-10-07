@@ -16,8 +16,8 @@ def test_row_statistics_are_hoisted_out_of_elementwise_consumers():
     T.store(C, T.library.masked_softmax(A, Mask) * 2 + 1)
 
   source = CPUBackend().lower(kernel.ir, (), target="AVX512").source
-  assert "dsl_o_norm_1_row" in source
-  assert "dsl_o_norm_1_denominator" in source
+  assert "dsl_o_map_1_row" in source
+  assert "safe_total" in source
   assert "axis_acc" not in source
   assert "ops::Softmax" not in source
 

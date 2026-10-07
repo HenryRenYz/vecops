@@ -26,6 +26,8 @@ class PrimitivesEmitter:
     return f"vecops::vec::get({tag}{{}}, {result}, 0)"
 
   def primitive_vector(self, value, tag, shape, coords, active, axis):
+    if self.environment.operations.get(value).family == "register_geometry":
+      return self.geometry_vector(value, tag, shape, coords, active, axis)
     if value.op == "gather":
       saved = self.snapshots.get(id(value))
       if saved is not None:
@@ -97,6 +99,13 @@ class PrimitivesEmitter:
 
       if kind == "row":
         return transformed((self.scalar(axes), *own), own_axis + 1)
+      if kind == "slice":
+        mapped = [self.scalar(start) for start in value.args[1:]]
+        for output_axis, source_axis in enumerate(axes):
+          mapped[source_axis] = f"(({mapped[source_axis]}) + ({own[output_axis]}))"
+        # A window maps into the producer's original coordinates; it is not
+        # broadcasting that producer to a smaller physical/logical shape.
+        return self.vector(source, tag, source.type.shape, tuple(mapped), active, axes[own_axis])
       if kind == "expand_dims":
         mapped = own[:axes] + own[axes + 1 :]
         if own_axis == axes:
@@ -140,6 +149,92 @@ class PrimitivesEmitter:
       self.close()
       return result
     return NotImplemented
+
+  def geometry_scalar(self, value, index):
+    """Legal fallback for cross-word geometry; no array of native vectors.
+
+    The small closed-register fast path is planned before emission. This
+    fallback handles large virtual values and partial/scalar consumers with
+    exact logical indexing, including endian-correct bit reinterpretation.
+    """
+    operation, source = value.op, value.args[0] if value.args else None
+    if self.environment.operations.get(value).family != "register_geometry":
+      coordinate = I.Expr(I.ScalarType("int64"), "raw", data=index)
+      return self.element_at(I.Expr(I.ScalarType(value.type.dtype), "element_at", (value, coordinate)))
+    if operation in {"lower", "upper"}:
+      offset = 0 if operation == "lower" else self.scalar(value.type.shape[0])
+      return self.geometry_scalar(source, f"(({index})+{offset})")
+    if operation == "bitcast":
+      before, after = ELEMENT_BYTES[source.type.dtype], ELEMENT_BYTES[value.type.dtype]
+      uint_source, uint_target = f"std::uint{before * 8}_t", f"std::uint{after * 8}_t"
+      if after >= before:
+        words = []
+        for piece in range(after // before):
+          scalar = self.geometry_scalar(source, f"(({index})*{after // before}+{piece})")
+          bits = f"std::bit_cast<{uint_source}>(static_cast<{CPP_TYPES[source.type.dtype]}>({scalar}))"
+          shift = f"(std::endian::native==std::endian::little ? {piece * before * 8} : {(after - before - piece * before) * 8})"
+          words.append(f"(static_cast<{uint_target}>({bits}) << {shift})")
+        bits = " | ".join(words)
+      else:
+        ratio = before // after
+        scalar = self.geometry_scalar(source, f"(({index})/{ratio})")
+        bits = f"std::bit_cast<{uint_source}>(static_cast<{CPP_TYPES[source.type.dtype]}>({scalar}))"
+        shift = (
+          f"(std::endian::native==std::endian::little ? ({index})%{ratio} : {ratio - 1}-({index})%{ratio})*{after * 8}"
+        )
+        bits = f"({bits} >> ({shift}))"
+      return f"std::bit_cast<{CPP_TYPES[value.type.dtype]}>(static_cast<{uint_target}>({bits}))"
+    if operation == "concat":
+      half = self.scalar(source.type.shape[0])
+      predicate = I.Expr(I.ScalarType("bool"), "raw", data=f"({index})<{half}")
+      return self.scalar_select(
+        predicate,
+        lambda: self.geometry_scalar(source, index),
+        lambda: self.geometry_scalar(value.args[1], f"(({index})-{half})"),
+        value.type.dtype,
+      )
+    if operation in {"interleave", "local_interleave_lower", "local_interleave_upper"}:
+      if operation == "interleave":
+        mapped = f"(({index})/2)"
+      else:
+        block = 16 // ELEMENT_BYTES[value.type.dtype]
+        offset = 0 if operation.endswith("lower") else block // 2
+        mapped = f"(({index})/{block}*{block}+({index})%{block}/2+{offset})"
+      predicate = I.Expr(I.ScalarType("bool"), "raw", data=f"({index})%2==0")
+      return self.scalar_select(
+        predicate,
+        lambda: self.geometry_scalar(source, mapped),
+        lambda: self.geometry_scalar(value.args[1], mapped),
+        value.type.dtype,
+      )
+    block = 16 // ELEMENT_BYTES[value.type.dtype]
+    blocks = I.constant(value.type.shape[0]) // block
+
+    def select(ordinal):
+      chosen = value.data[ordinal]
+      argument = value.args[chosen // blocks]
+      mapped = f"({chosen % blocks * block}+({index})%{block})"
+      if ordinal == len(value.data) - 1:
+        return self.geometry_scalar(argument, mapped)
+      predicate = I.Expr(I.ScalarType("bool"), "raw", data=f"({index})/{block}=={ordinal}")
+      return self.scalar_select(
+        predicate,
+        lambda: self.geometry_scalar(argument, mapped),
+        lambda: select(ordinal + 1),
+        value.type.dtype,
+      )
+
+    return select(0)
+
+  def geometry_vector(self, value, tag, shape, coords, active, axis):
+    result, lane = self.unique("geometry"), self.unique("geometry_lane")
+    self.line(f"auto {result}=vecops::vec::zeros({tag}{{}});")
+    own = self.coordinates(value.type.shape, shape, coords)
+    self.opening(f"for (vecops::nint_t {lane}=0; {lane}<({active}); ++{lane})")
+    scalar = self.geometry_scalar(value, f"(({own[-1]})+{lane})")
+    self.line(f"{result}=vecops::vec::set({tag}{{}}, {result}, {lane}, {scalar});")
+    self.close()
+    return result
 
   def check_indices(self, index, predicate, tag, shape, coords, active, axis, view, memory_axis=0):
     indices = self.vector(index, tag, shape, coords, active, axis)

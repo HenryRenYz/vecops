@@ -17,6 +17,7 @@ from .matmul_support import PREAMBLE as _MATMUL_PREAMBLE
 from .memory import MemoryEmitter
 from .primitives import PrimitivesEmitter
 from .printing import PrintEmitter
+from .registers import RegistersEmitter
 from .state import StateEmitter
 from .support import _PREAMBLE, _SME_MATH_POLICY
 from .transpose import TransposeEmitter
@@ -36,6 +37,7 @@ class CPUEmitter(
   PrimitivesEmitter,
   CollectiveEmitter,
   PrintEmitter,
+  RegistersEmitter,
 ):
   def __init__(self, prepared):
     self.prepared = prepared
@@ -122,6 +124,7 @@ class CPUEmitter(
     self.line("}")
 
   def generate(self):
+    self.line("#include <bit>")
     if (self.uses_executor or self.traces_memory) and not self.uses_workspace:
       self.line("#define VECOPS_KERNEL_EXECUTION_CONTEXT 1")
     parameters = []

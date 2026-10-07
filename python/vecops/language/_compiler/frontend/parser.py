@@ -14,11 +14,12 @@ from ..dtypes import dtype_name
 from ..ir.promotion import cast_operands, floating_dtype
 from ..operations import Trait, use_catalog
 from ..operations import current as operation_snapshot
-from .capture import DSL_MODULES, Body, capture, symbol
+from .capture import DSL_MODULES, Body, SelfCall, capture, symbol
 from .collectives import CollectiveFrontend
 from .diagnostics import DSLError
 from .hardware import HardwareFrontend
 from .helpers import HelperFrontend
+from .indexing import IndexingFrontend
 from .loops import LoopsFrontend
 from .pipeline import PipelineFrontend
 from .primitives import PrimitivesFrontend
@@ -31,6 +32,7 @@ from .workspace import WorkspaceFrontend
 
 class Frontend(
   HelperFrontend,
+  IndexingFrontend,
   StateFrontend,
   PrimitivesFrontend,
   LoopsFrontend,
@@ -53,10 +55,12 @@ class Frontend(
     self.counter = 0
     self.loop_depth = 0
     self.helper_depth = 0
+    self.helper_scopes = []
     self.control_depth = 0
     self.promoted = {}
     self.diagnostics = []
     self.hardware_regions = []
+    self.positive_scalars = set()
     self.helper_exits = []
     self.teams = []
     self.origins = {}
@@ -173,17 +177,10 @@ class Frontend(
           return value
         if isinstance(value, DSLFunction):
           return capture(value.function)
+        from ...._dtype import is_native_dtype
         from ..._debug.options import PrintTarget
 
-        if isinstance(value, (Intrinsic, PrintTarget, type)) or node.attr in {
-          "float16",
-          "bfloat16",
-          "float32",
-          "float64",
-          "int32",
-          "int64",
-          "bool_",
-        }:
+        if isinstance(value, (Intrinsic, PrintTarget, type)) or is_native_dtype(value):
           return value
         self.error(node, f"unsupported DSL attribute {node.attr!r}")
       if node.attr in {"shape", "strides"} and isinstance(obj, I.View):
@@ -303,118 +300,7 @@ class Frontend(
       a, b = self.value(self.expression(node.body), node), self.value(self.expression(node.orelse), node)
       return self.select(condition, a, b)
     if isinstance(node, ast.Subscript):
-      obj = self.expression(node.value)
-      if isinstance(obj, tuple):
-        if isinstance(node.slice, ast.Slice):
-          bounds = []
-          for part in (node.slice.lower, node.slice.upper, node.slice.step):
-            value = None if part is None else self.expression(part)
-            bound = None if value is None else I.constant(self.value(value, node))
-            if value is not None and type(bound) is not int:
-              self.error(node, "tuple slice bounds must be compile-time integers")
-            bounds.append(bound)
-          if bounds[2] == 0:
-            self.error(node, "tuple slice bounds/step must be compile-time integers with a nonzero step")
-          return obj[slice(*bounds)]
-        index = I.constant(self.value(self.expression(node.slice), node))
-        if not isinstance(index, int):
-          self.error(node, "tuple indices must be compile-time integers")
-        return obj[index]
-      if not isinstance(obj, I.View):
-        self.error(node, "only tensor/tile views and tuples can be indexed")
-      items = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
-      shape, strides, offset = [], [], obj.offset
-      region = obj.region
-      starts, widths, steps, region_clipped, axes = (
-        (list(region.starts), list(region.widths), list(region.steps), list(region.clipped), [])
-        if region is not None
-        else ([], [], [], [], [])
-      )
-      axis = 0
-      for item in items:
-        if isinstance(item, ast.Constant) and item.value is Ellipsis:
-          remaining = len(obj.shape) - (len(items) - 1)
-          shape.extend(obj.shape[axis : axis + remaining])
-          strides.extend(obj.strides[axis : axis + remaining])
-          if region is not None:
-            axes.extend(region.axes[axis : axis + remaining])
-          axis += remaining
-          continue
-        if axis >= len(obj.shape):
-          self.error(node, "too many tensor indices")
-        extent, stride = obj.shape[axis], obj.strides[axis]
-        full_slice = isinstance(item, ast.Slice) and item.lower is None and item.upper is None and item.step is None
-        if region is not None and region.clipped[region.axes[axis]] and not full_slice:
-          # A second clipped subregion is relative to the first clipped start,
-          # not its original affine start. Retain addresses, drop the proof.
-          region = None
-        if isinstance(item, ast.Slice):
-          if full_slice:
-            shape.append(extent)
-            strides.append(stride)
-            if region is not None:
-              axes.append(region.axes[axis])
-            axis += 1
-            continue
-          step = self.value(self.expression(item.step), node) if item.step else I.literal(1)
-          if step.op != "literal" or not isinstance(step.data, int) or isinstance(step.data, bool) or step.data <= 0:
-            self.error(node, "slice steps must be positive constants; negative tensor strides are supported")
-          start = self.value(self.expression(item.lower), node) if item.lower else I.literal(0)
-          stop = self.value(self.expression(item.upper), node) if item.upper else extent
-          if any(not isinstance(v.type, I.ScalarType) or "int" not in v.type.dtype for v in (start, stop)):
-            self.error(node, "slice bounds must be scalar integers")
-          # Region slices clip to bounds. Negative Python indices are normalized.
-          if I.constant(start) is not None and I.constant(start) < 0:
-            start = I.binary("add", extent, start)
-          if I.constant(stop) is not None and I.constant(stop) < 0:
-            stop = I.binary("add", extent, stop)
-          if region is not None:
-            root_axis = region.axes[axis]
-            starts[root_axis] = I.binary("add", starts[root_axis], I.binary("mul", start, I.literal(steps[root_axis])))
-            widths[root_axis] = I.binary("mul", I.binary("sub", stop, start), I.literal(steps[root_axis]))
-            steps[root_axis] *= step.data
-            region_clipped[root_axis] = True
-            axes.append(root_axis)
-          start = I.binary("max", I.literal(0), I.binary("min", start, extent))
-          clipped = I.binary("min", stop, extent)
-          # Native lane extents are positive; preserve a canonical min for
-          # descriptor loads and matching region stores.
-          if I.constant(start) == 0 and stop.op == "lanes":
-            stop = clipped
-          else:
-            stop = I.binary("max", start, clipped)
-          length = I.binary(
-            "floordiv", I.binary("add", I.binary("sub", stop, start), I.binary("sub", step, I.literal(1))), step
-          )
-          offset = I.binary("add", offset, I.binary("mul", start, stride))
-          shape.append(length)
-          strides.append(I.binary("mul", stride, step))
-        else:
-          index = self.value(self.expression(item), node)
-          if not isinstance(index.type, I.ScalarType) or "int" not in index.type.dtype:
-            self.error(node, "view indices must be scalar integers; use strided regions for vector access")
-          if I.constant(index) is not None and I.constant(index) < 0:
-            index = I.binary("add", extent, index)
-          if region is not None:
-            root_axis = region.axes[axis]
-            starts[root_axis] = I.binary("add", starts[root_axis], I.binary("mul", index, I.literal(steps[root_axis])))
-            widths[root_axis] = I.literal(1)
-            region_clipped[root_axis] = False
-          offset = I.binary("add", offset, I.binary("mul", index, stride))
-        axis += 1
-      shape.extend(obj.shape[axis:])
-      strides.extend(obj.strides[axis:])
-      if region is not None:
-        axes.extend(region.axes[axis:])
-        region = replace(
-          region,
-          starts=tuple(starts),
-          widths=tuple(widths),
-          steps=tuple(steps),
-          axes=tuple(axes),
-          clipped=tuple(region_clipped),
-        )
-      return replace(obj, shape=tuple(shape), strides=tuple(strides), offset=offset, region=region)
+      return self.index(node)
     if isinstance(node, ast.Call):
       return self.call(node)
     self.error(node, f"unsupported expression {type(node).__name__}")
@@ -433,6 +319,18 @@ class Frontend(
       operation = node.func.id
     else:
       function = self.expression(node.func)
+      if isinstance(function, SelfCall):
+        scope = next(
+          (
+            (body, depth)
+            for body, depth in reversed(self.helper_scopes)
+            if any(v is function for v in body.environment.values())
+          ),
+          None,
+        )
+        if scope is None or self.control_depth > scope[1]:
+          self.error(node, "recursive T.func calls require compile-time control and specialization")
+        return self.helper(scope[0], node)
       if isinstance(function, Body):
         return self.helper(function, node)
       if function in (Vector, ExecutionLayout):
@@ -458,6 +356,21 @@ class Frontend(
       self.error(node, "runtime keyword unpacking is not supported")
     if operation in {"print", "static_print"}:
       return self.print_call(operation, args, kwargs, node)
+    if operation == "map_rows":
+      return self.map_rows(args, kwargs, node)
+    if operation in {"dtype_name", "itemsize", "static_log2"}:
+      if len(args) != 1 or kwargs:
+        self.error(node, f"{operation} expects one compile-time argument")
+      if operation == "dtype_name":
+        return dtype_name(args[0])
+      if operation == "itemsize":
+        from ..dtypes import ELEMENT_BYTES
+
+        return I.literal(ELEMENT_BYTES[dtype_name(args[0])])
+      value = I.constant(self.value(args[0], node))
+      if type(value) is not int or value <= 0 or value & (value - 1):
+        self.error(node, "static_log2 requires a positive compile-time power of two")
+      return I.literal(value.bit_length() - 1)
     allowed = {
       "load": {"dtype", "vector", "mask", "other"},
       "store": {"mask", "implementation"},
@@ -503,7 +416,7 @@ class Frontend(
       if not self.hardware_regions or self.hardware_regions[-1][0] != kind:
         self.error(node, f"{operation} requires a matching lexical hardware region")
       if kind == "sme":
-        result = self.sme_operation(operation, args, node)
+        result = self.sme_operation(operation, args, kwargs, node)
         if result is not NotImplemented:
           return result
       if operation == "amx.tdp":
@@ -588,22 +501,6 @@ class Frontend(
       if len(args) != 1:
         self.error(node, "as_value expects one operand")
       return self.matrix_operand(args[0], node, allow_scalar=True)
-    if operation == "_normalize":
-      if len(args) != 1:
-        self.error(node, "normalization expects one rank-two tile")
-      value = self.matrix_operand(args[0], node)
-      if value.type.dtype not in {"float32", "float64"}:
-        value = I.Expr(I.TileType("float32", value.type.shape), "cast", (value,))
-      kind = kwargs.get("kind", "layernorm")
-      variance = kwargs.get("variance", "centered")
-      if kind not in {"layernorm", "rmsnorm", "softmax", "masked_softmax"} or variance not in {"centered", "moments"}:
-        self.error(node, "unsupported normalization algorithm")
-      accuracy = kwargs.get("accuracy", "strict")
-      if accuracy not in {"strict", "fast", "estimate"}:
-        self.error(node, "accuracy must be strict, fast or estimate")
-      eps = self.value(kwargs.get("eps", I.literal(1e-5)), node)
-      unroll = self.unroll_count(kwargs.get("unroll", I.literal(2)), node)
-      return I.Expr(value.type, "row_normalize", (value, eps), (kind, variance, unroll, accuracy))
     if operation in {"dot", "_matmul"}:
       pure = len(args) in (2, 3) and not isinstance(args[0], tuple)
       if len(args) not in (2, 3) or not pure and len(args[0]) != 2:
@@ -1013,14 +910,16 @@ class Frontend(
       self.error(node, "unroll exceeds the 1024-copy code-size budget")
     return count
 
+  def positive_extent(self, value):
+    from ..analysis.affine import positive_extent
+
+    return positive_extent(value, self.operations, self.positive_scalars)
+
   def assign(self, target, value, node):
     if isinstance(target, ast.Tuple):
       if not isinstance(value, tuple) or len(value) != len(target.elts):
         self.error(node, "tuple assignment arity mismatch")
-      value = tuple(
-        self.freeze_tile(v) if isinstance(v, I.Expr) and isinstance(v.type, I.ScalarType) else self.snapshot_state(v)
-        for v in value
-      )
+      value = self.capture_assignment(value)
       for item, val in zip(target.elts, value):
         self.assign(item, val, node)
       return
@@ -1034,12 +933,19 @@ class Frontend(
     if not isinstance(target, ast.Name):
       self.error(node, "only names, tuples and writable views can be assigned")
     existing = self.env.get(target.id)
+    from .state import CarriedTuple
+
+    if isinstance(existing, CarriedTuple):
+      self.update_tuple(existing, self.capture_assignment(value), node)
+      return
     if isinstance(existing, I.Expr) and existing.op == "state_ref":
       self.check_state_type(existing.type, value, node)
       self.block.statements.append(I.UpdateState(existing.data, self.freeze_tile(value)))
       return
     if isinstance(value, I.Expr) and isinstance(value.type, I.ScalarType):
       existing = self.env.get(target.id)
+      if value is existing:
+        return  # A helper's as_value(parameter) is not a scalar mutation.
       if value.op == "literal" and not (isinstance(existing, I.Expr) and existing.op == "local"):
         # Preserve compile-time helper results/locals. Structured control
         # promotes an assigned constant to a runtime slot before entering it.
@@ -1053,6 +959,10 @@ class Frontend(
       else:
         name, declare = self.unique(target.id), True
       self.block.statements.append(I.Assign(name, value, declare))
+      if self.positive_extent(value):
+        self.positive_scalars.add(name)
+      else:
+        self.positive_scalars.discard(name)
       self.env[target.id] = I.Expr(value.type, "local", data=name)
     else:
       if isinstance(value, I.Expr) and isinstance(value.type, I.TileType):
@@ -1183,14 +1093,7 @@ class Frontend(
         body = self.nested(node.body)
       finally:
         self.hardware_regions.pop()
-      allowed = (I.ArchitectureCall, I.BindTile, I.Store) if kind == "sme" else (I.ArchitectureCall,)
-      if any(not isinstance(s, allowed) for s in body.statements):
-        self.error(
-          node,
-          "hardware region supports only whole-view transpose/architecture instructions; no allocation or control flow",
-        )
-      if kind == "sme" and any(s.mask is not None for s in body.statements if isinstance(s, I.Store)):
-        self.error(node, "SME region does not admit masked stores")
+      self.validate_hardware_body(body, kind, node)
       self.env = before
       self.block.statements.append(I.HardwareRegion(kind, body, configuration))
     elif isinstance(node, ast.Assign):
@@ -1269,8 +1172,8 @@ class Frontend(
         if len(values) == 1
         else (values[0], values[1], values[2] if len(values) == 3 else I.literal(1))
       )
-      if step.op != "literal" or step.data == 0:
-        self.error(node, "loop step must be a nonzero constant")
+      if step.op != "literal" and not self.positive_extent(step) or step.op == "literal" and step.data == 0:
+        self.error(node, "loop step must be a nonzero constant or proven positive native extent")
       if kind == "unroll":
         if any(isinstance(n, (ast.Break, ast.Continue)) for s in node.body for n in ast.walk(s)):
           self.error(node, "break/continue in an unrolled region is not supported; use T.serial")

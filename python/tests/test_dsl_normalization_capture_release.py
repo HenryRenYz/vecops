@@ -60,7 +60,7 @@ def source_block(source, opening):
 
 
 def streamed_sources(source):
-  row = source.index("for (vecops::nint_t dsl_o_norm_stream_")
+  row = source.index("for (vecops::nint_t dsl_o_map_stream_")
   fast, stop = source_block(source, row)
   fallback = source.index("else", stop)
   slow, _ = source_block(source, fallback)
@@ -113,7 +113,7 @@ def test_statistics_and_epilogue_read_the_capture_saved_before_a_write(kind, tar
   source = lowered.source
   snapshot = re.search(r"Buffer<float> (dsl_c_snapshot_\d+);", source).group(1)
   alias = re.search(r"const bool (dsl_c_alias_\d+) =", source).group(1)
-  row = source.index("for (vecops::nint_t dsl_o_norm_1_row")
+  row = source.index("for (vecops::nint_t dsl_o_map_1_row")
   statistics, stop = source_block(source, row)
   loads = [line for line in statistics.splitlines() if "load_convert" in line]
   assert loads and all(snapshot + ".data()" in load and alias + " ?" in load for load in loads)
@@ -146,7 +146,7 @@ def test_unused_boundary_capture_backed_by_private_reads_is_not_discarded(operat
 
   from vecops.language._compiler.environment import freeze
   from vecops.language._compiler.frontend.parser import lower
-  from vecops.language._compiler.passes.kernel.normalization import stream_row_normalization
+  from vecops.language._compiler.passes.kernel.regions import stream_row_maps
 
   frontend = lower(capture_template().ir)
   source = next(node for node in nodes(frontend.body) if isinstance(node, I.Expr) and node.op == "load")
@@ -154,7 +154,7 @@ def test_unused_boundary_capture_backed_by_private_reads_is_not_discarded(operat
   statement = I.BindTile(captured)
   frontend.body.statements.insert(1, statement)
   context = SimpleNamespace(options={}, environment=freeze(target="SVE"))
-  rewritten = stream_row_normalization(frontend, context)
+  rewritten = stream_row_maps(frontend, context)
   retained = [node for node in rewritten.body.statements if isinstance(node, I.BindTile)]
   assert any(node.value is captured for node in retained)
   # Never turn private-load membership into a license to erase an unrelated
@@ -168,7 +168,7 @@ def test_row_substitution_preserves_shared_affine_dag_edges():
 
   from vecops.language._compiler.environment import freeze
   from vecops.language._compiler.frontend.parser import lower
-  from vecops.language._compiler.passes.kernel.normalization import stream_row_normalization
+  from vecops.language._compiler.passes.kernel.regions import stream_row_maps
 
   frontend = lower(capture_template().ir)
   sink = frontend.body.statements[-1]
@@ -177,7 +177,7 @@ def test_row_substitution_preserves_shared_affine_dag_edges():
     value = I.binary("add", value, value)
   frontend.body.statements[-1] = replace(sink, value=value)
   context = SimpleNamespace(options={}, environment=freeze(target="SVE"))
-  rewritten = stream_row_normalization(frontend, context)
+  rewritten = stream_row_maps(frontend, context)
   guard = streaming_guard(rewritten)
   assert guard is not None
   value = next(node.value for node in nodes(guard.body) if isinstance(node, I.Store))

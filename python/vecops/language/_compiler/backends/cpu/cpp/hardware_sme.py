@@ -5,38 +5,79 @@ from ..capabilities import CPP_TYPES
 
 
 class SMEInstructionEmitter:
-  def check_sme_instruction(self, statement):
-    if statement.operation not in {"sme.load", "sme.store_tile"}:
-      return
-    view = statement.view
-    lanes = f"vecops::vec::sme::streaming_lanes<{CPP_TYPES[view.dtype]}>()"
-    guards = [f"({self.scalar(view.strides[-1])}) == 1"]
-    guards += [f"({self.scalar(n)})>=0 && ({self.scalar(n)})<=({lanes})" for n in view.shape]
-    self.line("#if defined(HAS_SME_FA64)")
-    self.line(
-      "if (!("
-      + " && ".join(guards)
-      + ')) throw std::invalid_argument("SME operand must fit one streaming word/tile and have unit column stride");'
-    )
-    if statement.operation == "sme.store_tile":
-      self.line(
-        f"vecops_dsl::check_writable<2>({{{', '.join(self.scalar(v) for v in view.shape)}}}, {{{', '.join(self.scalar(v) for v in view.strides)}}});"
-      )
-    self.line("#endif")
-
   def emit_sme_instruction(self, statement):
-    if statement.operation == "sme.load":
-      handle = statement.operands[0]
-      tag = handle.name + "_tag"
-      self.line(f"using {tag} = vecops::vec::ScalableTag<{CPP_TYPES[handle.view.dtype]}, 0>;")
-      self.line(f"auto {handle.name}_mask = vecops::vec::mwhilelt({tag}{{}}, 0, {self.scalar(handle.view.shape[0])});")
+    if statement.operation in {"sme.load_hor", "sme.load_ver", "sme.store_hor", "sme.store_ver"}:
+      view, index = statement.view, statement.slice_index
+      word_bytes = ELEMENT_BYTES[statement.operands[0]]
+      unsigned = f"std::uint{word_bytes * 8}_t"
+      tag, mask = self.unique("za_slice_tag"), self.unique("za_slice_mask")
+      self.line(f"using {tag} = vecops::vec::ScalableTag<{unsigned}, 0>;")
+      count = self.scalar(view.shape[0])
+      if word_bytes != ELEMENT_BYTES[view.dtype]:
+        count = f"(({count}) * {ELEMENT_BYTES[view.dtype]} / {word_bytes})"
+      self.line(f"auto {mask} = vecops::vec::mwhilelt({tag}{{}}, 0, {count});")
+      const = "const " if statement.operation.startswith("sme.load") else ""
+      instruction = statement.operation.split(".")[1]
       self.line(
-        f"auto {handle.name} = vecops::vec::load_convert({tag}{{}}, {self.pointer(handle.view)}, vecops::vec::opt::masked({handle.name}_mask));"
+        f"vecops::vec::sme::{instruction}<{statement.tile}>(static_cast<std::uint32_t>({self.scalar(index)}), {mask}, reinterpret_cast<{const}{unsigned}*>({self.pointer(view)}));"
       )
+    elif statement.operation in {"sme.load_bits", "sme.store_bits"}:
+      handle, view = statement.vector, statement.view
+      tag = handle.name + "_tag"
+      memory_tag = self.unique("streaming_bits_tag")
+      memory_type = f"std::uint{ELEMENT_BYTES[view.dtype] * 8}_t"
+      self.line(f"using {memory_tag} = vecops::vec::ScalableTag<{memory_type}, 0>;")
+      mask = self.unique("streaming_bits_mask")
+      self.line(f"auto {mask} = vecops::vec::mwhilelt({memory_tag}{{}}, 0, {self.scalar(view.shape[0])});")
+      if statement.operation == "sme.load_bits":
+        self.line(f"using {tag} = vecops::vec::ScalableTag<{CPP_TYPES[handle.dtype]}, 0>;")
+        self.line(f"auto {handle.name}_mask = vecops::vec::mwhilelt({tag}{{}}, 0, {self.scalar(handle.extent)});")
+        self.line(
+          f"auto {handle.name} = vecops::vec::bitcast({tag}{{}}, {memory_tag}{{}}, "
+          f"vecops::vec::load({memory_tag}{{}}, reinterpret_cast<const {memory_type}*>({self.pointer(view)}), "
+          f"vecops::vec::opt::masked({mask})));"
+        )
+      else:
+        self.line(
+          f"vecops::vec::store({memory_tag}{{}}, reinterpret_cast<{memory_type}*>({self.pointer(view)}), "
+          f"vecops::vec::bitcast({memory_tag}{{}}, {tag}{{}}, {handle.name}), vecops::vec::opt::masked({mask}));"
+        )
+    elif statement.operation == "sme.load":
+      handle = statement.vector
+      tag = handle.name + "_tag"
+      self.line(f"using {tag} = vecops::vec::ScalableTag<{CPP_TYPES[handle.dtype]}, 0>;")
+      self.line(f"auto {handle.name}_mask = vecops::vec::mwhilelt({tag}{{}}, 0, {self.scalar(handle.extent)});")
+      self.line(
+        f"auto {handle.name} = vecops::vec::load_convert({tag}{{}}, {self.pointer(statement.view)}, vecops::vec::opt::masked({handle.name}_mask));"
+      )
+    elif statement.operation == "sme.store":
+      handle = statement.vector
+      self.line(
+        f"vecops::vec::store_convert({handle.name}_tag{{}}, {self.pointer(statement.view)}, {handle.name}, vecops::vec::opt::masked({handle.name}_mask));"
+      )
+    elif statement.operation in {"sme.read_hor", "sme.read_ver", "sme.write_hor", "sme.write_ver"}:
+      handle, index = statement.vector, statement.slice_index
+      tag, bits = handle.name + "_tag", self.unique("za_vector_bits")
+      unsigned = f"std::uint{ELEMENT_BYTES[handle.dtype] * 8}_t"
+      self.line(f"using {bits} = vecops::vec::ScalableTag<{unsigned}, 0>;")
+      mask = self.unique("za_vector_mask")
+      self.line(f"auto {mask} = vecops::vec::mwhilelt({bits}{{}}, 0, {self.scalar(handle.extent)});")
+      instruction = statement.operation.split(".")[1]
+      slice_index = f"static_cast<std::uint32_t>({self.scalar(index)})"
+      if instruction.startswith("read"):
+        self.line(f"using {tag} = vecops::vec::ScalableTag<{CPP_TYPES[handle.dtype]}, 0>;")
+        self.line(f"auto {handle.name}_mask = vecops::vec::mwhilelt({tag}{{}}, 0, {self.scalar(handle.extent)});")
+        self.line(
+          f"auto {handle.name} = vecops::vec::bitcast({tag}{{}}, {bits}{{}}, vecops::vec::sme::{instruction}<{statement.tile}>({bits}{{}}, {slice_index}, {mask}));"
+        )
+      else:
+        self.line(
+          f"vecops::vec::sme::{instruction}<{statement.tile}>({slice_index}, {mask}, vecops::vec::bitcast({bits}{{}}, {tag}{{}}, {handle.name}));"
+        )
     elif statement.operation == "sme.mopa":
       dtype, a, b = statement.operands
       self.line(
-        f"vecops::vec::sme::mopa<{statement.tile}, {CPP_TYPES[dtype]}, {CPP_TYPES[a.view.dtype]}, {CPP_TYPES[b.view.dtype]}>({a.name}_mask, {b.name}_mask, {a.name}, {b.name});"
+        f"vecops::vec::sme::mopa<{statement.tile}, {CPP_TYPES[dtype]}, {CPP_TYPES[a.dtype]}, {CPP_TYPES[b.dtype]}>({a.name}_mask, {b.name}_mask, {a.name}, {b.name});"
       )
     elif statement.operation == "sme.store_tile":
       view = statement.view

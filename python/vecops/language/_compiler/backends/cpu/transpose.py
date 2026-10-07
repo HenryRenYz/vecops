@@ -1,18 +1,44 @@
 """CPU layout recognition and target-specific register/state policies."""
 
-from dataclasses import fields, replace
+from __future__ import annotations
+
+from dataclasses import dataclass, fields, replace
 from types import MappingProxyType
 
 from ... import ir as I
+from ...analysis.affine import simplify_loop_metadata
 from ...dtypes import ELEMENT_BYTES
-from ...ir.transpose import TransposePlan
+from ...frontend.helpers import expand_helper
 from ...ir.traversal import walk
+from ...ir.vector import RegisterProgram
 from ...lowering.tile_to_vector import attach_stores, lower_region, store_roots, store_value
-from ...lowering.transpose import register_transpose
 from ...operations import Trait, snapshot
 from ...passes.manager import register_pass
+from .registers import register_transpose
 
 MAX_STATIC_HALF_INPUT_ROWS = 16
+
+
+@dataclass(frozen=True)
+class TransposePlan:
+  """CPU-only physical layout schedule; not a portable IR contract."""
+
+  statement: object
+  dtype: str
+  source_axis: int
+  variants: tuple[tuple[str, RegisterProgram], ...]
+  sme: bool = False
+  sme_preferred: bool = True
+  sme_pairs: bool = False
+  cache_block: int = 64
+  loop_order: str = "output"
+  dense_destination: bool = False
+  lane_bytes: int = 0
+  # Captured SVL proves these bounded schedules; ordinary VL cannot.
+  sme_const_half_output_columns: int | None = None
+  sme_const_half_full_input_rows: int | None = None
+  sme_program: I.Block | None = None
+  pass_trace: tuple[str, ...] = ("cpu-plan-transpose", "lower-register-permutations")
 
 
 @register_pass("cpu-plan-transpose", stage="cpu-memory")
@@ -201,7 +227,7 @@ def plan_transpose(statement, options=None):
       if bytes_ > 16
       else "defined(CPU_CAPABILITY_SVE)"
     )
-    variants.append((guard, register_transpose(rows, columns, width)))
+    variants.append((guard, replace(register_transpose(rows, columns, width, dtype=dtype), dtype=dtype)))
   # The GCC register-pressure cap follows the measured C++ baseline. Clang
   # can use 16 rows; SVE caps rows at 8, including the named-register VLA path.
   for bytes_, guard in ((64, "VEC_WIDTH >= 512"), (32, "VEC_WIDTH >= 256"), (16, "1")):
@@ -229,7 +255,9 @@ def plan_transpose(statement, options=None):
     network_width = ELEMENT_BYTES[network_dtype]
     columns = min(bytes_ // network_width, 16)
     rows = min(columns, 8 if network_width >= 4 else 16)
-    variants.append((guard, replace(register_transpose(rows, columns, network_width), dtype=network_dtype)))
+    variants.append(
+      (guard, replace(register_transpose(rows, columns, network_width, dtype=network_dtype), dtype=network_dtype))
+    )
   simple = compute.op == "load" and not compute.args and len(loads) == 1
   preferred = True
   pairs = False
@@ -259,7 +287,7 @@ def plan_transpose(statement, options=None):
   for extent, stride in zip(reversed(destination.shape), reversed(destination.strides)):
     dense = dense and I.same_expr(stride, expected)
     expected = I.binary("mul", expected, extent)
-  return TransposePlan(
+  plan = TransposePlan(
     statement,
     dtype,
     axis,
@@ -278,6 +306,63 @@ def plan_transpose(statement, options=None):
       constant_half_full_input_rows(compute, destination, options) if simple and static_input else None
     ),
   )
+  staged = options.get("cpu_transpose_sme_dsl", False)
+  if not isinstance(staged, bool):
+    raise TypeError("cpu_transpose_sme_dsl must be bool")
+  if staged and simple:
+    from ....sme import _transpose_scheduled_matrix
+
+    dynamic_unroll = options.get("cpu_transpose_sme_dynamic_unroll", False)
+    if not isinstance(dynamic_unroll, bool):
+      raise TypeError("cpu_transpose_sme_dynamic_unroll must be bool")
+
+    def raw(name):
+      return I.Expr(I.ScalarType("int64"), "raw", data="sme_library." + name)
+
+    m, n, source_pitch, target_pitch = (raw(name) for name in ("m", "n", "source_pitch", "target_pitch"))
+
+    def view(storage, dtype, shape, pitch):
+      strides = pitch, I.literal(1)
+      return I.View(
+        storage,
+        dtype,
+        shape,
+        strides,
+        I.literal(0),
+        region=I.ViewRegion(shape, strides, (I.literal(0), I.literal(0)), shape, (1, 1), (0, 1), (False, False)),
+      )
+
+    # Preserve constant pitches in the source program. Dynamic geometry is
+    # bound to fresh owner-local SSA by the terminal boundary printer.
+    source_pitch = (
+      I.literal(I.constant(compute.data.strides[-1]))
+      if I.constant(compute.data.strides[-1]) is not None
+      else source_pitch
+    )
+    target_pitch = (
+      I.literal(I.constant(destination.strides[-2]))
+      if I.constant(destination.strides[-2]) is not None
+      else target_pitch
+    )
+    source = view("sme_library_input", compute.data.dtype, (m, n), source_pitch)
+    target = view("sme_library_output", destination.dtype, (n, m), target_pitch)
+    _, body = expand_helper(
+      _transpose_scheduled_matrix,
+      (source, target),
+      catalog=catalog,
+      prefix="sme_library",
+      keyword_arguments={
+        "compute_dtype": dtype,
+        "pairs": pairs,
+        "input_unroll": 2 if dynamic_unroll and I.constant(source_pitch) is None else 8,
+        "output_unroll": 2 if dynamic_unroll and I.constant(target_pitch) is None else 8,
+        "full_input": plan.sme_const_half_full_input_rows,
+        "full_output": plan.sme_const_half_output_columns,
+      },
+      hardware_kind="sme",
+    )
+    plan = replace(plan, sme_program=simplify_loop_metadata(I.Block(body)))
+  return plan
 
 
 def constant_half_output_columns(compute, destination, options):

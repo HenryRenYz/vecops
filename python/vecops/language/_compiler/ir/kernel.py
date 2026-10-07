@@ -44,6 +44,11 @@ class ViewRegion(Node):
   steps: tuple[int, ...]
   axes: tuple[int, ...]
   clipped: tuple[bool, ...]
+  # Exact clamped coordinates coexist with the requested affine partition
+  # used by grid ownership. Nested slices must not invent affine coordinates
+  # from a previously clamped origin or discard all bounds provenance.
+  exact_starts: tuple[Expr, ...] | None = None
+  affine_partition: bool = True
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,19 @@ class Assign(Node):
 @dataclass(frozen=True)
 class BindTile(Node):
   value: Expr
+
+
+@dataclass(frozen=True, eq=False)
+class RowMap(Node):
+  """A pure source-parsed row program, not a named operator algorithm.
+
+  ``argument`` is a lexical tile parameter. The body and result are ordinary
+  IR and are instantiated hygienically at each selected execution site.
+  """
+
+  argument: Expr
+  body: Block
+  result: Expr
 
 
 @dataclass(frozen=True)
@@ -179,6 +197,8 @@ class ArchitectureCall(Node):
   tile: int = 0
   view: View | None = None
   operands: tuple = ()
+  slice_index: Expr | None = None
+  vector: SMEVector | None = None
 
 
 @dataclass(frozen=True)
@@ -191,7 +211,8 @@ class AMXTile(Node):
 @dataclass(frozen=True)
 class SMEVector(Node):
   name: str
-  view: View
+  dtype: str
+  extent: Expr
   region: int
 
 

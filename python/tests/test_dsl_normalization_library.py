@@ -92,8 +92,8 @@ def test_library_benchmark_collects_full_row_and_cpp_independently(library_bench
   assert all(first is second for first, second in zip(prepared[0][1], prepared[1][1]))
   full_source = prepared[0][1][0].generated_source
   row_source = prepared[0][1][1].generated_source
-  assert "dsl_o_norm_" in full_source
-  assert "dsl_o_norm_" not in row_source
+  assert "dsl_o_map_" in full_source
+  assert "dsl_o_map_" not in row_source
   assert_no_vec_mask_arrays(full_source)
 
 
@@ -118,7 +118,7 @@ def test_current_higher_rank_library_limit_is_a_located_diagnostic(operation, ra
 @pytest.mark.parametrize(("operation", "variance"), ALGORITHMS)
 def test_direct_library_codegen_preserves_vector_and_accuracy_contracts(dtype, operation, variance):
   source = CPUBackend().lower(direct_template(operation, variance, dtype).ir, (), target="SVE").source
-  assert "dsl_o_norm_" in source
+  assert "dsl_o_map_" in source
   assert "vecops::ops::" not in source
   assert "vecops::vec::opt::math::strict" in source
   assert_no_vec_mask_arrays(source)

@@ -9,7 +9,7 @@ _builtin_lock = threading.RLock()
 _builtins_loaded = False
 _BUILTIN_MODULES = (
   "passes.kernel.canonicalize",
-  "passes.kernel.normalization",
+  "passes.kernel.regions",
   "passes.kernel.transforms",
   "passes.kernel.layout",
   "passes.kernel.matmul",
@@ -28,6 +28,8 @@ _BUILTIN_MODULES = (
   "backends.cpu.grid_pass",
   "backends.cpu.state",
   "backends.cpu.register_layout",
+  "backends.cpu.registers",
+  "backends.cpu.hardware",
 )
 
 

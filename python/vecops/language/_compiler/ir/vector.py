@@ -13,6 +13,26 @@ from . import kernel as I
 
 
 @dataclass(frozen=True)
+class RegisterProgram:
+  """Ordered typed expressions, independent of physical register storage."""
+
+  inputs: tuple[I.Expr, ...]
+  operations: tuple[I.Expr, ...]
+  outputs: tuple[I.Expr, ...]
+  # Permutations commute with a sole boundary conversion; a backend may
+  # retain narrow bits through the program and widen at its output boundary.
+  dtype: str | None = None
+
+  @property
+  def rows(self):
+    return self.outputs[0].type.shape[0].data
+
+  @property
+  def columns(self):
+    return self.inputs[0].type.shape[0].data
+
+
+@dataclass(frozen=True)
 class VectorOp:
   index: int
   expression: I.Expr

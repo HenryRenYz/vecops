@@ -97,12 +97,57 @@ def silu(x, *, accuracy="fast", algorithm="exp"):
 
 
 @T.func
+def layernorm_row(x, *, eps=1e-5, variance="centered", unroll=2):
+  """One visible statistics/elementwise algorithm for every row schedule."""
+  count = x.shape[0]
+  inv_count = T.cast(1, x.dtype) / count
+  if variance == "moments":
+    total = T.reduce_add(x, unroll=unroll)
+    total_squared = T.reduce_add(x * x, unroll=unroll)
+    mean = total * inv_count
+    var = T.max(total_squared * inv_count - mean * mean, T.cast(0, x.dtype))
+  else:
+    T.static_assert(variance == "centered")
+    mean = T.reduce_add(x, unroll=unroll) * inv_count
+    centered = x - mean
+    var = T.reduce_add(centered * centered, unroll=unroll) * inv_count
+  inv_std = T.rsqrt(var + T.cast(eps, x.dtype))
+  return (x - mean) * inv_std
+
+
+@T.func
+def softmax_row(x, *, unroll=2, accuracy="strict"):
+  maximum = T.reduce_max(x, unroll=unroll)
+  exponent = softmax_exp_neg(x - maximum, accuracy=accuracy)
+  denominator = T.reduce_add(exponent, unroll=unroll)
+  inverse = softmax_inverse(denominator, accuracy=accuracy)
+  return exponent * inverse
+
+
+@T.func
+def rmsnorm_row(x, *, eps=1e-5, unroll=2):
+  variance = T.reduce_add(x * x, unroll=unroll) / T.cast(x.shape[0], x.dtype)
+  inverse = T.rsqrt(variance + T.cast(eps, x.dtype))
+  return x * inverse
+
+
+@T.func
+def masked_softmax_row(scores, *, accuracy="fast", unroll=2):
+  maximum = T.reduce_max(scores, unroll=unroll)
+  safe_maximum = T.where(maximum == T.cast(NEGATIVE_INFINITY, scores.dtype), T.cast(0, scores.dtype), maximum)
+  probability = softmax_exp_neg(scores - safe_maximum, accuracy=accuracy)
+  total = T.reduce_add(probability, unroll=unroll)
+  safe_total = T.where(total > T.cast(0, scores.dtype), total, T.cast(1, scores.dtype))
+  return probability * softmax_inverse(safe_total, accuracy=accuracy)
+
+
+@T.func
 def rmsnorm(x, *, eps=1e-5, axis=-1, unroll=2):
   x = T.as_value(x)
   if x.dtype == "float16" or x.dtype == "bfloat16":
     x = T.cast(x, "float32")
   if len(x.shape) == 2 and (axis == -1 or axis == 1):
-    return T._normalize(x, kind="rmsnorm", eps=eps, unroll=unroll)
+    return T.map_rows(rmsnorm_row, x, eps=eps, unroll=unroll)
   count = x.shape[axis]
   variance = T.reduce_add(x * x, axis=axis, unroll=unroll) / count
   inverse = T.rsqrt(variance + T.cast(eps, x.dtype))
@@ -130,7 +175,7 @@ def masked_softmax(x, mask=None, *, axis=-1, accuracy="fast", unroll=2):
   negative_infinity = T.cast(NEGATIVE_INFINITY, x.dtype)
   scores = T.where(valid, x, negative_infinity)
   if len(x.shape) == 2 and (axis == -1 or axis == 1):
-    return T._normalize(scores, kind="masked_softmax", accuracy=accuracy, unroll=unroll)
+    return T.map_rows(masked_softmax_row, scores, accuracy=accuracy, unroll=unroll)
   maximum = T.reduce_max(scores, axis=axis, unroll=unroll)
   safe_maximum = T.where(maximum == negative_infinity, T.cast(0, x.dtype), maximum)
   if len(x.shape) > 1:

@@ -71,6 +71,8 @@ class MemoryEmitter:
         self.close()
       return
     self.check_store(statement)
+    if self.register_store(statement):
+      return
     if self.matmul_store(statement):
       return
     if self.transpose_store(statement, self.prepared.transposes.get(id(statement))):
@@ -369,7 +371,7 @@ class MemoryEmitter:
     transformed_inputs = {
       id(load)
       for value in walk_unique(statement.value)
-      if value.op == "value_transform"
+      if value.op == "value_transform" or self.environment.operations.has(value, Trait.REGISTER_TRANSFORM)
       for load in I.loads_unique(value)
     }
     for identity in preserved:

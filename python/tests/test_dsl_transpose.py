@@ -9,7 +9,7 @@ import vecops
 import vecops.language as T
 from dsl_test_utils import amx_tile_available_for_test, make_compiler
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
-from vecops.language._compiler.ir.transpose import TransposePlan
+from vecops.language._compiler.backends.cpu.transpose import TransposePlan
 
 
 @pytest.fixture(scope="module")

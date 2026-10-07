@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import runpy
 import sys
 from pathlib import Path
@@ -56,11 +57,24 @@ def main(argv=None):
   expected = root / "python/vecops/__init__.py"
   if Path(vecops.__file__).resolve() != expected:
     raise RuntimeError(f"vecops import escaped the source snapshot: {vecops.__file__}")
+  # Relative pytest selectors and source inspection must use the same tree.
+  # Supply absolute artifact paths when results belong outside that snapshot.
+  os.chdir(root)
   print(
     "Frozen source selection: "
-    + json.dumps({"root": str(root), "python_package": vecops.__file__, "native_extension": vecops._C.__file__}),
+    + json.dumps(
+      {
+        "root": str(root),
+        "working_directory": str(Path.cwd()),
+        "python_package": vecops.__file__,
+        "native_extension": vecops._C.__file__,
+      }
+    ),
     flush=True,
   )
+  # Pytest selectors and inspect.getsource must refer to the same immutable
+  # tree as the package. Leaving cwd at a live editable tree makes tests load
+  # mutable source, even though vecops itself was selected correctly.
   runner = root / "benchmarks/dsl_arm_validate.py"
   sys.argv = [str(runner), *forwarded]
   runpy.run_path(str(runner), run_name="__main__")

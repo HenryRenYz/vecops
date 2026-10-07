@@ -146,60 +146,33 @@ class TransposeEmitter:
     self.close()
 
   def register_tile(self, plan, network, source, batch, mi, ni, active_m):
-    dtype = network.dtype or plan.dtype
-    names, tags = {}, {}
     before = self.chunk_cache
     self.chunk_cache = {}
-    input_row = 0
 
-    def tag(lanes):
-      if lanes not in tags:
-        name = self.unique("transpose_tag")
-        tags[lanes] = name
-        self.tag_dtypes[name] = dtype
-        self.line(f"using {name} = vecops::vec::FixedTag<{CPP_TYPES[dtype]}, {lanes}>;")
-      return tags[lanes]
-
-    for index, operation in enumerate(network.operations):
-      own_tag = tag(operation.lanes)
+    def load(row, own_tag):
       name = self.unique("transpose_vec")
-      args = [names[i] for i in operation.operands]
-      if operation.kind == "input":
-        coords = batch + (ni, f"({mi} + {input_row})")
-        if active_m is not None:
-          self.line(f"vecops::vec::Vec<{own_tag}> {name} = vecops::vec::zeros({own_tag}{{}});")
-          self.opening(f"if ({input_row} < {active_m})")
-        previous_full = getattr(self, "full_vector", False)
-        # A complete source row has no inactive lanes, even in a row fringe.
-        # Preserve that fact at the memory boundary: first(constant_lanes) can
-        # select a scalar masked conversion rather than native FP16->FP64.
-        self.full_vector = True
-        value = self.vector(
-          source, own_tag, plan.statement.destination.shape, coords, str(network.columns), plan.source_axis
-        )
-        self.full_vector = previous_full
-        self.line(f"{'auto ' if active_m is None else ''}{name} = {value};")
-        if active_m is not None:
-          self.close()
-        input_row += 1
-      elif operation.kind.startswith("interleave_"):
-        width = operation.element_bytes
-        stage = f"vecops::vec::ViewAs<std::uint{width * 8}_t, {own_tag}>"
-        a, b = (f"vecops::vec::bitcast({stage}{{}}, {own_tag}{{}}, {v})" for v in args)
-        self.line(
-          f"auto {name} = vecops::vec::bitcast({own_tag}{{}}, {stage}{{}}, vecops::vec::local_{operation.kind}({stage}{{}}, {a}, {b}));"
-        )
-      elif operation.kind == "concat":
-        self.line(f"auto {name} = vecops::vec::concat({own_tag}{{}}, {', '.join(args)});")
-      else:
-        parent = tag(network.operations[operation.operands[0]].lanes)
-        self.line(f"auto {name} = vecops::vec::{operation.kind}({parent}{{}}, {args[0]});")
-      names[index] = name
-    store_tag = tag(network.rows)
+      coords = batch + (ni, f"({mi} + {row})")
+      if active_m is not None:
+        self.line(f"vecops::vec::Vec<{own_tag}> {name} = vecops::vec::zeros({own_tag}{{}});")
+        self.opening(f"if ({row} < {active_m})")
+      previous_full = getattr(self, "full_vector", False)
+      # A complete source row has no inactive lanes, even in a row fringe.
+      # Preserve this proof to select the same fused native load_convert.
+      self.full_vector = True
+      value = self.vector(
+        source, own_tag, plan.statement.destination.shape, coords, str(network.columns), plan.source_axis
+      )
+      self.full_vector = previous_full
+      self.line(f"{'auto ' if active_m is None else ''}{name} = {value};")
+      if active_m is not None:
+        self.close()
+      return name
+
+    store_tag, outputs = self.register_program(network, load, prefix="transpose")
     options = f", vecops::vec::opt::first({active_m})" if active_m is not None else ""
-    for column, output in enumerate(network.outputs):
+    for column, output in enumerate(outputs):
       pointer = self.pointer(plan.statement.destination, batch + (f"({ni} + {column})", mi))
-      self.line(f"vecops::vec::store_convert({store_tag}{{}}, {pointer}, {names[output]}{options});")
+      self.line(f"vecops::vec::store_convert({store_tag}{{}}, {pointer}, {output}{options});")
     self.chunk_cache = before
 
   def sme_transpose(self, plan, batch):
@@ -253,6 +226,25 @@ class TransposeEmitter:
     ):
       self.line(f"const vecops::nint_t {name}={self.scalar(stride)};")
     m, n = extent_m, extent_n
+    if plan.sme_program is not None:
+      # The memory planner staged the executable DSL before emission. The
+      # checked caller already established shape, unit axes and nonaliasing.
+      # Bind its virtual boundary to fresh callback-owned SSA; no passes or
+      # source parsing occur in this terminal printer.
+      self.hardware_program(
+        plan.sme_program,
+        metadata={
+          "sme_library.m": m,
+          "sme_library.n": n,
+          "sme_library.source_pitch": source_m,
+          "sme_library.target_pitch": target_n,
+        },
+        pointers={"sme_library_input": source_base, "sme_library_output": target_base},
+      )
+      if own_region:
+        self.indent -= 1
+        self.line("});")
+      return
 
     def source_pointer(row):
       return f"({source_base} + ({ni}) * {source_n} + ({mi} + {row}) * {source_m})"

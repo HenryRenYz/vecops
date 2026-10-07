@@ -2490,3 +2490,216 @@ only for those dynamic pitches; it defaults to `False` until target paired
 measurements decide the tradeoff. A lack of scalar loads is a code-generation
 check, not by itself a speed result. ARM correctness and timing results for
 these new paths must be reported separately from cross compilation.
+
+## Library/region boundary refactor (2026-10-07)
+
+Algorithm formulae belong in source-parsed DSL helpers, not operator-name
+branches in compiler passes. `T.map_rows(helper, input, **scalar_options)`
+stages an ordinary rank-one program over a rank-two logical tile. The generic
+region scheduler either fuses a sole row-separable consumer under whole-view
+alias/nonoverlap guards, or exports only row-varying scalar intermediates for
+later consumers. It preserves historical captures and helper producer DAG
+identity. LayerNorm, RMSNorm and Softmax use this mechanism; there is no
+`_normalize`/`row_normalize` algorithm in the compiler. Stateful, allocating,
+runtime-control and external-tensor-option callbacks are initially rejected.
+
+The remaining migration order is executable hardware regions and accumulator
+state, packing/register-transpose algorithms, vector and architecture matrix
+leaves, then cache traversal and automatic packing. A mere relocation of a
+C++ string emitter does not count as DSL migration. Preserve explicit FMA and
+conversion boundaries and named register pieces, and measure before/after
+using frozen source snapshots on the same x86 and scheduled ARM machines.
+Checkpoint `6f57d0a` is the pre-refactor baseline, not a claim of prior universal
+ARM performance parity. Native/benchmark execution must not import a live
+editable tree that is being changed during its build.
+
+### Register algorithms (second migration slice)
+
+Portable transpose butterflies and the 512-bit dword packing permutation
+are now ordinary `_library/registers.py` `T.func` programs. Static branches,
+tuple construction, split/concat, bitcast and local/block interleave compose
+their logic. `RegisterProgram` contains ordinary typed Expr nodes rather
+than a separate transpose-specific instruction vocabulary. The same terminal
+printer serves transpose, AMX packing and explicit logical register stores.
+The compiler adapter checks pure closed geometry; it no longer implements
+the butterfly. Oversized/non-power-of-two logical vectors use individual
+native words/scalar lane indexing, never a C++ array of Vecs. Primitive
+geometry admits complete fixed and scalable register extents; arbitrary
+clipped/dynamic bit geometry remains unproved. Alias preservation is mandatory even when source and
+destination have identical whole-view mappings: a permutation is not an
+elementwise in-place update.
+
+This is not completion of the whole library migration. SME ZA traversal,
+interleaved pack drivers, cache blocking and matrix-family algorithms still
+need executable DSL/hardware-region support before their C++ emitters can be
+removed. Adding reusable frontend/legalization mechanisms initially increases
+total production size; the final code-reduction requirement is not satisfied
+by moving files or by this intermediate slice alone.
+
+Validation records: fixed phase-one snapshot has 52 x86 native test passes
+and 109 non-native passes; sixteen paired LayerNorm cases over 32 balanced
+rounds have median new/old 0.999887 (range 0.989898–1.013308). These are scoped
+checks, not complete catalog or ARM parity claims. ARM job 1816914 validates
+the same phase-one source/SDK inputs privately on 920f-lx using clang;
+it completed with 52 native passes and no skips. Its 28 paired LayerNorm/
+Softmax cases over 32 balanced rounds had median new/old 1.000378, range
+0.989179–1.005086. The phase-two x86 frozen recursive-register snapshot passed
+17 selected native tests; 36 TransposeBench cases over 24 balanced rounds had
+median approximately 1.0 and range 0.991783–1.005128. Earlier register-order
+variants regressed and are not accepted performance evidence.
+
+### Structured hardware regions and grouped-K streams
+
+Explicit SME/AMX regions now admit bounded serial instruction loops and
+loop-invariant metadata branches. A dedicated CPU preflight pass uses the
+shared affine/interval analysis to check indexed views and tile capacities
+before ownership, without replaying instruction loops. Allocation, mutable
+state, ordinary SIMD computation, memory-dependent control and unbounded
+loops remain illegal. Unknown nonlinear intervals or lost root provenance
+are diagnosed conservatively. This is a deliberately limited executable
+foundation, not a claim that arbitrary DSL control can run in streaming mode.
+
+Raw `T.sme.load_hor/ver(tile, index, view)` and `store_hor/ver` expose direct
+bit-preserving memory/ZA slice instructions. `T.sme.transpose_tile` implements
+the word-sized same-dtype algorithm in DSL: load all rows, then drain columns.
+This public helper is not yet the default large/converted transpose driver.
+It retains one owner and derives capacity from the actual streaming length.
+Optional compute dtype now composes converting loads, ZA vector writes/reads
+and converting stores; those are small region-local primitives, not a second
+opaque transpose algorithm. Immutable metadata declarations are expanded by
+preflight; ordinary throwing/SIMD/stateful work remains disallowed. Invariant
+whole-view owned/reshaped operands retain their existing compatibility path,
+while loop-dependent accesses require root provenance. Allocations now retain
+their own logical root coordinates as workspace declarations already do.
+
+Grouped-K interleaving is also a source-parsed library function, not a C++
+algorithm in `interleave_group`. Two streams use one `T.interleave`; four byte
+streams combine two pairs through an explicit 16-bit reinterpretation. The
+same staged Expr DAG serves AMX fixed columns and scalable SME/vector packing.
+Bitcast retains the original scalable byte-domain/tag, never infers VL from
+SVL, and never treats a clipped load as a complete scalable register. These
+new paths require their own frozen native, ARM and performance validation;
+the previous records do not cover them.
+
+The next slice adds exact clamped view coordinates, correlated nested-loop
+intervals and positive native-length serial steps. These are general control/
+memory mechanisms, not a transpose-name pattern. A source-parsed larger
+`sme.transpose_matrix` composes one owner and clipped word tiles. Default CPU
+transpose emission has not yet switched to that driver. Fixed-register
+placement can use a captured ordinary VL with backend-planned scalable tags;
+unknown VL still uses the guaranteed prefix. SVL cannot establish that proof.
+Parallel/fusion requested-affine partitions remain conservative after nested
+clipping even when exact hardware access coordinates are retained.
+The experimental CPU option `cpu_transpose_sme_dsl` prepares the executable
+library body, including paired traffic and bounded full-tile conversion
+branches, and binds it to invocation-local SSA at emission. The old driver
+remains the default pending paired ARM measurements. Constant pitches remain
+constant in the staged body; fringes keep their typed predication. This option
+must be removed when the complete measured algorithm is migrated, not kept
+as a permanent second implementation.
+
+CPU transpose policies now live with the CPU planner, not in portable IR.
+The shared `RegisterProgram` lives in vector IR and is also used by packing;
+the old transpose-specific IR module has been removed. Nested immutable
+tuples can carry scalar/tile/vector slots through structured control. All
+sources are captured before any slot update, and each register is emitted as
+an individual variable, including sizeless SVE. Tuple arity/types cannot
+change at runtime. This enables library register banks without C++ arrays.
+
+ARM phase-four validation exposed a conservative interval bug for clipped
+matrix tails. Preflight must simplify induction-domain clamps before bounding
+their differences, preserving the correlation between an origin and its
+remaining length. It must also retain access/capacity checks and write effects
+when a rank-one store needs no separate layout check. Pure metadata tests cover
+multiple streaming lengths, empty dimensions and multiword matrix extents.
+The phase-five x86 runner reported 171 passes with 15 SME platform skips, but
+that local invocation selected the frozen package without rebasing relative
+pytest paths. It is not an all-inputs-frozen acceptance gate. The runner now
+executes and records its working directory inside the snapshot. A corrected
+phase-six x86 run passed all 65 state/matmul/attention tests from that directory.
+The updated ARM snapshot and paired driver measurements are still pending.
+The phase-four ARM matrix/attention suite passed 22 tests with 10 platform skips;
+the same job's transpose failures are not accepted validation evidence.
+
+ARM phase-five passed the structured matrix transpose and MOPA tests, but
+exposed two small-register compilation failures. Captured VL can fit a
+scalable descriptor while C++'s implicit Half<Tag> has no representation at
+the architectural minimum. CPU implementation contracts record those implicit
+half domains centrally; small fragments use fixed prefixes and unsupported
+combinations retain exact generic legalization. The fixed/scalable bitcast
+boundary reinterprets one physical SVE word without changing logical bytes.
+This does not alter the separately measured automatic-transpose register
+programs, which retain their own placement policy.
+
+The dynamic AMX cache decision is shared before family dispatch, reducing one
+transformed-input generated source from 23.46 MB to 14.07 MB. This is a code-size
+result, not accepted performance evidence. It is currently gated by
+`cpu_amx_shared_cache_dispatch=True`; the default retains the original policy.
+In particular, automatic B-packing
+and partial-panel family selection still need large and slim-matrix paired
+measurements. Native FP16 Matmul's public C++ reference requires AMX-FP16;
+Sapphire Rapids supplies only the DSL vector fallback for that dtype. Paired
+benchmarks fail early for unsupported reference kinds rather than substitute
+BF16 or silently report an incomplete catalog.
+
+The next SME packing slice stages `_library/sme_packing.py` before terminal
+emission. Its full-word schedule explicitly primes a ZA pair, overlaps loads
+with stores through two alternating pairs, and drains the final pair. An
+optional `word_dtype` on raw slice moves reinterprets storage rather than
+performing numerical conversion. `T.prefetch` is legal in bounded hardware
+instruction regions; its address still receives root-coordinate preflight
+checks before ownership, even though it consumes no tile/vector capacity.
+The temporary `cpu_sme_packing_dsl` option remains off by default while native
+correctness, instruction order and balanced MatmulPackBench measurements are
+being checked. The experimental fringe schedule now uses storage-masked
+`sme.load_bits` / `store_bits` and word-sized ZA reads/writes, including
+fractional K zero padding. These are small region-local memory primitives,
+not operator algorithms. Panel traversal is now also part of the experimental
+`pack_raw` DSL recipe, not the terminal printer. The default raw driver and
+transformed packing remain unchanged pending native/performance validation;
+this is not a completed packing migration.
+
+Paired packing validation derives an independent zero-padded
+`[spatial-panel, K-group, spatial-lane, K-lane]` oracle from the actual SME
+vector length. All old/new/public-C++ variants must match it before and after
+timing. The source snapshot, SDK/native input hashes and compiler environment
+are pinned; failed or mixed live/snapshot runs are not acceptance evidence.
+
+Instruction metadata uses lexical SSA before terminal printing. Multiple
+independent clamps are not distributed into a Cartesian product of arms;
+equivalent pure metadata expressions are shared within their defining scope,
+never across a branch or a loop-index shadow. This reduced one whole packing
+wrapper from approximately 1.8 MB to 147 KB and its real cross-generated
+assembly from 172 KB to 68 KB. The corresponding fixed-input check finished
+in 29 seconds instead of 230 seconds. These are code-generation/build results,
+not runtime-performance claims. The bit-move model covers six storage dtypes,
+three SVLs, empty shapes, both tails and padded pitches; native ARM validation
+is still needed for these new packing paths.
+
+ARM phase-seven job 1818543 on cn00002 completed its hardware/register/state
+suite with 168 passes and one AMX platform skip. The frozen working directory,
+source/SDK/native hashes and compiler environment were recorded. Shared-home
+quota prevented the stage marker and result archive from being created, so the
+paired transpose rank could not advance to timing. The task is not accepted as
+a performance gate; its private outputs were retained under
+`/tmp/vecops-dsl-library-phase7.BITbt2uF` pending recovery.
+
+Logical tile windows now preserve the producer argument edge and carry their
+starts as scalar argument edges, so normal capture freezing applies. They
+reuse view clipping, retain kept-axis coordinates, and lower through ordinary
+vector memory/conversion operations rather than an operator-specific emitter.
+They currently admit unit-step slices and mixed scalar/sliced axes; entirely
+scalar extraction remains `element_at` and stepped indices remain `gather`.
+This enables DSL algorithms to name a region of an elementwise/helper result
+without requiring an intermediate tensor, while retaining historical-load
+and overlap handling. It does not yet remove `_matmul` or its cache driver.
+
+The phase-fourteen fixed x86 source/test/SDK snapshot completed with 252 passes
+and 28 architecture skips, including the real ARM cross-codegen checks.
+The separate phase-fifteen window snapshot completed all eight native/reference
+tests, including changed scalar indices, historical reads and aliased outputs.
+The checkpoint matmul A/B run completed 48 supported BF16/I8 cases over 24
+balanced rounds (3456 unfiltered samples); median new/old was 1.000176, range
+0.985058–1.016215. These small-problem cases do not exercise the experimental
+large dynamic cache branch. Source extraction into the indexing frontend is
+mechanical and keeps the same view/window semantics.

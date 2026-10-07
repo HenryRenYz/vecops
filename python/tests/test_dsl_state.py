@@ -12,9 +12,7 @@ from dsl_test_utils import make_compiler
 @pytest.fixture(scope="module")
 def compiler(tmp_path_factory):
   root = tmp_path_factory.mktemp("dsl-state")
-  return make_compiler(
-    target="Native", jobs=4, cache_dir=root / "cache", build_dir=root / "build"
-  )
+  return make_compiler(target="Native", jobs=4, cache_dir=root / "cache", build_dir=root / "build")
 
 
 @pytest.mark.parametrize("shape", [(37,), (3, 17)])
@@ -116,6 +114,43 @@ def test_tuple_simultaneous_state_swap(compiler):
 
   a = np.arange(7, dtype=np.float32)
   np.testing.assert_array_equal(factory()(a), (a + 10) * 2 + a)
+
+
+def tuple_recurrence_template():
+  @T.template
+  def kernel(A: T.Tensor((7,), dtype="float32"), C: T.Tensor((7,), dtype="float32", access="output"), count: int = 3):
+    values = (T.load(A), (T.load(A) + 10, 0))
+    for i in T.serial(count):
+      values = (values[1][0], (values[0] + values[1][1], values[1][1] + 1))
+    T.store(C, values[0] * 2 + values[1][0])
+
+  return kernel
+
+
+def test_nested_tuple_carried_state_reference_and_codegen():
+  from vecops.language._compiler.backends.cpu.backend import CPUBackend
+  from vecops.language._debug.interpreter import Interpreter
+
+  artifact = CPUBackend().lower(tuple_recurrence_template().ir, (), target="AVX512")
+  assert not re.search(r"(?:Vec|Mask)<[^;\n]+>\s+\w+\s*\[", artifact.source)
+  for count in (0, 1, 3, 4):
+    a, c = np.arange(7, dtype=np.float32), np.empty(7, dtype=np.float32)
+    Interpreter(artifact.lowered.kernel, {"A": a, "C": c, "count": count}).block(artifact.lowered.kernel.body)
+    x, y, scalar = a.copy(), a + 10, 0
+    for _ in range(count):
+      x, y, scalar = y, x + scalar, scalar + 1
+    np.testing.assert_array_equal(c, x * 2 + y)
+
+
+def test_native_nested_tuple_carried_state(compiler):
+  compiled = T.compile(tuple_recurrence_template(), compiler=compiler)
+  for count in (0, 1, 3, 4):
+    a, c = np.arange(7, dtype=np.float32), np.empty(7, dtype=np.float32)
+    compiled.operator.native(a, c, count)
+    x, y, scalar = a.copy(), a + 10, 0
+    for _ in range(count):
+      x, y, scalar = y, x + scalar, scalar + 1
+    np.testing.assert_array_equal(c, x * 2 + y)
 
 
 def test_helper_conditional_nested_tuple_result(compiler):

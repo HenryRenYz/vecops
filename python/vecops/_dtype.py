@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from functools import lru_cache
+from types import MappingProxyType
 from typing import Any
 
 from . import _C
@@ -54,6 +55,12 @@ _NAMES = {name: dtype for name, (dtype, _) in _DTYPES.items()}
 _NAMES["bool_"] = bool_
 _BY_VALUE = {dtype: (name, size) for name, (dtype, size) in _DTYPES.items()}
 ELEMENT_BYTES = {name: size for name, (_, size) in _DTYPES.items()}
+DTYPE_CONSTANTS = MappingProxyType({"bool_" if name == "bool" else name: dtype for name, (dtype, _) in _DTYPES.items()})
+
+
+def is_native_dtype(value: Any) -> bool:
+  """Recognize the native enum without importing optional frameworks."""
+  return isinstance(value, _C.DType)
 
 
 def is_dtype_name(value: Any) -> bool:
@@ -77,7 +84,7 @@ def normalize_dtype(value: Any) -> _C.DType:
   ``None`` is an unspecified schema dtype, not a concrete dtype. Non-native
   NumPy byte orders are rejected, matching the native tensor adapter.
   """
-  if isinstance(value, _C.DType):
+  if is_native_dtype(value):
     return value
   unwrap = getattr(value, "__vecops_dtype__", None)
   if callable(unwrap):

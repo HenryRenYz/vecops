@@ -9,6 +9,7 @@ from test_dsl_normalization_streaming import streaming_guard
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.ir.traversal import nodes
+from vecops.language._library.math import masked_softmax_row
 
 
 def producer_template(dtype="float32", *, masked=False, accuracy="estimate", boundary="none"):
@@ -30,7 +31,7 @@ def producer_template(dtype="float32", *, masked=False, accuracy="estimate", bou
       y = T.library.masked_softmax(x, T.load(Mask), accuracy=accuracy)
     elif masked:
       scores = T.where(T.load(Mask), x, T.cast(NegativeInfinity, Compute))
-      y = T._normalize(scores, kind="masked_softmax", accuracy=accuracy)
+      y = T.map_rows(masked_softmax_row, scores, accuracy=accuracy)
     else:
       y = T.library.softmax(x, accuracy=accuracy)
     if boundary == "multiple":
@@ -81,7 +82,7 @@ def test_nonstreaming_boundary_does_not_export_a_row_local_producer(boundary):
     kernel = template.ir
   lowered = CPUBackend().lower(kernel, (), target="SVE")
   assert streaming_guard(lowered.kernel) is None
-  rows = [node for node in nodes(lowered.kernel.body) if isinstance(node, I.For) and "norm" in node.target]
+  rows = [node for node in nodes(lowered.kernel.body) if isinstance(node, I.For) and "map" in node.target]
   assert rows
   producers = {id(node.args[0]) for row in rows for node in expressions(row.body) if node.op == "reduce_add"}
   sinks = [
@@ -89,7 +90,7 @@ def test_nonstreaming_boundary_does_not_export_a_row_local_producer(boundary):
   ]
   assert {sink.destination.storage for sink in sinks} == ({"C", "D"} if boundary == "multiple" else {"C"})
   assert all(id(node) not in producers for sink in sinks for node in expressions(sink.value))
-  assert "dsl_o_norm_1_tail" in lowered.source
+  assert all(any(node.op in {"exp_neg", "fma"} for node in expressions(sink.value)) for sink in sinks)
   assert_no_vec_mask_arrays(lowered.source)
 
 
@@ -105,13 +106,13 @@ def test_public_helper_scalar_capture_boundary_keeps_existing_nonstreaming_sched
     if node.value.op == "cast" and node.value.args[0].op == "literal" and node.value.args[0].data == float("-inf")
   )
   captured = next(node for node in assignments if node.value.op == "local" and node.value.data == negative.target)
-  normalization = next(node for node in expressions(frontend.body) if node.op == "row_normalize")
+  normalization = next(node for node in expressions(frontend.body) if node.op == "map_rows")
   assert any(node.op == "frozen" and node.data == captured.target for node in expressions(normalization.args[0]))
   lowered = CPUBackend().lower(template.ir, (), target="SVE")
   # The helper captures a scalar after its lazy input bindings. Keep the
   # existing conservative barrier rather than move producers across it.
   assert streaming_guard(lowered.kernel) is None
-  assert any(isinstance(node, I.Allocate) and "norm" in node.view.storage for node in nodes(lowered.kernel.body))
+  assert any(isinstance(node, I.Allocate) and "map" in node.view.storage for node in nodes(lowered.kernel.body))
 
 
 def test_shared_identity_does_not_override_the_generic_cost_policy():

@@ -20,6 +20,8 @@ constexpr auto benchmark_atom_type() {
 #else
   if constexpr (std::same_as<A, vecops::bfloat16_t>)
     return std::type_identity<vecops::matmul::AMX_BF16F32>{};
+  else if constexpr (std::same_as<A, vecops::float16_t>)
+    return std::type_identity<vecops::matmul::AMX_F16F32>{};
   else
     return std::type_identity<vecops::matmul::AMX_I8I32<A, B>>{};
 #endif

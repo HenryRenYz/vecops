@@ -3,7 +3,7 @@
 from dataclasses import replace
 
 from .. import ir as I
-from ..dtypes import dtype_name
+from ..dtypes import ELEMENT_BYTES, dtype_name
 from ..ir.traversal import walk
 from ..operations import Trait
 
@@ -18,6 +18,12 @@ class PrimitivesFrontend:
 
   def primitive(self, operation, args, kwargs, node):
     family = self.operations.get(operation).family
+    if operation == "view_disjoint":
+      if len(args) != 2 or kwargs or any(not isinstance(v, I.View) for v in args):
+        self.error(node, "view_disjoint expects two memory views")
+      return I.Expr(I.ScalarType("bool"), operation, data=tuple(args))
+    if family == "register_geometry":
+      return self.register_geometry(operation, args, node)
     if family == "mask_query":
       if len(args) != 1:
         self.error(node, "mask queries expect one predicate")
@@ -181,3 +187,85 @@ class PrimitivesFrontend:
         )
       return I.Expr(I.TileType(value.type.dtype, shape, value.type.mask), "value_transform", (value,), data)
     return NotImplemented
+
+  def register_geometry(self, operation, args, node):
+    """Fixed logical register geometry, independent of physical Vec limits.
+
+    These are pure bit/lane transformations, not numeric conversions. A
+    vector can contain multiple native words; CPU legalization must retain
+    this logical geometry when splitting it into individually named values.
+    """
+    operation = {"lower_half": "lower", "upper_half": "upper"}.get(operation, operation)
+    arity = 1 if operation in {"lower", "upper"} else 3 if operation == "block_shuffle" else 2
+    if len(args) != arity:
+      self.error(node, f"{operation} expects {arity} arguments")
+    value = self.value(args[0], node)
+    if not isinstance(value.type, I.TileType) or value.type.mask or len(value.type.shape) != 1:
+      self.error(node, "register geometry requires a numeric rank-one value")
+    extent = value.type.shape[0]
+    lanes = I.constant(extent)
+
+    def scalable_extent(tag, dtype):
+      count = I.Expr(I.ScalarType("int64"), "lanes", data=(tag.basis_dtype, tag.pow))
+      if dtype != tag.basis_dtype:
+        count = I.binary(
+          "floordiv", I.binary("mul", count, I.literal(ELEMENT_BYTES[tag.basis_dtype])), I.literal(ELEMENT_BYTES[dtype])
+        )
+      return count
+
+    scalable = (
+      lanes is None
+      and isinstance(value.type, I.VectorType)
+      and value.type.tag.N is None
+      and I.same_expr(extent, scalable_extent(value.type.tag, value.type.dtype))
+    )
+    if not scalable and (type(lanes) is not int or lanes <= 0):
+      self.error(node, "register geometry currently requires a complete fixed extent")
+    tag = value.type.tag if scalable else I.VectorTag(N=lanes, basis_dtype=value.type.dtype)
+    minimum_bytes = (16 << tag.pow) if tag.pow >= 0 else (16 >> -tag.pow)
+    minimum_lanes = minimum_bytes // ELEMENT_BYTES[value.type.dtype] if scalable else lanes
+    if minimum_lanes < 1:
+      self.error(node, "register geometry requires at least one guaranteed lane")
+    dtype, operands, data = value.type.dtype, (value,), None
+    if operation == "bitcast":
+      dtype = dtype_name(args[1])
+      size = minimum_lanes * ELEMENT_BYTES[value.type.dtype]
+      if dtype == "bool" or size % ELEMENT_BYTES[dtype]:
+        self.error(node, "bitcast requires equal logical bytes and a numeric dtype")
+      extent = I.binary(
+        "floordiv", I.binary("mul", extent, I.literal(ELEMENT_BYTES[value.type.dtype])), I.literal(ELEMENT_BYTES[dtype])
+      )
+    elif operation in {"lower", "upper"}:
+      if minimum_lanes < 2 or minimum_lanes % 2:
+        self.error(node, "lower/upper require an even logical lane count")
+      extent = I.binary("floordiv", extent, I.literal(2))
+      tag = replace(tag, pow=tag.pow - 1)
+    else:
+      right = self.value(args[1], node)
+      if not isinstance(right.type, I.TileType) or right.type.mask or right.type.dtype != dtype:
+        self.error(node, "register operands must have the same numeric dtype")
+      if len(right.type.shape) != 1 or not I.same_expr(right.type.shape[0], extent):
+        self.error(node, "register operands must have the same complete extent")
+      operands = (value, right)
+      if operation in {"concat", "interleave"}:
+        extent = I.binary("mul", extent, I.literal(2))
+        tag = replace(tag, pow=tag.pow + 1)
+      elif operation == "block_shuffle":
+        if scalable:
+          self.error(node, "block_shuffle currently requires a complete fixed extent")
+        # One block is 128 bits, matching vec's local-interleave boundary.
+        blocks = lanes * ELEMENT_BYTES[dtype] // 16
+        if lanes * ELEMENT_BYTES[dtype] < 16 or lanes * ELEMENT_BYTES[dtype] % 16:
+          self.error(node, "block_shuffle requires complete 16-byte blocks")
+        order = tuple(I.constant(v) for v in self.shape(args[2], node))
+        if len(order) != blocks or any(type(i) is not int or not 0 <= i < 2 * blocks for i in order):
+          self.error(node, "block_shuffle order must select one source block per output block")
+        data = order
+      elif minimum_lanes * ELEMENT_BYTES[dtype] % 16:
+        self.error(node, "local interleave requires complete 16-byte blocks")
+    if not scalable:
+      tag = I.VectorTag(N=I.constant(extent), basis_dtype=dtype)
+    else:
+      extent = scalable_extent(tag, dtype)
+    typ = I.VectorType(dtype, (extent,), tag=tag)
+    return I.Expr(typ, operation, operands, data)

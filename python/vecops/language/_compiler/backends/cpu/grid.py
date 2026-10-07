@@ -5,9 +5,12 @@ still requires runtime non-overlapping layouts and cross-parameter alias guards.
 Lost view provenance, loop-carried state and unknown effects retain serial order.
 """
 
-from dataclasses import dataclass, replace
+from __future__ import annotations
+
+from dataclasses import dataclass
 
 from ... import ir as I
+from ...analysis.affine import affine
 from ...cost import CostQuery, estimate
 from ...ir.traversal import children, values, walk
 from ...operations import Trait
@@ -32,48 +35,6 @@ class GridAxisGuard:
   programs: object | None = None
   extent: object | None = None
   clipped: bool = False
-
-
-def expand_definitions(value, definitions, seen=frozenset()):
-  if value.op in {"local", "frozen"} and value.data in definitions and value.data not in seen:
-    return expand_definitions(definitions[value.data], definitions, seen | {value.data})
-  return replace(value, args=tuple(expand_definitions(a, definitions, seen) for a in value.args))
-
-
-def affine(value, variables, definitions, seen=frozenset()):
-  """Return integer program coefficients and a program-invariant remainder."""
-  if value.op in {"local", "frozen"} and value.data in definitions and value.data not in seen:
-    return affine(definitions[value.data], variables, definitions, seen | {value.data})
-  if value.op == "local" and value.data in variables:
-    return {value.data: 1}, I.literal(0)
-  if value.op in {"add", "sub"}:
-    left, right = (affine(a, variables, definitions, seen) for a in value.args)
-    if left is None or right is None:
-      return None
-    sign = 1 if value.op == "add" else -1
-    coefficients = dict(left[0])
-    for name, factor in right[0].items():
-      coefficients[name] = coefficients.get(name, 0) + sign * factor
-    return {k: v for k, v in coefficients.items() if v}, I.binary(value.op, left[1], right[1])
-  if value.op == "mul":
-    for constant, operand in (value.args, value.args[::-1]):
-      factor = I.constant(constant)
-      if type(factor) is int:
-        result = affine(operand, variables, definitions, seen)
-        if result is not None:
-          return {k: v * factor for k, v in result[0].items()}, I.binary("mul", result[1], constant)
-  if any(affine_contains(a, variables, definitions, seen) for a in (value,)):
-    return None
-  return {}, expand_definitions(value, definitions, seen)
-
-
-def affine_contains(value, variables, definitions, seen=frozenset()):
-  if value.op in {"local", "frozen"}:
-    if value.data in variables:
-      return True
-    if value.data in definitions and value.data not in seen:
-      return affine_contains(definitions[value.data], variables, definitions, seen | {value.data})
-  return any(affine_contains(a, variables, definitions, seen) for a in value.args)
 
 
 def plan_grid(grid, environment):
@@ -171,7 +132,7 @@ def plan_grid(grid, environment):
     return reject(unsupported[0])
   for view in writes:
     region = view.region
-    if region is None:
+    if region is None or not region.affine_partition:
       return reject("write view has no root-coordinate provenance")
     mapped = {}
     for axis, start in enumerate(region.starts):
@@ -199,7 +160,7 @@ def plan_grid(grid, environment):
   for view in read_views:
     if view.storage not in ownership:
       continue
-    if view.region is None:
+    if view.region is None or not view.region.affine_partition:
       return reject("read/write dependence has unknown coordinates")
     for name, (axis, factor) in ownership[view.storage].items():
       start = affine(view.region.starts[axis], variables, definitions)

@@ -6,7 +6,7 @@ import sys
 import pytest
 import vecops
 import vecops.language as T
-from vecops._dtype import ELEMENT_BYTES, dtype_itemsize, dtype_name, framework_dtype
+from vecops._dtype import DTYPE_CONSTANTS, ELEMENT_BYTES, dtype_itemsize, dtype_name, framework_dtype, is_native_dtype
 
 
 @pytest.mark.parametrize(
@@ -36,6 +36,15 @@ def test_canonical_dtype_name(name):
   canonical = "bool" if name == "bool_" else name
   assert dtype_name(expected) == canonical
   assert dtype_itemsize(T.DType(name)) == ELEMENT_BYTES[canonical]
+
+
+def test_language_dtype_exports_follow_the_shared_registry():
+  for name, dtype in DTYPE_CONSTANTS.items():
+    assert getattr(T, name) is dtype
+    assert name in T.__all__
+    assert is_native_dtype(dtype)
+  assert not is_native_dtype("float32")
+  assert not is_native_dtype(None)
 
 
 def test_canonical_names_without_framework_imports():

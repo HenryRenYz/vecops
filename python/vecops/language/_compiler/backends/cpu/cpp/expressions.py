@@ -138,6 +138,20 @@ class ExpressionsEmitter:
         else self.scalar_select(left, lambda: "true", selected, value.type.dtype)
       )
     arguments = [self.scalar(a) for a in value.args]
+    if getattr(self, "hardware_scope", None) is not None:
+      # Instruction-region validation proves these strictly positive divisors.
+      # The ordinary floor/remainder helpers may throw or outline; metadata
+      # here is nonnegative (clipped view sizes), so native integer arithmetic
+      # has the same result and needs no call within the manual owner.
+      if value.op in {"floordiv", "mod"}:
+        operator = "/" if value.op == "floordiv" else "%"
+        quotient = f"({arguments[0]} {operator} {arguments[1]})"
+        # General signed metadata retains Python floor/remainder semantics.
+        if value.op == "floordiv":
+          return f"({quotient} - (({arguments[0]}) % ({arguments[1]}) < 0))"
+        return f"({quotient} + ({quotient} < 0 ? ({arguments[1]}) : 0))"
+      if value.op in {"min", "max"} and self.hardware_scope[0] == "sme":
+        return f"vecops::vec::sme::{value.op}_value<{CPP_TYPES[value.type.dtype]}>({', '.join(arguments)})"
     implementation = self.environment.implementations.get(value.op)
     if self.environment.operations.has(value, Trait.ELEMENTWISE) and value.op != "cast":
       # Small-float scalar operators have competing conversion overloads.

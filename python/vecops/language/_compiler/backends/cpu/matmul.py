@@ -1,18 +1,52 @@
 """CPU matrix-product policy; no opaque ops::Matmul forwarding."""
 
-from dataclasses import fields, replace
+from __future__ import annotations
+
+from dataclasses import dataclass, fields, replace
 from types import MappingProxyType
 
 from ... import ir as I
+from ...analysis.affine import bind_instruction_metadata, simplify_loop_metadata
 from ...cost import estimate
 from ...ir.traversal import walk
 from ...lowering.tile_to_vector import lower_stores
-from ...lowering.transpose import register_transpose, x86_dword_transpose
 from ...operations import Trait
 from ...passes.manager import register_pass
 from .cost.sme import NativeAPackingPolicy, PackedABTraversalPolicy
 from .policies import recompute_limit
+from .registers import register_transpose, x86_dword_transpose
 from .transpose import plan_transpose
+
+
+@dataclass(frozen=True)
+class CPUMatmulPlan:
+  """Physical CPU family policies; none are universal logical-dot semantics."""
+
+  expression: object
+  options: I.DotOptions
+  vector_rows: int = 4
+  vector_columns: int = 4
+  k_unroll: int = 2
+  unblocked_bytes: int = 512 * 1024
+  runtime_unblocked_bytes: int = 128 * 1024
+  amx_m_major: object | None = None
+  amx_native_b_pack_min_m: int = 0
+  amx_cache_b_panel_divisor: int = 0
+  amx_cache_b_panel_max_m: int = 0
+  amx_shared_cache_dispatch: bool = False
+  # Experimental SVE quantized/prepacked-B driver, still profitability-gated.
+  sve_runtime_quant: bool = False
+  # Evaluated against actual panel extents and captured SME streaming length.
+  sme_native_a_packing: object = None
+  sme_packed_ab_cache_bypass: bool = False
+  sme_packed_ab_traversal: object = None
+  # ZA keeps native geometry even for narrowed singleton scalar/Vec traffic.
+  sme_narrow_singleton_slices: bool = False
+  operands: tuple = ()
+  amx_b_permutation: object | None = None
+  dense_transposes: tuple = ()
+  schedule: object | None = None
+  pass_trace: tuple = ("cpu-plan-matmul",)
 
 
 def runtime_quant_candidate(a, b, accumulator_dtype, operations):
@@ -70,6 +104,9 @@ def plan_matmul(prepared, context):
   runtime_quant = context.options.get("cpu_sve_runtime_quant", False)
   if type(runtime_quant) is not bool:
     raise ValueError("cpu_sve_runtime_quant must be bool")
+  amx_shared_cache = context.options.get("cpu_amx_shared_cache_dispatch", False)
+  if type(amx_shared_cache) is not bool:
+    raise ValueError("cpu_amx_shared_cache_dispatch must be bool")
   runtime_quant_available = (
     runtime_quant
     and fusion != "never"
@@ -102,14 +139,14 @@ def plan_matmul(prepared, context):
 
   def product_k_unroll(product):
     known_k = I.constant(product.args[0].type.shape[1])
-    if "cpu_gemv_k_unroll" not in context.options:
-      # Unbounded K can be long. Keep the conservative latency-hiding bank
-      # count instead of imposing the short, compile-time-specialized choice.
-      if known_k is None or known_k >= costs.policy("gemv_k_unroll_long_min", 512):
-        result = int(costs.policy("gemv_k_unroll_long", k_unroll))
-        if result not in (1, 2, 4):
-          raise ValueError("gemv_k_unroll_long must be 1, 2 or 4")
-        return result
+    # Unbounded K keeps the conservative latency-hiding bank count.
+    if "cpu_gemv_k_unroll" not in context.options and (
+      known_k is None or known_k >= costs.policy("gemv_k_unroll_long_min", 512)
+    ):
+      result = int(costs.policy("gemv_k_unroll_long", k_unroll))
+      if result not in (1, 2, 4):
+        raise ValueError("gemv_k_unroll_long must be 1, 2 or 4")
+      return result
     return k_unroll
 
   def amx_traversal(product):
@@ -239,7 +276,7 @@ def plan_matmul(prepared, context):
           dense_transposes.append(
             plan_transpose(I.Store(destination, source, implementation="vector"), context.options)
           )
-        plans[id(node)] = I.MatmulPlan(
+        plans[id(node)] = CPUMatmulPlan(
           node,
           node.data,
           operands=operands,
@@ -251,6 +288,7 @@ def plan_matmul(prepared, context):
           amx_native_b_pack_min_m=int(costs.policy("amx_native_b_pack_min_m", 0)),
           amx_cache_b_panel_divisor=b_panel_divisor,
           amx_cache_b_panel_max_m=b_panel_max_m,
+          amx_shared_cache_dispatch=amx_shared_cache,
           sve_runtime_quant=runtime_quant_available,
           sme_native_a_packing=sme_native_a_packing,
           sme_packed_ab_cache_bypass=sme_packed_ab_cache_bypass,
@@ -266,6 +304,41 @@ def plan_matmul(prepared, context):
         visit(child)
 
   visit(prepared.vectors.kernel.body)
+  packing_programs = {}
+  staged_packing = context.options.get("cpu_sme_packing_dsl", False)
+  if type(staged_packing) is not bool:
+    raise TypeError("cpu_sme_packing_dsl must be bool")
+  if staged_packing:
+    from ...._library.sme_packing import pack_raw
+    from ...frontend.helpers import expand_helper
+    from ...ir.traversal import nodes
+
+    graph = tuple(nodes(prepared.vectors.kernel.body))
+    dtypes = {node.destination.view.dtype for node in graph if isinstance(node, I.Pack)}
+    for node in graph:
+      if isinstance(node, I.Expr) and node.op == "dot" and node.data.tiled:
+        dtypes.update(operand.type.dtype for operand in node.args[:2])
+    for dtype in sorted(dtypes):
+      if dtype == "bool":
+        continue
+
+      def raw(name):
+        return I.Expr(I.ScalarType("int64"), "raw", data="sme_packing." + name)
+
+      source = I.View(
+        "sme_packing_input", dtype, (raw("m"), raw("k")), (raw("pitch"), I.literal(1)), I.literal(0), writable=False
+      )
+      destination = I.View("sme_packing_output", dtype, (raw("capacity"),), (I.literal(1),), I.literal(0))
+      _, body = expand_helper(
+        pack_raw,
+        (source, destination),
+        catalog=context.environment.operations,
+        prefix="sme_packing_" + dtype,
+        hardware_kind="sme",
+      )
+      packing_programs[dtype] = bind_instruction_metadata(
+        simplify_loop_metadata(I.Block(body)), prefix="sme_packing_metadata_" + dtype
+      )
   return replace(
     prepared,
     matmuls=MappingProxyType(plans),
@@ -275,4 +348,5 @@ def plan_matmul(prepared, context):
     packing_permutation_x86=x86_dword_transpose(),
     dense_packs=MappingProxyType(dense_packs),
     grouped_epilogues=frozenset(grouped_epilogues),
+    sme_packing_programs=MappingProxyType(packing_programs),
   )

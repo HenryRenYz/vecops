@@ -65,6 +65,19 @@ class Interpreter:
     if not isinstance(expression, I.Expr):
       return expression
     op = expression.op
+    if op == "view_disjoint":
+
+      def span(view):
+        array = self.view(view)
+        if not array.size:
+          return None
+        pointer = array.__array_interface__["data"][0]
+        low = sum(min(0, (n - 1) * s) for n, s in zip(array.shape, array.strides))
+        high = sum(max(0, (n - 1) * s) for n, s in zip(array.shape, array.strides)) + array.itemsize
+        return pointer + low, pointer + high
+
+      a, b = map(span, expression.data)
+      return a is None or b is None or a[1] <= b[0] or b[1] <= a[0]
     if op == "load":
       return self.view(expression.data).copy()
     if op in ("symbol", "local", "frozen", "raw"):
@@ -80,6 +93,8 @@ class Interpreter:
       raise UnsupportedInterpretation(f"raw expression: {expression.data}")
     if op == "literal":
       return expression.data
+    if op == "register_input":
+      return self.environment["__register_inputs"][expression.data]
     if op == "state_ref":
       return self.states[expression.data.name].copy()
     if op == "native_lanes":
@@ -97,10 +112,36 @@ class Interpreter:
       return {"add": np.sum, "min": np.min, "max": np.max}[operation](args[0], axis=axis)
     if op in ("cast", "convert"):
       return np.asarray(args[0], dtype=self.dtype(expression.type.dtype))
+    if op == "bitcast":
+      return np.asarray(args[0]).view(self.dtype(expression.type.dtype))
+    if op in ("lower", "upper"):
+      half = len(args[0]) // 2
+      return args[0][:half] if op == "lower" else args[0][half:]
+    if op == "concat":
+      return np.concatenate(args)
+    if op == "interleave":
+      return np.stack(args, axis=-1).reshape(-1)
+    if op in ("local_interleave_lower", "local_interleave_upper"):
+      width = 16 // np.asarray(args[0]).dtype.itemsize
+      half = slice(0, width // 2) if op.endswith("lower") else slice(width // 2, width)
+      a, b = (np.asarray(v).reshape(-1, width)[:, half] for v in args)
+      return np.stack((a, b), axis=-1).reshape(-1)
+    if op == "block_shuffle":
+      width = 16 // np.asarray(args[0]).dtype.itemsize
+      blocks = np.concatenate([np.asarray(v).reshape(-1, width) for v in args])
+      return blocks[list(expression.data)].reshape(-1)
     if op in ("where", "select"):
       return np.where(*args)
     if op == "element_at":
       return args[0][tuple(int(a) for a in args[1:])]
+    if op == "value_transform" and expression.data[0] == "slice":
+      kept = expression.data[1]
+      shape = tuple(int(self.value(n)) for n in expression.type.shape)
+      indices = tuple(
+        slice(int(start), int(start) + shape[kept.index(axis)]) if axis in kept else int(start)
+        for axis, start in enumerate(args[1:])
+      )
+      return args[0][indices]
     if op == "reshape":
       return np.reshape(args[0], tuple(int(self.value(n)) for n in expression.type.shape))
     if op == "broadcast":
@@ -180,6 +221,9 @@ class Interpreter:
         )
       elif isinstance(statement, I.If):
         self.block(statement.body if self.value(statement.condition) else statement.otherwise)
+      elif isinstance(statement, I.Assert):
+        if not self.value(statement.condition):
+          raise AssertionError(statement.message)
       elif isinstance(statement, I.While):
         while self.value(statement.condition):
           self.step()

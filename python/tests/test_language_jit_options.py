@@ -8,7 +8,7 @@ import vecops.language as T
 def test_jit_forwards_compile_options_and_snapshots_option_mapping(monkeypatch):
   module = importlib.import_module("vecops.language.jit")
   calls = []
-  compiler, pipeline, debug = object(), ("stream-row-normalization",), object()
+  compiler, pipeline, debug = object(), ("stream-row-maps",), object()
   options = {"cpu_grid_regions": "adjacent"}
 
   def compile_template(template, **kwargs):
@@ -49,7 +49,7 @@ def test_jit_compile_options_do_not_compile_python_forwarders(monkeypatch):
 
   monkeypatch.setattr(module, "compile", unexpected_compile)
 
-  @T.jit(pass_options={"cpu_grid_regions": "adjacent"}, pipeline=("stream-row-normalization",))
+  @T.jit(pass_options={"cpu_grid_regions": "adjacent"}, pipeline=("stream-row-maps",))
   def factory(N):
     def forward(value):
       return value + int(N)

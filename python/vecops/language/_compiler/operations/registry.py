@@ -35,6 +35,8 @@ class Trait(IntFlag):
   MEMORY_READ = auto()
   REGISTER_TRANSFORM = auto()
   MASK_REDUCTION = auto()
+  HARDWARE_SCALAR = auto()
+  POSITIVE_EXTENT = auto()
 
 
 @dataclass(frozen=True)

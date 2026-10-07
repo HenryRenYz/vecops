@@ -8,7 +8,7 @@ from ...operations import Trait
 from ..manager import register_pass
 
 
-@register_pass("fold-value-transforms", after=("decompose-row-normalization",), before=("canonicalize-memory",))
+@register_pass("fold-value-transforms", after=("decompose-row-maps",), before=("canonicalize-memory",))
 def fold_value_transforms(ir, context):
   def transform(value, kind, axes, shape):
     if isinstance(value.type, I.ScalarType):

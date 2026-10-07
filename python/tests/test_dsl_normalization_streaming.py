@@ -51,7 +51,7 @@ def streaming_guard(kernel):
       node
       for node in nodes(kernel.body)
       if isinstance(node, I.If)
-      and any(isinstance(child, I.For) and child.target.startswith("dsl_o_norm_stream_") for child in nodes(node.body))
+      and any(isinstance(child, I.For) and child.target.startswith("dsl_o_map_stream_") for child in nodes(node.body))
     ),
     None,
   )
@@ -88,7 +88,7 @@ def test_shared_effectful_or_layout_changing_consumers_keep_original_boundary(bo
     ir = template.ir
   lowered = CPUBackend().lower(ir, (), target="SVE")
   assert streaming_guard(lowered.kernel) is None
-  assert any(isinstance(node, I.Allocate) and "norm" in node.view.storage for node in nodes(lowered.kernel.body))
+  assert any(isinstance(node, I.Allocate) and "map" in node.view.storage for node in nodes(lowered.kernel.body))
 
 
 def test_streaming_pass_is_registered_and_independently_disabled():
@@ -96,11 +96,11 @@ def test_streaming_pass_is_registered_and_independently_disabled():
     streaming_template().ir, (), target="SVE", options={"row_normalization_streaming": False}
   )
   assert streaming_guard(lowered.kernel) is None
-  assert "stream-row-normalization" in {spec.name for spec in registered_passes()}
+  assert "stream-row-maps" in {spec.name for spec in registered_passes()}
   assert (
     lowered.kernel.pass_trace.index("normalize-reduction-layout")
-    < lowered.kernel.pass_trace.index("stream-row-normalization")
-    < lowered.kernel.pass_trace.index("decompose-row-normalization")
+    < lowered.kernel.pass_trace.index("stream-row-maps")
+    < lowered.kernel.pass_trace.index("decompose-row-maps")
   )
 
 
@@ -119,7 +119,7 @@ def test_normalization_to_dot_and_pack_remains_a_materialized_statistics_boundar
 
   lowered = CPUBackend().lower(dot_kernel.ir, (), target="SVE")
   assert streaming_guard(lowered.kernel) is None
-  assert any(isinstance(node, I.Allocate) and "norm" in node.view.storage for node in nodes(lowered.kernel.body))
+  assert any(isinstance(node, I.Allocate) and "map" in node.view.storage for node in nodes(lowered.kernel.body))
 
 
 @pytest.fixture(scope="module")
@@ -144,6 +144,45 @@ def native_streaming_kernels(tmp_path_factory):
         kernels[kind, affine] = compiled
   vecops.compile_batch(collector.requests, parallelism=4, execution_parallelism=1)
   return kernels
+
+
+@T.func
+def row_standardize_range(x, *, scale=1, unroll=2):
+  low = T.reduce_min(x, unroll=unroll)
+  high = T.reduce_max(x, unroll=unroll)
+  extent = T.max(high - low, T.cast(1e-5, x.dtype))
+  return (x - low) / extent * scale
+
+
+@pytest.mark.parametrize("streaming", (False, True))
+def test_user_row_program_uses_the_same_generic_region_scheduler(streaming):
+  @T.template
+  def kernel(A: T.Tensor((3, 37), dtype="float32"), C: T.Tensor((3, 37), dtype="float32", access="output")):
+    T.store(C, T.map_rows(row_standardize_range, T.load(A), scale=2))
+
+  lowered = CPUBackend().lower(kernel.ir, (), target="SVE", options={"row_map_streaming": streaming})
+  assert (streaming_guard(lowered.kernel) is not None) is streaming
+  assert not any(
+    node.op in {"map_rows", "region_argument"} for node in nodes(lowered.kernel.body) if isinstance(node, I.Expr)
+  )
+  assert "vecops::vec::reduce_min" in lowered.source
+  assert "vecops::vec::reduce_max" in lowered.source
+  assert_no_vec_mask_arrays(lowered.source)
+
+
+@T.func
+def effectful_row(x):
+  T.print("not a pure row program")
+  return x
+
+
+def test_effectful_row_program_is_rejected_at_its_source_site():
+  @T.template
+  def kernel(A: T.Tensor((3, 37), dtype="float32"), C: T.Tensor((3, 37), dtype="float32", access="output")):
+    T.store(C, T.map_rows(effectful_row, T.load(A)))
+
+  with pytest.raises(TypeError, match="pure straight-line"):
+    CPUBackend().lower(kernel.ir, (), target="Native")
 
 
 def reference(inputs, kind):
@@ -205,4 +244,4 @@ def test_native_streaming_fast_path_and_full_alias_fallback(native_streaming_ker
     warmup=0,
     memory=True,
   )
-  assert not any("norm_" in event.get("site", "") and event.get("action", 0) == 0 for event in report.memory_events)
+  assert not any("map_" in event.get("site", "") and event.get("action", 0) == 0 for event in report.memory_events)

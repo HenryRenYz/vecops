@@ -7,18 +7,21 @@ compiler may cache reused expensive expressions instead of recomputing them.
 
 from . import dsl as T
 from ._library.attention import scaled_dot_product_attention
-from ._library.math import masked_softmax, rmsnorm, silu, softmax_exp_neg, softmax_inverse, stable_sigmoid
+from ._library.math import layernorm_row, masked_softmax, rmsnorm, silu, softmax_row, stable_sigmoid
+from ._library.registers import pack_interleave, transpose_registers
 
 __all__ = [
   "layernorm",
   "masked_softmax",
   "matmul",
+  "pack_interleave",
   "rmsnorm",
   "scaled_dot_product_attention",
   "silu",
   "softmax",
   "stable_sigmoid",
   "transpose_copy",
+  "transpose_registers",
 ]
 
 
@@ -26,27 +29,12 @@ __all__ = [
 def layernorm(x, *, eps=1e-5, variance="centered", unroll=2):
   x = T.as_value(x)
   if len(x.shape) == 2:
-    result = T._normalize(x, kind="layernorm", eps=eps, variance=variance, unroll=unroll)
+    if x.dtype != "float32" and x.dtype != "float64":
+      x = T.cast(x, "float32")
+    result = T.map_rows(layernorm_row, x, eps=eps, variance=variance, unroll=unroll)
   else:
     T.static_assert(len(x.shape) == 1)
-    count = x.shape[0]
-    # One explicit reciprocal shared by both statistics. This is part of the
-    # visible DSL algorithm, not a backend reassociation of arbitrary strict
-    # divisions; centered variance keeps its independent second sweep.
-    inv_count = T.cast(1, x.dtype) / count
-    if variance == "moments":
-      total = T.reduce_add(x, unroll=unroll)
-      total_squared = T.reduce_add(x * x, unroll=unroll)
-      mean = total * inv_count
-      centered = x - mean
-      var = T.max(total_squared * inv_count - mean * mean, T.cast(0, x.dtype))
-    else:
-      T.static_assert(variance == "centered")
-      mean = T.reduce_add(x, unroll=unroll) * inv_count
-      centered = x - mean
-      var = T.reduce_add(centered * centered, unroll=unroll) * inv_count
-    inv_std = T.rsqrt(var + T.cast(eps, x.dtype))
-    result = centered * inv_std
+    result = layernorm_row(x, eps=eps, variance=variance, unroll=unroll)
   return result
 
 
@@ -59,14 +47,12 @@ def softmax(x, *, unroll=2, accuracy="strict"):
   """
   x = T.as_value(x)
   if len(x.shape) == 2:
-    result = T._normalize(x, kind="softmax", unroll=unroll, accuracy=accuracy)
+    if x.dtype != "float32" and x.dtype != "float64":
+      x = T.cast(x, "float32")
+    result = T.map_rows(softmax_row, x, unroll=unroll, accuracy=accuracy)
   else:
     T.static_assert(len(x.shape) == 1)
-    maximum = T.reduce_max(x, unroll=unroll)
-    exponent = softmax_exp_neg(x - maximum, accuracy=accuracy)
-    denominator = T.reduce_add(exponent, unroll=unroll)
-    inverse = softmax_inverse(denominator, accuracy=accuracy)
-    result = exponent * inverse
+    result = softmax_row(x, unroll=unroll, accuracy=accuracy)
   return result
 
 
