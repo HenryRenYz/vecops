@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Summarize matmul kernel text size and matrix instructions in binaries.
 
 The report is deliberately independent of a particular benchmark target so it

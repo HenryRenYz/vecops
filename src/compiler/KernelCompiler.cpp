@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /**
  * @file KernelCompiler.cpp
  * @brief Generate `vecops::spec` headers and stable ABI adapters for source kernels.

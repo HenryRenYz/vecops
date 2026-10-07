@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 #include "OneDNNRunner.h"
 
 namespace vecops::bench::matmul_otherlibs {

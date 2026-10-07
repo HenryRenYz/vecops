@@ -1,6 +1,5 @@
-//
-// Created by HenryRenYz on 2026/6/7.
-//
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 
 #ifndef VECOPS_BITCAST_H
 #define VECOPS_BITCAST_H

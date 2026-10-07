@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 #ifndef VECOPS_OPS_LAYERNORM_H
 #define VECOPS_OPS_LAYERNORM_H
 

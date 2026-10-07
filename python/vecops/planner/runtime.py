@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Runtime binding of an offline plan to ``vecops.memory`` arenas.
 
 The core planner remains framework-neutral. ``PlanSession`` is the optional

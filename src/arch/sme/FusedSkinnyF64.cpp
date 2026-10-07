@@ -1,5 +1,6 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 //
-// Copyright (c) vecops contributors.
 //
 // Explicit FP64 skinny compute instantiations for SME-capable multiarch
 // targets.  This source is intentionally excluded from generic libvecops.a

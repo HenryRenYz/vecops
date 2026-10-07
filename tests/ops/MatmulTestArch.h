@@ -1,5 +1,6 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 //
-// Copyright (c) vecops contributors.
 //
 
 #ifndef VECOPS_TESTS_OPS_MATMUL_TEST_ARCH_H

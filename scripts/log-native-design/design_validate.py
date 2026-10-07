@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Offline design + validation for the native (promotion-free) SVE log kernels.
 
 Develops the constants for include/vecops/vec/details/sve/math/Log.h and

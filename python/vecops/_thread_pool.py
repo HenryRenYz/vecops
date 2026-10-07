@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Scoped controls for the optional process-local native thread pool."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Model-level collection and parallel preparation of lazy JIT artifacts."""
 
 from __future__ import annotations

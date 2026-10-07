@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 #ifndef VECOPS_TENSOR_OPTIONAL_OPERAND_H
 #define VECOPS_TENSOR_OPTIONAL_OPERAND_H
 

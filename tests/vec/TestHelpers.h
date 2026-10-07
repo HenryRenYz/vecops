@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 #ifndef VECOPS_TESTS_NVEC_TESTHELPERS_H
 #define VECOPS_TESTS_NVEC_TESTHELPERS_H
 

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /**
  * @file Executable.cpp
  * @brief Validation, dynamic loading, workspace queries, and kernel execution.

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Run one instruction benchmark case per perf-stat process and summarize it."""
 
 from __future__ import annotations

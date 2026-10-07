@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Audit provider coverage and vecops Meta extent pairs from benchmark lists."""
 
 from __future__ import annotations

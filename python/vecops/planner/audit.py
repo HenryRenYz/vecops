@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Coverage reports for framework state and planned memory movements."""
 
 from __future__ import annotations

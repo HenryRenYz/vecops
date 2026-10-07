@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Report Const/Dynamic median ratios from Google Benchmark JSON files."""
 
 from __future__ import annotations

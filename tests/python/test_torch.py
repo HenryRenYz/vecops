@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """End-to-end ordered dispatch through a generated mutable Torch bridge."""
 
 from concurrent.futures import ThreadPoolExecutor

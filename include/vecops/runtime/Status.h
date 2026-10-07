@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /**
  * @file Status.h
  * @brief Value-based C++ status and result transport for runtime operations.

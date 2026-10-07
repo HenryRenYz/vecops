@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Shared oneDNN execution adapter for the raw-E2E suite and phase probes.
 // The public weights view is [batch, M, K]; oneDNN consumes its logical
 // transpose [batch, K, M] through an opaque implementation-selected layout.

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /** @file NormOperatorCli.cpp @brief New-API correctness and latency probe. */
 
 #include "vecops/compiler/Compiler.h"

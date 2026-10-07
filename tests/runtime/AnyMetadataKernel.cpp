@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /** @file AnyMetadataKernel.cpp @brief Runtime-valued unconstrained metadata probe. */
 
 #include "vecops/Kernel.h"

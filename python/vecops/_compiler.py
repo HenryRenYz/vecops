@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Python-facing compiler configuration and lazy native-tool discovery.
 
 The public :class:`Compiler` owns cache policy and reproducible CMake inputs;

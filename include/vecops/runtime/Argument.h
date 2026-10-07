@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /**
  * @file Argument.h
  * @brief Type-erased, owning C++ argument metadata for runtime invocations.

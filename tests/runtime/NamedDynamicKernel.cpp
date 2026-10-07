@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /** @file NamedDynamicKernel.cpp @brief Runtime-valued named-dimension probe. */
 
 #include "vecops/Kernel.h"

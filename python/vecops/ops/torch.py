@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Torch registration facade for C++-dispatched vecops source recipes.
 
 This module deliberately exposes a callable in ``vecops.ops.torch`` instead

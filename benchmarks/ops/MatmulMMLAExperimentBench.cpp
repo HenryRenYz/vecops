@@ -1,6 +1,7 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // @vecops-target-shards: 6
 //
-// Copyright (c) vecops contributors.
 //
 // Isolated end-to-end experiment for consuming the existing SME PackedAB ABI
 // with ordinary-SVE BFMMLA/I8MM instructions.  This is deliberately kept out

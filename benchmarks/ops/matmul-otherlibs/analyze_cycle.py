@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Compare one benchmark cycle with peers and a previous vecops snapshot."""
 
 from __future__ import annotations

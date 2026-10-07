@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /** @file TestKernel.cpp @brief Minimal compiler-managed `__kernel__` source. */
 
 #include "vecops/Kernel.h"

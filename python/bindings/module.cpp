@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /**
  * @file module.cpp
  * @brief pybind11 adapters for the compiler, runtime, and NumPy CPU arrays.

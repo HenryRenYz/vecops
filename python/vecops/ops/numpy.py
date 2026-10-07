@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """NumPy registration facade for C++-dispatched vecops source recipes.
 
 Registered operations retain out-style tensor semantics and are retrieved from
