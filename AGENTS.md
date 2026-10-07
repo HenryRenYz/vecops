@@ -156,3 +156,36 @@ repeated in each top-level operation header and `VecBase.h`. Converging it
 into a computed-include macro was considered and deferred: the sandwich layout
 keeps the guards local and readable, and each backend file needs its own
 guard anyway.
+
+## Licensing of new files and third-party material
+
+- Add `SPDX-FileCopyrightText` and `SPDX-License-Identifier` near the top of
+  each new project-owned source, test, script, build file, and document,
+  using its comment syntax. Project-owned contributions use MIT; use the
+  actual copyright holder and years, not the last Git author automatically.
+  For a new project-owned C++ file, for example:
+
+  ```cpp
+  // SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+  // SPDX-License-Identifier: MIT
+  ```
+
+- Preserve imported copyright, license, patent, attribution, and disclaimer
+  notices. For copied code, ports, coefficients, tables, or data, record the
+  source path/URL, full upstream commit, original notices, applicable license,
+  and local changes in `THIRD_PARTY_NOTICES.md`; retain the required full texts
+  in `LICENSES/`. A comparison reference is not proof of the original import
+  revision. Stop for review if rights or provenance are unresolved.
+- The root MIT license does not relicense third-party portions. Keep upstream
+  SPDX identifiers and scope them accurately; do not apply a project MIT
+  header to an imported file or invent an `OR` choice between unrelated rights.
+  Keep the Huawei/MulanPSL-2.0 notice for KUPL-derived material.
+- For formats that cannot contain comments, record an exact-path attribution
+  in `THIRD_PARTY_NOTICES.md` or a dedicated `.license` sidecar. Preserve
+  upstream license files unchanged; they do not need project SPDX headers.
+- Review new-file SPDX fields, changed third-party mappings, full-license
+  availability, and notices in distributed artifacts before accepting a
+  change. A future automated check should examine added files with
+  `git diff --diff-filter=A --name-only <base>...HEAD`, require both fields or
+  an explicit exact-path exception, and verify each referenced license file.
+  Existing unmarked files need individual review before any bulk annotation.

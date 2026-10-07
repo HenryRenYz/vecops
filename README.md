@@ -1,6 +1,23 @@
 # vecops
 CPU operator extension using native SIMD &amp; matrix extension.
 
+## Development status and branches
+
+Vecops is under active development (currently 0.1.0). APIs, kernel ABI,
+build options and performance characteristics may change before a stable
+release. Check the documentation for host and ISA requirements.
+
+`main` is the primary development branch. `feat/kupl-mma` contains the
+experimental KUPL-derived SME BF16 provider; it has its own licensing
+notices and is not implicitly included in `main`.
+
+## License
+
+Project-owned contributions are licensed under [MIT](LICENSE). Copied or
+derived third-party material retains its original terms and copyrights;
+see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [LICENSES/](LICENSES/),
+including KUPL's MulanPSL-2.0 where applicable.
+
 ## Documentation
 
 - [Code organization](docs/Architecture.md)
