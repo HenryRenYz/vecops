@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Run a pinned single-thread benchmark suite and produce its merged CSV."""
 
 from __future__ import annotations

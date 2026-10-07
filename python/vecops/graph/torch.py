@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Optional Torch adapter for :mod:`vecops.graph`.
 
 Imports are intentionally local to this module so the serialized graph and

@@ -1,6 +1,5 @@
-//
-// Created by renyz on 2026/6/3.
-//
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 
 #include <gtest/gtest.h>
 #include <sstream>

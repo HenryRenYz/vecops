@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Runtime annotations used by :func:`vecops.jit` declarations.
 
 Tensor annotations use ``vt.In(dtype)[shape, strides]`` syntax. Each string

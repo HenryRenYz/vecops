@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Signature-driven declarations for lazy compiler-managed ``__kernel__`` recipes.
 
 The decorated Python function is a schema declaration, not the implementation:

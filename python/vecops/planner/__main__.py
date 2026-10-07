@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Command-line entry point for offline vecops memory planning."""
 
 from __future__ import annotations

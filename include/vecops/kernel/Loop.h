@@ -1,6 +1,5 @@
-//
-// Created by renyz on 2026/7/8.
-//
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 
 #ifndef VECOPS_KERNEL_LOOP_H
 #define VECOPS_KERNEL_LOOP_H

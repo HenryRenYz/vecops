@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /**
  * @file Operator.cpp
  * @brief KernelCall normalization, ordered recipe dispatch, and execution.

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Generate and load stable Torch bridges from a native :class:`KernelDef`.
 
 The generated extension contains only Torch-to-``CallAbi`` adaptation and a

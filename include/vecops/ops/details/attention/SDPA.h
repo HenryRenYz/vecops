@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 #ifndef VECOPS_OPS_DETAILS_ATTENTION_SDPA_H
 #define VECOPS_OPS_DETAILS_ATTENTION_SDPA_H
 

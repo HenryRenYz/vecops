@@ -1,5 +1,12 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// The project copyright above applies to project-owned portions only.
+// SPDX-FileCopyrightText: 2026 Huawei Technologies Co., Ltd.
+// KUPL-derived provider/schedule/layout portions retain MulanPSL-2.0;
+// other project-owned portions use MIT. Existing upstream notices remain.
+// Original scope and complete terms: THIRD_PARTY_NOTICES.md and
+// LICENSES/KUPL-MulanPSL-2.0.txt.
+// SPDX-License-Identifier: MIT AND MulanPSL-2.0
 //
-// Copyright (c) vecops contributors.
 //
 
 /**

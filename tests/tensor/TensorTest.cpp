@@ -1,5 +1,6 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 //
-// Created by renyz on 2026/6/11.
 // Comprehensive tests for Tensor.h - compile-time shape/stride tensor
 //
 

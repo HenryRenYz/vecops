@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Pythonic compiler/runtime API; low-level bindings live in :mod:`vecops._C`."""
 
 from . import _C, graph, ops, planner

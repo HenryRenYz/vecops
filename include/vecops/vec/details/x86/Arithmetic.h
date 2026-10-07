@@ -1,3 +1,14 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// The project copyright above applies to project-owned portions only.
+// SPDX-FileCopyrightText: 2017 Facebook Inc.
+// SPDX-FileCopyrightText: 2017 Georgia Institute of Technology
+// SPDX-FileCopyrightText: 2019 Google LLC
+// PyTorch-derived portions: BSD-3-Clause; overlapping FP16 portions: MIT.
+// The complete original PyTorch project copyright statements, conditions
+// and disclaimer are retained in LICENSES/PyTorch-BSD.txt; these project
+// statements do not identify the original author of each imported function.
+// Original FP16 notices and MIT terms: LICENSES/FP16-MIT.txt.
+// SPDX-License-Identifier: MIT AND BSD-3-Clause
 #ifndef VECOPS_VEC_DETAILS_X86_ARITHMETIC_H
 #define VECOPS_VEC_DETAILS_X86_ARITHMETIC_H
 

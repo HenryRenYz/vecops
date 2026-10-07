@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 //
 // Shared allocation, verification, naming, and registration for the
 // cross-library BF16 GEMM benchmarks.

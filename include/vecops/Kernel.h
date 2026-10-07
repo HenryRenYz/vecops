@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /**
  * @file Kernel.h
  * @brief Compact authoring surface for compiler-managed `__kernel__` files.
