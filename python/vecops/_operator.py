@@ -32,10 +32,23 @@ class Operator:
   ) -> None:
     self.source = Path(source).expanduser().resolve()
     self.kernel_def = kernel_def
-    self.compiler = compiler or Compiler()
-    from ._identity import compiler_identity, digest, include_roots, source_inputs
+    self.compiler = (compiler or Compiler()).snapshot()
+    from ._identity import (
+      _source_input_diff,
+      _write_build_input_trace,
+      compiler_identity,
+      digest,
+      include_roots,
+      source_inputs,
+    )
 
-    inputs = source_inputs(self.source, include_roots(self.compiler), dependencies)
+    inputs = source_inputs(
+      self.source,
+      include_roots(self.compiler),
+      dependencies,
+      definition_cwd=self.compiler.definition_cwd,
+      inventory_excludes=self.compiler._source_include_inventory_excludes,
+    )
     source_identity = digest(inputs)
     if build_identity is None:
       try:
@@ -52,10 +65,39 @@ class Operator:
     source_path, include_dirs, selected = self.source, include_roots(self.compiler), self.compiler
 
     def validate_inputs():
-      return (
-        source_inputs(source_path, include_dirs, dependencies) == inputs
-        and compiler_identity(selected) == build_identity
+      # The operator owns an immutable VL/SVL snapshot and compile definitions.
+      # A batch may contain several such snapshots, and can build on a thread
+      # with another current length. Validate content/policy, not that worker's
+      # mutable ISA state. The generated entry adapter checks invocation state.
+      current_inputs = source_inputs(
+        source_path,
+        include_dirs,
+        dependencies,
+        definition_cwd=selected.definition_cwd,
+        inventory_excludes=selected._source_include_inventory_excludes,
       )
+      source_equal = current_inputs == inputs
+      current_identity = None
+      compiler_equal = None
+      if source_equal:
+        current_identity = compiler_identity(selected)
+        compiler_equal = current_identity == build_identity
+      if not source_equal or compiler_equal is False:
+        _write_build_input_trace(
+          {
+            "event": "operator_input_validation",
+            "source": str(source_path),
+            "source_inputs_equal": source_equal,
+            "compiler_identity_equal": compiler_equal,
+            "expected_compiler_identity": build_identity if source_equal else None,
+            "current_compiler_identity": current_identity,
+            "source_diff": _source_input_diff(inputs, current_inputs)
+            if not source_equal
+            else {"changed_count": 0, "paths": []},
+          },
+          compiler=selected,
+        )
+      return bool(source_equal and compiler_equal)
 
     self._native = _C.Operator(
       self.source,

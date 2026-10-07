@@ -239,6 +239,94 @@ TYPED_TEST(VecConversionMemoryTypedTest, DefaultLoadAndStoreAllDestinations) {
   verify_default_conversion_memory<From>(vecops::uint64_t{});
 }
 
+template <typename From, typename To, int Power, bool Unordered>
+void verify_indexed_store_mask_domain() {
+  using Tag = vec::ScalableTag<From, Power>;
+  using MemoryTag = vec::Rebind<To, Tag>;
+  using MaskTag = std::conditional_t<Unordered, MemoryTag, Tag>;
+  using IndexTag = vec::Rebind<int32_t, Tag>;
+  const auto layout = []() VECOPS_INLINE_LAMBDA {
+    if constexpr (Unordered)
+      return vec::cvt::unordered;
+    else
+      return vec::cvt::ordered;
+  }();
+  const auto lanes = vec::size(Tag{});
+  ASSERT_GT(lanes, 0);
+  const To canary = ::vecops::convert<To>(-99);
+  std::vector<From> input(static_cast<std::size_t>(lanes));
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane)
+    input[static_cast<std::size_t>(lane)] = memory_conversion_input<From, To>(lane);
+  const auto value = vec::load(Tag{}, input.data());
+  const auto reference = vec::convert(MemoryTag{}, Tag{}, value, layout);
+  auto mask = vec::mfalse(MaskTag{});
+  for (vecops::nint_t lane = 0; lane < lanes; ++lane)
+    mask = vec::set(MaskTag{}, mask, lane, lane % 3 != 1);
+
+  // Exercise both signs of a strided boundary and explicit indexed offsets.
+  // Every addressed or padding lane starts with a canary; inactive addresses
+  // must remain untouched, not merely contain a numerically plausible value.
+  for (const bool indexed : {false, true}) {
+    for (const vecops::nint_t stride : {vecops::nint_t{3}, vecops::nint_t{-3}}) {
+      std::vector<int32_t> offsets(static_cast<std::size_t>(lanes));
+      for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+        const auto offset = indexed ? lane * 3 + lane % 2 : lane * 3;
+        offsets[static_cast<std::size_t>(lane)] = static_cast<int32_t>(stride > 0 ? offset : -offset);
+      }
+      const auto indices = vec::load(IndexTag{}, offsets.data());
+      const std::size_t capacity = static_cast<std::size_t>(lanes * 4 + 7);
+      const auto origin = stride > 0 ? vecops::nint_t{2} : lanes * 3 + 2;
+      for (const bool first : {false, true}) {
+        const auto active = std::max<vecops::nint_t>(1, lanes - 1);
+        std::vector<To> output(capacity, canary);
+        auto* pointer = output.data() + origin;
+        if (indexed) {
+          if (first)
+            vec::store_convert(Tag{}, pointer, value, layout, vec::indexed(indices), vec::opt::first(active));
+          else
+            vec::store_convert(Tag{}, pointer, value, layout, vec::indexed(indices), vec::opt::masked(mask));
+        } else {
+          if (first)
+            vec::store_convert(Tag{}, pointer, value, layout, vec::strided(stride), vec::opt::first(active));
+          else
+            vec::store_convert(Tag{}, pointer, value, layout, vec::strided(stride), vec::opt::masked(mask));
+        }
+        std::vector<To> expected(capacity, canary);
+        for (vecops::nint_t lane = 0; lane < lanes; ++lane) {
+          if (first ? lane < active : lane % 3 != 1) {
+            const auto address = static_cast<std::size_t>(origin + offsets[static_cast<std::size_t>(lane)]);
+            ASSERT_LT(address, capacity);
+            expected[address] = vec::get(MemoryTag{}, reference, lane);
+          }
+        }
+        for (std::size_t address = 0; address < capacity; ++address)
+          EXPECT_TRUE(vec_test::values_identical(output[address], expected[address]))
+            << "from=" << typeid(From).name() << " to=" << typeid(To).name() << " pow=" << Power
+            << " unordered=" << Unordered << " indexed=" << indexed << " stride=" << stride << " first=" << first
+            << " address=" << address;
+      }
+    }
+  }
+}
+
+TEST(VecConversionMemoryTest, IndexedSubwordStoreMasksUseLayoutDomain) {
+  // The widening cases put the largest element type in one native word;
+  // SVE therefore represents both mask domains as svbool_t. A type-based
+  // domain guess used to lose the upper half/three quarters of active lanes.
+  verify_indexed_store_mask_domain<vecops::float32_t, vecops::float64_t, -1, false>();
+  verify_indexed_store_mask_domain<vecops::float32_t, vecops::float64_t, -1, true>();
+  verify_indexed_store_mask_domain<vecops::float16_t, vecops::float64_t, -2, false>();
+  verify_indexed_store_mask_domain<vecops::float16_t, vecops::float64_t, -2, true>();
+  verify_indexed_store_mask_domain<vecops::float64_t, vecops::float32_t, 0, false>();
+  verify_indexed_store_mask_domain<vecops::float64_t, vecops::float32_t, 0, true>();
+  verify_indexed_store_mask_domain<vecops::float64_t, vecops::float16_t, 0, false>();
+  verify_indexed_store_mask_domain<vecops::float64_t, vecops::float16_t, 0, true>();
+  verify_indexed_store_mask_domain<int16_t, int64_t, -2, false>();
+  verify_indexed_store_mask_domain<int16_t, int64_t, -2, true>();
+  verify_indexed_store_mask_domain<int64_t, int16_t, 0, false>();
+  verify_indexed_store_mask_domain<int64_t, int16_t, 0, true>();
+}
+
 TEST(VecConversionMemoryTest, AlignmentAndTemporalityAreSoftHints) {
   using Tag = vec::ScalableTag<int32_t>;
   constexpr std::size_t capacity = 256;

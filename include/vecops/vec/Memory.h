@@ -8,6 +8,7 @@
 
 #include "vecops/Assertion.h"
 #include "vecops/vec/Basic.h"
+#include "vecops/vec/Sequence.h"
 #include "vecops/vec/Options.h"
 #include "vecops/vec/Request.h"
 
@@ -96,6 +97,11 @@ namespace vecops::vec {
  *
  * `opt::indexed(indices)` performs gather loads using i32 or i64 index
  * vectors. `opt::strided(stride)` emits a linear index sequence internally.
+ * If the native sequence or its backend byte scaling would overflow i32,
+ * SVE promotes that access to i64 indices when its widened Tag is legal;
+ * otherwise it uses scalar nint_t addresses. Both paths preserve masks and
+ * population without truncating the stride. Active byte offsets must fit
+ * nint_t and refer to valid memory; inactive index formation is modular.
  * Indexed and strided addressing are mutually exclusive with alignment.
  *
  * @see store for contiguous stores.

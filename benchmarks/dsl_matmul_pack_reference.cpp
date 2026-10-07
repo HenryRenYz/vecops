@@ -1,12 +1,12 @@
 // Paired public MatmulPack baseline, including optional load/convert/affine.
 #include "vecops/Kernel.h"
 #include "vecops/ops/MatmulPack.h"
+#include "dsl_matmul_atom.h"
 
 void __kernel__(vecops::tensor::TensorLike auto A,vecops::tensor::TensorLike auto P,
                 std::int64_t repeat) {
   using Native=vecops::spec::Native;
-  using Atom=std::conditional_t<std::same_as<Native,vecops::bfloat16_t>,vecops::matmul::AMX_BF16F32,
-                               vecops::matmul::AMX_I8I32<std::int8_t,std::int8_t>>;
+  using Atom=BenchmarkAtom<Native,Native>;
   constexpr auto side=vecops::spec::SideB ? vecops::matmul::Operand::B : vecops::matmul::Operand::A;
   auto source=[&]() VECOPS_INLINE_LAMBDA {
     if constexpr (vecops::spec::SideB) return vecops::tensor::transpose<0,1>(A);

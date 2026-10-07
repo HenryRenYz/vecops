@@ -17,18 +17,24 @@ class StateEmitter:
     tags = []
     for piece in plan.pieces:
       if piece.scalable:
-        tag = f"vecops::vec::ScalableTag<{CPP_TYPES[plan.state.type.dtype]}, 0>"
-        tag = f"vecops::vec::Rebind<{CPP_TYPES[dtype]}, {tag}>" if dtype != plan.state.type.dtype else tag
+        origin = f"vecops::vec::ScalableTag<{CPP_TYPES[plan.state.type.dtype]}, {piece.power}>"
+        tag = f"vecops::vec::Rebind<{CPP_TYPES[dtype]}, {origin}>" if dtype != plan.state.type.dtype else origin
       else:
+        origin = f"vecops::vec::FixedTag<{CPP_TYPES[plan.state.type.dtype]}, {piece.lanes}>"
         tag = f"vecops::vec::FixedTag<{CPP_TYPES[dtype]}, {piece.lanes}>"
         self.fixed_tag_lanes[tag] = piece.lanes
+        self.fixed_tag_lanes[origin] = piece.lanes
+      self.tag_dtypes[origin] = plan.state.type.dtype
+      self.state_tag_origins[tag] = origin
+      self.state_tag_origins[origin] = origin
       tags.append(tag)
     return tuple(tags)
 
   def state_coordinates(self, plan):
     tags = self.state_tags(plan, plan.state.type.dtype)
     return tuple(
-      ("0" if p.coordinates[0] == 0 else f"({p.coordinates[0]} * vecops::vec::size({tag}{{}}))",)
+      tuple(str(c) for c in p.coordinates[:-1])
+      + ("0" if p.coordinates[-1] == 0 else f"({p.coordinates[-1]} * {self.vector_size(tag)})",)
       if p.scalable
       else tuple(str(c) for c in p.coordinates)
       for p, tag in zip(plan.pieces, tags)
@@ -36,9 +42,9 @@ class StateEmitter:
 
   def state_counts(self, plan):
     return tuple(
-      f"std::clamp<vecops::nint_t>(({self.scalar(plan.state.type.shape[-1])}) - ({c[-1]}), 0, vecops::vec::size({tag}{{}}))"
-      if piece.scalable
-      else str(piece.lanes)
+      str(piece.lanes)
+      if piece.lanes
+      else f"std::clamp<vecops::nint_t>(({self.scalar(plan.state.type.shape[-1])}) - ({c[-1]}), 0, {self.vector_size(tag)})"
       for piece, tag, c in zip(plan.pieces, self.state_tags(plan, plan.state.type.dtype), self.state_coordinates(plan))
     )
 
@@ -64,7 +70,7 @@ class StateEmitter:
       self.chunk_cache = {}
       register_region = self.prepared.state_regions[(id(statement), "register")]
       roots = self.emit_operations(
-        register_region, tags, coords, counts, full=not any(p.scalable for p in plan.pieces)
+        register_region, tags, coords, counts, full=all(not p.scalable or p.full for p in plan.pieces)
       )[0]
       for index, root in enumerate(roots):
         name = f"{state.name}_r{index}"
@@ -119,7 +125,7 @@ class StateEmitter:
       self.tag_dtypes[tag] = region.dtype
     coords, counts = self.state_coordinates(plan), self.state_counts(plan)
     state = setup(tags) if setup else None
-    roots = self.emit_operations(region, tags, coords, counts, full=not any(p.scalable for p in plan.pieces))
+    roots = self.emit_operations(region, tags, coords, counts, full=all(not p.scalable or p.full for p in plan.pieces))
     callback(tags, coords, counts, roots, state)
     if finish:
       finish(tags, state)
@@ -154,7 +160,7 @@ class StateEmitter:
     for index, (piece, own_tag, coordinate) in enumerate(zip(plan.pieces, own_tags, self.state_coordinates(plan))):
       conditions = [f"({c})==({p})" for c, p in zip(indices[:-1], coordinate[:-1])]
       offset = coordinate[-1]
-      width = f"vecops::vec::size({own_tag}{{}})" if piece.scalable else str(piece.lanes)
+      width = self.vector_size(own_tag) if piece.scalable else str(piece.lanes)
       conditions.append(f"({indices[-1]})>=({offset}) && ({indices[-1]})<({offset})+({width})")
       self.opening("if (" + " && ".join(conditions) + ")")
       get, set_ = "get", "set"

@@ -4,8 +4,10 @@ import re
 from dataclasses import replace
 
 import numpy as np
+import pytest
 import vecops
 import vecops.language as T
+from dsl_test_utils import amx_available_for_test, make_compiler
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.cpp.matmul import MatmulEmitter
@@ -168,7 +170,7 @@ def test_aligned_cache_panels_keep_a_branch_free_amx_k_body():
     T.library.matmul((A, B), C)
 
   source = CPUBackend().lower(kernel.ir, (), target="AVX512").source
-  match = re.search(r"/\* full K: unmasked load/convert \*/\s*for \(;[^\n]+\{(.*?)\n\s*\}", source, re.S)
+  match = re.search(r"/\* full K: unmasked load/convert \*/\s*for \(;[^\n]+\{(.*?)\n\s*\}", source, re.DOTALL)
   assert match is not None
   body = match[1]
   assert body.count("vecops::vec::amx::dot<") == 4
@@ -269,6 +271,7 @@ def test_native_b_packing_crossover_preserves_transformed_and_dynamic_inputs():
   assert re.search(r"matmul_packed_\d+\.resize\(vecops_dsl::pack_size<vecops::bfloat16_t, 1>", source)
 
 
+@pytest.mark.skipif(not amx_available_for_test(), reason="explicit AMX matmul requires an x86 AMX target")
 def test_dense_packed_operands_do_not_assume_zero_padded_k(tmp_path):
   import ml_dtypes
 
@@ -282,10 +285,8 @@ def test_dense_packed_operands_do_not_assume_zero_padded_k(tmp_path):
     b = T.pack(B, side="B", format="dense")
     T.dot((a, b), C, implementation="amx")
 
-  compiler = vecops.Compiler(
+  compiler = make_compiler(
     target="Native",
-    cc="gcc",
-    cxx="g++",
     jobs=4,
     cache_dir=tmp_path / "cache",
     build_dir=tmp_path / "build",
@@ -300,6 +301,7 @@ def test_dense_packed_operands_do_not_assume_zero_padded_k(tmp_path):
   np.testing.assert_array_equal(c, a.astype(np.float32) @ b.astype(np.float32))
 
 
+@pytest.mark.skipif(not amx_available_for_test(), reason="explicit AMX matmul requires an x86 AMX target")
 def test_dynamic_k_cursors_guard_zero_length_storage(tmp_path):
   import ml_dtypes
 
@@ -314,11 +316,14 @@ def test_dynamic_k_cursors_guard_zero_length_storage(tmp_path):
   ):
     T.library.matmul((A, B), C, implementation="amx")
 
-  compiler = vecops.Compiler(
+  compiler = make_compiler(
     target="Native", cc="gcc", cxx="g++", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"
   )
   compiled = T.compile(kernel, compiler=compiler)
-  assert re.search(r"amx_k_cursor_\d+=\(\([^\n]+>0 \?[^\n]+: A.data\(\)\)", compiled.generated_source)
+  from dsl_test_utils import parameter_snapshot_name
+
+  base = re.escape(parameter_snapshot_name(compiled.generated_source, "A.data()"))
+  assert re.search(rf"amx_k_cursor_\d+=\(\([^\n]+>0 \?[^\n]+: {base}\)", compiled.generated_source)
   rng = np.random.default_rng(61)
   for k in (0, 33, 64):
     a = (rng.integers(-3, 4, (64, k + 1)) / 8).astype(ml_dtypes.bfloat16)[:, :k]
@@ -342,9 +347,7 @@ def test_matrix_alias_snapshots_preserve_column_major_inputs(tmp_path):
   ):
     T.library.matmul((A, B), C)
 
-  compiler = vecops.Compiler(
-    target="Native", cc="gcc", cxx="g++", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"
-  )
+  compiler = make_compiler(target="Native", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
   compiled = T.compile(kernel, compiler=compiler)
   rng = np.random.default_rng(47)
   for m, n, k in ((1, 17, 13), (17, 1, 13), (9, 11, 13), (17, 19, 33)):
@@ -363,9 +366,7 @@ def test_matrix_alias_snapshots_preserve_column_major_inputs(tmp_path):
 def test_partially_static_amx_families_have_no_empty_instruction_tiles(tmp_path):
   import ml_dtypes
 
-  compiler = vecops.Compiler(
-    target="Native", cc="gcc", cxx="g++", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"
-  )
+  compiler = make_compiler(target="Native", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
   requests = []
   with vecops.collect_compile_requests() as collector:
     for static_m in (True, False):

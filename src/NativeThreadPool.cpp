@@ -1,6 +1,7 @@
 // Copyright (c) vecops contributors.
 
 #include "vecops/runtime/CallAbi.h"
+#include "vecops/runtime/detail/AtomicWait.h"
 
 #include <algorithm>
 #include <atomic>
@@ -250,7 +251,7 @@ class NativeThreadPool {
     }
     const std::uint32_t count;
     std::atomic<std::uint32_t> arrived{0};
-    std::atomic<std::uint64_t> generation{0};
+    vecops::runtime::detail::AtomicWait32 generation{0};
     std::atomic<bool> cancelled{false};
   };
   struct Submission {

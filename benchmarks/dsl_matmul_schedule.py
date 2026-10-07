@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import vecops
 import vecops.language as T
-
+from dsl_benchmark_utils import add_toolchain_arguments, default_cpu, packing_geometry
 from dsl_matmul import ROOT, kernels
 from dsl_timing import isolate_compilation, reserve_cpu
 from dsl_transpose import aligned_empty, measure
@@ -24,6 +24,7 @@ from dsl_transpose import aligned_empty, measure
 def variant(compiler, m, n, k, mode, schedule, blocks):
   M, N, K = (m, n, k) if mode == "Const" else (T.dynamic(lower=0) for _ in range(3))
   BM, BN, BK = (T.Const(v) if v is not None else None for v in blocks)
+  format_ = packing_geometry("bfloat16")[0]
 
   @T.template
   def kernel(
@@ -37,9 +38,9 @@ def variant(compiler, m, n, k, mode, schedule, blocks):
       a = T.load(A)
       b = T.load(B)
       if schedule == "pack_ab":
-        a = T.pack(a, side="A", format="amx")
+        a = T.pack(a, side="A", format=format_)
       if schedule == "pack_b" or schedule == "pack_ab":
-        b = T.pack(b, side="B", format="amx")
+        b = T.pack(b, side="B", format=format_)
       if schedule == "dot" or schedule == "pack_b" or schedule == "pack_ab":
         T.dot((a, b), C)
       else:
@@ -56,7 +57,8 @@ def main():
   parser.add_argument("--rounds", type=int, default=25)
   parser.add_argument("--repeat", type=int, default=8)
   parser.add_argument("--jobs", type=int, default=6)
-  parser.add_argument("--cpu", type=int, default=2)
+  parser.add_argument("--cpu", type=int, default=default_cpu())
+  add_toolchain_arguments(parser)
   parser.add_argument("--build-dir", type=Path, default=ROOT / "build-dsl-matmul")
   parser.add_argument("--output", type=Path, required=True)
   parser.add_argument("--compact", action="store_true", help="Compare only auto, C++ and the previous B-panel budget")
@@ -67,9 +69,9 @@ def main():
   torch.set_num_threads(1)
   torch.set_num_interop_threads(1)
   compiler = vecops.Compiler(
-    target="Native",
-    cc="gcc",
-    cxx="g++",
+    target=args.target,
+    cc=args.cc,
+    cxx=args.cxx,
     jobs=args.jobs,
     cache_dir=args.build_dir / "cache",
     build_dir=args.build_dir / "build",
@@ -120,7 +122,7 @@ def main():
       b[:] = rng.integers(-3, 4, size=b.shape) / 8
       d.fill(0)
 
-      def calls(repeat):
+      def calls(repeat, a=a, b=b, c=c, d=d, schedules=schedules):
         return tuple(
           lambda kernel=kernel: kernel.operator.native(a, b, c, d, repeat, **kernel._core.specialization_values)
           for _, kernel in schedules

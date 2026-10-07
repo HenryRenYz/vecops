@@ -22,7 +22,12 @@ template <typename T>
 using WordTag = ScalableTag<T, 0>;
 
 template <typename T>
-VECOPS_ALWAYS_INLINE auto raw_word(Vec<WordTag<T>> value) noexcept {
+VECOPS_ALWAYS_INLINE typename ::vecops::vec::details::SVERawVector<T>::type
+raw_word(Vec<WordTag<T>> value) noexcept {
+  // Inline-asm operands must retain the ACLE sizeless register type. In a
+  // VLS build, deducing `auto` here leaks arm_sve_vector_bits into the asm
+  // operand and LLVM cannot allocate its "w" register constraint. The
+  // explicit return is a representation bridge, not a change of lane count.
   return ::vecops::vec::details::sve_basic_raw_word(value);
 }
 
@@ -32,7 +37,10 @@ VECOPS_ALWAYS_INLINE Vec<WordTag<T>> wrap_word(Raw value) noexcept {
 }
 
 template <typename T>
-VECOPS_ALWAYS_INLINE auto raw_mask(Mask<WordTag<T>> value) noexcept {
+VECOPS_ALWAYS_INLINE svbool_t raw_mask(Mask<WordTag<T>> value) noexcept {
+  // The same boundary applies to the "Upl" predicate constraint: returning
+  // a sized VLS mask preserves the wrong LLVM operand type. Normalize only
+  // this instruction boundary; sized Vec use in SM still requires VL=SVL.
   return ::vecops::vec::get_word<0>(WordTag<T>{}, value);
 }
 
@@ -171,6 +179,21 @@ VECOPS_ALWAYS_INLINE void addha(
         :                                                                \
         : [row] "r"(row), [tile] "i"(Tile), [pg] "Upl"(predicate),    \
           [pointer] "r"(pointer)                                        \
+        : "x12", "za", "memory");                                    \
+  }                                                                      \
+  template <int Tile>                                                    \
+  VECOPS_ALWAYS_INLINE void load_ver(                                    \
+      std::uint32_t column, Mask<WordTag<Type>> pg,                      \
+      const Type* pointer) noexcept {                                    \
+    validate_tile<Tile, Type>();                                         \
+    const auto predicate = raw_mask<Type>(pg);                           \
+    asm volatile(                                                        \
+        "mov w12, %w[column]\n\t"                                     \
+        #LoadMnemonic " {za%c[tile]v." #ZASuffix                       \
+            "[w12, 0]}, %[pg]/z, [%[pointer]]"                          \
+        :                                                                \
+        : [column] "r"(column), [tile] "i"(Tile),                      \
+          [pg] "Upl"(predicate), [pointer] "r"(pointer)                 \
         : "x12", "za", "memory");                                    \
   }                                                                      \
   template <int Tile>                                                    \

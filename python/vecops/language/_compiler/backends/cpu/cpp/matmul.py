@@ -4,18 +4,21 @@ The emitter owns no algorithm-selection passes and never calls ops::Matmul
 or its private kernel. Registers are always independent C++ identifiers.
 """
 
+from contextlib import contextmanager
 from dataclasses import replace
 
 from .... import ir as I
 from ....dtypes import ELEMENT_BYTES
-from ....ir.traversal import walk
+from ....ir.traversal import walk, walk_unique
 from ....operations import Trait
 from ..capabilities import CPP_TYPES
+from ..matmul import runtime_quant_candidate
+from .sme_packing import SMEPackingEmitter
 
 FORMATS = {"auto": -1, "dense": 0, "amx": 1, "sme": 2}
 
 
-class MatmulEmitter:
+class MatmulEmitter(SMEPackingEmitter):
   def matrix_loop(self, role, index, bindings, *, initialize=True, bound=None):
     """Print a previously planned iteration domain with target bindings."""
     loop = self.active_matmul_plan.schedule.loop(role)
@@ -231,14 +234,20 @@ class MatmulEmitter:
         f"auto {name}=vecops::vec::load_convert({tag}{{}},{pointer}+({offset}),vecops::vec::opt::first({active}){stride});"
       )
       return name
-    if along_k and packed.side == "B" and packed.format in {"amx", "sme"}:
-      kp = max(1, 4 // ELEMENT_BYTES[packed.view.dtype])
+    kp = max(1, 4 // ELEMENT_BYTES[packed.view.dtype])
+    # A fixed K tail may contain less than one packed instruction group.
+    # Reinterpreting one bf16 lane as uint32 (or 1-3 i8 lanes as uint32)
+    # is not a valid ViewAs. Preserve the grouped stream for whole groups;
+    # use the scalar packed-offset path below for incomplete fixed vectors.
+    complete_groups = self.fixed_tag_lanes.get(tag, kp) % kp == 0
+    if along_k and complete_groups and (packed.format == "sme" or packed.side == "B" and packed.format == "amx"):
       input_tag = f"vecops::vec::Rebind<{CPP_TYPES[packed.view.dtype]},{tag}>"
-      bits = f"vecops::vec::ViewAs<std::uint32_t,{input_tag}>"
+      word_type = "std::uint64_t" if ELEMENT_BYTES[packed.view.dtype] == 8 else "std::uint32_t"
+      bits = f"vecops::vec::ViewAs<{word_type},{input_tag}>"
       panel = f"vecops_dsl::pack_panel<{CPP_TYPES[packed.view.dtype]},{FORMATS[packed.format]}>()"
       name = self.unique("packed_k_stream")
       self.line(
-        f"auto {name}=vecops::vec::bitcast({input_tag}{{}},{bits}{{}},vecops::vec::load({bits}{{}},reinterpret_cast<const std::uint32_t*>({pointer}+({offset})),vecops::vec::opt::first((({active})+{kp}-1)/{kp}),vecops::vec::opt::strided({panel})));"
+        f"auto {name}=vecops::vec::bitcast({input_tag}{{}},{bits}{{}},vecops::vec::load({bits}{{}},reinterpret_cast<const {word_type}*>({pointer}+({offset})),vecops::vec::opt::first((({active})+{kp}-1)/{kp}),vecops::vec::opt::strided({panel})));"
       )
       if not native:
         converted = self.unique("packed_stream_conversion")
@@ -288,7 +297,7 @@ class MatmulEmitter:
       self.tag_dtypes[half] = dtype
       self.matrix_tag_lanes[half] = n // 2 if n is not None else None
       self.matrix_tag_powers[half] = power - 1
-      halfwidth = f"vecops::vec::size({half}{{}})"
+      halfwidth = self.vector_size(half)
       values = []
       for part in range(2):
         own = list(coords)
@@ -387,7 +396,7 @@ class MatmulEmitter:
     tag = self.matrix_tag(source.type.dtype)
     m, n = (self.scalar(v) for v in destination.shape)
     row, col = self.unique("pack_row"), self.unique("pack_col")
-    width = f"vecops::vec::size({tag}{{}})"
+    width = self.vector_size(tag)
     self.opening(f"for (vecops::nint_t {row}=0; {row} < {m}; ++{row})")
     self.opening(f"for (vecops::nint_t {col}=0; {col} < {n}; {col} += {width})")
     active = f"std::min<vecops::nint_t>({width}, ({n})-{col})"
@@ -399,7 +408,7 @@ class MatmulEmitter:
     self.close()
 
   def pack_interleaved(self, source, packed, spatial, logical_k):
-    dtype, format_, side = packed.view.dtype, packed.format, packed.side
+    dtype, format_ = packed.view.dtype, packed.format
     cpp, code = CPP_TYPES[dtype], FORMATS[format_]
     panel = self.unique("panel")
     block = self.unique("pack_kblock")
@@ -413,7 +422,10 @@ class MatmulEmitter:
       self.close()
       self.opening("else")
       self.line("#endif")
+    sme_raw = self.sme_raw_pack(source, packed, spatial, logical_k, code)
     self.pack_group_vectors(source, packed, spatial, logical_k, panel, block)
+    if sme_raw:
+      self.close_sme_raw_pack()
     if amx:
       self.line("#if defined(HAS_AMX_TILE)")
       self.close()
@@ -444,8 +456,8 @@ class MatmulEmitter:
   def pack_amx_vectors(self, source, packed, spatial, logical_k):
     dtype, side = packed.view.dtype, packed.side
     width = ELEMENT_BYTES[dtype]
-    kr, kp = 64 // width, 4 // width
-    s, k, row = (self.unique(v) for v in ("pack_panel_origin", "pack_k_origin", "pack_row"))
+    kr = 64 // width
+    s, k, _row = (self.unique(v) for v in ("pack_panel_origin", "pack_k_origin", "pack_row"))
     self.line(f"vecops::nint_t {s}=0;")
 
     def panel(full_spatial):
@@ -538,7 +550,7 @@ class MatmulEmitter:
     kp = max(1, 4 // ELEMENT_BYTES[dtype])
     power = -(kp.bit_length() - 1)
     tag = self.matrix_tag(dtype, power=power)
-    lanes = f"vecops::vec::size({tag}{{}})"
+    lanes = self.vector_size(tag)
     sp, kg, s = (self.unique(v) for v in ("pack_panel_origin", "pack_group", "pack_spatial"))
     self.opening(f"for (vecops::nint_t {sp}=0; {sp} < ({spatial}); {sp} += {panel})")
     self.opening(f"for (vecops::nint_t {kg}=0; {kg} < ({logical_k}); {kg} += {kp})")
@@ -656,7 +668,32 @@ class MatmulEmitter:
     plan = self.prepared.matmuls[id(product)]
     self.active_matmul_plan = plan
     self.emitted_regions.append(plan)
-    inputs = []
+    self.dot_inputs = {id(product): tuple(policy.expression for policy in plan.operands)}
+    a, b = self.matrix_operands(product)
+    dtype, implementation = product.type.dtype, product.data.implementation
+    native_half = a.type.dtype == b.type.dtype and a.type.dtype in {"bfloat16", "float16"} and dtype == "float32"
+    native_int = a.type.dtype in {"int8", "uint8"} and b.type.dtype in {"int8", "uint8"} and dtype == "int32"
+    amx_types = native_half or native_int
+    sme_types = amx_types or a.type.dtype == b.type.dtype == dtype and dtype in {"float32", "float64"}
+    if implementation == "amx" and not amx_types or implementation == "sme" and not sme_types:
+      raise TypeError(f"unsupported {implementation} dot dtype combination")
+    # Elide impossible *architecture* branches before printing families and
+    # transformed packing producers. Generic artifacts retain both branches;
+    # per-ISA feature/dtype availability remains guarded by C++ macros. This
+    # consults the actual frozen lowering target, never cpu_cost_target.
+    target = self.environment.codegen_target
+    amx = amx_types and target.architecture != "arm" and target.isa != "scalar"
+    sme = sme_types and target.architecture != "x86" and target.isa != "scalar"
+    # This family is ordinary SVE, despite consuming the SME packing ABI.
+    # Select it before FA64/streaming guards. One shared fallback retains all
+    # existing hardware dispatch and cache policies on an ineligible shape.
+    runtime_quant = sme and implementation == "auto" and self.sve_runtime_quant(statement, product)
+    if runtime_quant:
+      self.opening("")
+    # A family candidate is not a selected algorithm. Prepare the normal
+    # fusion/materialization/packing policy only in the generic branch;
+    # neither a rejected guard nor an ISA fallback inherits the experiment's
+    # raw-quantization policy. The accepted branch consumes the original DAG.
     for policy in plan.operands:
       expression = policy.expression
       self.line(f"/* input fusion: {policy.reason}; estimated op cost {policy.operation_cost} */")
@@ -673,16 +710,6 @@ class MatmulEmitter:
         self.store(policy.materialization)
         self.close()
         self.materialized[id(expression)] = (view, enabled)
-      inputs.append(expression)
-    self.dot_inputs = {id(product): tuple(inputs)}
-    a, b = self.matrix_operands(product)
-    dtype, implementation = product.type.dtype, product.data.implementation
-    native_half = a.type.dtype == b.type.dtype and a.type.dtype in {"bfloat16", "float16"} and dtype == "float32"
-    native_int = a.type.dtype in {"int8", "uint8"} and b.type.dtype in {"int8", "uint8"} and dtype == "int32"
-    amx = native_half or native_int
-    sme = amx or a.type.dtype == b.type.dtype == dtype and dtype in {"float32", "float64"}
-    if implementation == "amx" and not amx or implementation == "sme" and not sme:
-      raise TypeError(f"unsupported {implementation} dot dtype combination")
     # Hardware selection is target-conditional. No host ISA assumptions leak
     # into cross-compiled artifacts; explicit requests never silently fallback.
     guard = (
@@ -715,7 +742,70 @@ class MatmulEmitter:
       self.line(
         f"#if defined({smeguard}) && defined(HAS_SME_FA64) && (!defined(HAS_FIXED_SVE_BITS) || (defined(FIXED_STREAMING_SVE_BITS) && FIXED_SVE_BITS == FIXED_STREAMING_SVE_BITS))"
       )
+      if implementation == "auto":
+        # Match the C++ SME SmallVector family before entering SM: these
+        # kernels use ordinary SVE and need no ZA initialization/drain.
+        limit = 16 if a.type.dtype == "float16" else 64
+        skinny = f"(({m})==1 && ({n})<={limit}) || (({n})==1 && ({m})<={limit})"
+        packed = all(e.op == "packed_load" and e.data.format in {"sme", "auto"} for e in (a, b))
+        if packed:
+          # The packed-dot ladder mirrors the C++ SME primary/tiny leaves.
+          # K-contiguous gathers now serve both packed A and B, so no lane
+          # extraction loop or streaming-state overhead is necessary.
+          k = self.scalar(a.type.shape[1])
+          max_k = 1025 if a.type.dtype == "bfloat16" else 513
+          primary = f"((({m})==2 && ({n})==8) || (({m})==8 && ({n})==2)) && ({k})<={max_k}"
+          tiny = f"({m})==2 && (({n})==2 || ({n})==4) && ({k})<={max_k}"
+          square = f"((({m})==4 && ({n})==4) || (({m})==4 && ({n})==2)) && ({k})<=257"
+          skinny = f"({skinny}) || ({primary}) || ({tiny}) || ({square})"
+          if (
+            a.type.dtype == b.type.dtype == "bfloat16"
+            and dtype == "float32"
+            and a.data.side == "A"
+            and b.data.side == "B"
+            and not a.data.origins
+            and not b.data.origins
+            and self.hardware_scope is None
+          ):
+            # Four complete physical M blocks are already available in the
+            # native packing ABI. The ordinary K-vectorized GEMV leaf must
+            # gather these spatial panels, whereas the existing 4x1 ZA owner
+            # reads four contiguous A vectors and one shared B per K group.
+            # Limit this correction to whole, explicitly identified panels;
+            # cache windows and the primary/tiny PackedDot ladder stay intact.
+            lanes = self.sme_scalar_lanes("float32")
+            spatial = f"({n})==1 && ({m})>3*({lanes}) && ({m})<=4*({lanes})"
+            skinny = f"({skinny}) && !({spatial}) /* packed AB four-M-block column uses ZA */"
+        elif (
+          b.op == "packed_load"
+          and b.data.format in {"sme", "auto"}
+          and not any(value.op == "packed_load" for value in walk_unique(a))
+        ):
+          # The generic N-vectorized leaf has only one useful lane for a
+          # column GEMV and reads this packed B through scalar lane inserts.
+          # Unlike a raw K-contiguous B, a single SME-packed B is not an
+          # ordinary-SVE skinny candidate in the native scheduler. Preserve
+          # the existing shape limits but route N==1 through the shared ZA
+          # spatial family (four M tiles at M==4*ZA lanes), including its
+          # fused raw A, accumulator and output paths. No implicit packing.
+          skinny = f"({skinny}) && ({n})!=1 /* single-packed B column uses ZA spatial lanes */"
+          if a.type.dtype == "bfloat16":
+            # A single SME-packed B is likewise not K-contiguous for the
+            # ordinary row leaf: rebuilding every N vector uses scalar lane
+            # inserts. The shared 1x2/1x4 ZA family loads its native K groups
+            # directly. Leave FP16, raw and PackedAB dispatch unchanged.
+            skinny = f"({skinny}) && ({m})!=1 /* single-packed B row uses ZA spatial lanes */"
+        self.opening(f"if ({skinny}) /* SME ordinary-SVE skinny/packed-dot family */")
+        if packed:
+          if not self.sve_packed_mmla(statement, product):
+            self.vector_gemv_matmul(statement, product)
+        else:
+          self.vector_matrix_leaf(statement, product)
+        self.close()
+        self.opening("else")
       self.sme_matmul(statement, product)
+      if implementation == "auto":
+        self.close()
       self.line("#else")
     if implementation in {"amx", "sme"}:
       self.line(f'#error "explicit {implementation} dot requires matching target ISA/dtype and vector lengths"')
@@ -731,6 +821,8 @@ class MatmulEmitter:
       self.line("#endif")
     if amx and implementation in {"auto", "amx"}:
       self.line("#endif")
+    if runtime_quant:
+      self.close()
     self.close()
     self.chunk_cache = {}
     self.dot_inputs = {}
@@ -744,6 +836,375 @@ class MatmulEmitter:
       self.vector_gemv_matmul(statement, product)
     else:
       self.vector_matmul(statement, product)
+
+  def sve_runtime_quant(self, statement, product):
+    """Print an opt-in row-vector dot with one shared general fallback.
+
+    Four quantized K bytes form each repeated A word. Conversion happens
+    before tail zeroing, so a nonzero zero-point cannot poison padded lanes.
+    VL controls arithmetic lanes; the independent SVL-sized packed panel
+    bounds every B load. Neither ZA nor a streaming state owner is needed.
+    """
+    if not self.active_matmul_plan.sve_runtime_quant or self.hardware_scope is not None:
+      return False
+    a, b = self.matrix_operands(product)
+    if not runtime_quant_candidate(a, b, product.type.dtype, self.environment.operations):
+      return False
+    if product.data.implementation != "auto":
+      return False
+    explicit_blocks = product.data.tiled and any(
+      v is not None for v in (product.data.block_m, product.data.block_n, product.data.block_k)
+    )
+    m, n = (self.scalar(v) for v in product.type.shape)
+    k = self.scalar(a.type.shape[1])
+    packed = b.data
+    os, ok = packed.origins or (I.literal(0), I.literal(0))
+    # Logical B origins are (K,N), unlike the physical spatial/K layout.
+    origin_k, origin_n = self.scalar(os), self.scalar(ok)
+    format_code = FORMATS[packed.format]
+    gate = f"vecops_dsl::packing_format<vecops::int8_t,{format_code}> == 2 && ({origin_k})%4==0"
+    # One whole-problem three-matrix storage budget, for dot and library
+    # alike. Include the producer's FP32 storage width, not post-cast U8 or
+    # MC/NC/KC leaf extents. A cache leaf must never retry a rejected family.
+    gate += (
+      f" && vecops_dsl::matmul_fits({m},{n},{k},{self.matrix_expression_width(a)},1,4,"
+      f"{self.active_matmul_plan.runtime_unblocked_bytes})"
+    )
+    self.line("#if defined(CPU_CAPABILITY_SVE) && defined(__ARM_FEATURE_SVE_MATMUL_INT8) && defined(HAS_SME)")
+    self.opening(f"if ({gate}) /* ordinary-SVE runtime-quantized packed-B dot */")
+    if explicit_blocks:
+      span = "2*vecops::vec::sme::streaming_lanes<vecops::int32_t>()"
+      cache = self.matrix_cache_blocks(product, span, span, 4, format_="sme")
+      self.blocked_matrix_matmul(statement, product, cache, "sme", k_alignment=4, runtime_quant_family=True)
+    else:
+      self.sve_runtime_quant_rows(statement, product, m, n, k, origin_n)
+    self.close()
+    self.line("else")
+    self.line("#endif")
+    return True
+
+  def sve_runtime_quant_rows(self, statement, product, m, n, k, origin_n):
+    """FP32 pointwise DAG -> four U8 bytes -> ordinary-SVE widening dot."""
+    a, b = self.matrix_operands(product)
+    tag = self.matrix_tag("int32")
+    btag, atag, bits = (self.matrix_tag(dtype) for dtype in ("int8", "uint8", "uint32"))
+    qtag, wordtag = self.matrix_tag("uint8", lanes=4), self.matrix_tag("uint32", lanes=1)
+    lanes, panel, mm, nn, kk, active, bulk, weights = (
+      self.unique(v)
+      for v in (
+        "runtime_quant_lanes",
+        "runtime_quant_panel",
+        "runtime_quant_m",
+        "runtime_quant_n",
+        "runtime_quant_k",
+        "runtime_quant_active",
+        "runtime_quant_bulk",
+        "runtime_quant_weights",
+      )
+    )
+    self.line(f"const vecops::nint_t {lanes}={self.vector_size(tag)};")
+    self.line(f"const vecops::nint_t {panel}=vecops_dsl::pack_panel<vecops::int8_t,{FORMATS[b.data.format]}>();")
+    self.line(f"const vecops::nint_t {bulk}=({k})-({k})%4;")
+    self.opening(f"for (vecops::nint_t {mm}=0;{mm}<({m});++{mm})")
+    self.opening(f"for (vecops::nint_t {nn}=0;{nn}<({n});)")
+    self.line(
+      f"const vecops::nint_t {active}=std::min<vecops::nint_t>({lanes},std::min<vecops::nint_t>(({n})-{nn},{panel}-(({origin_n})+{nn})%{panel}));"
+    )
+    self.line(
+      f"const auto* const {weights}=({k})>0 ? {self.pointer(b.data.view)}+({self.packed_offset(b.data, nn, '0')}) : {self.pointer(b.data.view)};"
+    )
+    result = self.unique("runtime_quant_prior")
+    self.line(f"auto {result}=vecops::vec::zeros({tag}{{}});")
+    phase = getattr(self, "matrix_phase", None)
+    coords = (mm, nn)
+    if phase is not None:
+      self.opening(f"if ({phase[0]})")
+    if product.args[2:]:
+      self.chunk_cache = {}
+      initial = self.vector(product.args[2], tag, product.type.shape, coords, active, 1)
+      self.line(f"{result}={initial};")
+    if phase is not None:
+      self.close()
+      self.opening("else /* corrected integer running sum, not correction again */")
+      stride = phase[2].strides[1]
+      extra = "" if I.constant(stride) == 1 else f",vecops::vec::opt::strided({self.scalar(stride)})"
+      self.line(
+        f"{result}=vecops::vec::load({tag}{{}},{self.pointer(phase[2], coords)},vecops::vec::opt::first({active}){extra});"
+      )
+      self.close()
+    self.line(f"vecops::nint_t {kk}=0;")
+
+    def step(count, full):
+      previous_full = getattr(self, "full_vector", False)
+      self.full_vector = full
+      quantized = self.matrix_value(a, qtag, (mm, kk), count, 1)
+      if not full:
+        zero = self.unique("runtime_quant_tail_zero")
+        self.line(
+          f"auto {zero}=vecops::vec::blend({qtag}{{}},vecops::vec::zeros({qtag}{{}}),vecops::vec::mwhilelt({qtag}{{}},0,{count}),{quantized});"
+        )
+        quantized = zero
+      group, repeated, values = (
+        self.unique(v) for v in ("runtime_quant_word", "runtime_quant_repeated", "runtime_quant_b")
+      )
+      self.line(
+        f"const auto {group}=vecops::vec::get({wordtag}{{}},vecops::vec::bitcast({wordtag}{{}},{qtag}{{}},{quantized}),0);"
+      )
+      self.line(f"auto {repeated}=vecops::vec::bitcast({atag}{{}},{bits}{{}},vecops::vec::fill({bits}{{}},{group}));")
+      self.line(
+        f"auto {values}=vecops::vec::load({btag}{{}},{weights}+{kk}*{panel},vecops::vec::opt::first({active}*4),vecops::vec::opt::zero);"
+      )
+      self.line(f"{result}=vecops::vec::widening_dot({tag}{{}},{atag}{{}},{btag}{{}},{repeated},{values},{result});")
+      self.full_vector = previous_full
+
+    self.opening(f"for (;{kk}<{bulk};{kk}+=4) /* four complete quantized K lanes */")
+    step("4", True)
+    self.close()
+    self.opening(f"if ({kk}<({k})) /* quantized K tail: mask after conversion */")
+    step(f"({k})-{kk}", False)
+    self.close()
+    self.vector_matrix_epilogue(statement, product, tag, coords, active, result)
+    self.line(f"{nn}+={active};")
+    self.close()
+    self.close()
+    self.chunk_cache = {}
+
+  def sve_packed_mmla(self, statement, product, *, fallback=None):
+    """Ordinary-SVE segment MACs over the existing SME PackedAB ABI.
+
+    Keep a general widening-dot fallback: a same-VL/SVL pair alone does not
+    prove that one register can contain a particular small matrix. Sliced
+    packed windows must also stay in a panel and start on a K-group boundary.
+    The final partial K group is legal only at the original matrix's end.
+    BF16 clears its nonlogical K half explicitly, including external packed
+    storage whose padding is not zero. Full-group register loads remain
+    bounded by the current physical panel, even for shifted cache windows.
+    """
+    a, b = self.matrix_operands(product)
+    dtype = a.type.dtype
+    if (
+      self.hardware_scope is not None
+      or dtype != b.type.dtype
+      or (dtype, product.type.dtype) not in {("bfloat16", "float32"), ("int8", "int32"), ("uint8", "int32")}
+      or any(operand.op != "packed_load" or operand.data.format not in {"sme", "auto"} for operand in (a, b))
+      # An optional auto-packed A has no storage on its raw branch. The SME
+      # family dispatches that branch before K; ordinary MMLA must not mistake
+      # the conditional descriptor for an unconditionally available buffer.
+      or any(id(operand) in getattr(self, "sme_optional_packs", {}) for operand in (a, b))
+    ):
+      return False
+    state = self.environment.vector_state
+    vl, svl = getattr(state, "sve_bytes", None), getattr(state, "sme_bytes", None)
+    if vl is not None and svl is not None and vl != svl:
+      return False
+    m, n = (self.scalar(v) for v in product.type.shape)
+    k = self.scalar(a.type.shape[1])
+    known_m, known_n = (I.constant(v) for v in product.type.shape)
+    max_k, kp = (1025, 2) if dtype == "bfloat16" else (513, 4)
+    cases = (
+      (2, 2, 16, max_k),
+      (2, 4, 32, max_k),
+      (2, 8, 64, max_k),
+      (4, 2, 32, 257),
+      (4, 4, 32, 257),
+      (8, 2, 64, max_k),
+    )
+    cases = tuple(
+      case
+      for case in cases
+      if (not isinstance(known_m, int) or known_m == case[0])
+      and (not isinstance(known_n, int) or known_n == case[1])
+      and (vl is None or vl >= case[2])
+    )
+    if not cases:
+      return False
+    feature = "__ARM_FEATURE_SVE_BF16" if dtype == "bfloat16" else "__ARM_FEATURE_SVE_MATMUL_INT8"
+    self.line(f"#if defined({feature})")
+    bytes_ = self.vector_size("vecops::vec::ScalableTag<vecops::uint8_t, 0>")
+    panels = tuple(
+      f"vecops_dsl::pack_panel<{CPP_TYPES[dtype]}, {FORMATS[operand.data.format]}>()" for operand in (a, b)
+    )
+    shape_gate = " || ".join(
+      f"(({m})=={rows} && ({n})=={columns} && ({k})<={limit} && ({bytes_})>={minimum})"
+      for rows, columns, minimum, limit in cases
+    )
+    geometry = [f"({panels[0]})==({panels[1]})", f"({bytes_})==2*({panels[0]})"]
+    full_loads = []
+    for operand, spatial, panel in zip((a, b), (m, n), panels):
+      data = operand.data
+      origins = data.origins or (I.literal(0), I.literal(0))
+      os, ok = origins if data.side == "A" else origins[::-1]
+      os, ok = self.scalar(os), self.scalar(ok)
+      original_k = self.scalar(data.shape[1 if data.side == "A" else 0])
+      geometry.extend(
+        (
+          f"({os})>=0 && ({spatial})<=({panel})-({os})%({panel})",
+          f"({ok})>=0 && ({ok})%{kp}==0",
+          f"(({k})%{kp}==0 || ({k})==({original_k})-({ok}))",
+        )
+      )
+      # A full ordinary-SVE register may read spatial padding, but never
+      # cross the current physical K group's panel boundary. MMLA segments
+      # do not reduce across rows/columns: padding contributes only to
+      # discarded outputs, irrespective of its stored value.
+      full_loads.append(f"({os})%({panel})<=({panel})-({bytes_})/{ELEMENT_BYTES[dtype] * kp}")
+    self.opening(f"if (({shape_gate}) && {' && '.join(geometry)}) /* ordinary-SVE PackedDot MMLA */")
+    atag, tag = self.matrix_tag(dtype), self.matrix_tag(product.type.dtype)
+    groups, group = self.unique("mmla_groups"), self.unique("mmla_group")
+    self.line(f"const vecops::nint_t {groups}=({k})/{kp}+(({k})%{kp}!=0);")
+    bases, strides = [], []
+    for operand, panel in zip((a, b), panels):
+      base, stride = self.unique("mmla_packed_base"), self.unique("mmla_group_stride")
+      pointer = self.pointer(operand.data.view)
+      # An empty K has no allocation. Do not form even a zero-offset pointer
+      # expression through that null storage while initializing accumulators.
+      offset = self.packed_offset(operand.data, "0", "0")
+      self.line(f"const auto* {base}=({k})>0 ? {pointer}+({offset}) : {pointer};")
+      self.line(f"const vecops::nint_t {stride}=({panel})*{kp};")
+      bases.append(base)
+      strides.append(stride)
+    row_families = tuple(sorted({case[0] for case in cases}, reverse=True))
+    for index, rows in enumerate(row_families):
+      self.opening(f"{'if' if index == 0 else 'else if'} (({m})=={rows}) /* MMLA {rows}-row family */")
+      self.sve_packed_mmla_rows(
+        statement, product, atag, tag, rows, n, k, groups, group, bases, strides, kp, full_loads
+      )
+      self.close()
+    self.close()
+    self.line("else")
+    # The fallback belongs to the same lexical if on MMLA targets and is an
+    # unconditional block elsewhere. Emit the large GEMV family only once.
+    self.line("#endif")
+    self.opening("")
+    (fallback or self.vector_gemv_matmul)(statement, product)
+    self.close()
+    return True
+
+  def sve_packed_mmla_rows(
+    self, statement, product, atag, tag, rows, n, k, groups, group, bases, strides, kp, full_loads
+  ):
+    """Paired K groups, named accumulators, then logical-coordinate fusion."""
+    bf16 = self.tag_dtypes[atag] == "bfloat16"
+    full_groups = self.unique("mmla_full_groups") if bf16 else groups
+    if bf16:
+      self.line(f"const vecops::nint_t {full_groups}=({k})/{kp};")
+    accumulators = tuple(self.unique("mmla_accumulator") for _ in range(2 if rows == 4 else 1))
+    for accumulator in accumulators:
+      self.line(f"auto {accumulator}=vecops::vec::zeros({tag}{{}});")
+
+    def clear_partial_k(value):
+      # The final physical dword has only its low BF16 half in logical K.
+      # Clear bits, not FP values: arbitrary NaN/nonzero external padding
+      # must not participate in MMLA or alter valid lanes.
+      bits = "vecops::vec::ScalableTag<vecops::uint32_t, 0>"
+      self.line(
+        f"{value}=vecops::vec::bitcast({atag}{{}},{bits}{{}},"
+        f"vecops::vec::bit_and({bits}{{}},vecops::vec::bitcast({bits}{{}},{atag}{{}},{value}),"
+        f"vecops::vec::fill({bits}{{}},vecops::uint32_t{{0xffff}})));"
+      )
+
+    def step(paired, *, full=False, partial=False):
+      inputs = []
+      for base, stride, active in zip(bases, strides, (str(rows * kp), f"({n})*{kp}")):
+        first, second = self.unique("mmla_group_first"), self.unique("mmla_group_second")
+        options = "" if full else f",vecops::vec::opt::first({active}),vecops::vec::opt::zero"
+        self.line(f"auto {first}=vecops::vec::load({atag}{{}},{base}+{group}*{stride}{options});")
+        if partial and not paired:
+          self.opening(f"if ({group}=={full_groups}) /* partial logical K, not padding */")
+          clear_partial_k(first)
+          self.close()
+        if paired:
+          self.line(f"auto {second}=vecops::vec::load({atag}{{}},{base}+({group}+1)*{stride}{options});")
+          if partial:
+            clear_partial_k(second)
+        else:
+          self.line(f"auto {second}=vecops::vec::zeros({atag}{{}});")
+        joined = self.unique("mmla_joined")
+        self.line(f"auto {joined}=vecops::vec::sve::join_k_groups({atag}{{}},{first},{second});")
+        inputs.append(joined)
+      for index, accumulator in enumerate(accumulators):
+        left, right = inputs
+        broadcast = self.unique("mmla_segment")
+        source = right if rows == 8 else left
+        self.line(f"auto {broadcast}=vecops::vec::sve::broadcast_segment<{index}>({atag}{{}},{source});")
+        left, right = (left, broadcast) if rows == 8 else (broadcast, right)
+        self.line(
+          f"{accumulator}=vecops::vec::sve::mmla({tag}{{}},{atag}{{}},{atag}{{}},{left},{right},{accumulator});"
+        )
+
+    self.line(f"vecops::nint_t {group}=0;")
+    if bf16:
+      # Unswitch once, outside the K loop. Full-group unmasked loads avoid
+      # BF16 inactive-lane blending without weakening masked-load semantics
+      # for shifted packed windows near a physical panel's end.
+      self.opening(f"if ({' && '.join(full_loads)}) /* MMLA full physical register fits */")
+      self.opening(f"for (;({full_groups})-{group}>=2;{group}+=2) /* MMLA two complete K groups */")
+      step(True, full=True)
+      self.close()
+      self.close()
+      self.opening("else")
+      self.opening(f"for (;({full_groups})-{group}>=2;{group}+=2) /* MMLA masked two complete K groups */")
+      step(True)
+      self.close()
+      self.close()
+      self.opening(f"if (({groups})-{group}==2) /* MMLA one complete and one partial K group */")
+      step(True, partial=True)
+      self.close()
+      self.opening(f"else if ({group}<({groups})) /* MMLA odd group: no second-group read */")
+      step(False, partial=True)
+    else:
+      self.opening(f"for (;({groups})-{group}>=2;{group}+=2) /* MMLA two complete K groups */")
+      step(True)
+      self.close()
+      self.opening(f"if ({group}<({groups})) /* MMLA odd group: no second-group read */")
+      step(False)
+    self.close()
+    phase = getattr(self, "matrix_phase", None)
+    initial = product.args[2:]
+    direct = (
+      rows == 8
+      and not initial
+      and phase is None
+      and statement.value is product
+      and statement.destination.dtype == product.type.dtype
+      and statement.mask is None
+    )
+    if direct:
+      stride0, stride1 = (self.scalar(s) for s in statement.destination.strides)
+      self.opening(f"if (({stride0})==2 && ({stride1})==1) /* contiguous 8x2 MMLA output */")
+      self.line(
+        f"vecops::vec::store({tag}{{}},{self.pointer(statement.destination, ('0', '0'))},{accumulators[0]},vecops::vec::opt::first(16));"
+      )
+      self.close()
+      self.opening("else")
+    for row in range(rows):
+      value = self.unique("mmla_output_row")
+      accumulator = accumulators[row // 2] if rows == 4 else accumulators[0]
+      if rows == 8:
+        segment = self.unique("mmla_output_segment")
+        self.line(f"auto {segment}=vecops::vec::sve::broadcast_segment<{row // 2}>({tag}{{}},{accumulator});")
+        accumulator = segment
+      self.line(f"auto {value}=vecops::vec::sve::row_pair<{row % 2}>({tag}{{}},{accumulator});")
+      coords = (str(row), "0")
+      self.chunk_cache = {}
+      if phase is not None:
+        self.opening(f"if ({phase[0]})")
+      if initial:
+        seed = self.vector(initial[0], tag, product.type.shape, coords, n, 1)
+        self.line(f"{value}=vecops::vec::add({tag}{{}},{value},{seed});")
+      if phase is not None:
+        self.close()
+        self.opening("else")
+        stride = phase[2].strides[1]
+        extra = "" if I.constant(stride) == 1 else f",vecops::vec::opt::strided({self.scalar(stride)})"
+        self.line(
+          f"{value}=vecops::vec::add({tag}{{}},{value},vecops::vec::load({tag}{{}},{self.pointer(phase[2], coords)},vecops::vec::opt::first({n}){extra}));"
+        )
+        self.close()
+      self.vector_matrix_epilogue(statement, product, tag, coords, n, value)
+    if direct:
+      self.close()
+    self.chunk_cache = {}
 
   def vector_matrix_epilogue(self, statement, product, tag, coords, active, value, axis=1, *, legalized=False):
     phase = getattr(self, "matrix_phase", None)
@@ -780,7 +1241,7 @@ class MatmulEmitter:
       half = self.unique("epilogue_half_tag")
       self.line(f"using {half}=vecops::vec::Half<{tag}>;")
       self.tag_dtypes[half] = product.type.dtype
-      halfwidth = f"vecops::vec::size({half}{{}})"
+      halfwidth = self.vector_size(half)
       for part, op in enumerate(("lower", "upper")):
         fragment = self.unique("epilogue_fragment")
         self.line(f"auto {fragment}=vecops::vec::{op}({tag}{{}},{accumulator});")
@@ -819,8 +1280,12 @@ class MatmulEmitter:
       a, b = b, a
     initial = product.args[2:]
     dtype = product.type.dtype
+    # Half inputs retain their rounding boundary before grouped FP32 MACs.
+    # The public primitive selects FMLALB/T on ordinary SVE2, or a portable
+    # widening fallback elsewhere; no ISA instruction leaks into this driver.
     narrow = ELEMENT_BYTES[a.type.dtype] == ELEMENT_BYTES[b.type.dtype] < ELEMENT_BYTES[dtype] and (
-      a.type.dtype == b.type.dtype == "bfloat16"
+      a.type.dtype == b.type.dtype
+      and a.type.dtype in {"bfloat16", "float16"}
       and dtype == "float32"
       or a.type.dtype in {"int8", "uint8"}
       and b.type.dtype in {"int8", "uint8"}
@@ -837,7 +1302,7 @@ class MatmulEmitter:
       m, n = n, m
     k = self.scalar(a.type.shape[0 if transpose else 1])
     mi, ni, ki = (self.unique(v) for v in ("gemv_m", "gemv_n", "gemv_k"))
-    width = f"vecops::vec::size({atag}{{}})"
+    width = self.vector_size(atag)
     tail = remainder_columns > 0
     column_count = remainder_columns or self.active_matmul_plan.vector_columns
     unroll = (
@@ -989,12 +1454,11 @@ class MatmulEmitter:
       self.close()
     self.close()
     self.close()
-    if separate_tail and not tail and column_count > 1:
-      # Known narrowed groups divide N exactly and need no remainder.
-      if column_count == self.active_matmul_plan.vector_columns:
-        if column_count > 2:
-          self.vector_k_matmul(statement, product, transpose=transpose, remainder_columns=2)
-        self.vector_k_matmul(statement, product, transpose=transpose, remainder_columns=1)
+    # Known narrowed groups divide N exactly and need no remainder.
+    if separate_tail and not tail and column_count > 1 and column_count == self.active_matmul_plan.vector_columns:
+      if column_count > 2:
+        self.vector_k_matmul(statement, product, transpose=transpose, remainder_columns=2)
+      self.vector_k_matmul(statement, product, transpose=transpose, remainder_columns=1)
 
   def gemv_grouped_output(self, statement, product, tag, accumulators, mi, ni, n, transpose, lanes):
     """Group completed independent dots before math, never scalar exp per C."""
@@ -1246,8 +1710,6 @@ class MatmulEmitter:
     a, b = self.automatic_matrix_packing(product, "amx", single_m_tile=single_m_tile)
     cfg, session, scope = (self.unique(v) for v in ("dot_tilecfg", "dot_session", "dot_scope"))
     self.line(f"vecops::execution::amx::TileConfiguration {cfg};")
-    native_m = min(16, cm) if isinstance(cm, int) and cm > 0 else 16
-    native_n = min(16, cn) if isinstance(cn, int) and cn > 0 else 16
     row_counts = (
       tuple(min(16, cm - r * 16) for r in range(rows))
       if isinstance(cm, int) and 0 < cm <= rows * 16
@@ -1430,7 +1892,7 @@ class MatmulEmitter:
             if I.constant(self.active_matmul_plan.expression.args[0].type.shape[1]) is None:
               # Zero-length tensors permit arbitrary spatial strides. Do not
               # even form a row-offset pointer when the cursor will be unused.
-              address = f"(({k})>0 ? {address} : {operand.data.storage}.data())"
+              address = f"(({k})>0 ? {address} : {self.storage_pointer(operand.data.storage)})"
             stride = f"({stride})*{ELEMENT_BYTES[operand.type.dtype]}"
           self.line(f"auto* {pointer}={address}; /* invariant AMX K cursor */")
           cursors[tile] = (pointer, stride, guaranteed)
@@ -1522,7 +1984,13 @@ class MatmulEmitter:
     self.line("});")
 
   def amx_partial_load(self, view, tile, ro, co, m, n, tag, scratch):
-    self.opening(f"if ({ro}+16<=({m}) && {co}+16<=({n}))")
+    # Output-backed split-K accumulators inherit the caller's layout. AMX
+    # memory tiles support a row byte stride, not a column element stride.
+    # Use the vector staging path for nonunit/reversed columns just as for
+    # spatial fringes, without changing the partial accumulator's ownership.
+    stride = self.scalar(view.strides[1])
+    extra = "" if I.constant(view.strides[1]) == 1 else f",vecops::vec::opt::strided({stride})"
+    self.opening(f"if ({ro}+16<=({m}) && {co}+16<=({n}) && ({stride})==1)")
     self.line(f"vecops::vec::amx::load<{tile}>({self.pointer(view, (ro, co))},({self.scalar(view.strides[0])})*4);")
     self.close()
     self.opening("else")
@@ -1533,7 +2001,7 @@ class MatmulEmitter:
     self.opening(f"if ({ro}+{row}<({m}) && {co}<({n}))")
     active = f"std::min<vecops::nint_t>(16,({n})-{co})"
     self.line(
-      f"{value}=vecops::vec::load({tag}{{}},{self.pointer(view, (f'({ro}+{row})', co))},vecops::vec::opt::first({active}));"
+      f"{value}=vecops::vec::load({tag}{{}},{self.pointer(view, (f'({ro}+{row})', co))},vecops::vec::opt::first({active}){extra});"
     )
     self.close()
     self.line(f"vecops::vec::store({tag}{{}},{scratch}+{row}*16,{value});")
@@ -1542,7 +2010,9 @@ class MatmulEmitter:
     self.close()
 
   def amx_partial_store(self, view, tile, ro, co, m, n, tag, scratch):
-    self.opening(f"if ({ro}+16<=({m}) && {co}+16<=({n}))")
+    stride = self.scalar(view.strides[1])
+    extra = "" if I.constant(view.strides[1]) == 1 else f",vecops::vec::opt::strided({stride})"
+    self.opening(f"if ({ro}+16<=({m}) && {co}+16<=({n}) && ({stride})==1)")
     self.line(f"vecops::vec::amx::store<{tile}>({self.pointer(view, (ro, co))},({self.scalar(view.strides[0])})*4);")
     self.close()
     self.opening("else")
@@ -1553,20 +2023,38 @@ class MatmulEmitter:
     self.line(f"auto {value}=vecops::vec::load({tag}{{}},{scratch}+{row}*16);")
     active = f"std::min<vecops::nint_t>(16,({n})-{co})"
     self.line(
-      f"vecops::vec::store({tag}{{}},{self.pointer(view, (f'({ro}+{row})', co))},{value},vecops::vec::opt::first({active}));"
+      f"vecops::vec::store({tag}{{}},{self.pointer(view, (f'({ro}+{row})', co))},{value},vecops::vec::opt::first({active}){extra});"
     )
     self.close()
     self.close()
+
+  @staticmethod
+  def slice_matrix_axis(extent, origin, size):
+    """Keep runtime singleton broadcasts in their original coordinates.
+
+    A cache panel does not turn a singleton input into a panel-sized load.
+    Preserve both origin zero and extent one before rebinding the local DAG,
+    including its captured snapshots/materializations. Known nonsingletons
+    retain the original branch-free slicing representation.
+    """
+    constant = I.constant(extent)
+    if constant == 1:
+      return I.literal(0), extent
+    if constant is not None:
+      return origin, size
+    singleton = I.binary("eq", extent, I.literal(1))
+    return (
+      I.Expr(origin.type, "where", (singleton, I.literal(0), origin)),
+      I.Expr(size.type, "where", (singleton, I.literal(1), size)),
+    )
 
   def slice_matrix_view(self, view, origins, shape):
     offset = view.offset
     sizes = []
     for extent, stride, origin, size in zip(view.shape, view.strides, origins, shape):
-      if I.constant(extent) == 1:
-        sizes.append(extent)
-      else:
-        offset = I.binary("add", offset, I.binary("mul", origin, stride))
-        sizes.append(size)
+      origin, size = self.slice_matrix_axis(extent, origin, size)
+      offset = I.binary("add", offset, I.binary("mul", origin, stride))
+      sizes.append(size)
     return replace(view, offset=offset, shape=tuple(sizes))
 
   def slice_matrix_value(self, value, origins, shape, memo=None):
@@ -1588,14 +2076,17 @@ class MatmulEmitter:
       value = replace(value, type=I.TileType(value.type.dtype, promoted_shape, value.type.mask), data=data)
     if len(value.type.shape) != 2:
       raise TypeError("cache panel slicing requires rank-two DAGs")
-    sizes = tuple(extent if I.constant(extent) == 1 else size for extent, size in zip(value.type.shape, shape))
+    axes = tuple(
+      self.slice_matrix_axis(extent, origin, size) for extent, origin, size in zip(value.type.shape, origins, shape)
+    )
+    sizes = tuple(size for _, size in axes)
     data = self.slice_matrix_view(value.data, origins, shape) if value.op == "load" else value.data
     if value.op == "packed_load":
       old = value.data.origins or (I.literal(0), I.literal(0))
-      data = replace(value.data, origins=tuple(I.binary("add", a, b) for a, b in zip(old, origins)))
+      data = replace(value.data, origins=tuple(I.binary("add", old_axis, axis[0]) for old_axis, axis in zip(old, axes)))
     args = tuple(self.slice_matrix_value(a, origins, shape, memo) for a in value.args)
     if value.op == "arange":
-      args = (I.binary("add", args[0], origins[data if data is not None else 1]),)
+      args = (I.binary("add", args[0], axes[data if data is not None else 1][0]),)
     result = replace(value, type=I.TileType(value.type.dtype, sizes, value.type.mask), data=data, args=args)
     self.retain_expression(result)
     memo[id(original)] = result
@@ -1611,13 +2102,120 @@ class MatmulEmitter:
       self.snapshots[id(result)] = (self.slice_matrix_view(view, origins, shape), enabled)
     return result
 
-  def emit_matrix_pack(self, operand, side, format_, policy):
+  def sme_native_a_pack(self, operand, columns):
+    """Conditionally pack native A, dispatching its load path before K.
+
+    Only the library's automatic SME policy reaches this entry. Raw GEMV,
+    spatially contiguous/broadcast loads and high-padding skinny matrices
+    retain their existing route. The cache driver supplies NC, not full N:
+    this copy is deliberately not credited with reuse across other N panels.
+    """
+    plan = self.active_matmul_plan
+    policy = plan.sme_native_a_packing
+    if (
+      policy is None
+      or not plan.options.tiled
+      or plan.options.packing != "auto"
+      or operand.op != "load"
+      or operand.args
+      or operand.data.dtype != operand.type.dtype
+      or I.constant(operand.data.strides[1]) != 1
+      or I.constant(operand.data.strides[0]) in (0, 1)
+    ):
+      return operand
+    m_expr, k_expr = operand.type.shape
+    dtype, acc_dtype = operand.type.dtype, plan.expression.type.dtype
+    kp, element_bytes = max(1, 4 // ELEMENT_BYTES[dtype]), ELEMENT_BYTES[dtype]
+    known = tuple(I.constant(v) for v in (m_expr, columns, k_expr))
+    if any(isinstance(v, int) and v <= minimum for v, minimum in zip(known, (1, 1, 0))):
+      return operand
+    svl = self.environment.vector_state.sme_bytes
+    # Exact tiny/small metadata incurs neither scratch nor runtime dispatch.
+    if all(isinstance(v, int) for v in known) and svl is not None:
+      if not policy.profitable(
+        *known,
+        panel=2 * svl // ELEMENT_BYTES[acc_dtype],
+        lanes=svl // ELEMENT_BYTES[acc_dtype],
+        k_group=kp,
+        element_bytes=element_bytes,
+      ):
+        return operand
+      if I.constant(operand.data.strides[0]) is not None:
+        return self.emit_matrix_pack(operand, "A", "sme", "A")
+
+    enabled = self.unique("sme_native_a_pack_profitable")
+    self.line(f"bool {enabled}=false;")
+    m, n, k = (self.scalar(v) for v in (m_expr, columns, k_expr))
+    stride = self.scalar(operand.data.strides[0])
+    self.opening(f"if (({m})>1 && ({n})>1 && ({k})>0 && ({stride})!=0 && ({stride})!=1)")
+    names = tuple(self.unique(f"sme_pack_cost_{name}") for name in ("m", "n", "k", "panel", "lanes"))
+    cm, cn, ck, panel, lanes = names
+    for name, value in zip(
+      names,
+      (
+        m,
+        n,
+        k,
+        f"vecops_dsl::pack_panel<{CPP_TYPES[dtype]},2>()",
+        f"vecops::vec::sme::streaming_lanes<{CPP_TYPES[acc_dtype]}>()",
+      ),
+    ):
+      self.line(f"const __int128 {name}=({value});")
+    logical, physical, output, pm, pk = (
+      self.unique(f"sme_pack_cost_{name}") for name in ("logical", "physical", "output", "padded_m", "padded_k")
+    )
+    self.line(f"const __int128 {logical}={cm}*{ck}, {output}={cm}*{cn};")
+    self.line(f"const __int128 {pm}=(({cm}+{panel}-1)/{panel})*{panel}, {pk}=(({ck}+{kp - 1})/{kp})*{kp};")
+    self.line(f"const __int128 {physical}={pm}*{pk};")
+    limit = "std::numeric_limits<vecops::nint_t>::max()"
+    self.opening(
+      f"if ({logical}<={limit} && {output}<={limit} && {cn}*{ck}<={limit} && {physical}<={limit}/{element_bytes})"
+    )
+    span, reuse, groups, saving, traffic = (
+      self.unique(f"sme_pack_cost_{name}") for name in ("column_span", "reuse", "groups", "saving", "traffic")
+    )
+    expanded_columns = f" || ({cm}>=2*{lanes} && {cm}<4*{lanes} && {cn}>=4*{lanes})" if element_bytes == 8 else ""
+    self.line(f"const __int128 {span}=({cm}<={lanes}{expanded_columns}?4:({cn}<={lanes}?1:2))*{lanes};")
+    self.line(f"const __int128 {reuse}=({cn}+{span}-1)/{span};")
+    self.line(f"const __int128 {groups}=(({cm}+{lanes}-1)/{lanes})*(({ck}+{kp - 1})/{kp});")
+    self.line(
+      f"const __int128 {saving}={groups}*{policy.gather_cycles - policy.contiguous_cycles}*{policy.packing_bytes_per_cycle};"
+    )
+    self.line(
+      f"const __int128 {traffic}=({logical}+{physical})*{element_bytes}+{policy.packing_setup_cycles * policy.packing_bytes_per_cycle};"
+    )
+    self.line(
+      f"{enabled}=({output}>={policy.minimum_spatial_pairs} && {output}*{ck}>={policy.minimum_work} "
+      f"&& {reuse}>={policy.minimum_reuse_groups} && {physical}<={logical}*{policy.maximum_padding_ratio} "
+      f"&& {reuse}-1>=({traffic}+{saving}-1)/{saving}); /* SME native A: NC-local gather versus padded pack cost */"
+    )
+    self.close()
+    self.close()
+    # A false decision must not resize a buffer or enter a packing SM owner.
+    # Pack's internal alias checks are scoped to this branch; preserve the raw
+    # operand's original snapshot map for the false K-body as well.
+    snapshots = dict(self.snapshots)
+    self.opening(f"if ({enabled}) /* pack A only when the actual panel amortizes it */")
+    packed = self.emit_matrix_pack(operand, "A", "sme", "A")
+    self.close()
+    self.snapshots = snapshots
+    self.retain_expression(packed)
+    if not hasattr(self, "sme_optional_packs"):
+      self.sme_optional_packs = {}
+    self.sme_optional_packs[id(packed)] = operand, enabled
+    return packed
+
+  def emit_matrix_pack(self, operand, side, format_, policy, *, native_a_columns=None):
     direct = operand.op == "load" and not operand.args and operand.data.dtype == operand.type.dtype
     contiguous = I.constant(operand.data.strides[1 if side == "A" else 0]) == 1 if direct else False
     if operand.op == "packed_load" or policy == "none" or policy != "auto" and side not in policy:
       return operand
     if policy == "auto" and side == "A" and direct and contiguous:
-      return operand
+      return (
+        self.sme_native_a_pack(operand, native_a_columns)
+        if format_ == "sme" and native_a_columns is not None
+        else operand
+      )
     storage = self.unique("panel_packed")
     count = self.packing_size(operand.type.shape, operand.type.dtype, format_, side)
     self.allocate_buffer(operand.type.dtype, storage, count)
@@ -1675,6 +2273,7 @@ class MatmulEmitter:
     amx_family=None,
     single_m_tile=False,
     amx_full_extents=(False, False, False),
+    runtime_quant_family=False,
   ):
     """NC/KC/MC traversal: bounded panels, native partial C, phased fusion."""
     a, b = self.matrix_operands(product)
@@ -1726,7 +2325,8 @@ class MatmulEmitter:
     self.line(f"const auto {mm}=std::min<vecops::nint_t>({bm},({self.scalar(m)})-{mb});")
     av = self.slice_matrix_value(a, (raw(mb), raw(kb)), (ms, ks))
     self.matrix_prefetch(a, (mb, future_k), f"({self.scalar(k)})-({kb})>({bk})")
-    av = self.emit_matrix_pack(av, "A", format_, product.data.packing)
+    if not runtime_quant_family:
+      av = self.emit_matrix_pack(av, "A", format_, product.data.packing, native_a_columns=ns)
     initial = tuple(self.slice_matrix_value(seed, (raw(mb), raw(nb)), (ms, ns)) for seed in product.args[2:])
     local = replace(
       product,
@@ -1750,7 +2350,23 @@ class MatmulEmitter:
         full_extents=amx_full_extents,
       )
     else:
-      emit(replace(statement, destination=sink, value=value, mask=mask), local)
+      local_statement = replace(statement, destination=sink, value=value, mask=mask)
+      if runtime_quant_family:
+        # The original packed-B origin and whole-problem gate were accepted
+        # before entering the cache driver. BK uses the four-byte dot quantum,
+        # so every sliced K origin remains aligned and the final tail is the
+        # original matrix's end. Prior/correction and epilogue keep their
+        # existing first/final phase guards; there is no leaf redispatch.
+        self.sve_runtime_quant_rows(
+          local_statement,
+          local,
+          self.scalar(ms),
+          self.scalar(ns),
+          self.scalar(ks),
+          self.scalar(bv.data.origins[1]),
+        )
+      elif format_ != "sme" or not self.sve_packed_mmla(local_statement, local, fallback=emit):
+        emit(local_statement, local)
     self.matrix_phase = old_phase
     self.close()
     self.close()
@@ -1816,6 +2432,11 @@ class MatmulEmitter:
       if operand.op == "packed_load":
         continue
       policy = product.data.packing
+      if format_ == "sme" and policy == "auto" and side == "A":
+        direct = operand.op == "load" and not operand.args and operand.data.dtype == operand.type.dtype
+        if direct and I.constant(operand.data.strides[1]) == 1:
+          operands[index] = self.sme_native_a_pack(operand, product.type.shape[1])
+          continue
       skip_b = (
         single_m_tile
         if format_ == "amx"
@@ -1850,160 +2471,817 @@ class MatmulEmitter:
     native = self.matrix_tag(dtype)
     if operand.op == "packed_load" and operand.data.format in {"sme", "auto"}:
       value = self.unique("sme_packed")
-      self.line(f"auto {value}=vecops::vec::zeros({native}{{}});")
-      self.opening(f"if (({origin})<({spatial}))")
-      offset = self.packed_offset(operand.data, origin, ki)
-      self.line(f"{value}=vecops::vec::load({native}{{}}, {self.pointer(operand.data.view)}+({offset}));")
-      self.close()
+      cursor = getattr(self, "sme_packed_cursors", {}).get((id(operand), origin))
+      pointer = (
+        f"{cursor[0]}+(({ki})/{kp})*({cursor[1]})"
+        if cursor is not None
+        else f"{self.pointer(operand.data.view)}+({self.packed_offset(operand.data, origin, ki)})"
+      )
+      if getattr(self, "sme_blocks_exist", False):
+        self.line(f"auto {value}=vecops::vec::load({native}{{}},{pointer});")
+      else:
+        self.line(f"auto {value}=vecops::vec::zeros({native}{{}});")
+        self.opening(f"if (({origin})<({spatial}))")
+        self.line(f"{value}=vecops::vec::load({native}{{}}, {pointer});")
+        self.close()
       return native, value
-    active = (
-      f"std::max<vecops::nint_t>(0,std::min<vecops::nint_t>(vecops::vec::size({tag}{{}}),({spatial})-({origin})))"
-    )
-    values = []
-    for group in range(kp):
-      value = self.unique("sme_operand")
-      self.line(f"auto {value}=vecops::vec::zeros({tag}{{}});")
-      self.opening(f"if (({ki})+{group}<({k}) && ({active})>0)")
-      coords = (origin, f"({ki})+{group}") if side == "A" else (f"({ki})+{group}", origin)
-      loaded = self.matrix_value(operand, tag, coords, active, 0 if side == "A" else 1)
-      loaded = self.zero_matrix_tail(tag, loaded, active)
-      self.line(f"{value}={loaded};")
-      self.close()
-      values.append(value)
-    outtag, value = self.interleave_group(tag, values, dtype)
-    return outtag, value
+    spatial_axis = 0 if side == "A" else 1
+    if (
+      self.active_matmul_plan.sme_narrow_singleton_slices
+      and dtype == "bfloat16"
+      and I.constant(operand.type.shape[spatial_axis]) == 1
+    ):
+      # Each logical K slot contains one spatial value. Interleave only those
+      # values before MOPA; do not construct wide signed-index predicates for
+      # a strided gather whose logical width is statically one. The packed
+      # load branch above still loads a complete native word, and the public
+      # MOPA wrapper receives ordinary native-word Vec/Mask representations.
+      self.line("/* proven singleton spatial input: one value per K slot */")
+      tag = self.matrix_tag(dtype, lanes=1)
+    spatial_full = getattr(self, "sme_spatial_full", False)
+    width = self.sme_scalar_lanes(dtype, divisor=kp)
+    active = width if spatial_full else self.sme_clamp_extent(f"({spatial})-({origin})", width)
+    full_k = getattr(self, "matrix_k_full", False)
 
-  def sme_matmul(self, statement, product):
+    def scalar_groups():
+      values = []
+      for group in range(kp):
+        value = self.unique("sme_operand")
+        guarded = not (full_k and spatial_full)
+        if guarded:
+          self.line(f"auto {value}=vecops::vec::zeros({tag}{{}});")
+          condition = f"({active})>0" if full_k else f"({ki})+{group}<({k}) && ({active})>0"
+          self.opening(f"if ({condition})")
+        coords = (origin, f"({ki})+{group}") if side == "A" else (f"({ki})+{group}", origin)
+        loaded = self.matrix_value(operand, tag, coords, active, 0 if side == "A" else 1)
+        if not spatial_full:
+          loaded = self.zero_matrix_tail(tag, loaded, active)
+        self.line(f"{'auto ' if not guarded else ''}{value}={loaded};")
+        if guarded:
+          self.close()
+        values.append(value)
+      return self.interleave_group(tag, values, dtype)
+
+    # A whole K-group already has the interleaved lane order of BFMOPA /
+    # SMOPA. One u32 spatial gather replaces 2/4 narrow gathers and shuffles.
+    # Keep the partial-K fallback: loading a whole word past K is incorrect.
+    k_axis, spatial_axis = (1, 0) if side == "A" else (0, 1)
+    grouped = (
+      kp > 1
+      and operand.op == "load"
+      and not operand.args
+      and operand.data.dtype == dtype
+      and len(operand.data.shape) == 2
+      and I.constant(operand.data.strides[k_axis]) == 1
+    )
+    if not grouped:
+      return scalar_groups()
+    result = self.unique("sme_grouped_operand")
+    self.line(f"auto {result}=vecops::vec::zeros({native}{{}});")
+    stride = self.scalar(operand.data.strides[spatial_axis])
+    # The SVE memory request uses signed byte-scaled gather indices. Prove
+    # their range before multiplication or address formation, including
+    # negative/broadcast strides and extreme dynamic strides.
+    upper = 2147483647 // ELEMENT_BYTES[dtype]
+    lower = -2147483648 // ELEMENT_BYTES[dtype]
+    coords = (origin, ki) if side == "A" else (ki, origin)
+    pointer = self.pointer(operand.data, coords)
+    if id(operand) in self.snapshots:
+      saved, alias = self.snapshots[id(operand)]
+      # Snapshot layout may differ from the source. Its addressing and byte
+      # stride must switch together, not only the base pointer.
+      pointer = f"({alias} ? {self.pointer(saved, coords)} : {pointer})"
+      stride = f"({alias} ? {self.scalar(saved.strides[spatial_axis])} : ({stride}))"
+    fits = f"({stride})>={lower} && ({stride})<={upper}"
+    complete = "true" if full_k else f"({k})-({ki})>={kp}"
+    self.opening(f"if ({complete} && {fits} && ({active})>0) /* whole K-group u32 gather */")
+    words = self.matrix_tag("uint32")
+    mask = "vecops::vec::opt::unmasked" if spatial_full else f"vecops::vec::opt::first({active})"
+    self.line(
+      f"{result}=vecops::vec::bitcast({native}{{}},{words}{{}},vecops::vec::load({words}{{}},"
+      f"reinterpret_cast<const std::uint32_t*>({pointer}),{mask},"
+      f"vecops::vec::opt::strided(({stride})*{ELEMENT_BYTES[dtype]},vecops::vec::opt::scale<1>)));"
+    )
+    self.close()
+    self.opening("else")
+    _, value = scalar_groups()
+    self.line(f"{result}=static_cast<vecops::vec::Vec<{native}>>({value});")
+    self.close()
+    return native, result
+
+  @staticmethod
+  def sme_direct_axis(view, dtype):
+    """Return the contiguous ZA slice axis; conversions need Z registers."""
+    if len(view.shape) != 2 or view.dtype != dtype:
+      return None
+    # A single-column tensor can be contiguous along both axes. Use one
+    # vertical ZA slice rather than one horizontal slice per logical row.
+    if I.constant(view.shape[1]) == 1 and I.constant(view.strides[0]) == 1:
+      return 0
+    if I.constant(view.strides[1]) == 1:
+      return 1
+    if I.constant(view.strides[0]) == 1:
+      return 0
+    return None
+
+  def sme_slice_pointer(self, view, axis, origin, index, rows, columns, *, seed=None):
+    """Hoist ZA-slice address invariants past the memory-clobber barrier.
+
+    Inactive catalog blocks must not form an out-of-bounds tile pointer.
+    Snapshot selection preserves its own row stride rather than borrowing
+    the original layout's stride. A snapshot with another contiguous axis
+    retains the existing per-slice route; it is not a contiguous cursor.
+    """
+    saved = self.snapshots.get(id(seed)) if seed is not None else None
+    if saved is not None and I.constant(saved[0].strides[axis]) != 1:
+      return None
+    pointer = self.pointer(view, origin)
+    inactive = self.pointer(view)
+    stride = self.scalar(view.strides[1 - axis])
+    if saved is not None:
+      snapshot, alias = saved
+      pointer = f"({alias} ? {self.pointer(snapshot, origin)} : {pointer})"
+      inactive = f"({alias} ? {self.pointer(snapshot)} : {inactive})"
+      stride = f"({alias} ? {self.scalar(snapshot.strides[1 - axis])} : {stride})"
+    base, step = self.unique("sme_slice_base"), self.unique("sme_slice_stride")
+    self.line(f"auto* const {base}=(({rows})>0 && ({columns})>0 ? {pointer} : {inactive});")
+    self.line(f"const vecops::nint_t {step}={stride};")
+    return f"{base}+({index})*{step}"
+
+  def sme_memory_slice(self, operation, tile, index, predicate, tag, dtype, view, coords, *, seed=None, pointer=None):
+    """Emit a bit-preserving ZA-memory instruction, not a Z-register move."""
+    bits = "std::uint64_t" if ELEMENT_BYTES[dtype] == 8 else "std::uint32_t"
+    bitstag = f"vecops::vec::ScalableTag<{bits},0>"
+    if pointer is None:
+      pointer = self.pointer(view, coords)
+      if seed is not None and id(seed) in self.snapshots:
+        saved, alias = self.snapshots[id(seed)]
+        pointer = f"({alias} ? {self.pointer(saved, coords)} : {pointer})"
+    const = "const " if operation.startswith("load") else ""
+    self.line(
+      f"vecops::vec::sme::{operation}<{tile}>(static_cast<std::uint32_t>({index}),"
+      f"static_cast<vecops::vec::Mask<{bitstag}>>({predicate}),reinterpret_cast<{const}{bits}*>({pointer}));"
+    )
+
+  def sme_slice_value_tag(self, product, axis, tag):
+    """Keep ISA tags native; narrow only proven one-element memory slices.
+
+    An arbitrary short/tail slice is not a singleton proof. In particular a
+    vertical column of an Mx1 result still contains M elements. FixedTag<T,1>
+    keeps one physical SVE word but avoids wide-index predicate tuples for
+    scalar-width strided accesses, without scalarizing the ZA instruction.
+    """
+    if not self.active_matmul_plan.sme_narrow_singleton_slices or I.constant(product.type.shape[axis]) != 1:
+      return tag
+    self.line("/* proven singleton ZA slice: scalar-width vector memory/epilogue */")
+    return self.matrix_tag(product.type.dtype, lanes=1)
+
+  def sme_seed_tile(self, seed, product, tile, ro, co, rows, columns, tag):
+    """Initialize ZA directly when possible, retaining fused prologue DAGs.
+
+    Row broadcasts are a single outer product / ADDHA, not one reload per
+    output row. Raw column-contiguous seeds use LD1 into vertical ZA slices.
+    """
+    dtype = product.type.dtype
+    raw = seed.op == "load" and not seed.args and seed.data.dtype == dtype
+    broadcast = raw and (
+      len(seed.data.shape) == 1
+      or len(seed.data.shape) == 2
+      and (I.constant(seed.data.shape[0]) == 1 or I.constant(seed.data.strides[0]) == 0)
+    )
+    if broadcast:
+      self.opening(f"if (({rows})>0 && ({columns})>0) /* broadcast C seed: one ZA instruction */")
+      pg_rows, pg_columns = (self.unique(v) for v in ("sme_seed_rows", "sme_seed_columns"))
+      self.line(f"auto {pg_rows}=vecops::vec::mwhilelt({tag}{{}},0,{rows});")
+      self.line(f"auto {pg_columns}=vecops::vec::mwhilelt({tag}{{}},0,{columns});")
+      self.chunk_cache = {}
+      value_tag = self.sme_slice_value_tag(product, 1, tag)
+      value = self.vector(seed, value_tag, product.type.shape, (ro, co), columns, 1)
+      if dtype in {"int32", "uint32"}:
+        self.line(f"vecops::vec::sme::addha<{tile},{CPP_TYPES[dtype]}>({pg_rows},{pg_columns},{value});")
+      else:
+        self.line(
+          f"vecops::vec::sme::mopa<{tile},{CPP_TYPES[dtype]},{CPP_TYPES[dtype]},{CPP_TYPES[dtype]}>("
+          f"{pg_rows},{pg_columns},vecops::vec::fill({tag}{{}},{CPP_TYPES[dtype]}{{1}}),{value});"
+        )
+      self.close()
+      return
+    same_shape = raw and all(I.same_expr(x, y) for x, y in zip(seed.data.shape, product.type.shape))
+    axis = self.sme_direct_axis(seed.data, dtype) if same_shape else None
+    axis = 1 if axis is None else axis
+    active, extent = (columns, rows) if axis == 1 else (rows, columns)
+    pg, index = (self.unique(v) for v in ("sme_seed_mask", "sme_seed_slice"))
+    self.line(f"auto {pg}=vecops::vec::mwhilelt({tag}{{}},0,{active});")
+    direct = same_shape and self.sme_direct_axis(seed.data, dtype) is not None
+    pointer = self.sme_slice_pointer(seed.data, axis, (ro, co), index, rows, columns, seed=seed) if direct else None
+    self.opening(f"for (vecops::nint_t {index}=0;{index}<({extent}) && ({active})>0;++{index})")
+    coords = (f"({ro}+{index})", co) if axis == 1 else (ro, f"({co}+{index})")
+    if direct:
+      self.sme_memory_slice(
+        "load_hor" if axis == 1 else "load_ver",
+        tile,
+        index,
+        pg,
+        tag,
+        dtype,
+        seed.data,
+        coords,
+        seed=seed,
+        pointer=pointer,
+      )
+    else:
+      self.chunk_cache = {}
+      value_tag = self.sme_slice_value_tag(product, axis, tag)
+      value = self.vector(seed, value_tag, product.type.shape, coords, active, axis)
+      self.line(f"vecops::vec::sme::write_hor<{tile}>(static_cast<std::uint32_t>({index}),{pg},{value});")
+    self.close()
+
+  def sme_store_tile(self, statement, product, tile, ro, co, rows, columns, tag, *, _axis=None, _single_column=False):
+    """Drain native C/partial accumulators directly; vectorize only transforms."""
+    dtype = product.type.dtype
+    destination = statement.destination
+    value = statement.value
+    if value.op == "cast" and value.type.dtype == destination.dtype:
+      value = value.args[0]
+    direct = value is product and statement.mask is None and destination.dtype == dtype
+    axis = self.sme_direct_axis(destination, dtype) if direct else None
+    if _axis is None and direct and axis == 1 and I.constant(destination.strides[0]) is None:
+      # The row-major leading stride may only become one at invocation.
+      # Keep this outside K and retain the original route for negative or
+      # non-unit strides, multi-column tiles, transforms and masked stores.
+      self.opening(
+        f"if (({self.scalar(destination.strides[0])})==1 && ({columns})==1 && ({rows})>1) "
+        "/* runtime contiguous column: one vertical ZA store */"
+      )
+      self.sme_store_tile(statement, product, tile, ro, co, rows, columns, tag, _axis=0, _single_column=True)
+      self.close()
+      self.opening("else /* original ZA slice orientation */")
+      self.sme_store_tile(statement, product, tile, ro, co, rows, columns, tag, _axis=1)
+      self.close()
+      return
+    if _axis is not None:
+      axis = _axis
+    # Transformed column-contiguous C also uses vertical slices: no scatter.
+    if axis is None:
+      axis = 0 if I.constant(destination.strides[0]) == 1 else 1
+    active, extent = (columns, rows) if axis == 1 else (rows, columns)
+    pg, index = (self.unique(v) for v in ("sme_store_mask", "sme_store_slice"))
+    self.line(f"auto {pg}=vecops::vec::mwhilelt({tag}{{}},0,{active});")
+    phase = getattr(self, "matrix_phase", None)
+    pointer = (
+      self.sme_slice_pointer(destination, axis, (ro, co), index, rows, columns)
+      if direct and self.sme_direct_axis(destination, dtype) is not None
+      else None
+    )
+    partial_axis = self.sme_direct_axis(phase[2], dtype) if phase is not None else None
+    partial_pointer = (
+      self.sme_slice_pointer(phase[2], axis, (ro, co), index, rows, columns) if partial_axis == axis else None
+    )
+    if _single_column:
+      # The dispatch proved extent == 1 and active > 1. Preserve that proof
+      # explicitly: the C++ optimizer need not rediscover it across ZA inline
+      # assembly memory barriers and repeated clamp expressions.
+      self.opening("/* exactly one active vertical slice */")
+      self.line(f"constexpr vecops::nint_t {index}=0;")
+    else:
+      self.opening(f"for (vecops::nint_t {index}=0;{index}<({extent}) && ({active})>0;++{index})")
+    coords = (f"({ro}+{index})", co) if axis == 1 else (ro, f"({co}+{index})")
+    if phase is not None:
+      self.opening(f"if ({phase[1]}) /* epilogue exactly once */")
+    if direct and self.sme_direct_axis(destination, dtype) is not None:
+      self.sme_memory_slice(
+        "store_hor" if axis == 1 else "store_ver", tile, index, pg, tag, dtype, destination, coords, pointer=pointer
+      )
+    else:
+      result = self.unique("sme_result")
+      self.line(
+        f"auto {result}=vecops::vec::sme::read_{'hor' if axis == 1 else 'ver'}<{tile}>("
+        f"{tag}{{}},static_cast<std::uint32_t>({index}),{pg});"
+      )
+      value_tag = self.sme_slice_value_tag(product, axis, tag)
+      self.matrix_epilogue(statement, product, value_tag, coords, active, result, axis)
+    if phase is not None:
+      self.close()
+      self.opening("else /* native partial C: direct ZA store */")
+      if partial_axis == axis:
+        self.sme_memory_slice(
+          "store_hor" if axis == 1 else "store_ver",
+          tile,
+          index,
+          pg,
+          tag,
+          dtype,
+          phase[2],
+          coords,
+          pointer=partial_pointer,
+        )
+      else:
+        result = self.unique("sme_partial_result")
+        self.line(
+          f"auto {result}=vecops::vec::sme::read_{'hor' if axis == 1 else 'ver'}<{tile}>("
+          f"{tag}{{}},static_cast<std::uint32_t>({index}),{pg});"
+        )
+        stride = phase[2].strides[axis]
+        extra = "" if I.constant(stride) == 1 else f",vecops::vec::opt::strided({self.scalar(stride)})"
+        value_tag = self.sme_slice_value_tag(product, axis, tag)
+        self.line(
+          f"vecops::vec::store({value_tag}{{}},{self.pointer(phase[2], coords)},{result},vecops::vec::opt::first({active}){extra});"
+        )
+      self.close()
+    self.close()
+
+  def sme_scalar_lanes(self, dtype, *, divisor=1):
+    """Use captured SVL, never ordinary VL or a cost-profile vector width.
+
+    Native compilation keys and the adapter entry guard retain this thread's
+    independent SVL. Literal integer arithmetic also avoids leaving metadata
+    Const division calls in a large manual streaming owner. Cross lowering
+    without a vector-state snapshot still uses the public runtime SVL reader.
+    """
+    svl = self.environment.vector_state.sme_bytes
+    if svl is not None:
+      return str(svl // ELEMENT_BYTES[dtype] // divisor)
+    lanes = f"vecops::vec::sme::streaming_lanes<{CPP_TYPES[dtype]}>()"
+    return lanes if divisor == 1 else f"({lanes})/{divisor}"
+
+  @staticmethod
+  def sme_clamp_extent(value, upper):
+    """Force-inline scalar extents: ordinary std min/max may remain calls."""
+    return f"vecops::vec::sme::clamp_value<vecops::nint_t>({value},0,{upper})"
+
+  @contextmanager
+  def sme_loader_metadata(self, operands):
+    """Keep immutable producer addressing in this selected owner's SSA.
+
+    The manual state trampoline exposes its captures by reference. ZA's
+    memory clobbers can therefore reload an otherwise immutable ABI stride,
+    alias predicate or Buffer::data() in every K group. Copy only existing
+    ABI descriptor leaves and producer buffer bases after entering the owner;
+    retain the original load identities, masks and historical read captures.
+
+    No offset pointer is formed here. An inactive conditional Buffer may
+    supply a null data() base, but an unknown/optional storage expression and
+    arbitrary raw/local/state expressions retain their original evaluation
+    scope. Every map is restored even if a nested emitter raises.
+    """
+    old_metadata, old_pointers = self.parameter_metadata, self.parameter_pointers
+    old_snapshots, old_materialized = self.snapshots, self.materialized
+    old_optional = getattr(self, "sme_optional_packs", None)
+    old_cache = self.chunk_cache
+    self.parameter_metadata, self.parameter_pointers = dict(old_metadata), dict(old_pointers)
+    self.snapshots, self.materialized = dict(old_snapshots), dict(old_materialized)
+    if old_optional is not None:
+      self.sme_optional_packs = dict(old_optional)
+    self.chunk_cache = {}
+    try:
+      views, metadata, expressions = {}, [], {}
+      roots = list(operands)
+      for operand in operands:
+        optional = (old_optional or {}).get(id(operand))
+        if optional is not None:
+          roots.append(optional[0])
+      for root in roots:
+        for value in walk_unique(root):
+          expressions[id(value)] = value
+          if value.op == "load":
+            views[id(value.data)] = value.data
+          elif value.op == "packed_load":
+            views[id(value.data.view)] = value.data.view
+            metadata.extend((*value.data.shape, *(value.data.origins or ())))
+          for mapping in (old_snapshots, old_materialized):
+            saved = mapping.get(id(value))
+            if saved is not None:
+              views[id(saved[0])] = saved[0]
+      self.line("/* selected SME owner: immutable producer addressing, not tensor contents */")
+      for view in views.values():
+        metadata.extend((view.offset, *view.shape, *view.strides))
+        storage = view.storage
+        # ABI entry pointers and named owned buffers have a pure data() base.
+        # Never hoist an optional.value() or another unknown storage accessor.
+        if storage not in old_pointers and not (view.owned and storage.isidentifier()):
+          continue
+        if self.parameter_pointers.get(storage) != old_pointers.get(storage):
+          continue  # Several views can share one storage without another read.
+        local = self.unique("sme_loader_base")
+        self.line(f"[[maybe_unused]] auto* const {local}={self.storage_pointer(storage)};")
+        self.parameter_pointers[storage] = local
+
+      seen = set()
+
+      def descriptor(value):
+        if id(value) in seen:
+          return
+        seen.add(id(value))
+        if value.op == "symbol":
+          bound = self.ir.bindings.get(value.data)
+          if bound is not None:
+            descriptor(bound)
+        elif value.op == "raw" and value.data in old_metadata:
+          # The exact ABI mapping, not a spelling/opcode heuristic, proves
+          # this is immutable metadata. Do not freeze an induction/state raw.
+          if self.parameter_metadata[value.data] == old_metadata[value.data]:
+            local = self.unique("sme_loader_metadata")
+            self.line(f"[[maybe_unused]] const vecops::nint_t {local}={old_metadata[value.data]};")
+            self.parameter_metadata[value.data] = local
+        for argument in value.args:
+          descriptor(argument)
+
+      for value in metadata:
+        descriptor(value)
+
+      predicates = {}
+
+      def predicate(condition):
+        # These are already-decided generated bool locals. More general
+        # expressions, including guarded optional access, are not speculated.
+        if not isinstance(condition, str) or not condition.isidentifier() or condition in {"true", "false"}:
+          return condition
+        if condition not in predicates:
+          local = self.unique("sme_loader_enabled")
+          self.line(f"const bool {local}={condition};")
+          predicates[condition] = local
+        return predicates[condition]
+
+      for identity in expressions:
+        for mapping in (self.snapshots, self.materialized):
+          entry = mapping.get(identity)
+          if entry is not None:
+            mapping[identity] = (entry[0], predicate(entry[1]))
+      if old_optional is not None:
+        for operand in operands:
+          entry = old_optional.get(id(operand))
+          if entry is not None:
+            self.sme_optional_packs[id(operand)] = (entry[0], predicate(entry[1]))
+      yield
+    finally:
+      self.parameter_metadata, self.parameter_pointers = old_metadata, old_pointers
+      self.snapshots, self.materialized = old_snapshots, old_materialized
+      if old_optional is not None:
+        self.sme_optional_packs = old_optional
+      self.chunk_cache = old_cache
+
+  def sme_family_owner(self, statement, product, a, b, session, extents, nr_m, nr_n, *, exact_blocks=False):
+    """One selected geometry per manual SM owner, not one giant family tree.
+
+    The outer geometry branch executes before entering SM. Its callback must
+    inline into the state trampoline, but the trampoline itself remains the
+    public state owner's ABI boundary. Splitting the tree prevents unrelated
+    gather/tail families from exhausting the optimizer's local inline budget.
+    """
+    scope = self.unique("sme_dot_scope")
+    self.opening_hardware_owner("sme", session, f"[&](auto& {scope})")
+    previous_scope, self.hardware_scope = self.hardware_scope, ("sme", scope)
+    # Each outlined state trampoline reads escaped captures exactly once.
+    # Keep immutable, callback-owned SSA extents throughout its native loops.
+    held_extents = tuple(self.unique(f"sme_extent_{axis}_value") for axis in ("m", "n", "k"))
+    for name, value in zip(held_extents, extents):
+      self.line(f"const vecops::nint_t {name}={value};")
+    tag = self.matrix_tag(product.type.dtype)
+    lanes = self.unique("sme_matrix_lanes")
+    self.line(f"const vecops::nint_t {lanes}={self.sme_scalar_lanes(product.type.dtype)};")
+    try:
+      with self.sme_loader_metadata((a, b)):
+        self.sme_matrix_family(
+          statement, product, a, b, tag, lanes, nr_m, nr_n, held_extents, exact_blocks=exact_blocks
+        )
+    finally:
+      self.hardware_scope = previous_scope
+    self.indent -= 1
+    self.line("});")
+
+  def sme_packed_ab_cache_bypass(self, product, a, b, m, n, k, kp):
+    """Select a resident full-K packed traversal outside any streaming owner.
+
+    This is intentionally narrow, not a promise that every packed
+    product should skip caches. Unsupported dtype/format and explicit block
+    requests emit no extra code. Quotients avoid nint overflow even at INT64_MAX.
+    The existing leaf owns accumulator, fusion, alias and signed-layout rules.
+    """
+    plan = self.active_matmul_plan
+    if not plan.sme_packed_ab_cache_bypass or product.type.dtype != "float32":
+      return None
+    if not all(
+      value.op == "packed_load"
+      and value.type.dtype == "bfloat16"
+      and value.data.side == side
+      and value.data.format in {"sme", "auto"}
+      for value, side in ((a, "A"), (b, "B"))
+    ):
+      return None
+    policy = plan.sme_packed_ab_traversal
+    known = tuple(I.constant(value) for value in (*product.type.shape, a.type.shape[1]))
+    captured = self.environment.vector_state.sme_bytes
+    if (
+      captured is not None
+      and all(type(value) is int for value in known)
+      and not policy.shape_candidate(*known, lanes=captured // 4, k_group=kp)
+    ):
+      return None
+    lanes = self.unique("sme_packed_ab_lanes")
+    groups = self.unique("sme_packed_ab_k_groups")
+    selected = self.unique("sme_packed_ab_whole_problem")
+    self.line(f"const vecops::nint_t {lanes}={self.sme_scalar_lanes('float32')};")
+    self.line(f"bool {selected}=false;")
+    self.opening(
+      f"if (({m})>0 && ({m})<={policy.maximum_row_panels}*{lanes}"
+      f" && ({n})/{lanes}>={policy.minimum_column_panels} && ({k})/{kp}>={policy.minimum_k_groups})"
+      " /* SME packed-AB whole-problem geometry */"
+    )
+    self.line(f"const vecops::nint_t {groups}=({k})/{kp}+(({k})%{kp}!=0);")
+    self.line(
+      f"{selected}={groups}<=vecops::platform::cache_info().l2_bytes"
+      f"/{policy.private_cache_divisor}/(4*{lanes}*{ELEMENT_BYTES[a.type.dtype]})/{kp};"
+      " /* complete padded two-by-two micro-panel stays in private L2 */"
+    )
+    self.close()
+    return selected
+
+  def sme_matmul(self, statement, product, *, skip_cache=False):
     a, b = self.matrix_operands(product)
-    initial = product.args[2:]
     dtype = product.type.dtype
     m, n = (self.scalar(v) for v in product.type.shape)
     k = self.scalar(a.type.shape[1])
     kp = max(1, 4 // ELEMENT_BYTES[a.type.dtype])
-    span = f"2*vecops::vec::sme::streaming_lanes<{CPP_TYPES[dtype]}>()"
-    cache = self.matrix_cache_blocks(product, span, span, kp)
+    span = f"2*({self.sme_scalar_lanes(dtype)})"
+    automatic = product.data.tiled and all(
+      value is None for value in (product.data.block_m, product.data.block_n, product.data.block_k)
+    )
+    unknown_extent = any(I.constant(value) is None for value in (*product.type.shape, a.type.shape[1]))
+    packed_bypass = (
+      self.sme_packed_ab_cache_bypass(product, a, b, m, n, k, kp) if not skip_cache and automatic else None
+    )
+    bypass = not skip_cache and automatic and (unknown_extent or packed_bypass is not None)
+    if bypass:
+      # Dynamic metadata is not evidence that the actual working set is large.
+      # The shared quotient-based budget predicate cannot overflow; this test
+      # also precedes cache_info(), the panel loops and partial-C phase setup.
+      # Explicit cache tiles are never bypassed, and the leaf retains its own
+      # packing/fusion policies just like the known-small Const path.
+      limit = self.active_matmul_plan.runtime_unblocked_bytes
+      small = (
+        f"vecops_dsl::matmul_fits({m},{n},{k},{ELEMENT_BYTES[a.type.dtype]},{ELEMENT_BYTES[b.type.dtype]},{ELEMENT_BYTES[dtype]},{limit})"
+        if unknown_extent
+        else "false"
+      )
+      condition = f"{packed_bypass} || {small}" if packed_bypass else small
+      self.opening(f"if ({condition}) /* bypass cache panels for small runtime SME products */")
+      self.sme_matmul(statement, product, skip_cache=True)
+      self.close()
+      self.opening("else")
+    cache = None if skip_cache else self.matrix_cache_blocks(product, span, span, kp)
     if cache is not None:
-      self.blocked_matrix_matmul(statement, product, cache, "sme")
+      # Cache BK is rounded to this operand's actual MOPA K quantum (1 for
+      # FP32/FP64, 2 for FP16/BF16, 4 for bytes). The generic driver's default
+      # 32 belongs to other families: using it to preserve Const K can claim
+      # a whole K=5 panel even though an explicit BK=3 produces only 3/4 lanes.
+      self.blocked_matrix_matmul(statement, product, cache, "sme", k_alignment=kp)
+      if bypass:
+        self.close()
       return
     a, b = self.automatic_matrix_packing(product, "sme")
-    session, scope = (self.unique(v) for v in ("sme_dot_session", "sme_dot_scope"))
+    # Capture validated immutable metadata before any noexcept SM callback.
+    # Geometry selection stays ordinary scalar code, with SVL-derived lanes
+    # rather than CNT from the current ordinary SVE execution domain.
+    extents = tuple(self.unique(f"sme_extent_{axis}") for axis in ("m", "n", "k"))
+    for name, value in zip(extents, (m, n, k)):
+      self.line(f"const vecops::nint_t {name}=({value});")
+    m, n, k = extents
+    session = self.unique("sme_dot_session")
     self.line(f"vecops::execution::ExecutionSession {session};")
-    self.opening(
-      f"{session}.with_resources(vecops::execution::sme::Region{{}}, [&](auto& {scope}) VECOPS_INLINE_LAMBDA_NOEXCEPT"
-    )
-    tag = self.matrix_tag(dtype)
     lanes = self.unique("sme_matrix_lanes")
-    self.line(f"const vecops::nint_t {lanes}=vecops::vec::size({tag}{{}});")
+    self.line(f"const vecops::nint_t {lanes}={self.sme_scalar_lanes(dtype)};")
+    # ZA has four f32/i32 tiles or eight f64 tiles. A fixed 2x2 schedule
+    # wastes half/all its outer products for narrow-M/N problems; select a
+    # rectangular family outside K. All registers remain named variables.
+    self.opening(f"if (({m})<={lanes}) /* narrow M: 1x4 ZA family */")
+    for blocks in (1, 2, 3):
+      self.opening(f"{'if' if blocks == 1 else 'else if'} (({n})<={blocks}*{lanes}) /* exact 1x{blocks} ZA blocks */")
+      self.sme_family_owner(statement, product, a, b, session, extents, 1, blocks, exact_blocks=True)
+      self.close()
+    self.opening("else")
+    self.sme_family_owner(statement, product, a, b, session, extents, 1, 4)
+    self.close()
+    self.close()
+    self.opening(f"else if (({n})<={lanes}) /* narrow N: 4x1 ZA family */")
+    for blocks in (2, 3):
+      self.opening(f"{'if' if blocks == 2 else 'else if'} (({m})<={blocks}*{lanes}) /* exact {blocks}x1 ZA blocks */")
+      self.sme_family_owner(statement, product, a, b, session, extents, blocks, 1, exact_blocks=True)
+      self.close()
+    self.opening("else")
+    self.sme_family_owner(statement, product, a, b, session, extents, 4, 1)
+    self.close()
+    self.close()
+    self.opening(f"else if (({m})<=2*{lanes} && ({n})<=2*{lanes}) /* exact 2x2 ZA blocks */")
+    self.sme_family_owner(statement, product, a, b, session, extents, 2, 2, exact_blocks=True)
+    self.close()
+    if dtype == "float64" and not all(
+      e.op == "packed_load" and id(e) not in getattr(self, "sme_optional_packs", {}) for e in (a, b)
+    ):
+      self.opening(f"else if (({m})>=4*{lanes} && ({n})>=2*{lanes}) /* expanded ZA64 catalog */")
+      self.sme_family_owner(statement, product, a, b, session, extents, 4, 2)
+      self.close()
+      self.opening(f"else if (({m})>=2*{lanes} && ({n})>=4*{lanes}) /* expanded ZA64 catalog */")
+      self.sme_family_owner(statement, product, a, b, session, extents, 2, 4)
+      self.close()
+    self.opening("else /* balanced 2x2 ZA family */")
+    self.sme_family_owner(statement, product, a, b, session, extents, 2, 2)
+    self.close()
+    if bypass:
+      self.close()
+
+  def sme_matrix_family(self, statement, product, a, b, tag, lanes, nr_m, nr_n, extents, *, exact_blocks=False):
+    """One rectangular ZA leaf, optionally proving all its blocks exist.
+
+    Exact leaves are selected before K only for a single macro-tile whose
+    block count is known. Every non-last block has a full static slice extent;
+    the last block retains its dynamic tail mask. This does not assume the
+    tail rows/columns themselves are full or change accumulation order.
+    """
+    initial = product.args[2:]
+    dtype = product.type.dtype
+    m, n, k = extents
+    optional_a = getattr(self, "sme_optional_packs", {}).get(id(a))
+    kp = max(1, 4 // ELEMENT_BYTES[a.type.dtype])
     mi, ni, ki = (self.unique(v) for v in ("sme_m", "sme_n", "sme_k"))
-    self.line("/* SME 2x2 outer-product schedule; all vectors are born inside SM */")
-    self.matrix_loop("sme.m", mi, {"M": m, "SMR": f"2*{lanes}"})
-    self.matrix_loop("sme.n", ni, {"N": n, "SNR": f"2*{lanes}"})
+    self.line(f"/* SME {nr_m}x{nr_n} outer-product schedule; all vectors are born inside SM */")
+    self.matrix_loop("sme.m", mi, {"M": m, "SMR": f"{nr_m}*{lanes}"})
+    self.matrix_loop("sme.n", ni, {"N": n, "SNR": f"{nr_n}*{lanes}"})
     self.line("vecops::vec::sme::zero_za();")
-    for r in range(2):
-      for c in range(2):
-        tile = r * 2 + c
+
+    def active_extent(total, origin, block, blocks):
+      if exact_blocks and block + 1 < blocks:
+        return lanes
+      return self.sme_clamp_extent(f"({total})-{origin}", lanes)
+
+    for r in range(nr_m):
+      for c in range(nr_n):
+        tile = r * nr_n + c
         ro, co = f"({mi}+{r}*{lanes})", f"({ni}+{c}*{lanes})"
-        active = f"std::max<vecops::nint_t>(0,std::min<vecops::nint_t>({lanes},({n})-{co}))"
-        pg = self.unique("sme_columns")
-        self.line(f"auto {pg}=vecops::vec::mwhilelt({tag}{{}},0,{active});")
+        rows = active_extent(m, ro, r, nr_m)
+        columns = active_extent(n, co, c, nr_n)
         phase = getattr(self, "matrix_phase", None)
         if phase is not None:
           self.opening(f"if ({phase[0]}) /* prologue exactly once */")
         if initial:
-          row = self.unique("sme_seed_row")
-          self.opening(f"for (vecops::nint_t {row}=0; {row}<{lanes} && {ro}+{row}<({m}) && ({active})>0; ++{row})")
-          seed = initial[0]
-          direct = (
-            seed.op == "load"
-            and not seed.args
-            and seed.data.dtype == dtype
-            and len(seed.data.shape) == 2
-            and I.constant(seed.data.strides[1]) == 1
-            and all(I.same_expr(x, y) for x, y in zip(seed.data.shape, product.type.shape))
-          )
-          coords = (f"({ro}+{row})", co)
-          if direct:
-            bits = "std::uint64_t" if ELEMENT_BYTES[dtype] == 8 else "std::uint32_t"
-            bitstag = f"vecops::vec::ScalableTag<{bits},0>"
-            pointer = self.pointer(seed.data, coords)
-            if id(seed) in self.snapshots:
-              saved, alias = self.snapshots[id(seed)]
-              pointer = f"({alias} ? {self.pointer(saved, coords)} : {pointer})"
-            self.line(
-              f"vecops::vec::sme::load_hor<{tile}>(static_cast<std::uint32_t>({row}),static_cast<vecops::vec::Mask<{bitstag}>>({pg}),reinterpret_cast<const {bits}*>({pointer}));"
-            )
-          else:
-            self.chunk_cache = {}
-            value = self.vector(seed, tag, product.type.shape, coords, active, 1)
-            self.line(f"vecops::vec::sme::write_hor<{tile}>(static_cast<std::uint32_t>({row}),{pg},{value});")
-          self.close()
+          self.sme_seed_tile(initial[0], product, tile, ro, co, rows, columns, tag)
         if phase is not None:
           self.close()
           self.opening("else /* native ZA accumulator continuation */")
-          row = self.unique("sme_partial_row")
-          self.opening(f"for (vecops::nint_t {row}=0; {row}<{lanes} && {ro}+{row}<({m}) && ({active})>0; ++{row})")
-          bits = "std::uint64_t" if ELEMENT_BYTES[dtype] == 8 else "std::uint32_t"
-          bitstag = f"vecops::vec::ScalableTag<{bits},0>"
-          pointer = self.pointer(phase[2], (f"({ro}+{row})", co))
-          self.line(
-            f"vecops::vec::sme::load_hor<{tile}>(static_cast<std::uint32_t>({row}),static_cast<vecops::vec::Mask<{bitstag}>>({pg}),reinterpret_cast<const {bits}*>({pointer}));"
-          )
-          self.close()
+          partial = I.Expr(product.type, "load", data=phase[2])
+          self.sme_seed_tile(partial, product, tile, ro, co, rows, columns, tag)
           self.close()
 
+    old_cursors = getattr(self, "sme_packed_cursors", {})
+    self.sme_packed_cursors = {}
+    for operand, side, index, blocks, spatial in ((a, "A", mi, nr_m, m), (b, "B", ni, nr_n, n)):
+      if operand.op != "packed_load" or operand.data.format not in {"sme", "auto"}:
+        continue
+      step = self.unique("sme_packed_k_step")
+      self.line(
+        f"const vecops::nint_t {step}=vecops_dsl::pack_panel<{CPP_TYPES[operand.type.dtype]},{FORMATS[operand.data.format]}>()*{kp};"
+      )
+      for block in range(blocks):
+        origin = f"({index}+{block}*{lanes})"
+        cursor = self.unique("sme_packed_k_cursor")
+        offset = self.packed_offset(operand.data, origin, "0")
+        base = self.pointer(operand.data.view)
+        self.line(
+          f"const {CPP_TYPES[operand.type.dtype]}* {cursor}=(({k})>0 && ({origin})<({spatial})"
+          f"{' && (' + optional_a[1] + ')' if operand is a and optional_a is not None else ''} ? {base}+({offset}) : nullptr);"
+        )
+        self.sme_packed_cursors[id(operand), origin] = cursor, step
+
     def load_sme(index):
-      av = [self.sme_operand_vector(a, "A", f"({mi}+{r}*{lanes})", index, m, k) for r in range(2)]
-      bv = [self.sme_operand_vector(b, "B", f"({ni}+{c}*{lanes})", index, n, k) for c in range(2)]
+      previous_spatial, previous_vector = self.sme_spatial_full, self.full_vector
+
+      def load(operand, side, base, block, blocks, spatial):
+        prefix = exact_blocks and block + 1 < blocks
+        self.sme_spatial_full = previous_spatial or prefix
+        self.full_vector = previous_vector or prefix
+        return self.sme_operand_vector(operand, side, f"({base}+{block}*{lanes})", index, spatial, k)
+
+      av = [load(a, "A", mi, r, nr_m, m) for r in range(nr_m)]
+      bv = [load(b, "B", ni, c, nr_n, n) for c in range(nr_n)]
+      self.sme_spatial_full, self.full_vector = previous_spatial, previous_vector
       return (*av, *bv)
 
     def compute_sme(operands):
-      for r in range(2):
-        for c in range(2):
+      for r in range(nr_m):
+        for c in range(nr_n):
           atag, aval = operands[r]
-          btag, bval = operands[2 + c]
+          btag, bval = operands[nr_m + c]
+          guarded = not getattr(self, "sme_blocks_exist", False) and (nr_m > 1 or nr_n > 1)
+          if guarded:
+            # Guard only block existence, not individual SIMD lanes. Tail
+            # loads zero-fill, but empty blocks should not issue an MOPA.
+            self.opening(f"if (({mi}+{r}*{lanes})<({m}) && ({ni}+{c}*{lanes})<({n}))")
           self.line(
-            f"vecops::vec::sme::mopa<{r * 2 + c},{CPP_TYPES[dtype]},{CPP_TYPES[a.type.dtype]},{CPP_TYPES[b.type.dtype]}>(vecops::vec::mtrue({atag}{{}}),vecops::vec::mtrue({btag}{{}}),{aval},{bval});"
+            f"vecops::vec::sme::mopa<{r * nr_n + c},{CPP_TYPES[dtype]},{CPP_TYPES[a.type.dtype]},{CPP_TYPES[b.type.dtype]}>(vecops::vec::mtrue({atag}{{}}),vecops::vec::mtrue({btag}{{}}),{aval},{bval});"
           )
+          if guarded:
+            self.close()
 
-    if self.active_matmul_plan.schedule.pipeline == "staged":
-      self.matrix_lookahead("sme.k", ki, {"K": k, "SKR": kp}, load_sme, compute_sme)
-    else:
-      self.matrix_loop("sme.k", ki, {"K": k, "SKR": kp})
-      future = f"({ki})+{kp * self.active_matmul_plan.schedule.loop('sme.k').schedule.distance}"
-      self.matrix_prefetch(
-        a, (mi, future), f"({k})-({ki})>{kp * self.active_matmul_plan.schedule.loop('sme.k').schedule.distance}"
-      )
-      self.matrix_prefetch(
-        b, (future, ni), f"({k})-({ki})>{kp * self.active_matmul_plan.schedule.loop('sme.k').schedule.distance}"
-      )
-      compute_sme(load_sme(ki))
-      self.close()
-    for r in range(2):
-      for c in range(2):
-        tile = r * 2 + c
-        ro, co = f"({mi}+{r}*{lanes})", f"({ni}+{c}*{lanes})"
-        row = self.unique("sme_store_row")
-        active = f"std::max<vecops::nint_t>(0,std::min<vecops::nint_t>({lanes},({n})-{co}))"
-        self.opening(f"for (vecops::nint_t {row}=0; {row}<{lanes} && {ro}+{row}<({m}) && ({active})>0; ++{row})")
-        pg = self.unique("sme_store_mask")
-        self.line(f"auto {pg}=vecops::vec::mwhilelt({tag}{{}},0,{active});")
-        value = self.unique("sme_result")
-        self.line(f"auto {value}=vecops::vec::sme::read_hor<{tile}>({tag}{{}},static_cast<std::uint32_t>({row}),{pg});")
-        if phase is not None:
-          self.opening(f"if ({phase[1]}) /* epilogue exactly once */")
-        self.matrix_epilogue(statement, product, tag, (f"({ro}+{row})", co), active, value)
-        if phase is not None:
-          self.close()
-          self.opening("else")
-          self.line(
-            f"vecops::vec::store({tag}{{}},{self.pointer(phase[2], (f'({ro}+{row})', co))},{value},vecops::vec::opt::first({active}));"
-          )
-          self.close()
+    padded, stop = False, k
+
+    def k_loop():
+      previous_full = getattr(self, "matrix_k_full", False)
+      self.matrix_k_full = True
+      if self.active_matmul_plan.schedule.pipeline == "staged":
+        full = stop if padded or kp == 1 else f"(({k})/{kp}*{kp})"
+        self.matrix_lookahead("sme.k", ki, {"K": full, "SKR": kp}, load_sme, compute_sme)
+      else:
+        self.line(f"vecops::nint_t {ki}=0;")
+        self.line("/* full K groups: no per-element tail tests */")
+        self.line("VECOPS_LOOP_ALIGN(64)")
+        self.matrix_loop("sme.k", ki, {"K": stop, "SKR": kp}, initialize=False, bound="full-tiles")
+        distance = kp * self.active_matmul_plan.schedule.loop("sme.k").schedule.distance
+        future = f"({ki})+{distance}"
+        self.matrix_prefetch(a, (mi, future), f"({k})-({ki})>{distance}")
+        self.matrix_prefetch(b, (future, ni), f"({k})-({ki})>{distance}")
+        compute_sme(load_sme(ki))
         self.close()
+      self.matrix_k_full = False
+      known_k = I.constant(a.type.shape[1])
+      if not padded and kp > 1 and (not isinstance(known_k, int) or known_k % kp):
+        tail = f"(({k})/{kp}*{kp})"
+        self.opening(f"if (({k})%{kp}) /* one partial K group */")
+        compute_sme(load_sme(tail))
+        self.close()
+      self.matrix_k_full = previous_full
+
+    def emit_k_path():
+      nonlocal padded, stop
+      padded = all(e.op == "packed_load" and e.data.format in {"sme", "auto"} for e in (a, b))
+      stop = f"((({k})+{kp - 1})/{kp}*{kp})" if padded and kp > 1 else k
+      previous_exists = getattr(self, "sme_blocks_exist", False)
+      previous_spatial = getattr(self, "sme_spatial_full", False)
+      previous_vector = getattr(self, "full_vector", False)
+      condition = (
+        f"({m})-({mi})>{nr_m - 1}*{lanes} && ({n})-({ni})>{nr_n - 1}*{lanes}"
+        if padded
+        else f"({m})-({mi})>={nr_m}*{lanes} && ({n})-({ni})>={nr_n}*{lanes}"
+      )
+      packed_axes = tuple(e.op == "packed_load" and e.data.format in {"sme", "auto"} for e in (a, b))
+      whole_packed = all(not e.data.origins for e, is_packed in zip((a, b), packed_axes) if is_packed)
+      if packed_axes[0] != packed_axes[1] and whole_packed:
+        # A validated native packed panel has full physical spatial words,
+        # even when the corresponding logical axis is a fringe. Prove full
+        # raw lanes independently; do not make a padded packed-B column
+        # force a full raw-A row block through the partial spatial K path.
+        # Logical K padding still requires both operands to be packed.
+        # Sliced packed views retain their prior conservative condition:
+        # their physical panel/cursor origin needs a separate proof.
+        conditions = []
+        for total, index, blocks, native_packed in zip((m, n), (mi, ni), (nr_m, nr_n), packed_axes):
+          relation, bound = (">", blocks - 1) if native_packed else (">=", blocks)
+          conditions.append(f"({total})-({index}){relation}{bound}*{lanes}")
+        condition = " && ".join(conditions)
+      if exact_blocks:
+        # The pre-K dispatch proved every block nonempty, not every lane active.
+        # Packed panels are padded; raw inputs still mask the final block.
+        self.line("/* exact blocks: no empty-block tests inside K */")
+        self.sme_blocks_exist = True
+        self.sme_spatial_full = False
+        self.full_vector = False
+        k_loop()
+      else:
+        self.opening(f"if ({condition}) /* full ZA family: branch-free spatial K body */")
+        self.sme_blocks_exist = True
+        self.sme_spatial_full = not padded
+        self.full_vector = not padded
+        k_loop()
+        self.close()
+        self.opening("else /* partial spatial family */")
+        self.sme_blocks_exist = False
+        self.sme_spatial_full = False
+        self.full_vector = False
+        k_loop()
+        self.close()
+      self.sme_blocks_exist = previous_exists
+      self.sme_spatial_full = previous_spatial
+      self.full_vector = previous_vector
+
+    if optional_a is None:
+      emit_k_path()
+    else:
+      self.opening(f"if ({optional_a[1]}) /* native A packing dispatch outside K */")
+      emit_k_path()
+      self.close()
+      self.opening("else /* raw A: no scratch load or allocation */")
+      packed_a, a = a, optional_a[0]
+      emit_k_path()
+      a = packed_a
+      self.close()
+    self.sme_packed_cursors = old_cursors
+    for r in range(nr_m):
+      for c in range(nr_n):
+        tile = r * nr_n + c
+        ro, co = f"({mi}+{r}*{lanes})", f"({ni}+{c}*{lanes})"
+        rows = active_extent(m, ro, r, nr_m)
+        columns = active_extent(n, co, c, nr_n)
+        self.sme_store_tile(statement, product, tile, ro, co, rows, columns, tag)
     self.close()
     self.close()
-    self.indent -= 1
-    self.line("});")
 
   def vector_matmul(self, statement, product):
     a, b = self.matrix_operands(product)
@@ -2013,7 +3291,7 @@ class MatmulEmitter:
     mr = self.active_matmul_plan.vector_rows
     m, n = (self.scalar(v) for v in product.type.shape)
     k = self.scalar(a.type.shape[1])
-    width = f"vecops::vec::size({tag}{{}})"
+    width = self.vector_size(tag)
     mi, ni, ki = (self.unique(v) for v in ("matmul_m", "matmul_n", "matmul_k"))
     self.line("/* vector outer-product family: named accumulators, fused input/C transforms */")
     self.matrix_loop("vector.m", mi, {"M": m, "MR": mr})
@@ -2035,8 +3313,10 @@ class MatmulEmitter:
       if phase is not None:
         self.close()
         self.opening(f"else if ({mi}+{row}<({m}))")
+        stride = phase[2].strides[1]
+        extra = "" if I.constant(stride) == 1 else f",vecops::vec::opt::strided({self.scalar(stride)})"
         self.line(
-          f"{accumulator}=vecops::vec::load({tag}{{}},{self.pointer(phase[2], coords)},vecops::vec::opt::first({active}));"
+          f"{accumulator}=vecops::vec::load({tag}{{}},{self.pointer(phase[2], coords)},vecops::vec::opt::first({active}){extra});"
         )
         self.close()
       accumulators.append(accumulator)

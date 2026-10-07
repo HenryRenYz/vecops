@@ -129,8 +129,8 @@ class TransposeEmitter:
     self.line("#endif")
     self.tag_dtypes[tag] = dtype
     self.opening(f"for (; {ni} < {nend}; ++{ni})")
-    self.opening(f"for (vecops::nint_t {mi} = {mb}; {mi} < {mend}; {mi} += vecops::vec::size({tag}{{}}))")
-    active = f"std::min<vecops::nint_t>(vecops::vec::size({tag}{{}}), {mend} - {mi})"
+    self.opening(f"for (vecops::nint_t {mi} = {mb}; {mi} < {mend}; {mi} += {self.vector_size(tag)})")
+    active = f"std::min<vecops::nint_t>({self.vector_size(tag)}, {mend} - {mi})"
     coords = batch + (ni, mi)
     before = self.chunk_cache
     self.chunk_cache = {}
@@ -215,19 +215,56 @@ class TransposeEmitter:
     if source.op == "cast" and source.type.dtype == statement.destination.dtype:
       source = source.args[0]
     view = source.data
+    dynamic_unroll = self.vector_ir.manager.options.get("cpu_transpose_sme_dynamic_unroll", False)
+    if not isinstance(dynamic_unroll, bool):
+      raise TypeError("cpu_transpose_sme_dynamic_unroll must be bool")
     m, n = map(self.scalar, statement.destination.shape[-2:][::-1])
     own_region = self.hardware_scope is None
     if own_region:
       session = self.unique("sme_session")
       self.line(f"vecops::execution::ExecutionSession {session};")
-      self.opening(
-        f"{session}.with_resources(vecops::execution::sme::Region{{}}, [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT"
+      self.opening_hardware_owner("sme", session, "[&](auto&)")
+    # Const entry snapshots are still captured by reference in an outlined
+    # streaming trampoline. ZA assembly clobbers memory, so accessing those
+    # captures in every slice can reload the closure after each instruction.
+    # Copy only this invocation's scalar geometry and origins into SSA inside
+    # the owner. This is also fresh after an owned buffer's most recent resize.
+    # Keep the copies local: another view/region may have different offsets or
+    # may resize the same scratch storage before its next invocation.
+    extent_m, extent_n = self.unique("transpose_extent_m"), self.unique("transpose_extent_n")
+    source_base, target_base = self.unique("transpose_source_base"), self.unique("transpose_target_base")
+    source_m, source_n = self.unique("transpose_source_m_stride"), self.unique("transpose_source_n_stride")
+    target_m, target_n = self.unique("transpose_target_m_stride"), self.unique("transpose_target_n_stride")
+    self.line(f"const vecops::nint_t {extent_m}=({m});")
+    self.line(f"const vecops::nint_t {extent_n}=({n});")
+    for name, view_ in ((source_base, view), (target_base, statement.destination)):
+      self.line(
+        f"const auto {name}=({extent_m}>0 && {extent_n}>0 ? "
+        f"{self.pointer(view_, batch)} : {self.storage_pointer(view_.storage)});"
       )
+    # Both callers already guard these contiguous axes before entering SME.
+    # An outlined trampoline cannot otherwise inherit that unit-stride proof.
+    # Keep only the independent row pitches dynamic, including negative ones.
+    for name, stride in (
+      (source_m, view.strides[-1]),
+      (source_n, I.literal(1)),
+      (target_m, I.literal(1)),
+      (target_n, statement.destination.strides[-2]),
+    ):
+      self.line(f"const vecops::nint_t {name}={self.scalar(stride)};")
+    m, n = extent_m, extent_n
+
+    def source_pointer(row):
+      return f"({source_base} + ({ni}) * {source_n} + ({mi} + {row}) * {source_m})"
+
+    def target_pointer(column):
+      return f"({target_base} + ({ni} + {column}) * {target_n} + ({mi}) * {target_m})"
+
     tag, bits, lanes = (self.unique(v) for v in ("sme_tag", "sme_bits", "svl"))
     width = ELEMENT_BYTES[dtype]
     self.line(f"using {tag} = vecops::vec::ScalableTag<{CPP_TYPES[dtype]}, 0>;")
     self.line(f"using {bits} = vecops::vec::ScalableTag<std::uint{width * 8}_t, 0>;")
-    self.line(f"const auto {lanes} = vecops::vec::size({tag}{{}});")
+    self.line(f"const auto {lanes} = vecops::vec::sme::streaming_lanes<{CPP_TYPES[dtype]}>();")
     mi, ni, r, c = (self.unique(v) for v in ("sme_m", "sme_n", "za_row", "za_col"))
     am, an = self.unique("active_m"), self.unique("active_n")
     self.opening(f"for (vecops::nint_t {mi} = 0; {mi} < ({m}); {mi} += {lanes})")
@@ -239,9 +276,23 @@ class TransposeEmitter:
     self.line(f"auto {pgn} = vecops::vec::mwhilelt({bits}{{}}, 0, {an});")
 
     def write_rows(offsets):
+      if view.dtype == dtype:
+        # Native memory already has the ZA tile's element representation.
+        # Moving it through a Z register adds a load + MOVA dependency (and
+        # extends Z liveness) without performing a numeric conversion. ZA
+        # memory instructions predicate the tail directly, including its
+        # zero fill. Reinterpret only the pointer: floats/integers of the
+        # same storage type keep every payload bit, including NaNs.
+        for offset in offsets:
+          pointer = source_pointer(offset)
+          self.line(
+            f"vecops::vec::sme::load_hor<0>(static_cast<std::uint32_t>({offset}), {pgn}, "
+            f"reinterpret_cast<const std::uint{width * 8}_t*>({pointer}));"
+          )
+        return
       values = []
       for offset in offsets:
-        pointer = self.pointer(view, batch + (ni, f"({mi} + {offset})"))
+        pointer = source_pointer(offset)
         value = self.unique("za_input")
         self.line(f"vecops::vec::Vec<{tag}> {value};")
         self.opening(f"if ({an} == {lanes})")
@@ -257,6 +308,16 @@ class TransposeEmitter:
         )
 
     def read_columns(offsets):
+      if statement.destination.dtype == dtype:
+        # With no store conversion, one ST1 ZA vertical slice replaces
+        # read_ver + a vector store and needs no temporary Z register.
+        for offset in offsets:
+          pointer = target_pointer(offset)
+          self.line(
+            f"vecops::vec::sme::store_ver<0>(static_cast<std::uint32_t>({offset}), {pgm}, "
+            f"reinterpret_cast<std::uint{width * 8}_t*>({pointer}));"
+          )
+        return
       values = []
       for offset in offsets:
         value = self.unique("za_output")
@@ -265,7 +326,7 @@ class TransposeEmitter:
         )
         values.append(value)
       for offset, value in zip(offsets, values):
-        pointer = self.pointer(statement.destination, batch + (f"({ni} + {offset})", mi))
+        pointer = target_pointer(offset)
         self.opening(f"if ({am} == {lanes})")
         self.line(f"vecops::vec::store_convert({tag}{{}}, {pointer}, {value});")
         self.close()
@@ -273,15 +334,105 @@ class TransposeEmitter:
         self.line(f"vecops::vec::store_convert({tag}{{}}, {pointer}, {value}, vecops::vec::opt::first({am}));")
         self.close()
 
-    for index, extent, emit in ((r, am, write_rows), (c, an, read_columns)):
+    def static_half_output():
+      # Only complete columns exist in this branch. Form their origin inside
+      # the guard and use independent constant offsets, not a mutable cursor
+      # chain or a pointer after the final column. Pairs have two named Z
+      # values and retain the original read/read/store/store ordering.
+      origin = self.unique("za_half_output_origin")
+      self.line(f"const auto {origin} = {target_pointer('0')};")
+      pitch = I.constant(statement.destination.strides[-2])
+      for first in range(0, plan.sme_const_half_output_columns, 2):
+        self.opening("")
+        values = []
+        for column in (first, first + 1):
+          value = self.unique("za_half_output")
+          self.line(
+            f"const auto {value} = vecops::vec::bitcast({tag}{{}}, {bits}{{}}, "
+            f"vecops::vec::sme::read_ver<0>({bits}{{}}, std::uint32_t{{{column}}}, {pgm}));"
+          )
+          values.append((column, value))
+        for column, value in values:
+          self.line(f"vecops::vec::store_convert({tag}{{}}, ({origin} + std::int64_t{{{column * pitch}}}), {value});")
+        self.close()
+
+    def static_half_full_input():
+      # Full am/an and captured SVL are proved by the caller. Same-type
+      # public loads move payload bits without numeric conversion. Form
+      # this invocation's origin inside the guard and keep only two named
+      # Z values live per load/load/write/write pair; no aggregate Vec/Mask.
+      origin = self.unique("za_half_input_origin")
+      self.line(f"const auto {origin} = {source_pointer('0')};")
+      pitch = I.constant(view.strides[-1])
+      for first in range(0, plan.sme_const_half_full_input_rows, 2):
+        self.opening("")
+        values = []
+        for row in (first, first + 1):
+          value = self.unique("za_half_input")
+          self.line(f"const auto {value} = vecops::vec::load({tag}{{}}, ({origin} + std::int64_t{{{row * pitch}}}));")
+          values.append((row, value))
+        for row, value in values:
+          self.line(
+            f"vecops::vec::sme::write_hor<0>(std::uint32_t{{{row}}}, {pgn}, "
+            f"vecops::vec::bitcast({bits}{{}}, {tag}{{}}, {value}));"
+          )
+        self.close()
+
+    for index, extent, emit, pitch in (
+      (r, am, write_rows, view.strides[-1]),
+      (c, an, read_columns, statement.destination.strides[-2]),
+    ):
+      static_output = plan.sme_const_half_output_columns is not None and emit is read_columns
+      static_input = plan.sme_const_half_full_input_rows is not None and emit is write_rows
+      if static_input:
+        self.opening(
+          f"if ({am} == {lanes} && {an} == {lanes} && {lanes} == {plan.sme_const_half_full_input_rows}) "
+          "/* full ZA input: named constant-pitch F32 pairs */"
+        )
+        static_half_full_input()
+        self.close()
+        self.opening("else /* typed input fringe: retain predicated ZA loads */")
+      if static_output:
+        self.opening(
+          f"if ({am} == {lanes} && {an} == {lanes} && {lanes} == {plan.sme_const_half_output_columns}) "
+          "/* full ZA output: constant F32-to-F16 addresses */"
+        )
+        static_half_output()
+        self.close()
+        self.opening("else /* typed output fringe: keep cold addresses local */")
+
+      def unroll_hint(pitch=pitch, static_output=static_output):
+        if static_output:
+          # Do not clone every cold column address into the full owner's
+          # frame. This hint is scoped to this bounded constant-pitch output
+          # fallback; no input or public serial/vector unroll is changed.
+          self.line("#if defined(__clang__)")
+          self.line("#pragma clang loop unroll(disable)")
+          self.line("#elif defined(__GNUC__)")
+          self.line("#pragma GCC unroll 1")
+          self.line("#endif")
+        elif dynamic_unroll and I.constant(pitch) is None:
+          # The <=8-slice auto-unroll can keep seven multiples of each
+          # runtime pitch live and spill them. Bound only that experimental
+          # dynamic-address case; constant pitches retain native scheduling.
+          self.line("#if defined(__clang__)")
+          self.line("#pragma clang loop unroll_count(2)")
+          self.line("#elif defined(__GNUC__)")
+          self.line("#pragma GCC unroll 2")
+          self.line("#endif")
+
       self.line(f"vecops::nint_t {index} = 0;")
       if plan.sme_pairs:
+        unroll_hint()
         self.opening(f"for (; {index} + 1 < {extent}; {index} += 2)")
         emit((index, f"({index} + 1)"))
         self.close()
+      unroll_hint()
       self.opening(f"for (; {index} < {extent}; ++{index})")
       emit((index,))
       self.close()
+      if static_output or static_input:
+        self.close()
     self.close()
     self.close()
     if own_region:

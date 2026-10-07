@@ -109,6 +109,18 @@ that share one physical worker can deadlock. Old V1 providers stay valid.
 The native provider implements teams; current Torch/OpenMP providers keep
 their logical-task API and generated grids fall back to individual regions.
 
+Linux AArch64 vector lengths are per-thread and SVE VL need not equal SME SVL.
+Logical-task and resident-team dispatch capture the caller's pair. Worker entry
+checks it using architectural reads; only a mismatch invokes `prctl` to select
+the exact lengths. Worker exit restores its original lengths and inheritance
+flags, including exceptions. Unsupported lengths or OS rounding are errors.
+`execution/VectorLength.h` exposes `current_thread_vector_lengths()` and
+`ScopedArmVectorLengths` for embedding code; the latter must run outside
+streaming mode and with no live vector, predicate, or ZA state spanning it.
+Generated source-kernel adapters cheaply validate their compile-time VL/SVL
+pair on every entry. If the caller changes it, obtain the corresponding kernel
+again through `T.jit` or `T.compile`; a stale fixed-geometry kernel never runs.
+
 Direct Python/NumPy calls receive the lazy `vecops_cpu_thread_pool_v1()` facade.
 Its capacity follows the calling thread's affinity, physical cores, cgroup v2
 CPU quota (cached for at most one second), and `VECOPS_NUM_THREADS`. An explicit
@@ -132,12 +144,41 @@ Separate processes should use spawn/forkserver with disjoint CPU affinities
 or explicit per-process budgets. There is no cross-process work queue,
 automatic NUMA placement, or support for inheriting live workers across fork.
 
+The generated Torch extension is a typed, schema-shaped adapter artifact; it
+does not bake a dispatcher namespace or operator name into its source. At load
+time the DSO registers each namespace/name/schema separately, with a stateful
+typed CPU functor holding that operator's runtime handle, specialization names,
+allocation observer, and thread-pool context. Meta registration uses a typed
+Meta functor. Thus multiple Torch names—including distinct read-write and
+cache-only JIT wrappers—can share one bridge artifact without sharing operator
+state. Re-registering the same name with a different handle is rejected. The
+bridge cache identity includes the typed signature/spec ordering, Torch and
+compiler identities, and parallel-runtime policy, but excludes the registration
+name and cache mode; cache-only lookup checks its deterministic signature key
+and never builds or writes a missing bridge.
+
 The generated Torch extension uses Torch's intra-op runtime by default. It
-reports `at::get_num_threads()`, detects an existing
-`at::in_parallel_region()`, and executes the logical task set through the
-active Torch/GNU OpenMP team where that integration is available, with a Torch
-`at::parallel_for` fallback on other builds. Nested entry is serialized to
-avoid oversubscription.
+reports `at::get_num_threads()` and detects an existing
+`at::in_parallel_region()`. The default generated adapter uses
+`at::parallel_for`. When Torch identifies its packaged GNU OpenMP runtime and
+the selected bridge compiler is Clang, vecops emits a separate guarded adapter
+that calls `GOMP_parallel` from that exact packaged runtime; it does not enable
+compiler OpenMP or link a second runtime. This adapter matches ATen's
+grain-size-one chunking, lazy thread initialization, thread-ID and parallel
+guards, nested serialization, and post-join exception propagation. Before
+using it, vecops verifies the packaged library is already loaded, checks with
+`dladdr` that each required GOMP/standard `omp_*` symbol resolves to that exact
+file, and confirms its maximum team size matches Torch's reported setting.
+Those function addresses are installed directly into the bridge, so loader
+symbol interposition cannot redirect worker IDs or nested-region checks to a
+different OpenMP runtime. The library's content identity participates in the
+bridge cache key and publication guard.
+Unknown or ambiguous runtimes fail with an actionable error instead of
+silently switching compilers or running serially. The direct GOMP entry point
+is a GNU runtime ABI boundary, so it is intentionally limited to the
+validated packaged runtime path. A bridge compiler override is available only
+when both `VECOPS_TORCH_BRIDGE_CC` and `VECOPS_TORCH_BRIDGE_CXX` are explicitly
+set.
 
 Set `VECOPS_THREAD_POOL=native` before importing vecops to inject the optional
 process-local persistent pool into every generated Torch bridge. The pool is
@@ -152,6 +193,12 @@ before the legacy pool was created; the adaptive direct-call facade instead
 requires that override to lie inside the caller's affinity. `VECOPS_THREAD_POOL_SPIN_COUNT` controls the bounded spin
 before parking and defaults to 256. This mode is opt-in because a workload
 with substantial interleaved ATen work can still prefer Torch's shared team.
+Team barriers use the standard-library atomic wait facility when the selected
+library provides it. Older Linux standard libraries park on a lock-free
+32-bit generation word with private futexes after the bounded spin; other
+platforms use a condition-variable fallback with predicate-based wakeup. This
+keeps barrier waits parked rather than burning CPU on unsupported
+`atomic<uint64_t>::wait` implementations.
 Set `VECOPS_NATIVE_THREAD_POOL_OPS` to comma-separated qualified-name glob
 patterns to opt in only selected bridges, for example
 `alphafold3_native::diffusion_*`; unmatched bridges retain the Torch pool.

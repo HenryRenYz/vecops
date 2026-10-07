@@ -7,6 +7,7 @@ from typing import Any
 
 from ..operations import Trait
 from ..operations import current as operation_snapshot
+from .promotion import FLOAT_DTYPES, cast_operands, floating_dtype, rounded_float, weak_literal
 from .types import Node, ScalarType, TileType, VectorTag, VectorType
 
 
@@ -208,8 +209,11 @@ class KernelIR(Node):
 
 
 def literal(value, dtype=None):
+  weak = dtype is None
   dtype = dtype or ("bool" if isinstance(value, bool) else "int64" if isinstance(value, int) else "float64")
-  return Expr(ScalarType(dtype), "literal", data=value)
+  if not weak and dtype in FLOAT_DTYPES:
+    value = rounded_float(value, dtype)
+  return Expr(ScalarType(dtype, weak=weak), "literal", data=value)
 
 
 def constant(expr):
@@ -256,22 +260,33 @@ def binary(op, left, right):
   if left.op == right.op == "literal":
     fold = operation_snapshot().get(op).fold
     if fold is not None:
-      return literal(fold(left.data, right.data))
+      if weak_literal(left) and weak_literal(right):
+        return literal(fold(left.data, right.data))
+      dtype = floating_dtype((left, right), shaped=False)
+      if dtype is not None:
+        result = fold(rounded_float(left.data, dtype), rounded_float(right.data, dtype))
+        comparison = operation_snapshot().has(op, Trait.COMPARISON)
+        return literal(result if comparison else rounded_float(result, dtype), dtype="bool" if comparison else dtype)
+      # Integer-only folding retains its pre-existing Python-result width.
+      # Preserve strong provenance without adding signed/width promotion here.
+      result = literal(fold(left.data, right.data))
+      return Expr(ScalarType(result.type.dtype), "literal", data=result.data)
   tiles = [v for v in (left, right) if isinstance(v.type, TileType)]
+  promoted = floating_dtype((left, right), shaped=bool(tiles))
+  if promoted is not None and operation_snapshot().get(op).family != "logical":
+    left, right = cast_operands((left, right), promoted, Expr, shaped_type, shaped=bool(tiles))
+  else:
+    promoted = None
   if tiles:
     typ = tiles[0].type
     shape = typ.shape
     for tile in tiles[1:]:
       shape = broadcast_shape(shape, tile.type.shape)
     comparison = operation_snapshot().has(op, Trait.COMPARISON)
-    float_dtypes = [v.type.dtype for v in tiles if v.type.dtype.startswith("float")]
-    dtype = max(float_dtypes, key=lambda d: int(d[5:])) if float_dtypes else "float64" if op == "div" else typ.dtype
+    dtype = promoted or ("float64" if op == "div" else typ.dtype)
     typ = shaped_type(dtype, shape, typ, comparison)
   else:
-    floating = [v.type.dtype for v in (left, right) if v.type.dtype.startswith(("float", "bfloat"))]
-    dtype = (
-      "float64" if "float64" in floating or op == "div" and not floating else "float32" if floating else left.type.dtype
-    )
+    dtype = promoted or ("float64" if op == "div" else left.type.dtype)
     typ = ScalarType("bool" if operation_snapshot().has(op, Trait.COMPARISON) else dtype)
   return Expr(typ, op, (left, right))
 
@@ -279,6 +294,7 @@ def binary(op, left, right):
 def same_expr(a, b):
   if (
     a.type.dtype != b.type.dtype
+    or getattr(a.type, "weak", False) != getattr(b.type, "weak", False)
     or isinstance(a.type, TileType) != isinstance(b.type, TileType)
     or getattr(a.type, "mask", False) != getattr(b.type, "mask", False)
   ):
@@ -289,9 +305,10 @@ def same_expr(a, b):
     and a.op == b.op
     and a.op in {"min", "max"}
     and len(a.args) == len(b.args) == 2
+    and same_expr(a.args[0], b.args[1])
+    and same_expr(a.args[1], b.args[0])
   ):
-    if same_expr(a.args[0], b.args[1]) and same_expr(a.args[1], b.args[0]):
-      return True
+    return True
   return a is b or (
     a.op == b.op
     and a.data == b.data
@@ -317,7 +334,18 @@ def broadcast_shape(a, b):
 
 
 def loads(expr):
+  """Memory-read occurrences, preserving repeated incoming argument edges."""
   if operation_snapshot().has(expr, Trait.MEMORY_READ):
     yield expr
   for argument in expr.args:
     yield from loads(argument)
+
+
+def loads_unique(expr):
+  """Memory-read identities for dependency/alias membership, not use counts."""
+  from .traversal import walk_unique
+
+  catalog = operation_snapshot()
+  for value in walk_unique(expr):
+    if catalog.has(value, Trait.MEMORY_READ):
+      yield value

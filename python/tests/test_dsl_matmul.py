@@ -6,13 +6,14 @@ import pytest
 import vecops
 import vecops.language as T
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
+from dsl_test_utils import amx_available_for_test, make_compiler
 
 
 @pytest.fixture(scope="module")
 def compiler(tmp_path_factory):
   root = tmp_path_factory.mktemp("dsl-matmul")
-  return vecops.Compiler(target="Native", cc="gcc", cxx="g++", jobs=4,
-                         cache_dir=root/"cache", build_dir=root/"build")
+  return make_compiler(target="Native", jobs=4,
+                       cache_dir=root/"cache", build_dir=root/"build")
 
 
 def template(dtype="float32", *, library=False, fused=False, packed=False):
@@ -86,6 +87,7 @@ def test_invalid_shapes_and_packing():
 
 @pytest.mark.parametrize("ad,bd", [("bfloat16","bfloat16"),("int8","int8"),("uint8","int8")])
 @pytest.mark.parametrize("packed", [False,True])
+@pytest.mark.skipif(not amx_available_for_test(), reason="explicit AMX matmul requires an x86 AMX target")
 def test_amx_tails_packed_fusion(compiler,ad,bd,packed):
   M,N,K=(T.dynamic(lower=0) for _ in range(3))
   out="float32" if ad=="bfloat16" else "int32"
@@ -263,6 +265,7 @@ def test_noncontiguous_layernorm_tail_fuses_through_func(compiler,fusion):
 
 @pytest.mark.parametrize('dtype',['bfloat16','int8'])
 @pytest.mark.parametrize('side',['A','B'])
+@pytest.mark.skipif(not amx_available_for_test(), reason="AMX packing requires an x86 AMX target")
 def test_packed_abi_matches_public_cpp(compiler,dtype,side):
   S,K,F=(T.dynamic(lower=0) for _ in range(3))
   shape=(S,K) if side=='A' else (K,S)

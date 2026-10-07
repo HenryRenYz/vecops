@@ -4,17 +4,19 @@ import pytest
 import torch
 import vecops
 import vecops.language as T
+from dsl_test_utils import amx_available_for_test, make_compiler
 
 
 @pytest.fixture(scope="module")
 def compiler(tmp_path_factory):
   root = tmp_path_factory.mktemp("dsl-amx-pipeline-tail")
-  return vecops.Compiler(
-    target="Native", cc="gcc", cxx="g++", jobs=4, build_dir=root / "build", cache_dir=root / "cache"
+  return make_compiler(
+    target="Native", jobs=4, build_dir=root / "build", cache_dir=root / "cache"
   )
 
 
 @pytest.mark.parametrize("mode", ["prefetch", "staged"])
+@pytest.mark.skipif(not amx_available_for_test(), reason="explicit AMX pipeline requires an x86 AMX target")
 def test_fused_amx_k_tails(compiler, mode):
   k = T.dynamic(lower=0)
 

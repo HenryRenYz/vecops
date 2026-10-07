@@ -162,12 +162,23 @@ arguments are rejected. The normalized call is both the elaboration input and
 the decorator cache key. Forwarding a normalized value into another `T.jit`
 function rebinds its specialization name to the callee parameter.
 
+`T.jit(..., pipeline=..., pass_options=...)` forwards the compilation pipeline
+and pass policy to `T.compile` for returned templates, including scheduling
+cost-profile overrides. Plain Python return values/forwarders remain uncompiled.
+The option mapping is copied when the decorator is created; option values and
+pipeline objects must remain immutable for that decorator's lifetime.
+
 `T.Const` arithmetic builds exact integer expressions. `T.dynamic()` creates
 a bounded, aligned runtime value which does not specialize the artifact;
 expressions combining named dynamic and Const leaves validate shape/stride
 relations at runtime. A comparison involving an unresolved dynamic value is
 not proven and is false in Python control flow, while `T.is_value(x)` reports
 whether `x` is compile-time known. `T.any` is the unconstrained dynamic value.
+Anonymous dynamic and dtype leaves passed through a `TensorType`-only helper
+factory receive deterministic internal names before IR/schema capture. Distinct
+dynamic objects remain independent; repeated references to one object enforce
+the same runtime dimension, including derived dense-stride expressions. These
+internal names are not a public API and do not depend on allocation addresses.
 
 `T.Tensor(shape, strides, dtype)` accepts tuples or lists in the annotation.
 Omitted strides mean dense row-major for the current source backend; the IR
@@ -190,11 +201,22 @@ Template annotations and external values referenced in the template body are
 captured as C++ specialization values. A bare reference in the ignored body is
 therefore the explicit way to capture a value which does not occur in an
 annotation. The body is never executed for a source template. `T.compile`
+exports every referenced name when multiple `T.Const`/`T.DType` variables alias
+the same value (for example, `NativeA = NativeB = T.DType("float16")`). These
+names still reference the original value: shared annotation identities and
+delayed batch captures are preserved rather than copied or rebound. Source-less
+DSL templates keep their existing Python capture environment. `T.compile`
 caches the lowered operator by template IR, source/dependency content,
 `out_idx`, and compiler configuration. `T.jit` adds a higher-level elaboration
 cache and only calls `T.compile` when the elaborated result is a
 `TemplateFunction`; ordinary Python callables and forwarding wrappers are
 cached and returned unchanged.
+
+`Optional[T.Tensor(...)]` and `T.Tensor(...) | None` both mark an optional
+input. Tensor descriptors have a stable hash for Python's typing caches,
+including older supported Python versions; binding symbolic names does not
+invalidate that hash. The hash is not artifact identity: template/compilation
+cache keys still use canonical dimensions, dtype, access and capture values.
 
 Calls made inside `vecops.collect_compile_requests()` allocate output metadata
 or framework tensors, record the source-kernel request, and skip execution.
@@ -231,10 +253,48 @@ loops; use explicit `T.alloc` storage instead. An unrolled region cannot use
 
 Literal scalar locals and pure constant `T.func` results retain compile-time
 identity, so they can feed `T.static_assert` and specialization branches.
+Immutable captured Python `bool`/`int`/`float` values, tuple elements and
+helper defaults use the same scalar IR literals when consumed as expressions;
+ordinary constants such as a captured `BM = 32` do not require `T.Const(32)`.
 If a runtime loop or branch updates such a local, it is promoted to mutable
 scalar state before that region. Immutable tuples support compile-time
 slicing and starred tuple expansion; runtime tuple slice bounds and mutable
 iterable unpacking are not supported.
+
+Weak-literal metadata controls promotion; it is not a distinct storage dtype.
+Boolean literal `flush` values (including the omitted default) remain valid
+for printing. Loop-returning helpers use strong scalar result slots and allow
+weak literals and explicitly typed values of the same dtype on different
+return paths; different dtypes still require an explicit cast.
+
+Python numeric literals in DSL expressions are **weak**: they do not widen an
+existing floating tile/vector. Thus `float32_tile * 0.5` computes in FP32,
+including intermediate rounding, rather than implicitly computing in FP64.
+An integer or boolean value combined with a weak Python float computes in FP32
+when the float is zero, NaN, infinity, or its finite nonzero magnitude lies in
+`[2**-149, (2-2**-23)*2**127]`; otherwise it computes in FP64. This is a
+magnitude-range rule, not an exact-representation guarantee for every Python
+float. In particular, `int32_tile * 0.5 + 0.125` no longer truncates the
+constants to integers before arithmetic. Output stores still convert to the
+destination dtype after the floating computation.
+
+Explicit `T.cast`, typed runtime scalar parameters and compiler-created typed
+literals are **strong** operands. Their floating dtype participates in the
+common computation type: FP64 dominates, FP32 dominates small-floats, and
+mixed FP16/BF16 computes in FP32. Same-type half tile/vector arithmetic retains
+that dtype; scalar FP16/BF16 arithmetic retains the existing FP32 computation
+policy, with explicit casts/stores providing the rounding boundaries. A
+literal promoted to mutable control-flow state becomes strong. Scalar-only
+expressions containing only untyped Python literals keep Python's existing
+double-precision constant-folding behavior. Constant folding preserves strong
+types and rounds typed literals; small-float literals follow the public scalar
+constructors' FP64-to-FP32-to-FP16/BF16 chain.
+
+The shared rules also apply to `T.where`, `T.fma`, elementwise `min`/`max`, and
+comparisons. A predicate retains its numeric lane basis, not a boolean vector
+tag. This does not change integer/integer width or signedness selection,
+integer division semantics, or the distinction between separate `mul`/`add`
+and explicitly fused `T.fma`.
 
 Tile values retain snapshot semantics: `old = x; x = x + 1` leaves `old`
 unchanged, and `x, y = y, x` reads both old values before updating either.
@@ -275,6 +335,10 @@ back to dense views; general value reshapes have a register-only lane fallback.
 `T.squeeze(view_or_value, axis=-1)` removes one, checking its extent at runtime
 when necessary. Memory transforms remain zero-copy and value transforms retain
 their logical coordinates when broadcast into higher-rank consumers.
+Compile-time tuple parameters such as transpose axes and reshape extents may be
+immutable tuples captured from the surrounding Python factory or written as
+literals in the kernel. Their scalar leaves are normalized at the DSL call
+boundary; mutable lists remain unsupported.
 Shapes broadcast
 statically where possible; unknown relations are checked at runtime. A source
 extent must equal the destination extent or be one; incompatible extents error.
@@ -490,7 +554,10 @@ Buffering is off by default because extra scalar-storage traffic can cost
 more than it saves on inexpensive kernels.
 
 `T.double_buffer(shape, dtype=...)` allocates two scalar-storage banks, selected
-as `banks[i % 2, ...]`. Prime the first bank and explicitly load the next bank
+as `banks[i % 2, ...]`. Shape accepts a scalar extent or a tuple, including
+captured tuples and parsed helper results, just like `T.alloc`/`T.shared`;
+shape expressions are evaluated once during frontend expansion. Prime the
+first bank and explicitly load the next bank
 before consuming the current bank. The compiler does not yet infer arbitrary
 double-buffer schedules or asynchronous events; GPU/NPU async semantics are
 not advertised by these CPU operations.
@@ -570,6 +637,13 @@ threads; it does not spawn processes or coordinate their CPU ownership.
 
 ### Matrix products and packing
 
+Generated Python DSL kernels disable implicit floating-point contraction at
+native compilation: distinct `mul` and `add` operations retain their separate
+rounding, including when fused into packing or a Matmul input producer.
+Use `T.fma(a, b, c)` for explicitly fused rounding. This target-only policy is
+part of artifact identity; it does not mutate the user's `Compiler`, global
+`CXXFLAGS`, or the compilation policy of `T.template(source=...)` C++ kernels.
+
 `T.dot((A, B), output, acc=None, acc_dtype=None, implementation="auto")`
 computes the rank-two tile product. A is `[M,K]`, B is **`[K,N]`** (unlike the
 C++ Matmul operator's `[N,K]` convention). Inputs may be views, elementwise
@@ -608,7 +682,10 @@ or writes a padded physical buffer and returns a packed logical tile. Formats
 are `dense`, `amx`, `sme`, or target-selected `auto`. `T.packed(buffer,
 logical_shape, side=..., format=...)` wraps an external packed buffer. Its
 physical storage must be dense, large enough and independent of the output;
-shape/capacity/alias validation precedes hardware-state entry. A/B formats
+all physical slots beyond logical K must be zero, matching the public C++
+MatmulPack format contract. Wrapping external storage does not create or
+repair this padding. Shape/capacity/alias validation precedes hardware-state
+entry. A/B formats
 are distinct: AMX A is row/K-blocked, B is dword-group/VNNI interleaved; SME
 uses spatial panels and K groups parameterized by SVL. Dense B stores `[N,K]`.
 Explicit AMX packing supports bf16/fp16/int8/uint8 and requires an AMX target.
@@ -621,6 +698,50 @@ transpose/vector memory planner. External packed buffers are tied to the
 target ISA and (for SME) SVL ABI; shape reinterpretation is not a format
 conversion.
 
+Ordinary-SVE BF16 PackedDot leaves load full registers for complete K groups
+only when the actual vector width fits inside each operand's current physical
+spatial panel. Shifted windows near a panel boundary keep masked loads.
+MMLA's row/column segments do not mix discarded spatial-padding results into
+valid outputs; the final partial K group explicitly clears its nonlogical
+halfword before MAC, rather than relying on an external buffer's zero padding.
+This local robustness does not change `T.packed`'s general zero-K-padding
+contract: other packed consumers and fallback families still require it.
+FP16 inner-product leaves keep FP16 input vectors and use the public grouped
+widening-dot primitive with FP32 accumulators (FMLALB/FMLALT on SVE2).
+The input DAG's FP16 conversion boundary and strict multiply/add policy remain
+in place, and an explicit `T.fma` remains fused. These ordinary-SVE operations
+use VL independently of SVL and do not enter streaming mode.
+
+Dynamic SME matrix geometry is selected before entering streaming mode. Each
+selected family has its own small forced-inline callback and owns one SM/ZA
+interval; unrelated family bodies do not share an oversized streaming owner.
+Scalar lane bounds use the captured SVL independently of ordinary VL, and
+clipped fringe extents use public forced-inline scalar helpers. This is an
+inlining/code-generation policy, not a change to packing or family thresholds;
+target disassembly and paired execution still determine its effectiveness.
+
+On an SME-FA64 target, same-storage-type operands with unit K stride can
+pack through public ZA horizontal loads and vertical drains. Full panels
+of elements up to 32 bits ping-pong between two ZA tile pairs; FP64 and
+spatial/K fringes use element-width staging with exact zero padding. Raw
+packing preserves storage bits (including NaN payloads and signed zeros).
+Negative spatial strides are legal; non-unit K strides retain the vector
+gather/conversion path. An unmasked rank-two FP32 storage leaf can also stage
+through ZA32 and feed its transposed slices to the normal pointwise Vector
+DAG before narrowing to BF16/FP16/int8/uint8. FP32 row-statistic and K-axis
+parameter broadcasts keep their own logical coordinates; final mul/add
+remain separate unless the DSL explicitly requests FMA. The route does not
+cross reduction, materialization or register/state boundaries, and 16-bit
+auxiliary loads retain the ordinary path. A folded load-convert's narrow
+alias snapshot also uses the ordinary path rather than pretending it is
+FP32 input storage. Absent spatial lanes are zeroed after the DAG and before
+conversion; padded K slots skip the entire DAG, including parameter reads.
+Conversion uses the public ordered/saturating conversion contract, not a
+bitwise guarantee for converted NaNs. Capacity and alias checks, including
+any snapshot, run before streaming entry. Geometry
+uses the captured calling-thread SVL, not a build-host or fixed 64-byte
+assumption, and no vector arrays are generated.
+
 `T.func` is inlined **before** fusion analysis, including nested
 `T.library.*` calls in frozen capture identity. Rank-two layernorm/softmax
 hoist row statistics once; their final affine/exp tail stays in the operand
@@ -630,6 +751,72 @@ Dynamic row/column GEMV selects the non-packing reuse model when it bypasses
 packing; a tiled API alone does not imply that B is produced only once.
 `pass_options={"cpu_matmul_fusion": "auto"/"always"/"never"}` provides an
 explicit diagnostic override; `auto` is a heuristic, not an optimality proof.
+`cpu_sme_packed_ab_cache_bypass` is a strict boolean override. The SME cost
+profile enables the narrow policy by default; `False` retains the blocked
+control path. It may skip automatic cache panels for short, wide BF16 products
+whose A and B are already SME-packed. Geometry follows captured SVL, while a
+quotient-based runtime test requires the padded two-by-two full-K micro-panel
+to fit private L2 (the default budget uses its full capacity, not an
+arbitrary half-cache reservation). A target cost profile can select a stricter
+`sme_packed_ab_private_cache_divisor`; this is a performance budget, not an
+instruction-legality rule or universal profitability guarantee. Tuning thresholds live in the immutable SME cost
+profile (`sme_packed_ab_*`), not scattered opcode or exact-shape tables.
+Explicit BM/BN/BK, other dtypes/formats, ordinary vector requests and raw
+operands keep their existing paths. The full-dot leaf preserves prior
+accumulation, fused epilogue and alias checks. A processor cost profile can
+disable the default with `sme_packed_ab_cache_bypass=0` (the policy accepts only
+integer 0 or 1); the explicit boolean override takes precedence. The default
+is qualified by the complete 44-key packed-AB geometry cohort on 920f-lx,
+not a universal performance-parity claim or a fixed processor vector length.
+`benchmarks/dsl_matmul_packed_ab_ab.py` compares the explicitly blocked control, this
+policy and the original C++ reference on the complete source-registered
+geometry cohort. It retains GEMV/no-op dispatches, policy/fusion variants
+and private-cache budget rejects rather than selecting only profitable keys.
+Listing requires an explicit `--svl-bytes`; execution queries actual process
+SVL inside a scheduled ARM job and verifies any supplied value. Deterministic
+`--shard-index`/`--shard-count` partitions permit parallel validation without
+dropping or duplicating original keys. Every six rounds balance all three
+labels' positions and directed neighbors; all clocks, repeats and samples
+are retained. Offline packing remains outside timing, as in the source
+registration; original packing ABI and independent numerical checks precede
+timing. These measurements qualify this cohort, not the entire DSL catalog.
+`cpu_sme_narrow_singleton_slices` is a strict boolean experiment, default
+`False`. For a statically one-element ZA slice, memory loads, conversions and
+fused elementwise work use `FixedTag<T,1>`; ZA instructions keep their native
+word tag and masks. The proof is orientation-specific: a vertical slice of an
+Mx1 output still contains M elements and is not narrowed. Dynamic or merely
+short/tail slices keep their original route. This avoids instantiating wide
+index/predicate tuples for scalar-width memory work without scalarizing the
+matrix instruction. Cross-codegen checks pass; Native correctness and paired
+performance acceptance remain separate prerequisites for enabling a default.
+For an unpacked BF16 operand whose spatial axis is statically one, the same
+experiment computes one value per K slot and interleaves those values before
+MOPA. Already packed words, other operand dtypes and unknown spatial extents
+retain their original operand path. This is not a smaller hardware ZA tile.
+
+`cpu_sve_runtime_quant` is a strict boolean experimental option, default
+`False`. When enabled, a lane-local FP32-to-U8 operand DAG and pure signed-I8
+SME-packed B can use an ordinary-SVE widening-dot row driver without ZA.
+Matching uses inlined IR semantics, not helper names. Four quantized K bytes
+are broadcast per dot instruction; incomplete K groups are zeroed **after**
+conversion, preserving a nonzero zero-point. Strict multiply/add remains
+separate; an explicit `T.fma` remains fused. Ordinary VL sizes the arithmetic
+vectors while the independently captured SVL bounds packed-panel loads.
+Cache blocking, phased I32 prior accumulation and the final epilogue remain
+in place; unsupported DAGs, execution domains or layouts retain the general
+path. This experiment fuses A production unless `cpu_matmul_fusion="never"`
+explicitly requests materialization. It does not yet assert a profitability
+crossover: compare its target timings with both the general MOPA path and
+the public C++ RuntimeQuant family before choosing a default or M threshold.
+Its intermediate tile values are limited to FP32/I32/bool, followed by the
+final U8 conversion. FP64 intermediates and staged FP16/BF16 conversions
+retain the general lowering, including their original rounding boundaries.
+SME cache leaves retain a constant K extent only when it fits the actual
+rounded BK: the K quantum is 1 for FP32/FP64, 2 for FP16/BF16 and 4 for byte
+operands. For example, `K=5, BK=3` still needs two phases, including its
+shortened final panel; the generic vector family's quantum of 32 is not a
+valid bound for this proof. Accumulator input applies only to the first
+phase, and output transforms only to the final phase.
 `cpu_gemv_columns` (integer 1–8, default 4) controls independent GEMV result
 columns per register group for CPU tuning; it is not a tile shape restriction.
 `cpu_gemv_k_unroll` (1, 2 or 4) overrides independent K accumulator banks.
@@ -682,6 +869,14 @@ The cost policies `matmul_unblocked_bytes` (512 KiB for constant shapes) and
 automatic small-footprint bypass. Dynamic matrices above the latter cutoff
 retain cache-panel packing even when an equal-sized constant kernel can be
 simplified enough to profit from an unblocked schedule.
+For SME, automatic packing can also pack native, K-contiguous A when its
+spatial gather loads are sufficiently expensive. The decision includes padded
+storage and reuse within the actual NC panel, rather than assuming reuse
+across all N panels. Small/GEMV, broadcast and spatially contiguous inputs
+retain their existing route. A rejected decision neither allocates nor packs
+A; a selected decision dispatches once before each ZA block's K traversal.
+This does not add automatic packing to `T.dot`, or change explicit `packing=`
+requests. The centralized SME cost profile controls this internal policy.
 Alias snapshots preserve a statically known unit-stride axis while removing
 padding and overlap; compatible unmasked loads select an address/layout before
 one load/convert instead of selecting between two complete load expressions.
@@ -723,6 +918,22 @@ order. Results need not be bit-identical across targets.
 `T.sum` spelling are not supported. Reductions and `T.serial` accept a positive,
 compile-time `unroll=` keyword (default 2, 1 disables expansion). `T.layernorm`
 and `T.softmax` forward their optional `unroll=` to their reductions.
+`T.softmax(x, accuracy="strict" | "fast" | "estimate")` uses the requested
+exponential accuracy; strict normalization computes dtype-typed `1 / sum`
+with ordinary IEEE division, matching C++ Softmax's scalar inverse algorithm.
+Fast/Estimate normalization retains the corresponding native reciprocal
+tier. The default remains `"strict"` for both rank-one and rank-two tiles;
+their scalar inverse is defined by the same visible DSL helper, including
+rank-two masked normalization's safe denominator. This strengthens strict
+inverse precision and does not change the explicit `T.rcp` primitive,
+reduction order, or the default `unroll=2`. Like native C++ Softmax, FP32 `"estimate"`
+uses a visible degree-nine polynomial with seven squarings instead of FEXPA,
+which can be exceptionally slow for some ARM input values. Centered scores
+below -80 become zero and NaNs remain NaNs. Strict/Fast and non-FP32 compute
+dtypes keep the native exponential. Masked softmax uses the same policy.
+Scalar `T.rsqrt`/`T.rcp` on FP32/FP64 row statistics use the same native vec
+math dispatcher and accuracy tier as vector values, including SVE estimate
+and refinement instructions; they are not silently replaced by scalar libm.
 
 Unrolling copies each operation across iterations, not the complete body per
 iteration. Seven adjacent vector chunks group as 4+2+1, with powers P+2/P+1/P.
@@ -732,6 +943,12 @@ Oversized virtual vectors remain streamable, not forced into one native value.
 Nonadjacent reduction-axis copies retain distinct lane domains. Loop-carried
 scalar dependencies and break/continue retain ordered loops; alias-dependent
 serial iterations have a runtime ordered fallback. Tails are always guarded.
+Ordinary SVE traversals may split only their masked remainder into native-word
+register fragments, accounting for wider load/store dtypes. Full-loop grouping
+and the requested unroll remain unchanged. Reduction banks are reconstructed
+before their original horizontal reduction, preserving their lane/order
+contract; explicit SIMD and loop-carried vector extents retain their existing
+lowering. This internal policy does not relax masks or conversion rounding.
 
 Adjacent compatible, independent reductions with the same unroll count can
 share a traversal (currently up to two reductions). An independent elementwise
@@ -741,7 +958,15 @@ traversal with runtime alias guards and a sequential fallback.
 
 `T.layernorm` and `T.softmax` are visible rank-one/rank-two DSL algorithms:
 centered variance and maximum-subtracted exponentials respectively. Rank two
-normalizes each row, with statistics separated from the fusible tail. Affine/post-ops can
+normalizes each row. A sole row-separable `T.store` consumer can fuse its
+row statistics and elementwise tail into one row loop, keeping mean/rstd
+in scalar locals instead of writing and rereading two statistics buffers.
+This compiler transformation requires full-region read/write non-alias
+proofs and a non-overlapping full output layout. Overlapping/in-place
+calls retain the complete original schedule and its conditional snapshots;
+only checking aliases within the current row is not sufficient for shifted
+matrix views. The `row_normalization_streaming=False` pass option disables
+this fast path independently. Affine/post-ops can
 be expressed directly before `T.store`. `T.layernorm(x, variance='moments')`
 explicitly selects the existing C++ operator's sum/sum-of-squares algorithm,
 allowing a fused reduction pass; it can suffer cancellation for large means and
@@ -753,6 +978,81 @@ overlapping remaps and tile values retained across writes use conditional
 snapshots, while ordinary disjoint calls do not allocate snapshots. Writable
 region strides must pass a conservative non-overlap proof; repeated scatter
 locations are rejected, unlike source kernels which may define their own policy.
+The two-axis proof uses one compare/swap rather than a general-purpose sort;
+negative strides, empty/singleton axes and span-overflow diagnostics retain
+the same sorted-axis semantics.
+
+CPU lowering captures each ABI tensor parameter's data pointer, dimensions
+and strides into invocation-local const scalars at kernel entry. Those
+descriptors are invariant, but the pointed-to tensor contents are not:
+serial iterations, aliases and atomics still observe the original memory
+effects. This does not hoist dynamic loop state, view offsets, or addresses
+of scratch buffers that can resize. The independent diagnostic pass option
+`cpu_parameter_metadata_snapshot=False` retains direct descriptor access.
+
+Independent elementwise stores can version their vector traversal once on the
+current store's alias guards. On the disjoint fast branch, only conditional
+snapshots freshly created for that exact store are released; a load captured
+before an earlier write still reads its historical snapshot. The cold branch
+retains the original traversal and every snapshot. Branch-local materialization
+and vector caches cannot escape into subsequent stores. Reduction, state,
+register-transform and opaque-effect boundaries retain their existing lowering.
+`store_snapshot_regions=False` disables this internal versioning policy for
+diagnostics without changing capture or alias semantics.
+
+Ordinary SVE can give a closed, complete F32 pointwise output region a private
+native lane permutation when all vector inputs and its output use compatible
+F16/BF16 memory conversions. The compiler applies the same permutation to
+both loads and stores; logical tensor order, individual-element rounding and
+strict arithmetic remain unchanged. Uniform row statistics stay in their
+original loop scope. Reduction banks, masked/tail accesses, indexed or
+register-transform operations, historical/materialized values and explicit
+SME hardware scopes retain their ordered paths. This is a CPU memory-planning
+optimization, not permission to change public ordered conversion semantics.
+The proof accepts only VectorRegion plans; hardware matmul plans in the shared
+debug inventory stay outside it, including when that inventory is re-prepared.
+`T.compile(..., pass_options={"cpu_pointwise_register_layout": True})` enables
+the broad experimental policy. Actual same-node testing
+found FP16 affine improvements but regressions for simpler FP16 and BF16
+regions, so the legality proof alone does not authorize default selection.
+`cpu_pointwise_register_layout_policy="auto"` is the narrow default
+profitability policy. It uses centrally profiled ordered/packed conversion
+costs and a conservative compute/register-pressure budget, and currently only
+considers FP16 regions with at least three independent full-width paired loads.
+Shared producers and scalar broadcasts do not count as independent pairs;
+BF16, mixed storage and one/two-load regions retain their ordered paths.
+`cpu_pointwise_register_layout_policy="off"` restores ordered lowering. An
+explicit boolean `cpu_pointwise_register_layout` takes priority over the policy:
+`False` disables it, while `True` forces the broad legal experiment. Costs are
+heuristic relative cycles with provenance, not measured instruction latencies.
+Selection follows the real code-generation ISA, not a
+cost-profile override; see the [register-layout design](internal/arm-pointwise-register-layout.md).
+
+Casting a captured load preserves that exact read's identity, including
+through helper returns, branches and loop-carried values. A later cast must
+not reread storage changed by an intervening aliased write; a distinct
+`T.load` after that write still observes the new contents. Ordered intermediate
+rounding is retained. The CPU emitter may fuse a single current-region
+consumer into `load_convert` while retaining its snapshot selection; shared
+or materialized reads instead reuse their already computed value. This is a
+local fusion rule, not a promise of register residency across separate loops.
+
+LayerNorm explicitly shares one reciprocal of the normalized-axis length
+between its statistics; rank-two normalization computes it before its row
+loop. This does not permit the compiler to reassociate arbitrary strict
+division expressions or to change the reduction ordering. Rank-three/four
+direct LayerNorm/Softmax calls are not yet supported and receive a located
+`static_assert` diagnostic. `benchmarks/dsl_norm_library.py` measures the
+actual rank-two library call against both a row-wise DSL wrapper and C++, with
+separate `library_over_cpp` and `library_over_row` ratios; the row catalog
+alone is not evidence for the direct library path's performance.
+
+Multiple consumers, layout/index transforms, dot/packing consumers, and
+effects between a tile capture and its store keep materialized statistics
+as a fusion boundary. In particular, the row-store optimization does not
+replace normalization-to-dot/packing schedules or recompute their reductions
+inside a matrix microkernel. Statistics construction and the streaming
+schedule share the same reduction/accuracy IR, not an opaque native operator.
 
 The initial backend uses standard-library AST/IR and the existing compiler SDK,
 with no MLIR/TVM dependency. Generated sources are content-addressed below
@@ -796,6 +1096,13 @@ and logical unroll counts do not change. `pass_options` can override
 wider automatic chunk). `cpu_state_register_budget` (integer 0–64, default
 12) limits standalone register pieces **per tile state**; 0 forces private
 scratch for comparison/debugging. It is not a whole-kernel liveness budget.
+State placement uses the actual code-generation ISA, independently of cost
+profile overrides. On SVE, a captured runtime VL permits single-word scalable
+register pieces; it does **not** enlarge the VLA `FixedTag` limit. Without a
+captured VL, fixed pieces remain within the architectural 128-bit minimum.
+Finite multi-row pieces preserve row coordinates and mask the final word.
+Widening intermediates reserve lane headroom, and connected snapshots use the
+same geometry, avoiding multiword register arrays and repeated scalar repacking.
 Single-reduction regions can use a wider base to
 expose more accumulator chains; fused reductions already supply independent
 chains. These are tuning policies, not performance guarantees.
@@ -845,7 +1152,23 @@ this is a coarse model, not an exact cache/port simulator. All compiler stages
 share one frozen semantic/implementation/cost environment, whose fingerprint
 participates in generated-source identity. Registry changes also invalidate
 decorator caches, including profiles selected by a returned template's target.
+The environment separately records the actual code-generation target. An ARM
+matmul omits unreachable x86/AMX families, and vice versa; generic lowering
+retains both target-conditional paths. Overriding `cpu_cost_target` only changes
+planning costs, never instruction availability or architecture pruning.
 Pass-registry changes still require `cache_clear()` as described above.
+
+SME conversion packing may version an eligible pure FP32 pointwise DAG at
+the packing boundary when producer-cache and historical READ-snapshot guards
+are all false. The guard is outside the packing loops: K-contiguous input
+then uses ZA staging and vertical vector drains before narrowing/interleaving.
+Active caches or snapshots, unknown/unconditional materializations, masks,
+reductions/state, nonunit K strides and intermediate narrowing retain the
+original snapshot-aware vector fallback. This changes only code-generation
+eligibility, not cache ownership, numerical precision or packing lifetime.
+Emitter maps, expression caches and hardware scope are restored before the
+fallback is emitted, including on an emission exception. Geometry comes from
+the captured target vector state; it is not an assumed64-byte SME length.
 
 Development formatting is pinned in the `dev` extra. Run
 `python -m ruff format python/vecops/language` or append `--check` in CI;
@@ -862,6 +1185,25 @@ layout-aware transpose plans rather than bypassing their permutation DAGs.
 `cpu_transpose_defer_conversion` (bool) overrides boundary-conversion motion;
 the default cost policy keeps byte→FP64 in the compute domain for unknown
 strides/extents and permutes narrow storage bits for constant layouts.
+With a captured ordinary SVE VL wider than its guaranteed 128-bit prefix,
+simple constant rank-2 conversions rejected by the shared automatic SME
+selection may instead use a single-word native gather. This includes
+conversions of at most 256 elements and eight-byte inputs of at most 8192
+elements; it does not expand the automatic SME rejection thresholds.
+For these automatic native gathers with both constant axes at most 16,
+the independent row loops remain rolled, including their alias-snapshot
+alternatives. This bounds native address-register pressure without changing
+the inner Vector IR unroll factor, conversion rounding or mask/tail handling.
+Medium gathers and user-selected implementations retain their row schedules.
+Explicit `vector`/`sme`/`gather` choices remain unchanged. SME transposes copy
+their current origins, dimensions and signed row pitches inside the streaming
+owner, including fresh scratch pointers after resizing; ZA slice instructions
+do not repeatedly reload reference-captured tensor metadata.
+`cpu_transpose_sme_dynamic_unroll` (bool, default `False`) is an experimental
+A/B tuning option: it requests two-way native loop unrolling only for SME
+slice transfers with a dynamic row pitch. Constant pitches retain the native
+compiler strategy. It can reduce address-multiple spills but is not a
+performance guarantee; measure both settings on the same target and VL/SVL.
 Matrix planning records input fusion/materialization decisions and prepares
 packing permutations and dense-pack layout conversions. Empty matrix outputs
 skip hardware resource/configuration entry; zero K still applies acc/epilogue.
@@ -907,7 +1249,10 @@ legalized variables. The public C++ surfaces are `vecops/vec/{SME,AMX}.h` and
 
 NumPy `ml_dtypes.bfloat16` storage is accepted by the native ABI using ndarray
 metadata (it has no PEP-3118 buffer format). Endianness and writable output checks
-are unchanged. Contiguous empty NumPy arrays retain canonical dense ABI strides.
+are unchanged. Empty C-contiguous NumPy arrays with an all-zero stride tuple
+retain the legacy canonical dense ABI strides. Explicit nonzero signed strides
+are preserved on empty/singleton axes: NumPy's C/F contiguity flags alone do
+not specify the layout of an empty tensor.
 See `benchmarks/dsl_transpose.py` for the exact 399-case TransposeBench catalog
 comparison and `benchmarks/dsl_transpose_cross.py` for ARM object/disassembly
 checks. Cross compilation does not establish ARM correctness or performance.
@@ -992,8 +1337,17 @@ stride, dtype, optional presence, and explicit specialization values, then
 returns the caller-allocated output arguments without invoking native code.
 Exact duplicate requests are removed; runtime scalar payloads are deliberately
 not part of the deduplication key because they do not specialize artifacts.
-After tracing, `compile_batch()` performs cache lookup and binding first, then
-places all misses sharing a toolchain into one generated CMake project. Each
+After tracing, `compile_batch()` matches, binds, and looks up every call first,
+including the relationships between named Dynamic dimensions. Cold misses
+sharing a toolchain are then deduplicated by their bound source-artifact
+identity: different runtime Dynamic observations can share one compiled target,
+while Const/dtype specializations, source/interface identities, and logical
+parallelism remain distinct. Every alias retains its build-input validation
+before compilation and before publication, and the resulting executable is
+adopted by every requesting provider/cache namespace. `PrecompileResult.prepared`
+counts prepared requests, not unique compiler targets.
+
+All unique misses sharing a toolchain enter one generated CMake project. Each
 specialization remains a separate target/subdirectory, but one Ninja or Make
 jobserver schedules every translation unit. No Python compilation thread pool
 is used. `parallelism` is the job limit passed to that shared build graph; the
@@ -1339,6 +1693,39 @@ there is no deterministic worker ordering or computation-memory barrier.
 `DebugOptions(prints=False)` strips runtime prints before optimization, but does
 not suppress explicitly requested compile-time `static_print` effects.
 
+#### ARM toolchains with an older C++ standard library
+
+The CPU print implementation requires C++20 `std::format_to`; selecting a
+recent Clang alone does not provide a recent C++ standard library. For example,
+the target cluster's BiSheng Clang can otherwise select GCC 10 headers without
+`<format>`. Do not replace the bounded-buffer print path with an allocating or
+`printf` fallback to work around that toolchain mismatch.
+
+For scheduled ARM validation, `benchmarks/arm_job_env.sh` verifies a pinned,
+project-private GCC 14 header bundle and durable runtime libraries, runs actual
+Clang syntax/link/execution probes, and exports a job-scoped environment. Source
+it after activating `af3`, **before starting Python**: NumPy or Torch can select
+an older `libgcc_s`/`libstdc++` before vecops is imported, and changing library
+search paths after that load does not replace those mapped libraries. The
+helper does not modify the conda environment, shell startup files or global
+compiler configuration. Its inputs and resulting runtime identities are
+recorded in the job manifest and participate in compiler/cache identity.
+
+The helper requires the explicit bundle/runtime paths and SHA-256 values listed
+in its usage error. Temporary headers are extracted under an owner-only `0700`
+job directory; runtime DSOs use durable project paths so compiled artifacts do
+not depend on a deleted temporary runtime. This is a validation/deployment
+environment helper, not an automatic Python-import-time toolchain upgrade.
+
+`benchmarks/dsl_arm_validate.py` scopes implicit compiler, build and Torch
+bridge caches to a fresh `*-cache` sibling of its pytest basetemp. It overrides
+inherited `VECOPS_CACHE_DIR`, `VECOPS_BUILD_DIR` and `VECOPS_TORCH_BRIDGE_DIR`
+for that invocation and restores them on exit, including failure. This keeps
+an application's home cache out of a private `/tmp`/`/dev/shm` validation run.
+Cache contents are retained for debugging; an existing sibling is rejected
+rather than reused or overwritten. Explicit per-test `Compiler` paths are
+unchanged. The selected paths are recorded in validation provenance.
+
 ### Content-addressed cache invalidation
 
 Artifact keys now include source/include/dependency content, generated C++,
@@ -1354,6 +1741,54 @@ shadowing headers. Linux mutation notifications accelerate content hashing;
 the dnotify fallback uses an unused process signal when inotify quota is full,
 and unavailable/overflowed watches fall back to rehashing, never size/mtime-only
 identity. Toolchain attestations are atomically published under writer locks.
+
+Relative include paths and the include environment are anchored at the
+`Compiler` creation directory, including nonempty path lists' empty components
+such as a trailing `CPATH` separator. Incidental outputs under this implicit
+cwd root do not become toolchain dependencies: resolved include contents and
+shadow selection remain tracked. Explicit include-directory inventories retain
+their conservative behavior. Quoted includes search the including file's
+directory first; angle includes do not. Macro-generated includes should use
+declared dependencies or explicit include-directory inventories.
+
+On Linux AArch64, the **current calling thread's** SVE VL and SME SVL are
+independent compilation inputs, queried through the OS rather than assumed
+from a CPU model or maximum supported width. Factory, lowering, artifact and
+batch keys include both lengths. Generated kernels use captured constant lane
+counts while retaining sizeless vector representations, including when VL and
+SVL differ. Changing either length requires obtaining a kernel again through
+`T.jit`/`T.compile`; invoking an older compiled object reports a length mismatch
+instead of executing with incompatible geometry. `T.grid`/resident-team workers
+temporarily match the caller's lengths and restore their original state afterward.
+`Compiler.snapshot()` freezes this state and compiler policy for pending
+source/DSL compilations on every platform; its environment dictionary is copied.
+The original `Compiler` remains reusable by threads with different settings.
+Factory lookup separately checks that original compiler's current policy, so
+changing flags or build policy produces a new specialization without changing
+an already returned kernel. Snapshot calls are idempotent; build-event storage
+is shared for inspection. This prepared-kernel contract does not make an
+already obtained raw native compiler/backend follow later policy mutations.
+Standalone dry/cross lowering with an explicit non-Native target does not probe
+the build host for vector geometry. Pass an explicit `_vector_state` snapshot
+for geometry-specific inspection; the normal compile driver supplies one.
+
+SME's centralized `sme_const_half_transpose` policy selects a bounded paired
+input/output schedule for simple FP32-memory/FP32-compute to FP16 transposes
+with known nonzero signed pitches. It derives the row/column count from the
+captured SVL; at most sixteen compute lanes bound code size and liveness,
+not the hardware's vector width. Actual complete-tile guards precede unmasked
+loads. Tails, overlap snapshots, unsupported strides, converting inputs and
+other dtype families retain their existing paths. A cost profile cannot supply
+missing SVL or enable SME on another code-generation target.
+
+The policy can be disabled with a cost-profile override of integer `0` (only
+exact integers `0`/`1` are accepted). Diagnostic pass options
+`cpu_transpose_sme_const_half_output` and
+`cpu_transpose_sme_const_half_full_input` are strict booleans and override the
+policy independently. Setting only the output option to `False` also disables
+the implicit full-input schedule; explicit input `True` can still isolate that
+schedule for inspection. These compiler-tuning interfaces are not portable
+DSL semantics or a guarantee of performance parity for all transposes.
 
 Decorator lookup invalidates stale dependencies; **already returned/prepared
 kernel objects are immutable snapshots**, so hot execution does not read files

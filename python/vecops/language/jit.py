@@ -38,13 +38,19 @@ def jit(
   *,
   out_idx: int | list[int] | tuple[int, ...] | None = None,
   compiler=None,
+  pipeline=None,
+  pass_options=None,
   debug=None,
 ):
   """Cache a Python kernel factory and compile only returned TemplateFunctions.
 
   Outer-function annotations are intentionally ignored. Actual argument values
   are normalized recursively before both cache-key construction and execution.
+  ``pipeline`` and ``pass_options`` are forwarded to :func:`T.compile` only
+  for returned templates. Pass options are copied at decoration time; their
+  values, like a compile pipeline, must remain immutable for the decorator.
   """
+  selected_options = None if pass_options is None else dict(pass_options)
 
   def decorate(target: Callable[..., Any]):
     from ._debug.report import DebugInfo, InspectionMixin
@@ -58,10 +64,17 @@ def jit(
     @functools.wraps(target)
     def wrapped(*args, **kwargs):
       bound, key = _normalized_binding(signature, args, kwargs)
+      from .._arm_vector_state import get_vector_state
       from .._identity import callable_identity, implementation_identity
       from ._compiler.environment import registry_fingerprint
 
-      key = (key, registry_fingerprint(), implementation_identity(), callable_identity(target, include_state=False))
+      key = (
+        key,
+        get_vector_state().env_token,
+        registry_fingerprint(),
+        implementation_identity(),
+        callable_identity(target, include_state=False),
+      )
       active = getattr(local, "active", set())
       if key in active:
         raise RuntimeError(f"recursive T.jit elaboration cycle in {target.__qualname__}")
@@ -85,7 +98,14 @@ def jit(
       try:
         result = target(*bound.args, **bound.kwargs)
         if isinstance(result, TemplateFunction):
-          result = compile(result, out_idx=out_idx, compiler=compiler, debug=debug)
+          result = compile(
+            result,
+            out_idx=out_idx,
+            compiler=compiler,
+            pipeline=pipeline,
+            pass_options=selected_options,
+            debug=debug,
+          )
         elif callable(result):
           from ._debug.report import attach_composite
 

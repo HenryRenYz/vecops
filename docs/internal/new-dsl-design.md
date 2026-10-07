@@ -367,6 +367,12 @@ print 只取计划、绑定 scratch 标识符和输出代码，不再次调用 p
 采用标准库 AST，而不是仅记录一次执行路径。字节码解析会引入 Python 版本
 相关的栈与跳转恢复问题，当前没有必要。本阶段要求可 inspect 的 Python 源文件。
 
+表达式按 DAG 而不是展开成树处理。标量捕获的 memo 仅在单次赋值的
+capture 边界内有效，不跨越后续标量更新；变换后保留共享参数边。
+`walk` / `loads` 保留重复使用次数，成本和启发式计数不能静默去重；
+`walk_unique` / `loads_unique` 则用于状态存在性、依赖与别名集合，
+避免多项式/helper 中的共享子图导致指数级编译时间。
+
 后续后端模块应接收 KernelIR 与目标能力，返回其产物/执行适配器；不能把
 SME streaming 状态、AMX tilecfg 或 GPU warp layout 写进 AST 解析器。
 当前编译/执行适配器只有 CPU C++ 实现；GPU/NPU 的 codegen、resource/effect
@@ -446,6 +452,8 @@ dtype 转换保留逻辑 lane 数，超大 pow 不生成非法 C++ Tag。
    或跨写入保留的 tile 值进行运行时 span 判断并按需快照；span 判断保守覆盖空洞。
 7. region scatter 的非重叠性使用按绝对 stride 排序的充分条件证明。
    零 stride/重叠写区域拒绝；复杂但实际无重叠的特殊布局可能被保守拒绝。
+   两个轴时排序降为一次比较交换，避免小矩阵 guard 实例化通用 introsort；
+   单例/空轴、负 stride、地址跨度和溢出检查的语义保持不变。
 8. 动态 stride 生成连续/strided 两条访问路径；layout transpose 当前直接
    gather/scatter，生成源码和诊断明确标记 TODO 专用 transpose 内核。
 9. 标量归约使用展开后各合法向量组的独立累加器及最终合并。
@@ -866,15 +874,18 @@ tile 有直接路径；已有输入输出重叠保护提升为区域级分流，
 未知 shape/stride 的 byte→FP64 保留 compute-domain network，避免过多
 宽 store/address chains。常量布局仍保留 narrow-bit permutation。
 
-SME 简单加载转置使用 ZA horizontal write / vertical read，再执行边界
-转换。沿用原 C++ 已测量的常量 shape/dtype SME 选择及双行/双列流水阈值；
+SME 简单加载转置在无需数值转换的边界直接使用 ZA horizontal load /
+vertical store，不经过临时 Z 寄存器；需要转换的边界保留 load_convert +
+horizontal write / vertical read + store_convert。浮点和整数用等宽无符号
+位表示搬运，保留 NaN payload 和有符号零。输入/输出两个边界独立选路，
+尾块直接使用 ZA 谓词。沿用原 C++ 已测量的常量 shape/dtype SME 选择及双行/双列流水阈值；
 没有 ARM 实机，不能将这些阈值声称为本轮的新性能优化结果。显式 SME
 要求目标 SME-FA64，automatic 在不满足条件时走 vector/gather。普通固定
 VL 和固定 SVL 不匹配时，automatic 不进入 SME；显式路径编译诊断拒绝。
 
 公开 C++ `vecops/vec/{SME,AMX}.h` 为原 details 中的指令封装提供稳定入口，
 `vecops/execution/Resources.h` 提供词法 state/configuration requirements。
-SME manual owner 内部禁止异常、分配和未内联调用；强制内联 noexcept
+SME manual owner 内部禁止异常、分配和任意未内联计算调用；强制内联 noexcept
 callback，state entry 之前做全部验证。AMX 是 tile state/memory API，
 并非转置指令：Python `T.amx.region` 支持 configuration/zero/load/
 stream_load/store，Linux XTILEDATA permission 按线程取得，失败抛出明确异常，
@@ -1010,9 +1021,11 @@ GEMV 完整 K 边界在循环前计算，完整组与单个 masked K 尾块分�
 完整输出列组也在 K 循环外判断，避免依赖 GCC 自动 loop unswitching。
 CPU planning 的 `cpu_gemv_columns` 调优参数控制独立列数（1–8，默认 4），
 不改变顶层 tile/API 的形状限制。
-SME DSL 编译单元自动选择
+实际生成 SME 状态 owner 的 DSL 编译单元在第一个头文件之前选择
 `VECOPS_SVE_INLINE_MATH_SPECIALS=1`，强制内联 vector-only exp/log/rcp/rsqrt
-特殊值路径，保持精度与特殊值语义；普通 SVE 编译仍保留 cold outlining。
+特殊值路径，保持精度与特殊值语义；即使目标支持 SME，完全没有 streaming
+owner 的普通 SVE 内核仍保留 cold outlining。状态 owner 通过统一 emitter
+入口声明这一需求，不依赖生成字符串中的指令名扫描。
 没有解除 SMSTART/SMSTOP 的 no-call 验证，也没有将 scalar libm 标记为安全。
 
 ### 矩阵阶段验证与性能记录（本机限频）
@@ -1826,8 +1839,14 @@ CPU 存储布局。
 
 注册的 `cpu-plan-state` pass 在 grid ownership 前执行，选择：
 
-- 小固定 tile：末轴拆成 native-register 范围内的 FixedTag pieces，
+- 小固定 tile：末轴拆成 native-register 范围内的 pieces，
   高维 row 坐标显式枚举；每个 piece 独立 C++ Vec/Mask local。
+  x86 使用 FixedTag；SVE 有捕获的 VL 时使用单 word ScalableTag，
+  不把运行时 VL 误当成 VLA FixedTag 的合法宽度。未知 VL 时的固定片
+  保持在 128-bit architectural minimum 内。placement 使用真实
+  codegen ISA，而非用户可覆盖的 cost profile；widening 给每片预留
+  lane headroom，相关 snapshots 共用 geometry，避免循环中的 scalar
+  get/set 重组。末片保留 active count，不读取 tile 以外的内存。
 - Scalable Vector：在预算内拆成多个 P=0 的 ScalableTag local，
   runtime lane count 只决定每片 active count；不依赖 SVE VLS，
   VLA sizeless 类型同样不进入数组/struct/tuple 存储。
@@ -2309,3 +2328,165 @@ SME-fixed-SVL 四种 clang 19.1.3 跨编译检查，不代表 ARM 实机执行�
 最终 25 项回归在输出模式/observer 转发和无效 file 参数校验修正后运行。
 Ruff format check（146 个文件）、新增调试文件的 Ruff check、language 的
 F821/F822/F823/E9、compileall 和 `git diff --check` 均通过。
+
+## ARM SME matrix validation: runtime panels and raw ZA packing
+
+Runtime-small SME library products now use the same overflow-safe working-set
+budget predicate as the AMX path before querying cache sizes. Automatic
+blocking may be bypassed below the target runtime budget; explicit BM/BN/BK
+still force the requested panel policy. The unblocked leaf preserves packing,
+input transforms, the initial accumulator, and a single final epilogue. Large
+products retain NC/KC/MC continuation in native accumulator storage.
+
+Direct ZA accumulator seed/store loops precompute slice base pointers and
+signed strides; matrix-family bounds precompute immutable dimensions. This
+is necessary because public ZA instructions carry an assembly memory clobber,
+which otherwise prevents CSE of tensor metadata inside the instruction loop.
+On the same 920f-lx target, the paired Dynamic BF16 16x16x8 packed-AB source
+case changed from DSL/C++ 2.28386 to 1.07927 after this stage. The new paired
+times were 0.35330225/0.32735425 microseconds. This is one measured case, not
+a claim of full matrix-shape parity.
+
+Raw SME packing is a separate backend emitter in `cpp/sme_packing.py`. It
+uses only public `vec::sme::{load_hor,read_ver,store_ver}` and vector
+primitives, never an opaque MatmulPack call. A same-dtype unit-K-stride
+guard (using actual alias-snapshot strides) chooses it. Spatial strides may
+be negative. Full <=32-bit panels use ZA32 pair 0/1 and pair 2/3 to pipeline
+load/drain of K chunks; FP64 uses ZA64. Fringes stage at the storage element
+width, zero masked K lanes, mask absent rows on read, and assemble K groups
+as individually named native words. Whole-word ZIP halves are required:
+the public `local_interleave_*` operations are 16-byte-block-local and are
+not a substitute at SVL >16 bytes. Values are extracted directly from the
+public interleave expression; no multiword Vec variable or Vec array is
+declared. Callback-entry scalar copies prevent reference-capture reloads
+from reappearing around inline assembly clobbers.
+
+The raw-packing stage initially leaves conversion/elementwise packing on the
+existing vector path, and does not merge packing and multiply streaming
+owners. The new ARM
+execution tests use arbitrary storage bits, full/tail panels, zero axes,
+negative spatial strides, non-unit-K fallback, aliases and output sentinels;
+their oracle derives panel geometry from the current-thread SVL. Local
+proof includes native byte/halfword ZIP ordering at every active-row count
+and 48 true-FA64 ARM assembly instantiations over six dtypes, A/B, and
+VL/SVL pairs 16/64, 64/16, 32/64 and 64/64. Each assembly gate checks ZA
+input, streaming ownership, native word ZIP where required, and absence of
+matrix-multiply instructions in packing-only wrappers. Cross-compilation
+does not establish ARM runtime correctness or speed; those results must be
+recorded separately from the scheduled target run.
+
+The next conversion-packing stage admits a conservative FP32 pointwise DAG:
+an unmasked full-shape FP32 storage leaf is loaded into two ZA32 tiles, read
+as spatial FP32 vectors, and substituted into the ordinary Vector emitter.
+FP32 row statistics and column parameters retain their separate broadcast
+coordinates. Each resulting half-panel is narrowed independently and its
+K=2/4 slots are interleaved into one named native word, keeping every live
+ScalableTag at POW2 <= 0. Neither Vec arrays nor opaque MatmulPack calls are
+introduced. Distinct mul/add nodes remain distinct; only explicit FMA has
+fused arithmetic semantics. Missing spatial lanes are zeroed after any
+non-zero-preserving affine expression and before narrowing. A padded K slot
+does not evaluate its expression or access mean, scale, weight or bias.
+
+Selection does not traverse reduction, materialized, state or register
+transform boundaries, and widening 16-bit auxiliary captures stays in the
+ordinary domain. A final conversion folded into a load uses a separate FP32
+computation leaf without discarding an intermediate FP16 rounding. Alias
+snapshots keep the original load identity; if such a snapshot is already
+narrow storage, that alias takes the original vector fallback instead of an
+invalid narrow/FP32 pointer selection. The conversion route does not promise
+raw NaN-payload preservation: it inherits ordered/saturating public vector
+conversion semantics. Its paired target tests use the real public C++
+MatmulPack, with identity, elementwise or lane-local transforms as appropriate,
+and a separate finite-value oracle for broadcast coordinates, saturating
+integer conversion, full/tail panels, non-unit-K fallback and output sentinels.
+Packing/multiply ownership merging and staged BF16/FP16-to-FP32 input expansion
+remain subsequent work rather than being hidden in this specialization.
+
+### SME exact-block leaves and capture lifetime
+
+The streaming resource trampoline can outline a reference-capturing callback.
+Even a const extent captured from its caller becomes address-exposed to the
+public ZA instructions' memory clobbers. The dot callback therefore copies
+M/N/K into callback-owned values before issuing ZA instructions. The actual
+packed four-MOPA K loop is checked for the absence of scalar extent reloads,
+rather than assuming an outer const declaration guarantees CSE.
+
+Small runtime domains select exact 1×1, 1×2, 1×3, 2×1, 3×1 and 2×2 ZA leaves
+before K. Their non-last spatial bands have a full compile-time slice extent;
+last bands still mask raw inputs and output tails. All block counts derive
+from the current-thread captured SVL and accumulator dtype, not a 64-byte
+assumption. Larger domains retain the existing rectangular families. These
+leaves increase generated-source volume, so cross-compiled hot-loop proof is
+not performance acceptance: target correctness, paired C++ timings and cold
+build/code-size costs must be assessed together before extending the catalog.
+
+### SME column drains and mixed packed spatial proofs
+
+A same-dtype, unmasked output with a proven unit row stride and one active
+column drains ZA through one vertical memory slice. Dynamic output strides
+are checked outside the K loop; nonunit/negative strides, transformed output
+and wider tiles retain their original orientation and vector/store path.
+Initial accumulators use the corresponding direct ZA axis only when their
+layout independently proves it safe. This does not bypass prologue/epilogue
+or alias ordering.
+
+A whole native packed input may supply full physical spatial lanes for a
+logical fringe, independently of the other raw operand's full-lane proof.
+This relaxes only the spatial full-family dispatch, never the raw K bound.
+Packed windows, including an explicit zero-origin window, retain their
+conservative condition until their panel origins are independently proven.
+Odd raw K still uses its masked tail; padding is consumed only when both
+input formats guarantee it. All tile geometry comes from captured SVL.
+
+### SME transpose origins and small VLA conversions
+
+Actual stage-6 ARM artifacts showed that constant 16×16 conversions could
+select a 128-bit-prefix register permutation even at ordinary VL=64 bytes.
+For FP16→FP32 that path measured 0.3520/0.1035 microseconds (DSL/C++) and
+used four-lane shuffles/stores, whereas the C++ VLA path used native gathers.
+The CPU memory planner now admits only automatic, simple rank-2 conversions
+with a constant positive element count rejected by the existing SME preference
+policy and a captured ordinary SVE VL wider than the safe prefix. That single
+policy rejects conversions with ≤256 elements and eight-byte inputs with
+≤8192 elements. Actual strict stage-18b ARM 63×129 FP64→FP32/Int8 artifacts
+confirmed the same mismatch: the C++ hot loop used eight-lane `LD1D` gathers,
+while DSL used two-lane `LD1D` loads and `ZIP1` prefix permutations. The planner
+therefore reuses the original SME rejection decision, not a second threshold
+table, to select the existing gather/store-convert Vector IR with unroll=1.
+Raw values, larger/dynamic shapes, compound producers,
+unknown VL and explicit implementation choices retain their original policy.
+This preserves conversion boundaries, snapshots and signed-stride fallbacks;
+it does not infer VL from SVL or from a cost-profile override.
+
+Stage-49 isolated the remaining tiny-constant gap using all 12 original
+16×16 mixed-dtype triples, four LLVM row-unroll choices, exact numerical and
+overlap/canary checks, and 60 actual AArch64 modules. Two/four-row hints
+regressed Int8→FP64 by about 10%, while disabled outer auto-unrolling had
+median 0.8681× the unchanged duration and worst 1.0012× in that paired period.
+The planner therefore keeps only tiny automatic conversion-gather rows
+rolled (both constant axes ≤16), including their cold snapshot alternatives.
+`VectorRegion.outer_unroll` is an independent schedule hint; the explicit
+inner vector grouping/unroll, ordered conversions, snapshots and tails do
+not change. Other targets, explicit implementations and medium gathers keep
+the native compiler's existing row-loop strategy. The isolated measurement
+is diagnostic evidence, not a claim that the combined full catalog passed.
+
+Stage-8 worker transpose disassembly independently confirmed that outer
+parameter snapshots captured by reference were still reloaded after ZA memory
+clobbers. SME transpose now copies this invocation's source/target origins,
+dimensions and signed row pitches into local SSA inside its actual owner.
+Origins incorporate view offsets and leading batch coordinates once. Empty
+views do not form offset pointers, and owned scratch data is read after its
+latest resize rather than being globally cached. The contiguous axes are
+already guarded before entry and their unit-stride proof is restated locally.
+Raw loads/stores remain direct LD1/ST1 ZA slices; conversion paths retain their
+existing native vector precision and predicates.
+
+Cross-codegen distinguishes remaining stack spills from escaped-closure
+reloads. LLVM may fully unroll a bounded eight-slice loop and keep many
+dynamic-pitch address multiples live. The experimental pass option
+`cpu_transpose_sme_dynamic_unroll=True` requests two-way Clang/GCC unrolling
+only for those dynamic pitches; it defaults to `False` until target paired
+measurements decide the tradeoff. A lack of scalar loads is a code-generation
+check, not by itself a speed result. ARM correctness and timing results for
+these new paths must be reported separately from cross compilation.

@@ -8,9 +8,55 @@ from ...cost import estimate
 from ...ir.traversal import walk
 from ...lowering.tile_to_vector import lower_stores
 from ...lowering.transpose import register_transpose, x86_dword_transpose
+from ...operations import Trait
 from ...passes.manager import register_pass
+from .cost.sme import NativeAPackingPolicy, PackedABTraversalPolicy
 from .policies import recompute_limit
 from .transpose import plan_transpose
+
+
+def runtime_quant_candidate(a, b, accumulator_dtype, operations):
+  """Recognize a lane-local FP32 -> U8 DAG, never a helper/function name.
+
+  The ordinary-SVE leaf consumes four adjacent logical K values and a pure
+  SME-packed signed-byte B. It must not cross reductions, register shuffles,
+  or stateful/materialized producer boundaries. Broadcasting and alias
+  snapshots remain the ordinary vector emitter's responsibility.
+  """
+  if (
+    accumulator_dtype != "int32"
+    or a.type.dtype != "uint8"
+    or a.op != "cast"
+    or a.args[0].type.dtype != "float32"
+    or len(a.type.shape) != 2
+    or b.type.dtype != "int8"
+    or b.op != "packed_load"
+    or b.data.side != "B"
+    or b.data.format not in {"sme", "auto"}
+  ):
+    return False
+  primary = False
+  for value in walk(a):
+    if not isinstance(value.type, I.TileType):
+      continue
+    if value is not a and value.type.dtype not in {"float32", "int32", "bool"}:
+      # Four FP32/I32 lanes fit the architectural minimum ordinary VL.
+      # Wider or staged narrow conversions retain the general legalizer;
+      # this family must never hide a multiword fixed descriptor in C++.
+      return False
+    if len(value.type.shape) > 2:
+      return False
+    if value.op == "load":
+      if value.args or value.data.dtype not in {"float32", "int32"}:
+        return False
+      primary |= (
+        value.data.dtype == "float32"
+        and len(value.type.shape) == 2
+        and all(I.same_expr(x, y) for x, y in zip(value.type.shape, a.type.shape))
+      )
+    elif not operations.has(value, Trait.ELEMENTWISE):
+      return False
+  return primary
 
 
 @register_pass("cpu-plan-matmul", stage="cpu-memory", after=("cpu-plan-transpose",))
@@ -21,6 +67,26 @@ def plan_matmul(prepared, context):
   fusion = context.options.get("cpu_matmul_fusion", "auto")
   if fusion not in {"auto", "always", "never"}:
     raise ValueError("cpu_matmul_fusion must be auto, always or never")
+  runtime_quant = context.options.get("cpu_sve_runtime_quant", False)
+  if type(runtime_quant) is not bool:
+    raise ValueError("cpu_sve_runtime_quant must be bool")
+  runtime_quant_available = (
+    runtime_quant
+    and fusion != "never"
+    and context.environment.codegen_target.architecture != "x86"
+    and context.environment.codegen_target.isa != "scalar"
+  )
+  sme_native_a_packing = NativeAPackingPolicy.from_costs(costs)
+  packed_ab_default = costs.policy("sme_packed_ab_cache_bypass", 0)
+  if type(packed_ab_default) is not int or packed_ab_default not in (0, 1):
+    raise ValueError("sme_packed_ab_cache_bypass policy must be 0 or 1")
+  sme_packed_ab_cache_bypass = context.options.get("cpu_sme_packed_ab_cache_bypass", bool(packed_ab_default))
+  if type(sme_packed_ab_cache_bypass) is not bool:
+    raise ValueError("cpu_sme_packed_ab_cache_bypass must be bool")
+  sme_packed_ab_traversal = PackedABTraversalPolicy.from_costs(costs)
+  sme_narrow_singleton_slices = context.options.get("cpu_sme_narrow_singleton_slices", False)
+  if type(sme_narrow_singleton_slices) is not bool:
+    raise ValueError("cpu_sme_narrow_singleton_slices must be bool")
   gemv_columns = context.options.get("cpu_gemv_columns", 4)
   if type(gemv_columns) is not int or not 1 <= gemv_columns <= 8:
     raise ValueError("cpu_gemv_columns must be an integer in [1,8]")
@@ -185,6 +251,11 @@ def plan_matmul(prepared, context):
           amx_native_b_pack_min_m=int(costs.policy("amx_native_b_pack_min_m", 0)),
           amx_cache_b_panel_divisor=b_panel_divisor,
           amx_cache_b_panel_max_m=b_panel_max_m,
+          sve_runtime_quant=runtime_quant_available,
+          sme_native_a_packing=sme_native_a_packing,
+          sme_packed_ab_cache_bypass=sme_packed_ab_cache_bypass,
+          sme_packed_ab_traversal=sme_packed_ab_traversal,
+          sme_narrow_singleton_slices=sme_narrow_singleton_slices,
           amx_b_permutation=register_transpose(16, 16, 4),
           dense_transposes=tuple(dense_transposes),
         )

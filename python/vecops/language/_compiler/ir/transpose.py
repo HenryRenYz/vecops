@@ -4,6 +4,8 @@ Fixed extents refer to *logical* lanes. Named values, rather than aggregate
 register arrays, make the same DAG legal for fixed and sizeless SVE vectors.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 
@@ -41,4 +43,10 @@ class TransposePlan:
   dense_destination: bool = False
   # Maximum lane width of memory and typed intermediates, not just compute.
   lane_bytes: int = 0
+  # CPU-only bounded epilogue schedule. None preserves the original output
+  # slice loops; a value is proved from captured SVL, not ordinary VL.
+  sme_const_half_output_columns: int | None = None
+  # Independent CPU-only full-input schedule; runtime full-tile proof
+  # remains required. Captured SVL determines rows, not ordinary SVE VL.
+  sme_const_half_full_input_rows: int | None = None
   pass_trace: tuple[str, ...] = ("cpu-plan-transpose", "lower-register-permutations")

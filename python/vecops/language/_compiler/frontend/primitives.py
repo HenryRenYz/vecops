@@ -138,7 +138,7 @@ class PrimitivesFrontend:
       if operation == "transpose":
         requested = kwargs.get("axes", args[1] if len(args) > 1 else None)
         axes = (
-          tuple(I.constant(self.value(v, node)) for v in requested)
+          tuple(I.constant(v) for v in self.shape(requested, node))
           if requested is not None
           else tuple(reversed(range(len(shape))))
         )

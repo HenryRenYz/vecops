@@ -9,9 +9,7 @@ void __kernel__(vecops::tensor::TensorLike auto A,vecops::tensor::TensorLike aut
                 vecops::tensor::TensorLike auto C,vecops::tensor::TensorLike auto D,std::int64_t repeat) {
   using TA=vecops::spec::NativeA;
   using TB=vecops::spec::NativeB;
-  using Atom=std::conditional_t<std::same_as<TA,vecops::bfloat16_t>,vecops::matmul::AMX_BF16F32,
-    vecops::matmul::AMX_I8I32<std::conditional_t<std::same_as<TA,vecops::bfloat16_t>,std::int8_t,TA>,
-                           std::conditional_t<std::same_as<TB,vecops::bfloat16_t>,std::int8_t,TB>>>;
+  using Atom=BenchmarkAtom<TA,TB>;
   using Acc=typename Atom::TAcc;
   auto bt=vecops::tensor::transpose<0,1>(B);
   auto a=[&]() VECOPS_INLINE_LAMBDA {

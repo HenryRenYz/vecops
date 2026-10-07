@@ -6,6 +6,7 @@
 
 #include "vecops/execution/Parallel.h"
 #include "vecops/execution/FloatControl.h"
+#include "vecops/execution/VectorLength.h"
 
 #include <algorithm>
 #include <array>
@@ -57,9 +58,10 @@ void parallel_tasks_erased(const VecopsThreadPoolV1* pool, nint_t task_count, vo
     struct CallbackState {
       void* object;
       ParallelBody body;
+      ArmVectorLengths vector_lengths;
       std::exception_ptr exception;
       std::mutex mutex;
-    } state{object, body};
+    } state{object, body, current_thread_vector_lengths()};
     std::array<char, 512> message{};
     VecopsError error{sizeof(VecopsError), 0, message.data(), message.size(), 0};
     const auto status = pool->parallel_for(
@@ -67,6 +69,7 @@ void parallel_tasks_erased(const VecopsThreadPoolV1* pool, nint_t task_count, vo
       [](void* opaque, std::uint32_t task_id, std::uint32_t count) {
         auto& callback = *static_cast<CallbackState*>(opaque);
         try {
+          const ScopedArmVectorLengths vector_lengths(callback.vector_lengths);
           apply_process_flush_subnormals();
           callback.body(callback.object,
                         ParallelContext{static_cast<nint_t>(task_id), static_cast<nint_t>(count)});

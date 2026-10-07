@@ -42,6 +42,13 @@ cannot diverge. Both entry points remain deliberately cache-independent.
 `compile_kernels()` performs the same operation for a span of already-bound
 source recipes. It generates one task per specialization and submits the whole
 set through `compile_batch()`.
+Python's native operator batch planner first matches/binds every request, then
+shares exact source-artifact identities within one compiler configuration. The
+representative recipe retains every alias's cold-build validator, checked both
+before building and before publication; the loaded result is adopted separately
+by every requesting provider. This does not replace call metadata or Dynamic
+relationship validation, and the cache-independent C++ compiler entry points
+continue to preserve their caller-supplied task list.
 
 The compiler gets no persistent cache policy. `ArtifactExecutableProvider`
 owns cache lookup/publication and invokes a compiler callback only when its
@@ -167,3 +174,120 @@ attestations without running native tools or creating a build tree.
 `compile_commands.json` is retained for read-only adapter, specialization and
 object inspection. Source/IR getters never invoke a build to synthesize missing
 evidence, and optional disassembly tools report explicit unavailability.
+
+### ARM thread-local geometry and toolchains
+
+Python compilation captures the calling thread's independent SVE VL and SME
+SVL. Both lengths participate in factory, lowering, artifact and batch identities;
+hardware detection or a cost-profile override is not a vector-length snapshot.
+Generated C++ uses the captured lengths for constant geometry while retaining
+sizeless SVE representations. It does not require compiler support for a fixed
+streaming-vector-bits flag. Actual code-generation architecture is recorded
+separately from the optimization cost profile.
+
+A batch may contain kernels captured under different VL/SVL pairs: the build
+thread need not use those lengths. Entry adapters reject execution with a
+different current pair; callers obtain the appropriate specialization through
+`T.jit` or `T.compile` again. Worker regions propagate the caller's lengths and
+restore the persistent workers' original settings before returning.
+
+Compiler attestation includes effective `CXXFLAGS` when resolving implicit
+headers and runtime libraries. A project-private GCC standard library selected
+by clang is therefore a distinct content-addressed toolchain. On the ARM
+cluster, `benchmarks/arm_toolchain_setup.sh` prepares this library under the
+project's `build-toolchain-gcc14` directory, without changing af3 or global
+configuration; source its generated `job-env.sh` inside scheduled jobs before
+running Python/CMake. Both online and offline package caches remain inside the
+selected private storage. Only C++ headers/development files and runtimes are
+installed: clang remains the compiler and the host's C library is reused.
+The generated task-local envfile also selects that same Clang pair for the
+Torch bridge, overriding any older GNU bridge setting only in the current
+job. Mixing an older GCC executable with the selected GCC14 headers is not a
+supported configuration; no af3 activation hook or global setting is edited.
+An offline, checksummed package bundle can be passed with
+`--offline-package-dir` if compute nodes cannot access the login-node proxy.
+When explicitly permitted for a cluster run, `--scratch-root` instead selects
+an existing task-private, non-symlink `/tmp/vecops-*` or `/dev/shm/vecops-*`
+directory owned by the current UID with mode `0700`. Headers and runtimes stay
+inside that directory, not the shared temporary root; its `job-env.sh` applies
+only to that compute-node job. Preserve logs/results separately before node-local
+scratch is reclaimed. Changing the selected toolchain path/content changes its
+attestation rather than reusing an artifact linked to an unavailable old runtime.
+
+For quota-constrained validation, the verified deployment can instead retain
+only the selected C++ headers, GCC development/start files and a checksummed
+compressed bundle in the project. Each scheduled job unpacks those files into
+its private scratch directory; shared runtime libraries remain in a durable
+project-private directory selected by explicit link flags and RPATH. The
+job-local envfile must locate the unpacked header tree relative to itself,
+verify its payload and the durable runtime contents, and select clang before
+any Python import. Runtime ELF dependencies must not point to reclaimed
+scratch directories. This deployment does not install a second GCC compiler,
+change af3, or require a global shell modification; retain probe and actual
+JIT evidence separately from merely successful extraction.
+
+`benchmarks/arm_job_env.sh` is the sourceable, self-contained entry point for
+this deployment. Activate af3 in a scheduled ARM compute job, then set the
+job-local `VECOPS_GCC14_BUNDLE`/`VECOPS_GCC14_BUNDLE_SHA256`,
+`VECOPS_DURABLE_LIBGCC`/`VECOPS_DURABLE_LIBGCC_SHA256` and
+`VECOPS_DURABLE_LIBSTDCXX`/`VECOPS_DURABLE_LIBSTDCXX_SHA256` pairs before sourcing
+it. Its adjacent standard-library-only Python helper verifies the archive,
+runtime libraries, active interpreter and project print header; extracts the
+headers into a fresh UID-owned mode-0700 directory; and performs Clang syntax,
+link and execution probes for format, floating `to_chars`, atomic wait/notify
+and the actual print facility. It records the exact commands, compiler and
+probe identities in `VECOPS_ARM_JOB_ENV_MANIFEST`.
+
+Bundle extraction rejects hard links, special files, path escapes and arbitrary
+symbolic links. The deployment's four `installation/lib/libgcc_s.so{,.1}` and
+`installation/lib/libstdc++.so{,.6}` links are the sole exception: all four
+must exist and name exactly the explicitly selected, hash-verified durable
+runtime files. Link chains and archive members beneath those links are
+rejected; extraction never follows a link to write runtime contents.
+
+Source this shell before importing NumPy, Torch or vecops: it preloads both
+durable runtimes for future Python processes and selects the same explicit
+Clang drivers for CMake and the Torch bridge. The C++ driver invocation keeps
+its `clang++` spelling even if it is a symlink to `clang-19`; resolved binary
+contents are attested separately. A successful probe alone does not establish
+JIT correctness, numerical accuracy, performance or editable installation.
+
+BiSheng Clang 19.1.7 on the ARM validation cluster may omit its AArch64 UBSan
+runtime archives even though `-fsanitize=undefined` is enabled. The
+task-private `benchmarks/arm_sanitizer_setup.sh` installs only the matching
+`libclang_rt.ubsan_standalone-aarch64.a` and
+`libclang_rt.ubsan_standalone_cxx-aarch64.a` from the checksummed conda-forge
+`compiler-rt_linux-aarch64-19.1.7` package into the project-local
+`build-toolchain-compiler-rt19/clang19-resource` resource directory. It symlinks
+the existing Clang builtin headers and verifies both ordinary execution and a
+deliberate signed-overflow diagnostic using explicit Clang 19.1.7. This is a
+task-local resource-dir selection, not a global compiler/runtime installation:
+it does not modify af3, shell startup files, BiSheng's installation, or the
+UBSan flags, and it never falls back to GCC. Keep the package SHA, private
+archive hashes, and probe evidence with the validation run.
+
+Inaccessible unrelated system-header paths are represented by explicit error
+identities rather than crashing discovery or being silently omitted. Error
+identities are never memoized, so restoring access causes contents to be
+re-attested.
+
+Relative include paths are anchored when a Python `Compiler` is created. Empty
+components and `.` in `CPATH`, `CPLUS_INCLUDE_PATH`, and `C_INCLUDE_PATH` mean
+that captured directory and are preserved as absolute entries; relative `-I`,
+`-iquote`, `-isystem`, and `-idirafter` options in `CXXFLAGS` or compiler flags
+are anchored there as well. The normalized environment is shared by the
+compiler identity probe and native CMake build. An implicit working-directory
+root from an empty path-list component is validated through each source's
+resolved include closure instead of recursively inventorying unrelated
+workspace outputs. Explicit include directories and non-empty include roots
+retain directory inventory checks for shadowing headers.
+
+For diagnosing an unexpected cache invalidation, set
+`VECOPS_BUILD_INPUT_TRACE` to an absolute JSONL file path whose parent directory
+already exists. Read/write identity checks append component digests (tool paths
+and content digests, system-header roots, linked runtimes, hardware digest,
+generator, and configuration key); failed publication validation appends the
+source-input comparison and a bounded path-level diff. Environment values are
+not included. This trace is observational: it does not affect identity hashes
+or relax validation. Cache-only mode neither discovers tools nor writes trace
+records, including when the variable is set.

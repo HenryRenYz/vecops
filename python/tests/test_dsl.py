@@ -3,13 +3,14 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
+from dsl_test_utils import make_compiler, x86_target_available_for_test
 
 
 @pytest.fixture(scope="module")
 def compiler(tmp_path_factory):
   path = tmp_path_factory.mktemp("dsl")
-  return vecops.Compiler(target="Native", cc="gcc", cxx="g++", jobs=4,
-                         cache_dir=path / "cache", build_dir=path / "build")
+  return make_compiler(target="Native", jobs=4,
+                       cache_dir=path / "cache", build_dir=path / "build")
 
 
 def normalization(compiler, which, dtype="float32", output_dtype="float32"):
@@ -486,13 +487,16 @@ def test_runtime_assertions_and_reshape_are_checked_in_release(compiler):
     kernel(np.ones(30, dtype=np.float32)[::2])
 
 
-@pytest.mark.parametrize("target", ["Scalar", "AVX2"])
+@pytest.mark.parametrize(
+  "target",
+  ["Scalar", pytest.param("AVX2", marks=pytest.mark.skipif(not x86_target_available_for_test(), reason="AVX2 target requires x86"))],
+)
 def test_portable_cpu_targets_and_cache_only_hit(tmp_path, target):
   @T.template
   def kernel(A: T.Tensor((37,), dtype=T.float32), C: T.Tensor((37,), dtype=T.float32, access="output")):
     T.store(C, T.softmax(T.load(A)))
-  builder = vecops.Compiler(target=target, cc="gcc", cxx="g++", jobs=4,
-                           cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  builder = make_compiler(target=target, jobs=4,
+                          cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
   first = T.compile(kernel, out_idx=[-1], compiler=builder)
   a = np.linspace(-3, 3, 37, dtype=np.float32)
   expected = np.exp(a - a.max()) / np.exp(a - a.max()).sum()

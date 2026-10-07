@@ -58,7 +58,10 @@ def main():
   parser.add_argument("--count", type=int, default=32)
   parser.add_argument("--repeat", type=int, default=10000)
   parser.add_argument("--rounds", type=int, default=9)
-  parser.add_argument("--cpu", type=int, default=2)
+  parser.add_argument("--cpu", type=int, default=min(os.sched_getaffinity(0)))
+  parser.add_argument("--target", default=os.environ.get("VECOPS_TEST_TARGET", "Native"))
+  parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+  parser.add_argument("--cxx", default=os.environ.get("CXX", "g++"))
   parser.add_argument("--build-dir", type=Path, default=ROOT / "build-dsl-state")
   parser.add_argument("--output", type=Path)
   args = parser.parse_args()
@@ -69,9 +72,9 @@ def main():
     parser.error("timing CPU is outside the caller's allowed affinity")
   args.build_dir.mkdir(parents=True, exist_ok=True)
   compiler = vecops.Compiler(
-    target="Native",
-    cc="gcc",
-    cxx="g++",
+    target=args.target,
+    cc=args.cc,
+    cxx=args.cxx,
     jobs=6,
     cache_dir=args.build_dir / "cache",
     build_dir=args.build_dir / "build",

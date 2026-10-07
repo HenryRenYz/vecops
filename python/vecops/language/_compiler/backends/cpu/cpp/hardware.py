@@ -64,9 +64,7 @@ class HardwareEmitter(SMEInstructionEmitter):
     guard = "HAS_SME_FA64" if kind == "sme" else "HAS_AMX_TILE"
     self.line(f"#if defined({guard})")
     self.line(f"vecops::execution::ExecutionSession {session};")
-    self.opening(
-      f"{session}.with_resources(vecops::execution::{kind}::Region{{}}, [&](auto& {scope}) VECOPS_INLINE_LAMBDA_NOEXCEPT"
-    )
+    self.opening_hardware_owner(kind, session, f"[&](auto& {scope})")
     previous, self.hardware_scope = self.hardware_scope, (kind, scope)
     if kind == "amx":
       self.opening(f"{scope}.with_configuration({configuration}, [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT")

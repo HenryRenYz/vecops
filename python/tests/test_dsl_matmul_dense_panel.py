@@ -2,6 +2,7 @@
 import numpy as np
 import vecops
 import vecops.language as T
+from dsl_test_utils import make_compiler
 
 
 def test_runtime_dense_panel_transpose_and_global_arithmetic(tmp_path):
@@ -12,8 +13,8 @@ def test_runtime_dense_panel_transpose_and_global_arithmetic(tmp_path):
     value=T.library.matmul((T.load(A)*2+1,T.load(B)*0.5-1),C,
                            BM=16,BN=32,BK=32,implementation='vector')
     T.store(C,T.max(value*0.25+1,0))
-  compiler=vecops.Compiler(target='Native',cc='gcc',cxx='g++',jobs=6,
-                          cache_dir=tmp_path/'cache',build_dir=tmp_path/'build')
+  compiler=make_compiler(target='Native',jobs=6,
+                         cache_dir=tmp_path/'cache',build_dir=tmp_path/'build')
   compiled=T.compile(kernel,compiler=compiler)
   rng=np.random.default_rng(17)
   a=rng.normal(size=(37,65)).astype(np.float32)

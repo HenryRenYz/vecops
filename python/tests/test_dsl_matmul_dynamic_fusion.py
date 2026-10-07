@@ -2,6 +2,7 @@
 import numpy as np
 import vecops
 import vecops.language as T
+from dsl_test_utils import make_compiler
 
 
 @T.func
@@ -16,8 +17,8 @@ def test_expensive_inputs_row_col_and_packing(tmp_path):
              C:T.Tensor((M,N),dtype='float32',access='output')):
     value=T.library.matmul((produced(A),produced(B)),C,BM=16,BN=16,BK=32)
     T.store(C,value*0.5)
-  compiler=vecops.Compiler(target='Native',cc='gcc',cxx='g++',jobs=6,
-                          cache_dir=tmp_path/'cache',build_dir=tmp_path/'build')
+  compiler=make_compiler(target='Native',jobs=6,
+                         cache_dir=tmp_path/'cache',build_dir=tmp_path/'build')
   compiled=T.compile(kernel,compiler=compiler)
   import ml_dtypes
   rng=np.random.default_rng(31)

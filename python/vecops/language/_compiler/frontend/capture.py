@@ -32,6 +32,8 @@ def symbol(value):
   if isinstance(value, Const):
     return I.literal(value.value)
   if isinstance(value, Dynamic):
+    if value.name is None:
+      raise DSLError("unbound dynamic value: expose its symbol in a template tensor annotation")
     return I.Expr(I.ScalarType("int64"), "symbol", data=value.name)
   if isinstance(value, IntExpr):
     return I.binary(value.op, symbol(value.left), symbol(value.right))
@@ -112,7 +114,7 @@ def capture(function, local_scope=None, seen=None):
       key = repr(value)
     elif isinstance(value, tuple):
 
-      def freeze_tuple(item):
+      def freeze_tuple(item, capture_name=name):
         if isinstance(item, tuple):
           return tuple(freeze_tuple(v) for v in item)
         if isinstance(item, (Const, Dynamic, IntExpr)):
@@ -124,7 +126,7 @@ def capture(function, local_scope=None, seen=None):
         try:
           return dtype_name(item)
         except (TypeError, ValueError) as error:
-          raise DSLError(f"capture {name!r} must be immutable kernel data") from error
+          raise DSLError(f"capture {capture_name!r} must be immutable kernel data") from error
 
       value = freeze_tuple(value)
       key = repr(value)

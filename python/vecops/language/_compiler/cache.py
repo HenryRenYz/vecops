@@ -18,7 +18,8 @@ def _source_identity(ir: TemplateIR) -> str:
   return digest(source_inputs(ir.source, dependencies=ir.dependencies))
 
 
-def _compiler_key(compiler: Compiler):
+def _compiler_policy_key(compiler: Compiler):
+  """Return mutable compiler policy, excluding thread-scoped vector state."""
   return (
     compiler.target,
     str(compiler.cache_dir),
@@ -36,3 +37,9 @@ def _compiler_key(compiler: Compiler):
     compiler.generator,
     tuple(sorted(compiler.environment.items())),
   )
+
+
+def _compiler_key(compiler: Compiler):
+  """Return the immutable artifact key, including the snapshot's VL/SVL."""
+  policy = _compiler_policy_key(compiler)
+  return (policy[0], compiler.vector_state.env_token, *policy[1:])

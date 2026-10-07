@@ -24,9 +24,7 @@ def test_flush_subnormals_sets_current_and_new_threads() -> None:
     vecops.set_flush_subnormals(True)
     assert vecops.current_thread_flush_subnormals()
     inherited: list[bool] = []
-    thread = threading.Thread(
-      target=lambda: inherited.append(vecops.current_thread_flush_subnormals())
-    )
+    thread = threading.Thread(target=lambda: inherited.append(vecops.current_thread_flush_subnormals()))
     thread.start()
     thread.join()
     assert inherited == [True]
@@ -64,8 +62,7 @@ def test_native_compiler_target_allows_process_override(
 def test_schema_dimension_constraints_and_symbol_inference() -> None:
   definition = vecops.KernelDef(
     "test::dsl",
-    [vecops.TensorDef("input", [vecops.Dynamic(8, 1, "MaxB"), "N"],
-                      [vecops.Const, 1], dtype=np.float32)],
+    [vecops.TensorDef("input", [vecops.Dynamic(8, 1, "MaxB"), "N"], [vecops.Const, 1], dtype=np.float32)],
   )
   assert definition.values == {"MaxB": vecops.Const, "N": vecops.Const}
   native = definition._native()
@@ -146,8 +143,13 @@ def make_test_kernel(compiler: vecops.Compiler):
     "test::scale",
     [
       vecops.TensorDef("input", ["B", "D"], ["stride_D", 1], dtype="ComputeType"),
-      vecops.TensorDef("output", ["B", "D"], [vecops.Dynamic(1, "D", 1048576), 1],
-                       dtype="ComputeType", access=vecops.TensorAccess.output),
+      vecops.TensorDef(
+        "output",
+        ["B", "D"],
+        [vecops.Dynamic(1, "D", 1048576), 1],
+        dtype="ComputeType",
+        access=vecops.TensorAccess.output,
+      ),
       vecops.ValueDef("factor", float, 2.0),
       vecops.ValueDef("add_one", bool, False),
     ],
@@ -303,7 +305,8 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
   kernel.compile_for(
     vecops.TensorMeta(input.shape, dtype=vecops.float32),
     vecops.TensorMeta(
-      output.shape, dtype=vecops.float32,
+      output.shape,
+      dtype=vecops.float32,
       access=vecops.TensorAccess.output,
     ),
   )
@@ -321,57 +324,87 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
 
   def tensor_value(array: np.ndarray, flags: int) -> Value:
     tensor = TensorView(
-      ctypes.sizeof(TensorView), array.ctypes.data, 0, 1, 0, 12, 2,
-      sizes, strides, flags,
+      ctypes.sizeof(TensorView),
+      array.ctypes.data,
+      0,
+      1,
+      0,
+      12,
+      2,
+      sizes,
+      strides,
+      flags,
     )
     return Value(ctypes.sizeof(Value), 1, ValuePayload(tensor=tensor))
 
   factor = Scalar(
-    ctypes.sizeof(Scalar), 13, ScalarStorage(f64=3.0),
+    ctypes.sizeof(Scalar),
+    13,
+    ScalarStorage(f64=3.0),
   )
   add_one = Scalar(
-    ctypes.sizeof(Scalar), 1, ScalarStorage(u64=1),
+    ctypes.sizeof(Scalar),
+    1,
+    ScalarStorage(u64=1),
   )
   values = (Value * 4)(
-    tensor_value(input, 1), tensor_value(output, 2),
+    tensor_value(input, 1),
+    tensor_value(output, 2),
     Value(ctypes.sizeof(Value), 2, ValuePayload(scalar=factor)),
     Value(ctypes.sizeof(Value), 2, ValuePayload(scalar=add_one)),
   )
 
   raw_workspace = (ctypes.c_ubyte * 128)()
-  workspace_address = (
-    ctypes.addressof(raw_workspace) + 63
-  ) & ~63
-  ctypes.memset(workspace_address, 0xcc, 64)
+  workspace_address = (ctypes.addressof(raw_workspace) + 63) & ~63
+  ctypes.memset(workspace_address, 0xCC, 64)
   context = ExecutionContext(
-    ctypes.sizeof(ExecutionContext), 3, None, None, 0x55,
+    ctypes.sizeof(ExecutionContext),
+    3,
+    None,
+    None,
+    0x55,
   )
   call = Call(
-    ctypes.sizeof(Call), len(values), values, workspace_address, 64,
+    ctypes.sizeof(Call),
+    len(values),
+    values,
+    workspace_address,
+    64,
     ctypes.pointer(context),
   )
   specialization = (SpecializationArgument * 1)(
     SpecializationArgument(
-      ctypes.sizeof(SpecializationArgument), 2, b"ComputeType",
+      ctypes.sizeof(SpecializationArgument),
+      2,
+      b"ComputeType",
       SpecializationPayload(dtype=12),
     )
   )
   message = ctypes.create_string_buffer(1024)
   error = Error(
-    ctypes.sizeof(Error), 0, ctypes.cast(message, ctypes.c_char_p),
-    len(message), 0,
+    ctypes.sizeof(Error),
+    0,
+    ctypes.cast(message, ctypes.c_char_p),
+    len(message),
+    0,
   )
 
   library = ctypes.CDLL(vecops._C.__file__)
   bridge = library.vecops_operator_bridge_invoke_v1
   bridge.argtypes = [
-    ctypes.c_uint64, ctypes.POINTER(Call), ctypes.c_uint32,
-    ctypes.POINTER(SpecializationArgument), ctypes.POINTER(Error),
+    ctypes.c_uint64,
+    ctypes.POINTER(Call),
+    ctypes.c_uint32,
+    ctypes.POINTER(SpecializationArgument),
+    ctypes.POINTER(Error),
   ]
   bridge.restype = ctypes.c_int32
   result = bridge(
-    kernel.native._handle, ctypes.byref(call), len(specialization),
-    specialization, ctypes.byref(error),
+    kernel.native._handle,
+    ctypes.byref(call),
+    len(specialization),
+    specialization,
+    ctypes.byref(error),
   )
   assert result == 0, message.value.decode()
   np.testing.assert_array_equal(output, input * 3 + 1)
@@ -392,7 +425,12 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
 
   output.fill(0)
   managed_context = ExecutionContext(
-    ctypes.sizeof(ExecutionContext), 3, None, ctypes.c_void_p(0x1234), 0x55, None,
+    ctypes.sizeof(ExecutionContext),
+    3,
+    None,
+    ctypes.c_void_p(0x1234),
+    0x55,
+    None,
   )
   managed_call = Call(
     ctypes.sizeof(Call),
@@ -438,27 +476,183 @@ def test_generated_torch_bridge_uses_mutable_out_schema() -> None:
   assert "Tensor(a!) output" in schema
   assert schema.endswith("-> ()")
   source = _generate_torch_source("vecops_test", "run", definition)
-  assert "TORCH_LIBRARY_FRAGMENT(vecops_test" in source
+  assert "TORCH_LIBRARY_FRAGMENT(vecops_test" not in source
   assert "vecops_operator_bridge_invoke_v1" in source
-  assert "vecops_torch_bridge_set_handle_v1" in source
-  assert "VecopsThreadPoolV1 torch_thread_pool" in source
-  assert "bridge_thread_pool" in source
-  assert "vecops_torch_bridge_set_thread_pool_v1" in source
-  assert "at::parallel_for(0, task_count, 1" in source
+  assert "vecops_torch_bridge_register_v2" in source
+  assert "struct CpuFunctor" in source and "struct MetaFunctor" in source
+  assert "std::shared_ptr<State> state" in source
+  assert "at::parallel_for(0, count, 1" in source
   assert "libgomp.so.1" not in source
   assert "GOMP_parallel" not in source
   assert "dlsym" not in source
   assert "RTLD_DEFAULT" not in source
-  assert "configured_pool != nullptr ? configured_pool : &torch_thread_pool" in source
+  assert "state->pool ? state->pool : &state->torch_pool" in source
   assert "torch/extension.h" not in source
   assert "PYBIND11_MODULE" not in source
   returning_schema = _torch_schema("run", definition, return_outputs=True)
   assert returning_schema.endswith("-> Tensor")
-  returning_source = _generate_torch_source(
-    "vecops_test", "run", definition, return_outputs=True
-  )
-  assert "at::Tensor wrapper(" in returning_source
+  returning_source = _generate_torch_source("vecops_test", "run", definition, return_outputs=True)
+  assert "at::Tensor operator()(" in returning_source
   assert "return p1;" in returning_source
+
+
+def test_gnu_torch_bridge_filters_only_clang_gcc_install_selector(monkeypatch):
+  from vecops import _schema_bridge
+
+  toolchain = vecops._C.ToolchainSpec()
+  toolchain.c_compiler = "/kernel/clang"
+  toolchain.cxx_compiler = "/kernel/clang++"
+  toolchain.environment = {
+    "CXXFLAGS": (
+      "--gcc-install-dir=/opt/gcc/14 --gcc-toolchain=/opt/gcc -nostdinc++ "
+      "-isystem /private/include -L/private/lib -Wl,-rpath,/private/lib"
+    ),
+    "KEEP_ME": "unchanged",
+  }
+  config = vecops._C.KernelCompilerConfig()
+  config.toolchain = toolchain
+  monkeypatch.setenv("VECOPS_TORCH_BRIDGE_CC", "gcc")
+  monkeypatch.setenv("VECOPS_TORCH_BRIDGE_CXX", "g++")
+  monkeypatch.setattr(_schema_bridge, "_torch_openmp_runtime", lambda *_args: "gomp")
+  monkeypatch.setattr(
+    _schema_bridge.shutil,
+    "which",
+    lambda name: {"g++": "/opt/gcc/bin/g++", "gcc": "/opt/gcc/bin/gcc"}[name],
+  )
+  policy = _schema_bridge._torch_bridge_build_policy(config, (), "")
+  bridge = policy.toolchain
+  assert policy.compile_flags == ("-fopenmp",)
+  assert str(bridge.cxx_compiler) == "/opt/gcc/bin/g++"
+  normalized = bridge.environment["CXXFLAGS"]
+  assert "--gcc-install-dir" not in normalized and "--gcc-toolchain" not in normalized
+  for retained in (
+    "-nostdinc++",
+    "-isystem /private/include",
+    "-L/private/lib",
+    "-Wl,-rpath,/private/lib",
+  ):
+    assert retained in normalized
+  assert bridge.environment["KEEP_ME"] == "unchanged"
+  assert toolchain.environment["CXXFLAGS"].startswith("--gcc-install-dir=")
+
+
+def test_gnu_torch_bridge_normalizes_split_clang_selector(monkeypatch):
+  from vecops._schema_bridge import _gnu_compatible_cxxflags
+
+  flags = "--gcc-install-dir /opt/gcc/14 --gcc-toolchain /opt/gcc -isystem /private/include -L /private/lib"
+  normalized = _gnu_compatible_cxxflags(flags)
+  assert "--gcc-install-dir" not in normalized
+  assert "-isystem /private/include" in normalized
+  assert "-L /private/lib" in normalized
+  with pytest.raises(ValueError, match="without a path"):
+    _gnu_compatible_cxxflags("-O2 --gcc-install-dir")
+
+
+def test_cache_only_torch_bridge_loads_existing_artifact_without_writes(monkeypatch, tmp_path):
+  from vecops import _schema_bridge
+
+  class TorchStub:
+    pass
+
+  class CompilerStub:
+    cache_mode = vecops._C.ArtifactCacheMode.cache_only
+
+    def _native_config(self):
+      pytest.fail("cache-only bridge lookup must not resolve compiler tools")
+
+  base = tmp_path / "bridge-cache"
+  source = "generated bridge source"
+  registration = _schema_bridge._BridgeRegistration(
+    "lib", "op", object(), object(), CompilerStub(), None, False, (), False
+  )
+  registration.ready[0] = False
+  loaded = []
+  monkeypatch.setenv("VECOPS_TORCH_BRIDGE_DIR", str(base))
+  monkeypatch.setattr(
+    _schema_bridge,
+    "_torch_bridge_inputs",
+    lambda: (TorchStub(), None, (), (), "", tmp_path / "native.so", ("torch-identity",)),
+  )
+  monkeypatch.setattr(_schema_bridge, "_generate_torch_source", lambda *_args, **_kwargs: source)
+  monkeypatch.setattr(_schema_bridge, "_bridge_signature_identity", lambda _registration: "signature")
+
+  def load_bridge(reg, path, *_args):
+    loaded.append(path)
+    reg.materialized = True
+
+  monkeypatch.setattr(_schema_bridge, "_load_bridge", load_bridge)
+  import vecops._identity as identity_module
+
+  monkeypatch.setattr(identity_module, "compiler_identity", lambda _compiler: "compiler-attestation")
+  monkeypatch.setattr(identity_module, "file_identity", lambda path: (str(path), f"{path}-content"))
+  key = _schema_bridge._bridge_artifact_key(source, ("torch-identity",), "compiler-attestation", (), "signature")
+  directory = base / key
+  directory.mkdir(parents=True)
+  output_name = f"vecops_bridge_{key}"
+  (directory / f"{output_name}.so").write_bytes(b"bridge")
+  manifest_identity = (
+    source,
+    ("torch-identity",),
+    "signature",
+    ("torch-bridge-v7", "compiler-attestation", (), None, None, "aten"),
+  )
+  (directory / f"{output_name}.identity").write_text(repr(manifest_identity))
+  before = sorted((path.relative_to(tmp_path), path.stat().st_mtime_ns) for path in tmp_path.rglob("*"))
+  monkeypatch.setattr(_schema_bridge, "_bridge_cache_base", lambda _registration: base)
+  monkeypatch.setattr(
+    _schema_bridge,
+    "_compile_pending_torch_bridges_impl",
+    lambda **_kwargs: pytest.fail("cache-only must never call the bridge compiler"),
+  )
+  monkeypatch.setattr(_schema_bridge, "_registrations", {("lib", "op"): registration})
+
+  assert _schema_bridge.compile_pending_torch_bridges() == 0
+  assert loaded == [directory / f"{output_name}.so"]
+  assert registration.materialized
+  assert sorted((path.relative_to(tmp_path), path.stat().st_mtime_ns) for path in tmp_path.rglob("*")) == before
+
+
+def test_cache_only_torch_bridge_miss_is_import_error_without_creation(monkeypatch, tmp_path):
+  from vecops import _schema_bridge
+
+  class TorchStub:
+    pass
+
+  class CompilerStub:
+    cache_mode = vecops._C.ArtifactCacheMode.cache_only
+
+    def _native_config(self):
+      pytest.fail("cache-only bridge miss must not resolve compiler tools")
+
+  cache = tmp_path / "not-created"
+  registration = _schema_bridge._BridgeRegistration(
+    "lib", "missing", object(), object(), CompilerStub(), None, False, (), False
+  )
+  monkeypatch.setenv("VECOPS_TORCH_BRIDGE_DIR", str(cache))
+  monkeypatch.setattr(
+    _schema_bridge,
+    "_torch_bridge_inputs",
+    lambda: (TorchStub(), None, (), (), "", tmp_path / "native.so", ("torch-identity",)),
+  )
+  monkeypatch.setattr(_schema_bridge, "_generate_torch_source", lambda *_args, **_kwargs: "source")
+  monkeypatch.setattr(_schema_bridge, "_bridge_signature_identity", lambda _registration: "signature")
+  import vecops._identity as identity_module
+
+  monkeypatch.setattr(identity_module, "compiler_identity", lambda _compiler: "compiler-attestation")
+  monkeypatch.setattr(
+    _schema_bridge,
+    "_torch_bridge_build_policy",
+    lambda config, *_args: _schema_bridge._TorchBridgeBuildPolicy(config.toolchain),
+  )
+  monkeypatch.setattr(_schema_bridge, "_registrations", {("lib", "missing"): registration})
+  monkeypatch.setattr(
+    _schema_bridge,
+    "_compile_pending_torch_bridges_impl",
+    lambda **_kwargs: pytest.fail("cache-only must never compile a missing bridge"),
+  )
+  with pytest.raises(ImportError, match="cache-only Torch bridge.*not found"):
+    _schema_bridge.compile_pending_torch_bridges()
+  assert not cache.exists()
 
 
 def test_native_thread_pool_operator_filter(monkeypatch) -> None:
@@ -470,7 +664,9 @@ def test_native_thread_pool_operator_filter(monkeypatch) -> None:
       return 7
 
   monkeypatch.setattr(
-    _schema_bridge.native, "native_thread_pool_address", lambda threads: 1234,
+    _schema_bridge.native,
+    "native_thread_pool_address",
+    lambda threads: 1234,
     raising=False,
   )
   monkeypatch.setattr(_schema_bridge, "_native_thread_pool", None)
@@ -479,15 +675,9 @@ def test_native_thread_pool_operator_filter(monkeypatch) -> None:
     "VECOPS_NATIVE_THREAD_POOL_OPS",
     "alphafold3_native::diffusion_*,other::exact",
   )
-  assert not _schema_bridge._thread_pool_pointer(
-    TorchStub(), "alphafold3_native::linear_packed"
-  ).value
-  assert _schema_bridge._thread_pool_pointer(
-    TorchStub(), "alphafold3_native::diffusion_self_attention"
-  ).value == 1234
-  assert _schema_bridge._thread_pool_pointer(
-    TorchStub(), "other::exact"
-  ).value == 1234
+  assert not _schema_bridge._thread_pool_pointer(TorchStub(), "alphafold3_native::linear_packed").value
+  assert _schema_bridge._thread_pool_pointer(TorchStub(), "alphafold3_native::diffusion_self_attention").value == 1234
+  assert _schema_bridge._thread_pool_pointer(TorchStub(), "other::exact").value == 1234
 
 
 def test_native_thread_pool_region_is_scoped_and_nestable(monkeypatch) -> None:
@@ -528,9 +718,7 @@ def test_native_thread_pool_region_can_be_disabled(monkeypatch) -> None:
 
 
 def test_python_sdk_core_target_does_not_propagate_openmp() -> None:
-  sdk_targets = (
-    VECOPS_ROOT / "cmake" / "VecopsPythonSdkTargets.cmake.in"
-  ).read_text()
+  sdk_targets = (VECOPS_ROOT / "cmake" / "VecopsPythonSdkTargets.cmake.in").read_text()
   assert "OpenMP::OpenMP_CXX" not in sdk_targets
   assert 'INTERFACE_LINK_LIBRARIES "${CMAKE_DL_LIBS}"' in sdk_targets
 
@@ -568,9 +756,7 @@ def test_compile_batch_delegates_one_native_build_graph(monkeypatch) -> None:
     )
     for index in range(2)
   ]
-  result = vecops.compile_batch(
-    requests, parallelism=2, execution_parallelism=7
-  )
+  result = vecops.compile_batch(requests, parallelism=2, execution_parallelism=7)
   assert result.prepared == 2
   assert result.parallelism == 2
   assert len(submitted) == 1

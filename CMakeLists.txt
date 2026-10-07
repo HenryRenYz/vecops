@@ -14,6 +14,10 @@ set(CMAKE_VERBOSE_MAKEFILE ON)
 # Keep an explicit project root.  CMAKE_SOURCE_DIR belongs to the outermost
 # project and is therefore wrong when Vecops is consumed with add_subdirectory.
 set(VECOPS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+set(_VECOPS_SME_MATMUL_LEAF_SOURCES
+    "${VECOPS_SOURCE_DIR}/src/arch/sme/FusedSkinnyF64.cpp"
+    "${VECOPS_SOURCE_DIR}/src/arch/sme/RuntimeQuantInt8.cpp"
+    "${VECOPS_SOURCE_DIR}/src/arch/sme/MixedSignSkinnyInt8.cpp")
 
 # Address sanitizer
 
@@ -120,11 +124,15 @@ if(VECOPS_BUILD_PYTHON)
         FILES
             cmake/VecopsKernelTargets.cmake
             cmake/VecopsTargetArch.cmake
+            cmake/VecopsSMEMatmulLeaves.cmake
             "${CMAKE_CURRENT_BINARY_DIR}/VecopsConfig.cmake"
             "${CMAKE_CURRENT_BINARY_DIR}/VecopsConfigVersion.cmake"
         DESTINATION vecops/_sdk/lib/cmake/Vecops
         COMPONENT python
     )
+    install(FILES ${_VECOPS_SME_MATMUL_LEAF_SOURCES}
+        DESTINATION vecops/_sdk/lib/cmake/Vecops/sme
+        COMPONENT python)
 endif()
 
 # -------------------------------- Test Config ---------------------------------
@@ -198,8 +206,11 @@ install(
     FILES
         cmake/VecopsKernelTargets.cmake
         cmake/VecopsTargetArch.cmake
+        cmake/VecopsSMEMatmulLeaves.cmake
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Vecops"
 )
+install(FILES ${_VECOPS_SME_MATMUL_LEAF_SOURCES}
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Vecops/sme")
 
 configure_package_config_file(
     cmake/VecopsConfig.cmake.in
@@ -235,3 +246,14 @@ configure_file(
     "${CMAKE_CURRENT_BINARY_DIR}/VecopsTargetArch.cmake"
     COPYONLY
 )
+configure_file(
+    cmake/VecopsSMEMatmulLeaves.cmake
+    "${CMAKE_CURRENT_BINARY_DIR}/VecopsSMEMatmulLeaves.cmake"
+    COPYONLY
+)
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/sme")
+foreach(_VECOPS_SME_SOURCE IN LISTS _VECOPS_SME_MATMUL_LEAF_SOURCES)
+    get_filename_component(_VECOPS_SME_FILENAME "${_VECOPS_SME_SOURCE}" NAME)
+    configure_file("${_VECOPS_SME_SOURCE}"
+        "${CMAKE_CURRENT_BINARY_DIR}/sme/${_VECOPS_SME_FILENAME}" COPYONLY)
+endforeach()

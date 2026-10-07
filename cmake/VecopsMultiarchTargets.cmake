@@ -2,6 +2,7 @@ include_guard(GLOBAL)
 
 include(CheckCXXCompilerFlag)
 include("${CMAKE_CURRENT_LIST_DIR}/VecopsTargetArch.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/VecopsSMEMatmulLeaves.cmake")
 
 # Architecture metadata shared by tests, benchmarks, and any future
 # multi-architecture executable targets.
@@ -391,61 +392,6 @@ ${_SHARD_LEGACY_DEFINITIONS}
     set(${OUT_VAR} "${_EXPANDED_SOURCES}" PARENT_SCOPE)
 endfunction()
 
-# Return one ISA-specific archive containing the selected non-header SME matmul
-# leaves. The archive is shared by targets with the same -march and feature
-# set. Each leaf remains a separate object, so a static linker extracts only
-# the objects referenced by a consumer's header instantiations. Target ISA
-# features are the compile-time availability contract: every multiarch target
-# that can instantiate one of these paths is linked to the matching archive.
-function(_vecops_get_sme_matmul_leaf_library
-        OUT_VAR MARCH USE_F64 USE_RUNTIME_QUANT_INT8 USE_MIXED_SIGN_SKINNY)
-    set(_LEAF_KEY
-        "${MARCH};f64=${USE_F64};runtime_i8=${USE_RUNTIME_QUANT_INT8};mixed_sign_skinny=${USE_MIXED_SIGN_SKINNY}")
-    string(SHA1 _MARCH_HASH "${_LEAF_KEY}")
-    string(SUBSTRING "${_MARCH_HASH}" 0 12 _MARCH_ID)
-    set(_LEAF_TARGET "vecops_sme_matmul_leaves_${_MARCH_ID}")
-    if(NOT TARGET ${_LEAF_TARGET})
-        set(_LEAF_SOURCES "")
-        if(USE_F64)
-            list(APPEND _LEAF_SOURCES
-                "${VECOPS_SOURCE_DIR}/src/arch/sme/FusedSkinnyF64.cpp")
-        endif()
-        if(USE_RUNTIME_QUANT_INT8)
-            list(APPEND _LEAF_SOURCES
-                "${VECOPS_SOURCE_DIR}/src/arch/sme/RuntimeQuantInt8.cpp")
-        endif()
-        if(USE_MIXED_SIGN_SKINNY)
-            list(APPEND _LEAF_SOURCES
-                "${VECOPS_SOURCE_DIR}/src/arch/sme/MixedSignSkinnyInt8.cpp")
-        endif()
-        if(NOT _LEAF_SOURCES)
-            message(FATAL_ERROR
-                "SME matmul leaf library requested without any leaves")
-        endif()
-        add_library(${_LEAF_TARGET} STATIC ${_LEAF_SOURCES})
-        target_compile_features(${_LEAF_TARGET} PRIVATE cxx_std_20)
-        target_include_directories(${_LEAF_TARGET} PRIVATE
-            "${VECOPS_SOURCE_DIR}/include"
-            "${VECOPS_SOURCE_DIR}/include/vecops")
-        target_compile_definitions(${_LEAF_TARGET} PRIVATE
-            "$<$<CONFIG:Debug>:VECOPS_DEBUG>")
-        if(VECOPS_PRESERVE_SUBNORMALS)
-            target_compile_definitions(${_LEAF_TARGET} PRIVATE
-                VECOPS_PRESERVE_SUBNORMALS=1)
-        endif()
-        target_compile_options(${_LEAF_TARGET} PRIVATE
-            "-march=${MARCH}" "-Wno-ignored-attributes")
-        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-            target_compile_options(${_LEAF_TARGET} PRIVATE "-Wno-psabi")
-        endif()
-        target_link_libraries(${_LEAF_TARGET} PRIVATE
-            vecops_optimize_for_kernels)
-        set_property(TARGET ${_LEAF_TARGET} PROPERTY FOLDER
-            "internal/sme_matmul")
-    endif()
-    set(${OUT_VAR} "${_LEAF_TARGET}" PARENT_SCOPE)
-endfunction()
-
 # Public primitive used by vecops_add_test and vecops_add_benchmark. It owns
 # source sharding and all architecture-specific compile/link policy.
 function(vecops_add_multiarch_executable)
@@ -557,49 +503,7 @@ function(vecops_add_multiarch_executable)
               (_ARCH STREQUAL "NativeFixedStreamingSVE")))))
             set(_VECOPS_TARGET_HAS_SME ON)
         endif()
-        set(_VECOPS_TARGET_HAS_I8MM OFF)
-        if(VECOPS_ARCH_FAMILY STREQUAL "ARM" AND
-           ((_MARCH MATCHES "(^|\\+)i8mm($|\\+)") OR
-            (VECOPS_NATIVE_HAS_I8MM AND
-             ((_ARCH STREQUAL "Native") OR
-              (_ARCH STREQUAL "NativeFixedSVE") OR
-              (_ARCH STREQUAL "NativeFixedStreamingSVE")))))
-            set(_VECOPS_TARGET_HAS_I8MM ON)
-        endif()
-        set(_VECOPS_USE_SME_F64_LEAF OFF)
-        if(_VECOPS_TARGET_HAS_SME AND
-           ((_MARCH MATCHES "(^|\\+)sme-f64f64($|\\+)") OR
-            (VECOPS_NATIVE_HAS_SME_F64F64 AND
-             ((_ARCH STREQUAL "Native") OR
-              (_ARCH STREQUAL "NativeFixedSVE") OR
-              (_ARCH STREQUAL "NativeFixedStreamingSVE")))))
-            set(_VECOPS_USE_SME_F64_LEAF ON)
-            target_compile_definitions(${_TARGET_NAME} PRIVATE VECOPS_TARGET_SME_F64F64=1)
-        endif()
-
-        set(_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF OFF)
-        if(_VECOPS_TARGET_HAS_SME AND
-           _VECOPS_TARGET_HAS_I8MM)
-            set(_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF ON)
-        endif()
-
-        set(_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF OFF)
-        if(_VECOPS_TARGET_HAS_SME AND
-           _VECOPS_TARGET_HAS_I8MM)
-            set(_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF ON)
-        endif()
-
-        if(_VECOPS_USE_SME_F64_LEAF OR
-           _VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF OR
-           _VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF)
-            _vecops_get_sme_matmul_leaf_library(
-                _VECOPS_SME_MATMUL_LEAF_LIBRARY "${_MARCH}"
-                "${_VECOPS_USE_SME_F64_LEAF}"
-                "${_VECOPS_USE_SME_RUNTIME_QUANT_INT8_LEAF}"
-                "${_VECOPS_USE_SME_MIXED_SIGN_SKINNY_LEAF}")
-            target_link_libraries(${_TARGET_NAME} PRIVATE
-                ${_VECOPS_SME_MATMUL_LEAF_LIBRARY})
-        endif()
+        _vecops_link_sme_matmul_leaves(${_TARGET_NAME} "${_ARCH}" "${_MARCH}")
         if(_VECOPS_TARGET_HAS_SME AND
            VECOPS_NATIVE_FIXED_STREAMING_SVE_BITS AND
            ((_ARCH STREQUAL "NativeFixedStreamingSVE") OR

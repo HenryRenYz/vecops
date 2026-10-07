@@ -30,7 +30,8 @@ install.components = ["python"]
 wheel.packages = ["python/vecops"]
 
 [tool.pytest.ini_options]
-testpaths = ["python/tests"]
+testpaths = ["python/tests", "tests/vec"]
+pythonpath = ["python/tests"]
 
 [tool.ruff]
 line-length = 120

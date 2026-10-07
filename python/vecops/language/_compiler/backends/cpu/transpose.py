@@ -7,14 +7,18 @@ from ... import ir as I
 from ...dtypes import ELEMENT_BYTES
 from ...ir.transpose import TransposePlan
 from ...ir.traversal import walk
+from ...lowering.tile_to_vector import attach_stores, lower_region, store_roots, store_value
 from ...lowering.transpose import register_transpose
 from ...operations import Trait, snapshot
 from ...passes.manager import register_pass
+
+MAX_STATIC_HALF_INPUT_ROWS = 16
 
 
 @register_pass("cpu-plan-transpose", stage="cpu-memory")
 def plan_memory(prepared, context):
   plans = {}
+  gathers = {}
   seen = set()
 
   def visit(node):
@@ -26,7 +30,37 @@ def plan_memory(prepared, context):
       plan = plan_transpose(node, context.options)
       if node.implementation == "sme" and (plan is None or not plan.sme):
         raise TypeError("explicit SME transpose requires a simple unmasked last-two-axis load and supported strides")
-      if plan is not None:
+      if plan is not None and small_vla_conversion(plan, context.options):
+        # Reuse the normal memory/alias/conversion lowering, but do not form
+        # a two-word group for this conversion gather. A half-full grouped tail would
+        # need multiword masks even when one ordinary SVE vector fits a row.
+        region = lower_region(
+          node.destination.shape,
+          store_value(node).type.dtype,
+          store_roots((node,)),
+          unroll=1,
+          opaque=prepared.vectors.kernel.materializations,
+          manager=prepared.vectors.manager,
+          run_passes=False,
+        )
+        attach_stores(region, (node,))
+        region = prepared.vectors.manager.run(region)
+        gathers[id(node)] = region
+        if small_conversion_rolled_rows(plan):
+          # Alias fallbacks and snapshot copies are mutually exclusive, but
+          # their unrolled address chains can still enlarge the hot function's
+          # frame. Keep every alternative's row loop rolled, not its explicit
+          # vector schedule. Snapshot rebinding preserves this schedule hint.
+          alternatives = (
+            region,
+            prepared.vectors.plans.get(id(node)),
+            prepared.stores.get(id(node)),
+            *(prepared.snapshots.get(id(load)) for load in I.loads_unique(node.value)),
+          )
+          for alternative in alternatives:
+            if alternative is not None:
+              alternative.outer_unroll = 1
+      elif plan is not None:
         plans[id(node)] = plan
     if isinstance(node, I.Node):
       for field in fields(node):
@@ -36,11 +70,79 @@ def plan_memory(prepared, context):
         visit(child)
 
   visit(prepared.vectors.kernel.body)
-  return replace(prepared, transposes=MappingProxyType(plans))
+  stores = dict(prepared.stores)
+  for identity, region in gathers.items():
+    previous = prepared.vectors.plans.get(identity)
+    if previous is None:
+      stores[identity] = region
+    else:
+      prepared.vectors.plans[identity] = region
+      # The frontend IR and public VectorKernel share this list. Keep that
+      # identity so debug output reports the actual scheduled vector region.
+      prepared.vectors.regions[:] = [region if item is previous else item for item in prepared.vectors.regions]
+  return replace(prepared, transposes=MappingProxyType(plans), stores=MappingProxyType(stores))
+
+
+def small_conversion_rolled_rows(plan):
+  """Bound address-register pressure in tiny native SVE conversion gathers.
+
+  Called only after the captured-VL, simple-conversion gather proof above.
+  Tiny rows otherwise get aggressively expanded by Clang, retaining one
+  address per row across hot/cold alias alternatives. A rolled row loop keeps
+  the same converting memory operations and inner vector groups. Medium
+  eight-byte gathers, dynamic shapes and other backends keep their schedules.
+  """
+  extents = tuple(I.constant(extent) for extent in plan.statement.destination.shape)
+  return len(extents) == 2 and all(isinstance(extent, int) and 1 < extent <= 16 for extent in extents)
+
+
+def small_vla_conversion(plan, options):
+  """Prefer one native gather over a 128-bit-prefix permutation network.
+
+  This policy is limited to automatic, simple, constant conversions that the
+  shared transpose plan keeps outside SME. Its existing selection thresholds
+  include tiny conversions and medium conversions with eight-byte inputs;
+  reuse that decision rather than maintaining another size/dtype table here.
+  The kernel compiler uses sizeless SVE when an ordinary vector length is
+  captured. A wider native gather then avoids many small permutation tiles.
+  Unknown VL retains the conservative existing path; neither SME SVL nor a
+  user-selected cost profile establishes the ordinary vector representation.
+  """
+  environment = options.get("_compiler_environment")
+  if environment is None or environment.codegen_target.architecture != "arm":
+    return False
+  if environment.codegen_target.isa not in {"sve", "sme"}:
+    return False
+  state = environment.vector_state
+  if state is None or state.sve_bytes is None:
+    return False
+  statement = plan.statement
+  if statement.implementation != "auto" or not plan.sme or plan.sme_preferred or len(statement.destination.shape) != 2:
+    return False
+  extents = tuple(I.constant(extent) for extent in statement.destination.shape)
+  if not all(isinstance(extent, int) for extent in extents) or extents[0] * extents[1] <= 0:
+    return False
+  load = next(I.loads_unique(statement.value))
+  if load.data.dtype == plan.dtype == statement.destination.dtype:
+    return False
+  prefix_lanes = min(16 // plan.lane_bytes, 16)
+  return state.sve_bytes // plan.lane_bytes > prefix_lanes
 
 
 def plan_transpose(statement, options=None):
   options = options or {}
+  environment = options.get("_compiler_environment")
+  default = 0 if environment is None else environment.costs.policy("sme_const_half_transpose", 0)
+  if type(default) is not int or default not in (0, 1):
+    raise ValueError("sme_const_half_transpose policy must be 0 or 1")
+  static_half = options.get("cpu_transpose_sme_const_half_output", bool(default))
+  if not isinstance(static_half, bool):
+    raise TypeError("cpu_transpose_sme_const_half_output must be bool")
+  # Disabling output also disables the implicit combined schedule. An explicit
+  # input override remains independent for code-generation diagnostics.
+  static_input = options.get("cpu_transpose_sme_const_half_full_input", static_half and bool(default))
+  if not isinstance(static_input, bool):
+    raise TypeError("cpu_transpose_sme_const_half_full_input must be bool")
   catalog = options["_compiler_environment"].operations if "_compiler_environment" in options else snapshot()
   destination, value = statement.destination, statement.value
   rank = len(destination.shape)
@@ -169,4 +271,66 @@ def plan_transpose(statement, options=None):
     loop_order=order,
     dense_destination=dense,
     lane_bytes=lane_bytes,
+    sme_const_half_output_columns=(
+      constant_half_output_columns(compute, destination, options) if simple and static_half else None
+    ),
+    sme_const_half_full_input_rows=(
+      constant_half_full_input_rows(compute, destination, options) if simple and static_input else None
+    ),
   )
+
+
+def constant_half_output_columns(compute, destination, options):
+  """Prepare a narrow, bounded straight-line output schedule, never an ISA.
+
+  This target policy is limited to the dtype/constant-address family with a
+  measured positive combined result. It does not identify a library or shape.
+  At most sixteen F32 column conversions bound code size and scalar address
+  live ranges; this is a conservative code-budget heuristic, not a latency
+  measurement or a claim that every such case is faster. The original input,
+  masks, typed fringe and alias branch are unchanged. Explicit pass options
+  can independently select the input/output schedules for diagnostics.
+  """
+  environment = options.get("_compiler_environment")
+  if environment is None or environment.codegen_target.architecture != "arm":
+    return None
+  if environment.codegen_target.isa != "sme":
+    return None
+  if compute.type.dtype != "float32" or compute.data.dtype != "float32" or destination.dtype != "float16":
+    return None
+  pitch = I.constant(destination.strides[-2])
+  if type(pitch) is not int or pitch == 0:
+    return None
+  state = environment.vector_state
+  svl = None if state is None else state.sme_bytes
+  if type(svl) is not int or not 16 <= svl <= 256 or svl % 16:
+    return None
+  columns = svl // ELEMENT_BYTES[compute.type.dtype]
+  # A static pointer offset must itself fit the signed C++ index domain;
+  # otherwise keep runtime layout validation and the original leaf. This
+  # also avoids emitting an out-of-range literal for a dead zero-size view.
+  if columns > 16 or not -(2**63 - 1) <= (columns - 1) * pitch <= 2**63 - 1:
+    return None
+  return columns
+
+
+def constant_half_full_input_rows(compute, destination, options):
+  """Prepare named full-input pairs only for the existing narrow family.
+
+  Ordinary VL does not establish the ZA row count. Reuse the captured-SVL,
+  simple same-memory/compute F32 -> constant-pitch F16 legality above, then
+  additionally require a known, nonzero, signed source row pitch. The emitter
+  guards both active extents and the actual streaming row count before any
+  unmasked load. Tails, converting inputs and protected captures keep their
+  existing paths. MAX_STATIC_HALF_INPUT_ROWS is only a code-size/liveness
+  heuristic, not a hardware vector-length limit or measured profit claim.
+  """
+  rows = constant_half_output_columns(compute, destination, options)
+  if rows is None or rows > MAX_STATIC_HALF_INPUT_ROWS:
+    return None
+  pitch = I.constant(compute.data.strides[-1])
+  if type(pitch) is not int or pitch == 0:
+    return None
+  if not -(2**63 - 1) <= (rows - 1) * pitch <= 2**63 - 1:
+    return None
+  return rows

@@ -4,6 +4,8 @@ from dataclasses import replace
 
 from ... import ir as I
 from ...cost import estimate
+from ...dtypes import ELEMENT_BYTES
+from ...ir import vector as V
 from ...passes.manager import PassResult, register_pass
 
 
@@ -83,4 +85,58 @@ def legalize_math(region, context):
     boundaries=(id(op.expression) for op in region.operations if op.opaque),
     words=physical_words,
   )
+  return region
+
+
+@register_pass("cpu-plan-native-word-tails", stage="vector", after="legalize-vector-types")
+def plan_native_word_tails(region, context):
+  """Keep full groups, but avoid grouped SVE predicates in a masked remainder.
+
+  A native compute vector can still widen to multiple memory words. Account
+  for every dtype domain with the already-legalized rebind headroom, instead
+  of special-casing normalization or individual operations. Explicit vector
+  state/iteration contracts retain their own lowering.
+  """
+  if context.options.get("backend") != "cpu":
+    return PassResult(region, changed=False)
+  enabled = context.options.get("cpu_native_word_tails", True)
+  if not isinstance(enabled, bool):
+    raise ValueError("cpu_native_word_tails must be bool")  # noqa: TRY004 - Match existing CPU pass-option validation.
+  region.native_tails = {}
+  target = context.environment.codegen_target
+  if (
+    not enabled
+    or target.architecture != "arm"
+    or target.isa not in {"sve", "sme"}
+    or not region.full_chunks
+    or region.single_chunk
+    or region.iteration_axis is not None
+    or any(isinstance(operation.expression.type, I.VectorType) for operation in region.operations)
+  ):
+    return region
+  # Converting stores may deliberately omit their terminal cast from roots.
+  # Their physical memory dtype still constrains a native masked fragment.
+  memory_bytes = max(
+    (ELEMENT_BYTES[effect.store.destination.dtype] for effect in region.effects if effect.store is not None),
+    default=ELEMENT_BYTES[region.dtype],
+  )
+  store_headroom = max(0, memory_bytes.bit_length() - ELEMENT_BYTES[region.dtype].bit_length())
+  tail_power = -max(region.rebind_headroom, store_headroom)
+  variants = tuple((power, region.base_power, groups) for power, groups in region.groupings.items())
+  if region.base_power > 0:
+    variants += ((None, 0, V.group_vectors(region.unroll, 0, 0)),)
+  for variant, base_power, groups in variants:
+    fragments = []
+    for parent, group in enumerate(groups):
+      depth = group.power - tail_power
+      if depth < 0 or group.repeat != 1:
+        break
+      for part in range(1 << depth):
+        path = tuple(bool(part & (1 << bit)) for bit in reversed(range(depth)))
+        first = (group.first << (base_power - tail_power)) + part
+        fragments.append(V.VectorTailFragment(parent, first, tail_power, path))
+    else:
+      # Single native groups already have no tuple predicate to remove.
+      if any(fragment.path for fragment in fragments):
+        region.native_tails[variant] = tuple(fragments)
   return region

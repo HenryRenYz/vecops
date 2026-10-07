@@ -218,6 +218,21 @@ unmasked. They compose normally with `opt::masked` and inactive-lane options.
   `meta::Dynamic` — the static forms let backends pick address-generation
   idioms without runtime multiplies.
 
+Strided memory dispatch proves that both the last logical lane index and
+the backend's byte scaling fit its signed i32 sequence. A representable
+`nint_t` stride is not sufficient by itself. If this proof fails, SVE promotes
+the access to i64 indices when that widened logical Tag is representable;
+otherwise it uses scalar `nint_t` addresses without truncating the stride. Both
+retain mask, inactive-population and conversion-layout semantics. The i64
+sequence is modular so even inactive offsets cannot cause C++ signed overflow;
+active byte offsets must still fit `nint_t` and refer to valid memory. Callers still
+must provide valid active addresses. Masks, first-count, inactive population
+and conversion policy remain unchanged. For unordered converting memory,
+only address generation is scalarized: the native conversion keeps its
+lane permutation and memory-side mask semantics. The conservative constant
+stride proof uses the architectural maximum vector width, not a physical
+64-byte assumption; only exceptional strides need the current lane count.
+
 **Memory hints** (`mem::`):
 
 - `mem::unaligned` (default) / `mem::aligned` — `aligned` *promises*
@@ -550,6 +565,11 @@ Special behavior worth knowing:
   because lanes may be permuted. When the rebound Tag is not representable,
   only the caller-logical mask type is valid. `opt::first(n)` sidesteps the
   distinction entirely and is the recommended tail interface here.
+  The layout selects the domain, not the mask's C++ representation: SVE
+  single-word masks of different element widths all use `svbool_t`. In an
+  ordered indexed/strided converting store, the implementation must rebind
+  that logical mask before the destination-width scatter; treating it as an
+  already-rebound memory mask can silently leave active addresses unwritten.
 - **Oversized rebinding.** A legal caller Tag is accepted even when the
   memory-side rebind exceeds the backend's representable power-of-two range;
   the request is then recursively partitioned into legal chunks (and may run
@@ -564,6 +584,30 @@ Special behavior worth knowing:
 - The SVE backend has native indexed FP16/BF16↔FP32 widening/narrowing paths;
   masked gathers and scatters keep indices in the caller-logical F32 lane
   domain and do not scalarize.
+- Contiguous ordered SVE FP32→FP16 `mem::packed` stores pack two complete FP32 words into
+  one FP16 word before writing. Both halves keep their original rounding;
+  compaction preserves lower-then-upper logical lane order rather than
+  selecting unordered conversion. Masked calls retain the ordered logical
+  mask domain and never write inactive addresses. Partial-word geometry and
+  non-contiguous addressing and explicit `mem::split` keep their existing lowering.
+- Contiguous ordered SVE FP16→FP32 temporal loads combine each pair of complete
+  FP32 words into one exactly predicated FP16 memory load. Integer unpacking
+  rearranges the raw half bits before FP16-to-FP32 conversion; the first and
+  second logical halves remain ordered, not even/odd unordered lanes. Arbitrary
+  masks and `first` counts never read inactive addresses, and merged inactive
+  values retain their bits. One-word/subword and non-contiguous accesses retain
+  their existing lowering. `mem::split` remains a store-only option, not a
+  converting-load option.
+- Unmasked SVE converting-memory one-word leaves construct validity from
+  their own compute or memory Tag. Complete scalable words use `ptrue` in
+  the **current** ordinary/streaming execution domain; fixed prefixes and
+  scalable subwords keep their original size-based lane-prefix predicates,
+  without introducing extra native-word-length queries. Packed stores
+  and loads use the memory-side `Rebind` Tag, not the compute predicate's
+  physical representation. Explicit masks/`first`, inactive-lane contracts,
+  pointer offsets, rounding and ordered lane placement remain unchanged.
+  This optimization does not substitute ordinary VL for streaming SVL or
+  remove the runtime execution-domain safeguards.
 
 ### Math (`vec/Math.h`)
 
@@ -945,8 +989,34 @@ outside the module (shared option traits live at the end of the public
 
 ## Architecture-specific instruction and state APIs
 
+`vecops/vec/SVE.h` publishes ordinary-SVE single-register segment primitives:
+`join_k_groups`, `broadcast_segment<Index>`, `row_pair<Row>`, and `mmla`.
+They accept only `ScalableTag<T,0>` (not fixed, subword or multiword tags),
+including sizeless and VLS representations. `mmla` selects BFMMLA for
+BF16×BF16→FP32, SMMLA for int8×int8→int32, or UMMLA for
+uint8×uint8→int32 bit views; unsupported signedness/types fail to compile.
+Joining two adjacent 32-bit K groups consumes the existing SME packed ABI,
+not a second packing format. Each MMLA 128-bit segment yields a 2×2 result;
+`row_pair` de-interleaves its two rows into column pairs in the low half.
+`broadcast_segment` requires `Index < VL_bytes/16`, proven by the caller.
+These operations execute outside streaming mode and never acquire SME state.
+The DSL PackedDot leaf additionally requires VL=SVL and capacity of at least
+16B (2×2), 32B (2×4/4×2/4×4), or 64B (2×8/8×2). Narrower/unequal
+domains and incompatible packed windows retain the widening-dot fallback.
+An odd last K group is paired with a zero register, never an out-of-bounds
+second load. Floating accumulation follows MMLA semantics rather than an
+assumed bitwise identity with scalar/reassociated vector reductions.
+
 `vecops/vec/SME.h` publishes `vec::sme` ZA/vector primitives (horizontal and
 vertical load/store/read/write, zero, addha, mopa, and SVL queries).
+`load_hor`/`load_ver` and `store_hor`/`store_ver` transfer a contiguous
+memory slice directly to/from ZA without an intermediate Z register.
+These memory forms take unsigned 8/16/32/64-bit containers; cast a
+same-width floating-point or signed-integer pointer to preserve its bits.
+Slice indices are runtime values, tile indices are compile-time values, and
+the predicate masks the contiguous memory axis (columns for horizontal
+slices, rows for vertical slices). The pointer must be valid only for active
+lanes; establish nonempty slice bounds before forming a tail address.
 `vecops/vec/AMX.h` publishes `vec::amx` tile/configuration/memory/dot primitives.
 Headers may be included portably; using an unavailable instruction is a
 compile-time error. These primitives do not acquire state. Use the lexical
@@ -960,18 +1030,37 @@ memory. GCC intrinsics with register-only inline asm otherwise permit producer
 stores to be deleted/reordered; this emits no hardware fence and does not add
 inter-thread synchronization.
 
-An SME owner must inline its noexcept callback and every helper between
-SMSTART/SMSTOP. Validate/allocate before entry; do not carry vectors or
+An SME owner must inline its noexcept callback and every compute helper.
+Validate/allocate before entry; do not carry vectors or
 predicates across the VL/SVL boundary. Sized SVE Vec types require matching
 fixed VL/SVL guarantees in streaming mode; VLA is the general alternative.
-The existing manual-SME disassembly gate verifies no out-of-line calls remain.
+The instruction wrappers normalize sized Vec/Mask operands to sizeless ACLE
+register types at the inline-assembly boundary. This avoids invalid VLS
+register constraints; it does not change lane counts or make unequal fixed
+VL/SVL safe. The public-header regression covers equal VLS and unequal VLA
+compilation separately from target execution.
+Fixed equal VL/SVL, or positive equal JIT-captured lengths checked by the
+entry adapter, retain the original single no-call owner. Other domains use a
+fixed scalar entry that starts SM before one resolved private compute call.
+That body owns ZA and allocates/restores its scalable frame in SVL; its only
+caller closes SM after return. The private call transfers no Vec/Mask or active
+ZA, is not interposable, and is not a general AAPCS streaming function API.
+Uncaptured VLA uses this bridge even when the machine currently has equal
+lengths. Instrumented or LTO builds are not supported by this manual contract.
+The disassembly gate checks every CFG return, scalar-only outer frames,
+the exact bound internal call and no outlined calls in the compute body.
+Base-SVE Clang predicate tuples use the representation layer's exact LLVM
+extract/insert intrinsics; grouping requires neither SVE2.1 instructions nor
+an outlined higher-ISA helper, and introduces no LLVM runtime dependency.
 For vector math inside such an owner, define
 `VECOPS_SVE_INLINE_MATH_SPECIALS=1` before any vecops header, consistently
 across translation units sharing inline/template definitions. This forces
 the vector-only exp/log/rcp/rsqrt exceptional paths inline without changing
 their accuracy, NaN, saturation or subnormal behavior. Ordinary SVE builds
-leave these cold paths outlined. Generated SME DSL translation units select
-this policy automatically. It does not make scalar libm fallbacks (such as
+leave these cold paths outlined. DSL translation units containing an actual
+SME owner select this policy before their first header. An SME-capable target
+does not by itself change ordinary SVE kernels' cold-path placement. It does
+not make scalar libm fallbacks (such as
 large-argument trigonometry) streaming-safe or replace the disassembly gate.
 Clang versions that accept `+sme-f64f64` but omit the ACLE feature-test macro
 can receive the matching target guarantee `VECOPS_TARGET_SME_F64F64=1`.

@@ -62,7 +62,7 @@ class PrintFrontend:
     if not isinstance(destination, PrintTarget):
       self.error(node, "kernel print file must be T.stdout/T.stderr or None, not a Python file object")
     flush = self.value(kwargs.get("flush", False), node)
-    if flush.type != I.ScalarType("bool"):
+    if not isinstance(flush.type, I.ScalarType) or flush.type.dtype != "bool":
       self.error(node, "print flush must be boolean")
 
     def constant(value):

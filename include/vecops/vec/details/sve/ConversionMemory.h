@@ -4,6 +4,12 @@
 /**
  * @file ConversionMemory.h
  * @brief SVE backend implementations for load_convert and store_convert operations.
+ *
+ * Unmasked one-word leaves specialize the Tag-domain validity predicate.
+ * Complete scalable words use the shared current-domain ptrue predicate;
+ * fixed prefixes and scalable subwords keep their original size-based prefix.
+ * This does not infer ordinary VL from streaming SVL, remove explicit masks,
+ * or change conversion rounding and logical ordered lane mappings.
  */
 
 #if !defined(HAS_SVE)
@@ -17,6 +23,33 @@
 #include "vecops/vec/details/sve/Memory.h"
 
 namespace vecops::vec::details {
+
+/**
+ * The leaf has already established one physical word. Only a complete
+ * scalable word can discard the length query. Keep the old prefix spelling
+ * for fixed/subword Tags: the general valid-word helper also queries native
+ * word size there, which is unnecessary for an already bounded one-word leaf.
+ */
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE svbool_t sve_conversion_word_predicate(Tag tag) {
+  static_assert(num_words(tag) == 1);
+  if constexpr (sve_word_is_always_full<Tag>())
+    return sve_valid_word_predicate<0>(tag);
+  else
+    return sve_prefix_predicate<ElementOf<Tag>>(size(tag));
+}
+
+template <VectorTag Tag>
+inline constexpr bool sve_complete_f32_pair_v = [] {
+  if constexpr (std::same_as<ElementOf<Tag>, float32_t> &&
+                num_words(Tag{}) == 2) {
+    return !is_subword_v<Half<Tag>>;
+  } else {
+    // Half<FixedTag<T, 1>> is not legal; do not instantiate it for a
+    // non-pair request merely to decide that this specialization is absent.
+    return false;
+  }
+}();
 
 template <typename... Options>
 inline constexpr bool sve_has_oversized_contiguous_conversion_lowering_v =
@@ -310,7 +343,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_word_unmasked(
   using To = ElementOf<ToTag>;
   using FromTag = Rebind<From, ToTag>;
   static_assert(num_words(to) == 1 && num_words(FromTag{}) == 1);
-  const auto active = sve_prefix_predicate<To>(size(to));
+  const auto active = sve_conversion_word_predicate(to);
   const auto converted = [&]() VECOPS_INLINE_LAMBDA {
     if constexpr (
         sve_is_integer_element_v<To> && sve_is_integer_element_v<From> &&
@@ -323,8 +356,7 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_word_unmasked(
       return svreinterpret_f32_u32(
           svlsl_n_u32_x(svptrue_b32(), bits, 16));
     } else {
-      const auto memory_active =
-          sve_prefix_predicate<From>(size(FromTag{}));
+      const auto memory_active = sve_conversion_word_predicate(FromTag{});
       const auto loaded = sve_load_memory_word(
           memory_active, pointer, mem::Temporal{});
       return sve_convert_one_word_raw<To, From>(loaded);
@@ -333,7 +365,69 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_word_unmasked(
   return sve_basic_wrap_word<ToTag>(converted);
 }
 
-template <VectorTag ToTag, Element From>
+/**
+ * Widen one contiguous half of a loaded FP16 word without changing lane order.
+ * Integer UNPK only rearranges the half's raw bits: FCVT still converts FP16
+ * to FP32, reading the low halfword of each widened lane. In particular this
+ * is not the even/odd lane mapping of the unordered FCVT/FCVTLT pair.
+ */
+template <bool Upper>
+VECOPS_ALWAYS_INLINE auto sve_widen_ordered_f16_half(
+    svuint16_t packed, svbool_t active) {
+  const auto expanded = [&]() VECOPS_INLINE_LAMBDA {
+    if constexpr (Upper) return svunpkhi_u32(packed);
+    else return svunpklo_u32(packed);
+  }();
+  return svcvt_f32_f16_x(active, svreinterpret_f16_u32(expanded));
+}
+
+/**
+ * Complete FP32 pairs use one precisely predicated FP16 memory word. Partial
+ * fixed prefixes and single/subword Tags keep their existing exact-width
+ * leaf. The logical output mask is converted before touching memory, and
+ * each half's conversion/blend retains its own inactive-lane contract.
+ */
+template <VectorTag ToTag>
+  requires sve_complete_f32_pair_v<ToTag>
+VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_ordered_f16_pair(
+    ToTag to, const float16_t* pointer, Mask<ToTag> mask,
+    Vec<ToTag> inactive) {
+  using FromTag = Rebind<float16_t, ToTag>;
+  using ToHalf = Half<ToTag>;
+  const auto memory_mask = sve_convert_mask(FromTag{}, to, mask);
+  const auto packed = svld1_u16(
+      ::vecops::vec::get_word<0>(FromTag{}, memory_mask),
+      reinterpret_cast<const uint16_t*>(pointer));
+  const auto lower_mask = lower(to, mask);
+  const auto upper_mask = upper(to, mask);
+  const auto lower_value = blend(
+      ToHalf{}, lower(to, inactive), lower_mask,
+      sve_basic_wrap_word<ToHalf>(
+          sve_widen_ordered_f16_half<false>(packed, lower_mask)));
+  const auto upper_value = blend(
+      ToHalf{}, upper(to, inactive), upper_mask,
+      sve_basic_wrap_word<ToHalf>(
+          sve_widen_ordered_f16_half<true>(packed, upper_mask)));
+  return concat(to, lower_value, upper_value);
+}
+
+template <VectorTag ToTag>
+  requires sve_complete_f32_pair_v<ToTag>
+VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_ordered_f16_pair(
+    ToTag to, const float16_t* pointer) {
+  using FromTag = Rebind<float16_t, ToTag>;
+  using ToHalf = Half<ToTag>;
+  const auto packed = svld1_u16(
+      sve_conversion_word_predicate(FromTag{}),
+      reinterpret_cast<const uint16_t*>(pointer));
+  const auto lower_value = sve_basic_wrap_word<ToHalf>(
+      sve_widen_ordered_f16_half<false>(packed, svptrue_b32()));
+  const auto upper_value = sve_basic_wrap_word<ToHalf>(
+      sve_widen_ordered_f16_half<true>(packed, svptrue_b32()));
+  return concat(to, lower_value, upper_value);
+}
+
+template <bool PackF16Pairs = true, VectorTag ToTag, Element From>
 VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_ordered_saturating(
     ToTag to, const From* pointer, Mask<ToTag> mask,
     Vec<ToTag> inactive) {
@@ -346,11 +440,27 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_ordered_saturating(
   }();
   if constexpr (OneWordPair) {
     return sve_load_convert_word(to, pointer, mask, inactive);
+  } else if constexpr (
+      PackF16Pairs && std::same_as<From, float16_t> &&
+      sve_complete_f32_pair_v<ToTag>) {
+    return sve_load_ordered_f16_pair(to, pointer, mask, inactive);
+  } else if constexpr (
+      PackF16Pairs && std::same_as<From, float16_t> &&
+      std::same_as<ElementOf<ToTag>, float32_t> && num_words(to) > 2) {
+    // Keep contiguous logical halves together until they reach a complete
+    // pair; independent word batching would issue two prefix loads again.
+    using ToHalf = Half<ToTag>;
+    const auto lower_value = sve_load_convert_ordered_saturating<PackF16Pairs>(
+        ToHalf{}, pointer, lower(to, mask), lower(to, inactive));
+    const auto upper_value = sve_load_convert_ordered_saturating<PackF16Pairs>(
+        ToHalf{}, pointer + size(ToHalf{}),
+        upper(to, mask), upper(to, inactive));
+    return concat(to, lower_value, upper_value);
   } else if constexpr (is_scalable_tag_v<ToTag> && num_words(to) > 1) {
     using WordTag = ScalableTag<ElementOf<ToTag>, 0>;
     return construct_words<SVEBackend>(
         to, [&]<nint_t Index>(ToTag) VECOPS_INLINE_LAMBDA {
-          return sve_load_convert_ordered_saturating(
+          return sve_load_convert_ordered_saturating<PackF16Pairs>(
               WordTag{}, pointer + Index * size(WordTag{}),
               ::vecops::vec::get_word<Index>(to, mask),
               ::vecops::vec::get_word<Index>(to, inactive));
@@ -359,17 +469,17 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_ordered_saturating(
     // Shape-changing conversion cannot use independent word batching: split
     // both complete Tags so the pointer offset remains a logical lane count.
     using ToHalf = Half<ToTag>;
-    const auto lower_value = sve_load_convert_ordered_saturating(
+    const auto lower_value = sve_load_convert_ordered_saturating<PackF16Pairs>(
         ToHalf{}, pointer,
         lower(to, mask), lower(to, inactive));
-    const auto upper_value = sve_load_convert_ordered_saturating(
+    const auto upper_value = sve_load_convert_ordered_saturating<PackF16Pairs>(
         ToHalf{}, pointer + size(ToHalf{}),
         upper(to, mask), upper(to, inactive));
     return concat(to, lower_value, upper_value);
   }
 }
 
-template <VectorTag ToTag, Element From>
+template <bool PackF16Pairs = true, VectorTag ToTag, Element From>
 VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_ordered_saturating(
     ToTag to, const From* pointer) {
   using FromTag = Rebind<From, ToTag>;
@@ -381,18 +491,31 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> sve_load_convert_ordered_saturating(
   }();
   if constexpr (OneWordPair) {
     return sve_load_convert_word_unmasked(to, pointer);
+  } else if constexpr (
+      PackF16Pairs && std::same_as<From, float16_t> &&
+      sve_complete_f32_pair_v<ToTag>) {
+    return sve_load_ordered_f16_pair(to, pointer);
+  } else if constexpr (
+      PackF16Pairs && std::same_as<From, float16_t> &&
+      std::same_as<ElementOf<ToTag>, float32_t> && num_words(to) > 2) {
+    using ToHalf = Half<ToTag>;
+    const auto lower_value = sve_load_convert_ordered_saturating<PackF16Pairs>(
+        ToHalf{}, pointer);
+    const auto upper_value = sve_load_convert_ordered_saturating<PackF16Pairs>(
+        ToHalf{}, pointer + size(ToHalf{}));
+    return concat(to, lower_value, upper_value);
   } else if constexpr (is_scalable_tag_v<ToTag> && num_words(to) > 1) {
     using WordTag = ScalableTag<ElementOf<ToTag>, 0>;
     return construct_words<SVEBackend>(
         to, [&]<nint_t Index>(ToTag) VECOPS_INLINE_LAMBDA {
-          return sve_load_convert_ordered_saturating(
+          return sve_load_convert_ordered_saturating<PackF16Pairs>(
               WordTag{}, pointer + Index * size(WordTag{}));
         });
   } else {
     using ToHalf = Half<ToTag>;
-    const auto lower_value = sve_load_convert_ordered_saturating(
+    const auto lower_value = sve_load_convert_ordered_saturating<PackF16Pairs>(
         ToHalf{}, pointer);
-    const auto upper_value = sve_load_convert_ordered_saturating(
+    const auto upper_value = sve_load_convert_ordered_saturating<PackF16Pairs>(
         ToHalf{}, pointer + size(ToHalf{}));
     return concat(to, lower_value, upper_value);
   }
@@ -682,7 +805,27 @@ VECOPS_ALWAYS_INLINE auto sve_pack_narrow_integer_x2(
 }
 #endif
 
-template <Element To, VectorTag FromTag>
+/**
+ * Pack two complete FP32 words into one ordered FP16 word.
+ *
+ * FCVT places each converted half in the even halfword lanes. UZP1 compacts
+ * both words in lower-then-upper logical order, without the permutation of
+ * cvt::Unordered. Requiring complete halves prevents a fixed logical prefix
+ * from leaving a physical-word-sized gap between the two halves. The same
+ * FCVT form as the one-word path preserves rounding and exception behavior.
+ */
+template <VectorTag FromTag>
+  requires sve_complete_f32_pair_v<FromTag>
+VECOPS_ALWAYS_INLINE auto sve_pack_ordered_f32_pair_to_f16(
+    FromTag from, Vec<FromTag> value) {
+  const auto lower_value = svcvt_f16_f32_x(
+      svptrue_b32(), sve_basic_raw_word(lower(from, value)));
+  const auto upper_value = svcvt_f16_f32_x(
+      svptrue_b32(), sve_basic_raw_word(upper(from, value)));
+  return svuzp1_f16(lower_value, upper_value);
+}
+
+template <bool PackF16Pairs = true, Element To, VectorTag FromTag>
 VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
     FromTag from, To* pointer, Vec<FromTag> value, Mask<FromTag> mask) {
   using From = ElementOf<FromTag>;
@@ -692,10 +835,10 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
 
   if constexpr (!sve_conversion_tag_representable_v<ToTag>) {
     using FromHalf = Half<FromTag>;
-    sve_store_convert_ordered_saturating(
+    sve_store_convert_ordered_saturating<PackF16Pairs>(
         FromHalf{}, pointer, lower(from, value),
         lower(from, mask));
-    sve_store_convert_ordered_saturating(
+    sve_store_convert_ordered_saturating<PackF16Pairs>(
         FromHalf{}, pointer + size(FromHalf{}),
         upper(from, value), upper(from, mask));
   } else {
@@ -711,6 +854,14 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
   } else
 #endif
   if constexpr (
+      PackF16Pairs && std::same_as<To, float16_t> &&
+      sve_complete_f32_pair_v<FromTag> &&
+      num_words(ToTag{}) == 1) {
+    const auto packed = sve_pack_ordered_f32_pair_to_f16(from, value);
+    const auto memory_mask = sve_convert_mask(ToTag{}, from, mask);
+    sve_store_memory_word(
+        memory_mask, pointer, packed, mem::Temporal{});
+  } else if constexpr (
       std::same_as<From, float32_t> && std::same_as<To, bfloat16_t> &&
       num_words(from) == 2 && num_words(ToTag{}) == 1) {
     // Two F32 words exactly fill one BF16 word. Keeping this as one packed
@@ -737,17 +888,17 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
     }
   } else {
     using FromHalf = Half<FromTag>;
-    sve_store_convert_ordered_saturating(
+    sve_store_convert_ordered_saturating<PackF16Pairs>(
         FromHalf{}, pointer, lower(from, value),
         lower(from, mask));
-    sve_store_convert_ordered_saturating(
+    sve_store_convert_ordered_saturating<PackF16Pairs>(
         FromHalf{}, pointer + size(FromHalf{}),
         upper(from, value), upper(from, mask));
   }
   }
 }
 
-template <Element To, VectorTag FromTag>
+template <bool PackF16Pairs = true, Element To, VectorTag FromTag>
 VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
     FromTag from, To* pointer, Vec<FromTag> value) {
   using From = ElementOf<FromTag>;
@@ -757,9 +908,9 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
 
   if constexpr (!sve_conversion_tag_representable_v<ToTag>) {
     using FromHalf = Half<FromTag>;
-    sve_store_convert_ordered_saturating(
+    sve_store_convert_ordered_saturating<PackF16Pairs>(
         FromHalf{}, pointer, lower(from, value));
-    sve_store_convert_ordered_saturating(
+    sve_store_convert_ordered_saturating<PackF16Pairs>(
         FromHalf{}, pointer + size(FromHalf{}),
         upper(from, value));
   } else {
@@ -769,20 +920,27 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
       sizeof(From) == sizeof(To) * 2 && num_words(from) == 2 &&
       num_words(ToTag{}) == 1) {
     const auto packed = sve_pack_narrow_integer_x2<To>(from, value);
-    const auto active = sve_prefix_predicate<To>(size(ToTag{}));
+    const auto active = sve_conversion_word_predicate(ToTag{});
     sve_store_memory_word(active, pointer, packed, mem::Temporal{});
   } else
 #endif
   if constexpr (
+      PackF16Pairs && std::same_as<To, float16_t> &&
+      sve_complete_f32_pair_v<FromTag> &&
+      num_words(ToTag{}) == 1) {
+    const auto packed = sve_pack_ordered_f32_pair_to_f16(from, value);
+    const auto active = sve_conversion_word_predicate(ToTag{});
+    sve_store_memory_word(active, pointer, packed, mem::Temporal{});
+  } else if constexpr (
       std::same_as<From, float32_t> && std::same_as<To, bfloat16_t> &&
       num_words(from) == 2 && num_words(ToTag{}) == 1) {
     const auto packed = sve_f32_pair_to_bf16(
         sve_basic_raw_word(lower(from, value)),
         sve_basic_raw_word(upper(from, value)));
-    const auto active = sve_prefix_predicate<To>(size(ToTag{}));
+    const auto active = sve_conversion_word_predicate(ToTag{});
     sve_store_memory_word(active, pointer, packed, mem::Temporal{});
   } else if constexpr (num_words(from) == 1 && num_words(ToTag{}) == 1) {
-    const auto active = sve_prefix_predicate<From>(size(from));
+    const auto active = sve_conversion_word_predicate(from);
     if constexpr (
         sve_is_integer_element_v<From> && sve_is_integer_element_v<To> &&
         sizeof(From) > sizeof(To)) {
@@ -790,16 +948,15 @@ VECOPS_ALWAYS_INLINE void sve_store_convert_ordered_saturating(
     } else {
       const auto converted = sve_convert_one_word_raw<To, From>(
           sve_basic_raw_word(value));
-      const auto memory_active =
-          sve_prefix_predicate<To>(size(ToTag{}));
+      const auto memory_active = sve_conversion_word_predicate(ToTag{});
       sve_store_memory_word(
           memory_active, pointer, converted, mem::Temporal{});
     }
   } else {
     using FromHalf = Half<FromTag>;
-    sve_store_convert_ordered_saturating(
+    sve_store_convert_ordered_saturating<PackF16Pairs>(
         FromHalf{}, pointer, lower(from, value));
-    sve_store_convert_ordered_saturating(
+    sve_store_convert_ordered_saturating<PackF16Pairs>(
         FromHalf{}, pointer + size(FromHalf{}),
         upper(from, value));
   }
@@ -1021,7 +1178,8 @@ struct NativeImpl<SVEBackend, LoadConvertOp, ToTag> {
       LoadConvertOp, ToTag to, const From* pointer,
       cvt::Ordered, cvt::Saturate, Alignment alignment,
       Temporality temporality) {
-    return sve_load_convert_ordered_saturating(to, pointer);
+    return sve_load_convert_ordered_saturating<
+        std::same_as<Temporality, mem::Temporal>>(to, pointer);
   }
 
   template <Element From, typename Alignment, typename Temporality>
@@ -1032,7 +1190,9 @@ struct NativeImpl<SVEBackend, LoadConvertOp, ToTag> {
       Mask<ToTag> mask, Vec<ToTag> inactive,
       cvt::Ordered, cvt::Saturate, Alignment alignment,
       Temporality temporality) {
-    return sve_load_convert_ordered_saturating(to, pointer, mask, inactive);
+    return sve_load_convert_ordered_saturating<
+        std::same_as<Temporality, mem::Temporal>>(
+        to, pointer, mask, inactive);
   }
 };
 
@@ -1150,7 +1310,8 @@ struct NativeImpl<SVEBackend, StoreConvertOp, FromTag> {
       StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
       cvt::Ordered, cvt::Saturate, Alignment alignment,
       Temporality temporality, Packing packing) {
-    sve_store_convert_ordered_saturating(from, pointer, value);
+    sve_store_convert_ordered_saturating<std::same_as<Packing, mem::Packed>>(
+        from, pointer, value);
   }
 
   template <Element To, typename Alignment, typename Temporality,
@@ -1164,7 +1325,8 @@ struct NativeImpl<SVEBackend, StoreConvertOp, FromTag> {
       StoreConvertOp, FromTag from, To* pointer, Vec<FromTag> value,
       Mask<FromTag> mask, cvt::Ordered, cvt::Saturate,
       Alignment alignment, Temporality temporality, Packing packing) {
-    sve_store_convert_ordered_saturating(from, pointer, value, mask);
+    sve_store_convert_ordered_saturating<std::same_as<Packing, mem::Packed>>(
+        from, pointer, value, mask);
   }
 };
 

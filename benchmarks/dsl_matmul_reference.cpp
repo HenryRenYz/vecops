@@ -3,6 +3,7 @@
 #include "vecops/ops/Matmul.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/execution/ExecutionSession.h"
+#include "dsl_matmul_atom.h"
 
 template<class Compute, class Tensor>
 auto benchmark_input(const Tensor& tensor) {
@@ -42,9 +43,7 @@ void __kernel__(vecops::tensor::TensorLike auto A,vecops::tensor::TensorLike aut
                 std::int64_t repeat) {
   using TA=vecops::spec::NativeA;
   using TB=vecops::spec::NativeB;
-  using Atom=std::conditional_t<std::same_as<TA,vecops::bfloat16_t>,vecops::matmul::AMX_BF16F32,
-    vecops::matmul::AMX_I8I32<std::conditional_t<std::same_as<TA,vecops::bfloat16_t>,std::int8_t,TA>,
-                           std::conditional_t<std::same_as<TB,vecops::bfloat16_t>,std::int8_t,TB>>>;
+  using Atom=BenchmarkAtom<TA,TB>;
   using Acc=typename Atom::TAcc;
   auto a=benchmark_input<TA>(A);
   auto b=benchmark_input<TB>(vecops::tensor::transpose<0,1>(B));

@@ -54,6 +54,10 @@
  *   a merge population is provided; inactive stores leave memory unchanged.
  * - Alignment and temporality are hints and may be ignored by a backend while
  *   preserving the conversion and memory semantics.
+ * - A strided native i32 sequence is used only when its last lane and native
+ *   byte scaling fit. Larger valid strides use i64 indexed SVE access when
+ *   the widened Tag is legal, or scalar nint_t addresses otherwise,
+ *   preserving inactive accesses and conversion/population options.
  */
 namespace vecops::vec {
 

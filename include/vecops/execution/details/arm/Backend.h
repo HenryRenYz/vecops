@@ -28,6 +28,11 @@ namespace vecops::execution::details {
  * `vec::sme::with_streaming_za` (a lexical region), rather than
  * relying on compiler-generated streaming functions. A nested region whose
  * requirements are already active compiles to a plain callback invocation.
+ * If captured/fixed VL and SVL are not proven equal, the owner enters SM in
+ * a fixed scalar frame before its resolved private compute call; only that
+ * body owns ZA and its scalable frame uses SVL throughout. This is not an
+ * unrestricted streaming-callee ABI. Capture scalar/pointer/metadata only;
+ * callback Vec/Mask values must be constructed and consumed inside the region.
  */
 template <>
 struct Backend<platform::AArch64Target> {

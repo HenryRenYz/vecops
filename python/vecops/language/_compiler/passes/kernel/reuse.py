@@ -2,9 +2,34 @@
 
 from ... import ir as I
 from ...cost import estimate
-from ...ir.traversal import children, values, walk
+from ...ir.traversal import children, values, walk_unique
 from ...operations import Trait
 from ..manager import register_pass
+
+
+def _unconditionally_evaluated_reductions(expression, catalog):
+  """Walk reductions without crossing a scalar short-circuit boundary.
+
+  Vector selects evaluate their operands in the same lane traversal and are
+  safe *inside* a reduction input. Scalar selects/logical operations can
+  leave their operand reductions unexecuted, so do not plan caches for those
+  reductions. Track guard state separately for DAG nodes shared by both
+  unconditional and conditional paths.
+  """
+  seen = set()
+
+  def visit(value, guarded=False):
+    key = (id(value), guarded)
+    if key in seen:
+      return
+    seen.add(key)
+    if not guarded and catalog.has(value, Trait.SCALAR_REDUCTION):
+      yield value
+    conditional = isinstance(value.type, I.ScalarType) and catalog.has(value, Trait.CONDITIONAL)
+    for index, argument in enumerate(value.args):
+      yield from visit(argument, guarded or conditional and index > 0)
+
+  yield from visit(expression)
 
 
 @register_pass("plan-computation-reuse", after=("expression-cse",))
@@ -22,20 +47,16 @@ def plan_computation_reuse(ir, context):
         else ()
       )
       for binding in bindings:
-        if any(catalog.has(e, Trait.CONDITIONAL) for e in walk(binding.value)):
-          continue
-        future = {id(e) for value in values(I.Block(block.statements[index + 1 :])) for e in walk(value)}
-        for reduction in walk(binding.value):
-          if not catalog.has(reduction, Trait.SCALAR_REDUCTION):
-            continue
+        future = {id(e) for value in values(I.Block(block.statements[index + 1 :])) for e in walk_unique(value)}
+        for reduction in _unconditionally_evaluated_reductions(binding.value, catalog):
           source = reduction.args[0]
           if (
             id(source) not in future
-            or any(catalog.has(e, Trait.STATE_REFERENCE) for e in walk(source))
+            or any(catalog.has(e, Trait.STATE_REFERENCE) for e in walk_unique(source))
             or source.type.dtype not in {"float32", "float64"}
             or estimate(source, costs, boundaries=ir.materializations).compute_cycles
             < costs.policy("reuse_compute_budget", 6)
-            or any(catalog.has(e, Trait.UNSTABLE_EXTENT) for extent in source.type.shape for e in walk(extent))
+            or any(catalog.has(e, Trait.UNSTABLE_EXTENT) for extent in source.type.shape for e in walk_unique(extent))
           ):
             continue
           if id(source) not in ir.materializations:

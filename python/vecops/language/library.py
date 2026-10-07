@@ -7,7 +7,7 @@ compiler may cache reused expensive expressions instead of recomputing them.
 
 from . import dsl as T
 from ._library.attention import scaled_dot_product_attention
-from ._library.math import masked_softmax, rmsnorm, silu, stable_sigmoid
+from ._library.math import masked_softmax, rmsnorm, silu, softmax_exp_neg, softmax_inverse, stable_sigmoid
 
 __all__ = [
   "layernorm",
@@ -30,33 +30,42 @@ def layernorm(x, *, eps=1e-5, variance="centered", unroll=2):
   else:
     T.static_assert(len(x.shape) == 1)
     count = x.shape[0]
+    # One explicit reciprocal shared by both statistics. This is part of the
+    # visible DSL algorithm, not a backend reassociation of arbitrary strict
+    # divisions; centered variance keeps its independent second sweep.
+    inv_count = T.cast(1, x.dtype) / count
     if variance == "moments":
       total = T.reduce_add(x, unroll=unroll)
       total_squared = T.reduce_add(x * x, unroll=unroll)
-      mean = total / count
+      mean = total * inv_count
       centered = x - mean
-      var = T.max(total_squared / count - mean * mean, T.cast(0, x.dtype))
+      var = T.max(total_squared * inv_count - mean * mean, T.cast(0, x.dtype))
     else:
       T.static_assert(variance == "centered")
-      mean = T.reduce_add(x, unroll=unroll) / count
+      mean = T.reduce_add(x, unroll=unroll) * inv_count
       centered = x - mean
-      var = T.reduce_add(centered * centered, unroll=unroll) / count
+      var = T.reduce_add(centered * centered, unroll=unroll) * inv_count
     inv_std = T.rsqrt(var + T.cast(eps, x.dtype))
     result = centered * inv_std
   return result
 
 
 @T.func
-def softmax(x, *, unroll=2):
+def softmax(x, *, unroll=2, accuracy="strict"):
+  """Normalize the final axis using the requested exponential accuracy.
+
+  Strict normalization uses dtype-typed ``1 / sum`` (IEEE division).
+  Fast/Estimate keep the corresponding native reciprocal accuracy tier.
+  """
   x = T.as_value(x)
   if len(x.shape) == 2:
-    result = T._normalize(x, kind="softmax", unroll=unroll)
+    result = T._normalize(x, kind="softmax", unroll=unroll, accuracy=accuracy)
   else:
     T.static_assert(len(x.shape) == 1)
     maximum = T.reduce_max(x, unroll=unroll)
-    exponent = T.exp_neg(x - maximum)
+    exponent = softmax_exp_neg(x - maximum, accuracy=accuracy)
     denominator = T.reduce_add(exponent, unroll=unroll)
-    inverse = T.rcp(denominator)
+    inverse = softmax_inverse(denominator, accuracy=accuracy)
     result = exponent * inverse
   return result
 

@@ -13,6 +13,11 @@ def scalar(expression, environment):
     return expression
   if expression.op == "literal":
     return expression.data
+  if expression.op == "streaming_lanes":
+    state = environment.get("__debug_vector_state")
+    if state is None or state.sme_bytes is None:
+      raise ValueError("streaming vector length is not known for this compilation")
+    return state.sme_bytes // itemsize(expression.data)
   if expression.op == "lanes":
     dtype, power = expression.data
     target = environment.get("__debug_cpu_target")

@@ -6,6 +6,8 @@ unused alternatives are not reported as emitted regions; identifier binding
 for scratch buffers does not re-run lowering or optimization.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field, fields, replace
 from types import MappingProxyType
 
@@ -52,6 +54,8 @@ class PreparedKernel:
   states: object = field(default_factory=dict)
   state_regions: object = field(default_factory=dict)
   primitives: object = field(default_factory=dict)
+  register_layouts: object = field(default_factory=dict)
+  register_layout_decisions: object = field(default_factory=dict)
   pass_trace: list = field(default_factory=list)
 
   def store(self, statement):
@@ -134,8 +138,8 @@ def prepare(vectors, *, memory_manager=None):
         snapshots[id(value)] = lower_stores(
           (I.Store(destination, value),), opaque=vectors.kernel.materializations, manager=manager
         )
-    for field in fields(value):
-      visit(getattr(value, field.name))
+    for descriptor in fields(value):
+      visit(getattr(value, descriptor.name))
 
   visit(vectors.kernel.body)
   visit(tuple(vectors.kernel.bindings.values()))

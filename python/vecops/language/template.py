@@ -46,6 +46,51 @@ def _tensor_leaves(tensor: TensorType):
     yield tensor.dtype
 
 
+@dataclass(frozen=True)
+class _CaptureAlias:
+  """An additional source-constexpr name for an existing captured value.
+
+  Keep the original value reference rather than copying/rebinding its symbol:
+  annotations, shared dimension constraints and delayed batch captures must
+  continue to refer to the same original object.
+  """
+
+  name: str
+  value: Const | DType
+
+  def canonical(self):
+    return ("source-capture-alias", self.name, self.value.canonical())
+
+
+def _bind_annotation_symbols(annotations: Mapping[str, Any], captures: list[Any]) -> None:
+  """Give anonymous annotation leaves stable names before schema/IR capture.
+
+  TensorType-only factories need not keep dimension/dtype variables in the
+  decorator's Python frame. Traverse parameters in signature order, preserving
+  object aliases, and reserve explicit capture names. Never use object IDs in
+  the names or cache identity: equivalent fresh factories must share artifacts.
+  Literal Const leaves remain literals rather than extra specialization args.
+  """
+  leaves = [
+    leaf
+    for annotation in annotations.values()
+    if isinstance(annotation, TensorType)
+    for leaf in _tensor_leaves(annotation)
+  ]
+  reserved = {leaf.name for leaf in (*leaves, *captures) if getattr(leaf, "name", None)}
+  for index, leaf in enumerate(leaves):
+    if not isinstance(leaf, (Dynamic, DType)) or leaf.name is not None:
+      continue
+    kind = "dynamic" if isinstance(leaf, Dynamic) else "dtype"
+    stem = f"__dsl_{kind}_{index}"
+    name, suffix = stem, 0
+    while name in reserved:
+      suffix += 1
+      name = f"{stem}_{suffix}"
+    leaf.bind_name(name)
+    reserved.add(name)
+
+
 def _evaluate_annotations(function: Callable[..., Any], local_scope: Mapping[str, Any]) -> dict[str, Any]:
   result = {}
   namespace = dict(function.__globals__)
@@ -160,7 +205,11 @@ def template(
   recipe_id: str | None = None,
   dependencies=(),
 ):
-  """Capture a kernel without executing it: C++ source or source-parsed DSL."""
+  """Capture a kernel without executing it: C++ source or source-parsed DSL.
+
+  Explicit body references to aliased Const/DType values export every referenced
+  name to source kernels, without renaming the shared annotation symbol.
+  """
   caller = inspect.currentframe().f_back
   local_scope = dict(caller.f_locals) if caller is not None else {}
 
@@ -171,6 +220,7 @@ def template(
     signature = inspect.signature(target)
     captures: list[Any] = []
     seen: set[int] = set()
+    aliases: set[tuple[int, str]] = set()
 
     def add(value: Any) -> None:
       if isinstance(value, IntExpr):
@@ -192,6 +242,23 @@ def template(
         seen.add(identity)
         captures.append(value)
 
+    def add_named(value: Any, name: str) -> None:
+      _bind_names(value, name)
+      add(value)
+      if source is None:
+        return  # DSL body capture already retains its Python name environment.
+      if isinstance(value, tuple):
+        for index, item in enumerate(value):
+          add_named(item, f"{name}_{index}")
+      elif isinstance(value, dict):
+        for key, item in value.items():
+          add_named(item, str(key))
+      elif isinstance(value, (Const, DType)) and value.name != name:
+        identity = (id(value), name)
+        if identity not in aliases:
+          aliases.add(identity)
+          captures.append(_CaptureAlias(name, value))
+
     for parameter in signature.parameters.values():
       annotation = annotations.get(parameter.name, parameter.annotation)
       if isinstance(annotation, TensorType):
@@ -202,11 +269,11 @@ def template(
     for name in target.__code__.co_freevars:
       if name in closure.nonlocals:
         value = closure.nonlocals[name]
-        _bind_names(value, name)
-        add(value)
+        add_named(value, name)
     for name, value in closure.globals.items():
-      _bind_names(value, name)
-      add(value)
+      add_named(value, name)
+
+    _bind_annotation_symbols(annotations, captures)
 
     resolved = _resolve_source(target, source, source_root)
     if resolved is not None and not resolved.is_file():

@@ -6,6 +6,55 @@ NEGATIVE_INFINITY = float("-inf")
 
 
 @T.func
+def softmax_inverse(denominator, accuracy="strict"):
+  """Softmax's scalar normalization factor in the accumulation dtype.
+
+  Strict uses ordinary IEEE division of a dtype-typed one. Fast/Estimate
+  retain the native reciprocal tier; explicit ``T.rcp`` is unaffected.
+  """
+  denominator = T.as_value(denominator)
+  if accuracy == "strict":
+    result = T.cast(1, denominator.dtype) / denominator
+  else:
+    result = T.rcp(denominator, accuracy=accuracy)
+  return result
+
+
+@T.func
+def softmax_exp_neg(x, accuracy="strict"):
+  """Softmax's FP32 Estimate exponential without the slow FEXPA tail.
+
+  Match ops/details/softmax/Exp.h: approximate exp(x / 128) on
+  [-0.625, 0] with a degree-nine polynomial, square seven times, and
+  flush centered scores below -80 to zero. NaNs survive clamping.
+  Strict/Fast and non-FP32 values retain the native exp_neg operation.
+  """
+  x = T.as_value(x)
+  if x.dtype == "float32" and accuracy == "estimate":
+    zero = T.cast(0, x.dtype)
+    one = T.cast(1, x.dtype)
+    limit = T.cast(-80, x.dtype)
+    clamped = T.where(x != x, x, T.max(x, limit))  # noqa: PLR0124 -- preserve NaNs across backend min/max policies
+    reduced = clamped * T.cast(1.0 / 128.0, x.dtype)
+    result = T.cast(1.0 / 362880.0, x.dtype)
+    result = T.fma(result, reduced, T.cast(1.0 / 40320.0, x.dtype))
+    result = T.fma(result, reduced, T.cast(1.0 / 5040.0, x.dtype))
+    result = T.fma(result, reduced, T.cast(1.0 / 720.0, x.dtype))
+    result = T.fma(result, reduced, T.cast(1.0 / 120.0, x.dtype))
+    result = T.fma(result, reduced, T.cast(1.0 / 24.0, x.dtype))
+    result = T.fma(result, reduced, T.cast(1.0 / 6.0, x.dtype))
+    result = T.fma(result, reduced, T.cast(0.5, x.dtype))
+    result = T.fma(result, reduced, one)
+    result = T.fma(result, reduced, one)
+    for i in T.unroll(7):
+      result = result * result
+    result = T.where(x < limit, zero, result)
+  else:
+    result = T.exp_neg(x, accuracy=accuracy)
+  return result
+
+
+@T.func
 def stable_sigmoid(x, *, accuracy="fast", algorithm="exp"):
   """Clamped sigmoid with the FP32 evaluation schedule of AF3 StableMath.
 
@@ -86,7 +135,7 @@ def masked_softmax(x, mask=None, *, axis=-1, accuracy="fast", unroll=2):
   safe_maximum = T.where(maximum == negative_infinity, T.cast(0, x.dtype), maximum)
   if len(x.shape) > 1:
     safe_maximum = T.expand_dims(safe_maximum, axis)
-  probability = T.where(valid, T.exp_neg(scores - safe_maximum, accuracy=accuracy), T.cast(0, x.dtype))
+  probability = T.where(valid, softmax_exp_neg(scores - safe_maximum, accuracy=accuracy), T.cast(0, x.dtype))
   total = T.reduce_add(probability, axis=axis, unroll=unroll)
   safe_total = T.where(total > 0, total, T.cast(1, x.dtype))
   if len(x.shape) > 1:

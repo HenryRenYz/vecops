@@ -40,6 +40,18 @@ class TensorType:
   optional: bool = False
   access: str = "input"
 
+  def __hash__(self):
+    """Support typing unions without hashing mutable symbolic metadata.
+
+    Older supported Python versions require hashable Optional/Union members.
+    Symbol names (and delayed captured values) can change after decoration,
+    so a structural hash would invalidate typing's caches. A stable class
+    hash preserves the existing descriptor equality contract; the few tensor
+    descriptors in an annotation union can safely share this hash bucket.
+    Artifact identity is still derived from TemplateIR's canonical metadata.
+    """
+    return hash(type(self))
+
   def __or__(self, other):
     if other is None or other is type(None):
       return replace(self, optional=True)

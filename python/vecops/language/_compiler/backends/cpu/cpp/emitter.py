@@ -18,7 +18,7 @@ from .memory import MemoryEmitter
 from .primitives import PrimitivesEmitter
 from .printing import PrintEmitter
 from .state import StateEmitter
-from .support import _PREAMBLE
+from .support import _PREAMBLE, _SME_MATH_POLICY
 from .transpose import TransposeEmitter
 from .vectors import VectorsEmitter
 
@@ -51,12 +51,18 @@ class CPUEmitter(
     self.allocated = set()
     self.tag_dtypes = {}
     self.fixed_tag_lanes = {}
+    self.state_tag_origins = {}
     self.active_loads = {}
     self.snapshots = {}
     self.storage_views = {}
+    # Only ABI tensor descriptors are immutable for the invocation. Scratch
+    # Buffer addresses can change on resize and must never enter these maps.
+    self.parameter_metadata = {}
+    self.parameter_pointers = {}
     self.materialized = {}
     self.reduction_materialized = {}
     self.hardware_scope = None
+    self.uses_streaming_math_policy = False
     self.buffer_declarations = {}
     self.parallel_depth = 0
     self.verified_grid = None
@@ -75,6 +81,12 @@ class CPUEmitter(
     self.expression_lifetimes[id(value)] = value
     return value
 
+  def vector_size(self, tag):
+    """Constant captured lanes without binding Vec to a fixed-width type."""
+    streaming = self.hardware_scope is not None and self.hardware_scope[0] == "sme"
+    domain = ", true" if streaming else ""
+    return f"vecops_dsl::vector_size<{tag}{domain}>({tag}{{}})"
+
   def allocate_buffer(self, dtype, name, count):
     # Invocation-local scratch reuse across serial loops, never process/global
     # state. Each textual allocation site has its own independently sized slot.
@@ -91,6 +103,19 @@ class CPUEmitter(
   def opening(self, text):
     self.line(text + " {")
     self.indent += 1
+
+  def opening_hardware_owner(self, kind, session, callback):
+    """Own architectural state and select its translation-unit call policy.
+
+    ISA availability alone does not imply execution in streaming mode. Only
+    an emitted SME owner requires vector-only exceptional helpers inline.
+    Select the policy before any includes, including optional debug headers.
+    """
+    if kind == "sme":
+      self.uses_streaming_math_policy = True
+    self.opening(
+      f"{session}.with_resources(vecops::execution::{kind}::Region{{}}, {callback} VECOPS_INLINE_LAMBDA_NOEXCEPT"
+    )
 
   def close(self):
     self.indent -= 1
@@ -121,6 +146,23 @@ class CPUEmitter(
     elif self.uses_executor or self.traces_memory:
       parameters.insert(0, "const VecopsExecutionContext* dsl_grid_context")
     self.opening(f"void __kernel__({', '.join(parameters)})")
+    snapshot_parameters = self.vector_ir.manager.options.get("cpu_parameter_metadata_snapshot", True)
+    if not isinstance(snapshot_parameters, bool):
+      raise TypeError("cpu_parameter_metadata_snapshot must be bool")
+    if snapshot_parameters:
+      self.line("/* invocation-invariant ABI tensor metadata, not tensor contents */")
+      for name, annotation in self.ir.parameters.items():
+        if not isinstance(annotation, TensorType):
+          continue
+        pointer = self.unique(f"parameter_{name}_data")
+        self.line(f"[[maybe_unused]] const auto {pointer} = {name}.data();")
+        self.parameter_pointers[name] = pointer
+        for operation in ("size", "stride"):
+          for axis in range(len(annotation.shape)):
+            expression = f"{name}.{operation}({axis})"
+            local = self.unique(f"parameter_{name}_{operation}_{axis}")
+            self.line(f"[[maybe_unused]] const auto {local} = {expression};")
+            self.parameter_metadata[expression] = local
     if self.traces_memory:
       self.line(
         "const auto* dsl_allocation_observer = dsl_workspace.allocation_observer();"
@@ -150,7 +192,7 @@ class CPUEmitter(
     for cached in self.ir.materializations.values():
       dtype = CPP_TYPES[cached.dtype]
       count = ", ".join(self.scalar(v) for v in cached.shape)
-      lanes = f"vecops::vec::size(vecops::vec::ScalableTag<{dtype}, 0>{{}})"
+      lanes = self.vector_size(f"vecops::vec::ScalableTag<{dtype}, 0>")
       self.line(f"const bool {cached.storage}_enabled = vecops_dsl::checked_shape({{{count}}}) >= 4 * {lanes};")
       self.line(f"vecops_dsl::Buffer<{dtype}> {cached.storage};")
     insertion = len(self.lines)
@@ -164,7 +206,7 @@ class CPUEmitter(
         re.sub(r"(vecops_dsl::Buffer<[^;]+> )(\w+);", r'\1\2(dsl_allocation_observer,"\2");', line)
         for line in self.lines
       ]
-    headers = '#include "vecops/execution/Atomic.h"\n'
+    headers = (_SME_MATH_POLICY if self.uses_streaming_math_policy else "") + '#include "vecops/execution/Atomic.h"\n'
     if self.traces_memory:
       headers = "#define VECOPS_DSL_MEMORY_TRACE 1\n" + headers
     if any(isinstance(n, I.Print) for n in nodes(self.ir.body)) and self.vector_ir.manager.options.get(

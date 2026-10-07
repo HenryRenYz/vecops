@@ -5,6 +5,7 @@ import math
 from .. import ir as I
 from ..dtypes import ELEMENT_BYTES
 from ..ir import vector as V
+from ..ir.traversal import walk_unique
 from ..operations import Trait, snapshot
 from ..passes.manager import PassManager
 
@@ -150,13 +151,12 @@ def lower_kernel(ir, *, manager=None):
     result.regions.append(region)
 
   def expressions(value):
-    if (
-      manager.options["_compiler_environment"].operations.has(value, Trait.SCALAR_REDUCTION)
-      and id(value) not in result.plans
-    ):
-      remember(id(value), lower_reduction((value,), manager=manager))
-    for argument in value.args:
-      expressions(argument)
+    for expression in walk_unique(value):
+      if (
+        manager.options["_compiler_environment"].operations.has(expression, Trait.SCALAR_REDUCTION)
+        and id(expression) not in result.plans
+      ):
+        remember(id(expression), lower_reduction((expression,), manager=manager))
 
   def block(body):
     for statement in body.statements:

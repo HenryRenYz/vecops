@@ -499,36 +499,34 @@ auto make_scenario_output(
   } else if constexpr (Pipeline == OutputPipeline::PerColumnScale) {
     static_assert(std::is_floating_point_v<Acc>);
     auto transform = tensor::make_lane_local_vec_transform<Acc, Acc>(
-        [scales = parameters.column_scales](
-            auto tag, auto value,
-            const auto& context) VECOPS_KERNEL_LAMBDA {
-          const auto coordinate = context.lane_coord(0);
-          const nint_t column = coordinate[coordinate.size() - 1];
-          return vec::mul(tag, value, vec::load(tag, scales + column));
-        });
+      [scales = parameters.column_scales](auto tag, auto value, const auto& context) VECOPS_KERNEL_LAMBDA {
+        const auto coordinate = context.lane_coord(0);
+        const nint_t column = coordinate[coordinate.size() - 1];
+        // Col-GEMV and transpose/swap stores can vary original rows rather
+        // than columns. The column parameter is invariant along that axis.
+        const auto scale = context.vector_axis == static_cast<int>(coordinate.size()) - 1
+                             ? vec::load(tag, scales + column)
+                             : vec::fill(tag, scales[column]);
+        return vec::mul(tag, value, scale);
+      });
     return tensor::output<Acc>(tensor, transform);
-  } else if constexpr (
-      Pipeline == OutputPipeline::BiasPerColumnDequantize ||
-      Pipeline == OutputPipeline::BiasPerColumnRequantizeU8) {
+  } else if constexpr (Pipeline == OutputPipeline::BiasPerColumnDequantize ||
+                       Pipeline == OutputPipeline::BiasPerColumnRequantizeU8) {
     static_assert(std::same_as<Acc, int32_t>);
-    auto transform = tensor::make_lane_local_vec_transform<
-        float32_t, float32_t>(
-        [scales = parameters.quant_column_scales,
-         zero_point = parameters.output_zero_point](
-            auto tag, auto value,
-            const auto& context) VECOPS_KERNEL_LAMBDA {
-          const auto coordinate = context.lane_coord(0);
-          const nint_t column = coordinate[coordinate.size() - 1];
-          auto result = vec::mul(
-              tag, value, vec::load(tag, scales + column));
-          if constexpr (
-              Pipeline == OutputPipeline::BiasPerColumnRequantizeU8) {
-            result = vec::add(
-                tag, result,
-                vec::fill(tag, static_cast<float32_t>(*zero_point)));
-          }
-          return result;
-        });
+    auto transform = tensor::make_lane_local_vec_transform<float32_t, float32_t>(
+      [scales = parameters.quant_column_scales,
+       zero_point = parameters.output_zero_point](auto tag, auto value, const auto& context) VECOPS_KERNEL_LAMBDA {
+        const auto coordinate = context.lane_coord(0);
+        const nint_t column = coordinate[coordinate.size() - 1];
+        const auto scale = context.vector_axis == static_cast<int>(coordinate.size()) - 1
+                             ? vec::load(tag, scales + column)
+                             : vec::fill(tag, scales[column]);
+        auto result = vec::mul(tag, value, scale);
+        if constexpr (Pipeline == OutputPipeline::BiasPerColumnRequantizeU8) {
+          result = vec::add(tag, result, vec::fill(tag, static_cast<float32_t>(*zero_point)));
+        }
+        return result;
+      });
     return tensor::output<Acc>(tensor, transform);
   } else if constexpr (
       Pipeline == OutputPipeline::RuntimePerRowColumnDequantize) {

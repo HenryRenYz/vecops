@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
+from dsl_test_utils import make_compiler
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.ir.iteration import FoldLoop, AxisResult
 from vecops.language._compiler.ir.traversal import nodes
@@ -14,8 +15,8 @@ from vecops.language._compiler.ir.traversal import nodes
 @pytest.fixture(scope="module")
 def compiler(tmp_path_factory):
   root = tmp_path_factory.mktemp("dsl-iteration")
-  return vecops.Compiler(
-    target="Native", cc="gcc", cxx="g++", jobs=4, build_dir=root / "build", cache_dir=root / "cache"
+  return make_compiler(
+    target="Native", jobs=4, build_dir=root / "build", cache_dir=root / "cache"
   )
 
 

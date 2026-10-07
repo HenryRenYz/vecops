@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
+from dsl_test_utils import cpp_compile_command, make_compiler
 
 
 @T.template
@@ -34,9 +35,7 @@ def test_lower_inspection_and_print_options(capsys):
 
 
 def test_native_print_and_debug(tmp_path, capfd):
-  compiler = vecops.Compiler(
-    cc="gcc",
-    cxx="g++",
+  compiler = make_compiler(
     target="AVX512",
     output="quiet",
     jobs=4,
@@ -94,9 +93,7 @@ def scratch_kernel(A: T.Tensor((31,), dtype=T.float32), C: T.Tensor((31,), dtype
 
 
 def test_memory_lifetimes_and_interpreter(tmp_path):
-  compiler = vecops.Compiler(
-    cc="gcc",
-    cxx="g++",
+  compiler = make_compiler(
     target="AVX512",
     output="quiet",
     jobs=4,
@@ -123,9 +120,7 @@ def test_multithreaded_print_records(tmp_path, capfd):
         T.print(f"worker={worker},step={step}", flush=True)
       C[worker] = float(worker)
 
-  compiler = vecops.Compiler(
-    cc="gcc", cxx="g++", output="quiet", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"
-  )
+  compiler = make_compiler(output="quiet", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
   compiled = T.compile(kernel, compiler=compiler, out_idx=-1)
   output = np.empty(8, dtype=np.float32)
   compiled(output)
@@ -155,16 +150,16 @@ def test_fixed_buffer_formatting_has_no_heap_allocations(tmp_path):
   root = Path(__file__).resolve().parents[2]
   executable = tmp_path / "print_reference"
   subprocess.run(
-    [
-      "g++",
-      "-std=c++20",
-      "-O3",
-      "-I",
-      str(root / "include"),
-      str(Path(__file__).with_name("print_reference.cpp")),
-      "-o",
-      str(executable),
-    ],
+    cpp_compile_command(
+      Path(__file__).with_name("print_reference.cpp"),
+      executable,
+      flags=[
+        "-std=c++20",
+        "-O3",
+        "-I",
+        str(root / "include"),
+      ],
+    ),
     check=True,
   )
   result = subprocess.run([str(executable)], capture_output=True, check=True)
@@ -185,9 +180,7 @@ def test_print_utf8_masks_and_float16(tmp_path, capfd):
 
   compiled = T.compile(
     kernel,
-    compiler=vecops.Compiler(
-      cc="gcc", cxx="g++", output="quiet", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"
-    ),
+    compiler=make_compiler(output="quiet", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"),
   )
   compiled(np.arange(4, dtype=np.float16))
   assert capfd.readouterr().out == "中文中[cut]中文中[cut]bool[False, False, True, True]|float16[0, 1, 2, 3]\n\n"
@@ -250,16 +243,20 @@ def test_deterministic_ir_and_failed_pass_report():
     assert first.get_ir(stage) == second.get_ir(stage)
 
 
-def test_torch_bridge_inherits_quiet_output_and_build_observer(tmp_path, capfd):
+def test_torch_bridge_inherits_quiet_output_and_build_observer(tmp_path, capfd, monkeypatch):
   import torch
+
+  # Earlier Torch tests may have populated the process-wide bridge cache with
+  # the same schema-shaped DSO. Keep this observer assertion about a cold
+  # build deterministic instead of requiring a "Torch bridges" event on a
+  # legitimate cache hit.
+  monkeypatch.setenv("VECOPS_TORCH_BRIDGE_DIR", str(tmp_path / "torch-bridges"))
 
   @T.template
   def kernel(A: T.Tensor((4,), dtype=T.float32), C: T.Tensor((4,), dtype=T.float32)):
     T.store(C, T.load(A) + 2)
 
-  compiler = vecops.Compiler(
-    cc="gcc",
-    cxx="g++",
+  compiler = make_compiler(
     target="AVX512",
     output="quiet",
     jobs=4,

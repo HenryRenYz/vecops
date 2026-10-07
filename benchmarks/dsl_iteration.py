@@ -76,7 +76,10 @@ def main():
   parser.add_argument("--kind", type=int, nargs="+", default=[0, 1, 2], choices=[0, 1, 2])
   parser.add_argument("--repeat", type=int, default=2000)
   parser.add_argument("--rounds", type=int, default=9)
-  parser.add_argument("--cpu", type=int, default=2)
+  parser.add_argument("--cpu", type=int, default=min(os.sched_getaffinity(0)))
+  parser.add_argument("--target", default=os.environ.get("VECOPS_TEST_TARGET", "Native"))
+  parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+  parser.add_argument("--cxx", default=os.environ.get("CXX", "g++"))
   parser.add_argument("--output", type=Path)
   parser.add_argument("--build-dir", type=Path, default=ROOT / "build-dsl-iteration")
   args = parser.parse_args()
@@ -86,7 +89,8 @@ def main():
   isolate_compilation(args.cpu)
   build_affinity = os.sched_getaffinity(0)
   compiler = vecops.Compiler(
-    target="Native", cc="gcc", cxx="g++", jobs=6, build_dir=args.build_dir / "build", cache_dir=args.build_dir / "cache"
+    target=args.target, cc=args.cc, cxx=args.cxx, jobs=6,
+    build_dir=args.build_dir / "build", cache_dir=args.build_dir / "cache"
   )
   cases = []
   with vecops.collect_compile_requests() as collector:

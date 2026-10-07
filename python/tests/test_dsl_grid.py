@@ -4,15 +4,14 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
+from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 
 
 @pytest.fixture(scope="module")
 def compiler(tmp_path_factory):
   directory = tmp_path_factory.mktemp("dsl-grid")
-  return vecops.Compiler(
-    target="Native", cc="gcc", cxx="g++", jobs=4, cache_dir=directory / "cache", build_dir=directory / "build"
-  )
+  return make_compiler(target="Native", jobs=4, cache_dir=directory / "cache", build_dir=directory / "build")
 
 
 @pytest.mark.parametrize("schedule", ["static", "dynamic"])
@@ -339,7 +338,11 @@ def test_batched_dot_keeps_packing_and_hardware_state_private(compiler, monkeypa
   b = rng.integers(-3, 4, size=(N, K)).astype(storage_dtype).T
   c = rng.integers(-3, 4, size=(Batch, M, N)).astype(np.float32)
   expected = np.maximum(a.astype(np.float32) @ b.astype(np.float32) + c, 0)
-  T.compile(kernel, compiler=compiler)(a, b, c)
+  compiled = T.compile(kernel, compiler=compiler)
+  assert_no_vec_mask_arrays(compiled.generated_source)
+  compiled(a, b, c)
+  # Grid-local matmul packing must not place target register vectors in arrays.
+  # This kernel is executed with multiple workers on both x86 and ARM targets.
   np.testing.assert_allclose(c, expected, rtol=2e-5, atol=2e-5)
 
 

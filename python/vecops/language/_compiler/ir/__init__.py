@@ -30,6 +30,7 @@ from .kernel import (
   constant,
   literal,
   loads,
+  loads_unique,
   same_expr,
   shaped_type,
 )

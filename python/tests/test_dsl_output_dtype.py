@@ -3,15 +3,14 @@
 import pytest
 import vecops
 import vecops.language as T
+from dsl_test_utils import make_compiler
 
 
 @pytest.mark.parametrize("strides", [None, (41, 1)])
 def test_automatic_bfloat16_output_from_string_annotation(tmp_path, strides):
   torch = pytest.importorskip("torch")
-  compiler = vecops.Compiler(
+  compiler = make_compiler(
     target="AVX512",
-    cc="gcc",
-    cxx="g++",
     jobs=2,
     output="quiet",
     build_dir=tmp_path / "build",
@@ -47,10 +46,8 @@ def test_torch_unsigned_dtype_through_complete_bridge(tmp_path, name):
   dtype = getattr(torch, name, None)
   if dtype is None:
     pytest.skip(f"Torch does not expose {name}")
-  compiler = vecops.Compiler(
+  compiler = make_compiler(
     target="AVX512",
-    cc="gcc",
-    cxx="g++",
     jobs=2,
     output="quiet",
     build_dir=tmp_path / "build",
@@ -83,10 +80,8 @@ def test_torch_unsigned_dtype_through_complete_bridge(tmp_path, name):
 def test_numpy_bfloat16_extension_automatic_output(tmp_path):
   np = pytest.importorskip("numpy")
   ml_dtypes = pytest.importorskip("ml_dtypes")
-  compiler = vecops.Compiler(
+  compiler = make_compiler(
     target="AVX512",
-    cc="gcc",
-    cxx="g++",
     jobs=2,
     output="quiet",
     build_dir=tmp_path / "build",

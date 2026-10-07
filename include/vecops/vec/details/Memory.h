@@ -30,17 +30,127 @@ namespace vecops::vec::details {
  * widened index Tag. Scalarize only that access, without instantiating the
  * impossible Vec<Rebind<int32_t, Tag>> (including in dead template code).
  */
-template <VectorTag Tag>
+template <VectorTag Tag, Element IndexElement = int32_t>
 consteval bool strided_indices_supported() {
 #if defined(CPU_CAPABILITY_SVE) && !defined(HAS_FIXED_SVE_BITS)
   if constexpr (is_fixed_tag_v<Tag>) {
-    return fixed_lanes_v<Tag> * sizeof(int32_t) <= 16;
+    return fixed_lanes_v<Tag> * sizeof(IndexElement) <= 16;
   } else {
-    return scale_power_v<Rebind<int32_t, Tag>> <= VEC_MAX_POW;
+    return scale_power_v<Rebind<IndexElement, Tag>> <= VEC_MAX_POW;
   }
 #else
   return true;
 #endif
+}
+
+/** Architectural upper bound, not the currently selected VL or SVL.
+ * Both SVE execution domains obey MAX_VEC_WIDTH. A constant ordinary stride
+ * can therefore eliminate the range guard even when size(tag) must use a
+ * volatile CNTB to distinguish unequal normal/streaming lengths.
+ */
+template <VectorTag Tag>
+consteval nint_t strided_index_lane_upper_bound() {
+  if constexpr (is_fixed_tag_v<Tag>) {
+    return fixed_lanes_v<Tag>;
+  } else if constexpr (scale_power_v<Tag> >= 0) {
+    return (MAX_VEC_WIDTH / 8 / sizeof(ElementOf<Tag>)) << scale_power_v<Tag>;
+  } else {
+    return (MAX_VEC_WIDTH / 8 / sizeof(ElementOf<Tag>)) >> (-scale_power_v<Tag>);
+  }
+}
+
+/** Whether the native i32 linear index sequence can describe this request.
+ * Check the last logical lane, not just its step. SVE's indexed-memory
+ * implementation also scales the indices in i32 before forming addresses.
+ * Divide the limits rather than multiplying user-provided strides, so the
+ * proof itself cannot overflow. An unsafe request uses legal i64 SVE indices
+ * or the scalar boundary below, retaining inactive-lane semantics.
+ */
+template <typename MemoryElement, typename Request>
+VECOPS_ALWAYS_INLINE bool strided_indices_fit(
+    typename Request::TagType tag, const Request& request) {
+  using Tag = typename Request::TagType;
+  static_assert(Request::addressing_kind == Addressing::Strided);
+  constexpr nint_t scale = std::same_as<CurrentBackend, SVEBackend>
+      ? (Request::index_scale == 0
+          ? static_cast<nint_t>(sizeof(MemoryElement))
+          : static_cast<nint_t>(Request::index_scale))
+      : nint_t{1};
+  static_assert(scale > 0);
+  constexpr nint_t last_upper = std::max<nint_t>(
+      strided_index_lane_upper_bound<Tag>() - 1, 1);
+  constexpr nint_t safe_lower = std::numeric_limits<int32_t>::min() / scale / last_upper;
+  constexpr nint_t safe_upper = std::numeric_limits<int32_t>::max() / scale / last_upper;
+  if (request.stride >= safe_lower && request.stride <= safe_upper)
+    return true;
+  const nint_t last = std::max<nint_t>(size(tag) - 1, 1);
+  const nint_t lower = std::numeric_limits<int32_t>::min() / scale / last;
+  const nint_t upper = std::numeric_limits<int32_t>::max() / scale / last;
+  return request.stride >= lower && request.stride <= upper;
+}
+
+/** Readdress a borrowed request without changing its mask/population domain.
+ * The index vector remains caller-owned and must outlive the synchronous
+ * access. All conversion, packing and execution-resource policies survive.
+ */
+template <typename IndexedRequest, typename Request, VectorValue Indices>
+VECOPS_ALWAYS_INLINE IndexedRequest copy_indexed_request_fields(
+    const Request& source, const Indices& indices) {
+  IndexedRequest result;
+  result.indices = &indices;
+  if constexpr (Request::active_kind == Active::First)
+    result.first_count = source.first_count;
+  else if constexpr (Request::active_kind == Active::Masked)
+    result.mask = source.mask;
+  if constexpr (requires { result.merge_vector = source.merge_vector; })
+    result.merge_vector = source.merge_vector;
+  else if constexpr (requires { result.merge_scalar = source.merge_scalar; })
+    result.merge_scalar = source.merge_scalar;
+  return result;
+}
+
+template <typename Request, VectorValue Indices>
+VECOPS_ALWAYS_INLINE auto reindex_request(
+    const Request& source, const Indices& indices) {
+  using Tag = typename Request::TagType;
+  constexpr Active A = Request::active_kind;
+  using Alignment = typename Request::AlignmentOption;
+  using Temporality = typename Request::TemporalityOption;
+  using Resources = typename Request::ActiveResources;
+  constexpr int Scale = Request::index_scale;
+  if constexpr (requires { typename Request::FromElement; }) {
+    using Result = LoadConvertRequest<Tag, typename Request::FromElement, A,
+        Addressing::Indexed, Request::populate_kind, Alignment, Temporality,
+        Scale, Indices, typename Request::LayoutOption,
+        typename Request::ValuePolicyOption, typename Request::MaskVectorType,
+        Resources>;
+    return copy_indexed_request_fields<Result>(source, indices);
+  } else if constexpr (requires { typename Request::ToElement; }) {
+    using Result = StoreConvertRequest<Tag, typename Request::ToElement, A,
+        Addressing::Indexed, Alignment, Temporality, Scale, Indices,
+        typename Request::LayoutOption, typename Request::ValuePolicyOption,
+        typename Request::PackingOption, typename Request::MaskVectorType,
+        Resources>;
+    return copy_indexed_request_fields<Result>(source, indices);
+  } else if constexpr (requires { Request::populate_kind; }) {
+    using Result = LoadRequest<Tag, A, Addressing::Indexed,
+        Request::populate_kind, Alignment, Temporality, Scale, Indices,
+        Resources>;
+    return copy_indexed_request_fields<Result>(source, indices);
+  } else {
+    using Result = StoreRequest<Tag, A, Addressing::Indexed, Alignment,
+        Temporality, Scale, Indices, Resources>;
+    return copy_indexed_request_fields<Result>(source, indices);
+  }
+}
+
+template <VectorTag Tag>
+VECOPS_ALWAYS_INLINE Vec<Rebind<int64_t, Tag>> make_wide_strided_indices(
+    Tag, nint_t stride) {
+  // Public integer iota is modular, including each physical-word start.
+  // Inactive huge offsets cannot trigger C++ signed overflow while forming
+  // the sequence. Valid active byte offsets remain the caller's contract.
+  return iota(Rebind<int64_t, Tag>{}, int64_t{0}, int64_t{stride});
 }
 
 template <typename Request, VectorTag Tag>
@@ -504,6 +614,17 @@ execute_load_request(LoadOp op, typename Request::TagType tag, const ElementOf<t
                  scalarize_indexed_memory_v<CurrentBackend, typename Request::ActiveResources>)) {
     return execute_scalar_load_request(tag, pointer, request);
   } else {
+    if constexpr (Addr == Addressing::Strided) {
+      if (!strided_indices_fit<ElementOf<Tag>>(tag, request)) [[unlikely]] {
+        if constexpr (std::same_as<CurrentBackend, SVEBackend> &&
+                      strided_indices_supported<Tag, int64_t>()) {
+          const auto indices = make_wide_strided_indices(tag, request.stride);
+          return execute_load_request(op, tag, pointer, reindex_request(request, indices));
+        } else {
+          return execute_scalar_load_request(tag, pointer, request);
+        }
+      }
+    }
     if constexpr (std::same_as<Alignment, mem::Aligned>) {
       VECOPS_ASSERT(reinterpret_cast<std::uintptr_t>(pointer) % static_cast<std::uintptr_t>(memory_alignment(tag)) == 0,
                     "load pointer is not aligned to %zd bytes", memory_alignment(tag));
@@ -583,6 +704,18 @@ VECOPS_ALWAYS_INLINE void execute_store_request(StoreOp op, typename Request::Ta
                  scalarize_indexed_memory_v<CurrentBackend, typename Request::ActiveResources>)) {
     execute_scalar_store_request(tag, pointer, value, request);
   } else {
+    if constexpr (Addr == Addressing::Strided) {
+      if (!strided_indices_fit<ElementOf<Tag>>(tag, request)) [[unlikely]] {
+        if constexpr (std::same_as<CurrentBackend, SVEBackend> &&
+                      strided_indices_supported<Tag, int64_t>()) {
+          const auto indices = make_wide_strided_indices(tag, request.stride);
+          execute_store_request(op, tag, pointer, value, reindex_request(request, indices));
+        } else {
+          execute_scalar_store_request(tag, pointer, value, request);
+        }
+        return;
+      }
+    }
     if constexpr (std::same_as<Alignment, mem::Aligned>) {
       VECOPS_ASSERT(reinterpret_cast<std::uintptr_t>(pointer) % static_cast<std::uintptr_t>(memory_alignment(tag)) == 0,
                     "store pointer is not aligned to %zd bytes", memory_alignment(tag));

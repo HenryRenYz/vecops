@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
+from dsl_test_utils import make_compiler
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.ir import vector as V
 from vecops.language._compiler.lowering.tile_to_vector import lower_region
@@ -11,8 +12,8 @@ from vecops.language._compiler.lowering.tile_to_vector import lower_region
 @pytest.fixture(scope="module")
 def compiler(tmp_path_factory):
   root = tmp_path_factory.mktemp("dsl-passes")
-  return vecops.Compiler(target="Native", cc="gcc", cxx="g++", jobs=4,
-                         build_dir=root / "build", cache_dir=root / "cache")
+  return make_compiler(target="Native", jobs=4,
+                       build_dir=root / "build", cache_dir=root / "cache")
 
 
 def test_pass_registry_snapshot_order_and_analyses():
@@ -59,7 +60,15 @@ def test_registered_builtin_stages_and_operation_major_vector_ir():
   assert [op.expression.op for op in region.operations] == ["load", "mul", "add"]
   assert [(c.operation, c.iteration) for c in region.copies] == [(op, i) for op in range(3) for i in range(7)]
   assert [(g.count, g.power) for g in region.groupings[2]] == [(4, 2), (2, 1), (1, 0)]
-  assert region.pass_trace == ["cpu-plan-full-chunks", "cpu-choose-vector-chunk", "unroll-vector-operations", "coalesce-vector-groups", "legalize-vector-types", "cpu-legalize-math"]
+  assert region.pass_trace == [
+    "cpu-plan-full-chunks",
+    "cpu-choose-vector-chunk",
+    "unroll-vector-operations",
+    "coalesce-vector-groups",
+    "legalize-vector-types",
+    "cpu-legalize-math",
+    "cpu-plan-native-word-tails",
+  ]
   assert all(isinstance(op.type, I.VectorType) for op in region.operations)
 
 

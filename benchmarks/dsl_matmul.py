@@ -19,14 +19,18 @@ import numpy as np
 import torch
 import vecops
 import vecops.language as T
+from dsl_benchmark_utils import add_toolchain_arguments, default_cpu, is_arm, packing_geometry
 from dsl_timing import isolate_compilation, reserve_cpu
 from dsl_transpose import aligned_empty, measure, numpy_dtype
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def catalog(integer=False):
-  values = {"tile": 16, "k_step": 64 if integer else 32}
+def catalog(integer=False, dtype=None):
+  dtype = dtype or ("int8" if integer else "bfloat16")
+  format_, panel, k_step = packing_geometry(dtype)
+  tile = panel // 2 if format_ == "sme" else panel
+  values = {"tile": tile, "k_step": k_step}
 
   def evaluate(source):
     tree = ast.parse(source.strip(), mode="eval").body
@@ -68,16 +72,20 @@ PIPELINES = {
   "affine_input": (0, 0, 2),
 }
 
+KIND_TYPES = {
+  "fp32": ("float32", "float32", "float32", "float32", "float32"),
+  "fp16": ("float16", "float16", "float16", "float16", "float32"),
+  "fp64": ("float64", "float64", "float64", "float64", "float64"),
+  "bf16": ("bfloat16", "bfloat16", "bfloat16", "bfloat16", "float32"),
+  "convert": ("float32", "float32", "bfloat16", "bfloat16", "float32"),
+  "i8": ("int8", "int8", "int8", "int8", "int32"),
+  "mixed": ("uint8", "int8", "uint8", "int8", "int32"),
+}
+
 
 def kernels(compiler, m, n, k, mode, kind, pipeline, level, pass_options=None, b_layout="col"):
   M, N, K = (m, n, k) if mode == "Const" else (T.dynamic(lower=0) for _ in range(3))
-  ad, bd, na, nb, acc = {
-    "fp32": ("float32", "float32", "float32", "float32", "float32"),
-    "bf16": ("bfloat16", "bfloat16", "bfloat16", "bfloat16", "float32"),
-    "convert": ("float32", "float32", "bfloat16", "bfloat16", "float32"),
-    "i8": ("int8", "int8", "int8", "int8", "int32"),
-    "mixed": ("uint8", "int8", "uint8", "int8", "int32"),
-  }[kind]
+  ad, bd, na, nb, acc = KIND_TYPES[kind]
   prologue, epilogue, input_scale = PIPELINES[pipeline]
   out = acc if epilogue == 0 else "float32"
   DM = 1 if prologue == 2 else M
@@ -120,7 +128,7 @@ def kernels(compiler, m, n, k, mode, kind, pipeline, level, pass_options=None, b
   Prologue, Epilogue, InputScale = T.Const(prologue), T.Const(epilogue), T.Const(input_scale)
   RowB = T.Const(b_layout == "row")
 
-  reference = "dsl_matmul_vector_reference.cpp" if kind == "fp32" else "dsl_matmul_reference.cpp"
+  reference = "dsl_matmul_vector_reference.cpp" if kind == "fp32" and not is_arm() else "dsl_matmul_reference.cpp"
 
   @T.template(source=ROOT / "benchmarks" / reference)
   def cpp(
@@ -154,27 +162,42 @@ def main():
     "--baseline-manifest", type=Path, help="Time saved baseline sources alongside current DSL and C++"
   )
   parser.add_argument("--shape", nargs="+")
-  parser.add_argument("--kind", nargs="+", default=["bf16"], choices=["fp32", "bf16", "convert", "i8", "mixed"])
+  parser.add_argument("--kind", nargs="+", default=["bf16"], choices=tuple(KIND_TYPES))
   parser.add_argument("--b-layout", choices=["row", "col"], default="col")
   parser.add_argument("--pipeline", nargs="+", default=["plain"], choices=tuple(PIPELINES))
-  parser.add_argument("--mode", nargs="+", default=["Const", "Dynamic"])
-  parser.add_argument("--level", nargs="+", default=["dot", "matmul"])
+  parser.add_argument("--mode", nargs="+", default=["Const", "Dynamic"], choices=["Const", "Dynamic"])
+  parser.add_argument("--level", nargs="+", default=["dot", "matmul"], choices=["dot", "matmul"])
   parser.add_argument("--rounds", type=int, default=9)
   parser.add_argument("--jobs", type=int, default=4)
-  parser.add_argument("--cc", default="gcc")
-  parser.add_argument("--cxx", default="g++")
-  parser.add_argument("--cpu", type=int, default=2)
+  add_toolchain_arguments(parser)
+  parser.add_argument("--cpu", type=int, default=default_cpu())
   parser.add_argument("--max-flops", type=int, default=300_000_000, help="Skip huge cases; set 0 for the full catalog")
   parser.add_argument("--fusion", choices=["auto", "always", "never"], default="auto")
   parser.add_argument("--schedule-pipeline", choices=["auto", "off", "prefetch", "staged"], default="auto")
   parser.add_argument("--gemv-columns", type=int, default=4, choices=range(1, 9))
   args = parser.parse_args()
+  catalogs = {kind: catalog(dtype=KIND_TYPES[kind][2]) for kind in args.kind}
+  known_shapes = {f"{m}x{n}x{k}" for entries in catalogs.values() for _, _, m, n, k in entries}
+  unknown_shapes = set(args.shape or ()) - known_shapes
+  if unknown_shapes:
+    parser.error(f"shapes absent from the selected dtype catalogs: {', '.join(sorted(unknown_shapes))}")
+  catalogs = {
+    kind: tuple(
+      entry
+      for entry in entries
+      if (not args.shape or f"{entry[2]}x{entry[3]}x{entry[4]}" in args.shape)
+      and (not args.max_flops or 2 * entry[2] * entry[3] * entry[4] <= args.max_flops)
+    )
+    for kind, entries in catalogs.items()
+  }
+  if not any(catalogs.values()):
+    parser.error("no matching benchmark cases; check filters or use --max-flops 0 for the full catalog")
   isolate_compilation(args.cpu)
   args.build_dir.mkdir(parents=True, exist_ok=True)
   torch.set_num_threads(1)
   torch.set_num_interop_threads(1)
   compiler = vecops.Compiler(
-    target="Native",
+    target=args.target,
     cc=args.cc,
     cxx=args.cxx,
     jobs=args.jobs,
@@ -187,9 +210,7 @@ def main():
   kernel_cache = {}
   with vecops.collect_compile_requests() as collector:
     for kind in args.kind:
-      for group, name, m, n, k in catalog(kind in {"i8", "mixed"}):
-        if args.shape and f"{m}x{n}x{k}" not in args.shape or args.max_flops and 2 * m * n * k > args.max_flops:
-          continue
+      for group, name, m, n, k in catalogs[kind]:
         for mode in args.mode:
           for pipeline in args.pipeline:
             for level in args.level:
@@ -284,7 +305,7 @@ def main():
       np.testing.assert_allclose(c, reference, rtol=5e-3, atol=3e-4)
     ds()
     np.testing.assert_allclose(c, reference, rtol=5e-3, atol=3e-4)
-    x, y = a.astype(np.float32), b.astype(np.float32)
+    x, y = a.astype(numpy_dtype(acc)), b.astype(numpy_dtype(acc))
     if pipeline == "affine_input":
       x, y = x * 2 + 1, y * 2 + 1
     expected = x.astype(numpy_dtype(na)).astype(numpy_dtype(acc)) @ y.astype(numpy_dtype(nb)).astype(numpy_dtype(acc))

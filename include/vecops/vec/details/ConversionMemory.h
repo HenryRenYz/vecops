@@ -290,8 +290,12 @@ struct GenericImpl<Backend, StoreConvertOp, FromTag> {
     const auto converted = execute(
         ConvertOp{}, ToTag{}, from, value, layout, value_policy);
     const auto memory_mask = [&]() VECOPS_INLINE_LAMBDA {
-      if constexpr (std::same_as<
-                        std::remove_cvref_t<MaskValueType>, Mask<ToTag>>)
+      // The layout determines the mask domain. Different logical Tags can
+      // have the same representation (e.g. every single-word SVE mask is
+      // svbool_t), so representation equality cannot identify a memory mask.
+      // Ordered receives caller-logical lanes; unordered receives memory
+      // lanes, matching the public converting-memory contract.
+      if constexpr (std::same_as<Layout, cvt::Unordered>)
         return mask;
       else
         return convert(ToTag{}, from, mask);
@@ -675,6 +679,108 @@ VECOPS_ALWAYS_INLINE void execute_scalar_store_convert_request(
   }
 }
 
+/** Preserve an unordered conversion's native lane permutation when a strided
+ * memory access cannot use its i32 address sequence. This boundary is entered
+ * only for a representable memory-side Tag: scalarize the addresses, not the
+ * conversion. Ordered conversion retains the cheaper lane-preserving path.
+ */
+template <typename Request>
+VECOPS_ALWAYS_INLINE Vec<typename Request::TagType>
+execute_wide_stride_load_convert_request(
+    typename Request::TagType to,
+    const typename Request::FromElement* pointer,
+    const Request& request) {
+  using ToTag = typename Request::TagType;
+  using From = typename Request::FromElement;
+  using FromTag = Rebind<From, ToTag>;
+  using Layout = typename Request::LayoutOption;
+  using ValuePolicy = typename Request::ValuePolicyOption;
+  if constexpr (!std::same_as<Layout, cvt::Unordered>) {
+    return execute_scalar_load_convert_request(to, pointer, request);
+  } else {
+    const auto loaded = [&]() VECOPS_INLINE_LAMBDA -> Vec<FromTag> {
+      if constexpr (std::same_as<CurrentBackend, SVEBackend> &&
+                    strided_indices_supported<ToTag, int64_t>()) {
+        const auto indices = make_wide_strided_indices(to, request.stride);
+        using MemoryRequest = LoadRequest<FromTag, Request::active_kind,
+            Addressing::Indexed, Populate::Zero,
+            typename Request::AlignmentOption,
+            typename Request::TemporalityOption, Request::index_scale,
+            Vec<Rebind<int64_t, FromTag>>, typename Request::ActiveResources>;
+        const auto access = copy_indexed_request_fields<MemoryRequest>(request, indices);
+        return load(FromTag{}, pointer, access);
+      } else {
+        auto result = zeros(FromTag{});
+        for (nint_t lane = 0; lane < size(to); ++lane) {
+          if (!request_lane_active(FromTag{}, request, lane)) continue;
+          From scalar;
+          const From* address = request_memory_address(to, pointer, request, lane);
+          std::memcpy(&scalar, address, sizeof(From));
+          result = set(FromTag{}, result, lane, scalar);
+        }
+        return result;
+      }
+    }();
+    const auto converted = convert(to, FromTag{}, loaded, Layout{}, ValuePolicy{});
+    if constexpr (Request::populate_kind == Populate::Zero ||
+                  Request::active_kind == Active::Unmasked) {
+      return converted;
+    } else {
+      const auto memory_mask = [&]() VECOPS_INLINE_LAMBDA {
+        if constexpr (Request::active_kind == Active::First)
+          return mwhilelt(FromTag{}, 0, request.first_count);
+        else
+          return *request.mask;
+      }();
+      // Match the resolved-request population contract used by the native
+      // converting-memory path; the population itself lives in output lanes.
+      const auto output_mask = convert(to, FromTag{}, memory_mask);
+      if constexpr (Request::populate_kind == Populate::MergeVector)
+        return blend(to, *request.merge_vector, output_mask, converted);
+      else
+        return blend(to, fill(to, request.merge_scalar), output_mask, converted);
+    }
+  }
+}
+
+/** Store counterpart of execute_wide_stride_load_convert_request. Masking
+ * for unordered conversion is in memory-side lanes after the permutation.
+ */
+template <typename Request>
+VECOPS_ALWAYS_INLINE void execute_wide_stride_store_convert_request(
+    typename Request::TagType from,
+    typename Request::ToElement* pointer,
+    Vec<typename Request::TagType> value,
+    const Request& request) {
+  using FromTag = typename Request::TagType;
+  using To = typename Request::ToElement;
+  using ToTag = Rebind<To, FromTag>;
+  using Layout = typename Request::LayoutOption;
+  using ValuePolicy = typename Request::ValuePolicyOption;
+  if constexpr (!std::same_as<Layout, cvt::Unordered>) {
+    execute_scalar_store_convert_request(from, pointer, value, request);
+  } else {
+    const auto converted = convert(ToTag{}, from, value, Layout{}, ValuePolicy{});
+    if constexpr (std::same_as<CurrentBackend, SVEBackend> &&
+                  strided_indices_supported<FromTag, int64_t>()) {
+      const auto indices = make_wide_strided_indices(from, request.stride);
+      using MemoryRequest = StoreRequest<ToTag, Request::active_kind,
+          Addressing::Indexed, typename Request::AlignmentOption,
+          typename Request::TemporalityOption, Request::index_scale,
+          Vec<Rebind<int64_t, ToTag>>, typename Request::ActiveResources>;
+      const auto access = copy_indexed_request_fields<MemoryRequest>(request, indices);
+      store(ToTag{}, pointer, converted, access);
+    } else {
+      for (nint_t lane = 0; lane < size(from); ++lane) {
+        if (!request_lane_active(ToTag{}, request, lane)) continue;
+        const To scalar = get(ToTag{}, converted, lane);
+        To* address = request_memory_address(from, pointer, request, lane);
+        std::memcpy(address, &scalar, sizeof(To));
+      }
+    }
+  }
+}
+
 /**
  * Executes a converting load from a resolved LoadConvertRequest. The emitted
  * operations match the equivalent option-pack call exactly: addressing rides
@@ -703,6 +809,17 @@ execute_load_convert_request(
                  scalarize_indexed_memory_v<CurrentBackend, typename Request::ActiveResources>)) {
     return execute_scalar_load_convert_request(to, pointer, request);
   } else {
+    if constexpr (Addr == Addressing::Strided) {
+      if (!strided_indices_fit<From>(to, request)) [[unlikely]] {
+        if constexpr (!Unordered && std::same_as<CurrentBackend, SVEBackend> &&
+                      strided_indices_supported<ToTag, int64_t>()) {
+          const auto indices = make_wide_strided_indices(to, request.stride);
+          return load_convert(to, pointer, reindex_request(request, indices));
+        } else {
+          return execute_wide_stride_load_convert_request(to, pointer, request);
+        }
+      }
+    }
     // Addressing rides in the alignment slot (see LoadConvertRequest); only
     // its construction differs between indexed, strided, and contiguous.
     auto dispatch = [&](auto access) VECOPS_INLINE_LAMBDA -> Vec<ToTag> {
@@ -789,6 +906,18 @@ VECOPS_ALWAYS_INLINE void execute_store_convert_request(StoreConvertOp op, typen
                  scalarize_indexed_memory_v<CurrentBackend, typename Request::ActiveResources>)) {
     execute_scalar_store_convert_request(from, pointer, value, request);
   } else {
+    if constexpr (Addr == Addressing::Strided) {
+      if (!strided_indices_fit<To>(from, request)) [[unlikely]] {
+        if constexpr (!Unordered && std::same_as<CurrentBackend, SVEBackend> &&
+                      strided_indices_supported<FromTag, int64_t>()) {
+          const auto indices = make_wide_strided_indices(from, request.stride);
+          store_convert(from, pointer, value, reindex_request(request, indices));
+        } else {
+          execute_wide_stride_store_convert_request(from, pointer, value, request);
+        }
+        return;
+      }
+    }
     auto dispatch = [&](auto access) VECOPS_INLINE_LAMBDA {
       if constexpr (A == Active::Unmasked) {
         execute(op, from, pointer, value, Layout{}, ValuePolicy{}, access, Temporality{}, Packing{});

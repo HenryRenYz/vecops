@@ -1,6 +1,7 @@
 include_guard(GLOBAL)
 include(GNUInstallDirs)
 include("${CMAKE_CURRENT_LIST_DIR}/VecopsTargetArch.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/VecopsSMEMatmulLeaves.cmake")
 
 # Add one loadable Vecops kernel module.  This deliberately contains only
 # target construction policy: schema generation, manifests, caching, and
@@ -37,7 +38,8 @@ function(vecops_add_kernel_library)
     if(ARG_TARGET_ARCH)
         vecops_configure_target_arch(
             TARGET ${ARG_NAME}
-            ARCH ${ARG_TARGET_ARCH})
+            ARCH ${ARG_TARGET_ARCH}
+            OUT_MARCH _VECOPS_KERNEL_MARCH)
     endif()
 
     if(NOT ARG_NO_RUNTIME)
@@ -55,6 +57,10 @@ function(vecops_add_kernel_library)
         elseif(TARGET vecops_optimize_for_kernels)
             target_link_libraries(${ARG_NAME} PRIVATE
                 vecops_optimize_for_kernels)
+        endif()
+        if(ARG_TARGET_ARCH)
+            _vecops_link_sme_matmul_leaves(${ARG_NAME}
+                "${ARG_TARGET_ARCH}" "${_VECOPS_KERNEL_MARCH}")
         endif()
     endif()
 

@@ -77,10 +77,10 @@ def check_outputs(a, b, c, operation):
 
 
 def worker(arguments):
-  cpus, directory, width, rows, operation, repeat, rounds = arguments
+  cpus, directory, width, rows, operation, repeat, rounds, target, cc, cxx = arguments
   os.sched_setaffinity(0, cpus)
   compiler = vecops.Compiler(
-    target="Native", cc="gcc", cxx="g++", jobs=4, cache_dir=directory / "cache", build_dir=directory / "build"
+    target=target, cc=cc, cxx=cxx, jobs=4, cache_dir=directory / "cache", build_dir=directory / "build"
   )
   rng = np.random.default_rng(42)
   a, b, c = (aligned_empty((rows, width), "float32") for _ in range(3))
@@ -108,6 +108,9 @@ def main():
   parser.add_argument("--rounds", type=int, default=9)
   parser.add_argument("--cpus", type=int, nargs="+")
   parser.add_argument("--multiprocess", type=int, default=0)
+  parser.add_argument("--target", default=os.environ.get("VECOPS_TEST_TARGET", "Native"))
+  parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+  parser.add_argument("--cxx", default=os.environ.get("CXX", "g++"))
   parser.add_argument("--build-dir", type=Path, default=ROOT / "build-dsl-grid")
   parser.add_argument("--output", type=Path)
   args = parser.parse_args()
@@ -134,6 +137,9 @@ def main():
         args.operation[0],
         args.repeat,
         args.rounds,
+        args.target,
+        args.cc,
+        args.cxx,
       )
       for i in range(args.multiprocess)
     ]
@@ -141,9 +147,9 @@ def main():
       results = pool.map(worker, tasks)
   else:
     compiler = vecops.Compiler(
-      target="Native",
-      cc="gcc",
-      cxx="g++",
+      target=args.target,
+      cc=args.cc,
+      cxx=args.cxx,
       jobs=6,
       cache_dir=args.build_dir / "cache",
       build_dir=args.build_dir / "build",

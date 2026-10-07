@@ -16,6 +16,11 @@ class Node:
 @dataclass(frozen=True)
 class ScalarType(Node):
   dtype: str
+  # Only untyped Python literals are weak. Explicit casts, ABI arguments and
+  # typed compiler literals remain strong specialization/computation values.
+  # This is promotion metadata, not a storage dtype qualifier: semantic dtype
+  # validation compares dtype, while mutable scalar slots drop the weak hint.
+  weak: bool = False
 
 
 @dataclass(frozen=True)

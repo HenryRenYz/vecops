@@ -27,6 +27,7 @@ _BUILTIN_MODULES = (
   "backends.cpu.schedule",
   "backends.cpu.grid_pass",
   "backends.cpu.state",
+  "backends.cpu.register_layout",
 )
 
 

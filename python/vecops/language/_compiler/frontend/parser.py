@@ -11,6 +11,7 @@ from ...expr import Dynamic
 from ...types import TensorType
 from .. import ir as I
 from ..dtypes import dtype_name
+from ..ir.promotion import cast_operands, floating_dtype
 from ..operations import Trait, use_catalog
 from ..operations import current as operation_snapshot
 from .capture import DSL_MODULES, Body, capture, symbol
@@ -124,7 +125,11 @@ class Frontend(
     return tuple(self.value(v, node) for v in (obj if isinstance(obj, tuple) else (obj,)))
 
   def expression(self, node):
-    value = self._expression(node)
+    # Every scalar expression has the same IR representation, whether it came
+    # from an AST literal, a captured Python value, tuple indexing, or a helper
+    # default. Keep immutable host captures intact for their capture identity;
+    # normalize them at the single expression-consumption boundary instead.
+    value = symbol(self._expression(node))
     if isinstance(value, I.Node):
       self.origins.setdefault(id(value), (self.body.filename, self.body.first_line + node.lineno - 1, node.col_offset))
     return value
@@ -236,7 +241,7 @@ class Frontend(
       if op is None:
         self.error(node, "unsupported unary operation")
       if value.op == "literal":
-        return I.literal(
+        result = (
           ~value.data
           if isinstance(node.op, ast.Invert) and value.type.dtype != "bool"
           else -value.data
@@ -245,6 +250,14 @@ class Frontend(
           if op == "not"
           else value.data
         )
+        dtype = (
+          None
+          if value.type.weak
+          else "bool"
+          if op == "not" and not isinstance(node.op, ast.Invert)
+          else value.type.dtype
+        )
+        return I.literal(result, dtype=dtype)
       predicate = value.type.dtype == "bool" or isinstance(value.type, I.TileType) and value.type.mask
       if isinstance(node.op, ast.Invert) and not predicate:
         op = "bit_not"
@@ -720,7 +733,7 @@ class Frontend(
       axes = (
         args[1] if len(args) > 1 else kwargs.get("axes", tuple(I.literal(i) for i in reversed(range(len(view.shape)))))
       )
-      axes = tuple(I.constant(v) for v in axes)
+      axes = tuple(I.constant(v) for v in self.shape(axes, node))
       if sorted(axes) != list(range(len(view.shape))):
         self.error(node, "transpose axes must be a permutation")
       self.diagnostics.append(
@@ -813,19 +826,14 @@ class Frontend(
         self.error(node, "load other requires a mask")
       return I.Expr(typ, "load", memory_args, view)
     if operation in {"alloc", "zeros", "full"}:
+      if operation == "alloc":
+        return self.call_allocation(args, kwargs, node)
       shape = self.shape(args[0], node)
       dtype = dtype_name(kwargs.get("dtype", args[1] if len(args) > 1 and operation != "full" else "float32"))
-      if operation != "alloc":
-        value = self.value(args[1] if operation == "full" else I.literal(0), node)
-        if operation == "full":
-          dtype = dtype_name(kwargs.get("dtype", args[2] if len(args) > 2 else "float32"))
-        return I.Expr(I.TileType(dtype, shape), "fill", (value,))
-      strides = [I.literal(1)] * len(shape)
-      for i in reversed(range(len(shape) - 1)):
-        strides[i] = I.binary("mul", strides[i + 1], shape[i + 1])
-      view = I.View(self.unique("scratch"), dtype, shape, tuple(strides), I.literal(0), owned=True)
-      self.block.statements.append(I.Allocate(view))
-      return view
+      value = self.value(args[1] if operation == "full" else I.literal(0), node)
+      if operation == "full":
+        dtype = dtype_name(kwargs.get("dtype", args[2] if len(args) > 2 else "float32"))
+      return I.Expr(I.TileType(dtype, shape), "fill", (value,))
     if operation in {"store", "copy"}:
       destination = args[0] if operation == "store" else args[1]
       if operation == "copy":
@@ -917,6 +925,10 @@ class Frontend(
       return I.Expr(value.type, operation, (value,), accuracy)
     if operation == "fma":
       a, b, c = (self.value(v, node) for v in args)
+      shaped = any(isinstance(value.type, I.TileType) for value in (a, b, c))
+      dtype = floating_dtype((a, b, c), shaped=shaped)
+      if dtype is not None:
+        a, b, c = cast_operands((a, b, c), dtype, I.Expr, I.shaped_type, shaped=shaped)
       typ = I.binary("add", I.binary("mul", a, b), c).type
       return I.Expr(typ, "fma", (a, b, c))
     if operation == "where":
@@ -981,7 +993,13 @@ class Frontend(
       condition = I.binary("ne", condition, I.literal(0))
     elif isinstance(condition.type, I.ScalarType) and condition.type.dtype != "bool":
       condition = I.Expr(I.ScalarType("bool"), "cast", (condition,))
+    shaped = any(isinstance(value.type, I.TileType) for value in (condition, a, b))
+    dtype = floating_dtype((a, b), shaped=shaped)
+    if dtype is not None:
+      a, b = cast_operands((a, b), dtype, I.Expr, I.shaped_type, shaped=shaped)
     typ = I.binary("add", a, b).type
+    if dtype is not None and dtype != typ.dtype:
+      typ = I.shaped_type(dtype, typ.shape, typ) if isinstance(typ, I.TileType) else I.ScalarType(dtype)
     if isinstance(condition.type, I.TileType):
       shape = I.broadcast_shape(typ.shape if isinstance(typ, I.TileType) else (), condition.type.shape)
       typ = I.shaped_type(typ.dtype, shape, typ if isinstance(typ, I.TileType) else condition.type)
@@ -1049,19 +1067,31 @@ class Frontend(
       self.block.statements.append(I.Store(view, value))
 
   def freeze_tile(self, value):
-    """A delayed computation captures scalar/coordinate values, not mutable locals."""
-    copies = {}
+    """Capture mutable coordinates once per assignment, preserving DAG sharing.
+
+    Memoization is local to this capture boundary: sharing a captured value
+    between two assignments would incorrectly freeze a later scalar update.
+    The expression graph itself is immutable during this traversal.
+    """
+    memo, capture_required = {}, {}
 
     def needs_freeze(expr):
-      return self.operations.has(expr, Trait.CAPTURE_SCALAR) or any(needs_freeze(a) for a in expr.args)
+      identity = id(expr)
+      if identity not in capture_required:
+        capture_required[identity] = self.operations.has(expr, Trait.CAPTURE_SCALAR) or any(
+          needs_freeze(argument) for argument in expr.args
+        )
+      return capture_required[identity]
 
     def freeze(expr):
+      identity = id(expr)
+      if identity in memo:
+        return memo[identity]
       if isinstance(expr.type, I.ScalarType) and expr.op != "frozen" and needs_freeze(expr):
-        if id(expr) not in copies:
-          name = self.unique("captured")
-          self.block.statements.append(I.Assign(name, expr))
-          copies[id(expr)] = I.Expr(expr.type, "frozen", data=name)
-        return copies[id(expr)]
+        name = self.unique("captured")
+        self.block.statements.append(I.Assign(name, expr))
+        memo[identity] = I.Expr(expr.type, "frozen", data=name)
+        return memo[identity]
       arguments = tuple(freeze(a) for a in expr.args)
       data = expr.data
       if self.operations.has(expr, Trait.MEMORY_READ):
@@ -1071,16 +1101,23 @@ class Frontend(
           tuple(freeze(v) for v in view.strides),
           freeze(view.offset),
         )
-        if shape != view.shape or strides != view.strides or offset is not view.offset:
+        if (
+          any(a is not b for a, b in zip(shape, view.shape))
+          or any(a is not b for a, b in zip(strides, view.strides))
+          or offset is not view.offset
+        ):
           data = replace(view, shape=shape, strides=strides, offset=offset)
       typ = expr.type
       if isinstance(typ, I.TileType):
         shape = tuple(freeze(v) for v in typ.shape)
         if any(a is not b for a, b in zip(shape, typ.shape)):
           typ = I.shaped_type(typ.dtype, shape, typ, typ.mask, keep_tag=True)
-      if arguments == expr.args and data is expr.data and typ is expr.type:
-        return expr
-      return I.Expr(typ, expr.op, arguments, data)
+      memo[identity] = (
+        expr
+        if all(a is b for a, b in zip(arguments, expr.args)) and data is expr.data and typ is expr.type
+        else I.Expr(typ, expr.op, arguments, data)
+      )
+      return memo[identity]
 
     return freeze(value)
 

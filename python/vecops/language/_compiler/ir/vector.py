@@ -5,6 +5,8 @@ and iteration identities explicit. A grouping is not a C++ type: target limits,
 dtype lane rebinding and memory effects still have to be legalized afterwards.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 from . import kernel as I
@@ -35,6 +37,21 @@ class VectorGroup:
   # Oversized input vectors can stream a repeated legal piece, without
   # allocating an exponentially large Python list or generating huge code.
   repeat: int = 1
+
+
+@dataclass(frozen=True)
+class VectorTailFragment:
+  """A native-width masked piece of an existing full-loop vector group.
+
+  ``first`` is measured in tail-vector extents, not logical unroll copies.
+  ``path`` selects lower/upper halves from the original accumulator group;
+  restoring the same tree preserves its lane and horizontal-reduction order.
+  """
+
+  parent: int
+  first: int
+  power: int
+  path: tuple[bool, ...]
 
 
 @dataclass(frozen=True)
@@ -83,6 +100,11 @@ class VectorRegion:
   pass_trace: list[str] = field(default_factory=list)
   cost: object | None = None
   single_chunk: bool = False
+  native_tails: dict[int | None, tuple[VectorTailFragment, ...]] = field(default_factory=dict)
+  # Scheduling hint for the independent outer axes, not the vector operation
+  # unroll factor above. None leaves native-compiler heuristics unchanged;
+  # one keeps each row rolled, without changing the mathematical iteration.
+  outer_unroll: int | None = None
 
 
 @dataclass

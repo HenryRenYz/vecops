@@ -68,20 +68,6 @@ class CollectiveFrontend:
       return self.call_allocation(args, kwargs, node)
     return NotImplemented
 
-  def call_allocation(self, args, kwargs, node):
-    # Reuse alloc's parser semantics without host execution or duplicated ABI.
-    name = self.unique("alloc_intrinsic")
-    from ...dsl import Intrinsic
-
-    self.env[name] = Intrinsic("alloc")
-    old = node.func
-    node.func = ast.Name(id=name, ctx=ast.Load())
-    try:
-      return self.call(node)
-    finally:
-      node.func = old
-      self.env.pop(name)
-
   def team_region(self, node, descriptor):
     if self.teams or self.loop_depth:
       self.error(node, "teams cannot nest inside loops, grids or other teams")

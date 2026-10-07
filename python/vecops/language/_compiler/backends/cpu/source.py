@@ -10,7 +10,7 @@ from ....._dtype import DType as SchemaDType
 from ....._dtype import normalize_dtype
 from ....._schema import KernelDef, TensorAccess, TensorDef, ValueDef
 from ....expr import Const, DType
-from ....template import TemplateIR
+from ....template import TemplateIR, _CaptureAlias
 from ....types import TensorType
 
 
@@ -22,6 +22,8 @@ def _specialization_environment(ir: TemplateIR):
     name = getattr(capture, "name", None)
     if not name:
       continue
+    if isinstance(capture, _CaptureAlias):
+      capture = capture.value
     if isinstance(capture, Const):
       kind = SchemaConst
       value = int(capture.value)

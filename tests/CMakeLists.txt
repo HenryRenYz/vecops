@@ -84,8 +84,23 @@ vecops_add_test(
     FILES execution/TaskPartitionTest.cpp
     FOLDER execution/task_partition
     ARCH Scalar)
+vecops_add_test(NAME VectorLengthTest FILES execution/VectorLengthTest.cpp
+    FOLDER execution/vector_length ARCH Scalar)
+vecops_add_test(NAME KernelBatchTest FILES compiler/KernelBatchTest.cpp
+    FOLDER compiler/kernel_batch ARCH Scalar)
 
 vecops_add_test(NAME UtilMathTest FILES util/MathTest.cpp FOLDER util/math)
+vecops_add_test(NAME AtomicWaitTest FILES runtime/AtomicWaitTest.cpp
+    FOLDER runtime)
+vecops_add_test(NAME AtomicWaitPortableTest FILES runtime/AtomicWaitTest.cpp
+    FOLDER runtime)
+target_compile_definitions(AtomicWaitPortableTest PRIVATE
+    VECOPS_FORCE_PORTABLE_ATOMIC_WAIT=1)
+vecops_add_test(NAME AtomicWaitCvTest FILES runtime/AtomicWaitTest.cpp
+    FOLDER runtime)
+target_compile_definitions(AtomicWaitCvTest PRIVATE
+    VECOPS_FORCE_PORTABLE_ATOMIC_WAIT=1
+    VECOPS_FORCE_CV_ATOMIC_WAIT=1)
 
 if(VECOPS_ARCH_FAMILY STREQUAL "x86")
     set(VECOPS_TENSOR_KERNEL_ARCH Scalar AVX512 Native)
@@ -142,6 +157,24 @@ vecops_add_test(NAME VecTrigTest FILES
     FOLDER vec/math ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecMemoryTest FILES vec/MemoryTest.cpp
     FOLDER vec/memory ARCH ${VEC_BASE_ARCH} LABELS vec)
+# These standalone probes use sparse anonymous mappings: large valid signed
+# offsets exercise i32 gather/scatter overflow without allocating huge RSS.
+# Keep the mmap-dependent regression on Linux with a 64-bit address space.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+    foreach(_PROBE IN ITEMS StrideRangeProbe StrideRangeLayoutProbe StrideRangeBoundsProbe)
+        vecops_add_multiarch_executable(
+            NAME ${_PROBE}
+            FILES vec/${_PROBE}.cpp
+            FOLDER vec/memory
+            ARCH Scalar Native
+            LIBRARIES vecops
+            OUT_TARGETS _STRIDE_TARGETS)
+        foreach(_TARGET IN LISTS _STRIDE_TARGETS)
+            add_test(NAME ${_TARGET} COMMAND $<TARGET_FILE:${_TARGET}>)
+            set_tests_properties(${_TARGET} PROPERTIES LABELS "vec;vec_memory")
+        endforeach()
+    endforeach()
+endif()
 vecops_add_test(NAME VecPrefetchTest FILES vec/PrefetchTest.cpp
     FOLDER vec/memory ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecMaskConversionTest FILES vec/MaskConversionTest.cpp

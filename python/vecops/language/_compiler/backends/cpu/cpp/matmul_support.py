@@ -2,6 +2,7 @@
 
 PREAMBLE = r"""
 #include "vecops/platform/CacheInfo.h"
+#include "vecops/vec/SVE.h"
 namespace vecops_dsl {
 // Codes: dense=0, AMX=1, SME=2, automatic=-1. The build host never selects
 // the packed ABI of an AArch64 artifact.

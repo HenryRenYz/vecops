@@ -12,12 +12,12 @@ class StateFrontend:
     return I.Expr(state.type, "state_ref", data=state)
 
   def snapshot_state(self, value):
-    from ..ir.traversal import walk
+    from ..ir.traversal import walk_unique
 
     if (
       isinstance(value, I.Expr)
       and isinstance(value.type, I.TileType)
-      and any(self.operations.has(e, Trait.STATE_REFERENCE) for e in walk(value))
+      and any(self.operations.has(e, Trait.STATE_REFERENCE) for e in walk_unique(value))
     ):
       return self.declare_state(value)
     return value
@@ -46,7 +46,7 @@ class StateFrontend:
       elif isinstance(value, I.Expr) and isinstance(value.type, I.ScalarType) and value.op == "literal":
         target = self.unique(name)
         self.block.statements.append(I.Assign(target, value))
-        self.env[name] = I.Expr(value.type, "local", data=target)
+        self.env[name] = I.Expr(I.ScalarType(value.type.dtype), "local", data=target)
 
   def available_scalar_names(self, environment):
     names, seen = set(), set()
@@ -98,4 +98,4 @@ class StateFrontend:
     self.block.statements.append(I.Assign(target, I.Expr(a.type, "cast", (I.literal(0),))))
     body.statements.append(I.Assign(target, a, False))
     otherwise.statements.append(I.Assign(target, b, False))
-    return I.Expr(a.type, "local", data=target)
+    return I.Expr(I.ScalarType(a.type.dtype), "local", data=target)

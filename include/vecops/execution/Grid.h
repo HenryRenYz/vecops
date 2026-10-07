@@ -14,6 +14,7 @@
 #include "vecops/CoreDefs.h"
 #include "vecops/execution/Parallel.h"
 #include "vecops/execution/FloatControl.h"
+#include "vecops/execution/VectorLength.h"
 
 namespace vecops::execution {
 
@@ -103,14 +104,19 @@ void grid_team(const VecopsThreadPoolV1* pool, nint_t workers, Fn&& body) {
   if (workers > std::numeric_limits<uint32_t>::max())
     throw std::overflow_error("grid worker count overflow");
   using Body = std::remove_reference_t<Fn>;
+  struct CallbackState {
+    Body* body;
+    ArmVectorLengths vector_lengths;
+  } state{std::addressof(body), current_thread_vector_lengths()};
   char message[512]{};
   VecopsError error{sizeof(VecopsError), 0, message, sizeof(message), 0};
-  auto* object = const_cast<void*>(static_cast<const void*>(std::addressof(body)));
   const auto status = pool->team_executor->run(
-    pool->context, static_cast<uint32_t>(workers), object,
+    pool->context, static_cast<uint32_t>(workers), &state,
     [](void* opaque, const VecopsTeamContextV1* team) VECOPS_INLINE_LAMBDA {
+      auto& callback = *static_cast<CallbackState*>(opaque);
+      const ScopedArmVectorLengths vector_lengths(callback.vector_lengths);
       apply_process_flush_subnormals();
-      std::invoke(*static_cast<Body*>(opaque), GridTeam(*team));
+      std::invoke(*callback.body, GridTeam(*team));
     },
     &error);
   if (status != VECOPS_STATUS_OK)

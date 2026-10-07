@@ -110,9 +110,20 @@ def content_hash(path):
   # symlink spellings are deliberately not memoized.
   with _lock:
     _drain()
-    parent = str(path.parent.resolve())
+    try:
+      parent = str(path.parent.resolve())
+    except FileNotFoundError:
+      return "missing"
+    except OSError as error:
+      return f"unreadable:resolve_parent:{error.errno}"
     watched = False
-    if not path.is_symlink():
+    try:
+      symlink = path.is_symlink()
+    except FileNotFoundError:
+      return "missing"
+    except OSError as error:
+      return f"unreadable:lstat_symlink:{error.errno}"
+    if not symlink:
       watched = _watch_directory(parent)
     key = (str(path.absolute()), parent)
     if watched and key in _files:
@@ -126,6 +137,10 @@ def content_hash(path):
         result = hasher.hexdigest()
     except FileNotFoundError:
       return "missing"
+    except OSError as error:
+      # System include roots can contain unrelated, inaccessible headers.
+      # Keep the failure in the identity, but never memoize unreadable content.
+      return f"unreadable:open:{error.errno}"
     _drain()
     if watched and generation == _generation:
       _files[key] = result
@@ -134,28 +149,58 @@ def content_hash(path):
 
 def tree_hash(root, suffixes=None):
   root = Path(root)
-  key = (str(root.absolute()), str(root.resolve()), tuple(sorted(suffixes)) if suffixes else None)
+  try:
+    resolved = str(root.resolve())
+  except FileNotFoundError:
+    return ((str(root.absolute()), "missing"),)
+  except OSError as error:
+    return ((str(root.absolute()), f"unreadable:resolve_root:{error.errno}"),)
+  key = (str(root.absolute()), resolved, tuple(sorted(suffixes)) if suffixes else None)
   with _lock:
     _drain()
     if key in _trees:
       return _trees[key]
-    paths = sorted(root.rglob("*"))
-    watched = _watch_directory(root)
-    for directory in paths:
-      if "__pycache__" in directory.parts:
-        continue
-      if directory.is_dir():
-        watched = _watch_directory(directory) and watched
-      # Resolving symlink inventories needs an independent ancestry watch;
-      # fall back instead of claiming that link targets cannot change.
-      if directory.is_symlink():
-        watched = False
     generation = _generation
-    results = tuple(
-      (str(p.absolute()), content_hash(p))
-      for p in paths
-      if p.is_file() and (suffixes is None or p.suffix in suffixes) and "__pycache__" not in p.parts
-    )
+    watched = True
+    records = []
+    pending = [root]
+    while pending:
+      directory = pending.pop()
+      try:
+        watched = _watch_directory(directory) and watched
+        # Unlike Path.rglob, record a denied scan explicitly instead of
+        # silently omitting that subtree. Never follow directory symlinks.
+        if directory.is_symlink():
+          watched = False
+        with os.scandir(directory) as entries:
+          children = sorted(entries, key=lambda entry: entry.name)
+      except FileNotFoundError:
+        records.append((str(directory.absolute()), "missing"))
+        watched = False
+        continue
+      except OSError as error:
+        records.append((str(directory.absolute()), f"unreadable:scandir:{error.errno}"))
+        watched = False
+        continue
+      for entry in children:
+        if entry.name == "__pycache__":
+          continue
+        path = Path(entry.path)
+        try:
+          if entry.is_symlink():
+            # Link targets can change without events in the link's ancestry.
+            watched = False
+          if entry.is_dir(follow_symlinks=False):
+            pending.append(path)
+          elif entry.is_file() and (suffixes is None or path.suffix in suffixes):
+            result = content_hash(path)
+            records.append((str(path.absolute()), result))
+            if result.startswith("unreadable:") or result == "missing":
+              watched = False
+        except OSError as error:
+          records.append((str(path.absolute()), f"unreadable:stat:{error.errno}"))
+          watched = False
+    results = tuple(sorted(records))
     _drain()
     if watched and generation == _generation:
       _trees[key] = results

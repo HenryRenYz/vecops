@@ -17,6 +17,7 @@ from .evaluate import bind, itemsize, scalar
 
 def execution_environment():
   from ... import _C
+  from ..._arm_vector_state import get_vector_state
 
   affinity = sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else list(range(os.cpu_count() or 1))
   quota = None
@@ -45,6 +46,7 @@ def execution_environment():
         frequencies[key] = (base / key).read_text().strip()
   return {
     "machine": platform.machine(),
+    "arm_vector_lengths": vars(get_vector_state()),
     "affinity": affinity,
     "quota_cpus": quota,
     "native_executor_capacity": _C.cpu_thread_pool_capacity(),
@@ -151,6 +153,7 @@ def analyze(owner, args=(), kwargs=None):
   compiler_environment = backend.vectors.manager.options["_compiler_environment"]
   costs = compiler_environment.costs
   environment["__debug_cpu_target"] = compiler_environment.target
+  environment["__debug_vector_state"] = compiler_environment.vector_state
   capacity = report["environment"]["native_executor_capacity"]
   for node in nodes(owner.kernel_ir.body):
     if isinstance(node, I.Grid):

@@ -3,13 +3,14 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
+from dsl_test_utils import amx_available_for_test, make_compiler
 
 
 @pytest.fixture(scope="module")
 def compiler(tmp_path_factory):
   root=tmp_path_factory.mktemp('dsl-matmul-edges')
-  return vecops.Compiler(target='Native',cc='gcc',cxx='g++',jobs=4,
-                         cache_dir=root/'cache',build_dir=root/'build')
+  return make_compiler(target='Native',jobs=4,
+                       cache_dir=root/'cache',build_dir=root/'build')
 
 
 @pytest.mark.parametrize('dtype',['bfloat16','float16'])
@@ -71,7 +72,10 @@ def test_sibling_products_and_pack_product_boundaries(compiler):
 
 
 @pytest.mark.parametrize('dtype,format_,implementation',[
-  ('float32','dense','vector'),('bfloat16','amx','amx'),('float16','amx','vector')])
+  ('float32','dense','vector'),
+  pytest.param('bfloat16','amx','amx', marks=pytest.mark.skipif(not amx_available_for_test(), reason="AMX packing requires an x86 AMX target")),
+  pytest.param('float16','amx','vector', marks=pytest.mark.skipif(not amx_available_for_test(), reason="AMX packing requires an x86 AMX target")),
+])
 def test_prepacked_cache_panels_and_fused_final_store(compiler,dtype,format_,implementation):
   import ml_dtypes
   memory={'float32':np.float32,'bfloat16':ml_dtypes.bfloat16,'float16':np.float16}[dtype]

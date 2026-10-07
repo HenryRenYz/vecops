@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+from copy import copy
 from dataclasses import replace
 from pathlib import Path
 
@@ -15,7 +16,24 @@ from .._runtime.binding import _normalize_out_idx
 from .._runtime.kernel import CompiledKernel, _CompiledCore
 from ..template import TemplateFunction
 from .backends.cpu.source import _build_definition
-from .cache import _compile_cache, _compile_lock, _compiler_key, _source_identity
+from .cache import _compile_cache, _compile_lock, _compiler_key, _compiler_policy_key, _source_identity
+
+
+def _strict_dsl_compiler(compiler: Compiler) -> Compiler:
+  """Keep distinct DSL mul/add rounding, without changing source-C++ policy.
+
+  Some ARM compilers contract separate inlined SVE intrinsic calls under their
+  default FP policy. Source spelling alone therefore cannot implement the IR's
+  explicit distinction between ``mul``/``add`` and ``fma``. The target option
+  disables only implicit contraction; explicit FMA intrinsics remain fused.
+  Append it after user options and isolate it in a copy of the frozen compiler,
+  preserving shared build events while retaining independent artifact identity.
+  """
+  result = copy(compiler)
+  result.environment = dict(compiler.environment)
+  result.cflags = (*compiler.cflags, "-ffp-contract=off")
+  result._native_compiler = None
+  return result
 
 
 def compile(
@@ -31,7 +49,10 @@ def compile(
   if not isinstance(template_function, TemplateFunction):
     raise TypeError("T.compile expects a T.template-decorated function")
   ir = template_function.ir
-  selected = compiler or template_function.compiler or Compiler()
+  source_compiler = compiler or template_function.compiler or Compiler()
+  selected = source_compiler.snapshot()
+  if ir.source is None:
+    selected = _strict_dsl_compiler(selected)
   indices = _normalize_out_idx(out_idx, tuple(ir.signature.parameters.values()))
   generated_source = None
   kernel_ir = None
@@ -45,7 +66,7 @@ def compile(
     target=selected.target,
     out_idx=out_idx,
     pipeline=pipeline,
-    pass_options=pass_options,
+    pass_options={**dict(pass_options or {}), "_vector_state": selected.vector_state},
     debug=debug,
   )
   if ir.source is None:
@@ -73,7 +94,13 @@ def compile(
   source_identity = _source_identity(ir)
   build_identity = compiler_identity(selected)
   input_roots = include_roots(selected)
-  input_snapshot = source_inputs(ir.source, input_roots, ir.dependencies)
+  input_snapshot = source_inputs(
+    ir.source,
+    input_roots,
+    ir.dependencies,
+    definition_cwd=selected.definition_cwd,
+    inventory_excludes=selected._source_include_inventory_excludes,
+  )
   key = (ir.canonical(), indices, source_identity, input_snapshot, build_identity, _compiler_key(selected))
   digest = hashlib.sha256(repr(key).encode()).hexdigest()
   with _compile_lock:
@@ -111,10 +138,20 @@ def compile(
   result.debug.diagnostics = tuple(kernel_ir.diagnostics) if kernel_ir is not None else ()
   implementation = implementation_identity()
   configuration = _compiler_key(selected)
+  source_configuration = _compiler_policy_key(source_compiler)
   result.debug._validate_cache = lambda: (
-    implementation_identity() == implementation
+    selected.is_environment_current()
+    and implementation_identity() == implementation
     and _compiler_key(selected) == configuration
-    and source_inputs(ir.source, input_roots, ir.dependencies) == input_snapshot
+    and _compiler_policy_key(source_compiler) == source_configuration
+    and source_inputs(
+      ir.source,
+      input_roots,
+      ir.dependencies,
+      definition_cwd=selected.definition_cwd,
+      inventory_excludes=selected._source_include_inventory_excludes,
+    )
+    == input_snapshot
   )
   template_function.debug = result.debug
   return result

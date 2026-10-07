@@ -2,7 +2,7 @@
 
 import hashlib
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from weakref import WeakValueDictionary
 
@@ -18,10 +18,21 @@ class CompilerEnvironment:
   implementations: object
   costs: object
   target: object
+  vector_state: object = None
+  # Actual code-generation target. Cost-profile overrides must never select
+  # which architecture's instructions are emitted or remove a legal path.
+  codegen_target: object = CPUTarget()
 
   @cached_property
   def fingerprint(self):
-    identity = (self.operations.fingerprint, self.implementations.fingerprint, self.costs.fingerprint, self.target)
+    identity = (
+      self.operations.fingerprint,
+      self.implementations.fingerprint,
+      self.costs.fingerprint,
+      self.target,
+      self.vector_state,
+      self.codegen_target,
+    )
     return hashlib.sha256(repr(identity).encode()).hexdigest()
 
 
@@ -34,22 +45,36 @@ def freeze(options=None, *, target="generic"):
   previous = options.get("_compiler_environment")
   if previous is not None:
     return previous
+  codegen_target = target if isinstance(target, CPUTarget) else resolve_target(target)
   selected = options.get("cpu_cost_target", target)
   selected = (
     selected
     if isinstance(selected, CPUTarget)
     else resolve_target(selected, processor=options.get("cpu_cost_processor"))
   )
+  from ..._arm_vector_state import VectorState, get_vector_state
+
+  vector_state = options.get("_vector_state")
+  if vector_state is None:
+    # Dry/cross lowering must not infer the target's vector geometry from
+    # the build host. The compile driver supplies its explicit snapshot;
+    # only a native standalone lowering may query the calling thread.
+    native = isinstance(target, str) and target.lower().startswith("native")
+    vector_state = get_vector_state() if native else VectorState(None, None)
+  if selected.architecture == "arm" and vector_state.sve_bytes is not None:
+    # Cached CPU detection describes the ISA, not a thread's mutable VL.
+    # Ordinary vector cost/planning uses VL; SME panel sizing uses SVL itself.
+    selected = replace(selected, vector_bits=vector_state.sve_bytes * 8)
   overrides = options.get("cost_profiles", ())
   overrides = (overrides,) if isinstance(overrides, str) else tuple(overrides)
   operations = snapshot()
   implementations = implementation_snapshot()
   costs = build_model(operations, selected, overrides)
-  key = (operations.fingerprint, implementations.fingerprint, costs.profiles, selected)
+  key = (operations.fingerprint, implementations.fingerprint, costs.profiles, selected, vector_state, codegen_target)
   with _lock:
     result = _cache.get(key)
     if result is None:
-      result = CompilerEnvironment(operations, implementations, costs, selected)
+      result = CompilerEnvironment(operations, implementations, costs, selected, vector_state, codegen_target)
       _cache[key] = result
     return result
 

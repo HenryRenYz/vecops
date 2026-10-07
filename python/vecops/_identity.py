@@ -15,11 +15,79 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 from pathlib import Path
+
+try:
+  import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms
+  fcntl = None
 
 
 def digest(value):
   return hashlib.sha256(repr(value).encode()).hexdigest()
+
+
+_trace_lock = threading.Lock()
+
+
+def _reset_trace_lock_after_fork():
+  global _trace_lock
+  _trace_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+  os.register_at_fork(after_in_child=_reset_trace_lock_after_fork)
+
+
+def _write_build_input_trace(event, *, compiler=None):
+  """Append one opt-in, secret-free build-input diagnostic JSONL record."""
+  if compiler is not None:
+    from . import _C
+
+    if compiler.cache_mode == _C.ArtifactCacheMode.cache_only:
+      return
+  configured = os.environ.get("VECOPS_BUILD_INPUT_TRACE")
+  if not configured:
+    return
+  path = Path(configured).expanduser()
+  if not path.is_absolute():
+    raise ValueError("VECOPS_BUILD_INPUT_TRACE must be an absolute path")
+  if not path.parent.is_dir():
+    raise ValueError("VECOPS_BUILD_INPUT_TRACE parent directory must already exist")
+  payload = (json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n").encode()
+  with _trace_lock:
+    descriptor = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+    try:
+      if fcntl is not None:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+      view = memoryview(payload)
+      while view:
+        view = view[os.write(descriptor, view) :]
+    finally:
+      if fcntl is not None:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+      os.close(descriptor)
+
+
+def _input_records(inputs):
+  """Flatten source_inputs output into path-to-identity records."""
+  files, roots = inputs
+  result = {path: identity for path, identity in files}
+  for root_records in roots:
+    result.update(root_records)
+  return result
+
+
+def _source_input_diff(before, after, *, limit=32):
+  """Return a bounded path diff without re-reading or re-hashing inputs."""
+  old, new = _input_records(before), _input_records(after)
+  changed = [
+    {"path": path, "before": old.get(path), "after": new.get(path)}
+    for path in sorted(old.keys() | new.keys())
+    if old.get(path) != new.get(path)
+  ]
+  return {"changed_count": len(changed), "paths": changed[:limit]}
 
 
 def _code_identity(code):
@@ -163,30 +231,41 @@ def callable_identity(function, *, include_state=True):
   )
 
 
-def source_inputs(source, include_dirs=(), dependencies=()):
+def source_inputs(source, include_dirs=(), dependencies=(), *, definition_cwd=None, inventory_excludes=()):
   """Conservative quoted/angle include closure plus user include inventories.
 
   The SDK is tracked separately in implementation_identity. System headers are
   attested by the toolchain identity. Macro-generated external includes must be
-  declared through dependencies or an include directory inventory.
+  declared through dependencies or an include directory inventory. An implicit
+  CWD search root can be excluded from whole-directory inventory while its
+  resolved include closure remains content-addressed.
   """
   from ._compiler import _sdk
 
   sdk, _ = _sdk()
-  roots = tuple(Path(p).resolve() for p in include_dirs)
+  base = Path(definition_cwd).resolve() if definition_cwd is not None else Path.cwd().resolve()
+  roots = tuple((Path(p) if Path(p).is_absolute() else base / p).resolve() for p in include_dirs)
   visited, inputs = set(), []
 
   def visit(path):
-    path = Path(path).resolve()
+    path = Path(path)
+    if not path.is_absolute():
+      path = base / path
+    path = path.resolve()
     if path in visited:
       return
     visited.add(path)
     inputs.append(file_identity(path))
     if not path.is_file():
       return
-    for name in re.findall(r'^\s*#\s*include\s*[<"]([^>"\n]+)[>"]', path.read_text(errors="replace"), re.MULTILINE):
-      for base in (path.parent, *roots, sdk / "include"):
-        candidate = base / name
+    includes = re.findall(r'^\s*#\s*include\s*([<"])([^>"\n]+)[>"]', path.read_text(errors="replace"), re.MULTILINE)
+    for delimiter, name in includes:
+      # Only quoted includes search the including file's directory. In
+      # particular, an unrelated sibling must not hide an angle include
+      # selected from the implicit cwd search root whose inventory we omit.
+      search = (path.parent, *roots, sdk / "include") if delimiter == '"' else (*roots, sdk / "include")
+      for include_base in search:
+        candidate = include_base / name
         if candidate.is_file():
           if not candidate.resolve().is_relative_to(sdk / "include"):
             visit(candidate)
@@ -195,20 +274,29 @@ def source_inputs(source, include_dirs=(), dependencies=()):
   visit(source)
   for dependency in dependencies:
     visit(dependency)
-  return (tuple(sorted(inputs)), tuple(tree_identity(root) for root in roots))
+  excluded = {Path(path).resolve() for path in inventory_excludes}
+  inventories = tuple(tree_identity(root) for root in roots if root not in excluded)
+  return (tuple(sorted(inputs)), inventories)
 
 
 def include_roots(compiler):
+  from shlex import split
+
+  from ._compiler import _absolute_include_path, _normalize_include_flags
+
+  base = compiler.definition_cwd
   roots = list(compiler.include_dirs)
-  arguments = iter(compiler.cflags)
+  flags = (*split(compiler.environment.get("CXXFLAGS", "")), *compiler.cflags)
+  arguments = iter(_normalize_include_flags(flags, base))
   for arg in arguments:
     if arg in ("-I", "-isystem", "-iquote", "-idirafter"):
-      roots.append(Path(next(arguments)).expanduser().resolve())
+      roots.append(Path(next(arguments)))
     elif arg.startswith("-I") and len(arg) > 2:
-      roots.append(Path(arg[2:]).expanduser().resolve())
+      roots.append(Path(arg[2:]))
   for variable in ("CPATH", "CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH"):
-    value = compiler.environment.get(variable, os.environ.get(variable, ""))
-    roots.extend(Path(p).resolve() for p in value.split(os.pathsep) if p)
+    value = compiler.environment[variable]
+    if value:
+      roots.extend(Path(_absolute_include_path(path, base)) for path in value.split(os.pathsep))
   return tuple(dict.fromkeys(roots))
 
 
@@ -219,6 +307,7 @@ def compiler_identity(compiler):
 
   policy = (
     compiler.target,
+    compiler.vector_state.env_token,
     compiler.cache_namespace,
     tuple(map(str, compiler.include_dirs)),
     compiler.cflags,
@@ -228,7 +317,7 @@ def compiler_identity(compiler):
     compiler.generator or os.environ.get("CMAKE_GENERATOR") or "auto",
     tuple(sorted(compiler.environment.items())),
     tuple(
-      (k, os.environ.get(k))
+      (k, compiler.environment.get(k, os.environ.get(k)))
       for k in (
         "CPATH",
         "CPLUS_INCLUDE_PATH",
@@ -272,21 +361,50 @@ def compiler_identity(compiler):
   )
   # Include the compiler's actual standard-library search roots. No source is
   # compiled here. This catches toolchain headers being updated in-place.
+  import shlex
   import subprocess
 
-  command = [tools[1][0], *compiler.cflags, "-E", "-x", "c++", "-v", "-"]
+  environment = {**os.environ, **compiler.environment}
+  # CMake initializes CMAKE_CXX_FLAGS from CXXFLAGS. Compiler drivers do not
+  # consume that variable themselves: pass it explicitly when attesting the
+  # actual headers/runtime (e.g. a private --gcc-toolchain or -stdlib choice).
+  flags = (*shlex.split(environment.get("CXXFLAGS", "")), *compiler.cflags)
+  command = [tools[1][0], *flags, "-E", "-x", "c++", "-v", "-"]
   search = subprocess.run(
-    command, input="", text=True, capture_output=True, check=True, env={**os.environ, **compiler.environment}
+    command, input="", text=True, capture_output=True, check=True, env=environment, cwd=compiler.definition_cwd
   ).stderr
   match = re.search(r"#include <\.\.\.> search starts here:\n(.*?)End of search list", search, re.DOTALL)
-  system = tuple(tree_identity(line.strip()) for line in match.group(1).splitlines()) if match else ()
+  user_roots = {str(root) for root in include_roots(compiler)}
+  definition_cwd = compiler.definition_cwd
+  system_roots = (
+    tuple(
+      (
+        line.strip(),
+        tree_identity(Path(line.strip()) if Path(line.strip()).is_absolute() else definition_cwd / line.strip()),
+      )
+      for line in match.group(1).splitlines()
+      if str((Path(line.strip()) if Path(line.strip()).is_absolute() else definition_cwd / line.strip()).resolve())
+      not in user_roots
+    )
+    if match
+    else ()
+  )
+  system = tuple(records for _, records in system_roots)
   linked_runtime = []
   for name in ("libstdc++.so", "libgcc_s.so", "libc.so"):
     location = subprocess.run(
-      [tools[1][0], f"-print-file-name={name}"], capture_output=True, text=True, check=True
+      [tools[1][0], *flags, f"-print-file-name={name}"],
+      capture_output=True,
+      text=True,
+      check=True,
+      env=environment,
+      cwd=compiler.definition_cwd,
     ).stdout.strip()
-    if Path(location).is_file():
-      linked_runtime.append(file_identity(location))
+    runtime_path = Path(location)
+    if not runtime_path.is_absolute():
+      runtime_path = compiler.definition_cwd / runtime_path
+    if runtime_path.is_file():
+      linked_runtime.append(file_identity(runtime_path))
   import platform
 
   hardware = platform.machine()
@@ -306,6 +424,29 @@ def compiler_identity(compiler):
       compiler.generator or os.environ.get("CMAKE_GENERATOR") or ("Ninja" if shutil.which("ninja") else None),
     )
   )
+  generator = compiler.generator or os.environ.get("CMAKE_GENERATOR") or ("Ninja" if shutil.which("ninja") else None)
+  components = {
+    "config_key": config_key,
+    "tools": [{"path": path, "content": content} for path, content in tools],
+    "system_roots": [
+      {
+        "path": root,
+        "tree_digest": digest(records),
+        "unreadable": [
+          {"path": path, "identity": value}
+          for path, value in records
+          if isinstance(value, str) and value.startswith("unreadable:")
+        ][:16],
+      }
+      for root, records in system_roots
+    ],
+    "linked_runtime": [{"path": path, "content": content} for path, content in linked_runtime],
+    "hardware_digest": digest(hardware),
+    "generator": generator,
+  }
+  _write_build_input_trace(
+    {"event": "compiler_identity", "identity": identity, "components": components}, compiler=compiler
+  )
   if getattr(compiler, "_build_identity", None) != identity:
     compiler._native_compiler = None
     compiler._build_identity = identity
@@ -316,8 +457,16 @@ def compiler_identity(compiler):
 
   with file_lock(attestation.with_suffix(".lock")):
     records = json.loads(attestation.read_text()) if attestation.is_file() else []
-    if not any(r["identity"] == identity for r in records):
+    matching = next((record for record in records if record["identity"] == identity), None)
+    changed = False
+    if matching is None:
       records.append({"identity": identity, "tools": tools})
+      matching = records[-1]
+      changed = True
+    if "components" not in matching:
+      matching["components"] = components
+      changed = True
+    if changed:
       descriptor, temporary = tempfile.mkstemp(prefix="identity-", dir=attestation.parent)
       try:
         with os.fdopen(descriptor, "w") as stream:

@@ -2,12 +2,40 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from .... import ir as I
 from ....dtypes import ELEMENT_BYTES
+from ....ir.vector import VectorGroup
 from ..capabilities import CPP_TYPES
 
 
 class VectorsEmitter:
+  @contextmanager
+  def pointwise_layout(self, region, groups, *, full):
+    """Keep a private memory permutation within exactly one complete body."""
+    previous = getattr(self, "pointwise_register_layout", None)
+    proof = self.prepared.register_layouts.get(id(region))
+    self.pointwise_register_layout = (
+      proof
+      if full
+      and proof is not None
+      and self.hardware_scope is None
+      and all(group.power >= 1 for group in groups)
+      and not any(
+        identity in mapping
+        for identity in proof.expressions
+        for mapping in (self.snapshots, self.materialized, self.reduction_materialized)
+      )
+      else None
+    )
+    try:
+      if self.pointwise_register_layout is not None:
+        self.line("/* private pointwise register layout: paired native 16->32 conversions */")
+      yield
+    finally:
+      self.pointwise_register_layout = previous
+
   def vector(self, value, tag, root_shape, coords, active, axis=-1):
     self.retain_expression(value)
     axis %= len(root_shape)
@@ -94,6 +122,7 @@ class VectorsEmitter:
         and not I.same_expr(view.shape[view_axis], root_shape[axis])
       )
       options, mask = self.memory_options(value.args[0] if value.args else None, tag, root_shape, coords, active, axis)
+      options += self.conversion_layout_option()
       other = None
       if value.args:
         other = self.unique("inactive")
@@ -282,6 +311,17 @@ class VectorsEmitter:
   def rebound_tag(self, dtype, base):
     if dtype == "bool" or dtype == self.tag_dtypes[base]:
       return base
+    # State consumers reuse the same lane geometry across casts. Canonicalize
+    # repeated rebinds so reading the original dtype resolves directly to its
+    # named register, rather than a scalar get/set reconstruction loop.
+    origin = self.state_tag_origins.get(base)
+    if origin is not None:
+      tag = origin if dtype == self.tag_dtypes[origin] else f"vecops::vec::Rebind<{CPP_TYPES[dtype]}, {origin}>"
+      self.tag_dtypes[tag] = dtype
+      self.state_tag_origins[tag] = origin
+      if origin in self.fixed_tag_lanes:
+        self.fixed_tag_lanes[tag] = self.fixed_tag_lanes[origin]
+      return tag
     tag = f"vecops::vec::Rebind<{CPP_TYPES[dtype]}, {base}>"
     self.tag_dtypes[tag] = dtype
     if base in self.fixed_tag_lanes:
@@ -290,6 +330,14 @@ class VectorsEmitter:
 
   def emit_operations(self, region, tags, coords, active, *, axis=-1, full=False):
     previous_cache, references = self.chunk_cache, {}
+    uses = {operation.index: 0 for operation in region.operations}
+    for operation in region.operations:
+      for index in operation.operands:
+        if index is not None:
+          uses[index] += 1
+    for index in region.root_indices:
+      if index is not None:
+        uses[index] += 1
     for operation in region.operations:
       for slot, (base, c, count) in enumerate(zip(tags, coords, active)):
         tag = self.rebound_tag(operation.expression.type.dtype, base)
@@ -313,6 +361,32 @@ class VectorsEmitter:
             else arg
             for arg, index in zip(operation.expression.args, operation.operands)
           )
+          if operation.expression.op == "cast":
+            source = operation.expression.args[0]
+            source_index = operation.operands[0]
+            if (
+              source.op == "load"
+              and source.type.dtype == source.data.dtype
+              and source_index is not None
+              and uses[source_index] == 1
+              and id(source) not in self.materialized
+              and id(source) not in self.reduction_materialized
+            ):
+              # Keep the lexical read's snapshot selection at the converting
+              # load boundary. A vector_ref would hide that edge and prevent
+              # load_convert fusion. Reuse already scheduled mask/inactive
+              # registers rather than evaluating their DAG a second time.
+              source_operation = region.operations[source_index]
+              source_args = tuple(
+                I.Expr(region.operations[index].type, "vector_ref", data=references[(index, slot)])
+                if index is not None
+                else arg
+                for arg, index in zip(source.args, source_operation.operands)
+              )
+              proxy = I.Expr(source.type, "load", source_args, source.data)
+              if id(source) in self.snapshots:
+                self.snapshots[id(proxy)] = self.snapshots[id(source)]
+              args = (proxy,)
           expression = I.Expr(operation.type, operation.expression.op, args, operation.expression.data)
           if operation.native_math_words:
             expression = I.Expr(
@@ -340,7 +414,7 @@ class VectorsEmitter:
     self.chunk_cache = previous_cache
     return roots
 
-  def traverse_region(self, region, callback, *, setup=None, finish=None):
+  def traverse_region(self, region, callback, *, setup=None, finish=None, project_tail=None, restore_tail=None):
     """Print explicit Vector IR schedules, not recursively lowered tile bodies."""
     state_plan = self.state_region(region)
     if state_plan is not None:
@@ -370,6 +444,12 @@ class VectorsEmitter:
       coordinates = []
       for extent in region.shape[:-1]:
         coordinate = self.unique("axis")
+        if region.outer_unroll == 1:
+          self.line("#if defined(__clang__)")
+          self.line("#pragma clang loop unroll(disable)")
+          self.line("#elif defined(__GNUC__)")
+          self.line("#pragma GCC unroll 1")
+          self.line("#endif")
         self.opening(f"for (vecops::nint_t {coordinate} = 0; {coordinate} < ({self.scalar(extent)}); ++{coordinate})")
         coordinates.append(coordinate)
       coordinate = self.unique("lane")
@@ -389,22 +469,25 @@ class VectorsEmitter:
         self.full_vector = full
         coords, active = [], []
         for group, tag in zip(groups, tags):
-          chunk = coordinate if group.first == 0 else f"({coordinate} + {group.first} * vecops::vec::size({base}{{}}))"
+          chunk = coordinate if group.first == 0 else f"({coordinate} + {group.first} * {self.vector_size(base)})"
           coords.append(tuple(coordinates) + (chunk,))
           count = self.unique("active")
           value = (
-            f"vecops::vec::size({tag}{{}})"
+            self.vector_size(tag)
             if full
-            else f"std::clamp<vecops::nint_t>(({stop}) - {chunk}, 0, vecops::vec::size({tag}{{}}))"
+            else f"std::clamp<vecops::nint_t>(({stop}) - {chunk}, 0, {self.vector_size(tag)})"
           )
           self.line(f"const auto {count} = {value};")
           active.append(count)
         previous_cache = self.chunk_cache
-        roots = self.emit_operations(region, tags, coords, active, full=full)
-        self.chunk_cache = {}
-        callback(tags, coords, active, roots, state)
-        self.chunk_cache = previous_cache
-        self.full_vector = old_full
+        try:
+          with self.pointwise_layout(region, groups, full=full):
+            roots = self.emit_operations(region, tags, coords, active, full=full)
+            self.chunk_cache = {}
+            callback(tags, coords, active, roots, state)
+        finally:
+          self.chunk_cache = previous_cache
+          self.full_vector = old_full
 
       if region.single_chunk and base_power == region.base_power and len(groups) == 1:
         # The surrounding SIMD loop already strip-mined this exact vector.
@@ -420,16 +503,30 @@ class VectorsEmitter:
       elif region.full_chunks:
         self.line(f"vecops::nint_t {coordinate} = 0;")
         self.opening(
-          f"for (; vecops_dsl::full_vectors({coordinate}, {stop}, vecops::vec::size({base}{{}}), {region.unroll}); {coordinate} += {region.unroll} * vecops::vec::size({base}{{}})) /* full vector groups */"
+          f"for (; vecops_dsl::full_vectors({coordinate}, {stop}, {self.vector_size(base)}, {region.unroll}); {coordinate} += {region.unroll} * {self.vector_size(base)}) /* full vector groups */"
         )
         body(True)
         self.close()
         self.opening(f"if ({coordinate} < ({stop})) /* masked vector tail */")
-        body(False)
+        fragments = region.native_tails.get(power)
+        if fragments and (setup is None or project_tail is not None and restore_tail is not None):
+          tail_tag = self.unique("tail_tag")
+          self.tag_dtypes[tail_tag] = region.dtype
+          self.line(
+            f"using {tail_tag} = vecops::vec::ScalableTag<{CPP_TYPES[region.dtype]}, {fragments[0].power}>; /* native-word masked remainder */"
+          )
+          tail_tags = tuple(tail_tag for _ in fragments)
+          tail_groups = tuple(VectorGroup(fragment.first, 1, fragment.power) for fragment in fragments)
+          tail_state = project_tail(tags, state, tail_tags, fragments) if project_tail else None
+          body(False, groups=tail_groups, tags=tail_tags, base=tail_tag, state=tail_state)
+          if restore_tail:
+            restore_tail(tags, state, tail_tags, fragments, tail_state)
+        else:
+          body(False)
         self.close()
       else:
         self.opening(
-          f"for (vecops::nint_t {coordinate} = 0; {coordinate} < ({stop}); {coordinate} += {region.unroll} * vecops::vec::size({base}{{}}))"
+          f"for (vecops::nint_t {coordinate} = 0; {coordinate} < ({stop}); {coordinate} += {region.unroll} * {self.vector_size(base)})"
         )
         body(False)
         self.close()
@@ -529,16 +626,30 @@ class VectorsEmitter:
           cached = self.ir.materializations.get(id(source))
           if cached is not None and id(source) not in self.materialized:
             condition = f"{cached.storage}_enabled"
-            self.opening(f"if ({condition} && {count} > 0)")
+            full = getattr(self, "full_vector", False)
+            # Full traversal groups already prove a positive, in-bounds
+            # physical extent. A first(count) option unnecessarily constructs
+            # a multiword SVE predicate, whose tuple accessors may require
+            # out-of-line calls across an ISA target boundary.
+            self.opening(f"if ({condition})" if full else f"if ({condition} && {count} > 0)")
+            memory_option = "vecops::vec::opt::unmasked" if full else f"vecops::vec::opt::first({count})"
             self.line(
-              f"vecops::vec::store_convert({tag}{{}}, {self.pointer(cached, coords)}, {value}, vecops::vec::opt::first({count}));"
+              f"vecops::vec::store_convert({tag}{{}}, {self.pointer(cached, coords)}, {value}, {memory_option});"
             )
             self.close()
             self.reduction_materialized[id(source)] = (cached, condition)
-          masked = self.unique("masked")
-          self.line(
-            f"auto {masked} = vecops::vec::blend({tag}{{}}, vecops::vec::fill({tag}{{}}, {self.identity(dtype, op)}), vecops::vec::mwhilelt({tag}{{}}, 0, {count}), {value});"
-          )
+          # A full vector group has no inactive lane. Besides an unnecessary
+          # select, constructing a multiword SVE predicate can introduce ABI
+          # helper calls and spills on otherwise call-free reduction sweeps.
+          # Tail vectors still need the operation's identity, even when a
+          # load happens to zero-fill its own inactive lanes: e.g. max/min
+          # identities are not zero, and later elementwise ops may change it.
+          masked = value
+          if not getattr(self, "full_vector", False):
+            masked = self.unique("masked")
+            self.line(
+              f"auto {masked} = vecops::vec::blend({tag}{{}}, vecops::vec::fill({tag}{{}}, {self.identity(dtype, op)}), vecops::vec::mwhilelt({tag}{{}}, 0, {count}), {value});"
+            )
           self.line(f"{accumulators[slot]} = vecops::vec::{op}({tag}{{}}, {accumulators[slot]}, {masked});")
       self.write_effects(plan, tags, coordinates, active, roots)
 
@@ -553,7 +664,38 @@ class VectorsEmitter:
         results.append(combined)
       self.line(f"{result} = {'std::tuple{' + ', '.join(results) + '}' if len(results) > 1 else results[0]};")
 
-    self.traverse_region(plan, update, setup=setup, finish=finish)
+    def project_tail(tags, banks, tail_tags, fragments):
+      projected = []
+      for accumulators in banks:
+        parts = []
+        for fragment in fragments:
+          tag, value = tags[fragment.parent], accumulators[fragment.parent]
+          for upper in fragment.path:
+            value = f"vecops::vec::{'upper' if upper else 'lower'}({tag}{{}}, {value})"
+            tag = f"vecops::vec::Half<{tag}>"
+          name = self.unique("tail_acc")
+          self.line(f"auto {name} = {value};")
+          parts.append(name)
+        projected.append(parts)
+      return projected
+
+    def restore_tail(tags, banks, tail_tags, fragments, projected):
+      for accumulators, parts in zip(banks, projected):
+        for parent, (tag, accumulator) in enumerate(zip(tags, accumulators)):
+          leaves = {fragment.path: part for fragment, part in zip(fragments, parts) if fragment.parent == parent}
+
+          def join(tag, path=(), leaves=leaves):
+            if path in leaves:
+              return leaves[path]
+            half = f"vecops::vec::Half<{tag}>"
+            low, high = join(half, (*path, False)), join(half, (*path, True))
+            name = self.unique("tail_join")
+            self.line(f"auto {name} = vecops::vec::concat({tag}{{}}, {low}, {high});")
+            return name
+
+          self.line(f"{accumulator} = {join(tag)};")
+
+    self.traverse_region(plan, update, setup=setup, finish=finish, project_tail=project_tail, restore_tail=restore_tail)
     self.close()
     return result
 

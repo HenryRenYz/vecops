@@ -4,13 +4,14 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
+from dsl_test_utils import amx_available_for_test, make_compiler
 
 
 @pytest.fixture(scope="module")
 def compiler(tmp_path_factory):
   root = tmp_path_factory.mktemp("dsl-attention-edges")
-  return vecops.Compiler(
-    target="Native", cc="gcc", cxx="g++", jobs=4, cache_dir=root / "cache", build_dir=root / "build"
+  return make_compiler(
+    target="Native", jobs=4, cache_dir=root / "cache", build_dir=root / "build"
   )
 
 
@@ -57,6 +58,7 @@ def test_indexed_attention_in_grid(compiler, monkeypatch):
     np.testing.assert_allclose(c, expected, rtol=7e-6, atol=1e-6)
 
 
+@pytest.mark.skipif(not amx_available_for_test(), reason="explicit AMX implementation requires an x86 AMX target")
 def test_attention_default_bfloat16_probabilities(compiler):
   torch = pytest.importorskip("torch")
 

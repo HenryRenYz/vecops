@@ -11,6 +11,23 @@ def walk(expression):
     yield from walk(argument)
 
 
+def walk_unique(expression):
+  """Preorder traversal of argument edges, visiting each expression once.
+
+  Use for membership/trait checks, not use counts: ``walk`` deliberately
+  preserves repeated incoming edges. Shape/data nodes are not argument edges;
+  ``nodes`` includes those when an ownership traversal is required.
+  """
+  pending, seen = [expression], set()
+  while pending:
+    value = pending.pop()
+    if id(value) in seen:
+      continue
+    seen.add(id(value))
+    yield value
+    pending.extend(reversed(value.args))
+
+
 def nodes(value, seen=None):
   """Walk each owned IR node once, including data and shape metadata.
 
@@ -72,7 +89,14 @@ def values(block):
       yield from values(child)
 
 
-def rewrite_expressions(ir, rewrite):
+def rewrite_expressions(ir, rewrite, *, with_original=False):
+  """Rewrite the shared DAG, optionally exposing its pre-rewrite identity.
+
+  ``with_original`` calls ``rewrite(changed, original)``. Identity-sensitive
+  passes can then distinguish lexical captures even when rewriting an argument
+  has already cloned the current expression. The default callback contract is
+  unchanged; all references to one original still share the memoized result.
+  """
   memo = {}
 
   def visit(value):
@@ -82,7 +106,8 @@ def rewrite_expressions(ir, rewrite):
         # CSE substitutes identity even when dataclass values compare equal.
         # Structural equality here would silently discard the shared DAG edge.
         same_arguments = all(a is b for a, b in zip(args, value.args))
-        memo[id(value)] = rewrite(value if same_arguments else replace(value, args=args))
+        changed = value if same_arguments else replace(value, args=args)
+        memo[id(value)] = rewrite(changed, value) if with_original else rewrite(changed)
       return memo[id(value)]
     if isinstance(value, tuple):
       return tuple(visit(v) for v in value)

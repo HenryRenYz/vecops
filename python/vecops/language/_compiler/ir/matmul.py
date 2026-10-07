@@ -51,6 +51,19 @@ class MatmulPlan:
   amx_native_b_pack_min_m: int = 0
   amx_cache_b_panel_divisor: int = 0
   amx_cache_b_panel_max_m: int = 0
+  # Experimental ordinary-SVE quantize/packed-B row driver. Profitability
+  # remains opt-in until paired target measurements establish a crossover.
+  sve_runtime_quant: bool = False
+  # Backend-owned immutable native-A gather/packing cost policy. The leaf
+  # evaluates actual panel extents, not a guessed size for dynamic metadata.
+  sme_native_a_packing: object = None
+  # Profile-selected whole-problem traversal for prepacked BF16 AB. Eligibility
+  # uses captured SVL and runtime private L2; explicit blocks remain binding.
+  sme_packed_ab_cache_bypass: bool = False
+  sme_packed_ab_traversal: object = None
+  # Narrow memory/elementwise work on a statically singleton ZA slice or
+  # unpacked BF16 spatial K slot. ZA instructions retain native-word geometry.
+  sme_narrow_singleton_slices: bool = False
   operands: tuple = ()
   amx_b_permutation: object | None = None
   dense_transposes: tuple = ()

@@ -3,13 +3,14 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
+from dsl_test_utils import make_compiler
 
 
 @pytest.fixture(scope='module')
 def compiler(tmp_path_factory):
   root=tmp_path_factory.mktemp('dsl-matmul-layout')
-  return vecops.Compiler(target='Native',cc='gcc',cxx='g++',jobs=4,
-                         cache_dir=root/'cache',build_dir=root/'build')
+  return make_compiler(target='Native',jobs=4,
+                       cache_dir=root/'cache',build_dir=root/'build')
 
 
 def test_dense_pack_uses_automatic_transpose(compiler):

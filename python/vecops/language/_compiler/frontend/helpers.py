@@ -128,8 +128,12 @@ class HelperFrontend:
         context["prefix"].append(I.DeclareState(state, initial))
         return I.Expr(v.type, "state_ref", data=state)
       name = self.unique("helper_value")
-      context["prefix"].append(I.Assign(name, I.Expr(v.type, "cast", (I.literal(0),))))
-      return I.Expr(v.type, "local", data=name)
+      # A result slot has a storage dtype, not a literal-promotion hint.
+      # Returning a weak literal must not make subsequent typed values of
+      # the same dtype incompatible, or leave a mutable local marked weak.
+      typ = I.ScalarType(v.type.dtype)
+      context["prefix"].append(I.Assign(name, I.Expr(typ, "cast", (I.literal(0),))))
+      return I.Expr(typ, "local", data=name)
 
     if context["result"] is None:
       context["result"] = slot(value)
@@ -145,7 +149,7 @@ class HelperFrontend:
         self.block.statements.append(I.UpdateState(target.data, self.freeze_tile(source)))
       else:
         source = self.value(source, node)
-        if target.type != source.type:
+        if not isinstance(source.type, I.ScalarType) or target.type.dtype != source.type.dtype:
           self.error(node, "T.func return dtype changes; use an explicit cast")
         self.block.statements.append(I.Assign(target.data, source, False))
 

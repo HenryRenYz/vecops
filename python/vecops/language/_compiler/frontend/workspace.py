@@ -7,6 +7,26 @@ from ..operations import Trait
 
 
 class WorkspaceFrontend:
+  def call_allocation(self, args, kwargs, node):
+    """Allocate from parsed values, preserving the original source location.
+
+    Shared and double-buffer storage use the same scalar-storage contract as
+    alloc. Re-parsing synthetic ASTs would lose locations and evaluate shape
+    expressions twice, including helper calls with a capture prelude.
+    """
+    if set(kwargs) - {"dtype"}:
+      self.error(node, "allocation only accepts the dtype keyword")
+    if not 1 <= len(args) <= 2 or len(args) == 2 and "dtype" in kwargs:
+      self.error(node, "allocation expects a shape and optional dtype")
+    shape = self.shape(args[0], node)
+    dtype = dtype_name(kwargs.get("dtype", args[1] if len(args) == 2 else "float32"))
+    strides = [I.literal(1)] * len(shape)
+    for axis in reversed(range(len(shape) - 1)):
+      strides[axis] = I.binary("mul", strides[axis + 1], shape[axis + 1])
+    view = I.View(self.unique("scratch"), dtype, shape, tuple(strides), I.literal(0), owned=True)
+    self.block.statements.append(I.Allocate(view))
+    return view
+
   def workspace_operation(self, operation, args, kwargs, node):
     if operation == "worker_capacity":
       if args or kwargs:

@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 from .... import ir as I
+from ....ir.traversal import walk_unique
+from ....operations import Trait
 from ..capabilities import CPP_TYPES
 
 
 class MemoryEmitter:
+  def conversion_layout_option(self):
+    """A private paired load/store layout exists only in a proven full body."""
+    return ", vecops::vec::cvt::unordered" if getattr(self, "pointwise_register_layout", None) else ""
+
+  def storage_pointer(self, storage):
+    """Use an entry pointer for ABI tensors; resolve resizable scratch live."""
+    return self.parameter_pointers.get(storage, f"{storage}.data()")
+
   def pointer(self, view, coordinates=()):
-    base = f"{view.storage}.data()"
+    base = self.storage_pointer(view.storage)
     offset = self.scalar(view.offset)
     terms = [offset]
     for coordinate, stride in zip(coordinates, view.strides):
@@ -74,9 +84,86 @@ class MemoryEmitter:
       self.emitted_regions.append(plan)
     elif id(statement) not in self.vector_ir.plans:
       self.emitted_regions.append(plan)
-    self.traverse_region(
-      plan, lambda tags, coords, active, roots, state: self.write_effects(plan, tags, coords, active, roots)
-    )
+    fresh = self.fresh_store_snapshots(statement, plan)
+
+    def emit():
+      self.traverse_region(
+        plan, lambda tags, coords, active, roots, state: self.write_effects(plan, tags, coords, active, roots)
+      )
+
+    if not fresh:
+      emit()
+      return
+    # Only this store's newly created conditional captures are false under
+    # this guard. An older capture may hold the value from before another
+    # write, even when the *current* source and destination are disjoint.
+    # Never substitute its original memory or clear unrelated mappings.
+    snapshots = self.snapshots
+    materialized = dict(self.materialized)
+    reduction_materialized = dict(self.reduction_materialized)
+    cache = self.chunk_cache
+    guards = dict.fromkeys(entry[1] for entry in fresh.values())
+    self.opening("if (!(" + " || ".join(guards) + ")) /* fresh store snapshots absent */")
+    try:
+      self.snapshots = {identity: entry for identity, entry in snapshots.items() if identity not in fresh}
+      self.materialized = dict(materialized)
+      self.reduction_materialized = dict(reduction_materialized)
+      self.chunk_cache = {}
+      emit()
+      self.close()
+      self.opening("else /* retain current and historical store snapshots */")
+      self.snapshots = dict(snapshots)
+      self.materialized = dict(materialized)
+      self.reduction_materialized = dict(reduction_materialized)
+      self.chunk_cache = {}
+      emit()
+      self.close()
+    finally:
+      # Branch-local proxy expressions and C++ locals cannot escape their
+      # scopes. Captures/materializations from outside remain available to
+      # every later store, including nested allocation and hardware regions.
+      self.snapshots = snapshots
+      self.materialized = materialized
+      self.reduction_materialized = reduction_materialized
+      self.chunk_cache = cache
+
+  def fresh_store_snapshots(self, statement, plan):
+    """Return only guarded captures first created for this exact store.
+
+    Version only row-independent elementwise memory DAGs. Reduction/state,
+    register transforms and opaque operations keep their existing lowering;
+    their branch-local state or materialization lifetimes need a separate
+    legality proof. The operation catalog, not a target-specific opcode
+    whitelist, supplies the semantic boundary.
+    """
+    policy = self.vector_ir.manager.options.get("store_snapshot_regions", True)
+    if not isinstance(policy, bool):
+      raise TypeError("store_snapshot_regions must be bool")
+    if not policy:
+      return {}
+    captured = getattr(self, "store_snapshot_provenance", {}).get(id(statement))
+    if captured is None or captured[0] is not statement:
+      return {}
+    boundaries = Trait.REDUCTION | Trait.REGISTER_TRANSFORM | Trait.VECTOR_BOUNDARY | Trait.STATE_REFERENCE
+    catalog = self.environment.operations
+    loads = set()
+    for root in plan.roots:
+      for expression in walk_unique(root):
+        if (
+          catalog.get(expression).effects not in {"none", "read"}
+          or catalog.has(expression, boundaries)
+          or isinstance(expression.type, I.TileType)
+          and expression.op != "load"
+          and not catalog.has(expression, Trait.ELEMENTWISE)
+        ):
+          return {}
+        if expression.op == "load":
+          loads.add(id(expression))
+    return {
+      identity: entry
+      for identity, entry in captured[1].items()
+      if identity in loads and self.snapshots.get(identity) is entry
+    }
 
   def check_store(self, statement):
     destination, value = statement.destination, statement.value
@@ -141,6 +228,7 @@ class MemoryEmitter:
           if getattr(self, "full_vector", False) or self.full_fixed_access(tag, count)
           else f"vecops::vec::opt::first({count})"
         )
+        options += self.conversion_layout_option()
         if masks is not None:
           mask = (
             I.Expr(statement.mask.type, "vector_ref", data=masks[slot])
@@ -180,7 +268,7 @@ class MemoryEmitter:
         getattr(statement, "indices", None),
       ):
         if isinstance(value, I.Expr):
-          for load in I.loads(value):
+          for load in I.loads_unique(value):
             result[id(load)] = load
       for name in ("body", "otherwise"):
         child = getattr(statement, name, None)
@@ -265,32 +353,42 @@ class MemoryEmitter:
     self.snapshots[id(load)] = (saved, condition)
 
   def protect_store(self, statement, future):
-    current = {id(load): load for load in I.loads(statement.value)}
+    current = {id(load): load for load in I.loads_unique(statement.value)}
     if statement.mask is not None:
-      current.update({id(load): load for load in I.loads(statement.mask)})
+      current.update({id(load): load for load in I.loads_unique(statement.mask)})
     preserved = set(self.active_loads) & set(future)
     # Matrix inputs are re-read across output tiles. Even identical mappings
     # are not an elementwise-safe in-place update (C=A/B needs a snapshot).
-    from ....ir.traversal import walk
-
     matrix_inputs = {
       id(load)
-      for value in walk(statement.value)
+      for value in walk_unique(statement.value)
       if value.op == "dot"
       for operand in value.args[:2]
-      for load in I.loads(operand)
+      for load in I.loads_unique(operand)
     }
     transformed_inputs = {
-      id(load) for value in walk(statement.value) if value.op == "value_transform" for load in I.loads(value)
+      id(load)
+      for value in walk_unique(statement.value)
+      if value.op == "value_transform"
+      for load in I.loads_unique(value)
     }
     for identity in preserved:
       current[identity] = self.active_loads[identity]
+    fresh = {}
     for identity, load in current.items():
+      historical = identity in self.snapshots
       self.snapshot(
         load,
         statement.destination,
         identity in preserved or identity in matrix_inputs or identity in transformed_inputs or load.op == "gather",
       )
+      if not historical and identity in self.snapshots:
+        fresh[identity] = self.snapshots[identity]
+    # Retain the statement, not just its id: synthesized snapshot/reduction
+    # statements can otherwise be collected and their Python ids reused.
+    if not hasattr(self, "store_snapshot_provenance"):
+      self.store_snapshot_provenance = {}
+    self.store_snapshot_provenance[id(statement)] = (statement, fresh)
 
   def stores(self, block):
     for statement in block.statements:
@@ -320,7 +418,7 @@ class MemoryEmitter:
     for statement in block.statements:
       if isinstance(statement, I.Pack):
         result.add(statement.destination.view.storage)
-        result.update(load.data.storage for load in I.loads(statement.source))
+        result.update(load.data.storage for load in I.loads_unique(statement.source))
       if isinstance(statement, I.ReductionGroup):
         result.update(self.used_storage(I.Block([*statement.assignments, *statement.stores])))
       if isinstance(statement, I.ElementwiseGroup):
@@ -335,7 +433,7 @@ class MemoryEmitter:
         getattr(statement, "indices", None),
       ):
         if isinstance(value, I.Expr):
-          result.update(load.data.storage for load in I.loads(value))
+          result.update(load.data.storage for load in I.loads_unique(value))
       if isinstance(statement, (I.Store, I.IndexedStore)):
         result.add(statement.destination.storage)
       if isinstance(statement, I.ArchitectureCall) and statement.view is not None:

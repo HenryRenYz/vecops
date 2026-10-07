@@ -19,6 +19,7 @@
 
 #include <arm_sve.h>
 
+#include <cstdint>
 #include <type_traits>
 
 #include "vecops/vec/details/Representation.h"
@@ -92,55 +93,96 @@ template <> struct SVEScalableMask<0> { using type = svbool_t; };
 template <> struct SVEScalableMask<1> { using type = svboolx2_t; };
 template <> struct SVEScalableMask<2> { using type = svboolx4_t; };
 
-// Clang 19 gates predicate-tuple access behind SVE2.1 even though these
-// create/get/set operations only describe predicate-register grouping. Keep
-// that target boundary confined to the affected Clang VLA accessors. GCC with
-// tuple support accepts the operations directly under base SVE. VLS masks use
-// sized WordArray storage below and never parse this block.
+// Clang 19's ACLE predicate-tuple aliases require SVE2.1, but tuple grouping
+// itself is a target-independent extract/insert, not a new ISA instruction.
+// A target(sve2p1) helper cannot inline into a base-SVE owner and would violate
+// the manual SME no-call boundary. Keep this compiler-only bridge local to
+// the VLA representation layer: these are the exact LLVM intrinsics used by
+// Clang's ACLE lowering, with constant indices in minimum predicate elements
+// (scaled by vscale, not by a captured physical VL). No LLVM runtime is linked.
+// https://llvm.org/docs/LangRef.html#llvm-vector-extract-intrinsic
+// https://llvm.org/docs/LangRef.html#llvm-vector-insert-intrinsic
+// GCC and actual SVE2.1 targets retain the ordinary ACLE entry points below.
 #if defined(COMPILER_CLANG) && !defined(HAS_SVE2P1)
-#define VECOPS_VEC_SVE_PREDICATE_ACCESS \
-    __attribute__((target("sve2p1"))) inline
-#else
-#define VECOPS_VEC_SVE_PREDICATE_ACCESS VECOPS_ALWAYS_INLINE
+namespace predicate_tuple_bridge {
+extern "C" svbool_t vecops_predicate_extract2(svboolx2_t, std::uint64_t)
+    noexcept asm("llvm.vector.extract.nxv16i1.nxv32i1");
+extern "C" svbool_t vecops_predicate_extract4(svboolx4_t, std::uint64_t)
+    noexcept asm("llvm.vector.extract.nxv16i1.nxv64i1");
+extern "C" svboolx2_t vecops_predicate_insert2(
+    svboolx2_t, svbool_t, std::uint64_t)
+    noexcept asm("llvm.vector.insert.nxv32i1.nxv16i1");
+extern "C" svboolx4_t vecops_predicate_insert4(
+    svboolx4_t, svbool_t, std::uint64_t)
+    noexcept asm("llvm.vector.insert.nxv64i1.nxv16i1");
+} // namespace predicate_tuple_bridge
 #endif
 
 template <nint_t Index>
-VECOPS_VEC_SVE_PREDICATE_ACCESS svbool_t get_word(svboolx2_t value) {
+VECOPS_ALWAYS_INLINE svbool_t get_word(svboolx2_t value) {
   static_assert(Index >= 0 && Index < 2);
+#if defined(COMPILER_CLANG) && !defined(HAS_SVE2P1)
+  return predicate_tuple_bridge::vecops_predicate_extract2(value, 16 * Index);
+#else
   return svget2(value, static_cast<uint64_t>(Index));
+#endif
 }
 
 template <nint_t Index>
-VECOPS_VEC_SVE_PREDICATE_ACCESS svboolx2_t set_word(
+VECOPS_ALWAYS_INLINE svboolx2_t set_word(
     svboolx2_t value, svbool_t word) {
   static_assert(Index >= 0 && Index < 2);
+#if defined(COMPILER_CLANG) && !defined(HAS_SVE2P1)
+  return predicate_tuple_bridge::vecops_predicate_insert2(value, word, 16 * Index);
+#else
   return svset2(value, static_cast<uint64_t>(Index), word);
+#endif
 }
 
 template <nint_t Index>
-VECOPS_VEC_SVE_PREDICATE_ACCESS svbool_t get_word(svboolx4_t value) {
+VECOPS_ALWAYS_INLINE svbool_t get_word(svboolx4_t value) {
   static_assert(Index >= 0 && Index < 4);
+#if defined(COMPILER_CLANG) && !defined(HAS_SVE2P1)
+  return predicate_tuple_bridge::vecops_predicate_extract4(value, 16 * Index);
+#else
   return svget4(value, static_cast<uint64_t>(Index));
+#endif
 }
 
 template <nint_t Index>
-VECOPS_VEC_SVE_PREDICATE_ACCESS svboolx4_t set_word(
+VECOPS_ALWAYS_INLINE svboolx4_t set_word(
     svboolx4_t value, svbool_t word) {
   static_assert(Index >= 0 && Index < 4);
+#if defined(COMPILER_CLANG) && !defined(HAS_SVE2P1)
+  return predicate_tuple_bridge::vecops_predicate_insert4(value, word, 16 * Index);
+#else
   return svset4(value, static_cast<uint64_t>(Index), word);
+#endif
 }
 
-VECOPS_VEC_SVE_PREDICATE_ACCESS svboolx2_t make_word_group(
+VECOPS_ALWAYS_INLINE svboolx2_t make_word_group(
     svbool_t word0, svbool_t word1) {
+#if defined(COMPILER_CLANG) && !defined(HAS_SVE2P1)
+  svboolx2_t result{};
+  result = predicate_tuple_bridge::vecops_predicate_insert2(result, word0, 0);
+  return predicate_tuple_bridge::vecops_predicate_insert2(result, word1, 16);
+#else
   return svcreate2(word0, word1);
+#endif
 }
 
-VECOPS_VEC_SVE_PREDICATE_ACCESS svboolx4_t make_word_group(
+VECOPS_ALWAYS_INLINE svboolx4_t make_word_group(
     svbool_t word0, svbool_t word1, svbool_t word2, svbool_t word3) {
+#if defined(COMPILER_CLANG) && !defined(HAS_SVE2P1)
+  svboolx4_t result{};
+  result = predicate_tuple_bridge::vecops_predicate_insert4(result, word0, 0);
+  result = predicate_tuple_bridge::vecops_predicate_insert4(result, word1, 16);
+  result = predicate_tuple_bridge::vecops_predicate_insert4(result, word2, 32);
+  return predicate_tuple_bridge::vecops_predicate_insert4(result, word3, 48);
+#else
   return svcreate4(word0, word1, word2, word3);
+#endif
 }
-
-#undef VECOPS_VEC_SVE_PREDICATE_ACCESS
 
 #endif // !defined(HAS_FIXED_SVE_BITS)
 
@@ -284,10 +326,29 @@ VECOPS_ALWAYS_INLINE svbfloat16x4_t make_word_group(
 
 template <Element T>
 VECOPS_ALWAYS_INLINE nint_t sve_word_lanes() {
+#if !defined(HAS_FIXED_SVE_BITS)
+#  if defined(VECOPS_KERNEL_SVE_BYTES) && defined(VECOPS_KERNEL_SME_BYTES) && \
+      VECOPS_KERNEL_SVE_BYTES > 0 && \
+      (VECOPS_KERNEL_SME_BYTES == 0 || VECOPS_KERNEL_SVE_BYTES == VECOPS_KERNEL_SME_BYTES)
+  // A JIT adapter validates the captured lengths before entry. If both
+  // execution domains have the same width, retaining LLVM's sizeless type
+  // still permits compile-time sizes without introducing vector arrays.
+  return VECOPS_KERNEL_SVE_BYTES / static_cast<nint_t>(sizeof(T));
+#  else
+  // LLVM models svcntb() as readnone. It can otherwise be CSE'd/hoisted
+  // across our manual SMSTART owner, producing VL instead of SVL when the
+  // two are different. A volatile architectural read observes the current
+  // execution domain and cannot move across the streaming boundaries.
+  nint_t bytes;
+  asm volatile("cntb %0" : "=r"(bytes) : : "memory");
+  return bytes / static_cast<nint_t>(sizeof(T));
+#  endif
+#else
   if constexpr (sizeof(T) == 1) return static_cast<nint_t>(svcntb());
   if constexpr (sizeof(T) == 2) return static_cast<nint_t>(svcnth());
   if constexpr (sizeof(T) == 4) return static_cast<nint_t>(svcntw());
   return static_cast<nint_t>(svcntd());
+#endif
 }
 
 #if !defined(HAS_FIXED_SVE_BITS)

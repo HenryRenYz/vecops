@@ -125,6 +125,25 @@ def test_explicit_cross_target_never_probes_local_machine(monkeypatch):
   assert unknown_cpu.costs.profiles[-1].name == "avx512"
 
 
+@pytest.mark.parametrize("target", ("generic", "AVX512", "SVE", "SME", CPUTarget("arm", "sve")))
+def test_explicit_lowering_geometry_never_probes_build_host(monkeypatch, target):
+  import vecops._arm_vector_state as vector_state
+
+  monkeypatch.setattr(vector_state, "get_vector_state", lambda: pytest.fail("vector-state probe during cross lowering"))
+  environment = freeze(target=target)
+  assert environment.vector_state == vector_state.VectorState(None, None)
+  captured = vector_state.VectorState(16, 64)
+  assert freeze({"_vector_state": captured}, target=target).vector_state == captured
+
+
+def test_standalone_native_lowering_captures_current_vector_geometry(monkeypatch):
+  import vecops._arm_vector_state as vector_state
+
+  captured = vector_state.VectorState(32, 16)
+  monkeypatch.setattr(vector_state, "get_vector_state", lambda: captured)
+  assert freeze(target="Native").vector_state == captured
+
+
 def test_registered_semantics_capability_and_cost_snapshots():
   old = freeze()
   name = "unit-new-operation"
@@ -314,6 +333,13 @@ def test_immutable_dynamic_extents_preserve_automatic_transpose(input_dtype, out
     T.transpose_copy(A, C, compute_dtype=output_dtype)
 
   artifact = CPUBackend().lower(kernel.ir, (), target="SME")
-  assert "sme::write_hor" in artifact.source
+  plans = tuple(artifact.backend_ir.transposes.values())
+  assert len(plans) == 1 and plans[0].sme
+  # Same-representation input now loads directly into ZA; converted input
+  # still needs load_convert followed by a vector-to-ZA transfer.
+  if input_dtype == output_dtype:
+    assert "sme::load_hor" in artifact.source
+  else:
+    assert "sme::write_hor" in artifact.source
   assert not snapshot().has("raw", Trait.CAPTURE_SCALAR)
   assert snapshot().has("local", Trait.CAPTURE_SCALAR)

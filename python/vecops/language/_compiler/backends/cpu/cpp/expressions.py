@@ -86,9 +86,19 @@ class ExpressionsEmitter:
           return ("-" if value.data < 0 else "") + f"std::numeric_limits<{CPP_TYPES[value.type.dtype]}>::infinity()"
         if math.isnan(value.data):
           return f"std::numeric_limits<{CPP_TYPES[value.type.dtype]}>::quiet_NaN()"
-        return repr(value.data)
+        text = repr(value.data)
+        # C++ unsuffixed literals are double even when the IR literal is
+        # explicitly F32. Make strong scalar computation execute in the
+        # promised type; weak shaped fills retain their existing spelling.
+        if not value.type.weak:
+          return f"static_cast<{CPP_TYPES[value.type.dtype]}>({text})"
+        return text
       return f"std::int64_t{{{value.data}}}"
-    if value.op in {"local", "raw", "frozen"}:
+    if value.op == "raw":
+      # Exact entry-descriptor reads only. Do not pattern-match arbitrary raw
+      # C++ or hoist a local/state expression that can change in a loop.
+      return self.parameter_metadata.get(value.data, value.data)
+    if value.op in {"local", "frozen"}:
       return value.data
     if value.op == "symbol":
       if value.data not in self.ir.bindings:
@@ -96,7 +106,7 @@ class ExpressionsEmitter:
       return self.scalar(self.ir.bindings[value.data])
     if value.op == "lanes":
       dtype, power = value.data
-      base = f"vecops::vec::size(vecops::vec::ScalableTag<{CPP_TYPES[dtype]}, 0>{{}})"
+      base = self.vector_size(f"vecops::vec::ScalableTag<{CPP_TYPES[dtype]}, 0>")
       if not -62 <= power <= 62:
         raise TypeError("virtual vector extent exceeds the signed 64-bit extent domain")
       return f"vecops_dsl::lanes({base}, {power})"
@@ -163,5 +173,20 @@ class ExpressionsEmitter:
     if implementation.scalar_kind == "std_math":
       return f"std::{implementation.scalar_spelling}({arguments[0]})"
     if implementation.scalar_kind == "reciprocal":
+      if value.type.dtype in {"float32", "float64"}:
+        # Row statistics are scalar, but their math contract is the same as
+        # vector math. Broadcasting into one native word lets each backend
+        # select its reciprocal estimate/refinement tier (as C++ LayerNorm
+        # does) rather than silently routing every tier through scalar libm.
+        # A single get extracts the result; no closure or register array is
+        # introduced, including the sizeless SVE representation.
+        cpp = CPP_TYPES[value.type.dtype]
+        tag = f"vecops::vec::ScalableTag<{cpp}, 0>"
+        tier = value.data or "strict"
+        return (
+          f"vecops::vec::get({tag}{{}}, vecops::vec::{value.op}({tag}{{}}, "
+          f"vecops::vec::fill({tag}{{}}, static_cast<{cpp}>({arguments[0]})), "
+          f"vecops::vec::opt::math::{tier}), 0)"
+        )
       return f"(static_cast<{CPP_TYPES[value.type.dtype]}>(1) / {'std::sqrt(' + arguments[0] + ')' if value.op == 'rsqrt' else arguments[0]})"
     raise TypeError(f"no scalar lowering for {value.op}")

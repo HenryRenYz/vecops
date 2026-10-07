@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
+from dsl_test_utils import make_compiler
 
 
 def test_watched_hash_detects_same_size_same_mtime_edits(tmp_path):
@@ -32,9 +33,7 @@ def test_source_headers_jit_wrapper_and_build_flags(tmp_path):
 #include "value.h"
 void __kernel__(vecops::tensor::TensorLike auto A, vecops::tensor::TensorLike auto C) { C.data()[0] = A.data()[0] + value; }
 """)
-  compiler = vecops.Compiler(
-    cc="gcc",
-    cxx="g++",
+  compiler = make_compiler(
     target="Scalar",
     output="quiet",
     jobs=2,
@@ -80,9 +79,7 @@ void __kernel__(vecops::tensor::TensorLike auto A, vecops::tensor::TensorLike au
   assert wrapper.debug.children
   header.write_text("constexpr float value = 5;\n")
   assert forwarding() is not wrapper
-  different = vecops.Compiler(
-    cc="gcc",
-    cxx="g++",
+  different = make_compiler(
     target="Scalar",
     output="quiet",
     cflags=("-ffp-contract=off",),

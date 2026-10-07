@@ -3,13 +3,14 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
+from dsl_test_utils import make_compiler
 
 
 @pytest.fixture(scope='module')
 def compiler(tmp_path_factory):
   root=tmp_path_factory.mktemp('dsl-gemv-math')
-  return vecops.Compiler(target='Native',cc='gcc',cxx='g++',jobs=6,
-                         cache_dir=root/'cache',build_dir=root/'build')
+  return make_compiler(target='Native',jobs=6,
+                       cache_dir=root/'cache',build_dir=root/'build')
 
 
 @pytest.mark.parametrize('column',[False,True])

@@ -4,13 +4,14 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
+from dsl_test_utils import amx_available_for_test, make_compiler
 
 
 @pytest.fixture(scope="module")
 def compiler(tmp_path_factory):
   root = tmp_path_factory.mktemp("dsl-collectives-pipeline")
-  return vecops.Compiler(
-    target="Native", cc="gcc", cxx="g++", jobs=4, cache_dir=root / "cache", build_dir=root / "build"
+  return make_compiler(
+    target="Native", jobs=4, cache_dir=root / "cache", build_dir=root / "build"
   )
 
 
@@ -106,6 +107,7 @@ def test_team_failure_cancels_barrier(compiler, monkeypatch):
     T.compile(kernel, compiler=compiler)(np.zeros(4, dtype=np.int64))
 
 
+@pytest.mark.skipif(not amx_available_for_test(), reason="explicit AMX instructions require an x86 AMX target")
 def test_raw_amx_tdp(compiler):
   @T.template
   def kernel(

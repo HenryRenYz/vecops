@@ -1,7 +1,5 @@
 """CPU prefetch hints and explicitly owned double-buffer storage."""
 
-import ast
-
 from .. import ir as I
 
 
@@ -21,19 +19,8 @@ class PipelineFrontend:
         self.error(node, "double_buffer expects a shape and optional dtype")
       # The first dimension selects the two scalar-storage banks. Views retain
       # ordinary access/alias semantics, with no array of hardware vectors.
-      modified = ast.Call(
-        func=node.func,
-        args=[
-          ast.Tuple(
-            elts=[ast.Constant(2), *(node.args[0].elts if isinstance(node.args[0], ast.Tuple) else [node.args[0]])],
-            ctx=ast.Load(),
-          ),
-          *node.args[1:],
-        ],
-        keywords=node.keywords,
-      )
-      ast.copy_location(modified, node)
-      return self.call_allocation(args, kwargs, modified)
+      shape = (I.literal(2), *self.shape(args[0], node))
+      return self.call_allocation([shape, *args[1:]], kwargs, node)
     if operation == "pipelined":
       stages = self.unroll_count(kwargs.get("stages", I.literal(2)), node)
       distance = self.unroll_count(kwargs.get("distance", I.literal(1)), node)

@@ -6,6 +6,7 @@ from dataclasses import replace
 from .. import ir as I
 from ..dtypes import ELEMENT_BYTES
 from ..ir import vector as V
+from ..ir.traversal import walk_unique
 from .manager import register_pass
 
 
@@ -37,15 +38,10 @@ def coalesce_groups(region, context):
 def legalize_types(region, context):
   base = ELEMENT_BYTES[region.dtype]
 
-  def expressions(value):
-    yield value
-    for argument in value.args:
-      yield from expressions(argument)
-
   sizes = [
-    ELEMENT_BYTES[e.type.dtype] for root in region.roots for e in expressions(root) if isinstance(e.type, I.TileType)
+    ELEMENT_BYTES[e.type.dtype] for root in region.roots for e in walk_unique(root) if isinstance(e.type, I.TileType)
   ]
-  sizes.extend(ELEMENT_BYTES[load.data.dtype] for root in region.roots for load in I.loads(root))
+  sizes.extend(ELEMENT_BYTES[load.data.dtype] for root in region.roots for load in I.loads_unique(root))
   region.rebind_headroom = max(0, int(math.log2(max(sizes, default=base))) - int(math.log2(base)))
   region.operations = [
     replace(op, type=replace(op.type, tag=I.VectorTag(pow=region.base_power, basis_dtype=region.dtype)))

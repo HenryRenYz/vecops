@@ -120,12 +120,37 @@ VECOPS_ALWAYS_INLINE std::uint64_t read_svcr() noexcept {
   return value;
 }
 
+template <typename Fn>
+static VECOPS_MANUAL_SME_OWNER_ATTRIBUTES void streaming_za_body(Fn&& fn) noexcept {
+  // Private compiler bridge, not an ordinary AAPCS SM interface. The only
+  // caller is the fixed-frame state owner below, with SM=1 and ZA=0. Its
+  // scalar/reference arguments must not contain normal-domain Vec/Mask data.
+  // The body frame and every scalable spill use one SVL domain. All callback
+  // callees must inline, and target instructions must be legal in SM.
+  asm volatile("" : : : "memory");
+  asm volatile("smstart za\n\tisb" : : : "memory");
+  std::forward<Fn>(fn)();
+  asm volatile("smstop za\n\tisb" : : : "memory");
+  asm volatile("" : : : "memory");
+}
+
 /**
  * Own one destructive, non-nestable Streaming+ZA interval.
  *
- * This is a compiler-specific backend contract rather than an ACLE function
- * interface. The callback and every function below it must actually inline;
- * disassembly tests enforce that no call remains between the two boundaries.
+ * Entry and exit require SM=0 and ZA=0. Capture only scalar, pointer and
+ * metadata values; construct all Vec/Mask values inside the callback and do
+ * not let them escape. The callback must be noexcept and actually inline,
+ * together with every helper it calls. Instrumentation and LTO are outside
+ * this compiler-specific backend contract, not an ACLE streaming interface.
+ *
+ * Proven equal vector domains retain the original single no-call owner. For
+ * other domains, a fixed scalar frame enters SM before one resolved internal
+ * call allocates the compute frame in SVL. That private body alone owns ZA;
+ * no active ZA crosses the call. Its allocation, spills and deallocation all
+ * use SVL, preventing ordinary-VL frame sizes from corrupting saved registers.
+ * Disassembly tests check both forms interprocedurally, not just callback
+ * source attributes. No general streaming-callee or function-pointer API is
+ * implied by the private bridge.
  */
 template <typename Fn>
 VECOPS_MANUAL_SME_OWNER_ATTRIBUTES void with_streaming_za(Fn&& fn) noexcept {
@@ -137,19 +162,33 @@ VECOPS_MANUAL_SME_OWNER_ATTRIBUTES void with_streaming_za(Fn&& fn) noexcept {
   VECOPS_ASSERT(read_svcr() == 0,
                 "manual SME region requires SM=0 and ZA=0 on entry");
 #endif
-  asm volatile(
-      "smstart\n\t"
-      "isb"
-      :
-      :
-      : VECOPS_SME_ZP_CLOBBERS, "memory");
+#if (defined(HAS_FIXED_SVE_BITS) && defined(HAS_FIXED_STREAMING_SVE_BITS) && \
+     (FIXED_SVE_BITS == FIXED_STREAMING_SVE_BITS)) || \
+    (defined(VECOPS_KERNEL_SVE_BYTES) && defined(VECOPS_KERNEL_SME_BYTES) && \
+     (VECOPS_KERNEL_SVE_BYTES > 0) && (VECOPS_KERNEL_SME_BYTES > 0) && \
+     (VECOPS_KERNEL_SVE_BYTES == VECOPS_KERNEL_SME_BYTES))
+  // Either the VLS contract or the JIT's immutable, invocation-checked
+  // current-thread snapshot guarantees identical frame geometry. The latter
+  // remains legal with scalable Vec representations; do not force VLS types.
+  // Retain the original single-owner codegen in these proven equal cases.
+  asm volatile("smstart\n\tisb" : : : VECOPS_SME_ZP_CLOBBERS, "memory");
   std::forward<Fn>(fn)();
+  asm volatile("smstop\n\tisb" : : : VECOPS_SME_ZP_CLOBBERS, "memory");
+#else
   asm volatile(
-      "smstop\n\t"
+      "smstart sm\n\t"
       "isb"
       :
       :
       : VECOPS_SME_ZP_CLOBBERS, "memory");
+  streaming_za_body(std::forward<Fn>(fn));
+  asm volatile(
+      "smstop sm\n\t"
+      "isb"
+      :
+      :
+      : VECOPS_SME_ZP_CLOBBERS, "memory");
+#endif
 #if defined(VECOPS_DEBUG)
   VECOPS_ASSERT(read_svcr() == 0,
                 "manual SME region did not restore SM=0 and ZA=0");

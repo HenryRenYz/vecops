@@ -35,6 +35,7 @@
 #include <pybind11/stl/filesystem.h>
 
 #include "vecops/compiler/Compiler.h"
+#include "vecops/compiler/details/KernelBatch.h"
 #include "vecops/execution/Parallel.h"
 #include "vecops/execution/Grid.h"
 #include "vecops/execution/FloatControl.h"
@@ -154,7 +155,9 @@ std::size_t dtype_size(DType dtype) {
  * workspace query and synchronous invocation made through PyArgumentMetadata.
  * Element-aligned signed strides are preserved, including overlapping views;
  * the ndarray remains responsible for proving that its reachable storage is
- * valid.
+ * valid. Only an empty C-contiguous ndarray whose entire stride tuple is zero
+ * receives the legacy dense-stride canonicalization. Explicit empty layouts
+ * are preserved even though NumPy marks them both C- and F-contiguous.
  */
 class PyTensorView {
 public:
@@ -195,10 +198,13 @@ public:
       view_.sizes.push_back(numpy_array.shape(axis));
       view_.strides.push_back(element_stride);
     }
-    if (numpy_array.size() == 0 && (numpy_array.flags() & py::array::c_style)) {
+    if (numpy_array.size() == 0 && (numpy_array.flags() & py::array::c_style) &&
+        std::ranges::all_of(view_.strides, [](const auto stride) { return stride == 0; })) {
       // The old buffer adapter canonicalized contiguous empty arrays. NumPy
       // reports zero byte strides for them; keep the dense ABI convention so
       // a length-zero vector still satisfies its declared unit lane stride.
+      // Contiguity flags cannot distinguish explicit layouts on empty axes:
+      // do not overwrite a user-provided nonzero signed stride tuple.
       vecops::nint_t dense = 1;
       for (py::ssize_t axis = numpy_array.ndim(); axis-- > 0;) {
         view_.strides[static_cast<std::size_t>(axis)] = dense;
@@ -612,7 +618,7 @@ public:
     return handle_;
   }
 
-  /** Prepare many cache misses through one CMake build per compiler. */
+  /** Prepare each unique artifact once per compiler, adopting it into every provider. */
   [[nodiscard]] static Status prepare_batch(std::span<const BatchItem> items, std::size_t parallel_jobs,
                                             vecops::nint_t execution_parallelism);
 
@@ -809,14 +815,23 @@ Status PyOperator::prepare_batch(std::span<const BatchItem> items, std::size_t p
     recipes.reserve(indices.size());
     for (const auto index : indices)
       recipes.push_back(planned[index].recipe);
-    auto compiled = planned[indices.front()].compiler_instance->compile_kernels(recipes, parallel_jobs);
-    if (compiled.size() != indices.size())
+    // Every call has passed match/bind above, including Dynamic relations.
+    // Only the final cold artifact identities are shared, never call checks.
+    auto unique = compiler::details::deduplicate_kernel_batch(recipes);
+    if (!unique)
+      return unique.status();
+    auto& batch = unique.value();
+    auto compiled = planned[indices.front()].compiler_instance->compile_kernels(batch.recipes, parallel_jobs);
+    if (compiled.size() != batch.recipes.size())
       return Status(StatusCode::InternalError, "kernel batch compiler returned the wrong result count");
+    for (const auto& executable : compiled)
+      if (!executable)
+        return executable.status();
     for (std::size_t offset = 0; offset < indices.size(); ++offset) {
-      if (!compiled[offset])
-        return compiled[offset].status();
       auto& plan = planned[indices[offset]];
-      auto adopted = plan.provider->adopt(plan.recipe, std::move(compiled[offset]).value());
+      // Copy the shared executable ownership: aliases may use independent
+      // providers, namespaces or cache roots, all of which must be populated.
+      auto adopted = plan.provider->adopt(plan.recipe, compiled[batch.input_to_artifact[offset]].value());
       if (!adopted)
         return adopted.status();
     }
