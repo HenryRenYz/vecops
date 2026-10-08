@@ -45,7 +45,6 @@ class CPUMatmulPlan:
   # ZA keeps native geometry even for narrowed singleton scalar/Vec traffic.
   sme_narrow_singleton_slices: bool = False
   operands: tuple = ()
-  amx_b_permutation: object | None = None
   dense_transposes: tuple = ()
   schedule: object | None = None
   pass_trace: tuple = ("cpu-plan-matmul",)
@@ -296,7 +295,6 @@ def plan_matmul(prepared, context):
           sme_packed_ab_cache_bypass=sme_packed_ab_cache_bypass,
           sme_packed_ab_traversal=sme_packed_ab_traversal,
           sme_narrow_singleton_slices=sme_narrow_singleton_slices,
-          amx_b_permutation=register_transpose(16, 16, 4),
           dense_transposes=tuple(dense_transposes),
         )
       for field in fields(node):
@@ -346,8 +344,12 @@ def plan_matmul(prepared, context):
     matmuls=MappingProxyType(plans),
     stores=MappingProxyType(stores),
     transposes=MappingProxyType(transposes),
-    packing_permutation=register_transpose(16, 16, 4),
-    packing_permutation_x86=x86_dword_transpose(),
+    # Only matrix/packing emission consumes these closed register recipes.
+    # Pure elementwise/reduction kernels must not parse unrelated algorithms;
+    # all products share the same prepared permutation instead of retaining
+    # an unused duplicate in every family plan.
+    packing_permutation=register_transpose(16, 16, 4) if plans or dense_packs else None,
+    packing_permutation_x86=x86_dword_transpose() if plans or dense_packs else None,
     dense_packs=MappingProxyType(dense_packs),
     grouped_epilogues=frozenset(grouped_epilogues),
     sme_packing_programs=MappingProxyType(packing_programs),

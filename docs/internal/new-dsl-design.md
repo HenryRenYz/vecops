@@ -2837,3 +2837,19 @@ within one traversal, holding original nodes strongly to prevent recycled-id
 collisions. Representative packing C++ stayed byte-identical and the 22
 model/bit-preservation checks passed. One profiled lowering changed from
 approximately 4.1s to 3.0s; that measures compile-time work, not kernel latency.
+
+The resumed ARM suite exposed unbounded directory descriptors in the native
+dnotify cache fallback. Watches now consume at most 128 descriptors and at
+most one eighth of the current soft FD limit; unwatched paths still hash
+their actual contents. The loaded extension passed the same 64-FD,
+200-directory mutation/hash regression on both local x86 and `920f-4`.
+Failure-log I/O errors also preserve the original diagnostic on stderr.
+
+Nonmatrix kernels no longer stage unrelated matrix packing permutations.
+Products share the prepared networks instead of retaining an unused duplicate
+in every family plan. The scoped planner change left generated C++ for sixteen
+MatmulBench metadata combinations and one SME transpose case byte-identical;
+433 register/source-catalog checks and 24 normalization/vector-driver checks
+passed. This removes compile-time work, not a matrix algorithm or a native
+performance gate. Whole-driver SME packing and three-way ARM timings remain
+the acceptance gates for deleting their old terminal algorithm printers.

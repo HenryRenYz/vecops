@@ -73,6 +73,59 @@ def test_debug_lower_name_is_preserved():
   assert callable(T.lower)
 
 
+@pytest.mark.parametrize("reduce", [False, True])
+def test_nonmatrix_kernels_do_not_prepare_matrix_packing_recipes(monkeypatch, reduce):
+  from vecops.language._compiler.backends.cpu import matmul
+
+  def unexpected(*args, **kwargs):
+    pytest.fail("a nonmatrix kernel staged an unrelated matrix packing algorithm")
+
+  monkeypatch.setattr(matmul, "register_transpose", unexpected)
+  monkeypatch.setattr(matmul, "x86_dword_transpose", unexpected)
+  extent = 1 if reduce else 16
+
+  @T.template
+  def kernel(A: T.Tensor((16,), dtype="float32"), C: T.Tensor((extent,), dtype="float32", access="output")):
+    value = T.load(A) * 2 + 1
+    if reduce:
+      C[0] = T.reduce_add(value)
+    else:
+      T.store(C, value)
+
+  prepared = CPUBackend().lower(kernel.ir, (), target="AVX512").backend_ir
+  assert prepared.packing_permutation is None
+  assert prepared.packing_permutation_x86 is None
+
+
+def test_products_share_one_prepared_packing_network(monkeypatch):
+  from vecops.language._compiler.backends.cpu import matmul
+
+  calls = []
+  original = matmul.register_transpose
+
+  def tracked(*args, **kwargs):
+    calls.append(args)
+    return original(*args, **kwargs)
+
+  monkeypatch.setattr(matmul, "register_transpose", tracked)
+
+  @T.template
+  def kernel(
+    A: T.Tensor((4, 4), dtype="float32"),
+    B: T.Tensor((4, 4), dtype="float32"),
+    C: T.Tensor((4, 4), dtype="float32", access="output"),
+    D: T.Tensor((4, 4), dtype="float32", access="output"),
+  ):
+    T.dot((T.load(A), T.load(B)), C, implementation="vector")
+    T.dot((T.load(B), T.load(A)), D, implementation="vector")
+
+  prepared = CPUBackend().lower(kernel.ir, (), target="AVX512").backend_ir
+  assert len(prepared.matmuls) == 2
+  assert calls == [(16, 16, 4)]
+  assert prepared.packing_permutation is not None
+  assert prepared.packing_permutation_x86 is not None
+
+
 @pytest.mark.parametrize("dtype,count", [("uint8", 4), ("int8", 4), ("float16", 2), ("bfloat16", 2)])
 @pytest.mark.parametrize("lanes", [None, 4, 16])
 def test_library_grouped_k_interleave(dtype, count, lanes):
