@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Prove raw/whole-native-packed spatial bounds independently, never K bounds.
 
 The narrow candidate deliberately leaves sliced packed origins on their prior

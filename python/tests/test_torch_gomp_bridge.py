@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Focused policy and source tests for the Clang-to-Torch-GOMP adapter."""
 
 from pathlib import Path

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Native oracle companion to SMEAsmTypesProbe.cpp. Every Vec/Mask is local
 // to a single manual state owner; the caller must select equal VL/SVL in VLS.
 #include <cstdint>

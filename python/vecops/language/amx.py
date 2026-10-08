@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """AMX-specific compiled lexical ownership and tile memory primitives.
 
 region(configuration) accepts up to eight (rows, column_bytes) descriptors.

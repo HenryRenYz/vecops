@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Native CPU metadata shared by paired DSL/C++ benchmark runners."""
 
 import os

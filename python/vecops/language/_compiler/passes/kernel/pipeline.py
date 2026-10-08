@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Plan guarded lookahead prefetches before vector lowering.
 
 CPU prefetch is a hint, not an asynchronous load. Opt-in automatic buffering

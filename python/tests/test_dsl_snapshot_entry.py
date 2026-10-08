@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Frozen validators must not be redirected to an editable live source tree."""
 
 import importlib.util

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Tests for read-only, thread-scoped ARM vector-state detection."""
 
 from vecops._arm_vector_state import (

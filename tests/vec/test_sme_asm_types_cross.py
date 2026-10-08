@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Real SME asm operands stay sizeless across the public VLS boundary.
 
 This standalone cross test deliberately does not import vecops/_C. It compiles

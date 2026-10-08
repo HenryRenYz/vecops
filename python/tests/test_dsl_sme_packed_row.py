@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """BF16 single-packed B rows use ZA, without changing other skinny routes.
 
 The matched C++ source registration already consumes native SME-packed B in

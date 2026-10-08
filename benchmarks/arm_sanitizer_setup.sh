@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 set -euo pipefail
 
 # Install only the Clang 19 UBSan static runtimes into this project's private

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """CPU resident teams, scalar shared slots and portable atomic operations."""
 
 from .... import ir as I

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Select the real public hardware atom for the paired native baseline.
 #pragma once
 #include "vecops/matmul/Atom.h"

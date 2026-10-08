@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Keep the public MatmulPack dispatch/TransformPack optimizations intact.
 // The auxiliary tensors express the same FP32 pointwise graph as the DSL;
 // the test oracle separately verifies logical coordinates and padded zeros.

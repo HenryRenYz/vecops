@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Register recurrence vs explicit C++ and deliberate scratch placement.
 
 Native repeat excludes Python dispatch, with shared aligned I/O, alternating

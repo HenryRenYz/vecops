@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Bounded delta debugging, requiring an explicit deterministic failure oracle."""
 
 

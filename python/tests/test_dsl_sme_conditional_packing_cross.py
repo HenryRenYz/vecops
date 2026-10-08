@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Actual FA64 cross assembly for the isolated conditional packing candidate."""
 
 import re

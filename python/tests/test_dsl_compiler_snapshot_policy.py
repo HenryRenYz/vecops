@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Compiler snapshots isolate prepared kernels from mutable user policy."""
 
 from __future__ import annotations

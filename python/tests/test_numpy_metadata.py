@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """NumPy's empty contiguity flags must not discard explicit ABI layouts."""
 
 import numpy as np

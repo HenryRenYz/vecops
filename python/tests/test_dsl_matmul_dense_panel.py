@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Runtime cache packing also binds the prepared register-transpose path."""
 import numpy as np
 import vecops

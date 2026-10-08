@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Execute every concrete ARM source registration, with auditable coverage.
 
 The six registration cohorts are distinct from shape/vocabulary indexes. Every

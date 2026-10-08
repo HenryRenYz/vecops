@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Measure the actual rank-two normalization library path, not a row wrapper.
 
 Each case compares a direct ``T.library.layernorm/softmax(T.load(A))`` with

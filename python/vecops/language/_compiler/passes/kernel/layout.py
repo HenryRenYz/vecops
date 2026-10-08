@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Normalize costly reduction input permutations through the memory planner.
 
 Do not copy arbitrary noncontiguous views: a rank-one slice, broadcast or

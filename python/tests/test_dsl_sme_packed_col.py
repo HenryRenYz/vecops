@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """A single packed B column uses SME spatial lanes, not scalar K MACs.
 
 The source/cross gates check the narrow automatic route without changing raw

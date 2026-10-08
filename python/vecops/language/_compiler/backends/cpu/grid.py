@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Conservative grid ownership proofs and target-local scheduling estimates.
 
 No alias promise is inferred from parameter names. Proven logical ownership

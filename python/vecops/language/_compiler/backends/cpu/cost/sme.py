@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """SME costs, bounded native-A packing and prepacked traversal policies.
 
 The cycle/byte rates below are conservative seeds, not hardware measurements.

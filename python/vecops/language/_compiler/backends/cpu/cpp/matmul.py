@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Print planned vector/FMA and matrix-instruction schedules.
 
 The emitter owns no algorithm-selection passes and never calls ops::Matmul

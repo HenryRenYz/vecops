@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 cmake_minimum_required(VERSION 3.22)
 project(Vecops VERSION 0.1.0 LANGUAGES C CXX)
 
@@ -133,6 +135,12 @@ if(VECOPS_BUILD_PYTHON)
     install(FILES ${_VECOPS_SME_MATMUL_LEAF_SOURCES}
         DESTINATION vecops/_sdk/lib/cmake/Vecops/sme
         COMPONENT python)
+    install(FILES LICENSE THIRD_PARTY_NOTICES.md
+        DESTINATION vecops/_sdk/share/licenses/vecops
+        COMPONENT python)
+    install(DIRECTORY LICENSES/
+        DESTINATION vecops/_sdk/share/licenses/vecops/LICENSES
+        COMPONENT python)
 endif()
 
 # -------------------------------- Test Config ---------------------------------
@@ -165,6 +173,10 @@ if(VECOPS_BUILD_BENCHMARKS)
 endif()
 
 # ------------------------------- Installation --------------------------------
+install(FILES LICENSE THIRD_PARTY_NOTICES.md
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/vecops")
+install(DIRECTORY LICENSES/
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/vecops/LICENSES")
 install(
     DIRECTORY include/vecops
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """SME's constant-panel proof uses its real K quantum, not generic 32."""
 
 import os

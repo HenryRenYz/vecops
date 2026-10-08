@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Attention composition through indexing, strided views, grids and AMX."""
 
 import numpy as np

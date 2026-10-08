@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Logical producer windows preserve captures and ordinary vector lowering."""
 
 import numpy as np

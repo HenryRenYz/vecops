@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Backend-independent scalar, tile and logical vector types."""
 
 from __future__ import annotations

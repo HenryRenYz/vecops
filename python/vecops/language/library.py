@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Visible DSL algorithms; no opaque C++ operator calls.
 
 Load with the desired accumulation dtype first. Layernorm uses centered

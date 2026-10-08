@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Matrix products retain operand DAGs, accumulator and packing provenance.
 
 Logical B is [K,N], unlike the C++ operator's [N,K] convention. Packed

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Backend-neutral implementation cost rules, in estimated target cycles.
 
 Throughput is reciprocal throughput, not dependency latency. Defaults are

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """JIT must preserve the compile configuration, including worker cost policy."""
 
 import importlib

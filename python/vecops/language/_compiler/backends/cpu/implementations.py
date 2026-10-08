@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """CPU lowering contracts, distinct from target-independent semantics/costs."""
 
 from __future__ import annotations

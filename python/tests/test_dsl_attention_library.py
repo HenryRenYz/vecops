@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Composable AF3 math and streamed attention, including empty/masked tiles."""
 
 import numpy as np

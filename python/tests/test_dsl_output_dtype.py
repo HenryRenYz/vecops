@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """String BF16 annotations work for automatic outputs, not just explicit ones."""
 
 import pytest

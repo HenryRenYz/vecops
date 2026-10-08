@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Negative controls for the manual Streaming/ZA assembly gate."""
 
 import pytest

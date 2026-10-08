@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 # Source this from an already initialized af3 shell inside an exclusive ARM job.
 # The helper materializes only the pinned C++ headers under a private /tmp root;
 # durable runtime DSOs are hash-checked and preloaded before future Python runs.

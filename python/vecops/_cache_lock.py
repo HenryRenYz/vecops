@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Cross-process writer locks for local POSIX artifact caches."""
 
 from contextlib import contextmanager

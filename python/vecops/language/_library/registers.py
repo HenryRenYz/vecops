@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Inspectable register algorithms shared by transpose and matrix packing.
 
 The arguments are immutable tuples of logical vectors. Every iteration and

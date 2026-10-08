@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Product boundaries, packed panel origins and AMX compiler-ordering edges."""
 import numpy as np
 import pytest

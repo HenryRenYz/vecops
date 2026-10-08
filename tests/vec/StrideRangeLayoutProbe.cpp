@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Validate the wide-address boundary against the public conversion layout.
 // Arrays below are ordinary memory inputs, never vector/Mask representations.
 #include <array>

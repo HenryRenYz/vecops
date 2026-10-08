@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Semantic operation catalog; independent of frontend, passes and backends."""
 
 from . import builtin as _builtin  # noqa: F401 -- register built-in contracts once

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """CPU memory estimates; compute work inherits portable defaults."""
 
 from ....cost.model import CostProfile, CostRule, OperationCost

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Native-loop baseline, same operation/configuration as TransposeBenchCommon.h.
 #include "vecops/Kernel.h"
 #include "vecops/ops/Transpose.h"

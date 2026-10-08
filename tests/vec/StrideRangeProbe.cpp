@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Sparse anonymous mappings exercise valid huge strides without huge RSS/files.
 #include <cerrno>
 #include <cstddef>

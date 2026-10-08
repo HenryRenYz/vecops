@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Prepare every CPU emission alternative before printing C++.
 
 Alias fallbacks, snapshots and axis-reduction tails used to run compiler passes

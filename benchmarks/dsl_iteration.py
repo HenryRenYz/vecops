@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Native paired timings for SIMD, custom moments and fused prefix consumers.
 
 Compilation is excluded, the timing core and sibling are reserved, and C++

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Runtime tensor metadata and symbolic argument/output binding."""
 
 from __future__ import annotations

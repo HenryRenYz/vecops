@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Single source of truth for built-in IR semantics and ordinary intrinsics."""
 
 import operator

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Typed value state across structured control flow, independent of storage.
 
 Backends choose registers or private memory; neither a C++ array nor an ISA

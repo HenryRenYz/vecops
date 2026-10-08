@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Immutable source/helper capture and semantic cache identity."""
 
 from __future__ import annotations

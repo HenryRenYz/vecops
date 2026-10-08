@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Singleton diagnostics retain original keys and a balanced, unfiltered order."""
 
 import csv

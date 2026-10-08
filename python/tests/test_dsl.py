@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Execution and codegen tests for source-less vector kernels."""
 import numpy as np
 import pytest

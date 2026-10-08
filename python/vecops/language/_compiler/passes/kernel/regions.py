@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Schedule source-parsed pure row regions without recognizing algorithms.
 
 A sole row-separable store can stream statistics and its epilogue together.

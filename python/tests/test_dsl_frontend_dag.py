@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Capture/state membership checks are linear in shared expression DAG size."""
 
 from vecops.language._compiler import ir as I

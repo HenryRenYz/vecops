@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Specialize source-parsed library leaves before ordinary kernel/vector passes.
 
 Adapters select a measured legal region, not its arithmetic or instruction

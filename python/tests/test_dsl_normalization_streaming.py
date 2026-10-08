@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Automatic row-statistic/epilogue fusion keeps layout and alias boundaries."""
 
 import numpy as np

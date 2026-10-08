@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Serialize native timings on one CPU while allowing parallel compilation."""
 import fcntl
 import os

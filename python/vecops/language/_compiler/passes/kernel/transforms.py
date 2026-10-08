@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Push logical value transforms to memory when the proof is exact."""
 
 from dataclasses import replace

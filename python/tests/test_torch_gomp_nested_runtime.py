@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Exercise the generated Clang/GOMP adapter's nested and error paths."""
 
 from __future__ import annotations

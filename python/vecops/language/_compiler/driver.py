@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Template compilation orchestration, independent of runtime argument adaptation."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """CPU compilation driver: frontend -> kernel passes -> vector lowering -> C++."""
 
 from dataclasses import replace

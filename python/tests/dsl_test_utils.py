@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Shared compiler selection for executable DSL tests.
 
 The defaults match the historical test configuration. ARM test jobs can set

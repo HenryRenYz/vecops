@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Tile-style Python metaprogramming frontend for vecops kernels."""
 
 from . import amx, cost, library, passes, sme

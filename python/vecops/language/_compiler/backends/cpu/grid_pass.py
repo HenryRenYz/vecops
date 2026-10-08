@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Registered CPU grid planning, independent of C++ printing."""
 
 from dataclasses import replace

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """General scalar/tuple folds expand into typed structured control IR.
 
 Native add/min/max reductions retain the existing vector fast paths. Arbitrary

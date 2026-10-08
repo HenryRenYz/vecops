@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Observable record output; not an elementwise value or a synchronization op."""
 
 from dataclasses import dataclass

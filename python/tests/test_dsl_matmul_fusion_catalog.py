@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """The paired ARM benchmark must audit every rank-two fusion/orientation schema."""
 
 import sys

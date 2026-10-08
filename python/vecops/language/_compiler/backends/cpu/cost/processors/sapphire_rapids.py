@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Conservative SPR dependency estimate; frequency is not baked into cycles."""
 
 from .....cost.model import CostProfile, CostRule, OperationCost

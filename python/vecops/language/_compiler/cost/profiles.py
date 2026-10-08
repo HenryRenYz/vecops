@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Versioned profile registry and immutable snapshots, without host probing."""
 
 import hashlib

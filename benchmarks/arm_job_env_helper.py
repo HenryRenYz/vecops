@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Materialize a hash-pinned ARM C++ header environment before Python imports.
 
 This intentionally imports only the Python standard library. In particular,

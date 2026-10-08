@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Source-level ZA packing schedules; primitive lowering owns no algorithm."""
 
 from .. import dsl as T

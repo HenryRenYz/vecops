@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Grid ownership, scheduling and native multi-stage execution regressions."""
 
 import numpy as np

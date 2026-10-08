@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Ordered FP32-pair stores preserve logical lanes, rounding and addressing.
 
 The cross tests inspect genuine SVE instructions; local Native execution is

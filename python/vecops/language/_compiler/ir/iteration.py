@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Logical loop contracts; execution mapping and ISA representation are separate.
 
 FoldLoop retains reduction identity and ordering until vector legalization.

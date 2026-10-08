@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Cache experiments preserve exact catalog coverage and arithmetic oracles."""
 
 import csv

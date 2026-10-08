@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Native-repeat CPU grid scheduling benchmark, including dispatch and barriers.
 
 Run in af3. Compilation is excluded and timings alternate variants using shared

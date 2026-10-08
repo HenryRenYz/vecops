@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Shape-only transforms and axis coordinates, independent of execution layout."""
 
 from dataclasses import replace

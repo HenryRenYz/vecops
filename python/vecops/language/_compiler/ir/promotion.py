@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Target-independent floating promotion, including weak Python literals.
 
 Integer/integer widths and signedness deliberately remain the existing IR

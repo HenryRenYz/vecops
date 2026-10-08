@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Time standalone packing against public MatmulPackBench shape/dtype metadata."""
 
 import argparse

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Read the calling thread's current ARM SVE/SME vector lengths.
 
 Linux ``prctl`` GET operations are read-only and thread scoped.  Nothing is

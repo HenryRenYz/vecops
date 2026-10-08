@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """SME-specific DSL state and instruction vocabulary.
 
 `with T.sme.region():` is compiled lexical ownership, never a host Python

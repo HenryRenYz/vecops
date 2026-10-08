@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Test-only bit-move model; no matrix ISA or production interpreter emulation.
 
 ZA words follow the published load/write/read/store slice contract. The model

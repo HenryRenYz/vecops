@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Source-tree and relocatable SDK SME leaf-library construction contracts."""
 
 import os

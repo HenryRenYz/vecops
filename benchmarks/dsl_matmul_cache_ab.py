@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Balanced cache-K diagnostics on exact, externally packed registrations.
 
 Preserve the catalog's tensors, transforms, independent numerical oracle and

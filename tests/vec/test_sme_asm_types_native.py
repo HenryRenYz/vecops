@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Actual SME VLS moves/direct memory/MOPA at supported equal VL/SVL.
 
 Prepared target-only regression; cross success is not this Native test's pass.

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Complete geometry cohort for the bounded packed-AB cache bypass.
 
 Keep every original registration meeting the cheap geometry gate, including

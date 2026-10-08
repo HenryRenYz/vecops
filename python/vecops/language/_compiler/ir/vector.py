@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """CPU-independent vector operations between tile IR and native legalization.
 
 Expressions describe logical math; VectorOp/OperationCopy make the operations

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Exercise the maintained paired output transform through real DataAccess.
 // Swapping an access must preserve the original coordinate/vector-axis map.
 #define __kernel__ unused_column_scale_matmul_reference

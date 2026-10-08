@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Resolve CPU profiles from the compilation target, not the build host."""
 
 from __future__ import annotations

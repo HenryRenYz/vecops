@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Cost-based CPU decisions; no duplicated opcode lists or hidden thresholds."""
 
 

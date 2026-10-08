@@ -1,4 +1,12 @@
+<!-- SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors -->
+<!-- SPDX-License-Identifier: MIT -->
+
 # Native source-kernel compiler
+
+Installed CMake SDKs keep the project license, third-party notices, and full
+upstream texts under `share/licenses/vecops`; preserve this directory when
+redistributing the installed headers or archives. Python SDK copies carry the
+same materials within their `_sdk` tree.
 
 `vecops::compiler::Compiler` turns one bound C++ file defining `__kernel__`
 into an artifact DSO. It is optional: runtime-only deployments build without

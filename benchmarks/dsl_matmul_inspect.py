@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Profile one native matrix schedule or audit AMX loops in its shared object.
 
 The profile path checks the DSL/C++ pair before sampling repeats, keeps the

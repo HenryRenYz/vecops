@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Compiled kernel calls and lazy Torch bridge adaptation."""
 
 from __future__ import annotations

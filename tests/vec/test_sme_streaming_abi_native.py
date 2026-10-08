@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Callee-saved ABI and numerical regression for manual SME state owners.
 
 Only scalar metadata crosses the normal/streaming boundary. The high-pressure

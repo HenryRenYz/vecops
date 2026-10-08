@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Instantiate SVE/SME matrix kernels and verify manual SM regions; no execution."""
 
 import argparse

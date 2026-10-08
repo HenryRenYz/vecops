@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors -->
+<!-- SPDX-License-Identifier: MIT -->
+
 # Python JIT API
 
 The public Python API is implemented above the low-level `vecops._C` pybind11
@@ -1976,3 +1979,12 @@ with no external reads need no checks; opaque/effectful producers that cannot
 expose their memory views are diagnosed. An enclosing true branch contributes
 the same bounded-view proof as the existing two-view form. This is a runtime
 guard, not an unchecked noalias annotation, and historical captures are kept.
+
+## Distribution license material
+
+Python wheels retain the root MIT license, `THIRD_PARTY_NOTICES.md`, and all
+referenced upstream texts from `LICENSES/` in wheel metadata and under
+`vecops/_sdk/share/licenses/vecops`. The latter stays with the bundled headers
+and native SDK when it is copied independently. Project SPDX fields cover only
+project-owned support code; user kernel logic and third-party portions retain
+their original terms. Generated DSL C++ identifies this distinction explicitly.

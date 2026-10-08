@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /** Benchmark-only typed reference; workspace is reused outside the repeat loop. */
 #include "vecops/Kernel.h"
 #include "vecops/execution/Parallel.h"

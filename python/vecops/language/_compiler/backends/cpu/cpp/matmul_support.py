@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Small target-side packing/cache helpers, not matrix-product kernels."""
 
 PREAMBLE = r"""

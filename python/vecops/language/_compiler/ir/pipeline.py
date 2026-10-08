@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Synchronous software pipeline annotations, not asynchronous promises."""
 
 from dataclasses import dataclass

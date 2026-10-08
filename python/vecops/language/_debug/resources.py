@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """CPU worker coverage, memory access plans and IR register estimates.
 
 Never executes a kernel, allocates outputs or claims hardware occupancy. Plans

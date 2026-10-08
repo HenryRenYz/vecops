@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Pure frontend regressions for boolean values captured by T.func helpers."""
 
 from __future__ import annotations

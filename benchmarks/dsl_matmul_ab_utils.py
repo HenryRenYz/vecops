@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Shared exact-key selection and unfiltered three-label Matmul timing."""
 
 from __future__ import annotations

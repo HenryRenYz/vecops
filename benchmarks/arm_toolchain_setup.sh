@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 # Prepare a project-private GCC 14 standard library for the existing clang.
 # Execute inside an exclusive lx-run job, never on the login node. No af3
 # activation/configuration, bashrc, or other shared environment is modified.

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Terminal register instruction spelling, shared by transpose and packing.
 
 Algorithms are staged T.func expression DAGs. This printer does not choose a

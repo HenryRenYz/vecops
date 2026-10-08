@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Prove private lane permutations for complete pointwise memory regions.
 
 Tile expressions remain logically ordered. A complete converting load and

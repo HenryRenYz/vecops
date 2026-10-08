@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Whole BF16 packed-AB four-M-block columns reuse the native ZA family.
 
 This is deliberately not a general PackedDot replacement: windows, ambiguous

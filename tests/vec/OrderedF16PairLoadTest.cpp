@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /** Standalone ordered converting-load regression; no Vec/Mask containers. */
 #include <algorithm>
 #include <bit>

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Exact TransposeBench metadata, shared I/O, native inner-loop A/B timing.
 
 Run in af3, pinned to one CPU. JIT is excluded; the two kernels use the same

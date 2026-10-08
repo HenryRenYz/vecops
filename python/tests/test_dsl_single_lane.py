@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """One-lane loads retain dtype conversion, masks and snapshot semantics."""
 
 import numpy as np

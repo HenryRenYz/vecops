@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Exact LayerNormBench/SoftmaxBench metadata with paired native-ABI timing.
 
 Run in the af3 environment on an allocated compute CPU. All compilers are

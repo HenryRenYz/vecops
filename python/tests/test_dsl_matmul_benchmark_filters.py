@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """A benchmark must not report success when its requested cases do not exist."""
 
 import importlib.util

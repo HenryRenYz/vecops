@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Source-backed manifest for the C++ matmul benchmark catalogs.
 
 This module deliberately keeps declaration-level entries (including entries

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Safe full-register PackedDot loads and FP16 widening-vector dot lowering.
 
 Pure/cross tests inspect real lowering without claiming target performance.

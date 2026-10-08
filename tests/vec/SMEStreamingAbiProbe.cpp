@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Streaming-only wide-address validation; allocate and diagnose outside SM.
 // Arrays below are ordinary memory inputs, never vector/Mask representations.
 #include <array>

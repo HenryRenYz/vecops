@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Compile instantiated transpose kernels for SVE VLA/VLS and SME; no execution.
 
 Needs an AArch64 sysroot with GCC 13 C++ headers and Clang supporting SME.

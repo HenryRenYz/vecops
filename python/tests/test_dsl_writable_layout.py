@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Small-rank layout proofs preserve the generic sorted-axis contract."""
 
 from itertools import product

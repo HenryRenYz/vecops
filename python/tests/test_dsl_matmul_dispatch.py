@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Runtime family selection, full/tail K and target-selected packed formats."""
 
 import numpy as np

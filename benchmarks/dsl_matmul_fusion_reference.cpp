@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Paired native baseline for MatmulFusionBench and MatmulOrientationBench.
 // Pipeline semantics match MatmulScenarioBenchCommon.h. Unlike a rewritten
 // compute loop, these DataAccess operands preserve public Matmul's transform,

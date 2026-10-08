@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Explicit CPU timings, correctness summaries and Chrome/Perfetto traces."""
 
 import json

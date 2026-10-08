@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Captured immutable integer tuples share the literal-parameter frontend path."""
 
 from __future__ import annotations

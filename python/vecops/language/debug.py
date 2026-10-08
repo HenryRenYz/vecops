@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Kernel inspection, tracing and profiling; presentation formats may evolve."""
 
 from ._debug.interpreter import UnsupportedInterpretation

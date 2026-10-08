@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Bounded constant-pitch F32 -> F16 epilogue; isolate its original input."""
 
 import json

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Paired baseline: public Matmul configuration, transforms and reusable scope.
 #include "vecops/Kernel.h"
 #include "vecops/ops/Matmul.h"

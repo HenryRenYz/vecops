@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Inspect actual native objects; never rebuild as a side effect of a getter."""
 
 import re

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """ARM validation runner safety and process-scoped SDK selection."""
 
 import importlib.util
@@ -260,6 +262,23 @@ def test_login_node_is_rejected_even_if_aarch64(runner, monkeypatch):
   monkeypatch.setattr(runner.sys, "platform", "linux")
   with pytest.raises(RuntimeError, match="login node"):
     runner.check_machine()
+  with pytest.raises(RuntimeError, match="login node"):
+    runner.check_machine(standalone_arm=True)
+
+
+def test_standalone_arm_requires_explicit_opt_in_and_arm_host(runner, monkeypatch):
+  monkeypatch.setattr(runner.platform, "machine", lambda: "aarch64")
+  monkeypatch.setattr(runner.platform, "node", lambda: "test14")
+  monkeypatch.setattr(runner.sys, "platform", "linux")
+  monkeypatch.delenv("CCS_JOB_ID", raising=False)
+  with pytest.raises(RuntimeError, match="Donau"):
+    runner.check_machine()
+  runner.check_machine(standalone_arm=True)
+  monkeypatch.setattr(runner.platform, "machine", lambda: "x86_64")
+  with pytest.raises(RuntimeError, match="AArch64"):
+    runner.check_machine(standalone_arm=True)
+  with pytest.raises(ValueError, match="not both"):
+    runner.check_machine(standalone_arm=True, allow_local=True)
 
 
 def test_source_smoke_cannot_misreport_installed_sdk(runner, tmp_path):

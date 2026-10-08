@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Compare the source-level FMA recipe with the existing vector dot family.
 
 Both generated sources use one frozen package/SDK, explicit vector lowering,

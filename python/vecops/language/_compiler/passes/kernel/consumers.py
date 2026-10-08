@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Pointwise consumers of loop-produced private storage fuse at the write site.
 
 Prefix recurrences retain their order, including exclusive scans. External

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Uncalibrated x86 estimates; not a claim of measured instruction timings."""
 
 from ....cost.model import CostProfile, CostRule, OperationCost

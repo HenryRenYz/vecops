@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Selected SME owners keep producer addressing in callback-owned SSA.
 
 Source/cross tests do not claim ARM speed. The Native fixture also runs on

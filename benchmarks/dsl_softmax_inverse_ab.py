@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Frozen-snapshot strict softmax versus unchanged C++ with explicit schedules.
 
 This external experiment calls only the public T.library.softmax interface,

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Kernel-language vocabulary; these operations are interpreted by the AST frontend.
 
 They deliberately cannot execute tensor computation in the host interpreter.

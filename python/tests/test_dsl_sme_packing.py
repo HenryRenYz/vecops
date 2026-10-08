@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Raw SME ZA packing: public-instruction codegen and bitwise ARM execution."""
 
 import os

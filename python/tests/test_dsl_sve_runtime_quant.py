@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Experimental ordinary-SVE quantize/packed-B dot family.
 
 The opt-in family must preserve the user DAG's floating-point contraction

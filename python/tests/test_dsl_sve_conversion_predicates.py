@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Complete converting-memory leaves retain logical Tag validity domains.
 
 Genuine ARM objects distinguish ptrue full words from fixed/subword prefixes.

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Owned storage intrinsics consume parsed shapes exactly once."""
 
 import pytest

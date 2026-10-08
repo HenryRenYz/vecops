@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Baseline-ISA launcher. No VL-dependent value crosses a prctl transition.
 #include <array>
 #include <cstdint>

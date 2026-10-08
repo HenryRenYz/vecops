@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Same-round MatmulBench/MatmulFusionBench shapes and transform pipelines.
 
 No JIT in timings. Native inner loops, identical metadata and buffers,

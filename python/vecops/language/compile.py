@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Public template-compilation façade; lowering and runtime are separate packages."""
 
 from ._compiler.driver import compile

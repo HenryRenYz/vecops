@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Multidimensional coordinates, singleton transforms and planned workspace."""
 
 import numpy as np

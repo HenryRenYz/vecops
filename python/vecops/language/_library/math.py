@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Stable, composable AF3-style math; no opaque native operator calls."""
 
 from .. import dsl as T

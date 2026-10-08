@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Execute guarded I.Pack with real typed cache/history tensor inputs.
 
 This is a code-generator primitive diagnostic, not an alternative lowering

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Run a frozen source snapshot without changing an editable installation.
 
 Use in a fresh validation process. The snapshot must contain its own native

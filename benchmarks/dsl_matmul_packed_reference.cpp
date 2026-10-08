@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Paired prepacked baseline. Packing is timed separately, not in this kernel.
 #define __kernel__ raw_matmul_reference_kernel
 #include "dsl_matmul_reference.cpp"

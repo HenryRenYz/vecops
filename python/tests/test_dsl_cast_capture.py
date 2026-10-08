@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Cast/load fusion preserves lexical read captures across aliased writes.
 
 The two casts are ordered rounding boundaries. Their original read remains a

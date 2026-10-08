@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Ordinary-SVE MMLA consumes SME-packed input without owning ZA.
 
 Cross compilation checks real ISA routes; target execution remains required

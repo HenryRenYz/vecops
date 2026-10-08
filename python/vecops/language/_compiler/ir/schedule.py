@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Backend schedules expressed before source emission.
 
 Parameters are bound by the backend printer (VL, native tile width and runtime

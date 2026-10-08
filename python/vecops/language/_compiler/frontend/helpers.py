@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Source-parsed T.func binding, typed results and lexical helper exits."""
 
 import ast

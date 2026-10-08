@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Common iteration contracts, ordered recurrences and alias-versioned fusion."""
 
 import re

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /** @file dsl_source_capture_alias.cpp
  * @brief Source-constexpr aliases must survive schema generation and batching.
  */

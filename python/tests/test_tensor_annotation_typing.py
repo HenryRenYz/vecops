@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Tensor annotation hashes are stable while symbolic captures are bound."""
 
 from __future__ import annotations

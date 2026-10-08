@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Shared expression DAG and structured-control traversal."""
 
 from dataclasses import fields, is_dataclass, replace

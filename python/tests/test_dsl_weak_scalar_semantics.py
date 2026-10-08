@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Literal-promotion hints are not boolean or helper-storage dtype qualifiers."""
 
 import pytest

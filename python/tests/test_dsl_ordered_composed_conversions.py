@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Ordered DSL casts retain intermediate rounding across grouped vector words.
 
 This diagnoses the DSL's ordered conversion path, not the separately skipped

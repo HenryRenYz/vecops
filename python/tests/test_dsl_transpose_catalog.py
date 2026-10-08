@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Complete transpose metadata, equivalent-schema reuse, and safe resuming."""
 
 import csv

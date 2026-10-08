@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Same-round cache/online-packing schedule experiments against public C++.
 
 Every variant includes online packing inside the native repeat loop. This is

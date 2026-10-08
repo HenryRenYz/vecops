@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Run real DSL pytest kernels on a scheduled ARM compute allocation.
 
 Source SDK is the default and should pass a separate smoke before a full
@@ -10,6 +12,10 @@ Examples (inside an exclusive lx-run compute job, after activating af3)::
   python benchmarks/dsl_arm_validate.py python/tests/test_dsl.py::test_control_flow
   python benchmarks/dsl_arm_validate.py --reuse-installed-sdk -- --maxfail=3 -q
   python benchmarks/dsl_arm_validate.py --reuse-installed-sdk --benchmark dsl_norm_catalog -- --list
+
+For an authorized standalone ARM test host (such as 920f-4), first verify its
+load and then pass ``--standalone-arm``. The default still requires Donau;
+neither mode admits a login node. ``--allow-local`` is a separate x86/mock opt-in.
 
 Pytest options such as ``-k`` go after ``--``. Explicit selectors go before it.
 An explicitly authorized scratch allocation can use ``--scratch-root`` with
@@ -39,17 +45,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def check_machine(*, allow_local=False):
+def check_machine(*, allow_local=False, standalone_arm=False):
+  if allow_local and standalone_arm:
+    raise ValueError("select either local/mocked validation or standalone ARM, not both")
   if not allow_local and (platform.machine().lower() not in {"aarch64", "arm64"} or sys.platform != "linux"):
     raise RuntimeError("ARM validation must run on Linux AArch64 in a scheduled compute job")
   if not allow_local:
+    if platform.node().split(".", 1)[0].lower().startswith("login"):
+      raise RuntimeError("run ARM validation on a compute host, never on the login node")
+    if standalone_arm:
+      return  # Explicit opt-in after checking the standalone host's load/access.
     allocation = os.environ.get("CCS_ALLOC_FILE")
-    if (
-      platform.node().split(".", 1)[0].lower().startswith("login")
-      or not os.environ.get("CCS_JOB_ID")
-      or not allocation
-      or not Path(allocation).is_file()
-    ):
+    if not os.environ.get("CCS_JOB_ID") or not allocation or not Path(allocation).is_file():
       raise RuntimeError("run ARM validation inside lx-run/Donau, never on the login node")
 
 
@@ -292,6 +299,9 @@ def main(argv=None):
   parser.add_argument("--junitxml", type=Path)
   parser.add_argument("--failure-log", type=Path, help="Optional immediate failed-test diagnostics as JSONL")
   parser.add_argument("--allow-local", action="store_true", help="Explicit opt-in for local/mocked runner tests")
+  parser.add_argument(
+    "--standalone-arm", action="store_true", help="Explicit opt-in for a verified standalone ARM host"
+  )
   parser.add_argument("selectors", nargs="*")
   args = parser.parse_args(own)
   if args.benchmark and args.selectors:
@@ -303,7 +313,7 @@ def main(argv=None):
   ):
     parser.error("pass --basetemp/--junitxml to the runner before -- so their output paths can be validated")
   benchmark = benchmark_path(args.benchmark) if args.benchmark else None
-  check_machine(allow_local=args.allow_local)
+  check_machine(allow_local=args.allow_local, standalone_arm=args.standalone_arm)
   cc, cxx = compiler_path(args.cc), compiler_path(args.cxx)
   os.environ.update(CC=cc, CXX=cxx, VECOPS_TEST_TARGET="Native")
   scratch_root = validate_scratch_root(args.scratch_root) if args.scratch_root else None

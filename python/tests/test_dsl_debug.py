@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Inspection is metadata-only; print records are bounded and effectful."""
 
 import numpy as np

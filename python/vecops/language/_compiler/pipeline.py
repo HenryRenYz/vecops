@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Explicit builtin loading and pipeline assembly; no compilation-global IR."""
 
 import importlib

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Single-thread CPU DSL / existing C++ ops comparison, excluding JIT time.
 
 Run: conda run -n af3 python benchmarks/dsl_norm.py

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Mutable locals cannot smuggle runtime scalar payloads into replay shapes."""
 
 import pytest

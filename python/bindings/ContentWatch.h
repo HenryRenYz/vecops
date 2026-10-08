@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Mutation-based hash-cache acceleration. Linux dnotify is a fallback when
 // the account's inotify quota is exhausted. Never performs work in a signal
 // handler beyond incrementing one lock-free atomic; no Python/GIL callbacks.

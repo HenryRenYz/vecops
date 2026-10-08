@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Immutable cost profiles for compiler tuning, independent of DSL semantics.
 
 Pass profiles through T.compile(..., pass_options={"cost_profiles": (profile,)})

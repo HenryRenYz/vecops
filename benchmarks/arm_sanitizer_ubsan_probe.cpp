@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Minimal C++ source used to validate a task-private Clang UBSan runtime.
 // It intentionally avoids C++ standard-library headers and APIs: the probe
 // tests compiler-rt selection, not the separate libstdc++ toolchain setup.

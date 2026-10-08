@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Frozen transpose/matmul/packing refactor versus its checkpoint and public C++.
 
 Uses the original TransposeBench metadata/input/oracle. Source emission runs

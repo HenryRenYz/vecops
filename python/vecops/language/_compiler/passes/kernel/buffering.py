@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Opt-in two-bank scheduling with an invocation-level no-alias guard.
 
 Only straight-line, fixed logical tile extents are eligible. Unsupported loops

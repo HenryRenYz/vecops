@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Output-backed split-K preserves its physical column stride on every path.
 
 The original row failure used the vector outer-product continuation, not an

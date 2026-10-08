@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Print prepared transpose DAGs. Algorithm selection lives in CPU planning."""
 
 from .... import ir as I

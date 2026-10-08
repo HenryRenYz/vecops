@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Exact scalar projections through logical layout and conversion boundaries.
 
 Keep the original memory read as an identity-bearing leaf. Consumers resolve

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Deterministic, bounded textual IR presentation; not an interchange format."""
 
 from collections.abc import Mapping

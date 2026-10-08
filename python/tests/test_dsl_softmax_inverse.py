@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Strict softmax division is a library algorithm, not an rcp rewrite."""
 
 import numpy as np

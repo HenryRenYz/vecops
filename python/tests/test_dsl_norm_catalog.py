@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Normalization benchmark metadata and accuracy propagation contracts."""
 
 import importlib.util

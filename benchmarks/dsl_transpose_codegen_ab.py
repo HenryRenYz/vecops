@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Isolate compiler row-unrolling pressure in tiny constant conversions.
 
 This is a generated-code diagnostic, not a new lowering or default policy.

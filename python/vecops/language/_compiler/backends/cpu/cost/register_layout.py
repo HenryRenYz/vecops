@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Conservative profitability of a semantically proven private CPU layout.
 
 The first automatic candidate is F16-only and requires several independent

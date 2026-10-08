@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Python aliases retain source names without splitting annotation identities."""
 
 from pathlib import Path

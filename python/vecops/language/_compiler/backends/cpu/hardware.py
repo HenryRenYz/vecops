@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Checked preflight for structured no-throw hardware instruction regions.
 
 All potentially throwing metadata checks are planned once, before ownership.

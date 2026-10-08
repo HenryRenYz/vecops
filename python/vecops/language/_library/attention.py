@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Portable online SDPA expressed as visible dot/reduction/control operations.
 
 This implementation is a composition baseline, not a claim of parity with the

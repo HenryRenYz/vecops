@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Subprocess target for the fresh-process bridge cache test."""
 
 from __future__ import annotations

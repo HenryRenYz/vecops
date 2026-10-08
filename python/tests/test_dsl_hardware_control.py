@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Hardware loops retain one owner and preflight all metadata before entry."""
 
 import numpy as np

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Narrow singleton memory work without narrowing the native ZA instruction."""
 
 import platform

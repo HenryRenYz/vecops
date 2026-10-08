@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Native mixed SVE/SME correctness and JIT cache isolation across VL changes.
 
 Run only on a Linux AArch64 SME compute allocation. No vector or ZA value is

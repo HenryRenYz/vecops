@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """C++ support preamble; not a place for compiler transforms."""
 
 _SME_MATH_POLICY = """// Manual SME owners cannot call ordinary SVE PCS exceptional-path helpers.

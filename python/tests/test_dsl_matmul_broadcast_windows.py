@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Cache windows preserve runtime singleton broadcasts and captured reads.
 
 Native shares the packed-column strict fixture, which first exposed a runtime

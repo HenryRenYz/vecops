@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Execute SME products on target ARM, sharing dynamic variants per dtype.
 
 Run with CC=clang CXX=clang++ VECOPS_TEST_TARGET=NativeFixedStreamingSVE

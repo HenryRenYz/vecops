@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Compilation-local trace collection; no global hooks or mutable IR snapshots."""
 
 import difflib

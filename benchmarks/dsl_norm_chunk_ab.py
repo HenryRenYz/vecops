@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Same-source BF16 normalization math-chunk diagnostic, not full catalog.
 
 The six 8x128 keys pair Const/Any for moments LayerNorm (none/gamma_beta)

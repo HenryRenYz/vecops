@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Empty dynamic matrices must not enter an invalid small AMX configuration."""
 
 import numpy as np

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Register and indexed-memory terminal lowering; never arrays of Vec/Mask."""
 
 from .... import ir as I

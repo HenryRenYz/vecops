@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """SME packed-layout traffic expressed entirely through public ZA/vector ops.
 
 The raw K-contiguous route stages source rows horizontally and drains packed

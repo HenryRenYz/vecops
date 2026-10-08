@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """DAG cost and dependency analysis; never executes passes or source emission."""
 
 from dataclasses import dataclass

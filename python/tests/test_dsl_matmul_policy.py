@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Fusion is a DAG/cost decision, including inlined helper and packing paths."""
 import pytest
 import vecops.language as T

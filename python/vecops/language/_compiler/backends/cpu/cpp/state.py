@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """State C++ emission. Register pieces are locals, including sizeless SVE.
 
 All placement and vector regions were prepared before emission. Memory is a

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Source/header/config/backend invalidation, cache-only and Python wrappers."""
 
 import numpy as np

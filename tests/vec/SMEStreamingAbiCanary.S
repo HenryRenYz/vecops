@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Ordinary AAPCS64 caller. Scalars below are ABI canaries, not Vec storage.
 // Save the caller's d8--d15, seed all eight lower halves, call the probe,
 // record the bits, then restore the original registers before returning.

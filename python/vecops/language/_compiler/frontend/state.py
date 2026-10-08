@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Typed control-flow state and branch joins; no CPU storage decisions."""
 
 from .. import ir as I

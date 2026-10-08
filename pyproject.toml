@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 [build-system]
 requires = [
   "scikit-build-core>=0.11",
@@ -9,6 +11,7 @@ build-backend = "scikit_build_core.build"
 name = "vecops"
 version = "0.1.0"
 description = "Framework-neutral Python bindings for vecops kernel artifacts"
+license = {file = "LICENSE"}
 readme = "README.md"
 requires-python = ">=3.9"
 
@@ -28,6 +31,7 @@ cmake.define.VECOPS_BUILD_PYTHON = "ON"
 cmake.define.VECOPS_BUILD_TESTING = "OFF"
 install.components = ["python"]
 wheel.packages = ["python/vecops"]
+wheel.license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSES/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests", "tests/vec"]

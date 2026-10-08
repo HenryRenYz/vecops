@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """One immutable semantic/capability/cost snapshot for a compilation."""
 
 import hashlib

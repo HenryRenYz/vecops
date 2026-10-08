@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Small canonical-IR reference interpreter with checked scalar-memory access.
 
 This is a debugging reference, not an ISA emulator. Unsupported intrinsics,

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Resident synchronization, atomics and synchronous software pipelines."""
 
 import numpy as np

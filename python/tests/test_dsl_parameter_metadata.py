@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Entry snapshots cover immutable ABI descriptors, never mutable DSL state."""
 
 import re

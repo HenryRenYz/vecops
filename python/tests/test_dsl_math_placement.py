@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Math exceptional-path placement follows emitted ownership, not ISA flags."""
 
 import os

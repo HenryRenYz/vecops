@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Architecture operand checks and region-scoped streaming vector handles."""
 
 from .. import ir as I

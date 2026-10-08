@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Completed GEMV dots share a vector epilogue, including wide seed/output."""
 import numpy as np
 import pytest

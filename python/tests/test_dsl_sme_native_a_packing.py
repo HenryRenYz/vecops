@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """NC-local native A auto packing; strict semantics and pre-K dispatch."""
 
 import re

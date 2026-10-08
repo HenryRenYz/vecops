@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Optional Linux content-hash acceleration using kernel mutation events.
 
 Not a size/mtime shortcut: inotify falls back to native Linux dnotify when

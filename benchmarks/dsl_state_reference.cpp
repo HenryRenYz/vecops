@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Reference recurrence with explicit vector locals and no capture boundary.
 #include "vecops/Kernel.h"
 #include "vecops/vec/Vec.h"

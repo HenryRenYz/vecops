@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Closed fixed-register placement; large logical values keep generic lowering."""
 
 from dataclasses import dataclass, replace

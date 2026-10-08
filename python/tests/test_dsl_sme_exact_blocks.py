@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Exact SME leaves preserve full prefixes without empty-block work in K.
 
 The optional cross tests compile real-pointer wrappers with SME FA64 enabled;

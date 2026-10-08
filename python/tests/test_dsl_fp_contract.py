@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """The generated DSL target, not source C++ or global flags, owns FP policy."""
 
 from __future__ import annotations

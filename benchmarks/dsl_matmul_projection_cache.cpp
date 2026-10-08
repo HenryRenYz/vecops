@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // The target process's exact public cache data, outside all timed kernels.
 #include "vecops/Kernel.h"
 #include "vecops/platform/CacheInfo.h"

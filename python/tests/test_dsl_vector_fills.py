@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Explicit register initialization, dynamic prefixes and carried geometry."""
 
 import numpy as np

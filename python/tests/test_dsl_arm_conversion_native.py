@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Native cross-dtype conversion and indexed-memory correctness.
 
 This is intentionally ISA-neutral: it runs on the local target or on ARM via

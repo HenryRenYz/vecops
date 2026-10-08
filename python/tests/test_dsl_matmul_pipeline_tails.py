@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Direct AMX pipeline tail/zero-K validation with fused input and epilogue."""
 
 import pytest

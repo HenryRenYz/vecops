@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Weak Python floats must not truncate in integer scalar/vector epilogues.
 
 Integer-only arithmetic is intentionally outside this change. Typed operands

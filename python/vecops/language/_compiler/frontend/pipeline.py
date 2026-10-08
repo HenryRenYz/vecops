@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """CPU prefetch hints and explicitly owned double-buffer storage."""
 
 from .. import ir as I

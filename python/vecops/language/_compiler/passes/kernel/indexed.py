@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Prove dense SIMD induction accesses before memory/vector legalization.
 
 Only clipped unit-step logical indices over the complete rank-one view are

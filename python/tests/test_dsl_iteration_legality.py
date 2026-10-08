@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Small legality regressions; equal domains alone never authorize fusion."""
 
 from dataclasses import replace

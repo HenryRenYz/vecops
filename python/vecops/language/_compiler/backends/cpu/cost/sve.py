@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Central SVE estimates; new layout variants never alter ordinary costs."""
 
 from ....cost.model import CostProfile, CostRule, OperationCost

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Balanced, raw-timing normalization scheduling diagnostics.
 
 Use the maintained rank-two library/C++ factories, inputs and numerical

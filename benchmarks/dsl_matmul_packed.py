@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Isolate prepacked leaf codegen from online packing/cache policy differences."""
 
 import argparse

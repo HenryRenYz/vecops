@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Direct ZA column stores need a proven unit stride, never an assumed layout."""
 
 import platform

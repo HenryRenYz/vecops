@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 #ifndef VECOPS_EXECUTION_RESOURCES_H
 #define VECOPS_EXECUTION_RESOURCES_H
 

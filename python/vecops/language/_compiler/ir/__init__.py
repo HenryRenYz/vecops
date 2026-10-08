@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Internal structured IR vocabulary."""
 
 from .collective import Barrier, Team, TeamReduce

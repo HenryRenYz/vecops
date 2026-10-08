@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Native masked fragments preserve grouped reduction banks and full schedules."""
 
 from __future__ import annotations

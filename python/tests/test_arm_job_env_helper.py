@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Local fake-tree tests for the distributable ARM job-environment helper."""
 
 from __future__ import annotations

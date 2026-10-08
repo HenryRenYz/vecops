@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Constant GEMV address vectors must never cross an unequal VL/SME boundary.
 
 This is actual target execution, not a source-only no-call assertion. It

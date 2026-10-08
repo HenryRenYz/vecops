@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """FP32 pointwise packing through ZA, including independently broadcast DAGs.
 
 The ISA-neutral checks inspect both the ZA specialization and its ordinary

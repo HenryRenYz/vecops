@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Bit-preserving streaming fringes and executable DSL packing schedules."""
 
 import os

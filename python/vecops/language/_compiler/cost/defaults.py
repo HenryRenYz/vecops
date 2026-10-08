@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Portable estimates; intentionally low-confidence until target calibration."""
 
 from .model import CostProfile, CostRule, OperationCost

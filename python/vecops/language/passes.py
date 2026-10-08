@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Public pass-registration and pipeline API; implementation lives in the compiler."""
 
 from ._compiler.passes.manager import (

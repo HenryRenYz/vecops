@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Shared integer affine decomposition and conservative loop intervals.
 
 Preserve cancellation before taking intervals (i + width - i is width).

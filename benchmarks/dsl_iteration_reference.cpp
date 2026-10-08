@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Same algorithm as the DSL, using native Vec locals and an inlined helper.
 #include "vecops/Kernel.h"
 #include "vecops/vec/Vec.h"

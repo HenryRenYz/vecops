@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Source-catalog baseline: preserve the public Matmul family/policy selector,
 // rank-three/shared-operand strategies and public MatmulPack implementation.
 // Offline packing uses the separate OnlyPack specialization, never the timed

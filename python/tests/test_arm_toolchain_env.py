@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Private standard-library envfiles keep kernels and Torch bridges on Clang."""
 
 import os

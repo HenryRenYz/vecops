@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Strict, interprocedural checks for compiler-emitted manual SME owners.
 
 This module deliberately has no vecops/native-extension dependency. Equal

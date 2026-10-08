@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Bounded full-input schedule; old tails, captures and output stay explicit."""
 
 import json

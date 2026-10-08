@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Resident packed-AB diagnostics retain the complete original geometry cohort."""
 
 import csv

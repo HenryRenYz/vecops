@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Paired normalization refactor checks from two frozen source snapshots.
 
 Emit source/schema catalogs in separate fresh Python processes, then build

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Paired public MatmulPack baseline, including optional load/convert/affine.
 #include "vecops/Kernel.h"
 #include "vecops/ops/MatmulPack.h"

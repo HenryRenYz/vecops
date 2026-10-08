@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Tests for the expression-based vecops.language frontend."""
 
 from __future__ import annotations

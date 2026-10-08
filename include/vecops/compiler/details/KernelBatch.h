@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Copyright (c) vecops contributors.
 #ifndef VECOPS_COMPILER_DETAILS_KERNEL_BATCH_H
 #define VECOPS_COMPILER_DETAILS_KERNEL_BATCH_H

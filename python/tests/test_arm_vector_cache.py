@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Vector-length cache/build snapshots, tested without native compilation."""
 
 import subprocess

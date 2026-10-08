@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Column parameters follow original logical axes, including col-GEMV/swap.
 
 This fixes benchmark transformations, not Matmul or the DSL to match a broken

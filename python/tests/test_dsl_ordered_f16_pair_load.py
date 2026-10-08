@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Ordered full-word FP16 loads retain precise masks and logical lane order."""
 
 from __future__ import annotations

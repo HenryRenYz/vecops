@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Pass registration, explicit Vector IR, unroll grouping and fusion contracts."""
 import numpy as np
 import pytest

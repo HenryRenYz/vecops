@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Value transforms and explicit indexed memory, independent of CPU tags."""
 
 from dataclasses import replace

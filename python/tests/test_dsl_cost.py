@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Semantic catalogs, target overlays, DAG costs and compilation isolation."""
 
 from concurrent.futures import ThreadPoolExecutor

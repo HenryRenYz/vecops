@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Controlled two/three/four-load CPU pointwise register-layout A/B.
 
 Off/auto/force use one source, operator, schema, strict arithmetic and inputs.

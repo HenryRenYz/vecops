@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Resident execution and scalar collectives, distinct from logical grids."""
 
 from dataclasses import dataclass

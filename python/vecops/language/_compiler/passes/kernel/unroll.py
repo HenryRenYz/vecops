@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Kernel passes: unroll."""
 
 from dataclasses import fields, is_dataclass, replace

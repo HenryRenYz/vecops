@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Compilation-core cache and source/compiler identity; no runtime dispatch."""
 
 from __future__ import annotations

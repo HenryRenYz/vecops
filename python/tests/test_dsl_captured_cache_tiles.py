@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Ordinary Python integer hints must remain compile-time cache tile values."""
 
 import pytest

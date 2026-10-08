@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Public packed ABI conformance oracle; no private packing helpers.
 #include "vecops/Kernel.h"
 #include "vecops/ops/MatmulPack.h"

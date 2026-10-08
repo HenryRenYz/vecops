@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Compile new primitive, local-loop, team and SME paths; no ARM execution."""
 
 import argparse

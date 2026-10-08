@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Permission failures must remain explicit content identities, never cache hits."""
 
 from __future__ import annotations

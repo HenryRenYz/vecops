@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """CPU matrix-product policy; no opaque ops::Matmul forwarding."""
 
 from __future__ import annotations

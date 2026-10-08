@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Streaming source-level vector matmul covers dynamic geometry and fusion."""
 
 import numpy as np

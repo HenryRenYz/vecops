@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Paired Fusion/Orientation catalogs with the real public C++ Matmul.
 
 All selected metadata are audited before compilation. Unsupported cases are

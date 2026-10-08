@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Content-addressed build inputs, shared by source kernels and bridges.
 
 Checks run at lookup/elaboration, never on a prepared kernel's execution path.

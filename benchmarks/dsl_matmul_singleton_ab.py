@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Paired singleton-input diagnostics using unchanged original catalog metadata.
 
 Only the opt-in code-generation flag changes. Offline packing, transforms,

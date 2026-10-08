@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Backend compilation boundary; other targets need not use Vector IR or C++."""
 
 from dataclasses import dataclass

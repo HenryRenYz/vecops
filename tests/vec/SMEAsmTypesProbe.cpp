@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Cross-compilation probe: public SME instruction operands must normalize to
 // sizeless ACLE register types, even when the public Vec/Mask is VLS-sized.
 // No Vec/Mask is created before SMSTART or survives SMSTOP; no arrays are used.

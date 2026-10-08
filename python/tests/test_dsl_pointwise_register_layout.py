@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Private SVE pointwise permutations preserve ordered, strict external bits."""
 
 import ctypes

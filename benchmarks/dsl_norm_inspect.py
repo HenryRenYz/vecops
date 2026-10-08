@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Profile one normalization pair or inspect its native vector loops.
 
 The profile path checks correctness before sampling and excludes compilation.

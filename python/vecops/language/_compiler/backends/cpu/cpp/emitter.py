@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """C++ emission: emitter."""
 
 from __future__ import annotations
@@ -218,7 +220,12 @@ class CPUEmitter(
       headers += '#include "vecops/execution/Print.h"\n'
     if self.uses_workspace:
       headers += '#include "vecops/execution/WorkspaceContext.h"\n'
-    return headers + _PREAMBLE + _MATMUL_PREAMBLE + "\n".join(self.lines) + "\n"
+    notices = (
+      "// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors\n"
+      "// SPDX-License-Identifier: MIT\n"
+      "// Generated support code is project-owned; user kernel logic retains its original terms.\n"
+    )
+    return notices + headers + _PREAMBLE + _MATMUL_PREAMBLE + "\n".join(self.lines) + "\n"
 
 
 def generate(prepared):

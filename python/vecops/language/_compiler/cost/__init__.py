@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Cost model and expression-region analysis contracts."""
 
 from .model import CostModel, CostProfile, CostQuery, CostRule, OperationCost

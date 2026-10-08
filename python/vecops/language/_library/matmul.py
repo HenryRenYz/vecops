@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Composable matrix algorithms built from ordinary value/control primitives.
 
 These recipes are not yet the default dot dispatcher. Backend selection,

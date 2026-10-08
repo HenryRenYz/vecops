@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Non-SME constant conversions use native gathers only with a captured SVE VL."""
 
 import re

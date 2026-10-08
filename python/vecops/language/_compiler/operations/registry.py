@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Target-independent operation contracts, frozen for each compilation.
 
 Traits are semantic promises, never target costs or ISA capabilities. Unknown

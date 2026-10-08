@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // FP32 reference: x86 public Matmul has AMX atoms, not an FP32 atom. Use
 // a named-register 4-row SIMD leaf with the same sequential K recurrence.
 #include "vecops/Kernel.h"

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Refresh all 30 projection metas and A/B only DSL online packing.
 
 The reference is the unchanged source-catalog public C++ Matmul, including

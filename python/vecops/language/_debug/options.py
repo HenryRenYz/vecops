@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Immutable per-compilation diagnostics configuration."""
 
 from dataclasses import dataclass

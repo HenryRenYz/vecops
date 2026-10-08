@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """CPU loop/pipeline policy for matmul, independent of the C++ printer.
 
 Prefetch is opt-in unless a calibrated target profile enables it. Vector/SME

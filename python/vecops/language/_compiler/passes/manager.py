@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Registered, deterministic compiler pipelines with per-run analysis state.
 
 Pass callbacks receive (ir, context). Return the IR, None for an in-place
