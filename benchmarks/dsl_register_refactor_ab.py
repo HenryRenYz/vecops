@@ -27,8 +27,7 @@ def matmul_workload(compiler, args):
   """Adapt original MatmulBench metadata and its independent NumPy oracle."""
   import numpy as np
   import vecops
-  import vecops.language as T
-  from dsl_matmul import KIND_TYPES, PIPELINES, catalog, kernels
+  from dsl_matmul import KIND_TYPES, PIPELINES, catalog, templates
   from dsl_transpose import aligned_empty, numpy_dtype
 
   cases = [
@@ -43,10 +42,7 @@ def matmul_workload(compiler, args):
 
   def prototype(case):
     m, n, k, mode, kind, pipeline, level, layout = case
-    dsl, cpp = kernels(compiler, m, n, k, mode, kind, pipeline, level, b_layout=layout)[0]
-    if args.shared_amx_cache:
-      dsl = T.compile(dsl.template, compiler=compiler, pass_options={"cpu_amx_shared_cache_dispatch": True})
-    return dsl, cpp
+    return templates(m, n, k, mode, kind, pipeline, level, b_layout=layout)[0]
 
   def metadata(case):
     m, n, k, _, kind, pipeline, _, layout = case
@@ -106,9 +102,8 @@ def packing_workload(compiler, args):
   """Original MatmulPackBench shapes with an independent SME layout oracle."""
   import numpy as np
   import vecops
-  import vecops.language as T
   from dsl_benchmark_utils import packed_size, packing_geometry
-  from dsl_matmul_pack import catalog, kernels
+  from dsl_matmul_pack import catalog, templates
   from dsl_transpose import aligned_empty, numpy_dtype
 
   if platform.machine().lower() not in {"aarch64", "arm64"}:
@@ -125,11 +120,7 @@ def packing_workload(compiler, args):
 
   def prototype(case):
     s, k, mode, kind, side, pipeline = case
-    pair, _ = kernels(compiler, s, k, mode, kind, side, pipeline == "affine")
-    dsl, cpp = pair
-    if args.dsl_pack:
-      dsl = T.compile(dsl.template, compiler=compiler, pass_options={"cpu_sme_packing_dsl": True})
-    return dsl, cpp
+    return templates(s, k, mode, kind, side, pipeline == "affine")[0]
 
   def types(kind):
     return {"bf16": ("bfloat16", "bfloat16"), "convert": ("float32", "bfloat16"), "i8": ("int8", "int8")}[kind]
@@ -217,7 +208,7 @@ def main():
   import vecops
   import vecops.language as T
   from dsl_timing import reserve_cpu
-  from dsl_transpose import MODES, aligned_empty, calls, catalog, kernels, numpy_dtype
+  from dsl_transpose import MODES, aligned_empty, calls, catalog, numpy_dtype, templates
 
   args.output = args.output.resolve()
   args.output.mkdir(parents=True, exist_ok=True)
@@ -254,10 +245,7 @@ def main():
 
     def prototype(case):
       m, n, ad, cd, compute, mode = case
-      dsl, cpp = kernels(compiler, m, n, mode, ad, cd, compute, args.implementation)
-      if args.dsl_sme:
-        dsl = T.compile(dsl.template, compiler=compiler, pass_options={"cpu_transpose_sme_dsl": True})
-      return dsl, cpp
+      return templates(m, n, mode, ad, cd, compute, args.implementation)
 
     def metadata(case):
       m, n, ad, cd, _, _ = case
@@ -277,9 +265,16 @@ def main():
   if not cases:
     parser.error("no original benchmark metadata selected")
   if args.emit:
+    selected = {
+      "transpose": ("cpu_transpose_sme_dsl", args.dsl_sme),
+      "packing": ("cpu_sme_packing_dsl", args.dsl_pack),
+      "matmul": ("cpu_amx_shared_cache_dispatch", args.shared_amx_cache),
+    }[args.operator]
+    options = {selected[0]: True} if selected[1] else None
     records = []
     for case in cases:
-      dsl, _ = prototype(case)
+      declaration, _ = prototype(case)
+      dsl = T.compile(declaration, compiler=compiler, pass_options=options)
       records.append({"case": case, "source": dsl.generated_source})
     args.emit.write_text(json.dumps({"root": str(root), "native": vecops._C.__file__, "records": records}))
     print(f"Emitted {len(records)} original {args.operator} metadata from {root}", flush=True)
@@ -298,16 +293,16 @@ def main():
     for before, after in zip(old, new):
       key = tuple(before["case"])
       if key not in unique:
-        declaration_kernel, cpp = prototype(before["case"])
+        declaration_kernel, reference = prototype(before["case"])
         variants = []
         for record in (before, after):
           digest = hashlib.sha256(record["source"].encode()).hexdigest()
           source = args.output / (digest + ".cpp")
           source.write_text(record["source"])
-          declaration = copy.copy(declaration_kernel.template)
+          declaration = copy.copy(declaration_kernel)
           declaration.ir = replace(declaration.ir, source=source)
           variants.append(T.compile(declaration, compiler=compiler))
-        pair = (*variants, cpp)
+        pair = (*variants, T.compile(reference, compiler=compiler))
         meta = metadata(before["case"])
         for kernel in pair:
           kernel.operator(*meta, 1, **kernel._core.specialization_values)

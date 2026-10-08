@@ -103,7 +103,8 @@ def case_key(case):
   return tuple(map(str, case))
 
 
-def kernels(compiler, m, n, mode, input_dtype, output_dtype, compute_dtype, implementation="auto", pass_options=None):
+def templates(m, n, mode, input_dtype, output_dtype, compute_dtype, implementation="auto"):
+  """Declare the ABI without lowering; frozen-source replay needs only this."""
   M, N = meta_shape(m, n, mode)
   input_dtype, output_dtype = getattr(vecops, input_dtype), getattr(vecops, output_dtype)
 
@@ -127,6 +128,11 @@ def kernels(compiler, m, n, mode, input_dtype, output_dtype, compute_dtype, impl
   ):
     Compute  # noqa: B018 - source-kernel compute-type specialization capture
 
+  return dsl, cpp
+
+
+def kernels(compiler, m, n, mode, input_dtype, output_dtype, compute_dtype, implementation="auto", pass_options=None):
+  dsl, cpp = templates(m, n, mode, input_dtype, output_dtype, compute_dtype, implementation)
   return T.compile(dsl, compiler=compiler, pass_options=pass_options), T.compile(cpp, compiler=compiler)
 
 

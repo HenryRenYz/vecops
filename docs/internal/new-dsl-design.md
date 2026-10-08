@@ -2853,3 +2853,11 @@ MatmulBench metadata combinations and one SME transpose case byte-identical;
 passed. This removes compile-time work, not a matrix algorithm or a native
 performance gate. Whole-driver SME packing and three-way ARM timings remain
 the acceptance gates for deleting their old terminal algorithm printers.
+
+Frozen-source transpose/matmul/packing benchmarks separate template declaration
+from compilation. Replay compiles the supplied C++ variants and the public C++
+reference, without lowering a third, unused DSL implementation. Source emission
+lowers only the selected DSL variant. Existing benchmark `kernels` wrappers
+retain their interface; their declaration factories are also tested without
+calling `T.compile`. The same sixteen matrix and one SME transpose source
+comparisons stayed byte-identical after this benchmark-only change.

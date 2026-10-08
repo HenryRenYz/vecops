@@ -85,7 +85,8 @@ KIND_TYPES = {
 }
 
 
-def kernels(compiler, m, n, k, mode, kind, pipeline, level, pass_options=None, b_layout="col"):
+def templates(m, n, k, mode, kind, pipeline, level, b_layout="col"):
+  """Declare original metadata/captures without generating an unused kernel."""
   M, N, K = (m, n, k) if mode == "Const" else (T.dynamic(lower=0) for _ in range(3))
   ad, bd, na, nb, acc = KIND_TYPES[kind]
   prologue, epilogue, input_scale = PIPELINES[pipeline]
@@ -142,7 +143,7 @@ def kernels(compiler, m, n, k, mode, kind, pipeline, level, pass_options=None, b
   ):
     NativeA, NativeB, Prologue, Epilogue, InputScale, RowB  # noqa: B018 -- specialization captures
 
-  return (T.compile(dsl, compiler=compiler, pass_options=pass_options), T.compile(cpp, compiler=compiler)), (
+  return (dsl, cpp), (
     ad,
     bd,
     na,
@@ -151,6 +152,11 @@ def kernels(compiler, m, n, k, mode, kind, pipeline, level, pass_options=None, b
     out,
     prologue,
   )
+
+
+def kernels(compiler, m, n, k, mode, kind, pipeline, level, pass_options=None, b_layout="col"):
+  (dsl, cpp), metadata = templates(m, n, k, mode, kind, pipeline, level, b_layout)
+  return (T.compile(dsl, compiler=compiler, pass_options=pass_options), T.compile(cpp, compiler=compiler)), metadata
 
 
 def main():

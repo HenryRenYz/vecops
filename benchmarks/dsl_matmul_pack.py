@@ -23,7 +23,8 @@ def catalog():
   return tuple(dict.fromkeys((int(s), int(k)) for s, k in re.findall(r"PackCase<\w+,\s*\w+,\s*(\d+),\s*(\d+)", text)))
 
 
-def kernels(compiler, s, k, mode, kind, side, transform):
+def templates(s, k, mode, kind, side, transform):
+  """Declare the original packing ABI independently of generated schedules."""
   S, K = (s, k) if mode == "Const" else (T.dynamic(lower=0) for _ in range(2))
   P = T.dynamic(lower=0)
   memory, native = {"bf16": ("bfloat16", "bfloat16"), "convert": ("float32", "bfloat16"), "i8": ("int8", "int8")}[kind]
@@ -46,7 +47,12 @@ def kernels(compiler, s, k, mode, kind, side, transform):
   def cpp(A: T.Tensor(shape, strides, memory), O: T.Tensor((P,), dtype=native, access="output"), repeat: int):
     Native, SideB, Transform  # noqa: B018 -- C++ specialization captures
 
-  return (T.compile(dsl, compiler=compiler), T.compile(cpp, compiler=compiler)), (memory, native)
+  return (dsl, cpp), (memory, native)
+
+
+def kernels(compiler, s, k, mode, kind, side, transform):
+  (dsl, cpp), metadata = templates(s, k, mode, kind, side, transform)
+  return (T.compile(dsl, compiler=compiler), T.compile(cpp, compiler=compiler)), metadata
 
 
 def main():

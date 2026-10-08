@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Frozen validators must not be redirected to an editable live source tree."""
 
+import importlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -70,3 +71,43 @@ def test_runner_uses_frozen_tests_not_the_callers_live_tree(entry, tmp_path, mon
       [str(root / "benchmarks/dsl_arm_validate.py"), "python/tests/test_dsl_state.py", "--", "-q"],
     ),
   ]
+
+
+@pytest.mark.parametrize(
+  "module,arguments,metadata",
+  [
+    ("dsl_transpose", (128, 128, "Any", "float32", "float16", "float32", "sme"), None),
+    ("dsl_matmul", (4, 4, 256, "Dynamic", "bf16", "bias_relu", "matmul"), 7),
+    ("dsl_matmul_pack", (17, 65, "Dynamic", "bf16", "B", False), 2),
+  ],
+)
+def test_benchmark_declarations_do_not_lower_unused_kernels(monkeypatch, module, arguments, metadata):
+  import vecops.language as T
+  from vecops.language._compiler.frontend.parser import lower
+
+  root = Path(__file__).resolve().parents[2]
+  monkeypatch.syspath_prepend(str(root / "benchmarks"))
+  benchmark = importlib.import_module(module)
+  calls = []
+
+  def compile(template, **kwargs):
+    calls.append((template, kwargs))
+    return template
+
+  monkeypatch.setattr(T, "compile", compile)
+  declared = benchmark.templates(*arguments)
+  pair = declared if metadata is None else declared[0]
+  assert not calls
+  assert pair[0].ir.source is None
+  assert pair[1].ir.source.name.endswith("reference.cpp")
+  assert pair[0].ir.signature == pair[1].ir.signature
+  assert lower(pair[0].ir).body.statements
+  if metadata is not None:
+    assert len(declared[1]) == metadata
+
+  compiler = object()
+  result = benchmark.kernels(compiler, *arguments)
+  compiled = result if metadata is None else result[0]
+  assert tuple(value[0] for value in calls) == compiled
+  assert len(calls) == 2
+  assert all(value[1]["compiler"] is compiler for value in calls)
