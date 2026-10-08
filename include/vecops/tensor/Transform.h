@@ -1,6 +1,5 @@
-//
-// Created by renyz on 2026/7/9.
-//
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 
 #ifndef VECOPS_TENSOR_TRANSFORM_H
 #define VECOPS_TENSOR_TRANSFORM_H

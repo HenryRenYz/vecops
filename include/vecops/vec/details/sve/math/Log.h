@@ -1,3 +1,11 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// The project copyright above applies to project-owned portions only.
+// SPDX-FileCopyrightText: 2019-2026 Arm Limited
+// Arm-derived portions retain MIT OR Apache-2.0 WITH LLVM-exception;
+// the conjunction below also requires MIT for project-owned portions.
+// Reference-specific original notices and scope: THIRD_PARTY_NOTICES.md.
+// Complete upstream terms: LICENSES/Arm-optimized-routines.txt.
+// SPDX-License-Identifier: MIT AND (MIT OR Apache-2.0 WITH LLVM-exception)
 #ifndef VECOPS_VEC_DETAILS_SVE_MATH_LOG_H
 #define VECOPS_VEC_DETAILS_SVE_MATH_LOG_H
 

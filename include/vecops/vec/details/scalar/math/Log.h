@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 #ifndef VECOPS_VEC_DETAILS_SCALAR_MATH_LOG_H
 #define VECOPS_VEC_DETAILS_SCALAR_MATH_LOG_H
 

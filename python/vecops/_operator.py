@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Public lazy runtime operators used by the language compiler."""
 
 from __future__ import annotations

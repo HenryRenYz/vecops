@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /**
  * @file OperatorBridgeAbi.h
  * @brief C ABI used by generated framework adapters to invoke a process-local Operator.

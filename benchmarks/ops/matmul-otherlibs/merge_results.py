@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Merge Google Benchmark JSON files into one comparison CSV.
 
 Benchmark names deliberately carry all semantic dimensions.  This script does

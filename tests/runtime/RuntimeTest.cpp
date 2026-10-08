@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /** @file RuntimeTest.cpp @brief Declarative binding, compilation, caching, and invocation tests. */
 
 #include "vecops/compiler/Compiler.h"

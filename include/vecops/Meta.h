@@ -1,6 +1,5 @@
-//
-// Created by renyz on 2026/6/2.
-//
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 
 #ifndef VECOPS_META_H
 #define VECOPS_META_H

@@ -1,5 +1,6 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 //
-// Copyright (c) vecops contributors.
 //
 
 #ifndef VECOPS_VEC_DETAILS_SME_ZA_H

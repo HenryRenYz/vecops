@@ -1,5 +1,6 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 //
-// Copyright (c) vecops contributors.
 //
 // Runtime-quantized INT8 packed-B GEMV leaf. It accepts arbitrary positive M
 // through a shared row driver and arbitrary N/K tails in this vector core.

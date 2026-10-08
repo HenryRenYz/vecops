@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 #ifndef VECOPS_TESTS_RUNTIME_WORKSPACE_CONTEXT_FIXTURE_H
 #define VECOPS_TESTS_RUNTIME_WORKSPACE_CONTEXT_FIXTURE_H
 

@@ -1,3 +1,11 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// The project copyright above applies to project-owned portions only.
+// SPDX-FileCopyrightText: 2010-2025 Naoki Shibata and contributors
+// SLEEF-derived sets retain BSL-1.0; other project-owned portions use MIT.
+// Original source notice: Copyright Naoki Shibata and contributors 2010 - 2025.
+// The compared older reference carries the corresponding 2010 - 2024 notice.
+// Complete upstream terms: LICENSES/SLEEF-BSL-1.0.txt.
+// SPDX-License-Identifier: MIT AND BSL-1.0
 #ifndef VECOPS_VEC_DETAILS_X86_MATH_EXP_H
 #define VECOPS_VEC_DETAILS_X86_MATH_EXP_H
 

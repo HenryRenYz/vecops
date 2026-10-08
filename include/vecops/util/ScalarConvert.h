@@ -1,6 +1,5 @@
-//
-// Created by renyz on 2026/3/21.
-//
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 
 #ifndef VECOPS_SCALARCONVERT_H
 #define VECOPS_SCALARCONVERT_H

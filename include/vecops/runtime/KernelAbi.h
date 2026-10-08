@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /**
  * @file KernelAbi.h
  * @brief C ABI exported by independently compiled kernel artifact DSOs.

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Tests for the low-level schema, operators, and optional-framework surface."""
 
 import ctypes

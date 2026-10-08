@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Offline HBM/DDR planning over framework-neutral execution graphs."""
 
 from .audit import audit_plan

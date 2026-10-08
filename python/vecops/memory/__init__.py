@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Ergonomic heterogeneous CPU-memory allocation.
 
 The default API uses placement intent names instead of exposing hwloc object

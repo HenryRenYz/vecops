@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 # Rebuild, run, merge, and summarize one x86 + 920f-4 benchmark iteration.
 
 set -euo pipefail

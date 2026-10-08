@@ -1,5 +1,6 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 //
-// Copyright (c) vecops contributors.
 //
 // Ordinary-SVE mixed-sign INT8 skinny leaves for SME-capable multiarch
 // targets. This source is intentionally excluded from generic libvecops.a and

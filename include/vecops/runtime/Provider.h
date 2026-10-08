@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /**
  * @file Provider.h
  * @brief Memory/disk artifact resolution with explicit cache side-effect modes.

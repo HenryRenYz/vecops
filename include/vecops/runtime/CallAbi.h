@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /**
  * @file CallAbi.h
  * @brief Shared C ABI values passed to kernels and process-local operator bridges.

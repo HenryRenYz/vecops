@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// The existing Arm rsqrt design reference is retained; no verbatim upstream
+// function was identified. See THIRD_PARTY_NOTICES.md for reference scope.
+// SPDX-License-Identifier: MIT
 #ifndef VECOPS_VEC_DETAILS_SVE_MATH_RECIPROCAL_H
 #define VECOPS_VEC_DETAILS_SVE_MATH_RECIPROCAL_H
 

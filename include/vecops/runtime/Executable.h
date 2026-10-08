@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /**
  * @file Executable.h
  * @brief Dynamic kernel-module loading and validated artifact invocation.

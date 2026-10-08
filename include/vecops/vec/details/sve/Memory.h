@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 #ifndef VECOPS_VEC_DETAILS_SVE_MEMORY_H
 #define VECOPS_VEC_DETAILS_SVE_MEMORY_H
 

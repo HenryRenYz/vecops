@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 /**
  * @file KernelDefinition.h
  * @brief Declarative source-kernel signatures and metadata specialization.

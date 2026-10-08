@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Framework-neutral execution and tensor-storage graph IR.
 
 The IR deliberately contains no Torch objects.  Framework adapters translate

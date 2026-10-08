@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Public dtype vocabulary and optional-framework normalization.
 
 NumPy and Torch are deliberately inspected only when they are already loaded;

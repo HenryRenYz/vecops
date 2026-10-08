@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 #include "ProviderCommon.h"
 
 // ACL's public NEGEMM restricts BF16 GEMM output to BF16.  The arm_gemm

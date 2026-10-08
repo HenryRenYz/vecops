@@ -1,6 +1,5 @@
-//
-// Created by renyz on 2026/5/28.
-//
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 
 #ifndef VECOPS_BFLOAT16_H
 #define VECOPS_BFLOAT16_H

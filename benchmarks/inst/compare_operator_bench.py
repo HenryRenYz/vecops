@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Compare ours and baseline Google Benchmark CSV output.
 
 Both inputs must be produced by the same benchmark target.

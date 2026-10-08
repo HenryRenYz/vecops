@@ -1,4 +1,5 @@
-// Copyright (c) vecops contributors.
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 
 #ifndef VECOPS_EXECUTION_FLOAT_CONTROL_H
 #define VECOPS_EXECUTION_FLOAT_CONTROL_H

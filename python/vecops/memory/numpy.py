@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """NumPy arrays backed by :mod:`vecops.memory` allocations."""
 
 from __future__ import annotations

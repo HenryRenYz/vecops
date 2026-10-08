@@ -1,5 +1,6 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 //
-// Copyright (c) vecops contributors.
 //
 
 #ifndef VECOPS_KERNEL_DETAILS_TRANSPOSE_SME_TRANSPOSE2D_H

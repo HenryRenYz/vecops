@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Standalone full-range accuracy probe for the vec math module: the exp
 // family (exp, exp2, exp10, and their *_neg domains), the reciprocal
 // family (rcp, rsqrt), and the log family (log, log2, log10). Mirrors the

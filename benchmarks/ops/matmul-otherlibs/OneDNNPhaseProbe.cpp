@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 // Diagnostic decomposition of oneDNN raw-E2E into opaque-weight reorder and
 // execution with a retained opaque weight.  These rows are intentionally not
 // part of the formal provider aggregate.

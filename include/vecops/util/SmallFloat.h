@@ -1,6 +1,5 @@
-//
-// Created by HenryRenYz on 2026/8/22.
-//
+// SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+// SPDX-License-Identifier: MIT
 
 #ifndef VECOPS_SMALL_FLOAT_H
 #define VECOPS_SMALL_FLOAT_H

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Framework-neutral memory-plan IR and machine profile."""
 
 from __future__ import annotations

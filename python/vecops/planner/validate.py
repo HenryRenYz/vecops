@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
 """Deterministic simulator and structural validation for memory plans."""
 
 from __future__ import annotations
