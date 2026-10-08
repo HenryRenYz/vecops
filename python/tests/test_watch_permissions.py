@@ -8,6 +8,7 @@ import errno
 import hashlib
 import os
 import subprocess
+import sys
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -31,7 +32,63 @@ def test_native_dnotify_budget_does_not_exhaust_process_descriptors(tmp_path):
   )
   directories = tmp_path / "watched"
   directories.mkdir()
-  result = subprocess.run([str(executable), str(directories)], capture_output=True, text=True)
+  result = subprocess.run([str(executable), str(directories)], check=False, capture_output=True, text=True)
+  if result.returncode == 77:
+    pytest.skip("native dnotify unavailable")
+  assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(os.uname().sysname != "Linux", reason="Linux dnotify fallback")
+def test_loaded_extension_dnotify_budget_preserves_unwatched_content_hashes(tmp_path):
+  """Check the real Python/native boundary, including the hash fallback."""
+  script = """
+import hashlib
+import os
+import resource
+import sys
+from pathlib import Path
+
+package = Path(sys.argv[2])
+snapshot = package.parents[1]
+if Path(sys.argv[3]).parent == package and (snapshot / 'benchmarks/dsl_snapshot_entry.py').is_file():
+    sys.path.insert(0, str(snapshot / 'benchmarks'))
+    from dsl_snapshot_entry import select_snapshot
+    select_snapshot(snapshot)
+else:
+    sys.path.insert(0, str(package.parent))
+import vecops._watch as watch
+from vecops import _C
+assert Path(_C.__file__).resolve() == Path(sys.argv[3]).resolve()
+
+root = Path(sys.argv[1])
+if watch._descriptor >= 0:
+    os.close(watch._descriptor)
+    watch._descriptor = -1
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (min(soft, 64), hard))
+budget = min(128, min(soft, 64) // 8)
+initial = len(os.listdir('/proc/self/fd'))
+for index in range(200):
+    directory = root / str(index)
+    directory.mkdir()
+    source = directory / 'header.h'
+    source.write_bytes(b'before')
+    assert watch.content_hash(source) == hashlib.sha256(b'before').hexdigest()
+    source.write_bytes(b'after!')
+    assert watch.content_hash(source) == hashlib.sha256(b'after!').hexdigest()
+assert len(os.listdir('/proc/self/fd')) <= initial + budget
+(root / 'diagnostics.log').write_text('file descriptors remain available')
+if not _C.content_watch_directory(root / '0'):
+    sys.exit(77)
+"""
+  from vecops import _C
+
+  result = subprocess.run(
+    [sys.executable, "-c", script, str(tmp_path), str(Path(watch.__file__).parent), _C.__file__],
+    check=False,
+    capture_output=True,
+    text=True,
+  )
   if result.returncode == 77:
     pytest.skip("native dnotify unavailable")
   assert result.returncode == 0, result.stdout + result.stderr
