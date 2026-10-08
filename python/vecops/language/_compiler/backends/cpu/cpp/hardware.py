@@ -10,6 +10,15 @@ from .hardware_sme import SMEInstructionEmitter
 
 
 class HardwareEmitter(SMEInstructionEmitter):
+  def owner_integer(self, value, fallback):
+    """Keep known scalar metadata literal inside an outlined state owner.
+
+    Reference captures lose the caller's constant/range facts across the
+    streaming trampoline. Only restore exact IR constants; runtime metadata
+    and invocation-dependent snapshots retain their callback-local copies.
+    """
+    return self.scalar(value) if type(I.constant(value)) is int else fallback
+
   def hardware_program(self, program, *, metadata, pointers):
     """Bind a prepared instruction program to invocation-owned ABI values."""
     previous = self.parameter_metadata, self.parameter_pointers, self.hardware_scope

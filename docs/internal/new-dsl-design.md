@@ -2868,3 +2868,18 @@ source catalogs now record the compiler's actual vector state and replay
 rejects missing/mismatched geometry before compilation. Previously emitted
 catalogs without this record are not performance-acceptance evidence for a
 new process; regenerate them rather than infer a width from the host model.
+
+The rebuilt extension's scoped installed-SDK ARM run at VL/SVL 64B/32B
+finished with 94 passes and 9 optional cross-codegen skips, without failures.
+It includes six raw packing storage types on both sides, exact empty/full/tail
+bits and output canaries, vector fills/driver and iteration legality. Extended
+negative-spatial-stride and aliased-output packing checks are a separate native
+gate still in progress at 64B/64B; do not count its partial run as complete.
+
+SME owner binding now preserves exact IR integer constants inside a possibly
+outlined callback rather than reloading them through reference captures.
+Packing strides are restored only when every possible alias snapshot has the
+same stride, or when that owner proves the differently typed snapshot inactive.
+Runtime pitches and alias-dependent negative-to-dense pitches keep their
+callback-local runtime values. Pure hardware/transpose checks passed (82 plus
+three owner-binding checks); new native timing/coverage remains required.

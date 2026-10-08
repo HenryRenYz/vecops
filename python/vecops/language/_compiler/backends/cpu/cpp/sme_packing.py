@@ -104,7 +104,17 @@ class SMEPackingEmitter:
       for name in ("sme_pack_base_value", "sme_pack_stride_value", "sme_pack_m_value", "sme_pack_k_value")
     )
     self.line(f"const auto* const {held_base}={base};")
-    self.line(f"const vecops::nint_t {held_stride}={row_step}, {held_m}={m}, {held_k}={k};")
+    own_spatial, own_k = packed.shape if packed.side == "A" else packed.shape[::-1]
+    unchanged_stride = (
+      saved is None
+      or saved[0].dtype != view.dtype  # This owner is guarded by !alias.
+      or I.same_expr(saved[0].strides[s_axis], view.strides[s_axis])
+    )
+    own_stride = self.owner_integer(view.strides[s_axis], row_step) if unchanged_stride else row_step
+    self.line(
+      f"const vecops::nint_t {held_stride}={own_stride}, "
+      f"{held_m}={self.owner_integer(own_spatial, m)}, {held_k}={self.owner_integer(own_k, k)};"
+    )
     try:
       if raw:
         self.sme_raw_pack_body(packed, held_base, held_stride, held_m, held_k, capacity=capacity)

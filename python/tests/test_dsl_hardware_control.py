@@ -258,6 +258,35 @@ def test_sme_packing_stages_executable_library_before_emission(monkeypatch):
   assert "std::array<vecops::vec::" not in source
 
 
+@pytest.mark.parametrize("pitch", [None, 129, -133])
+def test_sme_owner_restores_constants_but_not_alias_dependent_strides(pitch):
+  import re
+
+  stride = T.dynamic() if pitch is None else pitch
+  capacity = T.dynamic(lower=0)
+
+  @T.template
+  def kernel(
+    A: T.Tensor((37, 129), (stride, 1), "float16"),
+    O: T.Tensor((capacity,), dtype="float16", access="output"),
+  ):
+    T.pack(A, O, side="A", format="sme")
+
+  source = CPUBackend().lower(kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True}).source
+  match = re.search(
+    r"const vecops::nint_t \w+_sme_pack_stride_value_\d+=([^,]+), "
+    r"\w+_sme_pack_m_value_\d+=std::int64_t\{37\}, \w+_sme_pack_k_value_\d+=std::int64_t\{129\};",
+    source,
+  )
+  assert match, "known dimensions were reloaded through reference captures"
+  if pitch == 129:
+    assert match[1] == "std::int64_t{129}"
+  else:
+    # A reversed constant input gets a positive dense snapshot when aliasing;
+    # a dynamic pitch is unknown. Neither may borrow the original constant.
+    assert "std::int64_t{" not in match[1]
+
+
 def test_sme_packing_uses_all_external_packed_dimensions():
   @T.template
   def kernel(A: T.Tensor((37, 129), dtype="uint8"), O: T.Tensor((2, 33, 32, 4), dtype="uint8", access="output")):

@@ -210,8 +210,9 @@ class TransposeEmitter:
     source_base, target_base = self.unique("transpose_source_base"), self.unique("transpose_target_base")
     source_m, source_n = self.unique("transpose_source_m_stride"), self.unique("transpose_source_n_stride")
     target_m, target_n = self.unique("transpose_target_m_stride"), self.unique("transpose_target_n_stride")
-    self.line(f"const vecops::nint_t {extent_m}=({m});")
-    self.line(f"const vecops::nint_t {extent_n}=({n});")
+    own_n, own_m = statement.destination.shape[-2:]
+    self.line(f"const vecops::nint_t {extent_m}=({self.owner_integer(own_m, m)});")
+    self.line(f"const vecops::nint_t {extent_n}=({self.owner_integer(own_n, n)});")
     for name, view_ in ((source_base, view), (target_base, statement.destination)):
       self.line(
         f"const auto {name}=({extent_m}>0 && {extent_n}>0 ? "
