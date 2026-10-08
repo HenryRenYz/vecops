@@ -313,10 +313,10 @@ class VectorsEmitter:
   def rebound_tag(self, dtype, base):
     if dtype == "bool" or dtype == self.tag_dtypes[base]:
       return base
-    # State consumers reuse the same lane geometry across casts. Canonicalize
-    # repeated rebinds so reading the original dtype resolves directly to its
-    # named register, rather than a scalar get/set reconstruction loop.
-    geometry = self.state_tag_geometry.get(base)
+    # Register and generic traversal aliases share physical geometry. Keep
+    # casts canonical so an equivalent tag spelling never requires a scalar
+    # get/set reconstruction or a different virtual register width.
+    geometry = self.tag_geometry.get(base)
     if geometry is not None:
       scalable, extent = geometry
       if scalable:
@@ -448,11 +448,13 @@ class VectorsEmitter:
         self.line("#else")
       base = self.unique("base_tag")
       self.tag_dtypes[base] = region.dtype
+      self.tag_geometry[base] = True, base_power
       self.line(f"using {base} = vecops::vec::ScalableTag<{CPP_TYPES[region.dtype]}, {base_power}>;")
       tags = []
       for group in groups:
         tag = self.unique("group_tag")
         self.tag_dtypes[tag] = region.dtype
+        self.tag_geometry[tag] = True, group.power
         self.line(f"using {tag} = vecops::vec::ScalableTag<{CPP_TYPES[region.dtype]}, {group.power}>;")
         tags.append(tag)
       state = setup(tags) if setup else None
@@ -527,6 +529,7 @@ class VectorsEmitter:
         if fragments and (setup is None or project_tail is not None and restore_tail is not None):
           tail_tag = self.unique("tail_tag")
           self.tag_dtypes[tail_tag] = region.dtype
+          self.tag_geometry[tail_tag] = True, fragments[0].power
           self.line(
             f"using {tail_tag} = vecops::vec::ScalableTag<{CPP_TYPES[region.dtype]}, {fragments[0].power}>; /* native-word masked remainder */"
           )

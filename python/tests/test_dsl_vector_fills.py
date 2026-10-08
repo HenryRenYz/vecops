@@ -64,6 +64,44 @@ def compiler(tmp_path_factory):
   return make_compiler(jobs=4, cache_dir=root / "cache", build_dir=root / "build")
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32"])
+def test_native_register_prefix_broadcast_and_shifted_projection(compiler, dtype):
+  size, output_size = T.dynamic(lower=0), T.dynamic(lower=0)
+
+  @T.template
+  def broadcast(A: T.Tensor((size,), dtype=dtype), O: T.Tensor((output_size,), dtype=dtype, access="output")):
+    value = T.load(A, vector=T.Vector(dtype))
+    for _ in T.serial(2):
+      value = value + 1
+    T.store(O, T.broadcast_to(value, O.shape))
+
+  @T.template
+  def shifted(A: T.Tensor((size,), dtype=dtype), O: T.Tensor((output_size,), dtype=dtype, access="output")):
+    value = T.load(A, vector=T.Vector(dtype))
+    for _ in T.serial(2):
+      value = value + 1
+    T.store(O, value[1:])
+
+  broadcast_kernel = T.compile(broadcast, compiler=compiler)
+  shifted_kernel = T.compile(shifted, compiler=compiler)
+  assert "physical register prefix" in broadcast_kernel.generated_source
+  for n in (1, 2, 3):
+    source = np.arange(n, dtype=dtype) + 3
+    backing = np.full(n + 8, -19, dtype=dtype)
+    output = backing[3 : 3 + n]
+    broadcast_kernel.operator.native(source, output, **broadcast_kernel._core.specialization_values)
+    np.testing.assert_array_equal(output, source + 2)
+    shifted_kernel.operator.native(source, output[: n - 1], **shifted_kernel._core.specialization_values)
+    np.testing.assert_array_equal(output[: n - 1], source[1:] + 2)
+    np.testing.assert_array_equal(backing[:3], np.full(3, -19, dtype=dtype))
+    np.testing.assert_array_equal(backing[3 + n :], np.full(5, -19, dtype=dtype))
+  # Larger than one native word on every supported CPU, exercising the
+  # multiword/grouped scalar fallback as well as the one-word fast branch.
+  output = np.empty(257, dtype=dtype)
+  broadcast_kernel.operator.native(np.array([3], dtype=dtype), output, **broadcast_kernel._core.specialization_values)
+  np.testing.assert_array_equal(output, np.full(257, 5, dtype=dtype))
+
+
 @pytest.mark.parametrize("dtype", ["float32", "float16", "float64", "int32"])
 @pytest.mark.parametrize("fixed", [False, True])
 def test_native_vector_fill_prefix_carried_state_and_canaries(compiler, dtype, fixed):

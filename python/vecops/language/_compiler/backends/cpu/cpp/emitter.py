@@ -55,7 +55,7 @@ class CPUEmitter(
     self.allocated = set()
     self.tag_dtypes = {}
     self.fixed_tag_lanes = {}
-    self.state_tag_geometry = {}
+    self.tag_geometry = {}
     self.active_loads = {}
     self.snapshots = {}
     self.storage_views = {}

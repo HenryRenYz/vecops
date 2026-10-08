@@ -17,6 +17,24 @@ from vecops.language._compiler.backends.cpu.capabilities import CPP_TYPES
 from vecops.language._compiler.dtypes import ELEMENT_BYTES
 
 
+def test_integer_metadata_memo_retains_live_identities_and_leaves_floating_dags_alone():
+  from vecops.language._compiler import ir as I
+  from vecops.language._compiler.analysis.affine import canonical_integer
+
+  symbol = I.Expr(I.ScalarType("int64"), "raw", data="metadata_pitch")
+  extent = I.Expr(I.ScalarType("int64"), "streaming_lanes", data="uint32")
+  unchanged = I.Expr(I.ScalarType("int64"), "floordiv", (symbol, extent))
+  assert canonical_integer(unchanged) is unchanged
+  expression = I.binary("add", I.binary("mul", symbol, I.literal(3)), symbol)
+  memo = {}
+  result = canonical_integer(expression, _memo=memo)
+  assert canonical_integer(expression, _memo=memo) is result
+  assert memo[id(expression)][0] is expression
+  assert canonical_integer(result, _memo=memo) is result
+  floating = I.Expr(I.ScalarType("float32"), "add", (I.literal(1.0), I.literal(2.0)))
+  assert canonical_integer(floating) is floating
+
+
 def packing_template(dtype):
   spatial, reduction, capacity = (T.dynamic(lower=0) for _ in range(3))
 
@@ -148,6 +166,55 @@ def test_native_sme_bit_memory_partial_words_and_zero_padding(dtype, tmp_path):
     expected = np.zeros(padded, dtype=bits_dtype)
     expected[:length] = bits
     np.testing.assert_array_equal(output.view(bits_dtype), expected)
+
+
+@pytest.mark.parametrize("dtype", ["uint8", "int8", "float16", "bfloat16", "float32", "float64"])
+@pytest.mark.parametrize("side", ["A", "B"])
+def test_native_sme_library_pack_bits_pitches_tails_and_empty(dtype, side, tmp_path):
+  """Exercise the whole staged driver, not only isolated bit-move primitives."""
+  state = get_vector_state()
+  if state.sme_bytes is None:
+    pytest.skip("actual SME target required")
+  storage_dtype = np.dtype(pytest.importorskip("ml_dtypes").bfloat16) if dtype == "bfloat16" else np.dtype(dtype)
+  size = storage_dtype.itemsize
+  word_size = 8 if size == 8 else 4
+  width, quantum = state.sme_bytes // word_size, word_size // size
+  panel, chunk = 2 * width, state.sme_bytes // size
+  spatial, reduction, pitch, capacity = (T.dynamic(lower=0) for _ in range(4))
+  shape, strides = ((spatial, reduction), (pitch, 1)) if side == "A" else ((reduction, spatial), (1, pitch))
+
+  @T.template
+  def kernel(A: T.Tensor(shape, strides, dtype), O: T.Tensor((capacity,), dtype=dtype, access="output")):
+    T.pack(A, O, side=side, format="sme")
+
+  compiler = make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  compiled = T.compile(kernel, compiler=compiler, pass_options={"cpu_sme_packing_dsl": True})
+  assert "sme_packing_metadata_" + dtype in compiled.generated_source
+  bits_dtype = np.dtype(f"uint{size * 8}")
+  cases = (
+    (0, 7),
+    (7, 0),
+    (1, 1),
+    (panel - 1, quantum + 1),
+    (panel, chunk),
+    (panel + 5, 6 * chunk + 3),
+  )
+  for s, k in cases:
+    row_pitch = k + 3
+    rows = np.full((max(s, 1), row_pitch), 7, dtype=bits_dtype)
+    logical = (np.arange(s * k, dtype=bits_dtype) * 13 + np.iinfo(bits_dtype).max // 2).reshape(s, k)
+    rows[:s, :k] = logical
+    source = np.ndarray((s, k), storage_dtype, buffer=rows, strides=(row_pitch * size, size))
+    padded_s = (s + panel - 1) // panel * panel
+    groups = (k + quantum - 1) // quantum
+    padded = np.zeros((padded_s, groups * quantum), bits_dtype)
+    padded[:s, :k] = logical
+    expected = padded.reshape(padded_s // panel, panel, groups, quantum).transpose(0, 2, 1, 3).reshape(-1)
+    output_bits = np.full(expected.size + 5, 19, dtype=bits_dtype)
+    output = output_bits[: expected.size].view(storage_dtype)
+    compiled.operator.native(source if side == "A" else source.T, output, **compiled._core.specialization_values)
+    np.testing.assert_array_equal(output_bits[: expected.size], expected)
+    np.testing.assert_array_equal(output_bits[expected.size :], np.full(5, 19, dtype=bits_dtype))
 
 
 @pytest.mark.parametrize("dtype", ["uint8", "float16", "float64"])

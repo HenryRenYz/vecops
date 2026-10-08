@@ -48,7 +48,12 @@ def _vector_row_update(value, columns, a, row, k, dtype):
 def _vector_row_store(value, output, row, column, width, epilogue):
   if epilogue is not None:
     value = epilogue(value, row, column)
-  T.store(output[row, column : column + width], value)
+  # SIMD induction carries the bounded register extent through indexed-memory
+  # canonicalization. A generic tile store otherwise groups multiple words
+  # and reconstructs a clipped one-word state in its wider tail traversal.
+  region = output[row, column : column + width]
+  for indices in T.simd(region.shape[0], vector=T.Vector(value.dtype), unroll=1):
+    T.scatter(region, indices, value)
 
 
 @T.func

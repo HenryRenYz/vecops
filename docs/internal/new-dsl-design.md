@@ -2795,3 +2795,45 @@ was updated for the registered recipe pass and independently passed afterward.
 These scoped gates do not satisfy full catalog coverage, ARM native parity,
 or the final production-LOC decrease requirement. Old family/cache/packing
 drivers remain until those remaining acceptance gates are actually passed.
+
+### Public-main integration and resumed standalone ARM gates
+
+Public main `f8500b9` was merged with its MIT/SPDX and third-party provenance
+materials, without restoring the removed legacy Python binding. Reviewed
+project-owned DSL additions carry SPDX notices; full notices are installed
+with both CMake and Python SDKs and Python wheel metadata. The eight license
+materials in the built wheel were checked byte-for-byte against their sources.
+These notice edits do not relicense imported portions or user kernel logic.
+
+The fixed post-merge x86 snapshot passed 221 native tests. Its eight paired
+normalization cases had new/old ratios 0.995173–1.002301, and twenty paired
+transpose cases 0.998060–1.002169 over 24 balanced rounds. Generated sources
+for those cases and 32 MatmulBench metadata combinations differed only by
+the added license prefix. This is scoped merge validation, not whole-catalog
+performance acceptance for the experimental migration paths.
+
+ARM work moved to authorized `920f-4` in isolated directories, preserving its
+dirty pre-existing checkout and af3 installation. Its current process reports
+ordinary VL 64B and streaming VL 32B; both remain part of environment/cache
+identity, not a common-width assumption. A host clock at year 2000 initially
+caused Ninja regeneration failures. The user corrected the clock; both source
+SDK Makefiles and subsequent Ninja smoke tests passed two native state tests.
+Broader source/installed SDK suites and packing/transpose performance gates
+are still in progress; no default SME recipe switch follows from a smoke.
+
+Streaming-vector measurements exposed unnecessary lane reconstruction when
+tag aliases and dynamic logical prefixes met generic tile writeback. Physical
+tag geometry is now shared across state and ordinary vector traversal aliases.
+Singleton projections do not advance their source lane. Exact unit-step SIMD
+stores with known nonzero stride are proved injective without an unchecked
+user hint; arbitrary indices and unknown/overlapping strides retain fallback.
+The library uses those ordinary SIMD primitives, not a special Matmul printer.
+Some fused/fringe cases still regress, so its production dispatch remains off.
+A tuple-bank row specialization worsened fused-input cases and was reverted;
+its exploratory outputs are explicitly excluded as acceptance evidence.
+
+Integer metadata canonicalization retains unchanged DAG nodes and memoizes
+within one traversal, holding original nodes strongly to prevent recycled-id
+collisions. Representative packing C++ stayed byte-identical and the 22
+model/bit-preservation checks passed. One profiled lowering changed from
+approximately 4.1s to 3.0s; that measures compile-time work, not kernel latency.

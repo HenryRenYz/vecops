@@ -85,7 +85,14 @@ def normalize_simd_access(ir, context):
           return tuple(rewrite(v) for v in value)
         if isinstance(value, I.Block):
           return I.Block([rewrite(v) for v in value.statements])
-        if isinstance(value, I.IndexedStore) and value.unique:
+        if isinstance(value, I.IndexedStore) and (
+          value.unique
+          or len(value.destination.strides) == 1
+          and I.constant(value.destination.strides[0]) not in {None, 0}
+        ):
+          # Exact unit-step SIMD induction is injective even without a user
+          # hint. A known nonzero physical stride preserves that property;
+          # unknown/overlapping layouts keep their ordered indexed fallback.
           view = project(value.destination, value.indices)
           if view is not None:
             return I.Store(view, rewrite(value.value), rewrite(value.mask), vector_extent=value.indices.type.tag)

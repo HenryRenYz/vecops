@@ -1988,3 +1988,18 @@ referenced upstream texts from `LICENSES/` in wheel metadata and under
 and native SDK when it is copied independently. Project SPDX fields cover only
 project-owned support code; user kernel logic and third-party portions retain
 their original terms. Generated DSL C++ identifies this distinction explicitly.
+
+### Register-prefix and SIMD store legalization
+
+Generic vector traversal and carried registers share canonical physical tag
+geometry, including dtype rebinds and generated C++ tag aliases. A bounded
+one-word prefix is reused directly at its zero origin; a genuine shifted or
+wider projection retains the lane-extraction fallback. Singleton broadcasting
+replicates source lane zero rather than advancing through inactive lanes.
+
+An exact unit-step `T.simd` scatter into a known nonzero-stride rank-one view
+can become a bounded vector store without requiring a `unique=True` hint.
+Arbitrary/permuted indices and unknown or zero strides retain their indexed
+semantics and checks. The experimental streaming vector matrix recipe uses
+this ordinary SIMD path for writeback, not a matmul-specific emitter shortcut.
+It remains gated until all relevant shape/dtype/fusion performance gates pass.

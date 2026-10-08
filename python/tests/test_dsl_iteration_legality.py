@@ -4,6 +4,7 @@
 
 from dataclasses import replace
 
+import pytest
 import vecops.language as T
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.analysis.loops import fusion_guard, nonoverlap_proven
@@ -11,6 +12,25 @@ from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.ir.iteration import FoldLoop, contract
 from vecops.language._compiler.ir.traversal import nodes
 from vecops.language._compiler.operations import current
+
+
+@pytest.mark.parametrize("stride", [1, -2, 0, None])
+@pytest.mark.parametrize("permuted", [False, True])
+def test_simd_scatter_proves_unique_induction_without_unchecked_hint(stride, permuted):
+  step = T.dynamic() if stride is None else stride
+
+  @T.template
+  def kernel(A: T.Tensor((37,), dtype="float32"), C: T.Tensor((37,), (step,), "float32", access="output")):
+    for i in T.simd(37, unroll=1):
+      indices = i % 3 if permuted else i
+      T.scatter(C, indices, T.gather(A, i))
+
+  artifact = CPUBackend().lower(kernel.ir, (), target="AVX512")
+  indexed = any(isinstance(node, I.IndexedStore) for node in nodes(artifact.kernel.body))
+  assert indexed == (permuted or stride in {0, None})
+  if not indexed:
+    stores = [node for node in nodes(artifact.kernel.body) if isinstance(node, I.Store)]
+    assert stores and all(store.vector_extent is not None for store in stores)
 
 
 def point(storage, target="i", stride=1):

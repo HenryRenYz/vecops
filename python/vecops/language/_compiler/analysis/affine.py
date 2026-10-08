@@ -159,7 +159,9 @@ def simplify_ordered(value, bounds):
   forgetting that equality loses the correlation with the tail length.
   Unknown/nonlinear orders stay untouched.
   """
-  value = replace(value, args=tuple(simplify_ordered(a, bounds) for a in value.args))
+  arguments = tuple(simplify_ordered(a, bounds) for a in value.args)
+  if any(a is not b for a, b in zip(arguments, value.args)):
+    value = replace(value, args=arguments)
   if value.op not in {"min", "max"} or not bounds:
     return value
   endpoints = []
@@ -182,17 +184,33 @@ def simplify_ordered(value, bounds):
   return value
 
 
-def canonical_integer(value):
+def canonical_integer(value, *, _memo=None):
   """Normalize pure integer metadata sums without touching floating DAGs."""
+  memo = {} if _memo is None else _memo
+  identity = id(value)
+  if identity in memo:
+    return memo[identity][1]
+  result = _canonical_integer(value, memo)
+  # Retain the original too: synthesized temporary Exprs can otherwise lose
+  # their last reference and have an id reused during this same traversal.
+  memo[identity] = value, result
+  memo[id(result)] = result, result
+  return result
+
+
+def _canonical_integer(value, memo):
   if not isinstance(value.type, I.ScalarType) or not value.type.dtype.startswith("int"):
     return value
-  arguments = tuple(canonical_integer(a) for a in value.args)
-  value = replace(value, args=arguments)
+  arguments = tuple(canonical_integer(a, _memo=memo) for a in value.args)
+  if any(a is not b for a, b in zip(arguments, value.args)):
+    value = replace(value, args=arguments)
   if value.op == "sub" and value.args[0].op in {"min", "max"}:
     first, second = value.args
     for index, operand in enumerate(first.args):
       if I.same_expr(operand, second):
-        return I.binary(first.op, I.literal(0), canonical_integer(I.binary("sub", first.args[1 - index], second)))
+        return I.binary(
+          first.op, I.literal(0), canonical_integer(I.binary("sub", first.args[1 - index], second), _memo=memo)
+        )
   if value.op not in {"add", "sub", "mul"}:
     return value
   constants, terms = 0, {}
@@ -237,7 +255,7 @@ def canonical_integer(value):
         result = I.binary(
           operation,
           *(
-            canonical_integer(I.binary("add", result, I.binary("mul", I.literal(factor), arm)))
+            canonical_integer(I.binary("add", result, I.binary("mul", I.literal(factor), arm)), _memo=memo)
             for arm in expression.args
           ),
         )

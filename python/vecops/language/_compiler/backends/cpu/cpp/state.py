@@ -40,7 +40,7 @@ class StateEmitter:
     kind = "ScalableTag" if scalable else "FixedTag"
     tag = f"vecops::vec::{kind}<{CPP_TYPES[dtype]}, {extent}>"
     self.tag_dtypes[tag] = dtype
-    self.state_tag_geometry[tag] = scalable, extent
+    self.tag_geometry[tag] = scalable, extent
     if not scalable:
       self.fixed_tag_lanes[tag] = extent
     return tag
@@ -55,6 +55,15 @@ class StateEmitter:
         else piece.lanes,
       )
       for piece in plan.pieces
+    )
+
+  def same_register_tag(self, first, second):
+    """Compare physical geometry, including aliases made by vector traversal."""
+    return first == second or (
+      first in self.tag_geometry
+      and second in self.tag_geometry
+      and self.tag_geometry[first] == self.tag_geometry[second]
+      and self.tag_dtypes[first] == self.tag_dtypes[second]
     )
 
   def state_coordinates(self, plan):
@@ -173,17 +182,54 @@ class StateEmitter:
       if (
         own_coords == coordinate
         and axis == len(root_shape) - 1
-        and (tag == own_tag or tag == f"vecops::vec::Rebind<{CPP_TYPES[value.type.dtype]}, {own_tag}>")
+        and (I.constant(value.type.shape[-1]) != 1 or I.same_expr(value.type.shape[-1], root_shape[-1]))
+        and (
+          self.same_register_tag(tag, own_tag)
+          or tag == f"vecops::vec::Rebind<{CPP_TYPES[value.type.dtype]}, {own_tag}>"
+        )
       ):
         return f"{value.data.name}_r{index}"
+    # A dynamic logical prefix is still one physical register. Generic store
+    # traversal can hide its zero origin behind a loop variable or broadcast
+    # projection. Version that geometry rather than reconstruct every lane;
+    # genuinely shifted traversals retain the scalar correctness fallback.
+    word = (
+      len(plan.pieces) == 1
+      and len(value.type.shape) == 1
+      and plan.pieces[0].scalable
+      and plan.pieces[0].coordinates == (0,)
+      and axis == len(root_shape) - 1
+      and (
+        self.same_register_tag(tag, own_tags[0])
+        or tag == f"vecops::vec::Rebind<{CPP_TYPES[value.type.dtype]}, {own_tags[0]}>"
+      )
+    )
     # Other traversal axes and mixed piece widths use scalar lane extraction.
     # This is a correctness fallback, not an implicit Vec array/spill.
     name, lane = self.unique("state_read"), self.unique("state_lane")
     representation, fill = ("Mask", "mfill") if value.type.mask else ("Vec", "fill")
     self.line(f"vecops::vec::{representation}<{tag}> {name} = vecops::vec::{fill}({tag}{{}}, 0);")
+    if word:
+      extent = self.scalar(value.type.shape[-1])
+      register = f"{value.data.name}_r0"
+      singleton = f"vecops::vec::{fill}({tag}{{}}, vecops::vec::get({own_tags[0]}{{}}, {register}, 0))"
+      self.opening(f"if (({extent}) == 1 || ({coords[-1]}) == 0) /* physical register prefix */")
+      self.line(f"{name} = ({extent}) == 1 ? {singleton} : {register};")
+      self.close()
+      self.opening("else /* shifted register projection */")
     self.opening(f"for (vecops::nint_t {lane}=0; {lane}<({active}); ++{lane})")
     own_axis = axis - (len(root_shape) - len(value.type.shape))
-    indices = tuple(f"(({c}) + {lane})" if a == own_axis else c for a, c in enumerate(own_coords))
+    indices = []
+    for a, c in enumerate(own_coords):
+      extent = I.constant(value.type.shape[a])
+      if a != own_axis or extent == 1:
+        indices.append(c)
+      elif extent is None:
+        # Broadcasting a singleton register does not advance its source lane.
+        # Projection of the vector origin alone cannot express that stride.
+        indices.append(f"(({self.scalar(value.type.shape[a])}) == 1 ? 0 : (({c}) + {lane}))")
+      else:
+        indices.append(f"(({c}) + {lane})")
     for index, (piece, own_tag, coordinate) in enumerate(zip(plan.pieces, own_tags, self.state_coordinates(plan))):
       conditions = [f"({c})==({p})" for c, p in zip(indices[:-1], coordinate[:-1])]
       offset = coordinate[-1]
@@ -195,4 +241,6 @@ class StateEmitter:
       self.line(f"{name}=vecops::vec::{set_}({tag}{{}}, {name}, {lane}, {element});")
       self.close()
     self.close()
+    if word:
+      self.close()
     return name

@@ -39,6 +39,8 @@ def test_streaming_vector_driver_is_ordinary_ir_not_opaque_dot():
   assert not artifact.backend_ir.matmuls
   assert artifact.backend_ir.states and all(plan.pieces for plan in artifact.backend_ir.states.values())
   assert "vecops::vec::fmadd" in artifact.source
+  assert "clipped SIMD extent" in artifact.source
+  assert "vecops::vec::scatter(" not in artifact.source
   assert_no_vec_mask_arrays(artifact.source)
 
 
