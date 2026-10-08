@@ -295,10 +295,10 @@ def test_sme_packing_uses_all_external_packed_dimensions():
   source = CPUBackend().lower(kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True}).source
   import re
 
-  assert re.search(
-    r"const vecops::nint_t \w+_sme_pack_capacity_\d+=\(std::int64_t\{2\}\) \* \(std::int64_t\{33\}\) \* \(std::int64_t\{32\}\) \* \(std::int64_t\{4\}\);",
-    source,
-  )
+  actual = "(std::int64_t{2}) * (std::int64_t{33}) * (std::int64_t{32}) * (std::int64_t{4})"
+  assert f"if (({actual}) < (" in source and "packed output buffer too small" in source
+  assert re.search(r"const vecops::nint_t \w+_sme_pack_capacity_\d+=vecops_dsl::pack_size<", source)
+  assert re.search(r"const vecops::nint_t \w+_sme_pack_capacity_value_\d+=\(\(", source)
 
 
 def test_two_sme_library_programs_keep_separate_lexical_names():

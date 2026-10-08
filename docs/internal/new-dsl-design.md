@@ -2883,3 +2883,26 @@ same stride, or when that owner proves the differently typed snapshot inactive.
 Runtime pitches and alias-dependent negative-to-dense pitches keep their
 callback-local runtime values. Pure hardware/transpose checks passed (82 plus
 three owner-binding checks); new native timing/coverage remains required.
+
+The earlier merged installed-SDK ARM snapshot completed 317 tests with 22
+optional skips; the extended reversed/aliased raw packing suite completed all
+12 dtype/side combinations at VL/SVL 64B/64B. These validate those frozen
+snapshots, not every subsequent codegen experiment.
+
+Matched-geometry three-way timing found a real experimental raw-packing gap:
+64x256 BF16 A packing took about 2.14x its historical DSL checkpoint (24
+balanced rounds, independent layout oracle). Its assembly retained repeated
+output clamps/predicates. The prepared library boundary now uses the required
+packed extent, after validating the caller's full physical output capacity.
+Known geometry reconstructs that checked extent inside the owner using
+quotient/remainder ceilings; dynamic geometry retains the validated captured
+value. A later paired run for the same metadata measured about 1.40x the
+checkpoint, still too slow to enable or delete the old driver. These are
+separate paired runs, not a same-round estimate of the two experiments.
+
+Empty raw-packing domains skip panel traversal, including an enormous M with
+K=0. Group ceilings avoid pre-division signed overflow. Model checks include
+zero storage with the other extent at int64.max and retain output canaries;
+the 25 model/structure/bit checks pass. Broader native/performance gates for
+this latest logical-bound change remain outstanding. No experimental packing
+or transpose recipe became the production default.

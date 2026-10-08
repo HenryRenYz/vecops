@@ -99,6 +99,23 @@ def test_sme_raw_packing_recipe_matches_independent_bits_and_address_model(dtype
   word_size = 8 if size == 8 else 4
   panel, quantum, chunk = 2 * (svl // word_size), word_size // size, svl // size
   bits_dtype = np.dtype(f"uint{size * 8}")
+  for spatial, reduction in ((2**63 - 1, 0), (0, 2**63 - 1)):
+    for program in (original, prepared):
+      output = np.full(5, 19, dtype=bits_dtype)
+      model = PackingModel(
+        program,
+        dtype=dtype,
+        svl=svl,
+        source=np.empty(0, bits_dtype),
+        destination=output,
+        spatial=spatial,
+        reduction=reduction,
+        pitch=0,
+        capacity=0,
+      )
+      model.run()
+      assert not model.trace, "empty domains must not traverse or access a padded panel"
+      np.testing.assert_array_equal(output, np.full(5, 19, bits_dtype))
   for spatial, reduction in ((0, 7), (7, 0), (1, 1), (panel - 1, quantum + 1), (panel + 5, 6 * chunk + 3)):
     pitch = reduction + 3
     capacity = ((spatial + panel - 1) // panel) * ((reduction + quantum - 1) // quantum) * panel * quantum

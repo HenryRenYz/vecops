@@ -116,17 +116,21 @@ def pack_raw(source, destination):
   width = sme.streaming_lanes(word)
   chunk = sme.streaming_lanes(source.dtype)
   ratio = T.itemsize(word) // T.itemsize(source.dtype)
-  groups = (source.shape[1] + ratio - 1) // ratio
-  for origin in T.serial(0, source.shape[0], 2 * width, unroll=1):
-    panel_output = destination[(origin // (2 * width)) * groups * 2 * width * ratio :]
-    if T.itemsize(source.dtype) <= 4:
-      if source.shape[0] - origin >= 2 * width:
-        if source.shape[1] >= chunk:
-          pack_full_words(
-            source, panel_output, origin=origin, width=width, chunk=chunk, chunks=source.shape[1] // chunk
-          )
-        _pack_remainder(source, panel_output, origin, (source.shape[1] // chunk) * chunk, width, chunk, ratio)
+  groups = source.shape[1] // ratio + (source.shape[1] % ratio != 0)
+  # Empty storage has no panels to visit, even if its other logical extent
+  # is enormous. In particular, do not let an empty K domain run an M loop
+  # whose final padded induction value could overflow.
+  if source.shape[0] > 0 and source.shape[1] > 0:
+    for origin in T.serial(0, source.shape[0], 2 * width, unroll=1):
+      panel_output = destination[(origin // (2 * width)) * groups * 2 * width * ratio :]
+      if T.itemsize(source.dtype) <= 4:
+        if source.shape[0] - origin >= 2 * width:
+          if source.shape[1] >= chunk:
+            pack_full_words(
+              source, panel_output, origin=origin, width=width, chunk=chunk, chunks=source.shape[1] // chunk
+            )
+          _pack_remainder(source, panel_output, origin, (source.shape[1] // chunk) * chunk, width, chunk, ratio)
+        else:
+          _pack_remainder(source, panel_output, origin, 0, width, chunk, ratio)
       else:
         _pack_remainder(source, panel_output, origin, 0, width, chunk, ratio)
-    else:
-      _pack_remainder(source, panel_output, origin, 0, width, chunk, ratio)
