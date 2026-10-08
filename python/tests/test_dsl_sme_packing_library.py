@@ -180,7 +180,8 @@ def test_native_sme_library_pack_bits_pitches_tails_and_empty(dtype, side, tmp_p
   word_size = 8 if size == 8 else 4
   width, quantum = state.sme_bytes // word_size, word_size // size
   panel, chunk = 2 * width, state.sme_bytes // size
-  spatial, reduction, pitch, capacity = (T.dynamic(lower=0) for _ in range(4))
+  spatial, reduction, capacity = (T.dynamic(lower=0) for _ in range(3))
+  pitch = T.dynamic()  # Raw packing also supports reversed spatial rows.
   shape, strides = ((spatial, reduction), (pitch, 1)) if side == "A" else ((reduction, spatial), (1, pitch))
 
   @T.template
@@ -207,14 +208,25 @@ def test_native_sme_library_pack_bits_pitches_tails_and_empty(dtype, side, tmp_p
     source = np.ndarray((s, k), storage_dtype, buffer=rows, strides=(row_pitch * size, size))
     padded_s = (s + panel - 1) // panel * panel
     groups = (k + quantum - 1) // quantum
-    padded = np.zeros((padded_s, groups * quantum), bits_dtype)
-    padded[:s, :k] = logical
-    expected = padded.reshape(padded_s // panel, panel, groups, quantum).transpose(0, 2, 1, 3).reshape(-1)
-    output_bits = np.full(expected.size + 5, 19, dtype=bits_dtype)
-    output = output_bits[: expected.size].view(storage_dtype)
-    compiled.operator.native(source if side == "A" else source.T, output, **compiled._core.specialization_values)
-    np.testing.assert_array_equal(output_bits[: expected.size], expected)
-    np.testing.assert_array_equal(output_bits[expected.size :], np.full(5, 19, dtype=bits_dtype))
+    for reverse in (False, True):
+      padded = np.zeros((padded_s, groups * quantum), bits_dtype)
+      padded[:s, :k] = logical[::-1] if reverse else logical
+      expected = padded.reshape(padded_s // panel, panel, groups, quantum).transpose(0, 2, 1, 3).reshape(-1)
+      for alias in (False, True):
+        # Overlap snapshots must preserve all storage bits and the logical
+        # traversal, even when the original spatial stride is negative.
+        output_bits = np.full(max(rows.size if alias else 0, expected.size) + 5, 19, dtype=bits_dtype)
+        if alias:
+          original = np.ndarray((s, k), storage_dtype, buffer=output_bits, strides=(row_pitch * size, size))
+          original.view(bits_dtype)[:] = logical
+        else:
+          original = source
+        actual = original[::-1] if reverse else original
+        output = output_bits[: expected.size].view(storage_dtype)
+        untouched = output_bits[expected.size :].copy()
+        compiled.operator.native(actual if side == "A" else actual.T, output, **compiled._core.specialization_values)
+        np.testing.assert_array_equal(output_bits[: expected.size], expected)
+        np.testing.assert_array_equal(output_bits[expected.size :], untouched)
 
 
 @pytest.mark.parametrize("dtype", ["uint8", "float16", "float64"])
