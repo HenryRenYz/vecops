@@ -272,9 +272,14 @@ class FailureRecorder:
       "diagnostic": report.longreprtext,
       "provenance": self.provenance,
     }
-    with self.path.open("a", encoding="utf-8") as stream:
-      stream.write(json.dumps(event, ensure_ascii=True) + "\n")
-      stream.flush()
+    try:
+      with self.path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(event, ensure_ascii=True) + "\n")
+        stream.flush()
+    except OSError as error:
+      # A full filesystem or FD table must not turn the original kernel
+      # failure into an unrelated pytest INTERNALERROR and discard its trace.
+      print(f"[vecops] diagnostic file unavailable: {error}\n{report.longreprtext}", file=sys.stderr, flush=True)
     print(f"[vecops] test failed ({phase}): {report.nodeid}; diagnostics: {self.path}", flush=True)
 
   def pytest_runtest_logreport(self, report):

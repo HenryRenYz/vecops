@@ -4,7 +4,9 @@
 // the account's inotify quota is exhausted. Never performs work in a signal
 // handler beyond incrementing one lock-free atomic; no Python/GIL callbacks.
 #pragma once
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -12,6 +14,7 @@
 #  include <csignal>
 #  include <fcntl.h>
 #  include <unistd.h>
+#  include <sys/resource.h>
 #  include <sys/stat.h>
 #endif
 
@@ -27,6 +30,14 @@ class ContentWatch {
   static void changed(int) noexcept {
     instance_->generation_.fetch_add(1, std::memory_order_relaxed);
   }
+  static std::size_t descriptor_budget() noexcept {
+    struct rlimit limit {};
+    if (::getrlimit(RLIMIT_NOFILE, &limit))
+      return 0;
+    // dnotify needs one persistent FD per directory. Leave most of the
+    // process limit available to compilers, frameworks and failure reporting.
+    return static_cast<std::size_t>(std::min<rlim_t>(128, limit.rlim_cur / 8));
+  }
 #endif
 public:
   bool add(const std::filesystem::path& path) {
@@ -35,6 +46,14 @@ public:
     std::lock_guard guard(mutex_);
     if (::getpid() != owner_)
       return false;
+    const auto budget = descriptor_budget();
+    if (descriptors_.size() > budget) {
+      // A lowered limit must not leave cached hashes backed by closed watches.
+      for (const auto& [_, descriptor] : descriptors_)
+        ::close(descriptor);
+      descriptors_.clear();
+      generation_.fetch_add(1, std::memory_order_relaxed);
+    }
     if (signal_ < 0) {
       struct sigaction overflow {};
       if (::sigaction(SIGIO, nullptr, &overflow) || overflow.sa_handler != SIG_DFL)
@@ -70,7 +89,10 @@ public:
         return true;
       ::close(found->second);
       descriptors_.erase(found);
+      generation_.fetch_add(1, std::memory_order_relaxed);
     }
+    if (descriptors_.size() >= budget)
+      return false; // Unwatched paths are hashed from content, never trusted.
     const int descriptor = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (descriptor < 0)
       return false;

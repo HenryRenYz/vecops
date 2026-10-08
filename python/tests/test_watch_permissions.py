@@ -7,12 +7,34 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import subprocess
 from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
 import vecops._watch as watch
 from vecops._identity import file_identity, tree_identity
+
+
+@pytest.mark.skipif(os.uname().sysname != "Linux", reason="Linux dnotify fallback")
+def test_native_dnotify_budget_does_not_exhaust_process_descriptors(tmp_path):
+  from dsl_test_utils import cpp_compile_command
+
+  root = Path(__file__).parents[2]
+  executable = tmp_path / "watch-budget"
+  source = Path(__file__).with_name("content_watch_reference.cpp")
+  subprocess.run(
+    cpp_compile_command(source, executable, flags=("-std=c++20", "-O2", "-pthread", f"-I{root / 'python/bindings'}")),
+    check=True,
+    capture_output=True,
+    text=True,
+  )
+  directories = tmp_path / "watched"
+  directories.mkdir()
+  result = subprocess.run([str(executable), str(directories)], capture_output=True, text=True)
+  if result.returncode == 77:
+    pytest.skip("native dnotify unavailable")
+  assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _clear_watch_caches():

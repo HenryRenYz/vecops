@@ -299,3 +299,10 @@ source-input comparison and a bounded path-level diff. Environment values are
 not included. This trace is observational: it does not affect identity hashes
 or relax validation. Cache-only mode neither discovers tools nor writes trace
 records, including when the variable is set.
+
+Linux content-hash watches use inotify when available. The dnotify fallback
+retains one directory descriptor per watch and is bounded to the smaller of
+128 descriptors or one eighth of the process's current soft `RLIMIT_NOFILE`.
+Unwatched paths are hashed from content again; a descriptor-budget limit is
+never permission to reuse a stale hash. Lowering the process limit closes
+excess fallback watches and invalidates their cached generation.

@@ -106,6 +106,24 @@ def test_failure_events_preserve_full_diagnostics_and_ignore_passes(runner, tmp_
   assert len(path.read_text().splitlines()) == 2
 
 
+def test_failure_recorder_io_error_preserves_original_diagnostic(runner, tmp_path, monkeypatch, capsys):
+  path = tmp_path / "failures.jsonl"
+  recorder = runner.FailureRecorder(path, {})
+  real_open = Path.open
+
+  def unavailable(file, *args, **kwargs):
+    if file == path:
+      raise OSError(24, "Too many open files")
+    return real_open(file, *args, **kwargs)
+
+  monkeypatch.setattr(Path, "open", unavailable)
+  report = SimpleNamespace(failed=True, nodeid="original_kernel_failure", longreprtext="original kernel traceback")
+  recorder.record(report, "call")
+  output = capsys.readouterr()
+  assert "original kernel traceback" in output.err
+  assert "Too many open files" in output.err
+
+
 def test_scratch_accepts_only_explicit_private_task_root(runner, private_scratch):
   assert runner.validate_scratch_root(private_scratch) == private_scratch
   basetemp = runner.fresh_basetemp(private_scratch / "pytest-run", scratch_root=private_scratch)
