@@ -2861,3 +2861,10 @@ lowers only the selected DSL variant. Existing benchmark `kernels` wrappers
 retain their interface; their declaration factories are also tested without
 calling `T.compile`. The same sixteen matrix and one SME transpose source
 comparisons stayed byte-identical after this benchmark-only change.
+
+Later fresh `920f-4` processes reported ordinary/streaming lengths 64B/64B,
+while the earlier still-running process retained 64B/32B. Register-refactor
+source catalogs now record the compiler's actual vector state and replay
+rejects missing/mismatched geometry before compilation. Previously emitted
+catalogs without this record are not performance-acceptance evidence for a
+new process; regenerate them rather than infer a width from the host model.

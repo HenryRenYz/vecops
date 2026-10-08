@@ -111,3 +111,19 @@ def test_benchmark_declarations_do_not_lower_unused_kernels(monkeypatch, module,
   assert tuple(value[0] for value in calls) == compiled
   assert len(calls) == 2
   assert all(value[1]["compiler"] is compiler for value in calls)
+
+
+def test_frozen_source_replay_rejects_changed_or_missing_vector_geometry(monkeypatch):
+  from vecops._arm_vector_state import VectorState
+
+  root = Path(__file__).resolve().parents[2]
+  monkeypatch.syspath_prepend(str(root / "benchmarks"))
+  benchmark = importlib.import_module("dsl_register_refactor_ab")
+  expected = benchmark.vector_state_identity(SimpleNamespace(vector_state=VectorState(64, 32)))
+  matching = {"vector_state": expected}
+  benchmark.validate_source_geometry((matching, matching), expected)
+  for document in ({}, {"vector_state": {"sve_bytes": 64, "sme_bytes": 64}}):
+    with pytest.raises(ValueError, match="baseline source catalog vector state"):
+      benchmark.validate_source_geometry((document, matching), expected)
+    with pytest.raises(ValueError, match="candidate source catalog vector state"):
+      benchmark.validate_source_geometry((matching, document), expected)

@@ -23,6 +23,22 @@ from pathlib import Path
 from dsl_snapshot_entry import select_snapshot
 
 
+def vector_state_identity(compiler):
+  """Source specialization geometry, not a CPU model's maximum widths."""
+  state = compiler.vector_state
+  return {"sve_bytes": state.sve_bytes, "sme_bytes": state.sme_bytes}
+
+
+def validate_source_geometry(documents, expected):
+  for label, document in zip(("baseline", "candidate"), documents):
+    actual = document.get("vector_state")
+    if actual != expected:
+      raise ValueError(
+        f"{label} source catalog vector state {actual!r} does not match {expected!r}; "
+        "regenerate both catalogs in processes with the same actual VL/SVL"
+      )
+
+
 def matmul_workload(compiler, args):
   """Adapt original MatmulBench metadata and its independent NumPy oracle."""
   import numpy as np
@@ -276,12 +292,23 @@ def main():
       declaration, _ = prototype(case)
       dsl = T.compile(declaration, compiler=compiler, pass_options=options)
       records.append({"case": case, "source": dsl.generated_source})
-    args.emit.write_text(json.dumps({"root": str(root), "native": vecops._C.__file__, "records": records}))
+    args.emit.write_text(
+      json.dumps(
+        {
+          "root": str(root),
+          "native": vecops._C.__file__,
+          "vector_state": vector_state_identity(compiler),
+          "records": records,
+        }
+      )
+    )
     print(f"Emitted {len(records)} original {args.operator} metadata from {root}", flush=True)
     return
   if not args.baseline or not args.candidate or args.rounds <= 0 or args.rounds % 6:
     parser.error("requires two catalogs and a positive multiple of six rounds")
-  old, new = (json.loads(path.read_text())["records"] for path in (args.baseline, args.candidate))
+  documents = tuple(json.loads(path.read_text()) for path in (args.baseline, args.candidate))
+  validate_source_geometry(documents, vector_state_identity(compiler))
+  old, new = (document["records"] for document in documents)
   assert [record["case"] for record in old] == [record["case"] for record in new]
   selected = {tuple(case) for case in cases}
   old = [record for record in old if tuple(record["case"]) in selected]
@@ -350,7 +377,11 @@ def main():
         invoke()
         check(c, expected)
       print(case, rows[-1]["new_over_old"], flush=True)
-      (args.output / "results.json").write_text(json.dumps({"cpu": cpu, "root": str(root), "rows": rows}, indent=2))
+      (args.output / "results.json").write_text(
+        json.dumps(
+          {"cpu": cpu, "root": str(root), "vector_state": vector_state_identity(compiler), "rows": rows}, indent=2
+        )
+      )
   finally:
     lease.close()
 
