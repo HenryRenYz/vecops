@@ -39,11 +39,28 @@ def validate_source_geometry(documents, expected):
       )
 
 
+def template_pair(module, compiler, *arguments, **keywords):
+  """Replay current declarations or regenerate an older frozen checkpoint.
+
+  Older checkpoints only expose kernels(); retain their exact declarations
+  instead of importing today's algorithm into that historical snapshot.
+  Their extra lowering is restricted to this compatibility path.
+  """
+  factory = getattr(module, "templates", None)
+  if factory is not None:
+    result = factory(*arguments, **keywords)
+    return result[0] if isinstance(result[0], tuple) else result
+  result = module.kernels(compiler, *arguments, **keywords)
+  pair = result[0] if isinstance(result[0], tuple) else result
+  return tuple(kernel.template for kernel in pair)
+
+
 def matmul_workload(compiler, args):
   """Adapt original MatmulBench metadata and its independent NumPy oracle."""
+  import dsl_matmul
   import numpy as np
   import vecops
-  from dsl_matmul import KIND_TYPES, PIPELINES, catalog, templates
+  from dsl_matmul import KIND_TYPES, PIPELINES, catalog
   from dsl_transpose import aligned_empty, numpy_dtype
 
   cases = [
@@ -58,7 +75,7 @@ def matmul_workload(compiler, args):
 
   def prototype(case):
     m, n, k, mode, kind, pipeline, level, layout = case
-    return templates(m, n, k, mode, kind, pipeline, level, b_layout=layout)[0]
+    return template_pair(dsl_matmul, compiler, m, n, k, mode, kind, pipeline, level, b_layout=layout)
 
   def metadata(case):
     m, n, k, _, kind, pipeline, _, layout = case
@@ -116,10 +133,11 @@ def matmul_workload(compiler, args):
 
 def packing_workload(compiler, args):
   """Original MatmulPackBench shapes with an independent SME layout oracle."""
+  import dsl_matmul_pack
   import numpy as np
   import vecops
   from dsl_benchmark_utils import packed_size, packing_geometry
-  from dsl_matmul_pack import catalog, templates
+  from dsl_matmul_pack import catalog
   from dsl_transpose import aligned_empty, numpy_dtype
 
   if platform.machine().lower() not in {"aarch64", "arm64"}:
@@ -136,7 +154,7 @@ def packing_workload(compiler, args):
 
   def prototype(case):
     s, k, mode, kind, side, pipeline = case
-    return templates(s, k, mode, kind, side, pipeline == "affine")[0]
+    return template_pair(dsl_matmul_pack, compiler, s, k, mode, kind, side, pipeline == "affine")
 
   def types(kind):
     return {"bf16": ("bfloat16", "bfloat16"), "convert": ("float32", "bfloat16"), "i8": ("int8", "int8")}[kind]
@@ -220,11 +238,12 @@ def main():
       )
   root = select_snapshot(args.root)
   sys.path.insert(0, str(root / "benchmarks"))
+  import dsl_transpose
   import numpy as np
   import vecops
   import vecops.language as T
   from dsl_timing import reserve_cpu
-  from dsl_transpose import MODES, aligned_empty, calls, catalog, numpy_dtype, templates
+  from dsl_transpose import MODES, aligned_empty, calls, catalog, numpy_dtype
 
   args.output = args.output.resolve()
   args.output.mkdir(parents=True, exist_ok=True)
@@ -261,7 +280,7 @@ def main():
 
     def prototype(case):
       m, n, ad, cd, compute, mode = case
-      return templates(m, n, mode, ad, cd, compute, args.implementation)
+      return template_pair(dsl_transpose, compiler, m, n, mode, ad, cd, compute, args.implementation)
 
     def metadata(case):
       m, n, ad, cd, _, _ = case

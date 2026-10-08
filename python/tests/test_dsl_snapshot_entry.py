@@ -127,3 +127,25 @@ def test_frozen_source_replay_rejects_changed_or_missing_vector_geometry(monkeyp
       benchmark.validate_source_geometry((document, matching), expected)
     with pytest.raises(ValueError, match="candidate source catalog vector state"):
       benchmark.validate_source_geometry((matching, document), expected)
+
+
+def test_declaration_compatibility_keeps_the_frozen_checkpoints_own_factory(monkeypatch):
+  root = Path(__file__).resolve().parents[2]
+  monkeypatch.syspath_prepend(str(root / "benchmarks"))
+  benchmark = importlib.import_module("dsl_register_refactor_ab")
+  declared = (object(), object())
+  compiled = tuple(SimpleNamespace(template=value) for value in declared)
+  calls = []
+
+  def current(*args, **kwargs):
+    calls.append((args, kwargs))
+    return declared, ("metadata",)
+
+  def historical(compiler, *args, **kwargs):
+    calls.append((compiler, args, kwargs))
+    return compiled
+
+  compiler = object()
+  assert benchmark.template_pair(SimpleNamespace(templates=current), compiler, 7, kind="bf16") == declared
+  assert benchmark.template_pair(SimpleNamespace(kernels=historical), compiler, 7, kind="bf16") == declared
+  assert calls == [((7,), {"kind": "bf16"}), (compiler, (7,), {"kind": "bf16"})]
