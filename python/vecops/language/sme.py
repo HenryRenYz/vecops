@@ -21,6 +21,10 @@ vector load followed by a bitcast: a fractional word is zero padded. Its
 region-local unsigned vector may be written into ZA. store_bits(vector, view)
 stores the requested storage prefix without numerical conversion, including
 zero inactive lanes from a masked ZA read. Both fit one actual streaming word.
+mask(count, dtype="uint32") creates a checked region-local prefix predicate.
+read_hor/ver accept that predicate instead of a count, allowing a helper to
+reuse it across an instruction loop. Lane widths must match; predicates, like
+streaming vectors, cannot cross an owner boundary.
 """
 
 from . import dsl as T
@@ -29,6 +33,7 @@ from .dsl import Intrinsic
 region = Intrinsic("sme.region")
 zero_za = Intrinsic("sme.zero_za")
 streaming_lanes = Intrinsic("sme.streaming_lanes")
+mask = Intrinsic("sme.mask")
 load = Intrinsic("sme.load")
 load_bits = Intrinsic("sme.load_bits")
 mopa = Intrinsic("sme.mopa")

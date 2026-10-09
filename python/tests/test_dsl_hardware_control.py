@@ -196,6 +196,90 @@ def test_instruction_metadata_ssa_stays_in_its_loop_and_branch_scope():
   assert move.view.offset is repeated
 
 
+def test_instruction_metadata_ssa_preserves_literal_geometry():
+  width = I.literal(16, dtype="int32")
+  vector = I.SMEVector("word", "uint32", width, 1)
+  move = I.ArchitectureCall("sme.read_ver", 0, slice_index=I.literal(0), vector=vector)
+  result = bind_instruction_metadata(I.Block([I.Assign("width", width), move]))
+  extent = result.statements[-1].vector.extent
+  assert extent.op == "literal" and extent.data == 16 and extent.type == width.type
+
+
+@pytest.mark.parametrize("svl", [None, 16, 64, 128])
+def test_streaming_full_mask_requires_actual_svl_not_ordinary_vl(svl):
+  from types import SimpleNamespace
+
+  from vecops._arm_vector_state import VectorState
+  from vecops.language._compiler.backends.cpu.cpp.hardware_sme import SMEInstructionEmitter
+
+  class Emitter(SMEInstructionEmitter):
+    environment = SimpleNamespace(vector_state=VectorState(256, svl))
+
+    def scalar(self, expression):
+      return str(expression.data)
+
+  emitter = Emitter()
+  for dtype, size in (("uint8", 1), ("uint16", 2), ("uint32", 4), ("uint64", 8)):
+    explicit = I.Expr(I.ScalarType("int64"), "streaming_lanes", data=dtype)
+    assert emitter.streaming_mask("Tag", dtype, explicit) == "vecops::vec::mtrue(Tag{})"
+    for count in (0, 256 // size, (svl // size if svl is not None else 3)):
+      full = svl is not None and count == svl // size
+      result = emitter.streaming_mask("Tag", dtype, I.literal(count))
+      assert ("mtrue" in result) == full
+      assert ("mwhilelt" in result) != full
+    wider = I.Expr(I.ScalarType("int64"), "streaming_lanes", data="uint64" if size < 8 else "uint8")
+    assert "mwhilelt" in emitter.streaming_mask("Tag", dtype, wider)
+
+
+@T.func
+def streaming_prefix(count):
+  return T.sme.mask(count, dtype="uint32")
+
+
+def test_streaming_mask_is_constructed_once_before_its_consumer_loop():
+  from vecops._arm_vector_state import VectorState
+  from vecops.language._compiler.ir.traversal import nodes
+
+  @T.template
+  def kernel(A: T.Tensor((4, 4), dtype="uint32"), O: T.Tensor((4, 4), dtype="uint32", access="output")):
+    with T.sme.region():
+      prefix = streaming_prefix(4)
+      T.static_assert(prefix.dtype == "uint32")
+      for row in T.serial(4):
+        T.sme.load_hor(0, row, A[row, :])
+      for column in T.serial(4):
+        value = T.sme.read_ver(0, column, prefix)
+        T.sme.store_bits(value, O[column, :])
+
+  artifact = CPUBackend().lower(kernel.ir, (), target="SME", options={"_vector_state": VectorState(64, 64)})
+  source = artifact.source
+  graph = tuple(nodes(artifact.lowered.kernel.body))
+  mask = next(node.vector for node in graph if isinstance(node, I.ArchitectureCall) and node.operation == "sme.mask")
+  consumer = [node for node in graph if isinstance(node, I.For)][-1]
+  declaration = source.index(f"const auto {mask.name} =")
+  loop = source.index(f"for (vecops::nint_t {consumer.target}", declaration)
+  assert declaration < loop
+  assert "mwhilelt" not in source[loop : source.index("vecops::vec::sme::read_ver<0>", loop)]
+  assert "std::array<vecops::vec::" not in source
+
+
+@pytest.mark.parametrize("other_region", [False, True])
+def test_streaming_mask_rejects_wrong_width_and_cross_owner_reuse(other_region):
+  @T.template
+  def kernel(A: T.Tensor((4,), dtype="uint32")):
+    with T.sme.region():
+      prefix = T.sme.mask(4, dtype="uint32")
+      if not other_region:
+        T.sme.read_ver(0, 0, prefix, dtype="uint16")
+    if other_region:
+      with T.sme.region():
+        T.sme.read_ver(0, 0, prefix)
+
+  message = "unbound kernel name 'prefix'" if other_region else "same lane width.*this region"
+  with pytest.raises(TypeError, match=message):
+    CPUBackend().lower(kernel.ir, (), target="SME")
+
+
 def test_sme_full_word_packing_is_source_parsed_and_operation_ordered():
   from vecops.language._compiler.frontend.helpers import expand_helper
   from vecops.language._compiler.ir.traversal import nodes
@@ -233,6 +317,18 @@ def test_sme_full_word_packing_is_source_parsed_and_operation_ordered():
   )
   instructions = [node.operation for node in transfer.body.statements if isinstance(node, I.ArchitectureCall)]
   assert instructions == ["sme.load_hor", "sme.load_hor", "sme.store_ver", "sme.store_ver"]
+  row_loops = [
+    node
+    for node in graph
+    if isinstance(node, I.For)
+    and any(
+      isinstance(child, I.ArchitectureCall) and child.operation == "sme.load_hor" for child in node.body.statements
+    )
+  ]
+  assert row_loops
+  assert all(not any(isinstance(child, I.If) for child in nodes(loop.body)) for loop in row_loops), (
+    "prefetch dispatch belongs outside the hot row loop"
+  )
 
 
 def test_sme_packing_stages_executable_library_before_emission(monkeypatch):
@@ -258,6 +354,36 @@ def test_sme_packing_stages_executable_library_before_emission(monkeypatch):
   assert "vecops::vec::sme::load_hor<2>" in source
   assert "vecops::vec::sme::store_ver<3>" in source
   assert "std::array<vecops::vec::" not in source
+
+
+@pytest.mark.parametrize("svl", [16, 64, 128])
+def test_sme_complete_fringe_chunks_have_constant_unrolled_group_counts(svl):
+  from vecops._arm_vector_state import VectorState
+  from vecops.language._compiler.ir.traversal import nodes
+
+  spatial, reduction, capacity = (T.dynamic(lower=0) for _ in range(3))
+
+  @T.template
+  def kernel(
+    A: T.Tensor((spatial, reduction), dtype="bfloat16"),
+    O: T.Tensor((capacity,), dtype="bfloat16", access="output"),
+  ):
+    T.pack(A, O, side="A", format="sme")
+
+  artifact = CPUBackend().lower(
+    kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True, "_vector_state": VectorState(256, svl)}
+  )
+  program = artifact.backend_ir.sme_packing_programs["bfloat16"]
+  drains = [
+    node
+    for node in nodes(program)
+    if isinstance(node, I.For)
+    and any(
+      isinstance(child, I.ArchitectureCall) and child.operation == "sme.read_ver" for child in node.body.statements
+    )
+  ]
+  assert any(I.constant(node.stop) == svl // 4 and node.unroll == min(16, svl // 4) for node in drains)
+  assert any(I.constant(node.stop) is None and node.unroll == 2 for node in drains), "fractional groups stay bounded"
 
 
 @pytest.mark.parametrize("pitch", [None, 256, 259, -259])

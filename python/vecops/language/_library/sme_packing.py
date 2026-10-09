@@ -10,6 +10,22 @@ from .. import sme
 def _transfer_words(
   source, destination, origin, k_origin, output_origin, width, chunk, load_base, store_base, prefetch, row_unroll
 ):
+  # Select the hint schedule once per chunk, not once per row. Each helper
+  # expansion receives a literal hint flag, so its hot loop has no dispatch.
+  if prefetch:
+    _transfer_rows(
+      source, destination, origin, k_origin, output_origin, width, chunk, load_base, store_base, True, row_unroll
+    )
+  else:
+    _transfer_rows(
+      source, destination, origin, k_origin, output_origin, width, chunk, load_base, store_base, False, row_unroll
+    )
+
+
+@T.func
+def _transfer_rows(
+  source, destination, origin, k_origin, output_origin, width, chunk, load_base, store_base, prefetch, row_unroll
+):
   ratio = 4 // T.itemsize(source.dtype)
   for row in T.serial(width, unroll=row_unroll):
     for tile in T.unroll(2):
@@ -68,24 +84,25 @@ def pack_full_words(source, destination, *, origin, width, chunk, chunks, row_un
 
 
 @T.func
-def pack_fringe(source, destination, *, origin, k_origin, width, active_k, spatial, output_origin=0):
+def pack_fringe(source, destination, *, origin, k_origin, width, active_k, spatial, output_origin=0, group_unroll=2):
   """Zero-pad fractional K groups and spatial tails through typed ZA words.
 
-  Complete words enter ZA directly. Fractional words use a narrower storage
-  view of the same physical ZA row; LD1's inactive-storage zeroing pads the
-  final word without a Z-register round trip. Masked ZA reads zero absent
-  spatial lanes before full packed stores.
+  Narrow storage uses its own view of the physical ZA row, for both complete
+  and fractional K groups. LD1's inactive-storage zeroing pads the final word
+  without a Z-register round trip or a runtime word-alignment dispatch inside
+  the row loop. Masked ZA reads zero absent spatial lanes before full stores.
   Neither path evaluates a padded source address or needs a Vec array.
   """
   word_dtype = "uint64" if T.itemsize(source.dtype) == 8 else "uint32"
   ratio = T.itemsize(word_dtype) // T.itemsize(source.dtype)
+  # The spatial prefix does not vary across K groups. Make its predicate a
+  # visible register value rather than reconstructing it at every ZA read.
+  first_mask = sme.mask(T.max(0, T.min(width, spatial - origin)), dtype=word_dtype)
+  second_mask = sme.mask(T.max(0, T.min(width, spatial - origin - width)), dtype=word_dtype)
   for tile in T.unroll(2):
     for row in T.serial(T.max(0, T.min(width, spatial - origin - tile * width)), unroll=2):
       region = source[origin + tile * width + row, k_origin : k_origin + active_k]
-      if active_k % ratio == 0:
-        # Complete storage words can enter ZA directly, including spatial
-        # fringes and all 64-bit rows. Only a fractional terminal word needs
-        # the storage-masked vector load/zero-padding/write sequence.
+      if T.itemsize(source.dtype) >= 4:
         sme.load_hor(tile, row, region, word_dtype=word_dtype)
       else:
         # ZA tile views alias the same physical byte rows. A storage-width
@@ -95,9 +112,9 @@ def pack_fringe(source, destination, *, origin, k_origin, width, active_k, spati
         storage_bytes = T.itemsize(source.dtype)
         storage_word = "uint8" if storage_bytes == 1 else "uint16"
         sme.load_hor(tile % storage_bytes, row * ratio + tile // storage_bytes, region, word_dtype=storage_word)
-  for group in T.serial((active_k + ratio - 1) // ratio, unroll=2):
+  for group in T.serial((active_k + ratio - 1) // ratio, unroll=group_unroll):
     for tile in T.unroll(2):
-      value = sme.read_ver(tile, group, T.max(0, T.min(width, spatial - origin - tile * width)), dtype=word_dtype)
+      value = sme.read_ver(tile, group, first_mask if tile == 0 else second_mask, dtype=word_dtype)
       sme.store_bits(
         value,
         destination[output_origin + group, tile * width * ratio : (tile + 1) * width * ratio],
@@ -105,22 +122,36 @@ def pack_fringe(source, destination, *, origin, k_origin, width, active_k, spati
 
 
 @T.func
-def _pack_remainder(source, destination, origin, start, width, chunk, ratio):
-  for ki in T.serial(start, source.shape[1], chunk, unroll=1):
+def _pack_remainder(source, destination, origin, first_chunk, width, chunk, ratio, group_unroll):
+  # Complete chunks have constant masks/group counts. A clipped loop over
+  # both full and partial chunks hides that fact even from native unrolling.
+  for index in T.serial(first_chunk, source.shape[1] // chunk, unroll=1):
     pack_fringe(
       source,
       destination,
       origin=origin,
-      k_origin=ki,
+      k_origin=index * chunk,
       width=width,
-      active_k=T.min(chunk, source.shape[1] - ki),
+      active_k=chunk,
       spatial=source.shape[0],
-      output_origin=ki // ratio,
+      output_origin=index * width,
+      group_unroll=group_unroll,
+    )
+  if source.shape[1] % chunk:
+    pack_fringe(
+      source,
+      destination,
+      origin=origin,
+      k_origin=source.shape[1] - source.shape[1] % chunk,
+      width=width,
+      active_k=source.shape[1] % chunk,
+      spatial=source.shape[0],
+      output_origin=(source.shape[1] - source.shape[1] % chunk) // ratio,
     )
 
 
 @T.func
-def pack_raw(source, destination, *, row_unroll=2):
+def pack_raw(source, destination, *, row_unroll=2, group_unroll=2):
   """Whole K-contiguous packed-layout algorithm in one streaming owner.
 
   The checked caller binds destination's logical [panel, K-group, elements]
@@ -138,22 +169,49 @@ def pack_raw(source, destination, *, row_unroll=2):
   # is enormous. In particular, do not let an empty K domain run an M loop
   # whose final padded induction value could overflow.
   if source.shape[0] > 0 and source.shape[1] > 0:
+    if source.shape[0] < 2 * width and source.shape[1] <= chunk:
+      # One spatial fringe and one K chunk need neither panel bookkeeping
+      # nor a K loop. A complete spatial panel keeps the direct-store path.
+      pack_fringe(
+        source,
+        destination[0, :, :],
+        origin=0,
+        k_origin=0,
+        width=width,
+        active_k=source.shape[1],
+        spatial=source.shape[0],
+      )
+    else:
+      _pack_panels(source, destination, width, chunk, ratio, row_unroll, group_unroll)
+
+
+@T.func
+def _pack_panels(source, destination, width, chunk, ratio, row_unroll, group_unroll):
+  if T.itemsize(source.dtype) <= 4:
+    # Complete spatial panels and the sole spatial fringe have disjoint
+    # lifetimes. Do not keep every pipeline address induction live across
+    # a per-panel full/fringe dispatch, especially when there are no full
+    # panels at all. Subtraction avoids a round-up overflow.
+    full_spatial = source.shape[0] - source.shape[0] % (2 * width)
+    for panel_index in T.serial(source.shape[0] // (2 * width), unroll=1):
+      panel_output = destination[panel_index, :, :]
+      if source.shape[1] >= chunk:
+        pack_full_words(
+          source,
+          panel_output,
+          origin=panel_index * (2 * width),
+          width=width,
+          chunk=chunk,
+          chunks=source.shape[1] // chunk,
+          row_unroll=row_unroll,
+        )
+      _pack_remainder(
+        source, panel_output, panel_index * (2 * width), source.shape[1] // chunk, width, chunk, ratio, group_unroll
+      )
+    if full_spatial < source.shape[0]:
+      panel_output = destination[full_spatial // (2 * width), :, :]
+      _pack_remainder(source, panel_output, full_spatial, 0, width, chunk, ratio, group_unroll)
+  else:
     for origin in T.serial(0, source.shape[0], 2 * width, unroll=1):
       panel_output = destination[origin // (2 * width), :, :]
-      if T.itemsize(source.dtype) <= 4:
-        if source.shape[0] - origin >= 2 * width:
-          if source.shape[1] >= chunk:
-            pack_full_words(
-              source,
-              panel_output,
-              origin=origin,
-              width=width,
-              chunk=chunk,
-              chunks=source.shape[1] // chunk,
-              row_unroll=row_unroll,
-            )
-          _pack_remainder(source, panel_output, origin, (source.shape[1] // chunk) * chunk, width, chunk, ratio)
-        else:
-          _pack_remainder(source, panel_output, origin, 0, width, chunk, ratio)
-      else:
-        _pack_remainder(source, panel_output, origin, 0, width, chunk, ratio)
+      _pack_remainder(source, panel_output, origin, 0, width, chunk, ratio, group_unroll)

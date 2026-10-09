@@ -379,7 +379,13 @@ def plan_matmul(prepared, context):
         catalog=context.environment.operations,
         prefix="sme_packing_" + dtype,
         hardware_kind="sme",
-        keyword_arguments={"row_unroll": row_unroll},
+        keyword_arguments={
+          "row_unroll": row_unroll,
+          # Full fringe chunks drain fixed native-word groups: their address
+          # increments are immediate, unlike row loads with a runtime pitch.
+          # Fractional groups keep the recipe's conservative unroll=2.
+          "group_unroll": min(16, streaming_bytes // word) if streaming_bytes is not None else 2,
+        },
       )
       return bind_instruction_metadata(
         simplify_loop_metadata(I.Block(body), streaming_bytes=streaming_bytes),

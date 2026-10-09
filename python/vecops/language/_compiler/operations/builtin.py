@@ -188,6 +188,7 @@ define("view_disjoint", "metadata", T.NONE)
 define("double_buffer", "allocation", T.NONE, keywords=("dtype",))
 define("amx.zero", "architecture", T.NONE, effects="state", keywords=("dtype",))
 define("sme.load sme.load_bits sme.read_hor sme.read_ver", "architecture", T.NONE, effects="state", keywords=("dtype",))
+define("sme.mask", "architecture", T.NONE, effects="none", keywords=("dtype",))
 define("sme.store sme.store_bits sme.write_hor sme.write_ver sme.zero_za", "architecture", T.NONE, effects="state")
 define(
   "sme.load_hor sme.load_ver sme.store_hor sme.store_ver",

@@ -59,8 +59,37 @@ def test_sme_packing_fringe_is_library_control_with_small_bit_primitives(dtype):
   assert "vecops::vec::sme::load_hor<1>" in source
   assert "vecops::vec::sme::write_hor" not in source, "fractional storage words must be zeroed by direct ZA loads"
   assert "sme_packing_metadata_" in source
-  assert len(source) < 250_000, "nested clipped addresses were printed as expanded expression trees"
+  assert len(source) < 250_000, "instruction schedule source grew beyond its bounded variants"
+  assert max(map(len, source.splitlines())) < 2_000, "metadata was printed as expanded expression trees"
   assert_no_vec_mask_arrays(source)
+
+
+@pytest.mark.parametrize("dtype", ["uint8", "float16"])
+def test_sme_fringe_uses_storage_width_without_runtime_alignment_dispatch(dtype):
+  from vecops.language._compiler import ir as I
+  from vecops.language._compiler.frontend.helpers import expand_helper
+  from vecops.language._compiler.ir.traversal import nodes
+  from vecops.language._compiler.operations import snapshot
+  from vecops.language._library.sme_packing import pack_fringe
+
+  def raw(name):
+    return I.Expr(I.ScalarType("int64"), "raw", data=name)
+
+  source = I.View("source", dtype, (raw("M"), raw("K")), (raw("pitch"), I.literal(1)), I.literal(0))
+  destination = I.View("output", dtype, (raw("groups"), raw("elements")), (raw("elements"), I.literal(1)), I.literal(0))
+  _, statements = expand_helper(
+    pack_fringe,
+    (source, destination),
+    keyword_arguments={"origin": 0, "k_origin": 0, "width": raw("width"), "active_k": raw("K"), "spatial": raw("M")},
+    catalog=snapshot(),
+    prefix="fringe",
+    hardware_kind="sme",
+  )
+  graph = tuple(nodes(I.Block(statements)))
+  assert not any(isinstance(node, I.If) for node in graph)
+  loads = [node for node in graph if isinstance(node, I.ArchitectureCall) and node.operation == "sme.load_hor"]
+  assert len(loads) == 2
+  assert all(node.operands == ("uint8" if dtype == "uint8" else "uint16",) for node in loads)
 
 
 @pytest.mark.parametrize("operation", ["load", "store"])
@@ -169,7 +198,7 @@ def test_sme_raw_packing_recipe_matches_independent_bits_and_address_model(dtype
       catalog=snapshot(),
       prefix="packing_constant_model",
       hardware_kind="sme",
-      keyword_arguments={"row_unroll": min(16, svl // 4)},
+      keyword_arguments={"row_unroll": min(16, svl // 4), "group_unroll": min(16, svl // word_size)},
     )
     constant_program = bind_instruction_metadata(simplify_loop_metadata(I.Block(constant_body), streaming_bytes=svl))
     traces = []

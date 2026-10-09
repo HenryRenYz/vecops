@@ -42,6 +42,7 @@ class PackingModel:
       (self.word_dtype.itemsize, self.width, self.width), np.iinfo(self.word_dtype).max, dtype=self.word_dtype
     )
     self.vectors = {}
+    self.masks = {}
     self.trace = []
 
   def scalar(self, value):
@@ -89,7 +90,11 @@ class PackingModel:
       bytes_ = ELEMENT_BYTES[operation.operands[0]] if kind == "sme.load_hor" else self.word_dtype.itemsize
       assert 0 <= index < self.svl // bytes_
     self.trace.append((kind, operation.tile, index))
-    if kind in {"sme.load_hor", "sme.store_ver"}:
+    if kind == "sme.mask":
+      count = self.scalar(vector.extent)
+      assert 0 <= count <= self.svl // ELEMENT_BYTES[vector.dtype]
+      self.masks[vector.name] = count
+    elif kind in {"sme.load_hor", "sme.store_ver"}:
       memory = self.memory_slice(operation.view)
       if kind == "sme.load_hor":
         storage_word = np.dtype(operation.operands[0])
@@ -116,6 +121,8 @@ class PackingModel:
       assert vector.dtype == self.word_dtype.name
       count = self.scalar(vector.extent)
       assert 0 <= count <= self.width
+      if operation.operands:
+        assert self.masks[operation.operands[0].name] == count
       if kind == "sme.write_hor":
         self.za[operation.tile, index, :count] = self.vectors[vector.name][:count]
       else:

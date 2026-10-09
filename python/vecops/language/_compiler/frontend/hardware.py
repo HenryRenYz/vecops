@@ -76,6 +76,16 @@ class HardwareFrontend:
 
   def sme_operation(self, operation, args, kwargs, node):
     region = id(self.hardware_regions[-1])
+    if operation == "sme.mask":
+      if len(args) != 1:
+        self.error(node, "sme.mask expects one scalar active count")
+      extent = self.value(args[0], node)
+      dtype = dtype_name(kwargs.get("dtype", "uint32"))
+      if dtype == "bool" or not isinstance(extent.type, I.ScalarType) or not extent.type.dtype.startswith("int"):
+        self.error(node, "SME mask requires a numeric lane dtype and a scalar integer count")
+      mask = I.SMEMask(self.unique("streaming_mask"), dtype, extent, region)
+      self.block.statements.append(I.ArchitectureCall(operation, vector=mask))
+      return mask
     if operation in {"sme.load_hor", "sme.load_ver", "sme.store_hor", "sme.store_ver"}:
       if len(args) != 3 or not isinstance(args[2], I.View) or len(args[2].shape) != 1:
         self.error(node, "SME slice moves expect (constant tile, scalar slice index, rank-one view)")
@@ -98,9 +108,13 @@ class HardwareFrontend:
       if len(args) != 3:
         self.error(node, "SME vector slice moves expect (constant tile, scalar slice index, vector/active count)")
       tile, index = I.constant(self.value(args[0], node)), self.value(args[1], node)
+      mask = None
       if operation.startswith("sme.read"):
-        extent = self.value(args[2], node)
-        dtype = dtype_name(kwargs.get("dtype", "float32"))
+        mask = args[2] if isinstance(args[2], I.SMEMask) else None
+        extent = mask.extent if mask is not None else self.value(args[2], node)
+        dtype = dtype_name(kwargs.get("dtype", mask.dtype if mask is not None else "float32"))
+        if mask is not None and (mask.region != region or ELEMENT_BYTES[mask.dtype] != ELEMENT_BYTES[dtype]):
+          self.error(node, "SME read mask must have the same lane width and belong to this region")
         if not isinstance(extent.type, I.ScalarType) or not extent.type.dtype.startswith("int"):
           self.error(node, "SME vector active count must be a scalar integer")
         vector = I.SMEVector(self.unique("za_vector"), dtype, extent, region)
@@ -113,7 +127,9 @@ class HardwareFrontend:
         self.error(node, "SME ZA vector slice type/tile is invalid")
       if not isinstance(index.type, I.ScalarType) or not index.type.dtype.startswith("int"):
         self.error(node, "SME ZA slice index must be a scalar integer")
-      self.block.statements.append(I.ArchitectureCall(operation, tile, slice_index=index, vector=vector))
+      self.block.statements.append(
+        I.ArchitectureCall(operation, tile, slice_index=index, vector=vector, operands=() if mask is None else (mask,))
+      )
       return vector if operation.startswith("sme.read") else None
     if operation in {"sme.store", "sme.store_bits"}:
       if (

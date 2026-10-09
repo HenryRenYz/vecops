@@ -22,6 +22,7 @@ from .kernel import (
   KernelIR,
   ReductionGroup,
   RowMap,
+  SMEMask,
   SMEVector,
   Store,
   UnrolledFor,

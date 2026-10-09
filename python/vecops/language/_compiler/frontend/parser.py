@@ -189,8 +189,8 @@ class Frontend(
         return getattr(obj, node.attr)
       if node.attr == "shape" and isinstance(obj, I.Expr) and isinstance(obj.type, I.TileType):
         return obj.type.shape
-      if node.attr == "dtype" and isinstance(obj, (I.View, I.Expr)):
-        return obj.dtype if isinstance(obj, I.View) else obj.type.dtype
+      if node.attr == "dtype" and isinstance(obj, (I.View, I.Expr, I.SMEVector, I.SMEMask)):
+        return obj.type.dtype if isinstance(obj, I.Expr) else obj.dtype
       if node.attr == "T" and isinstance(obj, I.View):
         region = replace(obj.region, axes=obj.region.axes[::-1]) if obj.region is not None else None
         return replace(obj, shape=obj.shape[::-1], strides=obj.strides[::-1], region=region)

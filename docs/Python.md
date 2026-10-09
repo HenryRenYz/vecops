@@ -1940,6 +1940,17 @@ untouched. Slice-index/capacity checks use the selected word geometry, and
 never round a tail up into an out-of-bounds access. This supports library
 grouped-K packing without embedding its algorithm in the instruction emitter.
 
+`T.sme.mask(count, dtype="uint32")` constructs a region-local streaming
+prefix predicate. `T.sme.read_hor/ver(tile, index, predicate, dtype=...)`
+accepts it in place of the scalar active count; the optional result dtype
+must have the same lane width. A `T.func` may return this immutable handle
+inside its owner. The predicate cannot escape or be reused by another owner,
+and its `[0, streaming_lanes(dtype)]` capacity is checked before entry.
+This lets a source-level schedule construct spatial predicates once before
+its K-group loop, without relying on native loop-invariant code motion.
+Known complete prefixes lower to `mtrue` only using the captured **SVL** or
+an explicit streaming-length expression, never the ordinary VL or CPU model.
+
 Experimental CPU recipe tuning: `cpu_vector_dot_dsl=True` expands eligible
 explicit unblocked vector dots into the source-parsed FMA/state library leaf.
 The current scope is known small output geometry without packed operands;

@@ -2,22 +2,47 @@
 # SPDX-License-Identifier: MIT
 """Streaming operands are created and consumed within one SME region."""
 
+from .... import ir as I
 from ....dtypes import ELEMENT_BYTES
 from ..capabilities import CPP_TYPES
 
 
 class SMEInstructionEmitter:
+  def streaming_mask(self, tag, dtype, extent):
+    """Use all lanes only for the captured or explicit streaming geometry.
+
+    A CPU model, ordinary VL, or a larger logical view does not prove this.
+    Partial/unknown prefixes keep the normal bounded mask operation.
+    """
+    native = self.environment.vector_state.sme_bytes
+    if (
+      native is not None
+      and I.constant(extent) == native // ELEMENT_BYTES[dtype]
+      or extent.op == "streaming_lanes"
+      and ELEMENT_BYTES[extent.data] == ELEMENT_BYTES[dtype]
+    ):
+      return f"vecops::vec::mtrue({tag}{{}})"
+    return f"vecops::vec::mwhilelt({tag}{{}}, 0, {self.scalar(extent)})"
+
   def emit_sme_instruction(self, statement):
-    if statement.operation in {"sme.load_hor", "sme.load_ver", "sme.store_hor", "sme.store_ver"}:
+    if statement.operation == "sme.mask":
+      mask = statement.vector
+      tag = mask.name + "_tag"
+      unsigned = f"std::uint{ELEMENT_BYTES[mask.dtype] * 8}_t"
+      self.line(f"using {tag} = vecops::vec::ScalableTag<{unsigned}, 0>;")
+      self.line(f"const auto {mask.name} = {self.streaming_mask(tag, mask.dtype, mask.extent)};")
+    elif statement.operation in {"sme.load_hor", "sme.load_ver", "sme.store_hor", "sme.store_ver"}:
       view, index = statement.view, statement.slice_index
       word_bytes = ELEMENT_BYTES[statement.operands[0]]
       unsigned = f"std::uint{word_bytes * 8}_t"
       tag, mask = self.unique("za_slice_tag"), self.unique("za_slice_mask")
       self.line(f"using {tag} = vecops::vec::ScalableTag<{unsigned}, 0>;")
-      count = self.scalar(view.shape[0])
+      count = view.shape[0]
       if word_bytes != ELEMENT_BYTES[view.dtype]:
-        count = f"(({count}) * {ELEMENT_BYTES[view.dtype]} / {word_bytes})"
-      self.line(f"auto {mask} = vecops::vec::mwhilelt({tag}{{}}, 0, {count});")
+        count = I.binary(
+          "floordiv", I.binary("mul", count, I.literal(ELEMENT_BYTES[view.dtype])), I.literal(word_bytes)
+        )
+      self.line(f"auto {mask} = {self.streaming_mask(tag, statement.operands[0], count)};")
       const = "const " if statement.operation.startswith("sme.load") else ""
       instruction = statement.operation.split(".")[1]
       self.line(
@@ -30,10 +55,10 @@ class SMEInstructionEmitter:
       memory_type = f"std::uint{ELEMENT_BYTES[view.dtype] * 8}_t"
       self.line(f"using {memory_tag} = vecops::vec::ScalableTag<{memory_type}, 0>;")
       mask = self.unique("streaming_bits_mask")
-      self.line(f"auto {mask} = vecops::vec::mwhilelt({memory_tag}{{}}, 0, {self.scalar(view.shape[0])});")
+      self.line(f"auto {mask} = {self.streaming_mask(memory_tag, view.dtype, view.shape[0])};")
       if statement.operation == "sme.load_bits":
         self.line(f"using {tag} = vecops::vec::ScalableTag<{CPP_TYPES[handle.dtype]}, 0>;")
-        self.line(f"auto {handle.name}_mask = vecops::vec::mwhilelt({tag}{{}}, 0, {self.scalar(handle.extent)});")
+        self.line(f"auto {handle.name}_mask = {self.streaming_mask(tag, handle.dtype, handle.extent)};")
         self.line(
           f"auto {handle.name} = vecops::vec::bitcast({tag}{{}}, {memory_tag}{{}}, "
           f"vecops::vec::load({memory_tag}{{}}, reinterpret_cast<const {memory_type}*>({self.pointer(view)}), "
@@ -48,7 +73,7 @@ class SMEInstructionEmitter:
       handle = statement.vector
       tag = handle.name + "_tag"
       self.line(f"using {tag} = vecops::vec::ScalableTag<{CPP_TYPES[handle.dtype]}, 0>;")
-      self.line(f"auto {handle.name}_mask = vecops::vec::mwhilelt({tag}{{}}, 0, {self.scalar(handle.extent)});")
+      self.line(f"auto {handle.name}_mask = {self.streaming_mask(tag, handle.dtype, handle.extent)};")
       self.line(
         f"auto {handle.name} = vecops::vec::load_convert({tag}{{}}, {self.pointer(statement.view)}, vecops::vec::opt::masked({handle.name}_mask));"
       )
@@ -63,12 +88,17 @@ class SMEInstructionEmitter:
       unsigned = f"std::uint{ELEMENT_BYTES[handle.dtype] * 8}_t"
       self.line(f"using {bits} = vecops::vec::ScalableTag<{unsigned}, 0>;")
       mask = self.unique("za_vector_mask")
-      self.line(f"auto {mask} = vecops::vec::mwhilelt({bits}{{}}, 0, {self.scalar(handle.extent)});")
+      predicate = (
+        statement.operands[0].name
+        if statement.operands and isinstance(statement.operands[0], I.SMEMask)
+        else self.streaming_mask(bits, handle.dtype, handle.extent)
+      )
+      self.line(f"auto {mask} = {predicate};")
       instruction = statement.operation.split(".")[1]
       slice_index = f"static_cast<std::uint32_t>({self.scalar(index)})"
       if instruction.startswith("read"):
         self.line(f"using {tag} = vecops::vec::ScalableTag<{CPP_TYPES[handle.dtype]}, 0>;")
-        self.line(f"auto {handle.name}_mask = vecops::vec::mwhilelt({tag}{{}}, 0, {self.scalar(handle.extent)});")
+        self.line(f"auto {handle.name}_mask = {mask};")
         self.line(
           f"auto {handle.name} = vecops::vec::bitcast({tag}{{}}, {bits}{{}}, vecops::vec::sme::{instruction}<{statement.tile}>({bits}{{}}, {slice_index}, {mask}));"
         )

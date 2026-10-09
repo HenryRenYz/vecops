@@ -2653,9 +2653,9 @@ instruction regions; its address still receives root-coordinate preflight
 checks before ownership, even though it consumes no tile/vector capacity.
 The temporary `cpu_sme_packing_dsl` option remains off by default while native
 correctness, instruction order and balanced MatmulPackBench measurements are
-being checked. The experimental fringe schedule now uses storage-masked
-`sme.load_bits` / `store_bits` and word-sized ZA reads/writes, including
-fractional K zero padding. These are small region-local memory primitives,
+being checked. The experimental fringe schedule uses storage-width ZA loads
+and word-sized ZA reads plus `store_bits`, including fractional K zero padding
+through aliased physical ZA row views. These are small region-local primitives,
 not operator algorithms. Panel traversal is now also part of the experimental
 `pack_raw` DSL recipe, not the terminal printer. The default raw driver and
 transformed packing remain unchanged pending native/performance validation;
@@ -2939,8 +2939,8 @@ storage before entry. The source recipe selects one panel/group, then writes
 a complete native-word storage slice; group indices retain loop provenance.
 This removes redundant per-store flat-capacity clipping without adding an
 unchecked-access intrinsic. Group/panel ceilings use quotient/remainder.
-Complete storage words in spatial/K fringes use direct ZA loads; only a
-fractional terminal word needs the masked vector-load/zero-pad/write sequence.
+Narrow spatial/K fringes use storage-width direct ZA loads for both complete
+and fractional words; LD1 zeroing avoids a temporary vector/write sequence.
 The same terminal hardware-program binding now makes uncaptured local pointer
 copies, preserving const pointees and writable outputs across ZA memory
 clobbers. This is shared ownership/lowering infrastructure, not packing logic.
@@ -2999,3 +2999,55 @@ Latest remote snapshots/builds: 920f-4,
 independent row validation is under
 `/home/ryz/tmp/vecops-storage-row-proof.M6IzvNNk/build-validation/row-alias`.
 Each used a fresh, explicit installed-SDK snapshot and clang/clang++ from af3.
+
+### Source-level instruction scheduling (2026-10-10)
+
+Raw packing now selects storage-width ZA loads at compile time, without a
+per-row fractional-word dispatch. Complete spatial panels and the last fringe
+have separate lifetimes; the observed generic streaming frame shrank from
+480 to 368 bytes. Prefetch/no-prefetch variants are selected once per K chunk,
+then expanded with literal flags. Complete fringe K chunks have fixed group
+counts and bounded native-word unrolling; the sole fractional chunk remains
+masked with conservative unroll=2. A single small spatial/K fringe bypasses
+both outer traversal loops. Runtime-pitch row loads retain unroll=2.
+
+`T.sme.mask` is a small checked, region-local predicate primitive, not an
+operator algorithm. The source recipe constructs its spatial predicates once
+before K-group writeback. Read slice moves consume those handles without
+reconstructing their masks. Masks/vectors expose compile-time lane `dtype`
+metadata but cannot escape ownership. Metadata SSA preserves typed literals;
+full prefixes use captured SVL, never ordinary VL or the CPU model.
+
+The retained matched-geometry 920f-4 snapshot (clang, af3, VL=SVL=64 bytes)
+measured the following Dynamic BF16 B plain-packing ratios to public C++.
+All 24 balanced rounds and the independent packed-layout oracle are retained:
+
+| Spatial x K | New DSL / public C++ |
+| --- | --- |
+| 1 x 1 | 0.988 |
+| 17 x 65 | 1.094 |
+| 64 x 256 | 0.953 |
+| 513 x 1000 | 0.927 |
+
+This is four scoped cases, not the complete dtype/shape/fusion gate. The 17x65
+dynamic gap remains. The earlier panel/geometry snapshot passed all 24 raw
+dtype/side/shape-mode native combinations with reversed/aliased inputs and
+canaries; the retained predicate snapshot passed six native raw/row-alias
+checks. Scoped pure checks passed 246 tests; the frozen x86 vector-dot run
+passed nine native checks. Sixteen x86 and sixteen SME default matrix C++
+bodies stayed identical to c9764e0; their registry-fingerprint comment changes
+intentionally after adding the primitive.
+
+A plane-major direct-ZA half-drain experiment passed eight native checks but
+showed no benefit in the four-case paired gate (large tail about 2.8% slower
+than the retained predicate schedule). It was reverted; its results under
+`/home/ryz/tmp/vecops-packing-direct-halves.I2yXBnlH/build-validation` are not
+acceptance evidence for the retained implementation. The retained recipe is
+byte-identical to the predicate snapshot's `_library/sme_packing.py`.
+
+Retained timings and native outputs live under
+`/home/ryz/tmp/vecops-packing-shared-predicates.hziQX2IC/build-validation`.
+The raw/FP32-transform packing printer, vector/SME/AMX matrix families and
+cache/packing traversal printer still have required consumers. Their removal,
+the complete migration and net production-code reduction remain outstanding;
+`cpu_sme_packing_dsl` remains off by default until its full gate passes.

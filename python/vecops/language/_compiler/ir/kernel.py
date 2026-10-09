@@ -200,7 +200,7 @@ class ArchitectureCall(Node):
   view: View | None = None
   operands: tuple = ()
   slice_index: Expr | None = None
-  vector: SMEVector | None = None
+  vector: SMEVector | SMEMask | None = None
 
 
 @dataclass(frozen=True)
@@ -212,6 +212,14 @@ class AMXTile(Node):
 
 @dataclass(frozen=True)
 class SMEVector(Node):
+  name: str
+  dtype: str
+  extent: Expr
+  region: int
+
+
+@dataclass(frozen=True)
+class SMEMask(Node):
   name: str
   dtype: str
   extent: Expr

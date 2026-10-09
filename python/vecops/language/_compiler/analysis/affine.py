@@ -522,7 +522,7 @@ def bind_instruction_metadata(block, *, prefix="instruction_metadata"):
           shape=tuple(map(scalar, value.shape)),
           strides=tuple(map(scalar, value.strides)),
         )
-      if isinstance(value, I.SMEVector):
+      if isinstance(value, (I.SMEVector, I.SMEMask)):
         return replace(value, extent=scalar(value.extent))
       if isinstance(value, tuple):
         return tuple(map(metadata, value))
@@ -540,7 +540,14 @@ def bind_instruction_metadata(block, *, prefix="instruction_metadata"):
         )
       elif isinstance(statement, I.Assign):
         changed = replace(statement, value=scalar(statement.value, bind=False))
-        known[identity(statement.value)] = I.Expr(statement.value.type, "local", data=statement.target)
+        # A literal is already an SSA value. Replacing it with a local name
+        # hides native-width facts from primitive lowering (e.g. a full mask)
+        # without sharing any work. Preserve its original type/weakness.
+        known[identity(statement.value)] = (
+          changed.value
+          if changed.value.op == "literal"
+          else I.Expr(statement.value.type, "local", data=statement.target)
+        )
       elif isinstance(statement, (I.ArchitectureCall, I.Prefetch)):
         changed = replace(
           statement, **{field.name: metadata(getattr(statement, field.name)) for field in fields(statement)}
