@@ -11,6 +11,15 @@ from dataclasses import fields, replace
 from .. import ir as I
 
 
+def metadata_reference(value):
+  """Induction names and immutable ABI metadata use distinct namespaces."""
+  if value.op == "local":
+    return value.data
+  if value.op in {"raw", "symbol"} and isinstance(value.data, str):
+    return value.op, value.data
+  return None
+
+
 def positive_extent(value, catalog, names=frozenset()):
   """Strictly positive metadata, including products of native extents.
 
@@ -41,8 +50,9 @@ def affine(value, variables, definitions, seen=frozenset()):
   """Return integer variable coefficients and an invariant remainder."""
   if value.op in {"local", "frozen"} and value.data in definitions and value.data not in seen:
     return affine(definitions[value.data], variables, definitions, seen | {value.data})
-  if value.op == "local" and value.data in variables:
-    return {value.data: 1}, I.literal(0)
+  reference = metadata_reference(value)
+  if reference is not None and reference in variables:
+    return {reference: 1}, I.literal(0)
   if value.op in {"add", "sub"}:
     left, right = (affine(a, variables, definitions, seen) for a in value.args)
     if left is None or right is None:
@@ -65,6 +75,9 @@ def affine(value, variables, definitions, seen=frozenset()):
 
 
 def affine_contains(value, variables, definitions, seen=frozenset()):
+  reference = metadata_reference(value)
+  if reference is not None and reference in variables:
+    return True
   if value.op in {"local", "frozen"}:
     if value.data in variables:
       return True
@@ -77,9 +90,13 @@ def affine_contains(value, variables, definitions, seen=frozenset()):
   return any(isinstance(v, I.Expr) and affine_contains(v, variables, definitions, seen) for v in nodes(value.data))
 
 
-def interval(value, bounds):
+def interval(value, bounds, *, _ordered=True):
   """Inclusive bounds in loop-invariant metadata, or None if unproved."""
-  value = canonical_integer(simplify_ordered(value, bounds))
+  value = canonical_integer(simplify_ordered(value, bounds) if _ordered else value)
+
+  def bound(operand, ranges):
+    return interval(operand, ranges, _ordered=_ordered)
+
   # Push monotone affine arithmetic through min/max before bounding. This
   # retains relationships such as i + min(width, M - i) <= M; separately
   # bounding the two operands would lose that cancellation at clipped tails.
@@ -94,7 +111,7 @@ def interval(value, bounds):
       for arm in operand.args:
         arguments = list(value.args)
         arguments[index] = arm
-        alternatives.append(interval(I.binary(value.op, *arguments), bounds))
+        alternatives.append(bound(I.binary(value.op, *arguments), bounds))
       if any(v is None for v in alternatives):
         return None
       return tuple(I.binary(operation, alternatives[0][i], alternatives[1][i]) for i in (0, 1))
@@ -104,7 +121,7 @@ def interval(value, bounds):
       if type(factor) is not int or operand.op not in {"min", "max"}:
         continue
       operation = operand.op if factor >= 0 else "max" if operand.op == "min" else "min"
-      alternatives = [interval(I.binary("mul", literal, arm), bounds) for arm in operand.args]
+      alternatives = [bound(I.binary("mul", literal, arm), bounds) for arm in operand.args]
       if any(v is None for v in alternatives):
         return None
       return tuple(I.binary(operation, alternatives[0][i], alternatives[1][i]) for i in (0, 1))
@@ -118,8 +135,8 @@ def interval(value, bounds):
     coefficient = linear[0][name]
     rest = {key: pair for key, pair in bounds.items() if key != name}
     endpoints = bounds[name] if coefficient >= 0 else bounds[name][::-1]
-    lo = interval(I.binary("add", linear[1], I.binary("mul", I.literal(coefficient), endpoints[0])), rest)
-    hi = interval(I.binary("add", linear[1], I.binary("mul", I.literal(coefficient), endpoints[1])), rest)
+    lo = bound(I.binary("add", linear[1], I.binary("mul", I.literal(coefficient), endpoints[0])), rest)
+    hi = bound(I.binary("add", linear[1], I.binary("mul", I.literal(coefficient), endpoints[1])), rest)
     return None if lo is None or hi is None else (lo[0], hi[1])
   linear = affine(value, bounds, {})
   if linear is not None:
@@ -132,7 +149,7 @@ def interval(value, bounds):
       lower = I.binary("add", lower, I.binary("mul", I.literal(factor), lo))
       upper = I.binary("add", upper, I.binary("mul", I.literal(factor), hi))
     return lower, upper
-  operands = [interval(a, bounds) for a in value.args]
+  operands = [bound(a, bounds) for a in value.args]
   if any(v is None for v in operands):
     return None
   if value.op in {"min", "max"}:
@@ -142,6 +159,9 @@ def interval(value, bounds):
     return (I.binary(value.op, a[0], b[value.op == "sub"]), I.binary(value.op, a[1], b[value.op != "sub"]))
   if value.op == "floordiv" and type(I.constant(value.args[1])) is int and I.constant(value.args[1]) > 0:
     return tuple(I.binary("floordiv", v, value.args[1]) for v in operands[0])
+  if value.op == "mod" and type(I.constant(value.args[1])) is int and I.constant(value.args[1]) > 0:
+    # DSL floor division/remainder is Euclidean, including signed operands.
+    return I.literal(0), I.literal(I.constant(value.args[1]) - 1)
   if value.op == "mul":
     for index, literal in enumerate(value.args):
       factor = I.constant(literal)
@@ -175,7 +195,14 @@ def simplify_ordered(value, bounds):
       endpoint = canonical_integer(
         I.binary("add", linear[1], I.binary("mul", I.literal(factor), bounds[name][upper != (factor < 0)]))
       )
-    endpoints.append(I.constant(endpoint))
+    constant = I.constant(endpoint)
+    if constant is None:
+      # Affine substitution can end at a bounded nonlinear remainder, e.g.
+      # -(K % chunk). Use the same interval rules without recursively asking
+      # this clamp-ordering routine to prove its own premise.
+      span = interval(endpoint, bounds, _ordered=False)
+      constant = None if span is None else I.constant(span[upper])
+    endpoints.append(constant)
   lower, upper = endpoints
   if type(upper) is int and upper <= 0:
     return value.args[value.op == "max"]
@@ -199,11 +226,24 @@ def canonical_integer(value, *, _memo=None):
 
 
 def _canonical_integer(value, memo):
-  if not isinstance(value.type, I.ScalarType) or not value.type.dtype.startswith("int"):
+  if not isinstance(value.type, I.ScalarType) or not (value.type.dtype.startswith("int") or value.type.dtype == "bool"):
     return value
   arguments = tuple(canonical_integer(a, _memo=memo) for a in value.args)
   if any(a is not b for a, b in zip(arguments, value.args)):
     value = replace(value, args=arguments)
+  if len(arguments) == 2 and all(a.op == "literal" for a in arguments):
+    from ..operations import current
+
+    if current().get(value).fold is not None:
+      try:
+        # Reuse the operation registry's folds/promotion, including comparisons
+        # and quotient/remainder after a captured length became a literal.
+        value = I.binary(value.op, *arguments)
+      except ZeroDivisionError:
+        # A dead branch is not permission to evaluate its undefined arithmetic.
+        pass
+  if value.type.dtype == "bool":
+    return value
   if value.op == "sub" and value.args[0].op in {"min", "max"}:
     first, second = value.args
     for index, operand in enumerate(first.args):
@@ -216,10 +256,18 @@ def _canonical_integer(value, memo):
   constants, terms = 0, {}
 
   def key(expression):
+    from ..operations import current
+
     if expression.op in {"raw", "symbol", "local", "frozen"}:
       return expression.op, expression.data, expression.type.dtype
     if expression.op in {"literal", "min", "max", "streaming_lanes"}:
       return expression.op, expression.data, expression.type.dtype, tuple(key(a) for a in expression.args)
+    if expression.data is None and current().get(expression).effects == "none":
+      # Equal pure metadata products/quotients may arrive through distinct
+      # view edges. Identity-only terms lose cancellation of row*pitch and
+      # retain physical-address clamps even when logical bounds are proved.
+      # Memory/state reads and opaque operations deliberately stay distinct.
+      return expression.op, expression.type.dtype, tuple(key(a) for a in expression.args)
     return id(expression)
 
   def collect(expression, factor):
@@ -239,6 +287,25 @@ def _canonical_integer(value, memo):
       terms[identity] = previous, coefficient + factor
 
   collect(value, 1)
+  for expression, factor in tuple(terms.values()):
+    if expression.op != "floordiv" or not factor:
+      continue
+    numerator, denominator = expression.args
+    divisor = I.constant(denominator)
+    if type(divisor) is not int or divisor <= 0 or factor % divisor:
+      continue
+    own_key, numerator_key = key(expression), key(numerator)
+    multiplier = factor // divisor
+    if numerator_key not in terms or terms[numerator_key][1] != -multiplier:
+      continue
+    # d * floor(n/d) - n == -(n % d). Retaining that correlation makes
+    # full-chunk bounds provable rather than bounding n and n/d separately.
+    terms[own_key] = expression, 0
+    terms[numerator_key] = numerator, 0
+    remainder = I.binary("mod", numerator, denominator)
+    remainder_key = key(remainder)
+    previous, coefficient = terms.get(remainder_key, (remainder, 0))
+    terms[remainder_key] = previous, coefficient - multiplier
   result = I.literal(constants)
   # Distributing several independent clamps builds a Cartesian product of
   # arms, exponential in nested slicing depth. Retain exact arithmetic when
@@ -264,17 +331,92 @@ def _canonical_integer(value, memo):
   return result
 
 
-def simplify_loop_metadata(block, bounds=None):
+def branch_bounds(condition, bounds, *, taken=True):
+  """Refine enclosing integer induction ranges on one branch edge.
+
+  Only unit-coefficient affine comparisons are used. A bound may refer to
+  outer indices, never its own or an inner index; this preserves the acyclic
+  substitution order used by interval(). Unknown/disjunctive facts remain
+  unproved, and facts from one arm cannot escape to its sibling or successor.
+  """
+  if condition.op == "not":
+    return branch_bounds(condition.args[0], bounds, taken=not taken)
+  if condition.op == ("and" if taken else "or"):
+    for operand in condition.args:
+      bounds = branch_bounds(operand, bounds, taken=taken)
+    return bounds
+  operation = condition.op
+  if operation not in {"lt", "le", "gt", "ge", "eq", "ne"}:
+    return bounds
+  if not taken:
+    operation = {"lt": "ge", "le": "gt", "gt": "le", "ge": "lt", "eq": "ne", "ne": "eq"}[operation]
+  if operation == "ne" or any(
+    not isinstance(v.type, I.ScalarType) or not v.type.dtype.startswith("int") for v in condition.args
+  ):
+    return bounds
+  # ABI metadata is invariant outside every induction domain. Place its
+  # namespace before loop indices even when first encountered in an inner
+  # branch, so no metadata endpoint can depend on an inner induction value.
+  result = {name: pair for name, pair in bounds.items() if isinstance(name, tuple)}
+  from ..ir.traversal import walk_unique
+
+  for argument in condition.args:
+    for value in walk_unique(argument):
+      reference = metadata_reference(value)
+      if isinstance(reference, tuple) and value.type.dtype == "int64":
+        result.setdefault(reference, (I.literal(-(1 << 63)), I.literal((1 << 63) - 1)))
+  result.update({name: pair for name, pair in bounds.items() if not isinstance(name, tuple)})
+  names = tuple(result)
+  difference = canonical_integer(I.binary("sub", *condition.args))
+  for position, name in enumerate(names):
+    linear = affine(difference, {name}, {})
+    if linear is None or linear[0].get(name) not in (-1, 1):
+      continue
+    coefficient, remainder = linear[0][name], linear[1]
+    if affine_contains(remainder, set(names[position:]), {}):
+      continue
+    endpoint = canonical_integer(I.binary("mul", I.literal(-coefficient), remainder))
+    endpoint_value = I.constant(endpoint)
+    if type(endpoint_value) is int and not -(1 << 63) < endpoint_value < (1 << 63) - 1:
+      # Do not synthesize an unrepresentable signed endpoint/strict offset.
+      # Keeping the original range remains conservative on extreme inputs.
+      continue
+    selected = operation
+    if coefficient < 0:
+      selected = {"lt": "gt", "le": "ge", "gt": "lt", "ge": "le", "eq": "eq"}[selected]
+    lower, upper = result[name]
+    if selected in {"gt", "ge", "eq"}:
+      candidate = I.binary("add", endpoint, I.literal(int(selected == "gt")))
+      lower = canonical_integer(simplify_ordered(I.binary("max", lower, candidate), result))
+    if selected in {"lt", "le", "eq"}:
+      candidate = I.binary("sub", endpoint, I.literal(int(selected == "lt")))
+      upper = canonical_integer(simplify_ordered(I.binary("min", upper, candidate), result))
+    result[name] = lower, upper
+  return result
+
+
+def simplify_loop_metadata(block, bounds=None, *, streaming_bytes=None, _constants=None):
   """Simplify integer addresses in a validated immutable structured region.
 
   This is an induction-domain optimization, not an operator-name pattern.
-  It retains SSA references, execution order, payload types and native length
-  queries. No metadata definition is expanded into repeated runtime queries.
+  It retains SSA references, execution order and payload types. An explicitly
+  captured SVL may specialize native lengths; unknown/cross-target geometry
+  retains native queries. Only literal SSA definitions are propagated, never
+  expanded runtime queries. Branch ranges stay lexical.
   Scopes have separate DAG memoization because an expression can be shared
   between loops with different induction domains.
   """
   bounds = {} if bounds is None else bounds
+  if streaming_bytes is not None and (
+    type(streaming_bytes) is not int or not 16 <= streaming_bytes <= 256 or streaming_bytes & (streaming_bytes - 1)
+  ):
+    raise ValueError("captured streaming length must be a power of two between 16 and 256 bytes")
+  constants = {} if _constants is None else dict(_constants)
   memo = {}
+
+  def nested(body, ranges, *, shadow=None):
+    inherited = {name: value for name, value in constants.items() if name != shadow}
+    return simplify_loop_metadata(body, ranges, streaming_bytes=streaming_bytes, _constants=inherited)
 
   def visit(value):
     if isinstance(value, I.For):
@@ -292,8 +434,22 @@ def simplify_loop_metadata(block, bounds=None):
         start=start,
         stop=stop,
         step=step,
-        body=simplify_loop_metadata(value.body, {**bounds, value.target: endpoints}),
+        body=nested(value.body, {**bounds, value.target: endpoints}, shadow=value.target),
       )
+    if isinstance(value, I.If):
+      condition = visit(value.condition)
+      return replace(
+        value,
+        condition=condition,
+        body=nested(value.body, branch_bounds(condition, bounds)),
+        otherwise=nested(value.otherwise, branch_bounds(condition, bounds, taken=False)),
+      )
+    if isinstance(value, I.Assign):
+      changed = replace(value, value=visit(value.value))
+      constants.pop(value.target, None)
+      if value.declare and type(I.constant(changed.value)) is int:
+        constants[value.target] = changed.value
+      return changed
     if isinstance(value, I.Block):
       return I.Block([visit(s) for s in value.statements])
     if isinstance(value, tuple):
@@ -301,6 +457,13 @@ def simplify_loop_metadata(block, bounds=None):
     if isinstance(value, I.Node):
       if id(value) not in memo:
         changed = replace(value, **{field.name: visit(getattr(value, field.name)) for field in fields(value)})
+        if isinstance(changed, I.Expr):
+          if changed.op in {"local", "frozen"} and changed.data in constants:
+            changed = constants[changed.data]
+          elif changed.op == "streaming_lanes" and streaming_bytes is not None:
+            from ..dtypes import ELEMENT_BYTES
+
+            changed = I.literal(streaming_bytes // ELEMENT_BYTES[changed.data])
         memo[id(value)] = (
           canonical_integer(simplify_ordered(changed, bounds)) if isinstance(changed, I.Expr) else changed
         )

@@ -28,6 +28,11 @@ class _FP32PackTransform:
 
 
 class SMEPackingEmitter:
+  def sme_packing_program(self, packed):
+    shape = tuple(I.constant(v) for v in (packed.shape if packed.side == "A" else packed.shape[::-1]))
+    programs = self.prepared.sme_packing_programs
+    return programs.get((packed.view.dtype, shape), programs.get(packed.view.dtype))
+
   def sme_raw_pack(self, source, packed, spatial, logical_k, format_code):
     """Emit a guarded raw or FP32 pointwise-DAG route.
 
@@ -86,15 +91,6 @@ class SMEPackingEmitter:
       + (" && !(" + " || ".join(guards) + ")" if guards else "")
       + f") /* {'raw' if raw else 'FP32 DAG'} K-contiguous SME ZA packing */"
     )
-    capacity = None
-    if raw and packed.view.dtype in self.prepared.sme_packing_programs:
-      # May contain pack_size validation: evaluate before the no-throw owner.
-      capacity = self.unique("sme_pack_capacity")
-      # pack_matrix already checked every physical output dimension against
-      # this required size. The library's logical boundary is the packed
-      # region, not any extra caller-provided allocation capacity.
-      count = self.packing_size(packed.shape, dtype, packed.format, packed.side)
-      self.line(f"const vecops::nint_t {capacity}={count};")
     session, scope = self.unique("sme_pack_session"), self.unique("sme_pack_scope")
     self.line(f"vecops::execution::ExecutionSession {session};")
     self.opening_hardware_owner("sme", session, f"[&](auto& {scope})")
@@ -120,7 +116,7 @@ class SMEPackingEmitter:
     )
     try:
       if raw:
-        self.sme_raw_pack_body(packed, held_base, held_stride, held_m, held_k, capacity=capacity)
+        self.sme_raw_pack_body(packed, held_base, held_stride, held_m, held_k)
       else:
         if inactive:
           # Only this branch proves every listed replacement absent. Keep all
@@ -326,33 +322,15 @@ class SMEPackingEmitter:
     self.close()
     self.line("#endif")
 
-  def sme_raw_pack_body(self, packed, base, stride, spatial, logical_k, *, capacity=None):
-    program = self.prepared.sme_packing_programs.get(packed.view.dtype)
+  def sme_raw_pack_body(self, packed, base, stride, spatial, logical_k):
+    program = self.sme_packing_program(packed)
     if program is not None:
-      held_capacity = self.unique("sme_pack_capacity_value")
-      known = tuple(I.constant(extent) for extent in packed.shape)
-      if all(type(extent) is int for extent in known):
-        width = ELEMENT_BYTES[packed.view.dtype]
-        word_bytes = 8 if width == 8 else 4
-        quantum = word_bytes // width
-        panel = f"(2*vecops::vec::sme::streaming_lanes<std::uint{word_bytes * 8}_t>())"
-        # The checked preamble proved this product representable. Ceiling
-        # division uses quotient/remainder, not x + divisor - 1, so even
-        # large valid extents cannot overflow before division. This is fresh
-        # callback-owned geometry; a frozen scalar reference would lose the
-        # constant bound and retain output clamps in every slice move.
-        rows = f"(({spatial})/{panel} + (({spatial})%{panel} != 0))"
-        groups = f"(({logical_k})/{quantum} + (({logical_k})%{quantum} != 0))"
-        self.line(f"const vecops::nint_t {held_capacity}=({rows}*{groups}*{panel}*{quantum});")
-      else:
-        self.line(f"const vecops::nint_t {held_capacity}={capacity};")
       self.hardware_program(
         program,
         metadata={
           "sme_packing.m": spatial,
           "sme_packing.k": logical_k,
           "sme_packing.pitch": stride,
-          "sme_packing.capacity": held_capacity,
         },
         pointers={"sme_packing_input": base, "sme_packing_output": self.pointer(packed.view)},
       )

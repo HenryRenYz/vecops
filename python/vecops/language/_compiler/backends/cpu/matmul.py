@@ -310,35 +310,96 @@ def plan_matmul(prepared, context):
     raise TypeError("cpu_sme_packing_dsl must be bool")
   if staged_packing:
     from ...._library.sme_packing import pack_raw
+    from ...dtypes import ELEMENT_BYTES
     from ...frontend.helpers import expand_helper
     from ...ir.traversal import nodes
 
     graph = tuple(nodes(prepared.vectors.kernel.body))
-    dtypes = {node.destination.view.dtype for node in graph if isinstance(node, I.Pack)}
+    streaming_bytes = context.environment.vector_state.sme_bytes
+    generic_dtypes, constant_packs = set(), {}
     for node in graph:
-      if isinstance(node, I.Expr) and node.op == "dot" and node.data.tiled:
-        dtypes.update(operand.type.dtype for operand in node.args[:2])
-    for dtype in sorted(dtypes):
-      if dtype == "bool":
-        continue
+      if isinstance(node, I.Pack):
+        packed = node.destination
+        shape = tuple(I.constant(v) for v in (packed.shape if packed.side == "A" else packed.shape[::-1]))
+        if all(type(v) is int and v >= 0 for v in shape):
+          axis = 0 if packed.side == "A" else 1
+          source = node.source
+          dense_pitch = source.op == "load" and not source.args and I.constant(source.data.strides[axis]) == shape[1]
+          key = packed.view.dtype, shape
+          constant_packs[key] = constant_packs.get(key, True) and dense_pitch
+        else:
+          generic_dtypes.add(packed.view.dtype)
+    for node in graph:
+      if isinstance(node, I.Expr) and node.op == "dot":
+        # Cache leaves and profitable native-A packing can create their
+        # checked buffers during terminal emission, including direct dots.
+        generic_dtypes.update(operand.type.dtype for operand in node.args[:2])
 
+    def packing_program(dtype, shape=None, *, row_unroll=2):
       def raw(name):
         return I.Expr(I.ScalarType("int64"), "raw", data="sme_packing." + name)
 
-      source = I.View(
-        "sme_packing_input", dtype, (raw("m"), raw("k")), (raw("pitch"), I.literal(1)), I.literal(0), writable=False
+      size = ELEMENT_BYTES[dtype]
+      word, quantum = max(4, size), max(4, size) // size
+      lanes = (
+        I.literal(streaming_bytes // word)
+        if streaming_bytes is not None
+        else I.Expr(I.ScalarType("int64"), "streaming_lanes", data=f"uint{word * 8}")
       )
-      destination = I.View("sme_packing_output", dtype, (raw("capacity"),), (I.literal(1),), I.literal(0))
+      panel = I.binary("mul", I.literal(2), lanes)
+      source_shape = (raw("m"), raw("k")) if shape is None else tuple(map(I.literal, shape))
+
+      def ceiling(extent, divisor):
+        return I.binary(
+          "add", I.binary("floordiv", extent, divisor), I.binary("ne", I.binary("mod", extent, divisor), I.literal(0))
+        )
+
+      rows, groups = ceiling(source_shape[0], panel), ceiling(source_shape[1], I.literal(quantum))
+      elements = I.binary("mul", panel, I.literal(quantum))
+      source = I.View(
+        "sme_packing_input",
+        dtype,
+        source_shape,
+        (raw("pitch"), I.literal(1)),
+        I.literal(0),
+        writable=False,
+      )
+      # pack_matrix validates the exact physical count before ownership. Bind
+      # its packed ABI as logical axes instead of an arbitrary flat capacity.
+      destination = I.View(
+        "sme_packing_output",
+        dtype,
+        (rows, groups, elements),
+        (I.binary("mul", groups, elements), elements, I.literal(1)),
+        I.literal(0),
+      )
       _, body = expand_helper(
         pack_raw,
         (source, destination),
         catalog=context.environment.operations,
         prefix="sme_packing_" + dtype,
         hardware_kind="sme",
+        keyword_arguments={"row_unroll": row_unroll},
       )
-      packing_programs[dtype] = bind_instruction_metadata(
-        simplify_loop_metadata(I.Block(body)), prefix="sme_packing_metadata_" + dtype
+      return bind_instruction_metadata(
+        simplify_loop_metadata(I.Block(body), streaming_bytes=streaming_bytes),
+        prefix="sme_packing_metadata_" + dtype,
       )
+
+    for dtype in sorted(generic_dtypes - {"bool"}):
+      packing_programs[dtype] = packing_program(dtype)
+    # Specialize the same source recipe before terminal emission. Restoring
+    # constants only in C++ is too late for induction/slice range proofs,
+    # particularly when a runtime signed pitch obscures address ordering.
+    # Do not stage a second, unused generic program for constant-only packs.
+    # The key is logical geometry, not identity of a transient PackedView.
+    for dtype, shape in sorted(constant_packs):
+      if dtype != "bool":
+        # A fully expanded runtime-pitch row loop creates many simultaneous
+        # address products and spills GPRs. Dense constant pitches instead
+        # become cheap immediate offsets. Keep runtime geometry conservative.
+        unroll = min(16, streaming_bytes // 4) if streaming_bytes is not None and constant_packs[dtype, shape] else 2
+        packing_programs[dtype, shape] = packing_program(dtype, shape, row_unroll=unroll)
   return replace(
     prepared,
     matmuls=MappingProxyType(plans),

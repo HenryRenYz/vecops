@@ -2906,3 +2906,66 @@ zero storage with the other extent at int64.max and retain output canaries;
 the 25 model/structure/bit checks pass. Broader native/performance gates for
 this latest logical-bound change remain outstanding. No experimental packing
 or transpose recipe became the production default.
+
+### Lexical metadata specialization (2026-10-09)
+
+The remaining packing gap is being addressed in shared IR analysis, not by
+adding another C++ algorithm printer. Integer branch edges refine enclosing
+induction intervals (unit-coefficient affine comparisons only); an outer bound
+never depends on an inner index, and facts never escape their branch. Pure
+stride-product terms now cancel across independently constructed view edges;
+opaque/memory/state reads remain identity-distinct. Registry-defined integer
+folds evaluate quotient/remainder/comparison after literal propagation without
+changing floating DAGs or evaluating a dead division by zero.
+
+An explicitly captured SVL specializes `streaming_lanes` and literal SSA
+definitions. Unknown/cross geometry keeps length queries. Constant-shape
+explicit packing binds the same library recipe with its logical M/K and,
+its checked logical packed layout. Runtime signed pitch and alias snapshot
+selection are not specialized away.
+The raw recipe exposes a row-unroll parameter; its complete-word schedules can
+use a bounded native-width factor while fringes retain conservative control.
+This is a compiler policy knob inside source-level scheduling, not a hardcoded
+hardware width or a new opaque instruction implementation.
+
+Performance and native acceptance are recorded separately below; changing
+the default and deleting a family still requires its complete gate. The old
+C++ matrix/cache/packing printers have not all been removed.
+
+The packing destination is now bound as `[panel, K-group, panel-elements]`,
+not an arbitrary flat allocation-capacity symbol. The existing checked caller
+still validates every physical output dimension/stride and the required total
+storage before entry. The source recipe selects one panel/group, then writes
+a complete native-word storage slice; group indices retain loop provenance.
+This removes redundant per-store flat-capacity clipping without adding an
+unchecked-access intrinsic. Group/panel ceilings use quotient/remainder.
+Complete storage words in spatial/K fringes use direct ZA loads; only a
+fractional terminal word needs the masked vector-load/zero-pad/write sequence.
+The same terminal hardware-program binding now makes uncaptured local pointer
+copies, preserving const pointees and writable outputs across ZA memory
+clobbers. This is shared ownership/lowering infrastructure, not packing logic.
+
+Frozen 920f-4 validation (clang, af3, actual VL=SVL=64 bytes) passed all 24
+raw-storage combinations of six dtypes, A/B and constant/dynamic shape with
+reversed pitches, alias snapshots, empty/full/tail domains and output canaries.
+A subsequent direct-fringe snapshot passed eight BF16/FP64 combinations on
+both sides/modes. Independent bit/address models cover 16/64/128-byte SVL;
+default x86 source checks kept sixteen matrix metadata combinations
+byte-identical to c9764e0. These are scoped gates, not full MatmulBench parity.
+
+The eight-case packing catalog still shows dynamic/tail gaps. Inspection of
+its streaming body found integer address spills when runtime pitches were
+unrolled sixteen times. The planner now retains unroll=2 for runtime/non-dense
+pitches and uses a bounded native-word factor only for known dense pitches.
+The shared order proof can use Euclidean remainder intervals after induction
+substitution without recursively asking a clamp to prove its own premise.
+No experimental default switch or old-family deletion follows before the
+remaining matched-geometry performance gates pass.
+
+Reproduction uses `benchmarks/dsl_register_refactor_ab.py --operator packing
+--shape 1x1 17x65 64x256 513x1000 --mode Const Dynamic --kind bf16 --side A
+--pipeline plain --rounds 24 --jobs 4`, with independently emitted production
+and `--dsl-pack` catalogs. Each snapshot uses its own copied native extension
+and installed SDK; both catalogs are rejected if their recorded actual VL/SVL
+differ from the replay process. Compiler paths are explicit clang/clang++ and
+GCC 14 headers remain project-private; neither af3 nor shell startup is changed.

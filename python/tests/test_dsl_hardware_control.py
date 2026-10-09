@@ -206,7 +206,8 @@ def test_sme_full_word_packing_is_source_parsed_and_operation_ordered():
     return I.Expr(I.ScalarType("int64"), "raw", data=name)
 
   source = I.View("source", "float16", (raw("M"), raw("K")), (raw("pitch"), I.literal(1)), I.literal(0))
-  destination = I.View("output", "float16", (raw("capacity"),), (I.literal(1),), I.literal(0))
+  elements = I.binary("mul", raw("width"), I.literal(4))
+  destination = I.View("output", "float16", (raw("groups"), elements), (elements, I.literal(1)), I.literal(0))
   result, body = expand_helper(
     pack_full_words,
     (source, destination),
@@ -245,7 +246,8 @@ def test_sme_packing_stages_executable_library_before_emission(monkeypatch):
     T.pack(A, O, side="A", format="sme")
 
   artifact = CPUBackend().lower(kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True})
-  assert isinstance(artifact.backend_ir.sme_packing_programs["float16"], I.Block)
+  assert isinstance(artifact.backend_ir.sme_packing_programs["float16", (37, 129)], I.Block)
+  assert "float16" not in artifact.backend_ir.sme_packing_programs, "do not stage an unused generic recipe"
 
   def forbidden(*args, **kwargs):
     raise AssertionError("packing algorithms must be staged before terminal printing")
@@ -256,6 +258,33 @@ def test_sme_packing_stages_executable_library_before_emission(monkeypatch):
   assert "vecops::vec::sme::load_hor<2>" in source
   assert "vecops::vec::sme::store_ver<3>" in source
   assert "std::array<vecops::vec::" not in source
+
+
+@pytest.mark.parametrize("pitch", [None, 256, 259, -259])
+def test_sme_packing_unroll_keeps_runtime_address_products_bounded(pitch):
+  from vecops._arm_vector_state import VectorState
+  from vecops.language._compiler.ir.traversal import nodes
+
+  stride = T.dynamic() if pitch is None else pitch
+  capacity = T.dynamic(lower=0)
+
+  @T.template
+  def kernel(
+    A: T.Tensor((64, 256), (stride, 1), "bfloat16"), O: T.Tensor((capacity,), dtype="bfloat16", access="output")
+  ):
+    T.pack(A, O, side="A", format="sme")
+
+  artifact = CPUBackend().lower(
+    kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True, "_vector_state": VectorState(64, 64)}
+  )
+  program = artifact.backend_ir.sme_packing_programs["bfloat16", (64, 256)]
+  transfers = [
+    node
+    for node in nodes(program)
+    if isinstance(node, I.For)
+    and sum(isinstance(s, I.ArchitectureCall) and s.operation == "sme.load_hor" for s in node.body.statements) == 2
+  ]
+  assert transfers and all(node.unroll == (16 if pitch == 256 else 2) for node in transfers)
 
 
 @pytest.mark.parametrize("pitch", [None, 129, -133])
@@ -293,12 +322,9 @@ def test_sme_packing_uses_all_external_packed_dimensions():
     T.pack(A, O, side="A", format="sme")
 
   source = CPUBackend().lower(kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True}).source
-  import re
-
   actual = "(std::int64_t{2}) * (std::int64_t{33}) * (std::int64_t{32}) * (std::int64_t{4})"
   assert f"if (({actual}) < (" in source and "packed output buffer too small" in source
-  assert re.search(r"const vecops::nint_t \w+_sme_pack_capacity_\d+=vecops_dsl::pack_size<", source)
-  assert re.search(r"const vecops::nint_t \w+_sme_pack_capacity_value_\d+=\(\(", source)
+  assert "sme_pack_capacity_value" not in source, "packed logical axes replace per-store capacity clamps"
 
 
 def test_two_sme_library_programs_keep_separate_lexical_names():

@@ -56,7 +56,7 @@ def test_sme_packing_fringe_is_library_control_with_small_bit_primitives(dtype):
   assert "sme_packing_" + dtype + "_" in source
   assert "streaming_bits_mask" in source and "vecops::vec::bitcast" in source
   assert "vecops::vec::sme::read_ver<0>" in source
-  assert "vecops::vec::sme::write_hor<1>" in source
+  assert ("vecops::vec::sme::write_hor<1>" if ELEMENT_BYTES[dtype] < 4 else "vecops::vec::sme::load_hor<1>") in source
   assert "sme_packing_metadata_" in source
   assert len(source) < 250_000, "nested clipped addresses were printed as expanded expression trees"
   assert_no_vec_mask_arrays(source)
@@ -91,16 +91,39 @@ def test_sme_raw_packing_recipe_matches_independent_bits_and_address_model(dtype
     return I.Expr(I.ScalarType("int64"), "raw", data="sme_packing." + name)
 
   source = I.View("sme_packing_input", dtype, (raw("m"), raw("k")), (raw("pitch"), I.literal(1)), I.literal(0))
-  target = I.View("sme_packing_output", dtype, (raw("capacity"),), (I.literal(1),), I.literal(0))
+  size = ELEMENT_BYTES[dtype]
+  word_size = 8 if size == 8 else 4
+  quantum = word_size // size
+
+  def output_view(spatial, reduction):
+    width = I.Expr(I.ScalarType("int64"), "streaming_lanes", data=f"uint{word_size * 8}")
+    panel = I.binary("mul", I.literal(2), width)
+    rows = I.binary(
+      "add", I.binary("floordiv", spatial, panel), I.binary("ne", I.binary("mod", spatial, panel), I.literal(0))
+    )
+    groups = I.binary(
+      "add",
+      I.binary("floordiv", reduction, I.literal(quantum)),
+      I.binary("ne", I.binary("mod", reduction, I.literal(quantum)), I.literal(0)),
+    )
+    elements = I.binary("mul", panel, I.literal(quantum))
+    return I.View(
+      "sme_packing_output",
+      dtype,
+      (rows, groups, elements),
+      (I.binary("mul", groups, elements), elements, I.literal(1)),
+      I.literal(0),
+    )
+
+  target = output_view(raw("m"), raw("k"))
   _, body = expand_helper(pack_raw, (source, target), catalog=snapshot(), prefix="packing_model", hardware_kind="sme")
   original = I.Block(body)
   prepared = bind_instruction_metadata(simplify_loop_metadata(original))
-  size = ELEMENT_BYTES[dtype]
-  word_size = 8 if size == 8 else 4
+  specialized = bind_instruction_metadata(simplify_loop_metadata(original, streaming_bytes=svl))
   panel, quantum, chunk = 2 * (svl // word_size), word_size // size, svl // size
   bits_dtype = np.dtype(f"uint{size * 8}")
   for spatial, reduction in ((2**63 - 1, 0), (0, 2**63 - 1)):
-    for program in (original, prepared):
+    for program in (original, prepared, specialized):
       output = np.full(5, 19, dtype=bits_dtype)
       model = PackingModel(
         program,
@@ -132,8 +155,24 @@ def test_sme_raw_packing_recipe_matches_independent_bits_and_address_model(dtype
       if capacity
       else np.empty(0, dtype=bits_dtype)
     )
+    # Bind the same source recipe as the constant-shape compiler adapter.
+    # A nonconstant signed pitch remains a runtime value in all versions.
+    from dataclasses import replace
+
+    _, constant_body = expand_helper(
+      pack_raw,
+      (
+        replace(source, shape=(I.literal(spatial), I.literal(reduction))),
+        output_view(I.literal(spatial), I.literal(reduction)),
+      ),
+      catalog=snapshot(),
+      prefix="packing_constant_model",
+      hardware_kind="sme",
+      keyword_arguments={"row_unroll": min(16, svl // 4)},
+    )
+    constant_program = bind_instruction_metadata(simplify_loop_metadata(I.Block(constant_body), streaming_bytes=svl))
     traces = []
-    for program in (original, prepared):
+    for program in (original, prepared, specialized, constant_program):
       output = np.full(capacity + 5, 19, dtype=bits_dtype)
       model = PackingModel(
         program,
@@ -150,7 +189,7 @@ def test_sme_raw_packing_recipe_matches_independent_bits_and_address_model(dtype
       np.testing.assert_array_equal(output[:capacity], expected)
       np.testing.assert_array_equal(output[capacity:], np.full(5, 19, dtype=bits_dtype))
       traces.append(model.trace)
-    assert traces[0] == traces[1], "metadata optimization changed the ordered architecture program"
+    assert all(trace == traces[0] for trace in traces), "metadata optimization changed the ordered architecture program"
 
 
 @pytest.mark.parametrize("dtype", ["uint8", "float16", "float32", "float64"])
@@ -187,7 +226,8 @@ def test_native_sme_bit_memory_partial_words_and_zero_padding(dtype, tmp_path):
 
 @pytest.mark.parametrize("dtype", ["uint8", "int8", "float16", "bfloat16", "float32", "float64"])
 @pytest.mark.parametrize("side", ["A", "B"])
-def test_native_sme_library_pack_bits_pitches_tails_and_empty(dtype, side, tmp_path):
+@pytest.mark.parametrize("constant_shape", [False, True])
+def test_native_sme_library_pack_bits_pitches_tails_and_empty(dtype, side, constant_shape, tmp_path):
   """Exercise the whole staged driver, not only isolated bit-move primitives."""
   state = get_vector_state()
   if state.sme_bytes is None:
@@ -197,7 +237,8 @@ def test_native_sme_library_pack_bits_pitches_tails_and_empty(dtype, side, tmp_p
   word_size = 8 if size == 8 else 4
   width, quantum = state.sme_bytes // word_size, word_size // size
   panel, chunk = 2 * width, state.sme_bytes // size
-  spatial, reduction, capacity = (T.dynamic(lower=0) for _ in range(3))
+  capacity = T.dynamic(lower=0)
+  spatial, reduction = (panel + 5, 6 * chunk + 3) if constant_shape else (T.dynamic(lower=0), T.dynamic(lower=0))
   pitch = T.dynamic()  # Raw packing also supports reversed spatial rows.
   shape, strides = ((spatial, reduction), (pitch, 1)) if side == "A" else ((reduction, spatial), (1, pitch))
 
@@ -210,12 +251,16 @@ def test_native_sme_library_pack_bits_pitches_tails_and_empty(dtype, side, tmp_p
   assert "sme_packing_metadata_" + dtype in compiled.generated_source
   bits_dtype = np.dtype(f"uint{size * 8}")
   cases = (
-    (0, 7),
-    (7, 0),
-    (1, 1),
-    (panel - 1, quantum + 1),
-    (panel, chunk),
-    (panel + 5, 6 * chunk + 3),
+    ((spatial, reduction),)
+    if constant_shape
+    else (
+      (0, 7),
+      (7, 0),
+      (1, 1),
+      (panel - 1, quantum + 1),
+      (panel, chunk),
+      (panel + 5, 6 * chunk + 3),
+    )
   )
   for s, k in cases:
     row_pitch = k + 3

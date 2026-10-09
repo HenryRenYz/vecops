@@ -23,10 +23,19 @@ class HardwareEmitter(SMEInstructionEmitter):
     """Bind a prepared instruction program to invocation-owned ABI values."""
     previous = self.parameter_metadata, self.parameter_pointers, self.hardware_scope
     self.parameter_metadata = {**self.parameter_metadata, **metadata}
-    self.parameter_pointers = {**self.parameter_pointers, **pointers}
     self.hardware_scope = ("sme", None)
     self.opening("/* library instruction program */")
     try:
+      owned_pointers = {}
+      for name, pointer in pointers.items():
+        owned = self.unique("hardware_pointer")
+        # A reference-captured ABI pointer is address-exposed across the
+        # streaming trampoline. ZA memory clobbers must not force its reload
+        # at each instruction. Keep an uncaptured, region-local pointer SSA
+        # value; this preserves const pointees as well as writable outputs.
+        self.line(f"auto* const {owned} = {pointer};")
+        owned_pointers[name] = owned
+      self.parameter_pointers = {**self.parameter_pointers, **owned_pointers}
       self.hardware_block(program)
     finally:
       self.close()

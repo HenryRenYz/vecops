@@ -1853,6 +1853,15 @@ Standalone dry/cross lowering with an explicit non-Native target does not probe
 the build host for vector geometry. Pass an explicit `_vector_state` snapshot
 for geometry-specific inspection; the normal compile driver supplies one.
 
+Source-parsed hardware library recipes can specialize integer loop metadata
+using that captured streaming length. Full-tile branch facts refine only their
+own induction domains; tails and sibling/successor blocks retain their bounds.
+Constant-shape packing binds shape metadata before instruction printing, while
+signed runtime pitches, alias snapshots, capacity checks and storage-bit
+semantics remain intact. Unknown SVL retains native length queries. These
+optimizations do not change the current experimental status of the complete
+SME packing driver or promise universal performance parity.
+
 SME's centralized `sme_const_half_transpose` policy selects a bounded paired
 input/output schedule for simple FP32-memory/FP32-compute to FP16 transposes
 with known nonzero signed pitches. It derives the row/column count from the
