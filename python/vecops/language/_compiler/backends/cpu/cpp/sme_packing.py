@@ -109,11 +109,32 @@ class SMEPackingEmitter:
       or saved[0].dtype != view.dtype  # This owner is guarded by !alias.
       or I.same_expr(saved[0].strides[s_axis], view.strides[s_axis])
     )
-    own_stride = self.owner_integer(view.strides[s_axis], row_step) if unchanged_stride else row_step
-    self.line(
-      f"const vecops::nint_t {held_stride}={own_stride}, "
-      f"{held_m}={self.owner_integer(own_spatial, m)}, {held_k}={self.owner_integer(own_k, k)};"
-    )
+    if raw and self.sme_packing_program(packed) is not None:
+      singleton_snapshot = (
+        saved is not None and saved[0].dtype == view.dtype and I.same_expr(saved[0].strides[k_axis], view.shape[s_axis])
+      )
+      # The checked entry selects unit K stride. A dense B snapshot's K
+      # stride is its spatial extent, so an active snapshot here implies a
+      # singleton spatial axis whose stride is never used. Restore the
+      # original stride too: outlining otherwise loses this guard's fact.
+      original_stride = unchanged_stride or singleton_snapshot
+      own_stride = (
+        self.owner_integer(view.strides[s_axis], self.scalar(view.strides[s_axis])) if original_stride else row_step
+      )
+      self.line(
+        f"const vecops::nint_t {held_m}={self.owner_integer(own_spatial, m)}, {held_k}={self.owner_integer(own_k, k)};"
+      )
+      if original_stride and I.same_expr(view.strides[s_axis], own_k):
+        own_stride = held_k
+      self.line(f"const vecops::nint_t {held_stride}={own_stride};")
+    else:
+      # Production families stay unchanged until the whole library driver
+      # passes its performance gate, including the transformed-input route.
+      own_stride = self.owner_integer(view.strides[s_axis], row_step) if unchanged_stride else row_step
+      self.line(
+        f"const vecops::nint_t {held_stride}={own_stride}, "
+        f"{held_m}={self.owner_integer(own_spatial, m)}, {held_k}={self.owner_integer(own_k, k)};"
+      )
     try:
       if raw:
         self.sme_raw_pack_body(packed, held_base, held_stride, held_m, held_k)

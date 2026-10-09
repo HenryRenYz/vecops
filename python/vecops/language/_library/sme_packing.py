@@ -71,8 +71,9 @@ def pack_full_words(source, destination, *, origin, width, chunk, chunks, row_un
 def pack_fringe(source, destination, *, origin, k_origin, width, active_k, spatial, output_origin=0):
   """Zero-pad fractional K groups and spatial tails through typed ZA words.
 
-  Complete words enter ZA directly; storage-masked vector loads preserve every
-  input bit and zero a fractional final word. Masked ZA reads zero absent
+  Complete words enter ZA directly. Fractional words use a narrower storage
+  view of the same physical ZA row; LD1's inactive-storage zeroing pads the
+  final word without a Z-register round trip. Masked ZA reads zero absent
   spatial lanes before full packed stores.
   Neither path evaluates a padded source address or needs a Vec array.
   """
@@ -87,8 +88,13 @@ def pack_fringe(source, destination, *, origin, k_origin, width, active_k, spati
         # the storage-masked vector load/zero-padding/write sequence.
         sme.load_hor(tile, row, region, word_dtype=word_dtype)
       else:
-        value = sme.load_bits(region, dtype=word_dtype)
-        sme.write_hor(tile, row, value)
+        # ZA tile views alias the same physical byte rows. A storage-width
+        # LD1 zeros inactive storage lanes, including the unused bytes in
+        # the final packed word. Translate the wider-word row into that
+        # view instead of round-tripping through Z and WRITE_HOR.
+        storage_bytes = T.itemsize(source.dtype)
+        storage_word = "uint8" if storage_bytes == 1 else "uint16"
+        sme.load_hor(tile % storage_bytes, row * ratio + tile // storage_bytes, region, word_dtype=storage_word)
   for group in T.serial((active_k + ratio - 1) // ratio, unroll=2):
     for tile in T.unroll(2):
       value = sme.read_ver(tile, group, T.max(0, T.min(width, spatial - origin - tile * width)), dtype=word_dtype)

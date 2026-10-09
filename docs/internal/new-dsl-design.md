@@ -2969,3 +2969,33 @@ and `--dsl-pack` catalogs. Each snapshot uses its own copied native extension
 and installed SDK; both catalogs are rejected if their recorded actual VL/SVL
 differ from the replay process. Compiler paths are explicit clang/clang++ and
 GCC 14 headers remain project-private; neither af3 nor shell startup is changed.
+
+Fractional word loads now use a narrower ZA storage view of the same byte row.
+For a packed word of W bytes, storage element of S bytes and word tile t/row r,
+the storage view uses tile `t % S` and row `r*(W/S) + t//S`. Its physical byte
+row is still `W*r+t`; LD1 zeros the unused storage bytes in the terminal word.
+This removes the temporary Z load/bitcast/WRITE_HOR sequence. Two independent
+native U8/U16 row-alias kernels and the six-type, three-SVL bit model passed.
+Sixteen paired tiny/tail BF16/I8 A/B cases passed an independent layout oracle;
+17x65 constant I8 packing measured about 0.83x the production DSL and 0.82x
+the public C++ packer. Dynamic BF16 tails still do not meet parity.
+
+The unit-K-stride entry guard also proves that an active dense B snapshot
+can enter this owner only with a singleton spatial axis. Its spatial stride
+is unused then; otherwise the original stride applies. The library route can
+therefore bind that stride to owned K metadata instead of retaining an
+alias-dependent captured phi. Production/raw-C++ and transformed-input owners
+are unchanged. Four native BF16 A/B/constant/dynamic regressions passed with
+an additional singleton-long-K overlap case. The final B 17x65 dynamic probe
+still measured about 1.23x production/public C++, so the experimental switch
+remains off and the old driver remains required. Default code-generation checks
+kept sixteen x86 and sixteen SME matrix combinations byte-identical to c9764e0;
+the latest generic/metadata/regression selection passed 178 pure checks.
+
+Latest remote snapshots/builds: 920f-4,
+`/home/ryz/tmp/vecops-packing-spill-gate.ZXSP9iRF/build-validation/paired`,
+`/home/ryz/tmp/vecops-packing-storage-za.3oq2umUI/build-validation/paired`,
+`/home/ryz/tmp/vecops-packing-owner-guard.0o8Bgjlp/build-validation/paired`;
+independent row validation is under
+`/home/ryz/tmp/vecops-storage-row-proof.M6IzvNNk/build-validation/row-alias`.
+Each used a fresh, explicit installed-SDK snapshot and clang/clang++ from af3.

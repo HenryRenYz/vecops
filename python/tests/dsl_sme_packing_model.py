@@ -38,7 +38,9 @@ class PackingModel:
     self.width = svl // self.word_dtype.itemsize
     # Poison unused state: zero padding must come from explicit masked moves,
     # not from assuming ZA was initially zero or a previous panel was absent.
-    self.za = np.full((4, self.width, self.width), np.iinfo(self.word_dtype).max, dtype=self.word_dtype)
+    self.za = np.full(
+      (self.word_dtype.itemsize, self.width, self.width), np.iinfo(self.word_dtype).max, dtype=self.word_dtype
+    )
     self.vectors = {}
     self.trace = []
 
@@ -84,17 +86,25 @@ class PackingModel:
     vector = operation.vector
     index = self.scalar(operation.slice_index) if operation.slice_index is not None else None
     if index is not None:
-      assert 0 <= index < self.width
+      bytes_ = ELEMENT_BYTES[operation.operands[0]] if kind == "sme.load_hor" else self.word_dtype.itemsize
+      assert 0 <= index < self.svl // bytes_
     self.trace.append((kind, operation.tile, index))
     if kind in {"sme.load_hor", "sme.store_ver"}:
       memory = self.memory_slice(operation.view)
-      assert operation.operands[0] == self.word_dtype.name
-      count = memory.size // self.word_dtype.itemsize
-      assert count <= self.width
       if kind == "sme.load_hor":
-        self.za[operation.tile, index, :] = 0
-        self.za[operation.tile, index, :count] = memory[: count * self.word_dtype.itemsize].view(self.word_dtype)
+        storage_word = np.dtype(operation.operands[0])
+        assert memory.size <= self.svl
+        assert memory.size % storage_word.itemsize == 0
+        # Tile t's row r is physical byte row r*sizeof(element)+t.
+        # Reinterpret that same row through this model's packed-word view.
+        physical = index * storage_word.itemsize + operation.tile
+        tile, row = physical % self.word_dtype.itemsize, physical // self.word_dtype.itemsize
+        self.za[tile, row, :] = 0
+        self.za[tile, row, :].view(np.uint8)[: memory.size] = memory
       else:
+        assert operation.operands[0] == self.word_dtype.name
+        count = memory.size // self.word_dtype.itemsize
+        assert count <= self.width
         memory[: count * self.word_dtype.itemsize] = self.za[operation.tile, :count, index].copy().view(np.uint8)
     elif kind == "sme.load_bits":
       memory = self.memory_slice(operation.view)

@@ -302,14 +302,17 @@ def test_sme_owner_restores_constants_but_not_alias_dependent_strides(pitch):
     T.pack(A, O, side="A", format="sme")
 
   source = CPUBackend().lower(kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True}).source
+  assert re.search(
+    r"const vecops::nint_t \w+_sme_pack_m_value_\d+=std::int64_t\{37\}, \w+_sme_pack_k_value_\d+=std::int64_t\{129\};",
+    source,
+  ), "known dimensions were reloaded through reference captures"
   match = re.search(
-    r"const vecops::nint_t \w+_sme_pack_stride_value_\d+=([^,]+), "
-    r"\w+_sme_pack_m_value_\d+=std::int64_t\{37\}, \w+_sme_pack_k_value_\d+=std::int64_t\{129\};",
+    r"const vecops::nint_t \w+_sme_pack_stride_value_\d+=([^;]+);",
     source,
   )
   assert match, "known dimensions were reloaded through reference captures"
   if pitch == 129:
-    assert match[1] == "std::int64_t{129}"
+    assert re.fullmatch(r"\w+_sme_pack_k_value_\d+", match[1])
   else:
     # A reversed constant input gets a positive dense snapshot when aliasing;
     # a dynamic pitch is unknown. Neither may borrow the original constant.
@@ -325,6 +328,24 @@ def test_sme_packing_uses_all_external_packed_dimensions():
   actual = "(std::int64_t{2}) * (std::int64_t{33}) * (std::int64_t{32}) * (std::int64_t{4})"
   assert f"if (({actual}) < (" in source and "packed output buffer too small" in source
   assert "sme_pack_capacity_value" not in source, "packed logical axes replace per-store capacity clamps"
+
+
+def test_sme_b_owner_restores_unit_k_guarded_original_pitch():
+  import re
+
+  spatial, reduction, capacity = (T.dynamic(lower=0) for _ in range(3))
+
+  @T.template
+  def kernel(
+    B: T.Tensor((reduction, spatial), (1, reduction), "bfloat16"),
+    O: T.Tensor((capacity,), dtype="bfloat16", access="output"),
+  ):
+    T.pack(B, O, side="B", format="sme")
+
+  source = CPUBackend().lower(kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True}).source
+  held_k = re.search(r"(\w+_sme_pack_k_value_\d+)=[^;]+;", source)
+  assert held_k
+  assert re.search(rf"const vecops::nint_t \w+_sme_pack_stride_value_\d+={held_k[1]};", source)
 
 
 def test_two_sme_library_programs_keep_separate_lexical_names():

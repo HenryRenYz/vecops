@@ -56,7 +56,8 @@ def test_sme_packing_fringe_is_library_control_with_small_bit_primitives(dtype):
   assert "sme_packing_" + dtype + "_" in source
   assert "streaming_bits_mask" in source and "vecops::vec::bitcast" in source
   assert "vecops::vec::sme::read_ver<0>" in source
-  assert ("vecops::vec::sme::write_hor<1>" if ELEMENT_BYTES[dtype] < 4 else "vecops::vec::sme::load_hor<1>") in source
+  assert "vecops::vec::sme::load_hor<1>" in source
+  assert "vecops::vec::sme::write_hor" not in source, "fractional storage words must be zeroed by direct ZA loads"
   assert "sme_packing_metadata_" in source
   assert len(source) < 250_000, "nested clipped addresses were printed as expanded expression trees"
   assert_no_vec_mask_arrays(source)
@@ -224,6 +225,35 @@ def test_native_sme_bit_memory_partial_words_and_zero_padding(dtype, tmp_path):
     np.testing.assert_array_equal(output.view(bits_dtype), expected)
 
 
+@pytest.mark.parametrize("dtype", ["uint8", "uint16"])
+def test_native_sme_storage_view_aliases_packed_word_rows(dtype, tmp_path):
+  """Exercise the physical ZA row mapping independently of a pack driver."""
+  from vecops.language._library.sme_packing import pack_fringe
+
+  state = get_vector_state()
+  if state.sme_bytes is None:
+    pytest.skip("actual SME target required")
+  width = state.sme_bytes // 4
+  ratio = 4 // ELEMENT_BYTES[dtype]
+
+  @T.template
+  def kernel(
+    A: T.Tensor((2 * width, 1), dtype=dtype), O: T.Tensor((1, 2 * width * ratio), dtype=dtype, access="output")
+  ):
+    with T.sme.region():
+      pack_fringe(A, O, origin=0, k_origin=0, width=T.sme.streaming_lanes("uint32"), active_k=1, spatial=A.shape[0])
+
+  compiler = make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  compiled = T.compile(kernel, compiler=compiler)
+  assert "vecops::vec::sme::write_hor" not in compiled.generated_source
+  source = (np.arange(2 * width, dtype=dtype) * 13 + 7).reshape(-1, 1)
+  output = np.full((1, 2 * width * ratio), 19, dtype)
+  compiled.operator.native(source, output, **compiled._core.specialization_values)
+  expected = np.zeros((2 * width, ratio), dtype)
+  expected[:, 0] = source[:, 0]
+  np.testing.assert_array_equal(output.reshape(2 * width, ratio), expected)
+
+
 @pytest.mark.parametrize("dtype", ["uint8", "int8", "float16", "bfloat16", "float32", "float64"])
 @pytest.mark.parametrize("side", ["A", "B"])
 @pytest.mark.parametrize("constant_shape", [False, True])
@@ -257,6 +287,7 @@ def test_native_sme_library_pack_bits_pitches_tails_and_empty(dtype, side, const
       (0, 7),
       (7, 0),
       (1, 1),
+      (1, chunk + 3),
       (panel - 1, quantum + 1),
       (panel, chunk),
       (panel + 5, 6 * chunk + 3),
